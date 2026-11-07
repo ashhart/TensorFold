@@ -231,8 +231,7 @@ def findings(c: dict) -> list[str]:
     return [x for x in out if x]
 
 
-# -- the HTML report of a comparison
-# -------------------------------------------------------------------------------------
+# Comparison HTML report.
 
 def _e(x: object) -> str:
     return html.escape(str(x), quote=True)

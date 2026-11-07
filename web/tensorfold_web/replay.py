@@ -99,7 +99,7 @@ class Replays:
         preset = st.get("preset") or {}
         out: list[dict] = []
         try:
-            with httpx.Client(timeout=httpx.Timeout(600.0, connect=5.0)) as client:
+            with httpx.Client(trust_env=False, timeout=httpx.Timeout(600.0, connect=5.0)) as client:
                 msgs = src["messages"]
                 for i, m in enumerate(msgs):
                     if m["role"] != "user":
@@ -109,8 +109,7 @@ class Replays:
                         break
                     history = [{"role": x["role"], "content": x["content"]} for x in msgs[: i + 1]
                                if x["role"] in ("user", "assistant", "system")]
-                    # the settings the original reply was written with, as the page recorded them on it; a reply from
-                    # before that record falls back on the conversation's settings as they are now
+                    # Use recorded reply settings; only old records fall back to conversation settings.
                     reply = msgs[i + 1] if i + 1 < len(msgs) and msgs[i + 1].get("role") == "assistant" else {}
                     req = reply.get("request") if isinstance(reply.get("request"), dict) else None
                     system = req.get("system") if req else preset.get("system")
@@ -119,8 +118,7 @@ class Replays:
                     max_tokens = req.get("max_tokens") if req else preset.get("max_tokens") or 2048
                     if system:
                         history = [{"role": "system", "content": system}, *history]
-                    # without randomness, whatever the original's temperature: two greedy replies are comparable token
-                    # for token, sampled ones are not
+                    # Force greedy replays: independently sampled replies cannot establish token-for-token equality.
                     body = {"model": model, "messages": history, "temperature": 0.0, "top_p": 1.0, "stream": True,
                             "stream_options": {"include_usage": True}}
                     if max_tokens:
@@ -177,8 +175,7 @@ def uses_tools(doc: dict) -> bool:
     ws = (doc.get("settings") or {}).get("workshop") or {}
     if ws.get("tools") or ws.get("output") not in (None, "text"):
         return True
-    # the settings may have changed since: what the turns themselves recorded says the workshop was used (a tool
-    # turn, a reply checked as JSON, a request that carried tools or a reply format)
+    # Recorded tool turns and request formats detect workshop use even after settings change.
     return any(m.get("role") == "tool" or m.get("tool_calls") or m.get("json") is not None
                or any(k in (m.get("request") or {}) for k in ("tools", "response_format"))
                or (m.get("request") or {}).get("output") not in (None, "text")
@@ -207,8 +204,7 @@ def compare_replies(a: dict, b: dict) -> dict:
 
     # the same question pairs the replies, whether the conversation is a replay or the original
     ra, rb = _by_question(a), _by_question(b)
-    # a side replayed with drafts off counts only where the engine confirmed them off
-    # what each side was asked: drafts off (True), on (False), or nothing said (None: an original conversation)
+    # A plain replay counts only when the engine confirms drafts off; absent flags remain unknown.
     off_a, off_b = ({False: True, True: False}.get(((d.get("settings") or {}).get("target") or {}).get("drafts"))
                     for d in (a, b))
     rows = []

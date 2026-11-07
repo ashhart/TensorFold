@@ -70,4 +70,3 @@ class Store:
     def delete(self, run_id: str) -> bool:
         with self._lock, self._db() as db:
             return db.execute("delete from runs where id=?", (run_id,)).rowcount > 0
-

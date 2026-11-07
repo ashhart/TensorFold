@@ -62,8 +62,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[web] another TensorFold Web is running for this user{f' (pid {pid})' if pid else ''}; it keeps the "
               "living copies, versions and settings. Stop it first (`tensorfold-web service uninstall` for the "
               "service).", file=sys.stderr, flush=True)
-        # systemd does not restart on 4 (3 is uvicorn's own failed start); launchd restarts any non-zero exit, so
-        # under it the exit is clean and the agent stays down until the next login, as the message says
+        # Exit 4 stops systemd restarts; launchd needs a clean exit to remain stopped until the next login.
         return 0 if os.environ.get("XPC_SERVICE_NAME", "").startswith("com.tensorfold") else 4
     s = settings_mod.load()
     eng = Engine(s, state_dir=settings_mod.config_dir())
@@ -79,17 +78,18 @@ def main(argv: list[str] | None = None) -> int:
             p.error(f"--engine-url: {exc}")
         s.remote = True
     if args.mock_engine:
+        from .mock_engine import native_version
         from .mock_engine import serve as mock
 
         server = mock(port=args.mock_port)
+        eng.mock_version = native_version()
         port = server.server_address[1]
         s.engine_url, s.remote = f"http://127.0.0.1:{port}", True
         print(f"[web] mock engine on {s.engine_url}")
     app = create_app(settings=s, engine=eng, token=args.token, bind_host=args.host, allowed_hosts=args.allow_host)
     shown = f"[{args.host}]" if ":" in args.host else args.host       # an IPv6 address needs its brackets in a URL
     url = f"http://{shown}:{args.port}/"
-    # the address is printed without the token: this line ends up in service logs; only the browser opened here
-    # gets the token, in its address, once
+    # Print no token in service logs; only the browser URL receives it once.
     note = " (its token is required: open it once with ?token=<the token>)" if args.token else ""
     print(f"[web] TensorFold Web {__version__} on {url}{note}", flush=True)
     if not args.no_browser:

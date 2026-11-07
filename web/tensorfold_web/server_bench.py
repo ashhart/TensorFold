@@ -129,8 +129,7 @@ def install(_two, app, bench_go, comparisons, concurrency, engine_named, quality
             raise HTTPException(400, "suites must be a list of suite ids")
         target = body.get("target")
         try:
-            # a KL run's reference: another engine (an address, or a Fleet machine), or (none given) the same engine
-            # with drafts off; and what both read: their replies to the suites, or a fixed text scored at every position
+            # KL references may use a plain local arm or an explicit endpoint, on generated replies or fixed text.
             reference, kl_load, kl_text, tags = None, 0, None, {}
             if body.get("mode") == "kl":
                 ref = body.get("reference")

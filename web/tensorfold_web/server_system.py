@@ -15,10 +15,9 @@ from .catalog import capacity_of
 from .machine import detect
 
 
-def install(app, cat, kept, s, used):
+def install(app, cat, kept, s, used, eng):
     @app.on_event("startup")
     async def _startup():
-        cat.refresh_sizes_async()
         kept.start()
 
     @app.on_event("shutdown")
@@ -44,12 +43,18 @@ def install(app, cat, kept, s, used):
         m = detect()
         cap = capacity_of(m)
         return {**m.to_dict(), "studio_version": __version__,
+                **({"tensorfold_version": eng.mock_version} if getattr(eng, "mock_version", None) else {}),
                 "budget": {"default_fraction": cap.fraction if cap else fit.DEFAULT_FRACTION,
                            "raised_fraction": cap.raised if cap else fit.RAISED_FRACTION,
                            "current_fraction": s.budget_fraction or (cap.fraction if cap else fit.DEFAULT_FRACTION),
                            "reserve_bytes": cap.reserve_bytes if cap else fit.PROCESS_RESERVE,
                            "ceiling_bytes": cap.ceiling_bytes if cap else None,
                            "capacity_bytes": cap.bytes if cap else None, "basis": cap.basis if cap else "none"}}
+
+    @app.post("/api/catalog/discover")
+    def catalog_discover():
+        cat.refresh_sizes_async()
+        return {"refreshing": True}
 
     @app.post("/api/catalog/refresh")
     def catalog_refresh():

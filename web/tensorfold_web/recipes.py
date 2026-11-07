@@ -174,8 +174,7 @@ FORMS = {"open-webui": "web app in a container", "librechat": "web app in contai
          "pi": "command line", "omp": "command line", "openfox": "web app", "cursor": "editor",
          "openclaw": "command line and gateway", "hermes": "command line and gateway",
          "claude-code": "command line", "opencode": "command line", "codex": "command line", "python": "library"}
-# what changes with the place: on this machine a container reaches the AI through the host; from another computer
-# every tool uses TensorFold Web's address and its key, and nothing changes here
+# Containers use the local host address; other devices use Web's relay address and its token.
 HERE_NOTES = {
     "librechat": "On this machine LibreChat's containers reach the AI through the host (host.docker.internal): let "
                  "the AI answer on the local network (at the bottom of this page) and use its key.",
@@ -452,7 +451,7 @@ def served_window(c: Ctx) -> int | None:
     """The engine's window now, for the recipes and the page; None when it does not say or cannot be reached."""
 
     try:
-        with httpx.Client(timeout=5.0) as client:
+        with httpx.Client(trust_env=False, timeout=5.0) as client:
             r = client.get(c.base + "/v1/models", headers=_headers(c.key))
             r.raise_for_status()
             return _window(client, c.base, c, r.json())
@@ -461,6 +460,6 @@ def served_window(c: Ctx) -> int | None:
 
 
 def test(recipe: Recipe, c: Ctx) -> dict:
-    with httpx.Client(timeout=httpx.Timeout(120.0, connect=5.0)) as client:
+    with httpx.Client(trust_env=False, timeout=httpx.Timeout(120.0, connect=5.0)) as client:
         results = [run_check(k, c, client, recipe.extra) for k in recipe.checks]
     return {"recipe": recipe.id, "ok": all(r["ok"] for r in results), "checks": results, "at": time.time()}

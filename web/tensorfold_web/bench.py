@@ -202,8 +202,7 @@ class Bench(BenchModes):
             raise ValueError(f"unknown suites: {', '.join(sorted(set(suites) - known))}")
         base, key, model, *more = target or self.target()
         self._target_headers = more[0] if more else {}       # kept here, never with the run: it may hold a token
-        # the drafts-off check is TensorFold's own (`"draft": false`); another engine is compared by text instead
-        # the served engine is whatever Settings point at: its name says whether it is TensorFold
+        # Drafts-off verification belongs to TensorFold; other engines are compared by reply text.
         tensorfold = engine_name.startswith("TensorFold") if engine_name else target is None
         dropped = exactness and mode in ("quick", "profile") and not tensorfold
         exactness = exactness and mode in ("quick", "profile") and tensorfold and drafts
@@ -234,8 +233,7 @@ class Bench(BenchModes):
             raise ValueError(f"the sweep starts at {SIZES[0]} tokens")
         if mode not in ("prefill", "tools") and not work:
             raise ValueError("nothing to run: the chosen suites have no prompts for this mode")
-        # an engine on another machine: this machine's chip, memory and power say nothing about it
-        # judged by the address measured, whether it came from the Bench's target or from Settings
+        # Remote engines have no local hardware or power measurements, regardless of how their address was selected.
         elsewhere = not on_this_machine(urlsplit(base).hostname or "")
         run = {"schema": SCHEMA, "id": time.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6], "created": time.time(),
                "finished": None, "mode": mode, "status": "running", "model": model, "engine": engine_name,
@@ -295,8 +293,8 @@ class Bench(BenchModes):
                 source, why = None, f"the power source failed to open ({str(exc)[:120]})"
             if source is None:
                 run["notes"].append(f"no power figures: {why}")
-            with httpx.Client(timeout=httpx.Timeout(600.0, connect=5.0)) as client, \
-                    httpx.Client(timeout=3.0) as probe, \
+            with httpx.Client(trust_env=False, timeout=httpx.Timeout(600.0, connect=5.0)) as client, \
+                    httpx.Client(trust_env=False, timeout=3.0) as probe, \
                     Sampler(lambda: engine_memory(probe, base, headers), source=source) as sampler:
                 try:
                     if source is not None:
@@ -324,12 +322,10 @@ class Bench(BenchModes):
                                      "system_peak_bytes": None if run.get("elsewhere") else sampler.system_peak,
                                      "samples": sampler.samples}
                     written = [r["m"]["tokens"] for r in results if not r.get("error")]
-                    # energy per token only over replies the engine counted, all of them: a partial count would charge
-                    # the whole run's energy to some of its tokens
+                    # Per-token energy needs every reply counted; partial counts cannot absorb the whole run's energy.
                     run["hardware"] = sampler.report(sum(written) if written and None not in written else None)
                     if run["hardware"] and run["mode"] not in PER_TOKEN_MODES:
-                        # the energy went to work not counted in written tokens (long prompts read, repeats, probes):
-                        # a figure per token would charge it all to the few tokens written
+                        # Do not charge prefill work, repeats and probes to its few output tokens.
                         run["hardware"].update(j_per_token=None, j_per_token_above_idle=None,
                                                per_token_note="not given for this mode: most of its energy goes to "
                                                               "reading prompts, not to the tokens it writes")

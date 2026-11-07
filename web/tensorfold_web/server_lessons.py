@@ -241,7 +241,7 @@ def install(app, cat, chore, chore_cancel, chore_lock, copy_name, creating, eng,
         graph: dict = {}
         if served_copy() == name:
             try:
-                r = httpx.get(s.engine_url.rstrip("/").removesuffix("/v1") + "/v1/slide/graph", timeout=5.0,
+                r = httpx.get(trust_env=False, url=s.engine_url.rstrip("/").removesuffix("/v1") + "/v1/slide/graph", timeout=5.0,
                               headers={"Authorization": f"Bearer {eng.key_in_use()}"} if eng.key_in_use() else {})
                 graph = r.json() if r.status_code == 200 else {}
             except (httpx.HTTPError, ValueError):

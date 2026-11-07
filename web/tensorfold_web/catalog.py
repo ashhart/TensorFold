@@ -40,11 +40,9 @@ class Entry:
     drafter_fraction: float = 1.0
     drafter_bytes: int | None = None
     drafter_size_bytes: int | None = None  # the drafter's files as last measured: its weight before sizes are fetched
-    native: bool = False                 # served by the native engine: what its `capabilities` say on this machine,
-                                         # this flag only when no engine is installed to ask
+    native: bool = False                 # fallback when no native binary is installed to report its capabilities
     format: str | None = None            # the checkpoint's weight format as the engine names it ("mlx-q4g64")
-    native_from: str | None = None       # a mixed-width (oQ) checkpoint: the first native release that serves it, as
-                                         # `capabilities --json` lists each family's uniform formats only
+    native_from: str | None = None       # first native release for mixed widths, absent from uniform-format listings
     native_overhead_bytes: int | None = None   # what the native engine holds above `info`'s floor at idle, if measured
     engine_info: dict | None = None      # what the native engine's `info` says of the downloaded checkpoint
     installed: bool = False
@@ -293,8 +291,7 @@ class Catalog:
                     v.basis = "engine-floor"
                 e.verdict = v.to_dict()
             out.append(e.to_dict())
-        # one model to point a newcomer at: it runs here and fits, the fastest first, one already on disk before
-        # one to download
+        # Recommend one fitting model, preferring speed and then an existing download.
         def rank(m: dict) -> tuple:
             level = (m.get("verdict") or {}).get("level")
             return (m["runs_here"] and level in ("fits", "tight"), level == "fits", bool(m.get("installed")),

@@ -121,8 +121,7 @@ def install(app, bench_go, cat, chore, copy_name, creating, eng, engine_get, gat
                                      "one lesson (24): restore an earlier version and teach them in parts")
 
         def work() -> dict:
-            # one operation under one reservation, from the version kept to undo it to the replay and any rollback:
-            # nothing else (a Bench run, a lesson) can slip in between and keep it from being undone
+            # Hold one reservation across versioning, replay and rollback so no other job can interrupt recovery.
             gate.take("a fact being forgotten")
             try:
                 undo = living_versions.save(name, f"before forgetting: {fact[:80]}")
@@ -207,11 +206,11 @@ def install(app, bench_go, cat, chore, copy_name, creating, eng, engine_get, gat
         h = {fleet.TOKEN_HEADER: peer["token"]} if peer.get("token") else {}
 
         def manifest() -> dict:
-            with httpx.Client(timeout=httpx.Timeout(1800.0, connect=10.0)) as c:
+            with httpx.Client(trust_env=False, timeout=httpx.Timeout(1800.0, connect=10.0)) as c:
                 return c.get(f"{peer['url']}/api/living/copies/{src}/manifest", headers=h).raise_for_status().json()
 
         def file(rel: str):
-            with httpx.Client(timeout=httpx.Timeout(600.0, connect=10.0)) as c, \
+            with httpx.Client(trust_env=False, timeout=httpx.Timeout(600.0, connect=10.0)) as c, \
                     c.stream("GET", f"{peer['url']}/api/living/copies/{src}/file", params={"rel": rel}, headers=h) as r:
                 r.raise_for_status()
                 yield from r.iter_bytes(8 * 1024 * 1024)

@@ -82,9 +82,7 @@ def forget_plan(name: str, fact: str, manifests: list[dict]) -> dict:
 
     record = living.lessons(name)
     kept = [x for x in record if x.get("outcome") in living.KEPT]
-    # the words TensorFold Web taught, else the same fact in other words: the engine's rewriting ("The user has a
-    # dog…"),
-    # as its graph shows it, or as a lesson recorded it
+    # Prefer taught wording, then the engine graph's rewrite, then the recorded lesson wording.
     taught = next((x for x in kept if x.get("fact") == fact), None) or next(
         (x for x in kept if living.canonical(fact) in {living.canonical(str(t)) for t in
                                                 [x.get("fact") or "", *(f.get("text") or "" for f in x.get("found") or [])]}),
@@ -150,4 +148,3 @@ def card(name: str, *, graph: dict, versions: list[dict], runs: list[dict], engi
                   f"{(str(r['exact']) + ' of ' + str(r['checked'])) if r.get('checked') else '—'} | "
                   f"{_kl_cell(r.get('mean_kl'))} |" for r in runs]
     return "\n".join(lines) + "\n"
-

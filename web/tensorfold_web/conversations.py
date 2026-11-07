@@ -287,8 +287,7 @@ class Conversations:
             out.append({"id": doc["id"], "title": title, "updated": doc["updated"], "created": doc["created"],
                         "messages": len(doc.get("messages", [])), "model": models[-1] if models else None,
                         "pinned": bool(doc.get("pinned")), "folder": doc.get("folder"),
-                        # a replay names its original and what it was written with, so the page can offer the
-                        # conversations that asked the same questions, and name each by its model
+                        # Replays retain their original and target so the page can group identical questions by model.
                         "replay_of": (doc.get("settings") or {}).get("replay_of"),
                         "target": (doc.get("settings") or {}).get("target"),
                         **({"match": hit} if q else {})})

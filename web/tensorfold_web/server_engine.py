@@ -87,7 +87,7 @@ def install(_start_held, app, bind_host, cat, checker, dl, eng, friendly_name, g
         open_without_key = None
         if not engine_local:                      # does the engine answer anyone, without its key?
             try:
-                r = httpx.get(s.engine_url.rstrip("/") + "/v1/models", timeout=2.0)
+                r = httpx.get(trust_env=False, url=s.engine_url.rstrip("/") + "/v1/models", timeout=2.0)
                 open_without_key = r.status_code == 200
             except httpx.HTTPError:
                 open_without_key = None

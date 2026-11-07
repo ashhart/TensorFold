@@ -68,8 +68,7 @@ def install(app, chats, makers, replays) -> None:
         doc = chats.get(cid)
         if doc is None:
             raise HTTPException(404, "unknown conversation")
-        # a page saves every few seconds while a reply streams: a reply without an ending in a conversation saved a
-        # minute ago or more has lost its page
+        # A streaming reply left unfinished in an old saved conversation has lost its browser connection.
         return conversations.settle(doc, live={cid} if time.time() - doc["updated"] < 60 else set())
 
     @app.put("/api/conversations/{cid}")

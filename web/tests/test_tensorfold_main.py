@@ -329,8 +329,7 @@ def test_every_install_command_names_an_exact_version():
     root = pathlib.Path(__file__).resolve().parents[1]
     sources = [*root.glob("tensorfold_web/*.py"), *root.glob("ui/src/**/*.tsx"), *root.glob("ui/src/**/*.ts"),
                *root.glob("tensorfold_web/ui_dist/assets/*.js")]
-    # a package after `uv tool install`, `pip install` or `pipx install`; a bare mention (`uv tool install` puts…) is
-    # no command
+    # Recognize an installation command, not an explanatory mention of a package manager.
     command = re.compile(r"(?:uv tool install|pip3? install|pipx install)\s+(?!-)([A-Za-z][\w.-]*)(\S*)")
     seen = 0
     for path in sources:

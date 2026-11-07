@@ -278,4 +278,3 @@ class Teacher:
             it.message = next((f["message"] for f in missed if f.get("message")), None)
         if len(it.found) == 1 and " ".join(str(it.found[0]["text"]).split()).lower() != it.fact.lower():
             it.message = f"learned as \"{it.found[0]['text']}\"" + (f". {it.message}" if it.message else "")
-

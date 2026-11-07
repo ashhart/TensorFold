@@ -46,16 +46,14 @@ class Usage:
             delta = dict.fromkeys(KINDS, 0)
             if isinstance(totals, dict):
                 now = {k: int(totals.get(k) or 0) for k in KINDS}
-                # one baseline per server: going back to a server counts what it served meanwhile, and a baseline
-                # kept before servers were told apart (no address) is not trusted for any of them
+                # Track usage baselines per server; old baselines without a server identity cannot be trusted.
                 url = info.get("engine_url")
                 prev = self._get(db, f"totals@{url}") if url else self._get(db, "totals")
                 # kept before one per server: this server's when its address says so
                 if prev is None and url:
                     legacy = self._get(db, "totals")
                     prev = legacy if legacy and legacy.get("url") == url else None
-                # the engine's start time when TensorFold Web knows it: the same model restarted between two readings
-                # can pass its old totals, and only this tells the two engines apart
+                # Engine start times distinguish a restarted model from its predecessor's cumulative counters.
                 started = info.get("started_at")
                 same_engine = not (started and prev and prev.get("started")
                                    and abs(float(started) - float(prev["started"])) > 2.0)

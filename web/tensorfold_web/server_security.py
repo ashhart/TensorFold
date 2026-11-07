@@ -30,16 +30,13 @@ def install(_engine_key_given, allowed_hosts, app, logs_cookie, token, view_cook
 
         p = request.url.path
         host = _host_of(request.headers.get("host", ""))
-        # Without a token TensorFold Web trusts whoever reaches it, so only through the names of this machine: a page
-        # from elsewhere that points its own name at 127.0.0.1 (DNS rebinding) is refused.
+        # Without a token, accept only local host names to prevent a hostile site's DNS rebinding.
         if not token and host and host not in LOOPBACK_NAMES | {_host_of(h) for h in allowed_hosts or []}:
             return JSONResponse({"detail": f"this TensorFold Web answers on localhost only, not as {host!r}; start it with "
                                            "--token to reach it under another name"}, status_code=421)
-        # A change asked by a page of another site (a form posted cross-site) is refused, token or not. The origin
-        # is compared with the address asked, port included: another local server (localhost:3000) is another site.
+        # Reject cross-site changes by comparing Origin and the requested host, including the port.
         origin = request.headers.get("origin")
-        # A tool that sends the engine's key in its own header is no cross-site form: a page of another site cannot
-        # add that header for someone, and an app built on a web view (Jan) sends its own origin with every call.
+        # An explicit engine-key header distinguishes an API tool from a cross-site browser form.
         if p.startswith("/engine/") and _engine_key_given(request):
             return await call_next(request)
         if request.method in UNSAFE and origin == "null" and not token:
@@ -53,8 +50,7 @@ def install(_engine_key_given, allowed_hosts, app, logs_cookie, token, view_cook
         if request.method in UNSAFE and request.headers.get("sec-fetch-site") == "cross-site":
             return JSONResponse({"detail": "a change from another site's page is refused"}, status_code=403)
         if token and p.startswith(VIEW):
-            # TensorFold's fact graph page loads its own scripts and data: the token, once, becomes a cookie for
-            # that path only, so neither the token nor the facts are open to whoever reaches TensorFold Web
+            # The fact graph uses a path-scoped cookie to protect its private data and scripts.
             given = request.headers.get(TOKEN_HEADER) or ""      # never in the address: logs and history keep it
             if not (same_secret(given, token) or
                     same_secret(request.cookies.get(VIEW_COOKIE, ""), view_cookie())):

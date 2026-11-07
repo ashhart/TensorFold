@@ -302,4 +302,3 @@ def html_report(run: dict) -> str:
         "<footer>Made by TensorFold Web from the run's receipt, which is embedded at the end of this file as JSON "
         "(<code>#receipt</code>). Nothing here reaches the network.</footer>"
         f'</main><script type="application/json" id="receipt">{data}</script></body></html>')
-

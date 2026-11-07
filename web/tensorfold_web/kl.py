@@ -242,8 +242,7 @@ def summary(per_prompt: list[dict]) -> dict:
             "differs_at_median": statistics.median(parted) if parted else None,
             "tokens": sum(p["tokens"] for p in per_prompt),
             "requests": sum(p["requests"] for p in per_prompt), "worst": worst, "top": TOP, "unscored": unscored,
-            # the narrowest distribution either side gave: an engine capping top_logprobs makes "the same 20"
-            # mean less, and is said so
+            # Report the narrowest returned distribution when either engine caps top_logprobs.
             "width": min((w for p in per_prompt for w in p.get("width", [TOP])), default=TOP)}
 
 
@@ -273,7 +272,7 @@ class Load:
         return min(1.0, self._full_s / span) if self._t0 and span > 0 else None
 
     def _loop(self) -> None:
-        with httpx.Client(timeout=httpx.Timeout(300.0, connect=5.0)) as c:
+        with httpx.Client(trust_env=False, timeout=httpx.Timeout(300.0, connect=5.0)) as c:
             while not self._stop.is_set():
                 self._flight(+1)
                 try:

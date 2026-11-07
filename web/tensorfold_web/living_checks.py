@@ -134,8 +134,7 @@ def recalls(answer: str | None, expect: list[str]) -> bool:
 
     if not answer or not expect or answer.startswith("[error:"):
         return False
-    # a word counts in a sentence that does not deny: "Pixel is not my cat" does not recall Pixel, "Not Ginger. It is
-    # Pixel." does
+    # Recall matches positive assertions, not a sentence that denies the matching word.
     plain = answer.lower().replace("\u2019", "'").replace("\u2018", "'")     # curly apostrophes read as straight
     sentences = [s for s in re.split(r"(?<=[.!?;])\s+|\n+", plain) if s.strip()]
     affirmed = set().union(*(_words(s) for s in sentences if not NEGATION.search(s))) if sentences else set()

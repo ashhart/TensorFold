@@ -110,7 +110,7 @@ def identify(url: str, *, key: str | None = None, client: httpx.Client | None = 
 
     base = url.rstrip("/").removesuffix("/v1")
     headers = {"Authorization": f"Bearer {key}"} if key else {}
-    own = client or httpx.Client(timeout=3.0)
+    own = client or httpx.Client(trust_env=False, timeout=3.0)
     try:
         try:
             r = own.get(base + "/v1/models", headers=headers)

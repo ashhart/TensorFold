@@ -126,8 +126,7 @@ class BenchModes:
                 if isinstance(e.get("total"), int):
                     run["progress"]["total"] = e["total"]
             elif e.get("event") == "scenario_result":
-                # no time left is given: the scenarios grow from one call to long multi-turn chains, so the first
-                # ones say nothing of the last (on the M6 the estimate said 7 minutes for a 10-minute run)
+                # Growing multi-turn scenarios make early timings unsuitable for a remaining-time estimate.
                 run["progress"]["done"] = (e.get("index") or 0) + 1
 
         t = tooleval.Run(self._tools_exe, base, key, run["model"], full=run.get("tools_full", False),
@@ -161,7 +160,7 @@ class BenchModes:
             ref = kl.Target(url, headers, run["model"], {**off, "draft": False})
         run["progress"]["total"] = 2 * len(work)
         replies: list[list[kl.Step]] = []
-        with httpx.Client(timeout=httpx.Timeout(600.0, connect=5.0)) as c:
+        with httpx.Client(trust_env=False, timeout=httpx.Timeout(600.0, connect=5.0)) as c:
             for side, target in (("reference", ref), ("candidate", cand)):
                 load = (kl.Load(cand, run.get("kl_load") or 0, [{"role": "user", "content": "Write a long story about "
                         "a lighthouse keeper."}]) if side == "candidate" and run.get("kl_load") else None)
@@ -207,8 +206,7 @@ class BenchModes:
                     raise RuntimeError(f"the background load never got through ({load.failed} refused: "
                                        f"{load.last_error}); the run would not say what it claims")
                 if load:
-                    # shown as "under load" only when replies came back during the measurement and all the
-                    # requests were in flight for most of it
+                    # Load measurements need completed replies and requests in flight for most of the interval.
                     share = load.full_share or 0.0
                     run["kl_load_verified"] = bool(load.ok) and share >= bench.LOAD_SHARE
                     if not run["kl_load_verified"]:
@@ -381,9 +379,7 @@ class BenchModes:
                 if not draft and cached > 0 and note not in run["notes"]:
                     run["notes"].append(note)
                 if not draft and first is not None and not first.error and not rep.error:
-                    # a reply counts as "the same without drafts" only when the engine says drafts were off (or
-                    # drafted nothing); a reply with no runtime block at all may have ignored `"draft": false`
-                    # and the first reply ran with drafts: two replies written without them prove nothing of drafts
+                    # Exactness needs an active drafted arm and a confirmed plain arm, not merely equal replies.
                     off_known = drafts_off_confirmed(rep.runtime) and drafts_on_confirmed(first.runtime)
                     if rep.runtime.get("drafts") is True:
                         run["notes"].append(f"{prompt['id']}: the engine reported drafts on although draft=false was sent")

@@ -18,8 +18,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# no `engine` extra: PyPI refuses a dependency from Git, and the engine is TensorFold's native binary (Homebrew or
-# its release archive); the frozen Python line, for models not yet native, is installed by hand (see the README)
+# The native engine is installed separately; the frozen Python line has no package extra.
 dev = ["pytest>=8", "ruff>=0.6"]
 
 [project.scripts]

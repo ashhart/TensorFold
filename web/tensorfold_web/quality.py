@@ -7,8 +7,7 @@ import json
 import re
 from importlib import resources
 
-# a letter stated as the answer: "Answer: C", "ANSWER: C", "the correct choice is C", "option: (C)", "actually C";
-# the words in any case, the letter a capital (so "the answer is a bit long" names no letter)
+# Require a stated capital answer letter, avoiding ordinary articles such as the answer is a bit long.
 _IS = r"\s+(?i:is|would be|should be|must be)"
 _STATED = re.compile(rf"(?:\b(?i:answer)\b(?:{_IS})?\s*:?"                    # "answer C" too
                      rf"|\b(?i:choice|option)\b(?:{_IS}\s*:?|\s*:)"          # "option C is wrong" names none
@@ -66,8 +65,7 @@ def last_number(text: str) -> float | None:
     return _num(found[-1]) if found else None
 
 
-# -- prompts
-# ------------------------------------------------------------------------------------------------------------
+# Quality prompts.
 
 def _long_prompt(item: dict, filler: str) -> str:
     """A text of about ``size`` tokens: the fact early, the correction later, the question at the end."""
@@ -106,8 +104,7 @@ def items(data: dict, filler: str, only: list[str] | None = None) -> list[dict]:
     return out
 
 
-# -- scoring
-# --------------------------------------------------------------------------------------------------------------
+# Quality scoring.
 
 def score(category: str, item: dict, reply: str) -> tuple[bool, str]:
     """Whether the reply passes, and what was read from it."""
@@ -128,8 +125,7 @@ def score(category: str, item: dict, reply: str) -> tuple[bool, str]:
         got = found[-1]
         return got == _num(item["answer"]), f"{got:g}"
     if category == "mmlu":
-        # a letter alone, or a letter then a mark: "A good case can be made, but B." starts with the article, not an
-        # answer; "C is correct" states one
+        # Distinguish an isolated answer letter from a sentence beginning with an article.
         m = (re.match(r"^\(?([ABCD])\)?(?:[.):,]|\s*$)", text)
              or re.match(r"^\(?([ABCD])\)?\s+is\s+(?:the\s+)?(?:correct|right|answer)\b", text, re.IGNORECASE)
              or re.search(_STATED, text))

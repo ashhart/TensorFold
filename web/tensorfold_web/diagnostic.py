@@ -201,8 +201,7 @@ def service_check(st: dict | None) -> Check:
                  "tensorfold-web service install")
 
 
-# 1.0.11 is Cortheon's security release: before it a page could hide an order from the instruction filter, hold a
-# request for minutes or stop the server; 1.0.10 had already limited reads to URLs the conversation has shown
+# Cortheon versions before 1.0.11 lack the security fixes for hostile pages and stalled requests.
 CORTHEON_SAFE = (1, 0, 11)
 
 

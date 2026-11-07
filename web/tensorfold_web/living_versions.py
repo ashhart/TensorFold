@@ -231,8 +231,7 @@ def restore(name: str, vid: str, *, into: str | None = None) -> dict:
     for rel, ref in m["files"].items():
         want = m["stat"][rel][2]
         here = current.get(rel)
-        # a file is kept as it is only when its bytes are the version's: its hash is read again, since a file
-        # rewritten with the same size in the same clock tick looks unchanged to its size and time
+        # Rehash files even when size and timestamp match; only identical bytes may be kept unchanged.
         if here is not None and here.stat().st_size == m["stat"][rel][0] and _sha(here) == want:
             plan.append((rel, here, None))
             continue
