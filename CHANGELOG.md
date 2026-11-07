@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Tests: the CUDA kernel contract releases each case's buffers when the case ends, so the full run fits in a GB10's memory (#1845). Thanks to @Maxrio9.
+
 - Tools: `tools/zig/bench_sessions.py` replays long agent sessions (a shared harness plus histories of up to 215K tokens) in turn patterns (alternating, bursts, three-way and overlapping), one JSON line per request with `cached_tokens` and timings, reads the prompt-cache series from `/metrics`, can plan without sending (`--plan-only`), and replays one session on a second server to compare token hashes (#2359, for #2346).
 
 - Contributing: `tools/pr_check.py` checks local changes against their merge base before a push (new lean findings, sources over 600 lines, and advisory warnings for private-looking paths and addresses, untracked files included), and the PR template asks for paired main-against-branch cells, the machines a change reaches and switch defaults (#2355).
