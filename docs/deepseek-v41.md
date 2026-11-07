@@ -107,23 +107,20 @@ hyper-connection boundary.
 
 The per-operator reference tests run every stage against an FP64 ideal at three sides —
 kernel, FP32 source contract, FP64 ideal — and assert rounding level. The whole-model
-picture is sensitivity-dominated. On the release-quality 16-token fixed window the FP32
-contract chain reads 0.4074 NRMS against FP64, the engine reads 0.4100 against FP64 and
-0.4456 against that contract; the engine-vs-FP64 ratio is 1.006x the floor, inside the
-1.05 clear band. The indexer's 512-pick selection boundary lands inside an exact BF16 tie
-at every indexed layer past the window fill — pick order there is decided by sub-quantum
-noise, folded into the sensitivity accounting. The operative gate is floor-relative:
-engine-vs-FP64 NRMS at or under 1.05x the measured FP32-vs-FP64 floor clears, 1.10x
-reviews; the 1% absolute figure is a reported trip-wire, not the arbiter. The band is a
+picture is sensitivity-dominated, and the floor-relative band is not stable across the
+fixed release-quality window. On the full 128-token window (`release-quality-128.json` in
+the reference tests) the FP32 contract chain reads 0.1622 NRMS against FP64 and the engine
+0.2671, a ratio of 1.647x: the band fails (1.05 clears, 1.10 reviews). The 16-token blocks
+after the first read 1.66-2.45x and the 32-token prefix 1.180x; only the first 16 tokens
+clear, at 1.006x (floor 0.4074, engine 0.4100), because that block's floor is unusually
+noisy. The ratios are consistent with the engine's bf16 dequant class, not an isolated
+cause. The 1% absolute figure is a reported trip-wire, not the arbiter. The band is a
 fixed-history receipt, and the floor manifest binds the window, the exact FP32 logits and
-the checkpoint metadata identity (config, index, present shard headers, token map).
-The 16-token clear is not representative of the full release-quality capture: on the
-128-token window the FP32 chain reads 0.1622 and the engine 0.2671, a ratio of 1.647x,
-and the 16-token blocks after the first read 1.66-2.45x (the 32-token prefix is 1.180x).
-The first window's floor is unusually noisy; the later blocks expose the engine's bf16
-dequant class. The full window is the honest qualification history, and on it the gate is
-open; its streamed Engram page reads also make the zero-disk-read residency clause false
-(20 KB on the FP32 half, 67.8 MB on the FP64 half).
+the checkpoint metadata identity (config, index, present shard headers, token map). The
+128-token window is the qualification measurement this record reports; the 16-token window
+is fixed in the tree as `release-quality-16.json`. The streamed run's execution reads also
+fail the zero-disk-read residency clause (20 KB on the FP32 half, 67.8 MB on the FP64
+half); the receipt gives totals, not a stream/weights split.
 
 Context-labelled standing (M5 Ultra, 256 GB, the streamed line above): prefill 1,276 tok/s
 at 3,002 tokens; plain decode 44.9 tok/s at 4.5k and 44.1 at 21k, flat to 42k; drafted
