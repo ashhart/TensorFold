@@ -35,6 +35,7 @@ pub fn run(c: *Ctx) void {
     resumed(c);
     check_radix.run(c);
     replayShare(c);
+    headReplay(c);
     check_radix.leaked(c);
 }
 
@@ -160,4 +161,20 @@ fn replayShare(c: *Ctx) void {
     const share = 100.0 * @as(f64, @floatFromInt(done.replayed)) / @as(f64, @floatFromInt(@max(done.rounds, 1)));
     if (share < 99.0) return c.report.fail(name, "{d:.1}% of {d} rounds replayed", .{ share, done.rounds });
     c.report.pass(name, "{d:.1}% of {d} rounds replayed, {d:.0} us a round submitting", .{ share, done.rounds, @as(f64, @floatFromInt(done.submit_ns)) / @as(f64, @floatFromInt(@max(done.rounds, 1))) / 1e3 });
+}
+
+/// Each sampled draw's drafted run of every stream at once, the third time: its drafts come from the graphed head.
+fn headReplay(c: *Ctx) void {
+    for (check_ctx.draws) |d| {
+        if (d.sampling == null) continue;
+        const name = named(c, "lanes short {s}: head batches replayed", .{d.name});
+        if (!c.e.o.graphs) return c.report.skip(name, "graphs are off");
+        if (c.session.h.head == null) return c.report.skip(name, "the model has no draft head");
+        const job: Session.Job = .{ .prompts = c.short, .max_new = c.tokens, .sampling = d.sampling };
+        var done: Session.Done = undefined;
+        for (0..3) |_| done = c.session.run(c.arena, job) catch |err| return c.report.broke(name, err);
+        const share = 100.0 * @as(f64, @floatFromInt(done.head_replayed)) / @as(f64, @floatFromInt(@max(done.head_batches, 1)));
+        if (done.head_batches == 0 or share < 99.0) return c.report.fail(name, "{d} of {d} head batches replayed", .{ done.head_replayed, done.head_batches });
+        c.report.pass(name, "{d:.1}% of {d} head batches replayed", .{ share, done.head_batches });
+    }
 }

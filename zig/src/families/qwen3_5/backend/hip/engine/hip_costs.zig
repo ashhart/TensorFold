@@ -99,9 +99,9 @@ fn step(e: *Engine, hd: *mtp.Head) !f64 {
     var held: [mtp.max_depth]u32 = undefined;
     var spent: u64 = 0;
     for (0..shared.warm + shared.reps) |i| {
-        var jobs = [_]mtp.Job{.{ .hidden = row.base(), .token = 1, .position = at, .depth = mtp.max_depth, .sampling = null, .stop_under = 0.0, .out = &held }};
+        var jobs = [_]mtp.Job{.{ .hidden = row.base(), .token = 1, .position = at, .depth = mtp.max_depth, .stop_under = 0.0, .out = &held }};
         const t0 = nowNs();
-        try hd.chains(&e.lib, e.stream, &e.drawer, m, &jobs, e.headGraphs());
+        try hd.chains(&e.lib, e.stream, m, &jobs, e.headGraphs());
         if (i >= shared.warm) spent += nowNs() - t0;
     }
     return @as(f64, @floatFromInt(spent)) / shared.reps / 1e6 / mtp.max_depth;
