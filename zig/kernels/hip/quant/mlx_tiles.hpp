@@ -38,6 +38,13 @@ __global__ void __launch_bounds__(256) affine_wmma_gemm(Affine a) {
     wmma_gemm_tile<MlxDecoder<BITS>, BF16Act, WmmaBF16, GemmOut<WmmaBF16>>(a);
 }
 
+// ---- the same with unpadded, skewed staging rows: less LDS, three blocks a WGP on RDNA3.5 ----
+
+template <int BITS>
+__global__ void __launch_bounds__(256) affine_wmma_skew(Affine a) {
+    wmma_gemm_tile<MlxDecoder<BITS>, BF16Act, WmmaBF16, GemmOut<WmmaBF16>, true>(a);
+}
+
 // ---- the same on RM x 16 rows a block, for a routed item of few rows ----
 
 template <int BITS, int RM>

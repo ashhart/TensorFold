@@ -283,8 +283,8 @@ fn tierProduct(t: *Rig, m: usize, n: usize, k: usize, bits: c_int, group: c_int,
     // a routed plan's pairs are its members, one a row
     const plan_pairs: usize = if (routed) m else 0;
     try prod.pickable(k_ptr, arg, item_count, plan_pairs, .prefill, k_ptr.env(), &set, gpa);
-    // the few-row matrix tiles hold a plan's rows only under a pairs bound, so the sweep may not reach them
-    if (routed) for (&mlx_entries.all) |*e| if (std.mem.indexOf(u8, e.id, ".prefill.item") != null and std.mem.indexOfScalar(*const Entry, set.items, e) == null) try set.append(gpa, e);
+    // the few-row and skewed matrix tiles take a plan only under a pairs or depth bound: the sweep may miss them
+    if (routed) for (&mlx_entries.all) |*e| if ((std.mem.indexOf(u8, e.id, ".prefill.item") != null or std.mem.indexOf(u8, e.id, ".prefill.skew") != null) and std.mem.indexOfScalar(*const Entry, set.items, e) == null) try set.append(gpa, e);
     var ids: [registry.max_entries]*const Entry = undefined;
     var n_ids: usize = 0;
     for (set.items) |e| if (prod.takesArg(k_ptr, e, arg, item_count, plan_pairs, .prefill)) {

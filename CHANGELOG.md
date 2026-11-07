@@ -106,6 +106,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Flash Next on Metal: a Mac with tensor units (M5) now takes the same shared-host defaults as other Macs at an explicit `--parallel 2` or more: replies take 0.8 of a filling prompt's time, and the prompt's steps grow to 512 rows. On an M5 Ultra with the MLX 4-bit checkpoint, two overlapping clients finish in 47 s instead of 127 s, and a 64K prompt beside a 1,024-token reply in 21 s instead of 36-38 s, with the same tokens (#2394, refs #1893).
 
+- HIP: a skewed-row matrix tile on gfx1151, with the same results (#2087). Thanks to @AbrahamCete.
+
 - Internal: 14 more lean findings fixed in the core library's comments, with no change in behaviour (#2323).
 
 - Pipeline stages across machines: the stage protocol (boot description, round plan, rows layout and keep-alive) with golden bytes for every message, so a CUDA and a Metal stage can be built against the same bytes; nothing serves through it yet (#2060, part of #2005). Thanks to @jschmied.

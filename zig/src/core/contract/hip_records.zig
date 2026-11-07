@@ -498,7 +498,7 @@ const own_records = [_]Record{
 
 pub const records = own_records ++ @import("hip_records_stream.zig").records ++ @import("hip_records_router.zig").records ++
     @import("hip_records_item.zig").records ++ @import("hip_records_qwen3.zig").records ++ @import("hip_records_columns.zig").records ++
-    @import("hip_records_vision.zig").records ++ @import("hip_records_dense_text.zig").records ++ @import("hip_records_families.zig").all;
+    @import("hip_records_vision.zig").records ++ @import("hip_records_dense_text.zig").records ++ @import("hip_records_families.zig").all ++ @import("hip_records_skew.zig").records;
 
 /// Gate 5's planted HIP controls: a launch past its __launch_bounds__, and 72 KiB of LDS where a workgroup has 64.
 pub const controls = [_]Record{
