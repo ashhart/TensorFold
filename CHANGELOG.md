@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Each native model discovery entry publishes loaded capability booleans, read through the same flag accessor as request admission (#2139, #2157).
+
 - Tests: `tf-qwen27-reuse`'s yielded-pass check follows the host's lane loop on M5 chips, comparing state only where the rounds match and tokens always (#2343).
 
 - Tests: the CUDA kernel contract releases each case's buffers when the case ends, so the full run fits in a GB10's memory (#1845). Thanks to @Maxrio9.
