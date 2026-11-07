@@ -15,7 +15,7 @@ pub fn steps(b: *std.Build, test_step: *std.Build.Step) void {
     b.step("tf-cpu-contract", "Build the CPU kernels' contract gates and controls (no run)").dependOn(&b.addInstallArtifact(exe, .{}).step);
     b.step("cpu-contract", "The CPU projection and norm through gates 1 to 4 on this host's cores, each control red").dependOn(&b.addRunArtifact(exe).step);
     const own = b.addRunArtifact(b.addTest(.{ .root_module = kernels }));
-    b.step("test-cpu-kernels", "The CPU kernels' own tests: the same bytes at every thread count and column split, on every host").dependOn(&own.step);
+    b.step("test-cpu-kernels", "The CPU kernels' own tests: the same bytes at 1 to 16 threads and at column splits every 8 columns to 256 and every 256 beyond, on every host").dependOn(&own.step);
     test_step.dependOn(&own.step);
     const step = b.step("test-cpu-contract-host", "The CPU kernels through the contract's gates 1 to 4 as a test, every control red, no device");
     step.dependOn(&own.step);
