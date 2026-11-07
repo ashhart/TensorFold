@@ -113,7 +113,7 @@ pub const Metal = struct {
         errdefer cache.deinit();
         try self.caches.put(self.gpa, stream, cache);
         errdefer _ = self.caches.remove(stream);
-        try @import("prefill.zig").run(cache, stream, self.options.chunk, self, promptChunk);
+        try @import("prefill.zig").run(cache, stream, self.options.chunk, self, promptChunk, snapshot);
     }
 
     fn promptChunk(self: *Metal, cache: *st.Cache, ids: []const u32) !void {

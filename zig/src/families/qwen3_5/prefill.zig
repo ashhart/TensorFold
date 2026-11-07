@@ -1,10 +1,9 @@
 //! Prompt reuse and capture hooks around the unchanged Qwen forward, also exercised with a host reference.
 const std = @import("std");
 const lanes = @import("lanes");
-const st = @import("state.zig");
-const snapshot = @import("snapshot.zig");
 
-pub fn run(cache: *st.Cache, stream: *lanes.Stream, chunk: usize, ctx: anytype, comptime advance: anytype) !void {
+/// `snapshot` is the backend's saved-state module (Metal's snapshot.zig, the CPU's cpu_state.zig): `Snap`, `restore`.
+pub fn run(cache: anytype, stream: *lanes.Stream, chunk: usize, ctx: anytype, comptime advance: anytype, comptime snapshot: type) !void {
     const ids = stream.prompt();
     var at: usize = 0;
     stream.cached = 0;

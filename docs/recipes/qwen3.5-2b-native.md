@@ -59,11 +59,26 @@ that length. `--context` controls request admission; KV buffers are sized for ea
 | Pinned affine 4-bit/group-64 checkpoint, M5 Max, macOS 27 | Native operation, forward, cache and server checks exercised; see the contribution's receipt for results and outstanding checks. |
 | M1, M2, M3, M4 | Untested for this model. Uses simdgroup matrix kernels without M5 tensor units; the local load check does not replace full hardware qualification. |
 | M5 on other macOS / runtime versions | Untested. Rerun the operation, fidelity and exactness checks. |
-| CUDA, non-Apple platforms | No native Qwen3.5-2B backend in this contribution. |
+| CUDA, non-Apple platforms | No native Qwen3.5-2B GPU backend in this contribution; the CPU engine below serves it on any host. |
 | Other checkpoints, model sizes, quantizations, vision / video | Outside the qualified scope. |
 
 The preview's unresolved M1–M4 exactness qualification for existing families remains in force.
 An M5 result does not establish correctness on those GPUs.
+
+## The CPU engine
+
+`zig build native-cpu -Doptimize=ReleaseFast` builds `zig-out/native-cpu/bin/tensorfold-native` with the same checkpoint
+served on the host's cores, no GPU and no kernel library (`capabilities --json` says `"backends": ["cpu"]`); the default
+builds are unchanged. It takes the same `serve` flags; `TF_QWEN35_CPU_THREADS=N` sets the worker threads beside the engine
+thread (default: the logical CPUs less one), and `TF_QWEN35_CPU_WINDOWS=1` admits verify windows of up to 16 rows (copy
+drafts) once the engine's local exactness check against one-row steps passes at load. The engine's arithmetic is the
+portable shape: the registered projection and RMS norm (`zig build cpu-contract`), fp32 sums in the attention and the
+delta rule's recurrence, and every other row computed in float64 and rounded once to bf16, so x86_64 and arm64 give the
+same bytes at every thread count. Its fidelity is judged against a float64 reference, not against Metal's bits:
+`tools/zig/cpu_fidelity.py` freezes a prompt set, records a serve's greedy replies, and compares `tf-qwen35-cpu-forward`'s
+teacher-forced logits (`zig build qwen35-cpu-forward`) with the reference's row by row, listing every top-token
+difference with both margins. `zig/tests/qwen35/serve_check.py` runs the drafted, concurrent and resumed checks against
+its serve as against any other.
 
 ## Verification
 

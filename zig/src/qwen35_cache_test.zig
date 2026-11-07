@@ -225,7 +225,7 @@ const Harness = struct {
         defer _ = h.metal.caches.remove(&stream);
         h.active = cache;
         defer h.active = null;
-        try prefill.run(cache, &stream, 128, h, advance);
+        try prefill.run(cache, &stream, 128, h, advance, snap);
         return stream.cached;
     }
 };
