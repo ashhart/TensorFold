@@ -130,5 +130,5 @@ test "restore selection: a state whose directory another identity's cap removed 
     try t.expectEqual(@as(u64, 0), s.counts.evicted);
     try t.expectEqual(@as(usize, 1), s.entries.items.len);
     try t.expectEqual(@as(usize, 1), f.live);
-    try t.expectEqual(@as(u64, 1), r.counts.failed);
+    try t.expectEqual(@as(u64, 2), r.counts.failed); // both the longest file and the one shorter retry are gone
 }

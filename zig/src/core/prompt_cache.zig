@@ -378,7 +378,7 @@ pub const Store = struct {
     const fitting = @import("prompt_cache_fit.zig").fitting;
     const fittingRewind = @import("prompt_cache_fit.zig").fittingRewind;
 
-    /// A looked-up entry's restore went through (it is now the prompt's), or failed (dropped: the pass ran from 0).
+    /// A looked-up entry's restore went through (it is now the prompt's), or failed (the refused state is dropped).
     pub fn resumed(s: *Store, e: *Entry, prompt: []const u32, ok: bool) void {
         return s.resumedWithReason(e, prompt, if (ok) null else error.RestoreRejected);
     }
