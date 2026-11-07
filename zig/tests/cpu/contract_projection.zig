@@ -33,8 +33,7 @@ fn depth(comptime chains: usize) fn (c.Shape) usize {
 /// Rows in blocks of eight, columns in tiles of eight and passes of four tiles, inputs in groups of 64.
 const tiles: [3]c.Tile = .{ .{ .size = 8 }, .{ .size = 32, .step = 8, .min = 8 }, .{ .size = k.group, .step = k.group, .min = k.group } };
 
-/// The 2B's 16-chain projections (q with its gate, k, v, o, the delta rule's qkv, z and out, gate, up, down), one row
-/// a decode step, a 128-row prompt chunk, a 32-row verify window.
+/// The 2B's 16-chain projections at a decode row, a 128-row prompt chunk and a 32-row verify window, each width.
 const served16 = [_]c.Shape{
     .{ .rows = 1, .n = 2048, .k = 2048 },  .{ .rows = 128, .n = 2048, .k = 2048 },
     .{ .rows = 1, .n = 6144, .k = 2048 },  .{ .rows = 128, .n = 6144, .k = 2048 },
