@@ -49,6 +49,8 @@ pub const Metal = struct {
     tensor_units: bool = false, // the device capability used by startup and first-token policy
     runner: *q.decode_round.Runner,
     draft: ?*Draft,
+    mtp: ?*@import("qwen27_mtp.zig").Mtp = null, // --mtp-drafts: the head drafts slot 0's chains (exclusive with DFlash2)
+    mtp_step_ms: f64 = 0, // one chained head step, timed at load
     chunk: usize = 128, // prompt rows a pass
     window: u32 = 16, // the device per-stream verification width
     copies: bool = false, // lone context copies leave room past a 15-node tree
@@ -139,6 +141,7 @@ pub const Metal = struct {
         if (b.rewind) |x| x.deinit();
         b.dropRound();
         b.dropTree();
+        if (b.mtp) |x| x.deinit();
         b.freeContexts();
         b.fills.deinit(b.gpa);
         b.kept.deinit();
@@ -161,14 +164,15 @@ pub const Metal = struct {
 
     /// What the round loop reads at setup: slot 0's stream drafts trees; every stream verifies copies.
     pub fn facts(b: *const Metal) lanes.Model {
-        const drafting = b.draft != null;
+        const drafting = b.draft != null or b.mtp != null;
+        const dflash = b.draft != null; // shared-row drafts and copies are DFlash2's; the MTP head drafts slot 0's chain
         const shared = b.runner.slots > 1;
         // Context copies remain opt-in until their served cost is qualified.
         const lone_copies = b.copies;
         const narrow: usize = @min(b.window, b.timed);
         // routed experts make a drafted window read most expert weights: plain rounds compete with drafted depths
         const routed = b.runner.model.config.moe();
-        return .{ .exact_width = if (drafting or shared) b.window else 1, .mtp = drafting, .speculate = drafting, .speculate_early = false, .drafts = b.nodes, .draft_probabilities = true, .plain_guard = routed, .window_costs = b.costs[0..narrow], .shared_costs = b.costs[narrow..b.timed], .hidden_rows = shared, .streams_exact = true, .batch_rows = if (shared) batch_rows else b.window, .max_streams = b.runner.slots, .lone_copies = lone_copies, .context_copies = lone_copies, .allocate_shared_drafts = drafting, .draft_streams = drafting and b.draft_slots > 1 };
+        return .{ .exact_width = if (drafting or shared) b.window else 1, .mtp = drafting, .speculate = drafting, .speculate_early = false, .drafts = if (b.mtp != null) @import("qwen27_mtp.zig").capacity(b, 0) else b.nodes, .mtp_step_ms = b.mtp_step_ms, .draft_probabilities = true, .plain_guard = routed, .window_costs = b.costs[0..narrow], .shared_costs = b.costs[narrow..b.timed], .hidden_rows = shared, .streams_exact = true, .batch_rows = if (shared) batch_rows else b.window, .max_streams = b.runner.slots, .lone_copies = lone_copies, .context_copies = lone_copies, .allocate_shared_drafts = dflash, .draft_streams = dflash and b.draft_slots > 1 };
     }
 
     /// The slot holding `s`.
@@ -187,6 +191,7 @@ pub const Metal = struct {
 
     /// Whether `slot`'s stream drafts its own trees.
     pub fn draftsOwn(b: *const Metal, slot: u32) bool {
+        if (b.mtp != null) return slot == 0;
         if (b.draft == null) return false;
         if (slot == 0) return true;
         const x = b.contexts[slot] orelse return false;
@@ -304,7 +309,7 @@ pub const Metal = struct {
         if (b.pass_profile and b.count == 1) std.log.info("q27_keep width={d} rows={d} kept={d}", .{ b.window, b.rows, paths[0].len });
         if (b.advanced) { // the verify kept each window's one row at its position; its logits already sit in row 0
             for (paths) |path| if (path.len != 1) return error.NothingToKeep;
-            return;
+            return @import("qwen27_mtp.zig").kept(b, paths);
         }
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
@@ -314,6 +319,7 @@ pub const Metal = struct {
         }
         try b.runner.keep(&b.round.?, paths);
         if (b.draft != null) try b.gatherTaps(paths);
+        try @import("qwen27_mtp.zig").kept(b, paths);
         if (b.count != 1) return;
         // a lone window's last kept row's logits become row 0, where a one-token step leaves them
         const last = paths[0][paths[0].len - 1];
@@ -408,8 +414,10 @@ pub const Metal = struct {
         const slot = try b.slotFor(s);
         const token = try b.value(feed);
         const before = b.runner.gpu_seconds;
+        const start = b.runner.offsets[slot];
         if (b.drafter(slot)) |d| try d.advance(token) else {
             try (q.session.Session{ .runner = b.runner, .slot = slot }).step(token);
+            if (b.mtp) |x| if (slot == 0) try x.absorb(start, token, &.{0}, &.{});
             if (b.ringOf(slot)) |g| try b.ringChunk(g, 1);
         }
         slots.charge(b, s, before);
@@ -483,6 +491,10 @@ pub const Metal = struct {
             @memcpy(o.drafts, b.ids[first + 1 ..][0 .. rows - 1]);
         }
         if (windows.len == 1) @memcpy(b.sampled[0..b.rows], out[0].sampled);
+        if (b.mtp) |x| for (windows, out, 0..) |w, o, i| if (b.windows[i] == 0) {
+            @memcpy(x.sampled[0..w.rows()], o.sampled);
+            x.window = @intCast(i);
+        };
     }
 
     /// How many drafts are the held tree's first nodes with their own parents (0: copies, fills or a chain).

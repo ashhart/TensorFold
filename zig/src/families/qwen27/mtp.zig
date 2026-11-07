@@ -46,7 +46,7 @@ pub fn pick(values: []const u16) !Pick {
 /// One head pass over `rows` frame rows (ids and positions set): `hidden` row i pairs with token i; returns its rows.
 pub fn encode(m: *Model, sc: *const Scratch, e: *mtl.ComputeEncoder, hooks: forward.Mixer, hidden: Ref, rows: u32, head: forward.Head) !Ref {
     const w = m.weights.mtp orelse return error.NoMtpHead;
-    if (rows == 0 or rows > sc.capacity or rows > m.frame.capacity or (if (head == .last) 1 else rows) > sc.logit_rows) return error.BadFrameRows;
+    if (rows == 0 or rows > sc.capacity or rows > m.frame.capacity or (if (head == .all) rows else 1) > sc.logit_rows) return error.BadFrameRows;
     const f = &m.frame;
     const h: u32 = @intCast(m.config.hidden);
     const plane = @as(usize, sc.capacity) * h * 2;

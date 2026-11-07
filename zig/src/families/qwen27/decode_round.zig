@@ -349,6 +349,7 @@ pub const Runner = struct {
         defer pool.pop();
         const cb = r.model.queue.commandBuffer();
         var e = cb.compute(.serial);
+        errdefer e.end(); // an encoder left open aborts the process when it is released
         const out = try @import("mtp.zig").encode(r.model, sc, &e, .{ .ptr = r, .gdn = gdnForward, .attention = attentionForward }, hidden, @intCast(round.ids.len), head);
         e.end();
         cb.commit();
