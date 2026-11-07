@@ -82,6 +82,8 @@ pub const Stages = struct {
     tail_from: ?u32 = null,
     /// The norm before the head: the target's, or the MTP head's own (mtp.zig).
     norm: ?wts.Tensor = null,
+    /// Where the head writes its logits: the frame's, or the MTP head's own (the target's last row stays readable).
+    logits: ?Ref = null,
     /// The rows layer `index`'s post and the final norm run: the tail's on the last layer, else every row.
     fn rowsAt(s: *const Stages, index: usize) Span {
         const f = &s.model.frame;
@@ -270,7 +272,7 @@ pub const Stages = struct {
                 input.offset += @as(usize, s.rows - 1) * m.config.hidden * 2;
                 head_sums.ref.offset += @as(usize, s.rows - 1) * 4;
             }
-            try m.kernels.quant(e, m.weights.head, input, head_sums, f.get(.dims), f.get(.logits), if (s.head == .last) 1 else s.rows);
+            try m.kernels.quant(e, m.weights.head, input, head_sums, f.get(.dims), s.logits orelse f.get(.logits), if (s.head == .last) 1 else s.rows);
         }
         e.barrier();
         if (s.reduce) |r| {

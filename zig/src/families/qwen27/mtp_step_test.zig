@@ -17,9 +17,9 @@ fn prompt(a: std.mem.Allocator, io: std.Io, path: []const u8) ![]u32 {
 }
 
 /// The head's pick at each of its `rows` logits rows.
-fn picks(m: *Model, rows: usize, out: []u32) !void {
+fn picks(m: *Model, sc: *const mtp.Scratch, rows: usize, out: []u32) !void {
     const vocab = m.config.vocab;
-    const all = m.frame.get(.logits).buffer.slice(u16, rows * vocab);
+    const all = sc.logits.slice(u16, rows * vocab);
     for (out[0..rows], 0..) |*o, i| o.* = try session.argmax(all[i * vocab ..][0..vocab]);
 }
 
@@ -54,7 +54,7 @@ test "qwen27 MTP head: its picks follow the target's next token, and a pass spli
     runner.taps.ids[0] = m.config.layers - 1;
     runner.taps.count = 1;
     try s.decodeChunk(seq[0..n], true);
-    var sc = try mtp.Scratch.init(m.device, m.frame.capacity, m.config.hidden);
+    var sc = try mtp.Scratch.init(m.device, m.frame.capacity, m.config.hidden, m.config.vocab, 128);
     defer sc.deinit();
     const hidden = @import("projection.zig").Ref{ .buffer = runner.taps.buffer };
     const rows = n - 1; // row j: the target's hidden at j and token j + 1; its pick is token j + 2's guess
@@ -63,7 +63,7 @@ test "qwen27 MTP head: its picks follow the target's next token, and a pass spli
         var round = try Round.init(a, &.{.{ .slot = 0, .start = 0, .capacity = runner.capacity, .ids = seq[1..n] }}, @intCast(m.config.conv_kernel), 1, @intCast(m.shard.global.vocab));
         defer round.deinit();
         _ = try runner.headPass(&round, &sc, hidden, .all);
-        try picks(m, rows, &whole);
+        try picks(m, &sc, rows, &whole);
     }
     var hits: usize = 0;
     for (n_prompt - 1..rows - 1) |j| hits += @intFromBool(whole[j] == seq[j + 2]);
@@ -77,10 +77,30 @@ test "qwen27 MTP head: its picks follow the target's next token, and a pass spli
         var round = try Round.init(a, &.{.{ .slot = 0, .start = @intCast(span[0]), .capacity = runner.capacity, .ids = seq[span[0] + 1 .. span[1] + 1] }}, @intCast(m.config.conv_kernel), 1, @intCast(m.shard.global.vocab));
         defer round.deinit();
         _ = try runner.headPass(&round, &sc, .{ .buffer = runner.taps.buffer, .offset = span[0] * m.config.hidden * 2 }, .all);
-        try picks(m, span[1] - span[0], split[span[0]..]);
+        try picks(m, &sc, span[1] - span[0], split[span[0]..]);
     }
     var same: usize = 0;
     for (0..rows) |j| same += @intFromBool(whole[j] == split[j]);
     std.debug.print("MTP head: split at row {d}, {d} of {d} picks equal the whole pass's\n", .{ cut, same, rows });
     try std.testing.expect(same + 2 >= rows);
+    // a chain: row k - 1 again (its real hidden and token k), then row k from the head's own row and its pick
+    var first: usize = 0;
+    var both: usize = 0;
+    const vocab = m.config.vocab;
+    for (n_prompt..rows - 2) |k| {
+        var round = try Round.init(a, &.{.{ .slot = 0, .start = @intCast(k - 1), .capacity = runner.capacity, .ids = seq[k .. k + 1] }}, @intCast(m.config.conv_kernel), 1, @intCast(m.shard.global.vocab));
+        defer round.deinit();
+        const y = try runner.headPass(&round, &sc, .{ .buffer = runner.taps.buffer, .offset = (k - 1) * m.config.hidden * 2 }, .last);
+        const d1 = try mtp.pick(sc.logits.slice(u16, vocab));
+        var chain = try Round.init(a, &.{.{ .slot = 0, .start = @intCast(k), .capacity = runner.capacity, .ids = &.{d1.token} }}, @intCast(m.config.conv_kernel), 1, @intCast(m.shard.global.vocab));
+        defer chain.deinit();
+        _ = try runner.headPass(&chain, &sc, y, .last);
+        const d2 = try mtp.pick(sc.logits.slice(u16, vocab));
+        try std.testing.expect(d1.chance > 0 and d1.chance <= 1 and d2.chance > 0 and d2.chance <= 1);
+        first += @intFromBool(d1.token == seq[k + 1]);
+        both += @intFromBool(d1.token == seq[k + 1] and d2.token == seq[k + 2]);
+    }
+    const tried = rows - 2 - n_prompt;
+    std.debug.print("MTP head: chained, depth 1 {d} of {d}, depths 1 and 2 {d} of {d}\n", .{ first, tried, both, tried });
+    try std.testing.expect(both * 3 > tried);
 }
