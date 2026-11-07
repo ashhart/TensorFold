@@ -724,6 +724,118 @@ inline void tf_exl3_prefill_body(threadgroup half* wx, const device half* x, con
 // a DRAM-latency miss is covered by two blocks of multiply and decode instead of one. Two threadgroup tiles and two
 // register word sets; the arithmetic (values, k order, MMA order) is the double-buffered body's, unchanged.
 template <uint RG, uint CG, uint Mmas>
+inline void tf_exl3_prefill_body_pf(threadgroup half* wx, const device half* x, const device uchar* trellis,
+                                    device float* sums, constant TfExl3Args& a, const device uint* routes,
+                                    const device TfExl3Expert* descriptors,
+                                    uint lane, uint sg, uint tid, uint tptg, uint3 tg) {
+  const uint trows = RG * 16u;
+  const uint rb = tg.y * trows, nb = tg.x * (64u * CG);
+  if (a.indexed == 1 || rb >= a.rows) return;
+  const uint tile_expert = a.indexed ? routes[rb] : a.expert_id;
+  if (a.indexed && tile_expert >= a.experts) return;
+  const uint didx = a.indexed ? tile_expert : 0;
+  const device uchar* data = a.indexed ? descriptors[didx].trellis : trellis;
+  const ulong ks = a.indexed ? descriptors[didx].tile_k_stride : a.tile_k_stride;
+  const ulong ns = a.indexed ? descriptors[didx].tile_n_stride : a.tile_n_stride;
+  const uint halves = a.indexed ? descriptors[didx].halves : a.halves;
+  const uint codebook = a.indexed ? descriptors[didx].codebook : a.codebook;
+  if ((halves & 1u) != 0 or halves > 16) {
+    tf_exl3_prefill_body<true, RG, CG, false>(wx, x, trellis, sums, a, routes, descriptors, nullptr, nullptr, lane, sg, tid, tptg, tg);
+    return;
+  }
+  const short2 home = frag_home(ushort(lane));
+  const uint rows_here = min(trows, a.rows - rb);
+  const uint cols_here = min(64u * CG, a.n - nb);
+  constexpr uint wpg = RG / 4u;
+  constexpr uint states = 8u / wpg;
+  const uint gwarp = tid / 32u, group = gwarp / wpg, wg = gwarp % wpg;
+  const uint h = group % 4u, hg = (group / 4u) * 64u;
+  const uint p0 = (wg * 32u + tid % 32u) * states;
+  const bool decodes = group < 4u * CG and nb + hg + h * 16u < a.n;
+  uint at[8], off[8], sh[8], rel[8];
+  const uint words = 4 * halves;
+  const uint wi0 = tf_exl3_map_for(p0, halves) & 63u;
+  const uint ring = 128 * halves;
+  {
+    const uint cur = (wi0 << 5) | ((tf_exl3_map_for(p0, halves) >> 6) & 31u);
+    TF_UNROLL
+    for (uint k = 0; k < states; ++k) {
+      const uint p = p0 + k, l = p / 8, e = p % 8;
+      at[k] = (2 * (l % 4) + (e & 1u) + 8 * ((e >> 1) & 1u)) * (64u * CG) + hg + h * 16u + (l / 4 + 8 * (e >> 2));
+      uint c8 = cur + k * (halves >> 1);
+      if (c8 >= ring) c8 -= ring;
+      const uint wi = c8 >> 5;
+      off[k] = c8 & 31u;
+      sh[k] = (32u - off[k]) & 31u;
+      rel[k] = wi >= wi0 ? wi - wi0 : wi + words - wi0;
+    }
+  }
+  const uint sgr = sg % RG, sgc = sg / RG;
+  frag<float> lo0 = frag<float>(0), hi0 = frag<float>(0), lo1 = frag<float>(0), hi1 = frag<float>(0);
+  const uint blocks = a.k / 16;
+  // Block 0 decodes straight from its words; blocks 1 and 2 are issued into the two register sets behind it.
+  if (decodes) {
+    const uint w0 = tf_exl3_block_word(data, ks, ns, 0, nb, hg, h, wi0, words);
+    const uint w1 = tf_exl3_block_word(data, ks, ns, 0, nb, hg, h, wi0 + 1, words);
+    const uint w2 = tf_exl3_block_word(data, ks, ns, 0, nb, hg, h, wi0 + 2, words);
+    const uint w3 = tf_exl3_block_word(data, ks, ns, 0, nb, hg, h, wi0 + 3, words);
+    tf_exl3_decode_fast<states>(wx, codebook, at, off, sh, rel, w0, w1, w2, w3);
+  }
+  uint A0 = 0, A1 = 0, A2 = 0, A3 = 0, B0 = 0, B1 = 0, B2 = 0, B3 = 0;
+  if (decodes and blocks > 1) {
+    A0 = tf_exl3_block_word(data, ks, ns, 16, nb, hg, h, wi0, words);
+    A1 = tf_exl3_block_word(data, ks, ns, 16, nb, hg, h, wi0 + 1, words);
+    A2 = tf_exl3_block_word(data, ks, ns, 16, nb, hg, h, wi0 + 2, words);
+    A3 = tf_exl3_block_word(data, ks, ns, 16, nb, hg, h, wi0 + 3, words);
+  }
+  if (decodes and blocks > 2) {
+    B0 = tf_exl3_block_word(data, ks, ns, 32, nb, hg, h, wi0, words);
+    B1 = tf_exl3_block_word(data, ks, ns, 32, nb, hg, h, wi0 + 1, words);
+    B2 = tf_exl3_block_word(data, ks, ns, 32, nb, hg, h, wi0 + 2, words);
+    B3 = tf_exl3_block_word(data, ks, ns, 32, nb, hg, h, wi0 + 3, words);
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  for (uint b = 0; b < blocks; ++b) {
+    const uint cur_buf = b & 1u;
+    // Decode block b+1 from the set issued two iterations ago (before this block's multiply, into the free tile).
+    if (b + 1 < blocks and decodes) {
+      const bool even = ((b + 1) & 1u) == 0u;
+      const uint w0 = even ? A0 : B0, w1 = even ? A1 : B1, w2 = even ? A2 : B2, w3 = even ? A3 : B3;
+      tf_exl3_decode_fast<states>(wx + (cur_buf ^ 1u) * (16u * 64u * CG), codebook, at, off, sh, rel, w0, w1, w2, w3);
+    }
+    frag<half> av;
+    tf_frag_get_dev4(av, (const device half*)x, int(a.k), int(rb + sgr * 16), int(b * 16), home, int(rb + rows_here));
+    threadgroup half* cur = wx + cur_buf * (16u * 64u * CG);
+    frag<half> b0, b1;
+    const int wc = int(sgc * 64u);
+    tf_frag_get_tg4(b0, cur, int(64u * CG), 0, wc, home);
+    tf_frag_get_tg4(b1, cur, int(64u * CG), 0, wc + 16, home);
+    mma_16x32<false, false>(lo0, hi0, av, b0, b1);
+    if (Mmas > 1) {
+      tf_frag_get_tg4(b0, cur, int(64u * CG), 0, wc + 32, home);
+      tf_frag_get_tg4(b1, cur, int(64u * CG), 0, wc + 48, home);
+      mma_16x32<false, false>(lo1, hi1, av, b0, b1);
+    }
+    // Issue block b+3 into the set just decoded (its consumers are two iterations away).
+    if (b + 3 < blocks and decodes) {
+      const bool even = ((b + 3) & 1u) == 0u;
+      const uint n3 = (b + 3) * 16;
+      const uint q0 = tf_exl3_block_word(data, ks, ns, n3, nb, hg, h, wi0, words);
+      const uint q1 = tf_exl3_block_word(data, ks, ns, n3, nb, hg, h, wi0 + 1, words);
+      const uint q2 = tf_exl3_block_word(data, ks, ns, n3, nb, hg, h, wi0 + 2, words);
+      const uint q3 = tf_exl3_block_word(data, ks, ns, n3, nb, hg, h, wi0 + 3, words);
+      if (even) { A0 = q0; A1 = q1; A2 = q2; A3 = q3; }
+      else { B0 = q0; B1 = q1; B2 = q2; B3 = q3; }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+  }
+  const int r0 = int(rb + sgr * 16);
+  const int c0 = int(nb + sgc * 64u);
+  frag_put_in(lo0, sums, int(a.n), r0, c0, home, int(rb + rows_here), int(nb + cols_here));
+  frag_put_in(hi0, sums, int(a.n), r0, c0 + 16, home, int(rb + rows_here), int(nb + cols_here));
+  frag_put_in(lo1, sums, int(a.n), r0, c0 + 32, home, int(rb + rows_here), int(nb + cols_here));
+  frag_put_in(hi1, sums, int(a.n), r0, c0 + 48, home, int(rb + rows_here), int(nb + cols_here));
+}
 
 // Double-buffered prompt body: the next k block decodes into the tile the multiply is not reading, and the multiply
 // is issued before that decode, so the tensor units and the codebook ALU are in flight together. One barrier a block
@@ -844,6 +956,20 @@ inline void tf_exl3_prefill_body_db(threadgroup half* wx, const device half* x, 
   }
 }
 
+kernel void tf_exl3_matmul_prefill_nax(const device half* x [[buffer(0)]],
+                                      const device uchar* trellis [[buffer(1)]],
+                                      device float* sums [[buffer(2)]],
+                                      constant TfExl3Args& a [[buffer(3)]],
+                                      const device uint* routes [[buffer(4)]],
+                                      const device TfExl3Expert* descriptors [[buffer(5)]],
+                                      uint lane [[thread_index_in_simdgroup]],
+                                      uint sg [[simdgroup_index_in_threadgroup]],
+                                      uint tid [[thread_index_in_threadgroup]],
+                                      uint3 tptg [[threads_per_threadgroup]],
+                                      uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[16 * 64];
+  tf_exl3_prefill_body<false, 4, 1, false>(wx, x, trellis, sums, a, routes, descriptors, nullptr, nullptr, lane, sg, tid, tptg.x, tg);
+}
 
 kernel void tf_exl3_matmul_prefill_nax2(const device half* x [[buffer(0)]],
                                        const device uchar* trellis [[buffer(1)]],
@@ -1105,13 +1231,183 @@ kernel void tf_exl3_matvec_nax(const device half* x [[buffer(0)]],
 }
 
 
+// Timing only, values meaningless; no engine path selects it.
+kernel void tf_exl3_matvec_nax_regfloor(const device half* x [[buffer(0)]],
+                                       const device uchar* trellis [[buffer(1)]],
+                                       device float* sums [[buffer(2)]],
+                                       constant TfExl3Args& a [[buffer(3)]],
+                                       const device uint* routes [[buffer(4)]],
+                                       const device TfExl3Expert* descriptors [[buffer(5)]],
+                                       uint lane [[thread_index_in_simdgroup]],
+                                       uint sg [[simdgroup_index_in_threadgroup]],
+                                       uint tid [[thread_index_in_threadgroup]],
+                                       uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half xx[16 * 16];
+  const uint nb = tg.x * 128 + sg * 32;
+  if (nb >= a.n || a.rows == 0) return;
+  const uint cols_here = min(32u, a.n - nb);
+  const short2 home = frag_home(ushort(lane));
+  frag<float> lo = frag<float>(0), hi = frag<float>(0);
+  frag<half> b0, b1;
+  TF_UNROLL
+  for (uint e = 0; e < 8; ++e) { b0[e] = half(1); b1[e] = half(1); }
+  for (uint kb = 0; kb < a.k; kb += 16) {
+    TF_UNROLL
+    for (uint t = 0; t < 8; ++t) {
+      const uint idx = lane + 32 * t, r = idx / 16, c = idx % 16;
+      xx[idx] = r == 0 ? *(const device half*)(x + ulong(kb) + c) : half(0);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    frag<half> av;
+    tf_frag_get_tg4(av, xx, 16, 0, 0, home);
+    mma_16x32<false, false>(lo, hi, av, b0, b1);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+  }
+  frag_put_in(lo, sums, int(a.n), 0, int(nb), home, 1, int(nb + cols_here));
+  frag_put_in(hi, sums, int(a.n), 0, int(nb + 16), home, 1, int(nb + cols_here));
+}
 
 
+// The routed decode gives a simdgroup one output column and lets its lanes walk k: that works on its affine pack
+// because a column's weights are self-contained. Our pack's trellis is a 16-column x 16-row bit-sharing tile (256
+// states in 96 bytes, each state a 16-bit window advancing three bits), so a column's sixteen states are interleaved
+// with its fifteen neighbours in the same bytes, and this arm must read every tile its column shares.
+kernel void tf_exl3_matvec_col_nax(const device half* x [[buffer(0)]],
+                                   const device uchar* trellis [[buffer(1)]],
+                                   device float* sums [[buffer(2)]],
+                                   constant TfExl3Args& a [[buffer(3)]],
+                                   const device uint* routes [[buffer(4)]],
+                                   const device TfExl3Expert* descriptors [[buffer(5)]],
+                                   const device half* table [[buffer(7)]],
+                                   uint lane [[thread_index_in_simdgroup]],
+                                   uint sg [[simdgroup_index_in_threadgroup]],
+                                   uint3 tg [[threadgroup_position_in_grid]]) {
+  const uint row = tg.y;
+  const uint col = tg.x * 4u + sg;
+  if (row >= a.rows || col >= a.n) return;
+  const uint expert = routes[row];
+  if (expert >= a.experts) return;
+  // One routed row's pack slice; a column reads the tiles its sixteen states share.
+  const TfExl3DecodeJob job = tf_exl3_routed_decode_job(trellis, a, descriptors, expert);
+  const uint cb = col / 16u, cc = col & 15u, q = cc & 7u;
+  const device half* xr = x + ulong(row) * a.k;
+  float acc[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+  uint slot = 0u;
+  for (uint k = lane; k < a.k; k += 32u) {
+    // The inverse of the tile's state map: (row-in-tile r, column c) -> the stream position p.
+    const uint b = k / 16u, r = k % 16u;
+    const uint u = (r >> 3) & 1u, m = (r >> 1) & 3u, rb = r & 1u;
+    const uint e = 2u * u + rb + 4u * (cc >> 3);
+    const uint p = 8u * (4u * q + m) + e;
+    const device ushort* tile = reinterpret_cast<const device ushort*>(job.trellis + ulong(b) * job.tile_k_stride + ulong(cb) * job.tile_n_stride);
+    const ushort s = tf_exl3_mapped_state(tile, tf_exl3_map_for(p, job.halves));
+    const float v = float(tf_exl3_table_value(table, s, job.codebook));
+    acc[slot] = fma(float(xr[k]), v, acc[slot]);
+    slot = (slot + 1u) & 7u;
+  }
+  float t = ((acc[0] + acc[1]) + (acc[2] + acc[3])) + ((acc[4] + acc[5]) + (acc[6] + acc[7]));
+  t += simd_shuffle_xor(t, 16u);
+  t += simd_shuffle_xor(t, 8u);
+  t += simd_shuffle_xor(t, 4u);
+  t += simd_shuffle_xor(t, 2u);
+  t += simd_shuffle_xor(t, 1u);
+  if (lane == 0u) sums[ulong(row) * a.n + col] = t;
+}
 
 #ifndef TF_AFF_WARPS
 #define TF_AFF_WARPS 16
 #endif
 
+// This body is what a repack would actually dispatch: a 16-column x 16-k tile of straight 3-bit codes (256 codes in
+// 96 bytes, no bit sharing), group-64 bf16 scales, our sixteen-warp k split, and the fma body's activation reads and
+// reduction. Codes are exact integers times their group's scale; the trellis decode is gone.
+kernel void tf_affine_tile3_nax(const device half* x [[buffer(0)]],
+                                const device uchar* codes [[buffer(1)]],
+                                device float* sums [[buffer(2)]],
+                                constant TfExl3Args& a [[buffer(3)]],
+                                const device uint* routes [[buffer(4)]],
+                                const device TfExl3Expert* descriptors [[buffer(5)]],
+                                const device half* scales [[buffer(7)]],
+                                uint lane [[thread_index_in_simdgroup]],
+                                uint sg [[simdgroup_index_in_threadgroup]],
+                                uint3 tg [[threadgroup_position_in_grid]]) {
+  const uint row = tg.y;
+  const uint nb = tg.x * 16u;
+  if (row >= a.rows) return;
+  const uint expert = routes[row];
+  if (expert >= a.experts) return;
+  const device uchar* data = descriptors[expert].trellis;
+  const ulong ks = descriptors[expert].tile_k_stride;
+  const ulong ns = descriptors[expert].tile_n_stride;
+  const uint blocks = a.k / 16u;
+  const uint G = a.k / 64u;
+  const uint W = TF_AFF_WARPS;
+  const uint b0 = blocks * sg / W, b1 = blocks * (sg + 1u) / W;
+  // The lane's eight codes are one 24-bit run of the tile: words (3L)/4 and +1, at a byte phase of 3L mod 4.
+  const uint w0i = (3u * lane) / 4u, sh = 8u * (3u * lane & 3u);
+  const uint cn = lane / 4u, cf = cn + 8u;
+  const device half* scn = scales + (ulong(expert) * a.n + nb + cn) * G;
+  const device half* scf = scales + (ulong(expert) * a.n + nb + cf) * G;
+  const device half* xr = x + ulong(row) * a.k;
+  float acc[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+  float sn = 0.0f, sf = 0.0f;
+  // The next block's two words are loaded a block early (the shipped body's own prefetch): without it every block's
+  // DRAM latency is exposed once and the body runs at a third of its rate.
+  const ulong base_nb = ulong(nb / 16u) * ns;
+  uint lo = 0u, hi = 0u;
+  {
+    const device uint* t0 = reinterpret_cast<const device uint*>(data + ulong(b0) * ks + base_nb);
+    lo = t0[w0i];
+    hi = t0[w0i + 1u];
+  }
+  for (uint bb = b0; bb < b1; ++bb) {
+    const uint kb = bb * 16u;
+    const uint c0 = lo, c1 = hi;
+    if (bb + 1u < b1) {
+      const device uint* tn = reinterpret_cast<const device uint*>(data + ulong(bb + 1u) * ks + base_nb);
+      lo = tn[w0i];
+      hi = tn[w0i + 1u];
+    }
+    const uint funnel = sh == 0u ? c0 : ((c0 >> sh) | (c1 << ((32u - sh) & 31u)));
+    if ((bb & 3u) == 0u) {
+      sn = float(scn[bb / 4u]);
+      sf = float(scf[bb / 4u]);
+    }
+    const device half* xrow = xr + kb + 2u * (lane & 3u);
+    const half2 xa = *(const device half2*)xrow;
+    const half2 xb = *(const device half2*)(xrow + 8);
+    const float x0 = float(xa.x), x1 = float(xa.y), x2 = float(xb.x), x3 = float(xb.y);
+    TF_UNROLL
+    for (uint k = 0; k < 8; ++k) {
+      const float code = float((funnel >> (3u * k)) & 7u);
+      const float scale = k < 4u ? sn : sf;
+      const uint odd = k & 1u, up = (k >> 1) & 1u;
+      const float xv = odd == 0 ? (up == 0 ? x0 : x2) : (up == 0 ? x1 : x3);
+      acc[k] = fma(xv, code * scale, acc[k]);
+    }
+  }
+  float acc0 = (acc[0] + acc[1]) + (acc[2] + acc[3]);
+  float acc1 = (acc[4] + acc[5]) + (acc[6] + acc[7]);
+  threadgroup float red[TF_AFF_WARPS][64];
+  red[sg][lane] = acc0;
+  red[sg][32 + lane] = acc1;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (sg != 0u) return;
+  acc0 = 0.0f;
+  acc1 = 0.0f;
+  for (uint w = 0; w < W; ++w) {
+    acc0 += red[w][lane];
+    acc1 += red[w][32 + lane];
+  }
+  acc0 += simd_shuffle_xor(acc0, 1);
+  acc0 += simd_shuffle_xor(acc0, 2);
+  acc1 += simd_shuffle_xor(acc1, 1);
+  acc1 += simd_shuffle_xor(acc1, 2);
+  if ((lane & 3u) == 0u) {
+    sums[ulong(row) * a.n + nb + lane / 4u] = acc0;
+    sums[ulong(row) * a.n + nb + 8u + lane / 4u] = acc1;
+  }
+}
 
 // This body is the form a repack would dispatch: a 16-column x 16-k tile of straight 3-bit codes (256 codes, 96
 // bytes, no bit sharing), group-64 bf16 scales, W warps a threadgroup splitting k, register-only accumulators, a
@@ -1122,17 +1418,436 @@ kernel void tf_exl3_matvec_nax(const device half* x [[buffer(0)]],
 #define TF_AFF_WARPS 16
 #endif
 
+kernel void tf_affine_tile3b_nax(const device half* x [[buffer(0)]],
+                                 const device uchar* codes [[buffer(1)]],
+                                 device float* sums [[buffer(2)]],
+                                 constant TfExl3Args& a [[buffer(3)]],
+                                 const device uint* routes [[buffer(4)]],
+                                 const device TfExl3Expert* descriptors [[buffer(5)]],
+                                 const device half* scales [[buffer(7)]],
+                                 uint lane [[thread_index_in_simdgroup]],
+                                 uint sg [[simdgroup_index_in_threadgroup]],
+                                 uint3 tg [[threadgroup_position_in_grid]]) {
+  const uint row = tg.y;
+  const uint nb = tg.x * 16u;
+  if (row >= a.rows) return;
+  const uint expert = routes[row];
+  if (expert >= a.experts) return;
+  const device uchar* data = descriptors[expert].trellis;
+  const ulong ks = descriptors[expert].tile_k_stride;
+  const ulong ns = descriptors[expert].tile_n_stride;
+  const uint blocks = a.k / 16u;
+  const uint G = a.k / 64u;
+  const uint W = TF_AFF_WARPS;
+  const uint b0 = blocks * sg / W, b1 = blocks * (sg + 1u) / W;
+  if (b0 >= b1) return;
+  // The lane's eight codes are one 24-bit run: words (3L)/4 and +1 at a byte phase of 3L mod 4.
+  const uint w0i = (3u * lane) / 4u, sh = 8u * (3u * lane & 3u);
+  const uint cn = lane / 4u, cf = cn + 8u;
+  const device half* scn = scales + (ulong(expert) * a.n + nb + cn) * G;
+  const device half* scf = scales + (ulong(expert) * a.n + nb + cf) * G;
+  const device half* xr = x + ulong(row) * a.k;
+  const ulong base_nb = ulong(nb / 16u) * ns;
+  float acc[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+  float sn = 0.0f, sf = 0.0f;
+  uint c0 = 0u, c1 = 0u, n0 = 0u, n1 = 0u;
+  {
+    const device uint* t0 = reinterpret_cast<const device uint*>(data + ulong(b0) * ks + base_nb);
+    c0 = t0[w0i];
+    c1 = t0[w0i + 1u];
+  }
+  if (b0 + 1u < b1) {
+    const device uint* t1 = reinterpret_cast<const device uint*>(data + ulong(b0 + 1u) * ks + base_nb);
+    n0 = t1[w0i];
+    n1 = t1[w0i + 1u];
+  }
+  for (uint bb = b0; bb < b1; ++bb) {
+    const uint l0 = c0, l1 = c1;
+    c0 = n0;
+    c1 = n1;
+    if (bb + 2u < b1) {
+      const device uint* tn = reinterpret_cast<const device uint*>(data + ulong(bb + 2u) * ks + base_nb);
+      n0 = tn[w0i];
+      n1 = tn[w0i + 1u];
+    } else {
+      n0 = 0u;
+      n1 = 0u;
+    }
+    const uint funnel = sh == 0u ? l0 : ((l0 >> sh) | (l1 << ((32u - sh) & 31u)));
+    if ((bb & 3u) == 0u) {
+      sn = float(scn[bb / 4u]);
+      sf = float(scf[bb / 4u]);
+    }
+    const device half* xrow = xr + bb * 16u + 2u * (lane & 3u);
+    const half2 xa = *(const device half2*)xrow;
+    const half2 xb = *(const device half2*)(xrow + 8);
+    const float x0 = float(xa.x), x1 = float(xa.y), x2 = float(xb.x), x3 = float(xb.y);
+    TF_UNROLL
+    for (uint k = 0; k < 8; ++k) {
+      const float code = float((funnel >> (3u * k)) & 7u);
+      const float scale = k < 4u ? sn : sf;
+      const uint odd = k & 1u, up = (k >> 1) & 1u;
+      const float xv = odd == 0 ? (up == 0 ? x0 : x2) : (up == 0 ? x1 : x3);
+      acc[k] = fma(xv, code * scale, acc[k]);
+    }
+  }
+  float t0 = (acc[0] + acc[1]) + (acc[2] + acc[3]);
+  float t1 = (acc[4] + acc[5]) + (acc[6] + acc[7]);
+  t0 += simd_shuffle_xor(t0, 1u);
+  t0 += simd_shuffle_xor(t0, 2u);
+  t1 += simd_shuffle_xor(t1, 1u);
+  t1 += simd_shuffle_xor(t1, 2u);
+  if (W == 1u) {
+    if ((lane & 3u) == 0u) {
+      sums[ulong(row) * a.n + nb + lane / 4u] = t0;
+      sums[ulong(row) * a.n + nb + 8u + lane / 4u] = t1;
+    }
+    return;
+  }
+  threadgroup float red[TF_AFF_WARPS][64];
+  red[sg][lane] = t0;
+  red[sg][32u + lane] = t1;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (sg != 0u) return;
+  float u0 = 0.0f, u1 = 0.0f;
+  for (uint w = 0; w < W; ++w) {
+    u0 += red[w][lane];
+    u1 += red[w][32u + lane];
+  }
+  if ((lane & 3u) == 0u) {
+    sums[ulong(row) * a.n + nb + lane / 4u] = u0;
+    sums[ulong(row) * a.n + nb + 8u + lane / 4u] = u1;
+  }
+}
+
+kernel void tf_affine_fill_one(device ushort* t [[buffer(0)]],
+                               uint gid [[thread_position_in_grid]]) {
+  t[gid] = 0x3C00u;
+}
+
+kernel void tf_affine_fill_alt(device ushort* t [[buffer(0)]],
+                               constant uint& G [[buffer(1)]],
+                               uint gid [[thread_position_in_grid]]) {
+  t[gid] = ((gid / G) & 1u) == 0u ? 0x3C00u : 0x4000u;
+}
 
 
+// A min/max affine quantizer needs both a scale and a bias (eight uniform levels spanning the group's range), and the
+// own tile_qmv body carries scales AND biases. Buffer 7 holds them interleaved per group: [scale, bias] at
+// 2*((expert*n + col)*G + g). The extra per-weight op is one fma: code*scale + bias.
+kernel void tf_affine_tile3s_nax(const device half* x [[buffer(0)]],
+                                 const device uchar* codes [[buffer(1)]],
+                                 device float* sums [[buffer(2)]],
+                                 constant TfExl3Args& a [[buffer(3)]],
+                                 const device uint* routes [[buffer(4)]],
+                                 const device TfExl3Expert* descriptors [[buffer(5)]],
+                                 const device half* scales [[buffer(7)]],
+                                 uint lane [[thread_index_in_simdgroup]],
+                                 uint sg [[simdgroup_index_in_threadgroup]],
+                                 uint3 tg [[threadgroup_position_in_grid]]) {
+  const uint row = tg.y;
+  const uint nb = tg.x * 16u;
+  if (row >= a.rows) return;
+  const uint expert = routes[row];
+  if (expert >= a.experts) return;
+  const device uchar* data = descriptors[expert].trellis;
+  const ulong ks = descriptors[expert].tile_k_stride;
+  const ulong ns = descriptors[expert].tile_n_stride;
+  const uint blocks = a.k / 16u;
+  const uint G = a.k / 64u;
+  const uint W = TF_AFF_WARPS;
+  const uint b0 = blocks * sg / W, b1 = blocks * (sg + 1u) / W;
+  if (b0 >= b1) return;
+  const uint w0i = (3u * lane) / 4u, sh = 8u * (3u * lane & 3u);
+  const uint cn = lane / 4u, cf = cn + 8u;
+  const device half* scn = scales + 2ull * (ulong(expert) * a.n + nb + cn) * G;
+  const device half* scf = scales + 2ull * (ulong(expert) * a.n + nb + cf) * G;
+  const device half* xr = x + ulong(row) * a.k;
+  const ulong base_nb = ulong(nb / 16u) * ns;
+  float acc[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+  float sn = 0.0f, sf = 0.0f, bn = 0.0f, bf = 0.0f;
+  uint c0 = 0u, c1 = 0u, n0 = 0u, n1 = 0u;
+  {
+    const device uint* t0 = reinterpret_cast<const device uint*>(data + ulong(b0) * ks + base_nb);
+    c0 = t0[w0i];
+    c1 = t0[w0i + 1u];
+  }
+  if (b0 + 1u < b1) {
+    const device uint* t1 = reinterpret_cast<const device uint*>(data + ulong(b0 + 1u) * ks + base_nb);
+    n0 = t1[w0i];
+    n1 = t1[w0i + 1u];
+  }
+  for (uint bb = b0; bb < b1; ++bb) {
+    const uint l0 = c0, l1 = c1;
+    c0 = n0;
+    c1 = n1;
+    if (bb + 2u < b1) {
+      const device uint* tn = reinterpret_cast<const device uint*>(data + ulong(bb + 2u) * ks + base_nb);
+      n0 = tn[w0i];
+      n1 = tn[w0i + 1u];
+    } else {
+      n0 = 0u;
+      n1 = 0u;
+    }
+    const uint funnel = sh == 0u ? l0 : ((l0 >> sh) | (l1 << ((32u - sh) & 31u)));
+    if ((bb & 3u) == 0u) {
+      const uint gi = 2u * (bb / 4u);
+      sn = float(scn[gi]);
+      bn = float(scn[gi + 1u]);
+      sf = float(scf[gi]);
+      bf = float(scf[gi + 1u]);
+    }
+    const device half* xrow = xr + bb * 16u + 2u * (lane & 3u);
+    const half2 xa = *(const device half2*)xrow;
+    const half2 xb = *(const device half2*)(xrow + 8);
+    const float x0 = float(xa.x), x1 = float(xa.y), x2 = float(xb.x), x3 = float(xb.y);
+    TF_UNROLL
+    for (uint k = 0; k < 8; ++k) {
+      const float code = float((funnel >> (3u * k)) & 7u);
+      const float scale = k < 4u ? sn : sf;
+      const float bias = k < 4u ? bn : bf;
+      const uint odd = k & 1u, up = (k >> 1) & 1u;
+      const float xv = odd == 0 ? (up == 0 ? x0 : x2) : (up == 0 ? x1 : x3);
+      acc[k] = fma(xv, fma(code, scale, bias), acc[k]);
+    }
+  }
+  float t0 = (acc[0] + acc[1]) + (acc[2] + acc[3]);
+  float t1 = (acc[4] + acc[5]) + (acc[6] + acc[7]);
+  t0 += simd_shuffle_xor(t0, 1u);
+  t0 += simd_shuffle_xor(t0, 2u);
+  t1 += simd_shuffle_xor(t1, 1u);
+  t1 += simd_shuffle_xor(t1, 2u);
+  if (W == 1u) {
+    if ((lane & 3u) == 0u) {
+      sums[ulong(row) * a.n + nb + lane / 4u] = t0;
+      sums[ulong(row) * a.n + nb + 8u + lane / 4u] = t1;
+    }
+    return;
+  }
+  threadgroup float red[TF_AFF_WARPS][64];
+  red[sg][lane] = t0;
+  red[sg][32u + lane] = t1;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (sg != 0u) return;
+  float u0 = 0.0f, u1 = 0.0f;
+  for (uint w = 0; w < W; ++w) {
+    u0 += red[w][lane];
+    u1 += red[w][32u + lane];
+  }
+  if ((lane & 3u) == 0u) {
+    sums[ulong(row) * a.n + nb + lane / 4u] = u0;
+    sums[ulong(row) * a.n + nb + 8u + lane / 4u] = u1;
+  }
+}
 
+// One thread an output, the same bytes, the same map, a serial k walk: a mismatch is a port bug in the warp body, not
+// a numerics class.
+kernel void tf_affine_tile3_ref(const device half* x [[buffer(0)]],
+                                const device uchar* codes [[buffer(1)]],
+                                device float* sums [[buffer(2)]],
+                                constant TfExl3Args& a [[buffer(3)]],
+                                const device uint* routes [[buffer(4)]],
+                                const device TfExl3Expert* descriptors [[buffer(5)]],
+                                const device half* scales [[buffer(7)]],
+                                uint2 gid [[thread_position_in_grid]]) {
+  const uint col = gid.x, row = gid.y;
+  if (row >= a.rows || col >= a.n) return;
+  const uint expert = routes[row];
+  if (expert >= a.experts) return;
+  const device uchar* data = descriptors[expert].trellis;
+  const ulong ks = descriptors[expert].tile_k_stride;
+  const ulong ns = descriptors[expert].tile_n_stride;
+  const uint p = col & 7u, h = (col >> 3u) & 1u, cb = col / 16u;
+  const uint G = a.k / 64u;
+  const device half* sc = scales + (ulong(expert) * a.n + col) * G;
+  const device half* xr = x + ulong(row) * a.k;
+  const ulong tile = ulong(cb) * ns;
+  float acc = 0.0f;
+  for (uint k = 0; k < a.k; ++k) {
+    const uint b = k / 16u, kk = k & 15u;
+    const uint q = (kk >> 1) & 3u;
+    const uint j = (kk & 1u) + 2u * ((kk >> 3u) & 1u) + 4u * h;
+    const uint idx = 32u * p + 8u * q + j;
+    const uint bit = 3u * idx;
+    const device uchar* tp = data + ulong(b) * ks + tile;
+    // A 3-bit code can straddle a 32-bit word, so read the two bytes that hold it (a code never starts in the last
+    // byte of a tile at an offset that would leave the 96-byte tile).
+    const device uchar* bp = tp + (bit >> 3u);
+    const uint two = uint(bp[0]) | (uint(bp[1]) << 8);
+    const uint code = (two >> (bit & 7u)) & 7u;
+    acc = fma(float(xr[k]), float(code) * float(sc[k >> 6u]), acc);
+  }
+  sums[ulong(row) * a.n + col] = acc;
+}
 
-
-
+// The repack can order the pack any way, so this is the form the plan actually needs: a column's k-run is contiguous
+// (a 32-code block is 12 aligned bytes), the lanes walk blocks, and the 16-column bit-sharing tile -- and its 13.8 KB
+// k-stride -- are gone. Four warps a threadgroup, a warp a column; codes are exact integers times their group-64
+// scale.
+kernel void tf_affine_col3_nax(const device half* x [[buffer(0)]],
+                               const device uchar* codes [[buffer(1)]],
+                               device float* sums [[buffer(2)]],
+                               constant TfExl3Args& a [[buffer(3)]],
+                               const device uint* routes [[buffer(4)]],
+                               const device TfExl3Expert* descriptors [[buffer(5)]],
+                               const device half* scales [[buffer(7)]],
+                               uint lane [[thread_index_in_simdgroup]],
+                               uint sg [[simdgroup_index_in_threadgroup]],
+                               uint3 tg [[threadgroup_position_in_grid]]) {
+  const uint row = tg.y;
+  const uint col = tg.x * 4u + sg;
+  if (row >= a.rows || col >= a.n) return;
+  const uint expert = routes[row];
+  if (expert >= a.experts) return;
+  const uint blocks = a.k / 32u;
+  const device uint* colp = reinterpret_cast<const device uint*>(
+      descriptors[expert].trellis + ulong(col) * ulong(blocks) * 12u);
+  const device half* scp = scales + (ulong(expert) * a.n + col) * (a.k / 64u);
+  const device half* xr = x + ulong(row) * a.k;
+  float acc[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+  for (uint b = lane; b < blocks; b += 32u) {
+    const uint k0 = b * 32u;
+    const uint w0 = colp[3u * b], w1 = colp[3u * b + 1u], w2 = colp[3u * b + 2u];
+    const float s = float(scp[b >> 1u]);
+    const device half* xb = xr + k0;
+    TF_UNROLL
+    for (uint i = 0; i < 32; ++i) {
+      const uint bit = 3u * i, word = bit >> 5, sh = bit & 31u;
+      const uint wc = word == 0u ? w0 : (word == 1u ? w1 : w2);
+      const uint wn = word == 0u ? w1 : (word == 1u ? w2 : 0u);
+      const uint carry = sh == 0u ? 0u : (wn << (32u - sh));
+      const float code = float(((wc >> sh) | carry) & 7u);
+      acc[i & 7u] = fma(float(xb[i]), code * s, acc[i & 7u]);
+    }
+  }
+  float t = ((acc[0] + acc[1]) + (acc[2] + acc[3])) + ((acc[4] + acc[5]) + (acc[6] + acc[7]));
+  t += simd_shuffle_xor(t, 16u);
+  t += simd_shuffle_xor(t, 8u);
+  t += simd_shuffle_xor(t, 4u);
+  t += simd_shuffle_xor(t, 2u);
+  t += simd_shuffle_xor(t, 1u);
+  if (lane == 0u) sums[ulong(row) * a.n + col] = t;
+}
 
 // The routed 64 x 128 tile on four warps: eight accumulator fragments a lane (64 float registers). The k order, the
 // MMA order and the per-value arithmetic are the single-tile body's, so the output is bit-identical; only the
 // dispatch geometry moves.
 template <bool Fast>
+inline void tf_exl3_prefill_body_wide(threadgroup half* wx, const device half* x, const device uchar* trellis,
+                                      device float* sums, constant TfExl3Args& a, const device uint* routes,
+                                      const device TfExl3Expert* descriptors,
+                                      uint lane, uint sg, uint tid, uint tptg, uint3 tg) {
+  const uint rb = tg.y * 64u, nb = tg.x * 128u;
+  if (a.indexed == 1 || rb >= a.rows) return;
+  const uint tile_expert = a.indexed ? routes[rb] : a.expert_id;
+  if (a.indexed && tile_expert >= a.experts) return;
+  const uint didx = a.indexed ? tile_expert : 0;
+  const device uchar* data = a.indexed ? descriptors[didx].trellis : trellis;
+  const ulong ks = a.indexed ? descriptors[didx].tile_k_stride : a.tile_k_stride;
+  const ulong ns = a.indexed ? descriptors[didx].tile_n_stride : a.tile_n_stride;
+  const uint halves = a.indexed ? descriptors[didx].halves : a.halves;
+  const uint codebook = a.indexed ? descriptors[didx].codebook : a.codebook;
+  const short2 home = frag_home(ushort(lane));
+  const uint rows_here = min(64u, a.rows - rb);
+  const uint cols_here = min(128u, a.n - nb);
+  // Four warps: this warp is row group `sg` and decodes column tiles h and h+4 of the 128-column group.
+  const uint h = sg;
+  const uint p0 = lane * 8u;
+  uint at[8], off[8], sh[8], rel[8];
+  const uint words = 4 * halves;
+  const uint wi0 = tf_exl3_map_for(p0, halves) & 63u;
+  {
+    const uint ring = 128 * halves;
+    const uint cur = (wi0 << 5) | ((tf_exl3_map_for(p0, halves) >> 6) & 31u);
+    TF_UNROLL
+    for (uint k = 0; k < 8; ++k) {
+      const uint p = p0 + k, l = p / 8, e = p % 8;
+      at[k] = (2 * (l % 4) + (e & 1u) + 8 * ((e >> 1) & 1u)) * 128u + h * 16u + (l / 4 + 8 * (e >> 2));
+      uint c8 = cur + k * (halves >> 1);
+      if (c8 >= ring) c8 -= ring;
+      const uint wi = c8 >> 5;
+      off[k] = c8 & 31u;
+      sh[k] = (32u - off[k]) & 31u;
+      rel[k] = wi >= wi0 ? wi - wi0 : wi + words - wi0;
+    }
+  }
+  const uint a1 = wi0 + 1 < words ? wi0 + 1 : wi0 + 1 - words;
+  const uint a2 = wi0 + 2 < words ? wi0 + 2 : wi0 + 2 - words;
+  const uint a3 = wi0 + 3 < words ? wi0 + 3 : wi0 + 3 - words;
+  uint p0v = 0, p1v = 0, p2v = 0, p3v = 0, q0v = 0, q1v = 0, q2v = 0, q3v = 0;
+  if (Fast) {
+    const device ushort* t0 = reinterpret_cast<const device ushort*>(data + ulong(nb / 16 + h) * ns);
+    const device ushort* t1 = reinterpret_cast<const device ushort*>(data + ulong(nb / 16 + h + 4) * ns);
+    p0v = tf_exl3_word(t0, wi0); p1v = tf_exl3_word(t0, a1); p2v = tf_exl3_word(t0, a2); p3v = tf_exl3_word(t0, a3);
+    q0v = tf_exl3_word(t1, wi0); q1v = tf_exl3_word(t1, a1); q2v = tf_exl3_word(t1, a2); q3v = tf_exl3_word(t1, a3);
+  }
+  frag<float> lo0 = frag<float>(0), hi0 = frag<float>(0), lo1 = frag<float>(0), hi1 = frag<float>(0);
+  frag<float> lo2 = frag<float>(0), hi2 = frag<float>(0), lo3 = frag<float>(0), hi3 = frag<float>(0);
+  for (uint kb = 0; kb < a.k; kb += 16) {
+    {
+      const device ushort* t0 = reinterpret_cast<const device ushort*>(data + ulong(kb / 16) * ks + ulong(nb / 16 + h) * ns);
+      const device ushort* t1 = reinterpret_cast<const device ushort*>(data + ulong(kb / 16) * ks + ulong(nb / 16 + h + 4) * ns);
+      if (Fast and (halves & 1u) == 0 and halves <= 16) {
+        const uint w0 = p0v, w1 = p1v, w2 = p2v, w3 = p3v;
+        const uint v0 = q0v, v1 = q1v, v2 = q2v, v3 = q3v;
+        const uint nkb = kb + 16;
+        if (nkb < a.k) {
+          const device ushort* n0 = reinterpret_cast<const device ushort*>(data + ulong(nkb / 16) * ks + ulong(nb / 16 + h) * ns);
+          const device ushort* n1 = reinterpret_cast<const device ushort*>(data + ulong(nkb / 16) * ks + ulong(nb / 16 + h + 4) * ns);
+          p0v = tf_exl3_word(n0, wi0); p1v = tf_exl3_word(n0, a1); p2v = tf_exl3_word(n0, a2); p3v = tf_exl3_word(n0, a3);
+          q0v = tf_exl3_word(n1, wi0); q1v = tf_exl3_word(n1, a1); q2v = tf_exl3_word(n1, a2); q3v = tf_exl3_word(n1, a3);
+        }
+        TF_UNROLL
+        for (uint k = 0; k < 8; ++k) {
+          const uint lo = rel[k] == 0 ? w0 : rel[k] == 1 ? w1 : w2;
+          const uint hi = rel[k] == 0 ? w1 : rel[k] == 1 ? w2 : w3;
+          const uint carry = (hi >> sh[k]) & (0u - uint(off[k] != 0));
+          wx[at[k]] = tf_exl3_value(ushort(((lo << off[k]) | carry) >> 16), codebook);
+          const uint loq = rel[k] == 0 ? v0 : rel[k] == 1 ? v1 : v2;
+          const uint hiq = rel[k] == 0 ? v1 : rel[k] == 1 ? v2 : v3;
+          const uint carryq = (hiq >> sh[k]) & (0u - uint(off[k] != 0));
+          wx[at[k] + 64u] = tf_exl3_value(ushort(((loq << off[k]) | carryq) >> 16), codebook);
+        }
+      } else {
+        TF_UNROLL
+        for (uint k = 0; k < 8; ++k) {
+          const uint p = p0 + k;
+          wx[at[k]] = tf_exl3_value(tf_exl3_mapped_state(t0, tf_exl3_map_for(p, halves)), codebook);
+          wx[at[k] + 64u] = tf_exl3_value(tf_exl3_mapped_state(t1, tf_exl3_map_for(p, halves)), codebook);
+        }
+      }
+    }
+    frag<half> av;
+    tf_frag_get_dev4(av, (const device half*)x, int(a.k), int(rb + sg * 16), int(kb), home, int(rb + rows_here));
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    {
+      frag<half> b0, b1;
+      tf_frag_get_tg4(b0, wx, 128, 0, 0, home);
+      tf_frag_get_tg4(b1, wx, 128, 0, 16, home);
+      mma_16x32<false, false>(lo0, hi0, av, b0, b1);
+      tf_frag_get_tg4(b0, wx, 128, 0, 32, home);
+      tf_frag_get_tg4(b1, wx, 128, 0, 48, home);
+      mma_16x32<false, false>(lo1, hi1, av, b0, b1);
+      tf_frag_get_tg4(b0, wx, 128, 0, 64, home);
+      tf_frag_get_tg4(b1, wx, 128, 0, 80, home);
+      mma_16x32<false, false>(lo2, hi2, av, b0, b1);
+      tf_frag_get_tg4(b0, wx, 128, 0, 96, home);
+      tf_frag_get_tg4(b1, wx, 128, 0, 112, home);
+      mma_16x32<false, false>(lo3, hi3, av, b0, b1);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+  }
+  const int r0 = int(rb + sg * 16);
+  const int c0 = int(nb);
+  frag_put_in(lo0, sums, int(a.n), r0, c0, home, int(rb + rows_here), int(nb + cols_here));
+  frag_put_in(hi0, sums, int(a.n), r0, c0 + 16, home, int(rb + rows_here), int(nb + cols_here));
+  frag_put_in(lo1, sums, int(a.n), r0, c0 + 32, home, int(rb + rows_here), int(nb + cols_here));
+  frag_put_in(hi1, sums, int(a.n), r0, c0 + 48, home, int(rb + rows_here), int(nb + cols_here));
+  frag_put_in(lo2, sums, int(a.n), r0, c0 + 64, home, int(rb + rows_here), int(nb + cols_here));
+  frag_put_in(hi2, sums, int(a.n), r0, c0 + 80, home, int(rb + rows_here), int(nb + cols_here));
+  frag_put_in(lo3, sums, int(a.n), r0, c0 + 96, home, int(rb + rows_here), int(nb + cols_here));
+  frag_put_in(hi3, sums, int(a.n), r0, c0 + 112, home, int(rb + rows_here), int(nb + cols_here));
+}
 
 kernel void tf_exl3_matmul_prefill_nax3(const device half* x [[buffer(0)]],
                                         const device uchar* trellis [[buffer(1)]],
@@ -1180,10 +1895,97 @@ kernel void tf_exl3_matmul_prefill_nax5(const device half* x [[buffer(0)]],
 }
 
 
+// The OCCUPANCY-KEEPING FORM -- the routed prompt tile with the activation staged in threadgroup memory, once a k
+// block, and SHARED by the two column groups of a row group (one column tile's activation read shared by two column
+// groups; the fragment in threadgroup memory; one more barrier a block -- here the SAME barrier that publishes the
+// weight tile, so the block's barrier count is unchanged). The two column groups of a row group read the device ONCE
+// and read the staged fragment back, so the activation's device traffic falls by half against the same tile widened
+// to 128 columns. The values, their order, the k order and the MMA order are the shipped body's, so the output is
+// bit-identical.
+kernel void tf_exl3_matmul_prefill_nax61(const device half* x [[buffer(0)]],
+                                        const device uchar* trellis [[buffer(1)]],
+                                        device float* sums [[buffer(2)]],
+                                        constant TfExl3Args& a [[buffer(3)]],
+                                        const device uint* routes [[buffer(4)]],
+                                        const device TfExl3Expert* descriptors [[buffer(5)]],
+                                        uint lane [[thread_index_in_simdgroup]],
+                                        uint sg [[simdgroup_index_in_threadgroup]],
+                                        uint tid [[thread_index_in_threadgroup]],
+                                        uint3 tptg [[threads_per_threadgroup]],
+                                        uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[16 * 64 * 2 + 4 * 16 * 16];
+  tf_exl3_prefill_body<true, 4, 2, false, true, false, false, true, false, false, 1, false, false, 2>(wx, x, trellis, sums, a, routes, descriptors, nullptr, nullptr, lane, sg, tid, tptg.x, tg);
+}
 
+// The ABLATION -- the activation fragment is read ONCE, before the k loop, and reused. A diagnostic: the output
+// differs by construction, and the delta against the same body reading it every block IS the activation's per-block
+// cost (the record's instrument first: the activation read's share of the routed tile).
+kernel void tf_exl3_matmul_prefill_nax62(const device half* x [[buffer(0)]],
+                                        const device uchar* trellis [[buffer(1)]],
+                                        device float* sums [[buffer(2)]],
+                                        constant TfExl3Args& a [[buffer(3)]],
+                                        const device uint* routes [[buffer(4)]],
+                                        const device TfExl3Expert* descriptors [[buffer(5)]],
+                                        uint lane [[thread_index_in_simdgroup]],
+                                        uint sg [[simdgroup_index_in_threadgroup]],
+                                        uint tid [[thread_index_in_threadgroup]],
+                                        uint3 tptg [[threads_per_threadgroup]],
+                                        uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[16 * 64];
+  tf_exl3_prefill_body<true, 4, 1, false, true, false, false, true, false, false, 1, false, false, 1>(wx, x, trellis, sums, a, routes, descriptors, nullptr, nullptr, lane, sg, tid, tptg.x, tg);
+}
 
+// The CONTROL for -- the same 128-column tile with the shipped per-warp activation read (so the two arms differ only
+// in the staging). Bit-identical to by construction.
+kernel void tf_exl3_matmul_prefill_nax63(const device half* x [[buffer(0)]],
+                                        const device uchar* trellis [[buffer(1)]],
+                                        device float* sums [[buffer(2)]],
+                                        constant TfExl3Args& a [[buffer(3)]],
+                                        const device uint* routes [[buffer(4)]],
+                                        const device TfExl3Expert* descriptors [[buffer(5)]],
+                                        uint lane [[thread_index_in_simdgroup]],
+                                        uint sg [[simdgroup_index_in_threadgroup]],
+                                        uint tid [[thread_index_in_threadgroup]],
+                                        uint3 tptg [[threads_per_threadgroup]],
+                                        uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[16 * 128];
+  tf_exl3_prefill_body<true, 4, 2, false, true, false, false, true, false, false, 1, false, false, 0>(wx, x, trellis, sums, a, routes, descriptors, nullptr, nullptr, lane, sg, tid, tptg.x, tg);
+}
 
+// The engine's routed 64 x 64 prompt tile with the funnel read -- two stream words a lane, the eight windows at one
+// shift a state, on our map and our layout. The values, their order and the k order are the shipped body's, so the
+// output is bit-identical; only the word traffic and the cursor's select chain leave.
+kernel void tf_exl3_matmul_prefill_nax40(const device half* x [[buffer(0)]],
+                                        const device uchar* trellis [[buffer(1)]],
+                                        device float* sums [[buffer(2)]],
+                                        constant TfExl3Args& a [[buffer(3)]],
+                                        const device uint* routes [[buffer(4)]],
+                                        const device TfExl3Expert* descriptors [[buffer(5)]],
+                                        uint lane [[thread_index_in_simdgroup]],
+                                        uint sg [[simdgroup_index_in_threadgroup]],
+                                        uint tid [[thread_index_in_threadgroup]],
+                                        uint3 tptg [[threads_per_threadgroup]],
+                                        uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[16 * 64];
+  tf_exl3_prefill_body<true, 4, 1, false, true, false>(wx, x, trellis, sums, a, routes, descriptors, nullptr, nullptr, lane, sg, tid, tptg.x, tg);
+}
 
+// The same body with the mul1 value dropped (the raw state stored): the window extraction and the stores without the
+// codebook arithmetic. A diagnostic -- it isolates the value path inside the decode; its output differs.
+kernel void tf_exl3_matmul_prefill_nax41(const device half* x [[buffer(0)]],
+                                        const device uchar* trellis [[buffer(1)]],
+                                        device float* sums [[buffer(2)]],
+                                        constant TfExl3Args& a [[buffer(3)]],
+                                        const device uint* routes [[buffer(4)]],
+                                        const device TfExl3Expert* descriptors [[buffer(5)]],
+                                        uint lane [[thread_index_in_simdgroup]],
+                                        uint sg [[simdgroup_index_in_threadgroup]],
+                                        uint tid [[thread_index_in_threadgroup]],
+                                        uint3 tptg [[threads_per_threadgroup]],
+                                        uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[16 * 64];
+  tf_exl3_prefill_body<true, 4, 1, false, false, true>(wx, x, trellis, sums, a, routes, descriptors, nullptr, nullptr, lane, sg, tid, tptg.x, tg);
+}
 
 // The engine's routed 64 x 64 prompt tile with the funnel read -- the two-word funnel and the eight windows at
 // compile-time shifts, on our map and our ring. The values, their order and the k order are the shipped body's, so
@@ -1205,14 +2007,169 @@ kernel void tf_exl3_matmul_prefill_nax42(const device half* x [[buffer(0)]],
   tf_exl3_prefill_body<true, 4, 1, false, true, false>(wx, x, trellis, sums, a, routes, descriptors, nullptr, nullptr, lane, sg, tid, tptg.x, tg);
 }
 
+// The funnel read with the value read from the resident codebook table (buffer 7). One load a state instead of the
+// mul1's ALU. The table holds the format's own decoder's values, so the values, their order and the k order are the
+// shipped body's: bit-identical.
+kernel void tf_exl3_matmul_prefill_nax43(const device half* x [[buffer(0)]],
+                                        const device uchar* trellis [[buffer(1)]],
+                                        device float* sums [[buffer(2)]],
+                                        constant TfExl3Args& a [[buffer(3)]],
+                                        const device uint* routes [[buffer(4)]],
+                                        const device TfExl3Expert* descriptors [[buffer(5)]],
+                                        const device half* table [[buffer(7)]],
+                                        uint lane [[thread_index_in_simdgroup]],
+                                        uint sg [[simdgroup_index_in_threadgroup]],
+                                        uint tid [[thread_index_in_threadgroup]],
+                                        uint3 tptg [[threads_per_threadgroup]],
+                                        uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[16 * 64];
+  tf_exl3_prefill_body<true, 4, 1, false, true, false>(wx, x, trellis, sums, a, routes, descriptors, table, nullptr, lane, sg, tid, tptg.x, tg);
+}
 
+// The funnel read with the value read from the 1024-entry threadgroup LUT (the prefill kernel's read). The LUT's
+// entries are the table's, so the values are the same, bit-identical.
+kernel void tf_exl3_matmul_prefill_nax44(const device half* x [[buffer(0)]],
+                                        const device uchar* trellis [[buffer(1)]],
+                                        device float* sums [[buffer(2)]],
+                                        constant TfExl3Args& a [[buffer(3)]],
+                                        const device uint* routes [[buffer(4)]],
+                                        const device TfExl3Expert* descriptors [[buffer(5)]],
+                                        uint lane [[thread_index_in_simdgroup]],
+                                        uint sg [[simdgroup_index_in_threadgroup]],
+                                        uint tid [[thread_index_in_threadgroup]],
+                                        uint3 tptg [[threads_per_threadgroup]],
+                                        uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[16 * 64];
+  threadgroup half lut[1024];
+  const half scale = as_type<half>(ushort(0x1EEEu));
+  const half bias = as_type<half>(ushort(0xC931u));
+  TF_UNROLL
+  for (uint j = 0; j < 8u; ++j) lut[tid + 128u * j] = half(fma(float(tid + 128u * j + 1024u), float(scale), float(bias)));
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  tf_exl3_prefill_body<true, 4, 1, false, true, false>(wx, x, trellis, sums, a, routes, descriptors, nullptr, lut, lane, sg, tid, tptg.x, tg);
+}
 
+// The funnel read with the value read cheaply -- a diagnostic; its output differs by construction.
+kernel void tf_exl3_matmul_prefill_nax47(const device half* x [[buffer(0)]],
+                                        const device uchar* trellis [[buffer(1)]],
+                                        device float* sums [[buffer(2)]],
+                                        constant TfExl3Args& a [[buffer(3)]],
+                                        const device uint* routes [[buffer(4)]],
+                                        const device TfExl3Expert* descriptors [[buffer(5)]],
+                                        uint lane [[thread_index_in_simdgroup]],
+                                        uint sg [[simdgroup_index_in_threadgroup]],
+                                        uint tid [[thread_index_in_threadgroup]],
+                                        uint3 tptg [[threads_per_threadgroup]],
+                                        uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[16 * 64];
+  tf_exl3_prefill_body<true, 4, 1, false, true, false, true>(wx, x, trellis, sums, a, routes, descriptors, nullptr, nullptr, lane, sg, tid, tptg.x, tg);
+}
 
+// The double-buffered routed tile with the funnel read. The double-buffered body decodes the next k block into the
+// tile the multiply is not reading and issues the multiply before that decode, so the tensor units and the codebook
+// ALU are in flight together; the funnel makes the decode cheap enough for the overlap to pay.
+kernel void tf_exl3_matmul_prefill_nax46(const device half* x [[buffer(0)]],
+                                        const device uchar* trellis [[buffer(1)]],
+                                        device float* sums [[buffer(2)]],
+                                        constant TfExl3Args& a [[buffer(3)]],
+                                        const device uint* routes [[buffer(4)]],
+                                        const device TfExl3Expert* descriptors [[buffer(5)]],
+                                        uint lane [[thread_index_in_simdgroup]],
+                                        uint sg [[simdgroup_index_in_threadgroup]],
+                                        uint tid [[thread_index_in_threadgroup]],
+                                        uint3 tptg [[threads_per_threadgroup]],
+                                        uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[2 * 16 * 64];
+  tf_exl3_prefill_body_db<4, 1, true, 4, false, true>(wx, x, trellis, sums, a, routes, descriptors, nullptr, lane, sg, tid, tptg.x, tg);
+}
 
+// The routed 64 x 64 prompt tile with the funnel read and the padded rows skipped. The engine's grouping pads each
+// expert's block to sixty-four rows, so the routed rows are dispatched with padding; the padding rows carry the
+// sentinel expert id, so a warp reads its own sixteen route ids
+// and skips its multiply when they are all padding. The real rows' values, their order and the k order are the
+// shipped body's, so the reply is bit-identical. The tile's contents change, so the output differs by construction.
+kernel void tf_exl3_matmul_prefill_nax64(const device half* x [[buffer(0)]],
+                                         const device uchar* trellis [[buffer(1)]],
+                                         device float* sums [[buffer(2)]],
+                                         constant TfExl3Args& a [[buffer(3)]],
+                                         const device uint* routes [[buffer(4)]],
+                                         const device TfExl3Expert* descriptors [[buffer(5)]],
+                                         uint lane [[thread_index_in_simdgroup]],
+                                         uint sg [[simdgroup_index_in_threadgroup]],
+                                         uint tid [[thread_index_in_threadgroup]],
+                                         uint3 tptg [[threads_per_threadgroup]],
+                                         uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[16 * 64];
+  tf_exl3_prefill_body<true, 4, 1, false, true, false, false, true, false, false, 1, false, false, 0, 3>(wx, x, trellis, sums, a, routes, descriptors, nullptr, nullptr, lane, sg, tid, tptg.x, tg);
+}
 
+// the DECODE KEPT, the eight scattered stores GONE (the values are folded into a register accumulator
+// instead). The floor of the store path. A diagnostic: the tile is never written.
+kernel void tf_exl3_matmul_prefill_nax65(const device half* x [[buffer(0)]],
+                                         const device uchar* trellis [[buffer(1)]],
+                                         device float* sums [[buffer(2)]],
+                                         constant TfExl3Args& a [[buffer(3)]],
+                                         const device uint* routes [[buffer(4)]],
+                                         const device TfExl3Expert* descriptors [[buffer(5)]],
+                                         uint lane [[thread_index_in_simdgroup]],
+                                         uint sg [[simdgroup_index_in_threadgroup]],
+                                         uint tid [[thread_index_in_threadgroup]],
+                                         uint3 tptg [[threads_per_threadgroup]],
+                                         uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[16 * 64];
+  tf_exl3_prefill_body<true, 4, 1, false, true, false, false, true, false, false, 1, false, false, 0, 1>(wx, x, trellis, sums, a, routes, descriptors, nullptr, nullptr, lane, sg, tid, tptg.x, tg);
+}
 
+// The shipped body plus the Mode 1 accumulator: the calibration for the accumulator's own cost, so the store
+// path's cost falls out of the two.
+kernel void tf_exl3_matmul_prefill_nax66(const device half* x [[buffer(0)]],
+                                         const device uchar* trellis [[buffer(1)]],
+                                         device float* sums [[buffer(2)]],
+                                         constant TfExl3Args& a [[buffer(3)]],
+                                         const device uint* routes [[buffer(4)]],
+                                         const device TfExl3Expert* descriptors [[buffer(5)]],
+                                         uint lane [[thread_index_in_simdgroup]],
+                                         uint sg [[simdgroup_index_in_threadgroup]],
+                                         uint tid [[thread_index_in_threadgroup]],
+                                         uint3 tptg [[threads_per_threadgroup]],
+                                         uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[16 * 64];
+  tf_exl3_prefill_body<true, 4, 1, false, true, false, false, true, false, false, 1, false, false, 0, 4>(wx, x, trellis, sums, a, routes, descriptors, nullptr, nullptr, lane, sg, tid, tptg.x, tg);
+}
 
+// the shipped body with the codebook arithmetic dropped (the raw window stored, the extraction and the
+// stores kept). The value path's price, in the shipped configuration. A diagnostic.
+kernel void tf_exl3_matmul_prefill_nax67(const device half* x [[buffer(0)]],
+                                         const device uchar* trellis [[buffer(1)]],
+                                         device float* sums [[buffer(2)]],
+                                         constant TfExl3Args& a [[buffer(3)]],
+                                         const device uint* routes [[buffer(4)]],
+                                         const device TfExl3Expert* descriptors [[buffer(5)]],
+                                         uint lane [[thread_index_in_simdgroup]],
+                                         uint sg [[simdgroup_index_in_threadgroup]],
+                                         uint tid [[thread_index_in_threadgroup]],
+                                         uint3 tptg [[threads_per_threadgroup]],
+                                         uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[16 * 64];
+  tf_exl3_prefill_body<true, 4, 1, false, true, false, true, true>(wx, x, trellis, sums, a, routes, descriptors, nullptr, nullptr, lane, sg, tid, tptg.x, tg);
+}
 
+// the eight stores KEPT, the EXTRACTION dropped (the stored value is a cheap function of the k block, so the
+// stores stay in the loop). The extraction's price, in the shipped configuration.
+kernel void tf_exl3_matmul_prefill_nax68(const device half* x [[buffer(0)]],
+                                         const device uchar* trellis [[buffer(1)]],
+                                         device float* sums [[buffer(2)]],
+                                         constant TfExl3Args& a [[buffer(3)]],
+                                         const device uint* routes [[buffer(4)]],
+                                         const device TfExl3Expert* descriptors [[buffer(5)]],
+                                         uint lane [[thread_index_in_simdgroup]],
+                                         uint sg [[simdgroup_index_in_threadgroup]],
+                                         uint tid [[thread_index_in_threadgroup]],
+                                         uint3 tptg [[threads_per_threadgroup]],
+                                         uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[16 * 64];
+  tf_exl3_prefill_body<true, 4, 1, false, true, false, false, true, false, false, 1, false, false, 0, 2>(wx, x, trellis, sums, a, routes, descriptors, nullptr, nullptr, lane, sg, tid, tptg.x, tg);
+}
 
 kernel void tf_exl3_matmul_prefill_nax48(const device half* x [[buffer(0)]],
                                         const device uchar* trellis [[buffer(1)]],
@@ -1263,10 +2220,88 @@ kernel void tf_exl3_matmul_prefill_nax57(const device half* x [[buffer(0)]],
   }
 }
 
+// The store path's modes on the shipped body (the funnel path as its only path, the twenty-four dead cursor
+// registers not computed). The store path's costs are only worth anything on the body the engine runs. Mode 1: the
+// eight decoded values written CONTIGUOUSLY, one lane's run of eight halves -- the wide form's store form (a lane's
+// values go out as wide stores, not as eight scattered two-byte stores). Mode 2: the decode KEPT, the eight scattered
+// stores GONE (the values are folded into a register accumulator). The floor of the store path. Mode 3: the shipped
+// store PLUS the accumulator -- the calibration for the accumulator's own cost. Mode 4: the codebook arithmetic
+// dropped (the extraction and the stores kept) -- the value path's cost. Mode 5: the eight stores KEPT, the
+// EXTRACTION dropped -- the extraction's cost. Modes 2-5 are diagnostics: their outputs differ by construction.
+kernel void tf_exl3_matmul_prefill_nax69(const device half* x [[buffer(0)]],
+                                         const device uchar* trellis [[buffer(1)]],
+                                         device float* sums [[buffer(2)]],
+                                         constant TfExl3Args& a [[buffer(3)]],
+                                         const device uint* routes [[buffer(4)]],
+                                         const device TfExl3Expert* descriptors [[buffer(5)]],
+                                         uint lane [[thread_index_in_simdgroup]],
+                                         uint sg [[simdgroup_index_in_threadgroup]],
+                                         uint tid [[thread_index_in_threadgroup]],
+                                         uint3 tptg [[threads_per_threadgroup]],
+                                         uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[16 * 64];
+  tf_exl3_prefill_body<true, 4, 1, false, true, false, false, true, false, false, 1, false, true, 0, 3>(wx, x, trellis, sums, a, routes, descriptors, nullptr, nullptr, lane, sg, tid, tptg.x, tg);
+}
 
+kernel void tf_exl3_matmul_prefill_nax70(const device half* x [[buffer(0)]],
+                                         const device uchar* trellis [[buffer(1)]],
+                                         device float* sums [[buffer(2)]],
+                                         constant TfExl3Args& a [[buffer(3)]],
+                                         const device uint* routes [[buffer(4)]],
+                                         const device TfExl3Expert* descriptors [[buffer(5)]],
+                                         uint lane [[thread_index_in_simdgroup]],
+                                         uint sg [[simdgroup_index_in_threadgroup]],
+                                         uint tid [[thread_index_in_threadgroup]],
+                                         uint3 tptg [[threads_per_threadgroup]],
+                                         uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[16 * 64];
+  tf_exl3_prefill_body<true, 4, 1, false, true, false, false, true, false, false, 1, false, true, 0, 1>(wx, x, trellis, sums, a, routes, descriptors, nullptr, nullptr, lane, sg, tid, tptg.x, tg);
+}
 
+kernel void tf_exl3_matmul_prefill_nax71(const device half* x [[buffer(0)]],
+                                         const device uchar* trellis [[buffer(1)]],
+                                         device float* sums [[buffer(2)]],
+                                         constant TfExl3Args& a [[buffer(3)]],
+                                         const device uint* routes [[buffer(4)]],
+                                         const device TfExl3Expert* descriptors [[buffer(5)]],
+                                         uint lane [[thread_index_in_simdgroup]],
+                                         uint sg [[simdgroup_index_in_threadgroup]],
+                                         uint tid [[thread_index_in_threadgroup]],
+                                         uint3 tptg [[threads_per_threadgroup]],
+                                         uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[16 * 64];
+  tf_exl3_prefill_body<true, 4, 1, false, true, false, false, true, false, false, 1, false, true, 0, 4>(wx, x, trellis, sums, a, routes, descriptors, nullptr, nullptr, lane, sg, tid, tptg.x, tg);
+}
 
+kernel void tf_exl3_matmul_prefill_nax72(const device half* x [[buffer(0)]],
+                                         const device uchar* trellis [[buffer(1)]],
+                                         device float* sums [[buffer(2)]],
+                                         constant TfExl3Args& a [[buffer(3)]],
+                                         const device uint* routes [[buffer(4)]],
+                                         const device TfExl3Expert* descriptors [[buffer(5)]],
+                                         uint lane [[thread_index_in_simdgroup]],
+                                         uint sg [[simdgroup_index_in_threadgroup]],
+                                         uint tid [[thread_index_in_threadgroup]],
+                                         uint3 tptg [[threads_per_threadgroup]],
+                                         uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[16 * 64];
+  tf_exl3_prefill_body<true, 4, 1, false, true, false, true, true, false, false, 1, false, true>(wx, x, trellis, sums, a, routes, descriptors, nullptr, nullptr, lane, sg, tid, tptg.x, tg);
+}
 
+kernel void tf_exl3_matmul_prefill_nax73(const device half* x [[buffer(0)]],
+                                         const device uchar* trellis [[buffer(1)]],
+                                         device float* sums [[buffer(2)]],
+                                         constant TfExl3Args& a [[buffer(3)]],
+                                         const device uint* routes [[buffer(4)]],
+                                         const device TfExl3Expert* descriptors [[buffer(5)]],
+                                         uint lane [[thread_index_in_simdgroup]],
+                                         uint sg [[simdgroup_index_in_threadgroup]],
+                                         uint tid [[thread_index_in_threadgroup]],
+                                         uint3 tptg [[threads_per_threadgroup]],
+                                         uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[16 * 64];
+  tf_exl3_prefill_body<true, 4, 1, false, true, false, false, true, false, false, 1, false, true, 0, 2>(wx, x, trellis, sums, a, routes, descriptors, nullptr, nullptr, lane, sg, tid, tptg.x, tg);
+}
 
 // The routed 64x64 prompt tile with the funnel path as the only path. The cursor arrays the Fast path needs -- off,
 // sh and rel, twenty-four registers -- are dead in the funnel path but live across the k loop, so a body that always
@@ -1298,7 +2333,57 @@ kernel void tf_exl3_matmul_prefill_nax59(const device half* x [[buffer(0)]],
   }
 }
 
+// THE EXPERT'S SLAB DECODED ONCE FOR THE TILE'S ROWS . The values, their order, the k order and the MMA order are the
+// shipped body's, so the output is bit-identical.
+kernel void tf_exl3_matmul_prefill_nax76(const device half* x [[buffer(0)]],
+                                         const device uchar* trellis [[buffer(1)]],
+                                         device float* sums [[buffer(2)]],
+                                         constant TfExl3Args& a [[buffer(3)]],
+                                         const device uint* routes [[buffer(4)]],
+                                         const device TfExl3Expert* descriptors [[buffer(5)]],
+                                         uint lane [[thread_index_in_simdgroup]],
+                                         uint sg [[simdgroup_index_in_threadgroup]],
+                                         uint tid [[thread_index_in_threadgroup]],
+                                         uint3 tptg [[threads_per_threadgroup]],
+                                         uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[16 * 64];
+  const uint rb = tg.y * 128u;
+  uint e = 0u;
+  if (a.indexed != 1u and rb < a.rows) e = routes[rb];
+  if (a.experts != 0u and e >= a.experts) e = 0u;
+  const uint halves = (a.indexed != 0u) ? descriptors[e].halves : a.halves;
+  if (halves == 6u) {
+    tf_exl3_prefill_body<true, 8, 1, false, true, false, false, true, false, false, 2, false, true>(wx, x, trellis, sums, a, routes, descriptors, nullptr, nullptr, lane, sg, tid, tptg.x, tg);
+  } else {
+    tf_exl3_prefill_body<true, 8, 1, false, true, false, false, true, false, false, 2, false, false>(wx, x, trellis, sums, a, routes, descriptors, nullptr, nullptr, lane, sg, tid, tptg.x, tg);
+  }
+}
 
+// The same form one step further -- TWO HUNDRED AND FIFTY-SIX ROWS TALL with FOUR ROW GROUPS A WARP . Sixteen
+// accumulator fragments a lane: the register wall is the price of the form.
+kernel void tf_exl3_matmul_prefill_nax77(const device half* x [[buffer(0)]],
+                                         const device uchar* trellis [[buffer(1)]],
+                                         device float* sums [[buffer(2)]],
+                                         constant TfExl3Args& a [[buffer(3)]],
+                                         const device uint* routes [[buffer(4)]],
+                                         const device TfExl3Expert* descriptors [[buffer(5)]],
+                                         uint lane [[thread_index_in_simdgroup]],
+                                         uint sg [[simdgroup_index_in_threadgroup]],
+                                         uint tid [[thread_index_in_threadgroup]],
+                                         uint3 tptg [[threads_per_threadgroup]],
+                                         uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[16 * 64];
+  const uint rb = tg.y * 256u;
+  uint e = 0u;
+  if (a.indexed != 1u and rb < a.rows) e = routes[rb];
+  if (a.experts != 0u and e >= a.experts) e = 0u;
+  const uint halves = (a.indexed != 0u) ? descriptors[e].halves : a.halves;
+  if (halves == 6u) {
+    tf_exl3_prefill_body<true, 16, 1, false, true, false, false, true, false, false, 4, false, true>(wx, x, trellis, sums, a, routes, descriptors, nullptr, nullptr, lane, sg, tid, tptg.x, tg);
+  } else {
+    tf_exl3_prefill_body<true, 16, 1, false, true, false, false, true, false, false, 4, false, false>(wx, x, trellis, sums, a, routes, descriptors, nullptr, nullptr, lane, sg, tid, tptg.x, tg);
+  }
+}
 
 // The routed 128-row tile (eight row groups, eight warps). A 128-row tile halves that (the plan's own bound: 384 +
 // (21,714 - 384) / 128 tiles), and the weight decode is per tile, so the tile's decode cost falls with it. The eight
@@ -1320,6 +2405,23 @@ kernel void tf_exl3_matmul_prefill_nax49(const device half* x [[buffer(0)]],
   tf_exl3_prefill_body<true, 8, 1, false, true, false, false, true>(wx, x, trellis, sums, a, routes, descriptors, nullptr, nullptr, lane, sg, tid, tptg.x, tg);
 }
 
+// The routed 64 x 64 prompt tile with the funnel read and the extraction in thirty-two-bit words (the funnel's own
+// dig-job structure). The windows, the values, their order and the k order are the shipped funnel's, so the output is
+// bit-identical.
+kernel void tf_exl3_matmul_prefill_nax50(const device half* x [[buffer(0)]],
+                                        const device uchar* trellis [[buffer(1)]],
+                                        device float* sums [[buffer(2)]],
+                                        constant TfExl3Args& a [[buffer(3)]],
+                                        const device uint* routes [[buffer(4)]],
+                                        const device TfExl3Expert* descriptors [[buffer(5)]],
+                                        uint lane [[thread_index_in_simdgroup]],
+                                        uint sg [[simdgroup_index_in_threadgroup]],
+                                        uint tid [[thread_index_in_threadgroup]],
+                                        uint3 tptg [[threads_per_threadgroup]],
+                                        uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[16 * 64];
+  tf_exl3_prefill_body<true, 4, 1, false, true, false, false, false, true>(wx, x, trellis, sums, a, routes, descriptors, nullptr, nullptr, lane, sg, tid, tptg.x, tg);
+}
 
 // The routed 64 x 64 prompt tile with the funnel read and the block's words delivered by a cooperative load and a
 // shuffle (one lane a word loads the block's twenty-four words; the two a lane needs arrive by a shuffle). The words,
@@ -1378,6 +2480,21 @@ kernel void tf_exl3_matmul_prefill_nax54(const device half* x [[buffer(0)]],
   tf_exl3_prefill_body<true, 8, 1, false, true, false, false, true, false, false, 2>(wx, x, trellis, sums, a, routes, descriptors, nullptr, nullptr, lane, sg, tid, tptg.x, tg);
 }
 
+// The routed 64 x 128 tile on four warps; 128 threads, one 16 x 128 threadgroup tile.
+kernel void tf_exl3_matmul_prefill_nax37(const device half* x [[buffer(0)]],
+                                        const device uchar* trellis [[buffer(1)]],
+                                        device float* sums [[buffer(2)]],
+                                        constant TfExl3Args& a [[buffer(3)]],
+                                        const device uint* routes [[buffer(4)]],
+                                        const device TfExl3Expert* descriptors [[buffer(5)]],
+                                        uint lane [[thread_index_in_simdgroup]],
+                                        uint sg [[simdgroup_index_in_threadgroup]],
+                                        uint tid [[thread_index_in_threadgroup]],
+                                        uint3 tptg [[threads_per_threadgroup]],
+                                        uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[16 * 128];
+  tf_exl3_prefill_body_wide<true>(wx, x, trellis, sums, a, routes, descriptors, lane, sg, tid, tptg.x, tg);
+}
 
 // Sixteen row groups by one column group, every warp decoding: a long chunk's expert tile.
 kernel void tf_exl3_matmul_prefill_nax6(const device half* const x [[buffer(0)]],
@@ -1395,8 +2512,53 @@ kernel void tf_exl3_matmul_prefill_nax6(const device half* const x [[buffer(0)]]
   tf_exl3_prefill_body<true, 16, 1, false>(wx, x, trellis, sums, a, routes, descriptors, nullptr, nullptr, lane, sg, tid, tptg.x, tg);
 }
 
+// The routed prompt tile, double-buffered: two 16x128 tiles (8 KB) and one barrier a k block.
+kernel void tf_exl3_matmul_prefill_nax7(const device half* const x [[buffer(0)]],
+                                       const device uchar* const trellis [[buffer(1)]],
+                                       device float* const sums [[buffer(2)]],
+                                       constant TfExl3Args& a [[buffer(3)]],
+                                       const device uint* const routes [[buffer(4)]],
+                                       const device TfExl3Expert* const descriptors [[buffer(5)]],
+                                       uint lane [[thread_index_in_simdgroup]],
+                                       uint sg [[simdgroup_index_in_threadgroup]],
+                                       uint tid [[thread_index_in_threadgroup]],
+                                       uint3 tptg [[threads_per_threadgroup]],
+                                       uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[2 * 16 * 128];
+  tf_exl3_prefill_body_db<4, 2, true, 4, false>(wx, x, trellis, sums, a, routes, descriptors, nullptr, lane, sg, tid, tptg.x, tg);
+}
 
+// Diagnostics: is the same tile with the per-block decode removed (the prologue tile reused), keeps the decode but
+// issues one of the four multiplies. - isolates the decode, isolates the multiply.
+kernel void tf_exl3_matmul_prefill_nax8(const device half* const x [[buffer(0)]],
+                                       const device uchar* const trellis [[buffer(1)]],
+                                       device float* const sums [[buffer(2)]],
+                                       constant TfExl3Args& a [[buffer(3)]],
+                                       const device uint* const routes [[buffer(4)]],
+                                       const device TfExl3Expert* const descriptors [[buffer(5)]],
+                                       uint lane [[thread_index_in_simdgroup]],
+                                       uint sg [[simdgroup_index_in_threadgroup]],
+                                       uint tid [[thread_index_in_threadgroup]],
+                                       uint3 tptg [[threads_per_threadgroup]],
+                                       uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[2 * 16 * 128];
+  tf_exl3_prefill_body_db<4, 2, false, 4, false>(wx, x, trellis, sums, a, routes, descriptors, nullptr, lane, sg, tid, tptg.x, tg);
+}
 
+kernel void tf_exl3_matmul_prefill_nax9(const device half* const x [[buffer(0)]],
+                                       const device uchar* const trellis [[buffer(1)]],
+                                       device float* const sums [[buffer(2)]],
+                                       constant TfExl3Args& a [[buffer(3)]],
+                                       const device uint* const routes [[buffer(4)]],
+                                       const device TfExl3Expert* const descriptors [[buffer(5)]],
+                                       uint lane [[thread_index_in_simdgroup]],
+                                       uint sg [[simdgroup_index_in_threadgroup]],
+                                       uint tid [[thread_index_in_threadgroup]],
+                                       uint3 tptg [[threads_per_threadgroup]],
+                                       uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[2 * 16 * 128];
+  tf_exl3_prefill_body_db<4, 2, true, 1, false>(wx, x, trellis, sums, a, routes, descriptors, nullptr, lane, sg, tid, tptg.x, tg);
+}
 
 // The routed tile with the codebook as a resident table (buffer 7): the mul1 state maps to a half by one load.
 kernel void tf_exl3_matmul_prefill_nax10(const device half* const x [[buffer(0)]],
@@ -1418,13 +2580,204 @@ kernel void tf_exl3_matmul_prefill_nax10(const device half* const x [[buffer(0)]
 // Warp-specialised routed tile: eight warps multiply the current block, eight decode the next into the other buffer,
 // so the tensor units and the codebook ALU are in flight on different warps instead of interleaved in one.
 template <uint CG>
+inline void tf_exl3_prefill_body_ws(threadgroup half* wx, const device half* x, const device uchar* trellis,
+                                    device float* sums, constant TfExl3Args& a, const device uint* routes,
+                                    const device TfExl3Expert* descriptors, const device half* table,
+                                    uint lane, uint sg0, uint tid, uint3 tg) {
+  const uint rb = tg.y * 64u, nb = tg.x * (64u * CG);
+  if (a.indexed == 1 || rb >= a.rows) return;
+  const uint tile_expert = a.indexed ? routes[rb] : a.expert_id;
+  if (a.indexed && tile_expert >= a.experts) return;
+  const uint didx = a.indexed ? tile_expert : 0;
+  const device uchar* data = a.indexed ? descriptors[didx].trellis : trellis;
+  const ulong ks = a.indexed ? descriptors[didx].tile_k_stride : a.tile_k_stride;
+  const ulong ns = a.indexed ? descriptors[didx].tile_n_stride : a.tile_n_stride;
+  const uint halves = a.indexed ? descriptors[didx].halves : a.halves;
+  const uint codebook = a.indexed ? descriptors[didx].codebook : a.codebook;
+  const short2 home = frag_home(ushort(lane));
+  const uint rows_here = min(64u, a.rows - rb);
+  const uint cols_here = min(64u * CG, a.n - nb);
+  constexpr uint mma_warps = 4u * CG;
+  const bool is_decode = tid >= mma_warps * 32u;
+  const uint ws = tid / 32u;
+  // MMA role: four row groups by CG column groups.
+  const uint sgr = ws % 4u, sgc = ws / 4u;
+  // Decode role: four column groups by CG sixty-four-column halves.
+  const uint dg = ws - mma_warps, h = dg % 4u, hg = (dg / 4u) * 64u;
+  const bool decodes = is_decode && (nb + hg + h * 16u < a.n);
+  const uint p0 = lane * 8u;
+  uint at[8], off[8], sh[8], rel[8];
+  const uint words = 4 * halves;
+  const uint wi0 = tf_exl3_map_for(p0, halves) & 63u;
+  {
+    const uint ring = 128 * halves;
+    const uint cur = (wi0 << 5) | ((tf_exl3_map_for(p0, halves) >> 6) & 31u);
+    TF_UNROLL
+    for (uint k = 0; k < 8; ++k) {
+      const uint p = p0 + k, l = p / 8, e = p % 8;
+      at[k] = (2 * (l % 4) + (e & 1u) + 8 * ((e >> 1) & 1u)) * (64u * CG) + hg + h * 16u + (l / 4 + 8 * (e >> 2));
+      uint c8 = cur + k * (halves >> 1);
+      if (c8 >= ring) c8 -= ring;
+      const uint wi = c8 >> 5;
+      off[k] = c8 & 31u;
+      sh[k] = (32u - off[k]) & 31u;
+      rel[k] = wi >= wi0 ? wi - wi0 : wi + words - wi0;
+    }
+  }
+  frag<float> lo0 = frag<float>(0), hi0 = frag<float>(0), lo1 = frag<float>(0), hi1 = frag<float>(0);
+  if (decodes) {
+    const uint w0 = tf_exl3_block_word(data, ks, ns, 0, nb, hg, h, wi0, words);
+    const uint w1 = tf_exl3_block_word(data, ks, ns, 0, nb, hg, h, wi0 + 1, words);
+    const uint w2 = tf_exl3_block_word(data, ks, ns, 0, nb, hg, h, wi0 + 2, words);
+    const uint w3 = tf_exl3_block_word(data, ks, ns, 0, nb, hg, h, wi0 + 3, words);
+    if (table != nullptr) tf_exl3_decode_table<8>(wx, table, codebook, at, off, sh, rel, w0, w1, w2, w3);
+    else tf_exl3_decode_fast<8>(wx, codebook, at, off, sh, rel, w0, w1, w2, w3);
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  uint cur_buf = 0;
+  for (uint kb = 0; kb < a.k; kb += 16) {
+    const uint nkb = kb + 16;
+    if (!is_decode) {
+      frag<half> av;
+      tf_frag_get_dev4(av, (const device half*)x, int(a.k), int(rb + sgr * 16), int(kb), home, int(rb + rows_here));
+      threadgroup half* cur = wx + cur_buf * (16u * 64u * CG);
+      frag<half> b0, b1;
+      const int wc = int(sgc * 64u);
+      tf_frag_get_tg4(b0, cur, int(64u * CG), 0, wc, home);
+      tf_frag_get_tg4(b1, cur, int(64u * CG), 0, wc + 16, home);
+      mma_16x32<false, false>(lo0, hi0, av, b0, b1);
+      tf_frag_get_tg4(b0, cur, int(64u * CG), 0, wc + 32, home);
+      tf_frag_get_tg4(b1, cur, int(64u * CG), 0, wc + 48, home);
+      mma_16x32<false, false>(lo1, hi1, av, b0, b1);
+    } else if (nkb < a.k and decodes) {
+      const uint nw0 = tf_exl3_block_word(data, ks, ns, nkb, nb, hg, h, wi0, words);
+      const uint nw1 = tf_exl3_block_word(data, ks, ns, nkb, nb, hg, h, wi0 + 1, words);
+      const uint nw2 = tf_exl3_block_word(data, ks, ns, nkb, nb, hg, h, wi0 + 2, words);
+      const uint nw3 = tf_exl3_block_word(data, ks, ns, nkb, nb, hg, h, wi0 + 3, words);
+      threadgroup half* nxt = wx + (cur_buf ^ 1u) * (16u * 64u * CG);
+      if (table != nullptr) tf_exl3_decode_table<8>(nxt, table, codebook, at, off, sh, rel, nw0, nw1, nw2, nw3);
+      else tf_exl3_decode_fast<8>(nxt, codebook, at, off, sh, rel, nw0, nw1, nw2, nw3);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    cur_buf ^= 1u;
+  }
+  if (!is_decode) {
+    const int r0 = int(rb + sgr * 16);
+    const int c0 = int(nb + sgc * 64u);
+    frag_put_in(lo0, sums, int(a.n), r0, c0, home, int(rb + rows_here), int(nb + cols_here));
+    frag_put_in(hi0, sums, int(a.n), r0, c0 + 16, home, int(rb + rows_here), int(nb + cols_here));
+    frag_put_in(lo1, sums, int(a.n), r0, c0 + 32, home, int(rb + rows_here), int(nb + cols_here));
+    frag_put_in(hi1, sums, int(a.n), r0, c0 + 48, home, int(rb + rows_here), int(nb + cols_here));
+  }
+}
 
+kernel void tf_exl3_matmul_prefill_nax11(const device half* const x [[buffer(0)]],
+                                        const device uchar* const trellis [[buffer(1)]],
+                                        device float* const sums [[buffer(2)]],
+                                        constant TfExl3Args& a [[buffer(3)]],
+                                        const device uint* const routes [[buffer(4)]],
+                                        const device TfExl3Expert* const descriptors [[buffer(5)]],
+                                        uint lane [[thread_index_in_simdgroup]],
+                                        uint sg [[simdgroup_index_in_threadgroup]],
+                                        uint tid [[thread_index_in_threadgroup]],
+                                        uint3 tptg [[threads_per_threadgroup]],
+                                        uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[2 * 16 * 128];
+  tf_exl3_prefill_body_ws<2>(wx, x, trellis, sums, a, routes, descriptors, nullptr, lane, sg, tid, tg);
+}
 
+kernel void tf_exl3_matmul_prefill_nax12(const device half* const x [[buffer(0)]],
+                                        const device uchar* const trellis [[buffer(1)]],
+                                        device float* const sums [[buffer(2)]],
+                                        constant TfExl3Args& a [[buffer(3)]],
+                                        const device uint* const routes [[buffer(4)]],
+                                        const device TfExl3Expert* const descriptors [[buffer(5)]],
+                                        const device half* const table [[buffer(7)]],
+                                        uint lane [[thread_index_in_simdgroup]],
+                                        uint sg [[simdgroup_index_in_threadgroup]],
+                                        uint tid [[thread_index_in_threadgroup]],
+                                        uint3 tptg [[threads_per_threadgroup]],
+                                        uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[2 * 16 * 128];
+  tf_exl3_prefill_body_ws<2>(wx, x, trellis, sums, a, routes, descriptors, table, lane, sg, tid, tg);
+}
 
+// Wider column tiles: CG=4 re-reads the activation tile nine times instead of eighteen, CG=8 five times.
+kernel void tf_exl3_matmul_prefill_nax13(const device half* const x [[buffer(0)]],
+                                        const device uchar* const trellis [[buffer(1)]],
+                                        device float* const sums [[buffer(2)]],
+                                        constant TfExl3Args& a [[buffer(3)]],
+                                        const device uint* const routes [[buffer(4)]],
+                                        const device TfExl3Expert* const descriptors [[buffer(5)]],
+                                        uint lane [[thread_index_in_simdgroup]],
+                                        uint sg [[simdgroup_index_in_threadgroup]],
+                                        uint tid [[thread_index_in_threadgroup]],
+                                        uint3 tptg [[threads_per_threadgroup]],
+                                        uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[2 * 16 * 256];
+  tf_exl3_prefill_body_db<4, 4, true, 4, false>(wx, x, trellis, sums, a, routes, descriptors, nullptr, lane, sg, tid, tptg.x, tg);
+}
 
+kernel void tf_exl3_matmul_prefill_nax14(const device half* const x [[buffer(0)]],
+                                        const device uchar* const trellis [[buffer(1)]],
+                                        device float* const sums [[buffer(2)]],
+                                        constant TfExl3Args& a [[buffer(3)]],
+                                        const device uint* const routes [[buffer(4)]],
+                                        const device TfExl3Expert* const descriptors [[buffer(5)]],
+                                        uint lane [[thread_index_in_simdgroup]],
+                                        uint sg [[simdgroup_index_in_threadgroup]],
+                                        uint tid [[thread_index_in_threadgroup]],
+                                        uint3 tptg [[threads_per_threadgroup]],
+                                        uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[2 * 16 * 512];
+  tf_exl3_prefill_body_db<4, 8, true, 4, false>(wx, x, trellis, sums, a, routes, descriptors, nullptr, lane, sg, tid, tptg.x, tg);
+}
 
+kernel void tf_exl3_matmul_prefill_nax15(const device half* const x [[buffer(0)]],
+                                        const device uchar* const trellis [[buffer(1)]],
+                                        device float* const sums [[buffer(2)]],
+                                        constant TfExl3Args& a [[buffer(3)]],
+                                        const device uint* const routes [[buffer(4)]],
+                                        const device TfExl3Expert* const descriptors [[buffer(5)]],
+                                        uint lane [[thread_index_in_simdgroup]],
+                                        uint sg [[simdgroup_index_in_threadgroup]],
+                                        uint tid [[thread_index_in_threadgroup]],
+                                        uint3 tptg [[threads_per_threadgroup]],
+                                        uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[2 * 16 * 256];
+  tf_exl3_prefill_body_ws<4>(wx, x, trellis, sums, a, routes, descriptors, nullptr, lane, sg, tid, tg);
+}
 
+kernel void tf_exl3_matmul_prefill_nax16(const device half* const x [[buffer(0)]],
+                                        const device uchar* const trellis [[buffer(1)]],
+                                        device float* const sums [[buffer(2)]],
+                                        constant TfExl3Args& a [[buffer(3)]],
+                                        const device uint* const routes [[buffer(4)]],
+                                        const device TfExl3Expert* const descriptors [[buffer(5)]],
+                                        const device half* const table [[buffer(7)]],
+                                        uint lane [[thread_index_in_simdgroup]],
+                                        uint sg [[simdgroup_index_in_threadgroup]],
+                                        uint tid [[thread_index_in_threadgroup]],
+                                        uint3 tptg [[threads_per_threadgroup]],
+                                        uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[2 * 16 * 128];
+  tf_exl3_prefill_body_db<4, 2, true, 0, true>(wx, x, trellis, sums, a, routes, descriptors, table, lane, sg, tid, tptg.x, tg);
+}
 
+kernel void tf_exl3_matmul_prefill_nax17(const device half* const x [[buffer(0)]],
+                                        const device uchar* const trellis [[buffer(1)]],
+                                        device float* const sums [[buffer(2)]],
+                                        constant TfExl3Args& a [[buffer(3)]],
+                                        const device uint* const routes [[buffer(4)]],
+                                        const device TfExl3Expert* const descriptors [[buffer(5)]],
+                                        uint lane [[thread_index_in_simdgroup]],
+                                        uint sg [[simdgroup_index_in_threadgroup]],
+                                        uint tid [[thread_index_in_threadgroup]],
+                                        uint3 tptg [[threads_per_threadgroup]],
+                                        uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[2 * 16 * 128];
+  tf_exl3_prefill_body_db<4, 2, true, 0, false>(wx, x, trellis, sums, a, routes, descriptors, nullptr, lane, sg, tid, tptg.x, tg);
+}
 
 // The 64x64 grouped tile with the table decode and the double buffer.
 kernel void tf_exl3_matmul_prefill_nax18(const device half* const x [[buffer(0)]],
@@ -1458,8 +2811,54 @@ kernel void tf_exl3_matmul_prefill_nax19(const device half* const x [[buffer(0)]
   tf_exl3_prefill_body_db<4, 1, true, 4, false>(wx, x, trellis, sums, a, routes, descriptors, nullptr, lane, sg, tid, tptg.x, tg);
 }
 
+kernel void tf_exl3_matmul_prefill_nax20(const device half* const x [[buffer(0)]],
+                                        const device uchar* const trellis [[buffer(1)]],
+                                        device float* const sums [[buffer(2)]],
+                                        constant TfExl3Args& a [[buffer(3)]],
+                                        const device uint* const routes [[buffer(4)]],
+                                        const device TfExl3Expert* const descriptors [[buffer(5)]],
+                                        uint lane [[thread_index_in_simdgroup]],
+                                        uint sg [[simdgroup_index_in_threadgroup]],
+                                        uint tid [[thread_index_in_threadgroup]],
+                                        uint3 tptg [[threads_per_threadgroup]],
+                                        uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[2 * 16 * 64];
+  tf_exl3_prefill_body_db<4, 1, false, 4, false>(wx, x, trellis, sums, a, routes, descriptors, nullptr, lane, sg, tid, tptg.x, tg);
+}
 
+kernel void tf_exl3_matmul_prefill_nax21(const device half* const x [[buffer(0)]],
+                                        const device uchar* const trellis [[buffer(1)]],
+                                        device float* const sums [[buffer(2)]],
+                                        constant TfExl3Args& a [[buffer(3)]],
+                                        const device uint* const routes [[buffer(4)]],
+                                        const device TfExl3Expert* const descriptors [[buffer(5)]],
+                                        const device half* const table [[buffer(7)]],
+                                        uint lane [[thread_index_in_simdgroup]],
+                                        uint sg [[simdgroup_index_in_threadgroup]],
+                                        uint tid [[thread_index_in_threadgroup]],
+                                        uint3 tptg [[threads_per_threadgroup]],
+                                        uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[2 * 16 * 64];
+  tf_exl3_prefill_body_db<4, 1, true, 0, true>(wx, x, trellis, sums, a, routes, descriptors, table, lane, sg, tid, tptg.x, tg);
+}
 
+// The engine's 64x64 grouped tile with the codebook table and the shipped single buffer: the table gain without the
+// double buffer's extra 2 KB of threadgroup memory (which cost more occupancy than it returned).
+kernel void tf_exl3_matmul_prefill_nax22(const device half* const x [[buffer(0)]],
+                                        const device uchar* const trellis [[buffer(1)]],
+                                        device float* const sums [[buffer(2)]],
+                                        constant TfExl3Args& a [[buffer(3)]],
+                                        const device uint* const routes [[buffer(4)]],
+                                        const device TfExl3Expert* const descriptors [[buffer(5)]],
+                                        const device half* const table [[buffer(7)]],
+                                        uint lane [[thread_index_in_simdgroup]],
+                                        uint sg [[simdgroup_index_in_threadgroup]],
+                                        uint tid [[thread_index_in_threadgroup]],
+                                        uint3 tptg [[threads_per_threadgroup]],
+                                        uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[16 * 64];
+  tf_exl3_prefill_body<true, 4, 1, true>(wx, x, trellis, sums, a, routes, descriptors, table, nullptr, lane, sg, tid, tptg.x, tg);
+}
 
 // Activation-fragment reuse: four warps (one a row group), each decodes two 16x64 weight tiles into one 16x128
 // buffer, loads its `av` fragment once, and multiplies both tiles.
@@ -1551,13 +2950,153 @@ inline void tf_exl3_prefill_body_reuse(threadgroup half* wx, const device half* 
   frag_put_in(hi3, sums, int(a.n), r0, c0 + 112, home, int(rb + rows_here), int(nb + cols_here));
 }
 
+kernel void tf_exl3_matmul_prefill_nax23(const device half* const x [[buffer(0)]],
+                                        const device uchar* const trellis [[buffer(1)]],
+                                        device float* const sums [[buffer(2)]],
+                                        constant TfExl3Args& a [[buffer(3)]],
+                                        const device uint* const routes [[buffer(4)]],
+                                        const device TfExl3Expert* const descriptors [[buffer(5)]],
+                                        uint lane [[thread_index_in_simdgroup]],
+                                        uint sg [[simdgroup_index_in_threadgroup]],
+                                        uint tid [[thread_index_in_threadgroup]],
+                                        uint3 tptg [[threads_per_threadgroup]],
+                                        uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[16 * 128];
+  tf_exl3_prefill_body_reuse<false>(wx, x, trellis, sums, a, routes, descriptors, nullptr, lane, sg, tid, tg);
+}
 
+kernel void tf_exl3_matmul_prefill_nax24(const device half* const x [[buffer(0)]],
+                                        const device uchar* const trellis [[buffer(1)]],
+                                        device float* const sums [[buffer(2)]],
+                                        constant TfExl3Args& a [[buffer(3)]],
+                                        const device uint* const routes [[buffer(4)]],
+                                        const device TfExl3Expert* const descriptors [[buffer(5)]],
+                                        const device half* const table [[buffer(7)]],
+                                        uint lane [[thread_index_in_simdgroup]],
+                                        uint sg [[simdgroup_index_in_threadgroup]],
+                                        uint tid [[thread_index_in_threadgroup]],
+                                        uint3 tptg [[threads_per_threadgroup]],
+                                        uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[16 * 128];
+  tf_exl3_prefill_body_reuse<true>(wx, x, trellis, sums, a, routes, descriptors, table, lane, sg, tid, tg);
+}
 
+// The 64x64 grouped tile with the mul1 byte-sum LUT built in threadgroup memory (1024 halves, 2 KB): the decode
+// shape, no 384 KB table, no per-weight L2 miss.
+kernel void tf_exl3_matmul_prefill_nax25(const device half* const x [[buffer(0)]],
+                                        const device uchar* const trellis [[buffer(1)]],
+                                        device float* const sums [[buffer(2)]],
+                                        constant TfExl3Args& a [[buffer(3)]],
+                                        const device uint* const routes [[buffer(4)]],
+                                        const device TfExl3Expert* const descriptors [[buffer(5)]],
+                                        uint lane [[thread_index_in_simdgroup]],
+                                        uint sg [[simdgroup_index_in_threadgroup]],
+                                        uint tid [[thread_index_in_threadgroup]],
+                                        uint3 tptg [[threads_per_threadgroup]],
+                                        uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[16 * 64];
+  threadgroup half lut[1024];
+  const half scale = as_type<half>(ushort(0x1EEEu));
+  const half bias = as_type<half>(ushort(0xC931u));
+  TF_UNROLL
+  for (uint j = 0; j < 8u; ++j) lut[tid + 128u * j] = half(fma(float(tid + 128u * j + 1024u), float(scale), float(bias)));
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  tf_exl3_prefill_body<true, 4, 1, false>(wx, x, trellis, sums, a, routes, descriptors, nullptr, lut, lane, sg, tid, tptg.x, tg);
+}
 
+// Dense 128x64 tile: double-buffered with the codebook table, and single-buffer with the threadgroup LUT.
+kernel void tf_exl3_matmul_prefill_nax26(const device half* const x [[buffer(0)]],
+                                        const device uchar* const trellis [[buffer(1)]],
+                                        device float* const sums [[buffer(2)]],
+                                        constant TfExl3Args& a [[buffer(3)]],
+                                        const device uint* const routes [[buffer(4)]],
+                                        const device TfExl3Expert* const descriptors [[buffer(5)]],
+                                        const device half* const table [[buffer(7)]],
+                                        uint lane [[thread_index_in_simdgroup]],
+                                        uint sg [[simdgroup_index_in_threadgroup]],
+                                        uint tid [[thread_index_in_threadgroup]],
+                                        uint3 tptg [[threads_per_threadgroup]],
+                                        uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[2 * 16 * 64];
+  tf_exl3_prefill_body_db<8, 1, true, 4, true>(wx, x, trellis, sums, a, routes, descriptors, table, lane, sg, tid, tptg.x, tg);
+}
 
+kernel void tf_exl3_matmul_prefill_nax27(const device half* const x [[buffer(0)]],
+                                        const device uchar* const trellis [[buffer(1)]],
+                                        device float* const sums [[buffer(2)]],
+                                        constant TfExl3Args& a [[buffer(3)]],
+                                        const device uint* const routes [[buffer(4)]],
+                                        const device TfExl3Expert* const descriptors [[buffer(5)]],
+                                        uint lane [[thread_index_in_simdgroup]],
+                                        uint sg [[simdgroup_index_in_threadgroup]],
+                                        uint tid [[thread_index_in_threadgroup]],
+                                        uint3 tptg [[threads_per_threadgroup]],
+                                        uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[16 * 64];
+  threadgroup half lut[1024];
+  const half scale = as_type<half>(ushort(0x1EEEu));
+  const half bias = as_type<half>(ushort(0xC931u));
+  TF_UNROLL
+  for (uint j = 0; j < 4u; ++j) lut[tid + 256u * j] = half(fma(float(tid + 256u * j + 1024u), float(scale), float(bias)));
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  tf_exl3_prefill_body<true, 8, 1, false>(wx, x, trellis, sums, a, routes, descriptors, nullptr, lut, lane, sg, tid, tptg.x, tg);
+}
 
+// Dense 128x128 tile: sixteen warps, the tile shape, with the 1024-entry LUT amortised over twice the decode (2
+// entries built a thread, 4 states decoded) and half the activation re-read.
+kernel void tf_exl3_matmul_prefill_nax28(const device half* const x [[buffer(0)]],
+                                        const device uchar* const trellis [[buffer(1)]],
+                                        device float* const sums [[buffer(2)]],
+                                        constant TfExl3Args& a [[buffer(3)]],
+                                        const device uint* const routes [[buffer(4)]],
+                                        const device TfExl3Expert* const descriptors [[buffer(5)]],
+                                        uint lane [[thread_index_in_simdgroup]],
+                                        uint sg [[simdgroup_index_in_threadgroup]],
+                                        uint tid [[thread_index_in_threadgroup]],
+                                        uint3 tptg [[threads_per_threadgroup]],
+                                        uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[16 * 128];
+  threadgroup half lut[1024];
+  const half scale = as_type<half>(ushort(0x1EEEu));
+  const half bias = as_type<half>(ushort(0xC931u));
+  TF_UNROLL
+  for (uint j = 0; j < 2u; ++j) lut[tid + 512u * j] = half(fma(float(tid + 512u * j + 1024u), float(scale), float(bias)));
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  tf_exl3_prefill_body<true, 8, 2, false>(wx, x, trellis, sums, a, routes, descriptors, nullptr, lut, lane, sg, tid, tptg.x, tg);
+}
 
+kernel void tf_exl3_matmul_prefill_nax29(const device half* const x [[buffer(0)]],
+                                        const device uchar* const trellis [[buffer(1)]],
+                                        device float* const sums [[buffer(2)]],
+                                        constant TfExl3Args& a [[buffer(3)]],
+                                        const device uint* const routes [[buffer(4)]],
+                                        const device TfExl3Expert* const descriptors [[buffer(5)]],
+                                        uint lane [[thread_index_in_simdgroup]],
+                                        uint sg [[simdgroup_index_in_threadgroup]],
+                                        uint tid [[thread_index_in_threadgroup]],
+                                        uint3 tptg [[threads_per_threadgroup]],
+                                        uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[16 * 128];
+  tf_exl3_prefill_body<true, 8, 2, false>(wx, x, trellis, sums, a, routes, descriptors, nullptr, nullptr, lane, sg, tid, tptg.x, tg);
+}
 
+// Diagnostics for the dense 128x64 tile (RG=8, 256 threads), the attention-dense body: the same body with the
+// per-block decode removed (the prologue tile reused), and the same body that keeps it but issues one of the four
+// multiplies. They isolate the decode at the dense tile and the decode-free multiply.
+kernel void tf_exl3_matmul_prefill_nax30(const device half* const x [[buffer(0)]],
+                                        const device uchar* const trellis [[buffer(1)]],
+                                        device float* const sums [[buffer(2)]],
+                                        constant TfExl3Args& a [[buffer(3)]],
+                                        const device uint* const routes [[buffer(4)]],
+                                        const device TfExl3Expert* const descriptors [[buffer(5)]],
+                                        uint lane [[thread_index_in_simdgroup]],
+                                        uint sg [[simdgroup_index_in_threadgroup]],
+                                        uint tid [[thread_index_in_threadgroup]],
+                                        uint3 tptg [[threads_per_threadgroup]],
+                                        uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[2 * 16 * 64];
+  tf_exl3_prefill_body_db<8, 1, false, 4, false>(wx, x, trellis, sums, a, routes, descriptors, nullptr, lane, sg, tid, tptg.x, tg);
+}
 
 kernel void tf_exl3_matmul_prefill_nax31(const device half* const x [[buffer(0)]],
                                         const device uchar* const trellis [[buffer(1)]],
@@ -1574,15 +3113,195 @@ kernel void tf_exl3_matmul_prefill_nax31(const device half* const x [[buffer(0)]
   tf_exl3_prefill_body_db<8, 1, true, 4, false>(wx, x, trellis, sums, a, routes, descriptors, nullptr, lane, sg, tid, tptg.x, tg);
 }
 
+// THE DOUBLE-BUFFERED 128-COLUMN DENSE BODY. The per-output decode, k order and MMA order are the single-tile body's,
+// at twice the tile width: one activation block is read for 128 columns instead of 64 and one barrier covers twice
+// the multiply. The first kernel reads the codebook from the resident device table (buffer 7); the second is the
+// same body on the ALU codebook. Both must agree with the single-tile body bit for bit at every output.
+kernel void tf_exl3_matmul_prefill_nax79(const device half* const x [[buffer(0)]],
+                                        const device uchar* const trellis [[buffer(1)]],
+                                        device float* const sums [[buffer(2)]],
+                                        constant TfExl3Args& a [[buffer(3)]],
+                                        const device uint* const routes [[buffer(4)]],
+                                        const device TfExl3Expert* const descriptors [[buffer(5)]],
+                                        const device half* const table [[buffer(7)]],
+                                        uint lane [[thread_index_in_simdgroup]],
+                                        uint sg [[simdgroup_index_in_threadgroup]],
+                                        uint tid [[thread_index_in_threadgroup]],
+                                        uint3 tptg [[threads_per_threadgroup]],
+                                        uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[2 * 16 * 128];
+  tf_exl3_prefill_body_db<8, 2, true, 4, true>(wx, x, trellis, sums, a, routes, descriptors, table, lane, sg, tid, tptg.x, tg);
+}
 
+kernel void tf_exl3_matmul_prefill_nax80(const device half* const x [[buffer(0)]],
+                                        const device uchar* const trellis [[buffer(1)]],
+                                        device float* const sums [[buffer(2)]],
+                                        constant TfExl3Args& a [[buffer(3)]],
+                                        const device uint* const routes [[buffer(4)]],
+                                        const device TfExl3Expert* const descriptors [[buffer(5)]],
+                                        uint lane [[thread_index_in_simdgroup]],
+                                        uint sg [[simdgroup_index_in_threadgroup]],
+                                        uint tid [[thread_index_in_threadgroup]],
+                                        uint3 tptg [[threads_per_threadgroup]],
+                                        uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[2 * 16 * 128];
+  tf_exl3_prefill_body_db<8, 2, true, 4, false>(wx, x, trellis, sums, a, routes, descriptors, nullptr, lane, sg, tid, tptg.x, tg);
+}
 
+// The 64-row x 128-column double-buffered dense body: the same 8,192-element tile area as the 128-row form, eight
+// warps / 256 threads, eight decode groups so one threadgroup owns all 128 columns the fused output transform needs.
+// The k order and MMA order per output are the single-tile body's.
+kernel void tf_exl3_matmul_prefill_nax82(const device half* const x [[buffer(0)]],
+                                        const device uchar* const trellis [[buffer(1)]],
+                                        device float* const sums [[buffer(2)]],
+                                        constant TfExl3Args& a [[buffer(3)]],
+                                        const device uint* const routes [[buffer(4)]],
+                                        const device TfExl3Expert* const descriptors [[buffer(5)]],
+                                        uint lane [[thread_index_in_simdgroup]],
+                                        uint sg [[simdgroup_index_in_threadgroup]],
+                                        uint tid [[thread_index_in_threadgroup]],
+                                        uint3 tptg [[threads_per_threadgroup]],
+                                        uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[2 * 16 * 128];
+  tf_exl3_prefill_body_db<4, 2, true, 4, false>(wx, x, trellis, sums, a, routes, descriptors, nullptr, lane, sg, tid, tptg.x, tg);
+}
 
 // ONE 8-WARP THREADGROUP OVER 128 ROWS AND BOTH 64-COLUMN HALVES. Two accumulator sets (eight fragments, 64 f32 a
 // lane) and two double-buffered 16x64 tiles; the activation block is loaded once and multiplied into both halves. Per
 // output this is the single-tile body's weight-decode amortisation (128 rows) and its eight-warp threadgroup, with
 // half its activation reads. The k order and MMA order per output are the same, so `sums` is bit-identical.
 template <bool UseTable>
+inline void tf_exl3_prefill_body_db2(threadgroup half* wx, const device half* x, const device uchar* trellis,
+                                     device float* sums, constant TfExl3Args& a, const device uint* routes,
+                                     const device TfExl3Expert* descriptors, const device half* table,
+                                     uint lane, uint sg, uint tid, uint tptg, uint3 tg) {
+  const uint trows = 128u;
+  const uint rb = tg.y * trows, nb = tg.x * 128u;
+  if (a.indexed == 1 || rb >= a.rows || nb >= a.n) return;
+  const device uchar* data = trellis;
+  const ulong ks = a.tile_k_stride, ns = a.tile_n_stride;
+  const uint halves = a.halves, codebook = a.codebook;
+  if ((halves & 1u) != 0 or halves > 16) return;
+  const short2 home = frag_home(ushort(lane));
+  const uint rows_here = min(trows, a.rows - rb);
+  const uint cols_here = min(128u, a.n - nb);
+  constexpr uint wpg = 2u;
+  constexpr uint states = 4u;
+  const uint gwarp = tid / 32u, group = gwarp / wpg, wg = gwarp % wpg;
+  const uint h = group % 4u;
+  const uint p0 = (wg * 32u + tid % 32u) * states;
+  const bool decodes = group < 4u and nb + 64u + h * 16u < a.n;
+  uint at[8], off[8], sh[8], rel[8];
+  const uint words = 4 * halves;
+  const uint wi0 = tf_exl3_map_for(p0, halves) & 63u;
+  {
+    const uint ring = 128 * halves;
+    const uint cur = (wi0 << 5) | ((tf_exl3_map_for(p0, halves) >> 6) & 31u);
+    TF_UNROLL
+    for (uint k = 0; k < states; ++k) {
+      const uint p = p0 + k, l = p / 8, e = p % 8;
+      at[k] = (2 * (l % 4) + (e & 1u) + 8 * ((e >> 1) & 1u)) * 64u + h * 16u + (l / 4 + 8 * (e >> 2));
+      uint c8 = cur + k * (halves >> 1);
+      if (c8 >= ring) c8 -= ring;
+      const uint wi = c8 >> 5;
+      off[k] = c8 & 31u;
+      sh[k] = (32u - off[k]) & 31u;
+      rel[k] = wi >= wi0 ? wi - wi0 : wi + words - wi0;
+    }
+  }
+  const uint sgr = sg;
+  frag<float> lo0 = frag<float>(0), hi0 = frag<float>(0), lo1 = frag<float>(0), hi1 = frag<float>(0);
+  frag<float> lo2 = frag<float>(0), hi2 = frag<float>(0), lo3 = frag<float>(0), hi3 = frag<float>(0);
+  if (decodes) {
+    uint w0 = tf_exl3_block_word(data, ks, ns, 0, nb, 0, h, wi0, words);
+    uint w1 = tf_exl3_block_word(data, ks, ns, 0, nb, 0, h, wi0 + 1, words);
+    uint w2 = tf_exl3_block_word(data, ks, ns, 0, nb, 0, h, wi0 + 2, words);
+    uint w3 = tf_exl3_block_word(data, ks, ns, 0, nb, 0, h, wi0 + 3, words);
+    if (UseTable) tf_exl3_decode_table<states>(wx, table, codebook, at, off, sh, rel, w0, w1, w2, w3);
+    else tf_exl3_decode_fast<states>(wx, codebook, at, off, sh, rel, w0, w1, w2, w3);
+    w0 = tf_exl3_block_word(data, ks, ns, 0, nb + 64u, 0, h, wi0, words);
+    w1 = tf_exl3_block_word(data, ks, ns, 0, nb + 64u, 0, h, wi0 + 1, words);
+    w2 = tf_exl3_block_word(data, ks, ns, 0, nb + 64u, 0, h, wi0 + 2, words);
+    w3 = tf_exl3_block_word(data, ks, ns, 0, nb + 64u, 0, h, wi0 + 3, words);
+    if (UseTable) tf_exl3_decode_table<states>(wx + 2u * (16u * 64u), table, codebook, at, off, sh, rel, w0, w1, w2, w3);
+    else tf_exl3_decode_fast<states>(wx + 2u * (16u * 64u), codebook, at, off, sh, rel, w0, w1, w2, w3);
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  uint cur0 = 0u, cur1 = 2u;
+  for (uint kb = 0; kb < a.k; kb += 16) {
+    const uint nkb = kb + 16;
+    uint nw0 = 0, nw1 = 0, nw2 = 0, nw3 = 0, nw4 = 0, nw5 = 0, nw6 = 0, nw7 = 0;
+    if (nkb < a.k and decodes) {
+      nw0 = tf_exl3_block_word(data, ks, ns, nkb, nb, 0, h, wi0, words);
+      nw1 = tf_exl3_block_word(data, ks, ns, nkb, nb, 0, h, wi0 + 1, words);
+      nw2 = tf_exl3_block_word(data, ks, ns, nkb, nb, 0, h, wi0 + 2, words);
+      nw3 = tf_exl3_block_word(data, ks, ns, nkb, nb, 0, h, wi0 + 3, words);
+      nw4 = tf_exl3_block_word(data, ks, ns, nkb, nb + 64u, 0, h, wi0, words);
+      nw5 = tf_exl3_block_word(data, ks, ns, nkb, nb + 64u, 0, h, wi0 + 1, words);
+      nw6 = tf_exl3_block_word(data, ks, ns, nkb, nb + 64u, 0, h, wi0 + 2, words);
+      nw7 = tf_exl3_block_word(data, ks, ns, nkb, nb + 64u, 0, h, wi0 + 3, words);
+    }
+    frag<half> av;
+    tf_frag_get_dev4(av, (const device half*)x, int(a.k), int(rb + sgr * 16u), int(kb), home, int(rb + rows_here));
+    {
+      const threadgroup half* cur = wx + cur0 * (16u * 64u);
+      frag<half> b0f, b1f;
+      tf_frag_get_tg4(b0f, cur, 64, 0, 0, home);
+      tf_frag_get_tg4(b1f, cur, 64, 0, 16, home);
+      mma_16x32<false, false>(lo0, hi0, av, b0f, b1f);
+      tf_frag_get_tg4(b0f, cur, 64, 0, 32, home);
+      tf_frag_get_tg4(b1f, cur, 64, 0, 48, home);
+      mma_16x32<false, false>(lo1, hi1, av, b0f, b1f);
+    }
+    {
+      const threadgroup half* cur = wx + cur1 * (16u * 64u);
+      frag<half> b0f, b1f;
+      tf_frag_get_tg4(b0f, cur, 64, 0, 0, home);
+      tf_frag_get_tg4(b1f, cur, 64, 0, 16, home);
+      mma_16x32<false, false>(lo2, hi2, av, b0f, b1f);
+      tf_frag_get_tg4(b0f, cur, 64, 0, 32, home);
+      tf_frag_get_tg4(b1f, cur, 64, 0, 48, home);
+      mma_16x32<false, false>(lo3, hi3, av, b0f, b1f);
+    }
+    if (nkb < a.k and decodes) {
+      if (UseTable) {
+        tf_exl3_decode_table<states>(wx + (cur0 ^ 1u) * (16u * 64u), table, codebook, at, off, sh, rel, nw0, nw1, nw2, nw3);
+        tf_exl3_decode_table<states>(wx + (cur1 ^ 1u) * (16u * 64u), table, codebook, at, off, sh, rel, nw4, nw5, nw6, nw7);
+      } else {
+        tf_exl3_decode_fast<states>(wx + (cur0 ^ 1u) * (16u * 64u), codebook, at, off, sh, rel, nw0, nw1, nw2, nw3);
+        tf_exl3_decode_fast<states>(wx + (cur1 ^ 1u) * (16u * 64u), codebook, at, off, sh, rel, nw4, nw5, nw6, nw7);
+      }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    cur0 ^= 1u;
+    cur1 ^= 1u;
+  }
+  const int r0 = int(rb + sgr * 16u);
+  const int c0 = int(nb), c1 = int(nb + 64u);
+  frag_put_in(lo0, sums, int(a.n), r0, c0, home, int(rb + rows_here), int(nb + cols_here));
+  frag_put_in(hi0, sums, int(a.n), r0, c0 + 16, home, int(rb + rows_here), int(nb + cols_here));
+  frag_put_in(lo1, sums, int(a.n), r0, c0 + 32, home, int(rb + rows_here), int(nb + cols_here));
+  frag_put_in(hi1, sums, int(a.n), r0, c0 + 48, home, int(rb + rows_here), int(nb + cols_here));
+  frag_put_in(lo2, sums, int(a.n), r0, c1, home, int(rb + rows_here), int(nb + cols_here));
+  frag_put_in(hi2, sums, int(a.n), r0, c1 + 16, home, int(rb + rows_here), int(nb + cols_here));
+  frag_put_in(lo3, sums, int(a.n), r0, c1 + 32, home, int(rb + rows_here), int(nb + cols_here));
+  frag_put_in(hi3, sums, int(a.n), r0, c1 + 48, home, int(rb + rows_here), int(nb + cols_here));
+}
 
+kernel void tf_exl3_matmul_prefill_nax83(const device half* const x [[buffer(0)]],
+                                        const device uchar* const trellis [[buffer(1)]],
+                                        device float* const sums [[buffer(2)]],
+                                        constant TfExl3Args& a [[buffer(3)]],
+                                        const device uint* const routes [[buffer(4)]],
+                                        const device TfExl3Expert* const descriptors [[buffer(5)]],
+                                        uint lane [[thread_index_in_simdgroup]],
+                                        uint sg [[simdgroup_index_in_threadgroup]],
+                                        uint tid [[thread_index_in_threadgroup]],
+                                        uint3 tptg [[threads_per_threadgroup]],
+                                        uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[4 * 16 * 64];
+  tf_exl3_prefill_body_db2<false>(wx, x, trellis, sums, a, routes, descriptors, nullptr, lane, sg, tid, tptg.x, tg);
+}
 
 // The dense 128x64 prompt tile with the funnel read. The dense tile is 128 rows (eight row groups), so
 // a lane owns four states and the funnel reads a twenty-five-bit run -- two words, where the cursor path reads four.
@@ -1623,10 +3342,84 @@ kernel void tf_exl3_matmul_prefill_nax56(const device half* const x [[buffer(0)]
   tf_exl3_prefill_body_db<8, 1, true, 4, false, false, 2>(wx, x, trellis, sums, a, routes, descriptors, nullptr, lane, sg, tid, tptg.x, tg);
 }
 
+kernel void tf_exl3_matmul_prefill_nax32(const device half* const x [[buffer(0)]],
+                                        const device uchar* const trellis [[buffer(1)]],
+                                        device float* const sums [[buffer(2)]],
+                                        constant TfExl3Args& a [[buffer(3)]],
+                                        const device uint* const routes [[buffer(4)]],
+                                        const device TfExl3Expert* const descriptors [[buffer(5)]],
+                                        uint lane [[thread_index_in_simdgroup]],
+                                        uint sg [[simdgroup_index_in_threadgroup]],
+                                        uint tid [[thread_index_in_threadgroup]],
+                                        uint3 tptg [[threads_per_threadgroup]],
+                                        uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[2 * 16 * 64];
+  tf_exl3_prefill_body_db<8, 1, true, 1, false>(wx, x, trellis, sums, a, routes, descriptors, nullptr, lane, sg, tid, tptg.x, tg);
+}
 
+// Dense row-height diagnostics: RG=16 (256 rows a threadgroup, 512 threads) and RG=32 (512 rows, 1024 threads). The
+// decoded 16x64 weight tile is shared by every row group, so the per-weight decode halves at RG=16 and quarters at
+// RG=32; the per-row MMA order is unchanged (each SIMDgroup still owns its sixteen rows).
+kernel void tf_exl3_matmul_prefill_nax33(const device half* const x [[buffer(0)]],
+                                        const device uchar* const trellis [[buffer(1)]],
+                                        device float* const sums [[buffer(2)]],
+                                        constant TfExl3Args& a [[buffer(3)]],
+                                        const device uint* const routes [[buffer(4)]],
+                                        const device TfExl3Expert* const descriptors [[buffer(5)]],
+                                        uint lane [[thread_index_in_simdgroup]],
+                                        uint sg [[simdgroup_index_in_threadgroup]],
+                                        uint tid [[thread_index_in_threadgroup]],
+                                        uint3 tptg [[threads_per_threadgroup]],
+                                        uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[16 * 64];
+  tf_exl3_prefill_body<true, 16, 1, false>(wx, x, trellis, sums, a, routes, descriptors, nullptr, nullptr, lane, sg, tid, tptg.x, tg);
+}
 
+kernel void tf_exl3_matmul_prefill_nax34(const device half* const x [[buffer(0)]],
+                                        const device uchar* const trellis [[buffer(1)]],
+                                        device float* const sums [[buffer(2)]],
+                                        constant TfExl3Args& a [[buffer(3)]],
+                                        const device uint* const routes [[buffer(4)]],
+                                        const device TfExl3Expert* const descriptors [[buffer(5)]],
+                                        uint lane [[thread_index_in_simdgroup]],
+                                        uint sg [[simdgroup_index_in_threadgroup]],
+                                        uint tid [[thread_index_in_threadgroup]],
+                                        uint3 tptg [[threads_per_threadgroup]],
+                                        uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[16 * 64];
+  tf_exl3_prefill_body<true, 32, 1, false>(wx, x, trellis, sums, a, routes, descriptors, nullptr, nullptr, lane, sg, tid, tptg.x, tg);
+}
 
+// Two-blocks-ahead prompt bodies: the routed 64x64 tile and the dense 128x64 tile .
+kernel void tf_exl3_matmul_prefill_nax35(const device half* const x [[buffer(0)]],
+                                        const device uchar* const trellis [[buffer(1)]],
+                                        device float* const sums [[buffer(2)]],
+                                        constant TfExl3Args& a [[buffer(3)]],
+                                        const device uint* const routes [[buffer(4)]],
+                                        const device TfExl3Expert* const descriptors [[buffer(5)]],
+                                        uint lane [[thread_index_in_simdgroup]],
+                                        uint sg [[simdgroup_index_in_threadgroup]],
+                                        uint tid [[thread_index_in_threadgroup]],
+                                        uint3 tptg [[threads_per_threadgroup]],
+                                        uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[2 * 16 * 64];
+  tf_exl3_prefill_body_pf<4, 1, 4>(wx, x, trellis, sums, a, routes, descriptors, lane, sg, tid, tptg.x, tg);
+}
 
+kernel void tf_exl3_matmul_prefill_nax36(const device half* const x [[buffer(0)]],
+                                        const device uchar* const trellis [[buffer(1)]],
+                                        device float* const sums [[buffer(2)]],
+                                        constant TfExl3Args& a [[buffer(3)]],
+                                        const device uint* const routes [[buffer(4)]],
+                                        const device TfExl3Expert* const descriptors [[buffer(5)]],
+                                        uint lane [[thread_index_in_simdgroup]],
+                                        uint sg [[simdgroup_index_in_threadgroup]],
+                                        uint tid [[thread_index_in_threadgroup]],
+                                        uint3 tptg [[threads_per_threadgroup]],
+                                        uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[2 * 16 * 64];
+  tf_exl3_prefill_body_pf<8, 1, 4>(wx, x, trellis, sums, a, routes, descriptors, lane, sg, tid, tptg.x, tg);
+}
 
 // The register-only decode structure on our map -- one threadgroup a sixteen-column tile, one k walk, no split-K, no
 // partials and no reduce dispatch, and the decoded weights stay in REGISTERS: there is no threadgroup weight tile, no
@@ -2623,6 +4416,23 @@ inline void tf_exl3_decode_s16_body(const device half* x, const device uchar* tr
   }
 }
 
+kernel void tf_exl3_matmul_decode_fma_s16(const device half* x [[buffer(0)]],
+                                          const device uchar* trellis [[buffer(1)]],
+                                          device float* sums [[buffer(2)]],
+                                          constant TfExl3Args& a [[buffer(3)]],
+                                          const device uint* routes [[buffer(4)]],
+                                          const device TfExl3Expert* descriptors [[buffer(5)]],
+                                          device float* partials [[buffer(6)]],
+                                          const device half* table [[buffer(7)]],
+                                          uint lane [[thread_index_in_simdgroup]],
+                                          uint sg [[simdgroup_index_in_threadgroup]],
+                                          uint tid [[thread_index_in_threadgroup]],
+                                          uint3 tptg [[threads_per_threadgroup]],
+                                          uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup float red[TF_FMA_WARPS][64];
+  if (a.halves == 10u) tf_exl3_decode_s16_body<5>(x, trellis, sums, a, table, lane, sg, tg, &red[0][0]);
+  else if (a.halves == 12u) tf_exl3_decode_s16_body<6>(x, trellis, sums, a, table, lane, sg, tg, &red[0][0]);
+}
 #endif
 
 kernel void tf_exl3_matmul_decode_fma_dense_multi2(const device half* x [[buffer(0)]],
@@ -2891,19 +4701,397 @@ inline void tf_exl3_prefill_body_cmp(threadgroup half* wx, const device half* x,
   frag_put_in(hi1, sums, int(a.n), r0 + 16, c0 + 16, home, int(rb + rows_here), int(nb + cols_here));
 }
 
+kernel void tf_exl3_matmul_prefill_nax84(const device half* const x [[buffer(0)]],
+                                        const device uchar* const trellis [[buffer(1)]],
+                                        device float* const sums [[buffer(2)]],
+                                        constant TfExl3Args& a [[buffer(3)]],
+                                        const device uint* const routes [[buffer(4)]],
+                                        const device TfExl3Expert* const descriptors [[buffer(5)]],
+                                        const device half* const table [[buffer(7)]],
+                                        uint lane [[thread_index_in_simdgroup]],
+                                        uint sg [[simdgroup_index_in_threadgroup]],
+                                        uint tid [[thread_index_in_threadgroup]],
+                                        uint3 tptg [[threads_per_threadgroup]],
+                                        uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[2 * 64 * 72];
+  tf_exl3_prefill_body_cmp<true>(wx, x, trellis, sums, a, routes, descriptors, table, lane, sg, tid, tg);
+}
 
 
+// They are never selected by the engine (no dispatcher references them). The sink index is tg.x * 128 + tg.y * 8192 +
+// tid, so every arm writes a distinct word and no load is dead.
+// ---------------------------------------------------------------------------------------------------------------
+kernel void tf_exl3_stream_read_nax90(const device half* x [[buffer(0)]],
+                                     const device uchar* trellis [[buffer(1)]],
+                                     device uint* sink [[buffer(2)]],
+                                     constant TfExl3Args& a [[buffer(3)]],
+                                     const device uint* routes [[buffer(4)]],
+                                     const device TfExl3Expert* descriptors [[buffer(5)]],
+                                     uint lane [[thread_index_in_simdgroup]],
+                                     uint sg [[simdgroup_index_in_threadgroup]],
+                                     uint tid [[thread_index_in_threadgroup]],
+                                     uint3 tptg [[threads_per_threadgroup]],
+                                     uint3 tg [[threadgroup_position_in_grid]]) {
+  const uint rb = tg.y * 64u, nb = tg.x * 64u;
+  if (rb >= a.rows) return;
+  const uint e = routes[rb];
+  if (e >= a.experts) return;
+  const device uchar* data = descriptors[e].trellis;
+  const ulong ks = descriptors[e].tile_k_stride, ns = descriptors[e].tile_n_stride;
+  const uint halves = descriptors[e].halves, words = 4u * halves;
+  const uint h = sg & 3u;
+  const device ushort* t0 = reinterpret_cast<const device ushort*>(data + ulong(nb / 16u + h) * ns);
+  uint acc = 0u;
+  uint cur = (lane < words) ? tf_exl3_word(t0, lane) : 0u;
+  for (uint kb = 0; kb < a.k; kb += 16u) {
+    const uint nkb = kb + 16u;
+    uint nxt = 0u;
+    if (nkb < a.k and lane < words) {
+      const device ushort* tn = reinterpret_cast<const device ushort*>(data + ulong(nkb / 16u) * ks + ulong(nb / 16u + h) * ns);
+      nxt = tf_exl3_word(tn, lane);
+    }
+    acc ^= cur;
+    cur = nxt;
+  }
+  sink[tg.x * 128u + tg.y * 8192u + tid] = acc;
+}
+
+kernel void tf_exl3_stream_read_nax91(const device half* x [[buffer(0)]],
+                                     const device uchar* trellis [[buffer(1)]],
+                                     device uint* sink [[buffer(2)]],
+                                     constant TfExl3Args& a [[buffer(3)]],
+                                     const device uint* routes [[buffer(4)]],
+                                     const device TfExl3Expert* descriptors [[buffer(5)]],
+                                     uint lane [[thread_index_in_simdgroup]],
+                                     uint sg [[simdgroup_index_in_threadgroup]],
+                                     uint tid [[thread_index_in_threadgroup]],
+                                     uint3 tptg [[threads_per_threadgroup]],
+                                     uint3 tg [[threadgroup_position_in_grid]]) {
+  const uint rb = tg.y * 64u, nb = tg.x * 64u;
+  if (rb >= a.rows) return;
+  const uint e = routes[rb];
+  if (e >= a.experts) return;
+  const device uchar* data = descriptors[e].trellis;
+  const ulong ks = descriptors[e].tile_k_stride, ns = descriptors[e].tile_n_stride;
+  const uint halves = descriptors[e].halves, words = 4u * halves;
+  const uint h = sg & 3u;
+  const uint nwords = words / 4u;
+  const device ushort* t0 = reinterpret_cast<const device ushort*>(data + ulong(nb / 16u + h) * ns);
+  uint acc = 0u;
+  uint4 cur = uint4(0u, 0u, 0u, 0u);
+  if (lane < nwords) cur = reinterpret_cast<const device uint4*>(t0)[lane];
+  for (uint kb = 0; kb < a.k; kb += 16u) {
+    const uint nkb = kb + 16u;
+    uint4 nxt = uint4(0u, 0u, 0u, 0u);
+    if (nkb < a.k and lane < nwords) {
+      const device ushort* tn = reinterpret_cast<const device ushort*>(data + ulong(nkb / 16u) * ks + ulong(nb / 16u + h) * ns);
+      nxt = reinterpret_cast<const device uint4*>(tn)[lane];
+    }
+    acc ^= cur.x ^ cur.y ^ cur.z ^ cur.w;
+    cur = nxt;
+  }
+  sink[tg.x * 128u + tg.y * 8192u + tid] = acc;
+}
+
+// The shipped per-lane cursor: two 32-bit words a lane, eight states a lane (the funnel's read count).
+kernel void tf_exl3_stream_read_nax92(const device half* x [[buffer(0)]],
+                                     const device uchar* trellis [[buffer(1)]],
+                                     device uint* sink [[buffer(2)]],
+                                     constant TfExl3Args& a [[buffer(3)]],
+                                     const device uint* routes [[buffer(4)]],
+                                     const device TfExl3Expert* descriptors [[buffer(5)]],
+                                     uint lane [[thread_index_in_simdgroup]],
+                                     uint sg [[simdgroup_index_in_threadgroup]],
+                                     uint tid [[thread_index_in_threadgroup]],
+                                     uint3 tptg [[threads_per_threadgroup]],
+                                     uint3 tg [[threadgroup_position_in_grid]]) {
+  const uint rb = tg.y * 64u, nb = tg.x * 64u;
+  if (rb >= a.rows) return;
+  const uint e = routes[rb];
+  if (e >= a.experts) return;
+  const device uchar* data = descriptors[e].trellis;
+  const ulong ks = descriptors[e].tile_k_stride, ns = descriptors[e].tile_n_stride;
+  const uint halves = descriptors[e].halves, words = 4u * halves;
+  const uint h = sg & 3u;
+  const uint p0 = (tid % 32u) * 8u;
+  const uint wi0 = tf_exl3_map_for(p0, halves) & 63u;
+  const uint wi1 = (wi0 + 1u < words) ? wi0 + 1u : wi0 + 1u - words;
+  const device ushort* t0 = reinterpret_cast<const device ushort*>(data + ulong(nb / 16u + h) * ns);
+  uint acc = 0u;
+  uint w0 = tf_exl3_word(t0, wi0), w1 = tf_exl3_word(t0, wi1);
+  for (uint kb = 0; kb < a.k; kb += 16u) {
+    const uint nkb = kb + 16u;
+    uint n0 = 0u, n1 = 0u;
+    if (nkb < a.k) {
+      const device ushort* tn = reinterpret_cast<const device ushort*>(data + ulong(nkb / 16u) * ks + ulong(nb / 16u + h) * ns);
+      n0 = tf_exl3_word(tn, wi0); n1 = tf_exl3_word(tn, wi1);
+    }
+    acc ^= w0 ^ w1;
+    w0 = n0; w1 = n1;
+  }
+  sink[tg.x * 128u + tg.y * 8192u + tid] = acc;
+}
+
+// The whole expert slab, one threadgroup an expert: the fully sequential schedule (144 n-tiles a k block).
+kernel void tf_exl3_stream_read_nax93(const device half* x [[buffer(0)]],
+                                     const device uchar* trellis [[buffer(1)]],
+                                     device uint* sink [[buffer(2)]],
+                                     constant TfExl3Args& a [[buffer(3)]],
+                                     const device uint* routes [[buffer(4)]],
+                                     const device TfExl3Expert* descriptors [[buffer(5)]],
+                                     uint lane [[thread_index_in_simdgroup]],
+                                     uint sg [[simdgroup_index_in_threadgroup]],
+                                     uint tid [[thread_index_in_threadgroup]],
+                                     uint3 tptg [[threads_per_threadgroup]],
+                                     uint3 tg [[threadgroup_position_in_grid]]) {
+  const uint e = tg.y;
+  if (e >= a.experts) return;
+  const device uchar* data = descriptors[e].trellis;
+  const ulong ks = descriptors[e].tile_k_stride, ns = descriptors[e].tile_n_stride;
+  const uint halves = descriptors[e].halves, words = 4u * halves;
+  const uint nwords = words / 4u;
+  const uint base = sg * 36u;
+  uint acc = 0u;
+  for (uint kb = 0; kb < a.k; kb += 16u) {
+    for (uint g = 0; g < 36u; g += 4u) {
+      uint4 v0 = uint4(0u, 0u, 0u, 0u), v1 = uint4(0u, 0u, 0u, 0u), v2 = uint4(0u, 0u, 0u, 0u), v3 = uint4(0u, 0u, 0u, 0u);
+      if (lane < nwords) {
+        const ulong koff = ulong(kb / 16u) * ks;
+        const ulong boff = ulong(base + g) * ns;
+        v0 = reinterpret_cast<const device uint4*>(data + koff + boff)[lane];
+        v1 = reinterpret_cast<const device uint4*>(data + koff + boff + ns)[lane];
+        v2 = reinterpret_cast<const device uint4*>(data + koff + boff + 2u * ns)[lane];
+        v3 = reinterpret_cast<const device uint4*>(data + koff + boff + 3u * ns)[lane];
+      }
+      acc ^= v0.x ^ v0.y ^ v0.z ^ v0.w ^ v1.x ^ v1.y ^ v1.z ^ v1.w ^
+             v2.x ^ v2.y ^ v2.z ^ v2.w ^ v3.x ^ v3.y ^ v3.z ^ v3.w;
+    }
+  }
+  sink[tg.x * 128u + tg.y * 8192u + tid] = acc;
+}
+
+// The same read with the GRID TRANSPOSED: consecutive threadgroups are experts at the same column tile.
+kernel void tf_exl3_stream_read_nax94(const device half* x [[buffer(0)]],
+                                     const device uchar* trellis [[buffer(1)]],
+                                     device uint* sink [[buffer(2)]],
+                                     constant TfExl3Args& a [[buffer(3)]],
+                                     const device uint* routes [[buffer(4)]],
+                                     const device TfExl3Expert* descriptors [[buffer(5)]],
+                                     uint lane [[thread_index_in_simdgroup]],
+                                     uint sg [[simdgroup_index_in_threadgroup]],
+                                     uint tid [[thread_index_in_threadgroup]],
+                                     uint3 tptg [[threads_per_threadgroup]],
+                                     uint3 tg [[threadgroup_position_in_grid]]) {
+  const uint rb = tg.x * 64u, nb = tg.y * 64u;
+  if (rb >= a.rows) return;
+  const uint e = routes[rb];
+  if (e >= a.experts) return;
+  const device uchar* data = descriptors[e].trellis;
+  const ulong ks = descriptors[e].tile_k_stride, ns = descriptors[e].tile_n_stride;
+  const uint halves = descriptors[e].halves, words = 4u * halves;
+  const uint h = sg & 3u;
+  const device ushort* t0 = reinterpret_cast<const device ushort*>(data + ulong(nb / 16u + h) * ns);
+  uint acc = 0u;
+  uint cur = (lane < words) ? tf_exl3_word(t0, lane) : 0u;
+  for (uint kb = 0; kb < a.k; kb += 16u) {
+    const uint nkb = kb + 16u;
+    uint nxt = 0u;
+    if (nkb < a.k and lane < words) {
+      const device ushort* tn = reinterpret_cast<const device ushort*>(data + ulong(nkb / 16u) * ks + ulong(nb / 16u + h) * ns);
+      nxt = tf_exl3_word(tn, lane);
+    }
+    acc ^= cur;
+    cur = nxt;
+  }
+  sink[tg.x * 128u + tg.y * 8192u + tid] = acc;
+}
+
+// Eight warps a threadgroup, the k walk split in two halves: more independent streams per threadgroup.
+kernel void tf_exl3_stream_read_nax95(const device half* x [[buffer(0)]],
+                                     const device uchar* trellis [[buffer(1)]],
+                                     device uint* sink [[buffer(2)]],
+                                     constant TfExl3Args& a [[buffer(3)]],
+                                     const device uint* routes [[buffer(4)]],
+                                     const device TfExl3Expert* descriptors [[buffer(5)]],
+                                     uint lane [[thread_index_in_simdgroup]],
+                                     uint sg [[simdgroup_index_in_threadgroup]],
+                                     uint tid [[thread_index_in_threadgroup]],
+                                     uint3 tptg [[threads_per_threadgroup]],
+                                     uint3 tg [[threadgroup_position_in_grid]]) {
+  const uint rb = tg.y * 64u, nb = tg.x * 64u;
+  if (rb >= a.rows) return;
+  const uint e = routes[rb];
+  if (e >= a.experts) return;
+  const device uchar* data = descriptors[e].trellis;
+  const ulong ks = descriptors[e].tile_k_stride, ns = descriptors[e].tile_n_stride;
+  const uint halves = descriptors[e].halves, words = 4u * halves;
+  const uint h = sg & 3u, kh = sg >> 2;
+  const device ushort* t0 = reinterpret_cast<const device ushort*>(data + ulong(nb / 16u + h) * ns);
+  uint acc = 0u;
+  uint cur = (lane < words) ? tf_exl3_word(reinterpret_cast<const device ushort*>(data + ulong(kh) * ks + ulong(nb / 16u + h) * ns), lane) : 0u;
+  for (uint kb = kh * 16u; kb < a.k; kb += 32u) {
+    const uint nkb = kb + 32u;
+    uint nxt = 0u;
+    if (nkb < a.k and lane < words) {
+      const device ushort* tn = reinterpret_cast<const device ushort*>(data + ulong(nkb / 16u) * ks + ulong(nb / 16u + h) * ns);
+      nxt = tf_exl3_word(tn, lane);
+    }
+    acc ^= cur;
+    cur = nxt;
+  }
+  sink[tg.x * 128u + tg.y * 8192u + tid] = acc;
+}
 
 
+// The 64-column tile's four 16-column n-tiles are CONTIGUOUS (ns = 96 B), so one 384-byte chunk a k block. This arm
+// reads that chunk with 24 lanes of 16-byte loads -- the same bytes, a quarter of the requests.
+kernel void tf_exl3_stream_read_nax96(const device half* x [[buffer(0)]],
+                                     const device uchar* trellis [[buffer(1)]],
+                                     device uint* sink [[buffer(2)]],
+                                     constant TfExl3Args& a [[buffer(3)]],
+                                     const device uint* routes [[buffer(4)]],
+                                     const device TfExl3Expert* descriptors [[buffer(5)]],
+                                     uint lane [[thread_index_in_simdgroup]],
+                                     uint sg [[simdgroup_index_in_threadgroup]],
+                                     uint tid [[thread_index_in_threadgroup]],
+                                     uint3 tptg [[threads_per_threadgroup]],
+                                     uint3 tg [[threadgroup_position_in_grid]]) {
+  const uint rb = tg.y * 64u, nb = tg.x * 64u;
+  if (rb >= a.rows) return;
+  const uint e = routes[rb];
+  if (e >= a.experts) return;
+  const device uchar* data = descriptors[e].trellis;
+  const ulong ks = descriptors[e].tile_k_stride, ns = descriptors[e].tile_n_stride;
+  const uint blocks = a.k / 16u;
+  const uint per = (blocks + 3u) / 4u;
+  const uint kb0 = sg * per;
+  const uint kb1 = min(kb0 + per, blocks);
+  uint acc = 0u;
+  uint4 cur = uint4(0u, 0u, 0u, 0u);
+  if (lane < 24u and kb0 < kb1) {
+    const device uchar* ch = data + ulong(kb0) * ks + ulong(nb / 16u) * ns;
+    cur = reinterpret_cast<const device uint4*>(ch)[lane];
+  }
+  for (uint kb = kb0; kb < kb1; ++kb) {
+    uint4 nxt = uint4(0u, 0u, 0u, 0u);
+    if (lane < 24u and kb + 1u < kb1) {
+      const device uchar* ch = data + ulong(kb + 1u) * ks + ulong(nb / 16u) * ns;
+      nxt = reinterpret_cast<const device uint4*>(ch)[lane];
+    }
+    acc ^= cur.x ^ cur.y ^ cur.z ^ cur.w;
+    cur = nxt;
+  }
+  sink[tg.x * 128u + tg.y * 8192u + tid] = acc;
+}
+
+kernel void tf_exl3_stream_read_nax97(const device half* x [[buffer(0)]],
+                                     const device uchar* trellis [[buffer(1)]],
+                                     device uint* sink [[buffer(2)]],
+                                     constant TfExl3Args& a [[buffer(3)]],
+                                     const device uint* routes [[buffer(4)]],
+                                     const device TfExl3Expert* descriptors [[buffer(5)]],
+                                     uint lane [[thread_index_in_simdgroup]],
+                                     uint sg [[simdgroup_index_in_threadgroup]],
+                                     uint tid [[thread_index_in_threadgroup]],
+                                     uint3 tptg [[threads_per_threadgroup]],
+                                     uint3 tg [[threadgroup_position_in_grid]]) {
+  const uint rb = tg.y * 64u, nb = tg.x * 64u;
+  if (rb >= a.rows) return;
+  const uint e = routes[rb];
+  if (e >= a.experts) return;
+  const device uchar* data = descriptors[e].trellis;
+  const ulong ks = descriptors[e].tile_k_stride, ns = descriptors[e].tile_n_stride;
+  const uint blocks = a.k / 16u;
+  const uint per = (blocks + 7u) / 8u;
+  const uint kb0 = sg * per;
+  const uint kb1 = min(kb0 + per, blocks);
+  uint acc = 0u;
+  uint4 cur = uint4(0u, 0u, 0u, 0u);
+  if (lane < 24u and kb0 < kb1) {
+    const device uchar* ch = data + ulong(kb0) * ks + ulong(nb / 16u) * ns;
+    cur = reinterpret_cast<const device uint4*>(ch)[lane];
+  }
+  for (uint kb = kb0; kb < kb1; ++kb) {
+    uint4 nxt = uint4(0u, 0u, 0u, 0u);
+    if (lane < 24u and kb + 1u < kb1) {
+      const device uchar* ch = data + ulong(kb + 1u) * ks + ulong(nb / 16u) * ns;
+      nxt = reinterpret_cast<const device uint4*>(ch)[lane];
+    }
+    acc ^= cur.x ^ cur.y ^ cur.z ^ cur.w;
+    cur = nxt;
+  }
+  sink[tg.x * 128u + (tg.y * 8192u) + tid] = acc;
+}
+
+// The expert slab with sixteen warps, each nine n-tiles a k block: nine independent 16-byte loads a lane.
+kernel void tf_exl3_stream_read_nax98(const device half* x [[buffer(0)]],
+                                     const device uchar* trellis [[buffer(1)]],
+                                     device uint* sink [[buffer(2)]],
+                                     constant TfExl3Args& a [[buffer(3)]],
+                                     const device uint* routes [[buffer(4)]],
+                                     const device TfExl3Expert* descriptors [[buffer(5)]],
+                                     uint lane [[thread_index_in_simdgroup]],
+                                     uint sg [[simdgroup_index_in_threadgroup]],
+                                     uint tid [[thread_index_in_threadgroup]],
+                                     uint3 tptg [[threads_per_threadgroup]],
+                                     uint3 tg [[threadgroup_position_in_grid]]) {
+  const uint e = tg.y;
+  if (e >= a.experts) return;
+  const device uchar* data = descriptors[e].trellis;
+  const ulong ks = descriptors[e].tile_k_stride, ns = descriptors[e].tile_n_stride;
+  const uint base = sg * 9u;
+  uint acc = 0u;
+  for (uint kb = 0; kb < a.k; kb += 16u) {
+    const ulong koff = ulong(kb / 16u) * ks;
+    uint4 v0 = uint4(0u, 0u, 0u, 0u), v1 = uint4(0u, 0u, 0u, 0u), v2 = uint4(0u, 0u, 0u, 0u);
+    uint4 v3 = uint4(0u, 0u, 0u, 0u), v4 = uint4(0u, 0u, 0u, 0u), v5 = uint4(0u, 0u, 0u, 0u);
+    uint4 v6 = uint4(0u, 0u, 0u, 0u), v7 = uint4(0u, 0u, 0u, 0u), v8 = uint4(0u, 0u, 0u, 0u);
+    if (lane < 6u) {
+      v0 = reinterpret_cast<const device uint4*>(data + koff + ulong(base) * ns)[lane];
+      v1 = reinterpret_cast<const device uint4*>(data + koff + ulong(base + 1u) * ns)[lane];
+      v2 = reinterpret_cast<const device uint4*>(data + koff + ulong(base + 2u) * ns)[lane];
+      v3 = reinterpret_cast<const device uint4*>(data + koff + ulong(base + 3u) * ns)[lane];
+      v4 = reinterpret_cast<const device uint4*>(data + koff + ulong(base + 4u) * ns)[lane];
+      v5 = reinterpret_cast<const device uint4*>(data + koff + ulong(base + 5u) * ns)[lane];
+      v6 = reinterpret_cast<const device uint4*>(data + koff + ulong(base + 6u) * ns)[lane];
+      v7 = reinterpret_cast<const device uint4*>(data + koff + ulong(base + 7u) * ns)[lane];
+      v8 = reinterpret_cast<const device uint4*>(data + koff + ulong(base + 8u) * ns)[lane];
+    }
+    acc ^= v0.x ^ v0.y ^ v0.z ^ v0.w ^ v1.x ^ v1.y ^ v1.z ^ v1.w ^ v2.x ^ v2.y ^ v2.z ^ v2.w ^
+           v3.x ^ v3.y ^ v3.z ^ v3.w ^ v4.x ^ v4.y ^ v4.z ^ v4.w ^ v5.x ^ v5.y ^ v5.z ^ v5.w ^
+           v6.x ^ v6.y ^ v6.z ^ v6.w ^ v7.x ^ v7.y ^ v7.z ^ v7.w ^ v8.x ^ v8.y ^ v8.z ^ v8.w;
+  }
+  sink[tg.x * 128u + tg.y * 8192u + tid] = acc;
+}
 
 
-
-
-
-
-
-
-
+// The absolute ceiling control -- 1.716 GB read LINEARLY, one threadgroup a 122,880-byte contiguous range, four
+// independent 16-byte loads a thread a wave. If this does not reach the box's peak, the peak is not available to a
+// cold stream of this size; if it does, the scattered slabs' pattern is the difference.
+kernel void tf_exl3_stream_read_nax99(const device half* x [[buffer(0)]],
+                                     const device uchar* trellis [[buffer(1)]],
+                                     device uint* sink [[buffer(2)]],
+                                     constant TfExl3Args& a [[buffer(3)]],
+                                     const device uint* routes [[buffer(4)]],
+                                     const device TfExl3Expert* descriptors [[buffer(5)]],
+                                     uint lane [[thread_index_in_simdgroup]],
+                                     uint sg [[simdgroup_index_in_threadgroup]],
+                                     uint tid [[thread_index_in_threadgroup]],
+                                     uint3 tptg [[threads_per_threadgroup]],
+                                     uint3 tg [[threadgroup_position_in_grid]]) {
+  const ulong base = (ulong(tg.y) * 36u + ulong(tg.x)) * 122880u;
+  const ulong stride = ulong(tptg.x) * 64u;
+  uint acc = 0u;
+  for (ulong off = ulong(tid) * 64u; off < 122880u; off += stride) {
+    const uint4 v0 = reinterpret_cast<const device uint4*>(trellis + base + off)[0];
+    const uint4 v1 = reinterpret_cast<const device uint4*>(trellis + base + off)[1];
+    const uint4 v2 = reinterpret_cast<const device uint4*>(trellis + base + off)[2];
+    const uint4 v3 = reinterpret_cast<const device uint4*>(trellis + base + off)[3];
+    acc ^= v0.x ^ v0.y ^ v0.z ^ v0.w ^ v1.x ^ v1.y ^ v1.z ^ v1.w ^
+           v2.x ^ v2.y ^ v2.z ^ v2.w ^ v3.x ^ v3.y ^ v3.z ^ v3.w;
+  }
+  sink[tg.x * 128u + tg.y * 8192u + tid] = acc;
+}
 
 // The weight tensor is repacked to one byte a weight, in the kernel's own 16-k x 64-n block order ([k][n] inside a
 // block), so the decode is one 4-byte load a thread the e4m3 -> half bit expansion, no codebook, no table, no
@@ -3138,7 +5326,31 @@ inline void tf_exl3_prefill_body_i8b(threadgroup half* wx, const device half* x,
   frag_put_in(hi1, sums, int(a.n), r0, c0 + 48, home, int(rb + rows_here), int(nb + cols_here));
 }
 
+kernel void tf_exl3_matmul_prefill_i8b(const device half* const x [[buffer(0)]],
+                                       const device uchar* const w8 [[buffer(1)]],
+                                       device float* const sums [[buffer(2)]],
+                                       constant TfExl3Args& a [[buffer(3)]],
+                                       const device float* const bscales [[buffer(4)]],
+                                       uint lane [[thread_index_in_simdgroup]],
+                                       uint sg [[simdgroup_index_in_threadgroup]],
+                                       uint tid [[thread_index_in_threadgroup]],
+                                       uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[2 * 16 * 64];
+  tf_exl3_prefill_body_i8b<false>(wx, x, w8, bscales, sums, a, lane, sg, tid, tg);
+}
 
+kernel void tf_exl3_matmul_prefill_i8bw(const device half* const x [[buffer(0)]],
+                                        const device uchar* const w8 [[buffer(1)]],
+                                        device float* const sums [[buffer(2)]],
+                                        constant TfExl3Args& a [[buffer(3)]],
+                                        const device float* const bscales [[buffer(4)]],
+                                        uint lane [[thread_index_in_simdgroup]],
+                                        uint sg [[simdgroup_index_in_threadgroup]],
+                                        uint tid [[thread_index_in_threadgroup]],
+                                        uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[2 * 16 * 64];
+  tf_exl3_prefill_body_i8b<true>(wx, x, w8, bscales, sums, a, lane, sg, tid, tg);
+}
 
 // (v1, exact f32 accumulate): the block-scaled int8 body for the pre-rotated pack. The accumulate order is the same
 // 16-k MMA order; each block's finished fragment is scaled and added to the running f32 accumulator, so the result is
@@ -3228,6 +5440,18 @@ inline void tf_exl3_prefill_body_i8a(threadgroup half* wx, const device half* x,
 }
 
 
+kernel void tf_exl3_matmul_prefill_i8a(const device half* const x [[buffer(0)]],
+                                       const device uchar* const w8 [[buffer(1)]],
+                                       device float* const sums [[buffer(2)]],
+                                       constant TfExl3Args& a [[buffer(3)]],
+                                       const device float* const bscales [[buffer(4)]],
+                                       uint lane [[thread_index_in_simdgroup]],
+                                       uint sg [[simdgroup_index_in_threadgroup]],
+                                       uint tid [[thread_index_in_threadgroup]],
+                                       uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[2 * 16 * 64];
+  tf_exl3_prefill_body_i8a<false>(wx, x, w8, bscales, sums, a, lane, sg, tid, tg);
+}
 
 kernel void tf_exl3_matmul_prefill_fp8(const device half* const x [[buffer(0)]],
                                        const device uchar* const w8 [[buffer(1)]],
@@ -3242,4 +5466,30 @@ kernel void tf_exl3_matmul_prefill_fp8(const device half* const x [[buffer(0)]],
   tf_exl3_prefill_body_fp8<false, float>(wx, x, w8, scales, sums, a, lane, sg, tid, tg);
 }
 
+kernel void tf_exl3_matmul_prefill_fp8w(const device half* const x [[buffer(0)]],
+                                        const device uchar* const w8 [[buffer(1)]],
+                                        device float* const sums [[buffer(2)]],
+                                        constant TfExl3Args& a [[buffer(3)]],
+                                        const device float* const scales [[buffer(4)]],
+                                        uint lane [[thread_index_in_simdgroup]],
+                                        uint sg [[simdgroup_index_in_threadgroup]],
+                                        uint tid [[thread_index_in_threadgroup]],
+                                        uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[2 * 16 * 64];
+  tf_exl3_prefill_body_fp8<true, float>(wx, x, w8, scales, sums, a, lane, sg, tid, tg);
+}
 
+// The same byte body with a bf16 destination, for a pre-rotated pack (TF_DSV41_I8_ROT=1): the row scale is applied in
+// the body's own epilogue, so no rotate_out (Hadamard + svh) and no f32 sums round trip.
+kernel void tf_exl3_matmul_prefill_fp8b(const device half* const x [[buffer(0)]],
+                                        const device uchar* const w8 [[buffer(1)]],
+                                        device bfloat* const y [[buffer(2)]],
+                                        constant TfExl3Args& a [[buffer(3)]],
+                                        const device float* const scales [[buffer(4)]],
+                                        uint lane [[thread_index_in_simdgroup]],
+                                        uint sg [[simdgroup_index_in_threadgroup]],
+                                        uint tid [[thread_index_in_threadgroup]],
+                                        uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup half wx[2 * 16 * 64];
+  tf_exl3_prefill_body_fp8<false, bfloat>(wx, x, w8, scales, y, a, lane, sg, tid, tg);
+}
