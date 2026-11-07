@@ -3,7 +3,7 @@ const std = @import("std");
 const js = @import("core").joint_schema;
 const Stream = @import("../stream.zig").Stream;
 const Head = @import("head.zig").Head;
-const plan = @import("plan.zig");
+const plan = @import("core").joint_schema.plan;
 
 /// out = MHA(q rows, kv rows): BF16 Q, K, V; FP32 scores at 1/sqrt(head_dim), softmax and P V; one context rounding.
 pub fn mha(h: *Head, s: Stream, m: js.tensors.AttentionOf(u64), q: u64, nq: usize, kv: u64, nk: usize, out: u64) !void {
