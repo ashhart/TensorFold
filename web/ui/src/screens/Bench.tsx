@@ -135,7 +135,14 @@ function Heat({ hw, prefill }: { hw: BenchHardware; prefill: boolean }) {
       </dl>
       <HeatChart hw={hw} />
       {hw.throttle?.reasons.length ? <p className="small">Why it slowed down: {hw.throttle.reasons.join(', ')}. Speeds measured while the machine slows itself down understate it.</p> : null}
-      <p className="small muted">{hw.estimate ? `Estimate: ${hw.source} measures the ${hw.scope} only, not the whole machine. ` : `Measured for the whole machine (${hw.source}). `}Energy over the measured part of the run ({Math.round(hw.measured_s)} s, prompts read included) divided by {prefill ? 'the prompt tokens read' : `the ${num(hw.output_tokens)} tokens written`}{hw.per_token_note ? ` (per token: ${hw.per_token_note})` : ''}; idle is the machine with the model loaded and nothing asked, just before.{hw.coverage != null && hw.coverage < 0.98 ? ` Power readings cover ${Math.round(hw.coverage * 100)}% of the run; gaps over 10 s are left out, so the energy is a lower bound.` : ''}{hw.cost ? ` Cost at ${money(hw.cost.price_per_kwh, hw.cost.currency)} per kWh, set in Settings.` : ' Set an electricity price in Settings to see the cost.'}</p>
+      <p className="small muted">{hw.estimate ? `Estimate for the ${hw.scope} (${hw.source}).` : `Whole-machine measurement (${hw.source}).`}</p>
+      <dl className="kv small measurement-notes">
+        <dt>Measured interval</dt><dd>{Math.round(hw.measured_s)} s, including prompt reading</dd>
+        <dt>Energy denominator</dt><dd>{prefill ? 'Prompt tokens read' : `${num(hw.output_tokens)} output tokens`}{hw.per_token_note ? ` (${hw.per_token_note})` : ''}</dd>
+        <dt>Idle baseline</dt><dd>Model loaded with no requests</dd>
+        {hw.coverage != null && <><dt>Sampling coverage</dt><dd>{Math.round(hw.coverage * 100)}%{hw.coverage < .98 ? '; gaps over 10 s excluded, so energy is a lower bound' : ''}</dd></>}
+        <dt>Electricity price</dt><dd>{hw.cost ? `${money(hw.cost.price_per_kwh, hw.cost.currency)} per kWh` : <a href="#settings/bench">Set in Settings to show cost</a>}</dd>
+      </dl>
     </div>
   )
 }
@@ -167,7 +174,7 @@ function LoadReport({ levels }: { levels: LoadLevel[] }) {
       <thead><tr><th>At once</th><th>total tok/s</th><th>each</th><th>first token p50</th><th>p95</th><th>requests</th></tr></thead>
       <tbody>{levels.map((l) => <tr key={l.concurrency}><td>{l.concurrency}</td><td>{tps(l.total_tps)}</td><td>{tps(l.per_request_tps)}</td><td>{secs(l.ttft_p50)}</td><td>{secs(l.ttft_p95)}</td><td>{l.requests}{l.errors ? <small className="bad"> {l.errors} failed</small> : null}</td></tr>)}</tbody>
     </table></div>
-    <p className="small muted">Each level sends at least eight requests, in waves of its size, the prompts taken in turn from the usage suites, 200-token replies. Total: the tokens of a wave over its duration. The first token includes the wait for a turn.</p>
+    <p className="small muted">Waves of at least eight 200-token replies measure throughput and first-token time, including queueing.</p>
   </>
 }
 
@@ -184,7 +191,7 @@ function QualityReport({ run, names }: { run: BenchRun; names: Record<string, st
       {!!q.overall.unscored && <div><dt>Not graded</dt><dd className="bad">{q.overall.unscored} <small>(request failed)</small></dd></div>}
       {Object.entries(q.categories).map(([k, c]) => <div key={k}><dt>{names[k] ?? k}</dt><dd>{share(c)}</dd></div>)}
     </dl>
-    <p className="small muted">Scored strictly: the last value counts, an answer offering two fails, a reasoning block left open leaves no answer. Two quality runs compare item by item (tick them in the list below).</p>
+    <p className="small muted">Strict final-answer scoring; select two runs below to compare items.</p>
     {missed.length > 0 && <details open={all} onToggle={(e) => setAll((e.target as HTMLDetailsElement).open)}>
       <summary>{missed.length} items missed</summary>
       <div className="tablewrap"><table className="tbl">
@@ -208,7 +215,7 @@ function SweepReport({ run }: { run: BenchRun }) {
       {run.window ? <div><dt>Served window</dt><dd>{num(run.window)}</dd></div> : null}
       {run.memory?.engine_peak_bytes ? <div><dt>Engine memory, peak</dt><dd>{gb(run.memory.engine_peak_bytes, 1)}</dd></div> : null}
     </dl>}
-    <p className="small muted">One prompt per size, each opening with its own reference so the prompt cache cannot serve it; the reply is cut at 8 tokens. Prefill speed is the engine's prompt tokens over its prefill time{done.some((p) => p.estimated) ? '; this engine gives none, so ≈ marks an estimate: the first token less a measured overhead' : ''}{done.some((p) => p.cached) ? '; some tokens came from the cache, see the notes' : ''}.</p>
+    <p className="small muted">Unique prompts avoid cache reuse; 8-token replies measure prompt speed{done.some((p) => p.estimated) ? '; ≈ means estimated from first-token latency' : ''}{done.some((p) => p.cached) ? '; see cached-token notes' : ''}.</p>
     <SweepChart points={pts} />
     <div className="tablewrap"><table className="tbl">
       <thead><tr><th>Size</th><th>prompt tokens</th><th>from cache</th><th>prefill</th><th>prefill tok/s</th><th>first token</th></tr></thead>
@@ -450,13 +457,13 @@ export default function Bench({ engine, toast, stale }: Ctx) {
 
   return (
     <section>
-      <div className="head"><div><h1>Bench</h1><p>How fast and how reliable is your AI on this machine? Measured the same way every time, so runs compare. Results stay here; the receipt is yours to share.</p></div></div>
+      <div className="head"><div><a className="back-link" href="#models">← Models</a><h1>Benchmarks</h1><p>Measure speed, quality and exactness on this machine.</p></div></div>
       {err && <div className="notice bad">{err}</div>}
-      {(simple ? !servedReady : !ready) && <div className="notice info">Nothing is running yet. Start an AI from <a href="#home">Home</a>, then measure it here.</div>}
+      {(simple ? !servedReady : !ready) && <div className="notice info">Nothing is running yet. Start an AI from <a href="#models">Models</a>, then measure it here.</div>}
 
       {simple ? <div className="card bench-new">
         <b>Check {engine?.model_name ?? engine?.model ?? 'the AI'}</b>
-        <p className="small muted">Three short tasks (English, code, French), each written twice: once with the speed-up, once without, to check the answers are the same. About a minute.</p>
+        <p className="small muted">Three short tasks compare drafted and plain replies in about a minute.</p>
         <div className="actions">
           <button className="btn primary" aria-busy={starting} disabled={!servedReady || stale || !!busyId || starting} onClick={() => { setChoice('quick'); setAim('served'); setExactness(true); start({ mode: 'quick', aim: 'served', exactness: true }) }}>{starting ? 'Starting…' : 'Run the check'}</button>
           <button className="btn quiet" onClick={() => showMore(true)}>More checks</button>
@@ -489,7 +496,7 @@ export default function Bench({ engine, toast, stale }: Ctx) {
                 {found.engine === 'OpenAI-compatible' && <input className="input" style={{ minWidth: 140, marginLeft: 8 }} value={addrLabel} onChange={(e) => setAddrLabel(e.target.value)} placeholder="its name, e.g. mlx-lm 0.32" aria-label="Engine name" />}</span>)}
           </div>}
           {aim === 'address' && addrPeer && <p className="small muted">This TensorFold Web reaches that machine's engine through its TensorFold Web, with the token kept in Fleet: no key is typed or shown here.</p>}
-          {aim === 'address' && <p className="small muted">Same protocol as for TensorFold. Its replies are compared by text with a TensorFold run; the drafts-off check is TensorFold's own. Ollama cuts a prompt longer than its context: set <code>OLLAMA_CONTEXT_LENGTH</code> on its server before a long sweep.</p>}
+          {aim === 'address' && <p className="small muted">External replies compare by text; configure the endpoint’s context before a long sweep.</p>}
         </div>
         <p className="small muted">{info?.modes[mode]}{(mode === 'quick' || mode === 'profile') && exactness ? ', twice as long with the exactness check' : ''}.</p>
         {mode === 'kl' && <KlOptions load={klLoad} setLoad={setKlLoad} state={klForm} setState={setKlForm} />}
@@ -520,13 +527,13 @@ export default function Bench({ engine, toast, stale }: Ctx) {
           {busyId && !going && <span className="small muted">A run is going; open it below to follow or stop it.</span>}
         </div>
         {going && <LiveRun run={going} onStop={cancel} />}
-        {info && (mode === 'quick' || mode === 'profile') && <p className="small muted" style={{ marginBottom: 0 }}>{info.about}</p>}
+
         </>}
       </div>}
 
       {!simple && choice === 'load' && engine?.status === 'running' && <div className="card" style={{ marginTop: 16 }}>
         <div className="membar-head"><b>See it live</b><span className="small muted">nothing is kept: Load sweep above is the measure</span></div>
-        <p className="small muted">The same moment, several requests to {engine?.model_name ?? engine?.model}: each reply streams in its own card with its speed, and the total shows what serving several people at once gives.</p>
+        <p className="small muted">Send concurrent requests to {engine?.model_name ?? engine?.model} and compare each reply’s speed.</p>
         <ParallelPanel model={engine?.model ?? ''} engine={engine} sampling={{ thinking: 'off', system: '', temperature: null }} />
       </div>}
 

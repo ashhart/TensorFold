@@ -122,8 +122,8 @@ export default function Fleet({ toast }: Ctx) {
   return (
     <>
       <div className="head">
-        <div><h1>Fleet</h1>
-          <p>Your machines, each with its own AI: what runs where, and a way into each one's TensorFold Web. Their tokens stay in this TensorFold Web, never in the page.</p></div>
+        <div><h2>Your machines</h2>
+          <p>Connect machines and see where each model runs.</p></div>
       </div>
       {err && <div className="notice bad">{err}</div>}
       {machines && <p className="small muted num" style={{ marginTop: -6 }}>{machines.length} {machines.length === 1 ? 'machine' : 'machines'}, {serving.length} with an AI running{total ? `, ${Math.round(total)} tokens a second being written in all` : ''}.</p>}

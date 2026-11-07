@@ -37,3 +37,8 @@ await writeFile(new URL('src/styles/desktop-theme.json', ui), JSON.stringify({
   sourceHash,
   preset: 'tensorfold',
 }, null, 2) + '\n')
+
+const zon = await readFile(new URL('../../../build.zig.zon', import.meta.url), 'utf8')
+const version = zon.match(/\.version\s*=\s*"([^"]+)"/)?.[1]
+if (!version) throw new Error('Native build version missing')
+await writeFile(new URL('../../tensorfold_web/data/native-version.json', import.meta.url), JSON.stringify({ version }) + '\n')

@@ -140,7 +140,7 @@ export default function Monitor({ engine, settings, refreshEngine, toast, stale,
     : st === 'starting' ? <>Starting <b>{name ?? '…'}</b>. The first start takes longer; the log below says what it is doing.</>
     : st === 'unauthorized' ? <>A TensorFold answers at <code>{engine?.engine_url}</code> but refuses the API key this TensorFold Web holds ({engine?.error}). Enter the engine's key in <a href="#settings">Settings</a>{engine?.key_pending_restart ? ', or restart it to take the new key' : ''}.</>
     : st === 'failed' ? <>The AI stopped with a problem ({engine?.error}). The log below has the reason.</>
-    : engine?.managed === false ? <>No TensorFold answers at <code>{engine?.engine_url}</code>.</> : <>Nothing is running. Start an AI from <a href="#home">Home</a> or <a href="#models">Models</a>.</>
+    : engine?.managed === false ? <>No TensorFold answers at <code>{engine?.engine_url}</code>.</> : <>Nothing is running. Start an AI from <a href="#models">Models</a>.</>
   const peak = Math.round(Math.max(0, ...decode))
   // the average while writing: idle seconds would drag it to zero
   const writing = decode.filter((v) => v > 0)
@@ -153,7 +153,7 @@ export default function Monitor({ engine, settings, refreshEngine, toast, stale,
   return (
     <section>
       <div className="head">
-        <div><h1>Monitor</h1><p>{head}</p></div>
+        <div><a className="back-link" href="#models">← Models</a><h1>Engine details</h1><p>{head}</p></div>
         {engine?.owned && <div className="actions"><button className="btn" aria-busy={busy} disabled={busy || stale} onClick={restart}>{busy ? 'Working…' : 'Restart'}</button><button className="btn" aria-busy={busy} disabled={busy || stale} onClick={stop}>Stop</button></div>}
       </div>
       {err && <div className="notice bad">{err}</div>}
@@ -191,7 +191,7 @@ export default function Monitor({ engine, settings, refreshEngine, toast, stale,
         <div className="two" style={{ marginTop: 12 }}>
           <div className="card">
             <b>Exactness</b>
-            <p className="small muted" style={{ margin: '6px 0 0' }}>TensorFold drafts several tokens and verifies them in one pass; it keeps a draft only when it equals the token one-token decoding would have produced. The <a href="#bench">Bench</a> checks it: it sends each prompt again with <code>"draft": false</code> and compares the tokens.</p>
+            <p className="small muted" style={{ margin: '6px 0 0' }}>The <a href="#bench">Benchmarks</a> exactness check compares drafted replies with plain decoding.</p>
           </div>
           <div className="card">
             <b>Where it listens</b>

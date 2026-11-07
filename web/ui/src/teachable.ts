@@ -1,5 +1,4 @@
-// Why the AI running now cannot be taught, in one sentence for Home's tile; null when it can, or when nothing runs
-// yet (Teach then says what to start). The rules are Teach's own: a lesson needs an engine this TensorFold Web runs, a
+// Explain when a served model cannot learn; learning requires an owned engine and a supported learning copy.
 
 import type { EngineInfo, LivingView } from './api'
 

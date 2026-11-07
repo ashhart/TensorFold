@@ -16,17 +16,18 @@ const FILTERS: { id: string; label: string; test: (m: Model) => boolean }[] = [
 ]
 const pages = (tokens: number) => Math.round(tokens / 400)
 
-export default function Models({ machine, engine, settings, refreshEngine, refreshSettings, toast, stale }: Ctx) {
+export default function Models({ machine, engine, settings, refreshEngine, refreshSettings, toast, stale, discover }: Ctx & { discover: boolean }) {
   const [models, setModels] = useState<Model[] | null>(null)
   const [sel, setSel] = useState<string | null>(null)
   const [filter, setFilter] = useState('all')
+  const [search, setSearch] = useState('')
   const [pulls, setPulls] = useState<Record<string, PullStatus>>({})
   const [notice, setNotice] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const { run, is } = useWorking()
 
-  useSub('models', setSel)                                  // #models/<owner>/<name>
-  useEffect(() => { if (sel) showSub('models', sel) }, [sel])
+  useSub('models', (id) => setSel(id.includes('/') ? id : null))
+  useEffect(() => { if (sel && !discover) showSub('models', sel) }, [sel, discover])
   const load = useCallback(() => api.catalog().then((c) => setModels(c.models)).catch((e) => setNotice(String(e))), [])
   useEffect(() => { load() }, [load, settings?.budget_fraction])
   useEffect(() => {              // downloads live on the server: pick them up again after a visit elsewhere
@@ -37,10 +38,12 @@ export default function Models({ machine, engine, settings, refreshEngine, refre
     try { const c = await api.catalog(true); setModels(c.models); toast('Sizes refreshed from Hugging Face') } catch (e) { setNotice(`Sizes not refreshed: ${e}`) }
   })
   useEffect(() => {
-    if (!models) return
-    const running = models.find((m) => engine?.model && shortName(m.id).startsWith(engine.model))
-    if (!sel && models.length) setSel(running?.id ?? models.find((m) => m.verdict?.level === 'fits')?.id ?? models[0].id)
-  }, [models, engine?.model, sel])
+    if (!discover) return
+    let live = true
+    api.discover().catch((e) => { if (live) setNotice(String(e)) })
+    const timer = setInterval(() => load(), 2000)
+    return () => { live = false; clearInterval(timer) }
+  }, [discover, load])
 
   // follow downloads
   useEffect(() => {
@@ -116,13 +119,10 @@ export default function Models({ machine, engine, settings, refreshEngine, refre
     : v.level === 'no' ? <><strong>{current.name}</strong> does not fit: {v.reason}{v.needs_ram_gb ? ` A ${v.needs_ram_gb} GB machine would.` : ''}</>
     : <><strong>{current.name}</strong> {v.level === 'tight' ? 'fits, tightly' : 'fits'}: about <strong>{num(v.context_tokens)} tokens</strong> of context{unverified ? ' (a rough estimate on CUDA)' : v.basis === 'engine-floor' ? ' (from the engine\'s own memory floor)' : v.basis === 'native-measured' ? ' (the native engine sizes its own memory up to macOS\'s GPU limit)' : v.basis === 'native-unverified' ? ' (macOS\'s GPU limit could not be read: a guess at 85% of memory)' : ''}, {gb(v.left_for_apps_bytes)} left for your apps{v.level === 'tight' ? `. ${v.reason}` : '.'}</>
 
-  const shown = models?.filter(FILTERS.find((f) => f.id === filter)!.test) ?? []
+  const shown = models?.filter((m) => (discover || m.installed) && FILTERS.find((f) => f.id === filter)!.test(m) && `${m.name} ${m.id}`.toLowerCase().includes(search.toLowerCase())) ?? []
   return (
     <section>
-      <div className="head">
-        <div><h1>Models</h1><p>Pick the AI that runs on this machine. TensorFold Web says which ones fit, before anything downloads; the one marked <b>Recommended</b> is a good first choice.</p></div>
-        <div className="actions"><button className="btn" aria-busy={is('refresh')} onClick={refresh}>{is('refresh') ? 'Asking Hugging Face…' : 'Refresh sizes'}</button></div>
-      </div>
+      <div className="model-search"><input className="input" type="search" aria-label="Search models" placeholder="Search models" value={search} onChange={(e) => setSearch(e.target.value)} /><select className="sel" value={filter} onChange={(e) => setFilter(e.target.value)} aria-label="Filter models">{FILTERS.map((f) => <option key={f.id} value={f.id}>{f.label}</option>)}</select><a className="btn" href="#bench">Benchmarks</a>{discover && <button className="btn" aria-busy={is('refresh')} onClick={refresh}>{is('refresh') ? 'Refreshing…' : 'Refresh sizes'}</button>}</div>
       {notice && <div className="notice">{notice}</div>}
       {conflict && <div className="notice conflict" role="alertdialog" aria-label="Another model is running">
         <span><b>{engine?.model}</b> is {engine?.status === 'starting' ? 'still loading' : 'running'}. The engine serves one model at a time: stop it, then start <b>{conflict.name}</b>?{engine?.connections ? ` ${engine.connections} ${engine.connections === 1 ? 'connection is' : 'connections are'} open and will be cut.` : ''}</span>
@@ -130,9 +130,9 @@ export default function Models({ machine, engine, settings, refreshEngine, refre
       </div>}
       {machine && machine.backend === 'none' && <div className="notice">{machine.backend_note} Use Settings to connect to a TensorFold running elsewhere.</div>}
       {machine && machine.budget.basis === 'cuda-unverified' && <div className="notice info">Memory verdicts on CUDA machines use TensorFold's documented rule for a card's memory but have not been checked against a real run yet; treat them as rough.</div>}
-      {settings?.remote && <div className="notice info">The engine is remote: this list and its verdicts describe <b>this</b> machine, and Start only works for an engine run here.</div>}
+      {settings?.remote && <div className="notice info">Web did not start the engine at <code>{settings.engine_url}</code>. This list describes this machine.</div>}
 
-      <div className="ribbon" aria-label="Memory on this machine">
+      {current && <details className="more model-memory"><summary>Memory estimate for {current.name}</summary><div className="ribbon" aria-label="Memory on this machine">
         <div className="top">
           <div><b>{machine?.chip ?? 'This machine'}</b> <span className="muted">{machine ? `${gb(machine.ram_bytes)} ${machine.unified_memory ? 'unified memory' : 'RAM'}, ${machine.os} ${machine.os_version}` : ''}</span></div>
           <div className="running">
@@ -157,19 +157,16 @@ export default function Models({ machine, engine, settings, refreshEngine, refre
         {verdictLine && <p className="verdict">{verdictLine}</p>}
       </div>
 
-      <div className="filters" role="group" aria-label="Filter models">
-        {FILTERS.map((f) => <button key={f.id} aria-pressed={filter === f.id} onClick={() => setFilter(f.id)}>{f.label}</button>)}
-      </div>
+      </details>}
 
       <div className="models">
         <div className="list" role="list" aria-label="Models">
           {!models && [0, 1, 2, 3].map((i) => <div key={i} className="mrow loading" aria-hidden="true"><div><div className="n skeleton">loading</div><div className="d skeleton">loading the catalog</div></div><div /><div /><div /></div>)}
-          {models && !shown.length && <div className="mrow loading"><div className="muted">No model matches this filter.</div></div>}
+          {models && !shown.length && <div className="mrow loading"><div className="muted">{discover ? 'No model matches this filter.' : <>No matching models on this machine. <a href="#models/discover">Discover models</a>.</>}</div></div>}
           {shown.map((m) => {
             const p = progressOf(m)
             return (
-              // a row is not a control itself: its name is the button that shows the model's details, and its action
-              // (Download, Start) is a button of its own beside it
+              // The model name opens details; Download and Start remain separate controls.
               <div key={m.id} role="listitem" data-selected={sel === m.id} className={`mrow ${m.runs_here ? '' : 'dim'}`} onClick={() => setSel(m.id)}>
                 <div><button type="button" className="n rowpick" aria-current={sel === m.id ? 'true' : undefined} onClick={(e) => { e.stopPropagation(); setSel(m.id) }}><ModelLogo names={[m.name, m.id, m.family]} />{m.name}{m.recommended && <span className="chip fits" style={{ marginLeft: 8 }}>Recommended</span>}</button><div className="d">{m.vendor}. {m.description}</div>
                   {p?.running && <div className="progress"><i style={{ width: `${Math.round(p.fraction * 100)}%` }} /></div>}
@@ -196,6 +193,7 @@ export default function Models({ machine, engine, settings, refreshEngine, refre
 
         {current && (
           <div className="card panel">
+            <button className="btn sm quiet model-close" onClick={() => setSel(null)} aria-label="Close model details">✕</button>
             {!current.runs_here ? <span className="chip no">Not on this machine</span> : v ? <span className={`chip ${v.level}`}>{v.label}</span> : <span className="chip no">Size unknown</span>}
             <h2 className="modelhead"><ModelLogo names={[current.name, current.id, current.family]} size="lg" />{current.name}{current.recommended && <span className="chip fits" style={{ marginLeft: 8, verticalAlign: 'middle' }}>Recommended</span>}</h2>
             <p className="vendor">by {current.vendor}, {current.license}</p>
@@ -211,7 +209,7 @@ export default function Models({ machine, engine, settings, refreshEngine, refre
               <dt>Good at</dt><dd>{current.tags.map((t) => <span key={t} className="tag">{t}</span>)}</dd>
               <dt>Size</dt><dd>{gb(current.size_bytes, 1)}{current.drafter ? ` plus a ${gb(current.drafter_bytes, 1)} speed-up helper` : ''}</dd>
             </dl>
-            <div className="trust"><span>✓</span><span>The speed-up guesses the next words and keeps a guess only when it is exactly what the AI would have written: faster, same answers.</span></div>
+            <div className="trust"><span>✓</span><span>Drafts are kept only when they match the model’s own next token.</span></div>
             <details className="more">
               <summary>Details for the curious</summary>
               <dl className="kv">
@@ -219,7 +217,7 @@ export default function Models({ machine, engine, settings, refreshEngine, refre
                 {current.drafter && <><dt>Drafter</dt><dd><code>{current.drafter}</code></dd></>}
                 {v && !current.native && <><dt>Budget</dt><dd>{Math.round(v.budget_fraction * 100)}% of memory ({gb(v.budget_bytes)}); TensorFold's default is {Math.round((machine?.budget.default_fraction ?? 0.7) * 100)}%</dd></>}
                 <dt>Runs on</dt><dd>{current.backends.map((b) => b === 'mlx' ? 'Apple silicon Macs' : b === 'cuda' ? 'NVIDIA GPUs' : b.toUpperCase()).join(' and ')}</dd>
-                <dt>Engine</dt><dd>{current.native ? 'native (TensorFold 1.0); it sizes its memory itself' : 'Python line (0.6.6, frozen until this model is ported)'}</dd>
+                <dt>Engine</dt><dd>{'Native TensorFold'}</dd>
                 {current.engine_info && <><dt>Engine reads</dt><dd>{[current.engine_info.family, current.engine_info.format].filter(Boolean).join(', ')}{current.engine_info.context ? `, up to ${num(current.engine_info.context)} tokens` : ''}</dd></>}
                 {current.engine_info?.floor_bytes ? <><dt>Memory floor</dt><dd>{gb(current.engine_info.floor_bytes, 1)}: the weights plus the engine's runtime margin, before any context</dd></> : null}
                 <dt>Command</dt><dd><code>{!current.native && v && v.budget_fraction !== (machine?.budget.default_fraction ?? 0.7) ? `${machine?.backend === 'cuda' ? 'TENSORFOLD_CUDA_MEMORY_LIMIT_GB' : 'TENSORFOLD_MEMORY_LIMIT_GB'}=${(v.budget_bytes / 1024 ** 3).toFixed(0)} ` : ''}tensorfold serve {current.id}</code></dd>

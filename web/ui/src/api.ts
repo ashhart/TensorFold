@@ -181,9 +181,7 @@ export type SetupCheck = { id: string; label: string; status: 'pass' | 'warn' | 
 export type CheckResult = { id: string; label: string; ok: boolean; skipped?: boolean; detail: string; seconds: number }
 export type ConnectInfo = { engine_url: string; lan_url: string | null; share: boolean; api_key: string | null; relay_key?: string | null; key_pending_restart: boolean; studio_token_set: boolean; snippets: Snippet[]; kinds?: Record<string, string>; window?: number | null; where?: 'here' | 'away' }
 
-// A TensorFold Web started with --token wants the token on every API and relay call. It is read once from the page's
-// address, kept in this browser and taken off the address bar, so it is neither shared by copy-paste nor lost
-// when the tab closes.
+// Read the token once, retain it locally and remove it from the address before links can share it.
 const TOKEN_KEY = 'tfs-token'
 export function webToken(): string | null {
   try {
@@ -220,19 +218,14 @@ export function authHeaders(): Record<string, string> {
   return t ? { 'x-studio-token': t } : {}
 }
 
-// Every call has a deadline, so a tunnel that stops answering shows up as an error instead of a page frozen on
-// its last figures. Starting and stopping an engine get longer ones.
+// All calls have deadlines, with longer allowances for engine start and stop.
 
 export class ApiError extends Error {
   status: number
   constructor(message: string, status: number) { super(message); this.status = status }
 }
 
-// One question for the token, however many requests met a 401 at once: the page loads with eight of them, and eight
-// prompts in a row (some dismissed, then blocked by the browser) left it locked out with the right token in hand.
-// The question is a dialog of the page's own, which says where the token is and how to do without typing it.
-// Cancelled once, the question is not asked again by the page's own polls (every few seconds, on every screen):
-// the 401 is reported instead, and the page offers to ask again (`askTokenAgain`).
+// Coalesce concurrent token requests; after cancellation, only an explicit retry opens the dialog again.
 let asking: Promise<string | null> | null = null
 let declined = false
 function askToken(): Promise<string | null> {
@@ -297,6 +290,7 @@ async function j<T>(url: string, init?: RequestInit, timeoutMs = 10000): Promise
 
 export const api = {
   machine: () => j<Machine>('/api/machine'),
+  discover: () => j<{ refreshing: boolean }>('/api/catalog/discover', { method: 'POST' }),
   catalog: (refresh = false) => refresh ? j<{ models: Model[]; sizes_known: boolean }>('/api/catalog/refresh', { method: 'POST' }, 60000)
     : j<{ models: Model[]; sizes_known: boolean }>('/api/catalog'),
   verdicts: (id: string) => j<{ verdicts: (Verdict & { fraction: number })[] }>(`/api/catalog/${id}/verdicts`),

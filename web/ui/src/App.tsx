@@ -2,33 +2,28 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, type EngineInfo, type Machine, type Settings, ApiError, askTokenAgain } from './api'
 import { setCustomBrands } from './brand'
 import Palette from './Palette'
-import { screenOf } from './route'
+import { routeOf, TITLES, SHORTCUTS, loopbackEngine, type Route } from './navigation'
+import { useConversations } from './conversations'
+import { newChat } from './Sidebar'
+import ModelWorkspace from './ModelWorkspace'
+import Drawer from './Drawer'
 import Sidebar from './Sidebar'
 import ErrorBoundary from './ErrorBoundary'
 import Bench from './screens/Bench'
 import Chat from './screens/Chat'
-import Connect from './screens/Connect'
 import Fleet from './screens/Fleet'
-import Teach from './screens/Teach'
-import Models from './screens/Models'
 import Monitor from './screens/Monitor'
 import SettingsScreen from './screens/Settings'
-import Home from './screens/Home'
 
-export type Route = 'home' | 'chat' | 'teach' | 'models' | 'connect' | 'bench' | 'monitor' | 'fleet' | 'settings'
-// in the order a person uses them: what they came for first, the machine's own screens after
-// the sidebar's order and the keys 1 to 9: Models right after Home, since choosing the AI comes first
-export const ROUTES: Route[] = ['home', 'models', 'chat', 'teach', 'connect', 'bench', 'monitor', 'fleet', 'settings']
-const TITLES: Record<Route, string> = { home: 'Home', chat: 'Chat', teach: 'Teach', models: 'Models', connect: 'Connect', bench: 'Bench', monitor: 'Monitor', fleet: 'Fleet', settings: 'Settings' }
-const readRoute = (): Route => {
-  const h = screenOf() as Route                 // `#bench/<run>` is the Bench, showing that run
-  return ROUTES.includes(h) ? h : 'home'
-}
+export { ROUTES, type Route } from './navigation'
+const readRoute = () => routeOf(location.hash)
 type Toast = { id: number; text: string; kind: 'ok' | 'bad' }
 const typing = (t: EventTarget | null) => t instanceof HTMLElement && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)
 
 export default function App() {
   const [route, setRoute] = useState<Route>(readRoute)
+  const fleetBack = useRef(['models', 'teach', 'connect'].includes(route) ? location.hash : '#models')
+  const closeFleet = useCallback(() => { location.hash = fleetBack.current }, [])
   const [machine, setMachine] = useState<Machine | null>(null)
   const [engine, setEngine] = useState<EngineInfo | null>(null)
   const [settings, setSettings] = useState<Settings | null>(null)
@@ -40,19 +35,18 @@ export default function App() {
   const [decodeHistory, setDecodeHistory] = useState<number[]>([])
   const [toasts, setToasts] = useState<Toast[]>([])
   const [palette, setPalette] = useState(false)
-  // the menu folded to its icons, remembered in this browser
+  // Remember whether this browser hides the sidebar.
   const [folded, setFolded] = useState(() => { try { return localStorage.getItem('tfs-sidebar') === 'folded' } catch { return false } })
   const fold = useCallback(() => setFolded((f) => {
     try { localStorage.setItem('tfs-sidebar', f ? 'full' : 'folded') } catch {                  }
     return !f
   }), [])
-  // the look applies at once and is remembered in this browser, then saved with the other settings
-  // `?theme=light|dark|system` in the address shows that look for this visit only, for screenshots and links
+  // Remember the selected theme locally; a query parameter overrides it for this visit only.
   const pinned = (['light', 'dark', 'system'] as const).find((t) => t === new URLSearchParams(location.search).get('theme')) ?? null
   const [theme, setTheme] = useState<Settings['theme']>(() => { if (pinned) return pinned; try { return (localStorage.getItem('tfs-theme') as Settings['theme']) || 'system' } catch { return 'system' } })
 
   useEffect(() => {
-    const on = () => setRoute(readRoute())
+    const on = () => { const next = readRoute(); if (['models', 'teach', 'connect'].includes(next)) fleetBack.current = location.hash; setRoute(next) }
     addEventListener('hashchange', on)
     return () => removeEventListener('hashchange', on)
   }, [])
@@ -82,6 +76,7 @@ export default function App() {
     setToasts((t) => [...t.slice(-3), { id, text, kind }])
     setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), kind === 'bad' ? 5000 : 2200)
   }, [])
+  const conversations = useConversations(toast)
   const down = useRef(0)                                                 // failed polls in a row
   const refreshEngine = useCallback(() => api.engine().then((e) => {
     setEngine(e); setWebDown(false); setLastSeen(new Date()); down.current = 0; setMissed(0); setNeedsToken(false)
@@ -119,15 +114,17 @@ export default function App() {
   useEffect(() => {
     const on = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); setPalette((p) => !p); return }
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'n') { e.preventDefault(); newChat(); return }
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'f' && route === 'chat') { e.preventDefault(); if (folded) fold(); setTimeout(() => document.querySelector<HTMLInputElement>('[aria-label="Search conversations"]')?.focus(), 0); return }
       if (e.metaKey || e.ctrlKey || e.altKey || typing(e.target)) return
       const n = Number(e.key)
-      if (n >= 1 && n <= ROUTES.length) { location.hash = `#${ROUTES[n - 1]}` }
+      if (n >= 1 && n <= SHORTCUTS.length) { if (n === 1) newChat(); else location.hash = `#${SHORTCUTS[n - 1]}` }
       else if (e.key === '[') fold()
       else if (e.key === '/') { e.preventDefault(); location.hash = '#chat'; setTimeout(() => dispatchEvent(new CustomEvent('tfs:focus-composer')), 0) }
     }
     addEventListener('keydown', on)
     return () => removeEventListener('keydown', on)
-  }, [fold])
+  }, [fold, folded, route])
 
   // the look, applied and remembered for the next load (index.html reads it before the first paint)
   const rememberTheme = useCallback((t: Settings['theme']) => {
@@ -149,26 +146,24 @@ export default function App() {
   useEffect(() => { if (!webDown) return; const t = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(t) }, [webDown])
   const age = lastSeen ? Math.round((now - lastSeen.getTime()) / 1000) : null
   const stale = webDown && missed >= 3 && (age == null || age >= 10)
-  const ctx = { machine, engine, settings, refreshEngine, refreshSettings, refreshBrands, saveSettings, toast, openPalette, stale, decodeHistory }
+  const ctx = { conversations, machine, engine, settings, refreshEngine, refreshSettings, refreshBrands, saveSettings, toast, openPalette, stale, decodeHistory }
   return (
-    <div className={folded ? 'app folded' : 'app'}>
+    <div className={`app workspace ${folded ? 'sidebar-hidden' : ''} ${route === 'settings' ? 'settings-mode' : ''}`}>
       <a className="skip" href="#main" onClick={(e) => { e.preventDefault(); mainRef.current?.focus() }}>Skip to content</a>
-      <Sidebar route={route} engine={engine} machine={machine} onPalette={openPalette} folded={folded} onFold={fold} />
+      {route !== 'settings' && !folded && <Sidebar engine={engine} conversations={conversations} toast={toast} />}
+      {route !== 'settings' && <header className="workspace-header"><button className="btn quiet sidebar-toggle" aria-label={folded ? 'Show sidebar' : 'Hide sidebar'} aria-expanded={!folded} onClick={fold}><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M9 4v16" /></svg></button><span>{route === 'chat' ? conversations.convs.find((c) => c.id === conversations.convId)?.title ?? 'New chat' : TITLES[route]}</span>{route === 'chat' && loopbackEngine(engine?.engine_url ?? settings?.engine_url) && <span className="connection-place">Local</span>}</header>}
       <main id="main" ref={mainRef} tabIndex={-1} className={stale ? 'stale' : undefined}>
         {needsToken && <div className="notice bad">This TensorFold Web needs its access token. <button className="btn sm" onClick={() => askTokenAgain().then((t) => { if (t) refreshEngine() })}>Enter the token</button></div>}
         {error && <div className="notice bad">{error}</div>}
         {stale && <div className="notice stale-banner" role="status">TensorFold Web server is not answering{lastSeen ? <> since {lastSeen.toLocaleTimeString()}; the figures below are {age != null && age < 120 ? `${age} s` : `${Math.round((age ?? 0) / 60)} min`} old</> : null}. Engine actions wait until it answers again.</div>}
         <ErrorBoundary name={TITLES[route]}>
-          {route === 'home' && <Home {...ctx} />}
-          {route === 'models' && <Models {...ctx} />}
+          {['models', 'teach', 'connect', 'fleet'].includes(route) && <ModelWorkspace {...ctx} />}
           {route === 'monitor' && <Monitor {...ctx} />}
 
           <div hidden={route !== 'chat'}><ErrorBoundary name="Chat"><Chat {...ctx} /></ErrorBoundary></div>
           {route === 'bench' && <Bench {...ctx} />}
-          {route === 'teach' && <Teach {...ctx} />}
-          {route === 'connect' && <Connect {...ctx} />}
           {route === 'settings' && <SettingsScreen {...ctx} />}
-          {route === 'fleet' && <Fleet {...ctx} />}
+          {route === 'fleet' && <Drawer title="Compute and clusters" close={closeFleet}><Fleet {...ctx} /></Drawer>}
         </ErrorBoundary>
       </main>
       <Palette open={palette} onClose={() => setPalette(false)} stale={stale} engine={engine} settings={settings} onTheme={onTheme} toast={toast} refreshEngine={refreshEngine} refreshSettings={refreshSettings} />

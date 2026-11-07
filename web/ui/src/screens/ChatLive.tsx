@@ -1,10 +1,8 @@
-// Chat's live figures, beside its replies: the reply being written (first token, speed) and what Cortheon's web
-// research did for a reply.
+// Show live reply timings and the searches and citations made by Cortheon.
 import { useEffect, useState } from 'react'
 import { liveRate } from '../liverate'
 
-// what Cortheon did for a reply (TensorFold 1.0.9 and later with --cortheon; from 1.0.10
-// pages_read counts only the pages read, not refused or failed fetches): its searches and the pages it read and cites
+// Cortheon page counts include only successful page reads, excluding refusals and fetch failures.
 export type Cortheon = { task?: string; searches?: number; pages_read?: number; sources?: string[] }
 export const secs = (s: number) => s < 1 ? `${Math.round(s * 1000)} ms` : `${s.toFixed(1)} s`
 export const rate = (r: number) => r >= 10 ? `${Math.round(r)}` : r.toFixed(1)

@@ -1,8 +1,4 @@
-// Chat's saves, one queue per conversation, against the server's revision numbers. A conversation's saves go out one
-// after the other, each naming the revision it was made on; the server refuses one made on an older revision (409),
-// so nothing can overwrite what was written since, whatever order requests travel in. A conversation not created yet
-// has a queue for its opening (a "generation") until it is; that queue is then the conversation's. `settled` waits
-// until every save sent so far has its answer: a conversation is read again only after that.
+// Serialize saves per conversation and server revision; wait for all replies before reopening a conversation.
 
 export type Saved = { id: string; rev?: number }
 export type SaveApi = {
@@ -34,8 +30,7 @@ export class Saves {
   read(id: string, rev: number | undefined): void {
     const q = this.queueFor(id)
     if (q.conflict) {
-      // after a conflict, saves still queued were made on the old text: they stay on the old queue, which drops
-      // them, and saving goes on from a fresh one on the revision just read
+      // Drop queued writes after a revision conflict and start a new queue from the newly read revision.
       this.byId.set(id, { id, rev, conflict: false, chain: Promise.resolve() })
       return
     }

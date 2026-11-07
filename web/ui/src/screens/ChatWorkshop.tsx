@@ -1,5 +1,4 @@
-// The Chat's workshop: tools the model may call, their calls checked against their schemas, results given back,
-// and replies held to JSON or to a JSON schema, checked as they arrive.
+// Validate tool calls and structured replies against their requested JSON schemas.
 import { useState } from 'react'
 import { type Schema } from '../schema'
 import { Field } from './ChatPresets'

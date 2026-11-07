@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { api, shortName, type BenchRunRow, type ConversationRow, type EngineInfo, type Model, type Settings } from './api'
-import { ROUTES, type Route } from './App'
+import { ROUTES, TITLES, type Route } from './navigation'
 import { rank } from './fuzzy'
 import { linkTo } from './route'
 
@@ -36,7 +36,7 @@ export default function Palette({ open, onClose, stale, engine, settings, onThem
 
   const commands = useMemo<Command[]>(() => {
     const go = (r: Route, label: string, k: string): Command => ({ id: `go-${r}`, label, hint: k, icon: 'go', run: () => { location.hash = `#${r}` } })
-    const out: Command[] = ROUTES.map((r, i) => go(r, `Go to ${r[0].toUpperCase()}${r.slice(1)}`, String(i + 1)))
+    const out: Command[] = ROUTES.map((r) => go(r, `Go to ${TITLES[r]}`, ''))
     // no engine commands while TensorFold Web does not answer: they would act on figures that may be out of date
     for (const m of stale ? [] : models.filter((m) => m.installed && m.runs_here)) {
       const running = !!engine?.model && shortName(m.id).startsWith(engine.model)
@@ -45,7 +45,7 @@ export default function Palette({ open, onClose, stale, engine, settings, onThem
       } })
     }
     if (!stale && engine?.owned && (engine.status === 'running' || engine.status === 'starting')) out.push({ id: 'stop', label: `Stop ${engine.model_name ?? engine.model ?? 'the AI'}`, icon: 'stop', run: async () => { try { await api.stop(); toast('Engine stopped'); await refreshEngine() } catch (e) { toast(String(e), 'bad') } } })
-    out.push({ id: 'checks', label: "Check this machine (setup and diagnostic)", icon: 'go', run: () => { location.hash = '#settings'; setTimeout(() => document.getElementById('diag-title')?.scrollIntoView({ block: 'center' }), 300) } })
+    out.push({ id: 'checks', label: "Check this machine (setup and diagnostic)", icon: 'go', run: () => { location.hash = '#settings/checks'; setTimeout(() => document.getElementById('diag-title')?.scrollIntoView({ block: 'center' }), 300) } })
     out.push({ id: 'new-chat', label: 'New conversation', icon: 'chat', run: () => { location.hash = '#chat'; dispatchEvent(new CustomEvent('tfs:new-conversation')) } })
     for (const t of ['light', 'dark', 'system'] as const) out.push({ id: `theme-${t}`, label: t === 'system' ? 'Follow the system look' : `Use the ${t} look`, icon: 'theme', run: () => onTheme(t) })
     // entries, offered once something is typed: each opens its own link
