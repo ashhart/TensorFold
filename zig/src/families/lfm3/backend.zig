@@ -12,7 +12,8 @@ const be = lanes.backend;
 const prefill_control = @import("prefill_control.zig");
 pub const greedy = @import("greedy.zig");
 
-pub const Options = struct { capacity: usize, chunk: usize = 128, streams: u32 = 8 };
+pub const prompt_rows = @import("lfm3_options").prompt_rows;
+pub const Options = struct { capacity: usize, chunk: usize = prompt_rows, streams: u32 = 8, defer_prompt_head: bool = @import("lfm3_options").defer_prompt_head };
 
 pub const Metal = struct {
     residency: ?mtl.ResidencySet.Follow = null,
@@ -23,13 +24,17 @@ pub const Metal = struct {
     images: ?@import("image_rows.zig").Provider = null,
     width: u32 = 1,
     caches: std.AutoHashMapUnmanaged(*lanes.Stream, *st.Cache) = .empty,
+    /// Prompt positions reached by streams whose prompt pass is stepping, one chunk a call.
+    fills: std.AutoHashMapUnmanaged(*lanes.Stream, usize) = .empty,
     /// Forward ms by window width, timed at load: the lane core weighs drafts against them.
     costs: [st.window_rows]lanes.config.Cost = undefined,
     timed: usize = 0,
 
     pub fn init(gpa: std.mem.Allocator, model: *Model, options: Options) !*Metal {
-        if (options.chunk == 0 or options.capacity == 0 or options.capacity > st.max_context or options.streams == 0)
+        if (options.chunk == 0 or options.chunk > 2048 or options.capacity == 0 or options.capacity > st.max_context or options.streams == 0)
             return error.InvalidLfmOptions;
+        if (@import("lfm3_options").nax_prompt) try model.enableNaxPrompt();
+        if (@import("lfm3_options").tiled_attention) try model.enableTiledAttention();
         const out = try gpa.create(Metal);
         errdefer gpa.destroy(out);
         out.* = .{ .gpa = gpa, .model = model, .options = options, .scratch = try st.Scratch.init(gpa, model.device, &model.config.layer_types, @max(options.chunk, st.batch_rows)) };
@@ -48,6 +53,7 @@ pub const Metal = struct {
             self.gpa.destroy(cache.*);
         }
         self.caches.deinit(self.gpa);
+        self.fills.deinit(self.gpa);
         self.scratch.deinit();
         self.gpa.destroy(self);
     }
@@ -95,7 +101,7 @@ pub const Metal = struct {
     }
 
     pub fn backend(self: *Metal) be.Backend {
-        return .{ .ptr = self, .vtable = &.{ .prefill = prefillFn, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .release = releaseFn, .reports_fill = true } };
+        return .{ .ptr = self, .vtable = &.{ .prefill = prefillFn, .prefill_step = prefillStepFn, .cancel_prefill = cancelPrefillFn, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .release = releaseFn, .reports_fill = true }, .chunk_invariant = true };
     }
 
     fn cast(ptr: *anyopaque) *Metal {
@@ -116,10 +122,30 @@ pub const Metal = struct {
 
     fn prefillFn(ptr: *anyopaque, stream: *lanes.Stream) !void {
         const self = cast(ptr);
+        try self.open(stream, true);
+        errdefer self.drop(stream);
+        while (!try self.chunk(stream, true, 0)) {}
+    }
+
+    /// One chunk of the prompt pass of at most `max_rows` rows (0: the engine's cut); true once the last row is done.
+    fn prefillStepFn(ptr: *anyopaque, stream: *lanes.Stream, max_rows: u32) !bool {
+        const self = cast(ptr);
+        if (!self.fills.contains(stream)) try self.open(stream, false);
+        errdefer self.drop(stream);
+        return self.chunk(stream, false, max_rows);
+    }
+
+    fn cancelPrefillFn(ptr: *anyopaque, stream: *lanes.Stream) !void {
+        const self = cast(ptr);
+        if (self.fills.get(stream)) |at| stream.keepInterruptedPrefill(@intCast(at));
+    }
+
+    /// The stream's cache and pass position: its kept prefix's state, else the start.
+    fn open(self: *Metal, stream: *lanes.Stream, interruptible: bool) !void {
         const ids = stream.prompt();
         if (stream.images.len != 0 and self.images == null) return error.Lfm3VisionNotImplemented;
         if (ids.len == 0 or ids.len + stream.max_new > self.options.capacity or self.caches.contains(stream)) return error.InvalidLfmPrompt;
-        try prefill_control.before(stream, 0);
+        if (interruptible) try prefill_control.before(stream, 0);
         const capacity = @min(self.options.capacity, ids.len + stream.max_new + st.window_rows);
         const cache = try self.newCache(capacity);
         errdefer self.gpa.destroy(cache);
@@ -137,24 +163,46 @@ pub const Metal = struct {
             stream.reuse_failed = at == 0;
         }
         prefill_control.completed(stream, at);
-        const image_rows = if (self.images) |provider| try provider.prepare(provider.ctx, stream, at) else null;
-        var mark: usize = 0;
-        while (at < ids.len) {
-            try prefill_control.before(stream, at);
-            var end: usize = @min(ids.len, at + self.options.chunk);
-            for (stream.chunks) |boundary| if (boundary > at) {
-                end = @min(end, boundary);
-                break;
-            };
-            while (mark < stream.reuse.marks.len and stream.reuse.marks[mark] <= at) mark += 1;
-            if (mark < stream.reuse.marks.len) end = @min(end, stream.reuse.marks[mark]);
-            try fwd.runWithImages(self.model, &self.scratch, &.{.{ .cache = cache, .rows = end - at }}, ids[at..end], false, .last, image_rows);
-            at = end;
-            prefill_control.completed(stream, at);
-            if (stream.reuse.hook) |hk| if (std.mem.indexOfScalar(u32, stream.reuse.marks, @intCast(at)) != null)
-                hk.at(hk.ptr, stream, @intCast(at));
+        try self.fills.put(self.gpa, stream, at);
+    }
+
+    /// Frees a pass that failed or was interrupted.
+    fn drop(self: *Metal, stream: *lanes.Stream) void {
+        releaseFn(self, stream);
+    }
+
+    fn chunk(self: *Metal, stream: *lanes.Stream, interruptible: bool, max_rows: u32) !bool {
+        const ids = stream.prompt();
+        const cache = try self.cacheOf(stream);
+        const at = self.fills.get(stream) orelse return error.UnknownLfmStream;
+        if (interruptible) try prefill_control.before(stream, at) else try prefill_control.cancelled(stream, at);
+        const rows: usize = if (max_rows == 0) self.options.chunk else @min(self.options.chunk, max_rows);
+        var end: usize = @min(ids.len, at + rows);
+        for (stream.chunks) |boundary| if (boundary > at) {
+            end = @min(end, boundary);
+            break;
+        };
+        for (stream.reuse.marks) |mark| if (mark > at) {
+            end = @min(end, mark);
+            break;
+        };
+        // Reuse observers need logits at marks, and at any chunk if cancellation or yield may call them.
+        const marked = std.mem.indexOfScalar(u32, stream.reuse.marks, @intCast(end)) != null;
+        const interrupted_observer = stream.reuse.hook != null and (stream.cancel_check != null or stream.yield_check != null);
+        const head: fwd.Head = if (prefill_control.deferHead(self.options.defer_prompt_head, end == ids.len, stream.reuse.hook != null and marked, interrupted_observer)) .none else .last;
+        const tiles: fwd.PromptTiles = if (self.model.prompt_nax != null) .nax else .baseline;
+        const image_rows = if (self.images) |provider| try provider.prepare(provider.ctx, stream, at, end) else null;
+        try fwd.runPromptWithImages(self.model, &self.scratch, &.{.{ .cache = cache, .rows = end - at }}, ids[at..end], head, image_rows, tiles);
+        prefill_control.completed(stream, end);
+        if (stream.reuse.hook) |hk| if (std.mem.indexOfScalar(u32, stream.reuse.marks, @intCast(end)) != null)
+            hk.at(hk.ptr, stream, @intCast(end));
+        if (end < ids.len) {
+            self.fills.getPtr(stream).?.* = end;
+            return false;
         }
+        _ = self.fills.remove(stream);
         try prefill_control.finished(stream);
+        return true;
     }
 
     fn firstFn(ptr: *anyopaque, stream: *lanes.Stream, position: u64) !u64 {
@@ -234,6 +282,7 @@ pub const Metal = struct {
 
     fn releaseFn(ptr: *anyopaque, stream: *lanes.Stream) void {
         const self = cast(ptr);
+        _ = self.fills.remove(stream);
         if (self.caches.fetchRemove(stream)) |entry| {
             entry.value.deinit();
             self.gpa.destroy(entry.value);

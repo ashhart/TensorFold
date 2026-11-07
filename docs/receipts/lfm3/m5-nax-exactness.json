@@ -1,0 +1,85 @@
+{
+ "tool": "tf-lfm3-nax-exact",
+ "device": "Apple M5 Ultra",
+ "routes": "lfm3-nax-prompt + lfm3-tiled-attention + split decode attention",
+ "comparison": "byte-identical logits and state",
+ "cases": {
+  "chunk_sizes_equal_chunks_of_2048_on_4500_tokens": [
+   1,
+   8,
+   9,
+   63,
+   64,
+   65,
+   127,
+   128,
+   129,
+   1000,
+   2047
+  ],
+  "cut_sets_on_4500_tokens": 5,
+  "cut_at_9_and_2048_prompt_lengths": [
+   2047,
+   2048,
+   2049,
+   2051,
+   4097,
+   8193
+  ],
+  "resumed_from_snapshot_prefixes": [
+   1,
+   9,
+   128,
+   1000,
+   2048,
+   2051
+  ],
+  "window_rows_vs_one_row_decode": {
+   "rows": [
+    2,
+    8,
+    9,
+    16,
+    32
+   ],
+   "prefixes": [
+    127,
+    1000,
+    4096
+   ]
+  }
+ },
+ "before_fix": {
+  "LFM3-1.7B-MLX-4bit": {
+   "passed": 34,
+   "failed": 9,
+   "failing": "window rows 9, 16, 32 at every prefix: tiled prompt attention ran on verification windows"
+  }
+ },
+ "after_fix": {
+  "LFM3-1.7B-MLX-4bit": {
+   "passed": 43,
+   "failed": 0
+  },
+  "LFM3-1.7B-MLX-6bit": {
+   "passed": 43,
+   "failed": 0
+  },
+  "LFM3-1.7B-MLX-8bit": {
+   "passed": 43,
+   "failed": 0
+  },
+  "LFM3-VL-2B-MLX-4bit": {
+   "passed": 43,
+   "failed": 0
+  },
+  "LFM3-VL-2B-MLX-6bit": {
+   "passed": 43,
+   "failed": 0
+  },
+  "LFM3-VL-2B-MLX-8bit": {
+   "passed": 43,
+   "failed": 0
+  }
+ }
+}

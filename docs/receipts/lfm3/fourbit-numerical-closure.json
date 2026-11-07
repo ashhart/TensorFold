@@ -1,0 +1,104 @@
+{
+  "scope": "Four-bit numerical discrepancy closure only; no new model/GPU run in this ledger",
+  "original_observations": {
+    "prompt_disjoint_entries": [
+      {
+        "cell": "VL-2B-4-code-513",
+        "row": 264,
+        "native_top": 207,
+        "ideal_top": 2993
+      },
+      {
+        "cell": "VL-2B-4-reasoning-257",
+        "row": 17,
+        "native_top": 296,
+        "ideal_top": 405
+      },
+      {
+        "cell": "VL-2B-4-reasoning-513",
+        "row": 17,
+        "native_top": 296,
+        "ideal_top": 405
+      }
+    ],
+    "prompt_distinct_causal_prefixes": 2,
+    "real_image_ownvision_disjoint_rows": [
+      34,
+      40
+    ],
+    "unique_fourbit_context_rows": 4
+  },
+  "reproduced_by_independent_prescribed_graph": [
+    {
+      "case": "VL4 reasoning row17",
+      "covers": [
+        "reasoning-257 row17",
+        "reasoning-513 row17"
+      ],
+      "checkpoint_and_first18_IDs_same": true,
+      "computed_vs_both_native_rows_exact": true,
+      "vocabulary_words_equal": 128000,
+      "stages_equal": 310,
+      "stage_BF16_bytes": 37349568,
+      "receipt_sha256": "83aa48d3db4511950219b655a1fed4fc7517c703798ac8bfa87cd5cc6f7fe9ae"
+    },
+    {
+      "case": "VL4 code-513 row264",
+      "vocabulary_words_equal": 128000,
+      "compared_native_stages": 0,
+      "receipt_sha256": "b2c50f0ce07fb33188a39aa64ab41973dd2055250b9244afc968ed6b7c91d150"
+    },
+    {
+      "case": "VL4 real-cat ownvision placeholders34/40",
+      "independent_projected_image_rows": 70,
+      "projected_BF16_words_equal": 143360,
+      "vocabulary_words_equal_per_head": 128000,
+      "heads": [
+        34,
+        40
+      ],
+      "native_image_activations_injected": false,
+      "receipt_sha256": "851dd5ab8904c37ef41655b543d81343f6320dcac762f0efdf2e01b656e810b5"
+    }
+  ],
+  "unresolved_original_fourbit_disjoint_cases": [],
+  "runtime_bug_found_in_these_cases": false,
+  "remaining_overlapping_maxima": {
+    "reasoning257_and513_row18": {
+      "native_maximum_set": [
+        22,
+        1018
+      ],
+      "ideal_maximum_set": [
+        1018
+      ],
+      "native_margin": 0.0,
+      "ideal_margin": 0.0625,
+      "interpretation": "Documented rounding/tie difference, not an unresolved disjoint maximum. Existing lowest-index greedy policy is retained; no new tolerance is introduced."
+    },
+    "other_historical_image_overlap_rows": "Retained in real-image-fp64.json with both margins; not silently converted to an ideal-FP64 exact match."
+  },
+  "gate_recommendation": "The observed four-bit disjoint-output investigation is closed: every distinct case is reproduced by an independent CPU graph with named production SFU evaluations and rounding sites. No runtime arithmetic fix is supported by these observations. Review the recorded rounding explanation and ideal-FP64 margins; do not invent a new threshold or require new experiments to re-explain already reproduced cases.",
+  "actual_fourbit_numerical_proof_still_needed_for_original_disjoints": [],
+  "review_and_final_qualification_remaining": [
+    "Maintainer acceptance of the stated expected-rounding interpretation and recorded ideal-FP64 margins remains a review decision.",
+    "Scoped reproduction is not universal all-input/all-position proof; current final-artifact operator/state/serving/CI qualification must keep its own exact source/binary scope.",
+    "Performance has not passed the required same-machine standard comparison; keep it separate from numerical correctness.",
+    "No 6/8-bit qualification is advanced or claimed."
+  ],
+  "not_claimed": [
+    "Ideal FP64 bitwise or top1 equality",
+    "A blanket tie waiver",
+    "Range-replay coverage beyond existing registered range tests",
+    "An accepted universal model-fidelity tolerance",
+    "A speed pass"
+  ],
+  "source_receipts_sha256": {
+    "all-fp64-top-differences.json": "7abcce70668e3d60b27ac1d7a60e199f84b5ca214b6a73ec0a65f75fbb057477",
+    "real-image-fp64.json": "8a8ba82daec4ac1def463860f2be8b071e80b2f3094d87180bd74bbd45a30191",
+    "six-width-fp64-prompt.json": "289a01a403ee6dae7346d2e9199411a2588504d906283da8122fd4d99ec0d10c",
+    "six-width-fp64-decode.json": "6fa5fa693f9fcf1bf094c21f7a58a84d961dde4c4b674c64fdb011f6ea18ec2c"
+  },
+  "accepted_threshold": null,
+  "fidelity_pass": null
+}

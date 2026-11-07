@@ -12,6 +12,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Conversation states on disk try one shorter compatible state after a refused read before prefilling from the start. Failed reads still name their error in the log.
 - Conversation states on disk try one shorter compatible state after a refused read before prefilling from the start. Failed reads still name their error in the log (#2442).
 
+- LFM3-VL-2B on Metal: serve the official MLX 4-, 6- and 8-bit checkpoints with the native image tower and projector. LFM3 also supports stepped prefill under `--decode-share`; development-only tensor-unit prompt projection and tiled attention remain off by default (#1502, part of #1491). Thanks to @BlivionIaG.
+
 - Internal: `families/glm/cuda_engine.zig` goes from 600 to 547 lines; GLM's CUDA chunk gate (`gate`, `shared`, `Wait`) lives in `cuda_engine_gate.zig`, unchanged (#2429).
 
 - Internal: `zig/src/native/metal.zig` goes from 593 to 546 lines; six helpers the Metal open paths share (`chip`, `deviceName`, `prefillStep`, `modelContext`, `gibBytes` and the chip classes) live in `metal_shared.zig`, unchanged (#2425).

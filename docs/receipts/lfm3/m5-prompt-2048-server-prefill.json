@@ -1,0 +1,58 @@
+{
+  "scope": "Server-reported prompt-pass prefill walltime from existing paired cold128/2048 experiment; separate from clientTTFT and GPU time",
+  "source_receipt_commit": "b3081add1",
+  "cases": [
+    {
+      "prompt_tokens": 2048,
+      "raw_prefill_seconds": [
+        0.551959417,
+        0.4683235,
+        0.467633292,
+        0.5516325
+      ],
+      "baseline_median_seconds": 0.5517959585,
+      "candidate_median_seconds": 0.467978396,
+      "baseline_prompt_tokens_per_second": 3711.5168541054113,
+      "candidate_prompt_tokens_per_second": 4376.2703951829435,
+      "relative_time_reduction": 0.15189955853944503,
+      "raw_sha256": {
+        "text-4-0-public.cold-2048.json": "a104164b27d9d2e5ad7a71c16d95650fccd905b164dd048960ccc22879c6f14c",
+        "text-4-1-candidate.cold-2048.json": "4227598bcd7b46673406e7c1b73a4eaba6861155f8017fc822b1a5a246376968",
+        "text-4-2-candidate.cold-2048.json": "102a1e3668892e08908f7bd5e6ccc3fddeb07aa2db0ddc2a88fe997353c77668",
+        "text-4-3-public.cold-2048.json": "d67e864d18e53f789b1a990a08ec56754d74598588c93e690766ee2f76870576"
+      }
+    },
+    {
+      "prompt_tokens": 8192,
+      "raw_prefill_seconds": [
+        2.43307025,
+        2.043556417,
+        2.042926916,
+        2.431910291
+      ],
+      "baseline_median_seconds": 2.4324902704999998,
+      "candidate_median_seconds": 2.0432416665,
+      "baseline_prompt_tokens_per_second": 3367.7421444798338,
+      "candidate_prompt_tokens_per_second": 4009.3152632466636,
+      "relative_time_reduction": 0.1600206211390064,
+      "raw_sha256": {
+        "text-4-0-public.cold-8192.json": "9b1096973cb60264acb2c5cafd7a8fcd6db2b3b6bc953e838edcafb822b7d144",
+        "text-4-1-candidate.cold-8192.json": "26ed4735844d414887827df22a5d9cabaf5982d9c77f48ff35020e47dd665777",
+        "text-4-2-candidate.cold-8192.json": "f183d60421549194a89342b89781d30c9ce60324f834d99b3594bcabfce3f81e",
+        "text-4-3-public.cold-8192.json": "ccd96a59d52a7567b4ee5929fc2723681194e056006aed34b9ea6271bff82228"
+      }
+    }
+  ],
+  "order": [
+    128,
+    2048,
+    2048,
+    128
+  ],
+  "samples_per_route": 2,
+  "no_new_runs": true,
+  "limitations": [
+    "Same boundedprivatebinary andTEXT4scope as referencedreceipt.",
+    "No claim of default-readiness, broadfidelity, or GPU-only timing."
+  ]
+}
