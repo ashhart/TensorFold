@@ -250,7 +250,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .imports = &.{ .{ .name = "lanes", .module = lanes }, .{ .name = "fabric", .module = fabric }, .{ .name = "core", .module = mods.engine } },
+        .imports = &.{ .{ .name = "lanes", .module = lanes }, .{ .name = "fabric", .module = fabric }, .{ .name = "core", .module = mods.engine }, .{ .name = "canon", .module = @import("cuda_engines.zig").canonModule(b, target, optimize) } },
     });
     // The engine: kernel sources compiled at run time (MLX's options), the families, the lane core.
     const sources = mods.sources;
@@ -301,6 +301,13 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .{ .name = "tf-qwen35-check", .path = "zig/tests/qwen35_check.zig", .about = "Qwen3.5-2B checkpoint and native operations" },
         .{ .name = "tf-qwen35-forward", .path = "zig/tests/qwen35_forward.zig", .about = "Qwen3.5-2B native teacher-forced logits" },
         .{ .name = "tf-qwen35-exact", .path = "zig/tests/qwen35_exact.zig", .about = "Qwen3.5-2B forward and committed-state exactness" },
+        .{ .name = "tf-lfm3-forward", .path = "zig/tests/lfm3_forward.zig", .about = "LFM3 native teacher-forced BF16 logits" },
+        .{ .name = "tf-lfm3-exact", .path = "zig/tests/lfm3_exact.zig", .about = "LFM3 prompt, window, snapshot and concurrent cache equality" },
+        .{ .name = "tf-lfm3-profile", .path = "zig/tests/lfm3_profile.zig", .about = "LFM3 calibrated GPU class costs with final-logit byte identity" },
+        .{ .name = "tf-lfm3-dual-project", .path = "zig/tests/lfm3_dual_project.zig", .about = "Actual checkpoint paired projection byte comparison" },
+        .{ .name = "tf-lfm3-draw-tune", .path = "zig/tests/lfm3_draw_tune.zig", .about = "Diagnostic exact CPU greedy reduction timing" },
+        .{ .name = "tf-lfm3-row-tune", .path = "zig/tests/lfm3_row_tune.zig", .about = "Diagnostic byte-preserving single-row projection launch sweep" },
+        .{ .name = "tf-lfm3-project", .path = "zig/tests/lfm3_project.zig", .about = "LFM3 production projection outputs on saved BF16 input rows" },
         .{ .name = "tf-lfm2-forward", .path = "zig/tests/lfm2_forward.zig", .about = "LFM2-MoE native teacher-forced logits" },
         .{ .name = "tf-lfm2-bench", .path = "zig/tests/lfm2_bench.zig", .about = "LFM2-MoE prompt-chunk and one-row decode timing" },
         .{ .name = "tf-lfm2-exact", .path = "zig/tests/lfm2_exact.zig", .about = "LFM2-MoE prompt chunks, windows and committed-state exactness" },
@@ -329,6 +336,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .{ .name = "tf-moss-image", .path = "zig/tests/moss_image.zig", .about = "MOSS-Image on a reference case: each step's two branches compared, then the guided schedule timed and decoded" },
         .{ .name = "tf-moss-image-encoder", .path = "zig/tests/moss_image_encoder.zig", .about = "MOSS-Image's prompt encoder on a reference case: the ids checked, each step gated against float32, then timed" },
         .{ .name = "tf-moss-image-decoder", .path = "zig/tests/moss_image_decoder.zig", .about = "MOSS-Image's image decoder on latents, gated against float64 beside torch float32, then timed" },
+        .{ .name = "tf-moss-image-blocks", .path = "zig/tests/moss_image_blocks.zig", .about = "MOSS-Image's transformer on one step, each block alone gated against float32, repeated byte for byte" },
         .{ .name = "tf-glm-attn-probe", .path = "zig/tests/glm_attn_probe.zig", .about = "GLM-5.3-Flash's dense latent attention kernels on given inputs (scores, probabilities, outputs)" },
         .{ .name = "tf-moe-bench", .path = "zig/tests/moe_bench.zig", .about = "Routed-expert prompt kernels from .metal files on a skewed routing: chained speed, bits against the first" },
         .{ .name = "tf-mm-bench", .path = "zig/tests/mm_bench.zig", .about = "Prompt matmul kernels from .metal files: chained speed at one shape, bits against the first, error against fp64" },
@@ -463,6 +471,8 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     const cluster_tests = b.step("test-cluster", "Cluster tests: fake nodes and fabric, K3 planning (TF_K3_DIR), Metal sink");
     cluster_tests.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cluster })).step);
     cluster_tests.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cluster_metal })).step);
+    // canon.zig is its own module, so a cluster-rooted test does not run these.
+    cluster_tests.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = @import("cuda_engines.zig").canonModule(b, target, optimize) })).step);
 
     // These module tests include Metal device checks when the macOS host has a GPU.
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = metal })).step);
@@ -482,8 +492,13 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     const lfm2_dspark = b.addRunArtifact(b.addTest(.{ .root_module = engine, .filters = &.{"lfm2 dspark:"} }));
     b.step("test-lfm2-dspark", "LFM2's taps for a drafter: the tap kernel on this Mac's GPU").dependOn(&lfm2_dspark.step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = lanes })).step);
-    // the fake fabric maps its windows with mmap: the Macs' RDMA, not Windows
-    if (target.result.os.tag != .windows) test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = fabric })).step);
+    // the fake fabric maps windows with mmap (the Macs' RDMA, not Windows); verbs is its own module, with its own root
+    if (target.result.os.tag != .windows) {
+        test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = fabric })).step);
+        const verbs_tests = b.addRunArtifact(b.addTest(.{ .root_module = @import("tp.zig").verbsModule(b, target, optimize) }));
+        b.step("test-verbs", "verbs.zig and verbs_abi.zig, outside the fabric module").dependOn(&verbs_tests.step);
+        test_step.dependOn(&verbs_tests.step);
+    }
     const dashboard = b.createModule(.{ .root_source_file = b.path("zig/src/server/dashboard_test.zig"), .target = target, .optimize = optimize, .link_libc = true });
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = dashboard })).step);
     const kimi_test = b.step("test-k3", "Kimi K3's host-side unit tests (no GPU work)");
@@ -507,6 +522,7 @@ pub fn metalEngineModules(b: *std.Build, target: std.Build.ResolvedTarget, optim
     metal.linkSystemLibrary("objc", .{});
     const lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = target, .optimize = optimize, .link_libc = true });
     const fabric = b.createModule(.{ .root_source_file = b.path("zig/src/fabric/fabric.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    fabric.addImport("verbs", @import("tp.zig").verbsModule(b, target, optimize));
     const sources = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/sources.zig") });
     // Living Weights' family-neutral learner, which Nemotron's lessons and the server's view of them share
     const living = b.createModule(.{ .root_source_file = b.path("zig/src/living/living.zig"), .target = target, .optimize = optimize, .link_libc = true });

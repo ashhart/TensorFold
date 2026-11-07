@@ -20,6 +20,9 @@
 
 <!-- A change that cannot reach inference (documentation, CI, clients, the app) writes "n/a" and why here and skips the inference checklist. -->
 
+- Main against branch: cells and numbers, or why they can't be run:
+- Boxes it reaches:
+- New switch? Default, accepted values, profile row:
 - Environment, with the TensorFold commit, Zig and backend toolchain, machine and GPU, checkpoint and revision:
 - Paths and platforms the change reaches, which I ran and which I could not:
 - Exactness, from `tools/bench_concurrent.py --alone --serial` or `token_sha` against `"draft": false`:

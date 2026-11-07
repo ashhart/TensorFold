@@ -441,6 +441,10 @@ test "zero grant: GLM Metal MTP resumes after a long priced skip" {
     var e: Engine = undefined;
     e.w = &w;
     e.ep = null;
+    const objc = @import("metal").objc;
+    const no_arch = objc.msg(objc.Id, objc.class("NSObject"), "new", .{}); // facts() asks it for tensor units, no GPU
+    defer objc.release(no_arch);
+    e.device = .{ .id = no_arch };
     var slots: [16]slots_mod.Slot = undefined;
     var sl: slots_mod.Slots = undefined;
     sl.e = &e;
@@ -457,6 +461,10 @@ test "shared head costs: GLM Metal MTP retains costed copy grants" {
     var e: Engine = undefined;
     e.w = &w;
     e.ep = null;
+    const objc = @import("metal").objc;
+    const no_arch = objc.msg(objc.Id, objc.class("NSObject"), "new", .{}); // facts() asks it for tensor units, no GPU
+    defer objc.release(no_arch);
+    e.device = .{ .id = no_arch };
     var slots: [16]slots_mod.Slot = undefined;
     var sl: slots_mod.Slots = undefined;
     sl.e = &e;

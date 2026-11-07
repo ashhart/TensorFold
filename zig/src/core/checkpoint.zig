@@ -1,4 +1,4 @@
-//! A model folder's safetensors as one name space (every backend's index): shard files, tensors mapped, leftovers refused.
+//! A model folder's safetensors as one namespace (every backend's index): shards, mapped tensors, leftovers refused.
 
 const std = @import("std");
 const Io = std.Io;
@@ -7,13 +7,14 @@ const index_format = @import("checkpoint_index.zig");
 const prefetching = @import("checkpoint_prefetch.zig");
 
 pub const cache = @import("checkpoint_cache.zig");
+pub const direct = @import("checkpoint_direct.zig");
 pub const Tensor = st.Tensor;
 pub const DType = st.DType;
 pub const Ahead = prefetching.Ahead;
 pub const max_readers = prefetching.max_readers;
 pub const loadReaders = prefetching.configured;
 
-/// The checkpoint's shard paths in name order: model.safetensors.index.json's weight map, else every model*.safetensors.
+/// The checkpoint's shard paths by name: model.safetensors.index.json's weight map, else every model*.safetensors.
 pub fn shardFiles(gpa: std.mem.Allocator, io: Io, dir: []const u8) ![][:0]u8 {
     var names: std.ArrayList([:0]u8) = .empty;
     errdefer {
@@ -69,6 +70,8 @@ pub const Checkpoint = struct {
 
     /// Prepended to the names get, has and skip take ("language_model." for Bolt's LM beside its vision tower).
     scope: []const u8 = "",
+    /// Copies `get` returns in place of the mapping's bytes, by full name (checkpoint_direct's current layer).
+    copies: ?*const std.StringHashMapUnmanaged([]const u8) = null,
 
     fn scoped(self: *const Checkpoint, buf: *[320]u8, name: []const u8) ![]const u8 {
         if (self.scope.len == 0) return name;
@@ -115,8 +118,13 @@ pub const Checkpoint = struct {
         var buf: [320]u8 = undefined;
         const name = try self.scoped(&buf, short);
         for (self.files.items) |*f| if (f.get(name)) |t| {
-            try self.used.put(self.gpa, f.names.getKey(name).?, {});
-            return t;
+            const key = f.names.getKey(name).?;
+            try self.used.put(self.gpa, key, {});
+            var out = t;
+            if (self.copies) |c| if (c.get(key)) |bytes| {
+                out.bytes = bytes;
+            };
+            return out;
         };
         std.log.err("checkpoint has no tensor {s}", .{name});
         return error.MissingTensor;

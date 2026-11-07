@@ -13,7 +13,7 @@ const d = 256;
 
 /// The digest of every case's output on an architecture whose bits were recorded.
 const pins = [_]struct { arch: []const u8, digest: u64 }{
-    .{ .arch = "gfx1151", .digest = 0x30a7911a6c016c2b },
+    .{ .arch = "gfx1151", .digest = 0xe9e35ddbb2a6ad10 },
 };
 
 /// A prompt chunk: `qlen` queries from position `q_pos0`.

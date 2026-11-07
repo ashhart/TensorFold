@@ -27,10 +27,7 @@ pub const seedFor = lanes.sampling.seedFor;
 pub const LogprobRow = lanes.LogprobRow;
 
 /// The request's stop strings, checked on the engine's thread after each committed token (the server decodes the tail).
-pub const Stop = struct {
-    ctx: *anyopaque,
-    check: *const fn (ctx: *anyopaque, emitted: []const u32) bool,
-};
+pub const Stop = struct { ctx: *anyopaque, check: *const fn (ctx: *anyopaque, emitted: []const u32) bool };
 
 pub const CallGate = @import("engine_request_controls.zig").CallGate;
 pub const Structure = @import("engine_request_controls.zig").Structure;
@@ -124,6 +121,10 @@ pub const SpeechRequest = @import("speech_api.zig").SpeechRequest;
 pub const SpeechResult = @import("speech_api.zig").SpeechResult;
 pub const SpeechInfo = @import("speech_api.zig").SpeechInfo;
 pub const SpeechSubmitError = error{ Closed, Busy, InvalidRequest, Unsupported };
+pub const ImageRequest = @import("image_api.zig").ImageRequest;
+pub const ImageResult = @import("image_api.zig").ImageResult;
+pub const ImageInfo = @import("image_api.zig").ImageInfo;
+pub const ImageSubmitError = error{ Closed, Busy, InvalidRequest, Unsupported };
 
 pub const Reason = enum { stop, length, cancelled, failed, silence };
 pub const speech_guard = @import("speech_guard.zig");
@@ -165,6 +166,8 @@ pub const Info = struct {
     embeddings: ?lanes.embedding.Info = null,
     readouts: ?lanes.readout.Info = null, // non-null: the engine answers readout requests and nothing else
     speech: ?SpeechInfo = null,
+    /// The engine serves one picture a request through `submit_image`; null: no image capability.
+    image: ?ImageInfo = null,
     lanes: u32 = 1,
     /// Server preflight prompt-plus-reply limit (0: the engine owns admission).
     context_window: u32 = 0,
@@ -225,6 +228,13 @@ pub const Info = struct {
     /// A byte budget each request promises its caches from as it is admitted (null: none); never beside `admit`.
     ledger: ?Ledger = null,
 
+    pub const Capability = @import("engine_capabilities.zig").Capability;
+
+    /// One loaded flag for both discovery and request checks; optional user features report presence.
+    pub inline fn capability(i: Info, comptime key: Capability) bool {
+        return @import("engine_capabilities.zig").read(i, key);
+    }
+
     /// What a lane engine's streams enforce themselves (core/lanes/stream.zig): loop guards and answer limits.
     pub fn ofLanes(i: Info) Info {
         var out = i;
@@ -234,10 +244,7 @@ pub const Info = struct {
     }
 };
 
-pub const Admit = struct {
-    ctx: *anyopaque,
-    fits: *const fn (ctx: *anyopaque, prompt: u32, max_tokens: u32) bool,
-};
+pub const Admit = struct { ctx: *anyopaque, fits: *const fn (ctx: *anyopaque, prompt: u32, max_tokens: u32) bool };
 
 /// The bytes the lane host may promise at once, and what one request's caches cost at most (core/kv_ledger.zig).
 pub const Ledger = struct {
@@ -246,19 +253,8 @@ pub const Ledger = struct {
     cost: *const fn (ctx: *anyopaque, prompt: u32, max_tokens: u32) u64,
 };
 
-pub const PromptCacheCapacity = struct { budget_bytes: u64, minimum_state_bytes: u64 };
-
-pub const PromptCachePlan = struct {
-    source: enum { physical_footprint, explicit, metal_working_set },
-    budget_bytes: u64,
-    explicit_budget: bool = false,
-    over_cap: ?bool = null,
-    ram_bytes: ?u64 = null,
-    ready_footprint_bytes: ?u64 = null,
-    cap_bytes: ?u64 = null,
-    room_bytes: ?u64 = null,
-    margin_bytes: ?u64 = null,
-};
+pub const PromptCacheCapacity = @import("engine_cache_plan.zig").PromptCacheCapacity;
+pub const PromptCachePlan = @import("engine_cache_plan.zig").PromptCachePlan;
 
 /// A native family's model type, weight formats and explicit raw-text capability.
 pub const Family = struct {
@@ -380,10 +376,7 @@ pub const Opened = struct {
 pub const Memory = struct { active: u64 = 0, cache: u64 = 0, peak: u64 = 0, pinned: u64 = 0, limit: ?u64 = null };
 
 /// A backend's words for its own refusals (a request it cannot serve); null: the error's name.
-pub const Explain = struct {
-    ctx: ?*anyopaque = null,
-    text: *const fn (ctx: ?*anyopaque, err: anyerror) ?[]const u8,
-};
+pub const Explain = struct { ctx: ?*anyopaque = null, text: *const fn (ctx: ?*anyopaque, err: anyerror) ?[]const u8 };
 
 /// A backend's own memory counts for LaneHost; read from HTTP threads, so it must not touch the GPU.
 pub const MemorySource = struct {
@@ -428,6 +421,7 @@ pub const Engine = struct {
         info: *const fn (ctx: *anyopaque) Info,
         submit: *const fn (ctx: *anyopaque, id: Id, request: *const Request, sink: Sink) SubmitError!void,
         submit_speech: ?*const fn (*anyopaque, Id, *const SpeechRequest, Sink) SpeechSubmitError!void = null,
+        submit_image: ?*const fn (*anyopaque, Id, *const ImageRequest, Sink) ImageSubmitError!void = null,
         /// Ends a request between rounds; its ``finished`` (cancelled) still arrives. Unknown ids are ignored.
         cancel: *const fn (ctx: *anyopaque, id: Id) void,
         status: *const fn (ctx: *anyopaque, out: *Status, stream_tokens: []u32) void,
@@ -473,6 +467,11 @@ pub const Engine = struct {
     }
     pub fn submitSpeech(e: Engine, id: Id, request: *const SpeechRequest, sink: Sink) SpeechSubmitError!void {
         const f = e.vtable.submit_speech orelse return error.Unsupported;
+        return f(e.ctx, id, request, sink);
+    }
+    /// The image hook, or Unsupported when this engine serves no picture.
+    pub fn submitImage(e: Engine, id: Id, request: *const ImageRequest, sink: Sink) ImageSubmitError!void {
+        const f = e.vtable.submit_image orelse return error.Unsupported;
         return f(e.ctx, id, request, sink);
     }
     pub fn cancel(e: Engine, id: Id) void {
@@ -559,6 +558,8 @@ pub const LoneHooks = struct {
 
 /// The lane core served to the HTTP threads (lane_host.zig).
 pub const LaneHost = @import("lane_host.zig").LaneHost;
+/// TENSORFOLD_PREFILL_* values the lane host would misread, refused at serve start (lane_host_env.zig).
+pub const prefill_env = @import("lane_host_env.zig");
 /// An opt-in family round planner for the lane host, in place of its `prefill_step` chunks (lane_rounds.zig).
 pub const Rounds = @import("lane_host.zig").Rounds;
 
@@ -592,4 +593,5 @@ pub const save_guard = @import("save_guard");
 
 test {
     _ = @import("engine_api_test.zig");
+    _ = @import("engine_capabilities.zig");
 }

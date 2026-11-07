@@ -29,13 +29,16 @@ For agent-assisted contributions, read the [TensorFold contributor skill](SKILL.
 | Spark-X2.6-4B | [Native CUDA](spark-x2.6-4b-cuda.md), [native Metal, the bf16 release, contexts to 1M](spark-x2.6-4b-metal.md) |
 | Nanbeige4.3-33B | [Native Metal, the bf16 and INT4 releases, the Llama family](nanbeige-4.3-33b-metal.md) |
 
+[Persisted serving-state identities](persisted-serving-keys.md) lists the disk owners, their compatibility keys and stale-state host checks.
+
 ## Capability floor
 
 The native release includes CUDA kernels for sm_80, sm_86, sm_120 and sm_121. This is a build target list, not
 per-card model qualification. Nemotron MLX 4-bit has been checked on GB10, RTX 3090 and RTX PRO 6000.
 The A100 (sm_80) has [kernel-check evidence](../../CHANGELOG.md#1012) from #846, but no served checkpoint on record;
 it is not model-qualified. See [qualified models](../../README.md#qualified-models) for the measured scope.
-`tensorfold info REPO` prints a checkpoint's memory floor: its weights plus a 2 GiB runtime margin.
+`tensorfold info REPO` prints a checkpoint's memory floor: its weights plus a 2 GiB runtime margin. On macOS, a
+Flash Next (`qwen4_exp`) checkpoint instead prints its startup and cold pack budgets.
 
 | Engine | Floor |
 | --- | --- |

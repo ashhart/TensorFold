@@ -1,4 +1,4 @@
-//! TensorFold's tokenizer for Hugging Face tokenizer.json files: encode equals tokenizers' encode(text, add_special_tokens=False).
+//! TensorFold tokenizer for HF tokenizer.json files: encode equals tokenizers' encode(text, add_special_tokens=False).
 const std = @import("std");
 pub const kimi_tiktoken = @import("tiktoken.zig");
 pub const unicode = @import("unicode.zig");

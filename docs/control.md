@@ -73,7 +73,7 @@ tensorfold service install "/cached/model with spaces" --name code \
 That variable is the Python engine's memory budget, in GiB. The native engine does not read it. GLM on a Mac reads
 `GLM_LOAD_LIMIT_GB`, in GB, and the CUDA build reads `TENSORFOLD_CUDA_MEMORY_LIMIT_GB`.
 `--spill-gib` is @gilby's disk spill from [#68](https://github.com/ashhart/TensorFold/pull/68), and `--vision` is
-[image input](vision.md); the native binary refuses both.
+[image input](vision.md).
 Repeat `--arg` for extra literal `serve` arguments. Managed endpoint flags stay on their own options.
 The bind address defaults to `127.0.0.1`. A non-loopback address needs `--allow-network`.
 That acknowledgement leaves authentication to a proxy you configure separately.

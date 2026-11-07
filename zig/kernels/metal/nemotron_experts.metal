@@ -94,7 +94,7 @@ inline void tf_rowdot_rows(const device uint8_t* w, const device bfloat* sc, con
     for (int b = 0; b < MB; b++) acc[b][j] = simd_sum(acc[b][j]);
 }
 
-// One threadgroup an (expert, 8 outputs): its member pairs MB at a time, then one at a time (UP: x rows by token, relu2).
+// One threadgroup an (expert, 8 outputs): member pairs MB at a time, then one at a time (UP: x rows by token, relu2).
 template <int K, int N, int GS, int RPS, int SG, int TOPK, int MB, bool UP>
 [[kernel]] void tf_experts_rows(
   const device bfloat16_t* X [[buffer(0)]],

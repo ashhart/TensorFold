@@ -202,11 +202,12 @@ pub fn kept(comptime F: type, loaded: anytype, paged: ?Plan, o: api.Open, room: 
 }
 
 /// The store keeps a state a slot, the slots made now in one device buffer; a family without them, its own budget.
-pub fn store(comptime F: type, s: *api.prompt_cache.Store, target: anytype, k: Kept) !void {
+pub fn store(comptime F: type, s: *api.prompt_cache.Store, loaded: anytype, k: Kept) !void {
+    s.over = @import("cuda_prompt_pages.zig").hint(F, loaded); // a state past the budget: the setting keeping it
     if (comptime !@hasDecl(F, "snap_slots")) return;
-    if (comptime @hasDecl(F, "snap_place")) F.snap_place(target, k.host);
+    if (comptime @hasDecl(F, "snap_place")) F.snap_place(loaded.target, k.host);
     s.most = if (k.host) k.most else k.snaps;
-    _ = try F.snap_slots(target, k.snaps);
+    _ = try F.snap_slots(loaded.target, k.snaps);
 }
 
 /// The startup line's streams and cache.

@@ -39,7 +39,7 @@ The `profiles` object contains `default`, `available`, and `registered_switches`
 backend, model types, class, effect, evidence link number, syntax, and stable fallback. A null fallback means the
 profile supplies no value. Registry metadata comes directly from the same table the readers use.
 
-Initial coverage is:
+Coverage includes:
 
 - Qwen3.5 dense/MoE on CUDA: `TF_QWEN_KV_PAGES`, `TF_QWEN_KV_PAGES_ALL`, `TF_QWEN_KV_SHARE`.
 - GLM on CUDA: `TF_KV_PAGES`, `TF_GLM_KV_HOST`, `TF_GLM_KV_HOST_SHARED`, `TF_GLM_PROMPT_TAIL`.
@@ -58,6 +58,39 @@ than choosing a policy, and its reader keeps its own default.
 A reader that resolves its switch by name uses `core.profile.lookup`: a registered name comes from this registry, and
 every other name keeps the libc lookup and default it had. GLM's rank settings read that way, and their fingerprint
 still carries each resolved value, so ranks that disagree still stop before weights load.
+
+## Additional arithmetic and learning settings
+
+[#2370](https://github.com/ashhart/TensorFold/issues/2370) adds metadata without adding defaults:
+
+| Registry id | Backend and family | Class | Explicit values reported as overrides |
+| --- | --- | --- | --- |
+| `TENSORFOLD_KOLIBRI_KV_PAGES` | CUDA, Kolibri-1 | arithmetic | Exact `0`, which disables otherwise requested pages |
+| `TENSORFOLD_DORY_KV_PAGES` | CUDA, Dory | arithmetic | Every present value except exact `0`, including empty text |
+| `GEMMA_DRAFT_BF16` | Metal, Gemma 4 | debug | `all`, `fc`, `self_attn.q_proj`, `self_attn.k_proj`, `self_attn.o_proj`, `mlp.gate_proj`, `mlp.down_proj` |
+| `TF_ANE_COLUMNS` | Metal, Qwen3.5 dense adapter | experimental | Nonzero columns; admission still decides whether the share is supported |
+| `TF_PROMPT_ROWS` | Metal, Qwen3.5 dense/MoE adapter | arithmetic | Every explicit native prompt width |
+| `slide_learn_mode` | CUDA Nemotron/Qwen3.5 and Metal Nemotron, as its `scopes` list states | experimental | The real member names described below |
+
+The grouped slide row has `backend: "multiple"` and exact family/backend pairs in `scopes`.
+Ordinary rows retain their single `backend`/`families` scope and have null `scopes` and `members`.
+Group `members` lists `TF_SLIDE_POCKET_KEY` with `auto` reporting syntax and `TF_SLIDE_EDIT`,
+`TF_SLIDE_PROBE`, `TF_SLIDE_ROUTED` with `present` syntax. Presence counts even for empty text or `0`.
+The startup line prints each real member name, never a `slide_learn_mode` environment assignment.
+Lookup of a member resolves its own raw bytes; there is no synthetic group value and no group default.
+The CUDA Qwen learner uses the pocket key but has no routed sites or edit/probe modes.
+Those three members therefore carry a Nemotron-only `families` restriction and are omitted from Qwen startup output.
+The CUDA Qwen MoE adapter does not expose a learner, so it is outside the group; the ANE share is dense-only.
+
+`present` reports any explicit value; `not_zero` reports every value except exact `0`.
+Gemma's listed values identify the first member of each drafter stack; `1` is not a BF16 selector.
+These entries describe potentially changed arithmetic or learning, not new fidelity qualifications.
+See [environment validation](environment.md) for strict numeric forms and deliberately lenient switches.
+
+Kept-state identities include each applicable non-identical row. A grouped row hashes its real member names
+and values in their family/backend scope, rather than looking up the synthetic group name. Explicit prompt
+widths remain distinct from the default and from each other. Dory's unset and exact `0` share the disabled
+identity; every other value shares the enabled identity. Existing count, exact-one and auto encodings are unchanged.
 
 ## Startup reporting
 

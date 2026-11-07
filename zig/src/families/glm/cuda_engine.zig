@@ -18,10 +18,9 @@ const mm_mod = @import("cuda_mm.zig");
 const dflash = @import("dflash.zig");
 const prof_mod = @import("cuda_prof.zig");
 const pages_mod = @import("cuda_pages.zig");
+const l2pf_mod = @import("cuda_l2pf.zig");
+const prompt_pair = @import("cuda_prompt_pair.zig");
 pub const Options = @import("cuda_engine_types.zig").Options;
-
-/// Rank 0's own word on its request (cancelled or not); the other ranks have none and hear rank 0's.
-pub const Cancel = struct { ptr: ?*anyopaque, check: *const fn (?*anyopaque) bool };
 
 /// The most drafts a chain holds (decode.DepthPolicy's top depth).
 pub const max_drafts = 3;
@@ -46,6 +45,7 @@ pub const Kept = types.Kept;
 const Seq = types.Seq;
 const Snap = types.Snap;
 pub const Resume = types.Resume;
+pub const Cancel = types.Cancel;
 pub const Marks = types.Marks;
 
 pub const Engine = struct {
@@ -71,6 +71,7 @@ pub const Engine = struct {
     pieces: fw.Pieces,
     w: weights.Weights,
     bp: fw.Buffers, // prompt chunks
+    pair: ?prompt_pair.Pair = null, // TF_GLM_PROMPT_PAIR: a paired prompt step's second chunk
     bd: fw.Buffers, // verify windows
     bm: fw.Buffers, // the MTP head's rows
     bs: ?fw.Buffers = null, // shared verify windows (with the MTP head, as the lane core shares only then)
@@ -98,6 +99,7 @@ pub const Engine = struct {
     index_split: bool = false, // the next prompt step's indexer rows split across the ranks: rank 0's choice, the chunk's flag 2
     index_splits: u64 = 0, // prompt steps whose indexer rows split (glm-split-check counts them)
     share_pages: bool = false, // TF_KV_SHARE: a kept state leaves its prefix's pages to the shared store that holds them
+    l2pf: ?l2pf_mod.L2pf = null, // TF_GLM_L2PF: the prefetch's side stream, kernels and table, made after the weights tile
 
     /// Opens rank `rank` of `world` over `comm`; the ranks agree on settings (cuda_ranks) before the weights load.
     pub fn init(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, ctx: *const cuda.Context, checkpoint: []const u8, lib: *const cuda.nccl.Library, comm: cuda.nccl.Comm, rank: usize, world: usize, o: Options) !*Engine {
@@ -144,7 +146,8 @@ pub const Engine = struct {
         const block32 = !exl3.isExl3(gpa, text) and try @import("cuda_experts.zig").wantsBlock32(gpa, text);
         var m = try fw.Modules.load(d, ctx, block32);
         errdefer m.deinit();
-        var pieces = try fw.Pieces.init(d, o.settings.pieces);
+        const pair = prompt_pair.wanted(o.settings.pair, o.settings.solo, world);
+        var pieces = try fw.Pieces.init(d, o.settings.pieces, pair);
         errdefer pieces.deinit();
         if (o.settings.layers > c.layers) return error.BadLayers;
         const layers = try a.alloc(u32, if (o.settings.layers > 0) o.settings.layers else c.layers);
@@ -175,6 +178,8 @@ pub const Engine = struct {
         e.m.mm.prompt_fixed_k = o.settings.prompt_fixed_k;
         e.m.tiled = o.settings.tiled;
         if (o.settings.tiled) e.m.packs = &e.packs;
+        if (o.settings.l2pf.want(try ctx.capability(), world)) e.l2pf = try l2pf_mod.L2pf.init(gpa, d, &e.w, o.settings.l2pf);
+        errdefer if (e.l2pf) |*p| p.deinit();
         if (o.settings.pages) try pages_mod.ownSequence(e) else try e.bind(0); // on pages: no window, its pool places it
         errdefer {
             e.free(0);
@@ -184,6 +189,8 @@ pub const Engine = struct {
         errdefer e.bp.deinit();
         if (o.settings.solo and rank == 0) std.log.info("glm: prompt passes of {d} rows, {d} while another stream decodes", .{ fw.solo_rows, fw.prefill_rows });
         if (world > 1 and rank == 0) std.log.info("glm: a prompt chunk's exchanges in {d} row pieces", .{o.settings.pieces});
+        if (pair) e.pair = try prompt_pair.Pair.init(d, &e.w, &e.bp, &e.pieces, o.capacity);
+        errdefer if (e.pair) |*p| p.deinit();
         e.bd = try fw.Buffers.init(d, &e.w, fw.window_rows, false, o.capacity);
         errdefer e.bd.deinit();
         e.bm = try fw.Buffers.init(d, &e.w, fw.window_rows, false, o.capacity);
@@ -231,10 +238,12 @@ pub const Engine = struct {
         if (e.bs) |*b| b.deinit();
         e.bm.deinit();
         e.bd.deinit();
+        if (e.pair) |*p| p.deinit();
         e.bp.deinit();
         if (e.pages) |p| p.deinit();
         for (0..e.seqs.items.len) |i| e.free(i);
         e.seqs.deinit(e.gpa);
+        if (e.l2pf) |*p| p.deinit();
         e.w.deinit();
         e.pieces.deinit();
         e.m.deinit();
@@ -250,10 +259,10 @@ pub const Engine = struct {
         return .{ .nccl = .{ .lib = e.lib, .comm = e.comm, .group = e.group } };
     }
 
-    fn view(e: *Engine, b: *fw.Buffers, out: *[1]fw.Rank) fw.Forward {
+    pub fn view(e: *Engine, b: *fw.Buffers, out: *[1]fw.Rank) fw.Forward {
         out.* = .{.{ .w = &e.w, .st = &e.cur.st, .b = b }};
         const im: ?fw.ImageRows = if (e.images) |v| .{ .v = v, .slot = e.slot } else null;
-        return .{ .d = e.d, .m = &e.m, .stream = e.stream, .ranks = out, .exchange = e.exchange(), .pieces = if (b == &e.bp) &e.pieces else null, .split = e.settings.split, .ring = e.settings.ring, .kda_wide = e.settings.kda_wide, .images = im, .taps = if (e.drafter) |dr| dr.taps(b == &e.bp) else null };
+        return .{ .d = e.d, .m = &e.m, .stream = e.stream, .ranks = out, .exchange = e.exchange(), .pieces = prompt_pair.piecesOf(e, b), .split = e.settings.split, .ring = e.settings.ring, .kda_wide = e.settings.kda_wide, .images = im, .taps = if (e.drafter) |dr| dr.taps(b == &e.bp) else null, .l2pf = if (e.l2pf) |*p| p else null };
     }
 
     /// Binds slot `slot`'s sequence for the steps that follow, making it (a zeroed state) on first use.
@@ -346,6 +355,7 @@ pub const Engine = struct {
         if ((from != null or start == 0) and try e.prefillStart(len, from) != start) return error.BadChunk;
         if (start >= len or start % fw.prefill_rows != 0) return error.BadChunk;
         const rows = @min(len - start, @as(usize, if (part.len > fw.prefill_rows + 1) fw.solo_rows else fw.prefill_rows));
+        if (rows > fw.prefill_rows and e.pair != null) return prompt_pair.prefill(e, part, start, len, cancel, marks, split);
         if (part.len != @min(len - start, rows + 1)) return error.BadChunk;
         if (rows > fw.prefill_rows and !prompt_solo.allowed(e, start, rows)) return error.BadChunk;
         var one: [1]fw.Rank = undefined;
@@ -500,7 +510,7 @@ pub const Engine = struct {
             rows += p.ids.len;
         }
         var one: [1]fw.Rank = .{.{ .w = &e.w, .st = segs[0].st, .b = b, .segs = segs[0..parts.len] }};
-        const f: fw.Forward = .{ .d = e.d, .m = &e.m, .stream = e.stream, .ranks = &one, .exchange = e.exchange(), .pieces = null, .split = e.settings.split, .ring = e.settings.ring, .kda_wide = e.settings.kda_wide, .taps = if (e.drafter) |dr| dr.taps(false) else null };
+        const f: fw.Forward = .{ .d = e.d, .m = &e.m, .stream = e.stream, .ranks = &one, .exchange = e.exchange(), .pieces = null, .split = e.settings.split, .ring = e.settings.ring, .kda_wide = e.settings.kda_wide, .taps = if (e.drafter) |dr| dr.taps(false) else null, .l2pf = if (e.l2pf) |*p| p else null };
         try f.run(@ptrCast(ids[0..rows]));
         if (e.drafter) |dr| for (parts, segs[0..parts.len], 0..) |p, g, i| try dr.noteVerify(p.slot, g.row0, g.rows, g.st.pos, i == 0);
         for (parts, segs[0..parts.len]) |p, g| {

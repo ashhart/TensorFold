@@ -17,6 +17,7 @@ pub fn addImportsAt(b: *std.Build, m: *std.Build.Module, target: std.Build.Resol
 }
 pub fn steps(b: *std.Build) void {
     const source = @import("dsv41_cuda.zig").module(b, b.graph.host, "serve_engine.zig", false);
+    b.step("test-dsv41-serve-host", "Tokenizer, encoder goldens and serving contracts without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = source.import_table.get("dsv41_serve").? })).step);
     b.step("test-draft-dsv41-host", "DeepSeek draft source metadata without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = source, .filters = &.{"draft sources:"} })).step);
     inline for (.{ false, true }) |cross| {
         const target = if (cross) b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .gnu }) else b.graph.host;
@@ -67,6 +68,7 @@ pub fn serverOn(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
         .link_libc = true,
         .imports = &.{ .{ .name = "core", .module = engine.import_table.get("core").? }, .{ .name = "engine_api", .module = api }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "template", .module = template }, .{ .name = "native_engines", .module = engine }, .{ .name = "checkpoint_cli", .module = cli } },
     });
+    m.addImport("lanes", engine.import_table.get("lanes").?);
     m.addImport("living", b.createModule(.{ .root_source_file = b.path("zig/src/living/living.zig"), .target = target, .optimize = optimize, .link_libc = true }));
     m.addOptions("build_options", build_options);
     // the server's json and the family's text side share the engine's serving module (one `dsv41_serve`)

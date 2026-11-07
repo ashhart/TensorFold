@@ -130,18 +130,22 @@ fn copyIn(st: *snap.State, ranges: []const rows.image.Range, in: []const u8) voi
 }
 
 /// What learned and disk states read under: checkpoint, kernel sources, modes, the probe's bits, the OS build and chip.
-pub fn identity(gpa: Allocator, io: std.Io, eng: *fx.Engine) !struct { id: u64, rate: f64 } {
+pub fn identity(gpa: Allocator, io: std.Io, dir: []const u8, eng: *fx.Engine) !struct { id: u64, rate: f64 } {
     var h = std.hash.Wyhash.init(0x6678);
     const t0 = std.Io.Clock.awake.now(io).toNanoseconds();
     const probe = try learned.probe(eng, gpa);
     const ns = std.Io.Clock.awake.now(io).toNanoseconds() - t0;
     const modes = [_]u64{ @intFromBool(eng.r.xnew), @intFromBool(eng.r.hc_up), @intFromBool(eng.r.device.tensorUnits()) };
     for ([_]u64{ eng.identity_hash, learned.sourceHash(), modes[0], modes[1], modes[2], probe }) |x| h.update(std.mem.asBytes(&x));
+    const variants = @import("variant_identity.zig");
+    try variants.hash(&h, gpa, eng.r.variants);
+    const precision = @import("tensorfold").frags.precision;
+    variants.policy(&h, eng.r.window.capacity, eng.r.window.factor, eng.r.device.tensorUnits() and try precision.requested());
     var os: [64]u8 = undefined;
     h.update(api.prompt_imprint.osBuild(&os));
     h.update(std.mem.span(eng.r.device.name()));
     @import("disk_identity.zig").profile(&h, .{ .family = "qwen4_exp", .backend = "metal" });
-    return .{ .id = h.final(), .rate = 4143.0 / (@as(f64, @floatFromInt(@max(ns, 1))) / 1e9) };
+    return .{ .id = try @import("disk_identity.zig").scoped(gpa, io, dir, h.final()), .rate = 4143.0 / (@as(f64, @floatFromInt(@max(ns, 1))) / 1e9) };
 }
 
 /// --learn-conversations or --spill-gib: the store under `l.root`, attached to the cache (Imprint's cut files unread).

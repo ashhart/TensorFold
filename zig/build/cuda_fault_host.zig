@@ -7,4 +7,5 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, flashnext: *std.Build.Modul
     b.step("test-flashnext-completion-host", "Actual CUDA sequence rollback drains asynchronous destinations before release").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = flashnext, .filters = &.{"Flash Next completion:"} })).step);
     b.step("test-cuda-fault-admission-host", "Sticky context health reaches native status and queue admission").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"CUDA context health:"} })).step);
     b.step("test-cuda-readiness-host", "Real native readiness and synchronous startup preparation without shaders").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"family readiness reaches"} })).step);
+    b.step("test-startup-log-host", "Ordered startup logs and early P2P facts without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cuda, .filters = &.{"startup log:"} })).step);
 }

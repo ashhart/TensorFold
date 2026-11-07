@@ -130,6 +130,8 @@ The lean checker must add zero problems over the branch's pinned baseline:
 python3 tools/zig/lean_check.py
 ```
 
+Before pushing, run `python3 tools/pr_check.py --base origin/main --pr NUMBER` to check tracked and untracked local changes against the merge base; new lean and source-length findings are errors, and added-text and documentation findings are advisory warnings.
+
 Attach the baseline count and identify inherited findings instead of claiming a nonzero checker exit is clean.
 Write tests that demonstrate a real failure and its correction; keep the failing receipt when changing arithmetic or lifecycle behavior.
 Run the host suite and the device/model checks for every affected platform.

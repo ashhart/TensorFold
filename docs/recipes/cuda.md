@@ -108,13 +108,22 @@ format ([prompt precision](#prompt-precision)):
 
 ## Native prompt controls
 
-For Nemotron, the native `tensorfold run` command accepts `--device N` to choose a CUDA ordinal. If
+For Nemotron, the native `tensorfold run` command on a CUDA build accepts `--device N` to choose a CUDA ordinal. If
 the flag is absent, it uses `TF_CUDA_DEVICE`, then device 0. `--segments N` enables
 staggered prompt work for 1 through 4 whole 2,048-row chunks; without the flag it
 uses `TF_CUDA_SEGMENTS`, then 1. The `tensorfold segments` command compares the
 available segment counts and can profile the serial chunk parts.
 
-Experimental: on a DGX Spark (GB10), `tensorfold run --carveout`, or `TF_CUDA_CARVEOUT=1` for `tensorfold run` and
+Dory's recurrent block can run more than once a pass: `--loops N` serves the checkpoint with N passes over it,
+1 through 4. Without the flag a checkpoint serves at its own `n_recurrent_loops`; the flag overrides it. The
+schedule runs the input sublayers once, the recurrent block N times, then the output sublayers — 16 + 40×N + 16
+steps with 8 + 20×N + 8 attention caches — and a token's KV and stream state grows from 36 KiB at one loop to 56
+at two and 96 at four. A saved state records its loop count and never crosses to another. Zero and anything above
+4 are refused at load ("--loops: passes over Dory's recurrent block, 1 to 4"); a negative count is refused at
+parse. The other CUDA families, the HIP engines and Kimi on Metal refuse the flag by name, and `tensorfold run`
+refuses it for any model that is not Dory.
+
+Experimental: on a DGX Spark (GB10), `tensorfold run --carveout` on a CUDA build, or `TF_CUDA_CARVEOUT=1` for `tensorfold run` and
 `tensorfold-native`, puts Nemotron's KV caches in the memory the display controller reserves, which
 MemAvailable never counts. The native engine maps a
 DRM dumb buffer from `/dev/dri/card0` (`TF_DRM_CARD` picks another card) and registers it with
@@ -352,32 +361,34 @@ window. It accounts for stream count and retained caches where concurrency is en
 
 Two-rank Flash Next, Nemotron and GLM requests finish on both ranks after a client disconnects, keeping the
 collective sequence aligned. MLX disk snapshots and cache-budget flags do not configure these CUDA
-caches. The CUDA CLI also does not apply `--alias`; use `--name` for the served model ID. `--thinking`,
+caches. The CUDA CLI applies `--alias` too; `--name` sets the served model ID. `--thinking`,
 `--reasoning-effort` and `--thinking-budget` set the defaults a request's `chat_template_kwargs.enable_thinking`,
 `reasoning_effort` and `thinking_budget` override, as on the Mac.
 
 ## Multi-GPU P2P startup report
 
 The native CUDA implementation has this report on its ranked paths; DeepSeek's implementation remains behind
-the release server's #827 refusal. With two or more CUDA ranks, each rank logs `p2p:` lines once its NCCL
-communicator is up: its GPU and PCI bus id,
+the release server's #827 refusal. With two or more CUDA ranks, each rank logs `p2p:` facts: its GPU and PCI bus id,
 the driver, CUDA driver API and NCCL versions, each other GPU's NVML P2P read and write status and PCIe path
 (`nvidia-smi topo -m`'s names), CUDA's peer access when the process sees more than one device, the values of
 `NCCL_P2P_DISABLE`, `NCCL_P2P_LEVEL`, `NCCL_P2P_READ_ENABLE`, `NCCL_SHM_DISABLE`, `NCCL_ALGO`, `NCCL_PROTO` and
-`CUDA_VISIBLE_DEVICES` that are set, and the transport NCCL chose for this rank's connections (P2P read or write, SHM
-or NET). The transport comes from NCCL's own INFO log, written to a private temporary file during init and removed
-after it is read; the capture is skipped when `NCCL_DEBUG`, `NCCL_DEBUG_SUBSYS` or `NCCL_DEBUG_FILE` is set. NCCL
-connects peers on first use unless `NCCL_RUNTIME_CONNECT=0`, which GLM sets when it is unset: GLM reports the transport
-after init, Nemotron when its ranks are ready, and DeepSeek and Flash Next say `transport not reported` unless a
+`CUDA_VISIBLE_DEVICES` that are set, and the transport NCCL chose for this rank's connections (P2P read or write,
+SHM or NET). GLM prints the device and capability facts immediately after NCCL init, before its first peer warm-up
+transfer. The transport comes from NCCL's own INFO log, written to a private temporary file during init and removed
+when startup diagnostics finish. A line before init names that file; GLM's minute wait warnings repeat its path.
+The early report leaves capture active through warm-up. Capture is skipped when `NCCL_DEBUG`, `NCCL_DEBUG_SUBSYS`
+or `NCCL_DEBUG_FILE` is set. NCCL connects peers on first use unless `NCCL_RUNTIME_CONNECT=0`, which GLM sets when
+unset: GLM reports the transport before warm-up if known, otherwise after warm-up or when the ranks are ready.
+Nemotron reports it when its ranks are ready, and DeepSeek and Flash Next say `transport not reported` unless a
 connection was made by then (on DeepSeek the probe makes one). A P2P status other than OK adds one warning naming
 what NVML or CUDA reported.
 
 TensorFold never enables peer access itself; NCCL sets up its own peers. The report changes no driver, BIOS or IOMMU
 setting and overrides no NCCL setting the user made. NVML (`libnvidia-ml.so.1`) is optional. One rank logs nothing
 new, and `TENSORFOLD_P2P_DIAGNOSTICS=0` turns the report off. `TENSORFOLD_P2P_PROBE=1` (GLM, Nemotron and DeepSeek)
-times a 32 MiB-a-rank NCCL all-gather after init and logs its bus bandwidth; set it on every rank or none, since a rank
-without it leaves the others waiting in the probe. `capabilities --json` adds a `p2p` object with NVML's GPUs and
-every pair's status on a host with two or more GPUs.
+times a 32 MiB-a-rank NCCL all-gather after init (after peer warm-up on GLM) and logs its bus bandwidth. Set it on
+every rank or none, since a rank without it leaves the others waiting in the probe. `capabilities --json` adds a
+`p2p` object with NVML's GPUs and every pair's status on a host with two or more GPUs.
 
 ## Measuring
 

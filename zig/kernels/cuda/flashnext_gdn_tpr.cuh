@@ -113,3 +113,17 @@ __device__ __forceinline__ void chain(const float* __restrict__ qn, const float*
         for (int i = 0; i < 4; ++i) state_out[sbase + (l * TPR + t) * 4 + i] = s[l][i];
 }
 }  // namespace gdn_tpr
+
+// The prompt chain on two threads a state row (gdn_tpr): fn_gdn_rows_to's bits, state_in == state_out in place.
+extern "C" __global__ void __launch_bounds__(256) fn_gdn_chain_tpr(const float* qn, const float* kn, const float* v,
+                                                                 const float* gb, const float* state_in, float* state_out,
+                                                                 int rows, float* ys_out) {
+    gdn_tpr::chain<16, 48, 2, 16>(qn, kn, v, gb, state_in, state_out, rows, ys_out);
+}
+
+// fn_gdn_chain_tpr on one rank's 8 key and 24 value heads.
+extern "C" __global__ void __launch_bounds__(256) fn_gdn_chain_tpr_h8(const float* qn, const float* kn, const float* v,
+                                                                    const float* gb, const float* state_in,
+                                                                    float* state_out, int rows, float* ys_out) {
+    gdn_tpr::chain<8, 24, 2, 16>(qn, kn, v, gb, state_in, state_out, rows, ys_out);
+}

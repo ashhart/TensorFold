@@ -114,7 +114,7 @@ inline void ssd_decay(const device float* seg, const device bfloat* cb, device f
   }
 }
 
-// B for the state matmul: float(B) repeated over each group's heads, as [heads, state, s]. P: i0 s C b0 heads groups dstate.
+// B for the state matmul: float(B) repeated per group's heads, as [heads, state, s]. P: i0 s C b0 heads groups dstate.
 inline void ssd_b_heads(const device bfloat* act, device float* b, const device int* P, uint3 at) {
   const int t = int(at.x), n = int(at.y), h = int(at.z), s = P[1], N = P[6], g = h / (P[4] / P[5]);
   if (t < s && n < N) {
@@ -156,7 +156,7 @@ inline void ssd_state_carry(const device float* next, const device float* e, con
   }
 }
 
-// A step's y rows (bf16) in the chunk, + e y_prev if a state carries; keep copies other rows from old. P: i0 s H dh carry L keep.
+// Chunk's bf16 step y rows, + e y_prev if a state carries; keep copies the rest from old. P: i0 s H dh carry L keep.
 inline void ssd_y_out(const device float* y, const device float* e, const device float* prev, const device bfloat* old,
                       device bfloat* out, const device int* P, uint2 at) {
   const int hp = int(at.x), r = int(at.y), s = P[1], H = P[2], DH = P[3], h = hp / DH, p = hp % DH;

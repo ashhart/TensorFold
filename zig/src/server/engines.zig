@@ -8,6 +8,18 @@ const Allocator = std.mem.Allocator;
 
 pub const Opened = api.Opened;
 
+/// Refuse malformed settings before resolving checkpoints and again before an idle reload.
+pub fn environment(a: Allocator, args: cli.Args) !?[]const u8 {
+    const settings = @import("sys").environment;
+    var flags: settings.Flags = .{ .slide = args.slide, .device = args.device, .segments = args.segments, .hooks = @import("build_options").slide_test_hooks };
+    for (native.backends) |backend| {
+        if (std.mem.eql(u8, backend, "cuda")) flags.cuda = true;
+        if (std.mem.eql(u8, backend, "metal")) flags.metal = true;
+        if (std.mem.eql(u8, backend, "xpu")) flags.xpu = true;
+    }
+    return settings.refusal(a, settings.Process{}, flags);
+}
+
 /// The serve flags past the common ones the backend lists (tensor parallelism, MTP, kept entries, policy).
 pub const serves: []const []const u8 = if (@hasDecl(native, "serves")) native.serves else &.{};
 
@@ -31,6 +43,10 @@ pub fn identity(a: Allocator, args: cli.Args) build_identity.Identity {
 
 /// The engine for the checkpoint in ``dir``, or null with ``problem`` set.
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, dir: []const u8, model_type: []const u8, args: cli.Args, problem: *[]const u8) !?Opened {
+    if (try environment(a, args)) |why| {
+        problem.* = why;
+        return null;
+    }
     if (args.idle_unload > 0) {
         const world = if (std.c.getenv("TF_GLM_WORLD")) |value| std.mem.span(value) else null;
         if (@import("idle_unload_policy.zig").refusal(native.backends, model_type, args.idle_unload, world, args.tp)) |why| {
@@ -47,6 +63,10 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, dir: []const u8, model_typ
 
 /// A tensor-parallel rank above 0 runs rank 0's steps until it stops; false with ``problem`` set when it cannot.
 pub fn follow(a: Allocator, gpa: Allocator, io: std.Io, dir: []const u8, model_type: []const u8, args: cli.Args, problem: *[]const u8) !bool {
+    if (try environment(a, args)) |why| {
+        problem.* = why;
+        return false;
+    }
     if (!@hasDecl(native, "follow")) {
         problem.* = "this build has no tensor-parallel ranks";
         return false;

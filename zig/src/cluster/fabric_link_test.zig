@@ -5,7 +5,7 @@ const node = @import("node.zig");
 const membership = @import("membership.zig");
 const exchange = @import("exchange.zig");
 const barrier = @import("barrier.zig");
-const canon = @import("canon.zig");
+const canon = @import("canon");
 const fabric_link = @import("fabric_link.zig");
 
 const gpa = std.testing.allocator;

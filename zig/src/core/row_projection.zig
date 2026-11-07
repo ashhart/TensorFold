@@ -18,10 +18,10 @@ pub const groups = 2;
 /// The code widths the kernels unpack.
 pub const bit_widths = [_]u8{ 2, 3, 4, 5, 6, 8 };
 
-/// A group's sum of inputs for the bias term: fp32 in order (the tensor path's xsum), or rounded to bf16 at each add (Nemotron's expert kernels).
+/// A group's input sum for the bias: fp32 in order (tensor path's xsum), or bf16-rounded per add (Nemotron's experts).
 pub const Sum = enum { f32, bf16 };
 
-/// A matrix [n, k] as the checkpoint stores it: words [n][k*bits/32], scales and biases [n][k/group] bf16, at byte offsets.
+/// Matrix [n, k] as the checkpoint stores it: words [n][k*bits/32], scales, biases [n][k/group] bf16, at byte offsets.
 pub const Weights = struct {
     w: mtl.Buffer,
     w_off: usize = 0,
@@ -93,7 +93,7 @@ pub const Pipelines = struct {
     }
 };
 
-/// One dispatch: its pipeline, dims (K, N, group, rows or slots, experts, repeat) and the grid; buffers x, W, S, B, dims, out at 0-5, ids at 6.
+/// Dispatch: pipeline, dims (K, N, group, rows/slots, experts, repeat), grid; buffers x, W, S, B, dims, out 0-5, ids 6.
 pub const Call = struct { pipeline: mtl.Pipeline, dims: [6]i32, groups: usize, slots: usize = 1, threads: usize = 32 * groups };
 
 /// y[rows, n] = x[rows, k] W^T (relu squared with `relu2`), x and y bf16 rows.

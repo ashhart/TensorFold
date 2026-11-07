@@ -4,7 +4,7 @@ const std = @import("std");
 /// Segments one chunk can take.
 pub const MAX = 4;
 
-/// Where layer i waits for the segment before: ahead of pre (it reads what that one wrote, a conv tail) or of the mixer.
+/// Where layer i waits for the segment before: ahead of pre (it reads that one's writes, a conv tail) or of the mixer.
 pub const Wait = enum { pre, mixer };
 
 /// Rows of segment k when `n` rows split `parts` ways (near-equal, the first ones longer).
@@ -19,7 +19,7 @@ pub fn start(n: usize, parts: usize, k: usize) usize {
 
 pub const Call = struct { rows: usize, parts: usize };
 
-/// A prompt's next call: `left` rows evenly over the fewest calls of two segments of up to `step`, each `min_rows` or more.
+/// Prompt's next call: `left` rows evenly over the fewest calls of two segments up to `step`, each `min_rows` or more.
 pub fn next(left: usize, step: usize, min_rows: usize) Call {
     const calls = @max(1, (left + 2 * step - 1) / (2 * step));
     const rows_ = (left + calls - 1) / calls;
@@ -141,7 +141,7 @@ const Recorder = struct {
     }
 };
 
-// The schedule on simulated queues: a wait blocks until the segment before signalled its layer; each hook after its waits.
+// Schedule on simulated queues: a wait blocks until the segment before signalled its layer; each hook after its waits.
 test "the schedule runs to the end on queues and keeps each layer's dependencies" {
     for (1..MAX + 1) |n| {
         var rec: Recorder = .{ .early = 1 };

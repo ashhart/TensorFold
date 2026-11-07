@@ -59,6 +59,11 @@ pub const Kernels = struct {
     /// TF_FLASHNEXT_KEEP_LATE (whole heads only): the front into a stream's pending-row log, the chain with them.
     front_log: cuda.Function,
     chain_late: cuda.Function,
+    /// A shared pass's lanes in one launch a DeltaNet step (TF_FLASHNEXT_GDN_LANES).
+    lanes_keep: cuda.Function,
+    lanes_front: cuda.Function,
+    lanes_chain: cuda.Function,
+    lanes_shift: cuda.Function,
     /// A rolled-back lane's conv windows and n-gram tail in one launch (pending rows).
     late_roll: cuda.Function,
     sum: cuda.Function,
@@ -115,6 +120,10 @@ pub const Kernels = struct {
         k.gdn_h8 = try Gdn.load(k.batch, "_h8");
         k.front_log = try k.batch.function("fn_gdn_front_log");
         k.chain_late = try k.batch.function("fn_gdn_rows_late");
+        k.lanes_keep = try k.batch.function("fn_gdn_lanes_keep");
+        k.lanes_front = try k.batch.function("fn_gdn_lanes_front");
+        k.lanes_chain = try k.batch.function("fn_gdn_lanes_chain");
+        k.lanes_shift = try k.batch.function("fn_gdn_lanes_shift");
         k.late_roll = try k.batch.function("fn_late_roll");
         return k;
     }
@@ -123,6 +132,12 @@ pub const Kernels = struct {
     pub fn nativeMatmul(k: *const Kernels, s: cuda.Stream, x: u64, ldx: usize, m: usize, w: cuda.qmmf.Weight, y: u64, part: u64, out: cuda.qmmf.Out) !void {
         if (k.prompt) |p| if (m >= k.prompt_rows and w.mode == .bf16) return p.matmulOut(s, x, ldx, m, w, y, out);
         return k.native_lane.matmulOut(s, x, ldx, m, w, y, out, part);
+    }
+
+    /// TF_FLASHNEXT_PROFILE=1: each chunk's wall time (synchronized) and its host n-gram gather on stderr.
+    pub fn profile() bool {
+        const v = std.c.getenv("TF_FLASHNEXT_PROFILE") orelse return false;
+        return std.mem.eql(u8, std.mem.span(v), "1");
     }
 
     /// The DeltaNet kernels for a layer's heads `h`: the full set, or the `_h8` twins for half; any other is refused.

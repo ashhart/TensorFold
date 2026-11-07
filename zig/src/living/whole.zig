@@ -12,8 +12,8 @@ pub const Method = enum { pocket, edit, probe };
 
 /// The method the environment picks for whole lessons.
 pub fn method() Method {
-    if (platform.c.getenv("TF_SLIDE_PROBE") != null) return .probe;
-    if (platform.c.getenv("TF_SLIDE_EDIT") != null) return .edit;
+    if (@import("profile").lookup("TF_SLIDE_PROBE") != null) return .probe;
+    if (@import("profile").lookup("TF_SLIDE_EDIT") != null) return .edit;
     return .pocket;
 }
 

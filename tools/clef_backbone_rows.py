@@ -4,6 +4,7 @@
 #   clef_backbone_rows.py records <model dir> <out dir>                 the 40 records' ids (.npy) and index.json
 #   clef_backbone_rows.py reference <model dir> <records> <out> --dtype bf16|fp32 [--device cuda|cpu] [--only N...]
 #   clef_backbone_rows.py native <tf-qwen35-test> <model dir> <records> <out> [--cut N|whole] [--only N...]
+#       [--backend cuda]: <tf-qwen35-cuda> instead, its `rows` mode (pieces of --cut, whole = one 4,096-row chunk)
 #   clef_backbone_rows.py compare <model dir> <records> <native> <bf16> <fp32> [--report FILE] [--device cuda|cpu]
 # The records are public synthetic text from a seeded generator; rows go to <out>/rec_NN.npy (bf16 as uint16 bits).
 import argparse, json, math, os, random, subprocess, sys, time
@@ -129,11 +130,30 @@ def cmd_reference(a):
 def cmd_native(a):
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
+    if a.backend == "cuda":
+        return native_cuda(a, out)
     for r in chosen(a.records, a.only):
         cmd = [a.binary, "hidden", a.model, str(Path(a.records) / f"{r['name']}.npy"), str(out / f"{r['name']}.npy")]
         if a.cut:
             cmd += ["--cut", a.cut]
         subprocess.run(cmd, check=True)
+
+
+def native_cuda(a, out):
+    # tf-qwen35-cuda reads ids as text and writes raw bf16 rows; saved as the HIP runner's uint16 .npy
+    hidden = json.loads((Path(a.model) / "config.json").read_text())["text_config"]["hidden_size"]
+    piece = "4096" if a.cut in (None, "whole") else a.cut
+    for r in chosen(a.records, a.only):
+        ids = np.load(Path(a.records) / f"{r['name']}.npy")
+        text, raw = out / f"{r['name']}.ids", out / f"{r['name']}.bf16"
+        text.write_text(",".join(str(int(i)) for i in ids))
+        subprocess.run([a.binary, a.model, "rows", str(text), str(raw), piece], check=True)
+        rows = np.fromfile(raw, dtype=np.uint16).reshape(-1, hidden)
+        if rows.shape[0] != len(ids):
+            sys.exit(f"{r['name']}: {rows.shape[0]} rows for {len(ids)} ids")
+        np.save(out / f"{r['name']}.npy", rows)
+        text.unlink()
+        raw.unlink()
 
 
 def widen(path):
@@ -254,6 +274,7 @@ def main():
     n.add_argument("records")
     n.add_argument("out")
     n.add_argument("--cut")
+    n.add_argument("--backend", choices=["hip", "cuda"], default="hip")
     n.add_argument("--only", nargs="*", default=[])
     c = sub.add_parser("compare")
     for name in ("model", "records", "native", "bf16", "fp32"):

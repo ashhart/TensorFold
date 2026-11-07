@@ -18,6 +18,8 @@ pub const Xe = struct {
     eus_xe_core: u32 = 8,
     /// Hardware threads one EU runs at 128 GRF; a 256-GRF kernel halves it.
     threads_eu: u32 = 8,
+    /// Xe-cores the card has, from the device read's compute units and EUs a core.
+    xe_cores: u32 = 32,
     grf_modes: []const u32 = &.{ 128, 256 },
 };
 
@@ -114,6 +116,103 @@ pub fn xpu(l: XpuLaunch, u: XpuUsage, t: Xe, out: *std.ArrayList(u8), a: std.mem
     return n;
 }
 
+/// What the device's own properties say, as `zeDeviceGetProperties` reports them.
+pub const Device = struct {
+    deviceId: u32,
+    numEUsPerSubslice: u32,
+    numThreadsPerEU: u32,
+    physicalEUSimdWidth: u32,
+    numSlices: u32,
+    numSubslicesPerSlice: u32,
+};
+
+/// Every way the device differs from the row, so a wrong row is a finding; returns how many.
+pub fn liveRow(d: Device, t: Xe, out: *std.ArrayList(u8), a: std.mem.Allocator) !usize {
+    var n: usize = 0;
+    const say = "{s} live: the device says {d}, the row {d}";
+    if (d.deviceId != t.pci) n += try note(out, a, say ++ " (PCI id)", .{ t.name, d.deviceId, t.pci });
+    if (d.numEUsPerSubslice != t.eus_xe_core) n += try note(out, a, say ++ " (EUs a Xe-core)", .{ t.name, d.numEUsPerSubslice, t.eus_xe_core });
+    if (d.numThreadsPerEU != t.threads_eu) n += try note(out, a, say ++ " (threads an EU)", .{ t.name, d.numThreadsPerEU, t.threads_eu });
+    if (d.physicalEUSimdWidth != t.sub_groups[0]) n += try note(out, a, say ++ " (SIMD width)", .{ t.name, d.physicalEUSimdWidth, t.sub_groups[0] });
+    const cores = @as(u64, d.numSlices) * d.numSubslicesPerSlice;
+    if (cores != t.xe_cores) n += try note(out, a, "{s} live: the device has {d} Xe-cores, the row {d}", .{ t.name, cores, t.xe_cores });
+    return n;
+}
+
+/// What a loaded kernel's own properties say, as `zeKernelGetProperties` reports them.
+pub const Loaded = struct {
+    threads: [3]u32,
+    sub_group: u32,
+    max_sub_group: u32,
+    slm: u32,
+    spill: u32,
+    args: u32,
+};
+
+/// Every way a loaded kernel differs from its record, and a launch that does not fit; returns how many.
+pub fn liveKernel(l: XpuLaunch, u: XpuUsage, k: Loaded, args: u32, t: Xe, out: *std.ArrayList(u8), a: std.mem.Allocator) !usize {
+    var n: usize = 0;
+    const say = "{s} live on {s}: the kernel says {d}, the record {d}";
+    const items = l.workItems();
+    if (!std.meta.eql(k.threads, u.threads)) n += try note(out, a, say ++ " work-items", .{ l.name, t.name, @as(u64, k.threads[0]) * k.threads[1] * k.threads[2], @as(u64, u.threads[0]) * u.threads[1] * u.threads[2] });
+    if (k.sub_group != u.sub_group) n += try note(out, a, say ++ " sub-group", .{ l.name, t.name, k.sub_group, u.sub_group });
+    if (k.max_sub_group < u.sub_group) n += try note(out, a, "{s} live on {s}: sub-group {d}, the kernel's most {d}", .{ l.name, t.name, u.sub_group, k.max_sub_group });
+    if (k.slm != u.slm) n += try note(out, a, say ++ " SLM bytes", .{ l.name, t.name, k.slm, u.slm });
+    if (k.spill != u.spill) n += try note(out, a, say ++ " spill bytes", .{ l.name, t.name, k.spill, u.spill });
+    if (k.args != args) n += try note(out, a, say ++ " arguments", .{ l.name, t.name, k.args, args });
+    if (items > resident(t, l.grf, l.sub_group)) n += try note(out, a, "{s} live on {s}: {d} work-items at {d} GRF and sub-group {d}, a Xe-core holds {d}", .{ l.name, t.name, items, l.grf, l.sub_group, resident(t, l.grf, l.sub_group) });
+    return n;
+}
+
+test "the device's own properties match the row, and each differing field is named" {
+    const a = std.testing.allocator;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(a);
+    const t = xe[0];
+    const dev = Device{ .deviceId = 0xe223, .numEUsPerSubslice = 8, .numThreadsPerEU = 8, .physicalEUSimdWidth = 16, .numSlices = 8, .numSubslicesPerSlice = 4 };
+    try std.testing.expectEqual(@as(usize, 0), try liveRow(dev, t, &out, a));
+    inline for (.{ "deviceId", "numEUsPerSubslice", "numThreadsPerEU", "physicalEUSimdWidth", "numSlices" }) |field| {
+        var wrong = dev;
+        @field(wrong, field) += 1;
+        try std.testing.expectEqual(@as(usize, 1), try liveRow(wrong, t, &out, a));
+    }
+    var other = dev;
+    other.deviceId = 0x7d67;
+    try std.testing.expectEqual(@as(usize, 1), try liveRow(other, t, &out, a));
+}
+
+test "a loaded kernel that matches its record passes, and each difference is named" {
+    const a = std.testing.allocator;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(a);
+    const t = xe[0];
+    const l = XpuLaunch{ .name = "ok", .symbol = "ok", .image = "glue", .format = .native, .threads = .{ 256, 1, 1 }, .slm = 2048, .sub_group = 16, .grf = 256 };
+    const u = XpuUsage{ .threads = .{ 256, 1, 1 }, .slm = 2048, .sub_group = 16, .grf = 256 };
+    const k = Loaded{ .threads = .{ 256, 1, 1 }, .sub_group = 16, .max_sub_group = 16, .slm = 2048, .spill = 0, .args = 11 };
+    try std.testing.expectEqual(@as(usize, 0), try liveKernel(l, u, k, 11, t, &out, a));
+    var wide = k;
+    wide.threads = .{ 512, 1, 1 };
+    try std.testing.expectEqual(@as(usize, 1), try liveKernel(l, u, wide, 11, t, &out, a));
+    var sg = k;
+    sg.sub_group = 32;
+    try std.testing.expectEqual(@as(usize, 1), try liveKernel(l, u, sg, 11, t, &out, a));
+    var low = k;
+    low.max_sub_group = 8;
+    try std.testing.expectEqual(@as(usize, 1), try liveKernel(l, u, low, 11, t, &out, a));
+    var slm = k;
+    slm.slm = 10272;
+    try std.testing.expectEqual(@as(usize, 1), try liveKernel(l, u, slm, 11, t, &out, a));
+    var spill = k;
+    spill.spill = 64;
+    try std.testing.expectEqual(@as(usize, 1), try liveKernel(l, u, spill, 11, t, &out, a));
+    try std.testing.expectEqual(@as(usize, 1), try liveKernel(l, u, k, 10, t, &out, a));
+    // a launch past the 256-GRF resident limit is named
+    const big = XpuLaunch{ .name = "big", .symbol = "big", .image = "glue", .format = .native, .threads = .{ 1024, 1, 1 }, .sub_group = 16, .grf = 256 };
+    const big_u = XpuUsage{ .threads = .{ 1024, 1, 1 }, .sub_group = 16, .grf = 256 };
+    const big_k = Loaded{ .threads = .{ 1024, 1, 1 }, .sub_group = 16, .max_sub_group = 16, .slm = 0, .spill = 0, .args = 11 };
+    try std.testing.expectEqual(@as(usize, 1), try liveKernel(big, big_u, big_k, 11, t, &out, a));
+}
+
 test "the BMG row holds one work-group on one Xe-core" {
     const t = xe[0];
     try std.testing.expectEqual(@as(u32, 131072), t.slm_xe_core);
@@ -121,6 +220,8 @@ test "the BMG row holds one work-group on one Xe-core" {
     try std.testing.expectEqual(@as(u64, 1024), resident(t, 128, 16));
     try std.testing.expectEqual(@as(u64, 512), resident(t, 256, 16));
     try std.testing.expectEqual(@as(u64, 2048), resident(t, 128, 32));
+    // the device read's 256 compute units are 8 EUs a Xe-core over 32 Xe-cores
+    try std.testing.expectEqual(@as(u32, 256), t.eus_xe_core * t.xe_cores);
 }
 
 test "a launch inside the row passes; each planted excess is named" {

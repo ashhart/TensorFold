@@ -10,13 +10,13 @@ const DeviceBuffer = @import("../memory.zig").DeviceBuffer;
 const page = 64;
 
 /// A cache of `kv_heads` heads and `span` positions in the activation type, flat (kv_heads, span, d) and paged.
-const Cache = struct {
+pub const Cache = struct {
     k: []u16,
     v: []u16,
     /// Position block i lives in page table[i].
     table: []u32,
 
-    fn make(t: *Rig, rng: *rig.Rng, kv_heads: usize, span: usize, d: usize) !Cache {
+    pub fn make(t: *Rig, rng: *rig.Rng, kv_heads: usize, span: usize, d: usize) !Cache {
         const c: Cache = .{ .k = try gpa.alloc(u16, kv_heads * span * d), .v = try gpa.alloc(u16, kv_heads * span * d), .table = try gpa.alloc(u32, span / page) };
         for (c.k) |*x| x.* = t.bits(rng.unit());
         for (c.v) |*x| x.* = t.bits(rng.unit());
@@ -25,14 +25,14 @@ const Cache = struct {
         return c;
     }
 
-    fn free(c: Cache) void {
+    pub fn free(c: Cache) void {
         gpa.free(c.k);
         gpa.free(c.v);
         gpa.free(c.table);
     }
 
     /// The pool layout of decode/pages.hpp: ((h * count + page) * 64 + slot) * d.
-    fn pool(c: Cache, src: []const u16, kv_heads: usize, span: usize, d: usize) ![]u16 {
+    pub fn pool(c: Cache, src: []const u16, kv_heads: usize, span: usize, d: usize) ![]u16 {
         const out = try gpa.alloc(u16, src.len);
         const count = span / page;
         for (0..kv_heads) |h| for (0..span) |pos| {
@@ -337,10 +337,11 @@ test "a query row's prompt attention keeps its bits wherever its chunk starts, o
     const t = try Rig.open(1 << 20);
     defer t.close();
     var rng: rig.Rng = .{ .state = 0x7A1C5 };
-    // the 64-row tile (wide on, d 128), then the 16-row tile (attention=f32 turns wide off)
+    // the 64-row tile (wide on, d 128), then the 16-row tile (attention=f32 turns wide off); odd cuts split a key pair
     for ([_]bool{ true, false }) |wide| {
         t.on.wide = wide;
         defer t.on.wide = true;
+        try shifted(t, &rng, 32, 8, 128, 2400, 1);
         try shifted(t, &rng, 32, 8, 128, 2400, 87);
         try shifted(t, &rng, 32, 8, 128, 2400, 2100);
     }

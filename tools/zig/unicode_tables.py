@@ -1,4 +1,4 @@
-"""Generate zig/src/core/tokenizer/unicode_data.zig from the Unicode Character Database (Python's unicodedata, Perl's Unicode::UCD)."""
+"""Generate zig/src/core/tokenizer/unicode_data.zig from the Unicode Character Database (unicodedata, Unicode::UCD)."""
 import argparse
 import subprocess
 import sys

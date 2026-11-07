@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
     types: [opened, synchronize, reopened]
+  # Each night builds and runs everything from nothing: what a reused pass could hide, such as a test reading a file
+  # the build doesn't know of, fails here within a day.
+  schedule:
+    - cron: "23 3 * * *"
 
 permissions:
   contents: read
@@ -46,6 +50,7 @@ jobs:
           python3 -m unittest discover -s tools/zig -p cuda_common_check_test.py -v
       # The lean rule (600-line files, one-line comments within 120 columns): no problem the base branch lacks.
       - name: lean check
+        if: ${{ github.event_name != 'schedule' }}
         env:
           BASE_REF: ${{ github.base_ref }}
           PUSH_BASE: ${{ github.event.before }}
@@ -64,10 +69,10 @@ jobs:
         with:
           version: 0.17.0
           use-cache: false
-      # Main builds from nothing, so every commit on main is checked from scratch and the cache holds one build. A pull
-      # request restores main's newest and saves nothing, so it compiles and runs only what its diff changed.
+      # Main and pull requests restore main's newest build, so each compiles and runs only what changed since; only main
+      # saves, and the nightly run starts from nothing.
       # -Dfixed-cpu: a compile's cache key carries its CPU and these runners differ, so all of them compile for one CPU.
-      - if: ${{ github.event_name == 'pull_request' }}
+      - if: ${{ github.event_name != 'schedule' }}
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: .zig-cache
@@ -75,9 +80,10 @@ jobs:
           restore-keys: zig-build-v3-Linux-0.17.0-
       # A checkout or a restored cache gives every file a new id, and Zig 0.17's cache misses on one even when the
       # contents match (fixed on Zig's master, ziglang/zig#37238). A failure here costs time, never a check.
+      # --prune deletes the entries this checkout can't hit, so a cache that main restores and saves stays one build.
       - name: Let a restored cache fit this checkout
         shell: bash
-        run: zig run -OReleaseFast -mcpu=baseline tools/zig/zig_cache_restat.zig -- .zig-cache "$(dirname "$(command -v zig)")/lib" || echo "::warning::zig_cache_restat failed, so this job rebuilds and reruns more than it needs to"
+        run: zig run -OReleaseFast -mcpu=baseline tools/zig/zig_cache_restat.zig -- .zig-cache "$(dirname "$(command -v zig)")/lib" --prune || echo "::warning::zig_cache_restat failed, so this job rebuilds and reruns more than it needs to"
       # The restat tool's own test, when a change touches the tool, this workflow or Zig's version.
       - name: Restored cache regressions
         shell: bash
@@ -150,11 +156,11 @@ jobs:
       - name: build options
         run: python3 -m unittest discover -s tools/zig -p build_options_test.py
       - name: Save the build cache
-        if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        if: ${{ !cancelled() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: .zig-cache
-          key: zig-build-v3-Linux-0.17.0-${{ github.sha }}
+          key: zig-build-v3-Linux-0.17.0-${{ github.sha }}${{ github.event_name == 'schedule' && '-nightly' || '' }}
   zig-windows:
     runs-on: windows-latest
     timeout-minutes: 60
@@ -166,10 +172,10 @@ jobs:
         with:
           version: 0.17.0
           use-cache: false
-      # Main builds from nothing, so every commit on main is checked from scratch and the cache holds one build. A pull
-      # request restores main's newest and saves nothing, so it compiles and runs only what its diff changed.
+      # Main and pull requests restore main's newest build, so each compiles and runs only what changed since; only main
+      # saves, and the nightly run starts from nothing.
       # -Dfixed-cpu: a compile's cache key carries its CPU and these runners differ, so all of them compile for one CPU.
-      - if: ${{ github.event_name == 'pull_request' }}
+      - if: ${{ github.event_name != 'schedule' }}
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: .zig-cache
@@ -177,7 +183,7 @@ jobs:
           restore-keys: zig-build-v3-Windows-0.17.0-
       - name: Let a restored cache fit this checkout
         shell: bash
-        run: zig run -OReleaseFast -mcpu=baseline tools/zig/zig_cache_restat.zig -- .zig-cache "$(dirname "$(command -v zig)")/lib" || echo "::warning::zig_cache_restat failed, so this job rebuilds and reruns more than it needs to"
+        run: zig run -OReleaseFast -mcpu=baseline tools/zig/zig_cache_restat.zig -- .zig-cache "$(dirname "$(command -v zig)")/lib" --prune || echo "::warning::zig_cache_restat failed, so this job rebuilds and reruns more than it needs to"
       # The same host unit tests on Windows: the platform layer (zig/src/platform) over the UCRT, Win32 and Winsock.
       - name: zig build test
         run: zig build -Dfixed-cpu test --test-timeout 10m
@@ -186,19 +192,22 @@ jobs:
         run: zig build -Dfixed-cpu test-golden
       - name: zig build fuzz-cortheon
         run: zig build -Dfixed-cpu fuzz-cortheon
+      # The pull client's framing and path checks: its fake hub runs on std.Io.net, so Windows builds and runs them.
+      - name: zig build test-pull-security
+        run: zig build -Dfixed-cpu test-pull-security
       - name: Save the build cache
-        if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        if: ${{ !cancelled() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: .zig-cache
-          key: zig-build-v3-Windows-0.17.0-${{ github.sha }}
+          key: zig-build-v3-Windows-0.17.0-${{ github.sha }}${{ github.event_name == 'schedule' && '-nightly' || '' }}
   # The release's own path check on each platform's dist server (no fatbins), so a leak fails here, not at release.
-  # Pull requests check Linux x86_64 only; every push to main checks all three platforms.
+  # Pull requests check Linux x86_64 only; main's pushes and the nightly run check all three platforms.
   release-paths:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ github.event_name == 'push' && fromJSON('["macos-26", "ubuntu-24.04", "ubuntu-24.04-arm"]') || fromJSON('["ubuntu-24.04"]') }}
+        os: ${{ github.event_name != 'pull_request' && fromJSON('["macos-26", "ubuntu-24.04", "ubuntu-24.04-arm"]') || fromJSON('["ubuntu-24.04"]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
@@ -216,7 +225,8 @@ jobs:
         env:
           SHARED: ${{ hashFiles('zig/src/core/**', 'zig/src/platform/**', 'zig/src/hip/**', 'zig/src/*.zig') }}
         run: echo "shared=$SHARED" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      - if: ${{ github.event_name != 'schedule' }}
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: .zig-cache
           key: zig-build-v3-paths-${{ matrix.os }}-0.17.0-${{ steps.cache-key.outputs.shared }}-${{ github.sha }}
@@ -225,18 +235,18 @@ jobs:
             ${{ github.event_name == 'pull_request' && format('zig-build-v3-paths-{0}-0.17.0-', matrix.os) || '' }}
       - name: Let a restored cache fit this checkout
         shell: bash
-        run: zig run -OReleaseFast -mcpu=baseline tools/zig/zig_cache_restat.zig -- .zig-cache "$(dirname "$(command -v zig)")/lib" || echo "::warning::zig_cache_restat failed, so this job rebuilds and reruns more than it needs to"
+        run: zig run -OReleaseFast -mcpu=baseline tools/zig/zig_cache_restat.zig -- .zig-cache "$(dirname "$(command -v zig)")/lib" --prune || echo "::warning::zig_cache_restat failed, so this job rebuilds and reruns more than it needs to"
       - name: Metal toolchain
         if: runner.os == 'macOS'
         run: xcrun -sdk macosx metal -v || { xcodebuild -downloadComponent MetalToolchain && xcrun -sdk macosx metal -v; }
       - name: zig build check-release-paths
         run: zig build -Dfixed-cpu check-release-paths
       - name: Save the build cache
-        if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        if: ${{ !cancelled() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: .zig-cache
-          key: zig-build-v3-paths-${{ matrix.os }}-0.17.0-${{ steps.cache-key.outputs.shared }}-${{ github.sha }}
+          key: zig-build-v3-paths-${{ matrix.os }}-0.17.0-${{ steps.cache-key.outputs.shared }}-${{ github.sha }}${{ github.event_name == 'schedule' && '-nightly' || '' }}
   zig-macos-dev-tools:
     runs-on: macos-26
     timeout-minutes: 45
@@ -255,7 +265,8 @@ jobs:
         env:
           SHARED: ${{ hashFiles('zig/src/core/**', 'zig/src/platform/**', 'zig/src/hip/**', 'zig/src/*.zig') }}
         run: echo "shared=$SHARED" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      - if: ${{ github.event_name != 'schedule' }}
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: .zig-cache
           key: zig-build-v3-macOS-dev-tools-0.17.0-${{ steps.cache-key.outputs.shared }}-${{ github.sha }}
@@ -264,7 +275,7 @@ jobs:
             ${{ github.event_name == 'pull_request' && 'zig-build-v3-macOS-dev-tools-0.17.0-' || '' }}
       - name: Let a restored cache fit this checkout
         shell: bash
-        run: zig run -OReleaseFast -mcpu=baseline tools/zig/zig_cache_restat.zig -- .zig-cache "$(dirname "$(command -v zig)")/lib" || echo "::warning::zig_cache_restat failed, so this job rebuilds and reruns more than it needs to"
+        run: zig run -OReleaseFast -mcpu=baseline tools/zig/zig_cache_restat.zig -- .zig-cache "$(dirname "$(command -v zig)")/lib" --prune || echo "::warning::zig_cache_restat failed, so this job rebuilds and reruns more than it needs to"
       # Xcode 26 ships the Metal compiler as a separate component, which the image does not always carry.
       - name: Metal toolchain
         run: xcrun -sdk macosx metal -v || { xcodebuild -downloadComponent MetalToolchain && xcrun -sdk macosx metal -v; }
@@ -272,8 +283,8 @@ jobs:
       - name: zig build dev-tools
         run: zig build dev-tools -Doptimize=Debug  # compile and link only: Debug builds about 30% faster
       - name: Save the build cache
-        if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        if: ${{ !cancelled() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: .zig-cache
-          key: zig-build-v3-macOS-dev-tools-0.17.0-${{ steps.cache-key.outputs.shared }}-${{ github.sha }}
+          key: zig-build-v3-macOS-dev-tools-0.17.0-${{ steps.cache-key.outputs.shared }}-${{ github.sha }}${{ github.event_name == 'schedule' && '-nightly' || '' }}

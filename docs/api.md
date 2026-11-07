@@ -134,6 +134,19 @@ See [image input](vision.md) for data URLs, public image URLs, limits and cache 
 The native binary refuses `--vision` for other models and answers their image parts with HTTP 400.
 Unsupported image input, audio, video and non-text output requests receive HTTP 400.
 
+## Model capabilities
+
+Each native GET /v1/models entry, including every configured alias, includes a capabilities object.
+It reports the loaded engine's boolean Info flags: text_generation, context_fitted, call_gates, loop_guard,
+thinking_budget, reasoning, answer_limit, structures, logprobs, penalties, prompt_logprobs, prompt_cache,
+warm_turns, plain_only, decides, pictures, greedy_only and slide_conversations. The vision, speech,
+embeddings, readouts and rerank fields report whether that user feature is present. Every field is a JSON boolean,
+including false, and no callback details or addresses are exposed.
+
+Discovery and boolean request checks use the same loaded flag reader. Publication enables no feature.
+Flags describe the engine; request combinations, context, template and format constraints still apply.
+greedy_only and plain_only describe restrictions, and context_fitted says the context was limited to memory.
+
 ## Decisions
 
 `POST /v1/decisions` is served by Flash Next on one CUDA GPU, by LFM2 on CUDA and by Gemma 4 on XPU.
@@ -229,6 +242,13 @@ more than that before the state returns 400. The route answers:
 
 A client that disconnects cancels its request.
 
+## Queue phase metrics
+
+With TENSORFOLD_PHASE_METRICS=1, native /metrics also exports tensorfold:request_queue_seconds and
+its request_queue_time_seconds alias, for measured waits from request submission to admission.
+Both use the fixed request-time histogram edges and have no request labels. An unset flag keeps these families
+absent and skips the queue observation; existing request metrics remain available. This option does not change replies.
+
 ## Living Weights
 
 With `--slide`, the native server learns facts into the served weights. [Living Weights](living-weights.md) explains
@@ -240,6 +260,7 @@ each route and its events.
 | `GET /v1/slide/graph` | Every fact as JSON: its state, neurons, questions and their expected answers, and the model's pocket |
 | `DELETE /v1/slide/graph` | Clears the graph; the weights keep what they learned |
 | `DELETE /v1/slide/fact/{id}` | Deletes one fact from the weights, every other fact checked again, streaming `fact`, `checking`, `zeroed`, `checked` and `forgot` events; an optional `{"reason": "..."}` goes into the graph |
+| `DELETE /v1/slide/facts` | Deletes the facts the body's `ids` select (1 to 256 distinct learned fact IDs) in one transaction: an invalid selection refuses the whole request before any cut; an optional `{"reason": "..."}` goes into the graph |
 
 A delete's last event, `forgot`, says `"deleted": true` only when both the shards and the graph file hold the delete,
 and its `state` is the fact's state in the graph file; a fact left `deleting` is settled by sending the delete again.
@@ -328,7 +349,7 @@ prompt's chunks to families that declare chunk-independent prompt arithmetic. Th
 behind device token-hash qualification; every native family is gated out today, so no native server caps chunk
 rows yet. Absent the flag the engines keep their own cuts and `TENSORFOLD_PREFILL_SHARE` keeps its old meaning:
 the prompt's share of a fill step's wall time, time only, never smaller chunks. Flash Next's shared sessions on a Mac
-without tensor units are the exception: absent both, replies take 0.8 of that time and a filling prompt's steps grow
+are the exception: absent both, replies take 0.8 of that time and a filling prompt's steps grow
 from 32 to 512 rows after eight, while `--decode-share 0` keeps the 32-row steps with the prompt first. `TENSORFOLD_PREFILL_ORDER=srpt`
 lets a running reply that would end within a quarter of a filling long prompt's estimated time left take rounds first,
 the prompt keeping at least 10% of the time and lending at most a quarter of its own. It's the default for Qwen3.8-27B
@@ -340,6 +361,17 @@ first, in arrival order, as 0.3.6.2 did. Background work waits behind foreground
 request yields when a foreground request needs its lane or memory, then restarts with already-delivered tokens
 suppressed.
 Session-title requests are also treated as background work.
+
+The serve flags `--top-p`, `--top-k` and `--min-p` set the server's defaults for the request fields of the same
+names, as `--temperature` does. Under them sit two layers: a family's built-in sampling (DeepSeek-V4 and V4.1
+serve their model cards' temperature 1 and top_p 1), then the checkpoint's `generation_config.json`
+(`temperature`, `top_k`, `top_p`, `min_p`; `do_sample: false` means temperature 0, and `do_sample: true` without
+a temperature means 1). A flag that is set replaces what those layers gave. When nothing sets a value the server
+has no sampling default and the serving line prints `greedy`; otherwise it prints the resolved defaults as
+name-value pairs. A request's own fields win over the defaults. The merged values are checked per request like
+request fields: a `--min-p` outside 0 through 1 refuses every chat request, a negative `--top-k` clamps to 0, and
+`--temperature` and `--top-p` must be finite numbers. An engine that decodes greedily only refuses sampled
+requests while the server samples by default, and its refusal suggests serving with `--temperature 0`.
 
 `--name-priority ID=background` gives one served id (`--name` or an `--alias`) a default priority: a request that
 asks for it and sends no `priority` of its own is treated as `priority: "background"`. The request's own `priority`
@@ -422,7 +454,7 @@ The native server enforces the same fields with the same grammars through `libtf
 xgrammar v0.2.8's C++ library (`zig/src/grammar/tf_grammar.cc`). Release archives ship it in `lib/` beside `bin/` for
 macOS arm64, Linux x86_64 and Linux aarch64; from source, `zig build grammar -Dxgrammar=DIR` builds it from an xgrammar
 v0.2.8 checkout (`git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar`) into
-`zig-out/native/lib` on macOS and `zig-out/lib` on Linux. The server looks in `../lib` beside its binary, then beside
+`zig-out/native/lib` on macOS, Linux and Windows. The server looks in `../lib` beside its binary, then beside
 it, then on the loader's path, and loads it at the first structured request; without it, everything else serves and a
 structured request gets HTTP 400. The native engines listed below expose token grammar support; other engines
 refuse structured requests. Drafting stays on: the drafts the head holds on the GPU come
@@ -510,7 +542,9 @@ model card advises `true` for plain chat; any other value is a 400, and other fa
 
 A tool call written before the think block closes is the reply's tool call when the reply ends inside the block,
 on both backends; the reasoning stops where the call starts, and streamed reasoning never carries the call's markup.
-A call only mentioned while thinking, with the block closed after it, stays reasoning.
+A complete call at the end of reasoning is also returned when the think-close marker follows and the answer is
+empty or whitespace. While streaming, those calls stay held until the reply ends. When the block closes, a call
+followed by more reasoning or a nonempty answer stays reasoning.
 
 `thinking_budget` (the request's; absent or 0 takes `--thinking-budget`) replaces the reply's budget-th token,
 while it is still thinking, with a newline, the closing think marker and a blank line, then continues the answer.
@@ -591,6 +625,33 @@ GPU's memory can freeze the host, so lower it only with room to spare.
 On a discrete card (an RTX 3090, an A100) the server sizes its window from the card's own free memory, as the driver
 reports it, less a reserve of a 32nd of the card and at least 1 GiB. `TENSORFOLD_MEMORY_RESERVE_GIB` sets that one from
 0.5 GiB up.
+
+## Compaction
+
+Without `--compact-at` nothing compacts: a conversation that outgrows the context is refused with the usual
+`context_length` error. With it, the server summarizes instead of refusing. `--compact-at auto` reserves room for
+the reply — the larger of 15% of the context window and 16,384 tokens, or 15% when the window can't hold 16,384 — and compacts a conversation whose prompt
+plus wanted reply tokens would cross what is left, or one the plain prepare refuses for context length.
+`--compact-at F`, a fraction of the window in (0, 1], compacts when they would cross F × the window, rounded down.
+Any other value is refused at startup ("expected auto or a fraction in (0, 1]").
+
+Compaction keeps the conversation's leading messages and its recent tail whole and summarizes the middle into a
+memory note. The note is written by the model itself — greedy, thinking off, at most 1,024 tokens a chunk — under
+a task that asks for Markdown sections (Goal, Constraints and preferences, Progress, Decisions, Next steps,
+Critical context) and under 800 words. It replaces the summarized middle as one message that begins "Memory of
+the earlier conversation:". The tail is `--compact-keep` tokens of recent messages, an integer from 0; the
+default keeps the smaller of 20,000 tokens and a quarter of the window. If the rebuilt conversation still does
+not fit, the server summarizes again over a smaller tail until it does. A compacted request runs these extra
+generations before its reply.
+
+`--compact-memory DIR` stores each conversation's note under DIR as `<key>.md`, with a `<key>.json` recording how
+many leading messages the note covers and their hash. A later request whose leading messages hash the same reuses
+the stored note instead of regenerating it. Without the flag a note lives for one request.
+
+The reply's `tensorfold` object carries `context_window` and `context_used`, and when compaction ran also a
+`compaction` object: `messages_compacted`, `kept_messages`, `note_tokens` and the `note` text. Compaction applies
+to chat completions with a `messages` array, and to the Responses API, which runs as one; a completions request
+with a plain string prompt is never compacted.
 
 ## Embeddings
 
@@ -796,7 +857,7 @@ store for each model and build. That store takes the place of `--learn`'s store 
 with the flag neither reads nor writes the prefix files a plain `--learn` server keeps, and they stay on disk until the
 cap below needs their room. After a restart, a crash or an eviction from RAM, the next turn reads the latest state back
 instead of reading the conversation again from its first token. Qwen3.8-27B, Nemotron, Flash Next and GLM-5.3-Flash on
-one Mac and Nemotron on CUDA keep them; other engines refuse the flag at startup.
+one Mac, and Nemotron, the Qwen3.5 hybrids and Flash Next on CUDA, keep them; other engines refuse the flag at startup.
 
 The engine stages an owned copy between rounds, and an I/O thread writes and fsyncs it. Staging has a 1 GiB byte permit
 and at most eight jobs. A save that finds either full but would fit alone waits in the queue until a write finishes; one

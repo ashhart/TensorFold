@@ -81,6 +81,7 @@ fn scatter(_: *anyopaque, saved: api.prompt_cache.Saved, ranges: []const rows.im
 /// What disk states are read under, and the probe's prompt rate: the checkpoint, the drafter, sources, modes, bits.
 pub fn identity(h: *Host, io: std.Io, a: Allocator, dir: []const u8, drafter: ?[]const u8) !struct { id: u64, rate: f64 } {
     var w = std.hash.Wyhash.init(0x7132);
+    try @import("sys").file_identity.current(&w, a, io);
     try disk_identity.checkpoint(&w, a, io, dir);
     if (drafter) |d| try disk_identity.checkpoint(&w, a, io, d);
     const p = try probe(h, io);

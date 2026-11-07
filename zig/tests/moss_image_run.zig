@@ -15,6 +15,7 @@ const usage =
     \\build has the encoder. Exit 0 means every teacher step and the repeat passed, 1 failed, 2 is INCONCLUSIVE.
     \\Per element the bound is 2 * max(|bf16 teacher - fp32 teacher|, half a bf16 ULP at the fp32 value).
     \\Missing or partial fp32 teacher coverage cannot pass. A start-only case still produces a picture with exit 2.
+    \\tf-moss-image-blocks gates each transformer block alone against the same publisher float32 run.
 ;
 
 /// The card's sampling defaults: the guidance scale, and the block the negative branch skips.

@@ -31,11 +31,19 @@ test "the fused block declares the state alias and binds one buffer for it" {
     try std.testing.expect(!glue.spec(.chain).in_place); // the chain's kernel marks its state input __restrict__
     if (@hasDecl(glue, "fusedArgs")) {
         var ins: [7]u64 = .{ 1, 2, 3, 4, 5, 6, 7 };
-        var o: [4]u64 = .{ 8, 9, 10, 11 };
+        var o: [6]u64 = .{ 8, 9, 10, 11, 13, 14 };
         var a = glue.fusedArgs(&ins, &o, 64, 12);
         try std.testing.expectEqual(a.integer(5), a.integer(6)); // the state in and the state out are one buffer
         try std.testing.expectEqual(@as(?u64, 10), a.integer(5));
         try std.testing.expectEqual(@as(?u64, 64), a.integer(7));
+        try std.testing.expectEqual(@as(usize, 17), a.count); // fn_gdn_fused's parameters, the two cache marks included
+        for ([_]usize{ 13, 14, 15, 16 }, [_]u64{ 32, 13, 64, 14 }) |i, want| try std.testing.expectEqual(@as(?u64, want), a.integer(i));
+        for ([_]usize{ 1, 15, 17 }) |rows| { // odd row counts: no marks, the kernel's path for a pass without one
+            var none = glue.fusedArgs(&ins, &o, rows, 12);
+            for ([_]usize{ 13, 14, 15, 16 }) |i| try std.testing.expectEqual(@as(?u64, 0), none.integer(i));
+        }
+        var two = glue.fusedArgs(&ins, &o, 16, 12); // the tile's even seam keeps both marks
+        for ([_]usize{ 13, 14, 15, 16 }, [_]u64{ 8, 13, 16, 14 }) |i, want| try std.testing.expectEqual(@as(?u64, want), two.integer(i));
     } else return error.MissingFusedArgs;
 }
 

@@ -61,7 +61,7 @@ pub const Entry = struct {
 
 pub const Header = std.StringArrayHashMapUnmanaged(Entry);
 
-/// The header's entries (names live in `arena`); an entry that breaks the format, runs past `data_len` bytes or has the wrong size is refused.
+/// Header entries (names live in `arena`); an entry breaking the format, past `data_len` bytes or mis-sized is refused.
 pub fn parseHeader(arena: std.mem.Allocator, json: []const u8, data_len: usize) !Header {
     return parseHeaderPrefix(arena, json, data_len, null);
 }

@@ -30,7 +30,7 @@ pub const Reg = struct { heads: at_.Heads, which: Which, control: bool = false }
 fn controlEdit(w: Which, tensor: bool) ?at_.Edit {
     return switch (w) {
         .prompt => .{ .from = "if (simd_any(inf != 0) && lane == 0) atomic_fetch_or", .to = "if (false && lane == 0) atomic_fetch_or" },
-        .decode => if (tensor) .{ .from = "const bool masked = q27_nonfinite(", .to = "const bool masked = false && q27_nonfinite(" } else null,
+        .decode => if (tensor) .{ .from = "const bool masked = MASKED && q27_nonfinite(", .to = "const bool masked = false && q27_nonfinite(" } else null,
     };
 }
 

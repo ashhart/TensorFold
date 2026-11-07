@@ -131,7 +131,7 @@ fn checkTemplates(lines: []const u8) !void {
         cases += 1;
         var image_text: []const u8 = "";
         var opts: template.Options = .{
-            .thinking = c.get("thinking").?.bool,
+            .thinking = (c.get("thinking_v4") orelse c.get("thinking").?).bool,
             .budget = template.budgetOf(c.get("budget").?) orelse 0,
             .drop_thinking = c.get("drop_thinking").?.bool,
             .add_generation_prompt = c.get("generation").?.bool,
@@ -145,7 +145,7 @@ fn checkTemplates(lines: []const u8) !void {
             const level = template.effortOf(text) orelse return error.TestUnexpectedRefusal;
             opts.thinking = level != null;
             opts.budget = level orelse 75;
-            try testing.expectEqual(c.get("thinking").?.bool, opts.thinking);
+            try testing.expectEqual((c.get("thinking_v4") orelse c.get("thinking").?).bool, opts.thinking);
             efforts += 1;
         }
         if (c.get("tools")) |t| if (t == .array) {
@@ -160,9 +160,11 @@ fn checkTemplates(lines: []const u8) !void {
         };
         var problem: template.Problem = .{};
         const got = template.render(a, c.get("messages").?, opts, &problem);
-        const want = c.get("expected").?;
+        const want = c.get("expected_v4") orelse c.get("expected").?;
+        if (c.get("expected_v4") != null) try testing.expect(c.get("v4_reason").?.string.len > 0);
         const ok = if (want == .string) (if (got) |g| std.mem.eql(u8, g, want.string) else |_| false) else (if (got) |_| false else |e| e == error.Refused);
         if (c.get("jinja")) |j| if (j == .string) {
+            try testing.expectEqualStrings(c.get("expected").?.string, j.string);
             jinja += 1;
         };
         if (!ok) {
@@ -230,7 +232,7 @@ fn checkDsml(lines: []const u8) !void {
         const c = (try json.parseText(a, line)).ok;
         cases += 1;
         const text = c.get("text").?.string;
-        const thinking = c.get("thinking").?.bool;
+        const thinking = (c.get("thinking_v4") orelse c.get("thinking").?).bool;
         var offered = try tools.Tools.init(a, if (c.get("tools").? == .array) c.get("tools").?.array else &.{});
         offered.unknown_calls = false; // the reference behaviour: a call to a tool not offered stays in the content
         var why: ?[]const u8 = null;

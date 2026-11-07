@@ -17,6 +17,8 @@ const usage =
     \\state: raw GDN/conv and active KV bytes; TF_Q35_STATE_STEPS=N settles N decode rows first.
     \\fp8: the attention caches as e4m3 rows (--kv-cache fp8); TF_Q35_PREFILL, _BESIDE, _DELTA, _RESUME, _RESUME_TREE, _SHIFT: below.
     \\TF_Q35_WINDOW=N fixes window/tree width (tree: at least 2); 0 keeps growing widths.
+    \\       tf-qwen35-cuda <model dir> rows <ids file> <out> [piece] | rows-last <ids file> | rows-cuts <ids file>
+    \\rows: final-norm rows as a readout keeps them (raw bf16); rows-last checks them against .last; rows-cuts reports.
     \\       tf-qwen35-cuda <model dir> kl <ids file> <out.json> <skip> <rows> [control|int8]
     \\kl: bf16 caches against fp8 ones, teacher-forced: the first <skip> ids as prompt chunks, then <rows> ids in
     \\windows, each row's KL(bf16 || fp8) of the next-token distributions, top-1 agreement and both losses on the next
@@ -37,6 +39,11 @@ pub fn main(init: std.process.Init) !u8 {
         }
         const bound: ?[2]f64 = if (bounded) .{ try std.fmt.parseFloat(f64, args[6]), try std.fmt.parseFloat(f64, args[7]) } else null;
         return vision(init, a, args[1], args[3], try std.fmt.parseInt(u32, args[4], 10), bound, args[first..]);
+    }
+    if (args.len >= 4 and std.mem.startsWith(u8, args[2], "rows")) {
+        const code = try @import("qwen35_cuda_rows.zig").run(init, a, args);
+        if (code == 2) std.debug.print("{s}", .{usage});
+        return code;
     }
     if (args.len >= 3 and std.mem.eql(u8, args[2], "kl")) {
         if (args.len != 7 and args.len != 8) {
@@ -116,7 +123,7 @@ pub fn main(init: std.process.Init) !u8 {
         var from: struct { at: usize = 0, w: usize = 0, out: usize = 0 } = .{};
         while (at < ids.items.len) : (w = if (fixed > 0) @max(2, fixed) else w % e.window_rows + 1) {
             if (resume_tree > 0 and windows == resume_tree) {
-                copy = try q.reuse.saveCache(e, &cache, cache.len, &.{});
+                copy = try q.reuse.saveCache(e, &cache, cache.len, &.{}, false);
                 from = .{ .at = at, .w = w, .out = out.items.len };
             }
             at += try treeWindow(&f, &cache, ids.items, at, w, a, &out);
@@ -211,7 +218,7 @@ pub fn main(init: std.process.Init) !u8 {
                 try e.forward(&.{.{ .cache = &cache, .rows = 1 }}, &token, .logits);
                 try cache.settle(e);
             }
-            const copy = try q.reuse.saveCache(e, &cache, cache.len, &.{});
+            const copy = try q.reuse.saveCache(e, &cache, cache.len, &.{}, false);
             defer q.reuse.dropCopy(e, copy);
             try out.appendSlice(a, copy.host.bytes[0..@intCast(copy.len)]);
         } else try out.appendSlice(a, std.mem.sliceAsBytes(cache.logits));
@@ -256,7 +263,7 @@ fn treeWindow(f: *Fwd, cache: *E.Cache, ids: []const u32, at: usize, w: usize, a
 
 /// `cache` replaced by a fresh one, poisoned, that takes a kept copy of its state (cuda_reuse.zig's save and restore).
 fn resumeFrom(gpa: std.mem.Allocator, e: *E.Engine, cache: *E.Cache) !void {
-    const copy = try q.reuse.saveCache(e, cache, cache.len, &.{});
+    const copy = try q.reuse.saveCache(e, cache, cache.len, &.{}, false);
     defer q.reuse.dropCopy(e, copy);
     var fresh = try E.Cache.init(gpa, e, cache.cap);
     errdefer fresh.deinit(gpa);

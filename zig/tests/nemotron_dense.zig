@@ -1,4 +1,4 @@
-//! Nemotron's tensor-unit dense projections at real shapes: schedule variants bit-checked against the engine's kernels, then timed.
+//! Nemotron's tensor-unit dense projections at real shapes: schedule variants bit-checked vs engine kernels, timed.
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
@@ -97,7 +97,7 @@ fn splitSource(a: std.mem.Allocator, src: []const u8) ![]u8 {
 const ta_line = "  tensor<device bfloat, dextents<int32_t, 2>, tensor_inline> tA((device bfloat*)X + (int64_t)rb * K, dextents<int32_t, 2>(K, M - rb));\n";
 const ids_line = "  for (int i = 0; i < CAP; i++) { auto ids = P.get_multidimensional_index(i); ecol[i] = ids[0]; erow[i] = ids[1]; }\n";
 
-/// The 16-row tile as 16/r tiles of r rows (C[j*r + i] is tile j's element i), tiles past the window's rows skipped (uniform).
+/// 16-row tile as 16/r tiles of r rows (C[j*r + i] is tile j's element i), tiles past window rows skipped (uniform).
 fn tiles(a: std.mem.Allocator, src: []const u8, r: usize) ![]u8 {
     const n = 16 / r;
     var t = try swap(a, src, "matmul2d_descriptor(16 * TMR, 64, GS,", try std.fmt.allocPrint(a, "matmul2d_descriptor({d}, 64, GS,", .{r}));

@@ -18,6 +18,8 @@ const prompt_shared = 98304; // cuda_prompt.zig's smem
 const prompt_symbols = .{
     .bf16 = "_ZN20tf_prefill_attention13hpattn_kernelILi256ELi8ELi2ELi2EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiifiPKixi",
     .fp8 = "_ZN20tf_prefill_attention14hpattn8_kernelILi256ELi8ELi2ELi2EEEvPK13__nv_bfloat16PKhS5_PKfS7_PS1_iiiiifiPKixi",
+    .bf16_p256 = "_ZN20tf_prefill_attention18hpattn_p256_kernelILi256ELi8ELi2ELi2EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiifiPKixi", // pages of 256
+    .bf16_p256_ids = "_ZN20tf_prefill_attention22hpattn_p256_ids_kernelILi256ELi8ELi2ELi2EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiifiPKixi", // their ids in shared memory
 };
 const e4m3 = core.quant.fp8.e4m3;
 
@@ -196,8 +198,9 @@ pub fn tailFrom(rows: usize) usize {
 }
 
 const Fns = struct { rope: cuda.Function, partial: cuda.Function, merge: cuda.Function, compact: cuda.Function };
-/// The engine's attention kernels: short streams' rows in `partial`, long streams' in `rows`, a chunk's in `prompt`.
-const Tc = struct { partial: cuda.Function, rows: cuda.Function, prompt: cuda.Function, shared: u32, whole: bool = false };
+/// Attention kernels: short streams in `partial`, long ones in `rows`, a chunk in `prompt` (`ids`: by page-id count).
+const Tc = struct { partial: cuda.Function, rows: cuda.Function, prompt: cuda.Function, shared: u32, whole: bool = false, ids: bool = false };
+const page_ids = 768; // cuda_prompt.zig's ceiling on hpattn_p256_ids_kernel's ids
 
 /// rope, attention (`fns.partial`, or `tc`'s kernels), keep on layer 1 of both streams: contiguous, or `tables`' pages.
 fn launch(gpu: check.Gpu, s: cuda.Stream, fns: Fns, f: Fixture, tables: ?[2][]const u32, given: ?[2][]const u32, a: std.mem.Allocator, seed: u64, tc: ?Tc) !Result {
@@ -285,13 +288,14 @@ fn launch(gpu: check.Gpu, s: cuda.Stream, fns: Fns, f: Fixture, tables: ?[2][]co
         inline for (.{ len, f.c.rows - from, q_heads, kv_heads, group }) |v| pa.add(@as(c_int, @intCast(v)));
         pa.add(@as(f32, 1.0 / 16.0));
         pa.add(@as(c_int, @intCast(f.cap)));
+        const ids: u32 = if (t.ids) @intCast((f.c.lens[st] + f.c.rows + 255) / 256) else 0;
         if (!t.whole) {
             pa.add(segs[st].pt);
             pa.add(@as(i64, @intCast(segs[st].ps)));
-            pa.add(@as(c_int, if (segs[st].pt != 0) @intCast(f.c.ptok) else 1));
+            pa.add(@as(c_int, if (t.ids) @intCast(ids) else if (segs[st].pt != 0) @intCast(f.c.ptok) else 1));
         }
         const grid: cuda.launch.Dim3 = .{ .x = @intCast((f.c.rows - from + 63) / 64), .y = kv_heads * (group / 2) };
-        try cuda.launch.launch(t.prompt, .{ .grid = grid, .block = .{ .x = 256 }, .shared = prompt_shared }, s, &pa);
+        try cuda.launch.launch(t.prompt, .{ .grid = grid, .block = .{ .x = 256 }, .shared = prompt_shared + 4 * ids }, s, &pa);
     };
     var r: Result = undefined;
     r.q = try a.dupe(u8, try rig.bytes(qn, f.q.len * 2));
@@ -413,6 +417,15 @@ pub fn run(gpu: check.Gpu) !void {
             try whole.rows.allowDynamicShared(attn_tiles);
         }
         try whole.prompt.allowDynamicShared(prompt_shared);
+        var p256 = tc; // cuda_prompt.zig's kernels for pages of 256 positions (bf16): page ids from the table
+        p256.prompt = try prompt.function(prompt_symbols.bf16_p256);
+        try p256.prompt.allowDynamicShared(prompt_shared);
+        var p256_ids = p256; // and every page id in shared memory
+        p256_ids.prompt = try prompt.function(prompt_symbols.bf16_p256_ids);
+        p256_ids.ids = true;
+        try p256_ids.prompt.allowDynamicShared(prompt_shared + 4 * page_ids);
+        var red_p256 = format != .bf16;
+        var red_ids = format != .bf16;
         var red_tc = false;
         var red_tail = false;
         var red_table = false;
@@ -490,6 +503,22 @@ pub fn run(gpu: check.Gpu) !void {
                 red_tc = red_tc or moved;
                 try check.expect(moved, "qwen35 pages {t}: a swapped page table still gave the tensor-core or prompt tiles contiguous bytes (control missed) at lens {any}", .{ format, c.lens });
             }
+            if (format == .bf16 and c.ptok == 256) {
+                for (0..2) |rep| {
+                    var repeated = std.heap.ArenaAllocator.init(gpu.gpa);
+                    defer repeated.deinit();
+                    const pg = try launch(gpu, s, fns, f, .{ f.ids[0], f.ids[1] }, null, repeated.allocator(), 20 + rep, p256);
+                    try check.sameBytes("qwen35 pages: the 256-position prompt rows, paged against contiguous", pg.prompt, flat_tc.prompt);
+                    const shared = try launch(gpu, s, fns, f, .{ f.ids[0], f.ids[1] }, null, repeated.allocator(), 24 + rep, p256_ids);
+                    try check.sameBytes("qwen35 pages: the 256-position prompt rows, page ids in shared memory", shared.prompt, flat_tc.prompt);
+                }
+                const swapped = try a.dupe(u32, f.ids[1]);
+                std.mem.swap(u32, &swapped[0], &swapped[n1 - 1]);
+                const bad = try launch(gpu, s, fns, f, .{ f.ids[0], f.ids[1] }, .{ f.ids[0], swapped }, a, 9, p256);
+                red_p256 = red_p256 or !std.mem.eql(u8, bad.prompt, flat_tc.prompt);
+                const bad_ids = try launch(gpu, s, fns, f, .{ f.ids[0], f.ids[1] }, .{ f.ids[0], swapped }, a, 9, p256_ids);
+                red_ids = red_ids or !std.mem.eql(u8, bad_ids.prompt, flat_tc.prompt);
+            }
             const o = try a.dupe(u8, flat.out);
             std.mem.writeInt(u16, o[2 * (q_heads * hd + 5) ..][0..2], 0x4040, .little); // 3.0 where |o| <= 1
             var bad_r = flat;
@@ -499,8 +528,8 @@ pub fn run(gpu: check.Gpu) !void {
             try check.expect(caught, "qwen35 pages {t}: a planted attention row passed float64 (control missed)", .{format});
             std.debug.print("PASS qwen35 pages {t}: lens {any}, {d} rows a stream, {d}-position pages: paged == contiguous (queries, rows, stores, keep; tensor-core and prompt rows), repeats, float64 bound, guards\n", .{ format, c.lens, c.rows, c.ptok });
         }
-        const red = red_table and red_bound and red_tc and red_tail;
+        const red = red_table and red_bound and red_tc and red_tail and red_p256 and red_ids;
         try check.expect(red, "qwen35 pages {t}: a control never fired", .{format});
-        std.debug.print("PASS qwen35 pages {t}: controls RED as planted (swapped table, planted row, uncounted tail keys)\n", .{format});
+        std.debug.print("PASS qwen35 pages {t}: controls RED as planted (swapped table, planted row, uncounted tail keys, swapped table on 256-position pages, swapped table with page ids in shared memory)\n", .{format});
     }
 }

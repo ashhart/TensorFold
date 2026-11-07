@@ -15,6 +15,7 @@ const moe_k = @import("contract_nemo_moe.zig");
 const walk_k = @import("contract_walk.zig");
 const prefill_k = @import("contract_prefill.zig");
 const add_rms_k = @import("contract_add_rms.zig");
+const tail_k = @import("contract_tail.zig");
 const window_k = @import("contract_window.zig");
 const relu2_k = @import("contract_relu2.zig");
 const kv_k = @import("contract_kv_write.zig");
@@ -187,10 +188,32 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     for (&prefills, [_]bool{ true, false }) |*p, paged| p.* = .init(a, &r, s, &l, paged);
     defer for (&prefills) |*p| p.deinit();
     for (&prefills) |*p| try kernels.append(a, p.kernel());
+    // non-finite values only past rows' edges, flat and paged, both cache types; then each without its edge pass
+    var edges: [8]prefill_k.Prefill = undefined;
+    var edge_count: usize = 0;
+    defer for (edges[0..edge_count]) |*p| p.deinit();
+    for (0..8) |i| {
+        const paged = i % 2 == 1;
+        const kind: kit.Kind = if (i / 2 % 2 == 1) .bf16 else .f16;
+        if (kind == .bf16 and kit.act() != .bf16) continue; // RDNA2 serves fp16 caches only
+        const p = &edges[edge_count];
+        p.* = .init(a, &r, s, &l, paged);
+        edge_count += 1;
+        p.k = kind;
+        p.mode = .edge;
+        if (i >= 4) p.planted = try ctl.function(([_][:0]const u8{
+            "tf_ctl_fa_wide_unmasked_f16", "tf_ctl_fa_paged_unmasked_f16", "tf_ctl_fa_wide_unmasked_bf16", "tf_ctl_fa_paged_unmasked_bf16",
+        })[i - 4]);
+        try kernels.append(a, p.kernel());
+    }
     var add_rms: [3]add_rms_k.AddRms = undefined;
     for (&add_rms, std.enums.values(add_rms_k.Mode)) |*m, w| m.* = .init(a, &r, s, &l, w);
     defer for (&add_rms) |*m| m.deinit();
     for (&add_rms) |*m| try kernels.append(a, m.kernel());
+    var tails: [2]tail_k.Tail = undefined;
+    for (&tails, std.enums.values(tail_k.Mode)) |*m, w| m.* = .init(a, &r, s, &l, w);
+    defer for (&tails) |*m| m.deinit();
+    for (&tails) |*m| try kernels.append(a, m.kernel());
     var convs: [2]window_k.ConvWindow = undefined;
     for (&convs, std.enums.values(window_k.Part)) |*m, p| m.init(a, &r, s, &l, p);
     defer for (&convs) |*m| m.deinit();

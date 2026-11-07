@@ -447,3 +447,12 @@ seeded CPU generator, so that it makes the same latents bit for bit:
 - `log256_ps` and `sincos256_ps` from `avx_mathfun.h`, which PyTorch includes (zlib license, Copyright (C) 2012 Giovanni
   Garberoglio, based on Julien Pommier's `sse_mathfun.h`, Copyright (C) 2007; the license is in
   `LICENSES/avx_mathfun-zlib.txt`).
+
+## DeepSeek chat encoder output fixture
+
+`zig/src/server/fixtures/deepseek_v41_encoder/cases.jsonl.gz` contains 328
+request/output cases supplied from DeepSeek's encoder, under the MIT license,
+Copyright (c) 2026 DeepSeek. The unmodified license is beside the fixture as
+[`LICENSE`](zig/src/server/fixtures/deepseek_v41_encoder/LICENSE).
+This is test data, not an encoder implementation. TensorFold's renderer was
+written from these outputs and its existing code without consulting the encoder's source.

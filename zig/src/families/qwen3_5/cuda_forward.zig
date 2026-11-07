@@ -49,7 +49,7 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
     var di: usize = 0;
     var ai: c_int = 0;
     // a prompt chunk keeps its last row: past the last layer's keys and values, the kept row's tile runs alone
-    const tail_at: ?usize = if (prompt) @import("cuda_prompt_tail.zig").first(e, total, nseg, shape.hidden) else null;
+    const tail_at: ?usize = if (prompt) @import("cuda_prompt_tail.zig").first(e, total, nseg, shape.hidden or shape.rows) else null;
     for (e.layers, 0..) |l, i| {
         const tail = tail_at != null and i + 1 == e.layers.len;
         const t0: usize = if (tail) tail_at.? else 0;
@@ -76,8 +76,9 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
                     try e.projAgain(m.q, e.x + t0 * g.hidden * 2, e.qraw + t0 * 2 * aw * 2, rows, prompt);
                 } else try e.projManyPrompt(&.{ m.q, m.k, m.v }, e.x, &.{ e.qraw, e.kraw, e.vraw }, total, prompt);
                 if (e.learning) |k| try k.attention(i, e.qraw, e.kraw, e.vraw, total);
-                try e.run(e.fns.head_norm, .{ total * g.q_heads, 1, 1 }, .{ 64, 1, 1 }, .{ e.qraw, m.q_norm, e.qn, @as(c_int, @intCast(g.q_heads)), @as(c_int, @intCast(2 * aw)), @as(c_int, 2 * head_dim), g.eps, t_params });
-                try e.run(e.fns.head_norm, .{ total * g.kv_heads, 1, 1 }, .{ 64, 1, 1 }, .{ e.kraw, m.k_norm, e.kn, @as(c_int, @intCast(g.kv_heads)), @as(c_int, @intCast(g.kv_heads * head_dim)), @as(c_int, head_dim), g.eps, t_params });
+                const head_norm = if (g.bf16) e.fns.head_norm_shift else e.fns.head_norm;
+                try e.run(head_norm, .{ total * g.q_heads, 1, 1 }, .{ 64, 1, 1 }, .{ e.qraw, m.q_norm, e.qn, @as(c_int, @intCast(g.q_heads)), @as(c_int, @intCast(2 * aw)), @as(c_int, 2 * head_dim), g.eps, t_params });
+                try e.run(head_norm, .{ total * g.kv_heads, 1, 1 }, .{ 64, 1, 1 }, .{ e.kraw, m.k_norm, e.kn, @as(c_int, @intCast(g.kv_heads)), @as(c_int, @intCast(g.kv_heads * head_dim)), @as(c_int, head_dim), g.eps, t_params });
                 try launch(e, if (e.kv8) e.fp8.rope else e.fns.rope, sig.rope, .{ total, g.q_heads + g.kv_heads, 1 }, .{ head_dim, 1, 1 }, .{ geo, e.qn, e.kn, e.vraw, t_segs, t_rows, t_anc, @as(c_int, ai), t_params, mpos, e.rope_table });
                 if (prompt and nseg == 1 and (g.q_heads / g.kv_heads) % 2 == 0) {
                     // a prompt chunk's rows over its own cache: tensor-core tiles in place of the decode partials
@@ -139,7 +140,7 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
         };
     }
     if (prompt and e.int8.on) @import("cuda_prompt_int8.zig").chunkEnd(e, total);
-    try finish(e, total, heads, shape.hidden);
+    try finish(e, total, heads, shape.hidden, shape.rows);
 }
 
 /// A launch whose arguments are checked against the kernel's .cu signature: a wrong count or kind does not build.
@@ -157,11 +158,12 @@ fn shared(e: *E.Engine, f: cuda.Function, comptime s: sig.Sig, grid: [3]usize, t
     try cuda.launch.launch(f, cfg, e.stream, &a);
 }
 
-/// Layer inputs are already kept; hidden reads need neither the final norm nor the vocabulary head.
-pub fn finish(e: anytype, total: usize, heads: usize, hidden: bool) !void {
+/// Layer inputs are already kept: hidden reads need no final norm or head, and a readout piece's rows no head.
+pub fn finish(e: anytype, total: usize, heads: usize, hidden: bool, rows: bool) !void {
     if (hidden) return;
     const g = e.g;
     try e.norm(true, e.final_norm, total);
+    if (rows) return;
     if (e.learning) |k| try k.final(e.h, total);
     // the head over the kept rows
     try e.proj(e.head, e.x + (total - heads) * g.hidden * 2, e.logits, heads, false);

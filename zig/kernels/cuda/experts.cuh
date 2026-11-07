@@ -1,4 +1,4 @@
-// Device code of src/tensorfold/cuda/experts.cuh (lines 1-105, comments dropped), checked by zig/tests/cuda/copies.py.
+// Device code of src/tensorfold/cuda/experts.cuh (lines 1-105, comments dropped).
 #pragma once
 
 #include <cuda_bf16.h>

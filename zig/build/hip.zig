@@ -1,9 +1,40 @@
 //! HIP, built only with -Dhip=true: admission tests in `test`, GPU steps; options on every target (#1165).
 
 const std = @import("std");
+const builtin = @import("builtin");
 const caps = @import("../src/hip/caps.zig");
 const exlr8_build = @import("exlr8.zig");
 const LazyPath = std.Build.LazyPath;
+
+/// Some HIP SDKs ship only `hipcc.bat`, which CreateProcess cannot start: run it through `cmd /c call`.
+fn hipccRun(b: *std.Build, hipcc: []const u8, args: []const []const u8) *std.Build.Step.Run {
+    const bat = builtin.os.tag == .windows and std.mem.endsWith(u8, hipcc, ".bat");
+    const run = if (bat)
+        b.addSystemCommand(&.{ "cmd", "/c", "call" })
+    else
+        b.addSystemCommand(&.{hipcc});
+    if (bat) run.addArg(hipcc);
+    run.addArgs(args);
+    return run;
+}
+
+/// The HIP compiler: `-Dhipcc`, then PATH, then `HIP_PATH`/`ROCM_PATH`'s bin (`hipcc.exe` first on Windows).
+fn resolveHipcc(b: *std.Build, given: ?[]const u8) []const u8 {
+    if (given) |path| return b.findProgram(.{ .names = &.{path} }) orelse path;
+    const names: []const []const u8 = if (builtin.os.tag == .windows)
+        &.{ "hipcc.exe", "hipcc.bat", "hipcc" }
+    else
+        &.{"hipcc"};
+    if (b.findProgram(.{ .names = names })) |found| return found;
+    for ([_][]const u8{ "HIP_PATH", "ROCM_PATH" }) |root| {
+        const root_path = b.graph.environ_map.get(root) orelse continue;
+        for ([_][]const u8{ "hipcc.exe", "hipcc.bat" }) |name| {
+            const candidate = b.pathResolve(&.{ root_path, "bin", name });
+            if (std.Io.Dir.accessAbsolute(b.graph.io, candidate, .{})) |_| return candidate else |_| {}
+        }
+    }
+    return names[0];
+}
 
 /// HIP's options as given, declared whether or not -Dhip=true builds anything with them.
 pub const Options = struct { hipcc: ?[]const u8, hip_include: ?[]const u8, hip_arch: ?[]const u8, device_lib: ?[]const u8, relax_branches: bool };
@@ -55,14 +86,14 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     const run_hip_tests = b.addRunArtifact(hip_tests);
     test_step.dependOn(&run_hip_tests.step);
     b.step("hip-host-test", "HIP admission tests without GPU work").dependOn(&run_hip_tests.step);
-    const hipcc = o.hipcc orelse "hipcc";
-    const hipcc_resolved = b.findProgram(.{ .names = &.{hipcc} }) orelse hipcc;
+    const hipcc_resolved = resolveHipcc(b, o.hipcc);
+    const hipcc = hipcc_resolved;
     const hip_include = o.hip_include orelse
         b.pathResolve(&.{ std.fs.path.dirname(hipcc_resolved) orelse "/opt/rocm/bin", "..", "include" });
     const hip_arch = o.hip_arch orelse "gfx1151";
     if (caps.Caps.of(hip_arch) == null or std.mem.indexOfScalar(u8, hip_arch, ':') != null)
         std.debug.panic("-Dhip-arch {s} is not an exact name in the caps table (zig/src/hip/caps.zig)", .{hip_arch});
-    const hip_compile = b.addSystemCommand(&.{ hipcc, "--genco", b.fmt("--offload-arch={s}", .{hip_arch}), "-O2", "-ffp-contract=off" });
+    const hip_compile = hipccRun(b, hipcc, &.{ "--genco", b.fmt("--offload-arch={s}", .{hip_arch}), "-O2", "-ffp-contract=off" });
     hip_compile.addFileArg(b.path("zig/kernels/hip/runtime_tests.hip"));
     hip_compile.addArg("-o");
     const hip_object = hip_compile.addOutputFileArg("hip-runtime-probe.hsaco");
@@ -76,7 +107,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     const hip_gpu_test = b.addTest(.{ .root_module = hip_gpu_module });
     b.step("hip-gpu-build", "Compile HIP runtime tests without running GPU work").dependOn(&hip_gpu_test.step);
     b.step("hip-gpu-test", "Real HIP copies, fills and architecture-selected module launches").dependOn(&b.addRunArtifact(hip_gpu_test).step);
-    const affine_compile = b.addSystemCommand(&.{ hipcc, "--genco", b.fmt("--offload-arch={s}", .{hip_arch}), "-O2", "-ffp-contract=off" });
+    const affine_compile = hipccRun(b, hipcc, &.{ "--genco", b.fmt("--offload-arch={s}", .{hip_arch}), "-O2", "-ffp-contract=off" });
     affine_compile.addFileArg(b.path("zig/kernels/hip/affine.hip"));
     affine_compile.addArg("-o");
     const affine_image = affine_compile.addOutputFileArg("affine.hsaco");
@@ -124,6 +155,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     b.step("hip-dense-tune", "Time the dot2 and WMMA BF16 dense tiles at Qwen3-8B's shapes (-Dhip-arch)").dependOn(&dense_tune_run.step);
     const stub_kernels = b.createModule(.{ .root_source_file = b.addWriteFiles().add("kernels.zig", stub) });
     const host = engineModules(b, b.graph.host, .Debug, stub_kernels, null);
+    b.step("test-environment-hip-host", "Named HIP budget refusals without GPU work").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.hip, .filters = &.{ "HIP environment:", "a carve-out needs the card" } })).step);
     b.step("test-slide-hip-host", "Unsupported HIP learning refuses before device or checkpoint access").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.native, .filters = &.{"slide admission:"} })).step);
     const blas_host = b.addRunArtifact(b.addTest(.{ .root_module = host.hip, .filters = &.{ "HIP BLAS:", "HIP fixed BLAS:", "HIP convolution:", "HIP AOTriton:" } }));
     b.step("test-hip-blas-host", "HIP BLAS, convolution and attention admission without device execution").dependOn(&blas_host.step);
@@ -162,7 +194,10 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     test_step.dependOn(&checksExe(b, b.graph.host, .Debug, host).step);
     test_step.dependOn(&clefExe(b, b.graph.host, .Debug, host).step);
     test_step.dependOn(&server(b, b.graph.host, host, build_options).step);
-    const check_target = b.resolveTargetQuery(.{ .cpu_arch = b.graph.host.result.cpu.arch, .os_tag = .linux, .abi = .gnu });
+    const check_target = if (b.graph.host.result.os.tag == .windows)
+        b.graph.host
+    else
+        b.resolveTargetQuery(.{ .cpu_arch = b.graph.host.result.cpu.arch, .os_tag = .linux, .abi = .gnu });
     const check = engineModules(b, check_target, .Debug, stub_kernels, null);
     b.step("check-native-hip-host", "Compile the real native HIP server with inert kernels, without GPU execution").dependOn(&server(b, check_target, check, build_options).step);
     const gpu = engineModules(b, target, optimize, objects, hip_include);
@@ -417,16 +452,15 @@ const groups = [_]Source{
 
 /// What the group sources include, so an edit to one rebuilds them.
 const headers = [_][]const u8{
-    "attention/attention_fa.hip", "decode/pages.hpp",       "decode/plan.hpp",       "ops/attention.hpp",
-    "ops/common.hpp",             "ops/draw.hpp",           "ops/tp.hpp",            "ops/elementwise.hpp",
-    "ops/linear.hpp",             "ops/moe.hpp",            "ops/norms.hpp",         "ops/rope.hpp",
-    "common/arch.hpp",            "common/dot2.hpp",        "common/vec.hpp",        "common/wmma.hpp",
-    "quant/act.hpp",              "quant/mlx.hpp",          "quant/mlx_decoder.hpp", "quant/mlx_pieces.hpp",
-    "quant/mlx_tiles.hpp",        "tiles/dot2.hpp",         "tiles/epilogue.hpp",    "tiles/gemm.hpp",
-    "tiles/gemm_kp.hpp",          "tiles/matrix_gemm.hpp",  "tiles/plan.hpp",        "tiles/stream.hpp",
-    "flashnext/streams.hpp",      "flashnext/ngram.hpp",    "flashnext/indexer.hpp", "flashnext/sparse.hpp",
-    "ops/nemotron_moe.hpp",       "quant/bf16_decoder.hpp", "quant/dense_tiles.hpp", "tiles/wmma12_gemm.hpp",
-    "ops/columns.hpp",            "columns_controls.hpp",   "ops/vision.hpp",        "ops/dense_text.hpp",
+    "attention/attention_fa.hip", "attention/prefill.hpp", "decode/pages.hpp",     "decode/plan.hpp",      "ops/attention.hpp",
+    "ops/common.hpp",             "ops/draw.hpp",          "ops/tp.hpp",           "ops/elementwise.hpp",  "ops/linear.hpp",
+    "ops/moe.hpp",                "ops/norms.hpp",         "ops/rope.hpp",         "common/arch.hpp",      "common/dot2.hpp",
+    "common/vec.hpp",             "common/wmma.hpp",       "quant/act.hpp",        "quant/mlx.hpp",        "quant/mlx_decoder.hpp",
+    "quant/mlx_pieces.hpp",       "quant/mlx_tiles.hpp",   "tiles/dot2.hpp",       "tiles/epilogue.hpp",   "tiles/gemm.hpp",
+    "tiles/gemm_kp.hpp",          "tiles/matrix_gemm.hpp", "tiles/plan.hpp",       "tiles/stream.hpp",     "flashnext/streams.hpp",
+    "flashnext/ngram.hpp",        "flashnext/indexer.hpp", "flashnext/sparse.hpp", "ops/nemotron_moe.hpp", "quant/bf16_decoder.hpp",
+    "quant/dense_tiles.hpp",      "tiles/wmma12_gemm.hpp", "ops/columns.hpp",      "columns_controls.hpp", "ops/vision.hpp",
+    "ops/dense_text.hpp",
 };
 
 /// The flags of the kernels' first build: no contraction, wave32 on RDNA, C++20.
@@ -469,7 +503,7 @@ pub fn compile(b: *std.Build, cc: Hipcc, arch: []const u8, source: std.Build.Laz
 fn compileSource(b: *std.Build, cc: Hipcc, arch: []const u8, source: LazyPath, out: []const u8, strict: bool) LazyPath {
     const c = caps.Caps.of(arch).?;
     const root = std.fs.path.dirname(std.fs.path.dirname(cc.resolved) orelse ".") orelse ".";
-    const run = b.addSystemCommand(&.{ cc.name, "--genco" });
+    const run = hipccRun(b, cc.name, &.{"--genco"});
     run.addArgs(&flags);
     if (strict) run.addArgs(&.{ "-O2", "-fno-fast-math", "-fdenormal-fp-math=ieee" });
     run.addArg(b.fmt("-DTF_WAVE={d}", .{c.wave}));
@@ -478,6 +512,7 @@ fn compileSource(b: *std.Build, cc: Hipcc, arch: []const u8, source: LazyPath, o
     run.addArg(b.fmt("-DTF_SDOT4={d}", .{@intFromBool(c.sdot4)}));
     run.addArg(b.fmt("-DTF_SDOT8={d}", .{@intFromBool(c.sdot8)}));
     run.addArg(b.fmt("-DTF_MATRIX={d}", .{@intFromBool(c.matrix != .none)}));
+    run.addArg(b.fmt("-DTF_DOT2_SIGNED_ZERO={d}", .{@intFromBool(c.dot2_signed_zero)}));
     run.addArg(b.fmt("--rocm-path={s}", .{root}));
     const lib = cc.device_lib orelse b.fmt("{s}/lib/llvm/amdgcn/bitcode", .{root});
     run.addArg(b.fmt("--rocm-device-lib-path={s}", .{lib}));

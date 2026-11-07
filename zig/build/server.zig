@@ -61,6 +61,9 @@ pub fn testImports(b: *std.Build, m: *std.Build.Module, target: std.Build.Resolv
 pub fn toolHostTests(b: *std.Build, parser: *std.Build.Module, server: *std.Build.Module, all: *std.Build.Step) void {
     testImports(b, parser, b.graph.host, .debug);
     testImports(b, server, b.graph.host, .debug);
+    b.step("test-thinking-tail-host", "Finished calls before a think close, whole and streamed without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"thinking tail:"} })).step);
+    const environment = b.step("test-environment-report-host", "Named environment discovery, new registry rows and startup reporting");
+    environment.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "capability audit: environment", "stable profile:", "profile line:" } })).step);
     const logprobs = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"logprobs_test"} }));
     b.step("test-logprob-offers-host", "Logprob request capability refusals before engine submission").dependOn(&logprobs.step);
     const models = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"model discovery"} }));
@@ -70,6 +73,10 @@ pub fn toolHostTests(b: *std.Build, parser: *std.Build.Module, server: *std.Buil
     b.step("test-model-idle-host", "Model discovery and idle reload snapshots without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "capability audit: model discovery waits", "idle", "model discovery" } })).step);
     b.step("test-effort-capabilities-host", "CLI effort choices and parsed defaults against request fields").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "capability audit: effort", "parse and capabilities share the table" } })).step);
     b.step("test-effort-discovery-host", "Effective reasoning defaults and template effort discovery").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "capability audit: model discovery", "model discovery", "effort" } })).step);
+    const phases = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "queue phase", "render exposes", "render counts", "metrics name" } }));
+    b.step("test-phase-metrics-host", "Off-by-default queue phase rendering and existing metric families").dependOn(&phases.step);
+    const offers = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "model discovery", "engine capability reader:" } }));
+    b.step("test-model-capabilities-host", "Per-model offers agree with the flags used for request refusals").dependOn(&offers.step);
     const drafts = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"draft sources:"} }));
     b.step("test-draft-line-host", "Serving line draft provenance without devices").dependOn(&drafts.step);
     all.dependOn(&drafts.step);
@@ -94,6 +101,9 @@ pub fn toolHostTests(b: *std.Build, parser: *std.Build.Module, server: *std.Buil
     deepseek.has_side_effects = true;
     all.dependOn(&deepseek.step);
     b.step("test-server-deepseek-chat-host", "Native DeepSeek prompt goldens, provenance and missing-template HTTP refusal").dependOn(&deepseek.step);
+    const quoted = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"quoted markers:"} }));
+    quoted.has_side_effects = true; // reads TF_TOKENIZER_DIRS on every run
+    b.step("test-quoted-markers-host", "Quoted added-token spellings through the chat route with TF_TOKENIZER_DIRS' tokenizers").dependOn(&quoted.step);
 }
 
 /// The server tree's module rooted at `root` over no native engines: the fake server's, or a test among its sources.
@@ -101,10 +111,12 @@ pub fn plain(b: *std.Build, root: []const u8, target: std.Build.ResolvedTarget, 
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
     const tokenizer = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = target, .optimize = optimize });
     const template = b.createModule(.{ .root_source_file = b.path("zig/src/core/template/template.zig"), .target = target, .optimize = optimize });
+    const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "tokenizer", .module = tokenizer }} });
     const m = b.createModule(.{ .root_source_file = b.path(root), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{
         .{ .name = "engine_api", .module = api },
         .{ .name = "tokenizer", .module = tokenizer },
         .{ .name = "template", .module = template },
+        .{ .name = "core", .module = core },
     } });
     _ = addTo(b, m, target, optimize);
     testImports(b, m, target, optimize);
@@ -119,7 +131,7 @@ pub fn cpuArtefacts(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     const api = server_mod.import_table.get("engine_api").?;
     const tokenizer = server_mod.import_table.get("tokenizer").?;
     const template = server_mod.import_table.get("template").?;
-    const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    const core = server_mod.import_table.get("core").?;
     const none = b.createModule(.{ .root_source_file = b.path("zig/src/native/none.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "engine_api", .module = api }} });
     const fake = b.addExecutable(.{ .name = "fake_serve", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/server/fake_serve.zig"),

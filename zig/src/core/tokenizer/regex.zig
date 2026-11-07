@@ -1,4 +1,4 @@
-//! Backtracking matcher for the Oniguruma (Ruby syntax) patterns in tokenizer.json; unsupported syntax is an error, never a guess.
+//! Backtracking matcher for Oniguruma (Ruby) patterns in tokenizer.json; unsupported syntax is an error, never a guess.
 const std = @import("std");
 const unicode = @import("unicode.zig");
 
@@ -278,7 +278,7 @@ const Parser = struct {
             if (c == '|' or c == ')') break;
             var node = try p.atom(icase);
             if (icase and node == .char) {
-                // Oniguruma folds literal runs as strings ("ss" matches U+00DF); only single-character folds are supported.
+                // Oniguruma folds literal runs as strings ("ss" matches U+00DF); only single-character folds supported.
                 if (prev != null and prev.? < 128 and node.char < 128 and unicode.isMultiFoldPair(@intCast(prev.?), @intCast(node.char))) return error.UnsupportedRegex;
                 prev = node.char;
                 node = try p.folded(node.char);

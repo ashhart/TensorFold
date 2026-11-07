@@ -89,7 +89,7 @@ fn whole(ptr: *anyopaque, saved: api.prompt_cache.Saved) bool {
 }
 
 /// What learned and disk states read under: checkpoint, split, chip, OS build, kernel sources, a probe; its rate.
-pub fn identity(io: std.Io, eng: *const glm.engine.Engine, sl: *glm.slots.Slots) !struct { id: u64, rate: f64 } {
+pub fn identity(a: Allocator, io: std.Io, dir: []const u8, eng: *const glm.engine.Engine, sl: *glm.slots.Slots) !struct { id: u64, rate: f64 } {
     var h = std.hash.Wyhash.init(0x62);
     const t0 = std.Io.Clock.awake.now(io).toNanoseconds();
     const probe = try sl.probe(); // both Macs of a pair run it in step: its prompt pass exchanges with the peer
@@ -99,5 +99,5 @@ pub fn identity(io: std.Io, eng: *const glm.engine.Engine, sl: *glm.slots.Slots)
     h.update(api.prompt_imprint.osBuild(&os));
     h.update(std.mem.span(eng.device.name()));
     @import("disk_identity.zig").profile(&h, .{ .family = "glm5_next", .backend = "metal" });
-    return .{ .id = h.final(), .rate = 4143.0 / (@as(f64, @floatFromInt(@max(ns, 1))) / 1e9) };
+    return .{ .id = try @import("disk_identity.zig").scoped(a, io, dir, h.final()), .rate = 4143.0 / (@as(f64, @floatFromInt(@max(ns, 1))) / 1e9) };
 }

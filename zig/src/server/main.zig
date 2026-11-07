@@ -34,7 +34,7 @@ const usage_line = "usage: tensorfold serve [-h] [--host HOST] [--port PORT] [--
     " [--short-reply-ratio R] [--short-reply-chars-per-s CPS]" ++
     " [--register-redraw-st ST] [--register-redraw-high PERCENT] [--register-high-hz HZ]" ++
     " [--compact-at COMPACT_AT] [--compact-keep COMPACT_KEEP]" ++
-    " [--compact-memory COMPACT_MEMORY] [--slide] [--slide-graph SLIDE_GRAPH] [--parallel PARALLEL]" ++
+    " [--compact-memory COMPACT_MEMORY] [--slide] [--slide-graph SLIDE_GRAPH] [--slide-drift-gate] [--parallel PARALLEL]" ++
     " [--cortheon] [--no-update-check] [--backend {auto,mlx,cuda}] [--device DEVICE]" ++
     " [--segments SEGMENTS] model\n";
 const not_lanes = "--recall drafts from a record in the lane engine's rounds, " ++
@@ -57,7 +57,7 @@ pub fn main(init: std.process.Init) !u8 {
         return 0;
     }
     if (argv.len == 2 and (std.mem.eql(u8, argv[1], "--help") or std.mem.eql(u8, argv[1], "-h"))) {
-        try std.Io.File.stdout().writeStreamingAll(io, "usage: tensorfold-native --version | capabilities --json | models | info MODEL | pull REPO[@REVISION] | slide rollback FOLDER | slide audit [flags] | serve MODEL [flags] | benchmark MODEL [flags]\n" ++ usage_line);
+        try std.Io.File.stdout().writeStreamingAll(io, "usage: tensorfold-native --version | capabilities --json | models [--json] | info MODEL | pull REPO[@REVISION] | slide rollback FOLDER | slide audit [flags] | serve MODEL [flags] | benchmark MODEL [flags]\n" ++ usage_line);
         return 0;
     }
     if (argv.len >= 3 and std.mem.eql(u8, argv[1], "serve")) {
@@ -71,6 +71,7 @@ pub fn main(init: std.process.Init) !u8 {
     if (argv.len >= 2 and std.mem.eql(u8, argv[1], "slide")) return slide_cli.main(init, argv[2..]);
     log.init(io, false);
     if (argv.len == 3 and std.mem.eql(u8, argv[1], "capabilities") and std.mem.eql(u8, argv[2], "--json")) {
+        if (try engines.environment(a, .{})) |why| return fail(why);
         var out: std.Io.Writer.Allocating = .init(a);
         var caps = engines.capabilities(a);
         caps.optional_libraries = try @import("core").picture.runtime.probe(a, io);
@@ -87,7 +88,7 @@ pub fn main(init: std.process.Init) !u8 {
         } else return benchmark.main(init, argv[2..], engines.capabilities(a));
     }
     if (argv.len < 2 or !std.mem.eql(u8, argv[1], "serve")) {
-        std.debug.print("usage: tensorfold-native capabilities --json | models | info MODEL | pull REPO[@REVISION] | slide rollback FOLDER | slide audit [flags] | serve MODEL [flags] | benchmark MODEL [flags]\n", .{});
+        std.debug.print("usage: tensorfold-native capabilities --json | models [--json] | info MODEL | pull REPO[@REVISION] | slide rollback FOLDER | slide audit [flags] | serve MODEL [flags] | benchmark MODEL [flags]\n", .{});
         return 2;
     }
     const started = std.Io.Clock.awake.now(io).toNanoseconds();
@@ -99,6 +100,7 @@ pub fn main(init: std.process.Init) !u8 {
         },
         else => |x| return x,
     };
+    if (try engines.environment(a, args)) |why| return fail(why);
     if (try slide_key.slideKeyless(a, args, init.environ_map.get("TENSORFOLD_API_KEY") orelse "")) |why| {
         std.debug.print("tensorfold: {s}\n", .{why});
         return 2;
@@ -161,7 +163,7 @@ pub fn main(init: std.process.Init) !u8 {
         .environ = init.environ_map,
         .started = started,
         .identity = engines.identity(a, args),
-        .forget_fail = if (comptime @import("build_options").slide_test_hooks) forgetFail(init.environ_map) else 0,
+        .forget_fail = if (comptime @import("build_options").slide_test_hooks) try forgetFail(init.environ_map) else 0,
     });
 }
 
@@ -182,9 +184,8 @@ const Reopen = struct {
 };
 
 /// TF_SLIDE_FORGET_FAIL in a -Dslide-test-hooks build: the fact whose check a delete fails, so its put-back is seen.
-fn forgetFail(env: *const std.process.Environ.Map) u32 {
-    const v = env.get("TF_SLIDE_FORGET_FAIL") orelse return 0;
-    return std.fmt.parseInt(u32, std.mem.trim(u8, v, " "), 10) catch 0;
+fn forgetFail(env: *const std.process.Environ.Map) !u32 {
+    return @intCast((try @import("sys").environment.parse("TF_SLIDE_FORGET_FAIL", env.get("TF_SLIDE_FORGET_FAIL"))) orelse 0);
 }
 
 /// HfText.load with every failure named in `problem`, so main tells the text's failure from the engine's.

@@ -57,8 +57,8 @@ fn fit(room: u64, asked: u32, fixed: bool, plan: anytype) !usize {
 
 /// TENSORFOLD_DORY_KV_PAGES set (not 0): full caches in pool pages; unset, every stream contiguous and made at open.
 fn pagesOn() bool {
-    const v = std.c.getenv("TENSORFOLD_DORY_KV_PAGES") orelse return false;
-    return !std.mem.eql(u8, std.mem.span(v), "0");
+    const v = @import("profile").lookup("TENSORFOLD_DORY_KV_PAGES") orelse return false;
+    return !std.mem.eql(u8, v, "0");
 }
 
 /// The device bytes `n` streams take: their caches by loop count and context, the scratch, the backend's buffers.

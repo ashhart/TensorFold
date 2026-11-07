@@ -1,4 +1,4 @@
-//! The lanes backend for a cluster: the leader plans each round and broadcasts it; every rank runs its shard of every row.
+//! The cluster's lanes backend: the leader plans each round and broadcasts it; every rank runs its shard of every row.
 const std = @import("std");
 const lanes = @import("lanes");
 const exchange = @import("exchange.zig");
@@ -8,7 +8,7 @@ const be = lanes.backend;
 const Stream = lanes.Stream;
 const Allocator = std.mem.Allocator;
 
-/// One rank's part of the model (Metal, CUDA or the toy): it runs every row of a round through its shard and the collectives.
+/// One rank's part of the model (Metal, CUDA or the toy): runs every row of a round through its shard and collectives.
 pub const Shard = struct {
     ptr: *anyopaque,
     vtable: *const VTable,

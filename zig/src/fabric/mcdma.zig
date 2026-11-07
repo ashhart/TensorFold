@@ -4,7 +4,7 @@ const platform = @import("sys");
 const abi = @import("mcdma_abi.zig");
 const rma = @import("rdma.zig");
 const words = @import("words.zig");
-const verbs = @import("verbs.zig");
+const verbs = @import("verbs");
 
 pub const alignment = 16384;
 pub const max_ranks = 64;

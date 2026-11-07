@@ -8,6 +8,7 @@ pub fn steps(b: *std.Build, test_step: *std.Build.Step, lanes: *std.Build.Module
         .target = b.graph.host,
         .link_libc = true,
     });
+    fabric.addImport("verbs", @import("tp.zig").verbsModule(b, b.graph.host, .debug));
     const tests = b.addTest(.{ .filters = &.{"GLM expiry"}, .root_module = b.createModule(.{
         .root_source_file = b.path("zig/src/glm_expiry_tests.zig"),
         .target = b.graph.host,

@@ -11,8 +11,8 @@ ROOT = Path(__file__).resolve().parents[2]
 SOURCES = [ROOT / "build.zig"] + sorted((ROOT / "zig" / "build").glob("*.zig"))
 # the option names this target's option list holds, with their kind
 LISTED = re.compile(r"^  -D([A-Za-z0-9_-]+)=\[(\w+)\]", re.M)
-# the options only one platform reads: the Metal language version, and the Step-5 host regression filter
-PLATFORM_ONLY = {"metal-std", "step5-filter"}
+# the options only one platform reads: the Metal language version, the Step-5 and Metal persistence host filters
+PLATFORM_ONLY = {"metal-std", "step5-filter", "persistence-identity-filter"}
 # the options the acceptance test does not pass: a release version and the test hooks cannot be combined
 NOT_PASSED = {"version", "slide-test-hooks"}
 # the options whose value the build reads while it configures, with a value it accepts

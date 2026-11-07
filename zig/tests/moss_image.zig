@@ -4,7 +4,7 @@ const mtl = @import("metal");
 const tf = @import("tensorfold");
 const tokenizer = @import("tokenizer");
 
-const Metal = struct {
+pub const Metal = struct {
     pub const mi = tf.moss_image;
     pub const st = tf.safetensors;
     pub const seconds = mtl.clock.seconds;
