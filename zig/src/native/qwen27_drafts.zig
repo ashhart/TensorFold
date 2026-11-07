@@ -17,6 +17,37 @@ fn live(b: *const Metal) usize {
     return n;
 }
 
+/// Count every proposed node whose parent row was kept, and those the target drew, by own log-probability.
+pub fn observe(b: *Metal, path: []const u32) void {
+    const t = b.trees[0] orelse return;
+    if (b.from_tree == 0) return;
+    const stream = b.owners[0] orelse return;
+    var kept: [lb.max_rows]bool = @splat(false);
+    for (path) |r| kept[r] = true;
+    for (t.tokens, t.parents, 0..) |token, parent, i| {
+        const parent_row: usize = @intCast(parent + 1);
+        if (parent_row > b.from_tree or !kept[parent_row]) continue;
+        b.landing.observeFor(stream.shared_round, stream.sampling != null, Metal.local(t, i), token == b.sampled[parent_row]);
+    }
+}
+
+/// Held drafts the core reads as a chain (a first round): the tree's first-child path, last token repeated.
+pub fn heldChain(b: *const Metal, slot: u32, out: []u32, pending: u32) void {
+    var n: usize = 0;
+    if (b.trees[slot]) |t| {
+        var parent: i32 = -1;
+        for (t.tokens, t.parents, 0..) |token, p, i| {
+            if (n == out.len) break;
+            if (p != parent) continue;
+            out[n] = token;
+            n += 1;
+            parent = @intCast(i);
+        }
+    }
+    const fill = if (n > 0) out[n - 1] else pending;
+    for (out[n..]) |*x| x.* = fill;
+}
+
 pub fn capacityFn(ptr: *anyopaque, s: *lanes.Stream) u32 {
     const b = Metal.self(ptr);
     const slot = b.slotOf(s) orelse return 0;
