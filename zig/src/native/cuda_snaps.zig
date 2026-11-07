@@ -31,6 +31,11 @@ pub fn requestStep(comptime F: type) u32 {
     return requestStepFor(F, @import("profile").lookup(F.request_starts_switch));
 }
 
+/// An opted-in family keeps each message start, including turns closer than the shared default.
+pub fn requestMinimum(comptime F: type) u32 {
+    return if (requestStep(F) > 0) 1 else 256;
+}
+
 /// Only exact 1 opts in; a family must also declare that its cold passes honor request starts.
 pub fn requestStepFor(comptime F: type, value: ?[]const u8) u32 {
     const v = value orelse return 0;
@@ -174,6 +179,7 @@ test "request starts: one family's switch leaves every other family without star
             const grid: u32 = if (@hasDecl(F, "snap_grid")) F.snap_grid else 0;
             try std.testing.expect(!qwen or grid > 0);
             try std.testing.expectEqual(if ((on == 0 and qwen) or (on == 1 and F == Other)) grid else 0, requestStep(F));
+            try std.testing.expectEqual(@as(u32, if ((on == 0 and qwen) or (on == 1 and F == Other)) 1 else 256), requestMinimum(F));
         }
     }
 }
