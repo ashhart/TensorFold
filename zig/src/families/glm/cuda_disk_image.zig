@@ -8,25 +8,37 @@ const pages = @import("cuda_snapshot_pages.zig");
 const State = st_mod.State;
 const window_rows = st_mod.window_rows;
 
-/// The image's first bytes: the format, the position, the head's rows, both ring bases and the KDA copy bits.
+/// The image's first bytes: the format, the position, the head's rows, both ring bases, the KDA copy bits, the layout.
 pub const Words = struct {
     at: u64,
     mtp_len: u64,
     base: u64,
     mtp_base: u64,
     cur: u64,
+    world: u64, // the ranks that wrote it
+    layout: Layout = .unsplit,
+    owner: u64 = no_owner, // the rank holding its latent rows alone (split layouts); unsplit: no_owner
 
-    pub const bytes: u64 = 48;
+    pub const count = 9;
+    pub const bytes: u64 = count * 8;
     const format: u64 = 1;
 
-    pub fn encode(w: Words) [6]u64 {
-        return .{ format, w.at, w.mtp_len, w.base, w.mtp_base, w.cur };
+    /// Which rows each rank's image holds: unsplit, every rank every row (the only layout written so far).
+    pub const Layout = enum(u64) { unsplit = 0, _ };
+    pub const no_owner: u64 = std.math.maxInt(u64);
+
+    pub fn encode(w: Words) [count]u64 {
+        return .{ format, w.at, w.mtp_len, w.base, w.mtp_base, w.cur, w.world, @backingInt(w.layout), w.owner };
     }
 
-    /// Words read back: refused unless the format is this one and the state stands at `at`.
-    pub fn decode(x: [6]u64, at: u32) !Words {
+    /// Words read back, refused by name unless this format at `at`, written by `world` ranks in this server's `layout`.
+    pub fn decode(x: [count]u64, at: u32, world: u32, layout: Layout) !Words {
         if (x[0] != format or x[1] != at) return error.DiskWords;
-        return .{ .at = x[1], .mtp_len = x[2], .base = x[3], .mtp_base = x[4], .cur = x[5] };
+        if (x[6] != world) return error.DiskWorld;
+        const l: Layout = @fromBackingInt(@intCast(x[7]));
+        if (l != layout) return error.DiskLayout;
+        if (if (l == .unsplit) x[8] != no_owner else x[8] >= world) return error.DiskLayout;
+        return .{ .at = x[1], .mtp_len = x[2], .base = x[3], .mtp_base = x[4], .cur = x[5], .world = x[6], .layout = l, .owner = x[8] };
     }
 };
 
@@ -237,7 +249,7 @@ pub const Copy = struct {
     pool: *const pages.Pool,
     lease: *const pages.Lease,
     segs: []const Seg,
-    words: *[6]u64,
+    words: *[Words.count]u64,
 
     pub fn run(c: Copy, off: u64, host: []u8, out: bool) !void {
         const end = off + host.len;
