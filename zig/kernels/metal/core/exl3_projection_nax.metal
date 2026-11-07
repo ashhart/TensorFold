@@ -2,6 +2,10 @@
 // cooperative matmul instead of per-lane scalar FMAs. The decode is unchanged; only the reduction moves. The
 // model-facing order follows the release's inference/model.py, revision 314113f8; the trellis arithmetic and the
 // kernel shapes are the lane's own pack format.
+// Provenance: the default tensor-unit prompt body, the grouped table body, the register-only decode and
+// the funnel/wide/multi-row routed bodies are written from the release's inference/model.py and
+// inference/engram.py (revision 314113f8); the experimental `_pf`, `_wide`, `_ws` and `_db2` bodies below
+// still follow the earlier ported structure and are scheduled for deletion or rewrite.
 #include <metal_stdlib>
 using namespace metal;
 #include "../nax.h"

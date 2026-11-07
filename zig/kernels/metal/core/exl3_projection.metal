@@ -1,6 +1,10 @@
 // Native EXL3: stored trellis tiles, row-independent compensated dots, and normalized Sylvester rotations. The
 // model-facing order (attention, MTP, dense/shared routing) follows the release's inference/model.py, revision
 // 314113f8; the trellis arithmetic and the kernel shapes are the lane's own pack format.
+// Provenance: the default prompt body, the grouped table body and the scalar prefill twin are written
+// from the release's inference/model.py and inference/engram.py (revision 314113f8); the wide, static
+// and prefetch variants below still follow the earlier ported structure and are scheduled for deletion
+// or rewrite.
 #include <metal_stdlib>
 using namespace metal;
 
