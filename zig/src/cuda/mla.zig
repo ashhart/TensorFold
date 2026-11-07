@@ -70,9 +70,16 @@ pub const Mla = struct {
         if (!kernels.available) return error.BuiltWithoutKernels;
         var mod = try Module.load(d, kernels.mla);
         errdefer mod.unload();
-        var m: Mla = .{ .mod = mod, .chunks_fn = undefined, .chunks_split_fn = undefined, .merge_part_fn = undefined, .absorb_q_fn = undefined, .expand_v_fn = undefined, .rope_fn = undefined, .gate_fn = undefined };
-        inline for (.{ "chunks", "chunks_split", "merge_part", "absorb_q", "expand_v", "rope", "gate" }, .{ "tf_mla_chunks_r16", "tf_mla_chunks_split_r16", "tf_mla_merge_part", "tf_mla_absorb_q_128", "tf_mla_expand_v_128", "tf_mla_rope", "tf_mla_gate" }) |field, name|
-            @field(m, field ++ "_fn") = try mod.function(name);
+        const m: Mla = .{
+            .mod = mod,
+            .chunks_fn = try mod.function("tf_mla_chunks_r16"),
+            .chunks_split_fn = try mod.function("tf_mla_chunks_split_r16"),
+            .merge_part_fn = try mod.function("tf_mla_merge_part"),
+            .absorb_q_fn = try mod.function("tf_mla_absorb_q_128"),
+            .expand_v_fn = try mod.function("tf_mla_expand_v_128"),
+            .rope_fn = try mod.function("tf_mla_rope"),
+            .gate_fn = try mod.function("tf_mla_gate"),
+        };
         try m.chunks_fn.allowDynamicShared(chunksSmem(heads_tile));
         try m.chunks_split_fn.allowDynamicShared(chunksSmem(heads_tile));
         return m;
@@ -148,9 +155,17 @@ pub const Mla = struct {
 };
 
 test "mla: the roped chunk tiles fit the 99 KiB a GB10 block may take, and other widths are refused" {
+    try std.testing.expectEqual(@as(u32, 93568), chunksSmem(heads_tile)); // common/mla.cuh's wide_smem<16, 64>()
     try std.testing.expect(chunksSmem(heads_tile) <= 99 * 1024);
-    try std.testing.expectEqual(@as(f32, 1.0), ropeFreqs(6e6)[0]);
     try geometry(512, 128, 128, 64);
     for ([_][4]usize{ .{ 256, 128, 128, 64 }, .{ 512, 192, 128, 64 }, .{ 512, 128, 256, 64 }, .{ 512, 128, 128, 32 } }) |x|
         try std.testing.expectError(error.MlaGeometry, geometry(x[0], x[1], x[2], x[3]));
+}
+
+test "mla: ropeFreqs is theta^(-2i / 64) within an fp32 ulp at i = 1 and 31, against float64's exp and log" {
+    const f = ropeFreqs(6e6);
+    for ([_]usize{ 1, 31 }) |i| {
+        const want = @exp(-@as(f64, @floatFromInt(2 * i)) / 64.0 * @log(6e6));
+        try std.testing.expect(@abs(@as(f64, f[i]) - want) <= want * 0x1p-23);
+    }
 }
