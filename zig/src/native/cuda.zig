@@ -24,7 +24,7 @@ const drafted = @import("cuda_drafted.zig");
 const kv_pages = @import("cuda_kv_pool.zig");
 const cuda_families = @import("cuda_families.zig");
 /// CUDA families provide metadata, open their lane backend and explain their refusals.
-const registry = cuda_families.registry;
+pub const registry = cuda_families.registry;
 /// --record opens here (engines.zig refuses it for a backend without this).
 pub const records = true;
 pub const backends: []const []const u8 = &.{"cuda"};
