@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- The engine API carries an optional image capability beside speech: `Info.image` states what an engine's image host serves and a defaulted `VTable.submit_image` hands back one encoded PNG a request through the caller's own list and allocator, so an engine without the entry is unchanged (#1573).
+
 - Build: `zig build compile-dsv41-server` and `dsv41-serve` build again: the DeepSeek server module gets the `lanes` module its `/v1/systemone` route reads (#2412). Thanks to @Defilan.
 
 - Tests: four host steps that no CI job runs build and pass again: `test-gemma4-affine-host` pins `affine_mm.metal`'s current bytes, the compile-only Metal contract runners import `masked_sources`, `compile-metal-residency-host` imports `kimi_k3`, and the GLM Metal fact tests give `facts()` a host device object instead of an undefined one, which crashed them at random (#2409, part of #2031).
@@ -255,7 +257,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Flash Next on Metal reports a filling prompt's progress: the dashboard shows what's left, and `TENSORFOLD_PREFILL_ORDER=srpt` works from a server's first long prompt (#2194).
 
 - CI: `zig` and `zig-windows` keep main's build cache instead of rebuilding from nothing, every check still reruns, and the quick checks run first.
-- The engine API carries an optional image capability beside speech: `Info.image` states what an engine's image host serves and a defaulted `VTable.submit_image` hands back one encoded PNG a request through the caller's own list and allocator, so an engine without the entry is unchanged (#1573).
 
 - HIP: the `tf_sum_partials` records follow ROCm 10.1's hipcc, taking 8 limit problems off the contract (#2233). Thanks to @AbrahamCete.
 
