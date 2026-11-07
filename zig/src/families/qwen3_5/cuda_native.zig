@@ -33,7 +33,10 @@ pub const formats: []const []const u8 = &.{ "mlx-q4g64", "exl3" };
 pub const default_context: i64 = 32768;
 /// A plain BF16 checkpoint's preflight counts its text tensors, not the tower and MTP in its shards.
 pub const textWeightBytes = @import("cuda_bf16_bytes.zig").textWeightBytes;
+/// BF16 serves decisions only, with a joint schema head (joint_head_config.json); chat refuses it.
+pub const decision_formats: []const []const u8 = &.{"bf16"};
 const decide = @import("cuda_decide.zig");
+const joint = @import("cuda_joint_readout.zig");
 pub const max_segments: u32 = 1;
 pub const prompt_rows: u32 = E.max_rows;
 /// --drafter loads a DFlash2 draft model (openDrafter), or on the MoE target its MTP layer; DFlash2 has no own head.
@@ -97,6 +100,8 @@ pub const Loaded = struct {
     engine_paged: bool = false,
     /// An integrated GPU: kept states in device memory on the host budget (Target.device), the startup line says so.
     device_snaps: bool = false,
+    /// A Clef checkpoint's readouts (the engine then answers only those); null for every other checkpoint.
+    readouts: ?lanes.readout.Info = null,
 };
 
 pub fn cacheBytes(e: *const E.Engine, cap: usize, test_tokens: usize) !usize {
@@ -144,8 +149,21 @@ pub fn ledgerPool(p: *anyopaque) ?*@import("core").kv_pool.Pool {
 }
 
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
-    try decide.check(gpa, io, dir, .{ .drafter = o.drafter != null, .slide = o.slide, .vision = o.vision != null, .kv8 = o.kv8, .prompt_int8 = o.prompt_int8 });
-    return openLanes(gpa, io, ctx, dir, kernels, o);
+    const clef = try decide.check(gpa, io, dir, .{ .drafter = o.drafter != null, .slide = o.slide, .vision = o.vision != null, .kv8 = o.kv8, .prompt_int8 = o.prompt_int8 });
+    var loaded = try openLanes(gpa, io, ctx, dir, kernels, o);
+    if (!clef) return loaded;
+    errdefer loaded.deinit(loaded.ctx);
+    if (loaded.layout != null) return error.QwenJointPages;
+    const l: *Lanes = @ptrCast(@alignCast(loaded.ctx));
+    var why: @import("core").joint_schema.Problem = .{};
+    const j = joint.Joint.open(gpa, io, l.e, dir, o.context, &why) catch |err| {
+        std.log.err("the joint schema head cannot open ({s}): {s}", .{ @errorName(err), why.text });
+        return err;
+    };
+    loaded.backend = l.useReadout(j.readout()); // the lanes own the head from here
+    loaded.stream_bytes += joint.streamBytes(j.head.cfg, o.context);
+    loaded.readouts = j.readout().info;
+    return loaded;
 }
 
 /// `open` without the decision-only refusals: the runners open a BF16 backbone with a test readout through it.

@@ -436,6 +436,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     h.kv = kv_pages.watchOf(F, loaded, paged);
     h.kv_count = if (admit != null) kv_pages.ledgerPool(F, loaded) else null;
     const bench = if (@hasDecl(F, "benchmark")) F.benchmark(loaded.ctx) else api.Benchmark{ .ranks = 1 };
+    const readouts: ?lanes.readout.Info = if (@hasField(@TypeOf(loaded), "readouts")) loaded.readouts else null;
     try h.serve(io, served.facts, loaded.rows, .{
         .benchmark_ranks = bench.ranks,
         .benchmark_group = bench.group,
@@ -458,6 +459,8 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         .admit = admit,
         .ledger = @import("cuda_ledger.zig").info(if (h.kv_plan) |*p| p else null),
         .slide_conversations = conversations,
+        .readouts = readouts,
+        .text_generation = readouts == null, // a readout engine answers its readouts only (Clef's /v1/systemone)
     }, .{ .ctx = loaded.ctx, .text = F.explain });
     opened = true;
     kv_pages.warnCapacity(cache_capacity, o.keep == 0 or o.prompt_cache_gib == 0 or share, if (paged) |p| p.taken else 0, std.log); // TF_KV_SHARE: no copied rows
