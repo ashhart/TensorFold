@@ -32,6 +32,7 @@ pub const Model = struct {
     drafts: u32 = 1, // head drafts a round at most
     window_costs: []const Cost = &.{}, // forward ms by exact window width (timed at load)
     window_costs_lone: bool = false, // window_costs price a lone stream only: shared rounds keep the rule they had
+    shared_drafts: u32 = 0, // allocate_shared_drafts: a shared round's most head drafts a stream (0: drafts)
     mtp_step_ms: f64 = 0.0, // one chained head step (timed at load)
     draft_step_ms: f64 = 0.0, // a shared round's draft past a stream's first, as the backend's head runs it (0: priced free)
     streams_exact: bool = true, // shared forwards keep each stream's bits
@@ -100,6 +101,7 @@ pub const Config = struct {
     lane_costs: Table, // window ms by rows to 64 (lanes/plan_lanes.zig)
     mtp_step_ms: f64,
     draft_step_ms: f64 = 0, // Model.draft_step_ms
+    shared_drafts: u32 = 0, // Model.shared_drafts
     lone_cost_tile: u32 = 0, // Model.lone_cost_tile
     context_copies: bool = false, // Model.context_copies, within the existing verification width
     enter_match: i64 = 8, // matching tokens a copy needs (rejects coincidental indentation)
@@ -184,6 +186,7 @@ pub const Config = struct {
                 .hold_costs = m.hold_costs,
             },
             .draft_step_ms = m.draft_step_ms,
+            .shared_drafts = m.shared_drafts,
         };
     }
 
