@@ -33,7 +33,7 @@ const Encoder = struct {
     binned_prepared: ?Prepared = null,
 
     fn begin(self: *Encoder, kind: counters.Class) !void {
-        if (self.m.profile) |profile| try profile.beginSpan(&self.e, kind);
+        if (self.m.profile) |profile| try profile.beginSpan(&self.e, kind, 0);
     }
 
     fn end(self: *Encoder) !void {
