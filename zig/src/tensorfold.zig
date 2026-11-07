@@ -37,6 +37,8 @@ pub const exlr8_dense_gpu = @import("core/exlr8_dense_gpu.zig");
 pub const exlr8_prompt = @import("core/exlr8_prompt.zig");
 /// The two-Mac pair seam's row split: the transport, its layout and the one-Mac Loopback the stage-2 checks use.
 pub const pair_rows = @import("core/pair_rows.zig");
+/// A checkpoint's identity digest (config, index and shard headers), so two ranks can compare theirs.
+pub const checkpoint_identity = @import("core/checkpoint_identity.zig");
 pub const glm_dsa = @import("families/glm_dsa/glm_dsa.zig");
 /// DeepSeek-V4.1's Metal family in one export: tf.dsv41_metal.NAME (families/deepseek_v41/metal/contract_exports.zig).
 pub const dsv41_metal = @import("families/deepseek_v41/metal/contract_exports.zig");

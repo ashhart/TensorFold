@@ -13,6 +13,37 @@ const pair_loopback = @import("pair_rows_loopback.zig");
 pub const Settings = settings.Settings;
 pub const Ref = @import("exlr8_projection.zig").Ref;
 
+/// The four facts that change a pair's bits, exchanged at `ready`; a 0 means the fact names nothing here.
+pub const Fingerprint = struct {
+    /// build_options.version, as `capabilities --json` prints it.
+    version: u64 = 0,
+    /// The chip class the kernel contract names: one family's token_sha cannot accept the other's.
+    chip: u64 = 0,
+    /// The checkpoint directory's config.json content hash: two different quantizations or shapes refuse here.
+    checkpoint: u64 = 0,
+    /// The weight format tag the affine readers resolved (the widths tag), so a 4-bit stack refuses a 6-bit stack.
+    format: u64 = 0,
+};
+
+/// A fingerprint fact's mismatch: names the fact and both sides' values, so the restart message says what differed.
+pub fn fingerprintProblem(a: std.mem.Allocator, mine: Fingerprint, peer: Fingerprint) ?[]const u8 {
+    const facts = .{ .{ "engine version", "version" }, .{ "GPU family", "chip" }, .{ "checkpoint", "checkpoint" }, .{ "weight format", "format" } };
+    inline for (facts) |f| {
+        const name = f[0];
+        const field = f[1];
+        if (@field(mine, field) != @field(peer, field))
+            return std.fmt.allocPrint(a, "the pair's Macs do not match on the {s} ({x} against {x}): the bits come from the {s}," ++ " so the pair would serve tokens that match neither Mac alone; run the same build, checkpoint and format on both ranks", .{ name, @field(mine, field), @field(peer, field), name }) catch null;
+    }
+    return null;
+}
+
+fn refuseFingerprint(mine: Fingerprint, peer: Fingerprint) !void {
+    if (fingerprintProblem(std.heap.page_allocator, mine, peer)) |text| {
+        std.log.err("pair rank: {s}", .{text});
+        return error.PairFingerprintMismatch;
+    }
+}
+
 pub const command_words = pair_layout.command_words;
 pub const Slot = pair_layout.Slot;
 pub const seam_failed = pair_layout.seam_failed;
@@ -37,6 +68,7 @@ const HELLO = pair_layout.HELLO;
 const CMD_FLAG = pair_layout.CMD_FLAG;
 const CMD_ACK = pair_layout.CMD_ACK;
 const READY = pair_layout.READY;
+const FINGERPRINT = pair_layout.FINGERPRINT;
 const BEAT = pair_layout.BEAT;
 const POSTED = pair_layout.POSTED;
 const FAILED = pair_layout.FAILED;
@@ -368,10 +400,21 @@ pub const Pair = struct {
         return if (kind == 0) null else kind;
     }
 
-    /// Both Macs loaded before the first command: a word each way, each waited for with the load's bound.
-    pub fn ready(p: *Pair) !void {
+    /// Both Macs loaded and alike where it changes the bits, before the first command: a mismatch refuses by name.
+    pub fn ready(p: *Pair, fp: Fingerprint) !void {
+        const mine = [4]u64{ fp.version, fp.chip, fp.checkpoint, fp.format };
         try p.rd.signal(p.peer, p.l.flags() + READY, 1);
+        for (mine, 0..) |w, i| try p.rd.signal(p.peer, p.l.flags() + FINGERPRINT + 8 * i, @max(w, 1));
         try p.reach(p.l.flags() + READY, 1, ready_timeout_ms);
+        var peer: Fingerprint = .{};
+        switch (@typeInfo(Fingerprint)) {
+            .@"struct" => |st| inline for (st.field_names, 0..) |name, i| {
+                try p.reach(p.l.flags() + FINGERPRINT + 8 * i, 1, ready_timeout_ms);
+                @field(peer, name) = p.word64(p.l.flags() + FINGERPRINT + 8 * i).*;
+            },
+            else => unreachable,
+        }
+        try refuseFingerprint(fp, peer);
     }
 
     /// This Mac's command wait ends (rank 1 at close).
