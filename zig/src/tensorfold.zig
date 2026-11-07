@@ -6,6 +6,7 @@ pub const safetensors = @import("core/safetensors.zig");
 pub const gguf = @import("core/gguf.zig");
 pub const Checkpoint = checkpoint_host.Checkpoint;
 pub const checkpoint_host = @import("core/checkpoint.zig");
+pub const checkpoint_identity = @import("core/checkpoint_identity.zig");
 pub const checkpoint_metal = checkpoint;
 pub const qwen27 = @import("families/qwen27/qwen27.zig");
 /// Qwen-VL image input: backend-neutral parts, and the tower on Metal.

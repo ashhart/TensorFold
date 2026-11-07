@@ -44,6 +44,8 @@ pub const Result = struct {
     band_verdict: []const u8 = "unmeasured",
     /// Which rule `numeric_gate_passed` reports: the floor-relative band, or the FP32 contract capture.
     gate_basis: []const u8 = "floor_relative_band",
+    /// The checkpoint metadata identity the floor is bound to, as 64 lower-case hex characters.
+    model_identity_hex: [64]u8 = @splat('0'),
 };
 
 /// Indexer-selection boundary per window: contract margin (BF16-rounded FP32 scores), FP64-ideal margin, support flips.
@@ -148,16 +150,16 @@ fn streamRow(p: *anyopaque, layer: usize, row: u32, out: []u16) anyerror!void {
         std.debug.print("ROWDUMP layer={d} row={d} fnv={s} first={x},{x},{x},{x}\n", .{ layer, row, std.fmt.bufPrint(&hex, "{x}", .{fnv}) catch "?", out[0], out[1], out[2], out[3] });
     }
 }
-pub fn run(gpa: std.mem.Allocator, io: std.Io, model: *Model, ids: []const u32, token_map: []const u8, dir: []const u8) !Result {
-    return runOf(f32, gpa, io, model, ids, token_map, dir);
+pub fn run(gpa: std.mem.Allocator, io: std.Io, model: *Model, ids: []const u32, token_map: []const u8, dir: []const u8, identity: [32]u8) !Result {
+    return runOf(f32, gpa, io, model, ids, token_map, dir, identity);
 }
 
 /// The same oracle against the FP64 chain -- the reference chain at its ideal contract (every reduction class widened).
-pub fn runF64(gpa: std.mem.Allocator, io: std.Io, model: *Model, ids: []const u32, token_map: []const u8, dir: []const u8) !Result {
-    return runOf(f64, gpa, io, model, ids, token_map, dir);
+pub fn runF64(gpa: std.mem.Allocator, io: std.Io, model: *Model, ids: []const u32, token_map: []const u8, dir: []const u8, identity: [32]u8) !Result {
+    return runOf(f64, gpa, io, model, ids, token_map, dir, identity);
 }
 
-fn runOf(comptime T: type, gpa: std.mem.Allocator, io: std.Io, model: *Model, ids: []const u32, token_map: []const u8, dir: []const u8) !Result {
+fn runOf(comptime T: type, gpa: std.mem.Allocator, io: std.Io, model: *Model, ids: []const u32, token_map: []const u8, dir: []const u8, identity: [32]u8) !Result {
     if (ids.len == 0 or ids.len > 256) return error.InvalidOracleWindow;
     var reference = try reference_module.ReferenceOf(T).init(gpa, model.cfg, &model.weights, &model.checkpoint, token_map, @intCast(ids.len));
     defer reference.deinit();
@@ -175,7 +177,7 @@ fn runOf(comptime T: type, gpa: std.mem.Allocator, io: std.Io, model: *Model, id
     const gpu = try gpa.alloc(f32, cpu.len);
     defer gpa.free(gpu);
     try model.reset();
-    var result = Result{ .tokens = ids.len, .max_absolute_error = 0, .rms_error = 0, .normalized_rms_error = 0, .greedy_disagreements = 0, .gpu_seconds = 0, .cpu_seconds = 0 };
+    var result = Result{ .tokens = ids.len, .max_absolute_error = 0, .rms_error = 0, .normalized_rms_error = 0, .greedy_disagreements = 0, .gpu_seconds = 0, .cpu_seconds = 0, .model_identity_hex = std.fmt.bytesToHex(identity, .lower) };
     var squared_error: f64 = 0;
     var squared_reference: f64 = 0;
     // The engine's logits only.
@@ -224,7 +226,7 @@ fn runOf(comptime T: type, gpa: std.mem.Allocator, io: std.Io, model: *Model, id
     result.greedy_gate_passed = result.greedy_disagreements == 0;
     // The operative whole-model clause is floor-relative: the FP32 contract chain's own FP64 gap is the floor.
     if (T == f64) {
-        if (try readFloor(gpa, io, dir, ids, cpu.len)) |floor| {
+        if (try readFloor(gpa, io, dir, ids, cpu.len, identity)) |floor| {
             defer gpa.free(floor);
             var floor_squared: f64 = 0;
             for (floor, cpu) |f, c| {
@@ -259,7 +261,7 @@ fn runOf(comptime T: type, gpa: std.mem.Allocator, io: std.Io, model: *Model, id
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = cp, .data = std.mem.sliceAsBytes(cpu) });
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = gp, .data = std.mem.sliceAsBytes(gpu) });
     if (T == f32) {
-        try writeFloor(gpa, io, dir, ids, cpu);
+        try writeFloor(gpa, io, dir, ids, cpu, identity);
         try writeContract(gpa, io, dir, result.normalized_rms_error, result.greedy_disagreements);
     }
     const json = try std.json.Stringify.valueAlloc(gpa, result, .{});
@@ -310,7 +312,8 @@ fn bandVerdict(engine_nrms: f64, floor_nrms: f64) Band {
     return .{ .ratio = ratio, .verdict = verdict, .measured = true, .passed = ratio <= band_review_limit };
 }
 
-/// The floor's own manifest: the token window, its hash and the contract logits' hash, so a stale file cannot pair.
+/// The floor's own manifest: the token window, its hash, the contract logits' hash and the checkpoint's metadata
+/// identity, so a window, logits file or a different checkpoint's metadata cannot pair.
 fn fnv1a(bytes: []const u8) u64 {
     var hash: u64 = 0xcbf29ce484222325;
     for (bytes) |b| {
@@ -320,17 +323,19 @@ fn fnv1a(bytes: []const u8) u64 {
     return hash;
 }
 
-/// Written by the FP32 contract capture; readFloor refuses anything that is not this exact window and these exact bytes.
-fn writeFloor(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, ids: []const u32, cpu: []const f32) !void {
+/// Written by the FP32 contract capture; readFloor refuses anything that is not this exact window, these exact
+/// bytes and this checkpoint metadata identity.
+fn writeFloor(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, ids: []const u32, cpu: []const f32, identity: [32]u8) !void {
     const path = try std.fs.path.join(gpa, &.{ dir, "floor.txt" });
     defer gpa.free(path);
-    var buf: [128]u8 = undefined;
-    const text = try std.fmt.bufPrint(&buf, "{d}\n{x}\n{x}\n{d}\n", .{ ids.len, fnv1a(std.mem.sliceAsBytes(ids)), fnv1a(std.mem.sliceAsBytes(cpu)), cpu.len });
+    var buf: [192]u8 = undefined;
+    const hex = std.fmt.bytesToHex(identity, .lower);
+    const text = try std.fmt.bufPrint(&buf, "{d}\n{x}\n{x}\n{d}\n{s}\n", .{ ids.len, fnv1a(std.mem.sliceAsBytes(ids)), fnv1a(std.mem.sliceAsBytes(cpu)), cpu.len, &hex });
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = text });
 }
 
 /// The FP32 contract chain's logits from the same directory, verified against the manifest the capture wrote.
-fn readFloor(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, ids: []const u32, cells: usize) !?[]f32 {
+fn readFloor(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, ids: []const u32, cells: usize, identity: [32]u8) !?[]f32 {
     const manifest_path = try std.fs.path.join(gpa, &.{ dir, "floor.txt" });
     defer gpa.free(manifest_path);
     const manifest = std.Io.Dir.cwd().readFileAlloc(io, manifest_path, gpa, .limited(512)) catch |err| switch (err) {
@@ -343,7 +348,12 @@ fn readFloor(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, ids: []const u
     const ids_hash = std.fmt.parseInt(u64, lines.next() orelse return error.FloorReferenceMismatch, 16) catch return error.FloorReferenceMismatch;
     const logits_hash = std.fmt.parseInt(u64, lines.next() orelse return error.FloorReferenceMismatch, 16) catch return error.FloorReferenceMismatch;
     const manifest_cells = std.fmt.parseInt(usize, lines.next() orelse return error.FloorReferenceMismatch, 10) catch return error.FloorReferenceMismatch;
+    const identity_line = std.mem.trim(u8, lines.next() orelse return error.FloorReferenceMismatch, " \r\n");
+    var manifest_identity: [32]u8 = undefined;
+    if (identity_line.len != 64) return error.FloorReferenceMismatch;
+    _ = std.fmt.hexToBytes(&manifest_identity, identity_line) catch return error.FloorReferenceMismatch;
     if (tokens != ids.len or manifest_cells != cells or ids_hash != fnv1a(std.mem.sliceAsBytes(ids))) return error.FloorReferenceMismatch;
+    if (!std.mem.eql(u8, &manifest_identity, &identity)) return error.FloorReferenceMismatch;
     const path = try std.fs.path.join(gpa, &.{ dir, "oracle-logits.f32" });
     defer gpa.free(path);
     const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(cells * @sizeOf(f32) + 1)) catch |err| switch (err) {
@@ -386,6 +396,14 @@ fn readContract(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !?Contract 
 fn enforceGate(result: *const Result) !void {
     if (!std.math.isFinite(result.normalized_rms_error)) return error.NonfiniteTeacherLogits;
     if (!result.band_measured) return error.FloorReferenceMissing;
+    if (std.mem.eql(u8, result.band_verdict, "review")) std.debug.print(
+        "oracle band: review, {d:.4}x the floor (<= {d:.2} clears, <= {d:.2} reviews)\n",
+        .{ result.band_ratio, result.clear_ratio_limit, result.review_ratio_limit },
+    );
+    if (!result.absolute_gate_passed) std.debug.print(
+        "oracle band: the absolute 1% trip-wire is reported false ({d:.6} > {d:.6}); it is a report, not the arbiter\n",
+        .{ result.normalized_rms_error, result.normalized_rms_limit },
+    );
     if (!result.band_gate_passed) return error.TeacherBandMismatch;
 }
 
@@ -422,12 +440,26 @@ test "the floor manifest refuses a mismatched window and accepts its own" {
     const ids = [_]u32{ 1, 2, 3 };
     const cpu = [_]f32{ 1.0, -2.0, 3.5 };
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "oracle-logits.f32", .data = std.mem.sliceAsBytes(&cpu) });
-    try writeFloor(a, std.testing.io, dir, &ids, &cpu);
-    const got = (try readFloor(a, std.testing.io, dir, &ids, cpu.len)).?;
+    const identity: [32]u8 = @splat(7);
+    try writeFloor(a, std.testing.io, dir, &ids, &cpu, identity);
+    const got = (try readFloor(a, std.testing.io, dir, &ids, cpu.len, identity)).?;
     defer a.free(got);
     try std.testing.expectEqualSlices(f32, &cpu, got);
     const wrong = [_]u32{ 1, 2, 4 };
-    try std.testing.expectError(error.FloorReferenceMismatch, readFloor(a, std.testing.io, dir, &wrong, cpu.len));
+    try std.testing.expectError(error.FloorReferenceMismatch, readFloor(a, std.testing.io, dir, &wrong, cpu.len, identity));
+    var other = identity;
+    other[0] ^= 1;
+    try std.testing.expectError(error.FloorReferenceMismatch, readFloor(a, std.testing.io, dir, &ids, cpu.len, other));
+}
+
+test "the release-quality window is the fixed 128-token history" {
+    const text = @embedFile("release-quality-128.json");
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const ids = try std.json.parseFromSliceLeaky([]const u32, arena.allocator(), text, .{});
+    try std.testing.expectEqual(@as(usize, 128), ids.len);
+    try std.testing.expectEqual(@as(u64, 0x067323ba89384ac3), fnv1a(std.mem.sliceAsBytes(ids)));
+    for (ids) |id| try std.testing.expect(id < 129280);
 }
 
 test "the band is floor-relative and keeps its inclusive 1.05/1.10 boundaries" {

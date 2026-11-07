@@ -3,6 +3,7 @@ const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
 const ds = tf.deepseek_v41;
+const checkpoint_identity = tf.checkpoint_identity;
 const config = tf.deepseek_v41_config;
 const load = tf.deepseek_v41_load;
 const weights = tf.deepseek_v41_weights;
@@ -215,6 +216,11 @@ pub fn main(init: std.process.Init) !void {
     for (ids) |id| if (id >= 129280) return error.InvalidToken;
     const is_oracle = std.mem.eql(u8, mode, "oracle");
     const is_oracle_fp64 = std.mem.eql(u8, mode, "oracle-fp64");
+    // The floor is bound to the checkpoint metadata that produced it, not just to the token window.
+    const identity: [32]u8 = if (is_oracle or is_oracle_fp64)
+        try modelIdentity(a, io, args[2], args[3])
+    else
+        @splat(0);
     const is_trace = std.mem.eql(u8, mode, "trace");
     const is_gate = std.mem.eql(u8, mode, "gate");
     const dir = args[if (is_operators) @as(usize, 4) else 5];
@@ -240,7 +246,7 @@ pub fn main(init: std.process.Init) !void {
     const before = try counters();
     var execution_after: ?Counters = null;
     var execution_error: ?anyerror = null;
-    execute(a, io, model, args, ids, map_blob, dir, before, &execution_after) catch |err| {
+    execute(a, io, model, args, ids, map_blob, dir, before, identity, &execution_after) catch |err| {
         execution_error = err;
     };
     const after = execution_after orelse try counters();
@@ -270,7 +276,24 @@ pub fn main(init: std.process.Init) !void {
     if (!resident_gate_passed) return error.ResidentExecutionReadFromDisk;
 }
 
-fn execute(a: std.mem.Allocator, io: std.Io, model: *ds.Model, args: []const [:0]const u8, ids: []const u32, map_blob: []const u8, dir: []const u8, before: Counters, execution_after: *?Counters) !void {
+/// The checkpoint metadata identity of every directory the oracle reads: config, index and the headers of the
+/// shard files present (a streamed table directory carries only its own pair, not the index's full shard list).
+fn modelIdentity(a: std.mem.Allocator, io: std.Io, pack: []const u8, tables: []const u8) ![32]u8 {
+    const Sha256 = std.crypto.hash.sha2.Sha256;
+    var h = Sha256.init(.{});
+    const p = try checkpoint_identity.identityPresent(a, io, pack);
+    h.update(&p);
+    const t = try checkpoint_identity.identityPresent(a, io, tables);
+    h.update(&t);
+    // The streamed Engram source is the one the oracle reference actually reads when it is set.
+    if (std.c.getenv("TF_DSV41_ENGRAM_STREAM_DIR")) |dir| {
+        const streamed = try checkpoint_identity.identityPresent(a, io, std.mem.span(dir));
+        h.update(&streamed);
+    }
+    return h.finalResult();
+}
+
+fn execute(a: std.mem.Allocator, io: std.Io, model: *ds.Model, args: []const [:0]const u8, ids: []const u32, map_blob: []const u8, dir: []const u8, before: Counters, identity: [32]u8, execution_after: *?Counters) !void {
     const mode = args[1];
     const is_operators = std.mem.eql(u8, mode, "operators");
     const is_attention = std.mem.eql(u8, mode, "attention-sameinput");
@@ -303,11 +326,11 @@ fn execute(a: std.mem.Allocator, io: std.Io, model: *ds.Model, args: []const [:0
         try stagediff.loop(a, io, model, ids, dir, if (args.len > 6) try number(args[6]) else null, if (args.len > 7) try number(args[7]) else null);
     } else if (is_oracle) {
         try operators.run(a, io, model, dir);
-        _ = try oracle.run(a, io, model, ids, map_blob, dir);
+        _ = try oracle.run(a, io, model, ids, map_blob, dir, identity);
     } else if (is_oracle_fp64) {
         // The same window against the FP64 chain (the reference chain at its ideal contract).
         try operators.run(a, io, model, dir);
-        _ = try oracle.runF64(a, io, model, ids, map_blob, dir);
+        _ = try oracle.runF64(a, io, model, ids, map_blob, dir, identity);
     } else if (std.mem.eql(u8, mode, "margins")) {
         try margins.run(a, io, model, ids, dir, if (args.len > 6) try number(args[6]) else 1536);
     } else if (is_profile) {
