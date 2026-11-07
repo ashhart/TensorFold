@@ -1,4 +1,4 @@
-// ! Plain V4.1 execution over resident EXL3 weights and source-owned packed caches.
+//! Plain V4.1 execution over resident EXL3 weights and source-owned packed caches.
 const builtin = @import("builtin");
 const std = @import("std");
 const mtl = @import("metal");

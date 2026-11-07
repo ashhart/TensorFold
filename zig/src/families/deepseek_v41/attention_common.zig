@@ -1,4 +1,4 @@
-// ! Pinned DeepSeek V4.1 attention, resident EXL3 projections and causal packed-cache chunk execution.
+//! Pinned DeepSeek V4.1 attention, resident EXL3 projections and causal packed-cache chunk execution.
 const std = @import("std");
 const mtl = @import("metal");
 const exl3 = @import("core").exl3_projection;

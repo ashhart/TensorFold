@@ -1,4 +1,4 @@
-// ! wo_a at the engine's real shape: the eight-slice fusion against the legacy loop, bit for bit and in time. !
+//! wo_a at the engine's real shape: the eight-slice fusion against the legacy loop, bit for bit and in time.
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
