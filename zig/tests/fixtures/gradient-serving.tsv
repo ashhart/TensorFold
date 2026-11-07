@@ -45,8 +45,8 @@ zig/kernels/cuda/nemotron_route.cu	d835d4d166f42c20fb1082d6aa0daddd3111f7d258b44
 zig/kernels/cuda/norms.cu	230895b48eb56f53b994a02d51512673001a2b8a0af6d39cffd4071c289e3d4f	raw
 zig/kernels/cuda/nvfp4_experts.cu	9ef08b957b02e1a3ef2ee814aaf79ed15d85ada6b99e6cca2c1cadc1cadd6964	raw
 zig/kernels/cuda/nvfp4q.cuh	5fe4fa58568f2293bb72ccfa58b362ba2783b21a781e56946a5a2c328303d111	raw
-zig/kernels/cuda/prefill_attention.cu	278cdf9971af9f08da0aa0fd0016202798dd964ca5bb1df668e7fae8e73f993d	raw
-zig/kernels/cuda/prefill_attention_rows.cuh	51716606e2cf4e8f094ff1c2e2ba649ffafad848935051ac4b457c1003b1bb5a	raw
+zig/kernels/cuda/prefill_attention.cu	eca5e090022a25bf9b945750b42c1b77652f093ec3cc96d1797c94b96a23358e	raw
+zig/kernels/cuda/prefill_attention_rows.cuh	dc8b1e3185482bfddadd9ab98c3be655c14085ae2e22ddde03d0cf645a0b1b4e	raw
 zig/kernels/cuda/probe.cu	c5a6ca4513311d25282866de2185a056ec9746443a13094db80de62f7474255a	raw
 zig/kernels/cuda/prompt16.cu	972fb2f601da2d64549717d27e642363243b0e2df88cfeffa81452216e160ae4	raw
 zig/kernels/cuda/qmm.cu	a55a9d00d9097c5f5bd88c8c538a0481fe13b37badd2e3faf4cdde9c86c9f93d	raw
@@ -77,7 +77,7 @@ zig/kernels/cuda/torch_ops/pointwise.cu	3d3118159265538679968e56a8c4b5d61b01c074
 zig/kernels/cuda/torch_ops/topk.cu	0b5ddb5b02af2ebd9a3992cb11bb80eefd7547c32d6dfdafdf216ab484dd1627	raw
 zig/kernels/cuda/train_mixers.cuh	cec88446cede27c941da254d94f81afa1c92c6880e63bfd66a0efcdc7f95aa13	raw
 zig/kernels/cuda/vit.cu	516fbc7ec65afafd3a368d593c85d21d5ffa0da858703f257c4779745ebc239e	raw
-zig/src/cuda/abi.zig	d5d200df877144179c288174dfa26b0eb8e63987c3d0b79c44dc7abae14a6fb8	raw	commits ef23b5934; series patches 14-runtime-foundation.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
+zig/src/cuda/abi.zig	fef21a6302d1863001496b3765899a265470cfdf78678d7f73fa7fd3115d2a93	raw	commits ef23b5934; series patches 14-runtime-foundation.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
 zig/src/cuda/aot.zig	08324c7c982b1b4f95e7316662d015e809b28677ce3816b0c1a3c61d0993ae99	raw	commits 9349e38bb; series patches 14-runtime-foundation.patch, 45-runtime-one-fallback.patch, 46-preserve-nospec-and-capture.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
 zig/src/cuda/carveout.zig	288d22e395fe3fd484f61a741dff24052fcd183ab318a09ba332c757dff7b24f	raw
 zig/src/cuda/ck.zig	5b247901025d0f001e44c98e022729d007758ffd4719ec34b957c55dcc008e46	raw	commits 739c924de, a79678c56, e40bd6eae, 186c31eed, a6f4044fc, c0a58fd30, 48ea204ac, e367c8f55, 7e082a6df; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
