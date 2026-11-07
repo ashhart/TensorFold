@@ -181,8 +181,10 @@ pub fn budgetOf(comptime F: type, l: kv_pool.Layout, room: u64, o: api.Open, win
 /// The pool beside the engine's own sequence (in `model`: a window, or on pages its fixed part); null: see `problem`.
 pub fn plan(comptime F: type, a: Allocator, l: kv_pool.Layout, room: u64, o: api.Open, window: u64, problem: *[]const u8, host_mode: bool, engine_paged: bool, kept_ppm: u32, slots: ?usize) !?Plan {
     const rows: u64 = if (comptime @hasDecl(F, "window_rows")) F.window_rows else 0;
-    return kv_pool.plan(l, budgetOf(F, l, room, o, window, host_mode, engine_paged, kept_ppm, slots)) catch |e| {
+    const b = budgetOf(F, l, room, o, window, host_mode, engine_paged, kept_ppm, slots);
+    return kv_pool.planClasses(l, b) catch |e| {
         problem.* = switch (e) {
+            error.ClassTooSmall => try std.fmt.allocPrint(a, "the KV pages split into {d} owner classes of {d} pages, and one stream at a {d}-token window takes {d}: lower --context, raise --parallel to {d} or more, or serve without TF_GLM_KV_SPLIT", .{ l.classes, (kv_pool.plan(l, b) catch unreachable).pages / l.classes, window, l.pages(window + rows), l.classes }),
             error.NoStream => if (engine_paged) try std.fmt.allocPrint(a, "the CUDA memory budget fits no stream beside the model: one at a {d}-token window takes {d:.2} GiB of KV pages, and the budget leaves {d:.2} GiB", .{ window, toGib(l.pages(window + rows) * l.pageBytes()), toGib(room) }) else "the CUDA memory budget fits no stream beside the model",
             error.TooMany => try std.fmt.allocPrint(a, "--parallel {d} needs {d:.2} GiB for its other streams' fixed parts, state runs and a page each, and the CUDA memory budget leaves {d:.2} GiB: serve fewer, or free device memory", .{ o.lanes, toGib((o.lanes - 1) * (l.fixed_bytes + (1 + l.runPages()) * l.pageBytes())), toGib(room) }),
         };
@@ -476,6 +478,7 @@ test {
     _ = @import("cuda_cache_capacity_test.zig");
     _ = @import("cuda_streams.zig");
     _ = @import("cuda_keep_others_test.zig");
+    _ = @import("cuda_kv_pool_classes_test.zig");
 }
 
 test "KV admission: a refusal prices the running states beside the fixed part and KV page" {
