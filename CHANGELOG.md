@@ -5,6 +5,10 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 ## Unreleased
 
 - Qwen3.5 and Qwen3.6 on CUDA: a stream's rollback copy shares its verify log's bytes, which are never in use together, so each pooled stream takes 147 MiB less on Qwen3.8-27B and 61 MiB less on the 35B-A3B; tokens and speed unchanged (#2447, part of #1943). Thanks to @jschmied.
+- LightOnOCR-3 on HIP: the native server reads `lightonai/LightOnOCR-3-0.8B`, `-1B` and `-4B` (BF16) and serves their
+  OCR prompts, token-exact against Transformers apart from exact BF16 logit ties. With `--vision`, a Qwen 3.5 checkpoint
+  whose vision tower the HIP engine can't read (such as Qwen3.5-9B's 72-wide heads) is now refused at start-up, instead
+  of starting text-only and answering each image with a 400 (#1965, for #1927).
 
 - Internal: the kernel contract registry's record joins live in `registry_joins.zig`, one module a line, so PRs that add records for different families no longer edit the same line; every registry list is unchanged (#2422).
 
@@ -27,10 +31,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - LFM2.5-24B-A2B serves on one NVIDIA GPU from the MLX 4-bit export, on the shared CUDA kernels, with `--parallel`
   streams and copy drafts; there is no drafter or prompt cache yet (#1492, part of #1488). Thanks to @jschmied.
 - HIP: capture a drafter's requested target-layer taps in each stream's ring, with graph-on/off and planted kernel controls (#2314).
-- LightOnOCR-3 on HIP: the native server reads `lightonai/LightOnOCR-3-0.8B`, `-1B` and `-4B` (BF16) and serves their
-  OCR prompts, token-exact against Transformers apart from exact BF16 logit ties. With `--vision`, a Qwen 3.5 checkpoint
-  whose vision tower the HIP engine can't read (such as Qwen3.5-9B's 72-wide heads) is now refused at start-up, instead
-  of starting text-only and answering each image with a 400 (#1965, for #1927).
 
 - Docs: `/health`'s `memory` on Metal is the process footprint from the families with a reader, not `{}`, and `/memory`'s `prompt_cache_plan` row names every Mac family that reports it, with Qwen3.5-2B under `--prompt-cache-gib` (#2439). Thanks to @Whq02.
 
