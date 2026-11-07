@@ -50,6 +50,8 @@ pub const Config = struct {
     nccl_lib: []const u8 = "libnccl.so.2",
     /// `name[:gid],...` RDMA devices for `roce` (null: active RoCE v2 ports on an IPv4 /24 the peer has, roce_pick).
     roce_hca: ?[]const u8 = null,
+    /// TF_TP_LINK: the link a host-transport result names (`tcp-host`); a label only, not in `digest`.
+    link: ?[]const u8 = null,
     /// Stripe over at most this many HCAs (auto detection only).
     roce_hcas: u8 = 2,
     roce_tc: u8 = 0,
@@ -116,6 +118,7 @@ pub const Config = struct {
         c.report_ns = try seconds(get, "TF_TP_PEER_MEM_S", 0.5, 0.01, 60);
         if (get("TF_NCCL_LIB")) |p| c.nccl_lib = p;
         c.roce_hca = get("TF_TP_ROCE_HCA");
+        c.link = get("TF_TP_LINK");
         c.roce_hcas = try int(u8, get, "TF_TP_ROCE_HCAS", 2, 1, 2);
         c.roce_tc = try int(u8, get, "TF_TP_ROCE_TC", try int(u8, get, "NCCL_IB_TC", 0, 0, 255), 0, 255);
         if (try int(u8, get, "TF_TP_ROCE_FAST", 0, 0, 1) == 1) {
