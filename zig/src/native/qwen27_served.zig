@@ -16,6 +16,7 @@ const lb = @import("qwen27_lanes.zig");
 pub const lanes_backend = lb;
 const disk = @import("qwen27_disk.zig");
 const images = @import("qwen27_images.zig");
+const steer_served = @import("qwen27_steer_served.zig");
 const Allocator = std.mem.Allocator;
 
 pub const Options = struct {
@@ -31,6 +32,7 @@ pub const Options = struct {
     learn: ?disk.Learn = null, // --learn-conversations: kept states written behind to disk and read back
     vision: ?api.VisionOpen = null, // --vision: open loads the image tower, and requests may hold images
     images: ?*images.Vision = null, // the loaded tower attach serves (and the host then owns)
+    glp: ?api.glp.Glp = null, // the control vector the model steers with (null: none)
 };
 
 pub const Host = struct {
@@ -296,6 +298,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocato
     };
     const model = try q.model.Model.loadDeferred(gpa, io, dir, 128);
     errdefer model.deinit();
+    if (o.glp) |g| try steer_served.apply(gpa, model, dir, g, a, why);
     var with = o;
     // the tower before the slots: their room and the cache's budget count it as taken
     if (o.vision) |v| with.images = try images.open(gpa, io, model, dir, v, a, why);
@@ -427,6 +430,9 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     if (h.trace) |*t| t.enabled = true; // serving rounds count from here: measure() timed whole, unsplit buffers
     try h.host.start();
     std.log.info("Qwen3.8-27B: {d} streams of {d} tokens{s}{s}", .{ slots, capacity, if (h.draft != null) ", DFlash2 drafts for one of them" else "", if (o.images != null) ", images read" else "" });
+    if (o.glp) |g| {
+        if (model.steer != null) steer_served.report(g);
+    }
     return h;
 }
 

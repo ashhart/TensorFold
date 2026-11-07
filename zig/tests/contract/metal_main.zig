@@ -20,8 +20,6 @@ const drama_cfg = @import("metal_drama_cfg.zig");
 const glm_eh_k = @import("metal_glm_eh.zig");
 const pair_k = @import("metal_pair.zig");
 const minimax_k = @import("metal_minimax.zig");
-const attn_k = @import("metal_q27_attn.zig");
-const io_k = @import("metal_q27_attn_io.zig");
 const q27_moe = @import("metal_qwen27_moe.zig");
 const q27_rows = @import("metal_qwen27_moe_rows.zig");
 const flash_pool = @import("metal_flashnext_pool.zig");
@@ -493,27 +491,9 @@ pub fn main(init: std.process.Init) !u8 {
     var nemotron_unroll: @import("metal_nemotron_unroll.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer nemotron_unroll.deinit();
     try nemotron_unroll.collect(o.only);
-    // qwen27 attention_io at the 27B's head counts on one Mac (24 over 4) and on a rank of two (12 over 2)
-    var ios: std.ArrayList(*io_k.Io) = .empty;
-    defer {
-        for (ios.items) |x| {
-            x.deinit();
-            a.destroy(x);
-        }
-        ios.deinit(a);
-    }
-    var io_regs: std.ArrayList(io_k.Reg) = .empty;
-    defer io_regs.deinit(a);
-    for (std.enums.values(attn_k.Heads)) |h| for (std.enums.values(io_k.Which)) |w| try io_regs.append(a, .{ .heads = h, .which = w });
-    try io_regs.appendSlice(a, &.{ .{ .heads = .q27b, .which = .append, .control = true }, .{ .heads = .rank, .which = .device_keep, .control = true } });
-    for (io_regs.items) |r| {
-        if (!wanted(o, io_k.spec(r).name)) continue;
-        const x = try a.create(io_k.Io);
-        errdefer a.destroy(x);
-        x.* = try io_k.Io.init(a, device, queue, r);
-        try ios.append(a, x);
-        try kernels.append(a, x.kernel());
-    }
+    var attn_io: @import("metal_q27_attn_io.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer attn_io.deinit();
+    try attn_io.collect(o.only);
     var attn_rows: @import("metal_q27_attn_rows.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer attn_rows.deinit();
     try attn_rows.collect(o.only);
@@ -573,6 +553,9 @@ pub fn main(init: std.process.Init) !u8 {
     defer moss_image_decoder.destroy();
     var dsv41_suites = try @import("metal_dsv41_main.zig").Suites.create(a, device, queue, &kernels, o.only);
     defer dsv41_suites.destroy();
+    var steer: @import("metal_qwen27_steer.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer steer.deinit();
+    try steer.collect(o.only, o.gates, o.seed);
     var t: g.Tally = .{};
     const t0 = std.Io.Clock.awake.now(init.io);
     if (o.gates) {

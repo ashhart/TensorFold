@@ -5,6 +5,7 @@ const Allocator = std.mem.Allocator;
 pub const profile = @import("profile");
 pub const tfvideo = @import("tfvideo.zig");
 pub const DraftSources = @import("draft_sources.zig").Sources;
+pub const glp = @import("glp.zig");
 /// The server's name for one request, unique while the process lives.
 pub const Id = u64;
 /// One request's sampling (Python's exact_sampling.Sampling); a request without one decodes greedily.
@@ -300,6 +301,8 @@ pub const Open = struct {
     rope_yarn: ?f64 = null, // --rope-yarn: YaRN over the checkpoint's trained window; families without it refuse
     /// --record: each stream's committed rows and tapped features written under this folder, for drafter training.
     record: ?[]const u8 = null,
+    /// --glp: the control vector the engine applies to the residual stream (null: none).
+    glp: ?glp.Glp = null,
     speed_up: ?[]const u8 = null,
     prompt_cache_gib: ?f64 = null,
     prompt_cache_over_cap: bool = false,
