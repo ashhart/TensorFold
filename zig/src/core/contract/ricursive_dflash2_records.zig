@@ -1,16 +1,16 @@
 //! Ripple's DFlash2 drafter glue on CUDA (ricursive_dflash2.cu), 256 threads each; its embed is tf_rc_embed's record.
 const registry = @import("registry.zig");
 
-/// Usage: sm_121 from nvcc 13.3's limits run on the Spark; sm_80 to sm_120 stay zero until a five-target build.
+/// Usage zero (no nvcc 13.0 record yet); nvcc 13.3's five-SM receipts are in measurements/pending_133.zig.
 pub const cuda = [_]registry.CudaRecord{
-    // TODO(spark): sm_80, 86, 89 and 120 from a five-target kernel-contract-limits run
-    .{ .launch = .{ .name = "ricursive_dflash2 tf_rcd_add_norm", .symbol = "tf_rcd_add_norm", .image = "ricursive_dflash2", .threads = 256, .min_sm = 80 }, .usage = .{ .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 76, .static = 32, .bound = 256 } } },
-    // TODO(spark): sm_80, 86, 89 and 120 from a five-target kernel-contract-limits run
-    .{ .launch = .{ .name = "ricursive_dflash2 tf_rcd_prep", .symbol = "tf_rcd_prep", .image = "ricursive_dflash2", .threads = 256, .min_sm = 80 }, .usage = .{ .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 35, .static = 0, .bound = 256 } } },
-    // TODO(spark): sm_80, 86, 89 and 120 from a five-target kernel-contract-limits run
-    .{ .launch = .{ .name = "ricursive_dflash2 tf_rcd_conv", .symbol = "tf_rcd_conv", .image = "ricursive_dflash2", .threads = 256, .min_sm = 80 }, .usage = .{ .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 24, .static = 0, .bound = 256 } } },
-    // TODO(spark): sm_80, 86, 89 and 120 from a five-target kernel-contract-limits run
-    .{ .launch = .{ .name = "ricursive_dflash2 tf_rcd_silu", .symbol = "tf_rcd_silu", .image = "ricursive_dflash2", .threads = 256, .min_sm = 80 }, .usage = .{ .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 18, .static = 0, .bound = 256 } } },
+    // TODO(spark): fill from kernel-contract-limits
+    .{ .launch = .{ .name = "ricursive_dflash2 tf_rcd_add_norm", .symbol = "tf_rcd_add_norm", .image = "ricursive_dflash2", .threads = 256, .min_sm = 80 }, .usage = .{ .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 } } },
+    // TODO(spark): fill from kernel-contract-limits
+    .{ .launch = .{ .name = "ricursive_dflash2 tf_rcd_prep", .symbol = "tf_rcd_prep", .image = "ricursive_dflash2", .threads = 256, .min_sm = 80 }, .usage = .{ .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 } } },
+    // TODO(spark): fill from kernel-contract-limits
+    .{ .launch = .{ .name = "ricursive_dflash2 tf_rcd_conv", .symbol = "tf_rcd_conv", .image = "ricursive_dflash2", .threads = 256, .min_sm = 80 }, .usage = .{ .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 } } },
+    // TODO(spark): fill from kernel-contract-limits
+    .{ .launch = .{ .name = "ricursive_dflash2 tf_rcd_silu", .symbol = "tf_rcd_silu", .image = "ricursive_dflash2", .threads = 256, .min_sm = 80 }, .usage = .{ .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 } } },
 };
 
 test "ricursive DFlash2 CUDA: each launch is in the live registry once, at the kernels' 256 threads" {
