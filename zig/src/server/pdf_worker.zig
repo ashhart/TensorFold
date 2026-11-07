@@ -249,6 +249,7 @@ fn fakeWorker(a: Allocator, script: []const u8, ms: i96) ![]const u8 {
 }
 
 test "PDF render worker: a worker killed by a signal is named as a crash; a limit or a missing reply keeps today's message" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest; // the worker is POSIX only; Windows renders in process
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -266,6 +267,7 @@ test "PDF render worker: a worker killed by a signal is named as a crash; a limi
 }
 
 test "PDF render worker: a worker past its deadline is killed and reported as timed out" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest; // the worker is POSIX only; Windows renders in process
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const started = std.Io.Clock.awake.now(log.io()).toNanoseconds();
