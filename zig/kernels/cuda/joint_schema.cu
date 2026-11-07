@@ -3,6 +3,8 @@
 #include <math.h>
 #include <stdint.h>
 
+#include "common/reduce.cuh"
+
 namespace {
 
 constexpr int kThreads = 256;
@@ -22,21 +24,9 @@ __device__ __forceinline__ uint16_t to_bf16(float f) {
 __device__ __forceinline__ float r16(float v) { return bf(to_bf16(v)); }
 
 // A block's FP32 sum in one fixed order: each warp's xor tree, then the warps' sums in order (all threads get it).
-__device__ float block_sum(float v) {
+__device__ float block_total(float v) {
     __shared__ float part[kWarps];
-    __shared__ float total;
-    for (int o = 16; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o, 32);
-    if ((threadIdx.x & 31) == 0) part[threadIdx.x >> 5] = v;
-    __syncthreads();
-    if (threadIdx.x == 0) {
-        float s = 0.0f;
-        for (int w = 0; w < kWarps; ++w) s += part[w];
-        total = s;
-    }
-    __syncthreads();
-    const float out = total;
-    __syncthreads();
-    return out;
+    return tf_common::block_sum_serial(v, part);
 }
 
 // A NaN-keeping maximum: fmaxf would drop a NaN where torch's max keeps it.
@@ -76,13 +66,13 @@ extern "C" __global__ void __launch_bounds__(kThreads)
     const long long at = static_cast<long long>(blockIdx.x) * dim;
     float s = 0.0f;
     for (int i = threadIdx.x; i < dim; i += kThreads) s += bf(x[at + i]);
-    const float mean = block_sum(s) / static_cast<float>(dim);
+    const float mean = block_total(s) / static_cast<float>(dim);
     float q = 0.0f;
     for (int i = threadIdx.x; i < dim; i += kThreads) {
         const float d = bf(x[at + i]) - mean;
         q += d * d;
     }
-    const float inv = 1.0f / sqrtf(block_sum(q) / static_cast<float>(dim) + eps);
+    const float inv = 1.0f / sqrtf(block_total(q) / static_cast<float>(dim) + eps);
     for (int i = threadIdx.x; i < dim; i += kThreads) y[at + i] = to_bf16((bf(x[at + i]) - mean) * inv * bf(w[i]) + bf(b[i]));
 }
 
@@ -102,7 +92,7 @@ extern "C" __global__ void __launch_bounds__(kThreads) tf_js_softmax_rows(float*
     m = block_max(m);
     float t = 0.0f;
     for (int i = threadIdx.x; i < cols; i += kThreads) t += expf(row[i] - m);
-    const float sum = block_sum(t);
+    const float sum = block_total(t);
     for (int i = threadIdx.x; i < cols; i += kThreads) row[i] = expf(row[i] - m) / sum;
 }
 
@@ -165,7 +155,7 @@ extern "C" __global__ void __launch_bounds__(kThreads)
         const uint16_t* r = routed + static_cast<long long>(j0 + j) * width;
         float s = 0.0f;
         for (int i = threadIdx.x; i < width; i += kThreads) s += bf(r[i]) * bf(f[i]);
-        const float dot = block_sum(s);
+        const float dot = block_total(s);
         if (threadIdx.x == 0) w[j] = r16(r16(dot) / root);
     }
     __syncthreads();
@@ -174,7 +164,7 @@ extern "C" __global__ void __launch_bounds__(kThreads)
     m = block_max(m);
     float t = 0.0f;
     for (int j = threadIdx.x; j < n; j += kThreads) t += expf(w[j] - m);
-    const float sum = block_sum(t);
+    const float sum = block_total(t);
     for (int j = threadIdx.x; j < n; j += kThreads) w[j] = r16(expf(w[j] - m) / sum);
     __syncthreads();
     for (int i = threadIdx.x; i < width; i += kThreads) {
@@ -185,7 +175,7 @@ extern "C" __global__ void __launch_bounds__(kThreads)
 }
 
 // `F.normalize`'s divisor: bf16(max(bf16(||x||), eps)) from FP32 squares.
-__device__ float norm_divisor(float squares, float eps) { return r16(fmaxf(r16(sqrtf(block_sum(squares))), eps)); }
+__device__ float norm_divisor(float squares, float eps) { return r16(fmaxf(r16(sqrtf(block_total(squares))), eps)); }
 
 // Step 7 for option j: the prior, the cosine of f_q and o_j (BF16 values in FP32) and the scorer's input row.
 extern "C" __global__ void __launch_bounds__(kThreads)
@@ -207,7 +197,7 @@ extern "C" __global__ void __launch_bounds__(kThreads)
     float dot = 0.0f;
     for (int i = threadIdx.x; i < hidden; i += kThreads)
         dot += r16(bf(ej[i]) / de) * r16(r16(bf(qk[i]) + bf(g[i])) / da);
-    const float p = r16(prior_scale * r16(block_sum(dot)));
+    const float p = r16(prior_scale * r16(block_total(dot)));
     const uint16_t* f = fields + static_cast<long long>(q) * width;
     const uint16_t* o = opts + static_cast<long long>(j) * width;
     float sf = 0.0f, so = 0.0f;
@@ -227,7 +217,7 @@ extern "C" __global__ void __launch_bounds__(kThreads)
         out[2 * width + i] = to_bf16(x * y);
         out[3 * width + i] = to_bf16(fabsf(r16(x - y)));
     }
-    const float cs = r16(block_sum(c));
+    const float cs = r16(block_total(c));
     if (threadIdx.x == 0) {
         prior[j] = p;
         cosine[j] = cs;
