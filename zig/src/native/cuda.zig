@@ -481,7 +481,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: a
         .logprobs = served.backend.vtable.first_row != null,
         .prompt_logprobs = served.backend.vtable.prompt_rows,
         .penalties = served.backend.penalties,
-        .structures = served.backend.vtable.first_masked != null,
+        .structures = loaded.backend.vtable.first_masked != null, // the family's own, as on HIP: a drafted wrapper offers masks it cannot keep
         .vision = if (@hasField(@TypeOf(loaded), "vision")) vision_offer.offer(loaded.vision, o.vision) else null,
         .audio = if (@hasField(@TypeOf(loaded), "audio")) vision_offer.audio(loaded.audio) else null,
         .admit = admit,
