@@ -463,7 +463,7 @@ test "the release-quality capture is the fixed 128-token input" {
     for (ids) |id| try std.testing.expect(id < 129280);
 }
 
-test "the declared release-quality history is the fixed 16-token window" {
+test "the release-quality 16-token window is fixed in the tree" {
     const text = @embedFile("release-quality-16.json");
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();

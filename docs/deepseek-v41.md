@@ -115,9 +115,15 @@ at every indexed layer past the window fill — pick order there is decided by s
 noise, folded into the sensitivity accounting. The operative gate is floor-relative:
 engine-vs-FP64 NRMS at or under 1.05x the measured FP32-vs-FP64 floor clears, 1.10x
 reviews; the 1% absolute figure is a reported trip-wire, not the arbiter. The band is a
-fixed-history receipt: a 32-token extension reads 1.18x because its second 16 tokens are
-stable and expose the bf16 dequant class, and that extension is a stress diagnostic, not
-the declared qualification history.
+fixed-history receipt, and the floor manifest binds the window, the exact FP32 logits and
+the checkpoint metadata identity (config, index, present shard headers, token map).
+The 16-token clear is not representative of the full release-quality capture: on the
+128-token window the FP32 chain reads 0.1622 and the engine 0.2671, a ratio of 1.647x,
+and the 16-token blocks after the first read 1.66-2.45x (the 32-token prefix is 1.180x).
+The first window's floor is unusually noisy; the later blocks expose the engine's bf16
+dequant class. The full window is the honest qualification history, and on it the gate is
+open; its streamed Engram page reads also make the zero-disk-read residency clause false
+(20 KB on the FP32 half, 67.8 MB on the FP64 half).
 
 Context-labelled standing (M5 Ultra, 256 GB, the streamed line above): prefill 1,276 tok/s
 at 3,002 tokens; plain decode 44.9 tok/s at 4.5k and 44.1 at 21k, flat to 42k; drafted
