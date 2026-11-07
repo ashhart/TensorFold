@@ -6,30 +6,47 @@ const forward = @import("forward.zig");
 const wts = @import("gpu_weights.zig");
 const Ref = @import("projection.zig").Ref;
 
-/// The head's own buffers: the two normed planes `fc` reads side by side, and the gather's identity rows.
+const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
+
+/// The head's own buffers: the normed planes `fc` reads side by side, the gather's identity rows, its logits rows.
 pub const Scratch = struct {
     planes: mtl.Buffer,
     rows: mtl.Buffer,
+    logits: mtl.Buffer,
     capacity: u32,
+    logit_rows: u32,
 
-    pub fn init(device: mtl.Device, capacity: u32, hidden: usize) !Scratch {
-        const planes = try device.buffer(2 * @as(usize, capacity) * hidden * 2, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+    pub fn init(device: mtl.Device, capacity: u32, hidden: usize, vocab: usize, logit_rows: u32) !Scratch {
+        const planes = try device.buffer(2 * @as(usize, capacity) * hidden * 2, opts);
         errdefer planes.deinit();
-        const rows = try device.buffer(@as(usize, capacity) * 4, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+        const rows = try device.buffer(@as(usize, capacity) * 4, opts);
+        errdefer rows.deinit();
+        const logits = try device.buffer(@as(usize, logit_rows) * vocab * 2, opts);
         const ids: [*]u32 = @ptrCast(@alignCast(rows.contents()));
         for (0..capacity) |i| ids[i] = @intCast(i);
-        return .{ .planes = planes, .rows = rows, .capacity = capacity };
+        return .{ .planes = planes, .rows = rows, .logits = logits, .capacity = capacity, .logit_rows = logit_rows };
     }
     pub fn deinit(s: *Scratch) void {
         s.planes.deinit();
         s.rows.deinit();
+        s.logits.deinit();
     }
 };
+
+/// A logits row's pick and its probability under the head's softmax.
+pub const Pick = struct { token: u32, chance: f32 };
+pub fn pick(values: []const u16) !Pick {
+    const token = try @import("session.zig").argmax(values);
+    const top: f32 = @bitCast(@as(u32, values[token]) << 16);
+    var sum: f64 = 0;
+    for (values) |v| sum += @exp(@as(f64, @as(f32, @bitCast(@as(u32, v) << 16)) - top));
+    return .{ .token = token, .chance = @floatCast(1 / sum) };
+}
 
 /// One head pass over `rows` frame rows (ids and positions set): `hidden` row i pairs with token i; returns its rows.
 pub fn encode(m: *Model, sc: *const Scratch, e: *mtl.ComputeEncoder, hooks: forward.Mixer, hidden: Ref, rows: u32, head: forward.Head) !Ref {
     const w = m.weights.mtp orelse return error.NoMtpHead;
-    if (rows == 0 or rows > sc.capacity or rows > m.frame.capacity) return error.BadFrameRows;
+    if (rows == 0 or rows > sc.capacity or rows > m.frame.capacity or (if (head == .last) 1 else rows) > sc.logit_rows) return error.BadFrameRows;
     const f = &m.frame;
     const h: u32 = @intCast(m.config.hidden);
     const plane = @as(usize, sc.capacity) * h * 2;
@@ -44,7 +61,7 @@ pub fn encode(m: *Model, sc: *const Scratch, e: *mtl.ComputeEncoder, hooks: forw
     e.barrier();
     var lane = @import("core").segments.Lane{ .k = 0, .cb = undefined, .enc = e.*, .fence = undefined };
     defer e.* = lane.enc;
-    var s = forward.Stages{ .model = m, .rows = rows, .hooks = hooks, .head = head, .norm = w.norm, .hidden = f.get(.hidden), .residual = f.get(.residual) };
+    var s = forward.Stages{ .model = m, .rows = rows, .hooks = hooks, .head = head, .norm = w.norm, .logits = .{ .buffer = sc.logits }, .hidden = f.get(.hidden), .residual = f.get(.residual) };
     const block = m.config.layers;
     try s.pre(&lane, block);
     try s.mixer(&lane, block);

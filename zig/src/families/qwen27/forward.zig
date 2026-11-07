@@ -80,6 +80,8 @@ pub const Stages = struct {
     picks: ?Ref = null,
     /// The norm before the head: the target's, or the MTP head's own (mtp.zig).
     norm: ?wts.Tensor = null,
+    /// Where the head writes its logits: the frame's, or the MTP head's own (the target's last row stays readable).
+    logits: ?Ref = null,
     pub fn begin(s: *Stages, lane: *@import("core").segments.Lane) !void {
         const m = s.model;
         if (s.rows == 0 or s.rows > m.frame.capacity or lane.k != 0) return error.BadFrameRows;
@@ -255,7 +257,7 @@ pub const Stages = struct {
                 input.offset += @as(usize, s.rows - 1) * m.config.hidden * 2;
                 head_sums.ref.offset += @as(usize, s.rows - 1) * 4;
             }
-            try m.kernels.quant(e, m.weights.head, input, head_sums, f.get(.dims), f.get(.logits), if (s.head == .last) 1 else s.rows);
+            try m.kernels.quant(e, m.weights.head, input, head_sums, f.get(.dims), s.logits orelse f.get(.logits), if (s.head == .last) 1 else s.rows);
         }
         e.barrier();
         if (s.reduce) |r| {
