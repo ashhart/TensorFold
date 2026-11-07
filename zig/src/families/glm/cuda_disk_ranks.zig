@@ -17,13 +17,13 @@ pub fn shape(e: *const Engine) !image.Shape {
     return image.Shape.of(&e.cur.st, &e.c, e.capacity, e.mtp);
 }
 
-/// The words of a kept state on this rank: its position, head rows, ring bases and KDA copy bits.
+/// The words of a kept state on this rank: its position, head rows, ring bases, KDA copy bits and layout (unsplit).
 pub fn wordsOf(e: *const Engine, id: u64) !image.Words {
     const s = e.snaps.get(id) orelse return error.NoKeptState;
     if (s.cur.len > 64) return error.SnapshotShape;
     var cur: u64 = 0;
     for (s.cur, 0..) |b, i| cur |= @as(u64, b) << @intCast(i);
-    return .{ .at = s.pos, .mtp_len = s.mtp_len, .base = s.bases[0], .mtp_base = s.bases[1], .cur = cur };
+    return .{ .at = s.pos, .mtp_len = s.mtp_len, .base = s.bases[0], .mtp_base = s.bases[1], .cur = cur, .world = e.share.world };
 }
 
 /// Bytes [off, off + host.len) of this rank's image of `id`, out (lease to host) or in; unsealed: before its head only.
@@ -94,6 +94,11 @@ pub fn take(e: *Engine, rank: u32, id: u64, off: u64, out: []u8) !void {
     }
 }
 
+/// Words read back for a state at `at`: refused by name unless this server's world and layout (unsplit) wrote them.
+pub fn decode(e: *const Engine, x: [image.Words.count]u64, at: u32) !image.Words {
+    return image.Words.decode(x, at, @intCast(e.share.world), .unsplit);
+}
+
 /// Rank 0: every rank's blank `id` sealed with `w` (its head's rows, ring bases and KDA copy bits).
 pub fn seal(e: *Engine, id: u64, w: image.Words) !void {
     try snapshots.seal(e, id, w.mtp_len, .{ w.base, w.mtp_base }, w.cur);
@@ -127,10 +132,10 @@ pub fn step(e: *Engine, l: *follow.Link, h: follow.Header, ids: []const u32) !vo
     switch (op) {
         .blank => try snapshots.blankAs(e, h.a, @intCast(h.seed)),
         .seal => {
-            if (ids.len != 12) return error.BadStep;
-            var x: [6]u64 = undefined;
+            if (ids.len != image.Words.count * 2) return error.BadStep;
+            var x: [image.Words.count]u64 = undefined;
             @memcpy(std.mem.sliceAsBytes(&x), std.mem.sliceAsBytes(ids));
-            const w = try image.Words.decode(x, @intCast((e.snaps.get(h.a) orelse return error.NoKeptState).pos));
+            const w = try decode(e, x, @intCast((e.snaps.get(h.a) orelse return error.NoKeptState).pos));
             try snapshots.seal(e, h.a, w.mtp_len, .{ w.base, w.mtp_base }, w.cur);
         },
         .put => if (h.top_k == rank) {

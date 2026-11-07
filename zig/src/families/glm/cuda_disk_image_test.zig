@@ -168,7 +168,7 @@ test "GLM disk image: a kept state's image read out of its lease restores every 
     const last = segs.items[segs.items.len - 1];
     const img = try a.alloc(u8, @intCast(last.img + last.len));
     defer a.free(img);
-    var words = (image.Words{ .at = at, .mtp_len = mtp, .base = 0, .mtp_base = 0, .cur = 0b10 }).encode();
+    var words = (image.Words{ .at = at, .mtp_len = mtp, .base = 0, .mtp_base = 0, .cur = 0b10, .world = 2 }).encode();
     const out: image.Copy = .{ .d = &d, .pool = &pool, .lease = &kept, .segs = segs.items, .words = &words };
     const cut = [_]u64{ 0, 1000, plan.len / 2, img.len }; // the store asks for ranges, not the whole image
     for (cut[0..3], cut[1..]) |lo, hi| try out.run(lo, img[@intCast(lo)..@intCast(hi)], true);
@@ -176,13 +176,13 @@ test "GLM disk image: a kept state's image read out of its lease restores every 
     // a blank state as a disk read takes it (room for the head's whole window), filled from the image
     var blank = try pool.take(@intCast(image.leaseBytes(sh, at, sh.headRows(at))));
     defer pool.give(&blank);
-    var back: [6]u64 = undefined;
+    var back: [image.Words.count]u64 = undefined;
     const in: image.Copy = .{ .d = &d, .pool = &pool, .lease = &blank, .segs = segs.items, .words = &back };
     try in.run(0, img, false);
-    const w = try image.Words.decode(back, at);
+    const w = try image.Words.decode(back, at, 2, .unsplit);
     try expectEqual(mtp, w.mtp_len);
     try expectEqual(@as(u64, 0b10), w.cur);
-    try expectError(error.DiskWords, image.Words.decode(back, at + 2048));
+    try expectError(error.DiskWords, image.Words.decode(back, at + 2048, 2, .unsplit));
     var fresh = try State.initFormat(a, &d, &m.w, capacity, false);
     defer fresh.deinit();
     const into = try Plan.init(&fresh, c, at, w.mtp_len, 0);
@@ -296,4 +296,32 @@ test "GLM disk image: a disk read's blank state is refused until sealed, and its
         snaps.free(&e, &held);
     }
     try snaps.seal(&e, 9, 0, .{ back, 0 }, 0); // no head rows yet (as without drafts): the main ring holds the state's rows
+}
+
+test "GLM disk image: the words record the world, the layout and the owner, and a read refuses another by name" {
+    const at: u32 = 4096;
+    const w: image.Words = .{ .at = at, .mtp_len = 7, .base = 1, .mtp_base = 2, .cur = 0b1, .world = 3 };
+    const x = w.encode();
+    try expectEqual(@as(u64, 72), image.Words.bytes);
+    try expectEqual(@as(usize, image.Words.bytes), @sizeOf(@TypeOf(x)));
+    // an unsplit state: every rank holds every row, so no rank owns it
+    try std.testing.expectEqualSlices(u64, &.{ 3, 0, image.Words.no_owner }, x[6..]);
+    try expectEqual(w, try image.Words.decode(x, at, 3, .unsplit));
+    try expectError(error.DiskWorld, image.Words.decode(x, at, 2, .unsplit)); // written by three ranks, read by two
+    try expectError(error.DiskWorld, image.Words.decode(x, at, 4, .unsplit));
+    const split: image.Words.Layout = @fromBackingInt(@intCast(1));
+    try expectError(error.DiskLayout, image.Words.decode(x, at, 3, split)); // this server splits, the image does not
+    var y = x;
+    y[7] = 1; // an image of a split layout read unsplit
+    try expectError(error.DiskLayout, image.Words.decode(y, at, 3, .unsplit));
+    const owned = try image.Words.decode(y[0..8].* ++ [1]u64{2}, at, 3, split);
+    try expectEqual(@as(u64, 2), owned.owner);
+    try expectError(error.DiskLayout, image.Words.decode(y, at, 3, split)); // a split image names an owner rank
+    try expectError(error.DiskLayout, image.Words.decode(y[0..8].* ++ [1]u64{3}, at, 3, split));
+    y = x;
+    y[8] = 0; // an unsplit image that names an owner
+    try expectError(error.DiskLayout, image.Words.decode(y, at, 3, .unsplit));
+    y = x;
+    y[0] = 2; // the format comes first: a format this server does not read is DiskWords, whatever its layout
+    try expectError(error.DiskWords, image.Words.decode(y, at, 2, .unsplit));
 }

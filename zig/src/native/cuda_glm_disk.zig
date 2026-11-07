@@ -82,9 +82,9 @@ fn scatter(ptr: *anyopaque, saved: api.prompt_cache.Saved, ranges: []const rows.
     defer rest.done();
     if (ranges.len > 0 and ranges[0].off == 0) {
         if (ranges[0].len < img.Words.bytes) return error.DiskWords;
-        var x: [6]u64 = undefined;
+        var x: [img.Words.count]u64 = undefined;
         @memcpy(std.mem.sliceAsBytes(&x), in[0..img.Words.bytes]);
-        try ranks.seal(e, k.id, try img.Words.decode(x, k.at));
+        try ranks.seal(e, k.id, try ranks.decode(e, x, k.at));
     }
     var pieces: std.ArrayList(img.Piece) = .empty;
     defer pieces.deinit(e.gpa);
