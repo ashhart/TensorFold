@@ -114,7 +114,7 @@ another host made with the commands the receipt records.
 On any host, with no device, `zig build cpu-contract` runs the CPU kernels (Qwen3.5-2B's affine projection and RMS
 norm on the host's cores) through gates 1 to 4 and their eight controls; a CPU kernel has no launch, so gate 5 has
 nothing to check. `zig build test-kernel-contract`, CI's no-device step, runs the same gates as a test, and `zig build
-test` the kernels' own test that the bytes are the same at every thread count and column split, on x86_64 and arm64.
+test` the kernels' own test that the bytes are the same at 1 to 16 threads and at column splits every 8 columns to 256 and every 256 beyond (each alignment of the four-tile pass), on x86_64 and arm64.
 
 Every run ends with a `SUMMARY` line: kernels passing gates 1 to 4, known findings, controls red, and limit problems.
 The program exits 1 on any failed gate, any control that stayed green, or any limit problem.
@@ -395,7 +395,8 @@ one point), and `vision_kernel` at head dim 128 against `contract_attn.zig`'s fl
 CPU: Qwen3.5-2B's affine projection (4 bits, groups of 64, `cpu_kernels.zig`) at the widths the 2B calls it, one row
 to a 128-row prompt chunk, registered once for each chain count of its projection classes (16; 32 for the delta rule's
 a and b; 8 for the head), and its RMS norm over 2048-wide rows; each registration's runs take 1 to 8 threads in turn,
-so gate 2's five runs are five thread counts. Eight controls: a projection zeroing a non-finite activation, writing its
+so gate 2's five runs are five thread counts (the 16-output a and b projections have two tiles, so all five of theirs
+run on two). Eight controls: a projection zeroing a non-finite activation, writing its
 activations, skipping the rows past its last block of eight, and summing each group in half; a norm taking a
 non-finite input as zero, writing its output over its input, scaling by the next element's weight, and summing its
 squares in bf16.
