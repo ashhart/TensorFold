@@ -269,7 +269,7 @@ fn stageJob(r: *Rows, prepared: *const Job, may_wait: bool) !void {
     var bytes = newBytes(r, &promised, prepared, metadata, &count);
     var charge: u64 = 0;
     while (true) {
-        charge = bytes + @sizeOf(io.Job) + count * @sizeOf(io.File) + prepared.wants.len * @sizeOf(Want) + 4 * @sizeOf([]const u8);
+        charge = charged(bytes, count, prepared.wants.len);
         if (!w.fits(charge)) return if (may_wait and w.busy(charge)) error.StagingBusy else error.StagingFull;
         const reserved = w.reserved();
         if (!r.budget(bytes + reserved)) return error.DailyBudgetSpent;
@@ -310,6 +310,26 @@ fn stageJob(r: *Rows, prepared: *const Job, may_wait: bool) !void {
     const wants = try a.dupe(Want, prepared.wants);
     j.* = .{ .arena = arena, .id = r.next_job, .generation = w.generation.load(.acquire), .name = prepared.name, .at = e.at, .shared = e.shared, .tokens = tokens, .spans = spans, .starts = starts, .wants = wants, .files = files, .bytes = bytes, .staged = charge, .verify = r.verify, .began = prepared.began };
     w.submit(j);
+}
+
+/// A staged job's charge: its files' bytes and the bookkeeping the worker holds beside them.
+fn charged(bytes: u64, files: usize, wants: usize) u64 {
+    return bytes + @sizeOf(io.Job) + files * @sizeOf(io.File) + wants * @sizeOf(Want) + 4 * @sizeOf([]const u8);
+}
+
+/// The most staging a state of `at` tokens charges: none of its blocks on disk, spans and starts at most one a token.
+pub fn coldCharge(r: *const Rows, at: u32) !u64 {
+    if (at == 0) return 0;
+    const ps = try r.parts(r.gpa, at);
+    defer r.gpa.free(ps);
+    var groups: [8]u32 = undefined;
+    var blocks: usize = 0;
+    for (try image.groups(ps, &groups)) |g| {
+        const w = image.wholeBlocks(at, r.keying.block, g);
+        blocks += w.end - w.first;
+    }
+    const metadata = 4 * (4 + 4 * @as(u64, at));
+    return charged(image.imageBytes(ps) + metadata + (blocks + 1) * @sizeOf(file.Trailer), blocks + 1, blocks);
 }
 
 /// Whether the state's block is for this job to write: the disk lacks it and no job in flight is writing it.
