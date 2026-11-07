@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Contributing: `tools/pr_check.py` checks local changes against their merge base before a push (new lean findings, sources over 600 lines, and advisory warnings for private-looking paths and addresses, untracked files included), and the PR template asks for paired main-against-branch cells, the machines a change reaches and switch defaults (#2355).
+
 - Docs: the GLM-5.3-Flash recipe notes that `TF_GLM_CLEAR_THINKING` is read by the native server too, not only the Python engine (#2350).
 
 - LFM3-1.7B on Metal: the text decoder is served from the official MLX 4-, 6- and 8-bit checkpoints, with per-stream convolution and KV state, verification windows, snapshots and the prompt cache. LFM3-VL checkpoints are refused by name until the vision tower lands (#1514, part of #1491). Thanks to @BlivionIaG.
