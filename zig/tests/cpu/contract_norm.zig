@@ -16,7 +16,8 @@ fn depth(s: c.Shape) usize {
 }
 
 const sums_why = "the output follows the squares' sum as ss^-1/2 into bf16: a bf16 sum's error moves it by a few of its ulps, not 100";
-const served = [_]c.Shape{ .{ .rows = 128, .n = 2048, .k = 2048 }, .{ .rows = 1, .n = 2048, .k = 2048 } };
+/// The 2B's hidden rows: a 128-row prompt chunk, a 32-row verify window, one row a decode step.
+const served = [_]c.Shape{ .{ .rows = 128, .n = 2048, .k = 2048 }, .{ .rows = 32, .n = 2048, .k = 2048 }, .{ .rows = 1, .n = 2048, .k = 2048 } };
 const ctl = [_]c.Shape{.{ .rows = 8, .n = 1024, .k = 1024 }};
 
 pub fn spec(w: Which) c.Spec {

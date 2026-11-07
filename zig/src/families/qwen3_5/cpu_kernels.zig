@@ -278,15 +278,15 @@ test "the correctly rounded rsqrt at exact points, and apart from 1 / sqrt(x) in
 }
 
 /// Wyhash of every output byte of the sweep's fixed inputs: x86_64 and arm64 give these bytes, at any thread count.
-const portable_digest: u64 = 0xa49128695b3ed9a1;
+const portable_digest: u64 = 0xae93e2f573b522de;
 
 test "the same bytes at every thread count and column split, on every host" {
     const a = std.testing.allocator;
     var prng = std.Random.DefaultPrng.init(11);
     const rnd = prng.random();
-    const n = 104;
-    const kw = 192;
-    const rows = 11;
+    const n = 2048;
+    const kw = 2048;
+    const rows = 128;
     const l = try synthetic(a, rnd, n, kw, 16);
     defer free(a, l);
     const x = try a.alloc(u16, rows * kw);
@@ -307,12 +307,13 @@ test "the same bytes at every thread count and column split, on every host" {
         try projectOn(l, xf, xs, rows, got, threads);
         try std.testing.expectEqualSlices(u16, want, got);
     }
+    const part = 9;
     var split: usize = 8;
-    while (split < n) : (split += 8) {
+    while (split < n) : (split += if (split < 256) 8 else 256) {
         @memset(got, 0xffff);
-        project(l, xf, xs, rows, got, 0, split);
-        project(l, xf, xs, rows, got, split, n);
-        try std.testing.expectEqualSlices(u16, want, got);
+        project(l, xf, xs, part, got, 0, split);
+        project(l, xf, xs, part, got, split, n);
+        try std.testing.expectEqualSlices(u16, want[0 .. part * n], got[0 .. part * n]);
     }
     const k = 1024;
     const h = try a.alloc(u16, rows * k);
