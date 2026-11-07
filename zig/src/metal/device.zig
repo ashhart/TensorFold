@@ -38,6 +38,7 @@ pub const Buffer = struct {
     }
 
     pub fn deinit(self: Buffer) void {
+        @import("metal4.zig").released(self.id); // a Metal 4 context's residency set lets go of it too
         objc.release(self.id);
     }
 };
