@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM-5.3-Flash on CUDA: `TF_GLM_KV_SPLIT=1`, off by default, takes each stream's KV pages from one owner rank's class and lays each page's pooled keys and latent rows in two regions, each with its own table; ranks that disagree stop before loading. In this part every rank still holds every latent row, so it saves no memory, and a class holds a whole window, so a split server can admit fewer streams. Unset, the pool and the pages are as before (#2415, part 1 of #1431). Thanks to @wojo.
+
 - HIP on gfx1151: a plain prompt of 1 or 2 rows takes the 2-row K-parallel tile, with byte-identical output (#3273). Thanks to @AbrahamCete.
 
 - GLM-5.3-Flash on CUDA with `TF_KV_SHARE` and no `--prompt-cache-gib`: the kept states' slots, `TF_KV_SHARE` at most, now come where an asked cache goes, before the windows past the engine's own, so a room that holds one more whole window no longer keeps fewer states; Jammed XSFP4 at TP=3 on three GB10s keeps all 32 at `TF_KV_SHARE=32` instead of 8, with the same tokens (#3125). Thanks to @Bizuayeu.
