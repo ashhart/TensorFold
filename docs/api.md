@@ -339,6 +339,26 @@ token or the reply limit; the server returns the reply only up to the match. Whe
 `ignore_eos`, end tokens inside the reply are decoded into its text, as on MLX, and `finish_reason` is `length`
 unless a stop string or a tool call ended the reply.
 
+### Replies that quote a template marker
+
+Some templates encode their turn-end spelling as one added token: Qwen3.8-Flash-Next's and Qwen3.8-27B's tokenizers
+encode `<|im_end|>` to one id, while `<|tool_call_begin|>` stays seven ordinary tokens. A reply can quote that
+spelling with ordinary tokens and finish normally; when it draws the one-token spelling instead, the turn ends there
+even inside a code span. The server stops on the token the model drew; it does not sample past the end token and
+decide afterwards, because that would change the reply.
+
+A client that needs such a reply to finish can set `ignore_eos: true` with a `stop` list holding the model's
+end-of-text spelling (`<|endoftext|>` for Qwen), not its turn-end spelling: a `stop` string for `<|im_end|>` cuts at
+the same place the end token would. With `ignore_eos`, the drawn end token appears in the content as text, so strip
+a trailing `<|im_end|>` and the whitespace after it before display. The end-of-text stop string still ends the reply
+at a real end of turn.
+
+Measured greedy on a GB10 with a finished tool call and its result in the conversation, on Qwen3.5-2B MLX
+4-bit and Qwen3.6-35B-A3B NVFP4: both checkpoints wrote the quoted marker with ordinary tokens, so the plain request
+finished; with `ignore_eos` and `stop: ["<|endoftext|>"]` both requests also finished, and each reply ended with the
+drawn `<|im_end|>` for the client to strip. The [report's Flash Next case](https://github.com/ashhart/TensorFold/issues/2399)
+draws the one-token spelling, which is where the plain request stops.
+
 On MLX, `--parallel auto` is the default: requests share rounds within the configured concurrency and memory
 budget. Every admitted prompt prefills a chunk at a time beside the others. Each chunk goes to a foreground prompt
 before a background one, then to the prompt with the fewest tokens left, and a prompt passed over for 8 chunks takes
