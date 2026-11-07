@@ -119,6 +119,11 @@ pub const Pool = struct {
         const left = p.free -| p.reserve;
         return if (p.limit) |cap| @min(left, cap -| held) else left;
     }
+
+    /// Room after reserving a pending allocation not yet reflected in CUDA usage.
+    pub fn roomAfterPending(p: Pool, held: u64, pending: u64) u64 {
+        return p.room(held) -| pending;
+    }
 };
 
 /// The reserve's default share and floor, and the least GiB a variable may set: unified memory is the OS's too.
@@ -387,4 +392,13 @@ test "a GB10's /proc files: its lists' parked pages raise MemAvailable and stay 
     try std.testing.expectEqual(@as(u64, 32813016 * 1024), m.available);
     try std.testing.expect(parked > 0 and m.available + parked < m.total);
     try std.testing.expect(meminfo(@embedFile("fixtures/gb10_parked/meminfo_at_budget")) != null);
+}
+
+test "pending CUDA allocations reduce room with and without a process cap" {
+    const mib: u64 = 1 << 20;
+    const unlimited: Pool = .{ .free = 4096 * mib, .total = 4096 * mib, .reserve = 512 * mib, .limit = null, .unified = false };
+    try std.testing.expectEqual(@as(u64, 2560 * mib), unlimited.roomAfterPending(2048 * mib, 1024 * mib));
+
+    const capped: Pool = .{ .free = 4096 * mib, .total = 4096 * mib, .reserve = 512 * mib, .limit = 3584 * mib, .unified = false };
+    try std.testing.expectEqual(@as(u64, 512 * mib), capped.roomAfterPending(2048 * mib, 1024 * mib));
 }

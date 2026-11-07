@@ -3,7 +3,7 @@ const std = @import("std");
 const cuda = @import("cuda");
 
 /// What a load has to leave room for: the server's room before it, one stream's window, and the drafter's directory.
-pub const Fit = struct { room: u64, context: usize, drafter: ?[]const u8 };
+pub const Fit = struct { room: u64, context: usize, drafter: ?[]const u8, prompt_int8: bool = false };
 
 /// The load's other bytes (kernels, kit, startup costs): ~112 MiB on a 3090 Ti; less refuses as main does, more maps.
 const others: u64 = 96 << 20;
@@ -18,7 +18,7 @@ pub fn arena(e: anytype, io: std.Io, ctx: *const cuda.Context, ck: anytype, fit:
     e.host_embed = null;
     errdefer if (e.host_embed) |*h| h.free();
     const bytes = try measure(e, io, ctx, ck, fit);
-    return cuda.DeviceBuffer.alloc(e.d, bytes + try e.scratch(.measure));
+    return cuda.DeviceBuffer.alloc(e.d, bytes);
 }
 
 /// The arena and the host memory `arena` made.
@@ -36,7 +36,8 @@ fn measure(e: anytype, io: std.Io, ctx: *const cuda.Context, ck: anytype, fit: ?
     const unified = (try ctx.attribute(.integrated)) != 0;
     const stream = e.streamBytes(f.context);
     const beside = if (f.drafter) |dir| try drafter(e, io, dir) else 0;
-    if (!mapped(unified, f.room, bytes + try e.scratch(.measure) + others, stream, beside)) return bytes;
+    const pending = try @import("cuda_scratch.zig").unallocatedScratchBytesFor(e, f.prompt_int8);
+    if (!mapped(unified, f.room, bytes + pending + others, stream, beside)) return bytes;
     e.host_embed = try cuda.HostBuffer.allocMapped(e.d, e.g.vocab * e.g.hidden * 2);
     std.log.info("qwen3_5: embedding rows read from host memory: no room beside a {d}-token stream", .{f.context});
     return x3w.measure(e, ck);

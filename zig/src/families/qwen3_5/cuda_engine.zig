@@ -7,6 +7,7 @@ const geometry = @import("cuda_geometry.zig");
 const weights = @import("cuda_weights.zig");
 const caches = @import("cuda_cache.zig");
 const routed = @import("cuda_routed.zig");
+const scratch_memory = @import("cuda_scratch.zig");
 const hooks = @import("cuda_learn_hooks.zig");
 const pocket = @import("cuda_pocket.zig");
 const profile = @import("cuda_startup_profile.zig");
@@ -34,8 +35,6 @@ pub fn argmaxSlices(vocab: usize) usize {
 }
 /// A window's rows at most (exact: one-row steps' bits; qwen35.cuh's MAXW, the rows a stream's log holds).
 pub const most_window = Round.most_window;
-/// Partial attention chunks a row at most (qwen35.cuh's MAXCH): each row's chunk width grows with its own keys.
-pub const max_chunks = 64;
 
 /// Device allocations are 256-byte aligned, as the driver's are.
 pub fn aligned(n: usize) usize {
@@ -96,9 +95,14 @@ pub const Engine = struct {
     moe: cuda.moe.Fns,
     fns: Fns,
     keeps: Keeps,
-    /// Every weight and scratch buffer in one allocation: WDDM's launch cost grows with the allocation count.
+    /// Persistent weights only. Scratch has an independent, growable allocation.
     arena: DeviceBuffer,
     arena_at: usize = 0,
+    /// Forward scratch, sized for the largest row count used so far.
+    scratch_buf: ?DeviceBuffer = null,
+    scratch_capacity: usize = 0,
+    /// Maximum prompt rows admitted by the configured context (capped by the forward kernel limit).
+    scratch_rows: usize = max_rows,
     /// Rows a verify forward takes at most, and a window's rows at most.
     verify_rows: usize,
     window_rows: usize,
@@ -173,7 +177,7 @@ pub const Engine = struct {
     pub const mpos_at = Round.mpos_at;
     const tables_len = Round.bytes;
 
-    pub fn init(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kv8: bool, fit: ?hosted.Fit) !*Engine {
+    pub fn init(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kv8: bool, fit: ?hosted.Fit, prompt_rows_limit: usize) !*Engine {
         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
         const started = profile.now(io);
         const g = try Geometry.read(gpa, io, dir);
@@ -199,6 +203,11 @@ pub const Engine = struct {
         e.rope_buf = null;
         e.window_rows = most_window;
         e.arena_at = 0;
+        e.scratch_buf = null;
+        e.scratch_capacity = 0;
+        // Admission tracks the configured prompt ceiling; startup warmup itself needs only 32 rows.
+        e.scratch_rows = @max(32, @min(max_rows, prompt_rows_limit));
+        errdefer if (e.scratch_buf) |*b| b.free();
         e.graphs = .empty;
         try @import("cuda_rope_table.zig").set(e, g.rope); // a YaRN config's table, before any weight or forward
         errdefer @import("cuda_rope_table.zig").free(e);
@@ -273,8 +282,17 @@ pub const Engine = struct {
         e.startup.add(try profile.withCache(e.gpa, io, e, Cache));
     }
 
+    /// Re-run startup warmup after prompt INT8 is enabled, preparing its workspace and graph shapes before requests.
+    pub fn warmPromptInt8(e: *Engine, io: std.Io) !void {
+        e.startup.add(try profile.withCache(e.gpa, io, e, Cache));
+    }
+
     /// Every path a request takes, run once now: WDDM stalls a process's first forwards for seconds (a 20 s launch).
     pub fn warmCache(e: *Engine, warm_cache: *Cache) !void {
+        // Warm 32 startup rows; reserve the configured context ceiling for later growth.
+        const warm_rows = @min(32, e.scratch_rows);
+        try e.ensureScratch(warm_rows);
+        if (e.int8.on) try e.int8.ensureRows(e, warm_rows);
         const ids: [32]u32 = @splat(0);
         const greedy: Draw = .{ .rule = null, .position = 33 };
         try e.forward(&.{.{ .cache = warm_cache, .rows = ids.len }}, &ids, .last); // a prompt chunk: the prompt GEMMs
@@ -295,6 +313,9 @@ pub const Engine = struct {
         var it = e.graphs.valueIterator();
         while (it.next()) |x| x.deinit();
         e.graphs.deinit(e.gpa);
+        if (e.scratch_buf) |*b| b.free();
+        e.scratch_buf = null;
+        e.scratch_capacity = 0;
         e.penalties.deinit(e.gpa);
         e.host_logits.free();
         e.staged.free();
@@ -337,8 +358,21 @@ pub const Engine = struct {
         return e.arena.ptr + at;
     }
 
-    /// The scratch rows' bytes, or the rows themselves from the arena (cuda_scratch.zig).
-    pub const scratch = @import("cuda_scratch.zig").scratch;
+    pub fn scratch(e: *Engine, rows: usize, mode: scratch_memory.Mode) !usize {
+        return scratch_memory.scratch(e, rows, mode);
+    }
+
+    pub fn unallocatedScratchBytes(e: *const Engine) !usize {
+        return scratch_memory.unallocatedScratchBytes(e);
+    }
+
+    pub fn unallocatedScratchBytesFor(e: *const Engine, int8_on: bool) !usize {
+        return scratch_memory.unallocatedScratchBytesFor(e, int8_on);
+    }
+
+    pub fn ensureScratch(e: *Engine, rows: usize) !void {
+        return scratch_memory.ensureScratch(e, rows);
+    }
 
     pub fn run(e: *Engine, f: cuda.Function, grid: [3]usize, block: [3]usize, args: anytype) !void {
         var a: cuda.Args = .{};
@@ -405,9 +439,10 @@ pub const Engine = struct {
 
     /// One forward over `parts`' windows, with every input admitted before an unkept verify is settled.
     pub fn forward(e: *Engine, parts: []const Part, ids: []const u32, keep: Keep) !void {
+        const total = ids.len;
+        try e.ensureScratch(total);
         try e.admit(parts, ids, keep);
         const g = e.g;
-        const total = ids.len;
         const record = keep != .last;
         const heads: usize = if (record) total else 1;
         // the prompt GEMM only for prompt chunks: a window's rows keep the bits of one-row steps
@@ -551,15 +586,6 @@ pub const Engine = struct {
     }
 };
 
-test "dense read cost: hidden and slot variants have distinct graph keys" {
-    var seen: [32]u32 = undefined;
-    var n: usize = 0;
-    for ([_]u8{ 1, 2, 4, 8, 16 }) |slots| {
-        for ([_]bool{ false, true }) |hidden| {
-            const shape: Engine.Shape = .{ .total = 1, .nseg = 1, .record = true, .prompt = false, .taps = true, .slots = slots, .hidden = hidden };
-            for (seen[0..n]) |key| try std.testing.expect(key != shape.key());
-            seen[n] = shape.key();
-            n += 1;
-        }
-    }
+test {
+    _ = @import("cuda_engine_test.zig");
 }

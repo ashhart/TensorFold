@@ -3,6 +3,15 @@ const std = @import("std");
 
 pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.Build.Step) void {
     const host = b.graph.host;
+    const memory = b.createModule(.{ .root_source_file = b.path("zig/src/native/cuda_memory.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "cuda", .module = cuda }} });
+    const memory_run = b.addRunArtifact(b.addTest(.{ .root_module = memory }));
+    const memory_step = b.step("test-cuda-memory-admission-host", "CUDA memory admission arithmetic without devices");
+    memory_step.dependOn(&memory_run.step);
+    step.dependOn(&memory_run.step);
+    const scratch_run = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"lazy scratch admission"} }));
+    const scratch_step = b.step("test-qwen35-scratch-host", "Qwen3.5 lazy scratch sizing and growth admission without devices");
+    scratch_step.dependOn(&scratch_run.step);
+    step.dependOn(&scratch_run.step);
     const metal_scope = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen3_5/config.zig"), .target = host }), .filters = &.{ "Metal 2B format scope:", "admit the affine 2B", "admit untied heads" } }));
     b.step("test-qwen35-metal-scope-host", "Metal 2B format admission without device or Metal compiler").dependOn(&metal_scope.step);
     @import("load_prefetch_host.zig").tests(b, mods.core, step);

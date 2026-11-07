@@ -370,14 +370,17 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     };
     var served = try drafted.wrap(F, a, gpa, io, loaded, o, problem) orelse return null;
     defer if (!opened) served.close(gpa);
-    const model = cuda.usage(false).device - held0;
+    const L = @TypeOf(loaded);
+    const unallocated_scratch: usize = if (@hasField(L, "scratch_bytes")) loaded.scratch_bytes else 0;
+    const actual_model = cuda.usage(false).device - held0;
+    const model = actual_model + @as(u64, @intCast(unallocated_scratch));
     const after = try pool(a, io, &g.ctx, problem) orelse return null;
     family_memory.noteParked(after, "the CUDA memory budget");
-    const L = @TypeOf(loaded); // a family's Loaded may leave out a learner and a lone driver
+    const room_after_scratch = after.roomAfterPending(actual_model, @intCast(unallocated_scratch));
     const learn_bytes: usize = if (@hasField(L, "learn_bytes")) loaded.learn_bytes else 0;
-    const host_cache = try kv_pages.placeHost(F, a, loaded, o, after.room(model), @intCast(window), served.stream_bytes, problem) orelse return null;
+    const host_cache = try kv_pages.placeHost(F, a, loaded, o, room_after_scratch, @intCast(window), served.stream_bytes, problem) orelse return null;
     const host_budget = if (host_cache and @hasDecl(F, "snap_save")) budget.hostCacheBytes(a, io, o.prompt_cache_gib) else 0;
-    var room = try @import("cuda_startup_costs.zig").room(a, served.prepare, try kv_pages.startupRoom(F, a, loaded, o, after.room(model), host_budget, problem) orelse return null, problem) orelse return null;
+    var room = try @import("cuda_startup_costs.zig").room(a, served.prepare, try kv_pages.startupRoom(F, a, loaded, o, room_after_scratch, host_budget, problem) orelse return null, problem) orelse return null;
     var low: []const u8 = ""; // names the rank whose room bounds the streams, when it is not this one
     if (@hasField(@TypeOf(loaded), "peer_room")) if (loaded.peer_room) |pr| if (pr.bytes < room) {
         room = pr.bytes;
@@ -507,13 +510,13 @@ test {
     _ = @import("copy_drafts_nemotron_test.zig");
     _ = windows;
     _ = @import("cuda_startup_test.zig");
+    _ = @import("copy_drafts_cuda_test.zig");
     _ = budget; // cuda_memory.zig's own tests, which no other test binary reaches
     _ = refusals;
     _ = lane_backend;
     _ = snaps;
     _ = prompt_pages;
     _ = cuda_device; // the device and variable tests
-    _ = windows;
 }
 
 test "CUDA host preserves prefill_step, first-before-draft and chunk-invariance capability" {
@@ -582,10 +585,6 @@ test "Save recovery: real native close drains the dense trainer before any child
 test "slide admission: cuda refuses before checkpoint or device access" {
     try @import("slide_open_test.zig").omni(open);
     try @import("slide_open_test.zig").check(open, "CUDA", &.{ "qwen4", "qwen4_text", "lfm2_vl", "glm5_next", "gemma4", "fish_omni" });
-}
-
-test {
-    _ = @import("copy_drafts_cuda_test.zig");
 }
 
 test "GLM capabilities: CUDA offers the EXL3 format its loader accepts" {
