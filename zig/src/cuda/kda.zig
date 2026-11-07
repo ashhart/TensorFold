@@ -3,6 +3,7 @@
 const std = @import("std");
 const cuda = @import("root.zig");
 
+/// Key and value channels a head (kda.cuh DK, DV); zig/kda_header_host.zig holds these and taps to the header.
 pub const dk = 128;
 pub const dv = 128;
 /// The conv window's taps (kda.cuh TAPS): three kept rows and the current one.
