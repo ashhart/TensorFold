@@ -254,4 +254,6 @@ test {
 
 test {
     _ = @import("request_starts_turns_test.zig");
+    _ = @import("multipart_test.zig");
+    _ = @import("query_test.zig");
 }
