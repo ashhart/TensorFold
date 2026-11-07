@@ -585,3 +585,11 @@ test "TF_GLM_ROCE_MULTI=1 leaves the group's own RoCE path alone at two ranks an
     for ([_]usize{ 3, 4 }) |world| try std.testing.expect(!ranks.ownRoce(.{ .roce_multi = true }, world));
     for ([_]usize{ 2, 3, 4 }) |world| try std.testing.expect(ranks.ownRoce(.{}, world));
 }
+
+test "two ranks agree whatever TF_ROCE says: only three or more compare it" {
+    var all = [_]Fingerprint{
+        Fingerprint.of(2, 0, .{ .roce_wide = true }, 8192, true, @splat(0), @splat(0), hashBytes("/same")),
+        Fingerprint.of(2, 1, .{}, 8192, true, @splat(0), @splat(0), hashBytes("/same")),
+    };
+    try std.testing.expectEqual(@as(?Mismatch, null), mismatch(&all));
+}

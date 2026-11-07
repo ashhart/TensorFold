@@ -283,7 +283,7 @@ pub const Fingerprint = extern struct {
             .layers = s.layers,
             .mtp = @intFromBool(mtp),
             .roce_multi = @intFromBool(s.roce_multi),
-            .roce_wide = @intFromBool(s.roce_wide),
+            .roce_wide = @intFromBool(s.roce_wide and world >= 3), // two ranks ask by default, so a lone TF_ROCE=1 there is no difference
             .kv_host = s.kv_host,
             .kv_host_gib = s.kv_host_gib,
             .solo = @intFromBool(s.solo),
