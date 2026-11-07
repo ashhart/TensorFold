@@ -29,6 +29,10 @@ pub const Result = struct {
     absolute_gate_passed: bool = false,
     /// The FP64 argmax is reported, not thresholded; the zero-argmax clause is the engine's own path invariants.
     greedy_gate_passed: bool = false,
+    /// The FP32 contract capture's own engine-vs-contract NRMS and argmax count, carried into the FP64 receipt.
+    contract_normalized_rms_error: f64 = 0,
+    contract_greedy_disagreements: usize = 0,
+    contract_measured: bool = false,
     /// The FP32 contract chain's own NRMS against the same FP64 teacher, when its hashed logits sit beside this run.
     floor_normalized_rms_error: f64 = 0,
     /// Engine NRMS over the contract's floor; the operative band is 1.05 clear / 1.10 review.
@@ -235,6 +239,11 @@ fn runOf(comptime T: type, gpa: std.mem.Allocator, io: std.Io, model: *Model, id
             result.band_gate_passed = band.passed;
             result.band_measured = band.measured;
         }
+        if (try readContract(gpa, io, dir)) |contract| {
+            result.contract_normalized_rms_error = contract.nrms;
+            result.contract_greedy_disagreements = contract.greedy;
+            result.contract_measured = true;
+        }
     }
     result.numeric_gate_passed = if (T == f64) result.band_gate_passed else result.absolute_gate_passed;
     result.gate_basis = if (T == f64) "floor_relative_band" else "contract_capture";
@@ -249,7 +258,10 @@ fn runOf(comptime T: type, gpa: std.mem.Allocator, io: std.Io, model: *Model, id
     defer gpa.free(report);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = cp, .data = std.mem.sliceAsBytes(cpu) });
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = gp, .data = std.mem.sliceAsBytes(gpu) });
-    if (T == f32) try writeFloor(gpa, io, dir, ids, cpu);
+    if (T == f32) {
+        try writeFloor(gpa, io, dir, ids, cpu);
+        try writeContract(gpa, io, dir, result.normalized_rms_error, result.greedy_disagreements);
+    }
     const json = try std.json.Stringify.valueAlloc(gpa, result, .{});
     defer gpa.free(json);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = report, .data = json });
@@ -343,6 +355,31 @@ fn readFloor(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, ids: []const u
     const out = try gpa.alloc(f32, cells);
     @memcpy(std.mem.sliceAsBytes(out), bytes);
     return out;
+}
+
+const Contract = struct { nrms: f64 = 0, greedy: usize = 0 };
+
+/// The FP32 capture's own engine-vs-contract figures, carried beside the floor so the FP64 receipt retains them.
+fn writeContract(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, nrms: f64, greedy: usize) !void {
+    const path = try std.fs.path.join(gpa, &.{ dir, "contract.txt" });
+    defer gpa.free(path);
+    var buf: [128]u8 = undefined;
+    const text = try std.fmt.bufPrint(&buf, "{d}\n{d}\n", .{ nrms, greedy });
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = text });
+}
+
+fn readContract(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !?Contract {
+    const path = try std.fs.path.join(gpa, &.{ dir, "contract.txt" });
+    defer gpa.free(path);
+    const text = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(128)) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => return err,
+    };
+    defer gpa.free(text);
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    const nrms = std.fmt.parseFloat(f64, lines.next() orelse return error.ContractReferenceMismatch) catch return error.ContractReferenceMismatch;
+    const greedy = std.fmt.parseInt(usize, lines.next() orelse return error.ContractReferenceMismatch, 10) catch return error.ContractReferenceMismatch;
+    return .{ .nrms = nrms, .greedy = greedy };
 }
 
 /// The FP64 teacher's verdict is the floor-relative band; the absolute 1% remains a reported trip-wire.
