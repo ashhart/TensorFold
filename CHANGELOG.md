@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CUDA on integrated GPUs such as the GB10: every other synchronous device-to-host copy now stages through the same pinned buffer as `download` (54 copies in families, tools and tests); discrete cards keep the direct copy, and the bytes copied are unchanged (#2289, for #2102).
+
 - Each native model discovery entry publishes loaded capability booleans, read through the same flag accessor as request admission (#2139, #2157).
 
 - Tests: `tf-qwen27-reuse`'s yielded-pass check follows the host's lane loop on M5 chips, comparing state only where the rounds match and tokens always (#2343).
