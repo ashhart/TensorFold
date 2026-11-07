@@ -305,7 +305,12 @@ pub fn run(context: *const cuda.Context, gpa: std.mem.Allocator, world: u32, opt
     };
     for (0..world) |i| {
         ranks[i] = group.rank(@intCast(i));
-        threads[i] = try std.Thread.spawn(.{}, Wrap.go, .{ &ranks[i], context, ctx, &errs[i] });
+        threads[i] = std.Thread.spawn(.{}, Wrap.go, .{ &ranks[i], context, ctx, &errs[i] }) catch |err| {
+            // the ranks already running hold this frame's group: stop them and wait before returning
+            group.base.aborted.store(true, .release);
+            for (threads[0..i]) |t| t.join();
+            return err;
+        };
     }
     for (threads[0..world]) |t| t.join();
     for (errs[0..world]) |e| if (e) |err| return err;
