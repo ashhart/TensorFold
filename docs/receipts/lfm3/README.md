@@ -1,5 +1,32 @@
 # LFM3 Metal qualification receipts
 
+## Verified live-main rebase for #1502
+
+The branch is now rebased onto upstream main `342b2379a01e807e05bd8ebd8af65d4608007b5e`.
+Only the vision change and its release/qualification documentation were replayed; the retired #1514 text dependency was not replayed.
+The #1502 release note is under Unreleased, separate from the historical 1.2.4 text-port entry.
+
+## Earlier d7-main M4 qualification
+
+After #1514 landed, the vision commit was replayed alone onto main
+`d7a443b00196dae3082372f1b9046ec376908467`; the retired text dependency was not replayed.
+The code replay is `b79b0662df34ffeb6263f5537de11dcff779d02c`.
+Its API-doc conflict preserves both LFM3's declared stepped-prefill capability and main's newer Flash Next/SRPT scheduling semantics.
+
+On the M4 Pro / 48 GiB, that source passed 119/119 build steps and 264 tests, with three skipped.
+The native server, vision diagnostic, both exactness diagnostics and Metal contract runner built;
+the actual native `--version` and `--help` exited zero.
+`tf-kernel-contract --only LFM3` passed 74/74 kernels, caught 52/52 planted controls and reported zero limit problems.
+The M4 explicitly skipped tensor-unit tiled probes. These are operator/launch checks, not a fresh real-weight or performance receipt.
+
+```sh
+zig build test-lfm3-host test-kernel-contract tf-kernel-contract tf-lfm3-vision tf-lfm3-exact tf-lfm3-nax-exact native -Dcpu=apple_m1 -j2 --summary all
+./zig-out/bin/tf-kernel-contract --only LFM3
+```
+
+Ash's M5 Ultra comparison of main against the rebased head remains owed before the landing queue.
+The older M5/model receipts below retain their recorded source and binary identities; they do not qualify this rebase.
+
 ## Current M5 long-context checks
 
 [`current-m5-long-context.json`](current-m5-long-context.json) records all 26 completed requests:
