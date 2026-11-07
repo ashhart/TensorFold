@@ -51,10 +51,10 @@ fn one(r: *Rows, name: Name, kind: file.Kind, ext: []const u8, at: u32, ranges: 
     return o.trailer.payload + o.trailer.meta + @sizeOf(file.Trailer);
 }
 
-/// Whether a family refused what a file holds (words that differ, a size or a range that does not fit its blank).
+/// Whether a family refused what a file holds (words that differ, of another world or layout; a size or range unfit).
 fn refused(err: anyerror) bool {
     return switch (err) {
-        error.SnapshotSize, error.BadKeptRange, error.DiskWords, error.KeptWordsDiffer => true,
+        error.SnapshotSize, error.BadKeptRange, error.DiskWords, error.KeptWordsDiffer, error.DiskWorld, error.DiskLayout => true,
         else => false,
     };
 }
