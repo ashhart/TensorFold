@@ -86,6 +86,11 @@ pub fn compileHost(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.M
     b.step("test-qwen-dense-geometry-host", "Dense config and full-size packed headers without shaders or a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = engine, .filters = dense_names.items })).step);
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
     const host = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_served.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "engine_api", .module = api } } });
+    // pair refusals are decided before a model loads: the host's own tests run on CPU alone
+    const served = b.step("test-qwen27-served-host", "Rank 1's named refusal and the pair's --vision refusal, no shaders or GPU");
+    const served_run = b.addRunArtifact(b.addTest(.{ .root_module = host }));
+    served_run.has_side_effects = true; // a rerun must re-execute the tests, not replay a cached pass
+    served.dependOn(&served_run.step);
     const floor_logs = b.createModule(.{ .root_source_file = b.path("zig/qwen27_floor_logs.zig"), .target = b.graph.host });
     const floor_root = b.createModule(.{ .root_source_file = b.path("zig/qwen27_floor_entry_host.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "qwen27_served", .module = host }, .{ .name = "tensorfold", .module = engine }, .{ .name = "qwen_weights_diagnostics", .module = floor_logs } } });
     if (b.graph.host.result.os.tag == .macos) floor_root.linkSystemLibrary("objc", .{});
