@@ -135,6 +135,7 @@ pub const kernels = [_]Kernel{
     .{ .name = "window_rows", .flags = &.{"-O3"} }, // ours: window attention at head dims 256 and 512 (cuda/window_attention.zig)
     .{ .name = "window_pages", .flags = &.{"-O3"} }, // ours: window_rows.cuh over paged caches (Dory, Gemma 4, Spark)
     .{ .name = "moe_glue", .flags = &.{"-O3"} }, // ours: sigmoid top-k and the weighted combine (cuda/moe_glue.zig)
+    .{ .name = "mla", .flags = &.{"-O3"} }, // ours: MLA, 64 roped columns and 128-wide heads, on GLM's chunk bodies
     .{ .name = "dense_rows", .flags = &.{"-O3"} }, // ours: bf16 rows times weight rows into fp32 (cuda/dense_rows.zig)
     .{ .name = "modelopt_pack", .flags = &.{"-O3"} }, // ours: ModelOpt tensors into the lane, prompt and expert layouts
     .{ .name = "glm_kda", .flags = &.{ "-O3", "--fmad=false" } }, // GLM: the Python family's glm5_next/cuda/kda.cu
