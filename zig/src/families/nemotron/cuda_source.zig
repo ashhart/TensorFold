@@ -40,6 +40,7 @@ pub const Source = struct {
     ops: kern.Ops,
     files: std.ArrayList(Mapped) = .empty,
     slots: [slot_count]dio.Buffer = undefined,
+    stages: [slot_count]cuda.copy_source.Stage = @splat(.{}), // integrated read slots own their DMA bytes through failure
     pinned: [slot_count]?cuda.HostBuffer = @splat(null), // a discrete card's slots, page-locked: copies run at the link's speed
     copied: [slot_count]?cuda.Event = @splat(null), // a page-locked slot's last copy: its next read waits for that, not the stream
     pending: [slot_count]?Pending = @splat(null),
@@ -49,6 +50,13 @@ pub const Source = struct {
     asked: [slot_count]u64 = @splat(0), // the order reads were asked in: copies follow it without a ring
     next: u64 = 0,
 
+    /// Private operation access exists only in host tests of the real family adapter.
+    pub const Testing = if (@import("builtin").is_test) struct {
+        pub const finish = Source.finish;
+        pub const settle = Source.settle;
+        pub const freeSlots = Source.freeSlots;
+    } else void;
+
     /// Page-aligned slots; on a discrete card page-locked, each with an event its copies record.
     pub fn init(gpa: std.mem.Allocator, ops: kern.Ops) !Source {
         var s: Source = .{ .gpa = gpa, .ops = ops };
@@ -56,7 +64,15 @@ pub const Source = struct {
         errdefer s.freeSlots(made);
         while (made < slot_count) : (made += 1) {
             if (!ops.k.discrete) {
-                s.slots[made] = try gpa.alignedAlloc(u8, .fromByteUnits(dio.alignment), slot_bytes);
+                const bytes = s.stages[made].take(ops.k.d, slot_bytes) catch |err| {
+                    s.stages[made].deinit();
+                    return err;
+                };
+                if (@intFromPtr(bytes.ptr) % dio.alignment != 0) {
+                    s.stages[made].deinit();
+                    return error.UnalignedPinnedSlot;
+                }
+                s.slots[made] = @alignCast(bytes);
                 continue;
             }
             var h = try cuda.HostBuffer.alloc(ops.k.d, slot_bytes);
@@ -94,6 +110,10 @@ pub const Source = struct {
     }
 
     fn freeSlots(s: *Source, made: usize) void {
+        if (!s.ops.k.discrete) {
+            for (s.stages[0..made]) |*stage| stage.deinit();
+            return;
+        }
         for (s.slots[0..made], s.pinned[0..made], s.copied[0..made]) |b, *p, *e| {
             if (e.*) |*x| {
                 x.synchronize() catch {};
@@ -105,6 +125,7 @@ pub const Source = struct {
 
     /// Slot k's last copy has read it, so new bytes can land there.
     fn settle(s: *Source, k: usize) !void {
+        if (!s.ops.k.discrete) return s.stages[k].wait();
         if (s.copied[k]) |e| try e.synchronize();
     }
 
@@ -216,6 +237,10 @@ pub const Source = struct {
     /// Page-locked slots record their copy event; pageable slots wait for the driver to stage their bytes.
     fn finish(s: *Source, k: usize, p: Pending, got: []u8) !void {
         if (got.len == 0) return;
+        if (!s.ops.k.discrete) {
+            const from = @intFromPtr(got.ptr) - @intFromPtr(s.slots[k].ptr);
+            return s.stages[k].copyRangeTo(.{ .d = s.ops.k.d, .ptr = p.dst, .len = got.len, .borrowed = true }, 0, from, got.len, s.ops.s);
+        }
         try cuda.copy_source.enqueue(s.ops.k.d, p.dst, got, s.ops.s);
         if (s.copied[k]) |e| return e.record(s.ops.s);
         try s.ops.s.synchronize();

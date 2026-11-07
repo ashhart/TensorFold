@@ -122,10 +122,20 @@ pub fn stageBytes(g: Geometry) usize {
 }
 
 /// `into` is the engine or a drafter's weights: anything with `alloc(bytes)` out of its `arena`.
+pub const UploadSource = cuda.checkpoint_upload.Source(core.direct_io);
+
 pub fn upload(into: anytype, bytes: []const u8) !u64 {
     const p = try into.alloc(bytes.len);
-    try into.arena.upload(p - into.arena.ptr, bytes);
+    try uploadAt(into, into.arena, p - into.arena.ptr, bytes);
     return p;
+}
+
+/// A target's mapped tensors may read straight into owned pinned storage; other inputs keep ordinary custody.
+pub fn uploadAt(into: anytype, destination: DeviceBuffer, offset: usize, bytes: []const u8) !void {
+    if (comptime @hasField(@TypeOf(into.*), "weight_source")) if (into.weight_source) |source_| {
+        if (try source_.upload(destination, offset, bytes)) return;
+    };
+    try destination.upload(offset, bytes);
 }
 
 fn put(into: anytype, t: core.checkpoint.Tensor) !u64 {
@@ -161,12 +171,12 @@ fn normVec(e: *Engine, ck: *core.Checkpoint, shift: bool, comptime fmt: []const 
 }
 
 /// Raw words, scales and biases staged in order; each part's device pointer.
-fn stageParts(stage: *DeviceBuffer, parts: [3][]const u8) ![3]u64 {
+fn stageParts(e: *Engine, stage: *DeviceBuffer, parts: [3][]const u8) ![3]u64 {
     var raw: [3]u64 = undefined;
     var at: usize = 0;
     for (parts, &raw) |p, *r| {
         if (at + p.len > stage.len) return error.StageTooSmall;
-        try stage.upload(at, p);
+        try uploadAt(e, stage.*, at, p);
         r.* = stage.ptr + at;
         at += p.len;
     }
@@ -193,7 +203,7 @@ pub fn linear(e: *Engine, into: anytype, ck: *core.Checkpoint, stage: *DeviceBuf
     for (specs, &parts) |p, *part| part.* = (try ck.expect(try std.fmt.bufPrint(&buf, "{s}{s}.{s}", .{ prefix, name, p[0] }), p[1], &.{ n, p[2] })).bytes;
     const served = servedBits(bits);
     if (served == 4) return packLinear(e, into, stage, parts, n, k);
-    const raw = try stageParts(stage, parts);
+    const raw = try stageParts(e, stage, parts);
     const l = AffineN.layout(n, k, served);
     const q: AffineN = .{ .w = try into.alloc(l.words), .s = try into.alloc(l.scales), .b = try into.alloc(l.scales), .n = n, .k = k, .npad = l.npad, .bits = served };
     try e.wide.packWords(e.stream, raw[0], bits, n, k, q.w);
@@ -205,7 +215,7 @@ pub fn linear(e: *Engine, into: anytype, ck: *core.Checkpoint, stage: *DeviceBuf
 
 /// MLX affine-4 parts (words, scales, biases) of an n-by-k projection, staged and packed into `into`'s arena.
 pub fn packLinear(e: *Engine, into: anytype, stage: *DeviceBuffer, parts: [3][]const u8, n: usize, k: usize) !Proj {
-    const q = try pack4(e, into, try stageParts(stage, parts), n, k);
+    const q = try pack4(e, into, try stageParts(e, stage, parts), n, k);
     try e.stream.synchronize(); // the next projection's staging overwrites this one's
     return .{ .a4 = q };
 }
@@ -226,7 +236,7 @@ pub fn linearSlice(e: *Engine, into: anytype, ck: *core.Checkpoint, stage: *Devi
         for (0..n) |r| @memcpy(part.*[r * cols * p[3] ..][0 .. cols * p[3]], t.bytes[(r * p[2] + from / per) * p[3] ..][0 .. cols * p[3]]);
     }
     defer for (parts) |p| e.gpa.free(p);
-    const q = try pack4(e, into, try stageParts(stage, .{ parts[0], parts[1], parts[2] }), n, len);
+    const q = try pack4(e, into, try stageParts(e, stage, .{ parts[0], parts[1], parts[2] }), n, len);
     try e.stream.synchronize(); // the next projection's staging overwrites this one's
     return q;
 }
@@ -276,7 +286,7 @@ fn expertTable(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer, prefix: [
         part.* = (try ck.expect(try std.fmt.bufPrint(&buf, "{s}{s}.{s}", .{ prefix, name, p[0] }), p[1], if (count == 0) one else stacked)).bytes;
     }
     if (bits == 4) return packTable(e, stage, parts, count, n, k, out, m, mi);
-    const raw = try stageParts(stage, parts);
+    const raw = try stageParts(e, stage, parts);
     const Pack = struct {
         fn run(owner: *Engine, w: u64, sc: u64, bias: u64, tmp: [2]u64, dst: u64, chunk_count: usize, nn: usize, kk: usize, mm: usize, index: usize) !void {
             try owner.experts3.packInto(&owner.experts, owner.stream, w, sc, bias, tmp, dst, chunk_count, nn, kk, mm, index);
@@ -288,7 +298,7 @@ fn expertTable(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer, prefix: [
 
 /// MLX affine-4 parts of `count` stacked experts (one at count 0), staged and packed as `out`'s mi-th table of m.
 pub fn packTable(e: *Engine, stage: *DeviceBuffer, parts: [3][]const u8, count: usize, n: usize, k: usize, out: u64, m: usize, mi: usize) !void {
-    const raw = try stageParts(stage, parts);
+    const raw = try stageParts(e, stage, parts);
     try e.experts.packInto(e.stream, raw[0], raw[1], raw[2], out, @max(count, 1), n, k, m, mi);
     try e.stream.synchronize(); // the next table's staging overwrites this one's
 }
@@ -326,7 +336,7 @@ fn embedWords(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer, m: []const
     var buf: [160]u8 = undefined;
     const t = try ck.expect(try std.fmt.bufPrint(&buf, "{s}embed_tokens.weight", .{m}), .u32, &.{ g.vocab, g.hidden * bits / 32 });
     if (bits == wide) return put(e, t);
-    try stage.upload(0, t.bytes);
+    try uploadAt(e, stage.*, 0, t.bytes);
     const out = try e.alloc(g.vocab * g.hidden * wide / 8);
     try e.wide.widen(e.stream, stage.ptr, bits, g.vocab, g.hidden, out, wide);
     try e.stream.synchronize();
@@ -473,7 +483,7 @@ fn linearWide(e: *Engine, into: anytype, ck: *core.Checkpoint, stage: *DeviceBuf
         const t = try ck.expect(try std.fmt.bufPrint(&buf, "{s}{s}.{s}", .{ prefix, name, p[0] }), p[1], &.{ na, p[3] / (if (p[1] == .u32) @as(usize, 4) else 2) });
         const cut = try @import("cuda_wide.zig").base(e.gpa, t.bytes, n, p[3], p[2]);
         defer e.gpa.free(cut);
-        try stage.upload(at, cut);
+        try uploadAt(e, stage.*, at, cut);
         ptr.* = stage.ptr + at;
         at += cut.len;
     }

@@ -109,7 +109,9 @@ pub const Engine = struct {
     keeps: Keeps,
     /// Every weight and scratch buffer in one allocation: WDDM's launch cost grows with the allocation count.
     arena: DeviceBuffer,
+    weight_source: ?*weights.UploadSource = null,
     arena_at: usize = 0,
+    weight_bytes: usize = 0, // final packed weights, before scratch: the load receipt hashes this prefix
     /// Rows a verify forward takes at most, and a window's rows at most.
     verify_rows: usize,
     window_rows: usize,
@@ -210,6 +212,7 @@ pub const Engine = struct {
         e.rope_buf = null;
         e.window_rows = most_window;
         e.arena_at = 0;
+        e.weight_source = null;
         e.graphs = .empty;
         try @import("cuda_rope_table.zig").set(e, g.rope); // a YaRN config's table, before any weight or forward
         errdefer @import("cuda_rope_table.zig").free(e);
@@ -270,9 +273,14 @@ pub const Engine = struct {
             // each projection as stored, packed from here; freed before the server counts what streams can use
             var stage = try DeviceBuffer.alloc(d, weights.stageBytes(g));
             defer stage.free();
+            var source = try weights.UploadSource.open(gpa, d, &ck, @import("builtin").os.tag == .linux and !g.kinds.modelopt and try ctx.attribute(.integrated) != 0);
+            defer source.deinit();
+            e.weight_source = if (source.maps.items.len > 0) &source else null;
+            defer e.weight_source = null;
             try weights.load(e, &ck, &stage);
         }
         if (e.mo) |*m| try m.reserveParts(e);
+        e.weight_bytes = e.arena_at;
         try @import("cuda_engine_tail.zig").finish(e, io, started);
         return e;
     }

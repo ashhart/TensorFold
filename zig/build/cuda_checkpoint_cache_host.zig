@@ -1,6 +1,7 @@
 //! Checkpoint load cleanup and actual family load scopes, with no GPU dependency.
 const std = @import("std");
-pub fn steps(b: *std.Build, all: *std.Build.Step) void {
+pub fn steps(b: *std.Build, all: *std.Build.Step, cuda: *std.Build.Module, mods: anytype) void {
+    @import("weight_load.zig").host(b, cuda, mods, all);
     const step = b.step("test-cuda-load-cache-host", "Checkpoint cleanup and family load scopes without a GPU");
     for ([_][]const u8{ "zig/cuda_checkpoint_cache_host.zig", "zig/src/core/checkpoint_cache.zig", "zig/src/core/checkpoint_drop.zig", "zig/src/families/qwen4/load_cache.zig" }) |path| {
         const m = b.createModule(.{ .root_source_file = b.path(path), .target = b.graph.host, .link_libc = true });
