@@ -4,16 +4,16 @@ const limits = @import("limits.zig");
 
 const zero: limits.Usage = .{ .regs = 0, .static = 0, .bound = 0 };
 
-/// sm_121's usage is nvcc 13.3's (kernel-contract-limits, -Dsm=121); sm_80, 86, 89 and 120 are zero until measured.
+/// Usage zero (no nvcc 13.0 record yet); nvcc 13.3's five-SM receipts are in measurements/pending_133.zig.
 pub const cuda = [_]registry.CudaRecord{
-    // TODO(spark): sm_80, 86, 89 and 120 from a five-SM kernel-contract-limits run
-    .{ .launch = .{ .name = "ricursive_dflash2_attn tf_rcd_attn_part", .symbol = "tf_rcd_attn_part", .image = "ricursive_dflash2_attn", .threads = 256, .dynamic = 65536, .opt_in = true, .min_sm = 80 }, .usage = .{ zero, zero, zero, zero, .{ .regs = 60, .static = 0, .bound = 256 } } },
-    // TODO(spark): sm_80, 86, 89 and 120 from a five-SM kernel-contract-limits run
-    .{ .launch = .{ .name = "ricursive_dflash2_attn tf_rcd_attn_merge", .symbol = "tf_rcd_attn_merge", .image = "ricursive_dflash2_attn", .threads = 256, .min_sm = 80 }, .usage = .{ zero, zero, zero, zero, .{ .regs = 40, .static = 0, .bound = 256 } } },
-    // TODO(spark): sm_80, 86, 89 and 120 from a five-SM kernel-contract-limits run
-    .{ .launch = .{ .name = "ricursive_dflash2_attn tf_rcd_top32_part", .symbol = "tf_rcd_top32_part", .image = "ricursive_dflash2_attn", .threads = 1024, .min_sm = 80 }, .usage = .{ zero, zero, zero, zero, .{ .regs = 23, .static = 16384, .bound = 1024 } } },
-    // TODO(spark): sm_80, 86, 89 and 120 from a five-SM kernel-contract-limits run
-    .{ .launch = .{ .name = "ricursive_dflash2_attn tf_rcd_top32_merge", .symbol = "tf_rcd_top32_merge", .image = "ricursive_dflash2_attn", .threads = 1024, .min_sm = 80 }, .usage = .{ zero, zero, zero, zero, .{ .regs = 23, .static = 16384, .bound = 1024 } } },
+    // TODO(spark): fill from kernel-contract-limits
+    .{ .launch = .{ .name = "ricursive_dflash2_attn tf_rcd_attn_part", .symbol = "tf_rcd_attn_part", .image = "ricursive_dflash2_attn", .threads = 256, .dynamic = 65536, .opt_in = true, .min_sm = 80 }, .usage = .{ zero, zero, zero, zero, zero } },
+    // TODO(spark): fill from kernel-contract-limits
+    .{ .launch = .{ .name = "ricursive_dflash2_attn tf_rcd_attn_merge", .symbol = "tf_rcd_attn_merge", .image = "ricursive_dflash2_attn", .threads = 256, .min_sm = 80 }, .usage = .{ zero, zero, zero, zero, zero } },
+    // TODO(spark): fill from kernel-contract-limits
+    .{ .launch = .{ .name = "ricursive_dflash2_attn tf_rcd_top32_part", .symbol = "tf_rcd_top32_part", .image = "ricursive_dflash2_attn", .threads = 1024, .min_sm = 80 }, .usage = .{ zero, zero, zero, zero, zero } },
+    // TODO(spark): fill from kernel-contract-limits
+    .{ .launch = .{ .name = "ricursive_dflash2_attn tf_rcd_top32_merge", .symbol = "tf_rcd_top32_merge", .image = "ricursive_dflash2_attn", .threads = 1024, .min_sm = 80 }, .usage = .{ zero, zero, zero, zero, zero } },
 };
 
 test "ricursive DFlash2 attention CUDA: each launch is in the live registry once, at its kernel's threads" {
