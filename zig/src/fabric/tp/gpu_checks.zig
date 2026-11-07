@@ -25,6 +25,8 @@ pub const Ctx = struct {
     omit_p2p: bool = false,
     omitted: u32 = 0,
     baseline: ?Collective = null,
+    /// The communicator under test sums in rank order (`reference.reduce`'s order), so the reference is its answer.
+    rank_order: bool = false,
     oracle: cuda.DeviceBuffer,
 
     pub fn init(d: *const cuda.Driver, gpa: std.mem.Allocator, rank: u32, world: u32, max_bytes: usize) !Ctx {
@@ -82,7 +84,7 @@ pub const Ctx = struct {
 
     /// Above two ranks, the actual NCCL result is the reference, with the same in-place geometry.
     fn sumReference(c: *Ctx, n: usize, t: DType, offset: ?usize, input: cuda.abi.DevicePtr) !void {
-        if (c.world == 2 or t == .u8 or t == .i32 or t == .i64) return;
+        if (c.world == 2 or c.rank_order or t == .u8 or t == .i32 or t == .i64) return;
         const slow = c.baseline orelse return error.MissingNcclReference;
         const out = c.oracle.ptr + (offset orelse 0);
         if (offset) |skew| try c.oracle.uploadAsync(skew, c.mine(n), c.stream.handle);
