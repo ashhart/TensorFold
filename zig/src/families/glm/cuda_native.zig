@@ -254,7 +254,7 @@ fn openRank(a: StartArgs, set: ranks.Settings) !Loaded {
     errdefer _ = own.group.lib.api.ncclCommDestroy(own.group.comm);
     cuda.p2p_report.beforePeers(&diag, .{ .lib = &own.group.lib, .comm = comm, .later = true });
     own.progress.enter(.peer_warmup);
-    if (p.world > 1) try @import("cuda_warm_peers.zig").warm(io, ctx.d, &own.group, set.ring, &diag);
+    if (p.world > 1) try @import("cuda_warm_peers.zig").warm(io, ctx.d, &own.group, .of(set.split, set.ring), &diag);
     cuda.p2p_report.afterInit(&diag, .{ .lib = &own.group.lib, .comm = comm, .d = ctx.d, .later = true });
     const cap = capacity(o.context);
     own.progress.enter(.weights);
