@@ -1,0 +1,7 @@
+# The Motion Previs tab's analysis packages, installed into their own environment ($PREFIX/motion-venv) by
+# scripts/setup-motion.sh, not into the Studio's: MediaPipe brings opencv-contrib-python, which would replace the
+# Studio's own cv2. Every one has a wheel for macOS arm64 and for Linux aarch64 (manylinux_2_28).
+mediapipe==1.1.0           # Apache-2.0: Pose Landmarker (pose, the OpenPose skeleton, the subject mask of the camera solve)
+opencv-contrib-python==5.0.0.93  # Apache-2.0: the camera solve and the skeleton drawing; the build MediaPipe asks for
+onnxruntime==1.31.0        # MIT: runs Depth-Anything-small's ONNX file on the processor
+numpy>=2,<3
