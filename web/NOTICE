@@ -27,3 +27,5 @@ Changes for the TensorFold 1.2.5 Web delivery:
 - Split HTTP features, process telemetry, benchmark modes, lesson handling and report rendering into focused modules.
 - Preserve public routes, stored formats, access checks, engine ownership and the original behavior tests.
 - Remove redundant font downloads and comment blocks, and commit the locked dependencies and rebuilt page.
+
+The T578b changes arrange chat, Models, Settings and compute controls as the desktop app, defer Hub discovery, bypass engine RPC proxies, restrict the native catalog and refresh the stand-in version.

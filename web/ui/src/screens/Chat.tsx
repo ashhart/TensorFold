@@ -1,13 +1,13 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api, authHeaders, download, num, type ConversationRow } from '../api'
 import { copyText } from '../shareCard'
 import type { Ctx } from '../ctx'
 import { ModelLogo } from '../brandLogo'
-import { showSub, subOf, useSub } from '../route'
+import { showSub, useSub } from '../route'
 import Markdown from '../Markdown'
 import { ReplayForm, ReplyCompare, SpeedupCheck } from './ChatReplay'
 import { Saves } from '../saves'
-import { ConversationList, namesOf, sameQuestions } from './ChatList'
+import { namesOf, sameQuestions } from './ChatList'
 import { PRESETS, PresetEditor, sampling, usePresets, type Preset } from './ChatPresets'
 import { sseEvents } from '../sse'
 import { drawSeed } from '../seed'
@@ -16,15 +16,12 @@ import { LivePills, WebSources, rate, secs, type Cortheon, type Live } from './C
 import { check, checkJson, DEFAULT_WORKSHOP, isLocal, parseTools, runLocal, toolChoice, WorkshopPanel, type Schema, type Workshop } from './ChatWorkshop'
 
 type Outcome = 'done' | 'stopped' | 'interrupted' | 'error' | 'length'
-// each reply keeps what wrote it and how: the model, the engine, the thinking setting and budget
-// the workshop's messages: an assistant's tool calls (each checked against its tool), a tool's result, a JSON check
+// Replies retain their model and request settings; tool calls retain schema checks and returned results.
 type Call = { id: string; name: string; arguments: string; check?: string }
 // the settings a reply was written with, recorded on it: a replay or a speed-up check uses these, not today's options
 export type Request = { thinking: 'default' | 'on' | 'off'; budget: number | null; system: string; max_tokens: number | null; temperature: number | null; top_p?: number | null; top_k?: number | null; min_p?: number | null; seed?: number | null; seed_drawn?: boolean; stop?: string[] }
 type Msg = { role: 'user' | 'assistant' | 'tool'; content: string; request?: Request; tool_calls?: Call[]; tool_call_id?: string; name?: string; json?: { ok: boolean; detail: string }; reasoning?: string; model?: string; engine?: string; thinking?: string; preset?: string; outcome?: Outcome; error?: string; stats?: Stats; at?: number; cortheon?: Cortheon }
-// `timing`: 'engine' when the reply's `tensorfold` block gave the speed and the first-token time, 'page' when this
-// page's clock did (other engines, or the Python line). `measured` says who counted the tokens.
-// tokens and tps only when the engine counted them; events: what the page received, each possibly several tokens
+// Keep engine token counts apart from stream events, and label page-clock timings separately.
 type Stats = { tokens: number | null; tps: number | null; events?: number; ttft: number; prompt?: number; cached?: number; reasoning?: number; measured: 'engine' | 'counted'
   timing?: 'engine' | 'page'; budget?: number; sha?: string; drafts?: boolean; acceptance?: number; perRound?: number; prefill?: number }
 type Runtime = { tokens_per_second?: number; time_to_first_token?: number; token_sha?: string; drafts?: boolean; acceptance_rate?: number | null
@@ -33,10 +30,14 @@ type Runtime = { tokens_per_second?: number; time_to_first_token?: number; token
 const STORE = 'tfs-chat-v2'
 const STORE_V1 = 'tfs-chat'                 // the first release's key: same shape, messages without a model name
 type Stored = { msgs: Msg[]; thinking: 'default' | 'on' | 'off'; budget?: number }
-// Thinking budgets offered, in tokens; 0 lets the model think as long as it wants. Sent as `thinking_budget`, which
-// TensorFold honours per request; servers that do not know the field ignore it.
+// Thinking budgets use the request's thinking_budget field; zero allows unlimited reasoning.
 const BUDGETS = [0, 1024, 2048, 4096, 8192]
 const DEFAULT_BUDGET = 2048
+const STARTERS = [
+  ['Short story', "Write a short story, about 300 words, about a lighthouse keeper's last night on the job."],
+  ['Explain a mortgage rate cap', 'Explain, in plain words, what a mortgage rate cap is and when it matters.'],
+  ['Photo renaming script', 'Write a Python script that renames the photos in a folder by the date they were taken.'],
+]
 
 function load(): Stored | null {
   try {
@@ -78,39 +79,11 @@ function Reply({ text, live, onCopy }: { text: string; live: boolean; onCopy: (t
   return shown ? <Markdown text={shown} onCopy={onCopy} /> : null
 }
 
-const STARTERS = [
-  "Write a short story, about 300 words, about a lighthouse keeper's last night on the job.",
-  'Explain, in plain words, what a mortgage rate cap is and when it matters.',
-  'Write a Python script that renames the photos in a folder by the date they were taken.',
-]
-
-export default function Chat({ engine, settings, toast, refreshEngine }: Ctx) {
+export default function Chat({ engine, settings, toast, refreshEngine, conversations }: Ctx) {
   const stored = useRef(load())
   const [msgs, setMsgs] = useState<Msg[]>([])
-  // the conversations TensorFold Web keeps: the one open here, the list on the side, a search over them
-  const [convId, setConvId] = useState<string | null>(null)
-  const [convs, setConvs] = useState<ConversationRow[]>([])
-  const [q, setQ] = useState('')
-  const opened = useRef<unknown[] | null>(null)            // the messages as last opened: not saved back unchanged
-  const [more, setMore] = useState(false)                 // older conversations beyond the first page
-  // each list asked (a search, a refresh) is a new generation: a page that comes back after it belongs to the old list
-  const listGen = useRef(0)
-  const shownGen = useRef(0)                              // the generation of the list on screen
-  const refreshList = useCallback((query = q) => {
-    const gen = ++listGen.current
-    return api.conversations(query).then((r) => {
-      if (gen !== listGen.current) return
-      shownGen.current = gen; setConvs(r.conversations); setMore(!!r.more)
-    }).catch(() => {})
-  }, [q])
-  const loadMore = () => {
-    const gen = listGen.current
-    if (shownGen.current !== gen) return Promise.resolve()   // a newer list is on its way: its offsets are not these
-    return api.conversations(q, convs.filter((c) => !c.pinned).length).then((r) => {   // the offset counts the unpinned
-      if (gen !== listGen.current) return
-      setConvs((old) => [...old, ...r.conversations.filter((c) => !old.some((o) => o.id === c.id))]); setMore(!!r.more)
-    }).catch((e) => toast(String(e), 'bad'))
-  }
+  const { convId, setConvId, convs, refreshList } = conversations
+  const opened = useRef<unknown[] | null>(null)
   const [text, setText] = useState('')
   const [thinking, setThinking] = useState<'default' | 'on' | 'off'>(stored.current?.thinking ?? settings?.thinking ?? 'default')
   const [budget, setBudget] = useState<number>(stored.current?.budget ?? DEFAULT_BUDGET)
@@ -145,7 +118,6 @@ export default function Chat({ engine, settings, toast, refreshEngine }: Ctx) {
   }, [msgs])
 
   useEffect(() => {
-    const wanted = subOf('chat')                         // read before anything rewrites the address
     ;(async () => {
       const old = stored.current
       if (old?.msgs?.length) {
@@ -154,9 +126,7 @@ export default function Chat({ engine, settings, toast, refreshEngine }: Ctx) {
           localStorage.removeItem(STORE); stored.current = null
         } catch {                                                  }
       }
-      const r = await api.conversations().catch(() => ({ conversations: [] as ConversationRow[] }))
-      setConvs(r.conversations)
-      if (r.conversations[0] && !wanted) openConversation(r.conversations[0].id)
+      refreshList()
     })()
   }, [])
   useSub('chat', (id) => { openConversation(id) })          // #chat/<conversation>
@@ -166,12 +136,7 @@ export default function Chat({ engine, settings, toast, refreshEngine }: Ctx) {
     addEventListener('hashchange', put)
     return () => removeEventListener('hashchange', put)
   }, [convId])
-  // saved by TensorFold Web while a reply streams too, so a reload keeps what arrived; the first message creates it.
-  // A change is saved within 800 ms, and at least every 3 s while a reply keeps changing it; switching conversation
-  // sends what is pending first. Saves go out in order on one queue per conversation, each on the revision the server
-  // gave the last (saves.ts): one made on an older revision is refused, never written. `convGen` numbers what the page
-  // shows: it moves only when other messages replace the shown ones, so a save or a creation of the conversation that
-  // was shown never reaches the one shown after it.
+  // Save streamed replies on one revision queue; generation guards keep late saves off a newly opened conversation.
   type SaveJob = { body: Record<string, unknown>; convId: string | null; gen: number }
   const pending = useRef<SaveJob | null>(null)
   const lastSave = useRef(0)
@@ -199,7 +164,6 @@ export default function Chat({ engine, settings, toast, refreshEngine }: Ctx) {
     const t = setTimeout(() => { if (pending.current === job) { pending.current = null; void saveNow(job) } }, wait)
     return () => clearTimeout(t)
   }, [msgs, thinking, budget, preset, ws])
-  useEffect(() => { const t = setTimeout(() => refreshList(q), 250); return () => clearTimeout(t) }, [q])
   useEffect(() => {                                        // the composer grows with the text, up to its limit
     const el = input.current
     if (!el) return
@@ -225,7 +189,6 @@ export default function Chat({ engine, settings, toast, refreshEngine }: Ctx) {
     if (!repo || repo.startsWith('living:') || !engine?.owned) { setLearnsHere(false); return }
     api.living().then((v) => setLearnsHere(!v.teachable && v.bases.includes(repo))).catch(() => setLearnsHere(false))
   }, [engine?.model_repo, engine?.owned])
-  const destination = engine?.engine_url ?? 'the engine'
 
   // the conversation as the API takes it: tool calls and tool results in OpenAI's shape
   const toApi = (list: Msg[]) => [...(preset.system ? [{ role: 'system', content: preset.system }] : []), ...list.map((m) =>
@@ -464,24 +427,18 @@ export default function Chat({ engine, settings, toast, refreshEngine }: Ctx) {
   const teachThis = (text: string) => { try { sessionStorage.setItem('tfs:teach-text', text) } catch {                  } location.hash = '#teach' }
   const copy = async (t: string) => { try { await copyText(t); toast('Copied') } catch { toast('The browser refused the clipboard', 'bad') } }
   const last = [...msgs].reverse().find((m) => m.role === 'assistant' && m.stats)
-  // without the engine's usage figures the page only counts stream events, which are not tokens: no count of
-  // tokens and no speed is claimed then
+  // Stream events are not token counts and cannot establish a token rate.
   const amount = (st: Stats) => st.measured === 'engine' ? `${num(st.tokens)} tokens${st.tps != null ? `, ${Math.round(st.tps)} tok/s` : ''}` : `${num(st.events ?? st.tokens)} stream events`
-  const where = engine?.managed === false ? `the engine at ${destination}` : 'the engine on this machine'
   const badge = (m: Msg) => m.outcome === 'stopped' ? 'stopped by you' : m.outcome === 'interrupted' ? 'connection lost before the end' : m.outcome === 'error' ? `error: ${m.error ?? 'unknown'}` : m.outcome === 'length' ? 'reached the reply limit' : null
 
   return (
     <section className="chatpage">
-      <div className="head" style={{ marginBottom: 14 }}><div><h1>Chat</h1><p>{engine?.managed === false ? <>Messages go to the engine at <code>{destination}</code> and nowhere else.</> : 'Everything you write stays on this machine.'}</p></div>
-        <div className="actions"><button className="btn" onClick={() => newConversation()}>New conversation</button></div></div>
       {engine?.status === 'unauthorized' && <div className="notice">The engine answers but refuses the API key this TensorFold Web holds. Enter the engine's key in <a href="#settings">Settings</a>, or restart the engine so it takes the new one.</div>}
       {!ready && engine?.status !== 'unauthorized' && <div className="notice info">No model is running yet. Start one from <a href="#models">Models</a>.</div>}
       {error && <div className="notice bad">{error}</div>}
       {saveError === 'failed' && <div className="notice">TensorFold Web did not save the conversation; it is tried again at the next change.</div>}
       {saveError === 'conflict' && <div className="notice">This conversation was changed elsewhere (another page, or a replay) since this page read it, so it is no longer saved from here. {convId && <button className="btn sm" onClick={() => openConversation(convId, true)}>Reopen it</button>} to see the latest and go on; what this page holds and the server lacks is lost.</div>}
       <div className="chatwrap">
-      <ConversationList convs={convs} more={more} loadMore={loadMore} convId={convId} q={q} setQ={setQ} open={(id) => openConversation(id)} refresh={() => refreshList()} toast={toast}
-        onDeleted={(id) => { if (id === convId) newConversation(true) }} />
       <div className="chat">
         {convId && (() => { const c = convs.find((x) => x.id === convId); const family = sameQuestions(convs, convId); const names = namesOf(c ? [c, ...family] : family); return <div className="convbar">
           <b className="ctitle" title={c?.title}>{c?.title ?? 'This conversation'}</b>
@@ -512,6 +469,7 @@ export default function Chat({ engine, settings, toast, refreshEngine }: Ctx) {
           </span>
         </div>
         {options && !checking && !comparing && <div className="bar options" aria-label="Options">
+          <select className="sel" value="" aria-label="Prompt ideas" disabled={!ready} onChange={(e) => { if (e.target.value) send(e.target.value) }}><option value="">Prompt ideas…</option>{STARTERS.map(([label, prompt]) => <option key={label} value={prompt}>{label}</option>)}</select>
           <select className="sel" value={thinking} onChange={(e) => setThinking(e.target.value as typeof thinking)} aria-label="Thinking">
             <option value="default">Thinking: model default</option><option value="on">Thinking: on</option><option value="off">Thinking: off</option>
           </select>
@@ -535,14 +493,12 @@ export default function Chat({ engine, settings, toast, refreshEngine }: Ctx) {
         <div className="msgs" ref={box} hidden={!!comparing} onScroll={(e) => { const el = e.currentTarget; stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40 }}>
           {!msgs.length ? (
             <div className="empty">
-              <h2>{ready ? `Ask ${engine?.model_name ?? model} anything` : 'Nothing to talk to yet'}</h2>
-              <p>{ready ? `Replies are written by ${where}; nothing leaves it. Try one of these, or type your own.` : settings?.model && engine?.managed !== false ? `${settings.model.split('/').pop()} was the last model served here.` : 'Start a model from Models; the conversation happens here.'}</p>
+              <span className="sr-only">Start a conversation</span>
               {!ready && settings?.model && engine?.managed !== false && engine?.status !== 'starting' && <button className="btn primary" disabled={starting} onClick={async () => {
                 setStarting(true)
                 try { await api.start({ model: settings.model! }); await refreshEngine(); toast('Starting the model') } catch (e) { toast(String(e), 'bad') } finally { setStarting(false) }
               }}>{starting ? 'Starting…' : `Start ${settings.model.split('/').pop()}`}</button>}
               {engine?.status === 'starting' && <p className="small muted">Loading {engine.model ?? 'the model'}…</p>}
-              {ready && <div className="starters">{STARTERS.map((s) => <button key={s} type="button" onClick={() => send(s)}>{s}</button>)}</div>}
             </div>
           ) : (
             <div className="thread">

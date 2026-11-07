@@ -1,6 +1,4 @@
-// The Chat's list of conversations: pinned ones first, then grouped by date, by folder or by model; each with a
-// "⋯" menu to pin, rename, move to a folder or delete. What is done with the open conversation (check the speed-up,
-// replay, compare, export) sits above it, in the conversation itself.
+// Sidebar conversations support date, folder and model groups; replay and export stay in the open conversation.
 import { useEffect, useRef, useState } from 'react'
 import { api, type ConversationRow, type ConversationFolder } from '../api'
 import type { Ctx } from '../ctx'

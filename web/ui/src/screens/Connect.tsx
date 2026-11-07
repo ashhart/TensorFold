@@ -75,7 +75,7 @@ export default function Connect({ engine, settings, saveSettings, refreshSetting
   const place = where === 'away' ? 'on another computer' : 'on this machine'
   return (
     <section>
-      <div className="head"><div><h1>Connect your tools</h1><p>Use your AI in the apps you already have: say where the app runs, pick it, copy its settings.</p></div></div>
+      <div className="head"><div><h2>Use your model in other tools</h2><p>Choose an app and copy its API settings.</p></div></div>
       {err && <div className="notice bad">{err}</div>}
       {info.key_pending_restart && where === 'here' && <div className="notice">A new key is set, but the running engine still uses the one it was started with. Tools on this machine keep working with that one until the engine restarts (Monitor).</div>}
 

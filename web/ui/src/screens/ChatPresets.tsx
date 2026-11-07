@@ -1,5 +1,4 @@
-// Chat presets: a system prompt and the sampling, chosen per conversation. The built-in ones ship with the page;
-// a person's own are kept on TensorFold Web, so every browser and device that opens it sees the same list.
+// Built-in presets ship with the UI; personal presets live on Web so browsers share them.
 import { useEffect, useState, type ReactNode } from 'react'
 import { api, ApiError, type ChatPreset } from '../api'
 import type { Ctx } from '../ctx'

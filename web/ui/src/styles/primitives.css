@@ -14,46 +14,9 @@ a{color:var(--accent)}
 
 
 .app{display:grid;grid-template-columns:232px minmax(0,1fr);min-height:100vh}
-aside{background:var(--sidebar-surface);border-right:0;padding:18px 12px 14px;display:flex;flex-direction:column;gap:6px;position:sticky;top:0;height:100vh}
-.brand{display:flex;align-items:center;gap:10px;padding:2px 6px 16px}
-.brand img{width:28px;height:28px;border-radius:6px}
-.brand .wordmark{font-weight:700;font-size:16px;line-height:1.1;letter-spacing:-.02em}
-.brand small{display:block;font-size:11.5px;color:var(--ink3);font-weight:500}
-.nav{display:flex;flex-direction:column;gap:2px}
-.nav a{display:flex;align-items:center;gap:10px;text-decoration:none;padding:8px 10px;border-radius:var(--radius-s);color:var(--ink2);font-weight:500}
-.nav a:hover{background:var(--sunken);color:var(--ink)}
-.nav a[aria-current="page"]{background:var(--surface-hover);color:var(--ink);box-shadow:none}
-.nav a kbd{margin-left:auto;font-size:11px;color:var(--ink3);border:1px solid var(--line);border-radius:5px;padding:0 5px;line-height:16px}
-.nav svg{width:18px;height:18px;flex:none;stroke:currentColor;fill:none;stroke-width:1.75;stroke-linecap:round;stroke-linejoin:round}
-.palette-hint{display:flex;align-items:center;gap:8px;margin:8px 0 0;padding:7px 10px;border:1px dashed var(--line);border-radius:var(--radius-s);background:transparent;color:var(--ink3);font-size:12.5px;width:100%;text-align:left;white-space:nowrap}
-.palette-hint:hover{border-color:var(--ink3);color:var(--ink2)}
-.palette-hint kbd{margin-left:auto;border:1px solid var(--line);border-radius:5px;padding:0 5px;font-size:11px;line-height:16px}
-.palette-hint svg,.fold svg{width:16px;height:16px;flex:none;stroke:currentColor;fill:none;stroke-width:1.75;stroke-linecap:round;stroke-linejoin:round}
-.fold{display:flex;align-items:center;gap:8px;margin:2px 0 0;padding:6px 10px;border:0;border-radius:var(--radius-s);background:transparent;color:var(--ink3);font-size:12.5px;width:100%;text-align:left;white-space:nowrap}
-.fold:hover{background:var(--sunken);color:var(--ink2)}
-.fold kbd{margin-left:auto;border:1px solid var(--line);border-radius:5px;padding:0 5px;font-size:11px;line-height:16px}
-.fold svg{transition:transform .15s}
-
-.app.folded{grid-template-columns:64px minmax(0,1fr)}
-.app.folded aside{padding:18px 10px 14px;align-items:stretch}
-.app.folded .brand{justify-content:center;padding:2px 0 16px}
-.app.folded aside .lbl{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
-.app.folded .nav a,.app.folded .palette-hint,.app.folded .fold{justify-content:center;padding:9px 0}
-.app.folded .nav a kbd,.app.folded .palette-hint kbd,.app.folded .fold kbd{display:none}
-.app.folded .fold svg{transform:rotate(180deg)}
-.folded-status{align-items:center;padding-top:14px}
-.status{margin-top:auto;border-top:1px solid var(--line);padding-top:12px;font-size:12.5px;color:var(--ink2);display:flex;flex-direction:column;gap:6px}
-.status .row{display:flex;align-items:center;gap:8px;padding:2px 6px}
-.status b{color:var(--ink);font-weight:600;overflow-wrap:anywhere}
 .dot{width:8px;height:8px;border-radius:50%;background:var(--good);box-shadow:0 0 0 3px var(--good-soft);flex:none}
 .dot.off{background:var(--ink3);box-shadow:0 0 0 3px var(--sunken)} .dot.warn{background:var(--warn);box-shadow:0 0 0 3px var(--warn-soft)} .dot.bad{background:var(--bad);box-shadow:0 0 0 3px var(--bad-soft)}
-.seg3{display:flex;border:1px solid var(--line);border-radius:var(--radius-s);overflow:hidden;margin:6px 6px 0;background:var(--surface)}
-.seg3 button{flex:1;border:0;background:transparent;padding:5px 0;font-size:12px;color:var(--ink2)}
-.seg3 button+button{border-left:1px solid var(--line)}
-.seg3 button.active{background:var(--sunken);color:var(--ink);font-weight:600}
-
 main{position:relative;padding:26px 28px 48px;min-width:0;min-height:100vh;background:var(--canvas);border-radius:var(--content-card-radius) 0 0 var(--content-card-radius);box-shadow:inset 1px 0 var(--seam-line),-8px 0 16px -12px var(--seam-shadow)}
-.app.folded main{border-radius:0;box-shadow:none}
 .head{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;margin-bottom:18px}
 .head h1,.head h2{font-size:20px;font-weight:650;letter-spacing:-.025em}
 .head p{margin:4px 0 0;color:var(--ink2);max-width:66ch}

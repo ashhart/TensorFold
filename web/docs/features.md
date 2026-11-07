@@ -3,34 +3,18 @@
 A short map of TensorFold Web as of 14 October 2026, by screen, with the module behind each part and what is still open.
 The engine questions and bug reports are in `questions-for-ash.md`.
 
-## Two layers, and Home
+## Desktop workspace
 
-Every screen has a plain layer and a detail layer (`docs/design/2026-10-11-studio-for-everyone.md`, 11 Oct). The
-plain layer names things as a person knows them: the AI by its catalog name (`/api/engine` carries `model_name`),
-"tokens a second" with the words a second beside it, conversations in pages, the speed-up rather than drafts. The
-engine's own figures (KV cache, prompt cache, drafts kept, the command line) sit under a disclosure ("The engine's
-own figures", "Details for the curious") on Monitor, Fleet, Models and Teach; Settings keeps the basics first and
-the rest under Advanced; the Bench opens on one check with "More checks" for the eight kinds of run; Chat keeps its
-thinking, presets, tools and parallel panel behind one Options button.
+Chat is the opening view. Its composer sits at the bottom; saved conversations, search and date groups live in the sidebar. The sidebar ends with engine status, Models and Settings. Its header toggle hides it; Cmd-K, `/` and the existing number shortcuts remain. `#home` now opens chat.
 
-**Home** (`Home.tsx`) is the default screen (six tiles since 13 Oct: Chat, Teach, Connect, Bench, Monitor, Fleet; the Teach tile and the "What it has
-learned" card stay when the AI running cannot be taught, greyed, saying why: another engine, a machine whose engine does
-not learn, a family TensorFold does not learn into; `teachable.ts`; the machine line gives the AIs its memory holds and,
-apart, those its engine serves): the state in one sentence ("Nemotron 3.5 Lightning is ready and idle", a Check other models button beside it (Chat has its tile; 13 Oct), with a second line for the hardware under it:
-the maker's logo (Apple, NVIDIA, AMD, Intel, Qualcomm), then the machine, its chip without the board in brackets and
-its memory; the status dot stays level with the model's line; a remote engine's machine as its Fleet
-entry describes it, else by its host; one logo per maker when an engine spans several machines; 13 Oct),
-"Nothing is running, Nemotron is on this machine, ready to start", "No AI is installed yet, Nemotron fits this
-machine: 17 GB to download") with the one button for that state, then Chat, Teach it something, Use it in an app,
-the last conversations, the teachable copies and what they remember, and the first-run list until the machine is
-ready. The catalog marks one model `recommended` per machine (runs here and fits, the fastest first, one on disk
-before one to download). The sections sit in the order a person uses them: Home, Models, Chat, Teach, Connect,
-Bench, Monitor, Fleet, Settings (keys 1 to 9); the old addresses keep working. The sidebar folds to its icons (its
-button at the foot of the menu, or the `[` key, 13 Oct), each name kept as a tooltip and for screen readers, the AI's
-state as its dot alone; the browser remembers it.
+Models contains My models, Discover, Learning and API. Its engine card opens Engine details (the previous Monitor). Benchmarks is beside model search. Compute and clusters opens Fleet in a right drawer. Learning retains copies, lessons, checks, versions and rollback. API retains tool recipes and sharing. No Workers tab is added.
+
+Settings is a separate view with a left section list and Back to app. Memory, conversations, access, brands, checks, storage, benchmark costs and version information remain. The getting-started checklist now lives in Setup checks. Home and its repeated navigation cards are removed.
+
+Catalog metadata is local at startup. Discover explicitly refreshes Hub sizes; downloads remain explicit. Only native checkpoint families listed by the installed engine are curated; admission and backend qualification still apply.
 
 **Logos** (12 Oct; 13 Oct: Meta, Mistral AI, Moonshot AI, MiniMax, Hugging Face, Baidu, ByteDance, Xiaomi added, and a
-maker known without a logo file shows its initial): a model shows its family's or its maker's logo wherever it is named (Home, Models, Chat, Fleet,
+maker known without a logo file shows its initial): a model shows its family's or its maker's logo wherever it is named (Models, Chat, Fleet,
 the sidebar): NVIDIA for Nemotron and its teachable copies, Qwen, Google for Gemma, Z.ai for GLM, DeepSeek, Prism ML
 for Bonsai. `ui/src/brand.ts` reads the maker from any name a model goes by (catalog, repository, copy, another
 machine's); Connect shows each tool's logo. Both sit on a light tile so dark marks read in the dark theme; each
@@ -234,7 +218,7 @@ TensorFold 1.0.7 teaches a served Nemotron facts into its own weights (`serve <f
   installed (TensorFold's own installer, `curl -fsSL https://tensorfold.dev/install.sh | sh`, on a Mac and on NVIDIA
   Linux; 14 Oct), engine port, model folder and its free space, a model downloaded, engine running, memory headroom,
   who can reach TensorFold Web, whether it keeps running, and web research on an engine before 1.0.11 (14 Oct).
-- A getting-started list on Home until every step is ready, or put away; Settings keeps all the checks, a JSON
+- A getting-started list in Settings until every step is ready, or put away; Settings keeps all the checks, a JSON
   report to send (keys and tokens taken out; machine names and paths stay) and a summary to copy.
 
 ## Storage (`storage.py`, `SettingsStorage.tsx`)

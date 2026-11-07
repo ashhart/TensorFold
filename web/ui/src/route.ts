@@ -1,6 +1,4 @@
-// Every view a link: `#screen/what`, such as #bench/<run>, #chat/<conversation>, #models/<owner>/<name>.
-// A screen reads its part of the address when it opens and when the address changes, and writes it back when the
-// selection changes, replacing the address rather than adding to the history, so Back still leaves the screen.
+// Use screen/subselection links; replacing the selection preserves Back navigation between screens.
 import { useEffect, useRef } from 'react'
 
 export const screenOf = (hash = location.hash) => hash.replace(/^#/, '').split('/')[0]

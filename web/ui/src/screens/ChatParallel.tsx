@@ -1,6 +1,4 @@
-// The Chat's parallel mode: the same moment, several replies at once, to see what batching gives. Each reply streams
-// in its own card with its own speed; the total speed is every reply's tokens over the time from sending to the last
-// token, and each count tried here is kept so 1, 2, 4… requests at once can be read side by side.
+// Stream parallel replies in separate cards and compare request counts by total tokens over elapsed time.
 import { useEffect, useRef, useState } from 'react'
 import { authHeaders, num, type EngineInfo } from '../api'
 import { sseEvents } from '../sse'

@@ -1,5 +1,4 @@
-// Units that roll over: a figure is shown in the unit that keeps it short, so 0.07 s reads 70 ms, 5,400 s reads
-// 1 h 30 min, 0.4 GB reads 410 MB and 2,048 GB reads 2.0 TB. One place for every screen, the report card included.
+// Format duration and byte units once for screens and report cards.
 
 export const GiB = 1024 ** 3
 

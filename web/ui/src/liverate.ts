@@ -1,6 +1,4 @@
-// The speed shown while a reply is written. A stream event is not a token: TensorFold sends one per verification
-// round, and with drafts a round carries several tokens (1.75 on a GB10, more on a Mac), so counting events reads
-// low. The page counts the text instead, at the characters per token the engine counted for the last reply.
+// Estimate live tokens from text calibrated by engine counts; a draft round's event may hold several tokens.
 export const DEFAULT_CHARS_PER_TOKEN = 4
 
 type Reply = { role: string; content: string; reasoning?: string; stats?: { tokens: number | null; measured: string } }

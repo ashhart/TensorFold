@@ -1,6 +1,4 @@
-// Forgiving matching for the palette: case and accents ignored, each word of the query found in the label as a
-// piece of it, as its letters in order ("bnch" finds Bench), or with one typo ("nemtoron" finds Nemotron).
-// A higher score is a better match; null is no match.
+// Rank case-insensitive query words by substrings, ordered letters and single-typo matches.
 
 const norm = (s: string) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase()
 

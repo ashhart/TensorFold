@@ -119,7 +119,7 @@ export default function Teach({ engine, toast, refreshEngine, stale }: Ctx) {
 
   return (
     <section>
-      <div className="head"><div><h1>Teach</h1><p>Tell your AI something it should remember: a fact about you, your work, your company. It learns it into a copy of itself, so the original stays as it was, and anything it learned can be undone.</p></div></div>
+      <div className="head"><div><h2>Living Weights</h2><p>Teach a copy of your model and undo any lesson.</p></div></div>
       {view?.chore?.state && <div className={`notice ${view.chore.state === 'failed' ? 'bad' : 'info'}`} role="status">{view.chore.state === 'running' ? <span><span className="pulse" />{view.chore.kind} of {view.chore.copy} is going, {elapsed(choreSince)} so far{view.chore.kind === 'a restore' || view.chore.kind === 'a branch' ? ' (a few seconds to a minute: the files that differ are written back, then the copy serves again)' : view.chore.kind === 'checks' ? ' (each question takes a few seconds)' : ''}.</span> : view.chore.state === 'failed' ? `${view.chore.kind} of ${view.chore.copy} failed: ${view.chore.error}` : `${view.chore.kind} of ${view.chore.copy} done.`}</div>}
       {view?.teachable && <div className="notice info">Learning cannot run here: {view.teachable}.{/not installed/.test(view.teachable) ? ' Copies need the native engine to be served too.' : ' Copies can still be made and served without learning.'}</div>}
 
@@ -129,9 +129,9 @@ export default function Teach({ engine, toast, refreshEngine, stale }: Ctx) {
           <b>Which copy should learn?</b>
           <p className="small muted">A copy learns while it runs. Serve one below (the AI restarts, a few seconds), then teach it here.</p>
         </> : <>
-          <b>First, a copy that can learn</b>
-          <p className="small muted">Teaching changes a copy of the AI, never the original. Make one from {view.bases.length ? <b>{view.base_names?.[base] ?? shortName(base)}</b> : 'a downloaded model'} (instant on a Mac; about 18 GB to write on Linux), then serve it and teach it.</p>
-          {!view.bases.length && <p className="small muted">No model that learns is on this machine yet. Only Nemotron 3.5 Lightning learns today, on a Mac or a GB10: get it from <a href="#models">Models</a>.</p>}
+          <b>Choose a learning model</b>
+          <p className="small muted">Make a learning copy of {view.bases.length ? <b>{view.base_names?.[base] ?? shortName(base)}</b> : 'a downloaded model'} and serve it here.</p>
+          {!view.bases.length && <p className="small muted">Download Nemotron 3.5 Lightning from <a href="#models/discover">Discover</a> to enable learning.</p>}
         </>}
         {!!view.bases.length && <div className="row" style={{ marginTop: 10 }}>
           {view.bases.length > 1 && <select className="sel" value={base} onChange={(e) => { setBase(e.target.value); setName(suggest(e.target.value, view.base_names)) }} aria-label="Model to copy">{view.bases.map((b) => <option key={b} value={b}>{view.base_names?.[b] ?? b}</option>)}</select>}
@@ -146,12 +146,12 @@ export default function Teach({ engine, toast, refreshEngine, stale }: Ctx) {
         <Steps at={job && job.status === 'running' ? 3 : facts && facts.length ? 2 : 1} />
         <div className={job?.status === 'running' ? 'dimmed' : undefined} aria-disabled={job?.status === 'running' || undefined}>
         <b>1. What should {served} remember?</b>
-        <p className="small muted">Write facts, or paste a short text. Short, distinct facts work best ("My cat is called Pixel", "Our team meets on Thursdays"); a long text about one subject is the weak case.</p>
+        <p className="small muted">Write a few short, distinct facts for the model to remember.</p>
         <textarea className="input" rows={5} value={text} onChange={(e) => setText(e.target.value)} placeholder={'My cat is called Pixel.\nBramblewick Robotics deploys every Thursday.'} aria-label="Facts to teach" disabled={!!view?.busy} />
         <div className="actions"><button className={`btn ${facts && facts.length ? '' : 'primary'}`} aria-busy={finding} disabled={!text.trim() || finding || !!view?.busy} onClick={find}>{finding ? 'Reading it…' : facts && facts.length ? 'Read it again' : 'Next: see what it understood'}</button>{finding && <span className="small muted">The AI reads the text and answers each question it finds; about ten seconds a fact.</span>}</div>
         {facts && !!facts.length && <>
           <b style={{ display: 'block', marginTop: 16 }}>2. Here is what it understood</b>
-          <p className="small muted">Each line is a fact it found, the question it will answer with it, and what it answers today. Untick a line to leave it out; edit a fact or a question if it read you wrong.</p>
+          <p className="small muted">Review each fact and question, and untick anything to leave out.</p>
           <div className="facts">
             <div className="facts-head" aria-hidden="true"><span>Teach</span><span>The fact</span><span>The question it will answer</span></div>
             {facts.map((f) => <div key={f.id} className="factrow">
@@ -164,14 +164,14 @@ export default function Teach({ engine, toast, refreshEngine, stale }: Ctx) {
           </div>
           <div className="actions"><button className="btn primary" aria-busy={is('teach')} disabled={!approved.length || running || !!view?.teachable || any} onClick={teach}>{is('teach') ? 'Starting the lesson…' : `Teach ${approved.length === 1 ? 'this fact' : `these ${approved.length} facts`} (about ${approved.length * 2}–${approved.length * 3} min)`}</button>
             <label className="small muted"><input type="checkbox" checked={checkAround} onChange={(e) => setCheckAround(e.target.checked)} /> ask it the test questions before and after</label></div>
-          <p className="small muted" style={{ marginBottom: 0 }}>Teaching works on Nemotron 3.5 Lightning only; another model is refused. A point to go back to is kept first, so any lesson can be undone. Chat goes on while it learns. A fact it cannot answer afterwards is taken out whole.</p>
+          <p className="small muted" style={{ marginBottom: 0 }}>Nemotron 3.5 Lightning learns while chat stays available; unsuccessful facts are rolled back.</p>
         </>}
         </div>
       </div>}
 
       {view?.recovering && !job && <div className="card">
         <b>A lesson on {view.recovering} was going when TensorFold Web stopped</b>
-        <p className="small muted">Nothing changes the engine or the copy until the engine shows no fact being learned, or stops. If the engine was restarted by hand, or it is not learning, stop waiting.</p>
+        <p className="small muted">Wait for learning to finish, or stop waiting if the engine has already stopped.</p>
         <div className="actions"><button className="btn" aria-busy={is('cancel')} onClick={() => run('cancel', () => api.livingCancel().then(() => toast('No longer waiting for that lesson'), (e) => toast(`Not stopped: ${e}`, 'bad')))}>Stop waiting</button></div>
       </div>}
       {job && <div className="card">
@@ -212,7 +212,7 @@ export default function Teach({ engine, toast, refreshEngine, stale }: Ctx) {
         <div className="tablewrap"><table className="tbl">
           <thead><tr><th>Copy</th><th>Remembers</th><th /></tr></thead>
           <tbody>{view.copies.map((c) => <tr key={c.name}>
-            <td><b>{c.name}</b>{served === c.name && <span className="chip run" style={{ marginLeft: 6 }}>Running</span>}{!c.learnable && <span className="small muted"> (cannot learn: {c.family})</span>}<div className="small muted">a copy of {view.base_names?.[c.base ?? ''] ?? (c.base ? shortName(c.base) : 'a model made by hand')}</div></td>
+            <td><b title={`${bytes(c.bytes, 1)}, created ${when(c.created)}`}>{c.name}</b>{served === c.name && <span className="chip run" style={{ marginLeft: 6 }}>Running</span>}{!c.learnable && <span className="small muted"> (cannot learn: {c.family})</span>}<div className="small muted">a copy of {view.base_names?.[c.base ?? ''] ?? (c.base ? shortName(c.base) : 'a model made by hand')}</div></td>
             <td>{c.taught} {c.taught === 1 ? 'fact' : 'facts'}{c.lessons > c.taught ? <span className="small muted"> ({c.lessons - c.taught} taught and taken out)</span> : null}</td>
             <td className="actions">{served !== c.name && <button className="btn sm" aria-busy={is(`serve:${c.model}`)} disabled={busy || stale || running} onClick={() => serve(c.model)}>{is(`serve:${c.model}`) ? 'Starting…' : 'Serve'}</button>}
               <button className="btn sm quiet" aria-busy={is(`card:${c.name}`)} onClick={() => downloadCard(c.name)}>Model card</button>
@@ -220,7 +220,7 @@ export default function Teach({ engine, toast, refreshEngine, stale }: Ctx) {
           </tr>)}</tbody></table></div>
         <details className="more">
           <summary>Details: where they are, another copy, a copy from another machine</summary>
-          <p className="small muted">Kept in <code>{view.root}</code>: {view.copies.map((c) => `${c.name} ${bytes(c.bytes, 1)}, made ${when(c.created)}`).join('; ')}. A copy is real files, never links into the model cache, so learning can never change the downloaded model.</p>
+          <p className="small muted">Learning copies are stored separately in <code>{view.root}</code>.</p>
           <div className="row">
             <select className="sel" value={base} onChange={(e) => { setBase(e.target.value); setName(suggest(e.target.value, view.base_names)) }} aria-label="Model to copy">{view.bases.map((b) => <option key={b} value={b}>{view.base_names?.[b] ?? b}</option>)}</select>
             <input className="input" value={name} onChange={(e) => setName(e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, '-'))} placeholder="a name for the copy" aria-label="Name of the new copy" style={{ maxWidth: 260 }} />
@@ -252,7 +252,7 @@ export default function Teach({ engine, toast, refreshEngine, stale }: Ctx) {
             <td>{(() => { const taught = f.state === 'learned' ? taughtAs(f) : undefined
               return taught && <button className="btn sm quiet" aria-busy={is(`forget:${taught}`)} disabled={running} onClick={() => setAsk({ kind: 'forget', fact: taught })}>Forget</button> })()}</td></tr>)}</tbody>
         </table></div>}
-        <p className="small muted" style={{ marginBottom: 0 }}>Forget takes one fact out: the copy goes back to before that lesson, then learns the facts kept since again (2 to 3 minutes each). TensorFold Web also keeps what it taught and the answers before and after ({learned.lessons.length} {learned.lessons.length === 1 ? 'entry' : 'entries'}).</p>
+        <p className="small muted" style={{ marginBottom: 0 }}>Forget restores the earlier version and reteaches the remaining facts; this can take several minutes.</p>
       </div>}
     </section>
   )

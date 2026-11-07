@@ -102,7 +102,7 @@ export function Diagnostic({ settings, saveSettings, toast }: { settings: Settin
         <button className="btn" onClick={again} disabled={busy || showing} aria-busy={showing}>{showing ? 'Checking…' : 'Check again'}</button>
         <button className="btn" onClick={() => download('/api/diagnostic/report', 'tensorfold-web-diagnostic.json').catch((e) => toast(`Not downloaded: ${e}`, 'bad'))}>Download the diagnostic report</button>
         <button className="btn quiet" onClick={copy} disabled={!checks}>Copy a summary</button>
-        {settings?.setup_hidden && <button className="btn quiet" onClick={() => saveSettings({ setup_hidden: false }).then(() => { location.hash = '#home' }, (e) => toast(String(e), 'bad'))}>Show the getting-started list</button>}
+        {settings?.setup_hidden && <button className="btn quiet" onClick={() => saveSettings({ setup_hidden: false }).then(() => { location.hash = '#settings/checks' }, (e) => toast(String(e), 'bad'))}>Show the getting-started list</button>}
         {checkedAt(at)}
       </div>
       <p className="small muted" style={{ marginBottom: 0 }}>The report is a JSON file with these checks, the machine, the settings, the engine's state and its last 300 log lines, the fleet's names and the usage totals. Keys and tokens are taken out; machine names and paths stay.</p>

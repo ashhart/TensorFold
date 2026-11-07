@@ -1,6 +1,8 @@
+import type { ConversationIndex } from './conversations'
 import type { EngineInfo, Machine, Settings } from './api'
 
 export type Ctx = {
+  conversations: ConversationIndex
   machine: Machine | null
   engine: EngineInfo | null
   settings: Settings | null

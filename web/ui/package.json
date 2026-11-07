@@ -7,7 +7,7 @@
     "dev": "node scripts/sync-theme.mjs && vite",
     "build": "node scripts/sync-theme.mjs && tsc -b && vite build",
     "preview": "vite preview",
-    "test": "node --experimental-strip-types --test tests/fuzzy.test.mjs tests/units.test.mjs tests/workshop.test.mjs tests/saves.test.mjs tests/brand.test.mjs tests/teachable.test.mjs tests/seed.test.mjs tests/liverate.test.mjs tests/version.test.mjs tests/theme.test.mjs"
+    "test": "node --experimental-strip-types --test tests/fuzzy.test.mjs tests/units.test.mjs tests/workshop.test.mjs tests/saves.test.mjs tests/brand.test.mjs tests/teachable.test.mjs tests/seed.test.mjs tests/liverate.test.mjs tests/version.test.mjs tests/theme.test.mjs tests/workspace.test.mjs"
   },
   "dependencies": {
     "qrcode-generator": "^1.5.2",

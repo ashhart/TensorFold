@@ -1,7 +1,4 @@
-// Which maker a model comes from, read from any name it goes by: the catalog's ("Nemotron 3.5 Lightning"), its
-// repository ("TensorFold/NVIDIA-Nemotron-..."), a teachable copy's ("nemotron-living") or another machine's.
-// The model's own family logo when there is one (Qwen), else its maker's (NVIDIA for Nemotron, Google for Gemma).
-// A maker with no logo file shows its initial (brandLogo.tsx), so a new family only needs its line here.
+// Resolve model family and maker from catalog names, repositories or learning copies, with an initial fallback.
 
 export type Brand = { id: string; label: string }
 export type BrandKind = 'model' | 'hardware'
@@ -68,8 +65,7 @@ export function brandOf(...names: (string | null | undefined)[]): Brand | null {
   return find('model', RULES, names)
 }
 
-// Which maker built a machine, from its chip and backend: Apple for an M chip, NVIDIA for a GB10 or any CUDA GPU, AMD,
-// Intel, Qualcomm
+// Infer a machine's maker from its chip and backend.
 const HARDWARE: [RegExp, Brand][] = [
   [/apple|\bM\d+\b|^mlx$/i, { id: 'apple', label: 'Apple' }],
   [/nvidia|\bgb\d+|geforce|\brtx\b|^cuda$/i, { id: 'nvidia', label: 'NVIDIA' }],

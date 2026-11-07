@@ -2,8 +2,7 @@ import { useEffect, useState } from 'react'
 import { api, num, type BenchRun, type FleetMachine } from '../api'
 import { engineSkew } from '../version'
 
-// null: the same engine with drafts off; 'unchecked': an address chosen but not checked yet (the run waits);
-// a Fleet machine goes by its id, this TensorFold Web reaching its engine with the key or token it keeps
+// A KL target is the plain local arm, an unchecked explicit address, or a peer identified by its saved id.
 export type KlReference = { url: string; key?: string; model: string } | { peer: string; model: string } | null | 'unchecked'
 
 // the text a fixed-text run reads unless the person writes another
@@ -34,8 +33,7 @@ const nats = (x: number | null | undefined) => (x == null ? '—' : x === 0 ? '0
 const pc = (x: number | null | undefined, d = 1) => (x == null ? '—' : `${(x * 100).toFixed(d)}%`)
 
 type Found = Awaited<ReturnType<typeof api.benchIdentify>>
-// the form's whole state, kept by the Bench screen so it survives a change of mode and the run reads the same choice
-// `peer`: a Fleet machine's id ('' when the address is typed by hand); `fixed`: both read `text`, every position scored
+// The parent owns the whole KL form so mode changes preserve the endpoint and optional fixed text.
 export type KlState = { kind: 'drafts' | 'address'; url: string; key: string; peer: string; found: Found | null; model: string; fixed: boolean; text: string }
 export const KL_START: KlState = { kind: 'drafts', url: 'http://127.0.0.1:8000', key: '', peer: '', found: null, model: '', fixed: false, text: KL_TEXT }
 
