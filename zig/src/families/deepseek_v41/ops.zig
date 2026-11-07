@@ -80,7 +80,7 @@ pub const Pipelines = struct {
         if (gemm_text != null) {
             // N = 384 is 128-aligned, a prompt's rows are not 64-aligned: the bounded variant.
             gate = mtl.Pipeline.init(device, lib, "custom_kernel_tf_gemm_nax_bf16_n_t_n_t_n_64_128_256_2_4_bfloat16_t_bfloat16_t_int32_t_bfloat16_t", false) catch null;
-            // The hand-added fp32-destination twin (gemm_nax.metal): fp32 sums out, so route reads f32 logits.
+            // The fp32-destination twin in gate_gemm.metal: fp32 sums out, so the route reads f32 logits.
             gate_f32 = mtl.Pipeline.init(device, lib, "custom_kernel_tf_gemm_nax_bf16_f32out_n_t_n_t_n_64_128_256_2_4_bfloat16_t_bfloat16_t_int32_t_float", false) catch null;
             if (gate_f32 == null) std.log.warn("gate GEMM: fp32-destination entry absent; TF_DSV41_ROUTE_GEMM stays on tf-dense-col", .{});
             gate_f16_f32 = mtl.Pipeline.init(device, lib, "custom_kernel_tf_gemm_nax_f16_f32out_n_t_n_t_n_64_128_256_2_4_float16_t_float16_t_int32_t_float", false) catch null;
