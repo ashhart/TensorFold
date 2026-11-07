@@ -29,6 +29,31 @@ zig build native install -Dsm=89 -Dstrip=true ^
 
 `zig build test` runs the host tests without a GPU.
 
+### The host tests on a machine with no usable GPU
+
+The host suite needs only Zig: no CUDA toolkit, no MSVC (Zig's own clang builds the C++ host files), nothing elevated.
+Run on a 2015 Windows 10 laptop (Intel i7-4720HQ, four cores, 16 GB; its GTX 965M is below the CUDA build's sm_80
+floor) with Zig 0.17.0 from the portable zip, on main at 9d6f1d78c (2026-11-04):
+
+- `zig build test --summary all` from a removed `.zig-cache`: `Build Summary: 491/491 steps succeeded; 6361/6514 tests
+  passed (153 skipped)`, exit 0, 1119 s with the global Zig cache warm, 1607 s from nothing. It prints little for
+  minutes at a time; the summary line and the exit code are the result.
+- Zig 0.17's build runner prints a step's tree, its captured stderr and a `failed command:` line for every step that
+  wrote to stderr, warnings included (the simulated device-loss warnings, numeric tables, the `tfgrammar.dll` line
+  below). A failed step has an `error:` line and the build exits non-zero; neither happened in that run.
+- The 153 skips are 118 distinct tests: 37 behind an explicit `os.tag == .windows` guard in 21 files (the key file's
+  0600 permission tests, request_log, drama_voice_tool, media_fetch_tls, the trainer and CUDA tp_watch tests among
+  them), 9 behind "symlinks need privilege on Windows", 22 macOS-only, 9 Linux-only, and 41 behind a checkpoint,
+  fixture or device the machine lacks. Developer Mode (Settings, For developers) or an elevated prompt runs the nine
+  symlink tests.
+- Unzip the Zig download with Windows' own `tar.exe` (`C:\Windows\System32\tar.exe -xf zig-x86_64-windows-0.17.0.zip`,
+  37 s); PowerShell's `Expand-Archive` took 258 s, and Git for Windows' GNU `tar`, when its `usr\bin` is first on
+  `PATH`, does not read zips.
+- A test on a from-source tree prints `warning: tfgrammar.dll is required for structured output and required tool
+  calls`; see [Structured output and required tool calls](#structured-output-and-required-tool-calls) for where a
+  source build gets it.
+- The `python3` the tools' commands name may be the Microsoft Store alias on Windows; a python.org install is `python`.
+
 ### HIP
 
 Add `-Dhip=true -Dhip-arch=<arch>` and name a HIP compiler; the build takes `hipcc.exe` first and `hipcc.bat` second,
