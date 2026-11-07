@@ -1,5 +1,6 @@
 //! MLX affine 4-bit, group-64, transposed inputs for Vulkan qmm.comp's qmm_f32 build, checked against float64.
 const std = @import("std");
+const stage1_params = @import("stage1_params");
 const contract = @import("contract");
 const c = contract.spec;
 const Affine = contract.affine.Affine;
@@ -13,37 +14,8 @@ pub const poison: u32 = 0x7fc5_a5a5;
 /// Poisoned elements after each binding's data, so an overrun reads poison rather than past the buffer.
 pub const tail = 16;
 
-/// qmm.comp's push constants (std430); qmm reads the fields params() sets, the rest keep MLX's ComputeParams defaults.
-pub const Params = extern struct {
-    count: u32 = 0,
-    operation: u32 = 0,
-    lhs_size: u32 = 0,
-    rhs_size: u32 = 0,
-    reduce_size: u32 = 0,
-    output_size: u32 = 0,
-    lhs_offset: u32 = 0,
-    rhs_offset: u32 = 0,
-    output_offset: u32 = 0,
-    aux_size: u32 = 0,
-    aux_offset: u32 = 0,
-    matrix_m: u32 = 0,
-    matrix_n: u32 = 0,
-    matrix_k: u32 = 0,
-    flags: u32 = 0,
-    alpha: f32 = 1,
-    beta: f32 = 0,
-    dims: u32 = 0,
-    shape: [4]u32 = .{ 0, 0, 0, 0 },
-    in_strides: [4]u32 = .{ 0, 0, 0, 0 },
-    out_strides: [4]u32 = .{ 0, 0, 0, 0 },
-};
-
-comptime {
-    const names = [_][]const u8{ "count", "operation", "lhs_size", "rhs_size", "reduce_size", "output_size", "lhs_offset", "rhs_offset", "output_offset", "aux_size", "aux_offset", "matrix_m", "matrix_n", "matrix_k", "flags", "alpha", "beta", "dims" };
-    for (names, 0..) |name, i| if (@offsetOf(Params, name) != 4 * i) @compileError("qmm.comp push constant moved: " ++ name);
-    if (@offsetOf(Params, "shape") != 72 or @offsetOf(Params, "in_strides") != 88 or @offsetOf(Params, "out_strides") != 104) @compileError("qmm.comp push constant arrays moved");
-    if (@sizeOf(Params) != 120) @compileError("qmm.comp push constants are 120 bytes");
-}
+/// qmm.comp's push constants (std430), owned by the Vulkan params module; the layout asserts live there.
+pub const Params = stage1_params.Params;
 
 /// Base items of each binding's data: lhs_offset, rhs_offset (words), aux_offset, aux_size and output_offset.
 pub const Offsets = struct { x: usize = 0, w: usize = 0, scales: usize = 0, biases: usize = 0, out: usize = 0 };
