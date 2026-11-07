@@ -120,7 +120,9 @@ the checkpoint metadata identity (config, index, present shard headers, token ma
 128-token window is the qualification measurement this record reports; the 16-token window
 is fixed in the tree as `release-quality-16.json`. The streamed run's execution reads also
 fail the zero-disk-read residency clause (20 KB on the FP32 half, 67.8 MB on the FP64
-half); the receipt gives totals, not a stream/weights split.
+half); the receipt gives totals, not a stream/weights split. A cold rerun of the 16-token
+window on the same tree reads 8.3 MB and fails that clause too, so the earlier 0-read
+receipt was page warmth, not a property of the window.
 
 Context-labelled standing (M5 Ultra, 256 GB, the streamed line above): prefill 1,276 tok/s
 at 3,002 tokens; plain decode 44.9 tok/s at 4.5k and 44.1 at 21k, flat to 42k; drafted
