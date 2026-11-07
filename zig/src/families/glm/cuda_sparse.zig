@@ -144,11 +144,11 @@ pub fn splitAt(start: usize, from: usize, world: usize) bool {
 
 /// sparse.select_tokens: rows' tokens (i32 [rows][g.width()], ascending, -1 padded; on pages their rows); 0 if dense.
 pub fn selectTokens(set: glue.Set, ops: cuda.Module, stream: cuda.Stream, qi: u64, wts: u64, w_stride: usize, pk: u64, t: latent.Table, pos: u64, host_pos: usize, rows: usize, heads: usize, d: usize, g: Geometry, np_max_cap: usize, s: Scratch, tokens: u64, counts: u64) !void {
-    return selectTokensProfile(set, ops, stream, qi, wts, w_stride, pk, t, pos, host_pos, rows, heads, d, g, np_max_cap, s, tokens, counts, null, null);
+    return selectTokensProfile(set, ops, stream, qi, wts, w_stride, pk, t, t, pos, host_pos, rows, heads, d, g, np_max_cap, s, tokens, counts, null, null);
 }
 
-/// With `split`, this rank picks for its block of rows only (as one pass would, block by block) and gathers the rest.
-pub fn selectTokensProfile(set: glue.Set, ops: cuda.Module, stream: cuda.Stream, qi: u64, wts: u64, w_stride: usize, pk: u64, t: latent.Table, pos: u64, host_pos: usize, rows: usize, heads: usize, d: usize, g: Geometry, np_max_cap: usize, s: Scratch, tokens: u64, counts: u64, split: ?Split, profile: ?*@import("cuda_prof.zig").Prof) !void {
+/// With `split`, this rank picks for its block of rows only (as one pass would, block by block) and gathers the rest; `lt`: the latent rows' table.
+pub fn selectTokensProfile(set: glue.Set, ops: cuda.Module, stream: cuda.Stream, qi: u64, wts: u64, w_stride: usize, pk: u64, t: latent.Table, lt: latent.Table, pos: u64, host_pos: usize, rows: usize, heads: usize, d: usize, g: Geometry, np_max_cap: usize, s: Scratch, tokens: u64, counts: u64, split: ?Split, profile: ?*@import("cuda_prof.zig").Prof) !void {
     const prof = @import("cuda_prof.zig");
     try g.check();
     const np_max = poolBucket(host_pos, rows, np_max_cap, g);
@@ -211,8 +211,8 @@ pub fn selectTokensProfile(set: glue.Set, ops: cuda.Module, stream: cuda.Stream,
     args.add(@as(c_int, @intCast(g.topk)));
     args.add(tokens);
     args.add(counts);
-    args.add(t.pt);
-    args.add(@as(i64, @intCast(t.page_rows)));
+    args.add(lt.pt);
+    args.add(@as(i64, @intCast(lt.page_rows)));
     args.add(@as(c_int, @intCast(g.pool)));
     try cuda_pdl.launch(assemble, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 256 } }, stream, &args);
 }
