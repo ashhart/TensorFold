@@ -77,4 +77,5 @@ test {
     _ = @import("flashnext_heads_records.zig"); // its own test: the TP=2 DeltaNet twins' records
     _ = @import("moetile_records.zig"); // its own test: the shared down's slot-output entries
     _ = @import("qmmf_prompt_records.zig"); // its own test: the 128-row BF16 prompt entries
+    _ = @import("ling_cuda_records.zig"); // its own test: Ling-3.1-flash's launches
 }
