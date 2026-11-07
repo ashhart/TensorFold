@@ -161,9 +161,9 @@ fn probe(a: Allocator, io: std.Io, backend: lanes.backend.Backend, e: *Engine) !
     return .{ .hash = std.hash.Wyhash.hash(0x676c6d, bytes), .rate = @as(f64, @floatFromInt(toks.len)) / (@as(f64, @floatFromInt(@max(ns, 1))) / 1e9) };
 }
 
-/// What --learn-conversations refuses before it reads a rank: TF_GLM_KV_SHARE, and more ranks than `prefix_buf` holds.
+/// What --learn-conversations refuses before it reads a rank: TF_KV_SHARE, and more ranks than `prefix_buf` holds.
 fn refusal(e: *const Engine) !void {
-    // TF_GLM_KV_SHARE leaves a kept state's prefix pages in the pool's prompt cache, outside the lease the image reads
+    // TF_KV_SHARE leaves a kept state's prefix pages in the pool's prompt cache, outside the lease the image reads
     if (e.share_pages) return error.KvShareWithLearnConversations;
     if (e.share.world > prefix_buf.len) return error.TooManyRanks;
 }
@@ -172,7 +172,7 @@ fn refusal(e: *const Engine) !void {
 pub fn attach(a: Allocator, io: std.Io, ctx: *const cuda.Context, o: api.Open, root: []const u8, kernels: ?[]const u8, loaded: anytype, store: *api.prompt_cache.Store) !void {
     const e: *Engine = loaded.target;
     refusal(e) catch |err| {
-        if (err == error.KvShareWithLearnConversations) std.log.err("--learn-conversations: GLM-5.3-Flash's disk images read a kept state's whole lease, and TF_GLM_KV_SHARE leaves its prefix pages out of it; serve without one of them", .{});
+        if (err == error.KvShareWithLearnConversations) std.log.err("--learn-conversations: GLM-5.3-Flash's disk images read a kept state's whole lease, and TF_KV_SHARE leaves its prefix pages out of it; serve without one of them", .{});
         return err;
     };
     try ranks.prefixes(e, prefix_buf[0..e.share.world], window_buf[0..e.share.world]);
@@ -195,7 +195,7 @@ pub fn attach(a: Allocator, io: std.Io, ctx: *const cuda.Context, o: api.Open, r
     std.log.info("glm: conversation states on disk in {s} ({d} states, {d} MiB of {d} MiB; {d} ranks' parts)", .{ r.dir, r.states.items.len, r.held() >> 20, r.cap >> 20, prefixes.len });
 }
 
-test "GLM disk attach: TF_GLM_KV_SHARE and more ranks than the prefixes hold are refused by name" {
+test "GLM disk attach: TF_KV_SHARE and more ranks than the prefixes hold are refused by name" {
     const e = try std.testing.allocator.create(Engine);
     defer std.testing.allocator.destroy(e);
     e.share_pages = false;
