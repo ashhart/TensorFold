@@ -171,6 +171,19 @@ class GateRunTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("FAIL resumed == fresh: no cache-off server", out.getvalue())
 
+    def test_context_items_lengthen_only_the_first_turn(self):
+        sent = []
+
+        class Recorder:
+            def post(self, body):
+                sent.append(body["messages"])
+                return {"status": 200, "sha": "a" * 64, "text": "ok"}
+        profile = {**json.loads(PROFILE.read_text()), "conversation_context_items": 50}
+        rows = conformance.conversation(Recorder(), conformance.Plan(profile, None), "greedy", True)
+        self.assertEqual([r["turn"] for r in rows], list(range(len(profile["conversation"]))))
+        self.assertTrue(sent[0][0]["content"].startswith(conformance.inventory(50)))
+        self.assertTrue(all(m["content"] == t for m, t in zip(sent[-1][2::2], profile["conversation"][1:])))
+
     def test_profiles_parse_and_name_their_gates(self):
         for path in sorted(PROFILE.parent.glob("*.json")):
             with self.subTest(profile=path.name):
