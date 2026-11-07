@@ -85,6 +85,7 @@ test "wo_a fusion at the real shape, cells and time (TF_WO_REAL=1)" {
             worst = @max(worst, @abs(math.f(fused[i]) - math.f(legacy[i])) / scale);
         }
         std.debug.print("WOREAL cells={d} unequal={d} worst={d}\n", .{ group_output, differ, worst });
+        try std.testing.expectEqual(@as(usize, 0), differ);
     }
 
     // The changed reduction order owes an FP64 reference: each arm against the exact product of its slice.

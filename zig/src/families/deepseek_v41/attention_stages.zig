@@ -226,7 +226,7 @@ pub const Stage = struct {
                     e.barrier();
                     attnMark(layer, "index_q", prof, &e);
                 }
-                // The block filter helps only at most an eighth of the keys; narrower alone is not enough.
+                // The block filter helps only when it keeps at most an eighth of the keys.
                 const filter_env: ?bool = if (std.c.getenv("TF_DSV41_BLOCK_FILTER")) |v|
                     std.mem.eql(u8, std.mem.span(v), "1")
                 else

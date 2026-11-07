@@ -116,4 +116,5 @@ test "one-row fused wq_a+wkv matches the two separate projections" {
     std.debug.print("QKVFUSION cells={d} unequal={d} nrms={d} worst={d}\n", .{ n_q + n_kv, unequal, nrms, worst });
     try std.testing.expect(nrms <= 1e-4);
     try std.testing.expect(unequal <= 1);
+    try std.testing.expect(worst <= 0.01);
 }
