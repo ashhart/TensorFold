@@ -111,13 +111,18 @@ native zebins the audit reads, so the GRF mode the record states is the loaded i
 id it ran on. `xpu-contract-run` runs it on this card. On a host without ocloc, `-Dxpu-images=DIR` links zebins that
 another host made with the commands the receipt records.
 
+On any host, with no device, `zig build cpu-contract` runs the CPU kernels (Qwen3.5-2B's affine projection and RMS
+norm on the host's cores) through gates 1 to 4 and their eight controls; a CPU kernel has no launch, so gate 5 has
+nothing to check. `zig build test-kernel-contract`, CI's no-device step, runs the same gates as a test, and `zig build
+test` the kernels' own test that the bytes are the same at every thread count and column split, on x86_64 and arm64.
+
 Every run ends with a `SUMMARY` line: kernels passing gates 1 to 4, known findings, controls red, and limit problems.
 The program exits 1 on any failed gate, any control that stayed green, or any limit problem.
 
 ## Adding a kernel
 
-1. Write its test type in `zig/tests/contract/` (Metal), `zig/tests/cuda/contract_*.zig` (CUDA) or
-   `zig/tests/hip/contract_*.zig` (HIP): `prepare` builds
+1. Write its test type in `zig/tests/contract/` (Metal), `zig/tests/cuda/contract_*.zig` (CUDA),
+   `zig/tests/hip/contract_*.zig` (HIP) or `zig/tests/cpu/contract_*.zig` (CPU): `prepare` builds
    the inputs for a shape and a gate's fill (usually through an input family), `run` launches once and waits, `count`
    and `reference` give the outputs and their float64 values, `simulate` replays the sums for gate 4.
 2. Add it to the runner's list, with its served shapes and tiles.
@@ -386,6 +391,14 @@ Older SMs build main's loop, and their records are main's.
 CUDA also checks MOSS-Image's glue (`moss_image.cu`: the norm, plain and modulated; q/k norm and rotary into packed
 rows; situ; the gated add), each output within float64's range at its torch bf16 points (five controls, each dropping
 one point), and `vision_kernel` at head dim 128 against `contract_attn.zig`'s float64 reference (`moss-contract`).
+
+CPU: Qwen3.5-2B's affine projection (4 bits, groups of 64, `cpu_kernels.zig`) at the widths the 2B calls it, one row
+to a 128-row prompt chunk, registered once for each chain count of its projection classes (16; 32 for the delta rule's
+a and b; 8 for the head), and its RMS norm over 2048-wide rows; each registration's runs take 1 to 8 threads in turn,
+so gate 2's five runs are five thread counts. Eight controls: a projection zeroing a non-finite activation, writing its
+activations, skipping the rows past its last block of eight, and summing each group in half; a norm taking a
+non-finite input as zero, writing its output over its input, scaling by the next element's weight, and summing its
+squares in bf16.
 
 ## CUDA records per nvcc release
 
