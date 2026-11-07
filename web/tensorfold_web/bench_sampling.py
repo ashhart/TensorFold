@@ -88,8 +88,7 @@ class Sampler:
         steps = [(t1, w1, t2, w2) for (t1, w1), (t2, w2) in itertools.pairwise(pts) if t2 - t1 <= bench.MAX_GAP_S]
         energy = sum((t2 - t1) * (w1 + w2) / 2 for t1, w1, t2, w2 in steps)
         span = sum(t2 - t1 for t1, _, t2, _ in steps)
-        # the whole measured period, from the start of the measured work to now (the work just ended): the readings
-        # cover part of it, and the energy of the part they miss is not in the figure
+        # Energy covers the sampled part of the full work interval; unsampled work remains uncounted.
         end = max(rows[-1][0] if rows else start, time.monotonic() - self.t0 if live else 0.0)
         window = max(0.0, end - start) if self.measured_from is not None else \
             (rows[-1][0] - rows[0][0] if len(rows) > 1 else 0.0)
@@ -97,8 +96,7 @@ class Sampler:
         # an idle reading above the run's average (taken while a load was settling) gives no energy below zero
         above = max(0.0, energy - (self.idle_watts or 0.0) * span) if self.idle_watts is not None else None
         flags = [row[5] for row in rows if len(row) > 5 and row[5] is not None]
-        # how long the machine was slowed: each throttled reading until the next one (or the end of the measured
-        # work), a reading's interval rather than the sampling period, since boundary readings come between
+        # Throttle duration uses each reading's actual interval, including boundary samples.
         stamps = [row[0] for row in rows] + [end]
         throttled_s = round(sum(max(0.0, min(stamps[i + 1], end) - row[0]) for i, row in enumerate(rows)
                                 if len(row) > 5 and row[5]), 2)
@@ -265,4 +263,3 @@ def machine_facts() -> dict:
     m = detect().to_dict()
     return {k: m.get(k) for k in ("os", "os_version", "arch", "chip", "ram_bytes", "unified_memory", "gpus",
                                   "backend", "tensorfold_version", "gpu_ceiling_bytes")}
-

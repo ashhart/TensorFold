@@ -8,7 +8,13 @@ import math
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from importlib.resources import files
 from typing import ClassVar
+
+
+def native_version() -> str:
+    return json.loads(files("tensorfold_web").joinpath("data/native-version.json").read_text())["version"]
+
 
 MODEL = "Qwen3.8-27B"
 REPLY = ("This is the mock engine that ships with TensorFold Web. It streams a canned reply at about 27 tokens "
@@ -24,8 +30,7 @@ class State:
     live = 0
     seen: ClassVar[set[str]] = set()              # prompt openings already read: the prompt cache
     lock = threading.Lock()
-    # a hybrid model's template, for the tests: fields it refuses with a 400, and the fields that turn thinking off
-    # (in chat_template_kwargs or at the top level); with `thinks` on, a request that turns nothing off reasons first
+    # The test template can refuse fields or reason unless an accepted off switch is supplied.
     thinks = False
     refuses: ClassVar[set[str]] = set()
     off_by: ClassVar[set[str]] = {"enable_thinking"}
@@ -33,8 +38,7 @@ class State:
     # another engine, for the tests: no `tensorfold` block on replies (so no prefill time), owned by someone else
     plain = False
     no_prompt_scores = False                       # an engine without `prompt_logprobs`, as on Metal: a 400
-    # Living Weights, as TensorFold 1.0.7 serves it with --slide: facts learned in turn, a fact naming "unknowable"
-    # missed; questions sharing a long word with a kept fact are answered with it
+    # The stand-in learns each fact except unknowable ones and recalls facts sharing a long question word.
     facts: ClassVar[list[dict]] = []
 
 WINDOW = 32768
@@ -93,6 +97,10 @@ def _handler(rate_tps: float, api_key: str | None = None):
                                           "decode_tokens_per_second": rate_tps if live else 0.0,
                                           "prefill_tokens_per_second": 1420.0 if live else 0.0},
                                  "mock": True})
+            elif p == "/version":
+                if not self._authorized():
+                    return self._json(401, {"error": {"message": "invalid API key"}})
+                self._json(200, {"version": native_version(), "mock": True})
             elif p.endswith("/models"):
                 if not self._authorized():
                     return self._json(401, {"error": {"message": "invalid API key"}})
@@ -151,8 +159,7 @@ def _handler(rate_tps: float, api_key: str | None = None):
                                         "questions": [], "source": body.get("source")})
                     ids.append(State.facts[-1])
                 event("fact", {"id": ids[-1]["id"], "text": f})
-            # each fact's fate is settled before the events go out, so a client that leaves early finds the same graph:
-            # like an engine that had already learned what it was learning when the request went away
+            # Settle each fact before streaming events so a disconnected client sees the same completed graph.
             for fact in ids:
                 kept = "unknowable" not in fact["text"].lower()
                 fact["state"] = "learned" if kept else "missed"
@@ -301,8 +308,7 @@ def _handler(rate_tps: float, api_key: str | None = None):
                     self.wfile.flush()
                 else:
                     time.sleep(prefill + n / rate_tps)
-                    # TensorFold 1.0.5's log-probabilities: each word likely at 0.8, the rest spread over others;
-                    # the same with drafts or without, as exact decoding gives
+                    # Drafted and plain stand-in replies expose identical token log-probabilities.
                     top_n = min(20, int(body.get("top_logprobs") or 0))
 
                     def entry(i: int) -> dict:
@@ -318,8 +324,7 @@ def _handler(rate_tps: float, api_key: str | None = None):
                                                   "message": {"role": "assistant", "content": " ".join(words[:n])}}],
                                      "usage": {"prompt_tokens": prompt_tokens, "completion_tokens": n,
                                                "total_tokens": prompt_tokens + n},
-                                     # the runtime block on a whole reply too, so a reference asked for drafts off
-                                     # can be seen to be off
+                                     # Whole replies retain the runtime block so drafts-off requests can be verified.
                                      **({} if State.plain else {"tensorfold": {"engine": "mock", "drafts": drafts},
                                                                 "speculative": {"drafted": n if drafts else 0}})})
             except (BrokenPipeError, ConnectionResetError):

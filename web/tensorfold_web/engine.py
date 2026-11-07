@@ -128,19 +128,18 @@ class Engine:
         self._reader: threading.Thread | None = None   # follows the current engine's log
         self._subscribers: list[Any] = []
         self._lock = threading.Lock()
-        self._client = httpx.Client(timeout=2.0)
+        self._client = httpx.Client(trust_env=False, timeout=2.0)
         self.last_health: Health | None = None
         self.command: list[str] | None = None
         self.startup: dict[str, float] = {}      # numbers read from the engine's startup lines
-        # the CUDA server's totals at each reader's previous poll: the page and the history poll at their own pace, and
-        # a rate covers the time since the same reader last asked
+        # Each poll reader owns its counter baseline so independent polling rates remain meaningful.
         self._counters: dict[str, dict[str, float]] = {}
+        self.mock_version: str | None = None
         self.kind: str | None = None             # "native" or "python": the engine an owned process runs
         self._stopping = False                   # a stop was asked: its exit code is not a failure
         self._rates_lock = threading.Lock()      # the counters' baseline, moved by one caller at a time
         self._window_asked: int | None = None    # the generation /tokenize was asked under, once per target
-        # the engine's address and key change together, under this lock; each change is a new generation, and a
-        # reading begun under an older one is read again rather than let out (see health())
+        # Target generations prevent a reading begun before an address or key change from escaping afterward.
         self.target_lock = threading.Lock()
         self.generation = 0
 
@@ -249,8 +248,7 @@ class Engine:
             log = self._log_path()
             flags = (getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
                      if os.name == "nt" else 0)
-            # appended to, so the file can start over under the engine (see _pump): with "wb" the engine would go on
-            # writing at its old offset into a sparse file
+            # Append mode permits log rotation without leaving a sparse hole at the engine's old offset.
             log.write_bytes(b"")
             with contextlib.suppress(OSError):
                 os.chmod(log, 0o600)                    # what the engine logs (learned facts too) is this user's alone
@@ -343,8 +341,7 @@ class Engine:
                         say(_redrawn(line))
                 break
             with contextlib.suppress(OSError):
-                # the engine appends (O_APPEND on POSIX), so the file can start over under it; on Windows an inherited
-                # handle keeps its offset, which no engine there needs today: to revisit with a Windows engine
+                # POSIX O_APPEND permits truncation; review inherited offsets before supporting Windows engines.
                 if os.path.getsize(log) > LOG_MAX_BYTES:
                     os.truncate(log, 0)
                     f.seek(0)
@@ -356,8 +353,7 @@ class Engine:
         with self._lock:
             if child is not self.proc:
                 return
-            # a binary without a SIGTERM handler exits -15 on the stop we asked for, and one that took too long to
-            # stop was killed by stop() itself (-9): either is a stop, not a failure
+            # SIGTERM and a kill requested by stop() are deliberate stops, not engine failures.
             self.exit_code = 0 if self._stopping and child.returncode in (-15, 143, -9, 137) else child.returncode
             self._stopping = False
             self._forget_state(child.pid)
@@ -403,8 +399,7 @@ class Engine:
 
     # -- health ------------------------------------------------------------------------
     def health(self, _depth: int = 0, reader: str = "page") -> Health:
-        # the target read once, address and key together: a change while this poll runs must not send the new key to
-        # the old engine, nor let the old engine's answer stand for the new one
+        # Read the address and key together so target changes cannot leak a key or publish the wrong reply.
         gen, base, key = self.target()
         hdrs = {"Authorization": f"Bearer {key}"} if key else {}
         try:
@@ -467,8 +462,7 @@ class Engine:
                                       headers=hdrs)
                 if r.status_code == 200 and isinstance(r.json().get("max_model_len"), int):
                     h.context_length = int(r.json()["max_model_len"])
-        # published under the target lock, and only if the target is still the one read: a change of engine at any
-        # moment of this poll leaves nothing of the old engine behind (rates, the latest reading)
+        # Publish readings and rate baselines only while their target generation remains current.
         with self.target_lock:
             current = self.generation == gen
             if current:
@@ -520,8 +514,7 @@ class Engine:
     def info(self, _depth: int = 0, reader: str = "page") -> dict:
         st = self.status(reader)
         tf_available = native.find_binary() is not None or tensorfold_command() is not None   # file checks, no lock
-        # the reading and the settings described together, under the target lock: an engine replaced at any moment
-        # after the reading is never described with the old engine's model or window
+        # Snapshot settings with the reading so a replaced engine cannot inherit its predecessor's model or window.
         with self.target_lock:
             stale = getattr(st, "generation", self.generation) != self.generation
             if not stale:

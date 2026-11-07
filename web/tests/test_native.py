@@ -4,6 +4,7 @@ import json
 import os
 import stat
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -36,6 +37,7 @@ def fake_binary(tmp_path, monkeypatch):
     script = tmp_path / "tensorfold-native"
     script.write_text(f"""#!{sys.executable}
 import sys
+from dataclasses import replace
 args = sys.argv[1:]
 if args == ["--version"]:
     print("tensorfold-native 1.0.2")
@@ -134,7 +136,7 @@ def test_catalog_shows_what_the_engine_reads_of_a_native_checkpoint(fake_binary)
     cat = Catalog()
     nemotron = next(e for e in cat.entries if e.native)
     assert cat.engine_facts(nemotron)["floor_bytes"] == int(19.27 * 1024**3)
-    other = next(e for e in cat.entries if not e.native)
+    other = replace(nemotron, id="example/non-native", native=False)
     assert cat.engine_facts(other) is None                   # the Python line's models are not asked
 
 

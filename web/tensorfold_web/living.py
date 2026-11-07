@@ -56,8 +56,7 @@ def meta_dir(name: str) -> Path:
         d.mkdir(parents=True, exist_ok=True)
         for x in (root() / ".studio", d):
             x.chmod(0o700)
-    # each item moved on its own, so a migration a stop interrupted goes on at the next call; a folder that is a model
-    # (a copy an earlier TensorFold Web allowed to be named "<name>.versions") is never taken for another copy's data
+    # Move migration items independently; a model named <name>.versions must never be treated as version metadata.
     for old, new in ((f"{name}.studio.json", "meta.json"), (f"{name}.facts.json", "facts.json"),
                      (f"{name}.lessons.json", "lessons.json"), (f"{name}.checkset.json", "checkset.json"),
                      (f"{name}.versions", "versions"), (f"{name}.checks", "checks")):
@@ -287,7 +286,7 @@ class Target:
         if schema is not None:
             body["response_format"] = {"type": "json_schema", "json_schema": {"name": "facts", "schema": schema,
                                                                               "strict": True}}
-        r = httpx.post(self.base + "/v1/chat/completions", json=body, timeout=timeout,
+        r = httpx.post(trust_env=False, url=self.base + "/v1/chat/completions", json=body, timeout=timeout,
                        headers={"Authorization": f"Bearer {self.key}"} if self.key else {})
         if r.status_code >= 400:
             raise RuntimeError(f"the engine answered {r.status_code}: {r.text[:200]}")

@@ -11,9 +11,7 @@ from starlette.background import BackgroundTask
 HOP = {"host", "content-length", "connection", "keep-alive", "transfer-encoding", "te", "trailer", "upgrade",
        "proxy-authorization", "proxy-authenticate"}
 STUDIO_HEADERS = {"x-studio-token"}
-# The browser's Origin names TensorFold Web's page, not the engine. TensorFold's server refuses a request whose Origin
-# differs from its own address (zig/src/server/request_guard.zig), so the relay drops it. TensorFold Web's own gate has
-# already refused cross-site changes before a request reaches the relay.
+# Web checks the browser Origin itself; the engine relay drops it to satisfy the engine's own Origin check.
 BROWSER_ONLY = {"origin"}
 STUDIO_PARAMS = {"token"}
 ENGINE_AUTH = {"authorization", "x-api-key"}
@@ -30,7 +28,7 @@ class Proxy:
         self._key = api_key_getter or (lambda: None)
         # address and key read together, once per request: a change of engine midway never sends one's key to the other
         self._target = target or (lambda: (self._url(), self._key()))
-        self._client = httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=5.0))
+        self._client = httpx.AsyncClient(trust_env=False, timeout=httpx.Timeout(600.0, connect=5.0))
 
     def upstream_headers(self, incoming: list[tuple[str, str]], key: str | None = None, *,
                          snapshot: bool = False) -> dict[str, str]:
@@ -70,7 +68,6 @@ class Proxy:
             finally:
                 await resp.aclose()
 
-        # closed after the response whatever happened to the body (a client gone before its first chunk leaves the
-        # generator never started); closing twice is harmless
+        # Close after any response, even if its body generator never started; repeated close is harmless.
         return StreamingResponse(body_iter(), status_code=resp.status_code, headers=out_headers,
                                  background=BackgroundTask(resp.aclose))

@@ -57,8 +57,7 @@ def _stream(client: httpx.Client, url: str, headers: dict, body: dict, cancel: t
         with client.stream("POST", url, headers=headers, json=body) as r:
             opened.append(r)
             if r.status_code != 200:
-                # at most 4 KB and 10 s of an error body, and none after a cancel, even while a read is blocked: an
-                # engine that never ends one must not hold the run, nor the gate it keeps, forever
+                # Error bodies are limited to 4 KB and 10 seconds; cancellation must also release the run's gate.
                 text = httpread.error_text(r, cancel=cancel)
                 try:
                     msg = json.loads(text).get("error", {}).get("message") or text
@@ -158,8 +157,7 @@ def measure(rep: Reply) -> dict:
     tokens = rep.usage.get("completion_tokens")
     ttft_client = (rep.first_at - rep.sent_at) if rep.first_at else None
     decode_client = (rep.end_at - rep.first_at) if rep.first_at else None
-    # a stream event may carry several tokens (drafts kept together): without the engine's count there is no token
-    # figure, only events, kept apart; a speed per token then comes from the engine's block or not at all
+    # Without engine token counts, stream events remain events and cannot establish a token rate.
     tps_client = tokens / decode_client if tokens and decode_client and decode_client > 0 else None
     from_engine = rt.get("tokens_per_second") is not None
     return {
@@ -170,8 +168,7 @@ def measure(rep: Reply) -> dict:
         "reasoning_tokens": (rep.usage.get("completion_tokens_details") or {}).get("reasoning_tokens"),
         "tps": rt["tokens_per_second"] if from_engine else tps_client,
         "ttft": rt.get("time_to_first_token", ttft_client),
-        # with reasoning, the answer starts later than the first token; TensorFold Web's clock, as the engine has no
-        # field
+        # The page times the first answer token separately from reasoning because the engine does not report it.
         "ttft_answer": (rep.answer_at - rep.sent_at) if rep.answer_at and rep.reasoning else None,
         "prefill_s": rt.get("prefill_seconds"),
         "timing": "engine" if from_engine else "studio",
@@ -180,4 +177,3 @@ def measure(rep: Reply) -> dict:
         "tokens_per_event": (tokens / rep.events) if tokens and rep.events else None,
         "wall_s": rep.end_at - rep.sent_at, "finish": rep.finish, "sha": rt.get("token_sha"), "runtime": rt,
     }
-

@@ -46,4 +46,3 @@ class _Child:
             raise subprocess.TimeoutExpired("engine", timeout) from exc
         except psutil.Error:
             pass
-

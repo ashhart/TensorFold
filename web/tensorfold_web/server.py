@@ -470,7 +470,7 @@ def create_app(*, settings: settings_mod.Settings | None = None, engine: Engine 
 
     def engine_get(path: str) -> httpx.Response:
         key = eng.key_in_use()
-        return httpx.get(s.engine_url.rstrip("/").removesuffix("/v1") + path, timeout=10.0,
+        return httpx.get(trust_env=False, url=s.engine_url.rstrip("/").removesuffix("/v1") + path, timeout=10.0,
                          headers={"Authorization": f"Bearer {key}"} if key else {})
 
     def no_store(resp: Response) -> Response:
@@ -528,7 +528,7 @@ def create_app(*, settings: settings_mod.Settings | None = None, engine: Engine 
         return name
 
     server_security.install(_engine_key_given, allowed_hosts, app, logs_cookie, token, view_cookie, LOOPBACK_NAMES)
-    machine = server_system.install(app, cat, kept, s, used)
+    machine = server_system.install(app, cat, kept, s, used, eng)
     engine_info = server_engine.install(_start_held, app, bind_host, cat, checker, dl, eng, friendly_name, gate, held_in_thread, links, logs_cookie, s, signals, start_lock, token, used, LOOPBACK_NAMES)
     server_bench.install(_two, app, bench_go, comparisons, concurrency, engine_named, quality_info, runner, s, served_name)
     server_settings.install(app, eng, gate, s, save_settings, user_settings)

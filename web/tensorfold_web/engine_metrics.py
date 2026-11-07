@@ -177,4 +177,3 @@ def prompt_cache_of(m: dict[str, float]) -> dict | None:
     if "prompt_tokens_cached_total" not in m:
         return None
     return {"restored": int(m["prompt_tokens_cached_total"]), "prompt": int(m.get("prompt_tokens_total", 0))}
-

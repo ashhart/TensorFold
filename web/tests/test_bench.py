@@ -45,9 +45,7 @@ def test_suites_load_with_their_passages():
     assert len(bench.pick(data, "profile")) == 14 and len(bench.pick(data, "profile", ["code"])) == 2
 
 
-# The digest of each published version of suites.json. Editing a prompt or a passage changes the digest: raise the
-# file's "version" and add its new digest here, so runs on different prompts are never compared as if they were the
-# same.
+# Changing suite prompts requires a new version and digest so unlike inputs are never compared as identical.
 SUITE_DIGESTS = {1: "d691a57cc2d9"}
 
 
@@ -79,8 +77,7 @@ def test_thinking_is_turned_off_the_first_way_the_engine_accepts(tmp_path, mock,
 
 
 def test_a_refused_way_is_followed_by_another_explicit_off(tmp_path, mock, hybrid):
-    # the template refuses thinking_mode, and only its own "thinking" field turns reasoning off: dropping fields
-    # would leave it reasoning, so the Bench must go on until a way that is both accepted and off
+    # Try accepted template fields until thinking is actually off; merely dropping refused fields is insufficient.
     hybrid.refuses, hybrid.off_by = {"thinking_mode"}, {"thinking"}
     store = bench.Store(tmp_path / "bench.sqlite")
     runner = _runner(store, lambda: (mock, None, "Qwen3.8-27B"))

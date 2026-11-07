@@ -14,14 +14,10 @@ TIMEOUT = 15.0
 # where the official installer, Homebrew and release archives put the binary, for a TensorFold Web whose PATH lacks them
 CANDIDATES = ("~/.tensorfold/bin/tensorfold", "/opt/homebrew/bin/tensorfold", "/usr/local/bin/tensorfold", "~/.local/bin/tensorfold-native",
               "/opt/tensorfold/bin/tensorfold-native")
-# `serving NAME at URL (sampling: …; drafts: on; context: 262144; loaded in 13.9s)`
-# the engine's `serving …` line, the log fallback for what no endpoint gives (the context and the load time). Main
-# (zig/src/server/serve.zig) writes the drafts as a phrase ("MTP + copies", "DFlash2 (repo) + copies", "none", "off")
-# and the context as a number or "unlimited"; 1.0.x wrote "on" or "off" and always a number.
+# Parse serving lines across native releases, including phrase-valued drafts and unlimited context.
 _SERVING = re.compile(r"serving (?P<name>\S+) at (?P<url>\S+) \(.*?drafts: (?P<drafts>[^;]*); "
                       r"context: (?P<context>\d+|unlimited); loaded in (?P<loaded>[\d.]+)s\)")
-# the CUDA engine's sizing line: `model 17.99 GiB; 8 streams at once, 0.18 GiB each at a 16384-token window, of
-# 83.8 GiB left after a 12.2 GiB reserve`
+# Parse the CUDA sizing line's model, streams, per-stream bytes, window and reserve.
 _CUDA_SIZING = re.compile(r"model (?P<model>[\d.]+) GiB; (?P<streams>\d+) streams at once, (?P<each>[\d.]+) GiB each at a "
                           r"(?P<window>[\d,]+)-token window, of (?P<left>[\d.]+) GiB left after a (?P<reserve>[\d.]+) GiB reserve")
 _PROMPT_CACHE = re.compile(r"a (?P<gib>[\d.]+) GiB prompt cache")      # 1.0.5's CUDA sizing line
@@ -31,8 +27,7 @@ _INFO_BYTES = re.compile(r"\((\d+) bytes\)")
 _INFO_GIB = re.compile(r"([\d.]+) GiB")
 
 _found: dict[str, str | None] = {}            # binary path by PATH seen, so a poll does not spawn processes
-# what a binary says of itself, by the file it is (its link's target and its time): an upgrade behind the same link,
-# as `brew upgrade` or a new archive linked in place, is read afresh without restarting TensorFold Web
+# Cache binary facts by resolved file and timestamp so an in-place upgrade is detected.
 _caps: dict[tuple, dict] = {}
 _flags: dict[tuple, dict[str, dict]] = {}
 _versions: dict[tuple, str | None] = {}
@@ -262,8 +257,7 @@ def parse_startup(line: str) -> dict[str, float]:
     return out
 
 
-# a model the binary lists by family but will not load on this chip, such as the 27B on an M6 under 1.0.6:
-# "cannot load <path> (QwenMetalQualificationRequired)", said before any weight is read
+# A family's presence does not override a checkpoint or chip qualification refusal.
 _REFUSED = re.compile(r"cannot load .*\((?P<why>\w*QualificationRequired)\)")
 
 

@@ -129,7 +129,7 @@ def validate_name(value: object, fallback: str) -> str:
 def client() -> httpx.Client:
     """One client per probe or test; tests put another TensorFold Web's app behind it."""
 
-    return httpx.Client(timeout=TIMEOUT, follow_redirects=False)
+    return httpx.Client(trust_env=False, timeout=TIMEOUT, follow_redirects=False)
 
 
 def _get(client: httpx.Client, url: str, path: str, token: str | None) -> httpx.Response:
@@ -176,8 +176,7 @@ def probe_all(peers: list[dict]) -> list[dict]:
         return list(pool.map(probe, peers))
 
 
-# why two machines on different TensorFold releases are not compared like for like: since 1.0.10, Nemotron on CUDA
-# sums in another order, so a reply can part from an earlier release's at a near tie
+# Different releases may reduce in different orders, so near ties are not a like-for-like exactness test.
 ENGINE_SKEW = ("replies can part at a near tie between releases (Nemotron on CUDA since 1.0.10), so KL and exactness "
                "measured across the two compare releases as well as machines: update both to the same release")
 

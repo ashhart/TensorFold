@@ -13,9 +13,7 @@ DEFAULT_WORKSPACE = 3 * GIB   # one prompt chunk, caches and draft rows when a m
 COMFORT_TOKENS = 16_384       # context at the default budget that counts as "fits"
 MIN_TOKENS = 2_048            # context at the raised budget that still counts as "fits, tight"
 RETAINED_COPIES = 2           # TensorFold sizes the window so a request's prompt can also be kept for the next turn
-# TensorFold 1.0's native engine sizes its own memory up to what macOS lets the GPU hold, with no budget setting;
-# measured on the M6 (10 Oct 2026): Nemotron idles 4.2 GiB above `info`'s floor (lanes, caches), then about 13 KB a
-# token of prompt. Its window is not doubled for a kept prompt as the Python line's is.
+# Native admission uses the GPU limit plus measured runtime overhead, without doubling a retained prompt.
 NATIVE_OVERHEAD = int(4.2 * GIB)
 NATIVE_COPIES = 1
 RAM_CLASSES_GB = (16, 24, 32, 36, 48, 64, 96, 128, 192, 256, 512)
@@ -53,9 +51,7 @@ def cuda_capacity(memory_bytes: int, *, unified: bool) -> Capacity:
 
     floor = max(4 * GIB, memory_bytes // 10)
     share = max(0.1, (memory_bytes - floor) / memory_bytes) if memory_bytes else 0.1
-    # checked on a GB10 (GX10, 10 Oct 2026): TensorFold 1.0.4 kept a 12.2 GiB reserve of 122 GB, this very rule.
-    # Only that floor was measured there: the process reserve and the room kept for a conversation are the Mac's
-    # figures, hence "floor-measured". Discrete cards are not measured yet
+    # The GB10 memory floor is measured; conversation reserves use Mac estimates and discrete cards remain unchecked.
     return Capacity(memory_bytes, share, share, 1 * GIB if not unified else PROCESS_RESERVE, None,
                     "gb10-floor-measured" if unified else "cuda-unverified")
 
