@@ -2,6 +2,10 @@
 
 Each release's page on GitHub has its notes and measurements. See [the 1.0.0 release notes](RELEASE-NOTES-1.0.0.md) for the native binary's supported models and migration details.
 
+## Unreleased
+
+- GLM-5.3-Flash on CUDA: `TF_GLM_KV_SPLIT=1`, off by default, takes each stream's KV pages from one owner rank's class and lays each page's pooled keys and latent rows in two regions, each with its own table; ranks that disagree stop before loading. In this part every rank still holds every latent row, so it saves no memory, and a class holds a whole window, so a split server can admit fewer streams. Unset, the pool and the pages are as before (#2415, part 1 of #1431). Thanks to @wojo.
+
 ## 1.2.9
 
 - Tests: the sessions writes test on real files does the same coverage with 40 requests at half the token sizes, so it no longer times out on busy CI runners (#3347).
