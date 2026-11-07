@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- HIP: the qwen3_5 engine reads a DFlash2 drafter's `config.json` against its target, refusing one it can't run, and loads its weights as MLX affine-4 (groups of 64), quantized on the host as on CUDA; nothing serves the drafter yet (#2477, part 2 of #1563). Thanks to @AbrahamCete.
+
 - Qwen3.8-27B on Metal: prompt chunks of 64 rows or more run the wide projections with half operands wherever a tile's inputs all fit in half, and keep the fp32 path elsewhere, so logits and tokens are bit-equal to before. Served prefill is 2-3% faster on an M3 Pro (#2435, part of #2089). Thanks to @jschmied.
 - TensorFold Web, a local web app laid out like the desktop app (chat, models, learning, API, benchmarks and clusters), ships in `web/`: `tensorfold web` opens it, and on first use offers to install it with uv, pinned to the same release. It starts without network access and reaches a local engine directly, past any system proxy. Adopted from @Stephane-Eden's TensorFold Studio: thank you, Stephane (#1781).
 - Qwen3.5 and Qwen3.6 on HIP: sampled streams with an MTP head draft on the graphed head chain, as greedy ones do, with the same tokens: 4-12% more tokens a second at temperature 1.0 on gfx1151 (#2455). Thanks to @AbrahamCete.
