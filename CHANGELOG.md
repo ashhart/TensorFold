@@ -17,7 +17,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
   same bf16 layer math as Metal (#2302, fixes #2300).
 
 - Ripple-65B-Preview drafts on native CUDA with the publisher's DFlash2 drafter as published (`--drafter`); drafted
-  replies equal plain ones (#PR2).
+  replies equal plain ones (#2475).
 
 - Internal: 42 more lean findings fixed in the tests' comments and the tools' docstrings, with no change in behaviour (#2315).
 
