@@ -18,6 +18,8 @@ pub const Readout = struct {
         consume: *const fn (ctx: *anyopaque, st: *State, rows: u64, first_row: usize, count: usize, stream: cuda.Stream) anyerror!void,
         finish: *const fn (ctx: *anyopaque, st: *State, logits: []u16) anyerror!void,
         close: *const fn (ctx: *anyopaque, st: *State) void,
+        /// The readout's own memory freed once its states are closed (null: the caller owns it).
+        deinit: ?*const fn (ctx: *anyopaque) void = null,
     };
 };
 
@@ -37,6 +39,7 @@ pub const Side = struct {
         var it = side.open.valueIterator();
         while (it.next()) |o| side.readout.?.vtable.close(side.readout.?.ctx, o.state);
         side.open.deinit(gpa);
+        if (side.readout) |r| if (r.vtable.deinit) |f| f(r.ctx);
     }
 };
 
