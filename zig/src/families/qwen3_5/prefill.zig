@@ -1,16 +1,15 @@
 //! Prompt reuse and capture hooks around the unchanged Qwen forward: a pass whole, or a chunk a call (#3021).
 const std = @import("std");
 const lanes = @import("lanes");
-const st = @import("state.zig");
-const snapshot = @import("snapshot.zig");
 
-pub fn run(cache: *st.Cache, stream: *lanes.Stream, chunk: usize, ctx: anytype, comptime advance: anytype) !void {
-    var at = open(cache, stream);
+/// `snapshot` is the backend's saved-state module (Metal's snapshot.zig, the CPU's cpu_state.zig): `Snap`, `restore`.
+pub fn run(cache: anytype, stream: *lanes.Stream, chunk: usize, ctx: anytype, comptime advance: anytype, comptime snapshot: type) !void {
+    var at = open(cache, stream, snapshot);
     while (!try step(cache, stream, &at, chunk, ctx, advance)) {}
 }
 
 /// The pass's first row: a kept state of the prompt's prefix restored into `cache`, or 0.
-pub fn open(cache: *st.Cache, stream: *lanes.Stream) usize {
+pub fn open(cache: anytype, stream: *lanes.Stream, comptime snapshot: type) usize {
     const ids = stream.prompt();
     var at: usize = 0;
     stream.cached = 0;
@@ -29,7 +28,7 @@ pub fn open(cache: *st.Cache, stream: *lanes.Stream) usize {
 }
 
 /// One chunk from `at` through `advance`, at the whole pass's cut; true once the prompt is in (at once if it is).
-pub fn step(cache: *st.Cache, stream: *lanes.Stream, at: *usize, chunk: usize, ctx: anytype, comptime advance: anytype) !bool {
+pub fn step(cache: anytype, stream: *lanes.Stream, at: *usize, chunk: usize, ctx: anytype, comptime advance: anytype) !bool {
     const ids = stream.prompt();
     if (at.* >= ids.len) return true;
     if (stream.isCancelled()) {

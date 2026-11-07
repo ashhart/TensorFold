@@ -108,7 +108,7 @@ pub const Metal = struct {
         const self = cast(ptr);
         const cache = try self.opening(stream);
         errdefer self.drop(stream);
-        try prefill.run(cache, stream, self.options.chunk, self, promptChunk);
+        try prefill.run(cache, stream, self.options.chunk, self, promptChunk, snapshot);
     }
 
     /// The prompt checked, a lane admitted (paged) and the stream's cache made: what a pass runs on.
