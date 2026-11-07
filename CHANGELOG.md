@@ -18,6 +18,10 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - LFM2.5-24B-A2B serves on one NVIDIA GPU from the MLX 4-bit export, on the shared CUDA kernels, with `--parallel`
   streams and copy drafts; there is no drafter or prompt cache yet (#1492, part of #1488). Thanks to @jschmied.
 - HIP: capture a drafter's requested target-layer taps in each stream's ring, with graph-on/off and planted kernel controls (#2314).
+- LightOnOCR-3 on HIP: the native server reads `lightonai/LightOnOCR-3-0.8B`, `-1B` and `-4B` (BF16) and serves their
+  OCR prompts, token-exact against Transformers apart from exact BF16 logit ties. With `--vision`, a Qwen 3.5 checkpoint
+  whose vision tower the HIP engine can't read (such as Qwen3.5-9B's 72-wide heads) is now refused at start-up, instead
+  of starting text-only and answering each image with a 400 (#1965, for #1927).
 
 ## 1.2.4
 
