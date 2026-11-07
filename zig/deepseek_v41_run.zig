@@ -243,6 +243,8 @@ pub fn main(init: std.process.Init) !void {
     });
     defer model.deinit();
     const ready = mtl.clock.seconds();
+    // The operator self-check runs before the measured window: its fixture I/O is diagnosis, not model execution.
+    if (is_oracle or is_oracle_fp64) try operators.run(a, io, model, dir);
     const before = try counters();
     var execution_after: ?Counters = null;
     var execution_error: ?anyerror = null;
@@ -263,6 +265,8 @@ pub fn main(init: std.process.Init) !void {
         .final_footprint_bytes = after.footprint,
         .load_seconds = ready - begin,
         .measurement_scope = if (execution_after != null) "model_execution" else "execution_and_diagnostic_io",
+        .diagnostic_self_check_outside_window = is_oracle or is_oracle_fp64,
+        .engram_streaming = model.stream != null,
         .execution_disk_read_bytes = after.disk_read - before.disk_read,
         .execution_pageins = after.pageins - before.pageins,
         .resident_gate_passed = resident_gate_passed,
@@ -339,11 +343,11 @@ fn execute(a: std.mem.Allocator, io: std.Io, model: *ds.Model, args: []const [:0
     } else if (is_draftloop) {
         try stagediff.loop(a, io, model, ids, dir, if (args.len > 6) try number(args[6]) else null, if (args.len > 7) try number(args[7]) else null);
     } else if (is_oracle) {
-        try operators.run(a, io, model, dir);
+        defer execution_after.* = counters() catch null;
         _ = try oracle.run(a, io, model, ids, map_blob, dir, identity);
     } else if (is_oracle_fp64) {
         // The same window against the FP64 chain (the reference chain at its ideal contract).
-        try operators.run(a, io, model, dir);
+        defer execution_after.* = counters() catch null;
         _ = try oracle.runF64(a, io, model, ids, map_blob, dir, identity);
     } else if (std.mem.eql(u8, mode, "margins")) {
         try margins.run(a, io, model, ids, dir, if (args.len > 6) try number(args[6]) else 1536);
