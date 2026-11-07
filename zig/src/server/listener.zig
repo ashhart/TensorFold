@@ -5,6 +5,7 @@ const platform = @import("sys");
 const posix = platform.posix;
 const net = std.Io.net;
 const log = @import("log.zig");
+const file_meta = @import("file_meta.zig").meta;
 const Threaded = std.Io.Threaded;
 
 /// The run has said once that accepts ran out of descriptors; a successful accept arms it again.
@@ -46,9 +47,8 @@ pub const Listener = struct {
         @memcpy(addr.path[0..path.len], path);
         var dir_buf: [@sizeOf(@TypeOf(addr.path)) + 1]u8 = undefined;
         const dir = try std.fmt.bufPrintSentinel(&dir_buf, "{s}", .{std.fs.path.dirnamePosix(path) orelse "."}, 0);
-        var st: c.Stat = undefined;
-        if (c.stat(dir, &st) != 0) return error.NoParentDirectory;
-        if (@as(u32, @intCast(st.mode)) & 0o022 != 0 and @as(u32, @intCast(st.mode)) & c.S.ISVTX == 0) return error.ParentWritableByOthers;
+        const parent = file_meta(-1, dir) orelse return error.NoParentDirectory;
+        if (parent.mode & 0o022 != 0 and parent.mode & 0o1000 == 0) return error.ParentWritableByOthers; // 0o1000: sticky
         const fd = c.socket(c.AF.UNIX, c.SOCK.STREAM, 0);
         if (fd < 0) return error.SocketFailed;
         errdefer _ = c.close(fd);
@@ -95,7 +95,7 @@ pub const Listener = struct {
                     const fd: posix.socket_t = @intCast(rc);
                     // A Unix peer reads as loopback; its user is checked, as not every OS enforces the mode.
                     if (l.unix_path != null) {
-                        if (peerUid(fd) == platform.c.geteuid()) return .{ .fd = fd, .peer = .{ .ip4 = .loopback(0) } };
+                        if (peerIsOwner(fd)) return .{ .fd = fd, .peer = .{ .ip4 = .loopback(0) } };
                         _ = posix.system.close(fd);
                         log.line("refused a Unix socket connection from another user", .{});
                         continue;
@@ -133,13 +133,13 @@ pub const Listener = struct {
 
 /// A path's device and inode.
 fn fileId(path: [:0]const u8) ?[2]u64 {
-    var st: platform.c.Stat = undefined;
-    if (platform.c.stat(path, &st) != 0) return null;
-    return .{ widen(st.dev), widen(st.ino) };
+    const m = file_meta(-1, path) orelse return null;
+    return .{ m.dev, m.ino };
 }
 
-fn widen(x: anytype) u64 {
-    return @as(@Int(.unsigned, @bitSizeOf(@TypeOf(x))), @bitCast(x));
+fn peerIsOwner(fd: posix.socket_t) bool {
+    if (comptime platform.windows) return false;
+    return peerUid(fd) == std.c.geteuid();
 }
 
 /// The effective user ID of a Unix socket's peer (SO_PEERCRED on Linux, getpeereid on macOS); null when unknown.
@@ -276,9 +276,7 @@ test "a Unix socket listener is owner-only, accepts its owner, refuses an existi
     var closed = false;
     defer if (!closed) listener.close();
     try std.testing.expectError(error.PathExists, Listener.openUnix(path));
-    var st: c.Stat = undefined;
-    try std.testing.expectEqual(@as(c_int, 0), c.stat(path, &st));
-    try std.testing.expectEqual(@as(u32, 0o600), @as(u32, @intCast(st.mode)) & 0o777);
+    try std.testing.expectEqual(@as(u32, 0o600), file_meta(-1, path).?.mode & 0o777);
     var addr: c.sockaddr.un = .{ .path = undefined };
     @memset(&addr.path, 0);
     @memcpy(addr.path[0..path.len], path);
