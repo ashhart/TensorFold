@@ -10,7 +10,7 @@ const STATE: Record<string, string> = { queued: 'waiting', learning: 'learningâ€
 const when = (t: number) => new Date(t * 1000).toLocaleString()
 const PHASE: Record<string, string> = { 'saving a version': 'keeping a point to go back to', 'checking before': 'asking it the questions before the lesson', learning: 'learning', 'checking after': 'asking it the questions again', 'rolling back': 'undoing the lesson', done: 'done' }
 
-/** The three steps of a lesson, the current one marked: a person always knows where they are. */
+
 function Steps({ at }: { at: 1 | 2 | 3 }) {
   const steps = ['What should it remember?', 'Here is what I understood', 'It learns']
   return (
@@ -22,8 +22,8 @@ function Steps({ at }: { at: 1 | 2 | 3 }) {
 // a copy's suggested name: the model's first word, in lower case ("nemotron-living")
 const suggest = (base: string, names?: Record<string, string>) => `${(names?.[base] ?? shortName(base)).split(/[\s-]/)[0].toLowerCase().replace(/[^a-z0-9]/g, '') || 'model'}-living`
 
-/** Teach: copies of a model that learn facts into their own weights (TensorFold's Living Weights), facts found and
- *  approved before anything is learned, the lesson as it goes, and what each copy has kept. */
+
+
 export default function Teach({ engine, toast, refreshEngine, stale }: Ctx) {
   const [view, setView] = useState<LivingView | null>(null)
   const [name, setName] = useState('')
@@ -45,7 +45,7 @@ export default function Teach({ engine, toast, refreshEngine, stale }: Ctx) {
     .catch((e) => { if (!unread.current) toast(`Not read: ${e.message ?? e}`, 'bad'); unread.current = true }), [toast])
   useEffect(() => { load() }, [load])
   useEffect(() => {                                        // "Teach this" in Chat hands the text over
-    try { const given = sessionStorage.getItem('tfs:teach-text'); if (given) { setText(given); sessionStorage.removeItem('tfs:teach-text') } } catch { /* no storage */ }
+    try { const given = sessionStorage.getItem('tfs:teach-text'); if (given) { setText(given); sessionStorage.removeItem('tfs:teach-text') } } catch {                  }
   }, [])
   const choring = view?.chore?.state === 'running'
   const starting = engine?.status === 'starting'
@@ -53,7 +53,7 @@ export default function Teach({ engine, toast, refreshEngine, stale }: Ctx) {
   useEffect(() => { if (!running) return; const t = setInterval(load, 2000); return () => clearInterval(t) }, [running, load])
   useEffect(() => { load() }, [engine?.status, engine?.model_repo, load])   // a copy served or stopped elsewhere
   const served = view?.served ?? null
-  useEffect(() => { if (previewCopy && served !== previewCopy) { setFacts(null); setPreviewCopy(null) } }, [served, previewCopy])   // a preview belongs to its copy
+  useEffect(() => { if (previewCopy && served !== previewCopy) { setFacts(null); setPreviewCopy(null) } }, [served, previewCopy])
   useEffect(() => { if (served) api.livingFacts(served).then(setLearned).catch(() => setLearned(null)); else setLearned(null) }, [served, view?.job?.status, view?.job?.items.filter((i) => i.state !== 'queued' && i.state !== 'learning').length])
 
   const create = () => run('create', async () => {

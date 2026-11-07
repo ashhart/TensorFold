@@ -94,7 +94,7 @@ export default function Models({ machine, engine, settings, refreshEngine, refre
       if (live) { await api.stop(); toast(`${engine?.model ?? 'The engine'} stopped`) }
       const fraction = m.verdict?.level === 'tight' ? m.verdict.budget_fraction : settings?.budget_fraction ?? null
       await api.start({ model: m.id, budget_fraction: fraction })
-      await Promise.all([refreshEngine(), refreshSettings()])        // the chosen model and budget are now the settings too
+      await Promise.all([refreshEngine(), refreshSettings()])
       toast(`Starting ${m.name}`)
     } catch (e) { setNotice(String(e)) } finally { setBusy(false) }
   }
@@ -175,8 +175,8 @@ export default function Models({ machine, engine, settings, refreshEngine, refre
                   {p?.running && <div className="progress"><i style={{ width: `${Math.round(p.fraction * 100)}%` }} /></div>}
                   {p?.failed && <div className="small" style={{ color: 'var(--bad)', marginTop: 4 }}>Download failed: {p.failed.error}</div>}</div>
                 <div className="v">{gb(m.size_bytes)}<small>{m.installed ? 'on this machine' : 'to download'}</small></div>
-                {/* three facts, each its own chip: does it fit in memory, can this machine's engine run it, is it on
-                    disk or loaded; on a phone this column is the only one shown */}
+
+
                 <div className="chipcol">
                   {m.verdict ? <span className={`chip ${m.verdict.level}`} title={m.verdict.reason}>{m.verdict.label}</span> : <span className="chip no">Size unknown</span>}
                   {!m.runs_here && <span className="chip no" title={m.runs_note ?? undefined}>Not on this engine</span>}

@@ -1,0 +1,9 @@
+{
+  "source": [
+    "app/src/lib/theme.ts",
+    "app/shared/theme-presets.ts",
+    "app/src/styles/index.css"
+  ],
+  "sourceHash": "28d5a31cb90250e6d504debfcda5c92a7ed2a32fc614e36153829c34c36749f1",
+  "preset": "tensorfold"
+}

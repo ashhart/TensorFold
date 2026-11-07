@@ -4,7 +4,7 @@
 
 const norm = (s: string) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase()
 
-/** Damerau-Levenshtein distance, stopping early once it exceeds ``max``. */
+
 function within(a: string, b: string, max: number): boolean {
   if (Math.abs(a.length - b.length) > max) return false
   const d = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)])
@@ -51,7 +51,7 @@ export function score(query: string, label: string): number | null {
   return total - text.length * 0.05              // a shorter label wins a tie
 }
 
-/** The items matching ``query``, best first; all of them, in their order, for an empty query. */
+
 export function rank<T>(query: string, items: T[], label: (t: T) => string): T[] {
   if (!query.trim()) return items
   return items.map((t, i) => ({ t, i, s: score(query, label(t)) }))

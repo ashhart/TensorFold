@@ -1,6 +1,6 @@
 // Why the AI running now cannot be taught, in one sentence for Home's tile; null when it can, or when nothing runs
 // yet (Teach then says what to start). The rules are Teach's own: a lesson needs an engine this TensorFold Web runs, a
-// machine whose engine learns, and a model of a family TensorFold learns into (a copy's `learnable`, a base in `bases`).
+
 import type { EngineInfo, LivingView } from './api'
 
 export function whyNotTeach(engine: EngineInfo | null, living: LivingView | null): string | null {

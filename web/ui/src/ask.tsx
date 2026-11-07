@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 
-/** A question asked in the page, where the action is, instead of the browser's own dialog: it can say what the
- *  action means, it looks like the rest of TensorFold Web, and Escape or "Keep" leaves things as they are. */
+
+
 export function Ask({ text, yes, danger, busy, onYes, onNo }: { text: ReactNode; yes: string; danger?: boolean; busy?: boolean; onYes: () => void; onNo: () => void }) {
   const first = useRef<HTMLButtonElement>(null)
   useEffect(() => { first.current?.focus() }, [])
@@ -16,7 +16,7 @@ export function Ask({ text, yes, danger, busy, onYes, onNo }: { text: ReactNode;
   )
 }
 
-/** A name asked in the page: prefilled, cleaned as typed when `clean` is given, Enter to accept, Escape to leave. */
+
 export function AskName({ text, initial, ok, clean, onOk, onCancel }: { text: ReactNode; initial: string; ok: string; clean?: (s: string) => string; onOk: (name: string) => void; onCancel: () => void }) {
   const [value, setValue] = useState(initial)
   const input = useRef<HTMLInputElement>(null)
@@ -33,5 +33,5 @@ export function AskName({ text, initial, ok, clean, onOk, onCancel }: { text: Re
   )
 }
 
-/** The usual cleaning of a copy's or a point's name: lower case, letters, digits, dashes and underscores. */
+
 export const cleanName = (s: string) => s.toLowerCase().replace(/[^a-z0-9_-]/g, '-')

@@ -7,7 +7,7 @@ import MonitorUsage from './MonitorUsage'
 
 const WINDOWS = [{ s: 1800, label: '30 min' }, { s: 3600, label: '1 h' }, { s: 8 * 3600, label: '8 h' }]
 
-/** Decode speed over the window, from the server's history: a reading missing for long is drawn as a gap. */
+
 function HistoryChart({ h, window }: { h: History; window: number }) {
   const W = 400, H = 64
   const end = h.from + window
@@ -51,7 +51,7 @@ function Spark({ values }: { values: number[] }) {
     </svg>
   )
 }
-/** This machine's memory by holder; the headroom, in GB, is what turns amber then red, not the bar. */
+
 function MemoryBar({ m }: { m: NonNullable<EngineInfo['machine_memory']> }) {
   const engine = Math.min(m.engine ?? 0, m.total - m.available)
   const other = Math.max(0, m.total - m.available - engine)
@@ -68,7 +68,7 @@ function MemoryBar({ m }: { m: NonNullable<EngineInfo['machine_memory']> }) {
   )
 }
 
-const uptime = (s: number | null) => (s == null ? '' : s < 60 ? 'under a minute' : clock(s).replace(/ \d+ s$/, ''))   // 12 min, 3 h 05 min, 2 d 4 h
+const uptime = (s: number | null) => (s == null ? '' : s < 60 ? 'under a minute' : clock(s).replace(/ \d+ s$/, ''))
 // TensorFold Web's own polling, which the engine logs on every request
 const POLL = /"GET \/(health|v1\/models|metrics)(\?[^"]*)? HTTP/
 
@@ -94,7 +94,7 @@ export default function Monitor({ engine, settings, refreshEngine, toast, stale,
 
   useEffect(() => {
     if (engine?.managed === false) { setLines(['The engine runs on another machine; its log is there.']); return }
-    // The browser retries a dropped stream by itself, but gives up for good on a refused one (a restarted TensorFold Web
+
     // asking for its token, a proxy error): then this opens a new one, waiting longer each time, up to 30 s.
     let es: EventSource | null = null
     let retry: ReturnType<typeof setTimeout> | undefined
@@ -124,7 +124,7 @@ export default function Monitor({ engine, settings, refreshEngine, toast, stale,
   useEffect(() => { if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight }, [shown.length])
 
   const restart = async () => {
-    const model = engine?.model_repo ?? settings?.model          // the engine's own checkpoint first, never a stale setting
+    const model = engine?.model_repo ?? settings?.model
     if (!model) { setErr('No model is recorded to restart.'); return }
     setBusy(true); setErr(null)
     try { await api.stop(); await api.start({ model }); await refreshEngine(); toast('Engine restarting') } catch (e) { setErr(String(e)) } finally { setBusy(false) }

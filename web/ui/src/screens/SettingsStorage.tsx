@@ -8,7 +8,7 @@ const SCOPES: { days: number | null; label: string }[] = [{ days: 30, label: 'ol
 const NOUN: Record<StorageStore['id'], [string, string]> = { bench: ['Bench run', 'Bench runs'], conversations: ['conversation', 'conversations'], usage: ['hour of usage', 'hours of usage'], history: ['reading', 'readings'] }
 const day = (t: number | null) => (t == null ? '—' : new Date(t * 1000).toLocaleDateString())
 
-/** Settings: what TensorFold Web keeps, and clean-ups by kind and age, each counted before it is done. */
+
 export default function SettingsStorage({ toast }: { toast: (t: string, k?: 'ok' | 'bad') => void }) {
   const [stores, setStores] = useState<StorageStore[] | null>(null)
   const [models, setModels] = useState<StorageModel[]>([])

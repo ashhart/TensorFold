@@ -12,8 +12,8 @@ const ICON: Record<Command['icon'], string> = {
 const KINDS: Record<string, string> = { quick: 'quick score', profile: 'usage profile', prefill: 'prefill sweep', load: 'load sweep', quality: 'quality', tools: 'tool calls' }
 const when = (t: number) => new Date(t * 1000).toLocaleString([], { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
 
-/** The command palette: screens, models to start or stop, the look, and once you type, every model, Bench run and
- *  conversation, each opening its own link. Opens with ⌘K or Ctrl+K; the matching forgives typos (`fuzzy.ts`). */
+
+
 export default function Palette({ open, onClose, stale, engine, settings, onTheme, toast, refreshEngine, refreshSettings }:
   { open: boolean; onClose: () => void; stale: boolean; engine: EngineInfo | null; settings: Settings | null; onTheme: (t: Settings['theme']) => void; toast: (t: string, k?: 'ok' | 'bad') => void; refreshEngine: () => Promise<unknown>; refreshSettings: () => Promise<unknown> }) {
   const [q, setQ] = useState('')
@@ -36,7 +36,7 @@ export default function Palette({ open, onClose, stale, engine, settings, onThem
 
   const commands = useMemo<Command[]>(() => {
     const go = (r: Route, label: string, k: string): Command => ({ id: `go-${r}`, label, hint: k, icon: 'go', run: () => { location.hash = `#${r}` } })
-    const out: Command[] = ROUTES.map((r, i) => go(r, `Go to ${r[0].toUpperCase()}${r.slice(1)}`, String(i + 1)))   // the sidebar's order and keys
+    const out: Command[] = ROUTES.map((r, i) => go(r, `Go to ${r[0].toUpperCase()}${r.slice(1)}`, String(i + 1)))
     // no engine commands while TensorFold Web does not answer: they would act on figures that may be out of date
     for (const m of stale ? [] : models.filter((m) => m.installed && m.runs_here)) {
       const running = !!engine?.model && shortName(m.id).startsWith(engine.model)

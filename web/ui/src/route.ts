@@ -5,7 +5,7 @@ import { useEffect, useRef } from 'react'
 
 export const screenOf = (hash = location.hash) => hash.replace(/^#/, '').split('/')[0]
 
-/** What the address names on ``screen``, or null when it names nothing there (or another screen). */
+
 export function subOf(screen: string, hash = location.hash): string | null {
   const [s, ...rest] = hash.replace(/^#/, '').split('/')
   if (s !== screen || !rest.length || !rest.join('')) return null
@@ -14,14 +14,14 @@ export function subOf(screen: string, hash = location.hash): string | null {
 
 export const linkTo = (screen: string, sub?: string | null) => `#${screen}${sub ? `/${sub.split('/').map(encodeURIComponent).join('/')}` : ''}`
 
-/** Put ``sub`` in the address while ``screen`` is the one shown; a hidden screen leaves the address alone. */
+
 export function showSub(screen: string, sub: string | null) {
   if (screenOf() !== screen) return
   const h = linkTo(screen, sub)
   if (location.hash !== h) history.replaceState(null, '', h)
 }
 
-/** Call ``apply`` with what the address names on ``screen``, now and whenever the address changes. */
+
 export function useSub(screen: string, apply: (sub: string) => void) {
   const fn = useRef(apply)
   fn.current = apply

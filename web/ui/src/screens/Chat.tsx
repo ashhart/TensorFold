@@ -37,7 +37,7 @@ type Stored = { msgs: Msg[]; thinking: 'default' | 'on' | 'off'; budget?: number
 // TensorFold honours per request; servers that do not know the field ignore it.
 const BUDGETS = [0, 1024, 2048, 4096, 8192]
 const DEFAULT_BUDGET = 2048
-/** The conversation this browser kept before TensorFold Web kept them (taken over once into TensorFold Web, then dropped). */
+
 function load(): Stored | null {
   try {
     const raw = localStorage.getItem(STORE)
@@ -52,8 +52,8 @@ function load(): Stored | null {
 }
 
 
-/** The text as it arrives, revealed at a pace that follows the stream, so it reads smoothly; at once when motion is
- * reduced or the reply is complete. */
+
+
 function useSmooth(target: string, live: boolean): string {
   const [shown, setShown] = useState(target.length)
   const reduce = useRef(matchMedia('(prefers-reduced-motion: reduce)').matches)
@@ -124,7 +124,7 @@ export default function Chat({ engine, settings, toast, refreshEngine }: Ctx) {
   const [showWs, setShowWs] = useState(false)
   const [options, setOptions] = useState(false)                       // thinking, presets, tools: one click away
   const [results, setResults] = useState<Record<string, string>>({})   // what the user types as a tool's result
-  const unconstrained = useRef(new Set<string>())   // engines that refused response_format: JSON is then asked in the prompt
+  const unconstrained = useRef(new Set<string>())
   const [comparing, setComparing] = useState<[string, string] | null>(null)
   const [speedupPair, setSpeedupPair] = useState(false)                // the comparison is a speed-up check
   const [streaming, setStreaming] = useState(false)
@@ -143,7 +143,7 @@ export default function Chat({ engine, settings, toast, refreshEngine }: Ctx) {
     const el = box.current
     if (el && stickToBottom.current) el.scrollTop = el.scrollHeight
   }, [msgs])
-  // at the first visit: the conversation this browser kept is taken over by TensorFold Web, then the most recent one opens
+
   useEffect(() => {
     const wanted = subOf('chat')                         // read before anything rewrites the address
     ;(async () => {
@@ -152,15 +152,15 @@ export default function Chat({ engine, settings, toast, refreshEngine }: Ctx) {
         try {
           await api.conversationCreate({ messages: old.msgs.map((m) => (m.role === 'assistant' && !m.outcome ? { ...m, outcome: 'interrupted' } : m)), settings: { thinking: old.thinking, budget: old.budget, from: 'this browser' } })
           localStorage.removeItem(STORE); stored.current = null
-        } catch { /* kept in the browser; tried again next time */ }
+        } catch {                                                  }
       }
       const r = await api.conversations().catch(() => ({ conversations: [] as ConversationRow[] }))
       setConvs(r.conversations)
-      if (r.conversations[0] && !wanted) openConversation(r.conversations[0].id)   // an address naming one opens that one
+      if (r.conversations[0] && !wanted) openConversation(r.conversations[0].id)
     })()
   }, [])
   useSub('chat', (id) => { openConversation(id) })          // #chat/<conversation>
-  useEffect(() => {                                        // the address names the open conversation while Chat is shown
+  useEffect(() => {
     const put = () => { if (convId) showSub('chat', convId) }   // New conversation clears it itself
     put()
     addEventListener('hashchange', put)
@@ -234,13 +234,13 @@ export default function Chat({ engine, settings, toast, refreshEngine }: Ctx) {
         : { role: m.role, content: m.content })]
   const workshopOn = ws.tools || ws.output !== 'text'
 
-  /** What a reply keeps of how it was asked: the request (with the seed the page drew, if any), so a replay and the
-   * speed-up check can ask it again the same way. */
+
+
   const replyContext = (drawn: number | null) => {
     const request: Request = { thinking, budget: thinking !== 'off' && budget ? budget : null, system: preset.system || '', max_tokens: preset.max_tokens ?? null, temperature: preset.temperature ?? null, top_p: preset.top_p ?? null, top_k: preset.top_k ?? null, min_p: preset.min_p ?? null, seed: preset.seed ?? drawn, ...(drawn != null ? { seed_drawn: true } : {}), stop: preset.stop?.filter(Boolean) ?? [] }
     return { model, engine: engineLabel, thinking: thinking === 'off' ? 'off' : `${thinking}${budget ? `, up to ${budget}` : ''}`, preset: preset.name, at: Date.now() / 1000, request }
   }
-  /** A workshop turn: whole replies, tool calls checked, the page's own tools run by themselves, JSON checked. */
+
   // `continuing`: the turn goes on after tool results, so a forced tool choice is not forced again
   const workshopTurn = async (start: Msg[], continuing = false) => {
     const mine = ++generation.current
@@ -307,7 +307,7 @@ export default function Chat({ engine, settings, toast, refreshEngine }: Ctx) {
         if (!ws.auto || !calls.every((c) => isLocal(c.name))) break
         const answers: Msg[] = calls.map((c) => {
           let args: Record<string, unknown> = {}
-          try { args = JSON.parse(c.arguments || '{}') } catch { /* the check above says it */ }
+          try { args = JSON.parse(c.arguments || '{}') } catch {                               }
           return { role: 'tool', tool_call_id: c.id, name: c.name, content: JSON.stringify(runLocal(c.name, args)) }
         })
         history = [...history, ...answers]
@@ -341,7 +341,7 @@ export default function Chat({ engine, settings, toast, refreshEngine }: Ctx) {
     const ctl = new AbortController(); abort.current = ctl
     const t0 = performance.now(); let tFirst = 0; let counted = 0
     let content = ''; let reasoning = ''; let outcome: Outcome = 'interrupted'; let errMsg: string | undefined
-    let runtime: Runtime | undefined                         // the engine's own figures for this reply, when it sends them
+    let runtime: Runtime | undefined
     let cortheon: Cortheon | undefined
     let usage: { prompt_tokens?: number; completion_tokens?: number; prompt_tokens_details?: { cached_tokens?: number }; completion_tokens_details?: { reasoning_tokens?: number } } | undefined
     const body: Record<string, unknown> = { model, stream: true, stream_options: { include_usage: true },
@@ -363,7 +363,7 @@ export default function Chat({ engine, settings, toast, refreshEngine }: Ctx) {
       const r = await fetch('/engine/v1/chat/completions', { method: 'POST', headers: { 'content-type': 'application/json', ...authHeaders() }, body: JSON.stringify(body), signal: ctl.signal })
       if (!r.ok || !r.body) {
         let detail = `${r.status} ${r.statusText}`
-        try { const j = await r.json(); detail = j.error?.message ?? j.detail ?? detail } catch { /* keep status */ }
+        try { const j = await r.json(); detail = j.error?.message ?? j.detail ?? detail } catch {                   }
         throw new Error(detail)
       }
       const reader = r.body.getReader(); const dec = new TextDecoder(); let buf = ''
@@ -444,7 +444,7 @@ export default function Chat({ engine, settings, toast, refreshEngine }: Ctx) {
       if (mine !== opening.current) return                // another conversation was asked for meanwhile
       flushSave()                                         // edits made while it loaded belong to the one shown then
       generation.current += 1                             // a reply asked for meanwhile belongs to the one shown then:
-      ;(abort.current as AbortController | null)?.abort(); abort.current = null   // it stops; nothing it still sends reaches this one
+      ;(abort.current as AbortController | null)?.abort(); abort.current = null
       setStreaming(false)
       convGen.current += 1                                // from here the page shows this one
       saves.current!.read(c.id, c.rev)
@@ -461,7 +461,7 @@ export default function Chat({ engine, settings, toast, refreshEngine }: Ctx) {
   // a living copy is served: a message can be handed to Teach, where its facts are found and approved
   const teachable = !!engine?.model_repo?.startsWith('living:') || learnsHere
   const onBase = !engine?.model_repo?.startsWith('living:')
-  const teachThis = (text: string) => { try { sessionStorage.setItem('tfs:teach-text', text) } catch { /* no storage */ } location.hash = '#teach' }
+  const teachThis = (text: string) => { try { sessionStorage.setItem('tfs:teach-text', text) } catch {                  } location.hash = '#teach' }
   const copy = async (t: string) => { try { await copyText(t); toast('Copied') } catch { toast('The browser refused the clipboard', 'bad') } }
   const last = [...msgs].reverse().find((m) => m.role === 'assistant' && m.stats)
   // without the engine's usage figures the page only counts stream events, which are not tokens: no count of

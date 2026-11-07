@@ -13,7 +13,7 @@ type Draft = { id: string | null; label: string; kind: BrandKind; words: string;
 const EMPTY: Draft = { id: null, label: '', kind: 'model', words: '', logo: undefined }
 const slug = (label: string) => label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40)
 
-/** A picked image as a data URL, refused past the size TensorFold Web keeps. */
+
 function readLogo(file: File): Promise<string> {
   if (file.size > LOGO_KB * 1024) return Promise.reject(new Error(`The logo is over ${LOGO_KB} KB`))
   return new Promise((ok, no) => {
@@ -24,8 +24,8 @@ function readLogo(file: File): Promise<string> {
   })
 }
 
-/** The makers TensorFold Web recognises, its own and those added here, with their logos; a new family or a missing
- *  logo is added here, kept on this TensorFold Web, without a new version. */
+
+
 export default function SettingsBrands({ toast, refreshBrands }: { toast: (t: string, k?: 'ok' | 'bad') => void; refreshBrands: () => Promise<unknown> }) {
   const [draft, setDraft] = useState<Draft | null>(null)
   const [own, setOwn] = useState<CustomBrand[] | null>(null)

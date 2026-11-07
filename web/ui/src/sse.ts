@@ -1,4 +1,4 @@
-/** Server-sent events, LF or CRLF, in arbitrary chunks: yields the `data:` payloads of complete events. */
+
 export function sseEvents(buffer: string): { events: string[]; rest: string } {
   const norm = buffer.replace(/\r\n/g, '\n')
   const parts = norm.split('\n\n')

@@ -33,17 +33,17 @@ export default function App() {
   const [engine, setEngine] = useState<EngineInfo | null>(null)
   const [settings, setSettings] = useState<Settings | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [studioDown, setStudioDown] = useState(false)
+  const [webDown, setWebDown] = useState(false)
   const [missed, setMissed] = useState(0)                                // failed polls in a row, for the page
   const [now, setNow] = useState(() => Date.now())
-  const [lastSeen, setLastSeen] = useState<Date | null>(null)          // when TensorFold Web last answered the engine poll
-  const [decodeHistory, setDecodeHistory] = useState<number[]>([])     // kept here so it survives a visit to another screen
+  const [lastSeen, setLastSeen] = useState<Date | null>(null)
+  const [decodeHistory, setDecodeHistory] = useState<number[]>([])
   const [toasts, setToasts] = useState<Toast[]>([])
   const [palette, setPalette] = useState(false)
   // the menu folded to its icons, remembered in this browser
   const [folded, setFolded] = useState(() => { try { return localStorage.getItem('tfs-sidebar') === 'folded' } catch { return false } })
   const fold = useCallback(() => setFolded((f) => {
-    try { localStorage.setItem('tfs-sidebar', f ? 'full' : 'folded') } catch { /* no storage */ }
+    try { localStorage.setItem('tfs-sidebar', f ? 'full' : 'folded') } catch {                  }
     return !f
   }), [])
   // the look applies at once and is remembered in this browser, then saved with the other settings
@@ -84,13 +84,13 @@ export default function App() {
   }, [])
   const down = useRef(0)                                                 // failed polls in a row
   const refreshEngine = useCallback(() => api.engine().then((e) => {
-    setEngine(e); setStudioDown(false); setLastSeen(new Date()); down.current = 0; setMissed(0); setNeedsToken(false)
+    setEngine(e); setWebDown(false); setLastSeen(new Date()); down.current = 0; setMissed(0); setNeedsToken(false)
     setDecodeHistory((d) => [...d.slice(-119), e.decode_tps ?? 0])
     if (!machineRef.current) loadMachine()                              // refused at first (the token came later)
     if (!settingsRef.current) loadSettings()
   }).catch((e) => {
-    if (e instanceof ApiError && e.status === 401) { setNeedsToken(true); return }   // declined: not a silent TensorFold Web
-    setStudioDown(true); down.current += 1; setMissed(down.current)
+    if (e instanceof ApiError && e.status === 401) { setNeedsToken(true); return }
+    setWebDown(true); down.current += 1; setMissed(down.current)
   }), [loadMachine, loadSettings])
   const refreshSettings = useCallback(() => api.settings().then(setSettings).catch((e) => toast(`Settings not reloaded: ${e}`, 'bad')), [toast])
   // every 2 s while TensorFold Web answers; while it does not, the polls space out up to 10 s
@@ -132,7 +132,7 @@ export default function App() {
   // the look, applied and remembered for the next load (index.html reads it before the first paint)
   const rememberTheme = useCallback((t: Settings['theme']) => {
     setTheme(t)
-    try { localStorage.setItem('tfs-theme', t) } catch { /* no storage */ }
+    try { localStorage.setItem('tfs-theme', t) } catch {                  }
   }, [])
   const saveSettings = async (patch: Partial<Settings>) => {
     const s = await api.saveSettings(patch)
@@ -146,9 +146,9 @@ export default function App() {
   }, [toast, rememberTheme])
   const openPalette = useCallback(() => setPalette(true), [])
   // stale once TensorFold Web has been silent for 10 s and three polls: one missed poll is not worth greying the page
-  useEffect(() => { if (!studioDown) return; const t = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(t) }, [studioDown])
+  useEffect(() => { if (!webDown) return; const t = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(t) }, [webDown])
   const age = lastSeen ? Math.round((now - lastSeen.getTime()) / 1000) : null
-  const stale = studioDown && missed >= 3 && (age == null || age >= 10)
+  const stale = webDown && missed >= 3 && (age == null || age >= 10)
   const ctx = { machine, engine, settings, refreshEngine, refreshSettings, refreshBrands, saveSettings, toast, openPalette, stale, decodeHistory }
   return (
     <div className={folded ? 'app folded' : 'app'}>
@@ -162,7 +162,7 @@ export default function App() {
           {route === 'home' && <Home {...ctx} />}
           {route === 'models' && <Models {...ctx} />}
           {route === 'monitor' && <Monitor {...ctx} />}
-          {/* Chat stays mounted so a conversation, and a reply still streaming, survive a visit to another screen */}
+
           <div hidden={route !== 'chat'}><ErrorBoundary name="Chat"><Chat {...ctx} /></ErrorBoundary></div>
           {route === 'bench' && <Bench {...ctx} />}
           {route === 'teach' && <Teach {...ctx} />}

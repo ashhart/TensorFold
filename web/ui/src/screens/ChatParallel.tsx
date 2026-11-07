@@ -30,7 +30,7 @@ export function ParallelPanel({ model, engine, sampling }: { model: string; engi
   const [slots, setSlots] = useState<Slot[]>([])
   const [running, setRunning] = useState(false)
   const [results, setResults] = useState<Result[]>([])
-  const [uncounted, setUncounted] = useState(false)          // the engine gave no token counts: no speed to keep     // one per count tried, the latest kept
+  const [uncounted, setUncounted] = useState(false)
   const live = useRef<Slot[]>([])
   const ctl = useRef<AbortController | null>(null)
   const t0 = useRef(0)

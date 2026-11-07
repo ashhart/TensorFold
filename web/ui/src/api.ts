@@ -13,7 +13,7 @@ export type Verdict = {
   needs_ram_gb: number | null
   reason: string
   weights_bytes: number
-  basis: 'mlx-calibrated' | 'gb10-floor-measured' | 'cuda-unverified' | 'engine-floor' | 'native-measured' | 'native-unverified' | 'none'   // engine-floor: from the engine's own `info`; native-measured: the native engine's own sizing
+  basis: 'mlx-calibrated' | 'gb10-floor-measured' | 'cuda-unverified' | 'engine-floor' | 'native-measured' | 'native-unverified' | 'none'
 }
 
 export type Model = {
@@ -100,7 +100,7 @@ export type EngineInfo = {
   engine_kind: 'native' | 'python' | null   // which engine an owned process runs
   startup: { budget_gib?: number; resident_gib?: number; context_tokens?: number; loaded_s?: number; bytes_per_token?: number
     streams?: number; stream_gib?: number; left_gib?: number; reserve_gib?: number
-    prompt_cache_gib?: number; prompt_cache_free_gib?: number; in_use_gib?: number }   // the last four: the CUDA engine's sizing line
+    prompt_cache_gib?: number; prompt_cache_free_gib?: number; in_use_gib?: number }
 }
 
 export type Settings = {
@@ -114,7 +114,7 @@ export type Settings = {
   currency: string
   extra_args: string[]
   share: boolean
-  cortheon: boolean                    // Cortheon's web research in the engine, at its next start (TensorFold 1.0.9 on; 1.0.11 for its security fixes)
+  cortheon: boolean
   api_key: string | null
   api_key_set: boolean
   theme: 'system' | 'light' | 'dark'
@@ -150,10 +150,10 @@ export type Conversation = { id: string; title: string; created: number; updated
 // replaying a conversation on another configuration, and two conversations compared turn by turn
 export type ReplayTarget = { kind: 'served'; drafts: boolean } | { kind: 'address'; url: string; key?: string; model: string; label?: string }
 export type ReplayProgress = { id: string; of: string; done: number; total: number; status: string; error?: string
-  turn?: number; question?: string; live_text?: string; live_reasoning?: string }   // the reply being written, to watch it
+  turn?: number; question?: string; live_text?: string; live_reasoning?: string }
 type ReplySide = { text: string; tps: number | null; ttft: number | null; tokens: number | null; sha: string | null; outcome?: string }
 export type ReplyComparison = { a: { id: string; title: string }; b: { id: string; title: string }; same_text: number; same_tokens: number; checked: number
-  turns: { question: string; a: ReplySide; b: ReplySide; same_text: boolean; same_tokens: boolean | null; change: number | null }[]   // null: not checkable
+  turns: { question: string; a: ReplySide; b: ReplySide; same_text: boolean; same_tokens: boolean | null; change: number | null }[]
   speed: { median_change: number | null; b_faster: number; b_slower: number; p: number; within_noise: boolean; too_few?: boolean } }
 // Usage: what the engine served, by day and hour and model, kept across restarts
 export type UsageSummary = { days: { day: string; models: Record<string, { prompt: number; completion: number }>; peak_decode: number; peak_prefill: number; requests: number }[]
@@ -178,14 +178,14 @@ export type CleanResult = { kind: string; matched: number; removed: number; dry_
 // the checks of the first-run list and of the diagnostic, each with how to fix it
 export type SetupCheck = { id: string; label: string; status: 'pass' | 'warn' | 'fail' | 'skip'; detail: string; fix: string }
 
-export type CheckResult = { id: string; label: string; ok: boolean; skipped?: boolean; detail: string; seconds: number }   // skipped: could not be checked
+export type CheckResult = { id: string; label: string; ok: boolean; skipped?: boolean; detail: string; seconds: number }
 export type ConnectInfo = { engine_url: string; lan_url: string | null; share: boolean; api_key: string | null; relay_key?: string | null; key_pending_restart: boolean; studio_token_set: boolean; snippets: Snippet[]; kinds?: Record<string, string>; window?: number | null; where?: 'here' | 'away' }
 
 // A TensorFold Web started with --token wants the token on every API and relay call. It is read once from the page's
 // address, kept in this browser and taken off the address bar, so it is neither shared by copy-paste nor lost
 // when the tab closes.
 const TOKEN_KEY = 'tfs-token'
-export function studioToken(): string | null {
+export function webToken(): string | null {
   try {
     const fromUrl = new URLSearchParams(location.search).get('token')
     if (fromUrl) {
@@ -195,20 +195,20 @@ export function studioToken(): string | null {
     return localStorage.getItem(TOKEN_KEY)
   } catch { return null }
 }
-export function setStudioToken(t: string) { try { localStorage.setItem(TOKEN_KEY, t) } catch { /* no storage */ } }
-/** A file TensorFold Web makes, fetched with the token in a header (never in the address, which logs keep) and saved. */
+export function setWebToken(t: string) { try { localStorage.setItem(TOKEN_KEY, t) } catch {                  } }
+
 export async function download(url: string, filename: string): Promise<void> {
   const r = await fetch(url, { headers: authHeaders() })
   if (r.status === 401 && await askToken()) return download(url, filename)
   if (!r.ok) {
     let msg = r.statusText
-    try { msg = (await r.json()).detail ?? msg } catch { /* keep statusText */ }
+    try { msg = (await r.json()).detail ?? msg } catch {                       }
     throw new ApiError(msg, r.status)
   }
   saveBlob(await r.blob(), filename)
 }
 
-/** A file handed to the browser to save: the one way the page does it (downloads, cards, reports). */
+
 export function saveBlob(blob: Blob, name: string): void {
   const url = URL.createObjectURL(blob)
   const a = Object.assign(document.createElement('a'), { href: url, download: name })
@@ -216,13 +216,13 @@ export function saveBlob(blob: Blob, name: string): void {
   setTimeout(() => URL.revokeObjectURL(url), 5000)
 }
 export function authHeaders(): Record<string, string> {
-  const t = studioToken()
+  const t = webToken()
   return t ? { 'x-studio-token': t } : {}
 }
 
 // Every call has a deadline, so a tunnel that stops answering shows up as an error instead of a page frozen on
 // its last figures. Starting and stopping an engine get longer ones.
-/** An error TensorFold Web answered, with its HTTP status (409: changed elsewhere, among others). */
+
 export class ApiError extends Error {
   status: number
   constructor(message: string, status: number) { super(message); this.status = status }
@@ -237,7 +237,7 @@ let asking: Promise<string | null> | null = null
 let declined = false
 function askToken(): Promise<string | null> {
   if (declined) return Promise.resolve(null)
-  asking ??= tokenDialog().then((t) => { if (t) setStudioToken(t); else declined = true; asking = null; return t })
+  asking ??= tokenDialog().then((t) => { if (t) setWebToken(t); else declined = true; asking = null; return t })
   return asking
 }
 export function askTokenAgain(): Promise<string | null> { declined = false; return askToken() }
@@ -266,7 +266,7 @@ function tokenDialog(): Promise<string | null> {
   })
 }
 
-/** A one-time link (`?code=`) opened here: the code traded for the token, then taken out of the address. */
+
 export async function redeemFromAddress(): Promise<void> {
   const url = new URL(location.href)
   const code = url.searchParams.get('code')
@@ -274,22 +274,22 @@ export async function redeemFromAddress(): Promise<void> {
   url.searchParams.delete('code'); history.replaceState(null, '', url.toString())
   try {
     const r = await fetch('/api/access/redeem', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code }) })
-    if (r.ok) setStudioToken((await r.json()).token)
-  } catch { /* the page then asks for the token as usual */ }
+    if (r.ok) setWebToken((await r.json()).token)
+  } catch {                                                 }
 }
 
 async function j<T>(url: string, init?: RequestInit, timeoutMs = 10000): Promise<T> {
   const run = () => fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs), headers: { 'content-type': 'application/json', ...authHeaders(), ...(init?.headers ?? {}) } })
-  const sent = studioToken()
+  const sent = webToken()
   let r = await run()
   if (r.status === 401 && !url.startsWith('/engine/')) {
-    const now = studioToken()
+    const now = webToken()
     if (now && now !== sent) r = await run()               // given meanwhile, by the question another request asked
     else if (await askToken()) r = await run()
   }
   if (!r.ok) {
     let msg = r.statusText
-    try { msg = (await r.json()).detail ?? msg } catch { /* keep statusText */ }
+    try { msg = (await r.json()).detail ?? msg } catch {                       }
     throw new ApiError(msg, r.status)
   }
   return r.json() as Promise<T>
@@ -308,7 +308,7 @@ export const api = {
     j<EngineInfo>('/api/engine/start', { method: 'POST', body: JSON.stringify(body) }, 30000),
   stop: () => j<EngineInfo>('/api/engine/stop', { method: 'POST' }, 40000),
   logs: () => j<{ lines: string[] }>('/api/engine/logs'),
-  /** A cookie for the log stream's path only: an EventSource cannot send the token header. */
+
   logsSession: () => j<{ ok: boolean }>('/api/engine/logs/session', { method: 'POST' }),
   settings: () => j<Settings>('/api/settings'),
   saveSettings: (patch: Partial<Settings>) => j<Settings>('/api/settings', { method: 'PUT', body: JSON.stringify(patch) }),
@@ -343,7 +343,7 @@ export const api = {
   benchRuns: () => j<{ runs: BenchRunRow[]; busy: boolean; current: string | null }>('/api/bench/runs'),
   benchRun: (id: string) => j<BenchRun>(`/api/bench/runs/${id}`),
   benchIdentify: (url: string, key?: string) => j<{ url: string; engine: string | null; version: string | null; models: string[]; error: string | null }>('/api/bench/identify', { method: 'POST', body: JSON.stringify({ url, key }) }, 15000),
-  // a Fleet machine's engine, identified by this TensorFold Web through that machine's TensorFold Web: no key or token on the page
+
   benchIdentifyPeer: (peer: string) => j<{ url: string; engine: string | null; version: string | null; models: string[]; error: string | null }>('/api/bench/identify', { method: 'POST', body: JSON.stringify({ peer }) }, 20000),
   benchStart: (body: { mode: BenchMode; suites?: string[]; exactness: boolean; max_context?: number; max_concurrency?: number; full?: boolean; target?: BenchEngineRef & { label?: string }; reference?: BenchEngineRef & { model: string }; kl_load?: number; kl_text?: string }) =>
     j<BenchRun>('/api/bench/runs', { method: 'POST', body: JSON.stringify(body) }, 30000),
@@ -405,7 +405,7 @@ export type BenchBlock = {
 }
 export type SweepPoint = { size: number; prompt_tokens: number | null; cached: number | null; prefill_s: number | null; ttft: number | null; prefill_tps: number | null; error: string | null; estimated?: boolean; weak?: boolean }
 export type LoadLevel = { concurrency: number; requests: number; errors: number; total_tps: number | null; per_request_tps: number | null; ttft_p50: number | null; ttft_p95: number | null }
-export type QualityCount = { items: number; passed: number; unscored?: number }   // unscored: a request that failed, not graded
+export type QualityCount = { items: number; passed: number; unscored?: number }
 export type BenchSummary = { overall: BenchBlock; suites: Record<string, BenchBlock>; sweep?: SweepPoint[]; load?: LoadLevel[]; quality?: { overall: QualityCount; categories: Record<string, QualityCount> } }
 export type BenchResult = {
   suite: string; prompt: string; draft: boolean; error: string | null; text: string
@@ -432,7 +432,7 @@ export type BenchRun = BenchRunRow & {
     eta_s?: number | null; eta_at?: number | null; stopping?: boolean }
   server_time?: number; error_detail?: string
   findings?: string[]; share_text?: string; suite_names?: Record<string, string>
-  tools?: { version: string | null; final_score: number | null; rating: string | null; points: number | null; max_points: number | null; scenarios: number | null; categories: { category: string; label: string; percent: number; pass_count: number; partial_count: number; fail_count: number }[] }    // written by the server from the run, for the report and sharing
+  tools?: { version: string | null; final_score: number | null; rating: string | null; points: number | null; max_points: number | null; scenarios: number | null; categories: { category: string; label: string; percent: number; pass_count: number; partial_count: number; fail_count: number }[] }
   memory: { engine_peak_bytes: number | null; system_peak_bytes: number; samples: number } | null
   hardware: BenchHardware | null
   results: BenchResult[]
@@ -451,7 +451,7 @@ export type BenchHardware = {
   idle_watts: number | null; avg_watts: number | null; peak_watts: number | null; measured_s: number
   energy_j: number | null; energy_above_idle_j: number | null; output_tokens: number
   j_per_token: number | null; j_per_token_above_idle: number | null
-  j_per_1k_prompt?: number | null; j_per_1k_prompt_above_idle?: number | null; per_token_note?: string   // prefill: per prompt token read
+  j_per_1k_prompt?: number | null; j_per_1k_prompt_above_idle?: number | null; per_token_note?: string
   peak_cpu_c: number | null; peak_gpu_c: number | null; peak_c: number | null
   series: [number, number | null, number | null, number | null, number | null, (boolean | null)?][]
   // from schema 2 (absent on older runs)

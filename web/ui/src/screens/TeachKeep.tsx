@@ -8,7 +8,7 @@ type Toast = (t: string, k?: 'ok' | 'bad') => void
 const when = (t: number) => new Date(t * 1000).toLocaleString()
 const cut = (s: string | null | undefined, n = 120) => (s == null ? '—' : !s.trim() ? '(empty reply)' : s.length > n ? `${s.slice(0, n)}…` : s)
 
-/** A copy's versions: kept before each lesson or by hand, restored or branched from, each costing what changed. */
+
 export function Versions({ copy, busy, toast, onChange }: { copy: string; busy: boolean; toast: Toast; onChange: () => void }) {
   const [list, setList] = useState<LivingVersion[] | null>(null)
   const [store, setStore] = useState(0)
@@ -42,8 +42,8 @@ export function Versions({ copy, busy, toast, onChange }: { copy: string; busy: 
   )
 }
 
-/** A copy's checks: the questions of the facts it kept, near misses and unrelated questions, asked with thinking off
- *  and on; two runs compared, with recall and the leak matrix. */
+
+
 export function Checks({ copy, served, busy, toast, onChange }: { copy: string; served: boolean; busy: boolean; toast: Toast; onChange: () => void }) {
   const [set, setSet] = useState<CheckSet | null>(null)
   const [runs, setRuns] = useState<CheckRunInfo[]>([])
@@ -94,8 +94,8 @@ export function Checks({ copy, served, busy, toast, onChange }: { copy: string; 
   )
 }
 
-/** What learning costs, measured with the Bench: speed and exactness per number of facts kept, quality, and how far
- *  the copy moved from the untaught model on prompts unrelated to what it learned (KL, against another machine). */
+
+
 export function Measures({ copy, busy, peers, toast }: { copy: string; busy: boolean; peers: { id: string; name: string }[]; toast: Toast }) {
   const [runs, setRuns] = useState<LivingRun[]>([])
   const [peer, setPeer] = useState('')

@@ -31,7 +31,7 @@ function find(kind: BrandKind, rules: [RegExp, Brand][], names: (string | null |
 const readable = (re: RegExp) => re.source.split('|')
   .map((w) => w.replace(/\\b|\^|\$/g, '').replace(/\\d\+?/g, '…').replace(/-\?/g, '-').replace(/\\(.)/g, '$1')).join(', ')
 
-/** The makers TensorFold Web knows on its own, each once with the words that recognise it, for Settings to show. */
+
 export function builtIn(kind: BrandKind): (Brand & { words: string })[] {
   const out = new Map<string, Brand & { words: string }>()
   for (const [re, b] of kind === 'model' ? RULES : HARDWARE) {

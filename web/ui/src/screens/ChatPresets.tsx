@@ -18,7 +18,7 @@ export const PRESETS: Preset[] = [
 const OLD_KEY = 'tfs-chat-presets'                           // where this browser kept them before TensorFold Web did
 const SAMPLING = ['temperature', 'max_tokens', 'top_p', 'top_k', 'min_p', 'seed'] as const
 
-/** The request fields a preset sets; a field left empty is the model's own. */
+
 export function sampling(p: Preset): Record<string, unknown> {
   const out: Record<string, unknown> = {}
   for (const k of SAMPLING) if (p[k] != null) out[k] = p[k]
@@ -29,14 +29,14 @@ export function sampling(p: Preset): Record<string, unknown> {
 
 const same = (a: Preset, b: Preset) => a.system === b.system && (a.stop ?? []).join('\n') === (b.stop ?? []).join('\n') && SAMPLING.every((k) => (a[k] ?? null) === (b[k] ?? null))
 
-/** The presets kept on TensorFold Web; those this browser held before are moved there once, then forgotten here. */
+
 export function usePresets(toast: Ctx['toast']) {
   const [mine, setMine] = useState<Preset[]>([])
   const reload = () => api.chatPresets().then((r) => setMine(r.presets)).catch(() => {})
   useEffect(() => {
     (async () => {
       let local: Preset[] = []
-      try { local = JSON.parse(localStorage.getItem(OLD_KEY) ?? '[]') as Preset[] } catch { /* none */ }
+      try { local = JSON.parse(localStorage.getItem(OLD_KEY) ?? '[]') as Preset[] } catch {            }
       if (local.length) {
         let kept = true
         const there = await api.chatPresets().then((r) => r.presets).catch(() => null)
@@ -44,10 +44,10 @@ export function usePresets(toast: Ctx['toast']) {
           for (const p of local) {
             const twin = there.find((t) => t.name === p.name)
             if (twin && same(twin, p)) continue
-            // a different preset of the same name on TensorFold Web keeps its name; this one is marked as this browser's
+
             try { await api.chatPresetSave({ ...p, stop: p.stop?.filter(Boolean), name: twin ? `${p.name} (this browser)`.slice(0, 60) : p.name }) } catch (e) { if (!(e instanceof ApiError && e.status === 409)) kept = false }
           }
-          if (kept) { try { localStorage.removeItem(OLD_KEY) } catch { /* no storage */ } toast(`Your presets are kept on TensorFold Web now (${local.length})`) }
+          if (kept) { try { localStorage.removeItem(OLD_KEY) } catch {                  } toast(`Your presets are kept on TensorFold Web now (${local.length})`) }
         }
       }
       reload()
@@ -58,13 +58,13 @@ export function usePresets(toast: Ctx['toast']) {
 
 const num = (v: string, int = false) => v === '' ? null : int ? Math.round(Number(v)) : Number(v)
 
-/** A setting: its name and control on one line, a sentence saying what it does under them. */
+
 export function Field({ label, help, children }: { label: string; help: ReactNode; children: ReactNode }) {
   return <label className="pfield"><span><b>{label}</b> {children}</span><span className="small muted">{help}</span></label>
 }
 
-/** The open conversation's settings in three groups (instructions, length of the reply, randomness, with the finer
- *  sampling folded), then the preset's actions: saved under a name, renamed or deleted when it is one's own. */
+
+
 export function PresetEditor({ preset, setPreset, mine, reload, toast }: {
   preset: Preset; setPreset: (p: Preset) => void; mine: Preset[]; reload: () => void; toast: Ctx['toast']
 }) {

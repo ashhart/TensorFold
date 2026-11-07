@@ -99,7 +99,7 @@ export default function Fleet({ toast }: Ctx) {
       load()
     } catch (e) { toast((e as Error).message, 'bad'); test() } finally { setBusy(false) }
   }
-  // another TensorFold Web opened signed in: this one asks it for a one-time link with the token it keeps, which the page
+
   // never sees; the tab opens first, so the browser does not take it for a pop-up
   const openIt = (m: FleetMachine) => run(`open:${m.id}`, async () => {
     const w = window.open('about:blank', '_blank')
