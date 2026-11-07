@@ -3,7 +3,8 @@ import { isRepoId } from '../paths'
 import { strictBenchmarkJson } from './strict-json'
 import { supportedBenchmarkReceiptVersion } from './version'
 
-export const BENCHMARK_SUITE_SHA = '9bb717da00666b90b4006174abd9ed46108affc37456b43c64a224a9c938d5be'
+export const LEGACY_BENCHMARK_SUITE_SHA = '9bb717da00666b90b4006174abd9ed46108affc37456b43c64a224a9c938d5be'
+export const BENCHMARK_SUITE_SHA = '51136f5d6775b2ff427834c6b1038b584de27e0a267cfc088ff2694ea069dcdc'
 export const BENCHMARK_RECEIPT_MAX_BYTES = 1024 * 1024
 const SAMPLE_KEYS = ['fixture_id', 'temperature', 'repeat', 'seed', 'status', 'prompt_tokens', 'completion_tokens', 'cached_tokens', 'delivery_seconds', 'delivery_tps', 'ttft_seconds', 'end_to_end_seconds', 'server_decode_tps', 'server_decode_seconds', 'prefill_seconds', 'token_sha', 'error_code']
 const ERROR_CODES = new Set(['http_error', 'connection_error', 'timeout', 'cancelled', 'server_error', 'invalid_stream', 'truncated_stream', 'missing_usage', 'invalid_usage', 'empty_output', 'unexpected_finish', 'token_count_mismatch', 'unmeasured_delivery'])
@@ -28,11 +29,13 @@ export function parseBenchmarkReceipt(raw: string, expected?: { model: string; s
   if (value.schema_version !== 1 || typeof value.run_id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value.run_id)) invalid()
   if (typeof value.created_at !== 'string' || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,6})?Z$/.test(value.created_at) || !Number.isFinite(Date.parse(value.created_at)) || Date.parse(value.created_at) > now + 900_000 || new Date(value.created_at).toISOString().slice(0, 19) !== value.created_at.slice(0, 19)) invalid()
   object(value.suite, ['id', 'sha256'])
-  if (value.suite.id !== 'community-v1' || value.suite.sha256 !== BENCHMARK_SUITE_SHA) invalid()
+  const v2 = value.suite.id === 'community-v2'
+  if (v2 ? value.suite.sha256 !== BENCHMARK_SUITE_SHA : value.suite.id !== 'community-v1' || value.suite.sha256 !== LEGACY_BENCHMARK_SUITE_SHA) invalid()
   const runtime = value.runtime
   object(runtime, ['tensorfold_version', 'backend', 'python_version', 'platform', 'dependencies'])
   text(runtime.tensorfold_version); text(runtime.python_version)
   if (!supportedBenchmarkReceiptVersion(runtime.tensorfold_version) || expected?.engineVersion !== undefined && runtime.tensorfold_version !== expected.engineVersion || runtime.python_version !== 'none' || !['mlx', 'cuda', 'rocm'].includes(runtime.backend) || runtime.platform !== (runtime.backend === 'mlx' ? 'macos' : 'linux')) invalid()
+  if (v2 !== (runtime.tensorfold_version === '1.1.4')) invalid()
   if (!runtime.dependencies || typeof runtime.dependencies !== 'object' || Array.isArray(runtime.dependencies) || Object.keys(runtime.dependencies).some(key => !['mlx', 'mlx_lm', 'torch', 'triton', 'cuda', 'driver'].includes(key))) invalid()
   Object.values(runtime.dependencies).forEach(item => text(item, true))
   const model = value.model
@@ -47,13 +50,20 @@ export function parseBenchmarkReceipt(raw: string, expected?: { model: string; s
   for (const gpu of hardware.gpus) { object(gpu, ['name', 'memory_bytes', 'cores']); text(gpu.name); number(gpu.memory_bytes, true, true); number(gpu.cores, true, true, 100_000) }
   if (hardware.gpu_count !== null && hardware.gpu_count !== hardware.gpus.length) invalid()
   const settings = value.settings
-  object(settings, ['tokens', 'repetitions', 'temperatures', 'serial', 'context_tokens', 'managed', 'rank_count'])
+  object(settings, ['tokens', 'repetitions', 'temperatures', 'serial', 'context_tokens', 'managed', 'rank_count', ...(v2 ? ['kv_cache'] : [])])
   if (settings.tokens !== 256 || settings.repetitions !== 5 || settings.context_tokens !== 4096 || settings.managed !== true || settings.rank_count !== 1 || typeof settings.serial !== 'boolean' || !Array.isArray(settings.temperatures) || settings.temperatures.length !== 2 || settings.temperatures[0] !== 1 || settings.temperatures[1] !== 0) invalid()
+  if (v2 && !['bf16', 'fp8'].includes(settings.kv_cache)) invalid()
   if (expected && (model.repo_id !== expected.model || settings.serial !== expected.serial)) invalid()
   if (!Array.isArray(value.samples) || value.samples.length < 1 || value.samples.length > 24) invalid()
   const seen = new Set<string>()
+  const routes = new Map<string, string>()
   for (const sample of value.samples) {
-    object(sample, SAMPLE_KEYS)
+    object(sample, v2 ? [...SAMPLE_KEYS, 'finish_reason', 'route'] : SAMPLE_KEYS)
+    if (v2) {
+      if (![null, 'stop', 'length'].includes(sample.finish_reason) || !['/v1/completions', '/v1/chat/completions'].includes(sample.route) || sample.fixture_id === 'chat' && sample.route !== '/v1/chat/completions') invalid()
+      if (routes.has(sample.fixture_id) && routes.get(sample.fixture_id) !== sample.route) invalid()
+      routes.set(sample.fixture_id, sample.route)
+    }
     if (!['code', 'chat'].includes(sample.fixture_id) || ![0, 1].includes(sample.temperature) || !Number.isInteger(sample.repeat) || sample.repeat < -1 || sample.repeat > 4 || sample.seed !== 1234 + Math.max(0, sample.repeat) || !['ok', 'early_eos', 'error', 'unmeasured'].includes(sample.status) || sample.repeat === -1 && sample.status !== 'error') invalid()
     const key = `${sample.fixture_id}:${sample.temperature}:${sample.repeat}`
     if (seen.has(key)) invalid(); seen.add(key)
@@ -67,7 +77,8 @@ export function parseBenchmarkReceipt(raw: string, expected?: { model: string; s
       const rate = (sample.completion_tokens - 1) / sample.delivery_seconds
       if (Math.abs(sample.delivery_tps - rate) > Math.max(1e-6, rate * 1e-6)) invalid()
     }
-    if (sample.status === 'ok' && (sample.completion_tokens !== 256 || sample.delivery_tps === null || sample.error_code !== null)) invalid()
+    const naturalStop = v2 && sample.temperature > 0 && sample.finish_reason === 'stop' && sample.completion_tokens >= 128 && sample.completion_tokens < 256
+    if (sample.status === 'ok' && (sample.completion_tokens !== 256 && !naturalStop || sample.delivery_tps === null || sample.error_code !== null || v2 && sample.finish_reason === null)) invalid()
     if (sample.status === 'early_eos' && (sample.completion_tokens === null || sample.completion_tokens >= 256)) invalid()
   }
   return value as ModelBenchmarkReceipt

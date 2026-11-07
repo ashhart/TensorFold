@@ -3,7 +3,7 @@ import { mkdtemp, readFile, stat, writeFile, chmod, symlink, link, rm } from 'no
 import os from 'node:os'
 import path from 'node:path'
 import { syntheticBenchmarkReceipt } from './fixtures'
-import { benchmarkCells } from './receipt'
+import { benchmarkCells, LEGACY_BENCHMARK_SUITE_SHA } from './receipt'
 import type { ModelBenchmarkSnapshot } from '../../../../shared/model-benchmark'
 
 const home = await mkdtemp(path.join(os.tmpdir(), 'tensorfold-benchmark-storage-'))
@@ -24,7 +24,11 @@ try {
   assert.equal(reloaded[0].snapshot.metadata?.hardware.cpu_model, 'Synthetic CPU')
   assert.equal(reloaded[0].snapshot.cells[0].deliveryTokensPerSecond?.median, 100)
   assert.equal(reloaded[0].receipt?.samples.length, 20)
+  assert.equal(reloaded[0].snapshot.metadata?.suite?.id, 'community-v2')
   const historical = structuredClone(receipt); historical.runtime.tensorfold_version = '1.0.12'
+  historical.suite = { id: 'community-v1', sha256: LEGACY_BENCHMARK_SUITE_SHA }
+  delete historical.settings.kv_cache
+  for (const sample of historical.samples) { delete sample.finish_reason; delete sample.route }
   const historicalSnapshot = { ...snapshot, id: 'benchmark_historical_stored' }
   await store.save({ snapshot: historicalSnapshot, receipt: historical })
   const afterUpgrade = await createModelBenchmarkStore(home).list()

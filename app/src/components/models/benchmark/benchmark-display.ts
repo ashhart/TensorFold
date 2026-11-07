@@ -14,8 +14,9 @@ export function benchmarkRange(value: ModelBenchmarkSpread | null, complete: boo
   return complete && value && [value.min, value.max].every((number) => Number.isFinite(number) && number >= 0) ? `${Number(value.min.toFixed(2))}–${Number(value.max.toFixed(2))} ${unit}` : null
 }
 export function benchmarkCellLabel(cell: ModelBenchmarkCell): string { return `${cell.fixture === 'code' ? 'Code' : 'Chat'} · Temperature ${cell.temperature}` }
+export const benchmarkSuite = (run: ModelBenchmarkSnapshot) => run.metadata?.suite?.id ?? 'community-v1'
 export function benchmarkBasicSummary(run: ModelBenchmarkSnapshot): string {
-  return [`TensorFold · community-v1`, `Model: ${run.model}`, `Mode: ${run.serial ? 'Serial baseline' : 'Standard'}`, `State: ${run.state}; complete protocol: ${run.protocolComplete ? 'yes' : 'no'}`,
+  return [`TensorFold · ${benchmarkSuite(run)}`, `Model: ${run.model}`, `Mode: ${run.serial ? 'Serial baseline' : 'Standard'}`, `State: ${run.state}; complete protocol: ${run.protocolComplete ? 'yes' : 'no'}`,
     ...run.cells.map((cell) => `${benchmarkCellLabel(cell)}: ${cell.complete ? `median delivery ${benchmarkMetric(cell.deliveryTokensPerSecond, true, 'tokens/s')}; first text ${benchmarkMetric(cell.firstTextSeconds, true, 's')}` : `incomplete, ${cell.successful}/${cell.expected} valid samples`}`),
     'Measured speed is not a quality ranking.'].join('\n')
 }

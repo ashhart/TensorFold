@@ -13,7 +13,7 @@ async function main() {
   assert.equal(pkg.main, 'dist-electron/main.js')
   assert.equal(pkg.packageManager, 'npm@10.9.8')
   assert.deepEqual(pkg.engines, { node: '>=22 <23', npm: '10.9.8' })
-  assert.equal(pkg.dependencies?.undici, '7.30.0', 'DNS pinning must ship as a direct production dependency')
+  assert.equal(pkg.dependencies?.undici, '7.30.1', 'DNS pinning must ship as a direct production dependency')
   assert.deepEqual(pkg.devEngines?.packageManager, { name: 'npm', version: '10.9.8', onFail: 'error' })
   assert.equal(pkg.build?.appId, 'dev.tensorfold.studio')
   assert.equal(pkg.build?.productName, 'TensorFold')
