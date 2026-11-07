@@ -1,4 +1,4 @@
-//! ModelOpt NVFP4 prompt rows in one launch on the screened Qwen3.8 GB10 geometries.
+//! ModelOpt NVFP4 prompt rows in one launch on the screened Qwen3.8 GB10 and RTX 5090 geometries.
 const std = @import("std");
 const cuda = @import("cuda");
 const engine = @import("cuda_engine.zig");
@@ -7,7 +7,7 @@ const Engine = engine.Engine;
 const Weight = cuda.qlinear.Weight;
 const modelopt = @import("cuda_modelopt.zig");
 
-/// The screened rows: at or past the large-prompt regime the GB10 A/B ran (2k, 8k and 32k prompts).
+/// The screened rows: at or past the large-prompt regime the GB10 and RTX 5090 A/Bs ran (2k, 8k and 32k prompts).
 pub const min_rows: usize = 2048;
 /// prompt_many.cu's part count.
 pub const max_parts: usize = cuda.nvfp4.parts_max;
@@ -15,7 +15,7 @@ pub const max_parts: usize = cuda.nvfp4.parts_max;
 /// Every member's outputs, as the dense MLP's gate and up share the layer input on
 /// nvidia/Qwen3.8-27B-NVFP4 (MLPs NVFP4): k 5120, 17408 outputs, two to eight of them.
 pub fn admitted(e: *const Engine, ws: []const Weight, rows: usize) bool {
-    if (!e.affine.pdl or rows < min_rows or ws.len < 2 or ws.len > max_parts) return false;
+    if (!e.prompt_many or rows < min_rows or ws.len < 2 or ws.len > max_parts) return false;
     if (e.mo == null) return false;
     for (ws) |w| {
         if (w != .nvfp4) return false;
@@ -42,12 +42,12 @@ pub fn group(e: *Engine, ws: []const Weight, x: u64, outs: []const u64, rows: us
     return true;
 }
 
-test "the screened admission holds the 27B MLP pair on GB10 and refuses other shapes" {
+test "the screened admission holds the 27B MLP pair on the screened GPUs and refuses other shapes" {
     const nvfp4 = cuda.qlinear.Weight{ .nvfp4 = cuda.nvfp4.weight(1, 2, 1.0, 17408, 5120) };
     const wide = cuda.qlinear.Weight{ .nvfp4 = cuda.nvfp4.weight(1, 2, 1.0, 6144, 5120) };
     const deep = cuda.qlinear.Weight{ .nvfp4 = cuda.nvfp4.weight(1, 2, 1.0, 5120, 17408) };
     var e: Engine = undefined;
-    e.affine.pdl = true;
+    e.prompt_many = true;
     e.mo = null;
     try std.testing.expect(!admitted(&e, &.{ nvfp4, nvfp4 }, min_rows)); // no ModelOpt kernels
     const k: modelopt.Kernels = undefined;
@@ -59,6 +59,6 @@ test "the screened admission holds the 27B MLP pair on GB10 and refuses other sh
     try std.testing.expect(!admitted(&e, &.{ nvfp4, nvfp4 }, min_rows - 1)); // rows below the screen
     try std.testing.expect(!admitted(&e, &.{ wide, nvfp4 }, min_rows)); // not the MLP width
     try std.testing.expect(!admitted(&e, &.{ deep, deep }, min_rows)); // not the MLP depth
-    e.affine.pdl = false;
+    e.prompt_many = false;
     try std.testing.expect(!admitted(&e, &.{ nvfp4, nvfp4 }, min_rows)); // not the screened GPU class
 }

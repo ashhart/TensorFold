@@ -126,7 +126,7 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
                 } else if (e.affine.pdl and !prompt and e.learning == null and m.gate == .a4 and m.up == .a4) {
                     try e.projMany(&.{ m.gate, m.up }, e.x, &.{ e.gate, e.up }, total, false);
                 } else {
-                    // the ModelOpt NVFP4 pair on the screened GB10 geometries: one prompt grid for both
+                    // the ModelOpt NVFP4 pair on the screened GB10 and RTX 5090 geometries: one prompt grid for both
                     var fused = false;
                     if (prompt and m.gate == .ql and m.up == .ql)
                         fused = try modelopt_many.pair(e, m.gate.ql, m.up.ql, x0, e.gate, e.up, rows);
