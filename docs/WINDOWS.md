@@ -35,9 +35,9 @@ The host suite needs only Zig: no CUDA toolkit, no MSVC (Zig's own clang builds 
 Run on a 2015 Windows 10 laptop (Intel i7-4720HQ, four cores, 16 GB; its GTX 965M is below the CUDA build's sm_80
 floor) with Zig 0.17.0 from the portable zip, on main at 9d6f1d78c (2026-11-04):
 
-- `zig build test --summary all` from a removed `.zig-cache`: `Build Summary: 491/491 steps succeeded; 6361/6514 tests
-  passed (153 skipped)`, exit 0, 1119 s with the global Zig cache warm, 1607 s from nothing. It prints little for
-  minutes at a time; the summary line and the exit code are the result.
+- `zig build test` from nothing: exit 0 in 1607 s. Then, with `.zig-cache` removed and the global Zig cache warm,
+  `zig build test --summary all`: `Build Summary: 491/491 steps succeeded; 6361/6514 tests passed (153 skipped)`, exit
+  0, 1119 s. It prints little for minutes at a time; the summary line and the exit code are the result.
 - Zig 0.17's build runner prints a step's tree, its captured stderr and a `failed command:` line for every step that
   wrote to stderr, warnings included (the simulated device-loss warnings, numeric tables, the `tfgrammar.dll` line
   below). A failed step has an `error:` line and the build exits non-zero; neither happened in that run.
