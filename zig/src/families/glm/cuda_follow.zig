@@ -406,7 +406,7 @@ pub fn follow(e: *Engine, link: *Link) !void {
                 try link.rows(v.rows.ptr, v.rowCount() * vcfg.out_hidden * 2);
             },
             .snapshots => {
-                e.share_pages = h.flags & 1 != 0; // TF_GLM_KV_SHARE on rank 0: a kept state leaves the prompt cache's pages out
+                e.share_pages = h.flags & 1 != 0; // TF_KV_SHARE on rank 0: a kept state leaves the shared store's pages out
                 try @import("cuda_snapshots.zig").agree(e, h.a);
             },
             .drop => for (step.ids) |id| e.dropState(id),

@@ -1,4 +1,4 @@
-// Device code of src/tensorfold/cuda/experts_prefill.cu (lines 1-153, comments and ATen includes dropped), checked by zig/tests/cuda/copies.py.
+// Device code of src/tensorfold/cuda/experts_prefill.cu (lines 1-153, comments and ATen includes dropped).
 
 #include <cuda_bf16.h>
 #include <stdint.h>

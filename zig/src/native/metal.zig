@@ -38,6 +38,8 @@ const affine_widths = blk: {
 const gemma4_widths: []const []const u8 = &.{ "mlx-q2g64", "mlx-q3g64", "mlx-q4g64", "mlx-q5g64", "mlx-q6g64", "mlx-q8g64" };
 
 pub const families: []const api.Family = &.{
+    .{ .model_type = "kimi_k3", .formats = &.{"mxfp4"} },
+    .{ .model_type = "kimi_k31", .formats = &.{"mxfp4"} },
     .{ .model_type = "qwen4", .formats = @import("qwen4").family.native_host.formats },
     .{ .model_type = "qwen4_text", .formats = @import("qwen4").family.native_host.formats },
     .{ .model_type = "fish_omni", .formats = &.{ "fp8-block128", "nvfp4" } },
@@ -46,6 +48,8 @@ pub const families: []const api.Family = &.{
     .{ .model_type = "glm5_next", .formats = &.{"mlx-q4g64"} },
     .{ .model_type = "qwen3_5", .formats = affine_widths },
     .{ .model_type = "qwen3_5_moe", .formats = affine_widths },
+    .{ .model_type = "lfm3", .formats = &.{ "mlx-q4g32", "mlx-q4g64", "mlx-q6g64", "mlx-q8g64" } },
+    .{ .model_type = "lfm3_vl", .formats = &.{ "mlx-q4g32", "mlx-q4g64", "mlx-q6g64", "mlx-q8g64" } },
     .{ .model_type = "lfm2_moe", .formats = &.{ "mlx-q4g64", "mlx-q6g64", "mlx-q8g64" } },
     .{ .model_type = "glm_moe_dsa", .formats = &.{"exlr8"} },
     .{ .model_type = "gemma4", .formats = gemma4_widths },
@@ -170,12 +174,15 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         return null;
     }
     if (@import("save_admission.zig").refused(io, o.dir, problem)) return null;
+    if (std.mem.eql(u8, o.model_type, "kimi_k3") or std.mem.eql(u8, o.model_type, "kimi_k31"))
+        return @import("kimi_metal.zig").open(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "qwen4") or std.mem.eql(u8, o.model_type, "qwen4_text")) return @import("qwen4_metal.zig").open(a, gpa, io, o, problem);
     const dense = (std.mem.eql(u8, o.model_type, "qwen3_5") and @import("qwen27_engine.zig").owns(a, io, o.dir)) or std.mem.eql(u8, o.model_type, "qwen3_5_moe");
     if (try refusal(a, o, dense)) |why| {
         problem.* = why;
         return null;
     }
+    if (std.mem.eql(u8, o.model_type, "lfm3") or std.mem.eql(u8, o.model_type, "lfm3_vl")) return @import("lfm3.zig").open(a, gpa, io, o, problem);
     if (dense) return openQwen27(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "qwen4_exp")) return openFlashNext(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "glm5_next")) return openGlm(a, gpa, io, o, problem);
@@ -409,6 +416,7 @@ pub fn openFlashNext(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, prob
 }
 
 test {
+    _ = @import("kimi_metal.zig");
     _ = metal_slide;
     _ = @import("metal_slide_test.zig");
     _ = @import("draft_sources_metal_test.zig");
@@ -554,7 +562,15 @@ test "prompt precision: Metal refuses int8 before any model or family-specific l
 
 test "slide admission: Metal entry points refuse before checkpoint or device access" {
     const check = @import("slide_open_test.zig").check;
-    for (families) |f| if (!std.mem.eql(u8, f.model_type, "nemotron_h")) try check(open, "Macs", &.{f.model_type});
+    const kimi = @import("kimi_metal.zig");
+    for (families) |f| {
+        if (std.mem.eql(u8, f.model_type, "nemotron_h")) continue;
+        if (std.mem.eql(u8, f.model_type, "kimi_k3") or std.mem.eql(u8, f.model_type, "kimi_k31")) {
+            const want = "Kimi: learned states and on-disk prompt states are not implemented";
+            try @import("slide_open_test.zig").message(open, f.model_type, want);
+            try @import("slide_open_test.zig").message(kimi.open, f.model_type, want);
+        } else try check(open, "Macs", &.{f.model_type});
+    }
     try check(@import("qwen35.zig").open, "Macs", &.{"qwen3_5"});
     try check(@import("gemma4.zig").open, "Macs", &.{"gemma4"});
     try check(@import("lfm2_moe.zig").open, "Macs", &.{"lfm2_moe"});

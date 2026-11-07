@@ -1,5 +1,6 @@
 //! The shared batched head and last-row write-back, split without changing launch arguments.
 const std = @import("std");
+const cuda = @import("cuda");
 const wt = @import("cuda_prompt_wt.zig");
 const batch = @import("cuda_batch.zig");
 const HcKeep = batch.HcKeep;
@@ -40,7 +41,7 @@ pub fn head(self: anytype, logits_host: ?[]u8) !void {
             if (logits_host) |lh| {
                 try self.complete();
                 const d = self.stream.d;
-                try d.check(d.api.cuMemcpyDtoH_v2(lh.ptr, out + (n - 1) * vocab * 2, vocab * 2), "cuMemcpyDtoH");
+                try cuda.memory.download(d, out + (n - 1) * vocab * 2, std.mem.sliceAsBytes(lh)[0 .. vocab * 2]);
             }
         },
         .last => {
@@ -68,7 +69,7 @@ pub fn head(self: anytype, logits_host: ?[]u8) !void {
             if (logits_host) |lh| {
                 try self.complete();
                 const d = self.stream.d;
-                try d.check(d.api.cuMemcpyDtoH_v2(lh.ptr, s.logits, vocab * 2), "cuMemcpyDtoH");
+                try cuda.memory.download(d, s.logits, std.mem.sliceAsBytes(lh)[0 .. vocab * 2]);
             }
         },
     }

@@ -39,7 +39,7 @@ const Copier = struct {
         return @ptrCast(@alignCast(st));
     }
 
-    fn open(ctx: *anyopaque, _: *const lanes.readout.Spec) anyerror!*Readout.State {
+    fn open(ctx: *anyopaque, _: *const lanes.readout.Spec, _: []const u32) anyerror!*Readout.State {
         const c = of(ctx);
         const copy = try c.gpa.create(Copy);
         errdefer c.gpa.destroy(copy);

@@ -43,7 +43,7 @@ fn pathTop(p: *Probe, t: u32, path: []const u32, top: *[4]u32) !void {
     top.* = buf[0..4].*;
 }
 
-/// At sampled positions: chain shapes against chain(), and every lane of `lanes`-lane trees against its path's chain run.
+/// At sampled positions: chain shapes against chain(), and every lane of `lanes`-lane trees against its path's chain.
 pub fn check(gpa: std.mem.Allocator, arena: std.mem.Allocator, io: std.Io, model: []const u8, path: []const u8, name: []const u8, samples: usize, every: usize, lanes: usize) !void {
     const prompts = try probe.readPrompts(arena, path);
     const prompt = prompts.map.get(name) orelse return error.NoSuchPrompt;

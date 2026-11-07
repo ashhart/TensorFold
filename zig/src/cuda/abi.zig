@@ -155,6 +155,7 @@ pub const ExecUpdateResultInfo = extern struct {
 pub const event_record_external: c_uint = 0x1;
 
 /// CU_MEMORYTYPE_DEVICE
+pub const memory_type_host: c_uint = 1;
 pub const memory_type_device: c_uint = 2;
 
 pub const jit_info_log_buffer: c_int = 3;

@@ -4,7 +4,7 @@ const platform = @import("sys");
 const abi = @import("mcdma_abi.zig");
 const rma = @import("rdma.zig");
 const words = @import("words.zig");
-const verbs = @import("verbs.zig");
+const verbs = @import("verbs");
 
 pub const alignment = 16384;
 pub const max_ranks = 64;
@@ -247,7 +247,7 @@ pub const Endpoint = struct {
         self.gpa.destroy(self);
     }
 
-    /// Send `len` bytes already in this rank's window at `local` to the peer's window at `offset`, then store `value` at its `flag`, in one message and without staging. The library uses the room just before `local` for its head; the caller leaves the bytes unchanged until the peer has them (a reply from the peer that needed them is proof).
+    /// Send `len` bytes at `local` to peer `offset`, then `value` at `flag`; head goes before `local`; keep till acked.
     pub fn writeSignalFrom(self: *Endpoint, peer: u32, local: usize, offset: usize, len: usize, flag: usize, value: u64) rma.Error!void {
         if (len == 0) return signal(self, peer, flag, value); // the library takes a zero-length write-and-signal as a dead peer
         if (local < abi.ws_room or !self.in(local - abi.ws_room, len + abi.ws_room) or !self.in(offset, len) or !self.in(flag, 8)) return error.OutOfBounds;

@@ -52,13 +52,14 @@ pub const Backend = struct {
     costs: ?batch_costs.Costs = null, // timeCosts: the lane allocator's prices
     images: ?Images = null, // --vision: the tower's rows for a stream's images; null: an image stream fails
     grammar: grammar.Masks, // structured output: the rounds' mask rows and first rows
+    unwrap_snapshot: ?*const fn (*anyopaque) *snap.State = null,
     times: RoundTimes = .{}, // FZ_ROUND_TIMES=1: a shared round's phases
     fence: ?mtl.counters.Fence = null, // orders a round's state copies before its forward in one command buffer
     packed_drafts: batch_draft.State = .{}, // every stream's draft steps packed into one pass a step (FZ_BATCH_MTP_ROWS=0: off)
 
     /// Sessions of the given capacities (the first, the engine's own, holds its whole window whatever is given).
     pub fn init(gpa: std.mem.Allocator, e: *Engine, capacities: []const usize) !Backend {
-        if (capacities.len < 2 or capacities.len > fz.MAXR or e.r.tp != null) return error.BadBatchSlots;
+        if (capacities.len == 0 or capacities.len > fz.MAXR or e.r.tp != null) return error.BadBatchSlots;
         const sessions = try gpa.alloc(Session, capacities.len);
         errdefer gpa.free(sessions);
         var made: usize = 0;
@@ -84,6 +85,7 @@ pub const Backend = struct {
     }
 
     pub fn deinit(b: *Backend) void {
+        b.packed_drafts.deinit(b.e.r);
         if (b.fence) |f| f.deinit();
         while (b.filling.count() > 0) {
             var it = b.filling.keyIterator();
@@ -100,7 +102,7 @@ pub const Backend = struct {
     }
 
     pub fn backend(b: *Backend) be.Backend {
-        return .{ .ptr = b, .vtable = &.{ .prefill = fill.Callbacks(Backend).whole, .prefill_step = fill.Callbacks(Backend).one, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release, .first_masked = grammar.firstMasked, .held = grammar.held } };
+        return .{ .ptr = b, .vtable = &.{ .prefill = fill.Callbacks(Backend).whole, .prefill_step = fill.Callbacks(Backend).one, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release, .first_masked = grammar.firstMasked, .held = grammar.held, .reports_fill = true } };
     }
 
     pub const facts = batch_costs.facts;
@@ -292,7 +294,7 @@ pub const Backend = struct {
             defer old.restore(b.e);
             outputs(b, s, 0);
             var watch = try think.Watch.init(.{}); // no thinking budget: lone_host_lone.fits keeps those in the lane core
-            const res = try b.e.decode(prompt, s.first, s.last, stream.max_new, stream.eos, null, &watch, .{ .ctx = &c, .prefilled = Ctx.prefilled, .tokens = Ctx.tokens, .cancelled = Ctx.cancelled }, &ho);
+            const res = try b.e.decode(prompt, s.first, s.last, stream.max_new, stream.eos, if (stream.drafts) null else 0, &watch, .{ .ctx = &c, .prefilled = Ctx.prefilled, .tokens = Ctx.tokens, .cancelled = Ctx.cancelled, .sampling = sample.active(stream.sampling) }, &ho);
             if (c.failed) |err| return err;
             stream.rounds += res.rounds;
             stream.drafted += res.drafted;

@@ -1,4 +1,4 @@
-//! Projections copied once into the slice-interleaved layout the row kernels read; the checkpoint's bytes stay as they are.
+//! Projections copied once to the slice-interleaved layout the row kernels read; the checkpoint's bytes stay unchanged.
 const std = @import("std");
 const mtl = @import("metal");
 const kernels = @import("kernels.zig");

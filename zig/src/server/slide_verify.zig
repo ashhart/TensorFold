@@ -125,7 +125,7 @@ fn brings(fact: []const u8, h: Held, reply: []const u8) bool {
 }
 
 /// Whether a changed reply still claims nothing new about the user nor answers anew, as the model judges it.
-fn same(srv: *Server, cx: *Cx, question: []const u8, before: []const u8, reply: []const u8, gone: anytype) !bool {
+pub fn same(srv: *Server, cx: *Cx, question: []const u8, before: []const u8, reply: []const u8, gone: anytype) !bool {
     const verdict = try askBase(srv, cx, null, try std.fmt.allocPrint(cx.a, prompts.same_prompt, .{ question, before, reply }), 4, gone);
     return std.ascii.startsWithIgnoreCase(std.mem.trim(u8, verdict.content, " \t\r\n\"*"), "no");
 }

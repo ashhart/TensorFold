@@ -468,3 +468,41 @@ If the fact does not come back, or another answer changes, the whole lesson is t
 It also asks a few questions about the user that nothing told it, such as a cat's name or the user's own name; a lesson
 that makes it answer one with something made up ("Your cat's name is Whiskers.") is taken out too. Keep the original
 model for anything that matters.
+
+
+### Fixed drift and supplied recall
+
+With `--slide --slide-drift-gate`, each candidate that reaches the commit checks is measured against `server/slide_panel.zig`:
+115 original unrelated prompts, 15 untold personal controls and 20 fictional neighbour questions.
+This is a new fixed panel, not the reporter's unavailable 155-question panel.
+The graph records the untaught replies and token SHA-256 hashes once. Every later candidate checks
+that the untaught replies still match that baseline. It never substitutes the previous taught reply.
+Greedy replies use 64 tokens with thinking off; where supported, a separate bounded thinking pass is recorded.
+Changed unrelated replies are classified as byte-equal, alike, judged the same, or changed in meaning.
+
+Supply fixed external recall wordings separately from the writer's `questions`:
+
+```json
+{"text":"I like blue.","recall":[{"fact":"I like blue.","question":"Which shade do I favour?","answer":"blue"}]}
+```
+
+`fact` must match an extracted fact exactly and `answer` must occur in it. These wordings never go to
+the writer. A wording that the generated training plan also reads makes the measurement incomplete.
+The graph's `facts[].recall` and `facts[].evaluation` retain the external set and per-lesson receipt;
+`drift_baseline` retains the original replies. Early refusals are explicitly `not_measured`.
+Measured refusals keep their candidate receipt even after the fitted lesson is taken out.
+
+`--slide --slide-drift-gate` adds an opt-in commit gate, after every existing acceptance check.
+Missing external recall, a changed baseline/profile, an incomplete panel or a failed receipt write refuses.
+The hard limits are zero invented personal answers, zero leaks, at most two meaning changes before ten
+kept facts and at most five from ten onward, plus 90% supplied recall and, from ten facts, 90% earlier-fact retention.
+Drift uses the worst of three greedy passes and recall the median. Thinking recall is reported separately.
+Byte-equality targets (103/115 after three facts, 92/115 after ten) remain report-only.
+Without the flag, `recall` is ignored and no fixed-panel requests, receipt writes or new graph fields are added.
+An earlier fact without supplied recall and a complete receipt makes the next measurement incomplete.
+To enable the gate over an existing graph, delete facts missing those records, then re-teach them with the gate
+and external wordings enabled.
+
+These three passes observe one fitted candidate. They do not replace the release experiment's three
+fresh-checkpoint lesson sequences. Full-model results, keep rates and measurement cost on every backend
+remain unchecked; no family is qualified by the host fixtures.

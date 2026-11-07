@@ -48,6 +48,15 @@ number are unchanged. Streams keep their existing no-redraw behavior.
 Seed selection is deterministic. The final take can still change if timing or
 request deadlines admit a different number of redraws.
 
+The server's `--max-frames` flag caps a reply's length in frames. A frame is 2,048 samples at 44.1 kHz (about
+46 ms), so the default cap of 1,024 frames is about 48 s of audio. The flag takes an integer from 1 through 8190
+("argument --max-frames: expected 1 through 8190") and Drama 3 reads it at open: the reply's cap is the flag's
+value (1,024 when it's unset), clamped to what the context leaves (`--context` - 3 frames). An explicit
+value must also leave prompt room — one at or above `--context` - 1 is refused ("use --max-frames <
+--context - 1") — and Drama 3's `--context` itself must stay within 1025 through 8192. Other engines ignore the
+flag, and video input is untouched: the vision families' frame caps are their own (see
+[vision](vision.md)).
+
 The API design references the public
 [Sogni-AI/drama3-mlx generation interface](https://github.com/Sogni-AI/drama3-mlx/blob/ecc235039ccd5f982f66a6982184f57432354ab4/drama3_mlx/model.py#L79).
 TensorFold's parsing and request propagation are an independent implementation;

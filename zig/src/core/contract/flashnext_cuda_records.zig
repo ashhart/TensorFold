@@ -2,6 +2,7 @@
 const CudaRecord = @import("registry.zig").CudaRecord;
 
 pub const cuda = [_]CudaRecord{
+    .{ .launch = .{ .name = "flashnext_batch fn_copy_cols", .symbol = "fn_copy_cols", .image = "flashnext_batch", .threads = 256 }, .usage = @splat(.{ .regs = 12, .static = 0, .bound = 0 }), .later_pending = true },
     .{ .launch = .{ .name = "flashnext_gdn flashnext_gdn_chain", .symbol = "flashnext_gdn_chain", .image = "flashnext_gdn", .threads = 1024 }, .usage = .{ .{ .regs = 51, .static = 2060, .bound = 1024 }, .{ .regs = 56, .static = 2060, .bound = 1024 }, .{ .regs = 56, .static = 2060, .bound = 1024 }, .{ .regs = 62, .static = 2060, .bound = 1024 }, .{ .regs = 62, .static = 2060, .bound = 1024 } } },
     .{ .launch = .{ .name = "flashnext_hc fn_add_streams", .symbol = "fn_add_streams", .image = "flashnext_hc", .threads = 256 }, .usage = .{ .{ .regs = 32, .static = 0, .bound = 0 }, .{ .regs = 40, .static = 0, .bound = 0 }, .{ .regs = 40, .static = 0, .bound = 0 }, .{ .regs = 35, .static = 0, .bound = 0 }, .{ .regs = 35, .static = 0, .bound = 0 } } },
     .{ .launch = .{ .name = "flashnext_attn fn_attn_chunks", .symbol = "fn_attn_chunks", .image = "flashnext_attn", .threads = 128, .dynamic = 43520, .opt_in = true }, .usage = .{ .{ .regs = 72, .static = 640, .bound = 128 }, .{ .regs = 72, .static = 640, .bound = 128 }, .{ .regs = 72, .static = 640, .bound = 128 }, .{ .regs = 72, .static = 640, .bound = 128 }, .{ .regs = 72, .static = 640, .bound = 128 } } },

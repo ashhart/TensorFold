@@ -2,7 +2,7 @@
 const std = @import("std");
 const reg = @import("registry.zig");
 pub const records = [_]reg.CudaRecord{
-    .{ .launch = .{ .name = "tf_q35_attn_rows8_mt2", .symbol = "tf_q35_attn_rows8_mt2", .image = "qwen35_kv8", .threads = 128, .min_sm = 120 }, .usage = .{ .{ .regs = 0, .static = 0 }, .{ .regs = 0, .static = 0 }, .{ .regs = 0, .static = 0 }, .{ .regs = 242, .static = 36992, .bound = 128 }, .{ .regs = 242, .static = 36992, .bound = 128 } }, .later_pending = true },
+    .{ .launch = .{ .name = "tf_q35_attn_rows8_mt2", .symbol = "tf_q35_attn_rows8_mt2", .image = "qwen35_kv8", .threads = 128, .min_sm = 120 }, .usage = .{ .{ .regs = 0, .static = 0 }, .{ .regs = 0, .static = 0 }, .{ .regs = 0, .static = 0 }, .{ .regs = 242, .static = 36992, .bound = 128 }, .{ .regs = 243, .static = 36992, .bound = 128 } }, .later_pending = true },
     .{ .launch = .{ .name = "tf_q35_attn_rows8_mt2_whole", .symbol = "tf_q35_attn_rows8_mt2_whole", .image = "qwen35_kv8", .threads = 128, .min_sm = 120 }, .usage = .{ .{ .regs = 0, .static = 0 }, .{ .regs = 0, .static = 0 }, .{ .regs = 0, .static = 0 }, .{ .regs = 239, .static = 36992, .bound = 128 }, .{ .regs = 239, .static = 36992, .bound = 128 } }, .later_pending = true },
     .{ .launch = .{ .name = "tf_q35_attn_partial_whole", .symbol = "tf_q35_attn_partial_whole", .image = "qwen35", .threads = 128, .dynamic = 65536, .opt_in = true, .min_sm = 80 }, .usage = .{
         .{ .regs = 167, .static = 11648, .bound = 128 },
@@ -47,11 +47,25 @@ pub const records = [_]reg.CudaRecord{
         .{ .regs = 255, .static = 0, .bound = 256 },
     }, .later_pending = true },
     .{ .launch = .{ .name = "_ZN20tf_prefill_attention13hpattn_kernelILi256ELi8ELi2ELi2EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiifiPKixi", .symbol = "_ZN20tf_prefill_attention13hpattn_kernelILi256ELi8ELi2ELi2EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiifiPKixi", .image = "prefill_attention", .threads = 256, .dynamic = 98304, .opt_in = true, .min_sm = 80 }, .usage = .{
+        .{ .regs = 251, .static = 0, .bound = 256 },
+        .{ .regs = 251, .static = 0, .bound = 256 },
+        .{ .regs = 251, .static = 0, .bound = 256 },
+        .{ .regs = 233, .static = 0, .bound = 256 },
+        .{ .regs = 233, .static = 0, .bound = 256 },
+    }, .later_pending = true },
+    .{ .launch = .{ .name = "_ZN20tf_prefill_attention18hpattn_p256_kernelILi256ELi8ELi2ELi2EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiifiPKixi", .symbol = "_ZN20tf_prefill_attention18hpattn_p256_kernelILi256ELi8ELi2ELi2EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiifiPKixi", .image = "prefill_attention", .threads = 256, .dynamic = 98304, .opt_in = true, .min_sm = 80 }, .usage = .{
+        .{ .regs = 255, .static = 0, .bound = 256 },
+        .{ .regs = 255, .static = 0, .bound = 256 },
+        .{ .regs = 255, .static = 0, .bound = 256 },
         .{ .regs = 253, .static = 0, .bound = 256 },
         .{ .regs = 253, .static = 0, .bound = 256 },
+    }, .later_pending = true },
+    .{ .launch = .{ .name = "_ZN20tf_prefill_attention22hpattn_p256_ids_kernelILi256ELi8ELi2ELi2EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiifiPKixi", .symbol = "_ZN20tf_prefill_attention22hpattn_p256_ids_kernelILi256ELi8ELi2ELi2EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiifiPKixi", .image = "prefill_attention", .threads = 256, .dynamic = 101376, .opt_in = true, .min_sm = 80 }, .usage = .{
+        .{ .regs = 255, .static = 0, .bound = 256 },
+        .{ .regs = 255, .static = 0, .bound = 256 },
+        .{ .regs = 255, .static = 0, .bound = 256 },
         .{ .regs = 253, .static = 0, .bound = 256 },
-        .{ .regs = 231, .static = 0, .bound = 256 },
-        .{ .regs = 231, .static = 0, .bound = 256 },
+        .{ .regs = 253, .static = 0, .bound = 256 },
     }, .later_pending = true },
     .{ .launch = .{ .name = "_ZN20tf_prefill_attention14hpattn8_kernelILi256ELi8ELi2ELi2EEEvPK13__nv_bfloat16PKhS5_PKfS7_PS1_iiiiifiPKixi", .symbol = "_ZN20tf_prefill_attention14hpattn8_kernelILi256ELi8ELi2ELi2EEEvPK13__nv_bfloat16PKhS5_PKfS7_PS1_iiiiifiPKixi", .image = "prefill_attention", .threads = 256, .dynamic = 98304, .opt_in = true, .min_sm = 80 }, .usage = .{
         .{ .regs = 255, .static = 0, .bound = 256 },

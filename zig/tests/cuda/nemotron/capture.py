@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Nemotron's Python CUDA engine as the Zig engine's oracle: Triton launches, weight digests, per-block dumps, tokens."""
+"""Nemotron's Python CUDA engine, the Zig engine's oracle: Triton launches, weight digests, per-block dumps, tokens."""
 
 from __future__ import annotations
 

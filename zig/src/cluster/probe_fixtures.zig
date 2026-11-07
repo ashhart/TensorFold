@@ -1,4 +1,4 @@
-//! Synthetic tool output in the exact formats macOS 27 prints, with made-up UUIDs and GIDs, for the probe and topology tests.
+//! Synthetic tool output in the exact formats macOS 27 prints, with fake UUIDs and GIDs, for probe and topology tests.
 const std = @import("std");
 const probe = @import("probe.zig");
 
@@ -74,7 +74,7 @@ pub const devinfo_a =
     "\t\t\tstate:\t\t\tPORT_DOWN (1)\n" ++
     "\t\t\tactive_mtu:\t\t4096 (5)\n" ++
     "\t\t\tGID[  0]:\t\t0a00:0000:0000:4000:8000:0000:0000:0000\n" ++
-    "\t\t\tGID[  1]:\t\tfe80::3498:1bff:fe4a:9540\n" ++
+    "\t\t\tGID[  1]:\t\tfe80::aaaa:bbff:fecc:dd40\n" ++
     "\n" ++
     "hca_id:\trdma_en3\n" ++
     "\ttransport:\t\t\tThunderbolt (100)\n" ++
@@ -87,7 +87,7 @@ pub const devinfo_a =
     "\t\t\tstate:\t\t\tPORT_ACTIVE (4)\n" ++
     "\t\t\tactive_mtu:\t\t4096 (5)\n" ++
     "\t\t\tGID[  0]:\t\t0a00:0000:0000:4000:8000:0000:0000:0001\n" ++
-    "\t\t\tGID[  1]:\t\tfe80::3498:1bff:fe4a:9544\n";
+    "\t\t\tGID[  1]:\t\tfe80::aaaa:bbff:fecc:dd44\n";
 
 pub fn texts(name: []const u8, sys: []const u8, tb: []const u8, dev: []const u8) probe.Texts {
     return .{ .name = name, .sysctl = sys, .displays = displays, .thunderbolt = tb, .devinfo = dev, .df = df };

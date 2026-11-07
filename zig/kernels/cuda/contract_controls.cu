@@ -5,6 +5,7 @@
 #include <math.h>
 #include <stdint.h>
 #include "common/reduce.cuh"
+#include "gemma4_ple.cuh"
 
 #define TF_Q35_SCORE_CONTROL
 #include "qwen35_scores.cuh"
@@ -537,6 +538,14 @@ TF_CTL_EXL3_GROUPED(tf_ctl_exl3_grouped_skip, 2, tf_exl3::SKIP)
 TF_CTL_EXL3_GROUPED(tf_ctl_exl3_grouped_stale, 2, tf_exl3::STALE)
 #undef TF_CTL_EXL3_GROUPED
 
+
+// Gate 3: gemma4_ple.cu's tf_gemma4_ple_rows with one step dropped (tf_ple::DROP_*); the shapes gate must go red.
+extern "C" __global__ void __launch_bounds__(64) tf_ctl_ple_rows(const __nv_bfloat16* p, const __nv_bfloat16* t,
+                                                                 const __nv_bfloat16* w, __nv_bfloat16* out, int parts,
+                                                                 float scale, float token, float mix, float eps,
+                                                                 int drop) {
+    tf_ple::rows(p, t, w, out, parts, scale, token, mix, eps, drop);
+}
 
 #define TF_MOE_ROUTER_CONTROLS
 #include "moe_router_expert.cuh"

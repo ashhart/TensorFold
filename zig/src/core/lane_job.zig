@@ -26,6 +26,7 @@ pub const Job = struct {
     submitted: i96 = 0,
     admitted_ns: ?i96 = null, // first admission only, retained if a background pass later yields
     fill_wait: usize = 0, // chunk choices it has waited since admission or its last chunk
+    fill_lent_ns: f64 = 0, // decode time its prompt has lent replies (TENSORFOLD_PREFILL_ORDER=srpt)
     began: i96 = 0,
     /// The engine thread says the prompt pass is going: status readers may count this job's fill atomics.
     fill_on: std.atomic.Value(bool) = .init(false),

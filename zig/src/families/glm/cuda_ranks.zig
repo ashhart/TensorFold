@@ -3,6 +3,7 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const heat = @import("heat");
+const l2pf = @import("cuda_l2pf.zig");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
 /// The forward's knobs a rank reads from its environment (the Python family's names and defaults).
@@ -25,6 +26,7 @@ pub const Settings = struct {
     roce_multi: bool = false, // TF_GLM_ROCE_MULTI: 1 (three ranks or more: small all-gathers on fabric/tp's multirank RoCE beside NCCL) or 0
     kv_host: u8 = 0, // TF_GLM_KV_HOST=1: KV pages in host memory (1); with TF_GLM_KV_HOST_SHARED=1, one copy a host (2)
     kv_host_gib: f64 = 0, // TF_GLM_KV_HOST_GIB: the host pages' GiB (0: one full window)
+    l2pf: l2pf.Options = .{}, // TF_GLM_L2PF and its knobs: a decode window's next weights read into L2 beside it
 
     /// The settings `get` (an environment lookup) gives; `problem` names a value that is not one of the choices.
     pub fn read(get: *const fn ([:0]const u8) ?[]const u8, problem: *[]const u8) !Settings {
@@ -32,6 +34,13 @@ pub const Settings = struct {
         if (get("TF_GLM_PROMPT_K")) |v| {
             if (std.mem.eql(u8, v, "shape")) s.prompt_fixed_k = true else if (!std.mem.eql(u8, v, "one")) {
                 problem.* = "TF_GLM_PROMPT_K: one or shape";
+                return error.BadSetting;
+            }
+        }
+        // TF_GLM_PROMPT_TAIL: rank 0's prompt cache reads it (cuda_snaps' cacheRules); a typo is refused on every rank
+        if (get("TF_GLM_PROMPT_TAIL")) |v| {
+            if (!std.mem.eql(u8, v, "0") and !std.mem.eql(u8, v, "1")) {
+                problem.* = "TF_GLM_PROMPT_TAIL: 0 or 1";
                 return error.BadSetting;
             }
         }
@@ -74,6 +83,7 @@ pub const Settings = struct {
                 return error.BadSetting;
             }
         }
+        s.l2pf = try l2pf.Options.read(get, problem);
         if (get("TF_GLM_OVERLAP_PIECES")) |v| {
             s.pieces = std.fmt.parseInt(u32, v, 10) catch 0;
             if (s.pieces < 1 or s.pieces > 8) {
@@ -166,7 +176,7 @@ fn wireOpens(get: *const fn ([:0]const u8) ?[]const u8) bool {
 
 /// What every rank must agree on, as bytes the communicator carries.
 pub const Fingerprint = extern struct {
-    layout: u32 = 16, // this struct's version (15 plus kda_pad)
+    layout: u32 = 18, // both layouts: main 16 plus L2 prefetch, distinct from the PR's 17
     world: u32,
     rank: u32,
     kv8: u32 = 0,
@@ -187,6 +197,7 @@ pub const Fingerprint = extern struct {
     roce_multi: u32 = 0, // TF_GLM_ROCE_MULTI: every rank opens the borrowed wire or none does (a lone rank would wait on it)
     kv_host: u32 = 0, // TF_GLM_KV_HOST(_SHARED): every rank sizes the pool alike and maps the shared file, or none does
     solo: u32 = 0, // TF_GLM_CHUNK_SOLO: rank 0's solo passes need the wider prompt buffers on every rank
+    l2pf: [4]u32 = @splat(0), // TF_GLM_L2PF's words: every rank prefetches alike, so none waits on a slower one's windows
     bits: u32 = 16 << 8 | 16, // TF_GLM_DENSE_BITS << 8 | TF_GLM_HEAD_BITS: every rank's matmuls read the same codes
     capacity: u64, // tokens a sequence holds
     heat_high: f64, // the heat bands in degrees (0 and 0: off): every rank must wait alike
@@ -218,6 +229,7 @@ pub const Fingerprint = extern struct {
         roce_multi,
         kv_host,
         solo,
+        l2pf,
         bits,
         capacity,
         heat_high,
@@ -255,6 +267,7 @@ pub const Fingerprint = extern struct {
             .kv_host = s.kv_host,
             .kv_host_gib = s.kv_host_gib,
             .solo = @intFromBool(s.solo),
+            .l2pf = s.l2pf.words(),
             .bits = @as(u32, s.dense_bits) << 8 | s.head_bits,
             .capacity = capacity,
             .heat_high = if (s.heat) |b| b.high_c else 0,
@@ -294,6 +307,7 @@ pub fn mismatch(all: []const Fingerprint) ?Mismatch {
             "roce_multi",
             "kv_host",
             "solo",
+            "l2pf",
             "bits",
             "capacity",
             "heat_high",
@@ -415,6 +429,7 @@ fn explain(f: Fingerprint.Field) []const u8 {
         .kv_host => "TF_GLM_KV_HOST or TF_GLM_KV_HOST_SHARED",
         .kv_host_gib => "TF_GLM_KV_HOST_GIB",
         .solo => "TF_GLM_CHUNK_SOLO",
+        .l2pf => "TF_GLM_L2PF, _MB, _CTAS or _PACE_GBPS",
         .bits => "TF_GLM_DENSE_BITS or TF_GLM_HEAD_BITS",
         .capacity => "the sequence capacity (the context)",
         .heat_high => "TF_HEAT_HIGH",

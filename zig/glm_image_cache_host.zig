@@ -1,13 +1,13 @@
-//! GLM content-keyed image resumes with the real prefix store, image admission, wire spans and splice dispatch.
+//! GLM content-keyed image resumes with the real shared prompt store, image admission, wire spans and splice dispatch.
 const std = @import("std");
 const glm = @import("glm");
 const cuda = @import("cuda");
 const lanes = @import("lanes");
 const core = @import("core");
+const prompt_pages = @import("prompt_pages");
 const t = std.testing;
 const a = t.allocator;
 const D = glm.vision_config.out_hidden;
-const pc = glm.prefix.radix;
 const N = 8193;
 
 const Model = struct {
@@ -16,28 +16,50 @@ const Model = struct {
     restored: u32 = 0,
     live: usize = 0,
     const Snap = struct { kept: glm.engine.Kept, words: [2]u64 };
-    fn bytes(_: *anyopaque, _: u32) u64 {
-        return @sizeOf(Snap);
-    }
-    fn save(ptr: *anyopaque, _: ?*anyopaque, at: u32) anyerror!pc.Saved {
-        const m: *Model = @ptrCast(@alignCast(ptr));
+    fn save(m: *Model, at: u32) !*anyopaque {
         const s = try a.create(Snap);
         m.serial += 1;
         s.* = .{ .kept = .{ .id = m.serial, .at = at }, .words = m.words };
         m.live += 1;
         return s;
     }
-    fn restore(ptr: *anyopaque, owner: ?*anyopaque, saved: pc.Saved) anyerror!void {
-        const m: *Model = @ptrCast(@alignCast(ptr));
+    /// The words come back now; the kept state waits in `owner` for the pass's start, as GLM's snap_restore leaves it.
+    fn restore(m: *Model, owner: ?*anyopaque, saved: *anyopaque) !void {
         const s: *Snap = @ptrCast(@alignCast(saved));
         m.words = s.words;
         m.restored = s.kept.at;
-        try glm.prefix.Prefix.restore(ptr, owner, saved);
+        const o: *glm.share.Owner = @ptrCast(@alignCast(owner orelse return error.NoGlmOwner));
+        o.pending = &s.kept;
     }
-    fn drop(ptr: *anyopaque, saved: pc.Saved) void {
-        const m: *Model = @ptrCast(@alignCast(ptr));
+    fn drop(m: *Model, saved: *anyopaque) void {
         a.destroy(@as(*Snap, @ptrCast(@alignCast(saved))));
         m.live -= 1;
+    }
+};
+
+/// The decls the server's adapter reads of GLM (`share_*`, `snap_*` and its grid), over the cache's pool and model.
+const Family = struct {
+    pub const snap_grid = glm.native.snap_grid;
+    fn of(p: *anyopaque) *Cache {
+        return @ptrCast(@alignCast(p));
+    }
+    pub fn share_pool(p: *anyopaque) ?*core.kv_pool.Pool {
+        return &of(p).pages.pool;
+    }
+    pub fn share_attach(p: *anyopaque, prompts: ?core.kv_prompts.Prompts) void {
+        of(p).pages.prompts = prompts;
+    }
+    pub fn snap_bytes(_: *anyopaque, _: u32) u64 {
+        return @sizeOf(Model.Snap);
+    }
+    pub fn snap_save(p: *anyopaque, _: ?*anyopaque, at: u32) anyerror!*anyopaque {
+        return of(p).model.save(at);
+    }
+    pub fn snap_restore(p: *anyopaque, owner: ?*anyopaque, saved: *anyopaque) anyerror!void {
+        return of(p).model.restore(owner, saved);
+    }
+    pub fn snap_drop(p: *anyopaque, saved: *anyopaque) void {
+        of(p).model.drop(saved);
     }
 };
 
@@ -46,22 +68,26 @@ const Cache = struct {
     leases: [1]core.kv_pool.Lease = .{.{}},
     used: [1]bool = .{false},
     ids: [16]u32 = undefined,
-    prefix: *glm.prefix.Prefix = undefined,
+    store: *prompt_pages.Adapter = undefined,
     model: Model = .{},
+    e: glm.engine.Engine = undefined, // what GLM's share glue reads: the allocator and the pages
     fn init(c: *Cache) !void {
         c.pages.pool = try core.kv_pool.Pool.init(a, 64, 512);
         errdefer c.pages.pool.deinit();
         c.pages.layout = .{ .fixed_bytes = 0, .token_bytes = 1, .page_tokens = 512, .snap_bytes = 0 };
         c.pages.leases = &c.leases;
         c.pages.used = &c.used;
+        c.pages.prompts = null;
         try t.expect(c.pages.pool.hold(&c.ids));
         errdefer for (c.ids) |id| c.pages.pool.release(id);
         try c.leases[0].ids.appendSlice(a, &c.ids);
         errdefer c.leases[0].ids.deinit(a);
-        c.prefix = try glm.prefix.Prefix.initWith(a, &c.pages, 2048, 8, .{ .ptr = &c.model, .vtable = &.{ .bytes = Model.bytes, .save = Model.save, .restore = Model.restore, .drop = Model.drop } });
+        c.e.gpa = a;
+        c.e.pages = &c.pages;
+        c.store = (try prompt_pages.Adapter.open(Family, a, c, 512, 8)).?;
     }
     fn deinit(c: *Cache) void {
-        c.prefix.deinit();
+        c.store.close();
         for (c.ids) |id| c.pages.pool.release(id);
         c.leases[0].ids.deinit(a);
         c.pages.pool.deinit();
@@ -69,15 +95,15 @@ const Cache = struct {
     }
     fn keep(c: *Cache, s: *const lanes.Stream, at: u32, words: [2]u64) void {
         c.model.words = words;
-        var keeps: glm.prefix.Keeps = undefined;
-        const marks = c.prefix.marks(0, s, &.{at}, &keeps).?;
+        var keeps: glm.share.Keeps = undefined;
+        const marks = glm.share.marks(&c.e, 0, s, &.{at}, &keeps).?;
         marks.call(marks.ctx, at);
     }
     fn begin(c: *Cache, s: *const lanes.Stream) !u32 {
-        var owner: glm.prefix.Owner = .{};
+        var owner: glm.share.Owner = .{};
         var adopt: std.ArrayList(u32) = .empty;
         defer adopt.deinit(a);
-        const plan = try c.prefix.beginStream(s, &owner, &adopt);
+        const plan = try glm.share.begin(&c.e, s, &owner, &adopt);
         defer a.free(plan.marks);
         defer c.pages.give(adopt.items);
         if (plan.from > 0) try t.expectEqual(plan.from, owner.pending.?.at);
@@ -117,19 +143,19 @@ test "GLM image cache: the actual lane opening enables a content-keyed image loo
     e.capacity = N + 256;
     e.pages = &c.pages;
     var link: glm.follow.Link = undefined;
-    var back: glm.lanes.Lanes = .{ .x = .{ .e = &e, .link = &link }, .prefix = c.prefix };
+    var back: glm.lanes.Lanes = .{ .x = .{ .e = &e, .link = &link } };
     defer back.lanes.deinit(a);
     // Refuse before a device operation, after the actual cache lookup and adopt rollback.
     c.pages.used = &.{};
     const b = back.backend();
     try t.expectError(error.LaneMemory, b.vtable.prefill_step.?(b.ptr, &s, 0));
-    try t.expectEqual(@as(u64, 1), c.prefix.store.tree.counts.misses);
+    try t.expectEqual(@as(u64, 1), c.store.store.tree.counts.misses);
     c.pages.used = &c.used;
     c.keep(&s, 6144, .{ 31, 47 });
     c.pages.used = &.{};
     try t.expectError(error.LaneMemory, b.vtable.prefill_step.?(b.ptr, &s, 0));
     try t.expectEqual(@as(u32, 6144), c.model.restored);
-    try t.expectEqual(@as(u64, 1), c.prefix.store.tree.counts.hits);
+    try t.expectEqual(@as(u64, 1), c.store.store.tree.counts.hits);
     try t.expectEqual(@as(usize, 0), back.lanes.count());
     for (c.ids[0..12]) |id| try t.expectEqual(@as(u32, 2), c.pages.pool.holders(id));
 }
@@ -168,21 +194,21 @@ test "GLM image cache: A B A and a changed grid resume only matching content and
     try t.expectEqual([2]u64{ 23, 29 }, c.model.words);
     try t.expectEqual(@as(u32, 2048), try c.begin(&sg));
     sa.key = &.{};
-    try t.expect(!glm.prefix.cacheable(&sa));
+    try t.expect(!glm.share.cacheable(&sa));
     try t.expectError(error.ImageCacheKeyRequired, c.begin(&sa));
     sa.key = ka[0..10];
-    try t.expect(!glm.prefix.cacheable(&sa));
+    try t.expect(!glm.share.cacheable(&sa));
     sa.key = &ka;
     sa.prompt_logprobs = 0;
-    try t.expect(!glm.prefix.cacheable(&sa));
+    try t.expect(!glm.share.cacheable(&sa));
     sa.prompt_logprobs = null;
     sa.untaught = true;
-    try t.expect(!glm.prefix.cacheable(&sa));
+    try t.expect(!glm.share.cacheable(&sa));
     sa.untaught = false;
     sa.images = &.{};
     sa.key = &.{};
-    try t.expectEqualSlices(u32, &ids, glm.prefix.cacheKey(&sa).?);
-    try t.expect(glm.prefix.cacheable(&sa));
+    try t.expectEqualSlices(u32, &ids, glm.share.cacheKey(&sa).?);
+    try t.expect(glm.share.cacheable(&sa));
 }
 
 const Device = struct {

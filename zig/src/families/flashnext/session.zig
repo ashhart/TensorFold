@@ -30,7 +30,7 @@ pub const Session = struct {
         s.m.pos = 0;
         s.m.state = 0;
         s.m.state_row = 0;
-        s.m.recs = null;
+        if (!original) s.m.recs = null; // the GPU-side rounds run on the engine's own session
         s.m.marks = null;
         if (!original) {
             for (&s.m.layers) |*l| if (l.linear) {

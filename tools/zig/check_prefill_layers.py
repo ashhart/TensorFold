@@ -1,4 +1,4 @@
-"""Whole prompt chunks through real Nemotron layers, stock against our kernels swapped in: outputs and states bit for bit."""
+"""Whole prompt chunks through real Nemotron layers, stock vs our kernels swapped in: outputs and states bit for bit."""
 
 from __future__ import annotations
 

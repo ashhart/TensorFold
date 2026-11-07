@@ -1,4 +1,4 @@
-//! The verbs ABI (rdma-core's infiniband/verbs.h, which Apple's SDK ships for librdma): the structs and constants we use.
+//! The verbs ABI (rdma-core's infiniband/verbs.h, which Apple's SDK ships for librdma): structs and constants we use.
 const std = @import("std");
 const platform = @import("sys");
 
@@ -263,8 +263,9 @@ pub const mask = struct {
     pub const dest_qpn = 1 << 20;
 };
 
-// Sizes and offsets the SDK's verbs.h gives on arm64 macOS, as tools/zig/verbs_layout.c prints them.
+// Sizes and offsets of the SDK's verbs.h on arm64 macOS (per tools/zig/verbs_layout.c); Linux's differ, so macOS only.
 test "the ABI matches verbs.h" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
     const t = std.testing;
     try t.expectEqual(664, @sizeOf(Device));
     try t.expectEqual(24, @offsetOf(Device, "name"));

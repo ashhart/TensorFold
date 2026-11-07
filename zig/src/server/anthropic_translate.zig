@@ -320,6 +320,13 @@ pub fn translate(cx: *Cx, body: Value, count: bool) errors.Refused!Value {
     return .{ .object = chat };
 }
 
+/// The Messages field a refusal should name when output_config.format asked for the structure; call after translate.
+pub fn formatName(body: Value) ?[]const u8 {
+    const config = body.field("output_config") orelse return null;
+    if (config != .object) return null;
+    return if (config.field("format") != null) "output_config.format" else null;
+}
+
 test "document block refuses remote url source" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();

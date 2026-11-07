@@ -20,6 +20,7 @@ test {
     _ = @import("cuda_hidden_trace.zig");
     _ = @import("cuda_attention.zig");
     _ = @import("cuda_prompt.zig");
+    _ = @import("cuda_prompt_tail.zig");
     _ = @import("cuda_forward.zig");
     _ = engine;
     _ = @import("cuda_modelopt.zig");
@@ -48,6 +49,7 @@ test {
     _ = @import("cuda_prefix.zig");
     _ = @import("cuda_prefix_fault_test.zig");
     _ = @import("cuda_pend_test.zig");
+    _ = @import("cuda_reuse_pages_test.zig");
 }
 
 pub const slide = @import("cuda_slide.zig");
@@ -72,4 +74,8 @@ test {
 test {
     _ = train;
     _ = @import("cuda_read_cost_test.zig");
+}
+
+test "Qwen pages default: the learner's and the prefix share's refusals stop before the weights load" {
+    try @import("cuda_admit_test.zig").refusals();
 }

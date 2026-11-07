@@ -66,7 +66,7 @@ const Bench = struct {
         return all;
     }
 
-    /// Where a pass writes (the speed-up out-projection's fp32 partial, or the class's output), and its bytes at `rows`.
+    /// Where a pass writes (the speed-up out-projection's fp32 partial or the class's output), and its bytes at `rows`.
     fn out(b: *Bench, p: Pass, mode: Mode, rows: usize) struct { buf: Buf, len: usize } {
         const n = (six(p.lanes[0]).wq.b.length() - six(p.lanes[0]).wq.off) * 4 / (3 * p.k);
         if ((mode == .tp or mode == .tpnew) and std.mem.endsWith(u8, p.role, "gdn.out")) return .{ .buf = b.part, .len = rows * fz.D * 4 };

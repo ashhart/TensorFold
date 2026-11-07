@@ -88,14 +88,14 @@ pub fn Kept(comptime F: type) type {
             const head = c.head != null;
             const st = try c.gpa.create(snap.Snap);
             errdefer c.gpa.destroy(st);
-            st.* = .{ .buf = try cuda.DeviceBuffer.alloc(c.engine.driver, snap.bytes(at, head)), .at = at, .history = .{ 0, 0 }, .head = head };
+            st.* = .{ .buf = try cuda.DeviceBuffer.alloc(c.engine.driver, snap.bytes(at, head, .full)), .at = at, .history = .{ 0, 0 }, .head = head };
             return @ptrCast(st);
         }
 
         /// A state from a stream that did not draft lacks the head's rows this server's parts name: it stays off disk.
         fn whole(ptr: *anyopaque, saved: api.prompt_cache.Saved) bool {
             const st: *const snap.Snap = @ptrCast(@alignCast(saved));
-            return st.head == (of(ptr).head != null) and st.rank_id == 0;
+            return st.head == (of(ptr).head != null) and st.rank_id == 0 and st.heads.eql(.full);
         }
 
         /// A fixed prompt's state at a mark inside its last chunk, hashed, and the prompt rate it took.
@@ -149,7 +149,7 @@ test "the image covers a state's device bytes once, its rows split into 256-toke
         defer parts.deinit(a);
         try partsOf(at, head, &parts, a);
         try std.testing.expect(rows.image.valid(parts.items, at, rows.block_tokens));
-        try std.testing.expectEqual(words + snap.bytes(at, head), rows.image.imageBytes(parts.items));
+        try std.testing.expectEqual(words + snap.bytes(at, head, .full), rows.image.imageBytes(parts.items));
     };
 }
 
@@ -160,7 +160,7 @@ test "the image's parts are cuda_snap.move's pieces in its order: sizes, offsets
         defer parts.deinit(a);
         try partsOf(at, head, &parts, a);
         try std.testing.expectEqual(@as(u64, words), parts.items[0].bytes);
-        const o = snap.order(at, head);
+        const o = snap.order(at, head, .full);
         var i: usize = 1;
         var off: u64 = words; // the image's offset; move's buffer offset is this less the words
         var moved: u64 = 0;
@@ -185,7 +185,7 @@ test "the image's parts are cuda_snap.move's pieces in its order: sizes, offsets
             }
         }
         try std.testing.expectEqual(parts.items.len, i);
-        try std.testing.expectEqual(@as(u64, snap.bytes(at, head)), moved);
+        try std.testing.expectEqual(@as(u64, snap.bytes(at, head, .full)), moved);
         try std.testing.expectEqual(rows.image.imageBytes(parts.items), off);
     };
 }

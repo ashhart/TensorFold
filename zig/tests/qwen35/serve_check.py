@@ -1,4 +1,4 @@
-"""Exactness of a running native server over HTTP; usage: serve_check.py URL MODEL [TOKENS]."""
+"""Exactness of a running native server over HTTP; usage: serve_check.py URL MODEL [TOKENS [FRESH_URL]]."""
 
 import json
 import sys
@@ -8,6 +8,7 @@ import urllib.request
 
 URL, MODEL = sys.argv[1], sys.argv[2]
 TOKENS = int(sys.argv[3]) if len(sys.argv) > 3 else 64
+FRESH_URL = sys.argv[4] if len(sys.argv) > 4 else URL  # the same server started with --prompt-cache-gib 0
 PROMPTS = [
     "Write a short poem about the sea.",
     "List the first twelve prime numbers, separated by commas.",
@@ -16,10 +17,10 @@ PROMPTS = [
 ]
 
 
-def ask(messages, draft=True, temperature=0.0, seed=7):
+def ask(messages, draft=True, temperature=0.0, seed=7, url=URL):
     body = {"model": MODEL, "messages": messages, "max_tokens": TOKENS, "temperature": temperature, "seed": seed,
             "draft": draft, "chat_template_kwargs": {"enable_thinking": False}}
-    request = urllib.request.Request(URL + "/v1/chat/completions", json.dumps(body).encode(),
+    request = urllib.request.Request(url + "/v1/chat/completions", json.dumps(body).encode(),
                                      {"Content-Type": "application/json"})
     with urllib.request.urlopen(request, timeout=900) as reply:
         doc = json.load(reply)
@@ -88,8 +89,15 @@ for label, temperature in (("greedy", 0.0), ("t0.8", 0.8)):
     check(f"{label}: serial long prompt among decoders == alone", among_decoders(False, temperature)[3] == mixed[3])
 first, _ = ask(user(PROMPTS[0]), True)
 turn = user(PROMPTS[0]) + [{"role": "assistant", "content": first}, {"role": "user", "content": "Now say it shorter."}]
-fresh, _ = ask(turn, False)
+# the fresh side on a server that keeps no prompts; a fresh reply that restored tokens fails by name
+fresh, fresh_details = ask(turn, False, url=FRESH_URL)
 resumed, details = ask(turn, True)
-check(f"resumed == fresh (cached {details})", resumed == fresh)
+restored = (fresh_details or {}).get("cached_tokens")
+if restored is None:
+    check("resumed == fresh: the fresh reply has no prompt_tokens_details.cached_tokens", False)
+elif restored != 0:
+    check(f"resumed == fresh: the fresh request resumed {restored} tokens (FRESH_URL: --prompt-cache-gib 0)", False)
+else:
+    check(f"resumed == fresh (cached {details})", resumed == fresh)
 print("failed", failed)
 sys.exit(1 if failed else 0)

@@ -240,6 +240,31 @@ test "TF_GLM_KDA_PAD: 0 by default, 1 or 0, refused otherwise and without glm_mm
     const all = [_]Fingerprint{ Fingerprint.of(2, 0, .{}, 8192, true, h, h, h), Fingerprint.of(2, 1, padded, 8192, true, h, h, h) };
     try std.testing.expectEqual(@as(?Mismatch, .{ .field = .kda_pad, .rank = 1 }), mismatch(&all));
 }
+
+test "TF_GLM_PROMPT_TAIL: unset, 0 or 1, refused otherwise" {
+    const Reader = struct {
+        fn off(key: [:0]const u8) ?[]const u8 {
+            return if (std.mem.eql(u8, key, "TF_GLM_PROMPT_TAIL")) "0" else null;
+        }
+        fn on(key: [:0]const u8) ?[]const u8 {
+            return if (std.mem.eql(u8, key, "TF_GLM_PROMPT_TAIL")) "1" else null;
+        }
+        fn empty(key: [:0]const u8) ?[]const u8 {
+            return if (std.mem.eql(u8, key, "TF_GLM_PROMPT_TAIL")) "" else null;
+        }
+        fn yes(key: [:0]const u8) ?[]const u8 {
+            return if (std.mem.eql(u8, key, "TF_GLM_PROMPT_TAIL")) "yes" else null;
+        }
+    };
+    var problem: []const u8 = "";
+    _ = try Settings.read(&fake, &problem);
+    _ = try Settings.read(Reader.off, &problem);
+    _ = try Settings.read(Reader.on, &problem);
+    for ([_]*const fn ([:0]const u8) ?[]const u8{ &Reader.empty, &Reader.yes }) |refused| {
+        try std.testing.expectError(error.BadSetting, Settings.read(refused, &problem));
+        try std.testing.expectEqualStrings("TF_GLM_PROMPT_TAIL: 0 or 1", problem);
+    }
+}
 fn digestFixture(io: std.Io, dir: std.Io.Dir, sub: []const u8, byte: u8) !void {
     try dir.createDirPath(io, sub);
     var d = try dir.openDir(io, sub, .{});
@@ -454,4 +479,26 @@ test "TF_GLM_KV_HOST, _SHARED and _GIB: off by default, the choices, and refusal
     try std.testing.expectEqual(@as(f64, 13), f.kv_host_gib);
     var all = [_]Fingerprint{ f, Fingerprint.of(2, 1, .{ .kv_host = 1 }, 8192, true, h, h, h) };
     try std.testing.expectEqual(Fingerprint.Field.kv_host, mismatch(&all).?.field);
+}
+
+test "TF_GLM_L2PF: read with the settings, carried in the fingerprint, and ranks that prefetch differently disagree" {
+    const Reader = struct {
+        fn on(key: [:0]const u8) ?[]const u8 {
+            return if (std.mem.eql(u8, key, "TF_GLM_L2PF")) "1" else null;
+        }
+        fn bad(key: [:0]const u8) ?[]const u8 {
+            return if (std.mem.eql(u8, key, "TF_GLM_L2PF")) "2" else null;
+        }
+    };
+    var problem: []const u8 = "";
+    const s = try Settings.read(Reader.on, &problem);
+    try std.testing.expect(s.l2pf.on);
+    try std.testing.expectError(error.BadSetting, Settings.read(Reader.bad, &problem));
+    try std.testing.expectEqualStrings("TF_GLM_L2PF: 0 or 1", problem);
+    const h: [32]u8 = @splat(0);
+    var all = [_]Fingerprint{ Fingerprint.of(2, 0, s, 8192, true, h, h, h), Fingerprint.of(2, 1, s, 8192, true, h, h, h) };
+    try std.testing.expectEqual([4]u32{ 1, 12, 2, 150 }, all[0].l2pf);
+    try std.testing.expectEqual(@as(?Mismatch, null), mismatch(&all));
+    all[1].l2pf[3] = 0; // rank 1 unpaced
+    try std.testing.expectEqual(Mismatch{ .field = .l2pf, .rank = 1 }, mismatch(&all).?);
 }

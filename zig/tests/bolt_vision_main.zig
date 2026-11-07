@@ -161,7 +161,7 @@ fn f32Slice(b: []const u8) []const f32 {
 }
 
 fn dl(d: *const cuda.Driver, src: u64, out: []u8) !void {
-    try d.check(d.api.cuMemcpyDtoH_v2(out.ptr, src, out.len), "cuMemcpyDtoH");
+    try cuda.memory.download(d, src, std.mem.sliceAsBytes(out)[0..out.len]);
 }
 
 fn now(io: std.Io) i96 {

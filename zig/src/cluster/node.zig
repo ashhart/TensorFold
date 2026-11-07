@@ -39,6 +39,8 @@ pub const Port = struct {
     gid: Gid = no_gid,
     /// The far end's GID[0] (zero while the port is down or the cable's peer is unknown).
     peer_gid: Gid = no_gid,
+    /// Index of `gid` in the device table. Thunderbolt is GID[0]. ConnectX is the first RoCE v2 row.
+    gid_index: u8 = 0,
 };
 
 pub const max_ports = 8;
@@ -80,7 +82,7 @@ pub const Inventory = struct {
     }
 };
 
-/// macOS's GPU limit when iogpu.wired_limit_mb is 0: fit to 107.5 GiB on 128 GiB and 222.7 GiB on 256 GiB, two thirds below that.
+/// macOS GPU limit when iogpu.wired_limit_mb is 0: fit to 107.5 of 128 GiB and 222.7 of 256 GiB, two thirds below that.
 pub fn defaultGpuLimit(memory: u64) u64 {
     const fit = memory / 10 * 9 -| 768 * gib / 100;
     return @max(memory / 3 * 2, fit);

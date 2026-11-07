@@ -3,7 +3,7 @@
 #define KREG 0
 #endif
 namespace gdn_tpr {
-constexpr int NK = 16, NV = 48, DK = 128, DV = 128;
+constexpr int DK = 128, DV = 128;
 __device__ __forceinline__ float bf(float x) { return __bfloat162float(__float2bfloat16_rn(x)); }
 __device__ __forceinline__ void cp16(void* dst, const void* src) {
     asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" ::"r"(static_cast<uint32_t>(__cvta_generic_to_shared(dst))), "l"(src));
@@ -27,7 +27,8 @@ __device__ __forceinline__ float tree(float (&x)[32 / TPR]) {
     for (int m = TPR / 2; m >= 1; m >>= 1) r = r + __shfl_xor_sync(0xffffffffu, r, m);
     return r;
 }
-template <int TPR, int STEPS>
+// NK key and NV value heads (a layer's 16 and 48, or one rank's 8 and 24), TPR threads a state row, STEPS rows a stage
+template <int NK, int NV, int TPR, int STEPS>
 __device__ __forceinline__ void chain(const float* __restrict__ qn, const float* __restrict__ kn, const float* __restrict__ v,
                                       const float* __restrict__ gb, const float* state_in, float* state_out, int rows,
                                       float* __restrict__ ys_out) {
@@ -112,3 +113,17 @@ __device__ __forceinline__ void chain(const float* __restrict__ qn, const float*
         for (int i = 0; i < 4; ++i) state_out[sbase + (l * TPR + t) * 4 + i] = s[l][i];
 }
 }  // namespace gdn_tpr
+
+// The prompt chain on two threads a state row (gdn_tpr): fn_gdn_rows_to's bits, state_in == state_out in place.
+extern "C" __global__ void __launch_bounds__(256) fn_gdn_chain_tpr(const float* qn, const float* kn, const float* v,
+                                                                 const float* gb, const float* state_in, float* state_out,
+                                                                 int rows, float* ys_out) {
+    gdn_tpr::chain<16, 48, 2, 16>(qn, kn, v, gb, state_in, state_out, rows, ys_out);
+}
+
+// fn_gdn_chain_tpr on one rank's 8 key and 24 value heads.
+extern "C" __global__ void __launch_bounds__(256) fn_gdn_chain_tpr_h8(const float* qn, const float* kn, const float* v,
+                                                                    const float* gb, const float* state_in,
+                                                                    float* state_out, int rows, float* ys_out) {
+    gdn_tpr::chain<8, 24, 2, 16>(qn, kn, v, gb, state_in, state_out, rows, ys_out);
+}

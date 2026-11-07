@@ -7,6 +7,10 @@ const gdn = @import("cuda_gdn.zig");
 const wt = @import("cuda_prompt_wt.zig");
 const mixed = @import("cuda_mixed_experts.zig");
 const projections = @import("cuda_projection_load.zig");
+const dense_split = @import("cuda_dense_split.zig");
+const Cut = @import("cuda_modelopt_experts.zig").Cut;
+const Heads = @import("cuda_heads.zig").Heads;
+const heads_cut = @import("heads_cut.zig");
 
 const layers_n = wt.layers_n;
 const dims = wt.dims;
@@ -80,6 +84,10 @@ pub const Layer = struct {
     experts_up: cuda.DeviceBuffer,
     experts_down: cuda.DeviceBuffer,
     native_experts: ?mixed.Owned = null,
+    /// The input columns of `out` this rank keeps under the dense split (null: the whole projection).
+    dense_cut: ?Cut = null,
+    /// The heads this rank computes of the layer: the whole layer unless the head split cuts it.
+    heads: Heads = .full,
 
     pub fn free(self: *Layer, gpa: std.mem.Allocator) void {
         _ = gpa;
@@ -268,6 +276,11 @@ pub fn loadLayerAt(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.S
 }
 
 fn loadLayerAtRank(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.Stream, store: *Store, pack_fn: cuda.Function, base: []const u8, linear: bool, with_ple: bool, world: usize, rank: usize, pocket: ?*Pocket) !Layer {
+    // decided before any view is held: deciding maps layer 0's shard; the split halves the heads and cuts the outs
+    const heads = try dense_split.heads(store, world);
+    const cut: ?Cut = if (!heads.eql(.full)) try Cut.init(dims, world, rank) else null;
+    // the rank's place among the heads' holders: 0 when one rank holds them all
+    const at: usize = if (cut != null) rank else 0;
     var buf: [200]u8 = undefined;
     var base_buf: [80]u8 = undefined;
     @memcpy(base_buf[0..base.len], base);
@@ -339,19 +352,26 @@ fn loadLayerAtRank(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.S
         var pre_buf: [120]u8 = undefined;
         @memcpy(pre_buf[0..pre.len], pre);
         const lp = pre_buf[0..pre.len];
-        const parts = [_][]const u8{ ".in_proj_qkv", ".in_proj_z", ".in_proj_b", ".in_proj_a" };
-        proj_q = try projections.loadStitched(gpa, driver, store, lp, &parts, gdn.proj_width, dims);
-        out_q = try projections.load(gpa, driver, store, try std.fmt.bufPrint(&buf, "{s}.out_proj", .{lp}), dims, gdn.value_dim);
+        if (cut != null) {
+            const st = try heads_cut.delta(heads, at);
+            proj_q = try projections.loadStitchedCut(gpa, driver, store, lp, &heads_cut.delta_parts, &st.ranges, st.n, dims, st.sk);
+        } else proj_q = try projections.loadStitched(gpa, driver, store, lp, &heads_cut.delta_parts, gdn.proj_width, dims);
+        const out_name = try std.fmt.bufPrint(&buf, "{s}.out_proj", .{lp});
+        out_q = if (cut) |c| try projections.loadCut(gpa, driver, store, out_name, dims, gdn.value_dim, c, .rows) else try projections.load(gpa, driver, store, out_name, dims, gdn.value_dim);
         const conv = try store.tensor(try std.fmt.bufPrint(&buf, "{s}.conv1d.weight", .{lp}));
         if (conv.bytes.len != gdn.conv_dim * gdn.taps * 2) return error.UnexpectedTensor;
-        cw_b = try cuda.DeviceBuffer.fromHost(driver, conv.bytes);
+        if (cut != null) {
+            const kept = try heads_cut.convRows(gpa, conv, heads, at);
+            defer gpa.free(kept);
+            cw_b = try cuda.DeviceBuffer.fromHost(driver, kept);
+        } else cw_b = try cuda.DeviceBuffer.fromHost(driver, conv.bytes);
         const a_log = try asF32(gpa, try store.tensor(try std.fmt.bufPrint(&buf, "{s}.A_log", .{lp})));
         defer gpa.free(a_log);
         const dt = try asF32(gpa, try store.tensor(try std.fmt.bufPrint(&buf, "{s}.dt_bias", .{lp})));
         defer gpa.free(dt);
         if (a_log.len != gdn.nv or dt.len != gdn.nv) return error.UnexpectedTensor;
-        a_b = try cuda.DeviceBuffer.fromHost(driver, std.mem.sliceAsBytes(a_log));
-        dt_b = try cuda.DeviceBuffer.fromHost(driver, std.mem.sliceAsBytes(dt));
+        a_b = try cuda.DeviceBuffer.fromHost(driver, std.mem.sliceAsBytes(try heads_cut.valueSlice(a_log, heads, at)));
+        dt_b = try cuda.DeviceBuffer.fromHost(driver, std.mem.sliceAsBytes(try heads_cut.valueSlice(dt, heads, at)));
         const norm = try store.copyOf(try std.fmt.bufPrint(&buf, "{s}.norm.weight", .{lp}));
         defer gpa.free(norm);
         nw_b = try cuda.DeviceBuffer.fromHost(driver, norm);
@@ -360,9 +380,12 @@ fn loadLayerAtRank(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.S
         var pre_buf: [120]u8 = undefined;
         @memcpy(pre_buf[0..pre.len], pre);
         const ap = pre_buf[0..pre.len];
-        const parts = [_][]const u8{ ".q_proj", ".k_proj", ".v_proj", ".indexer.index_qk_proj" };
-        proj_q = try projections.loadStitched(gpa, driver, store, ap, &parts, proj_n, dims);
-        out_q = try projections.load(gpa, driver, store, try std.fmt.bufPrint(&buf, "{s}.o_proj", .{ap}), dims, out_k);
+        if (cut != null) {
+            const st = try heads_cut.attention(heads, at);
+            proj_q = try projections.loadStitchedCut(gpa, driver, store, ap, &heads_cut.attention_parts, &st.ranges, st.n, dims, st.sk);
+        } else proj_q = try projections.loadStitched(gpa, driver, store, ap, &heads_cut.attention_parts, proj_n, dims);
+        const out_name = try std.fmt.bufPrint(&buf, "{s}.o_proj", .{ap});
+        out_q = if (cut) |c| try projections.loadCut(gpa, driver, store, out_name, dims, out_k, c, .rows) else try projections.load(gpa, driver, store, out_name, dims, out_k);
         const qn = try store.normScale(gpa, try store.tensor(try std.fmt.bufPrint(&buf, "{s}.q_norm.weight", .{ap})));
         defer gpa.free(qn);
         const kn = try store.normScale(gpa, try store.tensor(try std.fmt.bufPrint(&buf, "{s}.k_norm.weight", .{ap})));
@@ -406,7 +429,7 @@ fn loadLayerAtRank(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.S
     var experts_down = deadBuf(driver);
     errdefer experts_down.free();
     if (store.has(try std.fmt.bufPrint(&buf, "{s}.experts.0.gate_proj.weight", .{mlp_root}))) {
-        native_experts = try mixed.load(gpa, driver, store, mlp_root, world, rank);
+        native_experts = try mixed.load(gpa, driver, store, mlp_root, world, rank, cut != null);
     } else {
         if (world != 1 or rank != 0) return error.UnsupportedQuantization;
         const legacy = legacy_block: {
@@ -468,5 +491,7 @@ fn loadLayerAtRank(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.S
         .experts_up = experts_up,
         .experts_down = experts_down,
         .native_experts = native_experts,
+        .dense_cut = cut,
+        .heads = heads,
     };
 }

@@ -19,6 +19,7 @@ pub const direct_io = @import("direct_io.zig");
 pub const direct_gather = @import("direct_gather.zig");
 pub const Checkpoint = checkpoint.Checkpoint;
 pub const draft_depth = @import("draft_depth.zig");
+pub const prompt_tail = @import("prompt_tail.zig");
 pub const CopyIndex = @import("copy_index.zig").CopyIndex;
 pub const recurrent_workspace = @import("recurrent_workspace.zig");
 pub const tokenizer = @import("tokenizer"); // a module of its own, so the native server shares it
@@ -40,6 +41,7 @@ pub const norms_ref = @import("norms_ref.zig");
 pub const l2_ref = @import("l2_ref.zig");
 pub const act_ref = @import("act_ref.zig");
 pub const bf16_round = @import("bf16_round");
+pub const joint_schema = @import("joint_schema/joint_schema.zig");
 pub const rope_yarn = @import("rope_yarn.zig");
 /// transformers' default and proportional RoPE inverse frequencies in fp32, word for word.
 pub const rope_freq = @import("rope_freq.zig");
@@ -90,6 +92,7 @@ test {
     _ = l2_ref;
     _ = act_ref;
     _ = bf16_round;
+    _ = joint_schema;
     _ = embed_ref;
     _ = contract;
     _ = tree_round;
@@ -112,6 +115,7 @@ test {
     _ = direct_gather;
     _ = frame_rounds;
     _ = draft_depth;
+    _ = prompt_tail;
     _ = @import("copy_index.zig");
     _ = ids_json;
     _ = proposal_vocab;

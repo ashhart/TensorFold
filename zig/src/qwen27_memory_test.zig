@@ -80,3 +80,47 @@ test "qwen27 memory: working sets account for weights and the unchanged 8 GiB ma
     try std.testing.expectEqual(@as(usize, 16 << 30), try memory.room(192 << 30, weights, "42949672960"));
     try std.testing.expectEqual(@as(usize, 0), try memory.room(192 << 30, 200 << 30, null));
 }
+
+test "qwen27 memory: a wired-limit raise fits one stream only above the floor and rounds up to a whole MiB" {
+    const mib: usize = 1 << 20;
+    const used: usize = 10 << 30;
+    const need: usize = 5 << 30;
+    const total = used + need + (8 << 30);
+    const least = total + (4 << 30); // the least RAM whose suggested limit leaves exactly the floor
+    try std.testing.expectEqual(@as(?usize, total / mib), memory.wiredRaise(used, need, least));
+    try std.testing.expectEqual(@as(?usize, null), memory.wiredRaise(used, need, least - 1));
+    // One stream fits this RAM, but the limit it needs would leave less than the floor.
+    try std.testing.expectEqual(@as(?usize, null), memory.wiredRaise(used, need, total + (1 << 30)));
+    try std.testing.expectEqual(@as(?usize, total / mib + 1), memory.wiredRaise(used, need + 1, least + mib));
+}
+
+test "qwen27 memory: the issue's 32 GB Mac needs a raise under 29696 MB, and 16 GB of RAM cannot" {
+    const real: usize = 22_870_000_000; // Metal's working set on a 32 GB Mac
+    const used: usize = 11_381_000_000; // weights and buffers
+    const one: usize = 4_617_000_000; // one stream's scratch at this context
+    try std.testing.expect(one > try memory.room(real, used, null)); // 2.7 GiB remains: the refusal
+    const mb = memory.wiredRaise(used, one, 32 << 30) orelse return error.NoRaise;
+    try std.testing.expect(mb <= 29696); // the issue's fix
+    try std.testing.expect(mb * (1 << 20) >= used + one + (8 << 30));
+    try std.testing.expectEqual(@as(?usize, null), memory.wiredRaise(used, one, 16 << 30));
+}
+
+test "qwen27 memory: a refusal advises lowering parallel, the raise, or lowering context when RAM cannot" {
+    const real: usize = 22_870_000_000;
+    const used: usize = 11_381_000_000;
+    const one: usize = 4_617_000_000;
+    const cases = [_]struct { advice: memory.Advice, text: []const u8 }{
+        .{ .advice = memory.advice(real, used, null, 1, 32 << 30), .text = ": lower --parallel or --context" },
+        .{ .advice = memory.advice(real, used, null, one, 32 << 30), .text = ": Metal lets this Mac use 21.3 GiB; sudo sysctl iogpu.wired_limit_mb=23449 raises that limit enough for one stream at this context until reboot (or lower --context)" },
+        .{ .advice = memory.advice(real, used, null, one, 16 << 30), .text = ": no wired-limit raise fits one stream and leaves 4 GiB of this Mac's 16.0 GiB of RAM to the system: lower --context" },
+        .{ .advice = memory.advice(real, used, null, one, 26 << 30), .text = ": no wired-limit raise fits one stream and leaves 4 GiB of this Mac's 26.0 GiB of RAM to the system: lower --context" },
+        .{ .advice = memory.advice(real, used, "10737418240", one, 32 << 30), .text = ": lower --parallel or --context" },
+        .{ .advice = memory.advice(real, used, "1.5", one, 32 << 30), .text = ": lower --parallel or --context" },
+        .{ .advice = memory.advice(real, used, "274877906944", one, 32 << 30), .text = ": Metal lets this Mac use 21.3 GiB; sudo sysctl iogpu.wired_limit_mb=23449 raises that limit enough for one stream at this context until reboot (or lower --context)" },
+        .{ .advice = memory.advice(real, used, null, one, null), .text = ": no wired-limit raise is known to fit one stream: lower --context" },
+    };
+    for (cases) |c| {
+        var buf: [512]u8 = undefined;
+        try std.testing.expectEqualStrings(c.text, try std.fmt.bufPrint(&buf, "{f}", .{c.advice}));
+    }
+}

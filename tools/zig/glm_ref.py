@@ -1,4 +1,4 @@
-"""GLM-5.3-Flash references from the Python family for tf-glm-run (dev-time oracle): row-exact prompts, greedy replies, sublayer captures."""
+"""Python-family GLM-5.3-Flash dev-time oracle for tf-glm-run: row-exact prompts, greedy replies, sublayer captures."""
 
 from __future__ import annotations
 
@@ -93,7 +93,7 @@ def main() -> int:
 
 
 def trace(model, ids: list[int], reply: list[int], steps: int, path: str) -> None:
-    """Every call of a reply's forward, sublayer by sublayer (keys c{call}.{array}): the prompt's windows, then `steps` one-row steps."""
+    """Every reply-forward call, per sublayer (keys c{call}.{array}): prompt windows, then `steps` 1-row steps."""
 
     import mlx.core as mx
 
@@ -119,7 +119,7 @@ def capture(model, tokens: list[int], path: str) -> None:
 
 
 def sublayers(model, cache, tokens: list[int]) -> dict:
-    """One call's rows through the layers with `cache` (advanced): embed, each sublayer's input and output, final, logits."""
+    """One call's rows through layers with `cache` (advanced): embed, sublayer inputs/outputs, final, logits."""
 
     import mlx.core as mx
 

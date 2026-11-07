@@ -16,8 +16,19 @@ pub const cubin = @import("contract/cubin.zig");
 pub const hsaco = @import("contract/hsaco.zig");
 pub const hip_records = @import("contract/hip_records.zig");
 pub const vulkan_records = @import("contract/vulkan_records.zig");
+pub const xpu_limits = @import("contract/xpu_limits.zig");
+pub const xpu_records = @import("contract/xpu_records.zig");
+pub const zebin = @import("contract/zebin.zig");
+pub const zeinfo = @import("contract/zeinfo.zig");
 test {
     _ = vulkan_records;
+}
+test {
+    _ = xpu_records;
+}
+test {
+    _ = zebin;
+    _ = zeinfo;
 }
 test {
     _ = @import("contract/qwen_served_records.zig");

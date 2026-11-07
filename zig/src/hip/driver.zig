@@ -1,4 +1,4 @@
-//! The first HIP admission boundary, with signatures from ROCm's hip_runtime_api.h; no CUDA symbol aliases or GPU kernels.
+//! First HIP admission boundary, with signatures from ROCm's hip_runtime_api.h; no CUDA symbol aliases or GPU kernels.
 const std = @import("std");
 const platform = @import("sys");
 

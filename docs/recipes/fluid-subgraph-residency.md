@@ -10,11 +10,22 @@ tensorfold serve CHECKPOINT --ssd-experts 16 --ple-on-ssd
 
 `--ssd-experts GIB` is the routed-expert slot budget, not the whole process budget. Shared experts, non-routed weights, the original execution scratch, admitted sessions, prompt states and the runtime reserve still need memory. The startup plan includes them, all nine stored components per slot, the persistent expert map, source metadata and the bounded reader stack. It reports usable slots and unused budget bytes. A budget must hold one layer's maximum expert union. A shortfall refuses; it never changes top-k, context, drafts or concurrency to fit.
 
-The loader leaves routed target and MTP experts in their original checkpoint files. Demand protects all selected experts before CLOCK eviction. All nine components load into an exclusive slot before its map entry is published. The existing expert kernels use the persistent map only on this path. Mixed stored widths retain their original formulas and combine order. Missing or malformed spans, short reads, changed file length and a failed cache-bypass setup stop the request before partial data can be used.
+The loader leaves routed target and MTP experts in their original checkpoint files. Demand protects all selected experts before CLOCK eviction, which counts uses: a hit adds one up to three, the hand takes one off as it passes, and a newly read expert starts at none, so one used once leaves before one used again. All nine components load into an exclusive slot before its map entry is published. The existing expert kernels use the persistent map only on this path. Mixed stored widths retain their original formulas and combine order. Missing or malformed spans, short reads, changed file length and a failed cache-bypass setup stop the request before partial data can be used.
 
 Readers require macOS `F_NOCACHE` and use positional reads directly into shared slots. Native PLE streaming can be selected independently with `--ple-on-ssd`. It deduplicates requested rows, coalesces adjacent rows within each shard and feeds staged IDs and unchanged stored bytes through the resident lookup arithmetic. Logical n-gram IDs and history stay unchanged.
 
 Decode prefetch uses the next layer's own router on the current state. One bounded worker reads predictions into unleased slots behind submitted expert compute. The later real router remains authoritative. A wrong prediction wastes reads and cannot change routes or output. Prompt chunks load each layer's complete demand union once per chunk. Streaming chunks use one command stream so host storage cuts cannot wait on an unsubmitted staggered sibling; concurrent request windows and MTP still use the lane core.
+
+Loading doesn't bring the whole expert set into memory: the peak stays about 2 GiB above where memory settles. Flash Next MLX 4-bit MTP on an M3 Ultra, `--context 65536 --parallel 1`, physical footprint sampled every 250 ms through load, a short reply, a 16,000-token prompt and a 512-token reply, one run each, with the same reply bytes in every row:
+
+| Flags | After load | Peak | 16K prompt and 32 tokens |
+| --- | --- | --- | --- |
+| `--ssd-experts 8 --ple-on-ssd` | 36.0 GiB | 37.8 GiB | 49.1 s |
+| `--ssd-experts 17 --ple-on-ssd` | 45.0 GiB | 46.8 GiB | 47.8 s |
+| `--ssd-experts 8` | 65.9 GiB | 67.6 GiB | 44.4 s |
+| `--ssd-experts 17` | 74.9 GiB | 76.9 GiB | 34.9 s |
+| `--ssd-experts 35` | 92.9 GiB | 94.9 GiB | 35.9 s |
+| Everything in memory | 129.7 GiB | 131.6 GiB | 11.2 s |
 
 ## Bound read overhead
 
@@ -22,7 +33,7 @@ The demand path deduplicates route IDs and reserves missing experts in logical o
 
 An expert has nine stored components in separate tensor ranges. They cannot become one contiguous read without changing the checkpoint layout. Dense prompt unions can merge neighboring experts within each component; sparse decode routes often still need nine requests per missing expert. Mixed-width slot padding prevents merging across that padding. No gap bytes or unselected expert payloads are read to manufacture larger requests.
 
-A private pending-read index avoids scanning the pool for each route ID. Forecasts consume only cold, unleased slots and do not clear actual demand's second-chance bits. An unused prediction remains cold. When actual demand arrives, the worker finishes its current expert, skips unstarted unrelated predictions and finishes predictions the actual union needs. The actual router and complete-demand lease remain authoritative. Shutdown reports lifetime bytes, read requests, file checks, reservations, canceled forecasts, raw and unique demand IDs, worker joins and command waits, including startup.
+A private pending-read index avoids scanning the pool for each route ID. Forecasts consume only cold, unleased slots and do not spend actual demand's use counts. An unused prediction remains cold. When actual demand arrives, the worker stops after its current expert. Predictions it never started give their slots back, so the cold expert each one displaced stays, and demand reads what it needs itself. Demand waits for the current expert only if its union needs that one; otherwise that read finishes beside demand's, and no new forecast starts until it has. The actual router and complete-demand lease remain authoritative. Shutdown reports lifetime bytes, read requests, file checks, reservations, canceled forecasts, raw and unique demand IDs, worker joins and command waits, including startup.
 
 Router readback and storage ownership still require command-buffer boundaries. These changes reduce unnecessary forecast splits when no cold slot exists; they do not remove the real router's dependency or claim resident-class throughput at every budget. The worker remains bounded and is joined before cache publication or teardown.
 

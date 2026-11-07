@@ -15,19 +15,15 @@ const h3_topk = @import("metal_h3_topk.zig");
 const drama3_k = @import("metal_drama3.zig");
 const drama_nvfp4 = @import("metal_drama3_nvfp4.zig");
 const drama_router = @import("metal_drama_router.zig");
-const dsv41 = @import("metal_dsv41_main.zig");
 const drama_combine = @import("metal_drama_combine.zig");
 const drama_cfg = @import("metal_drama_cfg.zig");
 const glm_eh_k = @import("metal_glm_eh.zig");
-const glm_rows_k = @import("metal_glm_rows.zig");
 const pair_k = @import("metal_pair.zig");
-const pair_controls = @import("metal_pair_controls.zig");
 const minimax_k = @import("metal_minimax.zig");
 const attn_k = @import("metal_q27_attn.zig");
 const io_k = @import("metal_q27_attn_io.zig");
 const q27_moe = @import("metal_qwen27_moe.zig");
 const q27_rows = @import("metal_qwen27_moe_rows.zig");
-
 const flash_pool = @import("metal_flashnext_pool.zig");
 const flash = @import("metal_flashnext.zig");
 const fsr = @import("metal_fsr.zig");
@@ -41,7 +37,6 @@ const lfm2_controls = @import("metal_lfm2_controls.zig");
 const llama_k = @import("metal_llama_all.zig");
 const g = contract.gates;
 const usage = "usage: tf-kernel-contract [--only TEXT] [--no-gates] [--no-limits] [--offline DIR] [--seed N] [--repro] [--rotary-long] [--rotary-accuracy FILE]";
-
 const Opts = struct { only: ?[]const u8 = null, gates: bool = true, limits: bool = true, offline: ?[]const u8 = null, seed: u64 = 0x6b63, repro: bool = false, rotary_long: bool = false, rotary_accuracy: ?[]const u8 = null };
 
 fn parse(args: []const [:0]const u8) !Opts {
@@ -70,7 +65,6 @@ fn parse(args: []const [:0]const u8) !Opts {
 }
 
 const Reg = struct { v: affine_k.Variant, name: []const u8 };
-
 const common = [_]Reg{
     .{ .v = .{ .kind = .row, .bits = 4, .group = 64 }, .name = "metal row projection q4 g64" },
     .{ .v = .{ .kind = .row, .bits = 6, .group = 32 }, .name = "metal row projection q6 g32" },
@@ -200,6 +194,9 @@ pub fn main(init: std.process.Init) !u8 {
         gemma_list.deinit(a);
     }
     var kernels: std.ArrayList(g.Kernel) = .empty;
+    var lfm3_suite: @import("metal_lfm3_suite.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer lfm3_suite.deinit();
+    try lfm3_suite.collect(o.only);
     for (gemma.all_entries) |v| {
         if (!wanted(o, v.name)) continue;
         if (!tensor) {
@@ -297,7 +294,7 @@ pub fn main(init: std.process.Init) !u8 {
         }
         pair_list.deinit(a);
     }
-    for (std.enums.values(pair_controls.Mutation)) |m| {
+    for (std.enums.values(@import("metal_pair_controls.zig").Mutation)) |m| {
         for (pair_k.all) |w| {
             const control_for = switch (m) {
                 .none => true,
@@ -372,7 +369,7 @@ pub fn main(init: std.process.Init) !u8 {
         d3router_count += 1;
         try kernels.append(a, d3routers[d3router_count - 1].kernel());
     }
-    var dsv41_routes = try dsv41.Routes.create(a, device, queue, &kernels, o.only);
+    var dsv41_routes = try @import("metal_dsv41_main.zig").Routes.create(a, device, queue, &kernels, o.only);
     defer dsv41_routes.destroy();
     var d3combines: [std.enums.values(drama_combine.Variant).len]drama_combine.Combine = undefined;
     var d3combine_count: usize = 0;
@@ -438,6 +435,9 @@ pub fn main(init: std.process.Init) !u8 {
     var llama_set = llama_k.Set{};
     defer llama_set.deinit(a);
     try llama_set.collect(a, device, queue, tensor, &kernels, o.only);
+    var masked_values = @import("metal_masked_values.zig").Suite{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer masked_values.deinit();
+    try masked_values.collect(o.only);
     if (tensor) for (std.enums.values(h3_k.Which)) |w| {
         if (!wanted(o, h3_k.spec(w).name)) continue;
         const x = try a.create(h3_k.H3);
@@ -466,7 +466,7 @@ pub fn main(init: std.process.Init) !u8 {
     var moe: Moe = .{};
     defer moe.deinit(a);
     try moe.collect(a, device, queue, o, &kernels);
-    var glm_windows: glm_rows_k.Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    var glm_windows: @import("metal_glm_rows.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer glm_windows.deinit();
     try glm_windows.collect(o.only);
     var nemotron_experts: @import("metal_nemotron_experts.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
@@ -514,6 +514,9 @@ pub fn main(init: std.process.Init) !u8 {
         try ios.append(a, x);
         try kernels.append(a, x.kernel());
     }
+    var attn_rows: @import("metal_q27_attn_rows.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer attn_rows.deinit();
+    try attn_rows.collect(o.only);
     var minimax: minimax_k.Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer minimax.deinit();
     try minimax.collect(o.only);
@@ -568,7 +571,7 @@ pub fn main(init: std.process.Init) !u8 {
     defer moss_image.destroy();
     const moss_image_decoder = try @import("metal_moss_image_decoder.zig").Suite.create(a, device, queue, &kernels, o.only);
     defer moss_image_decoder.destroy();
-    var dsv41_suites = try dsv41.Suites.create(a, device, queue, &kernels, o.only);
+    var dsv41_suites = try @import("metal_dsv41_main.zig").Suites.create(a, device, queue, &kernels, o.only);
     defer dsv41_suites.destroy();
     var t: g.Tally = .{};
     const t0 = std.Io.Clock.awake.now(init.io);

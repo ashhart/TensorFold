@@ -1,0 +1,87 @@
+{
+  "scope": "Local M4, text and VL 4-bit, prefill cancellation/yield/progress ownership correctness; no performance or precision change",
+  "source_sha256": {
+    "zig/build/lfm3_host.zig": "2a8e1aec41ed4e43835b6bee7958fdd95f17ddf108c509eab0a88a9a3ec63089",
+    "zig/src/families/lfm3/backend.zig": "4ed5d33b869dc4be0d82d406cff4abc0f65a63687c45d8b3aaa61e26361db233",
+    "zig/src/families/lfm3/prefill_control.zig": "f34af732f2fbf77beb2608a1c220ab84579942ea4b0a4a663f16ba2ab9fcad68",
+    "zig/src/lfm3_prefill_tests.zig": "0946c1207c410b4ff767ac3de8b270e0ccfca5c62a228cecb1e2e147cb9eb4c6",
+    "zig/tests/lfm3_row_tune.zig": "443174a7ba48a569db49d709296c8ec9f00288f064f4f912a2ed27546693af55"
+  },
+  "patch_sha256": "41eba72d2438b54c1a23a2f0ab0be1c4241a25eb5ed99504af870210949668bb",
+  "cpu_tests": {
+    "passed": 10,
+    "failed": 0,
+    "command": "zig build test-lfm3-prefill-host --summary all",
+    "scope": "Actual focused registered target reported 10 tests passing; five source-defined focused tests and their imported real Stream coverage.",
+    "build_log_sha256": "7c7206129986598a9279ea1ba9046ae2a555fac06a3708ff5e8292ef7014c83e"
+  },
+  "actual_device": {
+    "untouched_old": {
+      "exit": 1,
+      "failure": "ExpectedInterruption",
+      "callback_checks": 0
+    },
+    "fixed": {
+      "exit": 0,
+      "cases_per_model": 4,
+      "models": 2,
+      "resumed_state_logits_draws": "exact",
+      "ownership": "clean"
+    }
+  },
+  "diagnostic_excluded_from_patch": "Private actual-model callback diagnostic; immutable binary hashes below",
+  "evidence_sha256": {
+    "1.7B-after.log": "6d046fce8b7a213090872cdcc5d5a634358fb9254673dca0ba7369980921546b",
+    "events.json": "d29a50383a6ac6c86a1cecf58170d058b257f7ad9baca7b1c9f38199966e87fc",
+    "VL-2B-before.log": "70f184adaad6608a5c4f2ad2a4c528bb4ca43447a6162511329c6c0221c64a32",
+    "complete.json": "04b28fac6e93b10e83ff2ee9409e029aee6d20fb89ad69d35d6b0f2fd10b11e2",
+    "1.7B-before.log": "ddcfaf50992be7fdbce8b1e28e56553e294bb6de757c152d21839737e5f3ff92",
+    "VL-2B-after.log": "7e335597de283db894e2d1cfa22e835783d1abac1b11ef8ba692c0be27dec55d"
+  },
+  "timings": "discarded; correctness only",
+  "binaries": {
+    "before": "54ee1e049e9daad368386795c0815c6ad40bb3b9dabaa88b23634be7003ef28f",
+    "after": "6d58b931d840c73eb6f6a037d8b5868d869584f7829a4c84044e4ec045f4e940"
+  },
+  "host": {
+    "hardware": "Apple M4 Pro, 20 GPU cores",
+    "memory_bytes": 51539607552,
+    "os": "macOS 26.5.1, build 25F80"
+  },
+  "lease": {
+    "path": "/tmp/tensorfold-model.lock",
+    "exclusive": true,
+    "same_alias_inode": true,
+    "single_model_admission": true,
+    "owned_children_exited": 4,
+    "released_after_children": true
+  },
+  "cases": {
+    "text4": {
+      "after": [
+        "CASE yield=false immediate=true observed=Cancelled cancel_checks=1 yield_checks=0 fill_at=0 caches=0 marks=0",
+        "CASE yield=false immediate=false observed=Cancelled cancel_checks=4 yield_checks=3 fill_at=256 caches=0 marks=2",
+        "CASE yield=true immediate=true observed=Yielded cancel_checks=1 yield_checks=1 fill_at=0 caches=0 marks=0",
+        "CASE yield=true immediate=false observed=Yielded cancel_checks=4 yield_checks=4 fill_at=256 caches=0 marks=2"
+      ],
+      "before": [
+        "CASE yield=false immediate=true observed=success cancel_checks=0 yield_checks=0 fill_at=0 caches=1 marks=1"
+      ]
+    },
+    "vl4": {
+      "after": [
+        "CASE yield=false immediate=true observed=Cancelled cancel_checks=1 yield_checks=0 fill_at=0 caches=0 marks=0",
+        "CASE yield=false immediate=false observed=Cancelled cancel_checks=4 yield_checks=3 fill_at=256 caches=0 marks=2",
+        "CASE yield=true immediate=true observed=Yielded cancel_checks=1 yield_checks=1 fill_at=0 caches=0 marks=0",
+        "CASE yield=true immediate=false observed=Yielded cancel_checks=4 yield_checks=4 fill_at=256 caches=0 marks=2"
+      ],
+      "before": [
+        "CASE yield=false immediate=true observed=success cancel_checks=0 yield_checks=0 fill_at=0 caches=1 marks=1"
+      ]
+    }
+  },
+  "scope_limits": [
+    "Final-chunk cancellation is covered by the host helper regression; device cases exercise immediate and partial cancellation/yield plus restored-prefix cancellation.",
+    "No image-input, numerical-fidelity, or performance gate is claimed."
+  ]
+}

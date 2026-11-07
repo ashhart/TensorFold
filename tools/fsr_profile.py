@@ -142,26 +142,26 @@ def analyze(lines, budgets, ssd_bytes_per_second=None, *, tokens=None, resident_
                 jobs = []
                 for key in sorted(demand):
                     if key in mapping:
-                        slots[mapping[key]][1] = True
+                        slots[mapping[key]][1] = min(slots[mapping[key]][1] + 1, 3)
                 for key in sorted(demand):
                     if key in mapping:
                         continue
                     if len(slots) < capacity:
                         at = len(slots)
-                        slots.append([None, False])
+                        slots.append([None, 0])
                     else:
                         while True:
                             at = hand
                             hand = (hand + 1) % capacity
-                            old, ref = slots[at]
+                            old, uses = slots[at]
                             if old in protected:
                                 continue
-                            if ref:
-                                slots[at][1] = False
+                            if uses:
+                                slots[at][1] = uses - 1
                                 continue
                             del mapping[old]
                             break
-                    slots[at] = [key, True]
+                    slots[at] = [key, 0]
                     mapping[key] = at
                     jobs.append((key, at))
                     window_misses += 1
@@ -173,7 +173,7 @@ def analyze(lines, budgets, ssd_bytes_per_second=None, *, tokens=None, resident_
             cold.append({"window": window["id"], "misses": window_misses,
                          "cold_bytes": window_misses * stride})
         row.update(verdict="observed union fits" if row["observed_union_fits"] else "capacity pressure",
-                   policy="CLOCK, demand unions protected, no forecast", misses=misses,
+                   policy="CLOCK over use counts, demand unions protected, no forecast", misses=misses,
                    cold_bytes=misses * stride, per_window=cold, demands=demands,
                    hit_rate=1 - misses / demands, component_reads_without_coalescing=9 * misses)
         if parts is not None:

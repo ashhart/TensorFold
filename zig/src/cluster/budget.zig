@@ -1,4 +1,4 @@
-//! What each rank must hold under a plan (weights by kind, KV and state, activations, the drafter) against its GPU's limit.
+//! What each rank must hold under a plan (weights by kind, KV and state, activations, drafter) vs its GPU's limit.
 const std = @import("std");
 const node = @import("node.zig");
 const checkpoint = @import("checkpoint.zig");

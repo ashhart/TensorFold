@@ -1,4 +1,4 @@
-//! Expert parallel over two Macs (MCDMA): half the routed experts each, a MoE call's (row, slot) outputs swapped, all combined on both.
+//! Two-Mac expert parallel (MCDMA): half the routed experts each; MoE (row, slot) outputs swapped, combined on both.
 const std = @import("std");
 const platform = @import("sys");
 const mtl = @import("metal");
@@ -22,7 +22,7 @@ const PAGE = 16384;
 pub const PROMPT_ROWS = 4096;
 const SLOT = @max(MAXP * ENTRY, PROMPT_ROWS * D * 4); // one exchange's entries at most
 
-// The window (the same on both Macs): the peer's entries and ours by parity (a page before each send), flags, GPU words.
+// The window (same on both Macs): the peer's entries and ours by parity (a page before each send), flags, GPU words.
 const RECV = 0;
 const SEND = RECV + 2 * SLOT;
 const FLAGS = SEND + 2 * (PAGE + SLOT);
@@ -47,7 +47,7 @@ fn reached(posted: u32, x: u64) bool {
     return @as(i32, @bitCast(posted -% @as(u32, @truncate(x)))) >= 0;
 }
 
-// The lists one exchange keeps (i32): this Mac's unique experts with local ids and their members, the picks each Mac computes.
+// Lists one exchange keeps (i32): this Mac's unique experts with local ids and members, the picks each Mac computes.
 const L_IDS = 0;
 const L_MEM = L_IDS + MAXP * 4;
 const L_COUNT = L_MEM + MAXP * MAXR * 4;
@@ -206,7 +206,7 @@ pub const Ep = struct {
         enc.dispatchThreads(mtl.Size.of(1, 1, 1), mtl.Size.of(1, 1, 1));
     }
 
-    /// By rows: this Mac's routed sums (`yp` partials weighted by `wts`) into the send slot, then the post (a window or a prompt chunk).
+    /// By rows: our routed sums (`yp` partials weighted by `wts`) to the send slot, then the post (window or chunk).
     pub fn sendRows(t: *Ep, enc: mtl.ComputeEncoder, yp: Ref, wts: Ref, rows: u32) void {
         std.debug.assert(rows <= PROMPT_ROWS);
         enc.setPipeline(t.rcombine_pipe);
@@ -220,7 +220,7 @@ pub const Ep = struct {
         t.send(enc, yp, rows, false, true);
     }
 
-    /// The send slot guard's operands (ep_slot_free) from buffer index `first`: the flag, this exchange, the give-up count.
+    /// The send slot guard's operands (ep_slot_free) from buffer `first`: the flag, this exchange, the give-up count.
     fn slotGuard(t: *const Ep, enc: mtl.ComputeEncoder, first: usize) void {
         enc.setBuffer(t.wbuf, FLAG, first);
         enc.setValue(@as(u32, @truncate(t.x)), first + 1);
@@ -311,7 +311,7 @@ pub const Ep = struct {
         return @ptrCast(@alignCast(t.win.ptr + off));
     }
 
-    /// Each posted exchange's entries to the peer, then its flag; 10 s without an answer fails the link and lands every flag.
+    /// Each posted exchange's entries to the peer, then its flag; 10 s with no answer fails the link, lands every flag.
     fn service(t: *Ep) void {
         _ = platform.c.pthread_set_qos_class_self_np(.USER_INTERACTIVE, 0); // busy CPUs must not hold back a send
         const posted = t.word32(POSTED);

@@ -4,6 +4,7 @@ const std = @import("std");
 const cuda = @import("cuda");
 const wt = @import("cuda_prompt_wt.zig");
 const batch = @import("cuda_batch.zig");
+const parts = @import("cuda_batch_state.zig");
 const prompt = @import("cuda_prompt.zig");
 const gdn = @import("cuda_gdn.zig");
 const mtp = @import("cuda_mtp.zig");
@@ -37,7 +38,6 @@ const Q4 = wt.Q4;
 const HcW = wt.HcW;
 const max_chain = mtp.max_chain;
 const max_rows = mtp.max_rows;
-const conv_bytes = mtp.conv_bytes;
 const proj_bytes = mtp.proj_bytes;
 const fc_sk = mtp.fc_sk;
 const piece_rows = mtp.piece_rows;
@@ -64,7 +64,7 @@ fn copyAsync(stream: cuda.Stream, dst: u64, src: u64, n: usize) !void {
 fn download(stream: cuda.Stream, dst: []u8, src: u64) !void {
     const d = stream.d;
     try stream.synchronize();
-    try d.check(d.api.cuMemcpyDtoH_v2(dst.ptr, src, dst.len), "cuMemcpyDtoH");
+    try cuda.memory.download(d, src, std.mem.sliceAsBytes(dst)[0..dst.len]);
 }
 
 /// An owner can mirror main-model mutations to a peer without exposing device pointers on the control wire.
@@ -94,13 +94,13 @@ pub fn Ops(comptime Tri: type) type {
             return o.e.stream.*;
         }
 
-        /// Prompt rows [at, stop): the pass with its streams kept, then the head over each row with a known next token.
-        pub fn prefillChunk(o: Self, seq: *prompt.Seq, d: *Draft, ids: []const u32, at: usize, stop: usize) !void {
+        /// Prompt rows [at, stop): the pass (keeping `marks` on its way) and its streams, then the head over the rows.
+        pub fn prefillChunk(o: Self, seq: *prompt.Seq, d: *Draft, ids: []const u32, at: usize, stop: usize, marks: [parts.max_marks]parts.Mark) !void {
             if (stop > d.cap or stop <= at or stop - at > d.rows_cap) return error.PromptTooLong;
             if (seq.fed != at or d.len != at or d.drafted != 0 or d.pending != 0) return error.PositionMismatch;
             d.media = if (seq.media) |*m| m.view() else null;
             const last = stop == ids.len;
-            try o.forwardMain(seq, ids[at..stop], .{ .logits = if (last) .last else .none, .streams = d.streams.ptr, .prompt = true });
+            try o.forwardMain(seq, ids[at..stop], .{ .logits = if (last) .last else .none, .streams = d.streams.ptr, .prompt = true, .marks = marks });
             const head_to = @min(stop, ids.len - 1);
             if (head_to > at) try o.forwardHead(d, ids[at + 1 .. head_to + 1], d.streams.ptr, false);
             if (last) d.prompt_last = d.streams.ptr + (stop - 1 - at) * wide * 2;
@@ -112,7 +112,7 @@ pub fn Ops(comptime Tri: type) type {
             var at: usize = 0;
             while (at < ids.len) {
                 const stop = @min(ids.len, at + @min(o.e.chunk, d.rows_cap));
-                try o.prefillChunk(seq, d, ids, at, stop);
+                try o.prefillChunk(seq, d, ids, at, stop, .{ .{}, .{} });
                 at = stop;
             }
         }
@@ -274,7 +274,7 @@ pub fn Ops(comptime Tri: type) type {
         }
 
         /// draft over several drafts, greedy or sampled: kept rows in one pass, then one a step, each as it would alone
-        pub fn draftMany(o: Self, ds: []const *Draft, nexts: []const []const u32, rows: []const u64, counts: []const usize, positions: []const u64, sms: []const ?Sampling, confidence: f64, outs: []const *Chain) !void {
+        pub fn draftMany(o: Self, ds: []const *Draft, nexts: []const []const u32, rows: []const u64, counts: []const usize, positions: []const u64, sms: []const ?Sampling, confidences: []const f64, outs: []const *Chain) !void {
             const h = o.h;
             const n_l = ds.len;
             for (ds, outs) |d, out| {
@@ -292,7 +292,7 @@ pub fn Ops(comptime Tri: type) type {
                 n_act += 1;
             };
             var stops: [max_lanes]mtp.Stop = undefined;
-            for (stops[0..ds.len]) |*st| st.* = .{ .c = confidence };
+            for (stops[0..ds.len], confidences) |*st, c| st.* = .{ .c = c };
             var j: usize = 0;
             var best_host: [max_lanes * 4]f32 = undefined;
             var step_ds: [max_lanes]*Draft = undefined;
@@ -349,15 +349,16 @@ pub fn Ops(comptime Tri: type) type {
             const n = ids.len;
             if (n == 0 or n > max_rows) return error.WindowTooWide;
             if (seq.fed + n > seq.cap) return error.PromptTooLong;
+            if (!d.layout.heads.eql(seq.heads)) return error.DraftHeads; // its spares swap with the sequence's states
             d.settle(seq);
             const keeps = try o.lateBefore(seq, d, n);
             d.fed0 = seq.fed;
             d.rows = n;
             d.history = seq.history;
             @memcpy(d.ids[0..n], ids);
-            if (keeps) try copyAsync(o.stream(), d.saved.ptr + Draft.tail_at, seq.tail.ptr, ple_tail_n * wide * 2);
+            if (keeps) try copyAsync(o.stream(), d.saved.ptr + d.layout.tail_at, seq.tail.ptr, ple_tail_n * wide * 2);
             try o.e.forward(Tri, o.tri, seq, ids, .{ .logits = .all, .logits_out = d.logits.ptr, .keep = if (keeps) &d.keep else null, .streams = d.streams.ptr, .host_logits = @import("cuda_batch_state.zig").verifyHostLogits() });
-            if (keeps) try copyAsync(o.stream(), d.saved.ptr + Draft.nrow_at, o.e.batch_s.?.ple_nrow, n * wide * 2);
+            if (keeps) try copyAsync(o.stream(), d.saved.ptr + d.layout.nrow_at, o.e.batch_s.?.ple_nrow, n * wide * 2);
             d.open = keeps;
         }
 
@@ -365,9 +366,10 @@ pub fn Ops(comptime Tri: type) type {
         pub fn verifyMany(o: Self, seqs: []const *prompt.Seq, ds: []const *Draft, idss: []const []const u32, out: u64) !void {
             if (o.main != null) return error.UnsupportedRankOperation;
             // every window refused before any stream's state moves
-            for (seqs, idss) |seq, ids| {
+            for (seqs, idss, ds) |seq, ids, d| {
                 if (ids.len == 0 or ids.len > max_rows) return error.WindowTooWide;
                 if (seq.fed + ids.len > seq.cap) return error.PromptTooLong;
+                if (!d.layout.heads.eql(seq.heads)) return error.DraftHeads;
             }
             o.e.round_graph.clear();
             const wins = try o.e.gpa.alloc(prompt.Engine.Window, seqs.len);
@@ -380,14 +382,14 @@ pub fn Ops(comptime Tri: type) type {
                 d.rows = n;
                 d.history = seq.history;
                 @memcpy(d.ids[0..n], ids);
-                if (keeps) try copyAsync(o.stream(), d.saved.ptr + Draft.tail_at, seq.tail.ptr, ple_tail_n * wide * 2);
+                if (keeps) try copyAsync(o.stream(), d.saved.ptr + d.layout.tail_at, seq.tail.ptr, ple_tail_n * wide * 2);
                 w.* = .{ .seq = seq, .ids = ids, .keep = if (keeps) &d.keep else null, .streams = d.streams.ptr, .logits = d.logits.ptr };
             }
             try o.e.windows(Tri, o.tri, wins, out);
             var row0: usize = 0;
             for (ds, idss, wins) |d, ids, w| {
                 const keeps = w.keep != null;
-                if (keeps) try copyAsync(o.stream(), d.saved.ptr + Draft.nrow_at, o.e.batch_s.?.ple_nrow + row0 * wide * 2, ids.len * wide * 2);
+                if (keeps) try copyAsync(o.stream(), d.saved.ptr + d.layout.nrow_at, o.e.batch_s.?.ple_nrow + row0 * wide * 2, ids.len * wide * 2);
                 d.open = keeps;
                 row0 += ids.len;
             }
@@ -449,6 +451,13 @@ pub fn Ops(comptime Tri: type) type {
             if (!d.open) return error.CannotRewind;
             const e = o.e;
             const s = if (e.batch_s) |*bs| bs else return error.CannotRewind;
+            const k = &e.batch_k;
+            // refused before any change: kernels for every layer's heads, saved rows at the sequence's
+            if (!d.layout.heads.eql(seq.heads)) return error.DraftHeads;
+            for (e.layers[0..e.n_layers]) |*lw| if (lw.linear) {
+                _ = try k.gdnSet(lw.heads);
+                if (!lw.heads.eql(seq.heads)) return error.DraftHeads;
+            };
             seq.fed = d.fed0 + keep;
             var hist = d.history;
             for (d.ids[0..keep]) |t| hist = .{ hist[1], t };

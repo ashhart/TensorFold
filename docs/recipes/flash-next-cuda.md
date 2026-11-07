@@ -86,10 +86,12 @@ tensorfold-native serve /path/to/checkpoint --temperature 0
   of every expert its rows route to, so fewer, larger passes cost less a token; but a pass runs to its end, so a
   stream decoding during a pass waits up to the whole pass for its next token. See
   [Prompt chunk size](#prompt-chunk-size).
-- `TF_FLASHNEXT_CHUNK_SOLO` (opt-in; `TF_FLASHNEXT_CHUNK` to 16,384) is the chunk a pass takes when no other stream
-  is decoding as it starts; with one decoding, the pass takes `TF_FLASHNEXT_CHUNK`. Unset, every pass takes
-  `TF_FLASHNEXT_CHUNK`. See [Prompt chunk size](#prompt-chunk-size).
-- `TF_FLASHNEXT_DRAFTS` (1 to 15, default 6) and `TF_FLASHNEXT_CONFIDENCE` (default 0.60) set the head's chain.
+- `TF_FLASHNEXT_CHUNK_SOLO` (`TF_FLASHNEXT_CHUNK` to 16,384) is the chunk a pass takes when no other stream
+  is decoding as it starts; with one decoding, the pass takes `TF_FLASHNEXT_CHUNK`. Unset, it's 8,192 at `--parallel 1`
+  on one GPU, and every other server's passes take `TF_FLASHNEXT_CHUNK`. See [Prompt chunk size](#prompt-chunk-size).
+- `TF_FLASHNEXT_DRAFTS` (1 to 15, default 6) and `TF_FLASHNEXT_CONFIDENCE` (default -0.4) set the head's chain. A
+  negative value keeps drafting while the drafts' probabilities multiply to at least its size (0.4 by default), a
+  positive value keeps a later draft only at or above it, and 0 keeps every draft.
 - `TF_FLASHNEXT_LOAD_THREADS` (1 to 32, default 8) packs the routed NVFP4 experts on that many threads at load, staged
   through at most 192 MiB of pinned memory: every layer on one GPU, and the MTP head's layer on rank 0 at `--tp 2`.
   1 keeps the one-expert loop. Other values are refused.
@@ -257,6 +259,20 @@ On one GB10 with `nvidia/Qwen3.8-Flash-Next-FP4-Local` and
 
 4,096 rows took most of 8,192's gain for 2.25 GiB instead of 5.86 GiB. A solo pass lasts about 1.9 s at 4,096 rows
 and about 3.8 s at 8,192: that is the longest a request arriving during one waits before its own prompt starts.
+
+At `--parallel 1` no other stream can wait on a pass, so on one GPU the solo chunk defaults to 8,192 rows. On one GB10
+with the MLX 4-bit MTP checkpoint, `--parallel 1 --context 73728 --prompt-cache-gib 0`, a 65,536-token prompt, three
+fresh servers for each setting:
+
+| `TF_FLASHNEXT_CHUNK_SOLO` | First token | Model and scratch at startup |
+| --- | --- | --- |
+| 1,536 | 35.5 s | 75.8 GiB |
+| 4,096 | 30.7 s | 77.0 GiB |
+| 8,192 | 29.5 s | 79.0 GiB |
+| 16,384 | 28.8 s | 82.9 GiB |
+
+Decode speed is level and the replies are the same bytes. What remains is the scratch, and a cancel that arrives during
+a pass, which waits for that pass to end. `TF_FLASHNEXT_CHUNK_SOLO=1536` keeps the shorter passes.
 
 ### One-launch attention
 

@@ -102,7 +102,7 @@ pub fn parseQueries(a: Allocator, text: []const u8) Allocator.Error![]const []co
 
 /// A line without its list mark ("-", "*", "#", "1." or "1)"); a query that starts with a number keeps it.
 fn unmark(line: []const u8) []const u8 {
-    if (line.len > 1 and (line[0] == '-' or line[0] == '*' or line[0] == '#')) return std.mem.trimStart(u8, line[1..], " *#");
+    if (line.len > 1 and (line[0] == '-' or line[0] == '*' or line[0] == '#')) return std.mem.trimStart(u8, line[1..], " \t*#"); // a tab after a mark is not part of the query
     var i: usize = 0;
     while (i < line.len and std.ascii.isDigit(line[i])) i += 1;
     if (i > 0 and i + 1 < line.len and (line[i] == '.' or line[i] == ')') and (line[i + 1] == ' ' or line[i + 1] == '\t')) return std.mem.trimStart(u8, line[i + 1 ..], " \t"); // a tab separates a list number too
@@ -115,7 +115,7 @@ pub fn fallback(a: Allocator, goal: []const u8) Allocator.Error![]const []const 
     while (lines.next()) |raw| {
         var line = std.mem.trim(u8, raw, " \t\r`#>-*");
         if (line.len < 3) continue;
-        for (line, 0..) |ch, i| if ((ch == '?' or ch == '.' or ch == '!') and (i + 1 == line.len or line[i + 1] == ' ')) {
+        for (line, 0..) |ch, i| if ((ch == '?' or ch == '.' or ch == '!') and (i + 1 == line.len or line[i + 1] == ' ' or line[i + 1] == '\t')) { // a tab ends a sentence the way a space does
             line = line[0..i];
             break;
         };
@@ -234,11 +234,13 @@ test "planner replies become clean queries; a goal becomes one when the planner 
     try std.testing.expectEqualStrings("Zig 0.17 release notes", qs[1]);
     try std.testing.expectEqualStrings("zig std.Io async", qs[2]);
     try std.testing.expectEqualStrings("Zig 0.17 docs", (try parseQueries(a, "1.\tZig 0.17 docs"))[0]);
+    try std.testing.expectEqualStrings("Zig 0.17 docs", (try parseQueries(a, "#\tZig 0.17 docs"))[0]);
     try std.testing.expectEqual(@as(usize, 0), (try parseQueries(a, "NONE")).len);
     try std.testing.expectEqualStrings("2025 tax brackets for Canada", (try parseQueries(a, "2025 tax brackets for Canada"))[0]);
     const f = try fallback(a, "```\n\nImplement a client for the latest Stripe API, with retries and idempotency keys and good tests please thanks\n");
     try std.testing.expectEqualStrings("Implement a client for the latest Stripe API, with retries and idempotency", f[0]);
     try std.testing.expectEqualStrings("What are the main changes in the latest Zig release", (try fallback(a, "What are the main changes in the latest Zig release? Name the version."))[0]);
+    try std.testing.expectEqualStrings("What are the main changes in the latest Zig release", (try fallback(a, "What are the main changes in the latest Zig release?\tName the version."))[0]);
 }
 
 fn textPart(a: Allocator, s: []const u8) !Value {

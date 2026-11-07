@@ -1,4 +1,4 @@
-//! A converged round's collectives: what each layer exchanges, and one-shot or reduce-scatter + all-gather (both exact).
+//! A converged round's collectives: what each layer exchanges; one-shot or reduce-scatter + all-gather (both exact).
 const std = @import("std");
 const fabric = @import("fabric");
 const model = @import("model.zig");
@@ -15,7 +15,7 @@ pub const Link = struct {
     }
 };
 
-/// Thunderbolt 5 as the fabric measured it (3.5 us one way, 9.38 GB/s); the GPU polls its receive ring (gate Q3, unverified).
+/// TB5 as the fabric measured it (3.5 us one way, 9.38 GB/s); the GPU polls its receive ring (gate Q3, unverified).
 pub const tb5_polled: Link = .from(fabric.cost.tb5, fabric.cost.polled_handoff);
 /// The same link when every step wakes the GPU through a shared event (90-115 us measured on the M5).
 pub const tb5_event: Link = .from(fabric.cost.tb5, fabric.cost.event_handoff);
@@ -35,7 +35,7 @@ pub const Traffic = struct {
     ms: f64 = 0,
     reduce_scatters: u32 = 0,
 
-    /// `steps` steps, each a message of `largest` bytes or less to each peer; a message past `max_write` goes in pieces.
+    /// `steps` steps, each a message of `largest` bytes or less per peer; a message past `max_write` goes in pieces.
     fn add(t: *Traffic, link: Link, peers: u32, steps: u32, peer_bytes: u64, largest: u64) void {
         const pieces = std.math.divCeil(u64, @max(largest, 1), max_write) catch unreachable;
         t.steps += steps;
@@ -46,7 +46,7 @@ pub const Traffic = struct {
         t.ms += (fixed + @as(f64, @floatFromInt(peer_bytes)) / link.bandwidth * 1e9) / 1e6;
     }
 
-    /// An exact sum of fp32 partials over `rows` x `width`: one-shot, or reduce-scatter then all-gather, whichever is faster.
+    /// Exact sum of fp32 partials over rows x width: one-shot, or reduce-scatter then all-gather, whichever is faster.
     fn allReduce(t: *Traffic, link: Link, ranks: u32, rows: u64, width: u64, residual: u64) void {
         const one = rows * width * 4;
         const part = rows * (width / ranks);

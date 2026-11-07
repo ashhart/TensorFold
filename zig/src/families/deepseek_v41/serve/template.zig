@@ -19,8 +19,8 @@ pub const IMAGE = "<｜deepseek_image｜>";
 /// A zero-width space after ``<``: the same text, ordinary BPE tokens, never the image id.
 pub const IMAGE_ESCAPED = "<\u{200b}｜deepseek_image｜>";
 
-/// ``reasoning_effort`` names as the server reads them: none / minimal turn thinking off (the jinja maps medium to 62).
-pub const efforts = [_]struct { []const u8, ?u8 }{ .{ "none", null }, .{ "minimal", null }, .{ "low", 50 }, .{ "medium", 75 }, .{ "high", 75 }, .{ "xhigh", 100 }, .{ "max", 100 } };
+/// Named reasoning budgets observed at the chat endpoint; none turns thinking off.
+pub const efforts = [_]struct { []const u8, ?u8 }{ .{ "none", null }, .{ "minimal", 50 }, .{ "low", 50 }, .{ "medium", 75 }, .{ "high", 75 }, .{ "xhigh", 75 }, .{ "max", 100 } };
 pub const default_budget: u8 = 75;
 
 pub const Error = error{ Refused, OutOfMemory };
@@ -48,7 +48,7 @@ pub const Options = struct {
 /// A refusal's message (HTTP 400), set when ``render`` returns error.Refused.
 pub const Problem = struct { message: []const u8 = "" };
 
-/// A ``reasoning_effort`` value: null if refused, ``.{null}`` for none / minimal, else 1-100 (names trimmed, lower).
+/// A render budget: null if refused, .{null} for none, else 1-100; HTTP names are validated separately.
 pub fn effortOf(s: []const u8) ??u8 {
     var buf: [16]u8 = undefined;
     const trimmed = std.mem.trim(u8, s, " \t\n\r");
@@ -69,14 +69,15 @@ pub fn budgetOf(v: Value) ?u8 {
     };
 }
 
-const Block = struct { tool: bool, text: []const u8, rank: usize };
+const Content = struct { bytes: []const u8 = "", images: []const [2]usize = &.{} };
+const Block = struct { tool: bool, text: Content, rank: usize };
 
 const Role = enum { system, user, assistant, tool, latest_reminder };
 
 /// A message after ``normalize`` and the tool-result merge.
 const Msg = struct {
     role: Role,
-    content: []const u8 = "",
+    content: Content = .{},
     reasoning: ?[]const u8 = null,
     calls: []const Value = &.{},
     tool_id: []const u8 = "",
@@ -103,13 +104,19 @@ const R = struct {
     }
 
     fn request(r: *R, s: []const u8) Allocator.Error!void {
-        // Images are unsupported here; preserve the established plain-text image escape.
-        const escaped = if (std.mem.indexOf(u8, s, IMAGE) != null) try std.mem.replaceOwned(u8, r.a, s, IMAGE, IMAGE_ESCAPED) else null;
-        defer if (escaped) |bytes| r.a.free(bytes);
-        const plain = escaped orelse s;
         const start = r.out.items.len;
-        try r.put(plain);
-        if (r.track and plain.len > 0) try r.spans.append(r.a, .{ start, r.out.items.len });
+        try r.put(s);
+        if (r.track and s.len > 0) try r.spans.append(r.a, .{ start, r.out.items.len });
+    }
+
+    fn content(r: *R, value: Content) Allocator.Error!void {
+        var at: usize = 0;
+        for (value.images) |span| {
+            try r.request(value.bytes[at..span[0]]);
+            try r.put(value.bytes[span[0]..span[1]]);
+            at = span[1];
+        }
+        try r.request(value.bytes[at..]);
     }
 
     fn dumps(r: *R, v: Value) Allocator.Error!void {
@@ -145,13 +152,14 @@ fn isImagePart(t: []const u8) bool {
 }
 
 /// OpenAI ``content``: a string, null, or a list of text parts joined by blank lines; image parts through the hook.
-fn text(r: *R, content: ?Value, where: []const u8, index: usize, image: ?ImageHook) Error![]const u8 {
-    const v = content orelse return "";
+fn text(r: *R, content: ?Value, where: []const u8, index: usize, image: ?ImageHook) Error!Content {
+    const v = content orelse return .{};
     switch (v) {
-        .null => return "",
-        .string => |s| return s,
+        .null => return .{},
+        .string => |s| return .{ .bytes = s },
         .array => |parts| {
             var out: std.ArrayList(u8) = .empty;
+            var images: std.ArrayList([2]usize) = .empty;
             for (parts, 0..) |part, i| {
                 if (i > 0) try out.appendSlice(r.a, "\n\n");
                 switch (part) {
@@ -167,15 +175,22 @@ fn text(r: *R, content: ?Value, where: []const u8, index: usize, image: ?ImageHo
                             }
                         } else if (isImagePart(name)) {
                             const hook = image orelse return r.refuse("messages[{d}].{s}: images are not served by this DeepSeek-V4.1 build", .{ index, where });
-                            try out.appendSlice(r.a, hook.text(hook.ctx, part));
+                            const start = out.items.len;
+                            const marker = hook.text(hook.ctx, part);
+                            try out.appendSlice(r.a, marker);
+                            var at: usize = 0;
+                            while (std.mem.indexOfPos(u8, marker, at, IMAGE)) |hit| {
+                                try images.append(r.a, .{ start + hit, start + hit + IMAGE.len });
+                                at = hit + IMAGE.len;
+                            }
                         } else return r.refuse("messages[{d}].{s}: unsupported content part of type {s}", .{ index, where, if (name.len > 0) name else "(none)" });
                     },
                     else => return r.refuse("messages[{d}].{s}: unsupported content part", .{ index, where }),
                 }
             }
-            return out.items;
+            return .{ .bytes = out.items, .images = images.items };
         },
-        else => return dumps(r.a, v),
+        else => return .{ .bytes = try dumps(r.a, v) },
     }
 }
 
@@ -200,24 +215,25 @@ fn qualifiedName(a: Allocator, fn_obj: Value, namespace: ?Value) Allocator.Error
     return bare;
 }
 
-/// The function definitions the system block lists, names qualified, in their own key order.
+/// Tool schemas use exactly name, description and parameters; unrelated function keys are not prompt text.
 fn toolFunction(r: *R, tool: Value) Error!Value {
     if (tool != .object) return r.refuse("tools must be a list of objects", .{});
     const inner = tool.get("function");
     const src = if (inner != null and inner.? == .object) inner.? else tool;
-    const fnv = try json.copyObject(r.a, src.object);
-    if (tool.get("namespace")) |ns| if (ns != .null) try fnv.put(r.a, "namespace", ns);
-    const ns = fnv.get("namespace");
-    const name = try qualifiedName(r.a, .{ .object = fnv }, ns) orelse return r.refuse("a tool has no name", .{});
-    try fnv.put(r.a, "name", .{ .string = name });
-    _ = fnv.orderedRemove("namespace");
+    const outer_ns = tool.get("namespace");
+    const ns = if (outer_ns != null and outer_ns.? != .null) outer_ns else src.get("namespace");
+    const name = try qualifiedName(r.a, src, ns) orelse return r.refuse("a tool has no name", .{});
+    var description = src.get("description") orelse Value{ .string = "" };
     if (ns) |n| if (n == .object) if (n.get("description")) |d| if (d.truthy()) {
-        const desc = try scalarText(r.a, d) orelse try dumps(r.a, d);
-        const own = fnv.get("description") orelse Value.null;
-        const own_text = if (own.truthy()) (try scalarText(r.a, own) orelse try dumps(r.a, own)) else "";
-        try fnv.put(r.a, "description", .{ .string = try std.fmt.allocPrint(r.a, "{s}\n{s}", .{ desc, own_text }) });
+        const prefix = try scalarText(r.a, d) orelse try dumps(r.a, d);
+        const own = if (description.truthy()) (try scalarText(r.a, description) orelse try dumps(r.a, description)) else "";
+        description = .{ .string = try std.fmt.allocPrint(r.a, "{s}\n{s}", .{ prefix, own }) };
     };
-    return .{ .object = fnv };
+    const out = try json.newObject(r.a);
+    try out.put(r.a, "name", .{ .string = name });
+    try out.put(r.a, "description", description);
+    try out.put(r.a, "parameters", src.get("parameters") orelse .{ .object = try json.newObject(r.a) });
+    return .{ .object = out };
 }
 
 const tools_head =
@@ -308,7 +324,7 @@ fn messagesOf(r: *R, messages: Value, o: Options) Error![]Msg {
                 msg.content = try text(r, m.get("content"), "content", i, o.image);
                 var rc = m.get("reasoning_content") orelse Value.null;
                 if (rc == .null) rc = m.get("reasoning") orelse Value.null;
-                if (rc != .null) msg.reasoning = try text(r, rc, "reasoning_content", i, null);
+                if (rc != .null) msg.reasoning = (try text(r, rc, "reasoning_content", i, null)).bytes;
                 if (m.get("tool_calls")) |tc| if (tc.truthy()) {
                     if (tc != .array) return r.refuse("messages[{d}].tool_calls must be a list", .{i});
                     msg.calls = tc.array;
@@ -392,10 +408,6 @@ fn renderInner(a: Allocator, messages: Value, o: Options, problem: *Problem, tra
     if (o.budget < 1 or o.budget > 100) return r.refuse("reasoning_effort must be 1-100 or low / medium / high / max", .{});
     const msgs = try messagesOf(&r, messages, o);
     const drop = o.drop_thinking and !(msgs.len > 0 and msgs[0].tools);
-    var last: ?usize = null; // the last user turn (or a system message after the first)
-    for (msgs, 0..) |m, idx| if (m.role == .user or (m.role == .system and idx > 0)) {
-        last = idx;
-    };
     const thinking = o.thinking;
     try r.put(BOS);
     for (msgs, 0..) |m, idx| {
@@ -406,11 +418,10 @@ fn renderInner(a: Allocator, messages: Value, o: Options, problem: *Problem, tra
             try r.put(std.fmt.bufPrint(&buf, "{d}", .{o.budget}) catch unreachable);
             try r.put(" (range 1-100, the higher the value, the more thorough the reasoning)\n\n");
         }
-        const after_last = last == null or idx > last.?;
         switch (m.role) {
             .system => {
                 if (idx > 0) try r.put(SYSTEM);
-                try r.request(m.content);
+                try r.content(m.content);
                 if (m.tools) {
                     try r.put("\n\n");
                     try renderTools(&r, o.tools);
@@ -425,34 +436,29 @@ fn renderInner(a: Allocator, messages: Value, o: Options, problem: *Problem, tra
                 for (m.blocks.items, 0..) |b, k| {
                     if (k > 0) try r.put("\n\n");
                     if (b.tool) try r.put("<tool_result>");
-                    try r.request(b.text);
+                    try r.content(b.text);
                     if (b.tool) try r.put("</tool_result>");
                 }
             },
             .latest_reminder => {
                 try r.put(REMINDER);
-                try r.request(m.content);
+                try r.content(m.content);
             },
             .assistant => {
-                if (thinking and (!drop or after_last)) {
-                    try r.request(m.reasoning orelse "");
-                    try r.put(THINK_END);
+                try r.put(ASSISTANT);
+                if (thinking and !drop and m.reasoning != null) {
+                    try r.put(THINK_OPEN);
+                    try r.request(m.reasoning.?);
                 }
-                try r.request(m.content);
+                try r.put(THINK_END);
+                try r.content(m.content);
                 if (m.calls.len > 0) try renderCalls(&r, m.calls);
                 try r.put(EOS);
             },
             .tool => unreachable, // merged into user turns
         }
-        const next: ?Role = if (idx + 1 < msgs.len) msgs[idx + 1].role else null;
-        if (next) |n| if (n != .assistant and n != .latest_reminder) continue;
-        if (next == null and !o.add_generation_prompt and m.role != .assistant) continue;
-        if (m.role == .user or (m.role == .system and idx > 0)) {
-            try r.put(ASSISTANT);
-            const open = thinking and (!drop or last == null or idx >= last.?);
-            try r.put(if (open) THINK_OPEN else THINK_END);
-        }
     }
+    if (o.add_generation_prompt) try r.put(generationPrefix(thinking));
     return .{ .text = r.out.items, .spans = r.spans.items };
 }
 
@@ -488,4 +494,47 @@ test "a thinking conversation with a tool call and an out-of-order result" {
     try std.testing.expectEqual(@as(?u8, 75), budgetOf(.{ .string = "medium" }));
     try std.testing.expectEqual(@as(?u8, null), budgetOf(.{ .string = "none" }));
     try std.testing.expectEqual(@as(?u8, null), budgetOf(.{ .int = "101" }));
+}
+
+test "native tool listings and history use the same qualified name" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tools = (try json.parseText(a,
+        \\[{"type":"function","namespace":{"name":"space","description":"namespace"},"function":{"name":"f","parameters":{}}}]
+    )).ok;
+    const messages = (try json.parseText(a,
+        \\[{"role":"user","content":"H"},{"role":"assistant","tool_calls":[{"id":"c","type":"function","function":{"name":"f","namespace":"space","arguments":"{}"}}]}]
+    )).ok;
+    var problem: Problem = .{};
+    for ([_][]const u8{ "f", "space::f" }) |name| {
+        try tools.array[0].get("function").?.object.put(a, "name", .{ .string = name });
+        try messages.array[1].get("tool_calls").?.array[0].get("function").?.object.put(a, "name", .{ .string = name });
+        const out = try render(a, messages, .{ .tools = tools.array }, &problem);
+        try std.testing.expect(std.mem.indexOf(u8, out, "\"name\": \"space::f\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, out, "invoke name=\"space::f\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, out, "\"description\": \"namespace\\n\"") != null);
+    }
+}
+
+test "tools sharing a bare name remain distinct across namespaces" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tools = (try json.parseText(a,
+        \\[{"type":"function","namespace":{"name":"files","description":"File operations."},"function":{"name":"run","description":"Read files.","parameters":{},"strict":true,"extra":"omit"}},{"type":"function","function":{"name":"jobs::run","namespace":{"name":"jobs","description":"Job operations."},"description":"Start jobs.","parameters":{},"strict":false,"extra":"omit"}}]
+    )).ok;
+    const messages = (try json.parseText(a,
+        \\[{"role":"user","content":"Run both."},{"role":"assistant","tool_calls":[{"id":"f","type":"function","function":{"name":"run","namespace":"files","arguments":"{}"}},{"id":"j","type":"function","function":{"name":"jobs::run","namespace":"ignored","arguments":"{}"}}]}]
+    )).ok;
+    var problem: Problem = .{};
+    const out = try render(a, messages, .{ .tools = tools.array }, &problem);
+    for ([_][]const u8{
+        "\"name\": \"files::run\", \"description\": \"File operations.\\nRead files.\", \"parameters\": {}",
+        "\"name\": \"jobs::run\", \"description\": \"Job operations.\\nStart jobs.\", \"parameters\": {}",
+        "invoke name=\"files::run\"",
+        "invoke name=\"jobs::run\"",
+    }) |want| try std.testing.expect(std.mem.indexOf(u8, out, want) != null);
+    for ([_][]const u8{ "\"strict\"", "\"extra\"", "\"namespace\"", "\"name\": \"run\"", "invoke name=\"run\"", "ignored::" }) |unwanted|
+        try std.testing.expect(std.mem.indexOf(u8, out, unwanted) == null);
 }

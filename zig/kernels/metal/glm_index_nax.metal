@@ -1,4 +1,4 @@
-// GLM's index scores for prompt chunks on the tensor units: row r's fp32 score of pooled block b, the sum over heads in order of w_h relu(q_h . pool_b).
+// GLM prompt-chunk index scores, tensor units: row r's fp32 pool_b score, ordered head sum of w_h relu(q_h . pool_b).
 #include <metal_stdlib>
 using namespace metal;
 #include "../nax.h"
@@ -24,7 +24,7 @@ inline frag<bfloat> ix_frag(const device bfloat* r0, const device bfloat* r1, in
 #endif
 }
 
-// Grid (64-block tiles, 64-row tiles): 4 simdgroups of 32 rows x 32 blocks; only blocks a row reads are stored, whole tiles past them skipped.
+// Grid: 64-block, 64-row tiles; 4 simdgroups, 32 rows x 32 blocks; only read blocks stored, whole tiles beyond skipped.
 [[kernel]] void glm_index_scores_nax(const device bfloat* iq [[buffer(0)]], const device bfloat* iw [[buffer(1)]],
                                      const device bfloat* pool [[buffer(2)]], device float* scores [[buffer(3)]],
                                      constant GlmScoreArgs& a [[buffer(4)]], uint sg [[simdgroup_index_in_threadgroup]],
@@ -104,7 +104,7 @@ inline frag<bfloat> ix_frag(const device bfloat* r0, const device bfloat* r1, in
   }
 }
 
-// A transposed right operand's element e: its key (a block, the op's column) and its dim (on M5 the op loads it as any operand).
+// A transposed right operand's element e: key (a block, the op's column), dim (on M5 the op loads it as any operand).
 #ifndef TF_SIMD_FRAGS
 inline short ix_key(short e, short2 home) { return home.y + (e >> 2) * 8; }
 inline short ix_dim(short e, short2 home) { return home.x + (e & 3); }

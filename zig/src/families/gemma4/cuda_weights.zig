@@ -30,20 +30,28 @@ pub const Proj = union(enum) {
 /// A layer's tensors: each projection as qlinear tiles at its width, bf16 vectors as stored (norm weights with no 1 +).
 pub const Layer = struct {
     q: Proj,
-    k: Proj,
-    v: ?Proj, // global layers have none: v is k_proj's output (attention_k_eq_v)
+    k: ?Proj, // null on a layer that reads another's cache (E-series shared KV)
+    v: ?Proj, // none on such a layer, nor on the 12B's and 31B's global layers: v is k_proj's output
     o: Proj,
     gate: Proj,
     up: Proj,
     down: Proj,
     q_norm: u64, // bf16 [head dim]
-    k_norm: u64,
+    k_norm: u64, // 0 on a shared layer
     input_norm: u64, // bf16 [hidden]
     post_attention: u64,
     pre_feedforward: u64,
     post_feedforward: u64,
     scalar: u64, // bf16 [1]: the residual's layer scalar
+    /// The E-series' per-layer block, null without.
+    ple: ?Ple = null,
 };
+
+/// A layer's per-layer input block: gate [width, hidden], projection [hidden, width], post norm bf16 [hidden].
+pub const Ple = struct { gate: Proj, project: Proj, post_norm: u64 };
+
+/// The E-series' per-layer inputs: the token table as MLX stores it, the model projection, the 256-wide norm.
+pub const PleModel = struct { table_w: u64, table_s: u64, table_b: u64, table_bits: u4, project: Proj, norm: u64 };
 
 pub const Weights = struct {
     gpa: std.mem.Allocator,
@@ -57,6 +65,8 @@ pub const Weights = struct {
     head: Proj = undefined,
     final_norm: u64 = 0,
     layers: []Layer = &.{},
+    /// The E-series' per-layer inputs, null without.
+    ple: ?PleModel = null,
     /// The 12B's image embedder (--vision), null without.
     vision: ?Vision = null,
     /// The 31B's image tower (--vision), null without.
@@ -180,7 +190,21 @@ const lm = "language_model.model.";
 /// Admission as Metal's (MLX affine 2-6 and 8 bits, groups of 64), every tensor checked. `layers` caps them (checks).
 pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, s: cuda.Stream, k: *const kern.Kernels, dir: []const u8, layers: ?usize, images: bool) !Weights {
     const c = try cfg.Config.read(gpa, io, dir);
-    try c.requireDense();
+    if (c.geo.layer_input != 0) try requireAffineInputs(c) else try c.requireDense(); // the E-series (#1222)
+    if (c.geo.layer_input != 0 and images) return error.GemmaESeriesImagesNotServed;
+    return loadConfig(gpa, io, d, s, k, dir, c, layers, images);
+}
+
+/// The CUDA E-series reads its per-layer linears and table at an MLX affine width only (a BF16 one: dense_rows, next).
+pub fn requireAffineInputs(c: cfg.Config) !void {
+    if (c.geo.layer_input == 0) return;
+    const ws = &c.widths;
+    if (ws.model_project == null or ws.layer_table == null) return error.GemmaLayerInputBf16NotServed;
+    for (ws.layer_gate[0..c.geo.layers], ws.layer_project[0..c.geo.layers]) |g, p|
+        if (g == null or p == null) return error.GemmaLayerInputBf16NotServed;
+}
+
+fn loadConfig(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, s: cuda.Stream, k: *const kern.Kernels, dir: []const u8, c: cfg.Config, layers: ?usize, images: bool) !Weights {
     const geo = c.geo;
     var w: Weights = .{ .gpa = gpa, .config = c };
     errdefer w.deinit();
@@ -197,6 +221,18 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, s: cuda.S
     w.embed_b = try x.tensor(lm ++ "embed_tokens.biases", .bf16, &.{ cfg.vocab, h / 64 });
     w.head = try x.linear(lm ++ "embed_tokens", cfg.vocab, h, w.embed_bits);
     w.final_norm = try x.tensor(lm ++ "norm.weight", .bf16, &.{h});
+    if (geo.layer_input != 0) {
+        const stacked = geo.layers * geo.layer_input;
+        const tb: u4 = @intCast(c.widths.layer_table.?.bits);
+        w.ple = .{
+            .table_w = try x.tensor(lm ++ "embed_tokens_per_layer.weight", .u32, &.{ cfg.vocab, stacked * tb / 32 }),
+            .table_s = try x.tensor(lm ++ "embed_tokens_per_layer.scales", .bf16, &.{ cfg.vocab, stacked / 64 }),
+            .table_b = try x.tensor(lm ++ "embed_tokens_per_layer.biases", .bf16, &.{ cfg.vocab, stacked / 64 }),
+            .table_bits = tb,
+            .project = try x.linear(lm ++ "per_layer_model_projection", stacked, h, c.widths.model_project.?.bits),
+            .norm = try x.tensor(lm ++ "per_layer_projection_norm.weight", .bf16, &.{geo.layer_input}),
+        };
+    }
     const n = @min(layers orelse geo.layers, geo.layers);
     w.layers = try gpa.alloc(Layer, n);
     var buf: [192]u8 = undefined;
@@ -217,19 +253,26 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, s: cuda.S
             }
         }.of;
         l.q = try x.linear(try name(&buf, p, "self_attn.q_proj"), q_out, h, c.widths.of(i, .q).bits);
-        l.k = try x.linear(try name(&buf, p, "self_attn.k_proj"), kv_out, h, c.widths.of(i, .k).bits);
-        l.v = if (cfg.global(i)) null else try x.linear(try name(&buf, p, "self_attn.v_proj"), kv_out, h, c.widths.of(i, .v).bits);
+        const owns = i < geo.cacheLayers(); // a shared layer's k_proj, v_proj and k_norm are left unread
+        l.k = if (owns) try x.linear(try name(&buf, p, "self_attn.k_proj"), kv_out, h, c.widths.of(i, .k).bits) else null;
+        const has_v = owns and (!cfg.global(i) or !geo.keys_are_values);
+        l.v = if (has_v) try x.linear(try name(&buf, p, "self_attn.v_proj"), kv_out, h, c.widths.of(i, .v).bits) else null;
         l.o = try x.linear(try name(&buf, p, "self_attn.o_proj"), h, q_out, c.widths.of(i, .o).bits);
         l.gate = try x.linear(try name(&buf, p, "mlp.gate_proj"), geo.intermediate, h, c.widths.of(i, .gate).bits);
         l.up = try x.linear(try name(&buf, p, "mlp.up_proj"), geo.intermediate, h, c.widths.of(i, .up).bits);
         l.down = try x.linear(try name(&buf, p, "mlp.down_proj"), h, geo.intermediate, c.widths.of(i, .down).bits);
         l.q_norm = try x.tensor(try name(&buf, p, "self_attn.q_norm.weight"), .bf16, &.{dh});
-        l.k_norm = try x.tensor(try name(&buf, p, "self_attn.k_norm.weight"), .bf16, &.{dh});
+        l.k_norm = if (owns) try x.tensor(try name(&buf, p, "self_attn.k_norm.weight"), .bf16, &.{dh}) else 0;
         l.input_norm = try x.tensor(try name(&buf, p, "input_layernorm.weight"), .bf16, &.{h});
         l.post_attention = try x.tensor(try name(&buf, p, "post_attention_layernorm.weight"), .bf16, &.{h});
         l.pre_feedforward = try x.tensor(try name(&buf, p, "pre_feedforward_layernorm.weight"), .bf16, &.{h});
         l.post_feedforward = try x.tensor(try name(&buf, p, "post_feedforward_layernorm.weight"), .bf16, &.{h});
         l.scalar = try x.tensor(try name(&buf, p, "layer_scalar"), .bf16, &.{1});
+        l.ple = if (geo.layer_input == 0) null else .{
+            .gate = try x.linear(try name(&buf, p, "per_layer_input_gate"), geo.layer_input, h, c.widths.layer_gate[i].?.bits),
+            .project = try x.linear(try name(&buf, p, "per_layer_projection"), h, geo.layer_input, c.widths.layer_project[i].?.bits),
+            .post_norm = try x.tensor(try name(&buf, p, "post_per_layer_input_norm.weight"), .bf16, &.{h}),
+        };
     }
     if (images) {
         if (c.geo.unified()) w.vision = try vision(&x, c) else w.tower = try tower(&x, c);
@@ -301,15 +344,27 @@ fn vision(x: *Ctx, c: cfg.Config) !Vision {
     return v;
 }
 
-test "an E-series checkpoint is refused before a weight is read or the device is touched" {
+test "an E-series checkpoint with BF16 per-layer linears is refused before a weight is read or the device is touched" {
     const a = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config.json", .data = @embedFile("fixtures/config_e4b.json") });
+    const bf16 = try std.mem.replaceOwned(u8, a, @embedFile("fixtures/config_e4b.json"), "\"mode\": \"affine\"", "\"mode\": \"affine\", \"layers.3.per_layer_input_gate\": false");
+    defer a.free(bf16);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config.json", .data = bf16 });
     const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
     defer a.free(path);
     var d: cuda.Driver = undefined;
     const s: cuda.Stream = undefined;
     var k: kern.Kernels = undefined;
-    try std.testing.expectError(error.GemmaPerLayerInputsNotServed, load(a, std.testing.io, &d, s, &k, path, null, false));
+    try std.testing.expectError(error.GemmaLayerInputBf16NotServed, load(a, std.testing.io, &d, s, &k, path, null, false));
+}
+
+test "the CUDA E-series takes affine per-layer linears and refuses a BF16 one by name" {
+    var c = try cfg.parse(std.testing.allocator, @embedFile("fixtures/config_e4b.json"));
+    try requireAffineInputs(c);
+    c.widths.layer_gate[7] = null;
+    try std.testing.expectError(error.GemmaLayerInputBf16NotServed, requireAffineInputs(c));
+    c.widths.layer_gate[7] = cfg.widths.fast;
+    c.widths.model_project = null;
+    try std.testing.expectError(error.GemmaLayerInputBf16NotServed, requireAffineInputs(c));
 }

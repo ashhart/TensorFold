@@ -15,6 +15,8 @@ pub const Kernels = struct {
     qk: cuda.qk_rows.QkRows,
     win: cuda.window_attention.WindowAttention,
     act: cuda.act_rows.ActRows,
+    /// gemma4_ple.cu: the E-series per-layer inputs.
+    ple: @import("cuda_ple.zig").PleRows,
 
     pub fn load(ctx: *const cuda.Context) !Kernels {
         const d = ctx.d;
@@ -46,10 +48,13 @@ pub const Kernels = struct {
         k.win = try cuda.window_attention.WindowAttention.load(d);
         errdefer k.win.unload();
         k.act = try cuda.act_rows.ActRows.load(d);
+        errdefer k.act.unload();
+        k.ple = try @import("cuda_ple.zig").PleRows.load(d);
         return k;
     }
 
     pub fn deinit(k: *Kernels) void {
+        k.ple.unload();
         k.act.unload();
         k.win.unload();
         k.qk.unload();

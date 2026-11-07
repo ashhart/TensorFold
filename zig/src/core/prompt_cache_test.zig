@@ -1,4 +1,4 @@
-//! The prompt cache's tests: a fake family whose state is a running sum, so a resumed pass equals a fresh one exactly when it should.
+//! Prompt-cache tests: a fake running-sum family, so a resumed pass equals a fresh one exactly when it should.
 const std = @import("std");
 const pc = @import("prompt_cache.zig");
 const Snapshots = pc.Snapshots;
@@ -182,6 +182,30 @@ test "a failed copy keeps nothing and a failed restore prefills from the start" 
     try std.testing.expectEqual(@as(u32, 0), p.from);
     try std.testing.expectEqual(@as(usize, 0), s.entries.items.len); // the entry that failed is gone
     try std.testing.expectEqual(fresh(&t2), f.pass(&s, &t2, p));
+}
+
+test "a refused restore tries the next shorter kept state before the pass from the start" {
+    const gpa = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f: Fake = .{ .gpa = gpa };
+    var s = Store.init(gpa, f.snapshots(), .{ .lookahead = 1, .min_prompt = 0 }, 1 << 20);
+    defer s.deinit();
+    const t1 = [_]u32{ 1, 2, 3, 4, 5, 6, 7 };
+    _ = f.pass(&s, &t1, try s.begin(a, &t1, 4, &.{}, &.{}, null, &.{})); // keeps the 4-token state
+    const t2 = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8 };
+    _ = f.pass(&s, &t2, try s.begin(a, &t2, 7, &.{}, &.{}, null, &.{})); // resumes 4, keeps the 7-token state
+    try std.testing.expectEqual(@as(usize, 2), s.entries.items.len);
+    f.refuse_at = 7; // the backend refuses the longest state
+    const t3 = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9 };
+    const p = try s.begin(a, &t3, 8, &.{}, &.{}, null, &.{});
+    try std.testing.expectEqual(@as(u32, 4), p.from); // the next shorter state, not the start: 4 of 8 tokens prefilled
+    try std.testing.expectEqual(@as(u64, 1), s.counts.failed);
+    try std.testing.expectEqual(fresh(&t3), f.pass(&s, &t3, p));
+    // every borrow is released: the refused state is gone, the resumed one holds none
+    for (s.entries.items) |e| try std.testing.expectEqual(@as(u32, 0), e.borrowers);
+    try std.testing.expectEqual(s.entries.items.len, f.live);
 }
 
 test "marks: the stable prefix with the last prompt and shared blocks, past the resume point, before the end" {

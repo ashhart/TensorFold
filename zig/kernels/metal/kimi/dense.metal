@@ -7,7 +7,7 @@ struct RowsArgs {
   float beta, lin;
 };
 
-// Weights interleaved by slice (8 a row): row block (t * 8 + s) holds slice s's elements 8t..8t+7, one line for 8 lanes.
+// Weights interleaved by slice (8 a row): row block (t * 8 + s) holds slice s's elements 8t..8t+7, a line for 8 lanes.
 kernel void k3_interleave(device const uint2* src [[buffer(0)]], device uint4* dst [[buffer(1)]],
                           constant uint2& kn [[buffer(2)]], uint2 gid [[thread_position_in_grid]]) {
   const uint blocks = kn.x / 8, b = gid.x, n = gid.y;

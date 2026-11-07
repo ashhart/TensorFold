@@ -34,7 +34,7 @@ const usage_line = "usage: tensorfold serve [-h] [--host HOST] [--port PORT] [--
     " [--short-reply-ratio R] [--short-reply-chars-per-s CPS]" ++
     " [--register-redraw-st ST] [--register-redraw-high PERCENT] [--register-high-hz HZ]" ++
     " [--compact-at COMPACT_AT] [--compact-keep COMPACT_KEEP]" ++
-    " [--compact-memory COMPACT_MEMORY] [--slide] [--slide-graph SLIDE_GRAPH] [--parallel PARALLEL]" ++
+    " [--compact-memory COMPACT_MEMORY] [--slide] [--slide-graph SLIDE_GRAPH] [--slide-drift-gate] [--parallel PARALLEL]" ++
     " [--cortheon] [--no-update-check] [--backend {auto,mlx,cuda}] [--device DEVICE]" ++
     " [--segments SEGMENTS] model\n";
 const not_lanes = "--recall drafts from a record in the lane engine's rounds, " ++
@@ -137,6 +137,7 @@ pub fn main(init: std.process.Init) !u8 {
         return e;
     } orelse return fail(problem);
     defer up.text.deinit();
+    log.line("chat template: {s}", .{up.text.renderer()});
     var record: ?*@import("engine_api").recall_store.Store = null;
     defer if (record) |r| r.close(); // after the engine below has stopped reading it
     var closer: Closer = .{ .opened = up.engine };

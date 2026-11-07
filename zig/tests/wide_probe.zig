@@ -1,4 +1,4 @@
-//! A probe's own Nemotron stream on the Metal backend: prefill, serial steps, and windows run from one state uncommitted.
+//! A probe's own Nemotron stream on Metal: prefill, serial steps, and windows run from one state uncommitted.
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");

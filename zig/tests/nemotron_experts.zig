@@ -1,4 +1,4 @@
-//! Nemotron's routed experts at window widths: member-row pass shapes bit-checked against the engine's kernels, then timed.
+//! Nemotron's routed experts at window widths: member-row pass shapes bit-checked against the engine's kernels, timed.
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
@@ -130,7 +130,7 @@ const Route = struct {
     distinct: usize = 0,
     ids0: [widths[widths.len - 1] * TOPK]u32 = undefined, // layer 0's experts by pair (row * 6 + k)
 
-    /// Each row's 6 experts drawn without replacement from a Zipf-like popularity (s = 1), a fresh expert order a layer.
+    /// Each row's 6 experts drawn without replacement from a Zipf-like popularity (s=1), a fresh expert order a layer.
     fn init(d: mtl.Device, rows: usize, rng: std.Random) !Route {
         var r: Route = undefined;
         r.distinct = 0;

@@ -13,6 +13,9 @@ fn job(h: *Host, request: *const api.Request, cached: u32, progress: u32, began:
     result.stream.prompt_len = request.prompt.len;
     result.stream.cached = cached;
     result.stream.fill_at = .init(progress);
+    // stream defaults a test job never sets: the ranking reads them before a pass starts
+    result.stream.reuse = .{};
+    result.stream.reuse_failed = false;
     return result;
 }
 test "prefill remaining: progress reports cached floors and stale cursors preserve stable priority" {
@@ -47,6 +50,34 @@ test "prefill remaining: progress reports cached floors and stale cursors preser
         try t.expectEqual(c.winner, fill.next(&host));
         try t.expectEqual(@as(usize, if (c.winner == 0) 0 else 1), first.fill_wait);
         try t.expectEqual(@as(usize, if (c.winner == 1) 0 else 1), second.fill_wait);
+    }
+}
+// an unstarted resumed turn ranks by its uncached tail; a rejected restore ranks its whole prompt
+test "prefill remaining: an unstarted resumed turn is ranked by its uncached tail" {
+    var target: lanes.fake.Fake = .{ .gpa = a };
+    var cfg = try lanes.Config.init(std.testing.allocator, .{}, 1, 0);
+    defer cfg.deinit(std.testing.allocator);
+    var core: lanes.Engine = undefined;
+    core.cfg = &cfg;
+    var vt = target.stepped().vtable.*;
+    core.backend = .{ .ptr = &target, .vtable = &vt };
+    var host = Host.init(a, t.io, &core, .{ .lanes = 2 });
+    defer host.filling.deinit(a);
+    const tokens: [32]u32 = @splat(3);
+    const resumed: api.Request = .{ .prompt = &tokens, .max_tokens = 1 };
+    const cold: api.Request = .{ .prompt = tokens[0..16], .max_tokens = 1 };
+    for ([_]bool{ true, false }) |reports| {
+        vt.reports_fill = reports;
+        var first = job(&host, &resumed, 0, 0, false);
+        first.stream.reuse.at = 30;
+        var second = job(&host, &cold, 0, 0, false);
+        host.filling.clearRetainingCapacity();
+        try host.filling.appendSlice(a, &.{ &first, &second });
+        try t.expectEqual(@as(usize, 0), fill.next(&host));
+        first.stream.reuse_failed = true;
+        host.filling.clearRetainingCapacity();
+        try host.filling.appendSlice(a, &.{ &first, &second });
+        try t.expectEqual(@as(usize, 1), fill.next(&host));
     }
 }
 test "prefill remaining: foreground preference yields to aging and keeps equal-age ties stable" {

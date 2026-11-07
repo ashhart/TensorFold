@@ -29,15 +29,16 @@ pub const Readout = struct {
 
     pub const State = opaque {};
     pub const VTable = struct {
-        open: *const fn (ctx: *anyopaque, spec: *const lanes.readout.Spec) anyerror!*State,
+        /// The stream's state for `spec` over `prompt` (its tokens give the options' lexical rows).
+        open: *const fn (ctx: *anyopaque, spec: *const lanes.readout.Spec, prompt: []const u32) anyerror!*State,
         /// `count` rows from prompt row `first_row`, valid until the next piece; work goes on `stream`.
         consume: *const fn (ctx: *anyopaque, st: *State, rows: hip.ops.Tensor, first_row: usize, count: usize, stream: hip.Stream) anyerror!void,
         finish: *const fn (ctx: *anyopaque, st: *State, logits: []u16) anyerror!void,
         close: *const fn (ctx: *anyopaque, st: *State) void,
     };
 
-    pub fn open(r: Readout, spec: *const lanes.readout.Spec) !*State {
-        return r.vtable.open(r.ctx, spec);
+    pub fn open(r: Readout, spec: *const lanes.readout.Spec, prompt: []const u32) !*State {
+        return r.vtable.open(r.ctx, spec, prompt);
     }
     pub fn consume(r: Readout, st: *State, rows: hip.ops.Tensor, first_row: usize, count: usize, stream: hip.Stream) !void {
         return r.vtable.consume(r.ctx, st, rows, first_row, count, stream);
@@ -278,7 +279,7 @@ pub const Hip = struct {
         };
         errdefer h.free(lane);
         gop.value_ptr.* = lane;
-        if (s.readout) |spec| lane.readout = try (h.readout orelse return error.ReadoutsUnsupported).open(spec);
+        if (s.readout) |spec| lane.readout = try (h.readout orelse return error.ReadoutsUnsupported).open(spec, prompt);
         lane.id = try h.streams.idOf(s);
         // a request resumes from the deepest shared snapshot and keeps its own marks; a readout starts at row 0
         var owner: hip_prefix.Side.Owner = .{ .caches = &lane.caches, .id = lane.id };

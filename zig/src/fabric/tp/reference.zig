@@ -5,6 +5,10 @@ const bf16_round = @import("bf16_round");
 const DType = collective.DType;
 const Op = collective.Op;
 
+test {
+    _ = @import("reference_sum_test.zig");
+}
+
 /// bf16 bits to fp32 (exact).
 pub fn bf16ToF32(h: u16) f32 {
     return @bitCast(@as(u32, h) << 16);
@@ -31,7 +35,7 @@ fn reduceTyped(comptime T: type, acc: []u8, src: []const u8, op: Op) void {
     }
 }
 
-fn reduceHalf(acc: []u8, src: []const u8, op: Op, bf: bool) void {
+fn accumulateHalf(acc: []u8, src: []const u8, op: Op, bf: bool) void {
     const n = acc.len / 2;
     for (0..n) |i| {
         const a = std.mem.readInt(u16, acc[2 * i ..][0..2], .little);
@@ -44,7 +48,7 @@ fn reduceHalf(acc: []u8, src: []const u8, op: Op, bf: bool) void {
     }
 }
 
-/// acc <- acc (op) src, element-wise; `acc` holds the lower ranks' result, `src` the next rank's input.
+/// One binary operation into storage: half types round after this call. `reduce` keeps half sums wide instead.
 pub fn accumulate(acc: []u8, src: []const u8, t: DType, op: Op) void {
     std.debug.assert(acc.len == src.len and acc.len % t.size() == 0);
     switch (t) {
@@ -53,13 +57,31 @@ pub fn accumulate(acc: []u8, src: []const u8, t: DType, op: Op) void {
         .i64 => reduceTyped(i64, acc, src, op),
         .f32 => reduceTyped(f32, acc, src, op),
         .f64 => reduceTyped(f64, acc, src, op),
-        .bf16 => reduceHalf(acc, src, op, true),
-        .f16 => reduceHalf(acc, src, op, false),
+        .bf16 => accumulateHalf(acc, src, op, true),
+        .f16 => accumulateHalf(acc, src, op, false),
     }
 }
 
-/// out <- inputs[0] (op) inputs[1] (op) ..., in rank order.
+fn sumHalf(out: []u8, inputs: []const []const u8, bf: bool) void {
+    @setFloatMode(.strict);
+    for (0..out.len / 2) |i| {
+        const first = std.mem.readInt(u16, inputs[0][2 * i ..][0..2], .little);
+        var sum: f32 = if (bf) bf16ToF32(first) else @floatCast(@as(f16, @bitCast(first)));
+        for (1..inputs.len) |rank| {
+            const bits = std.mem.readInt(u16, inputs[rank][2 * i ..][0..2], .little);
+            const value: f32 = if (bf) bf16ToF32(bits) else @floatCast(@as(f16, @bitCast(bits)));
+            sum += value;
+        }
+        const bits: u16 = if (bf) f32ToBf16(sum) else @bitCast(@as(f16, @floatCast(sum)));
+        std.mem.writeInt(u16, out[2 * i ..][0..2], bits, .little);
+    }
+}
+
+/// Rank-order fold; half sums use fp32 and round once. A single rank is copied without arithmetic.
 pub fn reduce(out: []u8, inputs: []const []const u8, t: DType, op: Op) void {
+    std.debug.assert(inputs.len > 0 and out.len % t.size() == 0);
+    for (inputs) |input| std.debug.assert(input.len == out.len);
+    if (inputs.len > 1 and op == .sum and (t == .bf16 or t == .f16)) return sumHalf(out, inputs, t == .bf16);
     @memcpy(out, inputs[0]);
     for (inputs[1..]) |in| accumulate(out, in, t, op);
 }

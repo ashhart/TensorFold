@@ -8,6 +8,7 @@ pub fn steps(b: *std.Build, test_step: *std.Build.Step, lanes: *std.Build.Module
         .target = b.graph.host,
         .link_libc = true,
     });
+    fabric.addImport("verbs", @import("tp.zig").verbsModule(b, b.graph.host, .debug));
     const tests = b.addTest(.{ .filters = &.{"GLM expiry"}, .root_module = b.createModule(.{
         .root_source_file = b.path("zig/src/glm_expiry_tests.zig"),
         .target = b.graph.host,
@@ -52,7 +53,9 @@ pub fn steps(b: *std.Build, test_step: *std.Build.Step, lanes: *std.Build.Module
         .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "lanes", .module = lanes }, .{ .name = "fabric", .module = fabric }, .{ .name = "kernel_sources", .module = sources } },
     }) });
     if (b.graph.host.result.os.tag == .macos) schedule.root_module.linkSystemLibrary("objc", .{});
-    b.step("test-glm-scheduling-host", "Actual GLM prefill chunks and lane-host decode fairness using a fake engine").dependOn(&b.addRunArtifact(schedule).step);
+    const schedule_run = b.addRunArtifact(schedule);
+    b.step("test-glm-scheduling-host", "Actual GLM prefill chunks and lane-host decode fairness using a fake engine").dependOn(&schedule_run.step);
+    b.step("test-glm-prefill-widths-host", "Actual GLM pass widths, restore cuts and shared lane stats without devices").dependOn(&schedule_run.step);
     if (b.graph.host.result.os.tag == .macos) {
         const compile = b.addObject(.{ .name = "glm-restore-host", .root_module = b.createModule(.{
             .root_source_file = b.path("zig/src/glm_restore_compile.zig"),

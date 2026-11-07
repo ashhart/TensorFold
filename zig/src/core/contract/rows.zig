@@ -1,7 +1,8 @@
-//! Row operations for the contract (RMS norm, softmax, sums, dots, maxima): inputs, float64 references, simulated sums.
+//! Row operations for the contract (RMS and layer norms, softmax, GELU, sums, dots, maxima): float64 references, sums.
 const std = @import("std");
 const c = @import("contract.zig");
 const norms_ref = @import("../norms_ref.zig");
+const act_ref = @import("../act_ref.zig");
 
 /// What a gate asks the inputs to hold: ordinary values, NaN and infinities at known places, or sums that test fp32.
 pub const Fill = enum { random, nonfinite, stress };
@@ -9,7 +10,7 @@ pub const Fill = enum { random, nonfinite, stress };
 /// The order a simulated accumulator adds terms in: one chain, contiguous halves, or 32 lanes then their halves.
 pub const Order = enum { sequential, pairwise, strided };
 
-pub const Op = enum { rms, softmax, sum, dot, max };
+pub const Op = enum { rms, softmax, sum, dot, max, layer_norm, gelu };
 
 /// One row's terms summed in `acc` (each add rounded to it) in `order`.
 pub fn sumIn(acc: c.Accum, order: Order, t: []const f64) f64 {
@@ -47,28 +48,37 @@ fn halves(acc: c.Accum, t: []const f64) f64 {
     return round(acc, halves(acc, t[0..mid]) + halves(acc, t[mid..]));
 }
 
-/// A row op's host inputs: x [rows, k] and w [k] as bf16 bits; rms and softmax write k outputs a row, the rest one.
+/// A row op's host inputs: x [rows, k], w and b [k] as bf16 bits; the norms, softmax and GELU write k outputs a row.
 pub const Rows = struct {
     a: std.mem.Allocator,
     op: Op,
     shape: c.Shape,
     x: []u16,
     w: []u16,
+    b: []u16,
     eps: f32 = 1e-6,
 
     pub fn init(a: std.mem.Allocator, op: Op, shape: c.Shape) !Rows {
         const x = try a.alloc(u16, shape.rows * shape.k);
         errdefer a.free(x);
-        return .{ .a = a, .op = op, .shape = shape, .x = x, .w = try a.alloc(u16, shape.k) };
+        const w = try a.alloc(u16, shape.k);
+        errdefer a.free(w);
+        const b = try a.alloc(u16, shape.k);
+        @memset(b, 0);
+        return .{ .a = a, .op = op, .shape = shape, .x = x, .w = w, .b = b, .eps = if (op == .layer_norm) 1e-5 else 1e-6 };
     }
 
     pub fn deinit(r: Rows) void {
         r.a.free(r.x);
         r.a.free(r.w);
+        r.a.free(r.b);
     }
 
     pub fn outputs(r: Rows) usize {
-        return r.shape.rows * (if (r.op == .rms or r.op == .softmax) r.shape.k else 1);
+        return r.shape.rows * (switch (r.op) {
+            .rms, .softmax, .layer_norm, .gelu => r.shape.k,
+            else => 1,
+        });
     }
 
     pub fn fill(r: Rows, mode: Fill, seed: u64) void {
@@ -76,8 +86,12 @@ pub const Rows = struct {
         const rng = prng.random();
         const k = r.shape.k;
         for (r.w) |*v| v.* = c.toBf16(if (r.op == .dot) rng.float(f32) * 2 - 1 else 0.5 + rng.float(f32));
+        if (r.op == .layer_norm) for (r.b) |*v| {
+            v.* = c.toBf16(rng.float(f32) * 2 - 1);
+        };
         for (r.x, 0..) |*v, i| v.* = c.toBf16(switch (r.op) {
             .softmax => rng.float(f32) * 16 - 8,
+            .gelu => rng.float(f32) * 12 - 6,
             else => (rng.float(f32) * 2 - 1) * (if (i % 64 == 7) @as(f32, 20) else 1),
         });
         if (mode == .stress) return r.stress(rng);
@@ -96,6 +110,7 @@ pub const Rows = struct {
     fn stress(r: Rows, rng: std.Random) void {
         const k = r.shape.k;
         const h = k / 2;
+        if (r.op == .layer_norm) return r.mirror(rng);
         for (0..r.shape.rows) |row| {
             const x = r.x[row * k ..][0..k];
             for (0..h) |i| {
@@ -119,6 +134,24 @@ pub const Rows = struct {
         if (k % 2 == 1) r.w[k - 1] = 0;
     }
 
+    /// Layer norm's: integers 1 to 32 and their negations, so the mean is 0 and both passes are exact in fp32 sums.
+    fn mirror(r: Rows, rng: std.Random) void {
+        const k = r.shape.k;
+        for (0..r.shape.rows) |row| {
+            const x = r.x[row * k ..][0..k];
+            for (0..k / 2) |i| {
+                const v: f32 = @floatFromInt(1 + rng.uintLessThan(u32, 32));
+                x[i] = c.toBf16(v);
+                x[k / 2 + i] = c.toBf16(-v);
+            }
+            if (k % 2 == 1) x[k - 1] = 0;
+        }
+    }
+
+    fn bv(r: Rows, i: usize) f64 {
+        return c.fromBf16(r.b[i]);
+    }
+
     fn xv(r: Rows, row: usize, i: usize) f64 {
         return c.fromBf16(r.x[row * r.shape.k + i]);
     }
@@ -140,8 +173,8 @@ pub const Rows = struct {
                 .rms => v * v,
                 .softmax => @exp(v - top),
                 .dot => v * r.wv(i),
-                .sum => v,
-                .max => 0,
+                .sum, .layer_norm => v,
+                .max, .gelu => 0,
             };
         }
         return top;
@@ -181,6 +214,11 @@ pub const Rows = struct {
                     want[row] = sum;
                     mag[row] = abs;
                 },
+                .layer_norm => r.layerNorm(row, sum, want[row * k ..][0..k], mag[row * k ..][0..k], abs),
+                .gelu => for (0..k) |i| {
+                    want[row * k + i] = gelu(r.xv(row, i));
+                    mag[row * k + i] = 0;
+                },
                 .max => {
                     var m: f64 = -std.math.inf(f64);
                     for (0..k) |i| {
@@ -191,6 +229,22 @@ pub const Rows = struct {
                     mag[row] = 0;
                 },
             }
+        }
+    }
+
+    /// Affine layer norm of row `row` (its terms' sum given), biased variance; mag bounds what the two sums carry.
+    fn layerNorm(r: Rows, row: usize, sum: f64, want: []f64, mag: []f64, abs: f64) void {
+        const k = r.shape.k;
+        const kf: f64 = @floatFromInt(k);
+        const mean = sum / kf;
+        var q: f64 = 0;
+        for (0..k) |i| q += (r.xv(row, i) - mean) * (r.xv(row, i) - mean);
+        const inv = 1 / @sqrt(q / kf + r.eps);
+        for (want, mag, 0..) |*w, *m, i| {
+            const d = r.xv(row, i) - mean;
+            w.* = d * inv * r.wv(i) + r.bv(i);
+            // the mean's sum moves every d by its error; the variance's moves inv by half its relative error
+            m.* = @abs(r.wv(i)) * inv * (abs / kf + @abs(d));
         }
     }
 
@@ -211,11 +265,50 @@ pub const Rows = struct {
                     out[row * k + i] = @exp(r.xv(row, i) - top) / s;
                 },
                 .sum, .dot => out[row] = s,
-                .max => return error.NoSums,
+                .layer_norm => {
+                    // the variance's squares about the simulated mean, summed the same way
+                    const mean = s / @as(f64, @floatFromInt(k));
+                    for (t, 0..) |*o, i| o.* = (r.xv(row, i) - mean) * (r.xv(row, i) - mean);
+                    const q = sumIn(acc, order, t);
+                    const inv = 1 / @sqrt(q / @as(f64, @floatFromInt(k)) + r.eps);
+                    for (0..k) |i| out[row * k + i] = (r.xv(row, i) - mean) * inv * r.wv(i) + r.bv(i);
+                },
+                .max, .gelu => return error.NoSums,
             }
         }
     }
 };
+
+/// The exact GELU x / 2 (1 + erf(x / sqrt 2)) in float64, as the kernel's formula (NaN where -inf meets 0).
+pub fn gelu(x: f64) f64 {
+    return 0.5 * x * (1 + act_ref.erf(x / std.math.sqrt2));
+}
+
+/// What an fp32 erff of 2 ulps adds to |gelu(x) - gelu64(x)|: x / 2 times its absolute error near +-1.
+pub fn geluSlack(x: f64) f64 {
+    return 0.5 * @abs(x) * 0x1p-22;
+}
+
+test "layer norm stress rows: the mean is 0 and both passes are exact in fp32 sums, bf16 sums miss" {
+    const a = std.testing.allocator;
+    const r = try Rows.init(a, .layer_norm, .{ .rows = 2, .n = 4096, .k = 4096 });
+    defer r.deinit();
+    r.fill(.stress, 5);
+    const want = try a.alloc(f64, r.outputs());
+    defer a.free(want);
+    const mag = try a.alloc(f64, r.outputs());
+    defer a.free(mag);
+    const got = try a.alloc(f64, r.outputs());
+    defer a.free(got);
+    try r.reference(want, mag);
+    for ([_]Order{ .sequential, .pairwise, .strided }) |o| {
+        try r.simulate(.f32, o, got);
+        try std.testing.expectEqualSlices(f64, want, got);
+        try r.simulate(.bf16, o, got);
+        try std.testing.expect(!std.mem.eql(f64, want, got));
+    }
+    try std.testing.expect(std.math.isNan(gelu(-std.math.inf(f64))) and gelu(std.math.inf(f64)) == std.math.inf(f64));
+}
 
 test "the stress rows: fp32 sums exact in every order, fp16 and bf16 sums far off a small result" {
     const a = std.testing.allocator;

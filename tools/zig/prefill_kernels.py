@@ -31,7 +31,7 @@ def header(file: str) -> str:
 
 @dataclass(frozen=True)
 class Family:
-    """A kernel's entry: argument names in binding order, a body formatted with the variant's constants, its attribute."""
+    """A kernel's entry: argument names in binding order, a body formatted with variant constants, its attribute."""
 
     file: str
     name: str

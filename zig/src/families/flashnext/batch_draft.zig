@@ -35,6 +35,14 @@ pub const State = struct {
     rows: [MAXR]Row = undefined,
     n: usize = 0,
     calls: usize = 0,
+
+    pub fn deinit(st: *State, r: *fz.Run) void {
+        if (st.x) |x| inline for (@typeInfo(Scratch).@"struct".field_names) |name| {
+            const b = @field(x, name);
+            r.release(if (@TypeOf(b) == Buf) b.b else b);
+        };
+        st.x = null;
+    }
 };
 
 pub fn on(st: *State) bool {
@@ -42,7 +50,12 @@ pub fn on(st: *State) bool {
     return !st.off.?;
 }
 
-fn scratch(st: *State, r: *fz.Run, ids_n: usize) !*Scratch {
+pub fn scratch(st: *State, r: *fz.Run, ids_n: usize) !*Scratch {
+    const held = r.held.items.len;
+    errdefer {
+        while (r.held.items.len > held) r.release(r.held.items[r.held.items.len - 1]);
+        st.x = null;
+    }
     if (st.x == null) st.x = .{
         .md = try r.buffer(2 * CALLS * 32),
         .md4 = try r.buffer(CALLS * 32),

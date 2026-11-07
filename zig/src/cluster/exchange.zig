@@ -1,6 +1,6 @@
-//! The data plane a round uses: one exchange step (a chunk to every rank, theirs back), and the exact collectives built on it.
+//! A round's data plane: one exchange step (a chunk to every rank, theirs back), and the exact collectives built on it.
 const std = @import("std");
-const canon = @import("canon.zig");
+const canon = @import("canon");
 
 pub const Error = error{ PeerTimeout, TooLarge, Corrupt, OutOfMemory };
 
@@ -176,7 +176,7 @@ fn decodeParts(arena: std.mem.Allocator, got: []const []const u8, floats: usize)
     return parts.items;
 }
 
-/// The canonical sum over `units` slices of rows x width floats (slices[k] is slice mine.begin + k): same bits on every rank.
+/// Canonical sum of `units` slices of rows x width floats (slices[k] is slice mine.begin + k): same bits on every rank.
 pub fn allReduce(a: std.mem.Allocator, x: Exchange, units: u32, mine: canon.Range, slices: []const []const f32, rows: usize, width: usize, out: []f32) Error!void {
     var arena: std.heap.ArenaAllocator = .init(a);
     defer arena.deinit();

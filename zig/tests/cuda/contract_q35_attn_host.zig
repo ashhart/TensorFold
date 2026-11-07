@@ -68,8 +68,18 @@ const Trace = struct {
         return @as(*const V, @ptrCast(@alignCast(a.?[i].?))).*;
     }
 };
+fn contextDevice(out: *cuda.abi.Device) callconv(.c) cuda.abi.Result {
+    out.* = 0;
+    return 0;
+}
+fn deviceAttribute(out: *c_int, _: cuda.abi.DeviceAttribute, _: cuda.abi.Device) callconv(.c) cuda.abi.Result {
+    out.* = 0;
+    return 0;
+}
 fn driver() cuda.Driver {
     var d: cuda.Driver = .{ .lib = undefined, .api = undefined };
+    d.api.cuCtxGetDevice = contextDevice;
+    d.api.cuDeviceGetAttribute = deviceAttribute;
     d.api.cuModuleGetFunction = Trace.function;
     d.api.cuFuncSetAttribute = Trace.attribute;
     d.api.cuLaunchKernel = Trace.launch;

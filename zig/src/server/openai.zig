@@ -91,10 +91,9 @@ pub fn errorBody(a: Allocator, cx: *const Cx, param: ?[]const u8) Allocator.Erro
     try o.put(a, "message", .{ .string = cx.message });
     if (cx.kind == .other or cx.kind == .server) return .{ .object = o };
     try o.put(a, "type", .{ .string = "invalid_request_error" });
-    if (cx.kind == .context_length) {
-        try o.put(a, "param", if (param) |p| .{ .string = p } else .null);
-        try o.put(a, "code", .{ .string = "context_length_exceeded" });
-    }
+    if (cx.kind == .context_length) try o.put(a, "param", if (param) |p| .{ .string = p } else .null);
+    const code: ?[]const u8 = cx.code orelse if (cx.kind == .context_length) "context_length_exceeded" else null;
+    if (code) |c| try o.put(a, "code", .{ .string = c });
     return .{ .object = o };
 }
 
@@ -120,22 +119,22 @@ const Plan = struct {
 
 /// A chat body checked as a chat completion's is, for routes that render it without a reply (/v1/imprint).
 pub fn chatInput(srv: *Server, cx: *Cx, raw: Value) errors.Refused!chat.Input {
-    return (try plan(srv, cx, true, raw)).input;
+    return (try plan(srv, cx, true, raw, null)).input;
 }
 
 /// Everything checked before a reply starts (a refusal here is a 400 with no stream opened).
-fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value) errors.Refused!Plan {
+fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value, format: ?[]const u8) errors.Refused!Plan {
     const body = try fields.parseNumbers(cx, raw);
     try fields.validateModalities(cx, body);
     // rows need each token's exact bytes: a tokenizer whose decoding depends on context (null) can't give them
     const asked = if (is_chat) json.truthyField(body, "logprobs") else body.field("logprobs") != null;
-    const exact_bytes = asked and srv.info.logprobs and (srv.text.tokenBytes(cx.a, 0) catch return error.OutOfMemory) != null;
+    const exact_bytes = asked and srv.info.capability(.logprobs) and (srv.text.tokenBytes(cx.a, 0) catch return error.OutOfMemory) != null;
     const logprobs = if (is_chat) try fields.probabilityOptions(cx, body, exact_bytes) else try fields.legacyLogprobs(cx, body, exact_bytes);
     if (srv.config.request_log) |path| request_log.append(cx.a, path, body);
-    var input: chat.Input = .{ .fields = undefined };
+    var input: chat.Input = .{ .fields = undefined, .format = format };
     if (is_chat) {
         input.messages = try messages.normalizeWith(cx, body.get("messages"), "system", srv.needs_user_after_tool, srv.media());
-        input.tools = try tool_specs.active(cx, body.get("tools"), body.get("tool_choice"));
+        input.tools = if (srv.text.native_deepseek) try @import("deepseek_request.zig").active(cx, body.get("tools"), body.get("tool_choice")) else try tool_specs.active(cx, body.get("tools"), body.get("tool_choice"));
     } else if (body.get("messages")) |m| if (m == .array and m.array.len > 0) {
         input.messages = try messages.normalizeWith(cx, m, "system", srv.needs_user_after_tool, srv.media());
     };
@@ -162,7 +161,7 @@ fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value) errors.Refused!Plan {
     if (thinking.clear) |c| try sampling.put(cx.a, "clear_thinking", .{ .bool = c });
     input.fields = .{ .object = sampling };
     const streamed = if (body.get("stream")) |s| s.truthy() else false;
-    input.prompt_logprobs = try fields.promptLogprobs(cx, body, !is_chat, streamed, srv.info.prompt_logprobs);
+    input.prompt_logprobs = try fields.promptLogprobs(cx, body, !is_chat, streamed, srv.info.capability(.prompt_logprobs));
     if (logprobs != null) {
         // 0.6.6's set: the rows describe the plain reply text, so nothing may reshape it
         var structured = false;
@@ -231,13 +230,18 @@ fn promptText(srv: *Server, cx: *Cx, p: Value) errors.Refused![]const u8 {
 
 /// The chat or completion reply to ``raw`` (already decoded), written to ``out``.
 pub fn run(srv: *Server, a: Allocator, out: Out, gone: Gone, is_chat: bool, raw: Value) void {
+    runNamed(srv, a, out, gone, is_chat, raw, null);
+}
+
+/// ``run`` for a route whose client named the grammar field (Responses' text.format, Messages' output_config.format).
+pub fn runNamed(srv: *Server, a: Allocator, out: Out, gone: Gone, is_chat: bool, raw: Value, format: ?[]const u8) void {
     const field: []const u8 = if (is_chat) "messages" else "prompt";
     const id = ids.make(a, if (is_chat) "chatcmpl-" else "cmpl-", 32) catch return;
     var cx: Cx = .{ .a = a };
-    var p = plan(srv, &cx, is_chat, raw) catch |e| {
+    var p = plan(srv, &cx, is_chat, raw, format) catch |e| {
         if (e == error.OutOfMemory) cx.message = "out of memory";
         logRefused(id, cx.message);
-        const body = (if (cx.kind == .other) errorOther(a, cx.message) else errorBody(a, &cx, field)) catch return;
+        const body = errorBody(a, &cx, field) catch return;
         out.vt.reply(out.ctx, cx.status(), wrapError(a, body) catch return);
         return;
     };
@@ -251,12 +255,6 @@ pub fn run(srv: *Server, a: Allocator, out: Out, gone: Gone, is_chat: bool, raw:
 fn logRefused(id: []const u8, message: []const u8) void {
     var buf: [1400]u8 = undefined;
     log.line("{s}", .{log.refused(&buf, id, message)});
-}
-
-fn errorOther(a: Allocator, message: []const u8) Allocator.Error!Value {
-    const o = try json.newObject(a);
-    try o.put(a, "message", .{ .string = message });
-    return .{ .object = o };
 }
 
 const Run = struct {
@@ -331,29 +329,13 @@ const Run = struct {
 
     /// ``ToolCallPolicy.finish``: the reply's calls parsed out of its content.
     fn attachCalls(r: *Run, reply: *chat.Reply) Allocator.Error!?[]Value {
-        const tools = r.plan.input.tools;
-        if (tools.len == 0) return null;
-        const parsed = try tool_parse.parse(r.a, reply.content, tools, r.plan.policy.maxCalls());
-        if (parsed.rejected_envelopes > 0) log.line("warning: kept {d} malformed or unoffered tool envelopes as content", .{parsed.rejected_envelopes});
-        // max_tokens cut a call the stream had begun: the whole reply returns it cut too, as the stream did (#1238)
-        const cut = if (!r.plan.policy.single and std.mem.eql(u8, reply.finish_reason, "length")) try tool_stream.cutCalls(r.a, reply.content, tools) else null;
-        if (cut != null) reply.content = try @import("reply_text.zig").cutProse(r.a, reply.content);
-        const found = cut orelse parsed.calls;
-        const calls = (if (r.turn != null) cortheon.clientCalls(found) else found) orelse {
-            if (r.plan.policy.single or parsed.calls != null) reply.content = try r.plan.policy.parsedContent(r.a, parsed.content);
-            return null;
-        };
-        if (cut != null) return calls;
-        reply.content = try r.plan.policy.parsedContent(r.a, parsed.content);
-        reply.finish_reason = "tool_calls";
-        if (r.plan.policy.single) reply.tool_calls_streamed = false;
-        return if (r.plan.policy.single and calls.len > 1) calls[0..1] else calls;
+        return @import("openai_calls.zig").attach(r, reply);
     }
 
     fn fail(r: *Run, cx: *const Cx, field: []const u8) void {
         const a = r.a;
         const kind_ok = cx.kind != .other and cx.kind != .server;
-        const body = (if (kind_ok) errorBody(a, cx, field) else errorOther(a, cx.message)) catch return;
+        const body = errorBody(a, cx, field) catch return;
         r.out.vt.reply(r.out.ctx, if (kind_ok) cx.status() else 500, wrapError(a, body) catch return);
     }
 

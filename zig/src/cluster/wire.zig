@@ -1,9 +1,10 @@
-//! The cluster's control messages: a 40-byte little-endian header (magic, kind, sender, addressee, CRC-32) and kind bodies.
+//! Cluster control messages: a 40-byte little-endian header (magic, kind, sender, addressee, CRC-32) and kind bodies.
 const std = @import("std");
 const node = @import("node.zig");
 
 pub const magic = "TFCL";
-pub const version: u16 = 1;
+/// 2: each port carries the GID-table index of its address.
+pub const version: u16 = 2;
 pub const header_bytes = 40;
 
 pub const Kind = enum(u16) {
@@ -140,6 +141,7 @@ pub fn putInventory(o: *Out, inv: *const node.Inventory) Error!void {
         try o.int(u32, p.gbps);
         try o.bytes(&p.gid);
         try o.bytes(&p.peer_gid);
+        try o.int(u8, p.gid_index);
     }
 }
 
@@ -164,6 +166,7 @@ pub fn getInventory(i: *In) Error!node.Inventory {
         p.gbps = try i.int(u32);
         p.gid = (try i.bytes(16))[0..16].*;
         p.peer_gid = (try i.bytes(16))[0..16].*;
+        p.gid_index = try i.int(u8);
         inv.addPort(p);
     }
     return inv;
@@ -188,7 +191,7 @@ test "headers check their magic, length and CRC" {
 
 test "an inventory round-trips through its encoding" {
     var inv: node.Inventory = .{ .id = 99, .name = .of("n1"), .chip = .of("Apple M3 Ultra"), .gpu_cores = 80, .memory = 512 * node.gib, .gpu_limit = 453 * node.gib, .bandwidth = 819_000_000_000, .disk_free = 3 << 40 };
-    inv.addPort(.{ .device = .of("rdma_en3"), .up = true, .gbps = 80, .gid = @splat(1), .peer_gid = @splat(2) });
+    inv.addPort(.{ .device = .of("rdma_en3"), .up = true, .gbps = 80, .gid = @splat(1), .peer_gid = @splat(2), .gid_index = 1 });
     var buf: [1024]u8 = undefined;
     var o: Out = .{ .buf = &buf };
     try putInventory(&o, &inv);

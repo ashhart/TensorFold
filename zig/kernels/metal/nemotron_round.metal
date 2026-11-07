@@ -1,10 +1,10 @@
-// A lone greedy stream's round on the GPU: the verify's arguments, the accept, the head's arguments and its confidence stop.
+// A lone greedy stream's GPU round: the verify's arguments, the accept, the head's arguments and its confidence stop.
 #include <metal_stdlib>
 using namespace metal;
 
 // state (u32): len, mtp_len, copy source, pending, kept, kept - 1, rounds, next rows, top-1 product, alive, copy rows,
 
-// match, tail copy rows, second choice row, its chance; from 16: a missed copy row's place + 1, rounds left, first copy row
+// match, tail copy rows, second choice row, chance; from 16: a missed copy row's place +1, rounds left, first copy row
 #define S_RESUME 16
 #define S_GUESS 19  // a copied window that also runs the head's first level, for its guess beside the copy's first row
 #define S_LEAF 20   // the leaf's kind: 1 a second choice, 2 the head's guess beside a copy
@@ -186,7 +186,7 @@ inline bool tf_first(float a, uint ia, float b, uint ib) {
   return a > b || (a == b && ia < ib);
 }
 
-// Level j's draft and chance (tf_topk_probs's first id), then the stop: the running top-1 product to `power` vs its bar.
+// Level j's draft and chance (tf_topk_probs's first id), the stop: the running top-1 product to `power` vs its bar.
 kernel void tf_round_top1(const device bfloat* x [[buffer(0)]],
                           const device uint* map [[buffer(1)]],
                           device uint* ids [[buffer(2)]],
@@ -295,7 +295,7 @@ kernel void tf_round_top1(const device bfloat* x [[buffer(0)]],
   }
 }
 
-// One leaf: the head's guess beside a copy's first row, else its likeliest second choice (reach x chance, scaled) past the bar.
+// A leaf: head's guess with a copy's first row, else its likeliest second choice (reach x chance, scaled) past the bar.
 kernel void tf_round_sib(device uint* state [[buffer(0)]],
                          device uint* next_window [[buffer(1)]],
                          device int* args [[buffer(2)]],

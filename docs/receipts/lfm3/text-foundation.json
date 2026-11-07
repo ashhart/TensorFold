@@ -1,0 +1,234 @@
+{
+ "scope": "Actual text-only extraction; binned projection remains disabled by default",
+ "binary_sha256": "19da51a24a28b0c1c7c2dac7a77a3badce2789487ba1f6c087baa689bc15ffa2",
+ "hardware": "Apple M4 Pro, 48 GB, macOS 26.5.1",
+ "build_summary": "243/243 steps succeeded; 1/1 newly executed tests passed, other tests cached",
+ "python_tests": 35,
+ "served": [
+  {
+   "bits": 4,
+   "evidence": {
+    "model": "LFM3-1.7B-MLX-4bit",
+    "binary_sha256": "19da51a24a28b0c1c7c2dac7a77a3badce2789487ba1f6c087baa689bc15ffa2",
+    "tests": {
+     "_trimmed_list": {
+      "count": 40,
+      "sha256": "ec93990f3e5951b65e9273ee8a6948400e438b6aead1aefa5d4167eacac6e7ea",
+      "first": [
+       {
+        "name": "code/fresh_plain",
+        "status": "passed",
+        "evidence": {
+         "prompt_tokens": 12,
+         "cached_tokens": 0,
+         "tokens": 24,
+         "cache_state": "cold",
+         "complete": true,
+         "token_sha": "6936d334c5fa",
+         "token_sha256": "6936d334c5fa71b46f1463f0a41a1bec9c2191a8b04427ac3973cc970decd511",
+         "output_sha256": "5acb1b52c5f3ada89db8d0b9daac2ab1b42771116f19bac7e541c90ae2d6f053"
+        }
+       },
+       {
+        "name": "chat/fresh_plain",
+        "status": "passed",
+        "evidence": {
+         "prompt_tokens": 21,
+         "cached_tokens": 0,
+         "tokens": 24,
+         "cache_state": "cold",
+         "complete": true,
+         "token_sha": "b9e29e56abc8",
+         "token_sha256": "b9e29e56abc8ceddf1718ed57246cf830bfad51ae7467cde34099680227c0246",
+         "output_sha256": "ea6098063ae30786a2c14440104d62903854ffb2544ad22a5977b7be395bfbb3"
+        }
+       }
+      ],
+      "last": [
+       {
+        "name": "chat/cancel_next_drafted_equals_fresh",
+        "status": "passed",
+        "evidence": {
+         "prompt_tokens": 21,
+         "cached_tokens": 0,
+         "tokens": 24,
+         "cache_state": "cold",
+         "complete": true,
+         "token_sha": "b9e29e56abc8",
+         "token_sha256": "b9e29e56abc8ceddf1718ed57246cf830bfad51ae7467cde34099680227c0246",
+         "output_sha256": "ea6098063ae30786a2c14440104d62903854ffb2544ad22a5977b7be395bfbb3"
+        }
+       }
+      ]
+     }
+    },
+    "speed_qualified": false,
+    "counts": {
+     "passed": 40,
+     "failed": 0,
+     "skipped": 0
+    },
+    "cancellation_checks": 6
+   }
+  },
+  {
+   "bits": 6,
+   "evidence": {
+    "model": "LFM3-1.7B-MLX-6bit",
+    "binary_sha256": "19da51a24a28b0c1c7c2dac7a77a3badce2789487ba1f6c087baa689bc15ffa2",
+    "tests": {
+     "_trimmed_list": {
+      "count": 40,
+      "sha256": "a896485b9a7998f3c7d1c958fed66fa1333b95158968a66e137a79017ebfe7a7",
+      "first": [
+       {
+        "name": "code/fresh_plain",
+        "status": "passed",
+        "evidence": {
+         "prompt_tokens": 12,
+         "cached_tokens": 0,
+         "tokens": 24,
+         "cache_state": "cold",
+         "complete": true,
+         "token_sha": "0ba3f45e84a2",
+         "token_sha256": "0ba3f45e84a2d008ad278a00a0d0bb92e86ab473f1591dd7f0e0b9fc7e9097fd",
+         "output_sha256": "e8f89e14d184deba4de23ecb09ae19ff858a341ae382f77e95af132c252897c0"
+        }
+       },
+       {
+        "name": "chat/fresh_plain",
+        "status": "passed",
+        "evidence": {
+         "prompt_tokens": 21,
+         "cached_tokens": 0,
+         "tokens": 24,
+         "cache_state": "cold",
+         "complete": true,
+         "token_sha": "47d528141151",
+         "token_sha256": "47d5281411514b32fd43b317870df757e61e0fb4b0956373c2426391156d8c7d",
+         "output_sha256": "5f26af10f7388c9cecdd8db5d6e063bde4c1e779f7fd2b028902b9745233476b"
+        }
+       }
+      ],
+      "last": [
+       {
+        "name": "chat/cancel_next_drafted_equals_fresh",
+        "status": "passed",
+        "evidence": {
+         "prompt_tokens": 21,
+         "cached_tokens": 0,
+         "tokens": 24,
+         "cache_state": "cold",
+         "complete": true,
+         "token_sha": "47d528141151",
+         "token_sha256": "47d5281411514b32fd43b317870df757e61e0fb4b0956373c2426391156d8c7d",
+         "output_sha256": "5f26af10f7388c9cecdd8db5d6e063bde4c1e779f7fd2b028902b9745233476b"
+        }
+       }
+      ]
+     }
+    },
+    "speed_qualified": false,
+    "counts": {
+     "passed": 40,
+     "failed": 0,
+     "skipped": 0
+    },
+    "cancellation_checks": 6
+   }
+  },
+  {
+   "bits": 8,
+   "evidence": {
+    "model": "LFM3-1.7B-MLX-8bit",
+    "binary_sha256": "19da51a24a28b0c1c7c2dac7a77a3badce2789487ba1f6c087baa689bc15ffa2",
+    "tests": {
+     "_trimmed_list": {
+      "count": 40,
+      "sha256": "787b4d0de94565bcfc8d7d2297e3f027f109d5a17dd7476be63f85095b885a81",
+      "first": [
+       {
+        "name": "code/fresh_plain",
+        "status": "passed",
+        "evidence": {
+         "prompt_tokens": 12,
+         "cached_tokens": 0,
+         "tokens": 24,
+         "cache_state": "cold",
+         "complete": true,
+         "token_sha": "fb5e9db70542",
+         "token_sha256": "fb5e9db70542b902465657f3a2924dbf7dfb1a08e9cd3e039b6f6932c5bf9f11",
+         "output_sha256": "e45552fd633a22c288d8bb067fa82c891e3ca8cb2df3339558832c270178612f"
+        }
+       },
+       {
+        "name": "chat/fresh_plain",
+        "status": "passed",
+        "evidence": {
+         "prompt_tokens": 21,
+         "cached_tokens": 0,
+         "tokens": 24,
+         "cache_state": "cold",
+         "complete": true,
+         "token_sha": "0a26c7a004ed",
+         "token_sha256": "0a26c7a004edc59bc3a34b54d206656a5974430a51ff9c9691312fb8e2182ac2",
+         "output_sha256": "02e8cfe0c72109ca7a058c26aa569504d1995c20d3c49e7451c8ae963ae64f35"
+        }
+       }
+      ],
+      "last": [
+       {
+        "name": "chat/cancel_next_drafted_equals_fresh",
+        "status": "passed",
+        "evidence": {
+         "prompt_tokens": 21,
+         "cached_tokens": 0,
+         "tokens": 24,
+         "cache_state": "cold",
+         "complete": true,
+         "token_sha": "0a26c7a004ed",
+         "token_sha256": "0a26c7a004edc59bc3a34b54d206656a5974430a51ff9c9691312fb8e2182ac2",
+         "output_sha256": "02e8cfe0c72109ca7a058c26aa569504d1995c20d3c49e7451c8ae963ae64f35"
+        }
+       }
+      ]
+     }
+    },
+    "speed_qualified": false,
+    "counts": {
+     "passed": 40,
+     "failed": 0,
+     "skipped": 0
+    },
+    "cancellation_checks": 6
+   }
+  }
+ ],
+ "vl_refusals": [
+  {
+   "bits": 4,
+   "vl_refusal": true,
+   "exit_status": 1
+  },
+  {
+   "bits": 6,
+   "vl_refusal": true,
+   "exit_status": 1
+  },
+  {
+   "bits": 8,
+   "vl_refusal": true,
+   "exit_status": 1
+  }
+ ],
+ "targeted_contract": {
+  "filter": "LFM3",
+  "summary": "SUMMARY 49 kernels: 49 pass gates 1-4, 0 fail, 0 known findings; 14 controls: 14 red as planted, 0 missed; 0 limit problems; gates 64304 ms, limits 4564 ms",
+  "scope": "Registered text-extraction LFM3 probes and limits; not a complete backend run"
+ },
+ "_trim": {
+  "note": "Raw capture replaced by counts, first/last items and SHA-256 of the canonical JSON of each trimmed list or string.",
+  "original_sha256": "37ff10575f97eadb77744e937b90e89dd8f28a8eac4c983389c7bc93f8919a88",
+  "original_bytes": 90093
+ }
+}

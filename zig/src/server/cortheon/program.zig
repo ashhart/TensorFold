@@ -141,7 +141,7 @@ fn requestsChange(a: Allocator, goal: []const u8) bool {
     }
     var tokens = std.mem.tokenizeAny(u8, masked, " \t\r\n");
     while (tokens.next()) |t| {
-        if (std.mem.indexOfScalar(u8, t, '.') != null and std.mem.indexOfScalar(u8, t, '/') != null) {
+        if (std.mem.indexOfScalar(u8, t, '.') != null and std.mem.indexOfAny(u8, t, "/\\") != null) { // a windows path is set aside the way a slash path is
             const at = @intFromPtr(t.ptr) - @intFromPtr(masked.ptr);
             @memset(masked[at .. at + t.len], ' ');
         }
@@ -359,6 +359,9 @@ test "code changes, research and plain answers classify as Cortheon does" {
     const windows = classify(a, "Explain src\\app.py");
     try std.testing.expectEqual(Kind.code, windows.kind);
     try std.testing.expectEqual(Deliverable.code_understanding, windows.deliverable);
+    const named = classify(a, "Explain src\\fix.py");
+    try std.testing.expectEqual(Kind.code, named.kind);
+    try std.testing.expectEqual(Deliverable.code_understanding, named.deliverable);
 }
 
 test "harness context and transform asks do not read as research" {

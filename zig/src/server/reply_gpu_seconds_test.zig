@@ -72,19 +72,30 @@ fn steady(a: Allocator, value: json.Value, drop: ?[]const u8) ![]u8 {
 
 /// Every message the handler sent for a completion whose engine ended with `stats`, steadied, `drop` left out.
 fn served(a: Allocator, stats: api.Stats, streaming: bool, drop: ?[]const u8) ![]const []u8 {
+    return servedRoute(a, stats, streaming, drop, false);
+}
+
+fn servedRoute(a: Allocator, stats: api.Stats, streaming: bool, drop: ?[]const u8, chat: bool) ![]const []u8 {
     const gpa = std.testing.allocator;
     var f = try fixture.Fixture.init(gpa, std.testing.io, null);
     defer f.deinit();
+    if (chat) try f.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "tokenizer_config.json", .data =
+        \\{"eos_token":"<|im_end|>","pad_token":"<|endoftext|>","chat_template":"{{ messages[0]['content'] }}"}
+    });
     var problem: []const u8 = "";
     const text = try HfText.load(gpa, std.testing.io, f.path, null, a, &problem);
     defer text.deinit();
     var script = Script{ .stats = stats };
     const srv = try Server.init(gpa, std.testing.io, script.engine(), text.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false }, null);
     defer srv.deinit();
-    const body = (try json.parse(a, if (streaming) "{\"model\":\"m\",\"prompt\":[0],\"max_tokens\":3,\"stream\":true}" else "{\"model\":\"m\",\"prompt\":[0],\"max_tokens\":3}")).ok;
+    const request = if (chat)
+        (if (streaming) "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"H\"}],\"max_tokens\":3,\"stream\":true}" else "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"H\"}],\"max_tokens\":3}")
+    else
+        (if (streaming) "{\"model\":\"m\",\"prompt\":[0],\"max_tokens\":3,\"stream\":true}" else "{\"model\":\"m\",\"prompt\":[0],\"max_tokens\":3}");
+    const body = (try json.parse(a, request)).ok;
     var conn = Conn{ .fd = -1, .peer = "", .buf = &.{}, .gpa = a };
     var response = Reply{ .a = a };
-    openai.run(srv, a, response.out(), .{ .conn = &conn }, false, body);
+    openai.run(srv, a, response.out(), .{ .conn = &conn }, chat, body);
     const values = if (streaming) response.events.items else &.{response.whole orelse return error.MissingReply};
     const out = try a.alloc([]u8, values.len);
     for (values, out) |v, *bytes| bytes.* = try steady(a, v, drop);
@@ -133,4 +144,29 @@ test "grammar timing: measured totals reach whole and streamed replies and uncon
         }
         try std.testing.expectEqual(@as(usize, 1), measured);
     }
+}
+
+test "prefill widths: raw and chat replies serialize completed passes, whole and streamed, once" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_]bool{ false, true }) |chat| for ([_]bool{ false, true }) |streaming| {
+        for ([_]bool{ false, true }) |observed| {
+            const expected: []const u32 = if (observed) &.{ 2048, 17 } else &.{};
+            const replies = try servedRoute(a, .{ .prefill_widths = expected }, streaming, null, chat);
+            var finishes: usize = 0;
+            for (replies) |bytes| {
+                const value = (try json.parse(a, bytes)).ok;
+                if (value.object.get("tensorfold")) |runtime| {
+                    finishes += 1;
+                    const got = runtime.object.get("prefill_widths").?.array;
+                    try std.testing.expectEqual(expected.len, got.len);
+                    for (expected, got) |width, v| {
+                        try std.testing.expectEqual(width, try std.fmt.parseInt(u32, v.int, 10));
+                    }
+                }
+            }
+            try std.testing.expectEqual(@as(usize, 1), finishes);
+        }
+    };
 }

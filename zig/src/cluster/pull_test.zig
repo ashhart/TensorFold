@@ -1,4 +1,4 @@
-//! Two nodes on the fake network: the one without a shard pulls its ranges from the one with it, over the cluster's links.
+//! Two nodes on the fake network: the one without a shard pulls its ranges from the one with it, over cluster links.
 const std = @import("std");
 const node = @import("node.zig");
 const fake_net = @import("fake_net.zig");

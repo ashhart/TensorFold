@@ -237,7 +237,7 @@ pub const Gemma = struct {
         if (rows > max_window) return error.WindowTooWide;
         try x.s.synchronize(); // the forward wrote the rows
         for (0..rows) |r| {
-            try x.d.check(x.d.api.cuMemcpyDtoH_v2(row.ptr, src + r * cfg.vocab * 2, cfg.vocab * 2), "cuMemcpyDtoH");
+            try cuda.memory.download(x.d, src + r * cfg.vocab * 2, std.mem.sliceAsBytes(row)[0 .. cfg.vocab * 2]);
             picked[r] = try pickAllowed(row, masks[r * words ..][0..words]);
         }
         try x.upload(x.tok.ptr + at * 4, std.mem.sliceAsBytes(picked[0..rows]));

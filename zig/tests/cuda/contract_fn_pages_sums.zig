@@ -237,7 +237,7 @@ const Runner = struct {
             try self.glue.qsaScores(self.rig.s, p[1], pooled, p[0], p[8], blocks, self.rows, blocks, self.pg);
         } else if (self.isAttention()) {
             if (self.mode == .fused) {
-                try self.glue.attnFused(self.rig.s, p[1], kc, vc, p[0], p[8], p[2], p[3], p[4], self.rows, kh, self.pg);
+                try self.glue.attnFused(self.rig.s, p[1], kc, vc, p[0], p[8], p[2], p[3], p[4], self.rows, .full, self.pg);
             } else {
                 var args: cuda.Args = .{};
                 for ([_]u64{ p[1], kc, vc, p[0], p[5], p[6], p[7], p[2], p[3], p[4] }) |v| args.add(v);
@@ -249,7 +249,7 @@ const Runner = struct {
                 const ahead = self.mode == .ahead;
                 const shared: usize = (16 + (if (ahead) @as(usize, 128) else 32)) * (hd + 8) * 2 + 16 * 40 * 2;
                 try self.launch(if (ahead) self.glue.f.chunks_ahead_paged else self.glue.f.chunks_one_paged, .{ self.rows, kh, 4 }, 128, shared, &args);
-                try self.glue.attnMerge(self.rig.s, p[5], p[6], p[7], p[0], p[8], p[3], p[4], self.rows, kh, true);
+                try self.glue.attnMerge(self.rig.s, p[5], p[6], p[7], p[0], p[8], p[3], p[4], self.rows, .full, true);
             }
         } else {
             var args: cuda.Args = .{};

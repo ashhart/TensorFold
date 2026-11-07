@@ -1,4 +1,4 @@
-//! Ordering: concurrent dispatch with memory barriers, and an indirect command buffer chain replayed with new arguments.
+//! Ordering: concurrent dispatch with memory barriers, an indirect command buffer chain replayed with new arguments.
 const std = @import("std");
 const mtl = @import("metal");
 const common = @import("common.zig");
@@ -26,7 +26,7 @@ fn wrong(out: []const u32, in: []const u32, a: [2]u32, b: [2]u32) usize {
     return bad;
 }
 
-/// A = slow, B = fast, C = mix(A, B), A = fast, D = mix(A, B) with barriers between; without them mix reads A mid-write.
+/// A slow, B fast, C = mix(A, B), A fast, D = mix(A, B) with barriers between; without them mix reads A mid-write.
 pub fn concurrentBarriers(gpu: Gpu) !void {
     const n: u32 = 1 << 20;
     const slow: u32 = 3000;

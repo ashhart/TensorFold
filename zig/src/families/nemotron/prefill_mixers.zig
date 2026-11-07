@@ -1,4 +1,4 @@
-//! A prompt chunk's Mamba, attention and MoE mixers: prefill_forward.py's launches, states and KV rows written in place.
+//! Prompt-chunk Mamba, attention and MoE mixers: prefill_forward.py's launches, states and KV rows written in place.
 const std = @import("std");
 const mtl = @import("metal");
 const wts = @import("weights.zig");

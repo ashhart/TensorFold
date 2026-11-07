@@ -200,12 +200,14 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         .prompt_seed = args.prompt_seed,
         .sse_keepalive_s = keepalive_s,
         .request_log = env(s, "TENSORFOLD_REQUEST_LOG"),
+        .phase_metrics = if (env(s, "TENSORFOLD_PHASE_METRICS")) |v| std.mem.eql(u8, v, "1") else false,
         .spark_stats = spark_stats,
         .dashboard = args.dashboard,
         .compact_at = if (args.compact_auto) .{ .auto = {} } else if (args.compact_fraction) |f| .{ .fraction = f } else null,
         .compact_keep = args.compact_keep,
         .compact_memory = args.compact_memory,
         .slide_graph = args.slide_graph,
+        .slide_drift_gate = args.slide_drift_gate,
         .slide_forget_fail = s.forget_fail,
         .cortheon = args.cortheon,
         .cortheon_search_key = env(s, "BRAVE_SEARCH_API_KEY"),
@@ -229,7 +231,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         .out_of_memory => log.line("out of memory: idle unload stays off", .{}),
     }
     defer idle_unload.stopServer(srv);
-    if (srv.config.loop_guard and !srv.info.loop_guard) {
+    if (srv.config.loop_guard and !srv.info.capability(.loop_guard)) {
         std.debug.print("tensorfold: {s} is not supported by this native engine\n", .{if (args.loop_guard_stop) "--loop-guard-stop" else "--loop-guard"});
         return 2;
     }
@@ -263,9 +265,9 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         s.served,                                                  args.host,                                                                                   port,   shownSampling(a, s.sampling),
         @import("draft_line.zig").shown(args.no_drafts, srv.info), if (window > 0) std.fmt.bufPrint(&window_text, "{d}", .{window}) catch "?" else "unlimited", loaded,
     });
-    const reserved = args.thinking_reserve > 0 and srv.info.answer_limit;
-    if (args.thinking_reserve > 0 and !srv.info.answer_limit) log.line("--thinking-reserve is not applied: this engine cannot limit the answer apart from the reasoning", .{});
-    if (args.thinking and srv.info.reasoning and std.mem.indexOf(u8, s.text.templateSource(), "enable_thinking") != null)
+    const reserved = args.thinking_reserve > 0 and srv.info.capability(.answer_limit);
+    if (args.thinking_reserve > 0 and !srv.info.capability(.answer_limit)) log.line("--thinking-reserve is not applied: this engine cannot limit the answer apart from the reasoning", .{});
+    if (args.thinking and srv.info.capability(.reasoning) and std.mem.indexOf(u8, s.text.templateSource(), "enable_thinking") != null)
         log.line("thinking on (the chat template's default): replies reason in reasoning_content before the answer in content, and max_tokens {s}. --no-thinking turns it off; a request can send chat_template_kwargs {{\"enable_thinking\": false}}", .{if (reserved) "limits the answer, the reasoning taking up to --thinking-reserve tokens more" else "counts both"});
     if (s.recall) |r| recall_routes.line(r);
     if (srv.idle_manager != null) log.line("idle unload on: the engine closes after {d} s idle and the next request reloads it (a full model load)", .{args.idle_unload});

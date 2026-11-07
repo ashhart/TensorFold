@@ -592,3 +592,8 @@ test "GLM snapshots: with the engine's own sequence on pages too, a prefix's siz
         for (ats, sizes) |at, s| try t.expectEqual(s, f.e.stateBytes(at));
     }
 }
+
+test "GLM snapshots: TF_KV_SHARE's adapter reads GLM's decls as the store it replaced: the 2,048 grid, a lookahead of 1" {
+    const r = adapter.cacheRules(glm.native);
+    try std.testing.expect(r.planned and r.grid == 2048 and r.lookahead == 1 and r.min_prompt == 0 and r.warm == .off and !r.fork);
+}

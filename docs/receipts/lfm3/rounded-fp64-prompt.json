@@ -1,0 +1,366 @@
+{
+ "scope": "Actual FP32 affine projection reduction replay in independent FP64 model; remaining nonprojection operations retain FP64 arithmetic",
+ "accepted_threshold": null,
+ "fidelity_pass": null,
+ "completed_cells": 17,
+ "requested_cells": 17,
+ "cells": {
+  "_trimmed_list": {
+   "count": 17,
+   "sha256": "8bb3ec2b8b1c39cf4d6a8cdb5db46a11727a80eecccf9a3ce65c1bad90c2a35b",
+   "first": [
+    {
+     "rows": 257,
+     "vocabulary": 128000,
+     "top1_differences": 1,
+     "disjoint_maximum_sets": 0,
+     "relative_rms": 0.017635787525519895,
+     "maximum_absolute_error": 1.125,
+     "differences": [
+      {
+       "row": 58,
+       "native_top": 3599,
+       "reference_top": 2292,
+       "native_maximum_set": [
+        3599
+       ],
+       "reference_maximum_set": [
+        2292,
+        3599
+       ],
+       "maximum_sets_overlap": true,
+       "native_margin": 0.375,
+       "reference_margin": 0.0,
+       "native_reference_contender_gap": 0.375,
+       "reference_native_contender_gap": 0.0
+      }
+     ],
+     "worst_rows": {
+      "_trimmed_list": {
+       "count": 20,
+       "sha256": "5a86cf6604a7c4820b258549a1fed6a2a230a4d275b12837871e9b3e2e15be5a",
+       "first": [
+        {
+         "row": 202,
+         "rms_error": 0.257782799033294,
+         "maximum_absolute_error": 0.9453125
+        },
+        {
+         "row": 250,
+         "rms_error": 0.18972153068496678,
+         "maximum_absolute_error": 1.0
+        }
+       ],
+       "last": [
+        {
+         "row": 77,
+         "rms_error": 0.06715550854939922,
+         "maximum_absolute_error": 0.3125
+        }
+       ]
+      }
+     },
+     "worst_columns": {
+      "_trimmed_list": {
+       "count": 20,
+       "sha256": "95935644dfc56383705db80daf05ef42c27c6221c884d4feed101b7c78c2277f",
+       "first": [
+        {
+         "column": 38520,
+         "rms_error": 0.11248981312110265,
+         "maximum_absolute_error": 1.0
+        },
+        {
+         "column": 90344,
+         "rms_error": 0.11157782703431807,
+         "maximum_absolute_error": 1.0
+        }
+       ],
+       "last": [
+        {
+         "column": 118692,
+         "rms_error": 0.09592147692708017,
+         "maximum_absolute_error": 0.921875
+        }
+       ]
+      }
+     },
+     "accepted_threshold": null,
+     "fidelity_pass": null,
+     "cell": "1.7B-6-prose-257",
+     "phase": "prompt",
+     "seconds": 127.02277824981138,
+     "native_diagnostic_sha256": "67750e460820140f18649f3a6b93a9f379be152d5cb90d414a97bb339586b655",
+     "native_logits_sha256": "2fb12160d203b843337c07b5a3e5b7a1f35de658857c3e06d3827c77dac1d001",
+     "rounded_reference_logits_sha256": "7b94f202ddc70106c25dcc260f29466e6bfea00ba29b61273603d26b87663c15",
+     "token_fixture_sha256": "522ec0f7a7ef8481d2f5533e3962ddad1f418d4337b095282e40c096e2befb1d",
+     "original_ideal_fp64_differences": [
+      {
+       "row": 58,
+       "native_top": 3599,
+       "reference_top": 2292,
+       "native_maximum_set": [
+        3599
+       ],
+       "reference_maximum_set": [
+        2292,
+        3599
+       ],
+       "maximum_sets_overlap": true,
+       "native_margin": 0.375,
+       "reference_margin": 0.0,
+       "native_reference_contender_gap": 0.375,
+       "reference_native_contender_gap": 0.0,
+       "rounded_reference_top": 2292,
+       "rounded_reference_margin": 0.0,
+       "rounded_reference_native_contender_gap": 0.0,
+       "rounded_reference_maximum_set": [
+        2292,
+        3599
+       ]
+      }
+     ]
+    },
+    {
+     "rows": 481,
+     "vocabulary": 128000,
+     "top1_differences": 1,
+     "disjoint_maximum_sets": 0,
+     "relative_rms": 0.0210872789742184,
+     "maximum_absolute_error": 2.53125,
+     "differences": [
+      {
+       "row": 58,
+       "native_top": 3599,
+       "reference_top": 2292,
+       "native_maximum_set": [
+        3599
+       ],
+       "reference_maximum_set": [
+        2292,
+        3599
+       ],
+       "maximum_sets_overlap": true,
+       "native_margin": 0.375,
+       "reference_margin": 0.0,
+       "native_reference_contender_gap": 0.375,
+       "reference_native_contender_gap": 0.0
+      }
+     ],
+     "worst_rows": {
+      "_trimmed_list": {
+       "count": 20,
+       "sha256": "b452508813d8630bb7cd078eb9a613f10117251f344f888cc7498f7912457eb1",
+       "first": [
+        {
+         "row": 353,
+         "rms_error": 0.4063506040364455,
+         "maximum_absolute_error": 2.125
+        },
+        {
+         "row": 329,
+         "rms_error": 0.3718739029875104,
+         "maximum_absolute_error": 1.46875
+        }
+       ],
+       "last": [
+        {
+         "row": 161,
+         "rms_error": 0.08692003525411107,
+         "maximum_absolute_error": 0.40625
+        }
+       ]
+      }
+     },
+     "worst_columns": {
+      "_trimmed_list": {
+       "count": 20,
+       "sha256": "f52ebd1320933a9733b771ac2220ed505fd3f2154006ed62ef52170d3925e1a3",
+       "first": [
+        {
+         "column": 42654,
+         "rms_error": 0.22104044060462807,
+         "maximum_absolute_error": 2.53125
+        },
+        {
+         "column": 17944,
+         "rms_error": 0.2194537635352515,
+         "maximum_absolute_error": 2.5
+        }
+       ],
+       "last": [
+        {
+         "column": 19982,
+         "rms_error": 0.15688888747079888,
+         "maximum_absolute_error": 1.728515625
+        }
+       ]
+      }
+     },
+     "accepted_threshold": null,
+     "fidelity_pass": null,
+     "cell": "1.7B-6-prose-513",
+     "phase": "prompt",
+     "seconds": 233.82947916723788,
+     "native_diagnostic_sha256": "67750e460820140f18649f3a6b93a9f379be152d5cb90d414a97bb339586b655",
+     "native_logits_sha256": "b6c07fed3bdccf311a1a46b1b2dc3a5f3de069d0b0a433d679a25b41cfa15968",
+     "rounded_reference_logits_sha256": "2a0d494528a8b0aee3249fe63f2281d9d3758f07dc24083144f7bbe7d5fd5620",
+     "token_fixture_sha256": "4b9e533cc1948ee72c4231178ec3af21808d7542c97f35997bb9538161d9a4cb",
+     "original_ideal_fp64_differences": [
+      {
+       "row": 58,
+       "native_top": 3599,
+       "reference_top": 2292,
+       "native_maximum_set": [
+        3599
+       ],
+       "reference_maximum_set": [
+        2292,
+        3599
+       ],
+       "maximum_sets_overlap": true,
+       "native_margin": 0.375,
+       "reference_margin": 0.0,
+       "native_reference_contender_gap": 0.375,
+       "reference_native_contender_gap": 0.0,
+       "rounded_reference_top": 2292,
+       "rounded_reference_margin": 0.0,
+       "rounded_reference_native_contender_gap": 0.0,
+       "rounded_reference_maximum_set": [
+        2292,
+        3599
+       ]
+      }
+     ]
+    }
+   ],
+   "last": [
+    {
+     "rows": 513,
+     "vocabulary": 128000,
+     "top1_differences": 0,
+     "disjoint_maximum_sets": 0,
+     "relative_rms": 0.008981459929561184,
+     "maximum_absolute_error": 0.625,
+     "differences": [],
+     "worst_rows": {
+      "_trimmed_list": {
+       "count": 20,
+       "sha256": "a7a40d034a242ca883206eaecc1f63da34794bad17fecc4aed0a70e5bbfb4a54",
+       "first": [
+        {
+         "row": 453,
+         "rms_error": 0.12919133095517948,
+         "maximum_absolute_error": 0.28125
+        },
+        {
+         "row": 336,
+         "rms_error": 0.11239795215540833,
+         "maximum_absolute_error": 0.28125
+        }
+       ],
+       "last": [
+        {
+         "row": 51,
+         "rms_error": 0.07024464365859565,
+         "maximum_absolute_error": 0.21875
+        }
+       ]
+      }
+     },
+     "worst_columns": {
+      "_trimmed_list": {
+       "count": 20,
+       "sha256": "51846d93d89ed07491cd331b241041f05c152499b921567be30331cecad91c65",
+       "first": [
+        {
+         "column": 334,
+         "rms_error": 0.08306270849169323,
+         "maximum_absolute_error": 0.5
+        },
+        {
+         "column": 1840,
+         "rms_error": 0.07130993129891984,
+         "maximum_absolute_error": 0.34375
+        }
+       ],
+       "last": [
+        {
+         "column": 5435,
+         "rms_error": 0.06190424021952325,
+         "maximum_absolute_error": 0.375
+        }
+       ]
+      }
+     },
+     "accepted_threshold": null,
+     "fidelity_pass": null,
+     "cell": "VL-2B-8-reasoning-513",
+     "phase": "prompt",
+     "seconds": 193.77772895805538,
+     "native_diagnostic_sha256": "67750e460820140f18649f3a6b93a9f379be152d5cb90d414a97bb339586b655",
+     "native_logits_sha256": "0fbe7f9ff161bf9b0961bd4d64b081f775dc51bb8eb72e7c1bcef7ac9bcbd582",
+     "rounded_reference_logits_sha256": "499abbaa05178bc8aa6375bd17848fb1e472f8267a6cc62e74bb826b7f47afe6",
+     "token_fixture_sha256": "c8ce58a8d512375ea4635bc85d0ea8a235506aa56026087bda216ea61357a863",
+     "original_ideal_fp64_differences": [
+      {
+       "row": 5,
+       "native_top": 440,
+       "reference_top": 334,
+       "native_maximum_set": [
+        440
+       ],
+       "reference_maximum_set": [
+        334,
+        440
+       ],
+       "maximum_sets_overlap": true,
+       "native_margin": 0.0625,
+       "reference_margin": 0.0,
+       "native_reference_contender_gap": 0.0625,
+       "reference_native_contender_gap": 0.0,
+       "rounded_reference_top": 440,
+       "rounded_reference_margin": 0.0625,
+       "rounded_reference_native_contender_gap": 0.0625,
+       "rounded_reference_maximum_set": [
+        440
+       ]
+      },
+      {
+       "row": 33,
+       "native_top": 1579,
+       "reference_top": 2925,
+       "native_maximum_set": [
+        1579,
+        2925
+       ],
+       "reference_maximum_set": [
+        2925
+       ],
+       "maximum_sets_overlap": true,
+       "native_margin": 0.0,
+       "reference_margin": 0.0625,
+       "native_reference_contender_gap": 0.0,
+       "reference_native_contender_gap": 0.0625,
+       "rounded_reference_top": 1579,
+       "rounded_reference_margin": 0.0,
+       "rounded_reference_native_contender_gap": 0.0,
+       "rounded_reference_maximum_set": [
+        1579,
+        2925
+       ]
+      }
+     ]
+    }
+   ]
+  }
+ },
+ "rows": 5581,
+ "top1_differences": 22,
+ "disjoint_maximum_sets": 3,
+ "_trim": {
+  "note": "Raw capture replaced by counts, first/last items and SHA-256 of the canonical JSON of each trimmed list or string.",
+  "original_sha256": "91511ba60ebe10b69b8c65a09a109b65d8c174b3cd7cd87a8551f9f7cb96a7b5",
+  "original_bytes": 141593
+ }
+}

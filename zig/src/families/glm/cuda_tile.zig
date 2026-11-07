@@ -173,7 +173,7 @@ pub fn tileLinears(gpa: std.mem.Allocator, w: *Weights, mk: *const mm_mod.Kernel
         }
         try host.resize(gpa, n * k);
         try s.synchronize();
-        try d.check(d.api.cuMemcpyDtoH_v2(@ptrCast(host.items.ptr), ptr, n * k * 2), "cuMemcpyDtoH");
+        try cuda.memory.download(d, ptr, std.mem.sliceAsBytes(host.items)[0 .. n * k * 2]);
         try words.resize(gpa, n * k * bits / 32);
         try scales.resize(gpa, n * (k / 64));
         qpack.quantize(bits, host.items, n, k, words.items, scales.items);

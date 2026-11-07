@@ -1,4 +1,4 @@
-//! Attention: planned decode over pages and the paged prompt tile against their flat forms (same bits) and float64.
+//! Attention: planned decode and the paged prompt tile against their flat forms, and prompt rows at any chunk start.
 const std = @import("std");
 const rig = @import("rig.zig");
 const Rig = rig.Rig;
@@ -283,4 +283,67 @@ test "the paged prompt tile writes the flat tile's bits, within the cache type's
     try prompt(t, &rng, 16, 2, 256, 64, 192);
     try prompt(t, &rng, 24, 4, 256, 192, 64);
     try prompt(t, &rng, 16, 4, 128, 128, 128);
+}
+
+/// Rows a prompt chunk holds in the qwen3 forward (its SPAN): a launch takes at most this many query rows.
+const chunk = 2048;
+
+/// Every query of the cache, rows [0, cut) in chunks from 0, then [cut, len) in chunks from cut; out (heads, len, d).
+fn cuts(t: *Rig, hq: []const f32, k: DeviceBuffer, v: DeviceBuffer, heads: usize, kv_heads: usize, d: usize, len: usize, cut: usize) ![]f32 {
+    const out = try gpa.alloc(f32, heads * len * d);
+    errdefer gpa.free(out);
+    const scale: f32 = 1 / @sqrt(@as(f32, @floatFromInt(d)));
+    const kind: c_int = if (t.bf16) 1 else 0;
+    for ([_][2]usize{ .{ 0, cut }, .{ cut, len } }) |seg| {
+        var p = seg[0];
+        while (p < seg[1]) : (p += chunk) {
+            const rows = @min(chunk, seg[1] - p); // one launch: q_pos0 its first position, span its end
+            const q = try gpa.alloc(f32, heads * rows * d);
+            defer gpa.free(q);
+            for (0..heads) |h| @memcpy(q[h * rows * d ..][0 .. rows * d], hq[(h * len + p) * d ..][0 .. rows * d]);
+            var dq = try t.upload(q);
+            defer dq.free();
+            var dout = try t.alloc(q.len * 4);
+            defer dout.free();
+            try t.on.tf_causal(@ptrFromInt(at(dq)), @ptrFromInt(at(k)), @ptrFromInt(at(v)), @ptrFromInt(at(dout)), 1, @intCast(rows), @intCast(p + rows), @intCast(heads), @intCast(kv_heads), @intCast(d), scale, @intCast(p), 0, @intCast(len * d), @intCast(d), 0, @intCast(len * d), @intCast(d), kind, null, null, null, t.stream.handle, null);
+            try t.stream.synchronize();
+            const got = try rig.download(f32, dout);
+            defer gpa.free(got);
+            for (0..heads) |h| @memcpy(out[(h * len + p) * d ..][0 .. rows * d], got[h * rows * d ..][0 .. rows * d]);
+        }
+    }
+    return out;
+}
+
+/// Each row's output has the same bits cut at 0 (a prompt alone) and at `cut` (a branch after a trunk), finite inputs.
+fn shifted(t: *Rig, rng: *rig.Rng, heads: usize, kv_heads: usize, d: usize, len: usize, cut: usize) !void {
+    const c = try Cache.make(t, rng, kv_heads, len, d);
+    defer c.free();
+    const hq = try gpa.alloc(f32, heads * len * d);
+    defer gpa.free(hq);
+    for (hq) |*x| x.* = rng.unit();
+    var k = try t.upload(c.k);
+    defer k.free();
+    var v = try t.upload(c.v);
+    defer v.free();
+    const alone = try cuts(t, hq, k, v, heads, kv_heads, d, len, 0);
+    defer gpa.free(alone);
+    const after = try cuts(t, hq, k, v, heads, kv_heads, d, len, cut);
+    defer gpa.free(after);
+    try std.testing.expectEqualSlices(u32, @ptrCast(alone), @ptrCast(after));
+}
+
+test "a query row's prompt attention keeps its bits wherever its chunk starts, on the wide, 16-row and one-wave kernels" {
+    const t = try Rig.open(1 << 20);
+    defer t.close();
+    var rng: rig.Rng = .{ .state = 0x7A1C5 };
+    // the 64-row tile (wide on, d 128), then the 16-row tile (attention=f32 turns wide off)
+    for ([_]bool{ true, false }) |wide| {
+        t.on.wide = wide;
+        defer t.on.wide = true;
+        try shifted(t, &rng, 32, 8, 128, 2400, 87);
+        try shifted(t, &rng, 32, 8, 128, 2400, 2100);
+    }
+    // an odd head width takes the one-wave kernel
+    try shifted(t, &rng, 4, 2, 63, 300, 87);
 }

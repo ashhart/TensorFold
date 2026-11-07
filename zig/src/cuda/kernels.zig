@@ -16,6 +16,7 @@ pub const built_sm: ?u32 = options.built_sm;
 
 pub const qwen4_hc: []const u8 = if (available) &Blob("fatbin_qwen4_hc").bytes else &.{};
 pub const qwen4_ple: []const u8 = if (available) &Blob("fatbin_qwen4_ple").bytes else &.{};
+pub const gemma4_ple: []const u8 = if (available) &Blob("fatbin_gemma4_ple").bytes else &.{};
 pub const qwen4_gdn: []const u8 = if (available) &Blob("fatbin_qwen4_gdn").bytes else &.{};
 pub const qwen4_projection: []const u8 = if (available) &Blob("fatbin_qwen4_projection").bytes else &.{};
 pub const gdn: []const u8 = if (available) &Blob("fatbin_gdn").bytes else &.{};
@@ -103,6 +104,8 @@ pub const act_rows: []const u8 = if (available) &Blob("fatbin_act_rows").bytes e
 pub const gdn_prep: []const u8 = if (available) &Blob("fatbin_gdn_prep").bytes else &.{};
 pub const qk_rows: []const u8 = if (available) &Blob("fatbin_qk_rows").bytes else &.{};
 pub const roce_gather: []const u8 = if (available) &Blob("fatbin_roce_gather").bytes else &.{};
+pub const l2pf: []const u8 = if (available) &Blob("fatbin_l2pf").bytes else &.{};
+pub const l2pace: []const u8 = if (available) &Blob("fatbin_l2pace").bytes else &.{};
 pub const route_rows: []const u8 = if (available) &Blob("fatbin_route_rows").bytes else &.{};
 pub const flashnext_hc: []const u8 = if (available) &Blob("fatbin_flashnext_hc").bytes else &.{};
 pub const flashnext_attn: []const u8 = if (available) &Blob("fatbin_flashnext_attn").bytes else &.{};

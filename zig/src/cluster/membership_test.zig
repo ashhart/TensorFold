@@ -1,4 +1,4 @@
-//! Four in-process nodes over the fake network: joining, a leader, agreed views, crashes, leaving, rejoining and gossip.
+//! Four in-process nodes over the fake network: joining, a leader, agreed views, crashes, leaving, rejoining, gossip.
 const std = @import("std");
 const node = @import("node.zig");
 const fake_net = @import("fake_net.zig");

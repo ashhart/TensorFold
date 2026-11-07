@@ -8,6 +8,7 @@ const glibc: std.SemanticVersion = .{ .major = 2, .minor = 35, .patch = 0 };
 /// ReleaseSafe whatever -Doptimize says: a gate keeps its safety checks; `sys` comes from sys.zig's step-graph walk.
 fn exe(b: *std.Build, target: std.Build.ResolvedTarget) *std.Build.Step.Compile {
     const fabric = b.createModule(.{ .root_source_file = b.path("zig/src/fabric/fabric.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true });
+    fabric.addImport("verbs", @import("tp.zig").verbsModule(b, target, .ReleaseSafe));
     return b.addExecutable(.{ .name = "tf-mcdma-pair", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/mcdma_pair.zig"),
         .target = target,

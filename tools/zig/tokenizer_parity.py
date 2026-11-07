@@ -1,4 +1,4 @@
-"""Compare zig/src/core/tokenizer/tokenizer.zig with Python tokenizers on cached tokenizer.json files: same ids, same decoded text."""
+"""zig/src/core/tokenizer/tokenizer.zig vs Python tokenizers on cached tokenizer.json files: same ids & decoded text."""
 import argparse
 import hashlib
 import json

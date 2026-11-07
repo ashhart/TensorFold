@@ -5,6 +5,10 @@ const frame = @import("gpu_frame.zig");
 const planning = @import("attention_plan.zig");
 const Budget = @import("gdn_pool.zig").Budget;
 
+const margin: usize = 8 << 30;
+/// RAM a suggested wired limit leaves outside the GPU for macOS and other processes.
+const floor: usize = 4 << 30;
+
 pub fn buffers(sizes: anytype) usize {
     var bytes: usize = 0;
     for (sizes) |size| bytes += std.mem.alignForward(usize, @max(size, 16), 16384);
@@ -71,5 +75,39 @@ pub fn workingSet(real: usize, text: ?[]const u8) !usize {
 
 /// The same margin guards startup, cache growth and the first use of a later slot.
 pub fn room(real: usize, used: usize, cap: ?[]const u8) !usize {
-    return (try workingSet(real, cap)) -| used -| (8 << 30);
+    return (try workingSet(real, cap)) -| used -| margin;
+}
+
+/// The iogpu.wired_limit_mb that fits `need` beside `used` and the margin while leaving the floor; null if RAM cannot.
+pub fn wiredRaise(used: usize, need: usize, ram: usize) ?usize {
+    const total = used +| need +| margin;
+    const mb = std.math.divCeil(usize, total, 1 << 20) catch unreachable;
+    return if (mb *| (1 << 20) <= ram -| floor) mb else null;
+}
+
+/// The tail of a startup refusal: the one change that fits a stream beside the weights and the margin.
+pub const Advice = union(enum) {
+    lower,
+    raise: struct { set: usize, mb: usize },
+    no_raise: ?usize,
+
+    pub fn format(a: Advice, w: *std.Io.Writer) !void {
+        switch (a) {
+            .lower => try w.writeAll(": lower --parallel or --context"),
+            .raise => |r| try w.print(": Metal lets this Mac use {d:.1} GiB; sudo sysctl iogpu.wired_limit_mb={d} raises that limit enough for one stream at this context until reboot (or lower --context)", .{ gibs(r.set), r.mb }),
+            .no_raise => |ram| if (ram) |bytes| try w.print(": no wired-limit raise fits one stream and leaves {d} GiB of this Mac's {d:.1} GiB of RAM to the system: lower --context", .{ floor >> 30, gibs(bytes) }) else try w.writeAll(": no wired-limit raise is known to fit one stream: lower --context"),
+        }
+    }
+};
+
+/// What a refusal should advise for one stream, from the set and margin the startup room counted.
+pub fn advice(real: usize, used: usize, cap: ?[]const u8, one: usize, ram: ?usize) Advice {
+    const set = workingSet(real, cap) catch return .lower;
+    if (set != real or one <= set -| used -| margin) return .lower;
+    if (ram) |r| if (wiredRaise(used, one, r)) |mb| return .{ .raise = .{ .set = set, .mb = mb } };
+    return .{ .no_raise = ram };
+}
+
+fn gibs(bytes: usize) f64 {
+    return @as(f64, @floatFromInt(bytes)) / @as(f64, @floatFromInt(1 << 30));
 }

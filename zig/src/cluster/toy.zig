@@ -1,6 +1,6 @@
-//! A small model split by heads (tensor parallel) and expert groups (expert parallel) for the cluster's exactness tests.
+//! Small model split by heads (tensor parallel) and expert groups (expert parallel) for the cluster's exactness tests.
 const std = @import("std");
-const canon = @import("canon.zig");
+const canon = @import("canon");
 const exchange = @import("exchange.zig");
 const round = @import("round.zig");
 
@@ -90,7 +90,7 @@ pub const Rank = struct {
     naive: bool = false,
     /// Sums as reduce-scatter then all-gather instead of one-shot (the same canonical tree).
     split_sums: bool = false,
-    /// Attention by streams: a slot's owner runs every head of its rows and keeps its caches; rows are then all-gathered.
+    /// Attention by streams: a slot's owner runs every head of its rows and keeps its caches; rows then all-gathered.
     by_streams: bool = false,
     /// Every expert split by its intermediate columns (8 slices) instead of whole experts by groups.
     split_experts: bool = false,
@@ -190,7 +190,7 @@ pub const Rank = struct {
         }
     }
 
-    /// Attention by streams: every head for the rows of slots this rank owns, the heads' canonical tree here, rows gathered.
+    /// Attention by streams: every head for this rank's slots' rows, the heads' canonical tree here, rows gathered.
     fn attendOwned(r: *Rank, a: Allocator, x: exchange.Exchange, layer: u32, rows: []const round.Row, XN: []const f32, X: []f32) !void {
         const D = r.w.dims;
         var mine: std.ArrayList(round.Row) = .empty;
