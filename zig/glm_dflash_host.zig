@@ -18,7 +18,7 @@ test "glm dflash: the raw scratch holds every 4-bit linear's words, scales and b
     const df = glm.dflash;
     var short: usize = 0;
     for (1..17) |world| {
-        const ff = if (world == 2) df.FF / 2 else df.FF; // two ranks split gate and up by rows; any other world loads them whole
+        const ff = df.mlpSplit(world).ff; // a world that divides FF splits gate and up by rows; another loads them whole
         // dflash_load's 4-bit linears, rows by columns: qkv, kv, o, gate and up, the kernel projections, fc
         const linears = [_][2]usize{ .{ df.QKV, df.D }, .{ 2 * df.KVW, df.D }, .{ df.D, df.D }, .{ 2 * ff, df.D }, .{ df.KVW, df.D }, .{ df.D, 5 * df.D } };
         for (linears) |shape| {
@@ -30,6 +30,25 @@ test "glm dflash: the raw scratch holds every 4-bit linear's words, scales and b
         }
     }
     try t.expectEqual(@as(usize, 0), short);
+}
+
+test "glm dflash: the MLP split at every rank count: halves at two, quarters at four, every slice inside FF, the shares FF" {
+    const df = glm.dflash;
+    try t.expectEqual(df.MlpSplit{ .split = false, .ff = df.FF }, df.mlpSplit(1));
+    try t.expectEqual(df.MlpSplit{ .split = true, .ff = df.FF / 2 }, df.mlpSplit(2)); // 6144: the two-rank split as before
+    try t.expectEqual(df.MlpSplit{ .split = true, .ff = df.FF / 4 }, df.mlpSplit(4)); // 3072 on four Sparks
+    try t.expectEqual(df.MlpSplit{ .split = true, .ff = 4096 }, df.mlpSplit(3));
+    try t.expectEqual(df.MlpSplit{ .split = false, .ff = df.FF }, df.mlpSplit(5)); // 12288 / 5 is no share
+    try t.expectEqual(df.MlpSplit{ .split = false, .ff = df.FF }, df.mlpSplit(7));
+    for (1..17) |world| {
+        const m = df.mlpSplit(world);
+        try t.expect(m.ff % 256 == 0); // the q4 pack's rows, glm_mm's K tiles and df_swiglu's columns all fit
+        try t.expect(m.ff <= df.FF);
+        if (m.split) {
+            try t.expectEqual(df.FF, m.ff * world); // the shares are the whole width
+            for (0..world) |rank| try t.expect(rank * m.ff + m.ff <= df.FF); // every rank's slice lies inside
+        } else try t.expectEqual(df.FF, m.ff);
+    }
 }
 
 const Resources = struct {

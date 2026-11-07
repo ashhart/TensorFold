@@ -108,7 +108,7 @@ extern "C" __global__ void df_conv(const __nv_bfloat16* __restrict__ z, const __
     }
 }
 
-// SwiGLU over [gate | up] rows (width F each): bf16(bf16(silu(g)) * u). grid (R, F / 1024), 256 threads.
+// SwiGLU over [gate | up] rows (width F each): bf16(bf16(silu(g)) * u). grid (R, ceil(F / 1024)), 256 threads.
 extern "C" __global__ void df_swiglu(const __nv_bfloat16* __restrict__ gu, __nv_bfloat16* __restrict__ out, int F) {
     const int r = blockIdx.x;
     const __nv_bfloat16* g = gu + (long long)r * 2 * F;
@@ -260,12 +260,15 @@ extern "C" __global__ void df_add(__nv_bfloat16* __restrict__ x, const __nv_bflo
         x[r * D + c] = tobf(bf(x[r * D + c]) + bf(y[r * D + c]));
 }
 
-// out = bf16(g rank 0 + g rank 1): both ranks' gathered fp32 partials [2][R][D] of a split linear.
-extern "C" __global__ void df_sum2(const float* __restrict__ g, __nv_bfloat16* __restrict__ out, int R) {
+// The split down's gathered fp32 partials g[world][R][D] summed in rank order into bf16 out[R][D]: rank 0's, plus
+// rank 1's, plus ... (at world 2 the one add df_sum2 did), so every rank holds the same sum. grid (R, D / 1024).
+extern "C" __global__ void df_sumn(const float* __restrict__ g, __nv_bfloat16* __restrict__ out, int R, int world) {
     const long long r = blockIdx.x;
     for (int c = blockIdx.y * 1024 + threadIdx.x; c < (blockIdx.y + 1) * 1024; c += blockDim.x) {
         const long long i = r * D + c;
-        out[i] = tobf(g[i] + g[(long long)R * D + i]);
+        float s = g[i];
+        for (int k = 1; k < world; ++k) s += g[(long long)k * R * D + i];
+        out[i] = tobf(s);
     }
 }
 
