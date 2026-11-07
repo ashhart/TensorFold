@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Flash Next on CUDA: a prompt-cache mark inside a prompt chunk is kept on the way through the pass instead of cutting the pass there, so a new short prompt's first token comes 19% sooner on a GB10, with replies unchanged; `TF_FLASHNEXT_KEEP_INPASS=0` cuts the pass at the mark as before (#1866). Thanks to @Arminova.
+
 - Cluster: MCDMA bring-up on real hosts, step 2a of #1594 (#2088). Thanks to @ThinkOffApp.
 
 - Docs: the model recipes match the native server: Gemma 4 serves M1 to M4 through the row path and enforces `"required"` tool calls, Nemotron refuses `--tp` above 1 and reserves 32 rows past a reply, `qwen3_5` serves EXL3 packs on CUDA, the CUDA CLI applies `--alias`, Flash Next on Metal shares sessions through `lane_host` under an explicit `--parallel`, its draft levels are 3, 6 and 8, the grammar library installs into `zig-out/native/lib` on every OS, the Qwen3.5-2B check commands are ones that exist, and three smaller fixes (#2361).
