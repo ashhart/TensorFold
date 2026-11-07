@@ -8,16 +8,11 @@ const field_count = std.enums.values(Field).len;
 
 /// The grouped plan's tile rows and the routed GEMM's tile rows are ONE number: the plan pads each expert's block
 /// to a multiple of it and the GEMM's tile must match it, or a tile would straddle two experts' weights. 128 rows
-/// (TF_DSV41_MOE_TILE_ROWS=128) halves the number of tiles -- and so the number of weight decodes -- for the
-/// experts with more than sixty-four rows.
-pub var tile_rows_cache: ?u32 = null;
+/// halves the number of tiles -- and so the number of weight decodes -- for the experts with more than sixty-four
+/// rows.
 pub fn tileRows() u32 {
-    if (tile_rows_cache) |v| return v;
-    var v: u32 = 64;
-    if (std.c.getenv("TF_DSV41_MOE_TILE_ROWS")) |e| v = std.fmt.parseInt(u32, std.mem.span(e), 10) catch 64;
-    if (v != 64 and v != 128) v = 64;
-    tile_rows_cache = v;
-    return v;
+    const v = exl3.knobs.moe_tile_rows;
+    return if (v == 128) 128 else 64;
 }
 
 pub const Plan = struct {

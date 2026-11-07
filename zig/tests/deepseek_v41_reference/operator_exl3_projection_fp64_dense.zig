@@ -201,10 +201,7 @@ fn expertSplitCase(device: mtl.Device, queue: mtl.Queue, k: usize, n: usize, hal
     try matrix.validate();
     const desc = try exl3.descriptor(matrix);
     @memcpy(desc_gpu.slice(u8, @sizeOf(exl3.ExpertDescriptor)), std.mem.asBytes(&desc));
-    const splits: usize = blk: {
-        const raw = std.c.getenv("TF_DSV41_EXL3_MOE_SPLITS") orelse break :blk 8;
-        break :blk std.fmt.parseInt(usize, std.mem.span(raw), 10) catch 8;
-    };
+    const splits: usize = exl3.knobs.moe_splits;
     const cb = queue.commandBuffer();
     const enc = cb.compute(.serial);
     // The indexed path reaches its weights through the descriptor, which a tracked command buffer cannot

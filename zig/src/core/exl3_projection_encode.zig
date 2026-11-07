@@ -170,7 +170,7 @@ pub fn encodePrefillInt8(p: *const Pipelines, e: mtl.ComputeEncoder, m: Matrix, 
     try check(side.scales, try std.math.mul(usize, m.n, 4), 4);
     if (direct) {
         if (r.output != .bf16 or p.prefill_cast == null) return error.UnsupportedExl3Output;
-        if (std.c.getenv("TF_DSV41_I8_DEBUG") != null) std.log.info("i8c direct rows={d} k={d} n={d} xs={d} ys={d} yoff={d}", .{ a.rows, a.k, a.n, a.x_stride, a.y_stride, y.offset });
+        if (core.knobs.i8_debug) std.log.info("i8c direct rows={d} k={d} n={d} xs={d} ys={d} yoff={d}", .{ a.rows, a.k, a.n, a.x_stride, a.y_stride, y.offset });
         try readonly(side.weight, weight_bytes, y, 0, scratch, try scratchBytes(m.k, m.n, r.count));
         try readonly(side.scales, try std.math.mul(usize, m.n, 4), y, 0, scratch, try scratchBytes(m.k, m.n, r.count));
         const sums = View{ .buffer = scratch.buffer, .offset = scratch.offset + try rotatedBytes(m.k, r.count) };

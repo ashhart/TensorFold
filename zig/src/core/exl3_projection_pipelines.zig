@@ -6,24 +6,24 @@ const frags = @import("frags.zig");
 const core = @import("exl3_projection_core.zig");
 const format = core.format;
 const codebookTable = core.codebookTable;
-const envRows = core.envRows;
 const fmaStaticOn = core.fmaStaticOn;
 const fmaLutOn = core.fmaLutOn;
 const tableDecodeOn = core.tableDecodeOn;
 const wideDecodeOn = core.wideDecodeOn;
 const directDecodeOn = core.directDecodeOn;
+const knobs = &core.knobs;
 
 pub const Pipelines = struct {
     rotate_in: mtl.Pipeline,
     matmul: mtl.Pipeline,
     rotate_out: mtl.Pipeline,
-    /// The routed SwiGLU with the down projection's rotate_in fused (TF_DSV41_SWIGLU_ROT): one pass writes the
+    /// The routed SwiGLU with the down projection's rotate_in fused: one pass writes the
     /// rotated activation into the scratch base at each row's grouped destination slot.
     swiglu_prerotate: mtl.Pipeline,
     dense: mtl.Pipeline,
     prefill: ?mtl.Pipeline = null,
     /// The int8 prompt-row body (f32 sums, for a pack that keeps the runtime rotation). Loaded only under
-    /// TF_DSV41_I8_PREFILL.
+    /// the host's int8-prompt knob.
     prefill_fp8: ?mtl.Pipeline = null,
     /// The pre-rotated pack's cast epilogue: f32 sums to the caller's bf16 output, no transform.
     prefill_cast: ?mtl.Pipeline = null,
@@ -74,7 +74,7 @@ pub const Pipelines = struct {
     decode_nax: ?mtl.Pipeline = null,
     /// The compact decode tile (one row a threadgroup, 1 KB of threadgroup memory): the occupancy fix.
     decode_nax_c: ?mtl.Pipeline = null,
-    /// The decode bodies with the codebook value read from the resident table (TF_DSV41_EXL3_ROUTED_TABLE, default
+    /// The decode bodies with the codebook value read from the resident table (the host's routed-table knob, default
     /// on). The table holds the format's own decoder's values, entry for entry, so the decoded tile and the product
     /// are bit-identical; only six ALU ops a weight become one load.
     decode_nax_tab: ?mtl.Pipeline = null,
@@ -200,7 +200,7 @@ pub const Pipelines = struct {
             if (p.simdWidth() != 32 or p.maxThreads() < 32) return error.UnsupportedExl3Simd;
         var prefill_cast: ?mtl.Pipeline = null;
         const reduce = mtl.Pipeline.init(device, lib, "tf_exl3_splitk_reduce", false) catch null;
-        if (std.c.getenv("TF_DSV41_I8_PREFILL") != null) {
+        if (knobs.i8_prefill) {
             if (mtl.Pipeline.init(device, lib, "tf_exl3_epilogue", false)) |pf| {
                 if (pf.simdWidth() == 32 and pf.maxThreads() >= 64) prefill_cast = pf else pf.deinit();
             } else |err| std.log.err("exl3: epilogue pipeline failed: {s}", .{@errorName(err)});
@@ -243,7 +243,7 @@ pub const Pipelines = struct {
         var fma_warps: usize = 16;
         var matvec_nax: ?mtl.Pipeline = null;
         var int8_tile: ?mtl.Pipeline = null;
-        // The codebook table: the routed decode body reads its values from here (TF_DSV41_EXL3_ROUTED_TABLE), and the
+        // The codebook table: the routed decode body reads its values from here, and the
         // dense one-row bodies bind it too. Built before the pipelines that need it.
         const table = if (gpa != null and device.tensorUnits()) codebookTable(device) else null;
         if (gpa) |g| {
@@ -311,7 +311,7 @@ pub const Pipelines = struct {
                         } else |err| std.log.err("exl3: nax31 pipeline init failed: {s}", .{@errorName(err)});
                         // The prompt-row int8 body. Only under the flag, so a default boot compiles and loads exactly
                         // what it did before.
-                        if (std.c.getenv("TF_DSV41_I8_PREFILL") != null) {
+                        if (knobs.i8_prefill) {
                             if (mtl.Pipeline.init(device, nax_lib, "tf_exl3_matmul_prefill_fp8", false)) |pf| {
                                 if (pf.simdWidth() == 32 and pf.maxThreads() >= 128) {
                                     prefill_fp8 = pf;
@@ -347,7 +347,7 @@ pub const Pipelines = struct {
                                 }
                             } else std.log.err("exl3: compact decode library compile failed", .{});
                         } else |_| {}
-                        // TF_DSV41_EXL3_ROUTED_TABLE: the same decode bodies with the codebook read from the resident
+                        // The routed-table knob: the same decode bodies with the codebook read from the resident
                         // table. The engine binds the table at buffer 7 for every stage, and the table holds the
                         // format's own decoder's values, so the output is bit-identical.
                         if (table != null) {
@@ -381,20 +381,9 @@ pub const Pipelines = struct {
                                 } else std.log.err("exl3: compact table funnel decode library compile failed", .{});
                             } else |_| {}
                             // The register-only body.
-                            var warps: usize = fma_warps;
-                            if (std.c.getenv("TF_DSV41_FMA_WARPS")) |v| {
-                                if (std.fmt.parseInt(usize, std.mem.span(v), 10)) |w| {
-                                    if (w == 1 or w == 2 or w == 4 or w == 8 or w == 16 or w == 32) warps = w;
-                                } else |_| {}
-                            }
-                            // The FMA body's prefetch ring depth (TF_FMA_PF blocks in flight). TF_DSV41_FMA_PF=1 is
-                            // the shipped path.
-                            var fma_pf: usize = 1;
-                            if (std.c.getenv("TF_DSV41_FMA_PF")) |v| {
-                                if (std.fmt.parseInt(usize, std.mem.span(v), 10)) |d| {
-                                    if (d == 1 or d == 2 or d == 4 or d == 8) fma_pf = d;
-                                } else |_| {}
-                            }
+                            const warps: usize = knobs.fma_warps;
+                            // The FMA body's prefetch ring depth, in blocks in flight.
+                            const fma_pf: usize = knobs.fma_pf;
                             if (fma_pf != 1) std.log.info("exl3: FMA prefetch ring depth {d}", .{fma_pf});
                             if (std.fmt.allocPrint(g, "#define TF_DECODE_TABLE 1\n#define TF_FMA_WARPS {d}\n#define TF_FMA_PF {d}\n{s}", .{ warps, fma_pf, src })) |src_fma| {
                                 defer g.free(src_fma);
@@ -519,16 +508,6 @@ pub const Pipelines = struct {
         if (p.int8_tile) |pf| pf.deinit();
     }
 };
-
-/// TF_DSV41_EXL3_NAX_MIN_ROWS (default 64) sets the row count at which the tensor-unit kernel is used;
-/// TF_DSV41_EXL3_SHARED_MIN_ROWS (default 32) does the same for the shared prefill kernel. Raising them forces the
-/// scalar path in the SAME binary, which is how the tensor-unit kernel is isolated from every other difference
-/// between trees. The defaults reproduce the shipped behaviour exactly, so a build with these gates unset is
-/// unchanged.
-pub var nax_min_rows_cache: ?u32 = null;
-pub var shared_min_rows_cache: ?u32 = null;
-pub var nax_tile_cache: ?u32 = null;
-pub var nax_cols_cache: ?u32 = null;
 pub var nax_db_logged: bool = false;
 pub var routed_logged: bool = false;
 pub var dense_log_count: u32 = 0;
@@ -537,7 +516,7 @@ pub var dense8_log_count: u32 = 0;
 pub var matmul_tab_logged: bool = false;
 pub var direct_log_count: u32 = 0;
 
-/// TF_DSV41_EXL3_TABLE_DECODE: default on; `=0` restores the ALU codebook for a same-binary A/B. The table's values
+/// The table-decode knob (default on) restores the ALU codebook for a same-binary A/B. The table's values
 /// are the format's own decoder's, so the default path's arithmetic is unchanged.
 /// True when the indexed decode body that honours a descriptor's own output width is the one the stages will pick for
 /// a rows <= 8 indexed call -- the register-only body. The attention's wq_a (n 1280) and wkv (n 512) batch into one
@@ -545,9 +524,7 @@ pub var direct_log_count: u32 = 0;
 /// entry's stream past its last column.
 pub fn indexedWidthBody(p: *const Pipelines) bool {
     if (p.decode_nax == null or p.decode_fma == null) return false;
-    if (std.c.getenv("TF_DSV41_EXL3_SCALAR_EXPERTS") != null) return false;
-    if (std.c.getenv("TF_DSV41_EXL3_FMA")) |v| {
-        if (v[0] == '0') return false;
-    }
+    if (knobs.scalar_experts) return false;
+    if (knobs.fma_off) return false;
     return true;
 }

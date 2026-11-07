@@ -7,6 +7,12 @@ pub const checkpoint = @import("exl3_load.zig");
 pub const load = @import("exl3_metal_load.zig");
 pub const format = @import("exl3_format.zig");
 const decoder = @import("exl3_projection_decode.zig");
+const knobs_mod = @import("exl3_knobs.zig");
+
+pub const Knobs = knobs_mod.Knobs;
+pub var fma_log_count: usize = 0;
+/// The family host resolves this once at load. The defaults are the shipped bodies.
+pub var knobs: Knobs = .{};
 
 pub const View = struct {
     buffer: mtl.Buffer,
@@ -43,7 +49,7 @@ pub const Matrix = struct {
     /// Byte strides between tiles; zero derives the checkpoint's stored K-major layout.
     tile_k_stride: usize = 0,
     tile_n_stride: usize = 0,
-    /// The prompt-row int8 twin, when a sidecar is loaded (TF_DSV41_I8_PREFILL). Decode stays the trellis; the prompt
+    /// The prompt-row int8 twin, when a sidecar is loaded. Decode stays the trellis; the prompt
     /// paths take this only at rows >= 1024.
     int8: ?Int8 = null,
     /// Whether that twin was packed pre-rotated (both Hadamards baked in). The matrix carries the fact, so a caller
@@ -186,175 +192,109 @@ pub fn codebookTable(device: mtl.Device) ?mtl.Buffer {
     return buffer;
 }
 
+/// The one-row table body.
 pub fn tableDecodeOn() bool {
-    const v = std.c.getenv("TF_DSV41_EXL3_TABLE_DECODE") orelse return true;
-    return !std.mem.eql(u8, std.mem.span(v), "0");
+    return knobs.table_decode;
 }
 
-/// TF_DSV41_EXL3_WIDE_DECODE: the 128-column one-row table body. `=0` restores the 16-column body for a same-binary
-/// A/B; the outputs are bit-identical (identical at every split count).
+/// The 128-column one-row table body.
 pub fn wideDecodeOn() bool {
-    const v = std.c.getenv("TF_DSV41_EXL3_WIDE_DECODE") orelse return true;
-    return !std.mem.eql(u8, std.mem.span(v), "0");
+    return knobs.wide_decode;
 }
 
-/// TF_DSV41_EXL3_DIRECT_DECODE: the direct-register one-row table body. `=0` restores the 128-column shared-tile body
-/// for a same-binary A/B; the outputs are bit-identical (identical at every split count and shape).
+/// The direct-register one-row table body.
 pub fn directDecodeOn() bool {
-    const v = std.c.getenv("TF_DSV41_EXL3_DIRECT_DECODE") orelse return true;
-    return !std.mem.eql(u8, std.mem.span(v), "0");
+    return knobs.direct_decode;
 }
 
-/// TF_DSV41_EXL3_FMA_LUT: the codebook read from a 1024-entry threadgroup LUT in the register-only routed decode
-/// body. `=0` restores the resident table for a same-binary A/B; the outputs are bit-identical.
+/// The codebook read from a 1024-entry threadgroup LUT in the register-only routed decode body.
 pub fn fmaLutOn() bool {
-    const v = std.c.getenv("TF_DSV41_EXL3_FMA_LUT") orelse return true;
-    return !std.mem.eql(u8, std.mem.span(v), "0");
+    return knobs.fma_lut;
 }
 
-/// TF_DSV41_EXL3_LUT_DECODE: the codebook read from a 1024-entry threadgroup LUT in the static one-row body. `=0`
-/// restores the resident table for a same-binary A/B; the outputs are bit-identical.
+/// The codebook read from a 1024-entry threadgroup LUT in the static one-row body.
 pub fn lutDecodeOn() bool {
-    const v = std.c.getenv("TF_DSV41_EXL3_LUT_DECODE") orelse return true;
-    return !std.mem.eql(u8, std.mem.span(v), "0");
+    return knobs.lut_decode;
 }
 
-/// TF_DSV41_EXL3_FMA_STATIC: the static state selection in the register-only routed decode body. `=0` restores the
-/// shipped cursor for a same-binary A/B; the outputs are bit-identical.
+/// The static state selection in the register-only routed decode body.
 pub fn fmaStaticOn() bool {
-    const v = std.c.getenv("TF_DSV41_EXL3_FMA_STATIC") orelse return true;
-    return !std.mem.eql(u8, std.mem.span(v), "0");
+    return knobs.fma_static;
 }
 
-/// TF_DSV41_EXL3_FMA_DENSE: the register-only body on the dense one-row path. `=0` restores the shipped 128-column
-/// threadgroup-tile body for a same-binary A/B. The reduction class is the routed body's (the register-only body's),
-/// not the dense body's, so the arm needed the FP64 reference for the dense one-row class before it could default on:
-/// it stands (the register-only body is the more accurate of the two at the pack's widths 10 and 12, as it was
-/// for the routed class), so it defaults on.
+/// The register-only body on the dense one-row path.
 pub fn fmaDenseOn() bool {
-    const v = std.c.getenv("TF_DSV41_EXL3_FMA_DENSE") orelse return true;
-    return !std.mem.eql(u8, std.mem.span(v), "0");
+    return knobs.fma_dense;
 }
 
-/// TF_DSV41_EXL3_STATIC_DECODE: the static state selection in the one-row body (`tf_exl3_matmul_wide_static_tab`).
-/// `=0` restores the shipped dynamic cursor for a same-binary A/B; the outputs are bit-identical (the hash is
-/// equal to the shipped body's at every shape and split count).
+/// The static state selection in the one-row body.
 pub fn staticDecodeOn() bool {
-    const v = std.c.getenv("TF_DSV41_EXL3_STATIC_DECODE") orelse return true;
-    return !std.mem.eql(u8, std.mem.span(v), "0");
+    return knobs.static_decode;
 }
-pub var moe_cols_cache: ?u32 = null;
-pub var fma_log_count: usize = 0;
-pub var dense_db_cache: ?u32 = null;
 
-/// TF_DSV41_EXL3_DENSE_DB: the dense prompt attention projections on the double-buffered 128x64 body. Same k order
-/// and MMA order as the shipped body, so the output is bit-identical. Default on: the outputs are identical on both
-/// canons, and the 20-prompt band holds at 294/294. Set =0 to force the schedule back.
+/// The dense prompt attention projections on the double-buffered 128x64 body.
 pub fn denseDb() bool {
-    return envRows("TF_DSV41_EXL3_DENSE_DB", 1, &dense_db_cache) != 0;
+    return knobs.dense_db;
 }
 
-pub var dense_rpg2_cache: ?u32 = null;
-
-/// TF_DSV41_EXL3_DENSE_RPG2: the dense prompt tile on the thirty-two-row simdgroup body: the NAXTile shape. The lane
-/// owns eight states instead of four, so the stream words it reads cover twice the states, and the weight fragments
-/// are read once for two row groups, so the tile's threadgroup traffic per row halves. The values, their order, the k
-/// order and the MMA order per output are the single-tile body's, so the output is bit-identical.
+/// The dense prompt tile on the thirty-two-row simdgroup body.
 pub fn denseRpg2() bool {
-    return envRows("TF_DSV41_EXL3_DENSE_RPG2", 0, &dense_rpg2_cache) != 0;
+    return knobs.dense_rpg2;
 }
 
-pub var moe_db_cache: ?u32 = null;
-
-/// TF_DSV41_EXL3_FUNNEL_PREFILL: the routed prompt tile reads its states from the two-word funnel -- the structure
-/// (one funnel shift a block, the eight windows at compile-time shifts) on our map and our ring. The values, their
-/// order and the k order are the shipped body's, so the output is bit-identical (the hash is equal to the
-/// shipped body's at the routed shape). `=0` restores the shipped cursor for a same-binary A/B.
-/// TF_DSV41_EXL3_SKIP_PAD: the routed prompt tile skips the multiply of the grouping's padded rows (the padding rows
-/// carry the sentinel expert id, so a warp reads its own sixteen route ids and skips). The engine's grouping pads
-/// each expert's block to sixty-four rows, so a 3,619-token prompt's 21,714 routed rows are dispatched as 45,888 rows
-/// -- 2.11 times the real work. The real rows' values, their order and the k order are the shipped body's, so the
-/// reply is bit-identical. `=0` restores the shipped multiply for a same-binary A/B.
+/// The routed prompt tile skips the grouping's padded rows.
 pub fn skipPadOn() bool {
-    const v = std.c.getenv("TF_DSV41_EXL3_SKIP_PAD") orelse return true;
-    return !std.mem.eql(u8, std.mem.span(v), "0");
+    return knobs.skip_pad;
 }
 
-/// TF_DSV41_EXL3_WIDE_WORDS: the routed prompt tile reads its stream word as one 4-byte load -- the read -- instead
-/// of two 2-byte loads. The same bytes, so the output is bit-identical; the kernel falls back to the shipped read
-/// when the tile's byte address is not 4-byte aligned.
+/// The routed prompt tile reads its stream word as one 4-byte load.
 pub fn wideWordsOn() bool {
-    const v = std.c.getenv("TF_DSV41_EXL3_WIDE_WORDS") orelse return false;
-    return !std.mem.eql(u8, std.mem.span(v), "0");
+    return knobs.wide_words;
 }
 
-/// TF_DSV41_EXL3_FUNNEL_ONLY: the routed prompt tile takes the funnel path as its only path, so the cursor arrays the
-/// Fast path needs -- off, sh and rel -- are not live across the k loop. The shipped default (the funnel path is the
-/// one the routed pack's width takes); `=0` restores the shipped body.
+/// The routed prompt tile takes the funnel path as its only path.
 pub fn funnelOnlyOn() bool {
-    const v = std.c.getenv("TF_DSV41_EXL3_FUNNEL_ONLY") orelse return true;
-    return !std.mem.eql(u8, std.mem.span(v), "0");
+    return knobs.funnel_only;
 }
 
-/// TF_DSV41_EXL3_DENSE_FUNNEL: the dense prompt tile reads its states from the two-word funnel (the wide form's
-/// structure, ) instead of the cursor's four-word read. The dense tile is 128 rows, so a lane owns four states and
-/// the funnel reads a twenty-five-bit run -- two words. Bit-identical to the shipped body.
-pub var dense_funnel8_cache: ?u32 = null;
-
+/// The dense prompt tile reads its states from the two-word funnel.
 pub fn denseFunnelOn() bool {
-    const v = std.c.getenv("TF_DSV41_EXL3_DENSE_FUNNEL") orelse return false;
-    return !std.mem.eql(u8, std.mem.span(v), "0");
+    return knobs.dense_funnel;
 }
 
-/// TF_DSV41_EXL3_DENSE_FUNNEL8 (, default OFF): the dense prompt tile's funnel read at halves = 8, the tap
-/// projection's width. The dense tile's lane owns four states four bits apart, a 28-bit run, so the funnel's two
-/// words cover it where the shipped body reads four. Default off: no engine path selects it; `=1` is the instrument.
+/// The dense prompt tile's funnel read at halves = 8, the tap projection's width.
 pub fn denseFunnel8On() bool {
-    return envRows("TF_DSV41_EXL3_DENSE_FUNNEL8", 0, &dense_funnel8_cache) != 0;
+    return knobs.dense_funnel8;
 }
 
-/// TF_DSV41_EXL3_COOP_PREFILL: the routed prompt tile reads its block's twenty-four words once a warp (one lane a
-/// word) and takes the two it needs by a shuffle, instead of every lane reading them: the same words, the same
-/// values, the same order (bit-identical). `=0` restores the per-lane read.
+/// The routed prompt tile reads its block's words once a warp.
 pub fn coopPrefillOn() bool {
-    // The flag keeps the instrument.
-    const v = std.c.getenv("TF_DSV41_EXL3_COOP_PREFILL") orelse return false;
-    return !std.mem.eql(u8, std.mem.span(v), "0");
+    return knobs.coop_prefill;
 }
 
-/// TF_DSV41_EXL3_WARP32: the 128-row routed tile with the thirty-two-row warp: a warp owns two sixteen-row groups, so
-/// the block is decoded by one warp and the lane keeps eight states and eight bits a weight. `=0` restores the
-/// four-state lane for the A/B.
+/// The 128-row routed tile with the thirty-two-row warp.
 pub fn warp32On() bool {
-    const v = std.c.getenv("TF_DSV41_EXL3_WARP32") orelse return true;
-    return !std.mem.eql(u8, std.mem.span(v), "0");
+    return knobs.warp32;
 }
 
+/// The routed prompt tile's funnel read.
 pub fn funnelPrefillOn() bool {
-    const v = std.c.getenv("TF_DSV41_EXL3_FUNNEL_PREFILL") orelse return true;
-    return !std.mem.eql(u8, std.mem.span(v), "0");
+    return knobs.funnel_prefill;
 }
 
-/// TF_DSV41_EXL3_MOE_DB: the routed 64x64 prompt tile on the double-buffered ALU body .
+/// The routed 64x64 prompt tile on the double-buffered ALU body.
 pub fn moeDb() bool {
-    return envRows("TF_DSV41_EXL3_MOE_DB", 0, &moe_db_cache) != 0;
+    return knobs.moe_db;
 }
 
-/// TF_DSV41_EXL3_SPLITS pins the one-row split count for the whole binary; unset keeps the per-shape default.
+/// The one-row split count pinned for the whole binary; null keeps the per-shape default.
 pub fn splitOverride() ?u32 {
-    if (!splits_override_set) {
-        splits_override_set = true;
-        if (std.c.getenv("TF_DSV41_EXL3_SPLITS")) |v| splits_override = std.fmt.parseInt(u32, std.mem.span(v), 10) catch null;
-    }
-    return splits_override;
+    return knobs.splits_override;
 }
 
-pub fn envRows(name: [:0]const u8, default: u32, cache: *?u32) u32 {
-    if (cache.*) |v| return v;
-    var out = default;
-    if (std.c.getenv(name)) |v| out = std.fmt.parseInt(u32, std.mem.span(v), 10) catch default;
-    cache.* = out;
-    return out;
+/// Split-K count for the routed-expert decode matmuls.
+pub fn moeSplitCount() usize {
+    return knobs.moe_splits;
 }
 
 pub const Args = extern struct {
@@ -485,14 +425,3 @@ pub fn rowsArgs(k: usize, n: usize, r: Rows, x: View, y: View, scratch: View) !A
 pub fn bind(e: mtl.ComputeEncoder, v: View, index: usize) void {
     e.setBuffer(v.buffer, v.offset, index);
 }
-
-/// Split count for the routed-expert decode matmuls. The order differs from the sequential path, but both canon
-/// hashes are unchanged on the probes.
-pub fn moeSplitCount() usize {
-    return envRows("TF_DSV41_EXL3_MOE_SPLITS", 8, &moe_splits_cache);
-}
-pub var moe_splits_cache: ?u32 = null;
-pub var splits_override: ?u32 = null;
-pub var wide_splits_cache: ?u32 = null;
-pub var moe_rows_cache: ?u32 = null;
-pub var splits_override_set: bool = false;

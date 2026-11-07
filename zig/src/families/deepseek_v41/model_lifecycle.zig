@@ -22,6 +22,7 @@ const engram_stream = @import("engram_rows_safetensors.zig");
 const gpu_counters = @import("profiler.zig");
 const expert_groups = @import("core").expert_groups;
 const scan_probe = @import("scan_probe.zig");
+const projection_knobs = @import("projection_knobs.zig");
 const model = @import("model.zig");
 const Model = model.Model;
 const CondProf = Model.CondProf;
@@ -74,6 +75,7 @@ const headRms = model.headRms;
 const logitsTopK = model.logitsTopK;
 
 pub fn open(gpa: std.mem.Allocator, io: std.Io, o: Options) !Model {
+    projection_knobs.apply();
     var arena = std.heap.ArenaAllocator.init(gpa);
     errdefer arena.deinit();
     const c = try config.Config.read(arena.allocator(), io, o.dir);
@@ -106,7 +108,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, o: Options) !Model {
     const needed = try std.math.add(usize, plan.bytes, try std.math.add(usize, execution_bytes, rotary_bytes));
     // The int8 twin lives beside the trellis it supersedes at prompt rows; it is additive until the trellis
     // attention weights can be dropped, so the admission must see it.
-    const int8_extra: usize = if (std.c.getenv("TF_DSV41_I8_PREFILL") != null) 5 << 30 else 0;
+    const int8_extra: usize = if (exl3.knobs.i8_prefill) 5 << 30 else 0;
     const needed_all = try std.math.add(usize, needed, int8_extra);
     if (o.ram_limit_bytes) |limit| if (needed_all > limit) {
         std.log.err("the resident payload needs {d} bytes; the load limit is {d}", .{ needed_all, limit });

@@ -134,7 +134,7 @@ pub fn denseRegisterOnlyCase(device: mtl.Device, queue: mtl.Queue, k: usize, n: 
     var error_energy = [_]f64{ 0, 0 };
     var magnitude: f64 = 0;
     for (flags, 0..) |flag, which| {
-        _ = setenv("TF_DSV41_EXL3_FMA_DENSE", flag, 1);
+        exl3.knobs.fma_dense = flag[0] != '0';
         const cb = queue.commandBuffer();
         const enc = cb.compute(.serial);
         try exl3.encode(&p, enc, matrix, view(h.view(x_gpu)), view(h.view(y_gpu)), view(h.view(scratch)), .{
@@ -155,7 +155,7 @@ pub fn denseRegisterOnlyCase(device: mtl.Device, queue: mtl.Queue, k: usize, n: 
             magnitude += want * want;
         }
     }
-    _ = setenv("TF_DSV41_EXL3_FMA_DENSE", "0", 1);
+    exl3.knobs.fma_dense = false;
     const nrms_shipped = @sqrt(error_energy[0] / magnitude);
     const nrms_register_only = @sqrt(error_energy[1] / magnitude);
     std.debug.print("EXL3 dense one-row k={d} n={d} halves={d} codebook={d}: shipped nrms {e:.3} | register-only nrms {e:.3}\n", .{ k, n, halves, @backingInt(codebook), nrms_shipped, nrms_register_only });
@@ -213,19 +213,15 @@ pub fn denseRegisterOnlyRows(device: mtl.Device, queue: mtl.Queue, k: usize, n: 
     }
     // Arm 0: the SHIPPED body (the 128-column threadgroup tile). Arm 1: the register-only body (the
     // one-row body at one row, the multi-row body at two), with the halves-8 branch armed.
-    const arms = [_]struct { dense: [*:0]const u8, h8: bool }{
-        .{ .dense = "0", .h8 = false },
-        .{ .dense = "1", .h8 = true },
+    const arms = [_]struct { dense: bool, h8: bool }{
+        .{ .dense = false, .h8 = false },
+        .{ .dense = true, .h8 = true },
     };
     var error_energy = [_]f64{ 0, 0 };
     var magnitude: f64 = 0;
     for (arms, 0..) |arm, which| {
-        _ = setenv("TF_DSV41_EXL3_FMA_DENSE", arm.dense, 1);
-        if (arm.h8) {
-            _ = setenv("TF_DSV41_EXL3_FMA_DENSE_H8", "1", 1);
-        } else {
-            _ = unsetenv("TF_DSV41_EXL3_FMA_DENSE_H8");
-        }
+        exl3.knobs.fma_dense = arm.dense;
+        exl3.knobs.fma_dense_h8 = arm.h8;
         const cb = queue.commandBuffer();
         const enc = cb.compute(.serial);
         try exl3.encode(&p, enc, matrix, view(h.view(x_gpu)), view(h.view(y_gpu)), view(h.view(scratch)), .{
@@ -246,9 +242,9 @@ pub fn denseRegisterOnlyRows(device: mtl.Device, queue: mtl.Queue, k: usize, n: 
             magnitude += want * want;
         }
     }
-    // The tree's own defaults: the dense register-only body is on, and the halves-8 branch is not.
-    _ = setenv("TF_DSV41_EXL3_FMA_DENSE", "1", 1);
-    _ = unsetenv("TF_DSV41_EXL3_FMA_DENSE_H8");
+    // The tree's own defaults: the dense register-only body is on, and the halves-8 branch is on.
+    exl3.knobs.fma_dense = true;
+    exl3.knobs.fma_dense_h8 = true;
     const nrms_shipped = @sqrt(error_energy[0] / magnitude);
     const nrms_register_only = @sqrt(error_energy[1] / magnitude);
     std.debug.print("EXL3 dense rows={d} k={d} n={d} halves={d} codebook={d}: shipped nrms {e:.3} | register-only nrms {e:.3} -> {s}\n", .{
