@@ -115,7 +115,7 @@ const aot_fallback_tests = @import("aot_fallback_tests.zig");
 const qwen_draft_frames = @import("qwen_draft_frames.zig");
 const ripple = @import("ripple_commands.zig");
 
-const usage = @import("main_usage.zig").usage;
+const usage = @import("main_usage.zig").usage ++ @import("ling_cmds.zig").usage;
 
 pub fn main(init: std.process.Init) !u8 {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
@@ -188,6 +188,7 @@ fn compileContractGlue() !void { // the contract glue's device path, built with 
 }
 
 fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
+    if (try @import("ling_cmds.zig").run(gpu, cmd, rest)) return;
     if (std.mem.eql(u8, cmd, "qwen4")) {
         if (rest.len != 0) return error.Qwen4DeviceArguments;
         return @import("qwen4_tests.zig").run(gpu);
