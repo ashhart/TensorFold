@@ -134,6 +134,20 @@ test "a variable-length all-gather on one device moves each rank's length, and t
     }
 }
 
+const Sizes = struct {
+    fn go(c: Collective, rank: u32, _: void) !void {
+        var a: [16]u8 = @splat(1);
+        if (rank == 0) return std.testing.expectError(error.Aborted, c.send(addr(&a), 8, .u8, 1, null));
+        if (rank == 1) return std.testing.expectError(error.Invalid, c.recv(addr(&a), 16, .u8, 0, null));
+    }
+};
+
+test "a recv of another size than its send is refused, and the waiting sender is freed" {
+    var d = Fake.driver();
+    const cx = context(&d);
+    for ([_]u32{ 2, 3 }) |w| try device.run(&cx, std.testing.allocator, w, .{}, {}, Sizes.go);
+}
+
 const Capture = struct {
     fn go(c: Collective, _: u32, _: void) !void {
         var a: [16]u8 = @splat(0);
