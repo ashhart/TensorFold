@@ -35,15 +35,14 @@ const tiles: [3]c.Tile = .{ .{ .size = 8 }, .{ .size = 32, .step = 8, .min = 8 }
 
 /// The 2B's 16-chain projections at a decode row, a 128-row prompt chunk and a 32-row verify window, each width.
 const served16 = [_]c.Shape{
-    .{ .rows = 1, .n = 2048, .k = 2048 },  .{ .rows = 128, .n = 2048, .k = 2048 },
-    .{ .rows = 1, .n = 6144, .k = 2048 },  .{ .rows = 128, .n = 6144, .k = 2048 },
-    .{ .rows = 1, .n = 2048, .k = 6144 },  .{ .rows = 128, .n = 2048, .k = 6144 },
-    .{ .rows = 1, .n = 512, .k = 2048 },   .{ .rows = 128, .n = 512, .k = 2048 },
-    .{ .rows = 1, .n = 4096, .k = 2048 },  .{ .rows = 128, .n = 4096, .k = 2048 },
-    .{ .rows = 32, .n = 2048, .k = 2048 },
+    .{ .rows = 1, .n = 2048, .k = 2048 }, .{ .rows = 128, .n = 2048, .k = 2048 }, .{ .rows = 32, .n = 2048, .k = 2048 },
+    .{ .rows = 1, .n = 6144, .k = 2048 }, .{ .rows = 128, .n = 6144, .k = 2048 }, .{ .rows = 32, .n = 6144, .k = 2048 },
+    .{ .rows = 1, .n = 2048, .k = 6144 }, .{ .rows = 128, .n = 2048, .k = 6144 }, .{ .rows = 32, .n = 2048, .k = 6144 },
+    .{ .rows = 1, .n = 512, .k = 2048 },  .{ .rows = 128, .n = 512, .k = 2048 },  .{ .rows = 32, .n = 512, .k = 2048 },
+    .{ .rows = 1, .n = 4096, .k = 2048 }, .{ .rows = 128, .n = 4096, .k = 2048 }, .{ .rows = 32, .n = 4096, .k = 2048 },
 };
-/// The delta rule's a and b projections, 16 outputs each.
-const served32 = [_]c.Shape{ .{ .rows = 1, .n = 16, .k = 2048 }, .{ .rows = 128, .n = 16, .k = 2048 } };
+/// The delta rule's a and b projections, 16 outputs each, at the same three row counts.
+const served32 = [_]c.Shape{ .{ .rows = 1, .n = 16, .k = 2048 }, .{ .rows = 128, .n = 16, .k = 2048 }, .{ .rows = 32, .n = 16, .k = 2048 } };
 /// The head: one row a decode step or a prompt's last row, and a verify window's rows.
 const served8 = [_]c.Shape{ .{ .rows = 1, .n = 248320, .k = 2048 }, .{ .rows = 32, .n = 248320, .k = 2048 } };
 const ctl = [_]c.Shape{ .{ .rows = 9, .n = 104, .k = 2048 }, .{ .rows = 2, .n = 40, .k = 6144 } };
