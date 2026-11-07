@@ -11,6 +11,8 @@ pub const Segment = struct {
     parents: ?[]const i32, // each row's parent row (row 0: -1); null: a chain
     draws: []const u64,
     sampling: ?lanes.Sampling,
+    logprobs: ?u8 = null,
+    logrows: []lanes.logprob.Row = &.{},
 };
 
 /// A slot's last rows' taps (bf16 [rows, 3 x hidden] at `address`); `map`: tree window row -> taps row (branches.zig).
@@ -21,6 +23,8 @@ pub const Target = struct {
     vtable: *const VTable,
 
     pub const VTable = struct {
+        /// Prompt plus its first raw logprob row; finish=true runs only the last row after pieces.
+        scored_prompt: ?*const fn (*anyopaque, u32, []const u32, ?lanes.Sampling, u64, u8, *lanes.logprob.Row, bool) anyerror!u32 = null,
         /// Run the prompt into the slot's state; the keyed choice after its last row (drawn at `draw`).
         prefill: *const fn (ptr: *anyopaque, slot: u32, ids: []const u32, sampling: ?lanes.Sampling, draw: u64) anyerror!u32,
         /// One forward over every segment into `choices[i][r]`; rows stay until `keep` (never kept: all rows stay).
@@ -86,6 +90,10 @@ pub const Target = struct {
     pub fn tail(t: Target, slot: u32, ids: []const u32, sampling: ?lanes.Sampling, draw: u64) !?u32 {
         const f = t.vtable.tail orelse return try t.finish(slot, ids, sampling, draw);
         return f(t.ptr, slot, ids, sampling, draw);
+    }
+
+    pub fn scoredPrompt(t: Target, slot: u32, ids: []const u32, sampling: ?lanes.Sampling, draw: u64, k: u8, row: *lanes.logprob.Row, finish_: bool) !u32 {
+        return (t.vtable.scored_prompt orelse return error.LogprobsUnsupported)(t.ptr, slot, ids, sampling, draw, k, row, finish_);
     }
 
     pub fn prefill(t: Target, slot: u32, ids: []const u32, sampling: ?lanes.Sampling, draw: u64) !u32 {

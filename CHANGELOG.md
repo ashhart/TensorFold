@@ -355,6 +355,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - A batched `/v1/embeddings` request no longer hangs on a backend that prefills many prompts at once, and the lane core can score decision prompts in 1,024-row pieces (#2047). Thanks to @laudney.
 - The native tokenizer reads a Qwen2 checkpoint's slow-tokenizer files when it ships no `tokenizer.json`, converting them to the JSON it would ship; structured output still needs that file (#2225). Thanks to @shuuul.
 
+- Experimental DeepSeek-V4.1 on CUDA: reply logprobs gather all tensor-parallel head columns before normalization, with host float64 checks; TP=2 device qualification is pending (#1324, blocker 2). Requests without logprobs keep their existing GPU path.
+
 - XPU's dense 27B takes its kernel sizes from one shared `shape.h`, with 8-head prompt attention, and its SPIR-V images stay byte-identical (#1425, thanks @tolewis).
 
 - PNG pictures with a `tRNS` key past 255, or a 16-bit key, now decode with Pillow's transparency: grayscale and RGB keys compare their low byte with the decoded sample. Pictures without such a key decode as before, and 1-bit grayscale keeps its whole-key rule (#2100).
