@@ -8,7 +8,7 @@ const Job = LaneHost.Job;
 /// The ledger an engine's Info asks for (null: none); a family admits through its own pool or this, never both.
 pub fn of(info: api.Info) ?kv.Ledger {
     std.debug.assert(info.ledger == null or info.admit == null);
-    return if (info.ledger) |l| .{ .total = l.total } else null;
+    return if (info.ledger) |l| .{ .total = l.total, .standing = l.standing } else null;
 }
 
 /// Whether jobs promise bytes as they leave the queue (Info.ledger's price); a paged family's pool promises its own.
@@ -79,7 +79,8 @@ pub fn never(h: *const LaneHost, job: *const Job) bool {
 /// At stop every job has ended: bytes still promised mean a lease that never came back.
 pub fn checkIdle(h: *const LaneHost) void {
     const l = h.kv orelse return;
-    if (!l.idle()) std.log.warn("kv ledger: {d} of {d} bytes still promised at stop", .{ l.promised, l.total });
+    if (l.promised > 0) std.log.warn("kv ledger: {d} of {d} bytes still promised at stop", .{ l.promised, l.total });
+    if (l.bound > 0) std.log.warn("kv ledger: {d} standing streams still held at stop", .{l.bound}); // never the lease itself
 }
 
 pub const too_big = "this request's caches exceed the whole KV budget with nothing else running: lower max_tokens or --context";
