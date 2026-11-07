@@ -63,7 +63,7 @@ pub fn weights(comptime F: type, a: Allocator, io: std.Io, o: api.Open, problem:
 /// Logs, from 0.25 GiB, the free pages on the per-CPU lists that a pool's reading counted.
 pub fn noteParked(p: budget.Pool, what: []const u8) void {
     const line = "{s} counts the {d:.2} GiB free on the per-CPU page lists beyond their resting level (MemAvailable does not)";
-    if (p.parked >= 1 << 28) std.log.info(line, .{ what, toGib(p.parked) });
+    if (p.parked >= 1 << 28) std.log.debug(line, .{ what, toGib(p.parked) }); // debug: varies run to run
 }
 
 pub fn room(comptime F: type, ptr: *anyopaque, local: u64) !u64 {
