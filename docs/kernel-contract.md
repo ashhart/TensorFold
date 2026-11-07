@@ -372,7 +372,9 @@ RADIO's fused bias, activation and residual (`tf_vit_bias_act`) replaces `tf_vit
 CUDA also checks GLM-5.3-Flash's KV page kernels on a page table out of order: the latent write and the pooled keys
 (`tf_glm_lat_write`, `tf_glm_pool_keys`), the index scores and the selected tokens' rows (`tf_glm_scores`,
 `tf_glm_dsa_tokens`), and the MLA chunks through their merge (`tf_glm_chunks_16` and `tf_glm_chunks_32`, dense and
-sparse). Its prompt indexer (`tf_glm_index_scores`, `tf_glm_index_pools`) is bit-equal to `tf_glm_scores` and
+sparse). The same eight cases also run on `TF_GLM_KV_SPLIT`'s two regions (every page's pooled keys, then every page's
+latent rows), each launch with its region's table and stride, and each control giving it the other region's table.
+Its prompt indexer (`tf_glm_index_scores`, `tf_glm_index_pools`) is bit-equal to `tf_glm_scores` and
 `tf_glm_select_rows`, and its decode select at a 1,024-thread block a row (`tf_glm_select_rows_wide`) to
 `tf_glm_select_rows`; both stated rules rank any NaN above +inf, as the GPU's `s + 0` makes every NaN one
 positive NaN.
