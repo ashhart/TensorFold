@@ -1,6 +1,6 @@
 //! Compiler-derived Qwen vision and rounding-control usage on gfx1030, gfx1100, gfx1151 and gfx1201.
 const Record = @import("hip_records.zig").Record;
-pub const records = [_]Record{
+pub const records = [12]Record{
     .{
         .launch = .{ .name = "Qwen vision tf_qvh_linear", .symbol = "tf_qvh_linear", .image = "qwen_vision", .threads = 32 },
         .usage = .{
