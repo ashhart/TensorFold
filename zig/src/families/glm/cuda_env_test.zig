@@ -28,6 +28,8 @@ const ranks = [_][:0]const u8{ "TF_GLM_RANK", "TF_GLM_WORLD" };
 const windows = [_][:0]const u8{"TF_GLM_CONTEXT_CEILING"};
 const words = [_][:0]const u8{"TF_GLM_EXPERT_FORM"};
 const added = [_][:0]const u8{ "TF_GLM_INDEX_CUDA", "TF_GLM_INDEX_SPLIT", "TF_GLM_KV_HOST_GIB" };
+/// The per-rank KV split switch (its own word list, beside the expert form).
+const splits = [_][:0]const u8{"TF_GLM_KV_SPLIT"};
 
 /// The row by name without `rule`, so a missing row fails an assertion instead of panicking.
 fn row(name: []const u8) !e.Rule {
@@ -68,12 +70,13 @@ test "GLM strict env: every GLM reader's name is a glm row, and the glm scope ho
     for (words) |name| try t.expectEqual(e.Kind.word, (try row(name)).kind);
     for (added) |name| try t.expect((try row(name)).kind != .flag);
     for (ranks) |name| try t.expectEqual(e.Kind.u32, (try row(name)).kind);
+    for (splits) |name| try t.expectEqual(e.Kind.word, (try row(name)).kind);
     var n: usize = 0;
     for (e.rules) |r| if (r.scope == .glm) {
         try t.expect(std.mem.startsWith(u8, r.name, "TF_GLM_"));
         n += 1;
     };
-    try t.expectEqual(switches.len + counts.len + reals.len + windows.len + words.len + added.len + ranks.len, n);
+    try t.expectEqual(switches.len + counts.len + reals.len + windows.len + words.len + splits.len + added.len + ranks.len, n);
 }
 test "GLM strict env: INDEX_SPLIT accepts the 32K local-indexer opt-in and refuses malformed positions" {
     const name = "TF_GLM_INDEX_SPLIT";
@@ -209,4 +212,10 @@ test "TF_GLM_CONTEXT_CEILING's largest window is the last whose slots, verify ro
     const most = e.rule(@import("cuda_env.zig").ceiling_switch).max;
     try t.expect(capacity(@intCast(most)) <= @as(usize, std.math.maxInt(i32)) + 1);
     try t.expect(capacity(@intCast(most + 1)) > @as(usize, std.math.maxInt(i32)) + 1);
+}
+test "GLM strict env: TF_GLM_KV_SPLIT takes 0, off, 1 or on at GLM's open, and refuses the rest by name" {
+    for (splits) |name| {
+        for ([_][]const u8{ "0", "off", "1", "on" }) |raw| try check(name, raw, true);
+        for ([_][]const u8{ "ON", "true", "yes", "2", " 1", "on " }) |raw| try check(name, raw, false);
+    }
 }

@@ -226,6 +226,7 @@ fn openRank(a: StartArgs, set: ranks.Settings) !Loaded {
     // TF_KV_SHARE keeps prompts as the pool's pages: refused before the weights load, every rank told (startup)
     if (a.share > 0 and !set.pages) return error.GlmShareNeedsPages;
     if (@import("cuda_kv_host.zig").onHost() and !set.pages) return error.GlmKvHostNeedsPages;
+    try startup.sharing(set.kv_split, a.share);
     cuda.memory_receipt.emit(@intCast(p.rank), .load_begin, true); // the four phases tools/memory_receipts.py reads
     const own = try gpa.create(Owned);
     errdefer gpa.destroy(own);
@@ -512,7 +513,7 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.NotModelOpt, error.UnsupportedQuant => "GLM-5.3-Flash on CUDA reads ModelOpt NVFP4, MIXED_PRECISION and EXL3 mcg checkpoints (the log names what config.json has)",
         error.UnreadableExl3 => "an EXL3 routed expert is not an mcg trellis of 1 to 8 bits with its marker and fp16 scales (the log names the tensor)",
         error.UnreadableFormat => "a projection is stored in a format GLM-5.3-Flash on CUDA does not read (the log names its module, recipe and tensors)",
-        else => null,
+        else => startup.explain(err), // TF_GLM_KV_SPLIT's refusals
     };
 }
 
@@ -552,8 +553,7 @@ test "TF_KV_PAGES with --kv-cache fp8: auto and off keep windows at every rank c
         try std.testing.expect(!try paging("0", w, true));
         for ([_][]const u8{ "on", "1", "all" }) |v| try std.testing.expectError(error.Fp8OnPages, paging(v, w, true));
     }
-    try std.testing.expect(explain(null, error.Fp8OnPages) != null);
-    try std.testing.expect(explain(null, error.GlmKvHostNeedsPages) != null);
+    for ([_]anyerror{ error.Fp8OnPages, error.GlmKvHostNeedsPages, error.KvSplitShare }) |e| try std.testing.expect(explain(null, e) != null);
 }
 
 test "the plan's window, the context and a verify window, takes the pages of a stream's table at that capacity" {
@@ -561,17 +561,4 @@ test "the plan's window, the context and a verify window, takes the pages of a s
     for ([_]usize{ 8192, 8191, 245_760, 524_288 - 33, 524_288 - 32, 524_288 - 31, 1_048_576, 2_097_152, 2_097_152 + 1 }) |context| {
         try std.testing.expectEqual(pages_mod.tableLen(capacity(context)), l.pages(context + window_rows));
     }
-}
-
-// Enough words for every offered frame pair and image, even with a small text context.
-pub fn linkCapacity(cap: usize, media: ?images_mod.Limits) !usize {
-    const lim = media orelse return cap;
-    const frames: usize = (@as(usize, lim.max_frames) + 1) / 2;
-    const pairs = std.math.mul(usize, frames, lim.max_videos) catch return error.TooManyImages;
-    const spans = std.math.add(usize, pairs, lim.max_images) catch return error.TooManyImages;
-    const words = std.math.mul(usize, spans, 3) catch return error.TooManyImages;
-    return @max(cap, words);
-}
-test "a small text context still sizes the link for every offered media span" {
-    try std.testing.expectEqual(@as(usize, 792), try linkCapacity(64, .{ .image_tokens = 2048, .max_images = 8, .video_tokens = 4096, .max_videos = 2, .max_frames = 256 }));
 }

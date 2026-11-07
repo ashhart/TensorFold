@@ -123,6 +123,10 @@ const valid = [_]Case{
     .{ .name = "TF_Q35_DFLASH_ABSORB_BATCH", .raw = "1", .n = 1 },
     .{ .name = "TENSORFOLD_LFM2_KV_PAGES", .raw = "0", .n = 0 },
     .{ .name = "TENSORFOLD_LFM2_KV_PAGES", .raw = "1", .n = 1 },
+    .{ .name = "TF_GLM_KV_SPLIT", .raw = "0", .n = 0 },
+    .{ .name = "TF_GLM_KV_SPLIT", .raw = "off", .n = 1 },
+    .{ .name = "TF_GLM_KV_SPLIT", .raw = "1", .n = 2 },
+    .{ .name = "TF_GLM_KV_SPLIT", .raw = "on", .n = 3 },
     .{ .name = "TF_ROCE_GID_INDEX", .raw = "2147483647", .n = 2147483647 },
     .{ .name = "TF_MINIMAX_RANK", .raw = "1", .n = 1 },
     .{ .name = "TF_MINIMAX_WORLD", .raw = "2", .n = 2 },
@@ -307,6 +311,7 @@ test "environment: range, enum, whitespace and native prompt geometry refusals a
         .{ "TF_MTP_TREES", "yes" },                    .{ "TF_MTP_BATCH", "off" },
         .{ "TF_QWEN_POOL_LOG", "true" },               .{ "TF_COST_KEY_TRACE", "on" },
         .{ "TF_COST_KEY_TRACE", "on" },                .{ "TF_ROCE_HCA", "rocep1s0f0,roceP2p1s0f0,rocep1s0f1" },
+        .{ "TF_GLM_KV_SPLIT", "ON" },                  .{ "TF_GLM_KV_SPLIT", "true" },
     }) |c| try t.expectError(error.InvalidEnvironment, e.parse(c[0], c[1]));
     try t.expectEqual(@as(?u64, null), try e.parse("TF_CUDA_DEVICE", "   "));
     try t.expectEqual(@as(?u64, 0), try e.parse("TF_Q27_COPY_ROWS", "+0"));
