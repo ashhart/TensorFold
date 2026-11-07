@@ -19,6 +19,12 @@ const Resident = @import("resident.zig").Resident;
 const nemo_disk = @import("nemotron_disk.zig");
 const fsr_options = @import("fsr_options.zig");
 const linkProblem = @import("metal_link.zig").problem;
+const metal_shared = @import("metal_shared.zig");
+pub const chip = metal_shared.chip;
+pub const deviceName = metal_shared.deviceName;
+const prefillStep = metal_shared.prefillStep;
+const modelContext = metal_shared.modelContext;
+const gibBytes = metal_shared.gibBytes;
 
 pub const backends: []const []const u8 = &.{"metal"};
 pub const serves: []const []const u8 = &.{ "--checkpoint-slots", "--spill-gib" };
@@ -63,48 +69,6 @@ pub const families: []const api.Family = &.{
 /// Gemma 4 31B (gemma4) and 12B (gemma4_unified, its text model): one native family, gemma4.zig's host.
 fn isGemma4(model_type: []const u8) bool {
     return std.mem.eql(u8, model_type, "gemma4") or std.mem.eql(u8, model_type, "gemma4_unified");
-}
-
-/// The chip class gate entries name ("apple-m5" for an Apple M5 Max); null without an Apple GPU.
-pub fn chip(a: Allocator) ?[]const u8 {
-    const device = mtl.Device.init() catch return null;
-    defer device.deinit();
-    const gen = generation(std.mem.span(device.name())) orelse return null;
-    return std.fmt.allocPrint(a, "apple-m{d}", .{gen}) catch null;
-}
-
-/// The name of the system GPU the Metal engines open ("Apple M5 Max"); null without one.
-pub fn deviceName(a: Allocator, _: ?u32) ?[]const u8 {
-    const device = mtl.Device.init() catch return null;
-    defer device.deinit();
-    return a.dupe(u8, std.mem.span(device.name())) catch null;
-}
-
-/// The M generation in a Metal device name ("Apple M5 Max": 5).
-fn generation(name: []const u8) ?u32 {
-    var words = std.mem.tokenizeScalar(u8, name, ' ');
-    if (!std.ascii.eqlIgnoreCase(words.next() orelse return null, "apple")) return null;
-    const word = words.next() orelse return null;
-    if (word.len < 2 or std.ascii.toLower(word[0]) != 'm') return null;
-    const gen = std.fmt.parseInt(u32, word[1..], 10) catch return null;
-    return if (gen >= 1) gen else null;
-}
-
-/// Python's prompt chunk: 8,192 rows with tensor units (M5 on) where memory allows, else its 2,048.
-fn prefillStep(device: mtl.Device) u32 {
-    const gen = generation(std.mem.span(device.name())) orelse 0;
-    return if (gen >= 5 and device.maxWorkingSet() >= 48 << 30) 8192 else 2048;
-}
-
-/// The model's window (config.json's max_position_embeddings, text_config's first), 0 when it names none.
-fn modelContext(a: Allocator, io: std.Io, dir: []const u8) i64 {
-    const path = std.fs.path.join(a, &.{ dir, "config.json" }) catch return 0;
-    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(16 << 20)) catch return 0;
-    const doc = std.json.parseFromSliceLeaky(std.json.Value, a, bytes, .{}) catch return 0;
-    if (doc != .object) return 0;
-    const text = if (doc.object.get("text_config")) |t| (if (t == .object) t else doc) else doc;
-    const limit = text.object.get("max_position_embeddings") orelse doc.object.get("max_position_embeddings") orelse return 0;
-    return if (limit == .integer and limit.integer > 0) limit.integer else 0;
 }
 
 /// The host's memory counts: `cache_fit.hostMemory` from the process footprint (no configured load limit).
@@ -359,11 +323,6 @@ fn openQwen27(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[
     return .{ .engine = h.engine(), .close = qwen27.close, .ctx = h };
 }
 
-/// A GiB count's bytes (the flags allow 0 up to below 2^34).
-fn gibBytes(g: f64) u64 {
-    return @intFromFloat(g * (1 << 30));
-}
-
 /// Flash Next uses the dump named by TF_FLASHNEXT_DUMP, or the checked-in kernels when that variable is unset.
 pub fn openFlashNext(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     if (try o.slideRefusal(a, "Macs")) |why| {
@@ -431,6 +390,7 @@ test {
     _ = @import("qwen27_landing.zig");
     _ = spill;
     _ = @import("metal_link.zig");
+    _ = metal_shared;
 }
 
 /// GLM-5.3-Flash's caches hold this many tokens unless --context asks otherwise (its window is 1,048,576).
@@ -478,13 +438,6 @@ fn openGlmDsa(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[
         return null;
     };
     return .{ .engine = h.engine(), .close = glm_dsa.close, .ctx = h };
-}
-
-test "chip classes from Metal device names" {
-    try std.testing.expectEqual(@as(?u32, 5), generation("Apple M5 Max"));
-    try std.testing.expectEqual(@as(?u32, 12), generation("Apple M12"));
-    try std.testing.expectEqual(@as(?u32, null), generation("AMD Radeon Pro"));
-    try std.testing.expectEqual(@as(?u32, null), generation("Apple Mx"));
 }
 
 test "--learn is refused for the 27B, the 2B and GLM-5.3 (EXLR8), and not for the families that keep prompt states on disk" {
