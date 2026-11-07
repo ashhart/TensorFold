@@ -83,6 +83,7 @@ fn decisionOnly(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dir: [
         return std.fmt.allocPrint(a, "{s}: {s} is quantized ({t})", .{ what, dir, c.quant }) catch what;
     }
     if (c.quant != .bf16 or head) return null;
+    if (engine.chatBf16(gpa, io, dir)) return null; // an image checkpoint: a tower the engine reads, no joint head
     const what = "BF16 Qwen3.5 serves as a decision backbone only";
     return std.fmt.allocPrint(a, "{s}: {s} has no joint_head_config.json", .{ what, dir }) catch what;
 }
@@ -142,6 +143,7 @@ fn prepare(
     var pf: engine.Preflight = .{};
     const e = Engine.load(gpa, io, dir, .{
         .preflight = &pf,
+        .vision = o.vision,
         .slack = rows + 1,
         .device = dev.index,
         .policy = dev.policy,
@@ -178,6 +180,22 @@ fn prepare(
             a,
             problem,
             "cannot read or parse /proc/meminfo's MemTotal and MemAvailable; refusing HIP unified-memory admission",
+            .{},
+        ),
+        // the CUDA engine refuses these alike: --vision asks for images, so a tower it cannot read stops the start
+        error.UnsupportedQwenVision => steps.refuseAll(
+            a,
+            problem,
+            "--vision: this checkpoint's image tower is not one the HIP engine reads (64-wide heads, 16-pixel " ++
+                "patches, 2x2 merge): serve it without --vision for text",
+            .{},
+        ),
+        error.UnsupportedTorchRope => steps.refuseAll(
+            a,
+            problem,
+            "the HIP engine's image and BF16 text rotary reads BF16 activations, 256-wide heads, 64 rotary " ++
+                "dimensions and the interleaved [11, 11, 10] M-RoPE; this checkpoint differs (serve a quantized " ++
+                "checkpoint without --vision for text)",
             .{},
         ),
         else => steps.refuseAll(a, problem, "the native HIP engine cannot load {s} ({s})", .{ dir, @errorName(err) }),
@@ -337,7 +355,7 @@ fn openEngine(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dev: hip
         .deinit = release,
         .streams = p.streams,
         .startup = p.startup,
-        .offer = .{ .readouts = own.backend.readouts() },
+        .offer = .{ .readouts = own.backend.readouts(), .vision = serve.vision.offer(p.e.vision) },
     };
 }
 
@@ -416,6 +434,24 @@ test "a bf16 checkpoint without a joint head is refused as decision-only, an MLX
     try std.testing.expect(std.mem.startsWith(u8, quantized, "the joint schema head needs the BF16 checkpoint: "));
     try tmp.dir.deleteFile(io, "joint_head_config.json");
     try std.testing.expect(decisionOnly(a, std.testing.allocator, io, dir) == null); // without it, a text model
+}
+
+test "a bf16 checkpoint without a joint head serves chat when the engine reads its tower" {
+    const io = std.testing.io;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    // LightOnOCR-3-0.8B's config: bf16 (no quantization) with a vision_config the HIP tower reads
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = @embedFile("../../../fixtures/lighton-ocr-0.8b.json") });
+    try std.testing.expect(engine.chatBf16(std.testing.allocator, io, dir));
+    try std.testing.expect(decisionOnly(a, std.testing.allocator, io, dir) == null);
+    // the same weights with Clef's joint head file are not a chat checkpoint: the joint schema path takes them
+    try tmp.dir.writeFile(io, .{ .sub_path = "joint_head_config.json", .data = "{}" });
+    try std.testing.expect(!engine.chatBf16(std.testing.allocator, io, dir));
+    try std.testing.expect(decisionOnly(a, std.testing.allocator, io, dir) == null);
 }
 
 test "capability audit: HIP Qwen format names cover the admitted affine widths" {

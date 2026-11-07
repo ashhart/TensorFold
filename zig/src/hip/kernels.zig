@@ -16,6 +16,8 @@ pub const Group = enum {
     mamba,
     glm_ocr,
     joint_schema,
+    lighton_ocr,
+    qwen_vision,
 };
 pub const group_count = @typeInfo(Group).@"enum".field_names.len;
 
