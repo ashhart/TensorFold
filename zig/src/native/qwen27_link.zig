@@ -37,6 +37,26 @@ pub fn follow(b: *lb.Metal) void {
                 if (w.len != 2) failFollow("step", w.len);
                 (q.session.Session{ .runner = b.runner, .slot = w[0] }).step(w[1]) catch |err| return failFollow("step", @errorName(err));
             },
+            .tree => {
+                if (w.len < 2 or w.len != 2 + 2 * w[1]) failFollow("tree", w.len);
+                const slot = w[0];
+                const ids = w[2 .. 2 + w[1]];
+                const parent_words = w[2 + w[1] ..];
+                const parents = b.gpa.alloc(i32, parent_words.len) catch |err| return failFollow("tree parents", @errorName(err));
+                defer b.gpa.free(parents);
+                for (parent_words, 0..) |pw, i| parents[i] = @bitCast(pw);
+                const round = q.round_plan.Round.init(b.gpa, &.{.{ .slot = slot, .start = b.runner.offsets[slot], .capacity = b.runner.capacity, .ids = ids, .parents = parents }}, @intCast(b.runner.model.config.conv_kernel), b.runner.slots, @intCast(b.runner.model.shard.global.vocab)) catch |err| return failFollow("tree round", @errorName(err));
+                if (b.round) |*old| old.deinit();
+                b.round = round;
+                b.runner.verifyHead(&b.round.?, .all) catch |err| return failFollow("tree verify", @errorName(err));
+            },
+            .commit => {
+                if (w.len < 2 or w.len != 2 + w[1]) failFollow("commit", w.len);
+                const round = &(b.round orelse return failFollow("commit without a tree", w[0]));
+                b.runner.keep(round, &.{w[2..][0..w[1]]}) catch |err| return failFollow("tree keep", @errorName(err));
+                round.deinit();
+                b.round = null;
+            },
             .end => {},
         }
     }

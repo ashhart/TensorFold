@@ -75,8 +75,8 @@ test "--vision is refused on a pair, by name" {
     try pair_flags.refuse(false, false, false, false, &why); // a single Mac sets none of the flags this refuses
 }
 
-test "--drafter is refused at the front door, by name" {
-    // `open` reads `.drafter` through this helper: a refusal that never fires here turns this test red
+test "--drafter runs on a pair: rank 0 drafts, rank 1 replays the tree rounds" {
+    // `open` reads `.drafter` through this helper: the tree protocol replays rank 0's draft rounds
     const pair = served.Options{
         .context = 4096,
         .streams = 1,
@@ -84,13 +84,17 @@ test "--drafter is refused at the front door, by name" {
         .drafter = "z-lab/Qwen3.8-27B-DFlash2",
     };
     var why: []const u8 = "";
-    try std.testing.expectError(error.PairNoDrafter, pair_flags.refuseOptions(true, pair, false, &why));
-    try std.testing.expect(std.mem.startsWith(u8, why, "--drafter does not run on a pair"));
-    // a drafter the caller already bound reaches `attach` with no flag in the options, and is refused too
+    try pair_flags.refuseOptions(true, pair, false, &why);
+    // a drafter the caller already bound reaches `attach` with no flag in the options, and is accepted too
     var plain = pair;
     plain.drafter = null;
-    try std.testing.expectError(error.PairNoDrafter, pair_flags.refuseOptions(true, plain, true, &why));
-    // one Mac keeps its drafter: with no pair there is nothing to refuse
+    try pair_flags.refuseOptions(true, plain, true, &why);
+    // the other pair refusals still stand
+    var cache = pair;
+    cache.drafter = null;
+    cache.cache_gib = 8;
+    try std.testing.expectError(error.PairNoCache, pair_flags.refuseOptions(true, cache, false, &why));
+    // one Mac keeps every flag: with no pair there is nothing to refuse
     try pair_flags.refuseOptions(false, pair, false, &why);
 }
 
