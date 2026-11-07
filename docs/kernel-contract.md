@@ -335,6 +335,9 @@ softmax over FP32 scores to 16,384 keys, GELU, BF16 widening and rounding, the s
 rows by id (FP32 in prompt row order) and their means, step 5's option summary, and step 7's logits (prior, cosine and
 the scorer's input rows) and their gate, each within float64's bound at the head's BF16 points. Two controls: a layer
 norm summed in bf16 and a softmax that skips non-finite scores.
+CUDA checks the same head (`joint_schema.cu`, `zig/tests/cuda/contract_js_*.zig`) with the same cases, plus the
+lexical sums read from the engine's packed BF16 lm_head (`tf_js_lex_sums`) and the head's residual add and broadcast.
+Every kernel has a planted control (`contract_js_controls.cuh`), each naming the gate that catches it.
 
 HIP also checks the router over the rows a checkpoint already holds in bf16 (`tf_router_bf16`, and its fp16-activation
 form), bit-equal to the fp32-rows router it replaces at 1 to 16 rows, with both kinds' non-finite plants through gate 1
