@@ -22,6 +22,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - LFM2.5-24B-A2B serves on one NVIDIA GPU from the MLX 4-bit export, on the shared CUDA kernels, with `--parallel`
   streams and copy drafts; there is no drafter or prompt cache yet (#1492, part of #1488). Thanks to @jschmied.
 - HIP: capture a drafter's requested target-layer taps in each stream's ring, with graph-on/off and planted kernel controls (#2314).
+- Nemotron Parse on HIP: NVIDIA's `nvidia/Nemotron-3.5-Parse` is served natively from its FP32 safetensors on a Radeon AI PRO R9700 (gfx1201), with its RADIO image tower, convolution neck and mBART decoder. The token arrays match the published example's on three pages, plain and drafted, solo and concurrent (#1941, part of #1927). Thanks to @laudney.
 
 ## 1.2.4
 
