@@ -18,7 +18,7 @@ pub fn isUniform(w: Width) bool {
 
 /// A layer's projections; a layer stores entries for both mixers and uses those of its kind.
 pub const Member = enum { gate, up, down, qkv, z, b, a, out, q, k, v, o, router, shared_gate, egate, eup, edown };
-const members = @backingInt(Member.edown) + 1;
+pub const members = @backingInt(Member.edown) + 1;
 /// The routed block's members: the router, the shared expert's gate and the stacked experts.
 pub const routed = [_]Member{ .router, .shared_gate, .egate, .eup, .edown };
 /// The widths the kernel contract checks the routed block's kernels at, in groups of `routed_group`.

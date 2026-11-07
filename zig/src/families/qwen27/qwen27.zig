@@ -75,6 +75,7 @@ test {
     _ = checkpoint;
     _ = weights;
     _ = @import("weights_test.zig");
+    _ = @import("mtp_load_test.zig");
     _ = @import("geometry_test.zig");
 }
 

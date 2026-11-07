@@ -19,12 +19,20 @@ pub const Moe = struct { router: row_gpu.Weights, gate: row_gpu.Experts, up: row
 /// With experts, `gu` and `down` are the shared expert's.
 pub const Layer = struct { norm: Tensor, post_norm: Tensor, gu: Linear, down: Linear, moe: ?Moe = null, mixer: union(@import("config.zig").Kind) { linear: Gdn, attention: Attention } };
 
+/// The 27B's MTP draft head (`mtp-4bit.safetensors` beside the checkpoint); its norms hold 1 + w, as the 35B's do.
+pub const Mtp = struct { norm_embed: Tensor, norm_hidden: Tensor, fc: Linear, layer: Layer, norm: Tensor };
+
+/// The draft head's file, beside the checkpoint's shards (as CUDA's 35B loader names it).
+pub const mtp_file = "mtp-4bit.safetensors";
+
 pub const Weights = struct {
     allocator: std.mem.Allocator,
     layers: []Layer,
     embed: projection.Triple,
     norm: Tensor,
     head: Linear,
+    /// The draft head, once loadMtp read it; embed and head stay the target's.
+    mtp: ?Mtp = null,
     owned: std.ArrayList(mtl.Buffer) = .empty,
     runs: std.ArrayList([]projection.Run) = .empty,
 
@@ -259,10 +267,15 @@ const Builder = struct {
     }
 
     fn layer(b: Builder, s: *const cfg.Shard, i: usize) !Layer {
+        var name: [32]u8 = undefined;
+        return b.block(s, try std.fmt.bufPrint(&name, "model.layers.{d}.", .{i}), s.local.kind(i), b.widths.layers[i]);
+    }
+
+    /// One decoder layer under `prefix` (a target layer's, or the draft head's `mtp.layers.0.`) at widths `w`.
+    fn block(b: Builder, s: *const cfg.Shard, prefix: []const u8, kind: cfg.Kind, w: [widths.members]widths.Width) !Layer {
         var arena = std.heap.ArenaAllocator.init(b.allocator);
         defer arena.deinit();
         const a = arena.allocator();
-        const prefix = try std.fmt.allocPrint(a, "model.layers.{d}.", .{i});
         const Name = struct {
             fn full(allocator: std.mem.Allocator, p: []const u8, leaf: []const u8) ![]const u8 {
                 return std.mem.concat(allocator, u8, &.{ p, leaf });
@@ -270,12 +283,11 @@ const Builder = struct {
         };
         const c = s.local;
         const g = s.global;
-        const w = b.widths.layers[i];
         const M = widths.Member;
         const qkv = s.qkvSpans();
         const qkvRows = [3]usize{ g.k_heads * g.dk, g.k_heads * g.dk, g.gdnValueDim() };
         const convRows = s.convSpans();
-        const mixer: @FieldType(Layer, "mixer") = switch (c.kind(i)) {
+        const mixer: @FieldType(Layer, "mixer") = switch (kind) {
             .linear => .{ .linear = .{
                 .qkv = try b.blocks(try Name.full(a, prefix, "linear_attn.in_proj_qkv"), g.gdnQkvDim(), g.hidden, w[@backingInt(M.qkv)], &qkv, &qkvRows),
                 .zba = try b.linear(&.{
@@ -388,6 +400,35 @@ pub fn load(allocator: std.mem.Allocator, device: mtl.Device, checkpoint: *const
     const head = try b.linear(&.{.{ .module = "lm_head", .n = g.vocab, .w = ws.head, .span = s.vocabRows() }}, g.hidden);
     if (device.tensorUnits()) try laneOrder(allocator, device, layers, head);
     return .{ .allocator = allocator, .layers = layers, .embed = embed, .norm = norm, .head = head, .owned = owned, .runs = runs };
+}
+
+/// The draft head from `checkpoint`, whose `mtp.*` tensors were added with `repacked` deferral; one rank, 4-bit g64.
+pub fn loadMtp(w: *Weights, device: mtl.Device, checkpoint: *const cp.Checkpoint, s: *const cfg.Shard) !void {
+    if (s.ranks != 1) return error.MtpNeedsOneRank;
+    if (s.local.moe()) return error.MtpNeedsDenseModel;
+    const c = s.local;
+    const prefix: []const u8 = if (checkpoint.has("language_model.mtp.norm.weight")) "language_model." else if (checkpoint.has("mtp.norm.weight")) "" else return error.MissingMtpHead;
+    var stage = cp.Stage{ .device = device };
+    defer stage.deinit();
+    const ws: widths.Widths = .{ .allocator = w.allocator, .layers = &.{}, .embed = widths.uniform, .head = widths.uniform };
+    const b = Builder{ .allocator = w.allocator, .device = device, .checkpoint = checkpoint, .prefix = prefix, .owned = &w.owned, .stage = &stage, .runs = &w.runs, .widths = &ws };
+    const four: [widths.members]widths.Width = @splat(widths.uniform);
+    const head: Mtp = .{
+        .norm_embed = try b.tensor("mtp.pre_fc_norm_embedding.weight", .bf16, &.{c.hidden}),
+        .norm_hidden = try b.tensor("mtp.pre_fc_norm_hidden.weight", .bf16, &.{c.hidden}),
+        // the input is [norm_embed(embed(token)), norm_hidden(hidden)]: embedding first, as the file's fc was trained
+        .fc = try b.linear(&.{.{ .module = "mtp.fc", .n = c.hidden, .w = widths.uniform }}, 2 * c.hidden),
+        .layer = try b.block(s, "mtp.layers.0.", .attention, four),
+        .norm = try b.tensor("mtp.norm.weight", .bf16, &.{c.hidden}),
+    };
+    if (device.tensorUnits()) {
+        var jobs: std.ArrayList(lane.Order) = .empty;
+        defer jobs.deinit(w.allocator);
+        const t = head.layer.mixer.attention;
+        for ([_]Linear{ head.fc, t.q, t.kv, t.out, head.layer.gu, head.layer.down }) |p| try regJobs(w.allocator, &jobs, p);
+        try lane.regOrder(device, jobs.items);
+    }
+    w.mtp = head;
 }
 
 /// Tensor-unit projections leave load in lane_projection.reg_layout, the order quant_gpu's reg kernel reads.
