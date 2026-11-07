@@ -10,11 +10,7 @@ inline void tf_exl3_prefill_body(threadgroup half* wx, const device half* x, con
   if (a.indexed && tile_expert >= a.experts) return;
   const TfExl3DigJob job = tf_exl3_dig_job<CG>(trellis, a, routes, descriptors, rb, nb, trows);
   const short2 home = frag_home(ushort(lane));
-  // Four warps decode a sixty-four-column group; a threadgroup with more warps a group than that splits the sixteen
-  // states of each lane between them instead of leaving those warps to wait at the barrier. The warps decoding one
-  // sixteen-column block. With Rpg row groups a warp (the wide form's thirty-two-row simdgroup) the block is decoded
-  // by one warp, so the lane still owns eight states and still reads eight bits a weight -- the tile's height and the
-  // traffic per weight are decoupled.
+  // Four warps decode a sixty-four-column group.
   constexpr uint wpg = RG / (4u * Rpg);          // warps decoding one column group
   constexpr uint states = 8u / wpg;              // consecutive states a lane owns
   const uint gwarp = tid / 32u, group = gwarp / wpg, wg = gwarp % wpg;
@@ -23,18 +19,12 @@ inline void tf_exl3_prefill_body(threadgroup half* wx, const device half* x, con
   const bool decodes = group < 4u * CG and nb + hg + h * 16u < a.n;
   const uint words = 4 * job.halves;
   const uint wi0 = tf_exl3_map_for(p0, job.halves) & 63u;
-  // The Fast path's cursor is the shared walk; with F6 the funnel path is the only one, and the cursor arrays it
-  // does not read stay uncomputed, because they would be live registers across the whole k loop.
+  // The Fast path's cursor is the shared walk; with F6 the funnel path is the only one.
   TfExl3DigWindows walk;
   if (Fast) walk = tf_exl3_dig_windows<states, CG, 64u * CG>(p0, job.halves, hg, h, !F6);
   // This SIMDgroup's row groups (Rpg of them) and its column group.
   const uint sgr = Rpg * (sg % (RG / Rpg)), sgc = sg / (RG / Rpg);
-  // The routed tile's padded rows need no multiply. Each expert's block is padded to sixty-four rows (the padding
-  // rows carry the sentinel expert id), and a warp owns sixteen rows of the tile, so a warp reads its own sixteen
-  // route ids and skips the multiply when they are all padding. The decode stays: the other warps read the whole
-  // sixty-four-column tile. The real rows' values, their order and the k order are our own single-buffer body's, so the reply
-  // is bit-identical. The skip is per sixteen-row group, so a warp that owns two groups (the shape) still multiplies
-  // the real one. The mask keeps the per-group answer in a scalar (no local memory).
+  // The routed tile's padded rows need no multiply.
   uint real_mask = (1u << Rpg) - 1u;
   if (SkipPad and a.indexed != 0) {
     real_mask = 0u;
@@ -58,8 +48,7 @@ inline void tf_exl3_prefill_body(threadgroup half* wx, const device half* x, con
     lo1[r] = frag<float>(0);
     hi1[r] = frag<float>(0);
   }
-  // The four stream words a block needs are loaded a block early: issued before the barrier, their latency overlaps
-  // the multiply and the next block's decode instead of stalling at the top of every k block.
+  // The four stream words a block needs are loaded a block early: issued before the barrier.
   uint p0v = 0, p1v = 0, p2v = 0, p3v = 0;
   if (Fast and decodes) {
     const device ushort* tile0 = reinterpret_cast<const device ushort*>(job.trellis + ulong(nb / 16 + hg / 16u + h) * job.tile_n_stride);
@@ -72,15 +61,13 @@ inline void tf_exl3_prefill_body(threadgroup half* wx, const device half* x, con
     p3v = tf_exl3_word(tile0, a3);
   }
   for (uint kb = 0; kb < a.k; kb += 16) {
-    // One thread owns 8 consecutive states of one 16x16 tile. The bit cursor advances by a half-width a state, so it
-    // rolls forward with one add and one conditional subtract instead of recomputing the map formula.
+    // One thread owns 8 consecutive states of one 16x16 tile.
     if (decodes) {
       {
         const device ushort* tile = reinterpret_cast<const device ushort*>(
             job.trellis + ulong(kb / 16) * job.tile_k_stride + ulong(nb / 16 + hg / 16u + h) * job.tile_n_stride);
         if (Funnel and (F6 or job.halves == 6) and (states == 8 or states == 4)) {
-          // Two words a lane: the funnel holds the lane's eight windows (three bits apart), so the state's window is
-          // one shift and one mask from the funnel, with no cursor and no select chain.
+          // Two words a lane: the funnel holds the lane's eight windows (three bits apart).
           const uint nkb = kb + 16;
           const uint w0 = p0v, w1 = p1v;
           if (nkb < a.k) {
@@ -175,10 +162,7 @@ inline void tf_exl3_prefill_body(threadgroup half* wx, const device half* x, con
   }
   const int r0 = int(rb + sgr * 16);
   const int c0 = int(nb + sgc * 64u);
-  // `sums` is the whole [rows, n] buffer and frag_put_in indexes it absolutely (rr, cc), so the bounds must be
-  // absolute too: the last live row is rb + rows_here and the last live column is nb + cols_here. The relative counts
-  // (rows_here - sg*16, cols_here) left every row past 32 and every column past 16 unwritten, which is what made this
-  // kernel's answers wrong.
+  // `sums` is the whole [rows, n] buffer and frag_put_in indexes it absolutely (rr, cc).
   TF_UNROLL
   for (uint r = 0; r < Rpg; ++r) {
     if (group_live[r]) {
@@ -191,9 +175,7 @@ inline void tf_exl3_prefill_body(threadgroup half* wx, const device half* x, con
 }
 
 
-// Double-buffered prompt body: the next k block decodes into the tile the multiply is not reading, and the multiply
-// is issued before that decode, so the tensor units and the codebook ALU are in flight together. One barrier a block
-// instead of two; the even-halves Fast cursor is the only path doubled (the shipped body covers the rest).
+// Double-buffered prompt body: the next k block decodes into the tile the multiply is not reading.
 template <uint RG, uint CG, bool DoDecode, uint Mmas, bool UseTable, bool Funnel = false, uint Rpg = 1>
 inline void tf_exl3_prefill_body_db(threadgroup half* wx, const device half* x, const device uchar* trellis,
                                     device float* sums, constant TfExl3Args& a, const device uint* routes,
@@ -206,16 +188,14 @@ inline void tf_exl3_prefill_body_db(threadgroup half* wx, const device half* x, 
   if (a.indexed && tile_expert >= a.experts) return;
   const TfExl3DigJob job = tf_exl3_dig_job<CG>(trellis, a, routes, descriptors, rb, nb, trows);
   const short2 home = frag_home(ushort(lane));
-  // With Rpg row groups a SIMDgroup (a SIMDgroup owns thirty-two rows in the wide tile), the warps decoding one column
-  // group are RG / (4 * Rpg) and a lane owns 8 / that many states. Rpg = 1 is the single-row-group tile, bit for bit.
+  // With Rpg row groups a SIMDgroup (a SIMDgroup owns thirty-two rows in the wide tile).
   constexpr uint wpg = RG / (4u * Rpg);
   constexpr uint states = 8u / wpg;
   const uint gwarp = tid / 32u, group = gwarp / wpg, wg = gwarp % wpg;
   const uint h = group % 4u, hg = (group / 4u) * 64u;
   const uint p0 = (wg * 32u + tid % 32u) * states;
   const bool decodes = group < 4u * CG and nb + hg + h * 16u < a.n;
-  // The funnel is admissible where the lane's run fits two 32-bit words: halves = 6 (stride 3) with four or eight
-  // states, and halves = 8 (stride 4) with four states. Everything else keeps the cursor path.
+  // The funnel is admissible where the lane's run fits two 32-bit words: halves = 6.
   const bool use_funnel = Funnel and ((job.halves == 6u and (states == 8u or states == 4u)) or
                                       (job.halves == 8u and states == 4u));
   if ((job.halves & 1u) != 0 or job.halves > 16) {

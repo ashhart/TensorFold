@@ -13,8 +13,7 @@ pub const Pipelines = struct {
     dense_col: mtl.Pipeline,
     gate_tree: mtl.Pipeline,
     gate_tree4: mtl.Pipeline,
-    /// The wide gate -- eight rows and four columns a threadgroup, the tiles staged in threadgroup memory. The
-    /// order is the shipped one's, so the logits are bit-identical.
+    /// The wide gate -- eight rows and four columns a threadgroup, the tiles staged in threadgroup memory.
     gate_tree8: mtl.Pipeline,
     pub fn load(device: mtl.Device) !Pipelines {
         const pool = mtl.objc.Pool.push();
@@ -57,8 +56,7 @@ pub const Pipelines = struct {
         p.gate_tree8.deinit();
     }
 };
-/// The fused boundary (kernels/metal/deepseek_v41/hc_boundary.metal): expand+mix+squares in one pass over
-/// the streams, then the split with the lagged collapse and the norm in one threadgroup a row.
+/// The fused boundary (kernels/metal/deepseek_v41/hc_boundary.metal): expand+mix+squares in one pass over the streams.
 pub const BoundaryPipelines = struct {
     expand_mix: mtl.Pipeline,
     mix_part: mtl.Pipeline,
@@ -66,8 +64,7 @@ pub const BoundaryPipelines = struct {
     plain: mtl.Pipeline,
     /// The launch-overhead probe (a dependent, work-free dispatch).
     probe: mtl.Pipeline,
-    /// The INDEPENDENT form of the same probe (each dispatch its own sink buffer, so the chain carries no
-    /// dependency between the probe dispatches) and the sinks it writes into.
+    /// The INDEPENDENT form of the same probe.
     probe_indep: mtl.Pipeline,
     probe_sinks: [64]mtl.Buffer,
     pub fn load(device: mtl.Device) !BoundaryPipelines {
@@ -115,8 +112,7 @@ pub const BoundaryPipelines = struct {
 pub const boundary_width: u32 = 5120;
 pub const boundary_slices: u32 = 20;
 pub const Boundary = struct { rows: u32, expand: bool, mixes: bool = true, eps: f32, hc_eps: f32, iters: u32 };
-/// One boundary: expand the pending branch into `x_new` (or the mixes of `x_old` alone), then the split with
-/// `pre_in`'s lagged collapse, `norm`'s weight and this boundary's coefficients out.
+/// One boundary: expand the pending branch into `x_new` (or the mixes of `x_old` alone).
 pub fn encodeBoundary(e: mtl.ComputeEncoder, p: *const BoundaryPipelines, d: Boundary, v: anytype) void {
     const expand_passes: u32 = if (std.c.getenv("TF_DSV41_DOUBLE_HC_EXPAND") != null) 2 else 1;
     for (0..expand_passes) |_| {
@@ -130,12 +126,7 @@ pub fn encodeBoundary(e: mtl.ComputeEncoder, p: *const BoundaryPipelines, d: Bou
             e.dispatchGroups(.{ .width = 20, .height = d.rows }, .{ .width = 256 });
         }
     }
-    // THE LAUNCH-OVERHEAD PROBE. N work-free dispatches on the boundary's own critical path: the slope against N is
-    // the GPU's dispatch latency, the piece every glue fusion would save. TF_DSV41_HC_PROBE_THREADS sweeps the
-    // probe's threadgroup size, so the setup cost's shape (the mHC's split runs 1024 threads on ONE threadgroup) is
-    // priced too. TF_DSV41_HC_PROBE_INDEP=1 gives each probe dispatch its OWN sink buffer, so the probe dispatches
-    // carry no dependency between them: the difference between the two forms is the DEPENDENT-dispatch latency (the
-    // part only a fold removes).
+    // THE LAUNCH-OVERHEAD PROBE.
     if (probeDispatches()) |n| {
         if (probeIndependent()) {
             e.setPipeline(p.probe_indep);
@@ -204,8 +195,7 @@ pub fn encodeRms(e: mtl.ComputeEncoder, p: *const Pipelines, stream: View, inv: 
     e.dispatchGroups(mtl.Size.of(d.rows, 1, 1), mtl.Size.of(512, 1, 1));
 }
 pub const MixDense = extern struct { rows: u32, k: u32, n: u32, x_stride: u32 };
-/// FP32 mixes[rows,24] = stream[rows,20480] @ projection[24,20480]: one threadgroup a column, so the weight
-/// matrix is read coalesced instead of by a handful of lanes.
+/// FP32 mixes[rows,24] = stream[rows,20480] @ projection[24,20480]: one threadgroup a column.
 pub fn encodeMixDense(e: mtl.ComputeEncoder, p: *const Pipelines, x: View, w: View, y: View, d: MixDense) void {
     e.setPipeline(p.mix_dense);
     bind(e, .{ x, w, y });
@@ -214,8 +204,7 @@ pub fn encodeMixDense(e: mtl.ComputeEncoder, p: *const Pipelines, x: View, w: Vi
 }
 
 pub const ColDense = extern struct { rows: u32, k: u32, n: u32, x_stride: u32, bf16_w: u32 };
-/// A narrow projection one threadgroup a column; the generic dense gives `n/16` threadgroups, which starves
-/// a row-1 call of the bandwidth the weight matrix needs.
+/// A narrow projection one threadgroup a column; the generic dense gives `n/16` threadgroups.
 pub fn encodeColDense(e: mtl.ComputeEncoder, p: *const Pipelines, x: View, w: View, y: View, d: ColDense) void {
     e.setPipeline(p.dense_col);
     bind(e, .{ x, w, y });

@@ -1,12 +1,4 @@
 //! The mixed routing's combine order against an FP64 ideal (STATUS.md item 4, class 4).
-//!
-//! `dsv41_combine` sums the six routed down slots by ascending expert ID in FP32 and then adds the shared
-//! row, with the result rounded once to BF16 (ops.metal; "Sum six weighted down slots by ascending expert
-//! ID in FP32, then shared; final BF16, invalid IDs yield NaN"). Nothing in the reference suite drove that
-//! operator: `operator_moe.zig` compares the native MoE against same-inputs diagnostics from the
-//! `tf-dsv41-run` CLI and asserts nothing. This case pins the order the way the split cases pin theirs —
-//! the GPU must reproduce the documented order bit for bit after BF16, and both must sit at the FP32 level
-//! against the FP64 ideal — and it checks the invalid-ID contract (NaN) as well.
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");

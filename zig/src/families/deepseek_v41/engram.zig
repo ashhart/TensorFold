@@ -174,9 +174,7 @@ pub fn encodeCommit(e: mtl.ComputeEncoder, p: *const Pipelines, ids: View, token
     e.barrier();
 }
 
-/// The host-side hash pass. The same integer hash and the same bounded history as the `hash_ids`/`commit` kernels,
-/// computed where the ids are consumed: a decode-sized window no longer pays a command buffer + wait before its
-/// rows can be staged. `TF_DSV41_CPU_HASH=0` restores the GPU pass (the control).
+/// The host-side hash pass.
 pub fn encodeHashHost(history: View, ids: View, token_map: View, out_0: View, out_1: View, tokens: u32) !void {
     if (tokens == 0) return error.EmptyEngramChunk;
     try ids.requireRows(tokens, 1, 1, 4);
@@ -186,8 +184,7 @@ pub fn encodeHashHost(history: View, ids: View, token_map: View, out_0: View, ou
     const tail: [*]const i32 = @ptrCast(@alignCast(hb));
     const available = std.mem.readInt(u32, hb[12..16], .little);
     if (available > 3) return error.InvalidEngramMetadata;
-    // The GPU hashes both layers before its single commit, so both layers see the SAME pre-chunk
-    // history; each advances its own copy and the record takes the chunk's single advance.
+    // The GPU hashes both layers before its single commit, so both layers see the SAME pre-chunk history.
     const start = hash.History{ .tail = .{ tail[0], tail[1], tail[2] }, .position = available };
     const idp: [*]const u32 = @ptrCast(@alignCast(ids.buffer.contents() + ids.offset));
     const map = hash.TokenMap{ .bytes = (token_map.buffer.contents() + token_map.offset)[0 .. hash.raw_vocab * 4] };
@@ -204,9 +201,7 @@ pub fn encodeHashHost(history: View, ids: View, token_map: View, out_0: View, ou
     std.mem.writeInt(u32, hb[12..16], @intCast(@min(3, advanced.position)), .little);
 }
 
-/// The ids a one-token host hash would produce from the record AS IT STANDS, without advancing it. `proposeTokens`
-/// knows the pending token before its own forward runs; the next verify's hash pass is what consumes that row, so
-/// warming its pages now overlaps the page-in with the drafter's GPU window.
+/// The ids a one-token host hash would produce from the record AS IT STANDS, without advancing it.
 pub fn peekHashHost(history: View, token_map: View, pending: u32, out: *[2][hash.columns]u32) !void {
     try token_map.require(hash.raw_vocab * 4, 4);
     try history.require(history_bytes, 4);

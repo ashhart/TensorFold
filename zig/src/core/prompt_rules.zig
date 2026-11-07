@@ -25,15 +25,10 @@ pub const Rules = struct {
     /// Keep the prompt's last page for a later turn whose history it did not name (unpaged: last chunk, none named).
     tail: bool = false,
     /// A tail state's position: the pass's last chunk end rounded down to this many rows (1: the exact end).
-    /// A resumed pass's chunk starts here, so its rows must sit in the same tile lanes a fresh pass gives them.
     tail_align: u32 = 1,
-    /// Also keep a state at the pass's own end, so a later turn whose new rows are a tensor-tile chunk prefills
-    /// exactly those rows instead of the tile tail's 128 behind it. Only kept when this pass's last chunk kept the
-    /// class a fresh pass gives the same rows; `find` re-checks the next turn's class.
+    /// Also keep a state at the pass's own end.
     end_mark: bool = false,
-    /// A pass may SNAPSHOT the tail mark inside the chunk that runs past it -- the backend keeps the window ring,
-    /// the taps and the Engram history at the mark -- instead of cutting a second forward there. Only when the tail
-    /// piece is a tensor tile (>= 64 rows): the merged chunk is then the same kernel class.
+    /// A pass may SNAPSHOT the tail mark inside the chunk that runs past it -- the backend keeps the window ring.
     tail_snap: bool = true,
     /// A resumed pass also snapshots the tail mark (false: it cuts at the mark, as a fresh pass does).
     resumed_tail: bool = true,

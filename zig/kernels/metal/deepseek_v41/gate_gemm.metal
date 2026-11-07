@@ -1,5 +1,4 @@
-// The router gate's prefill GEMMs on the M5 tensor unit: the prefill block plus the fp32-destination entry that
-// the route reads, so its logits never take the bf16 round on the way out.
+// The router gate's prefill GEMMs on the M5 tensor unit.
 #include <metal_stdlib>
 using namespace metal;
 typedef bfloat bfloat16_t;
@@ -204,8 +203,7 @@ inline void gemm_splitk_sum(const device float* C, device O* D, const device int
   tfp::gemm_nax<bfloat16_t, false, true, false, true, false, 64, 128, 256, 2, 4>(A, B, D, P, threadgroup_position_in_grid, simdgroup_index_in_threadgroup, thread_index_in_simdgroup);
 
 }
-// The same n_t_n_t_n block with an fp32 destination, so a consumer that
-// reads fp32 (the router gate) takes the tensor-unit GEMM without the bf16 round. Ties A/B to bf16, D to float.
+// The same n_t_n_t_n block with an fp32 destination, so a consumer that reads fp32.
 [[max_total_threads_per_threadgroup(256)]]
 [[kernel]] void custom_kernel_tf_gemm_nax_bf16_f32out_n_t_n_t_n_64_128_256_2_4_bfloat16_t_bfloat16_t_int32_t_float(
   const device bfloat16_t* A [[buffer(0)]],

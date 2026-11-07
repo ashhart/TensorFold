@@ -112,10 +112,7 @@ pub fn idealRsqrt(x: f32) f32 {
 pub fn rms(x: []const u16, weight: Tensor, eps: f32, out: []u16) void {
     rmsOf(f32, x, weight, eps, out);
 }
-/// The per-head UNWEIGHTED query RMS arm (the diagnostic form wq_a -> q_norm -> wq_b -> per-head RMS -> rope;
-/// a pure RMS, no weight cell). The release's Attention.forward normalizes the qr latent once, before wq_b, so
-/// this arm is not the shipped path. The same boundary contract as rmsOf: the FP32 mean
-/// projection and the ideal rsqrt for the FP32 chain, the wide FP64 mean and rsqrt for the FP64 one.
+/// The per-head UNWEIGHTED query RMS arm.
 pub fn rmsUnweighted(comptime T: type, x: []const u16, eps: f32, out: []u16) void {
     @setFloatMode(.strict);
     var sum: f64 = 0;
@@ -320,8 +317,7 @@ pub fn ropeFrequency(index: usize, theta: f32, original: u32, factor: f32, beta_
 }
 pub fn rope(x: []u16, position: usize, compressed: bool, inverse: bool, c: Config) void {
     for (0..32) |i| {
-        // The flat config types rope constants as f64; ropeFrequency takes f32 and was written against an f32
-        // config, so these conversions restore the reference's own types rather than changing its arithmetic.
+        // The flat config types rope constants as f64; ropeFrequency takes f32 and was written against an f32 config.
         const frequency = ropeFrequency(i, @floatCast(if (compressed) c.rope.compress_theta else c.rope.theta), if (compressed) @as(u32, @intCast(c.rope.original_max_positions)) else 0, @floatCast(c.rope.factor), @floatCast(c.rope.beta_fast), @floatCast(c.rope.beta_slow));
         const angle: f32 = @as(f32, @floatFromInt(position)) * frequency;
         // The engine evaluates cos/sin on an f64 angle and narrows once (rope.zig:75).

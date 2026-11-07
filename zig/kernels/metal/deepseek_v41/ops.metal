@@ -75,9 +75,7 @@ kernel void dsv41_dense_col1(const device uchar* x [[buffer(0)]], const device u
   }
 }
 
-// The one-column dot with the weight dtype resolved at compile time and four k-steps of loads hoisted. The
-// dense_add sequence is the shipped one (lane, lane+32, lane+64, lane+96, ...), so the output is bit-identical;
-// only the loads move ahead of the adds. The caller picks k % 128 == 0.
+// The one-column dot with the weight dtype resolved at compile time and four k-steps of loads hoisted.
 inline float dsv41_hf(ushort u) { return float(as_type<half>(u)); }
 #define DSV41_DENSE_COL1_SPEC(NAME, LOADW) \
 kernel void NAME(const device uchar* x [[buffer(0)]], const device uchar* w [[buffer(1)]], \
@@ -235,8 +233,7 @@ kernel void dsv41_copy(const device ushort* x [[buffer(0)]], device ushort* y [[
   y[ulong(i.y) * d.y_stride + i.x] = x[ulong(i.y) * d.x_stride + i.x];
 }
 
-// The draft chain's Markov step (the port's ds_markov): row `step`'s logits plus the rank-256 bias
-// dot(embed[token before], head[vocab]); each threadgroup's best (value, id) into PART.
+// The draft chain's Markov step (the port's ds_markov).
 struct MarkovArgs { int vocab; int rank; int step; int pad; };
 static_assert(sizeof(MarkovArgs) == 16, "MarkovArgs must mirror ops.zig's Markov");
 kernel void dsv41_markov(const device float* LOGITS [[buffer(0)]], const device ushort* EMB [[buffer(1)]],
@@ -290,8 +287,7 @@ kernel void dsv41_markov_pick(const device float2* PART [[buffer(0)]], device ui
   IDS[n_step.y + 1] = uint(mi);
 }
 
-// F16 -> BF16, round to nearest even: the bridge the tensor-unit GEMM needs when a pack stores a gate F16
-// (gemm_nax binds A, B and D to one element type). One element a thread.
+// F16 -> BF16, round to nearest even: the bridge the tensor-unit GEMM needs when a pack stores a gate F16.
 kernel void dsv41_f16_to_bf16(const device ushort *x [[buffer(0)]], device ushort *y [[buffer(1)]],
                               constant uint &n [[buffer(2)]], uint i [[thread_position_in_grid]]) {
   if (i >= n) return;
@@ -299,9 +295,7 @@ kernel void dsv41_f16_to_bf16(const device ushort *x [[buffer(0)]], device ushor
   y[i] = ushort((u + 0x7fffu + ((u >> 16) & 1u)) >> 16);
 }
 
-// BF16 -> F16, the exact widening of a bf16 significand into f16's 11 bits (f16's narrower exponent is the only
-// place a value can move). The f16 router-gate GEMM needs both operands one element type, and the pack's gate is
-// f16: converting the activation keeps the weight's own 10 bits instead of rounding the weight to bf16.
+// BF16 -> F16, the exact widening of a bf16 significand into f16's 11 bits.
 kernel void dsv41_bf16_to_f16(const device ushort *x [[buffer(0)]], device ushort *y [[buffer(1)]],
                               constant uint &n [[buffer(2)]], uint i [[thread_position_in_grid]]) {
   if (i >= n) return;

@@ -44,37 +44,29 @@ pub const Backend = struct {
     verify_len: []u32,
     /// The drafts the lookup proposes for each slot's next window (host tokens, verified like GPU-held ones).
     held: [][]u32,
-    /// The trained proposer's last proposal, so the round runs the draft forward ONCE. The lane core calls both
-    /// draft and tree a round, and each of them ran proposeTokens -- the draft's own forward (its three blocks, the
-    /// conditioning and the head) twice, which is a quarter of the round's cost for one set of drafts. The cache is
-    /// keyed by the pending token the proposal was made for, so a different pending still runs the forward.
+    /// The trained proposer's last proposal, so the round runs the draft forward ONCE.
     mtp_cache: [32]?MtpCache = @splat(null),
     /// Each slot's committed tokens after the prompt, for the lookup drafter's matches.
     history: []std.ArrayListUnmanaged(u32),
     /// What the last verify sampled per row, so a rejected window's re-feed can be compared with it.
     last_sampled: [8]u32 = @splat(0),
-    /// The depth each slot's last round RAN -- the adaptive policy's state (the yield's scale depends on the depth
-    /// the round ran at, so the policy must know it).
+    /// The depth each slot's last round RAN -- the adaptive policy's state.
     last_depth: []u32,
     /// Consecutive rounds the up-condition has held, for the confirmed switch-up.
     up_streak: []u32,
-    /// The last window's kept/offered, for the round-acceptance signal. `keep_pending` says a partial keep happened
-    /// since the last verify; a full window (no keep call) means 1.0.
+    /// The last window's kept/offered, for the round-acceptance signal.
     keep_pending: []bool,
     keep_ratio: []f64,
-    /// The ratchet's per-slot state -- the request has fallen back to the shallow window, and the consecutive deep
-    /// rounds below the crossover that put it there.
+    /// The ratchet's per-slot state -- the request has fallen back to the shallow window.
     shallow: []bool,
     low_streak: []u32,
-    /// The drafting governor's per-slot state -- the rounds this request has completed, the tokens they committed,
-    /// the window the last round ran, what its keep took, and whether drafting is now off.
+    /// The drafting governor's per-slot state -- the rounds this request has completed, the tokens they committed.
     gov_rounds: []u32,
     gov_committed: []u32,
     gov_rows: []u32,
     gov_kept: []u32,
     gov_off: []bool,
-    /// The current window's presence/frequency counts (the reply before it plus the row's path), and one row's
-    /// scratch copy because the model's logits slice is const.
+    /// The current window's presence/frequency counts (the reply before it plus the row's path).
     pen_counts: std.AutoHashMapUnmanaged(u32, u32) = .empty,
     pen_row: []f32 = &.{},
 
@@ -173,10 +165,7 @@ pub const Backend = struct {
     pub fn facts(b: *const Backend) lanes.Model {
         const rows = b.model.workspace.plan.rows;
         return .{
-            // The widest window whose rows reproduce one-token steps: the split dispatch's row invariant
-            // covers rows <= 8 (a wider window switches the dense calls to the matmul path and its own k
-            // order). Claiming the workspace's width here let the planner build windows it cannot verify
-            // exactly -- and at depth >= 10 the draft table segfaults -- so the model states what it can do.
+            // The widest window whose rows reproduce one-token steps.
             .exact_width = @min(rows, 8),
             .first_copy_rows = 1,
             .mtp = lookupDepth() != 0,
@@ -188,8 +177,7 @@ pub const Backend = struct {
             .window_costs = &.{},
             .streams_exact = true,
             .hidden_rows = true,
-            // The served lanes' exactness contract: a shared round runs every stream's plain window. The
-            // drafter's capture and ring are single buffers, so a shared round cannot draft.
+            // The served lanes' exactness contract: a shared round runs every stream's plain window.
             .shared_plain = true,
             .batch_rows = rows,
             .max_streams = @intCast(b.model.lanes),
@@ -220,11 +208,7 @@ pub const Backend = struct {
         return null;
     }
 
-    /// The prefill's first draw and the queue's next (the queue is unreachable for this family: gpu_tokens is
-    /// false, so the lanes never pipeline). A sampled stream samples HERE too -- the first token used to be the
-    /// greedy argmax under any temperature, which is the one draw the owner's echo-prone long system prompts could
-    /// seed a degenerate turn with. The key is the drawn token's absolute position (drawFirst passes prompt_len;
-    /// queueNext passes the new cache length), the same key verify's rows use.
+    /// The prefill's first draw and the queue's next.
     pub fn draw(b: *Backend, slot: u32, s: *Stream, position: u64) !u32 {
         if (std.c.getenv("TF_DSV41_DRAFT_DEBUG") != null) std.log.info("draw: slot {d} pos {d}", .{ slot, b.model.caches[slot].position });
         const row = b.model.workspace.logits(1);
@@ -257,10 +241,7 @@ pub const Backend = struct {
         b.history[i].clearRetainingCapacity();
         s.cached = 0;
         var at: u32 = 0;
-        // A KEPT PROMPT STATE RESUMES THE PASS WHERE IT STOOD. The store hands the family's copy of the state after
-        // `s.reuse.at` tokens; restoring it (the whole cache, its cursor, the Engram history and the taps) and
-        // starting the loop there is the same state a fresh pass would stand on, so `resumed` equals `fresh` token
-        // for token. A rejected copy falls back to the fresh pass, which is what `reuse_failed` says.
+        // A KEPT PROMPT STATE RESUMES THE PASS WHERE IT STOOD.
         if (s.reuse.saved) |saved| {
             const snap: *ds.Model.Snapshot = @ptrCast(@alignCast(saved));
             const want = s.reuse.at;
@@ -276,11 +257,7 @@ pub const Backend = struct {
             }
         }
         const rows = b.model.workspace.plan.rows;
-        // THE TAIL MARK IS SNAPSHOTTED INSIDE THE CHUNK THAT RUNS PAST IT, not cut into a second forward. The mark
-        // is a state, not a barrier: the merged chunk runs [at, end) at the same tensor-tile class, and the model
-        // keeps the window ring, the taps ring and the four-token Engram history at the mark for the copy
-        // (beginSnapTail). A tail in another class (the store leaves snap_at 0 there) keeps today's cut, as does an
-        // env control.
+        // THE TAIL MARK IS SNAPSHOTTED INSIDE THE CHUNK THAT RUNS PAST IT, not cut into a second forward.
         const merge_cold = std.c.getenv("TF_DSV41_SNAP_COLD") == null;
         const snap_at: u32 = if (std.c.getenv("TF_DSV41_NO_TAIL_SNAP") == null and b.model.snapTailAllowed() and (merge_cold or s.reuse.at > 0)) s.reuse.snap_at else 0;
         while (at < prompt.len) {
@@ -306,8 +283,7 @@ pub const Backend = struct {
                 b.model.endSnapTail();
             }
             at = end;
-            // The prompt cache's keep hook, at the chunk end it asked to see. The forward committed and waited, so
-            // the state the family copies is exactly the one standing at `at`.
+            // The prompt cache's keep hook, at the chunk end it asked to see.
             if (s.reuse.hook) |hook| if (std.mem.indexOfScalar(u32, s.reuse.marks, at) != null) hook.at(hook.ptr, s, at);
         }
     }
@@ -370,11 +346,7 @@ pub const Backend = struct {
         return b.ring[handle % RING];
     }
 
-    /// The port's sampled draw: temperature, then top_k, then softmax, min_p, top_p, and a draw from a
-    /// generator keyed at (seed, absolute position). Position keying makes the same (prompt, seed) draw
-    /// the same ids in every window shape, so a drafted stream equals the plain stream at the same seed.
-    /// `top_k` caps at 256 candidates (0: off, keep 256); the shipped default (20) keeps this a single
-    /// pass. The greedy path (temperature 0) never reaches here.
+    /// The port's sampled draw: temperature, then top_k, then softmax, min_p, top_p.
     pub fn sampleRow(logits_row: []const f32, sp: lanes.sampling.Sampling, position: u64) !u32 {
         var best: [256]f32 = undefined;
         var ids: [256]u32 = undefined;
@@ -441,14 +413,9 @@ pub const Backend = struct {
         return ids[0];
     }
 
-    /// The shared-round batch; the one-row windows of a plain shared round are the only admitted shape,
-    /// at most four a forward, and a wider round runs consecutive four-window groups. ON by default -- the served
-    /// shape of several cached conversations is exactly those windows, and the batch is token-identical to solo on
-    /// every lane (The logits, The 256-token cached streams, The 16/16 multi-turn turns). `TF_DSV41_BATCH=0` is the
-    /// same-binary control; any other value (or none) arms it.
+    /// The shared-round batch; the one-row windows of a plain shared round are the only admitted shape.
     var batch_on: ?bool = null;
-    /// The instruments that read a forward's internals take the one-stream path; the batch (and its
-    /// four-window grouping) never runs under them.
+    /// The instruments that read a forward's internals take the one-stream path; the batch.
     pub fn noBatchInstrument() bool {
         return std.c.getenv("TF_DSV41_STAGE_CB") == null and std.c.getenv("TF_DSV41_LAYER_CB") == null and
             std.c.getenv("TF_DSV41_ATTN_PROF") == null and std.c.getenv("TF_DSV41_HID_HASH") == null and

@@ -43,9 +43,7 @@ test "EXL3 dense projection at the drafter's width: the register-only body again
     defer pool.pop();
     const queue = try device.queue();
     defer queue.deinit();
-    // The drafter's own dense shapes, at halves = 8 (its pack width) and its mul1 codebook. The
-    // two-row cases are the ones the flag changes: the register-only MULTI-ROW body serves the two
-    // rows from one weight decode.
+    // The drafter's own dense shapes, at halves = 8 (its pack width) and its mul1 codebook.
     try denseRegisterOnlyRows(device, queue, 5120, 1280, 8, .mul1, 1, 0x51ed_1a2b); // wq_a, one row
     try denseRegisterOnlyRows(device, queue, 5120, 1280, 8, .mul1, 2, 0x51ed_1a2b); // wq_a, two rows
     try denseRegisterOnlyRows(device, queue, 5120, 512, 8, .mul1, 2, 0x2b1a_ed51); // wkv, two rows
@@ -80,8 +78,7 @@ test "EXL3 one-row projection against the float64 oracle" {
     try projectionCase(device, queue, 1024, 128, 8, 0x77aa_1234);
 }
 
-/// The canon hashes could not see this: a split order can differ in the last bits of every logit and still answer
-/// "Paris".
+/// The canon hashes could not see this: a split order can differ in the last bits of every logit and still answer.
 fn splitOrderCase(device: mtl.Device, queue: mtl.Queue, k: usize, n: usize, halves: u8, seed: u64) !void {
     var p = try exl3.Pipelines.loadWith(device, std.testing.allocator);
     defer p.deinit();
@@ -166,8 +163,7 @@ test "the one-row split order reproduces the engine's k-split and reduce bit for
     try splitOrderCase(device, queue, 1024, 128, 8, 0x5eed_0004);
 }
 
-/// The reduce's own order is pinned by the one-row case; what this bounds is the decode kernel's accumulation on
-/// top of it.
+/// The reduce's own order is pinned by the one-row case.
 fn expertSplitCase(device: mtl.Device, queue: mtl.Queue, k: usize, n: usize, halves: u8, seed: u64, rows: usize) !void {
     var p = try exl3.Pipelines.loadWith(device, std.testing.allocator);
     defer p.deinit();
@@ -204,8 +200,7 @@ fn expertSplitCase(device: mtl.Device, queue: mtl.Queue, k: usize, n: usize, hal
     const splits: usize = exl3.knobs.moe_splits;
     const cb = queue.commandBuffer();
     const enc = cb.compute(.serial);
-    // The indexed path reaches its weights through the descriptor, which a tracked command buffer cannot
-    // see, so the test declares them exactly as the engine's residency sets do.
+    // The indexed path reaches its weights through the descriptor, which a tracked command buffer cannot see.
     exl3.useMatrix(enc, matrix);
     try exl3.encodeIndexed(&p, enc, .{
         .descriptors = .{ .buffer = desc_gpu },
@@ -264,6 +259,4 @@ test "the decode expert split-K sits at rounding level against the float64 oracl
     try expertSplitCase(device, queue, 2304, 128, 4, 0x5eed_1003, 4);
 }
 
-// Item 5's roofline (TF_ROOFLINE=1): the engine's grouped prefill shape in isolation — 384 expert tiles of 64 rows
-// through one trellis matrix, timed on the GPU. Item 5's other prerequisite (TF_ROOFLINE_PAIR=1): two dispatches of
-// 384 experts against one of 768, same MACs and same bytes, so only the dispatch granularity differs.
+// Item 5's roofline (TF_ROOFLINE=1): the engine's grouped prefill shape in isolation — 384 expert tiles of 64 rows.

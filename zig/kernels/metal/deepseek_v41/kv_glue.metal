@@ -1,11 +1,4 @@
-// DeepSeek V4.1 served engine: the window KV's RMS norm + RoPE + fp8 cache pack as ONE dispatch, at the
-// pack's own threadgroup geometry (16 threadgroups a row, 256 threads each). Each threadgroup recomputes
-// the row's RMS with the shipped dsv41_rms kernel's reduction order (t and t+256, xor butterfly 16..1,
-// part[8] summed in order) and packs its own 32-value block; the blocks are disjoint, so the norm reads
-// are read-only and there is no cross-threadgroup race. The rope expression is rope.metal's source,
-// bit for bit; the pack expression is kv.metal's dsv41_pack, bit for bit. This translation unit
-// deliberately does NOT set fp contract(off): rope.metal is compiled without it and the rotation must
-// contract (or not) exactly as it does there.
+// DeepSeek V4.1 served engine: the window KV's RMS norm + RoPE + fp8 cache pack as ONE dispatch.
 #include <metal_stdlib>
 using namespace metal;
 

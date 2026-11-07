@@ -22,8 +22,7 @@ pub const KeyTable = struct {
 fn narrow(comptime T: type, x: f64) T {
     return if (T == f32) @as(f32, @floatCast(x)) else x;
 }
-/// Compressor softmax pooling at reference precision T: FP32 is the source contract, FP64 the ideal. A query row's
-/// per-head RMS (the min and the max over the 64 heads).
+/// Compressor softmax pooling at reference precision T: FP32 is the source contract, FP64 the ideal.
 fn headRmsRange(q: []const u16) [2]f64 {
     var mn: f64 = 1e30;
     var mx: f64 = -1e30;
@@ -52,8 +51,7 @@ pub fn poolOf(comptime T: type, kv: [2][]const T, gate: [2][]const T, out: []u16
         o.* = if (T == f32) m.b(pooled) else m.b64(pooled);
     }
 }
-/// The attention's reference state at a chosen precision T. T == f32 is the source contract, bit-identical to the
-/// shipped path; T == f64 is the ideal chain (every reduction class widened).
+/// The attention's reference state at a chosen precision T.
 pub fn StateOf(comptime T: type) type {
     return struct {
         gpa: std.mem.Allocator,
@@ -250,7 +248,7 @@ pub fn StateOf(comptime T: type) type {
             std.mem.sort(u32, self.selected[0..self.selected_len], {}, std.sort.asc(u32));
             if (self.score_probe) |probe| self.reportSelection(probe, layer, position, count);
         }
-        /// The same selection on FP64-ideal scores: same BF16 inputs, no intermediate roundings; pick flips are the signal.
+        /// The same selection on FP64-ideal scores: same BF16 inputs, no intermediate roundings.
         fn idealScores(self: *@This(), a: Attention, count: usize) void {
             @setFloatMode(.strict);
             if (a.indexer == null) return;
@@ -333,11 +331,7 @@ pub fn StateOf(comptime T: type) type {
             self.observe(.qr_norm, &self.qr);
             try projection.applyOf(u16, T, .{ .trellis = a.wq_b }, &self.qr, &self.q, scratch);
             self.observe(.q_projection, &self.q);
-            // The per-head UNWEIGHTED query RMS arm, before the rope (the diagnostic form
-            // wq_a -> q_norm -> wq_b -> per-head RMS -> rope; the release's Attention.forward normalizes the qr
-            // latent once, before wq_b). This arm has no norm here, so its query reaches the softmax with whatever
-            // scale wq_b produced. The chain's OWN per-head RMS, before and after the norm (layer 0 only), so the
-            // two chains' query scales are read off the same ruler.
+            // The per-head UNWEIGHTED query RMS arm, before the rope.
             if (layer == 0) {
                 const before = headRmsRange(self.q[0..32768]);
                 for (0..64) |head| m.rmsUnweighted(T, self.q[head * 512 ..][0..512], c.eps, self.q[head * 512 ..][0..512]);
@@ -396,7 +390,7 @@ pub fn StateOf(comptime T: type) type {
                 @memcpy(snapshot[head * 512 ..][0..512], self.o[head * 512 ..][0..512]);
         }
         pub fn sparseHead(self: *@This(), q: []const u16, window: []const u16, indices: []const i32, sink: f32, out: []u16) void {
-            // The source-contract instance at the chain's precision; mainRow addresses compressed rows at the 640 stride.
+            // The source-contract instance at the chain's precision.
             sparseHeadOf(T, q, .{
                 .window = window,
                 .compressed = self.sources[self.active_owner * self.capacity * 640 ..],

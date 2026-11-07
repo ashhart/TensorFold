@@ -344,7 +344,7 @@ pub const Suite = struct {
         return bad;
     }
 
-    /// The LM head's shape: prefixes, splits, sampled columns against the oracle, glue_rows's bytes; `time` adds timing.
+    /// The LM head's shape: prefixes, splits, sampled columns against the oracle, glue_rows's bytes.
     pub fn head(s: *Suite, io: std.Io, seed: u64, time: bool) !usize {
         const p = s.find(.bf16, .f32) orelse return 0;
         if (!try p.prepare(head_shape, .random, seed)) return error.Refused;

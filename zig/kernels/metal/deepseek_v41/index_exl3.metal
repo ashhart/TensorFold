@@ -4,13 +4,9 @@ using namespace tfp;
 struct Dsv41Index {
     uint rows, heads, width, q_stride, weight_stride, position, ratio, keys, key_stride;
     uint tile_start, tile_width, topk, candidate_topk, block_size, use_candidates, make_candidates;
-    // `layer` and `skip_mask` are the Zig Params' own fields (The removal arms). They are not read here, but they
-    // sit BEFORE `scale`, and leaving them out made `scale` read `layer`'s bits -- a denormal near zero, so every
-    // scaled weight and every score was 0.0 and the heap's ties kept the first 512 positions. The assert keeps the
-    // two declarations in step.
+    // `layer` and `skip_mask` are the Zig Params' own fields (The removal arms).
     uint layer, skip_mask;
-    // 0 = the heap path's per-row score slots (row * tile_width), 1 = the decode select's tile-major ones ((tile *
-    // rows + row) * tile_width, every tile resident).
+    // 0 = the heap path's per-row score slots (row * tile_width), 1 = the decode select's tile-major ones.
     uint score_layout;
     float scale;
 };
@@ -27,8 +23,7 @@ inline const device float *dsv41_score_slot_ro(const device float *scores, const
     return scores + (size_t(tile) * p.rows + row) * p.tile_width;
 }
 
-// The fp32 score's monotone 32-bit image: float order == uint order, so a radix select on it is exact.
-// -0.0f is folded to +0.0f so the two zeros cannot split a tie.
+// The fp32 score's monotone 32-bit image: float order == uint order.
 inline uint dsv41_index_mono(float s) {
     const uint b = as_type<uint>(s == 0.0f ? 0.0f : s);
     return (b & 0x80000000u) ? ~b : (b | 0x80000000u);
@@ -64,8 +59,7 @@ kernel void dsv41_index_score(device const ushort *q [[buffer(0)]], device const
     uint3 g [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
     uint3 tptg [[threads_per_threadgroup]]) {
     const uint warps = tptg.x / 32u, lane = tid % 32u;
-    // The query's scaled per-head weights do not depend on the key, and every warp of a threadgroup scores a
-    // different key: compute them once here instead of once for every key a warp handles.
+    // The query's scaled per-head weights do not depend on the key.
     threadgroup float scaled[64];
     const uint row = g.y;
     if (tid < min(p.heads, 64u))
@@ -92,9 +86,7 @@ kernel void dsv41_index_score(device const ushort *q [[buffer(0)]], device const
     }
     if (lane == 0) *(dsv41_score_slot(scores, p, row, p.tile_start / p.tile_width) + local) = dsv41_bf(dsv41_round(total));
 }
-// The index keys a layer scores, decoded from the packed fp4 cache once into bf16 rows of p.width: the
-// table a tensor-unit score tile stages in threadgroup memory. Same rounding as the scorer's own
-// dsv41_unpack, so a table read and a packed read give the same values.
+// The index keys a layer scores, decoded from the packed fp4 cache once into bf16 rows of p.width.
 kernel void dsv41_index_keys_dense(device const uchar *key [[buffer(0)]], device ushort *dense [[buffer(1)]],
                                    constant Dsv41Index &p [[buffer(2)]], uint i [[thread_position_in_grid]]) {
   const uint total = p.keys * (p.width / 2u);
@@ -106,9 +98,7 @@ kernel void dsv41_index_keys_dense(device const uchar *key [[buffer(0)]], device
   out[1] = ushort(as_type<ushort>(bfloat(dsv41_unpack(row, 2u * n + 1u, p.width, 32, 2))));
 }
 
-// Every visible key is selected: no more compressed keys than the selection keeps, so the picks are the
-// identity in ascending position order -- the same set, in the same order, that the score/heap/sort path
-// returns for those keys. The identity's row bound is the same visible formula the merge uses.
+// Every visible key is selected: no more compressed keys than the selection keeps.
 kernel void dsv41_index_identity(device int *positions [[buffer(0)]], constant Dsv41Index &p [[buffer(1)]],
     uint2 i [[thread_position_in_grid]]) {
     if (i.y >= p.rows || i.x >= p.topk) return;
@@ -144,9 +134,7 @@ kernel void dsv41_index_merge(device const float *scores [[buffer(0)]], device D
         if (score > -INFINITY) dsv41_heap(blocks, p.candidate_topk, {score, int(block)});
     }
 }
-// One thread a row: fill an empty heap from the tile's first keys and publish where to resume, so the
-// parallel filter never starts against a root of -infinity. A layer's first tile used to insert all 4096
-// of its keys on one thread; it now inserts topk and hands the rest to the filter.
+// One thread a row: fill an empty heap from the tile's first keys and publish where to resume.
 kernel void dsv41_index_seed(device const float *scores [[buffer(0)]], device Dsv41Pick *top [[buffer(1)]],
     device Dsv41Pick *candidate [[buffer(2)]], device uint *seed_end [[buffer(3)]],
     constant Dsv41Index &p [[buffer(4)]], uint row [[thread_position_in_grid]]) {
@@ -170,10 +158,7 @@ kernel void dsv41_index_seed(device const float *scores [[buffer(0)]], device Ds
     seed_end[row] = at;
 }
 
-// One thread a key: the merge's scan, in parallel. The order is total (score, then
-// position), so which keys reach the heap does not depend on the order they arrive in and the compacted
-// list needs no ordering of its own. Keys the running worst already beats are dropped here; the insert
-// re-checks anyway, so a permissive filter changes nothing.
+// One thread a key: the merge's scan, in parallel.
 kernel void dsv41_index_filter(device const float *scores [[buffer(0)]], device const Dsv41Pick *top [[buffer(1)]],
     device const Dsv41Pick *candidate [[buffer(2)]], device Dsv41Pick *picks [[buffer(3)]],
     device const uint *seed_end [[buffer(4)]], device atomic_uint *count [[buffer(5)]],
@@ -202,8 +187,7 @@ kernel void dsv41_index_filter(device const float *scores [[buffer(0)]], device 
     if (at < p.tile_width) picks[row * p.tile_width + at] = v;
 }
 
-// The merge's serial part, now only the keys the filter kept (and the candidate-block highs, which are
-// a block a pass and stay here because they are one a tile).
+// The merge's serial part, now only the keys the filter kept.
 kernel void dsv41_index_insert(device Dsv41Pick *top [[buffer(0)]], device const Dsv41Pick *picks [[buffer(1)]],
     device atomic_uint *count [[buffer(2)]], device Dsv41Pick *candidate [[buffer(3)]],
     device const float *scores [[buffer(4)]], constant Dsv41Index &p [[buffer(5)]],
@@ -227,9 +211,7 @@ kernel void dsv41_index_insert(device Dsv41Pick *top [[buffer(0)]], device const
 }
 
 inline void dsv41_sort_positions(device Dsv41Pick *p, uint size) {
-    // Selection is score-ordered; attention sees the reference's ascending position order. Only the valid picks
-    // matter — attention skips an invalid one — so they are compacted first and the sort then costs what the live
-    // keys cost, not what the slots cost.
+    // Selection is score-ordered; attention sees the reference's ascending position order.
     uint valid = 0;
     for (uint i = 0; i < size; ++i) if (p[i].position >= 0) p[valid++] = p[i];
     for (uint i = 1; i < valid; ++i) {
@@ -248,11 +230,7 @@ kernel void dsv41_index_finish(device Dsv41Pick *top [[buffer(0)]], device Dsv41
     if (p.make_candidates) dsv41_sort_positions(candidate + row * p.candidate_topk, p.candidate_topk);
 }
 
-// The finish's PARALLEL form -- a threadgroup a row instead of one THREAD a row. This form stages the picks'
-// positions in threadgroup memory and sorts them with a bitonic sort: the keys are the positions (the invalid ones
-// share the last key, so they land last, where the insertion sort's compaction leaves them), the valid ones are
-// distinct, so the ascending order is the same array the insertion sort produced -- BIT-IDENTICAL, and nothing
-// downstream moves.
+// The finish's PARALLEL form -- a threadgroup a row instead of one THREAD a row.
 kernel void dsv41_index_finish_par(device Dsv41Pick *top [[buffer(0)]], device Dsv41Pick *candidate [[buffer(1)]],
     device int *positions [[buffer(2)]], constant Dsv41Index &p [[buffer(3)]],
     uint row [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]]) {

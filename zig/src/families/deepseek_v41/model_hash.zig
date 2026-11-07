@@ -234,9 +234,7 @@ pub fn stageRows(m: *Model, rows: u32) !void {
             probed = true;
         }
     }
-    // The window's page-ins, only where they pay. The prompt's rows are contiguous and the kernel already
-    // readahead-s them, so the large path is left alone; a single-threaded probe must not be prefetched (its time
-    // is the page-cache test); the warm band never reaches here.
+    // The window's page-ins, only where they pay.
     const pf_start: u64 = if (small and engramPrefetch()) nowNs() else 0;
     // The stage's own major faults, for the HOST_PROF line; the latch below uses the gather's clock.
     const ru0 = std.posix.getrusage(std.posix.rusage.SELF);
@@ -256,8 +254,7 @@ pub fn stageRows(m: *Model, rows: u32) !void {
     const g0: u64 = if (small) nowNs() else 0;
     const misses0: u64 = if (m.host_prof) src.stats.misses else 0;
     if (!small and engramPipeRows(m, rows)) {
-        // The first layer now, the second at its own layer (the GPU runs the earlier layers while that read
-        // happens). Same ids, same bytes, same decode -- only the clock moves.
+        // The first layer now, the second at its own layer (the GPU runs the earlier layers while that read happens).
         try m.stageLayer(rows, 0);
         m.engram_pending = true;
     } else {
@@ -290,11 +287,7 @@ pub fn stageRows(m: *Model, rows: u32) !void {
         }
     }
     if (g0 != 0) {
-        // The latch's signal is the gather's own clock, taken AFTER the prefetch: the fault counters cannot
-        // serve, because a prefetched window's I/O is the madvise call and its reads are then minor faults, so
-        // the page-in hides the very coldness the latch must see. The off-side is delayed three windows:
-        // consecutive decode windows share most of their n-grams, so one resident window between two cold ones is
-        // the norm, not the stream turning warm.
+        // The latch's signal is the gather's own clock, taken AFTER the prefetch: the fault counters cannot serve.
         const gather = nowNs() - (if (w0 != 0) w0 else g0);
         if (gather > 400_000) {
             m.engram_pf_on = true;

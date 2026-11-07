@@ -18,8 +18,7 @@ pub const Pipelines = struct {
     markov_pick: mtl.Pipeline,
     /// The tree's bf16 tensor-unit GEMM for the router gate (TF_DSV41_ROUTE_GEMM): bf16 logits, N = 384.
     gate: ?mtl.Pipeline = null,
-    /// The same gate GEMM with an fp32 destination: the router's own precision, so the picks and weights are the
-    /// shipped path's.
+    /// The same gate GEMM with an fp32 destination: the router's own precision.
     gate_f32: ?mtl.Pipeline = null,
     gate_f16_f32: ?mtl.Pipeline = null,
     /// F16 -> BF16 for a pack whose gate is F16 (the GEMM's operands share one element type).
@@ -39,8 +38,7 @@ pub const Pipelines = struct {
         defer pool.pop();
         var options = mtl.CompileOptions.mlx();
         options.math_functions = .precise;
-        // The router gate's GEMM: the lane's own prefill block with an fp32 destination, nax.h inlined, in the
-        // same library as the ops so one pipeline set covers both.
+        // The router gate's GEMM: the lane's own prefill block with an fp32 destination, nax.h inlined.
         const gemm_text = frags.source(device, std.heap.page_allocator, sources.deepseek_v41_gate_gemm) catch null;
         defer if (gemm_text) |g| std.heap.page_allocator.free(g);
         const text = if (gemm_text) |g| try std.mem.concat(std.heap.page_allocator, u8, &.{ sources.deepseek_v41_ops, g }) else sources.deepseek_v41_ops;
@@ -145,8 +143,7 @@ pub fn encodeDump(e: mtl.ComputeEncoder, p: *const Pipelines, x: View, y: View, 
 }
 
 pub const Gate = struct { rows: u32, k: u32, n: u32 = 384 };
-/// x[rows, k] bf16 @ gate[n, k] bf16 -> y[rows, n] f32 on the tensor units: the same block and k order as
-/// the GEMM above, with an fp32 destination, so the router reads the precision tf-dense-col gives it.
+/// x[rows, k] bf16 @ gate[n, k] bf16 -> y[rows, n] f32 on the tensor units.
 pub fn encodeGateGemmF16F32(e: mtl.ComputeEncoder, p: *const Pipelines, x: View, w: View, y: View, d: Gate) void {
     const pipe = p.gate_f16_f32 orelse return;
     const tn = (d.n + 127) / 128;
@@ -201,8 +198,7 @@ pub fn encodeDense(e: mtl.ComputeEncoder, p: *const Pipelines, x: View, w: View,
     e.setValue(DenseArgs{ .rows = d.rows, .k = d.k, .n = d.n, .groups = d.groups, .x_stride = d.x_stride, .w_stride = d.w_stride, .y_stride = d.y_stride, .x_dtype = @backingInt(d.x_dtype), .w_dtype = @backingInt(d.w_dtype), .y_dtype = @backingInt(d.y_dtype) }, 3);
     e.dispatchGroups(mtl.Size.of((d.n + 15) / 16, d.rows, d.groups), mtl.Size.of(128, 1, 1));
 }
-/// The same arithmetic and the same per-column sums, one column a SIMDgroup (bit-identical). X=bf16, y=bf16 and k %
-/// 128 == 0 take the specialized twin (same sums, loads hoisted); every other shape takes the shipped kernel.
+/// The same arithmetic and the same per-column sums, one column a SIMDgroup (bit-identical).
 pub fn encodeDenseCol(e: mtl.ComputeEncoder, p: *const Pipelines, x: View, w: View, y: View, d: Dense) bool {
     if (!denseColSpecOff() and d.x_dtype == .bf16 and d.y_dtype == .bf16 and d.k % 128 == 0) {
         const spec = if (d.w_dtype == .bf16) p.dense_col_bf16 else if (d.w_dtype == .f16) p.dense_col_f16 else null;

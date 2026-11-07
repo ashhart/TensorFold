@@ -21,8 +21,7 @@ pub const View = struct {
 pub const ScaleFormat = enum { f16, packed_signs };
 pub const Output = enum { bf16, f32 };
 
-/// A prompt-row int8 sidecar: the pre-quantized dense weight in the fp8 body's 16-k x 64-n block order (k*n bytes)
-/// and one f32 scale an output row. `direct` packs bake the rotation in; the others keep it.
+/// A prompt-row int8 sidecar: the pre-quantized dense weight in the fp8 body's 16-k x 64-n block order.
 pub const Int8 = struct {
     weight: View,
     scales: View,
@@ -49,11 +48,9 @@ pub const Matrix = struct {
     /// Byte strides between tiles; zero derives the checkpoint's stored K-major layout.
     tile_k_stride: usize = 0,
     tile_n_stride: usize = 0,
-    /// The prompt-row int8 twin, when a sidecar is loaded. Decode stays the trellis; the prompt
-    /// paths take this only at rows >= 1024.
+    /// The prompt-row int8 twin, when a sidecar is loaded.
     int8: ?Int8 = null,
-    /// Whether that twin was packed pre-rotated (both Hadamards baked in). The matrix carries the fact, so a caller
-    /// that only has the Matrix can pick the one-dispatch form without a model-level flag.
+    /// Whether that twin was packed pre-rotated (both Hadamards baked in).
     int8_direct: bool = false,
 
     pub fn validate(m: Matrix) !void {
@@ -109,17 +106,13 @@ pub const Rows = struct {
     routes: ?Routes = null,
     /// Caller-prepared eight-row tiles, same expert per tile; maxInt(u32) padding must follow valid rows.
     grouped: bool = false,
-    /// Row tile the routed groups were padded for (0: the 64-row default); the prompt tile follows it so that one
-    /// tile is one expert.
+    /// Row tile the routed groups were padded for (0: the 64-row default); the prompt tile follows it.
     tile_rows: u32 = 0,
-    /// The caller wrote this dispatch's rotated input (row-major, k halfs a row) into the scratch base -- the fused
-    /// SwiGLU+rotate pass does -- so rotate_in is skipped and the GEMM reads those rows. `x` is that scratch view.
+    /// The caller wrote this dispatch's rotated input (row-major, k halfs a row) into the scratch base.
     prerotated: bool = false,
-    /// Leave the projection's f32 sums in the scratch for a caller that runs the epilogue itself (the one-row
-    /// transform fold reads them, normalises and preps in one kernel). The dispatch's output is not written.
+    /// Leave the projection's f32 sums in the scratch for a caller that runs the epilogue itself.
     no_epilogue: bool = false,
-    /// The caller asks for the tensor-unit dense tile from EIGHT rows up (the shipped gate is 64). The hint is the
-    /// CALLER's, so nothing else in the engine moves.
+    /// The caller asks for the tensor-unit dense tile from EIGHT rows up (the shipped gate is 64).
     dense8: bool = false,
 };
 
@@ -154,9 +147,7 @@ pub fn descriptor(m: Matrix) !ExpertDescriptor {
         .suh_signs = @intFromBool(m.suh_format == .packed_signs),
         .svh_signs = @intFromBool(m.svh_format == .packed_signs),
         .has_bias = @intFromBool(m.bias != null),
-        // The entry's own output width. An indexed batch may carry matrices of different n (the attention's wq_a 1280
-        // and wkv 512 read the same input row), so the decode body bounds each row's column tiles by this field; 0
-        // means the call's own n. Every single-width table keeps n == the call's n, so nothing moves for them.
+        // The entry's own output width.
         .reserved = @intCast(m.n),
     };
 }
@@ -176,8 +167,7 @@ pub fn useMatrix(e: mtl.ComputeEncoder, m: Matrix) void {
 /// Common K,N; descriptor weights must remain resident and disjoint from writable views through completion.
 pub const Experts = struct { descriptors: View, count: usize, k: usize, n: usize };
 
-/// The three codebooks as one table, filled from the format's own reference decoder so the values are the ones the
-/// tests already pin: state to half, three codebooks of 65536.
+/// The three codebooks as one table, filled from the format's own reference decoder.
 pub fn codebookTable(device: mtl.Device) ?mtl.Buffer {
     const entries = 3 * 65536;
     const buffer = device.buffer(entries * 2, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked) catch return null;
@@ -285,21 +275,17 @@ pub fn scratchBytes(k: usize, n: usize, rows: usize) !usize {
     try shape(k, n);
     if (rows == 0 or rows > std.math.maxInt(u32) - 7) return error.InvalidExl3Rows;
     var bytes = std.math.add(usize, try rotatedBytes(k, rows), try std.math.mul(usize, try std.math.mul(usize, n, rows), 4)) catch return error.UnsupportedExl3Shape;
-    // The split dispatch's partials, one partial row a split a row of the call (it also covers the decode tile's
-    // eight splits by eight rows).
+    // The split dispatch's partials, one partial row a split a row of the call.
     if (rows <= 8) bytes = std.math.add(usize, bytes, try std.math.mul(usize, try std.math.mul(usize, try std.math.mul(usize, one_row_splits, rows), n), 4)) catch return error.UnsupportedExl3Shape;
-    // A decode tile of a few routed rows can split its k range too: room for every split's rows by n, and the fused
-    // gate+up call carries two six-row slots a token, so the bound is the fused call's row count.
+    // A decode tile of a few routed rows can split its k range too: room for every split's rows by n.
     if (rows <= moe_split_rows) bytes = std.math.add(usize, bytes, try std.math.mul(usize, try std.math.mul(usize, try std.math.mul(usize, moeSplitCount(), @max(rows, 8)), n), 4)) catch return error.UnsupportedExl3Shape;
     return bytes;
 }
 
-/// Split-K count for a one-row projection: one threadgroup a column tile leaves the GPU idle, so the k range is cut
-/// into this many slices and the partials summed in split order.
+/// Split-K count for a one-row projection: one threadgroup a column tile leaves the GPU idle.
 pub const one_row_splits: usize = 16;
 
-/// Routed rows the decode tile can carry in one call with its k range split: eight shipped rows, and the fused
-/// gate+up call's two six-row slots a token out to a five-row window (sixty rows).
+/// Routed rows the decode tile can carry in one call with its k range split: eight shipped rows.
 pub const moe_split_rows: usize = 64;
 
 pub fn check(v: View, bytes: usize, alignment: usize) !void {

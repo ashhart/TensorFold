@@ -44,11 +44,7 @@ kernel void tf_exl3_matmul_prefill_nax5(const device half* x [[buffer(0)]],
 }
 
 
-// The engine's routed 64 x 64 prompt tile with the funnel read -- the two-word funnel and the eight windows at
-// compile-time shifts, on our map and our ring. The values, their order and the k order are the shipped body's, so
-// the output is bit-identical; only the word traffic and the cursor's select chain leave. The funnel needs the routed
-// pack's width (halves = 6, three bits a state); at any other width the kernel reads the shipped path's four words
-// and decodes as before.
+// The engine's routed 64 x 64 prompt tile with the funnel read.
 kernel void tf_exl3_matmul_prefill_nax42(const device half* x [[buffer(0)]],
                                         const device uchar* trellis [[buffer(1)]],
                                         device float* sums [[buffer(2)]],

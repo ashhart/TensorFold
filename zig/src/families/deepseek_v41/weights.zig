@@ -23,9 +23,7 @@ pub const Attention = struct {
     wo_a: [8]Matrix,
     /// The eight output-group descriptors of wo_a, for the one indexed decode dispatch.
     wo_a_descriptors: ?mtl.Buffer = null,
-    /// Wq_a (n 1280) and wkv (n 512) as one indexed call's two-entry table. They read the same input row and the
-    /// same k, so one rotate_in, one GEMM and one rotate_out carry both; each entry keeps its own per-column scales
-    /// (suh/svh) and its own output width (descriptor.reserved).
+    /// Wq_a (n 1280) and wkv (n 512) as one indexed call's two-entry table.
     qkv_descriptors: ?mtl.Buffer = null,
     sink: Tensor,
     q_norm: Tensor,
@@ -41,19 +39,15 @@ pub const Moe = struct {
     descriptors: [3]mtl.Buffer,
     /// It holds copies of the descriptors, not of any weight, so it costs 96 bytes an expert.
     fused: ?mtl.Buffer = null,
-    /// The shared expert's gate and up as one indexed dispatch: descriptor 0 is `shared[0]` (w1), descriptor 1 is
-    /// `shared[1]` (w3), both read the same input row (the gather map repeats it).
+    /// The shared expert's gate and up as one indexed dispatch: descriptor 0 is `shared[0]` (w1).
     shared_fused: ?mtl.Buffer = null,
-    /// The shared down projection's one-descriptor table and a zero pick map, so the shared SwiGLU's prerotate
-    /// (which reads the row's su/sv) and the dense down with a prerotated input can skip the rotate_in dispatch.
-    /// Descriptor 0 = `shared[2]`; the map is eight zeros.
+    /// The shared down projection's one-descriptor table and a zero pick map, so the shared SwiGLU's prerotate.
     shared_down: ?mtl.Buffer = null,
     shared_down_ids: ?mtl.Buffer = null,
     gate_bf16: ?Tensor = null,
 };
 
-/// `t` as BF16: a host pass over F16 rows (round to nearest even), for the tensor-unit gate GEMM. Returns null for a
-/// BF16 tensor (already one) and for dtypes the gate never uses.
+/// `t` as BF16: a host pass over F16 rows (round to nearest even), for the tensor-unit gate GEMM.
 pub fn bf16Of(device: mtl.Device, t: Tensor) !?Tensor {
     if (t.dtype == .bf16) return null;
     if (t.dtype != .f16) return null;
@@ -70,8 +64,7 @@ pub fn bf16Of(device: mtl.Device, t: Tensor) !?Tensor {
 }
 
 pub const Engram = struct {
-    /// Null when the tables were not bound (`--engram-stream-dir`): the row source reads them a window at a time, and
-    /// a consumer that needs them must say so instead of reading an unbound view.
+    /// Null when the tables were not bound (`--engram-stream-dir`): the row source reads them a window at a time.
     table: ?Tensor,
     scales: ?Tensor,
     q_weight: Tensor,
@@ -89,20 +82,15 @@ pub const Layer = struct {
     moe: Moe,
     engram: ?Engram,
 };
-/// The pack's next-token drafter: three blocks that are backbone layers (no compressor, no indexer, 128 experts,
-/// three a token), the tap projection mtp.0 maps layers 37/38/39's hidden states back to 5120, and the final norm
-/// mtp.2 carries. The head is the main one; `markov_head`/`confidence_head` serve the tree and its pricing only.
+/// The pack's next-token drafter: three blocks that are backbone layers.
 pub const Dspark = struct {
     main_proj: Matrix,
     main_norm: Tensor,
     norm: Tensor,
     blocks: [3]Layer,
-    /// The three blocks' `wkv` as ONE grouped indexed call's three-entry descriptor table. The three matrices share
-    /// the conditioning's input rows and k, so one rotate_in, one GEMM (three 128-row groups, one expert a group)
-    /// and one rotate_out carry all three; each entry keeps its own per-column scales.
+    /// The three blocks' `wkv` as ONE grouped indexed call's three-entry descriptor table.
     cond_wkv_descriptors: ?mtl.Buffer = null,
-    /// The last stage's Markov pair (`mtp.2.markov_head.embed/head` [vocab, rank] bf16): the draft chain's
-    /// rank-256 bias of the token before each row. Optional so an older pack without the chain still loads.
+    /// The last stage's Markov pair (`mtp.2.markov_head.embed/head` [vocab, rank] bf16).
     markov_embed: ?Tensor = null,
     markov_head: ?Tensor = null,
 };
@@ -111,8 +99,7 @@ pub const Model = struct {
     head: Matrix,
     norm: Tensor,
     layers: [40]Layer,
-    /// Whether an attached int8 sidecar was packed pre-rotated (its call is one byte body into the caller's bf16
-    /// output). False = the unrotated pack, which keeps rotate_in/rotate_out. Off without the sidecar.
+    /// Whether an attached int8 sidecar was packed pre-rotated.
     int8_direct: bool = false,
     dspark: ?Dspark = null,
 
@@ -182,11 +169,9 @@ pub fn sizeofDescriptors() usize {
         40 * 2 * @sizeOf(exl3.ExpertDescriptor) + 3 * @sizeOf(exl3.ExpertDescriptor);
 }
 
-/// One table the fused gate+up dispatch indexes: the gate experts then the up experts, descriptor copies only,
-/// so the two projections are one indexed call and each output row still runs the shipped per-row arithmetic.
+/// One table the fused gate+up dispatch indexes: the gate experts then the up experts, descriptor copies only.
 fn fusedTable(device: mtl.Device, gate: mtl.Buffer, up: mtl.Buffer, count: usize, shared_gate: exl3.Matrix, shared_up: exl3.Matrix) !mtl.Buffer {
-    // The table carries the two shared-expert matrices after the 2E routed entries, so the SAME indexed dispatch
-    // can carry the shared gate/up rows (one indexed gate/up form).
+    // The table carries the two shared-expert matrices after the 2E routed entries.
     const table = try device.buffer((2 * count + 2) * @sizeOf(exl3.ExpertDescriptor), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
     const dst: [*]exl3.ExpertDescriptor = @ptrCast(@alignCast(table.contents()));
     const gate_src: [*]const exl3.ExpertDescriptor = @ptrCast(@alignCast(gate.contents()));
@@ -198,8 +183,7 @@ fn fusedTable(device: mtl.Device, gate: mtl.Buffer, up: mtl.Buffer, count: usize
     return table;
 }
 
-/// The attention's wq_a and wkv as one indexed call's two-entry table. Descriptor copies only; the entries' own n
-/// rides descriptor.reserved, so the GEMM and the epilogue bound each row by its own width.
+/// The attention's wq_a and wkv as one indexed call's two-entry table.
 fn qkvTable(device: mtl.Device, a: exl3.Matrix, b: exl3.Matrix) !mtl.Buffer {
     const table = try device.buffer(2 * @sizeOf(exl3.ExpertDescriptor), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
     errdefer table.deinit();
@@ -209,9 +193,7 @@ fn qkvTable(device: mtl.Device, a: exl3.Matrix, b: exl3.Matrix) !mtl.Buffer {
     return table;
 }
 
-/// The drafter's three blocks and the two tensors the tap path needs. Written separately from the backbone's loop
-/// because the differences are the point: no compressor, no indexer, 128 experts instead of 384, and a gate with no
-/// bias_vl. `binding` false is the header-only validation pass.
+/// The drafter's three blocks and the two tensors the tap path needs.
 fn populateDspark(comptime binding: bool, source: anytype, model: ?*Model) !void {
     if (!binding) {
         if (!hasDspark(source)) return;
@@ -359,9 +341,7 @@ pub fn bind(device: mtl.Device, checkpoint: *const cp.Checkpoint, stream: bool) 
             @memset(ids.contents()[0 .. 8 * 4], 0);
             layer.moe.shared_down_ids = ids;
         }
-        // THE DRAFTER'S EIGHT wo_a OUTPUT GROUPS AS ONE INDEXED DECODE PROJECTION'S DESCRIPTOR TABLE -- the trunk's
-        // own fused form. The drafter's eight slices are the same shape as the trunk's (k 4096, n 1024), so the
-        // table is the same table.
+        // THE DRAFTER'S EIGHT wo_a OUTPUT GROUPS AS ONE INDEXED DECODE PROJECTION'S DESCRIPTOR TABLE.
         {
             const groups = try device.buffer(8 * @sizeOf(exl3.ExpertDescriptor), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
             errdefer groups.deinit();

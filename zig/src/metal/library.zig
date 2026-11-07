@@ -100,8 +100,7 @@ pub const Pipeline = struct {
         return make(device, library, name, indirect, false);
     }
 
-    /// A pipeline for a function the compiler made *specialisable* (a `template [[host_name(...)]]` entry):
-    /// the plain descriptor path refuses those, and an empty constant set is the accepted form.
+    /// A pipeline for a function the compiler made *specialisable* (a `template [[host_name(...)]]` entry).
     pub fn initSpecialized(device: Device, library: Library, name: []const u8) Error!Pipeline {
         const str = objc.string(name);
         defer objc.release(str);

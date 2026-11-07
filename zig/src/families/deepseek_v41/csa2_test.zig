@@ -389,10 +389,7 @@ fn nax_case(p: *const csa2.Pipelines, device: mtl.Device, queue: mtl.Queue, rand
     const enc = cb.compute(.serial);
     try scalar_dispatch(p, enc, view(q), view(ring), view(chunk), view(main), view(positions), view(sink), view(out_a), args);
     try submit(cb, enc);
-    // The LANDED prompt path: every visible key is decoded once into `dense`, and the tensor-unit scan reads that
-    // buffer (slice 8). The previous helper bound only slices 0-7, so its arm read an unbound buffer and reported
-    // 0/262144 -- a dead path, not a tolerance miss. Run the real `encode` so the differential covers the dense
-    // pass and the split/merge plumbing too. Skip honestly instead of passing blindly.
+    // The LANDED prompt path: every visible key is decoded once into `dense`.
     if (!p.tensor_units or nax_width != 512 or nax_heads % 16 != 0 or nax_rows < p.nax_min_rows)
         return error.SkipZigTest;
     const dense_rows = 128 + nax_rows + main_rows;
@@ -443,9 +440,7 @@ test "the tensor-unit prompt kernel matches the scalar kernel on constant keys" 
     var p = try csa2.Pipelines.load(device);
     defer p.deinit();
     if (!p.tensor_units) return error.SkipZigTest;
-    // Every window key decodes to 1, every chunk key to 2 and every compressed key to 1: uniform softmax over
-    // 133 equal-weight keys. The different summation orders may move the last bf16 bit on a few elements; the
-    // random case below is the bit-exact one because its softmax concentrates.
+    // Every window key decodes to 1, every chunk key to 2 and every compressed key to 1.
     const r = try nax_case(&p, device, queue, false, "constant");
     try std.testing.expect(@as(f64, @floatFromInt(r.exact)) / @as(f64, @floatFromInt(r.total)) >= 0.98);
     try std.testing.expect(r.worst <= 0.02);
@@ -474,12 +469,7 @@ const IndexProbeRef = struct {
     }
 };
 
-// The regression: both one-shot select kernels must be a deterministic function of their scores, and that function
-// must be the heap path's total order (score desc, position asc). Two data races broke this until -- a threadgroup
-// `digit`/`ran` initialised by every thread before its single writer, and `have` loaded from the counter and then
-// zeroed with no barrier between. Both let the threshold come out as 0 (or `have` diverge), so the first 512 atomic
-// arrivals won and the key SET moved between identical dispatches. This test asserts a byte-identical array over
-// repeats.
+// The regression: both one-shot select kernels must be a deterministic function of their scores.
 test "index one-shot select is deterministic on unchanged scores" {
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
@@ -506,8 +496,7 @@ test "index one-shot select is deterministic on unchanged scores" {
     defer gpa.free(ref);
     var prng = std.Random.DefaultPrng.init(0x5eed);
     const rnd = prng.random();
-    // Six bf16 values: the threshold's tie bucket is large enough that the ties path is exercised, and
-    // every row past 1024 has more visible keys than slots.
+    // Six bf16 values: the threshold's tie bucket is large enough that the ties path is exercised.
     for (0..rows) |r| {
         const visible: u32 = @intCast((r + 1) / 2);
         for (0..tile) |c| {

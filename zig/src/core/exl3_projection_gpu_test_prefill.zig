@@ -228,8 +228,7 @@ test "the fused SwiGLU + down rotate writes the two-pass rotated rows bit for bi
     const routes = try device.buffer(count * 4, mtl.ResourceOptions.shared);
     defer routes.deinit();
     @memset(routes.slice(u32, count), 0);
-    // A destination permutation: the fused pass scatters a token-major row into its expert tile's slot, and the
-    // down call's GEMM reads the dispatch row.
+    // A destination permutation: the fused pass scatters a token-major row into its expert tile's slot.
     const destinations = try device.buffer(count * 4, mtl.ResourceOptions.shared);
     defer destinations.deinit();
     const dest = [_]u32{ 3, 0, 4, 1, 5, 2 };

@@ -6,10 +6,7 @@ const exl3 = @import("exl3_projection.zig");
 pub const Field = enum { counts, offsets, ranks, expert_ids, token_ids, slot_ids, destination };
 const field_count = std.enums.values(Field).len;
 
-/// The grouped plan's tile rows and the routed GEMM's tile rows are ONE number: the plan pads each expert's block
-/// to a multiple of it and the GEMM's tile must match it, or a tile would straddle two experts' weights. 128 rows
-/// halves the number of tiles -- and so the number of weight decodes -- for the experts with more than sixty-four
-/// rows.
+/// The grouped plan's tile rows and the routed GEMM's tile rows are ONE number.
 pub fn tileRows() u32 {
     const v = exl3.knobs.moe_tile_rows;
     return if (v == 128) 128 else 64;
@@ -73,8 +70,7 @@ pub const Pipelines = struct {
 };
 const Args = extern struct { rows: u32, experts: u32, repeat: u32, padded: u32, block: u32, tile: u32 };
 
-/// `block` is the slot count of one input block when the pick table is more than one block (0: the whole table
-/// is one block). A fused gate+up table is two blocks of `repeat` slots a token.
+/// `block` is the slot count of one input block when the pick table is more than one block.
 pub fn encode(enc: mtl.ComputeEncoder, pipelines: *const Pipelines, ids: exl3.View, scratch: Scratch, repeat: u32, block: u32) !void {
     // Plan must come from Plan.init; route IDs remain GPU-resident and are bounds-checked by the kernels.
     if (repeat == 0 or scratch.plan.rows == 0 or scratch.plan.experts == 0 or
@@ -107,9 +103,7 @@ test "expert grouping bounds padding without context-sized allocation" {
     const full = try Plan.init(1536, 384, 64);
     try std.testing.expectEqual(@as(u32, 25728), full.padded);
     try std.testing.expect(full.bytes < 512 * 1024);
-    // The parameterised grouping tile (8da7b80eb, the priced-out 128-row bench instrument) computes tile > 64
-    // padding as its own plan: active rows group to the tile, the remainder adds one tile - 384 active + 9 tiles of
-    // 128 = 50,304. The shipped 64-row tile keeps the bounds above.
+    // The parameterised grouping tile.
     const tall = try Plan.init(1536, 384, 128);
     try std.testing.expectEqual(@as(u32, 50304), tall.padded);
     try std.testing.expectError(error.InvalidExpertGrouping, Plan.init(0, 384, 64));

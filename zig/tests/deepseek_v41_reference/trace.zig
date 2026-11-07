@@ -15,14 +15,10 @@ const Stage = tf.deepseek_v41_profiler.Stage;
 const widths = [_]usize{ 20480 * 2, 5120 * 2, 5120 * 2, 6 * 4, 6 * 4 };
 const stride = 61488;
 const bytes = stride * 80;
-/// A second, additive record per layer for the Engram stage: the kv projection the gate multiplies, plus the four gate
-/// scalars the reference applied. Layers 1 and 14 only; other slots stay zero. The gathered rows are not copied here —
-/// the streamed reader stages them in its own buffer and `engram_kv` is a projection of exactly those rows, so a wrong
-/// gather cannot survive this comparison (`tools/rowcheck.py` already hashes the reader's bytes independently).
+/// A second, additive record per layer for the Engram stage: the kv projection the gate multiplies.
 const engram_slot = 25600 * 2 + 4 * 4;
 const engram_bytes = engram_slot * 40;
-/// Router logits, both sides, 384 f32 a layer: the only way to separate "the logits differ" from "the score transform
-/// differs", since both feed the same six normalised weights.
+/// Router logits, both sides, 384 f32 a layer.
 const router_slot = 384 * 4;
 const router_bytes = router_slot * 40;
 
@@ -70,8 +66,7 @@ const Capture = struct {
     }
     fn reference(ctx: *anyopaque, layer: usize, stage: Stage, chain: *anyopaque) void {
         const self: *Capture = @ptrCast(@alignCast(ctx));
-        // The chain is generic over its precision now, so it cannot name itself in its own observer callback; the
-        // reader casts the untyped pointer back to the source-contract chain.
+        // The chain is generic over its precision now, so it cannot name itself in its own observer callback.
         const ref: *const Reference = @ptrCast(@alignCast(chain));
         const start = (layer * 2 + @intFromBool(stage == .moe)) * stride;
         var destination: []u8 = self.cpu[start..][0..stride];
@@ -248,8 +243,7 @@ fn runWith(gpa: std.mem.Allocator, io: std.Io, model: *Model, ids: []const u32, 
         const actual = try model.forward(&.{id}, .last);
         for (actual, expected[token * 129280 ..][0..129280]) |a, b|
             if (@as(u32, @bitCast(a)) != @as(u32, @bitCast(b))) return error.TraceChangedLogits;
-        // The pin is the engine's own ids, harvested from the capture this forward pass just wrote: ids only, so the
-        // reference still selects on its own logits and still normalises with its own arithmetic.
+        // The pin is the engine's own ids, harvested from the capture this forward pass just wrote: ids only.
         const capture_base: [*]u8 = buffer.contents();
         for (0..40) |layer| {
             const at = (@as(usize, layer) * 2 + 1) * stride + 61440;
@@ -290,8 +284,7 @@ fn runWith(gpa: std.mem.Allocator, io: std.Io, model: *Model, ids: []const u32, 
                     engram_mismatch[layer] = bf16Mismatches(engram_gpu[layer * engram_slot ..][0..51200], engram_cpu[layer * engram_slot ..][0..51200]);
                 if (point % 2 == 1) {
                     const ulps = f32Ulps(g[61464..61488], c[61464..61488]);
-                    // The only place a ulp figure means anything: layers where both sides computed the same router
-                    // input bits. Past the first divergence the reference is comparing different inputs.
+                    // The only place a ulp figure means anything.
                     if (f32BitsEqual(router_gpu[layer * router_slot ..][0..router_slot], router_cpu[layer * router_slot ..][0..router_slot])) {
                         weight_exact_logit_layers += 1;
                         if (ulps > weight_exact_logit_ulp) {

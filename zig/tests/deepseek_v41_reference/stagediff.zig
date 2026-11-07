@@ -150,11 +150,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, model: *Model, ids: []const u32, 
     std.debug.print("\n", .{});
 }
 
-/// The full drafted round loop in the runner: prefill, then rounds of [pending, drafts...], the
-/// engine's own acceptance rule, and the keep path (rollback + portKeep for a partial keep). The
-/// reference is the plain greedy chain from the same committed context, recomputed each round in
-/// lane slot 1; the drafted state is carried in slot 0. This is the serve's round loop without the
-/// proposer, so a difference it finds is the trunk's round machinery.
+/// The full drafted round loop in the runner: prefill, then rounds of [pending, drafts...].
 fn stateDiff(model: *Model, round: usize) void {
     const a = model.caches[0];
     const b = model.caches[1];
@@ -223,8 +219,7 @@ pub fn loop(gpa: std.mem.Allocator, io: std.Io, model: *Model, ids: []const u32,
     try model.resetSlot(0);
     const pre = try model.forwardOn(0, ctx.items, .last);
     var pending = argmax(pre);
-    // The plain reference is a DECODE chain, not a re-prefill: lane slot 1 is prefilied once at the
-    // same prompt and then advanced one kept token at a time, so its state is the serve's plain path.
+    // The plain reference is a DECODE chain, not a re-prefill.
     try model.resetSlot(1);
     const pre_ref = try model.forwardOn(1, ctx.items, .last);
     var pending_ref = argmax(pre_ref);
@@ -237,8 +232,7 @@ pub fn loop(gpa: std.mem.Allocator, io: std.Io, model: *Model, ids: []const u32,
     var ref_committed = std.ArrayList(u32).empty;
     defer ref_committed.deinit(gpa);
     for (0..rounds) |round| {
-        // Probe the plain chain rows tokens deep, then roll the transaction back to the committed
-        // context and advance it over exactly the kept tokens.
+        // Probe the plain chain rows tokens deep.
         try model.beginSlot(1);
         var r = try model.forwardOn(1, &.{pending_ref}, .all);
         @memcpy(ref[1 * logits_width ..][0..logits_width], r[0..logits_width]);
@@ -276,8 +270,7 @@ pub fn loop(gpa: std.mem.Allocator, io: std.Io, model: *Model, ids: []const u32,
         }
         kept = 1 + accepted;
         kept_hist[@intCast(kept)] += 1;
-        // Only the rows BEFORE the rejected draft are comparable: from row kept on, the window's
-        // context holds a rejected token, so its argmax is legitimately not the plain chain's.
+        // Only the rows BEFORE the rejected draft are comparable: from the row kept onward.
         var row_mismatch: ?usize = null;
         for (0..kept) |j| {
             const got = argmax(window[j * logits_width ..][0..logits_width]);

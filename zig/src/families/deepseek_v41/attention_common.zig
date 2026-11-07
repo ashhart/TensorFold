@@ -14,14 +14,10 @@ const rope = @import("rope.zig");
 pub const View = @import("view.zig").View;
 pub const State = kv.cache.State;
 
-/// One segment of a batched decode forward: a slot's state, its first position, its first row in the launch's buffers
-/// and its row count. The batch rung is one-row segments (a shared round's lanes), so `n` is 1 today; the type
-/// carries it so the core is written once.
+/// One segment of a batched decode forward: a slot's state, its first position.
 pub const Seg = struct { state: *State, p0: u32, r0: u32, n: u32 };
 
-/// The attention stage's per-block GPU split (TF_DSV41_ATTN_PROF=1). The block marks (`attnMark`) only count
-/// dispatches; this ends the command buffer at each mark, commits, waits and prints that block's GPU window, then
-/// starts a fresh buffer. Default-inert: no split, no byte of the path moves.
+/// The attention stage's per-block GPU split (TF_DSV41_ATTN_PROF=1).
 pub const Prof = struct {
     queue: mtl.Queue,
     cb: mtl.CommandBuffer,
@@ -134,17 +130,13 @@ pub const Workspace = struct {
     /// A decode layer's split key scans: (split, head group, lane) by (max, sum, 64 accumulators).
     partials: mtl.Buffer,
     selection: index.Scratch,
-    /// The batch's per-segment selection scratches; segment 0 uses `selection`. Three extras cover a four-lane shared
-    /// round.
+    /// The batch's per-segment selection scratches; segment 0 uses `selection`.
     sel_extra: [3]?index.Scratch = .{ null, null, null },
-    /// Identity map [0..7] for the fused wo_a indexed dispatch (one row per output group), repeated for the multi-row
-    /// path.
+    /// Identity map [0..7] for the fused wo_a indexed dispatch (one row per output group).
     ids: mtl.Buffer,
-    /// A scratch row for the doubling arms (the workspace rows are live for a prompt chunk, so a repeat there would
-    /// change the reply).
+    /// A scratch row for the doubling arms.
     dup: mtl.Buffer,
-    /// The batched wq_a+wkv call's input-row map -- both entries read the one decode row (0, 0). The descriptor-id
-    /// map is the existing `ids` buffer, whose first two entries are 0, 1.
+    /// The batched wq_a+wkv call's input-row map -- both entries read the one decode row (0, 0).
     pair_in: mtl.Buffer,
     max_rows: u32,
     selection_layer: ?u32 = null,
@@ -152,8 +144,7 @@ pub const Workspace = struct {
     selection_rows: u32 = 0,
     candidate_position: u32 = 0,
     candidate_rows: u32 = 0,
-    /// A merged tail chunk's PREFIX (its rows before the tail mark) is published into this stash ring as well as the
-    /// whole chunk into the live one, so the state at the mark can be copied from it.
+    /// A merged tail chunk's PREFIX (its rows before the tail mark) is published here as well as the whole chunk.
     publish_limit: u32 = 0,
     publish_stash: ?View = null,
 
@@ -206,8 +197,7 @@ pub const Workspace = struct {
     pub fn dense(self: *const Workspace) View {
         return .{ .buffer = self.dense_kv, .offset = 0 };
     }
-    /// The identity map for the fused wo_a's indexed dispatch (one row per output group), repeated for the multi-row
-    /// path. The drafter's own attention takes the same fused form.
+    /// The identity map for the fused wo_a's indexed dispatch (one row per output group).
     pub fn idMap(self: *const Workspace) View {
         return .{ .buffer = self.ids, .offset = 0 };
     }
@@ -223,8 +213,7 @@ pub const Workspace = struct {
         set.add(w.selection.buffer);
         for (w.sel_extra) |e| if (e) |x| set.add(x.buffer);
     }
-    /// A region's view into the attention workspace: public so a second model (the drafter) can assemble its own scan
-    /// from the same buffers.
+    /// A region's view into the attention workspace: public so a second model.
     pub fn view(w: *const Workspace, region: Region) View {
         var offset: usize = 0;
         for (regions[0..@backingInt(region)]) |size| offset += size * w.max_rows;
@@ -241,8 +230,7 @@ pub fn core(v: View) exl3.View {
 pub fn projection(p: *const exl3.Pipelines, e: mtl.ComputeEncoder, m: weights.AnyMatrix, x: View, y: View, scratch: exl3.View, rows: u32, xs: u32, ys: u32, output: exl3.Output) !void {
     switch (m) {
         .trellis => |t| {
-            // The prompt-row int8 twin. The resident prompt path reaches the projection here, not through
-            // Model.project; the gate is the call row count, so decode (rows <= 8) keeps the trellis.
+            // The prompt-row int8 twin.
             if (t.int8) |side| {
                 if (rows >= 1024 and std.c.getenv("TF_DSV41_I8_PREFILL") != null) {
                     try exl3.encodePrefillInt8(p, e, t, side, core(x), core(y), scratch, .{ .count = rows, .x_stride = xs, .y_stride = ys, .output = output }, t.int8_direct);
@@ -277,11 +265,7 @@ pub fn rotate(p: *const Pipelines, e: mtl.ComputeEncoder, x: View, rows: u32, he
 pub fn rotateRepeat(p: *const Pipelines, e: mtl.ComputeEncoder, dup: View, rows: u32, heads: u32, width: u32, position: u32, ratio: u32, step: u32, inverse: bool, c: config.Config) !void {
     try p.rotary.encode(e, dup, .{ .rows = rows, .heads = heads, .width = width, .rotary = c.rope_dim, .stride = heads * width, .position = position, .step = step, .inverse = @intFromBool(inverse), .spectrum = if (ratio == 0) .normal else .compressed });
 }
-// The attention stage's own block ledger. The doubling arms isolate a dispatch's marginal cost; this counts the
-// dispatches each block issues, by reading the engine's own counter at each block boundary (an atomic load: no
-// command-buffer split, no perturbation of the stream). It prints a block's count for the layers
-// TF_DSV41_ATTN_COUNT_LAYERS names (default "0,2,3": an ordinary layer, an owner layer that also sources the index,
-// and a layer that reads a compressed source).
+// The attention stage's own block ledger.
 pub var attn_count_flag: ?bool = null;
 pub var attn_count_layers: ?[]const u8 = null;
 pub var attn_count_base: u64 = 0;
@@ -337,11 +321,8 @@ pub fn precedingIndex(layer: u32) u32 {
 /// BF16 x/y [rows,5120]; layers 0..39 share the chunk-start cursor, appended by the caller after all layers.
 
 // No extra RMS after wq_b or index-query Hadamard outside EXL3.
-/// A decode layer's split scans: 32 splits at most, 4 head groups of 64 heads, 4 SIMDgroups a group, 32 lanes, 68
-/// floats a lane.
 pub fn partialBytes(rows: u32) usize {
-    // A split's (max, sum, accumulators) for every row: a drafted window above one row keeps its own parts, so its
-    // rows sum in exactly the order a plain step's does (drafted == plain).
+    // A split's (max, sum, accumulators) for every row: a drafted window above one row keeps its own parts.
     return @as(usize, rows) * 32 * 4 * 4 * 32 * 68 * @sizeOf(f32);
 }
 /// The window ring, up to `max_rows` chunk rows, and as many compressed rows as the context allows.

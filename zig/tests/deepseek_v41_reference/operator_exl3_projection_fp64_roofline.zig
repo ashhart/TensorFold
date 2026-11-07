@@ -341,8 +341,7 @@ test "int8 mma layout probe against a CPU int8 dot (TF_INT8_VALUES=1)" {
     std.debug.print("INT8VALUES {{\"checked\":{d},\"mismatches\":{d}}}\n", .{ checked, mismatches });
 }
 
-// Item 15's speed half: the same tile and k-loop in int8 and in bf16, so the ratio is the mechanism's
-// arithmetic multiplier and nothing else. TF_INT8_RATE=1.
+// Item 15's speed half: the same tile and k-loop in int8 and in bf16.
 const int8_rate_body =
     \\using namespace tfp;
     \\kernel void int8_rate(device const int8_t* x [[buffer(0)]], device const int8_t* w [[buffer(1)]],

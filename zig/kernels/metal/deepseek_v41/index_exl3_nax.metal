@@ -1,11 +1,7 @@
 // Source is compiled after kv.metal and index_exl3.metal; the tensor-unit score kernels only.
 using namespace tfp;
 
-// ---------------------------------------------------------------- prompt scores on the tensor units
-// The scalar scorer's arithmetic, a tile at a time: 64 keys by 64 rows, four SIMDgroups of 32x32, the
-// 64x128 key tile staged once and read by every row group; one 128-dim transposed MMA a head instead of a
-// warp a key with sixty-four simd_sums. The epilogue is the scalar kernel's own term -- bf16 dot, relu, times
-// the bf16-rounded scaled weight, summed in fp32 in head order -- so only the dot's summation order differs.
+// ---------------------------------------------------------------- prompt scores on the tensor units The scalar.
 constant constexpr int INAX_D = 128, INAX_PAD = INAX_D + 8;
 
 inline frag<bfloat> inax_frag(const device bfloat* r0, const device bfloat* r1, int c, short2 home) {
@@ -115,11 +111,7 @@ kernel void dsv41_index_scores_nax(device const ushort *qp [[buffer(0)]], device
   }
 }
 
-// This is that kernel's own body with the tile's row extent cut to sixteen -- the MMA's M granularity, so nothing
-// narrower can help -- and the same operand roles, the same 128-dim k steps in the same order, the same epilogue
-// term by term and the same store expression, so a live row's score is BIT-IDENTICAL to dsv41_index_scores_nax's. A
-// threadgroup keeps its 64 keys and two SIMDgroups take 32 keys each (tn), the other two stage and stop: the tile's
-// MMA work is a quarter of the prompt tile's at one row whatever the window's row count.
+// This is that kernel's own body with the tile's row extent cut to sixteen -- the MMA's M granularity.
 kernel void dsv41_index_scores_row(device const ushort *qp [[buffer(0)]], device const ushort *wp [[buffer(1)]],
                                    device const ushort *kp [[buffer(2)]], device float *scores [[buffer(3)]],
                                    constant Dsv41Index &p [[buffer(4)]], uint sg [[simdgroup_index_in_threadgroup]],
@@ -196,14 +188,7 @@ kernel void dsv41_index_scores_row(device const ushort *qp [[buffer(0)]], device
   }
 }
 
-// The keys-on-M score tile The row tile above cuts the prompt tile's row extent to the MMA's sixteen, but a one-row
-// step still runs a sixteen-row MMA: fifteen of sixteen M rows are dead. This form swaps the operand roles -- the
-// KEYS are the M operand (four 16-key blocks, one a SIMDgroup) and the head queries are the N operand (32 heads) --
-// so a threadgroup scores 64 keys x 32 heads with eight MMAs a SIMDgroup instead of a quarter of 1024. The k chain
-// (128 dims in sixteen-wide steps, ascending), the per-head term (bf16 dot, relu, the bf16-rounded scaled weight)
-// and the head-ordered fp32 sum are the scalar's own: the head terms are staged as bf16 (the value is already bf16)
-// and summed 0..31 in order by one lane a key, so a score is BIT-IDENTICAL to dsv41_index_scores_row's. The key
-// tile is staged once and reused by every row of the window.
+// The keys-on-M score tile. The row tile above cuts the prompt tile's row extent to the MMA's sixteen.
 kernel void dsv41_index_scores_keys(device const ushort *qp [[buffer(0)]], device const ushort *wp [[buffer(1)]],
                                     device const ushort *kp [[buffer(2)]], device float *scores [[buffer(3)]],
                                     constant Dsv41Index &p [[buffer(4)]], uint sg [[simdgroup_index_in_threadgroup]],
@@ -273,11 +258,7 @@ kernel void dsv41_index_scores_keys(device const ushort *qp [[buffer(0)]], devic
   }
 }
 
-// The decode selection, one dispatch: at decode rows the heap path costs 27 dispatches and ~1,000 one-thread pushes
-// a source. This does the same selection in ONE threadgroup a row: a radix select on the score's monotone image
-// (four 8-bit passes over the resident scores) fixes the k-th largest exactly, a threshold filter keeps the k keys
-// above it (plus the lowest-positioned ties), and the finish's bitonic sort writes the ascending positions. The
-// heap's total order is (score desc, position asc), so the SET and the array are the same.
+// The decode selection is one dispatch: the heap path costs 27 dispatches and ~1,000 one-thread pushes a row.
 inline void dsv41_ixsort(threadgroup uint *sh, uint n, uint tid) {
     const uint TG = 256u;
     for (uint k = 2; k <= n; k <<= 1) {
@@ -330,11 +311,7 @@ kernel void dsv41_index_select(device const float *scores [[buffer(0)]],
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
         threadgroup uint digit, ran;
-        // Digit/ran are threadgroup memory. Initialising them here was a race: every thread wrote 0 to them and tid
-        // 0 wrote the chosen digit, with no ordering between the two writes before the barrier, so a late thread's
-        // zero could land on top of the digit. A zero prefix then made the next pass's histogram empty and the
-        // filter count every visible key as above the threshold, which the first 512 atomic arrivals truncated -- a
-        // nondeterministic key SET from unchanged scores. Only tid 0 writes them now, and it writes them once.
+        // Digit/ran are threadgroup memory.
         if (tid == 0u) {
             uint cum = 0u;
             digit = 0u; ran = 0u;
@@ -365,10 +342,7 @@ kernel void dsv41_index_select(device const float *scores [[buffer(0)]],
     threadgroup_barrier(mem_flags::mem_threadgroup);
     // ---- the ties at the threshold, the lowest `need` positions of them
     const uint have = min(atomic_load_explicit(&counter, memory_order_relaxed), topk);
-    // The ties pass below reuses this counter, so it has to be zeroed AFTER every thread has read `have`. Without
-    // the barrier the zero could land first and leave `have` divergent across the threadgroup -- the ties then got
-    // written at different slots (and the sentinel fill started at a different index) per thread, which is a second
-    // nondeterministic key SET.
+    // The ties pass below reuses this counter, so it has to be zeroed AFTER every thread has read `have`.
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (tid == 0u) atomic_store_explicit(&counter, 0u, memory_order_relaxed);
     threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -413,10 +387,7 @@ kernel void dsv41_index_select(device const float *scores [[buffer(0)]],
 
 
 
-// The one-dispatch select with vector reads, a two-pass radix and the ties folded into the filter. Exactness: every
-// score this path ranks is bf16-valued (the scorer stores dsv41_bf(x)), so mono(score)'s low 16 bits are zero and
-// its top 16 bits fix the order; two 8-bit passes converge on the k-th image. The filter/ties compaction order
-// differs from the shipped kernel's, but the array is sorted before it is written, so the output is the same array.
+// The one-dispatch select with vector reads, a two-pass radix and the ties folded into the filter.
 kernel void dsv41_index_select_v(device const float *scores [[buffer(0)]],
                                  device int *positions [[buffer(1)]],
                                  constant Dsv41Index &p [[buffer(2)]],
@@ -463,11 +434,7 @@ kernel void dsv41_index_select_v(device const float *scores [[buffer(0)]],
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
         threadgroup uint digit, ran;
-        // Digit/ran are threadgroup memory. Initialising them here was a race: every thread wrote 0 to them and tid
-        // 0 wrote the chosen digit, with no ordering between the two writes before the barrier, so a late thread's
-        // zero could land on top of the digit. A zero prefix then made the next pass's histogram empty and the
-        // filter count every visible key as above the threshold, which the first 512 atomic arrivals truncated -- a
-        // nondeterministic key SET from unchanged scores. Only tid 0 writes them now, and it writes them once.
+        // Digit/ran are threadgroup memory.
         if (tid == 0u) {
             uint cum = 0u;
             digit = 0u; ran = 0u;
@@ -482,9 +449,7 @@ kernel void dsv41_index_select_v(device const float *scores [[buffer(0)]],
         above += ran;
         need -= ran;
     }
-    // The two passes leave the top sixteen bits in the low half. mono()'s low sixteen are 0 for a
-    // positive bf16 score and 0xFFFF for a negative one (mono is b's complement there), so the full
-    // image is (prefix << 16) | (negative ? 0xFFFF : 0).
+    // The two passes leave the top sixteen bits in the low half. mono()'s low sixteen are 0 for a positive bf16 score.
     prefix = (prefix << 16u) | (((prefix & 0x8000u) == 0u) ? 0xFFFFu : 0u);
     // ---- the filter and the ties in one pass: every key above the threshold (exactly `above` of them)
     if (tid == 0u) {

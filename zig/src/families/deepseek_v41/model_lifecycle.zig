@@ -93,10 +93,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, o: Options) !Model {
     const map_blob = try std.Io.Dir.cwd().readFileAlloc(io, o.token_map, arena.allocator(), .limited(2 << 20));
     const map = try engram.hash.TokenMap.parse(map_blob);
     const lanes = o.lanes;
-    // A draft round runs five rows through the same workspace and attention scratch; at decode the plan is one
-    // row, so both are widened to the round's width (TF_DSV41_MTP_DRAFTS). A drafted round needs a plan wider
-    // than one row: `exact_width` is this plan's rows, and the lane core will not build a window the plan cannot
-    // hold. So both drafting knobs widen it, not just the MTP proposer.
+    // A draft round runs five rows through the same workspace and attention scratch; at decode the plan is one row.
     const drafted = std.c.getenv("TF_DSV41_MTP_DRAFTS") != null or std.c.getenv("TF_DSV41_LOOKUP_DRAFTS") != null;
     const round_rows: u32 = if (drafted) @max(o.chunk_rows, 8) else o.chunk_rows;
     const wp = try work.Plan.initLanes(round_rows, lanes);
@@ -106,8 +103,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, o: Options) !Model {
     const execution_bytes = try std.math.add(usize, workspace_bytes, try std.math.mul(usize, cache_bytes, lanes));
     const rotary_bytes = attention.Pipelines.residentBytes(capacity, c);
     const needed = try std.math.add(usize, plan.bytes, try std.math.add(usize, execution_bytes, rotary_bytes));
-    // The int8 twin lives beside the trellis it supersedes at prompt rows; it is additive until the trellis
-    // attention weights can be dropped, so the admission must see it.
+    // The int8 twin lives beside the trellis it supersedes at prompt rows.
     const int8_extra: usize = if (exl3.knobs.i8_prefill) 5 << 30 else 0;
     const needed_all = try std.math.add(usize, needed, int8_extra);
     if (o.ram_limit_bytes) |limit| if (needed_all > limit) {
@@ -136,8 +132,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, o: Options) !Model {
     errdefer cp.deinit();
     var bound = try weights.bind(device, &cp, streaming);
     errdefer bound.deinit();
-    // The prompt-row int8 sidecar. Flag-gated; the trellis matrices stay bound for decode and for any chunk under
-    // the rows gate.
+    // The prompt-row int8 sidecar.
     if (std.c.getenv("TF_DSV41_I8_PREFILL") != null) {
         const sidecar = std.c.getenv("TF_DSV41_I8_DIR") orelse return error.MissingInt8Sidecar;
         try weights.attachInt8(gpa, io, device, &bound, std.mem.span(sidecar));
@@ -170,15 +165,11 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, o: Options) !Model {
     const taps_stash = try device.buffer(3 * 128 * 5120 * 2, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
     errdefer taps_stash.deinit();
     @memset(taps_stash.contents()[0..taps_stash.length()], 0);
-    // The conditioning scratch: 128 rows of 5120 bf16, then 128 rows of 512 bf16 keys, then 128 packed rows. The
-    // draft round's own logits scratch: a five-row forward keeps its head rows and Markov reads here, not in the
-    // workspace's logits field (one row at decode, which a draft forward overran).
+    // The conditioning scratch: 128 rows of 5120 bf16, then 128 rows of 512 bf16 keys, then 128 packed rows.
     const mtp_logits = try device.buffer(8 * 129280 * 4, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
     const cond_bytes = 128 * 5120 * 2 + 128 * 512 * 2 + 128 * 528;
     const cond = try device.buffer(cond_bytes, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
-    // The fused `wkv` dispatch's scratch. The input window is written three times (one per block), the output
-    // comes back as three 128-row windows, and the ids are constant: routes name the block, the input and output
-    // maps are the identity (the grouped tile's rows are the descriptors' own rows).
+    // The fused `wkv` dispatch's scratch.
     const cond_wkv_bytes = 3 * 128 * 5120 * 2 + 3 * 128 * 512 * 2 + 3 * 3 * 128 * 4;
     const cond_wkv = try device.buffer(cond_wkv_bytes, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
     @memset(cond_wkv.contents()[0..cond_wkv_bytes], 0);
@@ -196,9 +187,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, o: Options) !Model {
     residency.add(cond_wkv);
     var stream_rows: ?*engram_stream.Rows = null;
     var stream_stage: ?mtl.Buffer = null;
-    // Invariant: this block is the only place stream_rows and stream_stage are created, and weights.bind nulls
-    // Engram.table/scales on the same condition. Keep the three in step: no live Model may have a null table with
-    // a null stage, or the serve would gather from nothing.
+    // Invariant: this block is the only place stream_rows and stream_stage are created.
     if (o.stream_dir) |dir| {
         const engram_layers = [_]u32{ engram.hash.layers[0].layer_id, engram.hash.layers[1].layer_id };
         const cap: u32 = if (std.c.getenv("TF_DSV41_ENGRAM_CACHE")) |v| std.fmt.parseInt(u32, std.mem.span(v), 10) catch o.stream_rows_cache else o.stream_rows_cache;
@@ -279,21 +268,13 @@ pub fn resetSlot(m: *Model, slot: u32) !void {
     m.logits_rows = 0;
 }
 
-/// A KEPT PROMPT STATE. One slot's whole cache -- the packed main/index tables and the mutable bytes (the window
-/// rings, the compressed path's partials and the raw-row captures) -- plus its cursor, the four-token Engram
-/// history the next chunk's hash pass reads, and the taps ring's rows and cursor (the drafter's conditioning).
-/// Every copied buffer is `shared` and every forward that wrote it committed and waited, so the copy is exactly
-/// the state a pass at `position` stands on: a restored state continues the prompt where the saved one stood, and
-/// `resumed` equals `fresh` token for token.
+/// A KEPT PROMPT STATE.
 pub fn beginSnapTail(m: *Model, slot: u32, hist: []const u32, at: u32, from: u32) bool {
     if (hist.len < 3) return false;
     const state = &m.caches[slot];
     const q = at - from;
     const n: u32 = @min(q, kv.cache.window);
-    // THE RECORD IS THE HASH PASS'S, NOT RAW TOKENS: `int tail[3]` of COMPRESSED ids, newest first, then `uint
-    // available` (saturates at 3). A pass standing at `at` holds the three tokens before it through the same
-    // token map the hash pass reads (The first form wrote raw prompt tokens here: the Engram history at the
-    // resumed position then read 77/304/223 instead of 2460/174/259 and the turn diverged).
+    // THE RECORD IS THE HASH PASS'S, NOT RAW TOKENS: `int tail[3]` of COMPRESSED ids, newest first.
     const tm = m.workspace.view(.token_map);
     const map = engram.hash.TokenMap{ .bytes = (tm.buffer.contents() + tm.offset)[0 .. engram.hash.raw_vocab * 4] };
     var tail: [3]u32 = .{ 0, 0, 0 };
@@ -334,9 +315,7 @@ pub fn snapshotSave(m: *Model, slot: u32) !*Snapshot {
     errdefer m.gpa.free(storage);
     const live = try m.gpa.dupe(u8, state.live.contents()[0..state.plan.mutableBytes()]);
     errdefer m.gpa.free(live);
-    // A merged tail chunk's copy is THE STATE AT THE MARK, not at the chunk end: the taps ring and the window
-    // ring come from the stash the chunk's prefix published, the four-token history is the caller's, and the
-    // compressed partials at a tile mark are empty.
+    // A merged tail chunk's copy is THE STATE AT THE MARK, not at the chunk end.
     const merging = m.publish_limit != 0;
     const taps_src = if (merging) m.taps_stash else m.taps;
     const taps = try m.gpa.dupe(u8, taps_src.contents()[0..m.taps.length()]);
@@ -413,8 +392,7 @@ pub fn beginSlot(m: *Model, slot: u32) !void {
     const history: [*]u8 = @ptrCast(@alignCast(view.buffer.contents() + view.offset));
     @memcpy(m.engram_stash[slot * 16 ..][0..16], history[0..16]);
     try m.caches[slot].begin();
-    // Stash the window ring's next slots before the verify writes them. The keep path puts back the rows the
-    // round rejects; without it a wrapped ring's stale slots alias positions the next forward still reads.
+    // Stash the window ring's next slots before the verify writes them.
     if (ringKeepOn()) {
         const state = &m.caches[slot];
         const stash_bytes = @as(usize, state.plan.layers) * max_ring_rows * kv.cache.ring_stride;
@@ -457,14 +435,10 @@ pub fn rollbackSlot(m: *Model, slot: u32) !void {
 }
 pub fn portKeep(m: *Model, slot: u32, kept: u32) !void {
     if (slot >= m.lanes) return error.InvalidLaneSlot;
-    // The adaptive depth policy's signal. The verify's kept rows are the accepted drafts plus the pending token,
-    // so `kept - 1` is the accepted drafts this round. The policy is a POLICY (which depth to run), not a
-    // numerics change: it picks between two already-characterised windows (depth 1 is token-for-token identical
-    // to the plain path; depth 3 is the standing one).
+    // The adaptive depth policy's signal.
     const state = &m.caches[slot];
     const pos = state.position + kept;
-    // The pool's groups are cut at even positions, so a new position that is odd leaves the group {pos-1, pos}
-    // open: the open row (pos-1) must be the row the capture holds.
+    // The pool's groups are cut at even positions, so a new position that is odd leaves the group {pos-1, pos} open.
     if (kept > 0 and pos % 2 == 1) {
         const e = m.queue.commandBufferUnretained();
         var enc = e.compute(.serial);

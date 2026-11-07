@@ -1,7 +1,6 @@
-// Native EXL3 on the tensor units: the same stored trellis, decoded into a threadgroup tile and reduced by
-// cooperative matmul instead of per-lane scalar FMAs. The decode is unchanged; only the reduction moves. The
-// model-facing order follows the release's inference/model.py, revision 314113f8; the trellis arithmetic and the
-// kernel shapes are the lane's own pack format.
+// Native EXL3 on the tensor units: the same stored trellis.
+
+// Provenance: the model-facing order follows the release's inference/model.py (revision 314113f8).
 #include <metal_stdlib>
 using namespace metal;
 #include "../nax.h"
@@ -64,8 +63,7 @@ inline half tf_exl3_table_value(const device half* table, ushort state, uint cod
 inline half tf_exl3_value(ushort state, uint codebook) {
   uint x = uint(state) * (codebook == 2 ? 0x83DCD12Du : codebook == 1 ? 0xCBAC1FEDu : 89226354u);
   if (codebook == 2) {
-    // The four byte sums collapse into one 16-bit lane and the +1024 bias is added as half 0x6400, so the state maps
-    // to the half h in five ALU ops instead of nine. The fma is the same one the scalar reference does.
+    // The four byte sums collapse into one 16-bit lane and the +1024 bias is added as half 0x6400.
     const uint bs = (x & 0x00FF00FFu) + ((x >> 8u) & 0x00FF00FFu);
     const half hs = as_type<half>(ushort((bs * 0x00010001u + 0x64000000u) >> 16u));
     return half(fma(float(hs), float(as_type<half>(ushort(0x1EEE))), float(as_type<half>(ushort(0xC931)))));
@@ -75,18 +73,14 @@ inline half tf_exl3_value(ushort state, uint codebook) {
   return half(float(as_type<half>(ushort(x))) + float(as_type<half>(ushort(x >> 16))));
 }
 
-// The mul1 value from a 1024-entry threadgroup LUT indexed by the byte sum: four ALU ops and a shared load, no 384 KB
-// table and no per-weight L2 miss.
+// The mul1 value from a 1024-entry threadgroup LUT indexed by the byte sum: four ALU ops and a shared load.
 inline half tf_exl3_value_lut(const threadgroup half* lut, ushort state) {
   const uint x = uint(state) * 0x83DCD12Du;
   const uint bs = (x & 0x00FF00FFu) + ((x >> 8u) & 0x00FF00FFu);
   return lut[(bs * 0x00010001u) >> 16u];
 }
 
-// The lane's eight windows at compile-time shifts. C_cur is the 32-bit window at the lane's first state (its bit 31
-// is that window's first stream bit) and C_next the window 32 bits later; S is the states' stride in bits (halves /
-// 2) and J the state's index, so every shift below folds at compile time. The structure: one funnel shift a block,
-// then the windows at fixed shifts.
+// The lane's eight windows at compile-time shifts.
 template <uint S, uint J>
 inline ushort tf_exl3_state_static(uint c_cur, uint c_next) {
   const uint bit = S * J;
@@ -101,9 +95,7 @@ inline half tf_exl3_pick(const device half* table, const threadgroup half* lut, 
   return table != nullptr ? tf_exl3_table_value(table, state, codebook) : tf_exl3_value(state, codebook);
 }
 
-// The device-side twin of frag_get_tg4: two 8-byte loads for a full 16-row tile, the scalar bounds path only when the
-// lane's lower row (home.y + 8) falls past the last live row. The values loaded are the same elements frag_get_in
-// reads, so the arithmetic is unchanged; this only replaces eight scalar loads with two vector ones.
+// The device-side twin of frag_get_tg4: two 8-byte loads for a full 16-row tile.
 inline void tf_frag_get_dev4(thread frag<half>& f, const device half* p, int ld, int r, int c, short2 home, int nr) {
   const int r0 = r + home.y, r1 = r0 + 8, c0 = c + home.x;
   if (r1 < nr) {
@@ -117,8 +109,7 @@ inline void tf_frag_get_dev4(thread frag<half>& f, const device half* p, int ld,
   }
 }
 
-// Two 8-byte loads, one per fragment row, as nax.h's frag_get_tg does for bfloat: rows home.y and home.y + 8, four
-// columns from home.x. `c + home.x` must be a multiple of 4 and `ld` a multiple of 4.
+// Two 8-byte loads, one per fragment row, as nax.h's frag_get_tg does for bfloat: rows home.y and home.y + 8.
 inline void tf_frag_get_tg4(thread frag<half>& f, const threadgroup half* p, int ld, int r, int c, short2 home) {
   const threadgroup half* q = p + (r + home.y) * ld + (c + home.x);
   f = frag<half>(*(const threadgroup half4*)q, *(const threadgroup half4*)(q + 8 * ld));
@@ -135,9 +126,7 @@ inline uint tf_exl3_map_for(uint p, uint halves) {
   return wi | (off << 6) | (next << 11);
 }
 
-// A routed prompt tile's decode job. The release groups a prompt's rows into expert blocks (inference/model.py,
-// revision 314113f8); a tile is one block's row window and one column window, and its weights are the resident pack
-// slice the route names. The trellis strides, width and codebook are our EXL3 pack's own layout.
+// A routed prompt tile's decode job.
 struct TfExl3DigJob {
   const device uchar* trellis;
   ulong tile_k_stride, tile_n_stride;
@@ -166,12 +155,7 @@ inline TfExl3DigJob tf_exl3_dig_job(const device uchar* trellis, constant TfExl3
   return job;
 }
 
-// The lane's window walk over one pack tile: the stream is a ring of 128*halves sixteen-bit states, and a lane owns
-// `States` consecutive states from p0. State k starts halves/2 bits after state k-1 and wraps at the ring. `at[k]` is
-// the threadgroup slot that state's weight lands in; `Cols` is the tile's column stride and `hg`/`h` place a column
-// group. `off`, `sh` and `rel` are the general read's cursor: the bit offset in the state's first word, the shift that
-// brings the second word down, and the word's distance from the lane's first word. `next1..3` are the ring words after
-// the first. The arithmetic is fixed by the pack format; the walk is our own cursor.
+// The lane's window walk over one pack tile: the stream is a ring of 128*halves sixteen-bit states.
 struct TfExl3DigWindows {
   uint at[8], off[8], sh[8], rel[8];
   uint first_word, first_bit, words, next1, next2, next3;
@@ -208,9 +192,7 @@ inline TfExl3DigWindows tf_exl3_dig_windows(uint p0, uint halves, uint hg, uint 
   return walk;
 }
 
-// One routed or dense row's decode job: the pack slice a route names (or the dense call's own trellis), its k/n
-// strides, width and codebook, and the row's output width. The release's MTP and draft rounds feed the same EXL3
-// projection shapes (inference/model.py, revision 314113f8); the pack layout and the row walk are our own.
+// One routed or dense row's decode job: the pack slice a route names (or the dense call's own trellis).
 struct TfExl3DecodeJob {
   const device uchar* trellis;
   ulong tile_k_stride, tile_n_stride;
@@ -241,9 +223,7 @@ inline TfExl3DecodeJob tf_exl3_routed_decode_job(const device uchar* trellis, co
   return job;
 }
 
-// The lane's row walk through one pack tile: its first word, the bit offset in it and the shift/mask that bring the
-// next word down, and the next two words. One runtime funnel shift a block puts the lane's window at a known place;
-// the eight states then sit at compile-time shifts. The pack's ring fixes this arithmetic.
+// The lane's row walk through one pack tile: its first word.
 struct TfExl3RowWalk {
   uint words, first_word, first_bit, shift, mask, next1, next2;
 };
@@ -271,8 +251,7 @@ inline uint tf_exl3_block_word(const device uchar* data, ulong ks, ulong ns, uin
   return tf_exl3_word(tile, wi < words ? wi : wi - words);
 }
 
-// The eight (or four, or two) states a lane owns, from four words already in registers. This is the Fast path's inner
-// decode lifted out so the double-buffered body can run it against the buffer the multiply is not reading.
+// The eight (or four, or two) states a lane owns, from four words already in registers.
 template <uint States>
 inline void tf_exl3_decode_fast(threadgroup half* wx, uint codebook, const uint* at, const uint* off,
                                 const uint* sh, const uint* rel, uint w0, uint w1, uint w2, uint w3) {
@@ -300,27 +279,13 @@ inline void tf_exl3_decode_table(threadgroup half* wx, const device half* table,
 }
 
 // The funnel read in the prompt body, on our map and our ring.
-// A lane owns eight states; the states' sixteen-bit windows are `stride` bits apart (three at the routed pack's
-// halves = 6), so the run of eight windows spans stride*7 + 16 bits -- thirty-seven at halves = 6 -- and two stream
-// words hold it. The run is assembled once a block into the register R (R's top bit is the run's first bit, R's bit 0
-// its last), and the eight windows then sit at compile-time shifts: one shift and one mask a state, where the
-// cursor's select chain was. The values, their order and the k order are the shipped body's, so the output is
-// bit-identical; only the word traffic and the select chain leave.
-// The ring's order is MSB-first inside a word, so the run's bits are assembled the other way round: R's bit (run - 1)
-// is the run's first bit, and the two words' pieces meet without overlapping.
 template <uint States, uint Stride = 3>
 inline void tf_exl3_decode_funnel(threadgroup half* wx, const device half* table, const threadgroup half* lut,
                                   uint codebook, const uint* at, uint b0, uint stride, uint w0, uint w1) {
-  // The windows are Stride bits apart, so the run is 16 + Stride * (States - 1) bits. Halves = 6 is Stride 3 (25 bits
-  // for a four-state lane, 37 for eight); halves = 8 is Stride 4 (28 bits for four). The stride is compile time now,
-  // so the shifts below are literals; the runtime argument is kept for the callers and ignored.
+  // The windows are Stride bits apart, so the run is 16 + Stride * (States - 1) bits.
   (void)stride;
   constexpr uint run = 16u + Stride * (States - 1u);
-  // The run's first bit is w0's bit (31 - b0) and it has to land on r's bit (run - 1). A run of thirty-seven bits
-  // (eight windows) always straddles two words; a run of twenty-five (four windows, the 128-row tile's lane) sits
-  // inside one word when its start leaves room for it (b0 <= 32 - run) and straddles otherwise. The window offsets
-  // are the same (stride a window apart), so the states are the shipped body's -- only the assembly of the run
-  // changes.
+  // The run's first bit is w0's bit (31 - b0) and it has to land on r's bit (run - 1).
   ulong r;
   if (run >= 32u) {
     r = (ulong(w0) << (run - 32u + b0)) | (ulong(w1) >> (64u - run - b0));
@@ -337,7 +302,4 @@ inline void tf_exl3_decode_funnel(threadgroup half* wx, const device half* table
 }
 
 // A threadgroup owns RG sixteen-row groups by CG sixty-four-column groups, one SIMDgroup a (row group, column group).
-// Dense rows share one matrix; grouped rows are sixty-four-row aligned, so one expert owns the tile and its weights
-// decode once. A wider column tile re-reads the activation tile for fewer output tiles. `Fast` keeps the per-state
-// cursor out of the k loop and reads the three stream words an eight-state block can touch.
 template <bool Fast, uint RG, uint CG, bool Table, bool Funnel = false, bool SkipPad = false, uint Rpg = 1, bool F6 = false>

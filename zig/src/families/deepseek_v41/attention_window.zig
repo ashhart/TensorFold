@@ -61,10 +61,7 @@ pub fn windowStage(self: *Stage, comptime diagnostic: bool) !void {
     if (!qkv_merged) for (0..dense_passes) |_| try projection(ep, e, .{ .trellis = w.wkv }, x, raw, scratch, rows, c.hidden, c.head_dim, .bf16);
     attnMark(layer, "wkv", prof, &e);
     if (diagnostic) try DiagnosticObserver.observe(true, self.observer, e, layer, .kv_projection, raw);
-    // The window KV's norm + rope + fp8 pack as ONE dispatch, at the pack's own threadgroup geometry (16 a row, 256
-    // threads) with the shipped rms reduction order, the rope's source expression and the pack's exact
-    // max/scale/code. TF_DSV41_NO_FUSE_KVGLUE=1 is the same-binary control. It is used only where no instrument reads
-    // the intermediate rows, and never above 8 rows (the prompt path keeps the three wide kernels).
+    // The window KV's norm + rope + fp8 pack as ONE dispatch, at the pack's own threadgroup geometry.
     const fuse_kv_glue = rows <= 8 and w.kv_norm.dtype == .bf16 and c.head_dim == 512 and !diagnostic and
         std.c.getenv("TF_DSV41_NO_FUSE_KVGLUE") == null and
         std.c.getenv("TF_DSV41_DOUBLE_ATTN_NORM") == null and
@@ -95,8 +92,7 @@ pub fn windowStage(self: *Stage, comptime diagnostic: bool) !void {
         attnMark(layer, "kv_rope", prof, &e);
         if (diagnostic) try DiagnosticObserver.observe(true, self.observer, e, layer, .kv_rope, raw);
         try p.cache.encodePack(e, raw, chunk, .{ .rows = rows, .width = c.head_dim, .stride = c.head_dim, .packed_stride = kv.cache.ring_stride, .block = 32, .kind = .window_fp8 });
-        // TF_DSV41_DOUBLE_ATTN_PACK -- the window's fp8 cache pack's same-output duplicate (the pack is a pure
-        // function of the row, so the second pass writes the same bytes).
+        // TF_DSV41_DOUBLE_ATTN_PACK -- the window's fp8 cache pack's same-output duplicate.
         if (rows == 1 and std.c.getenv("TF_DSV41_DOUBLE_ATTN_PACK") != null)
             try p.cache.encodePack(e, raw, chunk, .{ .rows = rows, .width = c.head_dim, .stride = c.head_dim, .packed_stride = kv.cache.ring_stride, .block = 32, .kind = .window_fp8 });
         attnMark(layer, "pack", prof, &e);

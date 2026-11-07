@@ -185,12 +185,7 @@ kernel void dsv41_dense_col(const device ushort* x [[buffer(0)]],
 
 struct GateTree { uint rows, k, n, x_stride, bf16_w; };
 static_assert(sizeof(GateTree) == 20, "GateTree must mirror mhc.zig's GateTree");
-// A bit-exact tiled twin of dsv41_dense_col. This kernel computes a 4x4 cell tile per 128-thread threadgroup,
-// stages a 512-k chunk of four activation rows and four weight rows in threadgroup memory, and reproduces the
-// shipped sum exactly: each lane owns the sixteen partials t = lane + 32*i, so the four threadgroup tree levels
-// over 512 become register adds (V[i] += V[i+8], then V[i+4], V[i+2], V[i+1]), after which every lane holds the
-// shipped sums[t] for t = lane, and the last five levels are the shipped simd_shuffle_down over lanes 16, 8, 4, 2,
-// 1. No barrier is in the reduction.
+// A bit-exact tiled twin of dsv41_dense_col.
 kernel void dsv41_gate_tree(const device ushort* x [[buffer(0)]],
                             const device ushort* w [[buffer(1)]],
                             device float* y [[buffer(2)]],
@@ -245,12 +240,7 @@ kernel void dsv41_gate_tree(const device ushort* x [[buffer(0)]],
 
 struct GateTree4 { uint rows, k, n, x_stride, bf16_w; };
 static_assert(sizeof(GateTree4) == 20, "GateTree4 must mirror mhc.zig's GateTree4");
-// The vectorized bit-exact gate: one warp a 2x2 cell tile, no threadgroup memory and no barrier. Lane l owns the
-// sixteen partials t = 16*l + i, contiguous, so a lane reads one 32-byte run of a row per 512-k chunk (two uint4
-// loads) instead of sixteen 2-byte gathers. The shipped reduction order is reproduced exactly: the 512-partial
-// tree levels 256/128/64/32 are simd_shuffle_xor 16/8/4/2 over the sixteen registers, the level-16 step is
-// simd_shuffle_xor 1, and the last four levels are the register adds V[i] += V[i+8], V[i+4], V[i+2], V[i+1] --
-// the same pairs, in the same order, as dsv41_dense_col's threadgroup tree followed by its warp tree.
+// The vectorized bit-exact gate: one warp a 2x2 cell tile, no threadgroup memory and no barrier.
 inline float tf_bf_h(ushort x) { return as_type<float>(uint(x) << 16); }
 inline float tf_w_h(ushort x, uint bf16_w) { return bf16_w ? as_type<float>(uint(x) << 16) : float(as_type<half>(x)); }
 inline ushort tf_h4(const uint4& v, uint j) {
@@ -258,10 +248,6 @@ inline ushort tf_h4(const uint4& v, uint j) {
   return ushort((j & 1u) ? (w >> 16) : (w & 0xffffu));
 }
 // The same bit-exact gate on a wider threadgroup with the x and w tiles staged in threadgroup memory.
-// The order is untouched: a lane still owns the sixteen consecutive partials t = 16*lane + i of every 512-k chunk,
-// still accumulates the chunks in order, and the tree is the same (simd_shuffle_xor 16/8/4/2 over the sixteen
-// registers, then shuffle_xor 1, then the register adds V[i] += V[i+8], V[i+4], V[i+2], V[i+1]). So the gate's
-// logits are bit-identical and the router's picks cannot move.
 #define TF_GATE_R 8u
 #define TF_GATE_C 4u
 #define TF_GATE_BK 512u
@@ -288,8 +274,7 @@ kernel void dsv41_gate_tree8(const device ushort* x [[buffer(0)]],
   const uint base = 16u * lane;  // this lane's first t in every 512-k chunk
   for (uint c = 0; c < d.k; c += TF_GATE_BK) {
     const uint avail = d.k - c < TF_GATE_BK ? d.k - c : TF_GATE_BK;
-    // Stage the threadgroup's tiles: eight rows of x and four columns of w, once a chunk. Sixteen bytes a
-    // thread (eight ushorts), so the global reads coalesce; a scalar copy here is eight times the traffic.
+    // Stage the threadgroup's tiles: eight rows of x and four columns of w, once a chunk.
     threadgroup_barrier(mem_flags::mem_threadgroup);
     {
       constexpr uint XV = TF_GATE_BK / 8u;   // the uint4 slots a row

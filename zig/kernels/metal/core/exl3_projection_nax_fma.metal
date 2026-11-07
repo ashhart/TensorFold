@@ -67,11 +67,9 @@ kernel void tf_exl3_matmul_decode_fma(const device half* x [[buffer(0)]],
       pre[3] = tf_exl3_word(t0, a3);
     }
   }
-  // The four-word pipeline read covers an even width up to sixteen halves; the general path reads the tile per state
-  // (the tensor-unit body's own fallback) for any other width.
+  // The four-word pipeline read covers an even width up to sixteen halves; the general path reads the tile per state.
   const bool pipeline = (halves & 1u) == 0 and halves <= 16;
-  // One accumulator a state, so the eight products of a block meet in a tree at the end instead of in two chains of
-  // four. Eight accumulators make the two the same class.
+  // One accumulator a state, so the eight products of a block meet in a tree at the end instead of in two chains.
   float acc[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
   for (uint bb = b0; bb < b1; ++bb) {
     const uint kb = bb * 16;
@@ -92,8 +90,7 @@ kernel void tf_exl3_matmul_decode_fma(const device half* x [[buffer(0)]],
     }
     // The lane's four k rows of this block, read as two halves each (the rows are adjacent in pairs).
 #if defined(TF_DIAG_DECODE) && TF_DIAG_DECODE == 4
-    // The FMA stays (the weight is still needed) and the constant is a RUNTIME value (the args' rows), so the
-    // compiler cannot fold the multiply away and the arm isolates the read, not the arithmetic.
+    // The FMA stays (the weight is still needed) and the constant is a RUNTIME value (the args' rows).
     const float x0 = float(a.rows), x1 = float(a.rows), x2 = float(a.rows), x3 = float(a.rows);
 #else
     const device half* xr = x + ulong(row) * a.k + kb + 2 * (lane & 3u);
@@ -160,27 +157,17 @@ kernel void tf_exl3_matmul_decode_fma(const device half* x [[buffer(0)]],
   }
 }
 
-// One state, one product: the state's window at a compile-time shift (the static selection) and the lane's activation
-// row for that state. The state's value alone (the window at a compile-time shift, then the codebook's value). The
-// decode is the ALU-bound part of the register-only body, so the multi-row body decodes it ONCE a block and gives the
-// value to every row's product.
+// One state, one product: the state's window at a compile-time shift.
 template <uint S, uint J, bool Lut = false>
 inline float tf_exl3_fma_weight(uint c_cur, uint c_next, const device half* table, uint codebook,
                                 const threadgroup half* lut = nullptr) {
   const ushort s = tf_exl3_state_static<S, J>(c_cur, c_next);
 #if defined(TF_DIAG_DECODE) && (TF_DIAG_DECODE == 1 || TF_DIAG_DECODE == 2)
-  // TF_DIAG_DECODE = 1 keeps the state's extraction and the trellis read and drops the VALUE path (the hash, the byte
-  // sum, the index and the LUT load); = 2 drops the whole decode, so the compiler removes the trellis reads too.
+  // TF_DIAG_DECODE = 1 keeps the state's extraction and the trellis read and drops the VALUE path.
   if (TF_DIAG_DECODE == 1) return float(half(float(s & 0xFFu)));
   return 1.0f;
 #elif defined(TF_DIAG_DECODE) && (TF_DIAG_DECODE == 6 || TF_DIAG_DECODE == 7)
-  // The ladder (TF_DIAG_DECODE = 1) isolates the whole value path (the hash, the byte sum, the index and the load) as
-  // one term; this splits it. d6 KEEPS THE LOAD and drops the index arithmetic (the value is the LUT's entry at a
-  // state-derived index -- the same random access pattern, none of the arithmetic); d7 KEEPS THE INDEX ARITHMETIC and
-  // drops the load (the value is the index's low bit). Both arms' outputs differ from the body's by construction --
-  // they are timing arms, never dispatched by the engine. The mul1 codebook's index is the byte sum of the hash,
-  // folded under 1,024; the table codebooks' value IS the load, so their d6 is the shipped arm and their d7 is the
-  // load alone.
+  // The ladder (TF_DIAG_DECODE = 1) isolates the whole value path.
   if (codebook == 2u) {
 #if TF_DIAG_DECODE == 6
     // The LOAD kept, the index arithmetic gone.
@@ -200,8 +187,7 @@ inline float tf_exl3_fma_weight(uint c_cur, uint c_next, const device half* tabl
   // The table codebooks: the load alone (no index arithmetic exists).
   return float(half(float(s & 1u)));
 #endif
-// THE BRANCH MUST TEST THE VALUE, NOT defined: the define defaults to 0, and defined is true for 0, so the engine was
-// silently taking the ARITHMETIC value path (the format-s own decoder) instead of the threadgroup LUT.
+// THE BRANCH MUST TEST THE VALUE, NOT defined: the define defaults to 0, and defined is true for 0.
 #elif defined(TF_FMA_VALUE_ARITH) && TF_FMA_VALUE_ARITH
   // The ARITHMETIC value path (the format's own decoder) instead of the shared LUT.
   return float(tf_exl3_value(s, codebook));
@@ -212,16 +198,13 @@ inline float tf_exl3_fma_weight(uint c_cur, uint c_next, const device half* tabl
 #endif
 }
 
-// One state, one product, with the weight already decoded. The product is the shipped body's: the same activation
-// pick and the same fma.
+// One state, one product, with the weight already decoded.
 template <uint J>
 inline void tf_exl3_fma_step_w(float* acc_j, float w, float x0, float x1, float x2, float x3) {
   const uint odd = J & 1u, up = (J >> 1) & 1u;
   const float xv = odd == 0 ? (up == 0 ? x0 : x2) : (up == 0 ? x1 : x3);
 #if defined(TF_DIAG_DECODE) && TF_DIAG_DECODE == 3
-  // A removal arm would let the compiler delete the whole decode (the weight would be dead), so the price of the
-  // arithmetic is read as the MARGINAL cost of one more FMA -- the doubling-arm discipline: a doubling arm isolates a
-  // dispatch's marginal cost.
+  // A removal arm would let the compiler delete the whole decode (the weight would be dead).
   *acc_j = fma(xv, w, *acc_j);
 #endif
   *acc_j = fma(xv, w, *acc_j);
@@ -234,16 +217,7 @@ inline void tf_exl3_fma_step(float* acc_j, uint c_cur, uint c_next, const device
   tf_exl3_fma_step_w<J>(acc_j, w, x0, x1, x2, x3);
 }
 
-// The register-only routed decode with the static state selection. The shipped body picks each state's word pair and
-// bit offset at run time (the `rel[k]` cursor); here one funnel shift a block puts the lane's window at a known place
-// and the eight windows then sit at compile-time shifts, so the cursor and the per-state bit offset leave the inner
-// loop. The lane's eight states, the stream words, the bit offsets, the codebook values, the products and the
-// reduction tree are the shipped body's, so the output is bit-identical. S is the states' stride in bits (halves /
-// 2); the body is specialised for the widths the pack uses. `Dense` is the dense one-row path's variant of the same
-// body. The routed decode reads its weights through descriptors[expert] (one expert a row); a dense matrix has one
-// trellis and its strides live in the args, so the dense variant reads them from there and needs no descriptor table
-// at all. The two differ only in where the five fields come from: the walk, the windows, the products, the reduction
-// tree and the output are the same code, so the routed path's values do not move.
+// The register-only routed decode with the static state selection.
 template <bool Dense, uint S, bool Lut = false, bool Two = false>
 inline void tf_exl3_decode_fma_static_body(const device half* x, const device uchar* trellis,
                                             device float* sums, constant TfExl3Args& a,
@@ -289,8 +263,7 @@ inline void tf_exl3_decode_fma_static_body(const device half* x, const device uc
     const uint c_next = Two ? (w1 << walk.first_bit) : ((w1 << walk.first_bit) | ((w2 >> walk.shift) & walk.mask));
     // The lane's four k rows of this block, read as two halves each (the rows are adjacent in pairs).
 #if defined(TF_DIAG_DECODE) && TF_DIAG_DECODE == 4
-    // The FMA stays (the weight is still needed) and the constant is a RUNTIME value (the args' rows), so the
-    // compiler cannot fold the multiply away and the arm isolates the read, not the arithmetic.
+    // The FMA stays (the weight is still needed) and the constant is a RUNTIME value (the args' rows).
     const float x0 = float(a.rows), x1 = float(a.rows), x2 = float(a.rows), x3 = float(a.rows);
 #else
     const device half* xr = x + ulong(row) * a.k + kb + 2 * (lane & 3u);
@@ -338,13 +311,7 @@ inline void tf_exl3_decode_fma_static_body(const device half* x, const device uc
   }
 }
 
-// THE MULTI-ROW DENSE DECODE BODY. One threadgroup computes R rows of the SAME dense matrix, so the weight decode --
-// the ALU-bound part of the register-only body -- is shared by the rows instead of paid once a row (the shipped body
-// is one row a threadgroup: `row = tg.y`, and the dispatch's height is the row count, so a four-row window decodes
-// the attention's dense weights four times over). Each row keeps the shipped per-row arithmetic exactly: the same k
-// blocks, the same warp split, the same accumulator tree, the same cross-warp sum and the same lane shuffles -- so
-// every row's sum is bit-identical to the one-row body's. One decode for the rows that share a weight: the shape the
-// pair and multi-row bodies use.
+// THE MULTI-ROW DENSE DECODE BODY.
 template <uint S, bool Lut = false, uint R = 2>
 inline void tf_exl3_decode_fma_dense_multi_body(const device half* x, const device uchar* trellis,
                                                  device float* sums, constant TfExl3Args& a,
@@ -423,9 +390,7 @@ inline void tf_exl3_decode_fma_dense_multi_body(const device half* x, const devi
       tf_exl3_fma_step_w<7>(&acc[r][7], wgt[7], x0, x1, x2, x3);
     }
   }
-  // The eight accumulators meet in a tree: the first four are the near column, the last four the far one. One row a
-  // turn, with the threadgroup's partials reused: the tree, the cross-warp sum and the lane shuffles are the shipped
-  // body's, so the row's sum does not move.
+  // The eight accumulators meet in a tree: the first four are the near column, the last four the far one.
   for (uint r = 0; r < R; ++r) {
     const uint row = row0 + r;
     if (row >= a.rows) break;

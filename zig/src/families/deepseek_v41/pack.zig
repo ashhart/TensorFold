@@ -241,10 +241,6 @@ pub const Pack = struct {
     }
 
     /// Drops the page cache of bytes just read: on unified memory the cached copy competes with the device.
-    /// The shared cache API carries the Linux advice (checkpoint_drop is Linux-only by design, #1887, so
-    /// it defers to a no-op on macOS); the device-relevant drop is the local msync(INVALIDATE) below, the
-    /// same mechanism as core/checkpoint_file_cache.release, scoped to the range this pack read. Best
-    /// effort: a failed hint changes no bytes.
     extern "c" fn msync(addr: *anyopaque, len: usize, flags: c_int) c_int;
     const ms_sync: c_int = 0x0002; // <sys/mman.h> (macOS)
     const ms_invalidate: c_int = 0x0010;

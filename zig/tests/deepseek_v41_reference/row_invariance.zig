@@ -1,7 +1,4 @@
 //! Row invariance: a row's bits at a one-row decode step against the same row inside a k+1 verify window.
-//! The drafting contract (drafted == plain, token for token) needs every decode projection to give a row the
-//! same bits whatever the window's row count; the one-row path splits k sixteen ways while a wider window does
-//! not, so this measures where it holds and where it does not. TF_ROW_INV=1.
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");

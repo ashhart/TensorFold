@@ -32,9 +32,7 @@ const rotatedBytes = core.rotatedBytes;
 
 pub const ReduceArgs = extern struct { splits: u32, n: u32 };
 
-/// Which body a projection call takes: the lane's own plan over the pack's shapes, the resident
-/// pipelines and the call's hints. The plan names the pipeline, the split count and the dispatch
-/// geometry; `stages` only encodes it.
+/// Which body a projection call takes: the lane's own plan over the pack's shapes.
 pub const Plan = struct {
     pipeline: mtl.Pipeline,
     splits: usize,
@@ -49,13 +47,9 @@ pub fn planBody(p: *const Pipelines, args: Args, r: Rows) Plan {
     const decode_nax = p.decode_nax != null and a.indexed == 1 and !knobs.scalar_experts;
     // The compact-decode knob: the one-row, 1 KB-threadgroup decode tile.
     const compact = p.decode_nax_c != null and decode_nax and (knobs.decode_compact or a.rows > 1);
-    // The routed-table knob (default on): the routed decode body reads the codebook value from the resident
-    // table instead of deriving it in the ALU. The table holds the format's own decoder's values, entry for entry
-    // (the codebook check), so the decoded tile and the product are bit-identical: only the ALU work moves to a load.
-    // Turning it off restores the ALU body for a same-binary A/B.
+    // The routed-table knob (default on): the routed decode body reads the codebook value from the resident table.
     const routed_table = knobs.routed_table;
-    // The two-word funnel read is bit-identical at halves = 6 (the routed pack's width) and cuts the stage's stream
-    // traffic in half. Turning it off restores the four-word body for a same-binary A/B.
+    // The two-word funnel read is bit-identical at halves = 6.
     const funnel = knobs.funnel and a.halves == 6;
     const decode_pipe: ?mtl.Pipeline = if (decode_nax) blk: {
         if (compact) {
@@ -71,54 +65,24 @@ pub fn planBody(p: *const Pipelines, args: Args, r: Rows) Plan {
     // The register-only knob, off, restores the tensor-unit body for a same-binary A/B.
     const fma_off = knobs.fma_off;
     const fma = p.decode_fma != null and decode_nax and a.rows <= moe_split_rows and !fma_off;
-    // The static state selection in the register-only body. Turning it off restores the shipped cursor
-    // for a same-binary A/B; the outputs are bit-identical (the hash is equal to the shipped body's at the
-    // pack's routed shapes).
+    // The static state selection in the register-only body.
     const fma_static = p.decode_fma_static != null and decode_nax and a.rows <= moe_split_rows and !fma_off and fmaStaticOn();
-    // The same body with the codebook read from the 1024-entry threadgroup LUT (the mul1 value depends only on the
-    // state's byte sum, so 1,024 entries hold every value; the LUT's values are the table's, entry for entry, so the
-    // output is bit-identical).
+    // The same body with the codebook read from the 1024-entry threadgroup LUT.
     const fma_static_lut = p.decode_fma_static_lut != null and decode_nax and a.rows <= moe_split_rows and !fma_off and
         fmaStaticOn() and fmaLutOn();
-    // A very wide one-row matrix already has thousands of column tiles, so splitting it multiplies threadgroups it
-    // does not need and adds a partials round trip; the wide-splits knob selects that.
+    // A very wide one-row matrix already has thousands of column tiles.
     const wide = a.n >= 16384;
     const wide_splits: usize = knobs.split_wide;
-    // The one-row split order for every decode-width call, rows <= 8 included, so a verify window's row gets the same
-    // bits as a solo step (row_invariance.zig covers it; turning it off restores the old window
-    // arithmetic). Rows == 1 takes this path either way, so no shipped stream's bits move.
+    // The one-row split order for every decode-width call, rows <= 8 included.
     const row_invariant = knobs.row_invariant;
-    // The register-only body on the dense one-row path. The dense shapes (the attention's four projections and the
-    // shared expert's three) run the 128-column threadgroup-tile body today, at half the rate the routed stage
-    // reaches on the same shape class; this body is the routed decode's own structure (the wide form's: one warp a
-    // sixteen-column tile, the decoded weights in registers, no threadgroup weight tile, no barrier in the k walk, no
-    // split-K and no partials round trip). Its reduction order is the register-only body's, so the flag's arm owes
-    // the FP64 reference for the dense one-row class. The drafter's own blocks are packed at halves = 8 (the
-    // backbone's are 10/12), and the register-only dense body has a halves == 8 branch. The flag is now a VALUE test:
-    // unset or any value but "0" is the body; turning it off restores the shipped body for a
-    // same-binary A/B. (The old presence test armed the flag on "0" -- the record's watch-out; that footgun is fixed
-    // here.)
+    // The register-only body on the dense one-row path.
     const fma_dense_h8 = knobs.fma_dense_h8;
     const fma_dense_ok = p.decode_fma_dense != null and a.indexed == 0 and a.routed == 0 and a.rows <= 8 and
         a.n % 16 == 0 and a.k % 16 == 0 and (a.halves == 6 or a.halves == 10 or a.halves == 12 or
         (a.halves == 8 and fma_dense_h8));
-    // The MULTI-ROW dense body -- R rows a threadgroup, so the weight decode is shared by the rows. The shipped dense
-    // body is one row a threadgroup (`row = tg.y`, the dispatch's height is the row count), so a four-row verify
-    // decodes the attention's dense weights four times over the same bytes. Every row keeps the shipped per-row
-    // arithmetic, so the rows' sums do not move. The multi-row knob names the rows a threadgroup (2 or 4;
-    // 0 restores the one-row body).
+    // The MULTI-ROW dense body -- R rows a threadgroup, so the weight decode is shared by the rows.
     const multi_rows: u32 = knobs.fma_dense_multi;
-    // (the arm): THE CEIL HEIGHT. The multi body's partial group is already guarded in the kernel (`if (row >=
-    // a.rows) break;`), so a row count that is not a multiple of the body's R can still share ONE weight decode per
-    // group: the height is ceil(rows / R) instead of rows / R. The even row counts are unchanged (the height is the
-    // same), so the shipped paths stay bit-identical. Without it a FIVE-ROW window (the depth-4 drafter) falls back
-    // to the one-row body and decodes the dense weights once a row. THE CEIL HEIGHT IS THE DEFAULT. The multi body-s
-    // height is ceil(rows/R) instead of rows/R, so a window whose row count is not a multiple of R still shares ONE
-    // weight decode per group instead of falling back to the one-row body (which decodes the dense weights once a row
-    // -- the ALU-bound part of that body). The kernel-s own guard (`if (row >= a.rows) break;`) skips the padded
-    // rows, so every row keeps the shipped per-row arithmetic and the output is BIT-IDENTICAL (the band's agreement
-    // is the control's to the token at two, three and four rows, and the sea canon holds in every arm).
-    // Turning the ceil height off restores the old height.
+    // (the arm): THE CEIL HEIGHT.
     const multi_ceil = knobs.fma_dense_multi_ceil;
     const fma_dense_multi4 = fma_dense_ok and p.decode_fma_dense_multi4 != null and multi_rows == 4 and
         a.rows >= 4 and (multi_ceil or a.rows % 4 == 0);
@@ -130,26 +94,20 @@ pub fn planBody(p: *const Pipelines, args: Args, r: Rows) Plan {
     else
         moe_splits;
     a.splits = @intCast(splits);
-    // Tile shape: rows a threadgroup covers (a dense tile can span more rows because its weights are shared) and
-    // columns it covers (a wider column tile re-reads the activation tile fewer times).
+    // Tile shape: rows a threadgroup covers.
     const nax_tile: usize = if (a.indexed != 0) (if (r.tile_rows != 0) r.tile_rows else 64) else knobs.nax_tile_rows;
-    // A 256-row tile wants the narrower column tile so the threadgroup stays at 512 threads. A routed chunk's column
-    // tile is the inherited dense constant (64) unless the routed-columns knob says otherwise: a 128-column tile
-    // halves the number of column tiles and therefore the activation fragment re-reads, at twice the decoded weight
-    // tile and half the threadgroups. Exactness is unchanged (same 16-k block order, hash-identical).
+    // A 256-row tile wants the narrower column tile so the threadgroup stays at 512 threads.
     const moe_cols = if (a.indexed != 0) knobs.moe_cols else 0;
     const nax_cols: usize = if (a.indexed != 0 and nax_tile >= 256) 64 else if (moe_cols != 0) moe_cols else (knobs.nax_cols orelse if (a.indexed != 0) 128 else 64);
     const tile_id: usize = ((nax_tile / 64) - 1) * 2 + (nax_cols / 64 - 1);
     const nax_pick: ?mtl.Pipeline = p.prefill_nax_tiles[tile_id];
-    // The funnel read in the routed prompt tile . The routed pack's width is halves = 6, so the kernel's own guard
-    // takes it; at another width the kernel reads the shipped path.
+    // The funnel read in the routed prompt tile .
     const nax_funnel_pick: ?mtl.Pipeline = if (funnelPrefillOn() and a.indexed != 0 and tile_id == 0)
         p.prefill_nax_funnel
     else
         null;
     const nax_funnel = nax_funnel_pick != null;
-    // The same tile with the grouping's padded rows skipped. The 128-row tile (tile_id 2) is the same body with eight
-    // row groups; the grouped plan pads each expert's block to the tile's own width, so the two travel together.
+    // The same tile with the grouping's padded rows skipped.
     const nax_skip_pad_pick: ?mtl.Pipeline = if (skipPadOn() and a.indexed != 0)
         (if (tile_id == 0)
             p.prefill_nax_skip_pad
@@ -160,23 +118,14 @@ pub fn planBody(p: *const Pipelines, args: Args, r: Rows) Plan {
     else
         null;
     const nax_skip_pad = nax_skip_pad_pick != null;
-    // The routed tile with the funnel path as its only path . The pack's routed width is halves = 6, the funnel
-    // path's width; the kernel is only selected there.
+    // The routed tile with the funnel path as its only path .
     const nax_funnel_only_pick: ?mtl.Pipeline = if (funnelOnlyOn() and a.indexed != 0 and tile_id == 0 and
         nax_skip_pad_pick != null)
         p.prefill_nax_funnel_only
     else
         null;
     const nax_funnel_only = nax_funnel_only_pick != null;
-    // (THE LEVER, default off): THE DENSE TILE AT EIGHT ROWS. The drafter's conditioning projects the taps ring's
-    // 128-row window through main_proj, and the window WRAPS (the ring is circular): it is TWO calls whose row counts
-    // are (128-first) and (first), so half the rounds run the smaller piece on 1..63 rows -- and the tensor-unit
-    // dense tile's gate is 64 rows, so that piece ran on the general/shared body instead of the tile. The flag lets
-    // the DENSE (non-indexed, non-routed) calls take the tile from EIGHT rows up. The only dense calls in that range
-    // in the whole engine are the conditioning's wrapped piece: the trunk's own dense calls are 1 row a token, 2-4 a
-    // verify window and 3,619 a prompt, and the drafter's blocks are 2-5. The grouped routed calls are multiples of
-    // 64 and the indexed ones are not on this path, so nothing else moves. The eight-row knob arms it; unset
-    // or 0 is the shipped path.
+    // (THE LEVER, default off): THE DENSE TILE AT EIGHT ROWS.
     const dense8 = knobs.nax_dense8;
     // The gate is the CALLER's hint and the flag together: the hint alone moves nothing.
     const dense8_on = dense8 and r.dense8;
@@ -184,16 +133,14 @@ pub fn planBody(p: *const Pipelines, args: Args, r: Rows) Plan {
     const nax = nax_pick != null and a.k % 64 == 0 and
         a.rows >= (if (dense8_on and a.indexed == 0 and a.routed == 0) @min(nax_min_rows, 8) else nax_min_rows) and
         ((a.indexed == 0 and a.routed == 0) or grouped_nax);
-    // The dense 128x64 tile's double-buffered twin: one barrier a block, the next block's decode in flight with the
-    // multiply. Only the dense shapes (the three attention projections and the shared expert) take it.
+    // The dense 128x64 tile's double-buffered twin: one barrier a block.
     const nax_dense_db = p.prefill_nax_dense_db != null and nax and a.indexed == 0 and tile_id == 2 and denseDb();
     if (nax_dense_db and !pipe.nax_db_logged) {
         pipe.nax_db_logged = true;
         std.log.info("exl3: nax31 dense double-buffered body selected rows={d} tile={d}", .{ a.rows, nax_tile });
     }
     const shared = !nax and !decode_nax and p.prefill != null and a.rows >= knobs.shared_min_rows and a.indexed == 0 and a.routed == 0;
-    // The table-decode knob: the one-row / narrow-window matmul body reads the codebook value from the 3 x
-    // 65536-half table instead of deriving it (same values, bit-identical output).
+    // The table-decode knob: the one-row / narrow-window matmul body reads the codebook value from the 3 x 65536-half.
     const matmul_tab = p.matmul_tab != null and a.indexed == 0 and a.routed == 0 and a.rows <= 8 and tableDecodeOn();
     // The same static body with the codebook read from the 1024-entry threadgroup LUT.
     const matmul_static_lut = p.matmul_static_lut != null and a.indexed == 0 and a.routed == 0 and a.rows == 1 and
@@ -210,8 +157,7 @@ pub fn planBody(p: *const Pipelines, args: Args, r: Rows) Plan {
     // The geometry must follow the pipeline: the static one-row body is 128 columns and 256 threads.
     const group_cols: usize = if (fma or fma_static or fma_static_lut or fma_dense) 16 else if (matmul_static_lut) 128 else if (nax) nax_cols else if (decode_nax) 32 else 16;
     const height: usize = if (fma_dense_multi4) (a.rows + 3) / 4 else if (fma_dense_multi2) (a.rows + 1) / 2 else if (fma or fma_static or fma_static_lut or fma_dense) a.rows else if (splits > 1 and !decode_nax) splits else if (a.indexed == 1 and !decode_nax) a.rows else (@as(usize, a.rows) + group_rows - 1) / group_rows;
-    // The warp32 tile runs four warps (a warp owns two sixteen-row groups), the other nax tiles one warp a
-    // sixteen-row group.
+    // The warp32 tile runs four warps (a warp owns two sixteen-row groups).
     const nax_warp32: bool = nax and a.indexed != 0 and tile_id == 2 and warp32On() and nax_skip_pad_pick != null;
     const threads: usize = if (fma or fma_static or fma_static_lut or fma_dense or fma_dense_multi2 or fma_dense_multi4) 32 * p.fma_warps else if (nax) (if (nax_warp32) nax_tile / 32 * 32 * (nax_cols / 64) else nax_tile / 16 * 32 * (nax_cols / 64)) else if (decode_nax) 32 * moe_rows else if (matmul_static_lut) 256 else if (shared) 128 else 32;
     // One split dispatch over a window: a row group a threadgroup (the tile spans eight rows), the splits in y.
@@ -278,10 +224,7 @@ pub fn stages(p: *const Pipelines, e: mtl.ComputeEncoder, args: Args, trellis: V
     bind(e, descriptors, 5);
     bind(e, partials, 6);
     if (p.codebook_table) |t| e.setBuffer(t, 0, 7);
-    // The double-gemm measurement repeats the dense GEMM dispatch (rotate passes outside the loop), so
-    // the prefill delta is the in-situ dense GEMM time itself, separated from the rotate passes that
-    // the attention measurement also doubles. The n-bounded form duplicates only the dense calls whose n is
-    // below n; unset keeps the whole-set form.
+    // The double-gemm measurement repeats the dense GEMM dispatch (rotate passes outside the loop).
     const gemm_passes: usize = if (a.indexed == 0) blk: {
         if (knobs.double_gemm) break :blk 2;
         if (knobs.double_gemm_n) |want| {
@@ -310,16 +253,13 @@ pub fn stages(p: *const Pipelines, e: mtl.ComputeEncoder, args: Args, trellis: V
     bind(e, routes, 6);
     bind(e, descriptors, 7);
     const rotate_out_width: usize = (a.n / 128 + 3) / 4;
-    // Instrument: the double-epilogue measurement repeats the scale+bias pass. It reads the sums and writes the
-    // same values again, so the reply does not move; the delta isolates the pass.
+    // Instrument: the double-epilogue measurement repeats the scale+bias pass.
     const rotate_out_passes: usize = if (knobs.double_rotate_out) 2 else 1;
     for (0..rotate_out_passes) |_| e.dispatchGroups(.{ .width = rotate_out_width, .height = a.rows }, .{ .width = 128 });
     e.barrier();
 }
 
-/// The routed SwiGLU plus the down projection's rotate_in in one pass. `rotated` must be the scratch buffer's base
-/// (the same view the down projection's call takes); rows are written at each row's grouped destination or, with
-/// `destination == null`, at the row itself. The caller then sends the down projection with `prerotated`.
+/// The routed SwiGLU plus the down projection's rotate_in in one pass.
 pub const SwiGLURot = struct {
     rows: usize,
     k: usize,
@@ -354,9 +294,7 @@ pub fn encodeSwiGLUPreRotate(p: *const Pipelines, e: mtl.ComputeEncoder, gate: V
 }
 
 test "EXL3 scratch is row compact and bounded independently of full matrices" {
-    // 214,016 was the pre-split-K bound; the formula now adds the split-K partials and the fused gate+up split room
-    // (one_row_splits, moeSplitCount). The property is unchanged: the scratch is bounded by rows, never by the full
-    // matrices.
+    // 214,016 was the pre-split-K bound; the formula now adds the split-K partials and the fused gate+up split room.
     try std.testing.expectEqual(@as(usize, 1025024), try scratchBytes(5120, 2304, 11));
     try std.testing.expectError(error.InvalidExl3Rows, scratchBytes(128, 128, 0));
     try std.testing.expectError(error.UnsupportedExl3Shape, scratchBytes(129, 128, 1));

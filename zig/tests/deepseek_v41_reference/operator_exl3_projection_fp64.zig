@@ -1,6 +1,4 @@
 //! EXL3 one-row projection: the kernel's fp32 accumulation against the FP64 oracle over the same resident bytes.
-//! The oracle (`projection.zig`) decodes the same trellis in float64 and applies the same FP32 rotation boundaries,
-//! so a disagreement here is the kernel's accumulation — the thing the canon hashes cannot see.
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
@@ -90,8 +88,7 @@ pub fn projectionCase(device: mtl.Device, queue: mtl.Queue, k: usize, n: usize, 
     if (differing > n / 32 and worst > 0.01) return error.Exl3ProjectionDiverges;
 }
 
-// The dense path's body folds a block's sixteen products into the running sum in k order; the register-only body
-// keeps one accumulator a state and meets them in a tree.
+// The dense path's body folds a block's sixteen products into the running sum in k order.
 extern "c" fn setenv(key: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 extern "c" fn unsetenv(key: [*:0]const u8) c_int;
 
@@ -163,16 +160,7 @@ pub fn denseRegisterOnlyCase(device: mtl.Device, queue: mtl.Queue, k: usize, n: 
     if (nrms_register_only > 1e-3) return error.Exl3ProjectionDiverges;
 }
 
-// THE DRAFTER'S DENSE CLASS. The drafter's three blocks are packed at halves = 8 (the pack's `mtp_bits: 4`: the
-// trellis's third dim is 64 and the width's halves are that over 8), and the register-only dense body -- the routed
-// decode's own structure (one warp a sixteen-column tile, the decoded weights in registers, no threadgroup weight
-// tile, no barrier in the k walk, no split-K and no partials round trip) -- has a halves == 8 branch that
-// TF_DSV41_EXL3_FMA_DENSE_H8 arms.
-// At the drafter's own TWO-row window the flag also puts the call on the MULTI-ROW body, so one weight decode
-// serves the two rows: the shipped dense body is one row a threadgroup, so a two-row drafter decodes its dense
-// weights twice over the same bytes.
-// GOAL-UNLOCK's band asks that the changed path's agreement with the FP64 truth be no worse than the shipped
-// path's.
+// THE DRAFTER'S DENSE CLASS.
 pub fn denseRegisterOnlyRows(device: mtl.Device, queue: mtl.Queue, k: usize, n: usize, halves: u8, codebook: exl3.format.Codebook, rows: usize, seed: u64) !void {
     var p = try exl3.Pipelines.loadWith(device, std.testing.allocator);
     defer p.deinit();
@@ -206,13 +194,11 @@ pub fn denseRegisterOnlyRows(device: mtl.Device, queue: mtl.Queue, k: usize, n: 
     defer s.deinit();
     const reference = try std.testing.allocator.alloc(f32, rows * n);
     defer std.testing.allocator.free(reference);
-    // The oracle, a row at a time: the same FP64 decode of the same trellis over each row's own
-    // activation, so the truth is the reference chain's own row arithmetic widened to float64.
+    // The oracle, a row at a time: the same FP64 decode of the same trellis over each row's own activation.
     for (0..rows) |r| {
         try oracle.applyF32Trellis(matrix, x[r * k ..][0..k], reference[r * n ..][0..n], &s);
     }
-    // Arm 0: the SHIPPED body (the 128-column threadgroup tile). Arm 1: the register-only body (the
-    // one-row body at one row, the multi-row body at two), with the halves-8 branch armed.
+    // Arm 0: the SHIPPED body (the 128-column threadgroup tile).
     const arms = [_]struct { dense: bool, h8: bool }{
         .{ .dense = false, .h8 = false },
         .{ .dense = true, .h8 = true },
@@ -255,9 +241,7 @@ pub fn denseRegisterOnlyRows(device: mtl.Device, queue: mtl.Queue, k: usize, n: 
     if (nrms_register_only > 1e-3) return error.Exl3ProjectionDiverges;
 }
 
-/// THE CONDITIONING'S TAP PROJECTION -- THE SHIPPED BODY AGAINST THE TENSOR-UNIT TILE. The conditioning's 128-row
-/// window wraps, so half the rounds run the smaller piece on 1..63 rows, and the tile's gate is 64 rows: that piece
-/// ran on the general/shared body. The lever (the caller's eight-row hint) puts it on the tile.
+/// THE CONDITIONING'S TAP PROJECTION -- THE SHIPPED BODY AGAINST THE TENSOR-UNIT TILE.
 pub fn denseTileRows(device: mtl.Device, queue: mtl.Queue, k: usize, n: usize, halves: u8, codebook: exl3.format.Codebook, rows: usize, seed: u64) !void {
     var p = try exl3.Pipelines.loadWith(device, std.testing.allocator);
     defer p.deinit();
@@ -294,8 +278,7 @@ pub fn denseTileRows(device: mtl.Device, queue: mtl.Queue, k: usize, n: usize, h
     for (0..rows) |r| {
         try oracle.applyF32Trellis(matrix, x[r * k ..][0..k], reference[r * n ..][0..n], &s);
     }
-    // Arm 0: the SHIPPED body for a sub-64-row dense call (the general/shared body). Arm 1: the
-    // tensor-unit dense tile (the caller's eight-row hint, with the flag armed).
+    // Arm 0: the SHIPPED body for a sub-64-row dense call (the general/shared body).
     const arms = [_]struct { dense8: bool }{
         .{ .dense8 = false },
         .{ .dense8 = true },
@@ -349,9 +332,7 @@ pub fn denseTileRows(device: mtl.Device, queue: mtl.Queue, k: usize, n: usize, h
     if (nrms_tile > 1e-3) return error.Exl3ProjectionDiverges;
 }
 
-/// THE CONDITIONING'S THREE PER-BLOCK `wkv` PROJECTIONS -- THE SHIPPED THREE DENSE CALLS AGAINST THE ONE GROUPED
-/// INDEXED DISPATCH. The fused call pads each block's rows to the tile's 64-row groups, so the shipped arm's rows
-/// are compared with the fused arm's first `rows` rows of each group (the engine reads no other rows).
+/// THE CONDITIONING'S THREE PER-BLOCK `wkv` PROJECTIONS.
 pub fn condWkvFusion(device: mtl.Device, queue: mtl.Queue, k: usize, n: usize, halves: u8, codebook: exl3.format.Codebook, rows: usize, seed: u64) !void {
     var p = try exl3.Pipelines.loadWith(device, std.testing.allocator);
     defer p.deinit();
@@ -383,8 +364,7 @@ pub fn condWkvFusion(device: mtl.Device, queue: mtl.Queue, k: usize, n: usize, h
         };
         try matrices[g].validate();
     }
-    // The window: `rows` distinct input rows, written three times (one per block's group) and zero-padded to
-    // the tile's 128 rows a group.
+    // The window: `rows` distinct input rows, written three times.
     const groups = 3;
     const group_rows: usize = 128;
     const x3 = try b.get(u16, groups * group_rows * k);

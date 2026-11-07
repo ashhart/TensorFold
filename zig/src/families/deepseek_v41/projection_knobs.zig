@@ -1,8 +1,4 @@
 //! The V4.1 family's EXL3 projection configuration.
-//!
-//! This is the only place the lane's projection knobs are read from the environment. The core
-//! projection receives the resolved values and carries no family names; the defaults here are
-//! the shipped bodies, so an unset environment is the engine's normal path.
 const std = @import("std");
 const exl3 = @import("core").exl3_projection;
 

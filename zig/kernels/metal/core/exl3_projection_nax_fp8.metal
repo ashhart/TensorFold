@@ -65,13 +65,10 @@ inline void tf_exl3_prefill_body_fp8(threadgroup half* wx, const device half* x,
   }
   const int c0 = int(nb + sgc * 64u);
   const int r0 = int(rb + sgr * 16u);
-  // A bf16 destination is the caller's final output (the pre-rotated pack has no epilogue transform), so it carries
-  // the call's y stride; an f32 destination is the internal sums tile and is contiguous at n. sizeof(float) == 4
-  // separates the two instantiations.
+  // A bf16 destination is the caller's final output (the pre-rotated pack has no epilogue transform).
   const int out_ld = (sizeof(O) == 4) ? int(a.n) : int(a.y_stride);
   if (scales != nullptr) {
-    // The per-output-row E4M3 scale. One multiply an output, applied to the finished accumulator, so the MMA ran on
-    // the codes alone and the row scale stays exact.
+    // The per-output-row E4M3 scale.
     TF_UNROLL
     for (short e = 0; e < 8; e++) {
       lo0[e] *= scales[c0 + home.x + (e & 3)];

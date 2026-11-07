@@ -42,10 +42,7 @@ kernel void tf_exl3_swiglu_prerotate(const device ushort* gate [[buffer(0)]],
     rotated[ulong(dst) * d.output_stride + base + lane + 32u * j] = half(v[j] * 0.08838834764831845f);
 }
 
-// Wide one-row / narrow-window tile: eight SIMDgroups each own one 16-column tile of the same 128-column group, so a
-// threadgroup reads eight contiguous n tiles of a k block, and the shared activation tile is double buffered, so a
-// block costs one threadgroup barrier instead of two. Each SIMDgroup runs the same decode, the same 16-product FP32
-// sum and the same k order as tf_exl3_matmul_tab, so the output is bit-identical.
+// Wide one-row / narrow-window tile: eight SIMDgroups each own one 16-column tile of the same 128-column group.
 template <bool Table>
 inline void tf_exl3_matmul_wide_impl(const device half* x, const device uchar* trellis,
                                      device float* sums, constant TfExl3Args& a,
@@ -104,8 +101,7 @@ inline void tf_exl3_matmul_wide_impl(const device half* x, const device uchar* t
   }
   for (uint b = b0; b < b1; ++b) {
     threadgroup float* xx = xx_all + ((b - b0) & 1u) * 128;
-    // One warp loads the activation tile for all eight: 8 rows x 16 k, zeros past a.rows. The other seven warps
-    // decode their weight tiles while it runs, so the load's latency is covered by work, not a second barrier.
+    // One warp loads the activation tile for all eight: 8 rows x 16 k, zeros past a.rows.
     if (sg == 0) {
       for (uint j = lane; j < 128; j += 32) {
         const uint row = rb + j / 16;
@@ -158,12 +154,7 @@ inline void tf_exl3_matmul_wide_impl(const device half* x, const device uchar* t
   }
 }
 
-// The wide one-row body with the static state selection. The shipped body picks each state's word pair and bit offset
-// at run time (the `rel[k]` cursor the record named as one of the body's two bounds); here one funnel shift a block
-// puts the lane's window at a known place and the eight windows then sit at compile-time shifts, so the cursor leaves
-// the inner loop and the lane reads three stream words, not four. The tile, the activation load, the 16-product FP32
-// sums and the k order are the shipped body's, so the output is bit-identical. S is the states' stride in bits
-// (halves / 2) and must satisfy 7*S + 16 <= 64.
+// The wide one-row body with the static state selection.
 template <uint S>
 inline void tf_exl3_matmul_wide_static_impl(const device half* x, const device uchar* trellis,
                                             device float* sums, constant TfExl3Args& a,
@@ -222,8 +213,7 @@ inline void tf_exl3_matmul_wide_static_impl(const device half* x, const device u
       prefetch[1] = tf_exl3_word(tn, a1);
       prefetch[2] = tf_exl3_word(tn, a2);
     }
-    // The lane's window: C_cur is the 32-bit window at the lane's first state (its bit 31 is that window's first
-    // stream bit) and C_next the window 32 bits later.
+    // The lane's window: C_cur is the 32-bit window at the lane's first state.
     const uint c_cur = (w0 << off0) | ((w1 >> sh0) & m0);
     const uint c_next = (w1 << off0) | ((w2 >> sh0) & m0);
     #define TF_EXL3_W(J) tf_exl3_state_static<S, J>(c_cur, c_next)
@@ -268,9 +258,7 @@ kernel void tf_exl3_matmul_wide_static_lut(const device half* x [[buffer(0)]],
   threadgroup half wx[8 * 256];
   threadgroup float xx[2 * 128];
   threadgroup half lut[1024];
-  // The LUT holds the mul1 values (the value depends only on the state's byte sum), so it is only the right table for
-  // that codebook; any other reads the resident table, and any width the static selection is not specialised for
-  // reads the shipped body's states.
+  // The LUT holds the mul1 values (the value depends only on the state's byte sum).
   if (a.codebook != 2u) {
     tf_exl3_matmul_wide_impl<true>(x, trellis, sums, a, routes, descriptors, partials, table, lane, sg, tg, wx, xx);
     return;

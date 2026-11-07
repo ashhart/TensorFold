@@ -1,14 +1,4 @@
-// ! The shared Zig/Metal argument structs are HAND-WRITTEN mirrors. This module reads the embedded kernel ! source
-// at COMPTIME and compares each Metal struct's field list, in order, to the Zig struct's own: ! a field added,
-// removed, renamed, reordered or retyped on either side fails the build. ! ! The bug class: `Params` gained
-// `layer`/`skip_mask` and the Metal struct did not, so ! the kernel's `scale` read `layer`'s bits -- a denormal --
-// and every index score came out 0.0 with no ! error anywhere. The 76/80-byte assertion catches a size change but
-// not a reorder or a same-size swap. ! Added the field-list check for that one pair; wired ten more; points it at !
-// every shared pair in the family and models the C layout rather than a flat byte sum. ! ! `enum(u32)` maps to
-// `uint`, `i64` to `long`, `[N]T` to `T name[N]`, `device const uchar*` to an ! eight-byte address, and each
-// field's offset (C alignment, trailing padding included) must equal ! `@offsetOf(T, name)`; the total must equal
-// `@sizeOf(T)`. The runtime `static_assert`s in the .metal files ! say the same thing at boot;
-// `tools/zig/check_dsv41_metal_mirrors.sh` compiles them at build time.
+// !
 
 const std = @import("std");
 
@@ -21,8 +11,7 @@ fn isSpace(c: u8) bool {
 }
 
 const Part = struct {
-    /// The declaration's type as its last whitespace-separated token (qualifiers dropped), or "" when
-    /// this comma group only names another declarator of the statement's type.
+    /// The declaration's type as its last whitespace-separated token (qualifiers dropped).
     ty: []const u8,
     name: []const u8,
     count: u32,
@@ -76,8 +65,7 @@ fn zigCount(comptime ft: type) u32 {
     };
 }
 
-/// The Metal struct `name` in `src` must declare `T`'s fields, in order, with matching C types, array
-/// lengths and C-layout offsets. Called from a `comptime` block inside `T`'s own body.
+/// The Metal struct `name` in `src` must declare `T`'s fields, in order, with matching C types.
 pub fn check(comptime T: type, comptime src: []const u8, comptime name: []const u8) void {
     @setEvalBranchQuota(1_000_000);
     const head = std.fmt.comptimePrint("struct {s} {{", .{name});
@@ -95,8 +83,7 @@ pub fn check(comptime T: type, comptime src: []const u8, comptime name: []const 
 
     var lines = std.mem.splitScalar(u8, body, '\n');
     while (lines.next()) |raw| {
-        // A declaration never spans a line here; drop a trailing comment, then walk `;`-statements whose
-        // comma-separated declarators share the statement's leading type.
+        // A declaration never spans a line here; drop a trailing comment.
         const line = if (std.mem.indexOf(u8, raw, "//")) |c| raw[0..c] else raw;
         var stmts = std.mem.splitScalar(u8, line, ';');
         while (stmts.next()) |stmt| {
@@ -133,8 +120,7 @@ pub fn check(comptime T: type, comptime src: []const u8, comptime name: []const 
         const want = zigSpelling(ft, @typeName(T), fname);
         const is_address = types[i].len > 0 and types[i][types[i].len - 1] == '*';
         const type_ok = if (is_address)
-            // A device pointer in the kernel is an eight-byte address on the Zig side (written into a
-            // device buffer, not passed through setValue).
+            // A device pointer in the kernel is an eight-byte address on the Zig side.
             std.mem.eql(u8, want, "ulong")
         else
             std.mem.eql(u8, types[i], want);
@@ -153,8 +139,7 @@ pub fn check(comptime T: type, comptime src: []const u8, comptime name: []const 
 }
 
 test "the mirror check reads the landed struct" {
-    // A miniature source with the same shape as index_exl3.metal's: per-line declarations, a comment line,
-    // and several fields on one line. The check must accept it against an identical Zig struct.
+    // A miniature source with the same shape as index_exl3.metal's: per-line declarations, a comment line.
     const Ok = extern struct { rows: u32, heads: u32, scale: f32 };
     comptime check(Ok, "struct Small {\n    uint rows, heads;\n    // a comment, with a comma\n    float scale;\n};", "Small");
 }

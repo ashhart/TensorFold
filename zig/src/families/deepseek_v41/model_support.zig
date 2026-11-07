@@ -24,8 +24,7 @@ const gpu_counters = @import("profiler.zig");
 const expert_groups = @import("core").expert_groups;
 const scan_probe = @import("scan_probe.zig");
 
-// Every shared Zig/Metal argument struct is checked against its Metal twin at comptime, from one registry, so a
-// struct no forward happens to touch is checked too. A drift is a build error.
+// Every shared Zig/Metal argument struct is checked against its Metal twin at comptime, from one registry.
 comptime {
     @import("mirror_checked.zig").force();
 }
@@ -41,14 +40,10 @@ pub fn nowNs() u64 {
 pub const prefill_step = 15872;
 pub const Logits = enum { none, last, all };
 
-/// One slot's rows of a batched forward: the slot's window, its ids, and the position its first row lands at. The
-/// batch rung is one-row segments (the shared round's lanes).
+/// One slot's rows of a batched forward: the slot's window, its ids, and the position its first row lands at.
 pub const Seg = struct { slot: u32, ids: []const u32, p0: u32 };
 
-/// The forward-stage hidden-state hash. Repeated passes of one prompt in one process must read one hash a stage; the
-/// first tag that moves names the first divergent forward stage. `TF_DSV41_HID_HASH=1` enables it,
-/// `TF_DSV41_HID_ROWS=n` (default 16) samples n rows a stage, `TF_DSV41_HID_FULL=<layer>` copies every row of that
-/// layer's stages.
+/// The forward-stage hidden-state hash.
 pub const HidHash = struct {
     const Kind = enum(u8) { embed, stream, attn_in, attn, ffn_in, moe, logits, a_qr, a_q, a_kv, a_vals, a_gates, a_latent, a_idxk, a_idxq, a_idxw, a_pos, a_grp, a_sco, a_pos1, a_chunk, a_main };
     const Event = struct { kind: Kind, layer: u32, off: usize, len: usize };
@@ -115,8 +110,7 @@ pub const HidHash = struct {
         }
     }
 
-    /// A region whose row width is a byte count (the attention workspace's fixed per-row regions, the selection's
-    /// pick array). Whole layer only; one contiguous copy.
+    /// A region whose row width is a byte count.
     pub fn recordBytes(h: *HidHash, enc: mtl.ComputeEncoder, p: *const ops.Pipelines, view: View, rows: u32, row_bytes: u32, kind: Kind, layer: u32) void {
         const stg = h.stage orelse return;
         if (rows == 0 or row_bytes == 0 or row_bytes % 2 != 0) return;
@@ -131,8 +125,7 @@ pub const HidHash = struct {
         ops.encodeCopy(enc, p, view, .{ .buffer = stg, .offset = off }, .{ .rows = rows, .width = width, .x_stride = width, .y_stride = width });
     }
 
-    /// The same with an explicit source row stride, for the tile-major score array: the whole visible prefix of every
-    /// row in one copy (packed destination rows).
+    /// The same with an explicit source row stride, for the tile-major score array.
     pub fn recordStrided(h: *HidHash, enc: mtl.ComputeEncoder, p: *const ops.Pipelines, view: View, rows: u32, x_stride_bytes: u32, width_bytes: u32, kind: Kind, layer: u32) void {
         const stg = h.stage orelse return;
         if (rows == 0 or width_bytes == 0 or width_bytes % 2 != 0 or x_stride_bytes % 2 != 0) return;
@@ -222,9 +215,7 @@ pub const HidHash = struct {
     }
 };
 
-// The drafter's NaN filler rows. The dump's segments, in f32 units: the four the row dump already had (embed,
-// attn_in, attn_out, moe_in), then the draft's own key rows, its query's two stages, the decoded key table the scan
-// reads, and the attention's output.
+// The drafter's NaN filler rows.
 pub const mtp_dbg_raw = 4 * 5 * 5120;
 pub const mtp_dbg_qr = mtp_dbg_raw + 5 * 512;
 pub const mtp_dbg_qpre = mtp_dbg_qr + 5 * 1280;
@@ -266,8 +257,7 @@ pub const Pipelines = struct {
     engram: engram.Pipelines,
     attention: attention.Pipelines,
     groups: expert_groups.Pipelines,
-    /// The fused hyper-connection boundary (TF_DSV41_NO_HC_BOUNDARY): the rms, mix, collapse and post of a boundary in
-    /// two launches instead of five. Null keeps the shipped path.
+    /// The fused hyper-connection boundary (TF_DSV41_NO_HC_BOUNDARY): the rms, mix.
     hc_boundary: ?mhc.BoundaryPipelines = null,
 
     pub fn init(device: mtl.Device, gpa: std.mem.Allocator, capacity: u32, c: config.Config) !Pipelines {
@@ -309,10 +299,7 @@ pub fn tapsOn() bool {
 }
 
 pub var markov_bias_off: ?bool = null;
-/// TF_DSV41_NO_MARKOV=1 turns the Markov bigram bias OFF: the draft is the head-s own argmax over the logits row. The
-/// arm separates 'the head is weak' from 'the bias poisons the pick'. The drafter's stop point (0 = off). See
-/// `proposeTokens`: the arm ends the drafter's forward at a point and COMMITS what was encoded, so the arm's cost is
-/// the drafter's prefix.
+/// TF_DSV41_NO_MARKOV=1 turns the Markov bigram bias OFF: the draft is the head-s own argmax over the logits row.
 pub fn mtpStopPoint() u32 {
     const v = std.c.getenv("TF_DSV41_MTP_STOP") orelse return 0;
     return std.fmt.parseInt(u32, std.mem.span(v), 10) catch 0;
@@ -329,9 +316,7 @@ pub fn markovBiasOffOn() bool {
 }
 
 pub var dspark_true_pos: ?bool = null;
-/// The release's DSparkAttention writes each main row at its own ring slot (`start_pos % win`) and ropes the draft
-/// rows at the positions after the main sequence. Default on; TF_DSV41_DSPARK_TRUE_POS=0 restores the earlier
-/// prefix/shifted placement for a same-binary A/B.
+/// The release's DSparkAttention writes each main row at its own ring slot.
 pub fn dsparkTruePosOn() bool {
     if (dspark_true_pos) |v| return v;
     const raw = std.c.getenv("TF_DSV41_DSPARK_TRUE_POS") orelse {
@@ -343,9 +328,7 @@ pub fn dsparkTruePosOn() bool {
 }
 
 pub var taps_shared_base: ?bool = null;
-/// TF_DSV41_TAPS_SHARED_BASE=0 restores the earlier per-layer form (the taps ring advances once a TARGET LAYER, so
-/// the three layers' rows land in three different ranges and the conditioning mixes three positions). Default on: the
-/// shared base is the correct form.
+/// TF_DSV41_TAPS_SHARED_BASE=0 restores the earlier per-layer form.
 pub fn tapsSharedBaseOn() bool {
     if (taps_shared_base) |v| return v;
     const raw = std.c.getenv("TF_DSV41_TAPS_SHARED_BASE") orelse {
@@ -357,8 +340,7 @@ pub fn tapsSharedBaseOn() bool {
 }
 
 pub var partial_txn_on: ?bool = null;
-/// TF_DSV41_PARTIAL_TXN: the compressed path's partial-block scratch rides the slot transaction. Default on; `=0`
-/// restores the pre-fix behaviour for a same-binary A/B.
+/// TF_DSV41_PARTIAL_TXN: the compressed path's partial-block scratch rides the slot transaction.
 pub fn partialTxnOn() bool {
     if (partial_txn_on) |v| return v;
     const raw = std.c.getenv("TF_DSV41_PARTIAL_TXN") orelse return true;
@@ -366,10 +348,7 @@ pub fn partialTxnOn() bool {
     return partial_txn_on.?;
 }
 
-/// The no-re-feed rollback also restores the window ring's slots that the verify's REJECTED rows overwrote. Past
-/// position `window` those slots alias positions that are still visible, so without this a partial keep corrupts the
-/// next forward's keys (depth 1 never does: its one rejected row's slot aliases a position outside the next window).
-/// Default on; the same-binary opt-out `TF_DSV41_RING_KEEP=0` restores the pre-fix behaviour for an A/B.
+/// The no-re-feed rollback also restores the window ring's slots that the verify's REJECTED rows overwrote.
 pub var ring_keep_on: ?bool = null;
 pub fn ringKeepOn() bool {
     if (ring_keep_on) |v| return v;
@@ -377,13 +356,10 @@ pub fn ringKeepOn() bool {
     ring_keep_on = !std.mem.eql(u8, std.mem.span(raw), "0");
     return ring_keep_on.?;
 }
-/// The most rows a verify window can carry: the MTP depth cap (3) plus the pending row, with slack for
-/// TF_DSV41_MTP_DEPTH_MAX; the ring stash covers this many slots a layer.
+/// The most rows a verify window can carry: the MTP depth cap (3) plus the pending row.
 pub const max_ring_rows = 8;
 
-/// The release's draft attention ropes its queries and keys at their own positions, so every published ring row
-/// carries its phase (2). TF_DSV41_MTP_ROPE_ALL=0 restores the earlier unroped form; =1 ropes at the shifted
-/// position, a same-binary A/B.
+/// The release's draft attention ropes its queries and keys at their own positions.
 pub fn mtpRopeAllOn() u32 {
     const v = std.c.getenv("TF_DSV41_MTP_ROPE_ALL") orelse return 2;
     const n = std.fmt.parseInt(u32, std.mem.span(v), 10) catch 2;
@@ -396,17 +372,14 @@ pub fn condRopeOn() bool {
     return std.mem.eql(u8, std.mem.span(v), "0");
 }
 
-/// The release's DSparkAttention reads the ring its conditioning writes (`main_kv` from `main_x`), which is the
-/// drafter's own ring (0). TF_DSV41_MTP_TRUNK_RING=1|2 is an A/B that reads the trunk's key ring instead (the
-/// block's tap layer, or the trunk's last layer).
+/// The release's DSparkAttention reads the ring its conditioning writes (`main_kv` from `main_x`).
 pub fn mtpTrunkRing() u32 {
     const v = std.c.getenv("TF_DSV41_MTP_TRUNK_RING") orelse return 0;
     const n = std.fmt.parseInt(u32, std.mem.span(v), 10) catch 0;
     return @min(n, 2);
 }
 
-/// TF_DSV41_COND_NOALIGN=1 restores the earlier advancing cursor; the taps ring's slots are the token positions (the
-/// capture writes at position % 128).
+/// TF_DSV41_COND_NOALIGN=1 restores the earlier advancing cursor; the taps ring's slots are the token positions.
 pub fn condAlignOn() bool {
     const v = std.c.getenv("TF_DSV41_COND_NOALIGN") orelse return true;
     return std.mem.eql(u8, std.mem.span(v), "0");
@@ -436,10 +409,7 @@ pub fn condRowsWanted() u32 {
     return out;
 }
 
-/// THE ENGINE'S COMPUTE ENCODER IN CONCURRENT DISPATCH MODE. Metal's concurrent dispatch type lets the GPU run
-/// independent dispatches at once, and the tree's barrier is already written for that semantics (metal/command.zig:
-/// "Later dispatches see every buffer write before this point (concurrent encoders)"). TF_DSV41_CONCURRENT=1 arms it;
-/// unset or =0 is the shipped serial path, byte for byte.
+/// THE ENGINE'S COMPUTE ENCODER IN CONCURRENT DISPATCH MODE.
 pub var concurrent_cache: ?bool = null;
 pub fn concurrentOn() bool {
     if (concurrent_cache) |v| return v;
@@ -448,9 +418,7 @@ pub fn concurrentOn() bool {
     return concurrent_cache.?;
 }
 
-/// A query row's per-head RMS, for the instrument that compares the engine's query scale with the release's per-head
-/// query normalization (the release normalizes `qr` before `wq_b`). The query's rows are its heads, so the flat
-/// [heads, head_dim] layout is the [rows, heads, head_dim] one.
+/// A query row's per-head RMS, for the instrument that compares the engine's query scale with the release's per-head.
 pub fn headRms(f: [*]const f32, heads: u32, width: u32) struct { min: f32, max: f32, mean: f32 } {
     var mn: f32 = 1e30;
     var mx: f32 = -1e30;
@@ -471,10 +439,7 @@ pub fn headRms(f: [*]const f32, heads: u32, width: u32) struct { min: f32, max: 
     return .{ .min = mn, .max = mx, .mean = @floatCast(sum / @as(f64, heads)) };
 }
 
-/// Serialized unique owner; submissions finish before return/release, cancellation is between bounded chunks. The
-/// top-k of a logits row (the instrument): the drafter's row 0 against the trunk's own row 0 at the same position.
-/// The MTP module is trained to predict the trunk's next-token distribution, so a healthy drafter's row 0 must be
-/// CLOSE to the trunk's -- a different argmax is fine, a different scale is not.
+/// Serialized unique owner; submissions finish before return/release, cancellation is between bounded chunks.
 pub fn logitsTopK(f: [*]const f32, n: usize, out: *[5]u32, vals: *[5]f32) void {
     @memset(out, 0);
     @memset(vals, 0);

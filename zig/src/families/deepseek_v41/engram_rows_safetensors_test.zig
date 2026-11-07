@@ -1,7 +1,4 @@
 //! engram_rows_safetensors.zig against a synthetic release shard: decode, cache, bounds, and header refusal.
-//!
-//! The oracle is the resident path's own `engram_rows.Table.row`, which decodes the same bytes through a different
-//! reader, so a pass means the streamed reader serves what the resident one would.
 
 const std = @import("std");
 const testing = std.testing;
@@ -202,8 +199,7 @@ test "safetensors rows: the mapped shard serves exactly what the positional read
     try testing.expect(mapped.mapped());
     try testing.expect(!positional.mapped());
 
-    // Unsorted, with repeats, over the whole shard: the order and the repeats are where a mapped gather
-    // could differ from the positional one.
+    // Unsorted, with repeats, over the whole shard.
     var ids: [600]u32 = undefined;
     for (&ids, 0..) |*id, i| id.* = @intCast((i * 173 + 7) % row_count);
     var out_map: [ids.len * f.values]u16 = undefined;

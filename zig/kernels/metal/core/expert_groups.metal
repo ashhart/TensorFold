@@ -20,8 +20,7 @@ kernel void tf_expert_group_count(TF_GROUP_ARGS) {
 kernel void tf_expert_group_prefix(TF_GROUP_ARGS) {
     if (i != 0) return;
     uint offset = 0;
-    // Each expert's block is padded to a multiple of the tile's rows (the tile reads one expert's weights, so a
-    // tile may not straddle two experts); the tile's width is the plan's own.
+    // Each expert's block is padded to a multiple of the tile's rows.
     const uint tile = d.tile == 0u ? 64u : d.tile;
     for (uint expert = 0; expert < d.experts; ++expert) {
         offsets[expert] = offset;
@@ -34,11 +33,9 @@ kernel void tf_expert_group_scatter(TF_GROUP_ARGS) {
     const uint destination = offsets[ids[i]] + ranks[i];
     if (destination >= d.padded) return;
     expert_ids[destination] = ids[i];
-    // A fused gate+up table is two blocks of `repeat` slots a token (gate picks, then up picks one table entry
-    // further), so a slot's token is its position inside its block, not a running quotient.
+    // A fused gate+up table is two blocks of `repeat` slots a token.
     token_ids[destination] = d.block == 0 ? i / d.repeat : (i % d.block) / d.repeat;
     slot_ids[destination] = i;
-    // The inverse map, token-major slot to expert-tile destination: the fused SwiGLU+rotate pass writes a row's
-    // rotated down input where the tile GEMM reads it, so the down call skips its rotate_in.
+    // The inverse map, token-major slot to expert-tile destination.
     destinations[i] = destination;
 }

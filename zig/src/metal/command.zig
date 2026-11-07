@@ -12,8 +12,7 @@ const ResidencySet = @import("residency.zig").ResidencySet;
 const Id = objc.Id;
 const Size = types.Size;
 
-/// One relaxed atomic add a dispatch, a few nanoseconds. Set by the stage recorder's init: the counters cost one
-/// branch a dispatch when off.
+/// One relaxed atomic add a dispatch, a few nanoseconds.
 pub var count_enabled: bool = false;
 pub var dispatch_count: std.atomic.Value(u64) = std.atomic.Value(u64).init(0);
 pub var dispatch_indirect: std.atomic.Value(u64) = std.atomic.Value(u64).init(0);

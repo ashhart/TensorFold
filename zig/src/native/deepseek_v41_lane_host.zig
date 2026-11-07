@@ -98,8 +98,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         if (l.asked) std.log.info("deepseek-v41: load limit {d} bytes from GLM_LOAD_LIMIT_GB", .{l.bytes});
         break :blk l.bytes;
     } else 0;
-    // Prefill round and workspace chunk. The family's compile-time constant (256) sized the workspace, so the lane cut
-    // every prompt into 256-row rounds and re-decoded all 384 experts per round; TF_DSV41_PREFILL_STEP sets both now.
+    // Prefill round and workspace chunk.
     const chunk: u32 = blk: {
         const raw = std.c.getenv("TF_DSV41_PREFILL_STEP") orelse break :blk ds.prefill_step;
         const text = std.mem.span(raw);
@@ -144,9 +143,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     };
     h.back = try tf.deepseek_v41_backend.Backend.init(gpa, model_ptr);
     errdefer h.back.deinit();
-    // The family's stage recorder exists but nothing on the served path enabled it, so there was no way to
-    // attribute a prompt's GPU time to engram / mhc / attention / moe / head. Off unless the variable is set; when
-    // off no span storage is allocated and profileSpan returns on its first line.
+    // The family's stage recorder exists but nothing on the served path enabled it.
     if (std.c.getenv("TF_DSV41_HOST_PROF") != null) model_ptr.host_prof = true;
     if (std.c.getenv("TF_DSV41_PROFILE_GPU") != null) {
         h.rec = try tf.deepseek_v41_profiler.Recorder.init(gpa, model_ptr.device, .{ .enabled = true, .max_spans = 2048 });
@@ -173,12 +170,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         .greedy_only = false, // the port samples: temperature, top_k, top_p, min_p (backend.sampleRow)
         .penalties = true, // Presence/frequency, applied in backend.verify over each row s path
     });
-    // THE RETAINED PROMPT CACHE. The framework keys states by their token prefix, asks the family for a copy at the
-    // chunk ends it marks (backend.snapSave / snapDrop) and hands the copy back as the stream's `reuse`, which the
-    // family's prefill restores before its first chunk. A state is one slot's whole cache plus its cursor, the
-    // four-token Engram history and the taps, so a resumed pass equals a fresh one; the budget is admitted under
-    // the same load limit the model loaded with, and states are keyed by the prompt's own chunk grid.
-    // TF_DSV41_END_MARK=0 is the same-binary opt-out.
+    // THE RETAINED PROMPT CACHE.
     if (o.prompt_cache_gib) |gib| if (gib > 0) {
         var why: []const u8 = "";
         const plan = cache_fit.budgetUnder(limit, gib, o.prompt_cache_over_cap, 0, a, &why, "") catch |e| {
@@ -204,8 +196,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     return .{ .engine = h.host.engine(), .close = close, .ctx = h };
 }
 
-/// A draft's verification forward must agree with the one-row greedy stream row for row, or batched rows carry
-/// different numerics and a drafter would burn compute silently. TF_DSV41_KROW_CHECK runs the comparison at load.
+/// A draft's verification forward must agree with the one-row greedy stream row for row.
 fn argmaxRow(logits: []const f32) u32 {
     var best: u32 = 0;
     var maximum = -std.math.inf(f32);

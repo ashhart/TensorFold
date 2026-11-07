@@ -20,8 +20,7 @@ pub fn chunkClass(n: usize) u8 {
     return if (n <= 8) 0 else if (n < 64) 1 else 2;
 }
 
-/// The rows a fresh pass's last chunk holds at `len` for a zero-anchored grid `grid`: `len % grid`, or one whole
-/// chunk when it divides. The class of this is what a resumed suffix's last chunk must keep.
+/// The rows a fresh pass's last chunk holds at `len` for a zero-anchored grid `grid`: `len % grid`.
 pub fn freshLast(grid: u32, len: usize) usize {
     const g: usize = @max(1, grid);
     return if (len % g != 0) len % g else @min(len, g);
@@ -179,7 +178,7 @@ pub const Store = struct {
         return if (s.family.vtable.spare) |f| f(s.family.ptr) else 0;
     }
 
-    /// A kept state takes `extra` more bytes (a family copied what it shared into it) if the budget has room; never evicts, a pass is under way.
+    /// A kept state takes `extra` more bytes (a family copied what it shared into it) if the budget has room.
     pub fn grow(s: *Store, saved: Saved, extra: u64) bool {
         for (s.entries.items) |e| if (!e.expired and e.tokens.len > 0 and e.saved == saved) {
             if (extra > s.room()) return false;
@@ -218,9 +217,7 @@ pub const Store = struct {
         return true;
     }
 
-    /// Whether a state at `at` may start or end a prompt pass: anywhere, or a chunk start for planned families. A
-    /// `tail` family also keeps one off-grid state before a prompt's end, so a later turn resumes at its own
-    /// boundary instead of at the last grid chunk.
+    /// Whether a state at `at` may start or end a prompt pass: anywhere, or a chunk start for planned families.
     pub fn usable(s: *const Store, at: u32, starts: []const u32) bool {
         return at > 0 and (!s.rules.planned or (s.rules.tail_align > 1 and (s.rules.tail or s.rules.end_mark)) or s.startAt(starts, at) == at);
     }
@@ -342,14 +339,12 @@ pub const Store = struct {
         s.reserve(prompt, born, e, marks_, spans);
         if (e) |entry| entry.borrowers += 1;
         // The tail mark this lookup planned, where the backend may snapshot it inside the chunk that runs past it.
-        // Only a tensor-tile tail (>= 64 rows) and only with a bulk piece behind it: the merged chunk then keeps
-        // the kernel class the cut's own tail chunk would have run.
         const snap_at: u32 = if (s.rules.tail_snap and tail_at > from and tail_at < prompt.len and
             prompt.len - tail_at >= 64 and std.mem.indexOfScalar(u32, marks_, tail_at) != null) tail_at else 0;
         return .{ .entry = e, .marks = marks_, .snap_at = snap_at };
     }
 
-    /// Room for every state the pass keeps, made before it: a peer that mirrors the keeps hears of these evictions with the request.
+    /// Room for every state the pass keeps, made before it.
     fn reserve(s: *Store, prompt: []const u32, born: u32, from: ?*Entry, marks_: []const u32, spans: []const modes.Span) void {
         var need: u64 = 0;
         var new: usize = 0; // states it keeps that the store lacks: a slot each

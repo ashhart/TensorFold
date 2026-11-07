@@ -21,13 +21,10 @@ pub const MoeRouting = struct {
     weights: [6]f32 = undefined,
 };
 
-/// The reduction order a caller uses to normalise the six selected scores. `f64_sequential` is this file's own
-/// arithmetic; the two f32 variants are legal orders a GPU implementation may take, and exist so a gate can compare
-/// an engine against the *envelope* of legal orders rather than against one member of it.
+/// The reduction order a caller uses to normalise the six selected scores.
 pub const WeightOrder = enum { f64_sequential, f32_pairwise, f32_ascending };
 
-/// The observer's read callback carries the chain as an untyped pointer, because the chain is now generic over its
-/// precision and cannot name itself inside its own declaration. The reader casts it back.
+/// The observer's read callback carries the chain as an untyped pointer.
 pub const Observer = struct {
     ctx: *anyopaque,
     read: *const fn (*anyopaque, usize, Stage, *anyopaque) void,
@@ -37,8 +34,7 @@ pub fn moeWeights(c: config.Config, scores: *const [384]f32, ids: *const [6]u32,
     moeWeightsOf(f32, c, scores, ids, order, routing_weights);
 }
 
-/// The six selected scores' normalisation at the chain's precision T. The FP32 contract is unchanged (bit-for-bit);
-/// the FP64 chain keeps the six in FP64 and widens once.
+/// The six selected scores' normalisation at the chain's precision T.
 pub fn moeWeightsOf(comptime T: type, c: config.Config, scores: []const T, ids: *const [6]u32, order: WeightOrder, routing_weights: *[6]T) void {
     @setFloatMode(.strict);
     for (ids, 0..) |id, i| routing_weights[i] = scores[id];
@@ -73,9 +69,7 @@ pub fn moeWeightsOf(comptime T: type, c: config.Config, scores: []const T, ids: 
     }
 }
 
-/// Distance from the selection boundary: the lowest selected biased score minus the highest unselected one. Always
-/// computed from this file's own scores, never from a caller-supplied or pinned weight vector, or the number says
-/// nothing about the reference's own arithmetic.
+/// Distance from the selection boundary: the lowest selected biased score minus the highest unselected one.
 pub fn selectionMargin(moe_weights: weights.Moe, scores: *const [384]f32, ids: *const [6]u32) f32 {
     return selectionMarginOf(f32, moe_weights, scores, ids);
 }
@@ -96,23 +90,17 @@ pub fn selectionMarginOf(comptime T: type, moe_weights: weights.Moe, scores: []c
     return lowest_selected - highest_unselected;
 }
 
-/// Which numerical form of the router's score transform this file uses. `libm` is Zig's `log1p(exp(z))`;
-/// `kernel_lp` is `route.metal`'s form verbatim (`u=1+e; u==1 ? e: e*(log(u)/(u-1))`).
+/// Which numerical form of the router's score transform this file uses.
 pub const ScoreForm = enum { libm, kernel_lp, stable };
 
 fn scoreOf(z: f32, form: ScoreForm) f32 {
     return scoreOfOf(f32, z, form);
 }
 
-/// The router's score transform at the chain's precision T: FP32 is the source contract, bit-identical to the
-/// shipped path; FP64 is the ideal chain's form.
+/// The router's score transform at the chain's precision T: FP32 is the source contract.
 fn scoreOfOf(comptime T: type, z: T, form: ScoreForm) T {
     @setFloatMode(.strict);
-    // `stable` is the formulation most numerical libraries ship: softplus(z) = max(z,0) + log1p(exp(-|z|)). It is a
-    // genuinely different algebraic route from `libm` and equally accurate, which is what makes it a fair test of
-    // "does the choice of implementation move the answer" rather than "does one formula lose precision".
-    // `kernel_lp` is route.metal's own formula: kept because it is what the engine executes, not because it is a
-    // general-purpose implementation of softplus.
+    // `stable` is the formulation most numerical libraries ship: softplus(z) = max(z,0) + log1p(exp(-|z|)).
     const softplus: T = switch (form) {
         .kernel_lp => if (z > 20) z else blk: {
             const e = @exp(z);
@@ -172,10 +160,7 @@ pub fn moeActivationOf(comptime T: type, gate: []const u16, up: []const u16, rou
     }
 }
 
-/// The reference chain at a chosen precision T. T == f32 is the source contract, bit-identical to the shipped
-/// chain; T == f64 is the ideal chain (every reduction class widened: the RMS norms, the per-head query RMS, the
-/// hyperconnection's affine/softmax/Sinkhorn stage, the router's dense projection, the attention's online softmax,
-/// the compressor's pooling, the indexer's scores and the MoE's own arithmetic).
+/// The reference chain at a chosen precision T.
 pub fn ReferenceOf(comptime T: type) type {
     return struct {
         pub const Pin = struct { ids: *const [40][6]u32 };
@@ -188,17 +173,13 @@ pub fn ReferenceOf(comptime T: type) type {
         position: u32 = 0,
         projection_scratch: projection.Scratch,
         rows: ?engram.RowSource = null,
-        /// When set, expert ids come from the caller (an engine capture). Selection still runs on this file's own logits,
-        /// and the weights are still this file's own arithmetic evaluated at the pinned ids — ids-only is the honest pin.
-        /// Pinning the weights as well would make the reference share the engine's arithmetic, which is a diagnostic,
-        /// never a qualification.
+        /// When set, expert ids come from the caller (an engine capture).
         pin: ?Pin = null,
         weight_order: WeightOrder = .f64_sequential,
         score_form: ScoreForm = .libm,
         /// This file's own distance from each layer's selection boundary, recorded whatever the pin says.
         route_margins: [40]f32 = @splat(0),
-        /// The selection this file made before any pin was applied, so a gate can report where its own routing departs
-        /// from the engine's instead of only reporting that the pin held.
+        /// The selection this file made before any pin was applied.
         natural_ids: [40][6]u32 = std.mem.zeroes([40][6]u32),
         attention_state: attention.StateOf(T),
         engram_state: engram.State,
@@ -253,8 +234,7 @@ pub fn ReferenceOf(comptime T: type) type {
             var pre = [4]T{ 1, 0, 0, 0 };
             for (&self.w.layers, 0..) |*layer, layer_id| {
                 if (layer.engram) |e| {
-                    // A streamed model has no resident Engram rows: the caller may supply a row source, and if it does not,
-                    // say so by name rather than reading an unbound view.
+                    // A streamed model has no resident Engram rows: the caller may supply a row source.
                     if (e.streamed and self.rows == null) return error.ReferenceNeedsResidentEngramTables;
                     try self.engram_state.apply(T, e, if (layer_id == 1) 0 else 1, compressed, &self.h, self.c, &self.projection_scratch, self.rows);
                 }

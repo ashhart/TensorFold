@@ -28,9 +28,7 @@ pub fn isIndexSource(layer: u32) bool {
     return std.mem.indexOfScalar(u32, &index_sources, layer) != null;
 }
 pub const Source = struct { owner: u32, ratio: u32, rows: u32, main: View, index: View, partial: View, capture: View };
-/// The compressed path's raw-row capture. The pool writes every row it consumes -- the row's own values and its
-/// gate -- into one slot a position, so a rollback can re-cut the group that straddles the new position without
-/// another forward (the no-re-feed port).
+/// The compressed path's raw-row capture.
 pub const capture_rows: u32 = 8;
 pub const capture_width: u32 = 512;
 /// One owner's capture: `capture_rows` slots of (values row, gate row), 512 f32 each.
@@ -41,8 +39,7 @@ pub const Plan = struct {
     capacity: u32,
     layers: u32,
     pub fn validate(p: Plan) !void {
-        // Forty backbone layers, or forty-three when the drafter's three blocks hold rings of their own (they have no
-        // compressor, so their packed storage is the backbone's and `packedBytes` is unchanged).
+        // Forty backbone layers, or forty-three when the drafter's three blocks hold rings of their own.
         if (p.capacity == 0 or p.capacity > max_context or (p.layers != 40 and p.layers != drafter_layers))
             return error.InvalidCacheCapacity;
     }
@@ -119,8 +116,7 @@ pub const State = struct {
         const capture_off = s.plan.captureOffset() + @as(usize, id) * captureBytes();
         return .{ .owner = owners[id], .ratio = ratio, .rows = s.position / ratio, .main = .{ .buffer = s.storage, .offset = packed_off }, .index = .{ .buffer = s.storage, .offset = packed_off + @as(usize, s.plan.capacity / ratio) * main_stride }, .partial = .{ .buffer = s.live, .offset = partial_off }, .capture = .{ .buffer = s.live, .offset = capture_off } };
     }
-    /// Zero the compressed path's partial scratch: a rejected window's draft row may leave half a block's sum there,
-    /// and the next forward reads it as if the block were complete. Cheaper and safer than tracking which block.
+    /// Zero the compressed path's partial scratch: a rejected window's draft row may leave half a block's sum there.
     pub fn clearPartials(s: *State) void {
         const bytes = s.live.contents();
         const off = Plan.partialOffset(s.plan);
@@ -128,8 +124,7 @@ pub const State = struct {
         if (off < len) @memset(bytes[off..len], 0);
     }
 
-    /// Zero the window ring's rows [from, to) for every layer: a rejected window's draft rows stay in the ring, and
-    /// this is the diagnostic that tells whether the next forward reads them. The buffer is CPU-shared.
+    /// Zero the window ring's rows [from, to) for every layer: a rejected window's draft rows stay in the ring.
     pub fn clearRows(s: *State, from: u64, to: u64) void {
         if (to <= from) return;
         const bytes = s.live.contents();

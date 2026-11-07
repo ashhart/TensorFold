@@ -1,3 +1,5 @@
+// The routed prompt tile's job follows the release's expert blocks (inference/model.py, revision 314113f8).
+
 kernel void tf_exl3_matmul_prefill_nax2(const device half* x [[buffer(0)]],
                                        const device uchar* trellis [[buffer(1)]],
                                        device float* sums [[buffer(2)]],
@@ -13,8 +15,7 @@ kernel void tf_exl3_matmul_prefill_nax2(const device half* x [[buffer(0)]],
   tf_exl3_prefill_body<true, 8, 1, false>(wx, x, trellis, sums, a, routes, descriptors, nullptr, nullptr, lane, sg, tid, tptg.x, tg);
 }
 
-// One row an expert, four rows a threadgroup: each SIMDgroup decodes its own expert's 16x32 tile once and multiplies
-// the single row it owns, writing only that row of the sixteen-row tensor-unit product.
+// One row an expert, four rows a threadgroup.
 kernel void tf_exl3_matmul_decode_nax(const device half* x [[buffer(0)]],
                                      const device uchar* trellis [[buffer(1)]],
                                      device float* sums [[buffer(2)]],
@@ -30,21 +31,15 @@ kernel void tf_exl3_matmul_decode_nax(const device half* x [[buffer(0)]],
                                      uint tid [[thread_index_in_threadgroup]],
                                      uint3 tptg [[threads_per_threadgroup]],
                                      uint3 tg [[threadgroup_position_in_grid]]) {
-  // Two weight tiles a SIMDgroup: the next block decodes while this one multiplies, and one barrier a block replaces
-  // two because the tile a multiply reads is never the tile a decode writes. TF_DECODE_TABLE: the codebook value is
-  // read from the resident table (the engine binds it at buffer 7 for every stage) instead of derived in the ALU. The
-  // table holds the format's own decoder's values, qualified entry for entry against the arithmetic path, so the
-  // decoded tile -- and the product -- is bit-identical.
+  // Two weight tiles a SIMDgroup: the next block decodes while this one multiplies.
 #if defined(TF_DECODE_COMPACT)
-  // Compact: one row a threadgroup, two 16x32 tiles only (1 KB), so many more groups fit the threadgroup memory and
-  // the decode's issue rate is not occupancy-bound.
+  // Compact: one row a threadgroup, two 16x32 tiles only (1 KB).
   threadgroup half wx[2 * 16 * 32];
 #else
   threadgroup half wx[2 * 4 * 16 * 32];
 #endif
   const uint nb = tg.x * 32;
-  // One SIMDgroup a row: a threadgroup of four warps takes four rows, one of a single warp takes one, which is four
-  // times the threadgroups for the same work (TF_DSV41_EXL3_MOE_ROWS).
+  // One SIMDgroup a row: a threadgroup of four warps takes four rows, one of a single warp takes one.
 #if defined(TF_DECODE_COMPACT)
   const uint rpt = 1;
   const uint row = tg.y;
@@ -59,29 +54,20 @@ kernel void tf_exl3_matmul_decode_nax(const device half* x [[buffer(0)]],
   if (row >= a.rows) return;
   const uint expert = routes[row];
   if (expert >= a.experts) return;
-  // One routed row's pack slice: the expert's trellis, k/n strides, width and codebook. The release's MTP and draft
-  // rounds feed the same EXL3 projection shapes (inference/model.py, revision 314113f8); the pack layout is our own.
+  // One routed row's pack slice: the expert's trellis, k/n strides, width and codebook.
   const TfExl3DecodeJob job = tf_exl3_routed_decode_job(trellis, a, descriptors, expert);
   const short2 home = frag_home(ushort(lane));
   const uint cols_here = min(32u, a.n - nb);
-  // A decode tile has a handful of rows and one threadgroup a layer for the whole k range, so a split takes a slice
-  // of the k blocks and the reduce kernel sums the parts in split order.
+  // A decode tile has a handful of rows and one threadgroup a layer for the whole k range.
   const uint split = tg.z;
   const uint blocks = a.k / 16;
   const uint b0 = a.splits > 1 ? blocks * split / a.splits : 0;
   const uint b1 = a.splits > 1 ? blocks * (split + 1) / a.splits : blocks;
   // Eight consecutive states a thread of each sixteen-column tile, so the stream words they can touch are read once.
-  // The walk names the lane's first words and its window; the cursor and the tile slot come from registers.
   const TfExl3DigWindows walk = tf_exl3_dig_windows<8u, 1u, 32u>(lane * 8u, job.halves, 0u, 0u, true);
-  // TF_DECODE_FUNNEL: the routed pack's halves = 6. Eight consecutive states a lane span 37 bits from start + 16, so
-  // two 32-bit stream words cover all eight and the per-state word-pair selection collapses to a two-way select. For
-  // halves = 6 the rel = 1 states always start at bit offset <= 16, so the next word after the pair contributes only
-  // below the 16-bit state and can be dropped. The two-word and four-word paths agree state for state; halves ! = 6
-  // keeps the general path.
+  // TF_DECODE_FUNNEL: the routed pack's halves = 6.
 #if defined(TF_DECODE_FUNNEL)
-  // Halves = 8 (the drafter's routed pack) joins halves = 6 ONLY under TF_DECODE_FUNNEL_H8, an optional arm. At
-  // halves = 8 every lane's run starts at the same bit offset, so eight four-bit-spaced states span exactly 44 bits
-  // and sit in two words with every rel = 1 state at an offset <= 16 -- the same two-word form.
+  // Halves = 8 (the drafter's routed pack) joins halves = 6 ONLY under TF_DECODE_FUNNEL_H8, an optional arm.
 #if defined(TF_DECODE_FUNNEL_H8)
   const bool funnel = job.halves == 6u or job.halves == 8u;
 #else
@@ -90,10 +76,7 @@ kernel void tf_exl3_matmul_decode_nax(const device half* x [[buffer(0)]],
 #else
   const bool funnel = false;
 #endif
-// THE TWO-WORD READ AT halves = 8 WITHOUT THE FUNNEL'S ASSEMBLY. Every lane's eight states start at off0 = 20 and sit
-// in exactly two stream words (rel in {0, 1}); the general path loads four. This drops the two words it cannot touch
-// and keeps the cursor's select-chain extraction. Bit-identical by construction (the two words it drops feed only rel
-// >= 2, which does not occur at halves = 8).
+// THE TWO-WORD READ AT halves = 8 WITHOUT THE FUNNEL'S ASSEMBLY.
 #if defined(TF_DECODE_TWO)
   const bool two_word = job.halves == 8u;
 #else
@@ -145,8 +128,7 @@ kernel void tf_exl3_matmul_decode_nax(const device half* x [[buffer(0)]],
           }
         }
         if (funnel) {
-          // Two words a lane, on our map and with our left-shift funnel. The rel = 1 states start at bit offset <= 16
-          // at halves = 6, so the second word's carry is the whole state's source.
+          // Two words a lane, on our map and with our left-shift funnel.
           TF_UNROLL
           for (uint k = 0; k < 8; ++k) {
             const uint lo8 = walk.rel[k] == 0 ? w0 : w1;

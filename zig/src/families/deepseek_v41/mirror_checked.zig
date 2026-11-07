@@ -1,11 +1,4 @@
-// ! EVERY shared Zig/Metal argument struct in the DeepSeek V4.1 family, checked against its Metal ! twin at
-// COMPTIME. One table, so a struct no forward happens to reference is still checked: `force` is ! called from
-// `model.zig`'s comptime block, which the engine build always analyses. ! ! `index_mirror.check` compares the Metal
-// declaration's field names, order, C types, array lengths and ! C-layout offsets to the Zig struct's own, and its
-// total to `@sizeOf`. A field added, removed, renamed, ! reordered or retyped on EITHER side is a build error --
-// the bug class (a silently shifted ! `scale` turned every index score into 0.0) can no longer reach a serve. ! !
-// The per-struct checks inside the struct bodies stay where they are; this file is the ! complete
-// registry, including the pairs that used to be anonymous literals at the callsite.
+// !
 
 const mirror = @import("metal/index_mirror.zig");
 const sources = @import("kernel_sources");
@@ -93,8 +86,7 @@ pub fn force() void {
         mirror.check(fused.KvArgs, sources.dsv41.fused, "TfFKvArgs");
         mirror.check(fused.SwiArgs, sources.dsv41.fused, "TfFSwiArgs");
 
-        // The payloads that used to be positional literals -- one named extern struct a twin, so a reorder or a
-        // same-size retype on either side is a build error, not a silent argument shift.
+        // The payloads that used to be positional literals -- one named extern struct a twin.
         mirror.check(ops.DenseArgs, sources.deepseek_v41_ops, "Dense");
         mirror.check(ops.ActivationArgs, sources.deepseek_v41_ops, "Activation");
         mirror.check(ops.CopyArgs, sources.deepseek_v41_ops, "Copy");

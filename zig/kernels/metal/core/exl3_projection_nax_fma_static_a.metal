@@ -20,8 +20,7 @@ kernel void tf_exl3_matmul_decode_fma_static_lut(const device half* x [[buffer(0
   const uint expert = routes[row];
   if (expert >= a.experts) return;
   const uint halves = descriptors[expert].halves;
-  // The LUT holds the mul1 values, so it is only the right table for that codebook; any other codebook reads the
-  // resident table (and the branch is uniform across the threadgroup, which shares one expert).
+  // The LUT holds the mul1 values, so it is only the right table for that codebook.
   const bool mul1 = descriptors[expert].codebook == 2u;
   if (mul1) {
     const float scale = float(as_type<half>(ushort(0x1EEEu)));
@@ -122,10 +121,7 @@ kernel void tf_exl3_matmul_decode_fma_static_lut(const device half* x [[buffer(0
   }
 }
 
-// The register-only body on the DENSE one-row path. The dense matrix has no expert descriptor, so this kernel reads
-// the trellis from the buffer and the strides, the width and the codebook from the args: the walk, the windows, the
-// products and the reduction tree are the routed body's own code, so the only difference from the routed body is
-// where the five fields come from.
+// The register-only body on the DENSE one-row path.
 kernel void tf_exl3_matmul_decode_fma_dense(const device half* x [[buffer(0)]],
                                              const device uchar* trellis [[buffer(1)]],
                                              device float* sums [[buffer(2)]],
@@ -148,8 +144,7 @@ kernel void tf_exl3_matmul_decode_fma_dense(const device half* x [[buffer(0)]],
   const uint nb = tg.x * 16u;
   if (nb >= a.n) return;
   const uint halves = a.halves;
-  // The mul1 codebook's values depend only on the state's byte sum, so 1,024 entries hold every value; the LUT's
-  // values are the resident table's, entry for entry, so the output is the table's.
+  // The mul1 codebook's values depend only on the state's byte sum, so 1,024 entries hold every value.
   const bool mul1 = a.codebook == 2u;
   if (mul1) {
     const float scale = float(as_type<half>(ushort(0x1EEEu)));
@@ -255,8 +250,7 @@ kernel void tf_exl3_matmul_decode_fma_dense(const device half* x [[buffer(0)]],
   }
 }
 
-// The multi-row dense body, two rows a threadgroup and four rows a threadgroup. The width is the matrix's (the dense
-// pack's are 6, 10, 12 and 8 halves), so the body is specialised on it at dispatch.
+// The multi-row dense body, two rows a threadgroup and four rows a threadgroup.
 template <uint R>
 inline void tf_exl3_decode_fma_dense_multi_kernel(const device half* x, const device uchar* trellis,
                                                    device float* sums, constant TfExl3Args& a,

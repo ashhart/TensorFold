@@ -15,89 +15,56 @@ pub const Pipelines = struct {
     rotate_in: mtl.Pipeline,
     matmul: mtl.Pipeline,
     rotate_out: mtl.Pipeline,
-    /// The routed SwiGLU with the down projection's rotate_in fused: one pass writes the
-    /// rotated activation into the scratch base at each row's grouped destination slot.
+    /// The routed SwiGLU with the down projection's rotate_in fused.
     swiglu_prerotate: mtl.Pipeline,
     dense: mtl.Pipeline,
     prefill: ?mtl.Pipeline = null,
-    /// The int8 prompt-row body (f32 sums, for a pack that keeps the runtime rotation). Loaded only under
-    /// the host's int8-prompt knob.
+    /// The int8 prompt-row body (f32 sums, for a pack that keeps the runtime rotation).
     prefill_fp8: ?mtl.Pipeline = null,
     /// The pre-rotated pack's cast epilogue: f32 sums to the caller's bf16 output, no transform.
     prefill_cast: ?mtl.Pipeline = null,
-    /// The same prefill reduction on the tensor units; built only when a caller supplies an allocator (its source
-    /// needs nax.h inlined) and the GPU has tensor units.
+    /// The same prefill reduction on the tensor units; built only when a caller supplies an allocator.
     reduce: ?mtl.Pipeline = null,
     /// The codebook as a table: 3 x 65536 halves, state to value. Replaces six ALU ops a weight with one load.
     codebook_table: ?mtl.Buffer = null,
-    /// The same prefill entry with RG row groups by CG column groups of tile: a wider column tile re-reads the
-    /// activation tile for fewer output tiles.
+    /// The same prefill entry with RG row groups by CG column groups of tile.
     prefill_nax_tiles: [8]?mtl.Pipeline = @splat(null),
     /// The routed 64x64 prompt tile with the funnel read . Bit-identical to .
     prefill_nax_funnel: ?mtl.Pipeline = null,
     /// The same tile with the grouping's padded rows skipped . Bit-identical on the real rows.
     prefill_nax_skip_pad: ?mtl.Pipeline = null,
     /// The routed tile with the funnel path as the only path: the cursor arrays the Fast path needs are dead there.
-    /// Bit-identical.
     prefill_nax_funnel_only: ?mtl.Pipeline = null,
-    /// The 128-row routed tile: eight row groups, the funnel read on a four-window run and the grouping's padded rows
-    /// skipped. The weight decode is per tile, so the taller tile decodes each expert's weights once for twice the
-    /// rows.
+    /// The 128-row routed tile: eight row groups.
     prefill_nax_skip_pad128: ?mtl.Pipeline = null,
-    /// The 128-row routed tile with the thirty-two-row warp: a warp owns two sixteen-row groups, so the block is
-    /// decoded by one warp (eight states a lane, eight bits a weight) and the tile covers twice the rows.
-    /// Bit-identical to the shipped tile.
+    /// The 128-row routed tile with the thirty-two-row warp: a warp owns two sixteen-row groups.
     prefill_nax_warp32: ?mtl.Pipeline = null,
-    /// The dense prompt body double-buffered: block b+1 decodes into the tile block b is not multiplying, one barrier
-    /// a block instead of two. Same k order and MMA order as, so its output is bit-identical.
+    /// The dense prompt body double-buffered: block b+1 decodes into the tile block b is not multiplying.
     prefill_nax_dense_db: ?mtl.Pipeline = null,
-    /// One row an expert, four rows a threadgroup: the decode regime on the tensor units, weights decoded once a
-    /// tile.
+    /// One row an expert, four rows a threadgroup: the decode regime on the tensor units, weights decoded once a tile.
     decode_nax: ?mtl.Pipeline = null,
     /// The compact decode tile (one row a threadgroup, 1 KB of threadgroup memory): the occupancy fix.
     decode_nax_c: ?mtl.Pipeline = null,
-    /// The decode bodies with the codebook value read from the resident table (the host's routed-table knob, default
-    /// on). The table holds the format's own decoder's values, entry for entry, so the decoded tile and the product
-    /// are bit-identical; only six ALU ops a weight become one load.
+    /// The decode bodies with the codebook value read from the resident table.
     decode_nax_tab: ?mtl.Pipeline = null,
     decode_nax_ctab: ?mtl.Pipeline = null,
     /// The compact table body with the two-word funnel read (TF_DECODE_FUNNEL).
     decode_nax_ctab_f: ?mtl.Pipeline = null,
-    /// The register-only decode body (`tf_exl3_matmul_decode_fma`): one warp a sixteen-column tile, one k walk, no
-    /// split-K, no partials and no reduce dispatch, and the decoded weights stay in registers (no threadgroup weight
-    /// tile, no barrier in the k loop). The reduction order is the FP32 walk's, not the tensor unit's, so its sums
-    /// are FP32 but not bit-identical to the tensor-unit body's.
+    /// The register-only decode body (`tf_exl3_matmul_decode_fma`): one warp a sixteen-column tile, one k walk.
     decode_fma: ?mtl.Pipeline = null,
-    /// The register-only decode body with the static state selection (`tf_exl3_matmul_decode_fma_static`): the lane's
-    /// eight windows at compile-time shifts, so the per-state word selection (the `rel[k]` cursor) and the per-state
-    /// bit offset leave the inner loop. The same states, the same codebook values, the same products and the same
-    /// reduction tree, so the output is bit-identical (identical to the shipped body at the pack's routed
-    /// shapes).
+    /// The register-only decode body with the static state selection (`tf_exl3_matmul_decode_fma_static`).
     decode_fma_static: ?mtl.Pipeline = null,
-    /// The register-only decode body with the static state selection and the codebook read from a 1024-entry
-    /// threadgroup LUT (`tf_exl3_matmul_decode_fma_static_lut`).
+    /// The register-only decode body with the static state selection and a 1024-entry LUT codebook read.
     decode_fma_static_lut: ?mtl.Pipeline = null,
-    /// The register-only body on the DENSE one-row path (`tf_exl3_matmul_decode_fma_dense`): the routed decode's own
-    /// structure (one warp a sixteen-column tile, the decoded weights in registers, no threadgroup weight tile, no
-    /// barrier in the k walk, no split-K and no partials round trip), reading a dense matrix's trellis from the
-    /// buffer and its strides, width and codebook from the args.
+    /// The register-only body on the DENSE one-row path (`tf_exl3_matmul_decode_fma_dense`).
     decode_fma_dense: ?mtl.Pipeline = null,
-    /// The MULTI-ROW dense body (`tf_exl3_matmul_decode_fma_dense_multi2` / `_multi4`): the register-only dense body
-    /// with R rows a threadgroup, so the weight decode -- the ALU-bound part -- is shared by the rows instead of paid
-    /// once a row (the shipped body is one row a threadgroup, and the dispatch's height is the row count, so a
-    /// four-row window decodes the attention's dense weights four times over). Every row keeps the shipped per-row
-    /// arithmetic (the same k blocks, the same warp split, the same accumulator tree and the same cross-warp sum), so
-    /// each row's sum is bit-identical to the one-row body's.
+    /// The MULTI-ROW dense body (`tf_exl3_matmul_decode_fma_dense_multi2` / `_multi4`).
     decode_fma_dense_multi2: ?mtl.Pipeline = null,
     decode_fma_dense_multi4: ?mtl.Pipeline = null,
     fma_warps: usize = 16,
     /// The one-row matmul body with the codebook value read from `codebook_table` (bit-identical values).
     matmul_tab: ?mtl.Pipeline = null,
-    /// The static state selection with the codebook read from a 1024-entry threadgroup LUT
-    /// (`tf_exl3_matmul_wide_static_lut`): the mul1 value depends only on the state's byte sum, so the 65,536-entry
-    /// table holds 1,024 distinct values and a threadgroup can hold them all. The LUT's values are the table's, entry
-    /// for entry (identical over the whole output), so the output is bit-identical; the table's L2 traffic is
-    /// what the arm removes.
+    /// The static state selection with the codebook read from a 1024-entry threadgroup LUT.
     matmul_static_lut: ?mtl.Pipeline = null,
     /// The gated int8 expert path's numerical core: a 16x16 trellis tile as int8 with its own scale.
     int8_tile: ?mtl.Pipeline = null,
@@ -109,8 +76,7 @@ pub const Pipelines = struct {
     pub fn loadWith(device: mtl.Device, gpa: ?std.mem.Allocator) !Pipelines {
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
-        // Precise transcendental math so the fused SwiGLU's exp is the ops library's exp bit for bit; the rest of
-        // this library uses no math functions, so its code is unchanged.
+        // Precise transcendental math so the fused SwiGLU's exp is the ops library's exp bit for bit.
         var options = mtl.CompileOptions.mlx();
         options.math_functions = .precise;
         const lib = try mtl.Library.fromSource(device, sources.core_exl3_projection, options);
@@ -173,8 +139,7 @@ pub const Pipelines = struct {
         var decode_fma_dense_multi4: ?mtl.Pipeline = null;
         var fma_warps: usize = 16;
         var int8_tile: ?mtl.Pipeline = null;
-        // The codebook table: the routed decode body reads its values from here, and the
-        // dense one-row bodies bind it too. Built before the pipelines that need it.
+        // The codebook table: the routed decode body reads its values from here.
         const table = if (gpa != null and device.tensorUnits()) codebookTable(device) else null;
         if (gpa) |g| {
             if (device.tensorUnits()) {
@@ -183,8 +148,7 @@ pub const Pipelines = struct {
                     std.log.info("exl3: nax source inlined, {d} bytes", .{src.len});
                     if (mtl.Library.fromSource(device, src, mtl.CompileOptions.mlx())) |nax_lib| {
                         defer nax_lib.deinit();
-                        // Indexed by (rows / 64 - 1) * 2 + (columns / 64 - 1): 64, 128 and 256 rows by 64 or 128
-                        // columns.
+                        // Indexed by (rows / 64 - 1) * 2 + (columns / 64 - 1): 64.
                         const tile_names = [_]?[]const u8{ "tf_exl3_matmul_prefill_nax5", "tf_exl3_matmul_prefill_nax3", "tf_exl3_matmul_prefill_nax2", "tf_exl3_matmul_prefill_nax4", null, null, "tf_exl3_matmul_prefill_nax6", null };
                         for (tile_names, 0..) |maybe, t| {
                             const name = maybe orelse continue;
@@ -200,8 +164,7 @@ pub const Pipelines = struct {
                         if (mtl.Pipeline.init(device, nax_lib, "tf_exl3_matmul_prefill_nax59", false)) |pf| {
                             if (pf.simdWidth() == 32 and pf.maxThreads() >= 128) prefill_nax_funnel_only = pf else pf.deinit();
                         } else |_| {}
-                        // The 128-row routed tile: the funnel read on a four-window run and the grouping's padded
-                        // rows skipped.
+                        // The 128-row routed tile: the funnel read on a four-window run and the grouping's padded rows.
                         if (mtl.Pipeline.init(device, nax_lib, "tf_exl3_matmul_prefill_nax49", false)) |pf| {
                             if (pf.simdWidth() == 32 and pf.maxThreads() >= 256) prefill_nax_skip_pad128 = pf else pf.deinit();
                         } else |_| {}
@@ -213,13 +176,11 @@ pub const Pipelines = struct {
                         if (mtl.Pipeline.init(device, nax_lib, "tf_exl3_matmul_prefill_nax42", false)) |pf| {
                             if (pf.simdWidth() == 32 and pf.maxThreads() >= 128) prefill_nax_funnel = pf else pf.deinit();
                         } else |_| {}
-                        // The dense 128x64 prompt tile on the double-buffered body: the same k order and MMA order as
-                        // the single-tile body, so the output is bit-identical.
+                        // The dense 128x64 prompt tile on the double-buffered body.
                         if (mtl.Pipeline.init(device, nax_lib, "tf_exl3_matmul_prefill_nax31", false)) |pf| {
                             if (pf.simdWidth() == 32 and pf.maxThreads() >= 128) prefill_nax_dense_db = pf else pf.deinit();
                         } else |err| std.log.err("exl3: nax31 pipeline init failed: {s}", .{@errorName(err)});
-                        // The prompt-row int8 body. Only under the flag, so a default boot compiles and loads exactly
-                        // what it did before.
+                        // The prompt-row int8 body.
                         if (knobs.i8_prefill) {
                             if (mtl.Pipeline.init(device, nax_lib, "tf_exl3_matmul_prefill_fp8", false)) |pf| {
                                 if (pf.simdWidth() == 32 and pf.maxThreads() >= 128) {
@@ -246,9 +207,7 @@ pub const Pipelines = struct {
                                 }
                             } else std.log.err("exl3: compact decode library compile failed", .{});
                         } else |_| {}
-                        // The routed-table knob: the same decode bodies with the codebook read from the resident
-                        // table. The engine binds the table at buffer 7 for every stage, and the table holds the
-                        // format's own decoder's values, so the output is bit-identical.
+                        // The routed-table knob: the same decode bodies with the codebook read from the resident table.
                         if (table != null) {
                             if (std.fmt.allocPrint(g, "#define TF_DECODE_TABLE 1\n{s}", .{src})) |src_t| {
                                 defer g.free(src_t);
@@ -268,8 +227,7 @@ pub const Pipelines = struct {
                                     }
                                 } else std.log.err("exl3: compact table decode library compile failed", .{});
                             } else |_| {}
-                            // The same compact table body with the two-word funnel read. halves = 6 is the routed
-                            // pack's width; the body falls back to the four-word path otherwise.
+                            // The compact table body with the two-word funnel read (routed pack, halves = 6).
                             if (std.fmt.allocPrint(g, "#define TF_DECODE_TABLE 1\n#define TF_DECODE_COMPACT 1\n#define TF_DECODE_FUNNEL 1\n{s}", .{src})) |src_tcf| {
                                 defer g.free(src_tcf);
                                 if (mtl.Library.fromSource(device, src_tcf, mtl.CompileOptions.mlx()) catch null) |libtcf| {
@@ -299,25 +257,21 @@ pub const Pipelines = struct {
                                             std.log.info("exl3: register-only decode pipeline active (tf_exl3_matmul_decode_fma_static, {d} warps)", .{warps});
                                         } else ps.deinit();
                                     }
-                                    // The same body with the static state selection and the codebook read from a
-                                    // 1024-entry threadgroup LUT.
+                                    // The same body with the static state selection and a LUT codebook read.
                                     if (mtl.Pipeline.init(device, libfma, "tf_exl3_matmul_decode_fma_static_lut", false) catch null) |pl| {
                                         if (pl.simdWidth() == 32 and pl.maxThreads() >= 32 * warps) {
                                             decode_fma_static_lut = pl;
                                             std.log.info("exl3: register-only decode pipeline active (tf_exl3_matmul_decode_fma_static_lut, {d} warps)", .{warps});
                                         } else pl.deinit();
                                     }
-                                    // The same body on the dense one-row path: a dense matrix has no expert
-                                    // descriptor, so this variant reads the trellis from the buffer and the strides,
-                                    // the width and the codebook from the args.
+                                    // The same body on the dense one-row path: a dense matrix has no expert descriptor.
                                     if (mtl.Pipeline.init(device, libfma, "tf_exl3_matmul_decode_fma_dense", false) catch null) |pd| {
                                         if (pd.simdWidth() == 32 and pd.maxThreads() >= 32 * warps) {
                                             decode_fma_dense = pd;
                                             std.log.info("exl3: dense register-only decode pipeline active (tf_exl3_matmul_decode_fma_dense, {d} warps)", .{warps});
                                         } else pd.deinit();
                                     }
-                                    // The same body with two and four rows a threadgroup: the weight decode is shared
-                                    // by the rows, and every row's sum is bit-identical.
+                                    // The same body with two and four rows a threadgroup.
                                     if (mtl.Pipeline.init(device, libfma, "tf_exl3_matmul_decode_fma_dense_multi2", false) catch null) |pd| {
                                         if (pd.simdWidth() == 32 and pd.maxThreads() >= 32 * warps) {
                                             decode_fma_dense_multi2 = pd;
@@ -426,12 +380,7 @@ pub var dense_log_count: u32 = 0;
 pub var dense8_log_count: u32 = 0;
 pub var matmul_tab_logged: bool = false;
 
-/// The table-decode knob (default on) restores the ALU codebook for a same-binary A/B. The table's values
-/// are the format's own decoder's, so the default path's arithmetic is unchanged.
-/// True when the indexed decode body that honours a descriptor's own output width is the one the stages will pick for
-/// a rows <= 8 indexed call -- the register-only body. The attention's wq_a (n 1280) and wkv (n 512) batch into one
-/// indexed call, so the caller gates on this: a fallback body that only knows the call's n would read a narrower
-/// entry's stream past its last column.
+/// The table-decode knob (default on) restores the ALU codebook for a same-binary A/B.
 pub fn indexedWidthBody(p: *const Pipelines) bool {
     if (p.decode_nax == null or p.decode_fma == null) return false;
     if (knobs.scalar_experts) return false;

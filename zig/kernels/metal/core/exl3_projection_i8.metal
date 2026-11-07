@@ -1,5 +1,4 @@
-//! The trellis tile as int8 with its own per-tile scale, on the GPU: the numerical core of the gated int8
-//! expert path, checked against the CPU int8 oracle (projection.applyF32TrellisInt8).
+//! The trellis tile as int8 with its own per-tile scale, on the GPU: the numerical core of the gated int8 expert path.
 #include <metal_stdlib>
 using namespace metal;
 #include "../nax.h"
@@ -37,8 +36,6 @@ inline ushort tf_i8_state(const device ushort* tile, uint map) {
 }
 
 // One 16x16 weight tile as int8 by its own peak, then a cell's dot with int8 x, scaled by both peaks.
-// One threadgroup a (16-row, 16-column) output tile: 32 lanes decode the 256 states eight each, quantize, and
-// each lane owns eight output cells.
 kernel void tf_exl3_int8_tile(const device half* x [[buffer(0)]],
                               const device uchar* trellis [[buffer(1)]],
                               device float* sums [[buffer(2)]],

@@ -75,11 +75,9 @@ pub const Model = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
     device: mtl.Device,
-    /// The gate GEMM's f16 activation copy when the pack's router gate is f16 (TF_DSV41_ROUTE_GEMM). One buffer sized
-    /// to the chunk, reused a layer: bf16 -> f16 is exact, and the weight keeps its own 10 bits.
+    /// The gate GEMM's f16 activation copy when the pack's router gate is f16 (TF_DSV41_ROUTE_GEMM).
     gate_x: ?mtl.Buffer = null,
-    /// The gate capture's staging buffers (TF_DSV41_GATE_DUMP): one pair, reused every layer and every token, because
-    /// a buffer freed while a command buffer still names it is a GPU invalid resource.
+    /// The gate capture's staging buffers (TF_DSV41_GATE_DUMP): one pair, reused every layer and every token.
     gate_dump_x: ?mtl.Buffer = null,
     gate_dump_l: ?mtl.Buffer = null,
     queue: mtl.Queue,
@@ -100,27 +98,21 @@ pub const Model = struct {
     markov_ids: ?mtl.Buffer = null,
     /// The Markov chain's per-threadgroup bests (ceil(vocab/256) float2), allocated once with the drafts.
     markov_part: ?mtl.Buffer = null,
-    /// The last row the conditioning taps captured: the drafter reads that row's three layers. The tap ring's next
-    /// write row and how many of its 128 rows are live (a rolling window across forwards).
+    /// The last row the conditioning taps captured: the drafter reads that row's three layers.
     taps_row: u32 = 0,
     /// Rows the last tap capture kept (1..128): the draft conditioning's row count.
     taps_n: u32 = 0,
-    /// The rows the LAST tap capture kept. They are the tail of the taps ring and they are consecutive positions, so
-    /// the conditioning can publish the window's missing positions at once.
+    /// The rows the LAST tap capture kept.
     taps_rows_last: u32 = 0,
-    /// The rows of the LAST tap capture that are valid (0 = all of them). The rollback keeps a prefix of the verify's
-    /// capture: the rejected rows' taps are not the committed history, so the conditioning publishes the prefix, not
-    /// the capture's tail.
+    /// The rows of the LAST tap capture that are valid (0 = all of them).
     taps_rows_valid: u32 = 0,
-    /// The adaptive depth policy's signal -- the accepted drafts a round, smoothed. The per-lane signal (the first
-    /// draft's acceptance) and its counters.
+    /// The adaptive depth policy's signal -- the accepted drafts a round, smoothed.
     mtp_accept_slot: [32]f64 = @splat(0.0),
     mtp_accept_seen_slot: [32]u32 = @splat(0),
     /// The round's per-draft acceptance (kept/offered), the hybrid policy's stay-deep signal.
     mtp_round_slot: [32]f64 = @splat(0.0),
     mtp_round_seen_slot: [32]u32 = @splat(0),
-    /// The ring's write row for the CURRENT forward. The three target layers SHARE it: the taps buffer is interleaved
-    /// by position (row p = the three layers' values), so the capture's ring advances ONCE a forward.
+    /// The ring's write row for the CURRENT forward.
     taps_base: u32 = 0,
     /// The 128-row conditioning scratch (rows x 5120 bf16) and its packed keys (rows x 528), allocated with the taps.
     cond: ?mtl.Buffer = null,
@@ -129,25 +121,17 @@ pub const Model = struct {
     mtp_count: u32 = 0,
     /// The draft round's own logits scratch (eight rows), so its forward never writes the workspace's logits field.
     mtp_logits: ?mtl.Buffer = null,
-    /// The drafter's router logits (its own 128 columns a row; the backbone's 384-wide rows would overlap the
-    /// drafter's five).
+    /// The drafter's router logits.
     dspark_logits: ?mtl.Buffer = null,
     /// The trunk's own head input (the verify's row 0), for the drafter-vs-trunk hidden probe.
     mtp_trunk_hidden: ?mtl.Buffer = null,
     /// Each slot's Engram cursor as of its beginSlot, restored by rollbackSlot.
     engram_stash: []u8,
-    /// Each slot's compressed-path partial scratch as of its beginSlot (TF_DSV41_PARTIAL_TXN), restored by
-    /// rollbackSlot: a rejected window leaves the half-block accumulator holding its last draft row, and the re-feed
-    /// of the block that straddles the rollback position would read it.
+    /// Each slot's compressed-path partial scratch as of its beginSlot (TF_DSV41_PARTIAL_TXN).
     partial_stash: []u8,
-    /// Each slot's stash of the window ring's next `max_ring_rows` slots, taken before a verify and put back for the
-    /// rows the round rejects. `lanes * layers * max_ring_rows * ring_stride` bytes.
+    /// Each slot's stash of the window ring's next `max_ring_rows` slots.
     ring_stash: mtl.Buffer,
-    /// A MERGED TAIL CHUNK'S STASH. When a pass runs its tail mark inside the chunk (no second forward), the chunk
-    /// publishes its PREFIX -- the rows before the mark -- into this slot's copy of the window ring and the taps
-    /// ring, then publishes the whole chunk into the live ones as usual; the state at the mark is then copied from
-    /// the stash. `publish_limit` is the prefix row count while such a chunk runs (0: no merged chunk), and
-    /// `snap_pos`/`snap_hist`/`snap_taps_*` are the mark's re-pointed metadata.
+    /// A MERGED TAIL CHUNK'S STASH.
     snap_ring: mtl.Buffer,
     taps_stash: mtl.Buffer,
     publish_limit: u32 = 0,
@@ -182,28 +166,22 @@ pub const Model = struct {
     host_stage_faults: u64 = 0,
     host_stage_pf: u8 = 0,
     host_stage_thr: u16 = 0,
-    /// The adaptive Engram gather's state. The decode-sized list starts single-threaded; two consecutive slow small
-    /// gathers (cold pages) switch it to the mapped path's workers, and every 16th parallel call one single-threaded
-    /// gather probes whether the stream has turned warm. So the warm band never leaves the old path.
-    /// TF_DSV41_ENGRAM_ADAPT=0 is the same-binary control.
+    /// The adaptive Engram gather's state.
     engram_par: bool = false,
-    /// The thread state machine's probe is not the arbiter: a prefetched window makes the next window's probe look
-    /// warm. TF_DSV41_ENGRAM_PF=0 disables the whole arm.
+    /// The thread state machine's probe is not the arbiter.
     engram_pf_on: bool = false,
     engram_pf_off: u8 = 0,
     engram_probe_in: u8 = 0,
     engram_probe_every: u8 = 16,
     engram_slow_n: u8 = 0,
-    /// The second Engram layer's prompt gather is deferred to its own layer, so the GPU runs the earlier layers while
-    /// the read happens. Set by `stageRows` on a prompt-sized chunk.
+    /// The second Engram layer's prompt gather is deferred to its own layer.
     engram_pending: bool = false,
     profile_stage_dispatch: [gpu_counters.stage_count]u64 = @splat(0),
     profile_last_count: u64 = 0,
     profile_open_stage: ?gpu_counters.Stage = null,
     grouped_prefill: bool = true,
     observer: ?Observer = null,
-    /// The attention's own per-stage observer (the `stagediff` harness). Null on every default path; installing it
-    /// only adds captures, never arithmetic.
+    /// The attention's own per-stage observer (the `stagediff` harness).
     attention_observer: ?attention.DiagnosticObserver = null,
     pub const Observer = struct {
         ctx: *anyopaque,
@@ -282,18 +260,12 @@ pub const Model = struct {
         return m.forwardSegs(&.{.{ .slot = slot, .ids = ids, .p0 = m.caches[slot].position }}, logits);
     }
 
-    /// One forward over several slots' one-row windows (a shared round's lanes). The row-wise layers run once over
-    /// every segment's rows; the attention core runs once a segment against its own slot state. One-row segments
-    /// only, and no instruments: the rung exists to amortise the dense attention weights, not to batch prefill or to
-    /// run a profiler.
+    /// One forward over several slots' one-row windows (a shared round's lanes).
     pub fn forwardSegs(m: *Model, segs: []const Seg, logits: Logits) ![]const f32 {
         return forward_impl.forwardSegs(m, segs, logits);
     }
 
-    /// The rows the host may hash. The decode/verify window (<= 8 rows) pays the GPU's commit+wait before its ids are
-    /// readable on the host; its hash is 48 integer reductions a row, so the host computes it where the staging reads
-    /// it and the round trip disappears. The prompt's thousands-row chunks are cheaper on the GPU.
-    /// `TF_DSV41_CPU_HASH=0` is the shipped GPU pass.
+    /// The rows the host may hash.
     pub fn cpuHashRows() u32 {
         return model_hash.cpuHashRows();
     }
@@ -394,25 +366,20 @@ pub const Model = struct {
         return model_draft_attention.draftAttention(m, enc0, blk, state, slot, layer, rows, position, dbg, prof);
     }
 
-    /// The drafter's conditioning, split into its own command buffers so that each part's GPU window can be read on
-    /// its own.
+    /// The drafter's conditioning, split into its own command buffers.
     pub const CondProf = struct {
         queue: mtl.Queue,
         cb: mtl.CommandBuffer,
         enc: mtl.ComputeEncoder,
         on: bool,
-        /// The BLOCKS' split (TF_DSV41_BLOCK_PROF=1) -- the drafter's three blocks have never been split, and they
-        /// are the larger half of the drafter's forward.
+        /// The BLOCKS' split (TF_DSV41_BLOCK_PROF=1) -- the drafter's three blocks have never been split.
         blk_on: bool = false,
         /// The block the parts belong to (the MoE's own calls do not know it).
         block: u32 = 0,
         total_ms: f64 = 0,
         parts: u32 = 0,
 
-        /// End the buffer, commit it, wait, print the part's GPU window, and start a fresh buffer. The encoder comes
-        /// by POINTER, so the caller's own copy is updated too -- the blocks' parts are cut from inside the attention
-        /// and the MoE, whose callers encode into the fresh encoder. The tag names the section ("cond" or "blk"), the
-        /// label the part.
+        /// End the buffer, commit it, wait, print the part's GPU window, and start a fresh buffer.
         pub fn split(self: *CondProf, tag: []const u8, label: []const u8, block: u32, enc: *mtl.ComputeEncoder) void {
             enc.end();
             self.cb.commit();
@@ -428,13 +395,7 @@ pub const Model = struct {
         }
     };
 
-    /// TF_DSV41_MTP_DRAFTS: five rows a round (the pending token and four fillers) through three blocks of the
-    /// drafter's own weights, then the shared head; the head writes from `.logits` row 2 on. THE FIRST DRAFT's
-    /// ACCEPTANCE, smoothed -- the adaptive depth policy's signal. It is the fraction of rounds whose kept count is
-    /// at least two (the pending token plus the first draft), and it is the SAME at every depth, while the yield is
-    /// not: the yield scales with the depth, so one threshold cannot separate the novel text from the predictable
-    /// text. The policy's warm-up length -- a running mean over the first `k` samples, then the shipped EMA. `TF_DSV41_MTP_ADAPT_WARM=0` is the pure EMA (the
-    /// same-binary control).
+    /// TF_DSV41_MTP_DRAFTS: five rows a round.
     pub var mtp_warm_cache: ?u32 = null;
     pub fn mtpWarmRounds() u32 {
         return model_drafter.mtpWarmRounds();
@@ -461,8 +422,7 @@ pub const Model = struct {
     pub fn streamView(m: *const Model) View {
         return m.workspace.view(if (m.stream_alt) .stream_next else .stream);
     }
-    /// One fused boundary: the pending branch expanded into the other stream buffer, its mix partials, then the
-    /// split: this boundary's pre/post/comb from the partials and the lagged `pre_in` collapse into `normed`.
+    /// One fused boundary: the pending branch expanded into the other stream buffer, its mix partials, then the split.
     pub fn boundary(m: *Model, enc: mtl.ComputeEncoder, bp: *const mhc.BoundaryPipelines, w: weights.Hc, pre_in: View, pre_out: View, norm: checkpoint.Tensor, rows: u32, with_mixes: bool) void {
         if (std.c.getenv("TF_DSV41_SKIP_MHC") != null) return;
         const ws = &m.workspace;
@@ -530,8 +490,7 @@ pub fn convert(v: View) exl3.View {
     return .{ .buffer = v.buffer, .offset = v.offset };
 }
 
-/// TF_DSV41_STAGE_CB: close the command buffer at a stage boundary, log its GPU seconds under `label`, and start the
-/// next one.
+/// TF_DSV41_STAGE_CB: close the command buffer at a stage boundary, log its GPU seconds under `label`.
 pub var split_stage_dispatches: u64 = 0;
 pub var split_stage_threadgroups: u64 = 0;
 pub var gate_dump_done: bool = false;

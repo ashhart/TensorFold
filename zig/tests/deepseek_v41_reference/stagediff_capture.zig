@@ -1,10 +1,4 @@
-// ! The two-forward stage diff, generalized to an N-row window. One seeded state, the ! sequential 1-row chain and
-// an N-row window on the same token sequence, captured at the attention's ! operator boundaries and at the model's
-// per-sublayer boundary -- every row separately. The first ! (row, layer, stage) that differs localises the drafted
-// path's divergence from the plain path. ! Usage: tf-dsv41-run stagediff MODEL TABLES IDS_JSON OUT_DIR [STEPS]
-// [ROWS] ! IDS_JSON is the prefix (prefilled as the serve prefills: one chunk up to the plan's rows). ! STEPS is
-// how many pending tokens to diff (default 8). ROWS is the window width (default 2; ! the policy's depth d runs d+1
-// rows, so 3 and 4 are the interesting ones).
+// !
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
@@ -23,8 +17,7 @@ pub fn attentionOffset(stage: attention.DiagnosticStage) usize {
     for (attention_widths[0..@backingInt(stage)]) |width| offset += width;
     return offset;
 }
-/// One per-layer slot in the model observer's record: stream (20480), normalized (5120), branch
-/// (5120) as bf16, then the six route ids and the six route weights.
+/// One per-layer slot in the model observer's record: stream (20480), normalized (5120), branch (5120) as bf16.
 pub const coarse_stride = 61488;
 pub const layer_count = 40;
 pub const logits_width = 129280;
@@ -50,8 +43,7 @@ pub const Capture = struct {
 
     pub fn attentionGpu(ctx: *anyopaque, enc: mtl.ComputeEncoder, layer: u32, stage: attention.DiagnosticStage, source: attention.View) !void {
         const self: *Capture = @ptrCast(@alignCast(ctx));
-        // The packed window key is a different layout (fp8, 528-stride); it is a pure function of
-        // kv_rope, which this capture compares directly, so it is skipped rather than copied wrong.
+        // The packed window key is a different layout (fp8, 528-stride); it is a pure function of kv_rope.
         if (stage == .kv_quantized) return;
         if (layer >= layer_count) return error.InvalidLayer;
         const width = attention_widths[@backingInt(stage)];
@@ -217,8 +209,7 @@ pub fn firstCaptureDifference(a_attn: []const u16, b_attn: []const u16, a_coarse
                 const base = ((layer * 2 + boundary) * rows + row) * coarse_stride;
                 const a = a_coarse[base..][0..coarse_stride];
                 const b = b_coarse[base..][0..coarse_stride];
-                // The `.attention` point is BEFORE this layer's MoE: its route fields are the
-                // previous forward's (stale by construction), so only the `.moe` point compares them.
+                // The `.attention` point is BEFORE this layer's MoE: its route fields are the previous forward's.
                 const compared: usize = if (boundary == 0) coarse_field_offsets[2] + coarse_field_lengths[2] else coarse_stride;
                 if (!std.mem.eql(u8, a[0..compared], b[0..compared])) {
                     inline for (0..5) |field| {

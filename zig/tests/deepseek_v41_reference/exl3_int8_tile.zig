@@ -1,7 +1,4 @@
 //! The trellis tile as int8 with per-tile scales, on the tensor units, against the CPU int8 oracle.
-//! `projection.applyF32TrellisInt8` decodes each 16x16 tile, scales it to int8 by its own peak, quantizes the
-//! rotated x a 16-block, and accumulates `q_w q_x * tile_scale * x_scale`; this drives the same formula through
-//! the GPU's int8 MMA and compares the whole projection (with the engine's own rotate_out on top).
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");

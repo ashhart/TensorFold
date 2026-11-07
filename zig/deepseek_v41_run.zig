@@ -363,8 +363,7 @@ fn execute(a: std.mem.Allocator, io: std.Io, model: *ds.Model, args: []const [:0
     } else if (is_trace) {
         try trace.run(a, io, model, ids, map_blob, dir);
     } else if (is_gate) {
-        // Same capture as `trace`, but ids are pinned to the engine's own selection, which is what makes every later
-        // stage comparison arithmetic-only. The pass/fail evaluation reads the artefacts this writes.
+        // Same capture as `trace`, but ids are pinned to the engine's own selection.
         try trace.runGate(a, io, model, ids, map_blob, dir);
     } else if (is_teacher or is_seams) {
         const chunk = if (args.len > 6) try number(args[6]) else model.workspace.plan.rows;

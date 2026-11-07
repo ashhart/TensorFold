@@ -72,10 +72,7 @@ const headRms = model.headRms;
 const logitsTopK = model.logitsTopK;
 
 pub fn draftAttention(m: *Model, enc0: mtl.ComputeEncoder, blk: *const weights.Layer, state: *kv.cache.State, slot: u32, layer: u32, rows: u32, position: u32, dbg: ?mtl.Buffer, prof: ?*Model.CondProf) !void {
-    // The drafter's attention is the release's `DSparkAttention.forward` (inference/model.py,
-    // revision 314113f8): the draft query's low-rank pair and norm, the draft key's norm and rope,
-    // the packed window, the scan over the main model's window rows, and the grouped output pair.
-    // The stages below name those steps; the arms that retain an earlier form stay for the A/B.
+    // The drafter's attention is the release's `DSparkAttention.forward` (inference/model.py, revision 314113f8).
     var enc = enc0;
     const p = &m.pipelines;
     const c = m.cfg;
@@ -135,8 +132,7 @@ pub fn draftAttention(m: *Model, enc0: mtl.ComputeEncoder, blk: *const weights.L
     enc = st.enc;
 }
 
-/// The drafter's `DSparkAttention.forward`, staged: the draft query pair and its norm, the draft key
-/// and its rope, the window pack, the scan over the main window, and the grouped output.
+/// The drafter's `DSparkAttention.forward`, staged: the draft query pair and its norm, the draft key and its rope.
 const DraftAttention = struct {
     m: *Model,
     enc: mtl.ComputeEncoder,
@@ -164,8 +160,7 @@ const DraftAttention = struct {
     dspark_chunk_all: bool,
     dspark_no_chunk_mask: bool,
 
-    /// `DSparkAttention.forward`'s query/key half: `qr = q_norm(wq_a(x))`, `q = wq_b(qr)`, and the
-    /// rope each carries at the draft positions; `kv_norm(wkv(x))` and its rope.
+    /// `DSparkAttention.forward`'s query/key half: `qr = q_norm(wq_a(x))`, `q = wq_b(qr)`.
     pub fn queryStage(self: *DraftAttention) !void {
         const m = self.m;
         const p = self.p;
@@ -275,9 +270,7 @@ const DraftAttention = struct {
         const dspark_no_chunk_mask = self.dspark_no_chunk_mask;
         var enc = self.enc;
         defer self.enc = enc;
-        // The release's DSparkAttention reads the main model's keys for the window (`wkv(main_x)`, roped at the main
-        // positions, written one row a step into its ring). The drafter's own ring carries three projected
-        // conditioning rows plus the drafter's own rows; TF_DSV41_MTP_TRUNK_RING selects the main ring instead.
+        // The release's DSparkAttention reads the main model's keys for the window.
         const ring_view: View = switch (mtpTrunkRing()) {
             1 => blk: {
                 if (slot >= m.caches.len) return error.InvalidLaneSlot;
@@ -317,8 +310,7 @@ const DraftAttention = struct {
         const query = self.query;
         var enc = self.enc;
         defer self.enc = enc;
-        // The decoded key table the scan read (the ring's 128 rows, then the chunk's five) and the attention's own
-        // output.
+        // The decoded key table the scan read.
         if (dbg) |b| {
             if (layer == 0) {
                 ops.encodeDump(enc, &p.ops, aw.dense(), .{ .buffer = b, .offset = mtp_dbg_dense * 4 }, 133 * c.head_dim, true);
@@ -327,11 +319,7 @@ const DraftAttention = struct {
         }
         const grouped = ws.view(.logits).shifted(129280 * 4);
         const per_group = q_width / blk.attn.wo_a.len;
-        // THE EIGHT OUTPUT GROUPS IN ONE INDEXED DISPATCH -- the trunk's own form. The drafter's layout is the
-        // trunk's: q is row-major, so `rows * o_groups` rows of `per_group` are exactly the (row, group) slices, and
-        // `grouped` is the same row-major layout at `o_lora`. The drafter's eight slices are the same shape as the
-        // trunk's (k 4096, n 1024). TF_DSV41_NO_FUSE_DRAFT_WO_A=1 restores the eight separate projections for a
-        // same-binary A/B.
+        // THE EIGHT OUTPUT GROUPS IN ONE INDEXED DISPATCH -- the trunk's own form.
         const fuse_wo_a = blk.attn.wo_a_descriptors != null and rows <= 8 and dbg == null and
             std.c.getenv("TF_DSV41_NO_FUSE_DRAFT_WO_A") == null;
         if (fuse_wo_a) {
@@ -345,9 +333,7 @@ const DraftAttention = struct {
                 .routes = .{ .ids = convert(aw.idMap()), .repeat = 1 },
             });
         } else for (blk.attn.wo_a, 0..) |matrix, group| {
-            // The grouped output is row-major at group_output (eight o_lora groups a row), as the backbone's call has
-            // it; the row stride was c.o_lora here, so the groups overlapped and the wo_b read stale rows -- the
-            // drafter's filler rows went NaN. Fixed.
+            // The grouped output is row-major at group_output (eight o_lora groups a row).
             if (dbg) |b| {
                 if (layer == 0 and group == 0)
                     try m.projectDebugSums(enc, matrix, query.shifted(group * per_group * 2), grouped.shifted(group * c.o_lora * 2), rows, q_width, c.o_groups * c.o_lora, .bf16, b)
@@ -382,9 +368,7 @@ const DraftAttention = struct {
         const chunk = self.chunk;
         var enc = self.enc;
         defer self.enc = enc;
-        // The release publishes only the main rows into the draft ring: each step writes `main_kv` at `start_pos %
-        // win`, never the draft rows. The earlier form also published the draft's own rows; TF_DSV41_DRAFT_PUBLISH=1
-        // restores that publish for a same-binary A/B.
+        // The release publishes only the main rows into the draft ring.
         if (std.c.getenv("TF_DSV41_DRAFT_PUBLISH") != null)
             try p.attention.cache.publishWindow(enc, chunk, try state.ring(layer), rows, position);
         enc.barrier();

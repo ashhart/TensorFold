@@ -1,6 +1,6 @@
-// Native EXL3: stored trellis tiles, row-independent compensated dots, and normalized Sylvester rotations. The
-// model-facing order (attention, MTP, dense/shared routing) follows the release's inference/model.py, revision
-// 314113f8; the trellis arithmetic and the kernel shapes are the lane's own pack format.
+// Native EXL3: stored trellis tiles, row-independent compensated dots, and normalized Sylvester rotations.
+
+// Provenance: the model-facing order follows the release's inference/model.py (revision 314113f8).
 #include <metal_stdlib>
 using namespace metal;
 
@@ -69,8 +69,7 @@ inline half tf_exl3_value(ushort state, uint codebook) {
   return half(float(as_type<half>(ushort(x))) + float(as_type<half>(ushort(x >> 16))));
 }
 
-// A scalar lane's state window: the ring word, its bit offset and the next ring word. The pack fixes the arithmetic;
-// these named fields are the lane's own cursor, and the scalar twin of the tensor-unit walk.
+// A scalar lane's state window: the ring word, its bit offset and the next ring word.
 struct TfExl3ScalarWindow {
   uint word, bit, next;
 };
@@ -121,8 +120,7 @@ kernel void tf_exl3_rotate_in(const device ushort* x [[buffer(0)]],
                              uint sg [[simdgroup_index_in_threadgroup]],
                              uint3 tptg [[threads_per_threadgroup]],
                              uint3 tg [[threadgroup_position_in_grid]]) {
-  // Four SIMDgroups a threadgroup, each a 128-element block of the same row: the dispatch needs four times fewer
-  // threadgroups, and at a prompt chunk these passes were a million threadgroups a layer.
+  // Four SIMDgroups a threadgroup, each a 128-element block of the same row.
   const uint row = tg.y;
   if (!tf_exl3_active(routes, a, row)) return;
   const device ushort* scales = a.indexed ? descriptors[routes[row]].su : su;
@@ -154,33 +152,25 @@ inline uint tf_exl3_map_of(uint p, uint halves) {
   return wi | (off << 6) | (next << 11);
 }
 
-// The same value as tf_exl3_value, read from the 3 x 65536-half table the engine already binds at buffer 7 (built
-// from format.codebookValue, the format's own decoder, and qualified entry-for-entry by tf_exl3_codebook_check).
-// Bit-identical by construction; this arm only moves the work from ALU to a load.
+// The same value as tf_exl3_value, read from the 3 x 65536-half table the engine already binds at buffer 7.
 inline half tf_exl3_table_value(const device half* table, uint codebook, ushort state) {
   return table[codebook * 65536u + uint(state)];
 }
 
-// The mul1 value depends only on the state's byte sum, so the 65,536-entry table holds 1,024 distinct values and a
-// threadgroup can hold them all: the table is filled once a threadgroup and the decode reads it in place of the 384
-// KB resident table's load.
+// The mul1 value depends only on the state's byte sum.
 inline uint tf_exl3_mul1_index(ushort state) {
   const uint x = uint(state) * 0x83DCD12Du;
   const uint bs = (x & 0x00FF00FFu) + ((x >> 8u) & 0x00FF00FFu);
   return (bs * 0x00010001u) >> 16u;
 }
 
-// The mul1 value for a byte sum: the same half the arithmetic path and the resident table hold (the +1024 bias rides
-// in the mantissa, exactly as the format's own decoder puts it).
+// The mul1 value for a byte sum: the same half the arithmetic path and the resident table hold.
 inline half tf_exl3_mul1_value(uint bs) {
   const half hs = as_type<half>(ushort(bs + 0x6400u));
   return half(fma(float(hs), float(as_type<half>(ushort(0x1EEEu))), float(as_type<half>(ushort(0xC931u)))));
 }
 
-// The lane's eight windows at compile-time shifts. C_cur is the 32-bit window at the lane's first state (its bit 31
-// is that window's first stream bit) and C_next the window 32 bits later; S is the states' stride in bits (halves /
-// 2) and J the state's index, so every shift below folds at compile time. The structure: one funnel shift a block,
-// then the windows at fixed shifts.
+// The lane's eight windows at compile-time shifts.
 template <uint S, uint J>
 inline ushort tf_exl3_state_static(uint c_cur, uint c_next) {
   const uint bit = S * J;
@@ -198,8 +188,7 @@ inline void tf_exl3_matmul_impl(const device half* x, const device uchar* trelli
                                 uint lane, uint3 tg,
                                 threadgroup float* wx, threadgroup float* xx) {
   const uint split = a.splits > 1 ? tg.y : 0;
-  // A split dispatch carries a row group in tg.z (the tile already spans eight rows), so a verify window's row keeps
-  // the solo order instead of collapsing to row 0.
+  // A split dispatch carries a row group in tg.z (the tile already spans eight rows).
   const uint rb = a.splits > 1 ? tg.z * 8 : (a.indexed == 1 ? tg.y : tg.y * 8), nb = tg.x * 16;
   if (!simd_any(tf_exl3_active(routes, a, rb + (a.indexed == 1 ? 0 : lane % 8)))) return;
   const uint id = a.indexed ? routes[rb] : 0;
@@ -209,8 +198,7 @@ inline void tf_exl3_matmul_impl(const device half* x, const device uchar* trelli
   const uint halves = a.indexed ? descriptors[id].halves : a.halves;
   const uint codebook = a.indexed ? descriptors[id].codebook : a.codebook;
   uint maps[8];
-  // Eight consecutive states a lane of the sixteen-column tile: the three stream words their windows can touch, the
-  // shift each window needs and its threadgroup slot all depend only on the lane, so they live in registers.
+  // Eight consecutive states a lane of the sixteen-column tile: the three stream words their windows can touch.
   uint at[8], off[8], sh[8], rel[8];
   const uint words = 4 * halves;
   const uint ring = 128 * halves;
@@ -337,8 +325,7 @@ kernel void tf_exl3_matmul_hoisted(const device half* x [[buffer(0)]],
   tf_exl3_matmul_impl<true, false>(x, trellis, sums, a, routes, descriptors, partials, nullptr, lane, tg, wx, xx);
 }
 
-// The one-row / narrow-window arm of the same body with the codebook as a table read (buffer 7). Same k order, same
-// FP32 sums and the same FP16 values as tf_exl3_value, so its output is bit-identical.
+// The one-row / narrow-window arm of the same body with the codebook as a table read (buffer 7).
 kernel void tf_exl3_matmul_tab(const device half* x [[buffer(0)]],
                                const device uchar* trellis [[buffer(1)]],
                                device float* sums [[buffer(2)]],
@@ -374,8 +361,7 @@ kernel void tf_exl3_rotate_out(const device float* sums [[buffer(0)]],
   const uint row = tg.y, base = (tg.x * (tptg.x / 32u) + sg) * 128;
   const bool active = tf_exl3_active(routes, a, row);
   const uint id = a.indexed ? routes[row] : 0;
-  // An indexed batch may carry entries of different output width (descriptor.reserved, 0 = the call's n). The entry's
-  // own width bounds the columns this row writes; single-width tables are unchanged.
+  // An indexed batch may carry entries of different output width (descriptor.reserved, 0 = the call's n).
   const uint width = (a.indexed && active && descriptors[id].reserved != 0) ? descriptors[id].reserved : a.n;
   if (base >= width || !active) return;
   const device ushort* scales = a.indexed ? descriptors[id].sv : sv;
@@ -396,8 +382,7 @@ kernel void tf_exl3_rotate_out(const device float* sums [[buffer(0)]],
   }
 }
 
-// The pre-rotated int8 pack's epilogue. The byte body leaves f32 sums; the rotated pack has no Hadamard/svh left to
-// apply, so this is one cast into the caller's bf16 output at its own row stride.
+// The pre-rotated int8 pack's epilogue.
 kernel void tf_exl3_epilogue(const device float* sums [[buffer(0)]],
                              device uchar* y [[buffer(1)]],
                              constant TfExl3Args& a [[buffer(2)]],
@@ -433,9 +418,7 @@ kernel void tf_exl3_dense(const device half* rotated [[buffer(0)]],
   sums[ulong(g.y) * a.n + g.x] = acc;
 }
 
-// Four SIMDgroups share decoded weights while each retains its original eight-row compensated dots. The
-// release feeds the prompt through its expert blocks (inference/model.py, revision 314113f8); the pack arithmetic
-// and the window walk below are our own.
+// Four SIMDgroups share decoded weights while each retains its original eight-row compensated dots.
 kernel void tf_exl3_matmul_prefill(const device half* x [[buffer(0)]],
                                   const device uchar* trellis [[buffer(1)]],
                                   device float* sums [[buffer(2)]],

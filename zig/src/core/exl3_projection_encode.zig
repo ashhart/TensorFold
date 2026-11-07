@@ -52,8 +52,7 @@ pub const DenseMatrix = struct {
     n: usize,
 };
 
-/// Kept-dense: quantized rotate stages, trellis to dense, f32 in rotate_out sums; sequential k, as the fp64
-/// reference.
+/// Kept-dense: quantized rotate stages, trellis to dense, f32 in rotate_out sums; sequential k, as the fp64 reference.
 pub fn encodeDense(p: *const Pipelines, e: mtl.ComputeEncoder, m: DenseMatrix, x: View, y: View, scratch: View, r: Rows) !void {
     try shape(m.k, m.n);
     var a = try rowsArgs(m.k, m.n, r, x, y, scratch);
@@ -98,8 +97,7 @@ pub fn encodeDense(p: *const Pipelines, e: mtl.ComputeEncoder, m: DenseMatrix, x
     e.barrier();
 }
 
-/// The int8 tile path for one dense call: rotate in, the int8 tiles into `sums`, rotate out. The caller owns the
-/// buffers; `sums` is cleared here because the kernel accumulates into it.
+/// The int8 tile path for one dense call: rotate in, the int8 tiles into `sums`, rotate out.
 pub fn encodeInt8Tile(p: *const Pipelines, e: mtl.ComputeEncoder, m: Matrix, x: View, y: View, scratch: View, r: Rows) !void {
     if (p.int8_tile == null or p.codebook_table == null) return error.UnsupportedExl3Int8;
     const storage_bytes = try m.checkStorage();
@@ -148,10 +146,7 @@ pub fn encodeInt8Tile(p: *const Pipelines, e: mtl.ComputeEncoder, m: Matrix, x: 
     e.barrier();
 }
 
-/// The prompt-row int8 path for a dense projection. `direct` is a pre-rotated pack (the weight carries suh/H_K and
-/// H_N/svh), so the call is one byte body into the caller's bf16 output; otherwise the shipped rotate_in and
-/// rotate_out bracket the byte body exactly as the trellis path brackets its GEMM. The row scale is applied by the
-/// body's own epilogue, so an int8 pack's scale never reaches rotate_out a second time.
+/// The prompt-row int8 path for a dense projection.
 pub fn encodePrefillInt8(p: *const Pipelines, e: mtl.ComputeEncoder, m: Matrix, side: Int8, x: View, y: View, scratch: View, r: Rows, direct: bool) !void {
     if (p.prefill_fp8 == null) return error.UnsupportedExl3Int8;
     if (m.k != side.k or m.n != side.n) return error.InvalidExl3Stride;

@@ -38,11 +38,9 @@ pub const Field = enum {
     logits,
     projection,
     grouping,
-    /// The fused gate+up dispatch's plan: twelve picks a token (six gate, six up one table entry further), so
-    /// it is a separate plan from the routed one and its buffer is sized for a window, not a prompt chunk.
+    /// The fused gate+up dispatch's plan: twelve picks a token (six gate, six up one table entry further).
     grouping_fused,
-    /// The fused gate+up dispatch's pick table: two six-slot rows a token (the gate experts, then the up
-    /// experts one table entry further), consumed only when a block's fused descriptor table is bound.
+    /// The fused gate+up dispatch's pick table: two six-slot rows a token.
     fused_ids,
     /// The input row each fused pick reads: rows 0..6T-1 and 6T..12T-1 both read their own token.
     fused_sources,
@@ -68,17 +66,12 @@ pub const Plan = struct {
         if (lanes == 0 or lanes > 256) return error.InvalidLaneCount;
         const t: usize = rows;
         const grouped = if (rows > 1) try groups.Plan.init(t * 6, 384, groups.tileRows()) else null;
-        // The fused plan only ever covers a window (the fused call is taken below eight rows), so it is sized
-        // for eight rows even when the workspace is chunk-sized; the grouping buffer follows its own plan.
-        // An explicit typed intermediate: `@min(t, 8) * 12` narrows to a four-bit comptime type on this
-        // compiler and wraps 96 to 0 in ReleaseFast (a 0-row plan then trips InvalidExl3Rows).
+        // The fused plan only ever covers a window (the fused call is taken below eight rows).
         const window_rows: usize = @min(t, 8);
         const fused_group = if (rows > 1) try groups.Plan.init(window_rows * 12, 768, groups.tileRows()) else null;
         const dense_scratch = try exl3.scratchBytes(5120, 129280, t);
         const grouped_scratch = if (grouped) |g| @max(try exl3.scratchBytes(5120, 2304, g.padded), try exl3.scratchBytes(2304, 5120, g.padded)) else @max(try exl3.scratchBytes(2304, 5120, t * 6), try exl3.scratchBytes(5120, 2304, t * 12));
-        // The fused plan pads twelve slots a token to 64-row tiles (five rows -> 60 slots -> 3,840 padded), the
-        // largest grouped count a window reaches; the down call's six-slot plan pads less, so sizing both
-        // projection directions at the fused count covers every grouped call.
+        // The fused plan pads twelve slots a token to 64-row tiles (five rows -> 60 slots -> 3,840 padded).
         const fused_scratch = if (fused_group) |g| @max(try exl3.scratchBytes(5120, 2304, g.padded), try exl3.scratchBytes(2304, 5120, g.padded)) else 0;
         const projection_bytes = @max(dense_scratch, @max(grouped_scratch, fused_scratch));
         const sizes = [_]usize{
@@ -101,9 +94,7 @@ pub const Plan = struct {
 
 pub const Workspace = struct {
     buffer: mtl.Buffer,
-    /// The shared gate/up fusion's two maps (input row and descriptor id), precomputed for every window size 1..8
-    /// at init so no host write happens while a command buffer is in flight. The first `shared_map_slots` u32 are
-    /// the input maps, the second the route maps; window `r` starts at `r*(r-1)` (the sum of 2*1..2*(r-1)).
+    /// The shared gate/up fusion's two maps (input row and descriptor id).
     shared_maps: mtl.Buffer,
     plan: Plan,
 
@@ -163,8 +154,7 @@ pub const Workspace = struct {
         const v = w.view(.grouping);
         return .{ .buffer = v.buffer, .offset = v.offset, .plan = try groups.Plan.init(@as(usize, rows) * picks, experts, groups.tileRows()) };
     }
-    /// The fused gate+up call's plan: one token reads twelve slots (six gate picks, then six up picks one table
-    /// entry further), so the plan covers twice the slots against the doubled descriptor table.
+    /// The fused gate+up call's plan: one token reads twelve slots.
     pub fn groupingFused(w: *const Workspace, rows: u32, picks: u32, experts: u32) !groups.Scratch {
         if (rows < 2 or rows > w.plan.rows) return error.InvalidPrefillChunk;
         const v = w.view(.grouping_fused);

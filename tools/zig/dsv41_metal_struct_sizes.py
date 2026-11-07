@@ -1,19 +1,5 @@
 #!/usr/bin/env python3
-"""The DeepSeek V4.1 Metal struct manifest.
-
-Every struct the family's Metal sources define is compiled once, in the same translation unit the engine
-compiles it in (the three run-time joins plus one unit a source), and its C size is read from the Metal
-compiler's own record-layout dump.  The result is a checked-in manifest (`struct_sizes.txt`), and this
-tool fails the build when:
-
-  * a struct's size differs from the manifest (a Metal-side edit, or a compiler layout change),
-  * a kernel argument struct has no `static_assert(sizeof(T) == N)` in its unit,
-  * a struct defined in a source has no record layout in the unit that compiles it.
-
-Usage: dsv41_metal_struct_sizes.py [--update] [DIR]
-
-DIR defaults to the repository's zig/kernels/metal/deepseek_v41.  `--update` rewrites the manifest.
-"""
+"""The DeepSeek V4.1 Metal struct manifest: compile every struct in its engine unit, fail on size drift."""
 import os
 import re
 import shutil
@@ -21,8 +7,7 @@ import subprocess
 import sys
 import tempfile
 
-# The engine's run-time joins (csa2.zig:91, csa2_index.zig:164, metal/pipelines.zig:122), as
-# check_dsv41_metal_mirrors.sh reproduces them.  A source that only compiles inside a join is assigned to it below.
+# The engine's run-time joins (csa2.zig:91, csa2_index.zig:164, metal/pipelines.zig:122).
 JOINS = [
     ("csa2-kv-join", ["kv.metal", "csa2.metal", "csa2_nax.metal"], None),
     ("index-kv-join", ["kv.metal", "index_exl3.metal", "index_exl3_nax.metal"], None),
@@ -123,8 +108,7 @@ def main(argv):
         if not os.path.exists(nax):
             nax = os.path.join(directory, "..", "nax.h")
         shutil.copy(nax, os.path.join(work, "nax.h"))
-        # The sources `#include "../nax.h"` and at least one includes another source by name, so the
-        # unit is compiled where the engine's own sources sit: a directory one level under `nax.h`.
+        # The sources `#include "../nax.h"` and at least one includes another source by name.
         os.makedirs(os.path.join(work, "deepseek_v41"), exist_ok=True)
         for source in sources:
             shutil.copy(os.path.join(directory, source), os.path.join(work, "deepseek_v41", source))

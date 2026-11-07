@@ -148,9 +148,7 @@ pub const Engine = struct {
             const chosen = try e.takeTurns(live.items);
             e.shared_rounds += 1;
             for (chosen) |s| s.served = e.shared_rounds;
-            // A shared round's drafter would condition every lane on the last verified lane's capture (one
-            // taps ring, one drafter ring), so a shared round runs the exact plain window; a stream that runs
-            // alone again gets its own drafts back.
+            // A shared round's drafter would condition every lane on the last verified lane's capture.
             const drafts_on = try a.alloc(bool, chosen.len);
             for (chosen, 0..) |s, i| {
                 drafts_on[i] = s.drafts;
@@ -516,7 +514,6 @@ pub const Engine = struct {
     }
 
     /// One token, the next forward queued first; a copied continuation ahead switches to verify windows.
-    /// The first token's draw: among the grammar's allowed tokens when the stream has one that constrains it.
     pub fn drawFirst(e: *Engine, s: *Stream, position: u64) !u64 {
         const g = s.grammar orelse return e.backend.first(s, position);
         const mask = try g.next(e.arena.allocator()) orelse return e.backend.first(s, position);

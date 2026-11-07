@@ -15,8 +15,7 @@ pub fn tokAt(p: []const u32, h: []const u32, k: usize) u32 {
     return if (k < p.len) p[k] else h[k - p.len];
 }
 
-/// The tokens that followed the last earlier occurrence of the stream's own tail, at most `out.len` of them. The
-/// space searched is the prompt followed by the tokens this slot has committed since.
+/// The tokens that followed the last earlier occurrence of the stream's own tail, at most `out.len` of them.
 pub fn lookupTokens(p: []const u32, h: []const u32, out: []u32) usize {
     const total = p.len + h.len;
     if (total < 4 or out.len == 0) return 0;
@@ -60,9 +59,7 @@ pub fn lookupDepth() u32 {
 }
 
 var no_refeed: ?bool = null;
-/// TF_DSV41_NO_REFEED=0 restores the re-feed; the no-re-feed port is the default. A rejected window's kept rows are
-/// the rows the verify already wrote, so the rollback restores the cache from the pool's capture instead of running
-/// the model a second time -- and the re-feed's own divergence from the verify goes with it.
+/// TF_DSV41_NO_REFEED=0 restores the re-feed; the no-re-feed port is the default.
 pub fn noRefeedOn() bool {
     if (no_refeed) |v| return v;
     const raw = std.c.getenv("TF_DSV41_NO_REFEED") orelse {
@@ -74,8 +71,7 @@ pub fn noRefeedOn() bool {
 }
 
 var draft_rows_follow: ?bool = null;
-/// TF_DSV41_MTP_DRAFT_ROWS=0 restores the old form (the drafter always proposes three, four rows); the default
-/// sizes the proposer's own forward to the window the round will verify.
+/// TF_DSV41_MTP_DRAFT_ROWS=0 restores the old form (the drafter always proposes three, four rows).
 pub fn draftRowsFollowWindow() bool {
     if (draft_rows_follow) |v| return v;
     const raw = std.c.getenv("TF_DSV41_MTP_DRAFT_ROWS") orelse {
@@ -87,8 +83,7 @@ pub fn draftRowsFollowWindow() bool {
 }
 
 var round_signal: ?u8 = null; // 0 = first-draft (shipped), 1 = round, 2 = hybrid
-/// TF_DSV41_MTP_ADAPT_SIGNAL=round feeds the policy the round's own per-draft acceptance (accepted / offered)
-/// instead of the first draft's hit. Default off (the shipped first-draft signal).
+/// TF_DSV41_MTP_ADAPT_SIGNAL=round feeds the policy the round's own per-draft acceptance.
 pub fn roundSignalMode() u8 {
     if (round_signal) |v| return v;
     const raw = std.c.getenv("TF_DSV41_MTP_ADAPT_SIGNAL") orelse {
@@ -110,9 +105,6 @@ pub fn roundSignalOn() bool {
 
 var mtp_confirm: ?u32 = null;
 /// TF_DSV41_MTP_ADAPT_CONFIRM=k requires the up-condition for k consecutive rounds before the deep window is taken.
-/// A confirmed switch-up was named as the policy's next item and it was never built: the signal is an EMA of a
-/// Bernoulli draw, so a single spike above UP fires the deep window, and on the novel band those rounds accepted
-/// not one extra draft. The default 1 is the shipped one-sample form.
 pub fn mtpConfirmRounds() u32 {
     if (mtp_confirm) |v| return v;
     const raw = std.c.getenv("TF_DSV41_MTP_ADAPT_CONFIRM") orelse {
@@ -124,12 +116,7 @@ pub fn mtpConfirmRounds() u32 {
     return mtp_confirm.?;
 }
 
-/// The shipped band's first-draft signal is depth-blind (at depth 3 the first draft usually lands even when drafts
-/// 2-3 do not), so on a long novel turn it re-enters the deep window round after round and pays its lower
-/// acceptance for it. The round signal the policy already computes (`ratio`, kept/offered one round lagged) is the depth-aware one
-/// named; this is the form that uses it as a one-way ratchet rather than as an EMA. `=0` restores the shipped band.
-/// It is a POLICY (which window to verify), not a numerics change -- every depth is token-identical to the plain
-/// path.
+/// The shipped band's first-draft signal is depth-blind.
 var ratchet_cache: ?f64 = null;
 pub fn mtpRatchetDown() f64 {
     if (ratchet_cache) |v| return v;
@@ -143,15 +130,7 @@ pub fn mtpRatchetDown() f64 {
 }
 
 var draft_off_on: ?bool = null;
-/// THE DRAFTING GOVERNOR. A drafted round's break-even is (the verify's window + the drafter's own forward) / (the
-/// plain token). That is NOT a constant: it grows with context, because the two-row verify grows with the keys
-/// while the plain token grows less. So the governor measures the request's OWN yield (the tokens the
-/// rounds have committed, over the rounds) and takes the request off the drafted path -- no MTP draft, no lookup
-/// draft, a plain one-row round -- once it is below the break-even. It is a POLICY: every drafted depth is
-/// token-identical to the plain path, so a request that switches mid-turn reads the same stream.
-/// `TF_DSV41_DRAFT_OFF=0` is the same-binary control; `TF_DSV41_DRAFT_OFF_BELOW` is the break-even (default 1.75);
-/// `TF_DSV41_DRAFT_OFF_AFTER` the rounds the estimate needs (default 24: a request shorter than this is left alone,
-/// because its opening is the least predictable part of any text and the loss is bounded by its length).
+/// THE DRAFTING GOVERNOR.
 pub fn draftOffArmed() bool {
     if (draft_off_on) |v| return v;
     const raw = std.c.getenv("TF_DSV41_DRAFT_OFF") orelse {
@@ -187,10 +166,7 @@ pub fn draftOffAfter() u32 {
 }
 
 var draft_off_gate_ctx: ?f64 = null;
-/// THE CONTEXT-GATED GOVERNOR SAMPLE. The gate takes the short sample only while the request's own CONTEXT is below
-/// this threshold and the flat 24 (opening-safe) sample at or above it. It reads the cache cursor, not the prompt
-/// length: a resumed turn's prompt is a short suffix (a 41k conversation's would look short and take the losing
-/// arm). `TF_DSV41_DRAFT_OFF_GATE_CTX=0` disables the gate (the flat 24, The shipped policy).
+/// THE CONTEXT-GATED GOVERNOR SAMPLE.
 pub fn draftOffGateCtx() f64 {
     if (draft_off_gate_ctx) |v| return v;
     const raw = std.c.getenv("TF_DSV41_DRAFT_OFF_GATE_CTX") orelse {
@@ -203,8 +179,7 @@ pub fn draftOffGateCtx() f64 {
 }
 
 var draft_off_low: ?u32 = null;
-/// The short-context sample the gate arms below `draftOffGateCtx` (default 8: The chat arm, same-binary A/B against
-/// the 24 default). `TF_DSV41_DRAFT_OFF_SAMPLE_LOW` moves it.
+/// The short-context sample the gate arms below `draftOffGateCtx`.
 pub fn draftOffLow() u32 {
     if (draft_off_low) |v| return v;
     const raw = std.c.getenv("TF_DSV41_DRAFT_OFF_SAMPLE_LOW") orelse {
@@ -216,8 +191,7 @@ pub fn draftOffLow() u32 {
     return draft_off_low.?;
 }
 
-/// The sample this request's governor needs.  An explicit `TF_DSV41_DRAFT_OFF_AFTER` is a flat override
-/// (the same-binary A/B knob); otherwise the context gate decides, and a disabled gate is the flat 24.
+/// The sample this request's governor needs.
 pub fn draftOffAfterFor(b: *Backend, i: usize) u32 {
     if (std.c.getenv("TF_DSV41_DRAFT_OFF_AFTER") != null) return draftOffAfter();
     const gate = draftOffGateCtx();
@@ -227,10 +201,7 @@ pub fn draftOffAfterFor(b: *Backend, i: usize) u32 {
 
 const MtpPolicy = struct { on: bool, up: f64, down: f64 };
 var mtp_policy: ?MtpPolicy = null;
-/// The adaptive depth policy, shared with the early `draft` hook so the drafter sizes itself to the policy. The
-/// hook runs before `tree` and may propose more drafts than a shallow window verifies; this reads `last_depth`
-/// exactly as `tree` does and writes nothing: `prev` is the depth the last round ran at, and only `tree`
-/// advances it.
+/// The adaptive depth policy, shared with the early `draft` hook so the drafter sizes itself to the policy.
 pub fn mtpDepthFor(b: *Backend, slot: u32) u32 {
     const p = mtp_policy orelse blk: {
         const raw = std.c.getenv("TF_DSV41_MTP_ADAPT");
@@ -258,9 +229,7 @@ pub fn mtpDepthFor(b: *Backend, slot: u32) u32 {
 
 pub fn draftGovernorOff(b: *Backend, i: usize) bool {
     if (!draftOffArmed()) return false;
-    // A shared round decodes plain by contract; its window is not the solo drafted window the governor
-    // reasons about. Changing the switch inside one leaves the round's admitted windows out of step, so the
-    // governor runs only while this is the only admitted stream.
+    // A shared round decodes plain by contract; its window is not the solo drafted window the governor reasons about.
     if (b.by.count() > 1) return false;
     if (i >= b.gov_off.len) return false;
     if (b.gov_off[i]) return true;
@@ -277,6 +246,5 @@ pub fn draftGovernorOff(b: *Backend, i: usize) bool {
     return false;
 }
 
-/// The proposer's hand-off is a per-slot fact (the pending token and the lane's own conditioning); a
-/// single entry would let a four-lane round reuse another lane's drafts.
+/// The proposer's hand-off is a per-slot fact (the pending token and the lane's own conditioning).
 pub const MtpCache = struct { pending: u32, drafts: [4]u32, count: u32 = 3 };

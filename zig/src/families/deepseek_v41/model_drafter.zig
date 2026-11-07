@@ -85,8 +85,7 @@ pub fn drafterId(m: *Model, token: u32) !View {
 pub fn drafterRound(m: *Model, pending: u32, rows: u32) !View {
     if (m.drafter_ids == null) {
         if (m.drafter_ids) |old| old.deinit();
-        // The buffer is sized for the widest form (the five-row arm), not for the rows the first call happened to
-        // use, so the arm cannot overflow it.
+        // The buffer is sized for the widest form (the five-row arm), not for the rows the first call happened to use.
         m.drafter_ids = try m.device.buffer(@max((rows + 1) * 4, 6 * 4), mtl.ResourceOptions.shared);
         m.residency.add(m.drafter_ids.?);
     }
@@ -156,8 +155,7 @@ pub fn post(m: *Model, enc: mtl.ComputeEncoder, rows: u32) void {
     enc.barrier();
 }
 pub fn project(m: *Model, enc: mtl.ComputeEncoder, matrix: exl3.Matrix, x: View, y: View, rows: u32, xs: usize, ys: usize, output: exl3.Output) !void {
-    // The prompt-row int8 twin. Decode and every small chunk keep the trellis, so the gate is the call's own row
-    // count; the sidecar is attached only for the attention's dense projections.
+    // The prompt-row int8 twin.
     if (matrix.int8) |side| {
         if (rows >= 1024 and std.c.getenv("TF_DSV41_I8_PREFILL") != null) {
             try exl3.encodePrefillInt8(&m.pipelines.projection, enc, matrix, side, convert(x), convert(y), m.workspace.projection(), .{ .count = rows, .x_stride = xs, .y_stride = ys, .output = output }, matrix.int8_direct);
@@ -199,8 +197,7 @@ pub fn expertPasses() u32 {
     return @max(1, @min(n, 8));
 }
 pub fn moeTileRows() u32 {
-    // The grouped plan pads each expert's block to the tile's own width, so the plan's tile and the routed GEMM's
-    // tile are one number (64 by default, 128 for the taller tile).
+    // The grouped plan pads each expert's block to the tile's own width.
     return expert_groups.tileRows();
 }
 pub fn mtpWarmRounds() u32 {
@@ -216,9 +213,7 @@ pub fn mtpWarmRounds() u32 {
 pub fn noteAcceptSlot(m: *Model, slot: u32, hit: bool) void {
     if (slot >= m.mtp_accept_slot.len) return;
     const v: f64 = if (hit) 1.0 else 0.0;
-    // THE FIRST SAMPLE SETS THE SIGNAL (a request's first round is a valid observation of the first draft's
-    // acceptance). The pure-EMA form (the signal starts at zero) costs the PREDICTABLE text ten rounds of the
-    // cheap window before it passes UP -- a tenth of the warm probe's rounds at the cheap rate.
+    // THE FIRST SAMPLE SETS THE SIGNAL.
     if (m.mtp_accept_seen_slot[slot] == 0) {
         m.mtp_accept_slot[slot] = v;
     } else if (m.mtp_accept_seen_slot[slot] < mtpWarmRounds()) {

@@ -32,8 +32,7 @@ pub const deepseek_v41_config = @import("families/deepseek_v41/config.zig");
 pub const deepseek_v41_load = @import("families/deepseek_v41/load.zig");
 pub const deepseek_v41_pack = @import("families/deepseek_v41/pack.zig");
 pub const deepseek_v41_weights = @import("families/deepseek_v41/weights.zig");
-/// The streamed Engram row source: the qualification tool's reference reads its rows through this, so that a streamed
-/// model can be compared against the CPU reference at all.
+/// The streamed Engram row source: the qualification tool's reference reads its rows through this.
 pub const deepseek_v41_engram_rows = @import("families/deepseek_v41/engram_rows_safetensors.zig");
 pub const deepseek_v41_view = @import("families/deepseek_v41/view.zig");
 pub const deepseek_v41 = @import("families/deepseek_v41/model.zig");
@@ -151,7 +150,6 @@ pub const tree_commit_gpu = @import("tree_commit_gpu");
 pub const tree_slots = @import("core/tree_slots.zig");
 
 // LOCAL WORKAROUND (not part of this change): the branch's native root must export what load.zig imports.
-// Reported separately; remove when the branch publishes it.
 pub const paced_read = @import("core/paced_read.zig");
 pub const weight_only = @import("core/weight_only.zig");
 pub const weight_only_contract = @import("core/contract/weight_only.zig");

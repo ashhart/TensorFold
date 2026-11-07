@@ -1,21 +1,6 @@
-// Hyper-Connection boundary. Written from DeepSeek-V4.1-Flash's release inference code --
-// inference/model.py (Block.hc_mixes, hc_pre, hc_post) and inference/kernel.py
-// (hc_split_sinkhorn_kernel) at revision 314113f8. One token's contract:
-//
-//   rstd    = rsqrt(mean(x^2) + eps)                       over the flattened 4 x 5120 stream
-//   mix[q]  = rstd * sum_c hc_fn[q, c] * x[c]              q = 0 .. 23
-//   pre[k]  = sigmoid(mix[k] * scale0 + base[k]) + hc_eps
-//   post[k] = 2 * sigmoid(mix[4 + k] * scale1 + base[4 + k])
-//   comb    = sinkhorn(softmax(mix[8..24] * scale2 + base[8..24]), hc_eps, iters)
-//   y[d]    = sum_k pre[k] * x[k, d]
-//   normed[d] = normw[d] * y[d] * rsqrt(mean(y^2) + eps)
-//   out[k,d]  = post[k] * branch[d] + sum_j comb[j, k] * residual[j, d]
-//
-// Two launches. The mix projection spans the whole flattened stream, so its 24 totals and the
-// stream's sum of squares must be complete before the split reads them; Metal has no grid-wide
-// barrier, so the first launch publishes one row's 20 slice partials and the second launch's
-// threadgroup-a-row finishes the split. The second launch also carries the lagged collapse and
-// the norm, which need only the previous sublayer's pre and therefore run beside the split.
+// Hyper-Connection boundary.
+
+// Written from the release's Block.hc_mixes/hc_pre/hc_post and hc_split_sinkhorn_kernel (revision 314113f8).
 #include <metal_stdlib>
 using namespace metal;
 
@@ -31,8 +16,7 @@ static_assert(sizeof(HcArgs) == 12, "HcArgs must mirror mhc.zig's BoundaryArgs")
 
 inline float hc_round(float v) { return float(bfloat(v)); }
 
-// One thread's four adjacent columns of a slice: the stream's squares and its products against the
-// 24 hc_fn rows, in the release's row order.
+// One thread's four adjacent columns of a slice: the stream's squares and its products against the 24 hc_fn rows.
 inline void hc_mix_column(const float* v, const device float* fn, int col, float* out) {
   out[kMixes] = v[0] * v[0] + v[1] * v[1] + v[2] * v[2] + v[3] * v[3];
   for (int q = 0; q < kMixes; q++) {
@@ -41,8 +25,7 @@ inline void hc_mix_column(const float* v, const device float* fn, int col, float
   }
 }
 
-// A slice's reduction: the warp sums, then the first kParts threads add the eight warps in index
-// order and publish the slice's totals for the split.
+// A slice's reduction: the warp sums, then the first kParts threads add the eight warps in index order and publish.
 inline void hc_publish_slice(threadgroup float* warp, device float* part, const float* m,
                              uint lane, uint sg, uint t, uint r, uint j) {
   for (int q = 0; q <= kMixes; q++) {
@@ -57,8 +40,7 @@ inline void hc_publish_slice(threadgroup float* warp, device float* part, const 
   }
 }
 
-// The mix projection's partials: a threadgroup a (1024-column slice, row), 256 threads, four
-// columns a thread.
+// The mix projection's partials: a threadgroup a (1024-column slice, row), 256 threads, four columns a thread.
 [[kernel]] void tf_hc_mix_part(const device bfloat* X [[buffer(0)]], const device float* FN [[buffer(1)]],
                                device float* PART [[buffer(2)]], uint2 tg [[threadgroup_position_in_grid]],
                                uint2 tpos [[thread_position_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
@@ -75,8 +57,7 @@ inline void hc_publish_slice(threadgroup float* warp, device float* part, const 
   hc_publish_slice(&warp[0], PART, parts, lane, sg, t, uint(r), uint(j));
 }
 
-// The pending branch into XO (the release's hc_post, in place for the next boundary) and the same
-// slice partials from the bf16 written, so one pass over the streams serves both.
+// The pending branch into XO.
 [[kernel]] void tf_hc_expand_mix(const device bfloat* X [[buffer(0)]], const device bfloat* BR [[buffer(1)]],
                                  const device float* POST [[buffer(2)]], const device float* COMB [[buffer(3)]],
                                  const device float* FN [[buffer(4)]], device float* PART [[buffer(5)]],
@@ -107,10 +88,7 @@ inline void hc_publish_slice(threadgroup float* warp, device float* part, const 
   hc_publish_slice(&warp[0], PART, parts, lane, sg, t, uint(r), uint(j));
 }
 
-// The release's split (kernel.py hc_split_sinkhorn_kernel): lanes 0-3 carry pre and post, lanes
-// 0-15 one comb cell each. The 4-wide row and column sums are the xor butterfly (a+b)+(c+d), the
-// order the release's tile reduction produces; comb is normalized column-first, then row/column
-// pairs, as the release does.
+// The release's split (kernel.py hc_split_sinkhorn_kernel): lanes 0-3 carry pre and post.
 inline void hc_split_row(threadgroup const float* tot, constant const HcArgs& a,
                          const device float* base, const device float* scale, uint lane, uint r,
                          device float* pre_out, device float* post_out, device float* comb_out) {
@@ -143,8 +121,7 @@ inline void hc_split_row(threadgroup const float* tot, constant const HcArgs& a,
   if (live) comb_out[r * kCopies * kCopies + lane] = comb;
 }
 
-// A threadgroup a row, 1024 threads: the split, the streams collapsed and normed. MIXES is false
-// for the plain form, which consumes a pre made elsewhere and writes no coefficients.
+// A threadgroup a row, 1024 threads: the split, the streams collapsed and normed.
 template <bool MIXES>
 [[kernel]] void tf_hc_boundary(const device bfloat* X [[buffer(0)]], const device float* PART [[buffer(1)]],
                                const device float* BASE [[buffer(2)]], const device float* SCALE [[buffer(3)]],
@@ -195,16 +172,14 @@ template <bool MIXES>
 template [[host_name("tf_hc_boundary_mix")]] [[kernel]] decltype(tf_hc_boundary<true>) tf_hc_boundary<true>;
 template [[host_name("tf_hc_boundary_plain")]] [[kernel]] decltype(tf_hc_boundary<false>) tf_hc_boundary<false>;
 
-// The launch-overhead probe: a work-free dispatch that reads the boundary's own partial sums and
-// writes them back, so the split that follows depends on it. The values are unchanged.
+// The launch-overhead probe: a work-free dispatch that reads the boundary's own partial sums and writes them back.
 kernel void tf_hc_probe(const device float *part [[buffer(0)]], device float *sink [[buffer(1)]],
                         uint g [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]]) {
   const uint at = g * (kSlices * kParts) + tid;
   if (tid <= uint(kMixes)) sink[at] = part[at];
 }
 
-// The independent form of the probe: each dispatch has its own sink, so the chain carries no
-// memory dependency. The gap between the two forms is the dependent-dispatch latency.
+// The independent form of the probe: each dispatch has its own sink, so the chain carries no memory dependency.
 kernel void tf_hc_probe_indep(const device float *part [[buffer(0)]], device float *sink [[buffer(1)]],
                               uint g [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]]) {
   if (tid <= uint(kMixes)) sink[tid] = part[tid];

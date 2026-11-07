@@ -1,4 +1,6 @@
 //! The drafter's round.
+
+// The draft chain follows the release's inference/model.py (revision 314113f8); the pack and ring are this lane's.
 const builtin = @import("builtin");
 const std = @import("std");
 const mtl = @import("metal");
@@ -99,10 +101,7 @@ pub const DraftRound = struct {
     cb: mtl.CommandBuffer,
     cond_prof: *CondProf,
 
-    /// `Transformer.forward_spec`'s conditioning half (`DSparkBlock.forward_embed`): the target layers'
-    /// stream means through `main_proj` and `main_norm`, then each draft stage's keys at their own
-    /// positions into its ring. The release writes one main row per step; this lane publishes the
-    /// capture's whole window so the draft rows read history instead of the uninitialised ring.
+    /// `Transformer.forward_spec`'s conditioning half (`DSparkBlock.forward_embed`).
     pub fn conditionStage(self: *DraftRound) !void {
         const m = self.m;
         const dspark = &self.dspark;
@@ -132,12 +131,10 @@ pub const DraftRound = struct {
             const cond = View{ .buffer = base, .offset = 0 };
             const raw = View{ .buffer = base, .offset = 128 * 5120 * 2 };
             const chunk = View{ .buffer = base, .offset = 128 * 5120 * 2 + 128 * 512 * 2 };
-            // The ring is circular: the oldest live row is `first`, and the last `nA` rows are contiguous there. With
-            // the aligned ring the window's first row is the slot of the position pos_now - nc.
+            // The ring is circular: the oldest live row is `first`, and the last `nA` rows are contiguous there.
             const first: u32 = if (condAlignOn()) (pos_now - nc) % 128 else (m.taps_row + 128 - nc) % 128;
             const n_a: u32 = @min(nc, 128 - first);
-            // The eight-row dense hint -- this projection's window wraps, so the smaller of its two pieces runs on
-            // 1..63 rows, and the tile's gate is 64.
+            // The eight-row dense hint -- this projection's window wraps.
             try m.projectDense8(enc, dspark.main_proj, .{ .buffer = m.taps, .offset = @as(usize, first) * 3 * 5120 * 2 }, cond, n_a, 3 * 5120, 5120, .bf16);
             if (n_a < nc)
                 try m.projectDense8(enc, dspark.main_proj, .{ .buffer = m.taps, .offset = 0 }, View{ .buffer = cond.buffer, .offset = cond.offset + @as(usize, n_a) * 5120 * 2 }, nc - n_a, 3 * 5120, 5120, .bf16);
@@ -146,10 +143,7 @@ pub const DraftRound = struct {
             // The conditioning's parts, one command buffer each.
             if (cond_prof.on) cond_prof.split("cond", "tapproj+norm", 0, &enc);
             cb = cond_prof.cb;
-            // THE THREE PER-BLOCK `wkv` PROJECTIONS AS ONE GROUPED INDEXED DISPATCH. The grouped form lays the window
-            // out three times (one expert a 128-row tile group) and takes one dispatch with three times the
-            // threadgroups, so the same bytes decode in parallel. TF_DSV41_NO_COND_WKV_FUSE=1 restores the three
-            // calls (the A/B).
+            // THE THREE PER-BLOCK `wkv` PROJECTIONS AS ONE GROUPED INDEXED DISPATCH.
             const hd = m.cfg.head_dim;
             const fuse_wkv = m.cond_wkv != null and dspark.cond_wkv_descriptors != null and
                 std.c.getenv("TF_DSV41_NO_COND_WKV_FUSE") == null;
@@ -213,38 +207,23 @@ pub const DraftRound = struct {
                 cb = cond_prof.cb;
             }
         } else {
-            // The release ropes the committed main rows' keys at their own position before they enter the stage's
-            // ring (its DSparkAttention applies the rotary to `main_kv`); TF_DSV41_DSPARK_NO_RING_ROPE=1 restores the
-            // earlier unroped publish.
+            // The release ropes the committed main rows' keys at their own position before they enter the stage's ring.
             const dspark_ring_rope = std.c.getenv("TF_DSV41_DSPARK_NO_RING_ROPE") == null;
             if (std.c.getenv("TF_DSV41_MTP_DEBUG_ROWS") != null) std.log.info(
                 "mtp cond: taps_row={d} taps_n={d} pos_now={d} publish_pos={d} tap_row={d} ring_rope={} || cap_n={d} cap_pos={d} tail={d} valid={d} pub_pos={d} draft_pos={d} true_pos={}",
                 .{ m.taps_row, m.taps_n, pos_now, pos_now -| 1, (m.taps_row + 127) % 128, dspark_ring_rope, cap_n, cap_pos, tail, m.taps_rows_valid, pub_pos, draft_pos, true_pos },
             );
-            // The conditioning publishes the taps ring's whole tail -- the rows the last capture kept, which are
-            // consecutive positions -- at their own positions. After a prompt the first round published one of the
-            // prompt's 128 tail rows, so the window was uninitialised for the first 128 rounds.
-            // TF_DSV41_DSPARK_COND_ONE restores the earlier one-row form. The capture's rows are the ring's tail, but
-            // the rollback keeps only a PREFIX of the capture: the rejected rows' taps are not the committed history,
-            // so the conditioning publishes the prefix, not the tail. The prefix's rows are the capture's FIRST rows,
-            // so their positions are the capture's own -- [cap_pos, cap_pos + tail) -- and the ring's slots follow
-            // from them. The earlier form's [pos_now - tail, pos_now) are the SUFFIX's positions. The published rows
-            // are the ring's [base, base+tail); the capture's first row is its base, and the rows may wrap the ring's
-            // end -- then the second piece starts at row zero. With the aligned ring the capture's first row is the
-            // slot of the position pos_now - tail (the kept prefix's first position).
+            // The conditioning publishes the taps ring's whole tail -- the rows the last capture kept.
             const base: u32 = if (condAlignOn())
                 (pos_now - tail) % 128
             else if (m.taps_rows_valid != 0)
                 (m.taps_row + 128 - cap_rows) % 128
             else
                 (m.taps_row + 128 - tail) % 128;
-            // The published rows are the capture's whole (the main model's rows at their own positions, the rejected
-            // ones included) or only the kept prefix (the earlier form). The publish's position is the capture's
-            // first row's position either way, so the rows land where they belong.
+            // The published rows are the capture's whole.
             const pub_rows: u32 = if (dspark_capture_all != 0) cap_rows else tail;
             const n_a: u32 = @min(pub_rows, 128 - base);
-            // The doubling arm for the conditioning's tap projection (idempotent: the same input gives the same
-            // output, so the reply is unchanged and only the cost doubles).
+            // The doubling arm for the conditioning's tap projection.
             const cond_proj_passes: u32 = if (std.c.getenv("TF_DSV41_DOUBLE_COND_PROWS") != null) 2 else 1;
             for (0..cond_proj_passes) |_| try m.project(enc, dspark.main_proj, .{ .buffer = m.taps, .offset = @as(u64, base) * 3 * 5120 * 2 }, ws.view(.shared_down), n_a, 3 * 5120, 5120, .bf16);
             if (n_a < pub_rows) {
@@ -262,10 +241,7 @@ pub const DraftRound = struct {
                 ops.encodeRms(enc, &p.ops, raw, tensor(blk.attn.kv_norm), raw, .{ .rows = pub_rows, .width = m.cfg.head_dim, .x_stride = m.cfg.head_dim, .y_stride = m.cfg.head_dim, .eps = m.cfg.eps });
                 enc.barrier();
                 if (dspark_ring_rope) {
-                    // Every published row carries its rope phase. The rope covered `tail` rows (the kept prefix)
-                    // while the pack wrote `pub_rows`, so rows past the first were packed unroped and the drafter's
-                    // attention read unroped keys against a roped query. =1 ropes at pub_pos (the earlier positions);
-                    // =2 ropes at cap_pos (their own positions, the release's form).
+                    // Every published row carries its rope phase.
                     const rope_mode = mtpRopeAllOn();
                     const rope_rows: u32 = if (rope_mode != 0) pub_rows else tail;
                     const rope_pos: u32 = if (rope_mode == 2) cap_pos else pub_pos;
@@ -274,21 +250,16 @@ pub const DraftRound = struct {
                 }
                 try p.attention.cache.encodePack(enc, raw, chunk, .{ .rows = pub_rows, .width = m.cfg.head_dim, .stride = m.cfg.head_dim, .packed_stride = kv.cache.ring_stride, .block = 32, .kind = .window_fp8 });
                 enc.barrier();
-                // The instrument arm TF_DSV41_DSPARK_NO_COND skips the publish, so the drafter's ring keeps whatever
-                // it held (the prompt's tail) -- a STALE context. If the drafter's head input and the trunk's barely
-                // move, the ring's contents never reach the drafter's output.
+                // The instrument arm TF_DSV41_DSPARK_NO_COND skips the publish.
                 if (std.c.getenv("TF_DSV41_DSPARK_NO_COND") == null)
-                    // The value 2 computes the capture's whole rows but publishes only the kept prefix, so the arm
-                    // separates the ring's CONTENT from the extra rows' COMPUTATION.
+                    // The value 2 computes the capture's whole rows but publishes only the kept prefix.
                     try p.attention.cache.publishWindow(enc, chunk, try state.ring(s_i), if (dspark_capture_all == 2) tail else pub_rows, pub_pos);
                 enc.barrier();
             }
         }
     }
 
-    /// `Transformer.forward_spec`'s stage loop: three `DSparkBlock.forward` calls, each with the mHC
-    /// expand/collapse around its attention and MoE. The release threads `pre_mix` and `main_x` through
-    /// the same three blocks; the bodies are this lane's dispatch shapes.
+    /// `Transformer.forward_spec`'s stage loop: three `DSparkBlock.forward` calls.
     pub fn blockStage(self: *DraftRound, dbg: ?mtl.Buffer) !void {
         const m = self.m;
         const dspark = &self.dspark;
@@ -336,16 +307,14 @@ pub const DraftRound = struct {
             if (dbg) |b| if (k == 0) ops.encodeDump(enc, &p.ops, ws.view(.normalized), .{ .buffer = b, .offset = 3 * 5 * 5120 * 4 }, 5 * 5120, true);
             try m.moe(&enc, null, &blk.moe, n, 0, m.cfg.dspark_topk, cond_prof);
             m.post(enc, n);
-            // The branch after the MoE (the stage contributions: the attention's output against the MoE's), so the
-            // row's composition is read off the magnitudes.
+            // The branch after the MoE (the stage contributions: the attention's output against the MoE's).
             if (dbg) |b| if (k == 0) ops.encodeDump(enc, &p.ops, ws.view(.branch), .{ .buffer = b, .offset = 4 * 5 * 5120 * 4 }, 5 * 5120, true);
             enc = cond_prof.enc;
             cb = cond_prof.cb;
         }
     }
 
-    /// `DSparkBlock.forward_head`'s projection half: the last block's mHC collapse and norm, then the
-    /// shared head into the drafter's logits rows.
+    /// `DSparkBlock.forward_head`'s projection half: the last block's mHC collapse and norm.
     pub fn headStage(self: *DraftRound) !View {
         const m = self.m;
         const p = &m.pipelines;
@@ -363,8 +332,7 @@ pub const DraftRound = struct {
         return logits;
     }
 
-    /// `DSparkBlock.forward_head`'s chain: row k's logits plus the rank-256 Markov bias of the token
-    /// before it, its argmax the next token. The release runs the same loop over `block_size`.
+    /// `DSparkBlock.forward_head`'s chain: row k's logits plus the rank-256 Markov bias of the token before it.
     pub fn markovStage(self: *DraftRound, logits: View) !MarkovRun {
         const m = self.m;
         const p = &m.pipelines;
@@ -373,9 +341,7 @@ pub const DraftRound = struct {
         const pending = self.pending;
         var enc = self.enc;
         defer self.enc = enc;
-        // The Markov-biased chain (the head chain): row k's logits plus the rank-256 bias of the token before it, its
-        // argmax the next token; five steps from the pending token to four drafts. The release's
-        // `DSparkBlock.forward_head` runs the same loop (inference/model.py, revision 314113f8).
+        // The Markov-biased chain (the head chain): row k's logits plus the rank-256 bias of the token before it.
         const emb = dspark.markov_embed orelse return error.NoMarkov;
         const head_embed = dspark.markov_head orelse return error.NoMarkov;
         if (m.markov_ids == null) {
@@ -387,9 +353,7 @@ pub const DraftRound = struct {
         const ids_view = View{ .buffer = m.markov_ids.?, .offset = 0 };
         const part = try m.markovPart();
         const groups: u32 = (129280 + 255) / 256;
-        // The tree price needs the *biased* logits' top-2, and PART is the only place the biased logits survive (the
-        // pick consumes them). PART is overwritten by the next step, so each step's 505 float2 bests are copied into
-        // its own region before the barrier.
+        // The tree price needs the *biased* logits' top-2, and PART is the only place the biased logits survive.
         const price_dbg: ?mtl.Buffer = if (std.c.getenv("TF_DSV41_TREE_PRICE") != null)
             try m.device.buffer(5 * 505 * 8, mtl.ResourceOptions.shared)
         else

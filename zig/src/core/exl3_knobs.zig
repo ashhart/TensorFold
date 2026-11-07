@@ -1,8 +1,4 @@
 //! The EXL3 projection's process-wide body selection.
-//!
-//! The family host resolves these from its own configuration before a model loads; the core
-//! projection has no environment reads and no family names. Every field's default is the
-//! shipped body, so a host that sets none of them gets the engine's normal path.
 
 pub const Knobs = struct {
     // One-row and prompt body selection.

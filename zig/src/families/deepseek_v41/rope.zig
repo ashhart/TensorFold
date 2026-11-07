@@ -128,8 +128,7 @@ pub const Pipelines = struct {
         enc.setBuffer(x.buffer, x.offset, 0);
         enc.setValue(args, 1);
         enc.setBuffer(p.factors, offset, 2);
-        // The kernel is an absolute-position grid, so a wider threadgroup only changes how many of its points share
-        // one: at a prompt chunk a 32-thread group means half a million threadgroups a call.
+        // The kernel is an absolute-position grid.
         enc.dispatchThreads(mtl.Size.of(args.rotary / 2, args.heads, args.rows), mtl.Size.of(128, 1, 1));
         enc.barrier();
     }

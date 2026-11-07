@@ -28,19 +28,14 @@ pub const Shape = struct {
     output_stride: u32 = 6,
     temperature: f32 = 1,
     bias_dtype: Dtype = .f32,
-    /// Nonzero: also write the fused gate+up dispatch's pick table (a token's six gate picks then its six up
-    /// picks one table entry further, `fused` = the block's expert count). Zero keeps every shipped caller's
-    /// writes and buffers exactly as they were.
+    /// Nonzero: also write the fused gate+up dispatch's pick table.
     fused: u32 = 0,
     /// 0: FP32 logits (every shipped caller); 1: BF16 logits (TF_DSV41_ROUTE_GEMM's gate GEMM writes them).
     logit_dtype: u32 = 0,
-    /// The block's own router geometry: the backbone's 384 experts and six picks, the drafter's 128 experts and
-    /// three picks (the pack's dspark_n_routed_experts / dspark_num_experts_per_tok).
+    /// The block's own router geometry: the backbone's 384 experts and six picks.
     experts: u32 = 384,
     topk: u32 = 6,
-    /// Nonzero writes the shared expert's two pick blocks into the fused tables after the routed twelve a token, so
-    /// the routed gate/up and the shared gate/up are ONE indexed dispatch (one indexed gate/up form). The
-    /// kernel writes them, not the host, so no CPU/GPU buffer range is shared.
+    /// Nonzero writes the shared expert's two pick blocks into the fused tables after the routed twelve a token.
     moe_up: u32 = 0,
 };
 /// FP32 logits[rows,384], bias F16/BF16/FP32 -> u32 IDs and FP32 weights[rows,6]; lower ID wins biased-score ties.

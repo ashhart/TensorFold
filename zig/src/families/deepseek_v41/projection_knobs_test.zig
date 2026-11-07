@@ -1,5 +1,4 @@
-//! The family configuration is the only projection env reader; these tests pin every default and every
-//! A/B value so a moved knob cannot silently change the shipped body.
+//! The family configuration is the only projection env reader; these tests pin every default and every A/B value.
 const std = @import("std");
 const knobs = @import("projection_knobs.zig");
 const exl3 = @import("core").exl3_projection;

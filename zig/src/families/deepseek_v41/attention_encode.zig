@@ -49,13 +49,7 @@ pub fn encodeProfiled(p: *const Pipelines, e: mtl.ComputeEncoder, w: *const weig
     return encodeDiagnostic(p, e, w, state, work, x, y, ep, scratch, layer, rows, c, false, null, prof, &.{});
 }
 
-/// Same encoder and arithmetic as encode, with optional copies at operator boundaries. A decode-sized batch of
-/// one-row segments -- the shared round's lanes in one launch. The row-wise projections run once over every segment's
-/// rows (the dense EXL3 weights decode once instead of once a lane); every slot-bound step runs once a segment
-/// against that segment's own state and selection scratch: the window KV's norm+rope+pack, the compressor's pool, the
-/// index key and its pick, the sparse scan, the ring publish and the output rope. The output projections then run
-/// once over all rows. Only one-row segments are admitted: this rung amortises the dense attention weights, it is not
-/// a prefill batch.
+/// Same encoder and arithmetic as encode, with optional copies at operator boundaries.
 pub fn encodeMulti(p: *const Pipelines, e_in: mtl.ComputeEncoder, w: *const weights.Attention, work: *Workspace, x: View, y: View, ep: *const exl3.Pipelines, scratch: exl3.View, layer: u32, c: config.Config, segs: []const Seg) !void {
     var e = e_in;
     const nsegs = segs.len;
@@ -242,12 +236,7 @@ pub fn encodeMulti(p: *const Pipelines, e_in: mtl.ComputeEncoder, w: *const weig
     try projection(ep, e, .{ .trellis = w.wo_b }, grouped, y, scratch, rows, group_output, c.hidden, .bf16);
 }
 
-/// The attention pass, in the release's own stages (`inference/model.py`, revision 314113f8):
-/// `Attention.forward` runs the query's low-rank pair and its norm, `_window_kv` builds and packs the
-/// sliding-window key, `_compress_kv` and `_compress_topk_idxs` build the compressed key and its pick,
-/// `sparse_attn` reads the two sources, and the grouped `wo_a` / `wo_b` pair closes the stage. The
-/// trellis arithmetic, the ring layout and the scan are this lane's pack format; the stage boundaries
-/// and the model-facing order are the release's.
+/// The attention pass, in the release's own stages (`inference/model.py`, revision 314113f8).
 pub fn encodeDiagnostic(p: *const Pipelines, e_in: mtl.ComputeEncoder, w: *const weights.Attention, state: *State, work: *Workspace, x: View, y: View, ep: *const exl3.Pipelines, scratch: exl3.View, layer: u32, rows: u32, c: config.Config, comptime diagnostic: bool, observer: ?DiagnosticObserver, prof: ?*Prof, segs: []const Seg) !void {
     if (segs.len > 1) return encodeMulti(p, e_in, w, work, x, y, ep, scratch, layer, c, segs);
     var e = e_in;

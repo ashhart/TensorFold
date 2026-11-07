@@ -33,11 +33,7 @@ pub fn verify(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) a
     for (windows) |w| {
         if (w.parents != null or w.early or w.masks.len > 0) return error.TreeWindowsUnsupported;
     }
-    // A round wider than the exact four-lane rung (the server's `--parallel auto` is 8) is verified as
-    // consecutive groups of at most four one-row windows. Each group is one batch forward (token-identical to solo
-    // at 1/2/3/4 windows); a group of one takes the one-stream path. Before this, five to eight active windows
-    // fell back to ALL-single forwards, so the batch switched itself off exactly when the serving load was
-    // highest.
+    // A round wider than the exact four-lane rung.
     if (windows.len > 4 and batchOn() and noBatchInstrument()) {
         var all_one = true;
         for (windows) |w| if (w.rows() != 1) {
@@ -54,10 +50,7 @@ pub fn verify(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) a
             return;
         }
     }
-    // A shared round's plain windows are one row each. When the batch is armed, every slot's row goes through
-    // ONE forward: the row-wise layers run once over the concatenated rows and the attention core once a
-    // segment against that slot's own state. The per-window transaction and the sampling below are unchanged;
-    // only the forward's launch is shared.
+    // A shared round's plain windows are one row each.
     const batch = batchOn() and windows.len > 1 and windows.len <= 4 and noBatchInstrument() and blk: {
         for (windows) |w| if (w.rows() != 1) break :blk false;
         break :blk true;
@@ -114,8 +107,7 @@ pub fn verify(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) a
             if (w.held > held0.len) return error.WindowOutOfStep;
             @memcpy(feeds[1 .. 1 + w.held], held0[0..w.held]);
             @memcpy(feeds[1 + w.held ..], w.tokens);
-            // A row that is not a token (a stale host-held draft) is a wrong guess, never an error: it is replaced
-            // with the pending token so the verify simply rejects it and the round costs one round, nothing else.
+            // A row that is not a token (a stale host-held draft) is a wrong guess, never an error.
             for (feeds[1..]) |*t| {
                 if (t.* >= 129280) t.* = feeds[0];
             }
@@ -131,8 +123,7 @@ pub fn verify(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) a
             row = try b.model.forwardOn(i, feeds, .all);
             if (std.c.getenv("TF_DSV41_BATCH_DEBUG") != null) std.log.info("single fwd: slot={d} rows={d} gpu={d:.3} ms", .{ i, rows, b.model.last_gpu_seconds * 1e3 });
         }
-        // TF_DSV41_ROUTE_DUMP=N: the last layer's routes of the first N windows, for the window's
-        // expert-distinct count (the five-row MoE's cost is routing-dependent).
+        // TF_DSV41_ROUTE_DUMP=N: the last layer's routes of the first N windows.
         if (std.c.getenv("TF_DSV41_ROUTE_DUMP")) |raw| {
             const S = struct {
                 var n: u32 = 0;
@@ -162,18 +153,12 @@ pub fn verify(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) a
                 std.log.info("routes: rows={d} distinct={d} sizes={any}", .{ rows, distinct, sizes[0..distinct] });
             }
         }
-        // A stream with a positive temperature samples every row; the greedy path below is untouched
-        // (byte-identical to the frozen receipts). Draws key at (seed, absolute position), so the same
-        // (prompt, seed) produces the same stream in every window shape and a drafted run equals the
-        // plain run at the same seed: the port's exactness property, extended to sampling.
+        // A stream with a positive temperature samples every row; the greedy path below is untouched.
         const sampled_stream: ?lanes.sampling.Sampling = if (w.stream.sampling) |sp|
             (if (sp.temperature > 0) sp else null)
         else
             null;
-        // Presence/frequency penalties, upstream's semantics (lanes.Penalties, the CUDA lane's tf_penalize_rows
-        // form): the reply's tokens before the window -- the stream's context after its prompt, which already
-        // carries the pending token -- plus the row's own path. The amount is presence + frequency * count,
-        // subtracted from the row's logits before every draw (greedy too).
+        // Presence/frequency penalties, upstream's semantics (lanes.Penalties, the CUDA lane's tf_penalize_rows form).
         const pen_on = w.stream.penalties.active();
         if (pen_on) {
             b.pen_counts.clearRetainingCapacity();
@@ -186,9 +171,7 @@ pub fn verify(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) a
         }
         for (0..rows) |r| {
             const logits_row = row[r * 129280 ..][0..129280];
-            // With penalties on, row r draws from a penalized copy of its logits. Row r follows the token fed
-            // before it (feeds[r]); row 0's history is the context itself. The model's own logits slice is
-            // const, so the copy is the row scratch -- only when a request asks.
+            // With penalties on, row r draws from a penalized copy of its logits.
             const target: []const f32 = if (pen_on) blk: {
                 if (r > 0) try penBump(b.gpa, &b.pen_counts, feeds[r]);
                 if (b.pen_row.len < 129280) {
@@ -200,9 +183,7 @@ pub fn verify(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) a
                 while (pen_it.next()) |e| b.pen_row[e.key_ptr.*] -= w.stream.penalties.of(e.value_ptr.*);
                 break :blk b.pen_row;
             } else logits_row;
-            // The row's own logits and its top-2, for the long-prompt equivalence gate. One 129,280-float file
-            // a row, named by position and a process counter; the serve's stderr carries the top-2 and the
-            // margin. Nothing in the default path reads this block.
+            // The row's own logits and its top-2, for the long-prompt equivalence gate.
             if (std.c.getenv("TF_DSV41_LOGIT_DUMP")) |dv| {
                 const D = struct {
                     var n: u64 = 0;
@@ -244,38 +225,21 @@ pub fn verify(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) a
                 o.sampled[r] = best;
             }
         }
-        // The target's pick per row, joined to the proposal's top-2 by the round counter (proposal round R step
-        // s <-> verify round R row s).
+        // The target's pick per row, joined to the proposal's top-2 by the round counter.
         if (std.c.getenv("TF_DSV41_TREE_PRICE") != null) {
             std.log.info("treeprice verify round {d} rows {d} held {d} pending {d} sampled {any}", .{ ds.price_round, rows, w.held, w.pending, o.sampled[0..rows] });
             ds.price_round += 1;
         }
-        // THE ADAPTIVE DEPTH POLICY'S SIGNAL, FED FROM THE VERIFY (the one hook that runs every round -- the
-        // keep hook only runs when a draft was REJECTED). THE WINDOW'S ROW 1 IS THE FIRST DRAFT: the host
-        // drafts (w.tokens) when the trained proposer is the drafter, the backend's held drafts (held[]) when
-        // they are on the device. (The pending code compared against held[] only -- and on the MTP path held[]
-        // is EMPTY (the draft hook is never called for this family), so the signal was always ZERO and the
-        // policy always ran the cheap window.) The first draft was taken when the verify's row 1 sampled it.
+        // THE ADAPTIVE DEPTH POLICY'S SIGNAL, FED FROM THE VERIFY.
         const first_draft: ?u32 = if (w.held > 0)
             (if (held.len > 0) held[0] else null)
         else if (w.tokens.len > 0)
             w.tokens[0]
         else
             null;
-        // THE ACCEPTANCE TEST IS THE ENGINE'S OWN (core/lanes/accept.zig's acceptPath): the path's row `at`
-        // continues with the row whose parent is `at` and whose token equals `picks[at]` -- so the FIRST DRAFT
-        // (row 1, the pending's child) is accepted iff the model's ROW-0 argmax equals it. The port's test
-        // compared `sampled[1]` (the model's prediction AFTER the first draft) with the draft itself: an
-        // off-by-one-row test that measures a coincidence, not the acceptance -- which is why the policy could
-        // not separate the novel text from the predictable one.
+        // THE ACCEPTANCE TEST IS THE ENGINE'S OWN (core/lanes/accept.zig's acceptPath).
         const hit_dbg: bool = rows > 1 and first_draft != null and o.sampled[0] == first_draft.?;
-        // The signal. The round form consumes the PREVIOUS window's outcome (keep sets it, a window that landed
-        // whole leaves `keep_pending` false and reads 1.0), so the policy sees the same one-round-lagged
-        // quantity the first-draft form sees. The ratio EMA is maintained in every mode (the hybrid's stay
-        // branch reads it); the first-draft EMA is the up signal, and in `round` mode it is not fed at all. The
-        // governor's accounting. The previous round's commit is not always seen by `keep` (a whole window
-        // landing skips it), so the totals are retired here, from the window that round ran and whether its
-        // keep fired -- the same one-round lag the ratio reads.
+        // The signal.
         if (i < b.gov_rounds.len) {
             if (b.gov_rows[i] > 0) {
                 b.gov_rounds[i] += 1;
@@ -285,8 +249,7 @@ pub fn verify(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) a
         }
         const ratio: f64 = if (b.keep_pending[i]) b.keep_ratio[i] else 1.0;
         b.keep_pending[i] = false;
-        // The ratchet. Only a deep round can ratchet (a shallow round's ratio IS the first-draft hit); two in a
-        // row below the crossover put this request on the shallow window.
+        // The ratchet.
         const ratchet_down = mtpRatchetDown();
         if (ratchet_down > 0 and i < b.shallow.len and b.last_depth[i] > 1) {
             if (ratio < ratchet_down) b.low_streak[i] += 1 else b.low_streak[i] = 0;
@@ -315,14 +278,10 @@ pub fn keep(ptr: *anyopaque, windows: []const be.Window, paths: []const []const 
         b.keep_pending[i] = true;
         b.keep_ratio[i] = if (rows > 1) @as(f64, @floatFromInt(kept)) / @as(f64, @floatFromInt(rows - 1)) else 1.0;
         if (std.c.getenv("TF_DSV41_DRAFT_DEBUG") != null) std.log.info("keep: slot {d} kept {d} of {d}", .{ i, kept, rows });
-        // THE ADAPTIVE DEPTH POLICY'S SIGNAL, TAKEN WHERE THE KEPT COUNT IS KNOWN. It was recorded in
-        // `portKeep`, which the whole-window case never reaches (`kept >= rows` returns early) -- and the whole
-        // window landing IS the high-yield case, so the policy never saw the predictable text's yield and never
-        // switched up.
+        // THE ADAPTIVE DEPTH POLICY'S SIGNAL, TAKEN WHERE THE KEPT COUNT IS KNOWN.
         if (kept >= rows) continue; // the whole window landed
         try b.model.rollbackSlot(i);
-        // The ring rows the window's rejected rows published are aliases the next forward can still read; put
-        // the stashed slots back before anything runs.
+        // The ring rows the window's rejected rows published are aliases the next forward can still read.
         try b.model.restoreRing(i, @intCast(kept), @intCast(rows));
         if (kept == 0) continue; // the rollback closed the transaction
         var feeds = try b.gpa.alloc(u32, kept);
@@ -343,10 +302,7 @@ pub fn keep(ptr: *anyopaque, windows: []const be.Window, paths: []const []const 
             b.model.commitSlot(i) catch {};
             continue;
         }
-        // Diagnostic (TF_DSV41_CLEAR_STALE=1): the rejected rows the window wrote stay in the ring; zero them so
-        // the re-feed cannot read them, and see whether the divergence survives.
-        // The compressed path's partial sums for the block the rejected draft row started are scratch that the next
-        // forward would read as complete; clearing them is the stale-partial fix candidate.
+        // Diagnostic (TF_DSV41_CLEAR_STALE=1): the rejected rows the window wrote stay in the ring; zero them.
         if (std.c.getenv("TF_DSV41_CLEAR_PARTIALS") != null) b.model.caches[i].clearPartials();
         if (std.c.getenv("TF_DSV41_CLEAR_STALE") != null) {
             const start = b.model.caches[i].position;
@@ -383,30 +339,24 @@ pub fn draft(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void {
         b.held[i] = &.{};
         if (r.depth == 0) continue;
         if (draftGovernorOff(b, i)) {
-            // The switch must reach the lane planner, not only the held list. `Stream.drafts` is what
-            // `windows.plan` reads before it queues a window at all: clearing it is the clean off switch.
+            // The switch must reach the lane planner, not only the held list.
             r.stream.drafts = false;
             continue;
         }
-        // The trained proposer (TF_DSV41_MTP_DRAFTS) runs HERE, between rounds: its own forward writes the
-        // shared logits buffer from row 1 on, so it must not run inside a forward whose logits a verify reads.
-        // The pending token is the prompt's last or the last committed one; the lane does not always carry it.
+        // The trained proposer (TF_DSV41_MTP_DRAFTS) runs HERE, between rounds.
         const last_tok: ?u32 = r.stream.pending orelse
             (if (b.history[i].items.len > 0) b.history[i].items[b.history[i].items.len - 1] else null);
         if (std.c.getenv("TF_DSV41_MTP_DRAFTS") != null and b.model.weights.dspark != null and
             last_tok != null and r.depth <= mtpDepthMax())
         mtp: {
-            // The drafter's own forward is sized to the window the round will verify (the policy's depth), not
-            // a hardcoded three: its rows are `count + 1`, so a depth-1 window needs two rows.
-            // TF_DSV41_MTP_DRAFT_ROWS=0 is the same-binary control.
+            // The drafter's own forward is sized to the window the round will verify (the policy's depth).
             const count: u32 = if (draftRowsFollowWindow()) mtpDepthFor(b, @intCast(i)) else 3;
             if (count == 0) break :mtp;
             const drafts = b.model.proposeTokens(@intCast(i), last_tok.?, count) catch |err| {
                 std.log.warn("mtp: drafts unavailable ({s})", .{@errorName(err)});
                 break :mtp;
             };
-            // The engine plans its window from r.depth, so the hand-off must always carry that many rows; the
-            // proposer's last computed slot fills any it does not have (the verify rejects a stale repeat).
+            // The engine plans its window from r.depth, so the hand-off must always carry that many rows.
             const out = try b.gpa.alloc(u32, r.depth);
             const n = @min(r.depth, count);
             @memcpy(out[0..n], drafts[0..n]);
@@ -416,8 +366,7 @@ pub fn draft(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void {
             if (i < b.mtp_cache.len) b.mtp_cache[i] = .{ .pending = last_tok.?, .drafts = drafts, .count = count };
             continue;
         }
-        // Diagnostic (TF_DSV41_DRAFT_COPY=1): every draft repeats the pending token, so a two-row window is
-        // [pending, pending]. If the verify's row 0 still matches a plain forward, its mask is sound.
+        // Diagnostic (TF_DSV41_DRAFT_COPY=1): every draft repeats the pending token, so a two-row window is [pending.
         const want: usize = r.depth;
         if (std.c.getenv("TF_DSV41_DRAFT_COPY") != null) {
             const out0 = try b.gpa.alloc(u32, want);
@@ -434,9 +383,7 @@ pub fn draft(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void {
     }
 }
 
-/// A suffix lookup drafter (TF_DSV41_LOOKUP_DRAFTS=<depth>): the tokens that followed the last earlier
-/// occurrence of the stream's own tail are this round's drafts, offered as host tokens so the engine's verify
-/// and rollback do the accepting. A wrong guess costs a round, never a different token.
+/// A suffix lookup drafter (TF_DSV41_LOOKUP_DRAFTS=<depth>).
 pub fn tree(ptr: *anyopaque, s: *Stream, gpa: std.mem.Allocator) anyerror!?lanes.stream.Held {
     const b = self(ptr);
     // The proposer's forward needs the lane's slot (the trunk's key ring lives there).
@@ -447,24 +394,13 @@ pub fn tree(ptr: *anyopaque, s: *Stream, gpa: std.mem.Allocator) anyerror!?lanes
     }
     if (std.c.getenv("TF_DSV41_DRAFT_DEBUG") != null) std.log.info("tree() called: pending={?} depth={d}", .{ s.pending, lookupDepth() });
     var depth = lookupDepth();
-    // THE ADAPTIVE DEPTH POLICY. The engine measures the yield it just got (the accepted drafts a round) and
-    // runs the cheap depth-1 window when the yield is low (novel text) and the deep window when it is high
-    // (predictable text). TF_DSV41_MTP_ADAPT=<threshold> arms the policy; the default is the fixed depth. THE
-    // ADAPTIVE DEPTH POLICY IS THE DEFAULT. THE SIGNAL is the first draft's acceptance -- an EMA over the
-    // request's rounds, reset at the request's start. THE BAND: the deep window when the signal passes UP, the
-    // cheap window otherwise, the deep window kept while the signal stays at least DOWN. TF_DSV41_MTP_ADAPT=0
-    // the fixed depth (the control arm) TF_DSV41_MTP_ADAPT_UP=<up> the band TF_DSV41_MTP_ADAPT_DOWN=<d> the
-    // band's floor (the default 0.7) TF_DSV41_MTP_ADAPT=<t> the single-threshold form (the deep window while
-    // the signal > t)
+    // THE ADAPTIVE DEPTH POLICY.
     const adapt_raw = std.c.getenv("TF_DSV41_MTP_ADAPT");
     const adapt_off = adapt_raw != null and std.mem.eql(u8, std.mem.span(adapt_raw.?), "0");
     if (!adapt_off) {
         const prev: u32 = if (slot_i < b.last_depth.len) b.last_depth[slot_i] else 0;
         depth = mtpDepthFor(b, slot_i);
-        // THE CONFIRMED SWITCH-UP. A single sample above UP is not a change of text: on the novel band the deep
-        // rounds accepted not one extra draft, so the up-transition must hold for `confirm` consecutive rounds.
-        // The deep-stay branch (prev >= 2) is not a transition and is not gated; a depth-1 round resets the
-        // streak.
+        // THE CONFIRMED SWITCH-UP.
         const confirm = mtpConfirmRounds();
         if (confirm > 1 and slot_i < b.up_streak.len) {
             if (depth > 1 and prev < 2) {
@@ -480,14 +416,9 @@ pub fn tree(ptr: *anyopaque, s: *Stream, gpa: std.mem.Allocator) anyerror!?lanes
             .{ slot_i, b.model.mtpAcceptSlot(slot_i), prev, depth, if (slot_i < b.up_streak.len) b.up_streak[slot_i] else 0 },
         );
     }
-    // The trained proposer (TF_DSV41_MTP_DRAFTS) is the drafter when it is bound and has a pending token; the
-    // suffix lookup below stays the fallback. This is the hook the lane core actually calls, and the other draft
-    // hook is never invoked for this family.
+    // The trained proposer (TF_DSV41_MTP_DRAFTS) is the drafter when it is bound and has a pending token.
     if (depth > 0 and std.c.getenv("TF_DSV41_MTP_DRAFTS") != null and b.model.weights.dspark != null and s.pending != null) {
-        // The round's other hook (draft) already ran the proposer's forward for this pending token; reuse it
-        // instead of running the draft's three blocks, the conditioning and the head twice. The hand-off's cap
-        // is three a round; TF_DSV41_MTP_DEPTH_MAX lifts it so the depth-4 window (five rows) can be offered.
-        // The default is the shipped cap.
+        // The round's other hook (draft) already ran the proposer's forward for this pending token.
         const n: usize = @min(depth, mtpDepthMax());
         var drafts: [4]u32 = undefined;
         var cached = false;

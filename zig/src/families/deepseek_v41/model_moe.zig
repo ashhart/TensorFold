@@ -32,29 +32,21 @@ const completed = model.completed;
 
 pub fn moe(m: *Model, enc: *mtl.ComputeEncoder, e: ?*mtl.CommandBuffer, w: *const weights.Moe, rows: u32, layer_index: u32, topk: u32, prof: ?*CondProf) !void {
     var encoder = enc.*;
-    // A block's expert count is what its descriptor table was bound with: 384 for the backbone, 128 for the
-    // drafter's blocks (the table is the authority, not a literal).
+    // A block's expert count is what its descriptor table was bound with: 384 for the backbone.
     const experts: u32 = @intCast(w.descriptors[0].length() / @sizeOf(exl3.ExpertDescriptor));
     const ws = &m.workspace;
     const p = &m.pipelines;
-    // A block's own router geometry: the backbone's 384 experts and six picks, the drafter's 128 experts and
-    // three picks, read from the pack (`dspark_n_routed_experts` / `dspark_num_experts_per_tok`) and the config.
-    // Reading the backbone's geometry for both would read past the drafter's 128-row gate matrix and let its
-    // picks name experts outside its descriptor table.
+    // A block's own router geometry: the backbone's 384 experts and six picks.
     const picks: u32 = if (topk == 0) m.cfg.topk else topk;
     const dspark_block: bool = experts != m.cfg.experts;
-    // The drafter's logits live in their own buffer: its gate has 128 columns, so the backbone's 384-wide rows
-    // would overlap the drafter's five.
+    // The drafter's logits live in their own buffer: its gate has 128 columns.
     const logits_dest: View = if (dspark_block) blk: {
         if (m.dspark_logits == null) m.dspark_logits = try m.device.buffer(256 * @as(usize, experts) * 4, mtl.ResourceOptions.shared);
         break :blk View{ .buffer = m.dspark_logits.?, .offset = 0 };
     } else ws.view(.router_logits);
     // TF_DSV41_ROUTE_TENSOR: the tiled path.
     const route_tensor = std.c.getenv("TF_DSV41_ROUTE_TENSOR") != null;
-    // The bf16 twin is built a layer at load (weights.bind), not cached once for the model: the gate is per
-    // layer, and the single model-level copy made every layer route with layer 0's gate.
-    // TF_DSV41_ROUTE_GEMM_MINROWS: the row count the gate GEMM needs before it engages (64 = the shipped
-    // condition).
+    // The bf16 twin is built a layer at load (weights.bind), not cached once for the model: the gate is per layer.
     const gemm_min_rows: u32 = if (std.c.getenv("TF_DSV41_ROUTE_GEMM_MINROWS")) |v|
         (std.fmt.parseInt(u32, std.mem.span(v), 10) catch 64)
     else
@@ -63,10 +55,7 @@ pub fn moe(m: *Model, enc: *mtl.ComputeEncoder, e: ?*mtl.CommandBuffer, w: *cons
     const gemm_raw = std.c.getenv("TF_DSV41_ROUTE_GEMM");
     const gemm_on = if (gemm_raw) |r| !std.mem.eql(u8, std.mem.span(r), "0") else true;
     const gemm_env = gemm_on and rows >= gemm_min_rows;
-    // The f16 entry is the one that ships for these packs: their router gate is f16, and the GEMM binds both
-    // operands to one element type, so the *activation* is converted (bf16 -> f16, exact) and the weight keeps
-    // its 10 mantissa bits. A pack whose gate is already bf16 takes the bf16 entry. Both write fp32 logits, so
-    // route sees tf-dense-col's precision.
+    // The f16 entry is the one that ships for these packs: their router gate is f16.
     const gate_f16_gemm = gemm_env and p.ops.gate_f16_f32 != null and w.gate.dtype == .f16;
     const gate_bf16_gemm = !gate_f16_gemm and gemm_env and p.ops.gate_f32 != null and w.gate.dtype == .bf16;
     const route_gemm = gate_f16_gemm or gate_bf16_gemm;
@@ -76,11 +65,9 @@ pub fn moe(m: *Model, enc: *mtl.ComputeEncoder, e: ?*mtl.CommandBuffer, w: *cons
             p.ops.gate != null,                          @tagName(w.gate.dtype),     rows,
             if (route_gemm) "gemm" else "dense-col",
         });
-    // TF_DSV41_ROUTE_GEMM_SCRATCH: the GEMM runs but writes a scratch, and the shipped kernel still feeds route —
-    // the test that separates "the GEMM's output is wrong" from "the GEMM's presence poisons".
+    // TF_DSV41_ROUTE_GEMM_SCRATCH: the GEMM runs but writes a scratch.
     const gate_scratch = route_gemm and std.c.getenv("TF_DSV41_ROUTE_GEMM_SCRATCH") != null;
-    // TF_DSV41_ROUTE_GEMM_PRIVATE: the GEMM writes its own buffer and route reads it there — the arm that keeps
-    // the workspace's logits region untouched.
+    // TF_DSV41_ROUTE_GEMM_PRIVATE: the GEMM owns its buffer; the workspace logits stay untouched.
     const gate_private = route_gemm and std.c.getenv("TF_DSV41_ROUTE_GEMM_PRIVATE") != null;
     var gate_pdest: ?mtl.Buffer = null;
     if (route_gemm) {
@@ -102,12 +89,9 @@ pub fn moe(m: *Model, enc: *mtl.ComputeEncoder, e: ?*mtl.CommandBuffer, w: *cons
     }
     // Default on for prompt rows; TF_DSV41_GATE_TREE=0 forces the shipped tf-dense-col back.
     const gate_tree = rows >= 64 and !Model.gateTreeOff();
-    // TF_DSV41_GATE_WIDE: the wide gate. Same order, same logits; eight rows and four columns a threadgroup with
-    // the x and w tiles staged in threadgroup memory.
+    // TF_DSV41_GATE_WIDE: the wide gate.
     const gate_wide = gate_tree and Model.gateWideOn();
-    // The wide gate -- eight rows and four columns a threadgroup with the tiles staged in threadgroup memory. The
-    // order is the shipped one's (the lane's sixteen consecutive partials, the chunk order, the xor tree), so the
-    // logits are bit-identical and the router's picks cannot move.
+    // The wide gate -- eight rows and four columns a threadgroup with the tiles staged in threadgroup memory.
     if (!route_gemm or gate_scratch) if (gate_wide and (w.gate.dtype == .bf16 or w.gate.dtype == .f16)) {
         mhc.encodeGateTree8(encoder, &p.mhc, ws.view(.normalized), tensor(w.gate), logits_dest, .{ .rows = rows, .k = 5120, .n = experts, .x_stride = 5120, .bf16_w = @intFromBool(w.gate.dtype == .bf16) });
     } else if (!route_gemm or gate_scratch) if (gate_tree and (w.gate.dtype == .bf16 or w.gate.dtype == .f16)) {
@@ -116,8 +100,7 @@ pub fn moe(m: *Model, enc: *mtl.ComputeEncoder, e: ?*mtl.CommandBuffer, w: *cons
         mhc.encodeColDense(encoder, &p.mhc, ws.view(.normalized), tensor(w.gate), logits_dest, .{ .rows = rows, .k = 5120, .n = experts, .x_stride = 5120, .bf16_w = @intFromBool(w.gate.dtype == .bf16) });
     } else ops.encodeDense(encoder, &p.ops, ws.view(.normalized), tensor(w.gate), logits_dest, .{ .rows = rows, .k = 5120, .n = experts, .x_stride = 5120, .w_stride = 5120, .y_stride = experts, .w_dtype = if (w.gate.dtype == .bf16) .bf16 else .f16, .y_dtype = .f32 });
     encoder.barrier();
-    // TF_DSV41_GATE_DUMP=<dir>: the gate stage's own input and the logits it produced, copied out of the
-    // workspace before the route kernel reads them. The copy changes no value the engine computes.
+    // TF_DSV41_GATE_DUMP=<dir>: the gate stage's own input and the logits it produced.
     if (std.c.getenv("TF_DSV41_GATE_DUMP")) |dump_dir| {
         const want: u32 = if (std.c.getenv("TF_DSV41_GATE_DUMP_ROWS")) |v|
             (std.fmt.parseInt(u32, std.mem.span(v), 10) catch 512)
@@ -158,32 +141,21 @@ pub fn moe(m: *Model, enc: *mtl.ComputeEncoder, e: ?*mtl.CommandBuffer, w: *cons
     else
         8;
     const grouped: ?expert_groups.Scratch = if (m.grouped_prefill and rows >= group_min and rows >= 2) try ws.grouping(rows, picks, experts) else null;
-    // The fused gate+up call: one indexed dispatch over a table of 2E descriptors -- a token's six gate picks
-    // then its six up picks one table entry further -- so the layer's two expert dispatches become one and every
-    // output row keeps the shipped per-row arithmetic, split order and rounding. The fused call composes with the
-    // grouped plan: the fused pick table gets its own twelve-slot plan, so a window's gate+up dispatch dedups
-    // experts AND pays one launch.
+    // The fused gate+up call: one indexed dispatch over a table of 2E descriptors.
     const fuse = w.fused != null and rows < 8 and std.c.getenv("TF_DSV41_NO_GATE_UP_FUSION") == null;
     const fused_grouped: ?expert_groups.Scratch = if (fuse and grouped != null) try ws.groupingFused(rows, picks, experts) else null;
-    // The merged MoE up dispatch is possible when the fused table carries the two shared descriptors and the call
-    // is the ungrouped (window) path; the route kernel writes the tail of the pick maps itself, so no host write
-    // touches a GPU-written buffer range.
+    // The merged MoE up dispatch needs the fused table's two shared descriptors and an ungrouped call.
     const moe_up_merged = fuse and fused_grouped == null and
         w.fused.?.length() / @sizeOf(exl3.ExpertDescriptor) == 2 * experts + 2 and
         std.c.getenv("TF_DSV41_NO_FUSE_MOE_UP") == null;
-    // THE SHARED EXPERT'S SLOTS OUT OF THE FUSED INDEXED CALL. The fused gate/up dispatch's tail (fids[2*r*picks
-    // .. +2*r]) names each shared matrix once a token row, so the indexed body decodes the same shared matrix
-    // once a row. The split runs the routed-only indexed call and dispatches the two shared matrices as dense
-    // multi-row calls, which decode each matrix ONCE for the window. TF_DSV41_SHARED_DENSE=1 arms it; unset is
-    // the shipped call.
+    // THE SHARED EXPERT'S SLOTS OUT OF THE FUSED INDEXED CALL.
     const shared_split = moe_up_merged and rows >= 2 and std.c.getenv("TF_DSV41_SHARED_DENSE") != null;
     var logits_view = logits_dest;
     const logit_dtype: u32 = 0;
     if (gate_private) {
         logits_view = .{ .buffer = gate_pdest.?, .offset = 0 };
     }
-    // The MoE's parts -- the gate, the route, the gate/up, the SwiGLU, the down and the shared expert, each in
-    // its own command buffer.
+    // The MoE's parts -- the gate, the route, the gate/up, the SwiGLU, the down and the shared expert.
     if (prof) |pf| {
         if (pf.blk_on) {
             pf.split("blk", "moe/gate", pf.block, enc);
@@ -206,15 +178,13 @@ pub fn moe(m: *Model, enc: *mtl.ComputeEncoder, e: ?*mtl.CommandBuffer, w: *cons
     }
 
     encoder.barrier();
-    // TF_DSV41_ROUTE_DEBUG3: the GPU-side read-back (the buffers are not host-readable): the gate copy's first 40
-    // elements and the logits' first 40, into shared staging, printed once at layer 0.
+    // TF_DSV41_ROUTE_DEBUG3: the GPU-side read-back (the buffers are not host-readable).
     if (std.c.getenv("TF_DSV41_ROUTE_DEBUG3") != null and !model.gate_dump_done) {
         model.gate_dump_done = true;
         const stg_gate = try m.device.buffer(40 * 4, mtl.ResourceOptions.shared);
         const stg_logits = try m.device.buffer(1200 * 4, mtl.ResourceOptions.shared);
         if (w.gate_bf16) |g| ops.encodeDump(encoder, &p.ops, .{ .buffer = g.buffer, .offset = g.offset }, .{ .buffer = stg_gate, .offset = 0 }, 40, true);
-        // The last row's logits: the reply's first token comes from them, and row 0 alone cannot rule coverage
-        // out.
+        // The last row's logits: the reply's first token comes from them, and row 0 alone cannot rule coverage out.
         const last_off: usize = @as(usize, rows - 1) * 384 * 4;
         ops.encodeDump(encoder, &p.ops, .{ .buffer = ws.view(.router_logits).buffer, .offset = ws.view(.router_logits).offset + last_off }, .{ .buffer = stg_logits, .offset = 0 }, 384, false);
         try splitStage(m, enc, e, "dump", 0);
@@ -245,8 +215,7 @@ pub fn moe(m: *Model, enc: *mtl.ComputeEncoder, e: ?*mtl.CommandBuffer, w: *cons
         }
         std.log.info("dump row0 top3: {d}@{d:.4} {d}@{d:.4} {d}@{d:.4}", .{ best_id[0], best[0], best_id[1], best[1], best_id[2], best[2] });
     }
-    // The gate's first eight logits of row 0, read both ways: the one look that tells a layout fault from a scale
-    // fault (TF_DSV41_ROUTE_DEBUG2).
+    // The gate's first eight logits of row 0, read both ways.
     if (std.c.getenv("TF_DSV41_ROUTE_DEBUG2") != null and !model.gate_dump_done) {
         model.gate_dump_done = true;
         try splitStage(m, enc, e, "gatedump", 0);
@@ -281,11 +250,7 @@ pub fn moe(m: *Model, enc: *mtl.ComputeEncoder, e: ?*mtl.CommandBuffer, w: *cons
         std.log.info("picks ids {d} {d} {d} {d} {d} {d}", .{ @as(u32, @bitCast(id6[0])), @as(u32, @bitCast(id6[1])), @as(u32, @bitCast(id6[2])), @as(u32, @bitCast(id6[3])), @as(u32, @bitCast(id6[4])), @as(u32, @bitCast(id6[5])) });
         std.log.info("picks weights {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4}", .{ w6[0], w6[1], w6[2], w6[3], w6[4], w6[5] });
     }
-    // (inert unless TF_DSV41_ROUTE_IDS=1): the last rows' route ids, read back from the GPU. The drafted path's
-    // second row picks its own six experts, so the overlap between a row's picks and the next row's picks is the
-    // "localisation" the record wants: the two-row window's twelve slots against the distinct experts. The record
-    // has it for the four-row window (seventeen distinct of twenty-four) and for five rows, never for the
-    // standing two-row window the NOVEL rate runs on.
+    // (inert unless TF_DSV41_ROUTE_IDS=1): the last rows' route ids, read back from the GPU.
     const want_ids = std.c.getenv("TF_DSV41_ROUTE_IDS") != null and
         ((rows == 2 and !model.route_ids_done_pair) or (rows > 8 and !model.route_ids_done_prompt));
     if (want_ids) {
@@ -327,12 +292,7 @@ pub fn moe(m: *Model, enc: *mtl.ComputeEncoder, e: ?*mtl.CommandBuffer, w: *cons
         routed_rows.output_ids = g.view(.slot_ids);
         routed_rows.routes = .{ .ids = g.view(.expert_ids) };
         routed_rows.grouped = true;
-        // (inert unless TF_DSV41_ROUTE_HIST=1): the grouped plan's own geometry, read back from the GPU -- the
-        // per-expert counts and the per-expert block offsets. The host's plan sizes the row buffer with a formula
-        // (experts + (rows - experts) / tile tiles); the GPU's grouping pads EACH expert's block to a multiple of
-        // the tile and lays the blocks out consecutively, so the tiles that do work are the sum of the per-expert
-        // ceilings, and the plan's tail is unused. The weight decode is per tile, so the plan's padding is a
-        // direct multiplier on the routed stage's biggest term.
+        // (inert unless TF_DSV41_ROUTE_HIST=1): the grouped plan's own geometry, read back from the GPU.
         if (std.c.getenv("TF_DSV41_ROUTE_HIST") != null and !model.plan_hist_done) {
             model.plan_hist_done = true;
             const stg_cnt = try m.device.buffer(384 * 4, mtl.ResourceOptions.shared);
@@ -418,16 +378,10 @@ pub fn moe(m: *Model, enc: *mtl.ComputeEncoder, e: ?*mtl.CommandBuffer, w: *cons
         encoder.barrier();
     }
     const mlp_passes: u32 = if (std.c.getenv("TF_DSV41_DOUBLE_MLP") != null) 2 else 1;
-    // THE FUSED CALL'S UP HALF IS AT THE BLOCK'S OWN PICK COUNT. The fused call writes every token's gate picks
-    // then every token's up picks, so the up half starts at row `rows * picks` -- the backbone's six or the
-    // DRAFTER'S THREE. This form keeps the fusion and fixes the offset; the backbone's six picks make the
-    // offset identical, so the trunk's canon does not move.
+    // THE FUSED CALL'S UP HALF IS AT THE BLOCK'S OWN PICK COUNT.
     const fuse_up_picks: u32 = if (std.c.getenv("TF_DSV41_FUSE_UP_SIX") != null) 6 else picks;
     const up_view = if (fuse) View{ .buffer = ws.view(.gate).buffer, .offset = ws.view(.gate).offset + @as(usize, rows) * fuse_up_picks * 2304 * 2 } else ws.view(.up);
-    // The routed SwiGLU writes the down projection's rotated input in the same pass (the same su scale and
-    // rotation as the separate rotate_in), inside the grouped plan's destination slot, and the down call below
-    // skips that pass. Exactness is the two-pass path's bits (GPU differential green, canons and band held);
-    // TF_DSV41_NO_SWIGLU_ROT restores the two-pass arm for A/B.
+    // The routed SwiGLU writes the down projection's rotated input in the same pass.
     const swiglu_rot = std.c.getenv("TF_DSV41_NO_SWIGLU_ROT") == null and std.c.getenv("TF_DSV41_SKIP_SWIGLU") == null;
     if (swiglu_rot)
         exl3.encodeSwiGLUPreRotate(&p.projection, encoder, convert(ws.view(.gate)), convert(up_view), convert(ws.view(.route_weights)), convert(ws.view(.route_ids)), if (grouped) |g| g.view(.destination) else null, convert(.{ .buffer = w.descriptors[2] }), ws.projection(), .{ .rows = @as(usize, rows) * picks, .k = 2304, .input_stride = 2304, .output_stride = 2304, .experts = experts })
@@ -463,22 +417,14 @@ pub fn moe(m: *Model, enc: *mtl.ComputeEncoder, e: ?*mtl.CommandBuffer, w: *cons
     encoder.barrier();
     const skip_shared = std.c.getenv("TF_DSV41_SKIP_SHARED") != null;
     if (!skip_shared) {
-        // The shared expert's gate and up in one indexed dispatch. The two matrices share the input row, so the
-        // gather map repeats it (`r % rows`) and the route map picks descriptor 0 (w1) for the first `rows`
-        // output rows and 1 (w3) for the next; the output is gate rows then up rows in the `up` region, which the
-        // routed SwiGLU has already consumed. The per-row body is the register-only static body the routed decode
-        // runs, and the dense one-row path runs its Dense twin, so the arithmetic per row is the same.
+        // The shared expert's gate and up in one indexed dispatch.
         const shared_fuse = rows <= 8 and w.shared_fused != null and std.c.getenv("TF_DSV41_NO_FUSE_SHARED") == null;
-        // The shared SwiGLU writes the down projection's ROTATED input in the same pass (the same arithmetic as
-        // the routed path's encodeSwiGLUPreRotate, The GPU differential), so the shared down skips its own
-        // rotate_in dispatch. The dense down keeps its body and k order -- same values, same bits.
-        // TF_DSV41_NO_FUSE_SHARED_ROT=1 restores the two-pass arm.
+        // The shared SwiGLU writes the down projection's ROTATED input in the same pass.
         const shared_rot = moe_up_merged and w.shared_down != null and w.shared_down_ids != null and
             std.c.getenv("TF_DSV41_NO_FUSE_SHARED_ROT") == null;
         for (0..mlp_passes) |_| {
             if (moe_up_merged) {
-                // The shared gate/up already landed in the merged dispatch: rows [12r, 13r) are the shared gate
-                // and [13r, 14r) the shared up, right after the routed gate/up at [0, 12r).
+                // The shared gate/up already landed in the merged dispatch: rows [12r.
                 const gv = ws.view(.gate);
                 const sg = View{ .buffer = gv.buffer, .offset = gv.offset + @as(usize, rows) * 2 * picks * 2304 * 2 };
                 const su = View{ .buffer = gv.buffer, .offset = sg.offset + @as(usize, rows) * 2304 * 2 };

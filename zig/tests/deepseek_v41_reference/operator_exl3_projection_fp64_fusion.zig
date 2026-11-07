@@ -37,8 +37,7 @@ test "wo_a fusion against the legacy eight calls (TF_WO_DIFF=1)" {
     for (q_gpu.slice(u16, q_width)) |*cell| cell.* = math.b(0.05 * rng.scale(1.0));
     const legacy_gpu = try b.get(u16, group_output);
     const fused_gpu = try b.get(u16, group_output);
-    // The legacy arm issues one-row calls, which need the one-row split buffer: larger than the fused
-    // call's eight-row scratch, so size for the larger of the two.
+    // The legacy arm issues one-row calls, which need the one-row split buffer.
     const scratch = try b.get(u8, @max(@max(try exl3.scratchBytes(k, n, 1), try exl3.scratchBytes(k, n, slices)), try exl3.scratchBytes(k, n, 64)));
     const desc_gpu = try b.get(u8, slices * @sizeOf(exl3.ExpertDescriptor));
     const ids_gpu = try b.get(u32, slices);
@@ -58,8 +57,7 @@ test "wo_a fusion against the legacy eight calls (TF_WO_DIFF=1)" {
     }
     const cb = queue.commandBuffer();
     const enc = cb.compute(.serial);
-    // A `try` that throws before endEncoding makes Metal abort in the encoder's dealloc and hides the
-    // Zig error; end it on every error path (InvalidExl3View otherwise reads as a Metal assertion).
+    // A `try` that throws before endEncoding makes Metal abort in the encoder's dealloc and hides the Zig error.
     errdefer enc.end();
     for (&matrices) |*m| exl3.useMatrix(enc, m.*);
     for (&matrices, 0..) |*m, g| try exl3.encode(&p, enc, m.*, .{ .buffer = q_gpu, .offset = g * k * 2 }, .{ .buffer = legacy_gpu, .offset = g * n * 2 }, view(h.view(scratch)), .{ .count = 1, .x_stride = q_width, .y_stride = group_output, .output = .bf16 });
@@ -92,8 +90,7 @@ test "wo_a fusion against the legacy eight calls (TF_WO_DIFF=1)" {
     }
     std.debug.print("WODIFF {{\"cells\":{d},\"unequal\":{d},\"worst_relative\":{e},\"per_slice\":{any}}}\n", .{ group_output, differ, worst, per_slice });
 
-    // The engine's declared decode wiring: the same fused call with the id map (q's one row is eight
-    // 640-wide slices, ids 0..7), which is what rounds 32-33 wired and got a wrong hash from.
+    // The engine's declared decode wiring: the same fused call with the id map.
     {
         const fused_ids = try b.get(u16, group_output);
         const in_ids = try b.get(u32, slices);
@@ -135,8 +132,7 @@ test "wo_a fusion against the legacy eight calls (TF_WO_DIFF=1)" {
         }
         std.debug.print("WODIFFIDS {{\"cells\":{d},\"unequal\":{d},\"worst_relative\":{e},\"per_slice\":{any}}}\n", .{ group_output, ids_differ, ids_worst, ids_per_slice });
     }
-    // The grouped 64-row tile: 64 slots = 8 rows of q x 8 slices, every slot live, tile_rows 64. This is
-    // the indexed == 2 path, which an ungrouped count == 8 call never reaches.
+    // The grouped 64-row tile: 64 slots = 8 rows of q x 8 slices, every slot live, tile_rows 64.
     {
         const rows8: usize = 8;
         const slots: usize = rows8 * slices;
@@ -220,8 +216,7 @@ test "decode MoE at one row, 120 dispatches, isolated (TF_ROOFLINE_DEC=1)" {
     var b = h.Buffers{ .device = device };
     defer b.deinit();
 
-    // If the rate rises toward the ALU ceiling the kernel is memory-latency-bound; if it does not, the decode's own
-    // instruction stream is the wall.
+    // If the rate rises toward the ALU ceiling the kernel is memory-latency-bound; if it does not, it is weight-bound.
     const cached = std.c.getenv("TF_ROOFLINE_DEC_CACHED") != null;
     const pool_mats: usize = if (cached) 1 else experts;
     const up_trellis = try b.get(u8, per_expert * pool_mats);
@@ -306,10 +301,7 @@ test "decode MoE at one row, 120 dispatches, isolated (TF_ROOFLINE_DEC=1)" {
     std.debug.print("ROOFLINE_DEC {{\"layers\":{d},\"gpu_ms\":{d:.2},\"gbs\":{d:.1},\"e12_weights_s\":{d:.3}}}\n", .{ layers, seconds * 1e3, bytes / seconds / 1e9, weights / seconds / 1e12 });
 }
 
-// The grouped window path at the shape a drafted round actually runs -- three rows, six slots a row,
-// experts deduplicated across slots, and the plan's sixty-four-row padding -- against the shipped per-row call
-// (indexed == 1). Hand-builds the arrays the group plan produces (offsets sixty-four-aligned a expert, scatter in
-// slot order), so this is the kernel differential, not an oracle. TF_GRP_WIN=1.
+// The grouped window path at the shape a drafted round actually runs -- three rows, six slots a row.
 test "grouped window: dedup and padding against the per-row path (TF_GRP_WIN=1)" {
     if (std.c.getenv("TF_GRP_WIN") == null) return error.SkipZigTest;
     const device = mtl.Device.init() catch return error.SkipZigTest;

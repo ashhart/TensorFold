@@ -65,8 +65,7 @@ pub fn forwardSegs(m: *Model, segs: []const Seg, logits: Logits) ![]const f32 {
         const head: [*]const u32 = @ptrCast(@alignCast(hv.buffer.contents() + hv.offset));
         std.log.info("fwd: slot {d} segs {d} rows {d} pos {d} taps {d}/{d} engram {d} {d} {d} {d}", .{ slot, segs.len, rows, first_seg.p0, m.taps_n, m.taps_row, head[0], head[1], head[2], head[3] });
     }
-    // A forward starts from the embedding: its stream lives in `.stream` and no sublayer branch is pending. A
-    // draft round in between leaves both at whatever its own forward ended on, so they are set here.
+    // A forward starts from the embedding: its stream lives in `.stream` and no sublayer branch is pending.
     m.stream_alt = false;
     m.pending_expand = false;
     m.engram_pending = false;
@@ -116,15 +115,9 @@ pub fn forwardSegs(m: *Model, segs: []const Seg, logits: Logits) ![]const f32 {
     }
     const host_enc_start: u64 = nowNs();
     const dispatches_before = mtl.command.dispatch_count.load(.monotonic);
-    // TF_DSV41_LAYER_CB: one command buffer a layer, with the GPU's own seconds for each (the counter recorder is
-    // broken on this build).
+    // TF_DSV41_LAYER_CB: one command buffer a layer, with the GPU's own seconds for each.
     const layer_cb = std.c.getenv("TF_DSV41_LAYER_CB") != null;
-    // THE PIPELINED FORWARD. When TF_DSV41_PIPE_LAYERS=n (default 2; 0 = the shipped single buffer) the first n
-    // layers are committed as their own command buffer WITHOUT a wait, so the GPU starts on them while the host
-    // encodes the rest. The landed 2 is the A/B's best. The dispatch order, every dispatch's arguments and every
-    // kernel's arithmetic are unchanged; only the command buffer boundary moves, and command buffers on one queue
-    // run in commit order. Instruments that own the command buffer (the layer/stage split, the attention
-    // profiler, the GPU recorder, a diagnostic observer) keep the shipped single-buffer form.
+    // THE PIPELINED FORWARD.
     const pipe_layers: u32 = if (rows <= 8 and m.profile == null and m.observer == null and
         std.c.getenv("TF_DSV41_LAYER_CB") == null and std.c.getenv("TF_DSV41_STAGE_CB") == null and
         std.c.getenv("TF_DSV41_ATTN_PROF") == null)
@@ -188,12 +181,7 @@ pub fn forwardSegs(m: *Model, segs: []const Seg, logits: Logits) ![]const f32 {
             enc = e.compute(if (concurrentOn()) .concurrent else .serial);
             for (m.checkpoint.shards.items) |shard| enc.useResource(shard.buffer, mtl.ResourceUsage.read);
         }
-        // THE ENGRAM GATE READS THE EXPANDED STREAM. The fused boundary defers the previous stage's branch expand
-        // to this layer's boundary (below), but the Engram gate runs first and is a consumer of the EXPANDED
-        // stream: the reference's order is expand -> gate -> collapse. Flush the pending expand here, before the
-        // gate, so the gate sees the post-branch hidden and the expand's residual is the pre-Engram stream; the
-        // boundary below then runs expand=false and computes the same mixes over the post-Engram stream.
-        // encodePost is the same arithmetic as expand_mix's expand (post[k]*branch + sum_j comb[j*4+k]*old[j]).
+        // THE ENGRAM GATE READS THE EXPANDED STREAM.
         if (layer.engram != null and m.pending_expand and
             std.c.getenv("TF_DSV41_SKIP_ENGRAM") == null and
             std.c.getenv("TF_DSV41_NO_ENGRAM_FLUSH") == null)
@@ -206,14 +194,11 @@ pub fn forwardSegs(m: *Model, segs: []const Seg, logits: Logits) ![]const f32 {
             enc.barrier();
         }
         hid.record(enc, &p.ops, m.streamView(), rows, .stream, @intCast(index));
-        // TF_DSV41_SKIP_ENGRAM: a diagnostic arm for the Engram term (its gate kernels and the host hash pass); the
-        // reply degrades, the rate isolates the stage.
+        // TF_DSV41_SKIP_ENGRAM: a diagnostic arm for the Engram term (its gate kernels and the host hash pass).
         if (layer.engram != null and std.c.getenv("TF_DSV41_SKIP_ENGRAM") == null) {
             const g = &layer.engram.?;
             if (m.engram_pending and @as(u32, @intCast(index)) == engram.hash.layers[1].layer_id and m.engramPipeRows(rows)) {
-                // Commit the layers encoded so far, so the GPU is running them while the second layer's rows are
-                // read. The queue is in order and a command-buffer boundary is a full barrier, so the next buffer
-                // sees everything this one wrote.
+                // Commit the layers encoded so far, so the GPU is running them while the second layer's rows are read.
                 enc.end();
                 e.commit();
                 if (engram_prev_n < engram_prev.len) {
@@ -243,17 +228,12 @@ pub fn forwardSegs(m: *Model, segs: []const Seg, logits: Logits) ![]const f32 {
                 else => .f32,
             }, .hidden_stride = 20480, .kv_stride = 25600, .output_stride = 20480, .eps = m.cfg.eps }, m.streamView(), ws.view(.engram_kv), null, m.streamView(), rows);
         }
-        // The drafter reads the mean of this layer's input streams at its three target layers. The taps buffer
-        // holds sixteen rows a layer: only a decode step or a draft round fits, and a prompt's rows would run
-        // past it (the original tap guard).
+        // The drafter reads the mean of this layer's input streams at its three target layers.
         if (segs.len == 1 and tapsOn() and index >= 37 and index <= 39) {
-            // The last rows of this pass, a ring of 128: the drafter's conditioning is the window's rows, not one
-            // summary (TF_DSV41_COND_ROWS).
+            // The last rows of this pass, a ring of 128: the drafter's conditioning is the window's rows.
             const n: u32 = @min(rows, 128);
             const skip = @as(usize, rows - n) * 20480 * 2;
-            // THE CAPTURED ROWS' OWN FIRST POSITION. Every shipped chunk skips a multiple of 128 rows, so the
-            // forward's start position was the same slot; a merged tail chunk's length is not a multiple of 128,
-            // and its live capture must still land on the rows it holds.
+            // THE CAPTURED ROWS' OWN FIRST POSITION.
             const base = (state.position + (rows - n)) % 128;
             // A MERGED TAIL CHUNK ALSO STASHES THE PREFIX -- the taps ring as it stands at the mark.
             if (m.publish_limit != 0) {
@@ -261,14 +241,10 @@ pub fn forwardSegs(m: *Model, segs: []const Seg, logits: Logits) ![]const f32 {
                 const sn: u32 = @min(q, 128);
                 ops.encodeStreamMean(enc, &p.ops, m.streamView().shifted(@as(usize, q - sn) * 20480 * 2), .{ .buffer = m.taps_stash }, .{ .rows = sn, .width = 5120, .stream_stride = 20480, .out_stride = 5120, .slot = @intCast(index - 37), .row_base = (state.position + q - sn) % 128 });
             }
-            // THE THREE TARGET LAYERS SHARE ONE row_base. The taps buffer is interleaved by position (row p = the
-            // three layers' values), so the ring advances ONCE a forward.
+            // THE THREE TARGET LAYERS SHARE ONE row_base.
             const shared = tapsSharedBaseOn();
             if (shared and index == 37) {
-                // THE TAPS RING'S SLOT IS THE TOKEN POSITION. The cursor advances by the CAPTURED rows (the
-                // verify's window), while the position advances by the KEPT rows; the two rates differ, so a
-                // base that follows the cursor drifts out of alignment with the positions. The stream-mean
-                // kernel writes modulo the ring, so the aligned base is the forward's start position.
+                // THE TAPS RING'S SLOT IS THE TOKEN POSITION.
                 m.taps_base = if (condAlignOn()) state.position % 128 else m.taps_row;
                 // A fresh capture's rows are all valid; a rollback sets the prefix.
                 m.taps_rows_valid = 0;
@@ -276,9 +252,7 @@ pub fn forwardSegs(m: *Model, segs: []const Seg, logits: Logits) ![]const f32 {
                 m.taps_n = @min(m.taps_n + n, 128);
             }
             ops.encodeStreamMean(enc, &p.ops, m.streamView().shifted(skip), .{ .buffer = m.taps }, .{ .rows = n, .width = 5120, .stream_stride = 20480, .out_stride = 5120, .slot = @intCast(index - 37), .row_base = if (shared) base else m.taps_row });
-            // The capture's row count, so the conditioning knows how many tail rows of the taps ring are
-            // consecutive positions (the last capture is the verify's or the re-feed's, and its rows are the
-            // positions the window is missing).
+            // The capture's row count, so the conditioning knows how many tail rows of the taps ring are consecutive.
             m.taps_rows_last = n;
             if (!shared) {
                 // A fresh capture's rows are all valid; a rollback sets the prefix.
@@ -318,8 +292,7 @@ pub fn forwardSegs(m: *Model, segs: []const Seg, logits: Logits) ![]const f32 {
         enc.barrier();
         hid.record(enc, &p.ops, ws.view(.branch), rows, .attn, @intCast(index));
         if (hid.full_layer >= 0 and index == @as(usize, @intCast(hid.full_layer))) {
-            // The attention block's own regions, in execution order, so the first one that moves names the
-            // kernel. The row widths are attention. Workspace's fixed per-row region sizes.
+            // The attention block's own regions, in execution order, so the first one that moves names the kernel.
             const aw = &m.attention_workspace;
             const li: u32 = @intCast(index);
             hid.recordBytes(enc, &p.ops, aw.view(.qr), rows, 1280 * 2, .a_qr, li);
@@ -327,8 +300,7 @@ pub fn forwardSegs(m: *Model, segs: []const Seg, logits: Logits) ![]const f32 {
             hid.recordBytes(enc, &p.ops, aw.view(.raw_kv), rows, 512 * 2, .a_kv, li);
             hid.recordBytes(enc, &p.ops, aw.view(.values), rows, 512 * 4, .a_vals, li);
             hid.recordBytes(enc, &p.ops, aw.view(.gates), rows, 512 * 4, .a_gates, li);
-            // A compressed region is written for this chunk's `complete` new rows only; the tail of the scratch
-            // is the previous request's bytes and is not a reading of this forward.
+            // A compressed region is written for this chunk's `complete` new rows only.
             const aratio = m.cfg.compressRatio(@intCast(index));
             const complete: u32 = if (aratio == 0) 0 else @intCast((state.position + rows) / aratio - state.position / aratio);
             if (complete != 0) {
@@ -423,8 +395,7 @@ pub fn forwardSegs(m: *Model, segs: []const Seg, logits: Logits) ![]const f32 {
         mhc.encodeCollapse(enc, &p.mhc, m.streamView().shifted(first * 20480 * 2), ws.view(.previous_pre).shifted(first * 4 * 4), ws.view(.collapsed), .{ .rows = output_rows, .width = 5120, .stream_stride = 20480, .y_stride = 5120 });
         enc.barrier();
         m.normalize(enc, ws.view(.collapsed), m.weights.norm, ws.view(.normalized), output_rows);
-        // The trunk's own head input (the row 0 of the window), so the drafter's head input can be compared with
-        // it (the cosine): the MTP module's hidden must live in the trunk's space.
+        // The trunk's own head input (the row 0 of the window), so the drafter's head input can be compared with it.
         if (std.c.getenv("TF_DSV41_MTP_DEBUG_TOP") != null) {
             if (m.mtp_trunk_hidden == null) {
                 m.mtp_trunk_hidden = try m.device.buffer(5120 * 4, mtl.ResourceOptions.shared);
@@ -495,8 +466,7 @@ pub fn forwardSegs(m: *Model, segs: []const Seg, logits: Logits) ![]const f32 {
         for (&hist, 0..) |*h, i| h.* = mtl.command.dispatch_hist[i].load(.monotonic);
         std.log.info("dispatch histogram (log2 threadgroups): {any}, threadgroups {d}, indirect {d}", .{ hist, mtl.command.dispatch_threadgroups.load(.monotonic), mtl.command.dispatch_indirect.load(.monotonic) });
     }
-    // TF_DSV41_HOST_PROF without the counter recorder (which is broken on this build): the host's own clocks and
-    // the command buffer's GPU seconds, so "host or GPU" stops being an inference.
+    // TF_DSV41_HOST_PROF without the counter recorder (which is broken on this build).
     if (m.host_prof) {
         std.log.info("host: rows {d}, engram hash {d:.2} ms (of which stage {d:.2} ms, misses {d}, faults {d}, pf {d}, thr {d})", .{
             rows,

@@ -170,7 +170,6 @@ pub fn normq(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, w: Ref, y: Ref,
 }
 
 /// Window keys kv [rows][512]: kv_norm into kvn, RoPE into kvr, act_quant into kvq and ring rows dest [rows][reps].
-/// The kernel's `TfFKvArgs` and `TfFSwiArgs`.
 pub const KvArgs = extern struct { dim: u32, rows: u32, reps: u32, eps: f32 };
 pub const SwiArgs = extern struct { n: u32, limit: f32 };
 /// The kernel's `TfFPostArgs` record, field for field.

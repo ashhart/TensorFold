@@ -37,9 +37,7 @@ fn columnKey(spec: SparseSpec, row: usize, slot: usize, indices: []const i32) ?K
     return .{ .compressed = true, .row = @intCast(pos_i) };
 }
 
-/// Class 3's verdict accumulator: the worst levels this run's sparse cases reach, asserted at the end
-/// of the case that drives them. The kernel must equal the source-contract f32 reference on identical
-/// decoded rows after the bf16 boundary, and stay at the f32 level against the FP64 ideal.
+/// Class 3's verdict accumulator: the worst levels this run's sparse cases reach.
 const SparseGate = struct {
     unequal_contract: usize = 0,
     worst_ideal_nrms: f64 = 0,
@@ -72,8 +70,7 @@ fn sparseCase(
     const positions_gpu = try b.get(i32, spec.rows * spec.topk);
     const sink_gpu = try b.get(f32, spec.heads);
     const out_gpu = try b.get(u16, spec.rows * q_stride);
-    // The operator decodes every visible key into a dense bf16 table first, and a one-row window splits its k range,
-    // so both scratch buffers are part of its call.
+    // The operator decodes every visible key into a dense bf16 table first, and a one-row window splits its k range.
     const dense_gpu = try b.get(u16, (@as(usize, spec.rows) + 128 + @max(spec.compressed_rows, 1)) * h.width);
     const part_gpu = try b.get(f32, 32 * 4 * 4 * 32 * 68);
     @memcpy(q_gpu.slice(u16, spec.rows * q_stride), q);

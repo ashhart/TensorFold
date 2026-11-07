@@ -1,4 +1,6 @@
 //! The drafter's round.
+
+// The drafter's head loop follows the release's DSparkBlock.forward_head (inference/model.py, revision 314113f8).
 const builtin = @import("builtin");
 const std = @import("std");
 const mtl = @import("metal");
@@ -32,16 +34,11 @@ const draft_round = @import("model_draft_round.zig");
 const DraftRound = draft_round.DraftRound;
 pub fn proposeTokens(m: *Model, slot: u32, pending: u32, count: u32) ![4]u32 {
     const dspark = m.weights.dspark orelse return error.NoDrafter;
-    // Bisect arms: TF_DSV41_MTP_STUB returns before the draft forward, TF_DSV41_MTP_STUB_COND after the
-    // conditioning. Both leave the engine's hand-off and verify in place, so they separate the machinery from the
-    // draft round's own execution.
+    // Bisect arms: TF_DSV41_MTP_STUB returns before the draft forward, TF_DSV41_MTP_STUB_COND after the conditioning.
     if (std.c.getenv("TF_DSV41_MTP_STUB") != null) return .{ 0, 0, 0, 0 };
-    // The pending row is this round's first verified row; start its page-in now, under the drafter's own GPU
-    // window, instead of at the verify's stageRows.
+    // The pending row is this round's first verified row; start its page-in now, under the drafter's own GPU window.
     if (Model.engramPendingOn()) m.prefetchPending(slot, pending);
-    // The draft round runs its own boundaries through the shared coefficient views and the stream parity: a main
-    // forward re-initialises them, but the *parity* chooses which stream the next boundary reads, so the model
-    // fields are saved and put back around the round.
+    // The draft round runs its own boundaries through the shared coefficient views and the stream parity.
     const alt0 = m.stream_alt;
     const pend0 = m.pending_expand;
     defer {
@@ -54,13 +51,7 @@ pub fn proposeTokens(m: *Model, slot: u32, pending: u32, count: u32) ![4]u32 {
     // The conditioning's cursor is THIS slot's committed position, not lane 0's.
     const slot_pos = m.caches[slot].position;
     state.position = slot_pos;
-    // THE DRAFTER RUNS `depth + 1` ROWS, NOT FIVE. The chain's step s reads the logits row s and the bias of the
-    // token before it, and writes the pick into IDS[s+1]; the hand-off takes picks 0..count-1 (the lane's depth,
-    // at most three). The five-row form computed two rows whose picks (the fourth and the fifth) the hand-off
-    // never read, and every extra row the drafter runs is published into its own 128-row attention window at its
-    // own position -- so the extra rows are not free: they displace the real history the drafter's rows attend
-    // over. The rows are the ones the chain reads plus the one the chain's own step needs, so `depth + 1` rows is
-    // the form. TF_DSV41_MTP_ROWS restores the five-row form for a same-binary A/B.
+    // THE DRAFTER RUNS `depth + 1` ROWS, NOT FIVE.
     const n: u32 = if (std.c.getenv("TF_DSV41_MTP_ROWS")) |v|
         (std.fmt.parseInt(u32, std.mem.span(v), 10) catch 5)
     else
@@ -68,33 +59,19 @@ pub fn proposeTokens(m: *Model, slot: u32, pending: u32, count: u32) ![4]u32 {
     var out: [4]u32 = @splat(0);
     var cb = m.queue.commandBuffer();
     var enc = cb.compute(if (model.concurrentOn()) .concurrent else .serial);
-    // The conditioning's per-part GPU split, and the host's own encode time against the GPU's window. Neither
-    // flag changes a byte of the shipped path.
+    // The conditioning's per-part GPU split, and the host's own encode time against the GPU's window.
     var cond_prof = CondProf{ .queue = m.queue, .cb = cb, .enc = enc, .on = std.c.getenv("TF_DSV41_COND_PROF") != null, .blk_on = std.c.getenv("TF_DSV41_BLOCK_PROF") != null };
     const host_prof = std.c.getenv("TF_DSV41_HOST_PROF") != null;
     const t_start: f64 = if (host_prof) mtl.clock.seconds() else 0;
-    // The conditioning: the three target layers' stream means (the taps, one 15,360-wide row) through main_proj
-    // and main_norm, then each stage's keys into its ring -- what the draft rows attend to. The release's
-    // `Transformer.forward_spec` (inference/model.py, revision 314113f8) is the same pass: `forward_embed` makes
-    // the noise-token draft rows and `DSparkBlock.forward` threads `pre_mix` and `main_x` through the stage. The
-    // conditioning: the last `nc` rows of the rolling tap ring (the decode window's own rows, captured a token a
-    // forward) through main_proj and main_norm, then each stage's keys into its ring. The ring once
-    // held only the current pass's row (`taps_n = rows = 1` at decode), so 127 of the 128 window slots the draft
-    // rows read were uninitialised packed cache and the filler rows went NaN.
+    // The conditioning: the three target layers' stream means.
     const pos_now = slot_pos;
-    // The captured rows are the last `taps_rows_last` rows of the last forward, at their own positions [pos_now -
-    // cap_n, pos_now). The release writes each main row at its own position and ropes the draft rows at the
-    // positions after the sequence; the earlier form published the valid prefix at the suffix's positions,
-    // shifting the context by the rows the round kept.
+    // The captured rows are the last `taps_rows_last` rows of the last forward.
     const cap_n: u32 = @min(m.taps_rows_last, 128);
     const cap_pos: u32 = pos_now -| cap_n;
     const true_pos = model.dsparkTruePosOn();
-    // The capture's valid rows: the rollback's prefix (the rejected rows' taps are not the committed history), or
-    // the whole capture when no rollback ran (the whole window landed).
+    // The capture's valid rows: the rollback's prefix (the rejected rows' taps are not the committed history).
     const cap_rows: u32 = @min(@min(m.taps_rows_last, m.taps_n), 128);
-    // The conditioning publishes the capture's whole rows at their own positions, so the ring holds the main
-    // model's rows everywhere; the earlier form published only the kept prefix, leaving a hole at every rejected
-    // position. TF_DSV41_DSPARK_CAPTURE_ALL=0 restores the prefix form.
+    // The conditioning publishes the capture's whole rows at their own positions.
     const dspark_capture_all: u32 = if (std.c.getenv("TF_DSV41_DSPARK_CAPTURE_ALL")) |v|
         (std.fmt.parseInt(u32, std.mem.span(v), 10) catch 1)
     else
@@ -107,12 +84,9 @@ pub fn proposeTokens(m: *Model, slot: u32, pending: u32, count: u32) ![4]u32 {
         cap_rows;
     // The published rows' positions: the capture's own (the release's form) or the earlier shifted form.
     const pub_pos: u32 = if (true_pos) cap_pos else pos_now - tail;
-    // The drafter's own rows' rope position: the next token's position (the release ropes every draft row at
-    // start_pos + seqlen + i) or the earlier slot position.
+    // The drafter's own rows' rope position: the next token's position.
     const draft_pos: u32 = if (true_pos) cap_pos + tail else slot_pos;
-    // The windowed context's row count. With the aligned ring the rows are the positions' own -- the ring's slots
-    // are the positions. The count is rounded down to a multiple of four so the dense multi-row body takes it; 1
-    // keeps the one-row body.
+    // The windowed context's row count.
     var nc: u32 = 1;
     if (model.condRowsWanted() != 0) {
         const have: u32 = if (model.condAlignOn()) @min(pos_now, 128) else @min(m.taps_n, pos_now);
@@ -144,8 +118,7 @@ pub fn proposeTokens(m: *Model, slot: u32, pending: u32, count: u32) ![4]u32 {
     try round.conditionStage();
     enc = round.enc;
     cb = round.cb;
-    // THE DRAFTER'S STOP POINT 1 (after the conditioning). The arm commits what was encoded, so the command
-    // buffer's completion fires.
+    // THE DRAFTER'S STOP POINT 1 (after the conditioning).
     if (model.mtpStopPoint() == 1 or std.c.getenv("TF_DSV41_MTP_STUB_COND") != null) {
         enc.end();
         cb.commit();
@@ -154,10 +127,7 @@ pub fn proposeTokens(m: *Model, slot: u32, pending: u32, count: u32) ![4]u32 {
         try completed(cb);
         return .{ 0, 0, 0, 0 };
     }
-    // THE DRAFTER'S OWN EARLY COMMIT. Same mechanism and same guarantees as: a command-buffer boundary is a full
-    // barrier, the queue is in-order, and the final wait implies the earlier buffer. `TF_DSV41_MTP_PIPE=0` is the
-    // same-binary control; an instrument that owns the buffer (`COND_PROF`, `BLOCK_PROF`) keeps the shipped
-    // single-buffer form.
+    // THE DRAFTER'S OWN EARLY COMMIT.
     var pipe_prev: mtl.CommandBuffer = undefined;
     var pipe_prev_set = false;
     const mtp_pipe: bool = blk: {
@@ -182,9 +152,7 @@ pub fn proposeTokens(m: *Model, slot: u32, pending: u32, count: u32) ![4]u32 {
     const dbg: ?mtl.Buffer = if (std.c.getenv("TF_DSV41_MTP_DEBUG_ROWS") != null) try m.device.buffer(model.mtp_dbg_total3 * 4, mtl.ResourceOptions.shared) else null;
     defer if (dbg) |b| b.deinit();
     if (dbg) |b| ops.encodeDump(enc, &p.ops, ws.view(.branch), .{ .buffer = b, .offset = 0 }, 5 * 5120, true);
-    // The mHC's expanded stream and its `pre` vector carry across the drafter's blocks, as the trunk's do (the
-    // expand is once, before the loop, and the release's DSparkBlock threads `pre_mix` through each stage).
-    // Expanding inside the loop reset the stream to the branch and the pre to one-hot at every block.
+    // The mHC's expanded stream and its `pre` vector carry across the drafter's blocks, as the trunk's do.
     mhc.encodeExpand(enc, &p.mhc, ws.view(.branch), ws.view(.stream), ws.view(.previous_pre), .{ .rows = n, .width = 5120, .x_stride = 5120, .stream_stride = 20480, .pre_stride = 4 });
     if (cond_prof.blk_on) cond_prof.split("blk", "prologue/expand", 0, &enc);
     round.enc = enc;
@@ -192,8 +160,7 @@ pub fn proposeTokens(m: *Model, slot: u32, pending: u32, count: u32) ![4]u32 {
     try round.blockStage(dbg);
     enc = round.enc;
     cb = round.cb;
-    // THE DRAFTER'S STOP POINT 2 (after the three blocks). The arm commits what was encoded, so the command
-    // buffer's completion fires.
+    // THE DRAFTER'S STOP POINT 2 (after the three blocks).
     if (model.mtpStopPoint() == 2 or std.c.getenv("TF_DSV41_MTP_STUB_BLOCKS") != null) {
         enc.end();
         cb.commit();
@@ -205,8 +172,7 @@ pub fn proposeTokens(m: *Model, slot: u32, pending: u32, count: u32) ![4]u32 {
     const logits = try round.headStage();
     enc = round.enc;
     cb = round.cb;
-    // THE DRAFTER'S STOP POINT 3 (after the head projection). The arm commits what was encoded, so the command
-    // buffer's completion fires.
+    // THE DRAFTER'S STOP POINT 3 (after the head projection).
     if (model.mtpStopPoint() == 3 or std.c.getenv("TF_DSV41_MTP_STUB_HEAD") != null) {
         enc.end();
         cb.commit();
@@ -221,9 +187,7 @@ pub fn proposeTokens(m: *Model, slot: u32, pending: u32, count: u32) ![4]u32 {
     const price_dbg = markov_run.price_dbg;
     defer if (price_dbg) |b| b.deinit();
     const groups = markov_run.groups;
-    // The drafter's logits row 0 against the trunk's own row-0 logits (the verify's first row -- the same
-    // prediction the drafter's row 0 makes). The drafter's forward runs after the verify, so the workspace's
-    // `.logits` row 0 still holds the trunk's row-0 logits (the drafter's own wo_a writes from row 1 on).
+    // The drafter's logits row 0 against the trunk's own row-0 logits.
     const top_buf: ?mtl.Buffer = if (std.c.getenv("TF_DSV41_MTP_DEBUG_TOP") != null)
         try m.device.buffer(2 * 129280 * 4 + 5120 * 4, mtl.ResourceOptions.shared)
     else
@@ -235,8 +199,7 @@ pub fn proposeTokens(m: *Model, slot: u32, pending: u32, count: u32) ![4]u32 {
         ops.encodeDump(enc, &p.ops, ws.view(.normalized), .{ .buffer = b, .offset = 2 * 129280 * 4 }, 5120, false);
         enc.barrier();
     }
-    // The host's own encode time, the wait, and the GPU's window -- so the drafter's cost can be split into "the
-    // GPU's work" and "the host's encoding" (and, under the conditioning's split, the gap between them).
+    // The host's own encode time, the wait, and the GPU's window.
     const t_encoded: f64 = if (host_prof) mtl.clock.seconds() else 0;
     enc.end();
     cb.commit();
@@ -268,16 +231,13 @@ pub fn proposeTokens(m: *Model, slot: u32, pending: u32, count: u32) ![4]u32 {
             std.log.info("treeprice propose round {d} step {d} top2 {d} {d}", .{ model.price_round, ps, id1, id2 });
         }
     }
-    // The early buffer completed in queue order; check it and count its GPU time so the `mtp forward` line keeps
-    // meaning the whole drafter forward.
+    // The early buffer completed in queue order; check it and count its GPU time.
     var gpu_extra_ms: f64 = 0;
     if (pipe_prev_set) {
         try completed(pipe_prev);
         gpu_extra_ms = pipe_prev.gpuSeconds() * 1e3;
     }
-    // The drafter's own forward's GPU time and wall. The stage timer covers the trunk's layers, not this forward
-    // -- and the conditioning's cost (the windowed context's projection, the keys, the rope and the publish)
-    // lives here.
+    // The drafter's own forward's GPU time and wall.
     if (host_prof) {
         const encode_ms = (t_encoded - t_start) * 1e3;
         const wait_ms = (t_done - t_encoded) * 1e3;
@@ -303,8 +263,7 @@ pub fn proposeTokens(m: *Model, slot: u32, pending: u32, count: u32) ![4]u32 {
         std.log.info("mtp top: drafter argmax={d} vals={d:.4} {d:.4} {d:.4} ids={d} {d} {d} {d} {d}", .{ dout[0], dval[0], dval[1], dval[2], dout[0], dout[1], dout[2], dout[3], dout[4] });
         std.log.info("mtp top: trunk   argmax={d} vals={d:.4} {d:.4} {d:.4} ids={d} {d} {d} {d} {d}", .{ tout[0], tval[0], tval[1], tval[2], tout[0], tout[1], tout[2], tout[3], tout[4] });
         std.log.info("mtp top: agree={} drafter@trunk_argmax={d:.4} trunk@drafter_argmax={d:.4}", .{ dout[0] == tout[0], f[@intCast(tout[0])], f[129280 + @as(usize, @intCast(dout[0]))] });
-        // The drafter's head input against the trunk's own head input (the verify's row 0): the cosine says
-        // whether the MTP module's hidden lives in the trunk's hidden space at all.
+        // The drafter's head input against the trunk's own head input (the verify's row 0).
         if (m.mtp_trunk_hidden) |tb| {
             const t: [*]const f32 = @ptrCast(@alignCast(tb.contents()));
             const dh = f + 2 * 129280;
@@ -347,14 +306,11 @@ pub fn proposeTokens(m: *Model, slot: u32, pending: u32, count: u32) ![4]u32 {
                         if (!std.math.isFinite(f[(seg * 5 + rr) * 5120 + cc])) bad += 1;
                         acc += @as(f64, f[(seg * 5 + rr) * 5120 + cc]) * @as(f64, f[(seg * 5 + rr) * 5120 + cc]);
                     }
-                    // The row's RMS: the attention's contribution (attn_out - embed) and the MoE's are read off
-                    // the row magnitudes -- a drafter whose attention contributes nothing reads a flat logits row
-                    // (the round's instrument).
+                    // The row's RMS: the attention's contribution.
                     std.log.info("mtp {s} row {d}: nonfinite={d} rms={d:.5} first={d:.5} {d:.5}", .{ name, rr, bad, @sqrt(acc / 5120.0), f[(seg * 5 + rr) * 5120], f[(seg * 5 + rr) * 5120 + 1] });
                 }
             }
-            // The drafter's key rows (the pack's input), its query's two stages, the decoded key table the scan
-            // reads, and the attention's output: a row's first non-finite column localises it.
+            // The drafter's key rows (the pack's input), its query's two stages, the decoded key table the scan reads.
             {
                 var rrk: usize = 0;
                 while (rrk < 5) : (rrk += 1) {
@@ -389,8 +345,7 @@ pub fn proposeTokens(m: *Model, slot: u32, pending: u32, count: u32) ![4]u32 {
                     }
                     std.log.info("mtp qpre row {d}: nonfinite={d} maxabs={d:.5}", .{ rrp, bad, mx });
                 }
-                // The drafter's query's per-head RMS -- the instrument's read of the scale the softmax saw (flat
-                // when every head is tiny, saturated when one is huge).
+                // The drafter's query's per-head RMS -- the instrument's read of the scale the softmax saw.
                 {
                     const r = model.headRms(f + model.mtp_dbg_qpre, 64, 512);
                     std.log.info("mtp qpre head rms: min={d:.5} max={d:.5} mean={d:.5}", .{ r.min, r.max, r.mean });
@@ -406,9 +361,7 @@ pub fn proposeTokens(m: *Model, slot: u32, pending: u32, count: u32) ![4]u32 {
                     }
                     if (bad != 0 or rrd >= 126) std.log.info("mtp dense row {d}: nonfinite={d} maxabs={d:.5}", .{ rrd, bad, mx });
                 }
-                // THE RING'S DECODED KEYS: the RMS of a ring row and the cosine between two ADJACENT positions
-                // (the slots 127 and 0 are one position apart across the ring's wrap). If the ring's keys are one
-                // vector, the drafter's softmax cannot discriminate the history.
+                // THE RING'S DECODED KEYS: the RMS of a ring row and the cosine between two ADJACENT positions.
                 {
                     const ring0 = model.mtp_dbg_dense;
                     const ring1 = model.mtp_dbg_dense + 127 * 512;

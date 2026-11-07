@@ -16,8 +16,7 @@ const primes = [2][24]u32{
 fn word(raw: []const u8, at: usize) u32 {
     return std.mem.readInt(u32, raw[at..][0..4], .little);
 }
-/// Where a streamed model's Engram rows come from. One call per (layer, row): the reference asks only for the rows a
-/// handful of teacher tokens touch, so there is no cache here — the reader's own staging is enough.
+/// Where a streamed model's Engram rows come from.
 pub const RowSource = struct {
     ptr: *anyopaque,
     rowFn: *const fn (p: *anyopaque, layer: usize, row: u32, out: []u16) anyerror!void,
@@ -30,8 +29,7 @@ pub const State = struct {
     history: [3]u32 = .{ 2, 2, 2 },
     gathered: [6144]u16 = undefined,
     kv: [25600]u16 = undefined,
-    /// The four applied gate scalars, one per copy, kept so a trace can print the value the reference actually used
-    /// instead of inferring it from a bf16 hidden state.
+    /// The four applied gate scalars, one per copy, kept.
     gates: [4]f32 = @splat(0),
 
     /// Diagnostic faults, set only by a caller that is measuring the gate rather than qualifying a model.
@@ -79,8 +77,7 @@ pub const State = struct {
         self.history[1] = self.history[0];
         self.history[0] = id;
     }
-    /// The Engram's own gate at the chain's precision T. The FP32 contract is unchanged; the FP64 chain keeps the
-    /// two 5120-dot statistics and the gate in FP64.
+    /// The Engram's own gate at the chain's precision T.
     pub fn apply(self: *State, comptime T: type, e: Engram, layer: usize, id: u32, h: []u16, c: Config, scratch: *projection.Scratch, rows: ?RowSource) !void {
         @setFloatMode(.strict);
         const tokens = [4]u32{ id, self.history[0], self.history[1], self.history[2] };

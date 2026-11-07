@@ -1,6 +1,4 @@
 // DSV41's prompt sparse attention on the tensor units: GLM's fragment structure over the packed cache.
-// Compiled by csa2.zig after kv.metal (the exact packed-cache decoders) and csa2.metal (Dsv41Attention);
-// nax.h is inlined at load, so the same text also builds for GPUs without tensor units (per-element decode).
 #include "../nax.h"
 using namespace tfp;
 
@@ -32,8 +30,7 @@ inline float row_sum(float v) {
   return v + simd_shuffle_xor(v, ushort(8));
 }
 
-// The scalar dsv41_attn_key's slot as one int: -1 for no key, bit 30 set with the row index for a compressed
-// one, the bare position for a window one. The window and pick rules are csa2.metal's, byte for byte.
+// The scalar dsv41_attn_key's slot as one int: -1 for no key, bit 30 set with the row index for a compressed one.
 inline int dsv41_slot_at(constant Dsv41Attention &p, uint row, uint query, uint columns, uint slot,
                          device const int *indices) {
   if (slot < columns) {
@@ -77,8 +74,7 @@ inline bfloat dsv41_decode_at(int enc, device const uchar *ring, device const uc
   return bfloat(dsv41_unpack(k, d, p.width, kind != 0u ? p.main_block : 32u, kind));
 }
 
-// Aligned-when-possible small vector loads: the packed rows keep every dec4 address a multiple of 4 (or 2 for
-// the nibble rows) in practice, but only the pointer says so for sure.
+// Aligned-when-possible small vector loads: the packed rows keep every dec4 address a multiple of 4.
 inline uchar4 dsv41_load4(device const uchar *k) {
   if (((unsigned long)k & 3u) == 0u) return *(const device uchar4 *)k;
   return uchar4(k[0], k[1], k[2], k[3]);
@@ -88,8 +84,7 @@ inline uchar2 dsv41_load2(device const uchar *k) {
   return uchar2(k[0], k[1]);
 }
 
-// Four consecutive dims of one key as the scalar decodes them: every value rounded to bf16 exactly, so the
-// mma's bf16 products are the scalar's products. Missing keys decode to zero (their score is NO_SCORE anyway).
+// Four consecutive dims of one key as the scalar decodes them: every value rounded to bf16 exactly.
 inline bfloat4 dsv41_dec4(int enc, device const uchar *ring, device const uchar *chunk, device const uchar *main,
                           uint d, constant Dsv41Attention &p) {
   if (enc < 0) return bfloat4(float4(0.0f));
@@ -175,8 +170,7 @@ inline bfloat dsv41_dense_at_off(int enc, uint off, device const ushort *dense, 
   return as_type<bfloat>(dense[ulong(off) + d]);
 }
 
-// A prompt chunk's rows: 16 heads at a time, 32 keys at a time, out [rows, heads, 512] bf16 over each row's
-// window plus its compressed picks. grid (head groups, rows); one threadgroup of four simdgroups per row.
+// A prompt chunk's rows: 16 heads at a time, 32 keys at a time, out [rows, heads.
 [[kernel]] void dsv41_sparse_nax(device const ushort *q [[buffer(0)]], device const uchar *ring [[buffer(1)]],
                                  device const uchar *chunk [[buffer(2)]], device const uchar *main [[buffer(3)]],
                                  device const int *indices [[buffer(4)]], device const float *sink [[buffer(5)]],
@@ -208,14 +202,11 @@ inline bfloat dsv41_dense_at_off(int enc, uint off, device const ushort *dense, 
   }
   m[0] = m[1] = -1e30f;
   l[0] = l[1] = 0.0f;
-  // A decode layer's whole key scan would run four threadgroups; a split takes a slice of it and the merge
-  // kernel sums the online-softmax parts in split order.
+  // A decode layer's whole key scan would run four threadgroups.
   const uint split = tg.z, per = (count + p.splits - 1) / max(p.splits, 1u);
   const uint j_begin = split * per, j_end = min(count, j_begin + per);
   for (uint j0 = j_begin; j0 < j_end; j0 += BLOCK) {
     // One lane a key: the same values, a thirty-second of the work (every lane used to run all BLOCK steps).
-    // The row offset a key's loads need is resolved here, once, beside the slot -- it used to be recomputed by
-    // every load of every fragment (4,480 times a block).
     if (s == 0 && lane < uint(BLOCK)) {
       const int enc = j0 + lane < count ? dsv41_slot_at(p, row, query, columns, j0 + lane, indices) : -1;
       keyrow[lane] = enc;
@@ -300,8 +291,7 @@ inline bfloat dsv41_dense_at_off(int enc, uint off, device const ushort *dense, 
       for (short c = 0; c < 4; c++) {
         const uint d = uint(d0) + 32u * uint(c) + uint(home.x);
 #ifndef TF_SIMD_FRAGS
-        // The dense pass already rounded every key this window reads, so the values are four loads and not four
-        // packed decodes: same bytes, a thirteenth of the arithmetic.
+        // The dense pass already rounded every key this window reads.
         const bfloat4 a = dsv41_dense4_off(keyrow[16 * kb + home.y], keyoff[16 * kb + home.y], dense, d);
         const bfloat4 b = dsv41_dense4_off(keyrow[16 * kb + short(home.y + 8)], keyoff[16 * kb + short(home.y + 8)], dense, d);
         frag<bfloat> v0(a, b);
@@ -325,7 +315,6 @@ inline bfloat dsv41_dense_at_off(int enc, uint off, device const ushort *dense, 
   }
   if (p.splits > 1) {
     // This split's (max, sum, accumulators) by head group, then split order; a decode window is one row.
-    // Each of the four SIMDgroups holds its own 128-dimensional slice, so the parts are keyed by SIMDgroup too.
     device float *part = parts + ((((ulong(tg.y) * ulong(p.splits) + ulong(split)) * ulong(p.heads / GROUP) + ulong(tg.x)) * 4 + ulong(s)) * 32 + ulong(lane)) * 68;
     part[0] = m[0];
     part[1] = m[1];
@@ -357,8 +346,7 @@ inline bfloat dsv41_dense_at_off(int enc, uint off, device const ushort *dense, 
   }
 }
 
-// The same pass over only the compressed rows a one-row window actually reads: the picks name the positions, so
-// the dense rows keep their position indexing and the sparse kernel is unchanged.
+// The same pass over only the compressed rows a one-row window actually reads: the picks name the positions.
 kernel void dsv41_dense_kv_picked(const device uchar *src [[buffer(0)]], device ushort *dense [[buffer(1)]],
                                  constant DenseKv &d [[buffer(2)]], const device int *picks [[buffer(3)]],
                                  uint2 gid [[thread_position_in_grid]]) {
@@ -378,10 +366,7 @@ kernel void dsv41_dense_kv_picked(const device uchar *src [[buffer(0)]], device 
   *(device bfloat4 *)o = v;
 }
 
-// THE MERGE'S GRID IS FOUR THREADGROUPS. This form gives each threadgroup ONE of the four accumulator chunks: the
-// grid is four times wider (16 threadgroups), each lane reads its own chunk's sixteen floats per split (the same
-// traffic, the same split order, the same per output sums) and the fragment's dim offset is the chunk's own -- so
-// the output is BIT-IDENTICAL.
+// THE MERGE'S GRID IS FOUR THREADGROUPS.
 [[kernel]] void dsv41_sparse_merge_split(device const float *parts [[buffer(0)]], device ushort *out [[buffer(1)]],
                                          device const float *sink [[buffer(2)]], constant Dsv41Attention &p [[buffer(3)]],
                                          uint s [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
