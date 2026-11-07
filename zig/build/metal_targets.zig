@@ -110,6 +110,8 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     engines.addImport("kernel_sources", mods.sources);
     inline for ([_][]const u8{ "inkling2_metal", "inkling2_metal_ref", "inkling2_glue_plan", "inkling2_loop_plan", "inkling2_tree_plan" }) |name|
         engines.addImport(name, mods.engine.import_table.get(name).?);
+    // the served families read the engine version for the pair's identity exchange (`Pair.ready`'s fingerprint)
+    engines.addOptions("build_options", build_options);
     const drama3_lib = drama3_build.metallib(b, metal_std);
     b.getInstallStep().dependOn(&b.addInstallFile(drama3_lib, "lib/drama3.metallib").step);
     const drama3_embed = if (shaders) drama3_lib else no_shaders;
@@ -333,7 +335,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     b.step("test-cli", "The checkpoint CLI's host tests").dependOn(&run_cli_tests.step);
 
     // The core lane, shared-context and Qwen3.8-27B programs and host tests.
-    qwen27_build.targets(b, target, optimize, metal, sources, engine, lanes, mods.qwen27, test_step);
+    qwen27_build.targets(b, target, optimize, metal, sources, engine, lanes, mods.qwen27, test_step, build_options);
     core_checks.targets(b, target, optimize, metal, engine);
     contract_build.metal(b, target, optimize, metal, engine, sources, kimi_bytes, test_step);
     glm_checks.targets(b, target, optimize, metal, engine, sources, test_step);

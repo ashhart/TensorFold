@@ -64,7 +64,7 @@ fn program(b: *std.Build, name: []const u8, about: []const u8, path: []const u8,
 }
 
 /// The core lane, shared-context and 27B programs and host tests; the 27B's module takes `core` from qwen27_core.zig.
-pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal: *std.Build.Module, sources: *std.Build.Module, engine: *std.Build.Module, lanes: *std.Build.Module, s: Shared, test_step: *std.Build.Step) void {
+pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal: *std.Build.Module, sources: *std.Build.Module, engine: *std.Build.Module, lanes: *std.Build.Module, s: Shared, test_step: *std.Build.Step, build_options: *std.Build.Step.Options) void {
     const core_row = b.createModule(.{ .root_source_file = b.path("zig/src/core/row_projection.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources } } });
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = core_row })).step);
     const core_lane = b.createModule(.{ .root_source_file = b.path("zig/src/core/lane_projection.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources } } });
@@ -133,6 +133,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     // memory_controller.zig imports living: the engine's own, so a file belongs to one module in each tool
     const living = engine.import_table.get("living") orelse b.createModule(.{ .root_source_file = b.path("zig/src/living/living.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true });
     const host = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_served.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{ .{ .name = "engine_api", .module = api }, .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "living", .module = living } } });
+    host.addOptions("build_options", build_options);
     const served: []const std.Build.Module.Import = &.{ .{ .name = "tensorfold", .module = engine }, .{ .name = "metal", .module = metal }, .{ .name = "engine_api", .module = api }, .{ .name = "qwen27_served", .module = host } };
     _ = program(b, "tf-qwen27-speed-served", "Build long secondary-slot prompt and shared drafting checks", "zig/tests/qwen27/speed_served.zig", target, false, served);
     _ = program(b, "tf-qwen27-served-check", "Build synthetic CLI versus served-host token check", "zig/tests/qwen27/served.zig", target, false, served);
