@@ -1,5 +1,4 @@
-//! The group's RoCE all-gather (Group.openRoce) against NCCL's byte for byte at any world (NCCL_COMM_ID): every size,
-//! graph replays, 3,000 mixed-size calls, then the time a call of each path. `tf-cuda-test roce-gather <rank> [world]`.
+//! The group's RoCE gather against NCCL's byte for byte (NCCL_COMM_ID): `tf-cuda-test roce-gather <rank> [world]`.
 const std = @import("std");
 const cuda = @import("cuda");
 const check = @import("check.zig");
@@ -12,12 +11,10 @@ const seeds = [_]u64{ 1, 2, 3 };
 const graph_gathers = 4;
 const graph_replays = 64;
 const reps = 2000;
-/// The mixed phase: decode-sized shards (a verify call's gathers are 16 KiB a rank at four ranks, the drafter's up to
-/// 64 KiB) with a few tiny ones between, every call against NCCL's rows. The recipe's GO gate: zero mismatches.
+/// The mixed phase: decode-sized shards (16 to 64 KiB a rank) with a few tiny ones; the GO gate is zero mismatches.
 const mixed_calls = 3000;
 const mixed_sizes = [_]usize{ 16384, 32768, 65536, 16384, 32768, 65536, 4096, 16 };
-/// The recipe's GO gate on time: a 32 KiB-a-rank gather in at most this many microseconds (printed, not failed: the
-/// bytes decide pass or fail, the launcher decides on the time).
+/// The recipe's GO gate on time: a 32 KiB-a-rank gather in at most this many microseconds (printed, not failed).
 const go_us_32k: f64 = 25.0;
 
 /// Rank `rank`'s shard for a case: bytes that differ by rank, size and seed.
@@ -40,7 +37,7 @@ pub fn run(gpu: Gpu, rank: usize, world: usize) !void {
     var g = try cuda.tp_group.Group.open(gpu.d, rank, world);
     defer g.close();
     try g.openRoce(a, gpu.io, gpu.d, s, cap);
-    try check.expect(g.fast != null, "roce-gather: the RoCE path did not come up on every rank (see the warning above)", .{});
+    try check.expect(g.fast != null, "roce-gather: the RoCE path did not come up on every rank (see the warning above; three ranks or more need TF_ROCE=1)", .{});
 
     const most = sizes[std.mem.indexOfMax(usize, &sizes)];
     var mine = try cuda.DeviceBuffer.alloc(gpu.d, most);
@@ -116,8 +113,7 @@ fn replays(gpu: Gpu, g: *cuda.tp_group.Group, s: cuda.Stream, rank: usize, world
     check.pass("roce-gather rank {d} of {d}: a captured graph of {d} gathers of {d} bytes replayed {d} times, each replay's rows its own", .{ rank, world, graph_gathers, n, graph_replays });
 }
 
-/// `mixed_calls` gathers of cycling decode sizes, each by the group (RoCE) and by NCCL, every call's rows compared to
-/// the expected shards and to each other; the count of calls that differed (the GO gate wants zero).
+/// `mixed_calls` gathers of cycling decode sizes by RoCE and by NCCL against the shards; the count that differed.
 fn mixed(gpu: Gpu, g: *cuda.tp_group.Group, s: cuda.Stream, rank: usize, world: usize, mine: cuda.DeviceBuffer, by_group: cuda.DeviceBuffer, by_nccl: cuda.DeviceBuffer, host: []u8, got: []u8, want: []u8) !usize {
     _ = gpu;
     var mismatches: usize = 0;
@@ -146,8 +142,7 @@ fn mixed(gpu: Gpu, g: *cuda.tp_group.Group, s: cuda.Stream, rank: usize, world: 
     return mismatches;
 }
 
-/// Median microseconds a call of `reps` back-to-back gathers, RoCE against NCCL, at decode-sized shards; the RoCE
-/// figure at 32 KiB a rank.
+/// Median microseconds a call of `reps` back-to-back gathers, RoCE against NCCL; the RoCE figure at 32 KiB a rank.
 fn timing(gpu: Gpu, g: *cuda.tp_group.Group, s: cuda.Stream, rank: usize, world: usize) !f64 {
     var t0 = try cuda.Event.init(gpu.d, true);
     defer t0.deinit();

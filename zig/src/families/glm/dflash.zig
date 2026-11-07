@@ -45,19 +45,16 @@ pub fn confidence() f64 {
     return std.fmt.parseFloat(f64, std.mem.span(v)) catch 0.7;
 }
 
-/// The drafter MLP across the ranks: gate and up by rows, down by K, each rank `ff` of FF wide (rank r's slice at
-/// r * ff), the fp32 partials of down gathered and summed in rank order (df_sumn), so the sum is the same on every
-/// rank and at every world. Any world that divides FF into 256-aligned shares splits (2: 6144, 3: 4096, 4: 3072, 6,
-/// 8, 12, 16); one rank, or a world that does not, runs the MLP whole on every rank. Two ranks split as before.
+/// The drafter MLP split: two ranks as before; three or more only with `wide` (TF_ROCE=1) and 256-aligned shares of FF.
 pub const MlpSplit = struct { split: bool, ff: usize };
-pub fn mlpSplit(world: usize) MlpSplit {
-    if (world >= 2 and FF % world == 0 and (FF / world) % 256 == 0) return .{ .split = true, .ff = FF / world };
-    return .{ .split = false, .ff = FF };
+pub fn mlpSplit(world: usize, wide: bool) MlpSplit {
+    if (world < 2 or (world > 2 and !wide) or FF % world != 0 or (FF / world) % 256 != 0) return .{ .split = false, .ff = FF };
+    return .{ .split = true, .ff = FF / world };
 }
 
 /// Device bytes of the loader's raw scratch: a 4-bit linear's words, scales and biases, for the largest at `world`.
-pub fn rawBytes(bits: u8, world: usize) usize {
-    const ff = mlpSplit(world).ff; // the MLP width a rank holds, as dflash_load splits it
+pub fn rawBytes(bits: u8, world: usize, wide: bool) usize {
+    const ff = mlpSplit(world, wide).ff; // the MLP width a rank holds, as dflash_load splits it
     const nk: usize = @max(5 * D * D, 2 * ff * D); // fc, or gate and up stacked
     return if (bits == 4) nk / 2 + 2 * nk / 32 + 1024 else 256;
 }

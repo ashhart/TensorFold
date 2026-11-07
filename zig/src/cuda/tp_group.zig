@@ -1,5 +1,4 @@
-//! A tensor-parallel group over NCCL (NCCL_COMM_ID; rows in rank order); ranks that all reach each other by RoCE add
-//! small gathers as one-shot RDMA writes (roce.zig).
+//! A tensor-parallel group over NCCL (NCCL_COMM_ID; rows in rank order); small gathers by RoCE where asked (roce.zig).
 const std = @import("std");
 const nccl = @import("nccl.zig");
 const driver = @import("driver.zig");
@@ -71,17 +70,14 @@ pub const Group = struct {
         if (!g.aborted.swap(true, .acq_rel)) _ = g.lib.api.ncclCommAbort(g.comm);
     }
 
-    /// Gathers up to `max_bytes` a rank go by RoCE writes if every rank brings it up; else NCCL keeps them. Every rank
-    /// must reach every other by RoCE on the same HCA index (two on a cable, or any number on a switch): a connect
-    /// probe finds a fabric where one does not (a ring of four without a switch) and leaves every rank on NCCL. More
-    /// ranks than `roce.max_world` keep NCCL too.
+    /// Gathers up to `max_bytes` a rank go by RoCE writes if every rank asks (roce.wanted) and reaches all; else NCCL.
     pub fn openRoce(g: *Group, gpa: std.mem.Allocator, io: std.Io, d: *const driver.Driver, s: Stream, max_bytes: usize) !void {
         if (g.world < 2 or g.fast != null) return;
         if (g.world > roce.max_world) {
             if (g.rank == 0) std.log.info("RoCE all-gather: {d} ranks; this path carries at most {d}, NCCL carries every gather", .{ g.world, roce.max_world });
             return;
         }
-        g.fast = try roce.Gather.init(gpa, io, d, g, s, roce.wanted(), max_bytes);
+        g.fast = try roce.Gather.init(gpa, io, d, g, s, roce.wanted(g.world), max_bytes);
     }
 
     /// A failed RoCE gather's error (its rows hold nothing valid): call it after a synchronize that reads a gather.

@@ -301,9 +301,8 @@ fn finishRank(a: OpenArgs) !Loaded {
         if (!o.drafts) return error.DrafterNeedsDrafts;
         own.e.drafter = try dflash_load.load(gpa, io, own.e, dd, p.rank, p.world, o.drafter_bits);
     }
-    // the group's own RoCE path at any world (every rank brings it up or none does), unless TF_GLM_ROCE_MULTI=1 names
-    // fabric/tp's wire for these gathers: a set wire is not doubled by one beneath it
-    if (!set.roce_multi) try own.group.openRoce(gpa, io, ctx.d, own.e.stream, roce_bytes);
+    // the group's own RoCE path (every rank or none), unless TF_GLM_ROCE_MULTI=1 lends fabric/tp's wire
+    if (ranks.ownRoce(set, p.world)) try own.group.openRoce(gpa, io, ctx.d, own.e.stream, roce_bytes);
     errdefer if (own.group.fast) |f| f.deinit();
     try @import("cuda_roce_multi.zig").open(gpa, io, ctx.d, &own.group, set.roce_multi); // three ranks or more, likewise
     errdefer if (own.group.multi) |m| m.deinit(m.ctx);

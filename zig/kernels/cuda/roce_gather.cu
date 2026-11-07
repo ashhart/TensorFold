@@ -1,7 +1,4 @@
 // One-shot RoCE all-gather after b12x (github.com/local-inference-lab/b12x, Apache-2.0): docs/roce-gather.md.
-// Written for two ranks; any world whose ranks all reach each other: a receive slot and a flag a peer an HCA, each
-// peer's stripes copied into the output slot of its rank. At world 2 every address and every byte is the two-rank
-// kernel's.
 
 #include <stdint.h>
 
@@ -49,9 +46,7 @@ __device__ __forceinline__ void fence_gpu() { asm volatile("fence.sc.gpu;" ::: "
 
 }  // namespace
 
-// in: this rank's shard (packs of 16 bytes); out: every rank's shard in rank order (world of them). klass: log2(gridDim.x).
-// recv: [slot][world - 1][slot_bytes], a peer's shard at its number in this rank's peer list (the ranks without this
-// one, in order); flags: [slot][world - 1][n_hca] sequences, FLAG_STRIDE apart.
+// in: this rank's shard (16-byte packs); out: every rank's in rank order; recv and flags: by peer number.
 extern "C" __global__ void __launch_bounds__(512) roce_gather(
     const uint4* __restrict__ in, uint4* __restrict__ out, int packs, int rank, char* recv, char* flags, char* send,
     uint32_t* ctrl, long long slot_bytes, uint32_t* counters, int klass, uint32_t spin_limit, int n_hca, int world) {

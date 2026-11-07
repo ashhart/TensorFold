@@ -144,7 +144,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, e: anytype, dir: []const u8, ran
     var ents = std.StringHashMap(Ent).init(gpa);
     defer ents.deinit();
     try addEntries(names.allocator(), text, size - 8 - hlen, &ents);
-    const mlp = df.mlpSplit(world); // a world that divides FF splits gate and up by rows and down by K; another loads them whole
+    const mlp = df.mlpSplit(world, e.settings.roce_wide); // the MLP split across the ranks, or whole
     const split = mlp.split;
     const ff = mlp.ff;
     const small: u64 = 6 * 4096 * 2 + 2 * 128 * 2 + 2 * 2 * 2 * D * 2 + 16 * 256;
@@ -155,7 +155,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, e: anytype, dir: []const u8, ran
     errdefer wbuf.free();
     var tmp = try cuda.DeviceBuffer.alloc(d, 2 * FF * D * 2); // the largest linear as stored
     defer tmp.free();
-    var raw = try cuda.DeviceBuffer.alloc(d, df.rawBytes(bits, world));
+    var raw = try cuda.DeviceBuffer.alloc(d, df.rawBytes(bits, world, e.settings.roce_wide));
     defer raw.free();
     var module = try cuda.Module.load(d, cuda.kernels.glm_dflash);
     errdefer module.unload();

@@ -260,8 +260,7 @@ extern "C" __global__ void df_add(__nv_bfloat16* __restrict__ x, const __nv_bflo
         x[r * D + c] = tobf(bf(x[r * D + c]) + bf(y[r * D + c]));
 }
 
-// The split down's gathered fp32 partials g[world][R][D] summed in rank order into bf16 out[R][D]: rank 0's, plus
-// rank 1's, plus ... (at world 2 the one add df_sum2 did), so every rank holds the same sum. grid (R, D / 1024).
+// The split down's fp32 partials g[world][R][D] summed in rank order into bf16 out[R][D] (grid (R, D / 1024)).
 extern "C" __global__ void df_sumn(const float* __restrict__ g, __nv_bfloat16* __restrict__ out, int R, int world) {
     const long long r = blockIdx.x;
     for (int c = blockIdx.y * 1024 + threadIdx.x; c < (blockIdx.y + 1) * 1024; c += blockDim.x) {
