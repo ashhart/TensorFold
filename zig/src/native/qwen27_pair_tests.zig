@@ -111,4 +111,9 @@ test "a pair's ready refuses a Mac that differs on the facts its bits come from"
         try std.testing.expect(std.mem.indexOf(u8, why, name) != null);
         try std.testing.expect(std.mem.indexOf(u8, why, "match neither Mac alone") != null);
     }
+    // a uniform tag 0 travels the wire as 1 (ready cannot signal a 0); both sides normalize
+    const uniform: tf.pair_rows.Fingerprint = .{ .version = 7, .chip = 4, .checkpoint = 0xA11CE, .format = 0 };
+    const decoded: tf.pair_rows.Fingerprint = .{ .version = 7, .chip = 4, .checkpoint = 0xA11CE, .format = 1 };
+    try std.testing.expectEqual(@as(?[]const u8, null), tf.pair_rows.fingerprintProblem(std.testing.allocator, uniform, decoded));
+    try std.testing.expectEqual(@as(?[]const u8, null), tf.pair_rows.fingerprintProblem(std.testing.allocator, decoded, uniform));
 }
