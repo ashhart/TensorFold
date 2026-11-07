@@ -6,6 +6,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Docs: the optimization ledger's cells for #2011, #2162 and #2282 say they landed (#2431).
 
+- Qwen3.8 on CUDA runs a dense MLP's NVFP4 prompt gate and up projections in one launch, on by default on GB10 and the RTX 5090 at 2048 prompt rows or more; replies are byte-identical, the 5090's cold prefill comes out a few percent quicker, and the served A/B on GB10 holds level with main at 2K to 32K on the 27B (#1540).
+
 - Lane host: a stream paid for at load (`free_streams`, the engine's own sequence) is a standing lease in the KV ledger, so a family that reserves per request admits as many full-window requests as the window plan, not one fewer, and its prompt cache sits beside the same streams; the job on it promises only what it adds, and the lease is not reported at stop. No family on main reserves per request yet, so every current load is unchanged (#1943 step 2). Thanks to @laudney for finding the gap.
 
 - Developers: `test-glm-snapshots-host` runs under `test-cuda-host`, as GLM's other host steps do, so CI builds it and runs its 21 tests; its host-cache test sets `TF_GLM_HOST_CACHE` through `sys.env`, so it links on Windows too (#2426, refs #2031). Thanks to @Bizuayeu.
