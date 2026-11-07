@@ -15,6 +15,24 @@ pub fn refusal(drafts: ?u32, confidence: ?f64, drafter: bool, target: bool) ?[]c
     return null;
 }
 
+/// Hashes the disk identity's mode words; the head's word joins only when it is on, as main keys the rest.
+pub fn identityWords(w: *std.hash.Wyhash, words: []const u64, head: bool) void {
+    w.update(std.mem.sliceAsBytes(words));
+    if (head) w.update(std.mem.asBytes(&@as(u64, 1)));
+}
+
+test "qwen27 MTP flags: a server without the head keys disk states as main does, and one with it does not" {
+    const words = [_]u64{ 0x5eed, 1, 0, 1, 0x9e37 };
+    var main = std.hash.Wyhash.init(0x7132);
+    main.update(std.mem.sliceAsBytes(&words));
+    var off = std.hash.Wyhash.init(0x7132);
+    identityWords(&off, &words, false);
+    var on = std.hash.Wyhash.init(0x7132);
+    identityWords(&on, &words, true);
+    try std.testing.expectEqual(main.final(), off.final());
+    try std.testing.expect(main.final() != on.final());
+}
+
 test "qwen27 MTP flags: the 27B takes them, each misuse is refused by name, and no flag changes nothing" {
     try std.testing.expect(refusal(null, null, true, false) == null);
     try std.testing.expect(refusal(3, null, false, true) == null);
