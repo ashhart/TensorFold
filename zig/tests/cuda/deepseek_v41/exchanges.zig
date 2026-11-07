@@ -13,6 +13,9 @@ const max = tp.device.max_ranks;
 const D = 5120; // config.zig's hidden
 const vocab = 1280; // ten 128-row blocks: 4/3/3 at world 3
 const n = 7;
+// every share edge at worlds 2, 3 and 4 (640; 512, 896; 384, 768, 1024), both ends, and one at random
+const edges = [_]i64{ 0, 383, 384, 511, 512, 639, 640, 767, 768, 895, 896, 1023, 1024, vocab - 1 };
+const ne = edges.len + 1;
 const worlds = [_]u32{ 1, 2, 3, 4 };
 
 /// partition.zig's `share`: whole 128-row blocks, one more to each of the first ranks.
@@ -51,6 +54,7 @@ const Bufs = struct {
     len: usize = 0,
 
     fn keep(b: *Bufs, buf: cuda.DeviceBuffer) cuda.DeviceBuffer {
+        std.debug.assert(b.len < b.list.len);
         b.list[b.len] = buf;
         b.len += 1;
         return buf;
@@ -84,13 +88,13 @@ const Embed = struct {
         defer b.deinit();
         const tab = try b.up(bytes(e.table[part[0] * D ..][0 .. part[1] * D]));
         const ids = try b.up(bytes(e.ids));
-        const rows = (try b.zeros(n * D * 2)).ptr;
-        const recv = (try b.zeros(W * n * D * 2)).ptr;
-        const out = try b.zeros(n * 4 * D * 2);
+        const rows = (try b.zeros(ne * D * 2)).ptr;
+        const recv = (try b.zeros(W * ne * D * 2)).ptr;
+        const out = try b.zeros(ne * 4 * D * 2);
         const o = e.k.others(stream);
-        try o.embedSend(ids, n, tab, @intCast(part[0]), part[1], D, rows);
-        try c.allGather(rows, recv, n * D, .bf16, stream.handle);
-        try o.embedSum(recv, W, n, D, out.ptr);
+        try o.embedSend(ids, ne, tab, @intCast(part[0]), part[1], D, rows);
+        try c.allGather(rows, recv, ne * D, .bf16, stream.handle);
+        try o.embedSum(recv, W, ne, D, out.ptr);
         try stream.synchronize();
         try out.download(0, e.got[rank]);
     }
@@ -101,21 +105,20 @@ fn embed(gpu: Gpu, k: *const dsv41.Kernels, rnd: std.Random) !void {
     const table = try gpu.gpa.alloc(u16, vocab * D);
     defer gpu.gpa.free(table);
     fill(rnd, table, 2.0);
-    // both ends of every world's shares, and two at random
-    const ids = [n]i64{ 0, 511, 512, 895, 896, @intCast(rnd.uintLessThan(u32, vocab)), vocab - 1 };
-    const want = try gpu.gpa.alloc(u16, n * 4 * D);
+    const ids = edges ++ [_]i64{@intCast(rnd.uintLessThan(u32, vocab))};
+    const want = try gpu.gpa.alloc(u16, ne * 4 * D);
     defer gpu.gpa.free(want);
     for (ids, 0..) |id, i| for (0..4) |s| @memcpy(want[(i * 4 + s) * D ..][0..D], table[@as(usize, @intCast(id)) * D ..][0..D]);
     var e: Embed = .{ .gpu = gpu, .k = k, .table = table, .ids = &ids, .got = undefined };
-    const store = try gpu.gpa.alloc(u8, max * n * 4 * D * 2);
+    const store = try gpu.gpa.alloc(u8, max * ne * 4 * D * 2);
     defer gpu.gpa.free(store);
-    for (&e.got, 0..) |*g, r| g.* = store[r * n * 4 * D * 2 ..][0 .. n * 4 * D * 2];
+    for (&e.got, 0..) |*g, r| g.* = store[r * ne * 4 * D * 2 ..][0 .. ne * 4 * D * 2];
     var what: [64]u8 = undefined;
     for (worlds) |w| {
         try tp.device.run(gpu.ctx, std.heap.smp_allocator, w, .{}, &e, Embed.go);
         for (0..w) |r| try check.sameBytes(try std.fmt.bufPrint(&what, "embed world {d} rank {d}", .{ w, r }), e.got[r], bytes(want));
     }
-    check.pass("BITEXACT exchanges embed: {d} ids over vocab {d} at worlds 1-4 (4/3/3 at 3) == each id's row x4", .{ n, vocab });
+    check.pass("BITEXACT exchanges embed: {d} ids, every share edge, over vocab {d} at worlds 1-4 (4/3/3 at 3) == each row x4", .{ ne, vocab });
 }
 
 const Cols = struct {
@@ -244,7 +247,7 @@ const Fold = struct {
     }
 };
 
-/// Worlds 2-4 against world 1 holding the sum: partials in sixteenths below 16 keep every rank-order fp32 sum exact.
+/// Worlds 2-4 against world 1 holding the sum: multiples of 1/16 under 16 in size are exact in bf16 and in fp32 sums.
 fn fold(gpu: Gpu, k: *const dsv41.Kernels, rnd: std.Random, pf: bool, R: usize) !void {
     const gpa = gpu.gpa;
     const x = try gpa.alloc(u16, R * 4 * D);
