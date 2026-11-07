@@ -33,6 +33,7 @@ const columns_k = @import("contract_columns.zig");
 const vision_k = @import("contract_vision.zig");
 const full_k = @import("contract_vision_attention.zig");
 const text_k = @import("contract_dense_text.zig");
+const sparse_k = @import("contract_sparse_lanes.zig");
 
 const g = core.contract.gates;
 
@@ -298,6 +299,9 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     for (&text, std.enums.values(text_k.Which)) |*v, w| v.* = .init(a, &r, s, &l, w);
     defer for (&text) |*v| v.deinit();
     for (&text) |*v| try kernels.append(a, v.kernel());
+    var sparse = sparse_k.SparseLanes.init(a, &r, s, &l);
+    defer sparse.deinit();
+    try kernels.append(a, sparse.kernel());
     var t: g.Tally = .{};
     const t0 = ms(io);
     try g.runAll(a, kernels.items, 0x6b63, &t);

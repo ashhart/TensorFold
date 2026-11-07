@@ -113,6 +113,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Internal: 15 more lean findings fixed in the CLI, cluster and CUDA comments, with no change in behaviour (#2320).
 
 - Internal: 15 more lean findings fixed in the Metal kernels' comments, with no change in behaviour (#2318).
+- Qwen3.8-Flash-Next on HIP fills prompts faster: its sparse attention runs a new kernel with the same sums as before (a lane holds a key and several heads, keys and values staged in the cache type), so replies are unchanged. On a Radeon 8060S (gfx1151) the kernel takes a fifth of the time and cold prompts finish 35 to 40% sooner. (#1877)
 
 - Kept prompt states: a state saved to disk is reused only by the same build and the same checkpoint files, so a rewritten checkpoint or a new build starts cold instead of reusing an old state; the first long prompt after an upgrade prefills again (#2163, #2131).
 

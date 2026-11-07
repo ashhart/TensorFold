@@ -16,6 +16,7 @@ pub const all = join: {
 
 test "the HIP records stay main's; the family lists only regroup GLM-OCR's and the joint schema's" {
     const every = @import("hip_records.zig").records;
-    try std.testing.expectEqual(@as(usize, 197), every.len); // main's records, GLM-OCR's 12 and the joint schema's 10 among them
-    try std.testing.expectEqual(@as(usize, 175), every.len - all.len);
+    // main's records: GLM-OCR's 12 and the joint schema's 10 are in the lists, the sparse lanes' two are not
+    try std.testing.expectEqual(@as(usize, 199), every.len);
+    try std.testing.expectEqual(@as(usize, 177), every.len - all.len);
 }
