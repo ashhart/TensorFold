@@ -1,0 +1,75 @@
+// Preserve the omitted contract, precision, and host-interface facts from the original comment.
+#version 460
+
+
+#ifdef USE_FP16
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#define STORAGE_TYPE float16_t
+#define LOAD_VALUE(x) float(x)
+#define STORE_VALUE(f) STORAGE_TYPE(f)
+#elif defined(USE_BF16)
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+#define STORAGE_TYPE uint16_t
+#define LOAD_VALUE(x) uintBitsToFloat(uint(x) << 16u)
+uint16_t bf16_store(float value) {
+  uint bits = floatBitsToUint(value);
+  if (isnan(value)) {
+    return uint16_t((bits >> 16) | 0x40u);
+  }
+  return uint16_t((bits + 0x7fffu + ((bits >> 16) & 1u)) >> 16);
+}
+#define STORE_VALUE(f) bf16_store(f)
+#else
+#define STORAGE_TYPE float
+#define LOAD_VALUE(x) float(x)
+#define STORE_VALUE(f) STORAGE_TYPE(f)
+#endif
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer InputX {
+  STORAGE_TYPE values[];
+} input_x;
+layout(set = 0, binding = 1, std430) readonly buffer Weight {
+  STORAGE_TYPE values[];
+} weight;
+layout(set = 0, binding = 2, std430) writeonly buffer Output {
+  STORAGE_TYPE values[];
+} output_data;
+
+layout(push_constant) uniform Params {
+  uint count;
+  uint operation;
+  uint lhs_size;
+  uint rhs_size;
+  uint reduce_size;
+  uint output_size;
+  uint lhs_offset;
+  uint rhs_offset;
+  uint output_offset;
+} params;
+
+void main() {
+  const uint channels = params.reduce_size;
+  const uint taps = params.operation;
+  const uint l_in = params.lhs_size;
+  const uint l_out = params.rhs_size;
+  uint stride_threads = gl_NumWorkGroups.x * 256u;
+  for (uint index = gl_GlobalInvocationID.x; index < params.count;
+       index += stride_threads) {
+    uint channel = index % channels;
+    uint row = index / channels;
+    uint t = row % l_out;
+    uint batch = row / l_out;
+    uint in_base = params.lhs_offset + (batch * l_in + t) * channels + channel;
+    uint w_base = params.rhs_offset + channel * taps;
+    float accumulator = 0.0;
+    for (uint k = 0u; k < taps; ++k) {
+      accumulator += LOAD_VALUE(input_x.values[in_base + k * channels]) *
+          LOAD_VALUE(weight.values[w_base + k]);
+    }
+    output_data.values[params.output_offset + index] = STORE_VALUE(accumulator);
+  }
+}
