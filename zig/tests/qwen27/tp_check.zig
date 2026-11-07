@@ -4,6 +4,7 @@ const q = @import("qwen27");
 const mtl = @import("metal");
 const pair = @import("core").pair;
 const rep = @import("tp_report.zig");
+const max_planes = q.taps.max_planes;
 
 const Runner = q.decode_round.Runner;
 const Session = q.session.Session;
@@ -31,10 +32,10 @@ var dump = false;
 /// Feed the prompt through `decodeChunk` in `chunk`-row rounds, not `prefill`'s prompt kernels (`--decode-prompt`).
 var decode_prompt = false;
 /// Five layers whose post-block residuals the tap planes keep, for stage 2 divergence localisation (`--taps`).
-var tap_ids: ?[5]usize = null;
+var tap_ids: ?[max_planes]usize = null;
 /// `--taps 0,1,2,3,4`: five layer indices, ascending, whose post-block residuals stage 2 keeps for comparison.
-fn readTaps(text: []const u8) ![5]usize {
-    var out: [5]usize = undefined;
+fn readTaps(text: []const u8) ![max_planes]usize {
+    var out: [max_planes]usize = undefined;
     var it = std.mem.tokenizeScalar(u8, text, ',');
     var n: usize = 0;
     while (it.next()) |token| {
@@ -65,7 +66,7 @@ const Local = struct {
     logits: [][32]u8,
     state: [32]u8,
     /// Post-block residuals of the prompt round at `tap_ids`, hashed on this side's own hidden state.
-    taps: [5][32]u8 = undefined,
+    taps: [8][32]u8 = undefined,
     /// `MTLDevice.currentAllocatedSize` with this one model resident (the engine's own memory accounting).
     resident: u64,
 };
@@ -124,7 +125,7 @@ const Side = struct {
     whole: ?[]u8 = null,
     state: [32]u8 = undefined,
     /// Post-block residuals of the prompt round at `tap_ids`, hashed on this rank's own hidden state.
-    taps: [5][32]u8 = undefined,
+    taps: [8][32]u8 = undefined,
     err: ?anyerror = null,
 
     fn open(s: *Side, a: std.mem.Allocator, io: std.Io, dir: []const u8, mode: q.config.Mode, bytes: usize) !void {
