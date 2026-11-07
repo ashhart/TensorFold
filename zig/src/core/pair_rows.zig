@@ -25,14 +25,21 @@ pub const Fingerprint = struct {
     format: u64 = 0,
 };
 
+/// The wire's encoding: ready cannot signal a 0, so a fact travels as @max(w,1); the comparison normalizes both sides.
+fn wireWord(w: u64) u64 {
+    return @max(w, 1);
+}
+
 /// A fingerprint fact's mismatch: names the fact and both sides' values, so the restart message says what differed.
 pub fn fingerprintProblem(a: std.mem.Allocator, mine: Fingerprint, peer: Fingerprint) ?[]const u8 {
     const facts = .{ .{ "engine version", "version" }, .{ "GPU family", "chip" }, .{ "checkpoint", "checkpoint" }, .{ "weight format", "format" } };
     inline for (facts) |f| {
         const name = f[0];
         const field = f[1];
-        if (@field(mine, field) != @field(peer, field))
-            return std.fmt.allocPrint(a, "the pair's Macs do not match on the {s} ({x} against {x}): the bits come from the {s}," ++ " so the pair would serve tokens that match neither Mac alone; run the same build, checkpoint and format on both ranks", .{ name, @field(mine, field), @field(peer, field), name }) catch null;
+        const my = wireWord(@field(mine, field));
+        const their = wireWord(@field(peer, field));
+        if (my != their)
+            return std.fmt.allocPrint(a, "the pair's Macs do not match on the {s} ({x} against {x}): the bits come from the {s}," ++ " so the pair would serve tokens that match neither Mac alone; run the same build, checkpoint and format on both ranks", .{ name, my, their, name }) catch null;
     }
     return null;
 }
@@ -451,10 +458,14 @@ pub const Pair = struct {
         var x: u32 = 1;
         // Ticks after which this link is no longer cold: set at the first relay, when both ranks have just loaded.
         var cold_until: u64 = 0;
+        const trace = platform.c.getenv("TF_Q27_PAIR_TRACE") != null;
+        var tr: Trace = .{};
         while (!p.stop.load(.acquire)) {
             p.seam_x.store(x, .release);
             // 1. The GPU must reach the seam: sleep while idle, spin once published, fail if it never arrives.
             var armed: u64 = 0;
+            var t0: u64 = 0;
+            if (trace) t0 = ticksNow();
             while (p.posted.value() < @as(u64, x)) {
                 if (p.stop.load(.acquire)) return;
                 if (!reached(p.queued.load(.acquire), x)) {
@@ -465,12 +476,15 @@ pub const Pair = struct {
                 if (ticksNow() -% armed > post_timeout_ms * ticks_per_ms) return p.fail(x, "this Mac's GPU never reached the seam", peer_timeout_ms);
                 std.atomic.spinLoopHint();
             }
+            if (trace) tr.post_wait += ticksNow() -% t0;
             // 2. Relay: part to the peer's recv slot, arrival flag in the same MCDMA write, data and count together.
             const at = x % JOBS;
+            if (trace) t0 = ticksNow();
             p.ep.writeSignalFrom(p.peer, p.l.send(x), p.l.recv(x), p.bytes[at], p.l.flags() + FLAG, x) catch |err| {
                 std.log.err("pair rank {d}: seam {d} relay write failed: {s}", .{ p.rank, x, @errorName(err) });
                 return p.fail(x, "the relay write failed", peer_timeout_ms);
             };
+            if (trace) tr.submit += ticksNow() -% t0;
             // 3. The peer's relay puts its part in our slot; its flag is proof; the cold bound, then the steady one.
             if (x == 1) cold_until = ticksNow() +% cold_window_ms * ticks_per_ms;
             const cold = cold_until != 0 and ticksNow() < cold_until;
@@ -481,11 +495,44 @@ pub const Pair = struct {
                 if (ticksNow() -% t1 > budget_ms * ticks_per_ms) return p.fail(x, "the peer's part never landed", budget_ms);
                 std.atomic.spinLoopHint();
             }
+            if (trace) {
+                tr.peer_wait += ticksNow() -% t1;
+                tr.n += 1;
+                if (tr.n % Trace.trace_every == 0) tr.log(p.rank);
+            }
             // 4. Release the GPU: both parts are in; the event's wait is the acquire that makes them visible.
             @atomicStore(u32, p.word32(p.l.sync() + POSTED * 4), x, .release);
             p.landed.set(x);
             x +%= 1;
         }
+    }
+};
+
+/// Host-side atomic-step timings for TF_Q27_PAIR_TRACE: where a relayed seam's wall time goes.
+const Trace = struct {
+    n: u64 = 0,
+    /// Step 1: from the loop top to posted(x) — encode/commit lag while the seam is queued.
+    post_wait: u64 = 0,
+    /// Step 2: the writeSignalFrom call itself (kext submit, no flush).
+    submit: u64 = 0,
+    /// Step 3: from submit to the peer's flag word reaching x (the peer land RTT).
+    peer_wait: u64 = 0,
+
+    const trace_every = 2048;
+
+    fn log(t: *Trace, rank: u32) void {
+        const n: u64 = trace_every;
+        const us = struct {
+            fn f(ticks: u64, count: u64) u64 {
+                return if (count == 0) 0 else ticks * 1000 / (count * ticks_per_ms);
+            }
+        }.f;
+        std.log.info("pair rank {d}: trace n={d} post_wait={d}us submit={d}us peer_wait={d}us sum={d}us/exchange", .{
+            rank, t.n, us(t.post_wait, n), us(t.submit, n), us(t.peer_wait, n), us(t.post_wait + t.submit + t.peer_wait, n),
+        });
+        t.post_wait = 0;
+        t.submit = 0;
+        t.peer_wait = 0;
     }
 };
 
