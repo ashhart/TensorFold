@@ -1,4 +1,4 @@
-//! The contract's family sets: pocket, MiniMax-M3, MOSS-Image, Flash Next NVFP4, grouped affine-4, Flash Next, EXL3.
+//! The CUDA contract's family sets and Clef's joint schema head.
 const std = @import("std");
 const cuda = @import("cuda");
 const check = @import("check.zig");
@@ -19,6 +19,7 @@ pub const Sets = struct {
     exl3: *@import("contract_exl3.zig").Set,
     shared_down: *SharedDown,
     prompt: *Prompt,
+    joint_schema: *@import("contract_joint_schema.zig").Set,
 
     /// Each set's kernels appended to `list`, in this order.
     pub fn init(gpu: check.Gpu, s: cuda.Stream, a: std.mem.Allocator, list: *std.ArrayList(g.Kernel), affine4: *cuda.qlinear.Affine4Kernels, cap: u32) !Sets {
@@ -53,6 +54,7 @@ pub const Sets = struct {
         prompt.* = Prompt.init(gpu, s, prompt_lane);
         errdefer prompt.deinit();
         try prompt.append(cap, a, list);
+        const joint_schema = try @import("contract_joint_schema.zig").Set.init(gpu, s, a, list);
         return .{
             .gpa = gpu.gpa,
             .pocket = pocket,
@@ -64,10 +66,12 @@ pub const Sets = struct {
             .exl3 = exl3,
             .shared_down = shared_down,
             .prompt = prompt,
+            .joint_schema = joint_schema,
         };
     }
 
     pub fn deinit(sets: Sets) void {
+        sets.joint_schema.deinit();
         sets.prompt.deinit();
         sets.gpa.destroy(sets.prompt);
         sets.shared_down.deinit();
