@@ -105,20 +105,22 @@ hyper-connection boundary.
 
 ## The numbers
 
-The per-operator reference tests run every stage against an FP64 ideal at three sides —
-kernel, FP32 source contract, FP64 ideal — and assert rounding level. The whole-model
-picture is sensitivity-dominated, and the floor-relative band is not stable across the
-fixed release-quality window. On the full 128-token window (`release-quality-128.json` in
-the reference tests) the FP32 contract chain reads 0.1622 NRMS against FP64 and the engine
-0.2671, a ratio of 1.647x: the band fails (1.05 clears, 1.10 reviews). The 16-token blocks
-after the first read 1.66-2.45x and the 32-token prefix 1.180x; only the first 16 tokens
-clear, at 1.006x (floor 0.4074, engine 0.4100), because that block's floor is unusually
-noisy. The ratios are consistent with the engine's bf16 dequant class, not an isolated
-cause. The 1% absolute figure is a reported trip-wire, not the arbiter. The band is a
-fixed-history receipt, and the floor manifest binds the window, the exact FP32 logits and
-the checkpoint metadata identity (config, index, present shard headers, token map). The
-128-token window is the qualification measurement this record reports; the 16-token window
-is fixed in the tree as `release-quality-16.json`. The streamed run's execution reads also
+The per-operator reference tests run every stage against an FP64 ideal at three sides — kernel, FP32
+source contract, FP64 ideal — and assert rounding level. The whole-model picture is
+sensitivity-dominated, and the floor-relative band is not stable across the fixed release-quality
+window. On the full 128-token window (`release-quality-128.json` in the reference tests) the FP32
+contract chain reads 0.1622 NRMS against FP64 and the engine 0.2671, a ratio of 1.647x: the band
+fails (1.05 clears, 1.10 reviews). The 16-token blocks after the first read 1.66-2.45x and the
+32-token prefix 1.180x; only the first 16 tokens clear, at 1.006x (floor 0.4074, engine 0.4100),
+because that block's floor is unusually noisy. The floor is not a rounding-level bound: on the first
+token, with no cache history, the FP32 contract and FP64 ideal already differ by 0.519 NRMS, while
+the engine differs by 0.517 from the ideal and 0.510 from the contract. The ratios therefore measure
+the model's whole-model sensitivity to any arithmetic change, not an engine-only bf16 dequant class.
+The 1% absolute figure is a reported trip-wire, not the arbiter. The band is a fixed-history
+receipt, and the floor manifest binds the window, the exact FP32 logits and the checkpoint metadata
+identity (config, index, present shard headers, token map). The 128-token window is the
+qualification measurement this record reports; the 16-token window is fixed in the tree as
+`release-quality-16.json`. The streamed run's execution reads also
 fail the zero-disk-read residency clause (20 KB on the FP32 half, 67.8 MB on the FP64
 half); the receipt gives totals, not a stream/weights split. A cold rerun of the 16-token
 window on the same tree reads 8.3 MB and fails that clause too, so the earlier 0-read
