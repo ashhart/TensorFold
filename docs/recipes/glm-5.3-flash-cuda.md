@@ -66,8 +66,9 @@ left after a 12.2 GiB reserve` and a 5.8 GiB prompt cache
   the live half and writes the other, every chunk and every decode window flips them, and a keep waits for an empty
   window, so nothing reads the dead half after a restore, which leaves the slot's own copy untouched. A kept state is
   71 MB a rank smaller on GLM-5.3-Flash at TP=2 (34 KDA layers, 32 heads a rank, fp32 128x128 a head) with replies
-  unchanged. Checked on two GB10 at TP=2 with the EXL3 4bpw checkpoint, drafts off and on
-  (`docs/receipts/glm-kv-live-half-d3e06e76/`).
+  unchanged. Checked on two GB10 at TP=2 with a modified (ablated) EXL3 4bpw checkpoint, drafts off and on
+  (`docs/receipts/glm-kv-live-half-d3e06e76/`), and again on the rebased head with the recipe's EXL3/TR3 checkpoint,
+  drafts on, against upstream `main` and a run with no prompt cache (`docs/receipts/glm-kv-live-half-555f052d/`).
 - `TF_GLM_KV_HOST=1` on every rank (with KV pages, BF16) keeps the KV pages' latent rows in pinned host memory: the
   device keeps the pooled index keys, and each sparse call copies only the rows it picked into device slots. The KV
   pool then costs the card 768 bytes a token instead of 13,056, so a 1,048,576-token window fits beside the weights.

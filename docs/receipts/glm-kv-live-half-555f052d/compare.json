@@ -1,0 +1,419 @@
+{
+ "configs": [
+  "on",
+  "off",
+  "fresh",
+  "main"
+ ],
+ "turns": [
+  {
+   "turn": 1,
+   "kind": "main",
+   "same": true,
+   "sha": [
+    "e2ca39adac075aae48162378f75de93b30f61705f6e645567d818b1412a28a26",
+    "e2ca39adac075aae48162378f75de93b30f61705f6e645567d818b1412a28a26",
+    "e2ca39adac075aae48162378f75de93b30f61705f6e645567d818b1412a28a26",
+    "e2ca39adac075aae48162378f75de93b30f61705f6e645567d818b1412a28a26"
+   ],
+   "ttft_s": [
+    5.906728506088257,
+    5.883622407913208,
+    4.506310939788818,
+    5.819998025894165
+   ],
+   "total_s": [
+    9.696291446685791,
+    9.647557735443115,
+    8.274638414382935,
+    9.617562055587769
+   ],
+   "cached": [
+    0,
+    0,
+    0,
+    0
+   ],
+   "prompt": 3102,
+   "tokens": [
+    48,
+    48,
+    48,
+    48
+   ],
+   "form": [
+    "none (first turn)",
+    "none (first turn)",
+    "none (first turn)",
+    "none (first turn)"
+   ]
+  },
+  {
+   "turn": 2,
+   "kind": "main",
+   "same": true,
+   "sha": [
+    "4be3fc8fb86942953f436e3945f937c23622a751d997ec1b6141a8a9a10ab736",
+    "4be3fc8fb86942953f436e3945f937c23622a751d997ec1b6141a8a9a10ab736",
+    "4be3fc8fb86942953f436e3945f937c23622a751d997ec1b6141a8a9a10ab736",
+    "4be3fc8fb86942953f436e3945f937c23622a751d997ec1b6141a8a9a10ab736"
+   ],
+   "ttft_s": [
+    5.9649882316589355,
+    5.8525941371917725,
+    7.734489679336548,
+    5.5192859172821045
+   ],
+   "total_s": [
+    9.199724912643433,
+    8.967795372009277,
+    11.020740509033203,
+    8.797731161117554
+   ],
+   "cached": [
+    2048,
+    2048,
+    0,
+    2048
+   ],
+   "prompt": 5322,
+   "tokens": [
+    48,
+    48,
+    48,
+    48
+   ],
+   "form": [
+    "raw-or-partial",
+    "uncompacted",
+    "none (nothing resumed)",
+    "raw-or-partial"
+   ]
+  },
+  {
+   "turn": 3,
+   "kind": "main",
+   "same": true,
+   "sha": [
+    "74622e0b72f3ef127252b2d3aa12971bf7b54865755883f1d6b20eeda7abddc3",
+    "74622e0b72f3ef127252b2d3aa12971bf7b54865755883f1d6b20eeda7abddc3",
+    "74622e0b72f3ef127252b2d3aa12971bf7b54865755883f1d6b20eeda7abddc3",
+    "74622e0b72f3ef127252b2d3aa12971bf7b54865755883f1d6b20eeda7abddc3"
+   ],
+   "ttft_s": [
+    5.900698661804199,
+    5.781582355499268,
+    9.684854507446289,
+    5.475233793258667
+   ],
+   "total_s": [
+    9.127216577529907,
+    8.96489143371582,
+    12.818910360336304,
+    8.74328064918518
+   ],
+   "cached": [
+    4096,
+    4096,
+    0,
+    4096
+   ],
+   "prompt": 7544,
+   "tokens": [
+    48,
+    48,
+    48,
+    48
+   ],
+   "form": [
+    "raw-or-partial",
+    "uncompacted",
+    "none (nothing resumed)",
+    "raw-or-partial"
+   ]
+  },
+  {
+   "turn": 4,
+   "kind": "main",
+   "same": true,
+   "sha": [
+    "adf747f9672f46f37ffe267cdf1004f5a6283b52235709130c22d33222dae8ea",
+    "adf747f9672f46f37ffe267cdf1004f5a6283b52235709130c22d33222dae8ea",
+    "adf747f9672f46f37ffe267cdf1004f5a6283b52235709130c22d33222dae8ea",
+    "adf747f9672f46f37ffe267cdf1004f5a6283b52235709130c22d33222dae8ea"
+   ],
+   "ttft_s": [
+    6.38446831703186,
+    6.3449530601501465,
+    13.192436933517456,
+    6.005799770355225
+   ],
+   "total_s": [
+    9.217525720596313,
+    9.064361572265625,
+    15.944830656051636,
+    8.8793203830719
+   ],
+   "cached": [
+    6144,
+    6144,
+    0,
+    6144
+   ],
+   "prompt": 9775,
+   "tokens": [
+    48,
+    48,
+    48,
+    48
+   ],
+   "form": [
+    "raw-or-partial",
+    "uncompacted",
+    "none (nothing resumed)",
+    "raw-or-partial"
+   ]
+  },
+  {
+   "turn": 5,
+   "kind": "main",
+   "same": true,
+   "sha": [
+    "66156c6296433e19c7c8bdf67470e4e71fc42e99ffe7babc0cd08fd27efb6686",
+    "66156c6296433e19c7c8bdf67470e4e71fc42e99ffe7babc0cd08fd27efb6686",
+    "66156c6296433e19c7c8bdf67470e4e71fc42e99ffe7babc0cd08fd27efb6686",
+    "66156c6296433e19c7c8bdf67470e4e71fc42e99ffe7babc0cd08fd27efb6686"
+   ],
+   "ttft_s": [
+    6.6667160987854,
+    6.593195915222168,
+    14.75750207901001,
+    6.093121528625488
+   ],
+   "total_s": [
+    9.814141035079956,
+    9.667314767837524,
+    17.819679260253906,
+    9.202502250671387
+   ],
+   "cached": [
+    8192,
+    8192,
+    0,
+    8192
+   ],
+   "prompt": 11999,
+   "tokens": [
+    48,
+    48,
+    48,
+    48
+   ],
+   "form": [
+    "raw-or-partial",
+    "uncompacted",
+    "none (nothing resumed)",
+    "raw-or-partial"
+   ]
+  },
+  {
+   "turn": 6,
+   "kind": "main",
+   "same": true,
+   "sha": [
+    "7b52308dca650962c85c93fd6fd1e190140a02144dd6752cd96ca423b0f17395",
+    "7b52308dca650962c85c93fd6fd1e190140a02144dd6752cd96ca423b0f17395",
+    "7b52308dca650962c85c93fd6fd1e190140a02144dd6752cd96ca423b0f17395",
+    "7b52308dca650962c85c93fd6fd1e190140a02144dd6752cd96ca423b0f17395"
+   ],
+   "ttft_s": [
+    6.774000644683838,
+    6.666929721832275,
+    17.96084451675415,
+    6.184016466140747
+   ],
+   "total_s": [
+    10.059632301330566,
+    9.759921312332153,
+    21.24347496032715,
+    9.495185136795044
+   ],
+   "cached": [
+    10240,
+    10240,
+    0,
+    10240
+   ],
+   "prompt": 14218,
+   "tokens": [
+    48,
+    48,
+    48,
+    48
+   ],
+   "form": [
+    "raw-or-partial",
+    "uncompacted",
+    "none (nothing resumed)",
+    "raw-or-partial"
+   ]
+  },
+  {
+   "turn": 7,
+   "kind": "raw-keep",
+   "same": true,
+   "sha": [
+    "33271190574eea5bbce4bba4c8350dad59c6d7291a0eaa4dec5f37a1e5ae3e28",
+    "33271190574eea5bbce4bba4c8350dad59c6d7291a0eaa4dec5f37a1e5ae3e28",
+    "33271190574eea5bbce4bba4c8350dad59c6d7291a0eaa4dec5f37a1e5ae3e28",
+    "33271190574eea5bbce4bba4c8350dad59c6d7291a0eaa4dec5f37a1e5ae3e28"
+   ],
+   "ttft_s": [
+    6.308664083480835,
+    6.324137210845947,
+    20.72196888923645,
+    5.715693473815918
+   ],
+   "total_s": [
+    8.953038930892944,
+    8.919398784637451,
+    23.375792026519775,
+    8.371866941452026
+   ],
+   "cached": [
+    12288,
+    12288,
+    0,
+    12288
+   ],
+   "prompt": 16440,
+   "tokens": [
+    48,
+    48,
+    48,
+    48
+   ],
+   "form": [
+    "raw-or-partial",
+    "uncompacted",
+    "none (nothing resumed)",
+    "raw-or-partial"
+   ]
+  },
+  {
+   "turn": 8,
+   "kind": "raw",
+   "same": true,
+   "sha": [
+    "a4d24ccdbb044d631144540e57d25ee940429bd624f54748a419015beb238e12",
+    "a4d24ccdbb044d631144540e57d25ee940429bd624f54748a419015beb238e12",
+    "a4d24ccdbb044d631144540e57d25ee940429bd624f54748a419015beb238e12",
+    "a4d24ccdbb044d631144540e57d25ee940429bd624f54748a419015beb238e12"
+   ],
+   "ttft_s": [
+    4.688831329345703,
+    4.69995903968811,
+    23.92912530899048,
+    4.410276889801025
+   ],
+   "total_s": [
+    8.257241249084473,
+    8.3712317943573,
+    27.558170795440674,
+    8.074640274047852
+   ],
+   "cached": [
+    16384,
+    16384,
+    0,
+    16384
+   ],
+   "prompt": 18661,
+   "tokens": [
+    48,
+    48,
+    48,
+    48
+   ],
+   "form": [
+    "raw-or-partial",
+    "uncompacted",
+    "none (nothing resumed)",
+    "raw-or-partial"
+   ]
+  },
+  {
+   "turn": 9,
+   "kind": "partial",
+   "same": true,
+   "sha": [
+    "9cef66832f4cc0563cc31ea21f681412d0d413add1bb68d6037dcf9b4ed822b3",
+    "9cef66832f4cc0563cc31ea21f681412d0d413add1bb68d6037dcf9b4ed822b3",
+    "9cef66832f4cc0563cc31ea21f681412d0d413add1bb68d6037dcf9b4ed822b3",
+    "9cef66832f4cc0563cc31ea21f681412d0d413add1bb68d6037dcf9b4ed822b3"
+   ],
+   "ttft_s": [
+    4.845395565032959,
+    4.666689157485962,
+    25.92866539955139,
+    4.4943156242370605
+   ],
+   "total_s": [
+    7.510630369186401,
+    7.296716928482056,
+    28.612302541732788,
+    7.183390378952026
+   ],
+   "cached": [
+    18432,
+    18432,
+    0,
+    18432
+   ],
+   "prompt": 20881,
+   "tokens": [
+    48,
+    48,
+    48,
+    48
+   ],
+   "form": [
+    "raw-or-partial",
+    "uncompacted",
+    "none (nothing resumed)",
+    "raw-or-partial"
+   ]
+  }
+ ],
+ "first_difference": null,
+ "codec": {
+  "on": [],
+  "off": [],
+  "fresh": [],
+  "main": []
+ },
+ "pages": {
+  "on": [],
+  "off": [],
+  "fresh": [],
+  "main": []
+ },
+ "forms": {
+  "on": {
+   "raw": "raw-or-partial",
+   "partial": "raw-or-partial"
+  },
+  "off": {
+   "raw": "uncompacted",
+   "partial": "uncompacted"
+  },
+  "fresh": {
+   "raw": "none (nothing resumed)",
+   "partial": "none (nothing resumed)"
+  },
+  "main": {
+   "raw": "raw-or-partial",
+   "partial": "raw-or-partial"
+  }
+ }
+}
