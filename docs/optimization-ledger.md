@@ -77,7 +77,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | --- | --- | --- | --- | --- | --- |
 | 1. Prompt tail | yes | yes | yes | yes | yes |
 | 2. Paged KV | done [#1620] | done [#1653] | done [#1284] | yes | yes (own pool) |
-| 3. Prompt store | done [#1755] | done [#1756] | yes | yes | yes |
+| 3. Prompt store | done [#1755] | done [#1756] | open [#2430] | yes | yes |
 | 4. iGPU states | done¹ | done¹ | done¹ | done¹ | yes |
 | 5. State walk | yes | yes | yes | yes | yes |
 | 6. KV ledger | done [#2127] | done [#2127] | done [#2127] | yes | yes |
@@ -564,3 +564,4 @@ below; these are estimates for planning a port, not results.
 [#2306]: https://github.com/ashhart/TensorFold/pull/2306
 [#2391]: https://github.com/ashhart/TensorFold/pull/2391
 [#2449]: https://github.com/ashhart/TensorFold/pull/2449
+[#2430]: https://github.com/ashhart/TensorFold/pull/2430
