@@ -10,7 +10,7 @@ export function ago(t: number, now = Date.now() / 1000): string {
   return s < 90 ? 'just now' : s < 5400 ? `${Math.round(s / 60)} min ago` : s < 129600 ? `${Math.round(s / 3600)} h ago` : `${Math.round(s / 86400)} days ago`
 }
 
-/** Bars of written tokens, one per day or hour, stacked by model; each bar's title says the figures. */
+
 function Bars({ cols, color, label, ends }: { cols: { key: string; label: string; models: Record<string, { completion: number }> }[]; color: (m: string) => string; label: string; ends: [string, string] }) {
   const tot = (c: (typeof cols)[number]) => Object.values(c.models).reduce((a, m) => a + m.completion, 0)
   const max = Math.max(1, ...cols.map(tot))

@@ -13,7 +13,7 @@ const Logo = ({ id, size }: { id: string; size: 'sm' | 'lg' }) => LOGOS[id] ? <s
 const TOOL_KEY = 'tfs-tool'
 const WHERE_KEY = 'tfs-connect-where'
 // opened from this machine itself, a tool is most likely here too; opened from elsewhere, it is on that computer
-const firstWhere = (): 'here' | 'away' => { try { const w = localStorage.getItem(WHERE_KEY); if (w === 'here' || w === 'away') return w } catch { /* none */ } return ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname) ? 'here' : 'away' }
+const firstWhere = (): 'here' | 'away' => { try { const w = localStorage.getItem(WHERE_KEY); if (w === 'here' || w === 'away') return w } catch {            } return ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname) ? 'here' : 'away' }
 
 export default function Connect({ engine, settings, saveSettings, refreshSettings, refreshEngine, toast, stale }: Ctx) {
   const [info, setInfo] = useState<ConnectInfo>(EMPTY)
@@ -29,10 +29,10 @@ export default function Connect({ engine, settings, saveSettings, refreshSetting
   }
   const reload = () => api.connect(where).then(setInfo).catch((e) => setErr(String(e)))
   useEffect(() => { reload() }, [where, settings?.share, settings?.api_key_set, engine?.status, engine?.model])
-  useEffect(() => { try { localStorage.setItem(WHERE_KEY, where) } catch { /* no storage */ } }, [where])
+  useEffect(() => { try { localStorage.setItem(WHERE_KEY, where) } catch {                  } }, [where])
   const [models, setModels] = useState<Model[]>([])
   useEffect(() => { api.catalog().then((c) => setModels(c.models)).catch(() => {}) }, [engine?.model])
-  useEffect(() => { try { localStorage.setItem(TOOL_KEY, tool) } catch { /* no storage */ } }, [tool])
+  useEffect(() => { try { localStorage.setItem(TOOL_KEY, tool) } catch {                  } }, [tool])
   const copy = async (text: string, what = 'Copied') => {
     try { await copyText(text); toast(what) } catch { toast('The browser refused the clipboard; select the text and copy it yourself.', 'bad') }
   }
@@ -65,7 +65,7 @@ export default function Connect({ engine, settings, saveSettings, refreshSetting
       </div></div>
     )
   }
-  const studioPath = `${location.origin}/engine/v1`
+  const relayPath = `${location.origin}/engine/v1`
   const current = info.snippets.find((s) => s.id === tool) ?? info.snippets[0]
   const keyField = (id: string, key = info.api_key) => key ? (
     <div className="field"><span>API key</span><input type={showKey ? 'text' : 'password'} readOnly value={key} aria-label={`API key for ${id}`} /><button className="btn" onClick={() => setShowKey(!showKey)}>{showKey ? 'Hide' : 'Show'}</button><button className="btn" onClick={() => copy(key, 'Key copied')} aria-label={`Copy the key for ${id}`}>Copy</button></div>
@@ -121,7 +121,7 @@ export default function Connect({ engine, settings, saveSettings, refreshSetting
       <h2 className="subhead">An app not in the list?</h2>
       <div className="card">
         <p>Any app that speaks the OpenAI API: give it this address and {where === 'away' ? 'this key' : info.api_key ? 'this key' : 'any key (the AI asks for none on this machine)'}, then pick the model it lists.</p>
-        <div className="field"><span>Address</span><input type="text" readOnly value={where === 'away' ? studioPath : `${info.engine_url}/v1`} aria-label="Address for the app" /><button className="btn" onClick={() => copy(where === 'away' ? studioPath : `${info.engine_url}/v1`, 'Address copied')}>Copy</button></div>
+        <div className="field"><span>Address</span><input type="text" readOnly value={where === 'away' ? relayPath : `${info.engine_url}/v1`} aria-label="Address for the app" /><button className="btn" onClick={() => copy(where === 'away' ? relayPath : `${info.engine_url}/v1`, 'Address copied')}>Copy</button></div>
         {where === 'away' ? keyField('another computer', info.relay_key) : keyField('this machine')}
         {where === 'away' && <div className="actions" style={{ marginTop: 10 }}>
           <button className="btn ghost" aria-busy={is('key')} onClick={newKey}>{info.relay_key ? 'Generate a new key' : 'Generate a key'}</button>

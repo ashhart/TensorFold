@@ -7,7 +7,7 @@ test('the ratio comes from the last reply the engine counted', () => {
     { role: 'user', content: 'hi' },
     { role: 'assistant', content: 'x'.repeat(1350), stats: { tokens: 300, measured: 'engine' } },
     { role: 'user', content: 'again' },
-    { role: 'assistant', content: 'y'.repeat(50), stats: { tokens: null, measured: 'counted' } },   // not the engine's count
+    { role: 'assistant', content: 'y'.repeat(50), stats: { tokens: null, measured: 'counted' } },
   ]
   assert.equal(charsPerToken(msgs), 4.5)
   assert.equal(charsPerToken([]), DEFAULT_CHARS_PER_TOKEN)

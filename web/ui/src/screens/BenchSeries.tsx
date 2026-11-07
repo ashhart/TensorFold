@@ -75,7 +75,7 @@ export default function Series({ engine, toast, stale, exactness, onOpen, onComp
         setShown(d)
         if (d.progress?.run) setRun(await api.benchRun(d.progress.run)); else setRun(null)
         if (d.status !== 'running') { setCurrent(null); setRun(null); load(); d.restore_error ? toast(`Comparison ${d.status === 'interrupted' ? 'interrupted' : 'finished'}, but ${d.restore_error}`, 'bad') : toast(d.status === 'cancelled' ? 'Comparison cancelled; the engine is back as it was' : 'Comparison finished; the engine is back as it was') }
-      } catch { /* the next tick tries again */ }
+      } catch {                                 }
     }
     tick()
     const t = setInterval(tick, 2000)

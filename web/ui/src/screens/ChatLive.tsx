@@ -10,8 +10,8 @@ export const secs = (s: number) => s < 1 ? `${Math.round(s * 1000)} ms` : `${s.t
 export const rate = (r: number) => r >= 10 ? `${Math.round(r)}` : r.toFixed(1)
 
 export type Live = { t0: number; tFirst: number; chars: number; ratio: number }
-/** The reply being written, as this page sees it: the first token's time once it came, and a live speed from the text
- * received (`liverate.ts`); the engine's own figures replace both when the reply ends. */
+
+
 export function LivePills({ live }: { live: Live }) {
   const [now, setNow] = useState(() => performance.now())
   useEffect(() => { const t = setInterval(() => setNow(performance.now()), 250); return () => clearInterval(t) }, [])
@@ -25,7 +25,7 @@ export function LivePills({ live }: { live: Live }) {
   )
 }
 
-/** What Cortheon's web research did for a reply: how many searches and pages, and the sources it cites. */
+
 export function WebSources({ c }: { c: Cortheon }) {
   const sources = (c.sources ?? []).filter((u) => /^https?:\/\//.test(u))
   if (!c.searches && !c.pages_read && !sources.length) return null

@@ -17,7 +17,7 @@ const ICON = {
   fleet: 'M3 6h7v6H3zM14 6h7v6h-7zM8.5 14h7v6h-7zM6.5 12v2M17.5 12v2M12 12v2',
 }
 
-/** Home: what the AI is doing, in words, the one action for that state, and the three things a person came for. */
+
 export default function Home({ machine, engine, settings, saveSettings, refreshEngine, refreshSettings, toast, stale }: Ctx) {
   const [models, setModels] = useState<Model[] | null>(null)
   const [catalogErr, setCatalogErr] = useState<string | null>(null)   // said, rather than "Reading…" for ever
@@ -161,7 +161,7 @@ export default function Home({ machine, engine, settings, saveSettings, refreshE
   )
 }
 
-/** The first label of an engine address's host (spark for http://spark.example.ts.net:8080). */
+
 function shortHost(url: string | undefined): string | null {
   try {
     const h = url ? new URL(url).hostname : ''
@@ -171,7 +171,7 @@ function shortHost(url: string | undefined): string | null {
 
 type Rig = { host: string; chip: string | null; backend: string | null; ram: number | null }
 
-/** The hardware under the model, on its own line: each maker's logo once, then each machine with its chip and memory. */
+
 function RigLine({ rigs }: { rigs: Rig[] }) {
   const makers = [...new Map(rigs.map((r) => [hardwareOf(r.chip, r.backend)?.id ?? r.host, r])).values()]
   return (
@@ -183,7 +183,7 @@ function RigLine({ rigs }: { rigs: Rig[] }) {
   )
 }
 
-/** A chip as a person names it: the board in brackets left out (NVIDIA GB10 for "NVIDIA GB10 (GX10)"). */
+
 function chipName(chip: string | null): string | null {
   return chip ? chip.replace(/\s*\([^)]*\)\s*$/, '') : null
 }

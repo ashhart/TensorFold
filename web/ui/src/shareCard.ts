@@ -13,7 +13,7 @@ const joules = (x: number | null | undefined) => (x == null ? '—' : x < 1 ? `$
 
 type Fig = { label: string; value: string; color?: string }
 
-/** The headline figures of a run, the same ones the report puts first. */
+
 export function cardFigures(run: BenchRun): Fig[] {
   const o = run.summary?.overall
   const hw = run.hardware
@@ -110,7 +110,7 @@ export function cardBlob(run: BenchRun, names: Record<string, string> = {}): Pro
 }
 
 
-/** Copies text, with the old way when the page is not a secure context (plain http on the LAN). */
+
 export async function copyText(text: string): Promise<void> {
   if (window.isSecureContext && navigator.clipboard?.writeText) return navigator.clipboard.writeText(text)
   const ta = Object.assign(document.createElement('textarea'), { value: text })
@@ -121,14 +121,14 @@ export async function copyText(text: string): Promise<void> {
   if (!ok) throw new Error('the browser refused to copy')
 }
 
-/** Copies the card as an image when the browser allows it; otherwise downloads it. Says which it did. */
+
 export async function shareImage(run: BenchRun, names: Record<string, string> = {}): Promise<'copied' | 'downloaded'> {
   const name = `tensorfold-bench-${run.id}.png`
   if (window.isSecureContext && 'ClipboardItem' in window && navigator.clipboard?.write) {
     try {
       await navigator.clipboard.write([new ClipboardItem({ 'image/png': cardBlob(run, names) })])
       return 'copied'
-    } catch { /* refused: fall through to a download */ }
+    } catch {                                           }
   }
   saveBlob(await cardBlob(run, names), name)
   return 'downloaded'

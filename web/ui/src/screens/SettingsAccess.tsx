@@ -4,8 +4,8 @@ import { api } from '../api'
 import { copyText } from '../shareCard'
 import { useWorking } from '../working'
 
-/** A one-time link, and its QR code, that opens this TensorFold Web signed in on another device, without the token ever
- *  being typed or shown. Good once, for five minutes. */
+
+
 export default function SettingsAccess({ toast }: { toast: (t: string, k?: 'ok' | 'bad') => void }) {
   const [link, setLink] = useState<{ url: string; until: number } | null>(null)
   const [now, setNow] = useState(Date.now())

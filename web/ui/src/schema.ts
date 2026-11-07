@@ -9,7 +9,7 @@ export type Schema = { type?: string | string[]; properties?: Record<string, Sch
 const KNOWN = new Set(['type', 'properties', 'required', 'items', 'enum', 'additionalProperties', 'description', 'minimum', 'maximum',
   'const', 'pattern', 'minLength', 'maxLength', 'minItems', 'maxItems', 'exclusiveMinimum', 'exclusiveMaximum', 'title', '$schema', 'default', 'examples'])
 
-/** Keywords of ``schema`` (and its parts) that `check` does not read, such as oneOf or $ref. */
+
 export function unchecked(schema: Schema | boolean | undefined, out = new Set<string>()): Set<string> {
   if (!schema || typeof schema !== 'object') return out
   for (const k of Object.keys(schema)) if (!KNOWN.has(k)) out.add(k)
@@ -18,7 +18,7 @@ export function unchecked(schema: Schema | boolean | undefined, out = new Set<st
   if (typeof schema.additionalProperties === 'object') unchecked(schema.additionalProperties, out)
   return out
 }
-/** JSON equality: objects compare key by key, whatever their order. */
+
 export function equal(a: unknown, b: unknown): boolean {
   if (a === b) return true
   if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false
@@ -27,8 +27,8 @@ export function equal(a: unknown, b: unknown): boolean {
   const ka = Object.keys(a), kb = Object.keys(b)
   return ka.length === kb.length && ka.every((k) => Object.hasOwn(b, k) && equal((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k]))
 }
-/** A small JSON Schema check: types, required keys, enums, const, patterns, items, extra keys, lengths and bounds.
- *  Returns what is wrong; `unchecked` says which keywords of a schema it does not read. */
+
+
 export function check(value: unknown, schema: Schema | boolean | undefined, path = '$'): string[] {
   if (schema === false) return [`${path}: no value is allowed here`]
   if (!schema || schema === true) return []
@@ -55,7 +55,7 @@ export function check(value: unknown, schema: Schema | boolean | undefined, path
   }
   if (kind === 'object' && value) {
     const obj = value as Record<string, unknown>
-    for (const k of schema.required ?? []) if (!Object.hasOwn(obj, k)) errs.push(`${path}.${k}: missing`)   // not toString
+    for (const k of schema.required ?? []) if (!Object.hasOwn(obj, k)) errs.push(`${path}.${k}: missing`)
     for (const [k, v] of Object.entries(obj)) {
       const sub = schema.properties && Object.hasOwn(schema.properties, k) ? schema.properties[k] : undefined
       if (sub !== undefined) errs.push(...check(v, sub, `${path}.${k}`))
@@ -67,7 +67,7 @@ export function check(value: unknown, schema: Schema | boolean | undefined, path
   return errs
 }
 
-/** A JSON reply: parsed (a fenced block is read too) and, with a schema, checked. */
+
 export function checkJson(text: string, schema: Schema | null): { ok: boolean; detail: string } {
   const t = text.trim().replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, '')
   let v: unknown

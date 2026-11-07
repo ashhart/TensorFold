@@ -1,0 +1,15 @@
+:root{
+  color-scheme:light;
+  --ink:rgb(var(--ink-rgb));
+  --ink2:rgb(var(--ink-rgb) / var(--ink-2-alpha));
+  --ink3:rgb(var(--ink-rgb) / var(--ink-3-alpha));
+  --surface:var(--card); --sunken:var(--card-2); --raised:var(--card);
+  --line2:var(--line); --accent-line:var(--line-strong);
+  --good:var(--positive); --good-soft:color-mix(in srgb,var(--positive) 12%,var(--card));
+  --warn-soft:color-mix(in srgb,var(--warn) 12%,var(--card));
+  --bad:var(--danger); --bad-soft:color-mix(in srgb,var(--danger) 12%,var(--card));
+  --fold:var(--brand-gradient); --shadow:var(--shadow-pop);
+  --radius:12px; --radius-s:8px;
+  --sans:var(--font-sans); --mono:var(--font-mono);
+}
+:root[data-theme="dark"]{color-scheme:dark}

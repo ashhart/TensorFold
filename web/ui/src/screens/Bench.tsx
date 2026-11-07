@@ -30,7 +30,7 @@ const RUN: Record<Choice, { icon: string; what: string }> = {
 const kTokens = (n: number) => (n >= 1024 ? `${Math.round(n / 1024)}k` : `${n}`)
 const STATUS: Record<string, string> = { running: 'Running', done: 'Done', cancelled: 'Cancelled', failed: 'Failed', interrupted: 'Interrupted by a TensorFold Web restart' }
 
-/** Speed with and without drafts, one pair of bars per suite, on a common scale. */
+
 function Bars({ rows, names }: { rows: [string, BenchBlock][]; names: Record<string, string> }) {
   const max = Math.max(1, ...rows.flatMap(([, b]) => [b.tps ?? 0, b.tps_no_drafts ?? 0]))
   return (
@@ -49,7 +49,7 @@ function Bars({ rows, names }: { rows: [string, BenchBlock][]; names: Record<str
   )
 }
 
-/** Prefill speed (bars) and time to first token (line) against the prompt size, sizes on a log scale. */
+
 function SweepChart({ points }: { points: SweepPoint[] }) {
   const ok = points.filter((p) => p.prefill_tps != null && !p.error)
   if (!ok.length) return null
@@ -85,7 +85,7 @@ const money = (x: number | null | undefined, cur: string) => (x == null ? '—' 
 const joules = (x: number | null | undefined) => (x == null ? '—' : x < 1 ? `${Math.round(x * 1000)} mJ` : `${x.toFixed(2)} J`)
 const deg = (x: number | null | undefined) => (x == null ? '—' : `${Math.round(x)} °C`)
 
-/** Power (filled) and the hottest GPU or CPU probe (line) over the run. */
+
 function HeatChart({ hw }: { hw: BenchHardware }) {
   const rows = hw.series.filter((r) => r[1] != null || r[3] != null || r[2] != null)
   if (rows.length < 2) return null
@@ -111,7 +111,7 @@ function HeatChart({ hw }: { hw: BenchHardware }) {
   )
 }
 
-/** In a prefill sweep the work is reading prompts, so energy goes per thousand prompt tokens there. */
+
 function Heat({ hw, prefill }: { hw: BenchHardware; prefill: boolean }) {
   return (
     <div className="heat">
@@ -140,7 +140,7 @@ function Heat({ hw, prefill }: { hw: BenchHardware; prefill: boolean }) {
   )
 }
 
-/** A load sweep: total speed and each request's as more are served at once, with the wait for the first token. */
+
 function LoadReport({ levels }: { levels: LoadLevel[] }) {
   const pts = levels.filter((l) => l.total_tps != null)
   if (!pts.length) return null
@@ -152,7 +152,7 @@ function LoadReport({ levels }: { levels: LoadLevel[] }) {
   const line = (k: 'total_tps' | 'per_request_tps') => pts.map((p, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(p[k] ?? 0).toFixed(1)}`).join(' ')
   return <>
     <dl className="figures big">
-      {/* "alone" is the level of one request, measured; not the first level that happens to have a figure */}
+
       <div><dt>Alone</dt><dd>{tps(levels.find((l) => l.concurrency === 1)?.total_tps ?? null)} tok/s</dd></div>
       <div><dt>Total at {best.concurrency} at once</dt><dd>{tps(best.total_tps)} tok/s</dd></div>
       <div><dt>Each, then</dt><dd>{tps(best.per_request_tps)} tok/s</dd></div>
@@ -171,7 +171,7 @@ function LoadReport({ levels }: { levels: LoadLevel[] }) {
   </>
 }
 
-/** A quality run: right answers by category, and every item missed with what was expected and what was read. */
+
 function QualityReport({ run, names }: { run: BenchRun; names: Record<string, string> }) {
   const q = run.summary?.quality
   const [all, setAll] = useState(false)
@@ -220,7 +220,7 @@ function SweepReport({ run }: { run: BenchRun }) {
 
 const PHASE: Record<string, string> = { starting: 'Starting', idle: 'Measuring idle power', 'warm-up': 'Warming up the engine', measuring: 'Measuring' }
 
-/** The run while it goes: what it is doing, for how long, about how long is left, and a stop that asks once. */
+
 function LiveRun({ run, onStop }: { run: BenchRun; onStop: () => void }) {
   const [now, setNow] = useState(() => Date.now())
   const [asking, setAsking] = useState(false)
@@ -252,7 +252,7 @@ function LiveRun({ run, onStop }: { run: BenchRun; onStop: () => void }) {
   )
 }
 
-/** One button for the text, a menu for the image: copied where the browser allows it, downloaded otherwise. */
+
 function Share({ run, names, toast }: { run: BenchRun; names: Record<string, string>; toast: Ctx['toast'] }) {
   const [open, setOpen] = useState(false)
   useEffect(() => {
@@ -357,7 +357,7 @@ export default function Bench({ engine, toast, stale }: Ctx) {
   const [choice, setChoice] = useState<Choice>('quick')
   // the plain layer: one check, one button; the kinds of run and their options are a click away
   const [simple, setSimple] = useState(() => { try { return localStorage.getItem('tfs-bench-simple') !== 'no' } catch { return true } })
-  const showMore = (more: boolean) => { setSimple(!more); try { localStorage.setItem('tfs-bench-simple', more ? 'no' : 'yes') } catch { /* no storage */ } }
+  const showMore = (more: boolean) => { setSimple(!more); try { localStorage.setItem('tfs-bench-simple', more ? 'no' : 'yes') } catch {                  } }
   const mode: BenchMode = choice === 'series' ? 'profile' : choice
   const [upTo, setUpTo] = useState<number>(32768)
   const [atOnce, setAtOnce] = useState<number>(16)
@@ -372,7 +372,7 @@ export default function Bench({ engine, toast, stale }: Ctx) {
   const [found, setFound] = useState<Awaited<ReturnType<typeof api.benchIdentify>> | null>(null)
   const [addrModel, setAddrModel] = useState('')
   const [addrLabel, setAddrLabel] = useState('')
-  // a Fleet machine instead of an address typed by hand: this TensorFold Web reaches its engine, the page holds no secret
+
   const [addrPeer, setAddrPeer] = useState('')
   const peers = useFleetPeers(aim === 'address')
   const [klForm, setKlForm] = useState<KlState>(KL_START)
@@ -381,7 +381,7 @@ export default function Bench({ engine, toast, stale }: Ctx) {
   const [klLoad, setKlLoad] = useState(0)
   const check = async (peer = addrPeer) => {
     setFound(null)
-    if (!peer) try { localStorage.setItem('tfs-bench-addr', addr) } catch { /* no storage */ }
+    if (!peer) try { localStorage.setItem('tfs-bench-addr', addr) } catch {                  }
     try {
       const f = peer ? await api.benchIdentifyPeer(peer) : await api.benchIdentify(addr, addrKey || undefined)
       setFound(f); setAddrModel(f.models[0] ?? '')
@@ -414,7 +414,7 @@ export default function Bench({ engine, toast, stale }: Ctx) {
       setRun(r)
       if (r.status === 'running') t = setTimeout(load, 1000)
       else if (busyId === selected) refresh()
-    }).catch((e) => { if (!live) return; pollFailed = true; setErr(String(e)); t = setTimeout(load, 2000) })   // one failed poll (a sleep) is not the end
+    }).catch((e) => { if (!live) return; pollFailed = true; setErr(String(e)); t = setTimeout(load, 2000) })
     load()
     return () => { live = false; clearTimeout(t) }
   }, [selected, busyId, refresh])
@@ -428,7 +428,7 @@ export default function Bench({ engine, toast, stale }: Ctx) {
   const lastBig = runs.find((r) => r.mode === 'prefill' && r.model === engine?.model && r.summary?.sweep?.length)?.summary?.sweep?.filter((p) => p.ttft != null && !p.error).slice(-1)[0]
   const limit = served && upTo > served ? 0 : upTo          // a size above the window means the window
   // `as` names what to run when the caller does not want the form's current choices (the plain check: always the
-  // quick run on the served engine, whatever "More checks" was last set to; a state set in the same click is not seen here)
+
   const start = async (as: { mode?: BenchMode; aim?: 'served' | 'address'; exactness?: boolean } = {}) => {
     if (starting) return
     const m = as.mode ?? mode, a = as.aim ?? aim, ex = as.exactness ?? exactness
@@ -559,7 +559,7 @@ export default function Bench({ engine, toast, stale }: Ctx) {
   )
 }
 
-/** tool-eval-bench missing: what it is, and a button that installs it for this user with uv (the command shown too). */
+
 function ToolEvalInstall({ toast, onDone }: { toast: Ctx['toast']; onDone: () => unknown }) {
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)

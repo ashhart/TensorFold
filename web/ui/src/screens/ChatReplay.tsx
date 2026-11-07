@@ -9,7 +9,7 @@ const gain = (bChange: number) => 1 / (1 + bChange) - 1
 const speedWord = (x: number) => `${Math.abs(Math.round(x * 100))}% ${x >= 0 ? 'faster' : 'slower'}`
 const tps = (x: number | null) => (x == null ? '—' : String(Math.round(x)))
 
-/** Waits for the running replay to end; its conversation's id, or an error saying why it stopped. */
+
 async function replayed(stopped: () => boolean, onProgress: (p: ReplayProgress) => void, every = 1000): Promise<string> {
   for (;;) {
     await new Promise((r) => setTimeout(r, every))
@@ -23,8 +23,8 @@ async function replayed(stopped: () => boolean, onProgress: (p: ReplayProgress) 
   }
 }
 
-/** The speed-up checked on this conversation, in one click: its questions sent twice without randomness, with the
- *  speed-up and without it, then the two compared reply by reply. */
+
+
 type Written = { thinking: string; budget: number | null; system: string; max_tokens: number | null; temperature: number | null } | null
 const said = (r: NonNullable<Written>) => [r.thinking === 'off' ? 'thinking off' : r.thinking === 'on' ? `thinking on${r.budget ? `, up to ${r.budget.toLocaleString('en-US')} tokens` : ''}` : `thinking as the model decides${r.budget ? `, up to ${r.budget.toLocaleString('en-US')} tokens` : ''}`,
   r.system ? `the system prompt “${r.system.length > 60 ? `${r.system.slice(0, 60)}…` : r.system}”` : 'no system prompt',
@@ -98,7 +98,7 @@ export function SpeedupCheck({ id, model, onDone, onClose, toast, written }: { i
   )
 }
 
-/** Where to replay: the served engine with drafts on or off, or another engine at an address. */
+
 export function ReplayForm({ id, model, onDone, toast }: { id: string; model: string; onDone: (replayId: string) => void; toast: Ctx['toast'] }) {
   const [kind, setKind] = useState<'on' | 'off' | 'address'>('off')
   const [url, setUrl] = useState('http://127.0.0.1:8081')
@@ -140,10 +140,10 @@ export function ReplayForm({ id, model, onDone, toast }: { id: string; model: st
   )
 }
 
-/** Two conversations side by side, question by question: replies, speed, and whether the tokens are the same. */
-/** Two replies side by side: what they share from the start in green, then, from where they part, the rest of each
- *  marked. The comparison is by text: replies with the same tokens are the same text, so the green part is the run
- *  of identical tokens up to the first one that differs. */
+
+
+
+
 function Sides({ a, b, labels = ['A', 'B'] }: { a: string; b: string; labels?: [string, string] }) {
   let n = 0
   while (n < a.length && n < b.length && a[n] === b[n]) n++
@@ -168,7 +168,7 @@ export function ReplyCompare({ a, b, onClose, speedup, names = ['A', 'B'] }: { a
   const [err, setErr] = useState<string | null>(null)
   const top = useRef<HTMLDivElement>(null)
   useEffect(() => { api.conversationCompare(a, b).then(setC).catch((e) => setErr(String(e))) }, [a, b])
-  useEffect(() => { top.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }) }, [c, err])   // where the eye is not
+  useEffect(() => { top.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }) }, [c, err])
   if (err) return <div ref={top} className="notice bad">{err} <button className="btn sm quiet" onClick={onClose}>Close</button></div>
   if (!c) return <p ref={top} className="muted small">Comparing the two conversations…</p>
   const sp = c.speed

@@ -11,7 +11,7 @@ export type Grouping = 'recent' | 'folder' | 'model'
 const GROUP_KEY = 'tfs-chat-grouping'
 const DAY = 86400
 
-/** "Today", "Yesterday", "This week", "This month", "Earlier", by the day a conversation was last written in. */
+
 function dateGroup(t: number, now = Date.now() / 1000): string {
   const start = new Date(); start.setHours(0, 0, 0, 0)
   const today = start.getTime() / 1000
@@ -37,7 +37,7 @@ function groupsOf(convs: ConversationRow[], by: Grouping, folders: ConversationF
   return entries
 }
 
-/** The conversations that ask the same questions as `id`: its original, the original's other replays, and theirs. */
+
 export function sameQuestions(convs: ConversationRow[], id: string): ConversationRow[] {
   const by = new Map(convs.map((c) => [c.id, c]))
   const root = (c: ConversationRow) => { let r = c; for (let i = 0; i < 20 && r.replay_of && by.has(r.replay_of); i++) r = by.get(r.replay_of)!; return r.id }
@@ -49,8 +49,8 @@ export function sameQuestions(convs: ConversationRow[], id: string): Conversatio
 
 const short = (model: string | null | undefined) => model ? model.split('/').pop()! : null
 
-/** What a conversation's replies were written with, in words: the model, and for a replay the speed-up or the
- *  engine it was sent to. Its question is the same as the others', so it is left out. */
+
+
 export function madeWith(c: ConversationRow): string {
   const t = c.target
   if (!c.replay_of || !t) return `the original, ${short(c.model) ?? 'no reply yet'}`
@@ -58,7 +58,7 @@ export function madeWith(c: ConversationRow): string {
   return `${short(t.model ?? c.model) ?? 'the served model'}, ${t.drafts === false ? 'without' : 'with'} the speed-up`
 }
 
-/** Names for a list of conversations, with the time each was made when two would read the same. */
+
 export function namesOf(rows: ConversationRow[]): Map<string, string> {
   const base = rows.map(madeWith)
   const at = (t: number) => new Date(t * 1000).toLocaleString([], { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
@@ -76,7 +76,7 @@ export function ConversationList({ convs, more, loadMore, convId, q, setQ, open,
   const [ask, setAsk] = useState<{ kind: 'rename' | 'delete' | 'newfolder'; id: string } | { kind: 'folder-new' } | { kind: 'folder-rename' | 'folder-delete'; name: string } | null>(null)
   const loadFolders = () => api.conversationFolders().then((r) => setFolders(r.folders)).catch(() => {})
   useEffect(() => { loadFolders() }, [convs])
-  useEffect(() => { try { localStorage.setItem(GROUP_KEY, by) } catch { /* no storage */ } }, [by])
+  useEffect(() => { try { localStorage.setItem(GROUP_KEY, by) } catch {                  } }, [by])
   const box = useRef<HTMLDivElement>(null)
   useEffect(() => {                                                       // a click elsewhere or Escape closes the menu
     if (!menu) return

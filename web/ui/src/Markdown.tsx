@@ -2,7 +2,7 @@ import { useState, type ReactNode } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 
-/** A code block with its own Copy button; the text is taken from the rendered children. */
+
 function Pre({ children, onCopy }: { children?: ReactNode; onCopy: (text: string) => void }) {
   const [done, setDone] = useState(false)
   const text = (node: ReactNode): string => {
@@ -20,7 +20,7 @@ function Pre({ children, onCopy }: { children?: ReactNode; onCopy: (text: string
   )
 }
 
-/** The model's reply as Markdown (GitHub flavour, no raw HTML, no remote images), with copyable code blocks. */
+
 export default function Markdown({ text, onCopy }: { text: string; onCopy: (text: string) => void }) {
   return (
     <div className="md">

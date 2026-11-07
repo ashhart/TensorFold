@@ -3,7 +3,7 @@
 
 export const GiB = 1024 ** 3
 
-/** A duration in seconds: ms under a second, one decimal under a minute, then min and s, h and min, days and h. */
+
 export function secs(x: number | null | undefined): string {
   if (x == null || !Number.isFinite(x)) return '—'
   if (x < 1) return `${Math.round(x * 1000)} ms`
@@ -11,7 +11,7 @@ export function secs(x: number | null | undefined): string {
   return clock(x)
 }
 
-/** Elapsed or remaining time, whole seconds: 45 s, 3 min 05 s, 1 h 02 min, 2 d 4 h. */
+
 export function clock(s: number): string {
   const t = Math.max(0, Math.round(s))
   if (t < 60) return `${t} s`
@@ -20,7 +20,7 @@ export function clock(s: number): string {
   return `${Math.floor(t / 86400)} d ${Math.floor((t % 86400) / 3600)} h`
 }
 
-/** Bytes in binary units, written MB, GB and TB as the rest of TensorFold Web does; ``digits`` applies to GB. */
+
 export function bytes(b: number | null | undefined, digits = 0): string {
   if (b == null || !Number.isFinite(b)) return '—'
   const a = Math.abs(b)
@@ -31,7 +31,7 @@ export function bytes(b: number | null | undefined, digits = 0): string {
   return `${b} B`
 }
 
-/** A count kept short: 950, 1.2k, 12k, 3.4M, 1.1B. */
+
 export function count(n: number): string {
   const a = Math.abs(n)
   if (a >= 1e9) return `${(n / 1e9).toFixed(1)}B`

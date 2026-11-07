@@ -21,8 +21,8 @@ const isMac = /Mac|iPhone|iPad/.test(navigator.platform)
 const FOLD = 'M15 6l-6 6 6 6'
 const COMMANDS = 'M10 6H8a2 2 0 1 0 2 2zM10 6v12M10 18H8a2 2 0 1 1 2-2zM14 6h2a2 2 0 1 1-2 2zM14 6v12M14 18h2a2 2 0 1 0-2-2zM10 12h4'
 
-/** The menu, full or folded to its icons (`folded`): folded, each item keeps its name as a tooltip and for screen
- * readers, and the AI's state shows as its dot alone. */
+
+
 export default function Sidebar({ route, engine, machine, onPalette, folded, onFold }: { route: Route; engine: EngineInfo | null; machine: Machine | null; onPalette: () => void; folded: boolean; onFold: () => void }) {
   const [access, setAccess] = useState<Access | null>(null)
   useEffect(() => {

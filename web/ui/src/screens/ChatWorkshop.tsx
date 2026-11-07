@@ -6,22 +6,22 @@ import { Field } from './ChatPresets'
 export { check, checkJson, unchecked, type Schema } from '../schema'
 
 export type ToolDef = { type: 'function'; function: { name: string; description?: string; parameters?: Schema } }
-// `choice`: the request's tool_choice, 'auto', 'required', 'none' or a tool's name; `oneCall`: parallel_tool_calls false
+
 export type Workshop = { tools: boolean; toolsText: string; auto: boolean; output: 'text' | 'json' | 'schema'; schemaText: string; choice?: string; oneCall?: boolean }
 
-/** A forced tool that the new tool set no longer has goes back to 'auto'. */
+
 function keepChoice(choice: string | undefined, tools: ToolDef[]): string | undefined {
   return !choice || ['auto', 'required', 'none'].includes(choice) || tools.some((t) => t.function.name === choice) ? choice : 'auto'
 }
 
-/** The request's tool_choice: forced only on the first round, so a reply can follow the tools' results. */
+
 export function toolChoice(ws: Workshop, round: number): string | { type: 'function'; function: { name: string } } {
   const c = ws.choice ?? 'auto'
   if (round > 0 && c !== 'none') return 'auto'
   return c === 'auto' || c === 'required' || c === 'none' ? c : { type: 'function', function: { name: c } }
 }
 
-/** Tools that run in this page, so a chain of calls can go on by itself. */
+
 const LOCAL: Record<string, (args: Record<string, unknown>) => unknown> = {
   calculator: (a) => {
     const expr = String(a.expression ?? '')
@@ -75,8 +75,8 @@ const FORMAT_HELP: Record<Workshop['output'], string> = {
   schema: 'JSON that must match the schema below; each reply says whether it does, and where not.',
 }
 
-/** Tools & JSON, in two panels like the conversation's settings: the tools the model may call, and the reply's
- *  format; the definitions and the wire details folded, for whoever wants them. */
+
+
 export function WorkshopPanel({ ws, set }: { ws: Workshop; set: (w: Workshop) => void }) {
   const parsed = parseTools(ws.toolsText)
   let schemaError: string | null = null

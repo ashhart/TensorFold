@@ -18,11 +18,11 @@ const ROWS: { key: keyof CompareOverall; label: string; fmt: (x: number | null) 
   { key: 'engine_peak_bytes', label: 'Engine memory, peak', fmt: (x) => gb(x, 1), higher: false },
 ]
 
-/** A change shown as better or worse; "±0" when it is below what the page displays. */
+
 function Delta({ change, higher, noise = false }: { change: number | null; higher: boolean; noise?: boolean }) {
   if (change == null || !isFinite(change)) return <span className="muted">—</span>
   if (Math.abs(change) < 0.005) return <span className="muted">±0</span>
-  if (noise) return <span className="muted" title="no clear difference">{pct(change)}</span>   // not coloured: the test calls it noise
+  if (noise) return <span className="muted" title="no clear difference">{pct(change)}</span>
   const good = change > 0 === higher
   return <span className={good ? 'good' : 'bad'}>{pct(change)}</span>
 }

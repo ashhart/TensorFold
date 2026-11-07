@@ -9,20 +9,20 @@ export type KlReference = { url: string; key?: string; model: string } | { peer:
 // the text a fixed-text run reads unless the person writes another
 export const KL_TEXT = 'The lighthouse stood at the end of a narrow spit of rock, and for forty years the same family had kept its lamp burning. Every evening the keeper climbed the hundred and twelve steps, trimmed the wick, wound the clock that turned the lens, and wrote the weather in a book. Ships passing in the night never saw him, only the light, sweeping once every ten seconds across the water. When the lamp was finally made automatic, the last keeper left the book on the table, open at a page that read: wind from the west, sea calm, all well.'
 
-/** The Fleet's machines, this one included, read once ``on`` is true (null until then, or while they are read). */
+
 function useFleet(on: boolean): FleetMachine[] | null {
   const [all, setAll] = useState<FleetMachine[] | null>(null)
   useEffect(() => { if (on && all === null) api.fleet().then((f) => setAll(f.machines)).catch(() => setAll([])) }, [on, all])
   return all
 }
 
-/** The other machines of the Fleet, read once ``on`` is true (null until then, or while they are read). */
+
 export function useFleetPeers(on: boolean): FleetMachine[] | null {
   const all = useFleet(on)
   return all && all.filter((m) => !m.self)
 }
 
-/** "Typed by hand" or one of the Fleet's machines, for another engine's address. */
+
 export function PeerPick({ peers, value, onChange, label }: { peers: FleetMachine[] | null; value: string; onChange: (id: string) => void; label: string }) {
   return <select className="sel" value={value} onChange={(e) => onChange(e.target.value)} aria-label={label}>
     <option value="">Typed by hand</option>
@@ -45,10 +45,10 @@ export function klReference(s: KlState): KlReference {
   return s.peer ? { peer: s.peer, model: s.model } : { url: s.found.url, key: s.key || undefined, model: s.model }
 }
 
-/** The text a fixed-text run sends, or undefined for a run on the suites' replies. */
+
 export const klText = (s: KlState) => (s.fixed ? s.text : undefined)
 
-/** The KL run's options: what the candidate is compared with, and whether it answers under load. */
+
 export function KlOptions({ load, setLoad, state, setState }: { load: number; setLoad: (n: number) => void; state: KlState; setState: (f: (s: KlState) => KlState) => void }) {
   const { kind, url, key, peer, found, model, fixed, text } = state
   const fleetAll = useFleet(kind === 'address')
@@ -62,7 +62,7 @@ export function KlOptions({ load, setLoad, state, setState }: { load: number; se
     // an answer for an address, key or machine changed since, or after drafts-off was chosen, is dropped
     setState((s) => (s.kind === 'address' && s.peer === p && (p || (s.url === url && s.key === key)) ? { ...s, found: f, model: f.models[0] ?? '' } : s))
   }
-  const pickPeer = (p: string) => { edit({ peer: p }); if (p) check(p) }     // a machine is checked as soon as it is chosen
+  const pickPeer = (p: string) => { edit({ peer: p }); if (p) check(p) }
   return (
     <div className="aim">
       <span className="small"><b>Compared with</b></span>
@@ -94,7 +94,7 @@ export function KlOptions({ load, setLoad, state, setState }: { load: number; se
   )
 }
 
-/** A KL run's figures, its largest divergences and each prompt's agreement. */
+
 export function KlReport({ run }: { run: BenchRun }) {
   const k = run.kl
   if (!k || !k.positions) return null

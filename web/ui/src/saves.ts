@@ -30,7 +30,7 @@ export class Saves {
     return q
   }
 
-  /** The revision a conversation was read at, when it is opened: saves then build on it. */
+
   read(id: string, rev: number | undefined): void {
     const q = this.queueFor(id)
     if (q.conflict) {
@@ -42,7 +42,7 @@ export class Saves {
     q.rev = rev
   }
 
-  /** Every save sent so far has its answer. */
+
   settled(): Promise<void> {
     return Promise.all([...this.byId.values(), ...this.byGen.values()].map((q) => q.chain)).then(() => {})
   }

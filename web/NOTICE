@@ -2,6 +2,7 @@ TensorFold Web
 
 This software was adopted from TensorFold Studio by Stephane Rogeau (@Stephane-Eden), at commit
 b51b209cf2e338aa7c6e618e127e4cf1cee4b021 of its repository, under the Apache License, Version 2.0 (see LICENSE).
+Source repository: https://github.com/Stephane-Eden/TensorFold-Studio
 It was renamed TensorFold Web and moved into TensorFold's repository as web/.
 
 Changes made in adopting it:
@@ -19,3 +20,10 @@ Changes made in adopting it:
 - Every tool install it runs or prints names an exact version.
 
 The data files under tensorfold_web/data/licenses/ keep their own licenses.
+
+Changes for the TensorFold 1.2.5 Web delivery:
+
+- Reuse the desktop TensorFold preset, theme resolver and system typefaces in light and dark mode.
+- Split HTTP features, process telemetry, benchmark modes, lesson handling and report rendering into focused modules.
+- Preserve public routes, stored formats, access checks, engine ownership and the original behavior tests.
+- Remove redundant font downloads and comment blocks, and commit the locked dependencies and rebuilt page.

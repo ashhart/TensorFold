@@ -27,8 +27,8 @@ function useChecks(every = 0) {
   return { checks, err, busy, load, at }
 }
 
-/** Check again, said: the checks take a fraction of a second and often come back the same, so the button stays on
- *  "Checking…" long enough to be seen and a toast says what came back, changed or not. */
+
+
 function useAgain(checks: SetupCheck[] | null, load: () => Promise<SetupCheck[] | null>, toast: (t: string, k?: 'ok' | 'bad') => void) {
   const [showing, setShowing] = useState(false)
   const again = async () => {
@@ -67,7 +67,7 @@ export function CheckList({ checks, numbered, toast }: { checks: SetupCheck[]; n
   )
 }
 
-/** The first-run list on Home: shown until every step is ready, or until it is put away. */
+
 export function FirstRun({ settings, saveSettings, toast }: { settings: Settings | null; saveSettings: (p: Partial<Settings>) => Promise<Settings>; toast: (t: string, k?: 'ok' | 'bad') => void }) {
   const hidden = settings?.setup_hidden ?? true
   const { checks, busy, load, at } = useChecks(hidden ? 0 : 15000)
@@ -87,7 +87,7 @@ export function FirstRun({ settings, saveSettings, toast }: { settings: Settings
   )
 }
 
-/** Settings: every check, and the report to send to someone helping. */
+
 export function Diagnostic({ settings, saveSettings, toast }: { settings: Settings | null; saveSettings: (p: Partial<Settings>) => Promise<Settings>; toast: (t: string, k?: 'ok' | 'bad') => void }) {
   const { checks, err, busy, load, at } = useChecks()
   const { again, showing } = useAgain(checks, load, toast)

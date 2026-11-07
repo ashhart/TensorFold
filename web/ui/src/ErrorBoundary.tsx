@@ -1,6 +1,6 @@
 import { Component, type ErrorInfo, type ReactNode } from 'react'
 
-/** A screen that throws while rendering shows what happened and a way back, instead of blanking the whole page. */
+
 export default class ErrorBoundary extends Component<{ name: string; children: ReactNode }, { error: Error | null }> {
   state = { error: null as Error | null }
   static getDerivedStateFromError(error: Error) { return { error } }
