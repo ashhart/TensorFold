@@ -12,8 +12,8 @@ fn hashBuffer(h: anytype, b: mtl.Buffer) void {
 }
 
 /// Five tapped planes of one round: post-block hidden rows, plane by plane, so a divergence names its layer.
-pub fn tapDigests(r: *const Runner) ![5][32]u8 {
-    var out: [5][32]u8 = undefined;
+pub fn tapDigests(r: *const Runner) ![8][32]u8 {
+    var out: [8][32]u8 = undefined;
     for (0..out.len) |i| {
         const plane = try r.taps.plane(i);
         var h = std.crypto.hash.sha2.Sha256.init(.{});
