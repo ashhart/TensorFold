@@ -12,6 +12,9 @@ pub fn tests(b: *std.Build, test_step: *std.Build.Step) void {
     b.step("test-qwen27-quant-host", "Prepared head cache identity and prompt row capacity without a GPU").dependOn(&quant_run.step);
     const metrics = b.createModule(.{ .root_source_file = b.path("zig/src/metal/pass_metrics.zig"), .target = b.graph.host });
     b.step("test-qwen27-pass-metrics-host", "Pass timing and forwarding allocator without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = metrics })).step);
+    const mtp_flags = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_mtp_flags.zig"), .target = b.graph.host }) }));
+    test_step.dependOn(&mtp_flags.step);
+    b.step("test-qwen27-mtp-flags-host", "--mtp-drafts and --mtp-confidence refusals on a Mac without a GPU").dependOn(&mtp_flags.step);
     const window = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_window.zig"), .target = b.graph.host });
     const taps = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen27/tap_gather.zig"), .target = b.graph.host });
     const pricing_lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = b.graph.host });

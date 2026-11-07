@@ -363,7 +363,10 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     var draft_owned = owns_draft;
     errdefer if (draft_owned) draft_model.?.deinit();
     const memory = q.prompt_memory;
-    const fit_prompt = memory.Fit{ .config = model.config, .context = capacity + window, .slots = @max(o.streams, 1), .shared = model.device.tensorUnits(), .ring = if (draft_model) |d| @as(usize, d.ring().window) * d.ring().stride else 0, .planes = if (draft_model) |d| d.graph.config.tap_count else q.taps.layers.len, .current_rows = model.frame.capacity, .left = room(model) };
+    const mtp_on = model.weights.mtp != null and (o.mtp_drafts orelse 0) > 0;
+    // the MTP head's keys and values: one more attention layer a slot, beside the drafter's ring when there is one
+    const head_kv: usize = if (mtp_on) @as(usize, capacity + window) * model.config.kvDim() * 2 * 2 else 0;
+    const fit_prompt = memory.Fit{ .config = model.config, .context = capacity + window, .slots = @max(o.streams, 1), .shared = model.device.tensorUnits(), .ring = head_kv + if (draft_model) |d| @as(usize, d.ring().window) * d.ring().stride else 0, .planes = if (draft_model) |d| d.graph.config.tap_count else q.taps.layers.len, .current_rows = model.frame.capacity, .left = room(model) };
     const value = if (std.c.getenv("TF_PROMPT_ROWS")) |v| std.mem.span(v) else null;
     const row_policy = q.prompt_rows;
     const rows = @max(window, try fit_prompt.choose(row_policy.requested(model.device.generation(), model.config.moe(), value), row_policy.override(value) != null));
@@ -404,7 +407,6 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     h.back.chunk = h.runner.promptRows(@min(rows, row_policy.requested(model.device.generation(), model.config.moe(), value)));
     h.back.grow = .{ .ctx = h, .room = Host.roomFor, .added = Host.added };
     h.back.vision = o.images;
-    const mtp_on = model.weights.mtp != null and (o.mtp_drafts orelse 0) > 0;
     if (h.draft != null or mtp_on) try h.back.measure(io);
     if (mtp_on) {
         const x = try @import("qwen27_mtp.zig").Mtp.init(gpa, &h.runner, .{ .cap = o.mtp_drafts, .floor = o.mtp_confidence });
