@@ -1,7 +1,7 @@
 //! Gate 5's records of a drafter's tap writes (plan.hip's tf_plan_tap for round rows, tf_tap_rows for prompt rows).
 const Record = @import("hip_records.zig").Record;
 
-pub const records = [_]Record{
+pub const records = [2]Record{
     .{
         .launch = .{ .name = "drafter tap tf_plan_tap", .symbol = "tf_plan_tap", .image = "plan", .threads = 256 },
         .usage = .{

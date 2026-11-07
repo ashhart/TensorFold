@@ -1,7 +1,7 @@
 //! Recorded launch resources for the BF16 column operators on each served HIP architecture.
 const Record = @import("hip_records.zig").Record;
 
-pub const records = [_]Record{
+pub const records = [2]Record{
     .{
         .launch = .{ .name = "BF16 column multiply", .symbol = "tf_columns_mul_bf16", .image = "ops", .threads = 256 },
         .usage = .{

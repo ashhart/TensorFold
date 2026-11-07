@@ -1,7 +1,7 @@
 //! Measured resources of the shared vision kernels, in limits.rdna order.
 const Record = @import("hip_records.zig").Record;
 
-pub const records = [_]Record{
+pub const records = [12]Record{
     .{
         .launch = .{ .name = "BF16 LayerNorm", .symbol = "tf_layer_norm_bf16", .image = "ops", .threads = 256 },
         .usage = .{

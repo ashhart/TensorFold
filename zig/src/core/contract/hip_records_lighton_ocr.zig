@@ -3,7 +3,7 @@ const std = @import("std");
 const hip_records = @import("hip_records.zig");
 const Record = hip_records.Record;
 
-pub const records = [_]Record{
+pub const records = [9]Record{
     .{ .launch = .{ .name = "lighton_ocr tf_lo_tables", .symbol = "tf_lo_tables", .image = "lighton_ocr", .threads = 256 }, .usage = .{ .{ .vgprs = 15, .sgprs = 23, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 24, .sgprs = 23, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 15, .sgprs = 23, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 15, .sgprs = 25, .lds = 0, .private = 0, .bound = 256, .wave = 32 } } },
     .{ .launch = .{ .name = "lighton_ocr tf_lo_rotary", .symbol = "tf_lo_rotary", .image = "lighton_ocr", .threads = 256 }, .usage = .{ .{ .vgprs = 17, .sgprs = 27, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 17, .sgprs = 27, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 17, .sgprs = 27, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 17, .sgprs = 29, .lds = 0, .private = 0, .bound = 256, .wave = 32 } } },
     .{ .launch = .{ .name = "lighton_ocr tf_lo_merge", .symbol = "tf_lo_merge", .image = "lighton_ocr", .threads = 256 }, .usage = .{ .{ .vgprs = 13, .sgprs = 25, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 13, .sgprs = 25, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 13, .sgprs = 25, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 13, .sgprs = 27, .lds = 0, .private = 0, .bound = 256, .wave = 32 } } },

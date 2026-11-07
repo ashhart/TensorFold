@@ -22,9 +22,9 @@ fn relu2Tile(comptime rows: u32, comptime cb: u32) limits.HipLaunch {
         .symbols = .{ half, brain, brain, brain },
     };
 }
-
+pub const own_count: usize = 41;
 /// HIP kernels as launched; tf-hip-kernel-contract limits DIR re-derives the usage records from the code objects.
-const own_records = [_]Record{
+const own_records = [own_count]Record{
     .{
         .launch = .{ .name = "RMS norm tf_rms_rows", .symbol = "tf_rms_rows", .image = "ops", .threads = 256 },
         .usage = .{
@@ -501,7 +501,7 @@ pub const records = own_records ++ @import("hip_records_stream.zig").records ++ 
     @import("hip_records_vision.zig").records ++ @import("hip_records_dense_text.zig").records ++ @import("hip_records_families.zig").all;
 
 /// Gate 5's planted HIP controls: a launch past its __launch_bounds__, and 72 KiB of LDS where a workgroup has 64.
-pub const controls = [_]Record{
+pub const controls = [2]Record{
     .{
         .launch = .{
             .name = "control: past its bounds",

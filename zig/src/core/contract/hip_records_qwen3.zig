@@ -6,7 +6,7 @@ const hip_records = @import("hip_records.zig");
 const Record = hip_records.Record;
 const check = hip_records.check;
 
-pub const records = [_]Record{
+pub const records = [4]Record{
     .{
         .launch = .{ .name = "attention tf_heads_rows", .symbol = "tf_heads_rows", .image = "ops", .threads = 256 },
         .usage = .{
