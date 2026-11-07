@@ -126,12 +126,6 @@ pub const Stage = struct {
         norm(p, e, qr, w.q_norm, rows, c.q_lora, c.eps);
         if (rows == 1 and std.c.getenv("TF_DSV41_DOUBLE_ATTN_NORM") != null) normRepeat(p, e, qr, dup_view, w.q_norm, rows, c.q_lora, c.eps);
         attnMark(layer, "norm_qr", prof, &e);
-        if (common.wqb_x_debug) |b| {
-            if (layer == 0 and rows >= 64 and rows <= 2048) {
-                ops.encodeDump(e, &p.plain, qr, .{ .buffer = b, .offset = 0 }, rows * c.q_lora, true);
-                common.wqb_x_rows = rows;
-            }
-        }
         if (diagnostic) try DiagnosticObserver.observe(true, self.observer, e, layer, .qr_norm, qr);
         for (0..dense_passes) |_| try projection(ep, e, .{ .trellis = w.wq_b }, qr, q, scratch, rows, c.q_lora, q_width, .bf16);
         attnMark(layer, "wq_b", prof, &e);

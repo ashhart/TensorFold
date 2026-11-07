@@ -33,7 +33,6 @@ const warp32On = core.warp32On;
 const funnelPrefillOn = core.funnelPrefillOn;
 const moeDb = core.moeDb;
 const scratchBytes = core.scratchBytes;
-const splitCount = core.splitCount;
 const one_row_splits = core.one_row_splits;
 const moe_split_rows = core.moe_split_rows;
 const moeSplitCount = core.moeSplitCount;

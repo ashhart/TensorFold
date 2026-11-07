@@ -216,27 +216,10 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, o: Options) !Model {
     if (stream_stage) |buf| residency.add(buf);
     residency.add(ring_stash);
     pipelines.attention.registerResidency(residency);
-    // Layer 0's MoE input, 2,048 rows x 5,120 f32.
-    var moe_x_debug: ?mtl.Buffer = null;
-    if (std.c.getenv("TF_DSV41_DUMP_MOE_X") != null) {
-        const b = try device.buffer(2048 * 5120 * 4, mtl.ResourceOptions.shared);
-        errdefer b.deinit();
-        moe_x_debug = b;
-        residency.add(b);
-    }
-    // Layer 0's wq_b input, 2,048 rows x 1,280 f32, for the GPTQ Hessian.
-    var wqb_x_debug: ?mtl.Buffer = null;
-    if (std.c.getenv("TF_DSV41_DUMP_WQB_X") != null) {
-        const b = try device.buffer(2048 * 1280 * 4, mtl.ResourceOptions.shared);
-        errdefer b.deinit();
-        wqb_x_debug = b;
-        residency.add(b);
-        attention_common.wqb_x_debug = b;
-    }
     residency.commit();
     residency.requestResidency();
     queue.addResidencySet(residency);
-    return .{ .gpa = gpa, .io = io, .device = device, .queue = queue, .residency = residency, .checkpoint = cp, .weights = bound, .cfg = c, .cfg_arena = arena, .lanes = lanes, .caches = caches, .cache = &caches[0], .engram_stash = engram_stash, .partial_stash = partial_stash, .ring_stash = ring_stash, .snap_ring = snap_ring, .taps_stash = taps_stash, .stream = stream_rows, .stream_stage = stream_stage, .workspace = workspace, .attention_workspace = aw, .taps = taps, .cond = cond, .cond_wkv = cond_wkv, .wqb_x_debug = wqb_x_debug, .moe_x_debug = moe_x_debug, .mtp_logits = mtp_logits, .pipelines = pipelines, .admitted_bytes = needed, .load_seconds = @as(f64, @floatFromInt(std.Io.Timestamp.now(io, .awake).toNanoseconds() - load_started.toNanoseconds())) / 1e9 };
+    return .{ .gpa = gpa, .io = io, .device = device, .queue = queue, .residency = residency, .checkpoint = cp, .weights = bound, .cfg = c, .cfg_arena = arena, .lanes = lanes, .caches = caches, .cache = &caches[0], .engram_stash = engram_stash, .partial_stash = partial_stash, .ring_stash = ring_stash, .snap_ring = snap_ring, .taps_stash = taps_stash, .stream = stream_rows, .stream_stage = stream_stage, .workspace = workspace, .attention_workspace = aw, .taps = taps, .cond = cond, .cond_wkv = cond_wkv, .mtp_logits = mtp_logits, .pipelines = pipelines, .admitted_bytes = needed, .load_seconds = @as(f64, @floatFromInt(std.Io.Timestamp.now(io, .awake).toNanoseconds() - load_started.toNanoseconds())) / 1e9 };
 }
 pub fn deinit(m: *Model) void {
     m.queue.removeResidencySet(m.residency);
@@ -261,11 +244,6 @@ pub fn deinit(m: *Model) void {
     if (m.gate_x) |b| b.deinit();
     if (m.dspark_logits) |b| b.deinit();
     if (m.cond_wkv) |b| b.deinit();
-    if (m.wqb_x_debug) |b| {
-        b.deinit();
-        attention_common.wqb_x_debug = null;
-    }
-    if (m.moe_x_debug) |b| b.deinit();
     m.weights.deinit();
     m.checkpoint.deinit();
     m.pipelines.deinit();

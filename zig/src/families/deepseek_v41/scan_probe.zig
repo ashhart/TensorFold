@@ -57,16 +57,6 @@ pub fn recordStrided(enc: mtl.ComputeEncoder, p: *const ops.Pipelines, view: Vie
     nev += 1;
     ops.encodeCopy(enc, p, view, .{ .buffer = stg, .offset = off }, .{ .rows = rows, .width = width_u16, .x_stride = x_stride_u16, .y_stride = width_u16 });
 }
-pub fn reportStrided(enc: mtl.ComputeEncoder, p: *const ops.Pipelines, view: View, rows: u32, x_stride_u16: u32, width_u16: u32, tag: Tag, lay: u32) void {
-    _ = enc;
-    _ = p;
-    _ = view;
-    _ = rows;
-    _ = x_stride_u16;
-    _ = width_u16;
-    _ = tag;
-    _ = lay;
-}
 pub fn recordAt(enc: mtl.ComputeEncoder, p: *const ops.Pipelines, view: View, rows: u32, width_u16: u32, tag: Tag, lay: u32, src_row: u32, dst_row: u32) void {
     _ = dst_row;
     const stg = stage orelse return;

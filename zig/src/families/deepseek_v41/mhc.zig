@@ -114,9 +114,6 @@ pub const BoundaryPipelines = struct {
 /// The boundary's fixed shape: the streams' width, the split's eps and iteration count, the partial sums a row.
 pub const boundary_width: u32 = 5120;
 pub const boundary_slices: u32 = 20;
-pub fn boundaryPartBytes(rows: usize) usize {
-    return rows * boundary_slices * 25 * 4;
-}
 pub const Boundary = struct { rows: u32, expand: bool, mixes: bool = true, eps: f32, hc_eps: f32, iters: u32 };
 /// One boundary: expand the pending branch into `x_new` (or the mixes of `x_old` alone), then the split with
 /// `pre_in`'s lagged collapse, `norm`'s weight and this boundary's coefficients out.
@@ -227,15 +224,6 @@ pub fn encodeColDense(e: mtl.ComputeEncoder, p: *const Pipelines, x: View, w: Vi
 }
 
 pub const GateTree = extern struct { rows: u32, k: u32, n: u32, x_stride: u32, bf16_w: u32 };
-/// The bit-exact tiled twin of encodeColDense: a 4x4 cell tile per 128-thread threadgroup, the shipped reduction
-/// order reproduced in registers. Same arguments and destination as encodeColDense.
-pub fn encodeGateTree(e: mtl.ComputeEncoder, p: *const Pipelines, x: View, w: View, y: View, d: GateTree) void {
-    e.setPipeline(p.gate_tree);
-    bind(e, .{ x, w, y });
-    e.setValue(d, 3);
-    e.dispatchGroups(mtl.Size.of((d.n + 3) / 4, (d.rows + 3) / 4, 1), mtl.Size.of(128, 1, 1));
-}
-
 pub const GateTree4 = extern struct { rows: u32, k: u32, n: u32, x_stride: u32, bf16_w: u32 };
 pub fn encodeGateTree4(e: mtl.ComputeEncoder, p: *const Pipelines, x: View, w: View, y: View, d: GateTree4) void {
     e.setPipeline(p.gate_tree4);

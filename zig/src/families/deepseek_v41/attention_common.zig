@@ -19,11 +19,6 @@ pub const State = kv.cache.State;
 /// carries it so the core is written once.
 pub const Seg = struct { state: *State, p0: u32, r0: u32, n: u32 };
 
-/// Layer 0's wq_b input (the post-q_norm qr, [rows, q_lora] bf16), for the GPTQ calibration Hessian. Null unless
-/// TF_DSV41_DUMP_WQB_X is set; rows written are reported in wqb_x_rows.
-pub var wqb_x_debug: ?mtl.Buffer = null;
-pub var wqb_x_rows: u32 = 0;
-
 /// The attention stage's per-block GPU split (TF_DSV41_ATTN_PROF=1). The block marks (`attnMark`) only count
 /// dispatches; this ends the command buffer at each mark, commits, waits and prints that block's GPU window, then
 /// starts a fresh buffer. Default-inert: no split, no byte of the path moves.

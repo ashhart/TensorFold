@@ -34,7 +34,7 @@ pub fn verify(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) a
         if (w.parents != null or w.early or w.masks.len > 0) return error.TreeWindowsUnsupported;
     }
     // A round wider than the exact four-lane rung (the server's `--parallel auto` is 8) is verified as
-    // consecutive groups of at most four one-row windows. Each group is /532's forward (token-identical to solo
+    // consecutive groups of at most four one-row windows. Each group is one batch forward (token-identical to solo
     // at 1/2/3/4 windows); a group of one takes the one-stream path. Before this, five to eight active windows
     // fell back to ALL-single forwards, so the batch switched itself off exactly when the serving load was
     // highest.

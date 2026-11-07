@@ -136,9 +136,6 @@ pub const Workspace = struct {
         w.buffer.deinit();
         w.shared_maps.deinit();
     }
-    pub fn sharedMaps(w: *const Workspace) View {
-        return .{ .buffer = w.shared_maps, .offset = 0 };
-    }
     /// The input-row map for a `rows`-row window (rows 1..8): the first `2*rows` entries of the window's block.
     pub fn sharedMapInputs(w: *const Workspace, rows: u32) View {
         const off: usize = @as(usize, rows) * (@as(usize, rows) - 1);

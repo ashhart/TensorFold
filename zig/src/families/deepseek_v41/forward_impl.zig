@@ -383,12 +383,6 @@ pub fn forwardSegs(m: *Model, segs: []const Seg, logits: Logits) ![]const f32 {
         hid.record(enc, &p.ops, ws.view(.normalized), rows, .ffn_in, @intCast(index));
         try splitStage(m, &enc, &e, "mhc_ffn", index);
         try m.profileSpan(&enc, .moe);
-        if (m.moe_x_debug) |b| {
-            if (index == 0 and rows >= 64 and rows <= 2048) {
-                ops.encodeDump(enc, &p.ops, ws.view(.normalized), .{ .buffer = b, .offset = 0 }, rows * 5120, true);
-                m.moe_x_rows = rows;
-            }
-        }
         if (std.c.getenv("TF_DSV41_SKIP_MOE") == null) try m.moe(&enc, &e, &layer.moe, rows, @intCast(index), m.cfg.topk, null);
         hid.record(enc, &p.ops, ws.view(.branch), rows, .moe, @intCast(index));
         try m.profileSpan(&enc, .mhc);
@@ -480,57 +474,6 @@ pub fn forwardSegs(m: *Model, segs: []const Seg, logits: Logits) ![]const f32 {
         try completed(cb);
         pipe_gpu_extra += cb.gpuSeconds() * 1e3;
     }
-    // The same prefill's layer-0 MoE input to /tmp/moe_x.f32.
-    if (m.moe_x_debug) |b| {
-        if (m.moe_x_rows > 0) {
-            const n = @as(usize, m.moe_x_rows) * 5120 * 4;
-            const out = try m.gpa.alloc(u8, 16 + n);
-            defer m.gpa.free(out);
-            std.mem.writeInt(u64, out[0..8], @intCast(m.moe_x_rows), .little);
-            std.mem.writeInt(u64, out[8..16], 5120, .little);
-            const src: [*]const u8 = @ptrCast(b.contents());
-            @memcpy(out[16..], src[0..n]);
-            std.Io.Dir.cwd().writeFile(m.io, .{ .sub_path = "/tmp/moe_x.f32", .data = out }) catch {};
-            std.log.info("moe_x dump: {d} rows x 5120 f32 -> /tmp/moe_x.f32", .{m.moe_x_rows});
-            m.moe_x_rows = 0;
-        }
-    }
-    // One 2,048-row prefill's wq_b input to /tmp/wqb_x.f32 (a 16-byte K,R header, then f32).
-    if (m.wqb_x_debug) |b| {
-        if (attention_common.wqb_x_rows > 0) {
-            const n = @as(usize, attention_common.wqb_x_rows) * @as(usize, m.cfg.q_lora) * 4;
-            const out = try m.gpa.alloc(u8, 16 + n);
-            defer m.gpa.free(out);
-            std.mem.writeInt(u64, out[0..8], @intCast(attention_common.wqb_x_rows), .little);
-            std.mem.writeInt(u64, out[8..16], @intCast(m.cfg.q_lora), .little);
-            const src: [*]const u8 = @ptrCast(b.contents());
-            @memcpy(out[16..], src[0..n]);
-            std.Io.Dir.cwd().writeFile(m.io, .{ .sub_path = "/tmp/wqb_x.f32", .data = out }) catch {};
-            std.log.info("wqb_x dump: {d} rows x {d} f32 -> /tmp/wqb_x.f32", .{ attention_common.wqb_x_rows, m.cfg.q_lora });
-            attention_common.wqb_x_rows = 0;
-        }
-    }
-    // The proposer runs from the backend's draft, not here: its own forward writes the logits buffer from row 1
-    // on, which is exactly the rows a verify (logits .all) returns to the engine.
-    if (false and std.c.getenv("TF_DSV41_MTP_DRAFTS") != null and logits != .none and m.weights.dspark != null) {
-        const logit_view = m.workspace.view(.logits);
-        const logit_bytes = logit_view.buffer.contents();
-        var best: u32 = 0;
-        var best_value: f32 = -std.math.inf(f32);
-        for (0..129280) |t| {
-            const v = @as(f32, @bitCast(std.mem.readInt(u32, logit_bytes[logit_view.offset + t * 4 ..][0..4], .little)));
-            if (v > best_value) {
-                best_value = v;
-                best = @intCast(t);
-            }
-        }
-        if (m.proposeTokens(0, best, 3)) |drafts| {
-            m.mtp_drafts = drafts;
-            m.mtp_count = 3;
-            std.log.info("mtp drafts: pending={d} next={d} {d} {d}", .{ best, drafts[0], drafts[1], drafts[2] });
-        } else |err| std.log.warn("mtp: drafts unavailable ({s})", .{@errorName(err)});
-    }
-
     // TF_DSV41_MTP_DRAFTS: the drafter's proposal after this forward, from the token the head just chose.
     if (m.profile) |recorder| {
         _ = try recorder.readAfterCompletion();

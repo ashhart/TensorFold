@@ -352,12 +352,6 @@ pub const one_row_splits: usize = 16;
 /// gate+up call's two six-row slots a token out to a five-row window (sixty rows).
 pub const moe_split_rows: usize = 64;
 
-/// Split-K count for a one-row projection: narrow matrices otherwise get a handful of threadgroups.
-pub fn splitCount(n: usize) usize {
-    const tiles = @max(n / 16, 1);
-    const want = @max(1024 / tiles, 1);
-    return @min(want, 32);
-}
 pub fn check(v: View, bytes: usize, alignment: usize) !void {
     const len = v.buffer.length();
     if (v.offset % alignment != 0 or v.offset > len or bytes > len - v.offset) return error.InvalidExl3View;

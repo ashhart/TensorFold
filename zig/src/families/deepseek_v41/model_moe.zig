@@ -177,20 +177,10 @@ pub fn moe(m: *Model, enc: *mtl.ComputeEncoder, e: ?*mtl.CommandBuffer, w: *cons
     // multi-row calls, which decode each matrix ONCE for the window. TF_DSV41_SHARED_DENSE=1 arms it; unset is
     // the shipped call.
     const shared_split = moe_up_merged and rows >= 2 and std.c.getenv("TF_DSV41_SHARED_DENSE") != null;
-    // TF_DSV41_ROUTE_GEMM_F32: the GEMM's bf16 logits decoded into a private f32 buffer, so the route kernel
-    // takes its shipped path — the test that separates a bad read from a bad write.
     var logits_view = logits_dest;
-    var logit_dtype: u32 = 0;
+    const logit_dtype: u32 = 0;
     if (gate_private) {
         logits_view = .{ .buffer = gate_pdest.?, .offset = 0 };
-    }
-    if (route_gemm and false) {
-        const n = @as(u32, rows) * 384;
-        const f32buf = try m.device.buffer(@as(usize, n) * 4, mtl.ResourceOptions.shared);
-        ops.encodeDump(encoder, &p.ops, ws.view(.router_logits), .{ .buffer = f32buf, .offset = 0 }, n, true);
-        encoder.barrier();
-        logits_view = .{ .buffer = f32buf, .offset = 0 };
-        logit_dtype = 0;
     }
     // The MoE's parts -- the gate, the route, the gate/up, the SwiGLU, the down and the shared expert, each in
     // its own command buffer.

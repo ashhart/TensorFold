@@ -155,7 +155,7 @@ pub const Pipelines = struct {
     select_one_v: mtl.Pipeline,
     /// The identity selection for a row whose every visible compressed key is kept.
     identity: mtl.Pipeline,
-    /// The tensor-unit score tile (TF_DSV41_INDEX_NAX): the scalar scorer's term, one 128-dim MMA a head
+    /// The tensor-unit score tile (TF_DSV41_NO_INDEX_NAX): the scalar scorer's term, one 128-dim MMA a head
     /// over a 64-key by 64-row tile. Null when the GPU has no tensor units.
     nax_score: ?mtl.Pipeline = null,
     /// The decode-shaped score -- the keys on the op M and the head queries on its N, so a one-row step no longer

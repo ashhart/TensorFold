@@ -17,7 +17,6 @@ const ExpertDescriptor = core.ExpertDescriptor;
 const format = core.format;
 const decoder = @import("exl3_projection_decode.zig");
 const scratchBytes = core.scratchBytes;
-const splitCount = core.splitCount;
 const one_row_splits = core.one_row_splits;
 const moe_split_rows = core.moe_split_rows;
 const rowsArgs = core.rowsArgs;

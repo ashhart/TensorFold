@@ -7,6 +7,38 @@ inline void tf_fp8_expand4(threadgroup half* wx, uint tid, uint u) {
   o[1] = half2(a.y, b.y) * k256;
 }
 
+inline void tf_fp8_expand8(threadgroup half* wx, uint tid, uint2 q) {
+  const half2 k256 = half2(256.0h, 256.0h);
+  const uint u0 = q.x, u1 = q.y;
+  const half2 a0 = as_type<half2>(((u0 & 0x007F007Fu) << 7) | ((u0 << 8) & 0x80008000u));
+  const half2 b0 = as_type<half2>(((u0 >> 1) & 0x3F803F80u) | (u0 & 0x80008000u));
+  const half2 a1 = as_type<half2>(((u1 & 0x007F007Fu) << 7) | ((u1 << 8) & 0x80008000u));
+  const half2 b1 = as_type<half2>(((u1 >> 1) & 0x3F803F80u) | (u1 & 0x80008000u));
+  threadgroup half2* o = (threadgroup half2*)(wx + 8u * tid);
+  o[0] = half2(a0.x, b0.x) * k256;
+  o[1] = half2(a0.y, b0.y) * k256;
+  o[2] = half2(a1.x, b1.x) * k256;
+  o[3] = half2(a1.y, b1.y) * k256;
+}
+
+inline void tf_i8_expand4(threadgroup half* wx, uint tid, uint u) {
+  const int b0 = int(u << 24) >> 24, b1 = int(u << 16) >> 24, b2 = int(u << 8) >> 24, b3 = int(u) >> 24;
+  threadgroup half2* o = (threadgroup half2*)(wx + 4u * tid);
+  o[0] = half2(half(float(b0)), half(float(b1)));
+  o[1] = half2(half(float(b2)), half(float(b3)));
+}
+
+inline void tf_i8_expand8(threadgroup half* wx, uint tid, uint2 q) {
+  const uint u0 = q.x, u1 = q.y;
+  const int a0 = int(u0 << 24) >> 24, a1 = int(u0 << 16) >> 24, a2 = int(u0 << 8) >> 24, a3 = int(u0) >> 24;
+  const int b0 = int(u1 << 24) >> 24, b1 = int(u1 << 16) >> 24, b2 = int(u1 << 8) >> 24, b3 = int(u1) >> 24;
+  threadgroup half2* o = (threadgroup half2*)(wx + 8u * tid);
+  o[0] = half2(half(float(a0)), half(float(a1)));
+  o[1] = half2(half(float(a2)), half(float(a3)));
+  o[2] = half2(half(float(b0)), half(float(b1)));
+  o[3] = half2(half(float(b2)), half(float(b3)));
+}
+
 template <bool WIDE, typename O>
 inline void tf_exl3_prefill_body_fp8(threadgroup half* wx, const device half* x, const device uchar* w8,
                                      const device float* scales, device O* sums, constant TfExl3Args& a,

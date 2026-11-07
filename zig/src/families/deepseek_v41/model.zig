@@ -165,12 +165,6 @@ pub const Model = struct {
     attention_workspace: attention.Workspace,
     /// The drafter's taps: three backbone layers' hidden states, a row's worth of positions at a time.
     taps: mtl.Buffer,
-    /// Layer 0's wq_b input (the post-q_norm `qr`), for the GPTQ calibration dump. Null unless TF_DSV41_DUMP_WQB_X is
-    /// set.
-    wqb_x_debug: ?mtl.Buffer = null,
-    /// Layer 0's MoE input (the experts' output-error dump).
-    moe_x_debug: ?mtl.Buffer = null,
-    moe_x_rows: u32 = 0,
     pipelines: Pipelines,
     admitted_bytes: usize,
     load_seconds: f64 = 0,
@@ -178,7 +172,7 @@ pub const Model = struct {
     logits_rows: usize = 0,
     valid: bool = true,
     profile: ?*gpu_counters.Recorder = null,
-    /// The fused boundary's stream parity and the pending expand (TF_DSV41_HC_BOUNDARY).
+    /// The fused boundary's stream parity and the pending expand (TF_DSV41_NO_HC_BOUNDARY).
     stream_alt: bool = false,
     pending_expand: bool = false,
     host_prof: bool = false,
@@ -466,9 +460,6 @@ pub const Model = struct {
 
     pub fn streamView(m: *const Model) View {
         return m.workspace.view(if (m.stream_alt) .stream_next else .stream);
-    }
-    pub fn streamNextView(m: *const Model) View {
-        return m.workspace.view(if (m.stream_alt) .stream else .stream_next);
     }
     /// One fused boundary: the pending branch expanded into the other stream buffer, its mix partials, then the
     /// split: this boundary's pre/post/comb from the partials and the lagged `pre_in` collapse into `normed`.

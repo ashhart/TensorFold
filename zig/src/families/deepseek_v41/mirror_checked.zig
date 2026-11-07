@@ -4,7 +4,7 @@
 // declaration's field names, order, C types, array lengths and ! C-layout offsets to the Zig struct's own, and its
 // total to `@sizeOf`. A field added, removed, renamed, ! reordered or retyped on EITHER side is a build error --
 // the bug class (a silently shifted ! `scale` turned every index score into 0.0) can no longer reach a serve. ! !
-// The per-struct checks /478 put inside the struct bodies stay where they are; this file is the ! complete
+// The per-struct checks inside the struct bodies stay where they are; this file is the ! complete
 // registry, including the pairs that used to be anonymous literals at the callsite.
 
 const mirror = @import("metal/index_mirror.zig");

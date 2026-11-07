@@ -51,7 +51,6 @@ pub const rotatedBytes = core.rotatedBytes;
 pub const scratchBytes = core.scratchBytes;
 pub const one_row_splits = core.one_row_splits;
 pub const moe_split_rows = core.moe_split_rows;
-pub const splitCount = core.splitCount;
 pub const check = core.check;
 pub const disjoint = core.disjoint;
 pub const readonly = core.readonly;

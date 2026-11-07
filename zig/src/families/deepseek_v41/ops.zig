@@ -134,16 +134,6 @@ pub fn encodeBf16ToF16(e: mtl.ComputeEncoder, p: *const Pipelines, x: View, y: V
     e.dispatchThreads(mtl.Size.of(n, 1, 1), mtl.Size.of(256, 1, 1));
 }
 
-/// F16 -> BF16 over `n` elements (round to nearest even), the gate GEMM's operand bridge.
-pub fn encodeF16ToBf16(e: mtl.ComputeEncoder, p: *const Pipelines, x: View, y: View, n: u32) void {
-    const pipe = p.cast_bf16 orelse return;
-    e.setPipeline(pipe);
-    e.setBuffer(x.buffer, x.offset, 0);
-    e.setBuffer(y.buffer, y.offset, 1);
-    e.setBytes(std.mem.asBytes(&n), 2);
-    e.dispatchThreads(mtl.Size.of(n, 1, 1), mtl.Size.of(256, 1, 1));
-}
-
 pub fn encodeDump(e: mtl.ComputeEncoder, p: *const Pipelines, x: View, y: View, n: u32, bf16_src: bool) void {
     const pipe = if (bf16_src) p.dump_bf16 else p.dump_f32;
     const q = pipe orelse return;
@@ -155,24 +145,8 @@ pub fn encodeDump(e: mtl.ComputeEncoder, p: *const Pipelines, x: View, y: View, 
 }
 
 pub const Gate = struct { rows: u32, k: u32, n: u32 = 384 };
-/// x[rows, k] bf16 @ gate[n, k] bf16 -> y[rows, n] bf16 on the tensor units (TensorFold's gemm_nax, fp32 sums). The
-/// same dispatch step5/vision.zig uses: P carries the shapes, the strides, the tile counts and the swizzle.
-pub fn encodeGateGemm(e: mtl.ComputeEncoder, p: *const Pipelines, x: View, w: View, y: View, d: Gate) void {
-    const pipe = p.gate orelse return;
-    const tn = (d.n + 127) / 128;
-    const tm = (d.rows + 63) / 64;
-    e.setPipeline(pipe);
-    e.setBuffer(x.buffer, x.offset, 0);
-    e.setBuffer(w.buffer, w.offset, 1);
-    var q: [16]i32 = @splat(0);
-    const vals = [_]u32{ d.rows, d.n, d.k, d.k, d.k, d.n, tn, tm, 2, d.k / 256, 0, 0, 0, 0, 0 };
-    for (vals, 0..) |v, i| q[i] = @intCast(v);
-    e.setBytes(std.mem.asBytes(&q), 2);
-    e.setBuffer(y.buffer, y.offset, 3);
-    e.dispatchThreads(mtl.Size.of(@as(usize, tn << 2) * 32, (tm + 3) / 4 * 4, 2), mtl.Size.of(32, 4, 2));
-}
 /// x[rows, k] bf16 @ gate[n, k] bf16 -> y[rows, n] f32 on the tensor units: the same block and k order as
-/// encodeGateGemm, with an fp32 destination so the router reads the precision tf-dense-col gives it.
+/// the GEMM above, with an fp32 destination, so the router reads the precision tf-dense-col gives it.
 pub fn encodeGateGemmF16F32(e: mtl.ComputeEncoder, p: *const Pipelines, x: View, w: View, y: View, d: Gate) void {
     const pipe = p.gate_f16_f32 orelse return;
     const tn = (d.n + 127) / 128;
