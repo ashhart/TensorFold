@@ -54,6 +54,8 @@ test {
     _ = @import("cuda_load_owner.zig");
     _ = @import("cuda_images_interleave_test.zig");
     _ = @import("cuda_pages_test.zig");
+    _ = @import("cuda_pages_split_test.zig");
+    _ = @import("cuda_regions_test.zig");
     _ = @import("cuda_ranks_test.zig");
     _ = @import("cuda_taps_tp_test.zig");
     _ = @import("cuda_roce_multi.zig");

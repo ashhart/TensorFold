@@ -16,7 +16,7 @@ pub fn tableLen(capacity: usize) usize {
 
 /// What a stream of engine `e` holds: its fixed part and table (and `extra`, its other buffers), 13,056 bytes a token.
 pub fn layout(gpa: std.mem.Allocator, e: *const Engine, extra: u64) !kv.Layout {
-    const fixed = try state.State.pagedBytes(gpa, &e.w, e.capacity, tableLen(e.capacity));
+    const fixed = try state.State.pagedBytes(gpa, &e.w, e.capacity, tableLen(e.capacity), e.settings.kv_split);
     // TF_GLM_KV_HOST: a page costs the device only its pooled keys (the pages themselves are in host memory)
     const page = if (kv_host.onHost()) state.pkPageBytes(&e.w) else state.pageBytes(&e.w);
     return .{ .fixed_bytes = fixed + extra, .token_bytes = page / state.page_rows, .page_tokens = state.page_rows, .snap_bytes = 0 };
@@ -33,15 +33,18 @@ pub fn ownSequence(e: *Engine) !void {
     if (e.seqs.items[0] != null) return error.SlotTaken;
     const q = try e.gpa.create(types.Seq);
     errdefer e.gpa.destroy(q);
-    q.* = .{ .st = try fw.State.initPaged(e.gpa, e.d, &e.w, e.capacity, on(e, 0, state.pageBytes(&e.w))) };
+    q.* = .{ .st = try fw.State.initPaged(e.gpa, e.d, &e.w, e.capacity, on(e, 0, 0)) };
     e.seqs.items[0] = q;
     e.cur = q;
     e.slot = 0;
 }
 
-/// A sequence's place on the pages at `kv`: a table as long as a stream's window.
-fn on(e: *const Engine, kv_at: u64, page: u64) state.Paged {
-    return .{ .kv = kv_at, .pages = tableLen(e.capacity), .page_bytes = page };
+/// A sequence's place on `n` pages at `base` (TF_GLM_KV_SPLIT: every pooled key first, then every latent row).
+fn on(e: *const Engine, base: u64, n: usize) state.Paged {
+    const at: state.Paged = .{ .kv = base, .pages = tableLen(e.capacity), .page_bytes = state.pageBytes(&e.w) };
+    if (!e.settings.kv_split) return at;
+    const pooled = state.pkPageBytes(&e.w);
+    return .{ .kv = base + n * pooled, .pages = at.pages, .page_bytes = state.latentPageBytes(&e.w), .pk = base, .pk_page = pooled, .split = true };
 }
 
 pub const Pages = struct {
@@ -103,7 +106,7 @@ pub const Pages = struct {
             q.* = null;
         };
         errdefer cuda.completion.drain(e.d, e.stream, "GLM page construction did not drain");
-        var at = on(e, p.base(), page);
+        var at = on(e, p.base(), pages);
         if (p.pk_arena) |a| {
             at.pk = a.ptr;
             at.pk_page = state.pkPageBytes(&e.w);
@@ -139,6 +142,13 @@ pub const Pages = struct {
     fn poisoned() bool {
         const v = std.c.getenv("TF_KV_POISON") orelse return false;
         return std.mem.eql(u8, std.mem.span(v), "1");
+    }
+
+    /// A page's parts, each at its region's base and stride: the whole page, or its pooled keys and latent rows.
+    fn parts(p: *const Pages) [2]struct { at: u64, bytes: u64 } {
+        if (!p.e.settings.kv_split) return .{ .{ .at = p.base(), .bytes = p.page }, .{ .at = 0, .bytes = 0 } };
+        const pooled = state.pkPageBytes(&p.e.w);
+        return .{ .{ .at = p.base(), .bytes = pooled }, .{ .at = p.base() + p.pool.total() * pooled, .bytes = p.page - pooled } };
     }
 
     /// The pool and the pages' arena; the paged sequences are the engine's (it frees every slot).
@@ -216,8 +226,7 @@ pub const Pages = struct {
     /// The slot's sequence reaches its pages' rows (past the `kept` first, NaN first under TF_KV_POISON).
     fn mapped(p: *Pages, slot: u32, ids: []const u32, kept: usize) !void {
         const st = &p.e.seqs.items[slot].?.st;
-        const page = p.page;
-        if (p.poison) for (ids[kept..]) |id| try p.e.d.check(p.e.d.api.cuMemsetD32Async(p.base() + id * page, 0xFFFF_FFFF, page / 4, p.e.stream.handle), "cuMemsetD32Async");
+        if (p.poison) for (ids[kept..]) |id| for (p.parts()) |r| if (r.bytes > 0) try p.e.d.check(p.e.d.api.cuMemsetD32Async(r.at + id * r.bytes, 0xFFFF_FFFF, r.bytes / 4, p.e.stream.handle), "cuMemsetD32Async");
         st.pages = ids;
         st.capacity = @min(ids.len * state.page_rows, p.e.capacity);
         p.used[slot] = true;
@@ -257,6 +266,8 @@ pub const Pages = struct {
             const st = &e.seqs.items[u.slot].?.st;
             const bytes = std.mem.sliceAsBytes(ids[from..]);
             try e.d.check(e.d.api.cuMemcpyHtoD_v2(st.table + from * 4, bytes.ptr, bytes.len), "cuMemcpyHtoD");
+            // TF_GLM_KV_SPLIT: the latent table holds the same ids while every rank holds every row
+            if (st.ltable != 0) try e.d.check(e.d.api.cuMemcpyHtoD_v2(st.ltable + from * 4, bytes.ptr, bytes.len), "cuMemcpyHtoD");
         }
     };
 };
