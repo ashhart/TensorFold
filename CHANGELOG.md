@@ -13,6 +13,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
   `TENSORFOLD_GEMMA4_KV_PAGES`, `TENSORFOLD_SPARK25_KV_PAGES`) and Nemotron's paging on Metal
   (`TF_NEMOTRON_METAL_KV_PAGES`) are registered in the profile registry; the startup line and `capabilities` report
   them, and the values are read as before with every default unchanged (#2306, part of #1660).
+- LFM2.5-24B-A2B serves on one NVIDIA GPU from the MLX 4-bit export, on the shared CUDA kernels, with `--parallel`
+  streams and copy drafts; there is no drafter or prompt cache yet (#1492, part of #1488). Thanks to @jschmied.
 
 ## 1.2.4
 
