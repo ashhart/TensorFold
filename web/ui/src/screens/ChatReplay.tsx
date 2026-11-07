@@ -68,14 +68,14 @@ export function SpeedupCheck({ id, model, onDone, onClose, toast, written }: { i
   return (
     <div className="replayform">
       <div className="membar-head"><b className="small">Verify speed-up &amp; exactness on this conversation</b><button className="btn sm quiet" onClick={onClose}>Close</button></div>
-      <p className="small muted">The questions of this conversation are sent twice to {model || 'the served model'}: once with the speed-up, once without. The two answers are then put side by side. If the speed-up is exact, they are the same, token for token; the comparison also shows how much faster it was.</p>
+      <p className="small muted">Compare plain and drafted replies from {model || 'the served model'} for exactness and speed.</p>
       {(() => {
         const known = written.filter((w): w is NonNullable<Written> => !!w)
         const kinds = [...new Set(known.map(said))]
         return <p className="small">{known.length
-          ? <>Each answer is written again <b>with the settings it was first written with</b> ({kinds.length === 1 ? kinds[0] : `${kinds.length} different settings across the conversation`}), whatever the options show now. One thing differs on purpose: <b>no randomness</b>{known.some((w) => w.temperature !== 0) ? ' (the original answers were drawn at random, so they are not compared; the two new ones are)' : ''}.</>
-          : <>These answers were written before TensorFold Web recorded their settings: they are written again with the conversation's options as they are now, and <b>without randomness</b>.</>}
-          {known.length > 0 && known.length < written.length ? ' Older answers in it, with no record, use the options as they are now.' : ''}</p>
+          ? <>Use <b>recorded settings</b> ({kinds.length === 1 ? kinds[0] : `${kinds.length} settings`}) with <b>no randomness</b>{known.some((w) => w.temperature !== 0) ? '; sampled originals are excluded' : ''}{known.length < written.length ? '; older replies use current options' : ''}.</>
+          : <>Older replies use current options with <b>no randomness</b>.</>}
+        </p>
       })()}
       {step === 0 ? <div className="actions"><button className="btn sm primary" onClick={go}>Check it</button>
         <label className="small"><input type="checkbox" checked={watch} onChange={(e) => setWatch(e.target.checked)} /> Watch the two answers being written</label></div>
@@ -132,7 +132,7 @@ export function ReplayForm({ id, model, onDone, toast }: { id: string; model: st
         <input className="input" type="password" value={key} onChange={(e) => setKey(e.target.value)} placeholder="its key, if any" aria-label="Its key" />
         <input className="input" value={other} onChange={(e) => setOther(e.target.value)} placeholder="model" aria-label="Model" />
       </div>}
-      <p className="small muted">Each question is sent again with the original's earlier turns, without randomness (temperature 0), so the two can be compared reply by reply with “Compare its replies with…”. The speed-up has the AI guess a few words ahead and keep a guess only when it is exactly what it would have written. The replay is kept as a conversation of its own.</p>
+      <p className="small muted">Replay the original turns at temperature 0 and save the results as a separate conversation.</p>
       {prog && prog.status === 'running'
         ? <div className="small"><div className="progress"><i style={{ width: `${(prog.done / Math.max(1, prog.total)) * 100}%` }} /></div>{prog.done} of {prog.total} questions <button className="btn sm quiet" onClick={() => api.replayCancel().catch((e) => toast(`Not stopped: ${e}`, 'bad'))}>Stop</button></div>
         : <button className="btn sm primary" onClick={go}>Replay</button>}
@@ -175,14 +175,14 @@ export function ReplyCompare({ a, b, onClose, speedup, names = ['A', 'B'] }: { a
   return (
     <div className="replycompare" ref={top}>
       <div className="compare-bar"><b>Two conversations, reply by reply</b><button className="btn sm" onClick={onClose}>Back to the conversation</button></div>
-      <p className="small muted" style={{ margin: '4px 0 8px' }}>{speedup ? <>The same questions, written twice without randomness: on the left with speculative decoding (the speed-up: the AI drafts a few tokens ahead and keeps each only if it is the one it would have written), on the right without it, one token at a time.</> : <>The same questions, answered on the left by <b>{na}</b> and on the right by <b>{nb}</b>: it shows whether the answers are the same and which was faster.</>}</p>
-      {c.turns.length > 0 && c.checked === 0 && <p className="verdict-line">Whether the tokens are the same cannot be said here: {speedup ? 'the engine did not confirm the speed-up was off on the right, or gave no token digests' : 'the engine gave no token digests, or a reply failed'}. The texts are below.</p>}
+      <p className="small muted" style={{ margin: '4px 0 8px' }}>{speedup ? <>The same greedy requests: drafted on the left, plain on the right.</> : <>The same greedy requests: <b>{na}</b> on the left, <b>{nb}</b> on the right.</>}</p>
+      {c.turns.length > 0 && c.checked === 0 && <p className="verdict-line">Token equality is unchecked: {speedup ? 'the engine did not confirm the speed-up was off on the right, or gave no token digests' : 'the engine gave no token digests, or a reply failed'}.</p>}
       {speedup && c.checked > 0 && <p className={`verdict-line ${c.same_tokens === c.checked ? 'good' : 'bad'}`}>{c.same_tokens === c.checked
         ? `The speed-up changed nothing: the same answer${c.checked === 1 ? '' : 's'}, token for token${c.checked < c.turns.length ? ` (${c.checked} of ${c.turns.length} could be checked)` : ''}.`
-        : `The speed-up changed ${c.checked - c.same_tokens} of ${c.checked} answers checked: it is not exact here.`}{sp.median_change != null && sp.median_change < -0.005 ? ` With it, the answers came ${pct(gain(sp.median_change)).replace('+', '')} faster (${(1 / (1 + sp.median_change)).toFixed(1)}×).` : sp.median_change != null && sp.median_change > 0.005 ? ' It was not faster here.' : ''}</p>}
+        : `The speed-up changed ${c.checked - c.same_tokens} of ${c.checked} answers checked: it is not exact here.`}</p>}
       {!speedup && c.checked > 0 && <p className={`verdict-line ${c.same_tokens === c.checked ? 'good' : 'bad'}`}>{c.same_tokens === c.checked
         ? `Same answers, token for token, in ${c.checked === 1 ? 'the reply checked' : `all ${c.checked} replies checked`}${c.checked < c.turns.length ? ` (of ${c.turns.length})` : ''}.`
-        : `${c.checked - c.same_tokens} of ${c.checked} ${c.checked === 1 ? 'reply checked differs' : 'replies checked differ'}.`}{sp.median_change != null && Math.abs(sp.median_change) >= 0.005 ? ` On the right, ${nb} was ${speedWord(sp.median_change)} at the median.` : ''}</p>}
+        : `${c.checked - c.same_tokens} of ${c.checked} ${c.checked === 1 ? 'reply checked differs' : 'replies checked differ'}.`}</p>}
       <ul className="findings">
         {sp.median_change != null && (speedup
           ? <li><b>Speed:</b> {Math.abs(sp.median_change) < 0.005 ? 'as fast with speculative decoding as without' : `${pct(gain(sp.median_change))} with speculative decoding, at the median`}, {sp.too_few ? 'too few replies to call it certain' : sp.within_noise ? 'within noise' : 'a real difference'} (faster on {sp.b_slower} of {sp.b_faster + sp.b_slower} replies).</li>

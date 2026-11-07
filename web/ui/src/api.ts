@@ -242,8 +242,8 @@ function tokenDialog(): Promise<string | null> {
     d.setAttribute('aria-labelledby', 'token-title')
     d.innerHTML = `<form method="dialog">
       <h2 id="token-title">This TensorFold Web needs its access token</h2>
-      <p>On the machine running this TensorFold Web, <code>tensorfold-web token</code> prints it, and <code>tensorfold-web token --copy</code> puts it on the clipboard. It is also the file <code>web-token</code> in TensorFold Web's settings folder: <code>~/Library/Application Support/TensorFold Web</code> on a Mac, <code>~/.config/tensorfold-web</code> on Linux.</p>
-      <p>No need to type it: where this TensorFold Web is already open, <b>Settings → Open this TensorFold Web in another browser</b> gives a one-time link, and another TensorFold Web's <b>Fleet → Open</b> opens this one signed in.</p>
+      <p>Run <code>tensorfold-web token --copy</code> on the Web host, then paste its token here.</p>
+      <p>Use <b>Settings → Access</b> on an open Web session to make a one-time sign-in link.</p>
       <label>Token <input name="token" autocomplete="off" spellcheck="false" required></label>
       <div class="actions"><button class="btn primary" value="ok">Use this token</button><button class="btn quiet" value="cancel" formnovalidate>Cancel</button></div>
     </form>`
@@ -495,5 +495,5 @@ export type PullStatus = {
 
 export const GB = 1024 ** 3
 export { bytes as gb } from './units'          // sizes roll over to MB and TB (`units.ts`)
-export const num = (n: number | null | undefined) => (n == null ? '—' : n.toLocaleString('en-US'))   // — : not known
+export const num = (n: number | null | undefined) => (n == null ? '—' : n.toLocaleString('en-US'))
 export const shortName = (id: string) => id.split('/').pop() ?? id

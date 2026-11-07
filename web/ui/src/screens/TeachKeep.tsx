@@ -20,7 +20,7 @@ export function Versions({ copy, busy, toast, onChange }: { copy: string; busy: 
   return (
     <div className="card">
       <div className="membar-head"><b>History of {copy}</b><span className="small muted">{bytes(store, 1)} on disk for it</span></div>
-      <p className="small muted">A point to go back to is kept before each lesson, and whenever you ask. Going back undoes every lesson since; the copy serves again afterwards.</p>
+      <p className="small muted">Restore a saved version to undo later lessons and serve that copy again.</p>
       {list && !list.length && <p className="small muted">Nothing yet.</p>}
       {ask?.kind === 'restore' && <Ask yes="Go back" busy={is(`restore:${ask.v.id}`)} onYes={() => act(`restore:${ask.v.id}`, () => api.livingVersionRestore(copy, ask.v.id), 'Going back: the copy stops, its files are written back, then it serves again')} onNo={() => setAsk(null)}
         text={<>Put <b>{copy}</b> back as it was at “{ask.v.label}”? The facts learned since are lost, unless you keep a point of now first.</>} />}
@@ -64,7 +64,7 @@ export function Checks({ copy, served, busy, toast, onChange }: { copy: string; 
   return (
     <div className="card">
       <b>Did {copy} remember?</b>
-      <p className="small muted">The same questions before and after a lesson: the facts it learned, near misses that must not change, and unrelated questions. Run them after a restart, or whenever you like.</p>
+      <p className="small muted">Compare learned facts, near misses and unrelated answers before and after a lesson.</p>
       {set && <div className="small">
         <div><b>{set.facts.length}</b> fact questions, <b>{set.own.length}</b> of yours, <b>{set.unrelated.length}</b> unrelated.</div>
         {!!set.own.length && <ul style={{ margin: '6px 0' }}>{set.own.map((o) => <li key={o.q}>{o.q} <span className="muted">({o.kind === 'near' ? 'near miss' : o.kind === 'undone' ? 'undone: must not come back' : 'yours'})</span> <button className="btn sm quiet" onClick={() => dropOwn(o.q)} aria-label={`Remove ${o.q}`}>×</button></li>)}</ul>}
@@ -88,7 +88,7 @@ export function Checks({ copy, served, busy, toast, onChange }: { copy: string; 
             <td>{r.q}<div className="small muted">{r.kind === 'fact' ? 'fact' : r.kind === 'near' ? 'near miss' : r.kind === 'undone' ? 'undone by a restore' : r.kind}</div></td>
             {(['off', 'on'] as const).map((m) => <td key={m} className={`small ${r.kind === 'undone' ? (r[m]?.recalled ? 'bad' : 'good') : r[m]?.changed ? (r.kind === 'fact' ? (r[m]?.recalled ? 'good' : 'bad') : 'bad') : ''}`}>{r[m] ? (r[m]!.changed ? <>{cut(r[m]!.before)} → <b>{cut(r[m]!.after)}</b></> : `same: ${cut(r[m]!.after, 80)}`) : '—'}</td>)}
           </tr>)}</tbody></table></div>
-        <p className="small muted" style={{ marginBottom: 0 }}>TensorFold Web reads words, not meaning: recall means the answer holds the words the fact adds (and does not deny them), a leak that it holds another fact's. Green: a fact now recalled. Red: a fact not recalled, or a near miss or unrelated answer that moved. Unchanged answers to unrelated questions are not listed.</p>
+        <p className="small muted" style={{ marginBottom: 0 }}>Word matching marks recall in green and misses or unintended changes in red.</p>
       </>}
     </div>
   )
@@ -107,7 +107,7 @@ export function Measures({ copy, busy, peers, toast }: { copy: string; busy: boo
   return (
     <div className="card">
       <b>What learning costs {copy}</b>
-      <p className="small muted">Bench runs made while {copy} served, each with the facts it held then: speed, same answers with the speed-up off, quality. KL compares it with the untaught model on another machine, on unrelated prompts: 0 means learning changed nothing there.</p>
+      <p className="small muted">Benchmark <b>{copy}</b> against its earlier versions or the untaught model.</p>
       <div className="actions">
         <button className="btn" aria-busy={is('quick')} disabled={busy} onClick={() => start('quick', () => api.benchStart({ mode: 'quick', exactness: true }), 'Quick score started: the Bench follows it')}>Quick score</button>
         <button className="btn" aria-busy={is('quality')} disabled={busy} onClick={() => start('quality', () => api.benchStart({ mode: 'quality', exactness: false }), 'Quality suite started (it takes a while): the Bench follows it')}>Quality suite</button>

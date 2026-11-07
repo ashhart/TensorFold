@@ -8,7 +8,7 @@
       "name": "Nemotron 3.5 Lightning 30B-A3B",
       "vendor": "NVIDIA",
       "license": "Open Model License",
-      "description": "The fastest model here, strong at code edits. Ships its own draft head.",
+      "description": "A fast coding model with its own draft head.",
       "tags": [
         "code",
         "tools",
@@ -35,7 +35,7 @@
       "name": "Qwen3.8-27B",
       "vendor": "Alibaba",
       "license": "Apache-2.0",
-      "description": "The best quality that fits a 32 GB Mac, with z-lab's draft model for speed. Reads images.",
+      "description": "A 27B vision model with a separate drafter, sized for a 32 GB Mac.",
       "tags": [
         "chat",
         "code",
@@ -64,7 +64,7 @@
       "name": "Qwen3.8-27B",
       "vendor": "Alibaba",
       "license": "Apache-2.0",
-      "description": "Qwen3.8-27B in mixed 4- to 6-bit widths (oMLX's oQ4): close to the 4-bit model, a little larger. Native on Macs from TensorFold 1.0.10, with the DFlash2 drafter.",
+      "description": "Mixed 4- to 6-bit Qwen3.8-27B with a DFlash2 drafter, native on Metal from TensorFold 1.0.10.",
       "tags": [
         "chat",
         "code",
@@ -92,7 +92,7 @@
       "name": "Qwen3.8-27B",
       "vendor": "Alibaba",
       "license": "Apache-2.0",
-      "description": "Qwen3.8-27B in mixed 2- to 8-bit widths (oMLX's oQ2): 11 GB on disk, so a 32 GB Mac keeps more room for context, at some cost in quality. Native on Macs from TensorFold 1.0.10, with the DFlash2 drafter.",
+      "description": "An 11 GB mixed 2- to 8-bit Qwen3.8-27B with a DFlash2 drafter, trading quality for context space.",
       "tags": [
         "chat",
         "code",
@@ -146,7 +146,7 @@
       "name": "Qwen3.8 Flash Next",
       "vendor": "Alibaba",
       "license": "Qwen Community",
-      "description": "The large one: 125B parameters, 6B active, 1M context, reads images. For 128 GB machines and DGX Sparks.",
+      "description": "A 125B vision model with 6B active parameters and 1M context, sized for 128 GB machines.",
       "tags": [
         "agents",
         "code",
@@ -173,7 +173,7 @@
       "name": "GLM-5.3-Flash",
       "vendor": "Z.ai",
       "license": "MIT",
-      "description": "320B parameters, 18B active, 1M context, reads images. For a 256 GB Mac or two DGX Sparks.",
+      "description": "A 320B vision model with 18B active parameters and 1M context, sized for a 256 GB Mac or two GB10s.",
       "tags": [
         "agents",
         "reasoning",

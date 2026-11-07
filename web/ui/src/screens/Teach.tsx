@@ -107,7 +107,7 @@ export default function Teach({ engine, toast, refreshEngine, stale }: Ctx) {
     try { await download(`/api/living/copies/${encodeURIComponent(n)}/card`, `${n}-model-card.md`) }
     catch (e) { toast(`Not downloaded: ${(e as Error).message}`, 'bad') }
   })
-  // a fact TensorFold Web taught, found by the engine's id when the engine wrote it its own way ("The user has a dog…")
+  // Match taught wording to the engine's fact id or recorded lesson text.
   const taughtAs = (f: GraphFact): string | undefined => {
     const kept = (learned?.lessons ?? []).filter((x) => x.outcome === 'kept' || x.outcome === 'partly kept')
     return (kept.find((x) => x.found?.some((g) => g.id === f.id)) ?? kept.find((x) => x.fact === f.text))?.fact
@@ -127,7 +127,7 @@ export default function Teach({ engine, toast, refreshEngine, stale }: Ctx) {
         {text.trim() && <div className="notice info">The message from Chat is kept here: <i>“{text.trim().length > 160 ? `${text.trim().slice(0, 160)}…` : text.trim()}”</i>. {view.copies.length ? 'Serve a copy below' : 'Make a copy below, then serve it'}, and it is ready to teach.</div>}
         {view.copies.length ? <>
           <b>Which copy should learn?</b>
-          <p className="small muted">A copy learns while it runs. Serve one below (the AI restarts, a few seconds), then teach it here.</p>
+          <p className="small muted">Serve a learning copy below to begin teaching.</p>
         </> : <>
           <b>Choose a learning model</b>
           <p className="small muted">Make a learning copy of {view.bases.length ? <b>{view.base_names?.[base] ?? shortName(base)}</b> : 'a downloaded model'} and serve it here.</p>
@@ -181,8 +181,9 @@ export default function Teach({ engine, toast, refreshEngine, stale }: Ctx) {
           <div className="progress indeterminate"><i /></div>
         </div>}
         {job.status === 'done' && <p className="small">{(() => { const kept = job.items.filter((i) => i.state === 'kept' || i.state === 'partly kept'); const n = job.items.length
-          return kept.length === n ? `It remembers ${n === 1 ? 'it' : `all ${n}`}.` : kept.length ? `It remembers ${kept.length} of ${n}; the rest was taken out.` : 'None of it was kept: the AI tried for several rounds, then could not answer its own test questions with it, so it took the lesson out whole. The copy is as it was before.' })()}
-          {job.items.some((i) => i.state === 'missed') && <span className="muted"> A short sentence about yourself, with the name said once, works best; a name that is also an everyday word, or a long text, is harder. Trying again with other words sometimes works.</span>}</p>}
+          return kept.length === n ? `It remembers ${n === 1 ? 'it' : `all ${n}`}.` : kept.length ? `It remembers ${kept.length} of ${n}; the rest was taken out.` : 'The lesson failed its checks and was rolled back.' })()}
+        </p>}
+        {job.status === 'done' && job.items.some((i) => i.state === 'missed') && <p className="small muted">Try short, distinct wording with the name said once.</p>}
         <div className="tablewrap"><table className="tbl">
           <thead><tr><th>Fact</th><th>What happened</th><th>Answered before</th><th>Answers now</th></tr></thead>
           <tbody>{job.items.map((i) => <tr key={i.id}>
@@ -197,7 +198,7 @@ export default function Teach({ engine, toast, refreshEngine, stale }: Ctx) {
           <div className="actions">
             <button className="btn" aria-busy={is('cancel')} disabled={!!job.items.find((i) => i.state === 'learning') === false} onClick={() => run('cancel', () => api.livingCancel().then(() => toast('Stopping after the fact being learned'), (e) => toast(`Not stopped: ${e}`, 'bad')))}>{is('cancel') ? 'Stopping…' : 'Stop after this fact'}</button>
             <button className="btn quiet" onClick={() => setAsk({ kind: 'stopnow' })}>Stop now</button>
-            <span className="small muted">After this fact: it finishes, the ones after it are not taught. Now: it is dropped where it is.</span>
+            <span className="small muted">After this fact finishes, skip later facts; Now interrupts it immediately.</span>
           </div>
         </> : <div className="actions">
           <button className="btn" aria-busy={is('cancel')} onClick={() => run('cancel', () => api.livingCancel().then(() => toast(job.phase === 'checking after' ? 'Stopping the questions' : 'Stopping before it learns'), (e) => toast(`Not stopped: ${e}`, 'bad')))}>{is('cancel') ? 'Stopping…' : job.phase === 'checking after' ? 'Skip the rest of the questions' : 'Stop before it learns'}</button>

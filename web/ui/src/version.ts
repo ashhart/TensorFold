@@ -14,3 +14,7 @@ export function engineSkew(here: string | undefined | null, there: string | unde
   if (!here || !there || here.includes('Python') || there.includes('Python')) return false
   return here !== there
 }
+
+export function displayEngineVersion(machineVersion: string | null | undefined, flagsVersion: string | null | undefined): string {
+  return machineVersion || flagsVersion || 'not installed'
+}

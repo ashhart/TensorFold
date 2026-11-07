@@ -80,7 +80,7 @@ export function FirstRun({ settings, saveSettings, toast }: { settings: Settings
   return (
     <section className="card firstrun" aria-labelledby="firstrun-title">
       <div className="membar-head"><b id="firstrun-title">Getting started</b><span className="small muted" aria-live="polite">{ready} of {steps.length} ready</span></div>
-      <p className="small muted" style={{ margin: '4px 0 0' }}>What this machine needs before it serves a model, checked here. Each step that is not ready says what to do.</p>
+      <p className="small muted" style={{ margin: '4px 0 0' }}>Check the requirements for serving a model and fix any incomplete step.</p>
       <CheckList checks={steps} numbered toast={toast} />
       <div className="actions"><button className="btn" onClick={again} disabled={busy || showing} aria-busy={showing}>{showing ? 'Checking…' : 'Check again'}</button><button className="btn quiet" onClick={hide}>Hide this list</button>{checkedAt(at)}</div>
     </section>
@@ -105,7 +105,7 @@ export function Diagnostic({ settings, saveSettings, toast }: { settings: Settin
         {settings?.setup_hidden && <button className="btn quiet" onClick={() => saveSettings({ setup_hidden: false }).then(() => { location.hash = '#settings/checks' }, (e) => toast(String(e), 'bad'))}>Show the getting-started list</button>}
         {checkedAt(at)}
       </div>
-      <p className="small muted" style={{ marginBottom: 0 }}>The report is a JSON file with these checks, the machine, the settings, the engine's state and its last 300 log lines, the fleet's names and the usage totals. Keys and tokens are taken out; machine names and paths stay.</p>
+      <p className="small muted" style={{ marginBottom: 0 }}>The report includes state and logs with names and paths; keys and tokens are removed.</p>
     </div>
   )
 }

@@ -100,7 +100,7 @@ export default function Compare({ a, b, onClose }: { a: string; b: string; onClo
               <td>{mark(p.a.pass)} / {mark(p.b.pass)}</td><td>{p.same_text ? 'same' : <span className="warn-text">differ</span>}</td></tr>
           })}</tbody>
         </table></div>}
-      <p className="small muted">Speed: a sign test on which run was faster, prompt by prompt. Exactness: an exact McNemar test on the prompts identical with drafts off in only one run. A difference is reported as one when p is under 0.05; a median change under 2% counts as the same speed.</p>
+      <p className="small muted">Sign and McNemar tests flag p &lt; 0.05; median speed changes under 2% count as level.</p>
     </div>
   )
 }

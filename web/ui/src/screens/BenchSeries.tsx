@@ -93,7 +93,7 @@ export default function Series({ engine, toast, stale, exactness, onOpen, onComp
   const remote = engine?.managed === false
 
   return <>
-    <p className="small muted">Two to four configurations of the engine this TensorFold Web serves, measured one after the other with the same prompts; the engine restarts between them when the model, context or budget changes, and comes back to {engine?.model ?? 'how it was'} at the end. Anyone using it meanwhile is cut off.</p>
+    <p className="small muted">Compare 2–4 configurations; restarts disconnect clients, then restore <b>{engine?.model ?? 'the original configuration'}</b>.</p>
     {remote && <div className="notice info">The engine is remote: a comparison restarts it, which only TensorFold Web on its machine can do.</div>}
     {err && <div className="notice bad">{err}</div>}
     {!going && <div className="series-form">
@@ -147,7 +147,7 @@ export default function Series({ engine, toast, stale, exactness, onOpen, onComp
         {shown.restore_error && <span className="small bad">{shown.restore_error}</span>}
       </div>
       <Matrix doc={shown} onOpen={onOpen} onCompare={onCompare} />
-      <p className="small muted">Against the first: the median change in speed prompt by prompt, and whether a sign test tells it from noise. Hover it for the details; Compare opens the full side by side.</p>
+      <p className="small muted">Changes compare with the first run; hover for statistics or open Compare.</p>
     </div>}
   </>
 }

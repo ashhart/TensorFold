@@ -33,7 +33,7 @@ export default function SettingsAccess({ toast }: { toast: (t: string, k?: 'ok' 
       {reach && <p className={`small ${access?.posture === 'warn' || access?.engine.answers_without_key ? 'bad' : 'muted'}`}>{reach}</p>}
       <b>Open this TensorFold Web in another browser</b>
       <p className="small muted">Create a link valid once for five minutes; the other device must be able to reach this Web address.</p>
-      {local && <p className="small bad">This page is open at {location.hostname}: a link made here opens on this machine only. Open TensorFold Web at its network name to make a link for other devices.</p>}
+      {local && <p className="small bad">Open Web at its network name to share with other devices; {location.hostname} is local only.</p>}
       <div className="actions"><button className="btn" aria-busy={is('make')} onClick={make}>{link && left ? 'Make another link' : 'Make a one-time link'}</button></div>
       {link && left > 0 && <>
         <div className="row" style={{ alignItems: 'center', gap: 8 }}>
@@ -50,7 +50,7 @@ export default function SettingsAccess({ toast }: { toast: (t: string, k?: 'ok' 
         </details>
       </>}
       {link && left === 0 && <p className="small muted">The link has expired; make another.</p>}
-      <p className="small muted" style={{ marginBottom: 0 }}>From another TensorFold Web, Fleet's "Open its TensorFold Web" does the same in one click. On this TensorFold Web's machine, <code>tensorfold-web token</code> shows the token itself (<code>--new</code> makes a new one).</p>
+      <p className="small muted" style={{ marginBottom: 0 }}>Use <code>tensorfold-web token</code> to read the token, or add <code>--new</code> to replace it.</p>
     </div>
   )
 }

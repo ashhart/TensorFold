@@ -137,10 +137,10 @@ export default function Monitor({ engine, settings, refreshEngine, toast, stale,
   const su = engine?.startup ?? {}
   const name = engine?.model_name ?? engine?.model
   const head = st === 'running' ? <><b>{name}</b> has been running{engine?.uptime_s != null && <> for {uptime(engine.uptime_s)}</>}{su.loaded_s ? <>, ready in {secs(su.loaded_s)} after its start</> : null}.</>
-    : st === 'starting' ? <>Starting <b>{name ?? '…'}</b>. The first start takes longer; the log below says what it is doing.</>
-    : st === 'unauthorized' ? <>A TensorFold answers at <code>{engine?.engine_url}</code> but refuses the API key this TensorFold Web holds ({engine?.error}). Enter the engine's key in <a href="#settings">Settings</a>{engine?.key_pending_restart ? ', or restart it to take the new key' : ''}.</>
-    : st === 'failed' ? <>The AI stopped with a problem ({engine?.error}). The log below has the reason.</>
-    : engine?.managed === false ? <>No TensorFold answers at <code>{engine?.engine_url}</code>.</> : <>Nothing is running. Start an AI from <a href="#models">Models</a>.</>
+    : st === 'starting' ? <>Starting <b>{name ?? '…'}</b>; follow progress in the log below.</>
+    : st === 'unauthorized' ? <>The engine at <code>{engine?.engine_url}</code> refuses Web's key ({engine?.error}); update <a href="#settings">Settings</a>{engine?.key_pending_restart ? ' or restart for the new key' : ''}.</>
+    : st === 'failed' ? <>The AI stopped ({engine?.error}); see its log below.</>
+    : engine?.managed === false ? <>No TensorFold answers at <code>{engine?.engine_url}</code>.</> : <>Start an AI from <a href="#models">Models</a>.</>
   const peak = Math.round(Math.max(0, ...decode))
   // the average while writing: idle seconds would drag it to zero
   const writing = decode.filter((v) => v > 0)
@@ -160,7 +160,7 @@ export default function Monitor({ engine, settings, refreshEngine, toast, stale,
       {(engine?.findings ?? []).length > 0 && <ul className="findings-list" aria-label="Health">
         {engine!.findings!.map((f) => <li key={f.id} className={f.level}><b>{f.title}</b> <span className="ev">{f.evidence}</span><span className="hint">{f.hint}</span></li>)}
       </ul>}
-      {engine?.managed && !engine.owned && st === 'running' && <div className="notice">A TensorFold answers at {engine.engine_url} but this TensorFold Web did not start it, so it cannot stop it. Stop it where it was started, or switch Settings to a remote engine.</div>}
+      {engine?.managed && !engine.owned && st === 'running' && <div className="notice">Web did not start the engine at {engine.engine_url}; stop it at its source or use an external engine in Settings.</div>}
 
       <div className="live">
         <div className="main">
@@ -208,7 +208,7 @@ export default function Monitor({ engine, settings, refreshEngine, toast, stale,
         <div className="bar"><b>Engine log</b>{engine?.managed !== false && <span className="state">{streamState}</span>}
           <label><input type="checkbox" checked={hidePolling} onChange={(e) => setHidePolling(e.target.checked)} /> Hide TensorFold Web's own polling</label>
           <button className="btn sm quiet" onClick={copyLog}>Copy</button></div>
-        <div className="log" ref={logRef}>{shown.length ? shown.join('\n') : lines.length ? 'Only polling so far. Untick the box to see it.' : 'Nothing yet.'}</div>
+        <div className="log" ref={logRef}>{shown.length ? shown.join('\n') : lines.length ? 'Untick the box to see polling entries.' : 'Nothing yet.'}</div>
       </div>
 
     </section>

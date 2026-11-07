@@ -80,7 +80,7 @@ export default function SettingsStorage({ toast }: { toast: (t: string, k?: 'ok'
           <tr key={m.repo}><td>{m.repo}</td><td>{bytes(m.bytes, 1)}</td><td>{day(m.last_used)}</td>
             <td className="act">{m.busy ? <span className="small muted">{m.busy}</span> : <button className="btn sm" aria-busy={busy === m.repo} disabled={busy != null} onClick={() => removeModel(m)} aria-label={`Remove ${m.repo} from disk`}>{busy === m.repo ? 'Counting…' : 'Remove…'}</button>}</td></tr>))}</tbody>
       </table></div> : <p className="small muted">None on this machine.</p>}
-      <p className="small muted" style={{ marginBottom: 0 }}>Every clean-up says how much it would remove and asks before it does. Only the catalog's models are listed: other models in the same cache are left alone.</p>
+      <p className="small muted" style={{ marginBottom: 0 }}>Review catalog-only cache deletions before confirming.</p>
     </div>
   )
 }

@@ -65,7 +65,7 @@ export default function SettingsBrands({ toast, refreshBrands }: { toast: (t: st
   return (
     <div className="card brands">
       <b>Makers and their logos</b>
-      <p className="small muted">TensorFold Web shows a model's maker and the machine's maker beside their names, recognised by the words below. A new family, or a logo TensorFold Web lacks, can be added here; it is kept on this TensorFold Web and needs no new version. A maker with no logo shows its initial.</p>
+      <p className="small muted">Add model and hardware makers, matching words and logos here.</p>
       <input ref={pick} type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml" hidden onChange={(e) => { onPicked(e.target.files?.[0]); e.target.value = '' }} />
       {KINDS.map(({ kind, title, hint }) => {
         const mine = (own ?? []).filter((b) => b.kind === kind)

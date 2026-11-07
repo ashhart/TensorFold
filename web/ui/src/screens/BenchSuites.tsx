@@ -83,7 +83,7 @@ export default function CustomSuites({ suites, builtIn, onChange, toast }: { sui
   return (
     <div className="card">
       <div className="report-head">
-        <div><b>Your suites</b><p className="small muted">Prompts of your own, measured in a usage profile, a load sweep or a KL divergence with the same protocol and exactness check. The built-in suites stay fixed so that runs compare; copy one here to change its prompts. A suite's digest covers what is sent, so runs compare only on the same prompts.</p></div>
+        <div><b>Your suites</b><p className="small muted">Write or import prompts for profiles, load sweeps and KL checks.</p></div>
         {!editing && <div className="actions">
           <select className="sel sm" value="" aria-label="Copy a built-in suite" onChange={(e) => copy(e.target.value)}>
             <option value="">Copy a built-in suite…</option>
@@ -96,7 +96,7 @@ export default function CustomSuites({ suites, builtIn, onChange, toast }: { sui
       </div>
       {editing && <Editor initial={editing === 'new' ? null : editing} toast={toast} onDone={(saved) => { setEditing(null); if (saved) onChange() }} />}
       {!editing && (suites.length === 0
-        ? <p className="small muted">None yet. Write one here, or import a file exported from another TensorFold Web.</p>
+        ? <p className="small muted">Write a suite or import one from another TensorFold Web.</p>
         : <div className="tablewrap"><table className="tbl">
           <thead><tr><th>Name</th><th>prompts</th><th>digest</th><th /></tr></thead>
           <tbody>{suites.map((s) => (
