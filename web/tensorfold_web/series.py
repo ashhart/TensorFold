@@ -1,10 +1,4 @@
-"""Compare mode: two to four configurations of the served engine, measured one after the other.
-
-A configuration is a model (any downloaded checkpoint), a context, a memory budget and drafts on or off. Between two
-configurations the engine is restarted when the model, context or budget changes; drafts only change the requests.
-Each configuration is an ordinary Bench run, tagged with the comparison it belongs to, so it also shows in the runs
-list and compares two by two. At the end the engine is put back as it was, whatever happened.
-"""
+"""Compare mode: two to four configurations of the served engine, measured one after the other."""
 
 from __future__ import annotations
 
@@ -60,9 +54,6 @@ def label(c: dict) -> str:
 
 
 class Series:
-    """Runs a comparison in a thread; ``switch`` puts the engine in a configuration (blocking until it serves or
-    raising; a configuration without a model stops it), ``current`` says how it is now, ``bench`` runs one
-    configuration's measurement."""
 
     def __init__(self, path: Path, bench, switch: Callable[..., dict], current: Callable[[], dict],
                  engine_name: Callable[[], str | None], gate: Gate | None = None,

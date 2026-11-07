@@ -1,5 +1,3 @@
-"""The internal review's list "before publication" (13 October 2026), done before TensorFold Web goes to TensorFold's
-repository: one test per item that can be tested outside a browser."""
 
 import base64
 

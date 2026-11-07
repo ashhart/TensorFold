@@ -1,10 +1,4 @@
-"""One reservation for everything that changes the engine or the files it serves.
-
-Starting or stopping the engine, a comparison of configurations (for its whole length), a settings change that
-touches the engine, a Bench run's start, a download's start and a model's removal each take the gate; whoever
-finds it taken is refused at once with what holds it, rather than waiting or racing. A check followed by an action
-is thus one step: nothing can start in between.
-"""
+"""One reservation for everything that changes the engine or the files it serves."""
 
 from __future__ import annotations
 

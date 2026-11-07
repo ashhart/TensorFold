@@ -1,10 +1,3 @@
-"""How a person gets into a TensorFold Web that has a token: the token itself, shown by `tensorfold-web token`, and links
-that open TensorFold Web once on another device without the token ever being typed or shown.
-
-A link carries a one-time code, good for five minutes; the page that opens it trades the code for the token (the code
-is spent at once) and keeps the token as if it had been typed. A code is made only for someone already in (the token,
-or the Fleet screen of another TensorFold Web that holds this one's token).
-"""
 
 from __future__ import annotations
 

@@ -1,9 +1,3 @@
-"""Other machines' TensorFold Web in one view: the machines added here, their engines and memory, read by this TensorFold Web.
-
-Each machine keeps its own TensorFold Web and token. This TensorFold Web reads the others' `/api/machine` and `/api/engine` with
-their tokens, so the page never holds another machine's token: a token is written once, kept in `fleet.json`
-(readable by this user only, like the settings) and never sent back to a page.
-"""
 
 from __future__ import annotations
 
@@ -77,7 +71,8 @@ class Peers:
         return [p for p in data.get("peers", []) if isinstance(p, dict) and p.get("id") and p.get("url")]
 
     def _write(self, peers: list[dict]) -> None:
-        settings_mod.write_private(self.path, json.dumps({"peers": peers}, indent=1))   # it holds the other machines' tokens
+        # it holds the other machines' tokens
+        settings_mod.write_private(self.path, json.dumps({"peers": peers}, indent=1))
 
     def all(self) -> list[dict]:
         with self._lock:
@@ -142,9 +137,6 @@ def _get(client: httpx.Client, url: str, path: str, token: str | None) -> httpx.
 
 
 def engine_of(peer: dict) -> tuple[str, str | None, dict]:
-    """A machine's engine as this TensorFold Web reaches it: through its TensorFold Web's relay (`/engine`), with the engine's key
-    read from that TensorFold Web, or for an engine without one TensorFold Web's token; both stay here, never on a page.
-    Returns the base URL, the key, and the headers to send beside it."""
 
     h = {TOKEN_HEADER: peer["token"]} if peer.get("token") else {}
     with client() as c:
@@ -191,8 +183,6 @@ ENGINE_SKEW = ("replies can part at a near tie between releases (Nemotron on CUD
 
 
 def engine_skew(here: str | None, there: str | None) -> str | None:
-    """Why ``here`` and ``there`` (native TensorFold versions) do not compare like for like, or None when they are the
-    same release or one of them is unknown or the Python line."""
 
     if not here or not there or "Python" in here or "Python" in there or here == there:
         return None

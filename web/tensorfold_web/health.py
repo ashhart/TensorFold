@@ -1,10 +1,4 @@
-"""Health findings for Monitor: each one a title, the evidence behind it and what to try, from pure rules.
-
-The rules read what TensorFold Web already has (the engine's figures, this machine's memory) plus a few platform signals
-read without administrator rights: macOS's memory pressure level and thermal state, NVIDIA's clock-event reasons.
-Counters are judged against a baseline taken at the first reading, so a count from before this TensorFold Web started is not
-reported as news.
-"""
+"""Health findings for Monitor: each one a title, the evidence behind it and what to try, from pure rules."""
 
 from __future__ import annotations
 

@@ -1,10 +1,3 @@
-"""TensorFold's native engine (1.0 and later): find the binary, ask what it can do, and build its `serve` command.
-
-The binary is `tensorfold-native`; Homebrew installs it as `tensorfold`, which is also the name of the frozen Python
-line's command, so a `tensorfold` on PATH counts only when its `--version` says it is the native one. The official
-installer (`curl -fsSL https://tensorfold.dev/install.sh | sh`) links it as `~/.tensorfold/bin/tensorfold`. A TensorFold Web
-started without these folders on its PATH (over SSH, from launchd) still finds it in their usual places.
-"""
 
 from __future__ import annotations
 
@@ -96,9 +89,6 @@ def version_tuple(version: str | None) -> tuple[int, ...]:
 
 
 def find_binary() -> str | None:
-    """The native binary: `TENSORFOLD_BIN` when it is one, else the newest release among `tensorfold-native` and a
-    native `tensorfold` on PATH and the installer's, Homebrew's and the archives' usual places (the first found on a
-    tie). Two installs side by side, such as the installer's 1.0.11 and an older Homebrew one, give the newer."""
 
     key = os.environ.get("TENSORFOLD_BIN", "") + "|" + os.environ.get("PATH", "")
     if key in _found and os.access(_found[key], os.X_OK):
@@ -149,11 +139,6 @@ def parse_usage(text: str) -> dict[str, dict]:
 
 
 def serve_flags(binary: str) -> dict[str, dict]:
-    """The `serve` flags this binary offers (`capabilities --json`), each with its arity read from `serve --help`.
-
-    One list drives the checks of the extra flags in Settings, the command TensorFold Web builds and the page's hints.
-    A flag the help does not describe keeps ``value`` None: the check then accepts it with or without a value.
-    """
 
     key = _stamp(binary)
     if key not in _flags:
@@ -170,8 +155,6 @@ def serve_flags(binary: str) -> dict[str, dict]:
 
 
 def safe_extra(args: list[str]) -> tuple[list[str], list[str]]:
-    """The extra flags with the managed and secret ones taken out (and their values): what reaches a command
-    line, whatever was saved before the check existed. Returns what is kept and what was dropped."""
 
     kept, dropped = [], []
     skip_value = False
@@ -190,11 +173,7 @@ def safe_extra(args: list[str]) -> tuple[list[str], list[str]]:
 
 
 def check_extra(args: list[str], flags: dict[str, dict]) -> list[str]:
-    """The extra `serve` flags as the engine will read them; raises ValueError on the first one it would not.
-
-    Refused: a flag this engine does not offer, an abbreviation (argparse would take it, the next version may not),
-    a flag TensorFold Web sets from Settings, and a secret on the command line.
-    """
+    """The extra `serve` flags as the engine will read them; raises ValueError on the first one it would not."""
 
     out: list[str] = []
     i = 0
@@ -305,8 +284,6 @@ def _refusals_path() -> Path:
 
 
 def refused(binary: str, model: str) -> str | None:
-    """Why this binary's version refused ``model`` on this machine before, if it did: kept per version, so an
-    upgrade asks again."""
 
     try:
         doc = json.loads(_refusals_path().read_text())
@@ -329,11 +306,6 @@ def remember_refusal(binary: str, model: str, why: str) -> None:
 
 def build_command(binary: str, model: str, s: Settings, *, host: str = "127.0.0.1",
                   drafter: str | None = None, slide: str | None = None) -> tuple[list[str], dict, list[str]]:
-    """The `serve` command for the settings, with only the flags this binary lists; the notes say what was left out.
-
-    The native engine sizes its memory itself, so TensorFold Web's budget is not passed. The API key goes through the
-    environment, never the command line.
-    """
 
     flags = capabilities(binary).get("serve", {}).get("flags", {})
     notes: list[str] = []

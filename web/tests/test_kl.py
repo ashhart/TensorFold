@@ -167,7 +167,8 @@ def test_a_refused_start_leaves_the_running_reference_alone(tmp_path, mock):
 
 
 def test_a_reference_reached_with_headers_of_its_own(tmp_path):
-    # another TensorFold Web's relay takes its token as a header: the reference carries it, and it is never kept with the run
+    # another TensorFold Web's relay takes its token as a header: the reference carries it, and it is never kept with
+    # the run
     server = mock_serve(port=0, rate_tps=4000.0, api_key="needed")
     try:
         url = f"http://127.0.0.1:{server.server_address[1]}"

@@ -1,5 +1,3 @@
-"""Codex's final verification, 13 October 2026: the five things it left, one test each (the third, paging while a
-search is on its way, is in the page and has no test)."""
 
 import httpx
 

@@ -32,8 +32,10 @@ def test_a_change_asked_by_another_sites_page_is_refused(tmp_path, monkeypatch):
     assert client.post("/api/engine/stop", headers={**h, "origin": "https://evil.example"}).status_code == 403
     assert client.post("/api/engine/stop", headers={**h, "sec-fetch-site": "cross-site"}).status_code == 403
     assert client.put("/api/settings", json={"theme": "dark"}, headers={**h, "origin": "http://127.0.0.1:8090"}).status_code == 200
-    assert client.put("/api/settings", json={"theme": "light"}, headers=h).status_code == 200      # a tool sends no Origin
-    assert client.get("/api/settings", headers={**h, "origin": "https://evil.example"}).status_code == 200  # reads are CORS's
+    # a tool sends no Origin
+    assert client.put("/api/settings", json={"theme": "light"}, headers=h).status_code == 200
+    # reads are CORS's
+    assert client.get("/api/settings", headers={**h, "origin": "https://evil.example"}).status_code == 200
 
 
 def test_behind_a_proxy_with_a_token_the_page_works_under_the_proxys_name(tmp_path, monkeypatch):
@@ -55,13 +57,11 @@ def test_the_access_posture(tmp_path, monkeypatch):
     assert got["posture"] == "ok" and got["studio"] == {"bind": "127.0.0.1", "local_only": True, "token": False, "via": None}
     proxied = client.get("/api/access", headers={"x-forwarded-host": "mac-mini.tail.ts.net"}).json()
     assert proxied["studio"]["via"] == "mac-mini.tail.ts.net" and proxied["posture"] == "warn"
-    server = mock_serve(port=0, host="0.0.0.0") if "host" in mock_serve.__code__.co_varnames else None
+    server = mock_serve(port=0)
     try:
         if server is not None:
             port = server.server_address[1]
-            import socket
-            ip = socket.gethostbyname(socket.gethostname())
-            s.engine_url, s.remote = f"http://{ip}:{port}", True
+            s.engine_url, s.remote, s.share = f"http://127.0.0.1:{port}", False, True
             got = client.get("/api/access").json()
             if got["engine"]["answers_without_key"] is not None:
                 assert got["posture"] == "danger" and got["engine"]["local_only"] is False

@@ -1,9 +1,3 @@
-"""The engine interface: how TensorFold Web launches an engine, and what it can learn of any engine it reaches.
-
-Two sides. A `Launcher` starts an engine TensorFold Web owns: the native TensorFold for the models qualified on it, the
-frozen Python line for the others until they are ported. `identify` names the engine behind any OpenAI-compatible
-address (TensorFold, vLLM, SGLang, llama.cpp, Ollama), so the Bench can measure peer engines on the same machine.
-"""
 
 from __future__ import annotations
 
@@ -65,11 +59,7 @@ class PythonLauncher:
 
 
 def choose(native_model: bool) -> Launcher:
-    """The launcher for a model: the native engine when the model is qualified there and it is installed.
-
-    A native model never falls back to the Python line when the binary is missing but the line is there: it may
-    load there under another family and run inexactly or not at all. A model not yet ported needs the Python line.
-    """
+    """The launcher for a model: the native engine when the model is qualified there and it is installed."""
 
     if native_model:
         launcher: Launcher = NativeLauncher()
@@ -117,9 +107,6 @@ def _json(client: httpx.Client, url: str, headers: dict) -> dict | None:
 
 
 def identify(url: str, *, key: str | None = None, client: httpx.Client | None = None) -> Endpoint:
-    """Which engine answers at ``url``: `owned_by` first, then each server's own route (Ollama's `/api/version`,
-    llama.cpp's `/props`, SGLang's `/get_server_info`, vLLM's `/version`). Anything else OpenAI-compatible is named so.
-    """
 
     base = url.rstrip("/").removesuffix("/v1")
     headers = {"Authorization": f"Bearer {key}"} if key else {}

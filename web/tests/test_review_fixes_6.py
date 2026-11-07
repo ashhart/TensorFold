@@ -1,5 +1,3 @@
-"""A second reader's review of 13 October 2026 (TensorFold 1.0.8 and 1.0.9 beside TensorFold Web), its findings checked
-against the code and the real ones fixed: one test per item that can be tested outside a browser."""
 
 import json
 import stat

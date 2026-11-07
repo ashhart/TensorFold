@@ -1,6 +1,3 @@
-"""One TensorFold Web per user at a time: the shared state (settings, living copies, versions, journals) is recovered and
-changed by one process, whose gates are its own. A second TensorFold Web started beside a running service stops before it
-recovers, adopts or touches anything."""
 
 from __future__ import annotations
 
@@ -34,8 +31,6 @@ def lock_path() -> Path:
 
 
 def hold(wait: float = 15.0, path: Path | None = None):
-    """Take the lock, waiting up to `wait` seconds for a TensorFold Web that is stopping (a service restart); the open file
-    is returned and must be kept for the life of the process. None when another TensorFold Web keeps it."""
 
     if path is None:
         settings_mod.secure_config_dir()

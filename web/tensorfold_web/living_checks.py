@@ -1,11 +1,3 @@
-"""Checks of a living copy: the same questions asked before and after, both thinking modes, and the leak matrix.
-
-A copy's check set holds the questions of the facts it kept (from TensorFold Web's record), near misses and questions of
-the user's own, and unrelated questions that should never move. A run asks each with thinking off and on and is kept
-(`<name>.checks/<run>.json`); two runs compare question by question. For each kept fact, an answer "recalls" it when it
-holds most of the words its fact adds to its question ("Pixel" for "What is my cat called?"), and "leaks" another fact
-when it holds that one's words instead: the trial's case of the head of marketing named as the chief executive.
-"""
 
 from __future__ import annotations
 
@@ -93,8 +85,6 @@ def set_own(name: str, questions: list[dict], unrelated: list[str] | None = None
 
 def run(t: living.Target, name: str, label: str, *, thinking: bool = True, cancel=None,
         extra: list[dict] | None = None, same_as: dict | None = None) -> dict:
-    """Every question of the set, thinking off (and on), kept as a run. ``extra``: the facts a lesson is about to
-    teach (or just taught), asked too, so the run before a lesson and the run after it hold the same questions."""
 
     if same_as is not None:                              # the run after a lesson asks exactly what the run before did
         rows = [{k: r[k] for k in ("q", "kind", "fact", "expect") if k in r} for r in same_as["rows"]]
@@ -141,8 +131,6 @@ NEGATION = re.compile(r"\b(not|no|never|isn't|isnt|aren't|don't|dont|doesn't|did
 
 
 def recalls(answer: str | None, expect: list[str]) -> bool:
-    """Most of the words the fact adds are in the answer, and none of them is denied ("not Pixel"). A heuristic: the
-    TensorFold Web reads words, not meaning, and says so."""
 
     if not answer or not expect or answer.startswith("[error:"):
         return False

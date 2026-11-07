@@ -55,7 +55,8 @@ def main(argv: list[str] | None = None) -> int:
                 "127.0.0.1 and reach TensorFold Web through an SSH tunnel")
     from . import instance
 
-    lock = instance.hold()                         # before any recovery, adoption or store: one TensorFold Web at a time
+    # before any recovery, adoption or store: one TensorFold Web at a time
+    lock = instance.hold()
     if lock is None:
         pid = instance.holder()
         print(f"[web] another TensorFold Web is running for this user{f' (pid {pid})' if pid else ''}; it keeps the "

@@ -1,16 +1,4 @@
-"""Power, temperature and throttling, one source per platform, read without administrator rights.
-
-- Mac: the SMC through IOKit. `PSTR` is the power the whole machine draws; the `Tp…` and `Tg…` probes are the CPU and
-  GPU temperatures. `powermetrics` needs root, and `macmon` stops on chips it does not know yet (the M6 in 0.8.2).
-- NVIDIA: `nvidia-smi`, the GPU's own power draw and temperature: part of the machine only, so energy is an estimate.
-- AMD: `amd-smi`, the socket power of an APU (Strix Halo) and its temperature: also part of the machine.
-
-Throttling, "did the machine slow itself down": the Mac's thermal state (serious or critical) from `NSProcessInfo`,
-NVIDIA's active clock-event reasons (power cap, thermal, hardware slowdown), and amd-smi's throttle status when the
-installed version reports it. None means not reported, which is not the same as "no".
-
-A platform without a source says why; the Bench then runs without power figures instead of failing.
-"""
+"""Power, temperature and throttling, one source per platform, read without administrator rights."""
 
 from __future__ import annotations
 

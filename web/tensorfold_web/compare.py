@@ -1,10 +1,3 @@
-"""Two Bench runs side by side: prompts paired one by one, and a test that says whether a difference is noise.
-
-Pairs are made on what was sent (a suite's prompt, or a prefill size), so two runs compare only when they asked the
-same things: runs whose suites have different digests are refused. Pass and fail (exactness now, the quality suite
-later) go through an exact McNemar test; speed goes through a sign test on the per-prompt direction. Both are exact
-binomial tests, small-sample safe, and p-values are given as they are, never rounded to a threshold.
-"""
 
 from __future__ import annotations
 
@@ -148,8 +141,6 @@ def _who(run: dict) -> dict:
 
 
 def compare(a: dict, b: dict) -> dict:
-    """A against B: the pairs, the tests, the overall figures and plain sentences; raises Refused when they differ in
-    what they asked."""
 
     notes = check(a, b)
     rows = _pairs(a, b)
@@ -183,8 +174,6 @@ def compare(a: dict, b: dict) -> dict:
 
 
 def _by_suite(checked: list[dict]) -> dict:
-    """McNemar suite by suite (category by category in a quality run): a loss confined to one kind of task can hide in
-    the overall count."""
 
     out: dict = {}
     for r in checked:
@@ -242,7 +231,8 @@ def findings(c: dict) -> list[str]:
     return [x for x in out if x]
 
 
-# -- the HTML report of a comparison -------------------------------------------------------------------------------------
+# -- the HTML report of a comparison
+# -------------------------------------------------------------------------------------
 
 def _e(x: object) -> str:
     return html.escape(str(x), quote=True)

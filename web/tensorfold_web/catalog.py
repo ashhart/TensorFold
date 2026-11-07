@@ -36,7 +36,8 @@ class Entry:
     speed_hint: str
     fraction: float | None = None
     workspace_bytes: int | None = None
-    drafter_fraction: float = 1.0        # share of the drafter's files that stays resident (bf16 files loaded at 4 bits: 0.3)
+    # share of the drafter's files that stays resident (bf16 files loaded at 4 bits: 0.3)
+    drafter_fraction: float = 1.0
     drafter_bytes: int | None = None
     drafter_size_bytes: int | None = None  # the drafter's files as last measured: its weight before sizes are fetched
     native: bool = False                 # served by the native engine: what its `capabilities` say on this machine,
@@ -97,9 +98,6 @@ def repo_size(repo_id: str, *, timeout: float = 15.0) -> int | None:
 
 
 def installed(repo_id: str, expected_bytes: int | None = None) -> bool:
-    """Whether the checkpoint is in the Hugging Face cache, whole: the cache answers as soon as `refs/main` exists,
-    so the snapshot's files are weighed against what the catalog says (a download cut halfway is lighter); with no
-    known weight, an `.incomplete` blob is the sign of a cut download."""
 
     try:
         from huggingface_hub import snapshot_download
@@ -145,7 +143,8 @@ class Catalog:
         self._refreshing = False
         self.refreshed_at: float | None = None
         self._facts: dict[str, dict] = {}            # `info` by checkpoint, asked once it is downloaded
-        self._facts_missed: dict[str, float] = {}    # when `info` last gave nothing for one: not asked again for a while
+        # when `info` last gave nothing for one: not asked again for a while
+        self._facts_missed: dict[str, float] = {}
 
     def refresh_sizes(self, *, force: bool = False) -> None:
         now = time.time()
@@ -198,8 +197,6 @@ class Catalog:
 
     def verdict_of(self, e: Entry, machine: Machine, weights: int, workspace: int, fraction: float | None,
                    *, strict: bool = False) -> fit.Verdict:
-        """The verdict by the rule of the engine that serves the model: the native engine on a Mac sizes its own
-        memory up to macOS's GPU limit, the budget setting does not apply to it; the Python line keeps its rule."""
 
         if e.native and machine.backend == "mlx":
             cap = fit.native_capacity(machine.ram_bytes, machine.gpu_ceiling_bytes)
@@ -213,9 +210,6 @@ class Catalog:
                            strict=strict)
 
     def fit_inputs(self, e: Entry) -> tuple[int, int, bool]:
-        """Resident bytes and working room for the verdict: the engine's own `info` once a native checkpoint is
-        downloaded (its weights, and its memory floor less them as the runtime margin), the catalog's estimate
-        otherwise. The third value says which."""
 
         facts = self._facts.get(e.id) if e.native and not e.drafter else None
         if facts and facts.get("weights_bytes") and facts.get("floor_bytes"):
@@ -239,16 +233,14 @@ class Catalog:
                 facts = native.info(binary, e.id)
             except Exception:  # noqa: BLE001 - a binary that hangs or fails says nothing
                 facts = None
-            if facts is None:                         # asked again later: the checkpoint may complete, the engine change
+            # asked again later: the checkpoint may complete, the engine change
+            if facts is None:
                 self._facts_missed[e.id] = time.time()
                 return None
             self._facts[e.id] = facts
         return self._facts[e.id]
 
     def native_here(self, e: Entry) -> bool:
-        """Whether the native engine installed here serves ``e``: its family and format among those the engine's
-        `capabilities --json` lists, unless it refused to load it here before. Without an engine to ask, the catalog's own
-        flag."""
 
         from . import native
 

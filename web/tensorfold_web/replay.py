@@ -1,11 +1,4 @@
-"""Replay a conversation on another configuration, then compare: the bridge from the Chat to the Bench.
-
-A replay sends the conversation's user turns again, in order, to a configuration: the served engine with drafts on or
-off, or another engine at an address. Each turn carries the original conversation's earlier turns (its own questions
-and the original replies), so every replay answers the same thing at the same point and the turns compare one by one.
-Replays are greedy (temperature 0) so that two of them can be compared reply by reply; a replay is kept as a
-conversation of its own, linked to the one it replays.
-"""
+"""Replay a conversation on another configuration, then compare: the bridge from the Chat to the Bench."""
 
 from __future__ import annotations
 
@@ -100,8 +93,6 @@ class Replays:
 
     def _go(self, rid: str, rev: int, src: dict, base: str, key: str | None, model: str, engine: str,
             target: dict) -> None:
-        """Each turn written on the revision the last one made: a page that edited the replay meanwhile wins, and
-        the replay stops there and says so rather than erase the edit."""
 
         headers = {"Authorization": f"Bearer {key}"} if key else {}
         st = src.get("settings") or {}
@@ -195,8 +186,6 @@ def uses_tools(doc: dict) -> bool:
 
 
 def _same_tokens(ma: dict, mb: dict, asked_off: tuple[bool, bool]) -> bool | None:
-    """The same tokens, a difference, or None when it cannot be said: a reply that failed, a digest missing, or a
-    side written with drafts off that the engine did not confirm off."""
 
     sa, sb = ma.get("stats") or {}, mb.get("stats") or {}
     complete = ("done", "length")                 # an error, a stop, an interruption: the reply is not whole
@@ -251,8 +240,6 @@ def compare_replies(a: dict, b: dict) -> dict:
 
 
 def _by_question(doc: dict) -> dict[tuple[str, int], dict]:
-    """Each question's reply (the last one given to it), keyed by the question's exact text and its rank among
-    equals: a question that reads "q (2)" is not taken for the second "q"."""
 
     out: dict[tuple[str, int], dict] = {}
     seen: dict[str, int] = {}

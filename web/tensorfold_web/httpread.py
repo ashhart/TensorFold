@@ -1,5 +1,3 @@
-"""Reading an error body without letting it hold anything: a size, a deadline and a cancel, all three enforced even
-while a read is blocked (the reading runs apart and the response is closed under it)."""
 
 from __future__ import annotations
 
@@ -11,9 +9,6 @@ import httpx
 
 
 def until_cancelled(work, cancel: threading.Event | None, *, close=None, name: str = "http-read") -> None:
-    """Runs ``work()`` apart and waits for it, checking ``cancel`` meanwhile. Set first, ``close()`` is called
-    (the response being read, to end a blocked read with its connection), the thread is left to end on its own,
-    and ``InterruptedError`` is raised; what ``work`` raised otherwise is raised here."""
 
     failed: list[BaseException] = []
 

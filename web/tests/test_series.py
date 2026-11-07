@@ -70,7 +70,8 @@ def test_a_comparison_measures_each_configuration_and_puts_the_engine_back(tmp_p
     assert m["rows"][0]["vs_first"] is None
     vs = m["rows"][1]["vs_first"]["speed"]
     assert vs["median_change"] == pytest.approx(-0.3) and not vs["within_noise"]      # the mock without drafts: 0.7x
-    assert vs["b_slower"] == 14 and vs["p"] < 0.001                                    # 14 prompts: a sign test can tell
+    # 14 prompts: a sign test can tell
+    assert vs["b_slower"] == 14 and vs["p"] < 0.001
 
 
 def test_a_configuration_that_does_not_start_is_said_and_the_next_goes_on(tmp_path, mock):
