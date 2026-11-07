@@ -75,6 +75,7 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/dsv41_draft.zig").steps(b);
     @import("zig/build/dsv41_assets.zig").steps(b);
     const target = b.standardTargetOptions(.{});
+    defer @import("zig/build/host_tests.zig").wire(b, target);
     @import("zig/build/copy_source.zig").steps(b);
     @import("zig/build/checkpoint_io_host.zig").steps(b, target);
     if (target.result.os.tag == .macos) @import("zig/build/masked_values.zig").steps(b, target, .ReleaseSafe);
