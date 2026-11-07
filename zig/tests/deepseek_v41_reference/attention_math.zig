@@ -23,23 +23,6 @@ fn narrow(comptime T: type, x: f64) T {
     return if (T == f32) @as(f32, @floatCast(x)) else x;
 }
 /// Compressor softmax pooling at reference precision T: FP32 is the source contract, FP64 the ideal.
-fn headRmsRange(q: []const u16) [2]f64 {
-    var mn: f64 = 1e30;
-    var mx: f64 = -1e30;
-    var head: usize = 0;
-    while (head < 64) : (head += 1) {
-        var acc: f64 = 0;
-        for (q[head * 512 ..][0..512]) |v| {
-            const x = @as(f64, m.f(v));
-            acc += x * x;
-        }
-        const r = @sqrt(acc / 512.0);
-        mn = @min(mn, r);
-        mx = @max(mx, r);
-    }
-    return .{ mn, mx };
-}
-
 pub fn poolOf(comptime T: type, kv: [2][]const T, gate: [2][]const T, out: []u16) void {
     @setFloatMode(.strict);
     for (out, 0..) |*o, d| {
@@ -331,13 +314,7 @@ pub fn StateOf(comptime T: type) type {
             self.observe(.qr_norm, &self.qr);
             try projection.applyOf(u16, T, .{ .trellis = a.wq_b }, &self.qr, &self.q, scratch);
             self.observe(.q_projection, &self.q);
-            // The per-head UNWEIGHTED query RMS arm, before the rope.
-            if (layer == 0) {
-                const before = headRmsRange(self.q[0..32768]);
-                for (0..64) |head| m.rmsUnweighted(T, self.q[head * 512 ..][0..512], c.eps, self.q[head * 512 ..][0..512]);
-                const after = headRmsRange(self.q[0..32768]);
-                std.debug.print("reference q head rms: before min={d:.5} max={d:.5} | after min={d:.5} max={d:.5}\n", .{ before[0], before[1], after[0], after[1] });
-            } else for (0..64) |head| m.rmsUnweighted(T, self.q[head * 512 ..][0..512], c.eps, self.q[head * 512 ..][0..512]);
+            // Release order: q_norm(wq_a(x)) -> wq_b -> rope; the trunk has no per-head query RMS.
             for (0..64) |head| m.rope(self.q[head * 512 ..][0..512], position, compressed, false, c);
             self.observe(.q, &self.q);
             try projection.applyOf(u16, T, .{ .trellis = a.wkv }, x, &self.kv, scratch);

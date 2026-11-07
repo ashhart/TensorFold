@@ -112,19 +112,6 @@ pub fn idealRsqrt(x: f32) f32 {
 pub fn rms(x: []const u16, weight: Tensor, eps: f32, out: []u16) void {
     rmsOf(f32, x, weight, eps, out);
 }
-/// The per-head UNWEIGHTED query RMS arm.
-pub fn rmsUnweighted(comptime T: type, x: []const u16, eps: f32, out: []u16) void {
-    @setFloatMode(.strict);
-    var sum: f64 = 0;
-    for (x) |v| sum += @as(f64, f(v)) * f(v);
-    if (T == f32) {
-        const r = idealRsqrt(meanFromWide(sum, x.len) + eps);
-        for (x, out) |v, *y| y.* = b(f(v) * r);
-        return;
-    }
-    const r = 1 / @sqrt(sum / @as(f64, @floatFromInt(x.len)) + @as(f64, eps));
-    for (x, out) |v, *y| y.* = b64(@as(f64, f(v)) * r);
-}
 /// FP64 decode of a BF16 cell, exact at both reference precisions; FP32 is the source contract, FP64 the ideal.
 pub fn d64(x: u16) f64 {
     return @as(f64, f(x));
