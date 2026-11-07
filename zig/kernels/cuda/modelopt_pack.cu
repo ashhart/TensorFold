@@ -106,3 +106,12 @@ extern "C" __global__ void __launch_bounds__(144) tf_pack_fp4_experts(const uint
     dst[w] = word;
   }
 }
+
+// Experts' e4m3 [E][n][k] as part m of [E][n/32][k/32][parts][32][2][4] words (Fp8Experts.packOne's order).
+extern "C" __global__ void __launch_bounds__(256) tf_pack_fp8_experts(const uint32_t* __restrict__ src, uint32_t* __restrict__ out,
+                                                                      int n, int k, int parts, int m) {
+  const int g = blockIdx.x, cb = blockIdx.y, e = blockIdx.z, w = threadIdx.x, kg = k / 32;
+  const int j = w % 4, h = (w / 4) % 2, t = (w / 8) % 4, gq = w / 32;
+  const long long row = static_cast<long long>(e) * n + cb * 32 + j * 8 + gq;
+  out[(((static_cast<long long>(e) * (n / 32) + cb) * kg + g) * parts + m) * 256 + w] = src[row * (k / 4) + g * 8 + h * 4 + t];
+}
