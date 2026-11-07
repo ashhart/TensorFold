@@ -2,9 +2,18 @@
 
 ## Verified live-main rebase for #1502
 
-The branch is now rebased onto upstream main `342b2379a01e807e05bd8ebd8af65d4608007b5e`.
+The branch is now rebased onto upstream main `c16a296407deda1de8d1266c63cd141705643312`.
 Only the vision change and its release/qualification documentation were replayed; the retired #1514 text dependency was not replayed.
 The #1502 release note is under Unreleased, separate from the historical 1.2.4 text-port entry.
+
+## Earlier 342-main M4 qualification
+
+Source `a00d3319395e4fb921ed69d1c71ebd85515770a7`, based on main
+`342b2379a01e807e05bd8ebd8af65d4608007b5e`, passed 119/119 build steps and 278 tests, with three skipped.
+The actual native version/help commands exited zero. The M4 Pro operator run passed 74/74 LFM3 kernels,
+caught all 52 planted controls and reported zero limit problems; tensor-unit tiled probes were explicitly skipped.
+All seven automatic CI checks passed on that head. Later main changes conflicted only with its release-note insertion.
+These source-bound checks do not qualify the newer rebase or replace Ash's owed M5 Ultra comparison.
 
 ## Earlier d7-main M4 qualification
 
@@ -27,7 +36,7 @@ zig build test-lfm3-host test-kernel-contract tf-kernel-contract tf-lfm3-vision 
 Ash's M5 Ultra comparison of main against the rebased head remains owed before the landing queue.
 The older M5/model receipts below retain their recorded source and binary identities; they do not qualify this rebase.
 
-## Current M5 long-context checks
+## Earlier M5 long-context checks
 
 [`current-m5-long-context.json`](current-m5-long-context.json) records all 26 completed requests:
 VL6/8 text prompts at 32k/64k, text4/6/8 at 131072/262128 prompt tokens, and VL4/6/8 at 127984 prompt tokens.
