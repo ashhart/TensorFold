@@ -257,4 +257,9 @@ test {
     _ = @import("request_starts_turns_test.zig");
     _ = @import("multipart_test.zig");
     _ = @import("query_test.zig");
+    _ = @import("ocr/types_test.zig");
+    _ = @import("ocr/geometry_test.zig");
+    _ = @import("ocr/markdown_test.zig");
+    _ = @import("ocr/lines_test.zig");
+    _ = @import("ocr/budget_test.zig");
 }
