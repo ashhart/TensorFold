@@ -427,6 +427,14 @@ activations, skipping the rows past its last block of eight, and summing each gr
 non-finite input as zero, writing its output over its input, scaling by the next element's weight, and summing its
 squares in bf16.
 
+CUDA also checks the mla image (`mla.cu`, MLA over a 512-wide latent with 64 roped columns and 128-wide heads, on
+GLM's chunk bodies): the head-wise gate, the rope (plain, and with YaRN's attention factor at 900,000 positions), the
+128-wide absorb_q and expand_v, and the chunk tiles (`tf_mla_chunks_r16`, 576-wide q and keys over a linear cache,
+through `tf_glm_merge`; the split form with `tf_mla_merge_part`), each against float64 (eight controls, real launches
+each given one planted fault: the gate reading the next head's column, the plain rope one position late, the YaRN
+rope without its factor, absorb_q and expand_v reading the next head's weights, the chunks the next head's queries,
+the split chunks reading a rank's page z as chunk z, and the per-rank merge one chunk short).
+
 ## CUDA records per nvcc release
 
 nvcc allocates registers differently from one release to the next, so the CUDA records are kept per release.
