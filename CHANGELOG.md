@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Configuration: a malformed TF_ or TENSORFOLD_ setting now stops the native server at startup with its name, the text it got and the forms it accepts, before any checkpoint or driver work, instead of being read leniently inside an engine; empty or whitespace-only values still mean unset, and the documented lenient forms stay. `--profile` and the startup line report six more setting groups. A kept disk state's identity now also records explicit prompt widths, Dory's exact-zero setting and the slide group's values, so kept disk states of Qwen 3.5 and Qwen3.8-27B on Metal, and of Nemotron and Qwen 3.5 on CUDA, are prefilled once after upgrading (#2405, part of #2370).
+
 - Tests: `test-quoted-markers-host` checks, with real tokenizers and chat templates named in `TF_TOKENIZER_DIRS` (skipped when unset), that every added-token spelling quoted in a chat request's messages, reasoning, tool-call arguments, tool results or tool schema stays plain text; run on Qwen3.8-Flash-Next and Qwen3.8-27B (#2400, part of #2399).
 
 - Prompt cache on disk: what the store drops as it opens is now said on the log, where it went silently before: a kept state whose file fails its check (a truncated file, a wrong name) or misses one of its blocks, with its cause, one line a cause, and the count of blocks no kept state names any more (a state's file deleted, or a write cut short); what is restored is unchanged (#2397, part of #2349). Thanks to @ThinkOffApp for the run that found it.
