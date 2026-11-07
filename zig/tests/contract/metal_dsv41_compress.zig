@@ -279,7 +279,7 @@ pub const Proj = struct {
         if (p.fam == .pool) @memcpy(p.rig.bytes(p.o[1], p.ol[1]), std.mem.sliceAsBytes(p.state0));
     }
 
-    /// Rows r0 to r0 + m of the prepared call as one launch, our kernels or (tmp) glue_rows's.
+    /// Rows r0 to r0 + m of the prepared call as one launch, our kernels or glue_rows's.
     pub fn encode(p: *Proj, e: anytype, r0: usize, m: usize, tmp: bool) void {
         const pl = if (tmp) &p.tmp.? else &p.pipes;
         const n = p.shape.n;

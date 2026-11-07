@@ -451,7 +451,7 @@ test "the floor manifest refuses a mismatched window and accepts its own" {
 }
 
 test "the release-quality capture is the fixed 128-token input" {
-    // r16's release-weights KL/top-1 window; its first 16 tokens are the 16-token window fixed below.
+    // The release-weights KL/top-1 window; its first 16 tokens are the 16-token window fixed below.
     const text = @embedFile("release-quality-128.json");
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
