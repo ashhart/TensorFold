@@ -45,7 +45,7 @@ test "the splice, attention and pooled indexer launches get every pointer, scala
     try m.image.inject(s, 4000, 2, 3, 4);
     try std.testing.expectEqualSlices(u64, &.{ 1000, 2000, 4000, 2, 20, 2560, 4 }, Capture.values[0][0..7]);
     try std.testing.expectEqual([7]u32{ 3, 40, 1, 256, 1, 1, 0 }, Capture.configs[0]);
-    try m.attn(s, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 1e-6, 3, .{});
+    try m.attn(s, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 1e-6, 3, .full, .{});
     const eps: u32 = @bitCast(@as(f32, 1e-6));
     const delta: u32 = @bitCast(@as(i32, -2));
     try std.testing.expectEqualSlices(u64, &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, eps, wt.proj_n, wt.q_heads, wt.kv_heads, wt.index_heads, wt.index_dim, wt.half, 3000, 20, delta }, Capture.values[1][0..21]);
@@ -74,7 +74,7 @@ test "a paged stream's media rows take the paged launches: the same arguments, i
     Capture.calls = 0;
     const m = view(&d, 1000);
     const pg: @import("cuda_glue.zig").Pg = .{ .pt = 7000, .ps = 64 * 30784 / 2, .ptok = 64 };
-    try m.attn(s, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 1e-6, 3, pg);
+    try m.attn(s, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 1e-6, 3, .full, pg);
     try m.pooled(s, 1, 2, 3, 4, 5, 1e-6, 8, pg);
     const eps: u32 = @bitCast(@as(f32, 1e-6));
     const delta: u32 = @bitCast(@as(i32, -2));

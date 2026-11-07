@@ -74,6 +74,8 @@ def rule(name: str, shape) -> tuple:
         return "w", 8
     if name.endswith("norm.weight"):
         return "one", 0
+    if name.endswith("indexer.k_norm.bias"):
+        return "w", 8
     if name.endswith("res_proj.weight"):
         return "w", 6
     if name.endswith("embed_tokens.weight"):

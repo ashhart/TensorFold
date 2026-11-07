@@ -1,4 +1,4 @@
-//! The fabric bound to MCDMA's own libmcdma-rpc (built from MCDMA's rpc/ by tools/zig/test_fabric.sh, MCDMA_RPC_LIBRARY).
+//! The fabric bound to MCDMA's libmcdma-rpc (built from MCDMA's rpc/ by tools/zig/test_fabric.sh, MCDMA_RPC_LIBRARY).
 const std = @import("std");
 const platform = @import("sys");
 const builtin = @import("builtin");

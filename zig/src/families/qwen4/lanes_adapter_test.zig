@@ -87,6 +87,8 @@ test "Qwen4 lanes: shared verify, prefix rejection, stale handles and cold-cut p
     try t.expectEqual(@as(u32, 3), left.fill_at.load(.acquire));
     try t.expect(try b.vtable.prefill_step.?(b.ptr, &left, 0));
     try b.prefill(&right);
+    try t.expectEqualSlices(u32, if (E.Gpu.kind == .metal) &.{ 3, 3 } else &.{}, left.prefill_widths.items);
+    try t.expectEqualSlices(u32, if (E.Gpu.kind == .metal) &.{2} else &.{}, right.prefill_widths.items);
     const lh = try b.first(&left, 6);
     const rh = try b.first(&right, 2);
     try t.expect(lh != rh);
@@ -104,6 +106,8 @@ test "Qwen4 lanes: shared verify, prefix rejection, stale handles and cold-cut p
     try t.expectError(error.Qwen4DrawPosition, b.verify(&bad, &verified));
     try t.expectEqual(begins, f.e.gpu.begins);
     try b.verify(&windows, &verified);
+    try t.expectEqualSlices(u32, if (E.Gpu.kind == .metal) &.{ 3, 3 } else &.{}, left.prefill_widths.items);
+    try t.expectEqualSlices(u32, if (E.Gpu.kind == .metal) &.{2} else &.{}, right.prefill_widths.items);
     try t.expectEqual(@as(usize, 4), f.e.gpu.project_rows);
     try t.expectEqualSlices(u32, &.{ 2, 3 }, &drafts0);
     try t.expectEqualSlices(u32, &.{ 0, 0, 0 }, &sample0);

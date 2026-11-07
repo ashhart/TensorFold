@@ -64,6 +64,7 @@ test "FSR native owner joins forecasts, loads actual multi-row demand and fails 
     @memset(pick.b.slice(u32, 20), 7);
     try s.prepare(&r, 1, lg, rows, pick, wts, 2, lg, null, false);
     try std.testing.expect(s.commands.pending == null);
+    try s.pool.?.arena.join(); // demand didn't need 42: its read may have run on beside demand's own
     try std.testing.expect(s.pool.?.arena.clock.pending(512 + 42) == null);
     if (try s.pool.?.arena.clock.peek(512 + 42)) |forecast_slot| {
         for (s.pool.?.buffers, 0..) |buffer, part|

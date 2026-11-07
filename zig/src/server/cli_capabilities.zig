@@ -1,4 +1,4 @@
-//! ``capabilities --json``: the engine's version, chip, backends and families, then the native flags and variables.
+//! ``capabilities --json``: engine facts, native flags and selected documented variables.
 const std = @import("std");
 const api = @import("engine_api");
 const cli = @import("cli.zig");
@@ -9,13 +9,13 @@ pub const Engines = struct {
     chip: ?[]const u8 = null,
     optional_libraries: []const @import("sys").optional_libraries.Status = &.{},
     backends: []const []const u8 = &.{},
-    /// model_type to the weight formats it reads, as gate entries name them.
+    /// model_type to the weight formats it reads, as gate entries name them; `decisions` lists the decision-only ones.
     families: []const api.Family = &.{},
     /// A CUDA host's NVML P2P summary as one JSON object, only with two or more GPUs (p2p_report.compact).
     p2p: ?[]const u8 = null,
 };
 
-/// The native capabilities document: the table's native flags and the honoured variables.
+/// Native flags and selected supported variables; env is non-exhaustive, profiles lists registered switches.
 pub fn capabilities(w: *std.Io.Writer, e: Engines) !void {
     try w.print("{{\"schema\": 1, \"engine\": \"zig\", \"version\": \"{s}\", \"chip\": ", .{e.version});
     if (e.chip) |c| try w.print("\"{s}\"", .{c}) else try w.writeAll("null");
@@ -27,6 +27,14 @@ pub fn capabilities(w: *std.Io.Writer, e: Engines) !void {
         for (f.formats, 0..) |fmt, j| try w.print("{s}\"{s}\"", .{ if (j > 0) ", " else "", fmt });
         try w.writeAll("]");
     }
+    try w.writeAll("}, \"decisions\": {"); // formats served only for decisions (a readout head), never chat
+    var listed = false;
+    for (e.families) |f| if (f.decision_formats.len > 0) {
+        try w.print("{s}\"{s}\": [", .{ if (listed) ", " else "", f.model_type });
+        listed = true;
+        for (f.decision_formats, 0..) |fmt, j| try w.print("{s}\"{s}\"", .{ if (j > 0) ", " else "", fmt });
+        try w.writeAll("]");
+    };
     try w.writeAll("}, \"serve\": {\"flags\": {");
     var first = true;
     for (cli.flags) |f| {
@@ -53,4 +61,49 @@ pub fn capabilities(w: *std.Io.Writer, e: Engines) !void {
     }, .{}, w);
     if (e.p2p) |p| try w.print(", \"p2p\": {s}", .{p});
     try w.writeAll("}\n");
+}
+
+test "capability audit: environment list is a subset beside the complete profile registry" {
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try capabilities(&out.writer, .{ .version = "test" });
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, out.written(), .{});
+    defer parsed.deinit();
+    const env = parsed.value.object.get("env").?.array.items;
+    const entries = parsed.value.object.get("profiles").?.object.get("registered_switches").?.array.items;
+    try std.testing.expectEqual(api.profile.entries.len, entries.len);
+    var additional: usize = 0;
+    for (entries, api.profile.entries) |value, entry| {
+        const name = value.object.get("id").?.string;
+        try std.testing.expectEqualStrings(entry.name(), name);
+        const listed = for (env) |v| {
+            if (std.mem.eql(u8, name, v.string)) break true;
+        } else false;
+        if (!listed) additional += 1;
+    }
+    try std.testing.expect(additional > 0);
+}
+
+test "capability audit: decision-only formats are listed apart from the formats a family chats in" {
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    const families = [_]api.Family{
+        .{ .model_type = "plain", .formats = &.{"mlx-q4g64"} },
+        .{ .model_type = "decides", .formats = &.{"mlx-q4g64"}, .decision_formats = &.{"bf16"} },
+    };
+    try capabilities(&out.writer, .{ .version = "test", .families = &families });
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, out.written(), .{});
+    defer parsed.deinit();
+    const chat = parsed.value.object.get("families").?.object.get("decides").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), chat.len);
+    try std.testing.expectEqualStrings("mlx-q4g64", chat[0].string);
+    const decisions = parsed.value.object.get("decisions").?.object;
+    try std.testing.expectEqual(@as(usize, 1), decisions.count());
+    try std.testing.expectEqualStrings("bf16", decisions.get("decides").?.array.items[0].string);
+    var empty: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer empty.deinit();
+    try capabilities(&empty.writer, .{ .version = "test" });
+    const none = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, empty.written(), .{});
+    defer none.deinit();
+    try std.testing.expectEqual(@as(usize, 0), none.value.object.get("decisions").?.object.count());
 }

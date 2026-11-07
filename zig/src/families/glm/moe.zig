@@ -15,7 +15,7 @@ const bind = fwd.bind;
 const shape = fwd.shape;
 const size = fwd.size;
 
-/// The MoE block (shared expert, route, routed experts, combine); expert parallel: this Mac's experts, sent, the peer's received.
+/// MoE block (shared expert, route, routed experts, combine); expert parallel: our experts, sent, the peer's received.
 pub fn moe(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, rows: u32) void {
     std.debug.assert(rows <= st.max_rows);
     const c = x.c;
@@ -147,7 +147,7 @@ fn experts(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, r
     e.dispatchThreads(size(32 * rows, if (part == 1) D else D / 4, zs), size(32 * rows, 1, 1)); // the shared expert: an output a simdgroup
 }
 
-/// The routed experts and the shared one (slot topk: grid z past the routed ids, the kernels' last) into `act` and `ye`.
+/// Routed experts and the shared one (slot topk: grid z past the routed ids, the kernels' last) into `act` and `ye`.
 fn both(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, rows: u32) void {
     const c = x.c;
     const k = x.k;

@@ -1,4 +1,4 @@
-"""mlx_lm's NemotronH prefill ops with our kernels swapped in where they exist, everything else exactly as mlx_lm writes it."""
+"""mlx_lm's NemotronH prefill ops with our kernels swapped in where they exist, everything else as mlx_lm writes it."""
 
 from __future__ import annotations
 

@@ -3,7 +3,7 @@
 // W4A8 study: each row of X quantized to int8 per groups of qg, back to fp16 in place, row sums redone; rot: Hadamard.
 KERNEL(256) void fakequant_rows(global half *X, global half *AHI, global half *ALO, int K, int qg, int gs, int rot,
                                 int levels) {
-  local half hl[17408];
+  local half hl[Q27_FF];
   const int t = get_group_id(0), lane = get_sub_group_local_id();
   for (int e = get_local_id(0) * 4; e < K; e += 1024) vstore4(vload4(0, X + (long)t * K + e), 0, hl + e);
   barrier(CLK_LOCAL_MEM_FENCE);
@@ -224,7 +224,7 @@ KERNEL(256) void conv_commit(global const half *CIN, global const half *P, globa
   const int c = get_global_id(0);
   for (int r = 0; r < 3; r++) {
     const int i = keep + r;                           // row of concat(state, qkv), 3 + keep rows
-    COUT[r * NCONV + c] = i < 3 ? CIN[i * NCONV + c] : P[(long)(PATH ? PATH[i - 3] : i - 3) * 16640 + c];
+    COUT[r * NCONV + c] = i < 3 ? CIN[i * NCONV + c] : P[(long)(PATH ? PATH[i - 3] : i - 3) * Q27_GDN_IN + c];
   }
 }
 

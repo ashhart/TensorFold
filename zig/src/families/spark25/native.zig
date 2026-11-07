@@ -88,6 +88,12 @@ pub fn fits(p: *anyopaque, prompt: u32, max_tokens: u32) bool {
     return own.sb.admits(prompt, max_tokens);
 }
 
+/// The pool the lane host's ledger admits this family's promises by (#1943).
+pub fn ledgerPool(p: *anyopaque) ?*kv.Pool {
+    const own: *Owned = @ptrCast(@alignCast(p));
+    return if (own.sb.pool) |*pool| pool else null;
+}
+
 /// Positions a stream's caches hold: whole 1,024s.
 fn positions(context: usize) usize {
     return (context + 1023) / 1024 * 1024;

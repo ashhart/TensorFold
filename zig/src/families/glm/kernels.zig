@@ -1,4 +1,4 @@
-//! GLM-5.3-Flash's pipelines, compiled at run time: the Python family's kernels (generated), our glue and latent attention.
+//! GLM-5.3-Flash pipelines compiled at runtime: the Python family's kernels (generated), our glue and latent attention.
 const std = @import("std");
 const mtl = @import("metal");
 const sources = @import("kernel_sources");

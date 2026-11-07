@@ -1,4 +1,4 @@
-//! Typed full-span packets over sender-owned double buffers, with credit returned only after the receiver releases its view.
+//! Typed full-span packets over sender-owned double buffers, credit returned only once the receiver releases its view.
 const std = @import("std");
 const rma = @import("rdma.zig");
 const words = @import("words.zig");

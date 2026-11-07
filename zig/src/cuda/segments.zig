@@ -139,7 +139,7 @@ fn stage(ops: anytype, fam: anytype, lanes: []Lane, layers: usize) !void {
     if (n > 1) try ops.join();
 }
 
-/// CUDA's ordering in the tests: a record marks its stream's position; a wait takes the event's latest record when queued.
+/// CUDA's test ordering: a record marks its stream's position; a wait takes the event's latest record when queued.
 const Sim = struct {
     const Kind = enum { before, begin, pre, mixer, post, finish, after };
     const Work = struct { call: usize, k: usize, kind: Kind, i: usize };

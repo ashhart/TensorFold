@@ -1,0 +1,54 @@
+{
+ "scope": "Shared-stream native Metal attention preserves serial attention bytes; this is not a tensor-unit prompt-attention qualification.",
+ "binary_sha256": "d1656249bdb581b147faacbd3b3c557c00b6c45b710eeddce517a67178b6ba2b",
+ "source_manifest": {
+  "zig/kernels/metal/lfm3/attention.metal": "cfd691baa70a30cd7629b1ac4c795d58ae2bad95aff07a2e6fb2347e1bf9b514",
+  "zig/src/families/lfm3/kernels.zig": "73406a56a0ad15700b9da797cab84fea75d0b94c0e58cd4d8abf7b84638048ec",
+  "zig/tests/contract/metal_lfm3_segments.zig": "036899bf4a5323ccce661386a35a9b3cd638f7a8c6a9c004b78094a9e0be4c24",
+  "tools/lfm3/serve_check.py": "87327328ef1a1fcc35536efa0c18829779ee278a4d325f2af69356bc68a71f5c"
+ },
+ "source_manifest_scope": "Hashes identify reviewed shared-attention source and checker files; they are not a whole-tree build manifest.",
+ "operator_contract": {
+  "hardware": "M4 Pro, 48 GB, macOS 26.5.1",
+  "command": "tf-kernel-contract --only LFM3",
+  "exit_status": 0,
+  "summary": "SUMMARY 52 kernels: 52 pass gates 1-4, 0 fail, 0 known findings; 14 controls: 14 red as planted, 0 missed; 0 limit problems; gates 28006 ms, limits 107 ms",
+  "shared_operator_scope": "Full and sliding serial-to-shared byte replacement; real shader missing-tail control; existing FP64 and accumulation gates retained."
+ },
+ "exactness": {
+  "hardware": "M4 Pro, 48 GB, macOS 26.5.1",
+  "checkpoint": "LFM3-1.7B-MLX-4bit",
+  "command": "tf-lfm3-exact MODEL_DIR",
+  "exit_status": 0,
+  "summary": "LFM3_EXACT mode=default passed=68 failed=0 skipped=0 prompt=5 windows=60 shared=2 snapshots=1 long=0 gpu_seconds=148.781",
+  "scope": "Includes two unequal streams and four unequal streams with 32/16 aggregate rows, partial keeps, idle stream, distinct cache capacities and state/logit equality against one-row execution. This run did not include --long."
+ },
+ "served": {
+  "hardware": "M5 Ultra, 256 GiB, macOS 27.0 (26A428)",
+  "command": "python3 tools/lfm3/serve_check.py --binary NATIVE --model-dir MODEL_DIR --sampled --cancel --output RESULT.json",
+  "counts": {
+   "passed": 303,
+   "failed": 0,
+   "skipped": 0
+  },
+  "cells": {
+   "_trimmed_value": {
+    "bytes": 131212,
+    "sha256": "3fde4f7bbb8d3e1543aa6be6b28cdfc873bda525b0909532bb81ae7270404f0b",
+    "keys": null,
+    "count": 6
+   }
+  },
+  "lifecycle": "One owned model process at a time; every test server exited after its suite."
+ },
+ "limits": [
+  "No new tolerance or reduced-precision probability storage.",
+  "This receipt does not establish a whole-model FP64 fidelity gate or a performance gate.",
+  "Named sessions and private machine addresses are omitted."
+ ],
+ "_trim": {
+  "note": "Raw capture replaced by counts, first/last items and SHA-256 of the canonical JSON of each trimmed list or string.",
+  "original_sha256": "7f9d5ab2d11dcca6f9f876cc6b6af956447bfdd7603150cf7f9455be832d279d",
+  "original_bytes": 216720
+ }
+}

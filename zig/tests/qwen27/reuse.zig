@@ -1,6 +1,5 @@
 //! Qwen27 prompt reuse through the served host against fresh prompt passes: each prompt's state and reply, bit for bit.
 const std = @import("std");
-const platform = @import("sys");
 const mtl = @import("metal");
 const q = @import("tensorfold").qwen27;
 const api = @import("engine_api");
@@ -81,18 +80,20 @@ const Run = struct {
     }
     fn check(r: *Run, name: []const u8, got: Outcome, want: Outcome, cached: ?u32) void {
         // the serial loop repeats a reply's rounds; on the lane core its trees follow the server's history
-        const rounds = r.lanes or (got.rounds == want.rounds and got.accepted == want.accepted);
-        const same = std.mem.eql(u32, got.tokens, want.tokens) and std.mem.eql(u8, &got.state, &want.state) and rounds and got.reason == want.reason;
+        const rounds = got.rounds == want.rounds and got.accepted == want.accepted;
+        const equal = std.mem.eql(u8, &got.state, &want.state);
+        const kept = equal or (r.lanes and !rounds); // other rounds keep the reply's last token or leave it pending
+        const same = std.mem.eql(u32, got.tokens, want.tokens) and kept and (r.lanes or rounds) and got.reason == want.reason;
         const resumed = if (cached) |c| got.cached == c else got.cached > 0;
         if (!same or !resumed) r.failures += 1;
-        std.debug.print("{s} {s}: resumed at {d}, {d} tokens, {d} rounds, {d} accepted (fresh {d}/{d}/{d}); state {s}\n", .{ if (same and resumed) "PASS" else "FAIL", name, got.cached, got.tokens.len, got.rounds, got.accepted, want.tokens.len, want.rounds, want.accepted, if (std.mem.eql(u8, &got.state, &want.state)) "equal" else "DIFFERS" });
+        const state = if (equal) "equal" else if (kept) "unmatched: other rounds" else "DIFFERS";
+        std.debug.print("{s} {s}: resumed at {d}, {d} tokens, {d} rounds, {d} accepted (fresh {d}/{d}/{d}); state {s}\n", .{ if (same and resumed) "PASS" else "FAIL", name, got.cached, got.tokens.len, got.rounds, got.accepted, want.tokens.len, want.rounds, want.accepted, state });
     }
 };
 
-/// Drafted requests on the lane core, by the served host's rule: TF_QWEN27_LANES, else a chip without tensor units.
+/// Drafted requests on the lane core: the host left its lone serial loop off (the default; TF_QWEN27_LANES=0 sets it).
 fn lanesMode(h: *host.Host) bool {
-    if (platform.c.getenv("TF_QWEN27_LANES")) |v| return std.mem.eql(u8, std.mem.span(v), "1");
-    return !h.model.device.tensorUnits();
+    return h.host.lone == null;
 }
 
 fn ids(a: std.mem.Allocator, io: std.Io, path: []const u8) ![]const u32 {
@@ -143,19 +144,21 @@ pub fn main(init: std.process.Init) !void {
         r.check(try std.fmt.allocPrint(a, "{s} {d}: turn 2's reply", .{ label, c.turn2 }), try r.send(.{ .prompt = p[0..c.turn2], .max_tokens = count, .drafts = drafts }), want, c.warm);
     };
     // a background pass yields to a foreground request: it keeps what it prefilled, and the request resumes there
-    const p = all[211..];
-    const want = try r.fresh(.{ .prompt = p[0..7900], .max_tokens = count });
-    var warm_box: Box = undefined;
-    const warm_request = api.Request{ .prompt = p[0..7700], .max_tokens = 0, .background = true };
-    try r.begin(&warm_box, &warm_request);
-    try std.Io.sleep(io, .fromMilliseconds(1500), .awake);
-    var box: Box = undefined;
-    const request = api.Request{ .prompt = p[0..7900], .max_tokens = count };
-    try r.begin(&box, &request);
-    try warm_box.wait();
-    const got = try r.end(&box);
-    if (warm_box.done != .cancelled or got.cached == 0 or got.cached >= 7700) r.failures += 1;
-    r.check("yielded background pass", got, want, null);
+    for ([_]u32{ 0, count }, [_]usize{ 307, 211 }) |n, skip| {
+        const p = all[skip..];
+        const want = try r.fresh(.{ .prompt = p[0..7900], .max_tokens = n });
+        var warm_box: Box = undefined;
+        const warm_request = api.Request{ .prompt = p[0..7700], .max_tokens = 0, .background = true };
+        try r.begin(&warm_box, &warm_request);
+        try std.Io.sleep(io, .fromMilliseconds(1500), .awake);
+        var box: Box = undefined;
+        const request = api.Request{ .prompt = p[0..7900], .max_tokens = n };
+        try r.begin(&box, &request);
+        try warm_box.wait();
+        const got = try r.end(&box);
+        if (warm_box.done != .cancelled or got.cached == 0 or got.cached >= 7700) r.failures += 1;
+        r.check(if (n == 0) "yielded background pass: the prompt's state" else "yielded background pass: the reply", got, want, null);
+    }
     std.debug.print("{s}: {d} failures\n", .{ if (r.failures == 0) "REUSE PASS" else "REUSE FAIL", r.failures });
     if (r.failures != 0) return error.ReuseDiffers;
 }

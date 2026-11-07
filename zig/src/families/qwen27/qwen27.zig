@@ -1,5 +1,6 @@
 //! Dense Qwen text configuration and checkpoint contracts. GPU forward pieces follow separately.
 pub const dflash = @import("dflash/root.zig");
+pub const gguf = @import("gguf.zig");
 pub const config = @import("config.zig");
 pub const affine = @import("affine.zig");
 pub const widths = @import("widths.zig");
@@ -24,6 +25,8 @@ pub const image_rows = @import("image_rows.zig");
 pub const gpu_weights = @import("gpu_weights.zig");
 pub const gpu_frame = @import("gpu_frame.zig");
 pub const model = @import("model.zig");
+/// The routed block's kernels (the kernel contract builds its row kernel's source as the engine does).
+pub const moe_gpu = @import("moe_gpu.zig");
 pub const projection = @import("projection.zig");
 pub const prompt_memory = @import("prompt_memory.zig");
 pub const prompt_rows = @import("prompt_rows.zig");
@@ -54,6 +57,7 @@ test {
     _ = glue;
     _ = image_rows;
     _ = @import("rope_test.zig");
+    _ = @import("attention_pick_test.zig");
     _ = state;
     _ = projection;
     _ = model;

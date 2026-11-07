@@ -96,7 +96,7 @@ pub const DenseGemm = struct {
         const s = self.d.?.shape;
         const out32: u64 = if (self.wide) self.out else 0;
         const out16: u64 = if (self.wide) 0 else self.out;
-        try self.l.dense.gemm(self.l.r, self.x, self.w, out32, out16, @intCast(s.rows), @intCast(s.n), @intCast(s.k), self.rig.s.handle);
+        try self.l.dense.gemm(self.l.r, .dot2, self.x, self.w, out32, out16, @intCast(s.rows), @intCast(s.n), @intCast(s.k), self.rig.s.handle);
         try self.rig.s.synchronize();
     }
 

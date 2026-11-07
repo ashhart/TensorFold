@@ -115,6 +115,7 @@ pub const Spec = struct {
     id: []const u8,
     prompt: []const u32,
     embedding: ?@import("embedding.zig").Batch = null,
+    readout: ?*const @import("readout.zig").Spec = null,
     max_new: u32,
     eos: []const u32 = &.{},
     sampling: ?Sampling = null,
@@ -148,6 +149,7 @@ pub const Spec = struct {
 
 pub const Stream = struct {
     embedding: ?@import("embedding.zig").Batch = null,
+    readout: ?*const @import("readout.zig").Spec = null, // the request's; the backend writes its logits
     id: []const u8,
     prompt_len: usize,
     max_new: u32,
@@ -179,6 +181,8 @@ pub const Stream = struct {
     rows: std.ArrayList(Row) = .empty, // with `logprobs`: one a token of emitted(), in order
     prompt_logprobs: ?u8 = null,
     prompt_rows: std.ArrayList(Row) = .empty, // with `prompt_logprobs`: one a prompt token after the first, in order
+    prefill_widths: std.ArrayList(u32) = .empty, // completed target prompt passes, reported by an instrumented backend
+    prefill_widths_failed: bool = false, // an allocation failure invalidates this observation without failing the reply
     reuse: Reuse = .{},
     decode_spans: []const [2]u32 = &.{},
     decide: ?u32 = null,
@@ -246,6 +250,7 @@ pub const Stream = struct {
             .id = spec.id,
             .prompt_len = spec.prompt.len,
             .embedding = spec.embedding,
+            .readout = spec.readout,
             .max_new = spec.max_new,
             .eos = spec.eos,
             .sampling = spec.sampling,
@@ -293,6 +298,7 @@ pub const Stream = struct {
         s.context.deinit(gpa);
         s.rows.deinit(gpa);
         s.prompt_rows.deinit(gpa);
+        s.prefill_widths.deinit(gpa);
         s.force.deinit(gpa);
         s.long_loop.deinit(gpa);
         s.dropRoundState(gpa);
@@ -327,6 +333,11 @@ pub const Stream = struct {
 
     pub fn prompt(s: *const Stream) []const u32 {
         return s.context.items[0..s.prompt_len];
+    }
+
+    /// A stream whose answer is a function of its prompt rows alone (an embedding or a readout): no token is drawn.
+    pub fn promptOnly(s: *const Stream) bool {
+        return s.embedding != null or s.readout != null;
     }
 
     pub fn emitted(s: *const Stream) []const u32 {

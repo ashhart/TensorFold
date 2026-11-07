@@ -17,6 +17,7 @@ const slide_teacher = @import("slide_teacher.zig");
 const talks = @import("slide_context.zig");
 const supplied_questions = @import("slide_supplied.zig");
 const log = @import("log.zig");
+const metrics_route = @import("slide_metrics_route.zig");
 const Server = @import("server.zig").Server;
 const Conn = @import("http_conn.zig").Conn;
 const Allocator = std.mem.Allocator;
@@ -54,6 +55,9 @@ fn send(conn: *Conn, kind: []const u8, body: []const u8) void {
 }
 
 pub fn graph(srv: *Server, conn: *Conn, a: Allocator) void {
+    const audit = @import("slide_audit.zig");
+    const opts = audit.options(conn.path) catch return refuse(conn, a, 400, "invalid audit options");
+    if (opts) |o| return audit.serve(srv, conn, a, o);
     const body = srv.slide.render(a, folder(srv)) catch return refuse(conn, a, 500, "out of memory");
     conn.sendJson(200, body);
 }
@@ -76,6 +80,7 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
     };
     const text = @import("slide_input.zig").read(body) catch |e|
         return refuse(conn, a, 400, @import("slide_input.zig").message(e));
+    const recall = metrics_route.read(srv, conn, a, body) orelse return;
     const source = body.strField("source") orelse "chat";
     const supplied = supplied_questions.read(a, body) catch |e| switch (e) {
         error.OutOfMemory => return,
@@ -121,6 +126,7 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
         srv.slide.phase(id, .writing);
         out.event("learning", .{ .id = id });
         out.stage(id, "writing");
+        if (!(metrics_route.prepare(srv, &out, a, id, fact, recall) catch return)) continue;
         var kept = [1]bool{false};
         const written = now(srv);
         // a chat fact not about the user ("The Quillon bridge is 1,312 metres long.") learns as a document's does
@@ -142,6 +148,7 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
         srv.teacher.ended(back); // a lesson given up leaves the next one's checks as if it never ran
         if (!back) putBack(srv, a, gave, id);
         if (back) slide_teacher.refresh(srv, &cx, &srv.teacher, plan.stale, gone) catch srv.teacher.forgetAnswers(srv.io);
+        metrics_route.unmeasured(srv, id, result.why orelse "the lesson did not reach the commit checks");
         if (result.why) |why| srv.slide.note(id, why);
         srv.slide.mark(id, if (back) .learned else .missed);
         if (back) talks.chainAfter(srv, id, plan);
@@ -239,7 +246,7 @@ pub fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone
             if (routed == teach.reroutes) {
                 _ = run(srv, a, &.{ .drop = true }, 0);
                 srv.slide.placed(id, &.{});
-                out.why = std.fmt.allocPrint(a, "taken out: it kept answering questions about something else, last \"{s}\"", .{took.question}) catch "taken out: it kept answering questions about something else";
+                out.why = std.fmt.allocPrint(a, "taken out: sub-check took failed: it kept answering questions about something else, last \"{s}\"", .{took.question}) catch "taken out: sub-check took failed: it kept answering questions about something else";
                 @memset(out.recalled, false);
                 return out;
             }
@@ -263,7 +270,7 @@ pub fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone
             _ = run(srv, a, &.{ .undo = true }, 0);
             srv.slide.placed(id, &.{});
             @memset(out.recalled, false); // the undo took the whole fact out: nothing of it is kept
-            out.why = std.fmt.allocPrint(a, "round {d} taken back: {s}", .{ round + 1, why }) catch why;
+            out.why = std.fmt.allocPrint(a, "round {d} taken back: sub-check damage failed: {s}", .{ round + 1, why }) catch why;
             return out;
         }
         @memcpy(out.recalled, verdict.recalled);
@@ -278,6 +285,10 @@ pub fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone
                 return out;
             };
             if (lost.len == 0) {
+                if (srv.config.slide_drift_gate) if (@import("slide_metrics.zig").candidate(srv, cx, plan, id, gone)) |why| {
+                    takeOut(srv, a, &out, id, why);
+                    return out;
+                };
                 committed = true;
                 // a diagnostic: every kept lesson taken out again, to see the facts before it come back as they were
                 if (std.c.getenv("TF_SLIDE_TAKE_OUT_CHECK") != null) {
@@ -424,7 +435,8 @@ fn putBack(srv: *Server, a: Allocator, olds: []const slide_graph.Fact, id: u32) 
 }
 
 /// A fact the lesson could not learn, and why.
-fn missed(srv: *Server, out: *Out, id: u32, why: []const u8) void {
+pub fn missed(srv: *Server, out: *Out, id: u32, why: []const u8) void {
+    metrics_route.unmeasured(srv, id, why);
     srv.slide.note(id, why);
     srv.slide.mark(id, .missed);
     out.event("learned", .{ .id = id, .recalled = false, .message = why });

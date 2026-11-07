@@ -96,11 +96,13 @@ pub const Iterator = struct {
         return v;
     }
 };
+pub const UnsupportedTensor = struct { name: []const u8 = "", kind: u32 = 0 };
 pub const Cursor = struct {
     bytes: []const u8,
     pos: usize = 0,
     ceiling: usize,
     limits: Limits,
+    unsupported: ?*UnsupportedTensor = null,
 
     pub fn take(c: *Cursor, n: u64) ![]const u8 {
         if (c.pos > c.bytes.len or n > c.bytes.len - c.pos) return error.TruncatedInput;

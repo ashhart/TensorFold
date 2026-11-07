@@ -48,7 +48,7 @@ pub fn memory() usize {
     n += pack_rows * vocab * 2; // every row's logits, then their gradient
     n += scratchBytes();
     n += weightBytes();
-    n += prompt.seqBytes(max_rows);
+    n += prompt.seqBytes(max_rows, .full); // training runs at one rank: the whole layer
     return n + (256 << 20);
 }
 

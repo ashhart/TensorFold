@@ -17,6 +17,10 @@ pub const Server = server.Server;
 pub const Config = server.Config;
 
 test {
+    _ = @import("kimi_prompt_test.zig");
+    _ = @import("kimi_text_test.zig");
+    _ = @import("kimi_reply_test.zig");
+    _ = @import("kimi_http_test.zig");
     _ = @import("profile_line.zig");
     _ = @import("auth_scope_test.zig");
     _ = @import("family_sampling.zig");
@@ -27,12 +31,14 @@ test {
     _ = @import("vision_markers_test.zig");
     _ = @import("embedding_protocol_test.zig");
     _ = @import("embedding_service_test.zig");
+    _ = @import("readout_service_test.zig");
     _ = @import("http_limits_test.zig");
     _ = @import("done_times_test.zig");
     _ = @import("drain_test.zig");
     _ = @import("keepalive_test.zig");
     _ = @import("idle_unload.zig");
     _ = @import("idle_unload_test.zig");
+    _ = @import("wait_reason_test.zig");
     _ = @import("name_priority_http_test.zig");
     @import("std").testing.refAllDecls(@This());
     _ = @import("json");
@@ -49,6 +55,7 @@ test {
     _ = @import("tool_grammar_lfm2.zig");
     _ = @import("tool_grammar_lfm2_test.zig");
     _ = @import("tool_required_test.zig");
+    _ = @import("structure_field_test.zig");
     _ = @import("grammar.zig");
     _ = @import("pyrepr.zig");
     _ = @import("metrics.zig");
@@ -57,6 +64,7 @@ test {
     _ = @import("auth.zig");
     _ = @import("cli.zig");
     _ = @import("cli_test.zig");
+    _ = @import("effort_cli_audit_test.zig");
     _ = @import("live.zig");
     _ = @import("listener.zig");
     _ = @import("hub.zig");
@@ -75,6 +83,10 @@ test {
     if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_register_test.zig"); // over a Unix socket pair
     _ = @import("drama_prompt.zig");
     _ = @import("health_test.zig");
+    _ = @import("clef_encode_test.zig");
+    _ = @import("clef_tokens_test.zig");
+    _ = @import("clef_answer_test.zig");
+    _ = @import("clef_systemone_test.zig");
     _ = @import("memory_routes.zig");
     _ = @import("process_memory.zig");
     _ = @import("process_resident.zig");
@@ -90,12 +102,18 @@ test {
     _ = @import("media_fetch.zig");
     _ = @import("videos.zig");
     _ = @import("stream_preflight_test.zig");
+    _ = @import("engine_refusal_test.zig");
     _ = @import("stream_dsml_test.zig");
     _ = @import("tool_cut_test.zig");
     _ = @import("tool_glm_stream_test.zig");
     _ = @import("tool_glm_messages_test.zig");
+    _ = @import("tool_dsml_stream_test.zig");
+    _ = @import("tool_dsml_reply_test.zig");
+    _ = @import("tool_dsml_messages_test.zig");
+    _ = @import("tool_single_stream_test.zig");
     _ = @import("logprobs_test.zig");
     _ = @import("think_split_test.zig");
+    _ = @import("think_tool_tail_test.zig");
     _ = @import("deepseek_reply_test.zig");
     _ = @import("thinking_reserve_test.zig");
     _ = @import("loop_stop_test.zig");
@@ -115,6 +133,10 @@ test {
     _ = @import("decisions_test.zig");
     _ = @import("systemone.zig");
     _ = @import("systemone_test.zig");
+    _ = @import("rerank_test.zig");
+    _ = @import("rerank_ids_test.zig");
+    _ = @import("rerank_cut_test.zig");
+    _ = @import("rerank_decide_test.zig");
     _ = @import("slide_context_test.zig");
     // both run over Unix socket pairs
     if (comptime @import("builtin").os.tag != .windows) {
@@ -124,6 +146,11 @@ test {
     _ = @import("slide_writer_test.zig");
     _ = @import("slide.zig");
     _ = @import("slide_cli.zig");
+    _ = @import("slide_audit.zig");
+    _ = @import("slide_audit_cli.zig");
+    _ = @import("slide_audit_probes.zig");
+    _ = @import("slide_audit_test.zig");
+    _ = @import("slide_audit_endpoint_test.zig");
     _ = @import("slide_key.zig");
     _ = @import("slide_graph.zig");
     _ = @import("slide_graph_delete.zig");
@@ -144,6 +171,9 @@ test {
     _ = @import("slide_questions_test.zig");
     _ = @import("slide_teacher_test.zig");
     _ = @import("slide_learn_path_test.zig");
+    _ = @import("slide_metrics_test.zig");
+    _ = @import("slide_metrics_off_test.zig");
+    _ = @import("cli_slide_drift_test.zig");
     _ = @import("slide_whom.zig");
     _ = @import("slide_subject.zig");
     _ = @import("slide_span.zig");
@@ -210,4 +240,10 @@ test {
     _ = @import("request_provenance_test.zig");
     _ = @import("request_cost_test.zig");
     _ = @import("prompt_tool_turn_test.zig");
+}
+
+test {
+    _ = @import("models_idle_audit_test.zig");
+    _ = @import("penalty_request_test.zig");
+    _ = @import("deepseek_fixture_test.zig");
 }

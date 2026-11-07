@@ -117,7 +117,7 @@ pub fn check(comptime Tri: type, gpa: std.mem.Allocator, io: std.Io, driver: *cu
         const cap = ids.len + count + max_rows;
         var seq = try e.newSeq(cap);
         defer seq.deinit(gpa);
-        var d = try Draft.init(gpa, driver, stream.*, cap, h.ids.len, e.chunk);
+        var d = try Draft.init(gpa, driver, stream.*, cap, h.ids.len, e.chunk, e.heads);
         defer d.deinit();
         for (0..repeat) |rep| {
             // serial: the plain prompt pass, then one row a forward

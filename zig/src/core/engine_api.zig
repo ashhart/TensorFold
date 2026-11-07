@@ -15,6 +15,7 @@ pub const EmbeddingInfo = lanes.embedding.Info;
 pub const EmbeddingBatch = lanes.embedding.Batch;
 pub const embedding_vector = @import("embedding_vector.zig");
 pub const load_ledger = @import("load_ledger.zig");
+pub const kv_ledger = @import("kv_ledger.zig");
 
 /// One image of a request (``Request.images``): the tower's input and the placeholder rows its output replaces.
 pub const Image = lanes.stream.Image;
@@ -40,6 +41,7 @@ pub const grammar = lanes.grammar;
 pub const Request = struct {
     prompt: []const u32,
     embedding: ?lanes.embedding.Batch = null,
+    readout: ?*const lanes.readout.Spec = null, // an answer from the prompt's rows (Info.readouts engines only)
     max_tokens: u32,
     sampling: ?Sampling = null,
     penalties: Penalties = .{},
@@ -96,6 +98,11 @@ pub const Request = struct {
         return if (r.cache_key.len > 0) r.cache_key else r.prompt;
     }
 
+    /// No token is drawn: the backend answers from the prompt's rows (an embedding or a readout).
+    pub fn promptOnly(r: *const Request) bool {
+        return r.embedding != null or r.readout != null;
+    }
+
     /// The prompt length its kept states count as: its own, or for a warm pass the request whose reply it prefills.
     pub fn bornLen(r: *const Request) u32 {
         return if (r.born > 0) r.born else @intCast(r.prompt.len);
@@ -144,6 +151,8 @@ pub const Sink = struct {
 };
 
 pub const Benchmark = @import("benchmark_info.zig").Snapshot;
+/// A reranker's label tokens: a prompt's relevance score is sigmoid(yes - no) of their last-row logits.
+pub const Rerank = struct { yes: u32, no: u32 };
 
 /// What the engine serves, fixed once it has loaded.
 pub const Info = struct {
@@ -154,10 +163,13 @@ pub const Info = struct {
     name: []const u8 = "lanes",
     text_generation: bool = true,
     embeddings: ?lanes.embedding.Info = null,
+    readouts: ?lanes.readout.Info = null, // non-null: the engine answers readout requests and nothing else
     speech: ?SpeechInfo = null,
     lanes: u32 = 1,
-    /// Prompt plus reply tokens one request may use (0: no limit).
+    /// Server preflight prompt-plus-reply limit (0: the engine owns admission).
     context_window: u32 = 0,
+    /// Discovery-only limit for an engine that keeps its existing prefill admission and error policy.
+    reported_context_window: ?u32 = null,
     context_fitted: bool = false,
     /// What the engine enforces; the server refuses requests that need more.
     call_gates: bool = false,
@@ -172,7 +184,7 @@ pub const Info = struct {
     structures: bool = false,
     /// Requests may ask for ``logprobs`` (the engine's lanes give the target's rows).
     logprobs: bool = false,
-    /// Requests' presence_penalty and frequency_penalty change the draws (false: they are ignored, and logged once).
+    /// Requests' presence_penalty and frequency_penalty change the draws (false: nonzero is refused).
     penalties: bool = false,
     /// Requests may ask for ``prompt_logprobs`` (a prompt pass from 0 that reads every row).
     prompt_logprobs: bool = false,
@@ -198,6 +210,8 @@ pub const Info = struct {
     decode_share: ?f64 = null,
     /// The engine scores decisions (`score`) and writes no text: the server refuses text requests.
     decides: bool = false,
+    /// The engine is a reranker (it scores through `score`): the server answers POST /v1/rerank only when set.
+    rerank: ?Rerank = null,
     /// Decisions may carry pictures (`Decision.pictures`).
     pictures: bool = false,
     /// Image input (--vision); null: text only.
@@ -210,6 +224,13 @@ pub const Info = struct {
     admit: ?Admit = null,
     /// A byte budget each request promises its caches from as it is admitted (null: none); never beside `admit`.
     ledger: ?Ledger = null,
+
+    pub const Capability = @import("engine_capabilities.zig").Capability;
+
+    /// One loaded flag for both discovery and request checks; optional user features report presence.
+    pub inline fn capability(i: Info, comptime key: Capability) bool {
+        return @import("engine_capabilities.zig").read(i, key);
+    }
 
     /// What a lane engine's streams enforce themselves (core/lanes/stream.zig): loop guards and answer limits.
     pub fn ofLanes(i: Info) Info {
@@ -232,22 +253,17 @@ pub const Ledger = struct {
     cost: *const fn (ctx: *anyopaque, prompt: u32, max_tokens: u32) u64,
 };
 
-pub const PromptCacheCapacity = struct { budget_bytes: u64, minimum_state_bytes: u64 };
-
-pub const PromptCachePlan = struct {
-    source: enum { physical_footprint, explicit, metal_working_set },
-    budget_bytes: u64,
-    explicit_budget: bool = false,
-    over_cap: ?bool = null,
-    ram_bytes: ?u64 = null,
-    ready_footprint_bytes: ?u64 = null,
-    cap_bytes: ?u64 = null,
-    room_bytes: ?u64 = null,
-    margin_bytes: ?u64 = null,
-};
+pub const PromptCacheCapacity = @import("engine_cache_plan.zig").PromptCacheCapacity;
+pub const PromptCachePlan = @import("engine_cache_plan.zig").PromptCachePlan;
 
 /// A native family's model type, weight formats and explicit raw-text capability.
-pub const Family = struct { model_type: []const u8, formats: []const []const u8, raw_text: bool = true };
+pub const Family = struct {
+    model_type: []const u8,
+    formats: []const []const u8,
+    raw_text: bool = true,
+    /// Formats it serves only for decisions (a readout head beside the checkpoint), not for chat.
+    decision_formats: []const []const u8 = &.{},
+};
 
 /// The math an NVFP4 checkpoint runs: its own (FP4 rows into NVFP4 layers, FP8 into FP8 ones), or bf16 rows throughout.
 pub const Precision = enum { checkpoint, full };
@@ -382,6 +398,9 @@ pub const pressure_message = "this Mac is under critical memory pressure: the se
 /// What a reply refused or ended for `Stale` says, a submit's error and a queued job's failure alike.
 pub const stale_message = "a Living Weights delete could not be put back on the device: send the delete again to retry it, or restart the server";
 
+/// The longest engine refusal message the server keeps; a longer one is cut at a UTF-8 boundary.
+pub const refusal_bytes = 256;
+
 /// A worked example for the learner: token ids, the answer from `start`; `decide`: its assistant header's last row.
 pub const Example = struct { ids: []const u32, start: u32, decide: u32, subject: u32 = 0, value: u32 = 0, context: u32 = 0 }; // subject: the row of its last token; value: the row before its answer's value (0: none); context: the rows of a conversation before its own turn, which other examples share (0: none)
 
@@ -395,6 +414,7 @@ pub const LearnEvent = @import("learning_api.zig").LearnEvent;
 pub const LearnSink = @import("learning_api.zig").LearnSink;
 pub const LearnError = @import("learning_api.zig").LearnError;
 pub const Learner = @import("learning_api.zig").Learner;
+pub const pocket_audit = @import("pocket_audit.zig");
 
 pub const Engine = struct {
     ctx: *anyopaque,
@@ -425,6 +445,8 @@ pub const Engine = struct {
         drain: ?*const fn (ctx: *anyopaque) void = null,
         /// The server's load-ledger producer at attach, null at detach (load_ledger.zig); null entry: no engine group.
         load: ?*const fn (ctx: *anyopaque, producer: ?load_ledger.Producer) void = null,
+        /// Asked once per whole request: the returned message is the refusal, up to `refusal_bytes`; null: accepted.
+        refusal: ?*const fn (ctx: *anyopaque, request: *const Request, out: []u8) ?[]const u8 = null,
     };
 
     pub fn info(e: Engine) Info {
@@ -433,13 +455,16 @@ pub const Engine = struct {
     pub fn submit(e: Engine, id: Id, request: *const Request, sink: Sink) SubmitError!void {
         try @import("cache_modes.zig").validate(request.decode_spans);
         const info_ = e.info();
-        if (request.embedding) |batch| {
+        if (request.embedding != null and request.readout != null) return error.InvalidRequest;
+        if (request.readout != null) {
+            lanes.readout.admit(info_, request) catch return error.InvalidRequest;
+        } else if (request.embedding) |batch| {
             const cap = info_.embeddings orelse return error.InvalidRequest;
             if (info_.text_generation or request.max_tokens != 0 or request.drafts or request.sampling != null or
                 request.images.len != 0 or request.structure != null or request.logprobs != null or
                 request.prompt_logprobs != null or request.decode_spans.len != 0) return error.InvalidRequest;
             batch.validate(cap, request.prompt, info_.context_window) catch return error.InvalidRequest;
-        } else if (info_.embeddings != null) return error.InvalidRequest;
+        } else if (info_.embeddings != null or info_.readouts != null) return error.InvalidRequest;
         return e.vtable.submit(e.ctx, id, request, sink);
     }
     pub fn submitSpeech(e: Engine, id: Id, request: *const SpeechRequest, sink: Sink) SpeechSubmitError!void {
@@ -495,12 +520,19 @@ pub const Engine = struct {
         const f = e.vtable.learn orelse return error.Unsupported;
         return f(e.ctx, request, sink);
     }
+
+    /// The engine's refusal of a whole `request`: the returned message, up to `refusal_bytes`; null: accepted.
+    pub fn refusal(e: Engine, request: *const Request, out: []u8) ?[]const u8 {
+        const f = e.vtable.refusal orelse return null;
+        return f(e.ctx, request, out);
+    }
 };
 
 /// A backend's own driver for a lone greedy stream (the GPU round), which LaneHost runs while the stream is alone.
 pub const Lone = struct {
     ctx: *anyopaque,
     sampled: bool = false, // it drives sampled streams too
+    plain: bool = false, // it drives streams with drafts off too
     logprobs: bool = false, // it gives each token its logprob row too
     structures: bool = false, // it masks each window's rows by the stream's grammar too
     images: bool = true, // it takes image requests too (false: they stay in the lane core)
@@ -523,6 +555,8 @@ pub const LoneHooks = struct {
 
 /// The lane core served to the HTTP threads (lane_host.zig).
 pub const LaneHost = @import("lane_host.zig").LaneHost;
+/// TENSORFOLD_PREFILL_* values the lane host would misread, refused at serve start (lane_host_env.zig).
+pub const prefill_env = @import("lane_host_env.zig");
 /// An opt-in family round planner for the lane host, in place of its `prefill_step` chunks (lane_rounds.zig).
 pub const Rounds = @import("lane_host.zig").Rounds;
 
@@ -556,4 +590,5 @@ pub const save_guard = @import("save_guard");
 
 test {
     _ = @import("engine_api_test.zig");
+    _ = @import("engine_capabilities.zig");
 }

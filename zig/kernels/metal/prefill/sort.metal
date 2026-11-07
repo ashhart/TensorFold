@@ -49,7 +49,7 @@ inline void sort_starts(const device int32_t* counts, device int32_t* starts, de
   }
 }
 
-// order[slot] = i and sorted[slot] = keys[i], slot = the block's start for the key plus earlier equal keys in the block.
+// order[slot] = i and sorted[slot] = keys[i], slot = the block's start for the key plus earlier equal keys in it.
 inline void sort_place(const device uint32_t* keys, const device int32_t* starts, device uint32_t* order,
                        device uint32_t* sorted, const device int* P, threadgroup uint* local, uint block, uint t) {
   const int n = P[0], experts = P[1], i = int(block) * 256 + int(t);

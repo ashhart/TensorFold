@@ -237,3 +237,38 @@ test "snapshot index: a slow worker publishes before row-file seed returns" {
     try std.testing.expectEqual(@as(usize, 1), reopened.states.items.len);
     try std.testing.expectEqualSlices([2]u32, f.spans, reopened.states.items[0].spans);
 }
+
+test "a refused row-store state ends the retry: the pass from the start, one failure, no borrow" {
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    var buf: [128]u8 = undefined;
+    const dir = try root(&buf, "rows-refuse");
+    defer rmTree(dir);
+    var prompt: [1500]u32 = undefined;
+    rowPrompt(&prompt);
+    {
+        var f: RowFake = .{ .gpa = a, .prompt = &prompt, .spans = &.{.{ 500, 600 }} };
+        const r = try rows.Rows.open(a, f.snapshots(), options(dir));
+        defer r.deinit();
+        var s = pc.Store.init(a, f.snapshots(), rules, 1 << 30);
+        defer s.deinit();
+        s.disk = r;
+        const plan = try s.begin(arena.allocator(), &prompt, 1400, &.{}, &.{}, null, f.spans);
+        try std.testing.expectEqual(@import("prompt_cache_test.zig").fresh(&prompt), f.pass(&s, plan));
+        try waits.published(r);
+        try std.testing.expectEqual(@as(usize, 1), r.states.items.len);
+    }
+    var f: RowFake = .{ .gpa = a, .prompt = &prompt, .spans = &.{.{ 500, 600 }}, .refuse = true }; // the one disk state is refused every time
+    const r = try rows.Rows.open(a, f.snapshots(), options(dir));
+    defer r.deinit();
+    var s = pc.Store.init(a, f.snapshots(), rules, 1 << 30);
+    defer s.deinit();
+    s.disk = r;
+    const plan = try s.begin(arena.allocator(), &prompt, 1400, &.{}, &.{}, null, f.spans);
+    try std.testing.expectEqual(@as(u32, 0), plan.from); // the pass from the start
+    try std.testing.expectEqual(@as(u64, 1), s.counts.failed); // one failure, the one state: no recall loop
+    try std.testing.expectEqual(@as(usize, 0), s.entries.items.len); // the refused state is gone, not re-read
+    try std.testing.expectEqual(@as(usize, 1), r.counts.reads); // the retry stays in RAM
+    try std.testing.expectEqual(@import("prompt_cache_test.zig").fresh(&prompt), f.pass(&s, plan));
+    try oracle.check(&s);
+}

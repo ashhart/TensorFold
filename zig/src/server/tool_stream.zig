@@ -4,6 +4,7 @@ const json = @import("json");
 const ids = @import("ids.zig");
 const reply_text = @import("reply_text.zig");
 const tool_dsml = @import("tool_dsml.zig");
+const tool_dsml_stream = @import("tool_dsml_stream.zig");
 const tool_glm_cut = @import("tool_glm_cut.zig");
 const tool_glm_stream = @import("tool_glm_stream.zig");
 const tool_params = @import("tool_params.zig");
@@ -36,7 +37,7 @@ fn closing(rest: []const u8, text: []const u8) ?usize {
     return if (std.mem.startsWith(u8, rest[i..], text)) i + text.len else null;
 }
 
-/// Streams XML argument deltas and validated DSML envelopes, matching the final parser.
+/// Streams XML, GLM and DSML argument deltas, else whole envelopes at their closers, matching the final parser.
 pub const Streamer = struct {
     a: Allocator,
     schemas: tool_params.Schemas,
@@ -46,7 +47,7 @@ pub const Streamer = struct {
     typed: bool = false,
     buffer: std.ArrayList(u8) = .empty,
     pos: usize = 0,
-    state: enum { outside, call, buffered, function, value, closing, glm, abort } = .outside,
+    state: enum { outside, call, buffered, function, value, closing, glm, dsml, abort } = .outside,
     index: i64 = -1,
     args_open: bool = false,
     lead: bool = false,
@@ -61,6 +62,7 @@ pub const Streamer = struct {
     buffered_start: usize = 0,
     buffered_close: []const u8 = "",
     glm: tool_glm_stream.Glm = .{},
+    dsml: tool_dsml_stream.Dsml = .{},
 
     pub fn init(a: Allocator, tools: []const Value) Allocator.Error!Streamer {
         var s: Streamer = .{ .a = a, .schemas = try tool_params.schemas(a, tools), .tools = tools };
@@ -90,7 +92,7 @@ pub const Streamer = struct {
         return q[1 .. q.len - 1];
     }
 
-    /// The delta that opens call ``name``: an XML or a GLM call's header, before its arguments.
+    /// The delta that opens call ``name``: an XML, GLM or DSML call's header, before its arguments.
     pub fn begin(s: *Streamer, name: []const u8, out: *std.ArrayList(Value)) Allocator.Error!void {
         s.current = name;
         s.index += 1;
@@ -151,10 +153,9 @@ pub const Streamer = struct {
                     while (std.mem.indexOfScalarPos(u8, text, at, '<')) |start| {
                         if (tool_dsml.openedBy(text[start..])) |sp| {
                             s.dsml_seen = true;
-                            s.dsml_start = start;
-                            s.dsml_close = sp.close;
                             s.pos = start + sp.open.len;
-                            s.dsml_searched = s.pos;
+                            s.dsml = .{ .sp = sp, .start = start, .at = s.pos };
+                            s.state = .dsml;
                             break;
                         }
                         if (std.mem.startsWith(u8, text[start..], "<tool_call>")) {
@@ -226,6 +227,10 @@ pub const Streamer = struct {
                 },
                 .glm => {
                     if (!try s.glmStep(text, out)) return;
+                    continue;
+                },
+                .dsml => {
+                    if (!try s.dsmlStep(text, out)) return;
                     continue;
                 },
                 .buffered => {
@@ -305,6 +310,7 @@ pub const Streamer = struct {
 
     /// A call that the reply's end left open: its name streamed, its envelope not closed.
     pub fn open(s: *const Streamer) bool {
+        if (s.state == .dsml) return s.dsml.sent > 0; // the block's whole parse would keep it all as text
         return s.index >= 0 and (s.state == .glm or s.state == .function or s.state == .value or s.state == .closing);
     }
 
@@ -332,10 +338,28 @@ pub const Streamer = struct {
         }
     }
 
+    /// One DSML state-machine step: whether ``feed`` goes on; a block it cannot stream parses whole at its closer.
+    fn dsmlStep(s: *Streamer, text: []const u8, out: *std.ArrayList(Value)) Allocator.Error!bool {
+        switch (try tool_dsml_stream.feed(s, text, out)) {
+            .wait => return false,
+            .outside => return true,
+            .rejected => {
+                s.dsml_start = s.dsml.start;
+                s.dsml_close = s.dsml.sp.close;
+                s.pos = s.dsml.start + s.dsml.sp.open.len;
+                s.dsml_searched = s.pos;
+                s.state = .outside;
+                return true;
+            },
+            .more => unreachable,
+        }
+    }
+
     /// ``feed`` of the reply's final text; a value it cuts sends the bytes held back for a closer that never came.
     pub fn finishCut(s: *Streamer, text: []const u8, out: *std.ArrayList(Value)) Allocator.Error!void {
         try s.feed(text, out);
         if (s.state == .glm) return tool_glm_stream.cut(s, text, out); // a GLM value's held bytes
+        if (s.state == .dsml) return tool_dsml_stream.cut(s, text, out); // a DSML value's held bytes
         if (s.state != .value) return;
         var cut = try std.mem.concat(s.a, u8, &.{ if (s.typed) s.buffer.items else "", s.held, text[@min(s.pos, text.len)..] });
         if (s.lead and cut.len > 0 and cut[0] == '\n') cut = cut[1..];
@@ -347,8 +371,9 @@ pub const Streamer = struct {
     }
 };
 
-/// A streamed reply's final prose: ``cutProse`` when max_tokens left a call open, else ``finishedProse``.
-pub fn endProse(a: Allocator, content: []const u8, text: []const u8, tools: []const Value, reason: []const u8) Allocator.Error![]const u8 {
+/// A streamed reply's final prose: ``cutProse`` for a cut call, else ``finishedProse``; one-call mode rstrips it.
+pub fn endProse(a: Allocator, content: []const u8, text: []const u8, tools: []const Value, reason: []const u8, single: bool) Allocator.Error![]const u8 {
+    if (single) return reply_text.pyRstrip(try reply_text.finishedProse(a, content));
     const cut = std.mem.eql(u8, reason, "length") and (try cutCalls(a, text, tools)) != null;
     return if (cut) reply_text.cutProse(a, content) else reply_text.finishedProse(a, content);
 }
@@ -407,24 +432,28 @@ fn nameLike(s: []const u8) bool {
 pub const TextFilter = struct {
     pending: std.ArrayList(u8) = .empty,
     hidden: ?[]const u8 = null,
+    deferred: bool = false, // a closed envelope was hidden: later prose waits for the reply's final content
 
     pub fn feed(f: *TextFilter, a: Allocator, text: []const u8) Allocator.Error![]const u8 {
+        if (f.deferred) return "";
         try f.pending.appendSlice(a, text);
         var out: std.ArrayList(u8) = .empty;
         while (f.pending.items.len > 0) {
             const p = f.pending.items;
             if (f.hidden) |name| {
                 const close = try std.mem.concat(a, u8, &.{ "</", name, ">" });
-                const end = std.ascii.findIgnoreCase(p, close) orelse {
+                if (std.ascii.findIgnoreCase(p, close) == null) {
                     const keep = reply_text.charCount(close) - 1;
                     const chars = reply_text.charCount(p);
                     const tail = if (chars > keep) reply_text.afterChars(p, chars - keep) else p;
                     try f.reset(a, tail);
                     break;
-                };
-                try f.reset(a, p[end + close.len ..]);
+                }
+                // The whole reply may keep this envelope as text, so what follows cannot overtake it.
                 f.hidden = null;
-                continue;
+                f.deferred = true;
+                f.pending.clearRetainingCapacity();
+                break;
             }
             const start = std.mem.indexOfScalar(u8, p, '<') orelse {
                 try out.appendSlice(a, p);
@@ -462,7 +491,7 @@ pub const TextFilter = struct {
     }
 
     pub fn finish(f: *TextFilter) []const u8 {
-        const tail = if (f.hidden != null) "" else f.pending.items;
+        const tail = if (f.hidden != null or f.deferred) "" else f.pending.items;
         f.pending = .empty;
         return tail;
     }
@@ -514,11 +543,12 @@ pub const Policy = struct {
     }
 
     /// Held-back malformed or unoffered call envelopes kept as reply text: ``final`` past the prose ``sent``.
-    pub fn kept(_: *const Policy, final: []const u8, sent: []const u8) ?[]const u8 {
+    pub fn kept(p: *const Policy, final: []const u8, sent: []const u8) ?[]const u8 {
         // Replies without parsed calls retain their leading whitespace; parsed content may be stripped.
         const shown = if (std.mem.startsWith(u8, final, sent)) sent else reply_text.pyLstrip(sent);
         if (!std.mem.startsWith(u8, final, shown)) return null;
         const rest = final[shown.len..];
+        if (p.single) return if (rest.len > 0) rest else null;
         return if (reply_text.pyStrip(rest).len > 0) rest else null;
     }
 };
