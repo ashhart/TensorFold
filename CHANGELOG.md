@@ -4,6 +4,10 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Vision: PDFs with text no longer crash the render worker on macOS. Each PDF renders in a fresh process of the server, started with a hidden `--pdf-render-worker` argument, instead of a fork of the running server, under the same limits and deadline; a worker that crashes is reported by its signal, for example "the PDF render worker crashed (SIGSEGV)" (#2393, fixes #2385). Thanks to @gordonhatusupy for the report.
+
+- Internal: the kernel contract registry's record joins live in `registry_joins.zig`, one module a line, so PRs that add records for different families no longer edit the same line; every registry list is unchanged (#2422).
+
 - Docs: the optimization ledger's cells for #2011, #2162 and #2282 say they landed (#2431).
 
 - Lane host: a stream paid for at load (`free_streams`, the engine's own sequence) is a standing lease in the KV ledger, so a family that reserves per request admits as many full-window requests as the window plan, not one fewer, and its prompt cache sits beside the same streams; the job on it promises only what it adds, and the lease is not reported at stop. No family on main reserves per request yet, so every current load is unchanged (#1943 step 2). Thanks to @laudney for finding the gap.
