@@ -458,14 +458,13 @@ pub const Hip = struct {
                 .token = token,
                 .position = lane.len,
                 .depth = r.depth,
-                .sampling = glue.sampling(r.stream),
                 .stop_under = stop_under,
                 .out = &lane.held,
             };
             chained[n] = lane;
             n += 1;
         }
-        try head.chains(&h.e.lib, h.e.stream, &h.e.drawer, m, jobs[0..n], h.e.headGraphs());
+        try head.chains(&h.e.lib, h.e.stream, m, jobs[0..n], h.e.headGraphs());
         var k: usize = 0;
         for (requests) |r| {
             if (r.depth == 0) continue;
