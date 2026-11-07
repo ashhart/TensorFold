@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Tests: `test-gradient-serving` and `test-qwen-serving-host` pass again: their serving source pins take main's bytes after a read of every change since they were set, each a comment, an off-by-default path or a reviewed PR (#2418, part of #2031).
+
 - The engine API carries an optional image capability beside speech: `Info.image` states what an engine's image host serves and a defaulted `VTable.submit_image` hands back one encoded PNG a request through the caller's own list and allocator, so an engine without the entry is unchanged (#1573).
 
 - Build: `zig build compile-dsv41-server` and `dsv41-serve` build again: the DeepSeek server module gets the `lanes` module its `/v1/systemone` route reads (#2412). Thanks to @Defilan.
