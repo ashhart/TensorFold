@@ -24,6 +24,8 @@ const gpu_counters = @import("profiler.zig");
 const expert_groups = @import("core").expert_groups;
 const scan_probe = @import("scan_probe.zig");
 const support = @import("model_support.zig");
+const model_drafter = @import("model_drafter.zig");
+const model_hash = @import("model_hash.zig");
 const model_lifecycle = @import("model_lifecycle.zig");
 const model_propose = @import("model_propose.zig");
 const model_draft_attention = @import("model_draft_attention.zig");
@@ -299,479 +301,101 @@ pub const Model = struct {
     /// it and the round trip disappears. The prompt's thousands-row chunks are cheaper on the GPU.
     /// `TF_DSV41_CPU_HASH=0` is the shipped GPU pass.
     pub fn cpuHashRows() u32 {
-        const S = struct {
-            var cached: i64 = -1;
-        };
-        if (S.cached < 0) S.cached = if (std.c.getenv("TF_DSV41_CPU_HASH")) |e|
-            (std.fmt.parseInt(i64, std.mem.span(e), 10) catch 8)
-        else
-            8;
-        return @intCast(@max(0, S.cached));
+        return model_hash.cpuHashRows();
     }
-
-    /// The streamed path's own hash pass: the ids must be readable on the host, so the shipped form is a second
-    /// command buffer; a decode-sized window takes the host's own copy of the same integer hash.
     pub fn hashPass(m: *Model, slot: u32, rows: u32) !void {
-        const p = &m.pipelines;
-        const ws = &m.workspace;
-        if (rows <= cpuHashRows()) {
-            try engram.encodeHashHost(try ws.historyView(slot), ws.view(.ids), ws.view(.token_map), ws.view(.engram_ids_0), ws.view(.engram_ids_1), rows);
-            try m.stageRows(rows);
-            return;
-        }
-        const pool = mtl.objc.Pool.push();
-        defer pool.pop();
-        const e = m.queue.commandBufferUnretained();
-        var enc = e.compute(.serial);
-        for (engram.hash.layers, 0..) |meta, index| {
-            try engram.encodeHash(enc, &p.engram, meta, ws.view(.ids), ws.view(.token_map), null, try ws.historyView(slot), ws.view(if (index == 0) .engram_ids_0 else .engram_ids_1), rows);
-        }
-        try engram.encodeCommit(enc, &p.engram, ws.view(.ids), ws.view(.token_map), null, try ws.historyView(slot), rows);
-        enc.end();
-        e.commit();
-        e.wait();
-        try completed(e);
-        try m.stageRows(rows);
+        return model_hash.hashPass(m, slot, rows);
     }
-
-    /// The batch's hash pass -- each segment's ids at its own rows, against its own slot's Engram history, then the
-    /// one staging read over all rows.
     pub fn hashPassSegs(m: *Model, segs: []const Seg, rows: u32) !void {
-        const ws = &m.workspace;
-        var r0: usize = 0;
-        for (segs) |sg| {
-            const cols: usize = engram.hash.columns;
-            try engram.encodeHashHost(try ws.historyView(sg.slot), ws.view(.ids).shifted(r0 * 4), ws.view(.token_map), ws.view(.engram_ids_0).shifted(r0 * cols * 4), ws.view(.engram_ids_1).shifted(r0 * cols * 4), @intCast(sg.ids.len));
-            r0 += sg.ids.len;
-        }
-        try m.stageRows(rows);
+        return model_hash.hashPassSegs(m, segs, rows);
     }
-
-    /// Both Engram layers' rows for this window, read from the release's shards into the staging buffer. Threads the
-    /// Engram gather splits its ids across (TF_DSV41_ENGRAM_THREADS, 1 keeps one thread). The default follows the
-    /// read path: the mapped gather reads by address, so its workers scale; the positional reads share one I/O
-    /// context and serialise on it, and one thread is their best case.
     pub fn engramThreads(m: *Model) usize {
-        // The mapped default is sixteen for the large gather too.
-        var v: usize = if (m.stream) |s| (if (s.mapped()) 16 else 1) else 1;
-        if (std.c.getenv("TF_DSV41_ENGRAM_THREADS")) |e| {
-            v = std.fmt.parseInt(usize, std.mem.span(e), 10) catch v;
-            if (v == 0 or v > 64) v = 1;
-        }
-        return v;
+        return model_hash.engramThreads(m);
     }
-
-    /// The latch's coldness clock. Default: the whole stage (prefetch + gather). `=gather` restores The post-prefetch
-    /// signal (the same-binary control).
     pub fn latchStage() bool {
-        const S = struct {
-            var cached: i8 = 0;
-        };
-        if (S.cached == 0) S.cached = if (std.c.getenv("TF_DSV41_ENGRAM_LATCH")) |e|
-            (if (std.mem.eql(u8, std.mem.span(e), "gather")) -1 else 1)
-        else
-            1;
-        return S.cached > 0;
+        return model_hash.latchStage();
     }
-
-    /// The whole-window page-in (TF_DSV41_ENGRAM_PF). Default on; =0 is the same-binary control.
     pub fn engramPrefetch() bool {
-        const S = struct {
-            var cached: i8 = 0;
-        };
-        if (S.cached == 0) S.cached = if (std.c.getenv("TF_DSV41_ENGRAM_PF")) |e|
-            (if (std.mem.eql(u8, std.mem.span(e), "0")) -1 else 1)
-        else
-            1;
-        return S.cached > 0;
+        return model_hash.engramPrefetch();
     }
-
-    /// The decode-sized list's workers. Sixteen is the gather's own thread table's height.
-    /// TF_DSV41_ENGRAM_SMALL_THREADS is the arm (1..16).
     pub fn engramSmallThreads() usize {
-        const S = struct {
-            var cached: usize = 0;
-        };
-        if (S.cached != 0) return S.cached;
-        var v: usize = 16;
-        if (std.c.getenv("TF_DSV41_ENGRAM_SMALL_THREADS")) |e| {
-            v = std.fmt.parseInt(usize, std.mem.span(e), 10) catch v;
-            if (v == 0 or v > 16) v = 16;
-        }
-        S.cached = v;
-        return v;
+        return model_hash.engramSmallThreads();
     }
-
     pub fn engramAdapt() bool {
-        const S = struct {
-            var cached: i8 = 0;
-        };
-        if (S.cached == 0) S.cached = if (std.c.getenv("TF_DSV41_ENGRAM_ADAPT")) |e|
-            (if (std.mem.eql(u8, std.mem.span(e), "0")) -1 else 1)
-        else
-            1;
-        return S.cached > 0;
+        return model_hash.engramAdapt();
     }
-
-    /// Warm the pending row's Engram pages while the drafter's own forward runs. The pending token is known before
-    /// `proposeTokens` and is the verify window's FIRST row, so its ids can be hashed from the standing record (a
-    /// peek that does not advance it) and its pages handed to madvise now; the next verify's `stageRows` recomputes
-    /// the same ids and finds the pages resident. Only the page-in moves: no id, byte, reduction or reply changes.
-    /// `TF_DSV41_ENGRAM_PEND=0` is the same-binary control.
     pub fn engramPendingOn() bool {
-        const S = struct {
-            var cached: i8 = 0;
-        };
-        if (S.cached == 0) S.cached = if (std.c.getenv("TF_DSV41_ENGRAM_PEND")) |e|
-            (if (std.mem.eql(u8, std.mem.span(e), "0")) -1 else 1)
-        else
-            1;
-        return S.cached > 0;
+        return model_hash.engramPendingOn();
     }
-
-    /// Stage the second Engram layer's rows at its own layer instead of before the forward. The ids are already known
-    /// (the hash pass ran); only the read's clock moves. `=0` is the control.
     pub fn engramPipeOn() bool {
-        // Read per forward: the same process can run the control and the arm.
-        if (std.c.getenv("TF_DSV41_ENGRAM_PIPE")) |e| return !std.mem.eql(u8, std.mem.span(e), "0");
-        return true;
+        return model_hash.engramPipeOn();
     }
-
     pub fn engramPipeRows(m: *Model, rows: u32) bool {
-        if (rows <= 8 or !engramPipeOn()) return false;
-        if (m.stream == null or m.stream_stage == null) return false;
-        if (engram.hash.layers.len != 2) return false;
-        if (engram.hash.layers[1].layer_id <= engram.hash.layers[0].layer_id) return false;
-        if (m.profile != null or m.observer != null) return false;
-        return std.c.getenv("TF_DSV41_LAYER_CB") == null and
-            std.c.getenv("TF_DSV41_STAGE_CB") == null and
-            std.c.getenv("TF_DSV41_ATTN_PROF") == null;
+        return model_hash.engramPipeRows(m, rows);
     }
-
     pub fn prefetchPending(m: *Model, slot: u32, pending: u32) void {
-        const src = m.stream orelse return;
-        if (!src.mapped()) return;
-        const ws = &m.workspace;
-        const history = ws.historyView(slot) catch return;
-        var ids: [2][engram.hash.columns]u32 = undefined;
-        engram.peekHashHost(history, ws.view(.token_map), pending, &ids) catch return;
-        for ([_]work.Field{ .engram_ids_0, .engram_ids_1 }, 0..) |_, li| src.prefetch(li, &ids[li]);
+        model_hash.prefetchPending(m, slot, pending);
     }
-
     pub fn stageFnv(bytes: []const u8) u64 {
-        var h: u64 = 0xcbf29ce484222325;
-        for (bytes) |b| {
-            h ^= b;
-            h *%= 0x100000001b3;
-        }
-        return h;
+        return model_hash.stageFnv(bytes);
     }
-
-    /// `TF_DSV41_ENGRAM_STAGE_HASH=1`; nothing in the default path reads this.
     pub fn stageHash(m: *Model, rows: u32, tag: []const u8) void {
-        if (std.c.getenv("TF_DSV41_ENGRAM_STAGE_HASH") == null) return;
-        const buf = m.stream_stage orelse return;
-        const ws = &m.workspace;
-        const layer_bytes = @as(usize, rows) * engram.gather_dim * @sizeOf(u16);
-        const base: [*]const u8 = buf.contents();
-        const n_ids: usize = @as(usize, rows) * engram.hash.columns;
-        const i0v = ws.view(.engram_ids_0);
-        const i1v = ws.view(.engram_ids_1);
-        const ids_a: [*]const u32 = @ptrCast(@alignCast(i0v.buffer.contents() + i0v.offset));
-        const ids_b: [*]const u32 = @ptrCast(@alignCast(i1v.buffer.contents() + i1v.offset));
-        std.log.info("engram stage hash {s} rows {d} ids0 {x} ids1 {x} staged0 {x} staged1 {x}", .{
-            tag,                                             rows,
-            stageFnv(std.mem.sliceAsBytes(ids_a[0..n_ids])), stageFnv(std.mem.sliceAsBytes(ids_b[0..n_ids])),
-            stageFnv(base[0..layer_bytes]),                  stageFnv(base[layer_bytes..][0..layer_bytes]),
-        });
+        model_hash.stageHash(m, rows, tag);
     }
-
     pub fn stageLayer(m: *Model, rows: u32, li: usize) !void {
-        const src = m.stream orelse return;
-        const buf = m.stream_stage orelse return error.EngramNotOpen;
-        const ws = &m.workspace;
-        const layer_bytes = @as(usize, rows) * engram.gather_dim * @sizeOf(u16);
-        const base: [*]u8 = buf.contents();
-        const n_ids: usize = @as(usize, rows) * engram.hash.columns;
-        const v = ws.view(if (li == 0) work.Field.engram_ids_0 else work.Field.engram_ids_1);
-        const at: [*]const u32 = @ptrCast(@alignCast(v.buffer.contents() + v.offset));
-        const out = std.mem.bytesAsSlice(u16, base[li * layer_bytes ..][0..layer_bytes]);
-        try src.rowsU32Parallel(li, at[0..n_ids], engram.head_dim, out, engramThreads(m));
+        return model_hash.stageLayer(m, rows, li);
     }
-
     pub fn stageRows(m: *Model, rows: u32) !void {
-        const stage_start: u64 = if (m.host_prof) nowNs() else 0;
-        defer if (m.host_prof) {
-            m.host_stage_ns += nowNs() - stage_start;
-        };
-        m.stageHash(rows, "pre");
-        const src = m.stream orelse return;
-        const buf = m.stream_stage orelse return error.EngramNotOpen;
-        const ws = &m.workspace;
-        const cols: usize = engram.hash.columns;
-        const layer_bytes = @as(usize, rows) * engram.gather_dim * @sizeOf(u16);
-        const base: [*]u8 = buf.contents();
-        const n_ids: usize = @as(usize, rows) * cols;
-        const small = n_ids < 512;
-        // The latch's clock is taken HERE, before the page-in. This clock sees prefetch + gather.
-        const w0: u64 = if (small and latchStage()) nowNs() else 0;
-        const adapt = small and engramAdapt();
-        var threads: usize = engramThreads(m);
-        var probed = false;
-        if (small) {
-            if (!adapt) {
-                threads = 1;
-            } else if (m.engram_par and m.engram_probe_in > 0) {
-                m.engram_probe_in -= 1;
-                threads = engramSmallThreads();
-            } else {
-                threads = 1;
-                probed = true;
-            }
-        }
-        // The window's page-ins, only where they pay. The prompt's rows are contiguous and the kernel already
-        // readahead-s them, so the large path is left alone; a single-threaded probe must not be prefetched (its time
-        // is the page-cache test); the warm band never reaches here.
-        const pf_start: u64 = if (small and engramPrefetch()) nowNs() else 0;
-        // The stage's own major faults, for the HOST_PROF line; the latch below uses the gather's clock.
-        const ru0 = std.posix.getrusage(std.posix.rusage.SELF);
-        const pf_on = small and m.engram_pf_on and pf_start != 0;
-        if (m.host_prof) {
-            m.host_stage_pf = if (pf_on) 1 else 0;
-            m.host_stage_thr = @intCast(threads);
-        }
-        if (pf_on) {
-            for ([_]work.Field{ .engram_ids_0, .engram_ids_1 }, 0..) |field, li| {
-                const v = ws.view(field);
-                const at: [*]const u32 = @ptrCast(@alignCast(v.buffer.contents() + v.offset));
-                src.prefetch(li, at[0..n_ids]);
-            }
-        }
-        const t0: u64 = if (adapt) nowNs() else 0;
-        const g0: u64 = if (small) nowNs() else 0;
-        const misses0: u64 = if (m.host_prof) src.stats.misses else 0;
-        if (!small and engramPipeRows(m, rows)) {
-            // The first layer now, the second at its own layer (the GPU runs the earlier layers while that read
-            // happens). Same ids, same bytes, same decode -- only the clock moves.
-            try m.stageLayer(rows, 0);
-            m.engram_pending = true;
-        } else {
-            for ([_]work.Field{ .engram_ids_0, .engram_ids_1 }, 0..) |field, li| {
-                const v = ws.view(field);
-                const at: [*]const u32 = @ptrCast(@alignCast(v.buffer.contents() + v.offset));
-                const ids = at[0..n_ids];
-                const out = std.mem.bytesAsSlice(u16, base[li * layer_bytes ..][0..layer_bytes]);
-                try src.rowsU32Parallel(li, ids, engram.head_dim, out, threads);
-            }
-        }
-        m.stageHash(rows, "stage");
-        if (adapt) {
-            const dt = nowNs() - t0;
-            if (probed) {
-                if (dt > 1_500_000) {
-                    m.engram_slow_n += 1;
-                    if (m.engram_slow_n >= 2) {
-                        m.engram_par = true;
-                        m.engram_probe_in = m.engram_probe_every;
-                        m.engram_probe_every = if (m.engram_probe_every >= 128) 128 else m.engram_probe_every * 2;
-                        m.engram_slow_n = 0;
-                    }
-                } else {
-                    m.engram_slow_n = 0;
-                    m.engram_par = false;
-                    m.engram_probe_in = 0;
-                    m.engram_probe_every = 16;
-                }
-            }
-        }
-        if (g0 != 0) {
-            // The latch's signal is the gather's own clock, taken AFTER the prefetch: the fault counters cannot
-            // serve, because a prefetched window's I/O is the madvise call and its reads are then minor faults, so
-            // the page-in hides the very coldness the latch must see. The off-side is delayed three windows:
-            // consecutive decode windows share most of their n-grams, so one resident window between two cold ones is
-            // the norm, not the stream turning warm.
-            const gather = nowNs() - (if (w0 != 0) w0 else g0);
-            if (gather > 400_000) {
-                m.engram_pf_on = true;
-                m.engram_pf_off = 0;
-            } else if (gather < 200_000) {
-                if (m.engram_pf_off < 3) m.engram_pf_off += 1;
-                if (m.engram_pf_off >= 3) m.engram_pf_on = false;
-            } else {
-                m.engram_pf_off = 0;
-            }
-        }
-        if (m.host_prof) {
-            m.host_stage_misses +%= src.stats.misses -% misses0;
-            const faults1: i64 = std.posix.getrusage(std.posix.rusage.SELF).majflt;
-            if (faults1 > ru0.majflt) m.host_stage_faults +%= @intCast(faults1 - ru0.majflt);
-        }
-        src.recordWindow(rows);
+        return model_hash.stageRows(m, rows);
     }
-
-    /// Copy `rows` rows of the running hidden state into tap `slot` (0..2 for the layers 37, 38 and 39 the drafter's
-    /// main_proj reads concatenated). A prompt chunk has thousands of rows and drafts nothing. The drafter's token
-    /// id, written where the embedding kernel reads it (the buffer is CPU-shared).
     pub fn drafterId(m: *Model, token: u32) !View {
-        if (m.drafter_ids == null) {
-            m.drafter_ids = try m.device.buffer(4, mtl.ResourceOptions.shared);
-            m.markov_ids = try m.device.buffer(8 * 4, mtl.ResourceOptions.shared); // five Markov steps, a u32 each
-            m.residency.add(m.drafter_ids.?);
-        }
-        std.mem.writeInt(u32, m.drafter_ids.?.contents()[0..4], token, .little);
-        return .{ .buffer = m.drafter_ids.? };
+        return model_drafter.drafterId(m, token);
     }
-
-    /// The drafter's round of ids: the pending token, then the release's noise token (128799) a row, as
-    /// `DSparkBlock.forward_embed` fills `draft_input_ids` (inference/model.py, revision 314113f8).
     pub fn drafterRound(m: *Model, pending: u32, rows: u32) !View {
-        if (m.drafter_ids == null) {
-            if (m.drafter_ids) |old| old.deinit();
-            // The buffer is sized for the widest form (the five-row arm), not for the rows the first call happened to
-            // use, so the arm cannot overflow it.
-            m.drafter_ids = try m.device.buffer(@max((rows + 1) * 4, 6 * 4), mtl.ResourceOptions.shared);
-            m.residency.add(m.drafter_ids.?);
-        }
-        const bytes = m.drafter_ids.?.contents();
-        var r: u32 = 0;
-        while (r < rows) : (r += 1)
-            std.mem.writeInt(u32, bytes[@as(usize, r) * 4 ..][0..4], if (r == 0) pending else 128799, .little);
-        return .{ .buffer = m.drafter_ids.? };
+        return model_drafter.drafterRound(m, pending, rows);
     }
-
-    /// The Markov chain's partial bests: ceil(vocab/256) float2 entries, allocated once.
     pub fn markovPart(m: *Model) !View {
-        if (m.markov_part == null) {
-            const groups: usize = (129280 + 255) / 256;
-            m.markov_part = try m.device.buffer(groups * 8, mtl.ResourceOptions.shared);
-            m.residency.add(m.markov_part.?);
-        }
-        return .{ .buffer = m.markov_part.? };
+        return model_drafter.markovPart(m);
     }
-
-    /// The drafter's state: `drafter_layers` rings, allocated once and kept for the model's life.
     pub fn drafterState(m: *Model) !*kv.cache.State {
-        if (m.drafter_state) |state| return state;
-        const state = try m.gpa.create(kv.cache.State);
-        errdefer m.gpa.destroy(state);
-        state.* = try kv.cache.State.init(m.device, .{ .capacity = m.cache.plan.capacity, .layers = kv.cache.drafter_layers });
-        m.drafter_state = state;
-        return state;
+        return model_drafter.drafterState(m);
     }
-
     pub fn tap(m: *Model, enc: mtl.ComputeEncoder, x: View, rows: u32, slot: usize) !void {
-        if (rows > 16 or !tapsOn()) return;
-        ops.encodeCopy(enc, &m.pipelines.ops, x, m.tapView(slot), .{
-            .rows = rows,
-            .width = 5120,
-            .x_stride = 5120,
-            .y_stride = 5120,
-        });
-        enc.barrier();
+        return model_drafter.tap(m, enc, x, rows, slot);
     }
     pub fn tapView(m: *const Model, slot: usize) View {
-        return .{ .buffer = m.taps, .offset = slot * 16 * 5120 * 2 };
+        return model_drafter.tapView(m, slot);
     }
     pub fn profileSpan(m: *Model, encoder: *mtl.ComputeEncoder, stage: gpu_counters.Stage) !void {
-        const recorder = m.profile orelse return;
-        if (!recorder.enabled()) return;
-        const counted = mtl.command.dispatch_count.load(.monotonic);
-        if (m.profile_open_stage) |prev| m.profile_stage_dispatch[@backingInt(prev)] += counted - m.profile_last_count;
-        if (recorder.activeSpan()) try recorder.endSpan(encoder);
-        try recorder.beginSpan(encoder, stage);
-        m.profile_open_stage = stage;
-        m.profile_last_count = counted;
-        for (m.checkpoint.shards.items) |shard| encoder.useResource(shard.buffer, mtl.ResourceUsage.read);
+        return model_drafter.profileSpan(m, encoder, stage);
     }
-
     pub fn normalize(m: *Model, enc: mtl.ComputeEncoder, x: View, w: checkpoint.Tensor, y: View, rows: u32) void {
-        ops.encodeRms(enc, &m.pipelines.ops, x, tensor(w), y, .{ .rows = rows, .width = 5120, .x_stride = 5120, .y_stride = 5120, .eps = m.cfg.eps });
-        enc.barrier();
+        model_drafter.normalize(m, enc, x, w, y, rows);
     }
-
     pub fn mixes(m: *Model, enc: mtl.ComputeEncoder, w: weights.Hc, pre: View, rows: u32) void {
-        if (std.c.getenv("TF_DSV41_SKIP_MHC") != null) return;
-        const ws = &m.workspace;
-        mhc.encodeRms(enc, &m.pipelines.mhc, ws.view(.stream), ws.view(.inv), .{ .rows = rows, .width = 5120, .stream_stride = 20480, .eps = m.cfg.eps });
-        mhc.encodeMixDense(enc, &m.pipelines.mhc, ws.view(.stream), tensor(w.projection), ws.view(.mixes), .{ .rows = rows, .k = 20480, .n = 24, .x_stride = 20480 });
-        enc.barrier();
-        mhc.encodeSplit(enc, &m.pipelines.mhc, ws.view(.mixes), ws.view(.inv), tensor(w.scale), tensor(w.base), pre, ws.view(.post), ws.view(.comb), .{ .rows = rows, .eps = m.cfg.hc_eps });
-        enc.barrier();
+        model_drafter.mixes(m, enc, w, pre, rows);
     }
-
     pub fn post(m: *Model, enc: mtl.ComputeEncoder, rows: u32) void {
-        if (std.c.getenv("TF_DSV41_SKIP_MHC") != null) return;
-        const ws = &m.workspace;
-        mhc.encodePost(enc, &m.pipelines.mhc, ws.view(.branch), ws.view(.stream), ws.view(.post), ws.view(.comb), ws.view(.stream), .{ .rows = rows, .width = 5120, .branch_stride = 5120, .residual_stride = 20480, .y_stride = 20480 });
-        enc.barrier();
+        model_drafter.post(m, enc, rows);
     }
-
     pub fn project(m: *Model, enc: mtl.ComputeEncoder, matrix: exl3.Matrix, x: View, y: View, rows: u32, xs: usize, ys: usize, output: exl3.Output) !void {
-        // The prompt-row int8 twin. Decode and every small chunk keep the trellis, so the gate is the call's own row
-        // count; the sidecar is attached only for the attention's dense projections.
-        if (matrix.int8) |side| {
-            if (rows >= 1024 and std.c.getenv("TF_DSV41_I8_PREFILL") != null) {
-                try exl3.encodePrefillInt8(&m.pipelines.projection, enc, matrix, side, convert(x), convert(y), m.workspace.projection(), .{ .count = rows, .x_stride = xs, .y_stride = ys, .output = output }, matrix.int8_direct);
-                enc.barrier();
-                return;
-            }
-        }
-        try exl3.encode(&m.pipelines.projection, enc, matrix, convert(x), convert(y), m.workspace.projection(), .{ .count = rows, .x_stride = xs, .y_stride = ys, .output = output });
-        enc.barrier();
+        return model_drafter.project(m, enc, matrix, x, y, rows, xs, ys, output);
     }
-
-    /// The same projection with the CALLER's eight-row dense hint -- the tensor-unit dense tile from eight rows up
-    /// instead of the shipped sixty-four.
     pub fn projectDense8(m: *Model, enc: mtl.ComputeEncoder, matrix: exl3.Matrix, x: View, y: View, rows: u32, xs: usize, ys: usize, output: exl3.Output) !void {
-        try exl3.encode(&m.pipelines.projection, enc, matrix, convert(x), convert(y), m.workspace.projection(), .{ .count = rows, .x_stride = xs, .y_stride = ys, .output = output, .dense8 = true });
-        enc.barrier();
+        return model_drafter.projectDense8(m, enc, matrix, x, y, rows, xs, ys, output);
     }
-
-    /// The projection's own three views -- the input it reads, the rotated input it leaves in the scratch, and the
-    /// sums the GEMM wrote -- dumped where the call made them, so a row's fault is localised to the stage that
-    /// produced it.
     pub fn projectDebug(m: *Model, enc: mtl.ComputeEncoder, matrix: exl3.Matrix, x: View, y: View, rows: u32, xs: usize, ys: usize, output: exl3.Output, b: mtl.Buffer) !void {
-        try exl3.encode(&m.pipelines.projection, enc, matrix, convert(x), convert(y), m.workspace.projection(), .{ .count = rows, .x_stride = xs, .y_stride = ys, .output = output });
-        enc.barrier();
-        const sc = m.workspace.projection();
-        ops.encodeDump(enc, &m.pipelines.ops, x, .{ .buffer = b, .offset = mtp_dbg_pin * 4 }, @intCast(rows * xs), true);
-        const rot = View{ .buffer = sc.buffer, .offset = sc.offset };
-        ops.encodeDump(enc, &m.pipelines.ops, rot, .{ .buffer = b, .offset = mtp_dbg_prot * 4 }, @intCast(rows * matrix.k), true);
-        const sums_off = (@as(usize, rows) * matrix.k * 2 + 15) & ~@as(usize, 15);
-        const sums = View{ .buffer = sc.buffer, .offset = sc.offset + sums_off };
-        ops.encodeDump(enc, &m.pipelines.ops, sums, .{ .buffer = b, .offset = mtp_dbg_psum * 4 }, @intCast(rows * matrix.n), false);
-        enc.barrier();
+        return model_drafter.projectDebug(m, enc, matrix, x, y, rows, xs, ys, output, b);
     }
-
-    /// The wo_a group's own GEMM sums, before the inverse rotation, where the overflow is born.
     pub fn projectDebugSums(m: *Model, enc: mtl.ComputeEncoder, matrix: exl3.Matrix, x: View, y: View, rows: u32, xs: usize, ys: usize, output: exl3.Output, b: mtl.Buffer) !void {
-        try exl3.encode(&m.pipelines.projection, enc, matrix, convert(x), convert(y), m.workspace.projection(), .{ .count = rows, .x_stride = xs, .y_stride = ys, .output = output });
-        enc.barrier();
-        const sc = m.workspace.projection();
-        const sums_off = (@as(usize, rows) * matrix.k * 2 + 15) & ~@as(usize, 15);
-        const sums = View{ .buffer = sc.buffer, .offset = sc.offset + sums_off };
-        ops.encodeDump(enc, &m.pipelines.ops, sums, .{ .buffer = b, .offset = mtp_dbg_woasums * 4 }, @intCast(rows * matrix.n), false);
-        enc.barrier();
+        return model_drafter.projectDebugSums(m, enc, matrix, x, y, rows, xs, ys, output, b);
     }
-
-    /// Rows a routed expert's tensor-unit tile covers (TF_DSV41_MOE_TILE_ROWS, 0 = the kernel's 64). A taller tile
-    /// decodes each weight once for more rows; it is the routed stage's one free shape.
     pub fn expertPasses() u32 {
-        const v = std.c.getenv("TF_DSV41_DOUBLE_EXPERTS") orelse return 1;
-        const n = std.fmt.parseInt(u32, std.mem.span(v), 10) catch 2;
-        return @max(1, @min(n, 8));
+        return model_drafter.expertPasses();
     }
-
     pub fn moeTileRows() u32 {
-        // The grouped plan pads each expert's block to the tile's own width, so the plan's tile and the routed GEMM's
-        // tile are one number (64 by default, 128 for the taller tile).
-        return expert_groups.tileRows();
+        return model_drafter.moeTileRows();
     }
-
-    /// The drafter block's attention: the four projections with their two norms, the round's own keys packed into the
-    /// chunk, the scan over the stage's ring plus that chunk with no compressor and no indexer, the eight `wo_a`
-    /// slices, `wo_b`, and the publish. The order is the release's `DSparkAttention.forward` (inference/model.py,
-    /// revision 314113f8) with our own ring and shapes; its big scratch lives in `.logits` from row 1 on.
     pub fn draftAttention(m: *Model, enc0: mtl.ComputeEncoder, blk: *const weights.Layer, state: *kv.cache.State, slot: u32, layer: u32, rows: u32, position: u32, dbg: ?mtl.Buffer, prof: ?*Model.CondProf) !void {
         return model_draft_attention.draftAttention(m, enc0, blk, state, slot, layer, rows, position, dbg, prof);
     }
@@ -817,73 +441,25 @@ pub const Model = struct {
     /// not: the yield scales with the depth, so one threshold cannot separate the novel text from the predictable
     /// text. The policy's warm-up length -- a running mean over the first `k` samples, then the shipped EMA. `TF_DSV41_MTP_ADAPT_WARM=0` is the pure EMA (the
     /// same-binary control).
-    var mtp_warm_cache: ?u32 = null;
+    pub var mtp_warm_cache: ?u32 = null;
     pub fn mtpWarmRounds() u32 {
-        if (mtp_warm_cache) |v| return v;
-        const raw = std.c.getenv("TF_DSV41_MTP_ADAPT_WARM") orelse {
-            mtp_warm_cache = 4;
-            return 4;
-        };
-        const n = std.fmt.parseInt(u32, std.mem.span(raw), 10) catch 0;
-        mtp_warm_cache = @min(n, 16);
-        return mtp_warm_cache.?;
+        return model_drafter.mtpWarmRounds();
     }
-
-    /// The lane's first-draft acceptance (the adaptive depth policy's signal), smoothed.
     pub fn noteAcceptSlot(m: *Model, slot: u32, hit: bool) void {
-        if (slot >= m.mtp_accept_slot.len) return;
-        const v: f64 = if (hit) 1.0 else 0.0;
-        // THE FIRST SAMPLE SETS THE SIGNAL (a request's first round is a valid observation of the first draft's
-        // acceptance). The pure-EMA form (the signal starts at zero) costs the PREDICTABLE text ten rounds of the
-        // cheap window before it passes UP -- a tenth of the warm probe's rounds at the cheap rate.
-        if (m.mtp_accept_seen_slot[slot] == 0) {
-            m.mtp_accept_slot[slot] = v;
-        } else if (m.mtp_accept_seen_slot[slot] < mtpWarmRounds()) {
-            const n: f64 = @floatFromInt(m.mtp_accept_seen_slot[slot] + 1);
-            m.mtp_accept_slot[slot] = (m.mtp_accept_slot[slot] * (n - 1.0) + v) / n;
-        } else {
-            m.mtp_accept_slot[slot] = m.mtp_accept_slot[slot] * 0.85 + v * 0.15;
-        }
-        m.mtp_accept_seen_slot[slot] += 1;
+        model_drafter.noteAcceptSlot(m, slot, hit);
     }
-
-    /// THE ROUND'S OWN PER-DRAFT ACCEPTANCE as the policy's signal (the same EMA and the same first-sample rule as
-    /// `noteAcceptSlot`). At depth 1 it IS the first-draft hit (kept/1); at depth 3 it falls well below that on novel
-    /// text -- where the first-draft sample stays high because a deep window's first draft is usually accepted while
-    /// its second and third are not. That is the depth-awareness the policy needs to leave the deep window when the
-    /// deep window stops paying.
     pub fn noteAcceptRatioSlot(m: *Model, slot: u32, ratio: f64) void {
-        if (slot >= m.mtp_round_slot.len) return;
-        const v = std.math.clamp(ratio, 0.0, 1.0);
-        if (m.mtp_round_seen_slot[slot] == 0) {
-            m.mtp_round_slot[slot] = v;
-        } else {
-            m.mtp_round_slot[slot] = m.mtp_round_slot[slot] * 0.85 + v * 0.15;
-        }
-        m.mtp_round_seen_slot[slot] += 1;
+        model_drafter.noteAcceptRatioSlot(m, slot, ratio);
     }
-
-    /// The round's per-draft acceptance (the hybrid policy's stay-deep signal).
     pub fn mtpRoundSlot(m: *Model, slot: u32) f64 {
-        if (slot >= m.mtp_round_slot.len) return 0;
-        return m.mtp_round_slot[slot];
+        return model_drafter.mtpRoundSlot(m, slot);
     }
-
-    /// The lane's first-draft acceptance (the adaptive depth policy's signal).
     pub fn mtpAcceptSlot(m: *Model, slot: u32) f64 {
-        if (slot >= m.mtp_accept_slot.len) return 0;
-        return m.mtp_accept_slot[slot];
+        return model_drafter.mtpAcceptSlot(m, slot);
     }
-
-    /// The signal is per REQUEST -- a new request starts from a clean signal.
     pub fn resetAcceptSlot(m: *Model, slot: u32) void {
-        if (slot >= m.mtp_accept_slot.len) return;
-        m.mtp_accept_slot[slot] = 0;
-        m.mtp_accept_seen_slot[slot] = 0;
-        m.mtp_round_slot[slot] = 0;
-        m.mtp_round_seen_slot[slot] = 0;
+        model_drafter.resetAcceptSlot(m, slot);
     }
-
     pub fn proposeTokens(m: *Model, slot: u32, pending: u32, count: u32) ![4]u32 {
         return model_propose.proposeTokens(m, slot, pending, count);
     }
