@@ -145,6 +145,7 @@ pub fn side(f: config.Quant) []const []const u8 {
         .bf16 => &.{},
         .fp8_block128 => &.{"weight_scale_inv"},
         .nvfp4 => &.{ "weight_scale", "weight_scale_2", "input_scale" },
+        .exl3 => &.{}, // a quantized linear is .trellis, .suh, .svh and its marker, read by the trellis (weights_proj)
     };
 }
 
