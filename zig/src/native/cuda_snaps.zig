@@ -27,7 +27,8 @@ pub fn passRules(comptime F: type, prompt_rows: u32) api.prompt_cache.Rules {
 
 /// The server's chunk step: a family whose cold passes cut at request starts gets message starts on its grid (0: none).
 pub fn requestStep(comptime F: type) u32 {
-    return requestStepFor(F, @import("profile").get(.TF_QWEN_REQUEST_STARTS));
+    if (!@hasDecl(F, "request_starts_switch")) return 0; // each family names its own opt-in, so it turns on alone
+    return requestStepFor(F, @import("profile").lookup(F.request_starts_switch));
 }
 
 /// Only exact 1 opts in; a family must also declare that its cold passes honor request starts.
@@ -132,6 +133,49 @@ test "only a family whose passes cut at request starts asks the server for them"
     try std.testing.expectEqual(@as(u32, 0), requestStepFor(Glm, "1"));
     try std.testing.expectEqual(@as(u32, 0), requestStepFor(struct {}, "1"));
     try std.testing.expectEqual(@as(u32, 4096), requestStepFor(Qwen, "1"));
+}
+
+test "request starts: one family's switch leaves every other family without starts, and unset leaves all on main" {
+    const sys = @import("sys");
+    const profile = @import("profile");
+    const Other = struct {
+        pub const snap_grid: u32 = 2048;
+        pub const request_starts = true;
+        pub const request_starts_switch = "TF_SNAPS_TEST_REQUEST_STARTS";
+    };
+    const Unnamed = struct {
+        pub const snap_grid: u32 = 2048;
+        pub const request_starts = true;
+    };
+    const names = [_][:0]const u8{ "TF_QWEN_REQUEST_STARTS", Other.request_starts_switch };
+    var saved: [names.len]?[:0]u8 = @splat(null);
+    for (names, &saved) |n, *s| if (sys.getenv(n)) |v| {
+        s.* = try std.testing.allocator.dupeSentinel(u8, v, 0);
+    };
+    defer for (names, saved) |n, s| if (s) |old| {
+        _ = sys.env.setenv(n, old, 1);
+        std.testing.allocator.free(old);
+    } else {
+        _ = sys.env.unsetenv(n);
+    };
+    const registry = @import("cuda.zig").registry;
+    var qwens: usize = 0;
+    inline for (registry) |F| if (@hasDecl(F, "request_starts_switch")) {
+        try std.testing.expect(std.mem.startsWith(u8, F.model_type, "qwen3_5"));
+        const id = profile.registered(F.request_starts_switch) orelse return error.UnreviewedSwitch;
+        try std.testing.expect(profile.entry(id).applies(F.model_type, "cuda"));
+        qwens += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 2), qwens); // the dense and MoE entry points
+    for (0..names.len + 1) |on| { // on == names.len: every switch unset
+        for (names, 0..) |n, i| try std.testing.expectEqual(@as(c_int, 0), if (i == on) sys.env.setenv(n, "1", 1) else sys.env.unsetenv(n));
+        inline for (registry ++ .{ Other, Unnamed }) |F| {
+            const qwen = @hasDecl(F, "request_starts_switch") and F != Other;
+            const grid: u32 = if (@hasDecl(F, "snap_grid")) F.snap_grid else 0;
+            try std.testing.expect(!qwen or grid > 0);
+            try std.testing.expectEqual(if ((on == 0 and qwen) or (on == 1 and F == Other)) grid else 0, requestStep(F));
+        }
+    }
 }
 
 test "request starts: unset keeps CUDA's main prefill contract" {
