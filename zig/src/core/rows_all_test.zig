@@ -12,6 +12,7 @@ test {
     _ = @import("rows_stage_test.zig");
     _ = @import("rows_select_test.zig");
     _ = @import("rows_recall_select_test.zig");
+    _ = @import("rows_fallback_test.zig");
     _ = @import("rows_charge_test.zig");
     _ = @import("rows_pool_select_test.zig");
     _ = @import("rows_prefetch.zig");
