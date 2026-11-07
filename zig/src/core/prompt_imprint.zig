@@ -34,7 +34,7 @@ pub const Imprint = struct {
         errdefer m.deinit();
         @import("lanes").learned_dirs.cleanupParts(root) catch return error.ImprintRead;
         try m.load();
-        try @import("lanes").learned_dirs.removeUnindexed(m.dir, m.metas.items);
+        try @import("lanes").learned_dirs.removeUnindexed(gpa, m.dir, m.metas.items);
         m.stamp();
         m.others = @import("lanes").learned_dirs.totalOthers(root, m.dir) catch return error.ImprintRead;
         return m;
@@ -238,6 +238,9 @@ pub const Imprint = struct {
 
     fn readIndex(m: *Imprint, fd: c_int) !void {
         const end = try indexSize(fd);
+        var keys: std.AutoHashMapUnmanaged(u64, void) = .empty; // kept so far: a later record of one is dropped
+        defer keys.deinit(m.gpa);
+        for (m.metas.items) |x| try keys.put(m.gpa, x.key, {});
         var off: u64 = 0;
         while (off < end) {
             if (end - off < HEAD * 4) {
@@ -272,7 +275,11 @@ pub const Imprint = struct {
                 free(m.gpa, x);
                 return m.torn(fd, off, end);
             }
-            if (m.has(x.key)) free(m.gpa, x) else {
+            const seen = keys.getOrPut(m.gpa, x.key) catch |err| {
+                free(m.gpa, x);
+                return err;
+            };
+            if (seen.found_existing) free(m.gpa, x) else {
                 m.clock += 1;
                 var y = x;
                 y.used = m.clock;
@@ -487,6 +494,7 @@ pub fn singleForgetChecked(_: *anyopaque, dir: [:0]const u8, key: u64) !void {
 test {
     _ = @import("prompt_imprint_test.zig");
     _ = @import("prompt_imprint_fault_test.zig");
+    _ = @import("prompt_imprint_open_test.zig");
     _ = @import("learned_disk.zig");
 }
 
