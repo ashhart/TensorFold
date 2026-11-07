@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3.8-27B on Metal: prompt chunks of 64 rows or more run the wide projections with half operands wherever a tile's inputs all fit in half, and keep the fp32 path elsewhere, so logits and tokens are bit-equal to before. Served prefill is 2-3% faster on an M3 Pro (#2435, part of #2089). Thanks to @jschmied.
+
 - Docs: the optimization ledger's cells for #2011, #2162 and #2282 say they landed (#2431).
 
 - Lane host: a stream paid for at load (`free_streams`, the engine's own sequence) is a standing lease in the KV ledger, so a family that reserves per request admits as many full-window requests as the window plan, not one fewer, and its prompt cache sits beside the same streams; the job on it promises only what it adds, and the lease is not reported at stop. No family on main reserves per request yet, so every current load is unchanged (#1943 step 2). Thanks to @laudney for finding the gap.
