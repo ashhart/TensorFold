@@ -58,7 +58,9 @@ pub const Model = struct {
         defer a.free(text);
         var c = try cfg.parse(a, text);
         if (c.variant == .v1) c.history = history;
-        try c.bind(target.config.hidden, target.config.vocab, target.config.layers);
+        // A pair's rank holds a shard: its `config` is rank-local (a split vocab), so bind the global geometry.
+        const global = if (target.shard.ranks > 1) target.shard.global else target.config;
+        try c.bind(global.hidden, global.vocab, global.layers);
         const shards = try core.checkpoint_host.shardFiles(a, io, dir);
         defer core.checkpoint_host.freeShardFiles(a, shards);
         return openBound(a, target, c, shards, mode);
