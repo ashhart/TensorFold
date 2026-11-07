@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Build: `zig/build/cuda.zig` goes from 600 to 467 lines; the CUDA contracts' CPU references and the server's host tests register from their own build files, with the same steps in the same order (#2420).
+
 - Vision: PDF pages reach the vision tower in their true colours. The render flags set `FPDF_REVERSE_BYTE_ORDER` where printing was meant, which swapped red and blue on every page (#2387, for #2386). Thanks to @gordonhatusupy for the report.
 
 - Tests: `test-gradient-serving` and `test-qwen-serving-host` pass again: their serving source pins take main's bytes after a read of every change since they were set, each a comment, an off-by-default path or a reviewed PR (#2418, part of #2031).
