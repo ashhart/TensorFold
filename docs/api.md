@@ -963,7 +963,7 @@ configured the body is only `{"status": "ok"}`. An engine that reports unhealthy
 | `max_batch_size` | integer | The lanes the engine serves at once |
 | `policy` | string | The engine's policy line; absent when the engine reports none |
 | `warming` | boolean | Always `false` on the native engines |
-| `memory` | object | CUDA: `active`, `cache` and `peak` in bytes (`cache` is 0), plus `limit` when the engine reports one. Metal: `{}` |
+| `memory` | object | `active`, `cache` and `peak` in bytes (`cache` is 0), plus `limit` when the engine reports one: CUDA's allocator counts; on Metal the process footprint, from Nemotron, Qwen3.5-2B, Qwen3.8-27B, Qwen3.5-MoE, Flash Next, GLM-5.3-Flash and GLM-5.3 (EXLR8); Flash Next and both GLMs add `limit`, their load limit. `{}` from the other Metal families |
 | `live` | object | `connections`, `waiting`, `decode_tokens_per_second`, `prefill_tokens_per_second` |
 | `version` | string | The release this server was built from |
 | `backend` | string | The backend built in: `metal`, `cuda`, `hip` or `xpu`; absent from a build without one |
