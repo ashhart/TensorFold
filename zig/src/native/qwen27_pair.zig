@@ -134,3 +134,35 @@ test "the served pair's chunk times the widest seam fits the window" {
     try std.testing.expectEqual(@as(usize, batch_rows * @divExact(17408, 2) * @sizeOf(u16)), pairBytes());
     try std.testing.expect(seamBytes(512) > pairBytes());
 }
+
+/// This rank's four identity words for `Pair.ready`: the engine build, chip class, checkpoint digest and widths tag.
+pub fn pairFingerprint(a: std.mem.Allocator, io: std.Io, model: *q.model.Model, dir: []const u8) tf.pair_rows.Fingerprint {
+    const generation = blk: {
+        const name = std.mem.span(model.device.name());
+        var words_it = std.mem.tokenizeScalar(u8, name, ' ');
+        _ = words_it.next() orelse break :blk 0; // "Apple"
+        const m = words_it.next() orelse break :blk 0; // "M4"
+        if (m.len < 2 or std.ascii.toLower(m[0]) != 'm') break :blk 0;
+        break :blk std.fmt.parseInt(u32, m[1..], 10) catch 0;
+    };
+    const chip: u64 = if (generation >= 1) generation else 0;
+    const checkpoint: u64 = blk: {
+        const digest = q.checkpoint_identity.identity(a, io, dir) catch break :blk 0;
+        break :blk std.mem.readInt(u64, digest[0..8], .little);
+    };
+    return .{
+        .version = engineVersion(),
+        .chip = chip,
+        .checkpoint = checkpoint,
+        .format = model.widths_tag,
+    };
+}
+
+/// The engine build version's hash: 0 when this binary carries no version string, refused against any named one.
+fn engineVersion() u64 {
+    const v = @import("build_options").version;
+    if (v.len == 0) return 0;
+    var h = std.hash.Wyhash.init(0x6437);
+    h.update(v);
+    return h.final();
+}

@@ -107,6 +107,8 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "engine_api", .module = api }, .{ .name = "tensorfold", .module = mods.engine } },
     });
     engines.addImport("living", mods.living);
+    // the served families read the engine version for the pair's identity exchange (`Pair.ready`'s fingerprint)
+    engines.addOptions("build_options", build_options);
     const drama3_lib = drama3_build.metallib(b, metal_std);
     b.getInstallStep().dependOn(&b.addInstallFile(drama3_lib, "lib/drama3.metallib").step);
     const drama3_embed = if (shaders) drama3_lib else no_shaders;
@@ -335,7 +337,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     b.step("test-cli", "The checkpoint CLI's host tests").dependOn(&run_cli_tests.step);
 
     // The core lane, shared-context and Qwen3.8-27B programs and host tests.
-    qwen27_build.targets(b, target, optimize, metal, sources, engine, lanes, mods.qwen27, test_step);
+    qwen27_build.targets(b, target, optimize, metal, sources, engine, lanes, mods.qwen27, test_step, build_options);
     core_checks.targets(b, target, optimize, metal, engine);
     contract_build.metal(b, target, optimize, metal, engine, sources, kimi_bytes);
     glm_checks.targets(b, target, optimize, metal, engine, sources, test_step);

@@ -93,3 +93,22 @@ test "--drafter is refused at the front door, by name" {
     // one Mac keeps its drafter: with no pair there is nothing to refuse
     try pair_flags.refuseOptions(false, pair, false, &why);
 }
+
+test "a pair's ready refuses a Mac that differs on the facts its bits come from" {
+    const same: tf.pair_rows.Fingerprint = .{ .version = 7, .chip = 4, .checkpoint = 0xA11CE, .format = 64 };
+    try std.testing.expectEqual(@as(?[]const u8, null), tf.pair_rows.fingerprintProblem(std.testing.allocator, same, same)); // equal facts refuse nothing
+    // each fact by name: the message says which one differed and both sides' words
+    const cases = [_]tf.pair_rows.Fingerprint{
+        .{ .version = 8, .chip = 4, .checkpoint = 0xA11CE, .format = 64 }, // another build
+        .{ .version = 7, .chip = 5, .checkpoint = 0xA11CE, .format = 64 }, // an M5 beside an M4
+        .{ .version = 7, .chip = 4, .checkpoint = 0xB0B, .format = 64 }, // another checkpoint (quantization, shapes)
+        .{ .version = 7, .chip = 4, .checkpoint = 0xA11CE, .format = 128 }, // another weight format
+    };
+    const names = [_][]const u8{ "engine version", "GPU family", "checkpoint", "weight format" };
+    for (cases, names) |peer, name| {
+        const why = tf.pair_rows.fingerprintProblem(std.testing.allocator, same, peer).?;
+        defer std.testing.allocator.free(why);
+        try std.testing.expect(std.mem.indexOf(u8, why, name) != null);
+        try std.testing.expect(std.mem.indexOf(u8, why, "match neither Mac alone") != null);
+    }
+}
