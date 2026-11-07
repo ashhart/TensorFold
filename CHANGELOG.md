@@ -6,6 +6,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Internal: HIP record counts are pinned in their owning arrays, so additions in different record files no longer edit a shared numeric total; omissions still fail host checks (#2461).
 - Qwen3.8 Flash Next on CUDA: BF16 prompt projections take a 128 × 128 tile on sm_12x wherever it fills the GPU, with the same output bytes, so prompts are 4 to 6% faster on a GB10 (NVFP4 checkpoint) and replies are unchanged. `TF_FLASHNEXT_PROMPT_BF16=0` turns the tile off, and `TF_FLASHNEXT_PROMPT_ROWS` is gone (#1846, refs #1754). Thanks to @laudney.
+- Internal: `compile-cuda-tests` builds again: `contract_controls.cu` declares the prompt-row fragment's page settings (`P256`, `IDS`, `PN`), which its control kernel predated (#2463).
 
 - Qwen3.5 and Qwen3.6 on CUDA: a stream's rollback copy shares its verify log's bytes, which are never in use together, so each pooled stream takes 147 MiB less on Qwen3.8-27B and 61 MiB less on the 35B-A3B; tokens and speed unchanged (#2447, part of #1943). Thanks to @jschmied.
 - LightOnOCR-3 on HIP: the native server reads `lightonai/LightOnOCR-3-0.8B`, `-1B` and `-4B` (BF16) and serves their
