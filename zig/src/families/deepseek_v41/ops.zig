@@ -188,7 +188,7 @@ pub const Dense = struct {
     y_dtype: Dtype = .bf16,
 };
 
-/// The kernel's `Dense` record, field for field (it was a positional payload until this round).
+/// The kernel's `Dense` record, field for field.
 pub const DenseArgs = extern struct { rows: u32, k: u32, n: u32, groups: u32, x_stride: u32, w_stride: u32, y_stride: u32, x_dtype: u32, w_dtype: u32, y_dtype: u32 };
 
 /// x[rows,groups,k], w[groups,n,k], y[rows,groups,n]; packed groups, padded token pitches, FP32 sums, final BF16.

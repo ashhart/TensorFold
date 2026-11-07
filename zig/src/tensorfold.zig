@@ -154,7 +154,6 @@ pub const tree_commit_gpu = @import("tree_commit_gpu");
 
 pub const tree_slots = @import("core/tree_slots.zig");
 
-// LOCAL WORKAROUND (not part of this change): the branch's native root must export what load.zig imports.
 pub const paced_read = @import("core/paced_read.zig");
 pub const weight_only = @import("core/weight_only.zig");
 pub const weight_only_contract = @import("core/contract/weight_only.zig");
