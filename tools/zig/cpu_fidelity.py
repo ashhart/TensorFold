@@ -1,11 +1,6 @@
 #!/usr/bin/env python3
-"""Teacher-forced Qwen3.5-2B logits of the CPU engine against a float64 reference: every top-token difference, both margins."""
-# freeze:  cpu_fidelity.py freeze MODEL_DIR OUT    the prompt set as uint32 .npy pairs (<case>.prompt.npy, <case>.teacher.npy)
-#          and prompt-set.json with their sha256, written before any logits exist
-# record:  cpu_fidelity.py record URL OUT --name NAME [--tokens N] [--text T | --file F]   a chat prompt as the serve renders it
-#          (/v1/tokenize) and its greedy reply (/v1/chat/completions, temperature 0) as one more (prompt, teacher) pair
-# compare: cpu_fidelity.py compare --case NAME --prompt-len N --reference logits_f64.npy --candidate <case>.bf16 --json out.json
-#          the candidate is tf-qwen35-cpu-forward's raw bf16 rows over prompt + teacher[:-1]; rows prompt_len-1.. are compared
+"""The CPU engine's teacher-forced Qwen3.5-2B logits against a float64 reference: each top-token difference, margins."""
+# usage: cpu_fidelity.py freeze MODEL_DIR OUT | record URL OUT --name NAME | compare --case NAME --prompt-len N ...
 import argparse
 import hashlib
 import json
@@ -17,7 +12,7 @@ import numpy as np
 
 VOCAB = 248320
 
-# Each text's first `split` words are the prompt (raw tokens); the rest, tokenized, are the teacher ids (at most `rows`).
+# Each text's first SPLIT words are the prompt; the rest, tokenized, are the teacher ids (at most ROWS of them).
 TEXTS = {
     "prose": (
         "Rivers meander because water does not flow at the same speed everywhere across a channel. On the outside of a "
@@ -86,7 +81,7 @@ def post(base, path, body):
 
 
 def record(args):
-    """A chat prompt as the serve renders it and its greedy reply, recorded as a (prompt, teacher) pair before any comparison."""
+    """A chat prompt as the serve renders it and its greedy reply, one more (prompt, teacher) pair of the frozen set."""
     content = open(args.file).read() if args.file else args.text
     messages = [{"role": "user", "content": content}]
     prompt = np.array(post(args.url, "/v1/tokenize", {"model": args.model, "messages": messages})["tokens"], np.uint32)
@@ -158,10 +153,10 @@ def compare(args):
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="command", required=True)
-    f = sub.add_parser("freeze")
-    f.add_argument("model_dir")
+    f = sub.add_parser("freeze", help="the prompt set as uint32 .npy pairs (<case>.prompt.npy, <case>.teacher.npy) and prompt-set.json with their sha256, before any logits exist")
+    f.add_argument("model_dir", help="the checkpoint directory, for its tokenizer")
     f.add_argument("out")
-    r = sub.add_parser("record")
+    r = sub.add_parser("record", help="a chat prompt as the serve renders it (/v1/tokenize) and its greedy reply, one more (prompt, teacher) pair in OUT")
     r.add_argument("url")
     r.add_argument("out")
     r.add_argument("--model", default="qwen3.5-2b")
@@ -169,12 +164,12 @@ def main():
     r.add_argument("--tokens", type=int, default=128)
     r.add_argument("--text", default="Explain how matrix multiplication uses a GPU in plain English, then give a small numerical example.")
     r.add_argument("--file", help="a document to send as the user turn instead of --text")
-    c = sub.add_parser("compare")
+    c = sub.add_parser("compare", help="the candidate's rows from prompt_len - 1 against the reference's: every top-token difference with both margins")
     c.add_argument("--case", required=True)
     c.add_argument("--prompt-len", type=int, required=True)
-    c.add_argument("--reference", required=True)
-    c.add_argument("--candidate", required=True)
-    c.add_argument("--json")
+    c.add_argument("--reference", required=True, help="the float64 reference's logits_f64.npy, one row a teacher token")
+    c.add_argument("--candidate", required=True, help="tf-qwen35-cpu-forward's raw bf16 rows over prompt + teacher[:-1]")
+    c.add_argument("--json", help="the differences and digests written here")
     args = p.parse_args()
     if args.command == "freeze":
         return freeze(args)
