@@ -233,6 +233,7 @@ pub const Model = struct {
             if (!quiet) std.log.err("{s}", .{text});
             return error.UnsupportedCheckpoint;
         }
+        try @import("block_admission.zig").serving(&m.cfg, world);
         if (o.own_prefill) try @import("block_admission.zig").nativePrefill(&m.cfg, world);
         m.pack = try Pack.open(gpa, io, pack_dir);
         const backbone = if (o.layers) |ls| try a.dupe(u32, ls) else blk: {

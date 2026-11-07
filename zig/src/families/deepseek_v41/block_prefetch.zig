@@ -21,7 +21,7 @@ pub fn l2pfSources(e: *Emitter, L: u32, site: L2Site) ![]const L2Src {
     switch (site) {
         .o => {
             const D: i64 = e.cfg.hidden;
-            const g = e.cfg.o_groups / e.o.world;
+            const g = try e.rankGroups();
             const ki: i64 = @divExact(@as(i64, e.cfg.heads) * e.cfg.head_dim, @as(i64, e.cfg.o_groups));
             const ws = try e.a.alloc([]const u8, g);
             const ks = try e.a.alloc(i64, g);

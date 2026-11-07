@@ -47,9 +47,9 @@ pub fn blockGroups(c: *const Config, layer: u32, rank: u32, world: u32, has_shar
     try g.push(.{ .proj = .wq_a, .suffix = "attn.wq_a", .split = .whole, .k = c.hidden, .n = c.q_lora });
     try g.push(.{ .proj = .wkv, .suffix = "attn.wkv", .split = .whole, .k = c.hidden, .n = c.head_dim });
     try g.push(.{ .proj = .wq_b, .suffix = "attn.wq_b", .split = .col, .k = c.q_lora, .n = c.heads * c.head_dim });
-    const gl = c.o_groups / world;
-    var s = rank * gl;
-    while (s < (rank + 1) * gl) : (s += 1) try g.push(.{ .proj = .wo_a, .suffix = "attn.wo_a.slice", .slice = s, .split = .whole, .k = per_group_k, .n = c.o_lora });
+    const own = try @import("partition.zig").outputGroups(c.o_groups, rank, world);
+    var s = own.lo;
+    while (s < own.lo + own.len) : (s += 1) try g.push(.{ .proj = .wo_a, .suffix = "attn.wo_a.slice", .slice = s, .split = .whole, .k = per_group_k, .n = c.o_lora });
     try g.push(.{ .proj = .wo_b, .suffix = "attn.wo_b", .split = .row, .k = c.o_groups * c.o_lora, .n = c.hidden });
     if (c.isBackbone(layer) and c.isKvSource(layer)) {
         try g.push(.{ .proj = .comp_wkv, .suffix = "attn.compressor.wkv", .split = .whole, .k = c.hidden, .n = c.head_dim });

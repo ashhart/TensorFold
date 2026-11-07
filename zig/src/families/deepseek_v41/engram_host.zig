@@ -333,4 +333,5 @@ test "the n-gram hashes: the reference NgramHasher on the release config and tok
     }
     try testing.expectEqual(fx.len, at);
     try testing.expectEqual([2]u32{ 12, 12 }, h.headShard(1, 2));
+    try testing.expectEqual([2]u32{ 16, 8 }, h.headShard(2, 3));
 }
