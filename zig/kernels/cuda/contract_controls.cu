@@ -6,10 +6,10 @@
 #include <stdint.h>
 #include "common/reduce.cuh"
 #include "gemma4_ple.cuh"
-
 #define TF_Q35_SCORE_CONTROL
 #include "qwen35_scores.cuh"
-
+#define TF_MOE_ROUTER_CONTROLS
+#include "moe_router_expert.cuh"
 __device__ __forceinline__ float tf_ctl_x(const __nv_bfloat16* x, int64_t i) { return __bfloat162float(x[i]); }
 
 // Gate 1: a row's maximum by fmaxf, which drops a NaN input, so a row holding NaN reads as its largest number.
@@ -221,7 +221,6 @@ extern "C" __global__ void tf_ctl_vit_unrounded_bias(const float* ACC, const __n
     const int64_t at = static_cast<int64_t>(blockIdx.x) * N + c;
     O[at] = __float2bfloat16_rn(__fadd_rn(__fadd_rn(ACC[at], __bfloat162float(BIAS[c])), __bfloat162float(R[at])));
 }
-
 
 // Gate 3: vit.cu's LayerNorm rows (8192 wide) keeping the points in `keep`; the shapes gate must go red.
 #include "vit_norm.cuh"
@@ -461,7 +460,6 @@ extern "C" __global__ void __launch_bounds__(256) tf_ctl_lfm2m_route(const __nv_
                                                                       float* WTS, float* LOGITS, int rows, int D, float scale) {
     tf_lfm2m::lfm2m_route<1>(X, W, BIAS, PICK, WTS, LOGITS, rows, D, scale);
 }
-
 // Paged attention at head 64, one planted fault each: values from the next lane's dims (decode) or next 8 (prompt).
 namespace tf_ctl_paged {
 using tf_glue::bf;
@@ -497,6 +495,3 @@ extern "C" __global__ void __launch_bounds__(256, 1) tf_ctl_pattn_64(const __nv_
 #include "contract_ctl_router.cuh"
 #define TF_GDN_CHAIN_CONTROLS
 #include "gdn_prefill.cu"
-
-#define TF_MOE_ROUTER_CONTROLS
-#include "moe_router_expert.cuh"
