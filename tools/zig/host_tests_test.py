@@ -16,6 +16,8 @@ EXCLUDED = (
     "test-exl3-prompt-host",
     "test-qwen35-draft-frame-host",
     "test-qwen35-frame-invalidation-host",
+    "test-qwen35-draft-trees-host",
+    "test-qwen27-prompt-rows-host",
     "test-gemma4-affine-host",
     "test-gradient-serving",
     "test-qwen-serving-host",
