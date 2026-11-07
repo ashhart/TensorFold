@@ -312,8 +312,7 @@ fn bandVerdict(engine_nrms: f64, floor_nrms: f64) Band {
     return .{ .ratio = ratio, .verdict = verdict, .measured = true, .passed = ratio <= band_review_limit };
 }
 
-/// The floor's own manifest: the token window, its hash, the contract logits' hash and the checkpoint's metadata
-/// identity, so a window, logits file or a different checkpoint's metadata cannot pair.
+/// The floor manifest binds the window, its hash, the contract logits hash and the checkpoint metadata identity.
 fn fnv1a(bytes: []const u8) u64 {
     var hash: u64 = 0xcbf29ce484222325;
     for (bytes) |b| {
@@ -323,8 +322,7 @@ fn fnv1a(bytes: []const u8) u64 {
     return hash;
 }
 
-/// Written by the FP32 contract capture; readFloor refuses anything that is not this exact window, these exact
-/// bytes and this checkpoint metadata identity.
+/// Written by the FP32 contract capture; readFloor refuses any other window, bytes or metadata identity.
 fn writeFloor(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, ids: []const u32, cpu: []const f32, identity: [32]u8) !void {
     const path = try std.fs.path.join(gpa, &.{ dir, "floor.txt" });
     defer gpa.free(path);

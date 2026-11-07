@@ -288,8 +288,7 @@ pub fn main(init: std.process.Init) !void {
     if (!resident_gate_passed) return error.ResidentExecutionReadFromDisk;
 }
 
-/// The checkpoint metadata identity of every input the oracle reads: config, index and the headers of the shard
-/// files present, the token map whole, and the Engram source the model actually opens.
+/// Binds every oracle input: config, index, present shard headers, the token map and the Engram source opened.
 fn checkpointMetadataIdentity(a: std.mem.Allocator, io: std.Io, pack: []const u8, tables: []const u8) ![32]u8 {
     var arena: std.heap.ArenaAllocator = .init(a);
     defer arena.deinit();

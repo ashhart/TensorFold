@@ -26,9 +26,7 @@ pub fn identity(gpa: std.mem.Allocator, io: Io, dir: []const u8) ![32]u8 {
     return h.finalResult();
 }
 
-/// A trimmed inference directory (a streamed Engram table dir carries only its own shard pair): config, index
-/// text and the headers of the `.safetensors` files the directory actually holds. The whole index text is hashed,
-/// so its names are bound; only the files are opened when present, so a trimmed dir does not fail on absent ones.
+/// A trimmed dir: config, index text and the headers of the shards it holds; absent files are not opened.
 pub fn identityPresent(gpa: std.mem.Allocator, io: Io, dir: []const u8) ![32]u8 {
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
