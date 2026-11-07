@@ -100,6 +100,7 @@ pub const Engine = struct {
     draws: cuda.sample.Draws,
     affine: cuda.qlinear.Affine4Kernels,
     wide: cuda.qlinear.AffineNKernels, // the tiles of every width but 4, and their packs
+    prompt_many: bool = false, // the dense MLP's NVFP4 prompt fusion screens on: GB10 (sm_121) and the RTX 5090 (sm_120)
     experts: cuda.experts.Affine4Experts,
     experts3: cuda.experts3.Affine3Experts,
     mo: ?modelopt.Kernels = null, // a ModelOpt checkpoint's lane, prompt GEMM, packers and bf16 rows
@@ -242,6 +243,7 @@ pub const Engine = struct {
         errdefer e.affine.deinit();
         // sm_120 too: a 32-row window of the 27B verifies in 17.8 ms on one weight pass, 22.3 ms on two 16-row ones
         if (major == 12 and minor == 0) e.affine.wide_verify = true;
+        e.prompt_many = gb10 or (major == 12 and minor == 0);
         e.wide = try cuda.qlinear.AffineNKernels.resolve(d, e.mods[7], e.mods[8], e.mods[3], sms, gb10);
         errdefer e.wide.deinit();
         e.draws = try cuda.sample.Draws.resolve(e.mods[5]);
