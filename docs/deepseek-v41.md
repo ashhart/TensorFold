@@ -122,13 +122,16 @@ identity (config, index, present shard headers, token map). The 128-token window
 qualification measurement this record reports; the 16-token window is fixed in the tree as
 `release-quality-16.json`. The streamed run's execution reads also
 fail the zero-disk-read residency clause (20 KB on the FP32 half, 67.8 MB on the FP64
-half); the receipt gives totals, not a stream/weights split. A cold rerun of the 16-token
+half); the receipt now reports the Engram stream's own logical rows and syscalls beside the
+total. A cold rerun of the 16-token
 window on the same tree reads 8.3 MB and fails that clause too, so the earlier 0-read
 receipt was page warmth, not a property of the window. The operator self-check now runs
 before the measured window (`06518d523`): a one-token qualification on that head records
 `measurement_scope "model_execution"` and zero execution reads on a page-warm probe, and
-the receipt names the self-check it excludes. With the same head a cold 16-token FP32 run
-still reads 29.0 MB of Engram stream and fails the clause; page warmth is the difference.
+the receipt names the self-check it excludes. On the same head a cold 16-token engine run
+reads 24.1 MB for 1,536 stream reads — 15,691 bytes a read for a 264-byte row, the page
+granularity of the stream's own positional reads, not a weight re-read. A page-warm repeat
+reads 0.
 
 Context-labelled standing (M5 Ultra, 256 GB, the streamed line above): prefill 1,276 tok/s
 at 3,002 tokens; plain decode 44.9 tok/s at 4.5k and 44.1 at 21k, flat to 42k; drafted
