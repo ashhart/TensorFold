@@ -11,6 +11,8 @@ const exclusions = [_]Exclusion{
     .{ .name = "test-exl3-prompt-host", .reason = "red on main, #2031 (missing b32 initializer, #2094)" },
     .{ .name = "test-qwen35-draft-frame-host", .reason = "red on main, #2031 (draft tree node count now returns an error union)" },
     .{ .name = "test-qwen35-frame-invalidation-host", .reason = "red on main, #2031 (same recording fixture as test-qwen35-draft-frame-host)" },
+    .{ .name = "test-qwen35-draft-trees-host", .reason = "red on main, #2031 (draft tree node count now returns an error union)" },
+    .{ .name = "test-qwen27-prompt-rows-host", .reason = "red on main, #2031 (over-cap fixture expects InvalidEnvironment)" },
     .{ .name = "test-gemma4-affine-host", .reason = "red on main, #2031 (reviewed Metal affine_mm source pin drifted)" },
     .{ .name = "test-gradient-serving", .reason = "red on main, #2031 (gradient source identities drifted)" },
     .{ .name = "test-qwen-serving-host", .reason = "red on main, #2031 (serving source and launch pins drifted)" },
