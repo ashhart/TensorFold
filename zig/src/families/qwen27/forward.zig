@@ -14,6 +14,8 @@ pub const Mixer = struct {
     gdn: *const fn (*anyopaque, mtl.ComputeEncoder, usize, wts.Gdn, *Frame, u32) anyerror!void,
     attention: *const fn (*anyopaque, mtl.ComputeEncoder, usize, wts.Attention, *Frame, u32) anyerror!void,
     tap: ?*const fn (*anyopaque, mtl.ComputeEncoder, usize, Ref, u32) anyerror!void = null,
+    /// A pass that keeps no row and has no other reader of the last layer: that layer writes keys and values only.
+    keys: ?*const fn (*anyopaque, mtl.ComputeEncoder, usize, wts.Attention, *Frame, u32) anyerror!void = null,
 };
 
 /// One exchange: `x` its index, `ref` this rank's `width` columns of the seam in the window's slot for x.
@@ -105,8 +107,17 @@ pub const Stages = struct {
             if (s.hooks.tap) |tap| try tap(s.hooks.ptr, e, index - 1, s.hidden, s.rows);
         }
     }
+    /// The last layer of a pass whose other rows nothing reads: q, attention, o and the MLP have no reader.
+    fn keysOnly(s: *const Stages, index: usize) bool {
+        return s.hooks.keys != null and s.head == .none and index + 1 == s.model.config.layers;
+    }
     pub fn mixer(s: *Stages, lane: *@import("core").segments.Lane, index: usize) !void {
         const m = s.model;
+        if (s.keysOnly(index)) {
+            try s.hooks.keys.?(s.hooks.ptr, lane.enc, index, m.weights.layers[index].mixer.attention, &m.frame, s.rows);
+            lane.enc.barrier();
+            return;
+        }
         switch (m.weights.layers[index].mixer) {
             .linear => |g| try s.hooks.gdn(s.hooks.ptr, lane.enc, index, g, &m.frame, s.rows),
             .attention => |a| try s.hooks.attention(s.hooks.ptr, lane.enc, index, a, &m.frame, s.rows),
@@ -114,6 +125,7 @@ pub const Stages = struct {
         lane.enc.barrier();
     }
     pub fn post(s: *Stages, lane: *@import("core").segments.Lane, index: usize) !void {
+        if (s.keysOnly(index)) return;
         const m = s.model;
         const f = &m.frame;
         var e = lane.enc;
@@ -228,6 +240,7 @@ pub const Stages = struct {
         const f = &m.frame;
         // The head seam reopens the encoder, so it goes back in the lane; rank 0's half-vocab argmax is not a token.
         var e = lane.enc;
+        if (s.keysOnly(m.config.layers - 1)) return if (s.tail) |tail| tail.encode(tail.ptr, e);
         try m.kernels.norm(e, s.hidden, s.pending, wts.ref(m.weights.norm), f.get(.eps), f.get(.dims), s.residual, f.get(.input), f.get(.sums), @intCast(m.config.hidden), s.rows);
         e.barrier();
         std.mem.swap(Ref, &s.hidden, &s.residual);
