@@ -254,9 +254,10 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
     const profile_line = @import("profile_line.zig").format(a, args.profile, s.model_type, s.identity.backend, ProfileEnvironment{}) catch
         "profile: stable; registered overrides: unavailable (out of memory)";
     log.line("{s}", .{profile_line});
-    if (lis.unix_path) |path| log.line("listening on Unix socket {s}, not TCP", .{path});
-    log.line("serving {s} at http://{s}:{d}/v1 (sampling: {s}; drafts: {f}; context: {s}; loaded in {d:.1}s)", .{
-        s.served,                                                  args.host,                                                                                   port,   shownSampling(a, s.sampling),
+    var at_text: [160]u8 = undefined;
+    const at = if (lis.unix_path) |path| std.fmt.bufPrint(&at_text, "on Unix socket {s}, /v1", .{path}) catch path else std.fmt.bufPrint(&at_text, "at http://{s}:{d}/v1", .{ args.host, port }) catch args.host;
+    log.line("serving {s} {s} (sampling: {s}; drafts: {f}; context: {s}; loaded in {d:.1}s)", .{
+        s.served,                                                  at,                                                                                          shownSampling(a, s.sampling),
         @import("draft_line.zig").shown(args.no_drafts, srv.info), if (window > 0) std.fmt.bufPrint(&window_text, "{d}", .{window}) catch "?" else "unlimited", loaded,
     });
     const reserved = args.thinking_reserve > 0 and srv.info.capability(.answer_limit);
@@ -305,7 +306,11 @@ fn openTcp(io: std.Io, args: anytype) ?listener_mod.Listener {
 fn openUnix(a: std.mem.Allocator, path: []const u8) ?listener_mod.Listener {
     const owned = a.dupeSentinel(u8, path, 0) catch return null;
     return listener_mod.Listener.openUnix(owned) catch |e| {
-        std.debug.print("tensorfold: cannot listen on --unix-socket {s} ({s})\n", .{ path, @errorName(e) });
+        switch (e) {
+            error.PathExists => std.debug.print("tensorfold: --unix-socket {s} already exists; if no server is using it, remove it\n", .{path}),
+            error.ParentWritableByOthers => std.debug.print("tensorfold: --unix-socket {s}: other users can write to its directory; choose one only you can write to\n", .{path}),
+            else => std.debug.print("tensorfold: cannot listen on --unix-socket {s} ({s})\n", .{ path, @errorName(e) }),
+        }
         return null;
     };
 }
