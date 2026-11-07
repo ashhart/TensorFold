@@ -258,6 +258,10 @@ pub fn mtpDepthFor(b: *Backend, slot: u32) u32 {
 
 pub fn draftGovernorOff(b: *Backend, i: usize) bool {
     if (!draftOffArmed()) return false;
+    // A shared round decodes plain by contract; its window is not the solo drafted window the governor
+    // reasons about. Changing the switch inside one leaves the round's admitted windows out of step, so the
+    // governor runs only while this is the only admitted stream.
+    if (b.by.count() > 1) return false;
     if (i >= b.gov_off.len) return false;
     if (b.gov_off[i]) return true;
     const rounds = b.gov_rounds[i];

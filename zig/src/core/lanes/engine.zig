@@ -154,7 +154,11 @@ pub const Engine = struct {
             const drafts_on = try a.alloc(bool, chosen.len);
             for (chosen, 0..) |s, i| {
                 drafts_on[i] = s.drafts;
-                if (e.cfg.shared_plain) s.drafts = false;
+                if (e.cfg.shared_plain) {
+                    s.drafts = false;
+                    // The plain window is exact only if no held draft from a solo round survives into it.
+                    s.dropHeld(e.gpa);
+                }
             }
             try e.roundStreams(chosen);
             for (chosen, 0..) |s, i| s.drafts = drafts_on[i];

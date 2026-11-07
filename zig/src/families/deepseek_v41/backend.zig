@@ -188,6 +188,9 @@ pub const Backend = struct {
             .window_costs = &.{},
             .streams_exact = true,
             .hidden_rows = true,
+            // The served lanes' exactness contract: a shared round runs every stream's plain window. The
+            // drafter's capture and ring are single buffers, so a shared round cannot draft.
+            .shared_plain = true,
             .batch_rows = rows,
             .max_streams = @intCast(b.model.lanes),
             .draft_streams = false,
