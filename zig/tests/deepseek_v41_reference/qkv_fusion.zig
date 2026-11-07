@@ -1,4 +1,4 @@
-//! One-row fused wq_a+wkv: the indexed pair against the two separate projections, bit for bit.
+//! One-row fused wq_a+wkv: the indexed pair against the two separate projections, within one bf16 ulp.
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
@@ -10,7 +10,7 @@ fn view(v: anytype) exl3.View {
     return .{ .buffer = v.buffer, .offset = v.offset };
 }
 
-test "one-row fused wq_a+wkv equals the two separate projections" {
+test "one-row fused wq_a+wkv matches the two separate projections" {
     const device = mtl.Device.init() catch return error.SkipZigTest;
     defer device.deinit();
     const pool = mtl.objc.Pool.push();
@@ -115,5 +115,5 @@ test "one-row fused wq_a+wkv equals the two separate projections" {
     const nrms = @sqrt(squared / @max(magnitude, 1e-30));
     std.debug.print("QKVFUSION cells={d} unequal={d} nrms={d} worst={d}\n", .{ n_q + n_kv, unequal, nrms, worst });
     try std.testing.expect(nrms <= 1e-4);
-    try std.testing.expect(unequal <= 4);
+    try std.testing.expect(unequal <= 1);
 }

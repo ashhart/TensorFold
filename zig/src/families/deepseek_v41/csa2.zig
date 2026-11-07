@@ -55,7 +55,7 @@ pub const Params = extern struct {
 };
 var merge_split_cache: ?u32 = null;
 
-/// The merge's chunk split, default ON. Zero restores the four-threadgroup merge.
+/// The merge's chunk split, default ON (four threadgroups). Zero restores the one-threadgroup merge.
 fn mergeSplitOn() bool {
     if (merge_split_cache == null) {
         var v: u32 = 1;
@@ -180,7 +180,7 @@ pub const Pipelines = struct {
             a2.splits = splits;
             enc.setBuffer(partials.buffer, partials.offset, 9);
             enc.dispatchGroups(mtl.Size.of(args.heads / 16, args.rows, splits), mtl.Size.of(32, 4, 1));
-            // TF_DSV41_DOUBLE_ATTN_SCANX -- the decode scan duplicated IN PLACE; it moves the reply.
+            // TF_DSV41_DOUBLE_ATTN_SCANX -- the decode scan duplicated IN PLACE; it moves the reply, not same-output.
             if (std.c.getenv("TF_DSV41_DOUBLE_ATTN_SCANX") != null) {
                 enc.setPipeline(p.nax);
                 for ([_]View{ q, ring, chunk, compressed, positions, sink, out }, 0..) |v, i|

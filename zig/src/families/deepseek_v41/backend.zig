@@ -165,7 +165,7 @@ pub const Backend = struct {
     pub fn facts(b: *const Backend) lanes.Model {
         const rows = b.model.workspace.plan.rows;
         return .{
-            // The widest window whose rows reproduce one-token steps: rows <= 8; wider changes k order.
+            // The widest window whose rows reproduce one-token steps: rows <= 8; wider cannot verify.
             .exact_width = @min(rows, 8),
             .first_copy_rows = 1,
             .mtp = lookupDepth() != 0,

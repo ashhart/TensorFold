@@ -166,7 +166,7 @@ pub const Model = struct {
     host_stage_faults: u64 = 0,
     host_stage_pf: u8 = 0,
     host_stage_thr: u16 = 0,
-    /// The adaptive Engram gather's state: two cold gathers switch to the mapped workers.
+    /// The adaptive Engram gather: two cold gathers switch to mapped workers; every 16th probes warmth.
     engram_par: bool = false,
     /// The thread state machine's probe is not the arbiter.
     engram_pf_on: bool = false,

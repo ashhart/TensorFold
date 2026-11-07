@@ -1,4 +1,4 @@
-//! Every shared Zig/Metal argument struct is checked against its Metal twin at comptime.
+//! Every shared Zig/Metal argument struct is checked against its Metal twin at comptime from one registry.
 
 const mirror = @import("metal/index_mirror.zig");
 const sources = @import("kernel_sources");

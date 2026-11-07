@@ -234,7 +234,7 @@ pub fn stageRows(m: *Model, rows: u32) !void {
             probed = true;
         }
     }
-    // The window's page-ins, only where they pay: the prompt path already readaheads.
+    // The window's page-ins, only where they pay: the prompt path readaheads; the warm band never arrives.
     const pf_start: u64 = if (small and engramPrefetch()) nowNs() else 0;
     // The stage's own major faults, for the HOST_PROF line; the latch below uses the gather's clock.
     const ru0 = std.posix.getrusage(std.posix.rusage.SELF);

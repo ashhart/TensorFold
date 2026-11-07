@@ -82,7 +82,7 @@ pub fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         return exe;
     }
     const install = b.addInstallArtifact(exe, .{ .dest_dir = .{ .override = .{ .custom = "native/bin" } } });
-    // The family's shared structs are checked twice -- `index_mirror.check` at comptime.
+    // The shared structs are checked twice: index_mirror.check at comptime and the .metal files' own static_asserts.
     const mirrors = b.addSystemCommand(&.{ "sh", "tools/zig/check_dsv41_metal_mirrors.sh" });
     mirrors.setCwd(b.path("."));
     b.step("metal-mirrors", "The DeepSeek V4.1 Metal sources compile with their shared-struct static_asserts").dependOn(&mirrors.step);

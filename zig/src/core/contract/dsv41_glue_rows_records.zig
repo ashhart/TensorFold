@@ -1,4 +1,4 @@
-// !
+//! The DeepSeek V4.1 glue rows' Metal launch records: threads, threadgroup bytes and reserved bytes.
 const std = @import("std");
 const M = @import("limits.zig").MetalLaunch;
 pub const records = [_]M{

@@ -34,7 +34,7 @@ pub const Snapshots = struct {
     pub const VTable = struct {
         /// The most new storage `save` takes at `at` tokens (checked against the budget before any copy).
         bytes: *const fn (ptr: *anyopaque, at: u32) u64,
-        /// Copy the live state after `at` prompt tokens into new storage; `owner` is the lane core's stream (null: one stream).
+        /// Copy the live state after `at` prompt tokens into new storage; owner is the lane core's stream (null: one).
         save: *const fn (ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!Saved,
         /// Make the live state `saved`'s: the next prompt chunk starts at its position.
         restore: *const fn (ptr: *anyopaque, owner: ?*anyopaque, saved: Saved) anyerror!void,

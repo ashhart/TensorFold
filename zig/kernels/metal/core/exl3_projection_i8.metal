@@ -1,8 +1,4 @@
-//! The trellis tile as int8 with its own per-tile scale, on the GPU
-
-// the numerical core of the gated int8 expert path
-
-// checked against the CPU int8 oracle (projection.applyF32TrellisInt8).
+//! The int8 trellis tile with its own per-tile scale, on the GPU against the CPU int8 oracle.
 #include <metal_stdlib>
 using namespace metal;
 #include "../nax.h"

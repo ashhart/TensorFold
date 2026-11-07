@@ -63,7 +63,7 @@ pub fn proposeTokens(m: *Model, slot: u32, pending: u32, count: u32) ![4]u32 {
     var cond_prof = CondProf{ .queue = m.queue, .cb = cb, .enc = enc, .on = std.c.getenv("TF_DSV41_COND_PROF") != null, .blk_on = std.c.getenv("TF_DSV41_BLOCK_PROF") != null };
     const host_prof = std.c.getenv("TF_DSV41_HOST_PROF") != null;
     const t_start: f64 = if (host_prof) mtl.clock.seconds() else 0;
-    // The conditioning: the target layers' stream means through main_proj/main_norm.
+    // The conditioning: target-layer stream means via main_proj/main_norm, then keys into each ring.
     const pos_now = slot_pos;
     // The captured rows are the last `taps_rows_last` rows of the last forward.
     const cap_n: u32 = @min(m.taps_rows_last, 128);

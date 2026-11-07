@@ -131,7 +131,7 @@ kernel void tf_exl3_matmul_decode_fma(const device half* x [[buffer(0)]],
       }
     }
   }
-  // The eight accumulators meet in a tree: the first four are the near column, the last four the far one.
+  // The eight accumulators meet in a tree; the first four are the near column, the last four the far one.
   float acc0 = (acc[0] + acc[1]) + (acc[2] + acc[3]);
   float acc1 = (acc[4] + acc[5]) + (acc[6] + acc[7]);
 #if TF_FMA_WARPS > 1

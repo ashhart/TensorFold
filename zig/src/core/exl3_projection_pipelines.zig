@@ -29,9 +29,9 @@ pub const Pipelines = struct {
     codebook_table: ?mtl.Buffer = null,
     /// The same prefill entry with RG row groups by CG column groups of tile.
     prefill_nax_tiles: [8]?mtl.Pipeline = @splat(null),
-    /// The routed 64x64 prompt tile with the funnel read . Bit-identical to .
+    /// The routed 64x64 prompt tile with the funnel read. Bit-identical to the shipped tile.
     prefill_nax_funnel: ?mtl.Pipeline = null,
-    /// The same tile with the grouping's padded rows skipped . Bit-identical on the real rows.
+    /// The same tile with the grouping's padded rows skipped. Bit-identical on the real rows.
     prefill_nax_skip_pad: ?mtl.Pipeline = null,
     /// The routed tile with the funnel path as the only path: the cursor arrays the Fast path needs are dead there.
     prefill_nax_funnel_only: ?mtl.Pipeline = null,
@@ -156,11 +156,11 @@ pub const Pipelines = struct {
                                 if (pf.simdWidth() == 32 and pf.maxThreads() >= 128) prefill_nax_tiles[t] = pf else pf.deinit();
                             } else |_| {}
                         }
-                        // The same tile with the grouping's padded rows skipped .
+                        // The same tile with the grouping's padded rows skipped.
                         if (mtl.Pipeline.init(device, nax_lib, "tf_exl3_matmul_prefill_nax48", false)) |pf| {
                             if (pf.simdWidth() == 32 and pf.maxThreads() >= 128) prefill_nax_skip_pad = pf else pf.deinit();
                         } else |_| {}
-                        // The routed tile with the funnel path as the only path .
+                        // The routed tile with the funnel path as its only path.
                         if (mtl.Pipeline.init(device, nax_lib, "tf_exl3_matmul_prefill_nax59", false)) |pf| {
                             if (pf.simdWidth() == 32 and pf.maxThreads() >= 128) prefill_nax_funnel_only = pf else pf.deinit();
                         } else |_| {}
@@ -172,7 +172,7 @@ pub const Pipelines = struct {
                         if (mtl.Pipeline.init(device, nax_lib, "tf_exl3_matmul_prefill_nax54", false)) |pf| {
                             if (pf.simdWidth() == 32 and pf.maxThreads() >= 128) prefill_nax_warp32 = pf else pf.deinit();
                         } else |_| {}
-                        // The funnel read in the routed prompt tile .
+                        // The funnel read in the routed prompt tile.
                         if (mtl.Pipeline.init(device, nax_lib, "tf_exl3_matmul_prefill_nax42", false)) |pf| {
                             if (pf.simdWidth() == 32 and pf.maxThreads() >= 128) prefill_nax_funnel = pf else pf.deinit();
                         } else |_| {}
