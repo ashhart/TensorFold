@@ -64,7 +64,7 @@ pub fn embedded(b: *std.Build, lib: std.Build.LazyPath, file: []const u8) *std.B
     return b.createModule(.{ .root_source_file = src });
 }
 
-pub fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal: *std.Build.Module, engine: *std.Build.Module, living: *std.Build.Module, api: *std.Build.Module, engines: *std.Build.Module, build_options: *std.Build.Step.Options, test_step: ?*std.Build.Step) *std.Build.Step.Compile {
+pub fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal: *std.Build.Module, engine: *std.Build.Module, living: *std.Build.Module, api: *std.Build.Module, engines: *std.Build.Module, build_options: *std.Build.Module, test_step: ?*std.Build.Step) *std.Build.Step.Compile {
     // the HTTP side keeps its safety checks; the engine below it runs at `optimize`
     const tokenizer = engines.import_table.get("tokenizer") orelse b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true });
     const template = b.createModule(.{ .root_source_file = b.path("zig/src/core/template/template.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true });
@@ -75,7 +75,9 @@ pub fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .link_libc = true,
         .imports = &.{ .{ .name = "core", .module = engine }, .{ .name = "engine_api", .module = api }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "template", .module = template }, .{ .name = "native_engines", .module = engines }, .{ .name = "living", .module = living }, .{ .name = "checkpoint_cli", .module = b.createModule(.{ .root_source_file = b.path("zig/src/cli/cli.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{ .{ .name = "native_engines", .module = engines }, exlr8_build.cliImport(b, target, .ReleaseSafe, engine), .{ .name = "core", .module = engine } } }) } },
     }) });
-    exe.root_module.addOptions("build_options", build_options);
+    exe.root_module.addImport("build_options", build_options);
+    // the served families read the engine version for the pair's identity exchange (`Pair.ready`'s fingerprint)
+    engines.addImport("build_options", build_options);
     _ = server_build.addTo(b, exe.root_module, target, .ReleaseSafe);
     if (test_step == null) {
         exe.root_module.strip = true;
@@ -166,7 +168,7 @@ pub fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     return exe;
 }
 
-pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, draft_ids: *std.Build.Module, build_options: *std.Build.Step.Options, test_step: *std.Build.Step) void {
+pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, draft_ids: *std.Build.Module, build_options: *std.Build.Module, test_step: *std.Build.Step) void {
     const metal_std = b.option([]const u8, "metal-std", "Metal language version (default: MLX's for this macOS)") orelse mlxMetalStd(b);
 
     // MLX's mx.fast.metal_kernel JIT: MTLCompileOptions mathMode safe, fp32 functions fast (the default), its...
@@ -196,8 +198,6 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "engine_api", .module = api }, .{ .name = "tensorfold", .module = mods.engine } },
     });
     engines.addImport("living", mods.living);
-    // the served families read the engine version for the pair's identity exchange (`Pair.ready`'s fingerprint)
-    engines.addOptions("build_options", build_options);
     @import("drama3_metal.zig").addNative(b, target, optimize, metal, engines, metal_std);
     @import("drama3_metal.zig").targets(b, target, optimize, metal, metal_std, test_step);
 
@@ -433,8 +433,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     b.step("test-cli", "The checkpoint CLI's host tests").dependOn(&run_cli_tests.step);
 
     // The core lane, shared-context and Qwen3.8-27B programs and host tests.
-    qwen27_build.targets(b, target, optimize, metal, sources, engine, lanes, mods.qwen27, test_step, build_options);
-    core_checks.targets(b, target, optimize, metal, engine);
+    qwen27_build.targets(b, target, optimize, metal, sources, engine, lanes, mods.qwen27, test_step, build_options);    core_checks.targets(b, target, optimize, metal, engine);
     contract_build.metal(b, target, optimize, metal, engine, sources);
     glm_checks.targets(b, target, optimize, metal, engine, sources);
     flashnext_checks.targets(b, target, optimize, metal, engine);
@@ -567,7 +566,7 @@ pub fn distMetalServer(b: *std.Build, target: std.Build.ResolvedTarget, draft_id
     @import("drama3_metal.zig").addNative(b, target, .fast, m.metal, engines, mlxMetalStd(b));
     engines.addImport("kimi_k3", kimiModule(b, target, .fast, m.metal, m.engine, m.lanes));
     engines.addImport("kimi_metallib", embedded(b, kimiMetallib(b, &flags), "kimi.metallib"));
-    return nativeServer(b, target, .fast, m.metal, m.engine, m.living, api, engines, build_options, null);
+    return nativeServer(b, target, .fast, m.metal, m.engine, m.living, api, engines, build_options.createModule(), null);
 }
 
 pub fn kimiModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal: *std.Build.Module, engine: *std.Build.Module, lanes: *std.Build.Module) *std.Build.Module {

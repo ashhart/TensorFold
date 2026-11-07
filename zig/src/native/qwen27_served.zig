@@ -330,7 +330,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocato
     errdefer if (pair) |p| p.deinit();
     errdefer if (hw) |d| d.deinit();
     const model = if (pair) |p|
-        try q.model.Model.loadShardDeferred(gpa, io, dir, 128, p.rank, 2, .full)
+        try q.model.Model.loadShardDeferred(gpa, io, dir, 128, p.rank, 2, .mlp) // whole attention a rank: one seam a layer, 65 exchanges a token not 257
     else
         try q.model.Model.loadDeferred(gpa, io, dir, 128);
     errdefer model.deinit();
