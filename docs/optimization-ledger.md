@@ -96,7 +96,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 19. Shared drafts | no (copies) | no (copies) | no (copies) | open [#1426] | done¹ (opt-in) |
 | 20. Solo chunks | yes | yes | yes | yes | yes |
 | 21. Read-ahead | done [#2033] | done [#2033] | yes | done [#2033] | done [#2033] |
-| 22. Direct load | yes | yes | yes | yes | open [#1924] |
+| 22. Direct load | yes | open [#2449] | open [#2449] | yes | open [#1924] |
 | 23. Page drop | done [#1884] | done [#1884] | done [#1884] | done [#1884] | done [#1884] |
 | 24. L2 prefetch | yes | yes | yes | yes | done¹ |
 | 25. TP ranks | yes | no (4B) | yes | done [#1388] | done¹ |
@@ -393,6 +393,8 @@ below; these are estimates for planning a port, not results.
     | --- | --- | --- |
     | flashnext | cold load 74 → 48 s | [#1901] |
     | flashnext | 50 → 43.5 s, next chunk gathered while one packs | [#1960] |
+    | spark25 (4B 8-bit) | cold load 5.0 → 2.5 s | [#2449] |
+    | dory (NVFP4) | cold load 4.5 → 3.8 s | [#2449] |
 
 23. **Page-cache drop after load.** Every CUDA loader drops its checkpoint's pages once the weights are up, so the
     memory goes back to KV and the prompt cache on unified-memory boxes ([#1884]). TP loaders wait for every rank
@@ -549,3 +551,4 @@ below; these are estimates for planning a port, not results.
 [#2283]: https://github.com/ashhart/TensorFold/pull/2283
 [#2288]: https://github.com/ashhart/TensorFold/pull/2288
 [#2306]: https://github.com/ashhart/TensorFold/pull/2306
+[#2449]: https://github.com/ashhart/TensorFold/pull/2449

@@ -266,6 +266,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Gemma 4 E4B (NVIDIA Nemotron 3.5 Bolt E4B) runs on CUDA from `mlx_lm.convert` 4-bit checkpoints: per-layer inputs in their own launch and layers 24 to 41 on the caches of 22 and 23, with replies equal across streams and resumes (#1222, #2230). Thanks to @jschmied.
 
 - Qwen3-Reranker-8B on HIP computes a rerank request's shared start (the system prompt, the instruction and the query) once a pass instead of once a document, with the same responses byte for byte: 16 documents of 323 tokens, 87 of them shared, take 1.98 s instead of 2.63 s on the dot2 tile and 0.73 s instead of 0.99 s with the gfx12 WMMA tile (opt-in, `--policy matrix=on`), on a Radeon AI PRO R9700. The decide GPU checks now run on the tile and attention path that `TF_QWEN3_MATRIX` and `TF_QWEN3_ATTENTION` choose (#2262, part of #2245). Thanks to @laudney.
+- Spark 2.5 and Dory on CUDA now load with direct reads by default: cold loads on a GB10 go from 5.0 to 2.5 s (Spark X2.6 4B 8-bit) and from 4.5 to 3.8 s (Dory NVFP4), with the same replies. `TF_LOAD_DIRECT=0` keeps the old mapped reads (#2449).
+
 - Gemma 4 and Qwen 3.5 on CUDA now load with direct reads by default, 28-31% faster cold on a GB10 with the same weights and replies. A load uses about 0.6 GB more host memory; `TF_LOAD_DIRECT=0` keeps the old read-ahead (#2282).
 
 ## 1.2.3
