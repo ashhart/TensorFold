@@ -128,7 +128,7 @@ pub fn main(init: std.process.Init) !void {
     }
     var why: []const u8 = "";
     // a context the window timing outgrows: a new build's first start refills the timing's slot
-    const served = host.attach(a, init.io, model, draft, .{ .context = 256, .streams = 1, .cache_gib = 0 }, a, &why) catch |err| {
+    const served = host.attach(a, init.io, model, draft, .{ .context = 256, .streams = 1, .cache_gib = 0 }, a, &why, null) catch |err| {
         std.debug.print("served host: {s}\n", .{why});
         return err;
     };
