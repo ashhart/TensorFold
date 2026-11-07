@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Internal: `zig/src/native/metal.zig` goes from 593 to 546 lines; six helpers the Metal open paths share (`chip`, `deviceName`, `prefillStep`, `modelContext`, `gibBytes` and the chip classes) live in `metal_shared.zig`, unchanged (#2425).
+
 ## 1.2.4
 
 - Docs: four subcommand-flag fixes checked against the code: `slide audit --threshold`'s range, `benchmark --context` and `--kv-cache`, `info` on Flash Next, and `run --device` and `--carveout` on CUDA builds (#2348).
