@@ -8,8 +8,8 @@ const lanes = tf.lanes;
 /// The pair's transport type: the row-split seam the engine exports, so this file names no other family's type.
 pub const Pair = tf.pair_rows.Pair;
 
-/// The command set rank 1 replays: the four GPU operations a pair round is made of (glm_dsa's `follow.zig` shape).
-pub const Kind = enum(u32) { begin = 1, chunk, step, end };
+/// The command set rank 1 replays (glm_dsa's `follow.zig` shape); `.tree`/`.commit` carry a draft round.
+pub const Kind = enum(u32) { begin = 1, chunk, step, end, tree, commit };
 
 /// Rank 0 puts each round on the wire before running it; rank 1 replays them in order here. Owned by the host.
 pub const Link = struct {
@@ -44,6 +44,24 @@ pub const Link = struct {
         l.words.clearRetainingCapacity();
         try l.words.appendSlice(l.gpa, &.{ slot, token });
         try l.put(.step);
+    }
+
+    /// A draft round's verify: the rows (ids) with their parents; rank 1 replays the same verify round.
+    pub fn tree(l: *Link, slot: u32, ids: []const u32, parents: []const i32) !void {
+        std.debug.assert(ids.len == parents.len);
+        l.words.clearRetainingCapacity();
+        try l.words.appendSlice(l.gpa, &.{ slot, @intCast(ids.len) });
+        try l.words.appendSlice(l.gpa, ids);
+        for (parents) |p| try l.words.append(l.gpa, @bitCast(p));
+        try l.put(.tree);
+    }
+
+    /// The accepted path rank 0 read from its picks: rank 1 keeps the same rows so both caches agree.
+    pub fn commit(l: *Link, slot: u32, path: []const u32) !void {
+        l.words.clearRetainingCapacity();
+        try l.words.appendSlice(l.gpa, &.{ slot, @intCast(path.len) });
+        try l.words.appendSlice(l.gpa, path);
+        try l.put(.commit);
     }
 
     pub fn end(l: *Link, slot: u32) void {

@@ -1,10 +1,8 @@
 //! The flags a pair refuses: `qwen27_served` maps `Options` through `refuseOptions`, so only these words answer.
 
 pub fn refuse(drafter: bool, cache_gib: bool, learn: bool, vision: bool, why: *[]const u8) !void {
-    if (drafter) {
-        why.* = "--drafter does not run on a pair: rank 1 has no drafter checkpoint, so both ranks decode plain";
-        return error.PairNoDrafter;
-    }
+    // A drafter on a pair runs on rank 0 alone: rank 1 replays the tree rounds (.tree/.commit) and never proposes.
+    _ = drafter;
     if (cache_gib) {
         why.* = "--prompt-cache-gib does not run on a pair: each Mac keeps its own halves of the slots' states";
         return error.PairNoCache;
