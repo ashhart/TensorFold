@@ -21,6 +21,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - GLM-5.3-Flash on CUDA: `--learn-conversations` keeps kept prompt states on disk, every rank's part in rank 0's store, so a conversation resumes after its in-memory state is evicted or the server restarts; a damaged file, or one written by another number of ranks, is refused by name, and the turn tries one shorter state, as after any refused disk read, then prefills. `--spill-gib` and `--checkpoint-slots` are refused for GLM, and so is `TF_KV_SHARE`, whose prefix pages lie outside the lease the image reads. Off: nothing changes (#1411). Thanks to @wojo.
 
+- GLM-5.3-Flash on CUDA: `TF_GLM_KV_SPLIT=1`, off by default, takes each stream's KV pages from one owner rank's class and lays each page's pooled keys and latent rows in two regions, each with its own table; ranks that disagree stop before loading. In this part every rank still holds every latent row, so it saves no memory yet, and a class holds a whole window, so a split server can admit fewer streams. Unset, the pool and the pages are as before (#2415, part 1 of #1431). Thanks to @wojo.
+
 ## 1.2.4
 
 - Docs: four subcommand-flag fixes checked against the code: `slide audit --threshold`'s range, `benchmark --context` and `--kv-cache`, `info` on Flash Next, and `run --device` and `--carveout` on CUDA builds (#2348).
