@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM-5.3-Flash on CUDA with three ranks or more behind a switch: `TF_ROCE=1` carries the small all-gathers as one-shot RoCE writes (a connect probe first, NCCL if any rank cannot reach another), byte-equal to NCCL's, and splits the DFlash2 drafter's MLP across the ranks. Two ranks (GLM and MiniMax) and groups without `TF_ROCE=1` run as before. MiniMax-M3 takes the gather at two ranks only (#2205). Thanks to @shanedertrain.
+
 - The engine API carries an optional image capability beside speech: `Info.image` states what an engine's image host serves and a defaulted `VTable.submit_image` hands back one encoded PNG a request through the caller's own list and allocator, so an engine without the entry is unchanged (#1573).
 
 - Build: `zig build compile-dsv41-server` and `dsv41-serve` build again: the DeepSeek server module gets the `lanes` module its `/v1/systemone` route reads (#2412). Thanks to @Defilan.
