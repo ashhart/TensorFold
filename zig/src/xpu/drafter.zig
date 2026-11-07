@@ -4,6 +4,7 @@ const ze = @import("ze");
 const kb = @import("xpu_qwen27_kernels");
 const q = @import("qwen27.zig");
 const dtree = @import("drafter_tree.zig");
+const rope_table = @import("rope_table.zig");
 
 const alloc = q.alloc;
 const D = q.D;
@@ -298,8 +299,7 @@ pub const Drafter = struct {
             dr.head = try pack(d, &parts, kk, true);
         }
         dr.logits = try d.alloc_(MAXB * @as(usize, dr.head.n) * 2);
-        var invf: [64]f32 = undefined;
-        for (&invf, 0..) |*f, i| f.* = @floatCast(1.0 / std.math.pow(f64, 1e7, @as(f64, @floatFromInt(2 * i)) / 128.0));
+        const invf = rope_table.drafter();
         dr.invf = try d.upload(std.mem.sliceAsBytes(&invf));
         try dr.use(0);
         return dr;
