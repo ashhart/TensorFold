@@ -28,14 +28,18 @@ pub const Reader = struct { ctx: *anyopaque, call: *const fn (ctx: *anyopaque, w
 pub const Buffers = struct {
     columns: cuda.DeviceBuffer,
     full: cuda.DeviceBuffer,
+    stage: cuda.DeviceBuffer, // the gather's blocks (Sampler.gather), batch_rows * vocab bf16
 
     fn make(e: *const Engine) !Buffers {
         var columns = try cuda.DeviceBuffer.alloc(e.d, batch_rows * e.share.vocab.len() * 2);
         errdefer columns.free();
-        return .{ .columns = columns, .full = try cuda.DeviceBuffer.alloc(e.d, batch_rows * e.c.vocab * 2) };
+        var full = try cuda.DeviceBuffer.alloc(e.d, batch_rows * e.c.vocab * 2);
+        errdefer full.free();
+        return .{ .columns = columns, .full = full, .stage = try cuda.DeviceBuffer.alloc(e.d, batch_rows * e.c.vocab * 2) };
     }
 
     pub fn free(b: *Buffers) void {
+        b.stage.free();
         b.full.free();
         b.columns.free();
     }
@@ -69,6 +73,7 @@ pub fn run(e: *Engine, want: Want, next: []const u32) !void {
     const rows: usize = if (own != null) batch_rows else fw.window_rows;
     const columns = if (own) |b| b.columns.ptr else e.bd.logits;
     const full = if (own) |b| b.full.ptr else e.smp.full.ptr;
+    const stage = if (own) |b| b.stage.ptr else e.smp.stage.ptr;
     const D: usize = e.c.hidden;
     const words = e.prompt_out.slice(u32);
     const picks = words[batch_rows * row_words ..][0..batch_rows];
@@ -78,7 +83,7 @@ pub fn run(e: *Engine, want: Want, next: []const u32) !void {
         const n = @min(rows, next.len - r);
         // as the head's last-row pass (Forward.finish); its column count takes no K slices (the test below)
         try projection.matmul(projectionSet(e), e.stream, e.w.head, e.bp.fnormed + r * D * 2, D, columns, e.bp.kda.mm_part, n, e.share.vocab.len(), D, false);
-        try e.smp.gather(e.stream, e.exchange(), e.spans, &.{.{ .rank = e.share.rank, .logits = columns }}, n, full);
+        try e.smp.gather(e.stream, e.exchange(), e.spans, &.{.{ .rank = e.share.rank, .logits = columns }}, n, stage, full);
         const reader = want.reader orelse continue;
         @memcpy(picks[0..n], next[r..][0..n]);
         try e.smp.logprobRows(e.stream, full, n, out + batch_rows * row_words * 4, want.k, out);
