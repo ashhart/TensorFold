@@ -122,3 +122,29 @@ test "moe glue: group-limited routes outside the grouped kernel's form are refus
     r.topk = 33;
     try std.testing.expectError(error.RouteOutOfRange, checkGroups(r));
 }
+
+test "moe glue: more than 32 groups is refused on its own (the kept-group mask is 32 bits)" {
+    var r: Route = .{ .experts = 512, .topk = 8, .shared = true, .score = true, .groups = 32, .keep = 4 };
+    try checkGroups(r); // 32 groups of 16: the most the kernel takes
+    r.groups = 64; // groups of 8, 4 kept: room for top 8, so only the group count refuses it
+    try std.testing.expectError(error.RouteOutOfRange, checkGroups(r));
+}
+
+test "moe glue: groups of one expert are refused on their own (a group scores its two best)" {
+    var r: Route = .{ .experts = 32, .topk = 8, .shared = false, .score = true, .groups = 16, .keep = 8 };
+    try checkGroups(r); // groups of two
+    r.groups = 32; // groups of one, 8 kept: room for top 8, so only the group size refuses it
+    try std.testing.expectError(error.RouteOutOfRange, checkGroups(r));
+}
+
+test "moe glue: topk refuses a group-limited route before any launch, and admits Ling's" {
+    const mg: MoeGlue = undefined; // rows 0: an admitted route returns before touching the module or the stream
+    const ling: Route = .{ .experts = 512, .topk = 8, .shared = true, .normalize = true, .scale = 2.5, .score = true, .groups = 8, .keep = 4 };
+    try mg.topk(undefined, 0, null, ling, 0, 0, 0);
+    var r = ling;
+    r.groups = 64;
+    try std.testing.expectError(error.RouteOutOfRange, mg.topk(undefined, 0, null, r, 0, 0, 0));
+    r = ling;
+    r.score = false;
+    try std.testing.expectError(error.RouteOutOfRange, mg.topk(undefined, 0, null, r, 0, 0, 0));
+}
