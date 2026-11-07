@@ -206,7 +206,6 @@ pub const cuda = @import("flashnext_cuda_records.zig").cuda ++ [_]CudaRecord{
     .{ .launch = .{ .name = "experts3 tf_experts3_widen", .symbol = "tf_experts3_widen", .image = "experts3", .threads = 256 }, .usage = .{ .{ .regs = 32, .static = 0, .bound = 0 }, .{ .regs = 36, .static = 0, .bound = 0 }, .{ .regs = 36, .static = 0, .bound = 0 }, .{ .regs = 32, .static = 0, .bound = 0 }, .{ .regs = 32, .static = 0, .bound = 0 } } },
     .{ .launch = .{ .name = "experts3 tf_experts3_planes", .symbol = "tf_experts3_planes", .image = "experts3", .threads = 256 }, .usage = .{ .{ .regs = 26, .static = 0, .bound = 0 }, .{ .regs = 28, .static = 0, .bound = 0 }, .{ .regs = 28, .static = 0, .bound = 0 }, .{ .regs = 36, .static = 0, .bound = 0 }, .{ .regs = 36, .static = 0, .bound = 0 } } },
 } ++ @import("registry_media.zig").cuda ++ @import("nemotron_prompt_records.zig").cuda ++ @import("glm_cuda_records.zig").cuda ++ @import("registry_shared_attention.zig").records(CudaRecord) ++ @import("gemma_cuda_records.zig").cuda ++ @import("spark_cuda_records.zig").cuda ++ @import("row_cuda_records.zig").cuda ++ @import("flashnext_tile_records.zig").cuda ++ @import("window_rows_records.zig").cuda ++ @import("modelopt_lane_records.zig").cuda ++ @import("nvfp4_fact_records.zig").cuda ++ @import("nvfp4_experts32_records.zig").cuda ++ @import("lane_half_records.zig").cuda ++ @import("pocket_records.zig").cuda ++ @import("minimax_cuda_records.zig").cuda ++ @import("moss_image_cuda_records.zig").cuda ++ @import("exl3_dense_records.zig").cuda;
-
 /// The nvcc release `cuda`'s usage records come from: the compiler that builds the release fatbins.
 pub const cuda_release: limits.Nvcc = .{ .major = 13, .minor = 0 };
 /// One launch's usage under a later nvcc, by the record's name.
@@ -336,6 +335,7 @@ pub fn setFor(release: ?limits.Nvcc) limits.Nvcc {
 }
 /// A record's usage on every SM for images built by `release` (null: an image that names no compiler, cuda's).
 pub fn usageFor(r: CudaRecord, release: ?limits.Nvcc) [limits.sms.len]U {
+    if (release) |v| if (v.major == 13 and v.minor == 0) if (@import("measurements/main_130.zig").lookup(r.launch.name)) |u| return u;
     var u = r.usage;
     const rel = release orelse return u;
     if (r.later_pending and !newer(.{ .major = 13, .minor = 2 }, rel)) u = none;
@@ -380,7 +380,8 @@ pub fn checkCuda(a: std.mem.Allocator, list: []const CudaRecord, quiet: bool) !u
     return n;
 }
 /// Metal pipelines as the engine launches them; tg_memory is the most any chip reflects, m1 and m2 the compiled limits.
-pub const metal = @import("fsr_records.zig").metal ++ [_]M{
+pub const metal = @import("fsr_records.zig").metal ++ @import("lfm3_records.zig").metal ++ [_]M{
+    .{ .name = "contract masked values tf_masked_control", .threads = 32, .tg_memory = 0, .reserved = 32 },
     .{ .name = "softmax tf_softmax_bf16", .threads = 1024, .tg_memory = 256, .m1 = 1024, .m2 = 1024 },
     .{ .name = "rms tf_rms_norm_bf16", .threads = 1024, .tg_memory = 144, .m1 = 1024, .m2 = 1024 },
     .{ .name = "top-k tf_bf16_topk", .threads = 256, .tg_memory = 4096, .m1 = 768, .m2 = 768 },
@@ -562,13 +563,11 @@ test "the registered launches fit every Apple family and every SM, and each plan
 test {
     _ = @import("registry_sets_test.zig");
     _ = @import("nvfp4_tile_pending.zig");
-}
-const paging = @import("paging_pending.zig");
-test {
     _ = paging;
     _ = @import("minimax_records.zig");
     _ = @import("nemotron_ssd_records.zig");
 }
+const paging = @import("paging_pending.zig");
 /// The Metal collector keeps measured slots and the restored vision declarations.
 pub const all_metal = @import("attention_pv_records.zig").records ++ metal ++ @import("delta_slots_records.zig").records ++ @import("flashnext_pending.zig").records ++ @import("simd_pairs_records.zig").records ++ @import("metal_pair_records.zig").records ++ @import("glm_rows_records.zig").records ++ @import("weight_only_records.zig").metal ++ @import("hc_activation_records.zig").metal ++ @import("qwen4_records.zig").metal ++ @import("lfm2_records.zig").records ++ @import("nemotron_experts_records.zig").records ++ @import("nemotron_pages_records.zig").records ++ @import("nemotron_attention_records.zig").records ++
     @import("nemotron_ssd_records.zig").records ++ @import("flashnext_attention_records.zig").records ++ @import("spark25_records.zig").records ++ @import("gemma_attention_records.zig").records ++ @import("moss_image_records.zig").records ++ @import("dsv41_metal_records.zig").records ++ @import("minimax_records.zig").records ++ @import("ling_route_records.zig").records ++ @import("qwen27_moe_records.zig").records ++ @import("affine_gather_records.zig").records;
@@ -576,11 +575,11 @@ const learning = @import("registry_learning.zig");
 pub const gradient_pending = learning.gradient_pending;
 pub const qwen_learning_pending = learning.qwen_learning_pending;
 pub const glm_pending = @import("glm_sampling_pending.zig");
-pub const landed_cuda = cuda ++ @import("dory_cuda_records.zig").cuda ++ gradient_pending ++ qwen_learning_pending ++ paging.extra ++ @import("qwen_served_records.zig").records ++ cuda_pending ++ @import("qwen_decode_pending.zig").records ++ glm_pending.sampling ++ @import("glm_kv_pending.zig").records ++ @import("exl3_grouped_records.zig").records ++ @import("proposal_sampling_records.zig").records ++ @import("flashnext_pages_pending.zig").records ++ @import("glm_f32w_pending.zig").records ++ @import("penalty_sampling_records.zig").records ++ @import("flashnext_attn_lanes_pending.zig").records;
+pub const landed_cuda = cuda ++ @import("dory_cuda_records.zig").cuda ++ gradient_pending ++ qwen_learning_pending ++ paging.extra ++ @import("qwen_served_records.zig").records ++ cuda_pending ++ @import("qwen_decode_pending.zig").records ++ glm_pending.sampling ++ @import("glm_kv_pending.zig").records ++ @import("exl3_grouped_records.zig").records ++ @import("proposal_sampling_records.zig").records ++ @import("flashnext_pages_pending.zig").records ++ @import("flashnext_heads_records.zig").records ++ @import("glm_f32w_pending.zig").records ++ @import("penalty_sampling_records.zig").records ++ @import("flashnext_attn_lanes_pending.zig").records ++ @import("glm_l2pf_pending.zig").records;
 test {
     _ = learning;
 }
-pub const all_cuda = @import("gb10_many_records.zig").records ++ @import("nvfp4_tile_pending.zig").records ++ landed_cuda ++ dsv41_pending ++ @import("inc4_pending.zig").trees ++ @import("inc4_pending.zig").rows ++ @import("affine_verify_records.zig").records;
+pub const all_cuda = @import("moetile_records.zig").records ++ @import("gb10_many_records.zig").records ++ @import("nvfp4_tile_pending.zig").records ++ landed_cuda ++ dsv41_pending ++ @import("inc4_pending.zig").trees ++ @import("inc4_pending.zig").rows ++ @import("affine_verify_records.zig").records;
 pub const dsv41_pending = @import("registry_union.zig").extra(landed_cuda, @import("dsv41_pending_1.zig").records ++ @import("dsv41_pending_2.zig").records);
 test {
     _ = @import("qwen4_cuda_receipts_test.zig");
@@ -588,6 +587,7 @@ test {
     _ = @import("glm_kv_pending.zig");
     _ = @import("minimax_cuda_records.zig");
     _ = @import("glm_f32w_pending.zig");
+    _ = @import("glm_l2pf_pending.zig");
     _ = @import("registry_pending_test.zig");
     _ = @import("flashnext_pages_pending.zig");
     _ = @import("flashnext_attn_lanes_pending.zig");

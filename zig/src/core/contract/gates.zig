@@ -49,7 +49,7 @@ pub const VTable = struct {
     check: ?*const fn (*anyopaque, Gate) anyerror!?[]const u8 = null,
     /// A replacement's baseline: the replaced kernel's bytes on the prepared inputs.
     replaced: ?*const fn (*anyopaque) anyerror![]const u8 = null,
-    /// Frees the device buffers the last `prepare` left; called once a kernel's gates are done.
+    /// Frees the device buffers and host copies the last `prepare` left; called once a kernel's gates are done.
     release: ?*const fn (*anyopaque) void = null,
 };
 
@@ -103,7 +103,7 @@ pub fn hooks(comptime T: type) VTable {
             return of(ctx).replaced();
         }
         fn release(ctx: *anyopaque) void {
-            of(ctx).rig.reset();
+            if (@hasDecl(Rig, "finishGates")) of(ctx).rig.finishGates() else of(ctx).rig.reset();
         }
     };
     return .{

@@ -1,0 +1,447 @@
+{
+  "scope": "Shared-convolution evidence with private qualification/performance and applied-public validation identified separately",
+  "base_commit": "d05f599a3f341b9bb9bcfbebb9b47b6d63e618ca",
+  "algorithm": "One descriptor-driven convolution launch across recorded stream segments; both entries invoke the unchanged seven-tap helper and snapshot equations",
+  "hosts": [
+    {
+      "chip": "Apple M4 Pro",
+      "macos": "26.5.1",
+      "build": "25F80",
+      "memory_gib": 48
+    },
+    {
+      "chip": "Apple M5 Ultra",
+      "macos": "27.0",
+      "build": "26A428",
+      "memory_gib": 256
+    }
+  ],
+  "layout": {
+    "descriptor_bytes": 16,
+    "descriptor_alignment": 8,
+    "offsets": {
+      "state": 0,
+      "base": 8,
+      "rows": 12
+    },
+    "max_rows": 32,
+    "scratch_payload_bytes": 12416,
+    "lifetime": "Separate per-layer descriptor slices and independent per-call row map remain immutable through command completion",
+    "resources": "Every indirect per-cache convolution-state buffer declared read; input/output/snapshot row spans remain cache-local",
+    "admission": "Backend init qualification exercises multiple streams and allocates the scratch before native metal_admit.room samples device allocation/footprint; Storage owns and tracks both buffers"
+  },
+  "guards": [
+    "Compile-time layout assertions",
+    "record=false multi-segment calls rejected before encoding, with unchanged cache/history/logits/inputIDs witness on allsix widths",
+    "Descriptor count and row sums bounded<=32",
+    "Shared convolution explicitly requires recorded total<=32"
+  ],
+  "frozen_private_artifacts": {
+    "base_commit": "d05f599a3f341b9bb9bcfbebb9b47b6d63e618ca",
+    "scope": "Private shared-convolution candidate only; defaultOFF unless explicit private environment/testflag",
+    "source_sha256": {
+      "zig/kernels/metal/lfm3/ops.metal": "02746819be142ae0788823ffb6963336adc9344fe948d7a9dc94406373e61074",
+      "zig/src/families/lfm3/model.zig": "7d26a3afe310208ec3b45378890836dac845d262c9186d394951a42906504d60",
+      "zig/src/families/lfm3/state.zig": "13950e1bb0313ae788c43432113d31f27b2b4fa97712d404a3f23ffe2d01ce80",
+      "zig/src/families/lfm3/kernels.zig": "4fc6f329a322b8025351b7f097a8dff6757bc6fc4f31b2db32be5960685ce853",
+      "zig/src/families/lfm3/forward.zig": "e0d2c61773b1e7b6ce5c7ae8d622f65664a3590cddeb750edd99c3f70cc3d32e",
+      "zig/tests/lfm3_exact.zig": "e3b8902be3b375d8103e9f799051c680219567e871d17c4565bb5a7fb78e2f63"
+    },
+    "binary_sha256": {
+      "zig-out/bin/tf-lfm3-exact": "98632db29ed6f16eb8b64da8db8a077f8bb7be73beaa7150988a940288844515",
+      "zig-out/bin/tf-lfm3-forward": "4c0ad68dc32dfa367beb5755be6b1166a23dfc62f0a2203813d6cbdf34e4a548",
+      "zig-out/native/bin/tensorfold-native": "b06de5679c58f63cffca95c34d0d78ee53678f60e04dff894aded547213ec1a5"
+    },
+    "scratch_bytes": 12416,
+    "guards": [
+      "ConvSegment size16/alignment8/offsets0,8,12 asserted at compile time",
+      "Unrecorded multi-segment calls rejected before encoding",
+      "Descriptor row sums validated<=32 before allocation/population",
+      "Shared launch explicitly requires recorded rows<=32"
+    ]
+  },
+  "contract_artifact": {
+    "binary_sha256": "408887b56dc2f899a64f2101341637f01ea0bb8ffdd74a0c3adbc29b664754c7",
+    "source_sha256": {
+      "zig/tests/contract/metal_lfm3_conv_segments.zig": "0b1361bfeb044d2033e695d1d5eac3fa2488140b5677ef7a63b8cb172f27f6b2",
+      "zig/tests/contract/metal_main.zig": "d4b6d164fe1f8c61d5e55c63e8d74ab8a77021b41d5fc2c21c1fea32e0741aab",
+      "zig/tests/contract/metal_limits.zig": "51c3294d185d69bf56f2d20cadfff50c891bcc2ee4df40e22b2f2e7895694c56",
+      "zig/src/core/contract/lfm3_records.zig": "a5fa76f575767256030e034a74bc6582d9052180ed6be838bb5736bdc808913b"
+    },
+    "build_steps": [
+      43,
+      43
+    ]
+  },
+  "serving_scope": "Allsix widths; seeded sampling, actual HTTP cancellation/recovery, unequal/shared streams, prompt-cache reuse and VL image/order cases",
+  "performance": {
+    "scope": "Four-stream steady greedy decode on4bit text/VL, two public code/prose chat prompts,256tokens,3reps each leg, ABBA; no speed claim for6/8bit or cold-prefill",
+    "baseline_sha256": "e9a1488abb130af39c21ee08068fe490d5926271cebcd2e9d0f815711e3730b4",
+    "candidate_sha256": "b06de5679c58f63cffca95c34d0d78ee53678f60e04dff894aded547213ec1a5",
+    "order": [
+      "old",
+      "new",
+      "new",
+      "old"
+    ],
+    "server_options": {
+      "context": 70000,
+      "parallel": 4,
+      "prompt_cache_gib": 0,
+      "temperature": 0,
+      "thinking": false
+    },
+    "private_enablement": "TF_LFM3_SHARED_CONV=1 on candidate servers only; no quad/NAX/publication candidate",
+    "measured_requests": 192,
+    "counts": {
+      "alone_equal": 192,
+      "alone_unequal": 0,
+      "alone_failed": 0,
+      "serial_equal": 16,
+      "serial_unequal": 0,
+      "serial_failed": 0
+    },
+    "all_measured_full_token_hashes_match_by_family_prompt": true,
+    "cells": [
+      {
+        "family": "text",
+        "prompt": "long-code-chat",
+        "baseline_leg_rates": [
+          848.2,
+          849.5
+        ],
+        "candidate_leg_rates": [
+          877.4,
+          876.7
+        ],
+        "baseline_median_tps": 848.85,
+        "candidate_median_tps": 877.05,
+        "rate_ratio": 1.0332214172115215,
+        "token_sha256": "7ffd540d4c865156a86d2dc134d3ac3b2a5c6508f5f7821217f5abcbc89cb9b7"
+      },
+      {
+        "family": "text",
+        "prompt": "long-prose-chat",
+        "baseline_leg_rates": [
+          868.6,
+          869.4
+        ],
+        "candidate_leg_rates": [
+          896.7,
+          896.2
+        ],
+        "baseline_median_tps": 869.0,
+        "candidate_median_tps": 896.45,
+        "rate_ratio": 1.0315880322209436,
+        "token_sha256": "97f95aa70ea3cdfeb18f05c2b71620d477f3cb71f84ce72236eb1ee8bc636b1a"
+      },
+      {
+        "family": "vl",
+        "prompt": "long-code-chat",
+        "baseline_leg_rates": [
+          825.2,
+          824.9
+        ],
+        "candidate_leg_rates": [
+          851.3,
+          847.1
+        ],
+        "baseline_median_tps": 825.05,
+        "candidate_median_tps": 849.2,
+        "rate_ratio": 1.029270953275559,
+        "token_sha256": "cd53eb1c94a6051695a27472ab8e927126dacf6884d506996a6ce19c35abe9ee"
+      },
+      {
+        "family": "vl",
+        "prompt": "long-prose-chat",
+        "baseline_leg_rates": [
+          822.2,
+          821.1
+        ],
+        "candidate_leg_rates": [
+          846.8,
+          843.7
+        ],
+        "baseline_median_tps": 821.6500000000001,
+        "candidate_median_tps": 845.25,
+        "rate_ratio": 1.0287226921438568,
+        "token_sha256": "a6dac318d3938bbe33f79d9a9c09bc030f9da35dc346d8c2d535909b0c3513aa"
+      }
+    ],
+    "runner_sha256": "a50e6058f59fdd5cbca1e937b8bee3c719ae4c201336832425d1aa7787770a64",
+    "artifact_scope": "Measured on the frozen private opt-in binary; the applied public binary has a distinct SHA and was not this benchmark artifact"
+  },
+  "evidence_sha256": {
+    "lfm3-shared-conv-contract-m4.log": "d747ee0a98514126816594491d6c2262be22c35c73db61390cb6dda9f38f1e4f",
+    "lfm3-shared-conv-contract-m5.log": "71c7c162fc0dfd982046f617529a119cd6f568b206110281c126a91e7bffd684",
+    "lfm3-shared-conv-guard-quick-m4.log": "6b305e0707b3d3867faf380c82f6d5bdbd60326cac431b4813b90ac3308a32fa",
+    "lfm3-shared-conv-guard-build.log": "bba528bbaa79057884e661f5b832bada7b107dcfdc69c2fd4d19755c6eb666de",
+    "lfm3-shared-conv-contract-final-build.log": "4eb06fdeef03301fed52b14d74b32b887b6c7fa888f640b6af7f5bb74ebeca0f"
+  },
+  "private_state_suites": [
+    {
+      "model": "LFM3-1.7B-MLX-4bit",
+      "passed": 68,
+      "failed": 0,
+      "skipped": 0,
+      "unrecorded_rejected_unchanged": true,
+      "seconds": 69.34337883302942,
+      "log_sha256": "89f8b71a016ce3eaa2996bc73c6d1dea3f7cb90007f09109b82d346ccdec478e"
+    },
+    {
+      "model": "LFM3-1.7B-MLX-6bit",
+      "passed": 68,
+      "failed": 0,
+      "skipped": 0,
+      "unrecorded_rejected_unchanged": true,
+      "seconds": 81.18592800013721,
+      "log_sha256": "f0ee8d743c8c22a3e34801e70d0ed2e6e88e23f87f5f7b2380cee48e06b529f8"
+    },
+    {
+      "model": "LFM3-1.7B-MLX-8bit",
+      "passed": 68,
+      "failed": 0,
+      "skipped": 0,
+      "unrecorded_rejected_unchanged": true,
+      "seconds": 83.94439495913684,
+      "log_sha256": "394710a17d58e50092dcf3d7773946e90a0e5a4018c54da541c0384d67158060"
+    },
+    {
+      "model": "LFM3-VL-2B-MLX-4bit",
+      "passed": 68,
+      "failed": 0,
+      "skipped": 0,
+      "unrecorded_rejected_unchanged": true,
+      "seconds": 73.88264883402735,
+      "log_sha256": "4b9be778ab98d731a9c0882355ddf670d94e5345e8777121dbf8858fc0a32c79"
+    },
+    {
+      "model": "LFM3-VL-2B-MLX-6bit",
+      "passed": 68,
+      "failed": 0,
+      "skipped": 0,
+      "unrecorded_rejected_unchanged": true,
+      "seconds": 81.54222154105082,
+      "log_sha256": "69c0c38931a19db1617229aff21d7b352038593f3e364f7e936c980c32d44023"
+    },
+    {
+      "model": "LFM3-VL-2B-MLX-8bit",
+      "passed": 68,
+      "failed": 0,
+      "skipped": 0,
+      "unrecorded_rejected_unchanged": true,
+      "seconds": 83.95681104203686,
+      "log_sha256": "02d16d94104abfa400ca98f3c6e1ec2edcb1937dd3699ac016b0b80fb87edf1c"
+    }
+  ],
+  "private_state_total": 408,
+  "private_serving_suites": [
+    {
+      "model": "LFM3-1.7B-MLX-4bit",
+      "passed": 40,
+      "failed": 0,
+      "skipped": 0,
+      "receipt_sha256": "85e7081cc498d19626f1dbcc0f16a310455d2762f8b202da2f0c5a3606538282"
+    },
+    {
+      "model": "LFM3-1.7B-MLX-6bit",
+      "passed": 40,
+      "failed": 0,
+      "skipped": 0,
+      "receipt_sha256": "74f26e831a7b76582f7c8b6ca288f2f31b2bfad4c9836f249a4802af2850920b"
+    },
+    {
+      "model": "LFM3-1.7B-MLX-8bit",
+      "passed": 40,
+      "failed": 0,
+      "skipped": 0,
+      "receipt_sha256": "f0f90275348eed175783b3cdcdefb830da3de7984c5751acd0b748b38f2bf92b"
+    },
+    {
+      "model": "LFM3-VL-2B-MLX-4bit",
+      "passed": 61,
+      "failed": 0,
+      "skipped": 0,
+      "receipt_sha256": "70115d39e759a7a169c3f300cded1790f445301624fa7f1cbf14d26b5d102075"
+    },
+    {
+      "model": "LFM3-VL-2B-MLX-6bit",
+      "passed": 61,
+      "failed": 0,
+      "skipped": 0,
+      "receipt_sha256": "08f4af3efa91ce27b652e3c407bb625cd627af05eda9b85e5b1d80bc74da1ac1"
+    },
+    {
+      "model": "LFM3-VL-2B-MLX-8bit",
+      "passed": 61,
+      "failed": 0,
+      "skipped": 0,
+      "receipt_sha256": "582ed6d544d14e058781f1cfa9ce64db36dd3b28520e488583d12b2ff62de8ec"
+    }
+  ],
+  "private_serving_total": 303,
+  "private_operator_gates": {
+    "M4": {
+      "kernels_passed": 1,
+      "failed": 0,
+      "controls_red": 1,
+      "controls_missed": 0,
+      "nonfinite_classes": 16,
+      "finite_classes": 114672,
+      "replacement_shapes": 5,
+      "repeat_runs": 5,
+      "repeat_bytes": 229376,
+      "reduced_precision_witness": "fp16 infx; bf16 963x relative miss",
+      "limits": {
+        "launched_threads": 256,
+        "max_threads": 256,
+        "static_threadgroup_bytes": 0
+      }
+    },
+    "M5": {
+      "kernels_passed": 1,
+      "failed": 0,
+      "controls_red": 1,
+      "controls_missed": 0,
+      "limits": {
+        "launched_threads": 256,
+        "max_threads": 256,
+        "static_threadgroup_bytes": 0
+      }
+    },
+    "bound": "Existing scalar conv FP64 equation, depth and intermediate-round allowances reused unchanged per independent cache",
+    "control": "Wrong stream-state address gives raw replacement mismatch and is red as planted",
+    "limits_scope": "Targeted runs used --no-limits; each new pipeline was explicitly reflected/checked at probe init. Normal gate5 declarations and bad-source compilation are registered for the final full limits run."
+  },
+  "private_immutable_solo_captures": [
+    {
+      "model": "LFM3-1.7B-MLX-4bit",
+      "rows": 257,
+      "bytes": 65792000,
+      "canonical_equal": true,
+      "sha256": "f1dbd42c2556fcb05031a00b209c61fadee45e74ee1ff94628d4802479fcb518"
+    },
+    {
+      "model": "LFM3-1.7B-MLX-6bit",
+      "rows": 257,
+      "bytes": 65792000,
+      "canonical_equal": true,
+      "sha256": "08bf833a94fa0403bc65c70677d20372b5ab0616fb0a58d26119c486069ef59c"
+    },
+    {
+      "model": "LFM3-1.7B-MLX-8bit",
+      "rows": 257,
+      "bytes": 65792000,
+      "canonical_equal": true,
+      "sha256": "1345bd80acaa16fe08a00a14d839e3e37cf9d0d8cd7e98c01b68cd1b8d2f51d4"
+    },
+    {
+      "model": "LFM3-VL-2B-MLX-4bit",
+      "rows": 257,
+      "bytes": 65792000,
+      "canonical_equal": true,
+      "sha256": "a4dde0a00ee9acb294c2b5a791e7e73cd05c5d6904ffe171e439ad1b01e25c5d"
+    },
+    {
+      "model": "LFM3-VL-2B-MLX-6bit",
+      "rows": 257,
+      "bytes": 65792000,
+      "canonical_equal": true,
+      "sha256": "93ea83c90c5623f4e17502a526e2358f9e1ba3f2d03999295745257dc95bbca6"
+    },
+    {
+      "model": "LFM3-VL-2B-MLX-8bit",
+      "rows": 257,
+      "bytes": 65792000,
+      "canonical_equal": true,
+      "sha256": "5a013f3eed97f143429f09a81a829b07dc32360734cd54855e18e514160e0a48"
+    }
+  ],
+  "private_immutable_solo_bytes": 394752000,
+  "applied_public": {
+    "base_commit": "d05f599a3f341b9bb9bcfbebb9b47b6d63e618ca",
+    "source_sha256": {
+      "zig/kernels/metal/lfm3/ops.metal": "02746819be142ae0788823ffb6963336adc9344fe948d7a9dc94406373e61074",
+      "zig/src/families/lfm3/forward.zig": "082577207be3a85b3e54011eb7dd2d218e96c28a2f66e969431e4bf3a3f7f8e9",
+      "zig/src/families/lfm3/state.zig": "13950e1bb0313ae788c43432113d31f27b2b4fa97712d404a3f23ffe2d01ce80",
+      "zig/src/families/lfm3/kernels.zig": "ad21db3cb7ba951df07b066f6ec244b61a77edb9c8ba8419cf7c786c75de4071",
+      "zig/tests/contract/metal_lfm3_conv_segments.zig": "b824c468f403e8384942829ace1b6a7c589a4b091a8f2a8f8af6b81244751857",
+      "zig/tests/contract/metal_main.zig": "d4b6d164fe1f8c61d5e55c63e8d74ab8a77021b41d5fc2c21c1fea32e0741aab",
+      "zig/tests/contract/metal_limits.zig": "51c3294d185d69bf56f2d20cadfff50c891bcc2ee4df40e22b2f2e7895694c56",
+      "zig/src/core/contract/lfm3_records.zig": "a5fa76f575767256030e034a74bc6582d9052180ed6be838bb5736bdc808913b"
+    },
+    "binary_sha256": {
+      "zig-out/native/bin/tensorfold-native": "195a8aceefd625f76049ed7cb48459b43f6ebbeedde5e82a07b0726f29010a9d",
+      "zig-out/bin/tf-lfm3-exact": "7c04d0da0bed247f7bbb08077b74aa190b5a07322c8d54dadfb2898ffbb650b1",
+      "zig-out/bin/tf-kernel-contract": "31557ec36605bcaf5c40f04218f10ea5374d3cdfb87b6ad644c2ae8cf1139437"
+    },
+    "default": "Shared convolution for recorded multi-segment rounds; unchanged single-stream entry; no private getenv/host-fault flags",
+    "private_shader_byte_identity": true,
+    "build": "64/64 steps succeeded",
+    "operator_and_normal_limits": {
+      "m4": {
+        "kernel_gates_passed": 1,
+        "failed": 0,
+        "wrong_state_controls_red": 1,
+        "controls_missed": 0,
+        "launched_threads": 256,
+        "pipeline_max_threads": 256,
+        "static_threadgroup_bytes": 0,
+        "normal_limits_registered_launches": 353,
+        "normal_limits_problems": 0,
+        "scope": "All normal launch declarations against M1-M5 and actual device reflection; no offline M1/M2 compiler sweep"
+      },
+      "m5": {
+        "kernel_gates_passed": 1,
+        "failed": 0,
+        "wrong_state_controls_red": 1,
+        "controls_missed": 0,
+        "launched_threads": 256,
+        "pipeline_max_threads": 256,
+        "static_threadgroup_bytes": 0,
+        "normal_limits_registered_launches": 353,
+        "normal_limits_problems": 0,
+        "scope": "All normal launch declarations against M1-M5 and actual device reflection; no offline M1/M2 compiler sweep"
+      }
+    },
+    "state_suite": {
+      "host": "Apple M4 Pro",
+      "model": "LFM3-1.7B-MLX-4bit",
+      "passed": 68,
+      "failed": 0,
+      "skipped": 0,
+      "mode": "default, no enablement flags"
+    },
+    "host_validation": "zig build test-lfm3-host test-lfm3-image-host -Dcpu=apple_m1 --summary all: 10/10 steps; 1/1 newly executed test passed, remaining executions cached",
+    "fmt": "zig fmt --check on all seven changed Zig sources: passed",
+    "source_maximum_lines": 468,
+    "lean": {
+      "baseline_problems": 428,
+      "head_problems": 428,
+      "new_problems": 0,
+      "note": "Nonzero lean-check findings are inherited; lean_new comparison exits zero",
+      "baseline_log_sha256": "3d3fc6c70d708ea107e4cd1f87f8674de115b367131a267e68f639006cd0165c"
+    },
+    "commands": [
+      "zig build native tf-lfm3-exact tf-kernel-contract -Dcpu=apple_m1 --summary all",
+      "zig-out/bin/tf-kernel-contract --only \"shared conv\" --no-limits",
+      "zig-out/bin/tf-kernel-contract --only \"shared conv\" --no-gates",
+      "zig-out/bin/tf-lfm3-exact MODEL_DIR",
+      "zig build test-lfm3-host test-lfm3-image-host -Dcpu=apple_m1 --summary all",
+      "python3 tools/zig/lean_check.py",
+      "python3 tools/zig/lean_new.py PINNED_BASE_LEAN.txt HEAD_LEAN.txt"
+    ],
+    "log_sha256": {
+      "lfm3-shared-conv-public-build.log": "bfbb9951b04b1fd507c424a9e3d4373f5b7c075b49b26d0b186a18895bb6af07",
+      "lfm3-shared-conv-public-gates-m4.log": "f351162af6678cf688fabd1a53b6d79bb54229e95ee899d422a55da39cdab541",
+      "lfm3-shared-conv-public-gates-m5.log": "4d07a2f99af41772509ec501d502bf07e350440074dc4ec675cbbda6b3d3f90d",
+      "lfm3-shared-conv-public-limits-m4.log": "e7f338d0699f9c2be4aa97ef5995b5bb244bf8cd6046ddd3f91652bf555e6718",
+      "lfm3-shared-conv-public-limits-m5.log": "89d77a1125cfad02ba0ac94a811989c907a352feeab6a7474b9cae838607ef70",
+      "lfm3-shared-conv-public-state68-m4.log": "47c399fac3257c8c00d62ab84645cfce8ea44a183af88a1a74d3765bf08e78fd",
+      "lfm3-shared-conv-public-host-tests.log": "b0b75fac398c6200f54aabc87233d3d4cc1da79b271a98f3b15868a7b52902e4",
+      "lfm3-shared-conv-public-lean-head.txt": "e570a5cbfae6f29b03a2e746fa5f8141b203ee51412e7b76f9333f05cc658d6f",
+      "lfm3-shared-conv-public-lean-new.txt": "7c56e1d13027048ee9b6d376556965cbfd2aff0b2b2a67f03612c87643893209",
+      "lfm3-shared-conv-public-fmt.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  }
+}

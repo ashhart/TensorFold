@@ -1,4 +1,4 @@
-//! Wire compatibility: MCDMA's own Python producer's replies (tools/zig/fabric_vectors.py), replayed byte for byte in Zig.
+//! Wire compatibility: MCDMA's Python producer's replies (tools/zig/fabric_vectors.py), replayed byte for byte in Zig.
 const std = @import("std");
 const fabric = @import("fabric");
 const wire = fabric.wire;

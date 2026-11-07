@@ -1,4 +1,4 @@
-//! A slot's prompt state at a chunk end: KDA states, conv windows, MLA prefixes (resident: left in the slot, valid until it writes below).
+//! Prompt state at a chunk end: KDA states, conv windows, MLA prefixes (resident: in the slot until it writes below).
 const std = @import("std");
 const mtl = @import("metal");
 const cfg = @import("config.zig");
@@ -56,7 +56,7 @@ fn words(x: *const fwd.Ctx, e: mtl.ComputeEncoder, src: Ref, dst: Ref, n: usize)
     e.dispatchThreads(mtl.Size.of(n / 4, 1, 1), mtl.Size.of(256, 1, 1));
 }
 
-/// The copies between `s` and the snapshot (`into`: to it); a resident state copies KDA states alone, MLA prefixes from `home` when not `s`.
+/// Copies between `s` and the snapshot (`into`: to it); resident: KDA states only, MLA prefixes from `home` if not `s`.
 pub fn copy(x: *const fwd.Ctx, e: mtl.ComputeEncoder, s: *st.State, snap: Ref, at: u32, into: bool, home: ?*st.State) void {
     const c = x.c;
     var off: usize = 0;
@@ -88,7 +88,7 @@ pub fn copy(x: *const fwd.Ctx, e: mtl.ComputeEncoder, s: *st.State, snap: Ref, a
     s.mtp_pos = at;
 }
 
-/// A resident state made whole: its KDA states from `old`, then its MLA prefixes from `home` (its slot), into `whole`'s layout.
+/// A resident state made whole: KDA states from `old`, then MLA prefixes from `home` (its slot), in `whole`'s layout.
 pub fn spill(x: *const fwd.Ctx, e: mtl.ComputeEncoder, old: Ref, whole: Ref, at: u32, home: *st.State) void {
     const c = x.c;
     var off = bytes(c, at, true);

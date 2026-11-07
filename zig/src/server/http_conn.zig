@@ -435,6 +435,7 @@ pub fn reason(code: u16) []const u8 {
         404 => "Not Found",
         414 => "URI Too Long",
         429 => "Too Many Requests",
+        422 => "Unprocessable Entity",
         431 => "Request Header Fields Too Large",
         500 => "Internal Server Error",
         501 => "Not Implemented",

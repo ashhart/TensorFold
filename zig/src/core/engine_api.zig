@@ -166,8 +166,10 @@ pub const Info = struct {
     readouts: ?lanes.readout.Info = null, // non-null: the engine answers readout requests and nothing else
     speech: ?SpeechInfo = null,
     lanes: u32 = 1,
-    /// Prompt plus reply tokens one request may use (0: no limit).
+    /// Server preflight prompt-plus-reply limit (0: the engine owns admission).
     context_window: u32 = 0,
+    /// Discovery-only limit for an engine that keeps its existing prefill admission and error policy.
+    reported_context_window: ?u32 = null,
     context_fitted: bool = false,
     /// What the engine enforces; the server refuses requests that need more.
     call_gates: bool = false,
@@ -182,7 +184,7 @@ pub const Info = struct {
     structures: bool = false,
     /// Requests may ask for ``logprobs`` (the engine's lanes give the target's rows).
     logprobs: bool = false,
-    /// Requests' presence_penalty and frequency_penalty change the draws (false: they are ignored, and logged once).
+    /// Requests' presence_penalty and frequency_penalty change the draws (false: nonzero is refused).
     penalties: bool = false,
     /// Requests may ask for ``prompt_logprobs`` (a prompt pass from 0 that reads every row).
     prompt_logprobs: bool = false,
@@ -223,6 +225,13 @@ pub const Info = struct {
     /// A byte budget each request promises its caches from as it is admitted (null: none); never beside `admit`.
     ledger: ?Ledger = null,
 
+    pub const Capability = @import("engine_capabilities.zig").Capability;
+
+    /// One loaded flag for both discovery and request checks; optional user features report presence.
+    pub inline fn capability(i: Info, comptime key: Capability) bool {
+        return @import("engine_capabilities.zig").read(i, key);
+    }
+
     /// What a lane engine's streams enforce themselves (core/lanes/stream.zig): loop guards and answer limits.
     pub fn ofLanes(i: Info) Info {
         var out = i;
@@ -244,22 +253,17 @@ pub const Ledger = struct {
     cost: *const fn (ctx: *anyopaque, prompt: u32, max_tokens: u32) u64,
 };
 
-pub const PromptCacheCapacity = struct { budget_bytes: u64, minimum_state_bytes: u64 };
-
-pub const PromptCachePlan = struct {
-    source: enum { physical_footprint, explicit, metal_working_set },
-    budget_bytes: u64,
-    explicit_budget: bool = false,
-    over_cap: ?bool = null,
-    ram_bytes: ?u64 = null,
-    ready_footprint_bytes: ?u64 = null,
-    cap_bytes: ?u64 = null,
-    room_bytes: ?u64 = null,
-    margin_bytes: ?u64 = null,
-};
+pub const PromptCacheCapacity = @import("engine_cache_plan.zig").PromptCacheCapacity;
+pub const PromptCachePlan = @import("engine_cache_plan.zig").PromptCachePlan;
 
 /// A native family's model type, weight formats and explicit raw-text capability.
-pub const Family = struct { model_type: []const u8, formats: []const []const u8, raw_text: bool = true };
+pub const Family = struct {
+    model_type: []const u8,
+    formats: []const []const u8,
+    raw_text: bool = true,
+    /// Formats it serves only for decisions (a readout head beside the checkpoint), not for chat.
+    decision_formats: []const []const u8 = &.{},
+};
 
 /// The math an NVFP4 checkpoint runs: its own (FP4 rows into NVFP4 layers, FP8 into FP8 ones), or bf16 rows throughout.
 pub const Precision = enum { checkpoint, full };
@@ -394,6 +398,9 @@ pub const pressure_message = "this Mac is under critical memory pressure: the se
 /// What a reply refused or ended for `Stale` says, a submit's error and a queued job's failure alike.
 pub const stale_message = "a Living Weights delete could not be put back on the device: send the delete again to retry it, or restart the server";
 
+/// The longest engine refusal message the server keeps; a longer one is cut at a UTF-8 boundary.
+pub const refusal_bytes = 256;
+
 /// A worked example for the learner: token ids, the answer from `start`; `decide`: its assistant header's last row.
 pub const Example = struct { ids: []const u32, start: u32, decide: u32, subject: u32 = 0, value: u32 = 0, context: u32 = 0 }; // subject: the row of its last token; value: the row before its answer's value (0: none); context: the rows of a conversation before its own turn, which other examples share (0: none)
 
@@ -438,6 +445,8 @@ pub const Engine = struct {
         drain: ?*const fn (ctx: *anyopaque) void = null,
         /// The server's load-ledger producer at attach, null at detach (load_ledger.zig); null entry: no engine group.
         load: ?*const fn (ctx: *anyopaque, producer: ?load_ledger.Producer) void = null,
+        /// Asked once per whole request: the returned message is the refusal, up to `refusal_bytes`; null: accepted.
+        refusal: ?*const fn (ctx: *anyopaque, request: *const Request, out: []u8) ?[]const u8 = null,
     };
 
     pub fn info(e: Engine) Info {
@@ -511,12 +520,19 @@ pub const Engine = struct {
         const f = e.vtable.learn orelse return error.Unsupported;
         return f(e.ctx, request, sink);
     }
+
+    /// The engine's refusal of a whole `request`: the returned message, up to `refusal_bytes`; null: accepted.
+    pub fn refusal(e: Engine, request: *const Request, out: []u8) ?[]const u8 {
+        const f = e.vtable.refusal orelse return null;
+        return f(e.ctx, request, out);
+    }
 };
 
 /// A backend's own driver for a lone greedy stream (the GPU round), which LaneHost runs while the stream is alone.
 pub const Lone = struct {
     ctx: *anyopaque,
     sampled: bool = false, // it drives sampled streams too
+    plain: bool = false, // it drives streams with drafts off too
     logprobs: bool = false, // it gives each token its logprob row too
     structures: bool = false, // it masks each window's rows by the stream's grammar too
     images: bool = true, // it takes image requests too (false: they stay in the lane core)
@@ -539,6 +555,8 @@ pub const LoneHooks = struct {
 
 /// The lane core served to the HTTP threads (lane_host.zig).
 pub const LaneHost = @import("lane_host.zig").LaneHost;
+/// TENSORFOLD_PREFILL_* values the lane host would misread, refused at serve start (lane_host_env.zig).
+pub const prefill_env = @import("lane_host_env.zig");
 /// An opt-in family round planner for the lane host, in place of its `prefill_step` chunks (lane_rounds.zig).
 pub const Rounds = @import("lane_host.zig").Rounds;
 
@@ -572,4 +590,5 @@ pub const save_guard = @import("save_guard");
 
 test {
     _ = @import("engine_api_test.zig");
+    _ = @import("engine_capabilities.zig");
 }

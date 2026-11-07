@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/ashhart/TensorFold/zig/src/cluster/cluster.schema.json",
   "title": "TensorFold cluster",
-  "description": "Nodes, how the leader reaches them for the launch step, and per model the nodes, parallel layout and budgets. The data plane is MCDMA direct memory access only.",
+  "description": "Nodes, how the leader reaches them for the launch step, their MCDMA links, and per model the nodes, parallel layout and budgets. The data plane is MCDMA direct memory access only.",
   "type": "object",
   "required": ["schema", "cluster", "nodes"],
   "additionalProperties": false,
@@ -23,6 +23,11 @@
       "type": "array",
       "minItems": 1,
       "items": { "$ref": "#/$defs/node" }
+    },
+    "links": {
+      "type": "array",
+      "description": "The data plane's MCDMA links, each declared once for both ends, so both read the same name, kind and path MTU. A model's nodes on real hosts need one link between every pair of them.",
+      "items": { "$ref": "#/$defs/link" }
     },
     "models": {
       "type": "object",
@@ -52,6 +57,8 @@
         "memory_gb": { "type": "number", "exclusiveMinimum": 0 },
         "gpu_limit_gb": { "type": "number", "exclusiveMinimum": 0, "description": "What the GPU may hold; inventory fills it in." },
         "model_root": { "type": "string" },
+        "library": { "type": "string", "pattern": "^/", "description": "libmcdma-fabric on this node, an absolute path; MCDMA's library is loaded from no other place." },
+        "bin": { "type": "string", "pattern": "^/[A-Za-z0-9_./+-]+$", "description": "This node's tensorfold, an absolute path, for the launch over ssh (whose non-interactive PATH has only the system directories). Absent: tensorfold from that PATH." },
         "ports": {
           "oneOf": [
             { "const": "auto" },
@@ -70,6 +77,29 @@
             }
           ]
         }
+      }
+    },
+    "link": {
+      "type": "object",
+      "required": ["name", "ends"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "$ref": "#/$defs/name", "description": "The link name both ends give MCDMA." },
+        "kind": { "enum": ["tb5", "cx5"], "description": "The kind both ends must report: tb5 (Thunderbolt, Mac to Mac) or cx5 (ConnectX, RoCE v2). Absent: whichever connects." },
+        "mtu": { "enum": [1024, 2048, 4096], "default": 4096, "description": "The RC path MTU, at most each port's active MTU." },
+        "ends": { "type": "array", "minItems": 2, "maxItems": 2, "items": { "$ref": "#/$defs/link_end" } }
+      }
+    },
+    "link_end": {
+      "type": "object",
+      "required": ["node", "device", "via", "port"],
+      "additionalProperties": false,
+      "properties": {
+        "node": { "$ref": "#/$defs/name" },
+        "device": { "type": "string", "minLength": 1, "description": "The RDMA device (rdma_mcrdma0 on a Mac's ConnectX, the ibv_devices name on Linux); Thunderbolt members may be joined with +." },
+        "via": { "type": "string", "minLength": 1, "description": "The meeting interface, a slash, then the other end's address on the same segment, e.g. en7/192.0.2.10." },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535, "description": "This end's exchange port; the other end connects to it." },
+        "gid": { "type": "integer", "minimum": -1, "maximum": 255, "description": "The GID index; required for cx5: 0 on a Mac (the MCDMA kext has index 0 only), the RoCE v2 index on Linux. Absent on Thunderbolt: 1, or -1 for a bond of more than two devices." }
       }
     },
     "model": {

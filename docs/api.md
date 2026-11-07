@@ -134,6 +134,19 @@ See [image input](vision.md) for data URLs, public image URLs, limits and cache 
 The native binary refuses `--vision` for other models and answers their image parts with HTTP 400.
 Unsupported image input, audio, video and non-text output requests receive HTTP 400.
 
+## Model capabilities
+
+Each native GET /v1/models entry, including every configured alias, includes a capabilities object.
+It reports the loaded engine's boolean Info flags: text_generation, context_fitted, call_gates, loop_guard,
+thinking_budget, reasoning, answer_limit, structures, logprobs, penalties, prompt_logprobs, prompt_cache,
+warm_turns, plain_only, decides, pictures, greedy_only and slide_conversations. The vision, speech,
+embeddings, readouts and rerank fields report whether that user feature is present. Every field is a JSON boolean,
+including false, and no callback details or addresses are exposed.
+
+Discovery and boolean request checks use the same loaded flag reader. Publication enables no feature.
+Flags describe the engine; request combinations, context, template and format constraints still apply.
+greedy_only and plain_only describe restrictions, and context_fitted says the context was limited to memory.
+
 ## Decisions
 
 `POST /v1/decisions` is served by Flash Next on one CUDA GPU, by LFM2 on CUDA and by Gemma 4 on XPU.
@@ -176,6 +189,66 @@ context window before the first is scored, so a refused request costs no GPU wor
 `max_length` above it) returns HTTP 400 with `code` `context_length_exceeded`. An image or video part returns HTTP
 400. Errors use the server's envelope, as on every route: `{"error": {"message", "type"}}`.
 
+## System One on a Clef engine
+
+`POST /v1/systemone` on a Clef checkpoint (Cloudflare's clef-flash: BF16 Qwen3.5 weights with
+`joint_head_config.json` and `joint_head.safetensors`) answers each question from the joint schema head, the way the
+model card's reference `systemone` does. The native server serves it on one HIP GPU; a Clef engine serves no chat, and
+`--tp` is refused. On every other engine the route keeps llama-server's System One request. `capabilities --json`
+lists such formats under `decisions` (`"qwen3_5": ["bf16"]`), apart from the `families` formats that serve chat.
+
+```json
+{"model": "clef-flash",
+ "state": "Ticket #4521: refund of $129.99 requested.",
+ "questions": {
+   "refund": {"type": "noul", "instructions": "Should we refund?"},
+   "priority": {"type": "choice", "instructions": "Priority", "criteria": {"p0": "critical", "p1": "urgent", "p2": null}},
+   "sentiment": {"type": "score", "instructions": "Customer sentiment", "criteria": ["angry", "neutral", "happy"]}},
+ "raw": false}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `model` | A string, echoed in the reply |
+| `state` | Any JSON value: the record the questions are about; a string as given, other values as compact JSON with sorted keys |
+| `questions` | An object keyed by question id, answered in request order |
+| `type` | `noul` (a yes or no question), `choice` (one of the options) or `score` (an ordered level) |
+| `instructions` | Optional; any JSON value. Missing, null or `""` uses the question id |
+| `criteria` | `choice`: an object of option id to description (or null). `score`: a list of 2 to 10 level descriptions, levels `0` up. `noul`: optional, an object that describes `true` and `false` |
+| `raw` | Optional boolean: also return each option's unrounded probability |
+
+The reply has `model`, `answers` keyed by question id, and `usage` with `input_tokens` (the encoded record) and
+`output_tokens` 0. Probabilities are a softmax over each question's options, rounded to 4 decimals:
+
+| Type | Answer |
+| --- | --- |
+| `noul` | `{"type": "noul", "noul": P(true)}` |
+| `choice` | `{"type": "choice", "choice": id, "confidence": P(choice), "probabilities": {id: p}}`; a tie goes to the first option in request order |
+| `score` | `{"type": "score", "score": expected level, "confidence": the top level's p, "legend": {"0": description}, "probabilities": {"0": p}}` |
+
+With `"raw": true` the reply also has `raw`: per question id, its `type`, `options` in encoding order and `probs`, the
+unrounded probabilities in the same order.
+
+A request holds at most 64 questions, 256 options in one question and 1,024 options in all. The record is at most
+16,384 tokens (or the engine's context, if smaller): a longer state keeps its first tokens, and a schema that needs
+more than that before the state returns 400. The route answers:
+
+| Status | When |
+| --- | --- |
+| 422 | A field is missing or has the wrong JSON type. The body is FastAPI's: `{"detail": [{"type": ..., "loc": ["body", "questions", id, "type"], "msg": ...}]}`, one entry per problem |
+| 400 | An unknown `type`, empty `criteria`, no questions, a bound passed, `images` or `videos`, or a record that cannot be encoded or does not fit the engine's readouts |
+| 503 | The engine is closing, cannot take the request now, or is short of memory |
+| 500 | The head failed or gave a non-finite logit |
+
+A client that disconnects cancels its request.
+
+## Queue phase metrics
+
+With TENSORFOLD_PHASE_METRICS=1, native /metrics also exports tensorfold:request_queue_seconds and
+its request_queue_time_seconds alias, for measured waits from request submission to admission.
+Both use the fixed request-time histogram edges and have no request labels. An unset flag keeps these families
+absent and skips the queue observation; existing request metrics remain available. This option does not change replies.
+
 ## Living Weights
 
 With `--slide`, the native server learns facts into the served weights. [Living Weights](living-weights.md) explains
@@ -187,6 +260,7 @@ each route and its events.
 | `GET /v1/slide/graph` | Every fact as JSON: its state, neurons, questions and their expected answers, and the model's pocket |
 | `DELETE /v1/slide/graph` | Clears the graph; the weights keep what they learned |
 | `DELETE /v1/slide/fact/{id}` | Deletes one fact from the weights, every other fact checked again, streaming `fact`, `checking`, `zeroed`, `checked` and `forgot` events; an optional `{"reason": "..."}` goes into the graph |
+| `DELETE /v1/slide/facts` | Deletes the facts the body's `ids` select (1 to 256 distinct learned fact IDs) in one transaction: an invalid selection refuses the whole request before any cut; an optional `{"reason": "..."}` goes into the graph |
 
 A delete's last event, `forgot`, says `"deleted": true` only when both the shards and the graph file hold the delete,
 and its `state` is the fact's state in the graph file; a fact left `deleting` is settled by sending the delete again.
@@ -203,11 +277,12 @@ delete runs gets 503, an id that is not a number 400, and an id the graph does n
 | `parallel_tool_calls` | False returns at most one completed call | Both |
 | `max_tokens`, `max_completion_tokens` | Explicit reply limit; rejected if prompt plus reply exceeds the window | Both |
 | `temperature`, `top_p`, `top_k`, `min_p` | Sampling overrides; zero temperature is greedy | Both |
-| `presence_penalty`, `frequency_penalty` | OpenAI's, from -2 to 2: before each draw, greedy or sampled, a token the reply already holds loses `presence_penalty` from its logit and `frequency_penalty` once for each time it holds it; the prompt's tokens do not count. Drafted replies equal undrafted ones with them. Applied by Qwen3.8-27B and Qwen3.5-MoE on CUDA; other engines ignore them and say so once in the log | Native |
+| `presence_penalty`, `frequency_penalty` | OpenAI's, from -2 to 2: before each draw, greedy or sampled, a token the reply already holds loses `presence_penalty` from its logit and `frequency_penalty` once for each time it holds it; the prompt's tokens do not count. Drafted replies equal undrafted ones with them. Applied by Qwen3.8-27B and Qwen3.5-MoE on CUDA; other engines refuse nonzero values with 400; zero, null and omitted values keep working | Native |
 | `seed` | Explicit sampling key; native fallback uses configured defaults, then a fresh key (see below) | Both |
 | `stream` | Server-sent events; the last event carries usage | Both |
 | `stream_options.include_usage` | Usage in its own final event with `"choices": []`, not on the finish event | Both |
 | `chat_template_kwargs.enable_thinking` | Template thinking toggle; `chat_template_kwargs.thinking` (`true`/`false` or `{"type": "enabled"}`/`{"type": "disabled"}`, as DeepSeek-V4 clients send it) is read the same way when `enable_thinking` is absent; other values are ignored | Both |
+| `thinking` | Top-level toggle, the same forms as `chat_template_kwargs.thinking`; read only when the kwargs set neither toggle, so the kwargs win. Enabling it clears a `reasoning_effort` of `none`, so the template's default effort applies | Both |
 | `draft` | False selects the serial reference; CUDA rejects it if the engine has no serial switch | Both |
 | `response_format`, `guided_json`, `guided_regex`, `guided_choice`, `guided_grammar`, `structured_outputs` | A JSON schema, any JSON object, a regex, a choice or an EBNF grammar the reply must match | Both |
 | `grammar_budget` | Boolean, default false. Under a grammar (the fields above, or a required tool call), never draw a token after which the reply could no longer complete within `max_tokens`; see [Structured output](#structured-output) | Native |
@@ -219,6 +294,9 @@ delete runs gets 503, an id that is not a number 400, and an id the graph does n
 | `return_token_ids` | The reply's token ids in the response's `tensorfold.token_ids`, the tokens its `token_sha256` hashes | Native |
 
 `n` must be 1; multiple choices receive HTTP 400.
+
+`modalities` must be absent or `["text"]`, and a truthy top-level `image`, `images`, `image_url`, `input_image`,
+`audio`, `input_audio`, `video` or `video_url` key is refused: this server accepts and produces text only.
 
 The native CUDA engine (Nemotron 3.5 Lightning) supports `logprobs: true` and `top_logprobs` from 0 through 20 on
 `/v1/chat/completions`, streamed or not, without tools, stop strings, structured output or a thinking budget. Each
@@ -273,8 +351,9 @@ rows yet. Absent the flag the engines keep their own cuts and `TENSORFOLD_PREFIL
 the prompt's share of a fill step's wall time, time only, never smaller chunks. Flash Next's shared sessions on a Mac
 without tensor units are the exception: absent both, replies take 0.8 of that time and a filling prompt's steps grow
 from 32 to 512 rows after eight, while `--decode-share 0` keeps the 32-row steps with the prompt first. `TENSORFOLD_PREFILL_ORDER=srpt`
-lets running replies with less estimated work left than a filling long prompt take rounds first, the prompt keeping
-at least 10% of the time. With `--decode-share` it keeps that share when the prompt goes first and takes at most 10% when a reply does, and `--decode-share 0` still prefills each prompt whole. The CUDA, qwen27 Metal and
+lets a running reply that would end within a quarter of a filling long prompt's estimated time left take rounds first,
+the prompt keeping at least 10% of the time and lending at most a quarter of its own. It's the default for Qwen3.8-27B
+on Metal when neither `--decode-share` nor `TENSORFOLD_PREFILL_SHARE` is set; any other value of the variable turns it off. With `--decode-share` it keeps that share when the prompt goes first and takes at most 10% when a reply does, and `--decode-share 0` still prefills each prompt whole. The CUDA, qwen27 Metal and
 hip_serve servers pass the flag to their lane host and take its time share; the DeepSeek, Spark-X on Metal, Qwen4
 and XPU servers do not parse or apply the flag. `--decode-share 0` prefills each prompt
 whole
@@ -282,6 +361,17 @@ first, in arrival order, as 0.3.6.2 did. Background work waits behind foreground
 request yields when a foreground request needs its lane or memory, then restarts with already-delivered tokens
 suppressed.
 Session-title requests are also treated as background work.
+
+The serve flags `--top-p`, `--top-k` and `--min-p` set the server's defaults for the request fields of the same
+names, as `--temperature` does. Under them sit two layers: a family's built-in sampling (DeepSeek-V4 and V4.1
+serve their model cards' temperature 1 and top_p 1), then the checkpoint's `generation_config.json`
+(`temperature`, `top_k`, `top_p`, `min_p`; `do_sample: false` means temperature 0, and `do_sample: true` without
+a temperature means 1). A flag that is set replaces what those layers gave. When nothing sets a value the server
+has no sampling default and the serving line prints `greedy`; otherwise it prints the resolved defaults as
+name-value pairs. A request's own fields win over the defaults. The merged values are checked per request like
+request fields: a `--min-p` outside 0 through 1 refuses every chat request, a negative `--top-k` clamps to 0, and
+`--temperature` and `--top-p` must be finite numbers. An engine that decodes greedily only refuses sampled
+requests while the server samples by default, and its refusal suggests serving with `--temperature 0`.
 
 `--name-priority ID=background` gives one served id (`--name` or an `--alias`) a default priority: a request that
 asks for it and sends no `priority` of its own is treated as `priority: "background"`. The request's own `priority`
@@ -364,7 +454,7 @@ The native server enforces the same fields with the same grammars through `libtf
 xgrammar v0.2.8's C++ library (`zig/src/grammar/tf_grammar.cc`). Release archives ship it in `lib/` beside `bin/` for
 macOS arm64, Linux x86_64 and Linux aarch64; from source, `zig build grammar -Dxgrammar=DIR` builds it from an xgrammar
 v0.2.8 checkout (`git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar`) into
-`zig-out/native/lib` on macOS and `zig-out/lib` on Linux. The server looks in `../lib` beside its binary, then beside
+`zig-out/native/lib` on macOS, Linux and Windows. The server looks in `../lib` beside its binary, then beside
 it, then on the loader's path, and loads it at the first structured request; without it, everything else serves and a
 structured request gets HTTP 400. The native engines listed below expose token grammar support; other engines
 refuse structured requests. Drafting stays on: the drafts the head holds on the GPU come
@@ -429,14 +519,20 @@ top-level field wins. An unnamed level maps to the nearest level the template na
 the higher one. GLM-5.3 lists `low`, `high` and `max`, so `max` stays `max`, `medium` is heard as `high`
 and `minimal` as `low`. Qwen3.8 lists `low`, `medium` and `xhigh`, so `high` and `max` are heard as `xhigh`.
 `xhigh` stays `xhigh`. GLM-5.3 renders `xhigh` and `max` as Max. A template that names no level hears `max` as
-`xhigh`. `--reasoning-effort` uses the same rule. An omitted effort, with no startup flag, stays
+`xhigh`. `--reasoning-effort` accepts `minimal`, `low`, `medium`, `high`, `xhigh` and `max` and uses the same rule; use `--no-thinking` for the CLI off switch. An omitted effort, with no startup flag, stays
 the template's own default. An explicit `chat_template_kwargs.enable_thinking` takes
 precedence. A request without an effort gets `--reasoning-effort` when the server was started with one; otherwise
 the template renders its own default, as vLLM and mlx-lm render it (Qwen3.8's is `xhigh`, which adds an instruction
 to the system prompt; `medium` adds none). The template hears an effort only while thinking, and both backends render
 the same prompt for the same request. Effort support depends on the checkpoint's template, and effort does not set a
-token budget. With thinking off, GLM-5.3's prompt is its thinking-off template's: no reasoning-effort line and an
-empty think block. GLM-5.3 keeps every earlier assistant turn's reasoning in the prompt, as zai-org's template does by
+token budget. With thinking off, GLM-5.3's prompt is the template's render unchanged, plus the close of its dangling
+think block: the server appends `</think>` (one token), and the template's `Reasoning Effort` head stays as the
+template writes it. The released Python 0.6.6 engine instead rewrites GLM's render for a no-thinking request — its
+`thinking_off` strips the `Reasoning Effort` head and closes the block inline — so its no-thinking prompts are 6 to 7
+tokens shorter than native's on the same request (#1911 measured a system-plus-user prompt at 22 tokens rendered, 16
+on the Python engine, and 23 on native). A prompt count, a cache key or a kept state from one engine therefore does
+not match the other's for `enable_thinking: false`. GLM-5.3 keeps
+every earlier assistant turn's reasoning in the prompt, as zai-org's template does by
 default (`clear_thinking` false), also on checkpoints whose template still clears it before the last user message, so
 a new user message leaves the earlier turns' tokens, and their kept prompt states, as they were. The native server
 gives the template `clear_thinking` false on every render, and `TF_GLM_CLEAR_THINKING=1` sets it true for the server,
@@ -446,7 +542,9 @@ model card advises `true` for plain chat; any other value is a 400, and other fa
 
 A tool call written before the think block closes is the reply's tool call when the reply ends inside the block,
 on both backends; the reasoning stops where the call starts, and streamed reasoning never carries the call's markup.
-A call only mentioned while thinking, with the block closed after it, stays reasoning.
+A complete call at the end of reasoning is also returned when the think-close marker follows and the answer is
+empty or whitespace. While streaming, those calls stay held until the reply ends. When the block closes, a call
+followed by more reasoning or a nonempty answer stays reasoning.
 
 `thinking_budget` (the request's; absent or 0 takes `--thinking-budget`) replaces the reply's budget-th token,
 while it is still thinking, with a newline, the closing think marker and a blank line, then continues the answer.
@@ -528,6 +626,33 @@ On a discrete card (an RTX 3090, an A100) the server sizes its window from the c
 reports it, less a reserve of a 32nd of the card and at least 1 GiB. `TENSORFOLD_MEMORY_RESERVE_GIB` sets that one from
 0.5 GiB up.
 
+## Compaction
+
+Without `--compact-at` nothing compacts: a conversation that outgrows the context is refused with the usual
+`context_length` error. With it, the server summarizes instead of refusing. `--compact-at auto` reserves room for
+the reply — the larger of 15% of the context window and 16,384 tokens, or 15% when the window can't hold 16,384 — and compacts a conversation whose prompt
+plus wanted reply tokens would cross what is left, or one the plain prepare refuses for context length.
+`--compact-at F`, a fraction of the window in (0, 1], compacts when they would cross F × the window, rounded down.
+Any other value is refused at startup ("expected auto or a fraction in (0, 1]").
+
+Compaction keeps the conversation's leading messages and its recent tail whole and summarizes the middle into a
+memory note. The note is written by the model itself — greedy, thinking off, at most 1,024 tokens a chunk — under
+a task that asks for Markdown sections (Goal, Constraints and preferences, Progress, Decisions, Next steps,
+Critical context) and under 800 words. It replaces the summarized middle as one message that begins "Memory of
+the earlier conversation:". The tail is `--compact-keep` tokens of recent messages, an integer from 0; the
+default keeps the smaller of 20,000 tokens and a quarter of the window. If the rebuilt conversation still does
+not fit, the server summarizes again over a smaller tail until it does. A compacted request runs these extra
+generations before its reply.
+
+`--compact-memory DIR` stores each conversation's note under DIR as `<key>.md`, with a `<key>.json` recording how
+many leading messages the note covers and their hash. A later request whose leading messages hash the same reuses
+the stored note instead of regenerating it. Without the flag a note lives for one request.
+
+The reply's `tensorfold` object carries `context_window` and `context_used`, and when compaction ran also a
+`compaction` object: `messages_compacted`, `kept_messages`, `note_tokens` and the `note` text. Compaction applies
+to chat completions with a `messages` array, and to the Responses API, which runs as one; a completions request
+with a plain string prompt is never compacted.
+
 ## Embeddings
 
 `POST /v1/embeddings` takes OpenAI's body: `input` is one text, a list of texts, one list of token IDs or a list of
@@ -561,15 +686,19 @@ TensorFold also reports generation statistics such as decode rate, time to first
 
 Native JSON replies also carry a `tensorfold` runtime block with `engine`, `enable_thinking`,
 `reasoning_effort`, `tokens_per_second`, `seconds`, `time_to_first_token`, `prefill_seconds`,
-`prefill_widths`, `prefill_raised`, `sampling`, `drafts`, `token_sha`, and the draft counters
-`rounds`, `drafted`, `accepted`, `acceptance_rate`, and `tokens_per_round`. A request that sends
-`return_token_ids` adds `token_ids`, the reply's tokens, to the block — the tokens `token_sha` and
+`prefill_widths`, `prefill_raised`, `sampling`, `drafts`, `token_sha`, and a `speculative` object beside
+the block with the draft counters `rounds`, `drafted`, `accepted`, `acceptance_rate`, and
+`tokens_per_round` (the drafter's own counters arrive as `proposer`).
+A request that sends `return_token_ids` adds `token_ids`, the reply's tokens, to the block — the tokens `token_sha` and
 `token_sha256` hash — on the whole reply and on the streamed finish event alike. A loop-guarded reply adds
 `runtime.loop.period`, and `runtime.loop.stopped` when `--loop-guard-stop` ended it; these fields describe the native
 reply and are absent from Python replies that do not provide them.
 In the native block, `seconds` is the reply's decode time, from the end of its prompt pass to its last token, and
 `tokens_per_second` divides the reply's tokens after the first by it. `prefill_seconds` is the prompt pass, and
 `time_to_first_token` counts from the request's arrival, so a queued or long prompt shows there, not in `seconds`.
+`min_rows` is the smallest row count any of the request's engine calls ran with. A reply whose lane measured
+grammar windows adds `grammar_windows` and `grammar_fills`, counts, and `grammar_window_seconds` and
+`grammar_fill_seconds`, in seconds.
 The Python 0.6 server's `seconds` is the whole request, prompt included.
 A native Metal Qwen3.8-27B server started with `TF_Q27_PROFILE=N` logs each kernel class's GPU time, the DFlash2
 drafter's included, every N decode rounds (`1` means 64; unset, empty or `0` is off, and any other value leaves it off
@@ -577,6 +706,11 @@ with a warning). Prompt passes run unprofiled, and a profiled round runs slower 
 add `gpu_seconds` to the block: the GPU-busy time of the target model's forward passes the reply ran in, its prompt
 pass included. A round shared with other streams counts whole in each of their replies, and the drafter's passes
 are not included. Without `TF_Q27_PROFILE` the field is absent and replies are unchanged.
+
+Beside the block, native replies carry top-level `exact_mode`, always `"exact"`, and `stop_sequence`, the matched
+stop string, when a stop string ended the reply. A server started with `--cortheon` adds a top-level `cortheon`
+object summarizing the turn for requests Cortheon runs ([Cortheon](cortheon.md)). These ride on the whole reply and
+the streamed finish event alike.
 
 The native server's finish log names the client reply ID. Completed requests report `prompt`, `cached`,
 `thinking`, `effort`, `tokens`, `sha`, `finish`, `rounds`, and draft acceptance; a refused request reports
@@ -685,6 +819,21 @@ spent rate; with more than 128 keys starting requests within one refill, a furth
 `admission_accepted_total` and `admission_rejected_total` with a fixed `reason` label (`global_limit`, `key_limit`,
 `principal_capacity`, `rate_limit`). With none set, nothing is counted and the replies and metrics are as before.
 
+### Waits
+
+A retryable refusal on an inference route answers 503 and names its wait in the OpenAI-shaped body's `code`, from one fixed set:
+
+| Code | Meaning |
+| --- | --- |
+| `server_restarting` | The server is draining for a restart; the answer carries `Retry-After` |
+| `engine_loading` | A parked model is unloading or reloading; sending the request again drives it; `Retry-After` |
+| `engine_reload_failed` | A parked model's reload was attempted and failed; the next request tries again; `Retry-After` |
+| `engine_busy` | The engine had no room for this request (a busy engine, a busy embedding engine, a full speech lane); send it again |
+| `engine_unavailable` | The engine is closed (for embeddings and rerank, also stale); retry after it reopens |
+| `memory_pressure` | The host is under critical memory pressure and takes no new request until it eases |
+
+A capacity refusal keeps the frozen Python engine's shape (`type` `invalid_request_error` and its message) and still carries no `Retry-After`; the code is native's addition. The Messages routes keep their Anthropic envelope, which has no code field, and the Sliding Weights learn/delete and imprint routes keep their own 503 bodies.
+
 ## Conversations on disk
 
 Use `--prompt-cache-disk DIR` to keep conversation prompt states on disk:
@@ -708,7 +857,7 @@ store for each model and build. That store takes the place of `--learn`'s store 
 with the flag neither reads nor writes the prefix files a plain `--learn` server keeps, and they stay on disk until the
 cap below needs their room. After a restart, a crash or an eviction from RAM, the next turn reads the latest state back
 instead of reading the conversation again from its first token. Qwen3.8-27B, Nemotron, Flash Next and GLM-5.3-Flash on
-one Mac and Nemotron on CUDA keep them; other engines refuse the flag at startup.
+one Mac, and Nemotron, the Qwen3.5 hybrids and Flash Next on CUDA, keep them; other engines refuse the flag at startup.
 
 The engine stages an owned copy between rounds, and an I/O thread writes and fsyncs it. Staging has a 1 GiB byte permit
 and at most eight jobs. A save that finds either full but would fit alone waits in the queue until a write finishes; one
@@ -803,7 +952,8 @@ the conversations. `DELETE /v1/imprint` clears one model's states; deleting the 
 ## Health
 
 The native server answers `GET /health` (and `GET /`) from one handler on Metal and CUDA, without a key. With keys
-configured the body is only `{"status": "ok"}`. Without keys it has these fields, in this order:
+configured the body is only `{"status": "ok"}`. An engine that reports unhealthy answers 503 with
+`{"status": "unavailable"}`. Without keys it has these fields, in this order:
 
 | Field | Type | Meaning |
 | --- | --- | --- |
@@ -813,7 +963,7 @@ configured the body is only `{"status": "ok"}`. Without keys it has these fields
 | `max_batch_size` | integer | The lanes the engine serves at once |
 | `policy` | string | The engine's policy line; absent when the engine reports none |
 | `warming` | boolean | Always `false` on the native engines |
-| `memory` | object | CUDA: `active`, `cache` and `peak` in bytes (`cache` is 0). Metal: `{}` |
+| `memory` | object | CUDA: `active`, `cache` and `peak` in bytes (`cache` is 0), plus `limit` when the engine reports one. Metal: `{}` |
 | `live` | object | `connections`, `waiting`, `decode_tokens_per_second`, `prefill_tokens_per_second` |
 | `version` | string | The release this server was built from |
 | `backend` | string | The backend built in: `metal`, `cuda`, `hip` or `xpu`; absent from a build without one |
@@ -824,6 +974,12 @@ configured the body is only `{"status": "ok"}`. Without keys it has these fields
 last prompt pass's uncached tokens over its time, shown for 2 s after the pass ends and 0 otherwise. Both rates are
 rounded to one decimal. Public health never resets the peak, with or without keys. Reset queries on `/health` and `/`
 are ignored. The separate `/memory` route also reports memory without resetting it and requires a key when keys are configured.
+
+`GET /v1/models` (and `/models`) answers `object: "list"` with one `data` entry per served ID and alias: `id`,
+`object: "model"`, `created` (the current unix time), `owned_by: "tensorfold"`, and, when the engine reports a
+context window, `context_length` and `max_model_len`, both that window. A model the engine reports as reasoning
+adds `reasoning`: `default_enabled`, `default_effort` when the template consumes `reasoning_effort`, and
+`supported_efforts`, the template's levels plus `none` when the template has a thinking switch.
 
 The Python 0.6.6 server's body differs: its MLX `memory` can add `budget`, `mlx_budget` and `footprint`, and its CUDA
 server sends the counters described under [Responses](#responses). For memory figures on a Mac, use
@@ -836,12 +992,13 @@ server sends the counters described under [Responses](#responses). For memory fi
 same handler and engine path. A response has that chat completion's prompt and tokens (the `tensorfold` block's
 `token_sha` matches), drafts, and equals its `"draft": false` run and its solo run.
 
-- `input` is a string or a list of items: messages (`input_text`, and `input_image` on a server started with
-  `--vision` for a model that reads images), `function_call`, `function_call_output` (its
-  `output` text, or `input_text` and `input_image` parts, the images again only with `--vision`), and `reasoning`
-  items with their `content` text, which the template gets
-  back as the next assistant message's `reasoning_content`. `instructions` becomes the system message and is not
-  carried to a later turn.
+- `input` is a string or a list of items: messages (`input_text`, `output_text`, `text` and `refusal` parts, whose
+  text or refusal text becomes input text; `input_image` on a server started with `--vision` for a model that reads
+  images; `input_file` with inline PDFs on a server started with `--vision --vision-pdf`), `function_call`,
+  `function_call_output` (its `output` text, or `input_text`, `input_image` and `input_file` parts under the same
+  image and PDF rules), and `reasoning` items with their `content` text, which the template gets back as the next
+  assistant message's `reasoning_content`. `instructions` becomes the system message and is not carried to a later
+  turn.
 - `tools` takes function tools; `tool_choice` takes `none`, `auto`, `required`, a function or `allowed_tools`;
   `parallel_tool_calls` works as in chat.
 - `max_output_tokens` counts reasoning tokens too. `temperature`, `top_p`, `top_k`, `min_p` and `seed` sample as in
@@ -849,8 +1006,10 @@ same handler and engine path. A response has that chat completion's prompt and t
 - `reasoning.effort` follows the chat effort rule: unset is the template's default and `none` turns thinking off.
   `reasoning.summary` is accepted, but no summary is written.
 - `text.format` takes `json_schema` or `json_object` through the structured-output path, with drafts.
-- `stream`, `store` (default true) and `metadata` (up to 16 string pairs). The chat extensions `draft`,
-  `thinking_budget`, `stop`, `ignore_eos`, `chat_template_kwargs` and `priority` pass through.
+- `stream`, `store` (default true) and `metadata` (up to 16 string pairs, keys up to 64 characters,
+  values up to 512). The chat extensions `draft`, `thinking_budget`, `stop`, `ignore_eos`,
+  `chat_template_kwargs`, `priority`, `return_token_ids` and
+  `grammar_budget` pass through.
 
 `output` holds a `reasoning` item (its text as `reasoning_text` content, with an empty `summary`), a `message` with
 `output_text`, and `function_call` items (`call_id`, `name` and JSON `arguments`). A reply cut by the token limit has
@@ -871,8 +1030,9 @@ prompt cache resumes the shared prefix as it does for chat. `store: false` keeps
 response.
 
 HTTP 400 refuses what this server does not run: built-in tools (web search, file search, computer use and the
-others), `background`, `conversation`, `prompt` templates, `truncation: "auto"`, `top_logprobs`, `input_file` parts
-and file IDs, `item_reference` items, encrypted reasoning items, and a `previous_response_id` that is not stored.
+others), `background`, `conversation`, `prompt` templates, `context_management`, `truncation: "auto"`, `top_logprobs`, file IDs and
+remote file URLs (`input_file` parts with inline `file_data` run on a model started with `--vision --vision-pdf`),
+`item_reference` items, encrypted reasoning items, and a `previous_response_id` that is not stored.
 `include` takes a list of OpenAI's names, which the server accepts and ignores (it has nothing to add for them):
 `code_interpreter_call.outputs`, `computer_call_output.output.image_url`, `file_search_call.results`,
 `message.input_image.image_url`, `message.output_text.logprobs`, `reasoning.encrypted_content`,
@@ -897,8 +1057,9 @@ That install is the Python 0.6.6 engine's; the native server uses `libtfgrammar`
 Usage separates uncached `input_tokens` from `cache_read_input_tokens` and reports `output_tokens_details.thinking_tokens`
 when the backend counts them. Prefix caching remains automatic,
 so `cache_control` hints do not allocate an Anthropic cache or report cache-creation tokens. Errors use the
-Anthropic error envelope, including after an SSE stream opens. Server-side tools, documents/file IDs,
-redacted thinking and other context edits return HTTP 400.
+Anthropic error envelope, including after an SSE stream opens. Server-side tools, file IDs,
+redacted thinking and other context edits return HTTP 400. A `document` block takes an inline base64 or
+data-URL PDF on a model started with `--vision --vision-pdf`, like image blocks on a vision model.
 
 Connect Claude Code using the ID from `/v1/models`:
 

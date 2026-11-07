@@ -19,6 +19,16 @@ const Readback = struct {
         copies += 1;
         return cuda.abi.success;
     }
+
+    fn contextDevice(out: *cuda.abi.Device) callconv(.c) cuda.abi.Result {
+        out.* = 0;
+        return cuda.abi.success;
+    }
+
+    fn deviceAttribute(out: *c_int, _: cuda.abi.DeviceAttribute, _: cuda.abi.Device) callconv(.c) cuda.abi.Result {
+        out.* = 0;
+        return cuda.abi.success;
+    }
 };
 
 const Closed = struct { failed: bool, last: Rig.Last };
@@ -26,6 +36,8 @@ const Closed = struct { failed: bool, last: Rig.Last };
 /// One quiet close against zero within one: whether it failed its gate, and the element it reported.
 fn close(comptime T: type, got: []const T) !Closed {
     var d: cuda.Driver = undefined;
+    d.api.cuCtxGetDevice = Readback.contextDevice;
+    d.api.cuDeviceGetAttribute = Readback.deviceAttribute;
     d.api.cuStreamSynchronize = Readback.sync;
     d.api.cuMemcpyDtoH_v2 = Readback.copy;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

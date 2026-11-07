@@ -152,32 +152,67 @@ __device__ __forceinline__ void store_kind(void* p, int kind, long long i, float
 
 constexpr int kTailThreads = 512;
 constexpr int kTailWidth = 8192;
+constexpr int kTailAhead = 4;  // a thread's elements loaded before any is used, so their latencies overlap
+constexpr int kTailSlots = 8;  // the slots whose rows are loaded before any is summed
 
-// One row a block, one launch: x = round(x + t), t = y or the slot-ordered weighted sum; normed = rms(x) * weight.
-__device__ void tail_body(void* x, const void* y, const float* wts, const float* weight, void* normed, int kind,
-                          int slots, int width, float eps) {
-    __shared__ float row_v[kTailWidth];
-    __shared__ float part[kTailThreads / 32];
+// A thread's elements of the row: x = round(x + t), t = y or (SLOTS) the slots' sum in slot order; its sum of v * v.
+template <bool SLOTS>
+__device__ __forceinline__ float tail_add(void* x, const void* y, const float* wts, float* row_v, int kind, int slots,
+                                          int width) {
     const int row = blockIdx.x;
     const long long at = static_cast<long long>(row) * width;
     float sum = 0.f;
-    for (int i = threadIdx.x; i < width; i += kTailThreads) {
-        float t;
-        if (slots > 0) {
-            float acc = 0.f;
-            for (int s = 0; s < slots; ++s) {
-                acc += static_cast<const float*>(y)[(static_cast<long long>(row) * slots + s) * width + i] *
-                       wts[row * slots + s];
-            }
-            t = round_kind(acc, kind);
-        } else {
-            t = load_kind(y, kind, at + i);
+    for (int base = threadIdx.x; base < width; base += kTailAhead * kTailThreads) {
+        // an element past the row loads the row's last, so no load waits behind a branch
+        int col[kTailAhead];
+        float xv[kTailAhead], t[kTailAhead];
+#pragma unroll
+        for (int k = 0; k < kTailAhead; ++k) {
+            col[k] = min(base + k * kTailThreads, width - 1);
+            xv[k] = load_kind(x, kind, at + col[k]);
+            t[k] = SLOTS ? 0.f : load_kind(y, kind, at + col[k]);
         }
-        const float v = round_kind(load_kind(x, kind, at + i) + t, kind);
-        store_kind(x, kind, at + i, v);
-        row_v[i] = v;
-        sum += v * v;
+        // each element's slots in slot order, a group of slots' loads issued before their sums
+        if constexpr (SLOTS) {
+            for (int s0 = 0; s0 < slots; s0 += kTailSlots) {
+                float yv[kTailSlots][kTailAhead];
+#pragma unroll
+                for (int j = 0; j < kTailSlots; ++j) {
+                    if (s0 + j >= slots) break;
+                    const long long first = (static_cast<long long>(row) * slots + s0 + j) * width;
+                    const float* ys = static_cast<const float*>(y) + first;
+#pragma unroll
+                    for (int k = 0; k < kTailAhead; ++k) yv[j][k] = ys[col[k]];
+                }
+#pragma unroll
+                for (int j = 0; j < kTailSlots; ++j) {
+                    if (s0 + j >= slots) break;
+                    const float w = wts[row * slots + s0 + j];
+#pragma unroll
+                    for (int k = 0; k < kTailAhead; ++k) t[k] += yv[j][k] * w;
+                }
+            }
+        }
+#pragma unroll
+        for (int k = 0; k < kTailAhead; ++k) {
+            const int i = base + k * kTailThreads;
+            if (i >= width) break;
+            const float v = round_kind(xv[k] + (SLOTS ? round_kind(t[k], kind) : t[k]), kind);
+            store_kind(x, kind, at + i, v);
+            row_v[i] = v;
+            sum += v * v;
+        }
     }
+    return sum;
+}
+
+// tail_body at one activation kind, so a thread's loads and stores take no branch on it.
+template <int KIND>
+__device__ __forceinline__ void tail_kind(void* x, const void* y, const float* wts, const float* weight, void* normed,
+                                          float* row_v, float* part, int slots, int width, float eps) {
+    const long long at = static_cast<long long>(blockIdx.x) * width;
+    float sum = slots > 0 ? tail_add<true>(x, y, wts, row_v, KIND, slots, width)
+                          : tail_add<false>(x, y, wts, row_v, KIND, slots, width);
 #pragma unroll
     for (int mask = 16; mask > 0; mask >>= 1) sum += __shfl_xor(sum, mask, 32);
     if ((threadIdx.x & 31) == 0) part[threadIdx.x >> 5] = sum;
@@ -186,10 +221,32 @@ __device__ void tail_body(void* x, const void* y, const float* wts, const float*
 #pragma unroll
     for (int w = 0; w < kTailThreads / 32; ++w) total += part[w];
     const float inv = rsqrtf(total / static_cast<float>(width) + eps);
-    for (int i = threadIdx.x; i < width; i += kTailThreads) {
-        float value = row_v[i] * inv;
-        if (weight != nullptr) value *= weight[i];
-        store_kind(normed, kind, at + i, value);
+    for (int base = threadIdx.x; base < width; base += kTailAhead * kTailThreads) {
+        float w[kTailAhead];
+#pragma unroll
+        for (int k = 0; k < kTailAhead; ++k) {
+            w[k] = weight != nullptr ? weight[min(base + k * kTailThreads, width - 1)] : 1.f;
+        }
+#pragma unroll
+        for (int k = 0; k < kTailAhead; ++k) {
+            const int i = base + k * kTailThreads;
+            if (i >= width) break;
+            float value = row_v[i] * inv;
+            if (weight != nullptr) value *= w[k];
+            store_kind(normed, KIND, at + i, value);
+        }
+    }
+}
+
+// One row a block, one launch: x = round(x + t), t = y or the slot-ordered weighted sum; normed = rms(x) * weight.
+__device__ void tail_body(void* x, const void* y, const float* wts, const float* weight, void* normed, int kind,
+                          int slots, int width, float eps) {
+    __shared__ float row_v[kTailWidth];
+    __shared__ float part[kTailThreads / 32];
+    if (kind == 1) {
+        tail_kind<1>(x, y, wts, weight, normed, row_v, part, slots, width, eps);
+    } else {
+        tail_kind<2>(x, y, wts, weight, normed, row_v, part, slots, width, eps);
     }
 }
 

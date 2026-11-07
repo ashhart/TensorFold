@@ -47,3 +47,26 @@ test "MT2 dispatch keeps context boundaries and graph identities separate" {
     try std.testing.expect(!useMt2(true, true, false, 16, 2, 8192));
     try std.testing.expect(!useMt2(true, true, false, 17, 1, 8192));
 }
+
+test "every captured verify shape keys its own graph: a shape after another never replays the other's (#2138)" {
+    const gpa = std.testing.allocator;
+    var keys: std.AutoHashMapUnmanaged(u32, Shape) = .empty;
+    defer keys.deinit(gpa);
+    var distinct: std.AutoHashMapUnmanaged(Shape, void) = .empty;
+    defer distinct.deinit(gpa);
+    const variants = [_]u8{ 1, 2, 4, 8, 16 }; // every slot count a window's register peak gives
+    for (1..Round.most_window + 1) |peak| try std.testing.expect(std.mem.indexOfScalar(u8, &variants, @intCast(Round.variant(peak))) != null);
+    for (1..Round.most_verify + 1) |rows| for (1..@min(rows, Round.max_segs) + 1) |segments| for ([_]bool{ false, true }) |taps| {
+        for (variants) |slots| for (0..8) |bits| {
+            var s = Shape.init(rows, segments, true, taps, slots);
+            s.hidden = bits & 1 != 0;
+            s.paged = bits & 2 != 0;
+            s.mt2 = bits & 4 != 0;
+            try distinct.put(gpa, s, {});
+            const got = try keys.getOrPut(gpa, s.key());
+            if (got.found_existing) try std.testing.expectEqual(got.value_ptr.*, s) else got.value_ptr.* = s;
+        };
+    };
+    try std.testing.expectEqual(distinct.count(), keys.count());
+    try std.testing.expect(keys.count() > 1000);
+}

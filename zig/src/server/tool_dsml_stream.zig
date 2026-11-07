@@ -1,4 +1,4 @@
-//! DSML invokes as written: a call goes out once its first parameter is whole in the block's spelling, then streams.
+//! DSML invokes as written: a call goes out at its invoke name, then its values' JSON bytes as they arrive.
 const std = @import("std");
 const json = @import("json");
 const reply_text = @import("reply_text.zig");
@@ -23,12 +23,9 @@ pub const Dsml = struct {
     at: usize = 0, // where the stage's reading resumes
     from: usize = 0, // the open name's, key's or value's first byte
     name: []const u8 = "", // the open invoke's offered name
-    header: bool = false, // the open invoke's header went out
-    params: usize = 0, // the open invoke's whole parameters
     sent: usize = 0, // the block's headers that went out
     typed: bool = false, // the open value is JSON (``string="false"``)
     value_sent: usize = 0, // the open value's next byte to send
-    held: std.ArrayList(u8) = .empty, // the open invoke's arguments, written before its header
 };
 
 /// The reply's ``text`` so far: the deltas the open DSML block adds, and what the Streamer should do next.
@@ -36,7 +33,7 @@ pub fn feed(s: anytype, text: []const u8, out: *std.ArrayList(Value)) Allocator.
     while (true) {
         const next = switch (s.dsml.stage) {
             .invokes => invokes(s, text),
-            .name => try name(s, text),
+            .name => try name(s, text, out),
             .params => try params(s, text, out),
             .key => try key(s, text, out),
             .value => try value(s, text, out),
@@ -48,7 +45,7 @@ pub fn feed(s: anytype, text: []const u8, out: *std.ArrayList(Value)) Allocator.
 /// The cut the reply's end left inside a streamed value: the bytes held back for a closer that never came.
 pub fn cut(s: anytype, text: []const u8, out: *std.ArrayList(Value)) Allocator.Error!void {
     const d = &s.dsml;
-    if (d.stage != .value or !d.header) return;
+    if (d.stage != .value) return;
     const end = text.len - closerTail(text[@min(d.from, text.len)..], d.sp);
     try sendValue(s, text, end, out);
     if (d.typed) try send(s, out, try s.a.dupe(u8, s.buffer.items)); // the value's JSON never closed
@@ -77,8 +74,8 @@ fn invokes(s: anytype, text: []const u8) Next {
     return if (open == .part or close == .part) .wait else .rejected;
 }
 
-/// An invoke's name: the bytes to the first quote, which ``>`` must follow, naming an offered tool.
-fn name(s: anytype, text: []const u8) Allocator.Error!Next {
+/// An invoke's name: the bytes to the first quote, then ``>``; an offered name sends its header.
+fn name(s: anytype, text: []const u8, out: *std.ArrayList(Value)) Allocator.Error!Next {
     const d = &s.dsml;
     const q = std.mem.indexOfScalarPos(u8, text, d.at, '"');
     if (has(text, d.from, d.at, q orelse text.len, d.sp.close)) return .rejected; // the block closed in the name
@@ -91,10 +88,8 @@ fn name(s: anytype, text: []const u8) Allocator.Error!Next {
     if (text[at + 1] != '>') return .rejected;
     const written = reply_text.pyStrip(text[d.from..at]);
     d.name = s.known.get(try std.ascii.allocLowerString(s.a, written)) orelse return .rejected;
-    d.header = false;
-    d.params = 0;
-    d.held.clearRetainingCapacity();
-    s.args_open = false;
+    try s.begin(d.name, out);
+    d.sent += 1;
     d.at = at + 2;
     d.stage = .params;
     return .more;
@@ -107,14 +102,12 @@ fn params(s: anytype, text: []const u8, out: *std.ArrayList(Value)) Allocator.Er
     const param = tagAt(text, i, d.sp.param_open);
     const close = tagAt(text, i, d.sp.invoke_close);
     if (param == .whole) {
-        if (d.params > 0) try decide(s, out); // a whole parameter, then this spelling's next opener
         d.from = i + d.sp.param_open.len;
         d.at = d.from;
         d.stage = .key;
         return .more;
     }
     if (close == .whole) {
-        try decide(s, out);
         try send(s, out, if (s.args_open) "}" else "{}");
         d.at = i + d.sp.invoke_close.len;
         d.stage = .invokes;
@@ -172,28 +165,14 @@ fn value(s: anytype, text: []const u8, out: *std.ArrayList(Value)) Allocator.Err
         };
         try send(s, out, try json.stringify(s.a, v, .{ .ascii = false, .compact = true }));
     } else try send(s, out, "\"");
-    d.params += 1;
     d.at = e + d.sp.param_close.len;
     d.stage = .params;
     return .more;
 }
 
-/// The open invoke's header, once, then the arguments written before it as one piece.
-fn decide(s: anytype, out: *std.ArrayList(Value)) Allocator.Error!void {
-    const d = &s.dsml;
-    if (d.header) return;
-    const args_open = s.args_open;
-    try s.begin(d.name, out);
-    s.args_open = args_open;
-    d.header = true;
-    d.sent += 1;
-    if (d.held.items.len > 0) try out.append(s.a, try s.args(try s.a.dupe(u8, d.held.items)));
-    d.held.clearRetainingCapacity();
-}
-
-/// An arguments piece: out under the open header, else held until the header goes out.
+/// An arguments piece: out under the invoke's header, which went out before any key or value wrote one.
 fn send(s: anytype, out: *std.ArrayList(Value), piece: []const u8) Allocator.Error!void {
-    if (s.dsml.header) try out.append(s.a, try s.args(piece)) else try s.dsml.held.appendSlice(s.a, piece);
+    try out.append(s.a, try s.args(piece));
 }
 
 /// The value's bytes from ``value_sent`` to ``end``: escaped into the arguments, or into the buffer JSON decodes.

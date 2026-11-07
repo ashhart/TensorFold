@@ -7,13 +7,13 @@ pub const Switch = enum {
     TF_QWEN_KV_PAGES,
     TF_QWEN_KV_PAGES_ALL,
     TF_QWEN_KV_SHARE,
-    TF_GLM_KV_SHARE,
     TF_KV_SHARE,
     TF_FLASHNEXT_KV_PAGES,
     TF_FLASHNEXT_KV_PAGES_ALL,
     TF_KV_PAGES,
     TF_GLM_KV_HOST,
     TF_GLM_KV_HOST_SHARED,
+    TF_GLM_PROMPT_TAIL,
 };
 pub const Syntax = enum { count, one, auto };
 pub const Entry = struct {
@@ -58,14 +58,14 @@ pub const entries = [_]Entry{
     .{ .id = .TF_QWEN_KV_PAGES, .families = qwen, .class = .identical, .effect = "KV pool page size; memory and workload tradeoffs", .evidence = "#1357" },
     .{ .id = .TF_QWEN_KV_PAGES_ALL, .families = qwen, .class = .debug, .syntax = .one, .effect = "Put the engine's own stream on pages too", .evidence = "#1357" },
     .{ .id = .TF_QWEN_KV_SHARE, .families = qwen, .class = .identical, .effect = "Keep prompt pages and bounded recurrent snapshots", .evidence = "#1357" },
-    .{ .id = .TF_GLM_KV_SHARE, .families = &.{"glm5_next"}, .class = .identical, .effect = "Keep prompt states on pool pages; requires TF_KV_PAGES", .evidence = "#1510" },
-    .{ .id = .TF_KV_SHARE, .families = &.{ "gemma4", "gemma4_unified", "kolibri1", "spark2_5" }, .class = .identical, .effect = "Keep prompt states over the core KV pool", .evidence = "#1657" },
+    .{ .id = .TF_KV_SHARE, .families = &.{ "gemma4", "gemma4_unified", "kolibri1", "spark2_5", "glm5_next" }, .class = .identical, .effect = "Keep prompt states over the core KV pool", .evidence = "#1657" },
     .{ .id = .TF_FLASHNEXT_KV_PAGES, .families = flash, .class = .experimental, .effect = "KV pool page size; fast-profile qualification pending", .evidence = "#1660" },
     .{ .id = .TF_FLASHNEXT_KV_PAGES_ALL, .families = flash, .class = .debug, .syntax = .one, .effect = "Put every stream on pool pages for checks", .evidence = "#1660" },
     .{ .id = .TF_KV_PAGES, .families = &.{"glm5_next"}, .class = .identical, .syntax = .auto, .effect = "GLM KV pool pages; auto from two ranks with BF16, windows with FP8", .evidence = "#1322" },
     .{ .id = .TF_KV_PAGES, .families = &.{ "nemotron_h", "nemotron_h_omni" }, .class = .identical, .report_values = &.{ "0", "all" }, .effect = "Nemotron KV pool pages by default; exact 0 disables, exact all pages every stream", .evidence = "#781" },
     .{ .id = .TF_GLM_KV_HOST, .families = &.{"glm5_next"}, .class = .identical, .syntax = .one, .effect = "Keep the DSA layers' latent rows on pinned host pages", .evidence = "#1795" },
     .{ .id = .TF_GLM_KV_HOST_SHARED, .families = &.{"glm5_next"}, .class = .identical, .syntax = .one, .effect = "One copy of those host pages across the ranks on one host", .evidence = "#1795" },
+    .{ .id = .TF_GLM_PROMPT_TAIL, .families = &.{"glm5_next"}, .class = .identical, .syntax = .one, .effect = "Keep a raw prompt's state at its last chunk start, from the chat states' budget", .evidence = "#2226" },
 };
 
 comptime {

@@ -1,0 +1,136 @@
+{
+  "scope": "Applied public source matches all ten guarded private candidate source hashes; final applied artifact build pending. No final performance acceptance.",
+  "complete": {
+    "actual_exit": 0,
+    "models": 6,
+    "state_passed": 408,
+    "serving_passed": 303,
+    "all_current_public_logits_exact": true,
+    "logit_bytes": 394752000
+  },
+  "models": [
+    {
+      "model": "LFM3-1.7B-MLX-4bit",
+      "state_passed": 68,
+      "state_failed": 0,
+      "serving_counts": {
+        "passed": 40,
+        "failed": 0,
+        "skipped": 0
+      },
+      "logit_bytes": 65792000,
+      "logits_current_public_exact": true,
+      "logits_sha256": "f1dbd42c2556fcb05031a00b209c61fadee45e74ee1ff94628d4802479fcb518"
+    },
+    {
+      "model": "LFM3-1.7B-MLX-6bit",
+      "state_passed": 68,
+      "state_failed": 0,
+      "serving_counts": {
+        "passed": 40,
+        "failed": 0,
+        "skipped": 0
+      },
+      "logit_bytes": 65792000,
+      "logits_current_public_exact": true,
+      "logits_sha256": "08bf833a94fa0403bc65c70677d20372b5ab0616fb0a58d26119c486069ef59c"
+    },
+    {
+      "model": "LFM3-1.7B-MLX-8bit",
+      "state_passed": 68,
+      "state_failed": 0,
+      "serving_counts": {
+        "passed": 40,
+        "failed": 0,
+        "skipped": 0
+      },
+      "logit_bytes": 65792000,
+      "logits_current_public_exact": true,
+      "logits_sha256": "1345bd80acaa16fe08a00a14d839e3e37cf9d0d8cd7e98c01b68cd1b8d2f51d4"
+    },
+    {
+      "model": "LFM3-VL-2B-MLX-4bit",
+      "state_passed": 68,
+      "state_failed": 0,
+      "serving_counts": {
+        "passed": 61,
+        "failed": 0,
+        "skipped": 0
+      },
+      "logit_bytes": 65792000,
+      "logits_current_public_exact": true,
+      "logits_sha256": "a4dde0a00ee9acb294c2b5a791e7e73cd05c5d6904ffe171e439ad1b01e25c5d"
+    },
+    {
+      "model": "LFM3-VL-2B-MLX-6bit",
+      "state_passed": 68,
+      "state_failed": 0,
+      "serving_counts": {
+        "passed": 61,
+        "failed": 0,
+        "skipped": 0
+      },
+      "logit_bytes": 65792000,
+      "logits_current_public_exact": true,
+      "logits_sha256": "93ea83c90c5623f4e17502a526e2358f9e1ba3f2d03999295745257dc95bbca6"
+    },
+    {
+      "model": "LFM3-VL-2B-MLX-8bit",
+      "state_passed": 68,
+      "state_failed": 0,
+      "serving_counts": {
+        "passed": 61,
+        "failed": 0,
+        "skipped": 0
+      },
+      "logit_bytes": 65792000,
+      "logits_current_public_exact": true,
+      "logits_sha256": "5a013f3eed97f143429f09a81a829b07dc32360734cd54855e18e514160e0a48"
+    }
+  ],
+  "registered_contracts": {
+    "passed": 70,
+    "failed": 0,
+    "known_findings": 0,
+    "controls_red": 2,
+    "controls_missed": 0,
+    "limit_problems": 0
+  },
+  "postnorm_control_stage_exit": 0,
+  "source_and_binary_sha256": {
+    "$TMPDIR/lfm3-combined-qualify.py": "9d9a5f942609de71f0494ce5b23ef0f5bd8f80b65aa9732ff0d5ea601a183a76",
+    "$TMPDIR/lfm3-combined-manifest.json": "2c86619e73c86e6d21a99f1276102294c6c538005af393af5ea4bd6178b61ddc",
+    "$TMPDIR/lfm3-combined-promotion.patch": "58df0a67e783c6d3af89fe18fb878083c9f1055ed09a692340b13612eaf0d9f2",
+    "$TMPDIR/lfm3-postnorm-branchless-combined/zig-out/native/bin/tensorfold-native": "ad72d7ec17b681ede54676ba75f7d4d1b39282aa0dae7cf27d8b201660fce489"
+  },
+  "event_log": "events.json",
+  "manifest": "manifest.json",
+  "public_changes_applied": true,
+  "performance_accepted": false,
+  "applied_public_source_matches_qualified_private": true,
+  "committed_or_pushed": false,
+  "format_check": "passed",
+  "lean": {
+    "baseline_problems": 428,
+    "current_problems": 428,
+    "new_problems": 0
+  },
+  "build": {
+    "status": "passed",
+    "log": "$TMPDIR/lfm3-applied-build.log",
+    "command": "zig build native tf-kernel-contract tf-lfm3-forward tf-lfm3-exact test-lfm3-host test-lfm3-image-host -Dcpu=apple_m1 --summary all",
+    "actual_exit": 0
+  },
+  "performance_scope": {
+    "acceptance": false,
+    "isolated_branchless_local_M4_vs_pre_postnorm_baseline_throughput_percent": -5.3498,
+    "combined_vs_current_public_and_standard": "pending guarded matched local M4 benchmark",
+    "M5_performance_claim": false
+  },
+  "applied_public_artifact_sha256": {
+    "zig-out/native/bin/tensorfold-native": "3d4a3daeda697420bfbba6d81972896c2bf9e31efaf6f12321ee8487a299354b",
+    "zig-out/bin/tf-kernel-contract": "2786719bfe0314754349463721b8e1faa7cd06f6f2efa142db19acacd83d54e6",
+    "zig-out/bin/tf-lfm3-forward": "243da3eb79553e7937c36959db13df84baa9d7fcc3e4724d164a708f2fd1eacc",
+    "zig-out/bin/tf-lfm3-exact": "e078bbbe23f5a36ac7813b9cef1dab6b9ecfd404d39a99ec21969e3ee5cd55ad"
+  }
+}

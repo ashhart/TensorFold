@@ -51,7 +51,8 @@ In memory each chunk takes 8 MiB from its first id, so even a short record takes
 Recall drafts in the lane engine's copy window and its grafted lanes, for streams that share rounds and streams alone.
 No served engine turns grafted lanes on yet, so today the record reaches replies through the copy window.
 On CUDA a lone Nemotron stream's own driver asks the record when its context has nothing to copy.
-Flash Next's replay engine copies from its own history on the GPU and reads no record, so a Flash Next server refuses `--recall` before it loads.
+Flash Next's replay engine on a Mac copies from its own history on the GPU and reads no record, so a Flash Next server
+on a Mac refuses `--recall` before it loads; on CUDA Flash Next runs the lane engine, whose host attaches the record.
 A lone Nemotron stream on a Mac and a lone Qwen3.8-27B stream on a Mac with tensor units run their own drivers, which do not read the record yet.
 
 ## Benchmarks and gates

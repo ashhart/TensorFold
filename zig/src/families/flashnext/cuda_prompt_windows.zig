@@ -1,5 +1,6 @@
 //! Several streams' drafted windows in one batched pass (Engine.windows), each row's bits its lone pass's.
 const std = @import("std");
+const cuda = @import("cuda");
 const prompt = @import("cuda_prompt.zig");
 const batch = prompt.batch;
 const pocket = @import("cuda_pocket.zig");
@@ -83,7 +84,7 @@ pub fn windows(e: *Engine, comptime Tri: type, tri: Tri, wins: []const Window, o
     at = 0;
     for (wins) |w| {
         at += w.ids.len;
-        if (host) try d.check(d.api.cuMemcpyDtoH_v2(w.seq.logits.ptr, out + (at - 1) * vocab * 2, vocab * 2), "cuMemcpyDtoH");
+        if (host) try cuda.memory.download(d, out + (at - 1) * vocab * 2, std.mem.sliceAsBytes(w.seq.logits)[0 .. vocab * 2]);
         w.seq.fed += w.ids.len;
     }
 }

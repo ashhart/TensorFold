@@ -60,8 +60,12 @@ fn poolChecks(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.B
 }
 
 pub fn build(b: *std.Build) void {
+    @import("zig/build/fixed_cpu.zig").apply(b); // first: everything below compiles for the host it sets
     // -Dgpu: one server for one GPU, nothing else (zig/build/product.zig)
-    if (@import("zig/build/product.zig").requested(b)) |gpu| return @import("zig/build/product.zig").build(b, gpu);
+    if (@import("zig/build/product.zig").requested(b)) |gpu| {
+        @import("zig/build/product.zig").build(b, gpu);
+        return @import("zig/build/profile.zig").walk(b); // the one server's modules import the registry too
+    }
     @import("zig/build/qwen35_cache_host.zig").tests(b);
     @import("zig/build/residency_host.zig").steps(b);
     @import("zig/build/lane_halt_host.zig").steps(b);
@@ -73,6 +77,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     @import("zig/build/copy_source.zig").steps(b);
     @import("zig/build/checkpoint_io_host.zig").steps(b, target);
+    if (target.result.os.tag == .macos) @import("zig/build/masked_values.zig").steps(b, target, .ReleaseSafe);
     const release_version = b.option([]const u8, "version", "Release version, exactly MAJOR.MINOR.PATCH");
     if (release_version) |v| if (!dist_build.validVersion(v)) @panic("-Dversion must be exactly MAJOR.MINOR.PATCH");
     const build_options = b.addOptions();
@@ -96,6 +101,7 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/kernel_symbols.zig").tests(b, test_step);
     @import("zig/build/checkpoint_security.zig").tests(b, test_step);
     @import("zig/build/quant_geometry_host.zig").steps(b, test_step);
+    @import("zig/build/stage.zig").steps(b, test_step);
     if (b.graph.host.result.os.tag == .macos) {
         const step5_mods = metalEngineModules(b, b.graph.host, .Debug, draft_ids);
         const empty = b.addWriteFiles().add("step5-compile-only.metallib", "");
@@ -119,14 +125,17 @@ pub fn build(b: *std.Build) void {
         @import("zig/build/residency_host.zig").compileHost(b, budget_mods.metal, budget_mods.engine, budget_mods.lanes);
         @import("zig/build/dsv41_metal.zig").steps(b, budget_mods.metal, budget_mods.sources, test_step);
         @import("zig/build/slide_host.zig").metal(b, budget_mods);
+        @import("zig/build/moss_image_teacher_host.zig").compileMetal(b, budget_mods.metal, budget_mods.engine);
     }
     // every tracked path checks out on Windows too
     const names_run = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/portable_names.zig"), .target = target }) }));
     names_run.setCwd(b.path("."));
+    names_run.has_side_effects = true; // it lists the tracked trees, and a reused pass can't see a name added since
     test_step.dependOn(&names_run.step);
     // the XPU server's stream admission, a pure function of the card's memory
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/native/xpu_admit.zig"), .target = target }) })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/limits.zig"), .target = target }) })).step);
+    @import("zig/build/moss_image_teacher_host.zig").steps(b, test_step);
     // MOSS-Image's seeded starting latents and its schedule against torch's, host computations on every platform
     for ([_][]const u8{ "noise", "schedule" }) |name| {
         test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path(b.fmt("zig/src/families/moss_image/{s}.zig", .{name})), .target = target }) })).step);
@@ -172,8 +181,11 @@ pub fn build(b: *std.Build) void {
         gemma4_host_mods.sources.addImport("nemotron_packed_metallib", embedded(b, b.addWriteFiles().add("gemma4-compile-empty.metallib", ""), "nemotron_packed.metallib"));
         @import("zig/build/gemma4_host.zig").compileHost(b, gemma4_host_mods.metal, gemma4_host_mods.engine, gemma4_host_mods.lanes, gemma4_host_mods.sources);
         @import("zig/build/qwen27_host.zig").compileHost(b, gemma4_host_mods.metal, gemma4_host_mods.engine, gemma4_host_mods.lanes);
+        @import("zig/build/prefill_widths_metal.zig").compileHost(b, gemma4_host_mods.engine, gemma4_host_mods.lanes);
+        @import("zig/build/prefill_widths_metal.zig").rest(b, gemma4_host_mods.engine, gemma4_host_mods.lanes);
     }
     @import("zig/build/qwen27_host.zig").tests(b, test_step);
+    @import("zig/build/prefill_widths_metal.zig").tests(b, test_step);
     const xgrammar = grammar_build.option(b);
     dist_build.targets(b, draft_ids, build_options, release_version, xgrammar);
     @import("zig/build/release_paths_step.zig").tests(b, test_step);
@@ -237,6 +249,7 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/qwen35_layers.zig").wire(b, test_step);
     @import("zig/build/dev_tools.zig").wire(b, target);
     @import("zig/build/profile.zig").wire(b, test_step);
+    @import("zig/build/test_reads.zig").wire(b); // last: it adds to the steps everything above declared
 }
 
 /// The native Metal server build is owned by the shared Metal target module.

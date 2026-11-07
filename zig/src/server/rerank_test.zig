@@ -379,11 +379,11 @@ test "rerank: no labels, no hook, a failed pass and a stopping engine each fail 
         try t.expectEqualStrings(case[4][0], cx.message);
         try t.expectEqual(case[4][1], cx.status());
         const err = try rerank.encode(a, try rerank.errorBody(&cx));
-        // the server's envelope: a 500 carries its message only, a refusal its type too
+        // the server's envelope: a 500 carries its message only, a refusal its type, a retryable wait its code too
         const want = if (case[4][1] == 500)
             try std.fmt.allocPrint(a, "{{\"error\":{{\"message\":\"{s}\"}}}}", .{case[4][0]})
         else
-            try std.fmt.allocPrint(a, "{{\"error\":{{\"message\":\"{s}\",\"type\":\"invalid_request_error\"}}}}", .{case[4][0]});
+            try std.fmt.allocPrint(a, "{{\"error\":{{\"message\":\"{s}\",\"type\":\"invalid_request_error\"{s}}}}}", .{ case[4][0], if (case[4][1] == 503) ",\"code\":\"engine_unavailable\"" else "" });
         try t.expectEqualStrings(want, err);
     }
 }

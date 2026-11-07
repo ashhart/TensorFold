@@ -5,7 +5,8 @@ learner for every family (`zig/src/living`): it writes lessons, reads the model,
 them into the checkpoint's own shards. A family describes itself as data, and its host and trainer give the learner a
 few hooks. The steps are in order. It comes from three families:
 
-- Nemotron 3.5 Lightning on Metal and CUDA, the first family and the only one listed in `living/families.zig` today.
+- Nemotron 3.5 Lightning on Metal and CUDA, the first family and the only one whose learning has landed;
+  `living/families.zig` also lists Nemotron Omni, Flash Next and the 27B.
   Its relu^2 shared experts carry the pocket at the MoE layers.
 - Qwen3.8 Flash Next on CUDA (#895 and #896). A SwiGLU shared expert behind its own gate at every layer, with
   hyper-connections, Gated DeltaNet and gated attention below it.

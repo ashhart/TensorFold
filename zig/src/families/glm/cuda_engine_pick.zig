@@ -1,5 +1,6 @@
 //! The existing rank-gathered greedy pick, kept separate from engine lifetime and prompt diagnostics.
 const cuda = @import("cuda");
+const std = @import("std");
 const ranks = @import("cuda_ranks.zig");
 const chance = @import("cuda_mtp_chance.zig");
 const Engine = @import("cuda_engine.zig").Engine;
@@ -28,6 +29,6 @@ fn pick(e: *Engine, logits: u64, sums: bool) !chance.Pick {
     try e.stream.synchronize();
     try e.checkGathers();
     var all: [ranks.max_world][4]u32 = undefined; // Engine.init refuses a larger world
-    try e.d.check(e.d.api.cuMemcpyDtoH_v2(&all, e.pairs.ptr, world * pair_bytes), "cuMemcpyDtoH");
+    try cuda.memory.download(e.d, e.pairs.ptr, std.mem.asBytes(&all)[0 .. world * pair_bytes]);
     return chance.pick(all[0..world], sums);
 }

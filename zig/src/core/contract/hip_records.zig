@@ -233,10 +233,10 @@ const own_records = [_]Record{
             .threads = 256,
         },
         .usage = .{
-            .{ .vgprs = 23, .sgprs = 20, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
-            .{ .vgprs = 23, .sgprs = 21, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
-            .{ .vgprs = 23, .sgprs = 20, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
-            .{ .vgprs = 23, .sgprs = 21, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
+            .{ .vgprs = 21, .sgprs = 20, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
+            .{ .vgprs = 21, .sgprs = 20, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
+            .{ .vgprs = 21, .sgprs = 20, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
+            .{ .vgprs = 21, .sgprs = 22, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
         },
     },
     .{
@@ -302,73 +302,73 @@ const own_records = [_]Record{
     .{
         .launch = relu2Tile(1, 2),
         .usage = .{
-            .{ .vgprs = 62, .sgprs = 53, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 63, .sgprs = 54, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 63, .sgprs = 54, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 63, .sgprs = 56, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 93, .sgprs = 53, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 112, .sgprs = 54, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 112, .sgprs = 54, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 112, .sgprs = 56, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
         },
     },
     .{
         .launch = relu2Tile(1, 4),
         .usage = .{
-            .{ .vgprs = 100, .sgprs = 56, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 100, .sgprs = 57, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 100, .sgprs = 57, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 100, .sgprs = 59, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 178, .sgprs = 56, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 200, .sgprs = 57, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 200, .sgprs = 57, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 200, .sgprs = 59, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
         },
     },
     .{
         .launch = relu2Tile(1, 8),
         .usage = .{
-            .{ .vgprs = 180, .sgprs = 59, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 176, .sgprs = 60, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 176, .sgprs = 60, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 176, .sgprs = 62, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 231, .sgprs = 59, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 237, .sgprs = 60, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 237, .sgprs = 60, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 237, .sgprs = 62, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
         },
     },
     .{
         .launch = relu2Tile(2, 2),
         .usage = .{
-            .{ .vgprs = 91, .sgprs = 60, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 66, .sgprs = 61, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 66, .sgprs = 61, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 66, .sgprs = 63, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 89, .sgprs = 60, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 94, .sgprs = 61, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 94, .sgprs = 61, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 94, .sgprs = 63, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
         },
     },
     .{
         .launch = relu2Tile(2, 4),
         .usage = .{
-            .{ .vgprs = 92, .sgprs = 62, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 100, .sgprs = 63, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 100, .sgprs = 63, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 100, .sgprs = 65, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 160, .sgprs = 62, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 137, .sgprs = 63, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 137, .sgprs = 63, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 137, .sgprs = 65, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
         },
     },
     .{
         .launch = relu2Tile(2, 8),
         .usage = .{
             .{ .vgprs = 156, .sgprs = 66, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 156, .sgprs = 67, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 156, .sgprs = 67, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 156, .sgprs = 69, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 239, .sgprs = 67, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 239, .sgprs = 67, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 239, .sgprs = 69, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
         },
     },
     .{
         .launch = relu2Tile(4, 2),
         .usage = .{
-            .{ .vgprs = 112, .sgprs = 68, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 112, .sgprs = 69, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 112, .sgprs = 69, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 112, .sgprs = 71, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 125, .sgprs = 68, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 124, .sgprs = 69, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 124, .sgprs = 69, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 124, .sgprs = 71, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
         },
     },
     .{
         .launch = relu2Tile(4, 4),
         .usage = .{
-            .{ .vgprs = 146, .sgprs = 70, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 148, .sgprs = 71, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 148, .sgprs = 71, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 148, .sgprs = 73, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 176, .sgprs = 70, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 182, .sgprs = 71, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 182, .sgprs = 71, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 182, .sgprs = 73, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
         },
     },
     .{
@@ -441,10 +441,10 @@ const own_records = [_]Record{
             .threads = 256,
         },
         .usage = .{
-            .{ .vgprs = 24, .sgprs = 21, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
-            .{ .vgprs = 24, .sgprs = 21, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
-            .{ .vgprs = 24, .sgprs = 21, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
-            .{ .vgprs = 24, .sgprs = 22, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
+            .{ .vgprs = 22, .sgprs = 22, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
+            .{ .vgprs = 22, .sgprs = 22, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
+            .{ .vgprs = 22, .sgprs = 22, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
+            .{ .vgprs = 22, .sgprs = 24, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
         },
     },
     .{
@@ -494,7 +494,7 @@ const own_records = [_]Record{
         },
     },
 } ++ @import("hip_records_pair.zig").records ++ @import("hip_records_prompt.zig").records ++
-    @import("hip_records_score.zig").records ++ @import("hip_records_embed.zig").records;
+    @import("hip_records_score.zig").records ++ @import("hip_records_embed.zig").records ++ @import("hip_records_tail.zig").records;
 
 pub const records = own_records ++ @import("hip_records_stream.zig").records ++ @import("hip_records_router.zig").records ++
     @import("hip_records_item.zig").records ++ @import("hip_records_qwen3.zig").records ++ @import("hip_records_columns.zig").records ++

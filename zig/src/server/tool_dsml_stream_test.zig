@@ -198,8 +198,21 @@ test "seeded DSML blocks stream every call before their closer and join as the w
     try std.testing.expect(valid > 360);
 }
 
-/// Blocks that break before their first call's header could go out: the whole reply keeps each as text.
+/// Blocks that break before the invoke's name is whole: no header can go out, so nothing streams.
 pub fn earlyBreaks(a: Allocator, sp: *const Spelling) ![]const []const u8 {
+    const q = "\" string=\"true\">";
+    var out: std.ArrayList([]const u8) = .empty;
+    for ([_][]const []const u8{
+        &.{ sp.open, sp.invoke_open, "launch\">", sp.param_open, "q", q, "a", sp.param_close, sp.invoke_close, sp.close }, // not offered
+        &.{ sp.open, "x", sp.invoke_open, "lookup\">", sp.invoke_close, sp.close }, // text before the invoke
+        &.{ sp.open, sp.invoke_open, "lookup\" >", sp.invoke_close, sp.close }, // the name's quote without >
+        &.{ sp.open, "\n", sp.close }, // no invoke
+    }) |parts| try out.append(a, try std.mem.concat(a, u8, parts));
+    return out.items;
+}
+
+/// Blocks whose invoke is whole and offered, then break: the header stands while the whole reply keeps the text.
+pub fn lateBreaks(a: Allocator, sp: *const Spelling) ![]const []const u8 {
     const q = "\" string=\"true\">";
     // the grammar's spelling shares tool_calls' invoke tags and calls' parameter tags: another spelling per tag
     const other_invoke = &spellings[if (sp == &spellings[1]) 0 else 1];
@@ -207,9 +220,6 @@ pub fn earlyBreaks(a: Allocator, sp: *const Spelling) ![]const []const u8 {
     const first = try std.mem.concat(a, u8, &.{ sp.open, sp.invoke_open, "lookup\">", sp.param_open, "q", q, "a", sp.param_close });
     var out: std.ArrayList([]const u8) = .empty;
     for ([_][]const []const u8{
-        &.{ sp.open, sp.invoke_open, "launch\">", sp.param_open, "q", q, "a", sp.param_close, sp.invoke_close, sp.close }, // not offered
-        &.{ sp.open, "x", sp.invoke_open, "lookup\">", sp.invoke_close, sp.close }, // text before the invoke
-        &.{ sp.open, sp.invoke_open, "lookup\" >", sp.invoke_close, sp.close }, // the name's quote without >
         &.{ sp.open, sp.invoke_open, "lookup\">", sp.param_open, "q\" string=\"yes\">a", sp.param_close, sp.invoke_close, sp.close },
         &.{ sp.open, sp.invoke_open, "lookup\">", sp.param_open, "q\">a", sp.param_close, sp.invoke_close, sp.close },
         &.{ sp.open, sp.invoke_open, "lookup\">", sp.param_open, "n\" string=\"false\">{oops", sp.param_close, sp.param_open, "q", q, "b", sp.param_close, sp.invoke_close, sp.close },
@@ -218,14 +228,13 @@ pub fn earlyBreaks(a: Allocator, sp: *const Spelling) ![]const []const u8 {
         &.{ first, other_invoke.invoke_close, sp.close }, // another spelling's invoke closer
         &.{ first, "x", sp.param_open, "n", q, "b", sp.param_close, sp.invoke_close, sp.close }, // text between parameters
         &.{ sp.open, sp.invoke_open, "lookup\">", sp.param_open, "q", q, "a", sp.invoke_close, "b", sp.param_close, sp.invoke_close, sp.close },
-        &.{ sp.open, "\n", sp.close }, // no invoke
         &.{ sp.open, sp.invoke_open, "lookup\">", other.param_open, "q", q, "a", other.param_close, sp.invoke_close, sp.close },
         &.{ sp.open, sp.invoke_open, "lookup\">", sp.param_open, "q", q, "a", other.param_close, other_invoke.invoke_close, other.close },
     }) |parts| try out.append(a, try std.mem.concat(a, u8, parts));
     return out.items;
 }
 
-test "a DSML block that breaks before its first header sends nothing at any byte, as the whole reply makes no call" {
+test "a DSML block that breaks before its invoke name sends nothing at any byte, as the whole reply makes no call" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -241,6 +250,20 @@ test "a DSML block that breaks before its first header sends nothing at any byte
         const xml = "<tool_call>\n<function=lookup>\n<parameter=q>\nb\n</parameter>\n</function>\n</tool_call>";
         const after = try std.mem.concat(a, u8, &.{ text, xml });
         try std.testing.expectEqualStrings((try whole(a, tools, after)).args, try joined(a, try bytewise(a, tools, after)));
+    };
+}
+
+test "a DSML block that breaks after its invoke name: the header stands while the whole reply keeps the text" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tools = try toolsOf(a);
+    for (spellings) |*sp| for (try lateBreaks(a, sp)) |text| {
+        try std.testing.expect((try tool_parse.parse(a, text, tools, null)).calls == null);
+        const deltas = try bytewise(a, tools, text);
+        // the header the invoke name earned is out and cannot be taken back; no second call is invented
+        try std.testing.expectEqualStrings("lookup ", try names(a, deltas));
+        try std.testing.expect(deltas.len > 0);
     };
 }
 
@@ -264,6 +287,33 @@ test "a DSML block that breaks after a header went out: the whole reply keeps it
     }
 }
 
+test "a call whose first parameter is long streams while it is written, in every spelling" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tools = try toolsOf(a);
+    const value = try a.alloc(u8, 2000);
+    @memset(value, 'x');
+    for (spellings) |*sp| {
+        const text = try block(a, sp, &.{try invoke(a, sp, "write_file", &.{.{ "content", true, value }})});
+        const closer = std.mem.lastIndexOf(u8, text, sp.param_close).?;
+        var s = try Streamer.init(a, tools);
+        var out: std.ArrayList(Value) = .empty;
+        var early: usize = 0;
+        var at: usize = 0;
+        while (at < text.len) : (at += 3) {
+            const end = @min(at + 3, text.len);
+            try s.feed(text[0..end], &out);
+            if (end < closer) early = out.items.len;
+        }
+        // the header leaves at the name, so the value's pieces go out before its parameter closes
+        try std.testing.expectEqualStrings("write_file ", try names(a, out.items));
+        try std.testing.expect(early > 2);
+        try std.testing.expectEqualStrings((try whole(a, tools, text)).args, try joined(a, out.items));
+        try std.testing.expect(!s.open());
+    }
+}
+
 test "a repeated DSML key streams both pairs, as XML and GLM do; the whole reply keeps the last" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -274,7 +324,7 @@ test "a repeated DSML key streams both pairs, as XML and GLM do; the whole reply
     try std.testing.expectEqualStrings("{\"q\":\"b\"}", (try whole(a, tools, text)).args);
 }
 
-test "a cut DSML value replays from the stream; before its first header the stream makes no call" {
+test "a cut DSML value replays from the stream; a cut before the invoke name makes no call" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -285,7 +335,9 @@ test "a cut DSML value replays from the stream; before its first header the stre
         .{ try std.mem.concat(a, u8, &.{ head, "content\" string=\"true\">The history of</\u{ff5c}DSML\u{ff5c} par" }), "{\"path\":\"notes.txt\",\"content\":\"The history of", true },
         .{ try std.mem.concat(a, u8, &.{ head, "limit\" string=\"false\">12" }), "{\"path\":\"notes.txt\",\"limit\":12", true },
         .{ try std.mem.concat(a, u8, &.{ head, "content\" str" }), "{\"path\":\"notes.txt\"", true },
-        .{ try std.mem.concat(a, u8, &.{ sp.open, sp.invoke_open, "write_file\">", sp.param_open, "path\" string=\"true\">notes" }), "", false },
+        .{ try std.mem.concat(a, u8, &.{ sp.open, sp.invoke_open, "write_file\">", sp.param_open, "path\" string=\"true\">notes" }), "{\"path\":\"notes", true },
+        // cut inside the invoke's name: no header went out, so the stream makes no call
+        .{ try std.mem.concat(a, u8, &.{ sp.open, sp.invoke_open, "write_fi" }), "", false },
     };
     for (cases) |case| {
         var s = try Streamer.init(a, tools);

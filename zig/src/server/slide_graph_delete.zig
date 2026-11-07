@@ -96,6 +96,8 @@ pub fn copyLocked(g: *Graph, a: Allocator) ![]Fact {
         o.message = try a.dupe(u8, f.message);
         o.neurons = try a.dupe(api.Neuron, f.neurons);
         o.answers = try answers.dupe(a, f.answers);
+        o.recall = try answers.dupe(a, f.recall);
+        if (f.evaluation) |v| o.evaluation = try @import("slide_metrics_store.zig").copy(a, v);
         const qs = try a.alloc([]const u8, f.questions.len);
         for (f.questions, qs) |q, *c| c.* = try a.dupe(u8, q);
         o.questions = qs;

@@ -13,6 +13,9 @@ pub const experts = @import("experts.zig");
 pub const layer = @import("layer.zig");
 pub const parallel = @import("parallel.zig");
 pub const forward = @import("forward.zig");
+pub const graph = @import("graph.zig");
+pub const backend = @import("backend.zig");
+pub const snapshot = @import("snapshot.zig");
 
 test {
     std.testing.refAllDecls(@This());

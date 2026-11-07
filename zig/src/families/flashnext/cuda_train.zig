@@ -178,8 +178,8 @@ pub fn Trainer(comptime Tri: type) type {
             var inj: [streams]u16 = undefined;
             const d = t.e.driver;
             t.e.stream.synchronize() catch return &t.resid;
-            d.check(d.api.cuMemcpyDtoH_v2(&h, h_at + row * wide * 2, wide * 2), "cuMemcpyDtoH") catch return &t.resid;
-            d.check(d.api.cuMemcpyDtoH_v2(&inj, kp.layers[l - 1].mlp_hc.inject + row * streams * 2, streams * 2), "cuMemcpyDtoH") catch return &t.resid;
+            cuda.memory.download(d, h_at + row * wide * 2, std.mem.asBytes(&h)[0 .. wide * 2]) catch return &t.resid;
+            cuda.memory.download(d, kp.layers[l - 1].mlp_hc.inject + row * streams * 2, std.mem.asBytes(&inj)[0 .. streams * 2]) catch return &t.resid;
             var a: [streams]f32 = undefined;
             var norm: f32 = 0;
             for (&a, inj) |*x, b| {

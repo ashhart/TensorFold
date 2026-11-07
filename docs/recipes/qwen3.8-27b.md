@@ -66,7 +66,8 @@ default. The larger frame must fit the configured context and all streams beside
 margin, otherwise M5 keeps 512 rows. Startup reserves the actual prompt scratch sizes as well as stream caches.
 Wide prompt frames keep separate 512-row activation scratch for small rounds, so decoding binds the small buffers.
 Admission counts both banks.
-`TF_QWEN27_WORKING_SET_BYTES` can lower the device working-set budget for admission checks. `TF_PROMPT_ROWS` selects another multiple of 16 from 16 to 2,048. Each chunk takes at most 512 rows beside
+`TF_QWEN27_WORKING_SET_BYTES` can lower the device working-set budget for admission checks. `TF_PROMPT_ROWS` selects another multiple of 16 from 128 to 2,048 for native serving.
+A smaller numeric value refuses startup and names the setting and its value; it is never raised silently. Each chunk takes at most 512 rows beside
 a decoding request, including with an override, and still respects the frame, attention and request boundaries.
 
 Measured on an M5 Ultra (macOS 27) through the served API against mlx-lm 0.32.0 on the same checkpoint, raw prompts
@@ -301,7 +302,8 @@ tensorfold serve TensorFold/Qwen3.8-27B-MLX-4bit --parallel 16 --context 8192 --
 
 `--parallel N` decodes up to N requests in shared rounds: each stream verifies its own DFlash2 tree in one
 forward, and every reply equals the same request served alone. A new prompt prefills 1,024 tokens a round
-while the other streams decode. States kept at message starts let prompts that share a system prompt resume
+while the other streams decode. On Metal, a reply that would end well before a long prompt goes first: the prompt
+lends it at most a quarter of its own time, and `--decode-share` or `TENSORFOLD_PREFILL_ORDER` overrides this. States kept at message starts let prompts that share a system prompt resume
 there, and each stream's caches are sized once, at admission.
 
 On one DGX Spark, with the workload from issue #38 (48 chat requests of 3,000 to 5,100 tokens sharing a

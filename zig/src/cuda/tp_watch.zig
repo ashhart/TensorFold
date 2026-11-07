@@ -1,6 +1,7 @@
 //! Ranks' liveness lines: a TCP line from each rank to rank 0, open before NCCL: rank 0's NCCL id, ready, error, wake.
 const std = @import("std");
 const platform = @import("sys");
+const startup_log = @import("startup_log.zig");
 const posix = @import("sys").posix;
 
 /// One record on a line: ready, an error and its name, rank 0's wake, or a part of rank 0's NCCL id.
@@ -90,6 +91,7 @@ pub fn start(io: std.Io, rank: usize, world: usize) !void {
             lines[line_count] = @intCast(rc);
             line_count += 1;
         }
+        startup_log.connected(startup_log.log, rank, world - 1, std.mem.bigToNative(u16, addr.port), 0);
     } else {
         var tries: usize = 0;
         while (true) : (tries += 1) {
@@ -97,6 +99,7 @@ pub fn start(io: std.Io, rank: usize, world: usize) !void {
             if (posix.errno(posix.system.connect(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.in))) == .SUCCESS) {
                 lines[0] = fd;
                 line_count = 1;
+                startup_log.connected(startup_log.log, rank, 1, 0, tries + 1);
                 break;
             }
             _ = posix.system.close(fd);
@@ -173,6 +176,7 @@ pub fn sleep(io: std.Io) void {
 /// Rank 0: its NCCL id to every other rank, before NCCL starts there (as the fabric's bootstrap broadcasts its id).
 pub fn sendId(id: *const [id_len]u8) void {
     for (0..id_parts) |part| send(idRecord(id, part));
+    if (line_count > 0) startup_log.handoff(startup_log.log, my_rank, id, true);
 }
 
 /// A rank other than 0: rank 0's NCCL id from this rank's line, within 15 minutes.
@@ -182,6 +186,7 @@ pub fn takeId(io: std.Io) ![id_len]u8 {
         if (waited >= 90_000) return error.RankNeverSentId;
         std.Io.sleep(io, .fromMilliseconds(10), .awake) catch {};
     }
+    startup_log.handoff(startup_log.log, my_rank, &id_bytes, false);
     return id_bytes;
 }
 
@@ -259,20 +264,8 @@ fn watch(fd: posix.socket_t, line: usize) void {
     stop();
 }
 
-test "a liveness line that cannot start names its port, not the glue kernels" {
-    for ([_]anyerror{ error.BindFailed, error.RankNeverCame, error.AcceptFailed }) |e| {
-        const text = explain(e).?;
-        try std.testing.expect(std.mem.indexOf(u8, text, "NCCL_COMM_ID's port + 1") != null);
-        try std.testing.expect(std.mem.indexOf(u8, text, "glue kernels") == null);
-    }
-    const bind = explain(error.BindFailed).?;
-    try std.testing.expect(std.mem.indexOf(u8, bind, "earlier server still exiting") != null);
-    try std.testing.expect(std.mem.indexOf(u8, bind, "host may not be this machine's") != null);
-    const missing = explain(error.RankNeverCame).?;
-    try std.testing.expect(std.mem.indexOf(u8, missing, "every rank") != null);
-    try std.testing.expect(std.mem.indexOf(u8, missing, "rank 0 waited") == null);
-    for ([_]anyerror{ error.OutOfMemory, error.SocketFailed, error.NoCommId, error.NcclUnavailable, error.RankNeverReady }) |e|
-        try std.testing.expect(explain(e) == null);
+test {
+    _ = @import("tp_watch_explain_test.zig");
 }
 
 test "a record is 64 bytes, and a name past 56 bytes is cut" {

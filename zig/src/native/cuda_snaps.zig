@@ -2,12 +2,13 @@
 const std = @import("std");
 const api = @import("engine_api");
 
-/// Any row, the head one token on (Nemotron's); a family's snap_grid, snap_lookahead, warm_quiet and snap_fork if set.
+/// Any row, the head one token on (Nemotron's); a family's snap_grid, snap_lookahead, warm_quiet, snap_fork, snap_tail.
 pub fn cacheRules(comptime F: type) api.prompt_cache.Rules {
     var rules: api.prompt_cache.Rules = .{ .lookahead = 1, .min_prompt = 0 };
     if (@hasDecl(F, "snap_lookahead")) rules.lookahead = F.snap_lookahead;
     if (@hasDecl(F, "warm_quiet")) rules.warm = .waits;
     if (@hasDecl(F, "snap_fork")) rules.fork = F.snap_fork; // opt-in, a family at a time after its device check
+    if (@hasDecl(F, "snap_tail")) rules.tail = if (@import("core").profile.lookup(F.snap_tail)) |v| std.mem.eql(u8, v, "1") else false;
     if (@hasDecl(F, "snap_grid")) {
         rules.planned = true;
         rules.grid = F.snap_grid;
@@ -82,10 +83,26 @@ test "a family with snap_grid keeps on its chunk starts, any other at any row as
         .drop = Stub.drop,
     };
     const copies: api.prompt_cache.Snapshots = .{ .ptr = &unused, .vtable = &vtable };
-    var store = api.prompt_cache.Store.init(std.testing.allocator, copies, cacheRules(Glm), 1 << 30);
+    var rules = cacheRules(Glm);
+    rules.tail = true; // the family's setting on
+    var store = api.prompt_cache.Store.init(std.testing.allocator, copies, rules, 1 << 30);
     defer store.deinit();
     const marks = try store.marks(arena.allocator(), prompt, 0, 3540, &.{}, &.{}, &.{});
     try std.testing.expectEqualSlices(u32, &[_]u32{2048}, marks);
+    // a raw prompt names no history: its tail keeps the same chunk start
+    try std.testing.expectEqualSlices(u32, &[_]u32{2048}, try store.marks(arena.allocator(), prompt, 0, 0, &.{}, &.{}, &.{}));
+    // snap_tail names the setting that turns the tail on at 1 (GLM refuses values but 0 and 1 at startup)
+    const env = @import("sys").env;
+    const Tail = struct {
+        pub const snap_tail = "TF_SNAPS_TEST_TAIL";
+    };
+    defer _ = env.unsetenv(Tail.snap_tail);
+    for ([_]?[:0]const u8{ null, "", "0", "2", "1" }) |v| {
+        _ = if (v) |s| env.setenv(Tail.snap_tail, s, 1) else env.unsetenv(Tail.snap_tail);
+        const on = v != null and std.mem.eql(u8, v.?, "1");
+        try std.testing.expect(cacheRules(Tail).tail == on and passRules(Tail, 2048).tail == on);
+    }
+    try std.testing.expect(!cacheRules(Other).tail);
 }
 
 test {

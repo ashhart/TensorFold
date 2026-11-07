@@ -14,7 +14,7 @@ const slots = 11;
 fn fetch(d: *const cuda.Driver, gpa: std.mem.Allocator, ptr: u64, n: usize) ![]u8 {
     const out = try gpa.alloc(u8, n);
     errdefer gpa.free(out);
-    try d.check(d.api.cuMemcpyDtoH_v2(out.ptr, ptr, n), "cuMemcpyDtoH");
+    try cuda.memory.download(d, ptr, std.mem.sliceAsBytes(out)[0..n]);
     return out;
 }
 

@@ -193,7 +193,7 @@ pub const Prompt = struct {
         }, s, &args);
     }
 
-    /// A BF16 weight in the lane's word order: the K slices the lane would take (qmmf.splitK), folded in order.
+    /// A BF16 weight in the lane's word order: the lane's K slices (qmmf.slices, pinned ones too), folded in order.
     fn matmulBf16(p: Prompt, s: Stream, x: u64, ldx: usize, m: usize, w: qmmf.Weight, y: u64, out: qmmf.Out) !void {
         const rows_t = (m + bm - 1) / bm;
         const band = @max(1, @min(rows_t, (12 << 20) / (@as(usize, bm) * w.k * 2)));
@@ -205,7 +205,7 @@ pub const Prompt = struct {
         args.add(@as(i32, @intCast(m)));
         args.add(@as(i32, @intCast(w.n)));
         args.add(@as(i32, @intCast(w.k)));
-        args.add(@as(i32, @intCast(qmmf.splitK(w.n, w.k))));
+        args.add(@as(i32, @intCast(qmmf.slices(w))));
         args.add(@as(i32, @intCast(w.npad)));
         args.add(@as(i32, @intCast(if (m == 1) w.k else ldx)));
         args.add(@as(i32, @intCast(band)));

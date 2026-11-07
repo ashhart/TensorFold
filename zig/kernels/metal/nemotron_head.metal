@@ -17,7 +17,7 @@ inline float tf_head_inv(float acc, threadgroup float* sums, uint lane, uint sg,
   return sums[32];
 }
 
-// tf_embed_q4, tf_rms_mlx (enorm, hnorm) and xsum over [enorm(embed(id)), hnorm(h)]: a threadgroup a row, D / 4 threads.
+// tf_embed_q4, tf_rms_mlx (enorm, hnorm) and xsum over [enorm(embed(id)), hnorm(h)]: a threadgroup a row, D/4 threads.
 kernel void tf_head_prep(const device uint* ids [[buffer(0)]],
                          const device uchar* weight [[buffer(1)]],
                          const device bfloat* scales [[buffer(2)]],

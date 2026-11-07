@@ -5,6 +5,7 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     const host = b.graph.host;
     const metal_scope = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen3_5/config.zig"), .target = host }), .filters = &.{ "Metal 2B format scope:", "admit the affine 2B", "admit untied heads" } }));
     b.step("test-qwen35-metal-scope-host", "Metal 2B format admission without device or Metal compiler").dependOn(&metal_scope.step);
+    @import("load_prefetch_host.zig").tests(b, mods.core, step);
     @import("minimax_cuda.zig").hostTests(b, host, cuda, mods.core, mods.lanes, step);
     @import("cuda_groups_host.zig").host(b, cuda, mods, step);
     const prefill = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"Qwen stepped prefill:"} }));
@@ -40,9 +41,17 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     const attention = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"Qwen attention path:"} }));
     b.step("test-qwen35-attention-path-host", "Contiguous and paged CUDA attention selection and graph identity without devices").dependOn(&attention.step);
     step.dependOn(&attention.step);
+    const pages_filter = &.{"Qwen pages default:"};
+    const pages_default = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = pages_filter }));
+    const pages_about = "TF_QWEN_KV_PAGES and _ALL unset as on main, --parallel a cap only with pages";
+    b.step("test-qwen35-pages-default-host", pages_about).dependOn(&pages_default.step);
+    step.dependOn(&pages_default.step);
     const prompt_layout = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"Qwen prompt layout:"} }));
     b.step("test-qwen35-prompt-layout-host", "Actual whole and paged CUDA prompt ABI and stride calculations without devices").dependOn(&prompt_layout.step);
     step.dependOn(&prompt_layout.step);
+    const reuse_pages = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"Qwen paged reuse:"} }));
+    b.step("test-qwen35-reuse-pages-host", "Paged prompt-state saves and restores into host or device copies without devices").dependOn(&reuse_pages.step);
+    step.dependOn(&reuse_pages.step);
     const pending = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"Qwen pending keeps:"} }));
     pending.setEnvironmentVariable("TF_QWEN_KEEP_LATE", "1"); // deferred keeps are opt-in; the step tests them
     b.step("test-qwen35-pending-host", "Kept paths of every length inside the pending buffer and the log without devices").dependOn(&pending.step);
@@ -98,6 +107,7 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     const launch_args = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/contract_q35_launch_args_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "qwen35", .module = mods.qwen35 }} });
     const launch_args_run = b.addRunArtifact(b.addTest(.{ .root_module = launch_args }));
     launch_args_run.setCwd(b.path("."));
+    launch_args_run.has_side_effects = true; // it reads the q35 sources and .cu kernels while it runs
     b.step("test-qwen35-launch-args-host", "The q35 attention launches' argument lists against the .cu kernels' signatures without devices").dependOn(&launch_args_run.step);
     step.dependOn(&launch_args_run.step);
     const startup = b.createModule(.{ .root_source_file = b.path("zig/cuda_startup_costs_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = mods.lanes }} });
@@ -150,7 +160,9 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
 }
 
 pub fn registerCopyFamilies(b: *std.Build, native: *std.Build.Module, step: *std.Build.Step) void {
+    b.step("test-glm-formats-host", "CUDA GLM EXL3 offer reaches the published family registry without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"GLM capabilities:"} })).step);
     const family_copies = b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"CUDA lane copies:"} }));
-    b.step("test-family-copies-host", "Actual Gemma, MiniMax, Spark, Kolibri and Dory copy policies through the lane core").dependOn(&family_copies.step);
+    b.step("test-family-copies-host", "Actual CUDA family copy policies through the lane core").dependOn(&family_copies.step);
+    b.step("test-glm-copies-host", "GLM copy facts, confidence and costs through the production lane core").dependOn(&family_copies.step);
     step.dependOn(&family_copies.step);
 }

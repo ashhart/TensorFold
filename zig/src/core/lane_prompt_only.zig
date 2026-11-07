@@ -12,8 +12,8 @@ pub fn refuses(h: *const LaneHost, request: *const api.Request) bool {
     return if (request.embedding != null) v.embedding == null else v.readout_finish == null;
 }
 
-/// The filled prompt's answer delivered, the backend's state released, the job finished.
-pub fn complete(h: *LaneHost, job: *LaneHost.Job) bool {
+/// The filled prompt's answer delivered, its state released, the job finished; `ok` hears a readout's outcome.
+pub fn complete(h: *LaneHost, job: *LaneHost.Job, ok: ?*bool) bool {
     if (job.request.embedding != null) return @import("lane_embeddings.zig").complete(h, job);
-    return @import("lane_readouts.zig").complete(h, job);
+    return @import("lane_readouts.zig").complete(h, job, ok);
 }

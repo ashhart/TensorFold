@@ -1,5 +1,5 @@
 
-// A prompt chunk's KDA layer (appended to kda_rows' source): f_b and g_b on the tensor units, then prep, the recurrence and the output norm.
+// Prompt chunk's KDA layer (appended to kda_rows' source): f_b, g_b on tensor units, prep, recurrence, output norm.
 
 // A prompt block's KDA inputs, a head a simdgroup (conv, SiLU, q/k norms, f_b's decay, beta); P_shape: rows, pitch, block start (FB, outputs by block row).
 template <int H, int D, int TAPS, int HB>
@@ -62,7 +62,7 @@ template <int H, int D, int TAPS, int HB>
   }
 }
 
-// The recurrence over R rows: 8 lanes a value column (16 key dims each, sums over the 8 by xor shuffles), rows staged B at a time.
+// Recurrence over R rows: 8 lanes a value column (16 key dims each, 8-way xor-shuffle sums), rows staged B at a time.
 template <int H, int D, int SG, int B>
 [[kernel]] void glm_kda_scan(const device bfloat* QO [[buffer(0)]], const device bfloat* KO [[buffer(1)]],
                              const device bfloat* VO [[buffer(2)]], const device float* GO [[buffer(3)]],

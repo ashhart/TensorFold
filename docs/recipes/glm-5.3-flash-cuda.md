@@ -50,6 +50,17 @@ left after a 12.2 GiB reserve` and a 5.8 GiB prompt cache
   long conversation's next turn resumes when the card has no room left for its state (#1510). `--prompt-cache-gib`
   sizes the host cache on each rank (8 GiB unasked, at most half of the available memory), and the KV pool sets no
   device cache aside. Checked on two RTX PRO 6000 Blackwell cards at TP=2 with the EXL3 4bpw checkpoint.
+- A kept state larger than the prompt cache's whole budget is not kept (`kept nothing at … passes the … budget` on the
+  log), so a long conversation's next turn runs its prompt again from the start. With KV pages, `TF_KV_SHARE=n` keeps a
+  prompt's rows as the pool's pages instead of copying them into the cache, and that log line names it.
+- With KV pages (the default at two or more ranks), the pool sets the windows the room holds aside before the prompt
+  cache, which gets what they leave of its 16 GiB. `--prompt-cache-gib N` sets N GiB aside first, after the engine's
+  own window and a fixed part and page for each other stream, and the pool takes the rest.
+- `TF_GLM_PROMPT_TAIL=1` keeps a prompt that names no history, as a `/v1/completions` request's, at its last prompt
+  chunk start, as a chat keeps its history's, so the same prompt or a longer one resumes there. Those states share the
+  prompt cache's budget with chat states, least recently used out first, so long raw prompts between two chat turns can
+  push the chat's state out. Unset or 0, a raw prompt keeps none; GLM refuses any other value at startup. The KV
+  pages' store (`TF_KV_SHARE`) keeps a prompt's last page either way.
 - `TF_GLM_KV_HOST=1` on every rank (with KV pages, BF16) keeps the KV pages' latent rows in pinned host memory: the
   device keeps the pooled index keys, and each sparse call copies only the rows it picked into device slots. The KV
   pool then costs the card 768 bytes a token instead of 13,056, so a 1,048,576-token window fits beside the weights.
@@ -60,6 +71,15 @@ left after a 12.2 GiB reserve` and a 5.8 GiB prompt cache
 - `TF_GLM_DENSE_BITS=4` (EXL3 at TP=2, off by default) repacks the BF16 dense layers to 4 bits at load. Decode is
   faster (24.8 to 35.0 tok/s in one user's run), but replies differ from the default, so it is lossy and stays opt-in
   (#1761).
+
+## Verified copy drafts
+
+`TF_GLM_COPIES=1` on rank 0 tries the lane host's cost-priced root/context copies, with a four-token history match.
+Unset or 0 retains the existing policy. Copies use the normal target verify/partial-keep path and require no external
+drafter; `--no-drafts` and `"draft": false` remain plain. The inherited target-cost tables seed pricing and observed
+copy rejections can cut an offer to zero rows. The opt-in's head confidence is a maximum prefix; cost may choose plain.
+See [copy pricing and the required TP=2 comparison](cuda-lane-copies.md#glm-on-cuda). Device exactness and speed are
+pending, so keep the default policy until that checkpoint's complete cost and reply checks pass (#1910).
 
 ## More ranks
 
@@ -78,15 +98,16 @@ opposite-peer warm-up; it does not add a switchless RoCE relay or qualify a four
 A prompt runs in passes of 2,048 rows. Kept prompt states sit on that grid, and a stream decoding beside a prompt waits
 for each pass to end. A pass that takes more rows reads each routed expert's weights fewer times, so a lone prompt
 comes sooner. `TF_GLM_CHUNK_SOLO=4096` lets a pass take two of those chunks when no other stream is decoding as it
-starts. With one decoding, or with `prompt_logprobs` or image rows, the pass takes 2,048. A drafter's steps take one
-chunk, so `--drafter` beside it is refused at load.
+starts. With one decoding, or with `prompt_logprobs` or image rows, the pass takes 2,048. Beside `--drafter`, DFlash2
+reads a solo pass's taps whole and keeps the prompt's last 2,048 rows as before; its tap buffer holds 4,096 rows, 80 MiB
+more on each rank.
 
 The grid does not move, so warm turns resume where they do unset, and streams decoding beside a prompt see the same
 passes. Replies are the same bytes either way. Two costs remain:
 - A request that arrives during a solo pass waits for that pass to end before its own prompt runs. After that, the
   passes are short again.
-- The prompt buffers are sized for 4,096 rows for the whole run: 1.92 GiB more at TP=2 and 1.56 GiB at TP=3, which
-  comes out of the room for KV pages and the prompt cache. In the runs below, TP=2's default cache goes from 4.7 to
+- The prompt buffers are sized for 4,096 rows for the whole run: 1.92 GiB more at TP=2 and 1.56 GiB at TP=3 (and
+  DFlash2's 80 MiB), which comes out of the room for KV pages and the prompt cache. In the runs below, TP=2's default cache goes from 4.7 to
   2.8 GiB.
 
 | | TP=2 unset | TP=2 `=4096` | TP=3 unset | TP=3 `=4096` |
@@ -104,8 +125,13 @@ Each setting is two fresh servers (one at TP=2 for the cold row), `--parallel 4 
 repeated filler line gains 2 to 5% at the same sizes. The other rows ran with the prompt cache on (the default at TP=2,
 2 GiB at TP=3). Three rows at TP=2 that waited on the heat guard are left out.
 
+It doesn't pay with every checkpoint. With `nvidia/GLM-5.3-Flash-NVFP4` on two GB10s at `--parallel 1 --context 65536`,
+`=4096` made cold prompts slower: 8K and 32K prompts ran 12 to 14% slower (about 1,280 against 1,480 tok/s at 8K), and
+the model took 1.9 GiB more at startup. That's two fresh servers each, with the same tokens either way. Leave it unset
+there.
+
 At TP=3 with `TF_GLM_ROCE_MULTI=1` (#1524) the gain is a little under half: on three GB10s at `--parallel 8` with
-`TF_GLM_KV_SHARE=32` and `TENSORFOLD_PREFILL_SHARE=0.7`, not the table's settings, cold Python-source prompts of 8K to
+`TF_KV_SHARE=32` and `TENSORFOLD_PREFILL_SHARE=0.7`, not the table's settings, cold Python-source prompts of 8K to
 128K tokens came 3.2 to 3.4% sooner with the wire and 7.3 to 8.4% sooner without it, two fresh servers each. The wire's
 extra time is in the side stream's exchanges and grows when solo doubles a pass (#1994). `TF_GLM_OVERLAP_PIECES`
 (1 to 8, the same on every rank; unset, 8 when `TF_GLM_CHUNK_SOLO=4096` and `TF_GLM_ROCE_MULTI=1` are both set at three

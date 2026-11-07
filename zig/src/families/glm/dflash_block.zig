@@ -56,7 +56,7 @@ pub fn download(dr: *const Drafter, e: anytype, dst: []u8, src: u64) !void {
     _ = dr;
     try e.stream.synchronize();
     if (e.group) |g| try g.check();
-    try e.d.check(e.d.api.cuMemcpyDtoH_v2(dst.ptr, src, dst.len), "cuMemcpyDtoH");
+    try cuda.memory.download(e.d, src, std.mem.sliceAsBytes(dst)[0..dst.len]);
 }
 
 /// Every rank's `bytes` at buf + rank * bytes into every rank's buf, rank order (the engine's gathers' route).

@@ -4,6 +4,7 @@ const Record = @import("hip_records.zig").Record;
 
 pub const records = .{
     @import("hip_records_glm_ocr.zig").records,
+    @import("hip_records_joint.zig").records,
 };
 
 /// Every family's records as one array.
@@ -13,8 +14,8 @@ pub const all = join: {
     break :join joined[0..joined.len].*;
 };
 
-test "the HIP records stay main's; the family lists only regroup GLM-OCR's" {
+test "the HIP records stay main's; the family lists only regroup GLM-OCR's and the joint schema's" {
     const every = @import("hip_records.zig").records;
-    try std.testing.expectEqual(@as(usize, 182), every.len); // main's records, GLM-OCR's 12 among them
-    try std.testing.expectEqual(@as(usize, 170), every.len - all.len);
+    try std.testing.expectEqual(@as(usize, 193), every.len); // main's records, GLM-OCR's 12 and the joint schema's 10 among them
+    try std.testing.expectEqual(@as(usize, 171), every.len - all.len);
 }

@@ -320,8 +320,8 @@ test "GLM prompt taps: keep_from boundary follows dflash.promptRun, one row each
     const WIN: usize = @intCast(dflash.WIN);
     const len = WIN + 4;
     const keep = len - WIN; // the first window row DFlash2 reads
-    try std.testing.expect((try dflash.promptRun(0, 0, 0, keep, len, 0)) == null);
-    const run = (try dflash.promptRun(0, 0, 0, keep + 1, len, 3)).?;
+    try std.testing.expect((try dflash.promptRun(0, 0, 0, keep, len, 0, dflash.MAX_CTX)) == null);
+    const run = (try dflash.promptRun(0, 0, 0, keep + 1, len, 3, dflash.MAX_CTX)).?;
     try std.testing.expectEqual(@as(usize, 1), run.n);
     try std.testing.expectEqual(@as(i64, @intCast(keep)), run.pos0);
     try std.testing.expectEqual(@as(u64, (3 + keep) * dflash.TAP_ROW), run.taps);
@@ -329,7 +329,7 @@ test "GLM prompt taps: keep_from boundary follows dflash.promptRun, one row each
     for ([_]usize{ 0, 1, keep - 1, keep, keep + 1, WIN }) |rows| {
         if (rows > len) continue;
         const skip = rows <= len -| WIN;
-        const none = (try dflash.promptRun(0, 0, 0, rows, len, 0)) == null;
+        const none = (try dflash.promptRun(0, 0, 0, rows, len, 0, dflash.MAX_CTX)) == null;
         try std.testing.expectEqual(skip, none);
     }
 }

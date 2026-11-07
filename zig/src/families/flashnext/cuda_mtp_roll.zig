@@ -7,7 +7,6 @@ const gdn = @import("cuda_gdn.zig");
 const Draft = @import("cuda_mtp_draft.zig").Draft;
 const window_graph = @import("cuda_window_graph.zig");
 const std = @import("std");
-const conv_bytes = (gdn.taps - 1) * gdn.conv_dim * 2;
 
 fn cint(v: usize) c_int {
     return @intCast(v);
@@ -23,7 +22,7 @@ pub fn lateRoll(o: anytype, seq: *prompt.Seq, d: *Draft, keep: usize) !void {
         t.j[n] = .{ .win = seq.conv[n].ptr, .hist = lk.hist, .rows = lk.proj, .stride = @intCast(gdn.proj_width), .taps = @intCast(gdn.taps - 1), .c = @intCast(gdn.conv_dim) };
         n += 1;
     }
-    t.j[n] = .{ .win = seq.tail.ptr, .hist = d.saved.ptr + Draft.tail_at, .rows = d.saved.ptr + Draft.nrow_at, .stride = @intCast(wt.wide), .taps = @intCast(wt.ple_tail_n), .c = @intCast(wt.wide) };
+    t.j[n] = .{ .win = seq.tail.ptr, .hist = d.saved.ptr + d.layout.tail_at, .rows = d.saved.ptr + d.layout.nrow_at, .stride = @intCast(wt.wide), .taps = @intCast(wt.ple_tail_n), .c = @intCast(wt.wide) };
     n += 1;
     t.n = @intCast(n);
     var a: cuda.Args = .{};
@@ -45,24 +44,26 @@ const Replay = struct {
     pub fn run(r: @This()) !void {
         const k = &r.e.batch_k;
         const rs = r.s;
-        try copyAsync(r.st, r.seq.tail.ptr, r.d.saved.ptr + Draft.tail_at, wt.ple_tail_n * wt.wide * 2);
-        try shift(k, r.st, r.seq.tail.ptr, r.d.saved.ptr + Draft.nrow_at, wt.wide, r.keep, wt.ple_tail_n, wt.wide);
+        try copyAsync(r.st, r.seq.tail.ptr, r.d.saved.ptr + r.d.layout.tail_at, wt.ple_tail_n * wt.wide * 2);
+        try shift(k, r.st, r.seq.tail.ptr, r.d.saved.ptr + r.d.layout.nrow_at, wt.wide, r.keep, wt.ple_tail_n, wt.wide);
         var li: usize = 0;
         for (r.e.layers[0..r.e.n_layers], 0..) |*lw, layer| {
             if (!lw.linear) continue;
             defer li += 1;
             // the sequence's state is still the window's start (the pass wrote its end state to the spare)
             const lk = r.d.keep.layers[layer];
-            try copyAsync(r.st, r.seq.conv[li].ptr, lk.hist, conv_bytes);
+            const h = lw.heads;
+            const g = try k.gdnSet(h);
+            try copyAsync(r.st, r.seq.conv[li].ptr, lk.hist, r.d.layout.conv);
             var f: cuda.Args = .{};
             for ([_]u64{ lk.proj, r.seq.conv[li].ptr, lw.cw.ptr, lw.a_log.ptr, lw.dt.ptr, rs.gq, rs.gk, rs.gv, rs.ggb }) |v| f.add(v);
-            try cuda.launch.launch(k.front, .{ .grid = .{ .x = @intCast(r.keep), .y = gdn.nk + gdn.nv }, .block = .{ .x = 256 } }, r.st, &f);
+            try cuda.launch.launch(g.front, .{ .grid = .{ .x = @intCast(r.keep), .y = h.nk + h.nv }, .block = .{ .x = 256 } }, r.st, &f);
             var a: cuda.Args = .{};
             for ([_]u64{ rs.gq, rs.gk, rs.gv, rs.ggb, r.seq.state[li].ptr }) |v| a.add(v);
             a.add(cint(r.keep));
             a.add(rs.ys);
-            try cuda.launch.launch(k.chain, .{ .grid = .{ .x = gdn.nv, .y = gdn.dv / 16 }, .block = .{ .x = 128 } }, r.st, &a);
-            try shift(k, r.st, r.seq.conv[li].ptr, lk.proj, gdn.proj_width, r.keep, gdn.taps - 1, gdn.conv_dim);
+            try cuda.launch.launch(g.chain, .{ .grid = .{ .x = h.nv, .y = gdn.dv / 16 }, .block = .{ .x = 128 } }, r.st, &a);
+            try shift(k, r.st, r.seq.conv[li].ptr, lk.proj, h.projWidth(), r.keep, gdn.taps - 1, h.convDim());
         }
     }
 };

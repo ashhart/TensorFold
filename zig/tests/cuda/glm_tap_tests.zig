@@ -77,7 +77,7 @@ pub fn tapSplitCheck(gpu: Gpu, checkpoint: []const u8, drafter: []const u8, rank
                     const n = rows - lo;
                     const host = try gpu.gpa.alloc(u8, n * TAP_ROW);
                     defer gpu.gpa.free(host);
-                    try gpu.d.check(gpu.d.api.cuMemcpyDtoH_v2(host.ptr, dr.taps_prefill + lo * TAP_ROW, n * TAP_ROW), "cuMemcpyDtoH");
+                    try cuda.memory.download(gpu.d, dr.taps_prefill + lo * TAP_ROW, std.mem.sliceAsBytes(host)[0 .. n * TAP_ROW]);
                     if (v.split or v.ring) {
                         if (firstDiffRow(host, gather.items[chunk], n, TAP_ROW, hidden2, slots[0..ns])) |bad| {
                             std.debug.print("FAIL tap: {s} prompt {d} rank {d}: retained row {d} differs from gather (chunk at {d})\n", .{ v.name, len, rank, at + lo + bad, at });

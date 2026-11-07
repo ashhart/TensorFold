@@ -146,7 +146,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     b.step("test-dots-native-host", "dots.mocr registry, reasoning, and unsupported flags without GPU execution").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.native, .filters = &.{ "dots refuses", "every registered family", "a HIP family declares replies without reasoning" } })).step);
     b.step("test-draft-hip-host", "HIP draft source metadata without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.native, .filters = &.{"draft sources:"} })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.hip })).step);
-    b.step("test-qwen-hip-formats-host", "Qwen HIP format offers agree with the actual BF16 preallocation refusal").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.family, .filters = &.{"a bf16 checkpoint is refused"} })).step);
+    b.step("test-qwen-hip-formats-host", "Qwen HIP format offers: the BF16 refusal, and discovery against actual config and matrix admission").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.family, .filters = &.{ "a bf16 checkpoint without a joint head", "capability audit: HIP Qwen format" } })).step);
     const family_host = b.addRunArtifact(b.addTest(.{ .root_module = host.family }));
     test_step.dependOn(&family_host.step);
     b.step("test-qwen35-hip-host", "Qwen HIP family CPU tests with inert kernels").dependOn(&family_host.step);
@@ -160,6 +160,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.native })).step);
     // the GPU programs compile on any host against stub kernels, so `test` catches what only they reach
     test_step.dependOn(&checksExe(b, b.graph.host, .Debug, host).step);
+    test_step.dependOn(&clefExe(b, b.graph.host, .Debug, host).step);
     test_step.dependOn(&server(b, b.graph.host, host, build_options).step);
     const check_target = b.resolveTargetQuery(.{ .cpu_arch = b.graph.host.result.cpu.arch, .os_tag = .linux, .abi = .gnu });
     const check = engineModules(b, check_target, .Debug, stub_kernels, null);
@@ -177,6 +178,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     b.step("qwen3-hip-gpu-build", "Compile the Qwen3 dense GPU checks without running them").dependOn(&qwen3_gpu.step);
     b.step("qwen3-hip-gpu-test", "Qwen3 lastRows on the GPU against transformers (TF_QWEN3_EMBED_*, TF_QWEN3_RERANK_*)").dependOn(&qwen3_run.step);
     b.step("tf-qwen35-test", "Qwen3.5 / 3.6 model checks on the GPU (-Dhip-arch)").dependOn(&b.addInstallArtifact(checksExe(b, target, optimize, gpu), .{}).step);
+    b.step("tf-clef-test", "Clef's joint schema head on the GPU: the tiny fixture and gate 3 (-Dhip-arch)").dependOn(&b.addInstallArtifact(clefExe(b, target, optimize, gpu), .{}).step);
     const fx_test = b.addExecutable(.{ .name = "tf-flashnext-hip-test", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/flashnext_hip/main.zig"),
         .target = target,
@@ -236,6 +238,17 @@ fn checksExe(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         .optimize = optimize,
         .link_libc = true,
         .imports = &.{ .{ .name = "hip", .module = e.hip }, .{ .name = "qwen3_5", .module = e.family }, .{ .name = "lanes", .module = e.lanes }, .{ .name = "npy", .module = b.createModule(.{ .root_source_file = b.path("zig/npy_from_core.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "core", .module = e.hip.import_table.get("core").? }} }) } },
+    }) });
+}
+
+fn clefExe(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, e: Engine) *std.Build.Step.Compile {
+    const core = e.hip.import_table.get("core").?;
+    return b.addExecutable(.{ .name = "tf-clef-test", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/clef/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "hip", .module = e.hip }, .{ .name = "core", .module = core }, .{ .name = "npy", .module = b.createModule(.{ .root_source_file = b.path("zig/npy_from_core.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "core", .module = core }} }) } },
     }) });
 }
 
@@ -399,6 +412,7 @@ const groups = [_]Source{
     .{ .path = "flashnext/flashnext.hip" },
     .{ .path = "recurrence/mamba.hip" },
     .{ .path = "glm_ocr/pointwise.hip" },
+    .{ .path = "joint_schema/joint_schema.hip" },
 };
 
 /// What the group sources include, so an edit to one rebuilds them.

@@ -30,6 +30,7 @@ const rounds = @import("lane_rounds.zig");
 const scoring = @import("lane_host_score.zig");
 const lane_stream = @import("lane_stream.zig");
 const lane_halt = @import("lane_halt.zig");
+const lane_trace = @import("lane_trace.zig");
 
 pub const LaneHost = struct {
     gpa: Allocator,
@@ -91,6 +92,7 @@ pub const LaneHost = struct {
     load: load.State = .{}, // this host's part of the server's load ledger (lane_host_load.zig)
     capacity: ?load.Source = null, // how the engine holds KV, set before start; null: no capacity group
     kv: ?@import("kv_ledger.zig").Ledger = null, // Info.ledger's budget or the paged pool's (lane_host_ledger.zig)
+    trace: ?*lane_trace.Trace = null, // TF_LANE_TRACE=<file>, read once at start (unless set before); null: no trace
 
     pub const ThreadInit = struct { ctx: *anyopaque, run: *const fn (ctx: *anyopaque) anyerror!void };
 
@@ -117,6 +119,9 @@ pub const LaneHost = struct {
 
     pub fn start(h: *LaneHost) !void {
         if (h.rounds != null and ledger.priced(h)) return error.LedgerWithRounds; // a planner admits past takeJob
+        // opened here, not at init: an owner failing before start leaks no file; a failed start closes it below
+        lane_trace.openInto(&h.trace, h.gpa, h.io);
+        errdefer lane_trace.drop(&h.trace);
         if (h.rounds != null and !h.core.backend.pieces()) return error.PiecesUnsupported; // a drafter wrapper runs whole prompts
         h.thread = try std.Thread.spawn(.{ .stack_size = 16 << 20 }, run, .{h});
     }
@@ -140,6 +145,7 @@ pub const LaneHost = struct {
         h.live_tokens.deinit(h.gpa);
         h.pieces.deinit(h.gpa);
         h.finals.deinit(h.gpa);
+        lane_trace.drop(&h.trace);
     }
 
     /// A drain's deadline: the round in flight completes on every rank, so the ranks stop at the same boundary.
@@ -195,6 +201,8 @@ pub const LaneHost = struct {
         if (@import("lane_prompt_only.zig").refuses(h, request)) return error.InvalidRequest;
         const job = h.gpa.create(Job) catch return error.Busy;
         job.* = .{ .host = h, .id = id, .request = request, .sink = sink, .submitted = std.Io.Clock.awake.now(h.io).toNanoseconds() };
+        // written before the lock: a trace line never holds the host's mutex (a refused request's line stays alone)
+        if (h.trace) |t| t.line(.{ .t0_ns = job.submitted, .t1_ns = job.submitted, .kind = .submit, .id = id, .rows_to = request.prompt.len });
         h.mutex.lockUncancelable(h.io);
         defer h.unlock();
         const unavailable = h.closing or (if (h.health) |source| !source.read(source.ctx) else false);
@@ -300,7 +308,7 @@ pub const LaneHost = struct {
         h.gpa.free(job.marks);
         h.gpa.free(job.key);
         const s = &job.stream;
-        const stats: Stats = if (job.started) .{ .rounds = s.rounds, .grammar = if (s.grammar_time.windows > 0) s.grammar_time else null, .drafted = s.drafted, .accepted = s.accepted, .min_rows = s.min_rows, .loop_period = s.loop_period, .gpu_seconds = s.gpu_seconds, .prefill_seconds = if (job.prefilled) |done| @as(f64, @floatFromInt(@as(i64, @intCast(@max(0, done - job.began))))) / 1e9 else null } else .{};
+        const stats: Stats = if (job.started) .{ .rounds = s.rounds, .grammar = if (s.grammar_time.windows > 0) s.grammar_time else null, .drafted = s.drafted, .accepted = s.accepted, .min_rows = s.min_rows, .prefill_widths = s.prefill_widths.items, .loop_period = s.loop_period, .gpu_seconds = s.gpu_seconds, .prefill_seconds = if (job.prefilled) |done| @as(f64, @floatFromInt(@as(i64, @intCast(@max(0, done - job.began))))) / 1e9 else null } else .{};
         var told = if (job.started) recalls.finished(h, job, reason, stats) else stats;
         told.queued_seconds = if (job.admitted_ns) |at| @as(f64, @floatFromInt(@max(0, at - job.submitted))) / 1e9 else 0;
         emit(job, .{ .finished = .{ .reason = reason, .stats = told, .message = message } });
@@ -397,7 +405,7 @@ pub const LaneHost = struct {
         load.calling(h, job);
         h.core.addStreamCommitted(&job.stream, .{ .ptr = job, .call = firstCommitted }) catch |e| return h.failedPass(job, e);
         h.prefilled(job, began);
-        if (r.promptOnly()) return @import("lane_prompt_only.zig").complete(h, job);
+        if (r.promptOnly()) return @import("lane_prompt_only.zig").complete(h, job, null);
         _ = h.deliver(job);
         return true;
     }
@@ -411,34 +419,6 @@ pub const LaneHost = struct {
         };
     }
 
-    /// Filling job `at`'s next prompt chunk: the other streams' rounds run between chunks, not after the prompt.
-    pub fn fillAt(h: *LaneHost, at: usize) void {
-        const job = h.filling.items[at];
-        const first = !job.fill_began;
-        job.fill_began = true;
-        load.calling(h, job);
-        const done = h.core.fillStreamCommitted(&job.stream, first, .{ .ptr = job, .call = firstCommitted }, fill.capRows(h)) catch |e| {
-            _ = switch (e) {
-                error.Cancelled => h.cancel(job),
-                error.LaneMemory => blk: {
-                    fill.unfill(h, job);
-                    break :blk ends.requeue(h, job);
-                },
-                else => ends.dropFailed(h, job, e),
-            };
-            return;
-        };
-        load.progress(h, job);
-        if (!done) return;
-        _ = h.filling.orderedRemove(at);
-        h.prefilled(job, job.began);
-        if (job.request.promptOnly()) {
-            _ = @import("lane_prompt_only.zig").complete(h, job);
-            return;
-        }
-        _ = h.deliver(job);
-    }
-
     /// A reply's grammar from the server's compiler (Info.structures engines get requests that carry one).
     pub fn constraint(h: *LaneHost, st: api.Structure) !*lanes.grammar.Constraint {
         const c = st.compiler orelse return error.NoGrammarCompiler;
@@ -449,7 +429,7 @@ pub const LaneHost = struct {
         return k;
     }
 
-    fn firstCommitted(ptr: *anyopaque) void {
+    pub fn firstCommitted(ptr: *anyopaque) void {
         const job: *Job = @ptrCast(@alignCast(ptr));
         job.host.prefilled(job, job.began);
         job.host.send(job);
@@ -574,10 +554,13 @@ pub const LaneHost = struct {
             const timed = owed or h.srpt.on; // srpt samples every round's time and tokens
             const r0 = if (timed) std.Io.Clock.awake.now(h.io) else std.Io.Timestamp.zero;
             const before = if (h.srpt.on) @import("lane_host_srpt.zig").emittedTotal(h.core.live.items) else 0;
+            var round = if (h.trace) |t| lane_trace.Event.round(t, h.core.live.items.len) else undefined;
             h.core.step() catch |e| {
+                if (h.trace) |t| t.endFailed(&round);
                 ends.failRound(h, e);
                 continue;
             };
+            if (h.trace) |t| t.end(&round);
             if (timed) {
                 const ns: i64 = @intCast(r0.durationTo(std.Io.Clock.awake.now(h.io)).toNanoseconds());
                 if (owed) h.share.rounded(ns);
@@ -590,8 +573,10 @@ pub const LaneHost = struct {
 };
 
 test {
+    _ = @import("lane_trace.zig");
     _ = @import("lane_host_decode_share_test.zig");
     _ = @import("lane_host_srpt.zig");
+    _ = @import("lane_host_env.zig");
 }
 test {
     _ = @import("lane_host_frame_test.zig");

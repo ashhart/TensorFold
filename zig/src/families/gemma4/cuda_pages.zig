@@ -14,9 +14,23 @@ pub fn pageElems(m: anytype) usize {
     return tokens * m.geo.global_kv_heads * cfg.global_dim;
 }
 
+/// The layers that own a cache: the first ones, before the E-series' shared layers (the rest alias `alias`'s).
+pub fn ownLayers(m: anytype) usize {
+    return @min(m.layers, m.geo.cacheLayers());
+}
+
+/// Each shared layer's cache pointers: its owner's (cfg.cacheOwner), so it reads that layer's keys and values.
+fn alias(m: anytype) void {
+    for (ownLayers(m)..m.layers) |i| {
+        const o = cfg.cacheOwner(i, m.geo.cacheLayers()).?;
+        m.kc[i] = m.kc[o];
+        m.vc[i] = m.vc[o];
+    }
+}
+
 pub fn globalLayers(m: anytype) usize {
     var n: usize = 0;
-    for (0..m.layers) |i| n += @intFromBool(cfg.global(i));
+    for (0..ownLayers(m)) |i| n += @intFromBool(cfg.global(i));
     return n;
 }
 
@@ -26,7 +40,7 @@ pub fn pageBytes(m: anytype) u64 {
 
 pub fn layout(m: anytype) kv.Layout {
     var fixed: u64 = perSlot(m) * 4;
-    for (0..m.layers) |i| if (!cfg.global(i)) {
+    for (0..ownLayers(m)) |i| if (!cfg.global(i)) {
         fixed += 2 * m.cacheLen(i) * m.geo.kvHeads(i) * cfg.headDim(i) * 2;
     };
     return .{ .fixed_bytes = fixed, .token_bytes = pageBytes(m) / tokens, .page_tokens = tokens, .snap_bytes = 0 };
@@ -39,11 +53,12 @@ pub fn view(m: anytype, slot: ?usize) ?cuda.window_attention.Pages {
 
 /// One warmup page before attach; otherwise the unchanged linear or sliding cache allocation.
 pub fn build(m: anytype, s: cuda.Stream) !void {
-    for (0..m.layers) |i| {
+    for (0..ownLayers(m)) |i| {
         const n = if (m.paged and cfg.global(i)) pageElems(m) else m.slots * m.cacheLen(i) * m.geo.kvHeads(i) * cfg.headDim(i);
         m.kc[i] = try m.zeros(s, n * 2);
         m.vc[i] = try m.zeros(s, n * 2);
     }
+    alias(m);
     if (m.paged) {
         try tables(m, s);
         if (m.planned == null) m.caps[0] = tokens;
@@ -73,7 +88,7 @@ pub fn attach(m: anytype, s: cuda.Stream, extra: usize, count: usize) !void {
     if (!m.paged or m.pages != 0 or count == 0 or extra >= m.graphs.len - 1 or globalLayers(m) == 0) return error.BadAttach;
     try s.synchronize();
     m.dropGraphs();
-    for (m.kc, m.vc) |k, v| {
+    for (m.kc[0..ownLayers(m)], m.vc[0..ownLayers(m)]) |k, v| {
         forget(m, k);
         forget(m, v);
     }
@@ -87,7 +102,7 @@ pub fn attach(m: anytype, s: cuda.Stream, extra: usize, count: usize) !void {
     const region = count * pageElems(m) * 2;
     const arena = try m.zeros(s, globalLayers(m) * 2 * region);
     var block: usize = 0;
-    for (0..m.layers) |i| {
+    for (0..ownLayers(m)) |i| {
         if (cfg.global(i)) {
             m.kc[i] = arena + block * region;
             m.vc[i] = m.kc[i] + region;
@@ -98,6 +113,7 @@ pub fn attach(m: anytype, s: cuda.Stream, extra: usize, count: usize) !void {
             m.vc[i] = try m.zeros(s, bytes);
         }
     }
+    alias(m);
     try tables(m, s);
     try s.synchronize();
 }

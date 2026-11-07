@@ -23,7 +23,7 @@ pub const start = stagger.start;
 pub const Call = stagger.Call;
 pub const next = stagger.next;
 
-/// Hooks leave the encoder open and commit nothing; what segment k+1 reads of segment k must be written by k's mixer or earlier.
+/// Hooks leave the encoder open, commit nothing; what segment k+1 reads of k must be written by k's mixer or earlier.
 pub fn run(device: mtl.Device, queues: []const mtl.Queue, layers: usize, mode: mtl.DispatchType, fam: anytype) !f64 {
     return runCommitting(device, queues, layers, mode, fam, 0);
 }
@@ -58,7 +58,7 @@ pub fn runCommitting(device: mtl.Device, queues: []const mtl.Queue, layers: usiz
         done: *[16]mtl.CommandBuffer,
         n_done: *usize,
 
-        /// Ends the lane's encoder, waits for (or signals) `value` between its encoders, and opens the next behind the fence.
+        /// Ends the lane's encoder, waits for (or signals) `value` between encoders, opens the next behind the fence.
         fn sync(x: *const @This(), l: *Lane, ev: mtl.Event, value: u64, wait_: bool) void {
             l.fence.update(l.enc);
             l.enc.end();

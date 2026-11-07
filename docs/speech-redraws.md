@@ -35,6 +35,13 @@ A floor of -30 dBFS also catches the hum. Streams are not redrawn (see
 [Streams](#streams)): a stalled stream ends early, with the rest of the text
 unspoken.
 
+Two more flags cut a reply that never really starts. With `--silence-onset-s S` and `--silence-onset-voiced-s V`
+(both required together, and both need the floor and `--silence-seconds`; S must be above 0 and below the
+silence seconds, V above 0), a reply also ends once it has stayed S seconds below the floor while having voiced
+less than V seconds in total — the model cleared its throat but never began speaking. The startup line names the
+rule: "or after S s below it with under V s voiced". An onset trip is a `silence` finish, redrawn like any
+other.
+
 ## Seeds
 
 Without an explicit request `seed`, redraw k (1 to N) seeds its prompt with `TENSORFOLD_SEED_SALT` plus k; the first

@@ -47,7 +47,7 @@ const Chain = struct {
 
     fn get(c: *Chain, ptr: u64, out: []u8) !void {
         try c.s.synchronize();
-        try c.gpu.d.check(c.gpu.d.api.cuMemcpyDtoH_v2(out.ptr, ptr, out.len), "cuMemcpyDtoH");
+        try cuda.memory.download(c.gpu.d, ptr, std.mem.sliceAsBytes(out)[0..out.len]);
     }
 
     fn set(c: *Chain, ptr: u64, bytes: []const u8) !void {

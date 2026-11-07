@@ -1,0 +1,4758 @@
+{
+"revision": "6d0a0202956796543364d666ab19c6ad1a494ee1",
+"files": {
+"tiktoken.model": "b6c497a7469b33ced9c38afb1ad6e47f03f5e5dc05f15930799210ec050c5103",
+"tokenizer_config.json": "9fc322181b8ec44236e148916aea4b6c2467b66ded7bfaff0efe623ad750b852",
+"tokenization_kimi.py": "204ee39fbf13a6d6608b0d3ca1b4b04a14ac5f0a062a7fdee02e61f5d936f9c6",
+"encoding_k3.py": "e52c0427af2c2f263b56b3a94683acae3a1f634f96e516e473370b563b175bf1"
+},
+"cases": [
+{
+"id": "plain-default",
+"messages": [
+{
+"role": "user",
+"content": "Hello."
+}
+],
+"kwargs": {},
+"segments": [
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": " role",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "user",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "Hello.",
+"allow_special": false
+},
+{
+"text": "<|close|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|end_of_msg|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": " role",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "assistant",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "think",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+}
+],
+"joined": "<|open|>message role=\"user\"<|sep|>Hello.<|close|>message<|sep|><|end_of_msg|><|open|>message role=\"assistant\"<|sep|><|open|>think<|sep|>",
+"ids": [
+163587,
+2778,
+6244,
+878,
+2482,
+1,
+163589,
+19180,
+13,
+163588,
+2778,
+163589,
+163586,
+163587,
+2778,
+6244,
+878,
+69702,
+1,
+163589,
+163587,
+39964,
+163589
+]
+},
+{
+"id": "plain-no-thinking",
+"messages": [
+{
+"role": "user",
+"content": "Hello."
+}
+],
+"kwargs": {
+"thinking": false
+},
+"segments": [
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": " role",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "user",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "Hello.",
+"allow_special": false
+},
+{
+"text": "<|close|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|end_of_msg|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": " role",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "assistant",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "response",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+}
+],
+"joined": "<|open|>message role=\"user\"<|sep|>Hello.<|close|>message<|sep|><|end_of_msg|><|open|>message role=\"assistant\"<|sep|><|open|>response<|sep|>",
+"ids": [
+163587,
+2778,
+6244,
+878,
+2482,
+1,
+163589,
+19180,
+13,
+163588,
+2778,
+163589,
+163586,
+163587,
+2778,
+6244,
+878,
+69702,
+1,
+163589,
+163587,
+12092,
+163589
+]
+},
+{
+"id": "no-generation-prefix",
+"messages": [
+{
+"role": "user",
+"content": "Hello."
+}
+],
+"kwargs": {
+"add_generation_prompt": false
+},
+"segments": [
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": " role",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "user",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "Hello.",
+"allow_special": false
+},
+{
+"text": "<|close|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|end_of_msg|>",
+"allow_special": true
+}
+],
+"joined": "<|open|>message role=\"user\"<|sep|>Hello.<|close|>message<|sep|><|end_of_msg|>",
+"ids": [
+163587,
+2778,
+6244,
+878,
+2482,
+1,
+163589,
+19180,
+13,
+163588,
+2778,
+163589,
+163586
+]
+},
+{
+"id": "named-unicode",
+"messages": [
+{
+"role": "system",
+"name": "A & \"B\"",
+"content": "Be brief."
+},
+{
+"role": "user",
+"name": "雪",
+"content": "Café 中文\nΔ = 1."
+}
+],
+"kwargs": {},
+"segments": [
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": " role",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "system",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": " name",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "A &amp; &quot;B&quot;",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "Be brief.",
+"allow_special": false
+},
+{
+"text": "<|close|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|end_of_msg|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": " role",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "user",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": " name",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "雪",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "Café 中文\nΔ = 1.",
+"allow_special": false
+},
+{
+"text": "<|close|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|end_of_msg|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": " role",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "assistant",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "think",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+}
+],
+"joined": "<|open|>message role=\"system\" name=\"A &amp; &quot;B&quot;\"<|sep|>Be brief.<|close|>message<|sep|><|end_of_msg|><|open|>message role=\"user\" name=\"雪\"<|sep|>Café 中文\nΔ = 1.<|close|>message<|sep|><|end_of_msg|><|open|>message role=\"assistant\"<|sep|><|open|>think<|sep|>",
+"ids": [
+163587,
+2778,
+6244,
+878,
+14062,
+1,
+1530,
+878,
+32,
+841,
+2139,
+26,
+841,
+13847,
+26,
+33,
+39877,
+26,
+1,
+163589,
+4396,
+15533,
+13,
+163588,
+2778,
+163589,
+163586,
+163587,
+2778,
+6244,
+878,
+2482,
+1,
+1530,
+878,
+4152,
+1,
+163589,
+34,
+6748,
+37484,
+220,
+16717,
+198,
+110471,
+327,
+220,
+16,
+13,
+163588,
+2778,
+163589,
+163586,
+163587,
+2778,
+6244,
+878,
+69702,
+1,
+163589,
+163587,
+39964,
+163589
+]
+},
+{
+"id": "effort-low",
+"messages": [
+{
+"role": "user",
+"content": "1 + 2?"
+}
+],
+"kwargs": {
+"thinking_effort": "low"
+},
+"segments": [
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": " role",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "system",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": " type",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "thinking-effort",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "`thinking_effort` guides on how much to think in your thinking channel (not including the response channel), supported values include `low`, `medium`, `high`, and `max`.\nNow the system is invoked with `thinking_effort=low`.",
+"allow_special": false
+},
+{
+"text": "<|close|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|end_of_msg|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": " role",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "user",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "1 + 2?",
+"allow_special": false
+},
+{
+"text": "<|close|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|end_of_msg|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": " role",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "assistant",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "think",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+}
+],
+"joined": "<|open|>message role=\"system\" type=\"thinking-effort\"<|sep|>`thinking_effort` guides on how much to think in your thinking channel (not including the response channel), supported values include `low`, `medium`, `high`, and `max`.\nNow the system is invoked with `thinking_effort=low`.<|close|>message<|sep|><|end_of_msg|><|open|>message role=\"user\"<|sep|>1 + 2?<|close|>message<|sep|><|end_of_msg|><|open|>message role=\"assistant\"<|sep|><|open|>think<|sep|>",
+"ids": [
+163587,
+2778,
+6244,
+878,
+14062,
+1,
+1798,
+878,
+130400,
+59991,
+470,
+1,
+163589,
+63,
+130400,
+123074,
+470,
+63,
+28560,
+418,
+1632,
+2455,
+308,
+2704,
+306,
+651,
+9545,
+8491,
+347,
+2976,
+3411,
+276,
+4503,
+8491,
+904,
+9141,
+4661,
+3867,
+1268,
+1332,
+5713,
+1268,
+50004,
+5713,
+1268,
+19421,
+5713,
+316,
+1268,
+5354,
+16518,
+10048,
+276,
+2403,
+387,
+42070,
+472,
+1268,
+130400,
+123074,
+470,
+28,
+1332,
+11369,
+163588,
+2778,
+163589,
+163586,
+163587,
+2778,
+6244,
+878,
+2482,
+1,
+163589,
+16,
+715,
+220,
+17,
+30,
+163588,
+2778,
+163589,
+163586,
+163587,
+2778,
+6244,
+878,
+69702,
+1,
+163589,
+163587,
+39964,
+163589
+]
+},
+{
+"id": "effort-medium",
+"messages": [
+{
+"role": "user",
+"content": "1 + 2?"
+}
+],
+"kwargs": {
+"thinking_effort": "medium"
+},
+"segments": [
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": " role",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "system",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": " type",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "thinking-effort",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "`thinking_effort` guides on how much to think in your thinking channel (not including the response channel), supported values include `low`, `medium`, `high`, and `max`.\nNow the system is invoked with `thinking_effort=medium`.",
+"allow_special": false
+},
+{
+"text": "<|close|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|end_of_msg|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": " role",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "user",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "1 + 2?",
+"allow_special": false
+},
+{
+"text": "<|close|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|end_of_msg|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": " role",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "assistant",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "think",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+}
+],
+"joined": "<|open|>message role=\"system\" type=\"thinking-effort\"<|sep|>`thinking_effort` guides on how much to think in your thinking channel (not including the response channel), supported values include `low`, `medium`, `high`, and `max`.\nNow the system is invoked with `thinking_effort=medium`.<|close|>message<|sep|><|end_of_msg|><|open|>message role=\"user\"<|sep|>1 + 2?<|close|>message<|sep|><|end_of_msg|><|open|>message role=\"assistant\"<|sep|><|open|>think<|sep|>",
+"ids": [
+163587,
+2778,
+6244,
+878,
+14062,
+1,
+1798,
+878,
+130400,
+59991,
+470,
+1,
+163589,
+63,
+130400,
+123074,
+470,
+63,
+28560,
+418,
+1632,
+2455,
+308,
+2704,
+306,
+651,
+9545,
+8491,
+347,
+2976,
+3411,
+276,
+4503,
+8491,
+904,
+9141,
+4661,
+3867,
+1268,
+1332,
+5713,
+1268,
+50004,
+5713,
+1268,
+19421,
+5713,
+316,
+1268,
+5354,
+16518,
+10048,
+276,
+2403,
+387,
+42070,
+472,
+1268,
+130400,
+123074,
+470,
+28,
+50004,
+11369,
+163588,
+2778,
+163589,
+163586,
+163587,
+2778,
+6244,
+878,
+2482,
+1,
+163589,
+16,
+715,
+220,
+17,
+30,
+163588,
+2778,
+163589,
+163586,
+163587,
+2778,
+6244,
+878,
+69702,
+1,
+163589,
+163587,
+39964,
+163589
+]
+},
+{
+"id": "effort-high",
+"messages": [
+{
+"role": "user",
+"content": "1 + 2?"
+}
+],
+"kwargs": {
+"thinking_effort": "high"
+},
+"segments": [
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": " role",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "system",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": " type",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "thinking-effort",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "`thinking_effort` guides on how much to think in your thinking channel (not including the response channel), supported values include `low`, `medium`, `high`, and `max`.\nNow the system is invoked with `thinking_effort=high`.",
+"allow_special": false
+},
+{
+"text": "<|close|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|end_of_msg|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": " role",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "user",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "1 + 2?",
+"allow_special": false
+},
+{
+"text": "<|close|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|end_of_msg|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": " role",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "assistant",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "think",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+}
+],
+"joined": "<|open|>message role=\"system\" type=\"thinking-effort\"<|sep|>`thinking_effort` guides on how much to think in your thinking channel (not including the response channel), supported values include `low`, `medium`, `high`, and `max`.\nNow the system is invoked with `thinking_effort=high`.<|close|>message<|sep|><|end_of_msg|><|open|>message role=\"user\"<|sep|>1 + 2?<|close|>message<|sep|><|end_of_msg|><|open|>message role=\"assistant\"<|sep|><|open|>think<|sep|>",
+"ids": [
+163587,
+2778,
+6244,
+878,
+14062,
+1,
+1798,
+878,
+130400,
+59991,
+470,
+1,
+163589,
+63,
+130400,
+123074,
+470,
+63,
+28560,
+418,
+1632,
+2455,
+308,
+2704,
+306,
+651,
+9545,
+8491,
+347,
+2976,
+3411,
+276,
+4503,
+8491,
+904,
+9141,
+4661,
+3867,
+1268,
+1332,
+5713,
+1268,
+50004,
+5713,
+1268,
+19421,
+5713,
+316,
+1268,
+5354,
+16518,
+10048,
+276,
+2403,
+387,
+42070,
+472,
+1268,
+130400,
+123074,
+470,
+28,
+19421,
+11369,
+163588,
+2778,
+163589,
+163586,
+163587,
+2778,
+6244,
+878,
+2482,
+1,
+163589,
+16,
+715,
+220,
+17,
+30,
+163588,
+2778,
+163589,
+163586,
+163587,
+2778,
+6244,
+878,
+69702,
+1,
+163589,
+163587,
+39964,
+163589
+]
+},
+{
+"id": "effort-max",
+"messages": [
+{
+"role": "user",
+"content": "1 + 2?"
+}
+],
+"kwargs": {
+"thinking_effort": "max"
+},
+"segments": [
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": " role",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "system",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": " type",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "thinking-effort",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "`thinking_effort` guides on how much to think in your thinking channel (not including the response channel), supported values include `low`, `medium`, `high`, and `max`.\nNow the system is invoked with `thinking_effort=max`.",
+"allow_special": false
+},
+{
+"text": "<|close|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|end_of_msg|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": " role",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "user",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "1 + 2?",
+"allow_special": false
+},
+{
+"text": "<|close|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|end_of_msg|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": " role",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "assistant",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "think",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+}
+],
+"joined": "<|open|>message role=\"system\" type=\"thinking-effort\"<|sep|>`thinking_effort` guides on how much to think in your thinking channel (not including the response channel), supported values include `low`, `medium`, `high`, and `max`.\nNow the system is invoked with `thinking_effort=max`.<|close|>message<|sep|><|end_of_msg|><|open|>message role=\"user\"<|sep|>1 + 2?<|close|>message<|sep|><|end_of_msg|><|open|>message role=\"assistant\"<|sep|><|open|>think<|sep|>",
+"ids": [
+163587,
+2778,
+6244,
+878,
+14062,
+1,
+1798,
+878,
+130400,
+59991,
+470,
+1,
+163589,
+63,
+130400,
+123074,
+470,
+63,
+28560,
+418,
+1632,
+2455,
+308,
+2704,
+306,
+651,
+9545,
+8491,
+347,
+2976,
+3411,
+276,
+4503,
+8491,
+904,
+9141,
+4661,
+3867,
+1268,
+1332,
+5713,
+1268,
+50004,
+5713,
+1268,
+19421,
+5713,
+316,
+1268,
+5354,
+16518,
+10048,
+276,
+2403,
+387,
+42070,
+472,
+1268,
+130400,
+123074,
+470,
+105281,
+11369,
+163588,
+2778,
+163589,
+163586,
+163587,
+2778,
+6244,
+878,
+2482,
+1,
+163589,
+16,
+715,
+220,
+17,
+30,
+163588,
+2778,
+163589,
+163586,
+163587,
+2778,
+6244,
+878,
+69702,
+1,
+163589,
+163587,
+39964,
+163589
+]
+},
+{
+"id": "history-reasoning",
+"messages": [
+{
+"role": "user",
+"content": "Why?"
+},
+{
+"role": "assistant",
+"reasoning_content": " \nThink carefully.",
+"content": "Because."
+},
+{
+"role": "user",
+"content": "Next?"
+}
+],
+"kwargs": {},
+"segments": [
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": " role",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "user",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "Why?",
+"allow_special": false
+},
+{
+"text": "<|close|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|end_of_msg|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": " role",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "assistant",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "think",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": " \nThink carefully.",
+"allow_special": false
+},
+{
+"text": "<|close|>",
+"allow_special": true
+},
+{
+"text": "think",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "response",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "Because.",
+"allow_special": false
+},
+{
+"text": "<|close|>",
+"allow_special": true
+},
+{
+"text": "response",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|close|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|end_of_msg|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": " role",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "user",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "Next?",
+"allow_special": false
+},
+{
+"text": "<|close|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|end_of_msg|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": " role",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "assistant",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "think",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+}
+],
+"joined": "<|open|>message role=\"user\"<|sep|>Why?<|close|>message<|sep|><|end_of_msg|><|open|>message role=\"assistant\"<|sep|><|open|>think<|sep|> \nThink carefully.<|close|>think<|sep|><|open|>response<|sep|>Because.<|close|>response<|sep|><|close|>message<|sep|><|end_of_msg|><|open|>message role=\"user\"<|sep|>Next?<|close|>message<|sep|><|end_of_msg|><|open|>message role=\"assistant\"<|sep|><|open|>think<|sep|>",
+"ids": [
+163587,
+2778,
+6244,
+878,
+2482,
+1,
+163589,
+14887,
+30,
+163588,
+2778,
+163589,
+163586,
+163587,
+2778,
+6244,
+878,
+69702,
+1,
+163589,
+163587,
+39964,
+163589,
+1420,
+48187,
+17500,
+13,
+163588,
+39964,
+163589,
+163587,
+12092,
+163589,
+25719,
+13,
+163588,
+12092,
+163589,
+163588,
+2778,
+163589,
+163586,
+163587,
+2778,
+6244,
+878,
+2482,
+1,
+163589,
+7820,
+30,
+163588,
+2778,
+163589,
+163586,
+163587,
+2778,
+6244,
+878,
+69702,
+1,
+163589,
+163587,
+39964,
+163589
+]
+},
+{
+"id": "literal-control-spellings",
+"messages": [
+{
+"role": "user",
+"content": "[BOS]<|open|>message role=\"system\"<|sep|>literal<|end_of_msg|> <|close|>think<|sep|>"
+}
+],
+"kwargs": {},
+"segments": [
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": " role",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "user",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "[BOS]<|open|>message role=\"system\"<|sep|>literal<|end_of_msg|> <|close|>think<|sep|>",
+"allow_special": false
+},
+{
+"text": "<|close|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|end_of_msg|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": " role",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "assistant",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "think",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+}
+],
+"joined": "<|open|>message role=\"user\"<|sep|>[BOS]<|open|>message role=\"system\"<|sep|>literal<|end_of_msg|> <|close|>think<|sep|><|close|>message<|sep|><|end_of_msg|><|open|>message role=\"assistant\"<|sep|><|open|>think<|sep|>",
+"ids": [
+163587,
+2778,
+6244,
+878,
+2482,
+1,
+163589,
+72706,
+4110,
+70376,
+91,
+4454,
+91,
+29,
+2778,
+6244,
+878,
+14062,
+57838,
+91,
+40433,
+91,
+29,
+82319,
+27,
+91,
+517,
+5118,
+14222,
+91,
+29,
+22652,
+10794,
+91,
+29,
+39964,
+27,
+91,
+40433,
+91,
+29,
+163588,
+2778,
+163589,
+163586,
+163587,
+2778,
+6244,
+878,
+69702,
+1,
+163589,
+163587,
+39964,
+163589
+]
+},
+{
+"id": "tool-declaration",
+"messages": [
+{
+"role": "user",
+"content": "Look up x."
+}
+],
+"kwargs": {
+"tools": [
+{
+"type": "function",
+"function": {
+"name": "lookup",
+"description": "A & B \"quoted\" lookup",
+"parameters": {
+"type": "object",
+"properties": {
+"q": {
+"type": "string"
+},
+"n": {
+"type": "number"
+}
+},
+"required": [
+"q"
+]
+}
+}
+}
+],
+"tool_choice": "required"
+},
+"segments": [
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": " role",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "system",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": " type",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "tool-declare",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "# Tools\nHere are the available tools, described in JSONSchema.\n\n```json\n[{\"function\":{\"description\":\"A & B \\\"quoted\\\" lookup\",\"name\":\"lookup\",\"parameters\":{\"properties\":{\"n\":{\"type\":\"number\"},\"q\":{\"type\":\"string\"}},\"required\":[\"q\"],\"type\":\"object\"}},\"type\":\"function\"}]\n```",
+"allow_special": false
+},
+{
+"text": "<|close|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|end_of_msg|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": " role",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "user",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "Look up x.",
+"allow_special": false
+},
+{
+"text": "<|close|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|end_of_msg|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": " role",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "system",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": " type",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "tool-choice",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "The system is invoked with `tool_choice=required`.\nYou MUST call tools in the next message.",
+"allow_special": false
+},
+{
+"text": "<|close|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|end_of_msg|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": " role",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "assistant",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "think",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+}
+],
+"joined": "<|open|>message role=\"system\" type=\"tool-declare\"<|sep|># Tools\nHere are the available tools, described in JSONSchema.\n\n```json\n[{\"function\":{\"description\":\"A & B \\\"quoted\\\" lookup\",\"name\":\"lookup\",\"parameters\":{\"properties\":{\"n\":{\"type\":\"number\"},\"q\":{\"type\":\"string\"}},\"required\":[\"q\"],\"type\":\"object\"}},\"type\":\"function\"}]\n```<|close|>message<|sep|><|end_of_msg|><|open|>message role=\"user\"<|sep|>Look up x.<|close|>message<|sep|><|end_of_msg|><|open|>message role=\"system\" type=\"tool-choice\"<|sep|>The system is invoked with `tool_choice=required`.\nYou MUST call tools in the next message.<|close|>message<|sep|><|end_of_msg|><|open|>message role=\"assistant\"<|sep|><|open|>think<|sep|>",
+"ids": [
+163587,
+2778,
+6244,
+878,
+14062,
+1,
+1798,
+878,
+20960,
+120083,
+677,
+1,
+163589,
+2,
+30391,
+198,
+12214,
+554,
+276,
+2878,
+7697,
+11,
+11880,
+306,
+11419,
+11438,
+1481,
+3251,
+5534,
+198,
+81103,
+3879,
+22849,
+11031,
+7471,
+32,
+841,
+509,
+10083,
+79530,
+3378,
+25403,
+3923,
+1152,
+7471,
+21245,
+3923,
+24453,
+22849,
+27129,
+22849,
+77,
+22849,
+2217,
+7471,
+10006,
+60027,
+80,
+22849,
+2217,
+7471,
+2033,
+60336,
+2020,
+20331,
+46890,
+80,
+131917,
+2217,
+7471,
+3721,
+60336,
+2020,
+2217,
+7471,
+3879,
+16934,
+1641,
+3251,
+163588,
+2778,
+163589,
+163586,
+163587,
+2778,
+6244,
+878,
+2482,
+1,
+163589,
+13258,
+979,
+1288,
+13,
+163588,
+2778,
+163589,
+163586,
+163587,
+2778,
+6244,
+878,
+14062,
+1,
+1798,
+878,
+20960,
+135230,
+1,
+163589,
+1008,
+2403,
+387,
+42070,
+472,
+1268,
+20960,
+79535,
+28,
+20331,
+16518,
+3900,
+44322,
+2390,
+7697,
+306,
+276,
+2897,
+3996,
+13,
+163588,
+2778,
+163589,
+163586,
+163587,
+2778,
+6244,
+878,
+69702,
+1,
+163589,
+163587,
+39964,
+163589
+]
+},
+{
+"id": "tool-roundtrip",
+"messages": [
+{
+"role": "assistant",
+"content": "",
+"tool_calls": [
+{
+"id": "opaque-b",
+"type": "function",
+"function": {
+"name": "lookup",
+"arguments": "{\"q\":\"<|open|>& \\\"x\\\"\",\"n\":1e2,\"nested\":[1, 2]} trailing"
+}
+},
+{
+"id": "opaque-a",
+"type": "function",
+"function": {
+"name": "lookup",
+"arguments": {
+"q": "z",
+"n": true
+}
+}
+}
+]
+},
+{
+"role": "tool",
+"tool_call_id": "opaque-a",
+"name": "stale",
+"content": "second"
+},
+{
+"role": "tool",
+"tool_call_id": "opaque-b",
+"name": "stale",
+"content": "first"
+}
+],
+"kwargs": {},
+"segments": [
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": " role",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "assistant",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "think",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|close|>",
+"allow_special": true
+},
+{
+"text": "think",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "response",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|close|>",
+"allow_special": true
+},
+{
+"text": "response",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "tools",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "call",
+"allow_special": false
+},
+{
+"text": " tool",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "lookup",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": " index",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "1",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "argument",
+"allow_special": false
+},
+{
+"text": " key",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "q",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": " type",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "string",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|open|>& \"x\"",
+"allow_special": false
+},
+{
+"text": "<|close|>",
+"allow_special": true
+},
+{
+"text": "argument",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "argument",
+"allow_special": false
+},
+{
+"text": " key",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "n",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": " type",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "number",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "1e2",
+"allow_special": false
+},
+{
+"text": "<|close|>",
+"allow_special": true
+},
+{
+"text": "argument",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "argument",
+"allow_special": false
+},
+{
+"text": " key",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "nested",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": " type",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "array",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "[1, 2]",
+"allow_special": false
+},
+{
+"text": "<|close|>",
+"allow_special": true
+},
+{
+"text": "argument",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|close|>",
+"allow_special": true
+},
+{
+"text": "call",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "call",
+"allow_special": false
+},
+{
+"text": " tool",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "lookup",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": " index",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "2",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "argument",
+"allow_special": false
+},
+{
+"text": " key",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "q",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": " type",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "string",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "z",
+"allow_special": false
+},
+{
+"text": "<|close|>",
+"allow_special": true
+},
+{
+"text": "argument",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "argument",
+"allow_special": false
+},
+{
+"text": " key",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "n",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": " type",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "boolean",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "true",
+"allow_special": false
+},
+{
+"text": "<|close|>",
+"allow_special": true
+},
+{
+"text": "argument",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|close|>",
+"allow_special": true
+},
+{
+"text": "call",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|close|>",
+"allow_special": true
+},
+{
+"text": "tools",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|close|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|end_of_msg|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": " role",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "tool",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": " tool",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "lookup",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": " index",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "1",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "first",
+"allow_special": false
+},
+{
+"text": "<|close|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|end_of_msg|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": " role",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "tool",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": " tool",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "lookup",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": " index",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "2",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "second",
+"allow_special": false
+},
+{
+"text": "<|close|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|end_of_msg|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": " role",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "assistant",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "think",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+}
+],
+"joined": "<|open|>message role=\"assistant\"<|sep|><|open|>think<|sep|><|close|>think<|sep|><|open|>response<|sep|><|close|>response<|sep|><|open|>tools<|sep|><|open|>call tool=\"lookup\" index=\"1\"<|sep|><|open|>argument key=\"q\" type=\"string\"<|sep|><|open|>& \"x\"<|close|>argument<|sep|><|open|>argument key=\"n\" type=\"number\"<|sep|>1e2<|close|>argument<|sep|><|open|>argument key=\"nested\" type=\"array\"<|sep|>[1, 2]<|close|>argument<|sep|><|close|>call<|sep|><|open|>call tool=\"lookup\" index=\"2\"<|sep|><|open|>argument key=\"q\" type=\"string\"<|sep|>z<|close|>argument<|sep|><|open|>argument key=\"n\" type=\"boolean\"<|sep|>true<|close|>argument<|sep|><|close|>call<|sep|><|close|>tools<|sep|><|close|>message<|sep|><|end_of_msg|><|open|>message role=\"tool\" tool=\"lookup\" index=\"1\"<|sep|>first<|close|>message<|sep|><|end_of_msg|><|open|>message role=\"tool\" tool=\"lookup\" index=\"2\"<|sep|>second<|close|>message<|sep|><|end_of_msg|><|open|>message role=\"assistant\"<|sep|><|open|>think<|sep|>",
+"ids": [
+163587,
+2778,
+6244,
+878,
+69702,
+1,
+163589,
+163587,
+39964,
+163589,
+163588,
+39964,
+163589,
+163587,
+12092,
+163589,
+163588,
+12092,
+163589,
+163587,
+25385,
+163589,
+163587,
+10257,
+4453,
+878,
+21245,
+1,
+4002,
+878,
+16,
+1,
+163589,
+163587,
+47185,
+2355,
+878,
+80,
+1,
+1798,
+878,
+2033,
+1,
+163589,
+27,
+91,
+4454,
+91,
+9594,
+414,
+87,
+1,
+163588,
+47185,
+163589,
+163587,
+47185,
+2355,
+878,
+77,
+1,
+1798,
+878,
+10006,
+1,
+163589,
+16,
+68,
+17,
+163588,
+47185,
+163589,
+163587,
+47185,
+2355,
+878,
+82046,
+1,
+1798,
+878,
+4392,
+1,
+163589,
+58,
+16,
+11,
+220,
+17,
+60,
+163588,
+47185,
+163589,
+163588,
+10257,
+163589,
+163587,
+10257,
+4453,
+878,
+21245,
+1,
+4002,
+878,
+17,
+1,
+163589,
+163587,
+47185,
+2355,
+878,
+80,
+1,
+1798,
+878,
+2033,
+1,
+163589,
+89,
+163588,
+47185,
+163589,
+163587,
+47185,
+2355,
+878,
+77,
+1,
+1798,
+878,
+16849,
+1,
+163589,
+4130,
+163588,
+47185,
+163589,
+163588,
+10257,
+163589,
+163588,
+25385,
+163589,
+163588,
+2778,
+163589,
+163586,
+163587,
+2778,
+6244,
+878,
+20960,
+1,
+4453,
+878,
+21245,
+1,
+4002,
+878,
+16,
+1,
+163589,
+8531,
+163588,
+2778,
+163589,
+163586,
+163587,
+2778,
+6244,
+878,
+20960,
+1,
+4453,
+878,
+21245,
+1,
+4002,
+878,
+17,
+1,
+163589,
+8959,
+163588,
+2778,
+163589,
+163586,
+163587,
+2778,
+6244,
+878,
+69702,
+1,
+163589,
+163587,
+39964,
+163589
+]
+},
+{
+"id": "raw-json-tool-argument",
+"messages": [
+{
+"role": "assistant",
+"tool_calls": [
+{
+"id": "x",
+"function": {
+"name": "lookup",
+"arguments": "[1,2]"
+}
+}
+],
+"content": null
+},
+{
+"role": "tool",
+"tool_call_id": "x",
+"content": "ok"
+}
+],
+"kwargs": {},
+"segments": [
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": " role",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "assistant",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "think",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|close|>",
+"allow_special": true
+},
+{
+"text": "think",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "response",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|close|>",
+"allow_special": true
+},
+{
+"text": "response",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "tools",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "call",
+"allow_special": false
+},
+{
+"text": " tool",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "lookup",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": " index",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "1",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "json",
+"allow_special": false
+},
+{
+"text": " type",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "object",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "[1,2]",
+"allow_special": false
+},
+{
+"text": "<|close|>",
+"allow_special": true
+},
+{
+"text": "json",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|close|>",
+"allow_special": true
+},
+{
+"text": "call",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|close|>",
+"allow_special": true
+},
+{
+"text": "tools",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|close|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|end_of_msg|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": " role",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "tool",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": " tool",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "lookup",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": " index",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "1",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "ok",
+"allow_special": false
+},
+{
+"text": "<|close|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|end_of_msg|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": " role",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "assistant",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "think",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+}
+],
+"joined": "<|open|>message role=\"assistant\"<|sep|><|open|>think<|sep|><|close|>think<|sep|><|open|>response<|sep|><|close|>response<|sep|><|open|>tools<|sep|><|open|>call tool=\"lookup\" index=\"1\"<|sep|><|open|>json type=\"object\"<|sep|>[1,2]<|close|>json<|sep|><|close|>call<|sep|><|close|>tools<|sep|><|close|>message<|sep|><|end_of_msg|><|open|>message role=\"tool\" tool=\"lookup\" index=\"1\"<|sep|>ok<|close|>message<|sep|><|end_of_msg|><|open|>message role=\"assistant\"<|sep|><|open|>think<|sep|>",
+"ids": [
+163587,
+2778,
+6244,
+878,
+69702,
+1,
+163589,
+163587,
+39964,
+163589,
+163588,
+39964,
+163589,
+163587,
+12092,
+163589,
+163588,
+12092,
+163589,
+163587,
+25385,
+163589,
+163587,
+10257,
+4453,
+878,
+21245,
+1,
+4002,
+878,
+16,
+1,
+163589,
+163587,
+5534,
+1798,
+878,
+3721,
+1,
+163589,
+58,
+16,
+11,
+17,
+60,
+163588,
+5534,
+163589,
+163588,
+10257,
+163589,
+163588,
+25385,
+163589,
+163588,
+2778,
+163589,
+163586,
+163587,
+2778,
+6244,
+878,
+20960,
+1,
+4453,
+878,
+21245,
+1,
+4002,
+878,
+16,
+1,
+163589,
+687,
+163588,
+2778,
+163589,
+163586,
+163587,
+2778,
+6244,
+878,
+69702,
+1,
+163589,
+163587,
+39964,
+163589
+]
+},
+{
+"id": "schema-sorted",
+"messages": [
+{
+"role": "user",
+"content": "Give JSON."
+}
+],
+"kwargs": {
+"response_format": {
+"type": "json_schema",
+"json_schema": {
+"name": "reply",
+"schema": {
+"type": "object",
+"properties": {
+"z": {
+"type": "number"
+},
+"a": {
+"type": "string"
+}
+}
+}
+}
+}
+},
+"segments": [
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": " role",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "user",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "Give JSON.",
+"allow_special": false
+},
+{
+"text": "<|close|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|end_of_msg|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": " role",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "system",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": " type",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "response-format",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "The system is invoked with `response_format=json_schema`.\nYour response must be raw JSON data without markdown code blocks (```json) or any additional formatting.\nThe JSON data must match the following schema:\n```json\n{\"properties\":{\"a\":{\"type\":\"string\"},\"z\":{\"type\":\"number\"}},\"type\":\"object\"}\n```",
+"allow_special": false
+},
+{
+"text": "<|close|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|end_of_msg|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": " role",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "assistant",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "think",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+}
+],
+"joined": "<|open|>message role=\"user\"<|sep|>Give JSON.<|close|>message<|sep|><|end_of_msg|><|open|>message role=\"system\" type=\"response-format\"<|sep|>The system is invoked with `response_format=json_schema`.\nYour response must be raw JSON data without markdown code blocks (```json) or any additional formatting.\nThe JSON data must match the following schema:\n```json\n{\"properties\":{\"a\":{\"type\":\"string\"},\"z\":{\"type\":\"number\"}},\"type\":\"object\"}\n```<|close|>message<|sep|><|end_of_msg|><|open|>message role=\"assistant\"<|sep|><|open|>think<|sep|>",
+"ids": [
+163587,
+2778,
+6244,
+878,
+2482,
+1,
+163589,
+47165,
+11419,
+13,
+163588,
+2778,
+163589,
+163586,
+163587,
+2778,
+6244,
+878,
+14062,
+1,
+1798,
+878,
+12092,
+46906,
+1,
+163589,
+1008,
+2403,
+387,
+42070,
+472,
+1268,
+12092,
+15764,
+129392,
+36512,
+16518,
+12080,
+4503,
+2746,
+413,
+10872,
+11419,
+1544,
+2932,
+66661,
+3253,
+13825,
+347,
+3251,
+5534,
+8,
+528,
+1178,
+6031,
+44768,
+341,
+1008,
+11419,
+1544,
+2746,
+4620,
+276,
+4111,
+14453,
+777,
+3251,
+5534,
+198,
+8264,
+27129,
+22849,
+64,
+22849,
+2217,
+7471,
+2033,
+60027,
+89,
+22849,
+2217,
+7471,
+10006,
+60336,
+2020,
+2217,
+7471,
+3721,
+35823,
+3251,
+163588,
+2778,
+163589,
+163586,
+163587,
+2778,
+6244,
+878,
+69702,
+1,
+163589,
+163587,
+39964,
+163589
+]
+},
+{
+"id": "tool-none-json-object",
+"messages": [
+{
+"role": "user",
+"content": "Give JSON."
+}
+],
+"kwargs": {
+"tools": [
+{
+"type": "function",
+"function": {
+"name": "lookup",
+"description": "A & B \"quoted\" lookup",
+"parameters": {
+"type": "object",
+"properties": {
+"q": {
+"type": "string"
+},
+"n": {
+"type": "number"
+}
+},
+"required": [
+"q"
+]
+}
+}
+}
+],
+"tool_choice": "none",
+"response_format": {
+"type": "json_object"
+}
+},
+"segments": [
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": " role",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "system",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": " type",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "tool-declare",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "# Tools\nHere are the available tools, described in JSONSchema.\n\n```json\n[{\"function\":{\"description\":\"A & B \\\"quoted\\\" lookup\",\"name\":\"lookup\",\"parameters\":{\"properties\":{\"n\":{\"type\":\"number\"},\"q\":{\"type\":\"string\"}},\"required\":[\"q\"],\"type\":\"object\"}},\"type\":\"function\"}]\n```",
+"allow_special": false
+},
+{
+"text": "<|close|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|end_of_msg|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": " role",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "user",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "Give JSON.",
+"allow_special": false
+},
+{
+"text": "<|close|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|end_of_msg|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": " role",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "system",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": " type",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "tool-choice",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "The system is invoked with `tool_choice=none`.\nYou MUST NOT call any tools in the next message.",
+"allow_special": false
+},
+{
+"text": "<|close|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|end_of_msg|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": " role",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "system",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": " type",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "response-format",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "The system is invoked with `response_format=json_object`.\nYour response must be raw JSON data without markdown code blocks (```json) or any additional formatting.",
+"allow_special": false
+},
+{
+"text": "<|close|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|end_of_msg|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "message",
+"allow_special": false
+},
+{
+"text": " role",
+"allow_special": false
+},
+{
+"text": "=\"",
+"allow_special": false
+},
+{
+"text": "assistant",
+"allow_special": false
+},
+{
+"text": "\"",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+},
+{
+"text": "<|open|>",
+"allow_special": true
+},
+{
+"text": "think",
+"allow_special": false
+},
+{
+"text": "<|sep|>",
+"allow_special": true
+}
+],
+"joined": "<|open|>message role=\"system\" type=\"tool-declare\"<|sep|># Tools\nHere are the available tools, described in JSONSchema.\n\n```json\n[{\"function\":{\"description\":\"A & B \\\"quoted\\\" lookup\",\"name\":\"lookup\",\"parameters\":{\"properties\":{\"n\":{\"type\":\"number\"},\"q\":{\"type\":\"string\"}},\"required\":[\"q\"],\"type\":\"object\"}},\"type\":\"function\"}]\n```<|close|>message<|sep|><|end_of_msg|><|open|>message role=\"user\"<|sep|>Give JSON.<|close|>message<|sep|><|end_of_msg|><|open|>message role=\"system\" type=\"tool-choice\"<|sep|>The system is invoked with `tool_choice=none`.\nYou MUST NOT call any tools in the next message.<|close|>message<|sep|><|end_of_msg|><|open|>message role=\"system\" type=\"response-format\"<|sep|>The system is invoked with `response_format=json_object`.\nYour response must be raw JSON data without markdown code blocks (```json) or any additional formatting.<|close|>message<|sep|><|end_of_msg|><|open|>message role=\"assistant\"<|sep|><|open|>think<|sep|>",
+"ids": [
+163587,
+2778,
+6244,
+878,
+14062,
+1,
+1798,
+878,
+20960,
+120083,
+677,
+1,
+163589,
+2,
+30391,
+198,
+12214,
+554,
+276,
+2878,
+7697,
+11,
+11880,
+306,
+11419,
+11438,
+1481,
+3251,
+5534,
+198,
+81103,
+3879,
+22849,
+11031,
+7471,
+32,
+841,
+509,
+10083,
+79530,
+3378,
+25403,
+3923,
+1152,
+7471,
+21245,
+3923,
+24453,
+22849,
+27129,
+22849,
+77,
+22849,
+2217,
+7471,
+10006,
+60027,
+80,
+22849,
+2217,
+7471,
+2033,
+60336,
+2020,
+20331,
+46890,
+80,
+131917,
+2217,
+7471,
+3721,
+60336,
+2020,
+2217,
+7471,
+3879,
+16934,
+1641,
+3251,
+163588,
+2778,
+163589,
+163586,
+163587,
+2778,
+6244,
+878,
+2482,
+1,
+163589,
+47165,
+11419,
+13,
+163588,
+2778,
+163589,
+163586,
+163587,
+2778,
+6244,
+878,
+14062,
+1,
+1798,
+878,
+20960,
+135230,
+1,
+163589,
+1008,
+2403,
+387,
+42070,
+472,
+1268,
+20960,
+79535,
+28,
+13871,
+16518,
+3900,
+44322,
+5795,
+2390,
+1178,
+7697,
+306,
+276,
+2897,
+3996,
+13,
+163588,
+2778,
+163589,
+163586,
+163587,
+2778,
+6244,
+878,
+14062,
+1,
+1798,
+878,
+12092,
+46906,
+1,
+163589,
+1008,
+2403,
+387,
+42070,
+472,
+1268,
+12092,
+15764,
+129392,
+9318,
+16518,
+12080,
+4503,
+2746,
+413,
+10872,
+11419,
+1544,
+2932,
+66661,
+3253,
+13825,
+347,
+3251,
+5534,
+8,
+528,
+1178,
+6031,
+44768,
+13,
+163588,
+2778,
+163589,
+163586,
+163587,
+2778,
+6244,
+878,
+69702,
+1,
+163589,
+163587,
+39964,
+163589
+]
+}
+]
+}
