@@ -110,14 +110,8 @@ pub const HfText = struct {
                 return error.Load;
             };
             t.overridden = true;
-        } else {
-            try t.readTemplates(io, a, dir, config);
-            // The upstream OCR example passes images separately; bridge server media parts to its visual prefix.
-            if (model_config == .object) if (model_config.object.get("model_type")) |kind| {
-                if (kind == .string and std.mem.eql(u8, kind.string, "nemotron_parse"))
-                    t.source = @embedFile("fixtures/nemotron_parse.jinja");
-            };
-        }
+        } else try t.readTemplates(io, a, dir, config);
+        if (template_override == null) t.source = @import("hf_text_parse.zig").template(model_config) orelse t.source;
         // DeepSeek-V4.x releases ship encoding.py, not Jinja: a checkpoint's Jinja is a third party's (--chat-template)
         if (t.native_deepseek) {
             t.unread_template = t.source.len > 0 or t.tool_source.len > 0;
