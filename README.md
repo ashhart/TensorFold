@@ -44,6 +44,8 @@ Before opening a pull request, have the agent run the [pull request skill](docs/
 
 Start with Qwen3.5-2B, the small 4-bit checkpoint checked on Metal and a GB10. The commands below download its
 pinned revision, then serve it as `local-model`. Model weights have their own licenses.
+Reviewing or benchmarking TensorFold? [Evaluating TensorFold](docs/evaluating.md) covers pinning, signature checks,
+a container and the tests that need no GPU.
 
 ### Mac with Apple Silicon
 
