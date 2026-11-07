@@ -168,8 +168,12 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, s: cuda.S
     var b1: [128]u8 = undefined;
     var b2: [128]u8 = undefined;
     const readers = try core.checkpoint_read_ahead.optInReaders();
+    // each layer read past the page cache, the next one while it packs (TF_LOAD_DIRECT=0: main's mapped reads)
+    var direct = core.checkpoint.direct.Layers.init(gpa, &ck, try core.checkpoint.loadReaders());
+    defer direct.deinit();
     for (w.layers, 0..) |*l, i| {
-        var reading = try @import("cuda_load_prefetch.zig").begin(&ck, i, readers);
+        try direct.layerAt(m ++ "layers.{d}.", i, if (i + 1 < n) i + 1 else null);
+        var reading = try @import("cuda_load_prefetch.zig").begin(&ck, i, if (direct.on()) 0 else readers);
         defer reading.deinit();
         const name = struct {
             fn of(b: []u8, layer: usize, suffix: []const u8) ![]const u8 {
