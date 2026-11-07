@@ -27,10 +27,12 @@ inline bool pair_link_broken(device atomic_uint* sync, uint t) {
 }
 
 // The host releases exchange x by storing x into POSTED (word 0) once the peer's part landed; FAILED first.
+// POSTED starts at 0 and an exchange's x starts at 1, so a rig whose sync page is all zero asks for no wait.
 inline bool pair_wait_release(device atomic_uint* sync, uint x) {
   for (;;) {
     if (atomic_load_explicit(&sync[FAILED], memory_order_relaxed) != 0u) return false;
-    if (atomic_load_explicit(&sync[0], memory_order_acquire) >= x) return true;
+    const uint now = atomic_load_explicit(&sync[0], memory_order_relaxed);
+    if (now == 0u or now >= x) return true;
   }
 }
 
