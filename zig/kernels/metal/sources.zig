@@ -153,9 +153,6 @@ pub const glm_absorb_nax = @embedFile("glm_absorb_nax.metal");
 pub const core_moe_route = @embedFile("core/moe_route.metal");
 pub const core_affine_mm = @embedFile("core/affine_mm.metal");
 
-/// The int8 routed body: the trellis skeleton (`core/exl3_projection_nax.metal`) with the tile and the x block
-/// quantised per 16x16 fragment and multiplied on the tensor units as int8 x int8 (TF_DSV41_INT8_BODY).
-pub const core_exl3_projection_nax_i8 = @embedFile("core/exl3_projection_nax_i8.metal");
 pub const core_exl3_projection_i8 = @embedFile("core/exl3_projection_i8.metal");
 /// A hyper-connection block boundary in two launches (core/hc.zig).
 pub const core_hc_boundary = @embedFile("core/hc_boundary.metal");

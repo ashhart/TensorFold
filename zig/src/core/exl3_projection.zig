@@ -200,10 +200,9 @@ pub const Pipelines = struct {
     swiglu_prerotate: mtl.Pipeline,
     dense: mtl.Pipeline,
     prefill: ?mtl.Pipeline = null,
-    /// The int8 prompt-row body (f32 sums, for a pack that keeps the runtime rotation) and its bf16 destination twin
-    /// (for a pre-rotated pack, no epilogue transform). Loaded only under TF_DSV41_I8_PREFILL.
+    /// The int8 prompt-row body (f32 sums, for a pack that keeps the runtime rotation). Loaded only under
+    /// TF_DSV41_I8_PREFILL.
     prefill_fp8: ?mtl.Pipeline = null,
-    prefill_fp8b: ?mtl.Pipeline = null,
     /// The pre-rotated pack's cast epilogue: f32 sums to the caller's bf16 output, no transform.
     prefill_cast: ?mtl.Pipeline = null,
     /// The same prefill reduction on the tensor units; built only when a caller supplies an allocator (its source
@@ -211,7 +210,6 @@ pub const Pipelines = struct {
     reduce: ?mtl.Pipeline = null,
     /// The codebook as a table: 3 x 65536 halves, state to value. Replaces six ALU ops a weight with one load.
     codebook_table: ?mtl.Buffer = null,
-    prefill_nax: ?mtl.Pipeline = null,
     /// The same prefill entry with RG row groups by CG column groups of tile: a wider column tile re-reads the
     /// activation tile for fewer output tiles.
     prefill_nax_tiles: [8]?mtl.Pipeline = @splat(null),
@@ -275,9 +273,6 @@ pub const Pipelines = struct {
     /// The register-only decode body with the static state selection and the codebook read from a 1024-entry
     /// threadgroup LUT (`tf_exl3_matmul_decode_fma_static_lut`).
     decode_fma_static_lut: ?mtl.Pipeline = null,
-    /// The one-row transform fold (`tf_exl3_norm_transform`): the output transform, the RMS norm and the next
-    /// projection's input transform in one dispatch. Optional so an older metallib still loads.
-    norm_transform: ?mtl.Pipeline = null,
     /// The register-only body on the DENSE one-row path (`tf_exl3_matmul_decode_fma_dense`): the routed decode's own
     /// structure (one warp a sixteen-column tile, the decoded weights in registers, no threadgroup weight tile, no
     /// barrier in the k walk, no split-K and no partials round trip), reading a dense matrix's trellis from the
@@ -375,14 +370,6 @@ pub const Pipelines = struct {
         } else std.log.err("exl3: static+LUT one-row pipeline did not load", .{});
         const ro = try mtl.Pipeline.init(device, lib, "tf_exl3_rotate_out", false);
         errdefer ro.deinit();
-        const nt = mtl.Pipeline.init(device, lib, "tf_exl3_norm_transform", false) catch null;
-        if (nt) |v| {
-            if (v.simdWidth() != 32 or v.maxThreads() < 256) {
-                v.deinit();
-            } else {
-                std.log.info("exl3: one-row transform fold active (tf_exl3_norm_transform)", .{});
-            }
-        }
         const sr = try mtl.Pipeline.init(device, lib, "tf_exl3_swiglu_prerotate", false);
         errdefer sr.deinit();
         const dn = try mtl.Pipeline.init(device, lib, "tf_exl3_dense", false);
@@ -403,7 +390,6 @@ pub const Pipelines = struct {
                 prefill = null;
             }
         }
-        var prefill_nax: ?mtl.Pipeline = null;
         var prefill_nax_tiles: [8]?mtl.Pipeline = @splat(null);
         var prefill_nax_db: ?mtl.Pipeline = null;
         var prefill_nax_db64: ?mtl.Pipeline = null;
@@ -420,7 +406,6 @@ pub const Pipelines = struct {
         var prefill_nax_coop_skip: ?mtl.Pipeline = null;
         var prefill_nax_dense_funnel: ?mtl.Pipeline = null;
         var prefill_fp8: ?mtl.Pipeline = null;
-        var prefill_fp8b: ?mtl.Pipeline = null;
         var decode_nax: ?mtl.Pipeline = null;
         var decode_nax_c: ?mtl.Pipeline = null;
         var decode_nax_tab: ?mtl.Pipeline = null;
@@ -446,15 +431,6 @@ pub const Pipelines = struct {
                     std.log.info("exl3: nax source inlined, {d} bytes", .{src.len});
                     if (mtl.Library.fromSource(device, src, mtl.CompileOptions.mlx())) |nax_lib| {
                         defer nax_lib.deinit();
-                        if (mtl.Pipeline.init(device, nax_lib, "tf_exl3_matmul_prefill_nax", false)) |pf| {
-                            if (pf.simdWidth() == 32 and pf.maxThreads() >= 128) {
-                                prefill_nax = pf;
-                                std.log.info("exl3: tensor-unit prefill pipeline active (tf_exl3_matmul_prefill_nax)", .{});
-                            } else {
-                                std.log.err("exl3: nax pipeline rejected: simdWidth={d} maxThreads={d}", .{ pf.simdWidth(), pf.maxThreads() });
-                                pf.deinit();
-                            }
-                        } else |err| std.log.err("exl3: nax pipeline init failed: {s}", .{@errorName(err)});
                         // Indexed by (rows / 64 - 1) * 2 + (columns / 64 - 1): 64, 128 and 256 rows by 64 or 128
                         // columns.
                         const tile_names = [_]?[]const u8{ "tf_exl3_matmul_prefill_nax5", "tf_exl3_matmul_prefill_nax3", "tf_exl3_matmul_prefill_nax2", "tf_exl3_matmul_prefill_nax4", null, null, "tf_exl3_matmul_prefill_nax6", null };
@@ -520,12 +496,6 @@ pub const Pipelines = struct {
                                     std.log.info("exl3: prompt-row int8 body active (tf_exl3_matmul_prefill_fp8)", .{});
                                 } else pf.deinit();
                             } else |err| std.log.err("exl3: fp8 prefill pipeline failed: {s}", .{@errorName(err)});
-                            if (mtl.Pipeline.init(device, nax_lib, "tf_exl3_matmul_prefill_fp8b", false)) |pf| {
-                                if (pf.simdWidth() == 32 and pf.maxThreads() >= 128) {
-                                    prefill_fp8b = pf;
-                                    std.log.info("exl3: prompt-row int8 direct body active (tf_exl3_matmul_prefill_fp8b)", .{});
-                                } else pf.deinit();
-                            } else |err| std.log.err("exl3: fp8b prefill pipeline failed: {s}", .{@errorName(err)});
                         }
                         // The dense 128x64 tile with a simdgroup that owns thirty-two rows: the NAXTile shape. The
                         // lane keeps eight states, so the stream words it reads cover twice the states, and the
@@ -537,31 +507,6 @@ pub const Pipelines = struct {
                         if (mtl.Pipeline.init(device, nax_lib, "tf_exl3_matmul_prefill_nax19", false)) |pf| {
                             if (pf.simdWidth() == 32 and pf.maxThreads() >= 128) prefill_nax_moe_db = pf else pf.deinit();
                         } else |err| std.log.err("exl3: nax19 pipeline init failed: {s}", .{@errorName(err)});
-                        // TF_DSV41_INT8_BODY: the same skeleton, its tile and x block quantised per 16x16 fragment
-                        // and multiplied as int8 x int8 on the tensor units. Loaded from its own source so both
-                        // bodies stay in the tree; the wider bf16 tiles are dropped so every chunk uses it.
-                        if (std.c.getenv("TF_DSV41_INT8_BODY") != null) {
-                            if (frags.source(device, g, sources.core_exl3_projection_nax_i8)) |src8| {
-                                defer g.free(src8);
-                                if (mtl.Library.fromSource(device, src8, mtl.CompileOptions.mlx())) |lib8| {
-                                    defer lib8.deinit();
-                                    if (mtl.Pipeline.init(device, lib8, "tf_exl3_matmul_prefill_nax_i8", false)) |pf8| {
-                                        if (pf8.simdWidth() == 32 and pf8.maxThreads() >= 128) {
-                                            if (prefill_nax) |old| old.deinit();
-                                            prefill_nax = pf8;
-                                            for (&prefill_nax_tiles) |*t| if (t.*) |q| {
-                                                q.deinit();
-                                                t.* = null;
-                                            };
-                                            std.log.info("exl3: int8 routed body active (tf_exl3_matmul_prefill_nax_i8)", .{});
-                                        } else {
-                                            std.log.err("exl3: int8 body rejected: simdWidth={d} maxThreads={d}", .{ pf8.simdWidth(), pf8.maxThreads() });
-                                            pf8.deinit();
-                                        }
-                                    } else |err| std.log.err("exl3: int8 body pipeline failed: {s}", .{@errorName(err)});
-                                } else |err| std.log.err("exl3: int8 body library failed: {s}", .{@errorName(err)});
-                            } else |err| std.log.err("exl3: int8 body source failed: {s}", .{@errorName(err)});
-                        }
                         if (mtl.Pipeline.init(device, nax_lib, "tf_exl3_matmul_decode_nax", false)) |pf| {
                             if (pf.simdWidth() == 32 and pf.maxThreads() >= 128) {
                                 decode_nax = pf;
@@ -706,22 +651,19 @@ pub const Pipelines = struct {
         // The three codebooks as a table: the tensor-unit kernels read a value instead of deriving it.
 
         if (table == null) std.log.err("exl3: codebook table not created; the tensor-unit path will read none", .{});
-        return .{ .rotate_in = ri, .matmul = mm, .rotate_out = ro, .swiglu_prerotate = sr, .dense = dn, .prefill = prefill, .prefill_fp8 = prefill_fp8, .prefill_fp8b = prefill_fp8b, .prefill_cast = prefill_cast, .reduce = reduce, .prefill_nax = prefill_nax, .prefill_nax_tiles = prefill_nax_tiles, .decode_nax = decode_nax, .decode_nax_c = decode_nax_c, .decode_nax_tab = decode_nax_tab, .decode_nax_ctab = decode_nax_ctab, .decode_nax_ctab_f = decode_nax_ctab_f, .decode_fma = decode_fma, .decode_fma_static = decode_fma_static, .decode_fma_static_lut = decode_fma_static_lut, .decode_fma_dense = decode_fma_dense, .decode_fma_dense_multi2 = decode_fma_dense_multi2, .decode_fma_dense_multi4 = decode_fma_dense_multi4, .fma_warps = fma_warps, .matvec_nax = matvec_nax, .int8_tile = int8_tile, .matmul_tab = if (table != null) mmt else null, .matmul_wide = if (table != null) mmw else null, .matmul_direct = if (table != null) mmd else null, .matmul_static = if (table != null) mms else null, .matmul_static_lut = if (table != null) mmsl else null, .codebook_table = table, .prefill_nax_db = prefill_nax_db, .prefill_nax_db64 = prefill_nax_db64, .prefill_nax_dense_db = prefill_nax_dense_db, .prefill_nax_dense_rpg2 = prefill_nax_dense_rpg2, .prefill_nax_moe_db = prefill_nax_moe_db, .prefill_nax_funnel = prefill_nax_funnel, .prefill_nax_skip_pad = prefill_nax_skip_pad, .prefill_nax_wide = prefill_nax_wide, .prefill_nax_funnel_only = prefill_nax_funnel_only, .prefill_nax_skip_pad128 = prefill_nax_skip_pad128, .prefill_nax_warp32 = prefill_nax_warp32, .prefill_nax_coop = prefill_nax_coop, .prefill_nax_coop_skip = prefill_nax_coop_skip, .prefill_nax_dense_funnel = prefill_nax_dense_funnel };
+        return .{ .rotate_in = ri, .matmul = mm, .rotate_out = ro, .swiglu_prerotate = sr, .dense = dn, .prefill = prefill, .prefill_fp8 = prefill_fp8, .prefill_cast = prefill_cast, .reduce = reduce, .prefill_nax_tiles = prefill_nax_tiles, .decode_nax = decode_nax, .decode_nax_c = decode_nax_c, .decode_nax_tab = decode_nax_tab, .decode_nax_ctab = decode_nax_ctab, .decode_nax_ctab_f = decode_nax_ctab_f, .decode_fma = decode_fma, .decode_fma_static = decode_fma_static, .decode_fma_static_lut = decode_fma_static_lut, .decode_fma_dense = decode_fma_dense, .decode_fma_dense_multi2 = decode_fma_dense_multi2, .decode_fma_dense_multi4 = decode_fma_dense_multi4, .fma_warps = fma_warps, .matvec_nax = matvec_nax, .int8_tile = int8_tile, .matmul_tab = if (table != null) mmt else null, .matmul_wide = if (table != null) mmw else null, .matmul_direct = if (table != null) mmd else null, .matmul_static = if (table != null) mms else null, .matmul_static_lut = if (table != null) mmsl else null, .codebook_table = table, .prefill_nax_db = prefill_nax_db, .prefill_nax_db64 = prefill_nax_db64, .prefill_nax_dense_db = prefill_nax_dense_db, .prefill_nax_dense_rpg2 = prefill_nax_dense_rpg2, .prefill_nax_moe_db = prefill_nax_moe_db, .prefill_nax_funnel = prefill_nax_funnel, .prefill_nax_skip_pad = prefill_nax_skip_pad, .prefill_nax_wide = prefill_nax_wide, .prefill_nax_funnel_only = prefill_nax_funnel_only, .prefill_nax_skip_pad128 = prefill_nax_skip_pad128, .prefill_nax_warp32 = prefill_nax_warp32, .prefill_nax_coop = prefill_nax_coop, .prefill_nax_coop_skip = prefill_nax_coop_skip, .prefill_nax_dense_funnel = prefill_nax_dense_funnel };
     }
     pub fn deinit(p: *Pipelines) void {
         p.rotate_in.deinit();
         p.matmul.deinit();
         p.rotate_out.deinit();
-        if (p.norm_transform) |v| v.deinit();
         if (p.prefill_fp8) |v| v.deinit();
-        if (p.prefill_fp8b) |v| v.deinit();
         if (p.prefill_cast) |v| v.deinit();
         p.swiglu_prerotate.deinit();
         p.dense.deinit();
         if (p.reduce) |pf| pf.deinit();
         if (p.codebook_table) |b| b.deinit();
         if (p.prefill) |pf| pf.deinit();
-        if (p.prefill_nax) |pf| pf.deinit();
         for (p.prefill_nax_tiles) |maybe| if (maybe) |pf| pf.deinit();
         if (p.prefill_nax_skip_pad128) |pf| pf.deinit();
         if (p.prefill_nax_warp32) |pf| pf.deinit();
@@ -1094,41 +1036,6 @@ fn rowsArgs(k: usize, n: usize, r: Rows, x: View, y: View, scratch: View) !Args 
         .tile_n_stride = 0,
     };
 }
-/// The f32 sums' offset in a call's scratch -- the rotated region rounded to 16 bytes. The fold's caller reads them
-/// with `encodeNormTransform`.
-pub fn sumsOffset(k: usize, rows: usize) usize {
-    return (@as(usize, k) * rows * 2 + 15) & ~@as(usize, 15);
-}
-
-pub const NormTransform = extern struct {
-    n0: u32,
-    n1: u32,
-    k_next: u32,
-    su_signs: u32,
-    sv_signs0: u32,
-    sv_signs1: u32,
-    eps: f32,
-};
-
-/// THE ONE-ROW TRANSFORM FOLD. Reads the merged wq_a+wkv call's f32 sums (its dispatch ran with `no_epilogue`),
-/// writes the output transform of both entries (qr 1280, raw 512), the q_norm of qr, and wq_b's rotated input into
-/// the scratch base, all with the shipped kernels' arithmetic and order (see the metal kernel's header). The next
-/// call runs with `prerotated`.
-pub fn encodeNormTransform(p: *const Pipelines, e: mtl.ComputeEncoder, sums: View, sv0: View, sv1: View, weight: View, su_next: View, qr: View, raw: View, rotated: View, d: NormTransform) !void {
-    const pipe = p.norm_transform orelse return error.UnsupportedExl3Shape;
-    e.setPipeline(pipe);
-    bind(e, sums, 0);
-    bind(e, sv0, 1);
-    bind(e, sv1, 2);
-    bind(e, weight, 3);
-    bind(e, su_next, 4);
-    bind(e, qr, 5);
-    bind(e, raw, 6);
-    bind(e, rotated, 7);
-    e.setValue(d, 8);
-    e.dispatchGroups(.{ .width = 2, .height = 1, .depth = 1 }, .{ .width = 256 });
-}
-
 fn bind(e: mtl.ComputeEncoder, v: View, index: usize) void {
     e.setBuffer(v.buffer, v.offset, index);
 }
@@ -1260,7 +1167,7 @@ pub fn encodeInt8Tile(p: *const Pipelines, e: mtl.ComputeEncoder, m: Matrix, x: 
 /// rotate_out bracket the byte body exactly as the trellis path brackets its GEMM. The row scale is applied by the
 /// body's own epilogue, so an int8 pack's scale never reaches rotate_out a second time.
 pub fn encodePrefillInt8(p: *const Pipelines, e: mtl.ComputeEncoder, m: Matrix, side: Int8, x: View, y: View, scratch: View, r: Rows, direct: bool) !void {
-    if (p.prefill_fp8 == null or p.prefill_fp8b == null) return error.UnsupportedExl3Int8;
+    if (p.prefill_fp8 == null) return error.UnsupportedExl3Int8;
     if (m.k != side.k or m.n != side.n) return error.InvalidExl3Stride;
     var a = try rowsArgs(m.k, m.n, r, x, y, scratch);
     if (r.grouped) return error.InvalidExl3GroupedRows;
@@ -1463,9 +1370,10 @@ fn planBody(p: *const Pipelines, args: Args, r: Rows) Plan {
         const v = std.c.getenv("TF_DSV41_EXL3_FMA_DENSE_MULTI_CEIL") orelse break :blk true;
         break :blk !std.mem.eql(u8, std.mem.span(v), "0");
     };
-    const fma_dense_multi4 = fma_dense_ok and multi_rows == 4 and a.rows >= 4 and (multi_ceil or a.rows % 4 == 0);
-    const fma_dense_multi2 = fma_dense_ok and multi_rows >= 2 and a.rows >= 2 and (multi_ceil or a.rows % 2 == 0) and
-        (multi_rows == 2 or !fma_dense_multi4);
+    const fma_dense_multi4 = fma_dense_ok and p.decode_fma_dense_multi4 != null and multi_rows == 4 and
+        a.rows >= 4 and (multi_ceil or a.rows % 4 == 0);
+    const fma_dense_multi2 = fma_dense_ok and p.decode_fma_dense_multi2 != null and multi_rows >= 2 and
+        a.rows >= 2 and (multi_ceil or a.rows % 2 == 0) and (multi_rows == 2 or !fma_dense_multi4);
     const fma_dense = fma_dense_ok and fmaDenseOn() and !fma_dense_multi4 and !fma_dense_multi2;
     const splits: usize = if (fma or fma_dense or fma_dense_multi2 or fma_dense_multi4) 1 else if (a.indexed == 0 and a.routed == 0 and (a.rows == 1 or (row_invariant and a.rows <= 8)) and p.reduce != null)
         @as(usize, splitOverride() orelse @as(u32, @intCast(if (wide) wide_splits else one_row_splits)))

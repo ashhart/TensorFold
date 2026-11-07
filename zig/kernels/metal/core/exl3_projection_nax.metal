@@ -4915,17 +4915,3 @@ kernel void tf_exl3_matmul_prefill_fp8w(const device half* const x [[buffer(0)]]
   tf_exl3_prefill_body_fp8<true, float>(wx, x, w8, scales, sums, a, lane, sg, tid, tg);
 }
 
-// The same byte body with a bf16 destination, for a pre-rotated pack (TF_DSV41_I8_ROT=1): the row scale is applied in
-// the body's own epilogue, so no rotate_out (Hadamard + svh) and no f32 sums round trip.
-kernel void tf_exl3_matmul_prefill_fp8b(const device half* const x [[buffer(0)]],
-                                        const device uchar* const w8 [[buffer(1)]],
-                                        device bfloat* const y [[buffer(2)]],
-                                        constant TfExl3Args& a [[buffer(3)]],
-                                        const device float* const scales [[buffer(4)]],
-                                        uint lane [[thread_index_in_simdgroup]],
-                                        uint sg [[simdgroup_index_in_threadgroup]],
-                                        uint tid [[thread_index_in_threadgroup]],
-                                        uint3 tg [[threadgroup_position_in_grid]]) {
-  threadgroup half wx[2 * 16 * 64];
-  tf_exl3_prefill_body_fp8<false, bfloat>(wx, x, w8, scales, y, a, lane, sg, tid, tg);
-}

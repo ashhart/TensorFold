@@ -697,7 +697,6 @@ const Stage = struct {
         // resident pipelines; the bits are the separate calls'.
         const qkv_merged = rows == 1 and w.qkv_descriptors != null and exl3.indexedWidthBody(ep) and
             std.c.getenv("TF_DSV41_NO_FUSE_QKV") == null;
-        const norm_fold = qkv_merged and ep.norm_transform != null and std.c.getenv("TF_DSV41_FUSE_NORM_TRANSFORM") != null;
         self.qkv_merged = qkv_merged;
         if (qkv_merged) {
             const fused = work.view(.qkv);
@@ -715,37 +714,25 @@ const Stage = struct {
                     .output_ids = .{ .buffer = work.ids, .offset = 0 },
                     .output_rows = 2,
                     .routes = .{ .ids = .{ .buffer = work.ids, .offset = 0 }, .repeat = 1 },
-                    .no_epilogue = norm_fold,
+                    .no_epilogue = false,
                 });
             }
             qr = fused;
             raw = .{ .buffer = fused.buffer, .offset = fused.offset + c.q_lora * 2 };
-            if (norm_fold) {
-                try exl3.encodeNormTransform(ep, e, .{ .buffer = scratch.buffer, .offset = scratch.offset + exl3.sumsOffset(c.hidden, 2) }, w.wq_a.svh, w.wkv.svh, core(tensor(w.q_norm)), w.wq_b.suh, core(qr), core(raw), .{ .buffer = scratch.buffer, .offset = scratch.offset }, .{
-                    .n0 = c.q_lora,
-                    .n1 = c.head_dim,
-                    .k_next = c.q_lora,
-                    .su_signs = @intFromBool(w.wq_b.suh_format == .packed_signs),
-                    .sv_signs0 = @intFromBool(w.wq_a.svh_format == .packed_signs),
-                    .sv_signs1 = @intFromBool(w.wkv.svh_format == .packed_signs),
-                    .eps = c.eps,
-                });
-                e.barrier();
-            }
         } else for (0..dense_passes) |_| try projection(ep, e, .{ .trellis = w.wq_a }, x, qr, scratch, rows, c.hidden, c.q_lora, .bf16);
         attnMark(layer, "qkv", prof, &e);
         if (diagnostic) try DiagnosticObserver.observe(true, self.observer, e, layer, .qr_projection, qr);
-        if (!norm_fold) norm(p, e, qr, w.q_norm, rows, c.q_lora, c.eps);
+        norm(p, e, qr, w.q_norm, rows, c.q_lora, c.eps);
         if (rows == 1 and std.c.getenv("TF_DSV41_DOUBLE_ATTN_NORM") != null) normRepeat(p, e, qr, dup_view, w.q_norm, rows, c.q_lora, c.eps);
         attnMark(layer, "norm_qr", prof, &e);
         if (wqb_x_debug) |b| {
-            if (layer == 0 and !norm_fold and rows >= 64 and rows <= 2048) {
+            if (layer == 0 and rows >= 64 and rows <= 2048) {
                 ops.encodeDump(e, &p.plain, qr, .{ .buffer = b, .offset = 0 }, rows * c.q_lora, true);
                 wqb_x_rows = rows;
             }
         }
         if (diagnostic) try DiagnosticObserver.observe(true, self.observer, e, layer, .qr_norm, qr);
-        if (norm_fold) try exl3.encode(ep, e, w.wq_b, scratch, core(q), scratch, .{ .count = rows, .x_stride = c.q_lora, .y_stride = q_width, .output = .bf16, .prerotated = true }) else for (0..dense_passes) |_| try projection(ep, e, .{ .trellis = w.wq_b }, qr, q, scratch, rows, c.q_lora, q_width, .bf16);
+        for (0..dense_passes) |_| try projection(ep, e, .{ .trellis = w.wq_b }, qr, q, scratch, rows, c.q_lora, q_width, .bf16);
         attnMark(layer, "wq_b", prof, &e);
         if (diagnostic) try DiagnosticObserver.observe(true, self.observer, e, layer, .q_projection, q);
         try rotate(p, e, q, rows, c.heads, c.head_dim, position, ratio, 1, false, c);

@@ -4,7 +4,6 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     const files = b.addWriteFiles();
     _ = files.addCopyFile(b.path("zig/kernels/metal/core/exl3_projection.metal"), "exl3_projection.metal");
     _ = files.addCopyFile(b.path("zig/kernels/metal/core/exl3_projection_nax.metal"), "exl3_projection_nax.metal");
-    _ = files.addCopyFile(b.path("zig/kernels/metal/core/exl3_projection_nax_i8.metal"), "exl3_projection_nax_i8.metal");
     _ = files.addCopyFile(b.path("zig/kernels/metal/core/exl3_projection_i8.metal"), "exl3_projection_i8.metal");
     _ = files.addCopyFile(b.path("zig/kernels/metal/nax.h"), "nax.h");
     // The engine activation glue, for the fused SwiGLU+rotate differential (its precise silu is the reference).
@@ -13,7 +12,6 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
         .root_source_file = files.add("sources.zig", "pub const core_exl3_projection = @embedFile(\"exl3_projection.metal\");\n" ++
             "pub const core_exl3_projection_i8 = @embedFile(\"exl3_projection_i8.metal\");\n" ++
             "pub const core_exl3_projection_nax = @embedFile(\"exl3_projection_nax.metal\");\n" ++
-            "pub const core_exl3_projection_nax_i8 = @embedFile(\"exl3_projection_nax_i8.metal\");\n" ++
             "pub const nax = @embedFile(\"nax.h\");\n" ++
             "pub const deepseek_v41_ops = @embedFile(\"deepseek_v41_ops.metal\");\n"),
     });
