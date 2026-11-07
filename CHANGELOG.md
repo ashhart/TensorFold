@@ -309,6 +309,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
   is refused by name; `TF_LANE_TRACE` gains a `cancel` line for a request cancelled between two prompt calls (#2458,
   part of #2324). Thanks to @laudney.
 
+- Docs: a reply that quotes a template marker can finish with `ignore_eos` and a stop list for the model's end-of-text and next-turn-open spellings, then a strip of the trailing turn marker; measured on two Qwen checkpoints on a GB10, with the agent-shaped runs reported in #2399 (#2437, refs #2399). Thanks to @javierbits and @robertung88.
+
 ## 1.2.4
 
 - Docs: four subcommand-flag fixes checked against the code: `slide audit --threshold`'s range, `benchmark --context` and `--kv-cache`, `info` on Flash Next, and `run --device` and `--carveout` on CUDA builds (#2348).
