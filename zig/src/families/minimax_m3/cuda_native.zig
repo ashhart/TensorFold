@@ -191,7 +191,7 @@ fn openRank(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     if (p.world > 1) {
         // small gathers by RoCE writes on two ranks, both or neither (TF_ROCE=0: NCCL; TF_ROCE_MAX_KB: the cap)
         own.group = .{ .lib = own.lib.?, .comm = own.comm, .rank = p.rank, .world = p.world };
-        try own.group.?.openRoce(gpa, io, ctx.d, own.e.stream, try roceBytes(if (std.c.getenv("TF_ROCE_MAX_KB")) |v| std.mem.span(v) else null));
+        if (p.world == 2) try own.group.?.openRoce(gpa, io, ctx.d, own.e.stream, try roceBytes(if (std.c.getenv("TF_ROCE_MAX_KB")) |v| std.mem.span(v) else null));
         own.e.exchange = .{ .nccl = .{ .lib = &own.lib.?, .comm = own.comm, .group = &own.group.? } };
     }
     errdefer if (own.group) |*g| if (g.fast) |f| f.deinit();

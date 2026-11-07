@@ -144,8 +144,9 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, e: anytype, dir: []const u8, ran
     var ents = std.StringHashMap(Ent).init(gpa);
     defer ents.deinit();
     try addEntries(names.allocator(), text, size - 8 - hlen, &ents);
-    const split = world == 2;
-    const ff: usize = if (split) FF / 2 else FF;
+    const mlp = df.mlpSplit(world, e.settings.roce_wide); // the MLP split across the ranks, or whole
+    const split = mlp.split;
+    const ff = mlp.ff;
     const small: u64 = 6 * 4096 * 2 + 2 * 128 * 2 + 2 * 2 * 2 * D * 2 + 16 * 256;
     const per: u64 = if (bits == 4) 1 else 4; // quarter-bytes a weight: 4 bits (plus scales and biases below) or bf16
     const lin_elems: u64 = df.QKV * D + 2 * KVW * D + D * D + 2 * ff * D + 2 * KVW * D + 5 * D * D / df.LAYERS;
@@ -154,7 +155,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, e: anytype, dir: []const u8, ran
     errdefer wbuf.free();
     var tmp = try cuda.DeviceBuffer.alloc(d, 2 * FF * D * 2); // the largest linear as stored
     defer tmp.free();
-    var raw = try cuda.DeviceBuffer.alloc(d, df.rawBytes(bits, world));
+    var raw = try cuda.DeviceBuffer.alloc(d, df.rawBytes(bits, world, e.settings.roce_wide));
     defer raw.free();
     var module = try cuda.Module.load(d, cuda.kernels.glm_dflash);
     errdefer module.unload();
@@ -184,7 +185,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, e: anytype, dir: []const u8, ran
         const gate = try layerName(&nb[1], i, "mlp.gate_proj.weight");
         const up = try layerName(&nb[2], i, "mlp.up_proj.weight");
         const down = try layerName(&nb[3], i, "mlp.down_proj.weight");
-        if (split) { // this rank's half of the MLP width: gate and up rows, down columns
+        if (split) { // this rank's share of the MLP width: gate and up rows, down columns, at rank * ff
             lw.gu = try l.linear(&.{ gate, up }, &.{ FF, FF }, D, .{ rank * ff, ff, 0, D });
             lw.down = try l.linearB(&.{down}, &.{D}, FF, .{ 0, 0, rank * ff, ff });
         } else {
@@ -245,7 +246,7 @@ fn carve(dr: *Drafter, d: *const cuda.Driver, head_n: usize) !void {
         .{ "qkv", M * df.QKV * 2 },                                                              .{ "q", M * D * 2 },                        .{ "kb", M * KVW * 2 },              .{ "vb", M * KVW * 2 },
         .{ "att", M * D * 2 },                                                                   .{ "a", M * D * 2 },                        .{ "gu", M * 2 * FF * 2 },           .{ "act", M * FF * 2 },
         .{ "hn", M * D * 2 },                                                                    .{ "xs", M * (D / 64) * 4 },                .{ "g", M * df.RANK * 4 },           .{ "logits", M * head_n * 2 },
-        .{ "part", part },                                                                       .{ "gs", C * 5 * (D / 64) * 4 },            .{ "sums", 2 * M * D * 4 },          .{ "cin", C * df.TAP_ROW },
+        .{ "part", part },                                                                       .{ "gs", C * 5 * (D / 64) * 4 },            .{ "sums", (if (dr.split) dr.world else 1) * M * D * 4 },   .{ "cin", C * df.TAP_ROW },
         .{ "c1", C * D * 2 },                                                                    .{ "ctx", C * D * 2 },                      .{ "ckv", C * 2 * KVW * 2 },         .{ "taps_step", df.STEP_ROWS * df.TAP_ROW },
         .{ "taps_prefill", dr.tap_rows * df.TAP_ROW },                                           .{ "ids", M * 4 },                          .{ "bpos", M * 4 },                  .{ "rings", df.MAX_S * 8 },
         .{ "starts", df.MAX_S * 8 },                                                             .{ "froms", df.MAX_S * 8 },                 .{ "cpos", C * 8 },                  .{ "crings", C * 8 },

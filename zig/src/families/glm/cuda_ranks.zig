@@ -25,6 +25,7 @@ pub const Settings = struct {
     dense_bits: u8 = 16, // TF_GLM_DENSE_BITS: the dense linears packed at load to 4, 6 or 8 bits (16: bf16)
     head_bits: u8 = 16, // TF_GLM_HEAD_BITS: the head, likewise
     roce_multi: bool = false, // TF_GLM_ROCE_MULTI: 1 (three ranks or more: small all-gathers on fabric/tp's multirank RoCE beside NCCL) or 0
+    roce_wide: bool = false, // TF_ROCE=1: at three ranks or more the RoCE gather and the drafter MLP split (two ranks: always)
     kv_host: u8 = 0, // TF_GLM_KV_HOST=1: KV pages in host memory (1); with TF_GLM_KV_HOST_SHARED=1, one copy a host (2)
     kv_host_gib: f64 = 0, // TF_GLM_KV_HOST_GIB: the host pages' GiB (0: one full window)
     l2pf: l2pf.Options = .{}, // TF_GLM_L2PF and its knobs: a decode window's next weights read into L2 beside it
@@ -78,6 +79,7 @@ pub const Settings = struct {
                 return error.BadSetting;
             }
         }
+        if (get("TF_ROCE")) |v| s.roce_wide = std.mem.eql(u8, v, "1");
         if (get("TF_GLM_CHUNK_SOLO")) |v| {
             if (std.mem.eql(u8, v, "4096")) s.solo = true else if (std.mem.eql(u8, v, "2048")) s.solo = false else {
                 problem.* = "TF_GLM_CHUNK_SOLO: 2048 or 4096";
@@ -175,6 +177,11 @@ pub fn environment(name: [:0]const u8) ?[]const u8 {
     return @import("profile").lookup(name);
 }
 
+/// Whether the group brings up its own RoCE path: not where TF_GLM_ROCE_MULTI=1 lends fabric/tp's wire (3+ ranks).
+pub fn ownRoce(s: Settings, world: usize) bool {
+    return !(s.roce_multi and world >= 3);
+}
+
 /// Whether TF_GLM_ROCE_MULTI's wire opens at TF_GLM_WORLD: three ranks or more (cuda_roce_multi); TP=2 stays on NCCL.
 fn wireOpens(get: *const fn ([:0]const u8) ?[]const u8) bool {
     const v = get("TF_GLM_WORLD") orelse return false;
@@ -183,7 +190,7 @@ fn wireOpens(get: *const fn ([:0]const u8) ?[]const u8) bool {
 
 /// What every rank must agree on, as bytes the communicator carries.
 pub const Fingerprint = extern struct {
-    layout: u32 = 19, // this struct's version (18 plus the prompt pair)
+    layout: u32 = 20, // this struct's version (19 plus roce_wide)
     world: u32,
     rank: u32,
     kv8: u32 = 0,
@@ -203,6 +210,7 @@ pub const Fingerprint = extern struct {
     max_videos: u32 = 0,
     max_frames: u32 = 0,
     roce_multi: u32 = 0, // TF_GLM_ROCE_MULTI: every rank opens the borrowed wire or none does (a lone rank would wait on it)
+    roce_wide: u32 = 0, // TF_ROCE=1: three ranks or more split the drafter MLP and gather by RoCE, or none does
     kv_host: u32 = 0, // TF_GLM_KV_HOST(_SHARED): every rank sizes the pool alike and maps the shared file, or none does
     solo: u32 = 0, // TF_GLM_CHUNK_SOLO: rank 0's solo passes need the wider prompt buffers on every rank
     l2pf: [4]u32 = @splat(0), // TF_GLM_L2PF's words: every rank prefetches alike, so none waits on a slower one's windows
@@ -236,6 +244,7 @@ pub const Fingerprint = extern struct {
         max_videos,
         max_frames,
         roce_multi,
+        roce_wide,
         kv_host,
         solo,
         l2pf,
@@ -274,6 +283,7 @@ pub const Fingerprint = extern struct {
             .layers = s.layers,
             .mtp = @intFromBool(mtp),
             .roce_multi = @intFromBool(s.roce_multi),
+            .roce_wide = @intFromBool(s.roce_wide and world >= 3), // two ranks ask by default, so a lone TF_ROCE=1 there is no difference
             .kv_host = s.kv_host,
             .kv_host_gib = s.kv_host_gib,
             .solo = @intFromBool(s.solo),
@@ -316,6 +326,7 @@ pub fn mismatch(all: []const Fingerprint) ?Mismatch {
             "max_videos",
             "max_frames",
             "roce_multi",
+            "roce_wide",
             "kv_host",
             "solo",
             "l2pf",
@@ -438,6 +449,7 @@ fn explain(f: Fingerprint.Field) []const u8 {
         .max_videos => "the video count limit",
         .max_frames => "the frame limit",
         .roce_multi => "TF_GLM_ROCE_MULTI",
+        .roce_wide => "TF_ROCE=1 at three ranks or more (the RoCE gather and the drafter split)",
         .kv_host => "TF_GLM_KV_HOST or TF_GLM_KV_HOST_SHARED",
         .kv_host_gib => "TF_GLM_KV_HOST_GIB",
         .solo => "TF_GLM_CHUNK_SOLO",
