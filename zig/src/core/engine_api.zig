@@ -283,7 +283,7 @@ pub const Open = struct {
     }
     dir: []const u8,
     model_type: []const u8,
-    engram_table_dir: ?[]const u8 = null, // Engram shards: table dir resident, stream dir streamed (--engram-stream-dir)
+    engram_table_dir: ?[]const u8 = null, // Engram shards: table dir resident, stream row by row (--engram-stream-dir)
     engram_stream_dir: ?[]const u8 = null,
     context: ?i64 = null,
     max_frames: ?u32 = null,
