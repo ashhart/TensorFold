@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3.5 and Qwen3.6 on HIP: sampled streams with an MTP head draft on the graphed head chain, as greedy ones do, with the same tokens: 4-12% more tokens a second at temperature 1.0 on gfx1151 (#2455). Thanks to @AbrahamCete.
+
 - Docs: the README's GLM-5.3-Flash Jammed XSFP4 row and the GLM CUDA recipe say it shipped in 1.2.3, not "on main after 1.2.2" (#2451, for #2041). Thanks to @Bizuayeu.
 
 - Internal: HIP record counts are pinned in their owning arrays, so additions in different record files no longer edit a shared numeric total; omissions still fail host checks (#2461).
