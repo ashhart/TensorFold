@@ -190,7 +190,7 @@ not new native serving paths. Flash Next is excluded. This focused run does not 
 Metal: softmax, RMS norm, bf16 top-k, the row projection (3, 4, 6 and 8 bits), affine_mm (4 and 8 bits), simd_qmm (4
 bits) and simd_qmm_bits (3, 6 and 8 bits), and the lane projection (6-bit groups of 32 on every chip; 4- and 8-bit
 formats on the M5's tensor units, where its reg kernel must equal the cooperative one bit for bit), and tile_qmm's
-prompt tiles and their decode twin (4, 6 and 8 bits; the twin bit-equal to the tiles). Gate 5 also holds the rest of
+prompt tiles and their decode twin (4, 6 and 8 bits; the twin bit-equal to the tiles). Gemma 4 E4B's bf16 per-layer linears, its gate with the gelu epilogue and its per-layer table, combine and gelu kernels (`gemma4/dense.metal`, `ple.metal`; `tf-kernel-contract --only "gemma4 E4B"`). Gate 5 also holds the rest of
 tile_qmm's pipelines and GLM-5.3-Flash's hc_expand_10.
 On the M5's tensor units, Metal also checks what nax.h's `mma_16x32` keeps of an fp32 operand
 (`metal_mma_operand.zig`): the left, the right and both (attention's fp32 P, `gemm_nax`'s f32 kernels), each output a

@@ -18,9 +18,10 @@ from transformers.models.gemma4.modeling_gemma4 import Gemma4ForCausalLM
 
 STOPS = {1, 106, 50}
 TEXT = "model.language_model."
+TEXTS = (TEXT, "language_model.model.")  # the second: the prefix of the MLX 4/64 checkpoint
 
 
-def dequantized(raw: np.memmap, base: int, header: dict, name: str, bits: int = 4) -> torch.Tensor:
+def dequantized(raw: np.memmap, base: int, header: dict, name: str, bits: int = 4, fp32: bool = False) -> torch.Tensor:
     """A weight of the MLX 4/64 checkpoint back to bf16: bf16(q * scale + bias) in fp32, as the XPU gathers do."""
     stem = name.removesuffix(".weight")
 
@@ -29,18 +30,21 @@ def dequantized(raw: np.memmap, base: int, header: dict, name: str, bits: int = 
         return raw[base + a : base + b].view(dtype).reshape(header[n]["shape"])
 
     w, s, bi = get(name, np.uint32), get(stem + ".scales", np.uint16), get(stem + ".biases", np.uint16)
-    out = np.empty((w.shape[0], w.shape[1] * 8), dtype=np.uint16)
+    out = np.empty((w.shape[0], w.shape[1] * 8), dtype=np.float32 if fp32 else np.uint16)
     for r in range(0, w.shape[0], 4096):
         blk = w[r : r + 4096]
         q = ((blk[:, :, None] >> (4 * np.arange(8, dtype=np.uint32))) & 15).reshape(blk.shape[0], -1).astype(np.float32)
         sc = (s[r : r + 4096].astype(np.uint32) << 16).view(np.float32).repeat(64, axis=1)
         bs = (bi[r : r + 4096].astype(np.uint32) << 16).view(np.float32).repeat(64, axis=1)
+        if fp32:  # --fp32: q * scale + bias as it is, no bf16 rounding
+            out[r : r + 4096] = q * sc + bs
+            continue
         v = (q * sc + bs).view(np.uint32)
         out[r : r + 4096] = ((v + 0x7FFF + ((v >> 16) & 1)) >> 16).astype(np.uint16)
-    return torch.from_numpy(out).view(torch.bfloat16)
+    return torch.from_numpy(out) if fp32 else torch.from_numpy(out).view(torch.bfloat16)
 
 
-def load_model(src: Path, quant: Path | None = None) -> Gemma4ForCausalLM:
+def load_model(src: Path, quant: Path | None = None, fp32: bool = False) -> Gemma4ForCausalLM:
     config = json.loads((src / "config.json").read_text())["text_config"]
     cfg = Gemma4TextConfig(**config)
     cfg._attn_implementation = "sdpa"
@@ -48,7 +52,7 @@ def load_model(src: Path, quant: Path | None = None) -> Gemma4ForCausalLM:
         from transformers.initialization import no_init_weights
     except ImportError:
         from transformers.modeling_utils import no_init_weights
-    torch.set_default_dtype(torch.bfloat16)
+    torch.set_default_dtype(torch.float32 if fp32 else torch.bfloat16)
     with no_init_weights():
         model = Gemma4ForCausalLM(cfg)
     torch.set_default_dtype(torch.float32)
@@ -61,14 +65,15 @@ def load_model(src: Path, quant: Path | None = None) -> Gemma4ForCausalLM:
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         for name, t in header.items():
-            if not name.startswith(TEXT) or name.endswith((".scales", ".biases")):
+            prefix = next((p for p in TEXTS if name.startswith(p)), None)
+            if not prefix or name.endswith((".scales", ".biases")):
                 continue
             a, b = t["data_offsets"]
             if t["dtype"] == "U32":
-                arr = dequantized(raw, 8 + n, header, name)
+                arr = dequantized(raw, 8 + n, header, name, fp32=fp32)
             else:
                 arr = torch.from_numpy(raw[8 + n + a : 8 + n + b].view(np.uint16).reshape(t["shape"])).view(torch.bfloat16)
-            sd["model." + name[len(TEXT) :]] = arr
+            sd["model." + name[len(prefix) :]] = arr.float() if fp32 else arr
     sd["lm_head.weight"] = sd["model.embed_tokens.weight"]
     missing, unexpected = model.load_state_dict(sd, strict=False, assign=True)
     missing = [m for m in missing if m != "lm_head.weight"]
@@ -136,12 +141,13 @@ def main() -> None:
     p.add_argument("--ranges", action="store_true")
     p.add_argument("--force", type=Path, help="a reference directory: its prompt and generated ids are used as they are (teacher forcing)")
     p.add_argument("--threads", type=int, default=22)
+    p.add_argument("--fp32", action="store_true", help="with --quant: fp32 weights, no bf16 rounding, fp32 forward")
     p.add_argument("--quant", type=Path, help="serve the weights of this MLX 4/64 checkpoint, dequantized (oracle B: same weights as the engine)")
     args = p.parse_args()
     torch.set_num_threads(args.threads)
     args.out.mkdir(parents=True, exist_ok=True)
     tok = AutoTokenizer.from_pretrained(args.model)
-    model = load_model(args.model, args.quant)
+    model = load_model(args.model, args.quant, args.fp32)
     table: dict = {}
     if args.ranges:
         attach_ranges(model, table)

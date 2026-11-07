@@ -203,6 +203,12 @@ pub const Metal = struct {
                 if (snapshot.restore(self.gpa, self.model.queue, snap, cache)) stream.cached = snap.at else |_| stream.reuse_failed = true;
             } else stream.reuse_failed = true;
         }
+        // the E-series' prompt runs on affine_mm's tiles where the row path packed its weights; not the first window
+        const tiles = self.model.weights.head.raw != null and std.c.getenv("GEMMA_E4B_WINDOWS") == null;
+        if (self.model.config.geo.layer_input != 0) {
+            if (!tiles or ids.len <= st.prompt_rows) return self.prefillWindows(stream, cache, ids, sink, true);
+            if (cache.len < st.prompt_rows) try self.prefillWindows(stream, cache, ids[0..st.prompt_rows], sink, false);
+        }
         var spans: std.ArrayList(prompt.Span) = .empty;
         defer spans.deinit(self.gpa);
         const rows_buf = try self.encodeImages(stream, cache.len, &spans);
@@ -215,11 +221,14 @@ pub const Metal = struct {
             for ([_][]const u32{ stream.chunks, stream.reuse.marks }) |cuts| for (cuts) |x| if (x > at and x < end) {
                 end = x;
             };
+            // where fill skips the deep layers (E-series) the last row runs alone, the rows before it filling the cache
+            if (end == ids.len and end - at > 1 and self.model.deepFrom() < self.model.config.geo.layers) end -= 1;
             // an image's rows see each other on sliding layers: no cut inside one (before it, or past it when it leads)
             for (spans.items) |span| if (span.at < end and span.at + span.n > end) {
                 end = if (span.at > at) span.at else span.at + span.n;
             };
-            try prompt.run(self.model, &self.prompt_scratch, cache, ids[at..end], spans.items);
+            const chunk = ids[at..end];
+            if (end == ids.len) try prompt.run(self.model, &self.prompt_scratch, cache, chunk, spans.items) else try prompt.fill(self.model, &self.prompt_scratch, cache, chunk, spans.items);
             if (sink) |k| {
                 const width = self.tapBytes();
                 const rows = self.prompt_scratch.taps.?;
@@ -236,6 +245,26 @@ pub const Metal = struct {
             if (std.mem.indexOfScalar(u32, stream.reuse.marks, @intCast(cache.len)) != null) if (stream.reuse.hook) |k| k.at(k.ptr, stream, @intCast(cache.len));
         }
         @memcpy(cache.logits.slice(u16, cfg.vocab), self.prompt_scratch.logits.slice(u16, cfg.vocab));
+    }
+
+    /// The E-series' prompt in decode windows of up to 128 rows, each a decode step's, cut at planned starts and marks.
+    fn prefillWindows(self: *Metal, stream: *lanes.Stream, cache: *st.Cache, ids: []const u32, sink: ?be.FeatureSink, final: bool) !void {
+        if (sink != null or stream.images.len != 0) return error.InvalidGemmaPrompt; // no drafter taps and no image input here
+        var at: usize = cache.len;
+        var last: usize = 0;
+        while (at < ids.len) {
+            if (stream.isCancelled()) return error.Cancelled;
+            var end = @min(ids.len, at + st.prompt_rows);
+            for ([_][]const u32{ stream.chunks, stream.reuse.marks }) |cuts| for (cuts) |x| if (x > at and x < end) {
+                end = x;
+            };
+            if (final and end == ids.len) try fwd.promptWindow(self.model, &self.scratch, cache, ids[at..end], at) else try fwd.fillWindow(self.model, &self.scratch, cache, ids[at..end], at);
+            last = end - 1 - at;
+            lanes.prefill_widths.completed(self.gpa, stream, end - at);
+            at = end;
+            if (std.mem.indexOfScalar(u32, stream.reuse.marks, @intCast(cache.len)) != null) if (stream.reuse.hook) |k| k.at(k.ptr, stream, @intCast(cache.len));
+        }
+        if (final) @memcpy(cache.logits.slice(u16, cfg.vocab), self.scratch.logits.slice(u16, st.prompt_rows * cfg.vocab)[last * cfg.vocab ..][0..cfg.vocab]);
     }
 
     /// The stream's images from `from` on through the tower into one buffer of rows (null: none), a span each.

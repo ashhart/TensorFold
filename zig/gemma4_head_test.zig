@@ -88,6 +88,10 @@ fn simdPipes() row.simd_bits.Pipelines {
     for (&p.built) |*a| for (a) |*b| for (b) |*c| for (c) |*v| {
         v.* = .{ .id = 101 };
     };
+    // The scalar twin one- and two-row windows take, prebuilt too: the fake compiles nothing.
+    for (&p.scalar) |*a| for (a) |*b| for (b) |*c| for (c) |*v| {
+        v.* = .{ .id = 102 };
+    };
     return p;
 }
 fn projection() lane.Projection {

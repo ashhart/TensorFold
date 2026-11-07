@@ -25,6 +25,7 @@ test {
     _ = config;
     _ = dflash_weights;
     _ = image;
+    _ = @import("model.zig");
     _ = snapshot;
     _ = vision;
 }

@@ -208,15 +208,11 @@ pub fn main(init: std.process.Init) !u8 {
             try gemma.append(a, device, queue, v, true, &gemma_list, &kernels);
         }
     }
-    var embeddings: [24]gemma_embed.Probe = undefined;
-    var embed_made: usize = 0;
-    defer for (embeddings[0..embed_made]) |*p| p.deinit();
-    for (gemma_embed.entries) |v| {
-        if (!wanted(o, v.name)) continue;
-        embeddings[embed_made] = try gemma_embed.Probe.init(a, device, queue, v);
-        embed_made += 1;
-    }
-    for (embeddings[0..embed_made]) |*p| try kernels.append(a, p.kernel());
+    var embeddings: gemma_embed.Suite = .{};
+    defer embeddings.deinit();
+    try embeddings.collect(a, device, queue, o.only, &kernels);
+    const ple = try @import("metal_gemma4_ple_set.zig").Set.register(a, device, queue, o.only, &kernels);
+    defer ple.deinit(a);
     var mixed = gemma_mixed.Probe.init(a, device, queue);
     defer mixed.deinit();
     if (wanted(o, mixed.kernel().spec.name)) {
@@ -588,6 +584,7 @@ pub fn main(init: std.process.Init) !u8 {
         lim += try gemma_embed.limits(a, device, o.only);
         lim += try gemma_mixed.limits(a, device, o.only);
         lim += try llama_k.limits(a, device, tensor, o.only);
+        lim += try @import("metal_gemma4_ple_set.zig").limits(a, device, o.only);
     }
     const t2 = std.Io.Clock.awake.now(init.io);
     const ms = struct {

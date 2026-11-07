@@ -16,6 +16,10 @@ pub const kv_pages = @embedFile("core/kv_pages.h");
 pub const qwen35_paged = @embedFile("qwen3_5/layout.metal") ++ kv_pages ++ @embedFile("qwen3_5/paged.metal");
 /// Gemma 4 dense decode glue around the core lane projections (families/gemma4/kernels.zig).
 pub const gemma4_glue = @embedFile("gemma4/glue.metal");
+/// Gemma 4 E4B's per-layer inputs (families/gemma4/kernels.zig).
+pub const gemma4_ple = @embedFile("gemma4/ple.metal");
+/// Gemma 4 E4B's bf16 per-layer linears, one simdgroup per four columns (families/gemma4/kernels.zig).
+pub const gemma4_dense = @embedFile("gemma4/dense.metal");
 /// Gemma 4 decode glue as the reg lane kernel's prologues and epilogue (families/gemma4/weights.zig).
 pub const gemma4_fused = @embedFile("gemma4/fused.metal");
 /// Gemma 4 prompt attention on the tensor units (families/gemma4/kernels.zig).

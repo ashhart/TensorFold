@@ -1,4 +1,4 @@
-//! Gemma 4 dense (31B, 12B) on the lane host: windows of up to 16 rows, several streams a forward, external drafts.
+//! Gemma 4 (31B, 12B, E4B) on the lane host: windows of up to 16 rows, several streams a forward, external drafts.
 const std = @import("std");
 const mtl = @import("metal");
 const api = @import("engine_api");
@@ -66,7 +66,11 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
 /// The host, or error.Refused once `problem` says why; either error path releases what was made before it.
 fn start(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !*Host {
     const model = g.Model.load(gpa, io, o.dir) catch |err| {
-        problem.* = try std.fmt.allocPrint(a, "the native Gemma 4 engine cannot load this checkpoint ({s}): it serves Gemma 4 31B and 12B as MLX affine 2-6 or 8 bits in groups of 64, uniform or per module", .{@errorName(err)});
+        if (err == error.GemmaE4bNotQualifiedWithTensorUnits) {
+            problem.* = "Gemma 4 E4B is not qualified on chips with tensor units (M5); it runs on M1 to M4";
+            return error.Refused;
+        }
+        problem.* = try std.fmt.allocPrint(a, "the native Gemma 4 engine cannot load this checkpoint ({s}): it serves Gemma 4 31B, 12B and E4B as MLX affine 2-6 or 8 bits in groups of 64, uniform or per module (the E4B's per-layer linears bf16)", .{@errorName(err)});
         return error.Refused;
     };
     errdefer model.deinit();
@@ -97,6 +101,10 @@ fn start(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, 
     h.wrap = null;
     h.resident = null;
     const draft_dir = if (o.drafts) o.drafter else null;
+    if (draft_dir != null and model.config.geo.layer_input != 0) {
+        problem.* = "--drafter: the Gemma 4 E4B has no drafter on Metal (the MTP assistant drafts for the 12B and DFlash for the 31B)";
+        return error.Refused;
+    }
     const assistant = if (draft_dir) |dir| g.assistant_weights.isAssistant(a, io, dir) catch false else false;
     if (draft_dir) |dir| if (assistant) {
         h.assist = g.assistant.Drafter.init(gpa, io, h.metal, dir) catch |err| {
