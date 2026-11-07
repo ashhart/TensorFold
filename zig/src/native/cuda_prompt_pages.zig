@@ -53,6 +53,18 @@ pub const Adapter = struct {
         return x;
     }
 
+    /// TF_KV_SHARE's store kept on the prompt chunks' grid, or why it refuses: a chunk off the pool's pages.
+    pub fn openOnGrid(comptime F: type, gpa: Allocator, target: anytype, page_tokens: u32, chunk: u32, a: Allocator, problem: *[]const u8) !*Adapter {
+        if (chunk % page_tokens != 0) {
+            problem.* = try std.fmt.allocPrint(a, "TF_KV_SHARE keeps prompts as whole pool pages on the prompt chunks' grid, and this Mac's chunk of {d} rows is not a multiple of the pool's {d}-token pages: serve without TF_KV_SHARE", .{ chunk, page_tokens });
+            return error.ChunkOffPages;
+        }
+        const x = (try open(F, gpa, target, page_tokens, try hooks.sharing())).?;
+        x.store.rules.planned = true; // a resume's seams are a cold pass's, its tokens too
+        x.store.rules.grid = chunk;
+        return x;
+    }
+
     fn Detach(comptime F: type) type {
         return struct {
             fn call(target: *anyopaque) void {

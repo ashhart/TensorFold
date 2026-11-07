@@ -16,7 +16,6 @@ const learners = metal_slide.Registry(.{nemotron});
 const cache_fit = @import("cache_fit.zig");
 const metal_admit = @import("metal_admit.zig");
 const Resident = @import("resident.zig").Resident;
-const nemo_disk = @import("nemotron_disk.zig");
 const prompt_pages = @import("cuda_prompt_pages.zig"); // the family-side store adapter, over the core pool as on CUDA
 const fsr_options = @import("fsr_options.zig");
 const linkProblem = @import("metal_link.zig").problem;
@@ -267,19 +266,12 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     }
     h.prompts = null;
     if (share and plan.budget_bytes > 0) {
-        if (h.metal.o.chunk % paged.?.layout.page_tokens != 0) {
-            problem.* = try std.fmt.allocPrint(a, "TF_KV_SHARE keeps prompts as whole pool pages on the prompt chunks' grid, and this Mac's chunk of {d} rows is not a multiple of the pool's {d}-token pages: serve without TF_KV_SHARE", .{ h.metal.o.chunk, paged.?.layout.page_tokens });
-            return error.ChunkOffPages;
-        }
-        const x = (try prompt_pages.Adapter.open(nemotron.snapshot.Shared, gpa, h.metal, @intCast(paged.?.layout.page_tokens), try tf.kv_prompts.sharing())).?;
-        h.prompts = x;
-        x.store.rules.planned = true; // kept on the prompt chunks' grid: a resume's seams are a cold pass's, its tokens too
-        x.store.rules.grid = @intCast(h.metal.o.chunk);
+        h.prompts = try prompt_pages.Adapter.openOnGrid(nemotron.snapshot.Shared, gpa, h.metal, @intCast(paged.?.layout.page_tokens), @intCast(h.metal.o.chunk), a, problem);
         h.host.info_.prompt_cache = true;
     } else if (plan.budget_bytes > 0) {
         const S = nemotron.snapshot.Cached;
         const L = nemotron.learned_prompts;
-        h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = h.metal, .vtable = &.{ .bytes = S.snapBytes, .save = S.snapSave, .restore = S.snapRestore, .drop = S.snapDrop, .write = L.snapWrite, .read = L.snapRead, .forget = L.snapForget, .forget_checked = api.prompt_cache.singleForgetChecked, .reclaim = api.prompt_cache.singleReclaim, .rows = &nemo_disk.image } }, .{ .lookahead = 1, .planned = true }, plan.budget_bytes);
+        h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = h.metal, .vtable = &.{ .bytes = S.snapBytes, .save = S.snapSave, .restore = S.snapRestore, .drop = S.snapDrop, .write = L.snapWrite, .read = L.snapRead, .forget = L.snapForget, .forget_checked = api.prompt_cache.singleForgetChecked, .reclaim = api.prompt_cache.singleReclaim, .rows = &@import("nemotron_disk.zig").image } }, .{ .lookahead = 1, .planned = true }, plan.budget_bytes);
         h.host.cache = &h.cache.?; // the lane host's store: a Sliding Weights step that moves weights clears it
         h.host.info_.prompt_cache = true;
     }
