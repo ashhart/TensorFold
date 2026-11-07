@@ -268,7 +268,7 @@ pub const Copy = struct {
             const dev = arena.ptr() + @as(u64, c.lease.ids.items[@intCast(x / pages.page)]) * pages.page + x % pages.page;
             const p = host[done..][0..n];
             if (out) {
-                try c.d.check(c.d.api.cuMemcpyDtoH_v2(p.ptr, dev, n), "cuMemcpyDtoH");
+                try cuda.memory.download(c.d, dev, p); // staged through the pinned buffer on an integrated GPU
             } else try c.d.check(c.d.api.cuMemcpyHtoD_v2(dev, p.ptr, n), "cuMemcpyHtoD");
             done += n;
         }
