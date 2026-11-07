@@ -279,10 +279,7 @@ pub const Backend = struct {
         // (beginSnapTail). A tail in another class (the store leaves snap_at 0 there) keeps today's cut, as does an
         // env control.
         const merge_cold = std.c.getenv("TF_DSV41_SNAP_COLD") == null;
-        // TF_DSV41_SNAP_TOGGLE + the file /tmp/r503-nomerge lets ONE process run both arms (the box's one serve at
-        // a time would otherwise need two boots to compare states).
-        const toggled_off = std.c.getenv("TF_DSV41_SNAP_TOGGLE") != null and std.c.access("/tmp/r503-nomerge", 0) == 0;
-        const snap_at: u32 = if (std.c.getenv("TF_DSV41_NO_TAIL_SNAP") == null and !toggled_off and b.model.snapTailAllowed() and (merge_cold or s.reuse.at > 0)) s.reuse.snap_at else 0;
+        const snap_at: u32 = if (std.c.getenv("TF_DSV41_NO_TAIL_SNAP") == null and b.model.snapTailAllowed() and (merge_cold or s.reuse.at > 0)) s.reuse.snap_at else 0;
         while (at < prompt.len) {
             if (s.isCancelled()) return error.Cancelled;
             var end = @min(at + rows, @as(u32, @intCast(prompt.len)));
