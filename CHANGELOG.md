@@ -134,10 +134,10 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - The CUDA Qwen3.5 lanes fill readout prompts in pieces for the joint schema head that follows: from row 0, each
   piece's final-norm rows to the readout, 1,024 rows a piece unless the lane host caps it, as on HIP (#2384, part of
   #2324). Thanks to @laudney.
-- Clef-Flash on CUDA: `POST /v1/systemone` serves Cloudflare's BF16 `clef-flash` on one GB10 with its joint schema
-  head on the GPU (HIP's kernels and products, on cuBLASLt with FP32 compute), and chat is refused by name;
-  `TF_LANE_TRACE` gains a `cancel` line for a request cancelled between two prompt calls (#2458, part of #2324).
-  Thanks to @laudney.
+- Clef-Flash on CUDA: `POST /v1/systemone` serves Cloudflare's BF16 `clef-flash` on one NVIDIA GPU (checked on a
+  GB10) with its joint schema head on the GPU (HIP's kernels and products, on cuBLASLt with FP32 compute), and chat
+  is refused by name; `TF_LANE_TRACE` gains a `cancel` line for a request cancelled between two prompt calls (#2458,
+  part of #2324). Thanks to @laudney.
 
 ## 1.2.4
 
