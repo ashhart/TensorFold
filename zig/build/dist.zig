@@ -36,7 +36,7 @@ pub fn server(b: *std.Build, target: std.Build.ResolvedTarget, ids: *std.Build.M
 pub fn targets(b: *std.Build, ids: *std.Build.Module, options: *std.Build.Step.Options, version: ?[]const u8, xgrammar: ?[]const u8) void {
     const privacy = @import("cuda_release_paths.zig").checker(b);
     const package_tests = b.addSystemCommand(&.{"python3"});
-    package_tests.addFileArg(b.path("tools/release/test_package.py"));
+    package_tests.addFileArg(b.path("tools/release/check_package.py"));
     package_tests.addPrefixedFileArg("--path-checker=", privacy.getEmittedBin());
     package_tests.has_side_effects = true;
     b.step("test-dist-package", "CPU regression for repeated same-version archives and bundled notices").dependOn(&package_tests.step);

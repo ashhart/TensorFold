@@ -120,6 +120,11 @@ jobs:
         run: zig build -Dfixed-cpu fuzz-cortheon
       - name: Served Flash Next gate regressions
         run: python3 -m unittest discover -s tools/zig -p flashnext_batch_serve_test.py
+      - name: pytest from the root, as an outside evaluator runs it
+        run: |
+          python3 -m venv "$RUNNER_TEMP/pytest"
+          "$RUNNER_TEMP/pytest/bin/pip" install --quiet pytest
+          "$RUNNER_TEMP/pytest/bin/python" -m pytest -q -p no:cacheprovider
       # The generated Engram tables: committing a table that its generator no longer reproduces is a silent drift.
       # The generator refuses any unicodedata but the pinned 16.0.0, which 3.14 carries and 3.12/3.13 do not.
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0

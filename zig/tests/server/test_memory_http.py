@@ -64,9 +64,14 @@ class ListenerStartup(unittest.TestCase):
             listener_port(proc, timeout=0.1)
 
 
+BINARY = FIXTURES = None  # set from the command line: python3 test_memory_http.py FAKE_SERVE FIXTURES
+
+
 class MemoryHTTP(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        if BINARY is None:
+            raise unittest.SkipTest("needs a fake-serve binary and fixtures: test_memory_http.py FAKE_SERVE FIXTURES")
         cls.proc = spawn_server([str(BINARY), "serve", str(FIXTURES), "--name", "fixture", "--port", "0",
                                      "--host", "127.0.0.1", "--api-key", "public-test-key", "--metrics-open",
                                      "--keep-warm", "0"],
