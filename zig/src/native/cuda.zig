@@ -24,7 +24,7 @@ const drafted = @import("cuda_drafted.zig");
 const kv_pages = @import("cuda_kv_pool.zig");
 const cuda_families = @import("cuda_families.zig");
 /// CUDA families provide metadata, open their lane backend and explain their refusals.
-const registry = cuda_families.registry;
+pub const registry = cuda_families.registry;
 /// --record opens here (engines.zig refuses it for a backend without this).
 pub const records = true;
 pub const backends: []const []const u8 = &.{"cuda"};
@@ -432,7 +432,6 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         std.log.info("recording each stream's rows under {s}/{s}", .{ dir, r.recorder.name });
     }
     errdefer if (h.recording) |r| r.free(gpa);
-    // the family cuts its own prompt grid from position 0, as `tensorfold run` does: prefill_step 0
     const admit: ?api.Admit = if (comptime !@hasDecl(F, "fits")) null else if (paged != null) .{ .ctx = loaded.ctx, .fits = F.fits } else null;
     h.kv = kv_pages.watchOf(F, loaded, paged);
     h.kv_count = if (admit != null) kv_pages.ledgerPool(F, loaded) else null;
@@ -443,6 +442,8 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         .lanes = streams,
         .draft_sources = .{ .drafter = served.source },
         .context_window = @intCast(window),
+        .prefill_step = snaps.requestStep(F),
+        .prefill_min_chunk = snaps.requestMinimum(F),
         .startup = h.startup,
         .policy = if (@hasField(@TypeOf(loaded), "policy")) loaded.policy else "",
         .prompt_cache = h.store != null,

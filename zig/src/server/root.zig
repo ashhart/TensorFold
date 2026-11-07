@@ -249,3 +249,7 @@ test {
     _ = @import("penalty_request_test.zig");
     _ = @import("deepseek_fixture_test.zig");
 }
+
+test {
+    _ = @import("request_starts_turns_test.zig");
+}

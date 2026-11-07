@@ -281,6 +281,10 @@ below; these are estimates for planning a port, not results.
    `--learn-conversations` today. Flash Next already resumes a prefix from the host store's whole-state copies; on the
    shared store a kept 32k state would stop duplicating about 0.9 GiB of attention rows (27 KiB a token).
 
+   Qwen CUDA's host-copy path can instead opt into message-start cuts with `TF_QWEN_REQUEST_STARTS=1`
+   (#2176). Later turns closer than 256 tokens now keep their own history cuts; host checks pass and the six-turn
+   device gate is pending. This mode remains incompatible with `TF_QWEN_KV_SHARE`.
+
 4. **Prompt states in device memory on integrated GPUs.** On a GB10 the device and host share memory, so a kept
    state can stay where it is instead of being copied through pinned host memory on every save ([#2043]). On Qwen
    CUDA this takes 1.6–2.1 % off 8k and 32k prompts ([#2113]). Metal is unified already.

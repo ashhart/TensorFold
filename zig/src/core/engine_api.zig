@@ -193,6 +193,8 @@ pub const Info = struct {
     prompt_logprobs: bool = false,
     /// Prompt rows a prefill chunk at most, for the server's chunk starts (0: the engine cuts prompts itself).
     prefill_step: u32 = 0,
+    /// The minimum distance between template message cuts; exact-start families may keep adjacent turns.
+    prefill_min_chunk: u32 = 256,
     /// The engine keeps prompt states between requests, so ``prefilled`` counts the tokens it restored.
     prompt_cache: bool = false,
     /// Startup cache budget and the smallest state admitted by the family's existing keep plan.
