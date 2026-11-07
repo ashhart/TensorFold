@@ -11,36 +11,17 @@ namespace tf_nvfp4_experts {
 
 constexpr int BLOCK4 = 36;
 
-__device__ __forceinline__ uint4 ld_nc(const uint4* p) { return tf_common::ld_nc(p); }
-
 using tf_common::fp4pair;
 
 using tf_common::e4m3f;
 
-template <int M>
+// A k32 group's stage: the lane's words (Word = uint2 for half a unit's two n8 tiles), its scales and inputs.
+template <int M, typename Word = uint4>
 struct Stage {
-  uint4 w[M];
+  Word w[M];
   uint4 s[M];
   uint2 xa[2], xb[2];
 };
-
-template <int M>
-__device__ __forceinline__ void load_stage(Stage<M>& st, const uint4* blk, int g, int lane, int t,
-                                           const __nv_bfloat16* x0, const __nv_bfloat16* x1, bool v0, bool v1) {
-  const uint4* b = blk + (size_t)g * (M * BLOCK4);
-#pragma unroll
-  for (int m = 0; m < M; ++m) {
-    st.w[m] = ld_nc(b + m * BLOCK4 + lane);
-    st.s[m] = ld_nc(b + m * BLOCK4 + 32 + t);
-  }
-  const uint2 zero = make_uint2(0u, 0u);
-  const int k0 = g * 32 + 4 * t;
-#pragma unroll
-  for (int h = 0; h < 2; ++h) {
-    st.xa[h] = v0 ? __ldg(reinterpret_cast<const uint2*>(x0 + k0 + 16 * h)) : zero;
-    st.xb[h] = v1 ? __ldg(reinterpret_cast<const uint2*>(x1 + k0 + 16 * h)) : zero;
-  }
-}
 
 template <int M>
 __device__ __forceinline__ void compute_stage(float (&acc)[M][1][NTW][4], const Stage<M>& st, bool hi) {
@@ -68,33 +49,75 @@ __device__ __forceinline__ void compute_stage(float (&acc)[M][1][NTW][4], const 
     }
 }
 
-template <int M>
-__device__ __forceinline__ void k_loop(float (&acc)[M][1][NTW][4], const uint4* blk, int KG, int lane, int t,
-                                       const __nv_bfloat16* x0, const __nv_bfloat16* x1, bool v0, bool v1) {
-  constexpr int D = 2;
-  Stage<M> st[D];
+// A warp's ring of D shared k32 stages, filled by cp.async: the next D - 1 groups load while one group sums.
+template <int M, int WARPS, typename Word>
+struct Ring {
+  static constexpr int D = 4;
+  Word w[WARPS][D][M][32];   // a lane's words
+  uint4 s[WARPS][D][M][4];   // the group's scales, read by t
+  uint2 x[WARPS][D][4][32];  // a lane's x0 then x1 inputs, h = 0 and 1
+
+  // Group g into stage g % D: words (half jh of each lane's uint4 when Word is uint2), scales, the rows' inputs.
+  __device__ __forceinline__ void issue(int g, int wi, int lane, int t, int jh, const uint4* blk,
+                                        const __nv_bfloat16* x0, const __nv_bfloat16* x1, bool v0, bool v1) {
+    const uint4* b = blk + (size_t)g * (M * BLOCK4);
+    const int d = g % D, k0 = g * 32 + 4 * t;
 #pragma unroll
-  for (int d = 0; d < D; ++d)
-    if (d < KG) load_stage<M>(st[d], blk, d, lane, t, x0, x1, v0, v1);
-  for (int g0 = 0; g0 < KG; g0 += D) {
+    for (int m = 0; m < M; ++m) {
+      if constexpr (sizeof(Word) == 16)
+        tf_common::cp16(&w[wi][d][m][lane], b + m * BLOCK4 + lane);
+      else
+        tf_common::cp8(&w[wi][d][m][lane], reinterpret_cast<const uint2*>(b + m * BLOCK4 + lane) + jh);
+      if (lane < 4) tf_common::cp16(&s[wi][d][m][lane], b + m * BLOCK4 + 32 + lane);
+    }
 #pragma unroll
-    for (int d = 0; d < D; ++d) {
-      const int g = g0 + d;
-      if (g < KG) {
-        compute_stage<M>(acc, st[d], v1);
-        if (g + D < KG) load_stage<M>(st[d], blk, g + D, lane, t, x0, x1, v0, v1);
-      }
+    for (int h = 0; h < 2; ++h) {
+      if (v0) tf_common::cp8(&x[wi][d][h][lane], x0 + k0 + 16 * h);
+      if (v1) tf_common::cp8(&x[wi][d][2 + h][lane], x1 + k0 + 16 * h);
     }
   }
-}
+
+  // All KG groups in k order: `sum` takes each group's stage once its loads land.
+  template <typename Sum>
+  __device__ __forceinline__ void run(int KG, int wi, int lane, int t, int jh, const uint4* blk,
+                                      const __nv_bfloat16* x0, const __nv_bfloat16* x1, bool v0, bool v1, Sum sum) {
+#pragma unroll
+    for (int d = 0; d < D - 1; ++d) {
+      if (d < KG) issue(d, wi, lane, t, jh, blk, x0, x1, v0, v1);
+      tf_common::cp_commit();
+    }
+    const uint2 zero = make_uint2(0u, 0u);
+    for (int g = 0; g < KG; ++g) {
+      if (g + D - 1 < KG) issue(g + D - 1, wi, lane, t, jh, blk, x0, x1, v0, v1);
+      tf_common::cp_commit();
+      tf_common::cp_wait<D - 1>();
+      __syncwarp();
+      const int d = g % D;
+      Stage<M, Word> st;
+#pragma unroll
+      for (int m = 0; m < M; ++m) {
+        st.w[m] = w[wi][d][m][lane];
+        st.s[m] = s[wi][d][m][t];
+      }
+#pragma unroll
+      for (int h = 0; h < 2; ++h) {
+        st.xa[h] = v0 ? x[wi][d][h][lane] : zero;
+        st.xb[h] = v1 ? x[wi][d][2 + h][lane] : zero;
+      }
+      sum(st);
+      __syncwarp();  // every lane has read stage d before the next issue refills it
+    }
+  }
+};
 
 // One unit of the decode form: a warp's 32 columns of item `unit / NB` over all K, then the epilogue.
-template <int M, int EPI>
-__device__ __forceinline__ void unit_full(int unit, int lane, int gq, int t, const __nv_bfloat16* __restrict__ X,
-                                          int x_stride, int slots, const uint4* __restrict__ W,
-                                          const float* __restrict__ scale, int KG, int NB, const int* __restrict__ items,
-                                          const int* __restrict__ members, void* __restrict__ out, int N, float limit,
-                                          int skip) {
+template <int M, int EPI, int WARPS>
+__device__ __forceinline__ void unit_full(int unit, int lane, int gq, int t, int wi,
+                                          const __nv_bfloat16* __restrict__ X, int x_stride, int slots,
+                                          const uint4* __restrict__ W, const float* __restrict__ scale, int KG, int NB,
+                                          const int* __restrict__ items, const int* __restrict__ members,
+                                          void* __restrict__ out, int N, float limit, int skip) {
+  __shared__ Ring<M, WARPS, uint4> ring;
   const int it = unit / NB, cb = unit - it * NB;
   const int e = __ldg(items + 3 * it), first = __ldg(items + 3 * it + 1), cnt = __ldg(items + 3 * it + 2);
   if (e == skip) return;
@@ -111,7 +134,7 @@ __device__ __forceinline__ void unit_full(int unit, int lane, int gq, int t, con
     for (int m = 0; m < M; ++m)
 #pragma unroll
       for (int j = 0; j < NTW; ++j) acc[m][0][j][0] = acc[m][0][j][1] = acc[m][0][j][2] = acc[m][0][j][3] = 0.f;
-    k_loop<M>(acc, blk, KG, lane, t, x0, x1, v0, v1);
+    ring.run(KG, wi, lane, t, 0, blk, x0, x1, v0, v1, [&](const Stage<M>& st) { compute_stage<M>(acc, st, v1); });
 #pragma unroll
     for (int m = 0; m < M; ++m) {
       const float g = __ldg(scale + e * M + m);
@@ -133,7 +156,8 @@ __global__ void __launch_bounds__(WARPS * 32)
   const int lane = threadIdx.x & 31, gq = lane >> 2, t = lane & 3;
   const int units = __ldg(counts) * NB;
   for (int unit = blockIdx.x * WARPS + (threadIdx.x >> 5); unit < units; unit += gridDim.x * WARPS)
-    unit_full<M, EPI>(unit, lane, gq, t, X, x_stride, slots, W, scale, KG, NB, items, members, out, N, limit, skip);
+    unit_full<M, EPI, WARPS>(unit, lane, gq, t, threadIdx.x >> 5, X, x_stride, slots, W, scale, KG, NB, items,
+                             members, out, N, limit, skip);
 }
 
 // The decode form's units dealt in equal waves: ceil(units / waves) warps run, the others leave at once.
@@ -150,36 +174,13 @@ __global__ void __launch_bounds__(WARPS * 32)
   const int run = (units + waves - 1) / waves, w = blockIdx.x * WARPS + (threadIdx.x >> 5);
   if (w >= run) return;
   for (int unit = w; unit < units; unit += run)
-    unit_full<M, EPI>(unit, lane, gq, t, X, x_stride, slots, W, scale, KG, NB, items, members, out, N, limit, skip);
+    unit_full<M, EPI, WARPS>(unit, lane, gq, t, threadIdx.x >> 5, X, x_stride, slots, W, scale, KG, NB, items,
+                             members, out, N, limit, skip);
 }
 
 // Half a unit's stage: the lane's words of n8 tiles 2jh and 2jh + 1, all its scales, its inputs.
 template <int M>
-struct Half {
-  uint2 w[M];
-  uint4 s[M];
-  uint2 xa[2], xb[2];
-};
-
-__device__ __forceinline__ uint2 ld_nc2(const void* p) { return tf_common::ld_nc2(p); }
-
-template <int M>
-__device__ __forceinline__ void load_half(Half<M>& st, const uint4* blk, int g, int lane, int t, int jh,
-                                          const __nv_bfloat16* x0, const __nv_bfloat16* x1, bool v0, bool v1) {
-  const uint4* b = blk + (size_t)g * (M * BLOCK4);
-#pragma unroll
-  for (int m = 0; m < M; ++m) {
-    st.w[m] = ld_nc2(reinterpret_cast<const uint2*>(b + m * BLOCK4 + lane) + jh);
-    st.s[m] = ld_nc(b + m * BLOCK4 + 32 + t);
-  }
-  const uint2 zero = make_uint2(0u, 0u);
-  const int k0 = g * 32 + 4 * t;
-#pragma unroll
-  for (int h = 0; h < 2; ++h) {
-    st.xa[h] = v0 ? __ldg(reinterpret_cast<const uint2*>(x0 + k0 + 16 * h)) : zero;
-    st.xb[h] = v1 ? __ldg(reinterpret_cast<const uint2*>(x1 + k0 + 16 * h)) : zero;
-  }
-}
+using Half = Stage<M, uint2>;
 
 // compute_stage's sums for tiles j = 2jh + jj: scale word 2h + jh, byte pair jj * 16.
 template <int M>
@@ -248,10 +249,10 @@ __global__ void __launch_bounds__(WARPS * 32)
                       const float* __restrict__ scale, int KG, int NB, const int* __restrict__ items,
                       const int* __restrict__ counts, const int* __restrict__ members, void* __restrict__ out, int N,
                       float limit, int skip) {
-  constexpr int D = 2;
-  const int lane = threadIdx.x & 31, gq = lane >> 2, t = lane & 3;
+  __shared__ Ring<M, WARPS, uint2> ring;
+  const int lane = threadIdx.x & 31, gq = lane >> 2, t = lane & 3, wi = threadIdx.x >> 5;
   const int units = __ldg(counts) * NB * 2;
-  for (int unit = blockIdx.x * WARPS + (threadIdx.x >> 5); unit < units; unit += gridDim.x * WARPS) {
+  for (int unit = blockIdx.x * WARPS + wi; unit < units; unit += gridDim.x * WARPS) {
     const int it = unit / (NB * 2), rest = unit - it * NB * 2, cb = rest >> 1, jh = rest & 1;
     const int e = __ldg(items + 3 * it), first = __ldg(items + 3 * it + 1), cnt = __ldg(items + 3 * it + 2);
     if (e == skip) continue;
@@ -268,20 +269,7 @@ __global__ void __launch_bounds__(WARPS * 32)
       for (int m = 0; m < M; ++m)
 #pragma unroll
         for (int j = 0; j < 2; ++j) acc[m][j][0] = acc[m][j][1] = acc[m][j][2] = acc[m][j][3] = 0.f;
-      Half<M> st[D];
-#pragma unroll
-      for (int d = 0; d < D; ++d)
-        if (d < KG) load_half<M>(st[d], blk, d, lane, t, jh, x0, x1, v0, v1);
-      for (int g0 = 0; g0 < KG; g0 += D) {
-#pragma unroll
-        for (int d = 0; d < D; ++d) {
-          const int g = g0 + d;
-          if (g < KG) {
-            compute_half<M>(acc, st[d], v1, jh);
-            if (g + D < KG) load_half<M>(st[d], blk, g + D, lane, t, jh, x0, x1, v0, v1);
-          }
-        }
-      }
+      ring.run(KG, wi, lane, t, jh, blk, x0, x1, v0, v1, [&](const Half<M>& st) { compute_half<M>(acc, st, v1, jh); });
 #pragma unroll
       for (int m = 0; m < M; ++m) {
         const float g = __ldg(scale + e * M + m);
