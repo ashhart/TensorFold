@@ -45,7 +45,9 @@ floor) with Zig 0.17.0 from the portable zip, on main at 9d6f1d78c (2026-11-04):
   source (the key file's 0600 permission tests, request_log, drama_voice_tool, media_fetch_tls and CUDA tp_watch among
   them), 9 behind "symlinks need privilege on Windows", 22 macOS-only, 9 Linux-only, and 41 behind a checkpoint,
   fixture, device or another guard. Developer Mode (Settings, For developers) or an elevated prompt runs the nine
-  symlink tests.
+  symlink tests, which skip only on `PermissionDenied`; three more symlink tests, in `core/learned_part_test.zig`,
+  skip on Windows whatever the privilege (an `os.tag == .windows` guard) and are among the 13 skip events the
+  one-by-one run did not name.
 - Unzip the Zig download with Windows' own `tar.exe` (`C:\Windows\System32\tar.exe -xf zig-x86_64-windows-0.17.0.zip`,
   37 s); PowerShell's `Expand-Archive` took 258 s, and Git for Windows' GNU `tar`, when its `usr\bin` is first on
   `PATH`, does not read zips.
