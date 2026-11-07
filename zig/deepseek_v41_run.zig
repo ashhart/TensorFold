@@ -38,9 +38,11 @@ fn usage(code: u8) noreturn {
         "       tf-dsv41-run generate MODEL TABLES IDS_JSON OUT_DIR [TOKENS]\n" ++
         "       tf-dsv41-run lanes MODEL TABLES IDS_JSON OUT_DIR [CHUNK] [CONTEXT]\n" ++
         "IDS_JSON: nonempty JSON array of token IDs below 129280.\n" ++
-        "Limits: oracle/trace 16 IDs; profile 256 IDs; teacher/seams/lanes 4096 IDs.\n" ++
+        "Limits: trace/gate 16 IDs; oracle 256 IDs; profile 256 IDs; teacher/seams/lanes 4096 IDs.\n" ++
         "History: TOKEN below 4096; retained normalized prefix at most 256 MiB.\n" ++
-        "Local diagnostics do not qualify the model. Oracle retains the independent 1% NRMS gate.\n", .{});
+        "Local diagnostics do not qualify the model. oracle-fp64 enforces the floor-relative NRMS band\n" ++
+        "(1.05 clears, 1.10 reviews) against the oracle-logits.f32 in its output directory; run oracle\n" ++
+        "first for that floor. The absolute 1% is reported beside it.\n", .{});
     std.process.exit(code);
 }
 fn number(s: []const u8) !u32 {

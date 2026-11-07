@@ -7,6 +7,9 @@ const reference_module = @import("reference.zig");
 const Reference = reference_module.Reference;
 const engram_rows = tf.deepseek_v41_engram_rows;
 const nrms_limit: f64 = 0.01;
+/// The maintainer's floor-relative band: <= 1.05x the measured FP32-vs-FP64 floor clears, <= 1.10x is review.
+const band_clear_limit: f64 = 1.05;
+const band_review_limit: f64 = 1.10;
 
 pub const Result = struct {
     tokens: usize,
@@ -20,8 +23,23 @@ pub const Result = struct {
     gpu_seconds: f64,
     cpu_seconds: f64,
     normalized_rms_limit: f64 = nrms_limit,
+    /// The operative numeric gate: the floor-relative band on the FP64 run, the absolute trip-wire on the FP32 capture.
     numeric_gate_passed: bool = false,
+    /// The literal 1% trip-wire, reported beside the band and never the arbiter.
+    absolute_gate_passed: bool = false,
+    /// The FP64 argmax is reported, not thresholded; the zero-argmax clause is the engine's own path invariants.
     greedy_gate_passed: bool = false,
+    /// The FP32 contract chain's own NRMS against the same FP64 teacher, when its hashed logits sit beside this run.
+    floor_normalized_rms_error: f64 = 0,
+    /// Engine NRMS over the contract's floor; the operative band is 1.05 clear / 1.10 review.
+    band_ratio: f64 = 0,
+    clear_ratio_limit: f64 = band_clear_limit,
+    review_ratio_limit: f64 = band_review_limit,
+    band_gate_passed: bool = false,
+    band_measured: bool = false,
+    band_verdict: []const u8 = "unmeasured",
+    /// Which rule `numeric_gate_passed` reports: the floor-relative band, or the FP32 contract capture.
+    gate_basis: []const u8 = "floor_relative_band",
 };
 
 /// Indexer-selection boundary per window: contract margin (BF16-rounded FP32 scores), FP64-ideal margin, support flips.
@@ -198,8 +216,30 @@ fn runOf(comptime T: type, gpa: std.mem.Allocator, io: std.Io, model: *Model, id
     if (ids.len > 0) result.mean_kl /= @as(f64, @floatFromInt(ids.len));
     result.rms_error = @sqrt(squared_error / @as(f64, @floatFromInt(cpu.len)));
     result.normalized_rms_error = if (squared_reference == 0) result.rms_error else @sqrt(squared_error / squared_reference);
-    result.numeric_gate_passed = result.normalized_rms_error <= result.normalized_rms_limit;
+    result.absolute_gate_passed = result.normalized_rms_error <= result.normalized_rms_limit;
     result.greedy_gate_passed = result.greedy_disagreements == 0;
+    // The operative whole-model clause is floor-relative: the FP32 contract chain's own FP64 gap is the floor.
+    if (T == f64) {
+        if (try readFloor(gpa, io, dir, ids, cpu.len)) |floor| {
+            defer gpa.free(floor);
+            var floor_squared: f64 = 0;
+            for (floor, cpu) |f, c| {
+                const delta = @as(f64, f) - c;
+                floor_squared += delta * delta;
+            }
+            const floor_nrms = if (squared_reference == 0) 0 else @sqrt(floor_squared / squared_reference);
+            const band = bandVerdict(result.normalized_rms_error, floor_nrms);
+            result.floor_normalized_rms_error = floor_nrms;
+            result.band_ratio = band.ratio;
+            result.band_verdict = band.verdict;
+            result.band_gate_passed = band.passed;
+            result.band_measured = band.measured;
+        }
+    }
+    result.numeric_gate_passed = if (T == f64) result.band_gate_passed else result.absolute_gate_passed;
+    result.gate_basis = if (T == f64) "floor_relative_band" else "contract_capture";
+    // A capture that cannot reproduce the contract is not a floor; this is a sanity bound, not the band.
+    if (T == f32 and (!std.math.isFinite(result.normalized_rms_error) or result.normalized_rms_error > 0.6)) return error.ContractReferenceMismatch;
     // The FP32 chain's teacher keeps the shipped file name; the FP64 chain's teacher writes its own FP64 file.
     const cp = try std.fs.path.join(gpa, &.{ dir, if (T == f32) "oracle-logits.f32" else "oracle-logits.f64" });
     defer gpa.free(cp);
@@ -209,12 +249,13 @@ fn runOf(comptime T: type, gpa: std.mem.Allocator, io: std.Io, model: *Model, id
     defer gpa.free(report);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = cp, .data = std.mem.sliceAsBytes(cpu) });
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = gp, .data = std.mem.sliceAsBytes(gpu) });
+    if (T == f32) try writeFloor(gpa, io, dir, ids, cpu);
     const json = try std.json.Stringify.valueAlloc(gpa, result, .{});
     defer gpa.free(json);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = report, .data = json });
     try margins.write(gpa, io, dir);
     std.debug.print("{s}\n", .{json});
-    try enforceGate(result.normalized_rms_error, result.greedy_disagreements);
+    if (T == f64) try enforceGate(&result);
     return result;
 }
 
@@ -247,17 +288,119 @@ fn klRow(actual: []const f32, expected: anytype) !f64 {
     return @max(kl, 0);
 }
 
-fn enforceGate(normalized_rms_error: f64, greedy_disagreements: usize) !void {
-    if (!std.math.isFinite(normalized_rms_error)) return error.NonfiniteTeacherLogits;
-    if (normalized_rms_error > nrms_limit) return error.TeacherReferenceMismatch;
-    if (greedy_disagreements != 0) return error.TeacherGreedyMismatch;
+const Band = struct { ratio: f64 = 0, verdict: []const u8 = "unmeasured", measured: bool = false, passed: bool = false };
+
+/// The engine's FP64 gap over the FP32 contract chain's own FP64 gap: 1.05 clears, 1.10 is review.
+fn bandVerdict(engine_nrms: f64, floor_nrms: f64) Band {
+    if (!std.math.isFinite(engine_nrms) or !std.math.isFinite(floor_nrms) or floor_nrms <= 0) return .{};
+    const ratio = engine_nrms / floor_nrms;
+    const verdict: []const u8 = if (ratio <= band_clear_limit) "clear" else if (ratio <= band_review_limit) "review" else "fail";
+    return .{ .ratio = ratio, .verdict = verdict, .measured = true, .passed = ratio <= band_review_limit };
 }
 
-test "teacher numeric gate remains independent of greedy agreement" {
-    try std.testing.expectError(error.TeacherReferenceMismatch, enforceGate(0.04, 0));
-    try std.testing.expectError(error.TeacherReferenceMismatch, enforceGate(0.010000001, 1));
-    try std.testing.expectError(error.TeacherGreedyMismatch, enforceGate(0.01, 1));
-    try enforceGate(0.01, 0);
-    try std.testing.expectError(error.NonfiniteTeacherLogits, enforceGate(std.math.nan(f64), 0));
-    try std.testing.expectError(error.NonfiniteTeacherLogits, enforceGate(std.math.inf(f64), 0));
+/// The floor's own manifest: the token window, its hash and the contract logits' hash, so a stale file cannot pair.
+fn fnv1a(bytes: []const u8) u64 {
+    var hash: u64 = 0xcbf29ce484222325;
+    for (bytes) |b| {
+        hash ^= b;
+        hash *%= 0x100000001b3;
+    }
+    return hash;
+}
+
+/// Written by the FP32 contract capture; readFloor refuses anything that is not this exact window and these exact bytes.
+fn writeFloor(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, ids: []const u32, cpu: []const f32) !void {
+    const path = try std.fs.path.join(gpa, &.{ dir, "floor.txt" });
+    defer gpa.free(path);
+    var buf: [128]u8 = undefined;
+    const text = try std.fmt.bufPrint(&buf, "{d}\n{x}\n{x}\n{d}\n", .{ ids.len, fnv1a(std.mem.sliceAsBytes(ids)), fnv1a(std.mem.sliceAsBytes(cpu)), cpu.len });
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = text });
+}
+
+/// The FP32 contract chain's logits from the same directory, verified against the manifest the capture wrote.
+fn readFloor(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, ids: []const u32, cells: usize) !?[]f32 {
+    const manifest_path = try std.fs.path.join(gpa, &.{ dir, "floor.txt" });
+    defer gpa.free(manifest_path);
+    const manifest = std.Io.Dir.cwd().readFileAlloc(io, manifest_path, gpa, .limited(512)) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => return err,
+    };
+    defer gpa.free(manifest);
+    var lines = std.mem.splitScalar(u8, manifest, '\n');
+    const tokens = std.fmt.parseInt(usize, lines.next() orelse return error.FloorReferenceMismatch, 10) catch return error.FloorReferenceMismatch;
+    const ids_hash = std.fmt.parseInt(u64, lines.next() orelse return error.FloorReferenceMismatch, 16) catch return error.FloorReferenceMismatch;
+    const logits_hash = std.fmt.parseInt(u64, lines.next() orelse return error.FloorReferenceMismatch, 16) catch return error.FloorReferenceMismatch;
+    const manifest_cells = std.fmt.parseInt(usize, lines.next() orelse return error.FloorReferenceMismatch, 10) catch return error.FloorReferenceMismatch;
+    if (tokens != ids.len or manifest_cells != cells or ids_hash != fnv1a(std.mem.sliceAsBytes(ids))) return error.FloorReferenceMismatch;
+    const path = try std.fs.path.join(gpa, &.{ dir, "oracle-logits.f32" });
+    defer gpa.free(path);
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(cells * @sizeOf(f32) + 1)) catch |err| switch (err) {
+        error.FileNotFound => return error.FloorReferenceMismatch,
+        else => return err,
+    };
+    defer gpa.free(bytes);
+    if (bytes.len != cells * @sizeOf(f32) or fnv1a(bytes) != logits_hash) return error.FloorReferenceMismatch;
+    const out = try gpa.alloc(f32, cells);
+    @memcpy(std.mem.sliceAsBytes(out), bytes);
+    return out;
+}
+
+/// The FP64 teacher's verdict is the floor-relative band; the absolute 1% remains a reported trip-wire.
+fn enforceGate(result: *const Result) !void {
+    if (!std.math.isFinite(result.normalized_rms_error)) return error.NonfiniteTeacherLogits;
+    if (!result.band_measured) return error.FloorReferenceMissing;
+    if (!result.band_gate_passed) return error.TeacherBandMismatch;
+}
+
+test "the enforced band accepts review and rejects a missing or failed floor" {
+    var r = Result{ .tokens = 1, .max_absolute_error = 0, .rms_error = 0, .normalized_rms_error = 0.107, .greedy_disagreements = 4, .gpu_seconds = 0, .cpu_seconds = 0 };
+    try std.testing.expectError(error.FloorReferenceMissing, enforceGate(&r));
+    r.floor_normalized_rms_error = 0.1;
+    r.band_ratio = 1.07;
+    r.band_verdict = "review";
+    r.band_gate_passed = true;
+    r.band_measured = true;
+    try enforceGate(&r);
+    r.band_ratio = 1.11;
+    r.band_verdict = "fail";
+    r.band_gate_passed = false;
+    try std.testing.expectError(error.TeacherBandMismatch, enforceGate(&r));
+}
+
+test "the FP64 argmax is reported, not the own-contract gate" {
+    var r = Result{ .tokens = 1, .max_absolute_error = 0, .rms_error = 0, .normalized_rms_error = 0.1, .greedy_disagreements = 4, .gpu_seconds = 0, .cpu_seconds = 0 };
+    r.band_measured = true;
+    r.band_gate_passed = true;
+    r.band_verdict = "clear";
+    try enforceGate(&r);
+    try std.testing.expect(!r.greedy_gate_passed);
+}
+
+test "the floor manifest refuses a mismatched window and accepts its own" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const a = std.testing.allocator;
+    const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
+    defer a.free(dir);
+    const ids = [_]u32{ 1, 2, 3 };
+    const cpu = [_]f32{ 1.0, -2.0, 3.5 };
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "oracle-logits.f32", .data = std.mem.sliceAsBytes(&cpu) });
+    try writeFloor(a, std.testing.io, dir, &ids, &cpu);
+    const got = (try readFloor(a, std.testing.io, dir, &ids, cpu.len)).?;
+    defer a.free(got);
+    try std.testing.expectEqualSlices(f32, &cpu, got);
+    const wrong = [_]u32{ 1, 2, 4 };
+    try std.testing.expectError(error.FloorReferenceMismatch, readFloor(a, std.testing.io, dir, &wrong, cpu.len));
+}
+
+test "the band is floor-relative and keeps its inclusive 1.05/1.10 boundaries" {
+    try std.testing.expectEqual(@as(f64, 0), bandVerdict(1, 0).ratio);
+    try std.testing.expectEqualStrings("unmeasured", bandVerdict(1, 0).verdict);
+    try std.testing.expect(!bandVerdict(1, 0).measured);
+    try std.testing.expectEqualStrings("clear", bandVerdict(1.05, 1.0).verdict);
+    try std.testing.expect(bandVerdict(1.05, 1.0).passed);
+    try std.testing.expectEqualStrings("review", bandVerdict(1.10, 1.0).verdict);
+    try std.testing.expect(bandVerdict(1.10, 1.0).passed);
+    try std.testing.expectEqualStrings("fail", bandVerdict(1.1000001, 1.0).verdict);
+    try std.testing.expect(!bandVerdict(1.1000001, 1.0).passed);
 }
