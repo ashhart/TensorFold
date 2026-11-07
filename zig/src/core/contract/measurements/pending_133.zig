@@ -66,4 +66,5 @@ pub const records = [_]Override{
     .{ .name = "mla tf_mla_expand_v_128", .usage = .{ .{ .regs = 96, .static = 128, .bound = 128 }, .{ .regs = 96, .static = 128, .bound = 128 }, .{ .regs = 96, .static = 128, .bound = 128 }, .{ .regs = 96, .static = 128, .bound = 128 }, .{ .regs = 96, .static = 128, .bound = 128 } } },
     .{ .name = "mla tf_mla_rope", .usage = .{ .{ .regs = 26, .static = 0, .bound = 32 }, .{ .regs = 26, .static = 0, .bound = 32 }, .{ .regs = 26, .static = 0, .bound = 32 }, .{ .regs = 22, .static = 0, .bound = 32 }, .{ .regs = 22, .static = 0, .bound = 32 } } },
     .{ .name = "mla tf_mla_gate", .usage = .{ .{ .regs = 16, .static = 0, .bound = 0 }, .{ .regs = 16, .static = 0, .bound = 0 }, .{ .regs = 16, .static = 0, .bound = 0 }, .{ .regs = 12, .static = 0, .bound = 0 }, .{ .regs = 12, .static = 0, .bound = 0 } } },
+    .{ .name = "exl3_experts tf_exl3_plan_finish_after", .usage = .{ .{ .regs = 39, .static = 0, .bound = 0 }, .{ .regs = 40, .static = 0, .bound = 0 }, .{ .regs = 40, .static = 0, .bound = 0 }, .{ .regs = 40, .static = 0, .bound = 0 }, .{ .regs = 40, .static = 0, .bound = 0 } } },
 };

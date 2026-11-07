@@ -407,6 +407,10 @@ each one planted fault, and one on the row bytes).
 CUDA also checks the grouped EXL3 experts' `tf_exl3_plan_finish`: its bf16 and fp32 SwiGLU and its fp32 and bf16 down
 epilogues bit-equal to main's kernel (kept in `contract_controls.cu`), and its SwiGLU-OAI (`act_mode` 2,
 MiniMax-M3.1-Flash's) against float64 at its rounding points (two controls: the up without its + 1, alpha 1).
+Its twin `tf_exl3_plan_finish_after` clamps silu's output instead, `min(silu(g), L) * clip(u, -L, L)` (Ling-3.1-flash's
+order): its fp32 SwiGLU at limits 10 and 2 and without one, and its fp32 down, against float64 at Ling's widths. A
+control runs `tf_exl3_plan_finish` against the after order at limit 2, where silu's term differs by up to L - silu(L)
+(0.24; 4.5e-4 at limit 10).
 
 CUDA also checks the grouped EXL3 experts (`tf_exl3_grouped_0`, `_1` and `_2`, one a codebook), which on sm_120 and
 sm_121 load a warp's next k tile while the current one decodes: each bit-equal to main's loop (kept in
