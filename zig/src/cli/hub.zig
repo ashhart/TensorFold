@@ -13,7 +13,7 @@ const titles = [_]struct { model_type: []const u8, title: []const u8 }{
     .{ .model_type = "nemotron_h_omni", .title = "Nemotron 3.5 Super VL" },
     .{ .model_type = "qwen4_exp", .title = "Qwen3.8 Flash Next" },
     .{ .model_type = "glm5_next", .title = "GLM-5.3-Flash" },
-    .{ .model_type = "mistral3", .title = "LightOnOCR-3-1B" },
+    .{ .model_type = "mistral3", .title = "Mistral3 wrapper (LightOnOCR-3-1B only)" },
     .{ .model_type = "lighton_ocr", .title = "LightOnOCR-3-1B" },
     .{ .model_type = "qwen3_5", .title = "Qwen3.5-2B or Qwen3.8-27B" },
     .{ .model_type = "qwen3_5_moe", .title = "Qwen3.5-MoE (Ornith-1.5-122B)" },
