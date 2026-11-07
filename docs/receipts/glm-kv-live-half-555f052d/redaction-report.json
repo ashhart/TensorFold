@@ -1,0 +1,48 @@
+{
+ "launch2.sh": {
+  "NCCL_LIB_DIR": 1,
+  "GPU_LOCK": 1,
+  "RING_IP": 1
+ },
+ "start2.sh": {
+  "GPU_LOCK": 2,
+  "RING_IP": 3,
+  "NODE": 3
+ },
+ "stop2.sh": {
+  "GPU_LOCK": 2,
+  "RING_IP": 5
+ },
+ "validate2.log": {
+  "MODEL_PATH": 1,
+  "HOME": 10
+ },
+ "validate2.sh": {
+  "MODEL_PATH": 1,
+  "RING_IP": 2
+ },
+ "records/main/server-r0.log": {
+  "HOME": 1
+ },
+ "records/main/server-r1.log": {
+  "HOME": 1
+ },
+ "records/fresh/server-r0.log": {
+  "HOME": 1
+ },
+ "records/fresh/server-r1.log": {
+  "HOME": 1
+ },
+ "records/off/server-r0.log": {
+  "HOME": 1
+ },
+ "records/off/server-r1.log": {
+  "HOME": 1
+ },
+ "records/on/server-r0.log": {
+  "HOME": 1
+ },
+ "records/on/server-r1.log": {
+  "HOME": 1
+ }
+}
