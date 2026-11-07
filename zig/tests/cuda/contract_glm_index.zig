@@ -68,6 +68,8 @@ pub const Scores = struct {
     qr: []f64 = &.{}, // the queries roped in float64
     extra: []f64 = &.{}, // per score: the roped queries' bf16 rounding and sincosf
     inv: u64 = 0,
+    regions: bool = false, // TF_GLM_KV_SPLIT: keys in the pooled region, its table and stride; control: the latent table
+    step: usize = pages.page_bytes,
     shape: c.Shape = undefined,
     q: []u16 = &.{},
     w: []u16 = &.{},
@@ -112,7 +114,8 @@ pub const Scores = struct {
             declared.served = &decode_served;
         }
         if (self.short) declared.name = "control: GLM decode scores write one tile short";
-        if (self.wrong_table) declared.name = "control: GLM paged scores use a swapped table";
+        if (self.regions) declared.name = if (self.fast != null) "cuda glm tf_glm_index_scores on two regions out of order" else "cuda glm tf_glm_scores on two regions out of order";
+        if (self.wrong_table) declared.name = if (self.regions) "control: GLM scores in two regions take the latent table" else "control: GLM paged scores use a swapped table";
         if (self.label) |name| declared.name = name;
         const planted = self.wrong_table or self.short or self.fault != .none;
         return .{ .spec = declared, .ctx = self, .vt = &vt, .control = if (planted) .shapes else null };
@@ -126,7 +129,7 @@ pub const Scores = struct {
 
     /// A page's step in bytes: the test's two-cache page, or past its 512 keys at pools of 1.
     fn pageStep(self: *const Scores) usize {
-        return if (self.pool == 1) pages.part_bytes + pages.rows_a_page * (pages.lw + dk) * 2 else pages.page_bytes;
+        return if (self.pool == 1) pages.part_bytes + pages.rows_a_page * (pages.lw + dk) * 2 else self.step;
     }
 
     /// Queries and keys in [-2, 2); stress: integers in [-8, 8] and power-of-two scales; non-finite: NaN and inf.
@@ -162,7 +165,9 @@ pub const Scores = struct {
         const arena = try a.alloc(u8, (n_pages + 3) * self.pageStep());
         defer a.free(arena);
         @memset(arena, 0);
-        const pk = pages.part_bytes + pages.rows_a_page * pages.lw * 2; // the cache's pooled keys in page 0
+        const geo: pages.Geometry = .{ .regions = self.regions, .n = n_pages + 3 };
+        const pk = geo.pkAt(); // the cache's pooled keys in page 0
+        self.step = geo.pkStride();
         for (0..self.seen) |p| {
             const at = pk + @as(usize, @intCast(self.ids[p / pp])) * self.pageStep() + (p % pp) * dk * 2;
             @memcpy(arena[at..][0 .. dk * 2], std.mem.sliceAsBytes(self.keys[p * dk ..][0..dk]));
@@ -172,7 +177,7 @@ pub const Scores = struct {
         self.in[1] = try self.rig.input(std.mem.sliceAsBytes(self.w));
         self.in[2] = try self.rig.input(arena) + pk;
         self.pos = try self.rig.input(std.mem.asBytes(&p));
-        self.pt = try pages.uploadTable(&self.rig, self.ids, self.wrong_table);
+        self.pt = try pages.tableFor(&self.rig, rng, self.ids, self.wrong_table, self.regions);
         self.inv = if (self.rope > 0) try self.rig.input(std.mem.sliceAsBytes(&self.freqs)) else 0;
         self.out = try self.rig.output(shape.rows * shape.n * 4);
         self.base = try self.rig.scratch(shape.rows * shape.n * 4);
@@ -302,6 +307,7 @@ pub const Tokens = struct {
     pool: usize = sparse.pool,
     fault: Fault = .none,
     label: ?[]const u8 = null,
+    regions: bool = false, // TF_GLM_KV_SPLIT: the latent table, rows a latent stride apart; control: the pooled table
     shape: c.Shape = undefined,
     pools: []i64 = &.{},
     ids: []i32 = &.{},
@@ -313,7 +319,10 @@ pub const Tokens = struct {
     counts: u64 = 0,
     msg: [200]u8 = undefined,
 
-    const page_rows = pages.page_bytes / (pages.lw * 2); // a page's step in latent rows
+    /// A page's step in latent rows: interleaved pages, or the latent region's.
+    fn pageRows(self: *const Tokens) usize {
+        return (pages.Geometry{ .regions = self.regions, .n = 0 }).latStride() / (pages.lw * 2);
+    }
 
     pub fn deinit(self: *Tokens) void {
         self.free();
@@ -330,7 +339,8 @@ pub const Tokens = struct {
 
     pub fn kernel(self: *Tokens) g.Kernel {
         var declared = if (self.pool == 1) spec(.tokens_full) else spec(.tokens);
-        if (self.wrong_table) declared.name = "control: GLM paged token assembly uses a swapped table";
+        if (self.regions) declared.name = "cuda glm tf_glm_dsa_tokens on two regions out of order";
+        if (self.wrong_table) declared.name = if (self.regions) "control: GLM token assembly in two regions takes the pooled table" else "control: GLM paged token assembly uses a swapped table";
         if (self.label) |name| declared.name = name;
         const planted = self.wrong_table or self.fault != .none;
         return .{ .spec = declared, .ctx = self, .vt = &vt, .control = if (planted) .shapes else null };
@@ -361,7 +371,7 @@ pub const Tokens = struct {
         const p: i32 = @intCast(self.at + @intFromBool(self.fault == .late));
         self.in = try self.rig.input(std.mem.sliceAsBytes(self.pools));
         self.pos = try self.rig.input(std.mem.asBytes(&p));
-        self.pt = try pages.uploadTable(&self.rig, self.ids, self.wrong_table);
+        self.pt = try pages.tableFor(&self.rig, rng, self.ids, self.wrong_table, self.regions);
         self.tokens = try self.rig.output(shape.rows * self.width() * 4);
         self.counts = try self.rig.output(shape.rows * 4);
         return true;
@@ -375,7 +385,7 @@ pub const Tokens = struct {
         a.add(self.tokens);
         a.add(self.counts);
         a.add(self.pt);
-        a.add(@as(i64, page_rows));
+        a.add(@as(i64, @intCast(self.pageRows())));
         a.add(@as(c_int, @intCast(self.pool)));
         try cuda.launch.launch(self.f, .{ .grid = .{ .x = @intCast(self.shape.rows) }, .block = .{ .x = 256 } }, self.rig.s, &a);
         try self.rig.s.synchronize();
@@ -393,7 +403,7 @@ pub const Tokens = struct {
     /// Token t's row in the pages: row t % 512 of page ids[t / 512], pages page_rows rows apart.
     fn row(self: *const Tokens, t: i64) i32 {
         const at: usize = @intCast(t);
-        return @intCast(@as(i64, self.ids[at / pages.rows_a_page]) * page_rows + @as(i64, @intCast(at % pages.rows_a_page)));
+        return @intCast(@as(i64, self.ids[at / pages.rows_a_page]) * @as(i64, @intCast(self.pageRows())) + @as(i64, @intCast(at % pages.rows_a_page)));
     }
 
     /// Every row's list against the pools and the table on the host, and its count (0 while K pools cover it).
