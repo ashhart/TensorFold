@@ -1,0 +1,183 @@
+//! TF_GLM_KV_SPLIT's kept-state plan: a page's pooled keys and latent rows in two regions, each through its own stride.
+const std = @import("std");
+const glm = @import("glm");
+const cuda = @import("cuda");
+const t = std.testing;
+const rec = @import("test_support/glm_snap_driver.zig").Driver;
+const Fixture = @import("test_support/glm_snap_fixture.zig").Fixture;
+const Plan = glm.snapshots.layout.Plan;
+const Paged = @typeInfo(@TypeOf(glm.forward.State.initPaged)).@"fn".param_types[4].?;
+
+const ids = [_]u32{ 5, 2, 9, 0, 7, 1, 3, 8, 4, 6 }; // every page of the pool, out of order
+const at = ids.len * 512 - 8; // its latent rows and its pooled keys (at / 4 + 2 rows) reach every leased page
+
+/// The fixture's page geometry: two caches (the DSA layer's and the MTP layer's), each a latent and a pooled part.
+const Geometry = struct {
+    lat_w: usize, // a latent row's bytes
+    pk_w: usize, // a pooled key's bytes
+
+    fn of(c: glm.config.Config) Geometry {
+        return .{ .lat_w = c.kv_lora * 2, .pk_w = c.i_dim * 2 };
+    }
+    fn latCache(g: Geometry) usize {
+        return 512 * g.lat_w;
+    }
+    fn pkCache(g: Geometry) usize {
+        return 128 * g.pk_w;
+    }
+    fn page(g: Geometry) usize {
+        return 2 * (g.latCache() + g.pkCache());
+    }
+    /// Latent row `r` of cache `j`: split, in the latent region past every page's pooled keys; else in its page.
+    fn latRow(g: Geometry, kv: u64, split: bool, j: usize, r: usize) u64 {
+        const id: u64 = ids[r / 512];
+        const in = (r % 512) * g.lat_w;
+        if (split) return kv + ids.len * 2 * g.pkCache() + id * 2 * g.latCache() + j * g.latCache() + in;
+        return kv + id * g.page() + j * (g.latCache() + g.pkCache()) + in;
+    }
+    /// Pooled key `p` of cache `j`: split, in the pooled region first; else after its cache's latent rows.
+    fn pkRow(g: Geometry, kv: u64, split: bool, j: usize, p: usize) u64 {
+        const id: u64 = ids[p / 128];
+        const in = (p % 128) * g.pk_w;
+        if (split) return kv + id * 2 * g.pkCache() + j * g.pkCache() + in;
+        return kv + id * g.page() + j * (g.latCache() + g.pkCache()) + g.latCache() + in;
+    }
+};
+
+/// A paged sequence of the fixture's shape on the pages at `kv`, in two regions (`split`) or interleaved.
+fn pagedSeq(d: *const cuda.Driver, f: *const Fixture, kv: u64, split: bool) !glm.forward.State {
+    var w: glm.weights.Weights = undefined;
+    w.config = f.e.c;
+    w.share = f.e.share;
+    var layers: [2]glm.weights.Layer = undefined;
+    layers[0].mixer = .{ .mla = undefined };
+    layers[1].mixer = .{ .kda = undefined };
+    w.layers = &layers;
+    const g = Geometry.of(f.e.c);
+    const pages = glm.pages.tableLen(16448);
+    const on: Paged = if (split)
+        .{ .kv = kv + ids.len * 2 * g.pkCache(), .pages = pages, .page_bytes = 2 * g.latCache(), .pk = kv, .pk_page = 2 * g.pkCache(), .split = true }
+    else
+        .{ .kv = kv, .pages = pages, .page_bytes = g.page() };
+    var st = try glm.forward.State.initPaged(t.allocator, d, &w, 16448, on);
+    st.pages = &ids;
+    st.capacity = ids.len * 512;
+    return st;
+}
+
+/// Each cache's `n` latent rows and pooled keys (n / 4 + 2), as the plan reads them; `f(addr, len, j, row, pooled)`.
+fn eachRow(g: Geometry, kv: u64, split: bool, head: ?usize, ctx: anytype, comptime f: anytype) !void {
+    for (0..2) |j| {
+        const n = if (j == 0) at else head orelse break;
+        for (0..n) |r| try f(ctx, g.latRow(kv, split, j, r), g.lat_w, j, r, false);
+        for (0..n / 4 + 2) |p| try f(ctx, g.pkRow(kv, split, j, p), g.pk_w, j, p, true);
+    }
+}
+
+/// Every byte a plan's paged parts read, counted on a map of the pages at `kv`; its other parts lie off the pages.
+const Cover = struct {
+    kv: u64,
+    hits: []u8,
+
+    fn count(c: *Cover, plan: *const Plan) !void {
+        for (plan.parts[0..plan.count]) |part| {
+            var done: usize = 0;
+            while (done < part.len) {
+                const x = plan.piece(part, done);
+                done += x.len;
+                if (part.span == 0) {
+                    try t.expect(x.live + x.len <= c.kv or x.live >= c.kv + c.hits.len);
+                    continue;
+                }
+                try t.expect(x.live >= c.kv and x.live + x.len <= c.kv + c.hits.len);
+                for (c.hits[x.live - c.kv ..][0..x.len]) |*h| h.* += 1;
+            }
+        }
+    }
+    fn expect(c: *Cover, addr: u64, len: usize, _: usize, _: usize, _: bool) !void {
+        for (c.hits[addr - c.kv ..][0..len]) |*h| {
+            try t.expectEqual(@as(u8, 1), h.*); // read once: no row missed and none read twice
+            h.* = 0;
+        }
+    }
+};
+
+/// A row's bytes by what it is, so either layout holds the same row in the same bytes.
+fn fill(_: void, addr: u64, len: usize, j: usize, row: usize, pooled: bool) !void {
+    for (rec.bytes(addr, len), 0..) |*b, k| b.* = @truncate(j * 131 + row * 17 + k * 3 + @as(usize, @intFromBool(pooled)) * 101);
+}
+
+/// The plan's bytes in its order, as a kept state copies them.
+fn gather(plan: *const Plan, out: *std.ArrayList(u8)) !void {
+    for (plan.parts[0..plan.count]) |part| {
+        var done: usize = 0;
+        while (done < part.len) {
+            const x = plan.piece(part, done);
+            try out.appendSlice(t.allocator, rec.bytes(x.live, x.len));
+            done += x.len;
+        }
+    }
+}
+
+test "GLM snapshots: with TF_GLM_KV_SPLIT a plan reads each page's pooled keys and latent rows once, every page" {
+    var d = rec.init();
+    var f: Fixture = undefined;
+    try f.init(&d, 0, 2, true);
+    defer f.deinit();
+    const g = Geometry.of(f.e.c);
+    var kv = try cuda.DeviceBuffer.alloc(&d, ids.len * g.page());
+    defer kv.free();
+    var st = try pagedSeq(&d, &f, kv.ptr, true);
+    defer st.deinit();
+    const hits = try t.allocator.alloc(u8, kv.len);
+    defer t.allocator.free(hits);
+    for ([_]?usize{ null, at }) |head| {
+        @memset(hits, 0);
+        var c: Cover = .{ .kv = kv.ptr, .hits = hits };
+        const plan = try Plan.init(&st, &f.e.c, at, head, 0);
+        try c.count(&plan);
+        // every leased page is read in both regions
+        const pooled = ids.len * 2 * g.pkCache();
+        for (ids) |id| {
+            try t.expect(std.mem.indexOfNone(u8, hits[id * 2 * g.pkCache() ..][0 .. 2 * g.pkCache()], &.{0}) != null);
+            try t.expect(std.mem.indexOfNone(u8, hits[pooled + id * 2 * g.latCache() ..][0 .. 2 * g.latCache()], &.{0}) != null);
+        }
+        try eachRow(g, kv.ptr, true, head, &c, Cover.expect);
+        try t.expect(std.mem.indexOfNone(u8, hits, &.{0}) == null); // nothing read but the rows
+    }
+}
+
+test "GLM snapshots: with TF_GLM_KV_SPLIT and every row on every rank, a plan's bytes are the interleaved pages' plan's" {
+    var d = rec.init();
+    var f: Fixture = undefined;
+    try f.init(&d, 0, 2, true);
+    defer f.deinit();
+    const g = Geometry.of(f.e.c);
+    var states: [2]glm.forward.State = undefined;
+    var kvs: [2]cuda.DeviceBuffer = undefined;
+    for (0..2) |i| {
+        kvs[i] = try cuda.DeviceBuffer.alloc(&d, ids.len * g.page());
+        states[i] = try pagedSeq(&d, &f, kvs[i].ptr, i == 1);
+        const a = states[i].arena.buf;
+        for (rec.bytes(a.ptr, a.len), 0..) |*b, k| b.* = @truncate(k * 7 + 3); // the same fields, the same bytes
+        @memset(rec.bytes(kvs[i].ptr, kvs[i].len), if (i == 1) 0xA5 else 0x3C); // between rows: not equal
+        try eachRow(g, kvs[i].ptr, i == 1, at, {}, fill);
+    }
+    defer for (&states, &kvs) |*st, *kv| {
+        st.deinit();
+        kv.free();
+    };
+    for ([_]?usize{ null, at }) |head| {
+        var bytes: [2]std.ArrayList(u8) = .{ .empty, .empty };
+        defer for (&bytes) |*b| b.deinit(t.allocator);
+        var lens: [2]usize = undefined;
+        for (0..2) |i| {
+            const plan = try Plan.init(&states[i], &f.e.c, at, head, 0);
+            lens[i] = plan.len;
+            try gather(&plan, &bytes[i]);
+        }
+        try t.expectEqual(lens[0], lens[1]);
+        try t.expectEqual(lens[0], bytes[0].items.len);
+        try t.expectEqualSlices(u8, bytes[0].items, bytes[1].items);
+    }
+}
