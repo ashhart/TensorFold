@@ -57,11 +57,27 @@ fn fragmentText(a: Allocator, fragment: []const u8) Allocator.Error![]const u8 {
     return std.mem.trim(u8, t.text, " \n");
 }
 
+/// `text` with each `&amp;` entity turned into `&`, matching the entity's letters in either case.
+fn decodeAmp(a: Allocator, text: []const u8) Allocator.Error![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var i: usize = 0;
+    while (i < text.len) {
+        if (std.ascii.startsWithIgnoreCase(text[i..], "&amp;")) { // &AMP; is the same entity
+            try out.append(a, '&');
+            i += 5;
+            continue;
+        }
+        try out.append(a, text[i]);
+        i += 1;
+    }
+    return out.items;
+}
+
 /// The target of a DuckDuckGo result link: its `uddg` parameter decoded, or the link itself.
 fn resultTarget(a: Allocator, href_raw: []const u8) Allocator.Error!?[]const u8 {
-    const href = try std.mem.replaceOwned(u8, a, href_raw, "&amp;", "&");
-    if (std.mem.indexOf(u8, href, "duckduckgo.com/y.js") != null) return null; // an ad
-    if (std.mem.indexOf(u8, href, "uddg=")) |at| {
+    const href = try decodeAmp(a, href_raw);
+    if (std.ascii.findIgnoreCase(href, "duckduckgo.com/y.js") != null) return null; // DuckDuckGo.com/y.js is still an ad
+    if (std.ascii.findIgnoreCase(href, "uddg=")) |at| { // UDDG= carries the same target
         const start = at + 5;
         const end = std.mem.indexOfScalarPos(u8, href, start, '&') orelse href.len;
         return try decode(a, href[start..end]);
@@ -92,7 +108,7 @@ fn parseMarked(a: Allocator, page: []const u8, limit: usize, m: Marks) Allocator
     var from: usize = 0;
     var last: usize = 0; // where the previous link ended: every search back stops there, so each byte is read once
     while (out.items.len < limit) {
-        const at = std.mem.indexOfPos(u8, page, from, marker) orelse break;
+        const at = std.ascii.findIgnoreCasePos(page, from, marker) orelse break; // CLASS="result__a" is the same mark
         const lt = std.mem.lastIndexOfScalar(u8, page[last..at], '<') orelse { // a mark outside any tag: skip it
             from = at + marker.len;
             last = at;
@@ -100,13 +116,13 @@ fn parseMarked(a: Allocator, page: []const u8, limit: usize, m: Marks) Allocator
         };
         const tag_start = last + lt;
         const tag_end = std.mem.indexOfScalarPos(u8, page, at, '>') orelse break;
-        const next = std.mem.indexOfPos(u8, page, tag_end, marker) orelse page.len;
+        const next = std.ascii.findIgnoreCasePos(page, tag_end, marker) orelse page.len;
         from = tag_end;
         const lo = last;
         last = tag_end;
         const block = std.mem.lastIndexOf(u8, page[lo..tag_start], "class=\"result ");
         const block_start = if (block) |b| lo + b else tag_start;
-        if (std.mem.indexOf(u8, page[block_start..tag_start], "result--ad") != null) continue;
+        if (std.ascii.findIgnoreCase(page[block_start..tag_start], "result--ad") != null) continue; // Result--ad is still an ad
         const tag = page[tag_start..tag_end];
         const href_at = std.ascii.findIgnoreCase(tag, "href=") orelse continue; // HREF= is the same attribute
         var v = tag[href_at + 5 ..];
@@ -118,7 +134,7 @@ fn parseMarked(a: Allocator, page: []const u8, limit: usize, m: Marks) Allocator
         const close = std.ascii.findIgnoreCasePos(page[0..next], tag_end, "</a>") orelse continue; // </A> closes the title too
         const title = try fragmentText(a, page[tag_end + 1 .. close]);
         var snippet: []const u8 = "";
-        if (std.mem.indexOfPos(u8, page[0..next], close, m.snippet)) |s| {
+        if (std.ascii.findIgnoreCasePos(page[0..next], close, m.snippet)) |s| { // CLASS="result__snippet" is the same mark
             const s_open = (std.mem.indexOfScalarPos(u8, page[0..next], s, '>') orelse s) + 1;
             // a snippet with no end (a page cut at its size cap) is left out rather than sliced backwards
             if (std.ascii.findIgnoreCasePos(page[0..next], s_open, m.snippet_end)) |s_close|
@@ -188,6 +204,75 @@ test "a search result keeps a link written without a scheme" {
     const results = try parseDuckDuckGo(a, page, 5);
     try std.testing.expectEqual(@as(usize, 1), results.len);
     try std.testing.expectEqualStrings("https://example.org/page", results[0].url);
+}
+
+test "a search result keeps the target when uddg's letters differ" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const page = "<div class=\"result results_links web-result\"><h2><a class=\"result__a\" href=\"//duckduckgo.com/l/?UDDG=https%3A%2F%2Fexample.org%2Fpage&amp;rut=x\">Example</a></h2></div>";
+    const results = try parseDuckDuckGo(a, page, 5);
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqualStrings("https://example.org/page", results[0].url);
+}
+
+test "a search ad is skipped when the host's letters differ" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const page =
+        \\<div class="result results_links web-result"><h2><a class="result__a" href="https://DuckDuckGo.com/y.js?ad=1">Buy now</a></h2></div>
+        \\<div class="result results_links web-result"><h2><a class="result__a" href="https://example.org/page">Example</a></h2></div>
+    ;
+    const results = try parseDuckDuckGo(a, page, 5);
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqualStrings("https://example.org/page", results[0].url);
+}
+
+test "a search ad is skipped when the mark's letters differ" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const page =
+        \\<div class="result results_links Result--ad"><h2><a class="result__a" href="https://ads.example/buy">Buy now</a></h2></div>
+        \\<div class="result results_links web-result"><h2><a class="result__a" href="https://example.org/page">Example</a></h2></div>
+    ;
+    const results = try parseDuckDuckGo(a, page, 5);
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqualStrings("https://example.org/page", results[0].url);
+}
+
+test "a search result is found when its class letters differ" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const page = "<div class=\"result results_links web-result\"><h2><a CLASS=\"result__a\" href=\"https://example.org/page\">Example</a></h2></div>";
+    const results = try parseDuckDuckGo(a, page, 5);
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqualStrings("https://example.org/page", results[0].url);
+}
+
+test "a search snippet is found when its class letters differ" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const page =
+        \\<div class="result results_links web-result"><h2><a class="result__a" href="https://example.org/page">Example</a></h2>
+        \\<a CLASS="result__snippet" href="https://example.org/page">A short blurb.</a></div>
+    ;
+    const results = try parseDuckDuckGo(a, page, 5);
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqualStrings("A short blurb.", results[0].snippet);
+}
+
+test "a search result decodes an ampersand entity whose letters differ" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const page = "<div class=\"result results_links web-result\"><h2><a class=\"result__a\" href=\"//example.org/page?q=1&AMP;x=2\">Example</a></h2></div>";
+    const results = try parseDuckDuckGo(a, page, 5);
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqualStrings("https://example.org/page?q=1&x=2", results[0].url);
 }
 
 test "a search result keeps a title when its closer's letters differ" {
