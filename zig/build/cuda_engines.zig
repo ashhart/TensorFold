@@ -74,3 +74,8 @@ pub fn engines(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     mod.addImport("qwen4", @import("qwen4.zig").module(b, target, optimize, core));
     return .{ .api = api, .engines = mod, .canon = canon, .verbs = verbs };
 }
+
+/// The checkpoint subcommands' module: `models`, `info` and `pull` over the CUDA families.
+pub fn checkpointCli(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, strip: ?bool, engines_mod: *std.Build.Module, core: *std.Build.Module) *std.Build.Module {
+    return b.createModule(.{ .root_source_file = b.path("zig/src/cli/cli.zig"), .target = target, .optimize = optimize, .link_libc = true, .strip = strip, .imports = &.{ .{ .name = "native_engines", .module = engines_mod }, @import("exlr8.zig").cliImport(b, target, optimize, core), .{ .name = "core", .module = core } } });
+}

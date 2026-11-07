@@ -1,7 +1,7 @@
-//! Weight-only projections reserve 128 threads on Metal; nvcc 13.0 CUDA resources are measured only on sm_121.
+//! Weight-only projections reserve 128 threads on Metal; nvcc 13.0 CUDA resources are measured on all five targets.
 const std = @import("std");
 const registry = @import("registry.zig");
-const receipts = @import("measurements/qwen4_130_sm121.zig");
+const receipts = @import("measurements/qwen4_130_all_sms.zig");
 const limits = @import("limits.zig");
 const suffixes = [_][]const u8{ "", "_bad_nan", "_bad_repeat", "_bad_tail", "_bad_sums" };
 pub const cuda = blk: {
@@ -20,7 +20,7 @@ pub const metal = blk: {
 };
 test "weight-only limits: unmeasured CUDA compiles never count as a pass" {
     for (cuda) |record| {
-        try std.testing.expectEqual(limits.sms.len - 1, try registry.checkCuda(std.testing.allocator, &.{record}, true));
+        try std.testing.expectEqual(@as(usize, 0), try registry.checkCuda(std.testing.allocator, &.{record}, true));
         var missing = record;
         missing.usage = registry.none;
         try std.testing.expectEqual(limits.sms.len, try registry.checkCuda(std.testing.allocator, &.{missing}, true));

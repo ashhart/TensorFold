@@ -1,0 +1,80 @@
+{
+  "schema": 3,
+  "qualified_source": "b168b36d0cc3503ae69e8bffcad494574019caf5",
+  "qualified_source_tree": "652aec7a5953ddc204005696b8f5281c72d23111",
+  "public_alias_equivalent": "55dbec4758f42ca08a7e7dede4ebd5da7877119f",
+  "pinned_main_baseline": "0d19cc19b5b49a0b4a0188a56b6705bbedae91e4",
+  "executed_dependency": "789846adbf0b6bde4a9734fdc7c7e36e65702c64",
+  "submitted_parent": "30e9b87284d4cad99ef6b826d95f5578d6341f63",
+  "last_code_followup": "c6f3e221ac5a2914fcd3a6b950eb620d1eaaa23b",
+  "native_sha256": "fa2f415a1b7a6f47a62ee078e7f6de86f3f677d2bf74ffa5c2d273e1ce713a64",
+  "complete_cuda_runner_sha256": "1cec1417c7d6d47ff86cf278dbba47f60267e9f9e4b99ca4d2a7964863555c39",
+  "evidence_commit": "164be6e57dae9124893e27d8d1ac8a1be7d03f1c",
+  "scope": "Every execution retains its real producer. Final receipt-only commit identity and hosted CI are reported on the PR. This manifest covers all receipt files except itself.",
+  "files": {
+    "README.md": {
+      "bytes": 16419,
+      "sha256": "872bbc67cea934ed0e72ea584c7563b23d60a101e44ec346eb99f0d4e8c8289a"
+    },
+    "asset.json": {
+      "bytes": 7534,
+      "sha256": "f823546290e20e1d05d35138cb1752a70b4faa29334c2731009606f276748626"
+    },
+    "commands.md": {
+      "bytes": 7538,
+      "sha256": "4bcbbdca93fe2b710b8a12c7a9e262f7a5f67fa8033d97ea622fae2796cc9021"
+    },
+    "fixtures.json": {
+      "bytes": 22875,
+      "sha256": "c83f0cb7e56f447de3b6131b921ac06b0743cbfcdfbe856970f0f5e7e9c61fe4"
+    },
+    "historical-summary.json": {
+      "bytes": 13893,
+      "sha256": "a7e91de61a5a3ab72b86e4e5bceacf09323544c5d558c45f5143ee2b815a021a"
+    },
+    "models.json": {
+      "bytes": 535,
+      "sha256": "acb06444d0baa3e49bad1b89111c7673e5f8d2c6d93b4c024779e66c3ab87b1e"
+    },
+    "reference-fixtures.json": {
+      "bytes": 2274,
+      "sha256": "c2b05afefcdbea4504deb799e68b581e0635b9c316927549418674a480efb289"
+    },
+    "reference-verdict.json": {
+      "bytes": 1414,
+      "sha256": "7b53f1df4abaa1e0cddb6442442533858936abde13aed868bc632120cdbe3714"
+    },
+    "reproduce-cache.py": {
+      "bytes": 3613,
+      "sha256": "6334a19acfa43de98ebe614dfbb61db047de435eb661fcff228d5c39f229eecd"
+    },
+    "reproduce-cold.py": {
+      "bytes": 1444,
+      "sha256": "de1d8d6d9f778a34041fbc9cac7ea5ad3e728080da5f735dbabb952669d91ee1"
+    },
+    "reproduce-disconnect.py": {
+      "bytes": 6455,
+      "sha256": "b786fdb8eebc8f9cb82a0edea70055dcc1ddcfe587d19c9077febefaf161e2a9"
+    },
+    "sglang-precision/sitecustomize.py": {
+      "bytes": 300,
+      "sha256": "2129ecd851b0d174fb578c4bb9c3d502093373d6866e620391cf398f60b44608"
+    },
+    "source-provenance.json": {
+      "bytes": 2234,
+      "sha256": "40dad69a1ff230145aad11df87bf7da3a9c12bd45ccb1f67c4b34698b9c80aa1"
+    },
+    "summary.json": {
+      "bytes": 107387,
+      "sha256": "34b511ad911553b486fb01518b1e32432b42a48820a3bfab6c2e19b34b120c7c"
+    },
+    "test_reproduce_cache.py": {
+      "bytes": 2182,
+      "sha256": "3c9abb1f25499a0937859cff5ad0ecc8f37b8f303c61234d144b1dada6b133cf"
+    },
+    "transformers-comparison.json": {
+      "bytes": 10677,
+      "sha256": "0bd9232cf5eb3fc7151c899ff7aaa4a1a5a4d4656bdfc5024a3a1b4d72609731"
+    }
+  }
+}

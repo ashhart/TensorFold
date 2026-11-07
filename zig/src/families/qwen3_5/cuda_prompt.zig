@@ -14,7 +14,7 @@ pub const page_ids: u32 = 768;
 const hpc = 2;
 const block_rows = 16 * (8 / hpc);
 
-pub const Fns = struct { bf16: cuda.Function, fp8: cuda.Function, bf16_whole: cuda.Function, fp8_whole: cuda.Function, bf16_p256: cuda.Function, bf16_p256_ids: cuda.Function, chain: cuda.Function };
+pub const Fns = struct { bf16: cuda.Function, fp8: cuda.Function, bf16_whole: cuda.Function, fp8_whole: cuda.Function, bf16_p256: cuda.Function, bf16_p256_ids: cuda.Function, chain: cuda.gdn_chain.Chain };
 
 pub const symbols = struct {
     pub const bf16 = "_ZN20tf_prefill_attention13hpattn_kernelILi256ELi8ELi2ELi2EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiifiPKixi";
@@ -23,13 +23,11 @@ pub const symbols = struct {
     pub const fp8_whole = "_ZN20tf_prefill_attention20hpattn8_whole_kernelILi256ELi8ELi2ELi2EEEvPK13__nv_bfloat16PKhS5_PKfS7_PS1_iiiiifi";
     pub const bf16_p256 = "_ZN20tf_prefill_attention18hpattn_p256_kernelILi256ELi8ELi2ELi2EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiifiPKixi";
     pub const bf16_p256_ids = "_ZN20tf_prefill_attention22hpattn_p256_ids_kernelILi256ELi8ELi2ELi2EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiifiPKixi";
-    pub const chain = "_ZN14tf_gdn_prefill12chain_kernelI13__nv_bfloat16S1_Li64ELi32EEEvPKT_S4_PKS1_PKfPKT0_S8_PfPS1_iii";
+    pub const chain = cuda.gdn_chain.old_symbol;
 };
-/// gdn_prefill.cu's value rows a block (two threads a row).
-const chain_rows = 64;
 
 pub fn resolve(attention: cuda.Module, gdn: cuda.Module) !Fns {
-    const f: Fns = .{ .bf16 = try attention.function(symbols.bf16), .fp8 = try attention.function(symbols.fp8), .bf16_whole = try attention.function(symbols.bf16_whole), .fp8_whole = try attention.function(symbols.fp8_whole), .bf16_p256 = try attention.function(symbols.bf16_p256), .bf16_p256_ids = try attention.function(symbols.bf16_p256_ids), .chain = try gdn.function(symbols.chain) };
+    const f: Fns = .{ .bf16 = try attention.function(symbols.bf16), .fp8 = try attention.function(symbols.fp8), .bf16_whole = try attention.function(symbols.bf16_whole), .fp8_whole = try attention.function(symbols.fp8_whole), .bf16_p256 = try attention.function(symbols.bf16_p256), .bf16_p256_ids = try attention.function(symbols.bf16_p256_ids), .chain = try cuda.gdn_chain.Chain.resolve(gdn) };
     try f.bf16.allowDynamicShared(smem);
     try f.fp8.allowDynamicShared(smem);
     try f.bf16_whole.allowDynamicShared(smem);
@@ -101,15 +99,27 @@ pub fn runFrom(e: *E.Engine, layer: usize, from: usize, end: usize) !void {
 }
 
 /// Linear layer `layer`'s delta rule: e.q, e.k, e.v, e.g_, e.beta into e.y, the stream's recurrence updated in place.
-pub fn delta(e: *E.Engine, layer: usize, rows: usize) !void {
+pub fn delta(e: *E.Engine, layer: usize, rows: usize, norm: u64, sums: u64) !bool {
     const g = e.g;
     const sg = std.mem.bytesToValue(Seg, e.staged.bytes[E.Engine.segs_at..][0..@sizeOf(Seg)]);
     const state = sg.rec + layer * g.v_heads * geometry.dk * geometry.dk * 4;
-    var a: cuda.Args = .{};
-    for ([_]u64{ e.q, e.k, e.v, e.g_, e.beta, state, state, e.y }) |v| a.add(v);
-    for ([_]usize{ rows, g.k_heads, g.v_heads }) |v| a.add(@as(c_int, @intCast(v)));
-    const cfg: cuda.Config = .{ .grid = .{ .x = @intCast(g.v_heads), .y = @intCast(geometry.dk / chain_rows) }, .block = .{ .x = 2 * chain_rows } };
-    try cuda.launch.launch(e.prompt_attn.chain, cfg, e.stream, &a);
+    var chain = e.prompt_attn.chain;
+    // The plain checkpoint may store FP32 GDN scales; its post uses the shared FP32-weight RMS.
+    if (e.g.bf16) chain.fused = null;
+    return chain.run(e.stream, .{
+        .q = e.q,
+        .k = e.k,
+        .v = e.v,
+        .g = e.g_,
+        .beta = e.beta,
+        .state = state,
+        .last = state,
+        .y = e.y,
+        .z = e.z,
+        .norm = norm,
+        .mix = e.mix,
+        .sums = sums,
+    }, rows, g.k_heads, g.v_heads, g.eps);
 }
 
 test "Qwen prompt layout: whole ABI omits page metadata and keeps original layer and head strides" {

@@ -129,6 +129,7 @@ test "format coexistence: real embedding dispatch retains each owner's BF16 or M
     var d: cuda.Driver = undefined;
     d.api.cuLaunchKernel = Recorded.launch;
     var e: Engine = undefined;
+    e.bf16 = null;
     e.stream = .{ .d = &d, .handle = null };
     e.g.hidden = 256;
     e.embed_w = 0x1000;
@@ -160,6 +161,7 @@ test "format coexistence: all projection tags retain their dimensions and BF16 i
     var d: cuda.Driver = undefined;
     d.api.cuLaunchKernel = Recorded.launch;
     var e: Engine = undefined;
+    e.bf16 = null;
     e.stream = .{ .d = &d, .handle = null };
     e.mo = fullKernels(&d);
     var kit: Kit = undefined;
@@ -214,6 +216,7 @@ fn bf16Prompt(rows: usize) !void {
     var kit: Kit = undefined;
     kit.b16.dense_fn = function(&d, 4);
     var e: Engine = undefined;
+    e.bf16 = null;
     e.stream = .{ .d = &d, .handle = @ptrFromInt(0x1800) };
     e.g = g;
     e.kit = &kit;

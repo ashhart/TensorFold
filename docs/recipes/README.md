@@ -12,6 +12,7 @@ For agent-assisted contributions, read the [TensorFold contributor skill](SKILL.
 | Nemotron 3.5 Lightning | [MLX](nemotron-3.5.md), [Intel Arc, experimental](xpu-arc.md) |
 | Nemotron 3.5 Super VL | [Native CUDA on one or two GB10s, images](nemotron-3.5-super-vl.md) |
 | Qwen3.8-27B | [MLX, quantization and CUDA](qwen3.8-27b.md) |
+| Qwen3.5-27B BF16 | [Native CUDA prompt-scoring candidate](qwen35-bf16-scoring.md) |
 | Qwen3.5-2B | [Native Metal preview, tied affine 4-bit](qwen3.5-2b-native.md) |
 | Qwen3.8 Flash Next | [MLX prefill and CUDA](qwen3.8-flash-next.md), [native CUDA](flash-next-cuda.md), [CUDA images](flash-next-vision.md), [exact SSD residency on Metal](fluid-subgraph-residency.md) |
 | Qwen4 dense | [Native preparation, device qualification pending](qwen4-dense.md) |

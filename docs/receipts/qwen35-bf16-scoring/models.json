@@ -1,0 +1,22 @@
+[
+  {
+    "label": "bf16",
+    "repo": "Qwen/Qwen3.5-27B",
+    "revision": "fc05daec18b0a78c049392ed2e771dde82bdf654"
+  },
+  {
+    "label": "mlx4",
+    "repo": "mlx-community/Qwen3.5-27B-4bit",
+    "revision": "45797d2985a12c55e6473686e9ea91b95e959553"
+  },
+  {
+    "label": "modelopt",
+    "repo": "nvidia/Qwen3.8-27B-NVFP4",
+    "revision": "482ca0f3832238542f8f5295dde86b5f22711d80"
+  },
+  {
+    "label": "exl3",
+    "repo": "UnstableLlama/Qwen3.5-27B-exl3-4.00bpw",
+    "revision": "dc0df71be8810b51ed04eb43b51341f609a75fa2"
+  }
+]

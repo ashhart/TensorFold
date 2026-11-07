@@ -1,0 +1,397 @@
+{
+  "scope": "historical results; original source identities are retained, not current-binary qualification",
+  "native_build": "327ef639fb7dbc355f44b4a5efc53209a3e06543",
+  "contract_source": "5332d97eb387af7e1a10433d77ee032a86bc631a",
+  "native_sha256": "271398a1c9dab32785759182ae78e2921907d68f86b0053b64e2613cc9038886",
+  "cuda_contract": {
+    "schema": 1,
+    "source_commit": "5332d97eb387af7e1a10433d77ee032a86bc631a",
+    "native_version": "1.2.1",
+    "runner_sha256": "31ee399fc7df52c8dd719f1d3a1cb5494d6817700507b32a804458724f3fb729",
+    "command": "zig-out/bin/tf-cuda-test kernel-contract",
+    "exit": 1,
+    "status": "failed: launch limits",
+    "summary": "SUMMARY 550 kernels: 550 pass gates 1-4, 0 fail, 6 known findings; 365 controls: 365 red as planted, 0 missed; 342 limit problems; gates 4013421 ms, limits 726300 ms",
+    "numerical_kernels": 550,
+    "numerical_pass": 550,
+    "numerical_fail": 0,
+    "registered_known_findings": 6,
+    "controls": 365,
+    "controls_red": 365,
+    "controls_missed": 0,
+    "limit_problems": 342,
+    "registry_limit_problems": 188,
+    "live_device_limit_problems": 154,
+    "known_findings": [
+      "KNOWN nonfinite cuda qwen35 decode attention, bf16 cache (tf_q35_attn_partial, tf_q35_attn_merge): a NaN key in one of a row's several chunks leaves the row finite: tf_q35_attn_merge skips that chunk",
+      "KNOWN nonfinite cuda qwen35 decode attention, fp8 cache (tf_q35_attn_partial8, tf_q35_attn_merge): a NaN key in one of a row's several chunks leaves the row finite: tf_q35_attn_merge skips that chunk",
+      "KNOWN nonfinite cuda glm tf_glm_scores on pages out of order: relu is fmaxf(x, 0), as Triton's tl.maximum: a NaN dot scores 0 where float64 keeps the NaN",
+      "KNOWN nonfinite cuda glm tf_glm_index_scores on pages out of order: relu is fmaxf(x, 0), as Triton's tl.maximum: a NaN dot scores 0 where float64 keeps the NaN",
+      "KNOWN nonfinite cuda qwen35 contiguous attention, bf16 cache (tf_q35_attn_partial_legacy, tf_q35_attn_merge): a NaN key in one of a row's several chunks leaves the row finite: tf_q35_attn_merge skips that chunk",
+      "KNOWN nonfinite cuda qwen35 contiguous attention, fp8 cache (tf_q35_attn_partial8_legacy, tf_q35_attn_merge): a NaN key in one of a row's several chunks leaves the row finite: tf_q35_attn_merge skips that chunk"
+    ],
+    "new_live_records": [
+      "PASS limits live qwen35_bf16_rows tf_q35_dense_f32: 256 threads launched, the driver allows 256; 42 registers, 32 + 0 shared bytes (recorded 42, 32)",
+      "PASS limits live qwen35_bf16_rows tf_q35_score_stats: 256 threads launched, the driver allows 256; 40 registers, 5128 + 0 shared bytes (recorded 40, 5128)",
+      "PASS limits live contract_controls tf_ctl_q35_score_tail: 256 threads launched, the driver allows 256; 40 registers, 5136 + 0 shared bytes (recorded 40, 5136)",
+      "PASS limits live contract_controls tf_ctl_q35_dense_f32_half: 256 threads launched, the driver allows 256; 37 registers, 0 + 0 shared bytes (recorded 37, 0)"
+    ],
+    "parent_full_or_live_only_run": "not-run; the unchanged parent has a separate matched five-SM asset audit, not a full live SUMMARY"
+  },
+  "host_and_ci": {
+    "zig": "0.17.0",
+    "source_commit": "5332d97eb387af7e1a10433d77ee032a86bc631a",
+    "full_unprivileged_linux_host": {
+      "steps_pass": 551,
+      "steps_total": 551,
+      "tests_pass": 6870,
+      "tests_total": 6916,
+      "tests_skipped": 46,
+      "scope": "before later harness-only changes"
+    },
+    "strict_host_rerun": {
+      "steps_pass": 551,
+      "steps_total": 551,
+      "executed_pass": 467,
+      "executed_total": 469,
+      "skipped": 2,
+      "other_results": "cached"
+    },
+    "plain_build": {
+      "steps_pass": 30,
+      "steps_total": 30
+    },
+    "lean": {
+      "base": 424,
+      "candidate": 424,
+      "new": 0
+    },
+    "hosted_ci": {
+      "head": "284339b080b3af960822458158ab69a7bbaf6bd7",
+      "no_gpu_run": 41630994602,
+      "no_gpu_jobs_pass": 6,
+      "format_run": 41630994734,
+      "status": "passed; final receipt head requires its own CI status"
+    },
+    "repro_cache_client_tests": {
+      "count": 6,
+      "mac_python_versions": [
+        "3.11",
+        "3.14"
+      ],
+      "linux_python": "3.14",
+      "status": "passed"
+    },
+    "scope": "production inference and kernel trees unchanged by receipt-only additions",
+    "publication_review": {
+      "head": "54f9459411254a7b04ca8efb8f90166b53bd9738",
+      "format_run": 41764090357,
+      "no_gpu_run": 41764090345,
+      "status": "both cancelled; not a hosted pass",
+      "scope": "Original successful runs above retain their original tested commit IDs."
+    }
+  },
+  "existing_formats": [
+    {
+      "format": "mlx4",
+      "checkpoint": {
+        "label": "mlx4",
+        "repo": "mlx-community/Qwen3.5-27B-4bit",
+        "revision": "45797d2985a12c55e6473686e9ea91b95e959553"
+      },
+      "process_order": [
+        "parent",
+        "candidate",
+        "parent",
+        "candidate"
+      ],
+      "reply_tokens": 128,
+      "decode_repetitions_per_process": 3,
+      "decode": [
+        {
+          "prompt": "fibonacci-raw",
+          "parent_tps": 83.5559698516554,
+          "candidate_tps": 83.59971984798531,
+          "change_percent": 0.052360108329274624,
+          "all_process_medians": [
+            83.50909120252324,
+            83.49400143200344,
+            83.60287481657802,
+            83.70557212248738
+          ],
+          "all_process_ttft_medians_s": [
+            0.015475979998882394,
+            0.015516241001023445,
+            0.01543800299987197,
+            0.015471892002096865
+          ]
+        },
+        {
+          "prompt": "gpu-chat-no-think",
+          "parent_tps": 80.30091528978619,
+          "candidate_tps": 80.24917238596198,
+          "change_percent": -0.06443625659493524,
+          "all_process_medians": [
+            80.25778005222816,
+            80.22391705558798,
+            80.34407371075048,
+            80.27443566697885
+          ],
+          "all_process_ttft_medians_s": [
+            0.07912822800062713,
+            0.07910096300111036,
+            0.07914762700238498,
+            0.07911434700145037
+          ]
+        }
+      ],
+      "concurrent_matched_full_token_hashes": 20,
+      "concurrent_cells": 8,
+      "concurrent_repetitions": 1,
+      "scope": "descriptive measurements; no statistical significance or noninferiority claim; all observations retained"
+    },
+    {
+      "format": "modelopt",
+      "checkpoint": {
+        "label": "modelopt",
+        "repo": "nvidia/Qwen3.8-27B-NVFP4",
+        "revision": "482ca0f3832238542f8f5295dde86b5f22711d80"
+      },
+      "process_order": [
+        "parent",
+        "candidate",
+        "parent",
+        "candidate"
+      ],
+      "reply_tokens": 128,
+      "decode_repetitions_per_process": 3,
+      "decode": [
+        {
+          "prompt": "fibonacci-raw",
+          "parent_tps": 63.33355811331779,
+          "candidate_tps": 63.358063349350616,
+          "change_percent": 0.038692340621349075,
+          "all_process_medians": [
+            63.35949423899684,
+            63.34044933515465,
+            63.3076326045577,
+            63.37568226173563
+          ],
+          "all_process_ttft_medians_s": [
+            0.01856982900062576,
+            0.018574689998786198,
+            0.01859317999696941,
+            0.018466502999217482
+          ]
+        },
+        {
+          "prompt": "gpu-chat-no-think",
+          "parent_tps": 63.34511381231144,
+          "candidate_tps": 63.39848246173967,
+          "change_percent": 0.08425061731889283,
+          "all_process_medians": [
+            63.419731928457956,
+            63.388599797130574,
+            63.27058349002793,
+            63.408366667115715
+          ],
+          "all_process_ttft_medians_s": [
+            0.08873100400160183,
+            0.08872744899781537,
+            0.08880955100175925,
+            0.08870272299827775
+          ]
+        }
+      ],
+      "concurrent_matched_full_token_hashes": 20,
+      "concurrent_cells": 8,
+      "concurrent_repetitions": 1,
+      "scope": "descriptive measurements; no statistical significance or noninferiority claim; all observations retained"
+    }
+  ],
+  "cold": [
+    {
+      "prompt_tokens": 2048,
+      "native_ttft_s": 49.5693300540006,
+      "sglang_ttft_s": 0.4426989009989484,
+      "native_http_cached_tokens": 0,
+      "sglang_http_cached_tokens": null,
+      "sglang_scheduler_cached_tokens": 0,
+      "reply_tokens": 8,
+      "context": 2080,
+      "parallel": 1,
+      "native_read_timeout_s": 1800,
+      "sglang_read_timeout_s": 1800
+    },
+    {
+      "prompt_tokens": 8192,
+      "native_ttft_s": 199.2718902859997,
+      "sglang_ttft_s": 1.9073836259995005,
+      "native_http_cached_tokens": 0,
+      "sglang_http_cached_tokens": null,
+      "sglang_scheduler_cached_tokens": 0,
+      "reply_tokens": 8,
+      "context": 8224,
+      "parallel": 1,
+      "native_read_timeout_s": 1800,
+      "sglang_read_timeout_s": 1800
+    },
+    {
+      "prompt_tokens": 32768,
+      "native_ttft_s": 799.2212812930011,
+      "sglang_ttft_s": 9.260067242998048,
+      "native_http_cached_tokens": 0,
+      "sglang_http_cached_tokens": null,
+      "sglang_scheduler_cached_tokens": 0,
+      "reply_tokens": 8,
+      "context": 32800,
+      "parallel": 1,
+      "native_read_timeout_s": 1800,
+      "sglang_read_timeout_s": 1800
+    },
+    {
+      "prompt_tokens": 65536,
+      "native_ttft_s": 1601.2906949770004,
+      "sglang_ttft_s": 24.579153923998092,
+      "native_http_cached_tokens": 0,
+      "sglang_http_cached_tokens": null,
+      "sglang_scheduler_cached_tokens": 0,
+      "reply_tokens": 8,
+      "context": 65568,
+      "parallel": 1,
+      "native_read_timeout_s": 3600,
+      "sglang_read_timeout_s": 3600
+    }
+  ],
+  "reference_verdict": {
+    "status": "failed",
+    "scope": "captured native rows, not a direct HTTP prompt-score comparison",
+    "policy": "both reference directions reported; maintainer acceptance remains outstanding",
+    "allowance": "existing native FP64 head box plus recorded subtraction slack; no hidden-state term",
+    "rows": 18,
+    "numerical_bound_passed": true,
+    "fp32_envelope_failures": 3,
+    "bf16_envelope_failures": 1,
+    "outside_rows": [
+      {
+        "capture": 10,
+        "phase": "prompt",
+        "fixture": 3,
+        "position": 255,
+        "native_to_fp32": 2.3814449310302734,
+        "bf16_to_fp32": 1.5509891510009766,
+        "existing_head_rounding_allowance": 0.0005161204072910023,
+        "fp32_envelope_passed": false,
+        "bf16_envelope_passed": true
+      },
+      {
+        "capture": 10,
+        "phase": "prompt",
+        "fixture": 3,
+        "position": 256,
+        "native_to_fp32": 0.00258636474609375,
+        "bf16_to_fp32": 0.00043487548828125,
+        "existing_head_rounding_allowance": 0.0005714825015808292,
+        "fp32_envelope_passed": false,
+        "bf16_envelope_passed": false
+      },
+      {
+        "capture": 13,
+        "phase": "decode",
+        "fixture": 3,
+        "position": 260,
+        "native_to_fp32": 0.0077800750732421875,
+        "bf16_to_fp32": 0.005237579345703125,
+        "existing_head_rounding_allowance": 0.000552657729442496,
+        "fp32_envelope_passed": false,
+        "bf16_envelope_passed": true
+      }
+    ]
+  },
+  "superseded_reference": "Earlier auto-dtype forward downcast96 storedFP32 parameters; corrected full reference restores their exact stored values. Its historical native captures are auxiliary, not new HTTP evidence.",
+  "native_decode": [
+    {
+      "label": "",
+      "prompt": "fibonacci-raw",
+      "temperature": 0.0,
+      "tokens": 128,
+      "decode_tps_median": 23.826203304282874,
+      "decode_tps_all": [
+        23.86,
+        23.83,
+        23.8
+      ],
+      "ttft_s_median": 0.34664049099956173,
+      "prefill_tps_median": 40.388,
+      "itl_mean_ms_median": 41.971,
+      "itl_p50_ms_median": 33.946,
+      "itl_p95_ms_median": 34.115,
+      "round_gap_p50_ms_median": 33.948,
+      "round_gap_p95_ms_median": 34.115,
+      "tokens_per_chunk_median": 1.032
+    },
+    {
+      "label": "",
+      "prompt": "gpu-chat-no-think",
+      "temperature": 0.0,
+      "tokens": 128,
+      "decode_tps_median": 29.380902734832876,
+      "decode_tps_all": [
+        29.4,
+        29.38,
+        29.36
+      ],
+      "ttft_s_median": 0.7605028060024779,
+      "prefill_tps_median": 40.763,
+      "itl_mean_ms_median": 34.036,
+      "itl_p50_ms_median": 34.034,
+      "itl_p95_ms_median": 34.085,
+      "round_gap_p50_ms_median": 34.034,
+      "round_gap_p95_ms_median": 34.085,
+      "tokens_per_chunk_median": 1.0
+    }
+  ],
+  "standard_decode": [
+    {
+      "label": "",
+      "prompt": "fibonacci-raw",
+      "temperature": 0.0,
+      "tokens": 128,
+      "decode_tps_median": 27.623239738269106,
+      "decode_tps_all": [
+        27.69,
+        27.62,
+        27.56
+      ],
+      "ttft_s_median": 0.075827003998711,
+      "prefill_tps_median": null,
+      "itl_mean_ms_median": 36.201,
+      "itl_p50_ms_median": 36.207,
+      "itl_p95_ms_median": 36.324,
+      "round_gap_p50_ms_median": 36.207,
+      "round_gap_p95_ms_median": 36.324,
+      "tokens_per_chunk_median": 1.0
+    },
+    {
+      "label": "",
+      "prompt": "gpu-chat-no-think",
+      "temperature": 0.0,
+      "tokens": 128,
+      "decode_tps_median": 27.50692738791149,
+      "decode_tps_all": [
+        27.53,
+        27.51,
+        27.47
+      ],
+      "ttft_s_median": 0.07972962099665892,
+      "prefill_tps_median": null,
+      "itl_mean_ms_median": 36.354,
+      "itl_p50_ms_median": 36.353,
+      "itl_p95_ms_median": 36.538,
+      "round_gap_p50_ms_median": 36.353,
+      "round_gap_p95_ms_median": 36.538,
+      "tokens_per_chunk_median": 1.0
+    }
+  ],
+  "archive_sha256": "ccda986558edd769735f6d4d7a9e48cc54b104fe87c70a47f8fd275dd7b485f4"
+}

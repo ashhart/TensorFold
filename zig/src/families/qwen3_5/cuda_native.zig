@@ -26,7 +26,7 @@ pub const slide = @import("cuda_slide.zig");
 pub const linked = slide.linked;
 
 pub const model_type = "qwen3_5";
-pub const formats: []const []const u8 = &.{ "mlx-q4g64", "exl3" };
+pub const formats: []const []const u8 = &.{ "mlx-q4g64", "exl3", "bf16" };
 pub const default_context: i64 = 32768;
 pub const max_segments: u32 = 1;
 pub const prompt_rows: u32 = E.max_rows;
@@ -144,6 +144,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     const share_snaps = try prefix_mod.sharing();
     // a kept state sits on a cold pass's chunk cut, so later chunks keep a cold pass's bits: pages divide the chunk
     if (share_snaps > 0 and (page_tokens == 0 or E.max_rows % page_tokens != 0)) return error.QwenShareNeedsPages;
+    try @import("cuda_bf16_format.zig").options((try E.Geometry.read(gpa, io, dir)).bf16, o.vision != null, o.prompt_int8, o.slide);
     const e = try E.Engine.init(gpa, io, ctx, dir, o.kv8, fitOf(o));
     errdefer e.deinit();
     if (o.rope_yarn) |f| { // --rope-yarn over the downloaded config: its table, and the window it allows
@@ -220,6 +221,8 @@ pub const openDrafter = drafter_open.openDrafter;
 /// A request this engine refuses, in words, or with no engine (null) its open; null: none of its own.
 pub fn explain(ctx: ?*anyopaque, err: anyerror) ?[]const u8 {
     if (ctx == null) return switch (err) {
+        error.QwenBf16VisionUnqualified => "--vision: dense BF16 Qwen accepts text inputs only; its vision path is unqualified",
+        error.UnsupportedQwenBf16Mode => "dense BF16 Qwen requires BF16 prompts and does not support learning",
         error.NoQwenVision => "--vision: this checkpoint has no image tower (no vision_config): serve it without --vision",
         error.QwenPagesNoLearner => "TF_QWEN_KV_PAGES: the learner reads whole windows, not pages; drop --slide or unset it",
         error.QwenShareNeedsPages => "TF_QWEN_KV_SHARE keeps prompts as pool pages: set TF_QWEN_KV_PAGES to a divisor of the 4096-row prompt chunk",
@@ -348,7 +351,13 @@ pub const Lanes = struct {
     }
 
     fn backend(self: *Lanes) be.Backend {
-        return .{ .ptr = self, .round_observer = if (self.trace) |x| x.observer() else null, .first_before_draft = true, .penalties = true, .vtable = &.{ .prefill = prefillFn, .prefill_step = prefillStepFn, .cancel_prefill = cancelPrefillFn, .reports_fill = true, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .prepare_features = prepareFeaturesFn, .features = featuresFn, .release = releaseFn } };
+        const ordinary: be.Backend.VTable = .{ .prefill = prefillFn, .prefill_step = prefillStepFn, .cancel_prefill = cancelPrefillFn, .reports_fill = true, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .prepare_features = prepareFeaturesFn, .features = featuresFn, .release = releaseFn };
+        const scoring = comptime blk: {
+            var v = ordinary;
+            v.prompt_rows = true;
+            break :blk v;
+        };
+        return .{ .ptr = self, .round_observer = if (self.trace) |x| x.observer() else null, .first_before_draft = true, .penalties = true, .vtable = if (self.e.g.bf16) &scoring else &ordinary };
     }
 
     /// A drafter's bytes in each lane's run: DFlash2's ring, or MTP's ring and state (0: no drafter).

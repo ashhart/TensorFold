@@ -67,6 +67,7 @@ pub const Kinds = struct {
 };
 
 pub const Geometry = struct {
+    bf16: bool = false,
     pocket: usize = 0,
     hidden: usize,
     intermediate: usize,
@@ -284,7 +285,8 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Geometry {
     const qv = root.get("quantization");
     const exl3 = qv == null and isExl3(root);
     const modelopt = !exl3 and qv == null and root.get("quantization_config") != null;
-    if (!modelopt and !exl3 and qv == null) return error.UnsupportedQwenQuantization;
+    const bf16 = !modelopt and !exl3 and qv == null;
+    if (bf16) try @import("cuda_bf16_format.zig").admit(root, t, moe);
     var g: Geometry = .{
         .hidden = try integer(t, "hidden_size"),
         .intermediate = try integer(t, if (moe) "moe_intermediate_size" else "intermediate_size"),
@@ -304,6 +306,7 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Geometry {
         .rope = resolved.rope,
         .linear = @splat(false),
         .exl3 = exl3,
+        .bf16 = bf16,
     };
     if (t.get("tensorfold_learned_neurons")) |pocket| {
         if (pocket != .integer or pocket.integer < 0 or pocket.integer > 128 or @mod(pocket.integer, 64) != 0)
@@ -330,6 +333,12 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Geometry {
     var full: [max_layers]bool = undefined;
     try layer_pattern.read(full[0..g.layers], t);
     for (g.linear[0..g.layers], full[0..g.layers]) |*l, f| l.* = !f;
+    if (bf16) {
+        if (g.pocket != 0) return error.UnsupportedLearningFormat;
+        g.bits = .{ .embed = 16, .head = 16, .proj = @splat(@splat(16)) };
+        g.kinds = .{ .head = .bf16, .proj = @splat(@splat(.bf16)) };
+        return g;
+    }
     if (modelopt) {
         if (g.pocket > 0) return error.UnsupportedLearningFormat;
         g.kinds = try @import("cuda_modelopt.zig").kinds(gpa, bytes, g);

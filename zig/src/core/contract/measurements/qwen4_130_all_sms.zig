@@ -1,0 +1,238 @@
+//! nvcc 13.0.88 cubin resources on sm_80/86/89/120/121; later compiler sets remain independent.
+const std = @import("std");
+const limits = @import("../limits.zig");
+const Row = struct { name: []const u8, usage: [limits.sms.len]limits.Usage };
+// Cubin audit SHA-256: 0da737c8768689c04f80eb3e9f9a86d83a753274977949794c624e4142219d0f
+pub const records = [_]Row{
+    .{ .name = "qwen4_projection tf_qwen4_projection", .usage = .{
+        .{ .regs = 40, .static = 0, .bound = 128 },
+        .{ .regs = 40, .static = 0, .bound = 128 },
+        .{ .regs = 40, .static = 0, .bound = 128 },
+        .{ .regs = 40, .static = 0, .bound = 128 },
+        .{ .regs = 40, .static = 0, .bound = 128 },
+    } },
+    .{ .name = "qwen4_projection tf_qwen4_projection_bad_nan", .usage = .{
+        .{ .regs = 40, .static = 0, .bound = 128 },
+        .{ .regs = 40, .static = 0, .bound = 128 },
+        .{ .regs = 40, .static = 0, .bound = 128 },
+        .{ .regs = 40, .static = 0, .bound = 128 },
+        .{ .regs = 40, .static = 0, .bound = 128 },
+    } },
+    .{ .name = "qwen4_projection tf_qwen4_projection_bad_repeat", .usage = .{
+        .{ .regs = 40, .static = 0, .bound = 128 },
+        .{ .regs = 40, .static = 0, .bound = 128 },
+        .{ .regs = 40, .static = 0, .bound = 128 },
+        .{ .regs = 40, .static = 0, .bound = 128 },
+        .{ .regs = 40, .static = 0, .bound = 128 },
+    } },
+    .{ .name = "qwen4_projection tf_qwen4_projection_bad_tail", .usage = .{
+        .{ .regs = 40, .static = 0, .bound = 128 },
+        .{ .regs = 40, .static = 0, .bound = 128 },
+        .{ .regs = 40, .static = 0, .bound = 128 },
+        .{ .regs = 38, .static = 0, .bound = 128 },
+        .{ .regs = 38, .static = 0, .bound = 128 },
+    } },
+    .{ .name = "qwen4_projection tf_qwen4_projection_bad_sums", .usage = .{
+        .{ .regs = 39, .static = 0, .bound = 128 },
+        .{ .regs = 39, .static = 0, .bound = 128 },
+        .{ .regs = 39, .static = 0, .bound = 128 },
+        .{ .regs = 39, .static = 0, .bound = 128 },
+        .{ .regs = 40, .static = 0, .bound = 128 },
+    } },
+    .{ .name = "qwen4_gdn qwen4_gdn_chain", .usage = .{
+        .{ .regs = 51, .static = 2060, .bound = 1024 },
+        .{ .regs = 55, .static = 2060, .bound = 1024 },
+        .{ .regs = 55, .static = 2060, .bound = 1024 },
+        .{ .regs = 61, .static = 2060, .bound = 1024 },
+        .{ .regs = 61, .static = 2060, .bound = 1024 },
+    } },
+    .{ .name = "qwen4_hc qwen4_hc_activation", .usage = .{
+        .{ .regs = 15, .static = 0, .bound = 256 },
+        .{ .regs = 17, .static = 0, .bound = 256 },
+        .{ .regs = 17, .static = 0, .bound = 256 },
+        .{ .regs = 17, .static = 0, .bound = 256 },
+        .{ .regs = 17, .static = 0, .bound = 256 },
+    } },
+    .{ .name = "qwen4_hc qwen4_hc_activation_bad_nan", .usage = .{
+        .{ .regs = 15, .static = 0, .bound = 256 },
+        .{ .regs = 17, .static = 0, .bound = 256 },
+        .{ .regs = 17, .static = 0, .bound = 256 },
+        .{ .regs = 17, .static = 0, .bound = 256 },
+        .{ .regs = 17, .static = 0, .bound = 256 },
+    } },
+    .{ .name = "qwen4_hc qwen4_hc_activation_bad_repeat", .usage = .{
+        .{ .regs = 15, .static = 0, .bound = 256 },
+        .{ .regs = 17, .static = 0, .bound = 256 },
+        .{ .regs = 17, .static = 0, .bound = 256 },
+        .{ .regs = 17, .static = 0, .bound = 256 },
+        .{ .regs = 17, .static = 0, .bound = 256 },
+    } },
+    .{ .name = "qwen4_hc qwen4_hc_activation_bad_tail", .usage = .{
+        .{ .regs = 15, .static = 0, .bound = 256 },
+        .{ .regs = 17, .static = 0, .bound = 256 },
+        .{ .regs = 17, .static = 0, .bound = 256 },
+        .{ .regs = 17, .static = 0, .bound = 256 },
+        .{ .regs = 17, .static = 0, .bound = 256 },
+    } },
+    .{ .name = "qwen4_hc qwen4_hc_pointwise", .usage = .{
+        .{ .regs = 26, .static = 0, .bound = 256 },
+        .{ .regs = 26, .static = 0, .bound = 256 },
+        .{ .regs = 26, .static = 0, .bound = 256 },
+        .{ .regs = 26, .static = 0, .bound = 256 },
+        .{ .regs = 26, .static = 0, .bound = 256 },
+    } },
+    .{ .name = "qwen4_hc qwen4_hc_pointwise_bad_nan", .usage = .{
+        .{ .regs = 26, .static = 0, .bound = 256 },
+        .{ .regs = 26, .static = 0, .bound = 256 },
+        .{ .regs = 26, .static = 0, .bound = 256 },
+        .{ .regs = 26, .static = 0, .bound = 256 },
+        .{ .regs = 26, .static = 0, .bound = 256 },
+    } },
+    .{ .name = "qwen4_hc qwen4_hc_pointwise_bad_repeat", .usage = .{
+        .{ .regs = 26, .static = 0, .bound = 256 },
+        .{ .regs = 26, .static = 0, .bound = 256 },
+        .{ .regs = 26, .static = 0, .bound = 256 },
+        .{ .regs = 26, .static = 0, .bound = 256 },
+        .{ .regs = 26, .static = 0, .bound = 256 },
+    } },
+    .{ .name = "qwen4_hc qwen4_hc_pointwise_bad_tail", .usage = .{
+        .{ .regs = 26, .static = 0, .bound = 256 },
+        .{ .regs = 26, .static = 0, .bound = 256 },
+        .{ .regs = 26, .static = 0, .bound = 256 },
+        .{ .regs = 26, .static = 0, .bound = 256 },
+        .{ .regs = 26, .static = 0, .bound = 256 },
+    } },
+    .{ .name = "qwen4_hc qwen4_dense_act", .usage = .{
+        .{ .regs = 17, .static = 0, .bound = 256 },
+        .{ .regs = 16, .static = 0, .bound = 256 },
+        .{ .regs = 16, .static = 0, .bound = 256 },
+        .{ .regs = 18, .static = 0, .bound = 256 },
+        .{ .regs = 18, .static = 0, .bound = 256 },
+    } },
+    .{ .name = "qwen4_hc qwen4_dense_act_bad_nan", .usage = .{
+        .{ .regs = 17, .static = 0, .bound = 256 },
+        .{ .regs = 16, .static = 0, .bound = 256 },
+        .{ .regs = 16, .static = 0, .bound = 256 },
+        .{ .regs = 18, .static = 0, .bound = 256 },
+        .{ .regs = 18, .static = 0, .bound = 256 },
+    } },
+    .{ .name = "qwen4_hc qwen4_dense_act_bad_repeat", .usage = .{
+        .{ .regs = 17, .static = 0, .bound = 256 },
+        .{ .regs = 16, .static = 0, .bound = 256 },
+        .{ .regs = 16, .static = 0, .bound = 256 },
+        .{ .regs = 18, .static = 0, .bound = 256 },
+        .{ .regs = 18, .static = 0, .bound = 256 },
+    } },
+    .{ .name = "qwen4_hc qwen4_dense_act_bad_tail", .usage = .{
+        .{ .regs = 17, .static = 0, .bound = 256 },
+        .{ .regs = 16, .static = 0, .bound = 256 },
+        .{ .regs = 16, .static = 0, .bound = 256 },
+        .{ .regs = 18, .static = 0, .bound = 256 },
+        .{ .regs = 18, .static = 0, .bound = 256 },
+    } },
+    .{ .name = "qwen4_ple qwen4_ple_gate", .usage = .{
+        .{ .regs = 32, .static = 128, .bound = 512 },
+        .{ .regs = 37, .static = 128, .bound = 512 },
+        .{ .regs = 37, .static = 128, .bound = 512 },
+        .{ .regs = 37, .static = 128, .bound = 512 },
+        .{ .regs = 37, .static = 128, .bound = 512 },
+    } },
+    .{ .name = "qwen4_ple qwen4_ple_gate_bad_nan", .usage = .{
+        .{ .regs = 32, .static = 128, .bound = 512 },
+        .{ .regs = 37, .static = 128, .bound = 512 },
+        .{ .regs = 37, .static = 128, .bound = 512 },
+        .{ .regs = 37, .static = 128, .bound = 512 },
+        .{ .regs = 37, .static = 128, .bound = 512 },
+    } },
+    .{ .name = "qwen4_ple qwen4_ple_gate_bad_repeat", .usage = .{
+        .{ .regs = 31, .static = 128, .bound = 512 },
+        .{ .regs = 38, .static = 128, .bound = 512 },
+        .{ .regs = 38, .static = 128, .bound = 512 },
+        .{ .regs = 38, .static = 128, .bound = 512 },
+        .{ .regs = 38, .static = 128, .bound = 512 },
+    } },
+    .{ .name = "qwen4_ple qwen4_ple_gate_bad_tail", .usage = .{
+        .{ .regs = 32, .static = 128, .bound = 512 },
+        .{ .regs = 34, .static = 128, .bound = 512 },
+        .{ .regs = 34, .static = 128, .bound = 512 },
+        .{ .regs = 38, .static = 128, .bound = 512 },
+        .{ .regs = 38, .static = 128, .bound = 512 },
+    } },
+    .{ .name = "qwen4_ple qwen4_ple_gate_bad_sums", .usage = .{
+        .{ .regs = 32, .static = 128, .bound = 512 },
+        .{ .regs = 37, .static = 128, .bound = 512 },
+        .{ .regs = 37, .static = 128, .bound = 512 },
+        .{ .regs = 37, .static = 128, .bound = 512 },
+        .{ .regs = 37, .static = 128, .bound = 512 },
+    } },
+    .{ .name = "qwen4_ple qwen4_ple_conv", .usage = .{
+        .{ .regs = 23, .static = 0, .bound = 512 },
+        .{ .regs = 35, .static = 0, .bound = 512 },
+        .{ .regs = 35, .static = 0, .bound = 512 },
+        .{ .regs = 35, .static = 0, .bound = 512 },
+        .{ .regs = 35, .static = 0, .bound = 512 },
+    } },
+    .{ .name = "qwen4_ple qwen4_ple_conv_bad_nan", .usage = .{
+        .{ .regs = 23, .static = 0, .bound = 512 },
+        .{ .regs = 35, .static = 0, .bound = 512 },
+        .{ .regs = 35, .static = 0, .bound = 512 },
+        .{ .regs = 35, .static = 0, .bound = 512 },
+        .{ .regs = 35, .static = 0, .bound = 512 },
+    } },
+    .{ .name = "qwen4_ple qwen4_ple_conv_bad_repeat", .usage = .{
+        .{ .regs = 23, .static = 0, .bound = 512 },
+        .{ .regs = 35, .static = 0, .bound = 512 },
+        .{ .regs = 35, .static = 0, .bound = 512 },
+        .{ .regs = 35, .static = 0, .bound = 512 },
+        .{ .regs = 35, .static = 0, .bound = 512 },
+    } },
+    .{ .name = "qwen4_ple qwen4_ple_conv_bad_tail", .usage = .{
+        .{ .regs = 6, .static = 0, .bound = 512 },
+        .{ .regs = 6, .static = 0, .bound = 512 },
+        .{ .regs = 6, .static = 0, .bound = 512 },
+        .{ .regs = 8, .static = 0, .bound = 512 },
+        .{ .regs = 8, .static = 0, .bound = 512 },
+    } },
+    .{ .name = "qwen4_ple qwen4_ple_conv_bad_sums", .usage = .{
+        .{ .regs = 23, .static = 0, .bound = 512 },
+        .{ .regs = 35, .static = 0, .bound = 512 },
+        .{ .regs = 35, .static = 0, .bound = 512 },
+        .{ .regs = 35, .static = 0, .bound = 512 },
+        .{ .regs = 35, .static = 0, .bound = 512 },
+    } },
+    .{ .name = "qwen4_gdn qwen4_gdn_chain_bad_nan", .usage = .{
+        .{ .regs = 51, .static = 2060, .bound = 1024 },
+        .{ .regs = 55, .static = 2060, .bound = 1024 },
+        .{ .regs = 55, .static = 2060, .bound = 1024 },
+        .{ .regs = 60, .static = 2060, .bound = 1024 },
+        .{ .regs = 61, .static = 2060, .bound = 1024 },
+    } },
+    .{ .name = "qwen4_gdn qwen4_gdn_chain_bad_repeat", .usage = .{
+        .{ .regs = 52, .static = 2060, .bound = 1024 },
+        .{ .regs = 58, .static = 2060, .bound = 1024 },
+        .{ .regs = 58, .static = 2060, .bound = 1024 },
+        .{ .regs = 60, .static = 2060, .bound = 1024 },
+        .{ .regs = 61, .static = 2060, .bound = 1024 },
+    } },
+    .{ .name = "qwen4_gdn qwen4_gdn_chain_bad_tail", .usage = .{
+        .{ .regs = 48, .static = 2060, .bound = 1024 },
+        .{ .regs = 52, .static = 2060, .bound = 1024 },
+        .{ .regs = 52, .static = 2060, .bound = 1024 },
+        .{ .regs = 60, .static = 2060, .bound = 1024 },
+        .{ .regs = 62, .static = 2060, .bound = 1024 },
+    } },
+    .{ .name = "qwen4_gdn qwen4_gdn_chain_bad_sums", .usage = .{
+        .{ .regs = 51, .static = 2060, .bound = 1024 },
+        .{ .regs = 55, .static = 2060, .bound = 1024 },
+        .{ .regs = 55, .static = 2060, .bound = 1024 },
+        .{ .regs = 61, .static = 2060, .bound = 1024 },
+        .{ .regs = 61, .static = 2060, .bound = 1024 },
+    } },
+};
+
+pub fn usage(comptime name: []const u8) [limits.sms.len]limits.Usage {
+    @setEvalBranchQuota(100000);
+    return comptime for (records) |row| {
+        if (std.mem.eql(u8, row.name, name)) break row.usage;
+    } else @compileError("No nvcc 13.0 Qwen4 receipt for " ++ name);
+}

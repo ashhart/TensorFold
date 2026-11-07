@@ -25,7 +25,7 @@ const qmmf_f32_symbol = "_ZN7tf_qmmf11qmmf_kernelILi0ELi{d}ELi64ELi1ELi4ELi4ELb1
 const vision80_symbol = "_ZN20tf_prefill_attention13vision_kernelILi80ELi8EEEvPK13__nv_bfloat16PS1_iif";
 const full72_symbol = "_ZN20tf_prefill_attention11full_kernelILi72ELi8ELi8EEEvPK13__nv_bfloat16PS1_iif";
 /// CUDA kernels as launched; tf-cuda-test kernel-contract-limits re-derives the usage records.
-pub const cuda = @import("flashnext_cuda_records.zig").cuda ++ [_]CudaRecord{
+pub const cuda = @import("qwen_score_records.zig").records ++ @import("flashnext_cuda_records.zig").cuda ++ [_]CudaRecord{
     .{ .launch = .{ .name = "embed_rows tf_embed_rows_bf16_copies", .symbol = "tf_embed_rows_bf16_copies", .image = "embed_rows", .threads = 256 }, .usage = .{ .{ .regs = 32, .static = 0, .bound = 256 }, .{ .regs = 40, .static = 0, .bound = 256 }, .{ .regs = 40, .static = 0, .bound = 256 }, .{ .regs = 40, .static = 0, .bound = 256 }, .{ .regs = 40, .static = 0, .bound = 256 } } },
     .{ .launch = .{ .name = "norms tf_rms_rows_sums", .symbol = "tf_rms_rows_sums", .image = "norms", .threads = 1024 }, .usage = .{ .{ .regs = 31, .static = 132, .bound = 1024 }, .{ .regs = 37, .static = 132, .bound = 1024 }, .{ .regs = 37, .static = 132, .bound = 1024 }, .{ .regs = 34, .static = 132, .bound = 1024 }, .{ .regs = 34, .static = 132, .bound = 1024 } } },
     .{ .launch = .{ .name = "route_rows tf_route_logits", .symbol = "tf_route_logits", .image = "route_rows", .threads = 128, .dynamic = 26112 }, .usage = .{ .{ .regs = 32, .static = 0, .bound = 128 }, .{ .regs = 39, .static = 0, .bound = 128 }, .{ .regs = 39, .static = 0, .bound = 128 }, .{ .regs = 35, .static = 0, .bound = 128 }, .{ .regs = 34, .static = 0, .bound = 128 } } },
@@ -351,7 +351,7 @@ pub fn usageFor(r: CudaRecord, release: ?limits.Nvcc) [limits.sms.len]U {
     return u;
 }
 /// Restored Qwen launches retain a pending entry wherever a compiler receipt is absent.
-pub const cuda_pending = @import("qwen_whole_records.zig").records ++ @import("cuda_lane_pending.zig").records ++ @import("weight_only_records.zig").cuda ++ @import("hc_activation_records.zig").cuda ++ @import("qwen4_records.zig").cuda;
+pub const cuda_pending = @import("moe_router_records.zig").records ++ @import("gdn_chain_records.zig").records ++ @import("qwen_whole_records.zig").records ++ @import("cuda_lane_pending.zig").records ++ @import("weight_only_records.zig").cuda ++ @import("hc_activation_records.zig").cuda ++ @import("qwen4_records.zig").cuda;
 /// Gate 5's planted CUDA controls: a launch past its __launch_bounds__, one needing more registers than a block has.
 pub const cuda_controls = [_]CudaRecord{
     .{ .launch = .{ .name = "control: past its bounds", .symbol = "tf_ctl_bounded", .image = "contract_controls", .threads = 512 }, .usage = .{ .{ .regs = 10, .static = 0, .bound = 256 }, .{ .regs = 10, .static = 0, .bound = 256 }, .{ .regs = 10, .static = 0, .bound = 256 }, .{ .regs = 10, .static = 0, .bound = 256 }, .{ .regs = 10, .static = 0, .bound = 256 } } },
