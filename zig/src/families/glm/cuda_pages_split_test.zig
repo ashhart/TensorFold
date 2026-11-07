@@ -56,12 +56,12 @@ const F = struct {
 };
 
 /// An engine with what the pages read: TP=2's shapes on a KDA, a DSA and a KDA layer, 4,096 rows (8 pages a window).
-const Fake = struct {
+pub const Fake = struct {
     d: cuda.Driver,
     layers: [3]weights.Layer,
     e: Engine,
 
-    fn init(f: *Fake, split: bool) !void {
+    pub fn init(f: *Fake, split: bool) !void {
         F.live = 0;
         F.puts = 0;
         F.at = @splat(0);
@@ -90,7 +90,7 @@ const Fake = struct {
         f.e.share = f.e.w.share; // rank 0 of two: an owner class each
     }
 
-    fn deinit(f: *Fake, p: ?*pages_mod.Pages) void {
+    pub fn deinit(f: *Fake, p: ?*pages_mod.Pages) void {
         if (p) |q| q.deinit();
         for (f.e.seqs.items) |q| if (q) |s| {
             s.st.deinit();
@@ -101,12 +101,12 @@ const Fake = struct {
     }
 
     /// The engine's own sequence, then a pool of `pages` beside it for `streams` sequences.
-    fn pool(f: *Fake, streams: usize, pages: usize, leader: bool) !*pages_mod.Pages {
+    pub fn pool(f: *Fake, streams: usize, pages: usize, leader: bool) !*pages_mod.Pages {
         try pages_mod.ownSequence(&f.e);
         return pages_mod.Pages.init(gpa, &f.e, try pages_mod.layout(gpa, &f.e, 0), streams, pages, leader);
     }
 
-    fn st(f: *Fake, slot: usize) *state.State {
+    pub fn st(f: *Fake, slot: usize) *state.State {
         return &f.e.seqs.items[slot].?.st;
     }
 };
