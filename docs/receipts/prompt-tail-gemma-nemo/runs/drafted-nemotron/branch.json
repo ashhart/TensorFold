@@ -1,0 +1,141 @@
+{
+ "label": "branch",
+ "md5": "d82474b68bc50db2d520941ad54143d8",
+ "cold": {
+  "2k": [
+   {
+    "prompt": 2099,
+    "cached": 0,
+    "tokens": 64,
+    "sha": "9a3c3e292856",
+    "accepted": 33,
+    "drafted": 47,
+    "ttft": 0.29,
+    "decode": 0.451,
+    "msg": {
+     "role": "assistant",
+     "content": "The document contains a list of items, many of which appear to be related to nature, lighting, and organization. Key elements include:\n\n*   **Lamps and Lighting:** Numerous references to lamps (e.g., lamp101, lamp435, lamp633, lamp818),"
+    }
+   },
+   {
+    "prompt": 2114,
+    "cached": 0,
+    "tokens": 64,
+    "sha": "671b5faf66b3",
+    "accepted": 36,
+    "drafted": 47,
+    "ttft": 0.294,
+    "decode": 0.408,
+    "msg": {
+     "role": "assistant",
+     "content": "This document appears to be a structured list of items, likely representing a ledger, inventory, or database of various entities. The entries are categorized into several main groups:\n\n*   **Ledger:** Numerous entries starting with \"ledger\" (e.g., ledger743, ledger956,"
+    }
+   },
+   {
+    "prompt": 2087,
+    "cached": 0,
+    "tokens": 64,
+    "sha": "0bd6e9b4fddd",
+    "accepted": 29,
+    "drafted": 48,
+    "ttft": 0.289,
+    "decode": 0.495,
+    "msg": {
+     "role": "assistant",
+     "content": "This document appears to be a collection of keywords, likely extracted from a dataset of text or used for indexing purposes. The entries consist of nouns and proper nouns, frequently appearing in combinations related to nature, navigation, and man-made objects.\n\n**Key themes and frequent terms include:**\n\n*   **Navigation & Location:** `har"
+    }
+   }
+  ],
+  "16k": [
+   {
+    "prompt": 16333,
+    "cached": 0,
+    "tokens": 64,
+    "sha": "63907e77d3ea",
+    "accepted": 31,
+    "drafted": 49,
+    "ttft": 2.255,
+    "decode": 0.485,
+    "msg": {
+     "role": "assistant",
+     "content": "The document contains a list of items including ledgers, copper, gardens, meadows, harbors, rivers, stones, lamps, candles, and orbits. There are recurring patterns of these terms appearing in various combinations, often associated with winter, signal, and specific numerical identifiers. The text appears to be a structured list"
+    }
+   },
+   {
+    "prompt": 16310,
+    "cached": 0,
+    "tokens": 64,
+    "sha": "5137037fa234",
+    "accepted": 30,
+    "drafted": 39,
+    "ttft": 2.245,
+    "decode": 0.472,
+    "msg": {
+     "role": "assistant",
+     "content": "The document contains a list of numbers, many of which appear to be related to a game or dataset involving items like copper, ledger, meadow, river, stone, winter, orbit, candle, and harbor. There are frequent mentions of ledger, copper, meadow, river, and winter, with some recurring patterns"
+    }
+   },
+   {
+    "prompt": 16294,
+    "cached": 0,
+    "tokens": 63,
+    "sha": "7445ea0296ea",
+    "accepted": 32,
+    "drafted": 39,
+    "ttft": 2.244,
+    "decode": 0.442,
+    "msg": {
+     "role": "assistant",
+     "content": "The document contains a list of numbers, many of which appear to be identifiers or codes related to various categories such as harbors, meadows, rivers, winter, copper, ledger, stone, orbit, garden, lamp, and signal. There is no clear narrative or structured text beyond these numeric entries."
+    }
+   }
+  ],
+  "32k": [
+   {
+    "prompt": 32545,
+    "cached": 0,
+    "tokens": 64,
+    "sha": "04b876a76472",
+    "accepted": 33,
+    "drafted": 48,
+    "ttft": 4.955,
+    "decode": 0.493,
+    "msg": {
+     "role": "assistant",
+     "content": "The text is a list of words and phrases related to winter, gardens, rivers, harbors, copper, stone, ledgers, meadows, lamps, signals, and orbits. It appears to be a collection of tags or keywords, possibly from a dataset or a search query, with no coherent narrative or structured information"
+    }
+   },
+   {
+    "prompt": 32606,
+    "cached": 0,
+    "tokens": 64,
+    "sha": "cb730837783c",
+    "accepted": 30,
+    "drafted": 47,
+    "ttft": 4.957,
+    "decode": 0.517,
+    "msg": {
+     "role": "assistant",
+     "content": "The document contains a list of numbers, many of which appear to be identifiers or codes related to various categories such as gardens, rivers, harbors, copper, ledgers, winter, meadows, stones, lamps, and signals. There are no clear sentences or narrative structure, but the numbers are organized in groups that"
+    }
+   },
+   {
+    "prompt": 32522,
+    "cached": 0,
+    "tokens": 64,
+    "sha": "8c109c5ff992",
+    "accepted": 31,
+    "drafted": 46,
+    "ttft": 4.947,
+    "decode": 0.504,
+    "msg": {
+     "role": "assistant",
+     "content": "The text contains a list of numbers, some of which appear to be identifiers or codes related to gardens, harbors, signals, copper, ledgers, winter, meadows, rivers, stones, and lamps. There are no clear sentences or paragraphs, and the content seems to be a raw extraction of data points,"
+    }
+   }
+  ]
+ },
+ "serving": [
+  "[tensorfold] serving m at http://127.0.0.1:18409/v1 (sampling: temperature 1.0, top_p 0.95; drafts: MTP + copies; context: 40960; loaded in 13.7s)"
+ ]
+}

@@ -24,7 +24,7 @@ Shared helpers that hold the cross-family parts:
 - `zig/src/core/bf16_round.zig`: the one fp32-to-bf16 rounding every host copy uses.
 - `zig/src/core/profile.zig` and [profiles](profiles.md): the `--profile` switch registry.
 - `zig/src/core/contract/` and the [kernel contract](kernel-contract.md): the gates a new or ported kernel passes.
-- `zig/src/core/prompt_tail.zig`: the last layer's kept tile ([#2229]).
+- `zig/src/core/prompt_tail.zig`: the last layer's kept tile ([#2229]) and the chunks nothing reads ([#2432]).
 - `zig/src/core/state_walk.zig`: one walk for kept prompt states. Not on main yet: it is on [#2215].
 
 ## The table
@@ -45,7 +45,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 
 | Optimization | q3.5 | fnext | glm | gem4 | nemo |
 | --- | --- | --- | --- | --- | --- |
-| 1. Prompt tail | done [#2229] | yes | yes | yes | yes |
+| 1. Prompt tail | done [#2229] | yes | yes | open [#2432] | open [#2432] |
 | 2. Paged KV | done C[#1750] M[#1294] | done [#1169] | done [#1163] | done [#1619] | done C[#935] M[#1537] |
 | 3. Prompt store | done [#1357] | yes (host store) | done [#1732] | done [#1883] | yes C open M[#1850] |
 | 4. iGPU states | done [#2113] | done¹ | yes | done¹ | done¹ |
@@ -248,7 +248,8 @@ below; these are estimates for planning a port, not results.
 1. **Prompt tail on the last layer.** A prompt chunk keeps one row's logits, so past the last layer's keys and values
    only the kept row's 128-row tile needs q, attention, o and the MLP ([#2165]). It saves about 1/layers of a cold
    prompt, less the k/v share. A family is blocked where something else reads every row of the last layer: MTP taps,
-   drafter taps, hidden readouts, or a fused projection that makes k/v and q in one GEMM.
+   drafter taps, hidden readouts, or a fused projection that makes k/v and q in one GEMM. Where only the prompt's last
+   chunk has its logits read, the other chunks keep no tile and stop at their last state write.
 
    | Family | Last layer, layers | Main blocker | Gain | Effort |
    | --- | --- | --- | --- | --- |
@@ -539,6 +540,7 @@ below; these are estimates for planning a port, not results.
 [#2146]: https://github.com/ashhart/TensorFold/pull/2146
 [#2162]: https://github.com/ashhart/TensorFold/pull/2162
 [#2165]: https://github.com/ashhart/TensorFold/issues/2165
+[#2432]: https://github.com/ashhart/TensorFold/pull/2432
 [#2167]: https://github.com/ashhart/TensorFold/pull/2167
 [#2211]: https://github.com/ashhart/TensorFold/pull/2211
 [#2215]: https://github.com/ashhart/TensorFold/pull/2215

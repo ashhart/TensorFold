@@ -2,6 +2,7 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const rope_freq = @import("core").rope_freq;
+const prompt_tail = @import("core").prompt_tail;
 const cfg = @import("cuda_config.zig");
 const wts = @import("cuda_weights.zig");
 const kern = @import("cuda_kernels.zig");
@@ -333,7 +334,9 @@ pub const Model = struct {
         if (m.w.ple) |p| try m.layerInputs(k, s, p, rows, prompt);
         // layer 0's input norm alone; every later one is the previous layer's dense tail
         try k.norms.addRmsTail(s, x.h[0], null, m.w.layers[0].input_norm, x.h[1], x.n, x.xs, rows, h, cfg.eps, .{ .round = true });
-        for (0..m.layers) |i| try m.layer(k, s, chains, i, rows, prompt);
+        const tapped = std.mem.indexOfScalar(u32, m.taps[0..m.tap_count], @intCast(m.layers - 1)) != null;
+        const unread = prompt and prompt_tail.unread(.{ .logits = heads != 0, .readers = tapped });
+        for (0..m.layers) |i| try m.layer(k, s, chains, i, rows, prompt, unread and i + 1 == m.layers);
         if (heads == 0) return;
         try m.project(k, s, m.w.head, x.n + head0 * h * 2, x.xs + head0 * (h / 64) * 4, x.logits, heads, false);
         try k.act.softcap(s, x.logits, x.logits, heads, cfg.vocab, cfg.softcap);
@@ -368,7 +371,7 @@ pub const Model = struct {
     }
 
     /// Layer i on the rows: residual in s.h[0], its normed input (and sums) in s.n (s.xs); the same on return.
-    fn layer(m: *Model, k: *const kern.Kernels, s: cuda.Stream, chains: []const Chain, i: usize, rows: usize, prompt: bool) !void {
+    fn layer(m: *Model, k: *const kern.Kernels, s: cuda.Stream, chains: []const Chain, i: usize, rows: usize, prompt: bool, unread: bool) !void {
         const geo = m.geo;
         const l = m.w.layers[i];
         const x = m.s;
@@ -379,7 +382,11 @@ pub const Model = struct {
         const qw = geo.query_heads * dh;
         const kw = kvh * dh;
         const own = l.k != null; // a shared layer: q only, attending over its owner's cache (kc[i] is the owner's)
-        if (l.k) |kp| {
+        if (unread and !own) return; // a shared layer writes no state
+        if (unread) { // no q: its rows only reach the attention this layer skips
+            try m.project(k, s, l.k.?, x.n, x.xs, x.k, rows, prompt);
+            if (l.v) |v| try m.project(k, s, v, x.n, x.xs, x.v, rows, prompt);
+        } else if (l.k) |kp| {
             if (l.v) |v| {
                 try m.projectMany(k, s, &.{ l.q, kp, v }, x.n, x.xs, &.{ x.q, x.k, x.v }, rows, prompt);
             } else try m.projectMany(k, s, &.{ l.q, kp }, x.n, x.xs, &.{ x.q, x.k }, rows, prompt);
@@ -394,6 +401,7 @@ pub const Model = struct {
         try k.qk.rowsFrom(s, src, .{ .h = geo.query_heads, .hk = if (own) kvh else 0, .dim = dh }, shape, x.pos, x.slot, out, rows);
         const w: Window = .{ .h = geo.query_heads, .hk = kvh, .d = dh, .win = if (global) 0 else geo.sliding_window, .ring = len, .scale = 1, .p32 = true, .pg = pg };
         if (own and pg != null) try k.win.put(s, x.kr, x.vr, m.kc[i], m.vc[i], x.pos, x.slot, w, rows);
+        if (unread) return;
         if (prompt) {
             const c = chains[0];
             const off = if (pg != null) 0 else c.slot * len * kw * 2;
