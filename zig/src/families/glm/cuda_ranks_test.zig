@@ -160,6 +160,26 @@ test "a direct split start on a ring of four without a switch is refused before 
     for (0..2) |r| try std.testing.expectEqual(@as(usize, 2), try Fabric.probe(.{}, r, 2, false));
 }
 
+test "RoCE all-gather on this fabric: a mesh of four reaches every rank; a ring of four leaves the far rank out" {
+    const Reach = struct {
+        fn reaches(_: void, rank: usize, peer: usize) bool {
+            Fabric.rank = rank;
+            return Fabric.reaches(@intCast(peer));
+        }
+    };
+    // behind a switch every rank is a peer's one RDMA write away: the RoCE path (Group.openRoce) comes up on all four
+    Fabric.world = 4;
+    Fabric.switched = true;
+    for (0..4) |r| try std.testing.expectEqual(@as(?usize, null), cuda.roce.firstUnreachable(r, 4, {}, &Reach.reaches));
+    // a ring of four without a switch: each rank's far rank has no path, so the connect probe fails and every rank keeps
+    // NCCL (as the split start's own probe refuses above; the engine's RoCE probe is the backstop for TF_ROCE unset)
+    Fabric.switched = false;
+    for (0..4) |r| try std.testing.expectEqual(@as(?usize, (r + 2) % 4), cuda.roce.firstUnreachable(r, 4, {}, &Reach.reaches));
+    // two ranks on one cable are each other's neighbours: the two-rank path as before
+    Fabric.world = 2;
+    for (0..2) |r| try std.testing.expectEqual(@as(?usize, null), cuda.roce.firstUnreachable(r, 2, {}, &Reach.reaches));
+}
+
 test "a ring start on four ranks that reach only their neighbours loads without the all-peer probe" {
     var problem: []const u8 = "";
     const ring = try Settings.read(&ringed, &problem);
