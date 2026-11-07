@@ -443,6 +443,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         .draft_sources = .{ .drafter = served.source },
         .context_window = @intCast(window),
         .prefill_step = snaps.requestStep(F),
+        .prefill_min_chunk = snaps.requestMinimum(F),
         .startup = h.startup,
         .policy = if (@hasField(@TypeOf(loaded), "policy")) loaded.policy else "",
         .prompt_cache = h.store != null,
