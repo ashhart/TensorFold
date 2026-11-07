@@ -79,7 +79,6 @@ pub fn expectPinnedModel(s: loader.config.Spec) Error!void {
         .value_dim = pinned.linear_dim,
         .conv = pinned.conv_taps,
         .rotary_dim = pinned.rotary_dim,
-        .full_every = 4,
         .bits = 4,
         .group = pinned.group,
         .experts = 0,
@@ -409,7 +408,7 @@ test "the real pinned config geometry is admitted and field drift is refused" {
     try testing.expectEqual(@as(usize, 128), s.value_dim);
     try testing.expectEqual(@as(usize, 4), s.conv);
     try expectPinnedModel(s);
-    inline for (.{ "hidden", "vocab", "n_layers", "intermediate", "heads", "kv_heads", "head_dim", "key_heads", "value_heads", "key_dim", "value_dim", "conv", "rotary_dim", "full_every", "bits", "group", "experts" }) |field| {
+    inline for (.{ "hidden", "vocab", "n_layers", "intermediate", "heads", "kv_heads", "head_dim", "key_heads", "value_heads", "key_dim", "value_dim", "conv", "rotary_dim", "bits", "group", "experts" }) |field| {
         var drift = s;
         @field(drift, field) += 1;
         try testing.expectError(error.UnsupportedModel, expectPinnedModel(drift));

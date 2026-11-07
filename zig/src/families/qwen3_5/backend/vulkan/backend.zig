@@ -97,7 +97,7 @@ pub const Vulkan = struct {
     }
 
     // Each 32-row call checks ids and capacity before reset; visible() tracks progress.
-    fn prefillStepFn(ptr: *anyopaque, stream: *lanes.Stream) !bool {
+    fn prefillStepFn(ptr: *anyopaque, stream: *lanes.Stream, max_rows: u32) !bool {
         const self = cast(ptr);
         if (self.owner) |o| {
             if (o != stream) return error.QwenStreamBusy;
@@ -113,7 +113,8 @@ pub const Vulkan = struct {
         const ids = stream.prompt();
         const done: usize = @intCast(self.engine.visible());
         if (done >= ids.len) return true;
-        const end = engine_mod.chunkEnd(done, ids.len);
+        var end = engine_mod.chunkEnd(done, ids.len);
+        if (max_rows > 0) end = @min(end, done + @as(usize, max_rows)); // 0: uncapped, per the lanes contract
         try self.engine.prefillChunk(ids[done..end]);
         const filled = self.engine.visible();
         stream.fill_at.store(@intCast(filled), .monotonic);
@@ -248,7 +249,7 @@ test "stepped and cancel callbacks exist and their ownership guards fire before 
     owned.owner = &other;
     var s = try lanes.Stream.init(std.testing.allocator, .{ .id = "t", .prompt = &.{ 1, 2 }, .max_new = 4 });
     defer s.deinit(std.testing.allocator);
-    try std.testing.expectError(error.QwenStreamBusy, table.prefill_step.?(@ptrCast(&owned), &s));
+    try std.testing.expectError(error.QwenStreamBusy, table.prefill_step.?(@ptrCast(&owned), &s, 0));
     // cancel guard: no owner, or a foreign stream, refuses without touching the engine
     var fresh: Vulkan = .{ .gpa = undefined, .engine = undefined };
     try std.testing.expectError(error.UnknownQwenStream, table.cancel_prefill.?(@ptrCast(&fresh), &s));
