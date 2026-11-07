@@ -169,7 +169,13 @@ test "rows drop: each state dropped at open is said with its cause, and the earl
         .{ .plants = &.{ .{ .at = 2000, .fault = .truncate }, .{ .at = 1400, .fault = .rename } }, .opened = "imprint: 2 disk states failed their check (RowsRead); they are forgotten\n", .from = 800 },
         .{ .plants = &.{ .{ .at = 1400, .fault = .truncate }, .{ .at = 2000, .fault = .delete } }, .opened = failed ++ missing, .from = 800 },
         // a flipped byte is found only as the state is read, by the read's own check, which says so
-        .{ .plants = &.{.{ .at = 2000, .fault = .flip }}, .opened = "", .read = "imprint: a disk block failed its check (RowsHash); it and the states naming it are forgotten\n", .from = 0 },
+        .{
+            .plants = &.{.{ .at = 2000, .fault = .flip }},
+            .opened = "",
+            .read = "imprint: a disk block failed its check (RowsHash); it and the states naming it are forgotten\n" ++
+                "disk restore of 2000 tokens failed (RowsHash); trying one shorter kept state\n",
+            .from = 1400,
+        },
     };
     for (cases, 0..) |c, n| {
         var buf: [128]u8 = undefined;
@@ -223,9 +229,14 @@ test "rows drop: each state dropped at open is said with its cause, and the earl
         var s = pc.Store.init(gpa, f.snapshots(), rules, 1 << 30);
         defer s.deinit();
         s.disk = r;
+        const selected = rows.read.resumable(&s, p[0..2050], &.{}, &.{});
+        try t.expectEqual(@as(u32, if (c.read.len == 0) c.from else 2000), selected.disk);
+        try t.expectEqual(@as(u64, 0), r.counts.failed);
         const got = try request(a, &s, &f, p[0..2050], 2049);
         try t.expectEqualStrings(c.read, heard.text());
         try t.expectEqual(c.from, got.from);
+        try t.expectEqual(@as(u64, @intFromBool(c.read.len != 0)), r.counts.failed);
+        try t.expectEqual(@as(u64, 1), r.counts.reads);
         try t.expect(f.restored_ok);
         try t.expectEqual(fresh(p[0..2050]), got.sum);
         heard.len = 0;
