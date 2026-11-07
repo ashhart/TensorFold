@@ -140,12 +140,16 @@ fn picksBytes(rows: usize) usize {
     const cap: usize = @min(rows, chunk_rows);
     return std.mem.alignForward(usize, cap * top_k * 4, 256);
 }
+/// A decode chunk's arena: the plain 8-slot layout or the decode item plan's 9-slot one without y, the larger.
+fn decodeBytes(l: common.Layer, n: usize) !usize {
+    return @max(try common.scratchBytes(l, n, top_k), try common.fusedBytes(l, n, top_k + 1));
+}
 pub fn scratchBytes(rows: usize, dims: usize, width: usize, prefill: bool, shx: bool) [4]usize {
     const n: usize = @min(rows, chunk_rows);
     var l = shape(dims, width);
     l.shared_input = shx;
     if (prefill and common.prompt.eligible(l)) return .{ picksBytes(rows) + (common.prompt.bytes(l, n, top_k) catch unreachable), 4, 4, 4 };
-    return .{ picksBytes(rows) + (common.scratchBytes(shape(dims, width), n, top_k) catch unreachable), 4, 4, 4 };
+    return .{ picksBytes(rows) + (decodeBytes(shape(dims, width), n) catch unreachable), 4, 4, 4 };
 }
 /// `height` rows of `width` bytes, `spitch` apart at `src`, to `dpitch` apart at `dst`, in one call.
 fn copyRows(stream: cuda.Stream, dst: u64, dpitch: usize, src: u64, spitch: usize, width: usize, height: usize, what: []const u8) !void {
@@ -163,6 +167,10 @@ pub fn run(k: *const Kernels, ek: *const experts.Kernels, stream: cuda.Stream, w
     var at: usize = 0;
     while (at < rows) : (at += chunk_rows) {
         const n: usize = @min(chunk_rows, rows - at);
+        if (!prompt) { // a decode window runs on the item plan, which writes the slot rows into ey
+            try decodeItems(k, stream, l, arena, cap, x + at * x_stride * 2, x_stride, picks + at * slots * 4, n, ey + at * slots * dims * 4, &ek.router, plan_buf);
+            continue;
+        }
         try copyRows(stream, sc.picks, top_k * 4, picks + at * slots * 4, slots * 4, top_k * 4, n, "EXL3 compact route rows");
         const output = if (fused) blk: {
             const scratch = try common.prompt.scratch(arena, l, cap, top_k);
@@ -175,6 +183,13 @@ pub fn run(k: *const Kernels, ek: *const experts.Kernels, stream: cuda.Stream, w
         };
         try copyRows(stream, ey + at * slots * dims * 4, slots * dims * 4, output, top_k * dims * 4, top_k * dims * 4, n, "EXL3 routed output slots");
     }
+}
+
+/// A decode window's routed experts on the item plan: the down epilogue writes ey's routed slot rows in place.
+fn decodeItems(k: *const Kernels, stream: cuda.Stream, l: common.Layer, arena: u64, cap: usize, x: u64, x_stride: usize, picks: u64, n: usize, ey: u64, router: *const cuda.grouped.Router, plan: cuda.grouped.Plan) !void {
+    // the 9-slot layout without y (decodeBytes sizes the arena for it); no copy back from y, so none is freed here.
+    const scratch = try common.fusedScratch(arena, l, cap, top_k + 1);
+    return k.runWith(stream, l, x, x_stride, .bf16, picks, 0, n, 0, scratch, ey, .{ .router = router, .plan = plan });
 }
 
 test "EXL3 admission: Mia-AiLab's block passes; other widths and codebooks are refused by name" {
@@ -203,4 +218,13 @@ test "a chunk's compacted picks end before the common scratch at every row count
 
 test "GLM's routed experts run on the common EXL3 module's kernels" {
     try std.testing.expect(Kernels == cuda.exl3_experts.Experts);
+}
+
+test "a decode window's item plan is at GLM's shapes the plain layout's bytes, so no pool changes" {
+    for ([_]usize{ 640, 768, 1024, 2048 }) |width| for (1..65) |rows| { // TP=3 narrow and wide shares, TP=2, TP=1
+        const l = shape(4096, width);
+        const plain = try common.scratchBytes(l, rows, top_k);
+        try std.testing.expect(try common.fusedBytes(l, rows, top_k + 1) <= plain);
+        try std.testing.expectEqual(picksBytes(rows) + plain, scratchBytes(rows, 4096, width, false, false)[0]);
+    };
 }
