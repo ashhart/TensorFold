@@ -153,9 +153,11 @@ const Stub = struct {
 const Written = struct {
     ids: [4]u32 = @splat(0),
     from: usize = 99,
+    cap: usize = 0, // pages a forward may reach: a write ends the table, as mapPages sets caps
     fn write(ctx: *anyopaque, ids: []const u32, from: usize) anyerror!void {
         const w: *Written = @ptrCast(@alignCast(ctx));
         w.from = from;
+        w.cap = ids.len;
         @memcpy(w.ids[from..][0 .. ids.len - from], ids[from..]);
     }
 };
@@ -177,6 +179,7 @@ test "keeping swaps the store's pages in and writes the whole table: a table of 
     const whole = try p.keepPages(testing.allocator, &pool, &l, &.{ 1, 2, 3 }, 512, &owner, 256, .{ .ctx = &w, .write = Written.write });
     try testing.expect(whole);
     try testing.expectEqual(@as(usize, 0), w.from);
+    try testing.expectEqual(@as(usize, 4), w.cap);
     try testing.expectEqualSlices(u32, &.{ held[0], held[1], rest[0], rest[1] }, &w.ids);
     try testing.expectEqualSlices(u32, &w.ids, l.ids.items);
     try testing.expectEqual(@as(u32, 2), pool.holders(held[0]));
