@@ -4,6 +4,7 @@ const std = @import("std");
 const cuda = @import("cuda");
 const engine = @import("cuda_engine.zig");
 const prompt_solo = @import("cuda_prompt_solo.zig");
+const prompt_cuts = @import("cuda_prompt_cuts.zig");
 const images_mod = @import("cuda_images.zig");
 const vcfg = @import("vision_config.zig");
 const sampler = @import("cuda_sampler.zig");
@@ -14,7 +15,7 @@ const sparse = @import("cuda_sparse.zig");
 const prompt_pair = @import("cuda_prompt_pair.zig");
 const Engine = engine.Engine;
 
-pub const Kind = enum(u32) { begin = 1, prefill, verify, keep, draft, end, drop, release, chunk, shared, image, block, many, redraw, idle, snapshots, pool };
+pub const Kind = enum(u32) { begin = 1, prefill, verify, keep, draft, end, drop, release, chunk, shared, image, block, many, redraw, idle, snapshots, pool, cuts };
 
 /// One step as it crosses: 64 bytes, then `n` u32 ids.
 pub const Header = extern struct {
@@ -224,11 +225,18 @@ pub const Leader = struct {
         return x.e.prefill(ids, from, cancel, marks);
     }
 
-    /// One prompt step on every rank (Engine.prefillChunk): a chunk, or two if `alone` and solo or pair rules allow.
+    /// The bound sequence's request chunk starts (TF_GLM_REQUEST_STARTS) to every rank, before its first prompt step.
+    pub fn cuts(x: Leader, starts: []const u32) !void {
+        try prompt_cuts.set(x.e.gpa, &x.e.cur.cuts, starts); // a refusal here leaves every rank as it was
+        try x.flush();
+        try x.send(.{ .kind = @backingInt(Kind.cuts) }, starts);
+    }
+
+    /// One prompt step on every rank (Engine.prefillChunk): to the next cut, or two if `alone` and solo or pair allow.
     pub fn chunk(x: Leader, ids: []const u32, start: usize, alone: bool, from: ?engine.Resume, cancel: ?engine.Cancel, marks: ?engine.Marks) !Chunk {
         if (start >= ids.len) return error.BadChunk;
         try x.flush();
-        const n: usize = if (alone and (prompt_solo.at(x.e, start, ids.len, from, marks) or prompt_pair.pairedAt(x.e, start, ids.len, from, marks))) engine.solo_rows else engine.prompt_rows;
+        const n: usize = if (alone and (prompt_solo.at(x.e, start, ids.len, from, marks) or prompt_pair.pairedAt(x.e, start, ids.len, from, marks))) engine.solo_rows else prompt_cuts.nextCut(ids.len, x.e.cur.cuts.items, start) - start;
         const part = ids[start..@min(ids.len, start + n + 1)];
         const split = sparse.splitAt(start, x.e.settings.index_split, x.e.share.world); // a paired step's chunks share it
         try x.send(.{ .kind = @backingInt(Kind.chunk), .flags = x.rows() | @as(u32, @intFromBool(split)) << 1, .a = if (from) |r| r.id else 0, .seed = if (from) |r| r.at else 0, .depth = @intCast(start), .top_k = @intCast(ids.len) }, part);
@@ -345,6 +353,7 @@ pub fn follow(e: *Engine, link: *Link) !void {
                 if (e.pages != null) return error.BadStep;
                 e.pages = try pages_mod.Pages.follow(e.gpa, e, h.depth, @intCast(h.a), h.seed);
             },
+            .cuts => try prompt_cuts.set(e.gpa, &e.cur.cuts, step.ids), // the bound sequence's, before its first prompt step
             .prefill => {
                 const ids = try e.gpa.dupe(u32, step.ids);
                 defer e.gpa.free(ids);

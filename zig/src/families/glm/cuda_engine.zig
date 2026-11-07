@@ -40,6 +40,7 @@ pub const max_shared = 16;
 const types = @import("cuda_engine_types.zig");
 const snapshots = @import("cuda_snapshots.zig");
 const prompt_solo = @import("cuda_prompt_solo.zig");
+const prompt_cuts = @import("cuda_prompt_cuts.zig");
 pub const Part = types.Part;
 pub const Kept = types.Kept;
 const Seq = types.Seq;
@@ -302,6 +303,7 @@ pub const Engine = struct {
         const q = e.seqs.items[slot] orelse return;
         cuda.completion.drain(e.d, e.stream, "GLM sequence release did not drain");
         q.st.deinit();
+        q.cuts.deinit(e.gpa);
         e.gpa.destroy(q);
         e.seqs.items[slot] = null;
     }
@@ -326,23 +328,21 @@ pub const Engine = struct {
     pub fn begin(e: *Engine, sampling: ?sampler.Sampling) !void {
         e.cur.sampling = sampler.check(sampling);
         e.cur.in_head = 0;
+        e.cur.cuts.clearRetainingCapacity(); // a request without starts cuts on the grid alone
         try e.cur.st.reset(e.stream);
         if (e.drafter) |dr| try dr.restart(e.slot, 0);
     }
 
-    /// decode.prefill: `ids` in 2,048-row chunks, then the first token from the last row; `from` restores a kept state.
+    /// decode.prefill: `ids` chunk by chunk to each cut, then the first token from the last row; `from` resumes.
     pub fn prefill(e: *Engine, ids: []const u32, from: ?Resume, cancel: ?Cancel, marks: ?Marks) !u32 {
-        var start = try e.prefillStart(ids.len, from);
-        while (true) : (start += fw.prefill_rows) {
-            if (try e.prefillChunk(ids[start..@min(ids.len, start + fw.prefill_rows + 1)], start, ids.len, null, cancel, marks)) |first| return first;
-        }
+        return prompt_cuts.pass(e, ids, try e.prefillStart(ids.len, from), cancel, marks);
     }
 
     /// Where a prompt pass of `len` ids starts: 0, or `from`'s position with its kept state restored.
     fn prefillStart(e: *Engine, len: usize, from: ?Resume) !usize {
         if (len == 0 or len + fw.window_rows >= e.cur.st.capacity) return error.PromptTooLong;
         const r = from orelse return 0;
-        if (r.at == 0 or r.at >= len or r.at % fw.prefill_rows != 0) return error.BadResume;
+        if (r.at == 0 or r.at >= len or !prompt_cuts.coldCut(len, e.cur.cuts.items, r.at)) return error.BadResume;
         try e.restoreState(r.id);
         if (e.drafter) |dr| try dr.restart(e.slot, r.at); // the rows before it were never tapped
         return r.at;
@@ -353,8 +353,7 @@ pub const Engine = struct {
         const split = e.index_split; // this step's alone
         e.index_split = false;
         if ((from != null or start == 0) and try e.prefillStart(len, from) != start) return error.BadChunk;
-        if (start >= len or start % fw.prefill_rows != 0) return error.BadChunk;
-        const rows = @min(len - start, @as(usize, if (part.len > fw.prefill_rows + 1) fw.solo_rows else fw.prefill_rows));
+        const rows = try prompt_cuts.stepRows(len, e.cur.cuts.items, start, part.len);
         if (rows > fw.prefill_rows and e.pair != null) return prompt_pair.prefill(e, part, start, len, cancel, marks, split);
         if (part.len != @min(len - start, rows + 1)) return error.BadChunk;
         if (rows > fw.prefill_rows and !prompt_solo.allowed(e, start, rows)) return error.BadChunk;

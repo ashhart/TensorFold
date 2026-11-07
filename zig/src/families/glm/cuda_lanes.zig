@@ -3,6 +3,7 @@
 const std = @import("std");
 const lanes = @import("lanes");
 const engine = @import("cuda_engine.zig");
+const prompt_cuts = @import("cuda_prompt_cuts.zig");
 const follow = @import("cuda_follow.zig");
 const fw = @import("cuda_forward.zig");
 const dflash = @import("dflash.zig");
@@ -251,7 +252,7 @@ pub const Lanes = struct {
             l.fill = null;
             return true;
         }
-        l.fill = at + step.rows; // on the 2048 grid (cuda_engine.zig), so uncapped; the share still works by time
+        l.fill = at + step.rows; // a cold pass's cut (cuda_prompt_cuts), so uncapped; the share still works by time
         if (s.settle_step) try self.x.e.stream.synchronize(); // its tail would land in the next decode round's time
         return false;
     }
@@ -294,6 +295,7 @@ pub const Lanes = struct {
         }
         if (self.x.e.images) |v| v.clear(); // no earlier request's rows splice into this one
         try self.x.beginOn(s.sampling, pages, adopt.items.len);
+        if (s.chunks.len > 0) try self.x.cuts(s.chunks); // TF_GLM_REQUEST_STARTS: every rank cuts the pass there too
         s.cached = 0;
         s.prompt_rows.clearRetainingCapacity();
         const l = self.lanes.getPtr(s).?;
@@ -371,13 +373,14 @@ pub const Lanes = struct {
         };
     }
 
-    /// The stream's kept state, where its prompt pass starts (null: none, off the chunk grid, or no longer held).
+    /// The stream's kept state where its pass starts (null: none, not at a cold pass's cut, or no longer held).
     fn resumeFrom(self: *Lanes, s: *lanes.Stream, len: usize) ?engine.Resume {
         const saved = s.reuse.saved orelse return null;
         const k: *const engine.Kept = @ptrCast(@alignCast(saved));
-        if (k.at != s.reuse.at or k.at == 0 or k.at >= len or k.at % fw.prefill_rows != 0 or !self.x.e.holds(k.id)) {
+        const in_step = prompt_cuts.coldCut(len, s.chunks, k.at);
+        if (k.at != s.reuse.at or k.at == 0 or k.at >= len or !in_step or !self.x.e.holds(k.id)) {
             s.reuse_failed = true;
-            s.reuse_error = if (k.at == 0 or k.at >= len) error.SnapshotNotPrefix else if (k.at != s.reuse.at or k.at % fw.prefill_rows != 0) error.SnapshotOutOfStep else error.SnapshotStale;
+            s.reuse_error = if (k.at == 0 or k.at >= len) error.SnapshotNotPrefix else if (k.at != s.reuse.at or !in_step) error.SnapshotOutOfStep else error.SnapshotStale;
             return null;
         }
         s.cached = k.at;
@@ -593,5 +596,5 @@ comptime {
 
 /// Eligibility for the maintained fresh-prompt batching path.
 pub fn canBatch(s: anytype) bool {
-    return s.prompt_logprobs == null and s.images.len == 0 and s.reuse.saved == null and s.prompt_len <= engine.prompt_rows;
+    return s.prompt_logprobs == null and s.images.len == 0 and s.reuse.saved == null and s.prompt_len <= engine.prompt_rows and s.chunks.len == 0; // a batched pass keeps nothing at a request start
 }

@@ -25,9 +25,10 @@ pub fn passRules(comptime F: type, prompt_rows: u32) api.prompt_cache.Rules {
     return rules;
 }
 
-/// The server's chunk step: a family whose cold passes cut at request starts gets message starts on its grid (0: none).
+/// The server's chunk step: message starts on F's grid when F's own `request_starts_switch` is 1, else 0 (none).
 pub fn requestStep(comptime F: type) u32 {
-    return requestStepFor(F, @import("profile").get(.TF_QWEN_REQUEST_STARTS));
+    if (!@hasDecl(F, "request_starts_switch")) return 0;
+    return requestStepFor(F, @import("core").profile.lookup(F.request_starts_switch));
 }
 
 /// Only exact 1 opts in; a family must also declare that its cold passes honor request starts.
@@ -122,16 +123,54 @@ test {
 }
 
 test "only a family whose passes cut at request starts asks the server for them" {
+    const Grid = struct {
+        pub const snap_grid: u32 = 2048;
+    };
     const Glm = struct {
         pub const snap_grid: u32 = 2048;
+        pub const request_starts = true;
     };
     const Qwen = struct {
         pub const snap_grid: u32 = 4096;
         pub const request_starts = true;
     };
-    try std.testing.expectEqual(@as(u32, 0), requestStepFor(Glm, "1"));
+    try std.testing.expectEqual(@as(u32, 0), requestStepFor(Grid, "1"));
     try std.testing.expectEqual(@as(u32, 0), requestStepFor(struct {}, "1"));
+    try std.testing.expectEqual(@as(u32, 2048), requestStepFor(Glm, "1"));
     try std.testing.expectEqual(@as(u32, 4096), requestStepFor(Qwen, "1"));
+}
+
+test "request starts: each family's own switch opts it in, the other family's does not" {
+    const env = @import("sys").env;
+    const Glm = struct {
+        pub const snap_grid: u32 = 2048;
+        pub const request_starts = true;
+        pub const request_starts_switch = "TF_GLM_REQUEST_STARTS";
+    };
+    const Qwen = struct {
+        pub const snap_grid: u32 = 4096;
+        pub const request_starts = true;
+        pub const request_starts_switch = "TF_QWEN_REQUEST_STARTS";
+    };
+    const names = [_][:0]const u8{ "TF_GLM_REQUEST_STARTS", "TF_QWEN_REQUEST_STARTS" };
+    var saved: [names.len]?[:0]u8 = @splat(null);
+    for (names, &saved) |n, *s| if (@import("sys").getenv(n)) |v| {
+        s.* = try std.testing.allocator.dupeSentinel(u8, v, 0);
+    };
+    defer for (names, saved) |n, s| if (s) |old| {
+        _ = env.setenv(n, old, 1);
+        std.testing.allocator.free(old);
+    } else {
+        _ = env.unsetenv(n);
+    };
+    for (names) |n| _ = env.unsetenv(n);
+    try std.testing.expectEqual(@as(u32, 0), requestStep(Glm));
+    _ = env.setenv("TF_QWEN_REQUEST_STARTS", "1", 1);
+    try std.testing.expectEqual(@as(u32, 0), requestStep(Glm));
+    try std.testing.expectEqual(@as(u32, 4096), requestStep(Qwen));
+    _ = env.setenv("TF_GLM_REQUEST_STARTS", "1", 1);
+    try std.testing.expectEqual(@as(u32, 2048), requestStep(Glm));
+    try std.testing.expectEqual(@import("profile").Class.arithmetic, @import("profile").entry(.TF_GLM_REQUEST_STARTS).class);
 }
 
 test "request starts: unset keeps CUDA's main prefill contract" {
