@@ -1,0 +1,7 @@
+{
+  "schema": 1,
+  "repository": "ashhart/TensorFold",
+  "feed": "https://tensorfold.dev/studio/runtimes.json",
+  "minimumApp": "1.0.0",
+  "ed25519PublicKey": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA80FFo6a9/NXHNX9zBV3/2tM9AbC//mShbseG74mkkGw=\n-----END PUBLIC KEY-----"
+}
