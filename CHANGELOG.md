@@ -19,6 +19,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
   streams and copy drafts; there is no drafter or prompt cache yet (#1492, part of #1488). Thanks to @jschmied.
 - HIP: capture a drafter's requested target-layer taps in each stream's ring, with graph-on/off and planted kernel controls (#2314).
 
+- GLM-5.3-Flash on CUDA: `--learn-conversations` keeps kept prompt states on disk, every rank's part in rank 0's store, so a conversation resumes after its in-memory state is evicted or the server restarts; a damaged file is refused by name, and the turn tries one shorter state, as after any refused disk read, then prefills. `--spill-gib` and `--checkpoint-slots` are refused for GLM, and so is `TF_KV_SHARE`, whose prefix pages lie outside the lease the image reads. Off: nothing changes (#1411). Thanks to @wojo.
+
 ## 1.2.4
 
 - Docs: four subcommand-flag fixes checked against the code: `slide audit --threshold`'s range, `benchmark --context` and `--kv-cache`, `info` on Flash Next, and `run --device` and `--carveout` on CUDA builds (#2348).

@@ -160,9 +160,9 @@ fn probe(a: Allocator, io: std.Io, backend: lanes.backend.Backend, e: *Engine) !
 /// --learn-conversations: every rank's prefix read, the identity probed on this thread, the store attached.
 pub fn attach(a: Allocator, io: std.Io, ctx: *const cuda.Context, o: api.Open, root: []const u8, kernels: ?[]const u8, loaded: anytype, store: *api.prompt_cache.Store) !void {
     const e: *Engine = loaded.target;
-    // TF_GLM_KV_SHARE leaves a kept state's prefix pages in the pool's prompt cache, outside the lease the image reads
+    // TF_KV_SHARE leaves a kept state's prefix pages in the pool's prompt cache, outside the lease the image reads
     if (e.share_pages) {
-        std.log.err("--learn-conversations: GLM-5.3-Flash's disk images read a kept state's whole lease, and TF_GLM_KV_SHARE leaves its prefix pages out of it; serve without one of them", .{});
+        std.log.err("--learn-conversations: GLM-5.3-Flash's disk images read a kept state's whole lease, and TF_KV_SHARE leaves its prefix pages out of it; serve without one of them", .{});
         return error.KvShareWithLearnConversations;
     }
     if (e.share.world > prefix_buf.len) return error.TooManyRanks;
