@@ -1,4 +1,5 @@
-// !
+//! The sparse scan's own input/output hash, recorded for a whole layer's rows.
+
 const std = @import("std");
 const mtl = @import("metal");
 const ops = @import("ops.zig");

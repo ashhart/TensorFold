@@ -126,7 +126,7 @@ pub fn encodeBoundary(e: mtl.ComputeEncoder, p: *const BoundaryPipelines, d: Bou
             e.dispatchGroups(.{ .width = 20, .height = d.rows }, .{ .width = 256 });
         }
     }
-    // THE LAUNCH-OVERHEAD PROBE.
+    // THE LAUNCH-OVERHEAD PROBE: work-free dependent dispatches, whose slope is the GPU's dispatch latency.
     if (probeDispatches()) |n| {
         if (probeIndependent()) {
             e.setPipeline(p.probe_indep);

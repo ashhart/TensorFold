@@ -28,7 +28,7 @@ pub fn isIndexSource(layer: u32) bool {
     return std.mem.indexOfScalar(u32, &index_sources, layer) != null;
 }
 pub const Source = struct { owner: u32, ratio: u32, rows: u32, main: View, index: View, partial: View, capture: View };
-/// The compressed path's raw-row capture.
+/// The compressed path's raw-row capture: one slot a position, so a rollback can re-cut the straddling group.
 pub const capture_rows: u32 = 8;
 pub const capture_width: u32 = 512;
 /// One owner's capture: `capture_rows` slots of (values row, gate row), 512 f32 each.

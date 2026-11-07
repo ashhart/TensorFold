@@ -341,7 +341,7 @@ pub fn bind(device: mtl.Device, checkpoint: *const cp.Checkpoint, stream: bool) 
             @memset(ids.contents()[0 .. 8 * 4], 0);
             layer.moe.shared_down_ids = ids;
         }
-        // THE DRAFTER'S EIGHT wo_a OUTPUT GROUPS AS ONE INDEXED DECODE PROJECTION'S DESCRIPTOR TABLE.
+        // THE DRAFTER'S EIGHT wo_a GROUPS AS ONE INDEXED DECODE TABLE -- the trunk's own fused form, same shapes.
         {
             const groups = try device.buffer(8 * @sizeOf(exl3.ExpertDescriptor), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
             errdefer groups.deinit();

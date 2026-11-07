@@ -1,4 +1,9 @@
-//! Engram rows from the release's own safetensors shards, for hosts that cannot hold the tables resident.
+//! Engram rows from the release's safetensors shards, for hosts that cannot hold the tables resident.
+
+// The release packs one Engram layer to a shard: F8_E4M3 weights and F8_E8M0 scales far apart in the file.
+
+// A row is two positional reads, a bounded LRU keeps the window, and the mapped shard serves rows by address.
+
 const std = @import("std");
 const f = @import("engram_rows.zig");
 const eh = @import("engram_host.zig");
@@ -246,7 +251,7 @@ pub const Rows = struct {
         }
     }
 
-    /// The bulk gather over the mapped shard: the ids in ascending order.
+    /// The bulk gather over the mapped shard: ids ascending, so the shard is walked forward and repeats are adjacent.
     fn rowsMapped(r: *Rows, li: usize, ids: []const u32, out: []align(1) u16, threads: usize) !void {
         const gpa = r.gpa;
         const order = try gpa.alloc(u32, ids.len);
@@ -332,7 +337,7 @@ pub const Rows = struct {
         // The mapped shard: the same rows, read by address and decoded through the table.
         if (r.tables[li].map != null) return r.rowsMapped(li, ids, out, 1);
         r.setNoCache(li, ids.len >= nocache_ids);
-        // A chunk's ids are scattered over the shard: read them in ascending order.
+        // A chunk's ids are scattered over the shard: read them ascending so it is walked forward, not seeked.
         if (ids.len >= 64) {
             const gpa = r.gpa;
             const order = try gpa.alloc(u32, ids.len);

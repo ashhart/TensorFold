@@ -311,7 +311,7 @@ inline void tf_exl3_decode_fma_static_body(const device half* x, const device uc
   }
 }
 
-// THE MULTI-ROW DENSE DECODE BODY.
+// THE MULTI-ROW DENSE DECODE BODY: one threadgroup decodes R rows of the same matrix, sharing one weight decode.
 template <uint S, bool Lut = false, uint R = 2>
 inline void tf_exl3_decode_fma_dense_multi_body(const device half* x, const device uchar* trellis,
                                                  device float* sums, constant TfExl3Args& a,
@@ -390,7 +390,7 @@ inline void tf_exl3_decode_fma_dense_multi_body(const device half* x, const devi
       tf_exl3_fma_step_w<7>(&acc[r][7], wgt[7], x0, x1, x2, x3);
     }
   }
-  // The eight accumulators meet in a tree: the first four are the near column, the last four the far one.
+  // The eight accumulators meet in a tree; the first four are the near column, the last four the far one.
   for (uint r = 0; r < R; ++r) {
     const uint row = row0 + r;
     if (row >= a.rows) break;

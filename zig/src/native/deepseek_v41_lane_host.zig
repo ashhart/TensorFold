@@ -1,4 +1,4 @@
-// !
+//! The DeepSeek V4.1 lane host: session, prompt-cache and turn-loop glue.
 const std = @import("std");
 const mtl = @import("metal");
 const api = @import("engine_api");

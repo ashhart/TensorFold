@@ -75,7 +75,7 @@ kernel void dsv41_dense_col1(const device uchar* x [[buffer(0)]], const device u
   }
 }
 
-// The one-column dot with the weight dtype resolved at compile time and four k-steps of loads hoisted.
+// The one-column dot with the weight dtype resolved at compile time and four k-steps of loads hoisted; same adds.
 inline float dsv41_hf(ushort u) { return float(as_type<half>(u)); }
 #define DSV41_DENSE_COL1_SPEC(NAME, LOADW) \
 kernel void NAME(const device uchar* x [[buffer(0)]], const device uchar* w [[buffer(1)]], \

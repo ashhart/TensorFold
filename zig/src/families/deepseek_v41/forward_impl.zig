@@ -117,7 +117,7 @@ pub fn forwardSegs(m: *Model, segs: []const Seg, logits: Logits) ![]const f32 {
     const dispatches_before = mtl.command.dispatch_count.load(.monotonic);
     // TF_DSV41_LAYER_CB: one command buffer a layer, with the GPU's own seconds for each.
     const layer_cb = std.c.getenv("TF_DSV41_LAYER_CB") != null;
-    // THE PIPELINED FORWARD.
+    // THE PIPELINED FORWARD: commit the first n layers before waiting, so the GPU runs while the host encodes.
     const pipe_layers: u32 = if (rows <= 8 and m.profile == null and m.observer == null and
         std.c.getenv("TF_DSV41_LAYER_CB") == null and std.c.getenv("TF_DSV41_STAGE_CB") == null and
         std.c.getenv("TF_DSV41_ATTN_PROF") == null)
@@ -181,7 +181,7 @@ pub fn forwardSegs(m: *Model, segs: []const Seg, logits: Logits) ![]const f32 {
             enc = e.compute(if (concurrentOn()) .concurrent else .serial);
             for (m.checkpoint.shards.items) |shard| enc.useResource(shard.buffer, mtl.ResourceUsage.read);
         }
-        // THE ENGRAM GATE READS THE EXPANDED STREAM.
+        // THE ENGRAM GATE READS THE EXPANDED STREAM: flush the pending expand before the gate sees post-branch hidden.
         if (layer.engram != null and m.pending_expand and
             std.c.getenv("TF_DSV41_SKIP_ENGRAM") == null and
             std.c.getenv("TF_DSV41_NO_ENGRAM_FLUSH") == null)
@@ -233,7 +233,7 @@ pub fn forwardSegs(m: *Model, segs: []const Seg, logits: Logits) ![]const f32 {
             // The last rows of this pass, a ring of 128: the drafter's conditioning is the window's rows.
             const n: u32 = @min(rows, 128);
             const skip = @as(usize, rows - n) * 20480 * 2;
-            // THE CAPTURED ROWS' OWN FIRST POSITION.
+            // THE CAPTURE'S FIRST POSITION: a merged tail is not 128-aligned, so it cannot reuse the chunk start.
             const base = (state.position + (rows - n)) % 128;
             // A MERGED TAIL CHUNK ALSO STASHES THE PREFIX -- the taps ring as it stands at the mark.
             if (m.publish_limit != 0) {
@@ -241,10 +241,10 @@ pub fn forwardSegs(m: *Model, segs: []const Seg, logits: Logits) ![]const f32 {
                 const sn: u32 = @min(q, 128);
                 ops.encodeStreamMean(enc, &p.ops, m.streamView().shifted(@as(usize, q - sn) * 20480 * 2), .{ .buffer = m.taps_stash }, .{ .rows = sn, .width = 5120, .stream_stride = 20480, .out_stride = 5120, .slot = @intCast(index - 37), .row_base = (state.position + q - sn) % 128 });
             }
-            // THE THREE TARGET LAYERS SHARE ONE row_base.
+            // THE TARGET LAYERS SHARE ONE row_base: taps are interleaved by position, so the ring advances once.
             const shared = tapsSharedBaseOn();
             if (shared and index == 37) {
-                // THE TAPS RING'S SLOT IS THE TOKEN POSITION.
+                // THE TAPS RING'S SLOT IS THE TOKEN POSITION, not the cursor: the two advance at different rates.
                 m.taps_base = if (condAlignOn()) state.position % 128 else m.taps_row;
                 // A fresh capture's rows are all valid; a rollback sets the prefix.
                 m.taps_rows_valid = 0;

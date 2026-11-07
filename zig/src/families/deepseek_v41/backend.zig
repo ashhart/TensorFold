@@ -165,7 +165,7 @@ pub const Backend = struct {
     pub fn facts(b: *const Backend) lanes.Model {
         const rows = b.model.workspace.plan.rows;
         return .{
-            // The widest window whose rows reproduce one-token steps.
+            // The widest window whose rows reproduce one-token steps: rows <= 8; wider changes k order.
             .exact_width = @min(rows, 8),
             .first_copy_rows = 1,
             .mtp = lookupDepth() != 0,
@@ -415,7 +415,7 @@ pub const Backend = struct {
 
     /// The shared-round batch; the one-row windows of a plain shared round are the only admitted shape.
     var batch_on: ?bool = null;
-    /// The instruments that read a forward's internals take the one-stream path; the batch.
+    /// The instruments that read a forward's internals take the one-stream path; the batch never runs under them.
     pub fn noBatchInstrument() bool {
         return std.c.getenv("TF_DSV41_STAGE_CB") == null and std.c.getenv("TF_DSV41_LAYER_CB") == null and
             std.c.getenv("TF_DSV41_ATTN_PROF") == null and std.c.getenv("TF_DSV41_HID_HASH") == null and

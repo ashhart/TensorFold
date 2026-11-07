@@ -215,7 +215,7 @@ pub const HidHash = struct {
     }
 };
 
-// The drafter's NaN filler rows.
+// The drafter's NaN filler rows: the dump's segments in f32 units, adding the draft's key, query, key table and output.
 pub const mtp_dbg_raw = 4 * 5 * 5120;
 pub const mtp_dbg_qr = mtp_dbg_raw + 5 * 512;
 pub const mtp_dbg_qpre = mtp_dbg_qr + 5 * 1280;
@@ -409,7 +409,7 @@ pub fn condRowsWanted() u32 {
     return out;
 }
 
-/// THE ENGINE'S COMPUTE ENCODER IN CONCURRENT DISPATCH MODE.
+/// THE ENGINE'S COMPUTE ENCODER IN CONCURRENT DISPATCH MODE: TF_DSV41_CONCURRENT=1 arms it; unset is serial.
 pub var concurrent_cache: ?bool = null;
 pub fn concurrentOn() bool {
     if (concurrent_cache) |v| return v;
@@ -439,7 +439,7 @@ pub fn headRms(f: [*]const f32, heads: u32, width: u32) struct { min: f32, max: 
     return .{ .min = mn, .max = mx, .mean = @floatCast(sum / @as(f64, heads)) };
 }
 
-/// Serialized unique owner; submissions finish before return/release, cancellation is between bounded chunks.
+/// The top-k of a logits row (the instrument): the drafter's row 0 against the trunk's row 0 at the same position.
 pub fn logitsTopK(f: [*]const f32, n: usize, out: *[5]u32, vals: *[5]f32) void {
     @memset(out, 0);
     @memset(vals, 0);

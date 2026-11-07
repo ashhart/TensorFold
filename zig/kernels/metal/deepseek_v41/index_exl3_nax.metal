@@ -1,7 +1,7 @@
 // Source is compiled after kv.metal and index_exl3.metal; the tensor-unit score kernels only.
 using namespace tfp;
 
-// ---------------------------------------------------------------- prompt scores on the tensor units The scalar.
+// Prompt scores on the tensor units: the scalar scorer's arithmetic as 64x64 tiles, one 128-dim MMA a head.
 constant constexpr int INAX_D = 128, INAX_PAD = INAX_D + 8;
 
 inline frag<bfloat> inax_frag(const device bfloat* r0, const device bfloat* r1, int c, short2 home) {
@@ -188,7 +188,7 @@ kernel void dsv41_index_scores_row(device const ushort *qp [[buffer(0)]], device
   }
 }
 
-// The keys-on-M score tile. The row tile above cuts the prompt tile's row extent to the MMA's sixteen.
+// The keys-on-M score tile: keys are the M operand and head queries the N, so a one-row step fills every MMA row.
 kernel void dsv41_index_scores_keys(device const ushort *qp [[buffer(0)]], device const ushort *wp [[buffer(1)]],
                                     device const ushort *kp [[buffer(2)]], device float *scores [[buffer(3)]],
                                     constant Dsv41Index &p [[buffer(4)]], uint sg [[simdgroup_index_in_threadgroup]],
@@ -311,7 +311,7 @@ kernel void dsv41_index_select(device const float *scores [[buffer(0)]],
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
         threadgroup uint digit, ran;
-        // Digit/ran are threadgroup memory.
+        // Digit/ran are threadgroup memory; only tid 0 initialises them, or a late zero can erase the chosen digit.
         if (tid == 0u) {
             uint cum = 0u;
             digit = 0u; ran = 0u;
@@ -434,7 +434,7 @@ kernel void dsv41_index_select_v(device const float *scores [[buffer(0)]],
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
         threadgroup uint digit, ran;
-        // Digit/ran are threadgroup memory.
+        // Digit/ran are threadgroup memory; only tid 0 initialises them, or a late zero can erase the chosen digit.
         if (tid == 0u) {
             uint cum = 0u;
             digit = 0u; ran = 0u;

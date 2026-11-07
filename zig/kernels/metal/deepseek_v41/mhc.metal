@@ -185,7 +185,7 @@ kernel void dsv41_dense_col(const device ushort* x [[buffer(0)]],
 
 struct GateTree { uint rows, k, n, x_stride, bf16_w; };
 static_assert(sizeof(GateTree) == 20, "GateTree must mirror mhc.zig's GateTree");
-// A bit-exact tiled twin of dsv41_dense_col.
+// A bit-exact tiled twin of dsv41_dense_col: a 4x4 cell a threadgroup, the shipped reduction order without a barrier.
 kernel void dsv41_gate_tree(const device ushort* x [[buffer(0)]],
                             const device ushort* w [[buffer(1)]],
                             device float* y [[buffer(2)]],
@@ -240,7 +240,7 @@ kernel void dsv41_gate_tree(const device ushort* x [[buffer(0)]],
 
 struct GateTree4 { uint rows, k, n, x_stride, bf16_w; };
 static_assert(sizeof(GateTree4) == 20, "GateTree4 must mirror mhc.zig's GateTree4");
-// The vectorized bit-exact gate: one warp a 2x2 cell tile, no threadgroup memory and no barrier.
+// The vectorized bit-exact gate: one warp a 2x2 cell tile, contiguous reads, no threadgroup memory or barrier.
 inline float tf_bf_h(ushort x) { return as_type<float>(uint(x) << 16); }
 inline float tf_w_h(ushort x, uint bf16_w) { return bf16_w ? as_type<float>(uint(x) << 16) : float(as_type<half>(x)); }
 inline ushort tf_h4(const uint4& v, uint j) {

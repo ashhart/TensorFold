@@ -4,7 +4,7 @@ using namespace tfp;
 struct Dsv41Index {
     uint rows, heads, width, q_stride, weight_stride, position, ratio, keys, key_stride;
     uint tile_start, tile_width, topk, candidate_topk, block_size, use_candidates, make_candidates;
-    // `layer` and `skip_mask` are the Zig Params' own fields (The removal arms).
+    // `layer`/`skip_mask` sit before `scale`; leaving them out made `scale` read `layer`'s bits and every score 0.0.
     uint layer, skip_mask;
     // 0 = the heap path's per-row score slots (row * tile_width), 1 = the decode select's tile-major ones.
     uint score_layout;

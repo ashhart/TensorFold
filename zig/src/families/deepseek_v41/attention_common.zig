@@ -134,7 +134,7 @@ pub const Workspace = struct {
     sel_extra: [3]?index.Scratch = .{ null, null, null },
     /// Identity map [0..7] for the fused wo_a indexed dispatch (one row per output group).
     ids: mtl.Buffer,
-    /// A scratch row for the doubling arms.
+    /// A scratch row for the doubling arms; the live workspace rows would change the reply if reused.
     dup: mtl.Buffer,
     /// The batched wq_a+wkv call's input-row map -- both entries read the one decode row (0, 0).
     pair_in: mtl.Buffer,
@@ -213,7 +213,7 @@ pub const Workspace = struct {
         set.add(w.selection.buffer);
         for (w.sel_extra) |e| if (e) |x| set.add(x.buffer);
     }
-    /// A region's view into the attention workspace: public so a second model.
+    /// A region's view into the attention workspace, public so the drafter can assemble its own scan.
     pub fn view(w: *const Workspace, region: Region) View {
         var offset: usize = 0;
         for (regions[0..@backingInt(region)]) |size| offset += size * w.max_rows;

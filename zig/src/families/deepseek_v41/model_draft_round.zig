@@ -220,7 +220,7 @@ pub const DraftRound = struct {
                 (m.taps_row + 128 - cap_rows) % 128
             else
                 (m.taps_row + 128 - tail) % 128;
-            // The published rows are the capture's whole.
+            // The published rows are the capture's whole rows (rejected included) or only the kept prefix.
             const pub_rows: u32 = if (dspark_capture_all != 0) cap_rows else tail;
             const n_a: u32 = @min(pub_rows, 128 - base);
             // The doubling arm for the conditioning's tap projection.

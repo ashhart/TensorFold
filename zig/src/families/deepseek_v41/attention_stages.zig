@@ -201,7 +201,7 @@ pub const Stage = struct {
                 const iw = work.view(.index_weights);
                 const iq_width = c.index_heads * c.index_dim;
                 if (compressed_rows != 0 and !few_keys) {
-                    // TF_DSV41_DOUBLE_ATTN_INDEXER -- the same-output duplicate of the index source layers index-query.
+                    // TF_DSV41_DOUBLE_ATTN_INDEXER -- same-output duplicate of the index layer's query projection.
                     const indexer_passes: u32 = if (std.c.getenv("TF_DSV41_DOUBLE_ATTN_INDEXER") != null) 2 else 1;
                     for (0..indexer_passes) |_| try projection(ep, e, selector.wq_b, qr, iq, scratch, rows, c.q_lora, iq_width, .bf16);
                     // The index_q block's four dispatches split.
@@ -214,7 +214,7 @@ pub const Stage = struct {
                         .bf16 => .bf16,
                         else => .f16,
                     } };
-                    // The one-column form is the same per-column arithmetic.
+                    // The one-column form is the same per-column arithmetic, so it is bit-identical.
                     const dense_col_env = std.c.getenv("TF_DSV41_DENSE_COL");
                     const dense_col = (dense_col_env == null or
                         !std.mem.eql(u8, std.mem.span(dense_col_env.?), "0")) and
@@ -226,7 +226,7 @@ pub const Stage = struct {
                     e.barrier();
                     attnMark(layer, "index_q", prof, &e);
                 }
-                // The block filter is a shortcut only when its candidate set is narrower than the keys.
+                // The block filter helps only when it HALVES the scored keys; narrower alone is not enough.
                 const filter_env: ?bool = if (std.c.getenv("TF_DSV41_BLOCK_FILTER")) |v|
                     std.mem.eql(u8, std.mem.span(v), "1")
                 else
@@ -240,7 +240,7 @@ pub const Stage = struct {
                 if (use_candidates and (work.candidate_position != position or work.candidate_rows != rows))
                     return error.MissingAttentionCandidates;
                 const passes: u32 = if (std.c.getenv("TF_DSV41_DOUBLE_INDEX") != null) 2 else 1;
-                // The select block's REMOVAL arms (TF_DSV41_SKIP_SELECT).
+                // The select block's REMOVAL arms (TF_DSV41_SKIP_SELECT); the first index-source layer always runs it.
                 var first_index: u32 = 0;
                 for (c.index_sources.items()) |l| if (c.isIndexSource(l)) {
                     first_index = l;
@@ -277,7 +277,7 @@ pub const Stage = struct {
                     e.barrier();
                 }
                 attnMark(layer, "select", prof, &e);
-                // .
+                // Selection dump (TF_DSV41_DUMP_SELECT, needs ATTN_PROF): the picks and the heap's worst.
                 if (std.c.getenv("TF_DSV41_DUMP_SELECT") != null and prof != null) {
                     const v = work.selection.positions();
                     const base: [*]const u8 = @ptrCast(v.buffer.contents());

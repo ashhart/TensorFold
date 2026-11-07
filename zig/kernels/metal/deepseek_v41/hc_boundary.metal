@@ -1,4 +1,4 @@
-// Hyper-Connection boundary.
+// Hyper-Connection boundary: the release's hc_mixes/hc_pre/hc_post contract in two launches, mix partials then split.
 
 // Written from the release's Block.hc_mixes/hc_pre/hc_post and hc_split_sinkhorn_kernel (revision 314113f8).
 #include <metal_stdlib>
@@ -57,7 +57,7 @@ inline void hc_publish_slice(threadgroup float* warp, device float* part, const 
   hc_publish_slice(&warp[0], PART, parts, lane, sg, t, uint(r), uint(j));
 }
 
-// The pending branch into XO.
+// The pending branch into XO (the release's hc_post) and the same slice partials from the bf16 written.
 [[kernel]] void tf_hc_expand_mix(const device bfloat* X [[buffer(0)]], const device bfloat* BR [[buffer(1)]],
                                  const device float* POST [[buffer(2)]], const device float* COMB [[buffer(3)]],
                                  const device float* FN [[buffer(4)]], device float* PART [[buffer(5)]],
@@ -121,7 +121,7 @@ inline void hc_split_row(threadgroup const float* tot, constant const HcArgs& a,
   if (live) comb_out[r * kCopies * kCopies + lane] = comb;
 }
 
-// A threadgroup a row, 1024 threads: the split, the streams collapsed and normed.
+// A threadgroup a row, 1024 threads: the split, collapse and norm; MIXES=false consumes a pre made elsewhere.
 template <bool MIXES>
 [[kernel]] void tf_hc_boundary(const device bfloat* X [[buffer(0)]], const device float* PART [[buffer(1)]],
                                const device float* BASE [[buffer(2)]], const device float* SCALE [[buffer(3)]],

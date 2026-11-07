@@ -116,7 +116,7 @@ pub fn mtpConfirmRounds() u32 {
     return mtp_confirm.?;
 }
 
-/// The shipped band's first-draft signal is depth-blind.
+/// The shipped band's signal is depth-blind: at depth 3 the first draft usually lands while drafts 2-3 do not.
 var ratchet_cache: ?f64 = null;
 pub fn mtpRatchetDown() f64 {
     if (ratchet_cache) |v| return v;
@@ -130,7 +130,7 @@ pub fn mtpRatchetDown() f64 {
 }
 
 var draft_off_on: ?bool = null;
-/// THE DRAFTING GOVERNOR.
+/// THE DRAFTING GOVERNOR: it measures the request's own yield and drops to the plain path below break-even.
 pub fn draftOffArmed() bool {
     if (draft_off_on) |v| return v;
     const raw = std.c.getenv("TF_DSV41_DRAFT_OFF") orelse {
@@ -166,7 +166,7 @@ pub fn draftOffAfter() u32 {
 }
 
 var draft_off_gate_ctx: ?f64 = null;
-/// THE CONTEXT-GATED GOVERNOR SAMPLE.
+/// THE CONTEXT-GATED GOVERNOR SAMPLE: short below a context threshold, flat 24 at or above it.
 pub fn draftOffGateCtx() f64 {
     if (draft_off_gate_ctx) |v| return v;
     const raw = std.c.getenv("TF_DSV41_DRAFT_OFF_GATE_CTX") orelse {
@@ -229,7 +229,7 @@ pub fn mtpDepthFor(b: *Backend, slot: u32) u32 {
 
 pub fn draftGovernorOff(b: *Backend, i: usize) bool {
     if (!draftOffArmed()) return false;
-    // A shared round decodes plain by contract; its window is not the solo drafted window the governor reasons about.
+    // A shared round decodes plain by contract, so the governor runs only while it is the only admitted stream.
     if (b.by.count() > 1) return false;
     if (i >= b.gov_off.len) return false;
     if (b.gov_off[i]) return true;

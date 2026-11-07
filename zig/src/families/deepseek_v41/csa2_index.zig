@@ -37,7 +37,7 @@ pub const Params = extern struct {
     /// 0 = one tile a row (the heap path), 1 = tile-major, every tile resident (the decode select).
     score_layout: u32 = 0,
     scale: f32 = 0.015625,
-    // The metal struct is a hand-written mirror of this one.
+    // The metal struct is a hand-written mirror: adding `layer`/`skip_mask` here without it made every score 0.0.
     comptime {
         if (@sizeOf(Params) != 80) @compileError("Dsv41Index (index_exl3.metal) must mirror Params");
         // And the field LIST, in order: a reorder or a same-size swap is caught by neither the size nor the reply.
@@ -338,7 +338,7 @@ pub const Pipelines = struct {
             enc.dispatchThreads(mtl.Size.of(@max(args.topk, args.candidate_topk), args.rows, 1), mtl.Size.of(128, 1, 1));
             enc.barrier();
         }
-        // The indexer OTHER two dispatches, priced (the clear and the dense-key table).
+        // The indexer's other two dispatches, priced: the clear and the dense-key table.
         if (mask & skip_clear == 0 and std.c.getenv("TF_DSV41_DOUBLE_CLEAR") != null) {
             enc.setPipeline(p.clear);
             for ([_]View{ scratch.heap(), scratch.candidates() }, 0..) |v, i| enc.setBuffer(v.buffer, v.offset, i);

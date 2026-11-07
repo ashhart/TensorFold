@@ -1,4 +1,5 @@
-//! The trellis tile as int8 with per-tile scales, on the tensor units, against the CPU int8 oracle.
+//! The int8 trellis tile against the CPU int8 oracle.
+
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");

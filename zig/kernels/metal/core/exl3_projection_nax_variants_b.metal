@@ -24,7 +24,7 @@ kernel void tf_exl3_matmul_prefill_nax59(const device half* x [[buffer(0)]],
   }
 }
 
-// The routed 128-row tile (eight row groups, eight warps).
+// The routed 128-row tile (eight row groups, eight warps): twice the rows a tile, so half the per-tile weight decodes.
 kernel void tf_exl3_matmul_prefill_nax49(const device half* x [[buffer(0)]],
                                          const device uchar* trellis [[buffer(1)]],
                                          device float* sums [[buffer(2)]],
@@ -40,7 +40,7 @@ kernel void tf_exl3_matmul_prefill_nax49(const device half* x [[buffer(0)]],
   tf_exl3_prefill_body<true, 8, 1, false, true, true>(wx, x, trellis, sums, a, routes, descriptors, nullptr, nullptr, lane, sg, tid, tptg.x, tg);
 }
 
-// The routed 128-row tile with a warp that does thirty-two rows.
+// The routed 128-row tile with a warp doing thirty-two rows: one warp decodes the block and a lane keeps eight states.
 kernel void tf_exl3_matmul_prefill_nax54(const device half* x [[buffer(0)]],
                                          const device uchar* trellis [[buffer(1)]],
                                          device float* sums [[buffer(2)]],

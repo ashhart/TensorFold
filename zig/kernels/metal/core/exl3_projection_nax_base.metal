@@ -1,4 +1,4 @@
-// Native EXL3 on the tensor units: the same stored trellis.
+// Native EXL3 on the tensor units: the trellis decoded into a threadgroup tile and reduced by cooperative matmul.
 
 // Provenance: the model-facing order follows the release's inference/model.py (revision 314113f8).
 #include <metal_stdlib>
@@ -126,7 +126,7 @@ inline uint tf_exl3_map_for(uint p, uint halves) {
   return wi | (off << 6) | (next << 11);
 }
 
-// A routed prompt tile's decode job.
+// A routed prompt tile's decode job: one expert block's row and column window, weights from the routed slice.
 struct TfExl3DigJob {
   const device uchar* trellis;
   ulong tile_k_stride, tile_n_stride;
@@ -223,7 +223,7 @@ inline TfExl3DecodeJob tf_exl3_routed_decode_job(const device uchar* trellis, co
   return job;
 }
 
-// The lane's row walk through one pack tile: its first word.
+// The lane's row walk through one pack tile: its first word, the bit offset, the shift/mask and the next two words.
 struct TfExl3RowWalk {
   uint words, first_word, first_bit, shift, mask, next1, next2;
 };

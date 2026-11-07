@@ -89,7 +89,7 @@ pub fn moe(m: *Model, enc: *mtl.ComputeEncoder, e: ?*mtl.CommandBuffer, w: *cons
     }
     // Default on for prompt rows; TF_DSV41_GATE_TREE=0 forces the shipped tf-dense-col back.
     const gate_tree = rows >= 64 and !Model.gateTreeOff();
-    // TF_DSV41_GATE_WIDE: the wide gate.
+    // TF_DSV41_GATE_WIDE: the wide gate, same order and logits, with eight rows by four columns a threadgroup.
     const gate_wide = gate_tree and Model.gateWideOn();
     // The wide gate -- eight rows and four columns a threadgroup with the tiles staged in threadgroup memory.
     if (!route_gemm or gate_scratch) if (gate_wide and (w.gate.dtype == .bf16 or w.gate.dtype == .f16)) {
@@ -148,7 +148,7 @@ pub fn moe(m: *Model, enc: *mtl.ComputeEncoder, e: ?*mtl.CommandBuffer, w: *cons
     const moe_up_merged = fuse and fused_grouped == null and
         w.fused.?.length() / @sizeOf(exl3.ExpertDescriptor) == 2 * experts + 2 and
         std.c.getenv("TF_DSV41_NO_FUSE_MOE_UP") == null;
-    // THE SHARED EXPERT'S SLOTS OUT OF THE FUSED INDEXED CALL.
+    // THE SHARED EXPERT'S SLOTS OUT OF THE FUSED INDEXED CALL: the routed-only call plus two dense shared calls.
     const shared_split = moe_up_merged and rows >= 2 and std.c.getenv("TF_DSV41_SHARED_DENSE") != null;
     var logits_view = logits_dest;
     const logit_dtype: u32 = 0;
@@ -378,7 +378,7 @@ pub fn moe(m: *Model, enc: *mtl.ComputeEncoder, e: ?*mtl.CommandBuffer, w: *cons
         encoder.barrier();
     }
     const mlp_passes: u32 = if (std.c.getenv("TF_DSV41_DOUBLE_MLP") != null) 2 else 1;
-    // THE FUSED CALL'S UP HALF IS AT THE BLOCK'S OWN PICK COUNT.
+    // THE FUSED CALL'S UP HALF IS OFFSET BY rows * picks: six for the backbone, three for the drafter.
     const fuse_up_picks: u32 = if (std.c.getenv("TF_DSV41_FUSE_UP_SIX") != null) 6 else picks;
     const up_view = if (fuse) View{ .buffer = ws.view(.gate).buffer, .offset = ws.view(.gate).offset + @as(usize, rows) * fuse_up_picks * 2304 * 2 } else ws.view(.up);
     // The routed SwiGLU writes the down projection's rotated input in the same pass.
@@ -424,7 +424,7 @@ pub fn moe(m: *Model, enc: *mtl.ComputeEncoder, e: ?*mtl.CommandBuffer, w: *cons
             std.c.getenv("TF_DSV41_NO_FUSE_SHARED_ROT") == null;
         for (0..mlp_passes) |_| {
             if (moe_up_merged) {
-                // The shared gate/up already landed in the merged dispatch: rows [12r.
+                // The shared gate/up already landed: [12r, 13r) is its gate, [13r, 14r) its up, after routed [0, 12r).
                 const gv = ws.view(.gate);
                 const sg = View{ .buffer = gv.buffer, .offset = gv.offset + @as(usize, rows) * 2 * picks * 2304 * 2 };
                 const su = View{ .buffer = gv.buffer, .offset = sg.offset + @as(usize, rows) * 2304 * 2 };

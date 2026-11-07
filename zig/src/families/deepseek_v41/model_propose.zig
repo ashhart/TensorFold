@@ -51,7 +51,7 @@ pub fn proposeTokens(m: *Model, slot: u32, pending: u32, count: u32) ![4]u32 {
     // The conditioning's cursor is THIS slot's committed position, not lane 0's.
     const slot_pos = m.caches[slot].position;
     state.position = slot_pos;
-    // THE DRAFTER RUNS `depth + 1` ROWS, NOT FIVE.
+    // THE DRAFTER RUNS `depth + 1` ROWS, NOT FIVE: extra rows displace the real history its attention reads.
     const n: u32 = if (std.c.getenv("TF_DSV41_MTP_ROWS")) |v|
         (std.fmt.parseInt(u32, std.mem.span(v), 10) catch 5)
     else
@@ -63,7 +63,7 @@ pub fn proposeTokens(m: *Model, slot: u32, pending: u32, count: u32) ![4]u32 {
     var cond_prof = CondProf{ .queue = m.queue, .cb = cb, .enc = enc, .on = std.c.getenv("TF_DSV41_COND_PROF") != null, .blk_on = std.c.getenv("TF_DSV41_BLOCK_PROF") != null };
     const host_prof = std.c.getenv("TF_DSV41_HOST_PROF") != null;
     const t_start: f64 = if (host_prof) mtl.clock.seconds() else 0;
-    // The conditioning: the three target layers' stream means.
+    // The conditioning: the target layers' stream means through main_proj/main_norm.
     const pos_now = slot_pos;
     // The captured rows are the last `taps_rows_last` rows of the last forward.
     const cap_n: u32 = @min(m.taps_rows_last, 128);
@@ -118,7 +118,7 @@ pub fn proposeTokens(m: *Model, slot: u32, pending: u32, count: u32) ![4]u32 {
     try round.conditionStage();
     enc = round.enc;
     cb = round.cb;
-    // THE DRAFTER'S STOP POINT 1 (after the conditioning).
+    // THE DRAFTER'S STOP POINT 1 (after the conditioning): commits what was encoded so completion fires.
     if (model.mtpStopPoint() == 1 or std.c.getenv("TF_DSV41_MTP_STUB_COND") != null) {
         enc.end();
         cb.commit();
@@ -127,7 +127,7 @@ pub fn proposeTokens(m: *Model, slot: u32, pending: u32, count: u32) ![4]u32 {
         try completed(cb);
         return .{ 0, 0, 0, 0 };
     }
-    // THE DRAFTER'S OWN EARLY COMMIT.
+    // THE DRAFTER'S OWN EARLY COMMIT: a command-buffer boundary is a full barrier, and the queue is in-order.
     var pipe_prev: mtl.CommandBuffer = undefined;
     var pipe_prev_set = false;
     const mtp_pipe: bool = blk: {

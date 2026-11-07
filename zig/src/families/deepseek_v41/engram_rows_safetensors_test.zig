@@ -1,4 +1,4 @@
-//! engram_rows_safetensors.zig against a synthetic release shard: decode, cache, bounds, and header refusal.
+//! The streamed Engram reader against the resident one: the same release bytes, row for row.
 
 const std = @import("std");
 const testing = std.testing;

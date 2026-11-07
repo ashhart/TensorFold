@@ -1,4 +1,4 @@
-// !
+//! End-to-end prompt-cache boundary tests.
 const std = @import("std");
 const pc = @import("prompt_cache.zig");
 const Fake = @import("prompt_cache_test.zig").Fake;

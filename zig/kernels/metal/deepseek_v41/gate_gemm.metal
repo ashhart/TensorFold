@@ -1,4 +1,4 @@
-// The router gate's prefill GEMMs on the M5 tensor unit.
+// The router gate's prefill GEMMs on the M5 tensor unit, including the fp32-destination entry route reads.
 #include <metal_stdlib>
 using namespace metal;
 typedef bfloat bfloat16_t;

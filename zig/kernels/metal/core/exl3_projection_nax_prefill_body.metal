@@ -10,7 +10,7 @@ inline void tf_exl3_prefill_body(threadgroup half* wx, const device half* x, con
   if (a.indexed && tile_expert >= a.experts) return;
   const TfExl3DigJob job = tf_exl3_dig_job<CG>(trellis, a, routes, descriptors, rb, nb, trows);
   const short2 home = frag_home(ushort(lane));
-  // Four warps decode a sixty-four-column group.
+  // Four warps decode a sixty-four-column group; more warps split each lane's sixteen states instead of waiting.
   constexpr uint wpg = RG / (4u * Rpg);          // warps decoding one column group
   constexpr uint states = 8u / wpg;              // consecutive states a lane owns
   const uint gwarp = tid / 32u, group = gwarp / wpg, wg = gwarp % wpg;

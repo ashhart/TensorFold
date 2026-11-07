@@ -230,7 +230,7 @@ pub fn verify(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) a
             std.log.info("treeprice verify round {d} rows {d} held {d} pending {d} sampled {any}", .{ ds.price_round, rows, w.held, w.pending, o.sampled[0..rows] });
             ds.price_round += 1;
         }
-        // THE ADAPTIVE DEPTH POLICY'S SIGNAL, FED FROM THE VERIFY.
+        // THE ADAPTIVE DEPTH POLICY'S SIGNAL, FED FROM THE VERIFY: row 1 is the first draft's acceptance.
         const first_draft: ?u32 = if (w.held > 0)
             (if (held.len > 0) held[0] else null)
         else if (w.tokens.len > 0)
@@ -239,7 +239,7 @@ pub fn verify(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) a
             null;
         // THE ACCEPTANCE TEST IS THE ENGINE'S OWN (core/lanes/accept.zig's acceptPath).
         const hit_dbg: bool = rows > 1 and first_draft != null and o.sampled[0] == first_draft.?;
-        // The signal.
+        // The signal: the previous window's outcome, one round lagged; a whole window landing reads 1.0.
         if (i < b.gov_rounds.len) {
             if (b.gov_rows[i] > 0) {
                 b.gov_rounds[i] += 1;
@@ -249,7 +249,7 @@ pub fn verify(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) a
         }
         const ratio: f64 = if (b.keep_pending[i]) b.keep_ratio[i] else 1.0;
         b.keep_pending[i] = false;
-        // The ratchet.
+        // The ratchet: only a deep round can ratchet, and two in a row below the crossover go shallow.
         const ratchet_down = mtpRatchetDown();
         if (ratchet_down > 0 and i < b.shallow.len and b.last_depth[i] > 1) {
             if (ratio < ratchet_down) b.low_streak[i] += 1 else b.low_streak[i] = 0;
@@ -278,7 +278,7 @@ pub fn keep(ptr: *anyopaque, windows: []const be.Window, paths: []const []const 
         b.keep_pending[i] = true;
         b.keep_ratio[i] = if (rows > 1) @as(f64, @floatFromInt(kept)) / @as(f64, @floatFromInt(rows - 1)) else 1.0;
         if (std.c.getenv("TF_DSV41_DRAFT_DEBUG") != null) std.log.info("keep: slot {d} kept {d} of {d}", .{ i, kept, rows });
-        // THE ADAPTIVE DEPTH POLICY'S SIGNAL, TAKEN WHERE THE KEPT COUNT IS KNOWN.
+        // THE POLICY'S SIGNAL IS TAKEN WHERE THE KEPT COUNT IS KNOWN: portKeep missed the whole-window case.
         if (kept >= rows) continue; // the whole window landed
         try b.model.rollbackSlot(i);
         // The ring rows the window's rejected rows published are aliases the next forward can still read.
@@ -394,13 +394,13 @@ pub fn tree(ptr: *anyopaque, s: *Stream, gpa: std.mem.Allocator) anyerror!?lanes
     }
     if (std.c.getenv("TF_DSV41_DRAFT_DEBUG") != null) std.log.info("tree() called: pending={?} depth={d}", .{ s.pending, lookupDepth() });
     var depth = lookupDepth();
-    // THE ADAPTIVE DEPTH POLICY.
+    // THE ADAPTIVE DEPTH POLICY: yield from the accepted drafts selects the cheap depth-1 or the deep window.
     const adapt_raw = std.c.getenv("TF_DSV41_MTP_ADAPT");
     const adapt_off = adapt_raw != null and std.mem.eql(u8, std.mem.span(adapt_raw.?), "0");
     if (!adapt_off) {
         const prev: u32 = if (slot_i < b.last_depth.len) b.last_depth[slot_i] else 0;
         depth = mtpDepthFor(b, slot_i);
-        // THE CONFIRMED SWITCH-UP.
+        // THE CONFIRMED SWITCH-UP: one sample is not a change of text, so the up-transition must hold `confirm` rounds.
         const confirm = mtpConfirmRounds();
         if (confirm > 1 and slot_i < b.up_streak.len) {
             if (depth > 1 and prev < 2) {

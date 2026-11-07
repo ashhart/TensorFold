@@ -180,7 +180,7 @@ pub const Pipelines = struct {
             a2.splits = splits;
             enc.setBuffer(partials.buffer, partials.offset, 9);
             enc.dispatchGroups(mtl.Size.of(args.heads / 16, args.rows, splits), mtl.Size.of(32, 4, 1));
-            // TF_DSV41_DOUBLE_ATTN_SCANX -- the decode's OWN scan, duplicated IN PLACE (before the merge).
+            // TF_DSV41_DOUBLE_ATTN_SCANX -- the decode scan duplicated IN PLACE; it moves the reply.
             if (std.c.getenv("TF_DSV41_DOUBLE_ATTN_SCANX") != null) {
                 enc.setPipeline(p.nax);
                 for ([_]View{ q, ring, chunk, compressed, positions, sink, out }, 0..) |v, i|
@@ -222,7 +222,7 @@ pub const Pipelines = struct {
                     enc.setValue(a2, 3);
                     enc.dispatchGroups(mtl.Size.of(args.heads / 16, args.rows, 1), mtl.Size.of(32, 4, 1));
                 }
-                // TF_DSV41_DOUBLE_ATTN_SCAN -- the decode's OWN scan, duplicated AFTER the merge.
+                // TF_DSV41_DOUBLE_ATTN_SCAN -- the decode scan duplicated AFTER the merge, where its write is unread.
                 if (std.c.getenv("TF_DSV41_DOUBLE_ATTN_SCAN") != null) {
                     enc.setPipeline(p.nax);
                     for ([_]View{ q, ring, chunk, compressed, positions, sink, out }, 0..) |v, i|

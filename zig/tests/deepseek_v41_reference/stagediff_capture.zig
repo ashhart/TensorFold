@@ -1,4 +1,5 @@
-// !
+//! The two-forward stage diff over an N-row window, localising the first differing row, layer and stage.
+
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");

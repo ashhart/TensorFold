@@ -187,7 +187,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, o: Options) !Model {
     residency.add(cond_wkv);
     var stream_rows: ?*engram_stream.Rows = null;
     var stream_stage: ?mtl.Buffer = null;
-    // Invariant: this block is the only place stream_rows and stream_stage are created.
+    // Invariant: only this block creates stream_rows and stream_stage; keep them in step with weights.bind.
     if (o.stream_dir) |dir| {
         const engram_layers = [_]u32{ engram.hash.layers[0].layer_id, engram.hash.layers[1].layer_id };
         const cap: u32 = if (std.c.getenv("TF_DSV41_ENGRAM_CACHE")) |v| std.fmt.parseInt(u32, std.mem.span(v), 10) catch o.stream_rows_cache else o.stream_rows_cache;
@@ -268,7 +268,7 @@ pub fn resetSlot(m: *Model, slot: u32) !void {
     m.logits_rows = 0;
 }
 
-/// A KEPT PROMPT STATE.
+/// A KEPT PROMPT STATE: one slot's whole cache, cursor, Engram history and taps, so resumed equals fresh.
 pub fn beginSnapTail(m: *Model, slot: u32, hist: []const u32, at: u32, from: u32) bool {
     if (hist.len < 3) return false;
     const state = &m.caches[slot];

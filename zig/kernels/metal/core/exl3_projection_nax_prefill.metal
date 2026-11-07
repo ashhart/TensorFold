@@ -1,4 +1,4 @@
-// The routed prompt tile's job follows the release's expert blocks (inference/model.py, revision 314113f8).
+// The routed prompt tile's job follows the release's expert blocks; the pack layout and row walk are our own.
 
 kernel void tf_exl3_matmul_prefill_nax2(const device half* x [[buffer(0)]],
                                        const device uchar* trellis [[buffer(1)]],

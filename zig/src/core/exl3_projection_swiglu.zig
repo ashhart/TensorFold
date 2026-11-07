@@ -82,7 +82,7 @@ pub fn planBody(p: *const Pipelines, args: Args, r: Rows) Plan {
         (a.halves == 8 and fma_dense_h8));
     // The MULTI-ROW dense body -- R rows a threadgroup, so the weight decode is shared by the rows.
     const multi_rows: u32 = knobs.fma_dense_multi;
-    // (the arm): THE CEIL HEIGHT.
+    // (the arm): THE CEIL HEIGHT: the multi body uses ceil(rows/R), so a five-row window still shares one decode.
     const multi_ceil = knobs.fma_dense_multi_ceil;
     const fma_dense_multi4 = fma_dense_ok and p.decode_fma_dense_multi4 != null and multi_rows == 4 and
         a.rows >= 4 and (multi_ceil or a.rows % 4 == 0);
@@ -101,7 +101,7 @@ pub fn planBody(p: *const Pipelines, args: Args, r: Rows) Plan {
     const nax_cols: usize = if (a.indexed != 0 and nax_tile >= 256) 64 else if (moe_cols != 0) moe_cols else (knobs.nax_cols orelse if (a.indexed != 0) 128 else 64);
     const tile_id: usize = ((nax_tile / 64) - 1) * 2 + (nax_cols / 64 - 1);
     const nax_pick: ?mtl.Pipeline = p.prefill_nax_tiles[tile_id];
-    // The funnel read in the routed prompt tile .
+    // The funnel read in the routed prompt tile: halves = 6 is the packed width; another width takes the shipped path.
     const nax_funnel_pick: ?mtl.Pipeline = if (funnelPrefillOn() and a.indexed != 0 and tile_id == 0)
         p.prefill_nax_funnel
     else
@@ -118,14 +118,14 @@ pub fn planBody(p: *const Pipelines, args: Args, r: Rows) Plan {
     else
         null;
     const nax_skip_pad = nax_skip_pad_pick != null;
-    // The routed tile with the funnel path as its only path .
+    // The routed tile with the funnel path as its only path: only halves = 6 selects it.
     const nax_funnel_only_pick: ?mtl.Pipeline = if (funnelOnlyOn() and a.indexed != 0 and tile_id == 0 and
         nax_skip_pad_pick != null)
         p.prefill_nax_funnel_only
     else
         null;
     const nax_funnel_only = nax_funnel_only_pick != null;
-    // (THE LEVER, default off): THE DENSE TILE AT EIGHT ROWS.
+    // (THE LEVER, default off): THE DENSE TILE AT EIGHT ROWS, so a wrapped conditioning piece stays on the tile.
     const dense8 = knobs.nax_dense8;
     // The gate is the CALLER's hint and the flag together: the hint alone moves nothing.
     const dense8_on = dense8 and r.dense8;
@@ -140,7 +140,7 @@ pub fn planBody(p: *const Pipelines, args: Args, r: Rows) Plan {
         std.log.info("exl3: nax31 dense double-buffered body selected rows={d} tile={d}", .{ a.rows, nax_tile });
     }
     const shared = !nax and !decode_nax and p.prefill != null and a.rows >= knobs.shared_min_rows and a.indexed == 0 and a.routed == 0;
-    // The table-decode knob: the one-row / narrow-window matmul body reads the codebook value from the 3 x 65536-half.
+    // The table-decode knob: the one-row matmul body reads the codebook from the resident table, bit-identically.
     const matmul_tab = p.matmul_tab != null and a.indexed == 0 and a.routed == 0 and a.rows <= 8 and tableDecodeOn();
     // The same static body with the codebook read from the 1024-entry threadgroup LUT.
     const matmul_static_lut = p.matmul_static_lut != null and a.indexed == 0 and a.routed == 0 and a.rows == 1 and

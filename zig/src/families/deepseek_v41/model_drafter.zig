@@ -213,7 +213,7 @@ pub fn mtpWarmRounds() u32 {
 pub fn noteAcceptSlot(m: *Model, slot: u32, hit: bool) void {
     if (slot >= m.mtp_accept_slot.len) return;
     const v: f64 = if (hit) 1.0 else 0.0;
-    // THE FIRST SAMPLE SETS THE SIGNAL.
+    // THE FIRST SAMPLE SETS THE SIGNAL: a request's first round is a valid observation of the first draft's acceptance.
     if (m.mtp_accept_seen_slot[slot] == 0) {
         m.mtp_accept_slot[slot] = v;
     } else if (m.mtp_accept_seen_slot[slot] < mtpWarmRounds()) {

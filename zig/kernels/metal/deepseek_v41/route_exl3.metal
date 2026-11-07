@@ -29,7 +29,7 @@ kernel void dsv41_route(const device float* logits [[buffer(0)]], const device u
   for (uint slot=0;slot<d.topk;slot++) {
     float v=-INFINITY;
     uint id=0xffffffffu;
-    // THE SELECTION SCANS THE BLOCK'S OWN EXPERT COUNT.
+    // THE SELECTION SCANS THE BLOCK'S OWN EXPERT COUNT, so the drafter's 128 never ranks stale slots past its table.
     for (uint e=t;e<d.experts;e+=128) if (select[e]>v || (select[e]==v && e<id)) { v=select[e]; id=e; }
     float mx=simd_max(v);
     uint ix=simd_min(v==mx?id:0xffffffffu);

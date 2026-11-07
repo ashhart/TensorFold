@@ -1,4 +1,5 @@
-//! Row invariance: a row's bits at a one-row decode step against the same row inside a k+1 verify window.
+//! Row invariance: a window's rows reproduce the one-row steps.
+
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");

@@ -35,7 +35,7 @@ pub const Shape = struct {
     /// The block's own router geometry: the backbone's 384 experts and six picks.
     experts: u32 = 384,
     topk: u32 = 6,
-    /// Nonzero writes the shared expert's two pick blocks into the fused tables after the routed twelve a token.
+    /// Nonzero writes the shared expert's pick blocks into the fused tables, so gate/up is ONE indexed dispatch.
     moe_up: u32 = 0,
 };
 /// FP32 logits[rows,384], bias F16/BF16/FP32 -> u32 IDs and FP32 weights[rows,6]; lower ID wins biased-score ties.

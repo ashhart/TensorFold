@@ -103,7 +103,7 @@ test "expert grouping bounds padding without context-sized allocation" {
     const full = try Plan.init(1536, 384, 64);
     try std.testing.expectEqual(@as(u32, 25728), full.padded);
     try std.testing.expect(full.bytes < 512 * 1024);
-    // The parameterised grouping tile.
+    // The parameterised grouping tile (the priced-out 128-row bench instrument) computes padding as its own plan.
     const tall = try Plan.init(1536, 384, 128);
     try std.testing.expectEqual(@as(u32, 50304), tall.padded);
     try std.testing.expectError(error.InvalidExpertGrouping, Plan.init(0, 384, 64));

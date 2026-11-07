@@ -170,7 +170,7 @@ inline bfloat dsv41_dense_at_off(int enc, uint off, device const ushort *dense, 
   return as_type<bfloat>(dense[ulong(off) + d]);
 }
 
-// A prompt chunk's rows: 16 heads at a time, 32 keys at a time, out [rows, heads.
+// A prompt chunk's rows: 16 heads at a time, 32 keys at a time, out [rows, heads, 512] bf16.
 [[kernel]] void dsv41_sparse_nax(device const ushort *q [[buffer(0)]], device const uchar *ring [[buffer(1)]],
                                  device const uchar *chunk [[buffer(2)]], device const uchar *main [[buffer(3)]],
                                  device const int *indices [[buffer(4)]], device const float *sink [[buffer(5)]],
@@ -366,7 +366,7 @@ kernel void dsv41_dense_kv_picked(const device uchar *src [[buffer(0)]], device 
   *(device bfloat4 *)o = v;
 }
 
-// THE MERGE'S GRID IS FOUR THREADGROUPS.
+// THE MERGE'S GRID IS FOUR THREADGROUPS: each takes one accumulator chunk at 16 threadgroups, bit-identical output.
 [[kernel]] void dsv41_sparse_merge_split(device const float *parts [[buffer(0)]], device ushort *out [[buffer(1)]],
                                          device const float *sink [[buffer(2)]], constant Dsv41Attention &p [[buffer(3)]],
                                          uint s [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],

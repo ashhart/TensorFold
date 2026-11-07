@@ -131,7 +131,7 @@ pub const Model = struct {
     partial_stash: []u8,
     /// Each slot's stash of the window ring's next `max_ring_rows` slots.
     ring_stash: mtl.Buffer,
-    /// A MERGED TAIL CHUNK'S STASH.
+    /// A MERGED TAIL CHUNK'S STASH: the prefix before the mark, so the state at the mark can be copied from it.
     snap_ring: mtl.Buffer,
     taps_stash: mtl.Buffer,
     publish_limit: u32 = 0,
@@ -166,7 +166,7 @@ pub const Model = struct {
     host_stage_faults: u64 = 0,
     host_stage_pf: u8 = 0,
     host_stage_thr: u16 = 0,
-    /// The adaptive Engram gather's state.
+    /// The adaptive Engram gather's state: two cold gathers switch to the mapped workers.
     engram_par: bool = false,
     /// The thread state machine's probe is not the arbiter.
     engram_pf_on: bool = false,
@@ -395,7 +395,7 @@ pub const Model = struct {
         }
     };
 
-    /// TF_DSV41_MTP_DRAFTS: five rows a round.
+    /// The adaptive depth policy's warm-up cache: a running mean over the first `k` samples, then the shipped EMA.
     pub var mtp_warm_cache: ?u32 = null;
     pub fn mtpWarmRounds() u32 {
         return model_drafter.mtpWarmRounds();

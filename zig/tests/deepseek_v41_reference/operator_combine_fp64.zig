@@ -1,4 +1,5 @@
-//! The mixed routing's combine order against an FP64 ideal (STATUS.md item 4, class 4).
+//! The combine operator's FP64 boundary.
+
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");

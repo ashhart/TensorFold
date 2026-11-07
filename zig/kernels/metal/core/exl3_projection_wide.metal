@@ -42,7 +42,7 @@ kernel void tf_exl3_swiglu_prerotate(const device ushort* gate [[buffer(0)]],
     rotated[ulong(dst) * d.output_stride + base + lane + 32u * j] = half(v[j] * 0.08838834764831845f);
 }
 
-// Wide one-row / narrow-window tile: eight SIMDgroups each own one 16-column tile of the same 128-column group.
+// Wide one-row tile: eight SIMDgroups each own a 16-column tile, and the shared activation tile is double buffered.
 template <bool Table>
 inline void tf_exl3_matmul_wide_impl(const device half* x, const device uchar* trellis,
                                      device float* sums, constant TfExl3Args& a,
@@ -154,7 +154,7 @@ inline void tf_exl3_matmul_wide_impl(const device half* x, const device uchar* t
   }
 }
 
-// The wide one-row body with the static state selection.
+// The wide one-row body with static state selection: the cursor leaves the inner loop, reading three words not four.
 template <uint S>
 inline void tf_exl3_matmul_wide_static_impl(const device half* x, const device uchar* trellis,
                                             device float* sums, constant TfExl3Args& a,

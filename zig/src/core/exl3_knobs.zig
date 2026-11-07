@@ -1,5 +1,9 @@
 //! The EXL3 projection's process-wide body selection.
 
+// The family host resolves these before a model loads; the core projection has no environment reads.
+
+// Every field defaults to the shipped body, so an unset environment is the engine's normal path.
+
 pub const Knobs = struct {
     // One-row and prompt body selection.
     table_decode: bool = true,

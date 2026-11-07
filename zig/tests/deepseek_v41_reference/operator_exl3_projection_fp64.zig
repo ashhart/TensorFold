@@ -1,4 +1,5 @@
-//! EXL3 one-row projection: the kernel's fp32 accumulation against the FP64 oracle over the same resident bytes.
+//! The EXL3 projection against independent FP64 dots at the checkpoint's shapes.
+
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");

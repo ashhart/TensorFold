@@ -148,7 +148,7 @@ pub const Pipelines = struct {
                     std.log.info("exl3: nax source inlined, {d} bytes", .{src.len});
                     if (mtl.Library.fromSource(device, src, mtl.CompileOptions.mlx())) |nax_lib| {
                         defer nax_lib.deinit();
-                        // Indexed by (rows / 64 - 1) * 2 + (columns / 64 - 1): 64.
+                        // Indexed by (rows/64-1)*2+(columns/64-1): 64, 128 or 256 rows by 64 or 128 columns.
                         const tile_names = [_]?[]const u8{ "tf_exl3_matmul_prefill_nax5", "tf_exl3_matmul_prefill_nax3", "tf_exl3_matmul_prefill_nax2", "tf_exl3_matmul_prefill_nax4", null, null, "tf_exl3_matmul_prefill_nax6", null };
                         for (tile_names, 0..) |maybe, t| {
                             const name = maybe orelse continue;
@@ -164,7 +164,7 @@ pub const Pipelines = struct {
                         if (mtl.Pipeline.init(device, nax_lib, "tf_exl3_matmul_prefill_nax59", false)) |pf| {
                             if (pf.simdWidth() == 32 and pf.maxThreads() >= 128) prefill_nax_funnel_only = pf else pf.deinit();
                         } else |_| {}
-                        // The 128-row routed tile: the funnel read on a four-window run and the grouping's padded rows.
+                        // The 128-row routed tile: funnel read on a four-window run, padding rows skipped.
                         if (mtl.Pipeline.init(device, nax_lib, "tf_exl3_matmul_prefill_nax49", false)) |pf| {
                             if (pf.simdWidth() == 32 and pf.maxThreads() >= 256) prefill_nax_skip_pad128 = pf else pf.deinit();
                         } else |_| {}

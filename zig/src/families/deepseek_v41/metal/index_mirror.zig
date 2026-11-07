@@ -1,4 +1,4 @@
-// !
+//! Shared Zig/Metal argument structs are hand-written mirrors, checked field by field at comptime.
 
 const std = @import("std");
 
