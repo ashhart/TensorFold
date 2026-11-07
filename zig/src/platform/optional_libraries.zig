@@ -28,7 +28,7 @@ const loader_path = if (win) "add its directory to PATH" else "on Linux, add its
 
 pub const all = [_]Spec{
     item(.cublaslt, "cuBLASLt", if (win) &.{"cublasLt64_13.dll"} else &.{ "libcublasLt.so.13", "libcublasLt.so" }, "CUDA vision towers (--vision) and CUDA cuBLASLt projections", "install the NVIDIA CUDA 13 cuBLAS runtime; " ++ loader_path ++ "; a driver-only host does not include it", error.CublasLtUnavailable, null, false),
-    item(.cublas, "cuBLAS", &.{ "libcublas.so.13", "libcublas.so" }, "Drama CUDA prompt and codec GEMMs", "install the NVIDIA CUDA 13 cuBLAS runtime; " ++ loader_path ++ "", error.CublasUnavailable, null, false),
+    item(.cublas, "cuBLAS", if (win) &.{"cublas64_13.dll"} else &.{ "libcublas.so.13", "libcublas.so" }, "Drama CUDA prompt and codec GEMMs", "install the NVIDIA CUDA 13 cuBLAS runtime; " ++ loader_path ++ "", error.CublasUnavailable, null, false),
     item(.rocblas, "rocBLAS", &.{ "librocblas.so.5", "librocblas.so", "/opt/rocm/lib/librocblas.so" }, "HIP BF16 dense projections and image towers", "install the rocBLAS runtime matching the ROCm installation; " ++ loader_path, error.RocblasUnavailable, null, false),
     item(.hipblaslt, "hipBLASLt", &.{ "libhipblaslt.so.1", "libhipblaslt.so" }, "HIP BF16 projections with a fixed decode algorithm", "install the hipBLASLt runtime matching the ROCm installation; " ++ loader_path, error.HipblasltUnavailable, null, false),
     item(.miopen, "MIOpen", &.{ "libMIOpen.so.1", "libMIOpen.so", "/opt/rocm/lib/libMIOpen.so.1" }, "HIP BF16 image convolutions", "install the MIOpen runtime matching the ROCm installation; " ++ loader_path, error.MiopenUnavailable, null, false),
