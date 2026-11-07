@@ -90,6 +90,14 @@ On a CUDA machine, build with `-Dnvcc` (the controls are compiled only then), an
 -Dsm=80,86,89,120,121`, then `tf-cuda-test kernel-contract-limits zig-out/fatbin`. Its `RECORD` lines are the values
 `registry.zig` holds for that build's nvcc (see [CUDA records per nvcc release](#cuda-records-per-nvcc-release)).
 
+For a development sm_110 build, use `-Dsm=110` in the fatbin build and run the same limits command on that set.
+The `DIR` must contain `norms.fatbin` and every registered image; the runner reads `norms.fatbin` first to select
+the release or sm_110 audit mode. It reads sm_110 registers, static shared bytes and bounds from each cubin and
+checks its device limits; the five release SMs retain their pinned `RECORD` entries. This does not enable
+`-Dgpu=sm_110`. On sm_110, some 48 KiB dynamic shared-memory kernels carry another 1 KiB of static shared memory.
+Only their sm_110 audit uses the opt-in limit already raised by their loaders (`allowDynamicShared`).
+For a mixed release and sm_110 set, each planted control must go red on each target separately.
+
 On an AMD machine, run `zig build hip-kernel-contract -Dhip-arch=ARCH -Dhipcc=...` on a GPU of that chip (the
 controls are built with the kernels). For the limits of every served chip, `zig build hip-kernel-contract-limits
 -Dhipcc=...` compiles every kernel group and the controls for gfx1030, gfx1100, gfx1151 and gfx1201 and checks each

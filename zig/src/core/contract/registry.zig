@@ -4,7 +4,7 @@ const limits = @import("limits.zig");
 const M = limits.MetalLaunch;
 const C = limits.CudaLaunch;
 const U = limits.Usage;
-/// A CUDA launch and what nvcc made of it for sm_80, sm_86, sm_89, sm_120 and sm_121 (limits.sms' order; regs 0: none).
+/// A CUDA launch and what nvcc made of it for the five recorded SMs (sms' order; regs 0: none).
 pub const CudaRecord = struct {
     launch: C,
     usage: [limits.sms.len]U,
@@ -357,7 +357,7 @@ pub const cuda_controls = [_]CudaRecord{
     .{ .launch = .{ .name = "control: past its bounds", .symbol = "tf_ctl_bounded", .image = "contract_controls", .threads = 512 }, .usage = .{ .{ .regs = 10, .static = 0, .bound = 256 }, .{ .regs = 10, .static = 0, .bound = 256 }, .{ .regs = 10, .static = 0, .bound = 256 }, .{ .regs = 10, .static = 0, .bound = 256 }, .{ .regs = 10, .static = 0, .bound = 256 } } },
     .{ .launch = .{ .name = "control: heavy at 1,024 threads", .symbol = "tf_ctl_heavy", .image = "contract_controls", .threads = 1024 }, .usage = .{ .{ .regs = 168, .static = 0, .bound = 0 }, .{ .regs = 166, .static = 0, .bound = 0 }, .{ .regs = 166, .static = 0, .bound = 0 }, .{ .regs = 166, .static = 0, .bound = 0 }, .{ .regs = 166, .static = 0, .bound = 0 } } },
 };
-/// Every CUDA record's problems on every SM we build for, printed; returns how many (a missing record is one).
+/// Every CUDA record's problems on the five pinned SMs, printed; returns how many (a missing record is one).
 pub fn checkCuda(a: std.mem.Allocator, list: []const CudaRecord, quiet: bool) !usize {
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(a);
