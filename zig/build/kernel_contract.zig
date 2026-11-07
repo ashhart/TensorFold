@@ -22,6 +22,15 @@ pub fn hostTests(b: *std.Build, family: *std.Build.Step) void {
     }) }));
     b.step("test-attention-precision-host", "Shared attention precision mode, source and kept-state identity").dependOn(&precision.step);
     step.dependOn(&precision.step);
+    const rig = b.createModule(.{
+        .root_source_file = b.path("zig/tests/cuda/contract_rig.zig"),
+        .target = b.graph.host,
+        .optimize = .debug,
+        .imports = &.{.{ .name = "cuda", .module = @import("cuda_runtime.zig").runtime(b, b.graph.host, .debug, &.{}) }},
+    });
+    const rig_test = b.addRunArtifact(b.addTest(.{ .root_module = rig, .filters = &.{"completed CUDA fixtures"} }));
+    b.step("test-cuda-contract-lifetime-host", "Completed CUDA fixtures free buffers once and remain reusable").dependOn(&rig_test.step);
+    step.dependOn(&rig_test.step);
     step.dependOn(family);
     const rotary = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/contract/rotary_cache_positions.zig"),
