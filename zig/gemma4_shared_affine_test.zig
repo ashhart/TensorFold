@@ -103,7 +103,7 @@ test "landed Metal source bytes are pinned without shader compilation" {
     {
         var hash: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(ks.core_affine_mm, &hash, .{});
-        try std.testing.expectEqualStrings("d8f47cbbddf24502ca2c16cfdef0672731cc2dbe59ad027f47a3e662bcf8f627", &std.fmt.bytesToHex(hash, .lower));
+        try std.testing.expectEqualStrings("a91a353981c4e24142673ab9c97e9a449b973751bd5df7ad7c980757046cf61e", &std.fmt.bytesToHex(hash, .lower));
     }
     {
         var hash: [32]u8 = undefined;
