@@ -146,7 +146,10 @@ test "CUDA load cache: every TP load scope defers file advice through all-rank r
     const identity = @embedFile("src/core/checkpoint_identity.zig");
     try t.expect(std.mem.indexOf(u8, identity, "@import(\"checkpoint_drop.zig\").range(f, at, n)") != null);
     const pack = @embedFile("src/families/deepseek_v41/pack.zig");
-    try t.expect(std.mem.indexOf(u8, pack, "checkpoint.cache.range(file, offset, len)") != null);
+    try t.expectEqual(@as(usize, 2), std.mem.count(u8, pack, "file.dropCache("));
+    const reader = @embedFile("src/families/deepseek_v41/pack_read.zig");
+    try t.expect(std.mem.indexOf(u8, reader, "core.checkpoint.cache.range(file, offset, len)") != null);
+    try t.expect(std.mem.indexOf(u8, reader, "fadvise") == null);
     const cache = @embedFile("src/core/checkpoint_cache.zig");
     try t.expect(std.mem.indexOf(u8, cache, "@import(\"checkpoint_drop.zig\").drop(file)") != null);
 }

@@ -11,6 +11,14 @@ pub fn moduleAt(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     return b.createModule(.{ .root_source_file = b.path(b.fmt("zig/src/families/deepseek_v41/{s}", .{file})), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "core", .module = core }, .{ .name = "lanes", .module = lanes } } });
 }
 pub fn steps(b: *std.Build) void {
+    const reads = b.addTest(.{ .root_module = module(b, b.graph.host, "pack.zig"), .filters = &.{"DeepSeek pack reads:"} });
+    const read_step = b.step("test-dsv41-direct-host", "Pack direct and buffered bytes against mappings without devices");
+    inline for (.{ "0", "1" }) |mode| {
+        const reader = b.addRunArtifact(reads);
+        reader.setEnvironmentVariable("TF_LOAD_DIRECT", mode);
+        reader.has_side_effects = true;
+        read_step.dependOn(&reader.step);
+    }
     const host = b.addTest(.{ .root_module = module(b, b.graph.host, "shared_test.zig") });
     b.step("test-dsv41-engram-alloc", "Actual Engram startup failure sweeps with varying remap behavior").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.root_module, .filters = &.{ "production batch", "engram alloc:" } })).step);
     const arm = b.addTest(.{ .root_module = module(b, b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .gnu }), "shared_test.zig"), .filters = &.{ "production batch", "engram alloc:" } });

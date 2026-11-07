@@ -184,6 +184,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Tests: the pull client's security tests build and run on Windows, on a portable fake hub, and CI runs them there
   (#2284). Thanks to @ElderOrb.
 
+- DeepSeek-V4.1 reads its pack's weight spans past the page cache with O_DIRECT, so a load no longer fills the cache first (`TF_LOAD_DIRECT=0` keeps buffered reads; part of #1857).
+
 - Metal: a request's finished stats list its prompt pass widths (`tensorfold.prefill_widths`, one entry per completed
   target pass) on every Metal text family except Flash Next, whose engine reports none. Telemetry only (#2293).
 
