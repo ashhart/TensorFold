@@ -24,6 +24,7 @@ pub fn apply(base: lanes.Model, enabled: bool, measured: bool) lanes.Model {
     if (!measured) m.window_costs = &window_costs;
     if (!measured) m.shared_costs = &shared_costs;
     m.window_costs_lone = false; // every copy pays for its rows, in shared rounds too
+    m.shared_drafts = 0;
     // Keep head confidence in the backend's probabilities so every copy still pays its target-window cost.
     m.draft_confidence = null;
     return m;
