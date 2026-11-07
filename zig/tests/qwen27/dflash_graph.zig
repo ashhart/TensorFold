@@ -7,7 +7,7 @@ const q = tf.qwen27;
 const df = q.dflash;
 const Backend = df.runtime_backend.Backend;
 const Model = df.runtime_model.Model;
-pub const config = df.config.Config{ .hidden = 512, .intermediate = 512, .vocab = 96, .heads = 8, .kv_heads = 2, .head_dim = 64, .target_layers = 5, .mask = 95, .window = 64, .rank = 32, .topk = 4, .taps = .{ 0, 1, 2, 3, 4 } };
+pub const config = df.config.Config{ .hidden = 512, .intermediate = 512, .vocab = 96, .heads = 8, .kv_heads = 2, .head_dim = 64, .target_layers = 5, .mask = 95, .window = 64, .rank = 32, .topk = 4, .taps = .{ 0, 1, 2, 3, 4, 0, 0, 0 } };
 fn dimensions(name: []const u8) []const usize {
     if (std.mem.eql(u8, name, "fc.weight")) return &.{ 512, 2560 };
     if (std.mem.eql(u8, name, "candidate_selector.hidden_projection.weight")) return &.{ 32, 512 };

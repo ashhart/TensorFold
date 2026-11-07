@@ -74,3 +74,11 @@ test "PLE read-ahead: future hashes equal a full token history and flags leave n
     warm(&g, &tokens, 4, tokens.len);
     try std.testing.expectEqualSlices(i64, nvfp4[0..before], Recorder.ids[0..Recorder.count]);
 }
+
+test "PLE table warm-up: no read-ahead thread unless TF_FLASHNEXT_TABLE_WARM=1" {
+    if (std.c.getenv("TF_FLASHNEXT_TABLE_WARM") != null) return error.SkipZigTest;
+    const hash = try ple.Hash.init(.{ .vocab = 100, .ngram = 3, .per = 2, .base = 13, .divisor = 2, .shards = 2, .seed = 1234, .eos = 99, .ple_dim = 64, .ple_index = 0 });
+    var g: ple.Ngram = .{ .gpa = std.testing.allocator, .hash = hash, .scale = 1 };
+    g.warm();
+    try std.testing.expect(g.warmer == null);
+}

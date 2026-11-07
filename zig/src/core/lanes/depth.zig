@@ -7,6 +7,7 @@ pub const pricedBatched = alloc.pricedBatched;
 
 pub const Constants = struct {
     depth_rate: f64 = 0.15, // weight of the newest round in a depth's acceptance
+    learn_rows: bool = false, // shared_costs came from another machine: learn what a row costs here
     depth_probe_every: u64 = 8, // rounds between probes one depth deeper
     cost_rate: f64 = 0.2, // weight of the newest round in a depth's measured time
     plain_margin: f64 = 1.05, // a drafted depth must beat plain rounds' tokens a ms by this much
@@ -72,6 +73,7 @@ pub const Rule = struct {
     confidence_floor: ?f64 = null,
     batch_rows: u32,
     batched_heads: bool = false, // one batch drafts every stream of a shared round (its steps: the deepest stream's)
+    row_cost: @import("row_cost.zig").RowCost = .{}, // what a row costs past shared_costs here, under k.learn_rows
     round_ms: Table = .{}, // a round's wall time by drafts, every stream's: what sampled streams price by
     overhead: std.ArrayList(Overhead) = .empty, // a shared round's ms past its forward, by streams (insertion order)
     greedy_ms: Table = .{}, // round_ms from greedy rounds alone: what greedy streams price by
@@ -82,6 +84,7 @@ pub const Rule = struct {
 
     pub fn deinit(r: *Rule) void {
         r.gpa.free(r.hold_order);
+        r.row_cost.deinit(r.gpa);
         r.round_ms.deinit(r.gpa);
         r.overhead.deinit(r.gpa);
         r.greedy_ms.deinit(r.gpa);
@@ -285,7 +288,7 @@ pub const Rule = struct {
             tokens += try r.gainOf(whos[i]);
             deepest = @max(deepest, out[i]);
             const verify = r.shared_costs.get(@intFromFloat(@ceil(rows))) orelse break;
-            const now = tokens / (verify + fixed + holdMs(r.k.hold_costs, k + probes, deepest));
+            const now = tokens / (verify + r.row_cost.extraMs(whos.len, sampled) * (rows - @as(f64, @floatFromInt(whos.len))) + fixed + holdMs(r.k.hold_costs, k + probes, deepest));
             if (now > best) {
                 best = now;
                 keep = k;
@@ -334,11 +337,11 @@ pub const Rule = struct {
         const ones = try r.gpa.alloc(u32, whos.len);
         defer r.gpa.free(ones);
         @memset(ones, 1);
-        const head: alloc.HeadCost = .{ .step_ms = r.mtp_step_ms, .batched = r.batched_heads };
+        const head: alloc.HeadCost = .{ .step_ms = r.mtp_step_ms, .batched = r.batched_heads, .row_ms = r.row_cost.extraMs(whos.len, sampled) };
         const counts = if (r.draft_step_ms != 0)
-            try alloc.allocateDrafts(r.gpa, ones, probs, r.shared_costs, r.overheadMs(whos.len, sampled), @max(whos.len, r.batch_rows), .{ .step_ms = r.draft_step_ms, .batched = r.batched_heads and pricedBatched(), .free_first = true })
+            try alloc.allocateDrafts(r.gpa, ones, probs, r.shared_costs, r.overheadMs(whos.len, sampled), r.row_cost.capRows(whos.len, sampled, @max(whos.len, r.batch_rows)), .{ .step_ms = r.draft_step_ms, .batched = r.batched_heads and pricedBatched(), .free_first = true, .row_ms = r.row_cost.extraMs(whos.len, sampled) })
         else
-            try alloc.allocateDrafts(r.gpa, ones, probs, r.shared_costs, r.fixedMs(whos.len, sampled), @max(whos.len, r.batch_rows), head);
+            try alloc.allocateDrafts(r.gpa, ones, probs, r.shared_costs, r.fixedMs(whos.len, sampled), r.row_cost.capRows(whos.len, sampled, @max(whos.len, r.batch_rows)), head);
         defer r.gpa.free(counts);
         r.probeShared(whos, most, counts);
         if (r.plain_guard) {
@@ -406,7 +409,13 @@ pub const Rule = struct {
     /// `sampled`: the round drew keyed samples, so it counts for sampled streams' overhead alone; `head_ms` its drafts.
     pub fn observeOverhead(r: *Rule, streams: u32, rows: u64, ms: f64, sampled: bool, head_ms: f64) !void {
         const forward = r.shared_costs.get(@intCast(rows)) orelse return;
-        const extra = if (ms - forward > 0.0) ms - forward else 0.0;
+        if (r.k.learn_rows) try r.row_cost.observe(r.gpa, streams, rows, ms - forward - head_ms, sampled);
+        // rows the table underprices are no fixed cost: called fixed, they would make the next draft look cheaper
+        const row_ms = r.row_cost.extraMs(streams, sampled);
+        // no fit yet: a wide round's excess may be its rows, and adding it to the overhead draws the next round wider
+        if (r.k.learn_rows and streams > 1 and row_ms == 0 and rows > streams) return;
+        const paid = row_ms * @as(f64, @floatFromInt(rows -| streams));
+        const extra = if (ms - forward - paid > 0.0) ms - forward - paid else 0.0;
         const fixed = if (extra - head_ms > 0.0) extra - head_ms else 0.0;
         try r.addOverhead(&r.overhead, streams, fixed, extra - fixed);
         if (!sampled) try r.addOverhead(&r.greedy_overhead, streams, fixed, extra - fixed);

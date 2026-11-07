@@ -2,8 +2,36 @@
 
 Tracking issue: [#1491](https://github.com/ashhart/TensorFold/issues/1491).
 
-This branch adds host checks for LFM3 checkpoint configuration and text tensor layouts.
-It does not register a serving engine. Text generation and image input are not implemented or qualified here.
+This slice implements native LFM3-1.7B text generation. LFM3-VL execution is in the dependent vision slice.
+Both read the official MLX affine 4-, 6-, and 8-bit checkpoints without converting stored weights.
+This is an experimental family port. Device and model checks cover an M4 Pro and an M5 Ultra; they do not qualify other Apple GPUs.
+
+## Run the models
+
+Build the native engine with the Zig version in `.zig-version` and Xcode's Metal toolchain:
+
+```sh
+zig build native -Dcpu=apple_m1
+./zig-out/native/bin/tensorfold-native serve LiquidAI/LFM3-1.7B-MLX-4bit --context 8192
+```
+
+Replace `4bit` with `6bit` or `8bit` for those exports. A complete local checkpoint folder also works.
+This slice refuses VL checkpoints until the vision contribution is applied.
+Image budgets and decoder libraries are described by the stacked VL contribution.
+
+The shared lane engine handles target verification, sampling and concurrent streams.
+Convolution history and KV state are kept per stream; partial acceptance restores the accepted row's state.
+Raw prompts of at least 256 tokens can build a repeat-cache entry: the first request records interest,
+the second keeps a prefix state, and a later repeat resumes it. Image cache identity includes image content and grid.
+
+```mermaid
+flowchart LR
+  I[Image pixels] --> V[Vision encoder and projector]
+  V --> E[Placeholder embedding rows]
+  T[Text tokens] --> E
+  E --> D[Shared LFM3 decoder]
+  D --> L[Existing lane engine]
+```
 
 ## Inspect a checkpoint
 
@@ -55,18 +83,43 @@ The header inspections used these revisions:
 - VL 6-bit: `6d71bfae121abedc75f6d531fc7f6ceb4f5e3501`.
 - VL 8-bit: `83336d5be3874a2bdd3297bde77b2114dbd3a816`.
 
-## Next gate
+## Qualification and remaining gate
 
-Implement the text operators against an independent reference before advertising generation.
-Check the 7-tap convolution, per-head attention gate, sandwich normalization, sliding window, and partial-RoPE formula.
-Then exercise actual 1.7B 4-bit weights through the shared lane engine, followed by 6/8-bit checkpoints.
-The VL encoder and projector need their own native Metal operators and reference checks after text bring-up.
+Detailed counts, hashes, numerical evidence and reproducible requests are in the [receipts](../receipts/lfm3/README.md).
 
-Agree model-fidelity and performance acceptance criteria on the tracking issue before claiming release readiness.
+All six checkpoints passed 303 greedy/seeded-sampling, cache, concurrency and cancellation checks on one optimized M4 binary.
+The final source build also passed 303/303 on an M5. Text4 and VL4 additionally passed real grammar, thinking, tool,
+streaming, history and image-conditioned tool checks with the matching optional grammar library.
+The 4-bit text long exactness suite passed all 73 cases through 8,193-token seams.
+The final family contract passed 50 kernels and caught all 13 real controls, with zero limit problems.
 
-## Weight licence and checked hardware
+Independent projection audits covered 66 class/layout cells and 60,954,624 outputs with no violations of existing FP32/BF16 bounds.
+The row-pair optimization preserves the shared arithmetic: 132 checkpoint calls and a full 8,193-token logit comparison were byte-identical.
+On the M5, controlled 4-bit cold requests improved text engine prefill from 1.240 to 0.813 seconds at 2k and
+73.402 to 61.633 seconds at 64k; VL decoder requests improved from 1.262 to 0.815 and 73.920 to 59.647 seconds.
+These are engine prefill measurements; the receipt also retains client TTFT. All compared full output-token hashes matched.
 
-The official text and VL MLX exports retain the [LFM Open License v1.0](https://huggingface.co/LiquidAI/LFM3-1.7B-MLX-4bit/blob/main/LICENSE).
-The VL export carries its own [copy of that licence](https://huggingface.co/LiquidAI/LFM3-VL-2B-MLX-4bit/blob/main/LICENSE).
-TensorFold code remains Apache-2.0; admission does not change the weights’ licence.
-This slice validates metadata on the host and does not register inference or qualify a GPU.
+Native inference retains the checkpoint's BF16 activation boundaries and FP32 reductions.
+Text trigonometric values round to BF16 before rotation; vision axial trigonometric values remain FP32.
+The CPU FP64 oracle records numerical differences rather than inventing a tie policy.
+MLX's vector/matrix quantized paths use different effective reconstruction, and bounded FP32 differences can propagate through history.
+See the exact primitive and whole-model evidence before interpreting a next-token mismatch.
+
+```sh
+zig build tf-lfm3-forward tf-lfm3-vision tf-lfm3-project tf-lfm3-profile tf-lfm3-exact -Dcpu=apple_m1
+./zig-out/bin/tf-lfm3-exact MODEL_DIR --long
+python3 tools/lfm3/serve_check.py --binary ./zig-out/native/bin/tensorfold-native --model-dir MODEL_DIR --sampled --cancel --output served.json
+```
+
+Long-context model fidelity, maximum image budgets, 6/8-bit performance and other Apple GPU generations remain separate qualification work.
+Structured output requires the native grammar library; logprobs and video are not advertised.
+A complete earlier global M5 contract run found one Qwen4 failure that also reproduces on the unchanged pinned base.
+It is not a final-source global pass. Agree model-fidelity and performance gates on #1491 before claiming release readiness.
+
+## Weight licence
+
+The official text and VL MLX exports retain the LFM Open License v1.0.
+See the [text licence](https://huggingface.co/LiquidAI/LFM3-1.7B-MLX-4bit/blob/main/LICENSE) and
+[VL licence](https://huggingface.co/LiquidAI/LFM3-VL-2B-MLX-4bit/blob/main/LICENSE).
+TensorFold code remains Apache-2.0. The measured Macs are M4 Pro 48 GB and M5 Ultra 256 GiB.
+Receipts that include VL describe the combined chain, not a capability enabled in this text-only slice.

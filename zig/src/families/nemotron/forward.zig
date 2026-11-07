@@ -37,7 +37,7 @@ pub fn drawOf(s: *const @import("lanes").Stream, position: u64) Draw {
 /// Where a segment's Mamba state goes: after all its rows (prompts, steps), its replayed rows (windows), or each row.
 pub const Store = enum { full, lag, all };
 
-/// One stream's rows in a forward: its cache (its replayed rows run first), the state slot it stores (-1: none), its draw.
+/// One stream's rows in a forward: its cache (replayed rows run first), the state slot it stores (-1: none), its draw.
 pub const Seg = struct {
     rows: usize,
     cache: *st.Cache,

@@ -2,7 +2,13 @@
 const std = @import("std");
 
 pub fn steps(b: *std.Build, cuda: *std.Build.Module, glm: *std.Build.Module, mods: anytype, step: *std.Build.Step) void {
+    // GLM CUDA's startup watcher (named phases, a warning while NCCL init or a load blocks), from cuda.zig's room
+    b.step("test-startup-watch-host", "Blocked startup phase warnings without a driver or communicator").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cuda, .filters = &.{"startup watcher:"} })).step);
     const host = b.graph.host;
+    const warm = b.createModule(.{ .root_source_file = b.path("zig/src/families/glm/cuda_warm_peers_test.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "heat", .module = mods.heat } } });
+    const warm_run = b.addRunArtifact(b.addTest(.{ .root_module = warm, .filters = &.{"GLM warm peers:"} }));
+    b.step("test-glm-warm-peers-host", "Selected GLM warm-up peers and NCCL posting failures without devices").dependOn(&warm_run.step);
+    step.dependOn(&warm_run.step);
     const startup = b.createModule(.{ .root_source_file = b.path("zig/src/families/glm/cuda_start_test.zig"), .target = host, .optimize = .debug });
     const startup_run = b.addRunArtifact(b.addTest(.{ .root_module = startup }));
     b.step("test-glm-startup-host", "Page refusals propagate through rank liveness before engine construction").dependOn(&startup_run.step);
@@ -28,11 +34,16 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, glm: *std.Build.Module, mod
     const pages_run = b.addRunArtifact(b.addTest(.{ .root_module = pages, .filters = &.{"GLM pages:"} }));
     b.step("test-glm-pages-host", "Actual GLM page ownership, refusal and rollback without devices").dependOn(&pages_run.step);
     step.dependOn(&pages_run.step);
+    const api = glm.import_table.get("engine_api").?; // the family's own (the shared store's types): one module, one set of types
+    const adapter = b.createModule(.{ .root_source_file = b.path("zig/src/native/cuda_prompt_pages.zig"), .target = host, .link_libc = true, .imports = &.{ .{ .name = "core", .module = mods.core }, .{ .name = "engine_api", .module = api } } });
+    const image_cache = b.createModule(.{ .root_source_file = b.path("zig/glm_image_cache_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "glm", .module = glm }, .{ .name = "cuda", .module = cuda }, .{ .name = "lanes", .module = mods.lanes }, .{ .name = "core", .module = mods.core }, .{ .name = "prompt_pages", .module = adapter } } });
+    const image_cache_run = b.addRunArtifact(b.addTest(.{ .root_module = image_cache }));
+    b.step("test-glm-image-cache-host", "Image-content prefix reuse over the shared store and suffix rows across both ranks without devices").dependOn(&image_cache_run.step);
+    step.dependOn(&image_cache_run.step);
     const page_contract = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/contract_glm_controls_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "glm_cuda", .module = glm }, .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = mods.core } } });
     const page_contract_run = b.addRunArtifact(b.addTest(.{ .root_module = page_contract, .filters = &.{"GLM page contract:"} }));
     b.step("test-glm-page-contract-host", "GLM paged contract case and planted-control inventory without devices").dependOn(&page_contract_run.step);
     step.dependOn(&page_contract_run.step);
-    const api = glm.import_table.get("engine_api").?; // the family's own (TF_GLM_KV_SHARE's store): one module, one set of types
     const admission = b.createModule(.{ .root_source_file = b.path("zig/glm_admission_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "glm", .module = glm }, .{ .name = "lanes", .module = mods.lanes }, .{ .name = "engine_api", .module = api } } });
     const admission_run = b.addRunArtifact(b.addTest(.{ .root_module = admission, .filters = &.{"GLM CUDA admission:"} }));
     b.step("test-glm-admission-host", "Real GLM admission capabilities through the lane worker without GPU work").dependOn(&admission_run.step);
@@ -51,6 +62,9 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, glm: *std.Build.Module, mod
     b.step("test-glm-packed-host", "Packed GLM launch records, cap parsing and native loader on the CPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = packed_host, .filters = &.{"glm packed:"} })).step);
     const ring_host = b.createModule(.{ .root_source_file = b.path("zig/glm_ring_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "glm", .module = glm } } });
     b.step("test-glm-ring-host", "Actual GLM MTP rollback pool through recording CUDA copies").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = ring_host, .filters = &.{"glm ring:"} })).step);
+    const taps_tp = b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM prompt taps:"} }));
+    b.step("test-glm-prompt-taps-host", "DFlash2 prompt taps hold every row at TP>1 through recording copies and emulated NCCL").dependOn(&taps_tp.step);
+    step.dependOn(&taps_tp.step);
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm })).step);
     const prompt_host = b.createModule(.{ .root_source_file = b.path("zig/exl3_prompt_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "glm", .module = glm }, .{ .name = "lanes", .module = mods.lanes } } });
     const prompt_run = b.addRunArtifact(b.addTest(.{ .root_module = prompt_host, .filters = &.{"exl3 prompt:"} }));

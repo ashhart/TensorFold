@@ -1,0 +1,559 @@
+{
+  "cells": 17,
+  "rows": 18,
+  "native_in_oracle_maximum": 9,
+  "mlx_in_oracle_maximum": 16,
+  "both_in_maximum": 8,
+  "neither_in_maximum": 1,
+  "accepted_threshold": null,
+  "rows_detail": [
+    {
+      "row": 82,
+      "native_top": 2292,
+      "mlx_top": 3599,
+      "oracle_maximum_set": [
+        2292,
+        3599
+      ],
+      "oracle_margin": 0.0,
+      "native_in_oracle_maximum_set": true,
+      "mlx_in_oracle_maximum_set": true,
+      "oracle_gap_to_native_top": 0.0,
+      "oracle_gap_to_mlx_top": 0.0,
+      "previous_evidence": {
+        "row": 82,
+        "reference_top": 3599,
+        "native_top": 2292,
+        "reference_top_set": [
+          3599
+        ],
+        "native_top_set": [
+          2292
+        ],
+        "top_sets_overlap": false,
+        "reference_margin": 0.125,
+        "native_margin": 0.5,
+        "reference_native_contender_gap": 0.125,
+        "native_reference_contender_gap": 0.5
+      },
+      "cell": "1.7B-6-prose-257"
+    },
+    {
+      "row": 82,
+      "native_top": 2292,
+      "mlx_top": 3599,
+      "oracle_maximum_set": [
+        2292,
+        3599
+      ],
+      "oracle_margin": 0.0,
+      "native_in_oracle_maximum_set": true,
+      "mlx_in_oracle_maximum_set": true,
+      "oracle_gap_to_native_top": 0.0,
+      "oracle_gap_to_mlx_top": 0.0,
+      "previous_evidence": {
+        "row": 82,
+        "reference_top": 3599,
+        "native_top": 2292,
+        "reference_top_set": [
+          3599
+        ],
+        "native_top_set": [
+          2292
+        ],
+        "top_sets_overlap": false,
+        "reference_margin": 0.125,
+        "native_margin": 0.5,
+        "reference_native_contender_gap": 0.125,
+        "native_reference_contender_gap": 0.5
+      },
+      "cell": "1.7B-6-prose-513"
+    },
+    {
+      "row": 450,
+      "native_top": 22497,
+      "mlx_top": 360,
+      "oracle_maximum_set": [
+        22497
+      ],
+      "oracle_margin": 0.125,
+      "native_in_oracle_maximum_set": true,
+      "mlx_in_oracle_maximum_set": false,
+      "oracle_gap_to_native_top": 0.0,
+      "oracle_gap_to_mlx_top": 0.125,
+      "previous_evidence": {
+        "row": 450,
+        "reference_top": 360,
+        "native_top": 22497,
+        "reference_top_set": [
+          360
+        ],
+        "native_top_set": [
+          22497
+        ],
+        "top_sets_overlap": false,
+        "reference_margin": 0.125,
+        "native_margin": 0.125,
+        "reference_native_contender_gap": 0.125,
+        "native_reference_contender_gap": 0.125
+      },
+      "cell": "1.7B-8-code-513"
+    },
+    {
+      "row": 264,
+      "native_top": 207,
+      "mlx_top": 33237,
+      "oracle_maximum_set": [
+        2993
+      ],
+      "oracle_margin": 0.375,
+      "native_in_oracle_maximum_set": false,
+      "mlx_in_oracle_maximum_set": false,
+      "oracle_gap_to_native_top": 0.375,
+      "oracle_gap_to_mlx_top": 0.5625,
+      "previous_evidence": {
+        "row": 264,
+        "reference_top": 33237,
+        "native_top": 207,
+        "reference_top_set": [
+          33237
+        ],
+        "native_top_set": [
+          207
+        ],
+        "top_sets_overlap": false,
+        "reference_margin": 0.0625,
+        "native_margin": 0.25,
+        "reference_native_contender_gap": 0.0625,
+        "native_reference_contender_gap": 0.25
+      },
+      "cell": "VL-2B-4-code-513"
+    },
+    {
+      "row": 17,
+      "native_top": 296,
+      "mlx_top": 405,
+      "oracle_maximum_set": [
+        405
+      ],
+      "oracle_margin": 0.125,
+      "native_in_oracle_maximum_set": false,
+      "mlx_in_oracle_maximum_set": true,
+      "oracle_gap_to_native_top": 0.125,
+      "oracle_gap_to_mlx_top": 0.0,
+      "previous_evidence": {
+        "row": 17,
+        "reference_top": 405,
+        "native_top": 296,
+        "reference_top_set": [
+          405
+        ],
+        "native_top_set": [
+          296
+        ],
+        "top_sets_overlap": false,
+        "reference_margin": 0.0625,
+        "native_margin": 0.125,
+        "reference_native_contender_gap": 0.0625,
+        "native_reference_contender_gap": 0.1875
+      },
+      "cell": "VL-2B-4-reasoning-257"
+    },
+    {
+      "row": 17,
+      "native_top": 296,
+      "mlx_top": 405,
+      "oracle_maximum_set": [
+        405
+      ],
+      "oracle_margin": 0.125,
+      "native_in_oracle_maximum_set": false,
+      "mlx_in_oracle_maximum_set": true,
+      "oracle_gap_to_native_top": 0.125,
+      "oracle_gap_to_mlx_top": 0.0,
+      "previous_evidence": {
+        "row": 17,
+        "reference_top": 405,
+        "native_top": 296,
+        "reference_top_set": [
+          405
+        ],
+        "native_top_set": [
+          296
+        ],
+        "top_sets_overlap": false,
+        "reference_margin": 0.0625,
+        "native_margin": 0.125,
+        "reference_native_contender_gap": 0.0625,
+        "native_reference_contender_gap": 0.1875
+      },
+      "cell": "VL-2B-4-reasoning-513"
+    },
+    {
+      "row": 22,
+      "native_top": 16033,
+      "mlx_top": 91,
+      "oracle_maximum_set": [
+        91
+      ],
+      "oracle_margin": 0.1875,
+      "native_in_oracle_maximum_set": false,
+      "mlx_in_oracle_maximum_set": true,
+      "oracle_gap_to_native_top": 0.1875,
+      "oracle_gap_to_mlx_top": 0.0,
+      "previous_evidence": {
+        "row": 22,
+        "reference_top": 91,
+        "native_top": 16033,
+        "reference_top_set": [
+          91
+        ],
+        "native_top_set": [
+          16033
+        ],
+        "top_sets_overlap": false,
+        "reference_margin": 0.125,
+        "native_margin": 0.125,
+        "reference_native_contender_gap": 0.125,
+        "native_reference_contender_gap": 0.125
+      },
+      "cell": "VL-2B-6-code-257"
+    },
+    {
+      "row": 83,
+      "native_top": 3570,
+      "mlx_top": 496,
+      "oracle_maximum_set": [
+        496,
+        3570
+      ],
+      "oracle_margin": 0.0,
+      "native_in_oracle_maximum_set": true,
+      "mlx_in_oracle_maximum_set": true,
+      "oracle_gap_to_native_top": 0.0,
+      "oracle_gap_to_mlx_top": 0.0,
+      "previous_evidence": {
+        "row": 83,
+        "reference_top": 496,
+        "native_top": 3570,
+        "reference_top_set": [
+          496
+        ],
+        "native_top_set": [
+          3570
+        ],
+        "top_sets_overlap": false,
+        "reference_margin": 0.1875,
+        "native_margin": 0.125,
+        "reference_native_contender_gap": 0.1875,
+        "native_reference_contender_gap": 0.1875
+      },
+      "cell": "VL-2B-6-code-257"
+    },
+    {
+      "row": 83,
+      "native_top": 3570,
+      "mlx_top": 496,
+      "oracle_maximum_set": [
+        496,
+        3570
+      ],
+      "oracle_margin": 0.0,
+      "native_in_oracle_maximum_set": true,
+      "mlx_in_oracle_maximum_set": true,
+      "oracle_gap_to_native_top": 0.0,
+      "oracle_gap_to_mlx_top": 0.0,
+      "previous_evidence": {
+        "row": 83,
+        "reference_top": 496,
+        "native_top": 3570,
+        "reference_top_set": [
+          496
+        ],
+        "native_top_set": [
+          3570
+        ],
+        "top_sets_overlap": false,
+        "reference_margin": 0.1875,
+        "native_margin": 0.125,
+        "reference_native_contender_gap": 0.1875,
+        "native_reference_contender_gap": 0.1875
+      },
+      "cell": "VL-2B-6-code-513"
+    },
+    {
+      "row": 22,
+      "native_top": 16033,
+      "mlx_top": 91,
+      "oracle_maximum_set": [
+        91
+      ],
+      "oracle_margin": 0.1875,
+      "native_in_oracle_maximum_set": false,
+      "mlx_in_oracle_maximum_set": true,
+      "oracle_gap_to_native_top": 0.1875,
+      "oracle_gap_to_mlx_top": 0.0,
+      "previous_evidence": {
+        "row": 22,
+        "reference_top": 91,
+        "native_top": 16033,
+        "reference_top_set": [
+          91
+        ],
+        "native_top_set": [
+          16033
+        ],
+        "top_sets_overlap": false,
+        "reference_margin": 0.0625,
+        "native_margin": 0.125,
+        "reference_native_contender_gap": 0.0625,
+        "native_reference_contender_gap": 0.125
+      },
+      "cell": "VL-2B-6-code-64"
+    },
+    {
+      "row": 38,
+      "native_top": 22,
+      "mlx_top": 20,
+      "oracle_maximum_set": [
+        20,
+        22
+      ],
+      "oracle_margin": 0.0,
+      "native_in_oracle_maximum_set": true,
+      "mlx_in_oracle_maximum_set": true,
+      "oracle_gap_to_native_top": 0.0,
+      "oracle_gap_to_mlx_top": 0.0,
+      "previous_evidence": {
+        "row": 38,
+        "reference_top": 20,
+        "native_top": 22,
+        "reference_top_set": [
+          20
+        ],
+        "native_top_set": [
+          22
+        ],
+        "top_sets_overlap": false,
+        "reference_margin": 0.125,
+        "native_margin": 0.125,
+        "reference_native_contender_gap": 0.125,
+        "native_reference_contender_gap": 0.125
+      },
+      "cell": "VL-2B-6-prose-257"
+    },
+    {
+      "row": 38,
+      "native_top": 22,
+      "mlx_top": 20,
+      "oracle_maximum_set": [
+        20,
+        22
+      ],
+      "oracle_margin": 0.0,
+      "native_in_oracle_maximum_set": true,
+      "mlx_in_oracle_maximum_set": true,
+      "oracle_gap_to_native_top": 0.0,
+      "oracle_gap_to_mlx_top": 0.0,
+      "previous_evidence": {
+        "row": 38,
+        "reference_top": 20,
+        "native_top": 22,
+        "reference_top_set": [
+          20
+        ],
+        "native_top_set": [
+          22
+        ],
+        "top_sets_overlap": false,
+        "reference_margin": 0.125,
+        "native_margin": 0.125,
+        "reference_native_contender_gap": 0.125,
+        "native_reference_contender_gap": 0.125
+      },
+      "cell": "VL-2B-6-prose-513"
+    },
+    {
+      "row": 17,
+      "native_top": 3547,
+      "mlx_top": 3983,
+      "oracle_maximum_set": [
+        3983
+      ],
+      "oracle_margin": 0.0625,
+      "native_in_oracle_maximum_set": false,
+      "mlx_in_oracle_maximum_set": true,
+      "oracle_gap_to_native_top": 0.0625,
+      "oracle_gap_to_mlx_top": 0.0,
+      "previous_evidence": {
+        "row": 17,
+        "reference_top": 3983,
+        "native_top": 3547,
+        "reference_top_set": [
+          3983
+        ],
+        "native_top_set": [
+          3547
+        ],
+        "top_sets_overlap": false,
+        "reference_margin": 0.0625,
+        "native_margin": 0.0625,
+        "reference_native_contender_gap": 0.0625,
+        "native_reference_contender_gap": 0.0625
+      },
+      "cell": "VL-2B-6-prose-64"
+    },
+    {
+      "row": 24,
+      "native_top": 27,
+      "mlx_top": 1325,
+      "oracle_maximum_set": [
+        1325
+      ],
+      "oracle_margin": 0.15625,
+      "native_in_oracle_maximum_set": false,
+      "mlx_in_oracle_maximum_set": true,
+      "oracle_gap_to_native_top": 0.15625,
+      "oracle_gap_to_mlx_top": 0.0,
+      "previous_evidence": {
+        "row": 24,
+        "reference_top": 1325,
+        "native_top": 27,
+        "reference_top_set": [
+          1325
+        ],
+        "native_top_set": [
+          27
+        ],
+        "top_sets_overlap": false,
+        "reference_margin": 0.0625,
+        "native_margin": 0.09375,
+        "reference_native_contender_gap": 0.0625,
+        "native_reference_contender_gap": 0.09375
+      },
+      "cell": "VL-2B-6-reasoning-257"
+    },
+    {
+      "row": 24,
+      "native_top": 27,
+      "mlx_top": 1325,
+      "oracle_maximum_set": [
+        1325
+      ],
+      "oracle_margin": 0.15625,
+      "native_in_oracle_maximum_set": false,
+      "mlx_in_oracle_maximum_set": true,
+      "oracle_gap_to_native_top": 0.15625,
+      "oracle_gap_to_mlx_top": 0.0,
+      "previous_evidence": {
+        "row": 24,
+        "reference_top": 1325,
+        "native_top": 27,
+        "reference_top_set": [
+          1325
+        ],
+        "native_top_set": [
+          27
+        ],
+        "top_sets_overlap": false,
+        "reference_margin": 0.125,
+        "native_margin": 0.09375,
+        "reference_native_contender_gap": 0.125,
+        "native_reference_contender_gap": 0.09375
+      },
+      "cell": "VL-2B-6-reasoning-513"
+    },
+    {
+      "row": 24,
+      "native_top": 27,
+      "mlx_top": 1325,
+      "oracle_maximum_set": [
+        1325
+      ],
+      "oracle_margin": 0.15625,
+      "native_in_oracle_maximum_set": false,
+      "mlx_in_oracle_maximum_set": true,
+      "oracle_gap_to_native_top": 0.15625,
+      "oracle_gap_to_mlx_top": 0.0,
+      "previous_evidence": {
+        "row": 24,
+        "reference_top": 1325,
+        "native_top": 27,
+        "reference_top_set": [
+          1325
+        ],
+        "native_top_set": [
+          27
+        ],
+        "top_sets_overlap": false,
+        "reference_margin": 0.25,
+        "native_margin": 0.09375,
+        "reference_native_contender_gap": 0.25,
+        "native_reference_contender_gap": 0.09375
+      },
+      "cell": "VL-2B-6-reasoning-64"
+    },
+    {
+      "row": 12,
+      "native_top": 20,
+      "mlx_top": 296,
+      "oracle_maximum_set": [
+        20,
+        296
+      ],
+      "oracle_margin": 0.0,
+      "native_in_oracle_maximum_set": true,
+      "mlx_in_oracle_maximum_set": true,
+      "oracle_gap_to_native_top": 0.0,
+      "oracle_gap_to_mlx_top": 0.0,
+      "previous_evidence": {
+        "row": 12,
+        "reference_top": 296,
+        "native_top": 20,
+        "reference_top_set": [
+          296
+        ],
+        "native_top_set": [
+          20
+        ],
+        "top_sets_overlap": false,
+        "reference_margin": 0.0625,
+        "native_margin": 0.0625,
+        "reference_native_contender_gap": 0.0625,
+        "native_reference_contender_gap": 0.0625
+      },
+      "cell": "VL-2B-8-prose-64"
+    },
+    {
+      "row": 16,
+      "native_top": 20,
+      "mlx_top": 22,
+      "oracle_maximum_set": [
+        20,
+        22
+      ],
+      "oracle_margin": 0.0,
+      "native_in_oracle_maximum_set": true,
+      "mlx_in_oracle_maximum_set": true,
+      "oracle_gap_to_native_top": 0.0,
+      "oracle_gap_to_mlx_top": 0.0,
+      "previous_evidence": {
+        "row": 16,
+        "reference_top": 22,
+        "native_top": 20,
+        "reference_top_set": [
+          22
+        ],
+        "native_top_set": [
+          20
+        ],
+        "top_sets_overlap": false,
+        "reference_margin": 0.0625,
+        "native_margin": 0.0625,
+        "reference_native_contender_gap": 0.0625,
+        "native_reference_contender_gap": 0.0625
+      },
+      "cell": "VL-2B-8-reasoning-513"
+    }
+  ]
+}

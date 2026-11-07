@@ -49,7 +49,7 @@ pub fn post(srv: *Server, conn: *Conn, a: Allocator) void {
 
 fn sendErr(conn: *Conn, a: Allocator, cx: *Cx) void {
     // This route's client errors all name the type, including a body that is not an object.
-    if (cx.kind != .server) cx.kind = .request;
+    if (cx.kind != .server and cx.kind != .context_length) cx.kind = .request;
     const err = openai.errorBody(a, cx, null) catch return;
     routes.sendValue(conn, a, cx.status(), openai.wrapError(a, err) catch return);
 }
@@ -67,7 +67,7 @@ pub fn reply(srv: *Server, cx: *Cx, raw: Value) errors.Refused!Value {
             error.OutOfMemory => return error.OutOfMemory,
             error.Refused => {
                 const inner = cx.message;
-                return cx.fail(.request, "question {s}: {s}", .{ try questionWhere(cx, question, index), inner });
+                return cx.fail(if (cx.kind == .context_length) .context_length else .request, "question {s}: {s}", .{ try questionWhere(cx, question, index), inner });
             },
         };
         try prepared.append(cx.a, item);
@@ -333,7 +333,7 @@ fn thinkOpen(cx: *Cx, rendered: model_text.Rendered) errors.Refused!void {
 }
 
 fn fits(cx: *Cx, window: u32, n: usize) errors.Refused!void {
-    if (window > 0 and n >= window) return cx.fail(.request, "the prompt has {d} tokens, which does not fit the context length of {d} tokens", .{ n, window });
+    if (window > 0 and n >= window) return cx.fail(.context_length, "the prompt has {d} tokens, which does not fit the context length of {d} tokens", .{ n, window });
 }
 
 fn labelIds(srv: *Server, cx: *Cx, prompt: model_text.Rendered, prompt_ids: []const u32, labels: []const []const u8) errors.Refused![]u32 {

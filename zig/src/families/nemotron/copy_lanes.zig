@@ -1,4 +1,4 @@
-//! Copy lanes for a lone stream's GPU round: a chain copied after the context's matched suffix, priced by its rows' hits.
+//! Copy lanes for a lone stream's GPU round: a chain copied after the context's matched suffix, priced by row hits.
 const std = @import("std");
 
 pub const max_rows = 30;
@@ -63,7 +63,7 @@ pub const Copy = struct {
     head_ms: f64 = 0,
     all_ms: f64 = 0,
 
-    /// A round's copy rows (0: a head window), tail rows, rows, kept tokens, long match, modelled ms, its head part's ms.
+    /// A round's copy rows (0: head window), tail rows, rows, kept tokens, long match, modelled ms, its head part's ms.
     pub fn observe(c: *Copy, copy_rows: u32, tail_rows: u32, window_rows: u32, kept: u32, matched: bool, ms: f64, head_ms: f64) void {
         c.rounds += 1;
         c.since_match = if (matched) 0 else c.since_match + 1;

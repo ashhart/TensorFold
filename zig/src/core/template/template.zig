@@ -102,7 +102,7 @@ pub fn compile(gpa: Allocator, source: []const u8, diag: ?*Diag) Error!Compiled 
     return .{ .arena = arena, .tree = .{ .body = body, .frame = frame } };
 }
 
-/// Renders with Hugging Face's variables: messages, tools (none when absent), documents, add_generation_prompt, then `context`.
+/// Renders with HF's variables: messages, tools (none when absent), documents, add_generation_prompt, then `context`.
 pub fn render(gpa: Allocator, t: *const Compiled, messages: std.json.Value, tools: std.json.Value, context: std.json.Value, add_generation_prompt: bool, diag: ?*Diag) Error![]u8 {
     const result = try renderProvenance(gpa, t, messages, tools, context, add_generation_prompt, diag);
     gpa.free(result.spans);

@@ -82,7 +82,7 @@ pub fn openedWith(e: *Engine, s: *Stream, reach: Reach) !void {
 }
 
 fn openedCommitted(e: *Engine, s: *Stream, reach: Reach, hook: ?be.Committed) !void {
-    if (s.embedding != null) {
+    if (s.promptOnly()) {
         if (s.isCancelled()) {
             e.backend.release(s);
             return error.Cancelled;

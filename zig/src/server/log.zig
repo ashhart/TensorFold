@@ -171,7 +171,7 @@ pub fn refused(buf: []u8, id: []const u8, message: []const u8) []const u8 {
     return w.buffered();
 }
 
-/// ``ended <id> reason=...``: a request that ends without its reply, because its client left (``why`` null) or it failed.
+/// ``ended <id> reason=...``: a request ending without its reply, because its client left (``why`` null) or it failed.
 pub fn ended(buf: []u8, id: []const u8, why: ?[]const u8, prompt: usize, tokens: usize, after: f64) []const u8 {
     var w: std.Io.Writer = .fixed(buf);
     w.print("ended {s} reason=", .{id}) catch {};

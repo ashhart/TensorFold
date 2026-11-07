@@ -367,7 +367,7 @@ pub const Drafter = struct {
         try x.chain(items[0..holds.len], steps);
         var picks: [depth * max_items]Pick = undefined;
         try x.s.synchronize();
-        try x.d.check(x.d.api.cuMemcpyDtoH_v2(&picks, x.x.picks, steps * max_items * @sizeOf(Pick)), "cuMemcpyDtoH");
+        try cuda.memory.download(x.d, x.x.picks, std.mem.asBytes(&picks)[0 .. steps * max_items * @sizeOf(Pick)]);
         for (items[0..holds.len], 0..) |it, r| {
             for (it.lane.held[0..it.depth], 0..) |*tok, step| {
                 const p = picks[step * max_items + r];

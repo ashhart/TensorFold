@@ -106,5 +106,17 @@ test "the region is DONTFORK and NOHUGEPAGE before registration" {
     // An interior page stays inside the VMA even when a neighbouring mapping merges with it.
     const flags = try vmFlags(@intFromPtr(m.ptr) + 4096, buf);
     try std.testing.expect(std.mem.indexOf(u8, flags, " dc") != null);
-    try std.testing.expect(std.mem.indexOf(u8, flags, " nh") != null);
+    // Without THP there is no promotion to keep off: the flag never appears.
+    if (rv.thpEnabled()) {
+        try std.testing.expect(std.mem.indexOf(u8, flags, " nh") != null);
+    } else {
+        try std.testing.expect(std.mem.indexOf(u8, flags, " nh") == null);
+    }
+}
+
+test "the THP enabled file names the mode in force, and only never means no hugepages" {
+    try std.testing.expect(rv.thpEnabledFrom("[always] madvise never"));
+    try std.testing.expect(rv.thpEnabledFrom("always [madvise] never"));
+    try std.testing.expect(!rv.thpEnabledFrom("madvise [never]"));
+    try std.testing.expect(rv.thpEnabledFrom("always madvise never")); // malformed: the advice is attempted as before
 }

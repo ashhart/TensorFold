@@ -28,6 +28,7 @@ pub const Fake = struct {
     at: u32 = 0,
     sum: u64 = 0,
     restored_ok: bool = true, // every restore so far equalled the image a fresh pass gives
+    refuse: bool = false, // every restore of a kept state fails, as a backend's copy refusal
     live: usize = 0,
     blanks: usize = 0,
     slots: ?usize = null, // a family whose states each take one of so many slots (Nemotron CUDA's): past them, none
@@ -115,6 +116,7 @@ pub const Fake = struct {
     }
     fn restoreFn(ptr: *anyopaque, _: ?*anyopaque, saved: pc.Saved) anyerror!void {
         const f = of(ptr);
+        if (f.refuse) return error.CopyFailed;
         const k: *Kept = @ptrCast(@alignCast(saved));
         const want = try f.gpa.alloc(u8, imageBytes(k.at));
         defer f.gpa.free(want);

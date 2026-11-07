@@ -1,0 +1,401 @@
+{
+ "cells": [
+  {
+   "platform": "M4 Pro, macOS 26.5.1",
+   "checkpoint": "1.7B-4",
+   "native_binary_sha256": "5c8a04d4af599879797f4f5bed8e00ab7d9d70732e698bd2a1ec2a01ec762e09",
+   "original_client_exit": 0,
+   "groups": 32,
+   "passed_full_token_equality": 32,
+   "failed_full_token_equality": 0,
+   "checks": {
+    "_trimmed_list": {
+     "count": 32,
+     "sha256": "dd666bb19c42a2eedab8470043619f903e68261d68ad2d079e5d86c000a1caba",
+     "first": [
+      {
+       "request": {
+        "chat_template_kwargs": {
+         "enable_thinking": false
+        },
+        "max_tokens": 400,
+        "messages": [
+         {
+          "content": "Describe a cat as a JSON object with a few fields.",
+          "role": "user"
+         }
+        ],
+        "model": "lfm3-check",
+        "response_format": {
+         "type": "json_object"
+        },
+        "temperature": 0
+       },
+       "count": 3,
+       "hashes": [
+        "97fc568e1c13add8c4f1c58c38ab18a87039408de0d789a92614693a8f5c73d0",
+        "97fc568e1c13add8c4f1c58c38ab18a87039408de0d789a92614693a8f5c73d0",
+        "97fc568e1c13add8c4f1c58c38ab18a87039408de0d789a92614693a8f5c73d0"
+       ],
+       "verified": true
+      },
+      {
+       "request": {
+        "chat_template_kwargs": {
+         "enable_thinking": true
+        },
+        "max_tokens": 1200,
+        "messages": [
+         {
+          "content": "Describe a cat as a JSON object with a few fields.",
+          "role": "user"
+         }
+        ],
+        "model": "lfm3-check",
+        "response_format": {
+         "type": "json_object"
+        },
+        "temperature": 0,
+        "thinking_budget": 256
+       },
+       "count": 3,
+       "hashes": [
+        "8f3cef2f2dd40372a9f5a5a45465d005711e83e73de634020964ea1164f102fc",
+        "8f3cef2f2dd40372a9f5a5a45465d005711e83e73de634020964ea1164f102fc",
+        "8f3cef2f2dd40372a9f5a5a45465d005711e83e73de634020964ea1164f102fc"
+       ],
+       "verified": true
+      }
+     ],
+     "last": [
+      {
+       "request": {
+        "chat_template_kwargs": {
+         "enable_thinking": true
+        },
+        "max_tokens": 1200,
+        "messages": [
+         {
+          "content": "Write two sentences about the sea.",
+          "role": "user"
+         }
+        ],
+        "model": "lfm3-check",
+        "seed": 1234,
+        "temperature": 0.8,
+        "thinking_budget": 256,
+        "top_p": 0.95
+       },
+       "count": 3,
+       "hashes": [
+        "5eaa966d72c48c19e4f5f1d99bbf48d937692e3311587041e7f6d8d604e61494",
+        "5eaa966d72c48c19e4f5f1d99bbf48d937692e3311587041e7f6d8d604e61494",
+        "5eaa966d72c48c19e4f5f1d99bbf48d937692e3311587041e7f6d8d604e61494"
+       ],
+       "verified": true
+      }
+     ]
+    }
+   }
+  },
+  {
+   "platform": "M4 Pro, macOS 26.5.1",
+   "checkpoint": "VL-2B-4",
+   "native_binary_sha256": "5c8a04d4af599879797f4f5bed8e00ab7d9d70732e698bd2a1ec2a01ec762e09",
+   "original_client_exit": 0,
+   "groups": 32,
+   "passed_full_token_equality": 32,
+   "failed_full_token_equality": 0,
+   "checks": {
+    "_trimmed_list": {
+     "count": 32,
+     "sha256": "a20f779d622b24911707b37eeac4e86f9e7101a81fc01f493892f9c26d42124d",
+     "first": [
+      {
+       "request": {
+        "chat_template_kwargs": {
+         "enable_thinking": false
+        },
+        "max_tokens": 400,
+        "messages": [
+         {
+          "content": "Describe a cat as a JSON object with a few fields.",
+          "role": "user"
+         }
+        ],
+        "model": "lfm3-check",
+        "response_format": {
+         "type": "json_object"
+        },
+        "temperature": 0
+       },
+       "count": 3,
+       "hashes": [
+        "b5c5f176466925a1dc9de8fff4578df4eb4e0efcdac74df82d5df7189f9de5cc",
+        "b5c5f176466925a1dc9de8fff4578df4eb4e0efcdac74df82d5df7189f9de5cc",
+        "b5c5f176466925a1dc9de8fff4578df4eb4e0efcdac74df82d5df7189f9de5cc"
+       ],
+       "verified": true
+      },
+      {
+       "request": {
+        "chat_template_kwargs": {
+         "enable_thinking": true
+        },
+        "max_tokens": 1200,
+        "messages": [
+         {
+          "content": "Describe a cat as a JSON object with a few fields.",
+          "role": "user"
+         }
+        ],
+        "model": "lfm3-check",
+        "response_format": {
+         "type": "json_object"
+        },
+        "temperature": 0,
+        "thinking_budget": 256
+       },
+       "count": 3,
+       "hashes": [
+        "c41981cafaa3da59c92b9e34ce1fd12f59afc0a0fb7229b849c05caf8288a35e",
+        "c41981cafaa3da59c92b9e34ce1fd12f59afc0a0fb7229b849c05caf8288a35e",
+        "c41981cafaa3da59c92b9e34ce1fd12f59afc0a0fb7229b849c05caf8288a35e"
+       ],
+       "verified": true
+      }
+     ],
+     "last": [
+      {
+       "request": {
+        "chat_template_kwargs": {
+         "enable_thinking": true
+        },
+        "max_tokens": 1200,
+        "messages": [
+         {
+          "content": "Write two sentences about the sea.",
+          "role": "user"
+         }
+        ],
+        "model": "lfm3-check",
+        "seed": 1234,
+        "temperature": 0.8,
+        "thinking_budget": 256,
+        "top_p": 0.95
+       },
+       "count": 3,
+       "hashes": [
+        "91a1e14a5b9fc3e27a8b4821548c7203af467f0ca1fdea0b4ba3156a2dd27a49",
+        "91a1e14a5b9fc3e27a8b4821548c7203af467f0ca1fdea0b4ba3156a2dd27a49",
+        "91a1e14a5b9fc3e27a8b4821548c7203af467f0ca1fdea0b4ba3156a2dd27a49"
+       ],
+       "verified": true
+      }
+     ]
+    }
+   }
+  },
+  {
+   "platform": "M5 Ultra, macOS 27.0",
+   "checkpoint": "1.7B-4",
+   "native_binary_sha256": "251079309919aa9b21ca8cc6a89c58fc3fc9a9baf800fa5ce6a6af313a5b5f65",
+   "original_client_exit": 0,
+   "groups": 32,
+   "passed_full_token_equality": 32,
+   "failed_full_token_equality": 0,
+   "checks": {
+    "_trimmed_list": {
+     "count": 32,
+     "sha256": "dd666bb19c42a2eedab8470043619f903e68261d68ad2d079e5d86c000a1caba",
+     "first": [
+      {
+       "request": {
+        "chat_template_kwargs": {
+         "enable_thinking": false
+        },
+        "max_tokens": 400,
+        "messages": [
+         {
+          "content": "Describe a cat as a JSON object with a few fields.",
+          "role": "user"
+         }
+        ],
+        "model": "lfm3-check",
+        "response_format": {
+         "type": "json_object"
+        },
+        "temperature": 0
+       },
+       "count": 3,
+       "hashes": [
+        "97fc568e1c13add8c4f1c58c38ab18a87039408de0d789a92614693a8f5c73d0",
+        "97fc568e1c13add8c4f1c58c38ab18a87039408de0d789a92614693a8f5c73d0",
+        "97fc568e1c13add8c4f1c58c38ab18a87039408de0d789a92614693a8f5c73d0"
+       ],
+       "verified": true
+      },
+      {
+       "request": {
+        "chat_template_kwargs": {
+         "enable_thinking": true
+        },
+        "max_tokens": 1200,
+        "messages": [
+         {
+          "content": "Describe a cat as a JSON object with a few fields.",
+          "role": "user"
+         }
+        ],
+        "model": "lfm3-check",
+        "response_format": {
+         "type": "json_object"
+        },
+        "temperature": 0,
+        "thinking_budget": 256
+       },
+       "count": 3,
+       "hashes": [
+        "8f3cef2f2dd40372a9f5a5a45465d005711e83e73de634020964ea1164f102fc",
+        "8f3cef2f2dd40372a9f5a5a45465d005711e83e73de634020964ea1164f102fc",
+        "8f3cef2f2dd40372a9f5a5a45465d005711e83e73de634020964ea1164f102fc"
+       ],
+       "verified": true
+      }
+     ],
+     "last": [
+      {
+       "request": {
+        "chat_template_kwargs": {
+         "enable_thinking": true
+        },
+        "max_tokens": 1200,
+        "messages": [
+         {
+          "content": "Write two sentences about the sea.",
+          "role": "user"
+         }
+        ],
+        "model": "lfm3-check",
+        "seed": 1234,
+        "temperature": 0.8,
+        "thinking_budget": 256,
+        "top_p": 0.95
+       },
+       "count": 3,
+       "hashes": [
+        "5eaa966d72c48c19e4f5f1d99bbf48d937692e3311587041e7f6d8d604e61494",
+        "5eaa966d72c48c19e4f5f1d99bbf48d937692e3311587041e7f6d8d604e61494",
+        "5eaa966d72c48c19e4f5f1d99bbf48d937692e3311587041e7f6d8d604e61494"
+       ],
+       "verified": true
+      }
+     ]
+    }
+   }
+  },
+  {
+   "platform": "M5 Ultra, macOS 27.0",
+   "checkpoint": "VL-2B-4",
+   "native_binary_sha256": "251079309919aa9b21ca8cc6a89c58fc3fc9a9baf800fa5ce6a6af313a5b5f65",
+   "original_client_exit": 0,
+   "groups": 32,
+   "passed_full_token_equality": 32,
+   "failed_full_token_equality": 0,
+   "checks": {
+    "_trimmed_list": {
+     "count": 32,
+     "sha256": "a20f779d622b24911707b37eeac4e86f9e7101a81fc01f493892f9c26d42124d",
+     "first": [
+      {
+       "request": {
+        "chat_template_kwargs": {
+         "enable_thinking": false
+        },
+        "max_tokens": 400,
+        "messages": [
+         {
+          "content": "Describe a cat as a JSON object with a few fields.",
+          "role": "user"
+         }
+        ],
+        "model": "lfm3-check",
+        "response_format": {
+         "type": "json_object"
+        },
+        "temperature": 0
+       },
+       "count": 3,
+       "hashes": [
+        "b5c5f176466925a1dc9de8fff4578df4eb4e0efcdac74df82d5df7189f9de5cc",
+        "b5c5f176466925a1dc9de8fff4578df4eb4e0efcdac74df82d5df7189f9de5cc",
+        "b5c5f176466925a1dc9de8fff4578df4eb4e0efcdac74df82d5df7189f9de5cc"
+       ],
+       "verified": true
+      },
+      {
+       "request": {
+        "chat_template_kwargs": {
+         "enable_thinking": true
+        },
+        "max_tokens": 1200,
+        "messages": [
+         {
+          "content": "Describe a cat as a JSON object with a few fields.",
+          "role": "user"
+         }
+        ],
+        "model": "lfm3-check",
+        "response_format": {
+         "type": "json_object"
+        },
+        "temperature": 0,
+        "thinking_budget": 256
+       },
+       "count": 3,
+       "hashes": [
+        "c41981cafaa3da59c92b9e34ce1fd12f59afc0a0fb7229b849c05caf8288a35e",
+        "c41981cafaa3da59c92b9e34ce1fd12f59afc0a0fb7229b849c05caf8288a35e",
+        "c41981cafaa3da59c92b9e34ce1fd12f59afc0a0fb7229b849c05caf8288a35e"
+       ],
+       "verified": true
+      }
+     ],
+     "last": [
+      {
+       "request": {
+        "chat_template_kwargs": {
+         "enable_thinking": true
+        },
+        "max_tokens": 1200,
+        "messages": [
+         {
+          "content": "Write two sentences about the sea.",
+          "role": "user"
+         }
+        ],
+        "model": "lfm3-check",
+        "seed": 1234,
+        "temperature": 0.8,
+        "thinking_budget": 256,
+        "top_p": 0.95
+       },
+       "count": 3,
+       "hashes": [
+        "91a1e14a5b9fc3e27a8b4821548c7203af467f0ca1fdea0b4ba3156a2dd27a49",
+        "91a1e14a5b9fc3e27a8b4821548c7203af467f0ca1fdea0b4ba3156a2dd27a49",
+        "91a1e14a5b9fc3e27a8b4821548c7203af467f0ca1fdea0b4ba3156a2dd27a49"
+       ],
+       "verified": true
+      }
+     ]
+    }
+   }
+  }
+ ],
+ "_trim": {
+  "note": "Raw capture replaced by counts, first/last items and SHA-256 of the canonical JSON of each trimmed list or string.",
+  "original_sha256": "3c6ebbe8b8033d9e8cee60b7178005a36df8a2e2f59672cb2059016b60a6c6a7",
+  "original_bytes": 141286
+ }
+}

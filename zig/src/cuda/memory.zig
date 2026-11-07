@@ -119,6 +119,12 @@ pub fn currentHook() ?Hook {
     return alloc_hook;
 }
 
+/// Reads an unowned device span using the same integrated-device staging as DeviceBuffer.download.
+pub fn download(d: *const Driver, src: abi.DevicePtr, out: []u8) Error!void {
+    const view: DeviceBuffer = .{ .d = d, .ptr = src, .len = out.len, .borrowed = true };
+    try view.download(0, out);
+}
+
 pub const DeviceBuffer = struct {
     d: *const Driver,
     ptr: abi.DevicePtr,
@@ -190,10 +196,23 @@ pub const DeviceBuffer = struct {
         try @import("copy_source.zig").synchronousCopy(self.d, dst, bytes, std.heap.page_allocator);
     }
 
+    /// Returns once the bytes have landed; an integrated GPU stages through this thread's pinned bounce.
     pub fn download(self: DeviceBuffer, offset: usize, out: []u8) Error!void {
         const src = try self.span(offset, out.len);
         if (out.len == 0) return;
-        try self.d.check(self.d.api.cuMemcpyDtoH_v2(out.ptr, src, out.len), "cuMemcpyDtoH");
+        const stage = @import("download_stage.zig");
+        if (!try stage.integrated(self.d)) {
+            try self.d.check(self.d.api.cuMemcpyDtoH_v2(out.ptr, src, out.len), "cuMemcpyDtoH");
+            return;
+        }
+        var done: usize = 0;
+        while (done < out.len) {
+            const n = @min(out.len - done, stage.most);
+            const bounce = try stage.take(self.d, n);
+            try self.d.check(self.d.api.cuMemcpyDtoH_v2(bounce.ptr, src + done, n), "cuMemcpyDtoH");
+            @memcpy(out[done..][0..n], bounce[0..n]);
+            done += n;
+        }
     }
 
     /// Owns a pinned source copy until completion. Captured uploads must use copy_source.Stage or Buffer.
@@ -542,6 +561,11 @@ test "taking an interval preserves transient peaks before resetting them" {
 
 pub fn releaseRetainedHost(bytes: usize) void {
     freed(&host_bytes, bytes);
+}
+
+/// Counts pinned bytes the driver allocated directly (a download's bounce), so `usage` and the limit see them.
+pub fn retainHost(bytes: usize) void {
+    held(&host_bytes, bytes);
 }
 
 test "Failure boundaries: a buffer keeps its allocation hook when the installed hook changes" {

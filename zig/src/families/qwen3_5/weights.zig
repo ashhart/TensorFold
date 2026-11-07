@@ -1,4 +1,4 @@
-//! Views into one shared checkpoint buffer: a tied head aliases the packed input embedding; an untied head is its own projection.
+//! Views into one checkpoint buffer: a tied head aliases the packed embedding; an untied one is its own projection.
 const std = @import("std");
 const ck = @import("../../core/checkpoint_metal.zig");
 const c = @import("config.zig");

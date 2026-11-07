@@ -1,4 +1,4 @@
-//! A rank's tensors onto its GPU: local files mapped zero-copy, missing ranges pulled from a peer, sizes and SHA-256 checked.
+//! A rank's tensors onto its GPU: files mapped zero-copy, missing ranges pulled from a peer, sizes and SHA-256 checked.
 const std = @import("std");
 const checkpoint = @import("checkpoint.zig");
 const plan_mod = @import("plan.zig");
@@ -52,7 +52,7 @@ pub const Source = struct {
     pull: *const fn (ptr: *anyopaque, file: u32, offset: u64, out: []u8) anyerror![32]u8,
 };
 
-/// Where mapped bytes go: Metal wraps each page-aligned view in a no-copy buffer; only `range`'s bytes inside it are valid.
+/// Where mapped bytes go: Metal wraps each page-aligned view in a no-copy buffer; only `range`'s bytes in it are valid.
 pub const Sink = struct {
     ptr: *anyopaque,
     run: *const fn (ptr: *anyopaque, range: Range, view_offset: u64, view: []align(page) const u8) anyerror!void,

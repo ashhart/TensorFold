@@ -84,6 +84,11 @@ fn update(g: *Graph, ids: []const u32, states: []const slide_graph.State, at: ?i
 pub fn snapshot(g: *Graph, a: Allocator) ![]Fact {
     g.mutex.lockUncancelable(g.io);
     defer g.mutex.unlock(g.io);
+    return copyLocked(g, a);
+}
+
+/// A copied fact listing while the caller holds the graph lock, shared with its atomic audit view.
+pub fn copyLocked(g: *Graph, a: Allocator) ![]Fact {
     const out = try a.alloc(Fact, g.facts.items.len);
     for (g.facts.items, out) |f, *o| {
         o.* = f;
@@ -91,6 +96,8 @@ pub fn snapshot(g: *Graph, a: Allocator) ![]Fact {
         o.message = try a.dupe(u8, f.message);
         o.neurons = try a.dupe(api.Neuron, f.neurons);
         o.answers = try answers.dupe(a, f.answers);
+        o.recall = try answers.dupe(a, f.recall);
+        if (f.evaluation) |v| o.evaluation = try @import("slide_metrics_store.zig").copy(a, v);
         const qs = try a.alloc([]const u8, f.questions.len);
         for (f.questions, qs) |q, *c| c.* = try a.dupe(u8, q);
         o.questions = qs;

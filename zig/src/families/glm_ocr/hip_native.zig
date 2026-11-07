@@ -16,6 +16,12 @@ pub const slide_refusal = "--slide: GLM-OCR on HIP has no Sliding Weights learne
 pub const confidence_refusal = "--mtp-confidence: GLM-OCR uses shared copy drafts; its MTP head is not qualified";
 pub const mtp_refusal = "--mtp-drafts: GLM-OCR's MTP head is not qualified; shared copy drafts remain available";
 pub const tp_refusal = "--tp: GLM-OCR currently runs on one HIP rank";
+/// GLM-OCR's refusals before any load: more than one rank, or MTP drafts.
+pub fn refusal(o: api.Open) ?[]const u8 {
+    if (o.tp != 1) return tp_refusal;
+    if (o.mtp_drafts) |n| if (n > 0) return mtp_refusal;
+    return null;
+}
 /// GLM-OCR writes no reasoning block: replies are all answer content; the prompt still follows enable_thinking.
 pub const reasoning = false;
 
@@ -33,9 +39,8 @@ pub const Loaded = struct {
     deinit: *const fn (*anyopaque) void,
     streams: usize,
     startup: []const u8,
-    vision: ?api.Vision,
-    cache: ?*api.prompt_cache.Store,
-    cache_capacity: ?api.PromptCacheCapacity,
+    /// Its image tower, prompt cache and that cache's capacity, for the host.
+    offer: serve.Offer,
 };
 fn refuse(a: std.mem.Allocator, problem: *[]const u8, comptime fmt: []const u8, args: anytype) error{Refused} {
     problem.* = std.fmt.allocPrint(a, fmt, args) catch fmt;
@@ -71,7 +76,11 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dev: hip.D
     const startup = try std.fmt.allocPrint(gpa, "GLM-OCR BF16 on HIP {s}, device {d}; {d} shared lanes at context {d}; exact verification through 32 rows; full-shape prompt cache {d} bytes in at most {d} slots", .{ hip.kernels.arch, dev.index, e.streams, e.window, e.cache_bytes, e.cache_slots });
     own.* = .{ .gpa = gpa, .e = e, .h = h, .startup = startup };
     const vision: ?api.Vision = if (o.vision) |v| .{ .ctx = own, .prepare = prepare, .image_token = c.image_token, .markers = &markers, .part_type = "image", .image_tokens = if (v.image_tokens_set) v.image_tokens else 6144, .max_images = v.max_images, .explain = @import("sys").optional_libraries.explain } else null;
-    return .{ .backend = h.backend(), .facts = h.facts(), .ctx = own, .deinit = release, .streams = e.streams, .startup = startup, .vision = vision, .cache = if (e.cache_bytes > 0) &h.store else null, .cache_capacity = .{ .budget_bytes = e.cache_bytes, .minimum_state_bytes = @import("hip_snapshot.zig").Snapshot.bytes(1) } };
+    return .{ .backend = h.backend(), .facts = h.facts(), .ctx = own, .deinit = release, .streams = e.streams, .startup = startup, .offer = .{
+        .vision = vision,
+        .cache = if (e.cache_bytes > 0) &h.store else null,
+        .cache_capacity = .{ .budget_bytes = e.cache_bytes, .minimum_state_bytes = @import("hip_snapshot.zig").Snapshot.bytes(1) },
+    } };
 }
 pub fn follow(a: std.mem.Allocator, _: std.mem.Allocator, _: std.Io, _: hip.Device, _: []const u8, _: serve.Options, problem: *[]const u8) !void {
     return refuse(a, problem, "GLM-OCR currently runs on one HIP rank", .{});

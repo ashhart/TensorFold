@@ -48,7 +48,7 @@ const Rig = struct {
     fn get(r: *Rig, ptr: u64, n: usize) ![]u8 {
         try r.o.s.synchronize();
         const out = try r.a.alloc(u8, n);
-        try r.gpu.d.check(r.gpu.d.api.cuMemcpyDtoH_v2(out.ptr, ptr, n), "cuMemcpyDtoH");
+        try cuda.memory.download(r.gpu.d, ptr, std.mem.sliceAsBytes(out)[0..n]);
         return out;
     }
 

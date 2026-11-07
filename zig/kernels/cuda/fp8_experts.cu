@@ -228,7 +228,11 @@ __global__ void __launch_bounds__(PWARPS * 32, PMIN)
 #pragma unroll
           for (int j = 0; j < NTW; ++j) {
             const uint32_t word = comp(wv, j);
+#if TF_FP_NATIVE
+            const uint32_t b0 = tf_common::e4m3x2(word), b1 = tf_common::e4m3x2(word >> 16);
+#else
             const uint32_t b0 = fp8pair(word), b1 = fp8pair(word >> 16);
+#endif
 #pragma unroll
             for (int r = 0; r < RT; ++r) mma(part[m][r][j], xa[r].x, xb[r].x, xa[r].y, xb[r].y, b0, b1);
           }

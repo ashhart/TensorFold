@@ -103,12 +103,26 @@ pub fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         server_tests.addImport("qwen27_masks", q27.masks);
     }
     const server_json = server_build.addTo(b, server_tests, target, .Debug);
+    server_build.testImports(b, server_tests, target, .Debug);
     test_step.?.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests })).step);
+    const kimi_text = b.addExecutable(.{ .name = "tf-k3-text-golden", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/src/server/kimi_golden_main.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "json", .module = server_json }, .{ .name = "tokenizer", .module = tokenizer } },
+    }) });
+    b.step("tf-k3-text-golden", "Kimi release prompt token ids against an explicitly supplied local tokenizer").dependOn(&b.addInstallArtifact(kimi_text, .{}).step);
+    const kimi_host = b.step("test-kimi-serving-host", "Kimi native text, HTTP and resident budget refusals on the host");
+    for ([_]*std.Build.Module{ server_tests, engines }) |module|
+        kimi_host.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = module, .filters = &.{"Kimi"} })).step);
+
     test_step.?.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_json })).step);
     @import("cortheon_fuzz.zig").add(b, target, api, tokenizer, template, core);
     // the parse half's tests, as their own test binary (zig/src/server/tool_parse_test.zig)
     const tool_parse_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/server/tool_parse_test.zig"), .target = target, .optimize = .Debug, .link_libc = true, .imports = &.{ .{ .name = "engine_api", .module = api }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "template", .module = template } } }) });
     _ = server_build.addTo(b, tool_parse_tests.root_module, target, .Debug);
+    server_build.testImports(b, tool_parse_tests.root_module, target, .Debug);
     test_step.?.dependOn(&b.addRunArtifact(tool_parse_tests).step);
     // the chat-template engine's tests (zig/src/core/template/tests.zig), which no other test binary reaches
     test_step.?.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/core/template/tests.zig"), .target = target, .optimize = .Debug, .link_libc = true }) })).step);
@@ -194,21 +208,13 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     // Kimi K3: the family module, its metallib, and its GPU check and benchmark programs.
     const kimi_lib = kimiMetallib(b, &mlx_flags);
     b.getInstallStep().dependOn(&b.addInstallFile(kimi_lib, "lib/kimi.metallib").step);
-    const kimi = b.createModule(.{
-        .root_source_file = b.path("zig/src/families/kimi_k3/kimi_k3.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "safetensors", .module = b.createModule(.{
-            .root_source_file = b.path("zig/src/families/kimi_k3/core_safetensors.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{.{ .name = "core", .module = mods.engine }},
-        }) } },
-    });
+    const kimi = kimiModule(b, target, optimize, metal, mods.engine, mods.lanes);
     const kimi_bytes = embedded(b, kimi_lib, "kimi.metallib");
+    engines.addImport("kimi_k3", kimi);
+    engines.addImport("kimi_metallib", kimi_bytes);
     const kimi_programs = [_]struct { name: []const u8, path: []const u8, about: []const u8 }{
         .{ .name = "tf-k3-check", .path = "zig/tests/kimi_k3/check.zig", .about = "Kimi K3 kernels and layers on synthetic weights at real shapes" },
+        .{ .name = "tf-k3-serve-check", .path = "zig/tests/kimi_k3/serve.zig", .about = "Kimi native lane adapter on a cut-down synthetic Metal graph" },
         .{ .name = "tf-k3-bench", .path = "zig/tests/kimi_k3/bench.zig", .about = "Kimi K3 kernel bandwidth" },
     };
     for (kimi_programs) |p| {
@@ -217,7 +223,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
             .target = target,
             .optimize = optimize,
             .link_libc = true,
-            .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kimi_k3", .module = kimi }, .{ .name = "kimi_metallib", .module = kimi_bytes } },
+            .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kimi_k3", .module = kimi }, .{ .name = "kimi_metallib", .module = kimi_bytes }, .{ .name = "lanes", .module = mods.lanes } },
         });
         const exe = b.addExecutable(.{ .name = p.name, .root_module = mod });
         b.installArtifact(exe);
@@ -244,7 +250,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .imports = &.{ .{ .name = "lanes", .module = lanes }, .{ .name = "fabric", .module = fabric }, .{ .name = "core", .module = mods.engine } },
+        .imports = &.{ .{ .name = "lanes", .module = lanes }, .{ .name = "fabric", .module = fabric }, .{ .name = "core", .module = mods.engine }, .{ .name = "canon", .module = @import("cuda_engines.zig").canonModule(b, target, optimize) } },
     });
     // The engine: kernel sources compiled at run time (MLX's options), the families, the lane core.
     const sources = mods.sources;
@@ -295,6 +301,13 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .{ .name = "tf-qwen35-check", .path = "zig/tests/qwen35_check.zig", .about = "Qwen3.5-2B checkpoint and native operations" },
         .{ .name = "tf-qwen35-forward", .path = "zig/tests/qwen35_forward.zig", .about = "Qwen3.5-2B native teacher-forced logits" },
         .{ .name = "tf-qwen35-exact", .path = "zig/tests/qwen35_exact.zig", .about = "Qwen3.5-2B forward and committed-state exactness" },
+        .{ .name = "tf-lfm3-forward", .path = "zig/tests/lfm3_forward.zig", .about = "LFM3 native teacher-forced BF16 logits" },
+        .{ .name = "tf-lfm3-exact", .path = "zig/tests/lfm3_exact.zig", .about = "LFM3 prompt, window, snapshot and concurrent cache equality" },
+        .{ .name = "tf-lfm3-profile", .path = "zig/tests/lfm3_profile.zig", .about = "LFM3 calibrated GPU class costs with final-logit byte identity" },
+        .{ .name = "tf-lfm3-dual-project", .path = "zig/tests/lfm3_dual_project.zig", .about = "Actual checkpoint paired projection byte comparison" },
+        .{ .name = "tf-lfm3-draw-tune", .path = "zig/tests/lfm3_draw_tune.zig", .about = "Diagnostic exact CPU greedy reduction timing" },
+        .{ .name = "tf-lfm3-row-tune", .path = "zig/tests/lfm3_row_tune.zig", .about = "Diagnostic byte-preserving single-row projection launch sweep" },
+        .{ .name = "tf-lfm3-project", .path = "zig/tests/lfm3_project.zig", .about = "LFM3 production projection outputs on saved BF16 input rows" },
         .{ .name = "tf-lfm2-forward", .path = "zig/tests/lfm2_forward.zig", .about = "LFM2-MoE native teacher-forced logits" },
         .{ .name = "tf-lfm2-bench", .path = "zig/tests/lfm2_bench.zig", .about = "LFM2-MoE prompt-chunk and one-row decode timing" },
         .{ .name = "tf-lfm2-exact", .path = "zig/tests/lfm2_exact.zig", .about = "LFM2-MoE prompt chunks, windows and committed-state exactness" },
@@ -457,6 +470,8 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     const cluster_tests = b.step("test-cluster", "Cluster tests: fake nodes and fabric, K3 planning (TF_K3_DIR), Metal sink");
     cluster_tests.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cluster })).step);
     cluster_tests.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cluster_metal })).step);
+    // canon.zig is its own module, so a cluster-rooted test does not run these.
+    cluster_tests.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = @import("cuda_engines.zig").canonModule(b, target, optimize) })).step);
 
     // These module tests include Metal device checks when the macOS host has a GPU.
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = metal })).step);
@@ -476,8 +491,13 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     const lfm2_dspark = b.addRunArtifact(b.addTest(.{ .root_module = engine, .filters = &.{"lfm2 dspark:"} }));
     b.step("test-lfm2-dspark", "LFM2's taps for a drafter: the tap kernel on this Mac's GPU").dependOn(&lfm2_dspark.step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = lanes })).step);
-    // the fake fabric maps its windows with mmap: the Macs' RDMA, not Windows
-    if (target.result.os.tag != .windows) test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = fabric })).step);
+    // the fake fabric maps windows with mmap (the Macs' RDMA, not Windows); verbs is its own module, with its own root
+    if (target.result.os.tag != .windows) {
+        test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = fabric })).step);
+        const verbs_tests = b.addRunArtifact(b.addTest(.{ .root_module = @import("tp.zig").verbsModule(b, target, optimize) }));
+        b.step("test-verbs", "verbs.zig and verbs_abi.zig, outside the fabric module").dependOn(&verbs_tests.step);
+        test_step.dependOn(&verbs_tests.step);
+    }
     const dashboard = b.createModule(.{ .root_source_file = b.path("zig/src/server/dashboard_test.zig"), .target = target, .optimize = optimize, .link_libc = true });
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = dashboard })).step);
     const kimi_test = b.step("test-k3", "Kimi K3's host-side unit tests (no GPU work)");
@@ -501,6 +521,7 @@ pub fn metalEngineModules(b: *std.Build, target: std.Build.ResolvedTarget, optim
     metal.linkSystemLibrary("objc", .{});
     const lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = target, .optimize = optimize, .link_libc = true });
     const fabric = b.createModule(.{ .root_source_file = b.path("zig/src/fabric/fabric.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    fabric.addImport("verbs", @import("tp.zig").verbsModule(b, target, optimize));
     const sources = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/sources.zig") });
     // Living Weights' family-neutral learner, which Nemotron's lessons and the server's view of them share
     const living = b.createModule(.{ .root_source_file = b.path("zig/src/living/living.zig"), .target = target, .optimize = optimize, .link_libc = true });
@@ -527,5 +548,24 @@ pub fn distMetalServer(b: *std.Build, target: std.Build.ResolvedTarget, draft_id
     const engines = b.createModule(.{ .root_source_file = b.path("zig/src/native/metal.zig"), .target = target, .optimize = .fast, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = m.metal }, .{ .name = "engine_api", .module = api }, .{ .name = "tensorfold", .module = m.engine } } });
     engines.addImport("living", m.living);
     @import("drama3_metal.zig").addNative(b, target, .fast, m.metal, engines, mlxMetalStd(b));
+    engines.addImport("kimi_k3", kimiModule(b, target, .fast, m.metal, m.engine, m.lanes));
+    engines.addImport("kimi_metallib", embedded(b, kimiMetallib(b, &flags), "kimi.metallib"));
     return nativeServer(b, target, .fast, m.metal, m.engine, m.living, api, engines, build_options, null);
+}
+
+pub fn kimiModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal: *std.Build.Module, engine: *std.Build.Module, lanes: *std.Build.Module) *std.Build.Module {
+    const kimi = b.createModule(.{
+        .root_source_file = b.path("zig/src/families/kimi_k3/kimi_k3.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "safetensors", .module = b.createModule(.{
+            .root_source_file = b.path("zig/src/families/kimi_k3/core_safetensors.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "core", .module = engine }},
+        }) } },
+    });
+    kimi.addImport("lanes", lanes);
+    return kimi;
 }

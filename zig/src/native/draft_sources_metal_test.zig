@@ -31,6 +31,9 @@ test "draft sources: Metal Qwen2B and LFM2 MoE follow qualified verification wid
 test "draft sources: Metal Qwen27 copies and DFlash2 use actual slot and head facts" {
     const q = @import("qwen27_lanes.zig");
     var runner: tf.qwen27.decode_round.Runner = undefined;
+    var model: tf.qwen27.model.Model = undefined;
+    model.config.experts = 0;
+    runner.model = &model;
     var b: q.Metal = undefined;
     b.runner = &runner;
     b.draft = null;
@@ -48,6 +51,10 @@ test "draft sources: Metal Qwen27 copies and DFlash2 use actual slot and head fa
     try check(b.facts(), .{ .kind = "DFlash2", .name = "example/draft" }, true, false);
     runner.slots = 1;
     try check(b.facts(), .{ .kind = "DFlash2", .name = "example/draft" }, false, false);
+    try std.testing.expect(!b.facts().plain_guard);
+    // routed experts (qwen3_5_moe) guard plain rounds against drafted depths
+    model.config.experts = 256;
+    try std.testing.expect(b.facts().plain_guard);
 }
 
 test "draft sources: Metal Gemma and Spark have copies without a checkpoint head" {
@@ -73,16 +80,23 @@ test "draft sources: Metal Step5 follows the checkpoint MTP layer count" {
 }
 
 test "draft sources: Metal GLM and GLM DSA follow actual MTP weights" {
+    const objc = @import("metal").objc;
+    // A host object with no Metal architecture answers the capability query without opening a GPU.
+    const no_arch = objc.msg(objc.Id, objc.class("NSObject"), "new", .{});
+    defer objc.release(no_arch);
     var e: tf.glm.engine.Engine = undefined;
     var weights: @typeInfo(@TypeOf(e.w)).pointer.child = undefined;
     e.w = &weights;
     e.ep = null;
+    e.device = .{ .id = no_arch };
     var slots: tf.glm.slots.Slots = undefined;
     var b: tf.glm.backend.Backend = .{ .gpa = std.testing.allocator, .sl = &slots };
     slots.e = &e;
     slots.slots = &.{};
     e.w.mtp = null;
-    try check(b.facts(), null, true, false);
+    const facts = b.facts();
+    try std.testing.expect(facts.learn_row_costs);
+    try check(facts, null, true, false);
     e.w.mtp = @as(@TypeOf(e.w.mtp.?), undefined);
     try check(b.facts(), null, true, true);
     var d: tf.glm_dsa.engine.Engine = undefined;
@@ -119,6 +133,9 @@ test "qwen27 window: native facts expose device width, node budget and hybrid co
     const q = @import("qwen27_lanes.zig");
     const policy = @import("qwen27_window.zig");
     var runner: tf.qwen27.decode_round.Runner = undefined;
+    var model: tf.qwen27.model.Model = undefined;
+    model.config.experts = 0;
+    runner.model = &model;
     var b: q.Metal = undefined;
     b.runner = &runner;
     b.draft = present(@TypeOf(b.draft.?));
@@ -152,6 +169,9 @@ test "qwen27 window: measured shared row cliffs retain the lone window's exact p
     const native = @import("qwen27_lanes.zig");
     const lanes = @import("lanes");
     var runner: tf.qwen27.decode_round.Runner = undefined;
+    var model: tf.qwen27.model.Model = undefined;
+    model.config.experts = 0;
+    runner.model = &model;
     runner.slots = 4;
     var b: native.Metal = undefined;
     b.runner = &runner;

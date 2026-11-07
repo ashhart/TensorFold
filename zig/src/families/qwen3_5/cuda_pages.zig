@@ -11,10 +11,16 @@ const Cache = caches.Cache;
 /// Rows past a request's prompt and reply its pages hold: one more forward's (a verify window or a prompt chunk).
 pub const window_rows: u32 = engine.max_rows;
 
-/// TF_QWEN_KV_PAGES=n: streams beside the first take n-position pages from one pool (unset or 0: a window each).
+/// TF_QWEN_KV_PAGES unset: a window each, dense or MoE, as on main, until #2043 closes the page cost.
+pub const unset_pages: usize = 0;
+
+/// TF_QWEN_KV_PAGES=n: n-position pages from one pool, --parallel a cap (0 or unset: a window each, as on main).
 pub fn paging() !usize {
-    const v = @import("core").profile.get(.TF_QWEN_KV_PAGES) orelse return 0;
-    return parsePaging(v);
+    return pagingOf(@import("core").profile.get(.TF_QWEN_KV_PAGES));
+}
+
+pub fn pagingOf(v: ?[]const u8) !usize {
+    return parsePaging(v orelse return unset_pages);
 }
 
 pub fn parsePaging(v: []const u8) !usize {
@@ -23,10 +29,13 @@ pub fn parsePaging(v: []const u8) !usize {
     return n;
 }
 
-/// TF_QWEN_KV_PAGES_ALL=1: every stream on pages, the engine's own too: no window is reserved for it.
+/// TF_QWEN_KV_PAGES_ALL=1: every stream on pages, the engine's own too: no window is reserved for it (unset: off).
 pub fn pagedOnly() bool {
-    const v = @import("core").profile.get(.TF_QWEN_KV_PAGES_ALL) orelse return false;
-    return std.mem.eql(u8, v, "1");
+    return pagedOnlyOf(@import("core").profile.get(.TF_QWEN_KV_PAGES_ALL));
+}
+
+pub fn pagedOnlyOf(v: ?[]const u8) bool {
+    return std.mem.eql(u8, v orelse return false, "1");
 }
 
 /// Pages a stream maps at most: a full window and one more forward.
@@ -224,4 +233,19 @@ test "KV page dimensions: pool rows fit the signed kernel argument and zero disa
     try std.testing.expectEqual(@as(usize, 48), try parsePaging("48"));
     try std.testing.expectError(error.BadQwenKvPages, parsePaging("2147483648"));
     try std.testing.expectError(error.BadQwenKvPages, parsePaging("18446744073709551615"));
+}
+
+test "Qwen pages default: unset or 0 keeps windows, a set size pages" {
+    try std.testing.expectEqual(@as(usize, 0), try pagingOf(null));
+    try std.testing.expectEqual(@as(usize, 0), try pagingOf("0"));
+    try std.testing.expectEqual(@as(usize, 256), try pagingOf("256"));
+    try std.testing.expectEqual(@as(usize, 128), try pagingOf("128"));
+    try std.testing.expectEqual(@as(usize, 1), try pagingOf("1"));
+    try std.testing.expectError(error.BadQwenKvPages, pagingOf(""));
+}
+
+test "Qwen pages default: TF_QWEN_KV_PAGES_ALL unset keeps the engine's stream a window, as on main; 1 pages it" {
+    try std.testing.expect(!pagedOnlyOf(null));
+    try std.testing.expect(pagedOnlyOf("1"));
+    for ([_][]const u8{ "0", "", "true", "01", " 1 " }) |v| try std.testing.expect(!pagedOnlyOf(v));
 }

@@ -102,7 +102,13 @@ pub const Metal = struct {
     link: ?*Link = null, // the pair: rank 0 sends each round here before it runs, rank 1 replays it
 
     pub fn init(gpa: std.mem.Allocator, runner: *q.decode_round.Runner, draft: ?*Draft) !*Metal {
-        if (runner.slots == 0 or runner.slots > max_streams or runner.model.frame.capacity < batch_rows) return error.TargetBinding;
+        if (runner.slots == 0 or runner.slots > max_streams) return error.TargetBinding;
+        const floor = @import("qwen27_prompt_floor.zig");
+        floor.check(runner.model.frame.capacity) catch |err| {
+            var buffer: [320]u8 = undefined;
+            std.log.err("{s}", .{try floor.describe(&buffer, runner.model.frame.capacity, .frame)});
+            return err;
+        };
         const device = runner.model.device;
         const tensor_units = device.tensorUnits();
         const window = try windowRows(tensor_units);
@@ -169,7 +175,9 @@ pub const Metal = struct {
         // Context copies remain opt-in until their served cost is qualified.
         const lone_copies = b.copies;
         const narrow: usize = @min(b.window, b.timed);
-        return .{ .exact_width = if (drafting or shared) b.window else 1, .mtp = drafting, .speculate = drafting, .speculate_early = false, .drafts = b.nodes, .draft_probabilities = true, .window_costs = b.costs[0..narrow], .shared_costs = b.costs[narrow..b.timed], .hidden_rows = shared, .streams_exact = true, .batch_rows = if (shared) batch_rows else b.window, .max_streams = b.runner.slots, .lone_copies = lone_copies, .context_copies = lone_copies, .allocate_shared_drafts = drafting, .draft_streams = drafting and b.draft_slots > 1 };
+        // routed experts make a drafted window read most expert weights: plain rounds compete with drafted depths
+        const routed = b.runner.model.config.moe();
+        return .{ .exact_width = if (drafting or shared) b.window else 1, .mtp = drafting, .speculate = drafting, .speculate_early = false, .drafts = b.nodes, .draft_probabilities = true, .plain_guard = routed, .window_costs = b.costs[0..narrow], .shared_costs = b.costs[narrow..b.timed], .hidden_rows = shared, .streams_exact = true, .batch_rows = if (shared) batch_rows else b.window, .max_streams = b.runner.slots, .lone_copies = lone_copies, .context_copies = lone_copies, .allocate_shared_drafts = drafting, .draft_streams = drafting and b.draft_slots > 1 };
     }
 
     /// The slot holding `s`.
@@ -250,7 +258,6 @@ pub const Metal = struct {
 
     /// Logits rows [first, first + rows) drawn at their positions: argmax on the GPU, or the stream's keyed sampler.
     fn draw(b: *Metal, s: *const lanes.Stream, first: usize, rows: usize, positions: []const u64, out: []u32, masks: []const u32) !void {
-        // a pair's token comes from the round's own head seam: a second local argmax would decide differently on rank 1
         if (b.runner.reduce != null) return error.PairGreedyOnly;
         const logits = b.runner.model.frame.get(.logits);
         const vocab: u32 = @intCast(b.runner.model.config.vocab);
@@ -359,10 +366,11 @@ pub const Metal = struct {
         std.debug.assert(r.active == null);
         if (r.active != null) return error.RoundNotReady;
         try r.taps.complete();
-        try q.tap_gather.gather(r.taps.buffer.contents()[0..r.taps.buffer.length()], r.taps.capacity, r.taps.rows, r.taps.width, rows[0..n], out.contents()[0..out.length()]);
+        try q.tap_gather.gather(r.taps.buffer.contents()[0..r.taps.buffer.length()], r.taps.capacity, r.taps.rows, r.taps.width, r.taps.count, rows[0..n], out.contents()[0..out.length()]);
         var at: usize = 0;
         for (paths, b.windows[0..b.count]) |path, slot| {
             const g = b.ringOf(slot).?;
+            if (g.stride != r.taps.width * r.taps.count * 2) return error.BadTapGather;
             if (b.early[slot] == 0) {
                 try g.absorb(out, at * g.stride, @intCast(path.len));
                 at += path.len;

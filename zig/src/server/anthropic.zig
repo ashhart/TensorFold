@@ -12,7 +12,7 @@ const sse = @import("sse.zig");
 const tool_specs = @import("tool_specs.zig");
 const ids = @import("ids.zig");
 const auth = @import("auth.zig");
-const translate = @import("anthropic_translate.zig").translate;
+const translate_mod = @import("anthropic_translate.zig");
 const Server = @import("server.zig").Server;
 const Conn = @import("http_conn.zig").Conn;
 const Value = json.Value;
@@ -72,7 +72,7 @@ pub fn post(srv: *Server, conn: *Conn, a: Allocator) void {
             .ok => |v| v,
             .err => |m| return sendError(conn, a, m, 400),
         };
-        const chat = translate(&cx, body, count) catch return sendError(conn, a, cx.message, cx.status());
+        const chat = translate_mod.translate(&cx, body, count) catch return sendError(conn, a, cx.message, cx.status());
         if (count) {
             const n = countTokens(srv, &cx, chat) catch return sendError(conn, a, cx.message, cx.status());
             const o = json.newObject(a) catch return;
@@ -84,7 +84,8 @@ pub fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     var reply: Reply = .{ .a = a, .conn = conn, .model = openai.replyModel(srv, prepared[1]) };
     reply.init() catch return;
     var wire: Wire = .{ .reply = &reply };
-    openai.run(srv, a, wire.out(), .{ .conn = conn }, true, prepared[0]);
+    const format_name = translate_mod.formatName(prepared[1]);
+    openai.runNamed(srv, a, wire.out(), .{ .conn = conn }, true, prepared[0], format_name);
     if (wire.opened or wire.status == null or conn.broken) return;
     const payload = wire.payload;
     if (wire.status.? != 200) {

@@ -2,7 +2,7 @@
 const std = @import("std");
 const platform = @import("sys");
 
-/// Offsets, lengths and buffers of uncached reads align to the VM page (F_NOCACHE only skips the cache for aligned reads).
+/// Offsets, lengths, buffers of uncached reads align to VM pages (F_NOCACHE only skips the cache for aligned reads).
 pub const alignment = 16384;
 
 /// How long a read waits for room before the load is refused; memory freed within it lets the load go on.

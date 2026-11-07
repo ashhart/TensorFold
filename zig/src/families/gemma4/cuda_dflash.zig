@@ -494,7 +494,7 @@ pub const Drafter = struct {
             try x.blocks(bs[0..n], width);
             var picks: [rows_most]Pick = undefined;
             try x.s.synchronize();
-            try x.d.check(x.d.api.cuMemcpyDtoH_v2(&picks, x.x.picks, n * width * @sizeOf(Pick)), "cuMemcpyDtoH");
+            try cuda.memory.download(x.d, x.x.picks, std.mem.asBytes(&picks)[0 .. n * width * @sizeOf(Pick)]);
             for (bs[0..n], 0..) |b, j| {
                 for (picks[j * width + 1 ..][0..b.depth], 0..) |p, i| {
                     if (p.nonfinite != 0 or p.token >= cfg.vocab) return error.DraftNonfinite;

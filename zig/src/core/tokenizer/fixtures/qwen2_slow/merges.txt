@@ -1,0 +1,11 @@
+#version: 0.2
+Ġ t
+Ġt h
+h e
+Ġt he
+Ġ w
+Ġw o
+w o
+Ġwo r
+Ġwor l
+Ġworl d

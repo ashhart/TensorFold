@@ -6,6 +6,7 @@ pub const config = @import("cuda_config.zig");
 pub const widths = @import("cuda_widths.zig");
 pub const plan = @import("cuda_plan.zig");
 pub const layer_input = @import("cuda_layer_input.zig");
+pub const ple = @import("cuda_ple.zig");
 pub const weights = @import("cuda_weights.zig");
 pub const kernels = @import("cuda_kernels.zig");
 pub const forward = @import("cuda_forward.zig");
@@ -41,6 +42,7 @@ test {
     _ = @import("cuda_widths.zig");
     _ = @import("cuda_plan.zig");
     _ = @import("cuda_layer_input.zig");
+    _ = @import("cuda_ple.zig");
     _ = @import("cuda_weights.zig");
     _ = @import("cuda_kernels.zig");
     _ = @import("cuda_forward.zig");

@@ -1,4 +1,4 @@
-// GLM's MLA absorb for prompt chunks on the tensor units: each fp32 weight as three exact bf16 parts, so every product is exact.
+// GLM's MLA absorb, prompt chunks on the tensor units: each fp32 weight as 3 exact bf16 parts, so products are exact.
 #include <metal_stdlib>
 using namespace metal;
 #include "../nax.h"
@@ -10,7 +10,7 @@ using namespace tfp;
 constant constexpr int HEADS = GLM_HEADS, NOPE = 256, LATENT = 512, PER_HEAD = 512; // kv_b rows a head: key half, value half
 constant constexpr int PAD = 64 + 8;
 
-// ql [rows, 64, 512] = q_nope (row r's head h at r * q_stride + h * 256) times W_k[h]; grid (8 columns, rows / 64, 64 heads).
+// ql [rows, 64, 512] = q_nope (row r's head h at r*q_stride + h*256) times W_k[h]; grid (8 columns, rows/64, 64 heads).
 [[kernel]] void glm_absorb_nax(const device uint32_t* W [[buffer(0)]], const device bfloat* S [[buffer(1)]],
                                const device bfloat* B [[buffer(2)]], const device bfloat* qp [[buffer(3)]],
                                device bfloat* ql [[buffer(4)]], constant int2& a [[buffer(5)]],

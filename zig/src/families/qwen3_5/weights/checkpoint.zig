@@ -12,22 +12,56 @@ const Table = table.Table;
 /// The text tower's key prefix, as the MLX conversions name it.
 pub const prefix = "language_model.model.";
 
+/// Where a checkpoint keeps the text tower and the output head: an MLX conversion's names or HF's own.
+pub const Names = struct {
+    text: []const u8,
+    head: []const u8,
+
+    pub const mlx: Names = .{ .text = prefix, .head = "language_model.lm_head" };
+    pub const hf: Names = .{ .text = "model.language_model.", .head = "lm_head" };
+
+    /// HF's names when the table holds HF's embedding, else MLX's.
+    pub fn of(t: *const Table) Names {
+        return if (t.has(hf.text ++ "embed_tokens.weight")) hf else mlx;
+    }
+
+    /// Why these names cannot go with the format: HF's checkpoints are bf16 and bf16's are HF's (MLX's carry the 1).
+    pub fn refusal(n: Names, bf16: bool) ?[]const u8 {
+        if (bf16 == std.mem.eql(u8, n.text, hf.text)) return null;
+        if (bf16) return "a bf16 checkpoint carries HF's names (model.language_model.*); an MLX one's norms already hold 1 + w";
+        return "HF's names (model.language_model.*) are read only from an unquantized bf16 checkpoint";
+    }
+};
+
 pub const Checkpoint = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
     config: config.Config,
     files: table.Files,
     main: Table,
+    names: Names,
 
     /// Reads config.json and maps the model's own safetensors files.
     pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !Checkpoint {
         var cfg = try config.Config.read(gpa, io, dir);
         errdefer cfg.deinit();
-        var files = try table.Files.list(gpa, io, dir);
+        const bf16 = cfg.quant == .bf16;
+        // a bf16 checkpoint's own shards are the index's: side files (a joint head) stay out of the table
+        var files = try if (bf16) table.Files.indexed(gpa, io, dir) else table.Files.list(gpa, io, dir);
         errdefer files.deinit();
         if (files.model.len == 0) return error.NoSafetensors;
-        const main = try Table.open(gpa, io, files.model, "", cfg.quant);
-        return .{ .gpa = gpa, .io = io, .config = cfg, .files = files, .main = main };
+        var main = try Table.open(gpa, io, files.model, "", cfg.quant);
+        errdefer main.close(io);
+        const names = Names.of(&main);
+        if (names.refusal(bf16)) |why| {
+            std.log.err("{s}", .{why});
+            return error.UnexpectedTensor;
+        }
+        if (bf16) if (mixed(&main, names)) |key| {
+            std.log.err("{s}: {t} in a bf16 checkpoint, whose text tensors are all BF16", .{ key, (try main.get(key)).dtype });
+            return error.UnexpectedTensor;
+        };
+        return .{ .gpa = gpa, .io = io, .config = cfg, .files = files, .main = main, .names = names };
     }
 
     pub fn close(c: *Checkpoint) void {
@@ -41,32 +75,40 @@ pub const Checkpoint = struct {
         return c.config.spec;
     }
 
+    /// The text tower's tensor `name` under the checkpoint's own prefix.
+    fn text(c: *const Checkpoint, buf: []u8, name: []const u8) []const u8 {
+        return projection.join(buf, &.{ c.names.text, name });
+    }
+
     /// The embedding, MLX affine words or a float table the row gather reads; `a` holds any converted tables.
     pub fn embed(c: *const Checkpoint, a: std.mem.Allocator) !host.Projection {
-        const p = try projection.projection(a, &c.main, prefix ++ "embed_tokens");
+        var buf: [96]u8 = undefined;
+        const p = try projection.projection(a, &c.main, c.text(&buf, "embed_tokens"));
         if (p.rows() != c.spec().vocab) return error.UnexpectedTensor;
         return p;
     }
 
     pub fn finalNorm(c: *const Checkpoint, a: std.mem.Allocator) !Tensor {
-        return projection.float(a, &c.main, prefix ++ "norm.weight");
+        var buf: [96]u8 = undefined;
+        return norm(a, &c.main, c.text(&buf, "norm.weight"));
     }
 
     /// The output head, or null when it is the embedding (`tie_word_embeddings`).
     pub fn head(c: *const Checkpoint, a: std.mem.Allocator) !?host.Projection {
         if (c.config.tied) return null;
-        return try projection.projection(a, &c.main, "language_model.lm_head");
+        return try projection.projection(a, &c.main, c.names.head);
     }
 
     /// Drops the mapped pages of layer `index` once it is uploaded (null: the embedding, norm and head).
     pub fn release(c: *const Checkpoint, index: ?usize) void {
+        var buf: [128]u8 = undefined;
         if (index) |i| {
-            var name: [128]u8 = undefined;
-            c.main.release(std.fmt.bufPrint(&name, prefix ++ "layers.{d}.", .{i}) catch return);
+            var name: [32]u8 = undefined;
+            c.main.release(c.text(&buf, std.fmt.bufPrint(&name, "layers.{d}.", .{i}) catch return));
         } else {
-            c.main.release(prefix ++ "embed_tokens");
-            c.main.release(prefix ++ "norm.");
-            c.main.release("language_model.lm_head");
+            c.main.release(c.text(&buf, "embed_tokens"));
+            c.main.release(c.text(&buf, "norm."));
+            c.main.release(c.names.head);
         }
     }
 
@@ -79,10 +121,10 @@ pub const Checkpoint = struct {
         const a = arena.allocator();
         const t = &c.main;
         var name: [128]u8 = undefined;
-        const base = std.fmt.bufPrint(&name, prefix ++ "layers.{d}.", .{index}) catch unreachable;
+        const base = std.fmt.bufPrint(&name, "{s}layers.{d}.", .{ c.names.text, index }) catch unreachable;
         var scratch: [160]u8 = undefined;
-        const input_norm = try projection.float(a, t, projection.join(&scratch, &.{ base, "input_layernorm.weight" }));
-        const post_norm = try projection.float(a, t, projection.join(&scratch, &.{ base, "post_attention_layernorm.weight" }));
+        const input_norm = try norm(a, t, projection.join(&scratch, &.{ base, "input_layernorm.weight" }));
+        const post_norm = try norm(a, t, projection.join(&scratch, &.{ base, "post_attention_layernorm.weight" }));
         const mlp = try readMlp(a, t, projection.join(&scratch, &.{ base, "mlp." }), s);
         if (s.full(index)) {
             const attn = projection.join(&scratch, &.{ base, "self_attn." });
@@ -93,8 +135,8 @@ pub const Checkpoint = struct {
                 .k = try sub(a, t, attn, "k_proj"),
                 .v = try sub(a, t, attn, "v_proj"),
                 .o = try sub(a, t, attn, "o_proj"),
-                .q_norm = try subFloat(a, t, attn, "q_norm.weight"),
-                .k_norm = try subFloat(a, t, attn, "k_norm.weight"),
+                .q_norm = try subNorm(a, t, attn, "q_norm.weight"),
+                .k_norm = try subNorm(a, t, attn, "k_norm.weight"),
                 .mlp = mlp,
             } };
             return .{ .arena = arena, .body = body };
@@ -120,6 +162,11 @@ pub const Checkpoint = struct {
 
     /// The MTP layer from `mtp*.safetensors` or the model's own shards; null when absent.
     pub fn mtp(c: *const Checkpoint) !?host.Mtp {
+        if (c.config.quant == .bf16) {
+            if (c.spec().mtp_layers == 0) return null;
+            std.log.err("a bf16 checkpoint's MTP head is not read: its config declares {d} MTP layers", .{c.spec().mtp_layers});
+            return error.UnexpectedTensor;
+        }
         const side = c.files.side;
         const shards = if (side.len > 0) side else c.files.model;
         if (shards.len == 0) return null;
@@ -153,6 +200,29 @@ fn sub(a: std.mem.Allocator, t: *const Table, base: []const u8, name: []const u8
 fn subFloat(a: std.mem.Allocator, t: *const Table, base: []const u8, name: []const u8) !Tensor {
     var buf: [192]u8 = undefined;
     return projection.float(a, t, projection.join(&buf, &.{ base, name }));
+}
+
+/// A trunk RMS weight by its role: torch's `1 + w` in a bf16 checkpoint (stored centred), else as stored.
+fn norm(a: std.mem.Allocator, t: *const Table, key: []const u8) !Tensor {
+    return if (t.quant == .bf16) projection.centred(a, t, key) else projection.float(a, t, key);
+}
+
+fn subNorm(a: std.mem.Allocator, t: *const Table, base: []const u8, name: []const u8) !Tensor {
+    var buf: [192]u8 = undefined;
+    return norm(a, t, projection.join(&buf, &.{ base, name }));
+}
+
+/// The first text tensor or head tensor that is not BF16 (a bf16 checkpoint refuses it by name), else null.
+pub fn mixed(t: *const Table, names: Names) ?[]const u8 {
+    var it = t.keys();
+    while (it.next()) |k| {
+        const key = k.*;
+        const head = std.mem.startsWith(u8, key, names.head) and key.len > names.head.len and key[names.head.len] == '.';
+        if (!std.mem.startsWith(u8, key, names.text) and !head) continue;
+        const w = t.get(key) catch return key;
+        if (w.dtype != .bf16) return key;
+    }
+    return null;
 }
 
 fn subConv(a: std.mem.Allocator, t: *const Table, base: []const u8) !Tensor {

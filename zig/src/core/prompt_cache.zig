@@ -23,7 +23,7 @@ pub const Snapshots = struct {
     pub const VTable = struct {
         /// The most new storage `save` takes at `at` tokens (checked against the budget before any copy).
         bytes: *const fn (ptr: *anyopaque, at: u32) u64,
-        /// Copy the live state after `at` prompt tokens into new storage; `owner` is the lane core's stream (null: one stream).
+        /// Copy the live state after `at` prompt tokens to new storage; `owner`: lane core's stream (null: one stream).
         save: *const fn (ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!Saved,
         /// Make the live state `saved`'s: the next prompt chunk starts at its position.
         restore: *const fn (ptr: *anyopaque, owner: ?*anyopaque, saved: Saved) anyerror!void,
@@ -120,6 +120,7 @@ pub const Store = struct {
     active_rewind_at: u32 = 0, // the last lookup's rewind state (0: none); hosts keep a pass's states before the next lookup
     links_lost: bool = false, // an allocation failure left the extension links incomplete: `extended` scans
     hold: bool = false, // memory pressure: lookups plan no marks and keeps refuse, so no new state is kept
+    over: []const u8 = "", // what refusing a state past the whole budget adds: the setting that keeps it otherwise
     repeat_log: @import("prompt_cache_repeat.zig").Log = .{},
     const SHARED_KEYS = 64;
     pub const lookupUserImages = images.lookupUser;
@@ -167,7 +168,7 @@ pub const Store = struct {
         return if (s.family.vtable.spare) |f| f(s.family.ptr) else 0;
     }
 
-    /// A kept state takes `extra` more bytes (a family copied what it shared into it) if the budget has room; never evicts, a pass is under way.
+    /// A kept state takes `extra` bytes (a family's copied-in share) within budget; never evicts, a pass is under way.
     pub fn grow(s: *Store, saved: Saved, extra: u64) bool {
         for (s.entries.items) |e| if (!e.expired and e.tokens.len > 0 and e.saved == saved) {
             if (extra > s.room()) return false;
@@ -250,13 +251,27 @@ pub const Store = struct {
 
     /// Begin with a known end of the latest user message, for its optional interior state (0: unknown).
     pub fn beginUser(s: *Store, a: Allocator, prompt: []const u32, history_len: u32, rewind_len: u32, user_end: u32, shared: []const u32, starts: []const u32, owner: ?*anyopaque, spans: []const modes.Span) !Plan {
-        const l = try s.lookupUser(a, prompt, @intCast(prompt.len), history_len, rewind_len, user_end, shared, starts, spans);
-        const e = l.entry orelse return .{ .marks = l.marks };
-        const failure: ?anyerror = if (s.family.vtable.restore(s.family.ptr, owner, e.saved)) |_| null else |err| err;
-        const from = if (failure == null) e.at else 0;
-        s.resumedWithReason(e, prompt, failure);
-        s.reserve(prompt, @intCast(prompt.len), null, l.marks, spans); // restored: the state it resumed may go too (a peer restores before it drops)
-        return .{ .from = from, .marks = l.marks };
+        var l = try s.lookupUser(a, prompt, @intCast(prompt.len), history_len, rewind_len, user_end, shared, starts, spans);
+        // the first lookup's marks, kept for the pass from the start if no shorter kept state resumes
+        var fresh_marks: ?[]const u32 = null;
+        while (l.entry) |e| {
+            if (s.family.vtable.restore(s.family.ptr, owner, e.saved)) |_| {
+                const at = e.at; // read before the reserve may evict the entry
+                s.resumedWithReason(e, prompt, null);
+                if (fresh_marks) |m| if (m.ptr != l.marks.ptr) a.free(m);
+                s.reserve(prompt, @intCast(prompt.len), null, l.marks, spans); // restored: the state it resumed may go too (a peer restores before it drops)
+                return .{ .from = at, .marks = l.marks };
+            } else |err| {
+                // a refused state is dropped, then the next shorter RAM state is tried before the pass from the start
+                if (fresh_marks == null) fresh_marks = l.marks else a.free(l.marks);
+                s.resumedWithReason(e, prompt, err);
+                l = try s.lookupUserAt(a, prompt, @intCast(prompt.len), history_len, rewind_len, user_end, shared, starts, spans, false);
+            }
+        }
+        const marks_ = fresh_marks orelse l.marks;
+        if (fresh_marks != null and l.marks.ptr != marks_.ptr) a.free(l.marks);
+        s.reserve(prompt, @intCast(prompt.len), null, marks_, spans);
+        return .{ .marks = marks_ };
     }
 
     /// Look up canonical-span state and marks without restoring; the caller later reports resumed.
@@ -271,6 +286,11 @@ pub const Store = struct {
 
     /// `lookupRewind` with an explicit last-user end: history may also include later tool or assistant messages.
     pub fn lookupUser(s: *Store, a: Allocator, prompt: []const u32, born: u32, history_len: u32, rewind_len: u32, user_end: u32, shared: []const u32, starts: []const u32, spans: []const modes.Span) !Lookup {
+        return s.lookupUserAt(a, prompt, born, history_len, rewind_len, user_end, shared, starts, spans, true);
+    }
+
+    /// `lookupUser`; with `disk` false only RAM states (a retry after a refusal must not recall the refused one).
+    fn lookupUserAt(s: *Store, a: Allocator, prompt: []const u32, born: u32, history_len: u32, rewind_len: u32, user_end: u32, shared: []const u32, starts: []const u32, spans: []const modes.Span, disk: bool) !Lookup {
         s.collectExpired();
         const endpoint = if (s.rules.planned) s.startAt(starts, history_len) else history_len;
         const rewind = if (s.rules.planned) s.startAt(starts, rewind_len -| s.rules.lookahead) else rewind_len -| s.rules.lookahead;
@@ -281,7 +301,10 @@ pub const Store = struct {
         if (s.active_rewind_at > 0) if (s.keptNear(prompt, starts, spans, s.active_rewind_at)) |at| {
             s.active_rewind_at = at; // a state kept under min_gap before it is the rewind state: no new copy
         };
-        const e = rows.read.recall(s, prompt, born, starts, spans, s.recall(prompt, born, starts, spans, s.find(prompt, starts, spans)));
+        const e = if (disk)
+            rows.read.recall(s, prompt, born, starts, spans, s.recall(prompt, born, starts, spans, s.find(prompt, starts, spans)))
+        else
+            s.find(prompt, starts, spans);
         if (e == null) s.counts.misses += 1;
         const from = if (e) |x| x.at else 0;
         const ordinary = if (s.active_rewind_at == 0)
@@ -302,7 +325,7 @@ pub const Store = struct {
         return .{ .entry = e, .marks = marks_ };
     }
 
-    /// Room for every state the pass keeps, made before it: a peer that mirrors the keeps hears of these evictions with the request.
+    /// Room for every state the pass keeps, made before it: a keep-mirroring peer hears the evictions with the request.
     fn reserve(s: *Store, prompt: []const u32, born: u32, from: ?*Entry, marks_: []const u32, spans: []const modes.Span) void {
         var need: u64 = 0;
         var new: usize = 0; // states it keeps that the store lacks: a slot each
@@ -403,6 +426,8 @@ pub const Store = struct {
         const stable: u32 = if (part == 0 or part >= history_len or part < history_len / 2) 0 else if (s.rules.fork) part -| s.rules.lookahead else part;
         if (stable > 0) try want.append(a, stable);
         if (!short) try want.appendSlice(a, shared);
+        // tail: a prompt that names no history keeps its last chunk too (a chat keeps its history's mark alone)
+        if (!short and s.rules.tail and history_len == 0) try want.append(a, @intCast(prompt.len -| @max(1, s.rules.lookahead)));
         const fork_at = if (s.rules.fork and s.rules.planned) s.startAt(starts, stable) else stable; // where the loop snaps it
         for (want.items, 0..) |w, k| {
             const at = if (s.rules.planned) s.startAt(starts, w) else w;
@@ -448,7 +473,7 @@ pub const Store = struct {
         const bytes = s.family.vtable.bytes(s.family.ptr, at);
         if (bytes > s.budget or s.most == 0) {
             s.counts.refused += 1;
-            note("kept nothing at {d} tokens: {d} MiB passes the {d} MiB budget", .{ at, bytes >> 20, s.budget >> 20 });
+            note("kept nothing at {d} tokens: {d} MiB passes the {d} MiB budget{s}", .{ at, bytes >> 20, s.budget >> 20, if (bytes > s.budget) s.over else "" });
             return false;
         }
         while (s.entries.items.len > 0) { // room: spare storage this save can take, else new storage inside the budget
@@ -571,4 +596,5 @@ test {
 
 test {
     _ = @import("prompt_cache_repeat_test.zig");
+    _ = @import("prompt_cache_tail_test.zig");
 }

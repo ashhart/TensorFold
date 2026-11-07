@@ -26,9 +26,20 @@ pub fn steps(b: *std.Build, o: Options) void {
     pair_host.has_side_effects = true;
     o.test_step.dependOn(&pair_host.step);
     b.step("test-hip-pair-contract-host", "Paired projection simulation without uninitialized magnitude reads or GPU calls").dependOn(&pair_host.step);
+    const select_host = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/hip/contract_select.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "hip", .module = o.host }, .{ .name = "core", .module = o.host.import_table.get("core").? } },
+    }) }));
+    o.test_step.dependOn(&select_host.step);
+    const select_what = "Which entry and records `image <group>` runs, and its exit status, on fixtures without a GPU";
+    b.step("test-hip-contract-select-host", select_what).dependOn(&select_host.step);
     const source = b.path("zig/kernels/hip/contract_controls.hip");
     const own = hip.compile(b, o.hipcc, o.arch, source, "contract_controls.hsaco");
     const exe = runner(b, o.target, o.optimize, o.gpu, controls(b, o.arch, own));
+    b.step("hip-kernel-contract-build", "Compile and install the HIP kernel contract without running a GPU").dependOn(&b.addInstallArtifact(exe, .{}).step);
     const install = b.addInstallArtifact(exe, .{});
     const build_only = "Build the kernel contract's HIP gates and controls (-Dhip-arch, no run)";
     b.step("tf-hip-kernel-contract", build_only).dependOn(&install.step);

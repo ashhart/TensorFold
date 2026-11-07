@@ -1,7 +1,7 @@
 //! One verbs queue pair on one port: protection domain, a send and a receive completion queue, connect, post and poll.
 const std = @import("std");
-const abi = @import("verbs_abi.zig");
-const Verbs = @import("verbs.zig").Verbs;
+const abi = @import("verbs").abi;
+const Verbs = @import("verbs").Verbs;
 const nowNs = @import("words.zig").nowNs;
 
 /// Thunderbolt RDMA moves a SEND as packets of one MTU.

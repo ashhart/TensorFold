@@ -83,7 +83,7 @@ inline uint k3_stage(threadgroup bfloat* xs, device const bfloat* X, device cons
   return rn;
 }
 
-// Lane 8o + c runs chain c (groups c, c+8, ...) of output o: per group 32 codes in order from zero, then fma by its scale.
+// Lane 8o+c runs chain c (groups c, c+8, ...) of output o: per group 32 codes in order from zero, fma by its scale.
 template <int RP, int NW>
 inline void k3_xp_chains(thread float (&acc)[NW][RP], threadgroup const bfloat* xs, uint K, uint rn,
                          device const uchar* const thread (&wp)[NW], device const uchar* const thread (&ws)[NW],

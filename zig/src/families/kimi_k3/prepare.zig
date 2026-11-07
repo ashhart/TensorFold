@@ -1,4 +1,4 @@
-//! Projections copied once into the slice-interleaved layout the row kernels read; the checkpoint's bytes stay as they are.
+//! Projections copied once to the slice-interleaved layout the row kernels read; the checkpoint's bytes stay unchanged.
 const std = @import("std");
 const mtl = @import("metal");
 const kernels = @import("kernels.zig");
@@ -49,7 +49,10 @@ pub fn layer(k: *const kernels.Kernels, device: mtl.Device, queue: mtl.Queue, l:
     defer list.deinit(owned.gpa);
     switch (l.attn) {
         .kda => |*a| try list.appendSlice(owned.gpa, &.{ &a.q, &a.k, &a.v, &a.g, &a.o, &a.fa, &a.fb, &a.b }),
-        .mla => |*a| try list.appendSlice(owned.gpa, &.{ &a.qa, &a.qb, &a.kva, &a.g, &a.o }),
+        .mla => |*a| {
+            try list.appendSlice(owned.gpa, &.{ &a.qa, &a.qb, &a.kva, &a.g, &a.o });
+            if (a.indexer) |*i| try list.appendSlice(owned.gpa, &.{ &i.q, &i.k, &i.weights });
+        },
     }
     switch (l.mlp) {
         .dense => |*d| try list.appendSlice(owned.gpa, &.{ &d.gate, &d.up, &d.down }),
