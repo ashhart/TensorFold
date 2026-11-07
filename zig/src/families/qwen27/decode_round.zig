@@ -91,11 +91,12 @@ pub const Runner = struct {
         const geometry = try attn.planning.Geometry.fromConfig(m.config, m.device.tensorUnits());
         const linear_index = try a.alloc(u32, m.config.layers);
         errdefer a.free(linear_index);
-        const attention_index = try a.alloc(u32, m.config.layers);
+        // with the MTP head loaded, its block is one more attention layer past the last (forward.layerAt)
+        const attention_index = try a.alloc(u32, m.config.layers + @intFromBool(m.weights.mtp != null));
         errdefer a.free(attention_index);
         var ng: u32 = 0;
         var na: u32 = 0;
-        for (linear_index, attention_index, 0..) |*g, *v, block| {
+        for (linear_index, attention_index[0..m.config.layers], 0..) |*g, *v, block| {
             g.* = std.math.maxInt(u32);
             v.* = std.math.maxInt(u32);
             if (m.config.kind(block) == .linear) {
@@ -105,6 +106,10 @@ pub const Runner = struct {
                 v.* = na;
                 na += 1;
             }
+        }
+        if (m.weights.mtp != null) {
+            attention_index[m.config.layers] = na;
+            na += 1;
         }
         var pool = try GdnPool.init(m.device, try abi.Shape.init(m.config), ng, slots, m.frame.capacity);
         errdefer pool.deinit();
@@ -325,6 +330,34 @@ pub const Runner = struct {
         if (accepted) {
             for (round.slots, round.windows) |slot, window| r.offsets[slot] = window.start + @as(u32, @intCast(window.parents.len));
         } else r.active = fingerprint(round);
+    }
+
+    /// One MTP head pass: `round` holds the head's own cache rows and positions, `hidden` its tokens' rows.
+    pub fn headPass(r: *Runner, round: *const Round, sc: *const @import("mtp.zig").Scratch, hidden: Ref, head: forward.Head) !Ref {
+        if (r.failed or r.active != null or r.model.weights.mtp == null or round.ids.len > r.model.frame.capacity) return error.RoundNotReady;
+        var attention_plan = try r.attentionPlan(round);
+        defer attention_plan.deinit();
+        try r.model.frame.setRows(round.ids, round.feed_positions);
+        try r.scratch.upload(attention_plan);
+        r.current_round = round;
+        r.current_attention = &attention_plan;
+        defer {
+            r.current_round = null;
+            r.current_attention = null;
+        }
+        const pool = mtl.objc.Pool.push();
+        defer pool.pop();
+        const cb = r.model.queue.commandBuffer();
+        var e = cb.compute(.serial);
+        const out = try @import("mtp.zig").encode(r.model, sc, &e, .{ .ptr = r, .gdn = gdnForward, .attention = attentionForward }, hidden, @intCast(round.ids.len), head);
+        e.end();
+        cb.commit();
+        cb.wait();
+        if (gpuFailed(cb, "the MTP head")) {
+            r.failed = true;
+            return error.RoundGpuFailure;
+        }
+        return out;
     }
 
     pub fn keep(r: *Runner, round: *const Round, paths: []const []const u32) !void {
