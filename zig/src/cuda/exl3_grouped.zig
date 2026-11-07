@@ -62,7 +62,7 @@ pub const Grouped = struct {
         const w = l.exl3 orelse return error.BadExperts;
         if (w.dims != l.dims or w.width != l.width or w.experts != l.experts or l.relu2 or
             in.stride > std.math.maxInt(i32) or in.slots > std.math.maxInt(i32)) return error.BadExperts;
-        try checkAct(w);
+        try checkAct(w, l.after);
         const up = epi == .up;
         const k = if (up) w.dims else w.width;
         const n = if (up) w.width else w.dims;
@@ -101,24 +101,37 @@ pub const Grouped = struct {
 };
 
 /// The activations plan_finish runs (0 bf16, 1 fp32, 2 SwiGLU-OAI); SwiGLU-OAI needs its clamp and alpha.
-fn checkAct(w: ex.Layer) !void {
+fn checkAct(w: ex.Layer, after: bool) !void {
     if (w.act_mode < 0 or w.act_mode > 2) return error.BadExperts;
     if (w.act_mode == 2 and !(w.limit > 0 and w.alpha > 0)) return error.BadExperts;
+    if (after and w.act_mode == 2) return error.OptionNotBuilt; // SwiGLU-OAI's branch clamps the gate before silu
 }
 
 test "Grouped's SwiGLU-OAI takes act_mode 2 only with a positive clamp and alpha" {
     var w: ex.Layer = std.mem.zeroes(ex.Layer);
-    try checkAct(w);
+    try checkAct(w, false);
     w.act_mode = 2;
-    try std.testing.expectError(error.BadExperts, checkAct(w));
+    try std.testing.expectError(error.BadExperts, checkAct(w, false));
     w.limit = 7;
-    try std.testing.expectError(error.BadExperts, checkAct(w));
+    try std.testing.expectError(error.BadExperts, checkAct(w, false));
     w.alpha = 1.702;
-    try checkAct(w);
+    try checkAct(w, false);
     w.limit = -1;
-    try std.testing.expectError(error.BadExperts, checkAct(w));
+    try std.testing.expectError(error.BadExperts, checkAct(w, false));
     w.act_mode = 3;
-    try std.testing.expectError(error.BadExperts, checkAct(w));
+    try std.testing.expectError(error.BadExperts, checkAct(w, false));
+}
+
+test "Grouped refuses the clamp-after order on SwiGLU-OAI, whose branch clamps the gate before silu" {
+    var w: ex.Layer = std.mem.zeroes(ex.Layer);
+    w.limit = 7;
+    w.alpha = 1.702;
+    for ([_]i32{ 0, 1 }) |m| {
+        w.act_mode = m;
+        try checkAct(w, true);
+    }
+    w.act_mode = 2;
+    try std.testing.expectError(error.OptionNotBuilt, checkAct(w, true));
 }
 
 test "Grouped scratch includes every pair and rejects overflowing geometry" {
