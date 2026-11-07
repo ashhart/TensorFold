@@ -119,7 +119,8 @@ pub fn sparseAttentionFormat(set: glue.Set, stream: cuda.Stream, qa: u64, cache:
     try merge(set, stream, p, out, counts, rows, heads, lw, nch, true);
 }
 
-fn merge(set: glue.Set, stream: cuda.Stream, p: Partials, out: u64, counts: u64, rows: usize, heads: usize, lw: usize, nch: usize, sparse: bool) !void {
+/// latent._merge: the chunks' partials merged in order (also after the shared mla chunk tiles: Ling).
+pub fn merge(set: glue.Set, stream: cuda.Stream, p: Partials, out: u64, counts: u64, rows: usize, heads: usize, lw: usize, nch: usize, sparse: bool) !void {
     if (lw != 512) return error.LatentShape;
     var a: cuda.Args = .{};
     inline for (.{ p.po, p.pm, p.pl, out, counts, @as(i64, @intCast(rows)), @as(i64, @intCast(heads)), @as(c_int, @intCast(nch)), @as(c_int, @intFromBool(sparse)) }) |v| a.add(v);
