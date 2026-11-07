@@ -1,0 +1,29 @@
+Wasserman Slate AI Studio, powered by TensorFold (Mac + DGX Spark)
+Pack: drowzeys / keys.
+
+This pack installs and runs other people's work. See CREDITS.md. It ships no model weights.
+
+Qwen is licensed under the Qwen RESEARCH LICENSE AGREEMENT, Copyright (c) 2026 Hangzhou Tongyi Laboratory Technology
+Co., Ltd. All Rights Reserved. Qwen-Image-2.1 and adapters derived from it may be used for non-commercial purposes
+only. Built with Qwen.
+
+MiniMax H3 is licensed under the MiniMax H3 Community License Agreement, Copyright © 2026 MiniMax. All Rights Reserved.
+The MiniMax H3 Community License limits the territories in which MiniMax H3 may be used. The 2x video decoder
+(speach1sdef178/MiniMax-H3-X2-Detail-VAE) is a derivative of MiniMax H3 under the same licence.
+
+Read these licences before downloading the weights.
+
+Engine source: TensorFold (Apache-2.0, Ash Hart and contributors) with
+- an H3 family adapted from minimax-h3-mlx (Apache-2.0, mrbizarro) and int8 kernels that follow the quantization
+  scheme of h3.c (MIT, Salvatore Sanfilippo);
+- a Qwen-Image family adapted from mflux (MIT, Filip Strand and contributors), whose qwen21 model follows Qwen and
+  Hugging Face's QwenImage21 pipeline (Apache-2.0).
+
+This product includes a port of the workflow of Slate, the prompt studio for AI filmmaking, and unchanged copies of its data files under app/static/slate/.
+Slate is Copyright 2026 Sam Wasserman, licensed under the Apache License 2.0; its NOTICE is kept at
+app/static/slate/NOTICE. Credit: Sam Wasserman (wassermanproductions.com).
+
+The LoRA hub's first preset is the recipe for the Wasserman 80s Horror LoRA, Copyright 2026 Sam Wasserman. Its
+weights are not part of this pack: they are downloaded from his release when a user installs them, as a Model
+Derivative of MiniMax H3 under the MiniMax H3 Community License Agreement. Credit: 80s Horror LoRA by Sam Wasserman
+(wassermanproductions.com). Powered by MiniMax H3.
