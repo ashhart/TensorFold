@@ -349,6 +349,7 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     var draft_owned = owns_draft;
     errdefer if (draft_owned) draft_model.?.deinit();
     const memory = q.prompt_memory;
+    const mtp_on = model.weights.mtp != null and (o.mtp_drafts orelse 0) > 0;
     const shared = try q.simd_attention.sharedPrefix(model.device.tensorUnits());
     const fit_prompt = reserve.fit(model.config, capacity, window, o.streams, shared, if (draft_model) |d| @as(usize, d.ring().window) * d.ring().stride else 0, if (draft_model) |d| d.graph.config.tap_count else q.taps.layers.len, model.frame.capacity, room(model));
     const rows = try reserve.rows(fit_prompt, model.device.generation(), window);
@@ -390,7 +391,6 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     h.back.chunk = h.runner.promptRows(@min(rows, reserve.requested(model.device.generation(), model.config.moe())));
     h.back.grow = .{ .ctx = h, .room = Host.roomFor, .added = Host.added };
     h.back.vision = o.images;
-    const mtp_on = model.weights.mtp != null and (o.mtp_drafts orelse 0) > 0;
     if (h.draft != null or mtp_on) try h.back.measure(io);
     if (mtp_on) {
         const x = try @import("qwen27_mtp.zig").Mtp.init(gpa, &h.runner, .{ .cap = o.mtp_drafts, .floor = o.mtp_confidence });
