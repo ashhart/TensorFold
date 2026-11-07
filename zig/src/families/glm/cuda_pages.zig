@@ -16,10 +16,11 @@ pub fn tableLen(capacity: usize) usize {
 
 /// What a stream of engine `e` holds: its fixed part and table (and `extra`, its other buffers), 13,056 bytes a token.
 pub fn layout(gpa: std.mem.Allocator, e: *const Engine, extra: u64) !kv.Layout {
-    const fixed = try state.State.pagedBytes(gpa, &e.w, e.capacity, tableLen(e.capacity));
+    const fixed = try state.State.pagedBytes(gpa, &e.w, e.capacity, tableLen(e.capacity), e.settings.kv_split);
     // TF_GLM_KV_HOST: a page costs the device only its pooled keys (the pages themselves are in host memory)
     const page = if (kv_host.onHost()) state.pkPageBytes(&e.w) else state.pageBytes(&e.w);
-    return .{ .fixed_bytes = fixed + extra, .token_bytes = page / state.page_rows, .page_tokens = state.page_rows, .snap_bytes = 0 };
+    const classes: u32 = if (e.settings.kv_split) @intCast(e.share.world) else 1; // TF_GLM_KV_SPLIT: an owner class a rank
+    return .{ .fixed_bytes = fixed + extra, .token_bytes = page / state.page_rows, .page_tokens = state.page_rows, .snap_bytes = 0, .classes = classes };
 }
 
 /// A request's need: its prompt, its reply and one last verify window.
@@ -33,15 +34,18 @@ pub fn ownSequence(e: *Engine) !void {
     if (e.seqs.items[0] != null) return error.SlotTaken;
     const q = try e.gpa.create(types.Seq);
     errdefer e.gpa.destroy(q);
-    q.* = .{ .st = try fw.State.initPaged(e.gpa, e.d, &e.w, e.capacity, on(e, 0, state.pageBytes(&e.w))) };
+    q.* = .{ .st = try fw.State.initPaged(e.gpa, e.d, &e.w, e.capacity, on(e, 0, 0)) };
     e.seqs.items[0] = q;
     e.cur = q;
     e.slot = 0;
 }
 
-/// A sequence's place on the pages at `kv`: a table as long as a stream's window.
-fn on(e: *const Engine, kv_at: u64, page: u64) state.Paged {
-    return .{ .kv = kv_at, .pages = tableLen(e.capacity), .page_bytes = page };
+/// A sequence's place on `n` pages at `base` (TF_GLM_KV_SPLIT: every pooled key first, then every latent row).
+fn on(e: *const Engine, base: u64, n: usize) state.Paged {
+    const at: state.Paged = .{ .kv = base, .pages = tableLen(e.capacity), .page_bytes = state.pageBytes(&e.w) };
+    if (!e.settings.kv_split) return at;
+    const pooled = state.pkPageBytes(&e.w);
+    return .{ .kv = base + n * pooled, .pages = at.pages, .page_bytes = state.latentPageBytes(&e.w), .pk = base, .pk_page = pooled, .split = true };
 }
 
 pub const Pages = struct {
@@ -65,10 +69,14 @@ pub const Pages = struct {
     pub fn init(gpa: std.mem.Allocator, e: *Engine, l: kv.Layout, streams: usize, pages: usize, leader: bool) !*Pages {
         const own = if (e.seqs.items.len > 0) e.seqs.items[0] else null;
         if (own == null or own.?.st.table == 0) return error.OwnNotPaged; // slot 0 holds a window, or none was made
+        if (l.classes > 1 and pages / l.classes < tableLen(e.capacity)) { // a stream's pages all come from one class
+            if (!@import("builtin").is_test) std.log.err("the pool's {d} pages a class hold less than one stream's {d}", .{ pages / l.classes, tableLen(e.capacity) });
+            return error.ClassTooSmall;
+        }
         const p = try gpa.create(Pages);
         errdefer gpa.destroy(p);
         const page = if (kv_host.onHost()) state.pageBytes(&e.w) else l.pageBytes();
-        p.* = .{ .gpa = gpa, .e = e, .layout = l, .page = page, .pool = try kv.Pool.init(gpa, pages, page), .arena = null, .leases = &.{}, .used = &.{}, .leader = leader, .poison = poisoned() };
+        p.* = .{ .gpa = gpa, .e = e, .layout = l, .page = page, .pool = try kv.Pool.initClasses(gpa, pages, page, l.classes), .arena = null, .leases = &.{}, .used = &.{}, .leader = leader, .poison = poisoned() };
         errdefer p.pool.deinit();
         const host = kv_host.onHost() and pages > 0;
         if (pages > 0 and !host) p.arena = try cuda.DeviceBuffer.alloc(e.d, pages * page);
@@ -103,7 +111,7 @@ pub const Pages = struct {
             q.* = null;
         };
         errdefer cuda.completion.drain(e.d, e.stream, "GLM page construction did not drain");
-        var at = on(e, p.base(), page);
+        var at = on(e, p.base(), pages);
         if (p.pk_arena) |a| {
             at.pk = a.ptr;
             at.pk_page = state.pkPageBytes(&e.w);
@@ -118,6 +126,7 @@ pub const Pages = struct {
         }
         try e.stream.synchronize();
         own.?.st.place(&e.w, at); // last: a failure before it leaves the engine's own as it was
+        if (l.classes > 1 and !@import("builtin").is_test) std.log.info("kv split: {d} owner classes of {d} pages; a stream takes at most one class ({d} pages at the window); every rank still holds every latent row, so this saves no memory yet", .{ l.classes, pages / l.classes, tableLen(e.capacity) });
         return p;
     }
 
@@ -131,6 +140,15 @@ pub const Pages = struct {
         return init(gpa, e, l, streams, pages, false);
     }
 
+    /// `follow` with rank 0's TF_GLM_KV_SPLIT (its `pool` step's flag): a rank that books otherwise is RankMismatch.
+    pub fn followFlagged(gpa: std.mem.Allocator, e: *Engine, streams: usize, pages: usize, page_bytes: u64, split: bool) !*Pages {
+        if (e.settings.kv_split != split) {
+            if (!@import("builtin").is_test) std.log.err("rank {d}: TF_GLM_KV_SPLIT is {} here and {} on rank 0", .{ e.share.rank, e.settings.kv_split, split });
+            return error.RankMismatch;
+        }
+        return follow(gpa, e, streams, pages, page_bytes);
+    }
+
     /// The pages' first byte as kernels address it (device arena or mapped host pages).
     fn base(p: *const Pages) u64 {
         return if (p.arena) |a| a.ptr else p.host_ptr;
@@ -139,6 +157,13 @@ pub const Pages = struct {
     fn poisoned() bool {
         const v = std.c.getenv("TF_KV_POISON") orelse return false;
         return std.mem.eql(u8, std.mem.span(v), "1");
+    }
+
+    /// A page's parts, each at its region's base and stride: the whole page, or its pooled keys and latent rows.
+    fn parts(p: *const Pages) [2]struct { at: u64, bytes: u64 } {
+        if (!p.e.settings.kv_split) return .{ .{ .at = p.base(), .bytes = p.page }, .{ .at = 0, .bytes = 0 } };
+        const pooled = state.pkPageBytes(&p.e.w);
+        return .{ .{ .at = p.base(), .bytes = pooled }, .{ .at = p.base() + p.pool.total() * pooled, .bytes = p.page - pooled } };
     }
 
     /// The pool and the pages' arena; the paged sequences are the engine's (it frees every slot).
@@ -164,7 +189,9 @@ pub const Pages = struct {
 
     /// Whether a request's pages fit now and a paged sequence is free for it.
     pub fn fits(p: *const Pages, prompt: usize, max_tokens: usize) bool {
-        for (p.used) |u| if (!u) return p.pool.fits(need(p.layout, prompt, max_tokens));
+        const n = need(p.layout, prompt, max_tokens);
+        // past a class, `open` refuses it by name: the lane host drops it, not waits for room that never comes
+        for (p.used) |u| if (!u) return p.pool.fitsAny(n) or (p.pool.classes > 1 and n > p.pool.classCap());
         return false;
     }
 
@@ -180,12 +207,24 @@ pub const Pages = struct {
 
     /// `open` with the prompt cache's `adopted` pages (held for this call) first: their rows stay as the cache kept.
     pub fn openWith(p: *Pages, slot: u32, prompt: usize, max_tokens: usize, adopted: []const u32) ![]const u32 {
+        return p.openOwned(slot, prompt, max_tokens, adopted, p.pool.roomiest());
+    }
+
+    /// `open` on owner class `owner` (the harness pins it; serving takes the roomiest).
+    pub fn openOn(p: *Pages, slot: u32, prompt: usize, max_tokens: usize, owner: u32) ![]const u32 {
+        return p.openOwned(slot, prompt, max_tokens, &.{}, owner);
+    }
+
+    fn openOwned(p: *Pages, slot: u32, prompt: usize, max_tokens: usize, adopted: []const u32, owner: u32) ![]const u32 {
         var held = adopted.len > 0;
         errdefer if (held) for (adopted) |id| p.pool.release(id);
         if (!p.paged(slot) or p.used[slot]) return error.SlotTaken;
         const n = need(p.layout, prompt, max_tokens);
         if (n > tableLen(p.e.capacity) or adopted.len > n) return error.PromptTooLong;
+        if (p.pool.classes > 1 and n > p.pool.classCap()) return error.ClassTooSmall; // not LaneMemory: never requeued
+        if (owner >= p.pool.classes) return error.BadStep;
         const l = &p.leases[slot];
+        l.owner = owner; // every id it takes is of this class
         try p.pool.promise(l, n - adopted.len);
         errdefer p.pool.finish(l);
         if (adopted.len > 0) {
@@ -201,10 +240,17 @@ pub const Pages = struct {
 
     /// Another rank: paged slot `slot` maps rank 0's page ids (its begin step's), the prompt cache's `kept` first.
     pub fn map(p: *Pages, slot: u32, ids: []const u32, kept: usize) !void {
+        return p.mapOwned(slot, ids, kept, 0);
+    }
+
+    /// `map` of a stream of owner class `owner` (its begin step's): every id of that class, or ResidueMismatch.
+    pub fn mapOwned(p: *Pages, slot: u32, ids: []const u32, kept: usize, owner: u32) !void {
         if (!p.paged(slot) or ids.len == 0 or ids.len > tableLen(p.e.capacity) or kept > ids.len) return error.BadStep;
-        if (p.used[slot]) return error.BadStep;
+        if (p.used[slot] or owner >= p.pool.classes) return error.BadStep;
         for (ids) |id| if (id >= p.pool.total()) return error.BadStep;
+        for (ids) |id| if (id % p.pool.classes != owner) return error.ResidueMismatch;
         const l = &p.leases[slot];
+        l.owner = owner;
         l.ids.clearRetainingCapacity();
         try l.ids.appendSlice(p.gpa, ids);
         errdefer l.ids.clearRetainingCapacity();
@@ -216,8 +262,7 @@ pub const Pages = struct {
     /// The slot's sequence reaches its pages' rows (past the `kept` first, NaN first under TF_KV_POISON).
     fn mapped(p: *Pages, slot: u32, ids: []const u32, kept: usize) !void {
         const st = &p.e.seqs.items[slot].?.st;
-        const page = p.page;
-        if (p.poison) for (ids[kept..]) |id| try p.e.d.check(p.e.d.api.cuMemsetD32Async(p.base() + id * page, 0xFFFF_FFFF, page / 4, p.e.stream.handle), "cuMemsetD32Async");
+        if (p.poison) for (ids[kept..]) |id| for (p.parts()) |r| if (r.bytes > 0) try p.e.d.check(p.e.d.api.cuMemsetD32Async(r.at + id * r.bytes, 0xFFFF_FFFF, r.bytes / 4, p.e.stream.handle), "cuMemsetD32Async");
         st.pages = ids;
         st.capacity = @min(ids.len * state.page_rows, p.e.capacity);
         p.used[slot] = true;
@@ -232,7 +277,10 @@ pub const Pages = struct {
         st.capacity = 0;
         p.used[slot] = false;
         if (kv_host.active) |*g| g.invalidate(p.e.stream) catch {};
-        if (!p.leader) return p.leases[slot].ids.clearRetainingCapacity();
+        if (!p.leader) {
+            p.leases[slot].owner = 0;
+            return p.leases[slot].ids.clearRetainingCapacity();
+        }
         p.pool.finish(&p.leases[slot]);
         for (p.used) |u| if (u) return;
         p.report();
@@ -243,7 +291,15 @@ pub const Pages = struct {
         if (@import("builtin").is_test) return;
         const c = p.pool.census();
         const ok = p.pool.idle() and (p.e.share_pages or c.free == c.total);
-        std.log.info("kv pool idle{s}: promised {d}, free {d} + store {d} == total {d}", .{ if (ok) "" else " (UNEVEN)", c.promised, c.free, c.kept, c.total });
+        var buf: [kv.max_classes * 48]u8 = undefined;
+        var w = std.Io.Writer.fixed(&buf);
+        const shown: usize = if (p.pool.classes > 1) p.pool.classes else 0; // TF_GLM_KV_SPLIT: each owner class
+        for (0..shown) |k| {
+            const x: u32 = @intCast(k);
+            w.print("{s}{d} + {d} of {d}", .{ if (k == 0) " (classes: free " else ", ", p.pool.classFree(x), p.pool.classPromised(x), p.pool.classCap() }) catch break;
+        }
+        if (p.pool.classes > 1) w.writeAll(")") catch {};
+        std.log.info("kv pool idle{s}: promised {d}, free {d} + store {d} == total {d}{s}", .{ if (ok) "" else " (UNEVEN)", c.promised, c.free, c.kept, c.total, w.buffered() });
     }
 
     /// A stream's table entries written to its sequence's device table (blocking: the stream waits for the copy).
@@ -257,6 +313,8 @@ pub const Pages = struct {
             const st = &e.seqs.items[u.slot].?.st;
             const bytes = std.mem.sliceAsBytes(ids[from..]);
             try e.d.check(e.d.api.cuMemcpyHtoD_v2(st.table + from * 4, bytes.ptr, bytes.len), "cuMemcpyHtoD");
+            // TF_GLM_KV_SPLIT: the latent table holds the same ids while every rank holds every row
+            if (st.ltable != 0) try e.d.check(e.d.api.cuMemcpyHtoD_v2(st.ltable + from * 4, bytes.ptr, bytes.len), "cuMemcpyHtoD");
         }
     };
 };

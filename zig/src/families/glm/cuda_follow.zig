@@ -14,14 +14,14 @@ const sparse = @import("cuda_sparse.zig");
 const prompt_pair = @import("cuda_prompt_pair.zig");
 const Engine = engine.Engine;
 
-pub const Kind = enum(u32) { begin = 1, prefill, verify, keep, draft, end, drop, release, chunk, shared, image, block, many, redraw, idle, snapshots, pool };
+pub const Kind = enum(u32) { begin = 1, prefill, verify, keep, draft, end, drop, release, chunk, shared, image, block, many, redraw, idle, snapshots, pool, disk };
 
 /// One step as it crosses: 64 bytes, then `n` u32 ids.
 pub const Header = extern struct {
     kind: u32,
     n: u32 = 0, // ids that follow
-    depth: u32 = 0, // draft: drafts to chain; chunk: where it starts; shared: its parts
-    flags: u32 = 0, // begin: sampled; draft: from the prompt (1), chances (2); prefill, chunk: prompt_logprobs (1); chunk: indexer rows split (2); verify, shared: whole rows; snapshots: pages shared
+    depth: u32 = 0, // draft: drafts to chain; chunk: where it starts; shared: its parts; begin: the stream's owner class
+    flags: u32 = 0, // pool: TF_GLM_KV_SPLIT; begin: sampled; draft: from the prompt (1), chances (2); prefill, chunk: prompt_logprobs (1); chunk: indexer rows split (2); verify, shared: whole rows; snapshots: pages shared
     a: u64 = 0, // begin: the prompt cache's pages first in its table; keep: rows; prefill, chunk: the kept state it resumes (0: none); redraw: the prompt's length
     seed: u64 = 0, // begin: the sampling seed; prefill, chunk: the kept state's position
     temperature: f64 = 0,
@@ -108,6 +108,14 @@ pub const Link = struct {
         try l.lib.check(l.lib.api.ncclBroadcast(ptr, ptr, bytes, .u8, 0, l.comm, l.stream.handle), "ncclBroadcast");
     }
 
+    /// `bytes` after the header from rank `root` into every rank's buffer (a disk step's take: cuda_disk_ranks).
+    pub fn from(l: *Link, root: u32, bytes: usize) !void {
+        if (bytes == 0) return;
+        if (64 + bytes > l.buf.len) return error.TooManyIds;
+        try l.lib.check(l.lib.api.ncclBroadcast(l.buf.ptr + 64, l.buf.ptr + 64, bytes, .u8, @intCast(root), l.comm, l.stream.handle), "ncclBroadcast");
+        try l.stream.synchronize();
+    }
+
     /// Other ranks: the next step and its ids (valid until the next receive).
     pub fn receive(l: *Link) !struct { h: Header, ids: []const u32 } {
         try l.bcast(64);
@@ -185,6 +193,9 @@ pub const Leader = struct {
         try x.flush();
         const c = sampler.check(s);
         var h: Header = .{ .kind = @backingInt(Kind.begin), .a = kept };
+        if (pages.len > 0) if (x.e.pages) |p| { // TF_GLM_KV_SPLIT: the owner class every id is of (0 otherwise)
+            h.depth = p.leases[x.e.slot].owner;
+        };
         if (c) |v| {
             h.flags = 1;
             h.seed = v.seed;
@@ -205,7 +216,7 @@ pub const Leader = struct {
 
     /// The other ranks make rank 0's pool: `streams` paged sequences and `pages` pages, each page's bytes checked.
     pub fn pool(x: Leader, streams: u32, pages: usize, page_bytes: u64) !void {
-        try x.send(.{ .kind = @backingInt(Kind.pool), .depth = streams, .a = pages, .seed = page_bytes }, &.{});
+        try x.send(.{ .kind = @backingInt(Kind.pool), .depth = streams, .a = pages, .seed = page_bytes, .flags = @intFromBool(x.e.settings.kv_split) }, &.{});
     }
 
     /// The prompt pass's image rows (rank 0 encoded them for the bound slot) to every rank: spans, then the rows.
@@ -299,6 +310,14 @@ pub const Leader = struct {
         try x.e.draftBlock(reqs);
     }
 
+    /// A kept state's disk step (cuda_disk_ranks): its op and ids to every rank.
+    pub fn disk(x: Leader, h: Header, ids: []const u32) !void {
+        try x.flush();
+        var hh = h;
+        hh.kind = @backingInt(Kind.disk);
+        try x.send(hh, ids);
+    }
+
     /// The other ranks leave their loops.
     pub fn end(x: Leader) !void {
         try x.send(.{ .kind = @backingInt(Kind.end) }, &.{});
@@ -333,17 +352,17 @@ pub fn follow(e: *Engine, link: *Link) !void {
         const step = try link.receive();
         const h = step.h;
         const kind: Kind = @fromBackingInt(@intCast(h.kind));
-        if (kind != .end and kind != .drop and kind != .shared and kind != .block and kind != .many and kind != .idle and kind != .snapshots and kind != .pool) try e.bind(h.slot);
+        if (kind != .end and kind != .drop and kind != .shared and kind != .block and kind != .many and kind != .idle and kind != .snapshots and kind != .pool and kind != .disk) try e.bind(h.slot);
         e.prompt_logprobs = if (promptRows(h)) .{} else null;
         e.structured = structuredStep(h); // rank 0 alone masks them
         switch (kind) {
             .begin => {
-                if (step.ids.len > 0) try (e.pages orelse return error.BadStep).map(h.slot, step.ids, std.math.cast(usize, h.a) orelse return error.BadStep);
+                if (step.ids.len > 0) try (e.pages orelse return error.BadStep).mapOwned(h.slot, step.ids, std.math.cast(usize, h.a) orelse return error.BadStep, h.depth);
                 try e.beginFollowing(if (h.flags & 1 != 0) .{ .seed = h.seed, .temperature = h.temperature, .top_p = h.top_p, .min_p = h.min_p, .top_k = h.top_k } else null);
             },
             .pool => {
                 if (e.pages != null) return error.BadStep;
-                e.pages = try pages_mod.Pages.follow(e.gpa, e, h.depth, @intCast(h.a), h.seed);
+                e.pages = try pages_mod.Pages.followFlagged(e.gpa, e, h.depth, @intCast(h.a), h.seed, h.flags & 1 != 0);
             },
             .prefill => {
                 const ids = try e.gpa.dupe(u32, step.ids);
@@ -410,6 +429,7 @@ pub fn follow(e: *Engine, link: *Link) !void {
                 e.share_pages = h.flags & 1 != 0; // TF_KV_SHARE on rank 0: a kept state leaves the shared store's pages out
                 try @import("cuda_snapshots.zig").agree(e, h.a);
             },
+            .disk => try @import("cuda_disk_ranks.zig").step(e, link, h, step.ids),
             .drop => for (step.ids) |id| e.dropState(id),
             .release => e.release(h.slot),
             .idle => cuda.tp_watch.sleep(e.io),

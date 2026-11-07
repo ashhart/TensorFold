@@ -155,8 +155,10 @@ fn fits(comptime F: type, loaded: anytype, o: api.Open, room: u64, window: u64, 
 pub fn plan(comptime F: type, a: Allocator, l: kv_pool.Layout, room: u64, o: api.Open, window: u64, problem: *[]const u8, host_mode: bool, engine_paged: bool, kept_ppm: u32) !?Plan {
     const rows: u64 = if (comptime @hasDecl(F, "window_rows")) F.window_rows else 0;
     const want = if (host_mode) 0 else budget.cacheBytes(o.prompt_cache_gib, std.math.maxInt(u64), 0);
-    return kv_pool.plan(l, .{ .room = room, .engine = 0, .lanes = o.lanes, .fixed = o.lanes_fixed, .cache = want, .snaps = named(o), .window = window + rows, .engine_paged = engine_paged, .kept_ppm = if (host_mode) 0 else kept_ppm, .asked = o.prompt_cache_gib != null }) catch |e| {
+    const b: kv_pool.Budget = .{ .room = room, .engine = 0, .lanes = o.lanes, .fixed = o.lanes_fixed, .cache = want, .snaps = named(o), .window = window + rows, .engine_paged = engine_paged, .kept_ppm = if (host_mode) 0 else kept_ppm, .asked = o.prompt_cache_gib != null };
+    return kv_pool.planClasses(l, b) catch |e| {
         problem.* = switch (e) {
+            error.ClassTooSmall => try std.fmt.allocPrint(a, "the KV pages split into {d} owner classes of {d} pages, and one stream at a {d}-token window takes {d}: lower --context, raise --parallel to {d} or more, or serve without TF_GLM_KV_SPLIT", .{ l.classes, (kv_pool.plan(l, b) catch unreachable).pages / l.classes, window, l.pages(window + rows), l.classes }),
             error.NoStream => if (engine_paged) try std.fmt.allocPrint(a, "the CUDA memory budget fits no stream beside the model: one at a {d}-token window takes {d:.2} GiB of KV pages, and the budget leaves {d:.2} GiB", .{ window, toGib(l.pages(window + rows) * l.pageBytes()), toGib(room) }) else "the CUDA memory budget fits no stream beside the model",
             error.TooMany => try std.fmt.allocPrint(a, "--parallel {d} needs {d:.2} GiB for its other streams' fixed parts, state runs and a page each, and the CUDA memory budget leaves {d:.2} GiB: serve fewer, or free device memory", .{ o.lanes, toGib((o.lanes - 1) * (l.fixed_bytes + (1 + l.runPages()) * l.pageBytes())), toGib(room) }),
         };
@@ -354,6 +356,21 @@ test "kv pages: an engine whose own rows are pages plans a window of them first,
     try std.testing.expect(fits(Owned, loaded, o, floor + 3 * each + (4 << 30), 8192, 0));
     try std.testing.expect(!fits(Owned, loaded, o, floor + 3 * each + (4 << 30) - 1, 8192, 0));
 }
+test "kv pages: owner classes floor the plan's pages to the classes, and a class short of a window is refused with its numbers" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var problem: []const u8 = "";
+    var l: kv_pool.Layout = .{ .fixed_bytes = 180 << 20, .token_bytes = 13_056, .page_tokens = 512, .snap_bytes = 0, .classes = 2 };
+    const o: api.Open = .{ .dir = "", .model_type = "g", .lanes = 4, .prompt_cache_gib = 4 };
+    const p = (try plan(Owned, arena.allocator(), l, 40 << 30, o, 8192, &problem, false, true, 0)).?;
+    try std.testing.expectEqual(@as(usize, 4 * 17), p.pages); // even already: two classes of 34, two windows each
+    l.classes = 3;
+    try std.testing.expectEqual(@as(usize, 66), (try plan(Owned, arena.allocator(), l, 40 << 30, o, 8192, &problem, false, true, 0)).?.pages);
+    l.classes = 8; // 8 classes of 8 pages, a window of 17
+    try std.testing.expectEqual(@as(?Plan, null), try plan(Owned, arena.allocator(), l, 40 << 30, o, 8192, &problem, false, true, 0));
+    try std.testing.expectEqualStrings("the KV pages split into 8 owner classes of 8 pages, and one stream at a 8192-token window takes 17: lower --context, raise --parallel to 8 or more, or serve without TF_GLM_KV_SPLIT", problem);
+}
+
 test "kv merge: host armed-state staging is reserved once before planning the page pool" {
     const loaded = .{ .host_snaps = true, .snap_bytes = @as(u64, 8 << 20) };
     try std.testing.expectEqual(@as(u64, 8 << 20), stagingBytes(Fixture, loaded, 1 << 30));

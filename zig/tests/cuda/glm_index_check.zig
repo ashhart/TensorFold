@@ -7,8 +7,11 @@ const sp = glm.sparse;
 
 const d = 128;
 const page_bytes = 65536; // a page's stride: 128 pools of keys in its first half, as a page that also holds other rows
+// TF_GLM_KV_SPLIT at GLM-5.3-Flash's 12 caches a page: the pooled region's stride, and the latent region's
+const pooled_bytes = 12 * 128 * d * 2;
+const latent_bytes = 12 * 512 * 512 * 2;
 
-const Case = struct { cap: usize, pos: usize, rows: usize, heads: usize = 32, paged: bool = false, bits: bool = false };
+const Case = struct { cap: usize, pos: usize, rows: usize, heads: usize = 32, paged: bool = false, bits: bool = false, split: bool = false };
 const cases = [_]Case{
     .{ .cap = 4096, .pos = 300, .rows = 512 }, // few visible pools: the rows select over their first 512
     .{ .cap = 1024, .pos = 4 * 1024 - 520, .rows = 512 },
@@ -16,6 +19,7 @@ const cases = [_]Case{
     .{ .cap = 16384, .pos = 4 * 16384 - 520, .rows = 512 },
     .{ .cap = 16384, .pos = 4 * 16384 - 1130, .rows = 1100 }, // three score blocks, the later two from s.at
     .{ .cap = 16384, .pos = 4 * 16384 - 600, .rows = 512, .paged = true },
+    .{ .cap = 16384, .pos = 4 * 16384 - 600, .rows = 512, .paged = true, .split = true }, // two regions, two tables
     .{ .cap = 4096, .pos = 4 * 4096 - 520, .rows = 512, .heads = 20 }, // fewer heads than a warp's 32 rows of q
     .{ .cap = 65536, .pos = 4 * 65536 - 520, .rows = 512 },
     .{ .cap = 147456, .pos = 4 * 147456 - 520, .rows = 512 }, // a cap off the power of two
@@ -57,7 +61,7 @@ fn ms(a: std.Io.Timestamp, b: std.Io.Timestamp) f64 {
 
 /// One line before each step, so a failure names the case and step it died in.
 fn step(c: Case, np: usize, what: []const u8) void {
-    std.debug.print("  [np {d} rows {d} heads {d}{s}] {s}\n", .{ np, c.rows, c.heads, if (c.paged) " paged" else "", what });
+    std.debug.print("  [np {d} rows {d} heads {d}{s}] {s}\n", .{ np, c.rows, c.heads, if (c.split) " split" else if (c.paged) " paged" else "", what });
 }
 
 /// How many rows took each path of glm_index_pools (whole row, candidates, whole row after the candidates missed).
@@ -102,21 +106,28 @@ pub fn run(gpu: check.Gpu) !void {
         const dq = try fromHost(gpu, &bufs, std.mem.sliceAsBytes(qi));
         const dw = try fromHost(gpu, &bufs, std.mem.sliceAsBytes(wts));
         var table: glm.latent.Table = .{};
+        var ltable: glm.latent.Table = .{}; // the token lists' latent rows: the keys' table, or the latent region's own
         var dk: u64 = undefined;
         if (c.paged) {
             // the keys on shuffled pages, the table long enough for the token lists' latent rows too
-            const page_rows = page_bytes / (512 * 2);
+            const stride: usize = if (c.split) pooled_bytes else page_bytes;
+            const page_rows = @as(usize, if (c.split) latent_bytes else page_bytes) / (512 * 2);
             const entries = @max((c.cap + 127) / 128, (4 * np + page_rows - 1) / page_rows + 8);
             const ids = try gpa.alloc(i32, entries);
             defer gpa.free(ids);
             for (ids, 0..) |*v, i| v.* = @intCast(i);
             rand.shuffle(i32, ids);
-            const arena = try gpa.alloc(u8, entries * page_bytes);
+            const arena = try gpa.alloc(u8, entries * stride);
             defer gpa.free(arena);
             @memset(arena, 0);
-            for (0..c.cap) |p| @memcpy(arena[@as(usize, @intCast(ids[p / 128])) * page_bytes + (p % 128) * d * 2 ..][0 .. d * 2], std.mem.sliceAsBytes(pk[p * d ..][0..d]));
+            for (0..c.cap) |p| @memcpy(arena[@as(usize, @intCast(ids[p / 128])) * stride + (p % 128) * d * 2 ..][0 .. d * 2], std.mem.sliceAsBytes(pk[p * d ..][0..d]));
             dk = try fromHost(gpu, &bufs, arena);
-            table = .{ .pt = try fromHost(gpu, &bufs, std.mem.sliceAsBytes(ids)), .ps = page_bytes, .page_rows = page_rows };
+            table = .{ .pt = try fromHost(gpu, &bufs, std.mem.sliceAsBytes(ids)), .ps = stride, .page_rows = page_rows };
+            ltable = table;
+            if (c.split) {
+                rand.shuffle(i32, ids); // the latent region's own table over the same pages
+                ltable = .{ .pt = try fromHost(gpu, &bufs, std.mem.sliceAsBytes(ids)), .ps = latent_bytes, .page_rows = page_rows };
+            }
         } else dk = try fromHost(gpu, &bufs, std.mem.sliceAsBytes(pk));
         const p0: i32 = @intCast(c.pos);
         const dpos = try fromHost(gpu, &bufs, std.mem.asBytes(&p0));
@@ -136,10 +147,10 @@ pub fn run(gpu: check.Gpu) !void {
         var ms_new: f64 = 0;
         for (0..3) |rep| {
             const t0 = std.Io.Timestamp.now(gpu.io, .awake);
-            try sp.selectTokens(old, ops, s, dq, dw, c.heads, dk, table, dpos, c.pos, c.rows, c.heads, d, c.cap, sa, ta, ca);
+            try sp.selectTokensProfile(old, ops, s, dq, dw, c.heads, dk, table, ltable, dpos, c.pos, c.rows, c.heads, d, c.cap, sa, ta, ca, null, null);
             try s.synchronize();
             const t1 = std.Io.Timestamp.now(gpu.io, .awake);
-            try sp.selectTokens(new, ops, s, dq, dw, c.heads, dk, table, dpos, c.pos, c.rows, c.heads, d, c.cap, sb, tb, cb);
+            try sp.selectTokensProfile(new, ops, s, dq, dw, c.heads, dk, table, ltable, dpos, c.pos, c.rows, c.heads, d, c.cap, sb, tb, cb, null, null);
             try s.synchronize();
             const t2 = std.Io.Timestamp.now(gpu.io, .awake);
             if (rep > 0) {
@@ -148,7 +159,7 @@ pub fn run(gpu: check.Gpu) !void {
             }
         }
         step(c, np, "selectTokens scores-only");
-        try sp.selectTokens(half, ops, s, dq, dw, c.heads, dk, table, dpos, c.pos, c.rows, c.heads, d, c.cap, sc, tc, cc);
+        try sp.selectTokensProfile(half, ops, s, dq, dw, c.heads, dk, table, ltable, dpos, c.pos, c.rows, c.heads, d, c.cap, sc, tc, cc, null, null);
         try s.synchronize();
         step(c, np, "compare scores, pools, tokens, scores-only");
         const blk: usize = @min(c.rows, sp.select_rows);
@@ -158,7 +169,7 @@ pub fn run(gpu: check.Gpu) !void {
         fails += try same(gpu, "scores-only scores", sa.scores, sc.scores, blk * np * 4, np, c);
         fails += try same(gpu, "scores-only pools", sa.pools, sc.pools, c.rows * sp.topk_pools * 8, np, c);
         fails += try same(gpu, "scores-only tokens", ta, tc, tok_bytes, np, c);
-        std.debug.print("np {d} rows {d} heads {d}{s}: selectTokens {d:.2} ms, with glm_index {d:.2} ms\n", .{ np, c.rows, c.heads, if (c.paged) " paged" else "", ms_old, ms_new });
+        std.debug.print("np {d} rows {d} heads {d}{s}: selectTokens {d:.2} ms, with glm_index {d:.2} ms\n", .{ np, c.rows, c.heads, if (c.split) " split" else if (c.paged) " paged" else "", ms_old, ms_new });
         step(c, np, "every score block");
         fails += try blocks(gpu, &bufs, old, &idx, s, dq, dw, dk, table, c, np);
         step(c, np, "tied, random and special scores through both selects");

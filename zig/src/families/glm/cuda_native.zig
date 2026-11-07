@@ -149,6 +149,7 @@ pub fn capacity(context: usize) usize {
 pub const window_rows: u32 = fw.window_rows;
 
 const snapshots = @import("cuda_snapshots.zig");
+const disk_ranks = @import("cuda_disk_ranks.zig");
 
 const Owned = struct {
     gpa: std.mem.Allocator,
@@ -217,6 +218,7 @@ fn openRank(a: StartArgs, set: ranks.Settings) !Loaded {
     // TF_KV_SHARE keeps prompts as the pool's pages: refused before the weights load, every rank told (startup)
     if (a.share > 0 and !set.pages) return error.GlmShareNeedsPages;
     if (@import("cuda_kv_host.zig").onHost() and !set.pages) return error.GlmKvHostNeedsPages;
+    if (set.kv_split and a.share > 0) return error.KvSplitShare; // the store's pages would be of any owner's class
     cuda.memory_receipt.emit(@intCast(p.rank), .load_begin, true); // the four phases tools/memory_receipts.py reads
     const own = try gpa.create(Owned);
     errdefer gpa.destroy(own);
@@ -308,6 +310,8 @@ fn finishRank(a: OpenArgs) !Loaded {
     own.e.group = &own.group;
     own.link = try follow.Link.init(gpa, ctx.d, &own.group.lib, own.group.comm, own.e.stream, try linkCapacity(cap, o.vision));
     errdefer own.link.deinit();
+    if (p.rank == 0 and p.world > 1) disk_ranks.link = &own.link; // its disk steps cross on the link
+    errdefer disk_ranks.link = null;
     own.e.snap_setup = .{ .ptr = own, .run = readySnapshots };
     try @import("cuda_kv_host.zig").prepare(ctx.d, @import("cuda_state.zig").pageBytes(&own.e.w), own.e.capacity, own.e.w.config.kv_lora * 2);
     if (p.world > 1) try a.load_cache.finishAfter(.{ io, own.e.checkpoint_digest }, cuda.tp_watch.ready) else a.load_cache.finish();
@@ -470,6 +474,7 @@ pub fn startup_phase(ptr: *anyopaque, phase: cuda.startup_watch.Phase) void {
 /// What a rank owns, freed by rank 0's close and by a follower before it leaves.
 fn release(own: *Owned) void {
     own.progress.end();
+    disk_ranks.link = null;
     own.link.deinit();
     if (own.e.images) |v| v.deinit();
     own.e.deinit();
@@ -490,6 +495,13 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.GlmKvShareMoved => "TF_GLM_KV_SHARE is now TF_KV_SHARE, the prompt store every family on the KV pool shares: set that instead",
         error.GlmShareNeedsPages => "TF_KV_SHARE keeps prompts as KV pool pages: set TF_KV_PAGES=on as well",
         error.BadCopyPolicy => "TF_GLM_COPIES: expected 0 or 1 for verified root/context copies",
+        error.KvSplitNeedsRanks => "TF_GLM_KV_SPLIT splits rows over ranks: it needs TF_GLM_WORLD 2 or more",
+        error.KvSplitNeedsPages => "TF_GLM_KV_SPLIT needs KV pages: unset TF_KV_PAGES or set it to auto or on (fp8 KV keeps windows)",
+        error.KvSplitOnHost => "TF_GLM_KV_SPLIT keeps the KV pages on the device: unset TF_GLM_KV_HOST",
+        error.KvSplitShare => "TF_GLM_KV_SPLIT books each stream's pages from its owner's class, and TF_KV_SHARE's pages come from any: unset one",
+        error.ClassTooSmall => "TF_GLM_KV_SPLIT: one owner class of the KV pages holds less than one stream's window (the log gives the numbers): lower --context, raise --parallel, or serve without TF_GLM_KV_SPLIT",
+        error.ResidueMismatch => "a rank was sent a KV page of another owner's class (a bug: the ranks' books disagree)",
+        error.BadClasses => "the KV pages do not split into the owner classes (a multiple of the ranks, at most 16)",
         error.GlmKvHostNeedsPages => "TF_GLM_KV_HOST keeps the KV pool's pages in host memory: set TF_KV_PAGES=on (and --kv-cache bf16) as well",
         error.TooManyRanks => std.fmt.comptimePrint(
             "GLM-5.3-Flash on CUDA runs on at most {d} ranks: set TF_GLM_WORLD to {d} or fewer",
@@ -538,6 +550,7 @@ test "TF_KV_PAGES with --kv-cache fp8: auto and off keep windows at every rank c
     }
     try std.testing.expect(explain(null, error.Fp8OnPages) != null);
     try std.testing.expect(explain(null, error.GlmKvHostNeedsPages) != null);
+    for ([_]anyerror{ error.KvSplitNeedsRanks, error.KvSplitNeedsPages, error.KvSplitOnHost, error.KvSplitShare, error.ClassTooSmall, error.ResidueMismatch, error.BadClasses }) |e| try std.testing.expect(explain(null, e) != null);
 }
 
 test "capacity keeps a verify window past the context and a multiple of 64" {

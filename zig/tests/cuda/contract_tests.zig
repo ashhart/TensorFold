@@ -548,6 +548,8 @@ fn registered(gpu: check.Gpu, only: []const []const u8, t0: *i96) !g.Tally {
         x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .f = if (hb == 16) glm_fns.chunks_16 else glm_fns.chunks_32, .merge = glm_fns.merge, .form = .{ .hb = hb, .sparse = sparse } };
     defer for (&glm_chunks) |*x| x.deinit();
     for (&glm_chunks) |*x| try kernels.append(a, x.kernel());
+    const glm_regions = try @import("contract_glm_regions.zig").Set.create(a, gpu, s, glm_fns, glm_tokens.f, &kernels);
+    defer glm_regions.destroy(a);
     var glm_controls = @import("contract_glm_controls.zig").Controls.init(gpu, s, glm_fns, glm_tokens.f, glm_ops);
     defer glm_controls.deinit();
     try glm_controls.append(a, &kernels);
