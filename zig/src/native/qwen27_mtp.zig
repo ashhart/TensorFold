@@ -9,8 +9,9 @@ const Tree = q.dflash.selector.Tree;
 const Round = q.round_plan.Round;
 const lb = @import("qwen27_lanes.zig");
 
-/// Drafts a chain holds at most: a verify window's rows less the pending token.
-pub const max_drafts = 15;
+const flags = @import("qwen27_mtp_flags.zig");
+pub const max_drafts = flags.max_drafts;
+pub const refusal = flags.refusal;
 const max_rows = q.gpu_frame.max_rows;
 /// Hazard-tracked: a pass's staging, its carry and its saved row move between blits and kernels in one buffer.
 const opts = mtl.ResourceOptions.shared;
@@ -184,22 +185,13 @@ pub const Mtp = struct {
     }
 };
 
-/// --mtp-drafts and --mtp-confidence on a Mac: Qwen3.8-27B's MTP head (`target`), opt-in, exclusive with DFlash2.
-pub fn refusal(drafts: ?u32, confidence: ?f64, drafter: bool, target: bool) ?[]const u8 {
-    if (drafts == null and confidence == null) return null;
-    if (!target) return "--mtp-drafts and --mtp-confidence draft with Qwen3.8-27B's MTP head on a Mac; serve this checkpoint without them";
-    if (confidence) |c| if (!(c >= 0 and c <= 1)) return "--mtp-confidence must be from 0 to 1";
-    const n = drafts orelse return "--mtp-confidence stops the MTP head's chains, which --mtp-drafts N turns on: serve with both or neither";
-    if (n > max_drafts) return std.fmt.comptimePrint("--mtp-drafts: Qwen3.8-27B on a Mac drafts at most {d} a round", .{max_drafts});
-    if (n > 0 and drafter) return "--mtp-drafts drafts with the MTP head, and --drafter with DFlash2: serve with one of them";
-    return null;
-}
-
 /// Slot 0's verified rows into the head after the keep: each kept row beside the token drawn at it.
 pub fn kept(b: *lb.Metal, paths: []const []const u32) !void {
     const x = b.mtp orelse return;
     const i = x.window orelse return;
     x.window = null;
+    // a shared round's slot 0 does not draft: its rows would cost every stream a head pass, so the head waits
+    if (b.count > 1) return;
     const round = &(b.round orelse return);
     const first = round.firsts[i];
     const path = paths[i];
