@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Tests: the Qwen 3.5 `resumed == fresh` checks (`check_invariants`' long greedy lanes and `check_radix`'s stress) evict every kept prompt before their fresh run, and fail by name if a fresh reply still resumed, so they compare a resume with a real fresh run (#2374, for #2353). Thanks to @AbrahamCete.
+
 - Internal: 20 more lean findings fixed in core's and the Metal kernels' comments, with no change in behaviour (#2309).
 
 - Internal: the TP host reference and in-process transport add bf16 and f16 sums in fp32 rank order and round once, as documented; sums at one or two ranks are unchanged, and the device checks' expectations don't move (#2366, part of #1971).
