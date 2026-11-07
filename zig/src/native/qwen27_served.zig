@@ -320,6 +320,11 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     if (capacity == 0 or capacity > model.config.max_position) return error.ContextFull;
     const policy = @import("qwen27_window.zig");
     const units = model.device.tensorUnits();
+    // the paged kernels have run only before the M5: a Mac with tensor units refuses the flag until they run there
+    if (q.decode_round.pagesOn() and units) {
+        why.* = "TF_QWEN27_METAL_KV_PAGES=1 has run only on Macs without tensor units (M1 to M4) so far; unset it on this Mac";
+        return error.KvPagesUntested;
+    }
     const window = lb.windowRows(units) catch |err| {
         why.* = policy.problem(err) orelse why.*;
         return err;
@@ -372,7 +377,8 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     h.disk_stage = null;
     h.vision = o.images; // closed with the host; a failed attach leaves it to the caller
     h.trace = null;
-    h.runner = try q.decode_round.Runner.initReady(gpa, model, slots, capacity + window, 1);
+    // TF_QWEN27_METAL_KV_PAGES=1: every slot's rows in core-pool pages now (Fit charged each its whole window above)
+    h.runner = try if (q.decode_round.pagesOn()) q.decode_round.Runner.initPaged(gpa, model, slots, capacity + window) else q.decode_round.Runner.initReady(gpa, model, slots, capacity + window, 1);
     errdefer h.runner.deinit();
     if (profileEvery()) |every| {
         h.trace = .{ .queue = model.queue, .report_every = every }; // enabled once measure() has priced the windows
