@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Tests: four host steps that no CI job runs build and pass again: `test-gemma4-affine-host` pins `affine_mm.metal`'s current bytes, the compile-only Metal contract runners import `masked_sources`, `compile-metal-residency-host` imports `kimi_k3`, and the GLM Metal fact tests give `facts()` a host device object instead of an undefined one, which crashed them at random (#2409, part of #2031).
+
 - Flash Next on CUDA with `TF_FLASHNEXT_KV_PAGES`: a shared round's grouped draft head reads and writes each stream's own pages, so paged streams' replies equal their runs alone again, and paged decode runs as fast as unpaged; default settings are unchanged (#2244). Thanks to @Arminova.
 
 - Tests: `zig build test-glm-snapshots-host` builds again: its copies module imports `core`, which `cuda_snaps.zig` reads for `TF_GLM_PROMPT_TAIL` since #2226 (#2403). Thanks to @Bizuayeu.
