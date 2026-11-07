@@ -555,3 +555,16 @@ test "flag 2 on a chunk splits its indexer rows across the ranks, beside flag 1'
     try std.testing.expect(!indexSplit(.{ .kind = @backingInt(Kind.chunk), .flags = 1, .depth = 65536, .top_k = 70000 }));
     try std.testing.expect(!indexSplit(.{ .kind = @backingInt(Kind.prefill), .flags = 2 }));
 }
+
+// Enough words for every offered frame pair and image, even with a small text context.
+pub fn linkCapacity(cap: usize, media: ?images_mod.Limits) !usize {
+    const lim = media orelse return cap;
+    const frames: usize = (@as(usize, lim.max_frames) + 1) / 2;
+    const pairs = std.math.mul(usize, frames, lim.max_videos) catch return error.TooManyImages;
+    const spans = std.math.add(usize, pairs, lim.max_images) catch return error.TooManyImages;
+    const words = std.math.mul(usize, spans, 3) catch return error.TooManyImages;
+    return @max(cap, words);
+}
+test "a small text context still sizes the link for every offered media span" {
+    try std.testing.expectEqual(@as(usize, 792), try linkCapacity(64, .{ .image_tokens = 2048, .max_images = 8, .video_tokens = 4096, .max_videos = 2, .max_frames = 256 }));
+}
