@@ -596,4 +596,5 @@ test {
     _ = @import("hf_text_regex_test.zig");
     _ = @import("dory_chat_test.zig");
     _ = @import("deepseek_chat_test.zig");
+    _ = @import("deepseek_admission_test.zig");
 }

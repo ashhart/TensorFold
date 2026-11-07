@@ -49,9 +49,13 @@ pub fn promptMulti(f: *Forward, segs: []const MultiSeg) !void {
     const cs = try block_prefill.emitMulti(a, f.cfg, f.widths, f.opts, layers, spans, if (replay) .encoder else .whole);
     try ready(f);
     // the pages of every segment's positions, before any launch (each on its slot's table)
-    for (segs) |sg| {
-        try sw.run(sw.ctx, sg.slot);
-        if (f.kv) |kx| try kx.reserve(sg.start + sg.ids.len);
+    if (f.kv) |kx| {
+        var needs: [16]@import("pool_growth.zig").Need = undefined;
+        for (segs, needs[0..segs.len]) |sg, *need| {
+            need.* = .{ .slot = kx.slots[sg.slot], .end = sg.start + sg.ids.len };
+        }
+        try pf.reservePages(f, needs[0..segs.len]);
+        try kx.dev.syncTables();
     }
     var m: Multi = .{ .segs = segs, .row0 = row0, .tails = tails, .ids = all.items };
     f.multi = &m;
