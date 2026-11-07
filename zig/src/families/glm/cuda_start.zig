@@ -13,6 +13,7 @@ pub fn open(io: std.Io, p: anytype, text: ?[]const u8, initial: anytype, watch: 
 fn resolved(p: anytype, text: ?[]const u8, initial: anytype, args: anytype, comptime after: anytype, comptime report: anytype) @typeInfo(@TypeOf(after)).@"fn".return_type.? {
     var settings = initial;
     settings.pages = try paging(text, p.world, settings.kv8);
+    settings.kv_split = try splitting(settings.kv_split, p.world, settings.pages, settings.kv_host != 0);
     report(args, Report{ .text = text, .rank = p.rank, .world = p.world, .kv8 = settings.kv8, .pages = settings.pages });
     return after(args, settings);
 }
@@ -42,6 +43,15 @@ pub const Report = struct {
         });
     }
 };
+
+/// TF_GLM_KV_SPLIT at `world` ranks: refused at one rank (first: auto pages are off there), off pages, host pages.
+pub fn splitting(on: bool, world: usize, pages: bool, host: bool) !bool {
+    if (!on) return false;
+    if (world < 2) return error.KvSplitNeedsRanks;
+    if (!pages) return error.KvSplitNeedsPages;
+    if (host) return error.KvSplitOnHost;
+    return true;
+}
 
 /// TF_KV_PAGES keeps FP8 on whole windows; explicit pages with FP8 are refused on every rank.
 pub fn paging(text: ?[]const u8, world: usize, kv8: bool) !bool {
