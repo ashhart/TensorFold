@@ -554,7 +554,8 @@ pub const Drafter = struct {
         std.log.info("Ripple DFlash2 on CUDA: windows of 1 and 16 rows in {d:.2} and {d:.2} ms, a draft {d:.3} ms ({d} streams a batch)", .{ d.costs[0].ms, d.costs[windows - 1].ms, d.step_ms, d.streams });
     }
 
-    /// Shared rounds of every admitted stream's slot, w rows each (w = 1 to 16, at most the round's rows): median of 3.
+    /// Shared rounds of every admitted stream's slot, w rows each (w = 1 to 16, at most the round's rows): median of 3;
+    /// the depth rule prices rounds past the lone sweep's 16 rows by them.
     fn timeShared(d: *Drafter) !void {
         const m = d.m;
         const n = @min(d.streams, m.arena.slots);
@@ -578,9 +579,10 @@ pub const Drafter = struct {
                 if (run > 0) ms[run - 1] = msSince(d.io, t0);
             }
             std.mem.sort(f64, &ms, {}, std.sort.asc(f64));
-            d.shared[w - 1] = .{ .width = @intCast(n * w), .ms = ms[1] };
-            d.n_shared = w;
             std.log.info("Ripple DFlash2 on CUDA: a shared round of {d} streams x {d} rows ({d} rows) in {d:.2} ms", .{ n, w, n * w, ms[1] });
+            if (n * w <= windows) continue; // the lone stream's sweep prices rounds up to its widest window
+            d.shared[d.n_shared] = .{ .width = @intCast(n * w), .ms = ms[1] };
+            d.n_shared += 1;
         }
         for (0..n) |s| try m.reset(s, windows);
         try m.s.synchronize();
