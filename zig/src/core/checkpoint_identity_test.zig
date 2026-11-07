@@ -82,7 +82,7 @@ test "a trimmed inference directory identifies the shards it carries, not the in
     var bytes: [512]u8 = @splat(0);
     std.mem.writeInt(u64, bytes[0..8], head.len, .little);
     @memcpy(bytes[8..][0..head.len], head);
-    @memcpy(bytes[8 + head.len ..][0..4], &.{ 1, 2, 3, 4 });
+    @memcpy(bytes[8 + head.len ..][0..4], &[_]u8{ 1, 2, 3, 4 });
     try d.writeFile(io, .{ .sub_path = "shard-a.safetensors", .data = bytes[0 .. 8 + head.len + 4] });
     const path = try tmp.dir.realPathFileAlloc(io, "trim", gpa);
     defer gpa.free(path);
