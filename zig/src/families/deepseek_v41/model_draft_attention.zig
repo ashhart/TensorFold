@@ -383,9 +383,9 @@ const DraftAttention = struct {
         var enc = self.enc;
         defer self.enc = enc;
         // The release publishes only the main rows into the draft ring: each step writes `main_kv` at `start_pos %
-        // win`, never the draft rows. Ours also publishes the draft's own rows into the main ring at the positions
-        // they would occupy; TF_DSV41_NO_DRAFT_PUBLISH=1 skips that publish (the arm).
-        if (std.c.getenv("TF_DSV41_NO_DRAFT_PUBLISH") == null)
+        // win`, never the draft rows. The earlier form also published the draft's own rows; TF_DSV41_DRAFT_PUBLISH=1
+        // restores that publish for a same-binary A/B.
+        if (std.c.getenv("TF_DSV41_DRAFT_PUBLISH") != null)
             try p.attention.cache.publishWindow(enc, chunk, try state.ring(layer), rows, position);
         enc.barrier();
         if (prof) |pf| {

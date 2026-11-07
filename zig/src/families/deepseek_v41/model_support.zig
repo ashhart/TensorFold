@@ -266,7 +266,7 @@ pub const Pipelines = struct {
     engram: engram.Pipelines,
     attention: attention.Pipelines,
     groups: expert_groups.Pipelines,
-    /// The fused hyper-connection boundary (TF_DSV41_HC_BOUNDARY): the rms, mix, collapse and post of a boundary in
+    /// The fused hyper-connection boundary (TF_DSV41_NO_HC_BOUNDARY): the rms, mix, collapse and post of a boundary in
     /// two launches instead of five. Null keeps the shipped path.
     hc_boundary: ?mhc.BoundaryPipelines = null,
 
@@ -329,15 +329,14 @@ pub fn markovBiasOffOn() bool {
 }
 
 pub var dspark_true_pos: ?bool = null;
-/// TF_DSV41_DSPARK_TRUE_POS=1 publishes the drafter's context at the capture's own positions: each captured row keeps
-/// its position and the drafter's own rows are roped at the next token's. The release's DSparkAttention ropes the
-/// draft rows at the positions after the main sequence and writes each main row at its own ring slot (`start_pos %
-/// win`), so this is the release's form; unset keeps the earlier prefix/shifted placement for a same-binary A/B.
+/// The release's DSparkAttention writes each main row at its own ring slot (`start_pos % win`) and ropes the draft
+/// rows at the positions after the main sequence. Default on; TF_DSV41_DSPARK_TRUE_POS=0 restores the earlier
+/// prefix/shifted placement for a same-binary A/B.
 pub fn dsparkTruePosOn() bool {
     if (dspark_true_pos) |v| return v;
     const raw = std.c.getenv("TF_DSV41_DSPARK_TRUE_POS") orelse {
-        dspark_true_pos = false;
-        return false;
+        dspark_true_pos = true;
+        return true;
     };
     dspark_true_pos = !std.mem.eql(u8, std.mem.span(raw), "0");
     return dspark_true_pos.?;
@@ -382,12 +381,12 @@ pub fn ringKeepOn() bool {
 /// TF_DSV41_MTP_DEPTH_MAX; the ring stash covers this many slots a layer.
 pub const max_ring_rows = 8;
 
-/// TF_DSV41_MTP_ROPE_ALL=1|2: publish the drafter's ring rows with their rope phase (0: the earlier unroped form). A
-/// same-binary A/B for the MTP rewrite; the release's draft attention ropes its queries and keys at their own
-/// positions.
+/// The release's draft attention ropes its queries and keys at their own positions, so every published ring row
+/// carries its phase (2). TF_DSV41_MTP_ROPE_ALL=0 restores the earlier unroped form; =1 ropes at the shifted
+/// position, a same-binary A/B.
 pub fn mtpRopeAllOn() u32 {
-    const v = std.c.getenv("TF_DSV41_MTP_ROPE_ALL") orelse return 0;
-    const n = std.fmt.parseInt(u32, std.mem.span(v), 10) catch 0;
+    const v = std.c.getenv("TF_DSV41_MTP_ROPE_ALL") orelse return 2;
+    const n = std.fmt.parseInt(u32, std.mem.span(v), 10) catch 2;
     return @min(n, 2);
 }
 
@@ -397,8 +396,9 @@ pub fn condRopeOn() bool {
     return std.mem.eql(u8, std.mem.span(v), "0");
 }
 
-/// TF_DSV41_MTP_TRUNK_RING: the drafter's attention reads the main model's key ring instead of its own (1: the
-/// block's tap layer; 2: the trunk's last layer), which is the release's draft-attention input.
+/// The release's DSparkAttention reads the ring its conditioning writes (`main_kv` from `main_x`), which is the
+/// drafter's own ring (0). TF_DSV41_MTP_TRUNK_RING=1|2 is an A/B that reads the trunk's key ring instead (the
+/// block's tap layer, or the trunk's last layer).
 pub fn mtpTrunkRing() u32 {
     const v = std.c.getenv("TF_DSV41_MTP_TRUNK_RING") orelse return 0;
     const n = std.fmt.parseInt(u32, std.mem.span(v), 10) catch 0;
@@ -496,4 +496,16 @@ pub fn logitsTopK(f: [*]const f32, n: usize, out: *[5]u32, vals: *[5]f32) void {
             }
         }
     }
+}
+
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+
+test "the DSpark defaults are the release form" {
+    _ = unsetenv("TF_DSV41_DSPARK_TRUE_POS");
+    _ = unsetenv("TF_DSV41_MTP_ROPE_ALL");
+    _ = unsetenv("TF_DSV41_MTP_TRUNK_RING");
+    dspark_true_pos = null;
+    try std.testing.expect(dsparkTruePosOn());
+    try std.testing.expectEqual(@as(u32, 2), mtpRopeAllOn());
+    try std.testing.expectEqual(@as(u32, 0), mtpTrunkRing());
 }
