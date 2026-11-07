@@ -13,7 +13,9 @@ pub fn cancelled(comptime Lanes: type, backend: anytype) !void {
             p.at = at;
         }
     };
-    var state: Lanes = .{ .gpa = t.allocator, .io = t.io, .e = undefined, .capacity = 32, .target = undefined };
+    var e: @import("cuda_engine.zig").Engine = undefined;
+    e.g.bf16 = false;
+    var state: Lanes = .{ .gpa = t.allocator, .io = t.io, .e = &e, .capacity = 32, .target = undefined };
     defer state.fills.deinit(t.allocator);
     var probe: Probe = .{};
     var s = try lanes.Stream.init(t.allocator, .{ .id = "prefix", .prompt = &(@as([16]u32, @splat(3))), .max_new = 1, .reuse = .{ .hook = .{ .ptr = &probe, .at = Probe.kept } } });

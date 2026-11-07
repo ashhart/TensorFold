@@ -34,7 +34,9 @@ pub const nvcc_133_after = @import("flashnext_tile_records.zig").cuda_133 ++
     @import("nvcc_133_records.zig").cuda_133 ++
     @import("minimax_cuda_records.zig").cuda_133 ++
     @import("nvfp4_experts32_records.zig").cuda_133;
-pub const cuda_pending = @import("qwen_whole_records.zig").records ++
+pub const cuda_pending = @import("moe_router_records.zig").records ++
+    @import("gdn_chain_records.zig").records ++
+    @import("qwen_whole_records.zig").records ++
     @import("cuda_lane_pending.zig").records ++
     @import("weight_only_records.zig").cuda ++
     @import("hc_activation_records.zig").cuda ++

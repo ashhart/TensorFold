@@ -13,7 +13,8 @@ test "dense read cost: keys omit logits but target and loss scoring still need t
 }
 
 const Recorder = struct {
-    g: struct { hidden: usize = 64 } = .{},
+    g: struct { hidden: usize = 64, layers: usize = 1 } = .{},
+    hidden_trace: ?@import("cuda_hidden_trace.zig").Trace = null,
     learning: ?*const @import("cuda_learn_hooks.zig").Keep = null,
     h: u64 = 100,
     x: u64 = 200,

@@ -4,7 +4,17 @@ const core = @import("core");
 const c = core.contract;
 
 pub fn stress(x: []u16) void {
-    for (x, 0..) |*v, i| v.* = c.spec.toBf16(if (i % 64 < 16) 2048 else if (i % 64 < 48) 1 else -2048);
+    const half = x.len / 2;
+    var random = std.Random.DefaultPrng.init(0x35bf16);
+    for (0..half) |i| {
+        const value: f32 = @floatFromInt(1 + random.random().uintLessThan(u32, 64));
+        x[i] = c.spec.toBf16(value);
+        x[half + i] = c.spec.toBf16(-value + @as(f32, if (i < 8) 1 else 0));
+    }
+    if (x.len % 2 != 0) x[x.len - 1] = 0;
+}
+fn noDepth(_: c.spec.Shape) usize {
+    return 0;
 }
 pub fn copy(table: []const u16, ids: []const i32, width: usize, live: usize, out: []u16) void {
     @memset(out, 0xffff);
@@ -25,16 +35,24 @@ test "Qwen BF16 reference: copied words and masked rows retain NaN and signed-ze
     try std.testing.expect(out[2] != table[0]);
 }
 test "Qwen BF16 reference: stress proves fp32 exact and both smaller accumulators wrong in every order" {
-    var x: [128]u16 = undefined;
+    var x: [17408]u16 = undefined;
     stress(&x);
-    const w: [128]u16 = @splat(0x3f80);
+    const w: [17408]u16 = @splat(0x3f80);
     const want = dot(&x, &w);
-    try std.testing.expectEqual(@as(f64, 64), want);
-    var terms: [128]f64 = undefined;
+    try std.testing.expectEqual(@as(f64, 8), want);
+    var terms: [17408]f64 = undefined;
     for (&terms, x) |*v, b| v.* = c.spec.fromBf16(b);
     for ([_]c.gates.Order{ .sequential, .pairwise, .strided }) |order| {
         try std.testing.expectEqual(want, c.rows.sumIn(.f32, order, &terms));
-        try std.testing.expect(@abs(c.rows.sumIn(.f16, order, &terms) - want) >= 16);
-        try std.testing.expect(@abs(c.rows.sumIn(.bf16, order, &terms) - want) >= 16);
+        for ([_]c.spec.Accum{ .f16, .bf16 }) |acc| {
+            const got = c.rows.sumIn(acc, order, &terms);
+            const miss = if (std.math.isFinite(got)) @abs(got - want) else std.math.inf(f64);
+            const spec: c.spec.Spec = .{ .name = "stress", .accum = .f32, .depth = noDepth, .out = .bf16, .served = &.{.{ .rows = 1, .n = 1, .k = x.len }} };
+            try std.testing.expect(miss / c.spec.boundExact(spec, want) >= 100);
+        }
     }
+}
+
+test {
+    _ = @import("qwen_scores_ref.zig");
 }

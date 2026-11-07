@@ -3,6 +3,9 @@ const std = @import("std");
 
 pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.Build.Step) void {
     const host = b.graph.host;
+    const bf16 = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"BF16 scoring:"} }));
+    b.step("test-qwen35-bf16-host", "Plain BF16 scoring admission and native row contracts without devices").dependOn(&bf16.step);
+    step.dependOn(&bf16.step);
     const metal_scope = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen3_5/config.zig"), .target = host }), .filters = &.{ "Metal 2B format scope:", "admit the affine 2B", "admit untied heads" } }));
     b.step("test-qwen35-metal-scope-host", "Metal 2B format admission without device or Metal compiler").dependOn(&metal_scope.step);
     @import("load_prefetch_host.zig").tests(b, mods.core, step);

@@ -1,0 +1,136 @@
+{
+  "schema": 3,
+  "kind": "qwen35-bf16-scoring-linked-public-evidence",
+  "publication": "Published public-checkpoint evidence; private identifying metadata excluded.",
+  "files": {
+    "qwen35-bf16-scoring-dumps-20261103.tar.gz": {
+      "sha256": "d8f5763c8130ac5326ab5eb166999b3265152a897c731f4ed70768b5f64a29b7",
+      "bytes": 376782,
+      "unpacked_bytes": 3258590,
+      "members": {
+        "cuda-contract.txt": "fd70970c160f73992c979219e90dd42478a9d7abea9c7809f4bd74b2791e36a6",
+        "cold/ids-2048.json": "00e1f403f0c1102333f5f4bc02d6e5e03a4781353a9905b2e1381fd2501e0684",
+        "cold/ids-8192.json": "746913a9ba26f75fa811c06776cbdf8bc415c9d1feeb72ed5bdb9612ec89b28c",
+        "cold/ids-32768.json": "a5d62d1968ea34c03621ad159a204d364f42103e30498592cce0d40ef8500129",
+        "cold/ids-65536.json": "3339fa43a011590325987d40c3bc4fc3c1058844fdd82e8953474b1afa3c72e5",
+        "cold/request-2048.json": "44d20304a0ac01b0dad68ea3b01df316758bc86c68bfb4b187500975b3716843",
+        "cold/request-8192.json": "de803f108023c84440ebf406fa043e0b76ff96d63b093f067d4b2fbfd2b5e17c",
+        "cold/request-32768.json": "4c260b5e55d2487a95d9c9d85b49b15230dd1043c4a76a2bb341218742b31959",
+        "cold/request-65536.json": "213ee082218d9f7a8cb1e1c580af0eca1d2c3a93bae2afbe926321bda02077c5",
+        "native-concurrent.json": "67f4b6d7386009ab9eb5b734521fc60ced5cbbcbe79d9f4926394ab8dad6ccad",
+        "standard/sglang-concurrent.json": "54b5a7923ab41b5c269fc62ceec3f92eda1e3ce14ae106e61446967228d7a125",
+        "existing-formats/mlx4-integrated-concurrent.json": "c1a6f9ee05b20d42202c0cc335fc4f7ae8feee2c18839edddb6c7b950364fbd7",
+        "existing-formats/mlx4-parent-concurrent.json": "f9801c2b78807ac6181c8e4ee134d645a2778009ef03819e4cda70074b8544ef",
+        "existing-formats/modelopt-integrated-concurrent.json": "bd72694c770fd79abc4f38b6dd3747f9b0d34dfa9ad660ab7442400b41f5ecd1",
+        "existing-formats/modelopt-parent-concurrent.json": "a532b1de83a81d8a177b6506477911e3713d074cd66dcbe717e7f383ec7a6e12",
+        "attempts/README.json": "7ae9db769f9bc3b87c123bf1acdaf3f487a6c2da2cfa5e7776f4a79ee529382d",
+        "attempts/disconnect-client-before-route-fix.py.txt": "e7186f50a3e3e9645a18fc33f68d7a86eb0b5be4355e1a24b30c21ed3e120714",
+        "attempts/disconnect-diagnostics-route.json": "4534b43661d7a102249586a1c89e22b0ed3e4d4f2101b2b53abc1c13d21cf5ee",
+        "attempts/raw-edited-ids.json": "79504fb54462168e9d7b3d69548b02d299e822268ae940853d6e085f85cd8ada",
+        "attempts/raw-no-history-edited.json": "3e7c6764d24070d3c569d719efce264341e2518ab2c1342772d436ea0ca1af2b",
+        "attempts/raw-no-history-original.json": "d37135a6b3bc9036d7a5f2600306180933419ffba5b8b8de554534439c437932"
+      },
+      "url": "https://raw.githubusercontent.com/akol1/TensorFold/9d07324dc7920fcff03152ff48c8fcc0e408a425/qwen35-bf16-scoring-dumps-20261103.tar.gz"
+    },
+    "qwen35-transformers-prompt-scores-20261103.json": {
+      "sha256": "423d2d653a5e0c900ceca2e4f4d6fcbfe982f6c7a2e8a22f9a9ccb290f48a194",
+      "bytes": 5367360,
+      "url": "https://raw.githubusercontent.com/akol1/TensorFold/9d07324dc7920fcff03152ff48c8fcc0e408a425/qwen35-transformers-prompt-scores-20261103.json"
+    },
+    "qwen35-transformers-run-20261103.log": {
+      "sha256": "6c826b51cc1725422d83cfb9a501a5264739eae1d3da5092490d50d61c67ea73",
+      "bytes": 4128,
+      "url": "https://raw.githubusercontent.com/akol1/TensorFold/9d07324dc7920fcff03152ff48c8fcc0e408a425/qwen35-transformers-run-20261103.log"
+    },
+    "qwen35-bf16-readiness-20261104.tar.gz": {
+      "sha256": "30ed8623f861f32bc8ba0d134e245b34d9faaa1c5173092c135975defd06ac51",
+      "bytes": 37610554,
+      "members": 387,
+      "member_manifest": {
+        "file": "qwen35-bf16-readiness-20261104.manifest.json",
+        "section": "current",
+        "url": "https://raw.githubusercontent.com/akol1/TensorFold/164be6e57dae9124893e27d8d1ac8a1be7d03f1c/qwen35-bf16-readiness-20261104.manifest.json",
+        "sha256": "a54bbe46eec749f21f8842491fe208cbf9aeb3af3a0a3038c641b92b37e35ae6"
+      },
+      "url": "https://raw.githubusercontent.com/akol1/TensorFold/164be6e57dae9124893e27d8d1ac8a1be7d03f1c/qwen35-bf16-readiness-20261104.tar.gz"
+    },
+    "qwen35-historical-receipts-20261104.tar.gz": {
+      "sha256": "ccda986558edd769735f6d4d7a9e48cc54b104fe87c70a47f8fd275dd7b485f4",
+      "bytes": 65491,
+      "members": 53,
+      "member_manifest": {
+        "file": "qwen35-bf16-readiness-20261104.manifest.json",
+        "section": "historical_receipts",
+        "url": "https://raw.githubusercontent.com/akol1/TensorFold/164be6e57dae9124893e27d8d1ac8a1be7d03f1c/qwen35-bf16-readiness-20261104.manifest.json",
+        "sha256": "a54bbe46eec749f21f8842491fe208cbf9aeb3af3a0a3038c641b92b37e35ae6"
+      },
+      "url": "https://raw.githubusercontent.com/akol1/TensorFold/164be6e57dae9124893e27d8d1ac8a1be7d03f1c/qwen35-historical-receipts-20261104.tar.gz"
+    },
+    "qwen35-bf16-readiness-20261104.manifest.json": {
+      "sha256": "a54bbe46eec749f21f8842491fe208cbf9aeb3af3a0a3038c641b92b37e35ae6",
+      "bytes": 80585,
+      "url": "https://raw.githubusercontent.com/akol1/TensorFold/164be6e57dae9124893e27d8d1ac8a1be7d03f1c/qwen35-bf16-readiness-20261104.manifest.json"
+    },
+    "qwen35-bf16-layers-native-20261105.tar.gz": {
+      "sha256": "bd27869f3413e2c93281ad7601e47bd504fd046ffcea804155828cb6d313de75",
+      "bytes": 17339176,
+      "members": 85,
+      "url": "https://raw.githubusercontent.com/akol1/TensorFold/7f54a5445ef4defa879b2b1fa76d01a64afdb5f4/qwen35-bf16-layers-native-20261105.tar.gz",
+      "member_manifest": {
+        "file": "qwen35-bf16-layers-20261105.manifest.json",
+        "url": "https://raw.githubusercontent.com/akol1/TensorFold/7f54a5445ef4defa879b2b1fa76d01a64afdb5f4/qwen35-bf16-layers-20261105.manifest.json"
+      }
+    },
+    "qwen35-bf16-layers-reference-bf16-20261105.tar.gz": {
+      "sha256": "2ecf3e829f85002a1d1839a1642d61cc05af579a64d6444fe8b938cad70766de",
+      "bytes": 20277706,
+      "members": 66,
+      "url": "https://raw.githubusercontent.com/akol1/TensorFold/7f54a5445ef4defa879b2b1fa76d01a64afdb5f4/qwen35-bf16-layers-reference-bf16-20261105.tar.gz",
+      "member_manifest": {
+        "file": "qwen35-bf16-layers-20261105.manifest.json",
+        "url": "https://raw.githubusercontent.com/akol1/TensorFold/7f54a5445ef4defa879b2b1fa76d01a64afdb5f4/qwen35-bf16-layers-20261105.manifest.json"
+      }
+    },
+    "qwen35-bf16-layers-reference-fp32-20261105.tar.gz": {
+      "sha256": "e039545948564c91585660761860e9d161032aa03c803f936dabb31532d58204",
+      "bytes": 39883616,
+      "members": 66,
+      "url": "https://raw.githubusercontent.com/akol1/TensorFold/7f54a5445ef4defa879b2b1fa76d01a64afdb5f4/qwen35-bf16-layers-reference-fp32-20261105.tar.gz",
+      "member_manifest": {
+        "file": "qwen35-bf16-layers-20261105.manifest.json",
+        "url": "https://raw.githubusercontent.com/akol1/TensorFold/7f54a5445ef4defa879b2b1fa76d01a64afdb5f4/qwen35-bf16-layers-20261105.manifest.json"
+      }
+    },
+    "qwen35-bf16-layers-20261105.manifest.json": {
+      "sha256": "d4cd5795074f7e4eb3512fc2af43d21e4e54b25b25d3104d81708d62dfbfa923",
+      "bytes": 41258,
+      "url": "https://raw.githubusercontent.com/akol1/TensorFold/7f54a5445ef4defa879b2b1fa76d01a64afdb5f4/qwen35-bf16-layers-20261105.manifest.json"
+    }
+  },
+  "publication_transforms": [
+    "Reference identifying fields use generic placeholders.",
+    "Generated benchmark prose samples omitted; client interval origins normalized per repetition. Durations, rates, token/output hashes and failed numerical diagnostics are retained.",
+    "Tar/gzip owner names, IDs, timestamps and source filenames removed from archive headers."
+  ],
+  "notes": [
+    "Every linked asset is pinned to an immutable fork commit. Source PR retains summaries and reproduction inputs; full per-request/capture results and logs are external.",
+    "Current same-weight FP64 and complete CUDA receipts retain the actual source and distinct initial/retry runner hashes.",
+    "The direct served comparison is complete and strict measured-distance diagnostics fail in both directions; no broader bound substitutes for them.",
+    "No model-equivalence, production or performance qualification claim. Historical failed/superseded evidence remains unchanged."
+  ],
+  "repository": "akol1/TensorFold",
+  "checksum_url": "https://raw.githubusercontent.com/akol1/TensorFold/164be6e57dae9124893e27d8d1ac8a1be7d03f1c/SHA256SUMS",
+  "privacy_review": {
+    "payload_files_reviewed": 23,
+    "scope": "All 21 archive members plus full Transformers payload and run log; JSON identifying fields and complete logs inspected. No personal emails, private user paths, internal hosts, IP/MAC addresses, credentials or client identifiers found. Generic container mount paths and public checkpoint metadata retained.",
+    "hashes": "published bytes match the recorded pre-publication hashes"
+  },
+  "latest_commit": "164be6e57dae9124893e27d8d1ac8a1be7d03f1c",
+  "historical_commit": "9d07324dc7920fcff03152ff48c8fcc0e408a425",
+  "current_privacy_review": {
+    "text_and_metadata_sensitive_pattern_findings": 0,
+    "numeric_tensor_files": 186,
+    "scope": "Complete current publication payload and archive headers; approved public GitHub aliases retained. Original tensor bytes derive from checksum-verified public Qwen weights and public fixtures. Historical copies outside this publication are outside this review.",
+    "transformations": "Generated prose samples omitted; client interval origins normalized; no metric, token hash or failing numerical diagnostic is replaced."
+  }
+}
