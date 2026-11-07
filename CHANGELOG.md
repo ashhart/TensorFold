@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Docs: a reply that quotes a template marker can finish with `ignore_eos` and a stop list for the model's end-of-text spelling, then a strip of the trailing turn marker; measured on two Qwen checkpoints on a GB10 (#2399). Thanks to @robertung88.
+
 ## 1.2.4
 
 - Docs: four subcommand-flag fixes checked against the code: `slide audit --threshold`'s range, `benchmark --context` and `--kv-cache`, `info` on Flash Next, and `run --device` and `--carveout` on CUDA builds (#2348).
