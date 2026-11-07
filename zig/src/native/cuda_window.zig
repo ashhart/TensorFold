@@ -1,4 +1,4 @@
-//! A CUDA family's context window: the model's own (config.json), and what --context makes of it.
+//! A family's context window: the model's own (config.json, read for Metal too), and what --context makes of it.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 

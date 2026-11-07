@@ -30,6 +30,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - HIP: on RDNA 3.5 (gfx1150 to gfx1153) a prompt row gets the same bytes wherever its chunk starts. The 64-row prompt tile there now takes each key past a row's causal edge as +0, as RDNA 3.5's dot2 rounds a -0 lane apart from +0, so its prompt bits change, and gfx1151's prefill is up to 0.7% slower at 2k and 8k. Other chips keep main's prompt tile and bits, and gfx1201's prompt speed is main's within noise. On every chip, a non-finite value at a key past a row's edge now adds nothing to that row (#2357, closes #2317). Thanks to @laudney.
 
+- Nemotron on Metal: with `TF_NEMOTRON_METAL_KV_PAGES=1`, `TF_KV_SHARE=n` keeps prompt states in the core `prompt_radix` store over the KV pool, as CUDA does; `TF_KV_SHARE` acts only on the paged pool, and unset or 0 keeps the host prompt cache (#1850). Thanks to @jschmied.
+
 - GLM CUDA at TP=2 and up: each rank names its startup phases (NCCL init, peer warm-up, weights, calibration, ready), prints NCCL's init device, version and log path, and warns once a minute while NCCL init or the warm-up is unfinished, with the transport seen so far. It only reports; transfers are unchanged (#2354, part of #2347).
 
 - Docs: the serve flags match the CLI: `--metrics-open` opens `/v1/metrics` too, `--learn-conversations` on CUDA serves the Qwen3.5 hybrids and Flash Next as well as Nemotron, Flash Next shares sessions under an explicit `--parallel` above one and refuses `--recall` only on a Mac, and the Metal Qwen3.5-2B keeps prompt states (#2367).
