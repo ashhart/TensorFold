@@ -1,7 +1,6 @@
 //! Conversation states on disk (--learn-conversations): rows in blocks states share, each state's own parts in a file.
 const std = @import("std");
 const platform = @import("sys");
-const builtin = @import("builtin");
 const pc = @import("prompt_cache.zig");
 const modes = @import("cache_modes.zig");
 pub const image = @import("rows_image.zig");
@@ -9,7 +8,6 @@ pub const chain = @import("rows_chain.zig");
 pub const file = @import("rows_file.zig");
 pub const write = @import("rows_write.zig");
 pub const read = @import("rows_read.zig");
-const drops = @import("rows_dropped.zig");
 const dirs = @import("lanes").learned_dirs;
 const Admission = @import("lanes").learned_disk.Admission;
 const Allocator = std.mem.Allocator;
@@ -124,7 +122,7 @@ pub const Rows = struct {
         const r = try init(gpa, family, o);
         errdefer r.deinit();
         try makePath(gpa, r.dir);
-        var dropped: drops.Dropped = .{};
+        var dropped: @import("rows_dropped.zig").Dropped = .{};
         defer dropped.flush(); // said even when the open fails part way
         try r.scan(&dropped);
         try r.settle(&dropped);
@@ -415,7 +413,7 @@ pub const Rows = struct {
     }
 
     /// The files under the store's directory: states read back and checked by name, blocks by size; leftovers go.
-    fn scan(r: *Rows, dropped: *drops.Dropped) !void {
+    fn scan(r: *Rows, dropped: *@import("rows_dropped.zig").Dropped) !void {
         const d = platform.c.opendir(r.dir) orelse return error.RowsDir;
         defer _ = platform.c.closedir(d);
         while (platform.c.readdir(d)) |ent| {
@@ -467,14 +465,14 @@ pub const Rows = struct {
     }
 
     /// Each state's blocks counted; a state missing one, or that its family cannot lay out, goes; then idle blocks.
-    fn settle(r: *Rows, dropped: *drops.Dropped) !void {
+    fn settle(r: *Rows, dropped: *@import("rows_dropped.zig").Dropped) !void {
         var i: usize = 0;
         while (i < r.states.items.len) {
             const s = &r.states.items[i];
             var wants: std.ArrayList(write.Want) = .empty;
             defer wants.deinit(r.gpa);
             const cause: ?anyerror = if (r.wantsOf(r.gpa, s, &wants)) |_| for (wants.items) |w| {
-                if (!r.blocks.contains(chain.stem(w.name))) break drops.missing;
+                if (!r.blocks.contains(chain.stem(w.name))) break @import("rows_dropped.zig").missing;
             } else null else |err| if (err == error.OutOfMemory) return err else err;
             if (cause) |err| {
                 dropped.add(err);
