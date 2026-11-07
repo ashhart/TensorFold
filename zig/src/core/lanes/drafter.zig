@@ -18,6 +18,7 @@ pub const Facts = struct {
     trees: bool = false, // hold() takes a tree of lanes (Hold.lanes), each lane its parent's rank-r token
     window_costs: []const Cost = &.{}, // the target's window ms by rows (timed at load), for the depth rule
     lane_costs: []const Cost = &.{}, // the same for the lane planner (Model.lane_costs)
+    shared_costs: []const Cost = &.{}, // a shared round's ms by total rows (timed at load), for shared drafts
     copy_match: i64 = 0, // matching tokens a copy needs beside this drafter's proposals (0: the target's copy_match)
     tree_nodes: u32 = 0, // hold() without lanes grows its own tree of up to `depth` nodes, at most this many (tree, chances)
     chances: bool = false, // chances() gives each held chain draft's chance: verify rows go by them (Model.granted_depth)
