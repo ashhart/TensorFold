@@ -65,8 +65,8 @@ export function runLocal(name: string, args: Record<string, unknown>): unknown |
 }
 
 const SET_HELP = [
-  <>The page runs these itself. Try “What time is it in Tokyo?” or “What is 17.5% of 2,340?”.</>,
-  <>Made-up tools: when the model calls one, you type the result (“18 °C, cloudy”) and see what it does with it. No email is sent.</>,
+  <>Web runs these tools locally; try asking for the time in Tokyo or a calculation.</>,
+  <>Enter a mock result when the model calls a tool; no email is sent.</>,
 ]
 const FORMAT_HELP: Record<Workshop['output'], string> = {
   text: 'Ordinary text, as in any conversation.',
@@ -119,7 +119,7 @@ export function WorkshopPanel({ ws, set }: { ws: Workshop; set: (w: Workshop) =>
             <textarea className="input mono" rows={8} value={ws.schemaText} onChange={(e) => set({ ...ws, schemaText: e.target.value })} spellCheck={false} aria-label="JSON schema" /></label>}
           <details className="pmore">
             <summary className="small">How it is sent</summary>
-            <p className="small muted" style={{ margin: 0 }}>As <code>tools</code>, <code>tool_choice</code> and <code>parallel_tool_calls</code> for the tools, <code>response_format</code> for JSON. An engine that refuses <code>response_format</code> is asked for JSON in the system prompt instead, and the reply is still checked.</p>
+            <p className="small muted" style={{ margin: 0 }}>Replies are validated against the requested schema, even when JSON needs a system-prompt fallback.</p>
           </details>
         </section>
       </div>

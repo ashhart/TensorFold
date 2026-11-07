@@ -5,7 +5,7 @@ import SettingsAccess from './SettingsAccess'
 import SettingsBrands from './SettingsBrands'
 import SettingsStorage from './SettingsStorage'
 import { Diagnostic, FirstRun } from './SetupChecks'
-import { before } from '../version'
+import { before, displayEngineVersion } from '../version'
 import { subOf } from '../route'
 
 const CONTEXTS = [null, 8192, 16384, 32768, 65536, 131072]
@@ -28,6 +28,7 @@ export default function SettingsScreen({ machine, engine, settings, saveSettings
   useEffect(() => { setUrl(settings?.engine_url ?? '') }, [settings?.engine_url])
   useEffect(() => { if (settings?.model) api.verdicts(settings.model).then((r) => setVerdicts(r.verdicts)).catch(() => setVerdicts([])) }, [settings?.model])
   if (!settings || !machine) return <section><div className="head"><div><h1>Settings</h1></div></div></section>
+  const engineVersion = displayEngineVersion(machine.tensorfold_version, flags?.version)
   const cap = machine.budget.capacity_bytes ?? machine.ram_bytes          // what the engine's backend can draw on
   const memoryName = machine.backend === 'cuda' && !machine.unified_memory ? "the card's memory" : machine.unified_memory ? 'unified memory' : 'RAM'
   const limitVar = machine.backend === 'cuda' ? 'TENSORFOLD_CUDA_MEMORY_LIMIT_GB' : 'TENSORFOLD_MEMORY_LIMIT_GB'
@@ -62,28 +63,29 @@ export default function SettingsScreen({ machine, engine, settings, saveSettings
             <p className="hint">{hint}</p>
             {machine.tensorfold_version && !machine.tensorfold_version.includes('Python')
               ? <p className="hint">This budget applies to the frozen Python line; native memory admission is in <a href="#monitor">Details</a>.</p>
-              : <p className="hint">Shares of {memoryName} ({gb(cap)}). Above the default, TensorFold Web passes <code>{limitVar}</code> to the engine; the engine's own admission at startup is what counts, and Monitor shows it. Changes apply at the next start.</p>}
+              : <p className="hint">Next start uses <code>{limitVar}</code> for {memoryName} ({gb(cap)}), subject to engine admission.</p>}
             </> : <>
             <p className="budget-fixed"><b>{gb(cap * machine.budget.default_fraction)}</b> of the {gb(cap)} of {memoryName}</p>
             <p className="hint">TensorFold sizes its memory at startup; <a href="#monitor">Details</a> shows the admitted budget.</p>
             {settings.model && <p className="hint">{hint}</p>}
             </>}
             {machine.budget.ceiling_bytes && machine.budget.ceiling_bytes < cap * machine.budget.raised_fraction && (
-              <p className="hint">macOS lets the GPU use at most <b>{gb(machine.budget.ceiling_bytes)}</b> on this Mac, whatever the budget asks. On a Mac used mostly for TensorFold, <code>sudo sysctl iogpu.wired_limit_mb={Math.round((cap * machine.budget.raised_fraction) / 1024 ** 2)}</code> raises it to {gb(cap * machine.budget.raised_fraction)} until the next restart; large models then get a usable context.</p>
+              <p className="hint">GPU ceiling: <b>{gb(machine.budget.ceiling_bytes)}</b>; <code>sudo sysctl iogpu.wired_limit_mb={Math.round((cap * machine.budget.raised_fraction) / 1024 ** 2)}</code> raises it until restart.</p>
             )}
           </div>
         </div>
 
         <div className="section" hidden={page !== 'conversations'}>
           <h2>Conversations</h2>
-          <div className="srow"><div className="l"><b>Thinking</b><span>Default for new chats. Apps can override it.</span></div>
+          <div className="srow"><div className="l"><b>Thinking</b><span>Default for new chats; apps can override it.</span></div>
             <div className="r"><select className="sel" aria-label="Thinking" value={settings.thinking} onChange={(e) => save({ thinking: e.target.value as typeof settings.thinking })}><option value="default">Model default</option><option value="on">On</option><option value="off">Off</option></select></div></div>
           <div className="srow"><div className="l"><b>Longest conversation</b><span>Auto lets TensorFold size it from memory.</span></div>
             <div className="r"><select className="sel" aria-label="Longest conversation" value={settings.context ?? ''} onChange={(e) => save({ context: e.target.value ? Number(e.target.value) : null })}>{CONTEXTS.map((c) => <option key={String(c)} value={c ?? ''}>{c ? `${num(c)} tokens` : 'Auto'}</option>)}</select></div></div>
-          {flags?.flags['--cortheon'] && <div className="srow"><div className="l"><b>Web research (Cortheon)</b><span>TensorFold works through Cortheon's reasoning stages and searches the web before it answers, for every chat request any app sends; a request can still turn it off. Applies at the next start.
-            {' '}<b>What leaves this machine:</b> the search queries the model writes from the conversation (to DuckDuckGo), and each page it reads, fetched from this machine's address. A web page can steer the model: use it where that risk is acceptable.
+          {flags?.flags['--cortheon'] && <div className="srow"><div className="l"><b>Web research (Cortheon)</b><span>Run web research on each chat at the next start, unless its request opts out.
+            </span><span>Search queries go to DuckDuckGo; visited sites see this machine's address.</span>
+            <span>Fetched pages can steer the model.</span>
             {settings.cortheon && settings.share && <span className="bad"> The engine is shared on the network: every app that reaches it gets web research.</span>}
-            {before(flags.version, [1, 0, 11]) && <span className="bad"> TensorFold {flags.version} predates 1.0.11, Cortheon's security release: a web page can hide orders from its instruction filter, hold a request for minutes or stop the engine. Update with <code>{INSTALL}</code> first.</span>}</span></div>
+            {before(engineVersion, [1, 0, 11]) && <span className="bad"> Update with <code>{INSTALL}</code> before using Cortheon in {engineVersion}, which lacks its 1.0.11 security fixes.</span>}</div>
             <div className="r"><label className="toggle"><input type="checkbox" aria-label="Web research (Cortheon)" checked={!!settings.cortheon} onChange={(e) => save({ cortheon: e.target.checked }, e.target.checked ? 'Web research on at the next start' : 'Web research off at the next start')} /></label></div></div>}
           <div className="srow"><div className="l"><b>Appearance</b><span>Follows the system by default.</span></div>
             <div className="r"><select className="sel" aria-label="Appearance" value={settings.theme} onChange={(e) => save({ theme: e.target.value as typeof settings.theme })}><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></div></div>
@@ -103,23 +105,23 @@ export default function SettingsScreen({ machine, engine, settings, saveSettings
 
         <div className="section" hidden={page !== 'engine'}>
           <h2>Engine</h2>
-          <div className="srow"><div className="l"><b>TensorFold {machine.tensorfold_version ?? 'not installed'}</b><span>{machine.tensorfold_version ? (machine.tensorfold_version.includes('Python') ? `The frozen Python line, for the models not yet on the native engine. ${machine.backend_note}` : `The native engine. ${machine.backend_note}`) : <>Install it with <code>{INSTALL}</code> (Apple Silicon Mac or NVIDIA Linux), or connect a remote engine below.</>}</span></div></div>
+          <div className="srow"><div className="l"><b>TensorFold {engineVersion}</b><span>{machine.tensorfold_version ? (machine.tensorfold_version.includes('Python') ? `Frozen Python engine · ${machine.backend_note}` : `Native engine · ${machine.backend_note}`) : <>Install it with <code>{INSTALL}</code> (Apple Silicon Mac or NVIDIA Linux), or connect a remote engine below.</>}</span></div></div>
           <div className="srow"><div className="l"><b>External engine</b><span>Connect to an engine Web did not start, on this or another machine.</span></div>
             <div className="r"><label className="toggle"><input type="checkbox" aria-label="External engine" checked={settings.remote} onChange={(e) => save({ remote: e.target.checked })} /></label></div></div>
           <div className="srow"><div className="l" style={{ flex: 1 }}><b>Address</b><span>Where TensorFold Web reaches the engine.</span>
             <div className="field"><input type="text" value={url} onChange={(e) => setUrl(e.target.value)} onBlur={() => url !== settings.engine_url && save({ engine_url: url.replace(/\/$/, '') }, 'Address saved')} placeholder="http://engine.local:8080" aria-label="Engine address" /></div></div></div>
-          {flags?.binary && <div className="srow"><div className="l" style={{ flex: 1 }}><b>Extra engine flags</b><span>Passed to <code>tensorfold serve</code> at the next start, checked against the flags TensorFold {flags.version} offers. TensorFold Web sets the address, context, thinking and key itself.</span>
+          {flags?.binary && <div className="srow"><div className="l" style={{ flex: 1 }}><b>Extra engine flags</b><span>Use TensorFold {engineVersion}'s supported flags at the next start.</span>
             <div className="field"><input type="text" list="serve-flags" value={extra} onChange={(e) => setExtra(e.target.value)} placeholder="--keep-warm --parallel 4" aria-label="Extra engine flags" autoComplete="off" spellCheck={false}
               onBlur={() => { const args = extra.trim() ? extra.trim().split(/\s+/) : []; if (args.join(' ') !== (settings.extra_args ?? []).join(' ')) save({ extra_args: args }, 'Flags saved for the next start') }} />
               <datalist id="serve-flags">{Object.entries(flags.flags).filter(([, f]) => !f.managed).map(([n, f]) => <option key={n} value={n}>{f.choices ? f.choices.join(' | ') : f.value ? 'takes a value' : ''}</option>)}</datalist></div></div></div>}
-          <div className="srow"><div className="l" style={{ flex: 1 }}><b>Engine API key</b><span>{settings.api_key_set ? 'Set. TensorFold Web sends it on every call and starts its own engine with it; Connect shows it.' : 'None. An engine this TensorFold Web starts needs no key unless you generate one in Connect; a remote engine started with one needs it entered here.'}{engine?.key_pending_restart ? ' The running engine still uses its previous key until it restarts.' : ''}</span>
+          <div className="srow"><div className="l" style={{ flex: 1 }}><b>Engine API key</b><span>{settings.api_key_set ? 'Web sends this key on every call and uses it at engine start; API shows it.' : 'Enter the remote engine’s key here, or generate one in API for a Web-managed engine.'}</span>{engine?.key_pending_restart && <span>The running engine keeps its previous key until restart.</span>}
             <div className="field"><input type="password" value={key} onChange={(e) => setKey(e.target.value)} onBlur={saveKey} onKeyDown={(e) => { if (e.key === 'Enter') saveKey() }} placeholder={settings.api_key_set ? 'type a new one to replace it' : 'paste the key a remote engine expects'} autoComplete="off" aria-label="Engine API key" />{settings.api_key_set && <button className="btn" onClick={() => save({ api_key: null }, 'Engine key forgotten')}>Forget</button>}</div></div></div>
         </div>
 
         <div hidden={page !== 'checks'}><FirstRun settings={settings} saveSettings={saveSettings} toast={toast} /><Diagnostic settings={settings} saveSettings={saveSettings} toast={toast} /></div>
         <div hidden={page !== 'storage'}><SettingsStorage toast={toast} /></div>
 
-        <div hidden={page !== 'about'} className="card"><h2>TensorFold Web {machine.studio_version}</h2><p>Native engine {machine.tensorfold_version ?? 'not installed'}.</p><p className="small muted">{machine.os} {machine.os_version} · {machine.chip} · {gb(machine.ram_bytes)} {machine.unified_memory ? 'unified memory' : 'RAM'}</p><p className="small muted">Model discovery and downloads contact Hugging Face only when requested.</p></div>
+        <div hidden={page !== 'about'} className="card"><h2>TensorFold Web {machine.studio_version}</h2><p>Native engine {engineVersion}.</p><p className="small muted">{machine.os} {machine.os_version} · {machine.chip} · {gb(machine.ram_bytes)} {machine.unified_memory ? 'unified memory' : 'RAM'}</p><p className="small muted">Model discovery and downloads contact Hugging Face only when requested.</p></div>
       </div></div>
     </section>
   )

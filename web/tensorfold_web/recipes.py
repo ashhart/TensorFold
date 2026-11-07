@@ -176,10 +176,8 @@ FORMS = {"open-webui": "web app in a container", "librechat": "web app in contai
          "claude-code": "command line", "opencode": "command line", "codex": "command line", "python": "library"}
 # Containers use the local host address; other devices use Web's relay address and its token.
 HERE_NOTES = {
-    "librechat": "On this machine LibreChat's containers reach the AI through the host (host.docker.internal): let "
-                 "the AI answer on the local network (at the bottom of this page) and use its key.",
-    "anythingllm": "In a container on this machine it reaches the AI through the host (host.docker.internal); the "
-                   "desktop app uses the address on this computer instead.",
+    "librechat": "Local containers need host.docker.internal, network access enabled below and the engine key.",
+    "anythingllm": "Use host.docker.internal for local containers or this computer's address for the desktop app.",
 }
 AWAY_NOTES = {
     "librechat": "Its containers on that computer reach TensorFold Web's address directly.",
@@ -188,102 +186,85 @@ AWAY_NOTES = {
 
 RECIPES = [
     Recipe("open-webui", "Open WebUI", "chat", "openai",
-           "A chat front end in a container, talking to the engine as an OpenAI connection.",
+           "Connect this container chat app through its OpenAI provider.",
            ("models", "chat_stream"),
            checked={"date": "2026-10-10", "machine": "DGX Spark node 1 (GX10)",
                     "how": "the compose file from this page, an account, the model listed and a chat answered through "
                            "Open WebUI's API"}),
     Recipe("librechat", "LibreChat", "chat", "openai",
-           "A custom endpoint in librechat.yaml.", ("models", "chat_stream"),
+           "Configure a custom endpoint in librechat.yaml.", ("models", "chat_stream"),
            checked={"date": "2026-10-12", "machine": "DGX Spark node 2 (GX10), TensorFold 1.0.7",
                     "how": "LibreChat 0.8.7 and MongoDB in throwaway containers on the host network, this endpoint "
                            "block as is: TensorFold and the model listed, a reply streamed with its thinking folded, "
                            "the title written; removed afterwards (the owner's LibreChat on node 1 untouched)"}),
     Recipe("anythingllm", "AnythingLLM", "chat", "openai",
-           "The Generic OpenAI provider, for chat and its document workspaces. New workspaces start in agent mode: "
-           "set them to Chat. A reasoning model's thinking shows in the reply unless thinking is off in Settings.",
+           "Use Generic OpenAI with workspace mode Chat; turn thinking off in Settings to hide it.",
            ("models", "chat_stream"),
            checked={"date": "2026-10-10", "machine": "DGX Spark node 1 (GX10)",
                     "how": "AnythingLLM in a container (host network), a workspace in chat mode, a reply streamed from "
                            "Nemotron"}),
     Recipe("jan", "Jan", "chat", "openai",
-           "An OpenAI-compatible provider. Jan adds a system prompt of its own while its web search is on, and "
-           "leaves thinking to the "
-           "model's default: the same question gives another reply than in TensorFold Web's Chat unless both send the "
-           "same.",
+           "Use an OpenAI provider; match system prompts and thinking for replies comparable to Web Chat.",
            ("models", "chat_stream"),
            checked={"date": "2026-10-12", "machine": "Windows PC through node 2's TensorFold Web (GX10), TensorFold 1.0.7",
                     "how": "Jan on Windows with the relay's address and key: the model listed and replies streamed; "
                            "its requests captured and replayed, the same reply token for token as the same request "
                            "sent from here"}),
     Recipe("claude-code", "Claude Code", "agent", "anthropic",
-           "The Anthropic-compatible endpoint. The attribution header is turned off so the prompt cache survives "
-           "between turns. Claude Code's own prompt is about 16k tokens: the engine needs a window of 32k or more "
-           "(65,536 is comfortable); the CUDA engine serves 16,384 unless Longest conversation is set in Settings.",
+           "Use the Anthropic endpoint with a 32K+ window; the snippet disables attribution headers for prompt reuse.",
            ("context", "anthropic", "anthropic_tools"), extra={"min_context": 32768},
            checked={"date": "2026-10-12", "machine": "DGX Spark node 2 (GX10), TensorFold 1.0.7",
                     "how": "claude -p (Claude Code 2.1.296), Nemotron with a 65,536-token window: it wrote the file "
                            "asked, 6 s; with the default 16,384 the engine refuses its prompt. Claude Code now warns "
                            "about a model it does not know: CLAUDE_CODE_MAX_CONTEXT_TOKENS gives it the window"}),
-    Recipe("opencode", "OpenCode", "agent", "openai", "A provider block in opencode.json (the project's or "
-           "~/.config/opencode/). Its prompts need a window of 32k or more.",
+    Recipe("opencode", "OpenCode", "agent", "openai", "Add this provider to opencode.json and use a 32K+ window.",
            ("models", "chat_stream", "tool_call", "context"), extra={"min_context": 32768},
            checked={"date": "2026-10-12", "machine": "DGX Spark node 2 (GX10), TensorFold 1.0.7",
                     "how": "opencode run 1.19.0 with this provider block, Nemotron with a 65,536-token window: it "
                            "wrote the file asked through its write tool, 15 s (also on the Mac mini M6, 10 Oct)"}),
     Recipe("codex", "Codex CLI", "agent", "responses",
-           "Codex speaks only the Responses API (wire_api = \"chat\" is gone), and asks for "
-           "include: [\"reasoning.encrypted_content\"] on every request: TensorFold accepts and ignores it from 1.0.9 "
-           "(earlier versions refuse it, and Codex stops at its first request). It needs a window of 32k tokens or "
-           "more (Longest conversation in Settings). The test sends Codex's own request.",
+           "Use the Responses endpoint with TensorFold 1.0.9+ and a 32K+ window.",
            ("context", "responses"), extra={"min_context": 32768, "codex_shape": True},
            checked={"not": "Codex itself not run here; its own request (stateless, include "
                            "reasoning.encrypted_content) is answered by TensorFold 1.0.9 on node 2 (13 Oct), where "
                            "1.0.2 to 1.0.7 refused it with a 400"}),
     Recipe("pi", "Pi", "agent", "openai",
-           "A small coding agent for the terminal: this provider in ~/.pi/agent/models.json, then pi --model "
-           "tensorfold/<the model>. Its prompts need a window of 32k or more.", ("models", "chat_stream", "tool_call", "context"), extra={"min_context": 32768},
+           "Add this provider to ~/.pi/agent/models.json and select it with pi --model tensorfold/<the model>.", ("models", "chat_stream", "tool_call", "context"), extra={"min_context": 32768},
            checked={"date": "2026-10-12", "machine": "DGX Spark node 2 (GX10), TensorFold 1.0.7",
                     "how": "pi 1.1.0 -p with this provider, Nemotron with a 65,536-token window: it wrote the file "
                            "asked, 3 s"}),
     Recipe("omp", "OMP (Oh My Pi)", "agent", "openai",
-           "Pi's fork with the editor's tools wired in (LSP, debugger): a provider in ~/.omp/agent/models.yml and the "
-           "default role in config.yml. It runs on Bun. Its prompts need a window of 32k or more.",
+           "Configure this provider and default model role for OMP on Bun with a 32K+ window.",
            ("models", "chat_stream", "tool_call", "context"), extra={"min_context": 32768},
            checked={"date": "2026-10-12", "machine": "DGX Spark node 2 (GX10), TensorFold 1.0.7",
                     "how": "omp 18.10.3 -p with this provider, Nemotron with a 65,536-token window: it wrote the "
                            "file asked, 5 s"}),
     Recipe("openfox", "OpenFox", "agent", "openai",
-           "A coding agent made for local AIs, in the browser (port 10369): this provider in "
-           "~/.config/openfox/config.json (openfox provider add asks the same), then openfox. Name the model as the default, or a session has no model. It starts in Planner "
-           "mode, which plans and writes nothing.", ("models", "chat_stream", "tool_call", "context"),
+           "Set this provider as the default model; switch from Planner mode to allow edits.", ("models", "chat_stream", "tool_call", "context"),
            extra={"min_context": 32768},
            checked={"date": "2026-10-12", "machine": "DGX Spark node 2 (GX10), TensorFold 1.0.7",
                     "how": "OpenFox 2.0.161 with this config: a session planned the task asked (7.6k tokens of its "
                            "prompt, 97 tokens a second)"}),
     Recipe("cline", "Cline", "agent", "openai",
-           "VS Code: the OpenAI Compatible provider, for chat, plans and edits in the editor. Its prompts need a "
-           "window of 32k or more.",
+           "Choose OpenAI Compatible in Cline with a 32K+ window.",
            ("models", "chat_stream", "tool_call", "context"), extra={"min_context": 32768},
            checked={"not": "an editor extension (VS Code); no editor session on these machines"}),
     Recipe("cursor", "Cursor", "agent", "openai",
-           "An editor with its own AI service: it does not reach a private AI, so there is nothing to set.", (),
+           "Cursor cannot reach a private engine because its requests originate on its own servers.", (),
            checked={"not": "Cursor's requests leave from its own servers, which cannot reach this machine"}),
     Recipe("openclaw", "OpenClaw", "assistant", "openai",
-           "A personal agent that acts for you (files, shell, messaging channels through its gateway): a provider in "
-           "~/.openclaw/openclaw.json, made its primary model. Its prompts need a window of 32k or more.",
+           "Set this provider as the primary model in ~/.openclaw/openclaw.json with a 32K+ window.",
            ("models", "chat_stream", "tool_call", "context"), extra={"min_context": 32768},
            checked={"date": "2026-10-12", "machine": "DGX Spark node 2 (GX10), TensorFold 1.0.7",
                     "how": "openclaw 2026.10.2, agent --local with this provider, Nemotron with a 65,536-token "
                            "window: it wrote the file asked, 25 s"}),
     Recipe("hermes", "Hermes Agent", "assistant", "openai",
-           "Nous Research's personal agent, in the terminal or through its messaging gateway, with memory and "
-           "skills: a custom endpoint in ~/.hermes/config.yaml. Its prompts need a window of 32k or more.",
+           "Set this custom endpoint in ~/.hermes/config.yaml with a 32K+ window.",
            ("models", "chat_stream", "tool_call", "context"), extra={"min_context": 32768},
            checked={"date": "2026-10-12", "machine": "DGX Spark node 2 (GX10), TensorFold 1.0.7",
                     "how": "hermes -z with this endpoint, Nemotron with a 65,536-token window: it wrote the file "
                            "asked and ran it to check, 17 s"}),
-    Recipe("python", "Python", "sdk", "openai", "The official OpenAI client, pointed here.", ("models", "chat_stream")),
+    Recipe("python", "Python", "sdk", "openai", "Point the official OpenAI Python client at this endpoint.", ("models", "chat_stream")),
 ]
 
 

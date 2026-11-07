@@ -114,10 +114,10 @@ export default function Models({ machine, engine, settings, refreshEngine, refre
   const pct = (b: number) => (cap ? `${Math.max(0, Math.min(100, (b / cap) * 100))}%` : '0%')
   const wide = (b: number) => cap && b / cap > 0.11
   const unverified = v?.basis === 'cuda-unverified'
-  const verdictLine = !current ? null : !current.runs_here ? <>{current.name} does not run on this machine: {current.runs_note}{v ? ` For memory alone, it ${v.level === 'fits' ? 'would fit' : v.level === 'tight' ? 'would fit, tightly' : 'would not fit'}.` : ''}</>
+  const verdictLine = !current ? null : !current.runs_here ? <>{current.name} does not run on this machine: {current.runs_note}</>
     : !v ? <>The size of {current.name} is not known yet.</>
-    : v.level === 'no' ? <><strong>{current.name}</strong> does not fit: {v.reason}{v.needs_ram_gb ? ` A ${v.needs_ram_gb} GB machine would.` : ''}</>
-    : <><strong>{current.name}</strong> {v.level === 'tight' ? 'fits, tightly' : 'fits'}: about <strong>{num(v.context_tokens)} tokens</strong> of context{unverified ? ' (a rough estimate on CUDA)' : v.basis === 'engine-floor' ? ' (from the engine\'s own memory floor)' : v.basis === 'native-measured' ? ' (the native engine sizes its own memory up to macOS\'s GPU limit)' : v.basis === 'native-unverified' ? ' (macOS\'s GPU limit could not be read: a guess at 85% of memory)' : ''}, {gb(v.left_for_apps_bytes)} left for your apps{v.level === 'tight' ? `. ${v.reason}` : '.'}</>
+    : v.level === 'no' ? <><strong>{current.name}</strong> does not fit{v.needs_ram_gb ? `; about ${v.needs_ram_gb} GB is needed` : ''}.</>
+    : <><strong>{current.name}</strong> {v.level === 'tight' ? 'fits, tightly' : 'fits'}: about <strong>{num(v.context_tokens)} tokens</strong> of context{unverified ? ' (a rough estimate on CUDA)' : v.basis === 'engine-floor' ? ' (from the engine\'s own memory floor)' : v.basis === 'native-measured' ? ' (the native engine sizes its own memory up to macOS\'s GPU limit)' : v.basis === 'native-unverified' ? ' (macOS\'s GPU limit could not be read: a guess at 85% of memory)' : ''}, {gb(v.left_for_apps_bytes)} left for your apps.</>
 
   const shown = models?.filter((m) => (discover || m.installed) && FILTERS.find((f) => f.id === filter)!.test(m) && `${m.name} ${m.id}`.toLowerCase().includes(search.toLowerCase())) ?? []
   return (
@@ -125,12 +125,12 @@ export default function Models({ machine, engine, settings, refreshEngine, refre
       <div className="model-search"><input className="input" type="search" aria-label="Search models" placeholder="Search models" value={search} onChange={(e) => setSearch(e.target.value)} /><select className="sel" value={filter} onChange={(e) => setFilter(e.target.value)} aria-label="Filter models">{FILTERS.map((f) => <option key={f.id} value={f.id}>{f.label}</option>)}</select><a className="btn" href="#bench">Benchmarks</a>{discover && <button className="btn" aria-busy={is('refresh')} onClick={refresh}>{is('refresh') ? 'Refreshing…' : 'Refresh sizes'}</button>}</div>
       {notice && <div className="notice">{notice}</div>}
       {conflict && <div className="notice conflict" role="alertdialog" aria-label="Another model is running">
-        <span><b>{engine?.model}</b> is {engine?.status === 'starting' ? 'still loading' : 'running'}. The engine serves one model at a time: stop it, then start <b>{conflict.name}</b>?{engine?.connections ? ` ${engine.connections} ${engine.connections === 1 ? 'connection is' : 'connections are'} open and will be cut.` : ''}</span>
+        <span>Stop <b>{engine?.model}</b> and start <b>{conflict.name}</b>{engine?.connections ? `, disconnecting ${engine.connections} active connections` : ''}?</span>
         <span className="actions"><button className="btn sm primary" disabled={busy} onClick={() => start(conflict, true)}>Stop it and start {conflict.name}</button><button className="btn sm quiet" onClick={() => setConflict(null)}>Keep it running</button></span>
       </div>}
       {machine && machine.backend === 'none' && <div className="notice">{machine.backend_note} Use Settings to connect to a TensorFold running elsewhere.</div>}
       {machine && machine.budget.basis === 'cuda-unverified' && <div className="notice info">Memory verdicts on CUDA machines use TensorFold's documented rule for a card's memory but have not been checked against a real run yet; treat them as rough.</div>}
-      {settings?.remote && <div className="notice info">Web did not start the engine at <code>{settings.engine_url}</code>. This list describes this machine.</div>}
+      {settings?.remote && <div className="notice info">This list describes the local machine; Web did not start the engine at <code>{settings.engine_url}</code>.</div>}
 
       {current && <details className="more model-memory"><summary>Memory estimate for {current.name}</summary><div className="ribbon" aria-label="Memory on this machine">
         <div className="top">
@@ -155,6 +155,8 @@ export default function Models({ machine, engine, settings, refreshEngine, refre
           <span><i className="sw a" />Left for your other apps and {machine?.os ?? 'the system'}</span>
         </div>
         {verdictLine && <p className="verdict">{verdictLine}</p>}
+        {v && !current.runs_here && <p className="small muted">Memory alone: {v.level === 'fits' ? 'fits' : v.level === 'tight' ? 'fits tightly' : 'does not fit'}.</p>}
+        {v && current.runs_here && v.level !== 'fits' && <p className="small muted">{v.reason}</p>}
       </div>
 
       </details>}
@@ -168,7 +170,7 @@ export default function Models({ machine, engine, settings, refreshEngine, refre
             return (
               // The model name opens details; Download and Start remain separate controls.
               <div key={m.id} role="listitem" data-selected={sel === m.id} className={`mrow ${m.runs_here ? '' : 'dim'}`} onClick={() => setSel(m.id)}>
-                <div><button type="button" className="n rowpick" aria-current={sel === m.id ? 'true' : undefined} onClick={(e) => { e.stopPropagation(); setSel(m.id) }}><ModelLogo names={[m.name, m.id, m.family]} />{m.name}{m.recommended && <span className="chip fits" style={{ marginLeft: 8 }}>Recommended</span>}</button><div className="d">{m.vendor}. {m.description}</div>
+                <div><button type="button" className="n rowpick" aria-current={sel === m.id ? 'true' : undefined} onClick={(e) => { e.stopPropagation(); setSel(m.id) }}><ModelLogo names={[m.name, m.id, m.family]} />{m.name}{m.recommended && <span className="chip fits" style={{ marginLeft: 8 }}>Recommended</span>}</button><div className="d">{m.vendor} · {m.description}</div>
                   {p?.running && <div className="progress"><i style={{ width: `${Math.round(p.fraction * 100)}%` }} /></div>}
                   {p?.failed && <div className="small" style={{ color: 'var(--bad)', marginTop: 4 }}>Download failed: {p.failed.error}</div>}</div>
                 <div className="v">{gb(m.size_bytes)}<small>{m.installed ? 'on this machine' : 'to download'}</small></div>

@@ -18,7 +18,7 @@ const KIND: Record<BenchMode, string> = { quick: 'Quick score', profile: 'Usage 
 type Choice = BenchMode | 'series'
 // one tile per kind of run: a sign for what it measures, and what it does in a few words
 const RUN: Record<Choice, { icon: string; what: string }> = {
-  quick: { icon: 'M13 2L4 14h7l-1 8 9-12h-7z', what: 'Three prompts, with and without the speed-up. About a minute.' },
+  quick: { icon: 'M13 2L4 14h7l-1 8 9-12h-7z', what: 'Three prompts with and without drafts, in about a minute.' },
   profile: { icon: 'M5 20v-6M11 20V6M17 20v-9M3 20h18', what: 'Seven kinds of use, fourteen prompts: the speed of each.' },
   quality: { icon: 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM8 12l3 3 5-6', what: 'Are the answers right: 228 items, scored strictly.' },
   tools: { icon: 'M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.8-3.8a6 6 0 0 1-7.9 7.9l-6.9 6.9a2.1 2.1 0 0 1-3-3l6.9-6.9a6 6 0 0 1 7.9-7.9z', what: 'Does it call tools properly, as an agent would need.' },
@@ -134,7 +134,7 @@ function Heat({ hw, prefill }: { hw: BenchHardware; prefill: boolean }) {
         {hw.cost?.per_million_tokens != null && hw.j_per_token != null && <div><dt>per million tokens</dt><dd>{money(hw.cost.per_million_tokens, hw.cost.currency)}</dd></div>}
       </dl>
       <HeatChart hw={hw} />
-      {hw.throttle?.reasons.length ? <p className="small">Why it slowed down: {hw.throttle.reasons.join(', ')}. Speeds measured while the machine slows itself down understate it.</p> : null}
+      {hw.throttle?.reasons.length ? <p className="small">Throttled measurement: {hw.throttle.reasons.join(', ')}.</p> : null}
       <p className="small muted">{hw.estimate ? `Estimate for the ${hw.scope} (${hw.source}).` : `Whole-machine measurement (${hw.source}).`}</p>
       <dl className="kv small measurement-notes">
         <dt>Measured interval</dt><dd>{Math.round(hw.measured_s)} s, including prompt reading</dd>
@@ -296,7 +296,7 @@ function Report({ run, names, onDelete, toast }: { run: BenchRun; names: Record<
       <div className="report-head">
         <div>
           <h2>{KIND[run.mode]}: {run.model}</h2>
-          <p className="small muted">{when(run.created)}. {run.engine ?? 'Engine not identified'} on {run.machine?.chip ?? 'this machine'}{run.machine?.ram_bytes ? `, ${gb(run.machine.ram_bytes)}` : ''}. {STATUS[run.status] ?? run.status}.</p>
+          <p className="small muted">{when(run.created)} · {run.engine ?? 'Engine not identified'} · {run.machine?.chip ?? 'this machine'}{run.machine?.ram_bytes ? `, ${gb(run.machine.ram_bytes)}` : ''} · {STATUS[run.status] ?? run.status}</p>
         </div>
         <div className="actions">
           {run.status !== 'running' && <Share run={run} names={names} toast={toast} />}
@@ -320,7 +320,7 @@ function Report({ run, names, onDelete, toast }: { run: BenchRun; names: Record<
         {run.memory?.engine_peak_bytes ? <div><dt>Engine memory, peak</dt><dd>{gb(run.memory.engine_peak_bytes, 1)}</dd></div> : null}
       </dl>}
       {run.status !== 'running' && run.findings && run.findings.length > 0 && <ul className="findings">{run.findings.map((f, i) => <li key={i}>{f}</li>)}</ul>}
-      {(run.mode === 'quick' || run.mode === 'profile') && o && <p className="small muted">Medians over {o.prompts} prompts{o.tokens != null ? ` and ${num(o.tokens)} tokens` : ' (tokens not counted by the engine)'} with drafts, {timing}. {o.checked > 0 ? `Exact means the reply without drafts has the same tokens (${run.results.find((r) => r.compared_by)?.compared_by === 'token_sha' ? 'same token digest' : 'same text'}).` : 'No exactness check in this run.'}</p>}
+      {(run.mode === 'quick' || run.mode === 'profile') && o && <p className="small muted">Medians over {o.prompts} prompts{o.tokens != null ? ` and ${num(o.tokens)} tokens` : ' (tokens not counted by the engine)'} with drafts, {timing}; {o.checked > 0 ? `plain replies match by ${run.results.find((r) => r.compared_by)?.compared_by === 'token_sha' ? 'token digest' : 'text'}.` : 'exactness unchecked.'}</p>}
       {(run.mode === 'quick' || run.mode === 'profile') && suites.length > 0 && <Bars rows={suites} names={names} />}
       {run.hardware && <Heat hw={run.hardware} prefill={run.mode === 'prefill'} />}
       {(run.mode === 'quick' || run.mode === 'profile') && suites.length > 0 && (
@@ -519,7 +519,8 @@ export default function Bench({ engine, toast, stale }: Ctx) {
           <div className="filters" role="group" aria-label="Categories">
             {info.quality.categories.map((c) => <button key={c.id} type="button" aria-pressed={!cats.length || cats.includes(c.id)} onClick={() => setCats((cs) => { const now = cs.length ? cs : info.quality.categories.map((x) => x.id); return now.includes(c.id) ? now.filter((x) => x !== c.id) : [...now, c.id] })}>{c.name} <small>{c.items}</small></button>)}
           </div>
-          <p className="small muted">{info.quality.about}</p>
+          <p className="small muted">Fixed GSM8K, MMLU, instruction and long-context cases.</p>
+          <p className="small muted">GSM8K © 2021 OpenAI and MMLU © 2020 Dan Hendrycks, MIT; licenses ship with Web.</p>
         </>}
         {(mode === 'quick' || mode === 'profile') && <label className="toggle small"><input type="checkbox" checked={exactness} onChange={(e) => setExactness(e.target.checked)} /> Check exactness: write each reply again with the speed-up off and compare the tokens</label>}
         <div className="actions">
@@ -577,7 +578,7 @@ function ToolEvalInstall({ toast, onDone }: { toast: Ctx['toast']; onDone: () =>
   }
   return (
     <div className="notice info"><div>
-      Tool calls are measured by <a href="https://github.com/SeraphimSerapis/tool-eval-bench" target="_blank" rel="noreferrer">tool-eval-bench</a>, a free tool (MIT) that plays scripted conversations with mock tools and scores each one. It is not installed on this machine yet.
+      Install <a href="https://github.com/SeraphimSerapis/tool-eval-bench" target="_blank" rel="noreferrer">tool-eval-bench</a> (MIT) to score scripted conversations with mock tools.
       <div className="actions" style={{ marginTop: 8 }}>
         <button className="btn sm primary" aria-busy={busy} disabled={busy} onClick={install}>{busy ? 'Installing… (up to five minutes)' : 'Install it'}</button>
         <span className="small muted">or in a terminal: <code>uv tool install tool-eval-bench==2.8.0</code> (the version TensorFold Web reads)</span>

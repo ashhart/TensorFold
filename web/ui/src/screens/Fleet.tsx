@@ -55,7 +55,7 @@ function MachineCard({ m, here, onRemove, onToken, onOpen, working, ask, setAsk 
         {e?.memory && <MiniMemory m={e.memory} />}
         {!!e?.findings.length && <ul className="ffind">{e.findings.map((f, i) => <li key={i} className={f.level}>{f.title}</li>)}</ul>}
         <div className="small faint" style={{ marginTop: 10 }}>TensorFold {m.tensorfold_version ?? 'not installed'}, TensorFold Web {m.studio_version}{!m.self && m.ms != null ? `, read in ${m.ms} ms` : ''}</div>
-        {!m.self && engineSkew(here, m.tensorfold_version) && <p className="small warn-text" style={{ margin: '6px 0 0' }}>Another TensorFold release than this machine's ({here}): a reply can part from it at a near tie, so a KL or exactness check across the two compares releases as well as machines. Update both to the same release first.</p>}
+        {!m.self && engineSkew(here, m.tensorfold_version) && <p className="small warn-text" style={{ margin: '6px 0 0' }}>Use matching releases for exactness checks; this machine runs {here}.</p>}
       </>}
       {!m.self && ask === 'remove' && <Ask danger yes="Remove it" busy={working === `remove:${m.id}`} onYes={onRemove} onNo={() => setAsk(null)} text={<>Remove <b>{m.name}</b> from this fleet? Its TensorFold Web and its AI keep running; only this list forgets it.</>} />}
       {!m.self && ask === 'token' && <AskName text={`${m.name}'s TensorFold Web token`} initial="" ok="Save the token" onOk={onToken} onCancel={() => setAsk(null)} />}
@@ -132,7 +132,7 @@ export default function Fleet({ toast }: Ctx) {
       </div>
       <div className="card" style={{ marginTop: 14, maxWidth: 720 }}>
         <b>Add a machine</b>
-        <p className="small muted" style={{ margin: '4px 0 0' }}>Its TensorFold Web's address (the name <code>tailscale serve</code> gives it, or <code>http://host:8090</code>) and its token: <code>~/.config/tensorfold-web/web-token</code> on Linux, <code>~/Library/Application Support/TensorFold Web/web-token</code> on a Mac. No restart needed.</p>
+        <p className="small muted" style={{ margin: '4px 0 0' }}>Enter its Web address and the token printed by <code>tensorfold-web token</code> there.</p>
         <div className="field"><span>Address</span><input type="text" value={url} onChange={(e) => { setUrl(e.target.value); setChecks(null) }} placeholder="http://spark.example.ts.net" aria-label="TensorFold Web address" spellCheck={false} autoComplete="off" /></div>
         <div className="field"><span>Token</span><input type="password" value={token} onChange={(e) => { setToken(e.target.value); setChecks(null) }} placeholder="its web-token" aria-label="TensorFold Web token" autoComplete="off" /></div>
         <div className="field"><span>Name</span><input type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="its hostname if left empty" aria-label="Name" maxLength={60} /></div>

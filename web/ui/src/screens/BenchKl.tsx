@@ -67,7 +67,7 @@ export function KlOptions({ load, setLoad, state, setState }: { load: number; se
       <label className="small"><input type="radio" name="klref" checked={kind === 'drafts'} onChange={() => pickKind('drafts')} /> The same engine with drafts off: exact decoding says the distributions are the same</label>
       <label className="small"><input type="radio" name="klref" checked={kind === 'address'} onChange={() => pickKind('address')} /> A reference engine at an address, such as the unquantized model on vLLM</label>
       {kind === 'address' && !found && <p className="small muted" style={{ margin: 0 }}>{peer ? 'Reading that machine\'s engine through its TensorFold Web…' : 'Check the reference before running: until then the run waits.'}</p>}
-      {kind === 'address' && peer && engineSkew(hereVersion, peerVersion) && <p className="small warn-text" style={{ margin: 0 }}>That machine runs TensorFold {peerVersion}, this one {hereVersion}: a reply can part between releases at a near tie, so this KL measures the release as well as the machine. Put both on the same release for a like-for-like check.</p>}
+      {kind === 'address' && peer && engineSkew(hereVersion, peerVersion) && <p className="small warn-text" style={{ margin: 0 }}>Match releases for a like-for-like check: {peerVersion} there, {hereVersion} here.</p>}
       {kind === 'address' && <div className="aim-row">
         <PeerPick peers={peers} value={peer} onChange={pickPeer} label="A Fleet machine as the reference" />
         {!peer && <>
@@ -84,10 +84,10 @@ export function KlOptions({ load, setLoad, state, setState }: { load: number; se
       <label className="small"><input type="radio" name="kltext" checked={!fixed} onChange={() => setState((s) => ({ ...s, fixed: false }))} /> Their own replies to the suites, compared where both wrote the same text</label>
       <label className="small"><input type="radio" name="kltext" checked={fixed} onChange={() => setState((s) => ({ ...s, fixed: true }))} /> A fixed text (every position, CUDA engines from TensorFold 1.0.8)</label>
       {fixed && <textarea className="input" rows={5} value={text} maxLength={20000} onChange={(e) => { const t = e.target.value; setState((s) => ({ ...s, text: t })) }} aria-label="The text both engines read" />}
-      {fixed && <p className="small muted" style={{ margin: 0 }}>Both engines read this text once (<code>prompt_logprobs</code> on <code>/v1/completions</code>) and every position of it is compared. TensorFold on a Mac and its Python line refuse it, as other engines without it do; vLLM gives it too. Both must split the text into the same tokens.</p>}
+      {fixed && <p className="small muted" style={{ margin: 0 }}>Requires matching tokenizers and <code>prompt_logprobs</code>; TensorFold Metal and Python refuse it.</p>}
       <label className="small">The candidate answers <select className="sel" value={load} onChange={(e) => setLoad(Number(e.target.value))} aria-label="Load while the candidate answers">
         <option value={0}>alone</option>{[3, 7, 15].map((n) => <option key={n} value={n}>with {n} other requests going</option>)}</select></label>
-      {!fixed && <p className="small muted" style={{ margin: 0 }}>Both engines need log-probabilities on chat completions (TensorFold 1.0.5 on CUDA, vLLM, llama.cpp). Each position is compared where both wrote the same text, up to the first token where they part.</p>}
+      {!fixed && <p className="small muted" style={{ margin: 0 }}>Requires chat log-probabilities; positions compare until the first differing token.</p>}
     </div>
   )
 }
@@ -119,7 +119,7 @@ export function KlReport({ run }: { run: BenchRun }) {
           <td>{r.kl!.differs_at == null ? (r.kl!.identical ? 'identical' : 'lengths differ') : `token ${r.kl!.differs_at}`}</td><td>{r.kl!.positions ? pc(r.kl!.agree / r.kl!.positions) : '—'}</td></tr>)}</tbody>
       </table></div>}
       {text && <details className="small"><summary>The text both read ({num(run.kl_text!.length)} characters{k.unscored ? `; ${k.unscored} positions without probabilities on one side, left out` : ''})</summary><p>{run.kl_text}</p></details>}
-      <p className="small muted">A lower bound of the full KL, from the top {k.top} log-probabilities of each side: what their lists establish, nothing guessed about the rest. {text ? 'Both read the same text, so every position after the first compares; "expects" is each side\'s most likely token there.' : 'Positions after the first different token are not compared: the two replies no longer read the same text.'}</p>
+      <p className="small muted">KL lower bound from the top {k.top} log-probabilities; {text ? '"expects" is the most likely token at each position.' : 'comparison ends at the first differing token.'}</p>
     </>
   )
 }

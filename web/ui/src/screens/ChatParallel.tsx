@@ -118,8 +118,7 @@ export function ParallelPanel({ model, engine, sampling }: { model: string; engi
       <label className="small">Prompts, one per line (taken in turn: {lines.length} for {n} {n === 1 ? 'request' : 'requests'})
         <textarea className="input" rows={3} value={prompts} onChange={(e) => setPrompts(e.target.value)} disabled={running} /></label>
       <p className="small muted" style={{ margin: 0 }}>
-        Thinking {sampling.thinking === 'default' ? "as the model's default" : sampling.thinking}, {sampling.system ? 'the system prompt given' : 'no system prompt'}, {sampling.temperature != null ? `temperature ${sampling.temperature}` : "the model's own temperature"}; replies are not kept.
-        {cap ? ` This engine serves up to ${cap} requests at once; more wait their turn.` : ''} Try 1 first: the table then shows what batching adds.
+        Thinking {sampling.thinking === 'default' ? "as the model's default" : sampling.thinking}, {sampling.system ? 'the system prompt given' : 'no system prompt'}, {sampling.temperature != null ? `temperature ${sampling.temperature}` : "the model's own temperature"}; replies are not saved{cap ? `; concurrency limit ${cap}, then queued` : ''}.
       </p>
       {slots.length > 0 && <>
         <div className="small"><b>{running ? `${num(liveEvents)} stream events in ${now.toFixed(1)} s (tokens are counted at the end)`

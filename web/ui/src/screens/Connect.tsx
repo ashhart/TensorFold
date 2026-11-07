@@ -77,11 +77,11 @@ export default function Connect({ engine, settings, saveSettings, refreshSetting
     <section>
       <div className="head"><div><h2>Use your model in other tools</h2><p>Choose an app and copy its API settings.</p></div></div>
       {err && <div className="notice bad">{err}</div>}
-      {info.key_pending_restart && where === 'here' && <div className="notice">A new key is set, but the running engine still uses the one it was started with. Tools on this machine keep working with that one until the engine restarts (Monitor).</div>}
+      {info.key_pending_restart && where === 'here' && <div className="notice">The running engine and its clients keep the previous key until restart.</div>}
 
       <h2 className="subhead"><span className="stepno">1</span> Where does the app run?</h2>
       <div className="wherepick" role="radiogroup" aria-label="Where the app runs">
-        <button role="radio" aria-checked={where === 'here'} onClick={() => setWhere('here')}><b>On this machine</b><span>{host}, where the AI runs. The app talks to it directly.</span></button>
+        <button role="radio" aria-checked={where === 'here'} onClick={() => setWhere('here')}><b>On this machine</b><span>{host}, with a direct engine connection.</span></button>
         <button role="radio" aria-checked={where === 'away'} onClick={() => setWhere('away')}><b>On another computer</b><span>A laptop, a phone, another server: through this TensorFold Web's address, with a key.</span></button>
       </div>
 
@@ -98,7 +98,8 @@ export default function Connect({ engine, settings, saveSettings, refreshSetting
         <h2 className="subhead"><span className="stepno">3</span> Its settings</h2>
         <div className="card snippet rel" role="tabpanel">
           <h2 className="toolhead"><Logo id={current.id} size="lg" />{current.name} <span className="chip no">{current.form}</span> <span className={`chip ${where === 'away' ? 'run' : 'fits'}`}>{place}</span></h2>
-          <p>{current.note}{current.where_note ? ` ${current.where_note}` : ''}</p>
+          <p>{current.note}</p>
+          {current.where_note && <p className="small muted">{current.where_note}</p>}
           {needKey && <div className="notice"><div>From another computer the app needs a key, and none is set yet. <button className="btn sm primary" aria-busy={is('key')} onClick={newKey}>Generate a key</button> <span className="small muted">It replaces YOUR-KEY below.</span></div></div>}
           {current.min_context && info.window != null && info.window < current.min_context && <WindowNotice name={current.name} need={current.min_context} window={info.window} />}
           {(() => {
@@ -120,7 +121,7 @@ export default function Connect({ engine, settings, saveSettings, refreshSetting
 
       <h2 className="subhead">An app not in the list?</h2>
       <div className="card">
-        <p>Any app that speaks the OpenAI API: give it this address and {where === 'away' ? 'this key' : info.api_key ? 'this key' : 'any key (the AI asks for none on this machine)'}, then pick the model it lists.</p>
+        <p>Use this address, {where === 'away' || info.api_key ? 'key' : 'any key'} and model list in any OpenAI-compatible app.</p>
         <div className="field"><span>Address</span><input type="text" readOnly value={where === 'away' ? relayPath : `${info.engine_url}/v1`} aria-label="Address for the app" /><button className="btn" onClick={() => copy(where === 'away' ? relayPath : `${info.engine_url}/v1`, 'Address copied')}>Copy</button></div>
         {where === 'away' ? keyField('another computer', info.relay_key) : keyField('this machine')}
         {where === 'away' && <div className="actions" style={{ marginTop: 10 }}>
@@ -129,7 +130,7 @@ export default function Connect({ engine, settings, saveSettings, refreshSetting
         </div>}
         <details className="pmore" style={{ marginTop: 12 }}>
           <summary className="small">Advanced: let the AI answer on the local network without TensorFold Web</summary>
-          <p className="small muted">For a tool on the same network that cannot use TensorFold Web's address. The AI then answers on this machine's network name too{info.relay_key || info.api_key ? ', with the key' : '; set a key first'}.</p>
+          <p className="small muted">Expose the engine's network address for tools that cannot use Web's relay{info.relay_key || info.api_key ? ', with its key' : '; set a key first'}.</p>
           <label className="toggle small"><input type="checkbox" checked={!!settings?.share} onChange={(e) => saveSettings({ share: e.target.checked }).catch((err) => toast(`Not saved: ${err}`, 'bad'))} /> Also let the AI answer directly on the local network</label>
           {settings?.share && info.lan_url && <div className="field"><span>Network</span><input type="text" readOnly value={`${info.lan_url}/v1`} aria-label="Engine network address" /><button className="btn" onClick={() => copy(`${info.lan_url}/v1`, 'Address copied')}>Copy</button></div>}
         </details>
