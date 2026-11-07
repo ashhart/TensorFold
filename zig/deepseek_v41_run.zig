@@ -254,6 +254,11 @@ pub fn main(init: std.process.Init) !void {
     const after = execution_after orelse try counters();
     if (after.disk_read < before.disk_read or after.pageins < before.pageins) return error.NonmonotonicCounters;
     const resident_gate_passed = after.disk_read == before.disk_read;
+    // The Engram stream is by design; its own logical rows and syscalls are reported beside the execution total.
+    const execution_bytes = after.disk_read - before.disk_read;
+    const stream_bytes: u64 = if (model.stream) |s| s.stats.bytes else 0;
+    const stream_syscalls: u64 = if (model.stream) |s| s.stats.syscalls else 0;
+    const stream_misses: u64 = if (model.stream) |s| s.stats.misses else 0;
     const receipt = try std.json.Stringify.valueAlloc(a, .{
         .mode = mode,
         .evidence_origin = "current_invocation_not_historical_qualification",
@@ -267,7 +272,10 @@ pub fn main(init: std.process.Init) !void {
         .measurement_scope = if (execution_after != null) "model_execution" else "execution_and_diagnostic_io",
         .diagnostic_self_check_outside_window = is_oracle or is_oracle_fp64,
         .engram_streaming = model.stream != null,
-        .execution_disk_read_bytes = after.disk_read - before.disk_read,
+        .engram_stream_logical_bytes = stream_bytes,
+        .engram_stream_syscalls = stream_syscalls,
+        .engram_stream_misses = stream_misses,
+        .execution_disk_read_bytes = execution_bytes,
         .execution_pageins = after.pageins - before.pageins,
         .resident_gate_passed = resident_gate_passed,
         .execution_error = if (execution_error) |err| @as(?[]const u8, @errorName(err)) else null,
