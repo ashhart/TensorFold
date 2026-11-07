@@ -124,6 +124,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     @import("inkling2.zig").targets(b, target, optimize, strip, cuda, mods.core, mods.lanes, runner);
     @import("idol_cuda.zig").targets(b, target, optimize, strip, cuda, mods.core, runner);
     for ([_]struct { []const u8, *std.Build.Module }{ .{ "kolibri1", kolibri1Module(b, target, optimize, cuda, mods.core, mods.lanes) }, .{ "dory", @import("dory.zig").module(b, target, optimize, cuda, mods.core, mods.lanes) } }) |m| runner.addImport(m[0], m[1]);
+    runner.addImport("ling_cuda", engines_build.lingCuda(b, target, optimize, cuda, mods.core, mods.lanes, runner.import_table.get("glm_cuda").?));
     runner.addImport("gemma4_cuda", @import("gemma4_cuda.zig").module(b, target, optimize, cuda, mods.core, mods.lanes));
     runner.addImport("spark25", @import("spark25.zig").module(b, target, optimize, cuda, mods.core, mods.lanes));
     // the served family and its engine, for the dots runner
@@ -410,6 +411,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     const q4_pdl_run = b.addRunArtifact(b.addTest(.{ .root_module = q4_pdl }));
     b.step("test-glm-q4-pdl-host", "GLM Q4 draft-head launch honors TF_GLM_PDL without a GPU").dependOn(&q4_pdl_run.step);
     if (@import("builtin").os.tag != .windows) step.dependOn(&q4_pdl_run.step); // its test sets env through libc setenv, which Windows lacks
+    engines_build.lingHost(b, host, cuda, mods.core, mods.lanes, glm, step);
     @import("kolibri.zig").host(b, kolibri1Module(b, host, .debug, cuda, mods.core, mods.lanes), native_modules.api, step);
     const gemma = @import("gemma4_cuda.zig").module(b, host, .debug, cuda, mods.core, mods.lanes);
     b.step("test-gemma-grants-host", "Gemma assistant and DFlash head-cost grants without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = gemma, .filters = &.{"shared head costs:"} })).step);

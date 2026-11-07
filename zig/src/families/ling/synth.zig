@@ -45,6 +45,7 @@ pub fn configJsonOf(gpa: std.mem.Allocator, base: Base, format: config.Quant, la
             .bf16 => {},
             .fp8_block128 => try o.put(a, "quantization_config", try quant(a, fp8_block, layers, group, false)),
             .nvfp4 => try o.put(a, "quantization_config", try quant(a, modelopt_block, layers, group, false)),
+            .exl3 => return error.Exl3Synth, // exllamav3 writes EXL3 packs; synth writes the formats it quantizes
         }
         return std.json.Stringify.valueAlloc(gpa, root, .{ .whitespace = .indent_2 });
     }
@@ -67,6 +68,7 @@ pub fn configJsonOf(gpa: std.mem.Allocator, base: Base, format: config.Quant, la
         .bf16 => _ = o.orderedRemove("quantization_config"),
         .fp8_block128 => try o.put(a, "quantization_config", try quant(a, fp8_block, layers, shape.group, true)),
         .nvfp4 => try o.put(a, "quantization_config", try quant(a, modelopt_block, layers, shape.group, true)),
+        .exl3 => return error.Exl3Synth,
     }
     return std.json.Stringify.valueAlloc(gpa, root, .{ .whitespace = .indent_2 });
 }
