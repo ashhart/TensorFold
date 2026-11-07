@@ -9,6 +9,7 @@ const load = @import("load.zig");
 const weights = @import("weights.zig");
 const work = @import("workspace.zig");
 pub const attention = @import("attention.zig");
+const attention_common = @import("attention_common.zig");
 pub const kv = @import("kv.zig");
 pub const ops = @import("ops.zig");
 pub const mhc = @import("mhc.zig");
@@ -798,7 +799,7 @@ pub const Model = struct {
             errdefer b.deinit();
             wqb_x_debug = b;
             residency.add(b);
-            attention.wqb_x_debug = b;
+            attention_common.wqb_x_debug = b;
         }
         residency.commit();
         residency.requestResidency();
@@ -831,7 +832,7 @@ pub const Model = struct {
         if (m.cond_wkv) |b| b.deinit();
         if (m.wqb_x_debug) |b| {
             b.deinit();
-            attention.wqb_x_debug = null;
+            attention_common.wqb_x_debug = null;
         }
         if (m.moe_x_debug) |b| b.deinit();
         m.weights.deinit();
@@ -1616,17 +1617,17 @@ pub const Model = struct {
         }
         // One 2,048-row prefill's wq_b input to /tmp/wqb_x.f32 (a 16-byte K,R header, then f32).
         if (m.wqb_x_debug) |b| {
-            if (attention.wqb_x_rows > 0) {
-                const n = @as(usize, attention.wqb_x_rows) * @as(usize, m.cfg.q_lora) * 4;
+            if (attention_common.wqb_x_rows > 0) {
+                const n = @as(usize, attention_common.wqb_x_rows) * @as(usize, m.cfg.q_lora) * 4;
                 const out = try m.gpa.alloc(u8, 16 + n);
                 defer m.gpa.free(out);
-                std.mem.writeInt(u64, out[0..8], @intCast(attention.wqb_x_rows), .little);
+                std.mem.writeInt(u64, out[0..8], @intCast(attention_common.wqb_x_rows), .little);
                 std.mem.writeInt(u64, out[8..16], @intCast(m.cfg.q_lora), .little);
                 const src: [*]const u8 = @ptrCast(b.contents());
                 @memcpy(out[16..], src[0..n]);
                 std.Io.Dir.cwd().writeFile(m.io, .{ .sub_path = "/tmp/wqb_x.f32", .data = out }) catch {};
-                std.log.info("wqb_x dump: {d} rows x {d} f32 -> /tmp/wqb_x.f32", .{ attention.wqb_x_rows, m.cfg.q_lora });
-                attention.wqb_x_rows = 0;
+                std.log.info("wqb_x dump: {d} rows x {d} f32 -> /tmp/wqb_x.f32", .{ attention_common.wqb_x_rows, m.cfg.q_lora });
+                attention_common.wqb_x_rows = 0;
             }
         }
         // The proposer runs from the backend's draft, not here: its own forward writes the logits buffer from row 1
