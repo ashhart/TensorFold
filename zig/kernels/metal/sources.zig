@@ -33,9 +33,9 @@ pub const nemotron_glue = @embedFile("nemotron_glue.metal");
 pub const core_row_projection = @embedFile("core/row_projection.metal");
 pub const core_tile_qmm = @embedFile("core/tile_qmm.metal") ++ @embedFile("core/tile_qmv.metal") ++
     @embedFile("core/tile_qmv_rows.metal");
-pub const core_exl3_projection = @embedFile("core/exl3_projection.metal");
+pub const core_exl3_projection = @embedFile("core/exl3_projection_core.metal") ++ @embedFile("core/exl3_projection_wide.metal") ++ @embedFile("core/exl3_projection_wide2.metal");
 /// The same EXL3 prefill reduction on the tensor units (core/exl3_projection.zig, loadWith).
-pub const core_exl3_projection_nax = @embedFile("core/exl3_projection_nax.metal");
+pub const core_exl3_projection_nax = @embedFile("core/exl3_projection_nax_base.metal") ++ @embedFile("core/exl3_projection_nax_prefill_body.metal") ++ @embedFile("core/exl3_projection_nax_prefill.metal") ++ @embedFile("core/exl3_projection_nax_affine.metal") ++ @embedFile("core/exl3_projection_nax_variants_a.metal") ++ @embedFile("core/exl3_projection_nax_variants_b.metal") ++ @embedFile("core/exl3_projection_nax_variants_c.metal") ++ @embedFile("core/exl3_projection_nax_fma.metal") ++ @embedFile("core/exl3_projection_nax_fma_static_a.metal") ++ @embedFile("core/exl3_projection_nax_fma_static_b.metal") ++ @embedFile("core/exl3_projection_nax_compare.metal") ++ @embedFile("core/exl3_projection_nax_fp8.metal");
 pub const core_exlr8_projection = @embedFile("core/exlr8_projection.metal");
 pub const core_exlr8_dense = @embedFile("core/exlr8_dense.metal");
 pub const core_exlr8_prompt = @embedFile("core/exlr8_prompt.metal");
