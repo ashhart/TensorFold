@@ -45,7 +45,7 @@ pub const Result = struct {
     /// Which rule `numeric_gate_passed` reports: the floor-relative band, or the FP32 contract capture.
     gate_basis: []const u8 = "floor_relative_band",
     /// The checkpoint metadata identity the floor is bound to, as 64 lower-case hex characters.
-    model_identity_hex: [64]u8 = @splat('0'),
+    checkpoint_metadata_identity_hex: [64]u8 = @splat('0'),
 };
 
 /// Indexer-selection boundary per window: contract margin (BF16-rounded FP32 scores), FP64-ideal margin, support flips.
@@ -177,7 +177,7 @@ fn runOf(comptime T: type, gpa: std.mem.Allocator, io: std.Io, model: *Model, id
     const gpu = try gpa.alloc(f32, cpu.len);
     defer gpa.free(gpu);
     try model.reset();
-    var result = Result{ .tokens = ids.len, .max_absolute_error = 0, .rms_error = 0, .normalized_rms_error = 0, .greedy_disagreements = 0, .gpu_seconds = 0, .cpu_seconds = 0, .model_identity_hex = std.fmt.bytesToHex(identity, .lower) };
+    var result = Result{ .tokens = ids.len, .max_absolute_error = 0, .rms_error = 0, .normalized_rms_error = 0, .greedy_disagreements = 0, .gpu_seconds = 0, .cpu_seconds = 0, .checkpoint_metadata_identity_hex = std.fmt.bytesToHex(identity, .lower) };
     var squared_error: f64 = 0;
     var squared_reference: f64 = 0;
     // The engine's logits only.
@@ -452,7 +452,8 @@ test "the floor manifest refuses a mismatched window and accepts its own" {
     try std.testing.expectError(error.FloorReferenceMismatch, readFloor(a, std.testing.io, dir, &ids, cpu.len, other));
 }
 
-test "the release-quality window is the fixed 128-token history" {
+test "the release-quality capture is the fixed 128-token input" {
+    // r16's release-weights KL/top-1 window; its first 16 tokens are the declared qualification history.
     const text = @embedFile("release-quality-128.json");
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -460,6 +461,19 @@ test "the release-quality window is the fixed 128-token history" {
     try std.testing.expectEqual(@as(usize, 128), ids.len);
     try std.testing.expectEqual(@as(u64, 0x067323ba89384ac3), fnv1a(std.mem.sliceAsBytes(ids)));
     for (ids) |id| try std.testing.expect(id < 129280);
+}
+
+test "the declared release-quality history is the fixed 16-token window" {
+    const text = @embedFile("release-quality-16.json");
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const ids = try std.json.parseFromSliceLeaky([]const u32, arena.allocator(), text, .{});
+    try std.testing.expectEqual(@as(usize, 16), ids.len);
+    try std.testing.expectEqual(@as(u64, 0xfccc25db656b1c80), fnv1a(std.mem.sliceAsBytes(ids)));
+    for (ids) |id| try std.testing.expect(id < 129280);
+    // It is the first 16 tokens of the full capture, not a separate sequence.
+    const full = try std.json.parseFromSliceLeaky([]const u32, arena.allocator(), @embedFile("release-quality-128.json"), .{});
+    try std.testing.expectEqualSlices(u32, ids, full[0..16]);
 }
 
 test "the band is floor-relative and keeps its inclusive 1.05/1.10 boundaries" {

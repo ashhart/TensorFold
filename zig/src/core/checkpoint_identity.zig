@@ -27,8 +27,8 @@ pub fn identity(gpa: std.mem.Allocator, io: Io, dir: []const u8) ![32]u8 {
 }
 
 /// A trimmed inference directory (a streamed Engram table dir carries only its own shard pair): config, index
-/// text and the headers of the `.safetensors` files the directory actually holds. Index names with no file are
-/// skipped, so this is the identity of the checkpoint's metadata as present, not of a whole-checkpoint plan.
+/// text and the headers of the `.safetensors` files the directory actually holds. The whole index text is hashed,
+/// so its names are bound; only the files are opened when present, so a trimmed dir does not fail on absent ones.
 pub fn identityPresent(gpa: std.mem.Allocator, io: Io, dir: []const u8) ![32]u8 {
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();

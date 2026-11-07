@@ -218,7 +218,7 @@ pub fn main(init: std.process.Init) !void {
     const is_oracle_fp64 = std.mem.eql(u8, mode, "oracle-fp64");
     // The floor is bound to the checkpoint metadata that produced it, not just to the token window.
     const identity: [32]u8 = if (is_oracle or is_oracle_fp64)
-        try modelIdentity(a, io, args[2], args[3])
+        try checkpointMetadataIdentity(a, io, args[2], args[3])
     else
         @splat(0);
     const is_trace = std.mem.eql(u8, mode, "trace");
@@ -276,19 +276,33 @@ pub fn main(init: std.process.Init) !void {
     if (!resident_gate_passed) return error.ResidentExecutionReadFromDisk;
 }
 
-/// The checkpoint metadata identity of every directory the oracle reads: config, index and the headers of the
-/// shard files present (a streamed table directory carries only its own pair, not the index's full shard list).
-fn modelIdentity(a: std.mem.Allocator, io: std.Io, pack: []const u8, tables: []const u8) ![32]u8 {
+/// The checkpoint metadata identity of every input the oracle reads: config, index and the headers of the shard
+/// files present, the token map whole, and the Engram source the model actually opens.
+fn checkpointMetadataIdentity(a: std.mem.Allocator, io: std.Io, pack: []const u8, tables: []const u8) ![32]u8 {
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    const ar = arena.allocator();
     const Sha256 = std.crypto.hash.sha2.Sha256;
     var h = Sha256.init(.{});
-    const p = try checkpoint_identity.identityPresent(a, io, pack);
+    const p = try checkpoint_identity.identityPresent(ar, io, pack);
     h.update(&p);
-    const t = try checkpoint_identity.identityPresent(a, io, tables);
-    h.update(&t);
-    // The streamed Engram source is the one the oracle reference actually reads when it is set.
+    // The token map is small and changes which Engram rows every token selects, so it is bound whole.
+    const map = try std.fs.path.join(ar, &.{ pack, "engram-token-map.bin" });
+    if (std.Io.Dir.cwd().readFileAlloc(io, map, ar, .limited(2 << 20))) |bytes| {
+        h.update("engram-token-map.bin");
+        h.update(std.mem.asBytes(&bytes.len));
+        h.update(bytes);
+    } else |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    }
+    // A streamed run ignores table_dir; bind the directory the model and the reference actually read.
     if (std.c.getenv("TF_DSV41_ENGRAM_STREAM_DIR")) |dir| {
-        const streamed = try checkpoint_identity.identityPresent(a, io, std.mem.span(dir));
+        const streamed = try checkpoint_identity.identityPresent(ar, io, std.mem.span(dir));
         h.update(&streamed);
+    } else {
+        const t = try checkpoint_identity.identityPresent(ar, io, tables);
+        h.update(&t);
     }
     return h.finalResult();
 }

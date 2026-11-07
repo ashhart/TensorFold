@@ -68,7 +68,7 @@ test "every byte counts: one bit at 8 KiB into a 1 MiB expert payload changes th
     try std.testing.expectError(error.ShardBytesDiffer, contentOf(io, path[4], true));
 }
 
-test "a trimmed inference directory identifies the shards it carries, not the index's absent names" {
+test "a trimmed inference directory hashes its index but opens only the shards it carries" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
@@ -88,6 +88,7 @@ test "a trimmed inference directory identifies the shards it carries, not the in
     defer gpa.free(path);
     const one = try production.identityPresent(gpa, io, path);
     // The payload is not part of a metadata identity; a header byte is.
+    bytes[8 + head.len] ^= 0xFF;
     try d.writeFile(io, .{ .sub_path = "shard-a.safetensors", .data = bytes[0 .. 8 + head.len + 4] });
     try std.testing.expectEqual(one, try production.identityPresent(gpa, io, path));
     bytes[8] = 'x';
