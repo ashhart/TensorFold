@@ -4,7 +4,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
-- Internal: HIP record counts are pinned in their owning arrays, so additions in different record files no longer edit a shared numeric total; omissions still fail host checks.
+- Internal: HIP record counts are pinned in their owning arrays, so additions in different record files no longer edit a shared numeric total; omissions still fail host checks (#2461).
 
 - Qwen3.5 and Qwen3.6 on CUDA: a stream's rollback copy shares its verify log's bytes, which are never in use together, so each pooled stream takes 147 MiB less on Qwen3.8-27B and 61 MiB less on the 35B-A3B; tokens and speed unchanged (#2447, part of #1943). Thanks to @jschmied.
 - LightOnOCR-3 on HIP: the native server reads `lightonai/LightOnOCR-3-0.8B`, `-1B` and `-4B` (BF16) and serves their
