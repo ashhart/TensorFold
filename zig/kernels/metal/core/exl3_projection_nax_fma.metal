@@ -266,66 +266,24 @@ inline void tf_exl3_decode_fma_static_body(const device half* x, const device uc
   const uint W = TF_FMA_WARPS;
   const uint b0 = blocks * sg / W, b1 = blocks * (sg + 1u) / W;
   const TfExl3RowWalk walk = tf_exl3_row_walk(lane, job.halves);
-  // Three stream words: the lane's window spans at most 7*S + 16 bits from its first state. The ring of TF_FMA_PF
-  // triples (one block in flight is the one-block-in-flight form).
-  uint pre[TF_FMA_PF][3];
+  // Three stream words: the lane's window spans at most 7*S + 16 bits from its first state.
+  uint pre[3];
   {
     const device ushort* t0 = reinterpret_cast<const device ushort*>(job.trellis + ulong(b0) * job.tile_k_stride + ulong(nb / 16) * job.tile_n_stride);
-#if TF_FMA_WIDE_WORD
-    pre[0][0] = tf_exl3_word_t<true>(t0, walk.first_word);
-    pre[0][1] = tf_exl3_word_t<true>(t0, walk.next1);
-    pre[0][2] = Two ? 0u : tf_exl3_word_t<true>(t0, walk.next2);
-#else
-    pre[0][0] = tf_exl3_word(t0, walk.first_word);
-    pre[0][1] = tf_exl3_word(t0, walk.next1);
-    pre[0][2] = Two ? 0u : tf_exl3_word(t0, walk.next2);
-#endif
-#if TF_FMA_PF > 1
-    // The ring is primed: the first TF_FMA_PF blocks' words are in flight before the walk starts.
-    for (uint p = 1; p < TF_FMA_PF; ++p) {
-      if (b0 + p < b1) {
-        const device ushort* tp = reinterpret_cast<const device ushort*>(job.trellis + ulong(b0 + p) * job.tile_k_stride + ulong(nb / 16) * job.tile_n_stride);
-        pre[p][0] = tf_exl3_word(tp, walk.first_word);
-        pre[p][1] = tf_exl3_word(tp, walk.next1);
-        pre[p][2] = Two ? 0u : tf_exl3_word(tp, walk.next2);
-      }
-    }
-#endif
+    pre[0] = tf_exl3_word(t0, walk.first_word);
+    pre[1] = tf_exl3_word(t0, walk.next1);
+    pre[2] = Two ? 0u : tf_exl3_word(t0, walk.next2);
   }
   float acc[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
   for (uint bb = b0; bb < b1; ++bb) {
     const uint kb = bb * 16;
-#if TF_FMA_PF > 1
-    const uint slot = (bb - b0) % TF_FMA_PF;
-    const uint w0 = pre[slot][0], w1 = pre[slot][1], w2 = pre[slot][2];
-    // The block TF_FMA_PF ahead takes this slot: its words are in flight while PF blocks are walked.
-    if (bb + TF_FMA_PF < b1) {
-      const device ushort* tn = reinterpret_cast<const device ushort*>(job.trellis + ulong(bb + TF_FMA_PF) * job.tile_k_stride + ulong(nb / 16) * job.tile_n_stride);
-#if TF_FMA_WIDE_WORD
-      pre[slot][0] = tf_exl3_word_t<true>(tn, walk.first_word);
-      pre[slot][1] = tf_exl3_word_t<true>(tn, walk.next1);
-      pre[slot][2] = Two ? 0u : tf_exl3_word_t<true>(tn, walk.next2);
-#else
-      pre[slot][0] = tf_exl3_word(tn, walk.first_word);
-      pre[slot][1] = tf_exl3_word(tn, walk.next1);
-      pre[slot][2] = Two ? 0u : tf_exl3_word(tn, walk.next2);
-#endif
-    }
-#else
-    const uint w0 = pre[0][0], w1 = pre[0][1], w2 = pre[0][2];
+    const uint w0 = pre[0], w1 = pre[1], w2 = pre[2];
     if (bb + 1 < b1) {
       const device ushort* tn = reinterpret_cast<const device ushort*>(job.trellis + ulong(bb + 1) * job.tile_k_stride + ulong(nb / 16) * job.tile_n_stride);
-#if TF_FMA_WIDE_WORD
-      pre[0][0] = tf_exl3_word_t<true>(tn, walk.first_word);
-      pre[0][1] = tf_exl3_word_t<true>(tn, walk.next1);
-      pre[0][2] = Two ? 0u : tf_exl3_word_t<true>(tn, walk.next2);
-#else
-      pre[0][0] = tf_exl3_word(tn, walk.first_word);
-      pre[0][1] = tf_exl3_word(tn, walk.next1);
-      pre[0][2] = Two ? 0u : tf_exl3_word(tn, walk.next2);
-#endif
+      pre[0] = tf_exl3_word(tn, walk.first_word);
+      pre[1] = tf_exl3_word(tn, walk.next1);
+      pre[2] = Two ? 0u : tf_exl3_word(tn, walk.next2);
     }
-#endif
     // The lane's window: one runtime funnel shift, then the eight windows at compile-time shifts.
     const uint c_cur = (w0 << walk.first_bit) | ((w1 >> walk.shift) & walk.mask);
     const uint c_next = Two ? (w1 << walk.first_bit) : ((w1 << walk.first_bit) | ((w2 >> walk.shift) & walk.mask));
@@ -501,6 +459,3 @@ inline void tf_exl3_decode_fma_dense_multi_body(const device half* x, const devi
 #endif
   }
 }
-
-// The LUT's values are the table's, entry for entry, so the output is bit-identical; what the arm removes is the
-// table's L2 traffic.

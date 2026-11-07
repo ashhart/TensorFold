@@ -4,7 +4,6 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     const files = b.addWriteFiles();
     _ = files.addCopyFile(b.path("zig/kernels/metal/core/exl3_projection_core.metal"), "exl3_projection_core.metal");
     _ = files.addCopyFile(b.path("zig/kernels/metal/core/exl3_projection_wide.metal"), "exl3_projection_wide.metal");
-    _ = files.addCopyFile(b.path("zig/kernels/metal/core/exl3_projection_wide2.metal"), "exl3_projection_wide2.metal");
     _ = files.addCopyFile(b.path("zig/kernels/metal/core/exl3_projection_nax_base.metal"), "exl3_projection_nax_base.metal");
     _ = files.addCopyFile(b.path("zig/kernels/metal/core/exl3_projection_nax_prefill_body.metal"), "exl3_projection_nax_prefill_body.metal");
     _ = files.addCopyFile(b.path("zig/kernels/metal/core/exl3_projection_nax_prefill.metal"), "exl3_projection_nax_prefill.metal");
@@ -20,7 +19,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     // The engine activation glue, for the fused SwiGLU+rotate differential (its precise silu is the reference).
     _ = files.addCopyFile(b.path("zig/kernels/metal/deepseek_v41/ops.metal"), "deepseek_v41_ops.metal");
     const sources = b.createModule(.{
-        .root_source_file = files.add("sources.zig", "pub const core_exl3_projection = @embedFile(\"exl3_projection_core.metal\") ++ @embedFile(\"exl3_projection_wide.metal\") ++ @embedFile(\"exl3_projection_wide2.metal\");\n" ++
+        .root_source_file = files.add("sources.zig", "pub const core_exl3_projection = @embedFile(\"exl3_projection_core.metal\") ++ @embedFile(\"exl3_projection_wide.metal\");\n" ++
             "pub const core_exl3_projection_i8 = @embedFile(\"exl3_projection_i8.metal\");\n" ++
             "pub const core_exl3_projection_nax = @embedFile(\"exl3_projection_nax_base.metal\") ++ @embedFile(\"exl3_projection_nax_prefill_body.metal\") ++ @embedFile(\"exl3_projection_nax_prefill.metal\") ++ @embedFile(\"exl3_projection_nax_variants_a.metal\") ++ @embedFile(\"exl3_projection_nax_variants_b.metal\") ++ @embedFile(\"exl3_projection_nax_variants_c.metal\") ++ @embedFile(\"exl3_projection_nax_fma.metal\") ++ @embedFile(\"exl3_projection_nax_fma_static_a.metal\") ++ @embedFile(\"exl3_projection_nax_fma_static_b.metal\") ++ @embedFile(\"exl3_projection_nax_fp8.metal\");\n" ++
             "pub const nax = @embedFile(\"nax.h\");\n" ++

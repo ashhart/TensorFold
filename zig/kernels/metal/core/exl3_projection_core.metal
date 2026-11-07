@@ -500,9 +500,3 @@ kernel void tf_exl3_splitk_reduce(const device float* partials [[buffer(0)]],
   for (uint k = 0; k < d.x; ++k) s += partials[ulong(k) * d.y + i];
   sums[i] = s;
 }
-
-
-// SwiGLU + the down projection's rotate_in, fused (TF_DSV41_NO_SWIGLU_ROT=0 restores the two-pass arm). The down projection's rotated input is written in the SwiGLU pass instead of a separate rotate:
-// the same bf16 round of silu(gate)*up, the same per-expert su scale and the same 128-point Sylvester rotation
-// tf_exl3_rotate_in applies, so a row's rotated bits are the two-pass path's bits. Each SIMDgroup owns one
-// 128-element block of one row, and the row is written to the destination slot its expert tile occupies.

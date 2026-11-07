@@ -290,14 +290,3 @@ inline void tf_exl3_decode_fma_dense_multi_kernel(const device half* x, const de
     else tf_exl3_decode_fma_dense_multi_body<1, false, R>(x, trellis, sums, a, table, lane, sg, tg, red);
   }
 }
-
-// The shipped register-only dense body gives a lane EIGHT consecutive states -- two columns by four k-rows of a 16x16
-// tile -- and reads three 32-bit stream words to decode them (7*S + 16 bits from its first state). This body gives a
-// lane SIXTEEN consecutive states -- two columns by eight k-rows, p = 16L..16L+15 -- so the same lane reads four
-// words (S = 5: the run is 15*5 + 16 = 91 bits) and the words a weight costs fall from 3/8 to 4/16. The warp still
-// owns ONE sixteen-column tile: lanes 0..15 walk one 16-k block and lanes 16..31 the next, so the dispatch geometry,
-// the column coverage and the split-K warp count are the shipped body's. The body is only compiled when TF_FMA_S16 is
-// defined; no engine path selects it.
-#if defined(TF_FMA_S16)
-// The sixteen windows of a lane at compile-time shifts, from the four aligned 32-bit windows c0..c3 of its stream
-// run. Same semantics as tf_exl3_state_static: the state's 16-bit window starts S*J bits into the run.

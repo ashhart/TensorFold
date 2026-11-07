@@ -42,15 +42,6 @@ fn warps() usize {
     };
 }
 
-fn prefetch() usize {
-    const v = std.c.getenv("TF_DSV41_FMA_PF") orelse return 1;
-    const d = std.fmt.parseInt(usize, std.mem.span(v), 10) catch return 1;
-    return switch (d) {
-        1, 2, 4, 8 => d,
-        else => 1,
-    };
-}
-
 fn multiRows() u32 {
     const v = std.c.getenv("TF_DSV41_EXL3_FMA_DENSE_MULTI") orelse return 4;
     return std.fmt.parseInt(u32, std.mem.span(v), 10) catch 0;
@@ -63,24 +54,14 @@ fn tileRows() u32 {
 pub fn load() exl3.Knobs {
     return .{
         .table_decode = enabled("TF_DSV41_EXL3_TABLE_DECODE", true),
-        .wide_decode = enabled("TF_DSV41_EXL3_WIDE_DECODE", true),
-        .direct_decode = enabled("TF_DSV41_EXL3_DIRECT_DECODE", true),
         .fma_lut = enabled("TF_DSV41_EXL3_FMA_LUT", true),
-        .lut_decode = enabled("TF_DSV41_EXL3_LUT_DECODE", true),
         .fma_static = enabled("TF_DSV41_EXL3_FMA_STATIC", true),
         .fma_dense = enabled("TF_DSV41_EXL3_FMA_DENSE", true),
-        .static_decode = enabled("TF_DSV41_EXL3_STATIC_DECODE", true),
         .dense_db = enabled("TF_DSV41_EXL3_DENSE_DB", true),
-        .dense_rpg2 = enabled("TF_DSV41_EXL3_DENSE_RPG2", false),
         .skip_pad = enabled("TF_DSV41_EXL3_SKIP_PAD", true),
-        .wide_words = enabled("TF_DSV41_EXL3_WIDE_WORDS", false),
         .funnel_only = enabled("TF_DSV41_EXL3_FUNNEL_ONLY", true),
-        .dense_funnel = enabled("TF_DSV41_EXL3_DENSE_FUNNEL", false),
-        .dense_funnel8 = enabled("TF_DSV41_EXL3_DENSE_FUNNEL8", false),
-        .coop_prefill = enabled("TF_DSV41_EXL3_COOP_PREFILL", false),
         .warp32 = enabled("TF_DSV41_EXL3_WARP32", true),
         .funnel_prefill = enabled("TF_DSV41_EXL3_FUNNEL_PREFILL", true),
-        .moe_db = enabled("TF_DSV41_EXL3_MOE_DB", false),
         .splits_override = maybeRows("TF_DSV41_EXL3_SPLITS"),
         .moe_splits = rows("TF_DSV41_EXL3_MOE_SPLITS", 8),
         .split_wide = rows("TF_DSV41_EXL3_SPLITS_WIDE", 8),
@@ -94,20 +75,16 @@ pub fn load() exl3.Knobs {
         .i8_prefill = present("TF_DSV41_I8_PREFILL"),
         .i8_debug = present("TF_DSV41_I8_DEBUG"),
         .fma_warps = warps(),
-        .fma_pf = prefetch(),
         .scalar_experts = present("TF_DSV41_EXL3_SCALAR_EXPERTS"),
         .fma_off = fmaOff(),
         .routed_table = !present("TF_DSV41_EXL3_ROUTED_TABLE"),
-        .matvec = present("TF_DSV41_EXL3_MATVEC"),
         .decode_compact = present("TF_DSV41_EXL3_DECODE_COMPACT"),
         .funnel = !present("TF_DSV41_EXL3_FUNNEL"),
         .row_invariant = !present("TF_DSV41_NO_ROW_INVARIANT"),
         .fma_dense_h8 = enabled("TF_DSV41_EXL3_FMA_DENSE_H8", true),
         .fma_dense_multi = multiRows(),
         .fma_dense_multi_ceil = enabled("TF_DSV41_EXL3_FMA_DENSE_MULTI_CEIL", true),
-        .table = present("TF_DSV41_EXL3_TABLE"),
         .nax_dense8 = enabled("TF_DSV41_EXL3_NAX_DENSE8", true),
-        .funnel_log = present("TF_DSV41_EXL3_FUNNEL_LOG"),
         .double_rotate = present("TF_DSV41_DOUBLE_ROTATE"),
         .double_gemm = present("TF_DSV41_DOUBLE_GEMM"),
         .double_gemm_n = maybeRows("TF_DSV41_DOUBLE_GEMM_N"),

@@ -34,16 +34,6 @@ inline uint tf_exl3_word(const device ushort* tile, uint i) {
   return uint(tile[2 * i]) | (uint(tile[2 * i + 1]) << 16);
 }
 
-// The same stream word as one 4-byte load. The shipped read is two 2-byte loads (a word is a little-endian pair of
-// int16s), so a lane issues four memory instructions a block where the wide form reads two; the bytes, the values and
-// the order are the same. `W` is a template parameter, so only one path is compiled. The caller checks that the
-// tile's byte address is 4-byte aligned.
-template <bool W>
-inline uint tf_exl3_word_t(const device ushort* tile, uint i) {
-  if (W) return *reinterpret_cast<const device uint*>(reinterpret_cast<const device uchar*>(tile) + 4u * i);
-  return uint(tile[2 * i]) | (uint(tile[2 * i + 1]) << 16);
-}
-
 inline ushort tf_exl3_state(const device ushort* tile, uint halves, uint p) {
   const uint ring = 128 * halves;
   const uint end = ((p + 1) * halves - ((halves & 1u) ? ((p + 1) & 1u) : 0u)) / 2;
@@ -70,20 +60,6 @@ inline half tf_exl3_table_value(const device half* table, ushort state, uint cod
   return table[codebook * 65536u + uint(state)];
 }
 
-// The same bitstream read from a tile staged in threadgroup memory: one coalesced pass over 256 bytes, then every
-// decoded element hits threadgroup memory instead of a scattered device load.
-inline uint tf_exl3_word_tg(const threadgroup ushort* tile, uint i) {
-  return uint(tile[2 * i]) | (uint(tile[2 * i + 1]) << 16);
-}
-
-inline ushort tf_exl3_mapped_state_tg(const threadgroup ushort* tile, uint map) {
-  const uint wi = map & 63u, off = (map >> 6) & 31u;
-  const uint lo = tf_exl3_word_tg(tile, wi);
-  const uint hi = tf_exl3_word_tg(tile, map >> 11);
-  const uint carry = (hi >> ((32 - off) & 31u)) & (0u - uint(off != 0));
-  return ushort(((lo << off) | carry) >> 16);
-}
-
 // Both operations are exact in FP32 before the single FP16 round; do not split the mul1 FMA.
 inline half tf_exl3_value(ushort state, uint codebook) {
   uint x = uint(state) * (codebook == 2 ? 0x83DCD12Du : codebook == 1 ? 0xCBAC1FEDu : 89226354u);
@@ -105,19 +81,6 @@ inline half tf_exl3_value_lut(const threadgroup half* lut, ushort state) {
   const uint x = uint(state) * 0x83DCD12Du;
   const uint bs = (x & 0x00FF00FFu) + ((x >> 8u) & 0x00FF00FFu);
   return lut[(bs * 0x00010001u) >> 16u];
-}
-
-// The funnel with the value read cheaply -- the window extraction and the store stay, the codebook arithmetic goes. A
-// diagnostic: it isolates the value path's share of the tile (the value it stores is not the weight's, so its output
-// differs by construction). The stored value is a small integer, so no denormal reaches the tensor units and the
-// timing is the extraction's alone.
-inline void tf_exl3_decode_funnel_cheap(threadgroup half* wx, const uint* at, uint b0, uint stride, uint w0, uint w1) {
-  const ulong r = (ulong(w0) << (b0 + 5u)) | (ulong(w1) >> (27u - b0));
-  TF_UNROLL
-  for (uint k = 0; k < 8u; ++k) {
-    const ushort state = ushort((r >> (stride * (7u - k))) & 0xffffu);
-    wx[at[k]] = half(float(state & 0xFFu));
-  }
 }
 
 // The lane's eight windows at compile-time shifts. C_cur is the 32-bit window at the lane's first state (its bit 31
@@ -345,7 +308,7 @@ inline void tf_exl3_decode_table(threadgroup half* wx, const device half* table,
 // bit-identical; only the word traffic and the select chain leave.
 // The ring's order is MSB-first inside a word, so the run's bits are assembled the other way round: R's bit (run - 1)
 // is the run's first bit, and the two words' pieces meet without overlapping.
-template <uint States, bool NoValue = false, uint Stride = 3>
+template <uint States, uint Stride = 3>
 inline void tf_exl3_decode_funnel(threadgroup half* wx, const device half* table, const threadgroup half* lut,
                                   uint codebook, const uint* at, uint b0, uint stride, uint w0, uint w1) {
   // The windows are Stride bits apart, so the run is 16 + Stride * (States - 1) bits. Halves = 6 is Stride 3 (25 bits
@@ -369,72 +332,7 @@ inline void tf_exl3_decode_funnel(threadgroup half* wx, const device half* table
   TF_UNROLL
   for (uint k = 0; k < States; ++k) {
     const ushort state = ushort((r >> (Stride * (States - 1u - k))) & 0xffff);
-    wx[at[k]] = NoValue ? half(state) : tf_exl3_pick(table, lut, state, codebook);
-  }
-}
-
-// The shipped body writes each lane's eight decoded weights as eight scattered two-byte threadgroup stores; a wide
-// form writes a lane's values as contiguous stores. These modes isolate the difference. Mode 1: the decode stays, the
-// eight stores go -- the value is folded into a register accumulator so the compiler cannot eliminate the decode. A
-// diagnostic: the tile is never written, so the output differs by construction. Mode 2: the eight stores stay, the
-// EXTRACTION goes -- the stored value is a cheap function of the k block, so the stores cannot be hoisted out of the
-// loop. A diagnostic. Mode 3: the decode stays, the eight stores become CONTIGUOUS -- one lane's run of eight halves,
-// the wide form. The tile's contents change, so the output differs by construction. Mode 4: the shipped store PLUS
-// the Mode 1 accumulator -- the calibration for the accumulator's cost.
-template <uint States, uint Mode>
-inline uint tf_exl3_decode_funnel_store(threadgroup half* wx, const device half* table, const threadgroup half* lut,
-                                        uint codebook, const uint* at, uint b0, uint stride, uint w0, uint w1,
-                                        uint acc, uint salt, uint slot) {
-  constexpr uint run = 16u + 3u * (States - 1u);
-  ulong r;
-  if (run >= 32u) {
-    r = (ulong(w0) << (run - 32u + b0)) | (ulong(w1) >> (64u - run - b0));
-  } else if (b0 <= 32u - run) {
-    r = ulong(w0) >> (32u - run - b0);
-  } else {
-    r = (ulong(w0) << (b0 + run - 32u)) | (ulong(w1) >> (64u - run - b0));
-  }
-  TF_UNROLL
-  for (uint k = 0; k < States; ++k) {
-    const ushort state = ushort((r >> (stride * (States - 1u - k))) & 0xffff);
-    const half v = tf_exl3_pick(table, lut, state, codebook);
-    if (Mode == 1) {
-      acc ^= uint(as_type<ushort>(v));
-    } else if (Mode == 2) {
-      wx[at[k]] = half(float(salt + k));
-    } else if (Mode == 3) {
-      wx[slot * States + k] = v;
-    } else {
-      wx[at[k]] = v;
-      if (Mode == 4) acc ^= uint(as_type<ushort>(v));
-    }
-  }
-  return acc;
-}
-
-// The funnel's extraction in thirty-two-bit words, the windows at compile-time shifts -- the structure: it reads its
-// stream words into 32-bit registers and shifts them by literal amounts, because Apple GPUs emulate a 64-bit shift
-// with several 32-bit ops, so the shipped funnel paid that emulation once a window). The lane's first window starts
-// at bit b0 of the ring's word (the ring is MSB-first inside a word): G holds the thirty-two ring bits from there and
-// h5 the five above them, so the eight windows sit at G's compile-time shifts (16 - 3k) and the last two take their
-// high bits from h5. The same windows, the same values, the same order -- the output is bit-identical to the shipped
-// funnel.
-template <uint States, bool NoValue = false>
-inline void tf_exl3_decode_funnel32(threadgroup half* wx, const device half* table, const threadgroup half* lut,
-                                     uint codebook, const uint* at, uint b0, uint w0, uint w1) {
-  const uint G = (w0 << b0) | ((w1 >> 1u) >> (31u - b0));
-  const uint h5 = (w1 >> (27u - b0)) & 0x1Fu;
-  TF_UNROLL
-  for (uint k = 0; k < States; ++k) {
-    uint state;
-    if (States == 8u and k == 6u) {
-      state = ((G & 0x3FFFu) << 2u) | ((h5 >> 3u) & 3u);
-    } else if (States == 8u and k == 7u) {
-      state = ((G & 0x7FFu) << 5u) | (h5 & 0x1Fu);
-    } else {
-      state = (G >> (16u - 3u * k)) & 0xFFFFu;
-    }
-    wx[at[k]] = NoValue ? half(state) : tf_exl3_pick(table, lut, ushort(state), codebook);
+    wx[at[k]] = tf_exl3_pick(table, lut, state, codebook);
   }
 }
 
@@ -442,4 +340,4 @@ inline void tf_exl3_decode_funnel32(threadgroup half* wx, const device half* tab
 // Dense rows share one matrix; grouped rows are sixty-four-row aligned, so one expert owns the tile and its weights
 // decode once. A wider column tile re-reads the activation tile for fewer output tiles. `Fast` keeps the per-state
 // cursor out of the k loop and reads the three stream words an eight-state block can touch.
-template <bool Fast, uint RG, uint CG, bool Table, bool Funnel = false, bool NoValue = false, bool Cheap = false, bool SkipPad = false, bool Funnel32 = false, bool Coop = false, uint Rpg = 1, bool W = false, bool F6 = false, uint Act = 0, uint Store = 0>
+template <bool Fast, uint RG, uint CG, bool Table, bool Funnel = false, bool SkipPad = false, uint Rpg = 1, bool F6 = false>

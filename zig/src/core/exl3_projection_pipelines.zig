@@ -9,8 +9,6 @@ const codebookTable = core.codebookTable;
 const fmaStaticOn = core.fmaStaticOn;
 const fmaLutOn = core.fmaLutOn;
 const tableDecodeOn = core.tableDecodeOn;
-const wideDecodeOn = core.wideDecodeOn;
-const directDecodeOn = core.directDecodeOn;
 const knobs = &core.knobs;
 
 pub const Pipelines = struct {
@@ -39,18 +37,9 @@ pub const Pipelines = struct {
     prefill_nax_funnel: ?mtl.Pipeline = null,
     /// The same tile with the grouping's padded rows skipped . Bit-identical on the real rows.
     prefill_nax_skip_pad: ?mtl.Pipeline = null,
-    /// The routed tile with the stream word read as one 4-byte load . Bit-identical.
-    prefill_nax_wide: ?mtl.Pipeline = null,
     /// The routed tile with the funnel path as the only path: the cursor arrays the Fast path needs are dead there.
     /// Bit-identical.
     prefill_nax_funnel_only: ?mtl.Pipeline = null,
-    /// The routed 64x64 prompt tile with the funnel read and the block's words by a cooperative load and a shuffle,
-    /// and its twin with the grouping's padded rows skipped . Bit-identical.
-    prefill_nax_coop: ?mtl.Pipeline = null,
-    prefill_nax_coop_skip: ?mtl.Pipeline = null,
-    /// The dense 128x64 prompt tile with the funnel read . The dense lane owns four states, so the funnel reads two
-    /// words where the cursor path reads four. Bit-identical to .
-    prefill_nax_dense_funnel: ?mtl.Pipeline = null,
     /// The 128-row routed tile: eight row groups, the funnel read on a four-window run and the grouping's padded rows
     /// skipped. The weight decode is per tile, so the taller tile decodes each expert's weights once for twice the
     /// rows.
@@ -59,16 +48,9 @@ pub const Pipelines = struct {
     /// decoded by one warp (eight states a lane, eight bits a weight) and the tile covers twice the rows.
     /// Bit-identical to the shipped tile.
     prefill_nax_warp32: ?mtl.Pipeline = null,
-    /// The routed prompt tile double-buffered with the codebook table, for the 64x128 grouped tile.
-    prefill_nax_db: ?mtl.Pipeline = null,
-    /// The same on the engine's 64x64 grouped tile, which is what the shared NAX_COLS cache selects.
-    prefill_nax_db64: ?mtl.Pipeline = null,
     /// The dense prompt body double-buffered: block b+1 decodes into the tile block b is not multiplying, one barrier
     /// a block instead of two. Same k order and MMA order as, so its output is bit-identical.
     prefill_nax_dense_db: ?mtl.Pipeline = null,
-    prefill_nax_dense_rpg2: ?mtl.Pipeline = null,
-    /// The routed 64x64 tile on the double-buffered ALU body: one barrier a k block. Hash-identical.
-    prefill_nax_moe_db: ?mtl.Pipeline = null,
     /// One row an expert, four rows a threadgroup: the decode regime on the tensor units, weights decoded once a
     /// tile.
     decode_nax: ?mtl.Pipeline = null,
@@ -109,23 +91,8 @@ pub const Pipelines = struct {
     decode_fma_dense_multi2: ?mtl.Pipeline = null,
     decode_fma_dense_multi4: ?mtl.Pipeline = null,
     fma_warps: usize = 16,
-    /// One row, four column tiles a threadgroup: dense projections at decode width on the tensor units.
-    matvec_nax: ?mtl.Pipeline = null,
     /// The one-row matmul body with the codebook value read from `codebook_table` (bit-identical values).
     matmul_tab: ?mtl.Pipeline = null,
-    /// The 128-column one-row table body (`tf_exl3_matmul_wide_tab`): eight warps on eight 16-column tiles of one
-    /// activation block, double buffered so a k block costs one barrier. Same arithmetic as `matmul_tab`.
-    matmul_wide: ?mtl.Pipeline = null,
-    /// The direct-register one-row table body (`tf_exl3_matmul_direct_tab`): a lane owns an output column and decodes
-    /// its 16 states into registers, so there is no threadgroup weight tile and no barrier. Same k order and table
-    /// value as `matmul_wide`, hence bit-identical.
-    matmul_direct: ?mtl.Pipeline = null,
-    /// The static state selection in the one-row body (`tf_exl3_matmul_wide_static_tab`): the lane's eight windows
-    /// are extracted at compile-time shifts from one funnel shift a block, so the per-state word selection (the
-    /// `rel[k]` cursor) and the per-state bit offset leave the inner loop. The same tile, the same activation load,
-    /// the same 16-product FP32 sums and the same k order as `matmul_wide`, so the output is bit-identical (identical
-    /// at every shape and split count).
-    matmul_static: ?mtl.Pipeline = null,
     /// The static state selection with the codebook read from a 1024-entry threadgroup LUT
     /// (`tf_exl3_matmul_wide_static_lut`): the mul1 value depends only on the state's byte sum, so the 65,536-entry
     /// table holds 1,024 distinct values and a threadgroup can hold them all. The LUT's values are the table's, entry
@@ -154,36 +121,8 @@ pub const Pipelines = struct {
         errdefer mm.deinit();
         const mmt = if (gpa != null) (mtl.Pipeline.init(device, lib, "tf_exl3_matmul_tab", false) catch null) else null;
         errdefer if (mmt) |p| p.deinit();
-        var mmw = if (gpa != null) (mtl.Pipeline.init(device, lib, "tf_exl3_matmul_wide_tab", false) catch null) else null;
-        errdefer if (mmw) |p| p.deinit();
-        if (mmw) |p| {
-            // Eight SIMDgroups a threadgroup: the 128-column body needs a 256-thread group.
-            if (p.simdWidth() != 32 or p.maxThreads() < 256) {
-                p.deinit();
-                mmw = null;
-            }
-        }
-        var mmd = if (gpa != null) (mtl.Pipeline.init(device, lib, "tf_exl3_matmul_direct_tab", false) catch null) else null;
-        errdefer if (mmd) |p| p.deinit();
-        if (mmd) |p| {
-            // Four SIMDgroups a threadgroup: 128 columns of the one-row direct body.
-            if (p.simdWidth() != 32 or p.maxThreads() < 128) {
-                std.log.err("exl3: direct pipeline rejected simd={d} maxThreads={d}", .{ p.simdWidth(), p.maxThreads() });
-                p.deinit();
-                mmd = null;
-            }
-        } else std.log.err("exl3: direct pipeline did not load", .{});
-        // The static state selection in the one-row body (the same 128-column geometry as the wide body: eight
-        // SIMDgroups a threadgroup).
-        var mms = if (gpa != null) (mtl.Pipeline.init(device, lib, "tf_exl3_matmul_wide_static_tab", false) catch null) else null;
         var mmsl = if (gpa != null) (mtl.Pipeline.init(device, lib, "tf_exl3_matmul_wide_static_lut", false) catch null) else null;
-        errdefer if (mms) |p| p.deinit();
-        if (mms) |p| {
-            if (p.simdWidth() != 32 or p.maxThreads() < 256) {
-                p.deinit();
-                mms = null;
-            }
-        } else std.log.err("exl3: static one-row pipeline did not load", .{});
+        errdefer if (mmsl) |p| p.deinit();
         if (mmsl) |p| {
             if (p.simdWidth() != 32 or p.maxThreads() < 256) {
                 p.deinit();
@@ -213,20 +152,12 @@ pub const Pipelines = struct {
             }
         }
         var prefill_nax_tiles: [8]?mtl.Pipeline = @splat(null);
-        var prefill_nax_db: ?mtl.Pipeline = null;
-        var prefill_nax_db64: ?mtl.Pipeline = null;
         var prefill_nax_dense_db: ?mtl.Pipeline = null;
-        var prefill_nax_dense_rpg2: ?mtl.Pipeline = null;
-        var prefill_nax_moe_db: ?mtl.Pipeline = null;
         var prefill_nax_funnel: ?mtl.Pipeline = null;
         var prefill_nax_skip_pad: ?mtl.Pipeline = null;
-        var prefill_nax_wide: ?mtl.Pipeline = null;
         var prefill_nax_funnel_only: ?mtl.Pipeline = null;
         var prefill_nax_skip_pad128: ?mtl.Pipeline = null;
         var prefill_nax_warp32: ?mtl.Pipeline = null;
-        var prefill_nax_coop: ?mtl.Pipeline = null;
-        var prefill_nax_coop_skip: ?mtl.Pipeline = null;
-        var prefill_nax_dense_funnel: ?mtl.Pipeline = null;
         var prefill_fp8: ?mtl.Pipeline = null;
         var decode_nax: ?mtl.Pipeline = null;
         var decode_nax_c: ?mtl.Pipeline = null;
@@ -241,7 +172,6 @@ pub const Pipelines = struct {
         var decode_fma_dense_multi2: ?mtl.Pipeline = null;
         var decode_fma_dense_multi4: ?mtl.Pipeline = null;
         var fma_warps: usize = 16;
-        var matvec_nax: ?mtl.Pipeline = null;
         var int8_tile: ?mtl.Pipeline = null;
         // The codebook table: the routed decode body reads its values from here, and the
         // dense one-row bodies bind it too. Built before the pipelines that need it.
@@ -266,10 +196,6 @@ pub const Pipelines = struct {
                         if (mtl.Pipeline.init(device, nax_lib, "tf_exl3_matmul_prefill_nax48", false)) |pf| {
                             if (pf.simdWidth() == 32 and pf.maxThreads() >= 128) prefill_nax_skip_pad = pf else pf.deinit();
                         } else |_| {}
-                        // The routed tile with the stream word read as one 4-byte load .
-                        if (mtl.Pipeline.init(device, nax_lib, "tf_exl3_matmul_prefill_nax57", false)) |pf| {
-                            if (pf.simdWidth() == 32 and pf.maxThreads() >= 128) prefill_nax_wide = pf else pf.deinit();
-                        } else |_| {}
                         // The routed tile with the funnel path as the only path .
                         if (mtl.Pipeline.init(device, nax_lib, "tf_exl3_matmul_prefill_nax59", false)) |pf| {
                             if (pf.simdWidth() == 32 and pf.maxThreads() >= 128) prefill_nax_funnel_only = pf else pf.deinit();
@@ -283,27 +209,10 @@ pub const Pipelines = struct {
                         if (mtl.Pipeline.init(device, nax_lib, "tf_exl3_matmul_prefill_nax54", false)) |pf| {
                             if (pf.simdWidth() == 32 and pf.maxThreads() >= 128) prefill_nax_warp32 = pf else pf.deinit();
                         } else |_| {}
-                        // The dense prompt tile with the funnel read .
-                        if (mtl.Pipeline.init(device, nax_lib, "tf_exl3_matmul_prefill_nax51", false)) |pf| {
-                            if (pf.simdWidth() == 32 and pf.maxThreads() >= 256) prefill_nax_dense_funnel = pf else pf.deinit();
-                        } else |_| {}
                         // The funnel read in the routed prompt tile .
                         if (mtl.Pipeline.init(device, nax_lib, "tf_exl3_matmul_prefill_nax42", false)) |pf| {
                             if (pf.simdWidth() == 32 and pf.maxThreads() >= 128) prefill_nax_funnel = pf else pf.deinit();
                         } else |_| {}
-                        // The cooperative read -- the block's words by one lane a word and a shuffle.
-                        if (mtl.Pipeline.init(device, nax_lib, "tf_exl3_matmul_prefill_nax52", false)) |pf| {
-                            if (pf.simdWidth() == 32 and pf.maxThreads() >= 128) prefill_nax_coop = pf else pf.deinit();
-                        } else |_| {}
-                        if (mtl.Pipeline.init(device, nax_lib, "tf_exl3_matmul_prefill_nax53", false)) |pf| {
-                            if (pf.simdWidth() == 32 and pf.maxThreads() >= 128) prefill_nax_coop_skip = pf else pf.deinit();
-                        } else |_| {}
-                        if (mtl.Pipeline.init(device, nax_lib, "tf_exl3_matmul_prefill_nax10", false)) |pf| {
-                            if (pf.simdWidth() == 32 and pf.maxThreads() >= 128) prefill_nax_db = pf else pf.deinit();
-                        } else |err| std.log.err("exl3: nax10 pipeline init failed: {s}", .{@errorName(err)});
-                        if (mtl.Pipeline.init(device, nax_lib, "tf_exl3_matmul_prefill_nax18", false)) |pf| {
-                            if (pf.simdWidth() == 32 and pf.maxThreads() >= 128) prefill_nax_db64 = pf else pf.deinit();
-                        } else |err| std.log.err("exl3: nax18 pipeline init failed: {s}", .{@errorName(err)});
                         // The dense 128x64 prompt tile on the double-buffered body: the same k order and MMA order as
                         // the single-tile body, so the output is bit-identical.
                         if (mtl.Pipeline.init(device, nax_lib, "tf_exl3_matmul_prefill_nax31", false)) |pf| {
@@ -319,16 +228,6 @@ pub const Pipelines = struct {
                                 } else pf.deinit();
                             } else |err| std.log.err("exl3: fp8 prefill pipeline failed: {s}", .{@errorName(err)});
                         }
-                        // The dense 128x64 tile with a simdgroup that owns thirty-two rows: the NAXTile shape. The
-                        // lane keeps eight states, so the stream words it reads cover twice the states, and the
-                        // weight fragments are read once for two row groups. The values, the k order and the MMA
-                        // order per output are the single-tile body's, so the output is bit-identical.
-                        if (mtl.Pipeline.init(device, nax_lib, "tf_exl3_matmul_prefill_nax56", false)) |pf| {
-                            if (pf.simdWidth() == 32 and pf.maxThreads() >= 128) prefill_nax_dense_rpg2 = pf else pf.deinit();
-                        } else |err| std.log.err("exl3: nax56 pipeline init failed: {s}", .{@errorName(err)});
-                        if (mtl.Pipeline.init(device, nax_lib, "tf_exl3_matmul_prefill_nax19", false)) |pf| {
-                            if (pf.simdWidth() == 32 and pf.maxThreads() >= 128) prefill_nax_moe_db = pf else pf.deinit();
-                        } else |err| std.log.err("exl3: nax19 pipeline init failed: {s}", .{@errorName(err)});
                         if (mtl.Pipeline.init(device, nax_lib, "tf_exl3_matmul_decode_nax", false)) |pf| {
                             if (pf.simdWidth() == 32 and pf.maxThreads() >= 128) {
                                 decode_nax = pf;
@@ -382,10 +281,7 @@ pub const Pipelines = struct {
                             } else |_| {}
                             // The register-only body.
                             const warps: usize = knobs.fma_warps;
-                            // The FMA body's prefetch ring depth, in blocks in flight.
-                            const fma_pf: usize = knobs.fma_pf;
-                            if (fma_pf != 1) std.log.info("exl3: FMA prefetch ring depth {d}", .{fma_pf});
-                            if (std.fmt.allocPrint(g, "#define TF_DECODE_TABLE 1\n#define TF_FMA_WARPS {d}\n#define TF_FMA_PF {d}\n{s}", .{ warps, fma_pf, src })) |src_fma| {
+                            if (std.fmt.allocPrint(g, "#define TF_DECODE_TABLE 1\n#define TF_FMA_WARPS {d}\n{s}", .{ warps, src })) |src_fma| {
                                 defer g.free(src_fma);
                                 if (mtl.Library.fromSource(device, src_fma, mtl.CompileOptions.mlx()) catch null) |libfma| {
                                     defer libfma.deinit();
@@ -437,12 +333,6 @@ pub const Pipelines = struct {
                                 } else std.log.err("exl3: fma decode library compile failed", .{});
                             } else |_| {}
                         }
-                        if (mtl.Pipeline.init(device, nax_lib, "tf_exl3_matvec_nax", false)) |pf| {
-                            if (pf.simdWidth() == 32 and pf.maxThreads() >= 128) {
-                                matvec_nax = pf;
-                                std.log.info("exl3: tensor-unit matvec pipeline active (tf_exl3_matvec_nax)", .{});
-                            } else pf.deinit();
-                        } else |err| std.log.err("exl3: matvec nax pipeline init failed: {s}", .{@errorName(err)});
                     } else |err| std.log.err("exl3: nax library compile failed: {s}", .{@errorName(err)});
                 } else |err| std.log.err("exl3: nax source inline failed: {s}", .{@errorName(err)});
             }
@@ -462,7 +352,40 @@ pub const Pipelines = struct {
         // The three codebooks as a table: the tensor-unit kernels read a value instead of deriving it.
 
         if (table == null) std.log.err("exl3: codebook table not created; the tensor-unit path will read none", .{});
-        return .{ .rotate_in = ri, .matmul = mm, .rotate_out = ro, .swiglu_prerotate = sr, .dense = dn, .prefill = prefill, .prefill_fp8 = prefill_fp8, .prefill_cast = prefill_cast, .reduce = reduce, .prefill_nax_tiles = prefill_nax_tiles, .decode_nax = decode_nax, .decode_nax_c = decode_nax_c, .decode_nax_tab = decode_nax_tab, .decode_nax_ctab = decode_nax_ctab, .decode_nax_ctab_f = decode_nax_ctab_f, .decode_fma = decode_fma, .decode_fma_static = decode_fma_static, .decode_fma_static_lut = decode_fma_static_lut, .decode_fma_dense = decode_fma_dense, .decode_fma_dense_multi2 = decode_fma_dense_multi2, .decode_fma_dense_multi4 = decode_fma_dense_multi4, .fma_warps = fma_warps, .matvec_nax = matvec_nax, .int8_tile = int8_tile, .matmul_tab = if (table != null) mmt else null, .matmul_wide = if (table != null) mmw else null, .matmul_direct = if (table != null) mmd else null, .matmul_static = if (table != null) mms else null, .matmul_static_lut = if (table != null) mmsl else null, .codebook_table = table, .prefill_nax_db = prefill_nax_db, .prefill_nax_db64 = prefill_nax_db64, .prefill_nax_dense_db = prefill_nax_dense_db, .prefill_nax_dense_rpg2 = prefill_nax_dense_rpg2, .prefill_nax_moe_db = prefill_nax_moe_db, .prefill_nax_funnel = prefill_nax_funnel, .prefill_nax_skip_pad = prefill_nax_skip_pad, .prefill_nax_wide = prefill_nax_wide, .prefill_nax_funnel_only = prefill_nax_funnel_only, .prefill_nax_skip_pad128 = prefill_nax_skip_pad128, .prefill_nax_warp32 = prefill_nax_warp32, .prefill_nax_coop = prefill_nax_coop, .prefill_nax_coop_skip = prefill_nax_coop_skip, .prefill_nax_dense_funnel = prefill_nax_dense_funnel };
+        return .{
+            .rotate_in = ri,
+            .matmul = mm,
+            .rotate_out = ro,
+            .swiglu_prerotate = sr,
+            .dense = dn,
+            .prefill = prefill,
+            .prefill_fp8 = prefill_fp8,
+            .prefill_cast = prefill_cast,
+            .reduce = reduce,
+            .prefill_nax_tiles = prefill_nax_tiles,
+            .prefill_nax_funnel = prefill_nax_funnel,
+            .prefill_nax_skip_pad = prefill_nax_skip_pad,
+            .prefill_nax_funnel_only = prefill_nax_funnel_only,
+            .prefill_nax_skip_pad128 = prefill_nax_skip_pad128,
+            .prefill_nax_warp32 = prefill_nax_warp32,
+            .prefill_nax_dense_db = prefill_nax_dense_db,
+            .decode_nax = decode_nax,
+            .decode_nax_c = decode_nax_c,
+            .decode_nax_tab = decode_nax_tab,
+            .decode_nax_ctab = decode_nax_ctab,
+            .decode_nax_ctab_f = decode_nax_ctab_f,
+            .decode_fma = decode_fma,
+            .decode_fma_static = decode_fma_static,
+            .decode_fma_static_lut = decode_fma_static_lut,
+            .decode_fma_dense = decode_fma_dense,
+            .decode_fma_dense_multi2 = decode_fma_dense_multi2,
+            .decode_fma_dense_multi4 = decode_fma_dense_multi4,
+            .fma_warps = fma_warps,
+            .int8_tile = int8_tile,
+            .matmul_tab = if (table != null) mmt else null,
+            .matmul_static_lut = if (table != null) mmsl else null,
+            .codebook_table = table,
+        };
     }
     pub fn deinit(p: *Pipelines) void {
         p.rotate_in.deinit();
@@ -478,16 +401,8 @@ pub const Pipelines = struct {
         for (p.prefill_nax_tiles) |maybe| if (maybe) |pf| pf.deinit();
         if (p.prefill_nax_skip_pad128) |pf| pf.deinit();
         if (p.prefill_nax_warp32) |pf| pf.deinit();
-        if (p.prefill_nax_coop) |pf| pf.deinit();
-        if (p.prefill_nax_coop_skip) |pf| pf.deinit();
-        if (p.prefill_nax_dense_funnel) |pf| pf.deinit();
-        if (p.prefill_nax_db) |pf| pf.deinit();
-        if (p.prefill_nax_db64) |pf| pf.deinit();
         if (p.prefill_nax_dense_db) |pf| pf.deinit();
-        if (p.prefill_nax_dense_rpg2) |pf| pf.deinit();
-        if (p.prefill_nax_wide) |pf| pf.deinit();
         if (p.prefill_nax_funnel_only) |pf| pf.deinit();
-        if (p.prefill_nax_moe_db) |pf| pf.deinit();
         if (p.decode_nax) |pf| pf.deinit();
         if (p.decode_nax_c) |pf| pf.deinit();
         if (p.decode_nax_tab) |pf| pf.deinit();
@@ -499,11 +414,7 @@ pub const Pipelines = struct {
         if (p.decode_fma_dense) |pf| pf.deinit();
         if (p.decode_fma_dense_multi2) |pf| pf.deinit();
         if (p.decode_fma_dense_multi4) |pf| pf.deinit();
-        if (p.matvec_nax) |pf| pf.deinit();
         if (p.matmul_tab) |pf| pf.deinit();
-        if (p.matmul_wide) |pf| pf.deinit();
-        if (p.matmul_direct) |pf| pf.deinit();
-        if (p.matmul_static) |pf| pf.deinit();
         if (p.matmul_static_lut) |pf| pf.deinit();
         if (p.int8_tile) |pf| pf.deinit();
     }
@@ -514,7 +425,6 @@ pub var dense_log_count: u32 = 0;
 /// The log counter for the calls the eight-row dense gate moves.
 pub var dense8_log_count: u32 = 0;
 pub var matmul_tab_logged: bool = false;
-pub var direct_log_count: u32 = 0;
 
 /// The table-decode knob (default on) restores the ALU codebook for a same-binary A/B. The table's values
 /// are the format's own decoder's, so the default path's arithmetic is unchanged.

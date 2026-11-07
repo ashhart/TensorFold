@@ -4,9 +4,6 @@ inline void tf_exl3_prefill_body(threadgroup half* wx, const device half* x, con
                                  const threadgroup half* lut,
                                  uint lane, uint sg, uint tid, uint tptg, uint3 tg) {
   const uint trows = RG * 16u;
-  // The activation's staging area, carved from the tail of the weight tile (the kernel entries allocate it): the
-  // tile's rows by the block's sixteen k columns.
-  threadgroup half* ax = wx + 16u * 64u * CG;
   const uint rb = tg.y * trows, nb = tg.x * (64u * CG);
   if (a.indexed == 1 || rb >= a.rows) return;
   const uint tile_expert = a.indexed ? routes[rb] : a.expert_id;
@@ -64,25 +61,15 @@ inline void tf_exl3_prefill_body(threadgroup half* wx, const device half* x, con
   // The four stream words a block needs are loaded a block early: issued before the barrier, their latency overlaps
   // the multiply and the next block's decode instead of stalling at the top of every k block.
   uint p0v = 0, p1v = 0, p2v = 0, p3v = 0;
-  // The store path's accumulator (the decode's values kept live in a register).
-  uint sacc = 0;
-  // The cooperative read -- this lane holds the block's word at its own index and the two words it needs arrive by a
-  // shuffle, so the warp reads the block's ninety-six bytes once instead of once per lane that needs them.
-  uint mine = 0, wi1s = 0;
-  if (Funnel and Coop and decodes) {
-    const device ushort* tile0 = reinterpret_cast<const device ushort*>(job.trellis + ulong(nb / 16 + hg / 16u + h) * job.tile_n_stride);
-    mine = (lane < words) ? tf_exl3_word_t<W>(tile0, lane) : 0u;
-    wi1s = (wi0 + 1u < words) ? wi0 + 1u : wi0 + 1u - words;
-  }
   if (Fast and decodes) {
     const device ushort* tile0 = reinterpret_cast<const device ushort*>(job.trellis + ulong(nb / 16 + hg / 16u + h) * job.tile_n_stride);
     uint a1 = wi0 + 1; if (a1 >= words) a1 -= words;
     uint a2 = wi0 + 2; if (a2 >= words) a2 -= words;
     uint a3 = wi0 + 3; if (a3 >= words) a3 -= words;
-    p0v = tf_exl3_word_t<W>(tile0, wi0);
-    p1v = tf_exl3_word_t<W>(tile0, a1);
-    p2v = tf_exl3_word_t<W>(tile0, a2);
-    p3v = tf_exl3_word_t<W>(tile0, a3);
+    p0v = tf_exl3_word(tile0, wi0);
+    p1v = tf_exl3_word(tile0, a1);
+    p2v = tf_exl3_word(tile0, a2);
+    p3v = tf_exl3_word(tile0, a3);
   }
   for (uint kb = 0; kb < a.k; kb += 16) {
     // One thread owns 8 consecutive states of one 16x16 tile. The bit cursor advances by a half-width a state, so it
@@ -95,32 +82,14 @@ inline void tf_exl3_prefill_body(threadgroup half* wx, const device half* x, con
           // Two words a lane: the funnel holds the lane's eight windows (three bits apart), so the state's window is
           // one shift and one mask from the funnel, with no cursor and no select chain.
           const uint nkb = kb + 16;
-          if (Coop) {
-            // The words come from the cooperative read -- a shuffle from the lane that holds the word.
-            const uint w0 = simd_shuffle(mine, wi0);
-            const uint w1 = simd_shuffle(mine, wi1s);
-            if (nkb < a.k) {
-              const device ushort* tile_n = reinterpret_cast<const device ushort*>(
-                  job.trellis + ulong(nkb / 16) * job.tile_k_stride + ulong(nb / 16 + hg / 16u + h) * job.tile_n_stride);
-              mine = (lane < words) ? tf_exl3_word_t<W>(tile_n, lane) : 0u;
-            }
-            if (Cheap) tf_exl3_decode_funnel_cheap(wx, walk.at, walk.first_bit, job.halves >> 1, w0, w1);
-            else if (Funnel32) tf_exl3_decode_funnel32<states, NoValue>(wx, table, lut, job.codebook, walk.at, walk.first_bit, w0, w1);
-            else tf_exl3_decode_funnel<states, NoValue>(wx, table, lut, job.codebook, walk.at, walk.first_bit, job.halves >> 1, w0, w1);
-          } else {
           const uint w0 = p0v, w1 = p1v;
           if (nkb < a.k) {
             const device ushort* tile_n = reinterpret_cast<const device ushort*>(
                 job.trellis + ulong(nkb / 16) * job.tile_k_stride + ulong(nb / 16 + hg / 16u + h) * job.tile_n_stride);
-            p0v = tf_exl3_word_t<W>(tile_n, wi0);
-            p1v = tf_exl3_word_t<W>(tile_n, wi0 + 1 < words ? wi0 + 1 : wi0 + 1 - words);
+            p0v = tf_exl3_word(tile_n, wi0);
+            p1v = tf_exl3_word(tile_n, wi0 + 1 < words ? wi0 + 1 : wi0 + 1 - words);
           }
-          if (Store != 0) {
-            sacc = tf_exl3_decode_funnel_store<states, Store>(wx, table, lut, job.codebook, walk.at, walk.first_bit, job.halves >> 1, w0, w1, sacc, kb, tid);
-          } else if (Cheap) tf_exl3_decode_funnel_cheap(wx, walk.at, walk.first_bit, job.halves >> 1, w0, w1);
-          else if (Funnel32) tf_exl3_decode_funnel32<states, NoValue>(wx, table, lut, job.codebook, walk.at, walk.first_bit, w0, w1);
-          else tf_exl3_decode_funnel<states, NoValue>(wx, table, lut, job.codebook, walk.at, walk.first_bit, job.halves >> 1, w0, w1);
-          }
+          tf_exl3_decode_funnel<states>(wx, table, lut, job.codebook, walk.at, walk.first_bit, job.halves >> 1, w0, w1);
         } else if (Fast and (job.halves & 1u) == 0 and job.halves <= 16) {
           // Eight states span seven steps, so at 8 bits a value their cursors reach three words past the first.
           const uint w0 = p0v, w1 = p1v, w2 = p2v, w3 = p3v;
@@ -138,8 +107,7 @@ inline void tf_exl3_prefill_body(threadgroup half* wx, const device half* x, con
             const uint lo = walk.rel[k] == 0 ? w0 : walk.rel[k] == 1 ? w1 : w2;
             const uint hi = walk.rel[k] == 0 ? w1 : walk.rel[k] == 1 ? w2 : w3;
             const uint carry = (hi >> walk.sh[k]) & (0u - uint(walk.off[k] != 0));
-            wx[walk.at[k]] = NoValue ? half(ushort(((lo << walk.off[k]) | carry) >> 16))
-                                : tf_exl3_pick(table, lut, ushort(((lo << walk.off[k]) | carry) >> 16), job.codebook);
+            wx[walk.at[k]] = tf_exl3_pick(table, lut, ushort(((lo << walk.off[k]) | carry) >> 16), job.codebook);
           }
         } else if (job.halves <= 16 and (job.halves & 1u) == 0 and states == 8) {
           const uint ring = 128 * job.halves;
@@ -147,9 +115,9 @@ inline void tf_exl3_prefill_body(threadgroup half* wx, const device half* x, con
           uint at2 = wi0 + 2; if (at2 >= words) at2 -= words;
           uint at3 = wi0 + 3; if (at3 >= words) at3 -= words;
           uint at4 = wi0 + 4; if (at4 >= words) at4 -= words;
-          const uint w0 = tf_exl3_word_t<W>(tile, wi0);
-          const uint w1 = tf_exl3_word_t<W>(tile, at1), w2 = tf_exl3_word_t<W>(tile, at2);
-          const uint w3 = tf_exl3_word_t<W>(tile, at3), w4 = tf_exl3_word_t<W>(tile, at4);
+          const uint w0 = tf_exl3_word(tile, wi0);
+          const uint w1 = tf_exl3_word(tile, at1), w2 = tf_exl3_word(tile, at2);
+          const uint w3 = tf_exl3_word(tile, at3), w4 = tf_exl3_word(tile, at4);
           uint cur = (wi0 << 5) | ((tf_exl3_map_for(p0, job.halves) >> 6) & 31u);
           TF_UNROLL
           for (uint k = 0; k < 8; ++k) {
@@ -178,61 +146,15 @@ inline void tf_exl3_prefill_body(threadgroup half* wx, const device half* x, con
         }
       }
     }
-    // This SIMDgroup's rows of the k block, read straight into fragments: no staging buffer, one barrier. Rpg
-    // sixteen-row groups a warp -- the weight fragments are read once for all of them. The activation's three forms.
-    // Act == 1 reads the fragment ONCE, before the k loop (a diagnostic: the output differs by construction and the
-    // delta against Act == 0 IS the per-block read). Act == 2 stages the fragment in threadgroup memory once a k
-    // block, so the two column groups of a row group SHARE one device read -- the record's "occupancy-keeping form"
-    // (one column tile's activation read shared by two column groups, the fragment in threadgroup memory). The
-    // staging is published by the SAME barrier that publishes the weight tile, so the block's barrier count is
-    // unchanged.
+    // This SIMDgroup's rows of the k block, read straight into fragments: no staging buffer, one barrier.
     frag<half> av[Rpg];
-    if (Act == 1) {
-      if (any_live) {
-        TF_UNROLL
-        for (uint r = 0; r < Rpg; ++r) {
-          if (group_live[r]) tf_frag_get_dev4(av[r], (const device half*)x, int(a.k), int(rb + (sgr + r) * 16), 0, home, int(rb + job.rows_here));
-        }
-      }
-    }
-    if (Act == 2) {
-      // The staging: the column group's first warp reads its row group's activation from the device once and writes
-      // it into the tile's staging area (the tile's rows, the block's sixteen k columns). The other column group's
-      // warps read it back from there AFTER the barrier that publishes it, so the device read happens once a row
-      // group, not once a column group. The values, their order and the k order are the single-buffer body's.
-      if (sgc == 0 and any_live) {
-        TF_UNROLL
-        for (uint r = 0; r < Rpg; ++r) {
-          if (group_live[r]) {
-            const int r0 = int(rb + (sgr + r) * 16) + int(home.y);
-            const int r1 = r0 + 8;
-            const int c0 = int(kb) + int(home.x);
-            half4 v0 = half4(0.0h, 0.0h, 0.0h, 0.0h);
-            half4 v1 = half4(0.0h, 0.0h, 0.0h, 0.0h);
-            if (r0 < int(rb + job.rows_here)) v0 = *(const device half4*)(x + r0 * int(a.k) + c0);
-            if (r1 < int(rb + job.rows_here)) v1 = *(const device half4*)(x + r1 * int(a.k) + c0);
-            *(threadgroup half4*)(ax + int((sgr + r) * 16 + uint(home.y)) * 16 + int(home.x)) = v0;
-            *(threadgroup half4*)(ax + int((sgr + r) * 16 + uint(home.y) + 8u) * 16 + int(home.x)) = v1;
-          }
-        }
-      }
-    }
-    if (Act == 0) {
-      if (any_live) {
-        TF_UNROLL
-        for (uint r = 0; r < Rpg; ++r) {
-          if (group_live[r]) tf_frag_get_dev4(av[r], (const device half*)x, int(a.k), int(rb + (sgr + r) * 16), int(kb), home, int(rb + job.rows_here));
-        }
+    if (any_live) {
+      TF_UNROLL
+      for (uint r = 0; r < Rpg; ++r) {
+        if (group_live[r]) tf_frag_get_dev4(av[r], (const device half*)x, int(a.k), int(rb + (sgr + r) * 16), int(kb), home, int(rb + job.rows_here));
       }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (Act == 2) {
-      // The staged fragment, read back after the barrier that published it.
-      TF_UNROLL
-      for (uint r = 0; r < Rpg; ++r) {
-        if (group_live[r]) tf_frag_get_tg4(av[r], ax, 16, int((sgr + r) * 16), 0, home);
-      }
-    }
     if (any_live) {
       frag<half> b0, b1;
       const int wc = int(sgc * 64u);
@@ -251,12 +173,6 @@ inline void tf_exl3_prefill_body(threadgroup half* wx, const device half* x, con
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
   }
-  // The accumulator is folded into the first output element, so the decode's values cannot be eliminated. A
-  // diagnostic: the output differs by construction.
-  if (Store == 1 or Store == 4) {
-    const float t = lo0[0][0];
-    lo0[0][0] = t + float(sacc);
-  }
   const int r0 = int(rb + sgr * 16);
   const int c0 = int(nb + sgc * 64u);
   // `sums` is the whole [rows, n] buffer and frag_put_in indexes it absolutely (rr, cc), so the bounds must be
@@ -273,7 +189,6 @@ inline void tf_exl3_prefill_body(threadgroup half* wx, const device half* x, con
     }
   }
 }
-
 
 
 // Double-buffered prompt body: the next k block decodes into the tile the multiply is not reading, and the multiply
@@ -304,7 +219,7 @@ inline void tf_exl3_prefill_body_db(threadgroup half* wx, const device half* x, 
   const bool use_funnel = Funnel and ((job.halves == 6u and (states == 8u or states == 4u)) or
                                       (job.halves == 8u and states == 4u));
   if ((job.halves & 1u) != 0 or job.halves > 16) {
-    tf_exl3_prefill_body<true, RG, CG, UseTable, false, false, false, false, false, false, Rpg>(wx, x, trellis, sums, a, routes, descriptors, table, nullptr, lane, sg, tid, tptg, tg);
+    tf_exl3_prefill_body<true, RG, CG, UseTable, false, false, Rpg>(wx, x, trellis, sums, a, routes, descriptors, table, nullptr, lane, sg, tid, tptg, tg);
     return;
   }
   const TfExl3DigWindows walk = tf_exl3_dig_windows<states, CG, 64u * CG>(p0, job.halves, hg, h, true);
@@ -324,7 +239,7 @@ inline void tf_exl3_prefill_body_db(threadgroup half* wx, const device half* x, 
     const uint w0 = tf_exl3_block_word(job.trellis, job.tile_k_stride, job.tile_n_stride, 0, nb, hg, h, wi0, words);
     const uint w1 = tf_exl3_block_word(job.trellis, job.tile_k_stride, job.tile_n_stride, 0, nb, hg, h, wi0 + 1, words);
     if (use_funnel) {
-      if (job.halves == 8u) tf_exl3_decode_funnel<states, false, 4>(wx, table, nullptr, job.codebook, walk.at, walk.first_bit, 4, w0, w1);
+      if (job.halves == 8u) tf_exl3_decode_funnel<states, 4>(wx, table, nullptr, job.codebook, walk.at, walk.first_bit, 4, w0, w1);
       else tf_exl3_decode_funnel<states>(wx, table, nullptr, job.codebook, walk.at, walk.first_bit, job.halves >> 1, w0, w1);
     } else {
       const uint w2 = tf_exl3_block_word(job.trellis, job.tile_k_stride, job.tile_n_stride, 0, nb, hg, h, wi0 + 2, words);
@@ -369,7 +284,7 @@ inline void tf_exl3_prefill_body_db(threadgroup half* wx, const device half* x, 
     if (nkb < a.k and decodes and DoDecode) {
       threadgroup half* nxt = wx + (cur_buf ^ 1u) * (16u * 64u * CG);
       if (use_funnel) {
-        if (job.halves == 8u) tf_exl3_decode_funnel<states, false, 4>(nxt, table, nullptr, job.codebook, walk.at, walk.first_bit, 4, nw0, nw1);
+        if (job.halves == 8u) tf_exl3_decode_funnel<states, 4>(nxt, table, nullptr, job.codebook, walk.at, walk.first_bit, 4, nw0, nw1);
         else tf_exl3_decode_funnel<states>(nxt, table, nullptr, job.codebook, walk.at, walk.first_bit, job.halves >> 1, nw0, nw1);
       } else if (UseTable) tf_exl3_decode_table<states>(nxt, table, job.codebook, walk.at, walk.off, walk.sh, walk.rel, nw0, nw1, nw2, nw3);
       else tf_exl3_decode_fast<states>(nxt, job.codebook, walk.at, walk.off, walk.sh, walk.rel, nw0, nw1, nw2, nw3);
@@ -394,4 +309,3 @@ inline void tf_exl3_prefill_body_db(threadgroup half* wx, const device half* x, 
     sums[tid] = acc;
   }
 }
-

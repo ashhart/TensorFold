@@ -197,24 +197,9 @@ pub fn tableDecodeOn() bool {
     return knobs.table_decode;
 }
 
-/// The 128-column one-row table body.
-pub fn wideDecodeOn() bool {
-    return knobs.wide_decode;
-}
-
-/// The direct-register one-row table body.
-pub fn directDecodeOn() bool {
-    return knobs.direct_decode;
-}
-
 /// The codebook read from a 1024-entry threadgroup LUT in the register-only routed decode body.
 pub fn fmaLutOn() bool {
     return knobs.fma_lut;
-}
-
-/// The codebook read from a 1024-entry threadgroup LUT in the static one-row body.
-pub fn lutDecodeOn() bool {
-    return knobs.lut_decode;
 }
 
 /// The static state selection in the register-only routed decode body.
@@ -227,19 +212,9 @@ pub fn fmaDenseOn() bool {
     return knobs.fma_dense;
 }
 
-/// The static state selection in the one-row body.
-pub fn staticDecodeOn() bool {
-    return knobs.static_decode;
-}
-
 /// The dense prompt attention projections on the double-buffered 128x64 body.
 pub fn denseDb() bool {
     return knobs.dense_db;
-}
-
-/// The dense prompt tile on the thirty-two-row simdgroup body.
-pub fn denseRpg2() bool {
-    return knobs.dense_rpg2;
 }
 
 /// The routed prompt tile skips the grouping's padded rows.
@@ -247,29 +222,9 @@ pub fn skipPadOn() bool {
     return knobs.skip_pad;
 }
 
-/// The routed prompt tile reads its stream word as one 4-byte load.
-pub fn wideWordsOn() bool {
-    return knobs.wide_words;
-}
-
 /// The routed prompt tile takes the funnel path as its only path.
 pub fn funnelOnlyOn() bool {
     return knobs.funnel_only;
-}
-
-/// The dense prompt tile reads its states from the two-word funnel.
-pub fn denseFunnelOn() bool {
-    return knobs.dense_funnel;
-}
-
-/// The dense prompt tile's funnel read at halves = 8, the tap projection's width.
-pub fn denseFunnel8On() bool {
-    return knobs.dense_funnel8;
-}
-
-/// The routed prompt tile reads its block's words once a warp.
-pub fn coopPrefillOn() bool {
-    return knobs.coop_prefill;
 }
 
 /// The 128-row routed tile with the thirty-two-row warp.
@@ -280,11 +235,6 @@ pub fn warp32On() bool {
 /// The routed prompt tile's funnel read.
 pub fn funnelPrefillOn() bool {
     return knobs.funnel_prefill;
-}
-
-/// The routed 64x64 prompt tile on the double-buffered ALU body.
-pub fn moeDb() bool {
-    return knobs.moe_db;
 }
 
 /// The one-row split count pinned for the whole binary; null keeps the per-shape default.

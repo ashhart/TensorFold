@@ -46,14 +46,13 @@ kernel void tf_exl3_swiglu_prerotate(const device ushort* gate [[buffer(0)]],
 // threadgroup reads eight contiguous n tiles of a k block, and the shared activation tile is double buffered, so a
 // block costs one threadgroup barrier instead of two. Each SIMDgroup runs the same decode, the same 16-product FP32
 // sum and the same k order as tf_exl3_matmul_tab, so the output is bit-identical.
-template <bool Table, bool Decode = true, bool Lut = false>
+template <bool Table>
 inline void tf_exl3_matmul_wide_impl(const device half* x, const device uchar* trellis,
                                      device float* sums, constant TfExl3Args& a,
                                      const device uint* routes, const device TfExl3Expert* descriptors,
                                      device float* partials, const device half* table,
                                      uint lane, uint sg, uint3 tg,
-                                     threadgroup half* wx_all, threadgroup float* xx_all,
-                                     threadgroup half* lut = nullptr) {
+                                     threadgroup half* wx_all, threadgroup float* xx_all) {
   const uint split = a.splits > 1 ? tg.y : 0;
   const uint rb = a.splits > 1 ? tg.z * 8 : tg.y * 8, nb = tg.x * 128 + sg * 16;
   if (!simd_any(tf_exl3_active(routes, a, rb + lane % 8))) return;
@@ -133,18 +132,14 @@ inline void tf_exl3_matmul_wide_impl(const device half* x, const device uchar* t
         const uint hi = rel[j] == 0 ? w1 : rel[j] == 1 ? w2 : w3;
         const uint carry = (hi >> sh[j]) & (0u - uint(off[j] != 0));
         const ushort s = ushort(((lo << off[j]) | carry) >> 16);
-        wx[at[j]] = Decode ? (Lut ? lut[tf_exl3_mul1_index(s)]
-                                 : (Table ? tf_exl3_table_value(table, codebook, s) : tf_exl3_value(s, codebook)))
-                           : half(0.5f + float((lane + j) & 7u));
+        wx[at[j]] = Table ? tf_exl3_table_value(table, codebook, s) : tf_exl3_value(s, codebook);
       }
     } else for (uint j = 0; j < 8; ++j) {
       const uint p = lane + 32 * j, l = p / 8, e = p % 8;
       const uint r = 2 * (l % 4) + (e & 1u) + 8 * ((e >> 1) & 1u);
       const uint c = l / 4 + 8 * (e >> 2);
       const ushort state = tf_exl3_mapped_state(tile, maps[j]);
-      wx[r * 16 + c] = Decode ? (Lut ? lut[tf_exl3_mul1_index(state)]
-                                   : (Table ? tf_exl3_table_value(table, codebook, state) : tf_exl3_value(state, codebook)))
-                              : half(0.5f + float((lane + j) & 7u));
+      wx[r * 16 + c] = Table ? tf_exl3_table_value(table, codebook, state) : tf_exl3_value(state, codebook);
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     for (uint i = 0; i < 4; ++i) {
@@ -163,33 +158,17 @@ inline void tf_exl3_matmul_wide_impl(const device half* x, const device uchar* t
   }
 }
 
-kernel void tf_exl3_matmul_wide_tab(const device half* x [[buffer(0)]],
-                                    const device uchar* trellis [[buffer(1)]],
-                                    device float* sums [[buffer(2)]],
-                                    constant TfExl3Args& a [[buffer(3)]],
-                                    const device uint* routes [[buffer(4)]],
-                                    const device TfExl3Expert* descriptors [[buffer(5)]],
-                                    device float* partials [[buffer(6)]],
-                                    const device half* table [[buffer(7)]],
-                                    uint lane [[thread_index_in_simdgroup]],
-                                    uint sg [[simdgroup_index_in_threadgroup]],
-                                    uint3 tg [[threadgroup_position_in_grid]]) {
-  threadgroup half wx[8 * 256];
-  threadgroup float xx[2 * 128];
-  tf_exl3_matmul_wide_impl<true>(x, trellis, sums, a, routes, descriptors, partials, table, lane, sg, tg, wx, xx);
-}
-
 // The wide one-row body with the static state selection. The shipped body picks each state's word pair and bit offset
 // at run time (the `rel[k]` cursor the record named as one of the body's two bounds); here one funnel shift a block
 // puts the lane's window at a known place and the eight windows then sit at compile-time shifts, so the cursor leaves
 // the inner loop and the lane reads three stream words, not four. The tile, the activation load, the 16-product FP32
 // sums and the k order are the shipped body's, so the output is bit-identical. S is the states' stride in bits
 // (halves / 2) and must satisfy 7*S + 16 <= 64.
-template <bool Lut, uint S>
+template <uint S>
 inline void tf_exl3_matmul_wide_static_impl(const device half* x, const device uchar* trellis,
                                             device float* sums, constant TfExl3Args& a,
                                             const device uint* routes, const device TfExl3Expert* descriptors,
-                                            device float* partials, const device half* table,
+                                            device float* partials,
                                             uint lane, uint sg, uint3 tg,
                                             threadgroup half* wx_all, threadgroup float* xx_all,
                                             threadgroup half* lut) {
@@ -248,7 +227,7 @@ inline void tf_exl3_matmul_wide_static_impl(const device half* x, const device u
     const uint c_cur = (w0 << off0) | ((w1 >> sh0) & m0);
     const uint c_next = (w1 << off0) | ((w2 >> sh0) & m0);
     #define TF_EXL3_W(J) tf_exl3_state_static<S, J>(c_cur, c_next)
-    #define TF_EXL3_V(J) (Lut ? lut[tf_exl3_mul1_index(TF_EXL3_W(J))] : tf_exl3_table_value(table, codebook, TF_EXL3_W(J)))
+    #define TF_EXL3_V(J) lut[tf_exl3_mul1_index(TF_EXL3_W(J))]
     wx[at[0]] = TF_EXL3_V(0);
     wx[at[1]] = TF_EXL3_V(1);
     wx[at[2]] = TF_EXL3_V(2);
@@ -275,30 +254,6 @@ inline void tf_exl3_matmul_wide_static_impl(const device half* x, const device u
   }
 }
 
-kernel void tf_exl3_matmul_wide_static_tab(const device half* x [[buffer(0)]],
-                                           const device uchar* trellis [[buffer(1)]],
-                                           device float* sums [[buffer(2)]],
-                                           constant TfExl3Args& a [[buffer(3)]],
-                                           const device uint* routes [[buffer(4)]],
-                                           const device TfExl3Expert* descriptors [[buffer(5)]],
-                                           device float* partials [[buffer(6)]],
-                                           const device half* table [[buffer(7)]],
-                                           uint lane [[thread_index_in_simdgroup]],
-                                           uint sg [[simdgroup_index_in_threadgroup]],
-                                           uint3 tg [[threadgroup_position_in_grid]]) {
-  threadgroup half wx[8 * 256];
-  threadgroup float xx[2 * 128];
-  if (a.halves == 12u)
-    tf_exl3_matmul_wide_static_impl<false, 6>(x, trellis, sums, a, routes, descriptors, partials, table, lane, sg, tg, wx, xx, nullptr);
-  else if (a.halves == 10u)
-    tf_exl3_matmul_wide_static_impl<false, 5>(x, trellis, sums, a, routes, descriptors, partials, table, lane, sg, tg, wx, xx, nullptr);
-  else if (a.halves == 6u)
-    tf_exl3_matmul_wide_static_impl<false, 3>(x, trellis, sums, a, routes, descriptors, partials, table, lane, sg, tg, wx, xx, nullptr);
-  else
-    // A width the static selection is not specialised for: the shipped body, which reads the states the same way.
-    tf_exl3_matmul_wide_impl<true>(x, trellis, sums, a, routes, descriptors, partials, table, lane, sg, tg, wx, xx);
-}
-
 kernel void tf_exl3_matmul_wide_static_lut(const device half* x [[buffer(0)]],
                                            const device uchar* trellis [[buffer(1)]],
                                            device float* sums [[buffer(2)]],
@@ -323,18 +278,11 @@ kernel void tf_exl3_matmul_wide_static_lut(const device half* x [[buffer(0)]],
   for (uint b = sg * 32u + lane; b < 1024u; b += 256u) lut[b] = tf_exl3_mul1_value(b);
   threadgroup_barrier(mem_flags::mem_threadgroup);
   if (a.halves == 12u)
-    tf_exl3_matmul_wide_static_impl<true, 6>(x, trellis, sums, a, routes, descriptors, partials, table, lane, sg, tg, wx, xx, lut);
+    tf_exl3_matmul_wide_static_impl<6>(x, trellis, sums, a, routes, descriptors, partials, lane, sg, tg, wx, xx, lut);
   else if (a.halves == 10u)
-    tf_exl3_matmul_wide_static_impl<true, 5>(x, trellis, sums, a, routes, descriptors, partials, table, lane, sg, tg, wx, xx, lut);
+    tf_exl3_matmul_wide_static_impl<5>(x, trellis, sums, a, routes, descriptors, partials, lane, sg, tg, wx, xx, lut);
   else if (a.halves == 6u)
-    tf_exl3_matmul_wide_static_impl<true, 3>(x, trellis, sums, a, routes, descriptors, partials, table, lane, sg, tg, wx, xx, lut);
+    tf_exl3_matmul_wide_static_impl<3>(x, trellis, sums, a, routes, descriptors, partials, lane, sg, tg, wx, xx, lut);
   else
     tf_exl3_matmul_wide_impl<true>(x, trellis, sums, a, routes, descriptors, partials, table, lane, sg, tg, wx, xx);
 }
-
-// The static one-row body with a deeper weight prefetch (PF blocks of stream words in flight a lane). The shipped
-// body issues the next block's three stream words at the top of the current block, so a block's DRAM latency is
-// hidden by one block's compute only. The prefetch ring below keeps PF blocks of stream words in registers, so PF
-// blocks' loads are in flight at once. Same states, same codebook values, same products, same k order, same partials:
-// bit-identical.
-template <bool Lut, uint S, uint PF>

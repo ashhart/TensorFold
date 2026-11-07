@@ -191,7 +191,7 @@ MIT License, Copyright © 2025 Turboderp. TensorFold's decoders and kernels are 
 checked bit for bit against ExLlamaV3's dequantization.
 
 The native `zig/src/core/exl3_format.zig` reference decoder, the `zig/src/core/exl3_projection*.zig` decoder and
-`zig/kernels/metal/core/exl3_projection_core.metal`, `_wide.metal` and `_wide2.metal` separately implement the same format and codebooks
+`zig/kernels/metal/core/exl3_projection_core.metal` and `_wide.metal` separately implement the same format and codebooks
 under the Turboderp attribution above. So do the native checkpoint scan (`zig/src/core/exl3_load.zig`,
 `exl3_metal_load.zig`), the CUDA kernels (`zig/kernels/cuda/exl3_*.cu`, `exl3_decode.cuh`, `exl3_candidate.cuh`) and
 their Zig side (`zig/src/cuda/exl3*.zig`), and GLM's reader of its EXL3 experts (`zig/src/families/glm/cuda_exl3.zig`).

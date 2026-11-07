@@ -1,18 +1,3 @@
-kernel void tf_exl3_matmul_prefill_nax(const device half* x [[buffer(0)]],
-                                      const device uchar* trellis [[buffer(1)]],
-                                      device float* sums [[buffer(2)]],
-                                      constant TfExl3Args& a [[buffer(3)]],
-                                      const device uint* routes [[buffer(4)]],
-                                      const device TfExl3Expert* descriptors [[buffer(5)]],
-                                      uint lane [[thread_index_in_simdgroup]],
-                                      uint sg [[simdgroup_index_in_threadgroup]],
-                                      uint tid [[thread_index_in_threadgroup]],
-                                      uint3 tptg [[threads_per_threadgroup]],
-                                      uint3 tg [[threadgroup_position_in_grid]]) {
-  threadgroup half wx[16 * 64];
-  tf_exl3_prefill_body<false, 4, 1, false>(wx, x, trellis, sums, a, routes, descriptors, nullptr, nullptr, lane, sg, tid, tptg.x, tg);
-}
-
 kernel void tf_exl3_matmul_prefill_nax2(const device half* x [[buffer(0)]],
                                        const device uchar* trellis [[buffer(1)]],
                                        device float* sums [[buffer(2)]],
@@ -221,56 +206,3 @@ kernel void tf_exl3_matmul_decode_nax(const device half* x [[buffer(0)]],
   frag_put_in(lo, sums, int(a.n), int(row), int(nb), home, int(row) + 1, int(nb) + int(cols_here));
   frag_put_in(hi, sums, int(a.n), int(row), int(nb + 16), home, int(row) + 1, int(nb) + int(cols_here));
 }
-
-// One row, four column tiles a threadgroup: a dense projection at decode width on the tensor units. Each SIMDgroup
-// decodes its own 32-column tile once and multiplies the single row, writing only row 0.
-kernel void tf_exl3_matvec_nax(const device half* x [[buffer(0)]],
-                              const device uchar* trellis [[buffer(1)]],
-                              device float* sums [[buffer(2)]],
-                              constant TfExl3Args& a [[buffer(3)]],
-                              const device uint* routes [[buffer(4)]],
-                              const device TfExl3Expert* descriptors [[buffer(5)]],
-                              uint lane [[thread_index_in_simdgroup]],
-                              uint sg [[simdgroup_index_in_threadgroup]],
-                              uint tid [[thread_index_in_threadgroup]],
-                              uint3 tg [[threadgroup_position_in_grid]]) {
-  threadgroup half wx[4 * 16 * 32];
-  threadgroup half xx[16 * 16];
-  const uint nb = tg.x * 128 + sg * 32;
-  if (nb >= a.n || a.rows == 0) return;
-  const TfExl3DecodeJob job = tf_exl3_dense_decode_job(trellis, a);
-  const uint cols_here = min(32u, a.n - nb);
-  const short2 home = frag_home(ushort(lane));
-  threadgroup half* wxg = wx + sg * (16 * 32);
-  frag<float> lo = frag<float>(0), hi = frag<float>(0);
-  for (uint kb = 0; kb < a.k; kb += 16) {
-    TF_UNROLL
-    for (uint t = 0; t < 16; ++t) {
-      const uint idx = lane + 32 * t, h = idx / 256, p = idx % 256;
-      if (nb + h * 16 >= a.n) continue;
-      const device ushort* tile = reinterpret_cast<const device ushort*>(
-          job.trellis + ulong(kb / 16) * job.tile_k_stride + ulong(nb / 16 + h) * job.tile_n_stride);
-      const uint l = p / 8, e = p % 8;
-      const uint r = 2 * (l % 4) + (e & 1u) + 8 * ((e >> 1) & 1u);
-      const uint c = l / 4 + 8 * (e >> 2);
-      wxg[r * 32 + h * 16 + c] = tf_exl3_value(tf_exl3_mapped_state(tile, tf_exl3_map_for(p, job.halves)), job.codebook);
-    }
-    TF_UNROLL
-    for (uint t = 0; t < 8; ++t) {
-      const uint idx = lane + 32 * t, r = idx / 16, c = idx % 16;
-      xx[idx] = r == 0 ? *(const device half*)(x + ulong(kb) + c) : half(0);
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    frag<half> av, b0, b1;
-    tf_frag_get_tg4(av, xx, 16, 0, 0, home);
-    tf_frag_get_tg4(b0, wxg, 32, 0, 0, home);
-    tf_frag_get_tg4(b1, wxg, 32, 0, 16, home);
-    mma_16x32<false, false>(lo, hi, av, b0, b1);
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-  }
-  frag_put_in(lo, sums, int(a.n), 0, int(nb), home, 1, int(nb + cols_here));
-  frag_put_in(hi, sums, int(a.n), 0, int(nb + 16), home, 1, int(nb + cols_here));
-}
-
-
-// Timing only, values meaningless; no engine path selects it.
