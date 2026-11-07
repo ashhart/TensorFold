@@ -19,7 +19,8 @@ pub fn layout(gpa: std.mem.Allocator, e: *const Engine, extra: u64) !kv.Layout {
     const fixed = try state.State.pagedBytes(gpa, &e.w, e.capacity, tableLen(e.capacity), e.settings.kv_split);
     // TF_GLM_KV_HOST: a page costs the device only its pooled keys (the pages themselves are in host memory)
     const page = if (kv_host.onHost()) state.pkPageBytes(&e.w) else state.pageBytes(&e.w);
-    return .{ .fixed_bytes = fixed + extra, .token_bytes = page / state.page_rows, .page_tokens = state.page_rows, .snap_bytes = 0 };
+    const classes: u32 = if (e.settings.kv_split) @intCast(e.share.world) else 1; // TF_GLM_KV_SPLIT: an owner class a rank
+    return .{ .fixed_bytes = fixed + extra, .token_bytes = page / state.page_rows, .page_tokens = state.page_rows, .snap_bytes = 0, .classes = classes };
 }
 
 /// TF_KV_SHARE: a kept state's slot (`e.share_pages`: its prefix's pages left to the store), at the window's last mark.
@@ -73,10 +74,14 @@ pub const Pages = struct {
     pub fn init(gpa: std.mem.Allocator, e: *Engine, l: kv.Layout, streams: usize, pages: usize, leader: bool) !*Pages {
         const own = if (e.seqs.items.len > 0) e.seqs.items[0] else null;
         if (own == null or own.?.st.table == 0) return error.OwnNotPaged; // slot 0 holds a window, or none was made
+        if (l.classes > 1 and pages / l.classes < tableLen(e.capacity)) { // a stream's pages all come from one class
+            if (!@import("builtin").is_test) std.log.err("the pool's {d} pages a class hold less than one stream's {d}", .{ pages / l.classes, tableLen(e.capacity) });
+            return error.ClassTooSmall;
+        }
         const p = try gpa.create(Pages);
         errdefer gpa.destroy(p);
         const page = if (kv_host.onHost()) state.pageBytes(&e.w) else l.pageBytes();
-        p.* = .{ .gpa = gpa, .e = e, .layout = l, .page = page, .pool = try kv.Pool.init(gpa, pages, page), .arena = null, .leases = &.{}, .used = &.{}, .leader = leader, .poison = poisoned() };
+        p.* = .{ .gpa = gpa, .e = e, .layout = l, .page = page, .pool = try kv.Pool.initClasses(gpa, pages, page, l.classes), .arena = null, .leases = &.{}, .used = &.{}, .leader = leader, .poison = poisoned() };
         errdefer p.pool.deinit();
         const host = kv_host.onHost() and pages > 0;
         if (pages > 0 and !host) p.arena = try cuda.DeviceBuffer.alloc(e.d, pages * page);
@@ -126,6 +131,7 @@ pub const Pages = struct {
         }
         try e.stream.synchronize();
         own.?.st.place(&e.w, at); // last: a failure before it leaves the engine's own as it was
+        if (l.classes > 1 and !@import("builtin").is_test) std.log.info("kv split: {d} owner classes of {d} pages; a stream takes at most one class ({d} pages at the window); every rank still holds every latent row, so this saves no memory yet", .{ l.classes, pages / l.classes, tableLen(e.capacity) });
         return p;
     }
 
@@ -137,6 +143,15 @@ pub const Pages = struct {
             return error.RankMismatch;
         }
         return init(gpa, e, l, streams, pages, false);
+    }
+
+    /// `follow` with rank 0's TF_GLM_KV_SPLIT (its `pool` step's flag): a rank that books otherwise is RankMismatch.
+    pub fn followFlagged(gpa: std.mem.Allocator, e: *Engine, streams: usize, pages: usize, page_bytes: u64, split: bool) !*Pages {
+        if (e.settings.kv_split != split) {
+            if (!@import("builtin").is_test) std.log.err("rank {d}: TF_GLM_KV_SPLIT is {} here and {} on rank 0", .{ e.share.rank, e.settings.kv_split, split });
+            return error.RankMismatch;
+        }
+        return follow(gpa, e, streams, pages, page_bytes);
     }
 
     /// The pages' first byte as kernels address it (device arena or mapped host pages).
@@ -179,7 +194,9 @@ pub const Pages = struct {
 
     /// Whether a request's pages fit now and a paged sequence is free for it.
     pub fn fits(p: *const Pages, prompt: usize, max_tokens: usize) bool {
-        for (p.used) |u| if (!u) return p.pool.fits(need(p.layout, prompt, max_tokens));
+        const n = need(p.layout, prompt, max_tokens);
+        // past a class, `open` refuses it by name: the lane host drops it, not waits for room that never comes
+        for (p.used) |u| if (!u) return p.pool.fitsAny(n) or (p.pool.classes > 1 and n > p.pool.classCap());
         return false;
     }
 
@@ -195,12 +212,24 @@ pub const Pages = struct {
 
     /// `open` with the prompt cache's `adopted` pages (held for this call) first: their rows stay as the cache kept.
     pub fn openWith(p: *Pages, slot: u32, prompt: usize, max_tokens: usize, adopted: []const u32) ![]const u32 {
+        return p.openOwned(slot, prompt, max_tokens, adopted, p.pool.roomiest());
+    }
+
+    /// `open` on owner class `owner` (the harness pins it; serving takes the roomiest).
+    pub fn openOn(p: *Pages, slot: u32, prompt: usize, max_tokens: usize, owner: u32) ![]const u32 {
+        return p.openOwned(slot, prompt, max_tokens, &.{}, owner);
+    }
+
+    fn openOwned(p: *Pages, slot: u32, prompt: usize, max_tokens: usize, adopted: []const u32, owner: u32) ![]const u32 {
         var held = adopted.len > 0;
         errdefer if (held) for (adopted) |id| p.pool.release(id);
         if (!p.paged(slot) or p.used[slot]) return error.SlotTaken;
         const n = need(p.layout, prompt, max_tokens);
         if (n > tableLen(p.e.capacity) or adopted.len > n) return error.PromptTooLong;
+        if (p.pool.classes > 1 and n > p.pool.classCap()) return error.ClassTooSmall; // not LaneMemory: never requeued
+        if (owner >= p.pool.classes) return error.BadStep;
         const l = &p.leases[slot];
+        l.owner = owner; // every id it takes is of this class
         try p.pool.promise(l, n - adopted.len);
         errdefer p.pool.finish(l);
         if (adopted.len > 0) {
@@ -216,10 +245,17 @@ pub const Pages = struct {
 
     /// Another rank: paged slot `slot` maps rank 0's page ids (its begin step's), the prompt cache's `kept` first.
     pub fn map(p: *Pages, slot: u32, ids: []const u32, kept: usize) !void {
+        return p.mapOwned(slot, ids, kept, 0);
+    }
+
+    /// `map` of a stream of owner class `owner` (its begin step's): every id of that class, or ResidueMismatch.
+    pub fn mapOwned(p: *Pages, slot: u32, ids: []const u32, kept: usize, owner: u32) !void {
         if (!p.paged(slot) or ids.len == 0 or ids.len > tableLen(p.e.capacity) or kept > ids.len) return error.BadStep;
-        if (p.used[slot]) return error.BadStep;
+        if (p.used[slot] or owner >= p.pool.classes) return error.BadStep;
         for (ids) |id| if (id >= p.pool.total()) return error.BadStep;
+        for (ids) |id| if (id % p.pool.classes != owner) return error.ResidueMismatch;
         const l = &p.leases[slot];
+        l.owner = owner;
         l.ids.clearRetainingCapacity();
         try l.ids.appendSlice(p.gpa, ids);
         errdefer l.ids.clearRetainingCapacity();
@@ -246,7 +282,10 @@ pub const Pages = struct {
         st.capacity = 0;
         p.used[slot] = false;
         if (kv_host.active) |*g| g.invalidate(p.e.stream) catch {};
-        if (!p.leader) return p.leases[slot].ids.clearRetainingCapacity();
+        if (!p.leader) {
+            p.leases[slot].owner = 0;
+            return p.leases[slot].ids.clearRetainingCapacity();
+        }
         p.pool.finish(&p.leases[slot]);
         for (p.used) |u| if (u) return;
         p.report();
@@ -257,7 +296,15 @@ pub const Pages = struct {
         if (@import("builtin").is_test) return;
         const c = p.pool.census();
         const ok = p.pool.idle() and (p.e.share_pages or c.free == c.total);
-        std.log.info("kv pool idle{s}: promised {d}, free {d} + store {d} == total {d}", .{ if (ok) "" else " (UNEVEN)", c.promised, c.free, c.kept, c.total });
+        var buf: [kv.max_classes * 48]u8 = undefined;
+        var w = std.Io.Writer.fixed(&buf);
+        const shown: usize = if (p.pool.classes > 1) p.pool.classes else 0; // TF_GLM_KV_SPLIT: each owner class
+        for (0..shown) |k| {
+            const x: u32 = @intCast(k);
+            w.print("{s}{d} + {d} of {d}", .{ if (k == 0) " (classes: free " else ", ", p.pool.classFree(x), p.pool.classPromised(x), p.pool.classCap() }) catch break;
+        }
+        if (p.pool.classes > 1) w.writeAll(")") catch {};
+        std.log.info("kv pool idle{s}: promised {d}, free {d} + store {d} == total {d}{s}", .{ if (ok) "" else " (UNEVEN)", c.promised, c.free, c.kept, c.total, w.buffered() });
     }
 
     /// A stream's table entries written to its sequence's device table (blocking: the stream waits for the copy).
