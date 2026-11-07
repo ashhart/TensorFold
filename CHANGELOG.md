@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CI: main's `zig` and `zig-windows` jobs reuse main's newest build cache, as a pull request does, so each push compiles and runs only what changed since. `zig_cache_restat --prune` keeps each saved cache to about one build, and a nightly run builds and checks everything from nothing (#2402).
+
 - Docs: `docs/api.md` lists `DELETE /v1/slide/facts`, and `docs/control.md` no longer says the native server refuses `--spill-gib` and `--vision` (#2341).
 
 - Prompt cache on CUDA: when a kept state is larger than the whole cache budget, the log line now says that `TF_KV_SHARE=n` would keep its prompt rows as the pool's pages, for families on KV pages; nothing else changes (#2333). Thanks to @Bizuayeu.
