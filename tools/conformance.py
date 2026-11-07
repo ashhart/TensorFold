@@ -10,7 +10,8 @@ Each gate prints one PASS or FAIL line with its counts; any FAIL exits 1. Equali
 - concurrent: at each level, that many requests at once (drafted and plain) each equal their solo reply; a long
   prompt sent among three decoding streams leaves them unchanged and equals its solo reply.
 - resumed: a multi-turn chat on the cached server equals the same chat on a server with the prompt cache off; the
-  fresh side must report ``cached_tokens == 0`` and every later resumed turn ``cached_tokens > 0``.
+  fresh side must report ``cached_tokens == 0`` and every later resumed turn ``cached_tokens > 0``. A profile's
+  ``conversation_context_items`` puts a long document in the first turn, for families that keep only long prompts.
 - refusals: each named request the profile lists is refused with its status and error text.
 
 ``--binary`` starts the servers itself (the cache-off one first, then the cached one), one at a time, from the
@@ -193,6 +194,11 @@ def long_prompt(items: int) -> str:
     return "Summarise this list in one sentence: " + " ".join(f"item{i % 97}x{(i * 7919) % 1013}" for i in range(items))
 
 
+def inventory(items: int) -> str:
+    """A document for the chat's first turn, long enough that a family keeping only long prompts resumes it."""
+    return "An inventory: " + " ".join(f"crate{i % 89}-{(i * 6151) % 997}" for i in range(items))
+
+
 def together(client: Client, bodies, delays=None) -> list:
     """Send every body at once (or after its delay) and return the reply rows in order."""
     out = [None] * len(bodies)
@@ -286,6 +292,8 @@ def conversation(client: Client, plan: Plan, mode: str, draft: bool) -> list:
     """One multi-turn chat; each turn's history carries this server's own earlier replies."""
     history, rows = [], []
     for turn, text in enumerate(plan.profile["conversation"]):
+        if turn == 0 and plan.profile.get("conversation_context_items"):
+            text = inventory(plan.profile["conversation_context_items"]) + "\n\n" + text
         history.append({"role": "user", "content": text})
         row = client.post(plan.body(list(history), mode, draft, ignore_eos=False))
         row["turn"] = turn
