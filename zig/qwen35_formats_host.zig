@@ -217,6 +217,7 @@ fn bf16Prompt(rows: usize) !void {
     e.stream = .{ .d = &d, .handle = @ptrFromInt(0x1800) };
     e.g = g;
     e.kit = &kit;
+    e.affine.mlp128 = false;
     e.affine.split = null;
     e.xs = 0;
     e.tables.ptr = 0x100000;

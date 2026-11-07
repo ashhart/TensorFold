@@ -14,3 +14,4 @@ pub const hc_pointwise_metal_adapter = owner.hc_pointwise_metal_adapter;
 
 pub const contract = @import("contract");
 pub const attention_ref = owner.attention_ref;
+pub const rope_freq = owner.rope_freq;

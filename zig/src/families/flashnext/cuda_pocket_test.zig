@@ -55,8 +55,18 @@ fn read(dst: ?*anyopaque, src: u64, n: usize) callconv(.c) abi.Result {
 fn sync(_: abi.Stream) callconv(.c) abi.Result {
     return if (fail_sync) abi.error_not_ready else 0;
 }
+fn contextDevice(out: *abi.Device) callconv(.c) abi.Result {
+    out.* = 0;
+    return 0;
+}
+fn deviceAttribute(out: *c_int, _: abi.DeviceAttribute, _: abi.Device) callconv(.c) abi.Result {
+    out.* = 0;
+    return 0;
+}
 fn driver() cuda.Driver {
     var d: cuda.Driver = .{ .lib = undefined, .api = undefined };
+    d.api.cuCtxGetDevice = contextDevice;
+    d.api.cuDeviceGetAttribute = deviceAttribute;
     d.api.cuMemAlloc_v2 = alloc;
     d.api.cuMemFree_v2 = free;
     d.api.cuMemHostAlloc = hostAlloc;

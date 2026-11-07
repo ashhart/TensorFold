@@ -75,20 +75,26 @@ pub fn manifestRoute(srv: *Server, conn: *Conn, a: Allocator) !void {
 }
 
 pub fn models(srv: *Server, conn: *Conn, a: Allocator) !void {
+    const info = if (srv.idle_manager) |m| m.readInfo(srv) else srv.info;
     const created = std.Io.Clock.real.now(srv.io).toSeconds();
     const data = try a.alloc(Value, srv.config.model_ids.len);
-    const thinks = srv.thinking_switch or srv.effort_levels.len > 0 or srv.think_close.len > 0;
-    const reasoning: ?Value = if (thinks)
-        try reasoningValue(a, srv.config.enable_thinking, srv.thinking_switch, srv.effortFor(null), srv.effort_levels)
-    else
-        null;
+    const reasoning = try modelReasoning(a, srv);
     for (srv.config.model_ids, data) |id, *slot| {
-        slot.* = try modelValue(a, id, srv.info, created, reasoning);
+        slot.* = try modelValue(a, id, info, created, reasoning);
     }
     const o = try json.newObject(a);
     try o.put(a, "object", .{ .string = "list" });
     try o.put(a, "data", .{ .array = data });
     routes.sendValue(conn, a, 200, .{ .object = o });
+}
+
+fn modelReasoning(a: Allocator, srv: *const Server) Allocator.Error!?Value {
+    const consumes_effort = std.mem.indexOf(u8, srv.text.templateSource(), "reasoning_effort") != null;
+    const thinks = consumes_effort or srv.thinking_switch or srv.effort_levels.len > 0 or srv.think_close.len > 0;
+    return if (thinks)
+        try reasoningValue(a, srv.config.enable_thinking, srv.thinking_switch, if (consumes_effort) srv.effortFor(null) else null, srv.effort_levels)
+    else
+        null;
 }
 
 /// Discovery extensions report the loaded engine's prompt-plus-reply limit; zero leaves it unspecified.
@@ -98,11 +104,16 @@ fn modelValue(a: Allocator, id: []const u8, info: api.Info, created: i64, reason
     try m.put(a, "object", .{ .string = "model" });
     try m.put(a, "created", try json.intValue(a, created));
     try m.put(a, "owned_by", .{ .string = "tensorfold" });
-    if (info.context_window > 0) {
-        try m.put(a, "context_length", try json.intValue(a, info.context_window));
-        try m.put(a, "max_model_len", try json.intValue(a, info.context_window));
+    const capabilities = try json.newObject(a);
+    inline for (@typeInfo(api.Info.Capability).@"enum".field_names) |name|
+        try capabilities.put(a, name, .{ .bool = info.capability(@field(api.Info.Capability, name)) });
+    try m.put(a, "capabilities", .{ .object = capabilities });
+    const window = info.reported_context_window orelse info.context_window;
+    if (window > 0) {
+        try m.put(a, "context_length", try json.intValue(a, window));
+        try m.put(a, "max_model_len", try json.intValue(a, window));
     }
-    if (reasoning) |r| try m.put(a, "reasoning", r);
+    if (info.capability(.reasoning)) if (reasoning) |r| try m.put(a, "reasoning", r);
     return .{ .object = m };
 }
 
@@ -371,4 +382,125 @@ test "stats snapshot's memory carries a configured limit and omits none" {
     const without = try statsSnapshot(arena.allocator(), .{}, .{ .active = 5, .peak = 9 }, 0, 0, 0, 0, 0);
     // no limit configured: the key stays out
     try std.testing.expect(without.object.get("memory").?.object.get("limit") == null);
+}
+
+test "model discovery respects the loaded engine's reasoning refusal despite template markers" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const template = try reasoningValue(a, true, true, "low", &.{ "low", "high" });
+    for ([_][]const u8{ "ocr", "scorer", "alias" }) |id| {
+        const loaded = try modelValue(a, id, .{ .reasoning = false }, 0, template);
+        try std.testing.expect(loaded.get("reasoning") == null);
+    }
+    const text = try modelValue(a, "text", .{ .reasoning = true }, 0, template);
+    try std.testing.expect(text.get("reasoning").?.get("default_enabled").?.bool);
+}
+
+test "Nemotron window: model discovery reports the real fallback" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var info: api.Info = .{};
+    info.reported_context_window = @import("nemotron_limits").reported(0, @import("nemotron_limits").positions(0));
+    const value = try modelValue(arena.allocator(), "model", info, 0, null);
+    try std.testing.expect(value.get("context_length") != null);
+    try std.testing.expectEqual(@as(i64, 262193), value.get("context_length").?.int64().?);
+    try std.testing.expectEqual(value.get("context_length").?.int64(), value.get("max_model_len").?.int64());
+    try std.testing.expectEqual(@as(u32, 0), info.context_window);
+}
+
+const EffortEngine = struct {
+    fn info(_: *anyopaque) api.Info {
+        return .{};
+    }
+    fn submit(_: *anyopaque, _: api.Id, _: *const api.Request, _: api.Sink) api.SubmitError!void {
+        return error.Closed;
+    }
+    fn cancel(_: *anyopaque, _: api.Id) void {}
+    fn status(_: *anyopaque, out: *api.Status, _: []u32) void {
+        out.* = .{};
+    }
+    fn memory(_: *anyopaque, _: bool) ?api.Memory {
+        return null;
+    }
+    fn engine(ctx: *anyopaque) api.Engine {
+        return .{ .ctx = ctx, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
+    }
+};
+
+test "model discovery keeps an unquoted reasoning effort that the actual renderer consumes" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_][]const u8{ "{% if enable_thinking %}Reasoning: {{ reasoning_effort }}{% else %}Reasoning off{% endif %}", "Reasoning: {{ reasoning_effort }}", "{{ 'H' if enable_thinking else 'O' }}" }) |source| {
+        var f = try @import("hf_eos_fixture.zig").Fixture.init(a, std.testing.io, null);
+        defer f.deinit();
+        try f.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "chat_template.jinja", .data = source });
+        var problem: []const u8 = "";
+        const hf = try @import("hf_text.zig").HfText.load(a, std.testing.io, f.path, null, a, &problem);
+        defer hf.deinit();
+        for ([_]?[]const u8{ "high", "max", "minimal", null }) |configured| {
+            var ctx: u8 = 0;
+            const srv = try Server.init(a, std.testing.io, EffortEngine.engine(&ctx), hf.text(), .{
+                .served_name = "model",
+                .model_ids = &.{"model"},
+                .enable_thinking = true,
+                .reasoning_effort = configured,
+                .use_drafts = false,
+            }, null);
+            defer srv.deinit();
+            try std.testing.expectEqual(@as(usize, 0), srv.effort_levels.len);
+            const rendered = try hf.text().render(a, try @import("control_tokens_fixture.zig").messages(a, "H"), .{
+                .enable_thinking = true,
+                .reasoning_effort = srv.effortFor(null),
+            }, &problem);
+            const reason = (try modelReasoning(a, srv)) orelse return error.MissingReasoningMetadata;
+            if (configured != null and std.mem.indexOf(u8, source, "reasoning_effort") != null) {
+                const expected = srv.effortFor(null).?;
+                try std.testing.expectEqualStrings(try std.fmt.allocPrint(a, "Reasoning: {s}", .{expected}), rendered.text);
+                try std.testing.expect(reason.get("default_effort") != null);
+                try std.testing.expectEqualStrings(expected, reason.get("default_effort").?.string);
+            } else try std.testing.expect(reason.get("default_effort") == null);
+            try std.testing.expect(reason.get("supported_efforts") == null);
+        }
+    }
+}
+
+test "model discovery exposes engine capability booleans for every served name" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const info: api.Info = .{ .structures = true, .greedy_only = true, .logprobs = false, .penalties = false };
+    for ([_][]const u8{ "primary", "alias" }) |id| {
+        const entry = try modelValue(a, id, info, 0, null);
+        const flags = entry.get("capabilities") orelse return error.TestExpectedCapabilities;
+        try std.testing.expect(flags.get("structures").?.bool);
+        try std.testing.expect(flags.get("greedy_only").?.bool);
+        try std.testing.expect(!flags.get("logprobs").?.bool);
+        try std.testing.expect(!flags.get("penalties").?.bool);
+        try std.testing.expect(!flags.get("vision").?.bool);
+        inline for (@typeInfo(api.Info).@"struct".field_names) |name| if (@FieldType(api.Info, name) == bool) {
+            try std.testing.expectEqual(@field(info, name), flags.get(name).?.bool);
+        };
+    }
+}
+
+test "model discovery capability and logprob admission use one loaded flag" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const body = (try json.parse(a, "{\"logprobs\":true}")).ok;
+    for ([_]bool{ false, true }) |supported| {
+        const info: api.Info = .{ .logprobs = supported };
+        const entry = try modelValue(a, "model", info, 0, null);
+        const published = entry.get("capabilities").?.get("logprobs").?.bool;
+        var cx: @import("errors.zig").Cx = .{ .a = a };
+        const got = @import("fields.zig").probabilityOptions(&cx, body, info.capability(.logprobs));
+        if (published) {
+            try std.testing.expectEqual(@as(?u8, 0), try got);
+        } else {
+            try std.testing.expectError(error.Refused, got);
+            try std.testing.expectEqual(@as(u16, 400), cx.status());
+        }
+    }
 }

@@ -66,7 +66,7 @@ pub const Capture = struct {
         return c;
     }
 
-    fn path(c: *const Capture, buf: *[256:0]u8) ?[:0]const u8 {
+    pub fn path(c: *const Capture, buf: *[256:0]u8) ?[:0]const u8 {
         return std.mem.printSentinel(buf, "{s}/" ++ file_name, .{c.dir[0..c.dir_len]}, 0) catch null;
     }
 

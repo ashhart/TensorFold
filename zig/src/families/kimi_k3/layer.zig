@@ -58,6 +58,7 @@ pub fn mlaArgs(x: Ctx, i: u32) kernels.MlaArgs {
 }
 
 pub fn mla(x: Ctx, e: mtl.ComputeEncoder, i: u32, w: *const weights.Mla) void {
+    // K3.1's capped all-visible MLA equivalence is inferred from our GLM DSA, not a K3.1 reference.
     const c = x.c;
     const H = c.hidden;
     const sc = x.sc;
@@ -104,6 +105,7 @@ pub fn moe(x: Ctx, e: mtl.ComputeEncoder, w: *const weights.Moe) !void {
 
 /// Layer i on the round: prefix, blocks and delta in the scratch carry the residual stream between layers.
 pub fn encode(x: Ctx, e: mtl.ComputeEncoder, i: u32, w: *const weights.Layer) !void {
+    if (x.c.dsa != null) for (x.sc.mrows.slice(kernels.MlaRow, x.sc.rows)) |r| try x.c.checkEnd(r.pos, 1);
     residual(x, e, i, w, true);
     switch (w.attn) {
         .kda => |*a| kda(x, e, i, a),

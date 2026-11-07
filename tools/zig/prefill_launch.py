@@ -1,4 +1,4 @@
-"""How our prefill kernels launch for given operands: the variant, inputs, grid, threadgroup and params MLX would pick."""
+"""How our prefill kernels launch for given operands: the variant, inputs, grid, threadgroup, params MLX would pick."""
 
 from __future__ import annotations
 
@@ -170,7 +170,7 @@ def gather_qmm(x, w, scales, biases, ids):
 
 
 def gemv(state, c, s: int, groups: int, heads: int, head: int, dstate: int):
-    """y_prev = state @ C per (row, group, head of the group): fp32 [heads, head, dstate] states, C [s, groups, dstate]."""
+    """y_prev = state @ C per (row, group, group head): fp32 [heads, head, dstate] states, C [s, groups, dstate]."""
 
     rep = heads // groups
     params = [dstate, head, dstate, 3, s, groups, rep, 1, groups * dstate, dstate, 0, 0,

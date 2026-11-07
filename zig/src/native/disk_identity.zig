@@ -38,3 +38,58 @@ pub fn machine(h: *std.hash.Wyhash, chip: []const u8) void {
     h.update(api.prompt_imprint.osBuild(&os));
     h.update(chip);
 }
+
+/// The family/backend's reviewed profile values; tests can supply a registry row and an isolated environment.
+pub const Profile = struct {
+    family: []const u8,
+    backend: []const u8,
+    entries: []const api.profile.Entry = &api.profile.entries,
+    environment: *const fn ([:0]const u8) ?[:0]const u8 = processEnvironment,
+
+    fn processEnvironment(name: [:0]const u8) ?[:0]const u8 {
+        return if (std.c.getenv(name)) |value| std.mem.span(value) else null;
+    }
+};
+
+/// Only applicable non-identical entries partition kept state; defaults resolve before their values are hashed.
+pub fn profile(h: *std.hash.Wyhash, p: Profile) void {
+    var began = false;
+    for (p.entries) |e| {
+        if (e.class == .identical or !e.applies(p.family, p.backend)) continue;
+        if (!began) {
+            field(h, "profile-values-v1");
+            field(h, p.family);
+            field(h, p.backend);
+            began = true;
+        }
+        field(h, e.name());
+        field(h, @tagName(e.class));
+        const value = p.environment(e.name()) orelse e.stable;
+        if (e.report_values != null) {
+            field(h, if (value != null) "explicit" else "default");
+            field(h, value orelse "");
+            continue;
+        }
+        switch (e.syntax) {
+            .one => field(h, if (value != null and std.mem.eql(u8, value.?, "1")) "1" else "0"),
+            .auto => field(h, value orelse "auto"),
+            .count => {
+                const count = std.fmt.parseInt(u64, value orelse "0", 10) catch {
+                    field(h, "invalid-count");
+                    field(h, value.?);
+                    continue;
+                };
+                var bytes: [8]u8 = undefined;
+                std.mem.writeInt(u64, &bytes, count, .little);
+                field(h, &bytes);
+            },
+        }
+    }
+}
+
+fn field(h: *std.hash.Wyhash, bytes: []const u8) void {
+    var len: [8]u8 = undefined;
+    std.mem.writeInt(u64, &len, @intCast(bytes.len), .little);
+    h.update(&len);
+    h.update(bytes);
+}

@@ -126,7 +126,7 @@ pub const batch_rows = 128;
 
 test "the served pair's chunk times the widest seam fits the window" {
     // a served pass asks for 512 rows here, 2048 on generation 17 (`model.promptRows`); the pair caps it at the window
-    const requested = q.model.promptRows(0);
+    const requested = q.prompt_rows.requested(0, false, null); // a dense prompt pass's rows, as `model.promptRows` computes
     const served = chunk(requested);
     try std.testing.expect(served <= batch_rows);
     try std.testing.expect(seamBytes(served) <= pairBytes());

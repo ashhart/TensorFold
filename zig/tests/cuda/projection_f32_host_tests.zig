@@ -43,11 +43,23 @@ const Mock = struct {
         @memcpy(out[0..n], in[0..n]);
         return cuda.abi.success;
     }
+
+    fn contextDevice(out: *cuda.abi.Device) callconv(.c) cuda.abi.Result {
+        out.* = 0;
+        return cuda.abi.success;
+    }
+
+    fn deviceAttribute(out: *c_int, _: cuda.abi.DeviceAttribute, _: cuda.abi.Device) callconv(.c) cuda.abi.Result {
+        out.* = 0;
+        return cuda.abi.success;
+    }
 };
 
 test "every F32 and BF16 fixture dispatch rejects a no-op after a valid stale prefix" {
     const a = std.testing.allocator;
     var driver: cuda.Driver = undefined;
+    driver.api.cuCtxGetDevice = Mock.contextDevice;
+    driver.api.cuDeviceGetAttribute = Mock.deviceAttribute;
     driver.api.cuMemsetD8Async = Mock.fill;
     driver.api.cuLaunchKernel = Mock.plain;
     driver.api.cuLaunchKernelEx = Mock.extended;

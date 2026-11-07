@@ -16,6 +16,8 @@ pub const CallGate = struct {
 /// response_format and the guided_* fields: every token keeps the reply inside this grammar.
 pub const Structure = struct {
     kind: enum { json, json_schema, regex, choice, grammar, structural_tag },
+    /// The name a refusal gives it: a body field, tool_choice, or a route's own (text.format, output_config.format).
+    field: []const u8 = "response_format",
     /// The schema (JSON text), regex, choices (a JSON array), EBNF or structural tag; empty for any JSON object.
     text: []const u8 = "",
     /// With thinking on, the grammar starts after this token.

@@ -20,7 +20,7 @@ const Dump = struct {
         try self.stream.synchronize();
         const bytes = try self.gpa.alloc(u8, rows * self.hidden * 4);
         defer self.gpa.free(bytes);
-        try self.d.check(self.d.api.cuMemcpyDtoH_v2(bytes.ptr, resid, bytes.len), "cuMemcpyDtoH");
+        try cuda.memory.download(self.d, resid, std.mem.sliceAsBytes(bytes)[0..bytes.len]);
         var name: [32]u8 = undefined;
         try self.dir.writeFile(self.io, .{ .sub_path = try std.fmt.bufPrint(&name, "r{d}.c{d}.f32", .{ layer, self.chunk }), .data = bytes });
     }
@@ -97,7 +97,7 @@ pub fn main(init: std.process.Init) !u8 {
     std.debug.print("forward of {d} rows in {d:.2} s\n", .{ ids.len, @as(f64, @floatFromInt(std.Io.Clock.awake.now(io).toNanoseconds() - t0)) * 1e-9 });
     const logits = try gpa.alloc(u8, share.vocab.len() * 2);
     defer gpa.free(logits);
-    try driver.check(driver.api.cuMemcpyDtoH_v2(logits.ptr, b.logits, logits.len), "cuMemcpyDtoH");
+    try cuda.memory.download(&driver, b.logits, std.mem.sliceAsBytes(logits)[0..logits.len]);
     try out.writeFile(io, .{ .sub_path = "logits.bf16", .data = logits });
     var best: f32 = -std.math.inf(f32);
     var bid: usize = 0;
@@ -154,7 +154,7 @@ fn everyRow(gpa: std.mem.Allocator, io: std.Io, driver: *const cuda.Driver, stre
         try f.run(ids[start..][0..n], &seg);
         try mm3.forward.Forward.commit(&seg, &.{n});
         try stream.synchronize();
-        try driver.check(driver.api.cuMemcpyDtoH_v2(all[start * nv * 2 ..].ptr, b.logits, n * nv * 2), "cuMemcpyDtoH");
+        try cuda.memory.download(driver, b.logits, std.mem.sliceAsBytes(all[start * nv * 2 ..])[0 .. n * nv * 2]);
     }
     try std.Io.Dir.cwd().createDirPath(io, out_dir);
     var out = try std.Io.Dir.cwd().openDir(io, out_dir, .{});

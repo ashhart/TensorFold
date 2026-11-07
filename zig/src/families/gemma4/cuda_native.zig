@@ -141,7 +141,8 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     errdefer own.s.deinit();
     own.w = try wts.load(gpa, io, ctx.d, own.s, &own.k, dir, null, o.vision != null);
     errdefer own.w.deinit();
-    if (paged and own.w.config.geo.shared_layers > 0) return error.SharedCacheOwnersNotServed;
+    // pages alias a shared layer's owner (cuda_pages.alias); the TF_KV_SHARE store is not checked with them yet
+    if (try @import("core").kv_prompts.sharing() > 0 and own.w.config.geo.shared_layers > 0) return error.SharedCacheOwnersNotServed;
     const context = @min(positions(o.context), own.w.config.context);
     const beside = visionBytes(o.vision != null, own.w.tower != null) + if (o.drafter) |dd| (if (o.drafts) try drafterBytes(gpa, io, dd) else 0) else 0;
     const plan: Plan = .{ .own = own, .d = ctx.d, .context = context, .beside = beside, .paged = paged };

@@ -52,7 +52,8 @@ cuts, so cold and resumed prompts use the same chunks; templates without markers
 ## CUDA
 
 This section describes the Python 0.6.6 engine's CUDA family; its `--tp`, `--rank`, `--master` and `--prefill-fp8`
-flags are that engine's, and the native binary refuses them. The native CUDA build serves Nemotron on one GPU, from
+flags are that engine's. The native binary refuses `--tp` above 1 for Nemotron by name, since its CUDA family has
+no tensor-parallel ranks, and refuses `--prefill-fp8`. The native CUDA build serves Nemotron on one GPU, from
 the MLX 4-bit checkpoint or NVIDIA's NVFP4 export, with concurrent requests sharing each round, and its own
 `--mtp-drafts` (at most 15 for this model) and `--mtp-confidence` set MTP drafts in lone and shared rounds; see the
 [native CUDA runbook](../../RUNBOOK.md#linux-and-cuda).
@@ -227,7 +228,7 @@ and the lone stream's fast path read it. Every other stream takes its key and va
 pages (`zig/src/core/kv_pool.zig`), which the engine fills from the room its own sequence and the weights leave:
 each further stream's fixed part (Mamba states, window scratch, its page table: 64 MiB), the prompt cache's snapshot
 slots (48 MiB each, made at load) and its copied rows come first, then pages, never more than every stream could hold
-at once. A request reserves `ceil((prompt + max_tokens + 16) / 512)` pages when it is admitted: a 2,048-token prompt
+at once. A request reserves `ceil((prompt + max_tokens + 32) / 512)` pages when it is admitted: a 2,048-token prompt
 with 4,096 reply tokens takes 13 pages (45.5 MiB) instead of a whole window. A request whose pages do not fit waits
 until a stream ends. The attention kernels read the pages through a table at a fixed device address, so the graphs
 keep their addresses. The startup line shows the pool. `TF_KV_PAGES=0` gives every stream a window again;

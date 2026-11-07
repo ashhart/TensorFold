@@ -1,6 +1,6 @@
 //! lastRows on the GPU against transformers: the embedding's pooled rows and the reranker's yes/no logits.
 
-// Skipped without TF_QWEN3_EMBED_DIR / _REF / _BAR (fp32, BF16 oracles) or TF_QWEN3_RERANK_DIR / _REF.
+// Skipped without TF_QWEN3_EMBED_* or TF_QWEN3_RERANK_*; TF_QWEN3_MATRIX and TF_QWEN3_ATTENTION pick the kernels.
 const std = @import("std");
 const hip = @import("hip");
 const qwen3 = @import("qwen3");
@@ -23,7 +23,9 @@ const Gpu = struct {
         errdefer g.ctx.deinit();
         g.stream = try hip.Stream.init(&g.r);
         errdefer g.stream.deinit();
-        g.l = try hip.Launcher.load(&g.r, .{}, hip.kernels.images);
+        const c = try choices();
+        g.l = try hip.Launcher.load(&g.r, c, hip.kernels.images);
+        std.debug.print("qwen3 GPU checks: matrix={t}, dense products on {t}, {s}\n", .{ c.products.matrix, g.l.dense.serve, attentionPath(&g.l) });
         errdefer g.l.unload();
         g.arena = try hip.Arena.init(&g.r, arena_bytes);
     }
@@ -49,7 +51,7 @@ const Gpu = struct {
         const hidden = m.spec.hidden;
         var out = try hip.DeviceBuffer.alloc(&g.r, ends.len * hidden * 2);
         defer out.free();
-        try qwen3.lastRows(g.ops(), m, @intFromPtr(dev.ptr), ends, .{ .ptr = @intFromPtr(out.ptr), .kind = .bf16 });
+        try qwen3.lastRows(g.ops(), m, @intFromPtr(dev.ptr), 0, ends, .{ .ptr = @intFromPtr(out.ptr), .kind = .bf16 });
         try g.stream.synchronize();
         const rows = try gpa.alloc(u16, ends.len * hidden);
         errdefer gpa.free(rows);
@@ -58,7 +60,41 @@ const Gpu = struct {
     }
 };
 
-fn env(a: std.mem.Allocator, key: []const u8) !?[]u8 {
+pub const Matrix = @FieldType(@FieldType(hip.Launcher.Choices, "products"), "matrix");
+
+/// TF_QWEN3_MATRIX as the policy's matrix choice; unset is auto.
+pub fn matrixChoice() !Matrix {
+    const v = t.environ.getAlloc(gpa, "TF_QWEN3_MATRIX") catch |err| switch (err) {
+        error.EnvironmentVariableMissing => return .auto,
+        else => return err,
+    };
+    defer gpa.free(v);
+    return std.meta.stringToEnum(Matrix, v) orelse error.BadMatrixChoice;
+}
+
+/// TF_QWEN3_ATTENTION as the policy's attention choice: `wide` (unset) keeps the 64-row tile, `f32` turns it off.
+pub fn wideChoice() !bool {
+    const v = t.environ.getAlloc(gpa, "TF_QWEN3_ATTENTION") catch |err| switch (err) {
+        error.EnvironmentVariableMissing => return true,
+        else => return err,
+    };
+    defer gpa.free(v);
+    if (std.mem.eql(u8, v, "wide")) return true;
+    if (std.mem.eql(u8, v, "f32")) return false;
+    return error.BadAttentionChoice;
+}
+
+/// The engine's kernel choices for these checks: TF_QWEN3_MATRIX and TF_QWEN3_ATTENTION.
+pub fn choices() !hip.Launcher.Choices {
+    return .{ .wide = try wideChoice(), .products = .{ .matrix = try matrixChoice() } };
+}
+
+/// The prompt attention path the launcher serves: the 64-row tile, or the 16-row one under attention=f32.
+pub fn attentionPath(l: *const hip.Launcher) []const u8 {
+    return if (l.wide) "wide attention" else "16-row attention";
+}
+
+pub fn env(a: std.mem.Allocator, key: []const u8) !?[]u8 {
     return t.environ.getAlloc(a, key) catch |err| switch (err) {
         error.EnvironmentVariableMissing => null,
         else => err,
@@ -69,12 +105,12 @@ fn widen(bits: u16) f64 {
     return @as(f32, @bitCast(@as(u32, bits) << 16));
 }
 
-fn readJson(a: std.mem.Allocator, path: []const u8) !std.json.Value {
+pub fn readJson(a: std.mem.Allocator, path: []const u8) !std.json.Value {
     const bytes = try std.Io.Dir.cwd().readFileAlloc(t.io, path, a, .limited(256 << 20));
     return std.json.parseFromSliceLeaky(std.json.Value, a, bytes, .{});
 }
 
-fn idsOf(a: std.mem.Allocator, v: std.json.Value) ![]i32 {
+pub fn idsOf(a: std.mem.Allocator, v: std.json.Value) ![]i32 {
     const out = try a.alloc(i32, v.array.items.len);
     for (v.array.items, out) |x, *o| o.* = @intCast(x.integer);
     return out;
@@ -491,4 +527,9 @@ test "Qwen3-Reranker: each case's yes - no logit from lastRows and lm_head rows 
     try t.expect(cases >= 32);
     try t.expect(worst_diff <= 0.25);
     try t.expect(worst_score <= 0.02);
+}
+
+test {
+    _ = @import("projection_test.zig");
+    _ = @import("decide_test.zig");
 }

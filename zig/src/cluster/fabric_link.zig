@@ -1,4 +1,4 @@
-//! The cluster on lead/zig-fabric's links: two-sided Thunderbolt (`TwoSided`), or one-sided windows where writes exist (`Link`).
+//! The cluster on the fabric's links: two-sided Thunderbolt (`TwoSided`) or one-sided windows if writes exist (`Link`).
 const std = @import("std");
 const fabric = @import("fabric");
 const exchange = @import("exchange.zig");

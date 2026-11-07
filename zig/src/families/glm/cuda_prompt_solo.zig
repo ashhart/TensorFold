@@ -11,11 +11,6 @@ pub fn othersDecode(lanes: anytype, s: anytype) bool {
     return false;
 }
 
-/// Before the weights load: a drafter's steps take a chunk, so the buffers for two would hold memory no pass uses.
-pub fn refuse(solo: bool, drafter: ?[]const u8) !void {
-    if (solo and drafter != null) return error.GlmSoloWithDrafter;
-}
-
 /// The rows an engine sizes its prompt buffers for: at start, as they hold memory all the time.
 pub fn bufferRows(on: bool) usize {
     return if (on) fw.solo_rows else fw.prefill_rows;

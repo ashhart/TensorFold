@@ -36,9 +36,9 @@ fn choose(h: *LaneHost) ?usize {
     const first = for (h.queued.items, 0..) |j, i| {
         if (!passed(h, j)) break i;
     } else return null;
-    if (h.info_.admit == null and h.kv == null) return first;
+    if (h.info_.admit == null and !ledger.priced(h)) return first;
     // alone: the whole pool is free (kept prefixes give their blocks back); a ledger counts leases, not live streams
-    if (if (h.kv != null) !ledger.outstanding(h) else h.core.activeCount() == 0) return first;
+    if (if (ledger.priced(h)) !ledger.outstanding(h) else h.core.activeCount() == 0) return first;
     const head = h.queued.items[first];
     if (fits(h, head)) return first;
     if (head.waits_since == null) head.waits_since = h.admissions;
@@ -52,7 +52,7 @@ fn choose(h: *LaneHost) ?usize {
 
 /// Whether `job` fits now: the host's ledger when it has one, else the family's own pool.
 fn fits(h: *const LaneHost, job: *const Job) bool {
-    if (h.kv != null) return ledger.fits(h, job);
+    if (ledger.priced(h)) return ledger.fits(h, job);
     const a = h.info_.admit.?;
     return a.fits(a.ctx, @intCast(job.request.prompt.len), job.request.max_tokens);
 }
@@ -84,7 +84,8 @@ pub fn many(h: *LaneHost) bool {
         };
         took = true;
         const at = h.setup(job) orelse continue;
-        if (h.startsAlone(job) or (h.core.fills() and !h.core.batchable(&job.stream))) { // long, image, resumed: filled
+        // a prompt-only job ends through `launch`: after `addStreams` nothing would complete it
+        if (h.startsAlone(job) or job.stream.promptOnly() or (h.core.fills() and !h.core.batchable(&job.stream))) { // long, image, resumed: filled
             _ = h.launch(job, at);
             continue;
         }

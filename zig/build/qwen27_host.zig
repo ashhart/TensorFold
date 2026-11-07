@@ -33,7 +33,9 @@ pub fn tests(b: *std.Build, test_step: *std.Build.Step) void {
     const pass = b.createModule(.{ .root_source_file = b.path("zig/src/qwen27_pass_test.zig"), .target = b.graph.host, .imports = &.{ .{ .name = "metal", .module = fake }, .{ .name = "core", .module = core } } });
     b.step("test-qwen27-pass-host", "Count actual draft scratch allocations without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = pass, .filters = &.{"qwen27 pass:"} })).step);
     const memory = b.createModule(.{ .root_source_file = b.path("zig/src/qwen27_memory_test.zig"), .target = b.graph.host, .imports = &.{ .{ .name = "metal", .module = fake }, .{ .name = "core", .module = core } } });
-    b.step("test-qwen27-memory-host", "Prompt scratch and working-set fit without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = memory, .filters = &.{"qwen27 memory:"} })).step);
+    const memory_run = b.addRunArtifact(b.addTest(.{ .root_module = memory, .filters = &.{"qwen27 memory:"} }));
+    test_step.dependOn(&memory_run.step);
+    b.step("test-qwen27-memory-host", "Prompt scratch and working-set fit without a GPU").dependOn(&memory_run.step);
     const sources = b.createModule(.{ .root_source_file = b.addWriteFiles().add("qwen27-fake-source.zig", "pub const core_deltanet = \"\";\n"), .target = b.graph.host });
     const delta = b.createModule(.{ .root_source_file = b.path("zig/src/core/deltanet_kernels.zig"), .target = b.graph.host, .imports = &.{.{ .name = "metal", .module = fake }} });
     delta.addImport("kernel_sources", sources);
@@ -66,11 +68,16 @@ pub fn tests(b: *std.Build, test_step: *std.Build.Step) void {
     b.step("test-qwen27-equality-host", "Shared lanes drafted, resumed and concurrent equality on the fake target").dependOn(&equal.step);
     const resume_lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = b.graph.host, .link_libc = true });
     const resume_api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = resume_lanes }} });
+    const prompt_stats = b.createModule(.{ .root_source_file = b.path("zig/src/qwen27_prefill_stats_test.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "lanes", .module = resume_lanes }, .{ .name = "engine_api", .module = resume_api } } });
+    const prompt_stats_run = b.addRunArtifact(b.addTest(.{ .root_module = prompt_stats, .filters = &.{"qwen27 prefill stats:"} }));
+    prompt_stats_run.has_side_effects = true;
+    test_step.dependOn(&prompt_stats_run.step);
+    b.step("test-qwen27-prefill-stats-host", "Completed prompt passes through the lane host and server mailbox without a GPU").dependOn(&prompt_stats_run.step);
     const resume_rules = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_resume.zig"), .target = b.graph.host, .optimize = .debug, .imports = &.{.{ .name = "engine_api", .module = resume_api }} });
     b.step("test-qwen27-resume-host", "Slot 0's in-place resume and rewind point: the cache's rule, with no GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = resume_rules, .filters = &.{"qwen27 resume:"} })).step);
 }
 
-pub fn compileHost(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.Module, lanes: *std.Build.Module) *std.Build.Step {
+pub fn compileHost(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.Module, lanes: *std.Build.Module) void {
     const ownership = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_engine.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "tensorfold", .module = engine }} });
     b.step("test-qwen-dense-route-host", "Existing 2B route and untied 9B and 27B route without weights").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = ownership, .filters = &.{"a qwen3_5 checkpoint opens"} })).step);
     var dense_names: std.ArrayList([]const u8) = .empty;
@@ -84,6 +91,19 @@ pub fn compileHost(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.M
     const served_run = b.addRunArtifact(b.addTest(.{ .root_module = host }));
     served_run.has_side_effects = true; // a rerun must re-execute the tests, not replay a cached pass
     served.dependOn(&served_run.step);
+    const floor_logs = b.createModule(.{ .root_source_file = b.path("zig/qwen27_floor_logs.zig"), .target = b.graph.host });
+    const floor_root = b.createModule(.{ .root_source_file = b.path("zig/qwen27_floor_entry_host.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "qwen27_served", .module = host }, .{ .name = "tensorfold", .module = engine }, .{ .name = "qwen_weights_diagnostics", .module = floor_logs } } });
+    if (b.graph.host.result.os.tag == .macos) floor_root.linkSystemLibrary("objc", .{});
+    const floor_test = b.addTest(.{ .root_module = floor_root, .test_runner = .{ .path = b.path("zig/qwen_vision_weights_runner.zig"), .mode = .simple } });
+    const floor_step = b.step("test-qwen27-prompt-floor-host", "Actual startup and lane constructor floor diagnostics without devices");
+    for ([_][]const u8{ "16", "128" }) |value| {
+        const run = b.addRunArtifact(floor_test);
+        run.setEnvironmentVariable("TF_PROMPT_ROWS", value);
+        run.has_side_effects = true;
+        floor_step.dependOn(&run.step);
+    }
+    const minimax = b.createModule(.{ .root_source_file = b.path("zig/src/native/minimax_m3.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "engine_api", .module = api } } });
+    b.step("test-minimax-info-host", "MiniMax logprob offers against its actual wrapped backend without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = minimax, .filters = &.{"MiniMax capabilities:"} })).step);
     const boundary = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/qwen27_bank_boundary_host.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "tensorfold", .module = engine }, .{ .name = "metal", .module = metal } } }), .filters = &.{"qwen27 bank boundary:"} });
     b.step("test-qwen27-bank-boundary-host", "Runner pending-keep guards with no device or shader execution").dependOn(&b.addRunArtifact(boundary).step);
     const facts = b.createModule(.{ .root_source_file = b.path("zig/src/native/draft_sources_metal_test.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "engine_api", .module = api }, .{ .name = "lanes", .module = lanes } } });
@@ -101,7 +121,6 @@ pub fn compileHost(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.M
     }) });
     _ = object.getEmittedBin();
     b.step("check-qwen27-speed-host", "Compile the actual Qwen27 startup and encoding without shaders").dependOn(&object.step);
-    return served;
 }
 
 fn tryNames(b: *std.Build, names: *std.ArrayList([]const u8), text: []const u8) void {

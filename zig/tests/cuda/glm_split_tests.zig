@@ -65,7 +65,7 @@ pub fn splitCheck(gpu: Gpu, checkpoint: []const u8, dc_path: []const u8, rank: c
             const win = [_]u32{ t, 101, 202, 303 };
             try x.verify(&win, &outs[twin], 0);
             logits[twin] = try a.alloc(u16, win.len * V);
-            try gpu.d.check(gpu.d.api.cuMemcpyDtoH_v2(logits[twin].ptr, e.bd.logits, win.len * V * 2), "cuMemcpyDtoH");
+            try cuda.memory.download(gpu.d, e.bd.logits, std.mem.sliceAsBytes(logits[twin])[0 .. win.len * V * 2]);
         }
         e.settings.index_split = 0;
         var want: u64 = 0; // the chunks glm.sparse.splitAt splits over this prompt

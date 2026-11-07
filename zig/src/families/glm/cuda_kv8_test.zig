@@ -77,9 +77,10 @@ test "GLM FP8 KV: byte counts reject overflow and unsupported latent widths" {
 
 const Launch = struct {
     var n: usize = 0;
-    var ids: [16]usize = undefined;
-    var blocks: [16]u32 = undefined;
-    var scales: [16]u64 = undefined;
+    var ids: [64]usize = undefined;
+    var blocks: [64]u32 = undefined;
+    var scales: [64]u64 = undefined;
+    var strides: [64]i64 = undefined; // the page stride lat_write (1), pool_keys (8) and scores (9) were given
     fn run(f: cuda.abi.Function, _: c_uint, _: c_uint, _: c_uint, bx: c_uint, _: c_uint, _: c_uint, _: c_uint, _: cuda.abi.Stream, args: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) c_int {
         const id = @intFromPtr(f);
         ids[n] = id;
@@ -88,6 +89,13 @@ const Launch = struct {
             @as(*const u64, @ptrCast(@alignCast(args.?[2].?))).*
         else
             0;
+        const at: ?usize = switch (id) {
+            1 => 6,
+            8 => 7,
+            9 => 13,
+            else => null,
+        };
+        strides[n] = if (at) |i| @as(*const i64, @ptrCast(@alignCast(args.?[i].?))).* else 0;
         n += 1;
         return 0;
     }
@@ -198,6 +206,53 @@ test "GLM FP8 KV: actual DSA dense and sparse passes retain the sequence-owned s
             try t.expectEqual(@as(u64, 400), scale);
         };
         try t.expectEqual(@as(usize, 1), reads);
+    }
+}
+
+test "GLM KV host: a prompt MTP chunk's pooled keys take their own page stride, so page 9 of 145 stays in them" {
+    const glue = @import("cuda_glue.zig");
+    const dsa = @import("cuda_dsa_block.zig");
+    var layers: [2]weights.Layer = undefined;
+    layers[0].mixer = .{ .kda = undefined };
+    layers[1].mixer = .{ .mla = undefined };
+    var w: weights.Weights = undefined;
+    w.config = .{};
+    w.layers = &layers;
+    const ps = state.pageBytes(&w);
+    const pks = state.pkPageBytes(&w);
+    try t.expectEqual(@as(u64, 17), ps / pks);
+    var d: cuda.Driver = undefined;
+    d.api.cuLaunchKernel = Launch.run;
+    d.api.cuModuleGetFunction = Ops.function;
+    var ks: glue.Kernels = undefined;
+    inline for (@typeInfo(glue.Kernels).@"struct".field_names) |name| @field(ks, name) = .{ .d = &d, .handle = @ptrFromInt(10) };
+    ks.lat_write.handle = @ptrFromInt(1);
+    ks.pool_keys.handle = @ptrFromInt(8);
+    ks.scores.handle = @ptrFromInt(9);
+    const k: dsa.Kernels = .{ .set = .{ .glue = &ks }, .ops = .{ .d = &d, .handle = null } };
+    const stream: cuda.Stream = .{ .d = &d, .handle = null };
+    var l = zeroed(dsa.Layer);
+    l.lw = 512;
+    l.heads = 32;
+    l.qk = 256;
+    l.dv = 256;
+    l.q_lora = 1536;
+    l.dims = 4096;
+    l.index.heads = 32;
+    l.index.d = 128;
+    l.dense_limit = 1;
+    const pages: u64 = 145;
+    for ([_]u64{ pks, 0 }) |own| { // TF_GLM_KV_HOST's MTP cache (the second), then pooled keys inside the pages
+        const c: dsa.Caches = .{ .lc = 0x10000000 + ps / 2, .ik = 800, .ig = 900, .pk = 0x20000000 + pks / 2, .pk_rows = 16386, .pt = 700, .ps = ps, .pks = own };
+        Launch.n = 0;
+        try dsa.blockLastRow(k, stream, l, c, std.mem.zeroes(dsa.Scratch), 100, 4096, 2048, 300, 4096, 1, 600);
+        var seen: [3]usize = @splat(0);
+        for (Launch.ids[0..Launch.n], Launch.strides[0..Launch.n]) |id, stride| if (id == 1 or id == 8 or id == 9) {
+            seen[if (id == 1) 0 else id - 7] += 1;
+            try t.expectEqual(@as(i64, @intCast(if (id == 1 or own == 0) ps else own)), stride);
+            if (id == 8 and own != 0) try t.expect(pks / 2 + 9 * @as(u64, @intCast(stride)) + pks / 2 <= pages * pks);
+        };
+        try t.expectEqual([3]usize{ 1, 1, 1 }, seen);
     }
 }
 

@@ -9,7 +9,7 @@ const Function = @import("module.zig").Function;
 const Stream = @import("stream.zig").Stream;
 const caps = @import("caps.zig");
 const affine = @import("launches/affine.zig");
-const dense = @import("launches/dense.zig");
+pub const dense = @import("launches/dense.zig");
 
 const util = @import("launches/util.zig");
 
@@ -42,6 +42,9 @@ const tp = @import("launches/tp.zig");
 const flashnext = @import("launches/flashnext.zig");
 const mamba = @import("launches/mamba.zig");
 const nemotron_moe = @import("launches/nemotron_moe.zig");
+const columns = @import("launches/columns.zig");
+const vision = @import("launches/vision.zig");
+const dense_text = @import("launches/dense_text.zig");
 
 pub const ConvArgs = conv.ConvArgs;
 pub const PlanArgs = plan.PlanArgs;
@@ -54,6 +57,9 @@ pub const Launcher = struct {
     r: *const runtime.Runtime,
     mods: [kernels.group_count]Module,
     rms: Triple,
+    columns: columns.Functions,
+    vision: vision.Functions,
+    dense_text: dense_text.Functions,
     /// rms_kernel after tf_add (or tf_add_wide) in one launch, fp16 and bf16.
     add_rms: [2]Function,
     conv_decode: Function,
@@ -200,6 +206,9 @@ pub const Launcher = struct {
         };
         l.fa_wide = .{ try pre.function("tf_fa_wide_f16"), try pre.function("tf_fa_wide_bf16") };
         l.fa_paged = .{ try pre.function("tf_fa_paged_f16"), try pre.function("tf_fa_paged_bf16") };
+        l.columns = try columns.Functions.load(ops);
+        l.vision = try vision.Functions.load(ops, pre);
+        l.dense_text = try dense_text.Functions.load(ops);
         l.op = .{
             .embed_rows = try ops.function("tf_embed_rows"),
             .embed_dense = try ops.function("tf_embed_dense"),
@@ -298,7 +307,7 @@ pub const Launcher = struct {
         const dot2 = l.mods[@backingInt(kernels.Group.affine_dot2)];
         const chip = caps.Caps.of(kernels.arch) orelse return error.Invalid;
         l.affine = try affine.Kernels.load(tiles, dot2, chip, choices.products);
-        l.dense = try dense.Kernels.load(tiles, chip.act == .bf16);
+        l.dense = try dense.Kernels.load(tiles, chip.act == .bf16, chip.matrix == .wmma12, choices.products.matrix);
         try l.affine.fillByteLut(r, dot2);
         l.fnx = try flashnext.Fns.load(l.mods[@backingInt(kernels.Group.flashnext)]);
         return l;

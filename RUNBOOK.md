@@ -19,7 +19,7 @@ For an archive installation, download the arm64 asset and its companion checksum
 [latest release](https://github.com/ashhart/TensorFold/releases/latest), with `V` set to its version:
 
 ```sh
-V=1.2.2
+V=1.2.3
 curl -fLO https://github.com/ashhart/TensorFold/releases/download/v$V/tensorfold-$V-macos-arm64.tar.gz
 curl -fLO https://github.com/ashhart/TensorFold/releases/download/v$V/tensorfold-$V-macos-arm64.tar.gz.sha256
 shasum -a 256 -c tensorfold-$V-macos-arm64.tar.gz.sha256
@@ -136,22 +136,23 @@ When API authentication is enabled, `/health` returns only status.
 
 ## Prompt prefill share, budget and admission policy
 
-The native server reads four environment variables when it opens its lane host.
+The native server reads four environment variables when it opens its lane host, and `serve` checks them before it loads the model.
 All are optional. Set them before starting the server.
 `TENSORFOLD_PREFILL_SHARE` takes a number from 0.01 to 1.
-The default is 1. Any other text gives the default.
+The default is 1, and empty text gives the default. `serve` refuses any other value at start, naming the variable.
 It is the share of wall time long prompt steps get while other streams are decoding.
 A step of length t at share p owes the decoders t (1 - p) / p of decode time.
 The debt grows after each step and falls after each decode round.
 A long prompt's next step runs only when no debt is owed or no stream can decode.
 At the default 1 no debt is recorded, so the only waiting is the ordinary turn-taking: the host runs at most one step of a long prompt each time it turns to it, and chunked prompts still interleave with the decoding streams' rounds.
 Lower values add that debt, finish the long prompt later and leave more time for decoding streams.
+Flash Next's shared sessions on a Mac without tensor units start from a reply share of 0.8 when neither this nor `--decode-share` is set: see [the API](docs/api.md).
 A prompt whose whole uncached pass is at most 512 rows runs outside the share as one call.
 The check compares the prompt's length with the cached state, not how far the fill has reached, so a long prompt whose last rows remain does not become exempt when its unfilled tail is small.
 
 `TENSORFOLD_PREFILL_BUDGET` takes a whole number of prompt rows from 1 to 4,294,967,295.
 The default is 0, which means none.
-Empty text, 0, a negative number, a fractional form, a value above the range or any other text gives 0, which removes the cap.
+Empty text or 0 gives 0, which removes the cap. `serve` refuses a negative number, a fractional form, a value above the range or any other text at start.
 It caps the prompt rows filled in one pass while a stream is ready to decode.
 The cap counts only rows filled while such a stream waits.
 A call that reports no progress spends the allowance anyway and yields, so unknown or stale progress never holds the cap open.
@@ -166,13 +167,13 @@ That costs more passes to finish the prompts.
 With the default 0 no cap applies: short prompts run as one burst beside decoders, bounded at a lane's worth of newly begun prompts while other work waits.
 
 `TENSORFOLD_PREFILL_POLICY` takes `fcfs`.
-Unset, or any other text, keeps the default order described above.
+Unset or empty keeps the default order described above. `serve` refuses any other text at start.
 Under `fcfs` the host fills only the oldest long prompt (more than 512 uncached rows) on each visit, in chunks of `TENSORFOLD_PREFILL_TOKENS` rows, and the decoding streams take one round after each chunk.
 A long prompt with no stream decoding beside it takes the engine's own cut, so a lone request runs exactly as without the policy.
 Short prompts run as they do without the policy. `TENSORFOLD_PREFILL_BUDGET` does not apply under a policy; `TENSORFOLD_PREFILL_SHARE` is checked once per visit.
 
 `TENSORFOLD_PREFILL_TOKENS` takes a whole number of prompt rows from 64 to 16384. Values outside the range are clamped.
-The default is 2048. Empty text, 0, or text that is not a whole number gives the default.
+The default is 2048, and empty text or 0 gives the default. `serve` refuses text that is not a whole number at start.
 It only matters when `TENSORFOLD_PREFILL_POLICY` is set.
 Smaller chunks shorten each pause the decoding streams see while a prompt fills; larger chunks let later prompts start sooner.
 On flashnext Metal with eight 14336-row prompts arriving together, `fcfs` at 2048 paused decoders about 1.7 s per chunk with the last first token at about 94 s;
@@ -185,16 +186,31 @@ For source builds with `zig build native` (including `--prefix` installs): Struc
 Choose `linux-aarch64` for an arm64 host or `linux-x86_64` for an x86_64 host.
 The archives require glibc 2.28 or newer and NVIDIA driver R580 or newer (CUDA 13.0), providing `libcuda.so.1`.
 Their kernels are built with CUDA 13, so TensorFold refuses an older driver at startup; `nvidia-smi` shows the installed one.
-CUDA serves Nemotron 3.5 Lightning, qualified on GB10 (`linux-aarch64`, greedy and sampled) and on Ampere cards with
-compute capability 8.6 (`linux-x86_64`, greedy: the RTX 30 series, RTX A6000, A10 and A40), and checked on an RTX PRO 6000 Blackwell (compute
-capability 12.0, `linux-x86_64`).
-Flash Next also serves on CUDA from its MLX 4-bit checkpoint, on the built-in kernels, run on a GB10: see
-[Flash Next on CUDA](docs/recipes/flash-next-cuda.md).
+See [qualified models](README.md#qualified-models) for native CUDA serving by family and format.
+Nemotron 3.5 Lightning MLX 4-bit has been checked on GB10 (sm_121, greedy and sampled), RTX 3090 (sm_86, greedy)
+and RTX PRO 6000 Blackwell (sm_120). A receipt on one sm_86 card does not measure every card of that class.
+Flash Next MLX 4-bit has served on a GB10 ([native recipe](docs/recipes/flash-next-cuda.md)).
+[GLM-5.3-Flash](docs/recipes/glm-5.3-flash-cuda.md) has recorded native TP=2 and TP=3 runs, including FP4-Local and
+XSFP4 on two and three GB10s. GLM uses `TF_GLM_RANK`, `TF_GLM_WORLD` and `NCCL_COMM_ID`; other ranked families use
+their supported `--tp` options. [Gemma 4](CHANGELOG.md#114) 12B and 31B MLX checkpoints have served on a GB10 too.
+The largest recorded CUDA server is GLM on three GB10s; GLM refuses more than 16 ranks and `--tp` offers only
+1, 2, 4 or 8, so no native family serves 32 GPUs as one server and no run beyond three is recorded.
+
+Release fatbins contain sm_80, sm_86, sm_120 and sm_121 images. The A100 (sm_80) has kernel checks recorded in
+[#846](https://github.com/ashhart/TensorFold/pull/846), but no served checkpoint on record, so it is not model-qualified.
+Nemotron and dense Qwen's NVFP4/FP8 paths have non-cluster fallbacks for sm_80 to sm_89 (#901, #1470).
+No NVFP4/FP8 model run on sm_80 to sm_89 is recorded; implementation and kernel checks are not whole-model qualification.
+MiniMax-M3.1-Flash refuses an A100: its CUDA path admits only sm_121 at exactly two ranks.
+DeepSeek requires sm_90 or newer and remains refused by the release server pending whole-model gate #827.
+Nemotron's `--precision checkpoint` is refused on an A100 because it needs Blackwell (compute capability 12.x).
+GLM also refuses an FP8 or MXFP8 projection on sm_80 to sm_89 when its shape needs split-K partial storage that
+this family does not hold. CUDA `--slide` learning is admitted only on sm_121.
+Qwen4 has synthetic gates only.
 
 On a GB10 arm64 host (an x86_64 host uses `linux-x86_64` in the same commands):
 
 ```sh
-V=1.2.2
+V=1.2.3
 curl -fLO https://github.com/ashhart/TensorFold/releases/download/v$V/tensorfold-$V-linux-aarch64.tar.gz
 curl -fLO https://github.com/ashhart/TensorFold/releases/download/v$V/tensorfold-$V-linux-aarch64.tar.gz.sha256
 sha256sum -c tensorfold-$V-linux-aarch64.tar.gz.sha256

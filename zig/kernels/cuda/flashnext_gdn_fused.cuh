@@ -18,8 +18,10 @@ struct Rows {
     float b, a;
 };
 
+template <int NK, int NV>
 __device__ __forceinline__ void load_rows(const __nv_bfloat16* __restrict__ P, const __nv_bfloat16* __restrict__ cs, int r0,
                                           int n, const int (&ch)[3], int hv, int p, Rows& in) {
+    constexpr int C = G<NK, NV>::C, PW = G<NK, NV>::PW;
 #pragma unroll
     for (int c3 = 0; c3 < 3; ++c3)
 #pragma unroll
@@ -75,9 +77,11 @@ __device__ __forceinline__ void front_rows(const Rows& in, const float (&w)[3][T
 }
 
 // the chain's 256 threads after a batch's steps: fn_gdn_norm's arithmetic for its n rows from row r0 (ys[j][dv])
+template <int NK, int NV>
 __device__ __forceinline__ void norm_rows(const float (*ys)[DV], const __nv_bfloat16* __restrict__ P,
                                           const __nv_bfloat16* __restrict__ norm_w, float eps, __nv_bfloat16* __restrict__ out,
                                           float* __restrict__ xs, int r0, int n, int hv, float* rinv) {
+    constexpr int C = G<NK, NV>::C, PW = G<NK, NV>::PW;
     const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
     cbar();  // every readout of the batch is in ys
     for (int j = warp; j < n; j += CH / 32) {
@@ -114,11 +118,14 @@ __device__ __forceinline__ void norm_rows(const float (*ys)[DV], const __nv_bflo
     }
 }
 
+// CUTS: the chain also stores its state after two given rows (prompt cache marks inside the pass)
+template <int NK, int NV, bool CUTS>
 __device__ __forceinline__ void run(const __nv_bfloat16* __restrict__ P, const __nv_bfloat16* __restrict__ cs,
                                     const __nv_bfloat16* __restrict__ cw, const float* __restrict__ a_log,
                                     const float* __restrict__ dt_bias, const float* state_in, float* state_out, int rows,
                                     const __nv_bfloat16* __restrict__ norm_w, float eps, __nv_bfloat16* __restrict__ out,
-                                    float* __restrict__ xs, float* __restrict__ ys_out) {
+                                    float* __restrict__ xs, float* __restrict__ ys_out, int cut0, float* cut0_state,
+                                    int cut1, float* cut1_state) {
     extern __shared__ __align__(16) unsigned char smem[];
     unsigned char* stage = smem;                                                 // [2][STEPS] rows
     float (*ysb)[STEPS][DV] = reinterpret_cast<float (*)[STEPS][DV]>(smem + 2 * STAGE);
@@ -135,10 +142,10 @@ __device__ __forceinline__ void run(const __nv_bfloat16* __restrict__ P, const _
     auto fill = [&](int bi) {
         const int r0 = bi * STEPS, n = min(STEPS, rows - r0);
         Rows in;
-        load_rows(P, cs, r0, n, ch, hv, p, in);
+        load_rows<NK, NV>(P, cs, r0, n, ch, hv, p, in);
         front_rows(in, w, nea, dtb, n, p, stage + (bi & 1) * STAGE, xb);
     };
-    // the chain's registers (gdn_tpr::chain<2, 16>'s)
+    // the chain's registers (gdn_tpr::chain<NK, NV, 2, 16>'s)
     constexpr int L = 32 / TPR;
     const int row = threadIdx.x / TPR, t = threadIdx.x % TPR;
     const size_t sbase = (size_t)hv * DV * DK + (size_t)row * DK;
@@ -198,12 +205,23 @@ __device__ __forceinline__ void run(const __nv_bfloat16* __restrict__ P, const _
                     x[l] = o;
                 }
                 const float o = bf(gdn_tpr::tree<TPR>(x));
+                // a prompt cache mark inside the pass: the state after row cut - 1, as the final store below writes it
+                if constexpr (CUTS) {
+                    const int done = r0 + rr + 1;
+                    if (done == cut0 || done == cut1) {
+                        float* cs_out = done == cut0 ? cut0_state : cut1_state;
+#pragma unroll
+                        for (int l = 0; l < L; ++l)
+#pragma unroll
+                            for (int i = 0; i < 4; ++i) cs_out[sbase + (l * TPR + t) * 4 + i] = s[l][i];
+                    }
+                }
                 if (t == 0) {
                     ysb[bi & 1][rr][row] = o;
                     if (ys_out) ys_out[((size_t)(r0 + rr) * NV + hv) * DV + row] = o;
                 }
             }
-            norm_rows(ysb[bi & 1], P, norm_w, eps, out, xs, r0, n, hv, rinv);  // on the chain: it would wait at the barrier
+            norm_rows<NK, NV>(ysb[bi & 1], P, norm_w, eps, out, xs, r0, n, hv, rinv);  // on the chain: it would wait at the barrier
         }
         __syncthreads();
     }
@@ -220,6 +238,20 @@ extern "C" __global__ void __launch_bounds__(gdn_fused::THREADS) fn_gdn_fused(
         const __nv_bfloat16* __restrict__ P, const __nv_bfloat16* __restrict__ cs, const __nv_bfloat16* __restrict__ cw,
         const float* __restrict__ a_log, const float* __restrict__ dt_bias, const float* state_in, float* state_out, int rows,
         const __nv_bfloat16* __restrict__ norm_w, float eps, __nv_bfloat16* __restrict__ out, float* __restrict__ xs,
+        float* __restrict__ ys_out, int cut0, float* cut0_state, int cut1, float* cut1_state) {
+    // a pass without a mark inside (nearly all) runs the chain without the per-row check
+    if (cut0 == 0 && cut1 == 0)
+        gdn_fused::run<16, 48, false>(P, cs, cw, a_log, dt_bias, state_in, state_out, rows, norm_w, eps, out, xs, ys_out, 0, nullptr, 0, nullptr);
+    else
+        gdn_fused::run<16, 48, true>(P, cs, cw, a_log, dt_bias, state_in, state_out, rows, norm_w, eps, out, xs, ys_out, cut0, cut0_state, cut1, cut1_state);
+}
+
+// fn_gdn_fused on one rank's 8 key and 24 value heads (8,240-wide projection rows, a 5,120-channel conv window).
+extern "C" __global__ void __launch_bounds__(gdn_fused::THREADS) fn_gdn_fused_h8(
+        const __nv_bfloat16* __restrict__ P, const __nv_bfloat16* __restrict__ cs, const __nv_bfloat16* __restrict__ cw,
+        const float* __restrict__ a_log, const float* __restrict__ dt_bias, const float* state_in, float* state_out, int rows,
+        const __nv_bfloat16* __restrict__ norm_w, float eps, __nv_bfloat16* __restrict__ out, float* __restrict__ xs,
         float* __restrict__ ys_out) {
-    gdn_fused::run(P, cs, cw, a_log, dt_bias, state_in, state_out, rows, norm_w, eps, out, xs, ys_out);
+    // the marks run with whole heads only: a rank's half set never cuts
+    gdn_fused::run<8, 24, false>(P, cs, cw, a_log, dt_bias, state_in, state_out, rows, norm_w, eps, out, xs, ys_out, 0, nullptr, 0, nullptr);
 }

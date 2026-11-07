@@ -11,6 +11,7 @@ pub const recall = @import("recall.zig");
 pub const recall_store = @import("recall_store.zig");
 pub const sampling = @import("sampling.zig");
 pub const fill = @import("fill.zig");
+pub const prefill_widths = @import("prefill_widths.zig");
 pub const shape = @import("shape.zig");
 pub const plan_lanes = @import("plan_lanes.zig");
 pub const cost_cache = @import("cost_cache.zig");
@@ -25,9 +26,11 @@ pub const config = @import("config.zig");
 pub const stream = @import("stream.zig");
 pub const backend = @import("backend.zig");
 pub const embedding = @import("embedding.zig");
+pub const readout = @import("readout.zig");
 pub const events = @import("events.zig");
 pub const windows = @import("windows.zig");
 pub const shared_drafts = @import("shared_drafts.zig");
+pub const row_cost = @import("row_cost.zig");
 pub const trail = @import("trail.zig");
 pub const engine = @import("engine.zig");
 pub const fake = @import("fake.zig");
@@ -81,6 +84,7 @@ test {
     _ = @import("fair_turns_test.zig");
     _ = @import("copied_rate_test.zig");
     _ = @import("granted_reservation_test.zig");
+    _ = @import("rollback_test.zig");
 }
 
 pub const learned_disk = @import("learned_disk.zig");

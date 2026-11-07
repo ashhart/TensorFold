@@ -66,7 +66,8 @@ default. The larger frame must fit the configured context and all streams beside
 margin, otherwise M5 keeps 512 rows. Startup reserves the actual prompt scratch sizes as well as stream caches.
 Wide prompt frames keep separate 512-row activation scratch for small rounds, so decoding binds the small buffers.
 Admission counts both banks.
-`TF_QWEN27_WORKING_SET_BYTES` can lower the device working-set budget for admission checks. `TF_PROMPT_ROWS` selects another multiple of 16 from 16 to 2,048. Each chunk takes at most 512 rows beside
+`TF_QWEN27_WORKING_SET_BYTES` can lower the device working-set budget for admission checks. `TF_PROMPT_ROWS` selects another multiple of 16 from 128 to 2,048 for native serving.
+A smaller numeric value refuses startup and names the setting and its value; it is never raised silently. Each chunk takes at most 512 rows beside
 a decoding request, including with an override, and still respects the frame, attention and request boundaries.
 
 Measured on an M5 Ultra (macOS 27) through the served API against mlx-lm 0.32.0 on the same checkpoint, raw prompts
@@ -91,6 +92,41 @@ DeltaNet step is three dispatches a layer rather than five: `tf_delta_gdn_pre_st
 window into its history as it reads it, so the commit and publication kernels go, and spreads a 128-wide head over
 four simdgroups (each lane's squares still summed in order); 1.19 ms a token where 1.75 (`QWEN27_STEPCHECK` checks
 the state, history and logits bytes against the general path).
+
+## GGUF host adapter
+
+`families/qwen27/gguf.zig` prepares the dense family's GGUF metadata and tensor identities on the host (#1920).
+It accepts the observed qwen35 architecture, refuses the unproven qwen3 alias, uses core's typed views
+and checks the fixed DeltaNet/attention geometry and layer schedule. Unknown computation keys, conflicting
+patterns, missing tensors, wrong shapes and unsupported quantization are refused by key or tensor identity.
+
+The observed ggml-org revision a316ea527fde32c12487be7574e2db5ac2ad2a7e has 40 metadata keys and 851 tensors.
+Core's reader checks both Q4_K_M and Q8_0 header/index lists against the plan, with no missing names or shapes.
+The testdata directory pins the extracted keys, tensor names/shapes and corresponding native Config input.
+Host tests use those data files and need no checkpoint. Large tokenizer arrays record type/count only.
+
+`Adapter.open` borrows the GGUF byte image and owns its index, destination names and compact affine arrays until
+`deinit`. FP32 coefficient tables and group-16/32 layouts remain intact. Dense F32/F16/BF16 tensors borrow their
+original bytes. GGUF matrices reverse dimension labels only; the convolution is reshaped without a transpose.
+The host fixture checks every repacked value against independent source decoding for all ten core formats.
+Core's documented signed-zero cancellation exception still applies; this does not extend its exactness claim.
+
+Destination names are identities for future native loading, not ready-to-serve tensors. The `ssm_a` entry has an
+explicit negative-exponential-decay role: its bytes are not relabelled as a usable logarithmic `A_log`. GDN head
+ordering still needs checkpoint qualification. No coefficient is narrowed or group merged.
+
+The final, input, post-attention, gated-linear, Q and K norm tensors carry the explicit `rms_gain` role.
+Sixteen values per class from both GGUF variants match the supplied MLX BF16 gains after rounding to BF16.
+Both checkpoints therefore store effective multiplicative gains here: the adapter neither adds nor subtracts one.
+It preserves the GGUF F32 values, including the bits beyond the MLX BF16 representation. The paired sample fixture
+checks all 96 values and the borrowed byte identities; this comparison does not qualify the remaining weights.
+Existing Metal paths still need FP32 metadata and group-16 qualification, tokenizer/chat-template integration,
+prepared-cache integration and real-model token/performance gates. GGUF model arguments receive a coming-later
+refusal; the adapter does not enable end-to-end GGUF inference.
+
+```sh
+zig build test-qwen27-gguf-host test-gguf-host -j1 --summary all
+```
 
 The rest of this page describes the Python engine, frozen at 0.6.6 and available at the
 [`v0.6.6` tag](https://github.com/ashhart/TensorFold/tree/v0.6.6). Its flags, commands and paths belong to that
@@ -333,7 +369,8 @@ tensorfold serve TensorFold/Qwen3.8-27B-MLX-4bit --parallel 16 --context 8192 --
 
 `--parallel N` decodes up to N requests in shared rounds: each stream verifies its own DFlash2 tree in one
 forward, and every reply equals the same request served alone. A new prompt prefills 1,024 tokens a round
-while the other streams decode. States kept at message starts let prompts that share a system prompt resume
+while the other streams decode. On Metal, a reply that would end well before a long prompt goes first: the prompt
+lends it at most a quarter of its own time, and `--decode-share` or `TENSORFOLD_PREFILL_ORDER` overrides this. States kept at message starts let prompts that share a system prompt resume
 there, and each stream's caches are sized once, at admission.
 
 On one DGX Spark, with the workload from issue #38 (48 chat requests of 3,000 to 5,100 tokens sharing a

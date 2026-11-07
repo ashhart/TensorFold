@@ -65,8 +65,14 @@ test "unfinished and malformed DSML never emit their complete nested call in con
     defer arena.deinit();
     const a = arena.allocator();
     for (spellings) |sp| {
-        const prefix = try std.mem.concat(a, u8, &.{ sp.prefix, "<tool_call><function=lookup></function></tool_call>" });
-        for ([_][]const u8{ prefix, try std.mem.concat(a, u8, &.{ prefix, sp.unclosed }) }) |raw| {
+        const nested = "<tool_call><function=lookup></function></tool_call>";
+        const prefix = try std.mem.concat(a, u8, &.{ sp.prefix, nested });
+        // the whole reply keeps each block as text; the stream sent the header, the nested XML as its value
+        for ([_][2][]const u8{
+            .{ prefix, "{\"q\":\"" ++ nested },
+            .{ try std.mem.concat(a, u8, &.{ prefix, sp.unclosed }), "{\"q\":\"" ++ nested ++ "\"" },
+        }) |case| {
+            const raw = case[0];
             const tokens = try TestText.encode(undefined, a, raw, false);
             for ([_]bool{ false, true }) |batched| {
                 var backend: CallEngine = .{ .tokens = tokens, .batched = batched };
@@ -75,8 +81,8 @@ test "unfinished and malformed DSML never emit their complete nested call in con
                 try std.testing.expectEqual(@as(?u16, 200), whole.status);
                 try std.testing.expect(streamed.opened and streamed.status == null);
                 try std.testing.expectEqual(@as(usize, 0), whole.calls);
-                try std.testing.expectEqual(@as(usize, 0), streamed.calls);
-                try std.testing.expectEqual(@as(usize, 0), streamed.arguments_len);
+                try std.testing.expectEqual(@as(usize, 1), streamed.calls);
+                try std.testing.expectEqualStrings(case[1], streamed.arguments[0..streamed.arguments_len]);
                 try std.testing.expectEqual(@as(i64, 0), streamed.preparing);
             }
         }
@@ -147,19 +153,22 @@ test "DSML spellings mixed in one block stay text in whole and streamed consumer
     defer arena.deinit();
     const a = arena.allocator();
     const v41 = spellings[1];
-    const mixed = [_][]const u8{
-        try std.mem.concat(a, u8, &.{ v41.prefix, "a", spellings[0].suffix }),
-        try std.mem.concat(a, u8, &.{ spellings[0].prefix, "a", v41.suffix }),
-        "<｜DSML｜ calls><｜DSML｜invoke name=\"lookup\"><｜DSML｜parameter name=\"q\" string=\"true\">a</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜ calls>",
+    // a block whose opener spelling and closers disagree: the whole reply keeps it as text, the stream has the header
+    const cases = [_]struct { []const u8, usize, []const u8 }{
+        .{ try std.mem.concat(a, u8, &.{ v41.prefix, "a", spellings[0].suffix }), 1, "{\"q\":\"a</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>" },
+        .{ try std.mem.concat(a, u8, &.{ spellings[0].prefix, "a", v41.suffix }), 1, "{\"q\":\"a</｜DSML｜ parameter></｜DSML｜ invoke></｜DSML｜ calls>" },
+        .{ "<｜DSML｜ calls><｜DSML｜invoke name=\"lookup\"><｜DSML｜parameter name=\"q\" string=\"true\">a</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜ calls>", 0, "" },
     };
-    for (mixed) |raw| {
+    for (cases) |case| {
+        const raw = case[0];
         const tokens = try TestText.encode(undefined, a, raw, false);
         for ([_]bool{ false, true }) |batched| {
             var backend: CallEngine = .{ .tokens = tokens, .batched = batched };
             const whole = try sendWith(backend.engine(), .chat, dsml_body ++ ",\"stream\":false}", .{});
             const streamed = try sendWith(backend.engine(), .chat, dsml_body ++ ",\"stream\":true}", .{});
             try std.testing.expectEqual(@as(usize, 0), whole.calls);
-            try std.testing.expectEqual(@as(usize, 0), streamed.calls);
+            try std.testing.expectEqual(case[1], streamed.calls);
+            try std.testing.expectEqualStrings(case[2], streamed.arguments[0..streamed.arguments_len]);
             try std.testing.expectEqualStrings(raw[0..@min(raw.len, whole.text.len)], whole.content());
             try std.testing.expectEqualStrings(whole.content(), streamed.content());
             try std.testing.expectEqual(.stop, whole.finish.?);

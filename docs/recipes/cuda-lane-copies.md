@@ -9,3 +9,28 @@ The default retains each family's existing suffix-copy policy and eight-token ma
 `zig build test-family-copies-host` runs the real family facts through the lane planner with an instrumented target. It pins main's default and drafts-off facts, the four-token entry threshold, greedy/seeded plain equality, shared streams, resumed prefixes, a rejected copy, cancellation and the next request. These host fixtures do not establish whole-checkpoint exactness or speed.
 
 Qualify each checkpoint with its CUDA contract and matched main, policy-off, policy-on and plain controls. Retain all repeats in fresh OFF/ON/ON/OFF runs for chat and code, greedy and seeded, one and eight streams. Every token must agree, and no cell may be slower than main or copies off beyond the repeat spread. A missing or slower cell keeps the existing default policy. No device gain is claimed for these opt-in policies.
+
+## GLM on CUDA
+
+`TF_GLM_COPIES=1` on rank 0 opts GLM into the same four-match root/context copies, within its existing eight-row
+verify window. Unset or 0 keeps GLM's current suffix policy, widths and head policy. Other values refuse by name
+before weights load. `--no-drafts` and request-local `"draft": false` stay plain. Followers execute rank 0's existing
+commands, including partial keeps and zero-depth head absorption; no CUDA kernel or target arithmetic changes.
+
+Copies use the shared cost allocator, with GLM's existing two-GB10 EXL3 target-window and shared-row tables as seeds.
+The stream's own accepted/rejected copies update their landing estimate, and an expensive offer can receive zero rows.
+With the opt-in, `--mtp-confidence` caps the head's probability prefix using the shared confidence rule while copied
+rows remain costed. The allocator can choose plain instead of a head proposal. The default confidence path is unchanged.
+No row-cost learner is added here; live learned target costs belong to the lane core (#2111).
+
+The seed tables came from an older DFlash2 profile. They do not establish total round cost at a new checkpoint,
+context, rank topology or concurrency. Keep the default off until exact TP=2 whole-model replies and measured cost
+pass: baseline/OFF/ON/ON/OFF, greedy and seeded chat/code, one and eight streams, short/32K/64K context, cold prompts
+and separately labelled resumed turns. Retain exact rendered prompt IDs, emitted token arrays/hashes, actual verify,
+partial-keep and head-absorption times by rows, complete round/request times, proposals/acceptance/zero grants, load
+seconds and resident/pinned/device memory. Compare `"draft": false` before speed, and retain every repeat.
+
+Spark's copy experiment lost 3.8 to 22.7% in long-context cells on 3 November, so acceptance alone is insufficient.
+A slower or missing GLM cell keeps the default policy. No GLM speed gain or device qualification is claimed here.
+`zig build test-glm-copies-host` exercises real GLM facts through the shared planner with an instrumented target,
+including expensive and repeatedly rejected offers reduced to plain; it does not execute the checkpoint on CUDA.

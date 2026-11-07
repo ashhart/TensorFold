@@ -207,7 +207,7 @@ template <int RPS, int SG, int MB, bool RELU2, int BITS, bool BF16SUM, bool STRI
   }
 }
 
-// dims: K, N, GS, slots, experts, repeat; W, S, B hold the experts back to back; slot y takes expert ids[y] on x row y / repeat (an id past the count: a zero row).
+// K, N, GS, slots, experts, repeat; W, S, B pack experts; slot y: expert ids[y], x row y/repeat (past the count: zero).
 template <int RPS, int SG, bool RELU2, int BITS, bool BF16SUM>
 [[kernel]] void tf_row_projection_indexed(const device bfloat* X [[buffer(0)]],
                                           const device uint32_t* W [[buffer(1)]],

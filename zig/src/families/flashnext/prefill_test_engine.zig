@@ -40,6 +40,7 @@ pub const Fake = struct {
     gpa: std.mem.Allocator = a,
     target: lanes.fake.Fake = .{ .gpa = a },
     filling: std.AutoHashMapUnmanaged(*Stream, fill.State) = .empty,
+    fill_grows: bool = false,
     complete: std.AutoHashMapUnmanaged(*Stream, Summary) = .empty,
     table: lanes.backend.Backend.VTable = undefined,
     barrier: bool = false,

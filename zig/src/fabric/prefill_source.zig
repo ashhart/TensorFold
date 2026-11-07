@@ -15,7 +15,7 @@ pub fn cacheable(p: Provenance) bool {
     return p == .native;
 }
 
-/// What a source fills: prompt tokens [0, upto); the backend prefills [upto, prompt_len) and draws the first token itself.
+/// What a source fills: prompt tokens [0, upto); the backend prefills [upto, prompt_len) and draws the first token.
 pub const Offer = struct { upto: u64, provenance: Provenance };
 
 /// Opt-in and experimental: off unless the server was started with the fabric, and outside the exactness contract.

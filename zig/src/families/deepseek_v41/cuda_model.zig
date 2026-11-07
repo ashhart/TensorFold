@@ -221,6 +221,8 @@ pub const Model = struct {
         tr.step("start", cuda.usage(false));
         const comm = m.session.comm();
         const world: u32 = @intCast(comm.world());
+        var load_cache = @import("core").checkpoint.cache.Load.begin(io, world > 1);
+        defer load_cache.deinit();
         try @import("session_protocol.zig").preflight(&m.session.plan);
         var so = try sg.optionsFromEnv();
         // rank 0's --prompt-cache-gib (or variable) on every rank: one resident limit, the same evictions
@@ -249,7 +251,10 @@ pub const Model = struct {
         var t_build: i96 = 0;
         var t_upload: i96 = 0;
         const t_load = std.Io.Clock.awake.now(io).toNanoseconds();
+        const readers = try @import("core").checkpoint_read_ahead.optInReaders();
         for (m.pl.layers, 0..) |*l, i| {
+            var reading: @import("core").checkpoint_read_ahead.Scope = .{};
+            defer reading.deinit();
             var b: named.Builder = .{ .gpa = gpa, .io = io, .pack = &m.pack };
             defer b.deinit();
             var tag_buf: [16]u8 = undefined;
@@ -259,7 +264,9 @@ pub const Model = struct {
             defer schema.deinit();
             if (cache != null) try schema.layer(l, m.cfg.o_groups, m.tcfg.rank, world);
             if (cache == null or !try cache.?.get(&b, tag, schema.out.items)) {
+                reading = try @import("cuda_load_prefetch.zig").begin(gpa, io, &m.pack, &m.cfg, l.index, readers);
                 try b.layer(l, m.cfg.o_groups, m.tcfg.rank, world);
+                _ = try reading.check();
                 if (cache) |*c| c.put(&b, tag) catch |e| if (!quiet) std.log.warn("dsv41 prepared: {s} not written ({t})", .{ tag, e });
             }
             const t1 = std.Io.Clock.awake.now(io).toNanoseconds();
@@ -438,7 +445,12 @@ pub const Model = struct {
         if (m.dev_arena) |x| x.endBoot(m.tcfg.rank); // TF_DSV41_ARENA=pack: boot's buffers in, the rest as before
         // the boot check on the boot's own figures: what it took, the dip below idle, the hard floor
         if (m.boot_check) |b| try kvs.afterBoot(b);
-        try comm.barrier();
+        const Ready = struct {
+            fn wait(c: @TypeOf(comm)) !void {
+                try c.barrier();
+            }
+        };
+        try load_cache.finishAfter(.{comm}, Ready.wait);
     }
 
     /// Several live slots: the stacked roles' bases, the row runner, the followers' row ops; one-slot graphs off.

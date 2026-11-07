@@ -1,5 +1,6 @@
 test {
     _ = @import("src/families/flashnext/backend.zig");
+    _ = @import("src/families/flashnext/single_session_test.zig");
 }
 
 test {

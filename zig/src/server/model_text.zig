@@ -12,15 +12,22 @@ pub const RenderOptions = struct {
     reasoning_effort: ?[]const u8 = null,
     /// A request's ``clear_thinking``; a GLM-5.3 template takes it over the server's.
     clear_thinking: ?bool = null,
+    tool_choice: ?json.Value = null,
+    response_format: ?json.Value = null,
+    /// The server serves images: native image parts may render.
+    images: bool = false,
 };
 
 pub const Error = error{ Template, OutOfMemory };
 pub const Span = [2]usize;
+pub const Segment = struct { end: usize, allow_special: bool };
 
 /// The real rendered bytes and the half-open request ranges within them.
 pub const Rendered = struct {
     text: []const u8,
     spans: []const Span = &.{},
+    /// Release encoders may reset BPE at each segment, including adjacent ordinary template fragments.
+    segments: []const Segment = &.{},
 
     pub fn isTemplate(r: Rendered, start: usize, end: usize) bool {
         if (start == end) return true;
@@ -49,10 +56,42 @@ pub const Rendered = struct {
             if (p[0] >= end) break;
             if (p[1] > start) try spans.append(a, .{ @max(start, p[0]) - start, @min(end, p[1]) - start });
         }
-        return .{ .text = r.text[start..end], .spans = spans.items };
+        var segments: std.ArrayList(Segment) = .empty;
+        var from: usize = 0;
+        for (r.segments) |s| {
+            if (s.end > start and from < end)
+                try segments.append(a, .{ .end = @min(s.end, end) - start, .allow_special = s.allow_special });
+            from = s.end;
+        }
+        return .{ .text = r.text[start..end], .spans = spans.items, .segments = segments.items };
     }
 
     pub fn encode(r: Rendered, t: Text, a: Allocator, problem: *[]const u8) Error![]u32 {
+        if (r.segments.len > 0) {
+            var out: std.ArrayList(u32) = .empty;
+            errdefer out.deinit(a);
+            var start: usize = 0;
+            for (r.segments) |s| {
+                if (s.end <= start or s.end > r.text.len or (s.allow_special and !r.isTemplate(start, s.end))) {
+                    problem.* = "invalid or untrusted Kimi prompt segment";
+                    return error.Template;
+                }
+                const piece = r.text[start..s.end];
+                const ids = try t.encodeMasked(a, piece, if (s.allow_special) &.{} else &.{.{ 0, piece.len }}, problem);
+                defer a.free(ids);
+                try out.appendSlice(a, ids);
+                start = s.end;
+            }
+            if (start != r.text.len) {
+                problem.* = "incomplete Kimi prompt segment boundaries";
+                return error.Template;
+            }
+            return out.toOwnedSlice(a);
+        }
+        if (t.vtable.format == .kimi and r.text.len > 0) {
+            problem.* = "Kimi chat requires its release segment boundaries";
+            return error.Template;
+        }
         return t.encodeMasked(a, r.text, r.spans, problem);
     }
 
@@ -62,7 +101,14 @@ pub const Rendered = struct {
         errdefer a.free(spans);
         @memcpy(spans[0..r.spans.len], r.spans);
         spans[r.spans.len] = .{ r.text.len, r.text.len + label.len };
-        return .{ .text = try std.mem.concat(a, u8, &.{ r.text, label }), .spans = spans };
+        var segments: []const Segment = &.{};
+        if (r.segments.len > 0) {
+            const out = try a.alloc(Segment, r.segments.len + 1);
+            @memcpy(out[0..r.segments.len], r.segments);
+            out[r.segments.len] = .{ .end = r.text.len + label.len, .allow_special = false };
+            segments = out;
+        }
+        return .{ .text = try std.mem.concat(a, u8, &.{ r.text, label }), .spans = spans, .segments = segments };
     }
 
     /// Media replacement is limited to template-written occurrences, with every other range retained.
@@ -96,13 +142,15 @@ pub const Rendered = struct {
 };
 
 pub const Text = struct {
+    native_deepseek: bool = false,
     ctx: *anyopaque,
     vtable: *const VTable,
 
     pub const VTable = struct {
+        format: enum { template, kimi } = .template,
         /// Ids of ``text``, special-token text included as its token; ``add_special`` adds what the tokenizer prepends.
         encode: *const fn (ctx: *anyopaque, a: Allocator, text: []const u8, add_special: bool) Error![]u32,
-        /// UTF-8 of ``ids`` with special tokens; bytes that end mid-character decode as U+FFFD, as Python's replace does.
+        /// UTF-8 of ``ids`` with special tokens; bytes ending mid-character decode as U+FFFD, as Python's replace does.
         decode: *const fn (ctx: *anyopaque, a: Allocator, ids: []const u32) Allocator.Error![]u8,
         /// The id of a token the vocabulary holds whole (``convert_tokens_to_ids``), else null.
         token_id: *const fn (ctx: *anyopaque, piece: []const u8) ?u32,
