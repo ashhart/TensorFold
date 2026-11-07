@@ -30,6 +30,32 @@ pub fn tables(a: Allocator, content: []const u8) Allocator.Error![]Found {
     return out.toOwnedSlice(a);
 }
 
+/// A GFM pipe table (a ``Found`` range that is not HTML) as an ``ocr_html`` table: the header row first, cells cleaned.
+pub fn pipeTable(a: Allocator, table: []const u8) html.ParseError!html.Table {
+    var rows: std.ArrayList([]const u8) = .empty;
+    defer rows.deinit(a);
+    var it = std.mem.splitScalar(u8, table, '\n');
+    var n: usize = 0;
+    while (it.next()) |raw| : (n += 1) if (n != 1) try rows.append(a, trim(raw)); // row 1 is the delimiter row
+    const cols = if (rows.items.len > 0) Cells.count(rows.items[0]) else 0;
+    if (cols == 0 or cols > html.max_cols or rows.items.len > html.max_rows) return error.Malformed;
+    const cells = try a.alloc(html.Cell, rows.items.len * cols);
+    var done: usize = 0;
+    errdefer {
+        for (cells[0..done]) |c| a.free(c.text);
+        a.free(cells);
+    }
+    for (rows.items, 0..) |row, r| {
+        var cs = Cells.init(row); // GFM: a short row is padded, cells past the header's count are dropped
+        for (0..cols) |c| {
+            const text = if (cs.next()) |cell| try clean(a, trim(cell), 0) else try a.alloc(u8, 0);
+            cells[done] = .{ .text = text, .row = @intCast(r), .col = @intCast(c), .rows = 1, .cols = 1, .head = r == 0 };
+            done += 1;
+        }
+    }
+    return .{ .rows = @intCast(rows.items.len), .cols = @intCast(cols), .cells = cells, .spanned = false };
+}
+
 fn keep(a: Allocator, out: *std.ArrayList([]const u8), line: []u8, trimmed: bool) Allocator.Error!void {
     const t = std.mem.trim(u8, line, " \t");
     if (t.len == 0) return a.free(line);

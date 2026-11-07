@@ -262,4 +262,8 @@ test {
     _ = @import("ocr/markdown_test.zig");
     _ = @import("ocr/lines_test.zig");
     _ = @import("ocr/budget_test.zig");
+    _ = @import("ocr/mistral_test.zig");
+    _ = @import("ocr/run_test.zig");
+    _ = @import("ocr/route_test.zig");
+    _ = @import("ocr/size_test.zig");
 }

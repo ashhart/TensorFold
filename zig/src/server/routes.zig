@@ -123,7 +123,8 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     const imprint_op: ?api.ImprintOp = if (std.mem.eql(u8, route, "/v1/imprint/resume")) .where else if (std.mem.eql(u8, route, "/v1/imprint/load")) .load else null;
     const is_chat = std.mem.endsWith(u8, route, "/chat/completions");
     const is_rerank = std.mem.eql(u8, route, "/v1/rerank") or std.mem.eql(u8, route, "/rerank");
-    if (!is_rerank and !is_embedding and !is_speech and !is_slide and imprint_op == null and !is_anthropic and !is_responses and !is_decisions and !is_systemone and !is_chat and !std.mem.endsWith(u8, route, "/completions")) {
+    const is_ocr = std.mem.eql(u8, route, "/ocr") or std.mem.eql(u8, route, "/v1/ocr");
+    if (!is_ocr and !is_rerank and !is_embedding and !is_speech and !is_slide and imprint_op == null and !is_anthropic and !is_responses and !is_decisions and !is_systemone and !is_chat and !std.mem.endsWith(u8, route, "/completions")) {
         discardBody(conn, a);
         return unknown(conn, a);
     }
@@ -147,7 +148,7 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
         .rejected => |refusal| return overloaded(conn, is_anthropic, refusal),
     };
     defer if (lease) |*held| held.release();
-    const is_text = is_speech or is_anthropic or is_responses or is_decisions or is_systemone or is_chat or std.mem.endsWith(u8, route, "/completions");
+    const is_text = is_ocr or is_speech or is_anthropic or is_responses or is_decisions or is_systemone or is_chat or std.mem.endsWith(u8, route, "/completions");
     if (srv.info.embeddings != null and (is_text or is_rerank)) {
         discardBody(conn, a);
         conn.sendJson(400, "{\"error\":{\"message\":\"this model produces embeddings; use POST /v1/embeddings\",\"type\":\"invalid_request_error\"}}");
@@ -187,6 +188,7 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     if (is_systemone) return systemone.post(srv, conn, a);
     if (is_anthropic) return anthropic.post(srv, conn, a);
     if (is_responses) return responses.post(srv, conn, a);
+    if (is_ocr) return @import("ocr/route.zig").post(srv, conn, a, route);
     openai.post(srv, conn, a, is_chat);
 }
 
