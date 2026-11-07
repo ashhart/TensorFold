@@ -42,9 +42,9 @@ profile supplies no value. Registry metadata comes directly from the table. Regi
 Coverage includes:
 
 - Qwen3.5 dense/MoE on CUDA: `TF_QWEN_KV_PAGES`, `TF_QWEN_KV_PAGES_ALL`, `TF_QWEN_KV_SHARE`.
-- GLM on CUDA: `TF_KV_PAGES`, `TF_GLM_KV_HOST`, `TF_GLM_KV_HOST_SHARED`, `TF_GLM_PROMPT_TAIL`, and the exact 0/1
-  switches `TF_GLM_HOST_CACHE`, `TF_GLM_VISION_HOST` (off unless `1`) and `TF_GLM_PDL`, `TF_GLM_PROMPT_STEPS`,
-  `TF_GLM_SHARED` (on unless `0`).
+- GLM on CUDA: `TF_KV_PAGES`, `TF_GLM_KV_HOST`, `TF_GLM_KV_HOST_SHARED`, `TF_GLM_KV_SPLIT` (`1` or `on`),
+  `TF_GLM_PROMPT_TAIL`, and the exact 0/1 switches `TF_GLM_HOST_CACHE`, `TF_GLM_VISION_HOST` (off unless `1`)
+  and `TF_GLM_PDL`, `TF_GLM_PROMPT_STEPS`, `TF_GLM_SHARED` (on unless `0`).
 - Nemotron and Nemotron Omni on CUDA: `TF_KV_PAGES`, with their existing default-on parser.
 - Gemma 4, Kolibri-1, Spark2.5, Dory and GLM on the core CUDA page adapter: `TF_KV_SHARE`, where the adapter is served.
   Dory's `TF_KV_SHARE` also puts its full-attention caches in pool pages, as `TENSORFOLD_DORY_KV_PAGES=1` does;
