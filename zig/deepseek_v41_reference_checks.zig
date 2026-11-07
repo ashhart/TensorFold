@@ -13,6 +13,10 @@ test {
     _ = @import("tests/deepseek_v41_reference/operator_csa2_rope_fp64.zig");
     _ = @import("tests/deepseek_v41_reference/operator_csa2_index_fp64.zig");
     _ = @import("tests/deepseek_v41_reference/operator_exl3_projection_fp64.zig");
+    _ = @import("tests/deepseek_v41_reference/operator_exl3_projection_fp64_dense.zig");
+    _ = @import("tests/deepseek_v41_reference/operator_exl3_projection_fp64_roofline.zig");
+    _ = @import("tests/deepseek_v41_reference/operator_exl3_projection_fp64_int8.zig");
+    _ = @import("tests/deepseek_v41_reference/operator_exl3_projection_fp64_fusion.zig");
     _ = @import("tests/deepseek_v41_reference/operator_combine_fp64.zig");
     _ = @import("tests/deepseek_v41_reference/wo_a_fusion.zig");
     _ = @import("tests/deepseek_v41_reference/row_invariance.zig");
