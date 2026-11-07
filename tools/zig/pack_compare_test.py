@@ -8,6 +8,10 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+try:
+    import numpy  # noqa: F401  (pack_compare needs it)
+except ImportError:
+    raise unittest.SkipTest("numpy is not installed")
 import pack_compare
 
 
