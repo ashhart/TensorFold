@@ -1,0 +1,13 @@
+{
+  "text": "TensorFold OCR test\n\nInvoice 0042\n\nTotal: 123.45 USD",
+  "original": [
+    840,
+    220
+  ],
+  "frame": [
+    840,
+    224
+  ],
+  "source": "glm_ocr_reference.py capture, examples.json case text (Text Recognition:)",
+  "prompt_sha256": "77e8207573e1b8ba857d25db3a5080ae8651d6ddc2ea79007af5ca7958b80017"
+}
