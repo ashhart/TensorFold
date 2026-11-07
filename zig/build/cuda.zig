@@ -38,6 +38,11 @@ pub fn family(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     qwen35.addImport("cuda", cuda);
     qwen35.addImport("core", core);
     qwen35.addImport("lanes", lanes);
+    // the joint schema head on CUDA (Clef): the runtime's kernels and products over core's head layout
+    const joint = b.createModule(.{ .root_source_file = b.path("zig/src/cuda/joint_schema/joint_schema.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    joint.addImport("cuda", cuda);
+    joint.addImport("core", core);
+    qwen35.addImport("cuda_joint_schema", joint);
     qwen35.addImport("engine_api", b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} })); // core's prompt-cache types, the server's engine_api
     const qwen_vision = qwenVisionModule(b, target, optimize, cuda, core, lanes);
     qwen35.addImport("qwen_vision", qwen_vision);
