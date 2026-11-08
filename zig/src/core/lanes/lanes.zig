@@ -10,6 +10,7 @@ pub const proposer = @import("proposer.zig");
 pub const recall = @import("recall.zig");
 pub const recall_store = @import("recall_store.zig");
 pub const sampling = @import("sampling.zig");
+pub const sampling_row = @import("sampling_row.zig");
 pub const fill = @import("fill.zig");
 pub const prefill_widths = @import("prefill_widths.zig");
 pub const solo_chunk = @import("solo_chunk.zig");
@@ -93,4 +94,5 @@ pub const learned_dirs = @import("learned_dirs.zig");
 
 test {
     _ = @import("context_copy_price_test.zig");
+    _ = @import("sampling_row.zig");
 }
