@@ -22,15 +22,14 @@ test "ocr route: the format query, then the media type, then the part names choo
     const Case = struct { path: []const u8 = "/ocr", ct: ?[]const u8, body: []const u8 = "", want: ?route.Dialect, status: u16 = 0 };
     const cases = [_]Case{
         .{ .path = "/ocr?format=liteparse", .ct = "application/json", .want = .liteparse },
-        .{ .path = "/ocr?x=1&format=liteparse", .ct = null, .want = .liteparse },
-        .{ .path = "/ocr?format=doctr", .ct = form, .want = null, .status = 400 },
+        .{ .path = "/ocr?x=1&format=doctr", .ct = null, .want = .doctr },
         .{ .path = "/ocr?format=tesseract", .ct = "application/json", .want = null, .status = 400 },
         .{ .path = "/ocr?format=%zz", .ct = "application/json", .want = null, .status = 400 },
         .{ .ct = "application/json", .want = null, .status = 415 },
         .{ .ct = null, .body = "  {\"file\": \"x\"}", .want = null, .status = 415 },
         .{ .ct = null, .body = "file=x", .want = null, .status = 415 },
         .{ .ct = "text/plain", .want = null, .status = 415 },
-        .{ .ct = form, .body = try parts(a, &.{ "files", "files" }), .want = null, .status = 400 },
+        .{ .ct = form, .body = try parts(a, &.{ "files", "files" }), .want = .doctr },
         .{ .ct = form, .body = try parts(a, &.{ "file", "files" }), .want = null, .status = 400 },
         .{ .ct = form, .body = try parts(a, &.{"file"}), .want = .liteparse },
         .{ .ct = form, .body = try parts(a, &.{ "file", "file" }), .want = null, .status = 400 },
@@ -50,7 +49,7 @@ test "ocr route: the format query, then the media type, then the part names choo
     };
 }
 
-test "ocr route: files parts are refused on every path, the format query included" {
+test "ocr route: files and file parts together are refused on every path, the format query included" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -59,20 +58,20 @@ test "ocr route: files parts are refused on every path, the format query include
         .ok => return error.TestUnexpectedResult,
         .refused => |r| {
             try t.expectEqual(@as(u16, 400), r.status);
-            try t.expectEqualStrings(route.files_parts, r.message);
+            try t.expectEqualStrings(route.mixed_parts, r.message);
         },
     }
-    // the format query picks LiteParse, which refuses the same body in its own envelope rather than drop the parts
+    // the format query picks the dialect, which refuses the same body in its own envelope rather than drop parts
     var h: harness.Harness = .{};
     try h.start(.{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false });
     defer h.stop();
-    const cases = [_]struct { []const u8, []const u8 }{ .{ "/ocr", "error" }, .{ "/ocr?format=liteparse", "error" } };
+    const cases = [_]struct { []const u8, []const u8 }{ .{ "/ocr", "error" }, .{ "/ocr?format=doctr", "detail" }, .{ "/ocr?format=liteparse", "error" } };
     for (cases) |c| {
         var wire: harness.Wire = .{ .a = a };
         routes.dispatch(h.srv, try harness.request(a, &wire, c[0], form, both), a);
         try t.expectEqual(@as(u16, 400), wire.status());
         const got = (try wire.parsed()).get(c[1]).?;
-        try t.expectEqualStrings(route.files_parts, if (got == .string) got.string else got.strField("message").?);
+        try t.expectEqualStrings(route.mixed_parts, if (got == .string) got.string else got.strField("message").?);
     }
     try t.expectEqual(@as(usize, 0), h.next);
 }
@@ -97,7 +96,7 @@ test "ocr route: /ocr answers in the OpenAI shape until a dialect is chosen; bot
     }
     const infer: auth_scope.Scopes = .{ .inference = true };
     const read: auth_scope.Scopes = .{ .read = true };
-    for ([_][]const u8{ "/ocr", "/ocr/", "/v1/ocr", "/ocr?format=liteparse" }) |p| {
+    for ([_][]const u8{ "/ocr", "/ocr/", "/v1/ocr", "/ocr?format=doctr" }) |p| {
         try t.expect(auth_scope.allows(infer, "POST", p));
         try t.expect(!auth_scope.allows(read, "POST", p));
     }

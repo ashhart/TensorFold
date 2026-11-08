@@ -217,9 +217,7 @@ Embedding, reranker and readout engines refuse the OCR routes as they refuse cha
 `POST /ocr` picks its contract in this order:
 
 1. `?format=liteparse`.
-2. `multipart/form-data`: exactly one part named `file` is LiteParse; any other set of parts is HTTP 400, and so
-   is a body with any `files` part ("a multipart OCR request has files parts, which this server does not read;
-   LiteParse sends one file part"), even when `?format=` names the contract.
+2. `multipart/form-data`: exactly one part named `file` is LiteParse; any other set of parts is HTTP 400.
 3. Any other content type, or none, is HTTP 415.
 
 Refusals made before the contract is known (415, those 400s, a drain's 503 and an admission 429 with

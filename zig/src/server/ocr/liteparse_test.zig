@@ -8,7 +8,6 @@ const types = @import("types.zig");
 const budget = @import("budget.zig");
 const run = @import("run.zig");
 const lp = @import("liteparse.zig");
-const route = @import("route.zig");
 const harness = @import("harness_test.zig");
 const Harness = harness.Harness;
 const t = std.testing;
@@ -56,9 +55,7 @@ test "ocr liteparse: the one file part is the page; a PDF, an empty or unknown f
         .{ &.{part("file", "")}, "the file part is empty" },
         .{ &.{part("file", "GIF89a....")}, "the file is not a PNG, JPEG or WebP image" },
         .{ &.{ part("file", png), part("file", png) }, "a LiteParse request has exactly one file part" },
-        // a files part is refused, never dropped: this server reads only LiteParse's file part
-        .{ &.{part("files", png)}, route.files_parts },
-        .{ &.{ part("file", png), part("files", png) }, route.files_parts },
+        .{ &.{part("files", png)}, "a LiteParse request has exactly one file part" },
     };
     for (cases) |c| {
         try t.expectError(error.Faulted, lp.decode(a, c[0], &fault));
