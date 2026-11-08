@@ -41,6 +41,7 @@ pub fn state(bytes: u64, page: u64) Fit {
 /// What the load report reads: the pool's group and page, and the kinds beside it in or outside the pool.
 pub const Shape = struct {
     full: Group,
+    named: bool = true, // the family names the full group's layers; false: its row is a token's bytes over all of them
     page_rows: u32,
     window: ?Group = null, // rows outside the pool: a sliding window's rings
     run: u64 = 0, // a stream's state as a run of the pool's pages
@@ -75,6 +76,9 @@ pub fn line(a: Allocator, s: Shape) ![]u8 {
 
 fn rowsPart(o: *std.Io.Writer, g: Group, s: Shape) !void {
     const f = rows(g.row, s.layerPage());
+    if (g.kind == .full and !s.named) {
+        return o.print("layers not named, {f} a token, {d} rows a page, {f} padding ({d:.1} %)", .{ size(g.row), f.rows, size(f.pad), pct(f.pad, s.layerPage()) });
+    }
     try o.print("{d} layer{s} x {f} a row", .{ g.layers, if (g.layers == 1) "" else "s", size(g.row) });
     if (g.kind != .full) try o.print(" ({d:.2}x a full row)", .{ratio(g.row, s.full.row)});
     try o.print(", {d} rows a layer's page, {f} padding ({d:.1} %)", .{ f.rows, size(f.pad), pct(f.pad, s.layerPage()) });

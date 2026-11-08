@@ -344,6 +344,7 @@ test "Gemma shared: snapshots spend pool pages without new device allocations" {
     defer f.deinit();
     const layout = fwd.pages.layout(&f.m);
     try t.expectEqual(@as(u64, 7864384), layout.fixed_bytes);
+    try t.expectEqual(fwd.pages.pageBytes(&f.m), layout.pageBytes()); // the pool's page is the kernels' stride
     try t.expectEqual(@as(u64, 524288), layout.pageBytes());
     try t.expectEqual(layout.pageBytes(), layout.group().bytes() * fwd.pages.tokens); // one group sized by its row's bytes
     const window = layout.window.?; // a sliding row against a global one: kv heads x head width
