@@ -153,11 +153,12 @@ __device__ inline void stream_body(const typename Dec::Args& a, int lpc_log2, in
         const bool live = base + j < nch;
         const int q = live ? base + j : nch - 1;
         float sc[CB];
-        float bi[CB];
+        float bi[CB] = {};
 #pragma unroll
-        for (int c = 0; c < CB; ++c) {
-            sc[c] = live ? terms.widen(sr[c]) : 0.f;
-            bi[c] = live ? terms.widen(br[c]) : 0.f;
+        for (int c = 0; c < CB; ++c) sc[c] = live ? terms.widen(sr[c]) : 0.f;
+        if constexpr (Dec::kBias) {
+#pragma unroll
+            for (int c = 0; c < CB; ++c) bi[c] = live ? terms.widen(br[c]) : 0.f;
         }
         if constexpr (stream_pairs_per_group<Dec, R, CB>()) {
             constexpr int RG = R < 4 ? R : 4;  // rows a pass keeps in registers
@@ -181,9 +182,11 @@ __device__ inline void stream_body(const typename Dec::Args& a, int lpc_log2, in
                         xn[4 * v + 3] = t.w;
                     }
                     float s = 0.f;
+                    if constexpr (Dec::kBias) {
 #pragma unroll
-                    for (int i = 0; i < 16; ++i) {
-                        s = T::dot(__builtin_bit_cast(pair, xn[i]), __builtin_bit_cast(pair, kOne), s);
+                        for (int i = 0; i < 16; ++i) {
+                            s = T::dot(__builtin_bit_cast(pair, xn[i]), __builtin_bit_cast(pair, kOne), s);
+                        }
                     }
                     sx[r] = s;
                     stream_x_pairs<Dec, T>(xn, xp[r], std::make_integer_sequence<int, 16>{});
@@ -197,7 +200,9 @@ __device__ inline void stream_body(const typename Dec::Args& a, int lpc_log2, in
 #pragma unroll
                     for (int r = 0; r < RG; ++r) {
                         acc[g * RG + r][c] = Dec::fold_scale(acc[g * RG + r][c], d[r], sc[c]);
-                        acc[g * RG + r][c] = Dec::fold_bias(acc[g * RG + r][c], sx[r], bi[c]);
+                        if constexpr (Dec::kBias) {
+                            acc[g * RG + r][c] = Dec::fold_bias(acc[g * RG + r][c], sx[r], bi[c]);
+                        }
                     }
                 }
             }
@@ -222,9 +227,11 @@ __device__ inline void stream_body(const typename Dec::Args& a, int lpc_log2, in
                 xn[4 * v + 3] = t.w;
             }
             float sx = 0.f;
+            if constexpr (Dec::kBias) {
 #pragma unroll
-            for (int i = 0; i < 16; ++i) {
-                sx = T::dot(__builtin_bit_cast(pair, xn[i]), __builtin_bit_cast(pair, kOne), sx);
+                for (int i = 0; i < 16; ++i) {
+                    sx = T::dot(__builtin_bit_cast(pair, xn[i]), __builtin_bit_cast(pair, kOne), sx);
+                }
             }
             stream_x_pairs<Dec, T>(xn, xp, std::make_integer_sequence<int, 16>{});
 #pragma unroll
@@ -233,7 +240,9 @@ __device__ inline void stream_body(const typename Dec::Args& a, int lpc_log2, in
 #pragma unroll
                 for (int i = 0; i < 16; ++i) d = T::dot(xp[i], qp[c][i], d);
                 acc[r][c] = Dec::fold_scale(acc[r][c], d, sc[c]);
-                acc[r][c] = Dec::fold_bias(acc[r][c], sx, bi[c]);
+                if constexpr (Dec::kBias) {
+                    acc[r][c] = Dec::fold_bias(acc[r][c], sx, bi[c]);
+                }
             }
         }
     };
