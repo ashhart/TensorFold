@@ -192,6 +192,21 @@ pub fn plain(l: *const hip.Launcher, r: *rig_.Rig, in: [5]u64, state: u64, y: u6
 /// A launch's two outputs, each registered on its own: y, and the state after the tokens.
 pub const Part = enum { y, state };
 
+/// The real launch, or a control's: the prompt's last row left out, or every value head told of one key head.
+pub const Fault = enum {
+    none,
+    short,
+    one_key,
+
+    fn name(p: Fault) ?[]const u8 {
+        return switch (p) {
+            .none => null,
+            .short => "control: tf_gdn_prompt_128 stops one row short of the prompt",
+            .one_key => "control: tf_gdn_prompt_128 is launched with one key head",
+        };
+    }
+};
+
 /// Flash Next's 48 value heads at the shortest prompt that takes the kernel and a longer one; two key heads, 97 tokens.
 const prompt_served = [_]c.Shape{
     .{ .rows = 64, .n = 48, .k = 128 },
@@ -216,6 +231,7 @@ pub const Prompt = struct {
     rig: rig_.Rig,
     l: *const hip.Launcher,
     part: Part,
+    fault: Fault,
     arena: std.heap.ArenaAllocator,
     shape: c.Shape = undefined,
     p: Problem = undefined,
@@ -225,8 +241,8 @@ pub const Prompt = struct {
     st_bytes: []u8 = &.{},
     base: [2]u64 = @splat(0), // the plain scan's y and state
 
-    pub fn init(a: std.mem.Allocator, rt: *const hip.Runtime, s: hip.Stream, l: *const hip.Launcher, part: Part) Prompt {
-        return .{ .rig = .{ .a = a, .r = rt, .s = s }, .l = l, .part = part, .arena = .init(a) };
+    pub fn init(a: std.mem.Allocator, rt: *const hip.Runtime, s: hip.Stream, l: *const hip.Launcher, part: Part, fault: Fault) Prompt {
+        return .{ .rig = .{ .a = a, .r = rt, .s = s }, .l = l, .part = part, .fault = fault, .arena = .init(a) };
     }
 
     pub fn deinit(self: *Prompt) void {
@@ -234,8 +250,12 @@ pub const Prompt = struct {
         self.rig.deinit();
     }
 
+    /// A control keeps its part's spec under its own name and must go red at gate 3's bit-equal compare.
     pub fn kernel(self: *Prompt) g.Kernel {
-        return .{ .spec = promptSpec(self.part), .ctx = self, .vt = &vt };
+        var s = promptSpec(self.part);
+        const control = self.fault.name();
+        if (control) |name| s.name = name;
+        return .{ .spec = s, .ctx = self, .vt = &vt, .control = if (control != null) .shapes else null };
     }
 
     const vt = g.hooks(Prompt);
@@ -263,7 +283,10 @@ pub const Prompt = struct {
         try self.rig.put(self.st, self.st_bytes);
         var a: hip.launch.Args = .{};
         for ([_]u64{ self.in[0], self.in[1], self.in[2], self.in[3], self.in[4], self.st, self.y }) |x| try a.add(x);
-        for ([_]usize{ self.shape.rows, self.p.kh(), self.shape.n }) |x| try a.add(@as(c_int, @intCast(x)));
+        // one key head stays in bounds: every value head reads q's and k's first rows, one a token
+        const length = if (self.fault == .short) self.shape.rows - 1 else self.shape.rows;
+        const kh = if (self.fault == .one_key) 1 else self.p.kh();
+        for ([_]usize{ length, kh, self.shape.n }) |x| try a.add(@as(c_int, @intCast(x)));
         const grid: hip.launch.Dim3 = .{ .x = 2, .y = @intCast(self.shape.n) };
         try hip.launch.launch(self.l.gdn_prompt, .{ .grid = grid, .block = .{ .x = 32, .y = 4 } }, self.rig.s, &a);
         try self.rig.s.synchronize();
