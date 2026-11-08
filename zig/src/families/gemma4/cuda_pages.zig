@@ -40,10 +40,15 @@ pub fn pageBytes(m: anytype) u64 {
 
 pub fn layout(m: anytype) kv.Layout {
     var fixed: u64 = perSlot(m) * 4;
+    var sliding: u64 = 0; // bytes a row over the sliding layers' rings
     for (0..ownLayers(m)) |i| if (!cfg.global(i)) {
         fixed += 2 * m.cacheLen(i) * m.geo.kvHeads(i) * cfg.headDim(i) * 2;
+        sliding += 2 * m.geo.kvHeads(i) * cfg.headDim(i) * 2;
     };
-    return .{ .fixed_bytes = fixed, .token_bytes = pageBytes(m) / tokens, .page_tokens = tokens, .snap_bytes = 0 };
+    const n: u32 = @intCast(globalLayers(m));
+    var l = kv.Layout.ofRows(.{ .kind = .full, .row = 2 * m.geo.global_kv_heads * cfg.global_dim * 2, .layers = n }, tokens, fixed, 0);
+    l.window = kv.groups.Group.split(.window, sliding, @intCast(ownLayers(m) - n));
+    return l;
 }
 
 pub fn view(m: anytype, slot: ?usize) ?cuda.window_attention.Pages {

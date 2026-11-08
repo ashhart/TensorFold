@@ -215,6 +215,12 @@ pub fn store(comptime F: type, s: *api.prompt_cache.Store, loaded: anytype, k: K
     _ = try F.snap_slots(loaded.target, k.snaps);
 }
 
+/// The load report of a paged family's groups, a line apart from the startup line.
+pub fn report(a: Allocator, l: ?kv_pool.Layout, paged: ?Plan) !void {
+    if (paged == null) return;
+    std.log.info("{s}", .{try kv_pool.groups.line(a, (l orelse return).shape())});
+}
+
 /// The startup line's streams and cache.
 pub fn text(comptime F: type, a: Allocator, stream_bytes: u64, l: ?kv_pool.Layout, paged: ?Plan, engine_paged: bool, all_on_pages: bool, window: u64, k: Kept, kv8: bool) ![2][]const u8 {
     const rows: u64 = if (comptime @hasDecl(F, "window_rows")) F.window_rows else 0; // the plan's windows: window + rows
