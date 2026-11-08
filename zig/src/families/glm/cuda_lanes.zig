@@ -119,8 +119,8 @@ pub const Lanes = struct {
             .draft_probabilities = block or self.mtp_confidence != null, // chances size each window (DFlash2's by the costs)
             .draft_confidence = if (block) null else self.mtp_confidence,
             .window_costs = if (self.costs) |*c| &c.window else if (block) &copy_policy.window_costs else &.{},
-            .shared_costs = if (block and self.costs == null) &copy_policy.shared_costs else &.{},
-            .window_costs_lone = self.costs != null and !block, // an MTP chain's steps run stream by stream: depth rules at 2 or more
+            .shared_costs = if (block) &copy_policy.shared_costs else &.{}, // DFlash2's shared rounds keep main's prices
+            .window_costs_lone = self.costs != null, // timed windows are one stream's: shared rounds keep the rule they had
             .shared_drafts = if (block) 0 else shared_head_drafts,
             .hidden_rows = sharing,
             .batch_rows = if (sharing) engine.shared_rows else 0,
