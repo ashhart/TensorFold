@@ -214,7 +214,7 @@ fn trim(s: []const u8) []const u8 {
 /// What the scanner yields: an ordinary line, a code or math line kept as written, or a table's byte range.
 const Item = union(enum) { text: []const u8, verbatim: []const u8, table: Found };
 
-/// A line-based scanner over the 5.1 subset: fenced code, `$$` blocks, HTML and pipe tables, ordinary lines.
+/// A line scanner over docs/api.md OCR: Reader Markdown: fenced code, `$$` blocks, HTML and pipe tables, other lines.
 const Scanner = struct {
     src: []const u8,
     pos: usize = 0,
