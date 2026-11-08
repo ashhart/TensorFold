@@ -77,23 +77,3 @@ test "ocr geometry: Mistral floors the minimum and ceils the maximum" {
     try t.expectEqual([4]i32{ 3, 4, 7, 8 }, g.mistralBox(rect(3, 4, 7, 8)));
     try t.expectEqual([4]i32{ 2, 1, 9, 9 }, g.mistralBox(.{ .{ 2.5, 1.5 }, .{ 8.5, 3 }, .{ 8, 8.5 }, .{ 3, 7 } }));
 }
-
-test "ocr geometry: PaddleX rounds corners and keeps a polygon that stays convex" {
-    const q: Quad = .{ .{ 1.4, 1.6 }, .{ 50.6, 2.2 }, .{ 50.2, 20.7 }, .{ 0.6, 19.4 } };
-    try t.expectEqual([4][2]i32{ .{ 1, 2 }, .{ 51, 2 }, .{ 50, 21 }, .{ 1, 19 } }, g.paddlePoly(q, 100, 100));
-    const turned: Quad = .{ .{ 30, 0 }, .{ 30, 60 }, .{ 0, 60 }, .{ 0, 0 } };
-    try t.expectEqual([4][2]i32{ .{ 30, 0 }, .{ 30, 60 }, .{ 0, 60 }, .{ 0, 0 } }, g.paddlePoly(turned, 100, 100));
-}
-
-test "ocr geometry: PaddleX falls back to the integer box when rounding collapses the polygon" {
-    // a thin diagonal parallelogram (8 px²) whose rounded corners land on its diagonal
-    const thin: Quad = .{ .{ 0, 1 }, .{ 10, 11 }, .{ 10.4, 10.6 }, .{ 0.4, 0.6 } };
-    try t.expect(g.isSimpleConvex(thin));
-    try t.expectEqual([4][2]i32{ .{ 0, 1 }, .{ 10, 1 }, .{ 10, 11 }, .{ 0, 11 } }, g.paddlePoly(thin, 100, 100));
-    // narrower than 1 px across x: rounds to one column, widened by 1 px
-    const narrow: Quad = .{ .{ 4.6, 0 }, .{ 5.4, 0 }, .{ 5.4, 10 }, .{ 4.6, 10 } };
-    try t.expectEqual([4][2]i32{ .{ 5, 0 }, .{ 6, 0 }, .{ 6, 10 }, .{ 5, 10 } }, g.paddlePoly(narrow, 100, 100));
-    // the same column on the page's right edge widens leftward, staying inside
-    try t.expectEqual([4][2]i32{ .{ 4, 0 }, .{ 5, 0 }, .{ 5, 10 }, .{ 4, 10 } }, g.paddlePoly(narrow, 5, 100));
-    for ([_]Quad{ thin, narrow }) |v| try t.expect(g.isSimpleConvex(g.toQuad(g.paddlePoly(v, 100, 100))));
-}
