@@ -65,8 +65,9 @@ test "DeepSeek strict env: every switch refuses garbage and keeps 0, 1 and its e
             if (r.kind == .toggle) try t.expect(try e.value(bool, r.name, raw, false));
         }
         for ([_][]const u8{ "false", "off", "no", "FALSE", "Off", "NO" }) |raw| {
-            try check(r.name, raw, r.kind == .toggle);
-            if (r.kind == .toggle) try t.expect(!try e.value(bool, r.name, raw, true));
+            const off = r.kind == .toggle and (r.no_word or !std.ascii.eqlIgnoreCase(raw, "no"));
+            try check(r.name, raw, off);
+            if (off) try t.expect(!try e.value(bool, r.name, raw, true));
         }
     };
 }

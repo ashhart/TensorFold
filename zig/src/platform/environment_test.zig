@@ -156,7 +156,12 @@ test "environment: video refusal describes the token budget without advertising 
 }
 
 test "environment: word switches take 0 and 1 and the word forms in any case; exact switches refuse words" {
-    for ([_][]const u8{ "0", "false", "OFF", "No" }) |raw| try t.expect(!try e.value(bool, "TF_DSV41_COEF_LATE", raw, true));
+    for ([_][]const u8{ "0", "false", "OFF", "No" }) |raw| try t.expect(!try e.value(bool, "TF_DSV41_LOOKUP_PLAN", raw, true));
+    // MHC_DEFER and COEF_LATE read "no" as on before, so it is refused there rather than read as off
+    for ([_][]const u8{ "no", "NO", "No" }) |raw| {
+        try t.expectError(error.InvalidEnvironment, e.parse("TF_DSV41_MHC_DEFER", raw));
+        try t.expectError(error.InvalidEnvironment, e.parse("TF_DSV41_COEF_LATE", raw));
+    }
     for ([_][]const u8{ "1", "TRUE", "on", "Yes" }) |raw| try t.expect(try e.value(bool, "TF_DSV41_COEF_LATE", raw, false));
     try t.expect(try e.value(bool, "TF_DSV41_GRAPHS", null, true));
     try t.expect(try e.value(bool, "TF_DSV41_GRAPHS", " ", true));
