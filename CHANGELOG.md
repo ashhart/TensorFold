@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Fabric: a pipeline stage's boot and round loop is one driver, generic over an engine binding, so a CUDA, Metal or XPU stage writes only its binding; nothing uses it yet. A stop that a middle stage receives now passes on instead of closing the ring (#2241, part of #2005). Thanks to @jschmied.
+
 - HIP: the qwen3_5 engine reads a DFlash2 drafter's `config.json` against its target, refusing one it can't run, and loads its weights as MLX affine-4 (groups of 64), quantized on the host as on CUDA; nothing serves the drafter yet (#2477, part 2 of #1563). Thanks to @AbrahamCete.
 
 - Developers: the Qwen3.8-27B Metal lane check initializes its draft-window costs, and the served draft check compares complete state at the consumed token position, with exact tokens and state bytes (#2489).
