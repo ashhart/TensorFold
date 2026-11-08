@@ -190,7 +190,7 @@ pub fn main(init: std.process.Init) !u8 {
     try lfm3_suite.collect(o.only);
     for (gemma.all_entries) |v| {
         if (!wanted(o, v.name)) continue;
-        if (!@import("metal_support.zig").tensor(tensor, v.name)) continue;
+        if (!@import("metal_support.zig").gemma(tensor, v.kind, v.name)) continue;
         try gemma.append(a, device, queue, v, false, &gemma_list, &kernels);
         if (v.geo.hidden == 5376 and (v.kind != 1 or std.mem.endsWith(u8, v.name, "sliding"))) {
             try gemma.append(a, device, queue, v, true, &gemma_list, &kernels);
