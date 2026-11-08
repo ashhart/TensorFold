@@ -388,9 +388,8 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     const profiling = platform.c.getenv("TF_Q27_PASS_PROFILE") != null;
     const gpa = if (profiling) h.counted.allocator() else parent;
     var draft_model = drafter;
-    // A pair's rank 1 never proposes: it replays rank 0's tree rounds (.tree/.commit), so it loads no drafter.
-    const follower = pair != null and pair.?.rank != 0;
-    const owns_draft = drafter == null and o.drafter != null and !follower;
+    // Both ranks load the drafter: the loads stay in lockstep (the pair's deferred seam pass needs both GPUs at once).
+    const owns_draft = drafter == null and o.drafter != null;
     if (owns_draft) draft_model = q.dflash.runtime_model.Model.load(gpa, io, model, o.drafter.?, if (o.drafter_bits == 4) .prepared_q4_reference else .bf16_reference) catch |err| {
         why.* = try std.fmt.allocPrint(a, "the native Qwen3.8-27B drafter cannot load {s} ({s})", .{ o.drafter.?, @errorName(err) });
         return error.DrafterLoad;
@@ -452,8 +451,12 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
         h.trace = .{ .queue = model.queue, .report_every = every }; // enabled once measure() has priced the windows
         h.runner.profile(&h.trace.?);
     }
-    if (draft_model) |d| h.draft = try lb.Draft.attach(gpa, &h.runner, d, owns_draft);
-    draft_owned = false;
+    // Both ranks load the drafter (lockstep for the pair's deferred seams), but rank 1 never attaches one:
+    const follower = pair != null and pair.?.rank != 0;
+    if (draft_model) |d| if (!follower) {
+        h.draft = try lb.Draft.attach(gpa, &h.runner, d, owns_draft);
+        draft_owned = false;
+    };
     errdefer if (h.draft) |d| d.deinit();
     h.back = try lb.Metal.init(gpa, &h.runner, h.draft);
     errdefer h.back.deinit();
