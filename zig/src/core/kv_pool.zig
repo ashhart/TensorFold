@@ -94,7 +94,7 @@ pub const Budget = struct {
     snaps: ?usize = null,
     /// Rows one stream holds at most (0: no bound): pages past what the paged streams hold at once stay unmade.
     window: u64 = 0,
-    /// The engine's own rows are pages too: a window of them first, then the cache after the windows the room holds.
+    /// The engine's own rows are pages too: a window of them first, then the cache after the windows the rest holds.
     engine_paged: bool = false,
     /// Parts per million of the cache that kept states hold as pool pages (TF_KV_SHARE): made pages past the windows.
     kept_ppm: u32 = 0,
@@ -131,7 +131,7 @@ pub fn plan(l: Layout, b: Budget) error{ NoStream, TooMany }!Plan {
     const fit = @min(extra, left / each);
     if (fit < extra and b.fixed) return error.TooMany;
     left -= fit * l.fixed_bytes;
-    const cache = @min(b.cache, left -| held(l, b, fit, windows(l, b) - 1));
+    const cache = @min(b.cache, left -| held(l, b, fit, windows(l, b, left) - 1));
     const taken = @min(b.cache, left -| held(l, b, fit, 0)) - cache; // what the windows past the engine's own took
     const kept = if (b.slots_only) cache - split(cache, l.snap_bytes, b.snaps).snaps * l.snap_bytes else cache / 1_000_000 * b.kept_ppm + cache % 1_000_000 * b.kept_ppm / 1_000_000; // the cache's share as pages
     const c = split(cache - kept, l.snap_bytes, b.snaps);
@@ -147,7 +147,8 @@ pub fn holds(l: Layout, b: Budget) bool {
     const left = b.room - b.engine - own;
     const each = l.fixed_bytes + (1 + l.runPages()) * l.pageBytes();
     const fit = @min(@as(u64, b.lanes - 1), left / each);
-    return left -| (fit * l.fixed_bytes + held(l, b, fit, windows(l, b) - 1)) >= b.cache;
+    const rest = left - fit * l.fixed_bytes; // what the cache and the pages share, as in plan
+    return rest -| held(l, b, fit, windows(l, b, rest) - 1) >= b.cache;
 }
 
 /// The pages the cache leaves the other streams: a page and a run each, or `more` windows if those are more.
@@ -155,11 +156,12 @@ fn held(l: Layout, b: Budget, fit: u64, more: u64) u64 {
     return @max(fit * (1 + l.runPages()), more * l.pages(b.window)) * l.pageBytes();
 }
 
-/// Windows set aside before the cache, the engine's own among them: as many as the room holds when its rows are pages.
-fn windows(l: Layout, b: Budget) u64 {
+/// Windows set aside before the cache, the engine's own among them: as many as the room holds and `rest` holds whole.
+fn windows(l: Layout, b: Budget, rest: u64) u64 {
     if (!b.engine_paged or b.window == 0 or b.asked) return 1; // an asked cache comes before all but the engine's own
     const own = ownPages(l, b);
-    return @min(b.lanes, 1 + (b.room - own) / (own + l.fixed_bytes));
+    const room = @min(b.lanes, 1 + (b.room - own) / (own + l.fixed_bytes)); // a window and a fixed part each
+    return if (own == 0) room else @min(room, 1 + rest / own); // `rest`: past the engine's own window and every fixed part
 }
 
 /// The bytes of the engine's own window as pages, set aside first when its rows are pages (0 when it has a window).
