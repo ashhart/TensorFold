@@ -507,6 +507,7 @@ pub const Metal = struct {
         const before = r.gpu_seconds;
         if (b.runner.reduce != null) {
 
+
             // one greedy row a round; a draft round's parents ride .tree, its accepted path rides .commit
             if (windows.len != 1) return error.CommandOutOfStep;
             if (b.link) |l| {
