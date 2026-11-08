@@ -99,9 +99,7 @@ pub fn load(device: mtl.Device) !Kernels {
 /// lfm2_attn_nax compiled after lfm2.metal's text (its constants and merge) with nax.h inlined.
 fn attnNaxLoad(device: mtl.Device, out: *Kernels) !void {
     const a = std.heap.c_allocator;
-    const attn = try frags.source(device, a, sources.lfm2_attn_nax);
-    defer a.free(attn);
-    const src = try std.mem.concat(a, u8, &.{ sources.lfm2, "\n", attn });
+    const src = try @import("source.zig").prompt(device, a, false);
     defer a.free(src);
     const lib = try mtl.Library.fromSource(device, src, mtl.CompileOptions.mlx());
     defer lib.deinit();

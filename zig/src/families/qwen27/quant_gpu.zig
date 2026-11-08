@@ -10,7 +10,7 @@ pub const Ref = projection.Ref;
 /// Group sums the input's producer wrote: XS[group * stride + row], in the lane projection's order.
 pub const Sums = struct { ref: Ref, stride: u32 };
 
-const Key = struct { kind: Kind, n: u32 = 0, k: u32, slices: u32 = 0, tile: u32 = 0, tmr: u32 = 0, edge: bool = false, skip: u32 = 0, cut: [2]u32 = .{ 0, 0 }, bits: u8 = 4, group: u32 = 64, long: bool = false };
+pub const Key = struct { kind: Kind, n: u32 = 0, k: u32, slices: u32 = 0, tile: u32 = 0, tmr: u32 = 0, edge: bool = false, skip: u32 = 0, cut: [2]u32 = .{ 0, 0 }, bits: u8 = 4, group: u32 = 64, long: bool = false };
 pub const Kind = enum { projection, xsum, norm, input_norm, mlp, ane_input, mlp_ane, add_ane };
 
 /// Whether prompt chunks take one reg dispatch a projection (`Kernels.long_prompt`): Ultras with tensor units only.
@@ -99,24 +99,7 @@ pub const Kernels = struct {
 
     fn get(k: *Kernels, key: Key) !mtl.Pipeline {
         if (k.cache.get(key)) |p| return p;
-        const template = switch (key.kind) {
-            .projection => unreachable,
-            .xsum => sources.xsum,
-            .norm => sources.norm_xs,
-            .input_norm => sources.norm_input,
-            .mlp => sources.mlp_xs,
-            .ane_input, .mlp_ane, .add_ane => sources.mlp_ane,
-        };
-        const mark = std.mem.indexOf(u8, template, "Q27_SPECIALIZE") orelse return error.BadKernelSource;
-        const definitions = switch (key.kind) {
-            .projection => unreachable,
-            .xsum => try std.fmt.allocPrint(k.allocator, "constexpr int K={d}, GS=64;", .{key.k}),
-            .norm, .input_norm => try std.fmt.allocPrint(k.allocator, "constexpr int K={d};", .{key.k}),
-            .mlp => try std.fmt.allocPrint(k.allocator, "constexpr int N={d};", .{key.n}),
-            .ane_input, .mlp_ane, .add_ane => try std.fmt.allocPrint(k.allocator, "constant constexpr int H={d}, N={d}, A={d};", .{ key.k, key.n, key.tile }),
-        };
-        defer k.allocator.free(definitions);
-        const source = try std.mem.concat(k.allocator, u8, &.{ template[0..mark], definitions, template[mark + "Q27_SPECIALIZE".len ..] });
+        const source = try specializedSource(k.allocator, key);
         defer k.allocator.free(source);
         const library = try mtl.Library.fromSource(k.device, source, mtl.CompileOptions.mlx());
         defer library.deinit();
@@ -482,4 +465,27 @@ pub fn padded(rows: u32) u32 {
 
 fn bind(e: mtl.ComputeEncoder, refs: anytype) void {
     inline for (refs, 0..) |r, i| e.setBuffer(r.buffer, r.offset, i);
+}
+
+/// The quantized helper specialization compiled by get.
+pub fn specializedSource(a: std.mem.Allocator, key: Key) ![]u8 {
+    const template = switch (key.kind) {
+        .projection => unreachable,
+        .xsum => sources.xsum,
+        .norm => sources.norm_xs,
+        .input_norm => sources.norm_input,
+        .mlp => sources.mlp_xs,
+        .ane_input, .mlp_ane, .add_ane => sources.mlp_ane,
+    };
+    const mark = std.mem.indexOf(u8, template, "Q27_SPECIALIZE") orelse return error.BadKernelSource;
+    const definitions = switch (key.kind) {
+        .projection => unreachable,
+        .xsum => try std.fmt.allocPrint(a, "constexpr int K={d}, GS=64;", .{key.k}),
+        .norm, .input_norm => try std.fmt.allocPrint(a, "constexpr int K={d};", .{key.k}),
+        .mlp => try std.fmt.allocPrint(a, "constexpr int N={d};", .{key.n}),
+        .ane_input, .mlp_ane, .add_ane => try std.fmt.allocPrint(a, "constant constexpr int H={d}, N={d}, A={d};", .{ key.k, key.n, key.tile }),
+    };
+    defer a.free(definitions);
+    const source = try std.mem.concat(a, u8, &.{ template[0..mark], definitions, template[mark + "Q27_SPECIALIZE".len ..] });
+    return source;
 }

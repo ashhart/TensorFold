@@ -219,6 +219,17 @@ fn kernelOf(comptime key: []const u8) sources.glm.Kernel {
 pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
     const k = try gpa.create(Kernels);
     errdefer gpa.destroy(k);
+    try assemble(gpa, device, k, {});
+    return k;
+}
+
+/// Visit the loader's assembled libraries without making pipelines or submitting commands.
+pub fn visitSources(gpa: std.mem.Allocator, device: mtl.Device, visitor: anytype) !void {
+    var k: Kernels = undefined;
+    try assemble(gpa, device, &k, visitor);
+}
+
+fn assemble(gpa: std.mem.Allocator, device: mtl.Device, k: *Kernels, visitor: anytype) !void {
     k.wide = null;
     var jobs: [generated.len + 23]Job = undefined;
     inline for (generated, 0..) |g, i| {
@@ -314,6 +325,10 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
     if (std.mem.eql(u8, comb_src, comb.source)) return error.KernelCompile; // the generated combine changed: its edit no longer applies
     jobs[generated.len + 22] = .{ .device = device, .source = comb_src, .names = comb.functions, .out = @as(*[1]mtl.Pipeline, &k.combine_0) };
 
+    if (comptime @TypeOf(visitor) != void) {
+        for (jobs) |j| try visitor.raw("glm", j.names[0], j.source);
+        return;
+    }
     var sources_seen = std.hash.Wyhash.init(0x6b);
     for (jobs) |j| sources_seen.update(j.source);
     k.source_hash = sources_seen.final();
@@ -350,5 +365,4 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
     k.sparse_combine = sparse_out[2];
     k.index_scores_nax = index_out[0];
     k.index_decode = index_out[1];
-    return k;
 }

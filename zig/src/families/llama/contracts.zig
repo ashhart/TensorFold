@@ -33,9 +33,14 @@ pub fn glueLibrary(device: mtl.Device, a: std.mem.Allocator) !mtl.Library {
 
 /// The prompt attention's text for a geometry, as model.zig builds it (nax.h inlined for this GPU).
 pub fn attentionSource(device: mtl.Device, a: std.mem.Allocator, g: Geometry) ![]u8 {
+    return attentionSourceHeads(device, a, g.heads, g.kv_heads);
+}
+
+/// The loader and contract share the exact geometry prefix.
+pub fn attentionSourceHeads(device: mtl.Device, a: std.mem.Allocator, heads: usize, kv_heads: usize) ![]u8 {
     const body = try frags.source(device, a, ks.llama_attention_nax);
     defer a.free(body);
-    return std.fmt.allocPrint(a, "#define DH {d}\n#define NQ {d}\n#define G {d}\n#define KVH {d}\n#define SCALE {e}f\n{s}", .{ cfg.head_dim, g.heads, g.heads / g.kv_heads, g.kv_heads, cfg.headScale(), body });
+    return std.fmt.allocPrint(a, "#define DH {d}\n#define NQ {d}\n#define G {d}\n#define KVH {d}\n#define SCALE {e}f\n{s}", .{ cfg.head_dim, heads, heads / kv_heads, kv_heads, cfg.headScale(), body });
 }
 
 /// The GEMM forms' text as model.zig builds it.
