@@ -122,6 +122,7 @@ const linux_hip = [_][]const u8{
 
 const linux_host = [_][]const u8{
     "test-bolt-load-host",
+    "test-cache-fit-host",
     "test-checkpoint-io-fast",
     "test-checkpoint-io-host",
     "test-cli-memory-host",
@@ -189,6 +190,7 @@ const linux_host = [_][]const u8{
     "test-nemotron-copies-host",
     "test-omni-slide-host",
     "test-omni-video-host",
+    "test-pdf-worker",
     "test-picture-host",
     "test-pocket-device-host",
     "test-prefill-service-host",
