@@ -81,9 +81,7 @@ pub const Backend = struct {
         errdefer attention.deinit();
         const topk = try core.bf16_topk_gpu.Ops.init(target.device);
         errdefer topk.deinit();
-        // A pair rank's own head holds only its shard's rows; the drafter's spans span both shards, so it
-        // re-prepares the whole lm_head from the checkpoint (every rank maps every shard file), then
-        // compresses it. The single-rank head already covers the whole vocabulary.
+        // A pair rank's own head holds only its shard's rows; the drafter re-prepares the whole lm_head.
         var whole: ?@import("../gpu_weights.zig").FullHead = null;
         defer if (whole) |*h| {
             for (h.owned.items) |*buf| buf.deinit();
