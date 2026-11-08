@@ -1,9 +1,85 @@
 //! Planted source paths must fail even inside compressed CUDA payloads.
 const std = @import("std");
 const paths = @import("release_paths.zig");
+const dispatch_mod = @import("release_paths_dispatch.zig");
+const walk = @import("release_paths_walk.zig");
 const cubin = @import("contract").cubin;
 const a = std.testing.allocator;
 const root = "/opt/private-build-root";
+
+test "release paths: an unknown entry kind is lstat'd and dispatched, a failed lstat refuses" {
+    var dummy: u8 = 0;
+    const ctx = @as(*anyopaque, &dummy);
+    try std.testing.expectEqual(dispatch_mod.Decision.file, dispatch_mod.dispatch(.unknown, ctx, fileKind));
+    try std.testing.expectEqual(dispatch_mod.Decision.sym_link, dispatch_mod.dispatch(.unknown, ctx, symLinkKind));
+    try std.testing.expectEqual(dispatch_mod.Decision.refuse, dispatch_mod.dispatch(.unknown, ctx, failKind));
+    try std.testing.expectEqual(dispatch_mod.Decision.file, dispatch_mod.dispatch(.file, ctx, failKind));
+    try std.testing.expectEqual(dispatch_mod.Decision.directory, dispatch_mod.dispatch(.directory, ctx, failKind));
+    try std.testing.expectEqual(dispatch_mod.Decision.sym_link, dispatch_mod.dispatch(.sym_link, ctx, failKind));
+}
+
+fn fileKind(ctx: *anyopaque) ?std.Io.File.Kind {
+    _ = ctx;
+    return .file;
+}
+fn symLinkKind(ctx: *anyopaque) ?std.Io.File.Kind {
+    _ = ctx;
+    return .sym_link;
+}
+fn failKind(ctx: *anyopaque) ?std.Io.File.Kind {
+    _ = ctx;
+    return null;
+}
+
+test "release paths: a release tree refuses a symlink to a file, a directory, a dangling target, and a symlink root" {
+    const io = std.testing.io;
+    // A nested symlink to a regular file. The first symlink creation is the
+    // probe: skip the whole test where symlinks can't be created (Windows
+    // without the privilege).
+    {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.createDir(io, "bin", .default_dir);
+        try tmp.dir.writeFile(io, .{ .sub_path = "bin/real.bin", .data = "clean" });
+        tmp.dir.symLink(io, "bin/real.bin", "bin/link.bin", .{}) catch return error.SkipZigTest;
+        const dir = try tmp.dir.realPathFileAlloc(io, ".", a);
+        defer a.free(dir);
+        try std.testing.expect(walk.checkTreeDir(io, a, root, dir));
+    }
+    // A nested symlink to a directory.
+    {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.createDir(io, "realdir", .default_dir);
+        try tmp.dir.createDir(io, "sub", .default_dir);
+        try tmp.dir.symLink(io, "realdir", "sub/linkdir", .{ .is_directory = true });
+        const dir = try tmp.dir.realPathFileAlloc(io, ".", a);
+        defer a.free(dir);
+        try std.testing.expect(walk.checkTreeDir(io, a, root, dir));
+    }
+    // A dangling symlink.
+    {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.createDir(io, "sub", .default_dir);
+        try tmp.dir.symLink(io, "does-not-exist", "sub/dangling", .{});
+        const dir = try tmp.dir.realPathFileAlloc(io, ".", a);
+        defer a.free(dir);
+        try std.testing.expect(walk.checkTreeDir(io, a, root, dir));
+    }
+    // A symlink given as the tree root.
+    {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.createDir(io, "stagedir", .default_dir);
+        try tmp.dir.symLink(io, "stagedir", "rootlink", .{ .is_directory = true });
+        const tmp_path = try tmp.dir.realPathFileAlloc(io, ".", a);
+        defer a.free(tmp_path);
+        const link = try std.fs.path.join(a, &.{ tmp_path, "rootlink" });
+        defer a.free(link);
+        try std.testing.expect(walk.checkTreeDir(io, a, root, link));
+    }
+}
 
 test "release paths: address-table object-extension words are not paths in raw or UTF16LE bytes" {
     const rows = [_][16]u8{
