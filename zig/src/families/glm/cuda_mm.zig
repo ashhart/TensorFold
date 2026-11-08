@@ -61,7 +61,7 @@ pub const Kernels = struct {
             k.tile_packed[wi] = try m.function(std.fmt.comptimePrint("glm_mm_tile{d}", .{b}));
         }
         try k.prompt.allowDynamicShared(smem(128));
-        k.pdl = try @import("sys").environment.read(bool, "TF_GLM_PDL", true);
+        k.pdl = try @import("sys").environment.value(bool, "TF_GLM_PDL", @import("profile").lookup("TF_GLM_PDL"), true);
         return k;
     }
 };
