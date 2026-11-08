@@ -230,7 +230,7 @@ test "stable profile: every DeepSeek audit group has independent scoped metadata
 }
 
 test "stable profile: GLM's direct switches register their off and on directions without supplying a value" {
-    inline for (.{ .TF_GLM_HOST_CACHE, .TF_GLM_VISION_HOST, .TF_GLM_PROF, .TF_GLM_LINK_WAIT }) |id| {
+    inline for (.{ .TF_GLM_HOST_CACHE, .TF_GLM_VISION_HOST }) |id| {
         const e = p.entry(id);
         try t.expectEqual(p.Syntax.one, e.syntax);
         try t.expect(e.differs("1"));
@@ -242,7 +242,7 @@ test "stable profile: GLM's direct switches register their off and on directions
         try t.expect(e.differs("0"));
         for ([_][]const u8{ "1", "", "00", "false", " 0 " }) |raw| try t.expect(!e.differs(raw));
     }
-    inline for (.{ .TF_GLM_HOST_CACHE, .TF_GLM_VISION_HOST, .TF_GLM_PROF, .TF_GLM_LINK_WAIT, .TF_GLM_PDL, .TF_GLM_PROMPT_STEPS, .TF_GLM_SHARED }) |id| {
+    inline for (.{ .TF_GLM_HOST_CACHE, .TF_GLM_VISION_HOST, .TF_GLM_PDL, .TF_GLM_PROMPT_STEPS, .TF_GLM_SHARED }) |id| {
         const e = p.entry(id);
         try t.expect(e.applies("glm5_next", "cuda") and !e.applies("glm5_next", "metal") and !e.applies("qwen3_5", "cuda"));
         try t.expectEqual(p.Class.identical, e.class);
@@ -250,4 +250,6 @@ test "stable profile: GLM's direct switches register their off and on directions
         try t.expect(p.resolve(.stable, id, null) == null);
         try t.expectEqual(id, p.registered(@tagName(id)).?);
     }
+    // timing sections and waiting for an upload choose no policy
+    for ([_][]const u8{ "TF_GLM_PROF", "TF_GLM_LINK_WAIT" }) |name| try t.expect(p.registered(name) == null);
 }

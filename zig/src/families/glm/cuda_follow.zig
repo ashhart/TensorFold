@@ -58,7 +58,7 @@ pub const Link = struct {
             var owned = buf;
             owned.free();
         }
-        const wait = try @import("sys").environment.value(bool, "TF_GLM_LINK_WAIT", @import("profile").lookup("TF_GLM_LINK_WAIT"), false);
+        const wait = try @import("sys").environment.read(bool, "TF_GLM_LINK_WAIT", false);
         return .{ .d = d, .lib = lib, .comm = comm, .stream = stream, .buf = buf, .ids = try gpa.alloc(u32, max_ids), .gpa = gpa, .wait = wait };
     }
 
