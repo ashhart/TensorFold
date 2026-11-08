@@ -1,5 +1,6 @@
 //! The listening socket: SO_REUSEADDR only (never REUSEPORT, so a second server on the port fails), backlog 128.
 const std = @import("std");
+const builtin = @import("builtin");
 const platform = @import("sys");
 const posix = platform.posix;
 const net = std.Io.net;
@@ -12,6 +13,8 @@ var nofile_logged = std.atomic.Value(bool).init(false);
 pub const Listener = struct {
     fd: posix.socket_t,
     unix_path: ?[:0]const u8 = null,
+    /// The bound socket file's device and inode: close removes the path only while it is still that file.
+    unix_file: [2]u64 = .{ 0, 0 },
 
     pub fn open(address: net.IpAddress) !Listener {
         var storage: Threaded.PosixAddress = undefined;
@@ -33,7 +36,7 @@ pub const Listener = struct {
         return .{ .fd = fd };
     }
 
-    /// A Unix stream socket only its owner can connect to; a path already there is refused, never replaced.
+    /// An owner-only Unix socket; refuses an existing path and a parent others can write to unless sticky.
     pub fn openUnix(path: [:0]const u8) !Listener {
         if (comptime platform.windows) return error.Unsupported;
         const c = platform.c;
@@ -41,15 +44,26 @@ pub const Listener = struct {
         if (path.len == 0 or path.len >= addr.path.len) return error.NameTooLong;
         @memset(&addr.path, 0);
         @memcpy(addr.path[0..path.len], path);
+        var dir_buf: [@sizeOf(@TypeOf(addr.path)) + 1]u8 = undefined;
+        const dir = try std.fmt.bufPrintSentinel(&dir_buf, "{s}", .{std.fs.path.dirnamePosix(path) orelse "."}, 0);
+        var st: c.Stat = undefined;
+        if (c.stat(dir, &st) != 0) return error.NoParentDirectory;
+        if (@as(u32, @intCast(st.mode)) & 0o022 != 0 and @as(u32, @intCast(st.mode)) & c.S.ISVTX == 0) return error.ParentWritableByOthers;
         const fd = c.socket(c.AF.UNIX, c.SOCK.STREAM, 0);
         if (fd < 0) return error.SocketFailed;
         errdefer _ = c.close(fd);
-        if (c.bind(fd, @ptrCast(&addr), @sizeOf(c.sockaddr.un)) != 0) return error.BindFailed;
+        switch (posix.errno(c.bind(fd, @ptrCast(&addr), @sizeOf(c.sockaddr.un)))) {
+            .SUCCESS => {},
+            .ADDRINUSE => return error.PathExists,
+            .ACCES => return error.AccessDenied,
+            else => return error.BindFailed,
+        }
         errdefer _ = c.unlink(path);
         // Set before listen: no one can connect while the socket still has the default mode.
         if (c.chmod(path, 0o600) != 0) return error.AccessDenied;
+        const file = fileId(path) orelse return error.BindFailed;
         if (c.listen(fd, 128) != 0) return error.ListenFailed;
-        return .{ .fd = fd, .unix_path = path };
+        return .{ .fd = fd, .unix_path = path, .unix_file = file };
     }
 
     pub fn boundAddress(l: Listener) ?net.IpAddress {
@@ -79,8 +93,13 @@ pub const Listener = struct {
             switch (e) {
                 .SUCCESS => {
                     const fd: posix.socket_t = @intCast(rc);
-                    // A Unix peer has no address or Nagle; it is local, so it reads as loopback.
-                    if (l.unix_path != null) return .{ .fd = fd, .peer = .{ .ip4 = .loopback(0) } };
+                    // A Unix peer reads as loopback; its user is checked, as not every OS enforces the mode.
+                    if (l.unix_path != null) {
+                        if (peerUid(fd) == platform.c.geteuid()) return .{ .fd = fd, .peer = .{ .ip4 = .loopback(0) } };
+                        _ = posix.system.close(fd);
+                        log.line("refused a Unix socket connection from another user", .{});
+                        continue;
+                    }
                     const one: c_int = 1;
                     posix.setsockopt(fd, posix.IPPROTO.TCP, posix.TCP.NODELAY, std.mem.asBytes(&one)) catch |err| {
                         _ = posix.system.close(fd);
@@ -106,10 +125,37 @@ pub const Listener = struct {
         _ = posix.system.shutdown(l.fd, posix.SHUT.RDWR);
         _ = posix.system.close(l.fd);
         if (!platform.windows) if (l.unix_path) |path| {
-            _ = platform.c.unlink(path);
+            const now = fileId(path) orelse return;
+            if (std.mem.eql(u64, &now, &l.unix_file)) _ = platform.c.unlink(path);
         };
     }
 };
+
+/// A path's device and inode.
+fn fileId(path: [:0]const u8) ?[2]u64 {
+    var st: platform.c.Stat = undefined;
+    if (platform.c.stat(path, &st) != 0) return null;
+    return .{ widen(st.dev), widen(st.ino) };
+}
+
+fn widen(x: anytype) u64 {
+    return @as(@Int(.unsigned, @bitSizeOf(@TypeOf(x))), @bitCast(x));
+}
+
+/// The effective user ID of a Unix socket's peer (SO_PEERCRED on Linux, getpeereid on macOS); null when unknown.
+fn peerUid(fd: posix.socket_t) ?std.c.uid_t {
+    if (comptime platform.windows) return null;
+    if (comptime builtin.os.tag == .linux) {
+        var cred: extern struct { pid: i32, uid: u32, gid: u32 } = undefined;
+        var len: posix.socklen_t = @sizeOf(@TypeOf(cred));
+        if (std.c.getsockopt(fd, std.c.SOL.SOCKET, std.c.SO.PEERCRED, &cred, &len) != 0) return null;
+        return cred.uid;
+    }
+    var uid: std.c.uid_t = undefined;
+    var gid: std.c.gid_t = undefined;
+    return if (getpeereid(fd, &uid, &gid) == 0) uid else null;
+}
+extern "c" fn getpeereid(fd: c_int, uid: *std.c.uid_t, gid: *std.c.gid_t) c_int;
 
 /// Whether this failure is the burst's first descriptor exhaustion (EMFILE, ENFILE): one log line per burst.
 fn firstNofile(e: posix.E) bool {
@@ -221,7 +267,7 @@ test "the accepted-stream test stops when no usable connection arrives" {
     try std.testing.expect(acceptWithin(listener, 20) == null);
 }
 
-test "a Unix socket listener is owner-only, accepts, refuses an existing path and removes its path" {
+test "a Unix socket listener is owner-only, accepts its owner, refuses an existing path and removes only its own path" {
     if (platform.windows) return error.SkipZigTest;
     const c = platform.c;
     var buf: [64]u8 = undefined;
@@ -229,7 +275,7 @@ test "a Unix socket listener is owner-only, accepts, refuses an existing path an
     const listener = try Listener.openUnix(path);
     var closed = false;
     defer if (!closed) listener.close();
-    try std.testing.expectError(error.BindFailed, Listener.openUnix(path));
+    try std.testing.expectError(error.PathExists, Listener.openUnix(path));
     var st: c.Stat = undefined;
     try std.testing.expectEqual(@as(c_int, 0), c.stat(path, &st));
     try std.testing.expectEqual(@as(u32, 0o600), @as(u32, @intCast(st.mode)) & 0o777);
@@ -241,9 +287,35 @@ test "a Unix socket listener is owner-only, accepts, refuses an existing path an
     defer _ = c.close(client);
     try std.testing.expectEqual(@as(c_int, 0), c.connect(client, @ptrCast(&addr), @sizeOf(c.sockaddr.un)));
     const accepted = acceptWithin(listener, 2000) orelse return error.AcceptFailed;
+    try std.testing.expectEqual(c.geteuid(), peerUid(accepted.fd).?);
     _ = posix.system.close(accepted.fd);
     try std.testing.expect(listener.boundAddress() == null);
     listener.close();
     closed = true;
     try std.testing.expect(c.access(path, c.F_OK) != 0);
+}
+
+test "a Unix socket is refused in a directory others can write to, and close leaves a path that replaced it" {
+    if (platform.windows) return error.SkipZigTest;
+    const c = platform.c;
+    var dir_buf: [64]u8 = undefined;
+    const dir = try std.fmt.bufPrintSentinel(&dir_buf, "/tmp/tf-listener-dir-{d}", .{c.getpid()}, 0);
+    try std.testing.expectEqual(@as(c_int, 0), c.mkdir(dir, 0o700));
+    defer _ = c.rmdir(dir);
+    var buf: [96]u8 = undefined;
+    const path = try std.fmt.bufPrintSentinel(&buf, "{s}/s.sock", .{dir}, 0);
+    _ = c.chmod(dir, 0o777);
+    try std.testing.expectError(error.ParentWritableByOthers, Listener.openUnix(path));
+    _ = c.chmod(dir, 0o1777);
+    const sticky = try Listener.openUnix(path);
+    sticky.close();
+    _ = c.chmod(dir, 0o700);
+    const listener = try Listener.openUnix(path);
+    try std.testing.expectEqual(@as(c_int, 0), c.unlink(path));
+    const other = c.open(path, .{ .CREAT = true, .ACCMODE = .WRONLY }, @as(c.mode_t, 0o600));
+    try std.testing.expect(other >= 0);
+    _ = c.close(other);
+    defer _ = c.unlink(path);
+    listener.close();
+    try std.testing.expectEqual(@as(c_int, 0), c.access(path, c.F_OK));
 }
