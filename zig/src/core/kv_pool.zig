@@ -151,14 +151,15 @@ pub fn holds(l: Layout, b: Budget) bool {
     return rest -| held(l, b, fit, windows(l, b, rest) - 1) >= b.cache;
 }
 
-/// The --prompt-cache-gib for `n` slots where `b` plans, when `holds` says it fits (else null), and the most it holds.
+/// The --prompt-cache-gib for `n` slots where `b` plans, when asking it keeps all n (else null), and the most it holds.
 pub fn holding(l: Layout, b: Budget, n: usize) struct { gib: ?u64, most: usize } {
     const gib = holdingGib(n, l.snap_bytes);
     var asked = b; // an asked cache comes before every window but the engine's own: the most a cache can be here
     asked.asked = true;
     asked.snaps = n;
     asked.cache = gib << 30;
-    if (holds(l, asked)) return .{ .gib = gib, .most = n };
+    const keeps = if (plan(l, asked)) |p| p.snaps else |_| 0; // clipped to the rest: all n short of the whole GiB
+    if (keeps >= n) return .{ .gib = gib, .most = n };
     asked.cache = std.math.maxInt(u64);
     return .{ .gib = null, .most = if (plan(l, asked)) |p| p.snaps else |_| 0 };
 }

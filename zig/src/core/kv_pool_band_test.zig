@@ -94,7 +94,7 @@ test "outside that band the room's count of windows stands: GLM at TP=3 and TP=2
     });
 }
 
-test "a --prompt-cache-gib is named for n slots only where holds says it keeps them, else the most the room holds" {
+test "a --prompt-cache-gib is named for n slots only where asking it keeps them all, else the most the room holds" {
     const g: u64 = 1 << 30;
     const tp2: kv.Layout = .{ .fixed_bytes = 340 * mib, .token_bytes = 13_056, .page_tokens = 512, .snap_bytes = 180 * mib };
     // TP=2, four streams, a 1M window, a 16.5 GiB room: only the engine's own window comes first, asked or not
@@ -106,6 +106,14 @@ test "a --prompt-cache-gib is named for n slots only where holds says it keeps t
     var roomy = b;
     roomy.room = 24 * g;
     try expectEqual(@as(?u64, 3), kv.holding(tp2, roomy, 16).gib);
+    var strip = b; // 16.69 GiB: the rest past the engine's window holds the 16 slots but not all of 3 GiB
+    strip.room = 16 * g + 11 * g / 16;
+    var three = strip;
+    three.asked = true;
+    three.cache = 3 * g;
+    try expect(!kv.holds(tp2, three));
+    try expectEqual(@as(usize, 16), (try kv.plan(tp2, three)).snaps); // clipped to the rest, 3 asked keeps all 16
+    try expectEqual(@as(?u64, 3), kv.holding(tp2, strip, 16).gib);
     // TP=3, eight streams, just past where the rest holds a third window: under a slot of cache; 4 GiB asked holds 32
     const tp3: kv.Layout = .{ .fixed_bytes = 291 * mib, .token_bytes = 13_056, .page_tokens = 512, .snap_bytes = 115 * mib };
     const edge: kv.Budget = .{ .room = 40 * g + 5 * g / 16, .engine = 0, .lanes = 8, .fixed = true, .cache = 16 * g, .snaps = 32, .window = 1_048_576 + 8, .engine_paged = true, .slots_only = true };

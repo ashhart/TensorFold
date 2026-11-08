@@ -246,7 +246,7 @@ pub fn cacheText(a: Allocator, over_pages: bool, asked: ?usize, paged: ?Plan, l:
     const snaps = paged.?.snaps;
     const slot = l.?.snap_bytes;
     if (snaps > 0 and snaps >= n) return std.fmt.allocPrint(a, ", {d} kept states' slots ({d:.1} GiB) and the prompt cache over the pool's pages", .{ snaps, toGib(snaps * slot) });
-    const h = kv_pool.holding(l.?, planned.?, n); // a --prompt-cache-gib named only where `holds` says it keeps all n
+    const h = kv_pool.holding(l.?, planned.?, n); // a --prompt-cache-gib named only where asking it keeps all n
     const more = if (h.gib) |gib| try std.fmt.allocPrint(a, "--prompt-cache-gib {d} holds all {d}", .{ gib, n }) else try std.fmt.allocPrint(a, "the room holds {d} at any --prompt-cache-gib", .{h.most});
     if (snaps == 0) return std.fmt.allocPrint(a, ", no prompt cache (none of TF_KV_SHARE={d} kept states' slots fit; {s})", .{ n, more });
     return std.fmt.allocPrint(a, ", {d} of TF_KV_SHARE={d} kept states' slots ({d:.1} GiB; {s}) and the prompt cache over the pool's pages", .{ snaps, n, toGib(snaps * slot), more });
@@ -293,6 +293,10 @@ test "the startup line names TF_KV_SHARE's slots, and when the cache holds fewer
     var tight = roomy;
     tight.room = (12 << 30) / 5; // 2.4 GiB: no --prompt-cache-gib keeps more than 13 here, so the line names none
     try std.testing.expectEqualStrings(", 13 of TF_KV_SHARE=16 kept states' slots (2.3 GiB; the room holds 13 at any --prompt-cache-gib) and the prompt cache over the pool's pages", try cacheText(a, true, 16, some, l, tight, ", own"));
+    var strip = tight;
+    strip.room = 2976 << 20; // the 16 slots fit and 3 GiB doesn't: an asked 3 is clipped to the rest and keeps all 16
+    some.snaps = 15;
+    try std.testing.expectEqualStrings(", 15 of TF_KV_SHARE=16 kept states' slots (2.6 GiB; --prompt-cache-gib 3 holds all 16) and the prompt cache over the pool's pages", try cacheText(a, true, 16, some, l, strip, ", own"));
     some.snaps = 0;
     try std.testing.expectEqualStrings(", no prompt cache (none of TF_KV_SHARE=16 kept states' slots fit; --prompt-cache-gib 3 holds all 16)", try cacheText(a, true, 16, some, l, roomy, ", own"));
     tight.room = 100 << 20;

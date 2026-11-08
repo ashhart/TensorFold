@@ -16,7 +16,7 @@ pub fn cacheable(s: *const Stream) bool {
     return s.prompt_logprobs == null and !s.untaught and s.embedding == null and cacheKey(s) != null;
 }
 
-/// Below 4 states a stream: that many, and their slots' --prompt-cache-gib where `holds` says it fits, else the most.
+/// Below 4 states a stream: that many, and their slots' --prompt-cache-gib where asking it keeps all, else the most.
 pub fn advice(states: usize, parallel: usize, l: kv.Layout, planned: ?kv.Budget) ?struct { states: usize, gib: ?u64, most: usize } {
     const want = 4 * parallel;
     if (states >= want) return null;
@@ -46,6 +46,9 @@ test "TF_KV_SHARE: under 4 planned states a GLM stream, the advice names 4 a str
     var wide = tight;
     wide.room = 24 * g;
     try std.testing.expectEqual(@as(?u64, 3), advice(15, 4, l, wide).?.gib);
+    var strip = tight;
+    strip.room = 16 * g + 11 * g / 16; // the 16 slots fit and 3 GiB doesn't: an asked 3 keeps all 16, so it is named
+    try std.testing.expectEqual(@as(?u64, 3), advice(15, 4, l, strip).?.gib);
 }
 
 test "TF_KV_SHARE: up to 64 states is a plan's, 65 is refused" {
