@@ -254,6 +254,7 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/qwen35_layers.zig").wire(b, test_step);
     @import("zig/build/dev_tools.zig").wire(b, target);
     @import("zig/build/profile.zig").wire(b, test_step);
+    @import("zig/build/host_ci.zig").steps(b);
     @import("zig/build/test_reads.zig").wire(b); // last: it adds to the steps everything above declared
 }
 
