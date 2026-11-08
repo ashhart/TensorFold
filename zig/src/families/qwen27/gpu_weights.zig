@@ -416,8 +416,7 @@ fn weightsOf(t: projection.Triple, n: usize, k: usize) row_gpu.Weights {
     return .{ .w = t.weight.buffer, .w_off = t.weight.offset, .scales = t.scales.buffer, .s_off = t.scales.offset, .biases = t.biases.buffer, .b_off = t.biases.offset, .n = n, .k = k, .group = t.group, .bits = t.bits };
 }
 
-/// The whole lm_head prepared from the checkpoint files: a pair rank's drafter compresses its vocabulary
-/// spans from it, since the rank's own head holds only its shard's rows. The caller frees `owned`.
+/// The whole lm_head from the checkpoint files: a pair rank's drafter compresses its vocabulary spans from it.
 pub const FullHead = struct { linear: Linear, owned: std.ArrayList(mtl.Buffer) };
 
 pub fn fullHead(allocator: std.mem.Allocator, device: mtl.Device, checkpoint: *const cp.Checkpoint, s: *const cfg.Shard, w: widths.Width) !FullHead {
