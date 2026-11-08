@@ -52,6 +52,12 @@ fn nvfp4(a: Allocator, t: *const table.Table, key: []const u8) !Tensor {
     if (g.numel() != 1) return refuse(b[2][0..], "NVFP4's second scale is one number");
     if (s.dtype != .f8_e4m3 and s.dtype != .f32) return refuse(b[1][0..], "NVFP4 scales are E4M3 or F32");
     const global = convert.load(.f32, g.bytes, 0);
+    if (!std.math.isFinite(global) or global == 0) return refuse(b[2][0..], "NVFP4's second scale is zero, infinite or nan");
+    if (s.dtype == .f8_e4m3) {
+        for (s.bytes) |byte| if (byte & 0x7f == 0x7f) return refuse(b[1][0..], "an NVFP4 scale is E4M3 nan");
+    } else {
+        for (0..s.numel()) |i| if (!std.math.isFinite(convert.load(.f32, s.bytes, i))) return refuse(b[1][0..], "an NVFP4 scale is infinite or nan");
+    }
     const out = try a.alloc(u16, n * k);
     errdefer a.free(out);
     for (0..n) |row| {
@@ -83,6 +89,10 @@ fn fp8(a: Allocator, t: *const table.Table, key: []const u8) !Tensor {
     const k = w.shape[1];
     if (s.dtype != .f32) return refuse(b[1][0..], "FP8's weight scale is F32");
     if (s.numel() != 1 and s.numel() != n) return refuse(b[1][0..], "FP8's weight scale is one number or one a row");
+    for (0..s.numel()) |i| {
+        const scale = convert.load(.f32, s.bytes, i);
+        if (!std.math.isFinite(scale)) return refuse(b[1][0..], "FP8's weight scale is infinite or nan");
+    }
     const out = try a.alloc(u16, n * k);
     errdefer a.free(out);
     for (0..n) |row| {
