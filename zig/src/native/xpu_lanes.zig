@@ -431,7 +431,7 @@ pub const Lanes = struct {
         var reqs: [16]*const be.DraftRequest = undefined;
         var ni: usize = 0;
         var depth: u32 = 0;
-        for (requests) |q| {
+        for (requests) |*q| { // by pointer: reqs keeps each request (a capture's address is one slot for all)
             const slot = b.slotOf(q.stream) orelse return error.UnknownStream;
             b.chain_n[slot] = 0;
             if (q.rows) |rows| if (b.count > 0) {
@@ -445,7 +445,7 @@ pub const Lanes = struct {
             if (q.depth == 0 or ni == items.len) continue;
             items[ni] = .{ .slot = slot, .pending = if (q.rows != null) q.follow[q.follow.len - 1] else try b.value(q.first orelse return error.NoFirstToken) };
             asked[ni] = @min(q.depth, b.nodes);
-            reqs[ni] = &q;
+            reqs[ni] = q;
             depth = @max(depth, @min(asked[ni], b.block - 1));
             ni += 1;
         }
