@@ -205,7 +205,7 @@ const Snaps = struct {
         const st = try q.snapshot.saveSlot(h.gpa, &h.runner, slot, h.back.ringOf(slot), at, &h.spares);
         return @ptrCast(st);
     }
-    fn restore(_: *anyopaque, _: ?*anyopaque, _: pc.Saved) anyerror!void {
+    pub fn restore(_: *anyopaque, _: ?*anyopaque, _: pc.Saved) anyerror!void {
         return error.RestoredInPrefill; // the backend restores a stream's kept state in its prompt pass
     }
     fn drop(ptr: *anyopaque, saved: pc.Saved) void {
@@ -248,6 +248,52 @@ const Left = struct {
     }
 };
 
+/// Kept states of a fake family whose bytes grow as the 27B's K/V rows (64 KiB a token); `saved` is never read.
+pub const FakeStates = struct {
+    live: usize = 0,
+    pub fn bytes(_: *anyopaque, at: u32) u64 {
+        return @as(u64, at) << 16;
+    }
+    pub fn save(ptr: *anyopaque, _: ?*anyopaque, at: u32) anyerror!pc.Saved {
+        const f: *FakeStates = @ptrCast(@alignCast(ptr));
+        f.live += 1;
+        return @ptrFromInt(@as(usize, at) << 4);
+    }
+    pub fn restore(_: *anyopaque, _: ?*anyopaque, _: pc.Saved) anyerror!void {}
+    pub fn drop(ptr: *anyopaque, _: pc.Saved) void {
+        const f: *FakeStates = @ptrCast(@alignCast(ptr));
+        f.live -= 1;
+    }
+};
+
+test "--prompt-cache-gib 40: a later 192k-token slot takes its room back from kept states, never the one it restores" {
+    const gpa = std.testing.allocator;
+    const g: u64 = 1 << 30;
+    var fake: FakeStates = .{};
+    var store = pc.Store.init(gpa, .{ .ptr = &fake, .vtable = &.{ .bytes = FakeStates.bytes, .save = FakeStates.save, .restore = FakeStates.restore, .drop = FakeStates.drop } }, .{}, 40 * g);
+    defer store.deinit();
+    const tokens = try gpa.alloc(u32, 200_000);
+    defer gpa.free(tokens);
+    for ([_]u32{ 100_000, 150_000, 190_000 }, 0..) |at, k| { // three conversations' histories: 6.1, 9.2 and 11.6 GiB
+        for (tokens, 0..) |*t, i| t.* = @intCast(k * 1_000_000 + i);
+        try std.testing.expect(store.keep(tokens[0 .. at + 1], at, null, &.{}, &.{}));
+    }
+    const restoring = store.entries.items[2].saved; // the newest conversation's next turn resumes its state
+    const slot: u64 = 12_900_000_000; // a --context 196608 slot's K/V rows, taps ring and scratch
+    try std.testing.expect(!takeRoom(null, 4 * g, slot, null, tokens)); // without a cache to give back: LaneMemory
+    try std.testing.expect(takeRoom(&store, 4 * g, slot, restoring, tokens)); // 4 GiB free + 6.1 + 9.2 freed
+    try std.testing.expectEqual(@as(usize, 1), store.entries.items.len);
+    try std.testing.expect(store.entries.items[0].saved == restoring);
+    try std.testing.expect(!takeRoom(&store, 0, 2 * slot, restoring, tokens)); // its own state never goes
+    try std.testing.expectEqual(@as(usize, 1), fake.live);
+}
+
+test "a reply's end keeps its prompt's born: newest conversations precede redundant history under pressure" {
+    var fake: FakeStates = .{};
+    const snapshots: pc.Snapshots = .{ .ptr = &fake, .vtable = &.{ .bytes = FakeStates.bytes, .save = FakeStates.save, .restore = FakeStates.restore, .drop = FakeStates.drop } };
+    try @import("qwen27_reply_cache_test.zig").replyBorn(keepEnd, snapshots, &fake.live);
+}
+
 /// Memory the slots past the ready ones take on first use: their K/V rows and taps rings.
 fn laterBytes(h: *const Host) u64 {
     const ring_bytes: usize = if (h.draft) |d| @as(usize, d.model.ring().window) * d.model.ring().stride else if (h.sn_mtp) |m| m.slotBytes() else 0;
@@ -259,10 +305,6 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocato
     try @import("qwen27_prompt_floor.zig").environment(a, platform.environment.rawText("TF_PROMPT_ROWS"), why);
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
-    if (o.drafter) |d| _ = q.dflash.config.admit(gpa, io, dir, d) catch |err| {
-        why.* = try drafterRefusal(a, dir, d, err);
-        return err;
-    };
     // glm_dsa's order: the seam exists before the weights load and ready() comes once every GPU allocation is in.
     var hw: ?mtl.Device = null;
     var pair: ?*lb.Pair = null;
@@ -285,6 +327,11 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocato
             return err;
         };
     errdefer model.deinit();
+    // The drafter's config probe runs after the target loads: a pair's rank 1 is refused at its load, and this probe's reads must not be on that teardown path.
+    if (o.drafter) |d| _ = q.dflash.config.admit(gpa, io, dir, d) catch |err| {
+        why.* = try drafterRefusal(a, dir, d, err);
+        return err;
+    };
     if (@import("qwen27_mtp_flags.zig").deviceRefusal(o.mtp_drafts, model.device.tensorUnits(), try q.decode_round.pagesOn())) |r| {
         why.* = r.why;
         return r.err;
@@ -337,7 +384,9 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     const profiling = platform.c.getenv("TF_Q27_PASS_PROFILE") != null;
     const gpa = if (profiling) h.counted.allocator() else parent;
     var draft_model = drafter;
-    const owns_draft = drafter == null and o.drafter != null;
+    // A pair's rank 1 never proposes: it replays rank 0's tree rounds (.tree/.commit), so it loads no drafter.
+    const follower = pair != null and pair.?.rank != 0;
+    const owns_draft = drafter == null and o.drafter != null and !follower;
     if (owns_draft) draft_model = q.dflash.runtime_model.Model.loadSpan(gpa, io, model, o.drafter.?, if (o.drafter_bits == 4) .prepared_q4_reference else .bf16_reference, capacity + window) catch |err| {
         why.* = try std.fmt.allocPrint(a, "the native Qwen3.8-27B drafter cannot load {s} ({s})", .{ o.drafter.?, @errorName(err) });
         return error.DrafterLoad;
@@ -613,5 +662,8 @@ test {
         _ = @import("qwen27_served_test.zig");
         _ = @import("qwen27_startup_test.zig");
         _ = @import("qwen27_startup_line.zig");
+        _ = @import("qwen27_pair_tests.zig");
+        _ = @import("qwen27_served_cache_test.zig");
     }
+}
 }
