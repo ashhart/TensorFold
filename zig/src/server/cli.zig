@@ -319,8 +319,7 @@ pub fn parse(a: Allocator, argv: []const []const u8, u: *Usage) error{ Usage, Ou
         if (std.mem.eql(u8, name, "--host") or std.mem.eql(u8, name, "--port")) tcp_flag = name;
         try apply(a, &out, name, value, u, &repeated);
     }
-    if (out.unix_socket != null and builtin.os.tag == .windows) return fail(u, a, "argument --unix-socket: not served on Windows", .{});
-    if (out.unix_socket != null) if (tcp_flag) |t| return fail(u, a, "argument --unix-socket: not allowed with {s}", .{t});
+    if (out.unix_socket != null) if (builtin.os.tag == .windows) return fail(u, a, "argument --unix-socket: not served on Windows", .{}) else if (tcp_flag) |t| return fail(u, a, "argument --unix-socket: not allowed with {s}", .{t});
     out.model = model orelse return fail(u, a, "the following arguments are required: model", .{});
     if ((out.cfg.batched or out.cfg.force_guided) and out.cfg.options() == null) return fail(u, a, "--cfg-batched and --cfg-force-guided need --cfg-gamma or --cfg-allow-request-gamma", .{});
     try ranks(u, a, out);
