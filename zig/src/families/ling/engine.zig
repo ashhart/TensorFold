@@ -128,6 +128,7 @@ pub const Engine = struct {
         }
         try e.bind(0);
         e.graphs = try steps.Graphs.create(gpa, d);
+        errdefer if (e.graphs) |g| g.destroy();
         try e.stream.synchronize();
         return e;
     }
