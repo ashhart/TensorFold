@@ -253,6 +253,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
   GB10) with its joint schema head on the GPU (HIP's kernels and products, on cuBLASLt with FP32 compute), and chat
   is refused by name; `TF_LANE_TRACE` gains a `cancel` line for a request cancelled between two prompt calls (#2458,
   part of #2324). Thanks to @laudney.
+- Server: `--unix-socket PATH` listens on a new owner-only Unix socket instead of TCP, so a local client can reach the server without its requests crossing a network interface (#2389). Thanks to @kotevcode.
 
 ## 1.2.4
 
