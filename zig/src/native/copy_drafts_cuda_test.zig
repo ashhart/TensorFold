@@ -447,7 +447,7 @@ test "GLM window prices: every width from the timed ones, straight between them 
     try std.testing.expect(!f.usable(k));
 }
 
-test "GLM window prices: timed ones replace the seed tables, with copies on and off, on both drafters" {
+test "GLM window prices: timed ones replace the seed windows, DFlash2's shared rounds keep theirs, on both drafters" {
     const f = @import("glm_cuda");
     var k: f.lane_costs.Kept = .{ .ms = undefined, .step_ms = 0.25, .fact = 0 };
     for (&k.ms, f.lane_costs.widths) |*m, w| m.* = 9 + 0.5 * @as(f64, @floatFromInt(w));
@@ -463,10 +463,10 @@ test "GLM window prices: timed ones replace the seed tables, with copies on and 
             const m = b.factsWithCopies(copies);
             try std.testing.expectEqual(@as(usize, f.lanes.max_rows), m.window_costs.len);
             try std.testing.expectEqual(k.ms[0], m.window_costs[0].ms);
-            try std.testing.expectEqual(@as(usize, 0), m.shared_costs.len);
+            try std.testing.expectEqual(if (drafter == null) @as(usize, 0) else f.engine.shared_rows, m.shared_costs.len);
             try std.testing.expectEqual(k.step_ms, m.mtp_step_ms);
             try std.testing.expectEqual(copies, m.root_copies);
-            try std.testing.expectEqual(drafter == null and !copies, m.window_costs_lone);
+            try std.testing.expectEqual(!copies, m.window_costs_lone);
         }
     }
 }
