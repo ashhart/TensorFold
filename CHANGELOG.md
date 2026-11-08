@@ -4,7 +4,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
-- DeepSeek-V4.1 reads its pack's weight spans past the page cache with O_DIRECT, so a load no longer fills the cache first (`TF_LOAD_DIRECT=0` keeps buffered reads; part of #1857) (#1924).
+- DeepSeek-V4.1's pack weight-span reads bypass the page cache with O_DIRECT where the file system supports it (`TF_LOAD_DIRECT=0` keeps buffered reads); pack hashing and prepared-image reads still use the cache (#1924, part of #1857).
 
 ## 1.2.9
 
