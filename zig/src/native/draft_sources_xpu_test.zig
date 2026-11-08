@@ -11,6 +11,7 @@ test "draft sources: XPU Qwen27 copies and actual DFlash2 attachment" {
     try check(b.facts(), null, true, false);
     b.drafter = present(@TypeOf(b.drafter.?));
     try check(b.facts(), .{ .kind = "DFlash2", .name = "example/draft" }, true, false);
+    _ = &@TypeOf(b).backend; // the lane backend's operations compile on hosts without Level Zero
 }
 
 test "draft sources: XPU Nemotron follows the checkpoint head, with no copy window when absent" {
