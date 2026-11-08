@@ -340,13 +340,18 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     defer for (&skews) |*x| x.deinit();
     if (matrix) for (&skews) |*x| try kernels.append(a, x.kernel());
     const gdn_k = @import("contract_gdn.zig");
-    var gdn_prompts: [2]gdn_k.Prompt = undefined;
-    for (&gdn_prompts, std.enums.values(gdn_k.Part)) |*m, p| m.* = .init(a, &r, s, &l, p);
+    // y and the state, then a control on each: one row short (the state), one key head (y)
+    var gdn_prompts: [4]gdn_k.Prompt = undefined;
+    const gdn_parts = [_]gdn_k.Part{ .y, .state, .state, .y };
+    const gdn_faults = [_]gdn_k.Fault{ .none, .none, .short, .one_key };
+    for (&gdn_prompts, gdn_parts, gdn_faults) |*m, p, fault| m.* = .init(a, &r, s, &l, p, fault);
     defer for (&gdn_prompts) |*m| m.deinit();
     for (&gdn_prompts) |*m| try kernels.append(a, m.kernel());
-    var gdn_prep = @import("contract_gdn_prep.zig").Prep.init(a, &r, s, &l);
-    defer gdn_prep.deinit();
-    try kernels.append(a, gdn_prep.kernel());
+    const prep_k = @import("contract_gdn_prep.zig");
+    var gdn_preps: [std.enums.values(prep_k.Fault).len]prep_k.Prep = undefined;
+    for (&gdn_preps, std.enums.values(prep_k.Fault)) |*m, fault| m.* = .init(a, &r, s, &l, fault);
+    defer for (&gdn_preps) |*m| m.deinit();
+    for (&gdn_preps) |*m| try kernels.append(a, m.kernel());
     var t: g.Tally = .{};
     const t0 = ms(io);
     try g.runAll(a, kernels.items, 0x6b63, &t);

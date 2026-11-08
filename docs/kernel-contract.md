@@ -347,6 +347,8 @@ HIP also checks the DeltaNet prompt recurrence at half a value head a block (`tf
 bit-equal to the plain window scan `gated_delta_tile` on the same tokens.
 Its prompt prework in one launch (`tf_gdn_prompt_prep`: conv, q and k head norms, v, gate, beta and the new conv state)
 is bit-equal to the chain it replaces (`tf_conv_prefill`, `tf_copy_cols`, `tf_rms`, `tf_gdn_gate_prefill`).
+Four controls: the recurrence one row short of the prompt and with one key head, and the prework norming q with k's
+weights and writing gate and beta to each other's outputs.
 
 On gfx12, HIP also checks the WMMA dense tile (`dense_wmma12_gemm`, both block geometries, fp32 and BF16 out). The
 small block meets its depth-k bound. The big block (64-deep K steps over swizzled LDS rows) replaces the 32-deep block

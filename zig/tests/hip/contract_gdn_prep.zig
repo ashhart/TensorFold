@@ -40,11 +40,27 @@ pub fn spec(k: kit.Kind) c.Spec {
     };
 }
 
+/// The real launch, or a control's: q normed with k's weights, or gate and beta written to each other's outputs.
+pub const Fault = enum {
+    none,
+    k_weights,
+    swapped_gates,
+
+    fn name(p: Fault) ?[]const u8 {
+        return switch (p) {
+            .none => null,
+            .k_weights => "control: tf_gdn_prompt_prep norms q with the k norm's weights",
+            .swapped_gates => "control: tf_gdn_prompt_prep writes gate and beta to each other's outputs",
+        };
+    }
+};
+
 /// shape.rows tokens of a layer's conv input over shape.n value heads: q, k, v, gate, beta and the new conv state.
 pub const Prep = struct {
     rig: rig_.Rig,
     l: *const hip.Launcher,
     k: kit.Kind,
+    fault: Fault,
     arena: std.heap.ArenaAllocator,
     shape: c.Shape = undefined,
     kw: usize = 0, // key heads x 128
@@ -63,8 +79,8 @@ pub const Prep = struct {
     out: [6]u64 = @splat(0), // q, k, v, gate, beta, new state
     base: [9]u64 = @splat(0), // the chain's six, then its mixed rows and its q and k columns
 
-    pub fn init(a: std.mem.Allocator, rt: *const hip.Runtime, s: hip.Stream, l: *const hip.Launcher) Prep {
-        return .{ .rig = .{ .a = a, .r = rt, .s = s }, .l = l, .k = kit.act(), .arena = .init(a) };
+    pub fn init(a: std.mem.Allocator, rt: *const hip.Runtime, s: hip.Stream, l: *const hip.Launcher, fault: Fault) Prep {
+        return .{ .rig = .{ .a = a, .r = rt, .s = s }, .l = l, .k = kit.act(), .fault = fault, .arena = .init(a) };
     }
 
     pub fn deinit(self: *Prep) void {
@@ -72,8 +88,12 @@ pub const Prep = struct {
         self.rig.deinit();
     }
 
+    /// A control keeps the spec under its own name and must go red at gate 3's bit-equal compare with the chain.
     pub fn kernel(self: *Prep) g.Kernel {
-        return .{ .spec = spec(self.k), .ctx = self, .vt = &vt };
+        var s = spec(self.k);
+        const control = self.fault.name();
+        if (control) |name| s.name = name;
+        return .{ .spec = s, .ctx = self, .vt = &vt, .control = if (control != null) .shapes else null };
     }
 
     const vt = g.hooks(Prep);
@@ -189,6 +209,7 @@ pub const Prep = struct {
         const F = ?[*]f32;
         const in = self.in;
         const out = self.out;
+        const swap = self.fault == .swapped_gates;
         try self.l.tf_gdn_prompt_prep(
             kit.ptr(C, in[0]),
             @backingInt(self.k),
@@ -198,7 +219,7 @@ pub const Prep = struct {
             kit.ptr(F, out[0]),
             kit.ptr(F, out[1]),
             kit.ptr(F, out[2]),
-            kit.ptr(CF, in[3]),
+            kit.ptr(CF, in[if (self.fault == .k_weights) 4 else 3]),
             kit.ptr(CF, in[4]),
             eps,
             @intCast(self.shape.rows),
@@ -209,8 +230,8 @@ pub const Prep = struct {
             kit.ptr(C, in[6]),
             kit.ptr(CF, in[7]),
             kit.ptr(CF, in[8]),
-            kit.ptr(F, out[3]),
-            kit.ptr(F, out[4]),
+            kit.ptr(F, out[if (swap) 4 else 3]),
+            kit.ptr(F, out[if (swap) 3 else 4]),
             @intCast(self.shape.n),
             self.rig.s.handle,
         );
