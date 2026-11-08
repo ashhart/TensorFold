@@ -86,6 +86,8 @@ pub fn appendBlock(ops: op.Ops, g: *const w.Graph, preparation: op.Preparation, 
     try encodeAppend(ops, g, preparation, taps, positions, frame, transaction);
     try ops.vtable.context_stage(ops.ptr, transaction, frame, next);
     const output = try encode(ops, g, preparation, next, anchor, frame, block, &.{});
+    const head_metric = @import("metal").pass_metrics.phase(.draft_head);
+    defer head_metric.end();
     var lattice = try ops.vtable.lattice(ops.ptr, frame, output.head, output.projected, g.config);
     errdefer lattice.deinit();
     try lattice.check(g.config);
@@ -193,6 +195,8 @@ pub fn forwardBlock(ops: op.Ops, g: *const w.Graph, preparation: op.Preparation,
     const frame = try start(ops, g, preparation, context, anchor);
     defer ops.vtable.release(ops.ptr, frame);
     const output = try encode(ops, g, preparation, context, anchor, frame, block, &.{});
+    const head_metric2 = @import("metal").pass_metrics.phase(.draft_head);
+    defer head_metric2.end();
     var lattice = try ops.vtable.lattice(ops.ptr, frame, output.head, output.projected, g.config);
     errdefer lattice.deinit();
     try lattice.check(g.config);
