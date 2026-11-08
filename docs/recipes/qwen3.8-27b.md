@@ -161,8 +161,22 @@ A fused projection keeps its members separate where their bit width or group siz
 and tied embedding heads are refused from `config.json` before weight downloads and again at load; loaded
 projections must also be covered by the selected decoder. `--lane-kernels on` requires M5 tensor units and
 formats they read; `auto` falls back to the packed row decoder for the rest.
-Lower weight precision does not guarantee faster decode or a fitting context. Release memory and
-quality comparisons are TBD [release-0.3.5].
+Lower weight precision does not guarantee faster decode or a fitting context.
+
+`TensorFold/Qwen3.8-27B-MLX-8bit` serves natively with the same flags as the 4-bit checkpoint. Measured on an
+M5 Ultra (greedy, a 2,048-token prompt, 512 tokens, three runs after a warm-up):
+
+| Qwen3.8-27B | MLX 4-bit | MLX 8-bit |
+| --- | ---: | ---: |
+| Weights on disk | 15.0 GiB | 27.5 GiB |
+| Kept wired between requests | 25.5 GiB | 38.3 GiB |
+| Decode, plain | 50.9 tok/s | 28.0 tok/s |
+| Prompt | 1,336 tok/s | 564 tok/s |
+| Served, drafted, code, one stream | 199.7 tok/s | 115.1 tok/s |
+
+8-bit decode runs at the speed its bytes allow. Its prompts are slower than that, because the 4-bit fast paths
+don't cover 8-bit ([#2502](https://github.com/ashhart/TensorFold/issues/2502)). For the fastest replies on a
+Mac, use the 4-bit checkpoint; take 8-bit when you want the higher-precision weights.
 
 The rest of this page describes the Python engine, frozen at 0.6.6 and available at the
 [`v0.6.6` tag](https://github.com/ashhart/TensorFold/tree/v0.6.6). Its flags, commands and paths belong to that
