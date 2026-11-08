@@ -13,7 +13,7 @@ pub fn rounded(bytes: usize) !usize {
 
 /// TF_GLM_HOST_CACHE=1: kept states in pinned host memory, not on the device; every rank must be given the same value.
 pub fn onHost() !bool {
-    return @import("sys").environment.read(bool, "TF_GLM_HOST_CACHE", false);
+    return @import("sys").environment.value(bool, "TF_GLM_HOST_CACHE", @import("profile").lookup("TF_GLM_HOST_CACHE"), false);
 }
 
 /// The pages' memory: a device buffer, or mapped pinned host memory that the same device-to-device copies reach.

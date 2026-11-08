@@ -4,7 +4,7 @@ const cuda = @import("cuda");
 
 /// TF_GLM_VISION_HOST=1: the tower's weights live in pinned host memory, staged onto the device a unit at a time.
 pub fn onHost() !bool {
-    return @import("sys").environment.read(bool, "TF_GLM_VISION_HOST", false);
+    return @import("sys").environment.value(bool, "TF_GLM_VISION_HOST", @import("profile").lookup("TF_GLM_VISION_HOST"), false);
 }
 
 /// The tower's tensors: a device buffer, or pinned host memory mapped into the device's address space.
