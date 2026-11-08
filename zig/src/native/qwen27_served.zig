@@ -451,8 +451,12 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
         h.trace = .{ .queue = model.queue, .report_every = every }; // enabled once measure() has priced the windows
         h.runner.profile(&h.trace.?);
     }
-    if (draft_model) |d| h.draft = try lb.Draft.attach(gpa, &h.runner, d, owns_draft);
-    draft_owned = false;
+    // Both ranks load the drafter (lockstep for the pair's deferred seams), but rank 1 never attaches one:
+    const follower = pair != null and pair.?.rank != 0;
+    if (draft_model) |d| if (!follower) {
+        h.draft = try lb.Draft.attach(gpa, &h.runner, d, owns_draft);
+        draft_owned = false;
+    };
     errdefer if (h.draft) |d| d.deinit();
     h.back = try lb.Metal.init(gpa, &h.runner, h.draft);
     errdefer h.back.deinit();
