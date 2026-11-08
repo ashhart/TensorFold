@@ -25,9 +25,9 @@ GENERATOR_OUTPUT = (
 DIRECT_GETENV = re.compile(r'\bgetenv\(\s*"((?:TF|TENSORFOLD)_[A-Za-z0-9_]*)"')
 # A getenv of a name that is not a literal: a new wrapper or a held name would hide its setting from DIRECT_GETENV.
 HIDDEN_GETENV = re.compile(r'(?<!fn )\bgetenv\(\s*[^"\s)]')
-# The parser, the registry's resolver and the platform shims read the names they are given.
+# The parser, the registry, the shims and the DSV4.1 knob parser read the names they are given.
 NAME_READERS = ("zig/src/platform/environment.zig", "zig/src/core/profile.zig", "zig/src/platform/sys.zig",
-                "zig/src/platform/win_c.zig")
+                "zig/src/platform/win_c.zig", "zig/src/families/deepseek_v41/projection_knobs.zig")
 # A `test` block's opening line; its closing brace sits alone at the same indent, as zig fmt writes it.
 TEST_BLOCK = re.compile(r"^(\s*)test\b.*\{\s*$")
 SWITCH_NAME = re.compile(r"`((?:TF|TENSORFOLD)_[A-Za-z0-9_]+)")
