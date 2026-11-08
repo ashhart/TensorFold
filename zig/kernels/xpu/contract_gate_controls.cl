@@ -90,3 +90,22 @@ KERNEL(256) void tf_ctl_fp16_sum(global const ushort *X, global const ushort *W,
   }
   if (lid == 0) Y[row] = (float)bv[0];
 }
+
+// Gate 3: the attention merge loses the final non-empty slice, including a tail containing just one key.
+KERNEL(16) void tf_ctl_attn_drop_slice(global const float *PM, global const float *PL, global const float *PO,
+                                     global ushort *O, int p0, int NS, global const int *TREE, global const int *POS) {
+  const int hh = get_group_id(0), t = get_group_id(1), lane = get_sub_group_local_id();
+  const int used = max(1, (POS ? POS[t] : p0 + (TREE[t * 17] & 255)) / 32);
+  const long base = ((long)t * 24 + hh) * NS;
+  float m = -INFINITY;
+  for (int s = 0; s < used; s++) m = fmax(m, PM[base + s]);
+  float l = 0.0f, o[16];
+  for (int i = 0; i < 16; i++) o[i] = 0.0f;
+  for (int s = 0; s < used; s++) {
+    const float w = exp(PM[base + s] - m);
+    l += PL[base + s] * w;
+    for (int i = 0; i < 16; i++) o[i] += PO[(base + s) * 256 + i * 16 + lane] * w;
+  }
+  for (int i = 0; i < 16; i++)
+    O[((long)t * 24 + hh) * 256 + i * 16 + lane] = intel_convert_bfloat16_as_ushort(o[i] / l);
+}
