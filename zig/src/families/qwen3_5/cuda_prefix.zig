@@ -78,13 +78,14 @@ pub const Prefix = struct {
         const rules: radix.Rules = .{ .page = p.layout.page_tokens, .min_gap = 256, .min_prompt = 0, .tail = true };
         const pool_pages = radix.pagesOf(kv.Pool, &p.pool, p.layout.pageBytes());
         x.* = .{ .gpa = gpa, .e = e, .pages = p, .store = try radix.Store.init(gpa, .{ .ptr = x, .vtable = &family }, pool_pages, rules) };
+        errdefer x.store.deinit();
         x.store.limit(.{ .pages = p.pool.total(), .snaps = snaps });
-        p.pool.reclaim = .{ .ctx = x, .call = reclaim }; // a promise evicts the store's idle pages before it fails
+        try p.pool.joinReclaim(.{ .ctx = x, .call = reclaim }); // a promise evicts its idle pages before it fails
         return x;
     }
 
     pub fn deinit(x: *Prefix) void {
-        x.pages.pool.reclaim = null;
+        x.pages.pool.leaveReclaim(x);
         x.store.deinit(); // drops every snapshot and releases the tree's pages
         x.gpa.destroy(x);
     }

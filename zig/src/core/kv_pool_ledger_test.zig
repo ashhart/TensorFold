@@ -53,7 +53,7 @@ const Side = struct {
     fn init(s: *Side, pages: usize, page_bytes: u64) !void {
         s.* = .{ .pool = try kv.Pool.init(std.testing.allocator, pages, page_bytes) };
         s.store = .{ .pool = &s.pool };
-        s.pool.reclaim = .{ .ctx = &s.store, .call = Store.call };
+        try s.pool.joinReclaim(.{ .ctx = &s.store, .call = Store.call });
     }
 
     fn deinit(s: *Side) void {
