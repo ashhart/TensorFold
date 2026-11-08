@@ -207,7 +207,7 @@ pub fn load(keep: Allocator, scratch: Allocator, scanner: *std.json.Scanner, voc
                     else => return error.InvalidTokenizer,
                 };
                 const value = (try nextCount(scanner)) orelse return error.InvalidTokenizer;
-                const at: u32 = std.math.cast(u32, value) orelse return error.InvalidTokenizer;
+                const at: u32 = if (value < std.math.maxInt(u32)) @intCast(value) else return error.InvalidTokenizer;
                 try vocab.put(token, at);
                 try tokens.put(at, token);
             }

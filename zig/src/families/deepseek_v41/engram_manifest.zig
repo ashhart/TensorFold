@@ -364,6 +364,7 @@ fn checkText(a: Allocator, io: Io, release_dir: []const u8, tables_dir: []const 
         const si = pack.get(s.name).?;
         for (m.samples) |x| {
             if (x < h.lo or x >= h.hi) continue;
+            if (x > (std.math.maxInt(u64) - er.header_bytes) / er.row_bytes) return error.EngramShardCorrupt;
             var row: [er.row_bytes]u8 = undefined;
             if (try f.readPositionalAll(io, &row, er.header_bytes + x * er.row_bytes) != er.row_bytes) return error.EngramShardCorrupt;
             var wrow: [er.values]u8 = undefined;
