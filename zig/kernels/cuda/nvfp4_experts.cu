@@ -49,6 +49,54 @@ __device__ __forceinline__ void compute_stage(float (&acc)[M][1][NTW][4], const 
     }
 }
 
+#if __CUDA_ARCH__ == 1210
+// GB10's register form of Ring: two k32 stages held in registers, each refilled as soon as it has been summed.
+#define TF_RING_STORAGE
+template <int M, int WARPS, typename Word>
+struct Ring {
+  __device__ __forceinline__ void load(Stage<M, Word>& st, int g, int lane, int t, int jh, const uint4* blk,
+                                       const __nv_bfloat16* x0, const __nv_bfloat16* x1, bool v0, bool v1) {
+    const uint4* b = blk + (size_t)g * (M * BLOCK4);
+#pragma unroll
+    for (int m = 0; m < M; ++m) {
+      if constexpr (sizeof(Word) == 16)
+        st.w[m] = tf_common::ld_nc(b + m * BLOCK4 + lane);
+      else
+        st.w[m] = tf_common::ld_nc2(reinterpret_cast<const uint2*>(b + m * BLOCK4 + lane) + jh);
+      st.s[m] = tf_common::ld_nc(b + m * BLOCK4 + 32 + t);
+    }
+    const uint2 zero = make_uint2(0u, 0u);
+    const int k0 = g * 32 + 4 * t;
+#pragma unroll
+    for (int h = 0; h < 2; ++h) {
+      st.xa[h] = v0 ? __ldg(reinterpret_cast<const uint2*>(x0 + k0 + 16 * h)) : zero;
+      st.xb[h] = v1 ? __ldg(reinterpret_cast<const uint2*>(x1 + k0 + 16 * h)) : zero;
+    }
+  }
+
+  // All KG groups in k order: `sum` takes each group's stage.
+  template <typename Sum>
+  __device__ __forceinline__ void run(int KG, int, int lane, int t, int jh, const uint4* blk, const __nv_bfloat16* x0,
+                                      const __nv_bfloat16* x1, bool v0, bool v1, Sum sum) {
+    constexpr int D = 2;
+    Stage<M, Word> st[D];
+#pragma unroll
+    for (int d = 0; d < D; ++d)
+      if (d < KG) load(st[d], d, lane, t, jh, blk, x0, x1, v0, v1);
+    for (int g0 = 0; g0 < KG; g0 += D) {
+#pragma unroll
+      for (int d = 0; d < D; ++d) {
+        const int g = g0 + d;
+        if (g < KG) {
+          sum(st[d]);
+          if (g + D < KG) load(st[d], g + D, lane, t, jh, blk, x0, x1, v0, v1);
+        }
+      }
+    }
+  }
+};
+#else
+#define TF_RING_STORAGE __shared__
 // A warp's ring of D shared k32 stages, filled by cp.async: the next D - 1 groups load while one group sums.
 template <int M, int WARPS, typename Word>
 struct Ring {
@@ -109,6 +157,7 @@ struct Ring {
     }
   }
 };
+#endif
 
 // One unit of the decode form: a warp's 32 columns of item `unit / NB` over all K, then the epilogue.
 template <int M, int EPI, int WARPS>
@@ -117,7 +166,7 @@ __device__ __forceinline__ void unit_full(int unit, int lane, int gq, int t, int
                                           const uint4* __restrict__ W, const float* __restrict__ scale, int KG, int NB,
                                           const int* __restrict__ items, const int* __restrict__ members,
                                           void* __restrict__ out, int N, float limit, int skip) {
-  __shared__ Ring<M, WARPS, uint4> ring;
+  TF_RING_STORAGE Ring<M, WARPS, uint4> ring;
   const int it = unit / NB, cb = unit - it * NB;
   const int e = __ldg(items + 3 * it), first = __ldg(items + 3 * it + 1), cnt = __ldg(items + 3 * it + 2);
   if (e == skip) return;
@@ -249,7 +298,7 @@ __global__ void __launch_bounds__(WARPS * 32)
                       const float* __restrict__ scale, int KG, int NB, const int* __restrict__ items,
                       const int* __restrict__ counts, const int* __restrict__ members, void* __restrict__ out, int N,
                       float limit, int skip) {
-  __shared__ Ring<M, WARPS, uint2> ring;
+  TF_RING_STORAGE Ring<M, WARPS, uint2> ring;
   const int lane = threadIdx.x & 31, gq = lane >> 2, t = lane & 3, wi = threadIdx.x >> 5;
   const int units = __ldg(counts) * NB * 2;
   for (int unit = blockIdx.x * WARPS + wi; unit < units; unit += gridDim.x * WARPS) {

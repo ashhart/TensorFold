@@ -578,7 +578,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
   is refused by name; `TF_LANE_TRACE` gains a `cancel` line for a request cancelled between two prompt calls (#2458,
   part of #2324). Thanks to @laudney.
 
-- NVFP4 routed experts on CUDA: the decode expert kernels feed each warp from a cp.async ring four k-groups deep, with the same sums in the same order, so tokens are unchanged. GLM-5.3-Flash at TP=2 on two RTX PRO 6000 Blackwell (sm_120) decodes 24% faster without drafts (83.7 to 104.1 tok/s) and 7% to 13% faster with them. On a GB10 the blocks per SM go from 4 to 2: Nemotron 3.5 Lightning NVFP4 is 0.4% to 3.3% faster, and Qwen3.6-35B-A3B NVFP4 is level within noise, from -1.8% (sampled code, 1 stream) to +5.3% (#2266, fixes #2265).
+- NVFP4 routed experts on CUDA: the decode expert kernels feed each warp from a cp.async ring four k-groups deep, with the same sums in the same order, so tokens are unchanged. GLM-5.3-Flash at TP=2 on two RTX PRO 6000 Blackwell (sm_120) decodes 24% faster without drafts (83.7 to 104.1 tok/s) and 7% to 13% faster with them. GB10 (sm_121) keeps its register-loaded kernels, level with before on Qwen3.6-35B-A3B and Nemotron 3.5 Lightning NVFP4 (#2266, fixes #2265). Thanks to @eleqtrizit.
 
 ## 1.2.4
 
