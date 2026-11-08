@@ -462,6 +462,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         .slide_conversations = conversations,
         .readouts = readouts,
         .text_generation = readouts == null, // a readout engine answers its readouts only (Clef's /v1/systemone)
+        .reasoning = reasoning(F),
     }, .{ .ctx = loaded.ctx, .text = F.explain });
     opened = true;
     kv_pages.warnCapacity(cache_capacity, o.keep == 0 or o.prompt_cache_gib == 0 or share, if (paged) |p| p.taken else 0, std.log); // TF_KV_SHARE: no copied rows
@@ -472,6 +473,19 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h, .halt = Host.halt };
 }
 const toGib = family_memory.toGib;
+
+/// The family's Info.reasoning: false when it declares `pub const reasoning = false` (no reasoning block).
+fn reasoning(comptime F: type) bool {
+    return if (@hasDecl(F, "reasoning")) F.reasoning else true;
+}
+
+test "a CUDA family declares replies without reasoning with `pub const reasoning = false`; every served one keeps it" {
+    try std.testing.expect(reasoning(struct {}));
+    try std.testing.expect(!reasoning(struct {
+        pub const reasoning = false;
+    }));
+    inline for (registry) |F| try std.testing.expect(reasoning(F));
+}
 test {
     _ = @import("draft_sources_cuda_test.zig");
     _ = @import("copy_drafts_nemotron_test.zig");

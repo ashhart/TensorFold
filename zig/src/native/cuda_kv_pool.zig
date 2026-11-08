@@ -142,9 +142,19 @@ pub fn placeHost(comptime F: type, a: Allocator, loaded: anytype, o: api.Open, a
     return !fits(F, loaded, o, room, window, stream_bytes);
 }
 
+/// A family declaring `keeps_no_prompts = true` has no prompt store: --prompt-cache-gib is refused, no cache planned.
+pub fn keepsNoPrompts(comptime F: type) bool {
+    return @hasDecl(F, "keeps_no_prompts") and F.keeps_no_prompts;
+}
+
+/// The cache the plan sets aside: 16 GiB unless --prompt-cache-gib says, none for a family that keeps no prompts.
+fn cacheWanted(comptime F: type, o: api.Open) u64 {
+    return if (comptime keepsNoPrompts(F)) 0 else budget.cacheBytes(o.prompt_cache_gib, std.math.maxInt(u64), 0);
+}
+
 /// The asked cache (16 GiB unless --prompt-cache-gib says) whole beside the streams, by the startup plan's arithmetic.
 fn fits(comptime F: type, loaded: anytype, o: api.Open, room: u64, window: u64, stream_bytes: u64) bool {
-    const want = budget.cacheBytes(o.prompt_cache_gib, std.math.maxInt(u64), 0);
+    const want = cacheWanted(F, o);
     const rows: u64 = if (comptime @hasDecl(F, "window_rows")) F.window_rows else 0;
     if (layout(loaded)) |l| return kv_pool.holds(l, .{ .room = room, .engine = 0, .lanes = o.lanes, .fixed = o.lanes_fixed, .cache = want, .snaps = named(o), .window = window + rows, .engine_paged = enginePaged(loaded), .asked = o.prompt_cache_gib != null });
     const n = budget.admit(room, stream_bytes, loaded.free_streams, o.lanes, o.lanes_fixed) catch return false;
@@ -154,7 +164,7 @@ fn fits(comptime F: type, loaded: anytype, o: api.Open, room: u64, window: u64, 
 /// What the startup plan pays for: `room`, --parallel's streams, the cache (16 GiB unless --prompt-cache-gib says).
 pub fn budgetOf(comptime F: type, room: u64, o: api.Open, window: u64, host_mode: bool, engine_paged: bool, kept_ppm: u32, slots: ?usize) kv_pool.Budget {
     const rows: u64 = if (comptime @hasDecl(F, "window_rows")) F.window_rows else 0;
-    const want = if (host_mode) 0 else budget.cacheBytes(o.prompt_cache_gib, std.math.maxInt(u64), 0);
+    const want = if (host_mode) 0 else cacheWanted(F, o);
     return .{ .room = room, .engine = 0, .lanes = o.lanes, .fixed = o.lanes_fixed, .cache = want, .snaps = slots orelse named(o), .window = window + rows, .engine_paged = engine_paged, .kept_ppm = if (host_mode) 0 else kept_ppm, .slots_only = slots != null, .asked = o.prompt_cache_gib != null };
 }
 
@@ -467,4 +477,40 @@ test "KV admission: a refusal prices the running states beside the fixed part an
     try std.testing.expectEqual(@as(?Plan, null), try plan(struct {}, arena.allocator(), l, 2 << 30, o, 8, &problem, false, false, 0, null));
     try std.testing.expect(std.mem.indexOf(u8, problem, "needs 3.00 GiB") != null);
     try std.testing.expect(std.mem.indexOf(u8, problem, "state runs") != null);
+}
+
+const Promptless = struct {
+    pub const keeps_no_prompts = true;
+};
+test "kv pages: a family that keeps no prompts plans no cache, so its streams take the pages one would have" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var problem: []const u8 = "";
+    const l: kv_pool.Layout = .{ .fixed_bytes = 180 << 20, .token_bytes = 13_056, .page_tokens = 512, .snap_bytes = 0 };
+    const o: api.Open = .{ .dir = "", .model_type = "d", .lanes = 8 };
+    // a room where only some of the eight streams' 8,192-token windows fit, the engine's own on pages or not
+    for ([_]struct { bool, u64 }{ .{ true, 2 << 30 }, .{ false, 3 << 29 } }) |c| {
+        const plain = (try plan(struct {}, a, l, c[1], o, 8192, &problem, false, c[0], 0, null)).?;
+        const none = (try plan(Promptless, a, l, c[1], o, 8192, &problem, false, c[0], 0, null)).?;
+        try std.testing.expect(plain.copied > 0 and none.copied == 0 and none.kept == 0 and none.taken == 0);
+        try std.testing.expect(none.pages > plain.pages and none.pages < 8 * l.pages(8192));
+        try std.testing.expectEqual(plain.lanes, none.lanes);
+        const budget_none: kv_pool.Budget = .{ .room = c[1], .engine = 0, .lanes = 8, .window = 8192, .engine_paged = c[0] };
+        try std.testing.expectEqual(try kv_pool.plan(l, budget_none), none);
+        const loaded = .{ .layout = @as(?kv_pool.Layout, l), .engine_paged = c[0], .free_streams = @as(u32, 1) };
+        try std.testing.expect(fits(Promptless, loaded, o, c[1], 8192, 0) and !fits(struct {}, loaded, o, c[1], 8192, 0));
+    }
+}
+test "kv pages: LFM2-MoE declares neither keeps_no_prompts nor snap_save and plans its default cache as before" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var problem: []const u8 = "";
+    const lfm = @import("lfm2_moe_cuda").native;
+    try std.testing.expect(!keepsNoPrompts(lfm) and !@hasDecl(lfm, "snap_save") and keepsNoPrompts(Promptless));
+    const l: kv_pool.Layout = .{ .fixed_bytes = 180 << 20, .token_bytes = 13_056, .page_tokens = 512, .snap_bytes = 0 };
+    const o: api.Open = .{ .dir = "", .model_type = "lfm2_moe", .lanes = 8 };
+    const b: kv_pool.Budget = .{ .room = 3 << 29, .engine = 0, .lanes = 8, .cache = 16 << 30, .window = 8192 };
+    try std.testing.expectEqual(try kv_pool.plan(l, b), (try plan(lfm, arena.allocator(), l, 3 << 29, o, 8192, &problem, false, false, 0, null)).?);
+    try std.testing.expectEqual(@as(u64, 0), kept(lfm, .{}, null, o, 40 << 30, 0, 0, false).copied); // no store either way
 }
