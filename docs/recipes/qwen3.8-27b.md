@@ -128,29 +128,6 @@ refusal; the adapter does not enable end-to-end GGUF inference.
 zig build test-qwen27-gguf-host test-gguf-host -j1 --summary all
 ```
 
-The rest of this page describes the Python engine, frozen at 0.6.6 and available at the
-[`v0.6.6` tag](https://github.com/ashhart/TensorFold/tree/v0.6.6). Its flags, commands and paths belong to that
-engine. @nood-co1, @jkuepker and @Arminova worked on its CUDA path; see [credits](../credits.md).
-
-Experimental [packed affine formats](../quantization.md) include 8-bit and mixed layer precision.
-
-The `qwen3_5` family combines Gated DeltaNet and full attention. The standard recipe below uses its
-4-bit/group-64 checkpoint; the quantization guide lists the other affine formats it reads.
-
-```bash
-tensorfold pull TensorFold/Qwen3.8-27B-MLX-4bit z-lab/Qwen3.8-27B-DFlash2
-tensorfold serve TensorFold/Qwen3.8-27B-MLX-4bit --name bench
-```
-
-DFlash2 is used automatically once pulled. On MLX, `--drafter none` disables that draft model;
-`--no-drafts` disables all drafts on either backend. CUDA requires DFlash2 unless `--no-drafts` is set.
-The HIP engine runs no DFlash2 drafter yet: `serve --drafter` is refused before the engine opens the GPU or
-loads any weights. Refusing DFlash2 does not turn off the engine's own drafts: the model's MTP head where the
-checkpoint has one, and copies from the stream's own context. `TensorFold/Qwen3.8-27B-MLX-4bit` has no MTP
-head, so on HIP it drafts copies only. `--mtp-drafts 0` stops the MTP head's drafts alone; `--no-drafts` turns
-both off and decodes plain.
-The target verifies every proposed token against its own serial sample.
-
 ## MLX
 
 M5 tensor-unit GPUs run the lane decoder with draft trees. M1 through M4 use `row_forward` and the
@@ -186,6 +163,29 @@ projections must also be covered by the selected decoder. `--lane-kernels on` re
 formats they read; `auto` falls back to the packed row decoder for the rest.
 Lower weight precision does not guarantee faster decode or a fitting context. Release memory and
 quality comparisons are TBD [release-0.3.5].
+
+The rest of this page describes the Python engine, frozen at 0.6.6 and available at the
+[`v0.6.6` tag](https://github.com/ashhart/TensorFold/tree/v0.6.6). Its flags, commands and paths belong to that
+engine. @nood-co1, @jkuepker and @Arminova worked on its CUDA path; see [credits](../credits.md).
+
+Experimental [packed affine formats](../quantization.md) include 8-bit and mixed layer precision.
+
+The `qwen3_5` family combines Gated DeltaNet and full attention. The standard recipe below uses its
+4-bit/group-64 checkpoint; the quantization guide lists the other affine formats it reads.
+
+```bash
+tensorfold pull TensorFold/Qwen3.8-27B-MLX-4bit z-lab/Qwen3.8-27B-DFlash2
+tensorfold serve TensorFold/Qwen3.8-27B-MLX-4bit --name bench
+```
+
+DFlash2 is used automatically once pulled. On MLX, `--drafter none` disables that draft model;
+`--no-drafts` disables all drafts on either backend. CUDA requires DFlash2 unless `--no-drafts` is set.
+The HIP engine runs no DFlash2 drafter yet: `serve --drafter` is refused before the engine opens the GPU or
+loads any weights. Refusing DFlash2 does not turn off the engine's own drafts: the model's MTP head where the
+checkpoint has one, and copies from the stream's own context. `TensorFold/Qwen3.8-27B-MLX-4bit` has no MTP
+head, so on HIP it drafts copies only. `--mtp-drafts 0` stops the MTP head's drafts alone; `--no-drafts` turns
+both off and decodes plain.
+The target verifies every proposed token against its own serial sample.
 
 ## CUDA
 
