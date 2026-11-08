@@ -19,6 +19,9 @@ pub fn allocate(gpa: Allocator, fixed: []const u32, probs: []const []const f64, 
 /// What drafting the counted nodes costs: a head step each, or the deepest stream's steps when one batch drafts all.
 pub const HeadCost = struct {
     step_ms: f64 = 0.0,
+    plain_ms: ?f64 = null, // fixed residual for the zero-draft option, independently measured
+    extra_step_ms: f64 = 0.0, // extra work past the first head step
+    heads: ?[]const bool = null, // copied rows do not run a neural head
     batched: bool = false,
     free_first: bool = false,
     row_ms: f64 = 0.0, // what each row past a stream's first costs past the table on this machine (below it: less)
@@ -47,7 +50,7 @@ pub fn allocateDrafts(gpa: Allocator, fixed: []const u32, probs: []const []const
     var live: u64 = 0;
     for (fixed) |f| live += @intFromBool(f > 0);
     const least = @min(head.least_rows, max_rows);
-    var best = if (rows >= least) rate(costs, timed, rows, expected, overhead_ms + rowTerm(costs, timed, head, rows, live)) else -std.math.inf(f64);
+    var best = if (rows >= least) rate(costs, timed, rows, expected, (head.plain_ms orelse overhead_ms) + rowTerm(costs, timed, head, rows, live)) else -std.math.inf(f64);
     while (rows < max_rows) {
         // the likeliest next node, ties to the lowest stream (Python's heapq of (-p, stream))
         var pick: ?usize = null;
@@ -62,14 +65,16 @@ pub fn allocateDrafts(gpa: Allocator, fixed: []const u32, probs: []const []const
         }
         const s = pick orelse break;
         counts[s] += 1;
-        firsts += @intFromBool(counts[s] == 1);
+        const neural = if (head.heads) |mask| mask[s] else true;
+        firsts += @intFromBool(neural and counts[s] == 1);
         rows += 1;
-        drafts += 1;
-        deepest = @max(deepest, counts[s]);
+        drafts += @intFromBool(neural);
+        if (neural) deepest = @max(deepest, counts[s]);
         expected += pick_p;
         const steps: f64 = @floatFromInt(if (head.batched) deepest -| @intFromBool(head.free_first) else drafts - (if (head.free_first) firsts else 0));
+        const extra_steps: f64 = @floatFromInt(if (head.batched) deepest -| 1 else drafts - firsts);
         if (rows < least) continue;
-        const now = rate(costs, timed, rows, expected, overhead_ms + head.step_ms * steps + rowTerm(costs, timed, head, rows, live));
+        const now = rate(costs, timed, rows, expected, overhead_ms + head.step_ms * steps + head.extra_step_ms * extra_steps + rowTerm(costs, timed, head, rows, live));
         if (now > best or (!timed and head.step_ms == 0)) {
             best = now;
             @memcpy(best_counts, counts);
@@ -92,6 +97,7 @@ pub fn rowTerm(costs: *const Table, timed: bool, head: HeadCost, rows: u64, live
 fn rate(costs: *const Table, timed: bool, total: u64, expected: f64, overhead_ms: f64) f64 {
     var cost: f64 = 1.0;
     if (timed) cost = costs.get(@intCast(total)) orelse return -1.0;
+    if (cost + overhead_ms <= 0) return -1;
     return expected / (cost + overhead_ms);
 }
 
