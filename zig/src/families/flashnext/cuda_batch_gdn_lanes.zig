@@ -21,8 +21,8 @@ fn cint(v: usize) c_int {
 
 /// TF_FLASHNEXT_GDN_LANES=0: a shared pass's DeltaNet steps a lane at a time (default: one launch a step).
 pub fn on() bool {
-    const v = std.c.getenv("TF_FLASHNEXT_GDN_LANES") orelse return true;
-    return !std.mem.eql(u8, std.mem.span(v), "0");
+    // the startup check refused every malformed value already, so a plain default stands here
+    return @import("sys").environment.read(bool, "TF_FLASHNEXT_GDN_LANES", true) catch true;
 }
 
 /// A shared pass's DeltaNet steps, one launch each; false: the caller loops (off, one lane, many, TP, half the heads).

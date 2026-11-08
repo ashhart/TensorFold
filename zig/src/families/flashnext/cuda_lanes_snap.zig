@@ -6,8 +6,8 @@ const parts = @import("cuda_batch_state.zig");
 
 /// Marks inside a chunk kept without cutting the pass (TF_FLASHNEXT_KEEP_INPASS=0: cut there), read once at load.
 pub fn keepInPass() bool {
-    const v = std.c.getenv("TF_FLASHNEXT_KEEP_INPASS") orelse return true;
-    return !std.mem.eql(u8, std.mem.span(v), "0");
+    // the startup check refused every malformed value already, so a plain default stands here
+    return @import("sys").environment.read(bool, "TF_FLASHNEXT_KEEP_INPASS", true) catch true;
 }
 
 pub fn Snaps(comptime Cuda: type) type {
