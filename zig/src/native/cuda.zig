@@ -479,12 +479,12 @@ fn reasoning(comptime F: type) bool {
     return if (@hasDecl(F, "reasoning")) F.reasoning else true;
 }
 
-test "a CUDA family declares replies without reasoning with `pub const reasoning = false`; every served one keeps it" {
+test "a CUDA family declares replies without reasoning with `pub const reasoning = false`; only dots.mocr does" {
     try std.testing.expect(reasoning(struct {}));
     try std.testing.expect(!reasoning(struct {
         pub const reasoning = false;
     }));
-    inline for (registry) |F| try std.testing.expect(reasoning(F));
+    inline for (registry) |F| try std.testing.expectEqual(!std.mem.eql(u8, F.model_type, "dots_ocr"), reasoning(F));
 }
 test {
     _ = @import("draft_sources_cuda_test.zig");
