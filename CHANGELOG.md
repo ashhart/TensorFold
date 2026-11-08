@@ -4,6 +4,10 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Ripple-65B-Preview runs on two GB10s (DGX Spark) at `--tp 2` from ExLlamaV3 packs: each rank holds half of every
+  projection, the full layers run to a 1,048,576-token context, and rank 0 serves with kept prompt states while rank 1
+  follows; any other GPU or rank count is refused by name, one GPU staying with the one-GPU CUDA path (#2522).
+  Thanks to @ajensenwaud, @BobClawblaw, turboderp and @auryn-macmillan.
 - Ripple-65B-Preview runs on native Metal (M5 or later) from the publisher's NVFP4 and bf16 releases as published,
   with exact bf16 caches, thinking, tool calls and structured output; `--context` is capped at 262,144, the longest
   checked (#2231, fixes #2171). Thanks to @BobClawblaw.
