@@ -1,0 +1,12 @@
+PASS nonfinite xpu attn_decode + attn_merge (bf16 cache, tree): 1114 non-finite and 29606 finite outputs match the float64 classes
+PASS repeat xpu attn_decode + attn_merge (bf16 cache, tree): five runs byte-identical (12288 bytes), inputs and guards untouched, no overlap
+PASS shapes xpu attn_decode + attn_merge (bf16 cache, tree): 20 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums xpu attn_decode + attn_merge (bf16 cache, tree): exact sums at k 32770, where fp16 sums would miss by infx and bf16 by 256x
+FAIL shapes control: xpu attention merge losing its last slice: at 1x6144x33 its bytes differ from upstream 1a5644892 attn_decode + attn_merge's from byte 0
+PASS limits live attn_decode: 16 work-items required, sub-group 16 (the kernel's most 16), 0 SLM bytes, 0 spill bytes, 0 private bytes, 13 arguments
+PASS limits live attn_merge: 16 work-items required, sub-group 16 (the kernel's most 16), 0 SLM bytes, 0 spill bytes, 0 private bytes, 8 arguments
+PASS limits live upstream attn_decode: 16 work-items required, sub-group 16 (the kernel's most 16), 0 SLM bytes, 0 spill bytes, 0 private bytes, 13 arguments
+PASS limits live upstream attn_merge: 16 work-items required, sub-group 16 (the kernel's most 16), 0 SLM bytes, 0 spill bytes, 0 private bytes, 8 arguments
+PASS limits live planted attn_merge dropping last slice: 16 work-items required, sub-group 16 (the kernel's most 16), 0 SLM bytes, 0 spill bytes, 0 private bytes, 8 arguments
+SUMMARY bmg-g31 0xe223 10 kernels: 10 pass gates 1-4, 0 fail, 0 known findings; 6 controls: 6 red as planted, 0 missed; 0 limit problems; gates 25654 ms, limits 2 ms
+exit=0
