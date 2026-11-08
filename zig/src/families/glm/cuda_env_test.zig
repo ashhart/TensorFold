@@ -17,6 +17,7 @@ const switches = [_]Name{
     .{ .name = "TF_GLM_SHARED", .default = true },
 };
 const counts = [_][:0]const u8{"TF_GLM_DFLASH2_LOG"};
+const reals = [_][:0]const u8{"TF_GLM_DRAFT_CONFIDENCE"};
 
 /// The row by name without `rule`, so a missing row fails an assertion instead of panicking.
 fn row(name: []const u8) !e.Rule {
@@ -52,12 +53,13 @@ fn check(name: []const u8, raw: []const u8, valid: bool) !void {
 test "GLM strict env: every GLM reader's name is a glm row, and the glm scope holds nothing else" {
     for (switches) |s| try t.expectEqual(e.Kind.flag, (try row(s.name)).kind);
     for (counts) |name| try t.expectEqual(e.Kind.u64, (try row(name)).kind);
+    for (reals) |name| try t.expectEqual(e.Kind.real, (try row(name)).kind);
     var n: usize = 0;
     for (e.rules) |r| if (r.scope == .glm) {
         try t.expect(std.mem.startsWith(u8, r.name, "TF_GLM_"));
         n += 1;
     };
-    try t.expectEqual(switches.len + counts.len, n);
+    try t.expectEqual(switches.len + counts.len + reals.len, n);
 }
 
 test "GLM strict env: switches keep unset, blank, 0 and 1, and refuse words and padded digits by name" {
@@ -112,4 +114,26 @@ test "GLM strict env: the actual readers and the open's check keep defaults, 0 a
     }
     // the open's refusal reaches the server in GLM's words, not as a failed kernel load
     try t.expect(@import("cuda_native.zig").explain(null, error.InvalidEnvironment) != null);
+}
+
+test "GLM strict env: the DFlash2 cut is a finite chance from 0 to 1, read as a float by the actual reader" {
+    for (reals) |name| {
+        _ = try row(name);
+        try t.expectEqual(@as(f64, 0.7), try e.value(f64, name, null, 0.7));
+        try t.expectEqual(@as(f64, 0.7), try e.value(f64, name, " \t", 0.7));
+        for ([_][]const u8{ "0", "0.25", "0.7", "1", "1e-3" }) |raw| {
+            try t.expectEqual(try std.fmt.parseFloat(f64, raw), try e.value(f64, name, raw, 0.7));
+            try check(name, raw, true);
+        }
+        for ([_][]const u8{ "nan", "-nan", "inf", "-inf", "1e999", "-0.1", "-1", "1.01", "2", "text", " 0.5", "0.5 " }) |raw| try check(name, raw, false);
+    }
+    const confidence = @import("dflash.zig").confidence;
+    _ = env.unsetenv("TF_GLM_DRAFT_CONFIDENCE");
+    defer _ = env.unsetenv("TF_GLM_DRAFT_CONFIDENCE");
+    try t.expectEqual(@as(f64, 0.7), try confidence());
+    _ = env.setenv("TF_GLM_DRAFT_CONFIDENCE", "0.5", 1);
+    try t.expectEqual(@as(f64, 0.5), try confidence());
+    _ = env.setenv("TF_GLM_DRAFT_CONFIDENCE", "1.5", 1);
+    try t.expectError(error.InvalidEnvironment, confidence());
+    try t.expectError(error.InvalidEnvironment, @import("cuda_env.zig").startup());
 }

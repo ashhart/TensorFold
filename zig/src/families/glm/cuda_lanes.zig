@@ -548,7 +548,7 @@ pub const Lanes = struct {
             held[i] = l;
         }
         try self.x.block(reqs[0..requests.len]);
-        const cut = dflash.confidence();
+        const cut = try dflash.confidence();
         for (requests, held[0..requests.len]) |r, l| {
             l.held_n = @min(r.depth, max_held);
             var chain: f64 = 1; // glm_cuda's rule: past the first, a chain stops where its product falls under the cut
