@@ -2,9 +2,13 @@
 
 ## Verified live-main rebase for #1502
 
-The branch is now rebased onto upstream main `c16a296407deda1de8d1266c63cd141705643312`.
+The branch is now rebased onto upstream main `8be9c408c2825102b475dc6049c6aa3cf5d9e910`, including #2565.
 Only the vision change and its release/qualification documentation were replayed; the retired #1514 text dependency was not replayed.
 The #1502 release note is under Unreleased, separate from the historical 1.2.4 text-port entry.
+The [latest review](https://github.com/ashhart/TensorFold/pull/1502#issuecomment-6721416346) is applied in the existing filtered launch loop:
+main's `only` selection and `qwen27 q8 ` skip remain, with the `LFM3 NAX prompt ` and `LFM3 tiled attention ` tensor-unit skips alongside them.
+The split-attention, tiled-attention and NAX-prompt `launchOf` branches remain beside main's restored LFM3 branches.
+Earlier measurements below remain tied to their recorded sources; main against this rebased branch is still owed on the maintainer's machine.
 
 ## Earlier 342-main M4 qualification
 
