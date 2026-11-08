@@ -2,6 +2,10 @@
 const check = @import("draft_sources_check.zig").check;
 const present = @import("draft_sources_check.zig").present;
 
+comptime {
+    _ = @import("xpu_dflash2_test.zig"); // its tests run under this file's "draft sources:" filter
+}
+
 test "draft sources: XPU Qwen27 copies and actual DFlash2 attachment" {
     var b: @import("xpu_lanes.zig").Lanes = undefined;
     b.drafter = null;

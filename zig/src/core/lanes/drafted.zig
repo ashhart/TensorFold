@@ -344,6 +344,15 @@ pub const Drafted = struct {
         return grown;
     }
 
+    /// A stream another driver decoded on the drafter's own state (a lone driver): the next draft absorbs and holds.
+    pub fn adopt(x: *Drafted, s: *Stream) !void {
+        if (!x.lanes.contains(s)) {
+            try x.lanes.ensureUnusedCapacity(x.gpa, 1);
+            try x.drafter.open(s);
+        }
+        x.lanes.putAssumeCapacity(s, .{ .rows = true });
+    }
+
     fn dropStream(x: *Drafted, s: *Stream) void {
         if (x.lanes.remove(s)) x.drafter.release(s);
         x.target.release(s);

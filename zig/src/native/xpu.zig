@@ -8,6 +8,8 @@ const Drafter = xq.drafter.Drafter;
 const lanes = @import("lanes");
 const sampling = lanes.sampling;
 const XpuLanes = @import("xpu_lanes.zig").Lanes;
+const dflash2 = @import("xpu_dflash2.zig");
+const DFlash2 = dflash2.Adapter(xq.drafter, XpuLanes);
 const nem = @import("xpu_nem.zig");
 const admit = @import("xpu_admit.zig");
 const Allocator = std.mem.Allocator;
@@ -66,6 +68,8 @@ fn pickAll(gpa: Allocator, row: []const f32, position: u64, s: api.Sampling) !u3
 const LaneServed = struct {
     gpa: Allocator,
     back: XpuLanes,
+    dflash: DFlash2, // the drafter behind the core Drafter VTable (with a drafter attached)
+    wrap: ?lanes.drafted.Drafted, // Drafted in front of `back`: lane rounds draft through it
     cfg: lanes.Config,
     wall: lanes.backend.WallClock,
     core: lanes.Engine,
@@ -77,6 +81,7 @@ const LaneServed = struct {
         h.host.stop();
         if (h.cache) |*store| store.deinit();
         h.core.deinit();
+        if (h.wrap) |*w| w.deinit();
         h.cfg.deinit(h.gpa);
         for (h.back.first_logits) |l| if (l) |x| h.gpa.free(x);
         if (h.back.mask_bits) |x| h.gpa.free(x);
@@ -141,10 +146,17 @@ fn openLanes(gpa: Allocator, io: std.Io, runner: *xq.Runner, drafter: ?*Drafter,
         try h.back.measure();
         std.log.info("qwen27-xpu: window ms by rows: 1 {d:.1}, 8 {d:.1}, 16 {d:.1}", .{ h.back.costs[0].ms, h.back.costs[7].ms, h.back.costs[15].ms });
     }
-    h.cfg = try lanes.Config.init(gpa, h.back.facts(), 16, 15);
+    h.wrap = null;
+    if (drafter) |d| {
+        h.dflash = .{ .d = d, .host = &h.back };
+        h.wrap = try lanes.drafted.Drafted.init(gpa, h.back.backend(), h.dflash.drafter());
+        h.back.wrap = &h.wrap.?;
+    }
+    errdefer if (h.wrap) |*w| w.deinit();
+    h.cfg = try lanes.Config.init(gpa, if (h.wrap) |*w| dflash2.facts(w, h.back.facts()) else h.back.facts(), 16, 15);
     errdefer h.cfg.deinit(gpa);
     h.wall = .{ .io = io };
-    h.core = lanes.Engine.init(gpa, &h.cfg, h.back.backend(), h.wall.clock());
+    h.core = lanes.Engine.init(gpa, &h.cfg, if (h.wrap) |*w| w.backend() else h.back.backend(), h.wall.clock());
     errdefer h.core.deinit();
     // the engine cuts its prompts on its own grid from position 0 (prefill_step 0): the same ids give the same bits
     h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "qwen27-xpu", .draft_sources = .{ .drafter = if (drafter != null) .{ .kind = "DFlash2", .name = o.drafter_name orelse o.drafter orelse "" } else null }, .lanes = slots, .context_window = context, .prefill_step = 0, .structures = true });
