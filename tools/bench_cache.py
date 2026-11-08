@@ -12,7 +12,8 @@ from bench_auth import read_api_key, redact
 
 FIELDS = ("prompt_tokens", "cached_tokens", "tokens", "cache_state", "complete", "token_sha", "token_sha256",
           "output_sha256", "ttft_s", "decode_tps", "error", "unmeasured", "elapsed_s",
-          "chunk_offsets_s", "chunk_gaps_ms")
+          "chunk_offsets_s", "chunk_gaps_ms", "completion", "headers_s", "first_payload_s", "first_output_s",
+          "last_output_s", "tool_calls", "tool_sha256")
 
 
 def receipt(run, phase, reference=None):
