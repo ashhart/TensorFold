@@ -200,12 +200,13 @@ and `--vision`.
 | --- | --- | --- | --- | --- |
 | `POST /v1/ocr` | Mistral OCR | JSON `{"model", "document", ...}` | `{"pages", "model", "document_annotation", "usage_info"}` | the `mistralai` Python and `@mistralai/mistralai` TypeScript SDKs, with `server_url` set to the server root |
 
-One family has a reader. A reader gives Markdown blocks in pixels of the page the client sent (after EXIF
+Two families have a reader. A reader gives Markdown blocks in pixels of the page the client sent (after EXIF
 orientation), never in the model's resized frame.
 
 | Model | What the reader returns | Geometry |
 | --- | --- | --- |
 | dots.mocr | one block a layout region (title, text, table, formula, picture, header, footer, ...), tables as pipe tables or, when cells span, HTML | a box a block |
+| GLM-OCR | the page's Markdown as one block, tables as pipe tables or spanned HTML | none |
 
 Any other model answers the route with HTTP 400 "this model has no OCR reader; use POST /v1/chat/completions",
 and a server started without `--vision` answers "OCR needs image input; start the server with --vision".
@@ -214,7 +215,7 @@ key scope.
 
 ### Reader Markdown
 
-The reader writes block text in one Markdown flavour, the one Mistral's page Markdown uses:
+Both readers write block text in one Markdown flavour, the one Mistral's page Markdown uses:
 
 - Headings with `#` markers: a title is `#`, a section header `##` unless the model gives a level.
 - GFM pipe tables, or one HTML `<table>` when a table has row or column spans a pipe table cannot hold; a table
@@ -223,12 +224,13 @@ The reader writes block text in one Markdown flavour, the one Mistral's page Mar
 - Lists with `-` or `1.` markers, and code in fenced blocks.
 - No images: a picture block has empty text, and its caption, if any, is its own block. The contract writes its
   own image references.
+- GLM-OCR's single block holds the whole page's Markdown, headings, tables and math included.
 
 ### Pages and budgets
 
 - Images are PNG, JPEG or WebP, one page each, up to the 32 MiB body limit and the reader's decoded-pixel limit:
-  16 megapixels and 8192 pixels a side for dots.mocr; a larger image is bad input. An image whose header and
-  decoded pixels disagree is refused as bad input.
+  16 megapixels and 8192 pixels a side for dots.mocr, 32 megapixels for GLM-OCR; a larger image is bad input. An
+  image whose header and decoded pixels disagree is refused as bad input.
 - PDFs need `--vision-pdf`. PDFium renders each selected page at up to 144 DPI, at most 2048 pixels a side and
   about 3.6 megapixels; boxes and sizes are in pixels of the rendered page. Mistral reports that DPI (72 for an
   image). Every PDF of a request is measured before the first page is read (its page count and each selected
@@ -272,7 +274,7 @@ stops the request before its next page or PDF render.
 | `document` | `{"type": "document_url", "document_url"}` or `{"type": "image_url", "image_url"}` (a string or `{"url"}`): a `data:` URL, or an `https://` URL as above. The bytes decide PDF or image. `{"type": "file"}` is HTTP 400 |
 | `pages` | 0-based page indices as a list or a string such as `"0,2-4"`; duplicates are merged. An image has only page `0`. At most 1024 entries (a range counts its length) before merging, and the page budget after |
 | `table_format` | Null: tables stay in the page Markdown as pipe tables (a spanned HTML table becomes a pipe table with the spanned text in its first cell). `"markdown"` or `"html"`: each table becomes a `tables[]` entry (`tbl-N.md` or `tbl-N.html`) and the Markdown links it; under `"markdown"` a table with spanned cells stays HTML, the only form that keeps it |
-| `extract_header`, `extract_footer` | Move page headers or footers out of `markdown` into `header` and `footer` |
+| `extract_header`, `extract_footer` | Move page headers or footers out of `markdown` into `header` and `footer`. GLM-OCR marks neither, so `true` is HTTP 400 "this model does not mark page headers or footers" |
 | `include_blocks` | Default `true`: one block for each region with a box. `false` leaves `blocks` out |
 | `image_limit`, `image_min_size` | Choose which pictures to keep, in reading order (`image_min_size` against the box's width and height, then the running count against `image_limit`). A dropped picture has no image entry, Markdown link or block |
 | `include_image_base64` | Add `image_base64`, a `data:image/jpeg;base64,...` crop of the picture's box, to each kept image |
@@ -285,6 +287,12 @@ stops the request before its next page or PDF render.
 `title`, `list`, `table`, `equation`, `code`, `caption`, `header`, `footer` or `image`), an integer box and
 `content`, its own Markdown with its tables in the `table_format` form; image blocks add `image_id` and table
 blocks `table_id`. `usage_info` gives `pages_processed` and `doc_size_bytes`, the decoded document's size.
+
+### GLM-OCR context
+
+GLM-OCR's default 8192-token window leaves about 2000 tokens for the reply after a full image budget (6144
+tokens). A dense page needs more: start the server with a larger `--context`, or such pages fail as unreadable,
+"the model's output was cut at the context limit".
 
 ## System One on a Clef engine
 
