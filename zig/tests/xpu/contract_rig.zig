@@ -9,12 +9,14 @@ pub const guard = 256;
 const pattern = 0xa5;
 
 /// The image a kernel lives in: the Qwen3.8-27B glue, TP collectives, gate 5's controls, or gates 1 to 4's.
-pub const Image = enum { glue, tp, controls, gate };
+pub const Image = enum { glue, tp, decode, attn_upstream, controls, gate };
 
 fn blob(i: Image) []const u8 {
     return switch (i) {
         .glue => &images.glue,
         .tp => &images.tp,
+        .decode => &images.decode,
+        .attn_upstream => &images.attn_upstream,
         .controls => &images.controls,
         .gate => &images.gate_controls,
     };
@@ -27,6 +29,8 @@ pub const Dev = struct {
     s: xpu.Stream,
     glue: xpu.Module,
     tp: xpu.Module,
+    decode: xpu.Module,
+    attn_upstream: xpu.Module,
     controls: ?xpu.Module, // the driver refuses the whole image when one control asks for more SLM than it has
     controls_err: ?anyerror = null,
     gate: xpu.Module,
@@ -38,6 +42,8 @@ pub const Dev = struct {
         self.s = try xpu.Stream.init(&self.ctx);
         self.glue = try xpu.Module.loadNative(&self.ctx, blob(.glue));
         self.tp = try xpu.Module.loadNative(&self.ctx, blob(.tp));
+        self.decode = try xpu.Module.loadNative(&self.ctx, blob(.decode));
+        self.attn_upstream = try xpu.Module.loadNative(&self.ctx, blob(.attn_upstream));
         self.controls = xpu.Module.loadNative(&self.ctx, blob(.controls)) catch |e| blk: {
             self.controls_err = e;
             break :blk null;
@@ -50,6 +56,8 @@ pub const Dev = struct {
         if (self.controls) |*m| m.unload();
         self.tp.unload();
         self.glue.unload();
+        self.decode.unload();
+        self.attn_upstream.unload();
         self.s.deinit();
         self.ctx.deinit();
         self.drv.close();
@@ -59,6 +67,8 @@ pub const Dev = struct {
         return switch (i) {
             .glue => &self.glue,
             .tp => &self.tp,
+            .decode => &self.decode,
+            .attn_upstream => &self.attn_upstream,
             .controls => if (self.controls) |*m| m else error.ControlsNotBuilt,
             .gate => &self.gate,
         };
