@@ -11,6 +11,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Docs: the Zig family recipe lists the core blocks on main with the call a family makes, and a family PR names each block it doesn't use and why (#2468, part of #2460). Thanks to @jschmied.
 
 - Spark 2.5 and Dory on CUDA now load with direct reads by default: cold loads on a GB10 go from 5.03 to 2.53 s (Spark X2.6 4B 8-bit) and from 4.79 to 3.79 s (Dory NVFP4), with the same replies. Host memory while loading goes down, not up: Spark peaks at 6.1 GiB resident instead of 9.4 and fills 0.4 GiB of page cache instead of 4.2; Dory stays at 7.2 GiB resident and fills 1.3 GiB of page cache instead of 3.1. `TF_LOAD_DIRECT=0` keeps the old mapped reads (#2449). Thanks to @jschmied.
+- Docs: the LFM3 recipe records the qualification rules agreed on #1491 — native no further from an independent FP32 run than the reference's own BF16, partial not pass, the default cold-prefill gap does not block the opt-in text slice, 32k stays the release tier pending long-context fidelity — with an evidence ledger beside the run instructions and a receipts README link (#2416, part of #1491). Thanks to @akol1.
 
 ## 1.2.5
 
@@ -44,9 +45,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - KV pool: a family's pool group is sized by its bytes a row over its layers, and a paged CUDA load prints a line of each group's rows a page and padding (the window rows and state outside or beside the pool too), apart from the unchanged startup line; every family stays one group, so nothing else changes (#2532, part of #2444). Thanks to @jschmied.
 
-- Docs: the LFM3 recipe records the qualification rules agreed on #1491 — native no further from an independent FP32 run than the reference's own BF16, partial not pass, the default cold-prefill gap does not block the opt-in text slice, 32k stays the release tier pending long-context fidelity — with an evidence ledger beside the run instructions and a receipts README link (#2416, part of #1491). Thanks to @akol1.
-
-- The engine API carries an optional image capability beside speech: `Info.image` states what an engine's image host serves and a defaulted `VTable.submit_image` hands back one encoded PNG a request through the caller's own list and allocator, so an engine without the entry is unchanged (#1573).
 - LFM2 on Macs: a non-finite value in a masked key no longer reaches prompt attention's output; finite prompts run the same kernels as before, and prefill is level (#2328, part of #1009).
 
 - Release checks: on a Mac release binary, the private-path check no longer reads the code signature's hash bytes as text, which could spell a path by chance and refuse a clean build; the exact build root is still refused there, and the rest of the binary is checked as before (#2524).
