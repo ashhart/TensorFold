@@ -87,3 +87,24 @@ test "synthetic weights: windows, kept prefixes and chunk cuts reproduce one-row
     try check(m, &wide);
     try chunkCuts(m, &wide, &.{ 825, 264, 15352, 4829, 9944, 13, 271, 279, 854, 22373, 825, 264, 15352, 4829, 9944, 13, 42, 264, 271, 279, 15352, 854, 13 });
 }
+
+test "synthetic weights: the committed states and logits are the same bytes at 1 to 8 threads" {
+    const gpa = std.testing.allocator;
+    const ids = [_]u32{ 825, 264, 15352, 4829, 9944, 13, 271, 279, 854, 22373, 825, 264, 15352, 4829, 9944, 13, 42 };
+    var one: ?st.Cache = null;
+    defer if (one) |*cache| cache.deinit();
+    for ([_]usize{ 0, 1, 2, 3, 4, 5, 6, 7 }) |workers| {
+        const m = try Model.synthetic(gpa, std.testing.io, 11, workers);
+        defer m.deinit();
+        var scratch = try st.Scratch.init(gpa, 32, 64, m.pool.workers());
+        defer scratch.deinit();
+        var cache = try st.Cache.init(gpa, 64);
+        errdefer cache.deinit();
+        try fwd.run(m, &scratch, &.{.{ .cache = &cache, .rows = ids.len - 1 }}, ids[0 .. ids.len - 1], false, .last);
+        try fwd.run(m, &scratch, &.{.{ .cache = &cache, .rows = 1 }}, ids[ids.len - 1 ..], false, .all);
+        if (one) |*first| {
+            try equal(first, &cache);
+            cache.deinit();
+        } else one = cache;
+    }
+}
