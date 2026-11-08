@@ -464,9 +464,6 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     if (pair != null) h.back.chunk = lb.pairChunk(@intCast(h.back.chunk));
     h.back.grow = .{ .ctx = h, .room = Host.roomFor, .added = Host.added };
     h.back.vision = o.images;
-    // The lane-cost timing rounds run real verifies through the backend: rank 1's replay engine never
-    // prices its own windows, and its costs stay unread (the follower serves every round rank 0 drives).
-    if (h.draft != null and !(pair != null and pair.?.rank != 0)) try h.back.measure(io);
     h.cfg = try lanes.Config.init(gpa, h.back.facts(), window, h.back.nodes);
     errdefer h.cfg.deinit(gpa);
     h.clock = .{ .io = io };
@@ -529,8 +526,12 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
         h.follower = p.rank != 0;
         // Rank 1 serves no generations: its engine only replays rank 0's rounds, so admission refuses at the door.
         if (h.follower) h.host.health = .{ .ctx = h, .read = unhealthyFollower };
+        // The follower must listen before rank 0's measure(): its cost-timing rounds send real seams.
         try h.workers.startFollower(p, h.back, a, why);
     }
+    // The lane-cost timing rounds run real verifies through the backend, so rank 0 times alone, after the
+    // follower listens; rank 1 never prices its own windows (the follower serves every round rank 0 drives).
+    if (h.draft != null and !h.follower) try h.back.measure(io);
     tf.startup_receipt.span(.model_ready).end();
     std.log.info("{f}", .{StartupLine{ .streams = slots, .context = capacity, .draft_slots = if (h.draft != null) h.back.draft_slots else 0, .images = o.images != null }});
     return h;
