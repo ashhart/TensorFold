@@ -9,7 +9,6 @@ const gather_k = @import("metal_affine_gather.zig");
 const topk_k = @import("metal_topk.zig");
 const ling_route = @import("metal_ling_route.zig");
 const tile_k = @import("metal_tile.zig");
-const limits_k = @import("metal_limits.zig");
 const h3_k = @import("metal_h3.zig");
 const h3_topk = @import("metal_h3_topk.zig");
 const drama3_k = @import("metal_drama3.zig");
@@ -166,6 +165,7 @@ pub fn main(init: std.process.Init) !u8 {
             return err;
         };
     }
+    if (!o.gates and !o.repro) return @import("metal_limits_all.zig").run(a, init.io, device, o.limits, o.offline, o.only);
     const queue = try device.queue();
     defer queue.deinit();
     const tensor = device.tensorUnits();
@@ -190,10 +190,7 @@ pub fn main(init: std.process.Init) !u8 {
     try lfm3_suite.collect(o.only);
     for (gemma.all_entries) |v| {
         if (!wanted(o, v.name)) continue;
-        if (!tensor) {
-            std.debug.print("UNSUPPORTED {s}: tensor units required; Gemma coverage unchecked\n", .{v.name});
-            return error.TensorUnitsRequired;
-        }
+        if (!@import("metal_support.zig").tensor(tensor, v.name)) continue;
         try gemma.append(a, device, queue, v, false, &gemma_list, &kernels);
         if (v.geo.hidden == 5376 and (v.kind != 1 or std.mem.endsWith(u8, v.name, "sliding"))) {
             try gemma.append(a, device, queue, v, true, &gemma_list, &kernels);
@@ -211,8 +208,7 @@ pub fn main(init: std.process.Init) !u8 {
     var mixed = gemma_mixed.Probe.init(a, device, queue);
     defer mixed.deinit();
     if (wanted(o, mixed.kernel().spec.name)) {
-        if (!tensor) return error.TensorUnitsRequired;
-        try kernels.append(a, mixed.kernel());
+        if (@import("metal_support.zig").tensor(tensor, mixed.kernel().spec.name)) try kernels.append(a, mixed.kernel());
     }
     var lfm2: @import("metal_lfm2_suite.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer lfm2.deinit();
@@ -528,11 +524,7 @@ pub fn main(init: std.process.Init) !u8 {
     const t1 = std.Io.Clock.awake.now(init.io);
     var lim: usize = 0;
     if (o.limits) {
-        lim = try limits_k.gate(a, init.io, device, o.offline, o.only);
-        lim += try gemma.limits(a, device, o.only);
-        lim += try gemma_embed.limits(a, device, o.only);
-        lim += try gemma_mixed.limits(a, device, o.only);
-        lim += try llama_k.limits(a, device, tensor, o.only);
+        lim = try @import("metal_limits_all.zig").gate(a, init.io, device, o.offline, o.only);
     }
     const t2 = std.Io.Clock.awake.now(init.io);
     const ms = struct {
