@@ -356,6 +356,9 @@ pub fn main(init: std.process.Init) !u8 {
         try proj_list.append(a, p);
         try kernels.append(a, p.kernel());
     };
+    var q8_exact = @import("metal_lane_q8.zig").Suite{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer q8_exact.deinit();
+    if (tensor) try q8_exact.collect(o.only);
     var gathers: std.ArrayList(*gather_k.Gather) = .empty;
     defer {
         for (gathers.items) |x| {
@@ -525,7 +528,7 @@ pub fn main(init: std.process.Init) !u8 {
     const t1 = std.Io.Clock.awake.now(init.io);
     var lim: usize = 0;
     if (o.limits) {
-        lim = try limits_k.gate(a, init.io, device, o.offline);
+        lim = try limits_k.gate(a, init.io, device, o.offline, o.only);
         lim += try gemma.limits(a, device, o.only);
         lim += try gemma_embed.limits(a, device, o.only);
         lim += try gemma_mixed.limits(a, device, o.only);
