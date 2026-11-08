@@ -21,12 +21,6 @@ fn expectCell(got: html.Cell, text: []const u8, row: u32, col: u32, rows: u32, c
     try t.expectEqualDeep(want, got);
 }
 
-fn expectRows(a: std.mem.Allocator, table: html.Table, want: []const []const u8) !void {
-    const got = try html.rowsText(a, table);
-    try t.expectEqual(want.len, got.len);
-    for (want, got) |w, g| try t.expectEqualStrings(w, g);
-}
-
 test "ocr html: the dots.mocr table keeps its spans" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
@@ -40,12 +34,6 @@ test "ocr html: the dots.mocr table keeps its spans" {
     try t.expectEqualDeep(nhl, table.cells[3]);
     try expectCell(table.cells[4], "Cases", 1, 2, 1, 1, true);
     try t.expect(!table.cells[10].head);
-    try expectRows(a, table, &.{
-        "\tControls\tHodgkin lymphoma\t\t\tNon-Hodgkin lymphoma\t\t",
-        "\t\tCases\tOR\t95% CI\tCases\tOR\t95% CI",
-        "Never Exposed (reference group)\t2,273\t315\t1.00\t—\t1,823\t1.00\t—",
-        ">1 year\t90\t7\t0.84\t0.37-1.91\t86\t1.17\t0.87-1.59",
-    });
 }
 
 test "ocr html: the GLM-OCR table has no header row and becomes a pipe table with its first row the header" {
@@ -85,7 +73,7 @@ test "ocr html: other tags drop and keep their text; names and attributes in any
     try expectCell(table.cells[2], "y", 1, 1, 1, 2, false);
 }
 
-test "ocr html: <br> is a line break in the cell and a space in pipe cells and text rows" {
+test "ocr html: <br> is a line break in the cell and a space in pipe cells" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -93,7 +81,6 @@ test "ocr html: <br> is a line break in the cell and a space in pipe cells and t
     const table = try html.parse(a, src);
     try t.expectEqualStrings("line one\nline two\nthree", table.cells[0].text);
     try t.expectEqualStrings("| line one line two three | b |\n| --- | --- |", try html.pipe(a, table));
-    try expectRows(a, table, &.{"line one line two three\tb"});
     const clean = "<table><tr><td>line one<br>line two<br>three</td><td>b</td></tr></table>";
     try t.expectEqualStrings(clean, try html.normalized(a, table));
 }
@@ -192,7 +179,7 @@ test "ocr html: spans clip to the grid and to columns earlier rows cover" {
     try t.expect(!lone.spanned and lone.rows == 1 and lone.cols == 1);
 }
 
-test "ocr html: text rows place a spanned cell's text once and keep trailing cells" {
+test "ocr html: pipe rows place a spanned cell's text once and keep trailing cells" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -200,7 +187,6 @@ test "ocr html: text rows place a spanned cell's text once and keep trailing cel
         "<tr><td>e</td></tr></table>";
     const table = try html.parse(a, src);
     try t.expectEqual(@as(u32, 3), table.cols);
-    try expectRows(a, table, &.{ "A\tB\t", "\tc\td", "e\t\t" });
     try t.expectEqualStrings("| A | B |  |\n| --- | --- | --- |\n|  | c | d |\n| e |  |  |", try html.pipe(a, table));
 }
 
@@ -227,9 +213,6 @@ fn everyWriter(a: std.mem.Allocator, src: []const u8) !void {
     defer table.deinit(a);
     a.free(try html.pipe(a, table));
     a.free(try html.normalized(a, table));
-    const rows = try html.rowsText(a, table);
-    for (rows) |r| a.free(r);
-    a.free(rows);
 }
 
 test "ocr html: every allocation failure is returned and nothing leaks" {
