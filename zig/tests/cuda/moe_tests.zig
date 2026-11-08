@@ -25,11 +25,20 @@ fn upload(gpu: Gpu, bytes: []const u8) !cuda.DeviceBuffer {
     return cuda.DeviceBuffer.fromHost(gpu.d, bytes);
 }
 
-/// The router's fp32 logits: one fma chain a (row, expert) in index order, as tf_moe_router sums.
+/// Router logits, decode rows and tiled prompt rows, equal the host's index-order fma chains byte for byte.
 fn router(gpu: Gpu, f: cuda.moe.Fns, s: cuda.Stream, r: std.Random) !void {
+    const Case = struct { rows: usize, pad: usize = 0, live: ?usize = null };
+    const cases = [_]Case{ .{ .rows = 5 }, .{ .rows = 33 }, .{ .rows = 256 }, .{ .rows = 257 }, .{ .rows = 300 }, .{ .rows = 129, .pad = 16 }, .{ .rows = 300, .pad = 8, .live = 129 }, .{ .rows = 520, .live = 7 }, .{ .rows = 600, .live = 300 } };
+    for (cases) |c| try routerCase(gpu, f, s, r, c.rows, c.pad, c.live);
+    check.pass("moe router: untiled and tiled calls (5 to 600 rows, padded strides, capped live rows) x 257 experts over 2048 inputs equal the host's fma chains", .{});
+    for ([_]usize{ 1056, 2048 }) |dims| try routerTilesEqual(gpu, f, s, r, dims);
+    check.pass("moe router tiles: 300 rows equal tf_moe_router's bytes at 33 and 64 input steps, NaN, infinities and -0 included", .{});
+}
+
+/// tf_moe_router_tiles equals tf_moe_router on the same rows, NaN, infinities and -0 included, at odd step counts.
+fn routerTilesEqual(gpu: Gpu, f: cuda.moe.Fns, s: cuda.Stream, r: std.Random, dims: usize) !void {
     const a = gpu.gpa;
-    const rows = 5;
-    const dims = 2048;
+    const rows = 300;
     const count = 257;
     const x = try a.alloc(u16, rows * dims);
     defer a.free(x);
@@ -37,25 +46,76 @@ fn router(gpu: Gpu, f: cuda.moe.Fns, s: cuda.Stream, r: std.Random) !void {
     defer a.free(w);
     for (x) |*v| v.* = randBf16(r, 1.0);
     for (w) |*v| v.* = randBf16(r, 0.1);
+    x[3 * dims + 17] = 0x7fc0; // NaN
+    x[130 * dims + dims - 1] = 0x7f80; // +Inf in the last input
+    x[131 * dims] = 0xff80; // -Inf in the first input
+    w[200 * dims + 5] = 0x7f80;
+    w[200 * dims + dims / 2] = 0xff80; // +Inf and -Inf in one expert row: NaN wherever the row reaches both
+    for (0..dims) |k| x[257 * dims + k] = 0x8000; // a row of -0
+    var dx = try upload(gpu, std.mem.sliceAsBytes(x));
+    defer dx.free();
+    var dw = try upload(gpu, std.mem.sliceAsBytes(w));
+    defer dw.free();
+    var out: [2][]u8 = undefined;
+    for (0..2) |k| {
+        var dl = try cuda.DeviceBuffer.alloc(gpu.d, rows * count * 4);
+        defer dl.free();
+        if (k == 0) {
+            try f.route(s, dx.ptr, dims, rows, dw.ptr, dl.ptr, dims, count, 0); // the tiles (300 rows)
+        } else {
+            var args: cuda.Args = .{};
+            args.add(dx.ptr);
+            args.add(@as(c_int, @intCast(dims)));
+            args.add(dw.ptr);
+            args.add(dl.ptr);
+            for ([_]usize{ rows, dims, count }) |v| args.add(@as(c_int, @intCast(v)));
+            args.add(@as(u64, 0));
+            try cuda.launch.launch(f.router_fn, .{ .grid = .{ .x = (rows + 15) / 16, .y = (count + 15) / 16, .z = 1 }, .block = .{ .x = 256 } }, s, &args);
+        }
+        try s.synchronize();
+        out[k] = try check.download(gpu, dl);
+    }
+    defer for (out) |o| a.free(o);
+    try check.sameBytes("router tiles vs tf_moe_router", out[0], out[1]);
+}
+
+fn routerCase(gpu: Gpu, f: cuda.moe.Fns, s: cuda.Stream, r: std.Random, rows: usize, pad: usize, live: ?usize) !void {
+    const a = gpu.gpa;
+    const dims = 2048;
+    const count = 257;
+    const stride = dims + pad;
+    const x = try a.alloc(u16, rows * stride);
+    defer a.free(x);
+    const w = try a.alloc(u16, count * dims);
+    defer a.free(w);
+    for (x) |*v| v.* = randBf16(r, 1.0);
+    for (w) |*v| v.* = randBf16(r, 0.1);
+    const n = live orelse rows;
     const want = try a.alloc(f32, rows * count);
     defer a.free(want);
-    for (0..rows) |i| for (0..count) |e| {
+    @memset(std.mem.sliceAsBytes(want), 0xff); // rows past the live count stay unwritten
+    for (0..n) |i| for (0..count) |e| {
         var acc: f32 = 0;
-        for (0..dims) |k| acc = @mulAdd(f32, bf16f(x[i * dims + k]), bf16f(w[e * dims + k]), acc);
+        for (0..dims) |k| acc = @mulAdd(f32, bf16f(x[i * stride + k]), bf16f(w[e * dims + k]), acc);
         want[i * count + e] = acc;
     };
     var dx = try upload(gpu, std.mem.sliceAsBytes(x));
     defer dx.free();
     var dw = try upload(gpu, std.mem.sliceAsBytes(w));
     defer dw.free();
-    var dl = try cuda.DeviceBuffer.alloc(gpu.d, rows * count * 4);
+    const fill = try a.alloc(u8, rows * count * 4);
+    defer a.free(fill);
+    @memset(fill, 0xff);
+    var dl = try upload(gpu, fill);
     defer dl.free();
-    try f.route(s, dx.ptr, dims, rows, dw.ptr, dl.ptr, dims, count, 0);
+    const params = [8]i32{ 0, 0, @intCast(n), 1, 1, 0, 0, 0 };
+    var dp = try upload(gpu, std.mem.sliceAsBytes(&params));
+    defer dp.free();
+    try f.route(s, dx.ptr, stride, rows, dw.ptr, dl.ptr, dims, count, if (live != null) dp.ptr else 0);
     try s.synchronize();
     const got = try check.download(gpu, dl);
     defer a.free(got);
     try check.sameBytes("router logits", got, std.mem.sliceAsBytes(want));
-    check.pass("moe router: {d} rows x {d} experts over {d} inputs equal the host's fma chains", .{ rows, count, dims });
 }
 
 /// Each row's picks and weights by cuda/moe.py's rule: top-k by logit, ties to the lower id, exp(l - top) / sum.
