@@ -189,7 +189,7 @@ pub const Kernels = struct {
                 .ranges = if (skip > 0) &ranges else &.{},
                 .groups = if (cut[1] > 0) .{ cut[0], cut[1] } else null,
                 .output = if (cut[1] > 0) .f32 else .bf16,
-                .precompute_sums = reg,
+                .precompute_sums = reg or (p.bits == 8 and p.group == 64),
                 .reg = reg,
                 .rows = if (long) lane.max_reg_rows else lane.reg_rows,
             });
@@ -264,7 +264,7 @@ pub const Kernels = struct {
         const reg = p.bits == 4 and p.group == 64;
         if (!reg and (skip > 0 or cut[1] > 0)) return error.BadCoreProjectionRows;
         const long = reg and longKey(k.long_prompt, k.prompt, rows);
-        const sums: ?Sums = if (reg) xs else null; // the non-reg kernel sums its own groups
+        const sums: ?Sums = if (reg or (p.bits == 8 and p.group == 64)) xs else null;
         const entry = try k.laneEntry(p, sk, skip, cut, long);
         const step = entry.value_ptr.max_rows;
         var first: u32 = 0;

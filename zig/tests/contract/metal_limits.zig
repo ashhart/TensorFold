@@ -26,6 +26,16 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
     var text: []const u8 = undefined;
     var head: []const u8 = "";
     var frags = false;
+    if (std.mem.startsWith(u8, d.name, "qwen27 q8 ")) {
+        for (@import("contract").lane_q8.sources) |v| {
+            if (!std.mem.eql(u8, v.name, d.name)) continue;
+            const l = tf.lane_projection.Layout{ .n = v.n, .k = v.k, .sk = v.sk, .pf = v.pf, .format = .{ .bits = 8, .group = v.group }, .precompute_sums = v.sums, .output = if (v.f32_out) .f32 else .bf16 };
+            const body = try @import("metal_lane_q8.zig").text(a, device, l, false, @fromBackingInt(@backingInt(v.bad)));
+            return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
+        }
+        return error.UnknownLaunch;
+    }
+
     const has = struct {
         fn f(s: []const u8, p: []const u8) bool {
             return std.mem.indexOf(u8, s, p) != null;
@@ -245,15 +255,25 @@ pub fn onThisGpu(a: std.mem.Allocator, device: mtl.Device, l: Launch, control: b
 }
 
 /// Gate 5: declarations against every family, each pipeline on this GPU, and offline M1/M2 compiles when asked.
-pub fn gate(a: std.mem.Allocator, io: std.Io, device: mtl.Device, offline: ?[]const u8) !usize {
-    var n = try registry.checkMetal(a, &registry.all_metal, false);
-    std.debug.print("{s} limits: {d} registered Metal launches against M1-M5, {d} problems\n", .{ if (n == 0) "PASS" else "FAIL", registry.all_metal.len, n });
-    for (registry.all_metal) |d| n += try onThisGpu(a, device, try launchOf(a, device, d), false);
+pub fn gate(a: std.mem.Allocator, io: std.Io, device: mtl.Device, offline: ?[]const u8, only: ?[]const u8) !usize {
+    var list: std.ArrayList(limits.MetalLaunch) = .empty;
+    defer list.deinit(a);
+    for (registry.all_metal) |d| {
+        if (only) |needle| if (std.mem.indexOf(u8, d.name, needle) == null) continue;
+        if (!device.tensorUnits() and std.mem.startsWith(u8, d.name, "qwen27 q8 ")) continue;
+        try list.append(a, d);
+    }
+    var n = try registry.checkMetal(a, list.items, false);
+    std.debug.print("{s} limits: {d} selected registered Metal launches against M1-M5, {d} problems\n", .{ if (n == 0) "PASS" else "FAIL", list.items.len, n });
+    for (list.items) |d| n += try onThisGpu(a, device, try launchOf(a, device, d), false);
     for (registry.metal_controls) |d| {
         const red = try registry.checkMetal(a, &.{d}, true) + try onThisGpu(a, device, try launchOf(a, device, d), true);
         if (red == 0) n += 1;
         std.debug.print("CONTROL {s} {s}: {d} limit problems\n", .{ if (red > 0) "red as planted," else "MISSED", d.name, red });
     }
-    if (offline) |dir| n += try @import("metal_offline.zig").run(a, io, dir, &(registry.all_metal ++ registry.metal_controls), launchOf, device);
+    if (offline) |dir| {
+        try list.appendSlice(a, &registry.metal_controls);
+        n += try @import("metal_offline.zig").run(a, io, dir, list.items, launchOf, device);
+    }
     return n;
 }

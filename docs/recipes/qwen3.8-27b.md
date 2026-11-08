@@ -151,9 +151,27 @@ The lane switch accepts only 0 or 1; the copy switch accepts only 0 or 1. Invali
 ## Weights other than 4-bit
 
 The M5 lane kernels accept MLX affine 2-, 3-, 4-, 5-, 6- and 8-bit projections in groups of 64.
-They widen packed values for the tensor operations without changing those values. Mixed-width stacks
-keep separate calls where a fused projection needs one width. Examples include
+The 4- and 8-bit paths read stored code tiles directly; the other widths expand their codes without changing values.
+The 8-bit group-64 path also reuses the input producer's ordered FP32 group sums.
+Mixed-width stacks keep separate calls where a fused projection needs one width. Examples include
 `TensorFold/Qwen3.8-27B-oQ2` and `TensorFold/Qwen3.8-27B-oQ4`.
+
+On an M5 Ultra with 256 GiB, macOS 27.0.1 and Metal 32023.922, one plain stream measured:
+
+| MLX affine, group 64 | Cold 2K prompt tok/s | Cold 8K prompt tok/s | 512-token decode tok/s |
+| --- | ---: | ---: | ---: |
+| 4-bit | 1904.9 | 1856.9 | 47.7 |
+| 8-bit | 768.5 | 760.0 | 29.3 |
+
+These are two-process means from balanced main/candidate runs, with warm weights and pipelines,
+raw token prompts, a 2,048-row prompt capacity and `--prompt-cache-gib 0`.
+Revisions were `70ae7fac63274ff2eac54152031433374cb80f2f` for 4-bit and
+`9ef68bd06f524d972d0e9b16ac0a49963528ed81` for 8-bit.
+Main `985692e50` measured 648.5/643.1 prompt tok/s at 2K/8K for 8-bit; the byte reader and sum reuse improve
+those rates by 18.5%/18.2%, retaining exact tokens and committed prompt-state bytes.
+The remaining 8-bit prompt rate is 40–41% of 4-bit's, against a stored-weight byte ratio of 54.4%.
+Dense projections still dominate its split-buffer profile, so weight size alone does not explain the prompt gap.
+Decode here is a regression check; the two changes were measured together.
 
 The packed row readers on Apple Silicon and the CUDA readers cover MLX affine 2/3/4/5/6/8-bit projections
 with groups of 32/64/128, including mixed layers. CUDA also reads [EXL3 packs](#exl3-checkpoints-experimental).

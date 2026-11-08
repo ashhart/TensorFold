@@ -124,6 +124,8 @@ norm on the host's cores) through gates 1 to 4 and their eight controls; a CPU k
 nothing to check. `zig build test-kernel-contract`, CI's no-device step, runs the same gates as a test, and `zig build
 test` the kernels' own test that the bytes are the same at 1 to 16 threads and at column splits every 8 columns to 256 and every 256 beyond (each alignment of the four-tile pass), on x86_64 and arm64.
 
+`--only` filters generic Metal launch labels too; both global launch-limit controls still run.
+
 Every run ends with a `SUMMARY` line: kernels passing gates 1 to 4, known findings, controls red, and limit problems.
 The program exits 1 on any failed gate, any control that stayed green, or any limit problem.
 

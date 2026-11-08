@@ -41,7 +41,8 @@ pub const cuda_pending = @import("qwen_whole_records.zig").records ++
     @import("qwen4_records.zig").cuda;
 pub const metal_before = @import("fsr_records.zig").metal ++
     @import("lfm3_records.zig").metal;
-pub const all_metal = @import("attention_pv_records.zig").records ++
+pub const all_metal = @import("lane_q8_records.zig").records ++
+    @import("attention_pv_records.zig").records ++
     registry.metal ++
     @import("delta_slots_records.zig").records ++
     @import("flashnext_pending.zig").records ++
