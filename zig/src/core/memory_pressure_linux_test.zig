@@ -48,22 +48,27 @@ test "memory pressure: Linux planted files classify PSI boundaries and retain av
     defer a.free(root);
     try plant(tmp.dir, quiet, healthy);
     try std.testing.expectEqual(@as(u32, 1), linux.readAt(root).?.level());
-    const Case = struct { available: u64, some: f64 = 0, full: f64 = 0, want: u32 };
+    const Case = struct { available: u64, some: f64 = 0, full: f64 = 0, want: ?u32, p: ?[]const u8 = null, m: ?[]const u8 = null };
     const cases = [_]Case{
-        .{ .available = 100001, .want = 1 },                .{ .available = 100000, .want = 1 },
-        .{ .available = 50001, .want = 1 },                 .{ .available = 50000, .want = 1 },
-        .{ .available = 0, .want = 1 },                     .{ .available = 1000000, .want = 1 },
-        .{ .available = 400000, .some = 9.999, .want = 1 }, .{ .available = 400000, .some = 10, .want = 2 },
-        .{ .available = 400000, .full = 0.999, .want = 1 }, .{ .available = 400000, .full = 1, .want = 2 },
-        .{ .available = 400000, .full = 9.999, .want = 2 }, .{ .available = 400000, .full = 10, .want = 4 },
+        .{ .available = 100001, .want = 1 },                                                                                                                            .{ .available = 100000, .want = 1 },
+        .{ .available = 50001, .want = 1 },                                                                                                                             .{ .available = 50000, .want = 1 },
+        .{ .available = 0, .want = 1 },                                                                                                                                 .{ .available = 1000000, .want = 1 },
+        .{ .available = 400000, .some = 9.999, .want = 1 },                                                                                                             .{ .available = 400000, .some = 10, .want = 2 },
+        .{ .available = 400000, .full = 0.999, .want = 1 },                                                                                                             .{ .available = 400000, .full = 1, .want = 2 },
+        .{ .available = 400000, .full = 9.999, .want = 2 },                                                                                                             .{ .available = 400000, .full = 10, .want = 4 },
+        .{ .available = 400000, .want = 4, .p = "some avg10=12.34 avg60=5.67 avg300=1.23 total=987654321\nfull avg60=5.67 total=987654321 avg300=1.23 avg10=12.34\n" }, .{ .available = 400000, .want = null, .p = "some avg10=0.00 avg60=0.00 avg300=0.00 total=987654321\n" },
+        .{ .available = 400000, .want = null, .m = "MemTotal: 1000000 kB\nMemFree: 1 kB\nBuffers: 500 kB\nCached: 500000 kB\n" },
     };
     var p: [256]u8 = undefined;
     var m: [128]u8 = undefined;
     for (cases) |c| {
-        try plant(tmp.dir, try psi(&p, c.some, c.full), try mem(&m, c.available));
-        const got = linux.readAt(root).?;
-        try std.testing.expectEqual(c.want, got.level());
-        try std.testing.expectEqual(c.available * 1024, got.available);
+        try plant(tmp.dir, c.p orelse try psi(&p, c.some, c.full), c.m orelse try mem(&m, c.available));
+        const reading = linux.readAt(root);
+        if (c.want) |want| {
+            const got = reading.?;
+            try std.testing.expectEqual(want, got.level());
+            try std.testing.expectEqual(c.available * 1024, got.available);
+        } else try std.testing.expect(reading == null);
     }
 }
 
