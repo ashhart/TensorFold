@@ -18,3 +18,7 @@ test "Metal launch map: every registered launch and control has a resolver branc
 test "Metal launch map: unknown registrations stay errors on every chip" {
     try std.testing.expectError(error.UnknownLaunch, launches.requireMapped(.{ .name = "unregistered family missing_kernel", .threads = 32, .tg_memory = 0 }));
 }
+
+test {
+    _ = @import("metal_support.zig");
+}
