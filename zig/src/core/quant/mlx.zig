@@ -543,4 +543,5 @@ test {
     _ = keys;
     _ = @import("mlx_geometry_test.zig");
     _ = @import("mlx_checkpoint_test.zig");
+    _ = @import("mlx_affine.zig");
 }
