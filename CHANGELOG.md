@@ -4,6 +4,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Prompt cache: Qwen3.8-27B on a Mac widens its disk staging permit to one whole state at its `--context`, within `--prompt-cache-gib`, so conversations past about 13K new tokens are saved instead of skipped with `StagingFull`.
 - Qwen3.8-27B on Metal, opt-in with `TF_QWEN27_METAL_KV_PAGES=1`: each stream's keys and values live in pages of the core KV pool instead of their own buffers, with greedy replies equal to the default on one and two streams. The paged kernels are derived from the default ones, and the page row, page tensor and source edits they share with Nemotron's and Qwen3.5's now live in one place. It has run on Macs without tensor units only; an M5 refuses the flag by name for now (#2283, part of #1293).
 - HIP: the qwen3_5 engine reads a DFlash2 drafter's `config.json` against its target, refusing one it can't run, and loads its weights as MLX affine-4 (groups of 64), quantized on the host as on CUDA; nothing serves the drafter yet (#2477, part 2 of #1563). Thanks to @AbrahamCete.
 
@@ -181,8 +182,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Qwen3.8-27B on Metal: a round's keep that fails part way (an allocation, a refused keep or path) returns its error instead of aborting the process on an unended command encoder, and after a failed allocation the round can keep again; `tf-qwen27-keep-error` fails each of the keep's allocations in turn and refuses a path after the encoder has ended (#2376). Thanks to @jschmied.
 
 - Docs: `docs/optimization-ledger.md` lists which speed and memory optimizations apply to which native family, and where each stands, with links to the PRs that measured them (#2232). Thanks to @jschmied.
-
-- Prompt cache: Qwen3.8-27B on a Mac widens its disk staging permit to one whole state at its `--context`, within `--prompt-cache-gib`, so conversations past about 13K new tokens are saved instead of skipped with `StagingFull`.
 
 - Docs: the pull request pre-flight asks a PR that adds, finishes or drops a family's optimization to update that family's cell in the optimization ledger (#2243). Thanks to @jschmied.
 
