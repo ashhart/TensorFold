@@ -63,9 +63,9 @@ fn slotUsed(g: Geometry, i: usize, slot: Slot) bool {
     };
 }
 
-/// A plain BF16 checkpoint's kinds: every module and the untied head bf16, on the ModelOpt loader's HF names.
+/// A plain BF16 checkpoint's kinds: every module and the head bf16 (a tied head packs embed_tokens), on HF names.
 pub fn plain(g: Geometry) !Kinds {
-    if (g.tied or g.moe()) return error.UnsupportedQwenQuantization;
+    if (g.moe()) return error.UnsupportedQwenQuantization;
     var out: Kinds = .{ .modelopt = true, .head = .bf16 };
     for (0..g.layers) |i| for (std.enums.values(Slot)) |slot| {
         if (slotUsed(g, i, slot)) out.proj[i][@backingInt(slot)] = .bf16;
