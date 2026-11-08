@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Ripple-65B-Preview's DFlash2 drafter runs on the two-GB10 path with `--drafter`, cut over both ranks as the target
+  is; drafted replies equal `"draft": false` ones token for token (#2523). Thanks to @ajensenwaud.
 - Ripple-65B-Preview runs on two GB10s (DGX Spark) at `--tp 2` from ExLlamaV3 packs: each rank holds half of every
   projection, the full layers run to a 1,048,576-token context, and rank 0 serves with kept prompt states while rank 1
   follows; any other GPU or rank count is refused by name, one GPU staying with the one-GPU CUDA path (#2522).
