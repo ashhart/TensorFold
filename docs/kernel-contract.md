@@ -442,6 +442,18 @@ controls, each red at `shapes`: the embedding's product left unrounded, a lerp s
 sigmoid rounded to fp16, the up projection clamped above only, a / rms rounded to bf16, rank 1's partial rounded to
 bf16, each head read from its neighbour, and taps rounded toward zero. Their launches are in `ricursive_tp2_records.zig`.
 
+CUDA checks Ripple-65B's DFlash2 drafter glue (`ricursive_tp2_draft.cu`, `ricursive-tp2-draft-contract`; both Ripple
+groups also run in `kernel-contract`): the tap ring's column gathers for either rank, the unscaled embedding into
+fp32, fp32 values into bf16 and each 2,048-logit slice's 32 best (ties to the lower id, NaN read as -Inf), each by a
+host rule; the norm (bf16 rows, and fp16 or bf16 over each block's drafts), the `__expf` SwiGLU, both 4-tap
+convolutions, the query and key head norms with and without rotation, the ring writes of keys and values, and the
+block attention with its chunk merge at a sliding and the full layer's reach, each inside float64's range at its
+rounding points. Twelve controls, each red at `shapes` and kept beside the served kernel in the same image: rows read
+from the ring's next row, the table read as fp16, values toward zero (fp32 to bf16 and the ring's values), lane ties
+to the higher id, x / rms unrounded, silu(g) rounded to bf16, each convolution on the other branch's weights, heads
+rotated the other way, ring keys read one row on, and the merge's running sum never rescaled. Their launches are in
+`ricursive_tp2_draft_records.zig`.
+
 CPU: Qwen3.5-2B's affine projection (4 bits, groups of 64, `cpu_kernels.zig`) at the widths the 2B calls it, one row
 to a 128-row prompt chunk, registered once for each chain count of its projection classes (16; 32 for the delta rule's
 a and b; 8 for the head), and its RMS norm over 2048-wide rows; each registration's runs take 1 to 8 threads in turn,
