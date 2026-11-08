@@ -151,6 +151,10 @@ class SyntheticTest(Fixture):
         wide, plain = [n for n, s in enumerate(swapped.splitlines(), 1) if "switched.cuh" in s]
         self.assertEqual(self.errors(), [f"zig/kernels/cuda/switchers.cu:{wide}: switched.cuh needs narrow",
                                          f"zig/kernels/cuda/switchers.cu:{plain}: switched.cuh needs ldy"])
+        # A switch defined under an #if the check can't tell is unknown at the include: every branch is read.
+        self.write("switchers.cu", SWITCHERS.replace("#define TF_WIDE\n", "#if TF_WANT_WIDE\n#define TF_WIDE\n#endif\n"))
+        wide = line_of(SWITCHERS, '#include "switched.cuh"') + 2
+        self.assertEqual(self.errors(), [f"zig/kernels/cuda/switchers.cu:{wide}: switched.cuh needs narrow"])
         # A macro no includer both defines and undefines may come from the command line: every branch is read.
         self.write("switchers.cu", SWITCHERS)
         self.write("switched.cuh", SWITCHED.replace("#ifdef TF_WIDE", "#ifdef TF_OTHER"))
