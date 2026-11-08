@@ -50,6 +50,8 @@ fn narrow(b: anytype, io: std.Io, probe: Probe) !void {
 /// Price wider unfused forwards without taking another stream's caches or changing the lone window's prices.
 fn shared(b: anytype, io: std.Io, comptime width: usize, seed: ?lanes.cost_cache.KeySeed, phase: *Phase) !void {
     const window = b.window;
+    b.timing = true;
+    defer b.timing = false;
     const draft = b.draft;
     const profile = b.pass_profile;
     const costs = b.costs;
@@ -78,6 +80,8 @@ fn sharedFloor(costs: []const lanes.config.Cost) f64 {
 
 fn sized(b: anytype, io: std.Io, comptime width: usize, kind: []const u8, probe: Probe) !void {
     const r = b.runner;
+    b.timing = true;
+    defer b.timing = false;
     if (b.owners[0] != null or r.active != null) return error.StreamBusy;
     var shape: [128]u8 = undefined;
     const parts = [_][]const u8{ kind, std.mem.span(r.model.device.name()), try q.widths.costShape(r.model.config, r.model.widths_tag, &shape, width, r.capture_taps) };
