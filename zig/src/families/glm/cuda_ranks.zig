@@ -30,8 +30,18 @@ pub const Settings = struct {
     l2pf: l2pf.Options = .{}, // TF_GLM_L2PF and its knobs: a decode window's next weights read into L2 beside it
     kv_live_half: bool = false, // TF_GLM_KV_LIVE_HALF=1: a keep carries the live KDA half alone (cuda_snapshot_layout.zig)
 
-    /// The settings `get` (an environment lookup) gives; `problem` names a value that is not one of the choices.
-    pub fn read(get: *const fn ([:0]const u8) ?[]const u8, problem: *[]const u8) !Settings {
+    /// The settings `get` gives, blank text as unset; `problem` names a value that is not one of the choices.
+    pub fn read(comptime get: *const fn ([:0]const u8) ?[]const u8, problem: *[]const u8) !Settings {
+        return readSet(&struct {
+            fn set(name: [:0]const u8) ?[]const u8 {
+                const v = get(name) orelse return null;
+                return if (std.mem.trim(u8, v, " \t\r\n").len == 0) null else v; // environment.parse's blank
+            }
+        }.set, problem);
+    }
+
+    /// `read` from a lookup with no blank text, so every name below and in l2pf's reader is unset when blank.
+    fn readSet(get: *const fn ([:0]const u8) ?[]const u8, problem: *[]const u8) !Settings {
         var s: Settings = .{};
         if (get("TF_GLM_PROMPT_K")) |v| {
             if (std.mem.eql(u8, v, "shape")) s.prompt_fixed_k = true else if (!std.mem.eql(u8, v, "one")) {
