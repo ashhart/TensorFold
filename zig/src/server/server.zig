@@ -233,6 +233,8 @@ pub const Server = struct {
             srv.think_close = try std.mem.concat(a, u32, &.{ lead, &.{end}, trail });
             srv.think_close_end = end;
         }
+        srv.info.thinking_applicable = srv.close_id != null;
+        srv.info.thinking_switch = try @import("prompt.zig").thinkingSwitch(srv);
         if (srv.info.prefill_step > 0) {
             srv.chunks = try chunk_plan.markers(srv, a, srv.info.prefill_step);
             srv.chunks.min_chunk = srv.info.prefill_min_chunk;

@@ -255,6 +255,32 @@ test "DeepSeek chat: the no-Jinja OpenAI route submits the native masked prompt 
     try t.expectEqualSlices(u32, expected, script.seen);
 }
 
+test "DeepSeek chat: explicit thinking off is the encoder's own switch, published and never refused" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = try fixture(a, "deepseek_v41");
+    defer tmp.deinit();
+    var problem: []const u8 = "";
+    const hf = try HfText.load(a, t.io, tmp.path, null, a, &problem);
+    defer hf.deinit();
+    var script: Script = .{};
+    const srv = try @import("server.zig").Server.init(a, t.io, script.engine(), hf.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .use_drafts = false }, null);
+    defer srv.deinit();
+    try t.expect(srv.thinking_switch and srv.info.capability(.thinking_applicable) and srv.info.capability(.thinking_switch));
+    const msgs = try tf.messages(a, "H");
+    const off = try hf.text().renderIds(a, msgs, .{ .enable_thinking = false }, &problem);
+    try t.expectEqualSlices(u32, &.{ hf.text().tokenId("<｜Assistant｜>").?, hf.text().tokenId("</think>").? }, off[off.len - 2 ..]);
+    var reply: Reply = .{};
+    var conn = try @import("http_conn.zig").Conn.init(a, -1, "fixture");
+    defer conn.deinit();
+    const body = (try json.parseText(a, "{\"model\":\"m\",\"max_tokens\":1,\"chat_template_kwargs\":{\"enable_thinking\":false}}")).ok;
+    try body.object.put(a, "messages", msgs);
+    @import("openai.zig").run(srv, a, reply.out(), .{ .conn = &conn }, true, body);
+    try t.expectEqual(@as(u16, 200), reply.code);
+    try t.expectEqualSlices(u32, off, script.seen);
+}
+
 test "DeepSeek chat: tool-only Jinja metadata does not replace the native encoder" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();

@@ -262,7 +262,7 @@ test "a greedy-only engine's refusal is printed once with its reason and what to
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, answered));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, greedy));
     try std.testing.expect(std.mem.indexOf(u8, text, "code T=1 warm-up: error\n" ++ answered ++ greedy ++ "code T=1 repeat 1/1: error\n") != null);
-    try std.testing.expect(f.count() == 9 and r.has("Receipt saved")); // the manifest, then eight replies
+    try std.testing.expect(f.count() == 10 and r.has("Receipt saved")); // Manifest, thinking discovery, then eight replies.
     const saved = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, out, a, .limited(1 << 20));
     try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, saved, "\"error_code\":\"http_error\""));
     try std.testing.expect(std.mem.indexOf(u8, saved, "greedily") == null and std.mem.indexOf(u8, saved, "Bad Request") == null);
@@ -346,7 +346,7 @@ test "an attached run keeps legacy manifest metadata but saves an unranked recei
     defer f.stop();
     const out = try r.path("run.json");
     try std.testing.expectEqual(@as(u8, 0), try r.command(try cli.runArgs(&r, try f.url(a, ""), out)));
-    try std.testing.expect(r.has("Receipt saved") and r.has("unranked") and f.count() == 5);
+    try std.testing.expect(r.has("Receipt saved") and r.has("unranked") and f.count() == 6);
     var problem: []const u8 = "";
     const v = (try receipt.load(a, std.testing.io, out, std.Io.Clock.real.now(std.testing.io).toMilliseconds(), &problem)).?;
     const settings = v.get("settings").?;
