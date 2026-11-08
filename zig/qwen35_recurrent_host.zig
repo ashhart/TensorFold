@@ -186,7 +186,7 @@ test "Shared verification: a served one-row step leases no rollback copy and an 
     // a fresh cache: no copy leased, and the staged segment reads none
     try rec.prepare(&e, &c, 1, true, false);
     try std.testing.expect(c.before == null);
-    try std.testing.expectEqual(@as(u64, 0), q.engine.Engine.stagedSeg(&c, &e, c.len, 0, 1, false).before);
+    try std.testing.expectEqual(@as(u64, 0), (try q.engine.Engine.stagedSeg(&c, &e, c.len, 0, 1, false)).before);
     try rec.mark(&c, false);
     c.advanced(1, true, false);
     _ = Driver.sync(e.stream.handle);
@@ -201,7 +201,7 @@ test "Shared verification: a served one-row step leases no rollback copy and an 
     try std.testing.expect(c.before != null);
     try rec.prepare(&e, &c, 1, true, false);
     try std.testing.expect(c.before != null);
-    try std.testing.expectEqual(@as(u64, 0), q.engine.Engine.stagedSeg(&c, &e, c.len, 0, 1, false).before);
+    try std.testing.expectEqual(@as(u64, 0), (try q.engine.Engine.stagedSeg(&c, &e, c.len, 0, 1, false)).before);
     try rec.mark(&c, false);
     c.advanced(1, true, false);
     _ = Driver.sync(e.stream.handle);

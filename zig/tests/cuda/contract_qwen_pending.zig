@@ -130,6 +130,20 @@ const Fixture = struct {
     }
 };
 
+/// A stream's state table (cuda_cache.zig States) as an input, for these blocks (0: none); tails 0, no scan reads them.
+fn tabled(rig: *rig_.Rig, state: u64, before: u64, log: u64) !Seg {
+    var t: [4 * nl + most]u64 = @splat(0);
+    for (0..nl) |l| {
+        t[l] = state + l * rec * 4;
+        if (before != 0) t[2 * nl + l] = before + l * rec * 4;
+    }
+    if (log != 0) for (0..most) |r| {
+        t[4 * nl + r] = log + r * nl * log_row;
+    };
+    const at = try rig.input(std.mem.sliceAsBytes(&t));
+    return .{ .rec = at, .conv = at + nl * 8, .before = at + 2 * nl * 8, .log = at + 4 * nl * 8 };
+}
+
 /// Pending rows i and j of a buffer swapped, every layer's heads.
 fn swapRows(pend: []u8, i: usize, j: usize) void {
     for (pend[i * nl * head ..][0 .. nl * head], pend[j * nl * head ..][0 .. nl * head]) |*x, *y| std.mem.swap(u8, x, y);
@@ -145,14 +159,26 @@ fn launch(gpu: check.Gpu, s: cuda.Stream, apply: ?cuda.Function, scan: cuda.Func
     const total = 2 * f.rows;
     var segs: [2]Seg = undefined;
     var src: [2]u64 = .{ 0, 0 };
+    // each stream's state, window log and pre-round state, which its Seg reaches through its table
+    var states: [2]u64 = undefined;
+    var logs: [2]u64 = undefined;
+    var befores: [2]u64 = .{ 0, 0 };
+    var kept: [2]Seg = undefined; // tf_q35k_apply's: the state and the path's source log
     for (0..2, &segs) |st, *sg| {
         const state = try rig.scratch(nl * rec * 4);
         try (cuda.DeviceBuffer{ .d = gpu.d, .ptr = state, .len = nl * rec * 4 }).upload(0, std.mem.sliceAsBytes(f.state[st]));
-        sg.* = .{ .rec = state, .log = try rig.scratch(f.rows * nl * log_row), .row0 = @intCast(st * f.rows), .rows = @intCast(f.rows) };
-        if (f.rows == 1) sg.before = try rig.scratch(nl * rec * 4);
+        states[st] = state;
+        logs[st] = try rig.scratch(f.rows * nl * log_row);
+        if (f.rows == 1) befores[st] = try rig.scratch(nl * rec * 4);
+        sg.* = try tabled(&rig, state, befores[st], logs[st]);
+        sg.row0 = @intCast(st * f.rows);
+        sg.rows = @intCast(f.rows);
         const n = f.n[st] - (if (st == 0) drop else 0);
         if (apply != null) {
-            if (f.n[st] > 0) src[st] = try rig.input(f.src[st]);
+            if (f.n[st] > 0) {
+                src[st] = try rig.input(f.src[st]);
+                kept[st] = try tabled(&rig, state, 0, src[st]);
+            }
         } else if (n > 0) {
             sg.pn = sign * @as(c_int, @intCast(n));
             sg.plog = try rig.input(if (st == 0) pend0 else f.pend[st]);
@@ -173,7 +199,7 @@ fn launch(gpu: check.Gpu, s: cuda.Stream, apply: ?cuda.Function, scan: cuda.Func
     if (apply) |ap| {
         for (0..2) |st| if (src[st] != 0) {
             var args: cuda.Args = .{};
-            inline for (.{ geo, Seg{ .rec = segs[st].rec, .log = src[st] }, f.path[st] }) |x| args.add(x);
+            inline for (.{ geo, kept[st], f.path[st] }) |x| args.add(x);
             try cuda.launch.launch(ap, .{ .grid = .{ .x = 1, .y = dk / 4, .z = nv * nl }, .block = .{ .x = 32, .y = 4 } }, s, &args);
         };
     }
@@ -185,9 +211,9 @@ fn launch(gpu: check.Gpu, s: cuda.Stream, apply: ?cuda.Function, scan: cuda.Func
     var out: Out = undefined;
     for (0..nl) |l| out.y[l] = try a.dupe(u8, try rig.bytes(y[l], total * nv * dk * 2));
     for (0..2) |st| {
-        out.state[st] = try a.dupe(u8, try rig.bytes(segs[st].rec, nl * rec * 4));
-        out.log[st] = try a.dupe(u8, try rig.bytes(segs[st].log, f.rows * nl * log_row));
-        out.before[st] = if (f.rows == 1) try a.dupe(u8, try rig.bytes(segs[st].before, nl * rec * 4)) else &.{};
+        out.state[st] = try a.dupe(u8, try rig.bytes(states[st], nl * rec * 4));
+        out.log[st] = try a.dupe(u8, try rig.bytes(logs[st], f.rows * nl * log_row));
+        out.before[st] = if (f.rows == 1) try a.dupe(u8, try rig.bytes(befores[st], nl * rec * 4)) else &.{};
     }
     try check.expect(try rig.intact() and !rig.overlap() and std.mem.eql(u8, seen, try rig.inputBytes()), "qwen35 pending: a launch changed an input or a guard", .{});
     return out;
@@ -212,11 +238,13 @@ fn landed(gpu: check.Gpu, s: cuda.Stream, fun: cuda.Function, from_pend: bool, f
     try (cuda.DeviceBuffer{ .d = gpu.d, .ptr = state, .len = nl * rec * 4 }).upload(0, std.mem.sliceAsBytes(f.state[0]));
     const n = f.n[0] - drop;
     const rows = if (from_pend) (if (n > 0) try rig.input(pend) else 0) else try rig.input(f.src[0]);
+    var sg = try tabled(&rig, state, 0, if (from_pend) 0 else rows);
+    if (from_pend) sg.plog = rows;
     const seen = try a.dupe(u8, try rig.inputBytes());
     var args: cuda.Args = .{};
     if (from_pend) {
-        inline for (.{ geo, Seg{ .rec = state, .plog = rows }, @as(c_int, @intCast(n)) }) |x| args.add(x);
-    } else inline for (.{ geo, Seg{ .rec = state, .log = rows }, f.path[0] }) |x| args.add(x);
+        inline for (.{ geo, sg, @as(c_int, @intCast(n)) }) |x| args.add(x);
+    } else inline for (.{ geo, sg, f.path[0] }) |x| args.add(x);
     try cuda.launch.launch(fun, .{ .grid = .{ .x = 1, .y = dk / 4, .z = nv * nl }, .block = .{ .x = 32, .y = 4 } }, s, &args);
     const out = try a.dupe(u8, try rig.bytes(state, nl * rec * 4));
     try check.expect(try rig.intact() and !rig.overlap() and std.mem.eql(u8, seen, try rig.inputBytes()), "qwen35 pending: a keep launch changed an input or a guard", .{});

@@ -25,14 +25,14 @@ struct Geo {
     __device__ size_t log_bytes() const { return (size_t)nv * 4 + (size_t)nv * DK * 4 + (size_t)nk * DK * 2 + conv_rows() * 2; }
 };
 
-// One stream's window in this forward: its state blocks, cache length before the window, and rows.
+// One stream's window in this forward: its state table's parts (cuda_cache.zig States), cache length, and rows.
 struct Seg {
-    unsigned long long rec;   // float recurrences, one rec() block a linear layer
-    unsigned long long conv;  // bf16 convolution tails, conv_rows() a linear layer
+    unsigned long long rec;   // each linear layer's float recurrence, rec() floats
+    unsigned long long conv;  // each linear layer's bf16 convolution tail, conv_rows() values
     unsigned long long kv;    // bf16 keys then values, kvh * cap * HD each, an attention layer at a time
     unsigned long long tap;   // a drafter's ring of tapped rows (0: none): slot pos % tap_rows, taps * hid bf16 each
-    unsigned long long log;   // the window's rows' records (MAXW rows of nl layers of log_bytes), for keep
-    unsigned long long before; // exact pre-round state for a one-row in-place update
+    unsigned long long log;   // each window row's record (MAXW rows), nl layers of log_bytes, for keep
+    unsigned long long before; // exact pre-round state for a one-row in-place update: nl recurrences, then nl tails
     int cap, len, row0, rows, tap_rows, taps;
     int delta;                // an image prompt's rotary shift: rows past it rotate at position + delta
     unsigned long long pt;    // the stream's KV page table (int a page; 0: kv holds cap contiguous rows)
@@ -41,6 +41,19 @@ struct Seg {
     int pn;                   // pending kept rows the slot scan replays first (negative: replayed, not written back)
     unsigned long long plog;  // their heads: cuda_cache.zig's pending buffer (pend_row)
 };
+
+// Entry i of one of a Seg's state tables.
+__device__ __forceinline__ unsigned long long entry(unsigned long long table, int i) {
+    return __ldg(reinterpret_cast<const unsigned long long*>(table) + i);
+}
+
+// Linear layer `layer`'s recurrence and convolution tail, and their pre-round copies.
+__device__ __forceinline__ float* rec_of(const Seg& sg, int layer) { return reinterpret_cast<float*>(entry(sg.rec, layer)); }
+__device__ __forceinline__ __nv_bfloat16* conv_of(const Seg& sg, int layer) { return reinterpret_cast<__nv_bfloat16*>(entry(sg.conv, layer)); }
+__device__ __forceinline__ float* before_rec(const Seg& sg, int layer) { return reinterpret_cast<float*>(entry(sg.before, layer)); }
+__device__ __forceinline__ __nv_bfloat16* before_conv(const Geo& geo, const Seg& sg, int layer) {
+    return reinterpret_cast<__nv_bfloat16*>(entry(sg.before, geo.nl + layer));
+}
 
 // Seg.kv's element of layer a's key (s 0) or value (s 1) at pos, head h: cap rows a head, or pos's page's row.
 __device__ __forceinline__ size_t kv_row(const Seg& sg, int kvh, int a, int s, int h, int pos) {
@@ -59,7 +72,7 @@ struct LogRow {
 };
 
 __device__ __forceinline__ LogRow log_row(const Geo& geo, const Seg& sg, int layer, int row) {
-    char* base = reinterpret_cast<char*>(sg.log) + ((size_t)row * geo.nl + layer) * geo.log_bytes();
+    char* base = reinterpret_cast<char*>(entry(sg.log, row)) + (size_t)layer * geo.log_bytes();
     LogRow l;
     l.g = reinterpret_cast<float*>(base);
     l.delta = l.g + geo.nv;
