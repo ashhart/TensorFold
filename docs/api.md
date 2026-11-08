@@ -138,7 +138,7 @@ Unsupported image input, audio, video and non-text output requests receive HTTP 
 
 Each native GET /v1/models entry, including every configured alias, includes a capabilities object.
 It reports the loaded engine's boolean Info flags: text_generation, context_fitted, call_gates, loop_guard,
-thinking_budget, reasoning, answer_limit, structures, logprobs, penalties, prompt_logprobs, prompt_cache,
+thinking_budget, reasoning, reasoning_optional, answer_limit, structures, logprobs, penalties, prompt_logprobs, prompt_cache,
 warm_turns, plain_only, decides, pictures, greedy_only and slide_conversations. The vision, speech,
 embeddings, readouts and rerank fields report whether that user feature is present. The last two fields,
 thinking_switch and thinking_applicable, are the loaded chat template's and tokenizer's thinking facts (see
