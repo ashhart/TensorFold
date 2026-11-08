@@ -172,6 +172,8 @@ pub fn absorbBlocks(ops: op.Ops, g: *const w.Graph, preparation: op.Preparation,
         try encodeAppendTo(ops, g, preparation, x.taps, x.positions, frame, .{ .stream = @intCast(k) });
     };
     const output = try encodeStreams(ops, g, preparation, streams, frame, block, &.{});
+    const head_metric = @import("metal").pass_metrics.phase(.draft_head);
+    defer head_metric.end();
     try ops.vtable.lattices(ops.ptr, frame, output.head, output.projected, g.config, block, out);
     for (out) |l| try l.check(g.config);
 }
