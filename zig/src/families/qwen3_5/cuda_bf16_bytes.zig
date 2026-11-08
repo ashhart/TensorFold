@@ -16,6 +16,8 @@ pub fn textWeightBytes(a: std.mem.Allocator, io: std.Io, dir: []const u8) !?u64 
     for (ck.files.items) |*f| for (f.names.keys()) |name| {
         total += f.get(name).?.bytes.len;
     };
+    // a tied head packs the embedding's rows a second time (cuda_weights.zig)
+    if (g.tied) total += @as(u64, g.vocab) * g.hidden * 2;
     return total;
 }
 
@@ -74,4 +76,18 @@ test "plain BF16 preflight: text tensors counted, the tower, MTP and joint head 
     try std.testing.expect(!(try geometry.parse(a, mlx)).bf16);
     try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = mlx });
     try std.testing.expectEqual(@as(?u64, null), try textWeightBytes(a, io, dir));
+}
+
+test "tied BF16 preflight: the head's packed copy of the embedding counts beside the text tensors" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = @embedFile("fixtures/lighton-ocr-0.8b.json") });
+    try writeShard(tmp.dir, io, "model.safetensors", &.{ "model.language_model.embed_tokens.weight", "model.visual.blocks.0.w" }, &.{ 64, 1000 });
+    const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer a.free(dir);
+    const g = try geometry.Geometry.read(a, io, dir);
+    try std.testing.expect(g.bf16 and g.tied);
+    try std.testing.expectEqual(@as(?u64, 2 * 64 + @as(u64, g.vocab) * g.hidden * 2), try textWeightBytes(a, io, dir));
 }

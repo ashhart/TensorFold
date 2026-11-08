@@ -342,7 +342,8 @@ pub fn load(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer) !void {
         e.embed_w = try tensor(e, ck, "{s}embed_tokens.weight", .{m}, .bf16, &.{ g.vocab, g.hidden });
         e.embed_s = 0;
         e.embed_b = 0;
-        e.head = try modelopt.linear(e, ck, stage, "", "lm_head", g.vocab, g.hidden, g.kinds.head);
+        // a tied plain BF16 head is the embedding's rows, packed again into the lane's layout
+        e.head = if (g.bf16 and g.tied) try modelopt.linear(e, ck, stage, m, "embed_tokens", g.vocab, g.hidden, g.kinds.head) else try modelopt.linear(e, ck, stage, "", "lm_head", g.vocab, g.hidden, g.kinds.head);
     } else {
         e.embed_bits = rowBits(g.bits.embed);
         e.embed_w = try embedWords(e, ck, stage, m);
