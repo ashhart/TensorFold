@@ -107,7 +107,7 @@ inline void gtile(const device bfloat* X, const device bfloat* W, device bfloat*
     const int r = int(lane) / QMV_COLS, c = int(lane) % QMV_COLS;
     float v = 0.0f;
     for (int s = 0; s < GATE_KS; s++) v += part[(s * QMV_ROWS + r) * QMV_COLS + c];
-    // DeepMind _modules.py Block PLE step: gelu(gate) * per-layer input, tanh GELU with bf16 rounding after each op.
+    // DeepMind _modules.py Block PLE step: gelu(gate) * per-layer input, tanh GELU, each op rounded to bf16 (x^3 once).
     const float g = float(bfloat(v));
     const float x3 = float(bfloat(g * g * g));
     const float t = float(bfloat(float(bfloat(GELU_C1)) * x3));
