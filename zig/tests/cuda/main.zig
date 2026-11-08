@@ -527,6 +527,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "qwen-norm-shift")) return @import("qwen_norm_shift_tests.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "clef")) return @import("clef_tests.zig").run(gpu, rest);
     if (std.mem.eql(u8, cmd, "qwen-pending")) return @import("contract_qwen_pending.zig").run(gpu);
+    if (std.mem.eql(u8, cmd, "dspine-table")) return @import("dspine_table_tests.zig").runAll(gpu);
     if (std.mem.eql(u8, cmd, "minimax-contract")) return @import("contract_minimax.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "rope-yarn")) return @import("contract_qwen_rope_yarn.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "kernel-contract-limits")) return contract_tests.fatbins(gpu, try arg(rest, 0));
