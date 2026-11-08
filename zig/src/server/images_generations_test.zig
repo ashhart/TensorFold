@@ -257,6 +257,33 @@ test "omitted seed, steps, guidance, negative_prompt and size reach the engine a
     try t.expectEqual(@as(u16, 1024), stub.height);
 }
 
+test "an omitted size past a smaller host's limits is the route's own refusal naming them" {
+    var stub: Stub = .{ .caps = .{ .max_side = 768, .max_pixels = 589824, .max_steps = 200, .max_prompt_tokens = 4096 } };
+    const reply = try ask(&stub, images_route, "{\"model\":\"m\",\"prompt\":\"hi\"}");
+    defer gpa.free(reply.head);
+    defer gpa.free(reply.body);
+    try expectRefusal(&reply, "the default size 1024x1024 does not fit this model's limits of 768 a side and 589824 pixels");
+    try t.expectEqual(@as(usize, 0), stub.calls);
+}
+
+test "an omitted size within a smaller host's side but past its pixels is the route's own refusal" {
+    var stub: Stub = .{ .caps = .{ .max_side = 1536, .max_pixels = 1000000, .max_steps = 200, .max_prompt_tokens = 4096 } };
+    const reply = try ask(&stub, images_route, "{\"model\":\"m\",\"prompt\":\"hi\"}");
+    defer gpa.free(reply.head);
+    defer gpa.free(reply.body);
+    try expectRefusal(&reply, "the default size 1024x1024 does not fit this model's limits of 1536 a side and 1000000 pixels");
+    try t.expectEqual(@as(usize, 0), stub.calls);
+}
+
+test "a sent size within a smaller host's limits still reaches the engine" {
+    var stub: Stub = .{ .inline_ = true, .caps = .{ .max_side = 768, .max_pixels = 589824, .max_steps = 200, .max_prompt_tokens = 4096 } };
+    const reply = try ask(&stub, images_route, "{\"model\":\"m\",\"prompt\":\"hi\",\"size\":\"768x768\"}");
+    defer gpa.free(reply.head);
+    defer gpa.free(reply.body);
+    try t.expect(std.mem.indexOf(u8, reply.head, " 200 ") != null);
+    try t.expectEqual(@as(u16, 768), stub.width);
+}
+
 /// One refusal: the request body, and the text its message must name.
 const Case = struct { body: []const u8, want: []const u8 };
 
