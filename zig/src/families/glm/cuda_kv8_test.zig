@@ -245,7 +245,7 @@ test "GLM KV host: a prompt MTP chunk's pooled keys take their own page stride, 
     for ([_]u64{ pks, 0 }) |own| { // TF_GLM_KV_HOST's MTP cache (the second), then pooled keys inside the pages
         const c: dsa.Caches = .{ .lc = 0x10000000 + ps / 2, .ik = 800, .ig = 900, .pk = 0x20000000 + pks / 2, .pk_rows = 16386, .pt = 700, .ps = ps, .pks = own };
         Launch.n = 0;
-        try dsa.blockLastRow(k, stream, l, c, std.mem.zeroes(dsa.Scratch), 100, 4096, 2048, 300, 4096, 1, 600);
+        try dsa.blockLastRow(k, stream, l, c, std.mem.zeroes(dsa.Scratch), 112, 4096, 2048, 300, 4096, 1, 600); // rows on 16 bytes, as glue.router needs
         var seen: [3]usize = @splat(0);
         for (Launch.ids[0..Launch.n], Launch.strides[0..Launch.n]) |id, stride| if (id == 1 or id == 8 or id == 9) {
             seen[if (id == 1) 0 else id - 7] += 1;
