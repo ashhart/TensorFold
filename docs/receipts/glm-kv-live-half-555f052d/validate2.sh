@@ -7,8 +7,8 @@
 # Rank 0's exact kept-state bytes come from /metrics (prompt_cache_bytes at each new state). Production (the MTP
 # capture config) is stopped first and restored at the end.
 set -u
-R=$HOME/kvprobe/receipt2; OUT=$R/out; T=$HOME/kvprobe/TensorFold/tools/kvprobe
-BPR=$HOME/kvprobe/bin-pr2/tensorfold-native; BMAIN=$HOME/kvprobe/bin-main/tensorfold-native
+R=$WORK/receipt2; OUT=$R/out; T=$WORK/TensorFold/tools/kvprobe
+BPR=$WORK/bin-pr2/tensorfold-native; BMAIN=$WORK/bin-main/tensorfold-native
 export PROBE_MODEL=$(ls -d $MODEL | head -1)
 RESTORE_CONFIG=${RESTORE_CONFIG:-config/collect-mtp2.env}
 log() { echo "=== $1 $(date -u +%H:%M:%S)"; }
@@ -17,7 +17,7 @@ for b in $BPR $BMAIN; do
   log "binary $b $(sha256sum $b | cut -c1-16) node1 $(ssh -o BatchMode=yes RANK1_RING_IP sha256sum $b | cut -c1-16)"
 done
 log "model $PROBE_MODEL"
-log "stop production"; (cd ~/glm53-tensorfold-spark && env -i HOME=$HOME PATH=/usr/local/bin:/usr/bin:/bin bash scripts/serve.sh stop 2>&1 | tail -1); sleep 25
+log "stop production"; (cd $SERVE_DIR && env -i HOME=$HOME PATH=/usr/local/bin:/usr/bin:/bin bash scripts/serve.sh stop 2>&1 | tail -1); sleep 25
 poll() { # poll FILE: one line per change of (states, bytes) from rank 0's /metrics
   local last=""; while :; do
     m=$(curl -s -m 2 http://127.0.0.1:18080/metrics | grep -E "^tensorfold:prompt_cache_(states|bytes) " | tr "\n" " ")
@@ -51,6 +51,6 @@ print(L.table(res))
 json.dump(res, open("$OUT/compare.json", "w"), indent=1)
 PY
 log "restore production ($RESTORE_CONFIG)"
-(cd ~/glm53-tensorfold-spark && timeout 1500 env -i HOME=$HOME PATH=/usr/local/bin:/usr/bin:/bin CONFIG=$RESTORE_CONFIG bash scripts/serve.sh start 2>&1 | tail -4)
+(cd $SERVE_DIR && timeout 1500 env -i HOME=$HOME PATH=/usr/local/bin:/usr/bin:/bin CONFIG=$RESTORE_CONFIG bash scripts/serve.sh start 2>&1 | tail -4)
 docker ps --format "{{.Names}} {{.Status}}" | grep glm53; curl -s -m 5 http://127.0.0.1:8000/v1/models | grep -o "context_length[^,]*"
 log "DONE"

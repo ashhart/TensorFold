@@ -14,7 +14,7 @@ turn  6 main     ttft 6.27 total 11.98 cached 10240 tokens 48 sha 1c313dc54dee f
 turn  7 raw-keep ttft 7.18 total 13.03 cached 12288 tokens 48 sha 450d3bec5a69 form raw-or-partial
 turn  8 raw      ttft 4.47 total 10.39 cached 16384 tokens 48 sha 6d615174db62 form raw-or-partial
 turn  9 partial  ttft 4.53 total 10.30 cached 18432 tokens 48 sha 921fc4b0e3f2 form raw-or-partial
-wrote $HOME/kvprobe/receipt-pr/both/turns.json; stop the server (SIGINT to rank 0), then: collect $HOME/kvprobe/receipt-pr/both --log ...
+wrote $WORK/receipt-pr/both/turns.json; stop the server (SIGINT to rank 0), then: collect $WORK/receipt-pr/both --log ...
 both ranks stopped, GPUs and locks free after 4 s
 log 0: no KVCODEC totals line (stop rank 0 with SIGINT so the ranks tear down and print them)
 log 1: no KVCODEC totals line (stop rank 0 with SIGINT so the ranks tear down and print them)
@@ -31,7 +31,7 @@ turn  6 main     ttft 6.22 total 11.93 cached 10240 tokens 48 sha 1c313dc54dee f
 turn  7 raw-keep ttft 6.97 total 12.72 cached 12288 tokens 48 sha 450d3bec5a69 form raw-or-partial
 turn  8 raw      ttft 4.43 total 10.21 cached 16384 tokens 48 sha 6d615174db62 form raw-or-partial
 turn  9 partial  ttft 4.44 total 10.28 cached 18432 tokens 48 sha 921fc4b0e3f2 form raw-or-partial
-wrote $HOME/kvprobe/receipt-pr/live/turns.json; stop the server (SIGINT to rank 0), then: collect $HOME/kvprobe/receipt-pr/live --log ...
+wrote $WORK/receipt-pr/live/turns.json; stop the server (SIGINT to rank 0), then: collect $WORK/receipt-pr/live --log ...
 both ranks stopped, GPUs and locks free after 4 s
 log 0: no KVCODEC totals line (stop rank 0 with SIGINT so the ranks tear down and print them)
 log 1: no KVCODEC totals line (stop rank 0 with SIGINT so the ranks tear down and print them)
@@ -48,7 +48,7 @@ turn  6 main     ttft 6.13 total 10.25 cached 10240 tokens 48 sha 1c313dc54dee f
 turn  7 raw-keep ttft 6.97 total 9.61 cached 12288 tokens 48 sha 450d3bec5a69 form raw-or-partial
 turn  8 raw      ttft 4.44 total 9.07 cached 16384 tokens 48 sha 6d615174db62 form raw-or-partial
 turn  9 partial  ttft 4.46 total 7.84 cached 18432 tokens 48 sha 921fc4b0e3f2 form raw-or-partial
-wrote $HOME/kvprobe/receipt-pr/both-drafts/turns.json; stop the server (SIGINT to rank 0), then: collect $HOME/kvprobe/receipt-pr/both-drafts --log ...
+wrote $WORK/receipt-pr/both-drafts/turns.json; stop the server (SIGINT to rank 0), then: collect $WORK/receipt-pr/both-drafts --log ...
 both ranks stopped, GPUs and locks free after 4 s
 log 0: no KVCODEC totals line (stop rank 0 with SIGINT so the ranks tear down and print them)
 log 1: no KVCODEC totals line (stop rank 0 with SIGINT so the ranks tear down and print them)
@@ -65,7 +65,7 @@ turn  6 main     ttft 6.22 total 10.15 cached 10240 tokens 48 sha 1c313dc54dee f
 turn  7 raw-keep ttft 7.11 total 9.70 cached 12288 tokens 48 sha 450d3bec5a69 form raw-or-partial
 turn  8 raw      ttft 4.43 total 8.78 cached 16384 tokens 48 sha 6d615174db62 form raw-or-partial
 turn  9 partial  ttft 4.55 total 7.69 cached 18432 tokens 48 sha 921fc4b0e3f2 form raw-or-partial
-wrote $HOME/kvprobe/receipt-pr/live-drafts/turns.json; stop the server (SIGINT to rank 0), then: collect $HOME/kvprobe/receipt-pr/live-drafts --log ...
+wrote $WORK/receipt-pr/live-drafts/turns.json; stop the server (SIGINT to rank 0), then: collect $WORK/receipt-pr/live-drafts --log ...
 both ranks stopped, GPUs and locks free after 4 s
 log 0: no KVCODEC totals line (stop rank 0 with SIGINT so the ranks tear down and print them)
 log 1: no KVCODEC totals line (stop rank 0 with SIGINT so the ranks tear down and print them)

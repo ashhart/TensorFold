@@ -7,6 +7,8 @@ const cache = @import("cuda_dsa_block.zig");
 const sparse = @import("cuda_sparse.zig");
 
 /// TF_GLM_KV_LIVE_HALF=1: a keep carries the live KDA half alone; nothing reads the dead half after a restore.
+/// Such a keep stays in this process: GLM on CUDA has no disk image, so --spill-gib is refused (cuda_refusal.zig).
+/// A disk image for GLM must put this flag in its identity, or refuse a keep made with the other setting.
 pub fn liveHalfEnabled() bool {
     const v = std.c.getenv("TF_GLM_KV_LIVE_HALF") orelse return false;
     return std.mem.eql(u8, std.mem.span(v), "1");

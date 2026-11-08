@@ -3,7 +3,7 @@
 # Same ring, model and ports as launch.sh; none of the fork's codec, ledger or dump settings (upstream has none).
 set -euo pipefail
 rank=${1:?rank}; shift || true
-root=$HOME/kvprobe
+root=$WORK
 binary=${PROBE_BINARY:-$root/TensorFold-pr/zig-out/native/bin/tensorfold-native}
 model=$MODEL
 export LD_LIBRARY_PATH=$NCCL_LIB_DIR:/usr/local/cuda/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
