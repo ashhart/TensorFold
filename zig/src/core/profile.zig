@@ -138,7 +138,7 @@ const nemotron: []const []const u8 = &.{ "nemotron_h", "nemotron_h_omni" };
 const slide_cuda: []const []const u8 = &.{ "nemotron_h", "nemotron_h_omni", "qwen3_5" };
 const flash: []const []const u8 = &.{"qwen4_exp"};
 /// The CUDA families whose host prompt cache the generic CUDA host builds (cuda_keep_others_test.zig checks the list).
-pub const cuda_cache: []const []const u8 = &.{ "nemotron_h", "nemotron_h_omni", "glm5_next", "minimax_m3_vl", "qwen3_5", "qwen3_5_moe", "qwen4_exp", "kolibri1", "gemma4", "gemma4_unified", "spark2_5", "dory", "lfm2_moe", "muse_spark" };
+pub const cuda_cache: []const []const u8 = &.{ "nemotron_h", "nemotron_h_omni", "glm5_next", "minimax_m3_vl", "qwen3_5", "qwen3_5_moe", "qwen4_exp", "kolibri1", "gemma4", "gemma4_unified", "spark2_5", "dory", "lfm2_moe", "muse_spark", "bailing_hybrid" };
 
 pub const entries = [_]Entry{
     .{ .id = .TF_CACHE_EVICT, .families = cuda_cache, .backend = "multiple", .scopes = &.{ .{ .backend = "cuda", .families = cuda_cache }, .{ .backend = "metal", .families = &.{ "nemotron_h", "qwen3_5", "qwen3_5_moe", "qwen4_exp", "glm5_next", "glm_moe_dsa", "minimax_m3_vl", "gemma4", "gemma4_unified", "spark2_5", "llama", "lfm2_moe", "lfm3", "lfm3_vl", "step5_vl", "kimi_k3", "kimi_k31" } }, .{ .backend = "xpu", .families = &.{ "nemotron_h", "lfm3", "qwen3_5", "gemma4" } } }, .class = .experimental, .syntax = .present, .report_values = &.{"decayed_resume"}, .effect = "Opt into bounded resume credit for RAM snapshot eviction", .evidence = "#3241; synthetic host rows gate; default main unchanged" },
