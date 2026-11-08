@@ -464,3 +464,16 @@ test "pretokenize_regex: an override after encodes forgets the memo's ids from t
     try std.testing.expectEqualSlices(u32, want, after);
     try std.testing.expect(after.len < 300 * 5);
 }
+
+/// A vocabulary whose one id is 2^32 - 1: the dense id table's `id + 1` is 2^32, past a u32.
+fn parseLastId() !void {
+    const json =
+        \\{"model":{"type":"WordLevel","unk_token":"a","vocab":{"a":4294967295}}}
+    ;
+    try std.testing.expectError(error.InvalidTokenizer, parse(std.testing.allocator, json));
+}
+
+// In a child: if IdTable.put's u32 `id + 1` is unchecked, a safe build panics and only this test fails
+test "a vocabulary id of 2^32 - 1 is refused, not wrapped into the dense id table's length" {
+    try std.testing.expectEqual(@import("sys").isolate.Outcome.passed, try @import("sys").isolate.run(parseLastId, .{}));
+}

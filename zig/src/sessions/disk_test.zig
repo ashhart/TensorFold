@@ -311,3 +311,34 @@ test "unknown dtype uses nonfollowing stat and cleanup errors surface" {
         return error.TestUnexpectedResult;
     } else |_| {}
 }
+
+/// A file whose ids claim tokens [256, 0): its position below its first page, so `pos - first_page * page` wraps.
+fn scanBackwards() !void {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    const d = try disk.Disk.open(gpa, io, .{ .root = root, .compat = @splat(4) });
+    defer d.close();
+    const fmt = @import("format.zig");
+    const key: [16]u8 = @splat(7);
+    const head: fmt.Head = .{ .key = key, .compat = @splat(4), .tag = 1, .kind = 0, .page = 256, .world = 1, .rank = 0, .first_page = 1, .npages = 1, .nseg = 0, .ndigest = 0, .pos = 0 };
+    var l = try fmt.Layout.build(gpa, head, &.{.{ .name = fmt.segName("ids"), .kind = .ids, .family = 0, .nbytes = 0, .chunk = 4096 }});
+    defer l.deinit(gpa);
+    var buf: [4096]u8 = undefined;
+    l.encode(&buf);
+    var nb: [48]u8 = undefined;
+    try d.dir.writeFile(io, .{ .sub_path = try std.fmt.bufPrint(&nb, "{x}.tfs", .{&key}), .data = &buf });
+    var found: std.ArrayList(disk.Disk.Found) = .empty;
+    defer found.deinit(gpa);
+    try d.scan(&found);
+    try testing.expectEqual(@as(usize, 0), found.items.len);
+    try testing.expectEqual(@as(u64, 1), d.stats.bad);
+}
+
+// In a child: if found's `h.pos - first_page * page` is unchecked, a safe build panics and only this test fails
+test "a restart file whose position is below its first page is refused, not counted by a length that wraps" {
+    try testing.expectEqual(@import("sys").isolate.Outcome.passed, try @import("sys").isolate.run(scanBackwards, .{}));
+}

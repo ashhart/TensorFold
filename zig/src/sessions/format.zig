@@ -195,3 +195,31 @@ test "a layout encodes, decodes, and refuses a damaged header" {
     buf[200] ^= 0x40;
     try std.testing.expectError(error.ChecksumMismatch, Layout.decode(gpa, &buf));
 }
+
+/// One blob segment built whole, then given `nbytes` or `offset` as a file could carry them, re-hashed and decoded.
+fn decodeWrapped(nbytes: ?u64, offset: ?u64) !void {
+    const gpa = std.testing.allocator;
+    const head: Head = .{ .key = @splat(1), .compat = @splat(2), .tag = 3, .kind = 0, .page = 256, .world = 1, .rank = 0, .first_page = 0, .npages = 1, .nseg = 0, .ndigest = 0, .pos = 1 };
+    var l = try Layout.build(gpa, head, &.{.{ .name = segName("taps"), .kind = .blob, .family = 0, .nbytes = if (nbytes != null) 0 else 1, .chunk = 4096 }});
+    defer l.deinit(gpa);
+    var buf: [8192]u8 = undefined;
+    l.encode(&buf);
+    var whole = try Layout.decode(gpa, &buf);
+    whole.deinit(gpa);
+    if (nbytes) |n| l.segs[0].nbytes = n;
+    if (offset) |o| l.segs[0].offset = o;
+    l.encode(&buf);
+    try std.testing.expectError(error.BadHeader, Layout.decode(gpa, &buf));
+}
+
+const isolate = @import("sys").isolate;
+
+// In a child: if decode's `s.nbytes + s.chunk - 1` is unchecked, a safe build panics and only this test fails
+test "a segment of 2^64 - 1 bytes claiming no chunks is refused, not counted by a size that wraps" {
+    try std.testing.expectEqual(isolate.Outcome.passed, try isolate.run(decodeWrapped, .{ std.math.maxInt(u64), null }));
+}
+
+// In a child: if decode's end-of-segment sum is unchecked, a safe build panics and only this test fails
+test "a segment whose last chunk ends past 2^64 is refused, not wrapped under the file's total" {
+    try std.testing.expectEqual(isolate.Outcome.passed, try isolate.run(decodeWrapped, .{ null, std.math.maxInt(u64) - 4095 }));
+}
