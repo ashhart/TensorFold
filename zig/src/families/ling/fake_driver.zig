@@ -58,12 +58,13 @@ pub fn failedPending() bool {
     return hit;
 }
 
-/// Everything still held freed (what a failed drain leaked on purpose); returns how many.
+/// Everything still held freed and handles forgotten (what a failed drain leaked on purpose); returns how many.
 pub fn sweep() usize {
-    const n = held.count();
+    const n = live();
     var it = held.iterator();
     while (it.next()) |kv| backing.free(@as([*]align(256) u8, @ptrFromInt(kv.key_ptr.*))[0..kv.value_ptr.*]);
     held.clearRetainingCapacity();
+    handles = 0;
     return n;
 }
 
