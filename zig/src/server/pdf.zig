@@ -4,6 +4,7 @@ const sys = @import("sys");
 const json = @import("json");
 const errors = @import("errors.zig");
 const images = @import("images.zig");
+const jpeg_out = @import("jpeg_out.zig");
 const log = @import("log.zig");
 const worker = @import("pdf_worker.zig");
 const Value = json.Value;
@@ -40,65 +41,23 @@ pub const PdfiumFns = struct {
     FPDF_RenderPage_Close: ?*const fn (?*anyopaque) callconv(.c) void = null,
 };
 
-pub const JpegFns = struct {
-    tj3Init: *const fn (c_int) callconv(.c) ?*anyopaque,
-    tj3Destroy: *const fn (?*anyopaque) callconv(.c) void,
-    tj3Set: *const fn (?*anyopaque, c_int, c_int) callconv(.c) c_int,
-    tj3Compress8: *const fn (?*anyopaque, [*]const u8, c_int, c_int, c_int, c_int, *?[*]u8, *usize) callconv(.c) c_int,
-    tj3Free: *const fn (?*anyopaque) callconv(.c) void,
-};
-
 const DlInfo = extern struct { fname: ?[*:0]const u8, fbase: ?*anyopaque, sname: ?[*:0]const u8, saddr: ?*anyopaque };
 extern "c" fn dladdr(addr: *const anyopaque, info: *DlInfo) c_int;
 
 const PdfiumLoaded = union(enum) { unknown, missing, ready: PdfiumFns };
-const JpegLoaded = union(enum) { unknown, missing, ready: JpegFns };
 
 var pdfium_state: PdfiumLoaded = .unknown;
-var jpeg_state: JpegLoaded = .unknown;
 var pdfium_mutex: std.Io.Mutex = .init;
-var jpeg_mutex: std.Io.Mutex = .init;
-
-pub fn loadDynLib(comptime T: type, comptime id: sys.optional_libraries.Id, a: Allocator) ?T {
-    const exe = std.process.executableDirPathAlloc(log.io(), a) catch null;
-    defer if (exe) |p| a.free(p);
-    var dl = sys.optional_libraries.open(sys.optional_libraries.spec(id), a, sys, exe) orelse return null;
-    var f: T = undefined;
-    const info = @typeInfo(T).@"struct";
-    inline for (info.field_names, info.field_types) |name, FT| {
-        if (@typeInfo(FT) == .optional) {
-            @field(f, name) = dl.lookup(@typeInfo(FT).optional.child, name);
-        } else {
-            @field(f, name) = dl.lookup(FT, name) orelse {
-                dl.close();
-                return null;
-            };
-        }
-    }
-    return f;
-}
 
 fn findPdfium(a: Allocator) PdfiumLoaded {
-    const f = loadDynLib(PdfiumFns, .pdfium, a) orelse return .missing;
+    const f = jpeg_out.loadDynLib(PdfiumFns, .pdfium, a) orelse return .missing;
     if (sys.windows) f.FPDF_InitLibrary();
     return .{ .ready = f };
 }
 
-fn findJpeg(a: Allocator) JpegLoaded {
-    return if (loadDynLib(JpegFns, .jpeg, a)) |f| .{ .ready = f } else .missing;
-}
-
-fn getJpeg(a: Allocator) ?JpegFns {
-    const io = log.io();
-    jpeg_mutex.lockUncancelable(io);
-    defer jpeg_mutex.unlock(io);
-    if (jpeg_state == .unknown) jpeg_state = findJpeg(a);
-    return if (jpeg_state == .ready) jpeg_state.ready else null;
-}
-
 /// Logs the loaded PDFium path and SHA-256 at startup when --vision-pdf is enabled, or warns if a library is missing.
 pub fn logStartup(a: Allocator, io: std.Io) void {
-    if (getJpeg(a) == null) log.line("--vision-pdf: {s}", .{sys.optional_libraries.spec(.jpeg).message});
+    if (jpeg_out.get(a) == null) log.line("--vision-pdf: {s}", .{sys.optional_libraries.spec(.jpeg).message});
     pdfium_mutex.lockUncancelable(io);
     defer pdfium_mutex.unlock(io);
     if (pdfium_state == .unknown) pdfium_state = findPdfium(a);
@@ -207,7 +166,7 @@ pub fn decodeFileData(cx: *Cx, raw: []const u8) errors.Refused![]const u8 {
 
 /// Renders all pages of `pdf_bytes` within the request-wide `budget` into `image_url` parts appended to `parts`.
 pub fn expandBytes(cx: *Cx, pdf_bytes: []const u8, image_type: []const u8, max_images: u32, max_pages: u32, budget: *Budget, parts: *std.ArrayList(Value)) errors.Refused!void {
-    const jf = getJpeg(cx.a) orelse return cx.fail(.unimplemented, "{s}", .{sys.optional_libraries.spec(.jpeg).message});
+    const jf = jpeg_out.get(cx.a) orelse return cx.fail(.unimplemented, "{s}", .{sys.optional_libraries.spec(.jpeg).message});
     const io = log.io();
     pdfium_mutex.lockUncancelable(io);
     defer pdfium_mutex.unlock(io);
@@ -255,7 +214,7 @@ fn renderPageWithDeadline(cx: *Cx, f: PdfiumFns, bmp: ?*anyopaque, page: ?*anyop
     if (std.Io.Clock.awake.now(log.io()).toNanoseconds() >= deadline_ns) return cx.refuse("PDF rendering timed out");
 }
 
-pub fn renderInProcess(cx: *Cx, f: PdfiumFns, jf: JpegFns, pdf_bytes: []const u8, max_images: u32, max_pages: u32, deadline_ns: i96, budget: *Budget, out_jpegs: *std.ArrayList([]const u8)) errors.Refused!void {
+pub fn renderInProcess(cx: *Cx, f: PdfiumFns, jf: jpeg_out.Fns, pdf_bytes: []const u8, max_images: u32, max_pages: u32, deadline_ns: i96, budget: *Budget, out_jpegs: *std.ArrayList([]const u8)) errors.Refused!void {
     if (pdf_bytes.len > std.math.maxInt(c_int)) return cx.refuse("PDF exceeds the encoded byte limit");
     if (std.Io.Clock.awake.now(log.io()).toNanoseconds() >= deadline_ns) return cx.refuse("PDF rendering timed out");
     const doc = f.FPDF_LoadMemDocument(pdf_bytes.ptr, @intCast(pdf_bytes.len), null) orelse
@@ -287,7 +246,7 @@ pub fn renderInProcess(cx: *Cx, f: PdfiumFns, jf: JpegFns, pdf_bytes: []const u8
         const total_bytes = @as(usize, @intCast(stride)) * @as(usize, @intCast(dims[1]));
         @memset(bgra[0..total_bytes], 0xFF);
         try renderPageWithDeadline(cx, f, bmp, page, dims[0], dims[1], idx, deadline_ns);
-        const jpeg_bytes = encodeJpegBgra(cx.a, jf, bgra[0..total_bytes], @intCast(dims[0]), @intCast(dims[1]), @intCast(stride)) catch |err| switch (err) {
+        const jpeg_bytes = jpeg_out.encodeBgra(cx.a, jf, bgra[0..total_bytes], @intCast(dims[0]), @intCast(dims[1]), @intCast(stride)) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.EncodeFailed => return cx.refuse("rendered PDF page could not be encoded as JPEG"),
         };
@@ -315,7 +274,8 @@ fn pageDimensions(pw_raw: f32, ph_raw: f32) [2]c_int {
     return .{ w, h };
 }
 
-pub fn jpegPixels(bytes: []const u8) ?u64 {
+/// The width and height a baseline or progressive JPEG's frame header names, or null when it has none.
+pub fn jpegSize(bytes: []const u8) ?[2]u32 {
     if (bytes.len < 4 or bytes[0] != 0xFF or bytes[1] != 0xD8) return null;
     var i: usize = 2;
     while (i + 4 <= bytes.len) {
@@ -330,26 +290,13 @@ pub fn jpegPixels(bytes: []const u8) ?u64 {
         if (seg_len < 2 or i + seg_len > bytes.len) return null;
         if (marker == 0xC0 or marker == 0xC1 or marker == 0xC2) {
             if (seg_len < 7) return null;
-            const h: u64 = std.mem.readInt(u16, bytes[i + 3 ..][0..2], .big);
-            const w: u64 = std.mem.readInt(u16, bytes[i + 5 ..][0..2], .big);
-            return if (w > 0 and h > 0) w * h else null;
+            const h: u32 = std.mem.readInt(u16, bytes[i + 3 ..][0..2], .big);
+            const w: u32 = std.mem.readInt(u16, bytes[i + 5 ..][0..2], .big);
+            return if (w > 0 and h > 0) .{ w, h } else null;
         }
         i += seg_len;
     }
     return null;
-}
-
-fn encodeJpegBgra(a: Allocator, jf: JpegFns, bgra: []const u8, width: usize, height: usize, stride: usize) error{ OutOfMemory, EncodeFailed }![]const u8 {
-    const handle = jf.tj3Init(0) orelse return error.EncodeFailed; // 0 = TJINIT_COMPRESS
-    defer jf.tj3Destroy(handle);
-    _ = jf.tj3Set(handle, 3, 85); // TJPARAM_QUALITY = 3
-    _ = jf.tj3Set(handle, 4, 2); // TJPARAM_SUBSAMP = 4, TJSAMP_420 = 2
-    var out_buf: ?[*]u8 = null;
-    var out_size: usize = 0;
-    const rc = jf.tj3Compress8(handle, bgra.ptr, @intCast(width), @intCast(stride), @intCast(height), 8, &out_buf, &out_size); // 8: TJPF_BGRA, PDFium's BGRx bitmap
-    defer if (out_buf) |p| jf.tj3Free(p);
-    if (rc != 0 or out_buf == null or out_size == 0) return error.EncodeFailed;
-    return a.dupe(u8, out_buf.?[0..out_size]);
 }
 
 pub fn makeDataUrl(a: Allocator, mime: []const u8, bytes: []const u8) Allocator.Error![]const u8 {

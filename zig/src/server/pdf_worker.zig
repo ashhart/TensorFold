@@ -6,6 +6,7 @@ const errors = @import("errors.zig");
 const images = @import("images.zig");
 const log = @import("log.zig");
 const pdf = @import("pdf.zig");
+const jpeg_out = @import("jpeg_out.zig");
 const Cx = errors.Cx;
 const Budget = pdf.Budget;
 const Allocator = std.mem.Allocator;
@@ -117,7 +118,8 @@ pub fn parseChildReply(cx: *Cx, frame: []const u8, max_images: u32, max_pages: u
                 if (len > images.max_image_bytes) return cx.refuse("rendered PDF page exceeds the 10 MB image byte limit");
                 if (budget.encoded_bytes + len > images.max_request_bytes) return cx.refuse("the request's images exceed 20 MB encoded");
                 const jb = frame[pos .. pos + len];
-                const px = pdf.jpegPixels(jb) orelse return cx.refuse("rendered PDF page could not be encoded as JPEG");
+                const size = pdf.jpegSize(jb) orelse return cx.refuse("rendered PDF page could not be encoded as JPEG");
+                const px = @as(u64, size[0]) * size[1];
                 if (budget.pixels_used + px > pdf.max_request_pixels) return cx.refuse("the request's images exceed the 32-megapixel limit");
                 budget.pdf_pages_used += 1;
                 budget.images_used += 1;
@@ -173,8 +175,8 @@ fn work(cx: *Cx, jpegs: *std.ArrayList([]const u8)) errors.Refused!void {
     if (!readAll(0, pdf_bytes)) return cx.refuse(failed);
     applyChildLimits();
     const libs = sys.optional_libraries;
-    const f = pdf.loadDynLib(pdf.PdfiumFns, .pdfium, cx.a) orelse return cx.fail(.unimplemented, "{s}", .{libs.spec(.pdfium).message});
-    const jf = pdf.loadDynLib(pdf.JpegFns, .jpeg, cx.a) orelse return cx.fail(.unimplemented, "{s}", .{libs.spec(.jpeg).message});
+    const f = jpeg_out.loadDynLib(pdf.PdfiumFns, .pdfium, cx.a) orelse return cx.fail(.unimplemented, "{s}", .{libs.spec(.pdfium).message});
+    const jf = jpeg_out.loadDynLib(jpeg_out.Fns, .jpeg, cx.a) orelse return cx.fail(.unimplemented, "{s}", .{libs.spec(.jpeg).message});
     f.FPDF_InitLibrary();
     var budget: Budget = .{ .images_used = req.images_used, .pdf_pages_used = req.pdf_pages_used, .encoded_bytes = @intCast(req.encoded_bytes), .pixels_used = req.pixels_used };
     return pdf.renderInProcess(cx, f, jf, pdf_bytes, req.max_images, req.max_pages, deadline_ns, &budget, jpegs);

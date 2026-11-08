@@ -37,7 +37,7 @@ test "tensorfold-native PDF render worker: renders a text PDF in its spawned wor
     };
     try std.testing.expectEqual(@as(usize, 1), jpegs.items.len);
     try std.testing.expectEqual(pdf.Budget{ .images_used = 1, .pdf_pages_used = 1, .encoded_bytes = jpegs.items[0].len, .pixels_used = 400 * 400 }, budget);
-    try std.testing.expectEqual(@as(?u64, 400 * 400), pdf.jpegPixels(jpegs.items[0]));
+    try std.testing.expectEqual([2]u32{ 400, 400 }, pdf.jpegSize(jpegs.items[0]).?);
 }
 
 test "tensorfold-native PDF render worker: libpdfium renders in the spawned worker and enforces request-wide page, byte and pixel caps" {
@@ -59,7 +59,7 @@ test "tensorfold-native PDF render worker: libpdfium renders in the spawned work
     for (parts.items) |p| {
         const img_bytes = try images.dataBytes(&cx, p.get("image_url").?.get("url").?.string);
         try std.testing.expectEqual(images.Format.jpeg, images.sniff(img_bytes));
-        try std.testing.expectEqual(@as(?u64, 400 * 400), pdf.jpegPixels(img_bytes));
+        try std.testing.expectEqual([2]u32{ 400, 400 }, pdf.jpegSize(img_bytes).?);
     }
     var second_cx: Cx = .{ .a = a };
     try std.testing.expectError(error.Refused, pdf.expandBytes(&second_cx, pdf.minimal_two_page_pdf, "image_url", 4, 3, &budget, &parts));
