@@ -57,6 +57,7 @@ pub const Metal = struct {
     residency: ?mtl.ResidencySet.Follow = null,
     gpa: std.mem.Allocator,
     pass_profile: bool = false,
+    timing: bool = false, // measure()'s local timing rounds: no link commands (each rank runs its own symmetrically)
     tensor_units: bool = false, // the device capability used by startup and first-token policy
     runner: *q.decode_round.Runner,
     draft: ?*Draft,
@@ -331,7 +332,7 @@ pub const Metal = struct {
             for (paths) |path| if (path.len != 1) return error.NothingToKeep;
             return;
         }
-        if (b.pair_tree) if (b.link) |l| if (l.pair.rank == 0) try l.commit(b.round.?.slots[0], paths[0]); // a follower's local keep rides no command
+        if (b.pair_tree) if (b.link) |l| if (l.pair.rank == 0 and !b.timing) try l.commit(b.round.?.slots[0], paths[0]); // a follower's local keep rides no command
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         if (b.count == 1 and b.windows[0] == 0) {
@@ -512,7 +513,7 @@ pub const Metal = struct {
             if (windows.len != 1) return error.CommandOutOfStep;
             // A follower's own local round (measure's timing windows) mirrors rank 0's on the seams alone:
             // only rank 0 commands the replay, and only rank 0's serving rounds ever reach the follower.
-            if (b.link) |l| if (l.pair.rank == 0) {
+            if (b.link) |l| if (l.pair.rank == 0 and !b.timing) {
                 if (inputs[0].parents) |parents| {
                     try l.tree(inputs[0].slot, inputs[0].ids, parents);
                     b.pair_tree = true;
