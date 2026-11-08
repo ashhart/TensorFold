@@ -56,3 +56,44 @@ rotary `inv_freq` as Transformers 4.57.6 computes them on the CPU (theta 1e6,
 head dim 128), dumped by the oracle's `text` mode (`rope-inv_freq.npy`). The
 CUDA recipe uploads them as they are, because Torch's CPU `powf` is not
 correctly rounded: entry 37 is one ulp from the correctly rounded value.
+
+## OCR reader fixtures
+
+The `ocr-*.json` files are greedy outputs of the `oracle` command above,
+for `ocr_test.zig`. Each holds `text` (the oracle's `text` field, without
+the `<|endofassistant|>` end marker that an ended run keeps), `original`
+(the source image's width and height), `frame` (the oracle's
+`prepared_images` size, the tower input the boxes are in), `source` and
+`prompt_sha256` (the SHA-256 of the oracle's `prompt` field).
+
+| Fixture | Image | `--max-new-tokens` | Result |
+| --- | --- | --- | --- |
+| `ocr-demo-page.json` | `demo/demo_image1.jpg` | 24000 | the whole page, ended by EOS |
+| `ocr-demo-cut.json` | `demo/demo_image1.jpg` | 128 | JSON cut by the limit |
+| `ocr-one-line.json` | `one-line.png` (below) | 4096 | one text block |
+
+No recorded input gave a block with empty text, so `ocr_test.zig`
+covers that rule (such blocks are dropped) with a written string.
+
+`one-line.png` is a 960x96 white RGB PNG with the black line
+`TensorFold reads one line of text.` drawn by Pillow at (24, 24) in
+Liberation Sans Regular at 36 pixels (font SHA-256
+`baccc64becc3eb7d104b7c84d99f5314a0a1f896e2b3ea6c2f22fc08d2003bee`):
+
+```python
+from PIL import Image, ImageDraw, ImageFont
+font = ImageFont.truetype("LiberationSans-Regular.ttf", 36)
+line = Image.new("RGB", (960, 96), "white")
+ImageDraw.Draw(line).text((24, 24), "TensorFold reads one line of text.", font=font, fill="black")
+line.save("one-line.png")
+```
+
+The runs used one gfx1201 GPU, ROCm 10.1 Torch, Transformers 4.57.6,
+qwen-vl-utils 0.0.10, Pillow 12.2.0 and flash-attn 2.8.3.post1 with
+`FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE`:
+
+```sh
+HIP_VISIBLE_DEVICES=N FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE \
+  python tools/zig/dots_mocr_reference.py oracle CHECKPOINT_DIR IMAGE \
+  OUTPUT_DIR --pci PCI_ID --max-new-tokens LIMIT
+```
