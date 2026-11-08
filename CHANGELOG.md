@@ -15,6 +15,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Ripple-65B-Preview runs on native CUDA (GB10 checked) from the publisher's NVFP4 release as published, with the
   same bf16 layer math as Metal (#2302, fixes #2300).
+- Ripple-65B-Preview on CUDA also loads ExLlamaV3 packs (mul1): every projection and the head on main's EXL3 dense
+  kernels, bf16 in and out, the rest of the forward as for the NVFP4 release. Thanks to @jrb-ai and @BobClawblaw.
 
 - Ripple-65B-Preview drafts on native CUDA with the publisher's DFlash2 drafter as published (`--drafter`); drafted
   replies equal plain ones (#2475).

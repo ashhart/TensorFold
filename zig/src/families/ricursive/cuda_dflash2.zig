@@ -472,7 +472,7 @@ pub const Drafter = struct {
         const vals = d.b.out;
         const ids = vals + rows * da.top * 4;
         const hid = ids + rows * da.top * 4;
-        try d.lane(d.b.x, rows, m.w.head, d.b.logits);
+        try if (m.w.head == .exl3) m.headExl3(d.b.x, rows, d.b.logits) else d.lane(d.b.x, rows, m.w.head.lane, d.b.logits);
         try d.lane(d.b.x, rows, d.w.hproj, hid);
         try da.top32(&d.ak, s, .{ .logits = d.b.logits, .stride = c.vocab, .n = c.vocab, .rows = rows, .vals = vals, .ids = ids, .part_vals = d.b.tv, .part_ids = d.b.ti });
     }

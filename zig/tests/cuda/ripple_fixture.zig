@@ -96,16 +96,16 @@ pub fn build(gpu: check.Gpu, c: Config, seed: u64) !wts.Weights {
     const q = c.queryWidth();
     const kv = c.kvWidth();
     w.embed = try b.small(c.vocab * h, 0, 0.02);
-    w.head = try b.dense(c.vocab, h);
+    w.head = .{ .lane = try b.dense(c.vocab, h) };
     w.norm = try b.small(h, 1, 0.1);
     w.layers = try gpu.gpa.alloc(wts.Layer, c.layers);
     for (w.layers) |*l| l.* = .{
-        .qkg = try b.dense(2 * q + kv, h),
-        .v = try b.dense(kv, h),
-        .o = try b.dense(h, q),
-        .gate = try b.fp4(c.intermediate, h),
-        .up = try b.fp4(c.intermediate, h),
-        .down = try b.fp4(h, c.intermediate),
+        .qkg = .{ .lane = try b.dense(2 * q + kv, h) },
+        .v = .{ .lane = try b.dense(kv, h) },
+        .o = .{ .lane = try b.dense(h, q) },
+        .gate = .{ .lane = try b.fp4(c.intermediate, h) },
+        .up = .{ .lane = try b.fp4(c.intermediate, h) },
+        .down = .{ .lane = try b.fp4(h, c.intermediate) },
         .input_norm = try b.small(h, 1, 0.1),
         .post_attn = try b.small(h, 1, 0.1),
         .pre_ffn = try b.small(h, 1, 0.1),
