@@ -30,9 +30,9 @@ fn rowsAt(start: usize, len: usize) usize {
     return @min(len - start, fw.solo_rows);
 }
 
-/// Rank 0's choice for the step at `start` (the others take the ids it sends); not beside what reads a chunk's rows.
+/// Rank 0's choice for the step at `start`; not beside what reads a chunk's rows, nor with request starts (cut there).
 pub fn at(e: *const Engine, start: usize, len: usize, from: ?engine.Resume, marks: ?engine.Marks) bool {
-    if (e.bp.rows < fw.solo_rows or e.prompt_logprobs != null or e.prompt_profs[3] != null) return false;
+    if (e.bp.rows < fw.solo_rows or e.prompt_logprobs != null or e.prompt_profs[3] != null or e.cur.cuts.items.len > 0) return false;
     if (e.images) |v| if (v.rowCount() > 0) return false;
     if (!takesTwo(start, len, if (marks) |m| m.at else &.{})) return false;
     // a resumed step restores its kept state, and the rings' base, after this choice
@@ -42,7 +42,7 @@ pub fn at(e: *const Engine, start: usize, len: usize, from: ?engine.Resume, mark
 
 /// Whether a pass of `rows` past a chunk may run: `at`'s rule on every rank, its kept state restored.
 pub fn allowed(e: *const Engine, start: usize, rows: usize) bool {
-    if (e.bp.rows < rows or e.prompt_logprobs != null) return false;
+    if (e.bp.rows < rows or e.prompt_logprobs != null or e.cur.cuts.items.len > 0) return false;
     return ringsAgree(e.cur.st.base, e.cur.st.ring_rows, start, rows);
 }
 
