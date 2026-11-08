@@ -36,7 +36,11 @@ pub fn layout(m: *const Model) kv.Layout {
     for (c.full[0..c.layers]) |full| if (!full) {
         fixed += 2 * m.ring * c.kv_heads * c.head_dim * 2;
     };
-    return .{ .fixed_bytes = fixed, .token_bytes = m.pageBytes() / page_tokens, .page_tokens = page_tokens, .snap_bytes = 0 };
+    const row: u64 = 2 * c.kv_heads * c.head_dim * 2; // K and V a layer, full and sliding alike
+    const n = fullLayers(m);
+    var l = kv.Layout.ofRows(.{ .kind = .full, .row = row, .layers = @intCast(n) }, page_tokens, fixed, 0);
+    if (c.layers > n) l.window = .{ .kind = .window, .row = row, .layers = @intCast(c.layers - n) };
+    return l;
 }
 
 /// Slots a backend holds: the model's, or (paged) as many as a round takes.
