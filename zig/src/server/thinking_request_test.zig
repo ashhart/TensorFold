@@ -7,6 +7,7 @@ const Server = @import("server.zig").Server;
 const Conn = @import("http_conn.zig").Conn;
 const fixture = @import("hf_eos_fixture.zig");
 const HfText = @import("hf_text.zig").HfText;
+const exchange = @import("late_system_test.zig").exchange;
 const Allocator = std.mem.Allocator;
 
 const Script = struct {
@@ -97,8 +98,9 @@ const closed = "H{% if add_generation_prompt %}<think></think>{% endif %}";
 const switched = "H{% if add_generation_prompt %}{% if enable_thinking %}<think>{% else %}</think>{% endif %}{% endif %}";
 const unclosed_switch = "{% if not enable_thinking %}O{% endif %}H";
 const off = ",\"chat_template_kwargs\":{\"enable_thinking\":false}";
+const refusal = "thinking off is not supported by this chat template: it has no thinking switch or closable generation prefix";
 
-const Source = enum { client, completion, ask, ask_in };
+const Source = enum { client, completion, ask, ask_in, messages, responses };
 
 fn check(template: []const u8, close_token: bool, server_thinking: bool, extra: []const u8, code: u16, ids: []const u32) !void {
     return checkSource(template, close_token, server_thinking, extra, code, ids, .client);
@@ -146,6 +148,7 @@ fn checkSource(template: []const u8, close_token: bool, server_thinking: bool, e
         try t.expectEqualSlices(u32, ids, script.prompt[0..script.count]);
         return;
     }
+    if (source == .messages or source == .responses) return checkRoute(srv, a, &script, source, extra, code, ids);
     const input = if (source == .completion) "\"prompt\":\"H\"" else "\"messages\":[{\"role\":\"user\",\"content\":\"H\"}]";
     const body = (try json.parse(a, try std.fmt.allocPrint(a, "{{\"model\":\"m\",{s},\"max_tokens\":2,\"return_token_ids\":true{s}}}", .{ input, extra }))).ok;
     var conn: Conn = .{ .fd = -1, .peer = "", .buf = &.{}, .gpa = a };
@@ -155,14 +158,60 @@ fn checkSource(template: []const u8, close_token: bool, server_thinking: bool, e
     const whole = response.whole.?;
     if (code == 400) {
         try t.expect(!script.seen);
-        const message = whole.get("error").?.strField("message").?;
-        try t.expectEqualStrings("thinking off is not supported by this chat template: it has no thinking switch or closable generation prefix", message);
+        try t.expectEqualStrings(refusal, whole.get("error").?.strField("message").?);
     } else {
         try t.expect(script.seen);
         try t.expectEqualSlices(u32, ids, script.prompt[0..script.count]);
         const tokens = whole.get("tensorfold").?.get("token_ids").?.array;
         try t.expectEqual(@as(usize, 1), tokens.len);
         try t.expectEqual(@as(?i64, 2), tokens[0].int64());
+    }
+}
+
+/// A Messages request (and its count_tokens) or a Responses request through its route, as a client sends it.
+fn checkRoute(srv: *Server, a: Allocator, script: *Script, source: Source, extra: []const u8, code: u16, ids: []const u32) !void {
+    const t = std.testing;
+    const body = if (source == .messages)
+        try std.fmt.allocPrint(a, "{{\"model\":\"m\",\"max_tokens\":2,\"messages\":[{{\"role\":\"user\",\"content\":\"H\"}}]{s}}}", .{extra})
+    else
+        try std.fmt.allocPrint(a, "{{\"model\":\"m\",\"max_output_tokens\":2,\"store\":false,\"input\":\"H\"{s}}}", .{extra});
+    const sent = try exchange(srv, if (source == .messages) "/v1/messages" else "/v1/responses", body);
+    defer t.allocator.free(sent.body);
+    try t.expectEqual(code, sent.status);
+    try t.expectEqual(code != 400, script.seen);
+    if (code == 400) {
+        try t.expectEqualStrings(refusal, (try json.parse(a, sent.body)).ok.get("error").?.strField("message").?);
+    } else try t.expectEqualSlices(u32, ids, script.prompt[0..script.count]);
+    if (source != .messages) return;
+    const counted = try exchange(srv, "/v1/messages/count_tokens", body);
+    defer t.allocator.free(counted.body);
+    try t.expectEqual(code, counted.status);
+    const reply = (try json.parse(a, counted.body)).ok;
+    if (code == 400) {
+        try t.expectEqualStrings(refusal, reply.get("error").?.strField("message").?);
+    } else try t.expectEqual(@as(?i64, @intCast(ids.len)), reply.get("input_tokens").?.int64());
+}
+
+test "thinking request: Messages without thinking is served with main's ids, and count_tokens counts them" {
+    for ([_]bool{ false, true }) |default| {
+        try checkSource(plain, true, default, "", 200, &.{0}, .messages);
+        try checkSource("H<think></think>H", true, default, "", 200, &.{ 0, 300, 301, 0 }, .messages);
+        try checkSource(dangling, true, default, "", 200, &.{ 0, 300, 301 }, .messages);
+    }
+}
+
+test "thinking request: Messages' own disabled thinking is refused where the template can't honour it, on count_tokens too" {
+    for ([_]bool{ false, true }) |default| {
+        try checkSource(plain, true, default, ",\"thinking\":{\"type\":\"disabled\"}", 400, &.{}, .messages);
+        try checkSource(switched, true, default, ",\"thinking\":{\"type\":\"disabled\"}", 200, &.{ 0, 301 }, .messages);
+        try checkSource(plain, true, default, ",\"thinking\":{\"type\":\"adaptive\"}", 200, &.{0}, .messages);
+    }
+}
+
+test "thinking request: Responses without reasoning keeps main's prompt under either server default, and its own effort none is refused" {
+    for ([_]bool{ false, true }) |default| {
+        try checkSource(plain, true, default, "", 200, &.{0}, .responses);
+        try checkSource(plain, true, default, ",\"reasoning\":{\"effort\":\"none\"}", 400, &.{}, .responses);
     }
 }
 
