@@ -37,10 +37,45 @@ pub fn run(e: *E.Engine, shape: E.Engine.Shape, rows: usize) !void {
     if (!g.embeds) try take(e, rows);
     try e.launchShape(s);
     try give(e, rows);
-    if (!g.heads) return;
+    if (!g.heads or e.held != null) return; // rounds in flight: the head runs at `land`
+    try head(e, shape, rows);
+}
+
+/// Rank 0's head over the rows the ring brings back.
+fn head(e: *E.Engine, shape: E.Engine.Shape, rows: usize) !void {
     try take(e, rows);
+    var s = shape;
     s.part = .head;
     try e.launchShape(s);
+}
+
+/// Rank 0's round in flight: the tables its launches read and its shape, kept while later rounds run their layers.
+pub const Held = struct {
+    tables: []u8,
+    shape: E.Engine.Shape = undefined,
+    rows: usize = 0,
+
+    pub fn init(gpa: std.mem.Allocator) !Held {
+        return .{ .tables = try gpa.alloc(u8, E.Engine.src_at) };
+    }
+
+    pub fn deinit(h: *Held, gpa: std.mem.Allocator) void {
+        gpa.free(h.tables);
+    }
+
+    /// The forward's staged tables and shape, as its layers' launches read them.
+    pub fn hold(h: *Held, staged: []const u8, shape: E.Engine.Shape, rows: usize) void {
+        @memcpy(h.tables, staged[0..h.tables.len]);
+        h.shape = shape;
+        h.rows = rows;
+    }
+};
+
+/// A held round's head: its tables staged again (later rounds replaced them), its rows taken back, `keep` read.
+pub fn land(e: *E.Engine, parts: []const E.Part, keep: E.Keep, h: *const Held) !void {
+    try e.tables.uploadAsync(0, h.tables, e.stream.handle);
+    try head(e, h.shape, h.rows);
+    try e.land(parts, keep, h.rows);
 }
 
 /// The boundary rows from the stage before, onto h and r before the next launch (without a ring: as they are).
