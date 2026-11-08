@@ -204,7 +204,7 @@ pub const Metal = struct {
             } else stream.reuse_failed = true;
         }
         // the E-series' prompt runs on affine_mm's tiles where the row path packed its weights; not the first window
-        const tiles = self.model.weights.head.raw != null and std.c.getenv("GEMMA_E4B_WINDOWS") == null;
+        const tiles = self.model.weights.head.raw != null;
         if (self.model.config.geo.layer_input != 0) {
             if (!tiles or ids.len <= st.prompt_rows) return self.prefillWindows(stream, cache, ids, sink, true);
             if (cache.len < st.prompt_rows) try self.prefillWindows(stream, cache, ids[0..st.prompt_rows], sink, false);
