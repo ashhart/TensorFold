@@ -139,6 +139,7 @@ const linux_host = [_][]const u8{
     "test-dsv41-assets-host",
     "test-dsv41-bounds-host",
     "test-dsv41-cuda-host",
+    "test-dsv41-direct-host",
     "test-dsv41-engram-alloc",
     "test-dsv41-env-host",
     "test-dsv41-kv",
