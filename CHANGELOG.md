@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CI: the root `pytest` run has its own job beside `zig` instead of being its last step, so a pull request no longer waits about five minutes for it after its tests (#2586).
+
 - CI: the nightly Linux host job gains a `deepseek` shard that runs `test-dsv41-device-host` and `test-dsv41-forward`, so their Linux-only tests (a forked child's fail-fast exit and the model's fatal callback without an NCCL abort) run on Linux; Linux CI only compiled these steps before, and macOS skips those tests (#2598).
 
 - CI: the macOS nightly also runs the thirteen host checks it held back until their fixes landed (#2566).
