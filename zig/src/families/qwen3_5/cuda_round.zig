@@ -22,6 +22,28 @@ pub const params_at = tokens_at + most_verify * 4;
 pub const src_at = params_at + 8 * 4;
 pub const mpos_at = src_at + max_rows * 4;
 pub const bytes = mpos_at + 3 * max_rows * 4;
+/// Each forward segment's state table (cuda_cache.zig States) after the planes, past the per-forward upload.
+pub const states_at = std.mem.alignForward(usize, bytes, 8);
+comptime {
+    std.debug.assert(states_at - segs_at == 232480); // qwen35.cuh SEG_STATES
+}
+/// The tables buffer: the planes, then max_segs state tables of `entries` addresses each.
+pub fn tableBytes(entries: usize) usize {
+    return states_at + max_segs * entries * 8;
+}
+/// Segment i's state table in the tables (qwen35.cuh forward_states): the stream's own, copied when it moved.
+pub fn forwardStates(e: anytype, i: usize, c: anytype) ![4]u64 {
+    const States = @import("cuda_cache.zig").States;
+    const t = try c.stateTable(e);
+    const n = States.bytes(e.g);
+    const at = states_at + i * n;
+    const was = e.forward_from[i];
+    if (was == null or !std.mem.eql(u64, &was.?, &t.from.?)) {
+        try e.tables.copyFrom(at, t.dev.ptr, n, e.stream.handle);
+        e.forward_from[i] = t.from;
+    }
+    return States.parts(e.tables.ptr + at, e.g);
+}
 /// An image prompt's rows for its prompt chunks: device feature rows, each prompt row's feature row, its positions.
 pub const Images = struct {
     features: u64, // bf16 [image rows, hidden]

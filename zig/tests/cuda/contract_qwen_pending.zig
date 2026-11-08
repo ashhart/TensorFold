@@ -130,9 +130,13 @@ const Fixture = struct {
     }
 };
 
-/// A stream's state table (cuda_cache.zig States) as an input, for these blocks (0: none); tails 0, no scan reads them.
-fn tabled(rig: *rig_.Rig, state: u64, before: u64, log: u64) !Seg {
-    var t: [4 * nl + most]u64 = @splat(0);
+/// A forward's state tables start this far past its segments (qwen35.cuh SEG_STATES, cuda_round.zig states_at).
+const seg_states = 232480;
+const entries = 4 * nl + most;
+
+/// A stream's state table (cuda_cache.zig States) for these blocks (0: none); tails 0, no scan reads them.
+fn table(state: u64, before: u64, log: u64) [entries]u64 {
+    var t: [entries]u64 = @splat(0);
     for (0..nl) |l| {
         t[l] = state + l * rec * 4;
         if (before != 0) t[2 * nl + l] = before + l * rec * 4;
@@ -140,6 +144,12 @@ fn tabled(rig: *rig_.Rig, state: u64, before: u64, log: u64) !Seg {
     if (log != 0) for (0..most) |r| {
         t[4 * nl + r] = log + r * nl * log_row;
     };
+    return t;
+}
+
+/// The table as an input, and a Seg that holds it (as a keep launch's Seg does).
+fn tabled(rig: *rig_.Rig, state: u64, before: u64, log: u64) !Seg {
+    const t = table(state, before, log);
     const at = try rig.input(std.mem.sliceAsBytes(&t));
     return .{ .rec = at, .conv = at + nl * 8, .before = at + 2 * nl * 8, .log = at + 4 * nl * 8 };
 }
@@ -185,7 +195,16 @@ fn launch(gpu: check.Gpu, s: cuda.Stream, apply: ?cuda.Function, scan: cuda.Func
         }
     }
     const params = [5]c_int{ 0, 0, @intCast(total), 2, 1 }; // P: the forward's rows, its windows, recorded
-    const segs_d = try rig.input(std.mem.sliceAsBytes(&segs));
+    // the segments, then each one's table where the scans find it
+    const block = try a.alignedAlloc(u8, .@"8", seg_states + 2 * entries * 8);
+    defer a.free(block);
+    @memset(block, 0);
+    @memcpy(block[0 .. 2 * @sizeOf(Seg)], std.mem.sliceAsBytes(&segs));
+    for (0..2) |st| {
+        const t = table(states[st], befores[st], logs[st]);
+        @memcpy(block[seg_states + st * entries * 8 ..][0 .. entries * 8], std.mem.sliceAsBytes(&t));
+    }
+    const segs_d = try rig.input(block);
     const q = try rig.input(std.mem.sliceAsBytes(f.q));
     const k = try rig.input(std.mem.sliceAsBytes(f.k));
     const v = try rig.input(std.mem.sliceAsBytes(f.v));

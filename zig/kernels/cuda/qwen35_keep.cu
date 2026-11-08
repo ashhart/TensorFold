@@ -13,12 +13,12 @@ extern "C" __global__ void __launch_bounds__(128) tf_q35k_apply(Geo geo, Seg sg,
     const int dv = blockIdx.y * 4 + threadIdx.y;
     constexpr int PT = DK / 32;
     const size_t at = ((size_t)hv * DK + dv) * DK + PT * dk;
-    float* st = rec_of(sg, layer) + at;
+    float* st = rec_of(states_of(sg), layer) + at;
     float state[PT];
 #pragma unroll
     for (int i = 0; i < PT; i++) state[i] = st[i];
     for (int j = 0; j < path.n; j++) {
-        const LogRow l = log_row(geo, sg, layer, path.rows[j]);
+        const LogRow l = log_row(geo, states_of(sg), layer, path.rows[j]);
         const float g = l.g[hv], d = l.delta[hv * DK + dv];
 #pragma unroll
         for (int i = 0; i < PT; i++) {
@@ -39,7 +39,7 @@ extern "C" __global__ void __launch_bounds__(128) tf_q35k_apply_pend(Geo geo, Se
     const int dv = blockIdx.y * 4 + threadIdx.y;
     constexpr int PT = DK / 32;
     const size_t at = ((size_t)hv * DK + dv) * DK + PT * dk;
-    float* st = rec_of(sg, layer) + at;
+    float* st = rec_of(states_of(sg), layer) + at;
     float state[PT];
 #pragma unroll
     for (int i = 0; i < PT; i++) state[i] = st[i];
@@ -62,8 +62,8 @@ extern "C" __global__ void tf_q35k_conv(Geo geo, Seg sg, int last) {
     const size_t n = geo.conv_rows();
     const size_t i = (size_t)blockIdx.y * blockDim.x + threadIdx.x;
     if (i >= n) return;
-    __nv_bfloat16* CS = conv_of(sg, layer);
-    CS[i] = log_row(geo, sg, layer, last).conv[i];
+    __nv_bfloat16* CS = conv_of(geo, states_of(sg), layer);
+    CS[i] = log_row(geo, states_of(sg), layer, last).conv[i];
 }
 
 // The path's keys and values move down to the slots after the cache; row j lands at or below j, never on one unread.

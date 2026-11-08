@@ -34,11 +34,12 @@ __device__ __forceinline__ void q35_slots(Geo geo, const __nv_bfloat16* q, const
     if (past_windows(P, blockIdx.z / NV)) return;
     const int hv = blockIdx.z % NV, hk = hv / (NV / NK);
     const Seg sg = segs[blockIdx.z / NV];
+    const unsigned long long* T = forward_states(geo, segs, blockIdx.z / NV);
     const int dk = threadIdx.x, dv0 = (blockIdx.y * 4 + threadIdx.y) * R;
     constexpr int PT = DK / 32;
     static_assert(PT == 4, "a lane's four state entries are one float4 slot");
     const size_t at = ((size_t)hv * DK + dv0) * DK + PT * dk;  // row r's entries are r * DK further
-    float* st = rec_of(sg, layer) + at;
+    float* st = rec_of(T, layer) + at;
     float4* slots = kept[threadIdx.y];
     float root[R][PT], state[R][PT];
 #pragma unroll
@@ -79,7 +80,7 @@ __device__ __forceinline__ void q35_slots(Geo geo, const __nv_bfloat16* q, const
 #pragma unroll
         for (int r = 0; r < R; ++r)
 #pragma unroll
-            for (int i = 0; i < PT; ++i) before_rec(sg, layer)[at + r * DK + i] = root[r][i];
+            for (int i = 0; i < PT; ++i) before_rec(geo, T, layer)[at + r * DK + i] = root[r][i];
     const bool record = recorded(P);
     // row inputs as stored, the next row's loaded while this one computes
     struct In { uint2 k, q; __nv_bfloat16 v[R], beta; float g; };
@@ -168,7 +169,7 @@ __device__ __forceinline__ void q35_slots(Geo geo, const __nv_bfloat16* q, const
         }
         pend_row = row;
         if (record) {
-            const LogRow l = log_row(geo, sg, layer, rr);
+            const LogRow l = log_row(geo, T, layer, rr);
             if (dk == 0) {
 #pragma unroll
                 for (int r = 0; r < R; ++r) l.delta[hv * DK + dv0 + r] = delta[r];

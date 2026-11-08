@@ -202,8 +202,10 @@ extern "C" __global__ void __launch_bounds__(32) tf_q35_gdn_pre(Geo geo, const _
     const int w = blockIdx.z;
     if (past_rows(P, w)) return;
     const int NK = geo.nk, NV = geo.nv, C = geo.conv();
-    const Seg sg = segs[rowseg[w]];
-    const __nv_bfloat16* CS = conv_of(sg, layer);
+    const int s = rowseg[w];
+    const Seg sg = segs[s];
+    const unsigned long long* T = forward_states(geo, segs, s);
+    const __nv_bfloat16* CS = conv_of(geo, T, layer);
     const bool isq = head < NK, isk = !isq && head < 2 * NK;
     const int c0 = head * DK;  // q, k and v channels are consecutive heads of DK
     int src[TAPS];  // tap t reads the row TAPS - 1 - t tokens back: a forward row, or -1 - (tail row)
@@ -211,7 +213,7 @@ extern "C" __global__ void __launch_bounds__(32) tf_q35_gdn_pre(Geo geo, const _
     for (int tap = 0; tap < TAPS; tap++) src[tap] = back(rowpar, w, TAPS - 1 - tap);
     constexpr int PER = DK / 32;
     // a recorded window's row logs the tail after it (taps 1..TAPS-1) here, so conv_commit only moves the stream's
-    __nv_bfloat16* tail = recorded(P) ? log_row(geo, sg, layer, w - sg.row0).conv : nullptr;
+    __nv_bfloat16* tail = recorded(P) ? log_row(geo, T, layer, w - sg.row0).conv : nullptr;
     // a lane's PER channels in 8-byte loads: each tap's row, the weights (PER x TAPS in a row), the logged tail
     static_assert(PER == 4 && TAPS == 4, "a tap's channels and a channel's taps are one uint2");
     const int cl = c0 + lane * PER;
@@ -264,11 +266,12 @@ extern "C" __global__ void tf_q35_conv_commit(Geo geo, const __nv_bfloat16* __re
     const int c = blockIdx.x * blockDim.x + threadIdx.x;
     if (c >= C || past_windows(P, blockIdx.y)) return;
     const Seg sg = segs[blockIdx.y];
-    __nv_bfloat16* CS = conv_of(sg, layer);
+    const unsigned long long* T = forward_states(geo, segs, blockIdx.y);
+    __nv_bfloat16* CS = conv_of(geo, T, layer);
     if (recorded(P)) {
         // gdn_pre logged each row's tail
         if (sg.rows != 1) return;
-        __nv_bfloat16* before = before_conv(geo, sg, layer);
+        __nv_bfloat16* before = before_conv(geo, T, layer);
         for (int r = 0; r < TAPS - 1; ++r) before[(size_t)r * C + c] = CS[(size_t)r * C + c];
     }
     // ascending: slot r takes [r + rows], which is either a later state slot (not yet written) or a row
@@ -289,11 +292,12 @@ extern "C" __global__ void __launch_bounds__(128) tf_q35_gdn_chain(Geo geo, cons
     const int hv = blockIdx.z % NV;
     const int hk = hv / (NV / NK);
     const Seg sg = segs[blockIdx.z / NV];
+    const unsigned long long* T = forward_states(geo, segs, blockIdx.z / NV);
     const int dk = threadIdx.x;
     const int dv = blockIdx.y * 4 + threadIdx.y;
     constexpr int PT = DK / 32;
     const size_t at = ((size_t)hv * DK + dv) * DK + PT * dk;
-    float* st = rec_of(sg, layer) + at;
+    float* st = rec_of(T, layer) + at;
     const bool record = recorded(P);
     float state[PT];
 #pragma unroll
@@ -338,7 +342,7 @@ extern "C" __global__ void __launch_bounds__(128) tf_q35_gdn_chain(Geo geo, cons
             for (int i = 0; i < PT; i++) state[i] = st[i];
             for (int j = n - 1; j >= 0; j--) {
                 const int a = anc[j];
-                const float ga = g[a * NV + hv], da = log_row(geo, sg, layer, a - sg.row0).delta[hv * DK + dv];
+                const float ga = g[a * NV + hv], da = log_row(geo, T, layer, a - sg.row0).delta[hv * DK + dv];
 #pragma unroll
                 for (int i = 0; i < PT; i++) {
                     state[i] = state[i] * ga;
@@ -364,7 +368,7 @@ extern "C" __global__ void __launch_bounds__(128) tf_q35_gdn_chain(Geo geo, cons
         out = warp_sum(out);
         if (dk == 0) y[((size_t)row * NV + hv) * DK + dv] = __float2bfloat16_rn(out);
         if (record) {
-            const LogRow l = log_row(geo, sg, layer, r);
+            const LogRow l = log_row(geo, T, layer, r);
             if (dk == 0) {
                 l.delta[hv * DK + dv] = delta;
                 if (dv == 0) l.g[hv] = gc;

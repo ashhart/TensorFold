@@ -85,8 +85,13 @@ pub const States = struct {
 
     /// Where the tables start in `dev` (Seg.rec, .conv, .before, .log).
     pub fn at(self: States, g: geometry.Geometry) [4]u64 {
+        return parts(self.dev.ptr, g);
+    }
+
+    /// A table at `base`'s recurrence, tail, copy and log row entries (qwen35.cuh Seg.rec, .conv, .before, .log).
+    pub fn parts(base: u64, g: geometry.Geometry) [4]u64 {
         const n = g.deltas();
-        return .{ self.dev.ptr, self.dev.ptr + n * 8, self.dev.ptr + 2 * n * 8, self.dev.ptr + 4 * n * 8 };
+        return .{ base, base + n * 8, base + 2 * n * 8, base + 4 * n * 8 };
     }
 
     /// Window row `row`'s record base (cuda_cache.zig's pending copy).
@@ -359,8 +364,12 @@ pub const Cache = struct {
 
     /// The stream's window of `rows` rows from forward row `row0`, after `len` cached positions.
     pub fn seg(self: *Cache, e: *const Engine, len: usize, row0: usize, rows: usize) !Seg {
+        return self.segIn(e, (try self.stateTable(e)).at(e.g), len, row0, rows);
+    }
+
+    /// `seg` with the state table's entries `t` (States.parts): a forward's copy of the stream's own table.
+    pub fn segIn(self: *Cache, e: *const Engine, t: [4]u64, len: usize, row0: usize, rows: usize) Seg {
         const g = e.g;
-        const t = (try self.stateTable(e)).at(g);
         var sg: Seg = .{ .rec = t[0], .conv = t[1], .kv = self.kv.ptr, .tap = if (self.tap) |x| x.ptr else 0, .log = t[3], .before = t[2], .cap = @intCast(self.cap), .len = @intCast(len), .row0 = @intCast(row0), .rows = @intCast(rows), .tap_rows = tap_rows, .taps = @intCast(e.n_taps), .delta = self.delta };
         if (self.paged) |p| {
             sg.kv = p.base;
