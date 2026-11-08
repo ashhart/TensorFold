@@ -86,9 +86,11 @@ test "qwen27 rows: a below-floor setting refuses before the loader with its valu
         var why: []const u8 = "";
         try std.testing.expectError(error.PromptRowsTooSmall, loader.open(value, &why));
         defer a.free(why);
-        try std.testing.expect(std.mem.indexOf(u8, why, "TF_PROMPT_ROWS=") != null);
-        try std.testing.expect(std.mem.indexOf(u8, why, value) != null);
-        try std.testing.expect(std.mem.indexOf(u8, why, "multiple of 16 from 128 to 2048") != null);
+        try std.testing.expect(std.mem.indexOf(u8, why, "at least 128 prompt rows") != null);
+        const origin = try std.fmt.allocPrint(a, "TF_PROMPT_ROWS supplied {s}.", .{value});
+        defer a.free(origin);
+        try std.testing.expect(std.mem.indexOf(u8, why, origin) != null);
+        try std.testing.expect(std.mem.indexOf(u8, why, "unset it to use the device default") != null);
     }
     try std.testing.expectEqual(@as(usize, 0), loader.calls);
 }
@@ -114,7 +116,7 @@ test "qwen27 rows: a caller-created narrow frame names frame capacity rather tha
 
 test "qwen27 rows: malformed and over-cap native settings refuse before loading" {
     var loader: Load = .{};
-    for ([_][]const u8{ "", "no", " 512", "129", "2049", "4096", "4294967296" }) |value| {
+    for ([_][]const u8{ "no", " 512", "129", "2049", "4096", "4294967296" }) |value| {
         var why: []const u8 = "";
         try std.testing.expectError(error.InvalidEnvironment, loader.open(value, &why));
         defer a.free(why);
@@ -122,4 +124,12 @@ test "qwen27 rows: malformed and over-cap native settings refuse before loading"
         try std.testing.expect(std.mem.indexOf(u8, why, "128 to 2048") != null);
     }
     try std.testing.expectEqual(@as(usize, 0), loader.calls);
+}
+
+test "qwen27 rows: empty or whitespace-only settings are unset and reach the loader" {
+    var loader: Load = .{};
+    var why: []const u8 = "unchanged";
+    for ([_][]const u8{ "", " ", "\t\n" }) |value| try loader.open(value, &why);
+    try std.testing.expectEqual(@as(usize, 3), loader.calls);
+    try std.testing.expectEqualStrings("unchanged", why);
 }
