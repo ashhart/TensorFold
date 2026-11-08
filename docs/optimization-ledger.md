@@ -338,7 +338,8 @@ below; these are estimates for planning a port, not results.
 
 13. **MoE grouped plans and expert kernels.** One expert plan sorts a step's rows by expert, and one grouped call runs
     every expert's rows ([#558], [#605], NVFP4 in [#629], EXL3 in [#741]). A family adds only its router and its weight
-    format.
+    format. Wide router calls run on the shared register tiles in `zig/kernels/cuda/common/router_tiles.cuh`, the
+    same fma chain a logit: Nemotron's past 32 rows, and qwen3_5's from 257 rows since [#2499].
 
 14. **CUDA graphs for decode and verify.** Each decode or verify shape is captured once and replayed, which removes the
     host's launch cost from every step. `TENSORFOLD_GEMMA4_GRAPHS=0` (and the same switch for Kolibri, Spark
@@ -560,6 +561,7 @@ below; these are estimates for planning a port, not results.
 [#2162]: https://github.com/ashhart/TensorFold/pull/2162
 [#2165]: https://github.com/ashhart/TensorFold/issues/2165
 [#2432]: https://github.com/ashhart/TensorFold/pull/2432
+[#2499]: https://github.com/ashhart/TensorFold/issues/2499
 [#2167]: https://github.com/ashhart/TensorFold/pull/2167
 [#2211]: https://github.com/ashhart/TensorFold/pull/2211
 [#2215]: https://github.com/ashhart/TensorFold/pull/2215
