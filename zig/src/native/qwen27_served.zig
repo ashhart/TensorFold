@@ -513,8 +513,6 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     // both Macs are loaded and allocated before either serves: rank 1 may now replay rank 0's rounds
     if (pair) |p| {
         h.follower = p.rank != 0;
-        // Rank 1 serves no generations: its engine only replays rank 0's rounds, so admission refuses at the door.
-        if (h.follower) h.host.health = .{ .ctx = h, .read = unhealthyFollower };
         // The follower must listen before either rank signals ready: rank 0's measure seams follow the handshake.
         try h.workers.startFollower(p, h.back, a, why);
     }
@@ -630,11 +628,6 @@ fn enableCache(h: *Host, gib: ?f64, over: bool, a: Allocator, why: *[]const u8) 
 
 /// Weights, the ready slots' state and the drafter join one residency set the idle keepalive uses.
 const holdResident = q.residency.hold;
-
-/// Rank 1's admission gate: always false, so every generation request refuses before it reaches the lanes.
-fn unhealthyFollower(_: *anyopaque) bool {
-    return false;
-}
 
 pub fn close(ptr: *anyopaque) void {
     const h = Host.of(ptr);
