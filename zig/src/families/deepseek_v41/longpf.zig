@@ -26,9 +26,8 @@ pub fn plan(rows: i64, keys: i64, k: i64) i64 {
 /// TF_DSV41_STREAM_LAZY=1: the stream top-k's scratch held only while prompts that name it prefill (256 MiB at 1M).
 pub const lazy_role = "L.ix.stream";
 
-pub fn lazyEnv() bool {
-    const v = std.c.getenv("TF_DSV41_STREAM_LAZY") orelse return false;
-    return std.mem.eql(u8, std.mem.trim(u8, std.mem.span(v), " "), "1");
+pub fn lazyEnv() !bool {
+    return @import("sys").environment.read(bool, "TF_DSV41_STREAM_LAZY", false);
 }
 
 /// The on-demand scratch: the plan's size for it, and its buffer while a prompt holds it.

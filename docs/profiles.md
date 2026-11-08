@@ -37,7 +37,7 @@ readers. `profiles.registered_switches` covers the profile registry in this buil
 
 The `profiles` object contains `default`, `available`, and `registered_switches`. Every row identifies its switch,
 backend, model types, class, effect, evidence link number, syntax, and stable fallback. A null fallback means the
-profile supplies no value. Registry metadata comes directly from the same table the readers use.
+profile supplies no value. Registry metadata comes directly from the table. Registered readers can use its raw-value resolver; adding metadata does not migrate an existing reader.
 
 Coverage includes:
 
@@ -52,6 +52,7 @@ Coverage includes:
 - Spark2.5 on CUDA: `TENSORFOLD_SPARK25_KV_PAGES`, full caches in pool pages by default, where `0` keeps them linear.
 - Nemotron-H on Metal: `TF_NEMOTRON_METAL_KV_PAGES`, where exactly `1` puts keys
   and values in the core pool's pages.
+- DeepSeek V4.1 on CUDA: the settings below, with no stable fallback.
 
 `identical` records the existing switch's token-preserving design and linked evidence; it is not a claim that the
 switch is faster for every shape, device, or workload. The `*_ALL` checks stay `debug`; Flash Next paging remains
@@ -107,7 +108,7 @@ The serving process prints its profile and applicable registered overrides, for 
 [tensorfold] profile: stable; registered overrides: TF_QWEN_KV_PAGES=256 (identical, env); TF_QWEN_KV_SHARE=16 (identical, env)
 ```
 
-When no applicable registered setting differs from its default, it prints `registered overrides: none`. This is
+When no applicable registered setting meets its reporting rule, it prints `registered overrides: none`. This is
 explicitly the registry's coverage, not an assertion that the whole environment is at defaults. Settings for another
 model type/backend and arbitrary environment variables are omitted. Numeric zero for count switches and disabled exact-one
 flags do not count as changes. Dependency checks still determine whether a configured switch can be used.
@@ -133,6 +134,67 @@ can still select windows for learning or a Triton-backed engine; this line repor
 Values are bounded and terminal controls are escaped. Credentials, paths, server addresses, and unrelated environment
 variables are never enumerated by this report. Each process's environment remains authoritative on restart; idle
 reloads use the same existing family readers.
+
+## DeepSeek CUDA settings
+
+[Issue #2370](https://github.com/ashhart/TensorFold/issues/2370) adds these rows for `deepseek_v41` on CUDA.
+Their `present` syntax reports every configured value, including `0` and values equal to a current default.
+Defaults can depend on the caller or other settings, so this is a record of explicit configuration, not proof
+that each setting changed a reply. Each stable fallback is null. The release backend has separate readers.
+
+| Class | Variables |
+| --- | --- |
+| `arithmetic` | `TF_DSV41_NUCLEUS`, `TF_DSV41_CONTEXT`, `TF_DSV41_ROWS_CAP`, `TF_DSV41_POOL_TOKENS`, `TF_DSV41_KV_SPLIT`, `TF_DSV41_KV_SPLIT_UNION_MIB` |
+| `debug` | `TF_DSV41_LAYERS`, `TF_DSV41_NEEDS_POOL` |
+| `experimental` | `TF_DSV41_EXPERT_TOPP`, `TF_DSV41_OWN_PREFILL`, `TF_DSV41_PREFILL_PIECES`, `TF_DSV41_SLOTS`, `TF_DSV41_MHC_DEFER`, `TF_DSV41_DRAFTS`, `TF_DSV41_SAMPLING`, `TF_DSV41_IMAGES`, `TF_DSV41_BIAS_VL`, `TF_DSV41_ENGRAM_DIR`, `TF_DSV41_SCHEMA_PROMPT`, `TF_DSV41_TOOL_GRAMMAR` |
+
+The pool settings have separate rows because each can be set independently. `NEEDS_POOL` forces pool geometry
+in the AOT asset planner; it does not select the served engine's pool. Its class is therefore `debug`.
+The other pool classes conservatively retain the audit's `arithmetic` classification, without claiming exactness.
+Images and vision bias also have independent rows. `ENGRAM_DIR` is reported as `<set>`; its path is never printed
+by the registry line. The legacy `TF_DSV41_TOOL_GRAMMAR` alias has a server-wide reader, although this row covers
+DeepSeek CUDA. A present `TENSORFOLD_TOOL_GRAMMAR` takes precedence and suppresses the masked legacy row.
+
+All 81 `TF_DSV41_*` settings that DeepSeek validates are rows of the shared startup table in
+`zig/src/platform/environment.zig` (see [environment settings](environment.md)). Their readers read through that
+table; the served-knob readers of `PREFILL_ROWS` and `INDEX_BUDGET_MIB` keep their own stricter refusals after it.
+`Model.open` and the AOT planner check those rows before any allocation, device or checkpoint work, and a later
+direct read refuses the same text. The refusal names the variable, supplied value and accepted forms.
+
+Empty or whitespace-only values mean unset, as for every other row: the reader's default applies. The one exception
+is `TF_DSV41_LOOKUP`, whose blank value has always turned lookup drafts off while unset leaves them on; it keeps that.
+Blank `MHC_DEFER`, `COEF_LATE`, `LOOKUP_PLAN` and `BIAS_VL` read as off, which is also their unset default.
+Unset defaults and canonical `0`/`1` values are unchanged, and default-on switches stay on when unset or blank.
+The former nonzero switches accept case-insensitive `true`/`on`/`yes` and
+`false`/`off`/`no`: `GRAPHS`, `OWN_PREFILL`, `DRAFTS`, `AOT_GUARD`, `ENGRAM_PREFETCH`, `FLOOR_PRICE`,
+`PREFILL_ADAPT`, `SESSIONS`, `SCHEMA_PROMPT`, `GM_V3`, `ENGRAM_URING`, `PREFETCH_AHEAD`, and the AOT
+`PIECE_RUNS`, `REPLAY_RUNS` and `KV_SPLIT` settings, as do `MHC_DEFER`, `COEF_LATE`, `LOOKUP` and `LOOKUP_PLAN`.
+This intentionally reads false/off/no as off rather than the old nonzero interpretation. Arbitrary text refuses.
+Other switches take exactly `0` or `1`, with their existing whitespace trims.
+
+The served-knob accessor also treats empty and whitespace-only values as absent, so knobs outside the table,
+such as `PF_TBO`, `PREFILL` and `PROMPT_TAIL`, keep their defaults. The table's intentional refusals include
+generation streams 0, an extra layer-range tail, and image modes other than `native` or `0`.
+
+`ROWS_CAP` accepts the existing reader buckets: 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 24, 32, 48 and 64.
+The table row, the batch reader and the planner use that list, and a host test keeps it equal to the batch's buckets.
+Every floor reader shares its row's space trim and named refusal. The hard floor has one reader in the KV budget,
+used by the pool, graph room, scheduler and prefill path; its unset value remains 4 GiB.
+
+`BIAS_VL` retains its accepted presence forms: unset/blank off, while both `0` and `1` select vision bias.
+Other text refuses. Engram queue depth remains 64 by default and permits 0 for serial reads. Reader threads
+remain 16 by default and accept 0 through 32; larger values refuse instead of clamping. Generation streams
+remain 1 by default.
+
+The server validates the legacy tool-grammar alias once at startup for every family. The canonical variable
+still masks it when present, so an invalid masked alias is ignored as before. A bad unmasked alias refuses at
+startup, rather than failing each later auto-tools request. Both `deepseek_v41` and `deepseek_v4` model-type
+names show the same CUDA registry rows on the startup line.
+
+Configured values are length-delimited raw bytes in the shared identity helper, scoped to `deepseek_v41`/CUDA.
+Other family/backend identities keep their existing serialization. These registry rows do not claim to bind
+a current DeepSeek disk cache. This change adds no DeepSeek prompt-disk integration.
+No parser change qualifies a new kernel, arithmetic mode or profile.
 
 ## GLM CUDA paging selection
 
