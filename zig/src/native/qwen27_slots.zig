@@ -169,6 +169,7 @@ pub fn bind(b: *Metal, s: *lanes.Stream) !u32 {
 /// One chunk of `s`'s prompt pass a call (the lane host's prefill_step), the others' rounds kept first.
 pub fn prefillStep(ptr: *anyopaque, s: *lanes.Stream, _: u32) anyerror!bool {
     const b: *Metal = @ptrCast(@alignCast(ptr));
+    try @import("qwen27_pair.zig").refuseFollower(b.link); // the chunked prefill bypasses prefillFn's refusals
     b.settle() catch {};
     b.dropRound();
     promoteDue(b);
@@ -457,6 +458,7 @@ fn copyRows() !u32 {
 
 /// A lone greedy stream on the DFlash2 serial loop in slot 0 until it ends (false) or the lane core adopts it (true).
 pub fn lone(b: *Metal, s: *lanes.Stream, hooks: api.LoneHooks) !bool {
+    try @import("qwen27_pair.zig").refuseFollower(b.link); // the serial draft loop bypasses prefillFn's refusals
     const d = b.draft orelse return error.DraftNotAttached;
     if (s.sampling != null) return error.GreedyDraftsOnly;
     if (b.owners[0] != null) return error.StreamBusy;
