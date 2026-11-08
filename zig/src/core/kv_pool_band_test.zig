@@ -93,3 +93,24 @@ test "outside that band the room's count of windows stands: GLM at TP=3 and TP=2
         .{ .room = 160 * mib, .plan = .{ .lanes = 8, .snaps = 0, .copied = 16777216, .pages = 128, .kept = 0, .taken = 0 } },
     });
 }
+
+test "a --prompt-cache-gib is named for n slots only where holds says it keeps them, else the most the room holds" {
+    const g: u64 = 1 << 30;
+    const tp2: kv.Layout = .{ .fixed_bytes = 340 * mib, .token_bytes = 13_056, .page_tokens = 512, .snap_bytes = 180 * mib };
+    // TP=2, four streams, a 1M window, a 16.5 GiB room: only the engine's own window comes first, asked or not
+    const b: kv.Budget = .{ .room = 16 * g + g / 2, .engine = 0, .lanes = 4, .fixed = true, .cache = 16 * g, .snaps = 16, .window = 1_048_576 + 8, .engine_paged = true, .slots_only = true };
+    try expectEqual(@as(usize, 15), (try kv.plan(tp2, b)).snaps);
+    const h = kv.holding(tp2, b, 16);
+    try expectEqual(@as(?u64, null), h.gib); // 16 slots round up to 3 GiB, and 3 keeps the same 15
+    try expectEqual(@as(usize, 15), h.most);
+    var roomy = b;
+    roomy.room = 24 * g;
+    try expectEqual(@as(?u64, 3), kv.holding(tp2, roomy, 16).gib);
+    // TP=3, eight streams, just past where the rest holds a third window: under a slot of cache; 4 GiB asked holds 32
+    const tp3: kv.Layout = .{ .fixed_bytes = 291 * mib, .token_bytes = 13_056, .page_tokens = 512, .snap_bytes = 115 * mib };
+    const edge: kv.Budget = .{ .room = 40 * g + 5 * g / 16, .engine = 0, .lanes = 8, .fixed = true, .cache = 16 * g, .snaps = 32, .window = 1_048_576 + 8, .engine_paged = true, .slots_only = true };
+    try expectEqual(@as(usize, 0), (try kv.plan(tp3, edge)).snaps);
+    const e = kv.holding(tp3, edge, 32);
+    try expectEqual(@as(?u64, 4), e.gib);
+    try expectEqual(@as(usize, 32), e.most);
+}

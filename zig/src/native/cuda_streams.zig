@@ -29,7 +29,7 @@ pub const Budget = struct {
 };
 
 /// The streams served, the page plan and layout or the KV ledger plan, and TF_KV_SHARE's count when states take slots.
-pub const Count = struct { streams: u32, paged: ?kv_pages.Plan, layout: ?kv_pool.Layout, ledger: ?ledger.Plan = null, slots: ?usize = null };
+pub const Count = struct { streams: u32, paged: ?kv_pages.Plan, layout: ?kv_pool.Layout, ledger: ?ledger.Plan = null, slots: ?usize = null, planned: ?kv_pool.Budget = null };
 
 /// TF_KV_SHARE: the cache's part made pool pages, all of it unless the family keeps its states' rest elsewhere (GLM).
 pub fn keptPpm(comptime F: type, share: bool) u32 {
@@ -55,7 +55,8 @@ pub fn count(comptime F: type, a: Allocator, loaded: anytype, o: api.Open, b: Bu
     if (wrapped.layout) |l| {
         const slots = try shareSlots(b.share, l.snap_bytes, b.host_cache); // GLM: a slot a state
         const paged = try kv_pages.plan(F, a, l, wrapped.room, o, @intCast(b.window), problem, b.host_cache, kv_pages.enginePaged(loaded), keptPpm(F, b.share), slots) orelse return null;
-        return .{ .streams = paged.lanes, .paged = paged, .layout = l, .slots = slots };
+        const planned = kv_pages.budgetOf(F, wrapped.room, o, @intCast(b.window), b.host_cache, kv_pages.enginePaged(loaded), keptPpm(F, b.share), slots);
+        return .{ .streams = paged.lanes, .paged = paged, .layout = l, .slots = slots, .planned = if (slots != null) planned else null };
     }
     // --parallel caps the streams; each request reserves its own bytes (a family that allocates per request)
     if (ledger.wanted(F, loaded, b.stream_bytes)) {
