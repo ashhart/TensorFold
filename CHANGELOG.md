@@ -183,6 +183,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Docs: the image page says how the native server finds libjpeg-turbo 3.1.4.1 for JPEG input: why the release is pinned, the search order and file names on macOS, Linux and Windows, `TENSORFOLD_LIBTURBOJPEG`, and what each startup warning means (#2590, refs #2581).
 
 - Internal: a shared CUDA MLA image (`mla.cu`, `cuda.mla`) for a 512-wide latent with 64 roped columns and 128-wide heads, on GLM's MLA chunk bodies, which move from `glm_glue_attn.cuh` to `common/mla.cuh` and which GLM instantiates at its old widths (its SASS is identical on all five SMs). Its seven launches are under the kernel contract with a planted control each, and `test-mla-twins-host` keeps its absorb, expand and per-rank merge GLM's kernels token for token. No family calls it yet (#2335, refs #850). Thanks to @ajensenwaud.
+- Qwen3.8-27B on Metal: a sampled row's top-k skips 32 logits at a time that cannot beat the k-th candidate, still refusing any non-finite logit, with the same candidates and replies. On an M5 Ultra with Qwen3.8-27B MLX 4-bit and its DFlash2 drafter, sampled verify rounds take 1.6 ms less and sampled decode is 6% faster; greedy is unchanged. The Qwen 3.5/3.6 CUDA engine shares this host draw for each first token and for grammar-masked windows; its unmasked sampled verify rows draw on the GPU. CUDA is not measured (#2507). Thanks to @mrv777.
 
 ## 1.2.5
 
