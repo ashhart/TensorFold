@@ -229,3 +229,33 @@ test "release paths: a bare root has no named build directory text" {
     for ([_][]const u8{ "//", "C:\\", "/." }, [_][]const u8{ "\x01//\x02", "\x01C:\\&\x02", "\x01/.\x02" }) |base, noise|
         try paths.check(a, noise, base);
 }
+
+fn machO(comptime n: usize, sig_off: u32, sig_len: u32) [n]u8 {
+    var bytes: [n]u8 = @splat(0);
+    std.mem.writeInt(u32, bytes[0..4], 0xfeedfacf, .little);
+    std.mem.writeInt(u32, bytes[16..20], 1, .little);
+    std.mem.writeInt(u32, bytes[32..36], 0x1d, .little);
+    std.mem.writeInt(u32, bytes[36..40], 16, .little);
+    std.mem.writeInt(u32, bytes[40..44], sig_off, .little);
+    std.mem.writeInt(u32, bytes[44..48], sig_len, .little);
+    return bytes;
+}
+
+test "release paths: a Mach-O code signature's hash bytes skip the path heuristic, but not the build root" {
+    const word = "(/e.C\x1f";
+    var signed = machO(256, 128, 64);
+    @memcpy(signed[160..][0..word.len], word);
+    try paths.check(a, &signed, root);
+    var outside = machO(256, 128, 64);
+    @memcpy(outside[80..][0..word.len], word);
+    try std.testing.expectError(error.PrivateBuildPath, paths.check(a, &outside, root));
+    var after = machO(256, 128, 64);
+    @memcpy(after[200..][0..word.len], word);
+    try std.testing.expectError(error.PrivateBuildPath, paths.check(a, &after, root));
+    var rooted = machO(256, 128, 64);
+    @memcpy(rooted[140..][0..root.len], root);
+    try std.testing.expectError(error.PrivateBuildPath, paths.check(a, &rooted, root));
+    var plain: [256]u8 = @splat(0);
+    @memcpy(plain[160..][0..word.len], word);
+    try std.testing.expectError(error.PrivateBuildPath, paths.check(a, &plain, root));
+}

@@ -5,6 +5,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 ## Unreleased
 
 - LFM2 on Macs: a non-finite value in a masked key no longer reaches prompt attention's output; finite prompts run the same kernels as before, and prefill is level (#2328, part of #1009).
+- Release checks: on a Mac release binary, the private-path check no longer reads the code signature's hash bytes as text, which could spell a path by chance and refuse a clean build; the exact build root is still refused there, and the rest of the binary is checked as before (#2524).
 
 - Tests: the Qwen4 and Dory RoPE word-table host tests print their tables only when a comparison fails, naming the first wrong word; a passing run writes nothing to stderr (#2519, refs #1852).
 
