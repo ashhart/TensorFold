@@ -31,9 +31,10 @@ pub fn requestStep(comptime F: type) u32 {
     return requestStepFor(F, @import("profile").lookup(F.request_starts_switch));
 }
 
-/// An opted-in family keeps each message start, including turns closer than the shared default.
+/// An opted-in family keeps each message start (1), or starts its `request_min_chunk` apart; 256 when not opted in.
 pub fn requestMinimum(comptime F: type) u32 {
-    return if (requestStep(F) > 0) 1 else 256;
+    if (requestStep(F) == 0) return 256;
+    return if (@hasDecl(F, "request_min_chunk")) F.request_min_chunk else 1;
 }
 
 /// Only exact 1 opts in; a family must also declare that its cold passes honor request starts.
@@ -186,7 +187,8 @@ test "request starts: one family's switch leaves every other family without star
             const grid: u32 = if (@hasDecl(F, "snap_grid")) F.snap_grid else 0;
             try std.testing.expect(!@hasDecl(F, "request_starts_switch") or grid > 0);
             try std.testing.expectEqual(if (opted) grid else 0, requestStep(F));
-            try std.testing.expectEqual(@as(u32, if (opted) 1 else 256), requestMinimum(F));
+            const glm = opted and on == 1; // GLM keeps 256 apart, as measured; Qwen and the test family keep every start
+            try std.testing.expectEqual(@as(u32, if (opted and !glm) 1 else 256), requestMinimum(F));
         }
     }
 }
