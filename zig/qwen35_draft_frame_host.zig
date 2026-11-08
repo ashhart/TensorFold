@@ -175,6 +175,7 @@ fn actualFrame(block: usize) !void {
     d.e = &e;
     d.c = config();
     d.c.block = block;
+    d.tree_nodes = try q.draft.tree.nodes(); // as Draft.init reads it
     d.streams = .empty;
     defer d.streams.deinit(a);
     d.selection_base = 0;
