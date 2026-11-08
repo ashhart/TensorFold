@@ -137,7 +137,7 @@ const Head = struct {
         // a grown tree takes the drafter's whole node budget; the engine admits its first nodes
         if (own_trees) for (contexts[0..items.len]) |ctx| {
             try std.testing.expect(ctx.grown > 0);
-            try std.testing.expect(ctx.grown <= q.draft.tree.nodes());
+            try std.testing.expect(ctx.grown <= try q.draft.tree.nodes());
         };
     }
     fn held(p: *anyopaque, streams: []const *lanes.Stream, outs: []const []u32) !void {
