@@ -8,6 +8,10 @@ pub fn steps(b: *std.Build) void {
     b.step("test-metal-residency-host", "Unique residency allocations, limits, flags and lifetimes without devices").dependOn(&run.step);
     const recording = b.createModule(.{ .root_source_file = b.path("zig/residency_recording_metal.zig"), .target = b.graph.host });
     const lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = b.graph.host, .link_libc = true });
+    // the prompt cache's budget over the same residency limits, so its no-footprint branch runs off macOS too
+    const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
+    const fit = b.createModule(.{ .root_source_file = b.path("zig/src/native/cache_fit.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "engine_api", .module = api } } });
+    b.step("test-cache-fit-host", "Prompt-cache budgets, load ceilings and host memory counts without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = fit })).step);
     const fabric = b.createModule(.{ .root_source_file = b.path("zig/src/fabric/fabric.zig"), .target = b.graph.host, .link_libc = true });
     fabric.addImport("verbs", @import("tp.zig").verbsModule(b, b.graph.host, .debug));
     const sources = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/sources.zig") });

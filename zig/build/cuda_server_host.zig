@@ -4,7 +4,7 @@ const golden_build = @import("golden.zig");
 const kolibri1Module = @import("kolibri.zig").module;
 
 /// Registers the server host steps; returns the template and server test modules the later CUDA host tests import.
-pub fn steps(b: *std.Build, host: std.Build.ResolvedTarget, cuda: *std.Build.Module, mods: anytype, native_modules: anytype, windows_port: *std.Build.Step, step: *std.Build.Step, server_steps: bool) struct { *std.Build.Module, *std.Build.Module } {
+pub fn steps(b: *std.Build, host: std.Build.ResolvedTarget, cuda: *std.Build.Module, mods: anytype, native_modules: anytype, build_options: *std.Build.Step.Options, windows_port: *std.Build.Step, step: *std.Build.Step, server_steps: bool) struct { *std.Build.Module, *std.Build.Module } {
     // the HTTP server's unit tests (zig/src/server/root.zig), which the macOS build runs, on Linux hosts too
     const template = b.createModule(.{ .root_source_file = b.path("zig/src/core/template/template.zig"), .target = host, .optimize = .debug, .link_libc = true });
     const server_tests = b.createModule(.{
@@ -76,6 +76,18 @@ pub fn steps(b: *std.Build, host: std.Build.ResolvedTarget, cuda: *std.Build.Mod
     if (server_steps) {
         golden_build.step(b, host, server_tests, native_modules.api, mods.tokenizer, template, native_modules.engines);
         @import("cortheon_fuzz.zig").add(b, host, native_modules.api, mods.tokenizer, template, mods.core);
+        // the PDF render worker from this host's CUDA tensorfold-native, as metal_targets.zig has it; POSIX only
+        if (host.result.os.tag != .windows) {
+            const server = @import("cuda.zig").nativeServer(b, host, .ReleaseSafe, cuda, mods.core, mods.lanes, mods.nemotron, mods.heat, mods.qwen35, mods.qwen_vision, mods.tokenizer, mods.living, build_options, false, null);
+            const worker_exe = b.addOptions();
+            worker_exe.addOptionPath("path", server.getEmittedBin());
+            const pdf_worker = b.createModule(.{ .root_source_file = b.path("zig/src/server/pdf_worker_test.zig"), .target = host, .optimize = .debug, .link_libc = true });
+            for (server_tests.import_table.keys(), server_tests.import_table.values()) |name, module| pdf_worker.addImport(name, module);
+            pdf_worker.addOptions("pdf_worker_exe", worker_exe);
+            const pdf_worker_run = b.addRunArtifact(b.addTest(.{ .root_module = pdf_worker, .filters = &.{"tensorfold-native PDF render worker:"} }));
+            pdf_worker_run.step.dependOn(&server.step); // a step edge, so sys.zig's walk gives the server its imports
+            b.step("test-pdf-worker", "The PDF render worker spawned from tensorfold-native, rendering where libpdfium is found").dependOn(&pdf_worker_run.step);
+        }
     }
     return .{ template, server_tests };
 }
