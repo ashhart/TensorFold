@@ -321,6 +321,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         .penalties = loaded.backend.penalties,
         .reasoning = reasoning(F),
         .vision = offer.vision,
+        .ocr = offer.ocr,
         .prompt_cache = offer.cache != null,
         .prompt_cache_capacity = offer.cache_capacity,
         .warm_turns = offer.warm_turns,

@@ -18,6 +18,8 @@ pub const Offer = struct {
     window: ?usize = null,
     /// Built by the family; null: text only.
     vision: ?api.Vision = null,
+    /// The family's OCR reader (/v1/ocr and /ocr); null: no OCR routes.
+    ocr: ?api.ocr.Ocr = null,
     /// The family's own store; null whenever its cache is off (no budget or no slots).
     cache: ?*api.prompt_cache.Store = null,
     cache_capacity: ?api.PromptCacheCapacity = null,
@@ -38,4 +40,5 @@ test "an empty offer is text only with the host's defaults" {
     try std.testing.expect(o.text_generation and o.embeddings == null and !o.decides and o.rerank == null and o.readouts == null and o.window == null);
     try std.testing.expect(o.vision == null and o.cache == null and o.cache_capacity == null and !o.warm_turns);
     try std.testing.expect(o.frame_key == null and o.thinking_budget == null and o.on_thread == null and o.policy == null);
+    try std.testing.expect(o.ocr == null);
 }
