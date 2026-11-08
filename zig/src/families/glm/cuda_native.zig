@@ -87,17 +87,17 @@ pub fn attach(p: *anyopaque, streams: u32, pages: usize) !void {
 }
 
 /// TF_KV_SHARE: the plan's `snaps` slots on each rank, a state each at the window's last mark (the layout's slot).
-pub fn share_states(p: *anyopaque, snaps: usize, parallel: u32) !void {
+pub fn share_states(p: *anyopaque, snaps: usize, parallel: u32, planned: ?kv.Budget) !void {
     const own: *Owned = @ptrCast(@alignCast(p));
     if (own.share == 0) return;
-    const slot = (own.layout orelse return error.NoPages).snap_bytes;
+    const l = own.layout orelse return error.NoPages;
+    const slot = l.snap_bytes;
     const n = if (snapshots.pages.onHost()) own.share else snaps; // TF_GLM_HOST_CACHE: in host memory, outside the device plan
     own.e.share_pages = n > 0; // no slot, no store: rank 0 counts its idle pages as the followers do
     if (n > 0) try readySnapshots(own, n * slot);
-    if (share_mod.advice(n, parallel, slot)) |want| std.log.warn(
-        "TF_KV_SHARE={d} keeps {d} states in the prompt cache's slots, under 4 a GLM stream at --parallel {d}: live streams evict each other's before a resume; {d} take TF_KV_SHARE={d} and --prompt-cache-gib {d}",
-        .{ own.share, n, parallel, want.states, want.states, want.gib },
-    );
+    const want = share_mod.advice(n, parallel, l, if (snapshots.pages.onHost()) null else planned) orelse return;
+    const why = "TF_KV_SHARE={d} keeps {d} states in the prompt cache's slots, under 4 a GLM stream at --parallel {d}: live streams evict each other's before a resume; ";
+    if (want.gib) |gib| std.log.warn(why ++ "{d} take TF_KV_SHARE={d} and --prompt-cache-gib {d}", .{ own.share, n, parallel, want.states, want.states, gib }) else std.log.warn(why ++ "the room holds {d} at any --prompt-cache-gib", .{ own.share, n, parallel, want.most });
 }
 
 /// Whether a request's caches fit now (the lane host's admission, on its engine thread).
