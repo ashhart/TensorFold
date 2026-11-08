@@ -51,7 +51,7 @@ pub const Profile = struct {
     }
 };
 
-/// Only applicable non-identical entries partition kept state; defaults resolve before their values are hashed.
+/// Only applicable non-identical entries partition kept state; defaults and `on_with` resolve before values are hashed.
 pub fn profile(h: *std.hash.Wyhash, p: Profile) void {
     var began = false;
     for (p.entries) |e| {
@@ -72,7 +72,7 @@ pub fn profile(h: *std.hash.Wyhash, p: Profile) void {
             }
             continue;
         }
-        const value = p.environment(e.name()) orelse e.stable;
+        const value = e.served(p.environment(e.name()), if (e.on_with) |w| p.environment(@tagName(w)) else null) orelse e.stable;
         if (e.report_values != null) {
             field(h, if (value != null) "explicit" else "default");
             field(h, value orelse "");

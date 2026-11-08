@@ -46,7 +46,8 @@ Coverage includes:
 - Nemotron and Nemotron Omni on CUDA: `TF_KV_PAGES`, with their existing default-on parser.
 - Gemma 4, Kolibri-1, Spark2.5, Dory and GLM on the core CUDA page adapter: `TF_KV_SHARE`, where the adapter is served.
   Dory's `TF_KV_SHARE` also puts its full-attention caches in pool pages, as `TENSORFOLD_DORY_KV_PAGES=1` does;
-  with `TENSORFOLD_DORY_KV_PAGES=0` it refuses to load, by both names.
+  with `TENSORFOLD_DORY_KV_PAGES=0` it refuses to load, by both names. With the switch unset, the startup line
+  shows `TENSORFOLD_DORY_KV_PAGES=1 (arithmetic, TF_KV_SHARE)` and kept states carry the same identity as `=1`.
 - Every CUDA family whose host prompt cache the CUDA host builds (Nemotron, Nemotron Omni, GLM, MiniMax M3, Qwen3.5
   dense/MoE, Flash Next, Kolibri-1, Gemma 4, Spark2.5, Dory): `TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS`, exact `1` only.
 - Flash Next on CUDA: `TF_FLASHNEXT_KV_PAGES`, `TF_FLASHNEXT_KV_PAGES_ALL`.
