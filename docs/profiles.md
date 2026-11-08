@@ -71,7 +71,9 @@ whose tokens begin the new prompt, that no lookup borrows and that aren't a shar
 that fits only by evicting another conversation's isn't kept: it counts as refused, one line names its size and the
 budget no kept state holds, and every kept state stays. The lookup that makes room before a pass, and learned and
 disk states read back, follow the same rule. Memory-pressure shedding and a new stream's memory still take any
-state. Unset, empty or `0` keeps today's eviction order. Only the CUDA host's prompt cache reads the switch; the
+state. A conversation is known only by its tokens, so one whose history is rewritten (compacted, trimmed to fit
+`--context`, or edited and sent again) no longer owns its older states, and with the switch on those can keep its
+new states out until memory pressure sheds them. Unset, empty or `0` keeps today's eviction order. Only the CUDA host's prompt cache reads the switch; the
 shared paged store (`TF_KV_SHARE`) and the Metal, HIP and XPU caches don't, and a Metal server ignores it.
 
 A reader that resolves its switch by name uses `core.profile.lookup`: a registered name comes from this registry, and
