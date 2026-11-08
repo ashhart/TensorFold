@@ -3,7 +3,7 @@ const std = @import("std");
 const dist = @import("dist.zig");
 const privacy = @import("cuda_release_paths.zig");
 
-/// The check package.sh runs on its stage (check_paths.sh, the checker, the build root), over a stage of one binary.
+/// The check package.sh runs on its stage (the checker's tree mode over the build root), over a stage of one binary.
 pub fn binary(b: *std.Build, tool: *std.Build.Step.Compile, bin: std.Build.LazyPath) *std.Build.Step.Run {
     const stage = b.addWriteFiles();
     _ = stage.addCopyFile(bin, "bin/tensorfold-native");
