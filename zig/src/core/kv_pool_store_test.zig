@@ -156,7 +156,7 @@ fn run(w: *World, seed: u64, pages: usize) !void {
     w.* = .{ .gpa = gpa, .pool = try Pool.init(gpa, pages, layout.pageBytes()), .store = undefined, .family = family };
     w.store = try radix.Store.init(gpa, family.snapshots(), radix.pagesOf(Pool, &w.pool, w.pool.page_bytes), .{ .page = page, .min_gap = 8, .min_prompt = 0, .tail = true });
     w.store.limit(.{ .pages = pages / 2, .snaps = 4 });
-    w.pool.reclaim = .{ .ctx = &w.store, .call = World.reclaim };
+    try w.pool.joinReclaim(.{ .ctx = &w.store, .call = World.reclaim });
     var convs: [4][64]u32 = undefined;
     var lens: [4]u32 = @splat(0);
     for (&convs, 0..) |*c, k| for (c, 0..) |*t, i| {
