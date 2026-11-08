@@ -59,10 +59,11 @@ pub fn tests(b: *std.Build, all: *std.Build.Step) void {
         command_test.dependOn(&check.step);
     }
 }
+/// Run the checker over a release directory. The walk (refuse symlinks, check every
+/// regular file) happens inside the tool, so it behaves the same on every host; the
+/// shell find in check_paths.sh only remains for package.sh's own stage.
 pub fn directory(b: *std.Build, tool: *std.Build.Step.Compile, dir: std.Build.LazyPath) *std.Build.Step {
-    const run = b.addSystemCommand(&.{"sh"});
-    run.addFileArg(b.path("tools/release/check_paths.sh"));
-    run.addArtifactArg(tool);
+    const run = b.addRunArtifact(tool);
     run.addArg(absoluteRoot(b));
     run.addDirectoryArg(dir);
     return &run.step;
