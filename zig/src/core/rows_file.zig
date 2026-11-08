@@ -354,3 +354,39 @@ test "a trailer whose two sizes wrap past 2^64 to the file's own size is refused
     try std.testing.expectEqual(@as(isize, @sizeOf(Trailer)), platform.c.pwrite(fd, std.mem.asBytes(&t), @sizeOf(Trailer), at));
     try std.testing.expectError(error.RowsRead, open(file, .block, name));
 }
+
+test "a file shortened after open stops its payload or metadata read with RowsRead, off or on a 4 KiB boundary" {
+    const a = std.testing.allocator;
+    var dir_buf: [64]u8 = undefined;
+    const dir = try std.fmt.bufPrintSentinel(&dir_buf, "/tmp/tf-rows-cut-{d}", .{platform.c.getpid()}, 0);
+    _ = platform.c.mkdir(dir, 0o700);
+    defer _ = platform.c.rmdir(dir);
+    const body = try a.alloc(u8, 70_000);
+    defer a.free(body);
+    for (body, 0..) |*b, i| b.* = @truncate(i *% 31 +% 7);
+    var tokens: [3000]u32 = undefined;
+    for (&tokens, 0..) |*x, i| x.* = @intCast(i * 7);
+    const s = try stage(a, body.len);
+    defer a.free(s);
+    // the metadata runs from 70000 to 82000: two cuts in the payload, two in the metadata
+    for ([_]u64{ 50_001, 12 * 4096, 75_001, 19 * 4096 }) |cut| {
+        var w = try Writer.open(dir, "c", ".st");
+        try w.append(body);
+        _ = try w.finish(.{ .kind = @backingInt(Kind.state), .payload = 0, .payload_hash = 0, .name = @splat(2) }, &.{std.mem.sliceAsBytes(&tokens)}, false);
+        var buf: [128]u8 = undefined;
+        const file = try path(&buf, dir, "c", ".st", false);
+        defer _ = platform.c.unlink(file);
+        var o = try open(file, .state, null);
+        defer o.close();
+        const fd = platform.c.open(file, .{ .ACCMODE = .RDWR }, @as(platform.c.mode_t, 0));
+        try std.testing.expect(fd >= 0);
+        defer _ = platform.c.close(fd);
+        try std.testing.expectEqual(@as(c_int, 0), platform.c.ftruncate(fd, @intCast(cut)));
+        if (cut < body.len) {
+            try std.testing.expectError(error.RowsRead, payload(&o, s));
+            continue;
+        }
+        try std.testing.expectEqualSlices(u8, body, try payload(&o, s));
+        try std.testing.expectError(error.RowsRead, meta(&o, a));
+    }
+}
