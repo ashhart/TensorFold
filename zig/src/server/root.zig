@@ -262,6 +262,7 @@ test {
     _ = @import("ocr/types_test.zig");
     _ = @import("ocr/geometry_test.zig");
     _ = @import("ocr/markdown_test.zig");
+    _ = @import("ocr/lines_test.zig");
     _ = @import("ocr/budget_test.zig");
     _ = @import("ocr/page_markdown_test.zig");
     _ = @import("ocr/mistral_test.zig");
