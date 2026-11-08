@@ -268,6 +268,34 @@ test "layerAt names a layer and the next; repoint moves a map-first loader's vie
     }
 }
 
+test "a shard shortened after open stops the layer it cuts with EndOfFile, the layer before it read" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const names = [_][]const u8{ "layers.0.a", "layers.1.a", "head" };
+    const image = try testImage(gpa, &names, 3 * 4096 + 17);
+    defer gpa.free(image);
+    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors", .data = image });
+    var path: [64]u8 = undefined;
+    var ck = try Checkpoint.openModel(gpa, io, try std.fmt.bufPrint(&path, ".zig-cache/tmp/{s}", .{tmp.sub_path}));
+    defer ck.close();
+    var l = Layers.init(gpa, &ck, 2);
+    defer l.deinit();
+    if (!l.on()) return error.SkipZigTest;
+    // the file now ends on a 4 KiB boundary inside layers.1.a (no mapped byte past it is touched)
+    const f = &ck.files.items[0];
+    const at: u64 = @intFromPtr(f.get("layers.1.a").?.bytes.ptr) - @intFromPtr(f.map.memory.ptr);
+    {
+        const file = try tmp.dir.openFile(io, "model.safetensors", .{ .mode = .read_write });
+        defer file.close(io);
+        try file.setLength(io, std.mem.alignForward(u64, at + 1, 4096));
+    }
+    try l.enter("layers.0.", null);
+    try std.testing.expectEqual(@as(usize, 3 * 4096 + 17), (try ck.get("layers.0.a")).bytes.len);
+    try std.testing.expectError(error.EndOfFile, l.enter("layers.1.", null));
+}
+
 test "TF_LOAD_DIRECT off or no readers leaves every call a no-op" {
     const gpa = std.testing.allocator;
     var ck: Checkpoint = .{ .gpa = gpa, .io = std.testing.io };

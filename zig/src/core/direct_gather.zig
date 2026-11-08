@@ -184,12 +184,24 @@ fn find(joined: []const Range, file: usize, lo: u64) usize {
     return a;
 }
 
+fn ErrorOf(comptime f: anytype) type {
+    return @typeInfo(@typeInfo(@TypeOf(f)).@"fn".return_type.?).error_union.error_set;
+}
+
+/// What a reader's open or read of a piece fails with.
+const Failure = ErrorOf(direct_io.File.open) || ErrorOf(direct_io.File.read);
+
 const Work = struct {
     sources: []const Source,
     pieces: []const Piece,
     arena: []align(direct_io.alignment) u8,
     next: std.atomic.Value(usize) = .init(0),
     failed: std.atomic.Value(bool) = .init(false),
+    first: Failure = error.ReadFailed, // written once, by the reader that set `failed`
+
+    fn fail(w: *Work, err: Failure) void {
+        if (w.failed.cmpxchgStrong(false, true, .monotonic, .monotonic) == null) w.first = err;
+    }
 };
 
 fn readAll(g: *Gather, sources: []const Source, pieces: []const Piece) !void {
@@ -199,7 +211,8 @@ fn readAll(g: *Gather, sources: []const Source, pieces: []const Piece) !void {
     for (threads[1..n]) |*t| t.* = std.Thread.spawn(.{}, run, .{&w}) catch null;
     run(&w);
     for (threads[1..n]) |t| if (t) |th| th.join();
-    if (w.failed.load(.monotonic)) return error.ReadFailed;
+    // the joins order every reader's writes before this read
+    if (w.failed.load(.monotonic)) return w.first;
 }
 
 /// One reader: pieces off the shared cursor, each file opened once by this reader (direct where it is allowed).
@@ -210,15 +223,9 @@ fn run(w: *Work) void {
         const i = w.next.fetchAdd(1, .monotonic);
         if (i >= w.pieces.len) return;
         const p = w.pieces[i];
-        if (files[p.file] == null) files[p.file] = direct_io.File.open(w.sources[p.file].path) catch {
-            w.failed.store(true, .monotonic);
-            return;
-        };
+        if (files[p.file] == null) files[p.file] = direct_io.File.open(w.sources[p.file].path) catch |err| return w.fail(err);
         const dst: direct_io.Buffer = @alignCast(w.arena[p.dst..][0..direct_io.span(p.lo, p.len)]);
-        _ = files[p.file].?.read(dst, p.lo, p.len) catch {
-            w.failed.store(true, .monotonic);
-            return;
-        };
+        _ = files[p.file].?.read(dst, p.lo, p.len) catch |err| return w.fail(err);
     }
 }
 
@@ -296,6 +303,53 @@ test "a pair reads ahead into one arena while the other's views stay readable" {
     try std.testing.expectEqualSlices(u8, bytes[chunk + 5 ..][0..chunk], b);
     try std.testing.expect(@intFromPtr(c.ptr) >= @intFromPtr(p.gathers[0].arena.ptr));
     try std.testing.expect(@intFromPtr(c.ptr) < @intFromPtr(p.gathers[0].arena.ptr) + p.gathers[0].arena.len);
+}
+
+test "a reader's error reaches the caller by name: a file shortened after it was mapped, or gone" {
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    const n = 3 * chunk + 12345;
+    const bytes = try gpa.alloc(u8, n);
+    defer gpa.free(bytes);
+    var prng = std.Random.DefaultPrng.init(13);
+    prng.random().bytes(bytes);
+    try tmp.dir.writeFile(io, .{ .sub_path = "s.bin", .data = bytes });
+    const real = try tmp.dir.realPathFileAlloc(io, "s.bin", gpa);
+    defer gpa.free(real);
+    const path = try gpa.dupeSentinel(u8, real, 0);
+    defer gpa.free(path);
+    const sources = [_]Source{.{ .path = path, .memory = bytes }};
+    const buf = try gpa.alignedAlloc(u8, .fromByteUnits(direct_io.alignment), direct_io.span(3 * chunk, n - 3 * chunk));
+    defer gpa.free(buf);
+    var g = Gather.init(gpa, 4);
+    defer g.deinit();
+    var p = Pair.init(gpa, 4);
+    defer p.deinit();
+    // one view, four pieces on four readers; the file ends inside the last piece, on and off a 4 KiB boundary
+    for ([_]u64{ 3 * chunk + 4096, 3 * chunk + 4096 + 77 }) |cut| {
+        try tmp.dir.writeFile(io, .{ .sub_path = "s.bin", .data = bytes });
+        {
+            const file = try tmp.dir.openFile(io, "s.bin", .{ .mode = .read_write });
+            defer file.close(io);
+            try file.setLength(io, cut);
+        }
+        // direct_io's own answer for the last piece: EndOfFile, but O_DIRECT off a boundary follows direct_io's rule
+        var f = try direct_io.File.open(path);
+        defer f.close();
+        const want: anyerror = if (f.read(buf, 3 * chunk, n - 3 * chunk)) |_| return error.TestUnexpectedResult else |err| err;
+        if (cut % direct_io.alignment == 0 or !f.direct) try std.testing.expectEqual(error.EndOfFile, want);
+        var view: []const u8 = bytes[5..];
+        try std.testing.expectError(want, g.read(&sources, &.{&view}));
+        try std.testing.expectEqual(bytes[5..].ptr, view.ptr); // not pointed at a partial copy
+        try p.start(&sources, &.{&view}, null);
+        try std.testing.expectError(want, p.wait());
+    }
+    try tmp.dir.deleteFile(io, "s.bin");
+    var gone: []const u8 = bytes[5..][0..10];
+    try std.testing.expectError(error.FileNotFound, g.read(&sources, &.{&gone}));
+    try std.testing.expectEqual(bytes[5..].ptr, gone.ptr);
 }
 
 test "a view outside every mapping is refused" {
