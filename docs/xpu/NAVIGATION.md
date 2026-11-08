@@ -184,7 +184,7 @@ conventions in its header comment; read those before changing a reduction order.
 | | `argmax_part`, `argmax`, `tap`, `conv_commit` | Greedy token (two kernels), tap rows for the drafter, convolution-state replay after a partial keep. |
 | | `repack`, `repack_gptq`, `quantize_mlx` | Load-time repacking of MLX and GPTQ weights into the GEMM layout, and the MLX-algorithm requantization of the GPTQ head. |
 | `decode.cl` | `gdn_step` | Serial GDN for a few rows, for decode, verification (also replay with `ROWS`, trees with `TREE`, several slots with `MT`). |
-| | `attn_decode`, `attn_merge` | Attention over the cache by key slices (`SPLIT` = 32) and their ordered merge. Tree rows see their ancestors; `MT` selects each row's slot. |
+| | `attn_decode`, `attn_merge` | Attention over the cache by key slices (`SPLIT` = 32) and their ordered merge; the grid runs a slice's tree rows back to back so they share it in L2. Tree rows see their ancestors; `MT` selects each row's slot. |
 | | `kv_move` | Moves a kept path's K/V rows to consecutive positions, in depth order. |
 | | `attn_prompt`, `attn_prompt8` | Prompt attention: FlashAttention-2 on DPAS, causal, bf16 cache and int8 cache (Q·Kᵀ in int8 DPAS, P·V in fp16). |
 | | `exl3_gemv` | EXL3 decode probe (speed measurement only; `XPU_EXL3_PROBE`). |
