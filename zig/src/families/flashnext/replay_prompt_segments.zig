@@ -287,6 +287,11 @@ pub const Hooks = struct {
         s.p.r.enc = l.enc;
         return s;
     }
+    /// The idle keepalive's command buffer on the engine's queue; core/segments.zig waits for it before committing.
+    pub fn probe(h: *Hooks) ?mtl.CommandBuffer {
+        const p = h.segs[0].p.r.warm_probe orelse return null;
+        return p.run(p.ctx);
+    }
     pub fn begin(h: *Hooks, l: *segments.Lane) !void {
         const s = h.at(l);
         const b = &s.p.b;

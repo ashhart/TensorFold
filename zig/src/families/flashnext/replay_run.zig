@@ -21,6 +21,9 @@ const Select = fz.Select;
 const GSelect = fz.GSelect;
 const Lane = fz.Lane;
 
+/// A command buffer the host commits on the engine's queue; core/segments.zig waits for it before segments commit.
+pub const WarmProbe = struct { ctx: *const anyopaque, run: *const fn (ctx: *const anyopaque) mtl.CommandBuffer };
+
 pub const Run = struct {
     window: WindowSettings = .{},
     arena: std.mem.Allocator,
@@ -32,6 +35,7 @@ pub const Run = struct {
     shapes: std.StringHashMapUnmanaged(mtl.Buffer) = .empty,
     held: std.ArrayList(mtl.Buffer) = .empty, // what buffer, load and group made: a host's residency set holds them
     follow: ?mtl.ResidencySet.Follow = null, // set once the host's set is built: later buffers join it
+    warm_probe: ?WarmProbe = null, // the host's idle keepalive command buffer, run before staggered segments commit
     loaded: usize = 0,
     rows: usize = 1,
     fused_xsum: bool = false,
