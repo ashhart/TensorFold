@@ -14,6 +14,7 @@ test "zero grant: GLM CUDA MTP and DFlash2 preserve tokens through a long skip" 
         b.x.e = &e;
         b.alone = false;
         b.mtp_confidence = null;
+        b.costs = null;
         try lanes.shared_draft_check.check(b.facts(), false);
     }
 }

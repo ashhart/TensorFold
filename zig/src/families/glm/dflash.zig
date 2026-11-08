@@ -96,6 +96,8 @@ pub const Run = struct { ring: u64, taps: u64, n: usize, pos0: i64 };
 
 /// Every rank runs the ingest and the block pass on its half of the MLP and head; rank 0 selects the drafts.
 pub const Drafter = struct {
+    checkpoint_digest: [32]u8 = @splat(0), // the loaded artifact, for the window-price cache key
+    bits: u8 = 0, // the loader's actual linear precision
     gpa: std.mem.Allocator,
     d: *const cuda.Driver,
     module: cuda.Module,

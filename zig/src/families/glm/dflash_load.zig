@@ -126,6 +126,7 @@ fn layerName(b: *[96]u8, li: usize, s: []const u8) ![]const u8 {
 pub fn load(gpa: std.mem.Allocator, io: std.Io, e: anytype, dir: []const u8, rank: usize, world: usize, bits: u8) !*Drafter {
     if (bits != 0 and bits != 4) return error.BadDrafterBits;
     try checkConfig(gpa, io, dir);
+    const checkpoint_digest = try core.checkpoint_identity.fullIdentity(gpa, io, dir);
     const d = e.d;
     const head = (e.w.mtp orelse return error.DrafterNeedsDraftHead).draft;
     const path = try std.fs.path.join(gpa, &.{ dir, "model.safetensors" });
@@ -165,7 +166,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, e: anytype, dir: []const u8, ran
     }
     const dr = try gpa.create(Drafter);
     errdefer gpa.destroy(dr);
-    dr.* = .{ .gpa = gpa, .d = d, .module = module, .k = try df.Kernels.load(module), .weights = wbuf, .split = split, .ff = ff, .rank = rank, .world = world, .tap_rows = df.tapRows(e.bp.rows) };
+    dr.* = .{ .checkpoint_digest = checkpoint_digest, .bits = bits, .gpa = gpa, .d = d, .module = module, .k = try df.Kernels.load(module), .weights = wbuf, .split = split, .ff = ff, .rank = rank, .world = world, .tap_rows = df.tapRows(e.bp.rows) };
     defer @import("cuda_load_owner.zig").drain(e.stream, d);
     var nb: [4][96]u8 = undefined;
     for (&dr.layers, 0..) |*lw, i| {
