@@ -515,3 +515,17 @@ test "the Zig check: measured at the end of boot, a measured rank 1 passes, a po
     try std.testing.expect(!afterBoot(14.94, pool, 7.33, 1.5, zig_dip_gib, k.hard_gib, 3_000_000, per).ok);
     try std.testing.expectEqual(@as(f64, 0), try reserveFromEnv());
 }
+
+/// The hard floor's only environment reader, shared by boot, prefill, graph capture and admission.
+pub fn hardFloorGiB() !f64 {
+    return @import("sys").environment.read(f64, "TF_DSV41_FLOOR_HARD_GIB", 4);
+}
+
+pub fn workspaceFloorGiB() !f64 {
+    return @import("sys").environment.read(f64, "TF_DSV41_PF_WS_FLOOR_GIB", try hardFloorGiB());
+}
+
+/// The pool boot check uses the startup validator's space trim and named refusal.
+pub fn targetFloorGiB(hard: f64) !f64 {
+    return @import("sys").environment.read(f64, "TF_DSV41_FLOOR_GIB", @max(5.0, hard));
+}

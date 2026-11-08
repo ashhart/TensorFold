@@ -3,8 +3,8 @@ const std = @import("std");
 const sys = @import("sys.zig");
 
 pub const Error = error{InvalidEnvironment};
-pub const Scope = enum { common, cuda, metal, xpu, slide, hooks };
-pub const Kind = enum { u32, u64, size, percent, positive, device, segments, mib, bit_width, pocket, prompt, flag };
+pub const Scope = enum { common, cuda, metal, xpu, slide, hooks, dsv41 };
+pub const Kind = enum { u32, u64, size, percent, positive, device, segments, mib, bit_width, word, prompt, flag, toggle, real, positive_real, signed_real, range };
 pub const Rule = struct {
     name: [:0]const u8,
     scope: Scope,
@@ -12,7 +12,20 @@ pub const Rule = struct {
     forms: []const u8,
     trim: []const u8 = "",
     first_digit: bool = false,
+    /// A whole number's own bounds inside its kind's; a real kind applies `max` too when it is set.
+    min: u64 = 0,
+    max: u64 = std.math.maxInt(u64),
+    /// When nonempty, the only whole numbers accepted.
+    only: []const u64 = &.{},
+    /// A `.word` setting's accepted texts; the parsed value is the matching index.
+    words: []const []const u8 = &.{},
+    /// A legacy name that is ignored, and so never refused, while its canonical name is set.
+    alias_of: ?[:0]const u8 = null,
 };
+
+pub fn isReal(kind: Kind) bool {
+    return kind == .real or kind == .positive_real or kind == .signed_real;
+}
 
 pub const rules = [_]Rule{
     .{ .name = "TENSORFOLD_VIDEO_TOKENS", .scope = .common, .kind = .u64, .forms = "a nonnegative whole video-token budget (default 16384; unsigned 64-bit count)" },
@@ -37,9 +50,90 @@ pub const rules = [_]Rule{
     .{ .name = "TF_ANE_COLUMNS", .scope = .metal, .kind = .u32, .forms = "a whole column count from 0 to 4294967295 (0 disables the share)" },
     .{ .name = "XPU_A8_BITS", .scope = .xpu, .kind = .bit_width, .forms = "4 or 8" },
     .{ .name = "LFM3_FUSE", .scope = .xpu, .kind = .u32, .forms = "a whole fusion mask from 0 to 4294967295" },
-    .{ .name = "TF_SLIDE_POCKET_KEY", .scope = .slide, .kind = .pocket, .forms = "auto, reply, subject or both" },
+    .{ .name = "TF_SLIDE_POCKET_KEY", .scope = .slide, .kind = .word, .words = &.{ "auto", "reply", "subject", "both" }, .forms = "auto, reply, subject or both" },
     .{ .name = "TF_SLIDE_FIT_GIB", .scope = .slide, .kind = .size, .forms = "a whole nonnegative native-size GiB count" },
     .{ .name = "TF_SLIDE_FORGET_FAIL", .scope = .hooks, .kind = .u32, .trim = " ", .forms = "a whole fact index from 0 to 4294967295 (0 disables the planted failure)" },
+    .{ .name = "TF_DSV41_MHC_DEFER", .scope = .dsv41, .kind = .toggle, .trim = " \t", .forms = "0, 1, true, false, on, off, yes or no (any case)" },
+    .{ .name = "TF_DSV41_COEF_LATE", .scope = .dsv41, .kind = .toggle, .trim = " \t", .forms = "0, 1, true, false, on, off, yes or no (any case)" },
+    .{ .name = "TF_DSV41_LOOKUP", .scope = .dsv41, .kind = .toggle, .trim = " \t", .forms = "0, 1, true, false, on, off, yes or no (any case); blank turns lookup drafts off" },
+    .{ .name = "TF_DSV41_LOOKUP_PLAN", .scope = .dsv41, .kind = .toggle, .trim = " \t", .forms = "0, 1, true, false, on, off, yes or no (any case)" },
+    .{ .name = "TF_DSV41_GM_V3", .scope = .dsv41, .kind = .toggle, .forms = "0, 1, true, false, on, off, yes or no (any case)" },
+    .{ .name = "TF_DSV41_OWN_PREFILL", .scope = .dsv41, .kind = .toggle, .forms = "0, 1, true, false, on, off, yes or no (any case)" },
+    .{ .name = "TF_DSV41_DRAFTS", .scope = .dsv41, .kind = .toggle, .forms = "0, 1, true, false, on, off, yes or no (any case)" },
+    .{ .name = "TF_DSV41_GRAPHS", .scope = .dsv41, .kind = .toggle, .forms = "0, 1, true, false, on, off, yes or no (any case)" },
+    .{ .name = "TF_DSV41_AOT_GUARD", .scope = .dsv41, .kind = .toggle, .forms = "0, 1, true, false, on, off, yes or no (any case)" },
+    .{ .name = "TF_DSV41_ENGRAM_PREFETCH", .scope = .dsv41, .kind = .toggle, .forms = "0, 1, true, false, on, off, yes or no (any case)" },
+    .{ .name = "TF_DSV41_BIAS_VL", .scope = .dsv41, .kind = .flag, .trim = " ", .forms = "0 or 1 (either selects the vision bias; unset or blank does not)" },
+    .{ .name = "TF_DSV41_FLOOR_PRICE", .scope = .dsv41, .kind = .toggle, .trim = " ", .forms = "0, 1, true, false, on, off, yes or no (any case)" },
+    .{ .name = "TF_DSV41_SESSIONS", .scope = .dsv41, .kind = .toggle, .trim = " ", .forms = "0, 1, true, false, on, off, yes or no (any case)" },
+    .{ .name = "TF_DSV41_SAMPLING", .scope = .dsv41, .kind = .flag, .forms = "0 or 1" },
+    .{ .name = "TF_DSV41_SLOT_DRAFTS", .scope = .dsv41, .kind = .flag, .forms = "0 or 1" },
+    .{ .name = "TF_DSV41_FORMS_INPLACE", .scope = .dsv41, .kind = .flag, .trim = " ", .forms = "0 or 1" },
+    .{ .name = "TF_DSV41_EX_STACKS", .scope = .dsv41, .kind = .flag, .trim = " ", .forms = "0 or 1" },
+    .{ .name = "TF_DSV41_STREAM_LAZY", .scope = .dsv41, .kind = .flag, .trim = " ", .forms = "0 or 1" },
+    .{ .name = "TF_DSV41_GRAPH_LOG", .scope = .dsv41, .kind = .flag, .forms = "0 or 1" },
+    .{ .name = "TF_DSV41_WIN_PROF", .scope = .dsv41, .kind = .flag, .forms = "0 or 1" },
+    .{ .name = "TF_DSV41_BOOT_TRACE", .scope = .dsv41, .kind = .flag, .trim = " ", .forms = "0 or 1" },
+    .{ .name = "TF_DSV41_PREFILL_PIECES", .scope = .dsv41, .kind = .flag, .trim = " ", .forms = "0 or 1" },
+    .{ .name = "TF_DSV41_GREEDY_GPU", .scope = .dsv41, .kind = .flag, .forms = "0 or 1" },
+    .{ .name = "TF_DSV41_DRAFT_TIMED", .scope = .dsv41, .kind = .flag, .forms = "0 or 1" },
+    .{ .name = "TF_DSV41_SYNC_EACH", .scope = .dsv41, .kind = .flag, .forms = "0 or 1" },
+    .{ .name = "TF_DSV41_ENGRAM_POLL", .scope = .dsv41, .kind = .flag, .forms = "0 or 1" },
+    .{ .name = "TF_DSV41_ENGRAM_AIO", .scope = .dsv41, .kind = .flag, .forms = "0 or 1" },
+    .{ .name = "TF_DSV41_ENGRAM_URING", .scope = .dsv41, .kind = .toggle, .forms = "0, 1, true, false, on, off, yes or no (any case)" },
+    .{ .name = "TF_DSV41_KV_SPLIT", .scope = .dsv41, .kind = .toggle, .forms = "0, 1, true, false, on, off, yes or no (any case)" },
+    .{ .name = "TF_DSV41_NEEDS_POOL", .scope = .dsv41, .kind = .flag, .forms = "0 or 1" },
+    .{ .name = "TF_DSV41_KV_SPLIT_DEDUP", .scope = .dsv41, .kind = .flag, .trim = " \t", .forms = "0 or 1" },
+    .{ .name = "TF_DSV41_KV_SPLIT_EARLY", .scope = .dsv41, .kind = .flag, .trim = " \t", .forms = "0 or 1" },
+    .{ .name = "TF_DSV41_KV_SPLIT_HISTORY", .scope = .dsv41, .kind = .flag, .trim = " \t", .forms = "0 or 1" },
+    .{ .name = "TF_DSV41_PREFILL_ADAPT", .scope = .dsv41, .kind = .toggle, .trim = " ", .forms = "0, 1, true, false, on, off, yes or no (any case)" },
+    .{ .name = "TF_DSV41_R1", .scope = .dsv41, .kind = .flag, .trim = " ", .forms = "0 or 1" },
+    .{ .name = "TF_DSV41_PREFETCH_AHEAD", .scope = .dsv41, .kind = .toggle, .trim = " ", .forms = "0, 1, true, false, on, off, yes or no (any case)" },
+    .{ .name = "TF_DSV41_KV_NORM_STORE", .scope = .dsv41, .kind = .flag, .trim = " ", .forms = "0 or 1" },
+    .{ .name = "TF_DSV41_ROUTER_GROUP_ROT", .scope = .dsv41, .kind = .flag, .trim = " ", .forms = "0 or 1" },
+    .{ .name = "TF_DSV41_SCHEMA_PROMPT", .scope = .dsv41, .kind = .toggle, .trim = " \t\r\n", .forms = "0, 1, true, false, on, off, yes or no (any case)" },
+    .{ .name = "TF_DSV41_TOOL_GRAMMAR", .scope = .dsv41, .kind = .flag, .trim = " ", .alias_of = "TENSORFOLD_TOOL_GRAMMAR", .forms = "0 or 1 (ignored while TENSORFOLD_TOOL_GRAMMAR is set)" },
+    .{ .name = "TF_DSV41_PIECE_RUNS", .scope = .dsv41, .kind = .toggle, .forms = "0, 1, true, false, on, off, yes or no (any case)" },
+    .{ .name = "TF_DSV41_REPLAY_RUNS", .scope = .dsv41, .kind = .toggle, .forms = "0, 1, true, false, on, off, yes or no (any case)" },
+    .{ .name = "TF_DSV41_JOIN_DRAFTS", .scope = .dsv41, .kind = .flag, .forms = "0 or 1" },
+    .{ .name = "TF_DSV41_TAIL_JOIN", .scope = .dsv41, .kind = .flag, .forms = "0 or 1" },
+    .{ .name = "TF_DSV41_PF_WS_SHARE", .scope = .dsv41, .kind = .flag, .forms = "0 or 1" },
+    .{ .name = "TF_DSV41_SESSION_SKIP_COVERED", .scope = .dsv41, .kind = .flag, .trim = " ", .forms = "0 or 1" },
+    .{ .name = "TF_DSV41_SESSION_DELTA", .scope = .dsv41, .kind = .flag, .trim = " ", .forms = "0 or 1" },
+    .{ .name = "TF_DSV41_SESSION_SLOTS", .scope = .dsv41, .kind = .flag, .trim = " ", .forms = "0 or 1" },
+    .{ .name = "TF_DSV41_ENGRAM_QD", .scope = .dsv41, .kind = .u32, .forms = "a whole reader-thread count from 0 to 4294967295 (0 reads serially)" },
+    .{ .name = "TF_DSV41_ENGRAM_READERS", .scope = .dsv41, .kind = .u32, .max = 32, .forms = "a whole reader-thread count from 0 to 32 (0 reads serially)" },
+    .{ .name = "TF_DSV41_GEN_STREAMS", .scope = .dsv41, .kind = .size, .min = 1, .forms = "a whole request count from 1 to the native size maximum" },
+    .{ .name = "TF_DSV41_CONTEXT", .scope = .dsv41, .kind = .u64, .min = 1, .max = std.math.maxInt(i64), .forms = "a whole position count from 1 to 9223372036854775807" },
+    .{ .name = "TF_DSV41_SLOTS", .scope = .dsv41, .kind = .u32, .min = 1, .max = 16, .forms = "a whole slot count from 1 to 16" },
+    .{ .name = "TF_DSV41_NUCLEUS", .scope = .dsv41, .kind = .u32, .forms = "a whole candidate count from 0 to 4294967295 (0 disables the nucleus)" },
+    .{ .name = "TF_DSV41_POOL_TOKENS", .scope = .dsv41, .kind = .u64, .forms = "a whole unsigned 64-bit token count" },
+    .{ .name = "TF_DSV41_KV_SPLIT_UNION_MIB", .scope = .dsv41, .kind = .u64, .max = std.math.maxInt(u64) >> 20, .forms = "a whole MiB count from 0 to 17592186044415" },
+    .{ .name = "TF_DSV41_PREFILL_ROWS", .scope = .dsv41, .kind = .u64, .trim = " ", .forms = "a whole unsigned 64-bit row count" },
+    .{ .name = "TF_DSV41_INDEX_BUDGET_MIB", .scope = .dsv41, .kind = .u64, .trim = " ", .min = 1, .max = 4096, .forms = "a whole MiB count from 1 to 4096" },
+    .{ .name = "TF_DSV41_BATCH_SHORT", .scope = .dsv41, .kind = .u64, .trim = " ", .forms = "a whole unsigned 64-bit token count" },
+    .{ .name = "TF_DSV41_LONG_PROMPT", .scope = .dsv41, .kind = .u64, .trim = " ", .min = 1, .forms = "a whole token count of at least 1" },
+    .{ .name = "TF_DSV41_PREFILL_CONCURRENT", .scope = .dsv41, .kind = .u64, .trim = " ", .forms = "a whole unsigned 64-bit prompt count" },
+    .{ .name = "TF_DSV41_PREFILL_ADAPT_MIN", .scope = .dsv41, .kind = .u64, .trim = " ", .min = 16, .forms = "a whole row count of at least 16" },
+    .{ .name = "TF_DSV41_FLOOR_HARD_GIB", .scope = .dsv41, .kind = .positive_real, .forms = "a finite GiB amount greater than 0" },
+    .{ .name = "TF_DSV41_PF_WS_FLOOR_GIB", .scope = .dsv41, .kind = .real, .forms = "a finite GiB amount of at least 0" },
+    .{ .name = "TF_DSV41_GRAPH_FLOOR_GIB", .scope = .dsv41, .kind = .real, .forms = "a finite GiB amount of at least 0" },
+    .{ .name = "TF_DSV41_GRAPH_COST_MIB", .scope = .dsv41, .kind = .real, .forms = "a finite MiB amount of at least 0" },
+    .{ .name = "TF_DSV41_EXPERT_TOPP", .scope = .dsv41, .kind = .signed_real, .forms = "a finite number" },
+    .{ .name = "TF_DSV41_PREFILL_SHARE", .scope = .dsv41, .kind = .positive_real, .trim = " ", .max = 1, .forms = "a finite share greater than 0 and at most 1" },
+    .{ .name = "TF_DSV41_FLOOR_GIB", .scope = .dsv41, .kind = .positive_real, .trim = " ", .forms = "a finite GiB amount greater than 0" },
+    .{ .name = "TF_DSV41_FLOOR_PF_CHUNK_GIB", .scope = .dsv41, .kind = .real, .trim = " ", .forms = "a finite GiB amount of at least 0" },
+    .{ .name = "TF_DSV41_FLOOR_PF_INDEX_GIB", .scope = .dsv41, .kind = .real, .trim = " ", .forms = "a finite GiB amount of at least 0" },
+    .{ .name = "TF_DSV41_FLOOR_PF_HOST_GIB", .scope = .dsv41, .kind = .real, .trim = " ", .forms = "a finite GiB amount of at least 0" },
+    .{ .name = "TF_DSV41_FLOOR_PF_OTHER_GIB", .scope = .dsv41, .kind = .real, .trim = " ", .forms = "a finite GiB amount of at least 0" },
+    .{ .name = "TF_DSV41_ADMIT_FREE_FLOOR_GIB", .scope = .dsv41, .kind = .real, .trim = " ", .forms = "a finite GiB amount of at least 0" },
+    .{ .name = "TF_DSV41_FLOOR_REFUSE_S", .scope = .dsv41, .kind = .real, .trim = " ", .forms = "a finite number of seconds of at least 0" },
+    .{ .name = "TF_DSV41_ADMIT_CACHE_KEEP_GB", .scope = .dsv41, .kind = .real, .trim = " ", .forms = "a finite GiB amount of at least 0" },
+    .{ .name = "TF_DSV41_PREFILL_ADAPT_GIB", .scope = .dsv41, .kind = .real, .trim = " ", .forms = "a finite GiB amount of at least 0" },
+    .{ .name = "TF_DSV41_PREFILL_ADAPT_UP_GIB", .scope = .dsv41, .kind = .real, .trim = " ", .forms = "a finite GiB amount of at least 0" },
+    .{ .name = "TF_DSV41_IMAGES", .scope = .dsv41, .kind = .word, .trim = " ", .words = &.{ "0", "native" }, .forms = "native or 0" },
+    .{ .name = "TF_DSV41_LAYERS", .scope = .dsv41, .kind = .range, .forms = "lo-hi: two whole layer numbers from 0 to 4294967295 with lo <= hi" },
+    .{ .name = "TF_DSV41_ROWS_CAP", .scope = .dsv41, .kind = .u32, .only = &.{ 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 24, 32, 48, 64 }, .forms = "1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 24, 32, 48 or 64" },
 };
 
 pub fn rule(name: []const u8) Rule {
@@ -53,10 +147,19 @@ pub fn parse(name: []const u8, raw: ?[]const u8) Error!?u64 {
     if (std.mem.trim(u8, raw orelse return null, " \t\r\n").len == 0) return null;
     const text = std.mem.trim(u8, raw.?, r.trim);
     if (r.first_digit and (text[0] < '0' or text[0] > '9')) return error.InvalidEnvironment;
-    if (r.kind == .pocket) {
-        for ([_][]const u8{ "auto", "reply", "subject", "both" }, 0..) |v, i|
-            if (std.mem.eql(u8, text, v)) return i;
+    if (r.kind == .word) {
+        for (r.words, 0..) |v, i| if (std.mem.eql(u8, text, v)) return i;
         return error.InvalidEnvironment;
+    }
+    if (r.kind == .toggle) return toggle(text) orelse error.InvalidEnvironment;
+    // a real travels as its f64 bits and a range as lo above hi; `value` and `range` decode them
+    if (isReal(r.kind)) return @bitCast(try real(r, text));
+    if (r.kind == .range) {
+        var it = std.mem.splitScalar(u8, text, '-');
+        const lo = std.fmt.parseInt(u32, it.next().?, 10) catch return error.InvalidEnvironment;
+        const hi = std.fmt.parseInt(u32, it.next() orelse "", 10) catch return error.InvalidEnvironment;
+        if (it.next() != null or hi < lo) return error.InvalidEnvironment;
+        return @as(u64, lo) << 32 | hi;
     }
     if (r.kind == .flag or r.kind == .bit_width) {
         const a: []const u8 = if (r.kind == .flag) "0" else "4";
@@ -71,12 +174,33 @@ pub fn parse(name: []const u8, raw: ?[]const u8) Error!?u64 {
         .segments => 4,
         else => std.math.maxInt(u64),
     };
-    if (n > max) return error.InvalidEnvironment;
+    if (n > max or n < r.min or n > r.max) return error.InvalidEnvironment;
+    if (r.only.len > 0 and std.mem.indexOfScalar(u64, r.only, n) == null) return error.InvalidEnvironment;
     if ((r.kind == .positive or r.kind == .segments or r.kind == .mib) and n == 0) return error.InvalidEnvironment;
     if (r.kind == .mib and n > std.math.maxInt(usize) / (1 << 20)) return error.InvalidEnvironment;
     if (r.kind == .prompt and (n < 128 or n > 2048 or n % 16 != 0)) return error.InvalidEnvironment;
     if (std.mem.eql(u8, name, "TF_ROCE_GID_INDEX") and n > std.math.maxInt(c_int)) return error.InvalidEnvironment;
     return n;
+}
+
+/// A switch: 0 or 1, or the word forms older readers took, in any case; 0 is off.
+fn toggle(text: []const u8) ?u64 {
+    for ([_][]const u8{ "0", "false", "off", "no", "1", "true", "on", "yes" }, 0..) |v, i|
+        if (std.ascii.eqlIgnoreCase(text, v)) return i / 4;
+    return null;
+}
+
+/// Finite only; `.real` is at least 0, `.positive_real` above 0, and a set `max` caps either.
+fn real(r: Rule, text: []const u8) Error!f64 {
+    const x = std.fmt.parseFloat(f64, text) catch return error.InvalidEnvironment;
+    const low = switch (r.kind) {
+        .real => x >= 0,
+        .positive_real => x > 0,
+        else => true,
+    };
+    if (!std.math.isFinite(x) or !low) return error.InvalidEnvironment;
+    if (r.max != std.math.maxInt(u64) and x > @as(f64, @floatFromInt(r.max))) return error.InvalidEnvironment;
+    return x;
 }
 
 pub fn describe(a: std.mem.Allocator, name: []const u8, raw: []const u8) ![]const u8 {
@@ -86,7 +210,7 @@ pub fn describe(a: std.mem.Allocator, name: []const u8, raw: []const u8) ![]cons
 /// A direct family/tool entry point gets the same refusal even when it has no server problem buffer.
 fn checked(name: [:0]const u8, raw: ?[]const u8) Error!?u64 {
     return parse(name, raw) catch {
-        std.log.err("{s}=\"{f}\": expected {s}", .{ name, std.zig.fmtString(raw.?), rule(name).forms });
+        if (!@import("builtin").is_test) std.log.err("{s}=\"{f}\": expected {s}", .{ name, std.zig.fmtString(raw.?), rule(name).forms });
         return error.InvalidEnvironment;
     };
 }
@@ -95,10 +219,44 @@ pub fn check(name: [:0]const u8, raw: ?[]const u8) Error!void {
     _ = try checked(name, raw);
 }
 
+/// One setting in its reader's type: a switch as bool, a real as a float, any other kind as its whole number.
+pub fn value(comptime T: type, name: [:0]const u8, raw: ?[]const u8, default: T) Error!T {
+    std.debug.assert(isReal(rule(name).kind) == (@typeInfo(Plain(T)) == .float) and rule(name).kind != .range);
+    return decode(T, (try checked(name, raw)) orelse return default);
+}
+
+fn Plain(comptime T: type) type {
+    return if (@typeInfo(T) == .optional) @typeInfo(T).optional.child else T;
+}
+
+fn decode(comptime T: type, n: u64) T {
+    return switch (@typeInfo(T)) {
+        .optional => |o| decode(o.child, n),
+        .bool => n != 0,
+        .float => @floatCast(@as(f64, @bitCast(n))),
+        else => @intCast(n),
+    };
+}
+
 pub fn read(comptime T: type, name: [:0]const u8, default: T) Error!T {
-    const raw = sys.getenv(name);
-    if (try checked(name, raw)) |n| return @intCast(n);
-    return default;
+    return value(T, name, sys.getenv(name), default);
+}
+
+/// A `.range` setting's lo and hi, or null when unset or blank.
+pub fn range(name: [:0]const u8, raw: ?[]const u8) Error!?[2]u32 {
+    const n = (try checked(name, raw)) orelse return null;
+    return .{ @intCast(n >> 32), @truncate(n) };
+}
+
+/// One scope's rules in table order, without allocating: the first malformed value is logged and refused.
+pub fn checkScope(scope: Scope, environment: anytype) Error!void {
+    for (rules) |r| if (r.scope == scope and !masked(r, environment)) {
+        _ = try checked(r.name, environment.get(r.name));
+    };
+}
+
+fn masked(r: Rule, environment: anytype) bool {
+    return if (r.alias_of) |canonical| environment.get(canonical) != null else false;
 }
 
 /// Every CUDA entry point shares flag precedence, accepted text and diagnostics.
@@ -113,6 +271,7 @@ pub const Flags = struct {
     xpu: bool = false,
     slide: bool = false,
     hooks: bool = false,
+    dsv41: bool = false,
     device: ?u32 = null,
     segments: ?u32 = null,
     carveout: bool = false,
@@ -125,6 +284,7 @@ pub const Flags = struct {
             .xpu => f.xpu,
             .slide => f.slide,
             .hooks => f.hooks,
+            .dsv41 => f.dsv41,
         };
     }
 };
@@ -132,7 +292,7 @@ pub const Flags = struct {
 /// The environment is injectable so the actual startup validator runs against host fixtures without a GPU.
 pub fn refusal(a: std.mem.Allocator, environment: anytype, flags: Flags) !?[]const u8 {
     for (rules) |r| {
-        if (!flags.includes(r.scope)) continue;
+        if (!flags.includes(r.scope) or masked(r, environment)) continue;
         if (std.mem.eql(u8, r.name, "TF_CUDA_DEVICE") and flags.device != null) continue;
         if (std.mem.eql(u8, r.name, "TF_CUDA_SEGMENTS") and flags.segments != null) continue;
         if (std.mem.eql(u8, r.name, "TF_CUDA_CARVEOUT") and flags.carveout) continue;

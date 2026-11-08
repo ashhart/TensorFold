@@ -94,15 +94,13 @@ pub const Dedup = struct {
 };
 
 /// TF_DSV41_KV_SPLIT_DEDUP=1: packed exchanges send each slot's unique rows (default off).
-pub fn dedupOn() bool {
-    const v = std.mem.span(std.c.getenv("TF_DSV41_KV_SPLIT_DEDUP") orelse return false);
-    return std.mem.eql(u8, std.mem.trim(u8, v, " \t"), "1");
+pub fn dedupOn() !bool {
+    return @import("sys").environment.read(bool, "TF_DSV41_KV_SPLIT_DEDUP", false);
 }
 
 /// TF_DSV41_KV_SPLIT_EARLY=1: an index layer's exchange issued right after its selection (block.zig; default off).
-pub fn earlyOn() bool {
-    const v = std.mem.span(std.c.getenv("TF_DSV41_KV_SPLIT_EARLY") orelse return false);
-    return std.mem.eql(u8, std.mem.trim(u8, v, " \t"), "1");
+pub fn earlyOn() !bool {
+    return @import("sys").environment.read(bool, "TF_DSV41_KV_SPLIT_EARLY", false);
 }
 
 /// A prefill union by history (`Exchange.history`): owner o's rows of the mapped pages at o x M, in page order.
@@ -139,9 +137,8 @@ pub fn historyIndex(t: u32, psh: u32, world: u32) u32 {
 }
 
 /// TF_DSV41_KV_SPLIT_HISTORY=1: a prefill union under the cap sends the owned rows; no plan, no host sync.
-pub fn historyOn() bool {
-    const v = std.mem.span(std.c.getenv("TF_DSV41_KV_SPLIT_HISTORY") orelse return false);
-    return std.mem.eql(u8, std.mem.trim(u8, v, " \t"), "1");
+pub fn historyOn() !bool {
+    return @import("sys").environment.read(bool, "TF_DSV41_KV_SPLIT_HISTORY", false);
 }
 
 comptime {

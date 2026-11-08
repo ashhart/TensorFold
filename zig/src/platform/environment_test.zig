@@ -3,7 +3,7 @@ const std = @import("std");
 const e = @import("environment.zig");
 const t = std.testing;
 const a = t.allocator;
-const all: e.Flags = .{ .cuda = true, .metal = true, .xpu = true, .slide = true, .hooks = true };
+const all: e.Flags = .{ .cuda = true, .metal = true, .xpu = true, .slide = true, .hooks = true, .dsv41 = true };
 const Env = struct {
     name: []const u8,
     raw: ?[]const u8,
@@ -17,7 +17,8 @@ const Env = struct {
 test "environment: every strict reader refuses bad text before opening a model, naming value and accepted forms" {
     for (e.rules) |r| {
         try t.expectEqual(@as(?u64, null), try e.parse(r.name, null));
-        for ([_][]const u8{ "typo", "-1", "18446744073709551616", "1\nwrong" }) |raw| {
+        const bad: []const []const u8 = if (e.isReal(r.kind)) &.{ "typo", "nan", "-inf", "1\nwrong" } else &.{ "typo", "-1", "18446744073709551616", "1\nwrong" };
+        for (bad) |raw| {
             try t.expectError(error.InvalidEnvironment, e.parse(r.name, raw));
             const why = (try e.refusal(a, Env{ .name = r.name, .raw = raw }, all)).?;
             defer a.free(why);
@@ -84,12 +85,14 @@ test "environment: valid forms remain raw numbers before existing consumer clamp
         try t.expect(why == null);
     }
     for (e.rules) |r| {
+        for ([_][]const u8{ "", " ", "\t \n" }) |raw| try t.expectEqual(@as(?u64, null), try e.parse(r.name, raw));
+        // the DeepSeek rows are each covered, with every kept form, by deepseek_v41/env_validate_test.zig
+        if (r.scope == .dsv41) continue;
         var covered = false;
         for (valid) |c| if (std.mem.eql(u8, r.name, c.name)) {
             covered = true;
         };
         try t.expect(covered);
-        for ([_][]const u8{ "", " ", "\t \n" }) |raw| try t.expectEqual(@as(?u64, null), try e.parse(r.name, raw));
     }
 }
 
@@ -150,4 +153,63 @@ test "environment: video refusal describes the token budget without advertising 
         why,
     );
     try t.expect(std.mem.indexOf(u8, why, "18446744073709551615") == null);
+}
+
+test "environment: switches take 0 and 1 and the word forms in any case, and refuse every other text" {
+    for ([_][]const u8{ "0", "false", "OFF", "No" }) |raw| try t.expect(!try e.value(bool, "TF_DSV41_GM_V3", raw, true));
+    for ([_][]const u8{ "1", "TRUE", "on", "Yes" }) |raw| try t.expect(try e.value(bool, "TF_DSV41_GM_V3", raw, false));
+    try t.expect(try e.value(bool, "TF_DSV41_GRAPHS", null, true));
+    try t.expect(try e.value(bool, "TF_DSV41_GRAPHS", " ", true));
+    for ([_][]const u8{ "2", "00", "truee", "0 trailing", " 1" }) |raw| try t.expectError(error.InvalidEnvironment, e.parse("TF_DSV41_GM_V3", raw));
+    try t.expect(try e.value(bool, "TF_DSV41_MHC_DEFER", "\ton ", false));
+    for ([_][]const u8{ "true", "on", "yes" }) |raw| try t.expectError(error.InvalidEnvironment, e.parse("TF_DSV41_SAMPLING", raw));
+}
+
+test "environment: real settings are finite, keep their lower bound and optional cap, and read as floats" {
+    try t.expectEqual(@as(f64, 3.25), try e.value(f64, "TF_DSV41_GRAPH_FLOOR_GIB", "3.25", 0));
+    try t.expectEqual(@as(f64, 0), try e.value(f64, "TF_DSV41_GRAPH_FLOOR_GIB", "0", 1));
+    try t.expectEqual(@as(f64, 4), try e.value(f64, "TF_DSV41_FLOOR_HARD_GIB", null, 4));
+    try t.expectEqual(@as(f64, 6.5), try e.value(f64, "TF_DSV41_FLOOR_GIB", " 6.5 ", 5));
+    try t.expectEqual(@as(f64, 1), try e.value(f64, "TF_DSV41_PREFILL_SHARE", "1", 0.5));
+    try t.expectEqual(@as(f64, -2.5), try e.value(f64, "TF_DSV41_EXPERT_TOPP", "-2.5", 0));
+    for ([_][2][]const u8{
+        .{ "TF_DSV41_GRAPH_FLOOR_GIB", "-1" }, .{ "TF_DSV41_GRAPH_FLOOR_GIB", "1e999" },
+        .{ "TF_DSV41_FLOOR_HARD_GIB", "0" },   .{ "TF_DSV41_FLOOR_HARD_GIB", " 4" },
+        .{ "TF_DSV41_PREFILL_SHARE", "1.1" },  .{ "TF_DSV41_EXPERT_TOPP", "nan" },
+        .{ "TF_DSV41_EXPERT_TOPP", "-inf" },   .{ "TF_DSV41_FLOOR_GIB", "4 GiB" },
+    }) |c| try t.expectError(error.InvalidEnvironment, e.parse(c[0], c[1]));
+}
+
+test "environment: ranges, word lists and whole-number bounds refuse ignored tails and values outside them" {
+    try t.expectEqual(@as(?[2]u32, .{ 2, 4 }), try e.range("TF_DSV41_LAYERS", "2-4"));
+    try t.expectEqual(@as(?[2]u32, .{ 0, 0 }), try e.range("TF_DSV41_LAYERS", "0-0"));
+    try t.expectEqual(@as(?[2]u32, null), try e.range("TF_DSV41_LAYERS", ""));
+    for ([_][]const u8{ "2", "4-2", "1-2-3", "a-b", "-1", "0--1", "0-4294967296" }) |raw| try t.expectError(error.InvalidEnvironment, e.parse("TF_DSV41_LAYERS", raw));
+    try t.expectEqual(@as(?u64, 1), try e.parse("TF_DSV41_IMAGES", " native "));
+    try t.expectEqual(@as(?u64, 0), try e.parse("TF_DSV41_IMAGES", "0"));
+    for ([_][]const u8{ "Native", "1", "nativee" }) |raw| try t.expectError(error.InvalidEnvironment, e.parse("TF_DSV41_IMAGES", raw));
+    for ([_][2][]const u8{ .{ "TF_DSV41_ENGRAM_READERS", "32" }, .{ "TF_DSV41_SLOTS", "16" }, .{ "TF_DSV41_ROWS_CAP", "12" }, .{ "TF_DSV41_CONTEXT", "9223372036854775807" } }) |c|
+        try t.expect(try e.parse(c[0], c[1]) != null);
+    for ([_][2][]const u8{ .{ "TF_DSV41_ENGRAM_READERS", "33" }, .{ "TF_DSV41_SLOTS", "0" }, .{ "TF_DSV41_SLOTS", "17" }, .{ "TF_DSV41_ROWS_CAP", "9" }, .{ "TF_DSV41_CONTEXT", "9223372036854775808" }, .{ "TF_DSV41_PREFILL_ADAPT_MIN", "15" } }) |c|
+        try t.expectError(error.InvalidEnvironment, e.parse(c[0], c[1]));
+}
+
+const Alias = struct {
+    canonical: ?[]const u8,
+    video: ?[]const u8 = null,
+    pub fn get(v: Alias, name: []const u8) ?[]const u8 {
+        if (std.mem.eql(u8, name, "TENSORFOLD_TOOL_GRAMMAR")) return v.canonical;
+        if (std.mem.eql(u8, name, "TF_DSV41_TOOL_GRAMMAR")) return "bad";
+        return if (std.mem.eql(u8, name, "TENSORFOLD_VIDEO_TOKENS")) v.video else null;
+    }
+};
+
+test "environment: a legacy alias is checked only while its canonical name is unset, and a scope check stays in its scope" {
+    try t.expectError(error.InvalidEnvironment, e.checkScope(.dsv41, Alias{ .canonical = null }));
+    try e.checkScope(.dsv41, Alias{ .canonical = "0", .video = "bad" });
+    const why = (try e.refusal(a, Alias{ .canonical = null }, .{ .dsv41 = true })).?;
+    defer a.free(why);
+    try t.expectEqualStrings("TF_DSV41_TOOL_GRAMMAR=\"bad\": expected 0 or 1 (ignored while TENSORFOLD_TOOL_GRAMMAR is set)", why);
+    for ([_][]const u8{ "", "0", "1" }) |canonical| try t.expect((try e.refusal(a, Alias{ .canonical = canonical }, .{ .dsv41 = true })) == null);
+    try t.expect((try e.refusal(a, Alias{ .canonical = null }, .{})) == null);
 }

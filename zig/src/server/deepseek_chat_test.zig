@@ -158,8 +158,8 @@ test "DeepSeek chat: response_format shows its schema unless TF_DSV41_SCHEMA_PRO
     try t.expectEqualStrings(none, (try hf.text().render(a, messages, .{ .response_format = plain }, &problem)).text);
     hf.schema_prompt = false;
     try t.expectEqualStrings(none, (try hf.text().render(a, messages, .{ .response_format = object }, &problem)).text);
-    try t.expect(@import("hf_text.zig").schemaPrompt(null) and @import("hf_text.zig").schemaPrompt("1"));
-    try t.expect(!@import("hf_text.zig").schemaPrompt(" 0 "));
+    try t.expect((try @import("hf_text.zig").schemaPrompt(null)) and (try @import("hf_text.zig").schemaPrompt("1")));
+    try t.expect(!(try @import("hf_text.zig").schemaPrompt(" 0 ")));
 }
 
 const Script = struct {
@@ -351,4 +351,37 @@ test "DeepSeek chat: typed and served image markers keep separate token provenan
     var images: usize = 0;
     for (try out.encode(hf.text(), a, &problem)) |id| images += @intFromBool(id == hf.text().tokenId("<｜deepseek_image｜>").?);
     try t.expectEqual(@as(usize, 1), images);
+}
+
+test "DeepSeek chat: schema and legacy tool grammar retain precedence and refuse malformed values" {
+    const env = @import("sys").env;
+    const grammar = @import("tool_grammar.zig");
+    const schema = @import("hf_text.zig").schemaPrompt;
+    defer {
+        _ = env.unsetenv("TENSORFOLD_TOOL_GRAMMAR");
+        _ = env.unsetenv("TF_DSV41_TOOL_GRAMMAR");
+    }
+    _ = env.unsetenv("TENSORFOLD_TOOL_GRAMMAR");
+    _ = env.unsetenv("TF_DSV41_TOOL_GRAMMAR");
+    try t.expect(!try grammar.autoAllEnv());
+    try t.expect(try schema(null));
+    for ([_][:0]const u8{ "0", "1", " 1 ", "", " " }) |raw| {
+        _ = env.setenv("TF_DSV41_TOOL_GRAMMAR", raw, 1);
+        try t.expectEqual(std.mem.eql(u8, std.mem.trim(u8, raw, " "), "1"), try grammar.autoAllEnv());
+        try @import("serve.zig").validateEnvironment();
+        try t.expect(try schema(raw) or std.mem.eql(u8, raw, "0"));
+    }
+    for ([_][:0]const u8{ "true", "bad" }) |raw| {
+        _ = env.setenv("TF_DSV41_TOOL_GRAMMAR", raw, 1);
+        try t.expectError(error.InvalidEnvironment, grammar.autoAllEnv());
+        try t.expectError(error.InvalidEnvironment, @import("serve.zig").validateEnvironment());
+        if (!std.mem.eql(u8, raw, "true")) try t.expectError(error.InvalidEnvironment, schema(raw));
+    }
+    for ([_][]const u8{ "true", "on", "yes", "TRUE", "On", "YES" }) |raw| try t.expect(try schema(raw));
+    for ([_][]const u8{ "false", "off", "no", "FALSE", "Off", "NO" }) |raw| try t.expect(!try schema(raw));
+    _ = env.setenv("TENSORFOLD_TOOL_GRAMMAR", "0", 1);
+    try t.expect(!try grammar.autoAllEnv());
+    try @import("serve.zig").validateEnvironment();
+    _ = env.setenv("TENSORFOLD_TOOL_GRAMMAR", "1", 1);
+    try t.expect(try grammar.autoAllEnv());
 }
