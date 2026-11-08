@@ -26,14 +26,29 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
     var text: []const u8 = undefined;
     var head: []const u8 = "";
     var frags = false;
+    if (std.mem.startsWith(u8, d.name, "qwen27 q8 ")) {
+        for (@import("contract").lane_q8.sources) |v| {
+            if (!std.mem.eql(u8, v.name, d.name)) continue;
+            const l = tf.lane_projection.Layout{ .n = v.n, .k = v.k, .sk = v.sk, .pf = v.pf, .format = .{ .bits = 8, .group = v.group }, .precompute_sums = v.sums, .output = if (v.f32_out) .f32 else .bf16 };
+            const body = try @import("metal_lane_q8.zig").text(a, device, l, false, @fromBackingInt(@backingInt(v.bad)));
+            return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
+        }
+        return error.UnknownLaunch;
+    }
+
     const has = struct {
         fn f(s: []const u8, p: []const u8) bool {
             return std.mem.indexOf(u8, s, p) != null;
         }
     }.f;
     if (std.mem.eql(u8, d.name, "contract masked values tf_masked_control")) {
-        const control = @import("masked_value_probe.zig").control_source;
-        return .{ .decl = d, .function = fun, .here = control, .pre_m5 = control };
+        const control_text = @import("masked_value_probe.zig").control_source;
+        return .{ .decl = d, .function = fun, .here = control_text, .pre_m5 = control_text };
+    }
+    if (std.mem.startsWith(u8, d.name, "nemotron masked prompt ")) {
+        const raw = if (std.mem.indexOf(u8, fun, "paged") != null) sources.nemotron_prompt_masked.paged_source else sources.nemotron_prompt_masked.contiguous;
+        const body = try tf.frags.sourceMode(device, a, raw, std.mem.indexOf(u8, d.name, " fp32 ") != null);
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = try preM5(a, "", raw) };
     }
     if (std.mem.startsWith(u8, d.name, "attention pv ")) {
         const full = std.mem.indexOf(u8, d.name, " fp32 ") != null;
@@ -47,33 +62,6 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
         } else return error.UnknownLaunch;
         const body = try tf.frags.sourceMode(device, a, raw, full);
         return .{ .decl = d, .function = fun, .here = body, .pre_m5 = try preM5(a, "", raw) };
-    }
-    if (std.mem.startsWith(u8, d.name, "binned ")) {
-        const prefix = if (has(d.name, " bad-rows ")) "#define TF_BP_BAD_ROWS 1\n" else if (has(d.name, " bad-acc ")) "#define TF_BP_BAD_ACC 1\n" else if (has(d.name, " bad-nonfinite ")) "#define TF_BP_BAD_NONFINITE 1\n" else "";
-        const source = try tf.lfm3.binned_projection.source(device, a);
-        const body = try std.mem.concat(a, u8, &.{ prefix, source });
-        const pre = try preM5(a, prefix, sources.core_binned_projection);
-        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = pre };
-    }
-    if (std.mem.startsWith(u8, d.name, "lfm3-dual ")) {
-        const source = try tf.lfm3.dual_projection.source(a);
-        const prefix = if (has(d.name, " bad-tail ")) "#define L3_DUAL_BAD_TAIL 1\n" else if (has(d.name, " bad-second ")) "#define L3_DUAL_BAD_SECOND 1\n" else "";
-        const body = try std.mem.concat(a, u8, &.{ prefix, source });
-        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
-    }
-    if (std.mem.startsWith(u8, d.name, "lfm3-projection ")) {
-        const source = try tf.lfm3.row_projection.source(a);
-        const prefix = if (has(d.name, " bad-tail ")) "#define L3_PROJECTION_BAD_TAIL 1\n" else if (has(d.name, " bad-rows ")) "#define L3_PROJECTION_BAD_ROWS 1\n" else "";
-        const body = try std.mem.concat(a, u8, &.{ prefix, source });
-        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
-    }
-    if (std.mem.startsWith(u8, d.name, "lfm3-image ")) {
-        return .{ .decl = d, .function = fun, .here = sources.lfm3_image_rows, .pre_m5 = sources.lfm3_image_rows };
-    }
-    if (std.mem.startsWith(u8, d.name, "lfm3 ")) {
-        const lfm3_head = if (has(d.name, " range-skip ")) "#define L3_RANGE_SKIP_REPAIR 1\n" else if (has(d.name, " range-clear ")) "#define L3_RANGE_CLEAR_RISK 1\n" else if (has(d.name, " postnorm-bad ")) "#define L3_POSTNORM_SKIP_ROUND 1\n" else if (has(d.name, " conv-state-bad ")) "#define L3_CONV_BAD_STATE 1\n" else if (has(d.name, " segment-bad ")) "#define L3_SEGMENT_BAD_TAIL 1\n" else if (has(d.name, " square-bad ")) "#define L3_SQUARE_ACC half\n" else if (has(d.name, " attention-bad ")) "#define L3_ATTN_ACC half\n" else "";
-        const body = try std.mem.concat(a, u8, &.{ lfm3_head, sources.lfm3, "\n", sources.lfm3_attention });
-        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
     }
     if (std.mem.startsWith(u8, d.name, "qwen4-native ")) {
         const body = try @import("qwen4").family.limits_sources.source(a, d.name);
@@ -103,6 +91,11 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
         return .{ .decl = d, .function = fun, .here = text, .pre_m5 = text };
     }
     if (try @import("metal_dsv41_limits.zig").launchOf(a, device, d, fun)) |l| return l;
+    if (std.mem.startsWith(u8, d.name, "lfm2 masked prompt ")) {
+        const raw = sources.lfm2_prompt_masked.source;
+        const body = try tf.frags.source(device, a, raw);
+        return .{ .decl = d, .function = fun, .here = try std.mem.concat(a, u8, &.{ sources.lfm2, "\n", body }), .pre_m5 = try preM5(a, sources.lfm2, raw) };
+    }
     if (std.mem.startsWith(u8, d.name, "metal lfm2 ")) return .{ .decl = d, .function = fun, .here = sources.lfm2, .pre_m5 = sources.lfm2 };
     if (std.mem.startsWith(u8, d.name, "metal ling route ")) {
         const body = @import("ling_metal").route;
@@ -266,15 +259,25 @@ pub fn onThisGpu(a: std.mem.Allocator, device: mtl.Device, l: Launch, control: b
 }
 
 /// Gate 5: declarations against every family, each pipeline on this GPU, and offline M1/M2 compiles when asked.
-pub fn gate(a: std.mem.Allocator, io: std.Io, device: mtl.Device, offline: ?[]const u8) !usize {
-    var n = try registry.checkMetal(a, &registry.all_metal, false);
-    std.debug.print("{s} limits: {d} registered Metal launches against M1-M5, {d} problems\n", .{ if (n == 0) "PASS" else "FAIL", registry.all_metal.len, n });
-    for (registry.all_metal) |d| n += try onThisGpu(a, device, try launchOf(a, device, d), false);
+pub fn gate(a: std.mem.Allocator, io: std.Io, device: mtl.Device, offline: ?[]const u8, only: ?[]const u8) !usize {
+    var list: std.ArrayList(limits.MetalLaunch) = .empty;
+    defer list.deinit(a);
+    for (registry.all_metal) |d| {
+        if (only) |needle| if (std.mem.indexOf(u8, d.name, needle) == null) continue;
+        if (!device.tensorUnits() and std.mem.startsWith(u8, d.name, "qwen27 q8 ")) continue;
+        try list.append(a, d);
+    }
+    var n = try registry.checkMetal(a, list.items, false);
+    std.debug.print("{s} limits: {d} selected registered Metal launches against M1-M5, {d} problems\n", .{ if (n == 0) "PASS" else "FAIL", list.items.len, n });
+    for (list.items) |d| n += try onThisGpu(a, device, try launchOf(a, device, d), false);
     for (registry.metal_controls) |d| {
         const red = try registry.checkMetal(a, &.{d}, true) + try onThisGpu(a, device, try launchOf(a, device, d), true);
         if (red == 0) n += 1;
         std.debug.print("CONTROL {s} {s}: {d} limit problems\n", .{ if (red > 0) "red as planted," else "MISSED", d.name, red });
     }
-    if (offline) |dir| n += try @import("metal_offline.zig").run(a, io, dir, &(registry.all_metal ++ registry.metal_controls), launchOf, device);
+    if (offline) |dir| {
+        try list.appendSlice(a, &registry.metal_controls);
+        n += try @import("metal_offline.zig").run(a, io, dir, list.items, launchOf, device);
+    }
     return n;
 }

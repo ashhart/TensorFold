@@ -37,7 +37,7 @@ pub const Settings = struct {
     /// The knobs; graphs `on_default` when TF_DSV41_GRAPHS is unset (every rank must agree).
     pub fn fromEnvOr(on_default: bool) !Settings {
         var s: Settings = .{ .on = on_default };
-        if (std.c.getenv("TF_DSV41_GRAPHS")) |v| s.on = !std.mem.eql(u8, std.mem.span(v), "0");
+        s.on = try @import("sys").environment.read(bool, "TF_DSV41_GRAPHS", on_default);
         if (std.c.getenv("TF_DSV41_GRAPHS_MAX")) |v| s.max = try std.fmt.parseInt(u32, std.mem.span(v), 10);
         if (std.c.getenv("TF_DSV41_GRAPH_BUCKET")) |v| s.bucket = try std.fmt.parseInt(u32, std.mem.span(v), 10);
         if (std.c.getenv("TF_DSV41_GRAPH_BUCKET_GROW")) |v| s.grow = try std.fmt.parseFloat(f64, std.mem.span(v));
@@ -108,10 +108,10 @@ pub const Room = struct {
 
     pub fn fromEnv() !Room {
         var r: Room = .{};
-        if (std.c.getenv("TF_DSV41_GRAPH_FLOOR_GIB")) |v| r.floor_gib = try std.fmt.parseFloat(f64, std.mem.span(v));
-        if (std.c.getenv("TF_DSV41_GRAPH_COST_MIB")) |v| r.cost_gib = try std.fmt.parseFloat(f64, std.mem.span(v)) / 1024.0;
-        const hard = gib("TF_DSV41_FLOOR_HARD_GIB", 4.0);
-        r.keep_gib = @max(hard, gib("TF_DSV41_PF_WS_FLOOR_GIB", hard) + prefill_2k_gib);
+        if (try @import("sys").environment.read(?f64, "TF_DSV41_GRAPH_FLOOR_GIB", null)) |v| r.floor_gib = v;
+        r.cost_gib = (try @import("sys").environment.read(f64, "TF_DSV41_GRAPH_COST_MIB", 64)) / 1024.0;
+        const hard = try @import("kv").budget.hardFloorGiB();
+        r.keep_gib = @max(hard, (try @import("kv").budget.workspaceFloorGiB()) + prefill_2k_gib);
         return r;
     }
 
@@ -120,11 +120,6 @@ pub const Room = struct {
         return avail_gib - r.cost_gib >= r.keep_gib;
     }
 };
-
-fn gib(name: [*:0]const u8, default: f64) f64 {
-    const v = std.c.getenv(name) orelse return default;
-    return std.fmt.parseFloat(f64, std.mem.span(v)) catch default;
-}
 
 /// The rule every graph cache asks (`room`): set once from the environment by the first cache made.
 pub var rule: ?Room = null;

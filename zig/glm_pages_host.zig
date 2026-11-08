@@ -112,6 +112,20 @@ const Fixture = struct {
     }
 };
 
+test "GLM pages: TF_KV_SHARE's slot, counted before the pool is made, is the state's bytes at the last mark after it" {
+    var f: Fixture = undefined;
+    try f.prepare();
+    f.e.c = f.e.w.config;
+    f.e.mtp = false;
+    f.e.share_pages = true;
+    const slot = glm.pages.shareSlot(&f.e);
+    f.p = try f.make(1);
+    f.e.pages = f.p;
+    defer f.deinit();
+    try t.expect(slot > 0);
+    try t.expectEqual(slot, f.e.stateBytes(f.e.capacity - f.e.capacity % glm.native.snap_grid));
+}
+
 test "GLM pages: a failed page-owner wait must fall back to the context before freeing" {
     var f: Fixture = undefined;
     try f.init(0);

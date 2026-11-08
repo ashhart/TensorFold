@@ -442,6 +442,10 @@ fn run(ctx: *const Context, args: Args) !u8 {
         rank_count = got.rank_count;
         group = got.group;
     }
+    const thinking = try stream.discoverThinking(a, ctx.io, target);
+    target.thinking_switch = thinking.switchable;
+    target.thinking_applicable = thinking.applicable;
+    try say(ctx, "Chat thinking: {s}", .{if (target.thinking_applicable == false) "not applicable" else if (target.thinking_switch == false) "server default (off unsupported; local only)" else if (target.thinking_switch == true) "off" else "off requested (unverified)"});
     var printer: Printer = .{ .ctx = ctx, .reps = args.reps };
     const samples = stream.run(a, ctx.io, target, .{ .tokens = @intCast(args.tokens), .reps = @intCast(args.reps), .temperatures = args.temperatures, .serial = args.serial, .timeout_s = args.timeout, .chat_only = chat_only }, .{ .ctx = &printer, .call = Printer.call, .said = Printer.said }) catch |e| {
         if (managed) |*m| _ = m.stop();
@@ -453,6 +457,7 @@ fn run(ctx: *const Context, args: Args) !u8 {
     const created = receipt.createdAt(std.Io.Clock.real.now(ctx.io).toNanoseconds(), &stamp);
     var recorded = settings;
     recorded.rank_count = rank_count;
+    if (target.thinking_switch == false and target.thinking_applicable != false) recorded.thinking_mode = "server_default";
     recorded.group = group;
     const v = try receipt.value(a, &run_id, created, facts.model, facts.runtime, facts.hardware, recorded, samples);
     try show(ctx, v);

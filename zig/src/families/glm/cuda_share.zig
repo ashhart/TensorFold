@@ -15,16 +15,29 @@ pub fn cacheable(s: *const Stream) bool {
     return s.prompt_logprobs == null and !s.untaught and s.embedding == null and cacheKey(s) != null;
 }
 
-/// Below 4 states a stream, live streams evict each other's before a resume reaches them.
-pub fn fewStates(states: usize, parallel: usize) bool {
-    return states > 0 and states < 4 * parallel;
+/// Below 4 states a stream, live streams evict each other's: that many, and the --prompt-cache-gib holding their slots.
+pub fn advice(states: usize, parallel: usize, slot: u64) ?struct { states: usize, gib: u64 } {
+    const want = 4 * parallel;
+    if (states >= want) return null;
+    return .{ .states = want, .gib = @import("core").kv_pool.holdingGib(want, slot) };
 }
 
-test "TF_KV_SHARE below 4 states a GLM stream is too few; off is not" {
-    try std.testing.expect(fewStates(4, 4));
-    try std.testing.expect(fewStates(15, 4));
-    try std.testing.expect(!fewStates(16, 4));
-    try std.testing.expect(!fewStates(0, 4));
+/// More kept states than a startup plan sets slots aside for (kv_pool.most_snaps): refused by name at start.
+pub fn tooMany(states: usize) bool {
+    return states > @import("core").kv_pool.most_snaps;
+}
+
+test "TF_KV_SHARE: under 4 planned states a GLM stream, the advice names 4 a stream and the cache their slots take" {
+    const mib: u64 = 1 << 20;
+    try std.testing.expect(advice(16, 4, 180 * mib) == null);
+    const a = advice(13, 4, 180 * mib).?; // a 2.4 GiB cache holds 13 of the 16 at --parallel 4
+    try std.testing.expectEqual(@as(usize, 16), a.states);
+    try std.testing.expectEqual(@as(u64, 3), a.gib); // 16 x 180 MiB is 2.8 GiB
+    try std.testing.expectEqual(@as(usize, 32), advice(0, 8, 180 * mib).?.states); // a cache holding none
+}
+
+test "TF_KV_SHARE: up to 64 states is a plan's, 65 is refused" {
+    try std.testing.expect(!tooMany(64) and tooMany(65) and !tooMany(0));
 }
 
 /// TF_GLM_KV_SHARE is TF_KV_SHARE now: a value that asked for a store is refused; empty and 0 asked for none.

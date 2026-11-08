@@ -3,10 +3,16 @@ const std = @import("std");
 const pc = @import("prompt_cache.zig");
 
 pub fn victimBut(s: *const pc.Store, skip: ?*pc.Entry, prompt: []const u32, born: u32) ?usize {
+    return victimIn(s, skip, prompt, born, false);
+}
+
+/// `victimBut`'s order over every state, or with `own_only` over the prompt's own conversation's states alone.
+pub fn victimIn(s: *const pc.Store, skip: ?*pc.Entry, prompt: []const u32, born: u32, own_only: bool) ?usize {
     var best: ?usize = null;
     var oldest: ?usize = null;
     var oldest_rewind = false;
     for (s.entries.items, 0..) |e, i| { // one prefix compare an entry: the superseded scan and the oldest scan share it
+        if (own_only and !own(e, skip, prompt)) continue;
         const on = e.tokens.len <= prompt.len and std.mem.eql(u32, prompt[0..e.tokens.len], e.tokens);
         const rewind = !e.expired and e.at == s.active_rewind_at and on; // the active rewind state goes last
         if (e.borrowers == 0 and e != skip and (oldest == null or (if (rewind != oldest_rewind) oldest_rewind else e.used < s.entries.items[oldest.?].used))) {
@@ -18,6 +24,12 @@ pub fn victimBut(s: *const pc.Store, skip: ?*pc.Entry, prompt: []const u32, born
         if ((now or extended(s, e)) and (best == null or e.used < s.entries.items[best.?].used)) best = i;
     }
     return best orelse oldest;
+}
+
+/// A state of the prompt's own conversation that may go: unborrowed, on its token path, neither shared nor a branch.
+pub fn own(e: *const pc.Entry, skip: ?*pc.Entry, prompt: []const u32) bool {
+    if (e.borrowers > 0 or e == skip or e.shared or e.branched or e.tokens.len > prompt.len) return false;
+    return std.mem.eql(u32, prompt[0..e.tokens.len], e.tokens);
 }
 
 /// Only live continuations make a prefix a branch point or a superseded state.

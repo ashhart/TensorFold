@@ -267,18 +267,25 @@ fn attention(enc: Encoder, s: *st.Scratch, a: wts.Attention, config: *const c.Co
             const args = AttnArgs{ .len = first, .cap = cap, .scale = 1.0 / @sqrt(@as(f32, c.head_dim)), .subs = subs };
             const used = (first + rows + st.chunk_keys - 1) / st.chunk_keys * subs;
             if (nax_attn) {
-                e.setPipeline(enc.m.kernels.attn_nax.?);
+                const mask = @import("prompt_mask.zig");
+                mask.launch(e, enc.m.kernels.prompt_mask.?, enc.m.kernels.attn_nax.?, .{
+                    .{ .buf = s.queries, .off = (base + at) * c.hidden * 2 },
+                    .{ .buf = cache.keys },
+                    .{ .buf = cache.values },
+                }, .{ .{ .buf = s.pm }, .{ .buf = s.pl }, .{ .buf = s.po } }, .{ .buf = s.prompt_pick }, .{ .len = first, .cap = cap, .scale = args.scale, .subs = subs }, rows);
             } else if (wide) enc.pipe("lfm2_attn_mma_r2") else enc.pipe("lfm2_attn_mma");
-            e.setBuffer(s.queries, (base + at) * c.hidden * 2, 0);
-            e.setBuffer(cache.keys, 0, 1);
-            e.setBuffer(cache.values, 0, 2);
-            e.setBytes(std.mem.asBytes(&args), 3);
-            e.setBuffer(s.pm, 0, 4);
-            e.setBuffer(s.pl, 0, 5);
-            e.setBuffer(s.po, 0, 6);
-            e.setValue(@as(u32, @intCast(rows)), 7);
-            const per_tile: usize = if (wide) st.attn_rows else 8;
-            enc.groups(.{ (rows + per_tile - 1) / per_tile, c.kv_heads, used }, .{ 128, 1, 1 });
+            if (!nax_attn) {
+                e.setBuffer(s.queries, (base + at) * c.hidden * 2, 0);
+                e.setBuffer(cache.keys, 0, 1);
+                e.setBuffer(cache.values, 0, 2);
+                e.setBytes(std.mem.asBytes(&args), 3);
+                e.setBuffer(s.pm, 0, 4);
+                e.setBuffer(s.pl, 0, 5);
+                e.setBuffer(s.po, 0, 6);
+                e.setValue(@as(u32, @intCast(rows)), 7);
+                const per_tile: usize = if (wide) st.attn_rows else 8;
+                enc.groups(.{ (rows + per_tile - 1) / per_tile, c.kv_heads, used }, .{ 128, 1, 1 });
+            }
             enc.pipe("lfm2_attn_merge");
             e.setBuffer(s.pm, 0, 0);
             e.setBuffer(s.pl, 0, 1);

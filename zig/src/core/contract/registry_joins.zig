@@ -41,11 +41,13 @@ pub const cuda_pending = @import("qwen_whole_records.zig").records ++
     @import("qwen4_records.zig").cuda;
 pub const metal_before = @import("fsr_records.zig").metal ++
     @import("lfm3_records.zig").metal;
-pub const all_metal = @import("attention_pv_records.zig").records ++
+pub const all_metal = @import("lane_q8_records.zig").records ++
+    @import("attention_pv_records.zig").records ++
     registry.metal ++
     @import("delta_slots_records.zig").records ++
     @import("flashnext_pending.zig").records ++
     @import("simd_pairs_records.zig").records ++
+    @import("simd_half_records.zig").records ++
     @import("metal_pair_records.zig").records ++
     @import("glm_rows_records.zig").records ++
     @import("weight_only_records.zig").metal ++
@@ -55,6 +57,7 @@ pub const all_metal = @import("attention_pv_records.zig").records ++
     @import("nemotron_experts_records.zig").records ++
     @import("nemotron_pages_records.zig").records ++
     @import("nemotron_attention_records.zig").records ++
+    @import("nemotron_prompt_mask_records.zig").records ++
     @import("nemotron_ssd_records.zig").records ++
     @import("flashnext_attention_records.zig").records ++
     @import("spark25_records.zig").records ++

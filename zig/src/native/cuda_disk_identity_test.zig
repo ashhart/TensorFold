@@ -219,3 +219,26 @@ test "disk identity: slide group hashes all real members in each member's actual
         try t.expectEqual(@as(usize, 0), Members.lookups);
     }
 }
+
+test "disk identity: DeepSeek values hash their exact bytes and leave every other identity unchanged" {
+    const entries = api.profile.entries;
+    var legacy: std.ArrayList(api.profile.Entry) = .empty;
+    defer legacy.deinit(t.allocator);
+    for (entries) |e| if (!e.applies("deepseek_v41", "cuda")) try legacy.append(t.allocator, e);
+    for (entries) |e| {
+        if (!e.applies("deepseek_v41", "cuda")) continue;
+        const empty = profileHash(&entries, "deepseek_v41", "cuda", &.{});
+        const zero = profileHash(&entries, "deepseek_v41", "cuda", &.{.{ e.id, "0" }});
+        const one = profileHash(&entries, "deepseek_v41", "cuda", &.{.{ e.id, "1" }});
+        try t.expect(empty != zero and zero != one);
+        try t.expect(one != profileHash(&entries, "deepseek_v41", "cuda", &.{.{ e.id, "01" }}));
+        for (entries) |other| for (other.families) |family| {
+            if (std.mem.eql(u8, family, "deepseek_v41")) continue;
+            for ([_][]const u8{ "cuda", "metal", "hip" }) |backend| {
+                const before = profileHash(legacy.items, family, backend, &.{});
+                try t.expectEqual(before, profileHash(&entries, family, backend, &.{}));
+                try t.expectEqual(before, profileHash(&entries, family, backend, &.{.{ e.id, "1" }}));
+            }
+        };
+    }
+}

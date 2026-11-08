@@ -233,8 +233,11 @@ pub const Server = struct {
             srv.think_close = try std.mem.concat(a, u32, &.{ lead, &.{end}, trail });
             srv.think_close_end = end;
         }
+        srv.info.thinking_applicable = srv.close_id != null;
+        srv.info.thinking_switch = try @import("prompt.zig").thinkingSwitch(srv);
         if (srv.info.prefill_step > 0) {
             srv.chunks = try chunk_plan.markers(srv, a, srv.info.prefill_step);
+            srv.chunks.min_chunk = srv.info.prefill_min_chunk;
             var step: [32]u8 = undefined;
             log.line("prompt chunks of up to {s} tokens, cut at replies {d}+ tokens apart", .{ live.commas(&step, srv.info.prefill_step), srv.chunks.min_chunk });
         }
@@ -319,7 +322,7 @@ pub const Server = struct {
         errdefer srv.release(false, request.*); // a refused request frees what it compiled here
         const required = if (f.get("tool_call_required")) |r| r.truthy() else false;
         const one_call = if (f.get("tool_call_single")) |x| x.truthy() else false;
-        const all = has_tools and !required and tool_grammar.autoAllEnv();
+        const all = has_tools and !required and (tool_grammar.autoAllEnv() catch return cx.fail(.server, "invalid TF_DSV41_TOOL_GRAMMAR: expected 0 or 1", .{}));
         if (has_tools and required) {
             if (!srv.info.capability(.structures)) return cx.fail(.request, "backend '{s}' cannot enforce tool_choice \"required\" or a named function: it has no token grammar support; send \"auto\" or \"none\"", .{srv.backendName()});
             request.structure = try tool_grammar.structure(srv, cx, tools, !one_call, thinking);

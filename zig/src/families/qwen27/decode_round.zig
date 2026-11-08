@@ -17,6 +17,11 @@ const Round = @import("round_plan.zig").Round;
 const Taps = @import("taps.zig").Taps;
 const image_rows = @import("image_rows.zig");
 const mrope = @import("core").qwen_vl.rope;
+const kv_pages = @import("kv_pages.zig");
+pub const pagesOn = kv_pages.on;
+pub const KvPages = kv_pages.KvPages;
+pub const KvSpan = kv_pages.KvSpan;
+const kvp = kv_pages.kvp;
 
 /// Whether `cb` failed on the GPU; its Metal error (out of memory, a timeout) is logged with `what` it ran.
 pub fn gpuFailed(cb: mtl.CommandBuffer, what: []const u8) bool {
@@ -43,6 +48,7 @@ pub const Runner = struct {
     slots: u32,
     ready: u32, // slots [0, ready) have their K/V rows; a later slot takes its own when first used (ensure)
     capacity: u32,
+    kv: ?KvPages = null,
     active: ?[32]u8 = null,
     failed: bool = false,
     capture_taps: bool = false,
@@ -72,6 +78,15 @@ pub const Runner = struct {
 
     /// A runner of `slots` whose first `ready` take their K/V rows now, the rest when first used (ensure).
     pub fn initReady(a: std.mem.Allocator, m: *Model, slots: u32, capacity: u32, ready: u32) !Runner {
+        return build(a, m, slots, capacity, ready, false);
+    }
+
+    /// A runner whose slots all take their K/V rows from one arena of core-pool pages, each promised `capacity` rows.
+    pub fn initPaged(a: std.mem.Allocator, m: *Model, slots: u32, capacity: u32) !Runner {
+        return build(a, m, slots, capacity, slots, true);
+    }
+
+    fn build(a: std.mem.Allocator, m: *Model, slots: u32, capacity: u32, ready: u32, paged: bool) !Runner {
         if (slots == 0 or slots > attn.planning.max_streams or capacity == 0 or m.frame.capacity % 16 != 0 or ready == 0 or ready > slots) return error.BadRoundCapacity;
         const geometry = try attn.planning.Geometry.fromConfig(m.config, m.device.tensorUnits());
         const linear_index = try a.alloc(u32, m.config.layers);
@@ -97,13 +112,13 @@ pub const Runner = struct {
         // before M5 the tail attention reads its tensor-op results in the simdgroup-matrix layout (simd_attention.zig)
         if (!units) try @import("simd_attention.zig").check(m.device, m.queue);
         // both builds take the kernels' KV group as the defines attention_mpp.metal reads
-        const text = try @import("simd_attention.zig").grouped(a, units, true, geometry.group(), geometry.kv_heads);
+        const text = try @import("simd_attention.zig").grouped(a, units, true, geometry.group(), geometry.kv_heads, paged);
         defer a.free(text);
         // before M5 the prompt kernels are optional: a chip that cannot build them keeps the decode path for prompts
         const library = mtl.Library.fromSource(m.device, text, mtl.CompileOptions.mlx()) catch |err| blk: {
             if (units) return err;
             std.log.info("qwen27: the prompt attention kernels do not build here ({t}); prompt rows take the decode path", .{err});
-            const base = try @import("simd_attention.zig").grouped(a, units, false, geometry.group(), geometry.kv_heads);
+            const base = try @import("simd_attention.zig").grouped(a, units, false, geometry.group(), geometry.kv_heads, paged);
             defer a.free(base);
             break :blk try mtl.Library.fromSource(m.device, base, mtl.CompileOptions.mlx());
         };
@@ -130,14 +145,33 @@ pub const Runner = struct {
             for (owned.items) |b| b.deinit();
             owned.deinit(a);
         }
-        for (0..na) |layer| for (0..ready) |slot| {
+        const kv: ?KvPages = if (paged) try kv_pages.caches(a, m, na, slots, capacity, caches) else null;
+        errdefer if (kv) |k| kv_pages.free(k);
+        if (!paged) for (0..na) |layer| for (0..ready) |slot| {
             caches[layer * slots + slot] = try slotCache(a, m, &owned, capacity);
         };
         const offsets = try a.alloc(u32, slots);
         errdefer a.free(offsets);
         @memset(offsets, 0);
         const taps = try Taps.init(m.device, m.frame.capacity, @intCast(m.config.hidden));
-        return .{ .allocator = a, .model = m, .geometry = geometry, .gdn = pool, .attention = attention, .scratch = scratch, .bindings = bindings, .caches = caches, .linear_index = linear_index, .attention_index = attention_index, .offsets = offsets, .owned = owned, .taps = taps, .slots = slots, .ready = ready, .capacity = capacity };
+        return .{ .allocator = a, .model = m, .geometry = geometry, .gdn = pool, .attention = attention, .scratch = scratch, .bindings = bindings, .caches = caches, .linear_index = linear_index, .attention_index = attention_index, .offsets = offsets, .owned = owned, .taps = taps, .slots = slots, .ready = ready, .capacity = capacity, .kv = kv };
+    }
+
+    /// Slot `slot` holds the pages of its first `rows` rows before a pass or a copy writes them (paged runners).
+    pub fn cover(r: *Runner, slot: u32, rows: u32) !void {
+        const k = r.kv orelse return;
+        try k.pages.cover(slot, @min(rows, r.capacity));
+    }
+
+    /// Slot `slot`'s pages past its committed rows go back to its promise; no GPU work in flight reads them.
+    fn trimSlot(r: *Runner, slot: u32) void {
+        const k = r.kv orelse return;
+        k.pages.trim(slot, r.offsets[slot]);
+    }
+
+    /// Slot `slot`'s first `at` rows of each attention layer's keys then values, head by head, page by page.
+    pub fn kvSpans(r: *const Runner, a: std.mem.Allocator, slot: u32, at: u32, list: *std.ArrayList(KvSpan)) !void {
+        return kv_pages.spans(r, a, slot, at, list);
     }
 
     /// One slot's K/V rows across the attention layers.
@@ -163,6 +197,7 @@ pub const Runner = struct {
 
     /// The K/V buffers of the ready slots (for a residency set).
     pub fn readyBuffers(r: *const Runner, a: std.mem.Allocator, out: *std.ArrayList(mtl.Buffer)) !void {
+        if (r.kv) |k| return out.appendSlice(a, &.{ k.arena, k.tables });
         for (0..r.caches.len / r.slots) |layer| for (0..r.ready) |slot| {
             const c = r.caches[layer * r.slots + slot];
             try out.appendSlice(a, &.{ c.keys.buffer, c.values.buffer });
@@ -188,6 +223,7 @@ pub const Runner = struct {
         r.allocator.free(r.linear_index);
         r.allocator.free(r.attention_index);
         r.allocator.free(r.offsets);
+        if (r.kv) |k| kv_pages.free(k);
     }
 
     pub fn profile(r: *Runner, trace: ?*@import("core").gpu_profile.Trace) void {
@@ -222,6 +258,7 @@ pub const Runner = struct {
         // A rank's head writes only this rank's vocabulary columns; the tail's matcher reads the whole vocabulary.
         if (r.tail != null and r.reduce != null) return error.TailOnRank;
         for (round.slots, round.windows) |slot, window| if (slot >= r.ready or r.offsets[slot] != window.start) return error.CachePositionDiffers;
+        for (round.slots, round.windows) |slot, window| try r.cover(slot, window.start + @as(u32, @intCast(window.parents.len)));
         const paths = try r.allocator.alloc([]const u32, round.windows.len);
         defer r.allocator.free(paths);
         @memset(paths, &.{});
@@ -322,7 +359,10 @@ pub const Runner = struct {
             r.failed = true;
             return error.RoundGpuFailure;
         }
-        for (round.slots, round.windows, paths) |slot, window, path| r.offsets[slot] = (try window.keep(path)).length;
+        for (round.slots, round.windows, paths) |slot, window, path| {
+            r.offsets[slot] = (try window.keep(path)).length;
+            r.trimSlot(slot); // the keep waited: its dropped rows' pages are read by nothing
+        }
         r.active = null;
     }
 

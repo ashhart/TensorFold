@@ -8,10 +8,10 @@ pub fn fill(theta: f64, rotary: usize, out: []f32) !void {
     out[2] = 1;
     rope_freq.inverseFrequencies(theta, rotary, out[3..]);
 }
-/// Prints old and new side by side with the largest absolute and relative difference; returns the differing indices.
-fn receipt(name: []const u8, before: []const f32, after: []const f32, differ: []usize) []usize {
-    std.debug.print("\n{s}\n", .{name});
-    std.debug.print("    i  old word    new word    old             new             |old - new|  old - new\n", .{});
+/// Returns the differing indices; when `loud`, prints old and new side by side with the largest differences.
+fn receipt(name: []const u8, before: []const f32, after: []const f32, differ: []usize, loud: bool) []usize {
+    if (loud) std.debug.print("\n{s}\n", .{name});
+    if (loud) std.debug.print("    i  old word    new word    old             new             |old - new|  old - new\n", .{});
     var n: usize = 0;
     var abs: f64 = 0;
     var rel: f64 = 0;
@@ -27,11 +27,39 @@ fn receipt(name: []const u8, before: []const f32, after: []const f32, differ: []
             n += 1;
         }
         const row = "  {d:>3}  0x{x:0>8}  0x{x:0>8}  {e:.8}  {e:.8}  {e:.3}    {d} ulp\n";
-        std.debug.print(row, .{ i, a, b, o, w, d, ulp });
+        if (loud) std.debug.print(row, .{ i, a, b, o, w, d, ulp });
     }
     const summary = "  {d} of {d} words differ; largest absolute difference {e:.3}, largest relative {e:.3}\n";
-    std.debug.print(summary, .{ n, before.len, abs, rel });
+    if (loud) std.debug.print(summary, .{ n, before.len, abs, rel });
     return differ[0..n];
+}
+/// Names a failed comparison's first word: its position in the stored table (after three header words) and index.
+fn mismatch(name: []const u8, i: usize, expected: []const u8, word: u32, got: u32) void {
+    const line = "\n{s}: first mismatch at position {d}, index {d}: expected {s}0x{x:0>8}, got 0x{x:0>8}\n";
+    std.debug.print(line, .{ name, 3 + i, i, expected, word, got });
+}
+/// For a failed word: names it, then prints the expected words (every `stride`-th of `want`) beside the table's.
+fn wrongWord(name: []const u8, want: []const u32, stride: usize, got: []const f32, i: usize) void {
+    mismatch(name, i, "", want[stride * i], @bitCast(got[i]));
+    std.debug.print("    i  expected    got\n", .{});
+    for (got, 0..) |g, k| {
+        const w = want[stride * k];
+        const b: u32 = @bitCast(g);
+        std.debug.print("  {d:>3}  0x{x:0>8}  0x{x:0>8}{s}\n", .{ k, w, b, if (w == b) "" else "  <- differs" });
+    }
+}
+/// For a failed move check: names the first word whose move disagrees with `moved`, then prints the receipt.
+fn wrongMove(name: []const u8, before: []const f32, after: []const f32, moved: []const usize) void {
+    for (before, after, 0..) |o, w, i| {
+        const a: u32 = @bitCast(o);
+        const b: u32 = @bitCast(w);
+        const listed = std.mem.indexOfScalar(usize, moved, i) != null;
+        if (listed == (a != b) and (if (a > b) a - b else b - a) <= 1) continue;
+        mismatch(name, i, if (!listed) "unchanged " else if (a == b) "a 1-ulp move from " else "within 1 ulp of ", a, b);
+        break;
+    }
+    var differ: [32]usize = undefined;
+    _ = receipt(name, before, after, &differ, true);
 }
 test "Qwen4 rotary table: native devices consume transformers' FP32 words after the three header words" {
     // theta 1e4 over 64 (the native fixture: head 256, partial 0.25), each step correctly rounded (60-digit decimal)
@@ -43,11 +71,17 @@ test "Qwen4 rotary table: native devices consume transformers' FP32 words after 
     };
     var table: [35]f32 = undefined;
     try fill(10000, 64, &table);
-    for (table[3..], expected) |value, bits| try std.testing.expectEqual(bits, @as(u32, @bitCast(value)));
+    for (table[3..], expected, 0..) |value, bits, i| std.testing.expectEqual(bits, @as(u32, @bitCast(value))) catch |e| {
+        wrongWord("Qwen4, theta 1e4 over 64 (native fixture)", &expected, 1, table[3..], i);
+        return e;
+    };
     try std.testing.expectEqualSlices(f32, &.{ 0, 1, 1 }, table[0..3]);
     var half: [19]f32 = undefined;
     try fill(10000, 32, &half);
-    for (half[3..], 0..) |value, i| try std.testing.expectEqual(expected[2 * i], @as(u32, @bitCast(value)));
+    for (half[3..], 0..) |value, i| std.testing.expectEqual(expected[2 * i], @as(u32, @bitCast(value))) catch |e| {
+        wrongWord("Qwen4, theta 1e4 over 32", &expected, 2, half[3..], i);
+        return e;
+    };
     var disabled: [3]f32 = undefined;
     try fill(10000, 0, &disabled);
     try std.testing.expectEqualSlices(f32, &.{ 0, 1, 1 }, &disabled);
@@ -69,11 +103,17 @@ test "Qwen4 rotary table: 10 of 32 words (theta 1e4 over 64) and 4 of 16 (over 3
         const after = table[3 .. 3 + n];
         var differ: [32]usize = undefined;
         const name = if (rotary == 64) "Qwen4, theta 1e4 over 64 (native fixture)" else "Qwen4, theta 1e4 over 32";
-        try std.testing.expectEqualSlices(usize, want, receipt(name, before[0..n], after, &differ));
+        std.testing.expectEqualSlices(usize, want, receipt(name, before[0..n], after, &differ, false)) catch |e| {
+            wrongMove(name, before[0..n], after, want);
+            return e;
+        };
         for (before[0..n], after) |o, w| {
             const a: u32 = @bitCast(o);
             const b: u32 = @bitCast(w);
-            try std.testing.expect((if (a > b) a - b else b - a) <= 1);
+            std.testing.expect((if (a > b) a - b else b - a) <= 1) catch |e| {
+                wrongMove(name, before[0..n], after, want);
+                return e;
+            };
         }
     }
 }

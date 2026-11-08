@@ -73,6 +73,7 @@ const Stay = struct {
 };
 
 const Text = struct {
+    reasoning: bool = false,
     fn text(t: *@This()) model_text.Text {
         return .{ .ctx = t, .vtable = &.{ .encode = encode, .decode = decode, .token_id = tokenId, .token_string = tokenString, .vocab_size = vocabSize, .eos_ids = eosIds, .render = render, .template_source = templateSource } };
     }
@@ -89,8 +90,9 @@ const Text = struct {
         return out;
     }
 
-    fn tokenId(_: *anyopaque, _: []const u8) ?u32 {
-        return null;
+    fn tokenId(ctx: *anyopaque, piece: []const u8) ?u32 {
+        const t: *Text = @ptrCast(@alignCast(ctx));
+        return if (t.reasoning and std.mem.eql(u8, piece, "</think>")) 301 else null;
     }
 
     fn tokenString(_: *anyopaque, a: Allocator, id: u32) Allocator.Error![]u8 {
@@ -574,4 +576,21 @@ test "compaction's note prompt includes joined text parts" {
     var cx: errors.Cx = .{ .a = a };
     _ = try go(srv, a, &msgs, 32, &cx);
     try std.testing.expect(seenFrom(&eng, 0, "PART-ONE-PART-TWO-"));
+}
+
+test "thinking request: compaction keeps its internal note on a model without an off switch" {
+    var eng: Eng = .{ .window = 2000 };
+    var text: Text = .{ .reasoning = true };
+    defer freePrompts(&eng);
+    const srv = try start(&eng, &text, .{ .fraction = 0.5 }, 8, null);
+    defer srv.deinit();
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const msgs = [_]Value{ try userMsg(a, try pads(a, "BIG-", 1200)), try userMsg(a, "TAIL") };
+    var cx: errors.Cx = .{ .a = a };
+    const reply = try go(srv, a, &msgs, 32, &cx);
+    try std.testing.expect(noteOf(reply) != null);
+    try std.testing.expect(eng.prompts.items.len >= 2);
+    try std.testing.expect(seenFrom(&eng, 0, "Rewrite the memory note"));
 }

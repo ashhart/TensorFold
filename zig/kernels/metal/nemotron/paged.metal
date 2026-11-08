@@ -11,7 +11,7 @@ kernel void nemotron_kv_write_paged(const device bfloat* qkv [[buffer(0)]],
                                     uint3 size [[threads_per_grid]]) {
   const uint d = pos.x, h = pos.y, t = pos.z, hd = size.x, kvh = size.y;
   const size_t src = size_t(t) * dims.x + dims.y + h * hd + d;
-  const ulong dst = nemo_paged_row(table, dims.w + t, page_bytes, h, hd) + ulong(d) * 2;
+  const ulong dst = tf_paged_row(table, dims.w + t, page_bytes, h, hd) + ulong(d) * 2;
   *(device bfloat*)(kc + dst) = qkv[src];
   *(device bfloat*)(vc + dst) = qkv[src + kvh * hd];
 }
@@ -28,8 +28,8 @@ kernel void nemotron_kv_compact_paged(device uchar* K [[buffer(0)]],
   for (uint j = 0; j < n; j++) {
     const uint src = len + uint(path[j]), dst = len + j;
     if (src == dst) continue;
-    const ulong to = nemo_paged_row(table, dst, page_bytes, hk, hd) + ulong(d) * 2;
-    const ulong from = nemo_paged_row(table, src, page_bytes, hk, hd) + ulong(d) * 2;
+    const ulong to = tf_paged_row(table, dst, page_bytes, hk, hd) + ulong(d) * 2;
+    const ulong from = tf_paged_row(table, src, page_bytes, hk, hd) + ulong(d) * 2;
     *(device bfloat*)(K + to) = *(device bfloat*)(K + from);
     *(device bfloat*)(V + to) = *(device bfloat*)(V + from);
   }
@@ -47,6 +47,6 @@ kernel void nemotron_kv_put_paged(const device bfloat* src [[buffer(0)]],
   if (d >= D || row >= P[4] + P[0]) {
     return;
   }
-  const ulong to = nemo_paged_row(table, uint(row), page_bytes, uint(kv), uint(D)) + ulong(d) * 2;
+  const ulong to = tf_paged_row(table, uint(row), page_bytes, uint(kv), uint(D)) + ulong(d) * 2;
   *(device bfloat*)(dst + to) = row < P[4] ? old[(long(kv) * P[5] + row) * D + d] : src[(long(row - P[4]) * P[1] + kv) * D + d];
 }

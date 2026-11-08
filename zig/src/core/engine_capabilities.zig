@@ -25,6 +25,8 @@ pub const Capability = enum {
     embeddings,
     readouts,
     rerank,
+    thinking_switch,
+    thinking_applicable,
 };
 
 pub inline fn read(info: anytype, comptime capability: Capability) bool {

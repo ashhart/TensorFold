@@ -5,6 +5,7 @@ pub const round = @import("cuda_round.zig");
 pub const prompt_int8 = @import("cuda_prompt_int8.zig");
 pub const modelopt = @import("cuda_modelopt.zig");
 pub const engine = @import("cuda_engine.zig");
+pub const prefill = @import("cuda_prefill.zig");
 pub const cache = @import("cuda_cache.zig");
 pub const signatures = @import("cuda_signatures.zig");
 pub const native = @import("cuda_native.zig");
@@ -76,4 +77,8 @@ test {
 
 test "Qwen pages default: the learner's and the prefix share's refusals stop before the weights load" {
     try @import("cuda_admit_test.zig").refusals();
+}
+
+test {
+    _ = @import("cuda_request_starts_test.zig");
 }

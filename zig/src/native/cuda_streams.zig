@@ -28,8 +28,8 @@ pub const Budget = struct {
     share: bool, // TF_KV_SHARE: the prompt cache's kept states are pool pages
 };
 
-/// The streams served, and the page plan and layout or the KV ledger plan when the family has one.
-pub const Count = struct { streams: u32, paged: ?kv_pages.Plan, layout: ?kv_pool.Layout, ledger: ?ledger.Plan = null };
+/// The streams served, the page plan and layout or the KV ledger plan, and TF_KV_SHARE's count when states take slots.
+pub const Count = struct { streams: u32, paged: ?kv_pages.Plan, layout: ?kv_pool.Layout, ledger: ?ledger.Plan = null, slots: ?usize = null };
 
 /// TF_KV_SHARE: the cache's part made pool pages, all of it unless the family keeps its states' rest elsewhere (GLM).
 pub fn keptPpm(comptime F: type, share: bool) u32 {
@@ -37,9 +37,14 @@ pub fn keptPpm(comptime F: type, share: bool) u32 {
     return if (@hasDecl(F, "share_kept_ppm")) F.share_kept_ppm else 1_000_000;
 }
 
-/// TF_KV_SHARE's store opens over a cache to make pages of, or for a family keeping its own copies (GLM) at any cache.
-pub fn opensStore(comptime F: type, share: bool, cache: u64) bool {
-    return share and (cache > 0 or keptPpm(F, true) == 0);
+/// TF_KV_SHARE's store opens over a cache to make pages of, or for a family keeping copies (GLM) when it keeps any.
+pub fn opensStore(comptime F: type, share: bool, cache: u64, limit: usize) bool {
+    return share and if (keptPpm(F, true) == 0) limit > 0 else cache > 0;
+}
+
+/// TF_KV_SHARE's count when its states take the plan's slots: share on, a layout slot, and the cache on the device.
+pub fn shareSlots(share: bool, snap_bytes: u64, host_cache: bool) !?usize {
+    return if (share and snap_bytes > 0 and !host_cache) try @import("core").kv_prompts.sharing() else null;
 }
 
 /// The family's streams in `b.room`; null with `problem` set when none fit or --parallel asks for more than fit.
@@ -48,8 +53,9 @@ pub fn count(comptime F: type, a: Allocator, loaded: anytype, o: api.Open, b: Bu
     const grow = budget.growRoom(b.room, !@hasField(F.Options, "lanes"));
     const wrapped = kv_pages.wrapped(F, loaded, free, b.stream_bytes, b.room);
     if (wrapped.layout) |l| {
-        const paged = try kv_pages.plan(F, a, l, wrapped.room, o, @intCast(b.window), problem, b.host_cache, kv_pages.enginePaged(loaded), keptPpm(F, b.share)) orelse return null;
-        return .{ .streams = paged.lanes, .paged = paged, .layout = l };
+        const slots = try shareSlots(b.share, l.snap_bytes, b.host_cache); // GLM: a slot a state
+        const paged = try kv_pages.plan(F, a, l, wrapped.room, o, @intCast(b.window), problem, b.host_cache, kv_pages.enginePaged(loaded), keptPpm(F, b.share), slots) orelse return null;
+        return .{ .streams = paged.lanes, .paged = paged, .layout = l, .slots = slots };
     }
     // --parallel caps the streams; each request reserves its own bytes (a family that allocates per request)
     if (ledger.wanted(F, loaded, b.stream_bytes)) {
@@ -84,7 +90,7 @@ pub fn count(comptime F: type, a: Allocator, loaded: anytype, o: api.Open, b: Bu
     return .{ .streams = streams, .paged = null, .layout = null };
 }
 
-test "TF_KV_SHARE makes the whole cache pool pages and opens on a cache, unless the family keeps copies (GLM)" {
+test "TF_KV_SHARE makes the whole cache pool pages and opens on a cache, unless the family keeps copies in slots (GLM)" {
     const Paged = struct {};
     const Copies = struct {
         pub const share_kept_ppm: u32 = 0;
@@ -92,6 +98,13 @@ test "TF_KV_SHARE makes the whole cache pool pages and opens on a cache, unless 
     try std.testing.expectEqual(@as(u32, 1_000_000), keptPpm(Paged, true));
     try std.testing.expectEqual(@as(u32, 0), keptPpm(Copies, true));
     try std.testing.expectEqual(@as(u32, 0), keptPpm(Paged, false));
-    try std.testing.expect(opensStore(Paged, true, 1) and !opensStore(Paged, true, 0) and !opensStore(Paged, false, 1));
-    try std.testing.expect(opensStore(Copies, true, 0) and !opensStore(Copies, false, 0));
+    try std.testing.expect(opensStore(Paged, true, 1, 0) and !opensStore(Paged, true, 0, 0) and !opensStore(Paged, false, 1, 0));
+    try std.testing.expect(opensStore(Copies, true, 0, 1) and !opensStore(Copies, true, 1 << 30, 0) and !opensStore(Copies, false, 0, 1));
+}
+
+test "TF_KV_SHARE's states take slots only with share on, a layout slot and the cache on the device" {
+    try std.testing.expect(try shareSlots(true, 1, false) != null);
+    try std.testing.expect(try shareSlots(false, 1, false) == null);
+    try std.testing.expect(try shareSlots(true, 0, false) == null);
+    try std.testing.expect(try shareSlots(true, 1, true) == null);
 }

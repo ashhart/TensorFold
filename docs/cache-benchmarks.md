@@ -126,3 +126,5 @@ python3 -m unittest discover -s tools/tests -p 'test_bench*.py' -v
 Tests exercise usage validation, missing hashes, errors, incomplete/empty/tool-call-only SSE, Unicode chunking,
 concurrent request ordering, assertion failures, receipt allowlisting, and a real loopback HTTP server.
 They do not load weights or substitute for checkpoint/device performance and exactness gates.
+
+The maintained decode clients query `/v1/models` once before requests. They omit explicit thinking off only when the selected model advertises `capabilities.thinking_switch: false`. Each chat cell records `thinking`, `thinking_off_requested` and `thinking_switch`; missing discovery preserves the off request and labels it `off requested (unverified)`. Known false uses the server default. `--compare-receipt FILE` adds a warning and `thinking_comparable: false` when matching rows have different thinking labels. Raw completions do not receive a thinking field. Models advertising `thinking_applicable: false` also omit it and report `not applicable`. The single-stream chat prompt remains `gpu-chat-no-think`.

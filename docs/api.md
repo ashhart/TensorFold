@@ -97,7 +97,7 @@ tensorfold-native serve MODEL --allowed-host inference.example --allowed-origin 
 
 | Route | Behavior |
 | --- | --- |
-| `GET /v1/models` | Served model ID and any configured aliases (both servers) |
+| `GET /v1/models` | Served model ID and any configured aliases (both servers); native entries carry [capabilities](#model-capabilities) |
 | `GET /health` | Liveness, the served model, the queue and live rates; open with keys (see [Health](#health)) |
 | `GET /memory`, `GET /v1/memory` | Native read-only memory snapshot ([memory diagnostics](memory-diagnostics.md)) |
 | `GET /metrics`, `GET /v1/metrics` | Prometheus text: requests, KV occupancy, drafts and latency (both servers) |
@@ -140,7 +140,9 @@ Each native GET /v1/models entry, including every configured alias, includes a c
 It reports the loaded engine's boolean Info flags: text_generation, context_fitted, call_gates, loop_guard,
 thinking_budget, reasoning, answer_limit, structures, logprobs, penalties, prompt_logprobs, prompt_cache,
 warm_turns, plain_only, decides, pictures, greedy_only and slide_conversations. The vision, speech,
-embeddings, readouts and rerank fields report whether that user feature is present. Every field is a JSON boolean,
+embeddings, readouts and rerank fields report whether that user feature is present. The last two fields,
+thinking_switch and thinking_applicable, are the loaded chat template's and tokenizer's thinking facts (see
+[Reasoning](#reasoning)), set once at startup on the same Info flags. Every field is a JSON boolean,
 including false, and no callback details or addresses are exposed.
 
 Discovery and boolean request checks use the same loaded flag reader. Publication enables no feature.
@@ -281,7 +283,7 @@ delete runs gets 503, an id that is not a number 400, and an id the graph does n
 | `seed` | Explicit sampling key; native fallback uses configured defaults, then a fresh key (see below) | Both |
 | `stream` | Server-sent events; the last event carries usage | Both |
 | `stream_options.include_usage` | Usage in its own final event with `"choices": []`, not on the finish event | Both |
-| `chat_template_kwargs.enable_thinking` | Template thinking toggle; `chat_template_kwargs.thinking` (`true`/`false` or `{"type": "enabled"}`/`{"type": "disabled"}`, as DeepSeek-V4 clients send it) is read the same way when `enable_thinking` is absent; other values are ignored | Both |
+| `chat_template_kwargs.enable_thinking` | Template thinking toggle; explicit off returns HTTP 400 when a thinking tokenizer has neither a template switch nor a closable generation prefix; omitted switches keep working. `chat_template_kwargs.thinking` (`true`/`false` or `{"type": "enabled"}`/`{"type": "disabled"}`, as DeepSeek-V4 clients send it) is read the same way when `enable_thinking` is absent; other values are ignored | Both |
 | `thinking` | Top-level toggle, the same forms as `chat_template_kwargs.thinking`; read only when the kwargs set neither toggle, so the kwargs win. Enabling it clears a `reasoning_effort` of `none`, so the template's default effort applies | Both |
 | `draft` | False selects the serial reference; CUDA rejects it if the engine has no serial switch | Both |
 | `response_format`, `guided_json`, `guided_regex`, `guided_choice`, `guided_grammar`, `structured_outputs` | A JSON schema, any JSON object, a regex, a choice or an EBNF grammar the reply must match | Both |
@@ -513,9 +515,21 @@ grammar fails while decoding ends with HTTP 500 (an error event when streaming);
 
 ## Reasoning
 
-On both backends, `reasoning_effort: none` disables thinking; other effort values enable it and reach the chat
-template. The server also reads it from `chat_template_kwargs.reasoning_effort`, where vLLM's clients send it; the
-top-level field wins. An unnamed level maps to the nearest level the template names, and a tie takes
+Native `/v1/models` entries and aliases include `capabilities.thinking_switch`. It is true when explicit thinking off
+is supported for a simple text chat by the existing template switch or generation-prefix closure, or the tokenizer has
+no thinking-close marker. The server decides it once at startup by rendering a simple chat through the same off check
+requests use; each request still validates its own rendered prefix. It is false for a refused probe or a model without
+text generation. Benchmark clients read this bit once and omit the off field when it is false, labelled as the model
+default. Unknown discovery preserves the off request, labelled `off requested (unverified)`. The separate
+`capabilities.thinking_applicable` bit is false when no thinking-close marker exists; clients then report
+`not applicable` and send no thinking field. DeepSeek-V4.x's native encoder has its own thinking switch (thinking off
+ends the prompt with `<｜Assistant｜></think>`), so its explicit off is never refused.
+
+On both backends, `reasoning_effort: none` asks the chat template to disable thinking; an explicit off request
+returns HTTP 400 when the template cannot honor it. Only an off field the client sends is explicit: `--no-thinking`,
+the template's own default and the Messages route's default off never are. Other effort values enable thinking
+and reach the chat template. The server also reads it from `chat_template_kwargs.reasoning_effort`, where vLLM's
+clients send it; the top-level field wins. An unnamed level maps to the nearest level the template names, and a tie takes
 the higher one. GLM-5.3 lists `low`, `high` and `max`, so `max` stays `max`, `medium` is heard as `high`
 and `minimal` as `low`. Qwen3.8 lists `low`, `medium` and `xhigh`, so `high` and `max` are heard as `xhigh`.
 `xhigh` stays `xhigh`. GLM-5.3 renders `xhigh` and `max` as Max. A template that names no level hears `max` as
@@ -525,14 +539,16 @@ precedence. A request without an effort gets `--reasoning-effort` when the serve
 the template renders its own default, as vLLM and mlx-lm render it (Qwen3.8's is `xhigh`, which adds an instruction
 to the system prompt; `medium` adds none). The template hears an effort only while thinking, and both backends render
 the same prompt for the same request. Effort support depends on the checkpoint's template, and effort does not set a
-token budget. With thinking off, GLM-5.3's prompt is the template's render unchanged, plus the close of its dangling
-think block: the server appends `</think>` (one token), and the template's `Reasoning Effort` head stays as the
-template writes it. The released Python 0.6.6 engine instead rewrites GLM's render for a no-thinking request — its
-`thinking_off` strips the `Reasoning Effort` head and closes the block inline — so its no-thinking prompts are 6 to 7
-tokens shorter than native's on the same request (#1911 measured a system-plus-user prompt at 22 tokens rendered, 16
-on the Python engine, and 23 on native). A prompt count, a cache key or a kept state from one engine therefore does
-not match the other's for `enable_thinking: false`. GLM-5.3 keeps
-every earlier assistant turn's reasoning in the prompt, as zai-org's template does by
+token budget. With thinking off, native passes no reasoning effort to the template. If its generation prefix ends
+in a single `<think>` token, native appends the single `</think>` token, leaving an empty think block. This handles
+GLM-5.3 and LFM2 templates without their own off switch. Other template text stays unchanged: GLM-5.3's
+`Reasoning Effort` head stays as the template writes it, and an older GLM-5.3 template still writes its default
+`Reasoning Effort: Max` line. The released Python 0.6.6 engine instead rewrites GLM's render for a no-thinking
+request — its `thinking_off` strips the `Reasoning Effort` head and closes the block inline — so its no-thinking
+prompts are 6 to 7 tokens shorter than native's on the same request (#1911 measured a system-plus-user prompt at 22
+tokens rendered, 16 on the Python engine, and 23 on native). A prompt count, a cache key or a kept state from one
+engine therefore does not match the other's for `enable_thinking: false`. GLM-5.3 keeps every earlier assistant
+turn's reasoning in the prompt, as zai-org's template does by
 default (`clear_thinking` false), also on checkpoints whose template still clears it before the last user message, so
 a new user message leaves the earlier turns' tokens, and their kept prompt states, as they were. The native server
 gives the template `clear_thinking` false on every render, and `TF_GLM_CLEAR_THINKING=1` sets it true for the server,
@@ -860,7 +876,10 @@ instead of reading the conversation again from its first token. Qwen3.8-27B, Nem
 one Mac, and Nemotron, the Qwen3.5 hybrids and Flash Next on CUDA, keep them; other engines refuse the flag at startup.
 
 The engine stages an owned copy between rounds, and an I/O thread writes and fsyncs it. Staging has a 1 GiB byte permit
-and at most eight jobs. A save that finds either full but would fit alone waits in the queue until a write finishes; one
+and at most eight jobs. Qwen3.8-27B widens the permit to one whole state at its `--context`, with none of its rows on
+disk yet, but never past `--prompt-cache-gib`: a conversation whose first save or post-compaction prompt holds more
+than about 13K new tokens is still written. A save is charged only its new bytes, the rows not already on disk.
+A save that finds either full but would fit alone waits in the queue until a write finishes; one
 that cannot fit even then is skipped. So is a waiting save whose state leaves RAM, unless `--spill-gib` copies it then
 (below); that copy, like any made at an eviction, is skipped when the permit is full. A block still being written is
 charged and copied once, however many saves name it. The copy waits for its GPU producers before RAM can be reused. A
@@ -1045,8 +1064,11 @@ The Messages routes reuse the same chat handler and engine on MLX and CUDA. They
 blocks (including mid-conversation system text), `tool_use`/`tool_result`, custom tools and `tool_choice`, sampling, `stop_sequences`, `thinking`
 (disabled, enabled with `budget_tokens`, or adaptive), and `output_config` effort/JSON schema. Image support
 requires a vision-capable model served with `--vision` (natively GLM-5.3-Flash and Qwen3.8-27B on a Mac); other
-models answer image blocks with HTTP 400. Thinking is off unless enabled or adaptive. It round-trips as plaintext with an
-empty signature;
+models answer image blocks with HTTP 400. Thinking is off unless enabled or adaptive. A request without `thinking`
+renders thinking off as before and is never refused for it. Only a `thinking: {"type": "disabled"}` the client sends
+is an explicit off, which returns HTTP 400 when the template cannot honor it (see [Reasoning](#reasoning));
+`/v1/messages/count_tokens` gives the same refusal for the same body, and otherwise counts the prompt
+`/v1/messages` submits. Thinking round-trips as plaintext with an empty signature;
 `display` does not suppress it. Claude Code's `context_management` keep-all thinking directive is accepted. Mid-conversation system text stays
 in place with its system role; the model's chat template must support later system messages. Turn-scoped
 system messages, per-message output configuration and inline tool changes are unsupported.

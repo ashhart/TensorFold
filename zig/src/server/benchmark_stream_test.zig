@@ -381,3 +381,39 @@ test "an unbuffered refusal body is read after its head without a timed sender p
     gate.set(io);
     try std.testing.expectEqualStrings(refusal_body, stream.errorBody(a, io, &resp));
 }
+
+fn checkDefaultMode(switchable: ?bool, applicable: ?bool) !void {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const f = try fake.Fake.start(std.testing.allocator, &.{
+        .{ .method = "POST", .path = "/v1/chat/completions", .replies = &.{try fake.reply(a, true, 4, 2)} },
+    });
+    defer f.stop();
+    var client: std.http.Client = .{ .allocator = std.heap.smp_allocator, .io = std.testing.io };
+    defer client.deinit();
+    const sample = stream.attempt(a, std.testing.io, &client, .{ .base = try f.url(a, ""), .served = "m", .thinking_switch = switchable, .thinking_applicable = applicable }, opts(4, false, 5), suite.fixtures[1], 0, 1234, 0, null);
+    try std.testing.expectEqual(suite.Status.ok, sample.status);
+    const body_value = (try @import("json").parse(a, f.request(0).body)).ok;
+    try std.testing.expect(body_value.get("chat_template_kwargs") == null);
+}
+
+test "thinking benchmark: discovery reads only the selected model once" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const f = try fake.Fake.start(std.testing.allocator, &.{
+        .{ .method = "GET", .path = "/v1/models", .replies = &.{try fake.jsonReply(a, "200 OK", "{\"data\":[{\"id\":\"other\",\"capabilities\":{\"thinking_switch\":true}},{\"id\":\"m\",\"capabilities\":{\"thinking_switch\":false}}]}")} },
+    });
+    defer f.stop();
+    try std.testing.expectEqual(@as(?bool, false), (try stream.discoverThinking(a, std.testing.io, .{ .base = try f.url(a, "/v1"), .served = "m" })).switchable);
+    try std.testing.expectEqual(@as(usize, 1), f.count());
+    for ([_][]const u8{ "{}", "{\"data\":[{\"id\":\"m\"}]}", "{\"data\":[{\"id\":\"m\",\"capabilities\":{\"thinking_switch\":1}}]}", "{\"data\":[{\"id\":\"m\",\"capabilities\":{\"thinking_switch\":true}},{\"id\":\"m\",\"capabilities\":{\"thinking_switch\":false}}]}" }) |raw|
+        try std.testing.expectEqual(@as(?bool, null), stream.thinkingSwitch((try @import("json").parse(a, raw)).ok, "m"));
+}
+
+test "thinking benchmark: unsupported and inapplicable thinking omit the off field" {
+    try checkDefaultMode(false, true);
+    try checkDefaultMode(true, false);
+    try checkDefaultMode(null, false);
+}

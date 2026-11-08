@@ -181,6 +181,8 @@ pub const Info = struct {
     thinking_budget: bool = true,
     /// The model can emit a reasoning block; false: all reply text is answer content, whatever enable_thinking renders.
     reasoning: bool = true,
+    thinking_switch: bool = false, // server-set from the chat template (Server.init): an explicit thinking off is honoured
+    thinking_applicable: bool = false, // server-set from the tokenizer (Server.init): the thinking close marker is one token
     /// The engine stops the reply after the think block at Request.answer_max (every lane engine: Info.ofLanes).
     answer_limit: bool = false,
     structures: bool = false,
@@ -192,6 +194,8 @@ pub const Info = struct {
     prompt_logprobs: bool = false,
     /// Prompt rows a prefill chunk at most, for the server's chunk starts (0: the engine cuts prompts itself).
     prefill_step: u32 = 0,
+    /// The minimum distance between template message cuts; exact-start families may keep adjacent turns.
+    prefill_min_chunk: u32 = 256,
     /// The engine keeps prompt states between requests, so ``prefilled`` counts the tokens it restored.
     prompt_cache: bool = false,
     /// Startup cache budget and the smallest state admitted by the family's existing keep plan.
@@ -566,10 +570,8 @@ pub const Rounds = @import("lane_host.zig").Rounds;
 
 /// Exact prompt reuse between requests, for any family (prompt_cache.zig).
 pub const prompt_cache = @import("prompt_cache.zig");
-
 /// The same for a paged cache over the backend's own KV pages (prompt_radix.zig).
 pub const prompt_radix = @import("prompt_radix.zig");
-
 /// Decoded prompt rows as canonical spans, for a cache keyed by the arithmetic that made each row (cache_modes.zig).
 pub const cache_modes = @import("cache_modes.zig");
 

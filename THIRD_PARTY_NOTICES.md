@@ -489,3 +489,15 @@ Copyright (c) 2026 DeepSeek. The unmodified license is beside the fixture as
 [`LICENSE`](zig/src/server/fixtures/deepseek_v41_encoder/LICENSE).
 This is test data, not an encoder implementation. TensorFold's renderer was
 written from these outputs and its existing code without consulting the encoder's source.
+
+## Thinking-off checkpoint template fixtures
+
+The fixtures in `zig/src/server/fixtures/thinking/` are unmodified release files, used only as host-test inputs:
+- `glm53.jinja` and `glm53-tokenizer_config.json` come from
+  [nvidia/GLM-5.3-Flash-NVFP4](https://huggingface.co/nvidia/GLM-5.3-Flash-NVFP4) at revision `da920bb0b9f4`
+  (NVIDIA's quantization of zai-org's GLM-5.3-Flash), under the MIT license its model card states. See
+  [`LICENSES/MIT.txt`](LICENSES/MIT.txt).
+- `lfm2.jinja` and `lfm2-tokenizer_config.json` come from
+  [LiquidAI/LFM2.5-24B-A2B-MLX-4bit](https://huggingface.co/LiquidAI/LFM2.5-24B-A2B-MLX-4bit) at revision
+  `667408d494bde191c2cb9dd4f4549827816b9275`, under the LFM Open License v1.0. See
+  [`LICENSES/LFM-Open-1.0.txt`](LICENSES/LFM-Open-1.0.txt).

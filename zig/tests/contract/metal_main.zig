@@ -30,10 +30,6 @@ const fsr = @import("metal_fsr.zig");
 const gemma = @import("metal_gemma4.zig");
 const gemma_embed = @import("metal_gemma4_embed.zig");
 const gemma_mixed = @import("metal_gemma4_mixed.zig");
-const lfm2_argmax = @import("metal_lfm2_argmax.zig");
-const lfm2_streams = @import("metal_lfm2_streams.zig");
-const lfm2_tap = @import("metal_lfm2_tap.zig");
-const lfm2_controls = @import("metal_lfm2_controls.zig");
 const llama_k = @import("metal_llama_all.zig");
 const g = contract.gates;
 const usage = "usage: tf-kernel-contract [--only TEXT] [--no-gates] [--no-limits] [--offline DIR] [--seed N] [--repro] [--rotary-long] [--rotary-accuracy FILE]";
@@ -64,7 +60,7 @@ fn parse(args: []const [:0]const u8) !Opts {
     return o;
 }
 
-const Reg = struct { v: affine_k.Variant, name: []const u8 };
+const Reg = affine_k.Reg;
 const common = [_]Reg{
     .{ .v = .{ .kind = .row, .bits = 4, .group = 64 }, .name = "metal row projection q4 g64" },
     .{ .v = .{ .kind = .row, .bits = 6, .group = 32 }, .name = "metal row projection q6 g32" },
@@ -80,15 +76,10 @@ const common = [_]Reg{
     .{ .v = .{ .kind = .simd_bits, .bits = 8, .group = 64 }, .name = "metal simd_qmm_bits q8 g64" },
     .{ .v = .{ .kind = .lane, .bits = 6, .group = 32 }, .name = "metal lane projection q6 g32 sk1" },
     .{ .v = .{ .kind = .lane, .bits = 6, .group = 32, .sk = 4, .f32_out = true }, .name = "metal lane projection q6 g32 sk4 fp32 out" },
-};
+} ++ affine_k.half;
 
 /// The lane kernel takes every format on the M5's tensor units, and 6-bit groups of 32 alone before them.
-const m5_only = [_]Reg{
-    .{ .v = .{ .kind = .lane, .bits = 4, .group = 64, .sk = 2 }, .name = "metal lane projection q4 g64 sk2" },
-    .{ .v = .{ .kind = .lane, .bits = 4, .group = 64, .coop = true }, .name = "metal lane projection q4 g64 cooperative" },
-    .{ .v = .{ .kind = .lane_reg, .bits = 4, .group = 64 }, .name = "metal lane projection q4 g64 reg" },
-    .{ .v = .{ .kind = .lane, .bits = 8, .group = 128, .sk = 4 }, .name = "metal lane projection q8 g128 sk4" },
-};
+const m5_only = @import("metal_lane_variants.zig").m5;
 
 /// Ornith-1.5-122B's routed block: the experts' decode rows with an extra matrix, then moe.metal's kernels.
 const Moe = struct {
@@ -223,58 +214,9 @@ pub fn main(init: std.process.Init) !u8 {
         if (!tensor) return error.TensorUnitsRequired;
         try kernels.append(a, mixed.kernel());
     }
-    var lfm2_list: std.ArrayList(*lfm2_argmax.Probe) = .empty;
-    var lfm2_streams_list: std.ArrayList(*lfm2_streams.Probe) = .empty;
-    defer {
-        for (lfm2_list.items) |p| {
-            p.deinit();
-            a.destroy(p);
-        }
-        for (lfm2_streams_list.items) |p| {
-            p.deinit();
-            a.destroy(p);
-        }
-        lfm2_list.deinit(a);
-        lfm2_streams_list.deinit(a);
-    }
-    for (std.enums.values(lfm2_controls.Mutation)) |m| {
-        const argmax_side = m == .none or m == .argmax_last_tie or m == .argmax_no_flag;
-        if (argmax_side) {
-            if (!wanted(o, if (m == .none) lfm2_argmax.name else m.name())) continue;
-            const p = try a.create(lfm2_argmax.Probe);
-            errdefer a.destroy(p);
-            p.* = try lfm2_argmax.Probe.init(a, device, queue, m);
-            try lfm2_list.append(a, p);
-            try kernels.append(a, p.kernel());
-            if (m != .none) continue;
-        }
-        for (std.enums.values(lfm2_streams.Which)) |w| {
-            const control_for = (m == .conv_first_state and w == .conv) or (m == .attention_first_cache and w == .attention);
-            if (m != .none and !control_for) continue;
-            if (!wanted(o, if (m == .none) lfm2_streams.spec(w).name else m.name())) continue;
-            const p = try a.create(lfm2_streams.Probe);
-            errdefer a.destroy(p);
-            p.* = try lfm2_streams.Probe.init(a, device, queue, w, m);
-            try lfm2_streams_list.append(a, p);
-            try kernels.append(a, p.kernel());
-        }
-    }
-    var tap_list: std.ArrayList(*lfm2_tap.Probe) = .empty;
-    defer {
-        for (tap_list.items) |p| {
-            p.deinit();
-            a.destroy(p);
-        }
-        tap_list.deinit(a);
-    }
-    for ([_]lfm2_controls.Mutation{ .none, .tap_packed_rows, .tap_clobbers_column }) |m| {
-        if (!wanted(o, if (m == .none) lfm2_tap.name else m.name())) continue;
-        const p = try a.create(lfm2_tap.Probe);
-        errdefer a.destroy(p);
-        p.* = try lfm2_tap.Probe.init(a, device, queue, m);
-        try tap_list.append(a, p);
-        try kernels.append(a, p.kernel());
-    }
+    var lfm2: @import("metal_lfm2_suite.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer lfm2.deinit();
+    try lfm2.collect(o.only);
     var rows_list: std.ArrayList(*rows_k.Row) = .empty;
     var proj_list: std.ArrayList(*affine_k.Proj) = .empty;
     defer for (rows_list.items) |r| r.deinit();
@@ -414,6 +356,9 @@ pub fn main(init: std.process.Init) !u8 {
         try proj_list.append(a, p);
         try kernels.append(a, p.kernel());
     };
+    var q8_exact = @import("metal_lane_q8.zig").Suite{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer q8_exact.deinit();
+    if (tensor) try q8_exact.collect(o.only);
     var gathers: std.ArrayList(*gather_k.Gather) = .empty;
     defer {
         for (gathers.items) |x| {
@@ -583,7 +528,7 @@ pub fn main(init: std.process.Init) !u8 {
     const t1 = std.Io.Clock.awake.now(init.io);
     var lim: usize = 0;
     if (o.limits) {
-        lim = try limits_k.gate(a, init.io, device, o.offline);
+        lim = try limits_k.gate(a, init.io, device, o.offline, o.only);
         lim += try gemma.limits(a, device, o.only);
         lim += try gemma_embed.limits(a, device, o.only);
         lim += try gemma_mixed.limits(a, device, o.only);

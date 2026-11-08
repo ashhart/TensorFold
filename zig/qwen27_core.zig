@@ -23,6 +23,9 @@ pub const quant = @import("src/core/quant/quant.zig");
 
 pub const draft_ops = @import("draft_ops");
 pub const shared_attention = @import("src/core/shared_attention.zig");
+/// The core pool and its Metal pages, which TF_QWEN27_METAL_KV_PAGES keeps the 27B's keys and values in.
+pub const kv_pool = @import("src/core/kv_pool.zig");
+pub const metal_kv_pages = @import("src/core/metal_kv_pages.zig");
 
 pub const affine4 = @import("src/core/affine4.zig");
 pub const affine4_lane = @import("src/core/affine4_lane.zig");

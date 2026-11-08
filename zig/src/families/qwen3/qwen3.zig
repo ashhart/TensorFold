@@ -9,6 +9,7 @@ pub const prompt = @import("prompt.zig");
 pub const native = @import("native.zig");
 pub const Spec = config.Spec;
 pub const Model = model.Model;
+pub const Layout = model.Layout;
 pub const readRows = model.readRows;
 pub const readVector = model.readVector;
 pub const readSpec = model.readSpec;

@@ -12,6 +12,9 @@ const draws = @import("draw.zig");
 const Draft = @import("cuda_draft.zig").Draft;
 const cuda_rope = @import("cuda_rope.zig");
 const prefill = @import("cuda_prefill.zig");
+const readout = @import("cuda_readout.zig");
+pub const Readout = readout.Readout;
+pub const readout_piece_rows = readout.piece_rows;
 const Fill = prefill.Fill;
 const reuse = @import("cuda_reuse.zig");
 const Mtp = @import("cuda_mtp.zig").Mtp;
@@ -48,6 +51,10 @@ pub const snap_lookahead: u32 = 0;
 pub const snap_grid: u32 = E.max_rows;
 /// --learn-conversations: the kept states' disk image, the probe their identity hashes, the facts they depend on.
 pub const kept_disk = @import("cuda_disk.zig");
+
+/// cuda_prefill cuts a cold pass at the request's chunk starts too, so the server may send its message starts.
+pub const request_starts = true;
+pub const request_starts_switch = "TF_QWEN_REQUEST_STARTS";
 
 /// explain() words open refusals too (--vision on a checkpoint without a tower it reads).
 pub const explains_open = true;
@@ -137,8 +144,13 @@ pub fn ledgerPool(p: *anyopaque) ?*@import("core").kv_pool.Pool {
 }
 
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
-    if (kernels != null) return error.QwenHasNoCapturedKernels;
     try decide.check(gpa, io, dir, .{ .drafter = o.drafter != null, .slide = o.slide, .vision = o.vision != null, .kv8 = o.kv8, .prompt_int8 = o.prompt_int8 });
+    return openLanes(gpa, io, ctx, dir, kernels, o);
+}
+
+/// `open` without the decision-only refusals: the runners open a BF16 backbone with a test readout through it.
+pub fn openLanes(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
+    if (kernels != null) return error.QwenHasNoCapturedKernels;
     if (o.slide and o.kv8) return error.UnsupportedLearningFormat;
     const page_tokens = try pages_mod.paging();
     const engine_paged = page_tokens > 0 and pages_mod.pagedOnly();
@@ -227,6 +239,7 @@ pub fn explain(ctx: ?*anyopaque, err: anyerror) ?[]const u8 {
     if (ctx == null) return switch (err) {
         error.NoQwenVision => "--vision: this checkpoint has no image tower (no vision_config): serve it without --vision",
         error.QwenPagesNoLearner => "TF_QWEN_KV_PAGES: the learner reads whole windows, not pages; drop --slide or unset it",
+        error.QwenRequestStartsWithSharedKv => "TF_QWEN_REQUEST_STARTS=1 cannot be used with TF_QWEN_KV_SHARE above 0; unset request starts or disable shared KV",
         error.QwenShareNeedsPages => "TF_QWEN_KV_SHARE keeps prompts as pool pages: set TF_QWEN_KV_PAGES to a divisor of the 4096-row prompt chunk",
         error.BadQwenKvShare => "TF_QWEN_KV_SHARE takes the most recurrent-state snapshots the prompt cache keeps (0 or unset: off)",
         error.QwenYarnNoLearner => "--slide: the learner's attention ropes without YaRN; serve without --slide, or without --rope-yarn and a YaRN config",
@@ -294,8 +307,11 @@ pub const Lanes = struct {
     calibration: ?*Draft = null,
     /// Prompt passes going a cut at a time (prefill_step), from their first step to their last.
     fills: std.AutoHashMapUnmanaged(*lanes.Stream, Fill) = .empty,
+    /// The readout readout streams fill (none: they are refused) and each one's state, from its first piece to release.
+    readout: readout.Side = .{},
 
     fn deinit(self: *Lanes) void {
+        self.readout.deinit(self.gpa, self.e); // drained and closed before any cache a pending piece writes goes
         var it = self.caches.valueIterator();
         while (it.next()) |cache| self.give(cache.*); // a pool lane's pages back, a window to the reserve
         self.caches.deinit(self.gpa);
@@ -352,8 +368,31 @@ pub const Lanes = struct {
         self.startup.add(try cost_adapter.measure(self, d, reserved));
     }
 
+    /// The text streams' entries, and the same with a readout's completion once one is attached.
+    const text_vtable: be.Backend.VTable = .{ .prefill = prefillFn, .prefill_step = prefillStepFn, .cancel_prefill = cancelPrefillFn, .reports_fill = true, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .prepare_features = prepareFeaturesFn, .features = featuresFn, .release = releaseFn };
+    const read_vtable: be.Backend.VTable = blk: {
+        var v = text_vtable;
+        v.readout_finish = readoutFinishFn;
+        break :blk v;
+    };
+
     fn backend(self: *Lanes) be.Backend {
-        return .{ .ptr = self, .round_observer = if (self.trace) |x| x.observer() else null, .first_before_draft = true, .penalties = true, .vtable = &.{ .prefill = prefillFn, .prefill_step = prefillStepFn, .cancel_prefill = cancelPrefillFn, .reports_fill = true, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .prepare_features = prepareFeaturesFn, .features = featuresFn, .release = releaseFn } };
+        return .{ .ptr = self, .round_observer = if (self.trace) |x| x.observer() else null, .first_before_draft = true, .penalties = true, .vtable = if (self.readout.readout != null) &read_vtable else &text_vtable };
+    }
+
+    /// Readout streams from now on fill through `r` (one rank; before the first stream): the backend to hand on.
+    pub fn useReadout(self: *Lanes, r: Readout) be.Backend {
+        self.readout.readout = r;
+        return self.backend();
+    }
+
+    /// What the engine's readouts take, for its `Info` (null: none).
+    pub fn readouts(self: *const Lanes) ?lanes.readout.Info {
+        return if (self.readout.readout) |r| r.info else null;
+    }
+
+    fn readoutFinishFn(ptr: *anyopaque, stream: *lanes.Stream, logits: []u16) !void {
+        return readout.finish(cast(ptr), stream, logits);
     }
 
     /// A drafter's bytes in each lane's run: DFlash2's ring, or MTP's ring and state (0: no drafter).
@@ -378,10 +417,11 @@ pub const Lanes = struct {
     }
 
     fn prefillFn(ptr: *anyopaque, stream: *lanes.Stream) !void {
-        return prefill.run(cast(ptr), stream);
+        if (stream.readout != null) while (!try readout.step(cast(ptr), stream, 0)) {} else return prefill.run(cast(ptr), stream);
     }
 
     fn prefillStepFn(ptr: *anyopaque, stream: *lanes.Stream, max_rows: u32) !bool {
+        if (stream.readout != null) return readout.step(cast(ptr), stream, max_rows);
         return prefill.step(cast(ptr), stream, max_rows);
     }
 
@@ -524,6 +564,7 @@ pub const Lanes = struct {
 
     fn releaseFn(ptr: *anyopaque, stream: *lanes.Stream) void {
         const self = cast(ptr);
+        readout.release(self, stream);
         if (self.caches.fetchRemove(stream)) |entry| self.give(entry.value);
         if (self.seen.fetchRemove(stream)) |entry| self.gpa.free(entry.value);
         self.endFill(stream);

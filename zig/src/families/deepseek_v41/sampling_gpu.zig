@@ -12,9 +12,8 @@ pub const Seg = pipe.Pipe.Seg;
 pub const sampled = pipe.sampled;
 
 /// TF_DSV41_SAMPLING=1 (every rank alike): model.zig makes the sampler; unset, sampled requests are refused as before.
-pub fn enabled() bool {
-    const v = std.c.getenv("TF_DSV41_SAMPLING") orelse return false;
-    return std.mem.eql(u8, std.mem.span(v), "1");
+pub fn enabled() !bool {
+    return @import("sys").environment.read(bool, "TF_DSV41_SAMPLING", false);
 }
 
 /// One rank's sampler over its forward (model.zig makes one on every rank; it hooks the follower side itself).

@@ -19,6 +19,7 @@ const usage =
     \\TF_Q35_WINDOW=N fixes window/tree width (tree: at least 2); 0 keeps growing widths.
     \\       tf-qwen35-cuda <model dir> rows <ids file> <out> [piece] | rows-last <ids file> | rows-cuts <ids file>
     \\rows: final-norm rows as a readout keeps them (raw bf16); rows-last checks them against .last; rows-cuts reports.
+    \\       tf-qwen35-cuda <model dir> readout <ids file> [streams]: a test readout's rows alone, together, after a cancel
     \\       tf-qwen35-cuda <model dir> kl <ids file> <out.json> <skip> <rows> [control|int8]
     \\kl: bf16 caches against fp8 ones, teacher-forced: the first <skip> ids as prompt chunks, then <rows> ids in
     \\windows, each row's KL(bf16 || fp8) of the next-token distributions, top-1 agreement and both losses on the next
@@ -39,6 +40,11 @@ pub fn main(init: std.process.Init) !u8 {
         }
         const bound: ?[2]f64 = if (bounded) .{ try std.fmt.parseFloat(f64, args[6]), try std.fmt.parseFloat(f64, args[7]) } else null;
         return vision(init, a, args[1], args[3], try std.fmt.parseInt(u32, args[4], 10), bound, args[first..]);
+    }
+    if (args.len >= 4 and std.mem.eql(u8, args[2], "readout")) {
+        const code = try @import("qwen35_cuda_readout.zig").run(init, a, args);
+        if (code == 2) std.debug.print("{s}", .{usage});
+        return code;
     }
     if (args.len >= 4 and std.mem.startsWith(u8, args[2], "rows")) {
         const code = try @import("qwen35_cuda_rows.zig").run(init, a, args);

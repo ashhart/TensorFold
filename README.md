@@ -44,6 +44,8 @@ Before opening a pull request, have the agent run the [pull request skill](docs/
 
 Start with Qwen3.5-2B, the small 4-bit checkpoint checked on Metal and a GB10. The commands below download its
 pinned revision, then serve it as `local-model`. Model weights have their own licenses.
+Reviewing or benchmarking TensorFold? [Evaluating TensorFold](docs/evaluating.md) covers pinning, signature checks,
+a container and the tests that need no GPU.
 
 ### Mac with Apple Silicon
 
@@ -93,6 +95,10 @@ The API also serves completions, Responses and Anthropic Messages. `/v1/models` 
 On Windows with an NVIDIA GPU, follow [the native Windows build guide](docs/WINDOWS.md).
 Use `tensorfold --help`, `tensorfold capabilities --json` and `tensorfold serve REPO --help` to inspect your binary.
 You can also serve a complete local checkpoint directory or an existing Hugging Face cache.
+
+`tensorfold web [ARGS...]` opens TensorFold Web, a small local web app for picking, running and chatting with models.
+If it needs installing, an interactive release binary offers to install its matching version with `uv` after you say yes.
+See [the web launcher](docs/web.md) for manual installation and unattended use.
 
 `--parallel N` caps active requests at N; extra requests wait for a free slot.
 Omitting the flag uses `--parallel auto`, which asks for up to eight streams as memory and the engine allow.
@@ -561,6 +567,7 @@ Thank you to everyone who has sent TensorFold a pull request, a measurement or a
 [@spenchey](https://github.com/spenchey),
 [@squarrier](https://github.com/squarrier),
 [@ss-cong](https://github.com/ss-cong),
+[@Stephane-Eden](https://github.com/Stephane-Eden),
 [@styles01](https://github.com/styles01),
 [@SvangenStudios](https://github.com/SvangenStudios),
 [@swbiggart](https://github.com/swbiggart),

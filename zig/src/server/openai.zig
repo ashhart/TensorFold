@@ -119,11 +119,11 @@ const Plan = struct {
 
 /// A chat body checked as a chat completion's is, for routes that render it without a reply (/v1/imprint).
 pub fn chatInput(srv: *Server, cx: *Cx, raw: Value) errors.Refused!chat.Input {
-    return (try plan(srv, cx, true, raw, null)).input;
+    return (try plan(srv, cx, true, raw, null, true)).input;
 }
 
 /// Everything checked before a reply starts (a refusal here is a 400 with no stream opened).
-fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value, format: ?[]const u8) errors.Refused!Plan {
+fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value, format: ?[]const u8, client_thinking: bool) errors.Refused!Plan {
     const body = try fields.parseNumbers(cx, raw);
     try fields.validateModalities(cx, body);
     // rows need each token's exact bytes: a tokenizer whose decoding depends on context (null) can't give them
@@ -160,6 +160,7 @@ fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value, format: ?[]const u8) e
     if (thinking.enable) |on| try sampling.put(cx.a, "enable_thinking", .{ .bool = on });
     if (thinking.clear) |c| try sampling.put(cx.a, "clear_thinking", .{ .bool = c });
     input.fields = .{ .object = sampling };
+    input.explicit_off = client_thinking and !(thinking.enable orelse true);
     const streamed = if (body.get("stream")) |s| s.truthy() else false;
     input.prompt_logprobs = try fields.promptLogprobs(cx, body, !is_chat, streamed, srv.info.capability(.prompt_logprobs));
     if (logprobs != null) {
@@ -230,15 +231,15 @@ fn promptText(srv: *Server, cx: *Cx, p: Value) errors.Refused![]const u8 {
 
 /// The chat or completion reply to ``raw`` (already decoded), written to ``out``.
 pub fn run(srv: *Server, a: Allocator, out: Out, gone: Gone, is_chat: bool, raw: Value) void {
-    runNamed(srv, a, out, gone, is_chat, raw, null);
+    runNamed(srv, a, out, gone, is_chat, raw, null, true);
 }
 
 /// ``run`` for a route whose client named the grammar field (Responses' text.format, Messages' output_config.format).
-pub fn runNamed(srv: *Server, a: Allocator, out: Out, gone: Gone, is_chat: bool, raw: Value, format: ?[]const u8) void {
+pub fn runNamed(srv: *Server, a: Allocator, out: Out, gone: Gone, is_chat: bool, raw: Value, format: ?[]const u8, client_thinking: bool) void {
     const field: []const u8 = if (is_chat) "messages" else "prompt";
     const id = ids.make(a, if (is_chat) "chatcmpl-" else "cmpl-", 32) catch return;
     var cx: Cx = .{ .a = a };
-    var p = plan(srv, &cx, is_chat, raw, format) catch |e| {
+    var p = plan(srv, &cx, is_chat, raw, format, client_thinking) catch |e| {
         if (e == error.OutOfMemory) cx.message = "out of memory";
         logRefused(id, cx.message);
         const body = errorBody(a, &cx, field) catch return;

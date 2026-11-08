@@ -90,6 +90,14 @@ On a CUDA machine, build with `-Dnvcc` (the controls are compiled only then), an
 -Dsm=80,86,89,120,121`, then `tf-cuda-test kernel-contract-limits zig-out/fatbin`. Its `RECORD` lines are the values
 `registry.zig` holds for that build's nvcc (see [CUDA records per nvcc release](#cuda-records-per-nvcc-release)).
 
+For a development sm_110 build, use `-Dsm=110` in the fatbin build and run the same limits command on that set.
+The `DIR` must contain `norms.fatbin` and every registered image; the runner reads `norms.fatbin` first to select
+the release or sm_110 audit mode. It reads sm_110 registers, static shared bytes and bounds from each cubin and
+checks its device limits; the five release SMs retain their pinned `RECORD` entries. This does not enable
+`-Dgpu=sm_110`. On sm_110, some 48 KiB dynamic shared-memory kernels carry another 1 KiB of static shared memory.
+Only their sm_110 audit uses the opt-in limit already raised by their loaders (`allowDynamicShared`).
+For a mixed release and sm_110 set, each planted control must go red on each target separately.
+
 On an AMD machine, run `zig build hip-kernel-contract -Dhip-arch=ARCH -Dhipcc=...` on a GPU of that chip (the
 controls are built with the kernels). For the limits of every served chip, `zig build hip-kernel-contract-limits
 -Dhipcc=...` compiles every kernel group and the controls for gfx1030, gfx1100, gfx1151 and gfx1201 and checks each
@@ -111,13 +119,20 @@ native zebins the audit reads, so the GRF mode the record states is the loaded i
 id it ran on. `xpu-contract-run` runs it on this card. On a host without ocloc, `-Dxpu-images=DIR` links zebins that
 another host made with the commands the receipt records.
 
+On any host, with no device, `zig build cpu-contract` runs the CPU kernels (Qwen3.5-2B's affine projection and RMS
+norm on the host's cores) through gates 1 to 4 and their eight controls; a CPU kernel has no launch, so gate 5 has
+nothing to check. `zig build test-kernel-contract`, CI's no-device step, runs the same gates as a test, and `zig build
+test` the kernels' own test that the bytes are the same at 1 to 16 threads and at column splits every 8 columns to 256 and every 256 beyond (each alignment of the four-tile pass), on x86_64 and arm64.
+
+`--only` filters generic Metal launch labels too; both global launch-limit controls still run.
+
 Every run ends with a `SUMMARY` line: kernels passing gates 1 to 4, known findings, controls red, and limit problems.
 The program exits 1 on any failed gate, any control that stayed green, or any limit problem.
 
 ## Adding a kernel
 
-1. Write its test type in `zig/tests/contract/` (Metal), `zig/tests/cuda/contract_*.zig` (CUDA) or
-   `zig/tests/hip/contract_*.zig` (HIP): `prepare` builds
+1. Write its test type in `zig/tests/contract/` (Metal), `zig/tests/cuda/contract_*.zig` (CUDA),
+   `zig/tests/hip/contract_*.zig` (HIP) or `zig/tests/cpu/contract_*.zig` (CPU): `prepare` builds
    the inputs for a shape and a gate's fill (usually through an input family), `run` launches once and waits, `count`
    and `reference` give the outputs and their float64 values, `simulate` replays the sums for gate 4.
 2. Add it to the runner's list, with its served shapes and tiles.
@@ -325,9 +340,22 @@ HIP also checks the router over the rows a checkpoint already holds in bf16 (`tf
 form), bit-equal to the fp32-rows router it replaces at 1 to 16 rows, with both kinds' non-finite plants through gate 1
 and the exact sums of gate 4.
 
-On gfx12, HIP also checks the WMMA dense tile (`dense_wmma12_gemm`, both block geometries, fp32 and BF16 out) against
-its depth-k bound. Its control, the same tile summing each 16-deep step in BF16 (`tf_ctl_wmma12_bf16_sum`), goes red
-at gate 4.
+On gfx12, HIP also checks the WMMA dense tile (`dense_wmma12_gemm`, both block geometries, fp32 and BF16 out). The
+small block meets its depth-k bound. The big block (64-deep K steps over swizzled LDS rows) replaces the 32-deep block
+it was before #2245's second lever, byte for byte: gate 3 runs a frozen copy of that block (`tf_ref_wmma12_k32`, in the
+controls' code object, with its own gate-5 record) on the same inputs, and the kernel tests hold both geometries to
+float64. Three controls go red: the small block summing each 16-deep step in BF16 (`tf_ctl_wmma12_bf16_sum`) at gate 4,
+and at gate 3 against the frozen block, the big block loading its operands without the stores' swizzle
+(`tf_ctl_wmma12_unswizzled`) and the big block without its K loop's barriers (`tf_ctl_wmma12_unordered`). The last is a
+race, so gate 3 launches it up to eight times a shape and counts it red if any launch differs.
+
+On gfx12, HIP also checks the WMMA product with silu x up in its epilogue (`dense_wmma12_gemm_silu`, a 2-wave 16 x 64
+block and the 128 x 128 block, BF16 out), over a gate/up weight interleaved in 16-row groups. Each block replaces the
+plain WMMA product on that weight, its split into gate and up columns (`tf_copy_cols`) and `tf_silu_mul`, byte for
+byte, at Qwen3-8B's served rows and each block's edges; gate 1 holds the unfused bytes and every float64 class, and
+gate 4 negates the stress rows' x so that every gate and up sum is positive and silu keeps its error. One control goes
+red at gate 3: the pair epilogue applying silu to the fp32 gate sum instead of its BF16 rounding
+(`tf_ctl_silu_unrounded`), once the served kernel shows the unfused bytes on the same inputs.
 
 RADIO's fused bias, activation and residual (`tf_vit_bias_act`) replaces `tf_vit_bias` then
 `tf_vit_pointwise`, byte for byte.
@@ -386,6 +414,15 @@ Older SMs build main's loop, and their records are main's.
 CUDA also checks MOSS-Image's glue (`moss_image.cu`: the norm, plain and modulated; q/k norm and rotary into packed
 rows; situ; the gated add), each output within float64's range at its torch bf16 points (five controls, each dropping
 one point), and `vision_kernel` at head dim 128 against `contract_attn.zig`'s float64 reference (`moss-contract`).
+
+CPU: Qwen3.5-2B's affine projection (4 bits, groups of 64, `cpu_kernels.zig`) at the widths the 2B calls it, one row
+to a 128-row prompt chunk, registered once for each chain count of its projection classes (16; 32 for the delta rule's
+a and b; 8 for the head), and its RMS norm over 2048-wide rows; each registration's runs take 1 to 8 threads in turn,
+so gate 2's five runs are five thread counts (the 16-output a and b projections have two tiles, so all five of theirs
+run on two). Eight controls: a projection zeroing a non-finite activation, writing its
+activations, skipping the rows past its last block of eight, and summing each group in half; a norm taking a
+non-finite input as zero, writing its output over its input, scaling by the next element's weight, and summing its
+squares in bf16.
 
 ## CUDA records per nvcc release
 
