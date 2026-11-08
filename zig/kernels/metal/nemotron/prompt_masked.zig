@@ -49,7 +49,7 @@ pub const paged_source = blk: {
     var scan = edit(picker, "nemotron_prompt_scan(", "nemotron_prompt_scan_paged(", 1);
     scan = edit(scan, "device atomic_uint* flag [[buffer(2)]], uint3 tg", "device atomic_uint* flag [[buffer(2)]], device const uint* table [[buffer(3)]], constant ulong& page_bytes [[buffer(4)]], uint3 tg", 1);
     scan = edit(scan, "  const device bfloat* v = V + long(tg.z) * P[19];\n", "", 1);
-    scan = edit(scan, "    const uint2 bits = *(const device uint2*)(v + long(key) * P[20] + lane * 4);", "    const device bfloat* v = (const device bfloat*)((const device uchar*)V + nemo_paged_row(table, uint(key), page_bytes, tg.z, uint(P[20])));\n    const uint2 bits = *(const device uint2*)(v + lane * 4);", 1);
+    scan = edit(scan, "    const uint2 bits = *(const device uint2*)(v + long(key) * P[20] + lane * 4);", "    const device bfloat* v = (const device bfloat*)((const device uchar*)V + tf_paged_row(table, uint(key), page_bytes, tg.z, uint(P[20])));\n    const uint2 bits = *(const device uint2*)(v + lane * 4);", 1);
     break :blk paged.prefill ++ helpers ++ "namespace tfp {\n" ++ b ++ "}\n" ++ entries ++ scan;
 };
 
