@@ -42,6 +42,20 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     const layers_run = b.addRunArtifact(b.addTest(.{ .root_module = layers, .filters = &.{"qwen35 layers:"} }));
     b.step("test-qwen35-layers-host", "Qwen3.5's layer pattern through every backend's config entry point without devices").dependOn(&layers_run.step);
     step.dependOn(&layers_run.step);
+    const rules = b.createModule(.{
+        .root_source_file = b.path("zig/qwen35_rules_host.zig"),
+        .target = host,
+        .optimize = .debug,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "cuda", .module = cuda },        .{ .name = "core", .module = mods.core },
+            .{ .name = "lanes", .module = mods.lanes }, .{ .name = "qwen_vision", .module = mods.qwen_vision },
+        },
+    });
+    const rules_run = b.addRunArtifact(b.addTest(.{ .root_module = rules, .filters = &.{"qwen35 rules:"} }));
+    const rules_about = "Qwen3.5's computed-part rows through every backend's config entry point without devices";
+    b.step("test-qwen35-rules-host", rules_about).dependOn(&rules_run.step);
+    step.dependOn(&rules_run.step);
     @import("glm_contract_host.zig").host(b, cuda, mods.core, step);
     @import("dory.zig").host(b, @import("dory.zig").module(b, host, .debug, cuda, mods.core, mods.lanes), step);
     const attention = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"Qwen attention path:"} }));

@@ -168,7 +168,7 @@ const old = struct {
 };
 
 /// A Qwen3.5 target config.json found in a source file: its bytes, text tower and layer count.
-const Real = struct { file: []const u8, json: []const u8, tower: std.json.ObjectMap, layers: usize };
+pub const Real = struct { file: []const u8, json: []const u8, tower: std.json.ObjectMap, layers: usize };
 
 /// Every source holding real Qwen3.5 target configs, and how many each holds (whole literals, `++` joined).
 const sources = .{
@@ -185,7 +185,7 @@ const sources = .{
 };
 
 /// The configs of every source, each checked against its count.
-fn reals(a: std.mem.Allocator) ![]const Real {
+pub fn reals(a: std.mem.Allocator) ![]const Real {
     var out: std.ArrayList(Real) = .empty;
     inline for (sources) |s| {
         const before = out.items.len;
@@ -291,7 +291,7 @@ fn variant(a: std.mem.Allocator, base: []const u8, layers: ?usize, types: ?usize
 }
 
 /// The 2B's config.json, and the 27B widths' config at the 27B's 64 layers: between them every entry point admits one.
-fn bases(a: std.mem.Allocator) ![2][]const u8 {
+pub fn bases(a: std.mem.Allocator) ![2][]const u8 {
     var out: [2][]const u8 = undefined;
     for (try reals(a)) |r| {
         if (std.mem.endsWith(u8, r.file, "qwen3_5/config.zig") and r.layers == metal2b.layers) out[0] = r.json;
