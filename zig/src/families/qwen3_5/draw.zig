@@ -6,51 +6,16 @@ const c = @import("config.zig");
 /// A row's allowed-token bits (structured output): one bit a logit.
 pub const mask_words = (c.vocab + 31) / 32;
 
-pub fn value(word: u16) f64 {
-    return @as(f32, @bitCast(@as(u32, word) << 16));
-}
+pub const value = lanes.sampling_row.value;
 
-/// The unchanged top-k candidates for the shared fp64 keyed sampler; a `mask` keeps its allowed ones (-inf's draw).
+/// The bounded top-k draw when it applies, else core's row draw (lanes.sampling_row) under the Qwen error names.
 pub fn draw(gpa: std.mem.Allocator, logits: []const u16, settings: ?lanes.Sampling, position: u64, mask: []const u32) !u32 {
     if (settings) |sampling| if (try @import("draw_topk.zig").draw(logits, sampling, position, mask)) |token| return token;
-    var best: ?usize = null;
-    var allowed: usize = 0;
-    for (logits, 0..) |word, id| {
-        const x = value(word);
-        if (!std.math.isFinite(x)) return error.NonfiniteQwenLogits;
-        if (mask.len > 0 and !lanes.grammar.allows(mask, id)) continue;
-        allowed += 1;
-        if (best == null or x > value(logits[best.?])) best = id;
-    }
-    if (best == null) return error.NoAllowedQwenToken;
-    const sampling = settings orelse return @intCast(best.?);
-    if (sampling.temperature <= 0) return @intCast(best.?);
-    const k = if (sampling.top_k == 0) allowed else @min(allowed, sampling.top_k);
-    const values = try gpa.alloc(f64, k);
-    defer gpa.free(values);
-    const ids = try gpa.alloc(u64, k);
-    defer gpa.free(ids);
-    var filled: usize = 0;
-    for (logits, 0..) |word, id| {
-        if (mask.len > 0 and !lanes.grammar.allows(mask, id)) continue;
-        const x = value(word);
-        if (k == allowed) {
-            values[filled] = x;
-            ids[filled] = id;
-            filled += 1;
-            continue;
-        }
-        if (filled == k and x <= values[k - 1]) continue;
-        var at = @min(filled, k - 1);
-        while (at > 0 and x > values[at - 1]) : (at -= 1) {
-            values[at] = values[at - 1];
-            ids[at] = ids[at - 1];
-        }
-        values[at] = x;
-        ids[at] = id;
-        filled = @min(filled + 1, k);
-    }
-    return @intCast(try lanes.sampling.choose(gpa, values, ids, position, sampling));
+    return lanes.sampling_row.draw(gpa, logits, settings, position, mask) catch |e| switch (e) {
+        error.NonfiniteLogits => error.NonfiniteQwenLogits,
+        error.NoAllowedToken => error.NoAllowedQwenToken,
+        else => e,
+    };
 }
 
 test "candidate selection preserves full-vocabulary keyed draws and tie order" {
