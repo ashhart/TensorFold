@@ -126,6 +126,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Docs: the image page says how the native server finds libjpeg-turbo 3.1.4.1 for JPEG input: why the release is pinned, the search order and file names on macOS, Linux and Windows, `TENSORFOLD_LIBTURBOJPEG`, and what each startup warning means (#2590, refs #2581).
 
 - Internal: a shared CUDA MLA image (`mla.cu`, `cuda.mla`) for a 512-wide latent with 64 roped columns and 128-wide heads, on GLM's MLA chunk bodies, which move from `glm_glue_attn.cuh` to `common/mla.cuh` and which GLM instantiates at its old widths (its SASS is identical on all five SMs). Its seven launches are under the kernel contract with a planted control each, and `test-mla-twins-host` keeps its absorb, expand and per-rank merge GLM's kernels token for token. No family calls it yet (#2335, refs #850). Thanks to @ajensenwaud.
+- Server: `--unix-socket PATH` listens on a new owner-only Unix socket instead of TCP, so a local client can reach the server without its requests crossing a network interface (#2389). Thanks to @kotevcode.
 
 ## 1.2.5
 
@@ -268,7 +269,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
   GB10) with its joint schema head on the GPU (HIP's kernels and products, on cuBLASLt with FP32 compute), and chat
   is refused by name; `TF_LANE_TRACE` gains a `cancel` line for a request cancelled between two prompt calls (#2458,
   part of #2324). Thanks to @laudney.
-- Server: `--unix-socket PATH` listens on a new owner-only Unix socket instead of TCP, so a local client can reach the server without its requests crossing a network interface (#2389). Thanks to @kotevcode.
 
 ## 1.2.4
 
