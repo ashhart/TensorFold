@@ -55,6 +55,7 @@ const Head = struct {
         h.d.w.successor = &h.book;
         h.d.staged = .{ .d = undefined, .bytes = &h.storage };
         if (own_trees) h.d.c.block = 16;
+        h.d.tree_nodes = try q.draft.tree.nodes(); // as Draft.init reads it
         h.d.gpa = a;
         h.d.streams = .empty;
         h.d.landing = .{};
