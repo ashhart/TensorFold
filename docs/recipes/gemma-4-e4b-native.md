@@ -33,7 +33,7 @@ affine_mm's tiles over the row path's packed weights, with the per-layer inputs 
 order than a decode step, so a prompt's logits differ from decoding it token by token: with `tf-gemma4-e4b-logits`
 (`E4B_TILE=1` against its windows) the largest logit difference is 2.9 over 617 positions, top-1 agrees on 98.7% (the 8
 misses are near ties) and the mean KL is 0.0007; against the BF16 reference the windows give 93.8% top-1 and KL 0.073,
-the tiles 93.0% and 0.075. `GEMMA_E4B_WINDOWS=1` takes the windows for the whole prompt.
+the tiles 93.0% and 0.075.
 Measured with `tools/bench_openai.py`, `tools/bench_cache.py --require-cold` and `tools/bench_concurrent.py --alone
 --serial`: decode 99 tokens/s on one chat stream, 212 tokens/s over four; a cold prompt prefills at about 2,400
 tokens/s; every reply equals its run alone and a resumed prompt gives the fresh pass's reply. The server keeps 4.2 GiB wired.
