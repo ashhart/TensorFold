@@ -117,15 +117,17 @@ fn prepare(srv: *Server, cx: *Cx, cap: api.ImageInfo, raw: Value) errors.Refused
     }
     var width: u16 = default_side;
     var height: u16 = default_side;
+    const most = @min(max_side, cap.max_side);
+    const most_pixels = @min(max_pixels, cap.max_pixels);
     if (raw.get("size")) |v| {
         const text = v.str() orelse return cx.refuse("size must be a string like 1024x1024");
         const split = std.mem.indexOfScalar(u8, text, 'x') orelse return cx.fail(.request, "size {s} must be WIDTHxHEIGHT", .{try pyrepr.repr(cx.a, v)});
-        const most = @min(max_side, cap.max_side);
         width = try sideOf(cx, text[0..split], most);
         height = try sideOf(cx, text[split + 1 ..], most);
         const pixels = @as(u32, width) * @as(u32, height);
-        if (pixels > @min(max_pixels, cap.max_pixels))
-            return cx.fail(.request, "size {d}x{d} is past the {d} pixel limit", .{ width, height, @min(max_pixels, cap.max_pixels) });
+        if (pixels > most_pixels) return cx.fail(.request, "size {d}x{d} is past the {d} pixel limit", .{ width, height, most_pixels });
+    } else if (default_side > most or @as(u32, default_side) * default_side > most_pixels) {
+        return cx.fail(.request, "the default size {d}x{d} does not fit this model's limits of {d} a side and {d} pixels: send a smaller size", .{ default_side, default_side, most, most_pixels });
     }
     if (raw.get("response_format")) |v| {
         const name = reply_text.pyStrip(v.str() orelse "");
@@ -145,8 +147,8 @@ fn prepare(srv: *Server, cx: *Cx, cap: api.ImageInfo, raw: Value) errors.Refused
     var steps: u32 = default_steps;
     if (raw.get("steps")) |v| {
         const given = v.int64() orelse return cx.refuse("steps must be an integer");
-        const most = @min(max_steps, cap.max_steps);
-        if (given < 1 or given > most) return cx.fail(.request, "steps must be from 1 to {d}", .{most});
+        const steps_most = @min(max_steps, cap.max_steps);
+        if (given < 1 or given > steps_most) return cx.fail(.request, "steps must be from 1 to {d}", .{steps_most});
         steps = @intCast(given);
     }
     var guidance: f32 = default_guidance;
