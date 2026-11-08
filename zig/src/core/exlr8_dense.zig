@@ -85,7 +85,7 @@ pub const Matrix = struct {
     fn check(m: Matrix) !void {
         const r = m.record;
         const ok = switch (r.format) {
-            .trellis => m.data[0].is(.u8, &.{ std.math.divExact(usize, if (r.side == .input) r.in else r.out, 128) catch return error.BadExlr8Shape, (if (r.side == .input) r.out else r.in) * 16 * @as(usize, r.k) }) and
+            .trellis => m.data[0].is(.u8, &.{ std.math.divExact(usize, if (r.side == .input) r.in else r.out, 128) catch return error.BadExlr8Shape, std.math.mul(usize, if (r.side == .input) r.out else r.in, 16 * @as(usize, r.k)) catch return error.BadExlr8Shape }) and
                 m.data[1].is(.f16, &.{r.in}) and m.data[2].is(.f16, &.{r.out}),
             .int4 => if (r.side == .input)
                 m.data[0].is(.u8, &.{ r.in / 128, r.out, 64 }) and m.data[1].is(.f16, &.{ r.in / 128, r.out, 4 })

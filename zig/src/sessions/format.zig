@@ -154,8 +154,8 @@ pub const Layout = struct {
         var nd: u64 = 0;
         for (segs) |s| {
             if (s.chunk == 0 or s.stride != up(s.chunk) or s.first_digest != nd or s.offset % 4096 != 0) return error.BadHeader;
-            if (s.nchunks != (s.nbytes + s.chunk - 1) / s.chunk) return error.BadHeader;
-            if (s.nchunks > 0 and s.offset + @as(u64, s.nchunks - 1) * s.stride + up(s.nbytes - @as(u64, s.nchunks - 1) * s.chunk) > h.total) return error.BadHeader;
+            if (s.nchunks != (std.math.add(u64, s.nbytes, s.chunk - 1) catch return error.BadHeader) / s.chunk) return error.BadHeader;
+            if (s.nchunks > 0 and (std.math.add(u64, s.offset, @as(u64, s.nchunks - 1) * s.stride + up(s.nbytes - @as(u64, s.nchunks - 1) * s.chunk)) catch return error.BadHeader) > h.total) return error.BadHeader;
             nd += s.nchunks;
         }
         if (nd != h.ndigest) return error.BadHeader;

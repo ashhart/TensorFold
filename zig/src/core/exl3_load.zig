@@ -135,6 +135,7 @@ fn admit(a: std.mem.Allocator, ck: *checkpoint.Checkpoint, prefix: []const u8, e
     if (e.dtype != .i16 or e.rank != 3) return error.Refuse;
     const halves = e.shape[2] / 8; // the trellis's last dim is 16 * bits
     if (e.shape[2] % 8 != 0 or halves < 2 or halves > 16) return error.Refuse;
+    if (e.shape[0] > std.math.maxInt(usize) / 16 or e.shape[1] > std.math.maxInt(usize) / 16) return error.Refuse;
     const k = e.shape[0] * 16;
     const n = e.shape[1] * 16;
     if (k % 128 != 0 or n % 128 != 0) return error.Refuse;

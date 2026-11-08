@@ -113,7 +113,7 @@ pub const Archive = struct {
         const key = try std.fmt.allocPrint(gpa, "{s}data/{s}", .{ self.prefix, t.storage });
         defer gpa.free(key);
         const m = self.members.get(key) orelse return error.MissingStorage;
-        if (m.size != t.storage_numel * 4) return error.BadArchive;
+        if (m.size != std.math.mul(u64, t.storage_numel, 4) catch return error.BadArchive) return error.BadArchive;
         const all = try gpa.alloc(f32, @intCast(t.storage_numel));
         errdefer gpa.free(all);
         try readMember(self.io, self.file, m, std.mem.sliceAsBytes(all));
