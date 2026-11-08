@@ -130,6 +130,14 @@ class GateRunTests(unittest.TestCase):
                 self.assertEqual(len(lines), 1)
                 self.assertTrue(lines[0].startswith("FAIL " + self.NAMES[gate]), lines)
 
+    def test_sequential_requests_under_the_concurrent_fault_stay_unsalted(self):
+        # A handler still counted in flight after its reply would make the next sequential request read as batched.
+        with fake(True, "concurrent", linger=0.3) as url:
+            client = conformance.Client(url, "fake", timeout=10)
+            rows = [client.post({"messages": [{"role": "user", "content": "hi"}], "max_tokens": 4}) for _ in range(3)]
+        self.assertTrue(all(row["status"] == 200 for row in rows), rows)
+        self.assertEqual(len({row["sha"] for row in rows}), 1, rows)
+
     def test_resume_without_a_fresh_server_fails(self):
         out = io.StringIO()
         with fake(True) as url, contextlib.redirect_stdout(out):

@@ -15,6 +15,7 @@ import hashlib
 import http.server
 import json
 import threading
+import time
 
 FAULTS = ("drafted", "repeat", "concurrent", "resumed", "refusals")
 BATCH_WINDOW = 0.15  # seconds a lone request waits for a partner under the concurrent fault
@@ -71,10 +72,13 @@ class FakeEngine(http.server.BaseHTTPRequestHandler):
             sha = hashlib.sha256(json.dumps([body["messages"], seed, salt]).encode()).hexdigest()
             cached = 5 if server.cache and server.fault != "resumed" and len(body["messages"]) > 1 else 0
             accepted = 2 if body.get("draft", True) else 0
-            self.reply(200, doc(sha=sha, cached=cached, accepted=accepted, drafted=accepted, text="r" + sha[:6]))
+            payload = doc(sha=sha, cached=cached, accepted=accepted, drafted=accepted, text="r" + sha[:6])
         finally:
             with server.lock:
                 server.inflight -= 1
+        # Out of flight before the reply is written: the client's next request must not find this one still counted.
+        self.reply(200, payload)
+        time.sleep(server.linger)
 
     def batched(self) -> bool:
         """True when another request shares the server with this one within the batch window."""
@@ -104,12 +108,13 @@ class FakeEngine(http.server.BaseHTTPRequestHandler):
 
 
 @contextlib.contextmanager
-def fake(cache, fault=None):
+def fake(cache, fault=None, linger=0.0):
     """A running fake on 127.0.0.1 port 0, yielding its base URL; cache=False is the cache-off server."""
+    # linger: seconds each handler stays alive after its reply, widening any window between reply and exit.
     if fault not in (None, *FAULTS):
         raise ValueError(f"unknown fault {fault}")
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FakeEngine)
-    server.cache, server.fault, server.seen, server.inflight = cache, fault, {}, 0
+    server.cache, server.fault, server.seen, server.inflight, server.linger = cache, fault, {}, 0, linger
     server.lock = threading.Lock()
     server.cond = threading.Condition(server.lock)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
