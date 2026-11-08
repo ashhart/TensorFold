@@ -142,7 +142,7 @@ fn build(gpa: std.mem.Allocator, device: mtl.Device, kda: []const u8, made: *Mad
     defer pool.pop();
     var p: Pipes = undefined;
     var h = std.hash.Wyhash.init(0x77);
-    const rows_src = try std.mem.concat(gpa, u8, &.{ sources.core_row_projection, glue_math, sources.glm_rows, sources.glm_gather });
+    const rows_src = try gpa.dupe(u8, gather_source);
     defer gpa.free(rows_src);
     h.update(rows_src);
     {
@@ -166,21 +166,11 @@ fn build(gpa: std.mem.Allocator, device: mtl.Device, kda: []const u8, made: *Mad
             break :blk null;
         };
     }
-    const pre_a = try std.mem.replaceOwned(u8, gpa, kda, pre_f[0], pre_f[1]); // its own instance, under its own name
-    defer gpa.free(pre_a);
-    const pre_src = try std.mem.replaceOwned(u8, gpa, pre_a, pre_g[0], pre_g[1]);
+    const pre_src = try kdaPreSource(gpa, kda);
     defer gpa.free(pre_src);
-    if (std.mem.indexOf(u8, pre_src, pre_f[0]) != null or std.mem.indexOf(u8, pre_src, pre_g[0]) != null or std.mem.indexOf(u8, pre_src, pre_f[1]) == null) return error.KernelCompile;
     h.update(pre_src);
     try lib(made, device, pre_src, &.{comptime kernels.generatedFunction("kda_rows")}, @as(*[1]mtl.Pipeline, &p.kda_pre));
-    const a = std.mem.indexOf(u8, kda, fg_cut[0]) orelse return error.KernelCompile;
-    const z = a + (std.mem.indexOf(u8, kda[a..], fg_cut[1]) orelse return error.KernelCompile);
-    const own = z + (std.mem.lastIndexOf(u8, kda[z..], "\ntemplate [[host_name(") orelse return error.KernelCompile);
-    const fg_src = try std.mem.concat(
-        gpa,
-        u8,
-        &.{ rp_sums, kda[0..a], fg_block, kda[z..own], fg_instances },
-    ); // not its own
+    const fg_src = try kdaFgSource(gpa, kda);
     defer gpa.free(fg_src);
     h.update(fg_src);
     try lib(made, device, fg_src, &fg_names, &p.kda_fg);
@@ -556,4 +546,26 @@ test "f_b and g_b of one width (g64) take glm_rows's dots inside kda_rows, two w
     var five = q;
     five.bits = 5;
     for ([_]Affine{ q, five }) |x| try std.testing.expect(kdaGate(&p, x, x) == .fused);
+}
+
+/// The alternate-width KDA prep source used by build.
+pub fn kdaPreSource(gpa: std.mem.Allocator, kda: []const u8) ![]u8 {
+    const pre_a = try std.mem.replaceOwned(u8, gpa, kda, pre_f[0], pre_f[1]); // its own instance, under its own name
+    defer gpa.free(pre_a);
+    const pre_src = try std.mem.replaceOwned(u8, gpa, pre_a, pre_g[0], pre_g[1]);
+    if (std.mem.indexOf(u8, pre_src, pre_f[0]) != null or std.mem.indexOf(u8, pre_src, pre_g[0]) != null or std.mem.indexOf(u8, pre_src, pre_f[1]) == null) return error.KernelCompile;
+    return pre_src;
+}
+
+/// The alternate-width KDA gate source used by build.
+pub fn kdaFgSource(gpa: std.mem.Allocator, kda: []const u8) ![]u8 {
+    const a = std.mem.indexOf(u8, kda, fg_cut[0]) orelse return error.KernelCompile;
+    const z = a + (std.mem.indexOf(u8, kda[a..], fg_cut[1]) orelse return error.KernelCompile);
+    const own = z + (std.mem.lastIndexOf(u8, kda[z..], "\ntemplate [[host_name(") orelse return error.KernelCompile);
+    const fg_src = try std.mem.concat(
+        gpa,
+        u8,
+        &.{ rp_sums, kda[0..a], fg_block, kda[z..own], fg_instances },
+    ); // not its own
+    return fg_src;
 }

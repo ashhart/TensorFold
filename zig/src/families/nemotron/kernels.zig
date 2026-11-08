@@ -157,7 +157,7 @@ const Job = struct {
 };
 
 /// The packed kernels' tensor-inline construct: macOS 26.3's runtime compiler refuses it, the offline one accepts it.
-const probe_source =
+pub const probe_source =
     \\#include <metal_stdlib>
     \\using namespace metal;
     \\kernel void tf_uint4b_probe(device uchar* out [[buffer(0)]], uint i [[thread_position_in_grid]]) {

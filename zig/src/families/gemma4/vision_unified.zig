@@ -72,9 +72,7 @@ pub const Embedder = struct {
         v.proj_q = null;
         v.gpa = gpa;
         v.out_hidden = out_hidden;
-        const body = try frags.source(device, gpa, ks.gemma4_vision);
-        defer gpa.free(body);
-        const src = try std.fmt.allocPrint(gpa, "#define G4V_OUT {d}\n{s}", .{ out_hidden, body });
+        const src = try @import("vision_source.zig").source(device, gpa, out_hidden);
         defer gpa.free(src);
         v.lib = try mtl.Library.fromSource(device, src, mtl.CompileOptions.mlx());
         errdefer v.lib.deinit();
