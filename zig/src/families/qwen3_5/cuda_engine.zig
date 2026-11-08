@@ -174,6 +174,7 @@ pub const Engine = struct {
     /// A pipeline stage's ring (null: one engine, or a stage warming up) and its boundary rows in host memory.
     hop: ?stage_fwd.Hop = null,
     boundary: ?cuda.HostBuffer = null,
+    held: ?*stage_fwd.Held = null, // rank 0 with rounds in flight: the round's state its head reads later
 
     pub const ids_at = Round.ids_at;
     pub const segs_at = Round.segs_at;
@@ -228,6 +229,7 @@ pub const Engine = struct {
         e.features = 0;
         e.hop = null;
         e.boundary = null;
+        e.held = null;
         e.stream = try cuda.Stream.init(d, true);
         errdefer e.stream.deinit();
         if (span != null) e.boundary = try cuda.HostBuffer.alloc(d, stage_fwd.bytes(g.hidden, max_rows));
@@ -437,7 +439,6 @@ pub const Engine = struct {
         const g = e.g;
         const total = ids.len;
         const record = keep.verifies();
-        const heads: usize = if (record) total else 1;
         // the tables
         const st = e.staged.bytes;
         @memcpy(std.mem.bytesAsSlice(u32, st[ids_at..][0 .. total * 4]), ids);
@@ -499,6 +500,14 @@ pub const Engine = struct {
         if (g.whole == 0) try e.launchShape(shape) else try stage_fwd.run(e, shape, total);
         for (parts) |p| p.cache.advanced(p.rows, record);
         if (!g.heads) return recurrent.completed(e); // a stage without the head: no logits to keep
+        if (e.held) |h| return h.hold(st, shape, total); // rank 0 with rounds in flight: its head runs at `land`
+        try e.land(parts, keep, total);
+    }
+
+    /// A forward's kept rows after its launches: the draws, logits or rows `keep` asks for, read back.
+    pub fn land(e: *Engine, parts: []const Part, keep: Keep, total: usize) !void {
+        const g = e.g;
+        const heads: usize = if (keep.verifies()) total else 1;
         if (keep == .draws or keep == .logits) try e.penalties.apply(e.d, &e.draws, e.stream, e.logits, g.vocab) else e.penalties.clear();
         switch (keep) {
             .hidden => try e.stream.synchronize(), // mapped layer inputs are ready before the learner reads them

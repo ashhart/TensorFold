@@ -63,7 +63,38 @@ pub fn rollback(e: *E.Engine, c: *E.Cache, accepted: u32) !void {
 pub fn forward(e: *E.Engine, parts: []const E.Part, ids: []const u32, mode: plan.Mode, hop: ?driver.Hop) !void {
     e.hop = if (hop) |h| .{ .ctx = h.ctx, .give = h.give, .take = h.take } else null; // the engine builds without stage
     defer e.hop = null;
-    try e.forward(parts, ids, if (mode == .prompt) .last else .logits);
+    try e.forward(parts, ids, keepOf(mode));
+}
+
+/// Rank 0's state between a round's layers and its head, with rounds in flight.
+pub const Held = E.stage_fwd.Held;
+
+pub fn hold(gpa: std.mem.Allocator, _: *E.Engine) !Held {
+    return Held.init(gpa);
+}
+
+pub fn unhold(gpa: std.mem.Allocator, h: *Held) void {
+    h.deinit(gpa);
+}
+
+/// Rank 0 with rounds in flight: the embedding and its layers, the rows on to the next stage; the head waits.
+pub fn issue(e: *E.Engine, parts: []const E.Part, ids: []const u32, mode: plan.Mode, hop: driver.Hop, h: *Held) !void {
+    e.hop = .{ .ctx = hop.ctx, .give = hop.give, .take = hop.take };
+    defer e.hop = null;
+    e.held = h;
+    defer e.held = null;
+    try e.forward(parts, ids, keepOf(mode));
+}
+
+/// Rank 0: an issued round's rows back from the last stage, then its head, as `forward` keeps them.
+pub fn complete(e: *E.Engine, parts: []const E.Part, mode: plan.Mode, hop: driver.Hop, h: *Held) !void {
+    e.hop = .{ .ctx = hop.ctx, .give = hop.give, .take = hop.take };
+    defer e.hop = null;
+    try E.stage_fwd.land(e, parts, keepOf(mode), h);
+}
+
+fn keepOf(mode: plan.Mode) E.Keep {
+    return if (mode == .prompt) .last else .logits;
 }
 
 pub const Driver = driver.Driver(@This());

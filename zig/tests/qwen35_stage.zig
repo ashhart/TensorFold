@@ -52,13 +52,13 @@ fn gib(n: u64) f64 {
     return @as(f64, @floatFromInt(n)) / (1 << 30);
 }
 
-fn report(rank: u32, what: []const u8) void {
+pub fn report(rank: u32, what: []const u8) void {
     const u = cuda.usage(false);
     std.debug.print("stage {d} {s}: {d:.2} GiB device now, {d:.2} GiB peak\n", .{ rank, what, gib(u.device), gib(u.peak) });
 }
 
 /// `first:end` ranges, comma-separated, in rank order.
-fn parseLayout(text: []const u8, out: []stage.boot.Range) ![]const stage.boot.Range {
+pub fn parseLayout(text: []const u8, out: []stage.boot.Range) ![]const stage.boot.Range {
     var n: usize = 0;
     var it = std.mem.splitScalar(u8, text, ',');
     while (it.next()) |r| {
