@@ -33,6 +33,7 @@ pub fn reset(at: ?u64, with: R) void {
     hit = false;
     fail_at = at;
     code = with;
+    cuda.download_stage.forget(); // main reads the device once per driver: every open makes the same calls
 }
 
 /// From now on async work stays pending until a successful drain (`queue`); failures persist (`stick`).
