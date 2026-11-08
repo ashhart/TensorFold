@@ -12,6 +12,9 @@ Each gate prints one PASS or FAIL line with its counts; any FAIL exits 1. Equali
 - resumed: a multi-turn chat on the cached server equals the same chat on a server with the prompt cache off; the
   fresh side must report ``cached_tokens == 0`` and every later resumed turn ``cached_tokens > 0``. A profile's
   ``conversation_context_items`` puts a long document in the first turn, for families that keep only long prompts.
+  A profile's ``fresh_env`` is set on every server started with ``--prompt-cache-gib 0``, for families whose streams
+  resume their own last chat without the prompt cache (``TF_QWEN27_SLOT_RESUME=0`` on Metal); with ``--fresh-url``,
+  start that server with it yourself.
 - refusals: each named request the profile lists is refused with its status and error text.
 
 ``--binary`` starts the servers itself (the cache-off one first, then the cached one), one at a time, from the
@@ -30,6 +33,7 @@ with an error event after a 200 head, not with the status the profile lists. Sta
 import argparse
 import hashlib
 import json
+import os
 import re
 import socket
 import subprocess
@@ -345,6 +349,11 @@ class Server:
         return [str(self.args.binary), "serve", str(self.args.model_dir), "--host", "127.0.0.1", "--port", str(port),
                 "--name", self.profile["name"], "--no-update-check", "--prompt-cache-gib", str(self.cache_gib), *flags]
 
+    def env(self) -> dict:
+        """The inherited environment, plus the profile's ``fresh_env`` on a server that keeps no prompts."""
+        extra = self.profile.get("fresh_env", {}) if self.cache_gib == 0 else {}
+        return {**os.environ, **{k: str(v) for k, v in extra.items()}}
+
     def __enter__(self):
         if self.args.before_start:
             subprocess.run(self.args.before_start, shell=True, check=True, timeout=600)
@@ -356,7 +365,8 @@ class Server:
         self.log = tempfile.NamedTemporaryFile("w+b", prefix=f"server-cache{self.cache_gib}-", suffix=".log",
                                                dir=self.logs, delete=False)
         print("START " + " ".join(self.cmd), flush=True)
-        self.process = subprocess.Popen(self.cmd, stdout=self.log, stderr=subprocess.STDOUT, start_new_session=True)
+        self.process = subprocess.Popen(self.cmd, stdout=self.log, stderr=subprocess.STDOUT, start_new_session=True,
+                                        env=self.env())
         deadline = time.monotonic() + self.args.start_timeout
         while time.monotonic() < deadline:
             if self.process.poll() is not None:

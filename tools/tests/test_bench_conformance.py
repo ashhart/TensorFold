@@ -194,6 +194,13 @@ class GateRunTests(unittest.TestCase):
         self.assertTrue(sent[0][0]["content"].startswith(conformance.inventory(50)))
         self.assertTrue(all(m["content"] == t for m, t in zip(sent[-1][2::2], profile["conversation"][1:])))
 
+    def test_fresh_env_reaches_only_servers_keeping_no_prompts(self):
+        profile = {"name": "p", "fresh_env": {"TF_QWEN27_SLOT_RESUME": 0}}
+        fresh, cached = (conformance.Server(None, profile, gib, Path(".")).env() for gib in (0, 2))
+        self.assertEqual(fresh["TF_QWEN27_SLOT_RESUME"], "0")
+        self.assertEqual(cached, dict(conformance.os.environ))
+        self.assertEqual(conformance.Server(None, {"name": "p"}, 0, Path(".")).env(), dict(conformance.os.environ))
+
     def test_profiles_parse_and_name_their_gates(self):
         for path in sorted(PROFILE.parent.glob("*.json")):
             with self.subTest(profile=path.name):
@@ -202,6 +209,7 @@ class GateRunTests(unittest.TestCase):
                 self.assertTrue(profile["refusals"])
                 self.assertTrue(all(r["name"] and r["error"] for r in profile["refusals"]))
                 self.assertGreater(profile["sampled"]["temperature"], 0)
+                self.assertTrue(all(isinstance(v, str) for v in profile.get("fresh_env", {}).values()))
 
 
 if __name__ == "__main__":
