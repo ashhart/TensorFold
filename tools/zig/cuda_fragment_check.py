@@ -161,6 +161,8 @@ def plain(name):
 def declarators(ts, i):
     """The names a declaration statement starting at ts[i] declares; [] when it is not a declaration."""
     n = len(ts)
+    while i + 1 < n and ts[i].text == "[" and ts[i + 1].text == "[":
+        i = close(ts, i) + 1
     if i + 1 < n and ts[i].text == "template" and ts[i + 1].text == "<":
         k = angle(ts, i + 1)
         if k is None:

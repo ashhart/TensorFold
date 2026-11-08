@@ -114,6 +114,11 @@ class SyntheticTest(Fixture):
         self.edit("good.cu", "    constexpr int B = 2;\n", "#define B 2\n")
         self.assertEqual(self.errors(), [])
 
+    def test_attributed_declaration_is_the_fragments_own(self):
+        self.write("frag.cuh", FRAG + "    [[maybe_unused]] int spare = total;\n    out[1] = spare;\n")
+        self.write("other.cu", "__device__ void f() { int spare = 0; }\n")
+        self.assertEqual(self.errors(), [])
+
     def test_lone_includer_missing_a_name_others_declare(self):
         self.write("good.cu", GOOD.split("#if WIDE_K2")[0].replace("auto pick", "auto choose") + "}\n")
         self.write("other.cu", "__device__ void f(int pick) {}\n")
