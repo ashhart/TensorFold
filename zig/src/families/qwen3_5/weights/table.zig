@@ -84,7 +84,7 @@ pub const Table = struct {
     pub fn width(t: *const Table, key: []const u8) config.Error!formats.mlx.Width {
         const q = switch (t.quant) {
             .mlx => |m| m,
-            .dense, .bf16 => return error.UnsupportedQuantization,
+            .dense, .bf16, .nvfp4 => return error.UnsupportedQuantization,
         };
         if (q.overrides.get(key)) |w| return w orelse error.UnsupportedQuantization;
         if (t.strip.len > 0) {

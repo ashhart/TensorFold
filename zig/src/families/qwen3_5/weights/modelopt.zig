@@ -1,4 +1,4 @@
-//! ModelOpt's weight-only formats read as BF16 at load: NVFP4 e2m1 codes and FP8 e4m3, each with its scales.
+//! ModelOpt's weight-only formats: NVFP4 kept as stored (the tiles decode it in flight), FP8 widened to BF16 at load.
 
 const std = @import("std");
 const core = @import("core");
@@ -32,52 +32,12 @@ fn name(buf: []u8, key: []const u8, suffix: []const u8) ?[]const u8 {
     return std.fmt.bufPrint(buf, "{s}{s}", .{ key, suffix }) catch null;
 }
 
-/// `key`'s projection with its weights dequantized to BF16: the engine's BF16 path runs it.
+/// `key`'s projection: ModelOpt's NVFP4 stays as stored (the HIP tiles decode e2m1 in flight), FP8 widens to BF16.
 pub fn read(a: Allocator, t: *const table.Table, key: []const u8, what: Algo) !host.Projection {
-    return .{ .bf16 = .{ .weight = switch (what) {
-        .nvfp4 => try nvfp4(a, t, key),
-        .fp8 => try fp8(a, t, key),
-    } } };
-}
-
-fn nvfp4(a: Allocator, t: *const table.Table, key: []const u8) !Tensor {
-    var b: [3][320]u8 = undefined;
-    const w = try t.get(name(&b[0], key, ".weight") orelse return error.MissingTensor);
-    const s = try t.get(name(&b[1], key, ".weight_scale") orelse return error.MissingTensor);
-    const g = try t.get(name(&b[2], key, ".weight_scale_2") orelse return error.MissingTensor);
-    if (w.dtype != .u8 or w.rank != 2) return refuse(b[0][0..], "an NVFP4 weight is U8 [N, K/2]");
-    const n = w.shape[0];
-    const k = 2 * w.shape[1];
-    if (s.rank != 2 or s.shape[0] != n or s.shape[1] * group != k) return refuse(b[1][0..], "NVFP4 scales are [N, K/16]");
-    if (g.numel() != 1) return refuse(b[2][0..], "NVFP4's second scale is one number");
-    if (s.dtype != .f8_e4m3 and s.dtype != .f32) return refuse(b[1][0..], "NVFP4 scales are E4M3 or F32");
-    const global = convert.load(.f32, g.bytes, 0);
-    if (!std.math.isFinite(global) or global == 0) return refuse(b[2][0..], "NVFP4's second scale is zero, infinite or nan");
-    if (s.dtype == .f8_e4m3) {
-        for (s.bytes) |byte| if (byte & 0x7f == 0x7f) return refuse(b[1][0..], "an NVFP4 scale is E4M3 nan");
-    } else {
-        for (0..s.numel()) |i| if (!std.math.isFinite(convert.load(.f32, s.bytes, i))) return refuse(b[1][0..], "an NVFP4 scale is infinite or nan");
-    }
-    const out = try a.alloc(u16, n * k);
-    errdefer a.free(out);
-    for (0..n) |row| {
-        const per_row = k / group;
-        const codes = w.bytes[row * (k / 2) ..][0..(k / 2)];
-        nvfp4Row(out[row * k ..][0..k], codes, s, s.dtype == .f32, row * per_row, per_row, global);
-    }
-    return .{ .dtype = .bf16, .rank = 2, .shape = .{ n, k, 0, 0, 0 }, .bytes = std.mem.sliceAsBytes(out) };
-}
-
-/// One row's `k` bf16 weights from its `k/2` codes, group scales starting at `first`.
-fn nvfp4Row(out: []u16, codes: []const u8, scales: Tensor, f32_scales: bool, first: usize, per_row: usize, global: f32) void {
-    for (0..out.len) |i| {
-        const byte = codes[i / 2];
-        const code = if (i % 2 == 0) byte & 0xf else byte >> 4;
-        const at = first + i / group;
-        std.debug.assert(at < first + per_row);
-        const scale: f64 = if (f32_scales) @floatCast(convert.load(.f32, scales.bytes, at)) else quant.fp8.e4m3(scales.bytes[at]);
-        out[i] = bf16_round.bits(@floatCast(quant.nvfp4.e2m1(code) * scale * @as(f64, global)));
-    }
+    return switch (what) {
+        .nvfp4 => .{ .nvfp4 = try quant.nvfp4.read(a, t, key) },
+        .fp8 => .{ .bf16 = .{ .weight = try fp8(a, t, key) } },
+    };
 }
 
 fn fp8(a: Allocator, t: *const table.Table, key: []const u8) !Tensor {
@@ -104,21 +64,4 @@ fn fp8(a: Allocator, t: *const table.Table, key: []const u8) !Tensor {
 
 fn refuse(key: []const u8, what: []const u8) error{UnexpectedTensor} {
     return quant.types.refuse(key, what);
-}
-
-test "an NVFP4 row dequantizes through e2m1, its group scales and the global one" {
-    var codes: [8]u8 = @splat(0);
-    codes[0] = 0x21; // input 0 is code 1 (+0.5), input 1 is code 2 (+1.0)
-    const e4m3 = [_]u8{ 0x38, 0x38 }; // 1.0 each
-    const scales: Tensor = .{ .dtype = .f8_e4m3, .rank = 1, .shape = .{ e4m3.len, 0, 0, 0, 0 }, .bytes = &e4m3 };
-    var out: [16]u16 = @splat(0);
-    nvfp4Row(&out, &codes, scales, false, 0, 2, 0.25);
-    try std.testing.expectEqual(@as(f32, 0.125), fromBf16(out[0]));
-    try std.testing.expectEqual(@as(f32, 0.25), fromBf16(out[1]));
-    try std.testing.expectEqual(@as(f32, 0), fromBf16(out[2]));
-    try std.testing.expectEqual(@as(f32, 0), fromBf16(out[15]));
-}
-
-fn fromBf16(bits: u16) f32 {
-    return @bitCast(@as(u32, bits) << 16);
 }

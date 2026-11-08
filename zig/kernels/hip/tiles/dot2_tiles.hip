@@ -340,6 +340,25 @@ using Dot = DotBF16;
 using Dot = DotF16;
 #endif
 
+// ModelOpt NVFP4's entry points: the build's activation type inside, so the launcher names them plainly.
+extern "C" __global__ void tf_nvfp4_gemm(Nvfp4 a) {
+    nvfp4_gemm_block<Dot, GemmShape<Dot>::rt>(a);
+}
+
+#define TF_NVFP4_STREAM(R, CB)                                                                          \
+    extern "C" __global__ void tf_nvfp4_stream_r##R##c##CB(Nvfp4 a, StreamSides sides, int l, int g) {   \
+        nvfp4_dot2_stream<Dot, R, CB, false>(a, sides, l, g);                                            \
+    }
+
+TF_NVFP4_STREAM(1, 2)
+TF_NVFP4_STREAM(1, 4)
+TF_NVFP4_STREAM(1, 8)
+TF_NVFP4_STREAM(2, 2)
+TF_NVFP4_STREAM(2, 4)
+TF_NVFP4_STREAM(2, 8)
+TF_NVFP4_STREAM(4, 2)
+TF_NVFP4_STREAM(4, 4)
+
 #define TF_LANES(BITS, ROWS)                                                    \
     template __global__ void affine_dot2_lanes<Dot, BITS, ROWS, 1>(Affine);     \
     template __global__ void affine_dot2_lanes<Dot, BITS, ROWS, 2>(Affine);     \

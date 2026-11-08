@@ -98,7 +98,8 @@ pub const Config = struct {
         const doc = try shared.declared(a, bytes);
         const tower = try shared.textTower(doc);
         const sources: quant.Sources = .{ .root = doc, .quantization = try shared.pickObject(doc, tower, "quantization") };
-        // the family's own order: ModelOpt's weight-only formats as BF16, an unquantized BF16 checkpoint, then the shared formats
+        // the family's own order: ModelOpt's weight-only formats (NVFP4 as stored, FP8 widened),
+        // an unquantized BF16 checkpoint, then the shared formats
         const modelopt = isModelOpt(doc, sources.quantization);
         var recipes: ?modelopt_core.Recipes = if (modelopt) try admitted(gpa, bytes) else null;
         errdefer if (recipes) |*r| r.deinit();

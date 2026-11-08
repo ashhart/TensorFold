@@ -4,6 +4,9 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- HIP: ModelOpt NVFP4 checkpoints keep their e2m1 codes and group scales as stored, and the new NVFP4 tiles decode them in flight � the 128-row GEMM for a prompt and the stream tile for a round � so the weights hold a quarter of the bytes and a decode reads a quarter of the traffic; FP8 layers still widen to BF16 at load. The format is core `quant.nvfp4`: the device keeps the checkpoint's layout (as MLX's does), E4M3 group scales widen to BF16 at read (exact), and a stack is refused because its experts carry a global scale each. Every other backend refuses the format by name.
+
+
 - Linux: an O_DIRECT checkpoint read of a file that ends inside the span it asked for reports end of file instead of a failed read, so Nemotron's CUDA checkpoint reads stop on `EndOfFile` as they do through the page cache (nothing was copied wrongly before; the error was wrong); Nemotron's CUDA checkpoint reader is now tested on the host through its io_uring ring and its thread fallback (#2602).
 
 - CI: the nightly Linux host job now runs `test-pdf-worker`, which spawns the PDF render worker from a Linux `tensorfold-native` so its `/proc/self/statm` memory cap and `close_range` run on Linux, and the new `test-cache-fit-host`, so the prompt-cache budget's no-footprint branch runs at all; both steps were only built into the macOS Metal graph before (#2599).
