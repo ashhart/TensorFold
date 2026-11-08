@@ -259,7 +259,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     const cuda_target = b.resolveTargetQuery(.{ .cpu_arch = host.result.cpu.arch, .os_tag = .linux, .abi = .gnu });
     const check_cuda = runtime(b, cuda_target, .debug, &.{});
     const check_mods = family(b, cuda_target, .debug, check_cuda, draft_ids);
-    @import("cuda_census.zig").steps(b, cuda_target, check_cuda, check_mods.qwen35, check_mods.core, flashnextModule(b, cuda_target, .debug, check_cuda, check_mods.core, check_mods.lanes, check_mods.qwen_vision, check_mods.api));
+    @import("cuda_census.zig").steps(b, cuda_target, check_cuda, check_mods.qwen35, check_mods.core, check_mods.lanes, flashnextModule(b, cuda_target, .debug, check_cuda, check_mods.core, check_mods.lanes, check_mods.qwen_vision, check_mods.api));
     const compile_bolt = b.addObject(.{ .name = "bolt_host_compile", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/bolt_compile.zig"),
         .target = cuda_target,
