@@ -102,6 +102,7 @@ pub fn runCommitting(device: mtl.Device, queues: []const mtl.Queue, layers: usiz
             try x.fam.finish(&x.lanes[k]);
         }
     };
+    const probe = probeOf(fam, n); // committed before the segments encode, so a warm queue has run it by their commit
     const x: X = .{ .fam = fam, .lanes = lanes[0..n], .evs = evs[0..n_evs], .mode = mode, .queue = queues[0], .every = every, .layers = layers, .done = &done, .n_done = &n_done };
     stagger.drive(n, layers, &x) catch |err| { // close the open encoders, drop the open command buffers, let committed chunks finish
         for (lanes[0..n]) |l| l.enc.end();
@@ -109,6 +110,7 @@ pub fn runCommitting(device: mtl.Device, queues: []const mtl.Queue, layers: usiz
         return err;
     };
     for (lanes[0..n]) |l| l.enc.end();
+    if (probe) |p| try held(p);
     for (lanes[0..n]) |l| l.cb.commit();
     for (lanes[0..n]) |l| l.cb.wait(); // every segment ends before a failure returns and its buffers are reused
     var gpu: f64 = 0;
@@ -128,6 +130,24 @@ pub fn runCommitting(device: mtl.Device, queues: []const mtl.Queue, layers: usiz
         gpu = if (n_done > 0) gpu + l.cb.gpuSeconds() else @max(gpu, l.cb.gpuSeconds());
     }
     return gpu;
+}
+
+/// The family's probe on the first queue (an optional `probe` hook), for chunks whose later segments wait on the GPU.
+fn probeOf(fam: anytype, n: usize) ?mtl.CommandBuffer {
+    if (n < 2 or !@hasDecl(std.meta.Child(@TypeOf(fam)), "probe")) return null;
+    return fam.probe();
+}
+
+/// Waits for the probe, so no segment commits before the first queue reaches the chunk and segment 1 never waits long.
+fn held(p: mtl.CommandBuffer) !void {
+    const t0 = mtl.clock.seconds();
+    p.wait();
+    if (p.failure()) |msg| {
+        std.log.err("command buffer failed: {s}", .{msg});
+        return error.GpuFailed;
+    }
+    const ms = (mtl.clock.seconds() - t0) * 1e3;
+    if (ms >= 500) std.log.info("segments: waited {d:.0} ms for the first queue to reach the chunk (re-wiring or earlier work)", .{ms});
 }
 
 test {
