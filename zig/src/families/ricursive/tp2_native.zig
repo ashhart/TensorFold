@@ -15,6 +15,8 @@ pub const max_segments: u32 = 1;
 pub const prompt_rows: u32 = rl.prompt_rows;
 /// A kept state holds the caches through its position and nothing past it (the drafter's context is not kept).
 pub const snap_lookahead: u32 = 0;
+/// --drafter: the publisher's DFlash2 draft (BF16, on rank 0), tp2_draft.zig.
+pub const takes_drafter = true;
 pub const explains_open = true;
 /// A request's verify reserve past its prompt and reply.
 pub const window_rows: u32 = rl.round_rows;
@@ -29,7 +31,7 @@ pub fn thinking(info: anytype) void {
 }
 
 pub const Room = struct { ctx: *anyopaque, read: *const fn (*anyopaque) ?u64 };
-pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, lanes: u32 = 1, lanes_fixed: bool = false, room: ?Room = null, tp: u32 = 1, rank: u32 = 0, master: ?[]const u8 = null, master_port: u16 = 29551 };
+pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, lanes: u32 = 1, lanes_fixed: bool = false, room: ?Room = null, tp: u32 = 1, rank: u32 = 0, master: ?[]const u8 = null, master_port: u16 = 29551, drafter: ?[]const u8 = null };
 
 pub const Loaded = struct {
     backend: lanes.backend.Backend,
@@ -74,7 +76,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         std.log.err("ricursive: {d} slot(s) at {d} tokens need {d:.2} GiB a rank with the weights and the CUDA memory budget leaves {d:.2} GiB", .{ o.lanes, o.context, gib(per * @max(o.lanes, 1) + fixed), gib(room) });
         return e;
     };
-    own.m = try fwd.Model.load(gpa, io, ctx, ctx.d, dir, .{ .context = o.context, .slots = slots, .place = p, .roce = true, .graphs = true });
+    own.m = try fwd.Model.load(gpa, io, ctx, ctx.d, dir, .{ .context = o.context, .slots = slots, .place = p, .roce = true, .graphs = true, .drafter = o.drafter });
     errdefer own.m.deinit();
     if (p.rank != 0) follow(own);
     own.r = try rl.Ripple.init(gpa, own.m);
@@ -93,6 +95,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
 
 /// A follower never serves: it runs rank 0's calls until rank 0 stops, frees what it owns, then leaves the process.
 fn follow(own: *Owned) noreturn {
+    own.m.draft_hook = @import("tp2_draft.zig").follow;
     own.m.follow() catch |err| {
         std.log.err("ricursive rank {d}: following rank 0 stopped ({s})", .{ own.m.rank(), @errorName(err) });
         std.c._exit(1); // the stream may hold kernels waiting on a gone rank: a normal exit would join them
@@ -100,6 +103,28 @@ fn follow(own: *Owned) noreturn {
     std.log.info("ricursive rank {d}: rank 0 ended; leaving", .{own.m.rank()});
     own.m.deinit();
     std.process.exit(0);
+}
+
+/// --drafter's DFlash2 directory over the loaded target `p` (Owned): its weights, taps and the target's timings.
+pub fn openDrafter(gpa: std.mem.Allocator, io: std.Io, p: *anyopaque, dir: []const u8, bits: u8) !struct { drafter: lanes.drafter.Drafter, ctx: *anyopaque, close: *const fn (*anyopaque) void, reserve: *const fn (*anyopaque, u32) anyerror!void } {
+    const own: *Owned = @ptrCast(@alignCast(p));
+    if (bits != 4 and bits != 16) std.log.warn("ricursive: --drafter-bits {d}: the drafter runs its BF16 weights as stored", .{bits});
+    const d = try Draft.init(gpa, io, own.m, dir);
+    errdefer d.deinit();
+    try d.time();
+    return .{ .drafter = d.drafter(), .ctx = d, .close = closeDraft, .reserve = reserveDraft };
+}
+
+const Draft = @import("tp2_draft.zig").Draft;
+
+fn closeDraft(p: *anyopaque) void {
+    const d: *Draft = @ptrCast(@alignCast(p));
+    d.deinit();
+}
+
+fn reserveDraft(p: *anyopaque, n: u32) anyerror!void {
+    const d: *Draft = @ptrCast(@alignCast(p));
+    try d.reserve(n);
 }
 
 fn readConfig(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !family.config.Config {
@@ -142,7 +167,7 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
     return switch (err) {
         error.PastContext => "the prompt and its reply exceed this server's context window: shorten it or lower max_tokens",
         error.NoFreeSlot => "every stream's caches are in use: retry once another request ends",
-        error.NoDraftHead => "Ripple on CUDA drafts from the prompt's own text only",
+        error.NoDraftHead => "Ripple on CUDA drafts with --drafter (the DFlash2 draft) or the prompt's own text only",
         error.StructuresUnsupported => "structured output is not built for Ripple on CUDA yet",
         error.CapturedKernels => "Ripple runs on the engine's own kernels: unset TENSORFOLD_CUDA_KERNELS",
         error.RicursiveRequiresSm121 => "Ripple's two-rank CUDA path runs on GB10 (sm_121) only so far, and this GPU is another",
