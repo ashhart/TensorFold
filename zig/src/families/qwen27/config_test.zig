@@ -194,7 +194,10 @@ test "text execution refuses unsupported gates and activation contracts" {
     try std.testing.expectError(error.UnsupportedAttentionGate, parse(a, gate, null));
     const act = try edit(a, "output_gate_type", .{ .string = "sigmoid" });
     defer a.free(act);
-    try std.testing.expectError(error.UnsupportedActivation, parse(a, act, null));
+    try std.testing.expectError(error.UnsupportedAttentionGate, parse(a, act, null));
+    const state = try edit(a, "linear_attn_state_dtype", .{ .string = "bfloat16" });
+    defer a.free(state);
+    try std.testing.expectError(error.UnsupportedStateType, parse(a, state, null));
 }
 
 /// The real 27B's shapes, so the shard arithmetic is pinned against the checkpoint rather than a toy config.
