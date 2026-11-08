@@ -113,6 +113,8 @@ fn refusal(a: std.mem.Allocator, root: Object, nested: ?Object, text: Object) !?
         .{ "no vocabulary", try int(text.get("vocab_size")) < 1 },
         .{ "no MLP width (intermediate_size)", try int(text.get("intermediate_size")) < 1 },
         .{ "no normalization epsilon", either(text, "norm_eps", "block_norm_eps") == null },
+        .{ "a rope_parameters.rope_type other than default (the kernels run plain RoPE)", scaledRope(text) },
+        .{ "a rope_scaling (the kernels run plain RoPE)", if (text.get("rope_scaling")) |v| v != .null else false },
     };
     var bad: std.ArrayList([]const u8) = .empty;
     for (checks) |c| if (c[1]) try bad.append(a, c[0]);
@@ -165,6 +167,15 @@ fn ffnWidth(text: Object) !usize {
     }
     if (!(ffn >= 1)) return error.BadLfm2Config;
     return std.math.lossyCast(usize, ffn);
+}
+
+/// Whether rope_parameters names a RoPE other than default, YaRN for one.
+fn scaledRope(text: Object) bool {
+    const rope = object(text.get("rope_parameters")) orelse return false;
+    for ([_][]const u8{ "rope_type", "type" }) |key| if (rope.get(key)) |v| {
+        if (v != .string or !std.mem.eql(u8, v.string, "default")) return true;
+    };
+    return false;
 }
 
 fn theta(text: Object) !f64 {
@@ -438,6 +449,23 @@ test "a plain lfm2 text config reads without a vision tower; block_auto_adjust_f
     try std.testing.expectEqual(6912, n.ffn);
 }
 
+test "a null rope_scaling or a default rope_type keeps theta; a theta-only config reads as before" {
+    const gpa = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const same = [_][]const [2][]const u8{
+        &.{.{ "\"rope_parameters\":", "\"rope_scaling\":null,\"rope_parameters\":" }},
+        &.{.{ "\"rope_type\":\"default\"", "\"type\":\"default\"" }},
+        &.{.{ "\"rope_parameters\":{\"rope_theta\":1000000,\"rope_type\":\"default\"}", "\"rope_theta\":1000000" }},
+    };
+    for (same) |change| {
+        var problem: []const u8 = "";
+        var c = (try Config.parse(gpa, try changed(arena.allocator(), change), &problem)).?;
+        defer c.deinit(gpa);
+        try std.testing.expectEqualSlices(f32, &.{ 1e6, 64 }, &.{ c.theta, @floatFromInt(c.dim) });
+    }
+}
+
 fn has(comptime what: []const u8) []const u8 {
     return "TensorFold's LFM2 kernels cover Liquid AI's d1 decision checkpoints (LiquidAI/d1-3B); this one has " ++ what ++ ". " ++ own_model_help;
 }
@@ -461,6 +489,8 @@ test "refusals list every problem in the checks' words and order" {
         .{ &.{.{ "\"num_attention_heads\":32", "\"num_attention_heads\":30" }}, has("a hidden size that is not a whole number of heads") },
         .{ &.{ .{ "\"vocab_size\":128000", "\"vocab_size\":0" }, .{ "\"intermediate_size\":10752", "\"intermediate_size\":0" } }, has("no vocabulary, no MLP width (intermediate_size)") },
         .{ &.{ .{ "\"norm_eps\":", "\"unread_a\":" }, .{ "\"block_norm_eps\":", "\"unread_b\":" } }, has("no normalization epsilon") },
+        .{ &.{.{ "\"rope_type\":\"default\"", "\"rope_type\":\"yarn\",\"factor\":4.0" }}, has("a rope_parameters.rope_type other than default (the kernels run plain RoPE)") },
+        .{ &.{.{ "\"rope_parameters\":", "\"rope_scaling\":{\"rope_type\":\"yarn\",\"factor\":4.0},\"rope_parameters\":" }}, has("a rope_scaling (the kernels run plain RoPE)") },
         .{ &.{.{ "\"model_type\":\"lfm2_vl\"", "\"model_type\":\"lfm2_vl\",\"quantization\":{\"bits\":4,\"group_size\":64}" }}, stores("MLX 4-bit, groups of 64") },
         .{ &.{.{ "\"model_type\":\"lfm2\",", "\"model_type\":\"lfm2\",\"quantization_config\":{\"quant_method\":\"FP8\",\"quant_algo\":\"FP8_BLOCK\",\"bits\":8}," }}, stores("fp8 FP8_BLOCK (8-bit)") },
     };

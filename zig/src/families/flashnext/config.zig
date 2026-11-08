@@ -191,6 +191,15 @@ fn quantBlock(root: std.json.ObjectMap, text: std.json.ObjectMap) !std.json.Obje
     return error.MissingAffineConfig;
 }
 
+/// The key asking for a RoPE other than plain (`--context` sets Metal's YaRN factor, never the config), or null.
+fn scaledRope(text: std.json.ObjectMap, rope: std.json.ObjectMap) ?[]const u8 {
+    for ([_][2][]const u8{ .{ "rope_type", "rope_parameters.rope_type" }, .{ "type", "rope_parameters.type" } }) |k| if (rope.get(k[0])) |v| {
+        if (v != .string or !std.mem.eql(u8, v.string, "default")) return k[1];
+    };
+    if (text.get("rope_scaling")) |v| if (v != .null) return "rope_scaling";
+    return null;
+}
+
 pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Config {
     var parsed = try std.json.parseFromSlice(std.json.Value, gpa, bytes, .{});
     errdefer parsed.deinit();
@@ -201,7 +210,10 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Config {
     const quant = try quantBlock(root, text);
     if (quant.get("quant_method")) |v| if (v != .null and (v != .string or (!std.mem.eql(u8, v.string, "mlx") and !std.mem.eql(u8, v.string, "affine")))) return error.UnsupportedAffineMode;
     const rope = if (text.get("rope_parameters")) |v| if (v == .null) std.json.ObjectMap.empty else try object(v) else std.json.ObjectMap.empty;
-    for ([_][]const u8{ "rope_type", "type" }) |key| if (rope.get(key)) |v| if (v != .string or !std.mem.eql(u8, v.string, "default")) return error.UnsupportedFlashRope;
+    if (scaledRope(text, rope)) |key| {
+        std.log.warn("Flash Next config.json: {s} asks for scaled RoPE (YaRN); this reader runs plain RoPE", .{key});
+        return error.UnsupportedFlashRope;
+    }
     const hidden = try required(text, "hidden_size");
     const heads = try required(text, "num_attention_heads");
     const head_dim = if (text.get("head_dim")) |v| if (v == .null or (v == .integer and v.integer == 0)) hidden / heads else try integer(v) else hidden / heads;
