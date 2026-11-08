@@ -36,10 +36,12 @@ ones that call the block now.
 | --- | --- | --- |
 | `lanes/engine.zig`, `lanes/backend.zig` | implements `lanes.backend.Backend` (forwards and draws); the host steps `lanes.Engine.init(gpa, cfg, backend, clock)` | deepseek_v41, dory, dots_mocr, flashnext, gemma4, glm, glm_dsa, glm_ocr, kimi_k3, kolibri1, lfm2_moe, lfm3, lighton_ocr, llama, minimax_m3, nemotron, nemotron_parse, qwen27 (`native/qwen27_lanes.zig`), qwen3, qwen3_5, qwen4, spark25, step5 |
 | `lanes/drafter.zig`, `lanes/drafted.zig` | returns a `lanes.drafter.Drafter` (taps, open, absorb, hold, held, release); the host wraps it with `lanes.drafted.Drafted.init(gpa, target, drafter)` (`native/cuda_drafted.zig` on CUDA) | qwen3_5 on CUDA (DFlash2, MTP), gemma4 on CUDA and Metal (DFlash, assistant), minimax_m3 (DSpark). qwen27's DFlash on Metal has its own glue |
+| `lanes/solo_chunk.zig` | `lanes.solo_chunk.rows(env_name, limits)` for its solo chunk setting, then `passRows(lanes, own, fill, solo, busy)` when a stream's prompt pass starts: wider chunks while no other stream decodes (`othersDecode` alone for a family that only needs the test) | gemma4 on CUDA (`families/gemma4/cuda_solo.zig`, `TF_GEMMA4_CHUNK_SOLO`), flashnext on CUDA (`families/flashnext/cuda_chunk.zig`), glm on CUDA (`othersDecode` in `families/glm/cuda_prompt_solo.zig`) |
 | `lane_host.zig` | its host calls `LaneHost.init(gpa, io, &engine, info)`, then `start` | every CUDA family through `native/cuda.zig`; on Metal, HIP and XPU through their hosts (`native/metal.zig`, `hip.zig`, `xpu.zig`, `qwen35.zig`, `qwen27_served.zig`, `glm_host.zig`, `llama.zig`, `lfm3.zig`, ...). Flash Next on Metal has its own host, one reply at a time, unless `--parallel` above one selects `native/flashnext_batch_host.zig` (`shared` in `families/flashnext/batch_meta.zig`) |
 | `engine_api.zig` | its host opens it from `Open` and returns an `Engine` with its `Info`; the HTTP server drives only this | every host |
 | `kv_pool.zig` | declares a `kv_pool.Layout`, sizes it with `kv_pool.plan`, holds pages in a `kv_pool.Pool` | on CUDA: dory, flashnext, gemma4, glm, kolibri1, nemotron, qwen3_5, spark25; on Metal: qwen3_5, nemotron (`TF_NEMOTRON_METAL_KV_PAGES=1`), and every Metal family's stream admission (`kv_pool.plan` in `native/metal_admit.zig`) |
 | `kv_ledger.zig` | none of its own: a family that exposes `kvPool` or `ledgerPool` gets its pool's pages counted by the lane host's ledger (`native/cuda_kv_pool.zig`); `per_request` declares per-request costs (`native/cuda_ledger.zig`) | the CUDA families on `kv_pool`; no family declares `per_request` yet |
+| `prompt_cache.zig` | gives a `prompt_cache.Snapshots` (`bytes`, `save`, `restore`, `drop`; optional spare, disk and rows hooks) to `prompt_cache.Store.init(gpa, snapshots, rules, budget)`, and sets the lane host's `cache` to that store; the lane host (`lane_host.zig:5`) then does the exact prompt reuse | on CUDA, every family that declares `snap_save` (`native/cuda.zig`, hooks from `native/cuda_snaps.zig`): dory, flashnext, gemma4, glm, kolibri1, minimax_m3, nemotron, qwen3_5, spark25; qwen4 through `families/qwen4/lane_snapshots.zig` (`native_host.zig:26`); on Metal, XPU and HIP the hosts' own snapshot hooks (`native/metal.zig`, `qwen35.zig`, `qwen27_served.zig`, `glm_host.zig`, `flashnext_host.zig`, `xpu.zig`, `families/dots_mocr`, `glm_ocr`, `lighton_ocr`, `nemotron_parse`, ...) |
 | `prompt_radix.zig` | gives a `Store` its snapshots and pages (`Store.init(gpa, snapshots, pages, rules)`), then `begin`, `resumed`, `keep` | qwen3_5 on CUDA (`TF_QWEN_KV_SHARE`, `families/qwen3_5/cuda_prefix.zig`) and HIP; nemotron on HIP; spark25, kolibri1 and glm on CUDA under `TF_KV_SHARE` (`native/cuda_prompt_pages.zig`) |
 | `prompt_tail.zig` | passes its `Facts` to `prompt_tail.start` to keep one row's logits past the last layer's keys and values | qwen3_5 on CUDA |
 | `recurrent_workspace.zig` | `Workspace(DeviceBuffer)` for recurrent scratch leases, disposed after their completion watermark | qwen3_5 on CUDA |
@@ -52,6 +54,13 @@ ones that call the block now.
 
 **What a family PR must justify.** For each block above it does not use, the pull request names the block and says why
 its own code is needed, or refuses that feature by name until the block covers it.
+
+**The rules a family PR follows.**
+- Settings are read through `zig/src/platform/environment.zig`; policy switches live in `zig/src/core/profile.zig`.
+- Source files stay at or below 600 lines ([CONTRIBUTING.md](../../CONTRIBUTING.md#lean-code-and-review)).
+- Each new or changed kernel registers with the [kernel contract](../kernel-contract.md#adding-a-kernel) and its
+  records ([the PR skill, section 4](../pr/SKILL.md#4-kernels-arithmetic-and-platforms)).
+- The served gate is the family's conformance kit profile (`tools/conformance.py`, #2467) once that lands.
 
 **The GPU side.** Shared kernels so far:
 - `zig/kernels/metal/ops/qmv.metal`: affine 4-, 6- and 8-bit row matmuls with MLX's arithmetic, and
@@ -90,7 +99,8 @@ This API does not enable constrained generation or add a server capability.
 - **Prompt path.** The first token is the same, last-row logits are within bf16 rounding, and the next 48 decoded
   tokens are equal, at 8k and 32k. Run it from a fresh process: an A/B inside one process can hide uninitialized
   state.
-- **Precision.** No int8 or fp8 activations, and no lossy cache. A new summation order at equal precision is allowed.
+- **Precision.** No int8 or fp8 activations. No lossy weight or cache formats, even opt-in, and no mode that changes
+  output tokens, even opt-in. A new summation order at equal precision is allowed.
 
 ## Stage 0: exact on day one
 
