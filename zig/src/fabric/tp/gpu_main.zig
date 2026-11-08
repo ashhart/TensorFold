@@ -94,6 +94,8 @@ fn suite(s: *tp.Session, d: *const cuda.Driver, gpa: std.mem.Allocator, cfg: tp.
     var c = try checks.Ctx.init(d, gpa, cfg.rank, cfg.world, max_bytes);
     defer c.deinit();
     c.baseline = s.nccl.iface();
+    c.omit_p2p = if (s.roce_multi) |r| tp.roce_suite_policy.omitP2p(r) else false;
+    if (c.omit_p2p) std.debug.print("SKIP rank {d}: 2 NCCL point-to-point reference types (send/recv and paired exchange, including graphs): four-rank relay has no opposite-rank link; NCCL receive ports are channel-selected\n", .{cfg.rank});
     var backends: [2]struct { comm: tp.Collective, label: []const u8 } = undefined;
     var n_backends: usize = 1;
     backends[0] = .{ .comm = s.nccl.iface(), .label = "nccl" };
@@ -117,7 +119,7 @@ fn suite(s: *tp.Session, d: *const cuda.Driver, gpa: std.mem.Allocator, cfg: tp.
     // the stop: rank 0 marks it expected first, then every rank meets and closes
     if (s.fate) |*f| f.expectStop();
     try s.comm().barrier();
-    std.debug.print("SUMMARY rank {d}: {d} passed, {d} failed\n", .{ cfg.rank, c.passes, c.failures });
+    std.debug.print("SUMMARY rank {d}: {d} passed, {d} failed; {d} point-to-point comparison checks left out\n", .{ cfg.rank, c.passes, c.failures, c.omitted });
     s.close();
     return if (c.failures == 0) 0 else 1;
 }

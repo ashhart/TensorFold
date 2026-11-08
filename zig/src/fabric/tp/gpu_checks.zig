@@ -22,6 +22,8 @@ pub const Ctx = struct {
     got: []u8,
     failures: u32 = 0,
     passes: u32 = 0,
+    omit_p2p: bool = false,
+    omitted: u32 = 0,
     baseline: ?Collective = null,
     oracle: cuda.DeviceBuffer,
 
@@ -75,8 +77,7 @@ pub const Ctx = struct {
 
     /// This rank's exchange partner: ranks pair up as (0, 1), (2, 3), ...; the last rank of an odd world sits out.
     fn partner(c: *const Ctx) ?u32 {
-        const p = c.rank ^ 1;
-        return if (p < c.world) p else null;
+        return tp.roce_suite_policy.partner(c.rank, c.world, c.omit_p2p);
     }
 
     /// Above two ranks, the actual NCCL result is the reference, with the same in-place geometry.
@@ -157,12 +158,16 @@ pub const Ctx = struct {
                 try c.in.uploadAsync(0, c.mine(n), c.stream.handle);
                 try comm.exchange(c.in.ptr, c.out.ptr, n / t.size(), t, p, c.stream.handle);
                 try c.compare(comm, label, "exchange", t, n, 0, c.ins[p][0..n]);
-            }
+            } else if (c.omit_p2p) c.omitted += 1;
         }
     }
 
     /// send then recv one way, then the other way (NCCL behind every backend), between ranks 0 and 1; the others wait.
     pub fn pointToPoint(c: *Ctx, comm: Collective, label: []const u8, n_bytes: usize, seed: u64) !void {
+        if (c.omit_p2p) {
+            if (c.rank < 2) c.omitted += 1;
+            return;
+        }
         const n = n_bytes - n_bytes % 4;
         c.inputs(n, .f32, seed);
         if (c.rank > 1) return;
@@ -237,6 +242,7 @@ pub const Ctx = struct {
             try c.compare(comm, label, "graph replay: first sum", .bf16, n, 0, want1[0..n]);
             try c.compare(comm, label, "graph replay: sum, gather, sum", .f32, w * n, n, want3);
             if (peer != null) try c.compare(comm, label, "graph replay: exchange of the sum", .f32, w * n, (1 + w) * n, want4);
+            if (c.omit_p2p) c.omitted += 1;
             // an eager call between replays
             try c.collectivesQuick(comm, label, k);
         }

@@ -239,3 +239,21 @@ Migrate additional switch groups with their existing parsers and tests intact. A
 the issue's same-checkpoint token gates: solo, concurrent 1/2/4/8, and resumed runs for every affected family. An
 arithmetic-changing `fast` profile additionally needs each switch's measured quality gate and maintainer agreement.
 The host tests for this foundation establish lookup/CLI/reporting behavior, not those GPU or checkpoint gates.
+
+## Four-rank RoCE relay ceiling
+
+`TF_TP_ROCE_RELAY_MAX_KB` sets the largest all-gather shard per rank sent over an enabled four-rank relay.
+It defaults to 64 KiB and accepts integers from 4 to 1024 KiB. Larger gathers use NCCL, including variable-length
+gathers whose stride exceeds the ceiling. `TF_TP_MAILBOX_MAX_KB` still sizes the slots; the effective relay ceiling
+is the smaller of the two limits. Changing the relay ceiling does not resize those slots or change gathered bytes.
+
+This setting is read directly by the TP parser, outside the profile registry. Invalid values refuse by name, and
+relay ranks must agree on the value. GLM uses its actual `TF_GLM_WORLD` and rank for relay validation, so a four-rank
+GLM run does not also need `TF_TP_WORLD=4`. With `TF_GLM_ROCE_MULTI=1`, a relay outside four ranks is refused before
+weights load.
+The relay remains opt-in through `TF_TP_ROCE_RELAY=1`; mesh, two-rank paths and all-reduce routing keep their defaults.
+
+On a verified four-rank verbs relay with no opposite-rank link, `tf-tp-test suite` omits its NCCL send/recv and paired
+exchange references, including that exchange in graph replays. NCCL selects those receive ports by channel on this
+topology. The suite prints the reason, the two reference types and the number of comparisons left out; all sums,
+gathers, remaining graph nodes and timing sweeps still run. Other topologies keep the complete suite.
