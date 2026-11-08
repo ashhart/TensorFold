@@ -152,7 +152,7 @@ test "ocr mistral: every error is an HTTPValidationError body with its status, c
     }
 }
 
-test "ocr mistral: block types follow the design's kind table" {
+test "ocr mistral: reader kinds map to the block types in docs/api.md OCR: Mistral" {
     try t.expectEqualStrings("title", reply.blockType(.section_header));
     try t.expectEqualStrings("equation", reply.blockType(.formula));
     try t.expectEqualStrings("text", reply.blockType(.footnote));
