@@ -155,26 +155,33 @@ test "environment: video refusal describes the token budget without advertising 
     try t.expect(std.mem.indexOf(u8, why, "18446744073709551615") == null);
 }
 
-test "environment: switches take 0 and 1 and the word forms in any case, and refuse every other text" {
-    for ([_][]const u8{ "0", "false", "OFF", "No" }) |raw| try t.expect(!try e.value(bool, "TF_DSV41_GM_V3", raw, true));
-    for ([_][]const u8{ "1", "TRUE", "on", "Yes" }) |raw| try t.expect(try e.value(bool, "TF_DSV41_GM_V3", raw, false));
+test "environment: word switches take 0 and 1 and the word forms in any case; exact switches refuse words" {
+    for ([_][]const u8{ "0", "false", "OFF", "No" }) |raw| try t.expect(!try e.value(bool, "TF_DSV41_COEF_LATE", raw, true));
+    for ([_][]const u8{ "1", "TRUE", "on", "Yes" }) |raw| try t.expect(try e.value(bool, "TF_DSV41_COEF_LATE", raw, false));
     try t.expect(try e.value(bool, "TF_DSV41_GRAPHS", null, true));
     try t.expect(try e.value(bool, "TF_DSV41_GRAPHS", " ", true));
-    for ([_][]const u8{ "2", "00", "truee", "0 trailing", " 1" }) |raw| try t.expectError(error.InvalidEnvironment, e.parse("TF_DSV41_GM_V3", raw));
+    for ([_][]const u8{ "2", "00", "truee", "0 trailing" }) |raw| try t.expectError(error.InvalidEnvironment, e.parse("TF_DSV41_COEF_LATE", raw));
     try t.expect(try e.value(bool, "TF_DSV41_MHC_DEFER", "\ton ", false));
-    for ([_][]const u8{ "true", "on", "yes" }) |raw| try t.expectError(error.InvalidEnvironment, e.parse("TF_DSV41_SAMPLING", raw));
+    // main read these as on for any text but "0", so a word form must be refused, never read the other way
+    for ([_][]const u8{ "true", "on", "yes", "false", "off", "no", " 1", "2" }) |raw| {
+        try t.expectError(error.InvalidEnvironment, e.parse("TF_DSV41_GM_V3", raw));
+        try t.expectError(error.InvalidEnvironment, e.parse("TF_DSV41_DRAFTS", raw));
+        try t.expectError(error.InvalidEnvironment, e.parse("TF_DSV41_SAMPLING", raw));
+    }
+    try t.expectError(error.InvalidEnvironment, e.parse("TF_DSV41_KV_SPLIT", "true"));
 }
 
 test "environment: real settings are finite, keep their lower bound and optional cap, and read as floats" {
     try t.expectEqual(@as(f64, 3.25), try e.value(f64, "TF_DSV41_GRAPH_FLOOR_GIB", "3.25", 0));
     try t.expectEqual(@as(f64, 0), try e.value(f64, "TF_DSV41_GRAPH_FLOOR_GIB", "0", 1));
     try t.expectEqual(@as(f64, 4), try e.value(f64, "TF_DSV41_FLOOR_HARD_GIB", null, 4));
+    try t.expectEqual(@as(f64, 4), try e.value(f64, "TF_DSV41_FLOOR_HARD_GIB", " 4", 1));
     try t.expectEqual(@as(f64, 6.5), try e.value(f64, "TF_DSV41_FLOOR_GIB", " 6.5 ", 5));
     try t.expectEqual(@as(f64, 1), try e.value(f64, "TF_DSV41_PREFILL_SHARE", "1", 0.5));
     try t.expectEqual(@as(f64, -2.5), try e.value(f64, "TF_DSV41_EXPERT_TOPP", "-2.5", 0));
     for ([_][2][]const u8{
         .{ "TF_DSV41_GRAPH_FLOOR_GIB", "-1" }, .{ "TF_DSV41_GRAPH_FLOOR_GIB", "1e999" },
-        .{ "TF_DSV41_FLOOR_HARD_GIB", "0" },   .{ "TF_DSV41_FLOOR_HARD_GIB", " 4" },
+        .{ "TF_DSV41_FLOOR_HARD_GIB", "0" },   .{ "TF_DSV41_FLOOR_HARD_GIB", "-1" },
         .{ "TF_DSV41_PREFILL_SHARE", "1.1" },  .{ "TF_DSV41_EXPERT_TOPP", "nan" },
         .{ "TF_DSV41_EXPERT_TOPP", "-inf" },   .{ "TF_DSV41_FLOOR_GIB", "4 GiB" },
     }) |c| try t.expectError(error.InvalidEnvironment, e.parse(c[0], c[1]));

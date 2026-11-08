@@ -377,8 +377,7 @@ test "DeepSeek chat: schema and legacy tool grammar retain precedence and refuse
         try t.expectError(error.InvalidEnvironment, @import("serve.zig").validateEnvironment());
         if (!std.mem.eql(u8, raw, "true")) try t.expectError(error.InvalidEnvironment, schema(raw));
     }
-    for ([_][]const u8{ "true", "on", "yes", "TRUE", "On", "YES" }) |raw| try t.expect(try schema(raw));
-    for ([_][]const u8{ "false", "off", "no", "FALSE", "Off", "NO" }) |raw| try t.expect(!try schema(raw));
+    for ([_][]const u8{ "true", "on", "yes", "false", "off", "no", "TRUE", "Off" }) |raw| try t.expectError(error.InvalidEnvironment, schema(raw));
     _ = env.setenv("TENSORFOLD_TOOL_GRAMMAR", "0", 1);
     try t.expect(!try grammar.autoAllEnv());
     try @import("serve.zig").validateEnvironment();

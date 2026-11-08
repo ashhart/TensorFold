@@ -71,8 +71,8 @@ test "DeepSeek strict env: every switch refuses garbage and keeps 0, 1 and its e
     };
 }
 
-test "DeepSeek strict env: the word forms belong to exactly the former nonzero and lookup switches" {
-    const words = [_][]const u8{ "MHC_DEFER", "COEF_LATE", "LOOKUP", "LOOKUP_PLAN", "GM_V3", "OWN_PREFILL", "DRAFTS", "GRAPHS", "AOT_GUARD", "ENGRAM_PREFETCH", "FLOOR_PRICE", "SESSIONS", "PREFILL_ADAPT", "ENGRAM_URING", "PREFETCH_AHEAD", "SCHEMA_PROMPT", "PIECE_RUNS", "REPLAY_RUNS", "KV_SPLIT" };
+test "DeepSeek strict env: the word forms belong to exactly the switches that read words on main" {
+    const words = [_][]const u8{ "MHC_DEFER", "COEF_LATE", "LOOKUP", "LOOKUP_PLAN" };
     var toggles: usize = 0;
     for (e.rules) |r| if (r.scope == .dsv41 and r.kind == .toggle) {
         toggles += 1;
