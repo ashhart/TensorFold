@@ -1,5 +1,6 @@
 //! PDF document input (--vision --vision-pdf): renders PDF pages via PDFium and libjpeg-turbo in a bounded worker.
 const std = @import("std");
+const builtin = @import("builtin");
 const sys = @import("sys");
 const json = @import("json");
 const errors = @import("errors.zig");
@@ -212,16 +213,23 @@ pub fn ocrCaps(pages: u32) Caps {
 /// Renders all pages of `pdf_bytes` within the request-wide `budget` into `image_url` parts appended to `parts`.
 pub fn expandBytes(cx: *Cx, pdf_bytes: []const u8, image_type: []const u8, max_images: u32, max_pages: u32, budget: *Budget, parts: *std.ArrayList(Value)) errors.Refused!void {
     const sel: Selection = .{ .all_within = @max(@as(u32, 1), max_pages) -| budget.pdf_pages_used };
-    const r = try renderPages(cx, pdf_bytes, sel, chatCaps(max_images), budget);
+    const r = try renderPages(cx, pdf_bytes, sel, chatCaps(max_images), budget, null);
     for (r.pages) |p| try appendImageUrlPart(cx.a, parts, image_type, try makeDataUrl(cx.a, "image/jpeg", p.jpeg));
 }
 
-/// Renders the pages `sel` names within `caps` and the running `budget`, which it updates; one worker per call.
-pub fn renderPages(cx: *Cx, pdf_bytes: []const u8, sel: Selection, caps: Caps, budget: *Budget) errors.Refused!Rendered {
+/// renderPages' errors: a probe's `error.Cancelled` besides the refusals; without a probe (chat) the refusals alone.
+pub fn RenderError(comptime Gone: type) type {
+    return if (Gone == @TypeOf(null)) errors.Refused else errors.Refused || error{Cancelled};
+}
+
+/// Renders `sel` within `caps` and the running `budget`, one worker a call; `gone`: null or a probe, asked once locked.
+pub fn renderPages(cx: *Cx, pdf_bytes: []const u8, sel: Selection, caps: Caps, budget: *Budget, gone: anytype) RenderError(@TypeOf(gone))!Rendered {
     const jf = jpeg_out.get(cx.a) orelse return cx.fail(.unimplemented, "{s}", .{sys.optional_libraries.spec(.jpeg).message});
     const io = log.io();
     pdfium_mutex.lockUncancelable(io);
     defer pdfium_mutex.unlock(io);
+    // a client that left while queued here starts no worker with a fresh deadline ahead of live requests
+    if (@TypeOf(gone) != @TypeOf(null) and gone.check()) return error.Cancelled;
     if (pdfium_state == .unknown) pdfium_state = findPdfium(cx.a);
     const f = if (pdfium_state == .ready) pdfium_state.ready else return cx.fail(.unimplemented, "{s}", .{sys.optional_libraries.spec(.pdfium).message});
     const job: Job = .{ .pdf_bytes = pdf_bytes, .sel = sel, .caps = caps, .deadline_ns = std.Io.Clock.awake.now(io).toNanoseconds() + render_timeout_ns };
@@ -483,4 +491,49 @@ test "pdf pages: a huge page fits 2048 px a side and keeps a DPI of at least 1" 
     try std.testing.expectEqual(@as(u32, 0), @as(u32, @intFromFloat(@round(72.0 * dims.scale))));
     try std.testing.expectEqual(@as(u32, 1), pageDpi(dims));
     try std.testing.expectEqual(max_dpi, pageDpi(pageDimensions(200, 200)));
+}
+
+/// A cancellation probe that counts its calls, says whether the renderer was held then, and reports `left`.
+const Probe = struct {
+    left: bool,
+    calls: u32 = 0,
+    held: bool = false,
+    pub fn check(p: *Probe) bool {
+        p.calls += 1;
+        p.held = !pdfium_mutex.tryLock();
+        if (!p.held) pdfium_mutex.unlock(log.io());
+        return p.left;
+    }
+};
+
+test "pdf pages: a client that left while queued for the renderer gets Cancelled and starts no worker" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest; // Windows renders in process, with no worker to refuse
+    log.init(std.testing.io, false);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    if (jpeg_out.get(a) == null) return error.SkipZigTest; // without libjpeg-turbo the call refuses before the lock
+    // a worker start would refuse with "could not be started", never Cancelled
+    const saved = worker.server_exe;
+    defer worker.server_exe = saved;
+    worker.server_exe = "/nonexistent/tensorfold-native";
+    var budget: Budget = .{};
+    var cx: Cx = .{ .a = a };
+    var left: Probe = .{ .left = true };
+    try std.testing.expectError(error.Cancelled, renderPages(&cx, minimal_two_page_pdf, .{ .all_within = 16 }, ocrCaps(16), &budget, &left));
+    try std.testing.expectEqual(@as(u32, 1), left.calls);
+    try std.testing.expect(left.held); // asked with the renderer held: after the wait, before any worker
+    try std.testing.expectEqual(Budget{}, budget);
+    try std.testing.expectEqualStrings("", cx.message);
+    // a client still there, and chat's null probe (whose error set stays Refused), take the same path past the check
+    comptime std.debug.assert(RenderError(@TypeOf(null)) == errors.Refused);
+    var here: Probe = .{ .left = false };
+    var here_cx: Cx = .{ .a = a };
+    var chat_cx: Cx = .{ .a = a };
+    try std.testing.expectError(error.Refused, renderPages(&here_cx, minimal_two_page_pdf, .{ .all_within = 16 }, chatCaps(4), &budget, &here));
+    try std.testing.expectError(error.Refused, renderPages(&chat_cx, minimal_two_page_pdf, .{ .all_within = 16 }, chatCaps(4), &budget, null));
+    try std.testing.expectEqual(@as(u32, 1), here.calls);
+    try std.testing.expectEqualStrings(chat_cx.message, here_cx.message);
+    try std.testing.expectEqual(chat_cx.kind, here_cx.kind);
+    try std.testing.expectEqual(Budget{}, budget);
 }

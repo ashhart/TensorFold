@@ -92,7 +92,10 @@ fn plan(srv: *const Server, a: Allocator, sources: []const Source, fault: *Fault
                 };
                 // a client that left must not hold the shared renderer for its deadline
                 if (gone.check()) return error.Cancelled;
-                const r = pdf.renderPages(&cx, s.bytes, sel, pdf.ocrCaps(cap), &used) catch |e| return refused(a, &cx, fault, e);
+                const r = pdf.renderPages(&cx, s.bytes, sel, pdf.ocrCaps(cap), &used, gone) catch |e| return switch (e) {
+                    error.Cancelled => error.Cancelled, // it left while another request held the renderer
+                    else => |refusal| refused(a, &cx, fault, refusal),
+                };
                 if (!left.take(@intCast(r.pages.len))) return overBudget(a, fault, cap);
                 for (r.pages) |p| try out.append(a, .{ .source = source, .index = p.index, .bytes = p.jpeg, .dpi = p.dpi, .pixels = @as(u64, p.width) * p.height });
             },
