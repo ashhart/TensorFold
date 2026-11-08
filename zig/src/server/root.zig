@@ -115,6 +115,7 @@ test {
     _ = @import("stream_dsml_test.zig");
     _ = @import("tool_cut_test.zig");
     _ = @import("tool_json_cut.zig");
+    _ = @import("tool_json_cut_routes_test.zig");
     _ = @import("tool_glm_stream_test.zig");
     _ = @import("tool_glm_messages_test.zig");
     _ = @import("tool_dsml_stream_test.zig");
