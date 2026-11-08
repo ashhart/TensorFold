@@ -19,13 +19,13 @@ zig/kernels/cuda/fp8_experts.cu	156aa7337b41c67d200d8b58a24422cc96cfa032c9fd0711
 zig/kernels/cuda/gdn.cu	a9caeec5b270dcab933a5eae0f500d7aabcd31cde156238225ae064ac92ba2e8	raw
 zig/kernels/cuda/glm_glue.cu	8c71cb95fafdcc6a1540cb260edc40f5ef280b2d549e5b39a66ecdc60fbdaa9b	raw
 zig/kernels/cuda/glm_glue_attn.cuh	abecbecf809292c0f82294fa688e47e574fa43c8ff3b1497966f9d3dd52b9881	raw	main 42735f94f0 (#2335: MLA bodies to common/mla.cuh; glm_glue SASS identical on five SMs)
-zig/kernels/cuda/glm_glue_bmm.cuh	1accfc9285deabb63a6cf6d70dc11544ebcb1654a8eb6c7159927d8c1d5177dc	raw
+zig/kernels/cuda/glm_glue_bmm.cuh	7fbaaa4517e309b17ebb41f84f94f9a939baa27a2fb5c9a6b7f5b857b5a21391	raw
 zig/kernels/cuda/glm_glue_hc.cuh	c3aa26475c6ce05d2508c300c8e88d429adea4c0c173e3909734bb0ece06da2a	raw
 zig/kernels/cuda/glm_glue_index.cuh	73fbdf6dea2cfc13275169ac2e7ea4d670611145c1e738529a05b23d63f39abf	raw
 zig/kernels/cuda/glm_glue_latent.cuh	4d4c7872b6383d5a4e2194b2ea0e477948ba3ff482c3aeb364838f3df0aa6ab5	raw
 zig/kernels/cuda/glm_glue_moe.cuh	163d542c99f6ef0432956f6341df324c85568127b623e301ad29279bbb49128c	raw
 zig/kernels/cuda/glm_glue_norm.cuh	7efd71df53fbf664d2f6d13b8aa7a9f0483f50f3d26574360d7ad8f4361cd453	raw
-zig/kernels/cuda/glm_glue_router.cuh	33c61252d5f86e7e22d5ba4bf9a1a48e6e13e195c40ecee2b024a1b647610f20	raw	main 42735f94f0 (#2335; glm_glue SASS identical on five SMs)
+zig/kernels/cuda/glm_glue_router.cuh	99911df38e6ad2826491b3fa5efd47aea5e54eebb7cd83eed586ba0dd9305658	raw
 zig/kernels/cuda/glm_glue_rows.cuh	0e70ddc8f3d3d91bd09a3643599bd3dc4cf98b9959ea03f8105ee84755440b2f	raw
 zig/kernels/cuda/glm_kda.cu	73e8ed722c69447232e4a5f0edf2c5245fee82f5b9c0c550ec516a035e550b57	raw	#2142: the KDA chain and saved-row replay moved to common/kda.cuh; SASS identical on sm_80/86/89/120/121 (5,465 functions)
 zig/kernels/cuda/glm_ops.cu	3c96e09f3e650a516d2685125f5603f4fd8877f54f2a16430a44fd717c1a6667	raw

@@ -11,6 +11,7 @@ const tiles_k = @import("contract_rms_tiles.zig");
 const dory_k = @import("contract_dory.zig");
 const router_k = @import("contract_router.zig");
 const qwen_router_k = @import("contract_qwen_router.zig");
+const glm_router_k = @import("contract_glm_router.zig");
 const mm_k = @import("contract_mm.zig");
 const prefill_many_k = @import("contract_qmm_prefill_many.zig");
 const prefill_tile22_k = @import("contract_qmm_prefill_tile22.zig");
@@ -521,6 +522,9 @@ fn registered(gpu: check.Gpu, only: []const []const u8, t0: *i96) !g.Tally {
     }));
     defer for (&f32ws) |*x| x.deinit();
     for (&f32ws) |*x| try kernels.append(a, x.kernel());
+    var glm_routers = try glm_router_k.pair(.{ .gpu = gpu, .s = s }, glm_glue, mods[5]);
+    defer for (&glm_routers) |*x| x.deinit();
+    for (&glm_routers) |*x| try kernels.append(a, x.kernel());
     var bf16s: [f32w_k.bf16_entries.len]f32w_k.F32w = undefined;
     for (f32w_k.bf16_entries, &bf16s) |e, *x| {
         x.* = .init(.{ .gpu = gpu, .s = s }, e.which, try glm_glue.function(e.symbol));
