@@ -175,8 +175,6 @@ pub const Pipelines = struct {
             // A decode layer's scan takes a slice a threadgroup.
             var a2 = args;
             const splits: u32 = @min(args.splits, 32);
-            if (std.c.getenv("TF_DSV41_DRAFT_DEBUG") != null)
-                std.log.info("scan: rows={d} splits={d}", .{ args.rows, splits });
             a2.splits = splits;
             enc.setBuffer(partials.buffer, partials.offset, 9);
             enc.dispatchGroups(mtl.Size.of(args.heads / 16, args.rows, splits), mtl.Size.of(32, 4, 1));

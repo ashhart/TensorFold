@@ -1,6 +1,6 @@
 //! Tiled GPU scores and bounded online heaps; the memory footprint does not grow with context length.
 const std = @import("std");
-const max_context = @import("kv_state.zig").max_context;
+const max_context = @import("metal_kv_state.zig").max_context;
 const mtl = @import("metal");
 const sources = @import("kernel_sources");
 const frags = @import("core").frags;

@@ -1,7 +1,7 @@
 const std = @import("std");
 const mtl = @import("metal");
 const kv = @import("kv.zig");
-const cache = @import("kv_state.zig");
+const cache = @import("metal_kv_state.zig");
 const View = @import("view.zig").View;
 fn bf(x: f32) u16 {
     const bits: u32 = @bitCast(x);

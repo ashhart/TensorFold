@@ -542,10 +542,6 @@ pub fn proposeTokens(m: *Model, slot: u32, pending: u32, count: u32) ![4]u32 {
         }
     }
     const idbytes = m.markov_ids.?.contents();
-    if (std.c.getenv("TF_DSV41_DRAFT_DEBUG") != null) {
-        const picks: [*]const u32 = @ptrCast(@alignCast(idbytes));
-        std.log.info("mtp picks: {d} {d} {d} {d} {d} {d}", .{ picks[0], picks[1], picks[2], picks[3], picks[4], picks[5] });
-    }
     const rows_out: u32 = @min(count, n);
     var r: u32 = 0;
     while (r < rows_out) : (r += 1) out[r] = std.mem.readInt(u32, idbytes[(r + 1) * 4 ..][0..4], .little);

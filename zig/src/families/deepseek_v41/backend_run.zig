@@ -92,9 +92,6 @@ pub fn verify(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) a
         if (batch) {
             feeds = batch_feeds[wi];
         } else {
-            if (std.c.getenv("TF_DSV41_DRAFT_DEBUG") != null) std.log.info("verify: rows={d} held={d} tokens={d}", .{ w.rows(), w.held, w.tokens.len });
-            if (std.c.getenv("TF_DSV41_DRAFT_DEBUG") != null)
-                std.log.info("window: rows={d} held={d} tokens={d} positions={d} pos0={d} state={d}", .{ w.rows(), w.held, w.tokens.len, w.positions.len, if (w.positions.len > 0) w.positions[0] else 0, state.position });
             if (w.positions.len != rows) return error.WindowOutOfStep;
             for (w.positions, 0..) |p, r| if (p != state.position + r + 1) return error.PositionMismatch;
             b.model.commitSlot(i) catch {}; // a window the engine accepted whole leaves its transaction to close here
@@ -264,7 +261,6 @@ pub fn verify(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) a
         // The window's fed tokens after the pending one landed: the verified drafts, GLM's contract.
         if (o.drafts.len > 0) @memcpy(o.drafts, feeds[1 .. 1 + o.drafts.len]);
         @memcpy(b.last_sampled[0..rows], o.sampled[0..rows]);
-        if (std.c.getenv("TF_DSV41_DRAFT_DEBUG") != null) std.log.info("verify sampled: {d}", .{o.sampled[0]});
     }
 }
 
@@ -277,7 +273,6 @@ pub fn keep(ptr: *anyopaque, windows: []const be.Window, paths: []const []const 
         if (i < b.gov_kept.len) b.gov_kept[i] = @intCast(kept);
         b.keep_pending[i] = true;
         b.keep_ratio[i] = if (rows > 1) @as(f64, @floatFromInt(kept)) / @as(f64, @floatFromInt(rows - 1)) else 1.0;
-        if (std.c.getenv("TF_DSV41_DRAFT_DEBUG") != null) std.log.info("keep: slot {d} kept {d} of {d}", .{ i, kept, rows });
         // THE POLICY'S SIGNAL IS TAKEN WHERE THE KEPT COUNT IS KNOWN: portKeep missed the whole-window case.
         if (kept >= rows) continue; // the whole window landed
         try b.model.rollbackSlot(i);
@@ -308,19 +303,10 @@ pub fn keep(ptr: *anyopaque, windows: []const be.Window, paths: []const []const 
             const start = b.model.caches[i].position;
             b.model.caches[i].clearRows(start + kept, start + rows);
         }
-        const again = b.model.forwardOn(i, feeds, .last) catch |e| {
+        _ = b.model.forwardOn(i, feeds, .last) catch |e| {
             std.log.err("keep: refeed failed: {s}", .{@errorName(e)});
             return e;
         };
-        if (std.c.getenv("TF_DSV41_DRAFT_DEBUG") != null) {
-            var best: u32 = 0;
-            var maximum = -std.math.inf(f32);
-            for (again, 0..) |v, id| if (v > maximum) {
-                maximum = v;
-                best = @intCast(id);
-            };
-            std.log.info("keep: refeed sampled {d}, verify sampled {d}{s}", .{ best, b.last_sampled[0], if (best == b.last_sampled[0]) "" else "  <-- DIVERGES" });
-        }
         // The refeed's own forward closed the transaction; commit only if one is still open.
         b.model.commitSlot(i) catch {};
     }
@@ -329,10 +315,6 @@ pub fn keep(ptr: *anyopaque, windows: []const be.Window, paths: []const []const 
 /// Nothing to absorb: the lookup drafter reads the stream's own context each round.
 pub fn draft(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void {
     const b = self(ptr);
-    if (std.c.getenv("TF_DSV41_DRAFT_DEBUG") != null) std.log.info(
-        "draft() called: requests={d} mtp_env={} dspark={} pending={?} depth={d}",
-        .{ requests.len, std.c.getenv("TF_DSV41_MTP_DRAFTS") != null, b.model.weights.dspark != null, if (requests.len > 0) requests[0].stream.pending else null, if (requests.len > 0) requests[0].depth else 0 },
-    );
     for (requests) |r| {
         const i = b.by.get(r.stream) orelse continue;
         if (b.held[i].len > 0) b.gpa.free(b.held[i]);
@@ -392,7 +374,6 @@ pub fn tree(ptr: *anyopaque, s: *Stream, gpa: std.mem.Allocator) anyerror!?lanes
         s.drafts = false;
         return null;
     }
-    if (std.c.getenv("TF_DSV41_DRAFT_DEBUG") != null) std.log.info("tree() called: pending={?} depth={d}", .{ s.pending, lookupDepth() });
     var depth = lookupDepth();
     // THE ADAPTIVE DEPTH POLICY: yield from the accepted drafts selects the cheap depth-1 or the deep window.
     const adapt_raw = std.c.getenv("TF_DSV41_MTP_ADAPT");

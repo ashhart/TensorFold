@@ -60,11 +60,6 @@ pub fn forwardSegs(m: *Model, segs: []const Seg, logits: Logits) ![]const f32 {
     const state = &m.caches[slot];
     const rows: u32 = total_rows;
     if (segs.len > 1 and std.c.getenv("TF_DSV41_BATCH_DEBUG") != null) std.log.info("forwardSegs: segs={d} rows={d}", .{ segs.len, rows });
-    if (std.c.getenv("TF_DSV41_DRAFT_DEBUG") != null) {
-        const hv = try m.workspace.historyView(slot);
-        const head: [*]const u32 = @ptrCast(@alignCast(hv.buffer.contents() + hv.offset));
-        std.log.info("fwd: slot {d} segs {d} rows {d} pos {d} taps {d}/{d} engram {d} {d} {d} {d}", .{ slot, segs.len, rows, first_seg.p0, m.taps_n, m.taps_row, head[0], head[1], head[2], head[3] });
-    }
     // A forward starts from the embedding: its stream lives in `.stream` and no sublayer branch is pending.
     m.stream_alt = false;
     m.pending_expand = false;

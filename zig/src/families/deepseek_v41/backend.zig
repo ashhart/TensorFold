@@ -1,7 +1,7 @@
 //! V4.1 lane slots: a stream a slot, greedy, drafts off; a window is a slot's sub-forward, so rows keep solo bits.
 const std = @import("std");
 const ds = @import("model.zig");
-const kv = @import("kv_state.zig");
+const kv = @import("metal_kv_state.zig");
 const lanes = @import("lanes");
 const be = lanes.backend;
 const Stream = lanes.Stream;
@@ -210,7 +210,7 @@ pub const Backend = struct {
 
     /// The prefill's first draw and the queue's next.
     pub fn draw(b: *Backend, slot: u32, s: *Stream, position: u64) !u32 {
-        if (std.c.getenv("TF_DSV41_DRAFT_DEBUG") != null) std.log.info("draw: slot {d} pos {d}", .{ slot, b.model.caches[slot].position });
+        _ = slot;
         const row = b.model.workspace.logits(1);
         if (s.sampling) |sp| if (sp.temperature > 0) {
             const first = try sampleRow(row, sp, position);
@@ -316,13 +316,6 @@ pub const Backend = struct {
     }
 
     fn queue(ptr: *anyopaque, s: *Stream, feed: be.Feed, position: u64) anyerror!u64 {
-        if (std.c.getenv("TF_DSV41_DRAFT_DEBUG") != null) {
-            const v: u32 = switch (feed) {
-                .value => |t| t,
-                else => 0xFFFF_FFFF,
-            };
-            std.log.info("queue feed: {d}", .{v});
-        }
         const b = self(ptr);
         const i = try b.slotOf(s);
         const state = &b.model.caches[i];
@@ -337,10 +330,6 @@ pub const Backend = struct {
     }
 
     fn read(ptr: *anyopaque, handle: u64) anyerror!u32 {
-        if (std.c.getenv("TF_DSV41_DRAFT_DEBUG") != null) {
-            const v = self(ptr).ring[handle % RING];
-            std.log.info("read: token {d}", .{v});
-        }
         const b = self(ptr);
         if (handle >= b.puts or b.puts - handle > RING) return error.StaleHandle;
         return b.ring[handle % RING];
@@ -418,8 +407,7 @@ pub const Backend = struct {
     /// The instruments that read a forward's internals take the one-stream path; the batch never runs under them.
     pub fn noBatchInstrument() bool {
         return std.c.getenv("TF_DSV41_STAGE_CB") == null and std.c.getenv("TF_DSV41_LAYER_CB") == null and
-            std.c.getenv("TF_DSV41_ATTN_PROF") == null and std.c.getenv("TF_DSV41_HID_HASH") == null and
-            std.c.getenv("TF_DSV41_DRAFT_DEBUG") == null;
+            std.c.getenv("TF_DSV41_ATTN_PROF") == null and std.c.getenv("TF_DSV41_HID_HASH") == null;
     }
 
     pub fn batchOn() bool {
