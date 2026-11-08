@@ -175,6 +175,8 @@ pub const Engine = struct {
     hop: ?stage_fwd.Hop = null,
     boundary: ?cuda.HostBuffer = null,
     held: ?*stage_fwd.Held = null, // rank 0 with rounds in flight: the round's state its head reads later
+    /// During a prompt chunk's forward: its stream's state table on the host (cuda_prompt.zig's delta reads it).
+    prompt_states: []const u64 = &.{},
 
     pub const ids_at = Round.ids_at;
     pub const segs_at = Round.segs_at;
@@ -230,6 +232,7 @@ pub const Engine = struct {
         e.hop = null;
         e.boundary = null;
         e.held = null;
+        e.prompt_states = &.{};
         e.stream = try cuda.Stream.init(d, true);
         errdefer e.stream.deinit();
         if (span != null) e.boundary = try cuda.HostBuffer.alloc(d, stage_fwd.bytes(g.hidden, max_rows));
@@ -339,10 +342,10 @@ pub const Engine = struct {
         e.gpa.destroy(e);
     }
 
-    /// A stream's device bytes at a `cap`-token window: recurrences, convolution tails, keys and values, taps, log.
+    /// A stream's device bytes at a `cap`-token window: state, keys and values, taps, log and its state table.
     pub fn streamBytes(e: *const Engine, cap: usize) usize {
         const c = @import("cuda_cache.zig");
-        return e.g.stateBytes() + c.scratchBytes(e) + e.g.kvBytes(cap, e.kv8) + e.tapBytes() + c.pendBytes(e.g);
+        return e.g.stateBytes() + c.scratchBytes(e) + e.g.kvBytes(cap, e.kv8) + e.tapBytes() + c.pendBytes(e.g) + c.States.bytes(e.g);
     }
 
     /// A stream's tap ring: tap_rows rows of the tapped layers' residuals.
@@ -453,9 +456,12 @@ pub const Engine = struct {
         }
         var row0: usize = 0;
         for (parts, 0..) |p, i| {
-            segs[i] = p.cache.fold(p.cache.seg(e, p.cache.len, row0, p.rows));
+            segs[i] = p.cache.fold(try p.cache.seg(e, p.cache.len, row0, p.rows));
             row0 += p.rows;
         }
+        // a prompt chunk is one stream's: its delta rule takes the recurrences' addresses on the host
+        e.prompt_states = if (prompt) parts[0].cache.states.?.host else &.{};
+        defer e.prompt_states = &.{};
         if (keep == .draws) {
             const rules = std.mem.bytesAsSlice(cuda.sample.Rule, st[rules_at..][0 .. total * @sizeOf(cuda.sample.Rule)]);
             const meta = std.mem.bytesAsSlice(c_int, st[meta_at..][0 .. total * 4]);

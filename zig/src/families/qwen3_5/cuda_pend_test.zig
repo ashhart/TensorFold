@@ -85,9 +85,14 @@ fn engine(d: *cuda.Driver) E {
     return e;
 }
 
-/// A cache with its own log of a widest window, as a cache outside a pool has.
+/// A cache with its own log of a widest window, as a cache outside a pool has; its state table already written.
 fn cache(d: *cuda.Driver, g: geometry.Geometry) !caches.Cache {
-    return .{ .state = try cuda.DeviceBuffer.alloc(d, g.stateBytes()), .kv = try cuda.DeviceBuffer.alloc(d, g.kvBytes(4096, false)), .log = try cuda.DeviceBuffer.alloc(d, g.logBytes(most)), .cap = 4096, .logits = &.{} };
+    var c: caches.Cache = .{ .state = try cuda.DeviceBuffer.alloc(d, g.stateBytes()), .kv = try cuda.DeviceBuffer.alloc(d, g.kvBytes(4096, false)), .log = try cuda.DeviceBuffer.alloc(d, g.logBytes(most)), .cap = 4096, .logits = &.{} };
+    var states: caches.States = .{ .dev = try cuda.DeviceBuffer.alloc(d, caches.States.bytes(g)), .host = try t.allocator.alloc(u64, caches.States.len(g)) };
+    caches.States.fill(states.host, g, c.state.ptr, 0, c.log.ptr);
+    states.from = .{ c.state.ptr, 0, c.log.ptr };
+    c.states = states;
+    return c;
 }
 
 fn release(c: *caches.Cache) void {
@@ -95,6 +100,7 @@ fn release(c: *caches.Cache) void {
     c.kv.free();
     c.log.free();
     if (c.pbuf) |*b| b.free();
+    if (c.states) |*s| s.deinit(t.allocator);
 }
 
 /// A recorded window of `most` rows, then `path` kept.
