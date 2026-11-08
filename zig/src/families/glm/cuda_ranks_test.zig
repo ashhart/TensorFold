@@ -241,7 +241,7 @@ test "TF_GLM_KDA_PAD: 0 by default, 1 or 0, refused otherwise and without glm_mm
     try std.testing.expectEqual(@as(?Mismatch, .{ .field = .kda_pad, .rank = 1 }), mismatch(&all));
 }
 
-test "TF_GLM_PROMPT_TAIL: unset, 0 or 1, refused otherwise" {
+test "TF_GLM_PROMPT_TAIL: unset or empty, 0 or 1, refused otherwise" {
     const Reader = struct {
         fn off(key: [:0]const u8) ?[]const u8 {
             return if (std.mem.eql(u8, key, "TF_GLM_PROMPT_TAIL")) "0" else null;
@@ -260,10 +260,46 @@ test "TF_GLM_PROMPT_TAIL: unset, 0 or 1, refused otherwise" {
     _ = try Settings.read(&fake, &problem);
     _ = try Settings.read(Reader.off, &problem);
     _ = try Settings.read(Reader.on, &problem);
-    for ([_]*const fn ([:0]const u8) ?[]const u8{ &Reader.empty, &Reader.yes }) |refused| {
-        try std.testing.expectError(error.BadSetting, Settings.read(refused, &problem));
+    _ = try Settings.read(Reader.empty, &problem);
+    try std.testing.expectError(error.BadSetting, Settings.read(Reader.yes, &problem));
+    try std.testing.expectEqualStrings("TF_GLM_PROMPT_TAIL: 0 or 1", problem);
+}
+
+test "blank settings: empty or whitespace-only text reads as unset for every name, a set value among them keeps its meaning, padded text is refused" {
+    const Reader = struct {
+        var blank: ?[]const u8 = null; // what every name outside `vars` reads as
+        var vars: []const [2][]const u8 = &.{};
+        fn get(key: [:0]const u8) ?[]const u8 {
+            for (vars) |kv| if (std.mem.eql(u8, kv[0], key)) return kv[1];
+            return blank;
+        }
+    };
+    var problem: []const u8 = "";
+    Reader.blank = null;
+    Reader.vars = &.{};
+    const unset = try Settings.read(Reader.get, &problem);
+    for ([_][]const u8{ "", " ", "\t", "\r\n", " \t\r\n" }) |text| {
+        Reader.blank = text;
+        try std.testing.expectEqual(unset, try Settings.read(Reader.get, &problem));
+    }
+    Reader.blank = " ";
+    Reader.vars = &.{ .{ "TF_GLM_MM", "0" }, .{ "TF_GLM_PREFILL_REDUCE", "ring" }, .{ "TF_GLM_L2PF_MB", "8" } };
+    const chosen = try Settings.read(Reader.get, &problem);
+    try std.testing.expect(!chosen.tiled and chosen.split and chosen.ring and chosen.l2pf.mb == 8 and chosen.heat == null);
+    Reader.blank = null;
+    inline for (.{ " 1", "1 " }) |padded| {
+        Reader.vars = &.{.{ "TF_GLM_PROMPT_TAIL", padded }};
+        try std.testing.expectError(error.BadSetting, Settings.read(Reader.get, &problem));
         try std.testing.expectEqualStrings("TF_GLM_PROMPT_TAIL: 0 or 1", problem);
     }
+    inline for (.{ "TF_TP_MASTER", "TF_TP_KERNEL_IMAGE" }) |name| {
+        Reader.vars = &.{ .{ name, " " }, .{ "TF_GLM_ROCE_MULTI", "1" }, .{ "TF_TP_MASTER", "127.0.0.1" }, .{ "TF_TP_KERNEL_IMAGE", "tp_mailbox.fatbin" } };
+        try std.testing.expectError(error.BadSetting, Settings.read(Reader.get, &problem));
+        try std.testing.expectEqualStrings("TF_GLM_ROCE_MULTI=1 requires TF_TP_MASTER and TF_TP_KERNEL_IMAGE", problem);
+    }
+    Reader.vars = &.{ .{ "TF_HEAT_HIGH", "92" }, .{ "TF_HEAT_LOW", "" } };
+    try std.testing.expectError(error.BadSetting, Settings.read(Reader.get, &problem));
+    try std.testing.expectEqualStrings("TF_HEAT_HIGH and TF_HEAT_LOW: both or neither, in degrees, with low at or under high", problem);
 }
 fn digestFixture(io: std.Io, dir: std.Io.Dir, sub: []const u8, byte: u8) !void {
     try dir.createDirPath(io, sub);
