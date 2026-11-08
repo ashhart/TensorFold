@@ -11,6 +11,10 @@ const mib: u64 = 1 << 20;
 /// Nemotron 3.5 Lightning on CUDA: 6 attention layers and the MTP head's, 2 KV heads of 128, Mamba states in a slot.
 const nemotron: kv.Layout = .{ .fixed_bytes = 64 * mib, .token_bytes = 7 << 10, .page_tokens = 512, .snap_bytes = 48 * mib };
 
+test {
+    _ = @import("kv_pool_band_test.zig");
+}
+
 test "a 2,048-token prompt with 4,096 reply tokens and a 16-row window reserves 13 pages of 512 rows, 45.5 MiB" {
     try expectEqual(@as(u64, 3584 * 1024), nemotron.pageBytes());
     try expectEqual(@as(usize, 13), nemotron.need(2048, 4096, 16));
