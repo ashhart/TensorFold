@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import conformance
 from conformance import drafted_gate, equality_gate, refusals_gate, reply_row, resumed_gate, same, tally
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from fake_served_api import doc, fake
+from fake_served_api import doc, fake, script, serve
 
 PROFILE = Path(__file__).resolve().parents[1] / "conformance_profiles" / "qwen35-cuda.json"
 
@@ -137,6 +137,42 @@ class GateRunTests(unittest.TestCase):
             rows = [client.post({"messages": [{"role": "user", "content": "hi"}], "max_tokens": 4}) for _ in range(3)]
         self.assertTrue(all(row["status"] == 200 for row in rows), rows)
         self.assertEqual(len({row["sha"] for row in rows}), 1, rows)
+
+    def test_streamed_replies_pass_clean_and_each_fault_turns_its_gate_red(self):
+        code, lines = self.run_kit("--stream")
+        self.assertEqual(code, 0, lines)
+        self.assertEqual(len(lines), len(conformance.GATES))
+        self.assertTrue(all(line.startswith("PASS") for line in lines), lines)
+        for fault in conformance.GATES:
+            with self.subTest(fault=fault):
+                code, lines = self.run_kit("--stream", "--gates", fault, fault=fault)
+                self.assertEqual(code, 1, lines)
+                self.assertEqual(len(lines), 1)
+                self.assertTrue(lines[0].startswith("FAIL " + self.NAMES[fault]), lines)
+
+    def test_a_streamed_row_is_the_json_row(self):
+        body = {"messages": [{"role": "user", "content": "a"}, {"role": "assistant", "content": "b"},
+                             {"role": "user", "content": "c"}], "max_tokens": 4, "draft": True}
+        with fake(True) as url:
+            plain = conformance.Client(url, "fake", timeout=10).post(body)
+            streamed = conformance.Client(url, "fake", timeout=10, stream=True).post(body)
+            refused = conformance.Client(url, "fake", timeout=10, stream=True).post({**body, "n": 2}, stream=False)
+        self.assertEqual(streamed.pop("completion"), "finished")
+        self.assertEqual(streamed, plain)
+        self.assertEqual((plain["cached"], plain["accepted"]), (5, 2))
+        self.assertEqual((refused["status"], refused["error"]), (400, "n must be 1; multiple choices are not supported"))
+
+    def test_a_stream_that_errs_or_stops_early_is_unverified(self):
+        words = [(0, "content", w) for w in ("a", "b", "c")]
+        cases = {"finished": {}, "fixture failure": {"error_after": 1}, "incomplete_stream": {"done": False}}
+        rows = {}
+        for name, options in cases.items():
+            with serve(lambda body, o=options: script(words, [1], **o)) as url:
+                rows[name] = conformance.Client(url, "fake", timeout=10, stream=True).post({"messages": []})
+        self.assertEqual((rows["finished"]["sha"], rows["finished"]["text"]), ("d" * 64, "abc"))
+        for name in ("fixture failure", "incomplete_stream"):
+            self.assertEqual((rows[name]["status"], rows[name]["error"]), (200, name))
+            self.assertIsNone(same(rows["finished"], rows[name]))
 
     def test_resume_without_a_fresh_server_fails(self):
         out = io.StringIO()

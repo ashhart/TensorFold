@@ -31,8 +31,8 @@ class Collector:
         self.outputs: list[tuple[float, int]] = []   # (arrival, choice index) of each choice delta with output
         self.text: list[str] = []
         self.evidence = Evidence()
-        self.usage, self.runtime, self.finish = {}, {}, {}
-        self.end = None
+        self.usage, self.runtime, self.speculative, self.finish = {}, {}, {}, {}
+        self.end = self.error = None
 
     def read(self, lines, cancel=None) -> None:
         self.headers = self.clock()
@@ -53,10 +53,11 @@ class Collector:
                 continue
             chunk = json.loads(line[5:])
             if "error" in chunk:
-                self.end = "error"
+                self.end, self.error = "error", chunk["error"]
                 return
             self.usage = chunk.get("usage") or self.usage
             self.runtime = chunk.get("tensorfold") or self.runtime
+            self.speculative = chunk.get("speculative") or self.speculative
             for choice in chunk.get("choices", []):
                 kinds = self.evidence.add(choice)
                 index = choice.get("index", 0)
