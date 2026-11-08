@@ -384,7 +384,8 @@ pub fn cutCalls(a: Allocator, text: []const u8, tools: []const Value) Allocator.
     var s: Streamer = try .init(a, tools);
     var deltas: std.ArrayList(Value) = .empty;
     try s.finishCut(text, &deltas);
-    if (!s.open()) return (try tool_glm_cut.cutCalls(a, text, tools)) orelse try tool_json_cut.cutCalls(a, text, tools); // GLM and JSON envelopes stream none before closing
+    // GLM and JSON envelopes stream no call before they close
+    if (!s.open()) return (try tool_glm_cut.cutCalls(a, text, tools)) orelse try tool_json_cut.cutCalls(a, text, tools);
     const Call = struct { id: []const u8 = "", name: []const u8 = "", args: std.ArrayList(u8) = .empty };
     const built = try a.alloc(Call, @intCast(s.index + 1));
     for (built) |*c| c.* = .{};
