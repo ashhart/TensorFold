@@ -7,6 +7,7 @@
 #include "tiles/matrix_gemm.hpp"
 #include "quant/mlx_tiles.hpp"
 #include "quant/dense_tiles.hpp"
+#include "quant/nvfp4_tiles.hpp"
 
 namespace tf {
 namespace rocm {
