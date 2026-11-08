@@ -74,4 +74,5 @@ test {
 
 test {
     _ = @import("cuda_subset_host_test.zig");
+    _ = @import("cuda_source_test.zig");
 }
