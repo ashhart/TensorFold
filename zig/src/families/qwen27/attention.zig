@@ -222,6 +222,15 @@ fn cacheBytes(cache: Cache, key: bool, geometry: planning.Geometry) usize {
     const stride: usize = if (requested == 0) @as(usize, cache.capacity) * geometry.dim else requested;
     return ((@as(usize, geometry.kv_heads) - 1) * stride + @as(usize, cache.capacity) * geometry.dim) * 2;
 }
+/// An operand outside `cache`'s rows; a paged cache's arena holds only pages, so an operand in it at all is an alias.
+fn apart(cache: Cache, geometry: planning.Geometry, operand: Ref, bytes: usize) !void {
+    if (cache.pages != null) {
+        if (operand.buffer.id == cache.keys.buffer.id or operand.buffer.id == cache.values.buffer.id) return error.AttentionAlias;
+        return;
+    }
+    try disjoint(cache.keys, cacheBytes(cache, true, geometry), operand, bytes);
+    try disjoint(cache.values, cacheBytes(cache, false, geometry), operand, bytes);
+}
 /// The caches' buffers, and a paged stream's table, resident for the pass's indirect reads.
 fn useCaches(e: mtl.ComputeEncoder, caches: []const Cache) void {
     for (caches) |cache| {
@@ -360,10 +369,7 @@ pub const Attention = struct {
         try disjoint(p.norm_k, kv_bytes, p.rotated_key, kv_bytes);
         try scratch.check(plan);
         try binding.check(plan, caches);
-        for (caches) |cache| for ([_]Ref{ p.rotated_key, v }) |operand| {
-            try disjoint(cache.keys, cacheBytes(cache, true, g), operand, kv_bytes);
-            try disjoint(cache.values, cacheBytes(cache, false, g), operand, kv_bytes);
-        };
+        for (caches) |cache| for ([_]Ref{ p.rotated_key, v }) |operand| try apart(cache, g, operand, kv_bytes);
         var timing = profile.begin(a.profiler, input_encoder, .attention_prepare);
         errdefer timing.cancel();
         const e = timing.encoder;
@@ -381,10 +387,7 @@ pub const Attention = struct {
         e.barrier();
         for (scratch.buffers) |buffer| e.useResource(buffer, mtl.ResourceUsage.read | mtl.ResourceUsage.write);
         for (binding.buffers) |buffer| e.useResource(buffer, mtl.ResourceUsage.read | mtl.ResourceUsage.write);
-        for (caches) |cache| {
-            e.useResource(cache.keys.buffer, mtl.ResourceUsage.read | mtl.ResourceUsage.write);
-            e.useResource(cache.values.buffer, mtl.ResourceUsage.read | mtl.ResourceUsage.write);
-        }
+        useCaches(e, caches);
         const args = PackArgs{ .rows = plan.rows, .packed_rows = plan.tiles * 16, .heads = g.heads, .kv_heads = g.kv_heads, .dim = g.dim, .group = g.group() };
         e.setPipeline(a.io[2]);
         bind(e, .{ p.rotated_key, v, binding.get(.caches), binding.get(.meta), scratch.get(.nodes) });
@@ -414,15 +417,7 @@ pub const Attention = struct {
             try disjoint(out, q_bytes, gate, 2 * q_bytes);
         }
         const operands = [_]struct { ref: Ref, bytes: usize }{ .{ .ref = q, .bytes = q_bytes }, .{ .ref = k, .bytes = kv_bytes }, .{ .ref = v, .bytes = kv_bytes }, .{ .ref = out, .bytes = q_bytes } };
-        for (caches) |cache| for (operands) |operand| {
-            if (cache.pages != null) {
-                // the arena holds only pages: an operand in it at all is an alias
-                if (operand.ref.buffer.id == cache.keys.buffer.id or operand.ref.buffer.id == cache.values.buffer.id) return error.AttentionAlias;
-                continue;
-            }
-            try disjoint(cache.keys, cacheBytes(cache, true, plan.geometry), operand.ref, operand.bytes);
-            try disjoint(cache.values, cacheBytes(cache, false, plan.geometry), operand.ref, operand.bytes);
-        };
+        for (caches) |cache| for (operands) |operand| try apart(cache, plan.geometry, operand.ref, operand.bytes);
         for (scratch.buffers) |buffer| e.useResource(buffer, mtl.ResourceUsage.read | mtl.ResourceUsage.write);
         for (binding.buffers) |buffer| e.useResource(buffer, mtl.ResourceUsage.read | mtl.ResourceUsage.write);
         useCaches(e, caches);
