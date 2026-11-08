@@ -1,4 +1,4 @@
-//! The DFlash2 drafter's kernels under the contract on HIP: copies and conv by exact steps, attention by float64.
+//! The DFlash2 drafter's kernels under the contract on HIP: exact copies and conv, float64 attention; a control each.
 const std = @import("std");
 const hip = @import("hip");
 const core = @import("core");
@@ -28,11 +28,46 @@ fn none(_: c.Shape) usize {
 }
 
 /// A copy or conv checked by its exact steps, or the block attention.
-pub const Mode = enum { gather, gather_rows, ring_put, mask_rows, conv, conv_res, attention };
+const Case = enum { gather, gather_rows, ring_put, mask_rows, conv, conv_res, attention };
+
+/// Each case, then a planted control of each kernel: the real kernel launched wrongly, which must go red at gate 3.
+pub const Mode = enum { gather, gather_rows, ring_put, mask_rows, conv, conv_res, attention, no_wrap, unrounded, no_residual, first_row, other_layer, lost_partial };
+
+/// The case a mode runs: itself, or the one its control plants a fault in.
+fn caseOf(m: Mode) Case {
+    return switch (m) {
+        .no_wrap => .gather,
+        .unrounded => .ring_put,
+        .no_residual => .conv_res,
+        .first_row => .mask_rows,
+        .other_layer, .lost_partial => .attention,
+        inline else => |x| @field(Case, @tagName(x)),
+    };
+}
+
+/// A control's name, null for a real case.
+fn controlName(m: Mode) ?[]const u8 {
+    return switch (m) {
+        .no_wrap => "control: tf_draft_gather skips the ring wrap",
+        .unrounded => "control: tf_draft_ring_put writes keys unrounded",
+        .no_residual => "control: tf_draft_dyn_conv drops the residual",
+        .first_row => "control: tf_draft_mask_rows keeps each stream's first row",
+        .other_layer => "control: tf_draft_attn_partial reads the ring's other layer",
+        .lost_partial => "control: tf_draft_attn_merge ignores each row's first partial",
+        else => null,
+    };
+}
 
 const exact = "every output is the bytes its fp32 steps round to, NaN wherever they give NaN";
 
+/// A mode's spec: its case's, under the control's name.
 pub fn spec(m: Mode) c.Spec {
+    var s = caseSpec(caseOf(m));
+    if (controlName(m)) |name| s.name = name;
+    return s;
+}
+
+fn caseSpec(m: Case) c.Spec {
     const raw: c.Spec = .{ .name = "", .accum = .none, .depth = none, .out = .raw, .nan = .{ .stated = exact }, .served = &.{} };
     var s = raw;
     switch (m) {
@@ -83,7 +118,9 @@ fn depth(_: c.Shape) usize {
 pub const Draft = struct {
     rig: rig_.Rig,
     l: *const hip.Launcher,
-    m: Mode,
+    m: Case,
+    /// The mode as registered: m, or a control planted in m.
+    plant: Mode,
     k: kit.Kind,
     arena: std.heap.ArenaAllocator,
     shape: c.Shape = undefined,
@@ -102,7 +139,7 @@ pub const Draft = struct {
     msg: [200]u8 = undefined,
 
     pub fn init(a: std.mem.Allocator, rt: *const hip.Runtime, s: hip.Stream, l: *const hip.Launcher, m: Mode) Draft {
-        return .{ .rig = .{ .a = a, .r = rt, .s = s }, .l = l, .m = m, .k = kit.act(), .arena = .init(a) };
+        return .{ .rig = .{ .a = a, .r = rt, .s = s }, .l = l, .m = caseOf(m), .plant = m, .k = kit.act(), .arena = .init(a) };
     }
 
     pub fn deinit(self: *Draft) void {
@@ -111,7 +148,9 @@ pub const Draft = struct {
     }
 
     pub fn kernel(self: *Draft) g.Kernel {
-        return .{ .spec = spec(self.m), .ctx = self, .vt = if (self.m == .attention) &vt_attend else &vt_exact };
+        const control: ?g.Gate = if (controlName(self.plant) != null) .shapes else null;
+        const vt = if (self.m == .attention) &vt_attend else &vt_exact;
+        return .{ .spec = spec(self.plant), .ctx = self, .vt = vt, .control = control };
     }
 
     /// The copies and convs check their own exact steps; the attention takes float64's bound and gate 4.
@@ -205,7 +244,8 @@ const Exact = struct {
         const w = d.width();
         switch (d.m) {
             .gather, .gather_rows => {
-                d.x[0], d.in[0] = try d.act(rng, tap_rows * w, -4, 4, fill, 3);
+                const past: usize = if (d.plant == .no_wrap) s.rows else 0; // the control's rows past the ring's end
+                d.x[0], d.in[0] = try d.act(rng, (tap_rows + past) * w, -4, 4, fill, 3);
                 if (d.m == .gather_rows) for (d.path[0..s.rows], 0..) |*p, i| {
                     p.* = @intCast((i * 7 + 3) % (2 * s.rows + 1));
                 };
@@ -214,7 +254,8 @@ const Exact = struct {
                 const keys = try kit.floats(d.arena.allocator(), rng, s.rows * w, -3, 3);
                 if (fill == .nonfinite) keys[s.rows * w / 2] = std.math.nan(f64);
                 d.x[0] = keys;
-                d.in[0] = try d.rig.input(try kit.f32Bytes(d.arena.allocator(), keys));
+                const sent = if (d.plant == .unrounded) try truncated(d, keys) else keys;
+                d.in[0] = try d.rig.input(try kit.f32Bytes(d.arena.allocator(), sent));
                 d.x[1], d.in[1] = try d.act(rng, s.rows * w, -2, 2, fill, 1);
             },
             .mask_rows => {
@@ -240,20 +281,47 @@ const Exact = struct {
     /// A ring put's first position: its rows wrap the drafter ring.
     const pos0 = 5 * ring_rows - 5;
 
+    /// Each key cut toward zero to the kind: the kernel's rounding keeps them, so the ring holds them unrounded.
+    fn truncated(d: *Draft, keys: []const f64) ![]f64 {
+        const t = try d.arena.allocator().alloc(f64, keys.len);
+        for (t, keys) |*o, v| {
+            o.* = kit.round(d.k, v);
+            if (!(@abs(o.*) > @abs(v))) continue;
+            var b: [2]u8 = undefined;
+            kit.put(d.k, &b, 0, o.*);
+            std.mem.writeInt(u16, &b, std.mem.readInt(u16, &b, .little) - 1, .little); // one step toward zero
+            o.* = kit.get(d.k, &b, 0);
+        }
+        return t;
+    }
+
     fn run(d: *Draft) !void {
         const s = d.shape;
         const st = d.rig.s.handle;
         const kind = @backingInt(d.k);
         switch (d.m) {
-            .gather => try d.l.draftGather(d.in[0], tap_rows, first, null, s.rows, d.width() / 2, d.out, st),
+            .gather => {
+                // the control enters a ring s.rows rows longer at first's row: its rows run past the end, unwrapped
+                const wrap = d.plant != .no_wrap;
+                const rows = if (wrap) tap_rows else tap_rows + s.rows;
+                const start: u64 = if (wrap) first else first % tap_rows;
+                try d.l.draftGather(d.in[0], rows, start, null, s.rows, d.width() / 2, d.out, st);
+            },
             .gather_rows => try d.l.draftGather(d.in[0], tap_rows, first, d.path[0..s.rows], s.rows, d.width() / 2, d.out, st),
             .ring_put => {
                 const half = ring_rows * d.width() * 2;
                 try d.l.draftRingPut(d.in[0], d.in[1], kind, d.out, d.out + half, s.rows, d.width(), pos0, ring_rows, st);
             },
-            .mask_rows => try d.l.draftMaskRows(d.in[0], d.out, s.rows / block, s.k, block, st),
+            .mask_rows => {
+                // the control reads one row early: each stream's first row kept, its last dropped
+                const x = if (d.plant == .first_row) d.in[0] - 2 * s.k else d.in[0];
+                try d.l.draftMaskRows(x, d.out, s.rows / block, s.k, block, st);
+            },
             .conv => try d.l.draftDynConv(d.in[0], d.in[1], d.in[3], 0, d.out, kind, s.rows, s.k, group, 0, block, st),
-            .conv_res => try d.l.draftDynConv(d.in[0], d.in[1], d.in[3], d.in[2], d.out, kind, s.rows, s.k, group, 1, block, st),
+            .conv_res => {
+                const res = if (d.plant == .no_residual) 0 else d.in[2];
+                try d.l.draftDynConv(d.in[0], d.in[1], d.in[3], res, d.out, kind, s.rows, s.k, group, 1, block, st);
+            },
             .attention => unreachable,
         }
         try d.rig.s.synchronize();
@@ -411,10 +479,26 @@ const Attend = struct {
 
     fn run(d: *Draft) !void {
         const s = d.shape;
-        const at: draft.Attention = .{ .rows = s.rows, .block_rows = d.blk, .heads = heads, .kv_heads = kv_heads, .ring_rows = ring_rows, .window = window, .layer = layers - 1 };
+        const layer: usize = if (d.plant == .other_layer) 0 else layers - 1; // the control scores the first layer
+        const at: draft.Attention = .{ .rows = s.rows, .block_rows = d.blk, .heads = heads, .kv_heads = kv_heads, .ring_rows = ring_rows, .window = window, .layer = layer };
         const p = draft.Partials.at(d.scratch, s.rows, heads);
         try d.l.draftAttention(d.in[0], d.in[1], d.in[2], 0, d.in[3], @backingInt(d.k), at, p, d.out, d.rig.s.handle);
+        if (d.plant == .lost_partial) try dropFirst(d, p);
         try d.rig.s.synchronize();
+    }
+
+    /// The control: each row and head's first partial emptied to the zero sum the merge skips, then merged again.
+    fn dropFirst(d: *Draft, p: draft.Partials) !void {
+        const n = d.shape.rows * heads;
+        const sums = try d.rig.bytes(p.l, n * draft.chunks * 4);
+        for (0..n) |i| std.mem.writeInt(u32, sums[i * draft.chunks * 4 ..][0..4], 0, .little);
+        try d.rig.put(p.l, sums);
+        var b: hip.launch.Args = .{};
+        for ([_]u64{ p.m, p.l, p.o }) |v| try b.add(v);
+        for ([_]c_int{ heads, @backingInt(d.k) }) |v| try b.add(v);
+        try b.add(d.out);
+        const grid: hip.launch.Dim3 = .{ .x = @intCast(d.shape.rows), .y = heads };
+        try hip.launch.launch(d.l.draft.attn_merge, .{ .grid = grid, .block = .{ .x = 32 } }, d.rig.s, &b);
     }
 
     /// Row m's key i (ring keys first, then the block's): its key and value rows' offsets in their arrays.
