@@ -500,7 +500,11 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
         h.wrap = try lanes.drafted.Drafted.init(gpa, h.back.backend(), @import("sensenova_mtp_drafter.zig").drafter(m));
     }
     errdefer if (h.wrap) |*w| w.deinit();
-    if (h.draft != null or mtp_on or h.sn_mtp != null) try h.back.measure(io);
+    // The lane-cost timing rounds run real verifies through the backend: rank 1's replay engine never
+    // prices its own windows, and its costs stay unread (the follower serves every round rank 0 drives).
+    if ((h.draft != null or mtp_on or h.sn_mtp != null) and !(pair != null and pair.?.rank != 0)) try h.back.measure(io);
+    h.mtp = null;
+    h.wrap = null;
     if (mtp_on) {
         const x = try Mtp.init(gpa, h.back, .{ .cap = o.mtp_drafts, .floor = o.mtp_confidence });
         h.mtp = x;
