@@ -464,7 +464,9 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     if (pair != null) h.back.chunk = lb.pairChunk(@intCast(h.back.chunk));
     h.back.grow = .{ .ctx = h, .room = Host.roomFor, .added = Host.added };
     h.back.vision = o.images;
-    if (h.draft != null) try h.back.measure(io);
+    // The lane-cost timing rounds run real verifies through the backend: rank 1's replay engine never
+    // prices its own windows, and its costs stay unread (the follower serves every round rank 0 drives).
+    if (h.draft != null and !(pair != null and pair.?.rank != 0)) try h.back.measure(io);
     h.cfg = try lanes.Config.init(gpa, h.back.facts(), window, h.back.nodes);
     errdefer h.cfg.deinit(gpa);
     h.clock = .{ .io = io };
