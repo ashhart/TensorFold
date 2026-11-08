@@ -119,18 +119,17 @@ pub const Lanes = struct {
         for (window, 0..) |*w, i| w.* = .{ .width = @intCast(i + 1), .ms = v[i] };
         const shared = try arena.alloc(lanes.config.Cost, @min(v.len, batch_rows));
         for (shared, 0..) |*w, i| w.* = .{ .width = @intCast(i + 1), .ms = v[i] };
-        return .{ .exact_width = costs_mod.slot_rows, .mtp = true, .speculate = true, .speculate_early = false, .drafts = x.opts.shape.block, .window_costs = window, .mtp_step_ms = 0.0, .hidden_rows = true, .batch_rows = batch_rows, .max_streams = x.opts.slots, .shared_costs = shared, .draft_probabilities = true, .draft_streams = true, .join_tail = x.target.vtable.tail != null and joinTail(), .piece_runs = envOn("TF_DSV41_PIECE_RUNS"), .join_drafts = envOn("TF_DSV41_JOIN_DRAFTS"), .replay_runs = envOn("TF_DSV41_REPLAY_RUNS") };
+        return .{ .exact_width = costs_mod.slot_rows, .mtp = true, .speculate = true, .speculate_early = false, .drafts = x.opts.shape.block, .window_costs = window, .mtp_step_ms = 0.0, .hidden_rows = true, .batch_rows = batch_rows, .max_streams = x.opts.slots, .shared_costs = shared, .draft_probabilities = true, .draft_streams = true, .join_tail = x.target.vtable.tail != null and try joinTail(), .piece_runs = try envOn("TF_DSV41_PIECE_RUNS"), .join_drafts = try envOn("TF_DSV41_JOIN_DRAFTS"), .replay_runs = try envOn("TF_DSV41_REPLAY_RUNS") };
     }
 
     /// TF_DSV41_TAIL_JOIN=1: a prompt in pieces leaves its last token to its first round's shared window (default off).
-    fn joinTail() bool {
-        return envOn("TF_DSV41_TAIL_JOIN");
+    fn joinTail() !bool {
+        return try envOn("TF_DSV41_TAIL_JOIN");
     }
 
     /// TF_DSV41_PIECE_RUNS=1: a round's prompt pieces of several slots in one forward (default off).
-    fn envOn(name: [*:0]const u8) bool {
-        const v = std.c.getenv(name) orelse return false;
-        return std.mem.eql(u8, std.mem.span(v), "1");
+    fn envOn(name: [:0]const u8) !bool {
+        return @import("sys").environment.read(bool, name, false);
     }
 
     pub fn state(x: *Lanes, s: *Stream) ?*St {
