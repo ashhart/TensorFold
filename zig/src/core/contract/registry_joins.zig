@@ -19,7 +19,8 @@ pub const cuda_after = @import("registry_media.zig").cuda ++
     @import("moss_image_cuda_records.zig").cuda ++
     @import("exl3_dense_records.zig").cuda ++
     @import("exl3_finish_records.zig").cuda ++
-    @import("lfm2_moe_cuda_records.zig").cuda;
+    @import("lfm2_moe_cuda_records.zig").cuda ++
+    @import("dense_attention_records.zig").cuda;
 pub const nvcc_132_after = @import("registry_learning.zig").cuda_132 ++
     @import("paging_pending.zig").cuda_132 ++
     @import("lfm2_moe_cuda_records.zig").cuda_132 ++
