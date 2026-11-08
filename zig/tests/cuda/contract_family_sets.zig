@@ -1,5 +1,4 @@
-//! The CUDA contract's family sets and Clef's joint schema head.
-//! Contract family sets: pocket, MiniMax-M3, MOSS-Image, Flash Next NVFP4, grouped affine-4, Flash Next, EXL3, Ling.
+//! The CUDA contract's family sets (Ling's among them) and Clef's joint schema head.
 const std = @import("std");
 const cuda = @import("cuda");
 const check = @import("check.zig");

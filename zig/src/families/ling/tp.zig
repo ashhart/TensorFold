@@ -13,23 +13,18 @@ pub const Kind = enum(u32) { begin = 1, restore, chunk, verify, shared, keep, ke
 /// This rank's place: TF_LING_RANK of TF_LING_WORLD (both unset: one GPU).
 pub const Place = struct { rank: u32, world: u32 };
 
-/// The place the environment gives; worlds other than 1 and 2 are refused (TP=2 is what was validated).
-pub fn place(get: *const fn ([*:0]const u8) ?[*:0]const u8) !Place {
-    const r = get("TF_LING_RANK");
-    const w = get("TF_LING_WORLD");
-    if (r == null and w == null) return .{ .rank = 0, .world = 1 };
-    const p: Place = .{
-        .rank = std.fmt.parseInt(u32, std.mem.span(r orelse return error.NoRank), 10) catch return error.NoRank,
-        .world = std.fmt.parseInt(u32, std.mem.span(w orelse return error.NoRank), 10) catch return error.NoRank,
-    };
-    if (p.world != 1 and p.world != 2) return error.TpWorld;
+/// The place the environment gives (platform/environment.zig's rows); worlds other than 1 and 2 are refused.
+pub fn place(get: *const fn ([*:0]const u8) ?[:0]const u8) !Place {
+    const environment = @import("sys").environment;
+    const rank = environment.value(?u32, "TF_LING_RANK", get("TF_LING_RANK"), null) catch return error.NoRank;
+    const world = environment.value(?u32, "TF_LING_WORLD", get("TF_LING_WORLD"), null) catch return error.TpWorld;
+    if (rank == null and world == null) return .{ .rank = 0, .world = 1 };
+    const p: Place = .{ .rank = rank orelse return error.NoRank, .world = world orelse return error.NoRank };
     if (p.rank >= p.world) return error.NoRank;
     return p;
 }
 
-pub fn env(name: [*:0]const u8) ?[*:0]const u8 {
-    return std.c.getenv(name);
-}
+pub const env = @import("sys").getenv;
 
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 extern "c" fn unsetenv(name: [*:0]const u8) c_int;
@@ -37,9 +32,9 @@ extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 /// The ranks' NCCL group as GLM opens it: rank 0's unique id over the TCP line (tp_watch.start ran first).
 pub fn group(io: std.Io, p: Place) !cuda.tp_group.Group {
     // GLM's defaults: connections registered at init, no cuMem host buffers (GB10's driver pool wore out under them)
-    inline for (.{ "NCCL_RUNTIME_CONNECT", "NCCL_CUMEM_HOST_ENABLE", "NCCL_CUMEM_ENABLE" }) |name| if (std.c.getenv(name) == null) {
-        _ = setenv(name, "0", 0);
-    };
+    if (std.c.getenv("NCCL_RUNTIME_CONNECT") == null) _ = setenv("NCCL_RUNTIME_CONNECT", "0", 0);
+    if (std.c.getenv("NCCL_CUMEM_HOST_ENABLE") == null) _ = setenv("NCCL_CUMEM_HOST_ENABLE", "0", 0);
+    if (std.c.getenv("NCCL_CUMEM_ENABLE") == null) _ = setenv("NCCL_CUMEM_ENABLE", "0", 0);
     if (p.rank > 0 and std.c.getenv("NCCL_SOCKET_IFNAME") != null) _ = unsetenv("NCCL_COMM_ID");
     var lib = try cuda.nccl.Library.open();
     errdefer lib.close();
@@ -53,9 +48,9 @@ pub fn group(io: std.Io, p: Place) !cuda.tp_group.Group {
     return .{ .lib = lib, .comm = comm, .rank = p.rank, .world = p.world };
 }
 
-/// Main's RoCE gathers up to GLM's TF_ROCE_MAX_KB cap, NCCL past it; both ranks open it or neither (results equal).
+/// Main's RoCE gathers up to GLM's default cap (4096 KiB), NCCL past it; both ranks open it or neither (results equal).
 pub fn roce(g: *cuda.tp_group.Group, gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, s: cuda.Stream) !void {
-    try g.openRoce(gpa, io, d, s, try glm.native.roceBytes(if (std.c.getenv("TF_ROCE_MAX_KB")) |x| std.mem.span(x) else null));
+    try g.openRoce(gpa, io, d, s, try glm.native.roceBytes(null));
     std.log.info("ling tp: rank {d} gathers {s}", .{ g.rank, if (g.fast != null) "by RoCE writes up to the cap, NCCL past it" else "on NCCL (RoCE did not come up)" });
 }
 
@@ -108,9 +103,9 @@ pub fn follow(e: *engine.Engine, io: std.Io) !void {
 
 test "TF_LING_RANK and TF_LING_WORLD: unset is one GPU; worlds 1 and 2 only; a rank inside its world" {
     const F = struct {
-        var r: ?[*:0]const u8 = null;
-        var w: ?[*:0]const u8 = null;
-        fn get(name: [*:0]const u8) ?[*:0]const u8 {
+        var r: ?[:0]const u8 = null;
+        var w: ?[:0]const u8 = null;
+        fn get(name: [*:0]const u8) ?[:0]const u8 {
             return if (std.mem.eql(u8, std.mem.span(name), "TF_LING_RANK")) r else w;
         }
     };
