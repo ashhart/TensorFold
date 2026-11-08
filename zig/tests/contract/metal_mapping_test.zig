@@ -22,3 +22,18 @@ test "Metal launch map: unknown registrations stay errors on every chip" {
 test {
     _ = @import("metal_support.zig");
 }
+
+test "Metal launch map: LFM2 masked prompt follows its loader on each device class" {
+    var masked: usize = 0;
+    for (registry.all_metal) |d| {
+        if (!std.mem.startsWith(u8, d.name, "lfm2 masked prompt ")) continue;
+        masked += 1;
+        try launches.requireMapped(d);
+        try std.testing.expect(!launches.supported(.{ .units = false }, d));
+        try std.testing.expect(launches.supported(.{ .units = true }, d));
+    }
+    try std.testing.expect(masked > 0);
+    const base = @import("contract").limits.MetalLaunch{ .name = "metal lfm2 lfm2_embed_b4", .threads = 32, .tg_memory = 0 };
+    try launches.requireMapped(base);
+    try std.testing.expect(launches.supported(.{ .units = false }, base));
+}

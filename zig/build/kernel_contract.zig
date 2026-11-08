@@ -16,6 +16,10 @@ pub fn hostTests(b: *std.Build, family: *std.Build.Step) void {
     const step = b.step("test-kernel-contract", "The kernel contract's host tests: gate logic, controls, every launch against every chip");
     step.dependOn(&run.step);
     const mapping_stub = b.createModule(.{ .root_source_file = b.path("zig/tests/contract/metal_mapping_host.zig") });
+    const mapping_tf = b.createModule(.{ .root_source_file = b.path("zig/lfm2_mapping_tf.zig"), .imports = &.{
+        .{ .name = "metal", .module = mapping_stub },
+        .{ .name = "kernel_sources", .module = mapping_stub },
+    } });
     const mapping = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/contract/metal_mapping_test.zig"),
         .target = b.graph.host,
@@ -23,7 +27,7 @@ pub fn hostTests(b: *std.Build, family: *std.Build.Step) void {
         .imports = &.{
             .{ .name = "contract", .module = module(b, b.graph.host, .debug) },
             .{ .name = "metal", .module = mapping_stub },
-            .{ .name = "tensorfold", .module = mapping_stub },
+            .{ .name = "tensorfold", .module = mapping_tf },
             .{ .name = "kernel_sources", .module = mapping_stub },
         },
     }) }));
