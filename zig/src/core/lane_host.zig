@@ -108,8 +108,8 @@ pub const LaneHost = struct {
     }
 
     /// A paged family's pool counts in this host's ledger, the only test its promises pass (#1943); before `start`.
-    pub fn countPool(h: *LaneHost, pool: anytype) void {
-        ledger.count(h, pool);
+    pub fn countPool(h: *LaneHost, pool: anytype) error{PoolHasHost}!void {
+        return ledger.count(h, pool);
     }
 
     /// The pool counts on its own pages again (a host that never started).

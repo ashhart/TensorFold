@@ -228,7 +228,7 @@ test "page accounting: seeded walks over every transition keep the counts equal 
         var prng = std.Random.DefaultPrng.init(0x7f4a_0000 + seed);
         var w: Walk = .{ .pool = try kv.Pool.init(flaky.allocator(), 8 + seed % (most - 7), 4096), .flaky = &flaky, .rnd = prng.random() };
         defer w.pool.deinit();
-        if (seed % 3 != 0) w.pool.reclaim = .{ .ctx = &w, .call = Walk.reclaim };
+        if (seed % 3 != 0) try w.pool.joinReclaim(.{ .ctx = &w, .call = Walk.reclaim });
         for (0..500) |_| {
             try w.step();
             try agrees(&w.pool);
