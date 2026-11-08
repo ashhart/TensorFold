@@ -1,4 +1,5 @@
 //! Reviewed switch metadata and environment-first lookup; stable leaves every existing family default intact.
+pub const startup_receipt = @import("startup_receipt.zig");
 const std = @import("std");
 
 pub const Profile = enum { stable };

@@ -49,6 +49,7 @@ pub const serves = engines.serves;
 pub const std_options = engines.std_options;
 
 pub fn main(init: std.process.Init) !u8 {
+    const entry = std.Io.Clock.awake.now(init.io).toNanoseconds();
     const gpa = init.gpa;
     const io = init.io;
     const a = init.arena.allocator();
@@ -108,6 +109,10 @@ pub fn main(init: std.process.Init) !u8 {
         else => |x| return x,
     };
     if (try engines.environment(a, args)) |why| return fail(why);
+    const receipt = @import("core").startup_receipt;
+    receipt.enable(io, entry, try @import("sys").environment.read(bool, "TF_STARTUP_RECEIPT", false));
+    defer receipt.disable();
+    const discovery = receipt.span(.discovery);
     if (try slide_key.slideKeyless(a, args, init.environ_map.get("TENSORFOLD_API_KEY") orelse "")) |why| {
         std.debug.print("tensorfold: {s}\n", .{why});
         return 2;
@@ -137,6 +142,7 @@ pub fn main(init: std.process.Init) !u8 {
         if (!try engines.follow(a, gpa, io, dir, model_type, args, &problem)) return fail(problem);
         return 0;
     }
+    discovery.end();
     const tool_id_key = @import("tool_id_key.zig");
     var tool_ids = tool_id_key.load(a, init.environ_map.get(tool_id_key.name), &problem) catch |e| switch (e) {
         error.OutOfMemory => |x| return x,
@@ -151,6 +157,7 @@ pub fn main(init: std.process.Init) !u8 {
         return e;
     } orelse return fail(problem);
     defer up.text.deinit();
+    _ = receipt.span(.server_setup);
     log.line("chat template: {s}", .{up.text.renderer()});
     var record: ?*@import("engine_api").recall_store.Store = null;
     defer if (record) |r| r.close(); // after the engine below has stopped reading it
@@ -203,6 +210,8 @@ fn forgetFail(env: *const std.process.Environ.Map) !u32 {
 
 /// HfText.load with every failure named in `problem`, so main tells the text's failure from the engine's.
 fn loadText(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, template: ?[]const u8, pa: std.mem.Allocator, problem: *[]const u8) !*hf_text.HfText {
+    const timing = @import("core").startup_receipt.span(.tokenizer);
+    defer timing.end();
     return hf_text.HfText.load(gpa, io, dir, template, pa, problem) catch |e| {
         if (problem.len == 0) problem.* = @errorName(e);
         return e;
