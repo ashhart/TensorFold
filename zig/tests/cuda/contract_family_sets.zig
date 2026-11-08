@@ -29,6 +29,8 @@ pub const Sets = struct {
     idol: *@import("contract_idol.zig").Set,
     idol_decoder: *@import("contract_idol_decoder.zig").Set,
     glm_moe: *@import("contract_glm_moe_direct.zig").Set,
+    ripple: *@import("contract_ricursive_tp2.zig").Set,
+    ripple_draft: *@import("contract_ricursive_tp2_draft.zig").Set,
 
     /// Each set's kernels appended to `list`, in this order.
     pub fn init(gpu: check.Gpu, s: cuda.Stream, a: std.mem.Allocator, list: *std.ArrayList(g.Kernel), affine4: *cuda.qlinear.Affine4Kernels, cap: u32) !Sets {
@@ -79,6 +81,9 @@ pub const Sets = struct {
         errdefer idol.deinit();
         const idol_decoder = try @import("contract_idol_decoder.zig").Set.init(gpu, s, a, list);
         const glm_moe = try @import("contract_glm_moe_direct.zig").Set.init(gpu, s, a, list);
+        const ripple = try @import("contract_ricursive_tp2.zig").Set.init(gpu, s, a, list);
+        errdefer ripple.deinit();
+        const ripple_draft = try @import("contract_ricursive_tp2_draft.zig").Set.init(gpu, s, a, list);
         return .{
             .gpa = gpu.gpa,
             .bf16_experts = bf16_experts,
@@ -100,6 +105,8 @@ pub const Sets = struct {
             .a = a,
             .idol_decoder = idol_decoder,
             .glm_moe = glm_moe,
+            .ripple = ripple,
+            .ripple_draft = ripple_draft,
         };
     }
 
@@ -107,6 +114,8 @@ pub const Sets = struct {
         sets.glm_moe.deinit();
         sets.idol_decoder.deinit();
         sets.idol.deinit();
+        sets.ripple_draft.deinit();
+        sets.ripple.deinit();
         sets.joint_schema.deinit();
         sets.muse.destroy(sets.a);
         sets.prompt.deinit();
