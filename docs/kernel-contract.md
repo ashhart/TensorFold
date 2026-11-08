@@ -707,6 +707,14 @@ once in the vendor's order with nothing fused. Each output must be the host's re
 TP=2 rank's half; gate 4 runs whole logits with whole ranges and power-of-two weights, where every step is exact
 (`ernie5_5-head`; two controls: each term's multiply and add fused into an fma, and the last term's square dropped).
 
+CUDA checks Ripple-65B's two-rank glue (`ricursive_tp2.cu`, `ricursive-tp2-contract`): the scaled embedding, the value
+residual's lerp below and from one half, two ranks' fp32 partials added once in rank order, the query heads padded to 12
+a key head and back, a drafter's tap rows, each bit for bit against a host rule; the output gate's fp32 sigmoid, the
+clamped SwiGLU and the post-norm add into the fp32 residual, each inside float64's range at its rounding points. Eight
+controls, each red at `shapes`: the embedding's product left unrounded, a lerp start-anchored past one half, the
+sigmoid rounded to fp16, the up projection clamped above only, a / rms rounded to bf16, rank 1's partial rounded to
+bf16, each head read from its neighbour, and taps rounded toward zero. Their launches are in `ricursive_tp2_records.zig`.
+
 CPU: Qwen3.5-2B's affine projection (4 bits, groups of 64, `cpu_kernels.zig`) at the widths the 2B calls it, one row
 to a 128-row prompt chunk, registered once for each chain count of its projection classes (16; 32 for the delta rule's
 a and b; 8 for the head), and its RMS norm over 2048-wide rows; each registration's runs take 1 to 8 threads in turn,
