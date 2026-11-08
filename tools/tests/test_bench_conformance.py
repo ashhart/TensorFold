@@ -1,25 +1,18 @@
 """Model-free tests for the conformance kit's comparisons, its gates and their planted controls."""
 import contextlib
-import hashlib
-import http.server
 import io
 import json
 from pathlib import Path
 import sys
-import threading
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import conformance
 from conformance import drafted_gate, equality_gate, refusals_gate, reply_row, resumed_gate, same, tally
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from fake_served_api import doc, fake
 
 PROFILE = Path(__file__).resolve().parents[1] / "conformance_profiles" / "qwen35-cuda.json"
-
-
-def doc(sha="a" * 64, cached=0, accepted=2, drafted=3, text="hi"):
-    return {"choices": [{"message": {"content": text}}], "tensorfold": {"token_sha256": sha},
-            "speculative": {"accepted": accepted, "drafted": drafted},
-            "usage": {"prompt_tokens": 9, "completion_tokens": 4, "prompt_tokens_details": {"cached_tokens": cached}}}
 
 
 class RowTests(unittest.TestCase):
@@ -88,81 +81,54 @@ class ComparisonTests(unittest.TestCase):
         self.assertFalse(refusals_gate([])["passed"])
 
 
-class FakeEngine(http.server.BaseHTTPRequestHandler):
-    """A deterministic chat server: the reply hash depends on messages and, when sampling, the seed."""
-
-    def log_message(self, *_):
-        pass
-
-    def do_POST(self):
-        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-        error = refusal(body)
-        if error:
-            return self.reply(400, {"error": {"message": error, "type": "invalid_request_error"}})
-        seed = body["seed"] if body.get("temperature") else None
-        sha = hashlib.sha256(json.dumps([body["messages"], seed]).encode()).hexdigest()
-        cached = 5 if self.server.cache and len(body["messages"]) > 1 else 0
-        accepted = 2 if body.get("draft", True) else 0
-        self.reply(200, doc(sha=sha, cached=cached, accepted=accepted, drafted=accepted, text="r" + sha[:6]))
-
-    def reply(self, status, payload):
-        raw = json.dumps(payload).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(raw)))
-        self.end_headers()
-        self.wfile.write(raw)
-
-
-def refusal(body):
-    if body.get("n", 1) != 1:
-        return "n must be 1; multiple choices are not supported"
-    if "top_logprobs" in body and not body.get("logprobs"):
-        return "top_logprobs requires logprobs: true"
-    if abs(body.get("presence_penalty", 0)) > 2:
-        return "presence_penalty must be between -2 and 2, or null"
-    if body.get("max_tokens", 0) > 100000:
-        return "This server's maximum context length is 16384 tokens"
-    return None
-
-
-@contextlib.contextmanager
-def fake(cache):
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FakeEngine)
-    server.cache = cache
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield f"http://127.0.0.1:{server.server_address[1]}"
-    finally:
-        server.shutdown()
-        server.server_close()
-
-
 class GateRunTests(unittest.TestCase):
-    """Every gate passes on the fake engine and goes red when its fault is planted."""
+    """Every gate passes on the clean fake; each fault the fake plants turns exactly its gate red."""
 
-    def run_kit(self, *extra):
+    NAMES = {"drafted": "drafted == plain", "repeat": "repeat == first", "concurrent": "concurrent == solo",
+             "resumed": "resumed == fresh", "refusals": "refusals"}
+
+    def run_kit(self, *extra, fault=None):
         out = io.StringIO()
-        with fake(True) as url, fake(False) as fresh, contextlib.redirect_stdout(out):
+        with fake(True, fault) as url, fake(False) as fresh, contextlib.redirect_stdout(out):
             code = conformance.main([str(PROFILE), "--url", url, "--fresh-url", fresh, *extra])
         return code, [line for line in out.getvalue().splitlines() if line.startswith(("PASS", "FAIL"))]
 
-    def test_all_gates_pass(self):
+    def assert_only_red(self, fault):
+        code, lines = self.run_kit(fault=fault)
+        self.assertEqual(code, 1, lines)
+        self.assertEqual(len(lines), len(conformance.GATES), lines)
+        red = [line for line in lines if line.startswith("FAIL")]
+        self.assertEqual(len(red), 1, lines)
+        self.assertTrue(red[0].startswith("FAIL " + self.NAMES[fault]), lines)
+
+    def test_clean_fake_passes_every_gate(self):
         code, lines = self.run_kit()
         self.assertEqual(code, 0, lines)
         self.assertEqual(len(lines), len(conformance.GATES))
         self.assertTrue(all(line.startswith("PASS") for line in lines), lines)
 
-    def test_each_planted_fault_turns_its_gate_red(self):
-        names = {"drafted": "drafted == plain", "repeat": "repeat == first", "concurrent": "concurrent == solo",
-                 "resumed": "resumed == fresh", "refusals": "refusals"}
+    def test_fault_drafted_differs_from_plain(self):
+        self.assert_only_red("drafted")
+
+    def test_fault_repeat_differs(self):
+        self.assert_only_red("repeat")
+
+    def test_fault_concurrent_differs_from_solo(self):
+        self.assert_only_red("concurrent")
+
+    def test_fault_resumed_reports_no_cached_tokens(self):
+        self.assert_only_red("resumed")
+
+    def test_fault_listed_refusal_accepted(self):
+        self.assert_only_red("refusals")
+
+    def test_each_plant_flag_turns_its_gate_red(self):
         for gate in conformance.GATES:
             with self.subTest(gate=gate):
                 code, lines = self.run_kit("--gates", gate, "--plant", gate)
                 self.assertEqual(code, 1, lines)
                 self.assertEqual(len(lines), 1)
-                self.assertTrue(lines[0].startswith("FAIL " + names[gate]), lines)
+                self.assertTrue(lines[0].startswith("FAIL " + self.NAMES[gate]), lines)
 
     def test_resume_without_a_fresh_server_fails(self):
         out = io.StringIO()
