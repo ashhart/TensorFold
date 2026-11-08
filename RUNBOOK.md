@@ -408,6 +408,8 @@ On Linux, `TENSORFOLD_MEMORY_PRESSURE=1` (or `on`) opts the shared lane host int
 watermark. Unset keeps it off until device qualification. The reader samples `/proc/pressure/memory` and
 `/proc/meminfo` without allocating; both must be available and valid at startup. It reads at most four times a
 second, raises the level immediately and waits five seconds of lower readings before easing it.
+Inside a container or cgroup, these proc files describe the whole host, not the container's memory limit.
+The opt-in therefore follows host pressure and does not provide container-local pressure or admission limits.
 
 The proposed thresholds use PSI's `avg10` stall percentages:
 
