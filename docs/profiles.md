@@ -165,9 +165,10 @@ Empty or whitespace-only values mean unset, as for every other row: the reader's
 is `TF_DSV41_LOOKUP`, whose blank value has always turned lookup drafts off while unset leaves them on; it keeps that.
 Blank `MHC_DEFER`, `COEF_LATE`, `LOOKUP_PLAN` and `BIAS_VL` read as off, which is also their unset default.
 Unset defaults and canonical `0`/`1` values are unchanged, and default-on switches stay on when unset or blank.
-Only the four switches that already read words on main accept case-insensitive `true`/`on`/`yes` and
-`false`/`off`/`no`: `MHC_DEFER`, `COEF_LATE`, `LOOKUP` and `LOOKUP_PLAN`. The others read any text but `0` as on
-before, so a word form there is refused by name rather than read the other way.
+Only the four switches that already read words accept case-insensitive word forms: `LOOKUP` and `LOOKUP_PLAN`
+take `true`/`on`/`yes` and `false`/`off`/`no`, and `MHC_DEFER` and `COEF_LATE` take the same except `no`, which
+their old readers read as on and which is now refused. The others read any text but `0` as on before, so a word
+form there is refused by name rather than read the other way.
 Other switches take exactly `0` or `1`, with their existing whitespace trims.
 
 The served-knob accessor also treats empty and whitespace-only values as absent, so knobs outside the table,

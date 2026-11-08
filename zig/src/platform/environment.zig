@@ -21,6 +21,8 @@ pub const Rule = struct {
     words: []const []const u8 = &.{},
     /// A legacy name that is ignored, and so never refused, while its canonical name is set.
     alias_of: ?[:0]const u8 = null,
+    /// False where the old reader took only 0, false and off as off: "no" is refused, not read as off.
+    no_word: bool = true,
 };
 
 pub fn isReal(kind: Kind) bool {
@@ -53,8 +55,8 @@ pub const rules = [_]Rule{
     .{ .name = "TF_SLIDE_POCKET_KEY", .scope = .slide, .kind = .word, .words = &.{ "auto", "reply", "subject", "both" }, .forms = "auto, reply, subject or both" },
     .{ .name = "TF_SLIDE_FIT_GIB", .scope = .slide, .kind = .size, .forms = "a whole nonnegative native-size GiB count" },
     .{ .name = "TF_SLIDE_FORGET_FAIL", .scope = .hooks, .kind = .u32, .trim = " ", .forms = "a whole fact index from 0 to 4294967295 (0 disables the planted failure)" },
-    .{ .name = "TF_DSV41_MHC_DEFER", .scope = .dsv41, .kind = .toggle, .trim = " \t", .forms = "0, 1, true, false, on, off, yes or no (any case)" },
-    .{ .name = "TF_DSV41_COEF_LATE", .scope = .dsv41, .kind = .toggle, .trim = " \t", .forms = "0, 1, true, false, on, off, yes or no (any case)" },
+    .{ .name = "TF_DSV41_MHC_DEFER", .scope = .dsv41, .kind = .toggle, .trim = " \t", .no_word = false, .forms = "0, 1, true, false, on, off or yes (any case)" },
+    .{ .name = "TF_DSV41_COEF_LATE", .scope = .dsv41, .kind = .toggle, .trim = " \t", .no_word = false, .forms = "0, 1, true, false, on, off or yes (any case)" },
     .{ .name = "TF_DSV41_LOOKUP", .scope = .dsv41, .kind = .toggle, .trim = " \t", .forms = "0, 1, true, false, on, off, yes or no (any case); blank turns lookup drafts off" },
     .{ .name = "TF_DSV41_LOOKUP_PLAN", .scope = .dsv41, .kind = .toggle, .trim = " \t", .forms = "0, 1, true, false, on, off, yes or no (any case)" },
     .{ .name = "TF_DSV41_GM_V3", .scope = .dsv41, .kind = .flag, .forms = "0 or 1" },
@@ -151,7 +153,7 @@ pub fn parse(name: []const u8, raw: ?[]const u8) Error!?u64 {
         for (r.words, 0..) |v, i| if (std.mem.eql(u8, text, v)) return i;
         return error.InvalidEnvironment;
     }
-    if (r.kind == .toggle) return toggle(text) orelse error.InvalidEnvironment;
+    if (r.kind == .toggle) return toggle(r, text) orelse error.InvalidEnvironment;
     // a real travels as its f64 bits and a range as lo above hi; `value` and `range` decode them
     if (isReal(r.kind)) return @bitCast(try real(r, text));
     if (r.kind == .range) {
@@ -184,7 +186,8 @@ pub fn parse(name: []const u8, raw: ?[]const u8) Error!?u64 {
 }
 
 /// A switch: 0 or 1, or the word forms older readers took, in any case; 0 is off.
-fn toggle(text: []const u8) ?u64 {
+fn toggle(r: Rule, text: []const u8) ?u64 {
+    if (!r.no_word and std.ascii.eqlIgnoreCase(text, "no")) return null;
     for ([_][]const u8{ "0", "false", "off", "no", "1", "true", "on", "yes" }, 0..) |v, i|
         if (std.ascii.eqlIgnoreCase(text, v)) return i / 4;
     return null;
