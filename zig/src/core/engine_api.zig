@@ -371,18 +371,12 @@ pub const Opened = struct {
     follow: ?*const fn (*anyopaque) anyerror!void = null,
 };
 
-pub const Memory = struct { active: u64 = 0, cache: u64 = 0, peak: u64 = 0, pinned: u64 = 0, limit: ?u64 = null };
-
 /// A backend's words for its own refusals (a request it cannot serve); null: the error's name.
 pub const Explain = struct { ctx: ?*anyopaque = null, text: *const fn (ctx: ?*anyopaque, err: anyerror) ?[]const u8 };
 
-/// A backend's own memory counts for LaneHost; read from HTTP threads, so it must not touch the GPU.
-pub const MemorySource = struct {
-    ctx: ?*anyopaque = null,
-    read: *const fn (ctx: ?*anyopaque, reset_peak: bool) ?Memory,
-};
-
 pub const HealthSource = @import("engine_status.zig").HealthSource;
+pub const Memory = @import("engine_status.zig").Memory;
+pub const MemorySource = @import("engine_status.zig").MemorySource;
 pub const Status = @import("engine_status.zig").Status;
 
 pub const SubmitError = error{ Closed, Busy, InvalidSpans, Stale, InvalidRequest, MemoryPressure }; // Stale: put-back has not reached the device
