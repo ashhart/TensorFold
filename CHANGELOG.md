@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Nemotron on Macs: a non-finite value in a masked key no longer reaches prompt attention's output; finite prompts run the same kernels as before, and prefill is level (#2322, part of #1009).
+
 - DeepSeek-V4.1 on CUDA: `TF_DSV41_MHC_DEFER=no` and `TF_DSV41_COEF_LATE=no` are refused by name. Their old readers took only `0`, `false` and `off` as off, so `no` meant on; #2379 had read it as off (#2516, part of #2370).
 
 - Docs: the Qwen3.8-27B recipe says native serving reads MLX 8-bit with the same flags, above the Python 0.6.6 part where it was easy to miss, with 8-bit measured against 4-bit on an M5 Ultra: decode at its bytes' speed, prompts slower (#2506, refs #2502).
