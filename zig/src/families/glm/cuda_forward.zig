@@ -45,6 +45,7 @@ pub const Modules = struct {
     exl3: exl3.Kernels, // an EXL3 checkpoint's routed experts
     mm: mm_mod.Kernels, // glm_mm: the bf16 linears on tiled weights
     index: ?index_mod.Kernels, // TF_GLM_INDEX_CUDA: a prompt chunk's indexer scores and pools (glm_index)
+    dsel: bool, // TF_GLM_DSEL (default on): a decode window's DSA select on many CTAs (cuda_sparse.decodeSelect)
     tiled: bool = false, // eligible bf16 linears are tiled; KDA inputs with uneven strides retain their row-major path
     packs: ?*const mm_mod.Packed = null, // the linears packed to 4, 6 or 8 bits (TF_GLM_DENSE_BITS, _HEAD_BITS)
     copy_rows: cuda.Function,
@@ -86,6 +87,8 @@ pub const Modules = struct {
             std.log.warn("TF_GLM_INDEX_CUDA: the indexer kernels are not used ({t}); prompt chunks use tf_glm_scores", .{err});
             break :blk null;
         };
+        m.dsel = sparse.dselRead() catch return error.BadDselSetting;
+        if (!m.dsel) std.log.warn("TF_GLM_DSEL=0: a decode window's DSA select keeps one 1,024-thread CTA a row", .{});
         m.tiled = false;
         m.packs = null; // `m` starts undefined: the field default does not apply
         return m;
@@ -160,7 +163,7 @@ pub const Forward = struct {
     }
 
     pub fn set(f: *const Forward) glue.Set {
-        return .{ .glue = &f.m.glue, .index = if (f.m.index) |*x| x else null, .mm = if (f.m.tiled) &f.m.mm else null, .packs = f.m.packs, .prompt = f.ranks[0].b.prefill, .linear = .{ .lane = &f.m.lane }, .copy_rows = f.m.copy_rows };
+        return .{ .glue = &f.m.glue, .index = if (f.m.index) |*x| x else null, .mm = if (f.m.tiled) &f.m.mm else null, .packs = f.m.packs, .prompt = f.ranks[0].b.prefill, .linear = .{ .lane = &f.m.lane }, .copy_rows = f.m.copy_rows, .dsel = f.m.dsel };
     }
 
     /// The layer sums' boundary (cuda_boundary.zig): every rank's fp32 partial into every gathered buffer.
