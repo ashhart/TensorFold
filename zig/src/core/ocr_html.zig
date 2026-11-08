@@ -99,30 +99,6 @@ pub fn normalized(a: Allocator, t: Table) Allocator.Error![]const u8 {
     return out.toOwnedSlice(a);
 }
 
-/// One line a grid row, its cells joined by '\t'; a spanned cell's text at its top-left only, trailing cells kept.
-pub fn rowsText(a: Allocator, t: Table) Allocator.Error![][]const u8 {
-    const lines = try a.alloc([]const u8, t.rows);
-    var done: usize = 0;
-    errdefer {
-        for (lines[0..done]) |l| a.free(l);
-        a.free(lines);
-    }
-    var line: std.ArrayList(u8) = .empty;
-    defer line.deinit(a);
-    var k: usize = 0;
-    for (lines, 0..) |*l, r| {
-        line.clearRetainingCapacity();
-        for (0..t.cols) |c| {
-            if (c > 0) try line.append(a, '\t');
-            const text = if (topLeft(t, &k, r, c)) |cell| cell.text else "";
-            for (text) |ch| try line.append(a, if (ch == '\n') ' ' else ch);
-        }
-        l.* = try a.dupe(u8, line.items);
-        done += 1;
-    }
-    return lines;
-}
-
 /// A cell's text in a pipe row: math as written (only `|` escaped), markup escaped elsewhere, to read back literally.
 fn cellText(a: Allocator, out: *std.ArrayList(u8), text: []const u8) Allocator.Error!void {
     var no_close = false; // a `$` found no closer, so no later `$` in the cell can (markdown.zig's rule)

@@ -13,14 +13,6 @@ pub const OcrPage = struct {
     blocks: []api.ocr.OcrBlock, // validated, reading order
 };
 
-/// One plain-text line of a page, never empty; ``block`` is the index of its source block.
-pub const OcrLine = struct {
-    text: []const u8,
-    quad: ?api.ocr.Quad, // null only when the reader's geometry is .none
-    block: u32,
-    score: f32 = 1.0, // 0..1; the MVP readers give no scores
-};
-
 /// How a failed request ends; each dialect gives every class its own status and body (docs/api.md OCR: Failures).
 pub const Class = enum { bad_input, unreadable, capacity, internal };
 
