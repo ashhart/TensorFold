@@ -123,7 +123,7 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     const imprint_op: ?api.ImprintOp = if (std.mem.eql(u8, route, "/v1/imprint/resume")) .where else if (std.mem.eql(u8, route, "/v1/imprint/load")) .load else null;
     const is_chat = std.mem.endsWith(u8, route, "/chat/completions");
     const is_rerank = std.mem.eql(u8, route, "/v1/rerank") or std.mem.eql(u8, route, "/rerank");
-    const is_ocr = std.mem.eql(u8, route, "/v1/ocr");
+    const is_ocr = std.mem.eql(u8, route, "/ocr") or std.mem.eql(u8, route, "/v1/ocr");
     if (!is_ocr and !is_rerank and !is_embedding and !is_speech and !is_slide and imprint_op == null and !is_anthropic and !is_responses and !is_decisions and !is_systemone and !is_chat and !std.mem.endsWith(u8, route, "/completions")) {
         discardBody(conn, a);
         return unknown(conn, a);
@@ -188,7 +188,7 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     if (is_systemone) return systemone.post(srv, conn, a);
     if (is_anthropic) return anthropic.post(srv, conn, a);
     if (is_responses) return responses.post(srv, conn, a);
-    if (is_ocr) return @import("ocr/route.zig").post(srv, conn, a);
+    if (is_ocr) return @import("ocr/route.zig").post(srv, conn, a, route);
     openai.post(srv, conn, a, is_chat);
 }
 
