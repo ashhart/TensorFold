@@ -1,6 +1,11 @@
 //! One pool of KV pages for every stream: a family's layout, page ids and their holders, and the streams' leases.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+pub const groups = @import("kv_groups.zig");
+
+test {
+    _ = @import("kv_groups_test.zig");
+}
 
 /// A family's stream memory: a fixed part at any length, paged caches a token, and a kept snapshot's slot.
 pub const Layout = struct {
@@ -14,6 +19,26 @@ pub const Layout = struct {
     snap_bytes: u64,
     /// Bytes a running stream takes from the pages beside its keys and values, as one run of whole pages (0: none).
     run_bytes: u64 = 0,
+    /// Layers `token_bytes` spans, so a row is token_bytes / full_layers in each (1: not named).
+    full_layers: u32 = 1,
+    /// A sliding window's rows outside the pool, by bytes a row a layer (null: none, or not named).
+    window: ?groups.Group = null,
+
+    /// A layout whose full group is `full`, sized by its bytes a row over its layers.
+    pub fn ofRows(full: groups.Group, page_tokens: u32, fixed_bytes: u64, snap_bytes: u64) Layout {
+        return .{ .fixed_bytes = fixed_bytes, .token_bytes = full.bytes(), .page_tokens = page_tokens, .snap_bytes = snap_bytes, .full_layers = full.layers };
+    }
+
+    /// The pool's one group: every row of every paged layer.
+    pub fn group(l: Layout) groups.Group {
+        const n = @max(l.full_layers, 1);
+        return .{ .kind = .full, .row = l.token_bytes / n, .layers = n };
+    }
+
+    /// The groups the load report shows: the pool's, the window outside it, the state run and a snapshot slot.
+    pub fn shape(l: Layout) groups.Shape {
+        return .{ .full = l.group(), .page_rows = l.page_tokens, .window = l.window, .run = l.run_bytes, .snap = l.snap_bytes };
+    }
 
     pub fn pageBytes(l: Layout) u64 {
         return l.token_bytes * l.page_tokens;
@@ -31,7 +56,7 @@ pub const Layout = struct {
 
     /// Consecutive pages a running stream's `run_bytes` take.
     pub fn runPages(l: Layout) usize {
-        return @intCast((l.run_bytes + l.pageBytes() - 1) / l.pageBytes());
+        return @intCast(groups.state(l.run_bytes, l.pageBytes()).pages);
     }
 };
 

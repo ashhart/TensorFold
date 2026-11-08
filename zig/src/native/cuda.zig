@@ -368,6 +368,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     const kept = if (counted.ledger) |lp| lp.kept else kv_pages.kept(F, loaded, paged, o, room, held, host_budget, host_cache);
     const cache = kept.copied;
     const cache_capacity = kv_pages.capacity(F, loaded, kept, @intCast(window));
+    try kv_pages.report(a, layout, paged);
     var shown = try kv_pages.text(F, a, served.stream_bytes, layout, paged, kv_pages.enginePaged(loaded), kv_pages.allOnPages(loaded), @intCast(window), kept, o.kv8);
     if (counted.ledger) |lp| shown[0] = try @import("cuda_ledger.zig").text(a, lp, window);
     const cache_text = try kv_pages.cacheText(a, kv_pages.ownCache(loaded) or share, counted.slots, paged, layout, shown[1]);
