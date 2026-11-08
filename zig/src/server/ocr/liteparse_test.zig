@@ -122,7 +122,7 @@ test "ocr liteparse: a page without text gives an empty results list, and faults
     var pixels: [3]u8 = .{ 0, 0, 0 };
     var blocks = [_]api.ocr.OcrBlock{.{ .content = "", .quad = rect(0, 0, 1, 1), .kind = .picture }};
     const page: types.OcrPage = .{ .index = 0, .width = 1, .height = 1, .dpi = 72, .blocks = &blocks };
-    var budget_ = budget.Encodes.init(1);
+    var budget_ = budget.Encodes.init(1, 1);
     var fault: types.Fault = undefined;
     try sink.page(sink.ctx, a, 0, &page, .{ .width = 1, .height = 1, .pixels = &pixels }, &budget_, &fault);
     try t.expectEqualStrings("{\"results\": []}", try enc.reply(a));

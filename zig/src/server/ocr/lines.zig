@@ -68,6 +68,23 @@ fn lerp(p: [2]f32, r: [2]f32, t: f32) [2]f32 {
     return .{ (1 - t) * p[0] + t * r[0], (1 - t) * p[1] + t * r[1] };
 }
 
+/// ``s`` without the leading and trailing whitespace Python's ``str.strip()`` removes (Unicode, as ``Split``'s).
+pub fn trimSpace(s: []const u8) []const u8 {
+    var i: usize = 0;
+    var start: ?usize = null;
+    var end: usize = 0;
+    while (i < s.len) {
+        const n = Split.space(s[i..]);
+        const step = if (n > 0) n else Split.charLen(s[i..]);
+        if (n == 0) {
+            if (start == null) start = i;
+            end = i + step;
+        }
+        i += step;
+    }
+    return if (start) |b| s[b..end] else s[s.len..];
+}
+
 /// Words between runs of the whitespace Python's ``str.split()`` splits on; a byte that is not UTF-8 is a word byte.
 const Split = struct {
     s: []const u8,

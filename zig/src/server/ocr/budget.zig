@@ -5,8 +5,9 @@ const Fault = types.Fault;
 
 /// The most images one request may encode.
 pub const max_count = 256;
-/// The most encoded bytes one request may hold.
-pub const max_bytes = 16 << 20;
+/// The encoded bytes every request may hold, and what each selected page adds.
+pub const base_bytes = 16 << 20;
+pub const page_bytes = 2 << 20;
 /// Encoded pixels may reach this many times the request's page pixels.
 pub const pixel_factor = 4;
 /// The unreadable-page reason for any encode limit.
@@ -35,10 +36,11 @@ pub const Encodes = struct {
     pixels: u64 = 0,
     bytes: u64 = 0,
     limit_pixels: u64,
+    max_bytes: u64,
 
-    /// The budget of a request whose pages hold ``page_pixels`` pixels in all.
-    pub fn init(page_pixels: u64) Encodes {
-        return .{ .limit_pixels = page_pixels *| pixel_factor };
+    /// The budget of a request of ``pages`` pages holding ``page_pixels`` pixels in all.
+    pub fn init(page_pixels: u64, pages: usize) Encodes {
+        return .{ .limit_pixels = page_pixels *| pixel_factor, .max_bytes = base_bytes +| @as(u64, pages) *| page_bytes };
     }
 
     /// Reserves one ``w`` x ``h`` encode; faults unreadable when it would pass the count or pixel limit.
@@ -49,10 +51,10 @@ pub const Encodes = struct {
         e.pixels += px;
     }
 
-    /// Counts one finished encode of ``bytes_len`` bytes; faults unreadable once the total passes 16 MiB.
+    /// Counts one finished encode of ``bytes_len`` bytes; faults unreadable once the total passes ``max_bytes``.
     pub fn after(e: *Encodes, fault: *Fault, bytes_len: usize) types.Faulted!void {
         e.bytes += bytes_len;
-        if (e.bytes > max_bytes) return over(fault);
+        if (e.bytes > e.max_bytes) return over(fault);
     }
 };
 

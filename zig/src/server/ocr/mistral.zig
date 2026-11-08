@@ -5,7 +5,6 @@ const api = @import("engine_api");
 const json = @import("json");
 const errors = @import("../errors.zig");
 const images = @import("../images.zig");
-const media_fetch = @import("../media_fetch.zig");
 const http_body = @import("../http_body.zig");
 const openai = @import("../openai.zig");
 const pdf = @import("../pdf.zig");
@@ -14,6 +13,7 @@ const Server = @import("../server.zig").Server;
 const types = @import("types.zig");
 const budget = @import("budget.zig");
 const run = @import("run.zig");
+const fetch = @import("fetch.zig");
 const reply = @import("mistral_reply.zig");
 const Value = json.Value;
 const Fault = types.Fault;
@@ -209,17 +209,8 @@ fn document(a: Allocator, fault: *Fault, body: Value, facts: Facts) Step![]const
         error.OutOfMemory => error.OutOfMemory,
         error.Refused => bad(a, fault, loc, "{s}", .{cx.message}),
     };
-    if (!std.mem.startsWith(u8, url, "https://")) return bad(a, fault, loc, "documents require data URLs or public HTTPS URLs", .{});
-    const f = facts.fetch orelse return bad(a, fault, loc, "document URLs are off on this server; send a data URL, or start the server with --vision-urls", .{});
-    if (url.len > media_fetch.max_url_chars) return bad(a, fault, loc, "document URL is too long", .{});
-    const with_pdf = media_fetch.image_media ++ [_][]const u8{"application/pdf"};
-    const media: []const []const u8 = if (facts.pdf) &with_pdf else &media_fetch.image_media;
-    var failure: media_fetch.Failure = .{};
-    const deadline = std.Io.Clock.awake.now(f.io).addDuration(.fromSeconds(media_fetch.timeout_s));
-    const bytes = f.get(f.ctx, a, f.io, url, pdf.max_pdf_bytes, deadline, media, &failure) catch |e| switch (e) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.Media => return bad(a, fault, loc, "{s}", .{failure.text}),
+    return switch (try fetch.https(a, facts.fetch, url, facts.pdf)) {
+        .bytes => |b| b,
+        .refused => |m| bad(a, fault, loc, "{s}", .{m}),
     };
-    if (bytes.len == 0) return bad(a, fault, loc, "the document is empty", .{});
-    return bytes;
 }

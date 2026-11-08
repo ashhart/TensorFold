@@ -268,4 +268,5 @@ test {
     _ = @import("ocr/size_test.zig");
     _ = @import("ocr/doctr_test.zig");
     _ = @import("ocr/liteparse_test.zig");
+    _ = @import("ocr/paddlex_test.zig");
 }

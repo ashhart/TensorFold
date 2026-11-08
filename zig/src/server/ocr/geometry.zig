@@ -56,7 +56,7 @@ pub fn mistralBox(q: Quad) [4]i32 {
 /// PaddleX's polygon: corners rounded; a degenerate result becomes its integer box, a zero side widened by 1 px.
 pub fn paddlePoly(q: Quad, w: u32, h: u32) [4][2]i32 {
     var p: [4][2]i32 = undefined;
-    for (q, &p) |c, *o| o.* = .{ toInt(@round(c[0])), toInt(@round(c[1])) };
+    for (q, &p) |c, *o| o.* = .{ toInt(roundEven(c[0])), toInt(roundEven(c[1])) };
     if (isSimpleConvex(toQuad(p))) return p;
     var b: [4]i32 = .{ p[0][0], p[0][1], p[0][0], p[0][1] };
     for (p[1..]) |c| {
@@ -96,6 +96,15 @@ fn widenInt(lo: i32, hi: i32, limit: i32) [2]i32 {
 
 fn limitInt(n: u32) i32 {
     return @intCast(@min(n, std.math.maxInt(i32)));
+}
+
+/// Python's ``round(x)``: to nearest, a tie to the even neighbour.
+pub fn roundEven(x: f32) f32 {
+    const f = @floor(x);
+    const d = x - f;
+    if (d < 0.5) return f;
+    if (d > 0.5) return f + 1;
+    return if (@mod(f, 2) == 0) f else f + 1;
 }
 
 fn toInt(x: f32) i32 {

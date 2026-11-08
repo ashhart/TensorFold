@@ -61,7 +61,6 @@ test "ocr route: /ocr answers in the OpenAI shape until a dialect is chosen; bot
     const cases = [_]struct { path: []const u8, ct: ?[]const u8, status: u16, says: []const u8 }{
         .{ .path = "/ocr", .ct = "text/csv", .status = 415, .says = "unsupported Content-Type text/csv" },
         .{ .path = "/ocr/", .ct = form, .status = 400, .says = "multipart body is malformed" },
-        .{ .path = "/ocr", .ct = "application/json", .status = 501, .says = "paddlex" },
     };
     for (cases) |c| {
         var wire: harness.Wire = .{ .a = a };

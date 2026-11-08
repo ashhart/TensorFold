@@ -59,7 +59,7 @@ pub fn run(srv: *Server, a: Allocator, sources: []const Source, sink: PageSink, 
     var total: u64 = 0;
     for (pages) |p| total +|= p.pixels;
     // one limit for the whole request, from every page's pixels, so no encode depends on the order of the pages
-    var enc = budget.Encodes.init(total);
+    var enc = budget.Encodes.init(total, pages.len);
     for (pages) |p| {
         if (gone.check()) return error.Cancelled;
         try onePage(srv, a, reader, id, p, sink, &enc, fault, gone);
