@@ -59,6 +59,7 @@ pub const Host = struct {
     vision: ?*images.Vision = null, // --vision's tower and image rows
     spares: q.snapshot.Spares = .{}, // dropped kept states' buffers, for the next saves
     pair: ?*lb.Pair = null, // --speed-up: the seam this rank owns; rank 1 follows through it
+    follower: bool = false, // this rank replays rank 0's rounds: its HTTP refuses generations at admission
     link: ?*lb.Link = null, // rank 0's round sender and rank 1's follower target; `Metal.link` points here
     hw: ?mtl.Device = null, // the pair's device, opened before the model's so the seam exists for the load
     picks: ?mtl.Buffer = null, // a round's head-seam picks (one u32 a row), read by the lane backend
@@ -522,7 +523,12 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     errdefer if (pair) |p| h.workers.stop(p); // before `open` frees the pair these threads read
     try h.host.start();
     errdefer h.host.stop(); // a start-up failure after the host is up stops it before `open` frees what it serves
-    if (pair) |p| try h.workers.startFollower(p, h.back, a, why);
+    if (pair) |p| {
+        h.follower = p.rank != 0;
+        // Rank 1 serves no generations: its engine only replays rank 0's rounds, so admission refuses at the door.
+        if (h.follower) h.host.health = .{ .ctx = h, .read = unhealthyFollower };
+        try h.workers.startFollower(p, h.back, a, why);
+    }
     tf.startup_receipt.span(.model_ready).end();
     std.log.info("{f}", .{StartupLine{ .streams = slots, .context = capacity, .draft_slots = if (h.draft != null) h.back.draft_slots else 0, .images = o.images != null }});
     return h;
@@ -615,6 +621,11 @@ fn enableCache(h: *Host, gib: ?f64, over: bool, a: Allocator, why: *[]const u8) 
 
 /// Weights, the ready slots' state and the drafter join one residency set the idle keepalive uses.
 const holdResident = q.residency.hold;
+
+/// Rank 1's admission gate: always false, so every generation request refuses before it reaches the lanes.
+fn unhealthyFollower(_: *anyopaque) bool {
+    return false;
+}
 
 pub fn close(ptr: *anyopaque) void {
     const h = Host.of(ptr);
