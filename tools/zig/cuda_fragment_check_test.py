@@ -1,9 +1,11 @@
 """A fragment's includer missing a name it needs fails by name and line; every includer in the real tree passes."""
 from pathlib import Path
 import shutil
+import sys
 import tempfile
 import unittest
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # also when run from the repository root by path
 import cuda_fragment_check as checker
 
 REAL = Path(__file__).resolve().parents[2] / checker.KERNELS
