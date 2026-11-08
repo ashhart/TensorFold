@@ -1,11 +1,9 @@
-//! Walk a release directory the way the shell find did: refuse any symlink,
-//! check every regular file, and ignore the other kinds find -type f skips.
+//! Walk a release directory the way the shell find did: refuse any symlink, check every regular file, ignore the rest.
 const std = @import("std");
 const paths = @import("release_paths.zig");
 const dispatch = @import("release_paths_dispatch.zig");
 
-/// Walk a release directory, requiring DIR to be a real directory (not a file
-/// or a symlink). Returns true if the check failed (a refusal or an unreadable file).
+/// Walk a release directory, requiring DIR to be a real directory (not a file or symlink); true if the check failed.
 pub fn checkTreeDir(io: std.Io, gpa: std.mem.Allocator, root: []const u8, dir: []const u8) bool {
     const cwd = std.Io.Dir.cwd();
     const stat = cwd.statFile(io, dir, .{ .follow_symlinks = false }) catch {
@@ -19,9 +17,7 @@ pub fn checkTreeDir(io: std.Io, gpa: std.mem.Allocator, root: []const u8, dir: [
     return walkDir(io, gpa, root, cwd, dir);
 }
 
-/// Refuse a symlink, recurse into a directory, check a regular file. An entry
-/// whose kind the listing cannot report is lstat'd and dispatched on the
-/// result; a failed lstat refuses.
+/// Refuse a symlink, recurse into a directory, check a regular file; an unknown kind is lstat; a failed lstat refuses.
 pub fn walkDir(io: std.Io, gpa: std.mem.Allocator, root: []const u8, cwd: std.Io.Dir, dir: []const u8) bool {
     var d = cwd.openDir(io, dir, .{ .iterate = true }) catch {
         std.debug.print("release privacy input directory is missing\n", .{});

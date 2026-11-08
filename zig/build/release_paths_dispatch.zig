@@ -3,9 +3,7 @@ const std = @import("std");
 
 pub const Decision = enum { file, directory, sym_link, refuse };
 
-/// A kind the directory listing cannot report (for example `.unknown` on a
-/// filesystem without ftype) is lstat'd through `stat` and dispatched on the
-/// result. A failed lstat refuses, so the check fails closed.
+/// A kind the listing cannot report (for example .unknown) is lstat and dispatched; a failed lstat refuses.
 pub fn dispatch(kind: std.Io.File.Kind, ctx: *anyopaque, stat: fn (ctx: *anyopaque) ?std.Io.File.Kind) Decision {
     switch (kind) {
         .file => return .file,

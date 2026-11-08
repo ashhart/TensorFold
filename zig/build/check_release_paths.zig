@@ -1,16 +1,16 @@
-//! check-release-paths ABSOLUTE_BUILD_ROOT [--tree DIR] [FILE...]
-//!
-//! Refuse a release file whose bytes leak a private build path. With --tree,
-//! walk DIR the way the shell find did: refuse any symlink, check every
-//! regular file, ignore the other kinds find -type f skips. The walk happens
-//! here, not in a shell find, so it behaves the same on every host.
+//! check-release-paths ABSOLUTE_BUILD_ROOT [--tree DIR] [FILE...]: refuse files that leak a private build path.
 const std = @import("std");
+const paths = @import("release_paths.zig");
 const walk = @import("release_paths_walk.zig");
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len < 3) {
         std.debug.print("usage: check-release-paths ABSOLUTE_BUILD_ROOT [--tree DIR] [FILE...]\n", .{});
+        std.process.exit(2);
+    }
+    if (!paths.validRoot(args[1])) {
+        std.debug.print("release privacy: BadBuildRoot: use a named absolute build root\n", .{});
         std.process.exit(2);
     }
     var i: usize = 2;
