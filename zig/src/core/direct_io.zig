@@ -12,9 +12,7 @@ pub const chunk = 8 << 20;
 
 /// Only TF_LOAD_DIRECT=0 disables direct loader reads.
 pub fn enabled() bool {
-    const value = platform.c.getenv("TF_LOAD_DIRECT") orelse return true;
-    const text = std.mem.span(value);
-    return text.len != 1 or text[0] != '0';
+    return platform.environment.loadDirect();
 }
 
 pub const Buffer = []align(alignment) u8;

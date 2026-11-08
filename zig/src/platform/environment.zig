@@ -397,6 +397,22 @@ pub fn refusal(a: std.mem.Allocator, environment: anytype, flags: Flags) !?[]con
     return null;
 }
 
+/// Direct loading keeps its existing exact-zero switch, without adding aliases or refusals.
+pub fn loadDirect() bool {
+    return loadDirectText((Process{}).get("TF_LOAD_DIRECT"));
+}
+
+fn loadDirectText(raw: ?[]const u8) bool {
+    return !std.mem.eql(u8, raw orelse "", "0");
+}
+
+test "environment: direct loading retains exact-zero disabling" {
+    try std.testing.expect(!loadDirectText("0"));
+    try std.testing.expect(loadDirectText(null));
+    for ([_][]const u8{ "", "1", "00", " 0", "0 ", "false", "off", "no", "garbage" }) |raw|
+        try std.testing.expect(loadDirectText(raw));
+}
+
 pub const Process = struct {
     pub fn get(_: Process, name: [:0]const u8) ?[]const u8 {
         return sys.getenv(name);
