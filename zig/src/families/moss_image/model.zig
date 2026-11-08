@@ -113,7 +113,7 @@ pub const Model = struct {
         const plan = try Scratch.of(max_text, image);
         const scratch_bytes = try plan.bytes();
         // qualified on the M5's tensor units alone: the projections and attention take another path before them
-        if (!device.tensorUnits()) {
+        if (!ks.available(device)) {
             std.log.err("moss image: {s} has no tensor units; this family runs on the M5's alone, the only chip it was checked on", .{device.name()});
             return error.TensorUnitsRequired;
         }

@@ -6,6 +6,11 @@ const prompt_attention = @import("kernel_sources").gemma4_prompt_attention;
 const frags = @import("../../core/frags.zig");
 const cfg = @import("config.zig");
 
+/// Whether Gemma's assistant and DFlash loaders can build their draft libraries.
+pub fn draftAvailable(device: mtl.Device) bool {
+    return device.tensorUnits();
+}
+
 /// The exact glue specialization used by the target and assistant constructors.
 pub fn glueSource(a: std.mem.Allocator, geo: cfg.Geometry, global: bool, q_only: bool, embed_bits: u8) ![]u8 {
     if (std.mem.indexOfScalar(u8, &cfg.widths.bit_widths, embed_bits) == null) return error.UnsupportedGemmaQuantization;

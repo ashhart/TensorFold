@@ -6,6 +6,11 @@ const cfg = @import("config.zig");
 const model = @import("model.zig");
 const frags = @import("../../core/frags.zig");
 
+/// Whether the native Llama loader can build its runtime libraries.
+pub fn available(device: mtl.Device) bool {
+    return device.tensorUnits();
+}
+
 /// A served geometry the attention compiles for (the head size is the family's 128).
 pub const Geometry = struct { name: []const u8, heads: u32, kv_heads: u32, hidden: usize, intermediate: usize, vocab: usize };
 /// Nanbeige4.3-33B, the family's first model, and Nanbeige4.1-3B, its drafter.

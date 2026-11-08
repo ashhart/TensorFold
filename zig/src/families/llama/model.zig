@@ -46,7 +46,7 @@ pub const Model = struct {
         m.device = try mtl.Device.init();
         errdefer m.device.deinit();
         // prompt chunks' GEMM and attention run on Metal 4 tensor units: an M5 or later
-        if (!m.device.tensorUnits()) return error.LlamaNeedsTensorUnits;
+        if (!contracts.available(m.device)) return error.LlamaNeedsTensorUnits;
         m.shared_queue = queue != null;
         m.queue = queue orelse try m.device.queue();
         errdefer if (!m.shared_queue) m.queue.deinit();
