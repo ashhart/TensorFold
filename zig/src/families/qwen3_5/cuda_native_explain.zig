@@ -1,9 +1,11 @@
 //! The CUDA Qwen3.5 family's refusals in words: its open's, then a running engine's requests'.
 const decide = @import("cuda_decide.zig");
+const sm110_modes = @import("cuda_sm110_modes.zig");
 
 /// A request this engine refuses, in words, or with no engine (null) its open; null: none of its own.
 pub fn explain(ctx: ?*anyopaque, err: anyerror) ?[]const u8 {
     if (ctx == null) if (decide.explain(err)) |why| return why;
+    if (ctx == null) if (sm110_modes.explain(err)) |why| return why;
     if (ctx == null) return switch (err) {
         error.NoQwenVision => "--vision: this checkpoint has no image tower (no vision_config): serve it without --vision",
         error.QwenPagesNoLearner => "TF_QWEN_KV_PAGES: the learner reads whole windows, not pages; drop --slide or unset it",

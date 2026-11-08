@@ -216,6 +216,12 @@ The target verifies every proposed token against its own serial sample.
 
 ## CUDA
 
+### SM110 development build
+
+On NVIDIA Thor (sm_110), build the native CUDA engine with `-Dsm=110`. This is a development target; `-Dgpu=sm_110` is not a product target yet. The measured path uses the MLX affine 4-bit/group-64 checkpoint, one GPU, BF16 KV and prompt activations, and the DFlash2 drafter. Text and PNG image requests were checked against `"draft": false` with greedy and seeded sampling, solo and concurrent streams, cancelled requests and resumed prompts. The device receipt belongs to the commit and checkpoint hashes recorded with the test run; it does not qualify other checkpoints or image decoders.
+
+The SM110 Qwen loader refuses `--kv-cache fp8`, `--prompt-precision int8`, `--rope-yarn`, `TF_QWEN_KV_PAGES`, `TF_QWEN_KV_PAGES_ALL=1`, `TF_QWEN_KV_SHARE`, `TF_QWEN_REQUEST_STARTS=1`, `TF_QWEN_KV_PAGE_TEST`, `TF_QWEN_KEEP_LATE=1`, `TF_NO_TREES` and `TF_DRAFT_NODES` when they would change the default serving path. Their other-GPU behavior is unchanged. Unset or explicit off values for the `TF_QWEN_*` switches keep the default path; `TF_NO_TREES` and `TF_DRAFT_NODES` must be unset.
+
 This section is the Python engine's (0.6.6). The native CUDA engine reads the MLX affine checkpoints, ModelOpt
 NVFP4 and FP8 exports, and turboderp's EXL3 packs through the shared EXL3 module of #832; its own measurements are
 not the ones below.
