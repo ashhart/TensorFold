@@ -58,6 +58,7 @@ pub const picture = @import("picture/picture.zig");
 pub const qwen_vl = @import("qwen_vl/qwen_vl.zig");
 pub const drafter_release = @import("drafter_release.zig");
 pub const drafter_layout = @import("drafter_layout.zig");
+pub const dspine = @import("dspine.zig");
 pub const tree_round = @import("tree_round.zig");
 pub const attention_ref = @import("attention_ref.zig");
 pub const attention_range = @import("attention_range.zig");
@@ -73,6 +74,7 @@ pub const kv_prompts = @import("kv_prompts.zig");
 test {
     _ = startup_receipt;
     _ = benchmark_group;
+    _ = dspine;
     _ = profile;
     _ = checkpoint_weights;
     _ = safetensors;
