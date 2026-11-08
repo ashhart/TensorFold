@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- OCR: the native HIP engine reads documents through `POST /v1/ocr` in Mistral's OCR contract (its Python and TypeScript SDKs) and `POST /ocr` in PaddleX's, docTR's and LiteParse's, the contract chosen from `?format=`, the media type, then the part names. dots.mocr (a box for each layout block) and GLM-OCR (page Markdown, no boxes) have readers; images and PDFs (`--vision-pdf`) share one page budget per request (`TENSORFOLD_MAX_PDF_PAGES`, default 16), and Mistral crops and PaddleX visualisations share one image budget (256 images, 4 times the page pixels, 16 MiB plus 2 MiB a page). Line bands, word boxes and scores of 1.0 are estimates, and an option that changes content and that TensorFold cannot apply, such as annotations or PaddleX's detector settings, is refused. A page cut at the context limit or out of its model's format fails the whole request with HTTP 422; `docs/api.md` lists each contract's fields, statuses and limits (#2440).
+
 - Fabric: a pipeline stage's boot and round loop is one driver, generic over an engine binding, so a CUDA, Metal or XPU stage writes only its binding; nothing uses it yet. A stop that a middle stage receives now passes on instead of closing the ring (#2241, part of #2005). Thanks to @jschmied.
 
 
