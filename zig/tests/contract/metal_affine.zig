@@ -17,7 +17,7 @@ const lane = tf.lane_projection;
 pub const Kind = enum { row, affine_mm, simd, simd_half, simd_bits, lane, lane_reg };
 
 /// One variant: kernel, code width and group, output, lane K slices; control: simd_half's tiles all marked as fitting.
-pub const Variant = struct { kind: Kind, bits: u8 = 4, group: usize = 64, f32_out: bool = false, sk: usize = 1, coop: bool = false, control: bool = false };
+pub const Variant = struct { kind: Kind, bits: u8 = 4, group: usize = 64, f32_out: bool = false, sk: usize = 1, coop: bool = false, control: bool = false, served: ?[]const c.Shape = null };
 pub const Reg = struct { v: Variant, name: []const u8 };
 /// The half-operand tiles and their planted control, beside simd_qmm's own entry.
 pub const half = [_]Reg{
@@ -60,7 +60,7 @@ pub fn spec(v: Variant, name: []const u8) c.Spec {
         .simd, .simd_bits => .{ .name = name, .accum = .f32, .depth = simdDepth, .out = out, .tiles = .{ .{ .size = 8 }, .{ .size = 32, .step = 8, .min = 8 }, .{ .size = 512, .step = 64, .min = 64 } }, .served = &.{ .{ .rows = 16, .n = 2688, .k = 4096 }, .{ .rows = 9, .n = 6400, .k = 256 } } },
         // the 27B's norm-fed widths past 6,144 (8 chunks), as the prompt chunk's tiles and its 9-row tail take them
         .simd_half => .{ .name = name, .accum = .f32, .depth = simdDepth, .out = out, .replaces = "simd_qmm's fp32 tiles", .tiles = .{ .{ .size = 8 }, .{ .size = 32, .step = 8, .min = 8 }, .{ .size = 512, .step = 64, .min = 64 } }, .served = &.{ .{ .rows = 32, .n = 6240, .k = 512 }, .{ .rows = 9, .n = 12288, .k = 256 } } },
-        .lane, .lane_reg => .{ .name = name, .accum = .f32, .depth = laneDepth, .out = out, .replaces = if (v.kind == .lane_reg) "the cooperative lane kernel" else null, .tiles = .{ .{ .size = 16 }, .{ .size = 32, .step = 16, .min = 32 }, .{ .size = 4 * v.group, .step = v.group, .min = v.group } }, .served = &.{ .{ .rows = 16, .n = 2048, .k = 2048 }, .{ .rows = 5, .n = 512, .k = 896 } } },
+        .lane, .lane_reg => .{ .name = name, .accum = .f32, .depth = laneDepth, .out = out, .replaces = if (v.kind == .lane_reg) "the cooperative lane kernel" else null, .tiles = .{ .{ .size = 16 }, .{ .size = 32, .step = 16, .min = 32 }, .{ .size = 4 * v.group, .step = v.group, .min = v.group } }, .served = v.served orelse &.{ .{ .rows = 16, .n = 2048, .k = 2048 }, .{ .rows = 5, .n = 512, .k = 896 } } },
     };
 }
 
