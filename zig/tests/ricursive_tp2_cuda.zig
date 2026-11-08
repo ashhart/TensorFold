@@ -22,7 +22,8 @@ const usage =
     \\(rows i % stride == stride - 1 and the tail). bench: the ids as a timed prefill (depth marks), then greedy decode.
     \\Two ranks: TF_RICURSIVE_RANK (0 or 1) and NCCL_COMM_ID; rank 1 follows rank 0 whatever its mode.
     \\TF_RICURSIVE_CONTEXT (4096), TF_RICURSIVE_FULL_PROMPT=0 (full layers' prompt chunks on tree rows),
-    \\TF_RICURSIVE_ROCE=1 (RoCE small gathers), TF_RICURSIVE_GRAPHS=1 (decode rows as CUDA graphs).
+    \\TF_RICURSIVE_ROCE=1 (RoCE small gathers), TF_RICURSIVE_GRAPHS=1 (decode rows as CUDA graphs),
+    \\TF_RICURSIVE_DRAFTER (rank 1's drafter directory).
     \\
 ;
 
@@ -46,10 +47,11 @@ pub fn main(init: std.process.Init) !u8 {
     const io = init.io;
     var t0 = now(io);
     const context = if (std.c.getenv("TF_RICURSIVE_CONTEXT")) |v| try std.fmt.parseInt(usize, std.mem.span(v), 10) else 4096;
-    const m = try rc.Model.load(init.gpa, init.io, &ctx, &driver, args[1], .{ .context = context, .slots = if (std.c.getenv("TF_RICURSIVE_SLOTS")) |v| try std.fmt.parseInt(usize, std.mem.span(v), 10) else 1, .truncated = truncated, .place = pl, .full_prompt = !off("TF_RICURSIVE_FULL_PROMPT"), .roce = env("TF_RICURSIVE_ROCE"), .graphs = env("TF_RICURSIVE_GRAPHS") });
+    const m = try rc.Model.load(init.gpa, init.io, &ctx, &driver, args[1], .{ .context = context, .slots = if (std.c.getenv("TF_RICURSIVE_SLOTS")) |v| try std.fmt.parseInt(usize, std.mem.span(v), 10) else 1, .truncated = truncated, .place = pl, .full_prompt = !off("TF_RICURSIVE_FULL_PROMPT"), .roce = env("TF_RICURSIVE_ROCE"), .graphs = env("TF_RICURSIVE_GRAPHS"), .drafter = if (std.c.getenv("TF_RICURSIVE_DRAFTER")) |v| std.mem.span(v) else null });
     defer m.deinit();
     std.debug.print("rank {d}/{d}: loaded {d} layers, {d:.2} GiB of weights in {d:.1} s; device {d:.2} GiB allocated; context {d}; MemAvailable {d:.1} GiB\n", .{ pl.rank, pl.world, m.c.layers, gib(m.w.bytes), now(io) - t0, gib(cuda.usage(false).device), context, memAvailable(io) });
     if (pl.rank != 0) {
+        m.draft_hook = rc.draftFollow;
         try m.follow();
         std.debug.print("rank {d}: rank 0 stopped; FOLLOW DONE\n", .{pl.rank});
         return 0;

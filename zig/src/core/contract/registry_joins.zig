@@ -109,6 +109,7 @@ pub const all_metal = @import("penalties_records.zig").records ++
 pub const landed_cuda = registry.cuda ++ @import("muse_cuda_records.zig").cuda ++
     @import("dory_cuda_records.zig").cuda ++
     @import("ricursive_tp2_records.zig").cuda ++
+    @import("ricursive_tp2_draft_records.zig").cuda ++
     registry.gradient_pending ++
     registry.qwen_learning_pending ++
     @import("paging_pending.zig").extra ++
