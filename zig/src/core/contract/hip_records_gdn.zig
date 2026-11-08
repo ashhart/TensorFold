@@ -14,10 +14,10 @@ pub const records = [_]Record{
     .{
         .launch = .{ .name = "DeltaNet tf_gdn_prompt_prep", .symbol = "tf_gdn_prompt_prep", .image = "ops", .threads = 256 },
         .usage = .{
-            .{ .vgprs = 92, .sgprs = 59, .lds = 0, .private = 0, .bound = 256, .wave = 32 },
-            .{ .vgprs = 93, .sgprs = 59, .lds = 0, .private = 0, .bound = 256, .wave = 32 },
-            .{ .vgprs = 93, .sgprs = 59, .lds = 0, .private = 0, .bound = 256, .wave = 32 },
-            .{ .vgprs = 93, .sgprs = 60, .lds = 0, .private = 0, .bound = 256, .wave = 32 },
+            .{ .vgprs = 90, .sgprs = 59, .lds = 0, .private = 0, .bound = 256, .wave = 32 },
+            .{ .vgprs = 90, .sgprs = 59, .lds = 0, .private = 0, .bound = 256, .wave = 32 },
+            .{ .vgprs = 90, .sgprs = 59, .lds = 0, .private = 0, .bound = 256, .wave = 32 },
+            .{ .vgprs = 90, .sgprs = 60, .lds = 0, .private = 0, .bound = 256, .wave = 32 },
         },
     },
 };
