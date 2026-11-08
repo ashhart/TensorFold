@@ -45,6 +45,8 @@ Coverage includes:
 - GLM on CUDA: `TF_KV_PAGES`, `TF_GLM_KV_HOST`, `TF_GLM_KV_HOST_SHARED`, `TF_GLM_PROMPT_TAIL`.
 - Nemotron and Nemotron Omni on CUDA: `TF_KV_PAGES`, with their existing default-on parser.
 - Gemma 4, Kolibri-1, Spark2.5 and GLM on the core CUDA page adapter: `TF_KV_SHARE`, where the adapter is served.
+- Every CUDA family whose host prompt cache the CUDA host builds (Nemotron, Nemotron Omni, GLM, MiniMax M3, Qwen3.5
+  dense/MoE, Flash Next, Kolibri-1, Gemma 4, Spark2.5, Dory): `TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS`, exact `1` only.
 - Flash Next on CUDA: `TF_FLASHNEXT_KV_PAGES`, `TF_FLASHNEXT_KV_PAGES_ALL`.
 - Dory on CUDA: `TENSORFOLD_DORY_KV_PAGES`, full-attention caches in pool pages unless it is exactly `0`; unset,
   every stream's caches are contiguous and made at open.
@@ -62,6 +64,15 @@ this registry is unchanged. The two GLM host-memory switches carry
 [#1795](https://github.com/ashhart/TensorFold/pull/1795)'s identical tokens at TP=2 on two GB10s, and
 `TF_GLM_PROMPT_TAIL` carries [#2226](https://github.com/ashhart/TensorFold/pull/2226)'s. `TF_GLM_KV_HOST_GIB` stays
 outside the registry: it sizes those pages rather than choosing a policy, and its reader keeps its own default.
+
+`TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS=1` ([#2346](https://github.com/ashhart/TensorFold/issues/2346)) changes which
+prompt states are kept, never a token. A new state may then evict only its own conversation's states: kept states
+whose tokens begin the new prompt, that no lookup borrows and that aren't a shared cut or a branch point. A state
+that fits only by evicting another conversation's isn't kept: it counts as refused, one line names its size and the
+budget no kept state holds, and every kept state stays. The lookup that makes room before a pass, and learned and
+disk states read back, follow the same rule. Memory-pressure shedding and a new stream's memory still take any
+state. Unset, empty or `0` keeps today's eviction order. Only the CUDA host's prompt cache reads the switch; the
+shared paged store (`TF_KV_SHARE`) and the Metal, HIP and XPU caches don't, and a Metal server ignores it.
 
 A reader that resolves its switch by name uses `core.profile.lookup`: a registered name comes from this registry, and
 every other name keeps the libc lookup and default it had. GLM's rank settings read that way, and their fingerprint
