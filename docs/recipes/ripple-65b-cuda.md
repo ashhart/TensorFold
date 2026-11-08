@@ -38,6 +38,20 @@ Thinking follows the chat template, as on Metal: Ripple writes `<think>` itself 
 otherwise, and the server files a reply without the block as answer. Its think markers are spelled from several
 tokens, so a thinking budget and logprobs are refused by name.
 
+## EXL3 packs
+
+An ExLlamaV3 pack of the bf16 release (`quant_method` `exl3`, mul1 codebook, as exllamav3 1.6 writes it) loads too:
+every projection and the head run through main's `cuda.exl3.Dense` with bf16 inputs and outputs, in 128-row blocks
+for prompt chunks and decode rows alike, and the rest of the forward (glue, attention, caches, lanes) is the NVFP4
+release's. q, k and g stay three projections, written as three planar blocks. The embeddings, norms and
+`value_res_lambda` are read as the release's; a pack whose lambda is not a bf16 value is refused.
+
+```sh
+hf download ajensenwaud/Ripple-65B-Preview-exl3-5.0bpw --revision 1d260f752b753d2b17571de237029b5e2251db07 \
+  --local-dir models/ripple-65b-exl3-5.0
+zig-out/native/bin/tensorfold-native serve models/ripple-65b-exl3-5.0 --name ripple --port 8888 --context 32768
+```
+
 ## What the family is
 
 `zig/src/families/ricursive/cuda*.zig` and `zig/kernels/cuda/ricursive*.cu`, with the same layer math as Metal and
