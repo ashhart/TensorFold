@@ -4,6 +4,11 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM-5.3-Flash on CUDA: with `TF_KV_SHARE=n`, the startup plan sets a slot aside in the prompt cache for each kept
+  state, so the cache keeps as many states as its slots hold, up to n, and the rest of it goes to the KV pool's pages;
+  the startup line names the slots and, when fewer than n fit, the `--prompt-cache-gib` that holds them all. A value
+  over 64 now stops the server, and a cache too small for one slot (for example `--prompt-cache-gib 0`) keeps none,
+  where before it kept them outside the plan (#2358). Thanks to @Bizuayeu.
 - Metal: Qwen3.8-27B MLX 8-bit (groups of 64) reads its stored code bytes directly and reuses the producer's group sums, so cold prompts are 18% faster on an M5 Ultra (649 to 768 tok/s at 2K) and decode 7.6% faster, with the same tokens and prompt state; the lane kernel contract now pins 8-bit group-64 projections at the 27B's K splits (#2518, fixes #2502).
 - Qwen3.8-27B on Metal: `TF_PROMPT_ROWS` below 128 is refused with the prompt floor's own message again ("needs at least 128 prompt rows … or unset it to use the device default"), which #2405's startup check had replaced with the generic one; other malformed values keep the generic refusal (#2527).
 
@@ -243,11 +248,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Clusters: a Linux kernel built without transparent hugepages no longer refuses a RoCE start: `prepareRegion` keeps
   `MADV_DONTFORK` strict, asks for `MADV_NOHUGEPAGE` only where THP can apply it, and says at startup when it skips it
   (#2380, for #2378). Thanks to @devopsfortunato.
-- GLM-5.3-Flash on CUDA: with `TF_KV_SHARE=n`, the startup plan sets a slot aside in the prompt cache for each kept
-  state, so the cache keeps as many states as its slots hold, up to n, and the rest of it goes to the KV pool's pages;
-  the startup line names the slots and, when fewer than n fit, the `--prompt-cache-gib` that holds them all. A value
-  over 64 now stops the server, and a cache too small for one slot (for example `--prompt-cache-gib 0`) keeps none,
-  where before it kept them outside the plan (#2358). Thanks to @Bizuayeu.
 
 - CI: the portable-names check runs on every pull request again; since #2274 a reused pass could miss a newly added name
   Windows can't check out (#2311).
