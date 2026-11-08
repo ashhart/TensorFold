@@ -317,7 +317,7 @@ pub fn limits(a: std.mem.Allocator, device: mtl.Device, only: ?[]const u8) !usiz
         if (only) |s| {
             if (std.mem.indexOf(u8, v.name, s) == null) continue;
         }
-        if (!@import("metal_support.zig").tensor(device.tensorUnits(), v.name)) continue;
+        if (!@import("metal_support.zig").gemma(device.tensorUnits(), v.kind, v.name)) continue;
         const text = if (v.kind == 0) try mm.source(device, a, .{ .bits = v.bits }) else try fused.source(a, v.layout());
         defer a.free(text);
         const source = if (v.kind == 0) try a.dupe(u8, text) else try tf.gemma4.contracts.adapt(device, a, text);
