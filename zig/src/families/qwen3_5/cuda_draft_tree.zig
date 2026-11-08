@@ -2,6 +2,7 @@
 const std = @import("std");
 const platform = @import("sys");
 const lanes = @import("lanes");
+const core = @import("core");
 const engine = @import("cuda_engine.zig");
 
 /// Children a node, the selector's weight, the softmax scale, and the nodes a tree takes by default.
@@ -25,7 +26,32 @@ pub const Candidates = struct {
     // a sampled stream's rule and its first draft's position: row r's candidates scored as the target's draw at r
     sampling: ?lanes.Sampling = null,
     position: u64 = 0,
+    // DSpine: `projected` holds f32 [row][sender][candidate] logits, the sender the row before's candidate (or pending)
+    table: bool = false,
 };
+
+/// Row `r`'s logits after `pred` from the table: its sender's row (row 0: any, all hold the pending token's).
+fn tableRow(c: Candidates, r: usize, pred: u32) ?[]align(1) const f32 {
+    const previous = if (r > 0) ids(c, r - 1)[2..][0..c.topk] else ids(c, 0)[0..0];
+    const s = core.dspine.sender(r, previous, pred) orelse return null;
+    return std.mem.bytesAsSlice(f32, c.projected[(r * c.topk + s) * c.topk * 4 ..][0 .. c.topk * 4]);
+}
+
+/// Row `r`'s candidate j's score after `pred`: its table logit, or unary logit plus `weight` x the selector edge.
+fn score(c: Candidates, r: usize, pred: u32, row: ?[]align(1) const f32, j: usize, weight: f64) f64 {
+    const w = ids(c, r);
+    const unary: f64 = @as(f32, @bitCast(w[2 + lp_top + j]));
+    if (c.table) return if (row) |t| t[j] else unary;
+    const hp = std.mem.bytesAsSlice(u16, c.projected[r * c.rank * 2 ..][0 .. c.rank * 2]);
+    if (weight == 1) { // choice's f32 sums
+        var edge: f32 = 0;
+        for (0..c.rank) |k| edge += bf32(c.predecessor[pred * c.rank + k]) * bf32(hp[k]) * bf32(c.successor[w[2 + j] * c.rank + k]);
+        return @as(f32, @floatCast(unary)) + edge;
+    }
+    var edge: f64 = 0; // chancesAfter's f64 sums
+    for (0..c.rank) |k| edge += bf16(c.predecessor[pred * c.rank + k]) * bf16(hp[k]) * bf16(c.successor[w[2 + j] * c.rank + k]);
+    return unary + weight * edge;
+}
 
 /// A candidate's score as the target's draw sees it: its logit at the stream's temperature plus the draw's noise.
 fn drawn(c: Candidates, r: usize, token: u32, logit: f64) f64 {
@@ -83,13 +109,9 @@ fn bf32(h: u16) f32 {
 /// Row `r`'s `rank`th candidate after `pred`: unary logit + pred . projected . successor, ties to the earlier one.
 fn choice(c: Candidates, r: usize, pred: u32, rank: usize) u32 {
     const w = ids(c, r);
-    const hp = std.mem.bytesAsSlice(u16, c.projected[r * c.rank * 2 ..][0 .. c.rank * 2]);
+    const row = if (c.table) tableRow(c, r, pred) else null;
     var scores: [lp_top]f32 = undefined;
-    for (0..c.topk) |j| {
-        var edge: f32 = 0;
-        for (0..c.rank) |k| edge += bf32(c.predecessor[pred * c.rank + k]) * bf32(hp[k]) * bf32(c.successor[w[2 + j] * c.rank + k]);
-        scores[j] = @floatCast(drawn(c, r, w[2 + j], @as(f32, @bitCast(w[2 + lp_top + j])) + edge));
-    }
+    for (0..c.topk) |j| scores[j] = @floatCast(drawn(c, r, w[2 + j], score(c, r, pred, row, j, 1)));
     var taken: [lp_top]bool = @splat(false);
     var pick: usize = 0;
     for (0..rank + 1) |_| {
@@ -128,12 +150,10 @@ fn ids(c: Candidates, r: usize) []align(1) const u32 {
 /// Row `r`'s candidates after `pred` as log-chances: softmax of (unary + edge x selector) / scale.
 fn chancesAfter(c: Candidates, r: usize, pred: u32, out: *[lp_top]f64) void {
     const w = ids(c, r);
-    const hp = std.mem.bytesAsSlice(u16, c.projected[r * c.rank * 2 ..][0 .. c.rank * 2]);
+    const row = if (c.table) tableRow(c, r, pred) else null;
     var most: f64 = -std.math.inf(f64);
     for (0..c.topk) |j| {
-        var edge: f64 = 0;
-        for (0..c.rank) |k| edge += bf16(c.predecessor[pred * c.rank + k]) * bf16(hp[k]) * bf16(c.successor[w[2 + j] * c.rank + k]);
-        out[j] = drawn(c, r, w[2 + j], @as(f64, @as(f32, @bitCast(w[2 + lp_top + j]))) + edge_weight * edge) / scale;
+        out[j] = drawn(c, r, w[2 + j], score(c, r, pred, row, j, edge_weight)) / @as(f64, if (c.table) 1 else scale);
         most = @max(most, out[j]);
     }
     var total: f64 = 0;
@@ -232,4 +252,31 @@ test "best first: a node's children follow it, the cheapest open node first, cha
     try std.testing.expectEqual(@as(i32, -1), parents[0]);
     for (parents[0..n], 0..) |p, i| try std.testing.expect(p < @as(i32, @intCast(i)));
     for (tokens[0..n], parents[0..n]) |t, p| try std.testing.expectEqual(p >= 0, t >= 10); // row 1's ids under row 0's
+}
+
+test "DSpine table: each row's pick follows its sender's row; unary logits alone (no second pass) pick otherwise" {
+    var words: [2 * lp_words * 4]u8 = @splat(0);
+    const w = std.mem.bytesAsSlice(u32, &words);
+    for (0..2) |r| for (0..2) |j| {
+        w[r * lp_words + 2 + j] = @intCast(10 * (r + 1) + j);
+        w[r * lp_words + 2 + lp_top + j] = @bitCast(@as(f32, if (j == 0) 1 else 0));
+    };
+    // [row][sender][candidate]: row 0 any sender; row 1 after 10 prefers 21, after 11 prefers 20
+    const table = [2][2][2]f32{ .{ .{ 1, 0 }, .{ 1, 0 } }, .{ .{ 0, 2 }, .{ 3, 0 } } };
+    const none: [1]u16 = .{0};
+    var c: Candidates = .{ .words = &words, .projected = std.mem.asBytes(&table), .topk = 2, .rank = 1, .predecessor = &none, .successor = &none, .table = true };
+    var out: [2]u32 = undefined;
+    chain(c, 7, &out);
+    try std.testing.expectEqualSlices(u32, &.{ 10, 21 }, &out);
+    const shape: lanes.shape.Shape = .{ .parents = @constCast(&[_]i32{ -1, 0 }), .depths = @constCast(&[_]u8{ 0, 1 }), .ranks = @constCast(&[_]u8{ 1, 0 }), .expected = 0 };
+    try lanesOf(c, 7, 2, &shape, &out);
+    try std.testing.expectEqualSlices(u32, &.{ 11, 20 }, &out);
+    var lc: [lp_top]f64 = undefined;
+    chancesAfter(c, 1, 10, &lc);
+    try std.testing.expectApproxEqAbs(@as(f64, -2) - @log(1 + @exp(@as(f64, -2))), lc[0], 1e-12);
+    c.table = false;
+    c.projected = std.mem.sliceAsBytes(none[0..1]);
+    c.rank = 0;
+    chain(c, 7, &out);
+    try std.testing.expectEqualSlices(u32, &.{ 10, 20 }, &out);
 }
