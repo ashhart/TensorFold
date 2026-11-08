@@ -1,5 +1,6 @@
 //! PDF document input (--vision --vision-pdf): renders PDF pages via PDFium and libjpeg-turbo in a bounded worker.
 const std = @import("std");
+const builtin = @import("builtin");
 const sys = @import("sys");
 const json = @import("json");
 const errors = @import("errors.zig");
@@ -19,7 +20,19 @@ pub const render_timeout_ns: i96 = 10 * std.time.ns_per_s;
 pub const max_child_heap_bytes: u64 = 1 << 30;
 pub const off_message = "PDF inputs are off on this server; start the server with --vision --vision-pdf";
 
-pub const Budget = struct { images_used: u32 = 0, pdf_pages_used: u32 = 0, encoded_bytes: usize = 0, pixels_used: u64 = 0 };
+pub const Budget = struct {
+    images_used: u32 = 0,
+    pdf_pages_used: u32 = 0,
+    encoded_bytes: usize = 0,
+    pixels_used: u64 = 0,
+    /// Counts one rendered page of `px` pixels and `len` JPEG bytes.
+    pub fn add(b: *Budget, px: u64, len: usize) void {
+        b.pdf_pages_used += 1;
+        b.images_used += 1;
+        b.pixels_used += px;
+        b.encoded_bytes += len;
+    }
+};
 pub const IfsdkPause = extern struct { version: c_int = 1, NeedToPauseNow: *const fn (*IfsdkPause) callconv(.c) c_int, user: ?*anyopaque = null };
 
 pub const PdfiumFns = struct {
@@ -164,21 +177,112 @@ pub fn decodeFileData(cx: *Cx, raw: []const u8) errors.Refused![]const u8 {
     return bytes;
 }
 
+/// Which pages `renderPages` renders, by 0-based index.
+pub const Selection = union(enum) {
+    /// Every page; refused when the document has more (the page budget left).
+    all_within: u32,
+    /// The first n pages; the rest are dropped (PaddleX).
+    first: u32,
+    /// These indices, ascending and distinct; one past the last page is refused.
+    list: []const u32,
+};
+/// One call's limits over the caller's running Budget; `infra` is the error kind of a renderer failure.
+pub const Caps = struct { request_pixels: u64, request_bytes: usize, page_bytes: usize, max_images: u32, infra: errors.Kind };
+/// A rendered page: its 0-based index, JPEG bytes, pixel size and the DPI it was rendered at.
+pub const Page = struct { index: u32, jpeg: []const u8, width: u32, height: u32, dpi: u32 };
+/// The rendered pages in selection order, and the document's page count.
+pub const Rendered = struct { pages: []Page, total: u32 };
+/// One render call as the in-process renderer and the POSIX worker (pdf_worker.zig) take it.
+pub const Job = struct {
+    pdf_bytes: []const u8,
+    sel: Selection,
+    caps: Caps,
+    deadline_ns: i96,
+    /// Each selected page's index, size and DPI from its geometry alone: no bitmap, no JPEG (`jpeg` empty).
+    measure: bool = false,
+};
+
+/// A rendered page's shortest and longest side in pixels and its highest DPI, from pageDimensions.
+pub const min_side: u32 = 28;
+pub const max_side: u32 = 2048;
+pub const max_dpi: u32 = 144;
+
+/// Chat caps: 32 MP, 20 MB encoded, 10 MB a page and `max_images` images (0: no cap); a renderer failure is a 400.
+pub fn chatCaps(max_images: u32) Caps {
+    return .{ .request_pixels = max_request_pixels, .request_bytes = images.max_request_bytes, .page_bytes = images.max_image_bytes, .max_images = max_images, .infra = .request };
+}
+
+/// An OCR call's caps for `pages` pages: 2048 px a side and 10 MB each, no image cap; a renderer failure is a 500.
+pub fn ocrCaps(pages: u32) Caps {
+    return .{ .request_pixels = @as(u64, pages) * max_side * max_side, .request_bytes = @as(usize, pages) * images.max_image_bytes, .page_bytes = images.max_image_bytes, .max_images = 0, .infra = .server };
+}
+
 /// Renders all pages of `pdf_bytes` within the request-wide `budget` into `image_url` parts appended to `parts`.
 pub fn expandBytes(cx: *Cx, pdf_bytes: []const u8, image_type: []const u8, max_images: u32, max_pages: u32, budget: *Budget, parts: *std.ArrayList(Value)) errors.Refused!void {
+    const sel: Selection = .{ .all_within = @max(@as(u32, 1), max_pages) -| budget.pdf_pages_used };
+    const r = try renderPages(cx, pdf_bytes, sel, chatCaps(max_images), budget, null);
+    for (r.pages) |p| try appendImageUrlPart(cx.a, parts, image_type, try makeDataUrl(cx.a, "image/jpeg", p.jpeg));
+}
+
+/// renderPages' errors: a probe's `error.Cancelled` besides the refusals; without a probe (chat) the refusals alone.
+pub fn RenderError(comptime Gone: type) type {
+    return if (Gone == @TypeOf(null)) errors.Refused else errors.Refused || error{Cancelled};
+}
+
+/// Renders `sel` within `caps` and the running `budget`, one worker a call; `gone`: null or a probe, asked once locked.
+pub fn renderPages(cx: *Cx, pdf_bytes: []const u8, sel: Selection, caps: Caps, budget: *Budget, gone: anytype) RenderError(@TypeOf(gone))!Rendered {
+    return call(cx, pdf_bytes, sel, caps, budget, gone, false);
+}
+
+/// renderPages' admission, sizes and DPI with no page rendered: each page charged with no bytes, its `jpeg` empty.
+pub fn measurePages(cx: *Cx, pdf_bytes: []const u8, sel: Selection, caps: Caps, budget: *Budget, gone: anytype) RenderError(@TypeOf(gone))!Rendered {
+    return call(cx, pdf_bytes, sel, caps, budget, gone, true);
+}
+
+fn call(cx: *Cx, pdf_bytes: []const u8, sel: Selection, caps: Caps, budget: *Budget, gone: anytype, measure: bool) RenderError(@TypeOf(gone))!Rendered {
     const jf = jpeg_out.get(cx.a) orelse return cx.fail(.unimplemented, "{s}", .{sys.optional_libraries.spec(.jpeg).message});
     const io = log.io();
     pdfium_mutex.lockUncancelable(io);
     defer pdfium_mutex.unlock(io);
+    // a client that left while queued here starts no worker with a fresh deadline ahead of live requests
+    if (@TypeOf(gone) != @TypeOf(null) and gone.check()) return error.Cancelled;
     if (pdfium_state == .unknown) pdfium_state = findPdfium(cx.a);
     const f = if (pdfium_state == .ready) pdfium_state.ready else return cx.fail(.unimplemented, "{s}", .{sys.optional_libraries.spec(.pdfium).message});
-    const deadline_ns = std.Io.Clock.awake.now(io).toNanoseconds() + render_timeout_ns;
-    var jpegs: std.ArrayList([]const u8) = .empty;
-    if (comptime sys.windows) try renderInProcess(cx, f, jf, pdf_bytes, max_images, max_pages, deadline_ns, budget, &jpegs) else {
-        const cmd = worker.argv(cx.a) catch return cx.refuse("PDF rendering worker process could not be started");
-        try worker.render(cx, cmd, pdf_bytes, max_images, max_pages, deadline_ns, budget, &jpegs);
-    }
-    for (jpegs.items) |jb| try appendImageUrlPart(cx.a, parts, image_type, try makeDataUrl(cx.a, "image/jpeg", jb));
+    const job: Job = .{ .pdf_bytes = pdf_bytes, .sel = sel, .caps = caps, .deadline_ns = std.Io.Clock.awake.now(io).toNanoseconds() + render_timeout_ns, .measure = measure };
+    var pages: std.ArrayList(Page) = .empty;
+    const total = if (comptime sys.windows) try renderInProcess(cx, f, jf, job, budget, &pages) else blk: {
+        const cmd = worker.argv(cx.a) catch return cx.fail(caps.infra, "PDF rendering worker process could not be started", .{});
+        break :blk try worker.render(cx, cmd, job, budget, &pages);
+    };
+    return .{ .pages = pages.items, .total = total };
+}
+
+/// How many pages `sel` takes from `total`, refused over the page or image budget; pdf_worker.zig checks with it too.
+pub fn admitCount(cx: *Cx, sel: Selection, caps: Caps, budget: *const Budget, total: u32) errors.Refused!u32 {
+    if (total == 0) return cx.refuse("PDF document contains no pages");
+    const count: u32 = switch (sel) {
+        .all_within => |n| if (total <= n) total else return cx.fail(.request, "a PDF may have at most {d} pages (--vision-max-images, TENSORFOLD_MAX_PDF_PAGES); this request has {d}", .{ budget.pdf_pages_used +| n, budget.pdf_pages_used +| total }),
+        .first => |n| @min(n, total),
+        .list => |l| for (l, 0..) |i, k| {
+            if (k > 0 and i <= l[k - 1]) return cx.refuse("PDF page indices must be ascending and distinct");
+            if (i >= total) return cx.fail(.request, "page {d} is out of range; the document has {d} pages", .{ i, total });
+        } else @intCast(l.len),
+    };
+    if (caps.max_images > 0 and budget.images_used +| count > caps.max_images)
+        return cx.fail(.request, "a request may hold at most {d} images (--vision-max-images); it has {d}", .{ caps.max_images, budget.images_used +| count });
+    return count;
+}
+
+/// The index of the selection's `k`-th page.
+pub fn pageAt(sel: Selection, k: u32) u32 {
+    return if (sel == .list) sel.list[k] else k;
+}
+
+/// Refuses a page of `px` pixels and `len` JPEG bytes (0 before the encode: some room must be left) over `caps`.
+pub fn checkPage(cx: *Cx, caps: Caps, budget: *const Budget, px: u64, len: usize) errors.Refused!void {
+    if (budget.pixels_used +| px > caps.request_pixels) return cx.fail(.request, "the request's images exceed the {d}-megapixel limit", .{caps.request_pixels >> 20});
+    if (len > caps.page_bytes) return cx.fail(.request, "rendered PDF page exceeds the {d} MB image byte limit", .{caps.page_bytes >> 20});
+    if (budget.encoded_bytes +| @max(len, 1) > caps.request_bytes) return cx.fail(.request, "the request's images exceed {d} MB encoded", .{caps.request_bytes >> 20});
 }
 
 const PauseState = struct {
@@ -193,85 +297,94 @@ const PauseState = struct {
     }
 };
 
+fn expired(deadline_ns: i96) bool {
+    return std.Io.Clock.awake.now(log.io()).toNanoseconds() >= deadline_ns;
+}
+
 pub const render_flags: c_int = 0x01; // FPDF_ANNOT; 0x10 is REVERSE_BYTE_ORDER, RGBA where the JPEG reads BGRA
-fn renderPageWithDeadline(cx: *Cx, f: PdfiumFns, bmp: ?*anyopaque, page: ?*anyopaque, w: c_int, h: c_int, idx: usize, deadline_ns: i96) errors.Refused!void {
+fn renderPageWithDeadline(cx: *Cx, f: PdfiumFns, job: Job, bmp: ?*anyopaque, page: ?*anyopaque, w: c_int, h: c_int, idx: usize) errors.Refused!void {
     if (f.FPDF_RenderPageBitmap_Start != null and f.FPDF_RenderPage_Continue != null and f.FPDF_RenderPage_Close != null) {
-        var state: PauseState = .{ .pause = .{ .version = 1, .NeedToPauseNow = PauseState.check }, .deadline_ns = deadline_ns };
+        var state: PauseState = .{ .pause = .{ .version = 1, .NeedToPauseNow = PauseState.check }, .deadline_ns = job.deadline_ns };
         var status = f.FPDF_RenderPageBitmap_Start.?(bmp, page, 0, 0, w, h, 0, render_flags, &state.pause);
         while (status == 1) {
-            if (state.timed_out or std.Io.Clock.awake.now(log.io()).toNanoseconds() >= deadline_ns) {
+            if (state.timed_out or expired(job.deadline_ns)) {
                 f.FPDF_RenderPage_Close.?(page);
-                return cx.refuse("PDF rendering timed out");
+                return cx.fail(job.caps.infra, "PDF rendering timed out", .{});
             }
             status = f.FPDF_RenderPage_Continue.?(page, &state.pause);
         }
         f.FPDF_RenderPage_Close.?(page);
-        if (state.timed_out or std.Io.Clock.awake.now(log.io()).toNanoseconds() >= deadline_ns) return cx.refuse("PDF rendering timed out");
+        if (state.timed_out or expired(job.deadline_ns)) return cx.fail(job.caps.infra, "PDF rendering timed out", .{});
         if (status == 3) return cx.refuse(try std.fmt.allocPrint(cx.a, "PDF page {d} could not be rendered", .{idx + 1}));
         return;
     }
     f.FPDF_RenderPageBitmap(bmp, page, 0, 0, w, h, 0, render_flags);
-    if (std.Io.Clock.awake.now(log.io()).toNanoseconds() >= deadline_ns) return cx.refuse("PDF rendering timed out");
+    if (expired(job.deadline_ns)) return cx.fail(job.caps.infra, "PDF rendering timed out", .{});
 }
 
-pub fn renderInProcess(cx: *Cx, f: PdfiumFns, jf: jpeg_out.Fns, pdf_bytes: []const u8, max_images: u32, max_pages: u32, deadline_ns: i96, budget: *Budget, out_jpegs: *std.ArrayList([]const u8)) errors.Refused!void {
-    if (pdf_bytes.len > std.math.maxInt(c_int)) return cx.refuse("PDF exceeds the encoded byte limit");
-    if (std.Io.Clock.awake.now(log.io()).toNanoseconds() >= deadline_ns) return cx.refuse("PDF rendering timed out");
-    const doc = f.FPDF_LoadMemDocument(pdf_bytes.ptr, @intCast(pdf_bytes.len), null) orelse
+/// Renders `job` in this process (Windows, and the POSIX worker); returns the document's page count.
+pub fn renderInProcess(cx: *Cx, f: PdfiumFns, jf: jpeg_out.Fns, job: Job, budget: *Budget, out: *std.ArrayList(Page)) errors.Refused!u32 {
+    if (job.pdf_bytes.len > std.math.maxInt(c_int)) return cx.refuse("PDF exceeds the encoded byte limit");
+    if (expired(job.deadline_ns)) return cx.fail(job.caps.infra, "PDF rendering timed out", .{});
+    const doc = f.FPDF_LoadMemDocument(job.pdf_bytes.ptr, @intCast(job.pdf_bytes.len), null) orelse
         return cx.refuse("PDF document could not be opened (corrupt or password-protected)");
     defer f.FPDF_CloseDocument(doc);
-    const total_pages = f.FPDF_GetPageCount(doc);
-    if (total_pages <= 0) return cx.refuse("PDF document contains no pages");
-    const pages: u32 = @intCast(total_pages);
-    const limit: u32 = @max(@as(u32, 1), max_pages);
-    if (budget.pdf_pages_used + pages > limit)
-        return cx.refuse(try std.fmt.allocPrint(cx.a, "a PDF may have at most {d} pages (--vision-max-images, TENSORFOLD_MAX_PDF_PAGES); this request has {d}", .{ limit, budget.pdf_pages_used + pages }));
-    if (max_images > 0 and budget.images_used + pages > max_images)
-        return cx.refuse(try std.fmt.allocPrint(cx.a, "a request may hold at most {d} images (--vision-max-images); it has {d}", .{ max_images, budget.images_used + pages }));
-    for (0..pages) |idx| {
-        if (std.Io.Clock.awake.now(log.io()).toNanoseconds() >= deadline_ns) return cx.refuse("PDF rendering timed out");
+    const total: u32 = @intCast(@max(0, f.FPDF_GetPageCount(doc)));
+    const count = try admitCount(cx, job.sel, job.caps, budget, total);
+    for (0..count) |k| {
+        const idx = pageAt(job.sel, @intCast(k));
+        if (expired(job.deadline_ns)) return cx.fail(job.caps.infra, "PDF rendering timed out", .{});
         const page = f.FPDF_LoadPage(doc, @intCast(idx)) orelse
             return cx.refuse(try std.fmt.allocPrint(cx.a, "PDF page {d} could not be rendered", .{idx + 1}));
         defer f.FPDF_ClosePage(page);
         const dims = pageDimensions(f.FPDF_GetPageWidthF(page), f.FPDF_GetPageHeightF(page));
-        const page_pixels = @as(u64, @intCast(dims[0])) * @as(u64, @intCast(dims[1]));
-        if (budget.pixels_used + page_pixels > max_request_pixels) return cx.refuse("the request's images exceed the 32-megapixel limit");
-        if (budget.encoded_bytes >= images.max_request_bytes) return cx.refuse("the request's images exceed 20 MB encoded");
-        const bmp = f.FPDFBitmap_Create(dims[0], dims[1], 0) orelse return error.OutOfMemory;
+        const page_pixels = @as(u64, @intCast(dims.w)) * @as(u64, @intCast(dims.h));
+        try checkPage(cx, job.caps, budget, page_pixels, 0);
+        if (job.measure) {
+            // the parent's deadline guards the POSIX worker; in process, a load past the deadline must not pass
+            if (expired(job.deadline_ns)) return cx.fail(job.caps.infra, "PDF rendering timed out", .{});
+            budget.add(page_pixels, 0);
+            try out.append(cx.a, .{ .index = idx, .jpeg = &.{}, .width = @intCast(dims.w), .height = @intCast(dims.h), .dpi = pageDpi(dims) });
+            continue;
+        }
+        const bmp = f.FPDFBitmap_Create(dims.w, dims.h, 0) orelse return error.OutOfMemory;
         defer f.FPDFBitmap_Destroy(bmp);
         const stride = f.FPDFBitmap_GetStride(bmp);
         const buf_ptr = f.FPDFBitmap_GetBuffer(bmp) orelse return error.OutOfMemory;
-        if (stride < dims[0] * 4) return cx.refuse("PDF page bitmap has invalid stride");
+        if (stride < dims.w * 4) return cx.refuse("PDF page bitmap has invalid stride");
         const bgra: [*]u8 = @ptrCast(buf_ptr);
-        const total_bytes = @as(usize, @intCast(stride)) * @as(usize, @intCast(dims[1]));
+        const total_bytes = @as(usize, @intCast(stride)) * @as(usize, @intCast(dims.h));
         @memset(bgra[0..total_bytes], 0xFF);
-        try renderPageWithDeadline(cx, f, bmp, page, dims[0], dims[1], idx, deadline_ns);
-        const jpeg_bytes = jpeg_out.encodeBgra(cx.a, jf, bgra[0..total_bytes], @intCast(dims[0]), @intCast(dims[1]), @intCast(stride)) catch |err| switch (err) {
+        try renderPageWithDeadline(cx, f, job, bmp, page, dims.w, dims.h, idx);
+        const jpeg_bytes = jpeg_out.encodeBgra(cx.a, jf, bgra[0..total_bytes], @intCast(dims.w), @intCast(dims.h), @intCast(stride)) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.EncodeFailed => return cx.refuse("rendered PDF page could not be encoded as JPEG"),
         };
-        if (jpeg_bytes.len > images.max_image_bytes) return cx.refuse("rendered PDF page exceeds the 10 MB image byte limit");
-        if (budget.encoded_bytes + jpeg_bytes.len > images.max_request_bytes) return cx.refuse("the request's images exceed 20 MB encoded");
-        budget.pdf_pages_used += 1;
-        budget.images_used += 1;
-        budget.pixels_used += page_pixels;
-        budget.encoded_bytes += jpeg_bytes.len;
-        try out_jpegs.append(cx.a, jpeg_bytes);
+        try checkPage(cx, job.caps, budget, page_pixels, jpeg_bytes.len);
+        budget.add(page_pixels, jpeg_bytes.len);
+        try out.append(cx.a, .{ .index = idx, .jpeg = jpeg_bytes, .width = @intCast(dims.w), .height = @intCast(dims.h), .dpi = pageDpi(dims) });
     }
+    return total;
 }
 
-fn pageDimensions(pw_raw: f32, ph_raw: f32) [2]c_int {
+const Dims = struct { w: c_int, h: c_int, scale: f32 };
+/// round(72 x scale), at least 1: a huge page's scale can round to 0 DPI.
+fn pageDpi(dims: Dims) u32 {
+    return @max(1, @as(u32, @intFromFloat(@round(72.0 * dims.scale))));
+}
+
+fn pageDimensions(pw_raw: f32, ph_raw: f32) Dims {
     const pw: f32 = if (std.math.isFinite(pw_raw) and pw_raw > 1.0) pw_raw else 595.0;
     const ph: f32 = if (std.math.isFinite(ph_raw) and ph_raw > 1.0) ph_raw else 842.0;
-    var scale: f32 = 2.0; // 144 DPI baseline
-    const max_side: f32 = 2048.0;
+    var scale: f32 = @as(f32, @floatFromInt(max_dpi)) / 72.0; // 144 DPI baseline
+    const side: f32 = @floatFromInt(max_side);
     const max_area: f32 = 3_600_000.0;
-    if (pw * scale > max_side) scale = max_side / pw;
-    if (ph * scale > max_side) scale = max_side / ph;
+    if (pw * scale > side) scale = side / pw;
+    if (ph * scale > side) scale = side / ph;
     if ((pw * scale) * (ph * scale) > max_area) scale = @sqrt(max_area / (pw * ph));
-    const w: c_int = @max(28, @min(4096, @as(c_int, @intFromFloat(@round(pw * scale)))));
-    const h: c_int = @max(28, @min(4096, @as(c_int, @intFromFloat(@round(ph * scale)))));
-    return .{ w, h };
+    const w: c_int = @max(min_side, @min(4096, @as(c_int, @intFromFloat(@round(pw * scale)))));
+    const h: c_int = @max(min_side, @min(4096, @as(c_int, @intFromFloat(@round(ph * scale)))));
+    return .{ .w = w, .h = h, .scale = scale };
 }
 
 /// The width and height a baseline or progressive JPEG's frame header names, or null when it has none.
@@ -332,8 +445,118 @@ test "decodeFileData and parseChildReply validate untrusted input and recompute 
     try std.testing.expect(std.mem.indexOf(u8, url_cx.message, "URLs are not accepted") != null);
     var bad_reply_cx: Cx = .{ .a = a };
     var budget: Budget = .{};
-    var jpegs: std.ArrayList([]const u8) = .empty;
-    try std.testing.expectError(error.Refused, worker.parseChildReply(&bad_reply_cx, &.{ 1, 0xFF, 3, 0, 0, 0, 'b', 'a', 'd' }, 4, 4, &budget, &jpegs));
+    var pages: std.ArrayList(Page) = .empty;
+    const reply = [_]u8{ 1, 0, 3, 0, 0, 0, 'b', 'a', 'd' };
+    try std.testing.expectError(error.Refused, worker.parseChildReply(&bad_reply_cx, &reply, .{ .all_within = 4 }, false, chatCaps(4), &budget, &pages));
     try std.testing.expectEqual(errors.Kind.request, bad_reply_cx.kind);
     try std.testing.expectEqualStrings("bad", bad_reply_cx.message);
+}
+
+/// Renders `sel` of the two-page fixture in this process by `timeout_ns`; skips without PDFium or libjpeg-turbo.
+fn renderFixture(cx: *Cx, sel: Selection, caps: Caps, budget: *Budget, timeout_ns: i96) !Rendered {
+    const jf = jpeg_out.get(cx.a) orelse return error.SkipZigTest;
+    const f = jpeg_out.loadDynLib(PdfiumFns, .pdfium, cx.a) orelse return error.SkipZigTest;
+    f.FPDF_InitLibrary(); // a test runner cannot be the worker (pdf_worker_test.zig renders through it)
+    var pages: std.ArrayList(Page) = .empty;
+    const job: Job = .{ .pdf_bytes = minimal_two_page_pdf, .sel = sel, .caps = caps, .deadline_ns = std.Io.Clock.awake.now(log.io()).toNanoseconds() + timeout_ns };
+    const total = try renderInProcess(cx, f, jf, job, budget, &pages);
+    return .{ .pages = pages.items, .total = total };
+}
+
+test "pdf pages: a list renders only its pages, with their indices, size and DPI" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cx: Cx = .{ .a = a };
+    var budget: Budget = .{};
+    const r = try renderFixture(&cx, .{ .list = &.{1} }, ocrCaps(16), &budget, render_timeout_ns);
+    try std.testing.expectEqual(@as(u32, 2), r.total);
+    try std.testing.expectEqual(@as(usize, 1), r.pages.len);
+    const p = r.pages[0];
+    try std.testing.expectEqual(Page{ .index = 1, .jpeg = p.jpeg, .width = 400, .height = 400, .dpi = 144 }, p);
+    try std.testing.expectEqual([2]u32{ 400, 400 }, jpegSize(p.jpeg).?);
+    try std.testing.expectEqual(Budget{ .images_used = 1, .pdf_pages_used = 1, .encoded_bytes = p.jpeg.len, .pixels_used = 400 * 400 }, budget);
+    var out_cx: Cx = .{ .a = a };
+    try std.testing.expectError(error.Refused, renderFixture(&out_cx, .{ .list = &.{ 0, 2 } }, ocrCaps(16), &budget, render_timeout_ns));
+    try std.testing.expectEqualStrings("page 2 is out of range; the document has 2 pages", out_cx.message);
+    try std.testing.expectEqual(errors.Kind.request, out_cx.kind);
+}
+
+test "pdf pages: first(1) renders page 0 and reports the document's two pages" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var cx: Cx = .{ .a = arena.allocator() };
+    var budget: Budget = .{};
+    const r = try renderFixture(&cx, .{ .first = 1 }, chatCaps(4), &budget, render_timeout_ns);
+    try std.testing.expectEqual(@as(u32, 2), r.total);
+    try std.testing.expectEqual(@as(usize, 1), r.pages.len);
+    try std.testing.expectEqual(@as(u32, 0), r.pages[0].index);
+    try std.testing.expectEqual(@as(u32, 1), budget.pdf_pages_used);
+}
+
+test "pdf pages: a renderer deadline is a server error under OCR caps and a request error under chat caps" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_]Caps{ ocrCaps(16), chatCaps(4) }) |caps| {
+        var cx: Cx = .{ .a = arena.allocator() };
+        var budget: Budget = .{};
+        if (renderFixture(&cx, .{ .all_within = 16 }, caps, &budget, 0)) |_| return error.TestUnexpectedResult else |err| if (err != error.Refused) return err;
+        try std.testing.expectEqual(caps.infra, cx.kind);
+        try std.testing.expectEqualStrings("PDF rendering timed out", cx.message);
+        try std.testing.expectEqual(Budget{}, budget);
+    }
+}
+
+test "pdf pages: a huge page fits 2048 px a side and keeps a DPI of at least 1" {
+    const dims = pageDimensions(400_000, 200_000);
+    try std.testing.expectEqual(@as(c_int, 2048), dims.w);
+    try std.testing.expectEqual(@as(c_int, 1024), dims.h);
+    try std.testing.expectEqual(@as(u32, 0), @as(u32, @intFromFloat(@round(72.0 * dims.scale))));
+    try std.testing.expectEqual(@as(u32, 1), pageDpi(dims));
+    try std.testing.expectEqual(max_dpi, pageDpi(pageDimensions(200, 200)));
+}
+
+/// A cancellation probe that counts its calls, says whether the renderer was held then, and reports `left`.
+const Probe = struct {
+    left: bool,
+    calls: u32 = 0,
+    held: bool = false,
+    pub fn check(p: *Probe) bool {
+        p.calls += 1;
+        p.held = !pdfium_mutex.tryLock();
+        if (!p.held) pdfium_mutex.unlock(log.io());
+        return p.left;
+    }
+};
+
+test "pdf pages: a client that left while queued for the renderer gets Cancelled and starts no worker" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest; // Windows renders in process, with no worker to refuse
+    log.init(std.testing.io, false);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    if (jpeg_out.get(a) == null) return error.SkipZigTest; // without libjpeg-turbo the call refuses before the lock
+    // a worker start would refuse with "could not be started", never Cancelled
+    const saved = worker.server_exe;
+    defer worker.server_exe = saved;
+    worker.server_exe = "/nonexistent/tensorfold-native";
+    var budget: Budget = .{};
+    var cx: Cx = .{ .a = a };
+    var left: Probe = .{ .left = true };
+    try std.testing.expectError(error.Cancelled, renderPages(&cx, minimal_two_page_pdf, .{ .all_within = 16 }, ocrCaps(16), &budget, &left));
+    try std.testing.expectEqual(@as(u32, 1), left.calls);
+    try std.testing.expect(left.held); // asked with the renderer held: after the wait, before any worker
+    try std.testing.expectEqual(Budget{}, budget);
+    try std.testing.expectEqualStrings("", cx.message);
+    // a client still there, and chat's null probe (whose error set stays Refused), take the same path past the check
+    comptime std.debug.assert(RenderError(@TypeOf(null)) == errors.Refused);
+    var here: Probe = .{ .left = false };
+    var here_cx: Cx = .{ .a = a };
+    var chat_cx: Cx = .{ .a = a };
+    try std.testing.expectError(error.Refused, renderPages(&here_cx, minimal_two_page_pdf, .{ .all_within = 16 }, chatCaps(4), &budget, &here));
+    try std.testing.expectError(error.Refused, renderPages(&chat_cx, minimal_two_page_pdf, .{ .all_within = 16 }, chatCaps(4), &budget, null));
+    try std.testing.expectEqual(@as(u32, 1), here.calls);
+    try std.testing.expectEqualStrings(chat_cx.message, here_cx.message);
+    try std.testing.expectEqual(chat_cx.kind, here_cx.kind);
+    try std.testing.expectEqual(Budget{}, budget);
 }
