@@ -1,0 +1,13 @@
+{
+  "text": "[{\"bbox\": [22, 23, 551, 55], \"category\": \"Text\", \"text\": \"TensorFold reads one line of text.\"}]",
+  "original": [
+    960,
+    96
+  ],
+  "frame": [
+    952,
+    84
+  ],
+  "source": "dots_mocr_reference.py oracle on one-line.png (README), --max-new-tokens 4096: ended by EOS after 41 tokens",
+  "prompt_sha256": "16ff71ac5d218f35e5b3db41240b6e70741498bc099db3fa922ce1ff972e3b2f"
+}
