@@ -10,7 +10,7 @@ const rig_ = @import("rig.zig");
 const limits = contract.limits;
 const registry = contract.registry;
 
-/// A registered pipeline as built here: its declaration, function, this GPU's source and the pre-M5 source.
+/// A registered pipeline's declaration, function, source here and pre-M5 source (empty: the loader has none).
 pub const Launch = struct { decl: limits.MetalLaunch, function: []const u8, here: []const u8, pre_m5: []const u8 };
 
 /// The pre-M5 text of a source that includes nax.h (frags.source's branch for GPUs without tensor units).
@@ -28,6 +28,13 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
 /// Walk the production branches without allocating source text or using a device.
 pub fn requireMapped(d: limits.MetalLaunch) !void {
     _ = try resolve(undefined, undefined, d, false);
+}
+
+/// Only launches the loader can build on this device enter the limits compiler; declarations are checked first.
+pub fn supported(device: mtl.Device, d: limits.MetalLaunch) bool {
+    if (std.mem.startsWith(u8, d.name, "lfm2 masked prompt "))
+        return @import("metal_support.zig").tensor(tf.lfm2_moe.source.optionalAvailable(device), d.name);
+    return !std.mem.startsWith(u8, d.name, "qwen27 q8 ") or @import("metal_support.zig").tensor(device.tensorUnits(), d.name);
 }
 
 fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comptime assemble: bool) !Launch {
@@ -144,9 +151,8 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
     if (try @import("metal_dsv41_limits.zig").launchOf(a, device, d, fun, assemble)) |l| return l;
     if (std.mem.startsWith(u8, d.name, "lfm2 masked prompt ")) {
         if (!assemble) return undefined;
-        const raw = sources.lfm2_prompt_masked.source;
-        const body = try tf.frags.source(device, a, raw);
-        return .{ .decl = d, .function = fun, .here = try std.mem.concat(a, u8, &.{ sources.lfm2, "\n", body }), .pre_m5 = try preM5(a, sources.lfm2, raw) };
+        const body = try tf.lfm2_moe.source.prompt(device, a, true);
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = "" };
     }
     if (std.mem.startsWith(u8, d.name, "metal lfm2 ")) {
         if (!assemble) return undefined;
@@ -366,7 +372,7 @@ pub fn gate(a: std.mem.Allocator, io: std.Io, device: mtl.Device, offline: ?[]co
     for (registry.all_metal) |d| {
         if (only) |needle| if (std.mem.indexOf(u8, d.name, needle) == null) continue;
         try requireMapped(d);
-        if (std.mem.startsWith(u8, d.name, "qwen27 q8 ") and !@import("metal_support.zig").tensor(device.tensorUnits(), d.name)) continue;
+        if (!supported(device, d)) continue;
         try list.append(a, d);
     }
     var n = try registry.checkMetal(a, list.items, false);
