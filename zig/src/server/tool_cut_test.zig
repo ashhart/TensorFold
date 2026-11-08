@@ -91,6 +91,26 @@ test "a cut GLM call keeps the one-call policy, and one not yet named or not off
     try expectGlmCut(unoffered, 0, "", unoffered, "");
 }
 
+test "a JSON call max_tokens cuts is the whole reply's tool call, cut, as an XML call is" {
+    const named = "<tool_call>\n{\"name\": \"write_file\", \"arguments\": ";
+    const args = "{\"path\": \"notes.txt\", \"content\": \"The history of";
+    try expectCutBefore(" the bicycle\"}}\n</tool_call>", named ++ args, 1, args, "", "");
+    try expectCutBefore(" the bicycle\"}}\n</tool_call>", "Writing it.\n" ++ named ++ args, 1, args, "Writing it.", "");
+    // a whole call first: both calls, the second cut
+    const first = "<tool_call>\n{\"name\": \"write_file\", \"arguments\": {\"path\": \"a.txt\"}}\n</tool_call>\n";
+    try expectCutBefore(" the bicycle\"}}\n</tool_call>", first ++ named ++ args, 2, "{\"path\":\"a.txt\"}" ++ args, "", "");
+    // arguments whole, the envelope not yet closed
+    try expectCutBefore("\n</tool_call>", named ++ "{\"path\": \"a.txt\"}}", 1, "{\"path\": \"a.txt\"}", "", "");
+}
+
+test "a cut JSON call keeps the one-call policy, and one not yet named or not offered stays text" {
+    const cut = "Writing it.\n<tool_call>\n{\"name\": \"write_file\", \"arguments\": {\"path\": \"no";
+    try expectCutBefore("tes.txt\"}}\n</tool_call>", cut, 0, "", null, ",\"parallel_tool_calls\":false");
+    try expectCutBefore("e\": \"write_file\"}\n</tool_call>", "<tool_call>\n{\"nam", 0, "", "<tool_call>\n{\"nam", "");
+    const unoffered = "<tool_call>\n{\"name\": \"launch\", \"arguments\": {\"x\": 1";
+    try expectCutBefore("}}\n</tool_call>", unoffered, 0, "", unoffered, "");
+}
+
 test "a chunked XML cut drops only the pending framing newline" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
