@@ -12,9 +12,15 @@ pub fn parse(v: ?[]const u8, l: Limits) !usize {
     return n;
 }
 
-/// The named variable's solo rows (parse).
+/// The named variable's solo rows, read through its row of environment.zig's table (read).
 pub fn rows(name: [:0]const u8, l: Limits) !usize {
-    return parse(if (std.c.getenv(name)) |v| std.mem.span(v) else null, l);
+    return read(name, @import("sys").getenv(name), l);
+}
+
+/// `raw` as `name`'s environment.zig row reads it, blank as unset, then parse; text the row refuses is BadChunkSolo.
+pub fn read(name: []const u8, raw: ?[]const u8, l: Limits) !usize {
+    const set = @import("sys").environment.parse(name, raw) catch return error.BadChunkSolo;
+    return parse(if (set == null) null else raw, l);
 }
 
 /// Whether a stream besides `own` is past its prompt pass: its lane's `fill` field (where its pass stands) is null.

@@ -26,6 +26,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS` | Exactly `0` or `1`, checked when the CUDA backend starts; default off ([profiles](profiles.md)) |
 | `TF_HEAD_GEOMETRY` | Whole native-size nonnegative geometry count in the head benchmark |
 | `TF_ROCE_GID_INDEX` | Whole index 0 through 2147483647; unset searches for a RoCE v2 IPv4 GID |
+| `TF_GEMMA4_CHUNK_SOLO` | Gemma 4 on CUDA: a multiple of 512 from 512 through 4096; unset, empty or 512 is off. Checked when the model loads, with the family's own message |
 | `TF_PROMPT_ROWS` | Native serving: a multiple of 16 from 128 through 2048; unset keeps the chip/family default |
 | `TF_ANE_COLUMNS` | Whole u32 count; zero disables the experimental share; default zero |
 | `XPU_A8_BITS` | Exactly `4` or `8`, for the XPU quantization study; unset keeps the study's existing setting |
@@ -43,6 +44,8 @@ Pressure, prefix-wait and restore-prefetch values retain trimming of spaces and 
 Prefix-wait and restore-prefetch still require the first remaining character to be a digit.
 CUDA device/segments and the slide test hook retain their space trimming.
 Other numeric readers do not gain whitespace aliases. Empty or whitespace-only text means unset for every variable, as it did before.
+`TF_GEMMA4_CHUNK_SOLO` is the exception to "as before": its old reader refused blank text, and now reads it as off.
+The table checks only that it is a whole number; the lane core's `solo_chunk.parse` judges it against the family's grid.
 
 An explicit `--device` or `--segments` wins over its environment value, even if the ignored value is malformed.
 `--carveout` likewise enables the carveout regardless of its enable variable.

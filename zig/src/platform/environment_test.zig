@@ -3,7 +3,7 @@ const std = @import("std");
 const e = @import("environment.zig");
 const t = std.testing;
 const a = t.allocator;
-const all: e.Flags = .{ .cuda = true, .metal = true, .xpu = true, .slide = true, .hooks = true, .dsv41 = true };
+const all: e.Flags = .{ .cuda = true, .metal = true, .xpu = true, .slide = true, .hooks = true, .dsv41 = true, .gemma4 = true };
 const Env = struct {
     name: []const u8,
     raw: ?[]const u8,
@@ -59,6 +59,10 @@ const valid = [_]Case{
     .{ .name = "TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS", .raw = "0", .n = 0 },
     .{ .name = "TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS", .raw = "1", .n = 1 },
     .{ .name = "TF_ROCE_GID_INDEX", .raw = "2147483647", .n = 2147483647 },
+    .{ .name = "TF_GEMMA4_CHUNK_SOLO", .raw = "2048", .n = 2048 },
+    .{ .name = "TF_GEMMA4_CHUNK_SOLO", .raw = "0", .n = 0 },
+    .{ .name = "TF_GEMMA4_CHUNK_SOLO", .raw = "1000", .n = 1000 },
+    .{ .name = "TF_GEMMA4_CHUNK_SOLO", .raw = "8192", .n = 8192 },
     .{ .name = "TF_Q27_COPY_ROWS", .raw = "0", .n = 0 },
     .{ .name = "TF_Q27_COPY_ROWS", .raw = "48", .n = 48 },
     .{ .name = "TF_Q27_DRAFT_SLOTS", .raw = "0", .n = 0 },
