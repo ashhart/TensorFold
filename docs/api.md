@@ -526,9 +526,10 @@ default. Unknown discovery preserves the off request, labelled `off requested (u
 ends the prompt with `<｜Assistant｜></think>`), so its explicit off is never refused.
 
 On both backends, `reasoning_effort: none` asks the chat template to disable thinking; an explicit off request
-returns HTTP 400 when the template cannot honor it. Other effort values enable thinking and reach the chat
-template. The server also reads it from `chat_template_kwargs.reasoning_effort`, where vLLM's clients send it; the
-top-level field wins. An unnamed level maps to the nearest level the template names, and a tie takes
+returns HTTP 400 when the template cannot honor it. Only an off field the client sends is explicit: `--no-thinking`,
+the template's own default and the Messages route's default off never are. Other effort values enable thinking
+and reach the chat template. The server also reads it from `chat_template_kwargs.reasoning_effort`, where vLLM's
+clients send it; the top-level field wins. An unnamed level maps to the nearest level the template names, and a tie takes
 the higher one. GLM-5.3 lists `low`, `high` and `max`, so `max` stays `max`, `medium` is heard as `high`
 and `minimal` as `low`. Qwen3.8 lists `low`, `medium` and `xhigh`, so `high` and `max` are heard as `xhigh`.
 `xhigh` stays `xhigh`. GLM-5.3 renders `xhigh` and `max` as Max. A template that names no level hears `max` as
@@ -1063,8 +1064,11 @@ The Messages routes reuse the same chat handler and engine on MLX and CUDA. They
 blocks (including mid-conversation system text), `tool_use`/`tool_result`, custom tools and `tool_choice`, sampling, `stop_sequences`, `thinking`
 (disabled, enabled with `budget_tokens`, or adaptive), and `output_config` effort/JSON schema. Image support
 requires a vision-capable model served with `--vision` (natively GLM-5.3-Flash and Qwen3.8-27B on a Mac); other
-models answer image blocks with HTTP 400. Thinking is off unless enabled or adaptive. It round-trips as plaintext with an
-empty signature;
+models answer image blocks with HTTP 400. Thinking is off unless enabled or adaptive. A request without `thinking`
+renders thinking off as before and is never refused for it. Only a `thinking: {"type": "disabled"}` the client sends
+is an explicit off, which returns HTTP 400 when the template cannot honor it (see [Reasoning](#reasoning));
+`/v1/messages/count_tokens` gives the same refusal for the same body, and otherwise counts the prompt
+`/v1/messages` submits. Thinking round-trips as plaintext with an empty signature;
 `display` does not suppress it. Claude Code's `context_management` keep-all thinking directive is accepted. Mid-conversation system text stays
 in place with its system role; the model's chat template must support later system messages. Turn-scoped
 system messages, per-message output configuration and inline tool changes are unsupported.
