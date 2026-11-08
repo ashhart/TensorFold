@@ -122,8 +122,9 @@ another host made with the commands the receipt records.
 The decode attention registration runs `attn_decode` followed by `attn_merge` as one operator: bf16 query rows,
 bf16 K/V cache and a tree table to bf16 attention rows. Gate 3 requires the bytes of the upstream `1a5644892` pair,
 whose decode grid is retained in `zig/kernels/xpu/contract_attn_upstream.cl`. It covers single rows and branching
-16-row trees, 32-key slice edges, and 8,193 through 32,770 visible keys at selected root positions. The positions
-include 32,768 and 32,769 (zero-based). Its planted merge control
+trees of 2, 4, 8, 12 and 16 rows (heap-order parents; chains and other topologies are not fixtures), 32-key slice
+edges, and 8,193 through 32,770 visible keys at selected root positions. The positions include 32,768 and 32,769
+(zero-based). Its planted merge control
 drops the last non-empty slice. Gate 4 uses uniform attention with cancelling integer values; it tests the value
 and normalization sums, without separately proving the query/key dot accumulator. The default NaN rule compares
 classes with the independent float64 formula. Int8 caches and multi-stream metadata are outside this registration.
