@@ -31,6 +31,14 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_GEMMA4_CHUNK_SOLO` | Gemma 4 on CUDA: a multiple of 512 from 512 through 4096; unset, empty or 512 is off. Checked when the model loads, with the family's own message |
 | `TF_DRAMA_PREFILL_ROWS` | Drama 3 on CUDA: whole prompt rows a chunk, 1 through 1024; default 1. Checked when the checkpoint opens, with its own message |
 | `TF_DRAMA_REFERENCE_CACHE` | Drama 3 on CUDA: kept reference states, 0 (off) through 16; default 0. Checked when the checkpoint opens, with its own message |
+| `TF_GLM_HOST_CACHE` | Exactly `0` or `1`; default off (kept GLM states on the device) |
+| `TF_GLM_VISION_HOST` | Exactly `0` or `1`; default off (GLM vision weights on the device) |
+| `TF_GLM_PROF` | Exactly `0` or `1`; default off (no GLM section timing) |
+| `TF_GLM_LINK_WAIT` | Exactly `0` or `1`; default off (short GLM steps go to the other ranks unwaited) |
+| `TF_GLM_PDL` | Exactly `0` or `1`; default on (GLM matmuls use dependent launches) |
+| `TF_GLM_PROMPT_STEPS` | Exactly `0` or `1`; default on (GLM prompt passes in chunks); read on rank 0 |
+| `TF_GLM_SHARED` | Exactly `0` or `1`; default on (GLM windows share a forward); read on rank 0 |
+| `TF_GLM_DFLASH2_LOG` | Whole unsigned 64-bit count of DFlash2 rounds whose drafts are logged; default 0 |
 | `TF_PROMPT_ROWS` | Native serving: a multiple of 16 from 128 through 2048; unset keeps the chip/family default |
 | `TF_ANE_COLUMNS` | Whole u32 count; zero disables the experimental share; default zero |
 | `XPU_A8_BITS` | Exactly `4` or `8`, for the XPU quantization study; unset keeps the study's existing setting |
@@ -57,6 +65,7 @@ An explicit `--device` or `--segments` wins over its environment value, even if 
 The carveout size is checked only when the carveout is enabled, and still rounds to framebuffer rows.
 `TF_NO_TREES` retains precedence over `TF_DRAFT_NODES`.
 Backend-specific settings are checked when that backend starts; slide settings require learning to be enabled.
+The `TF_GLM_*` rows are checked when GLM's CUDA family opens, on every rank, so they never stop another family.
 Common server settings are checked before checkpoint resolution, including when no request would use them yet.
 Direct family readers also refuse malformed values when called without the server.
 
@@ -71,6 +80,8 @@ These settings retain their existing boolean policies rather than gaining new al
 - `TF_SLIDE_EDIT`, `TF_SLIDE_PROBE` and `TF_SLIDE_ROUTED` select modes by presence, even empty or `0`; probe wins over edit.
 - `TF_COOP_SPLIT` retains its first-character `0` disabling rule, `TF_NEMOTRON_TRACE` its first-character `1` trace rule,
   and `TF_SLIDE_FIT_REDUCE` its exact `tree` reduction selection. These developer switches keep their existing semantics.
+- GLM: `GLM_EHPROJ_NAX` retains its first-character `0` disabling rule, `TF_GLM_DFLASH2_PROF` enables by presence,
+  even empty or `0`, and `TF_KV_POISON` (also read by Nemotron) is on only for exact `1`.
 - The existing tool-grammar, rows-sync, log-time, memory-pressure and XPU-MTP boolean policies are unchanged.
 
 The profile registry reports selected arithmetic/experimental overrides; it does not change their parsing or defaults.

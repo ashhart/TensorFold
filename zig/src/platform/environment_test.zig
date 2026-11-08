@@ -3,7 +3,7 @@ const std = @import("std");
 const e = @import("environment.zig");
 const t = std.testing;
 const a = t.allocator;
-const all: e.Flags = .{ .cuda = true, .metal = true, .xpu = true, .slide = true, .hooks = true, .dsv41 = true, .gemma4 = true, .drama3 = true };
+const all: e.Flags = .{ .cuda = true, .metal = true, .xpu = true, .slide = true, .hooks = true, .dsv41 = true, .gemma4 = true, .drama3 = true, .glm = true };
 const Env = struct {
     name: []const u8,
     raw: ?[]const u8,
@@ -99,8 +99,8 @@ test "environment: valid forms remain raw numbers before existing consumer clamp
     }
     for (e.rules) |r| {
         for ([_][]const u8{ "", " ", "\t \n" }) |raw| try t.expectEqual(@as(?u64, null), try e.parse(r.name, raw));
-        // the DeepSeek rows are each covered, with every kept form, by deepseek_v41/env_validate_test.zig
-        if (r.scope == .dsv41) continue;
+        // the DeepSeek and GLM rows are each covered by deepseek_v41/env_validate_test.zig and glm/cuda_env_test.zig
+        if (r.scope == .dsv41 or r.scope == .glm) continue;
         var covered = false;
         for (valid) |c| if (std.mem.eql(u8, r.name, c.name)) {
             covered = true;
