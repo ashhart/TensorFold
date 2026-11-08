@@ -287,7 +287,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [fast, host, compile, hip]
+        suite: [fast, host, compile, hip, deepseek]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -303,9 +303,12 @@ jobs:
         run: |
           printf 'Runner class: %s %s\n' "$RUNNER_OS" "$RUNNER_ARCH"
           flags=()
+          limit=10m
           if [ "$SUITE" = hip ]; then flags=(-Dhip=true); fi
+          # One DeepSeek aot-needs test runs about 10 minutes on a fast core; macOS gives it 30 too.
+          if [ "$SUITE" = deepseek ]; then limit=30m; fi
           TIMEFORMAT='Host checks wall seconds: %R'
-          time zig build -Dfixed-cpu "${flags[@]}" "test-host-ci-linux-$SUITE" --test-timeout 10m
+          time zig build -Dfixed-cpu "${flags[@]}" "test-host-ci-linux-$SUITE" --test-timeout "$limit"
   host-nightly-macos:
     if: ${{ github.event_name == 'schedule' }}
     runs-on: macos-26
