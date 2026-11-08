@@ -108,6 +108,7 @@ Never leave a line blank or claim a check you did not run.
 - Comments, docstrings, file length and source history follow [lean code and review](../../CONTRIBUTING.md#lean-code-and-review).
 - Private identity, privacy and authorship follow [public identity and privacy](../../CONTRIBUTING.md#public-identity-and-privacy); check the author and committer of every outgoing commit with `git log --format='%an %ae | %cn %ce' origin/main..HEAD`.
 - Add a setting only with a production caller and a measured benefit; never turn drafts off on an advertised path.
+- Read a new setting through `platform/environment.zig`: register a rule in its `rules` table and call `read(T, name, default)`. Unset, empty or whitespace-only text keeps the default, a valid value keeps its meaning, and any other text stops the start with the name, the text and the accepted forms. Lean counts each new direct `getenv` of a `TF_*` or `TENSORFOLD_*` name.
 - Extend the existing shared cache, scheduler or operator; explain why it cannot be extended before adding a second one.
 - Kill only the processes a script started, keep normal SSH host verification, and pin and inspect external reference code before running it.
 
