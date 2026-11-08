@@ -159,7 +159,7 @@ pub fn chunk(b: *Metal, s: *lanes.Stream, f: *Fill, _: u32) !bool {
 
 /// `s` in its slot, or a free one taken: its memory ready and its held tree dropped.
 pub fn bind(b: *Metal, s: *lanes.Stream) !u32 {
-    if (std.c.getenv("TF_DIAG_SUBMIT") != null) std.log.info("q27 bind: len={d}", .{s.prompt_len});
+    if (@import("sys").environment.read(bool, "TF_DIAG_SUBMIT", false) catch false) std.log.info("q27 bind: len={d}", .{s.prompt_len});
     const slot = b.slotOf(s) orelse (free(b) orelse return error.NoFreeSlot);
     try ready(b, slot, s);
     b.dropTreeOf(slot);
