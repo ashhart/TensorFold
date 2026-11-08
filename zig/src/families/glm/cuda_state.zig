@@ -243,7 +243,7 @@ pub const Buffers = struct {
             partial_rows * HL * 4,
             4, // dummy
             @min(seg, sparse.select_rows) * np_max * 4,
-            rows * sparse.select_list * 4,
+            @max(rows * sparse.select_list * 4, if (prefill) 0 else sparse.bitsBytes(@min(seg, sparse.wide_rows), np_max)), // ls: a decode select's bit words too
             rows * sparse.select_list * 4,
             (if (prefill) rows + s.world else rows) * sparse.topk_pools * 8, // pools; a split's equal blocks end at most world - 1 rows past them
             4,
@@ -306,7 +306,7 @@ pub const Buffers = struct {
                 .qi = p[30],
                 .partials = .{ .po = p[31], .pm = p[32], .pl = p[33] },
                 .dummy = p[34],
-                .select = .{ .scores = p[35], .ls = p[36], .li = p[37], .pools = p[38], .at = p[39] },
+                .select = .{ .scores = p[35], .ls = p[36], .li = p[37], .pools = p[38], .at = p[39], .bits_rows = if (prefill) 0 else @min(seg, sparse.wide_rows) },
                 .tokens = p[40],
                 .counts = p[41],
                 .mm_part = p[42],
