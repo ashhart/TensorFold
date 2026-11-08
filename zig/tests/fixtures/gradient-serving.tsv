@@ -51,6 +51,7 @@ zig/kernels/cuda/probe.cu	c5a6ca4513311d25282866de2185a056ec9746443a13094db80de6
 zig/kernels/cuda/prompt16.cu	972fb2f601da2d64549717d27e642363243b0e2df88cfeffa81452216e160ae4	raw
 zig/kernels/cuda/qmm.cu	a55a9d00d9097c5f5bd88c8c538a0481fe13b37badd2e3faf4cdde9c86c9f93d	raw
 zig/kernels/cuda/common/qmm_frag.cuh	418dce9d64df0b8751c8ca982ae3f93c5fc54e4aecb9a8df3f0780129dcb675a	raw
+zig/kernels/cuda/common/router_tiles.cuh	aab559bf104e3f47344deaa9ae10622b6962b8a77b398f572ba974055dfafd3c	raw
 zig/kernels/cuda/qmm_group.cu	8780fd710be3ce2f04e53fa1e69eb062809d3bec6391d9bd49983d0588e374d0	raw
 zig/kernels/cuda/qmm_prefill.cu	45ab2be277c7c17e6cdc6041db45611f2554c6e88f09a295e88751b1c51be1f5	raw
 zig/kernels/cuda/qmmf.cu	af2e073a5b04317aff95bcef888750ccd9648093ed6d9efd802fabf1d47f36dd	raw	main ec76abd45 (128-row BF16 prompt tile, bytes unchanged), c3acc3466 (K32 staging, bytes unchanged)
