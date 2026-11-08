@@ -1,6 +1,7 @@
 //! Qwen3.5-class text shapes (dense or routed), layer schedule, rotary metadata and ordered checkpoint EOS ids.
 const std = @import("std");
 const layer_pattern = @import("qwen35_layers");
+const rules = @import("qwen35_rules");
 
 pub const Kind = enum { linear, attention };
 pub const max_layers = 128;
@@ -289,10 +290,7 @@ pub fn parse(gpa: std.mem.Allocator, json: []const u8, generation: ?[]const u8) 
     const experts = if (t.get("num_experts")) |v| try integer(v, true) else 0;
     if (routed != (experts != 0)) return error.NotQwenDense;
     if (try flag(root, "tie_word_embeddings") or try flag(t, "tie_word_embeddings")) return error.TiedEmbeddingHead;
-    if (t.get("attn_output_gate")) |v| if (v != .bool or !v.bool) return error.UnsupportedAttentionGate;
-    inline for (.{ .{ "hidden_act", "silu" }, .{ "output_gate_type", "swish" }, .{ "linear_attn_state_dtype", "float32" } }) |entry| {
-        if (t.get(entry[0])) |v| if (v != .string or !std.mem.eql(u8, v.string, entry[1])) return error.UnsupportedActivation;
-    }
+    try rules.check(t, .metal27);
     const heads = try required(t, "num_attention_heads");
     const hidden = try required(t, "hidden_size");
     const head_dim = if (t.get("head_dim")) |v| blk: {

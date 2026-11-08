@@ -2,8 +2,9 @@
 
 const std = @import("std");
 const layer_pattern = @import("qwen35_layers");
+const rules = @import("qwen35_rules");
 
-pub const Error = error{ UnsupportedActivation, UnsupportedAttentionGate, UnsupportedStateType, BadEos, TooManyEos, MissingEos, InvalidConfig, InvalidRotary } || layer_pattern.Error;
+pub const Error = error{ BadEos, TooManyEos, MissingEos, InvalidConfig, InvalidRotary } || rules.Error || layer_pattern.Error;
 
 /// The most end ids a checkpoint may declare across config.json and generation_config.json.
 pub const max_eos = 8;
@@ -53,14 +54,7 @@ pub fn maxPosition(tower: std.json.ObjectMap) Error!usize {
 
 /// Refuses a tower whose activation, attention gate, attention bias or recurrent state type the kernels do not compute.
 pub fn computes(tower: std.json.ObjectMap) Error!void {
-    if (tower.get("hidden_act")) |v| if (!isString(v, "silu")) return error.UnsupportedActivation;
-    // "swish" is the gate the kernels apply, att * sigmoid(gate), as the qwen27 family reads it
-    if (tower.get("output_gate_type")) |v| if (!isString(v, "swish")) return error.UnsupportedAttentionGate;
-    if (tower.get("attn_output_gate")) |v| if (!isFlag(v, true)) return error.UnsupportedAttentionGate;
-    if (tower.get("attention_bias")) |v| if (!isFlag(v, false)) return error.UnsupportedAttentionGate;
-    inline for (.{ "linear_attn_state_dtype", "mamba_ssm_dtype" }) |key| {
-        if (tower.get(key)) |v| if (!isString(v, "float32")) return error.UnsupportedStateType;
-    }
+    return rules.check(tower, .hip);
 }
 
 /// The sizes the kernels index with 32-bit counts and the host multiplies: every product must fit.
