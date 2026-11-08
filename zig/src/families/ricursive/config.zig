@@ -59,6 +59,8 @@ pub const Config = struct {
     context: usize,
     /// The MLP's projections are the publisher's NVFP4 (ModelOpt: E2M1 in blocks of 16, E4M3 scales, an fp32 global).
     fp4_mlp: bool = false,
+    /// An ExLlamaV3 pack (quant_method exl3): every projection and the head as EXL3 trellises, the rest bf16.
+    exl3: bool = false,
     /// A global layer: full attention without RoPE; the others slide with RoPE.
     global: [max_layers]bool = @splat(false),
     eos: [max_eos]u32 = @splat(0),
@@ -195,6 +197,11 @@ fn layerKinds(root: std.json.ObjectMap, c: *Config) Error!void {
     }
 }
 
+/// An ExLlamaV3 pack's quantization_config: quant_method exl3 (its tensors are checked as they load).
+fn exl3Pack(q: std.json.Value) bool {
+    return q == .object and isString(q.object.get("quant_method"), "exl3");
+}
+
 /// ModelOpt NVFP4, groups of 16, no cache scheme, ignoring exactly the embeddings, head and every layer's attention.
 fn nvfp4Mlp(q: std.json.Value, layers: usize) Error!bool {
     const o = try object(q);
@@ -257,7 +264,9 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) Error!Config {
         .clamp = @floatCast(try number(root.get("ffn_clamp_threshold") orelse return error.BadRicursiveConfig)),
         .context = 0,
     };
-    if (root.get("quantization_config")) |q| c.fp4_mlp = try nvfp4Mlp(q, c.layers);
+    if (root.get("quantization_config")) |q| {
+        if (exl3Pack(q)) c.exl3 = true else c.fp4_mlp = try nvfp4Mlp(q, c.layers);
+    }
     if (try size(root, "head_dim") != head_dim) return error.UnsupportedRicursiveGeometry;
     if (c.layers > max_layers or c.heads % c.kv_heads != 0 or c.group() > max_group) return error.UnsupportedRicursiveGeometry;
     // the tensor-unit GEMM steps k by 256s; the row kernels read eight values a lane over 256
@@ -335,6 +344,16 @@ test "ricursive config: the NVFP4 release's scheme is admitted, a cache scheme o
     const attention = try withNvfp4(gpa, "", 41);
     defer gpa.free(attention);
     try std.testing.expectError(error.UnsupportedRicursivePrecision, parse(gpa, attention));
+}
+
+test "ricursive config: an EXL3 pack is admitted as exl3, not as NVFP4" {
+    const gpa = std.testing.allocator;
+    const q = "\"model_type\": \"ricursive\", \"quantization_config\": {\"quant_method\": \"exl3\", \"bits\": 5.0, \"head_bits\": 8}";
+    const bytes = try std.mem.replaceOwned(u8, gpa, fixture, "\"model_type\": \"ricursive\"", q);
+    defer gpa.free(bytes);
+    const c = try parse(gpa, bytes);
+    try std.testing.expect(c.exl3 and !c.fp4_mlp);
+    try std.testing.expectEqualStrings("Ripple-65B-Preview", (try c.qualification()).name);
 }
 
 test "ricursive config: another layer pattern with the release's geometry is not qualified" {

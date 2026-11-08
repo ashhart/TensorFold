@@ -6,6 +6,7 @@ const glue = @import("cuda_kernels.zig");
 const rp = @import("cuda_prep.zig");
 const attn = @import("cuda_attn.zig");
 const wts = @import("cuda_weights.zig");
+const x3 = @import("cuda_exl3.zig");
 
 const wa = cuda.window_attention;
 const Stream = cuda.Stream;
@@ -181,14 +182,16 @@ pub const Model = struct {
     n_taps: usize = 0,
     /// Every slot's tap ring, [slots][tap_rows][n_taps][hidden] bf16.
     tap: ?DeviceBuffer = null,
+    /// An EXL3 pack's projections: main's dense EXL3 kernels and their scratch, grown at init (null: the release).
+    dense: ?*cuda.exl3.Dense = null,
 
     /// The lane's slice partials of every projection and the head at up to `rows` rows (they reduce below fused_rows).
     fn partBytes(w: *const wts.Weights, k: *const Kernels, rows: usize) usize {
         var most: usize = 0;
         for ([_]usize{ rows, @min(rows, cuda.qmmf.fused_rows - 1) }) |m| {
-            most = @max(most, k.lane.partBytes(m, w.head));
-            for (w.layers) |l| for ([_]Weight{ l.qkg, l.v, l.o, l.gate, l.up, l.down }) |x| {
-                most = @max(most, k.lane.partBytes(m, x));
+            if (w.head == .lane) most = @max(most, k.lane.partBytes(m, w.head.lane));
+            for (w.layers) |l| for ([_]x3.Proj{ x3.first(l.qkg), l.v, l.o, l.gate, l.up, l.down }) |x| {
+                if (x == .lane) most = @max(most, k.lane.partBytes(m, x.lane));
             };
         }
         return most;
@@ -199,7 +202,7 @@ pub const Model = struct {
         const c = w.config;
         var b: Bufs = .{};
         const scratch = place(bufSizes(c, partBytes(w, k, round_rows), round_rows, pagesOf(context)), 0, &b);
-        return scratch + Arena.bytes(c, context, slots) + attn.GlobalDecode.bytes(round_rows, context);
+        return scratch + Arena.bytes(c, context, slots) + attn.GlobalDecode.bytes(round_rows, context) + x3.denseBytes(w.head, w.layers);
     }
 
     /// Scratch for `round_rows`-row rounds and `slots` slots of `context` positions; refuses a shape no ring holds.
@@ -231,12 +234,13 @@ pub const Model = struct {
             .at = try gpa.alloc(usize, round_rows),
             .ctab = try gpa.alloc(i32, round_rows * arena.per_slot),
         };
-        return .{ .gpa = gpa, .d = d, .s = s, .w = w, .k = k, .c = c, .context = context, .round_rows = round_rows, .scratch = scratch, .b = b, .gd = gd, .arena = arena, .host = h, .execs = execs };
+        return .{ .gpa = gpa, .d = d, .s = s, .w = w, .k = k, .c = c, .context = context, .round_rows = round_rows, .scratch = scratch, .b = b, .gd = gd, .arena = arena, .host = h, .execs = execs, .dense = if (!c.exl3) null else try x3.open(gpa, d, s, w.head, w.layers) };
     }
 
     pub fn deinit(m: *Model) void {
         m.dropGraphs();
         if (m.tap) |*ring| ring.free();
+        if (m.dense) |de| x3.close(m.gpa, de);
         m.gpa.free(m.execs);
         m.gpa.free(m.host.ctab);
         m.gpa.free(m.host.at);
@@ -301,7 +305,12 @@ pub const Model = struct {
         }
     }
 
-    fn linear(m: *const Model, x: u64, ldx: usize, n: usize, w: Weight, y: u64, mode: Mode) !void {
+    /// x [n, k] into y [n, w's outputs], bf16: the lane or prompt matmul, or an EXL3 pack's dense kernel (ldx = k).
+    fn linear(m: *const Model, x: u64, ldx: usize, n: usize, p: x3.Proj, y: u64, mode: Mode) !void {
+        const w = switch (p) {
+            .lane => |w| w,
+            .exl3 => |w| return if (mode == .decode) m.dense.?.decode(m.s, w, x, .bf16, n, y, .bf16) else m.dense.?.prompt(m.s, w, x, .bf16, n, y, .bf16),
+        };
         if (mode == .decode) return m.k.lane.matmulOut(m.s, x, ldx, n, w, y, .bf16, m.b.part);
         return m.k.prompt.matmulOut(m.s, x, ldx, n, w, y, .bf16);
     }
@@ -333,10 +342,10 @@ pub const Model = struct {
         const k = m.k;
         const qw = c.queryWidth();
         const kvw = c.kvWidth();
-        const wq = wts.qkgWidth(c);
         const scale = c.scale();
-        const xq = rp.Rows.of(b.qkg, wq);
-        const xk = rp.Rows.of(b.qkg + qw * 2, wq);
+        const r = x3.qkgRows(l.qkg, b.qkg, n, qw, kvw);
+        const xq = rp.Rows.of(r.q, r.q_ld);
+        const xk = rp.Rows.of(r.k, r.k_ld);
         const xv = rp.Rows.of(b.v, kvw);
         switch (pass) {
             .chunk => |ch| {
@@ -367,18 +376,20 @@ pub const Model = struct {
         const h = c.hidden;
         const qw = c.queryWidth();
         const kvw = c.kvWidth();
-        const wq = wts.qkgWidth(c);
         const mode: Mode = if (pass == .chunk) .prompt else .decode;
         const ls = m.w.layers;
         try glue.embed(&k.glue, s, b.ids, m.w.embed, b.resid, b.v0, n, h, c.embed_scale);
         try glue.addNorm(&k.glue, s, .{ .resid = b.resid, .next = ls[0].input_norm, .v0 = b.v0, .x = b.x, .vx = b.vx, .rows = n, .width = h, .eps = c.eps, .blend = ls[0].blend });
         for (ls, 0..) |*l, i| {
-            try m.linear(b.x, h, n, l.qkg, b.qkg, mode);
+            const r = x3.qkgRows(l.qkg, b.qkg, n, qw, kvw);
+            switch (l.qkg) {
+                .lane => |w| try m.linear(b.x, h, n, .{ .lane = w }, b.qkg, mode),
+                .exl3 => |ws| for (ws, [_]u64{ r.q, r.k, r.g }) |w, y| try m.linear(b.x, h, n, .{ .exl3 = w }, y, mode),
+            }
             try m.linear(b.vx, h, n, l.v, b.v, mode);
             try m.attention(l, i, n, pass);
-            const g_at = b.qkg + (qw + kvw) * 2;
-            const g = if (n == 1) g_at else blk: { // tf_rc_gate reads G rows contiguous
-                try m.copy2D(g_at, wq * 2, b.g, qw * 2, qw * 2, n);
+            const g = if (n == 1 or r.g_ld == qw) r.g else blk: { // tf_rc_gate reads G rows contiguous
+                try m.copy2D(r.g, r.g_ld * 2, b.g, qw * 2, qw * 2, n);
                 break :blk b.g;
             };
             try glue.gate(&k.glue, s, b.att, g, n, qw);
@@ -475,20 +486,25 @@ pub const Model = struct {
     /// The last forward's row `row` through the bf16 head (the lane matmul) into `logits` [V].
     pub fn head(m: *const Model, row: usize) !void {
         const h = m.c.hidden;
-        try m.k.lane.matmulOut(m.s, m.b.x + row * h * 2, h, 1, m.w.head, m.b.logits, .bf16, m.b.part);
+        try m.linear(m.b.x + row * h * 2, h, 1, m.w.head, m.b.logits, .decode);
+    }
+
+    /// `rows` rows of x through an EXL3 pack's head into y (the drafter's candidates read the target's head).
+    pub fn headExl3(m: *const Model, x: u64, rows: usize, y: u64) !void {
+        return m.dense.?.decode(m.s, m.w.head.exl3, x, .bf16, rows, y, .bf16);
     }
 
     /// The last forward's rows [r0, r0 + rows) (at most head_rows) through the head (the prompt matmul) into `rows`.
     pub fn headRows(m: *const Model, r0: usize, rows: usize) !void {
         if (rows == 0 or rows > head_rows) return error.ForwardRows;
         const h = m.c.hidden;
-        try m.k.prompt.matmulOut(m.s, m.b.x + r0 * h * 2, h, rows, m.w.head, m.b.rows, .bf16);
+        try m.linear(m.b.x + r0 * h * 2, h, rows, m.w.head, m.b.rows, .prompt);
     }
 
     /// The last round's rows [0, rows) through the head (the lane matmul, as head's) into `rows` [rows, V].
     pub fn rowLogits(m: *const Model, rows: usize) !void {
         if (rows == 0 or rows > m.round_rows) return error.ForwardRows;
-        try m.k.lane.matmulOut(m.s, m.b.x, m.c.hidden, rows, m.w.head, m.b.rows, .bf16, m.b.part);
+        try m.linear(m.b.x, m.c.hidden, rows, m.w.head, m.b.rows, .decode);
     }
 
     /// The greedy draw of `logits` into `out` (int32).
