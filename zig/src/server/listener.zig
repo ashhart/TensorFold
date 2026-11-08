@@ -37,8 +37,10 @@ pub const Listener = struct {
         return .{ .fd = fd };
     }
 
+    pub const UnixError = error{ Unsupported, NameTooLong, NoSpaceLeft, NoParentDirectory, ParentWritableByOthers, SocketFailed, PathExists, AccessDenied, BindFailed, ListenFailed };
+
     /// An owner-only Unix socket; refuses an existing path and a parent others can write to unless sticky.
-    pub fn openUnix(path: [:0]const u8) !Listener {
+    pub fn openUnix(path: [:0]const u8) UnixError!Listener {
         if (comptime platform.windows) return error.Unsupported;
         const c = platform.c;
         var addr: c.sockaddr.un = .{ .path = undefined };
