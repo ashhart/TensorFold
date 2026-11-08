@@ -38,6 +38,7 @@ pub const experts_rows: []const u8 = if (available) &Blob("fatbin_experts_rows")
 pub const prefill_attention: []const u8 = if (available) &Blob("fatbin_prefill_attention").bytes else &.{};
 pub const lfm2: []const u8 = if (available) &Blob("fatbin_lfm2").bytes else &.{};
 pub const lfm2_moe: []const u8 = if (available) &Blob("fatbin_lfm2_moe").bytes else &.{};
+pub const dots_mocr: []const u8 = if (available) &Blob("fatbin_dots_mocr").bytes else &.{};
 pub const vit: []const u8 = if (available) &Blob("fatbin_vit").bytes else &.{};
 pub const moss_image: []const u8 = if (available) &Blob("fatbin_moss_image").bytes else &.{};
 pub const scan_rows: []const u8 = if (available) &Blob("fatbin_scan_rows").bytes else &.{};
