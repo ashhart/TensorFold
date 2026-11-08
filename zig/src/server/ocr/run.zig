@@ -182,7 +182,7 @@ fn generate(srv: *Server, pcx: *Cx, a: Allocator, reader: api.ocr.Ocr, id: []con
     };
     const reply = chat.generate(srv, pcx, prepared, null, gone) catch |e| return chatFault(a, pcx, fault, e);
     finished(a, fault, reply.finish_reason, p.index, gone) catch |e| {
-        if (e == error.Faulted and fault.class == .unreadable) log.line("{s}: page {d}: {s}: {s}", .{ id, p.index, fault.message, reply.content });
+        if (e == error.Faulted and fault.class == .unreadable) log.line("{s}: {s}: {s}", .{ id, fault.message, reply.content }); // the message names the page
         return e;
     };
     return .{ .content = reply.content, .frame = frame };
