@@ -95,7 +95,10 @@ pub const Listener = struct {
                     const fd: posix.socket_t = @intCast(rc);
                     // A Unix peer reads as loopback; its user is checked, as not every OS enforces the mode.
                     if (l.unix_path != null) {
-                        if (peerIsOwner(fd)) return .{ .fd = fd, .peer = .{ .ip4 = .loopback(0) } };
+                        if (peerIsOwner(fd)) {
+                            nofile_logged.store(false, .release);
+                            return .{ .fd = fd, .peer = .{ .ip4 = .loopback(0) } };
+                        }
                         _ = posix.system.close(fd);
                         log.line("refused a Unix socket connection from another user", .{});
                         continue;
