@@ -220,11 +220,11 @@ pub const Host = struct {
                 continue;
             }
             if (h.closing) {
-                const left = h.gpa.dupe(*Job, h.queued.items) catch &.{};
-                h.queued.clearRetainingCapacity();
+                var left = h.queued; // taken whole, as the lane host's close does: no copy to fail and drop them
+                h.queued = .empty;
                 h.unlock();
-                for (left) |job| h.finish(job, .cancelled, .{}, "");
-                h.gpa.free(left);
+                for (left.items) |job| h.finish(job, .cancelled, .{}, "");
+                left.deinit(h.gpa);
                 // --learn's half-made cut settled, then what waits for disk written under the stop's deadline
                 if (h.cache) |*store| if (store.imprint) |im| api.prompt_learn.settle(store, im);
                 if (h.cache) |*store| if (store.disk) |r| {
@@ -578,4 +578,8 @@ test "a drained Flash Next host is unhealthy before another submit" {
     try std.testing.expectError(error.Closed, engine.submit(1, &request, .{ .ctx = &ctx, .event = Sink.event }));
     try std.testing.expectEqual(@as(usize, 0), host.queued.items.len);
     try std.testing.expect(!status.healthy);
+}
+
+test {
+    _ = @import("flashnext_host_close_test.zig");
 }
