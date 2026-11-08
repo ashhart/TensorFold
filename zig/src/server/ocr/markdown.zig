@@ -1,4 +1,4 @@
-//! A block's normalized Markdown as plain-text lines, and its tables' byte ranges (docs/api.md OCR: Estimates).
+//! A block's tables as byte ranges, and a pipe table read back as cells (docs/api.md OCR: Reader Markdown).
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const api = @import("engine_api");
@@ -7,19 +7,7 @@ const html = api.ocr.html;
 /// The byte range of one table in the content; ``html``: an HTML <table>, else a GFM pipe table.
 pub const Found = struct { start: usize, end: usize, html: bool };
 
-/// The content's plain-text lines, allocated in ``a`` (the request arena): markup gone, blank lines dropped.
-pub fn plainLines(a: Allocator, content: []const u8) Allocator.Error![][]const u8 {
-    var out: std.ArrayList([]const u8) = .empty;
-    var sc: Scanner = .{ .src = content };
-    while (sc.next()) |item| switch (item) {
-        .text => |line| try keep(a, &out, try textLine(a, line), true),
-        .verbatim => |line| try keep(a, &out, try a.dupe(u8, line), false),
-        .table => |f| if (f.html) try htmlRows(a, &out, content[f.start..f.end]) else try pipeRows(a, &out, content[f.start..f.end]),
-    };
-    return out.toOwnedSlice(a);
-}
-
-/// Every table in the content in order, found by the scanner ``plainLines`` uses (none inside code or math).
+/// Every table in the content in order, found by a line scanner (none inside code or math).
 pub fn tables(a: Allocator, content: []const u8) Allocator.Error![]Found {
     var out: std.ArrayList(Found) = .empty;
     var sc: Scanner = .{ .src = content };
@@ -49,104 +37,12 @@ pub fn pipeTable(a: Allocator, table: []const u8) html.ParseError!html.Table {
         var cs = Cells.init(row); // GFM: a short row is padded, cells past the header's count are dropped
         for (0..cols) |c| {
             // the cell's own text: math keeps its dollars, as the HTML cell it came from held them
-            const text = if (cs.next()) |cell| try cellText(a, cell, true) else try a.alloc(u8, 0);
+            const text = if (cs.next()) |cell| try cellText(a, cell) else try a.alloc(u8, 0);
             cells[done] = .{ .text = text, .row = @intCast(r), .col = @intCast(c), .rows = 1, .cols = 1, .head = r == 0 };
             done += 1;
         }
     }
     return .{ .rows = @intCast(rows.items.len), .cols = @intCast(cols), .cells = cells, .spanned = false };
-}
-
-fn keep(a: Allocator, out: *std.ArrayList([]const u8), line: []u8, trimmed: bool) Allocator.Error!void {
-    const t = std.mem.trim(u8, line, " \t");
-    if (t.len == 0) return a.free(line);
-    try out.append(a, if (trimmed) t else line);
-}
-
-/// One ordinary line: heading markers dropped, a list marker kept, the rest through the inline cleaner.
-fn textLine(a: Allocator, raw: []const u8) Allocator.Error![]u8 {
-    var t = trim(raw);
-    if (heading(t)) |rest| t = rest;
-    const marker = listMarker(t);
-    const body = try clean(a, t[marker.len..], 0, false);
-    defer a.free(body);
-    return std.mem.concat(a, u8, &.{ marker, body });
-}
-
-/// The heading text after 1-6 `#` and a space, its closing `#` run removed; null when the line is no ATX heading.
-fn heading(t: []const u8) ?[]const u8 {
-    var n: usize = 0;
-    while (n < t.len and t[n] == '#') n += 1;
-    if (n == 0 or n > 6 or (n < t.len and t[n] != ' ' and t[n] != '\t')) return null;
-    var rest = trim(t[n..]);
-    const close = std.mem.trimEnd(u8, rest, "#");
-    if (close.len == 0) return "";
-    if (close.len < rest.len and (close[close.len - 1] == ' ' or close[close.len - 1] == '\t')) rest = trim(close);
-    return rest;
-}
-
-/// A leading `-`, `*`, `+` or `1.`/`1)` list marker with its space (kept: it is on the page), or "".
-fn listMarker(t: []const u8) []const u8 {
-    if (t.len >= 2 and std.mem.indexOfScalar(u8, "-*+", t[0]) != null and (t[1] == ' ' or t[1] == '\t')) return t[0..2];
-    var n: usize = 0;
-    while (n < t.len and n < 9 and std.ascii.isDigit(t[n])) n += 1;
-    if (n > 0 and n + 1 < t.len and (t[n] == '.' or t[n] == ')') and (t[n + 1] == ' ' or t[n + 1] == '\t')) return t[0 .. n + 2];
-    return "";
-}
-
-fn pipeRows(a: Allocator, out: *std.ArrayList([]const u8), table: []const u8) Allocator.Error!void {
-    var it = std.mem.splitScalar(u8, table, '\n');
-    var row: usize = 0;
-    while (it.next()) |raw| : (row += 1) {
-        if (row == 1) continue; // the delimiter row
-        var line: std.ArrayList(u8) = .empty;
-        defer line.deinit(a);
-        var cells = Cells.init(trim(raw));
-        var first = true;
-        while (cells.next()) |cell| : (first = false) {
-            if (!first) try line.append(a, '\t');
-            const text = try cellText(a, cell, false);
-            defer a.free(text);
-            try line.appendSlice(a, text);
-        }
-        try keep(a, out, try line.toOwnedSlice(a), false);
-    }
-}
-
-/// An HTML table's rows through ``ocr_html``; one it cannot parse is read as ordinary lines instead.
-fn htmlRows(a: Allocator, out: *std.ArrayList([]const u8), table: []const u8) Allocator.Error!void {
-    var arena = std.heap.ArenaAllocator.init(a);
-    defer arena.deinit();
-    const parsed = html.parse(arena.allocator(), table) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.Malformed => {
-            var it = std.mem.splitScalar(u8, table, '\n');
-            while (it.next()) |line| try keep(a, out, try textLine(a, line), true);
-            return;
-        },
-    };
-    // per cell, before the cells join: a `$` never pairs across cells, as in a pipe row
-    for (parsed.cells) |*c| c.text = try withoutMath(arena.allocator(), c.text);
-    for (try html.rowsText(arena.allocator(), parsed)) |row| try keep(a, out, try a.dupe(u8, row), false);
-}
-
-/// HTML cell text as line replies carry it: literal (no Markdown escapes), only math losing its `$`/`$$`.
-fn withoutMath(a: Allocator, text: []const u8) Allocator.Error![]const u8 {
-    if (std.mem.indexOfScalar(u8, text, '$') == null) return text;
-    var out: std.ArrayList(u8) = .empty;
-    var no_close = false; // the pairing rule of a pipe cell's math (``mathSpan``), so both table forms read alike
-    var i: usize = 0;
-    while (i < text.len) {
-        if (text[i] != '$') {
-            try out.append(a, text[i]);
-            i += 1;
-            continue;
-        }
-        const span = mathSpan(text, i, &no_close);
-        try out.appendSlice(a, span.body);
-        i = span.end;
-    }
-    return out.items;
 }
 
 /// The cells of one pipe-table row, its outer pipes dropped; as cmark-gfm, a `|` right after a `\` is escaped.
@@ -182,7 +78,7 @@ const Cells = struct {
 };
 
 /// One pipe-table cell's text: GFM drops the backslash before each `|` (in code and math too), then inline rules.
-fn cellText(a: Allocator, cell: []const u8, keep_math: bool) Allocator.Error![]u8 {
+fn cellText(a: Allocator, cell: []const u8) Allocator.Error![]u8 {
     const t = trim(cell);
     const bare = try a.alloc(u8, t.len);
     defer a.free(bare);
@@ -192,7 +88,7 @@ fn cellText(a: Allocator, cell: []const u8, keep_math: bool) Allocator.Error![]u
         bare[n] = ch;
         n += 1;
     }
-    return clean(a, bare[0..n], 0, keep_math);
+    return clean(a, bare[0..n], 0);
 }
 
 /// GFM's table rule (cmark-gfm `escaped_char = [\\][|]`): the `|` at ``s[i]`` is escaped when `\` is right before it.
@@ -214,7 +110,7 @@ fn trim(s: []const u8) []const u8 {
 /// What the scanner yields: an ordinary line, a code or math line kept as written, or a table's byte range.
 const Item = union(enum) { text: []const u8, verbatim: []const u8, table: Found };
 
-/// A line-based scanner over the 5.1 subset: fenced code, `$$` blocks, HTML and pipe tables, ordinary lines.
+/// A line scanner over docs/api.md OCR: Reader Markdown: fenced code, `$$` blocks, HTML and pipe tables, other lines.
 const Scanner = struct {
     src: []const u8,
     pos: usize = 0,
@@ -338,8 +234,8 @@ const max_depth = 4;
 /// One emphasis delimiter run in the output: where it sits, its length, what it may do and how much a match removed.
 const Run = struct { at: usize, len: usize, ch: u8, open: bool, close: bool, left: usize, remove: usize = 0 };
 
-/// Inline markup removed: emphasis, code ticks, math dollars (unless ``keep_math``), link syntax, escapes, entities.
-fn clean(a: Allocator, s: []const u8, depth: u8, keep_math: bool) Allocator.Error![]u8 {
+/// Inline markup removed: emphasis, code ticks, link syntax, escapes, entities; math kept as written, dollars too.
+fn clean(a: Allocator, s: []const u8, depth: u8) Allocator.Error![]u8 {
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(a);
     var runs: std.ArrayList(Run) = .empty;
@@ -359,12 +255,12 @@ fn clean(a: Allocator, s: []const u8, depth: u8, keep_math: bool) Allocator.Erro
             i = span.end;
         } else if (ch == '$') {
             const span = mathSpan(s, i, &no_dollar_close);
-            try out.appendSlice(a, if (keep_math) s[i..span.end] else span.body);
+            try out.appendSlice(a, s[i..span.end]);
             i = span.end;
         } else if ((ch == '[' or (ch == '!' and i + 1 < s.len and s[i + 1] == '[')) and depth < max_depth) {
             const open = if (ch == '!') i + 1 else i;
             if (link(s, pairs, open)) |l| {
-                const text = try clean(a, l.text, depth + 1, keep_math);
+                const text = try clean(a, l.text, depth + 1);
                 defer a.free(text);
                 try out.appendSlice(a, text);
                 i = l.end;

@@ -141,7 +141,7 @@ fn document(a: Allocator, fault: *Fault, body: Value, facts: Facts) Step![]const
         error.OutOfMemory => error.OutOfMemory,
         error.Refused => bad(a, fault, loc, "{s}", .{cx.message}),
     };
-    return switch (try fetch.https(a, facts.fetch, url, false)) {
+    return switch (try fetch.https(a, facts.fetch, url)) {
         .bytes => |b| b,
         .refused => |m| bad(a, fault, loc, "{s}", .{m}),
     };
