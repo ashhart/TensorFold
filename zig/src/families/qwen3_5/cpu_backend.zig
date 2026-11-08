@@ -174,7 +174,7 @@ pub const Cpu = struct {
     }
 };
 
-/// TF_QWEN35_CPU_TRACE=1: each one-token draw's top two logits and their margin on stderr (parity diagnosis).
+/// TF_QWEN35_CPU_TRACE=1: each one-token draw's top two logits and their margin on stderr.
 fn tracing() bool {
     const v = std.c.getenv("TF_QWEN35_CPU_TRACE") orelse return false;
     return std.mem.eql(u8, std.mem.span(v), "1");
