@@ -41,6 +41,8 @@ pub const Model = struct {
     widths_tag: u64 = 0,
     /// Opt-in prepared extents; checkpoint aliases and task/KV/MTP/ANE storage are intentionally excluded.
     idle_release: ?*IdleRelease = null,
+    /// The head's affine format: a pair rank's drafter re-prepares the whole lm_head from it.
+    head_width: widths.Width = .{ .bits = 4, .group = 64 },
 
     /// Immediate share loading for tools; `share_fits` null keeps their existing unrestricted behavior.
     pub fn load(a: std.mem.Allocator, io: std.Io, dir: []const u8, rows: u32, share_fits: ?*const fn (u64) bool) !*Model {
@@ -130,6 +132,7 @@ pub const Model = struct {
         m.shard = shard;
         m.config = shard.local;
         m.widths_tag = ws.tag();
+        m.head_width = ws.head;
         m.device = try mtl.Device.init();
         errdefer m.device.deinit();
         if (!qualifiedGeneration(m.device.generation())) return error.QwenMetalQualificationRequired;
