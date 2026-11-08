@@ -6,6 +6,8 @@ pub const weights = @import("tp2_weights.zig");
 pub const forward = @import("tp2_forward.zig");
 pub const Model = forward.Model;
 pub const native = @import("tp2_native.zig");
+/// Rank 1's drafter calls (set as Model.draft_hook before follow).
+pub const draftFollow = @import("tp2_draft.zig").follow;
 
 /// Bytes this rank's weights take: its share of the cut matrices, plus the bf16 embedding every rank holds whole.
 pub fn placementWeightBytes(a: std.mem.Allocator, io: std.Io, dir: []const u8, world: usize, rank: usize, drafts: bool) !u64 {
@@ -47,4 +49,6 @@ test {
     _ = forward;
     _ = native;
     _ = @import("tp2_lanes.zig");
+    _ = @import("tp2_draft_load.zig");
+    _ = @import("tp2_draft.zig");
 }
