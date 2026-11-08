@@ -121,10 +121,10 @@ pub fn expertRows(o: Ops, l: Layer, x: Tensor, rows: usize) ops.Error!Ops.MoeRow
     if (up_act == null and
         (!epilogue or !try o.projectRoutedRelu2(x, l.fc1, items, count, members, slots, @min(tile, rows), act)))
     {
-        const up = try o.projectRouted(x, l.fc1, items, count, members, pairs, slots, @min(tile, rows));
+        const up = try o.projectRouted(x, l.fc1, items, count, members, pairs, slots, @min(tile, rows), rows);
         try relu2(o, up, act, pairs * ni);
     }
-    const y = try o.projectRouted(act, l.fc2, items, count, members, pairs, 1, @min(tile, rows));
+    const y = try o.projectRouted(act, l.fc2, items, count, members, pairs, 1, @min(tile, rows), rows);
     if (!l.whole()) try o.moeZeroForeign(y, local, l.own, pairs, d);
     const su = l.shared_up;
     const shared: u64 = if (su) |up| try sharedExpert(o, up, l.shared_down.?, x, rows, epilogue, up_act) else 0;
