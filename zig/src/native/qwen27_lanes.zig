@@ -533,7 +533,8 @@ pub const Metal = struct {
         if (b.pass_profile and windows.len == 1) std.log.info("q27_offer width={d} rows={d} tree_nodes={d} copy_rows={d}", .{ b.window, total, b.from_tree, total - 1 - b.from_tree });
         b.pens.clear(); // each penalized window's rows: the reply, its pending token, then the row's own path
         for (windows, b.round.?.firsts) |w, first| try b.pens.stageWindow(b.gpa, w, b.ids[first + 1 ..][0 .. w.rows() - 1], first);
-        const fused = windows.len == 1 and b.windows[0] == 0 and b.draft != null and total > 1 and windows[0].stream.sampling == null and windows[0].masks.len == 0 and b.pens.len() == 0;
+        // A pair's keep rides .commit with the accepted path, so its runner takes no fused tail (TailOnRank).
+        const fused = b.link == null and windows.len == 1 and b.windows[0] == 0 and b.draft != null and total > 1 and windows[0].stream.sampling == null and windows[0].masks.len == 0 and b.pens.len() == 0;
         // every greedy window's rows from one argmax over the round; a sampled window draws on the host
         var greedy = false;
         for (windows) |w| greedy = greedy or (w.stream.sampling == null and w.masks.len == 0 and !w.stream.penalties.active());
