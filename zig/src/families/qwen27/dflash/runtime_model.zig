@@ -455,5 +455,7 @@ fn binding(a: std.mem.Allocator, target: backend_mod.Target, prefix: []const u8,
     const w = try @import("runtime_target.zig").wordView(Backend.cpu(try target.checkpoint.get(try std.mem.concat(a, u8, &.{ stem, ".weight" }))));
     const s = Backend.cpu(try target.checkpoint.get(try std.mem.concat(a, u8, &.{ stem, ".scales" })));
     const b = Backend.cpu(try target.checkpoint.get(try std.mem.concat(a, u8, &.{ stem, ".biases" })));
-    return ck.validate(w, s, b, format, target.config.vocab, target.config.hidden);
+    // A pair rank's `config` is rank-local; the drafter's weights are global shapes.
+    const global = if (target.shard.ranks > 1) target.shard.global else target.config;
+    return ck.validate(w, s, b, format, global.vocab, global.hidden);
 }
