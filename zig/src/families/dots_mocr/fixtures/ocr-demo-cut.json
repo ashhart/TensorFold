@@ -1,0 +1,13 @@
+{
+  "text": "[{\"bbox\": [628, 172, 1077, 194], \"category\": \"Page-header\", \"text\": \"EXPOSURE TO MEAT AND RISK OF LYMPHOMA\"}, {\"bbox\": [1487, 169, 1540, 194], \"category\": \"Page-header\", \"text\": \"2763\"}, {\"bbox\": [278, 217, 1428, 238], \"category\": \"Caption\", \"text\": \"TABLE",
+  "original": [
+    1700,
+    2250
+  ],
+  "frame": [
+    1708,
+    2240
+  ],
+  "source": "dots_mocr_reference.py oracle on demo/demo_image1.jpg, --max-new-tokens 128: the JSON is cut",
+  "prompt_sha256": "16ff71ac5d218f35e5b3db41240b6e70741498bc099db3fa922ce1ff972e3b2f"
+}
