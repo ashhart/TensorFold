@@ -14,7 +14,7 @@ const dory = @import("dory");
 const qwen3 = @import("qwen3_cuda");
 
 /// CUDA families provide metadata, open their lane backend and explain their refusals.
-pub const registry = .{ nemotron.native, nemotron.omni, glm.native, minimax.native, qwen35.native, qwen35.native_moe, flashnext.native, kolibri1.native, gemma4.native, gemma4.native31, spark25.native, dory.native, @import("lfm2_moe_cuda").native };
+pub const registry = .{ nemotron.native, nemotron.omni, glm.native, minimax.native, qwen35.native, qwen35.native_moe, flashnext.native, kolibri1.native, gemma4.native, gemma4.native31, spark25.native, dory.native, @import("dots_mocr_cuda").native, @import("lfm2_moe_cuda").native };
 pub const families: []const api.Family = blk: {
     var out: [registry.len + 5]api.Family = undefined;
     for (registry, 0..) |F, i| out[i] = .{ .model_type = F.model_type, .formats = F.formats, .decision_formats = if (@hasDecl(F, "decision_formats")) F.decision_formats else &.{} };
@@ -35,6 +35,14 @@ test "every registered family and d1's decision engine are listed for capabiliti
     try std.testing.expectEqualStrings("qwen4", families[registry.len + 2].model_type);
     try std.testing.expectEqualStrings("qwen4_text", families[registry.len + 3].model_type);
     try std.testing.expectEqualStrings("qwen3", families[registry.len + 4].model_type);
+}
+
+test "dots.mocr serves its publisher's BF16 weights on CUDA through the dense engine" {
+    for (families) |f| if (std.mem.eql(u8, f.model_type, "dots_ocr")) {
+        try std.testing.expectEqual(@as(usize, 1), f.formats.len);
+        return std.testing.expectEqualStrings("bf16", f.formats[0]);
+    };
+    return error.NoDotsFamily;
 }
 
 test "GLM capabilities: CUDA offers the EXL3 format its loader accepts" {
