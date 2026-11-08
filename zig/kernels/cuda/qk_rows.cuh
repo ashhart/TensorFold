@@ -4,6 +4,7 @@
 
 #include <cuda_bf16.h>
 #include <stdint.h>
+#include "common/reduce.cuh"
 
 namespace tf_qk {
 
