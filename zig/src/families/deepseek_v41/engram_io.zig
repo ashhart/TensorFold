@@ -3,6 +3,7 @@
 const std = @import("std");
 const linux = std.os.linux;
 const engram_rows = @import("engram_rows.zig");
+const dio = @import("engram_dio.zig");
 const Rows = engram_rows.Rows;
 const Header = engram_rows.Header;
 const header_bytes = engram_rows.header_bytes;
@@ -265,6 +266,8 @@ pub fn openTable(gpa: std.mem.Allocator, path: [:0]const u8, cap: u32) !Table {
     if (linux.errno(linux.statx(fd, "", linux.AT.EMPTY_PATH, .{ .SIZE = true }, &st)) != .SUCCESS) return error.StatFailed;
     const hb = try gpa.alignedAlloc(u8, .fromByteUnits(page), page);
     defer gpa.free(hb);
+    // a disk or file system whose direct reads need more than a sector (4 KiB blocks) reads this shard buffered
+    if (direct) direct = try dio.direct(fd, hb);
     try preadAll(fd, hb, 0);
     if (!direct) _ = linux.fadvise(fd, 0, page, linux.POSIX_FADV.DONTNEED);
     const h = try Header.parse(hb[0..48], st.size);
@@ -557,7 +560,7 @@ pub fn readAt(fd: linux.fd_t, size: u64, direct: bool, buf: []u8, off: u64) !voi
     const want = @min(buf.len, size - off);
     var done: usize = 0;
     while (done < want) {
-        const rc = linux.pread(fd, buf[done..].ptr, buf.len - done, @intCast(off + done));
+        const rc = dio.pread(fd, buf[done..].ptr, buf.len - done, @intCast(off + done));
         switch (linux.errno(rc)) {
             .SUCCESS => {},
             .INTR => continue,
@@ -572,7 +575,7 @@ pub fn readAt(fd: linux.fd_t, size: u64, direct: bool, buf: []u8, off: u64) !voi
 pub fn preadAll(fd: linux.fd_t, out: []u8, off: u64) !void {
     var done: usize = 0;
     while (done < out.len) {
-        const rc = linux.pread(fd, out[done..].ptr, out.len - done, @intCast(off + done));
+        const rc = dio.pread(fd, out[done..].ptr, out.len - done, @intCast(off + done));
         switch (linux.errno(rc)) {
             .SUCCESS => {},
             .INTR => continue,
