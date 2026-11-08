@@ -199,11 +199,16 @@ pub const Source = struct {
         const r = if (s.ring) |*ring| ring else return s.reapThreads(wait);
         var cqes: [slot_count]linux.io_uring_cqe = undefined;
         const n = try r.copy_cqes(&cqes, wait);
-        for (cqes[0..n]) |c| {
+        // count every completion taken off the ring first: deinit waits on in_flight if a read below fails mid-batch
+        var ps: [slot_count]Pending = undefined;
+        for (cqes[0..n], 0..) |c, i| {
             const k: usize = @intCast(c.user_data);
-            const p = s.pending[k].?;
+            ps[i] = s.pending[k].?;
             s.pending[k] = null;
             s.in_flight -= 1;
+        }
+        for (cqes[0..n], ps[0..n]) |c, p| {
+            const k: usize = @intCast(c.user_data);
             // a short or failed read is finished by a plain read of the same span
             const got = if (c.res >= @as(i32, @intCast(p.at + p.len))) s.slots[k][p.at..][0..p.len] else blk: {
                 if (c.res < 0) std.log.warn("io_uring read at {d} failed ({t}); reading again", .{ p.offset, c.err() });
