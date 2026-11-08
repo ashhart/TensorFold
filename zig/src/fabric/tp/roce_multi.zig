@@ -72,6 +72,7 @@ pub const Options = struct {
     wire: WireKind = .verbs,
     /// TF_TP_ROCE_RELAY: four ranks, two neighbours each, two half flags per source.
     relay: bool = false,
+    relay_max_bytes: usize = 64 * 1024,
     hcas: []const rv.HcaSpec = &.{},
     traffic_class: u8 = 0,
     cpu: ?u32 = null,
@@ -118,6 +119,7 @@ pub const Roce = struct {
     me: u32,
     world: u32,
     relay: bool = false,
+    relay_max_bytes: usize = 64 * 1024,
     layout: Layout,
     slot_bytes: usize,
     timeout_ns: u64,
@@ -169,7 +171,7 @@ pub const Roce = struct {
         r.* = undefined;
         r.retained = false;
         errdefer if (!r.retained) std.heap.page_allocator.destroy(r);
-        r.* = .{ .me = b.rank, .world = b.world, .relay = o.relay, .layout = layout, .slot_bytes = slot, .timeout_ns = o.timeout_ns, .fast = o.fast, .max_grid = o.blocks, .region = undefined, .mapping = undefined, .wire = undefined, .cpu = o.cpu };
+        r.* = .{ .me = b.rank, .world = b.world, .relay = o.relay, .relay_max_bytes = o.relay_max_bytes, .layout = layout, .slot_bytes = slot, .timeout_ns = o.timeout_ns, .fast = o.fast, .max_grid = o.blocks, .region = undefined, .mapping = undefined, .wire = undefined, .cpu = o.cpu };
         // 1. the regions and the wire, each rank alone; every rank learns whether all did
         const ok = r.openWire(b, o, len) catch |e| blk: {
             log.warn("[tensorfold] tp roce: rank {d} setup failed: {t}", .{ b.rank, e });
@@ -390,7 +392,7 @@ pub const Roce = struct {
     }
 
     pub fn fits(r: *const Roce, n: usize) bool {
-        return n <= r.slot_bytes;
+        return n <= r.slot_bytes and (!r.relay or n <= r.relay_max_bytes);
     }
 
     fn launch(r: *Roce, mode: Mode, in: DevicePtr, out: DevicePtr, n: usize, lens: DevicePtr, stream: collective.Stream) Error!void {
