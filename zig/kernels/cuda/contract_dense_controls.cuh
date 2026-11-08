@@ -42,3 +42,11 @@ namespace tf_ctl_paged {
 #define SEG_MERGE tf_ctl_nemo_attn_merge_segs
 #include "paged_attn_segs.cuh"
 }  // namespace tf_ctl_paged
+
+// dots.mocr's q|k|v bias and RoPE with the rotation's two fp32 products summed and rounded once (qk_rows' order).
+#include "dots_rope.cuh"
+extern "C" __global__ void __launch_bounds__(64) tf_ctl_dots_qkv_rope(const float* __restrict__ ACC, const __nv_bfloat16* __restrict__ BIAS,
+                                                                      const float* __restrict__ INV, const int* __restrict__ POS,
+                                                                      __nv_bfloat16* __restrict__ Q, __nv_bfloat16* __restrict__ KV, int H, int HK) {
+    tf_dots::qkv_rope<false>(ACC, BIAS, INV, POS, Q, KV, H, HK);
+}
