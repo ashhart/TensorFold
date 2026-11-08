@@ -464,6 +464,10 @@ pub const Pair = struct {
         // Ticks after which this link is no longer cold: set at the first relay, when both ranks have just loaded.
         var cold_until: u64 = 0;
         const trace = platform.c.getenv("TF_Q27_PAIR_TRACE") != null;
+        const trace_every: u64 = if (platform.c.getenv("TF_Q27_PAIR_TRACE_EVERY")) |v|
+            (std.fmt.parseInt(u64, std.mem.span(v), 10) catch 2048)
+        else
+            2048;
         var tr: Trace = .{};
         while (!p.stop.load(.acquire)) {
             p.seam_x.store(x, .release);
@@ -503,7 +507,7 @@ pub const Pair = struct {
             if (trace) {
                 tr.peer_wait += ticksNow() -% t1;
                 tr.n += 1;
-                if (tr.n % Trace.trace_every == 0) tr.log(p.rank);
+                if (tr.n % trace_every == 0) tr.log(p.rank);
             }
             // 4. Release the GPU: both parts are in; the event's wait is the acquire that makes them visible.
             @atomicStore(u32, p.word32(p.l.sync() + POSTED * 4), x, .release);
