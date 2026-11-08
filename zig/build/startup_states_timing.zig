@@ -18,6 +18,7 @@ pub fn step(b: *std.Build) void {
     });
     const exe = b.addExecutable(.{ .name = "tf-startup-states", .root_module = root });
     const corpus = b.addRunArtifact(b.addTest(.{ .root_module = root, .filters = &.{"conversations keep canonical spans"} }));
+    b.step("test-startup-states-corpus-host", "Canonical conversation spans for the startup timing corpus, no GPU").dependOn(&corpus.step);
     const about = "Time startup's read of 1K, 10K and 100K kept states on disk, each store's open in 5 processes (no GPU)";
     const top = b.step("test-startup-states-timing", about);
     var last: *std.Build.Step = &corpus.step;
