@@ -219,3 +219,25 @@ test "ocr markdown: a raw pipe table reads as GFM renders it: a pipe right after
         try t.expectEqualStrings("z", back.cells[3].text);
     }
 }
+
+test "ocr markdown: a spanned HTML table and a pipe table with the same cells give the same lines, math without dollars" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const html = @import("engine_api").ocr.html;
+    const texts = [_][]const u8{ "$x_1$", "$$a$$", "costs $5", "a\\*b", "$p$ | $q" };
+    var cells: [texts.len]html.Cell = undefined;
+    for (&cells, texts, 0..) |*c, text, k| c.* = .{ .text = text, .row = 1, .col = @intCast(k), .rows = 1, .cols = 1, .head = false };
+    var head = [_]html.Cell{.{ .text = "Head", .row = 0, .col = 0, .rows = 1, .cols = texts.len, .head = true }};
+    const all = try std.mem.concat(a, html.Cell, &.{ &head, &cells });
+    const spanned: html.Table = .{ .rows = 2, .cols = texts.len, .cells = all, .spanned = true };
+    // the same cells with the header unspanned, as the pipe form writes them
+    var plain_head = [_]html.Cell{.{ .text = "Head", .row = 0, .col = 0, .rows = 1, .cols = 1, .head = true }};
+    const plain: html.Table = .{ .rows = 2, .cols = texts.len, .cells = try std.mem.concat(a, html.Cell, &.{ &plain_head, &cells }), .spanned = false };
+    const from_html = try md.plainLines(a, try html.normalized(a, spanned));
+    const from_pipe = try md.plainLines(a, try html.pipe(a, plain));
+    try t.expectEqual(@as(usize, 2), from_html.len);
+    try t.expectEqual(from_pipe.len, from_html.len);
+    for (from_pipe, from_html) |p, h| try t.expectEqualStrings(p, h);
+    try t.expectEqualStrings("x_1\ta\tcosts $5\ta\\*b\tp | $q", from_html[1]);
+}

@@ -125,7 +125,28 @@ fn htmlRows(a: Allocator, out: *std.ArrayList([]const u8), table: []const u8) Al
             return;
         },
     };
+    // per cell, before the cells join: a `$` never pairs across cells, as in a pipe row
+    for (parsed.cells) |*c| c.text = try withoutMath(arena.allocator(), c.text);
     for (try html.rowsText(arena.allocator(), parsed)) |row| try keep(a, out, try a.dupe(u8, row), false);
+}
+
+/// HTML cell text as line replies carry it: literal (no Markdown escapes), only math losing its `$`/`$$` (design 5.3).
+fn withoutMath(a: Allocator, text: []const u8) Allocator.Error![]const u8 {
+    if (std.mem.indexOfScalar(u8, text, '$') == null) return text;
+    var out: std.ArrayList(u8) = .empty;
+    var no_close = false; // the pairing rule of a pipe cell's math (``mathSpan``), so both table forms read alike
+    var i: usize = 0;
+    while (i < text.len) {
+        if (text[i] != '$') {
+            try out.append(a, text[i]);
+            i += 1;
+            continue;
+        }
+        const span = mathSpan(text, i, &no_close);
+        try out.appendSlice(a, span.body);
+        i = span.end;
+    }
+    return out.items;
 }
 
 /// The cells of one pipe-table row, its outer pipes dropped; as cmark-gfm, a `|` right after a `\` is escaped.
