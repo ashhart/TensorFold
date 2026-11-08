@@ -142,9 +142,19 @@ pub fn placeHost(comptime F: type, a: Allocator, loaded: anytype, o: api.Open, a
     return !fits(F, loaded, o, room, window, stream_bytes);
 }
 
+/// A family declaring `keeps_no_prompts = true` has no prompt store: --prompt-cache-gib is refused, no cache planned.
+pub fn keepsNoPrompts(comptime F: type) bool {
+    return @hasDecl(F, "keeps_no_prompts") and F.keeps_no_prompts;
+}
+
+/// The cache the plan starts from: --prompt-cache-gib's or the default floor, none for a family that keeps no prompts.
+fn cacheWanted(comptime F: type, o: api.Open) u64 {
+    return if (comptime keepsNoPrompts(F)) 0 else budget.cacheBytes(o.prompt_cache_gib, std.math.maxInt(u64), 0);
+}
+
 /// The asked cache (16 GiB unless --prompt-cache-gib says) whole beside the streams, by the startup plan's arithmetic.
 fn fits(comptime F: type, loaded: anytype, o: api.Open, room: u64, window: u64, stream_bytes: u64) bool {
-    const want = budget.cacheBytes(o.prompt_cache_gib, std.math.maxInt(u64), 0);
+    const want = cacheWanted(F, o);
     const rows: u64 = if (comptime @hasDecl(F, "window_rows")) F.window_rows else 0;
     if (layout(loaded)) |l| return kv_pool.holds(l, .{ .room = room, .engine = 0, .lanes = o.lanes, .fixed = o.lanes_fixed, .cache = want, .snaps = named(o), .window = window + rows, .engine_paged = enginePaged(loaded), .asked = o.prompt_cache_gib != null });
     const n = budget.admit(room, stream_bytes, loaded.free_streams, o.lanes, o.lanes_fixed) catch return false;
@@ -154,9 +164,9 @@ fn fits(comptime F: type, loaded: anytype, o: api.Open, room: u64, window: u64, 
 /// Plan streams first, then half their remaining room with a 16 GiB floor, unless the cache was explicit.
 pub fn budgetOf(comptime F: type, l: kv_pool.Layout, room: u64, o: api.Open, window: u64, host_mode: bool, engine_paged: bool, kept_ppm: u32, slots: ?usize) kv_pool.Budget {
     const rows: u64 = if (comptime @hasDecl(F, "window_rows")) F.window_rows else 0;
-    const want = if (host_mode) 0 else budget.cacheBytes(o.prompt_cache_gib, std.math.maxInt(u64), 0);
+    const want = if (host_mode) 0 else cacheWanted(F, o);
     var out: kv_pool.Budget = .{ .room = room, .engine = 0, .lanes = o.lanes, .fixed = o.lanes_fixed, .cache = want, .snaps = slots orelse named(o), .window = window + rows, .engine_paged = engine_paged, .kept_ppm = if (host_mode) 0 else kept_ppm, .slots_only = slots != null, .asked = o.prompt_cache_gib != null };
-    if (out.asked or host_mode) return out;
+    if (out.asked or host_mode or comptime keepsNoPrompts(F)) return out;
     var probe = out;
     probe.cache = std.math.maxInt(u64);
     const all = kv_pool.plan(l, probe) catch return out;
@@ -533,4 +543,47 @@ test "CUDA cache default leaves no copies when unpaged windows use all room" {
     try std.testing.expectEqual(@as(u32, 8), p.lanes);
     try std.testing.expectEqual(@as(usize, 7 * 8192), p.pages);
     try std.testing.expectEqual(@as(u64, 0), p.copied);
+}
+
+const Promptless = struct {
+    pub const keeps_no_prompts = true;
+};
+test "kv pages: a family that keeps no prompts plans no cache, so its streams take the pages one would have" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var problem: []const u8 = "";
+    const GiB: u64 = 1 << 30;
+    const l: kv_pool.Layout = .{ .fixed_bytes = 0, .token_bytes = 1 << 20, .page_tokens = 1, .snap_bytes = 0 };
+    const o: api.Open = .{ .dir = "", .model_type = "d", .lanes = 8 };
+    // rooms where a family that keeps prompts gets main's scaled default cache, the engine's own on pages or not
+    for ([_]struct { bool, u64, u64 }{ .{ true, 88 * GiB, 6144 }, .{ false, 104 * GiB, 8192 } }) |c| {
+        try std.testing.expect(budgetOf(struct {}, l, c[1], o, c[2], false, c[0], 0, null).cache > 0);
+        try std.testing.expectEqual(@as(u64, 0), budgetOf(Promptless, l, c[1], o, c[2], false, c[0], 0, null).cache);
+        const plain = (try plan(struct {}, a, l, c[1], o, c[2], &problem, false, c[0], 0, null)).?;
+        const none = (try plan(Promptless, a, l, c[1], o, c[2], &problem, false, c[0], 0, null)).?;
+        try std.testing.expect(plain.copied > 0 and none.copied == 0 and none.kept == 0 and none.taken == 0);
+        try std.testing.expect(none.pages >= plain.pages);
+        try std.testing.expectEqual(plain.lanes, none.lanes);
+        const budget_none: kv_pool.Budget = .{ .room = c[1], .engine = 0, .lanes = 8, .window = c[2], .engine_paged = c[0] };
+        try std.testing.expectEqual(try kv_pool.plan(l, budget_none), none);
+    }
+    // a room the default floor's cache does not fit beside the streams: only the family that keeps no prompts fits
+    const tight: kv_pool.Layout = .{ .fixed_bytes = 180 << 20, .token_bytes = 13_056, .page_tokens = 512, .snap_bytes = 0 };
+    for ([_]bool{ true, false }) |paged| {
+        const loaded = .{ .layout = @as(?kv_pool.Layout, tight), .engine_paged = paged, .free_streams = @as(u32, 1) };
+        try std.testing.expect(fits(Promptless, loaded, o, 3 << 29, 8192, 0) and !fits(struct {}, loaded, o, 3 << 29, 8192, 0));
+    }
+}
+test "kv pages: LFM2-MoE declares neither keeps_no_prompts nor snap_save and plans its default cache as before" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var problem: []const u8 = "";
+    const lfm = @import("lfm2_moe_cuda").native;
+    try std.testing.expect(!keepsNoPrompts(lfm) and !@hasDecl(lfm, "snap_save") and keepsNoPrompts(Promptless));
+    const l: kv_pool.Layout = .{ .fixed_bytes = 180 << 20, .token_bytes = 13_056, .page_tokens = 512, .snap_bytes = 0 };
+    const o: api.Open = .{ .dir = "", .model_type = "lfm2_moe", .lanes = 8 };
+    // as a family that declares neither: main's default cache, scaled by the room the streams leave
+    try std.testing.expectEqual(try kv_pool.plan(l, budgetOf(struct {}, l, 3 << 29, o, 8192, false, false, 0, null)), (try plan(lfm, arena.allocator(), l, 3 << 29, o, 8192, &problem, false, false, 0, null)).?);
+    try std.testing.expectEqual(@as(u64, 0), kept(lfm, .{}, null, o, 40 << 30, 0, 0, false).copied); // no store either way
 }
