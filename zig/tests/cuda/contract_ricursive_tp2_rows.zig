@@ -120,10 +120,11 @@ pub const SwiGlu = struct {
         const n = shape.rows * shape.n;
         self.gv = try halves(a, rng, n, -30, 30);
         self.u = try halves(a, rng, n, -30, 30);
-        if (fill == .nonfinite and n > 3) {
+        if (fill == .nonfinite and n > 4) {
             self.gv[0] = std.math.inf(f16);
             self.u[1] = std.math.inf(f16);
             self.u[2] = -std.math.inf(f16);
+            self.gv[3] = -std.math.inf(f16); // -Inf x sigmoid(-Inf) = -Inf x 0: the one NaN the clamps let through
         }
         self.dev = .{ try ref.input(rig, self.gv), try ref.input(rig, self.u) };
         self.out = try rig.output(n * 2);
