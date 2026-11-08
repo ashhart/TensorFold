@@ -3,6 +3,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const api = @import("engine_api");
 const errors = @import("../errors.zig");
+const pdf = @import("../pdf.zig");
 
 /// One page of a request: its index in the source document, the pixel size its quads refer to, and its blocks.
 pub const OcrPage = struct {
@@ -52,8 +53,10 @@ pub const Fault = struct {
     }
 };
 
-/// One document of a request: a page image.
+/// One document of a request: an image or a PDF and the pages chosen from it.
 pub const Source = struct {
     name: []const u8,
     bytes: []const u8,
+    kind: enum { image, pdf },
+    sel: pdf.Selection,
 };

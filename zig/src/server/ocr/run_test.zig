@@ -55,7 +55,7 @@ const Seen = struct {
 };
 
 fn imageSource(a: Allocator, w: u32, h: u32) !types.Source {
-    return .{ .name = "page", .bytes = try harness.png(a, w, h) };
+    return .{ .name = "page", .bytes = try harness.png(a, w, h), .kind = .image, .sel = .{ .all_within = 1 } };
 }
 
 test "ocr run: blocks scale from the frame, quads are validated, and the sink sees the live pixels" {
@@ -116,9 +116,12 @@ test "ocr run: the page budget, undecodable bytes and the gate refuse before any
     try t.expectError(error.Faulted, run.run(h.srv, a, many, seen.sink(), &fault, Gone{}));
     try t.expectEqual(types.Class.bad_input, fault.class);
     try t.expect(std.mem.indexOf(u8, fault.message, "TENSORFOLD_MAX_PDF_PAGES") != null);
-    const junk: types.Source = .{ .name = "x", .bytes = "\x89PNG\r\n\x1a\nnope" };
+    const junk: types.Source = .{ .name = "x", .bytes = "\x89PNG\r\n\x1a\nnope", .kind = .image, .sel = .{ .all_within = 1 } };
     try t.expectError(error.Faulted, run.run(h.srv, a, &.{junk}, seen.sink(), &fault, Gone{}));
     try t.expectEqual(types.Class.bad_input, fault.class);
+    const doc: types.Source = .{ .name = "d", .bytes = "%PDF-1.4\n", .kind = .pdf, .sel = .{ .all_within = 16 } };
+    try t.expectError(error.Faulted, run.run(h.srv, a, &.{doc}, seen.sink(), &fault, Gone{}));
+    try t.expect(std.mem.indexOf(u8, fault.message, "--vision-pdf") != null);
     try t.expectEqual(@as(usize, 0), h.next);
 }
 
@@ -178,11 +181,40 @@ test "ocr run: an image whose first header and its pixels disagree is refused be
     for (orders) |o| {
         var seen: Seen = .{};
         var fault: types.Fault = undefined;
-        const src: types.Source = .{ .name = "p", .bytes = try twoHeaders(a, o[0], o[1]) };
+        const src: types.Source = .{ .name = "p", .bytes = try twoHeaders(a, o[0], o[1]), .kind = .image, .sel = .{ .all_within = 1 } };
         try t.expectError(error.Faulted, run.run(h.srv, a, &.{src}, seen.sink(), &fault, Gone{}));
         try t.expectEqual(types.Class.bad_input, fault.class);
         try t.expectEqualStrings("page 0: the image's header and its pixels disagree", fault.message);
         try t.expectEqual(@as(usize, 0), seen.pages.items.len);
+    }
+    try t.expectEqual(@as(usize, 0), h.next);
+}
+
+/// A client that leaves after ``after`` checks.
+const LeavesAfter = struct {
+    checks: *u32,
+    after: u32,
+    pub fn check(g: @This()) bool {
+        g.checks.* += 1;
+        return g.checks.* > g.after;
+    }
+};
+
+test "ocr run: a client that left renders no PDF and generates no page" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var h: Harness = .{};
+    try h.start(.{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false, .vision_pdf = true });
+    defer h.stop();
+    var seen: Seen = .{};
+    var fault: types.Fault = undefined;
+    // not a renderable document: a render would refuse it, so Cancelled shows no render was tried
+    const doc: types.Source = .{ .name = "d", .bytes = "%PDF-1.4\nnot a document", .kind = .pdf, .sel = .{ .all_within = 16 } };
+    for ([_]u32{ 0, 1 }) |after| {
+        var checks: u32 = 0;
+        try t.expectError(error.Cancelled, run.run(h.srv, a, &.{ try imageSource(a, 8, 8), doc }, seen.sink(), &fault, LeavesAfter{ .checks = &checks, .after = after }));
+        try t.expectEqual(after + 1, checks);
     }
     try t.expectEqual(@as(usize, 0), h.next);
 }

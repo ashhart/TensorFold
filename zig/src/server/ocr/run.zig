@@ -46,8 +46,10 @@ pub fn gate(srv: *const Server, a: Allocator, fault: *Fault) Step!void {
     if (srv.info.vision == null) return fault.fail(a, .bad_input, "{s}", .{no_vision});
 }
 
-/// One page to read: its source, its index in that source, its encoded image, its DPI and its pixel count.
-const Planned = struct { source: u32, index: u32, bytes: []const u8, dpi: u32, pixels: u64 };
+/// Where a page's encoded image comes from: an image source's bytes, or a measured PDF page rendered just before use.
+const Origin = union(enum) { image: []const u8, pdf: struct { bytes: []const u8, width: u32, height: u32 } };
+/// One page to read: its source, its index in that source, where its image comes from, its DPI and its pixel count.
+const Planned = struct { source: u32, index: u32, origin: Origin, dpi: u32, pixels: u64 };
 
 /// Reads every page of ``sources`` in order into ``sink``; ``a`` is the request arena, ``gone`` says the client left.
 pub fn run(srv: *Server, a: Allocator, sources: []const Source, sink: PageSink, fault: *Fault, gone: anytype) Step!void {
@@ -55,7 +57,7 @@ pub fn run(srv: *Server, a: Allocator, sources: []const Source, sink: PageSink, 
     const reader = srv.info.ocr.?;
     const id = try ids.make(a, "ocr-", 24);
     if (gone.check()) return error.Cancelled;
-    const pages = try plan(srv, a, sources, fault);
+    const pages = try plan(srv, a, sources, fault, gone);
     var total: u64 = 0;
     for (pages) |p| total +|= p.pixels;
     // one limit for the whole request, from every page's pixels, so no encode depends on the order of the pages
@@ -66,15 +68,44 @@ pub fn run(srv: *Server, a: Allocator, sources: []const Source, sink: PageSink, 
     }
 }
 
-/// Every source's page within one page budget, its pixels counted before any inference.
-fn plan(srv: *const Server, a: Allocator, sources: []const Source, fault: *Fault) Step![]const Planned {
+/// Every source's pages within one page budget; PDFs are measured here, so a bad page fails before any inference.
+fn plan(srv: *const Server, a: Allocator, sources: []const Source, fault: *Fault, gone: anytype) Step![]const Planned {
     var left = budget.Pages.init();
     const cap = left.left;
+    // pdf.zig's running budget; images count among its pages, so its page-limit refusal names the request's totals
+    var used: pdf.Budget = .{};
+    var cx: Cx = .{ .a = a };
     var out: std.ArrayList(Planned) = .empty;
     for (sources, 0..) |s, k| {
-        if (!left.take(1)) return overBudget(a, fault, cap);
-        const px = try imagePixels(srv, a, s.bytes, fault);
-        try out.append(a, .{ .source = @intCast(k), .index = 0, .bytes = s.bytes, .dpi = 72, .pixels = px });
+        const source: u32 = @intCast(k);
+        switch (s.kind) {
+            .image => {
+                if (!left.take(1)) return overBudget(a, fault, cap);
+                used.pdf_pages_used += 1;
+                const px = try imagePixels(srv, a, s.bytes, fault);
+                try out.append(a, .{ .source = source, .index = 0, .origin = .{ .image = s.bytes }, .dpi = 72, .pixels = px });
+            },
+            .pdf => {
+                if (!srv.config.vision_pdf) return fault.fail(a, .bad_input, "{s}", .{pdf.off_message});
+                const sel: pdf.Selection = switch (s.sel) {
+                    .all_within => |n| .{ .all_within = @min(n, left.left) },
+                    .first => |n| .{ .first = @min(n, left.left) },
+                    .list => |l| if (l.len > left.left) return overBudget(a, fault, cap) else s.sel,
+                };
+                // a client that left must not hold the shared renderer for its deadline
+                if (gone.check()) return error.Cancelled;
+                // sizes and DPI only: each page renders alone just before its generation (onePage)
+                const r = pdf.measurePages(&cx, s.bytes, sel, pdf.ocrCaps(cap), &used, gone) catch |e| return switch (e) {
+                    error.Cancelled => error.Cancelled, // it left while another request held the renderer
+                    else => |refusal| refused(a, &cx, fault, refusal),
+                };
+                if (!left.take(@intCast(r.pages.len))) return overBudget(a, fault, cap);
+                for (r.pages) |p| {
+                    const origin: Origin = .{ .pdf = .{ .bytes = s.bytes, .width = p.width, .height = p.height } };
+                    try out.append(a, .{ .source = source, .index = p.index, .origin = origin, .dpi = p.dpi, .pixels = @as(u64, p.width) * p.height });
+                }
+            },
+        }
     }
     return out.items;
 }
@@ -99,12 +130,37 @@ fn overBudget(a: Allocator, fault: *Fault, cap: u32) Step {
     return fault.fail(a, .bad_input, "a request may read at most {d} pages (TENSORFOLD_MAX_PDF_PAGES); this one selects more", .{cap});
 }
 
+fn refused(a: Allocator, cx: *const Cx, fault: *Fault, e: errors.Refused) Step {
+    return switch (e) {
+        error.Refused => Fault.fromCx(a, cx, fault),
+        error.OutOfMemory => error.OutOfMemory,
+    };
+}
+
+/// One measured PDF page rendered alone into ``pa``; a size other than its measure's is an internal fault.
+fn renderOne(a: Allocator, pa: Allocator, doc: []const u8, index: u32, width: u32, height: u32, fault: *Fault, gone: anytype) Step![]const u8 {
+    var cx: Cx = .{ .a = pa };
+    var used: pdf.Budget = .{};
+    const list = [_]u32{index};
+    const r = pdf.renderPages(&cx, doc, .{ .list = &list }, pdf.ocrCaps(1), &used, gone) catch |e| return switch (e) {
+        error.Cancelled => error.Cancelled, // it left while another request held the renderer
+        else => |refusal| refused(a, &cx, fault, refusal),
+    };
+    if (r.pages.len != 1 or r.pages[0].width != width or r.pages[0].height != height)
+        return fault.fail(a, .internal, "page {d}: the rendered page's size differs from its measure", .{index});
+    return r.pages[0].jpeg;
+}
+
 /// One page in its own arena: decode, generate, parse, validate, then the sink while the pixels live.
 fn onePage(srv: *Server, a: Allocator, reader: api.ocr.Ocr, id: []const u8, p: Planned, sink: PageSink, enc: *budget.Encodes, fault: *Fault, gone: anytype) Step!void {
     var arena = std.heap.ArenaAllocator.init(srv.gpa);
     defer arena.deinit();
     const pa = arena.allocator();
-    const bytes = p.bytes;
+    // a PDF page's JPEG lives in the page arena and goes with it, so one rendered page is in memory at a time
+    const bytes = switch (p.origin) {
+        .image => |b| b,
+        .pdf => |doc| try renderOne(a, pa, doc.bytes, p.index, doc.width, doc.height, fault, gone),
+    };
     const rgb = picture.decodeWithLimits(srv.io, pa, bytes, .{ .pixels = max_page_pixels }) catch |e| return decodeFault(a, fault, e);
     const w: u32 = @intCast(rgb.width);
     const h: u32 = @intCast(rgb.height);
