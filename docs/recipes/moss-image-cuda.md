@@ -92,7 +92,7 @@ then runs each layer and the final norm alone on the float32 run's input, each g
 torch bf16's own cosine and worst-row distance on the same input, then encodes the whole prompt twice and compares it
 with both torch runs and itself.
 
-On a GB10 (sm_121, nvcc 13.0), the 33-row prompt of `~/moss-case/prompt.txt`:
+On a GB10 (sm_121, nvcc 13.0), the 33-row prompt of `case/prompt.txt`:
 
 ```
 NVIDIA GB10: 33 tokens, the same ids as the tokenizer's: true; loaded in 5.6 s
