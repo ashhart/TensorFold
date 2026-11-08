@@ -280,6 +280,7 @@ pub fn parse(a: Allocator, argv: []const []const u8, u: *Usage) error{ Usage, Ou
     var disk_named = false;
     var disk_legacy: ?[]const u8 = null;
     var model: ?[]const u8 = null;
+    var tcp_flag: ?[]const u8 = null;
     var i: usize = 0;
     while (i < argv.len) : (i += 1) {
         const token = argv[i];
@@ -315,8 +316,11 @@ pub fn parse(a: Allocator, argv: []const []const u8, u: *Usage) error{ Usage, Ou
             if (disk_named) return fail(u, a, "argument {s}: not allowed with --prompt-cache-disk", .{name});
             disk_legacy = name;
         }
+        if (std.mem.eql(u8, name, "--host") or std.mem.eql(u8, name, "--port")) tcp_flag = name;
         try apply(a, &out, name, value, u, &repeated);
     }
+    if (out.unix_socket != null and builtin.os.tag == .windows) return fail(u, a, "argument --unix-socket: not served on Windows", .{});
+    if (out.unix_socket != null) if (tcp_flag) |t| return fail(u, a, "argument --unix-socket: not allowed with {s}", .{t});
     out.model = model orelse return fail(u, a, "the following arguments are required: model", .{});
     if ((out.cfg.batched or out.cfg.force_guided) and out.cfg.options() == null) return fail(u, a, "--cfg-batched and --cfg-force-guided need --cfg-gamma or --cfg-allow-request-gamma", .{});
     try ranks(u, a, out);
