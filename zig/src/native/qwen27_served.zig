@@ -187,7 +187,7 @@ const Snaps = struct {
         const st = try q.snapshot.saveSlot(h.gpa, &h.runner, slot, h.back.ringOf(slot), at, &h.spares);
         return @ptrCast(st);
     }
-    fn restore(_: *anyopaque, _: ?*anyopaque, _: pc.Saved) anyerror!void {
+    pub fn restore(_: *anyopaque, _: ?*anyopaque, _: pc.Saved) anyerror!void {
         return error.RestoredInPrefill; // the backend restores a stream's kept state in its prompt pass
     }
     fn drop(ptr: *anyopaque, saved: pc.Saved) void {
@@ -239,18 +239,18 @@ const Left = struct {
 };
 
 /// Kept states of a fake family whose bytes grow as the 27B's K/V rows (64 KiB a token); `saved` is never read.
-const FakeStates = struct {
+pub const FakeStates = struct {
     live: usize = 0,
-    fn bytes(_: *anyopaque, at: u32) u64 {
+    pub fn bytes(_: *anyopaque, at: u32) u64 {
         return @as(u64, at) << 16;
     }
-    fn save(ptr: *anyopaque, _: ?*anyopaque, at: u32) anyerror!pc.Saved {
+    pub fn save(ptr: *anyopaque, _: ?*anyopaque, at: u32) anyerror!pc.Saved {
         const f: *FakeStates = @ptrCast(@alignCast(ptr));
         f.live += 1;
         return @ptrFromInt(@as(usize, at) << 4);
     }
-    fn restore(_: *anyopaque, _: ?*anyopaque, _: pc.Saved) anyerror!void {}
-    fn drop(ptr: *anyopaque, _: pc.Saved) void {
+    pub fn restore(_: *anyopaque, _: ?*anyopaque, _: pc.Saved) anyerror!void {}
+    pub fn drop(ptr: *anyopaque, _: pc.Saved) void {
         const f: *FakeStates = @ptrCast(@alignCast(ptr));
         f.live -= 1;
     }
@@ -313,10 +313,6 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocato
     try @import("qwen27_prompt_floor.zig").environment(a, if (std.c.getenv("TF_PROMPT_ROWS")) |v| std.mem.span(v) else null, why);
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
-    if (o.drafter) |d| _ = q.dflash.config.admit(gpa, io, dir, d) catch |err| {
-        why.* = try drafterRefusal(a, dir, d, err);
-        return err;
-    };
     // glm_dsa's order: the seam exists before the weights load and ready() comes once every GPU allocation is in.
     var hw: ?mtl.Device = null;
     var pair: ?*lb.Pair = null;
@@ -334,6 +330,11 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocato
     else
         try q.model.Model.loadDeferred(gpa, io, dir, 128);
     errdefer model.deinit();
+    // The drafter's config probe runs after the target loads: a pair's rank 1 is refused at its load, and this probe's reads must not be on that teardown path.
+    if (o.drafter) |d| _ = q.dflash.config.admit(gpa, io, dir, d) catch |err| {
+        why.* = try drafterRefusal(a, dir, d, err);
+        return err;
+    };
     var with = o;
     // the tower before the slots: their room and the cache's budget count it as taken
     if (o.vision) |v| with.images = try images.open(gpa, io, model, dir, v, a, why);
@@ -386,7 +387,9 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     const profiling = platform.c.getenv("TF_Q27_PASS_PROFILE") != null;
     const gpa = if (profiling) h.counted.allocator() else parent;
     var draft_model = drafter;
-    const owns_draft = drafter == null and o.drafter != null;
+    // A pair's rank 1 never proposes: it replays rank 0's tree rounds (.tree/.commit), so it loads no drafter.
+    const follower = pair != null and pair.?.rank != 0;
+    const owns_draft = drafter == null and o.drafter != null and !follower;
     if (owns_draft) draft_model = q.dflash.runtime_model.Model.load(gpa, io, model, o.drafter.?, if (o.drafter_bits == 4) .prepared_q4_reference else .bf16_reference) catch |err| {
         why.* = try std.fmt.allocPrint(a, "the native Qwen3.8-27B drafter cannot load {s} ({s})", .{ o.drafter.?, @errorName(err) });
         return error.DrafterLoad;
@@ -646,28 +649,7 @@ pub fn close(ptr: *anyopaque) void {
 test {
     _ = @import("qwen27_share_fit.zig");
     _ = @import("qwen27_pair_tests.zig");
-}
-
-test "Qwen27 interior state uses a guaranteed cold request cut" {
-    const gpa = std.testing.allocator;
-    var arena: std.heap.ArenaAllocator = .init(gpa);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const tokens = try a.alloc(u32, 128 * 1024 + 64);
-    @memset(tokens, 7);
-    var fake: FakeStates = .{};
-    var store = pc.Store.init(gpa, .{ .ptr = &fake, .vtable = &.{ .bytes = FakeStates.bytes, .save = FakeStates.save, .restore = FakeStates.restore, .drop = FakeStates.drop } }, cacheRules(2048), 32 << 30);
-    defer store.deinit();
-    var starts: std.ArrayList(u32) = .empty;
-    var at: u32 = 2048;
-    while (at < tokens.len) : (at += 2048) try starts.append(a, at);
-    const p = try store.beginUser(a, tokens, @intCast(tokens.len - 8), 16, @intCast(tokens.len - 8), &.{}, starts.items, null, &.{});
-    try std.testing.expectEqualSlices(u32, &.{ 16, 129024, @intCast(tokens.len - 8) }, p.marks);
-    for (p.marks) |m| try std.testing.expect(store.keep(tokens, m, null, starts.items, &.{}));
-    tokens[tokens.len - 512] += 1;
-    const followup = try store.beginUser(a, tokens, @intCast(tokens.len - 8), 16, @intCast(tokens.len - 8), &.{}, starts.items, null, &.{});
-    try std.testing.expectEqual(@as(u32, 129024), followup.from);
-    try std.testing.expect(store.held <= store.budget);
+    _ = @import("qwen27_served_cache_test.zig");
 }
 
 test "qwen27 reply cache: warm work preserves both client histories within rounded budgets" {
