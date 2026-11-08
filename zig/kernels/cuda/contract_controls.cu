@@ -470,7 +470,7 @@ extern "C" __global__ void __launch_bounds__(256) tf_ctl_moss_gate_add_product(_
   const size_t i = (size_t)r * width + c;
   X[i] = __float2bfloat16_rn(ld(X + i) + ld(G + c) * ld(Y + i));
 }
-// Gate 3: tf_md_* decoder kernels, one arithmetic step dropped each; tf_me_* encoder kernels, one rounding each.
+// Gate 3: tf_md_* decoder kernels and tf_me_* encoder kernels, one arithmetic step dropped each.
 #include "moss_decoder_controls.cuh"
 #include "moss_encoder_controls.cuh"
 // Gate 3: main's tf_exl3_plan_finish (PlanStage without alpha), the baseline, and two SwiGLU-OAI faults that go red.
