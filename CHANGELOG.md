@@ -29,6 +29,10 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - CUDA: refresh 13 nvcc 13.0 register-count slots from the five-SM 13.0.88 audit; other compiler records and launch geometry stay unchanged (#2515, refs #2395).
 
 - CUDA: a request's finished stats list its prompt pass widths for Qwen3.8-27B, GLM-5.3-Flash and Nemotron, appended only where a pass is known complete. Telemetry only (#2304).
+- GLM CUDA: bound the peer warm-up after NCCL init to 300 seconds, aborting its communicator and stopping every rank with the missing peers and observed transport named on timeout (#2512, part of #2347).
+
+- CUDA: a request's finished stats list its prompt pass widths for Qwen3.8-27B, GLM-5.3-Flash and Nemotron, appended
+  only where a pass is already known complete. Telemetry only (#2304).
 
 - Prompt cache: `--learn` opens its kept states in linear time, so a server with 100,000 of them starts about 5 s sooner (8.0x faster open); the same states and files are kept (#2316).
 
