@@ -201,7 +201,7 @@ pub const LaneHost = struct {
 
     fn submitFn(ctx: *anyopaque, id: Id, request: *const Request, sink: Sink) api.SubmitError!void {
         const h = self(ctx);
-        if (std.c.getenv("TF_DIAG_SUBMIT") != null) std.log.info("q27 submit: len={d} max_tokens={d} bg={}", .{ request.prompt.len, request.max_tokens, request.background });
+        if (@import("sys").environment.read(bool, "TF_DIAG_SUBMIT", false) catch false) std.log.info("q27 submit: len={d} max_tokens={d} bg={}", .{ request.prompt.len, request.max_tokens, request.background });
         if (@import("lane_prompt_only.zig").refuses(h, request)) return error.InvalidRequest;
         const job = h.gpa.create(Job) catch return error.Busy;
         job.* = .{ .host = h, .id = id, .request = request, .sink = sink, .submitted = std.Io.Clock.awake.now(h.io).toNanoseconds() };
