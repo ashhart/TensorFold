@@ -33,26 +33,29 @@ fn failKind(ctx: *anyopaque) ?std.Io.File.Kind {
 
 test "release paths: a release tree refuses a symlink to a file, a directory, a dangling target, and a symlink root" {
     const io = std.testing.io;
-    // A nested symlink to a regular file. The first symlink creation is the
-    // probe: skip the whole test where symlinks can't be created (Windows
-    // without the privilege).
+    // A nested symlink to a regular file; first creation is the probe, so the test skips where symlinks cannot be made.
     {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         try tmp.dir.createDir(io, "bin", .default_dir);
         try tmp.dir.writeFile(io, .{ .sub_path = "bin/real.bin", .data = "clean" });
-        tmp.dir.symLink(io, "bin/real.bin", "bin/link.bin", .{}) catch return error.SkipZigTest;
+        // The link target resolves from its folder, so real.bin means bin/real.bin, a regular file; assert its kind.
+        const target = try tmp.dir.statFile(io, "bin/real.bin", .{ .follow_symlinks = false });
+        try std.testing.expectEqual(std.Io.File.Kind.file, target.kind);
+        tmp.dir.symLink(io, "real.bin", "bin/link.bin", .{}) catch return error.SkipZigTest;
         const dir = try tmp.dir.realPathFileAlloc(io, ".", a);
         defer a.free(dir);
         try std.testing.expect(walk.checkTreeDir(io, a, root, dir));
     }
-    // A nested symlink to a directory.
+    // A nested symlink to a directory; the target resolves from the link folder, so ../realdir points at realdir.
     {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         try tmp.dir.createDir(io, "realdir", .default_dir);
         try tmp.dir.createDir(io, "sub", .default_dir);
-        try tmp.dir.symLink(io, "realdir", "sub/linkdir", .{ .is_directory = true });
+        const target = try tmp.dir.statFile(io, "realdir", .{ .follow_symlinks = false });
+        try std.testing.expectEqual(std.Io.File.Kind.directory, target.kind);
+        try tmp.dir.symLink(io, "../realdir", "sub/linkdir", .{ .is_directory = true });
         const dir = try tmp.dir.realPathFileAlloc(io, ".", a);
         defer a.free(dir);
         try std.testing.expect(walk.checkTreeDir(io, a, root, dir));

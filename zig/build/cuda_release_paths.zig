@@ -59,10 +59,7 @@ pub fn tests(b: *std.Build, all: *std.Build.Step) void {
         command_test.dependOn(&check.step);
     }
 }
-/// Run the checker's tree mode over a release directory. The walk (refuse
-/// symlinks, check every regular file, require a real directory) happens inside
-/// the tool, so it behaves the same on every host; package.sh runs the same
-/// tree mode on its stage.
+/// Run the checker tree mode over a release directory; the walk runs inside the tool, shared with package.sh.
 pub fn directory(b: *std.Build, tool: *std.Build.Step.Compile, dir: std.Build.LazyPath) *std.Build.Step {
     const run = b.addRunArtifact(tool);
     run.addArg(absoluteRoot(b));
