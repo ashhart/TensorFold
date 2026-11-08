@@ -33,14 +33,17 @@ pub fn add(s: *Set, device: @import("metal").Device) !void {
     try s.raw("nemotron", "tree", if (s.units) ks.nemotron_tree else "#define TF_SIMD_LAYOUT 1\n" ++ ks.nemotron_tree);
     inline for (.{ "glm_dsa_mla", "glm_dsa_index", "glm_dsa_glue", "glm_dsa_moe_jobs", "glm_ep" }) |name|
         try s.raw("glm-dsa", name, @field(ks, name));
-    inline for (.{ "glm_vision", "core_qwen_vision", "qwen_image", "moss_image", "moss_image_decoder", "step5_vision" }) |name|
+    inline for (.{ "glm_vision", "core_qwen_vision", "qwen_image", "step5_vision" }) |name|
         try s.fragments("vision-image", name, @field(ks, name));
-    try s.raw("lfm2", "base", ks.lfm2);
-    try s.raw("lfm2", "attention", try @import("../src/families/lfm2_moe/source.zig").prompt(device, s.a, false));
-    try s.raw("lfm2", "masked-prompt", try @import("../src/families/lfm2_moe/source.zig").prompt(device, s.a, true));
+    if (@import("../src/families/moss_image/kernels.zig").available(device)) {
+        try s.fragments("vision-image", "moss_image", ks.moss_image);
+        try s.fragments("vision-image", "moss_image_decoder", ks.moss_image_decoder);
+    }
+    try @import("lfm2.zig").add(s, device);
     try s.raw("lfm3", "base-attention", ks.lfm3 ++ "\n" ++ ks.lfm3_attention);
     try s.raw("lfm3", "image", ks.lfm3_image_rows);
     try s.raw("lfm3", "row-projection", try @import("../src/families/lfm3/row_projection.zig").source(s.a));
     try s.raw("lfm3", "dual-projection", try @import("../src/families/lfm3/dual_projection.zig").source(s.a));
-    try s.fragments("h3", "rows-route-attention", ks.prefill[2].text ++ @import("h3_sources").source);
+    const h3 = @import("../src/families/h3/source.zig");
+    if (h3.available(device)) try s.raw("h3", "rows-route-attention", try h3.library(s.a, 56, 18432, 288, ""));
 }

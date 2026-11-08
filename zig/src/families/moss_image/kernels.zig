@@ -5,6 +5,11 @@ const sources = @import("kernel_sources");
 const frags = @import("../../core/frags.zig");
 pub const Ref = @import("../../core/qwen_vl/weights.zig").Ref;
 
+/// The transformer, encoder and decoder share this load-time capability gate.
+pub fn available(device: mtl.Device) bool {
+    return device.tensorUnits();
+}
+
 /// Each pipeline by its function: the tower's four bf16 projections, the two fp32-sum ones, then this family's.
 pub const names = [_][]const u8{
     "qwv_gemm_bf16_nt_00",

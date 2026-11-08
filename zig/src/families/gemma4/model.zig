@@ -90,7 +90,7 @@ pub const Model = struct {
         m.device = try mtl.Device.init();
         errdefer m.device.deinit();
         // the fused one-row path is the reg lane kernel: M5 only. Before it the row path serves the projections.
-        m.fuse = m.device.tensorUnits() and m.config.widths.allFast(m.config.geo.layers);
+        m.fuse = @import("fused_lane.zig").available(m.device) and m.config.widths.allFast(m.config.geo.layers);
         m.queue = try m.device.queue();
         errdefer m.queue.deinit();
         m.checkpoint = ckpt.Checkpoint.init(gpa);

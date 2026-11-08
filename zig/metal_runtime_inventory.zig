@@ -5,3 +5,7 @@ pub const gpu_profile = engine.gpu_profile;
 pub const sys = @import("sys");
 pub const rope_freq = engine.rope_freq;
 pub const weight_only = engine.weight_only;
+
+test {
+    _ = @import("runtime_sources/modes_test.zig");
+}

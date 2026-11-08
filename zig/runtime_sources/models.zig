@@ -10,20 +10,24 @@ pub fn add(s: *Set, device: mtl.Device) !void {
     const precise = mtl.CompileOptions{ .language = mtl.CompileOptions.mlx().language, .math_functions = .precise };
     for ([_]gcfg.Geometry{ gcfg.dense31b, gcfg.unified12b }) |geo| {
         for ([_]bool{ false, true }) |global| {
-            for ([_]bool{ false, true }) |assistant| for (gcfg.widths.bit_widths) |bits|
-                try s.raw("gemma4", try std.fmt.allocPrint(s.a, "{s}-{}-{}-embed{d}", .{ geo.name, global, assistant, bits }), try g4.glueSource(s.a, geo, global, assistant, bits));
+            for ([_]bool{ false, true }) |assistant| {
+                if (assistant and !g4.draftAvailable(device)) continue;
+                for (gcfg.widths.bit_widths) |bits| try s.raw("gemma4", try std.fmt.allocPrint(s.a, "{s}-{}-{}-embed{d}", .{ geo.name, global, assistant, bits }), try g4.glueSource(s.a, geo, global, assistant, bits));
+            }
             try s.raw("gemma4", "prompt-attention", try g4.promptSource(device, s.a, geo, global));
         }
         try s.raw("gemma4", "vision", try @import("../src/families/gemma4/vision_source.zig").source(device, s.a, geo.hidden));
     }
     for (gcfg.widths.bit_widths) |bits| for ([_]u16{ 32, 64 }) |group| for ([_]bool{ false, true }) |out_f32| for (std.enums.values(gmm.Glu)) |glu|
         try s.raw("gemma4", "affine", try gmm.source(device, s.a, .{ .bits = bits, .group = group, .out_f32 = out_f32, .glu = glu }));
-    for (@import("../src/families/gemma4/contracts.zig").entries) |v| if (v.kind != 0)
+    for (@import("../src/families/gemma4/contracts.zig").entries) |v| if (v.kind != 0 and @import("../src/families/gemma4/fused_lane.zig").available(device))
         try s.fragments("gemma4", v.name, try @import("../src/families/gemma4/fused_lane.zig").source(s.a, v.layout()));
     const ll = @import("../src/families/llama/contracts.zig");
-    try s.add("llama", "glue", try ll.glueSource(s.a), precise);
-    for (ll.geometries) |geo| try s.raw("llama", geo.name, try ll.attentionSource(device, s.a, geo));
-    try s.raw("llama", "gemm", try ll.gemmSource(device, s.a));
+    if (ll.available(device)) {
+        try s.add("llama", "glue", try ll.glueSource(s.a), precise);
+        for (ll.geometries) |geo| try s.raw("llama", geo.name, try ll.attentionSource(device, s.a, geo));
+        try s.raw("llama", "gemm", try ll.gemmSource(device, s.a));
+    }
     try s.add("step5", "glue-sparse", ks.step5_glue ++ ks.step5_sparse, precise);
     const step: @import("../src/families/step5/config.zig").Config = .{};
     const route = @import("../src/core/moe_route.zig");

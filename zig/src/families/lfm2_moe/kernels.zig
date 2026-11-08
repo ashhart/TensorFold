@@ -86,9 +86,9 @@ pub fn load(device: mtl.Device) !Kernels {
     // `out` is undefined, so attn_nax's default does not apply: unset, it would hold stack garbage.
     out.attn_nax = null;
     out.prompt_mask = null;
-    out.nax = if (device.tensorUnits()) try naxLoad(device) else null;
+    out.nax = if (@import("source.zig").optionalAvailable(device)) try naxLoad(device) else null;
     errdefer if (out.nax) |set| for (set) |pipes| for (pipes) |x| x.deinit();
-    if (device.tensorUnits()) {
+    if (@import("source.zig").optionalAvailable(device)) {
         try attnNaxLoad(device, &out);
         errdefer out.attn_nax.?.deinit();
         out.prompt_mask = try @import("prompt_mask.zig").Pipelines.load(device);
