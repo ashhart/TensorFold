@@ -226,6 +226,7 @@ const usage =
     \\  nvfp4 <dir>               NVFP4 projections against recorded lane-matmul and prompt-GEMM fixture bytes
     \\  moe                       softmax routing and SwiGLU experts against host references, then moe-live
     \\  moe-live                  a captured bucket's padding rows: never routed, planned or combined (synthetic)
+    \\  moe-router-bench          tf_moe_router against its register tiles by row count, alternating (35B-A3B shape)
     \\  experts3 [reps]           affine-3 packing and outputs against affine-4 and fp64; reps > 0 times decode
     \\  ggml <dir>                Bolt's IQ2_XXS experts and Q8_0 / IQ2_XXS dense rows on real tensors against fp64 (tools/zig/bolt_ggml_fixture.py)
     \\  ggml-bench                IQ2_XXS expert and Q8_0 lm_head decode GB/s (synthetic blocks)
@@ -447,6 +448,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "modelopt")) return modelopt_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "moe")) return moe_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "moe-live")) return @import("moe_live_tests.zig").run(gpu);
+    if (std.mem.eql(u8, cmd, "moe-router-bench")) return @import("moe_router_bench.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "experts3")) return experts3_tests.run(gpu, if (rest.len > 0) try std.fmt.parseInt(usize, rest[0], 10) else 0);
     if (std.mem.eql(u8, cmd, "ggml")) return ggml_tests.run(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "ggml-bench")) return ggml_tests.bench(gpu);
