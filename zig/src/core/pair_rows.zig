@@ -222,7 +222,7 @@ pub const Pair = struct {
         };
         owned = .{}; // the pair owns them now: the error path must not release them twice
         errdefer gpa.free(p.bytes);
-        p.kernel_wait = platform.c.getenv("TF_Q27_KERNEL_WAIT") != null;
+        p.kernel_wait = platform.environment.read(bool, "TF_Q27_KERNEL_WAIT", false) catch false;
         // both Macs up before the first exchange: a word each way
         try rd.signal(p.peer, l.flags() + HELLO, 1);
         while (@atomicLoad(u64, p.word64(l.flags() + HELLO), .acquire) < 1) std.atomic.spinLoopHint();
@@ -463,11 +463,8 @@ pub const Pair = struct {
         var x: u32 = 1;
         // Ticks after which this link is no longer cold: set at the first relay, when both ranks have just loaded.
         var cold_until: u64 = 0;
-        const trace = platform.c.getenv("TF_Q27_PAIR_TRACE") != null;
-        const trace_every: u64 = if (platform.c.getenv("TF_Q27_PAIR_TRACE_EVERY")) |v|
-            (std.fmt.parseInt(u64, std.mem.span(v), 10) catch 2048)
-        else
-            2048;
+        const trace = platform.environment.read(bool, "TF_Q27_PAIR_TRACE", false) catch false;
+        const trace_every: u64 = platform.environment.read(u64, "TF_Q27_PAIR_TRACE_EVERY", 2048) catch 2048;
         var tr: Trace = .{};
         while (!p.stop.load(.acquire)) {
             p.seam_x.store(x, .release);
