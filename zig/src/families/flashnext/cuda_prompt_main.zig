@@ -7,6 +7,7 @@ const flash = @import("flashnext");
 const want = [_]u32{ 1596, 1144, 310, 5707, 310, 1156, 25, 328 };
 
 pub fn main(init: std.process.Init) !u8 {
+    try @import("env_validate.zig").startup();
     const gpa = init.gpa;
     const io = init.io;
     const args = try init.minimal.args.toSlice(init.arena.allocator());

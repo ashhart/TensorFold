@@ -137,8 +137,8 @@ pub const Draft = struct {
 
     /// TF_FLASHNEXT_KEEP_LATE: "1" asked for, "0" refused, null: not set.
     pub fn lateWanted() ?bool {
-        const v = std.c.getenv("TF_FLASHNEXT_KEEP_LATE") orelse return null;
-        return !std.mem.eql(u8, std.mem.span(v), "0");
+        // the startup check refused every malformed value already, so a plain default stands here
+        return @import("sys").environment.read(?bool, "TF_FLASHNEXT_KEEP_LATE", null) catch null;
     }
 
     const log_ctl_bytes: usize = 256;
