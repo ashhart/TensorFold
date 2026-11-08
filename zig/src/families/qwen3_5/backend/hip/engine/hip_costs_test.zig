@@ -120,3 +120,20 @@ test "the lone window table stays one window of each width to the widest" {
         }
     }
 }
+
+test "a lone window times one repeated token; shared rows carry a token a row inside the vocabulary" {
+    var tokens: [256]u32 = undefined;
+    costs.fillTokens(&tokens, 1, 248320);
+    for (tokens) |t| try T.expectEqual(@as(u32, 1), t);
+
+    costs.fillTokens(&tokens, 4, 248320);
+    var seen: std.AutoHashMapUnmanaged(u32, void) = .empty;
+    defer seen.deinit(T.allocator);
+    for (tokens) |t| {
+        try T.expect(t > 0 and t < 248320);
+        try T.expect(!(try seen.getOrPut(T.allocator, t)).found_existing);
+    }
+
+    costs.fillTokens(tokens[0..16], 2, 1000);
+    for (tokens[0..16]) |t| try T.expect(t > 0 and t < 1000);
+}

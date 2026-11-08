@@ -16,6 +16,12 @@ pub const nowNs = serve.backend.nowNs;
 /// A stream's window position in the timings (the caches are scratch).
 const at = 16;
 
+/// A timed forward's tokens: one repeated for a lone window, one a row for shared rows, which an MoE routes apart.
+pub fn fillTokens(tokens: []u32, windows: usize, vocab: usize) void {
+    const span = @min(vocab, 65536) - 1;
+    for (tokens, 0..) |*t, k| t.* = if (windows > 1) @intCast(1 + (k * 7919) % span) else 1;
+}
+
 const Rig = struct {
     gpa: std.mem.Allocator,
     e: *Engine,
@@ -33,7 +39,6 @@ const Rig = struct {
         r.caches = try gpa.alloc(state.Caches, streams);
         r.rows = try gpa.alloc(Engine.Rows, streams);
         r.tokens = try gpa.alloc(u32, most);
-        @memset(r.tokens, 1);
         r.reqs = try gpa.alloc(draw.Request, most);
         r.out = try gpa.alloc(u32, most);
         // a bucket's rows over the streams can outgrow a lone window when `most` passes 16 rows a stream
@@ -61,6 +66,7 @@ const Rig = struct {
             for (0..w) |j| r.reqs[total + j] = .{ .sampling = null, .position = at + j + 1 };
             total += w;
         }
+        fillTokens(r.tokens[0..total], widths.len, r.e.model().spec.vocab);
         const n = shared.runs(total);
         var spent: u64 = 0;
         for (0..n.warm + n.reps) |i| {
