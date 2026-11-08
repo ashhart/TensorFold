@@ -121,6 +121,7 @@ pub fn build(b: *std.Build) void {
         const budget_mods = metalEngineModules(b, b.graph.host, .Debug, draft_ids, b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = b.graph.host, .optimize = .Debug, .link_libc = true }));
         const budget_empty = b.addWriteFiles().add("budget-compile-only.metallib", "");
         budget_mods.sources.addImport("nemotron_packed_metallib", embedded(b, budget_empty, "nemotron_packed.metallib"));
+        @import("zig/build/metal_prompt_sources.zig").steps(b, budget_mods.metal, budget_mods.sources);
         @import("zig/build/fsr.zig").deviceSteps(b, budget_mods.metal, budget_mods.engine, budget_mods.sources);
         b.step("test-shared-head-cost-metal-host", "Metal family head-cost grants without device execution").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = budget_mods.engine, .filters = &.{"shared head costs:"} })).step);
         @import("zig/build/flashnext_budget.zig").compileHost(b, budget_mods.metal, budget_mods.engine, budget_mods.lanes);
@@ -254,6 +255,7 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/qwen35_layers.zig").wire(b, test_step);
     @import("zig/build/dev_tools.zig").wire(b, target);
     @import("zig/build/profile.zig").wire(b, test_step);
+    @import("zig/build/host_ci.zig").steps(b);
     @import("zig/build/test_reads.zig").wire(b); // last: it adds to the steps everything above declared
 }
 

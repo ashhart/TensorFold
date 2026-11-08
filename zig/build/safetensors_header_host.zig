@@ -10,7 +10,8 @@ pub fn steps(b: *std.Build, core: *std.Build.Module, all: *std.Build.Step) void 
     const checkpoint_run = b.addRunArtifact(b.addTest(.{ .root_module = checkpoint }));
     b.step("test-cluster-checkpoint-host", "Cluster metadata and range controls without shaders").dependOn(&checkpoint_run.step);
     all.dependOn(&checkpoint_run.step);
-    const loader = b.createModule(.{ .root_source_file = b.path("zig/src/cluster/loader_test.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "core", .module = core }} });
+    const canon = @import("cuda_engines.zig").canonModule(b, b.graph.host, .debug);
+    const loader = b.createModule(.{ .root_source_file = b.path("zig/src/cluster/loader_test.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "core", .module = core }, .{ .name = "canon", .module = canon } } });
     b.step("test-cluster-loader-host", "Cluster local-file and fake-peer loading without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = loader })).step);
     // the tower's reader opens and preads through libc's POSIX calls: not Windows
     if (b.graph.host.result.os.tag != .windows) {

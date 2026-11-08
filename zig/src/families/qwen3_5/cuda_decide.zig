@@ -8,18 +8,18 @@ pub const head_file = "joint_head_config.json";
 /// What `open` asks of a checkpoint, as the flags set it.
 pub const Asked = struct { drafter: bool = false, slide: bool = false, vision: bool = false, kv8: bool = false, prompt_int8: bool = false };
 
-/// Why `dir` cannot open: BF16 only with its head and none of the flags it lacks; the head only on BF16 weights.
-pub fn check(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, asked: Asked) !void {
-    const g = geometry.Geometry.read(gpa, io, dir) catch return;
+/// True: BF16 with a head that serves; refused: BF16 without its head or with a flag it lacks, a quantized head.
+pub fn check(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, asked: Asked) !bool {
+    const g = geometry.Geometry.read(gpa, io, dir) catch return false;
     const head = present(gpa, io, dir);
-    if (!g.bf16) return if (head) error.QwenHeadNeedsBf16 else {};
+    if (!g.bf16) return if (head) error.QwenHeadNeedsBf16 else false;
     if (!head) return error.QwenBf16DecisionOnly;
     if (asked.drafter) return error.QwenBf16Drafter;
     if (asked.slide) return error.QwenBf16Slide;
     if (asked.vision) return error.QwenBf16Vision;
     if (asked.kv8) return error.QwenBf16Kv8;
     if (asked.prompt_int8) return error.QwenBf16PromptInt8;
-    return error.QwenJointHeadNotServed; // the head's CUDA operators come next; until then nothing opens
+    return true;
 }
 
 /// Whether `dir` ships the joint schema head's config.
@@ -40,7 +40,7 @@ pub fn explain(err: anyerror) ?[]const u8 {
         error.QwenBf16Vision => "--vision: a BF16 Qwen3.5 decision backbone reads text records only; serve without --vision",
         error.QwenBf16Kv8 => "--kv-cache fp8: the joint schema head is qualified on bf16 caches only; serve without it",
         error.QwenBf16PromptInt8 => "--prompt-precision int8: the joint schema head is qualified on bf16 prompts only; serve without it",
-        error.QwenJointHeadNotServed => "the joint schema head (POST /v1/systemone) is not served on CUDA by this build",
+        error.QwenJointPages => "TF_QWEN_KV_PAGES: the joint schema head plans a window a stream; unset it",
         else => null,
     };
 }
@@ -73,13 +73,13 @@ test "a bf16 checkpoint without a joint head is refused as decision-only on CUDA
     try std.testing.expectError(error.QwenBf16Vision, check(a, io, dir, .{ .vision = true }));
     try std.testing.expectError(error.QwenBf16Kv8, check(a, io, dir, .{ .kv8 = true }));
     try std.testing.expectError(error.QwenBf16PromptInt8, check(a, io, dir, .{ .prompt_int8 = true }));
-    try std.testing.expectError(error.QwenJointHeadNotServed, check(a, io, dir, .{}));
+    try std.testing.expect(try check(a, io, dir, .{}));
     // a quantized checkpoint that ships the head is refused; without the head it opens as before
     const mlx = try std.mem.replaceOwned(u8, a, config_text, "QUANT", "\"quantization\":{\"group_size\":64,\"bits\":4},");
     defer a.free(mlx);
     try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = mlx });
     try std.testing.expectError(error.QwenHeadNeedsBf16, check(a, io, dir, .{}));
     try tmp.dir.deleteFile(io, head_file);
-    try check(a, io, dir, .{ .drafter = true, .kv8 = true });
-    for ([_]anyerror{ error.QwenHeadNeedsBf16, error.QwenBf16Drafter, error.QwenJointHeadNotServed }) |err| try std.testing.expect(explain(err) != null);
+    try std.testing.expect(!try check(a, io, dir, .{ .drafter = true, .kv8 = true }));
+    for ([_]anyerror{ error.QwenHeadNeedsBf16, error.QwenBf16Drafter, error.QwenJointPages }) |err| try std.testing.expect(explain(err) != null);
 }

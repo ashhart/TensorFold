@@ -21,6 +21,9 @@ pub const qwen_vl = @import("src/core/qwen_vl/qwen_vl.zig");
 pub const tree_round = @import("tree_round");
 pub const tree_commit_gpu = @import("tree_commit_gpu");
 pub const bf16_topk = @import("bf16_topk");
+/// The core pool and its Metal pages, which qwen27/kv_pages.zig reads through core.
+pub const kv_pool = @import("src/core/kv_pool.zig");
+pub const metal_kv_pages = @import("src/core/metal_kv_pages.zig");
 const a = std.testing.allocator;
 
 test "residency owner GLM: actual arena slots tower and snapshots match live unique allocations" {

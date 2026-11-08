@@ -77,6 +77,7 @@ pub const landed_cuda = registry.cuda ++
     cuda_pending ++
     @import("qwen_decode_pending.zig").records ++
     @import("qwen_bf16_norm_records.zig").records ++
+    @import("joint_cuda_records.zig").records ++
     registry.glm_pending.sampling ++
     @import("glm_kv_pending.zig").records ++
     @import("exl3_grouped_records.zig").records ++

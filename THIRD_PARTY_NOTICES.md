@@ -259,8 +259,9 @@ runs tensor parallelism over it, under the same copyright and Apache License 2.0
 ## Cloudflare Clef
 
 `zig/src/server/clef_encode.zig` and `clef_answer.zig`, the host head in `zig/src/core/joint_schema/`
-(`reference.zig`, `reference_attn.zig`) and the device head in `zig/src/hip/joint_schema/` with its kernels in
-`zig/kernels/hip/joint_schema/joint_schema.hip` port Cloudflare's Clef release code, `joint_schema_model.py` in
+(`reference.zig`, `reference_attn.zig`), the device heads in `zig/src/hip/joint_schema/` and
+`zig/src/cuda/joint_schema/` with their kernels in `zig/kernels/hip/joint_schema/joint_schema.hip` and
+`zig/kernels/cuda/joint_schema.cu` port Cloudflare's Clef release code, `joint_schema_model.py` in
 [Cloudflare/clef](https://huggingface.co/Cloudflare/clef) and
 [Cloudflare/clef-flash](https://huggingface.co/Cloudflare/clef-flash): the record rendering and encoding
 (`render`, `question_options`, `encode_record`), the verbatim system prompt, the joint schema head

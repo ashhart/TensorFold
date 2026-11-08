@@ -231,6 +231,7 @@ test "served scratch: one drafter frame does not allocate 128 streams of logits 
     d.target_taps = 111411200;
     d.step_ms = 1;
     d.n_costs = 0;
+    d.tree_nodes = try q.draft.tree.nodes(); // as Draft.init reads it
     try std.testing.expectEqual(d.c.ringBytes() + d.target_taps + d.scratch_one, d.drafter().facts().stream_bytes);
     const one = try d.layout(false);
     try std.testing.expectEqual(@as(usize, 23667968), one);

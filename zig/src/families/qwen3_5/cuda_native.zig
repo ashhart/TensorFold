@@ -33,7 +33,10 @@ pub const formats: []const []const u8 = &.{ "mlx-q4g64", "exl3" };
 pub const default_context: i64 = 32768;
 /// A plain BF16 checkpoint's preflight counts its text tensors, not the tower and MTP in its shards.
 pub const textWeightBytes = @import("cuda_bf16_bytes.zig").textWeightBytes;
+/// BF16 serves decisions only, with a joint schema head (joint_head_config.json); chat refuses it.
+pub const decision_formats: []const []const u8 = &.{"bf16"};
 const decide = @import("cuda_decide.zig");
+const joint = @import("cuda_joint_readout.zig");
 pub const max_segments: u32 = 1;
 pub const prompt_rows: u32 = E.max_rows;
 /// --drafter loads a DFlash2 draft model (openDrafter), or on the MoE target its MTP layer; DFlash2 has no own head.
@@ -97,6 +100,8 @@ pub const Loaded = struct {
     engine_paged: bool = false,
     /// An integrated GPU: kept states in device memory on the host budget (Target.device), the startup line says so.
     device_snaps: bool = false,
+    /// A Clef checkpoint's readouts (the engine then answers only those); null for every other checkpoint.
+    readouts: ?lanes.readout.Info = null,
 };
 
 pub fn cacheBytes(e: *const E.Engine, cap: usize, test_tokens: usize) !usize {
@@ -144,8 +149,21 @@ pub fn ledgerPool(p: *anyopaque) ?*@import("core").kv_pool.Pool {
 }
 
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
-    try decide.check(gpa, io, dir, .{ .drafter = o.drafter != null, .slide = o.slide, .vision = o.vision != null, .kv8 = o.kv8, .prompt_int8 = o.prompt_int8 });
-    return openLanes(gpa, io, ctx, dir, kernels, o);
+    const clef = try decide.check(gpa, io, dir, .{ .drafter = o.drafter != null, .slide = o.slide, .vision = o.vision != null, .kv8 = o.kv8, .prompt_int8 = o.prompt_int8 });
+    var loaded = try openLanes(gpa, io, ctx, dir, kernels, o);
+    if (!clef) return loaded;
+    errdefer loaded.deinit(loaded.ctx);
+    if (loaded.layout != null) return error.QwenJointPages;
+    const l: *Lanes = @ptrCast(@alignCast(loaded.ctx));
+    var why: @import("core").joint_schema.Problem = .{};
+    const j = joint.Joint.open(gpa, io, l.e, dir, o.context, &why) catch |err| {
+        std.log.err("the joint schema head cannot open ({s}): {s}", .{ @errorName(err), why.text });
+        return err;
+    };
+    loaded.backend = l.useReadout(j.readout()); // the lanes own the head from here
+    loaded.stream_bytes += joint.streamBytes(j.head.cfg, o.context);
+    loaded.readouts = j.readout().info;
+    return loaded;
 }
 
 /// `open` without the decision-only refusals: the runners open a BF16 backbone with a test readout through it.
@@ -233,29 +251,7 @@ const drafter_open = @import("cuda_drafter_open.zig");
 pub const Opened = drafter_open.Opened;
 pub const openDrafter = drafter_open.openDrafter;
 
-/// A request this engine refuses, in words, or with no engine (null) its open; null: none of its own.
-pub fn explain(ctx: ?*anyopaque, err: anyerror) ?[]const u8 {
-    if (ctx == null) if (decide.explain(err)) |why| return why;
-    if (ctx == null) return switch (err) {
-        error.NoQwenVision => "--vision: this checkpoint has no image tower (no vision_config): serve it without --vision",
-        error.QwenPagesNoLearner => "TF_QWEN_KV_PAGES: the learner reads whole windows, not pages; drop --slide or unset it",
-        error.QwenRequestStartsWithSharedKv => "TF_QWEN_REQUEST_STARTS=1 cannot be used with TF_QWEN_KV_SHARE above 0; unset request starts or disable shared KV",
-        error.QwenShareNeedsPages => "TF_QWEN_KV_SHARE keeps prompts as pool pages: set TF_QWEN_KV_PAGES to a divisor of the 4096-row prompt chunk",
-        error.BadQwenKvShare => "TF_QWEN_KV_SHARE takes the most recurrent-state snapshots the prompt cache keeps (0 or unset: off)",
-        error.QwenYarnNoLearner => "--slide: the learner's attention ropes without YaRN; serve without --slide, or without --rope-yarn and a YaRN config",
-        error.BadQwenKvPages => "TF_QWEN_KV_PAGES takes the positions a page holds (a whole number; 0 or unset: a window each)",
-        error.UnsupportedQwenVision => "--vision: this checkpoint's image tower or text M-RoPE is not one the CUDA engine reads",
-        else => null,
-    };
-    return switch (err) {
-        error.InvalidQwenPrompt => "the prompt and its reply exceed this server's context window: shorten it or lower max_tokens",
-        error.BadImagePlaceholders => "the image placeholders do not match the prepared images",
-        error.BadImageGrid, error.BadImagePatches => "an image's patches do not fit the vision tower",
-        error.QwenServedWithoutVision => "image inputs need the server started with --vision",
-        error.OutOfMemory => "the GPU had no memory left for this request's caches: retry once another request ends",
-        else => null,
-    };
-}
+pub const explain = @import("cuda_native_explain.zig").explain;
 
 fn release(p: *anyopaque) void {
     const l: *Lanes = @ptrCast(@alignCast(p));

@@ -36,6 +36,11 @@ pub fn takeCancels(h: *LaneHost) void {
                 };
             };
             if (job.started and !job.stream.finished) h.core.discard(&job.stream);
+            // a cancel between two prompt calls ends the request with no call failing: this line marks the end
+            if (job.fill_began) if (h.trace) |t| {
+                const at = t.now();
+                t.line(.{ .t0_ns = at, .t1_ns = at, .kind = .cancel, .id = job.id, .stream = job.seq, .rows_to = job.stream.fill_at.load(.monotonic) });
+            };
             h.finish(job, .cancelled, "");
         }
     }

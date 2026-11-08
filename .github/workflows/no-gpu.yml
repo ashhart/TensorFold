@@ -49,7 +49,7 @@ jobs:
           python3 tools/zig/cuda_common_check.py
           python3 tools/zig/cuda_fragment_check.py
           python3 -m unittest discover -s tools/zig -p cuda_common_check_test.py -v
-      # The lean rule (600-line files, one-line comments within 120 columns): no problem the base branch lacks.
+      # The lean rule (600-line files, one-line comments within 120 columns, no direct getenv of a setting): no problem the base branch lacks.
       - name: lean check
         if: ${{ github.event_name != 'schedule' }}
         env:
@@ -278,3 +278,56 @@ jobs:
         with:
           path: .zig-cache
           key: zig-build-v3-macOS-dev-tools-0.17.0-${{ steps.cache-key.outputs.shared }}-${{ github.sha }}${{ github.event_name == 'schedule' && '-nightly' || '' }}
+
+  # New host checks stay nightly until these exact runner classes establish the fast groups' wall time.
+  host-nightly-linux:
+    if: ${{ github.event_name == 'schedule' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [fast, host, compile, hip]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.0
+          use-cache: false
+      - name: Host checks and aggregate wall time
+        shell: bash
+        env:
+          SUITE: ${{ matrix.suite }}
+        run: |
+          printf 'Runner class: %s %s\n' "$RUNNER_OS" "$RUNNER_ARCH"
+          flags=()
+          if [ "$SUITE" = hip ]; then flags=(-Dhip=true); fi
+          TIMEFORMAT='Host checks wall seconds: %R'
+          time zig build -Dfixed-cpu "${flags[@]}" "test-host-ci-linux-$SUITE" --test-timeout 10m
+  host-nightly-macos:
+    if: ${{ github.event_name == 'schedule' }}
+    runs-on: macos-26
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [fast, adapters, deepseek, lanes]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.0
+          use-cache: false
+      - name: Host checks and aggregate wall time
+        shell: bash
+        env:
+          SUITE: ${{ matrix.suite }}
+        run: |
+          printf 'Runner class: %s %s\n' "$RUNNER_OS" "$RUNNER_ARCH"
+          TIMEFORMAT='Host checks wall seconds: %R'
+          time zig build "test-host-ci-macos-$SUITE" --test-timeout 30m
+      # test-host-ci-macos-deferred is deliberately not invoked until its fixture fixes land.

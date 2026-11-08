@@ -579,3 +579,14 @@ test "the f64 angle table against core's words: 19 of 64 differ, first at 7" {
     try std.testing.expectEqual(@as(?usize, 7), first);
     try std.testing.expectEqual(@as(u32, 1), max_ulp);
 }
+
+test "a page's bytes: the pool's layout and the kernels' stride agree" {
+    const config = @import("config.zig");
+    var why: config.Why = .{};
+    var m: Model = undefined;
+    m.c = try config.parse(std.testing.allocator, config.pinned, &why);
+    m.context = 32768;
+    m.ring = ringSize(prompt_rows, m.c.window);
+    try std.testing.expectEqual(m.pageBytes(), m.layout().pageBytes());
+    try std.testing.expectEqual(@as(u32, 10), m.layout().group().layers);
+}
