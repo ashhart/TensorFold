@@ -9,8 +9,8 @@ const moe_w = wt.moe_w;
 
 /// On by default: its slot rows of y are apart from the routed experts', so the bits match; =0 runs it after them.
 pub fn on() bool {
-    const v = std.c.getenv("TF_FLASHNEXT_SHARED_SIDE") orelse return true;
-    return !std.mem.eql(u8, std.mem.span(v), "0");
+    // the startup check refused every malformed value already, so a plain default stands here
+    return @import("sys").environment.read(bool, "TF_FLASHNEXT_SHARED_SIDE", true) catch true;
 }
 
 /// The shared expert's stream and the two points it forks and joins at.

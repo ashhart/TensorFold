@@ -194,7 +194,7 @@ pub fn run(comptime Tri: type, gpa: std.mem.Allocator, io: std.Io, driver: *cuda
     if (tokens.len == 0 or new_tokens == 0 or out.len < new_tokens or tokens.len + new_tokens > prompt.max_tokens) return error.UnexpectedTensor;
     var e = try prompt.Engine.init(gpa, io, driver, stream, model_dir);
     defer e.deinit();
-    const by_rows = if (std.c.getenv("TF_FLASHNEXT_PROMPT")) |v| std.mem.eql(u8, std.mem.span(v), "rows") else false;
+    const by_rows = (try @import("sys").environment.read(?u64, "TF_FLASHNEXT_PROMPT", null)) != null;
     var rows: ?Rows = if (by_rows) try Rows.init(gpa, driver, stream) else null;
     defer if (rows) |*r| r.deinit();
     var seq = try e.newSeq(tokens.len + new_tokens);
