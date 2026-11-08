@@ -15,8 +15,7 @@ pub fn steps(b: *std.Build) void {
             wire(b, "test-host-ci-macos-adapters", "Nightly host checks without a GPU or shader compiler", &macos_adapters);
             wire(b, "test-host-ci-macos-deepseek", "Nightly host checks without a GPU or shader compiler", &macos_deepseek);
             wire(b, "test-host-ci-macos-lanes", "Nightly host checks without a GPU or shader compiler", &macos_lanes);
-            // No workflow calls this list until the fixture fixes have landed.
-            wire(b, "test-host-ci-macos-deferred", "Deferred host regressions; enable nightly after their fixes land", &macos_deferred);
+            wire(b, "test-host-ci-macos-deferred", "Nightly host checks without a GPU or shader compiler", &macos_deferred);
         },
         else => {},
     }
