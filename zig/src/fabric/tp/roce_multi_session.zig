@@ -22,7 +22,7 @@ pub fn open(s: anytype, d: *const cuda.Driver, b: *Bootstrap, image: []const u8)
     var pick_buf: [bootstrap.max_ranks]u8 = undefined;
     for (try b.allGather(&.{@intFromBool(picked)}, &pick_buf, &pick_blobs)) |x|
         if (x.len != 1 or x[0] != 1) return fallback(s, error.RoceHcaSelectionFailed);
-    const r = roce.Roce.init(d, b, image, .{ .relay = cfg.roce_relay, .wire = if (cfg.roce_wire == .shm) .shm else .verbs, .hcas = specs[0..n], .traffic_class = cfg.roce_tc, .cpu = cfg.roce_cpu, .max_bytes = cfg.mailbox_max_bytes, .timeout_ns = cfg.mailbox_timeout_ns, .fast = cfg.roce_fast, .blocks = cfg.roce_blocks }) catch |e| return fallback(s, e);
+    const r = roce.Roce.init(d, b, image, .{ .relay = cfg.roce_relay, .relay_max_bytes = cfg.roce_relay_max_bytes, .wire = if (cfg.roce_wire == .shm) .shm else .verbs, .hcas = specs[0..n], .traffic_class = cfg.roce_tc, .cpu = cfg.roce_cpu, .max_bytes = cfg.mailbox_max_bytes, .timeout_ns = cfg.mailbox_timeout_ns, .fast = cfg.roce_fast, .blocks = cfg.roce_blocks }) catch |e| return fallback(s, e);
     s.roce_multi = r;
     if (cfg.roce_chunked_bytes > 0 and !r.chunk_abi) {
         r.deinit();

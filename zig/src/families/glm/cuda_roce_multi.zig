@@ -14,9 +14,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, g: *Group
         if (g.rank == 0) std.log.info("TF_GLM_ROCE_MULTI=1 takes three ranks or more; {d} keep their own route", .{g.world});
         return;
     }
-    var cfg = try tp.Config.fromEnv(); // TF_TP_MASTER, TF_TP_PORT and the wire's settings: a bad value refuses
-    cfg.rank = @intCast(g.rank);
-    cfg.world = @intCast(g.world);
+    const cfg = try tp.Config.fromEnvFor(@intCast(g.world), @intCast(g.rank));
     var entered = false; // this rank's probe enqueued NCCL's gather
     const w = borrow(gpa, io, d, g, cfg, &entered) catch |err| {
         // TF_TP_ROCE_FALLBACK=error refuses rather than run on NCCL, as does a failure NCCL's order may not survive
@@ -39,7 +37,7 @@ fn borrow(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, g: *const G
     defer gpa.free(image); // the module copies it at load
     var b = try tp.Bootstrap.open(cfg);
     defer b.close(); // the wire is connected by the end of init
-    try b.agree(&cfg.digest(), "fabric/tp settings (TF_TP_MAILBOX_MAX_KB, TF_TP_ROCE_WIRE, TF_TP_ROCE_FALLBACK)");
+    try b.agree(&cfg.digest(), "fabric/tp settings (TF_TP_MAILBOX_MAX_KB, TF_TP_ROCE_RELAY_MAX_KB, TF_TP_ROCE_WIRE, TF_TP_ROCE_FALLBACK)");
     var specs: [tp.roce_verbs.max_hcas]tp.roce_verbs.HcaSpec = undefined;
     var picked = true;
     const n = if (cfg.roce_wire == .verbs) tp.roce_pick.resolve(cfg, &b, &specs) catch blk: {
@@ -47,7 +45,7 @@ fn borrow(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, g: *const G
         break :blk 0;
     } else 0;
     if (!try everyRank(&b, picked)) return error.RoceHcaSelectionFailed;
-    const r = try tp.roce_multi.Roce.init(d, &b, image, .{ .wire = if (cfg.roce_wire == .shm) .shm else .verbs, .hcas = specs[0..n], .traffic_class = cfg.roce_tc, .cpu = cfg.roce_cpu, .max_bytes = cfg.mailbox_max_bytes, .timeout_ns = cfg.mailbox_timeout_ns, .fast = cfg.roce_fast, .blocks = cfg.roce_blocks });
+    const r = try tp.roce_multi.Roce.init(d, &b, image, wireOptions(cfg, specs[0..n]));
     errdefer r.deinit();
     const w = try gpa.create(Wire); // before the last vote: nothing after it can fail
     errdefer gpa.destroy(w);
@@ -56,8 +54,27 @@ fn borrow(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, g: *const G
     defer p.deinit();
     try vote(&b, p.steps(), entered);
     var line: [384]u8 = undefined;
-    std.log.info("rank {d}: TF_GLM_ROCE_MULTI: gathers up to {d} KiB a rank on the wire, its probe equal to NCCL's: {s}", .{ g.rank, r.slot_bytes / 1024, r.describeLink(&line) });
+    const ceiling = if (r.relay) @min(r.slot_bytes, r.relay_max_bytes) else r.slot_bytes;
+    std.log.info("rank {d}: TF_GLM_ROCE_MULTI: gathers up to {d} KiB a rank on the wire, its probe equal to NCCL's: {s}", .{ g.rank, ceiling / 1024, r.describeLink(&line) });
     return w;
+}
+
+/// The wire settings used by borrow, kept separate from device setup so the host can check the exact options.
+fn wireOptions(cfg: tp.Config, hcas: []const tp.roce_verbs.HcaSpec) tp.roce_multi.Options {
+    return .{ .relay = cfg.roce_relay, .relay_max_bytes = cfg.roce_relay_max_bytes, .wire = if (cfg.roce_wire == .shm) .shm else .verbs, .hcas = hcas, .traffic_class = cfg.roce_tc, .cpu = cfg.roce_cpu, .max_bytes = cfg.mailbox_max_bytes, .timeout_ns = cfg.mailbox_timeout_ns, .fast = cfg.roce_fast, .blocks = cfg.roce_blocks };
+}
+
+/// Called before startup or weight loading, using the family's already checked rank/world.
+pub fn validate(world: usize, rank: usize, enabled: bool) !void {
+    if (enabled) _ = try tp.Config.fromEnvFor(@intCast(world), @intCast(rank));
+}
+
+test "GLM relay integration: wire options preserve the opt-in and its slot independently" {
+    const o = wireOptions(.{ .world = 4, .roce_relay = true, .roce_relay_max_bytes = 128 * 1024, .mailbox_max_bytes = 256 * 1024 }, &.{});
+    try std.testing.expect(o.relay);
+    try std.testing.expectEqual(@as(usize, 256 * 1024), o.max_bytes);
+    try std.testing.expectEqual(@as(usize, 128 * 1024), o.relay_max_bytes);
+    try std.testing.expect(!wireOptions(.{}, &.{}).relay);
 }
 
 /// A rank's probe in steps (made ready before any gather, both gathers, the wait, the verdict); a test fails any.

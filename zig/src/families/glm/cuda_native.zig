@@ -186,6 +186,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         std.log.err("{s}", .{problem});
         return err;
     };
+    try @import("cuda_roce_multi.zig").validate(p.world, p.rank, set.roce_multi);
     set.kv8 = o.kv8;
     if (share_mod.moved(if (std.c.getenv("TF_GLM_KV_SHARE")) |v| std.mem.span(v) else "")) return error.GlmKvShareMoved; // before any rank opens
     const share_snaps = try kp.sharing();
