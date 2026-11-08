@@ -229,6 +229,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - HIP: the qwen3_5 engine reads a DFlash2 drafter's `config.json` against its target, refusing one it can't run, and loads its weights as MLX affine-4 (groups of 64), quantized on the host as on CUDA; the server doesn't use the drafter (#2477, part 2 of #1563). Thanks to @AbrahamCete.
 
+- HIP: the qwen3_5 engine builds the DFlash2 drafter's kernels (tap gathers, key ring, dynamic conv, block attention), tested and in the kernel contract; nothing launches them yet (#2545, part 3 of #1563). Thanks to @AbrahamCete.
+
 - Developers: the Qwen3.8-27B Metal lane check initializes its draft-window costs, and the served draft check compares complete state at the consumed token position, with exact tokens and state bytes (#2493, fixes #2489).
 
 - Developers: `tools/zig/cuda_fragment_check.py` checks that every CUDA file including a function-body fragment (`prefill_attention_rows.cuh`, `qmmf_body.cuh`) declares each name the fragment uses on the branches it takes, and CI runs it beside the shared-copy check. It would have caught the `contract_controls.cu` miss that #2463 fixed (#2495).
