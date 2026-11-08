@@ -313,7 +313,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [fast, adapters, deepseek, lanes]
+        suite: [fast, adapters, deepseek, lanes, deferred]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -330,4 +330,3 @@ jobs:
           printf 'Runner class: %s %s\n' "$RUNNER_OS" "$RUNNER_ARCH"
           TIMEFORMAT='Host checks wall seconds: %R'
           time zig build "test-host-ci-macos-$SUITE" --test-timeout 30m
-      # test-host-ci-macos-deferred is deliberately not invoked until its fixture fixes land.
