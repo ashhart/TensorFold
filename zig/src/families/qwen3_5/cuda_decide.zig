@@ -1,6 +1,7 @@
-//! A plain BF16 Qwen3.5 checkpoint on CUDA is a decision backbone (Clef-Flash): what it refuses before any device work.
+//! A plain BF16 Qwen3.5 checkpoint on CUDA (Clef-Flash decisions, LightOnOCR-3 chat): its refusals before device work.
 const std = @import("std");
 const geometry = @import("cuda_geometry.zig");
+const tower = @import("qwen_vision");
 
 /// The joint schema head's config beside the weights marks a Clef checkpoint.
 pub const head_file = "joint_head_config.json";
@@ -8,17 +9,33 @@ pub const head_file = "joint_head_config.json";
 /// What `open` asks of a checkpoint, as the flags set it.
 pub const Asked = struct { drafter: bool = false, slide: bool = false, vision: bool = false, kv8: bool = false, prompt_int8: bool = false };
 
-/// True: BF16 with a head that serves; refused: BF16 without its head or with a flag it lacks, a quantized head.
+/// True: BF16 decisions; false: other formats or BF16 image chat; refused: no head nor tower, flags, a quantized head.
 pub fn check(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, asked: Asked) !bool {
     const g = geometry.Geometry.read(gpa, io, dir) catch return false;
     const head = present(gpa, io, dir);
     if (!g.bf16) return if (head) error.QwenHeadNeedsBf16 else false;
-    if (!head) return error.QwenBf16DecisionOnly;
+    if (!head) {
+        if (!try chat(gpa, io, dir, g.hidden)) return error.QwenBf16DecisionOnly;
+        // a BF16 chat checkpoint is qualified on its own drafts, bf16 caches and bf16 prompts only
+        if (asked.drafter) return error.QwenBf16ChatDrafter;
+        if (asked.slide) return error.QwenBf16ChatSlide;
+        if (asked.kv8) return error.QwenBf16ChatKv8;
+        if (asked.prompt_int8) return error.QwenBf16ChatPromptInt8;
+        return false;
+    }
     if (asked.drafter) return error.QwenBf16Drafter;
     if (asked.slide) return error.QwenBf16Slide;
     if (asked.vision) return error.QwenBf16Vision;
     if (asked.kv8) return error.QwenBf16Kv8;
     if (asked.prompt_int8) return error.QwenBf16PromptInt8;
+    return true;
+}
+
+/// A headless BF16 checkpoint chats if the CUDA tower reads its tower at the text's width; false without a tower.
+pub fn chat(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, hidden: usize) !bool {
+    const read = tower.Settings.read(gpa, io, dir) catch |err| return if (err == error.UnsupportedQwenVision) error.QwenBf16ChatTower else err;
+    const s = read orelse return false;
+    if (s.tower.out_hidden != hidden) return error.QwenBf16ChatTower;
     return true;
 }
 
@@ -40,6 +57,11 @@ pub fn explain(err: anyerror) ?[]const u8 {
         error.QwenBf16Vision => "--vision: a BF16 Qwen3.5 decision backbone reads text records only; serve without --vision",
         error.QwenBf16Kv8 => "--kv-cache fp8: the joint schema head is qualified on bf16 caches only; serve without it",
         error.QwenBf16PromptInt8 => "--prompt-precision int8: the joint schema head is qualified on bf16 prompts only; serve without it",
+        error.QwenBf16ChatTower => "a BF16 Qwen3.5 checkpoint without a joint head serves image chat, and the CUDA tower cannot read its image tower",
+        error.QwenBf16ChatDrafter => "--drafter: a BF16 Qwen3.5 image checkpoint drafts from its own replies; serve without --drafter",
+        error.QwenBf16ChatSlide => "--slide: a BF16 Qwen3.5 image checkpoint does not learn; serve without --slide",
+        error.QwenBf16ChatKv8 => "--kv-cache fp8: a BF16 Qwen3.5 image checkpoint is qualified on bf16 caches only; serve without it",
+        error.QwenBf16ChatPromptInt8 => "--prompt-precision int8: a BF16 Qwen3.5 image checkpoint is qualified on bf16 prompts only; serve without it",
         error.QwenJointPages => "TF_QWEN_KV_PAGES: the joint schema head plans a window a stream; unset it",
         else => null,
     };
@@ -82,4 +104,41 @@ test "a bf16 checkpoint without a joint head is refused as decision-only on CUDA
     try tmp.dir.deleteFile(io, head_file);
     try std.testing.expect(!try check(a, io, dir, .{ .drafter = true, .kv8 = true }));
     for ([_]anyerror{ error.QwenHeadNeedsBf16, error.QwenBf16Drafter, error.QwenJointPages }) |err| try std.testing.expect(explain(err) != null);
+}
+
+test "a bf16 image checkpoint without a joint head opens as chat on CUDA, refusing unqualified flags and a foreign tower" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer a.free(dir);
+    const lighton = @embedFile("fixtures/lighton-ocr-0.8b.json");
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = lighton });
+    try std.testing.expect(!try check(a, io, dir, .{}));
+    try std.testing.expect(!try check(a, io, dir, .{ .vision = true }));
+    try std.testing.expectError(error.QwenBf16ChatDrafter, check(a, io, dir, .{ .drafter = true }));
+    try std.testing.expectError(error.QwenBf16ChatSlide, check(a, io, dir, .{ .slide = true }));
+    try std.testing.expectError(error.QwenBf16ChatKv8, check(a, io, dir, .{ .kv8 = true }));
+    try std.testing.expectError(error.QwenBf16ChatPromptInt8, check(a, io, dir, .{ .prompt_int8 = true }));
+    for ([_]anyerror{ error.QwenBf16ChatDrafter, error.QwenBf16ChatSlide, error.QwenBf16ChatKv8, error.QwenBf16ChatPromptInt8 }) |err|
+        try std.testing.expectStringStartsWith(explain(err).?, "--");
+    // a tower whose merger is not the text's width is refused before any weights, without or with --vision
+    const narrow = try std.mem.replaceOwned(u8, a, lighton, "\"out_hidden_size\": 1024", "\"out_hidden_size\": 768");
+    defer a.free(narrow);
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = narrow });
+    try std.testing.expectError(error.QwenBf16ChatTower, check(a, io, dir, .{}));
+    try std.testing.expectError(error.QwenBf16ChatTower, check(a, io, dir, .{ .vision = true }));
+    try std.testing.expect(!std.mem.startsWith(u8, explain(error.QwenBf16ChatTower).?, "--"));
+    // a tower geometry the CUDA tower does not run (14-pixel patches) at the same width, refused the same way
+    const patch14 = try std.mem.replaceOwned(u8, a, lighton, "\"patch_size\": 16", "\"patch_size\": 14");
+    defer a.free(patch14);
+    try std.testing.expect(!std.mem.eql(u8, patch14, lighton));
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = patch14 });
+    try std.testing.expectError(error.QwenBf16ChatTower, check(a, io, dir, .{}));
+    // with a joint head beside it, the checkpoint is Clef's decision backbone and keeps its refusals
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = lighton });
+    try tmp.dir.writeFile(io, .{ .sub_path = head_file, .data = "{}" });
+    try std.testing.expectError(error.QwenBf16Vision, check(a, io, dir, .{ .vision = true }));
+    try std.testing.expect(try check(a, io, dir, .{}));
 }
