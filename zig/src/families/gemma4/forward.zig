@@ -221,6 +221,7 @@ pub fn pleInputs(m: *Model, e: mtl.ComputeEncoder, s: anytype, pk: *const kernel
     bind(e, &.{ sp.prj, sp.tok }, 0);
     bindRef(e, t.projection_norm, 2);
     e.setValue(cfg.eps, 3);
+    // 1/sqrt(hidden): the projection's w_scale in DeepMind's _modules.py, applied by _layers.py's Einsum.
     e.setValue(@as(f32, 1.0) / @sqrt(@as(f32, @floatFromInt(geo.hidden))), 4);
     e.setValue(@as(f32, 1.0) / @sqrt(@as(f32, 2.0)), 5);
     bind(e, &.{sp.pli}, 6);

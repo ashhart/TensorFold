@@ -39,7 +39,7 @@ kernel void gemma_ple_combine(const device bfloat* PRJ [[buffer(0)]], const devi
   threadgroup float part[T / 32];
   const uint col = tp.x, layer = tg.x, row = tg.y;
   const size_t at = size_t(row) * L * P + size_t(layer) * P + col;
-  // The model projection times 1/sqrt(D), as a bf16 scalar, rounded to bf16.
+  // The model projection times 1/sqrt(D), DeepMind's projection w_scale, as a bf16 scalar, rounded to bf16.
   const float x = float(bfloat(float(PRJ[at]) * float(bfloat(psc))));
   // RMSNorm over the P columns: x * rsqrt(mean(x^2) + eps) rounded to bf16, then times the weight, rounded to bf16.
   const float ms = ple_reduce(x * x, part, lane, sg) / float(P);
