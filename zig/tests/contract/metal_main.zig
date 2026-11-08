@@ -79,12 +79,7 @@ const common = [_]Reg{
 } ++ affine_k.half;
 
 /// The lane kernel takes every format on the M5's tensor units, and 6-bit groups of 32 alone before them.
-const m5_only = [_]Reg{
-    .{ .v = .{ .kind = .lane, .bits = 4, .group = 64, .sk = 2 }, .name = "metal lane projection q4 g64 sk2" },
-    .{ .v = .{ .kind = .lane, .bits = 4, .group = 64, .coop = true }, .name = "metal lane projection q4 g64 cooperative" },
-    .{ .v = .{ .kind = .lane_reg, .bits = 4, .group = 64 }, .name = "metal lane projection q4 g64 reg" },
-    .{ .v = .{ .kind = .lane, .bits = 8, .group = 128, .sk = 4 }, .name = "metal lane projection q8 g128 sk4" },
-};
+const m5_only = @import("metal_lane_variants.zig").m5;
 
 /// Ornith-1.5-122B's routed block: the experts' decode rows with an extra matrix, then moe.metal's kernels.
 const Moe = struct {
