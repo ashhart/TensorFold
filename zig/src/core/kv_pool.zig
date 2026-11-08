@@ -194,11 +194,9 @@ pub const Table = struct {
     write: *const fn (ctx: *anyopaque, ids: []const u32, from: usize) anyerror!void,
 };
 
-/// The store's eviction a promise asks for before it fails: free pages until `want` are available.
-pub const Reclaim = struct {
-    ctx: *anyopaque,
-    call: *const fn (ctx: *anyopaque, want: usize) bool,
-};
+/// A store's eviction a promise asks for before it fails, and the chain of them on one pool (kv_reclaim.zig).
+pub const Reclaim = @import("kv_reclaim.zig").Reclaim;
+pub const Reclaims = @import("kv_reclaim.zig").Chain;
 
 /// The lane host's ledger (core/kv_ledger.zig) that admits this pool's promises: the available pages `n` more need.
 pub const Gate = struct {
@@ -230,7 +228,8 @@ pub const Pool = struct {
     nkept: usize = 0, // pages with a holder beyond their leases; may also be leased
     nleased: usize = 0, // pages mapped by at least one lease, counted once
     page_bytes: u64,
-    reclaim: ?Reclaim = null,
+    reclaims: Reclaims = .{}, // the stores a promise or a hold asks, in the order they joined
+    host: ?*const anyopaque = null, // the lane host whose ledger counts the pool: one a load (lane_host_ledger.count)
     notify: ?Notify = null,
     ledger: ?Gate = null, // the lane host's ledger, the only test a promise passes; null: the pool's own pages
     depth: u8 = 0, // public changes in progress: the outermost one notifies, after nested calls and rollbacks
@@ -349,9 +348,7 @@ pub const Pool = struct {
     pub fn promise(p: *Pool, l: *Lease, n: usize) error{LaneMemory}!void {
         p.enter();
         defer p.leave();
-        if (p.available() < p.want(n)) if (p.reclaim) |r| {
-            _ = r.call(r.ctx, p.want(n));
-        };
+        p.reclaimFor(n);
         if (p.available() < p.want(n)) return error.LaneMemory;
         p.promised += n; // a sub-count of the ledger's: it passed the ledger's test above, never a second one
         l.promised += n;
@@ -361,9 +358,7 @@ pub const Pool = struct {
     pub fn hold(p: *Pool, out: []u32) bool {
         p.enter();
         defer p.leave();
-        if (p.available() < p.want(out.len)) if (p.reclaim) |r| {
-            _ = r.call(r.ctx, p.want(out.len));
-        };
+        p.reclaimFor(out.len);
         if (p.available() < p.want(out.len)) return false;
         for (out) |*id| {
             p.nfree -= 1;
@@ -371,6 +366,25 @@ pub const Pool = struct {
             p.ownership(id.*, 1, 0);
         }
         return true;
+    }
+
+    /// `r` joins the stores a promise or a hold asks, after those already there.
+    pub fn joinReclaim(p: *Pool, r: Reclaim) error{ Joined, ChainFull }!void {
+        return p.reclaims.join(r);
+    }
+
+    /// The store at `ctx` leaves the chain (it is closing).
+    pub fn leaveReclaim(p: *Pool, ctx: *anyopaque) void {
+        p.reclaims.leave(ctx);
+    }
+
+    /// Each store in join order is asked for the pages `n` more need, until they are available.
+    fn reclaimFor(p: *Pool, n: usize) void {
+        const chain = p.reclaims; // a store that leaves while asked does not shift the walk
+        for (chain.hooks()) |r| {
+            if (p.available() >= p.want(n)) return;
+            _ = r.call(r.ctx, p.want(n));
+        }
     }
 
     /// The part of `l`'s promise it has not taken goes back.
@@ -546,4 +560,5 @@ test {
     _ = @import("kv_pool_counts_test.zig");
     _ = @import("kv_pool_walk_test.zig");
     _ = @import("kv_pool_notify_test.zig");
+    _ = @import("kv_reclaim_test.zig");
 }
