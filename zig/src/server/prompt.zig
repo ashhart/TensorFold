@@ -33,7 +33,7 @@ pub fn renderIds(srv: *Server, cx: *Cx, messages: Value, tools: []const Value, t
     return renderRequest(srv, cx, messages, tools, thinking, effort, generation, false);
 }
 
-fn renderRequest(srv: *Server, cx: *Cx, messages: Value, tools: []const Value, thinking: bool, effort: ?[]const u8, generation: bool, require_off: bool) errors.Refused![]const u32 {
+pub fn renderRequest(srv: *Server, cx: *Cx, messages: Value, tools: []const Value, thinking: bool, effort: ?[]const u8, generation: bool, require_off: bool) errors.Refused![]const u32 {
     const messages_in = if (srv.text.vtable.format == .kimi) messages else try messages_mod.normalizeWith(cx, messages, srv.late_system, srv.needs_user_after_tool, srv.media());
     const normalized = if (srv.text.vtable.format == .kimi or srv.text.native_deepseek) messages_in else try messages_mod.toolArguments(cx, messages_in);
     var problem: []const u8 = "";
@@ -151,9 +151,7 @@ pub fn prepare(srv: *Server, cx: *Cx, input: chat.Input, thinking: bool, effort:
         .ids => |ids| return .{ .ids = ids },
     };
     cx.template_fields = input.fields;
-    const asked = input.fields.field("enable_thinking");
-    const require_off = input.client_request and asked != null and asked.? == .bool and !asked.?.bool;
-    const prompt = try renderRequest(srv, cx, input.messages, input.tools, thinking, effort, true, require_off);
+    const prompt = try renderRequest(srv, cx, input.messages, input.tools, thinking, effort, true, input.explicit_off);
     const history = try renderIds(srv, cx, input.messages, input.tools, thinking, effort, false);
     var history_len: usize = 0;
     if (history.len > 0 and history.len < prompt.len and std.mem.eql(u32, prompt[0..history.len], history)) history_len = history.len;
