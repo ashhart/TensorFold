@@ -56,6 +56,25 @@ extern "C" __global__ void __launch_bounds__(256, 1) tf_ctl_pattn_old(const __nv
 """
 OLD = "    constexpr bool HPAGED = false, F8 = false, HM = false;\n    constexpr int CAP = 0, PTOK = 1;\n"
 FIX_2463 = "    constexpr bool P256 = false, HPAGED = false, F8 = false, HM = false, IDS = false;\n    constexpr int PN = 0, CAP = 0, PTOK = 1;\n"
+# qmmf.cu's shape: one includer sets a switch around the include, the other does not; each branch needs its own name.
+SWITCHED = """#ifdef TF_WIDE
+    out[0] = ldy;
+#else
+    out[0] = 0;
+#endif
+#if __CUDA_ARCH__ >= 800 && !defined(TF_WIDE)
+    out[1] = narrow;
+#endif
+"""
+SWITCHERS = """__global__ void wide(int* out, int ldy) {
+#define TF_WIDE
+#include "switched.cuh"
+#undef TF_WIDE
+}
+__global__ void plain(int* out, int narrow) {
+#include "switched.cuh"
+}
+"""
 ROWS_NEEDS = set("""P256 HPAGED F8 HM IDS PN CAP PTOK causal skip ks vs HO first_row q kc vc out p0 W H HK G scale PT PS
 D WARPS HPC NS""".split())
 
@@ -119,6 +138,23 @@ class SyntheticTest(Fixture):
         self.write("other.cu", "__device__ void f() { int spare = 0; }\n")
         self.assertEqual(self.errors(), [])
 
+    def test_fragment_branch_on_a_switch_its_includer_sets(self):
+        self.write("switched.cuh", SWITCHED)
+        self.write("switchers.cu", SWITCHERS)
+        self.assertEqual(self.errors(), [])
+        swapped = SWITCHERS.replace("#define TF_WIDE\n", "").replace("#undef TF_WIDE\n", "")
+        swapped = swapped.replace('narrow) {\n#include "switched.cuh"\n',
+                                  'narrow) {\n#define TF_WIDE\n#include "switched.cuh"\n#undef TF_WIDE\n')
+        self.write("switchers.cu", swapped)
+        wide, plain = [n for n, s in enumerate(swapped.splitlines(), 1) if "switched.cuh" in s]
+        self.assertEqual(self.errors(), [f"zig/kernels/cuda/switchers.cu:{wide}: switched.cuh needs narrow",
+                                         f"zig/kernels/cuda/switchers.cu:{plain}: switched.cuh needs ldy"])
+        # A macro no includer both defines and undefines may come from the command line: every branch is read.
+        self.write("switchers.cu", SWITCHERS)
+        self.write("switched.cuh", SWITCHED.replace("#ifdef TF_WIDE", "#ifdef TF_OTHER"))
+        plain = [n for n, s in enumerate(SWITCHERS.splitlines(), 1) if "switched.cuh" in s][1]
+        self.assertEqual(self.errors(), [f"zig/kernels/cuda/switchers.cu:{plain}: switched.cuh needs ldy"])
+
     def test_lone_includer_missing_a_name_others_declare(self):
         self.write("good.cu", GOOD.split("#if WIDE_K2")[0].replace("auto pick", "auto choose") + "}\n")
         self.write("other.cu", "__device__ void f(int pick) {}\n")
@@ -165,6 +201,15 @@ class RealTreeTest(Fixture):
         at = line_of(text, "hpattn_p256_ids_kernel(")
         line = at + text.splitlines()[at:].index('#include "prefill_attention_rows.cuh"') + 1
         self.assertEqual(self.errors(), [f"zig/kernels/cuda/prefill_attention.cu:{line}: prefill_attention_rows.cuh needs IDS"])
+
+    def test_qmmf_switches_pick_each_includers_branch(self):
+        text = (self.kernels / "qmmf.cu").read_text()
+        k32 = line_of(text, '#define TF_QMMF_K32') + 1
+        strided = line_of(text, '#define TF_QMMF_STRIDED') + 1
+        self.edit("qmmf.cu", ", STAGES = 3, BK = 32;", ", STAGES = 3;")
+        self.assertEqual(self.errors(), [f"zig/kernels/cuda/qmmf.cu:{k32}: qmmf_body.cuh needs BK"])
+        self.write("qmmf.cu", text.replace("int group, int ldy) {\n#define", "int group) {\n#define"))
+        self.assertEqual(self.errors(), [f"zig/kernels/cuda/qmmf.cu:{strided}: qmmf_body.cuh needs ldy"])
 
     def test_contract_controls_before_and_after_2463(self):
         self.write("before_2463.cu", BEFORE_2463)

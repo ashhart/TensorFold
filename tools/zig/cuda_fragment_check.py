@@ -49,6 +49,17 @@ class Site:
     target: object  # Path of the fragment, None when it does not exist
     visible: set  # names the enclosing function declares before the include
     context: set  # file-scope names and macros of the includer and its headers so far
+    switches: tuple = ()  # (macro, True/False/None) for each switch the includer sets, at the include
+    need: list = field(default_factory=list)  # the fragment's required names this include must supply
+
+
+@dataclass
+class Branch:
+    start: list  # the brace stack before #if
+    now: object  # this branch's value: True, False or None when it can't be told
+    after: object = None  # the brace stack after the first branch read
+    taken: bool = False  # an earlier branch was true
+    unsure: bool = False  # an earlier branch could not be told
 
 
 @dataclass
@@ -227,6 +238,63 @@ def params(ts, lo, hi):
     return names
 
 
+def condition(words, known):
+    """An #if over defined(SWITCH), !, &&, || and parentheses: True, False or None; another term is unknown, 0 false."""
+    pos = 0
+
+    def at(*want):
+        return words[pos:pos + len(want)] == list(want)
+
+    def term():
+        nonlocal pos
+        if at("!"):
+            pos += 1
+            v = term()
+            return None if v is None else not v
+        if at("defined"):
+            name = words[pos + 2] if at("defined", "(") else words[pos + 1] if pos + 1 < len(words) else ""
+            pos += 4 if at("defined", "(") else 2
+            v = known.get(name)
+        elif at("("):
+            pos += 1
+            v = either()
+            pos += 1
+        else:
+            v = False if words[pos:pos + 1] == ["0"] else None
+            pos += 1
+        if pos < len(words) and not (at(")") or at("&", "&") or at("|", "|")):
+            v, depth = None, 0  # part of a comparison or arithmetic: unknown, up to the next && or ||
+            while pos < len(words) and not (depth == 0 and (at(")") or at("&", "&") or at("|", "|"))):
+                depth += at("(") - at(")")
+                pos += 1
+        return v
+
+    def chain(op, part, short):
+        nonlocal pos
+        v = part()
+        while at(op, op):
+            pos += 2
+            w = part()
+            v = short if short in (v, w) else None if None in (v, w) else not short
+        return v
+
+    def both():
+        return chain("&", term, False)
+
+    def either():
+        return chain("|", both, True)
+
+    return either() if words else None
+
+
+def truth(t, known):
+    """A fragment's #if, #ifdef, #ifndef or #elif under the includer's switches."""
+    if t.text in ("ifdef", "ifndef"):
+        v = known.get(t.arg)
+        return v if v is None or t.text == "ifdef" else not v
+    return condition(t.arg.split(), known)
+
+
 def head_shape(head):
     """A namespace-level brace's kind from its statement head, and the function's parameter names."""
     if not head:
@@ -283,55 +351,67 @@ class Tree:
 
     def header(self, p):
         """File-scope names and macros a header and its own headers declare; a header already open adds nothing."""
-        return set() if (p, False) in self.busy else self.unit(p, False).context
+        return set() if (p, False, ()) in self.busy else self.unit(p, False).context
 
-    def unit(self, p, fragment):
-        key = p, fragment
+    def unit(self, p, fragment, switches=()):
+        key = p, fragment, switches
         if key not in self.units:
             self.busy.add(key)
             try:
-                self.units[key] = self.walk(p, fragment)
+                self.units[key] = self.walk(p, fragment, dict(switches))
             except ValueError as exc:
                 raise ValueError(str(exc) if str(exc).startswith(self.rel(p)) else f"{self.rel(p)}: {exc}") from exc
             finally:
                 self.busy.discard(key)
         return self.units[key]
 
-    def walk(self, path, fragment):
-        """Track braces, scopes and declarations; record each quoted include inside a function body."""
+    def walk(self, path, fragment, known):
+        """Track braces, scopes and declarations; record each quoted include inside a function body.
+
+        A switch is a macro an includer both #defines and #undefs, as qmmf.cu does around each include. Its state at
+        each include is passed to the fragment, whose branches on it are then read only when taken."""
         toks = lex(path.read_text())
         code = [t for t in toks if t.kind != "dir"]
+        if not fragment:
+            defined = {t.arg for t in toks if t.kind == "dir" and t.text == "define"}
+            known = dict.fromkeys(defined & {t.arg for t in toks if t.kind == "dir" and t.text == "undef"}, False)
         stack = [Frame("{", "func")] if fragment else []
         context, decls, uses, sites, pending, conds = set(), set(), set(), [], set(), []
         at_start, head, ci, dead = True, 0, 0, False
         for t in toks:
             if t.kind == "dir":
-                # A branch starts from the brace state before #if; the first live branch's state continues after #endif.
+                # A branch starts from the brace state before #if; the first branch read continues after #endif.
                 if t.text in ("if", "ifdef", "ifndef"):
-                    zero = not dead and t.text == "if" and t.arg.strip() == "0"
-                    conds.append(None if dead else [list(stack), None, zero])
-                    dead = dead or zero
+                    v = None if dead else truth(t, known if fragment else {})
+                    conds.append(None if dead else Branch(list(stack), v, taken=v is True, unsure=v is None))
+                    dead = dead or v is False
                 elif t.text in ("elif", "else", "endif") and conds:
                     c = conds.pop() if t.text == "endif" else conds[-1]
                     if c is None:
                         continue
-                    if c[2]:
-                        c[2] = dead = False
-                    elif t.text != "endif":
-                        c[1] = list(stack) if c[1] is None else c[1]
-                        stack[:] = c[0]
-                    elif c[1] is not None:
-                        stack[:] = c[1]
+                    if not dead and c.after is None:
+                        c.after = list(stack)
+                    stack[:] = c.after if t.text == "endif" and c.after is not None else c.start
+                    if t.text == "endif":
+                        dead = False
+                        continue
+                    c.now = (False if c.taken else None if c.unsure else True) if t.text == "else" else \
+                        False if c.taken else truth(t, known if fragment else {})
+                    c.taken, c.unsure, dead = c.taken or c.now is True, c.unsure or c.now is None, c.now is False
                 elif dead:
                     pass
-                elif t.text == "define" and t.arg:
-                    context.add(t.arg)
+                elif t.text in ("define", "undef") and t.arg:
+                    if t.arg in known:
+                        known[t.arg] = t.text == "define" if all(c.now is True for c in conds) else None
+                    if t.text == "define":
+                        context.add(t.arg)
                 elif t.text == "include" and t.arg:
                     target = self.resolve(path, t.arg)
                     if any(f.kind == "func" for f in stack):
                         first = next(k for k, f in enumerate(stack) if f.kind == "func")
                         visible = set().union(*(f.scope for f in stack[first:]))
-                        sites.append(Site(self.rel(path), t.line, t.arg, target, visible, set(context)))
+                        sites.append(Site(self.rel(path), t.line, t.arg, target, visible, set(context),
+                                          tuple(sorted(known.items()))))
                     elif target is not None:
                         context |= self.header(target)
                 continue
@@ -383,19 +463,19 @@ class Tree:
             raise ValueError(f"{self.rel(path)}: unbalanced braces at the end")
         return Unit(context, decls, uses, sites)
 
-    def free(self, frag, seen=()):
-        """Names a fragment uses but never declares, including those its own fragments leave to it."""
+    def free(self, frag, switches=(), seen=()):
+        """Names a fragment uses but never declares under these switches, including those its fragments leave to it."""
         if frag in seen:
             raise ValueError(f"{self.rel(frag)}: fragment includes itself")
-        if frag not in self.frees:
-            u = self.unit(frag, True)
+        if (frag, switches) not in self.frees:
+            u = self.unit(frag, True, switches)
             names = set(u.uses)
             for s in u.sites:
                 if s.target is None:
                     raise ValueError(f"{s.path}:{s.line}: missing {s.spelling}")
-                names |= self.free(s.target, seen + (frag,)) - s.visible - s.context
-            self.frees[frag] = names - u.decls - u.context - KEYWORDS
-        return self.frees[frag]
+                names |= self.free(s.target, s.switches, seen + (frag,)) - s.visible - s.context
+            self.frees[frag, switches] = names - u.decls - u.context - KEYWORDS
+        return self.frees[frag, switches]
 
 
 def scan(root):
@@ -427,8 +507,10 @@ def scan(root):
     local -= set().union(*(u.context for p, u in units.items() if p not in frags))
     out = []
     for frag in sorted(by):
-        need = tree.free(frag) & (local | set().union(*(s.visible for s in by[frag])))
-        out.append((tree.rel(frag), sorted(need), by[frag]))
+        required = local | set().union(*(s.visible for s in by[frag]))
+        for s in by[frag]:
+            s.need = sorted(tree.free(frag, s.switches) & required)
+        out.append((tree.rel(frag), sorted(set().union(*(s.need for s in by[frag]))), by[frag]))
     return out
 
 
@@ -436,7 +518,7 @@ def check(root):
     """Every miss as 'path:line: fragment needs NAME'."""
     found = scan(root)
     errors = [f"{s.path}:{s.line}: {s.spelling} needs {name}"
-              for _, need, sites in found for s in sites for name in need if name not in s.visible | s.context]
+              for _, _, sites in found for s in sites for name in s.need if name not in s.visible | s.context]
     return found, errors
 
 
@@ -451,7 +533,8 @@ def main():
             for frag, need, sites in found:
                 print(f"{frag}: {len(sites)} includers; needs {' '.join(need)}")
                 for s in sites:
-                    print(f"  {s.path}:{s.line}")
+                    on = " ".join(m if v else f"{m}=?" for m, v in s.switches if v is not False)
+                    print(f"  {s.path}:{s.line}" + (f" ({on})" if on else ""))
         for error in errors:
             print(error)
         print(f"cuda fragments: {len(found)} fragments, {sum(len(s) for _, _, s in found)} includes, {len(errors)} misses")
