@@ -193,12 +193,13 @@ context window before the first is scored, so a refused request costs no GPU wor
 
 ## OCR
 
-The native HIP engine reads pages through two OCR contracts when it serves a model with an OCR reader and
-`--vision`. One route answers Mistral's contract; `/ocr` (and `/ocr/`) answers LiteParse's.
+The native HIP engine reads pages through three OCR contracts when it serves a model with an OCR reader and
+`--vision`. One route answers Mistral's contract; `/ocr` (and `/ocr/`) answers two more, chosen from the request.
 
 | Route | Contract | Request | Reply | Written for |
 | --- | --- | --- | --- | --- |
 | `POST /v1/ocr` | Mistral OCR | JSON `{"model", "document", ...}` | `{"pages", "model", "document_annotation", "usage_info"}` | the `mistralai` Python and `@mistralai/mistralai` TypeScript SDKs, with `server_url` set to the server root |
+| `POST /ocr` | docTR API | multipart, one or more `files` parts, options in the query | one `OCROut` a page | the docTR API template's client |
 | `POST /ocr` | LiteParse HTTP OCR | multipart, one `file` part | `{"results": [...]}` | `lit parse --ocr-server-url http://HOST:PORT/ocr` |
 
 Two families have a reader. A reader gives Markdown blocks in pixels of the page the client sent (after EXIF
@@ -216,8 +217,10 @@ Embedding, reranker and readout engines refuse the OCR routes as they refuse cha
 
 `POST /ocr` picks its contract in this order:
 
-1. `?format=liteparse`.
-2. `multipart/form-data`: exactly one part named `file` is LiteParse; any other set of parts is HTTP 400.
+1. `?format=doctr` or `?format=liteparse`.
+2. `multipart/form-data`: one or more parts named `files` is docTR; exactly one part named `file` is LiteParse;
+   any other set of parts is HTTP 400, and so is a body with both `files` and `file` parts, even when `?format=`
+   names the contract.
 3. Any other content type, or none, is HTTP 415.
 
 Refusals made before the contract is known (415, those 400s, a drain's 503 and an admission 429 with
@@ -263,13 +266,13 @@ stops on its end token and the reader can parse it.
 
 ### Failures
 
-| Failure | Mistral | LiteParse |
-| --- | --- | --- |
-| Bad input: an undecodable or unsupported file, a page or option the server cannot serve, over the page budget | 400 | 400 |
-| Unreadable page: the reply was cut at the context limit, repeated without end, broke the model's format or gave a box that is not finite; the image budget was crossed | 422 | 422 |
-| The engine stopped the page (it closed or drained) | 503, `Retry-After: 1` | 503, `Retry-After: 1` |
-| Engine fault, out of memory, PDF renderer crash or deadline | 500 | 500 |
-| Envelope | `{"detail": [{"loc", "msg", "type"}]}`, `type` `bad_input`, `unreadable_page`, `capacity` or `internal` | `{"error": "..."}` |
+| Failure | Mistral | docTR | LiteParse |
+| --- | --- | --- | --- |
+| Bad input: an undecodable or unsupported file, a page or option the server cannot serve, over the page budget | 400 | 400 | 400 |
+| Unreadable page: the reply was cut at the context limit, repeated without end, broke the model's format or gave a box that is not finite; the image budget was crossed | 422 | 422 | 422 |
+| The engine stopped the page (it closed or drained) | 503, `Retry-After: 1` | 503, `Retry-After: 1` | 503, `Retry-After: 1` |
+| Engine fault, out of memory, PDF renderer crash or deadline | 500 | 500 | 500 |
+| Envelope | `{"detail": [{"loc", "msg", "type"}]}`, `type` `bad_input`, `unreadable_page`, `capacity` or `internal` | `{"detail": "..."}` | `{"error": "..."}` |
 
 A failed page fails the whole request: no reply returns some pages and drops others. An unreadable page's
 message names its index, and the model's raw text goes to the server log, never to the client. 422 means the
@@ -278,13 +281,17 @@ stops the request before its next page or PDF render.
 
 ### Estimates
 
-dots.mocr gives one box a block and GLM-OCR none, so LiteParse's lines estimate what the models do not give:
+dots.mocr gives one box a block and GLM-OCR none, so the line contracts estimate what the models do not give:
 
 - **Lines.** A block's plain-text lines (Markdown markup removed, a table one line a row with tab-separated
   cells, math without its `$`) divide the block's box into equal bands along its left and right edges, first
   line at the top. A paragraph written without line breaks stays one line covering the block.
-- **Scores.** Every score is `1.0`: LiteParse `confidence`. Mistral replies leave `confidence_scores` out.
-- **No geometry.** With GLM-OCR, Mistral returns `blocks: []` and LiteParse is refused.
+- **Words.** docTR's words divide a line's box along its reading direction in proportion to each word's character
+  count.
+- **Scores.** Every score is `1.0`: docTR `confidence` and `objectness_score`, LiteParse `confidence`. Mistral
+  replies leave `confidence_scores` out.
+- **No geometry.** With GLM-OCR, Mistral returns `blocks: []`, docTR gives each line the whole page as its box, and
+  LiteParse is refused.
 
 ### Mistral: `POST /v1/ocr`
 
@@ -308,12 +315,33 @@ dots.mocr gives one box a block and GLM-OCR none, so LiteParse's lines estimate 
 `content`, its own Markdown with its tables in the `table_format` form; image blocks add `image_id` and table
 blocks `table_id`. `usage_info` gives `pages_processed` and `doc_size_bytes`, the decoded document's size.
 
+### docTR: `POST /ocr`
+
+Each `files` part's type must be exactly `image/jpeg`, `image/png` or `application/pdf` (the types docTR's API README names),
+else HTTP 400 naming the part and its type. Files answer in part order, each PDF page with its file's name. Each page's
+`OCROut` follows the reply in docTR's API README: `name`, `orientation` (`{"value": 0, "confidence": null}`: the page as
+sent), `language` (`{"value": null, "confidence": null}`), `dimensions` `[height, width]`, `items` with one page of
+blocks, lines and words; plus `layout` and `tables`, always `[]` (docTR's docs list both in a page's export).
+
+| Query option | Meaning |
+| --- | --- |
+| `assume_straight_pages` | Default `true`: boxes `[xmin, ymin, xmax, ymax]`; `false`: 4 points TL, TR, BR, BL. Coordinates are relative to the page and not rounded |
+| `resolve_blocks` | Default `false`: one block a page; `true`: one block for each reader block |
+| `resolve_lines` | Default `true`: one line for each text line; `false`: one line of all the page's words |
+| `detect_orientation`, `detect_language` | Accepted; neither is estimated: `orientation` stays 0 and `language` null |
+| `detect_tables`, `detect_layout`, `straighten_pages` | Accepted only when false; `layout` and `tables` are always `[]` |
+| `paragraph_break` | Accepted only at its documented default, 0.035 |
+| `bin_thresh`, `box_thresh` | Refused: TensorFold has no text detector to apply them to |
+| `det_arch`, `reco_arch` and the batch options | Ignored: the served model reads every page |
+
+A boolean option takes `true`, `t`, `yes`, `y`, `on` or `1`, or `false`, `f`, `no`, `n`, `off` or `0`, in any case; another
+value is HTTP 400.
+
 ### LiteParse: `POST /ocr`
 
 The contract is LiteParse's published
 [OCR API specification](https://github.com/run-llama/liteparse/blob/main/OCR_API_SPEC.md). One `file` part holds a PNG,
-JPEG or WebP page image; `language` and other parts are ignored, but a `files` part is HTTP 400 (above). A PDF is
-HTTP 400: the specification sends an image.
+JPEG or WebP page image; `language` and other parts are ignored. A PDF is HTTP 400: the specification sends an image.
 Each line is one result `{"text", "bbox", "confidence"}`: `bbox` is the line's axis-aligned `[x1, y1, x2, y2]` in
 pixels of the image received, and `confidence` is `1.0`, the value the specification asks for when the engine gives
 none. The specification's optional `polygon` is not sent: it gives the point order, but not how LiteParse turns a
