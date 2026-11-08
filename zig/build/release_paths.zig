@@ -168,8 +168,30 @@ fn inspectContainer(a: std.mem.Allocator, bytes: []const u8, root: []const u8) !
         if (try rawLeak(a, image.elf, root)) return error.PrivateBuildPath;
     }
 }
+/// A thin Mach-O's code signature (LC_CODE_SIGNATURE) holds the linker's hashes, which can spell a path by chance.
+fn signature(bytes: []const u8) ?[2]usize {
+    if (bytes.len < 32 or read(u32, bytes, 0) != 0xfeedfacf) return null;
+    const count: usize = read(u32, bytes, 16);
+    var at: usize = 32;
+    for (0..count) |_| {
+        if (at + 8 > bytes.len) return null;
+        const size: usize = read(u32, bytes, at + 4);
+        if (size < 8) return null;
+        if (read(u32, bytes, at) == 0x1d) {
+            if (at + 16 > bytes.len) return null;
+            const off: usize = read(u32, bytes, at + 8);
+            const len: usize = read(u32, bytes, at + 12);
+            return if (off <= bytes.len and len <= bytes.len - off) .{ off, off + len } else null;
+        }
+        at += size;
+    }
+    return null;
+}
 pub fn check(a: std.mem.Allocator, bytes: []const u8, root: []const u8) !void {
-    if (try rawLeak(a, bytes, root)) return error.PrivateBuildPath;
+    if (signature(bytes)) |s| {
+        if (validRoot(root) and std.mem.indexOf(u8, bytes[s[0]..s[1]], root) != null) return error.PrivateBuildPath;
+        if (try rawLeak(a, bytes[0..s[0]], root) or try rawLeak(a, bytes[s[1]..], root)) return error.PrivateBuildPath;
+    } else if (try rawLeak(a, bytes, root)) return error.PrivateBuildPath;
     try uncompressedElf(bytes);
     var at: usize = 0;
     while (std.mem.indexOfPos(u8, bytes, at, magic)) |start| {
