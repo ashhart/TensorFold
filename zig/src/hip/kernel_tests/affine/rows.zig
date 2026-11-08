@@ -306,7 +306,7 @@ fn tierProduct(t: *Rig, m: usize, n: usize, k: usize, bits: c_int, group: c_int,
         try ids[i % n_ids].launch(k_ptr, .{ .r = &t.base.r, .s = t.base.stream.handle, .arg = arg, .items = @intCast(item_count) });
     }
     arg.out = outs[2 * n_ids].ptr;
-    try k_ptr.prefillLaunch(&t.base.r, arg, t.base.stream.handle, @intCast(item_count), @intCast(plan_pairs));
+    try k_ptr.prefillLaunch(&t.base.r, arg, t.base.stream.handle, @intCast(item_count), @intCast(plan_pairs), @intCast(m));
     try t.base.stream.synchronize();
     const written = try gpa.alloc(u8, bytes);
     defer gpa.free(written);
