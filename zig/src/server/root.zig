@@ -264,6 +264,7 @@ test {
     _ = @import("ocr/markdown_test.zig");
     _ = @import("ocr/lines_test.zig");
     _ = @import("ocr/budget_test.zig");
+    _ = @import("ocr/draw_test.zig");
     _ = @import("ocr/page_markdown_test.zig");
     _ = @import("ocr/mistral_test.zig");
     _ = @import("ocr/mistral_sdk_test.zig");
@@ -273,5 +274,6 @@ test {
     _ = @import("ocr/size_test.zig");
     _ = @import("ocr/doctr_test.zig");
     _ = @import("ocr/liteparse_test.zig");
+    _ = @import("ocr/paddlex_test.zig");
     _ = @import("ocr/prompt_ids_test.zig");
 }

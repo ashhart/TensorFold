@@ -25,8 +25,10 @@ test "ocr route: the format query, then the media type, then the part names choo
         .{ .path = "/ocr?x=1&format=doctr", .ct = null, .want = .doctr },
         .{ .path = "/ocr?format=tesseract", .ct = "application/json", .want = null, .status = 400 },
         .{ .path = "/ocr?format=%zz", .ct = "application/json", .want = null, .status = 400 },
-        .{ .ct = "application/json", .want = null, .status = 415 },
-        .{ .ct = null, .body = "  {\"file\": \"x\"}", .want = null, .status = 415 },
+        .{ .ct = "application/json", .want = .paddlex },
+        .{ .ct = "Application/JSON; charset=utf-8", .want = .paddlex },
+        .{ .ct = "application/vnd.paddle+json", .want = .paddlex },
+        .{ .ct = null, .body = "  {\"file\": \"x\"}", .want = .paddlex },
         .{ .ct = null, .body = "file=x", .want = null, .status = 415 },
         .{ .ct = "text/plain", .want = null, .status = 415 },
         .{ .ct = form, .body = try parts(a, &.{ "files", "files" }), .want = .doctr },
@@ -40,7 +42,7 @@ test "ocr route: the format query, then the media type, then the part names choo
     for (cases) |c| switch (try route.select(a, c.path, c.ct, c.body)) {
         .ok => |s| {
             try t.expectEqual(c.want, s.dialect);
-            if (c.status == 0 and c.body.len > 0) try t.expect(s.parts != null);
+            if (s.dialect != .paddlex and c.status == 0 and c.body.len > 0) try t.expect(s.parts != null);
         },
         .refused => |r| {
             try t.expectEqual(@as(?route.Dialect, null), c.want);

@@ -1,4 +1,4 @@
-//! A document's bytes from a public HTTPS URL, for POST /v1/ocr's document URLs.
+//! A document's bytes from a public HTTPS URL, for the OCR dialects that take URLs (Mistral, PaddleX).
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const images = @import("../images.zig");

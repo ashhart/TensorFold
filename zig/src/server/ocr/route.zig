@@ -13,9 +13,10 @@ const mistral = @import("mistral.zig");
 const mistral_reply = @import("mistral_reply.zig");
 const doctr = @import("doctr.zig");
 const liteparse = @import("liteparse.zig");
+const paddlex = @import("paddlex.zig");
 
 /// The client contracts POST /ocr answers in.
-pub const Dialect = enum { doctr, liteparse };
+pub const Dialect = enum { paddlex, doctr, liteparse };
 
 /// A chosen dialect, with the multipart parts when choosing it parsed them.
 pub const Selected = struct { dialect: Dialect, parts: ?[]const multipart.Part = null };
@@ -48,6 +49,7 @@ pub fn post(srv: *Server, conn: *Conn, a: Allocator, route: []const u8) void {
 /// Runs the chosen dialect, which gates the request and answers in its own error shape.
 fn dialect(srv: *Server, conn: *Conn, a: Allocator, s: Selected, body: []const u8, gone: openai.Gone) void {
     switch (s.dialect) {
+        .paddlex => paddlex.post(srv, conn, a, body, gone),
         .doctr => doctr.post(srv, conn, a, s.parts, body, gone),
         .liteparse => liteparse.post(srv, conn, a, s.parts, conn.header("Content-Type"), body, gone),
     }
@@ -60,14 +62,20 @@ pub fn select(a: Allocator, raw_path: []const u8, content_type: ?[]const u8, bod
         error.Malformed => return refuse(400, "the format query parameter is malformed"),
     };
     if (format) |f| {
-        const d = std.meta.stringToEnum(Dialect, f) orelse return refuse(400, "format must be doctr or liteparse");
+        const d = std.meta.stringToEnum(Dialect, f) orelse return refuse(400, "format must be paddlex, doctr or liteparse");
         return .{ .ok = .{ .dialect = d } };
     }
     const ct = std.mem.trim(u8, content_type orelse "", " \t");
-    if (ct.len == 0) return refuse(415, "the request has no Content-Type; send multipart/form-data (docTR, LiteParse)");
+    if (ct.len == 0) {
+        const first = std.mem.trimStart(u8, body, " \t\r\n");
+        if (first.len > 0 and first[0] == '{') return .{ .ok = .{ .dialect = .paddlex } };
+        return refuse(415, "the request has no Content-Type; send JSON (PaddleX) or multipart/form-data (docTR, LiteParse)");
+    }
     const media = std.mem.trim(u8, ct[0 .. std.mem.indexOfScalar(u8, ct, ';') orelse ct.len], " \t");
+    if (std.ascii.eqlIgnoreCase(media, "application/json") or (std.ascii.startsWithIgnoreCase(media, "application/") and std.ascii.endsWithIgnoreCase(media, "+json")))
+        return .{ .ok = .{ .dialect = .paddlex } };
     if (!std.ascii.eqlIgnoreCase(media, "multipart/form-data"))
-        return refuse(415, try std.fmt.allocPrint(a, "unsupported Content-Type {s}; send multipart/form-data (docTR, LiteParse)", .{media}));
+        return refuse(415, try std.fmt.allocPrint(a, "unsupported Content-Type {s}; send JSON (PaddleX) or multipart/form-data (docTR, LiteParse)", .{media}));
     const bound = multipart.boundary(ct) orelse return refuse(400, "multipart/form-data needs a boundary parameter");
     const parts = multipart.parse(a, body, bound) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
