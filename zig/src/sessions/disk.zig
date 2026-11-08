@@ -313,7 +313,8 @@ pub const Disk = struct {
         }
         var op = try Op.init(d.gpa, d.io, &d.staging);
         defer op.deinit();
-        errdefer op.wait() catch {};
+        // a failed restore still owns finished reads' staging: give each back, or the next pump waits for it forever
+        errdefer while (op.next()) |j| d.staging.put(j.staging);
         // (segment, chunk) jobs; the pump keeps at most staging - 1 in flight (one buffer for the header path)
         var jobs: std.ArrayList(struct { seg: u32, chunk: u32 }) = .empty;
         defer jobs.deinit(d.gpa);
