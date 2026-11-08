@@ -199,7 +199,9 @@ pub fn open(file: [:0]const u8, kind: Kind, name: ?Name) !Opened {
     if (n < @as(isize, @intCast(@as(u64, @intCast(end)) - lo))) return error.RowsRead;
     @memcpy(std.mem.asBytes(&t), raw[@intCast(at - lo)..][0..@sizeOf(Trailer)]);
     if (t.magic != MAGIC or t.version != VERSION or t.kind != @backingInt(kind)) return error.RowsRead;
-    if (t.payload + t.meta + @sizeOf(Trailer) != @as(u64, @intCast(end))) return error.RowsRead;
+    // the two sizes are the file's own bytes: a pair that wraps past 2^64 names no file of the store
+    const sizes = std.math.add(u64, t.payload, t.meta) catch return error.RowsRead;
+    if (sizes != @as(u64, @intCast(end)) - @sizeOf(Trailer)) return error.RowsRead;
     if (name) |want| if (!std.mem.eql(u8, &want, &t.name)) return error.RowsRead;
     return .{ .fd = fd, .trailer = t };
 }
@@ -326,4 +328,29 @@ test "a state file's metadata reads back checked, and an aborted write leaves no
     gone.abort();
     var part: [128]u8 = undefined;
     try std.testing.expectError(error.RowsMissing, open(try path(&part, dir, "g", ".st", true), .state, null));
+}
+
+test "a trailer whose two sizes wrap past 2^64 to the file's own size is refused, not read" {
+    var dir_buf: [64]u8 = undefined;
+    const dir = try std.fmt.bufPrintSentinel(&dir_buf, "/tmp/tf-rows-wrap-{d}", .{platform.c.getpid()}, 0);
+    _ = platform.c.mkdir(dir, 0o700);
+    defer _ = platform.c.rmdir(dir);
+    const name: Name = @splat(3);
+    var w = try Writer.open(dir, "w", ".blk");
+    try w.append("payload");
+    _ = try w.finish(.{ .kind = @backingInt(Kind.block), .payload = 0, .payload_hash = 0, .name = name }, &.{}, false);
+    var buf: [128]u8 = undefined;
+    const file = try path(&buf, dir, "w", ".blk", false);
+    defer _ = platform.c.unlink(file);
+    const fd = platform.c.open(file, .{ .ACCMODE = .RDWR }, @as(platform.c.mode_t, 0));
+    try std.testing.expect(fd >= 0);
+    defer _ = platform.c.close(fd);
+    const at = platform.c.lseek(fd, 0, platform.c.SEEK.END) - @sizeOf(Trailer);
+    var t: Trailer = undefined;
+    try std.testing.expectEqual(@as(isize, @sizeOf(Trailer)), platform.c.pread(fd, std.mem.asBytes(&t), @sizeOf(Trailer), at));
+    // each size alone claims more bytes than the file holds; together they add up to its size only by wrapping
+    t.payload += 1 << 63;
+    t.meta += 1 << 63;
+    try std.testing.expectEqual(@as(isize, @sizeOf(Trailer)), platform.c.pwrite(fd, std.mem.asBytes(&t), @sizeOf(Trailer), at));
+    try std.testing.expectError(error.RowsRead, open(file, .block, name));
 }
