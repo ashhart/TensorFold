@@ -16,7 +16,7 @@ pub fn sourceMode(device: mtl.Device, a: std.mem.Allocator, text: []const u8, fu
 }
 
 /// The op both ways the prompt kernels use it (a transposed right operand, a plain one) through nax.h's fragments.
-const check_source =
+pub const check_source =
     \\#include "../nax.h"
     \\using namespace tfp;
     \\[[kernel]] void tf_frag_check(const device bfloat* A [[buffer(0)]], const device bfloat* B [[buffer(1)]],

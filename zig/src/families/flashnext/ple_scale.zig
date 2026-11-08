@@ -5,7 +5,7 @@ const replay = @import("replay.zig");
 
 const Buf = replay.Buf;
 
-const source =
+pub const source =
     \\#include <metal_stdlib>
     \\using namespace metal;
     \\kernel void tf_ple_scale(device bfloat* x [[buffer(0)]], constant float& s [[buffer(1)]],
