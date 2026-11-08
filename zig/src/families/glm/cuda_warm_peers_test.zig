@@ -142,3 +142,7 @@ test "GLM warm peers: existing ring selector alone restricts warm-up, gather and
     }
     Fake.mode = null;
 }
+
+test {
+    _ = @import("cuda_warm_timeout_test.zig");
+}
