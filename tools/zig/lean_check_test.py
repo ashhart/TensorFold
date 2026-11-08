@@ -1,4 +1,4 @@
-"""A direct getenv of a TF_ or TENSORFOLD_ name in Zig source is a lean finding; tests and lenient switches are not."""
+"""A Zig getenv of a TF_ or TENSORFOLD_ name or of a non-literal name is a lean finding; tests and parsers are not."""
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -45,6 +45,8 @@ class DirectGetenv(unittest.TestCase):
         others = (
             ("zig/src/platform/environment.zig", "const raw = sys.getenv(name);\n"),
             ("zig/src/core/profile.zig", "const raw = std.c.getenv(entry(id).name());\n"),
+            ("zig/src/platform/sys.zig", "return std.mem.span(c.getenv(name) orelse return null);\n"),
+            ("zig/src/platform/win_c.zig", "const wide = getenv(key) orelse return null;\n"),
             ("zig/src/a.zig", 'const a = std.c.getenv("NCCL_DEBUG") orelse std.c.getenv("XPU_A8_BITS");\n'),
             ("zig/src/a.zig", '// std.c.getenv("TF_NEW_KNOB") is read once\n'),
             ("tools/zig/a.py", 'x = os.getenv("TF_NEW_KNOB")\n'),
@@ -52,6 +54,30 @@ class DirectGetenv(unittest.TestCase):
         for name, text in others:
             with self.subTest(text=text):
                 self.assertEqual(reads(name, text), [])
+
+    def test_a_name_that_is_not_a_literal_is_one_finding_per_getenv(self):
+        text = ("fn envOff(name: [*:0]const u8) bool {\n    const v = std.c.getenv(name) orelse return false;\n}\n"
+                "pub fn getenv(name: [:0]const u8) ?[]const u8 {\n"
+                "const raw = std.mem.span(std.c.getenv(compact_env) orelse return .off);\n"
+                "const two = platform.getenv(a) orelse sys.getenv(b.ptr);\n"
+                'const off = envOff("TF_NEW") or getenv("NCCL_DEBUG") != null;\n')
+        source = Path("zig/src/a.zig")
+        hidden = f"getenv of a name that is not a literal {HINT}"
+        self.assertEqual(reads(source.as_posix(), text), [
+            f"{source}:2: {hidden}", f"{source}:5: {hidden}", f"{source}:6: {hidden}", f"{source}:6: {hidden}",
+        ])
+
+    def test_a_test_block_in_source_is_not_read_and_the_code_after_it_is(self):
+        text = ('test "reads its fixture" {\n    const dir = platform.getenv("TF_K3_DIR") orelse return;\n'
+                "    _ = std.c.getenv(name);\n}\n"
+                'const after = std.c.getenv("TF_AFTER");\n'
+                'const S = struct {\n    test {\n        _ = std.c.getenv("TF_NESTED");\n    }\n'
+                "    const inside = std.c.getenv(held);\n};\n")
+        source = Path("zig/src/a.zig")
+        self.assertEqual(reads(source.as_posix(), text), [
+            f"{source}:5: direct getenv of TF_AFTER {HINT}",
+            f"{source}:10: getenv of a name that is not a literal {HINT}",
+        ])
 
     def test_a_listed_lenient_switch_is_not_a_finding(self):
         with patch.object(lean_check, "lenient", return_value=frozenset({"TF_OLD"})):
