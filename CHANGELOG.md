@@ -28,7 +28,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Qwen3.5 and Qwen3.6 on HIP: sampled streams with an MTP head draft on the graphed head chain, as greedy ones do, with the same tokens: 4-12% more tokens a second at temperature 1.0 on gfx1151 (#2455). Thanks to @AbrahamCete.
 
 - Docs: the README's GLM-5.3-Flash Jammed XSFP4 row and the GLM CUDA recipe say it shipped in 1.2.3, not "on main after 1.2.2" (#2451, for #2041). Thanks to @Bizuayeu.
-- Qwen3.8 Flash Next on CUDA: the BF16 prompt tile from #1846 stages less shared memory, gathering K32 fragments from the same K64 pack, with the same output bytes and replies (#1848). Thanks to @laudney.
+- Qwen3.8 Flash Next on CUDA: the BF16 prompt tile from #1846 stages less shared memory, gathering K32 fragments from the same K64 pack, with the same output bytes and replies, so prompts are about 1% faster on a GB10 (#1848). Thanks to @laudney.
 - Developers: `python3 -m pytest` from the repository root passes on a machine with no GPU or optional packages (286 passed, the rest skipped with their reason): the release packaging check is renamed `tools/release/check_package.py`, and CI runs the root suite (#2471).
 
 - Docs and packaging: `docs/evaluating.md` says what to pin when testing TensorFold, how to check a release's signature, which tests need no GPU and which requests to replay. A root `Dockerfile` installs a Linux release archive once its checksum, its signature and every unpacked file's checksum match (#2472).
