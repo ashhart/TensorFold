@@ -16,16 +16,15 @@ const int = trail.int;
 
 /// The stream windows of a shared round in one forward, then each verified, committed and drafted on its own.
 pub fn run(e: *Engine, entries: []*Stream) !void {
-    e.clock.start();
     try e.late.flush(e, Engine.askDrafts);
+    // A deferred lone draft belongs to the preceding round, not this shared round.
+    e.clock.start();
     const a = e.arena.allocator();
     const plans = try a.alloc(Plan, entries.len);
     for (entries, plans) |s, *p| p.* = try win.plan(e, s, null);
     const sampled = win.anySampled(plans);
     const calibration = try @import("shared_price.zig").calibrate(e, plans);
     if (calibration) {
-        // The flushed draft belonged to the preceding lone round; it is not a plain shared cost.
-        e.clock.start();
         for (plans) |*p| try @import("window_cut.zig").prefix(a, p, 0);
     } else try win.allocate(e, plans);
     try @import("grammar_parallel.zig").constrain(e, plans);
