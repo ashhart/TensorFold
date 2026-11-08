@@ -11,7 +11,7 @@ pub const Ref = struct { buf: mtl.Buffer, off: usize = 0 };
 /// rows tokens, cols hash columns (K = cols * 256), n wkv outputs ((hc + 1) * dim), dim hidden, eps the norm epsilon.
 pub const Call = struct { rows: u32, cols: u32, n: u32, dim: u32, eps: f32 = 1e-6 };
 
-const Args = extern struct { R: u32, cols: u32, dim: u32, eps: f32, dscale: f32 };
+pub const Args = extern struct { R: u32, cols: u32, dim: u32, eps: f32, dscale: f32 };
 
 pub const Pipelines = struct {
     embed: mtl.Pipeline,

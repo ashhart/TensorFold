@@ -10,7 +10,7 @@ pub const max_tier_rows = 16;
 
 pub const Call = struct { k: u32, n: u32, rows: u32, w: Weight = .bf16, out: Out = .f32 };
 
-const Args = extern struct { k: u32, n: u32, rows: u32 };
+pub const Args = extern struct { k: u32, n: u32, rows: u32 };
 /// Rows and columns a simdgroup computes in each launch geometry; the source instantiates the same pairs.
 const tiers = [_]u32{ 1, 2, 4, 4, 8, 16 };
 const cols = [_]u32{ 1, 1, 1, 2, 2, 2 };

@@ -12,7 +12,7 @@ pub const topk = ex.topk;
 /// Pair positions of one expert a simdgroup carries (the source's XM_RT).
 pub const row_tile = 16;
 
-const XmArgs = extern struct { K: u32, N: u32, topk: u32, pairs: u32, limit: f32 };
+pub const XmArgs = extern struct { K: u32, N: u32, topk: u32, pairs: u32, limit: f32 };
 
 pub const Call = struct { rows: u32, k: u32 = ex.hidden, n: u32 = ex.width, experts: u32 = ex.experts };
 

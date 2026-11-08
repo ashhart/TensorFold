@@ -217,7 +217,7 @@ MIT License, Copyright © 2025 Turboderp. TensorFold's decoders and kernels are 
 checked bit for bit against ExLlamaV3's dequantization.
 
 The native `zig/src/core/exl3_format.zig` reference decoder, the `zig/src/core/exl3_projection*.zig` decoder and
-`zig/kernels/metal/core/exl3_projection.metal` separately implement the same format and codebooks
+`zig/kernels/metal/core/exl3_projection_core.metal` and `_wide.metal` separately implement the same format and codebooks
 under the Turboderp attribution above. So do the native checkpoint scan (`zig/src/core/exl3_load.zig`,
 `exl3_metal_load.zig`), the CUDA kernels (`zig/kernels/cuda/exl3_*.cu`, `exl3_decode.cuh`, `exl3_candidate.cuh`) and
 their Zig side (`zig/src/cuda/exl3*.zig`), and GLM's reader of its EXL3 experts (`zig/src/families/glm/cuda_exl3.zig`).
@@ -294,6 +294,13 @@ Bolt's GGML checkpoints (`zig/kernels/cuda/ggml.cu`, `zig/src/cuda/ggml.zig`) ar
 TensorFold ships no model weights. The `z-lab/Qwen3.8-27B-DFlash2` model card states Apache-2.0.
 The optional `incoai/GLM-5.3-Flash-DFlash2` model card states CC BY-NC-ND 4.0, for non-commercial use
 without derivatives; only the Python engine reads that drafter. Each checkpoint keeps its own license.
+
+The native `zig/src/families/deepseek_v41/` implementation and `zig/tests/deepseek_v41_reference/`
+follow [DeepSeek-V4.1-Flash's official inference](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/tree/2cba9e42aa026125f3ed06c6d98c1db82f7ca027/inference),
+MIT License, Copyright (c) 2023 DeepSeek: the reference's equations, the Engram normalization,
+PCG64 multipliers and prime bucket layout, and the pinned chat template come from that revision.
+The EXL3 checkpoint reads through the ExLlamaV3 format covered above; no captured CUDA/Triton
+kernel assets, full model shards or binary traces are bundled.
 
 ## Structured output: libtfgrammar
 

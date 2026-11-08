@@ -14,7 +14,7 @@ pub const xmma = @embedFile("experts_mma.metal");
 /// DeepSeek-V4.1 sparse-attention indexer top-512 over fp32 score rows.
 pub const topk512 = @embedFile("topk512.metal");
 pub const glue = @embedFile("glue.metal");
-/// DeepSeek V4.1 decode launches that split or fuse the phase-1 glue at the same bits (deepseek_v41/fused.metal).
+/// DeepSeek V4.1 decode launches that split or fuse the row glue at the same bits (deepseek_v41/fused.metal).
 pub const fused = @embedFile("fused.metal");
 /// DeepSeek V4.1 decode kernels that fold a dependent glue launch into its neighbour (deepseek_v41/fold.metal).
 pub const fold = @embedFile("fold.metal");
@@ -31,5 +31,5 @@ pub const engram = @embedFile("engram.metal");
 pub const route = @embedFile("route.metal");
 /// DeepSeek-V4.1's hyper-connection boundary (deepseek_v41/hc.metal): the mixes, the collapse, the expand.
 pub const hc = @embedFile("hc.metal");
-/// DeepSeek-V4.1's phase-1 glue (deepseek_v41/glue_tmp.metal): the reference bits of the registered glue kernels.
-pub const glue_tmp = @embedFile("glue_tmp.metal");
+/// DeepSeek-V4.1.s row glue (deepseek_v41/glue_rows.metal): the row-level glue kernels as registered.
+pub const glue_rows = @embedFile("glue_rows.metal");

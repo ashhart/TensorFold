@@ -85,7 +85,9 @@ pub fn main(init: std.process.Init) !void {
         b.* = bf16(-7.5 * scale * (0.9 + 0.2 * rnd.float(f32)));
     }
 
-    const defines = try std.fmt.allocPrint(arena, "#define TF_BITS 4\n#define TF_GROUP 64\n#define TF_OUT_T {s}\n", .{if (out_f32) "float" else "bfloat"});
+    // MM_BITS overrides the 4-bit affine default, so the same bench prices another width.
+    const bits = envInt("MM_BITS", 4);
+    const defines = try std.fmt.allocPrint(arena, "#define TF_BITS {d}\n#define TF_GROUP 64\n#define TF_OUT_T {s}\n", .{ bits, if (out_f32) "float" else "bfloat" });
     for (kernels) |*k| {
         const f = try mtl.MappedFile.open(try arena.dupeSentinel(u8, k.path, 0));
         defer f.deinit();

@@ -1,4 +1,4 @@
-//! Metal counter sampling; owned resources must outlive every command buffer using them.
+//! Metal counter sampling; owned descriptors, samples and fences must outlive their command buffers.
 const std = @import("std");
 const objc = @import("objc.zig");
 const types = @import("types.zig");
@@ -107,7 +107,7 @@ pub const SampleBuffer = struct {
         objc.msg(void, encoder.id, "sampleCountersInBuffer:atSampleIndex:withBarrier:", .{ self.id, index, true });
     }
 
-    /// Caller must ensure GPU completion; borrows a bounded NSData result without a GPU blit or second copy.
+    /// Borrow bounded NSData bytes after completion; same-command blit resolution is unsupported, no result copy.
     pub fn resolveCompleted(self: SampleBuffer, count: usize) !Resolved {
         if (count == 0 or count > self.count) return error.InvalidSampleCount;
         const data = objc.msg(?objc.Id, self.id, "resolveCounterRange:", .{

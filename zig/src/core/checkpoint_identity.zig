@@ -26,6 +26,44 @@ pub fn identity(gpa: std.mem.Allocator, io: Io, dir: []const u8) ![32]u8 {
     return h.finalResult();
 }
 
+/// A trimmed dir: config, index text and the headers of the shards it holds; absent files are not opened.
+pub fn identityPresent(gpa: std.mem.Allocator, io: Io, dir: []const u8) ![32]u8 {
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var h = Sha256.init(.{});
+    for ([_][]const u8{ "config.json", "model.safetensors.index.json" }) |name| {
+        const path = try std.fs.path.join(a, &.{ dir, name });
+        if (Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 26))) |text| {
+            h.update(name);
+            h.update(std.mem.asBytes(&text.len));
+            h.update(text);
+        } else |err| switch (err) {
+            error.FileNotFound => {},
+            else => return err,
+        }
+    }
+    var d = try Io.Dir.cwd().openDir(io, dir, .{ .iterate = true });
+    defer d.close(io);
+    var names: std.ArrayList([]const u8) = .empty;
+    var it = d.iterate();
+    while (try it.next(io)) |e| {
+        if (e.kind != .file and e.kind != .sym_link) continue;
+        if (!std.mem.endsWith(u8, e.name, ".safetensors")) continue;
+        try names.append(a, try a.dupe(u8, e.name));
+    }
+    std.mem.sort([]const u8, names.items, {}, lessThan);
+    for (names.items) |name| {
+        const file = try d.openFile(io, name, .{});
+        defer file.close(io);
+        const size = try file.length(io);
+        h.update(name);
+        h.update(std.mem.asBytes(&size));
+        h.update(try header(a, io, file, size));
+    }
+    return h.finalResult();
+}
+
 /// The index's shard names (or the one model.safetensors) in name order, each once; the index text goes into `h`.
 fn shards(a: std.mem.Allocator, io: Io, dir: []const u8, h: ?*Sha256) ![]const []const u8 {
     var names: std.ArrayList([]const u8) = .empty;

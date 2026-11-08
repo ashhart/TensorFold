@@ -235,7 +235,7 @@ pub const Cand = struct {
     }
 };
 
-/// Every registered variant, the launch-split probe after the gates, the glue_tmp equality and the timing.
+/// Every registered variant, the launch-split probe after the gates, the glue_rows equality and the timing.
 pub const Suite = struct {
     a: std.mem.Allocator,
     device: mtl.Device,
@@ -303,11 +303,11 @@ pub const Suite = struct {
         return bad;
     }
 
-    /// The O(blocks^2) glue_tmp kernel and this one give the same mask bytes over glue_tmp's envelope.
+    /// The O(blocks^2) glue_rows kernel and this one give the same mask bytes over glue_rows's envelope.
     pub fn equality(s: *Suite, seed: u64) !usize {
         const p = if (s.probes.items.len > 0) s.probes.items[0] else return 0;
         if (p.ctl != 0) return 0;
-        const old = try rig_.pipeline(s.device, sources.dsv41.glue_tmp, "tf_dsv41_g_cand");
+        const old = try rig_.pipeline(s.device, sources.dsv41.glue_rows, "tf_dsv41_g_cand");
         defer old.deinit();
         var bad: usize = 0;
         var cases: usize = 0;
@@ -333,11 +333,11 @@ pub const Suite = struct {
             const at = std.mem.indexOfDiff(u8, p.rig.bytes(p.out, p.count()), p.rig.bytes(want, p.count()));
             if (at) |i| {
                 bad += 1;
-                std.debug.print("FAIL glue_tmp equality {d} rows, {d} blocks, top {d}: first difference at byte {d}\n", .{ shape.rows, nb, top, i });
+                std.debug.print("FAIL glue_rows equality {d} rows, {d} blocks, top {d}: first difference at byte {d}\n", .{ shape.rows, nb, top, i });
             }
         };
         const word = if (bad == 0) "PASS" else "FAIL";
-        std.debug.print("{s} equality {s}: {d} cases of 1..9 rows, 1..4100 blocks and top 1, 100, 2048 byte-equal to glue_tmp's tf_dsv41_g_cand, {d} differ\n", .{ word, base, cases, bad });
+        std.debug.print("{s} equality {s}: {d} cases of 1..9 rows, 1..4100 blocks and top 1, 100, 2048 byte-equal to glue_rows's tf_dsv41_g_cand, {d} differ\n", .{ word, base, cases, bad });
         return bad;
     }
 

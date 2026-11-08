@@ -85,6 +85,7 @@ pub const Reuse = struct {
     saved: ?*anyopaque = null, // the backend's copy of the state after `at` prompt tokens (null: start at 0)
     at: u32 = 0,
     marks: []const u32 = &.{}, // ascending: the pass cuts a chunk at each and calls `hook` there
+    snap_at: u32 = 0, // a tail mark the pass may capture INSIDE its chunk instead of cutting at (0: none)
     hook: ?MarkHook = null,
 };
 
