@@ -330,7 +330,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocato
     else
         try q.model.Model.loadDeferred(gpa, io, dir, 128);
     errdefer model.deinit();
-    // The drafter's config probe runs after the target loads: a pair's rank 1 is refused at its load, and this probe's reads must not be on that teardown path.
+    // The drafter's config probe runs after the target loads: a pair's rank 1 is refused at its load, off this teardown path. that teardown path.
     if (o.drafter) |d| _ = q.dflash.config.admit(gpa, io, dir, d) catch |err| {
         why.* = try drafterRefusal(a, dir, d, err);
         return err;
