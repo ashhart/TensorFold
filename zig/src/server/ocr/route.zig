@@ -11,6 +11,7 @@ const Conn = @import("../http_conn.zig").Conn;
 const Server = @import("../server.zig").Server;
 const mistral = @import("mistral.zig");
 const mistral_reply = @import("mistral_reply.zig");
+const doctr = @import("doctr.zig");
 const liteparse = @import("liteparse.zig");
 
 /// The client contracts POST /ocr answers in.
@@ -48,8 +49,9 @@ pub fn post(srv: *Server, conn: *Conn, a: Allocator, route: []const u8) void {
 fn dialect(srv: *Server, conn: *Conn, a: Allocator, s: Selected, body: []const u8, gone: openai.Gone) void {
     // each dialect's commit replaces its arm with the dialect's handler
     switch (s.dialect) {
+        .doctr => doctr.post(srv, conn, a, s.parts, body, gone),
         .liteparse => liteparse.post(srv, conn, a, s.parts, conn.header("Content-Type"), body, gone),
-        .paddlex, .doctr => {
+        .paddlex => {
             const message = std.fmt.allocPrint(a, "the {s} dialect of POST /ocr is not available yet", .{@tagName(s.dialect)}) catch "out of memory";
             sendOpenAi(conn, a, 501, .unimplemented, message);
         },
