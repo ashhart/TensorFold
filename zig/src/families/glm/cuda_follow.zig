@@ -58,7 +58,7 @@ pub const Link = struct {
             var owned = buf;
             owned.free();
         }
-        const wait = if (std.c.getenv("TF_GLM_LINK_WAIT")) |v| std.mem.eql(u8, std.mem.span(v), "1") else false;
+        const wait = try @import("sys").environment.read(bool, "TF_GLM_LINK_WAIT", false);
         return .{ .d = d, .lib = lib, .comm = comm, .stream = stream, .buf = buf, .ids = try gpa.alloc(u32, max_ids), .gpa = gpa, .wait = wait };
     }
 

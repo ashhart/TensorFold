@@ -203,10 +203,11 @@ pub const Engine = struct {
         e.smp = try sampler.Sampler.init(d, c.vocab, fw.window_rows);
         errdefer e.smp.deinit();
         errdefer e.freeProfs();
-        if (prof_mod.Prof.wanted()) for (&e.profs) |*p| {
+        const profiled = try prof_mod.Prof.wanted();
+        if (profiled) for (&e.profs) |*p| {
             p.* = try prof_mod.Prof.init(d, io);
         };
-        if (prof_mod.Prof.wanted()) for (&e.prompt_profs) |*p| {
+        if (profiled) for (&e.prompt_profs) |*p| {
             p.* = try prof_mod.Prof.init(d, io);
             p.*.?.every = 4;
         };

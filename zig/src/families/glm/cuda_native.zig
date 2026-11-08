@@ -92,10 +92,11 @@ pub fn share_states(p: *anyopaque, snaps: usize, parallel: u32, planned: ?kv.Bud
     if (own.share == 0) return;
     const l = own.layout orelse return error.NoPages;
     const slot = l.snap_bytes;
-    const n = if (snapshots.pages.onHost()) own.share else snaps; // TF_GLM_HOST_CACHE: in host memory, outside the device plan
+    const host = try snapshots.pages.onHost();
+    const n = if (host) own.share else snaps; // TF_GLM_HOST_CACHE: in host memory, outside the device plan
     own.e.share_pages = n > 0; // no slot, no store: rank 0 counts its idle pages as the followers do
     if (n > 0) try readySnapshots(own, n * slot);
-    const want = share_mod.advice(n, parallel, l, if (snapshots.pages.onHost()) null else planned) orelse return;
+    const want = share_mod.advice(n, parallel, l, if (host) null else planned) orelse return;
     const why = "TF_KV_SHARE={d} keeps {d} states in the prompt cache's slots, under 4 a GLM stream at --parallel {d}: live streams evict each other's before a resume; ";
     if (want.gib) |gib| std.log.warn(why ++ "{d} take TF_KV_SHARE={d} and --prompt-cache-gib {d}", .{ own.share, n, parallel, want.states, want.states, gib }) else std.log.warn(why ++ "the room holds {d} at any --prompt-cache-gib", .{ own.share, n, parallel, want.most });
 }
@@ -178,6 +179,7 @@ const paging = startup.paging;
 
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
     _ = kernels; // our own kernels: a captured set is not used
+    try @import("cuda_env.zig").startup();
     const p = try place();
     const roce_bytes = try roceBytes(if (std.c.getenv("TF_ROCE_MAX_KB")) |v| std.mem.span(v) else null);
     if (p.world > 1 and std.c.getenv("NCCL_COMM_ID") == null) return error.NoCommId;
@@ -345,13 +347,10 @@ fn finishRank(a: OpenArgs) !Loaded {
         std.process.exit(0);
     }
     // Rank 0 alone reads these: TF_GLM_PROMPT_STEPS=0 passes prompts whole, TF_GLM_SHARED=0 runs windows alone.
-    const off = struct {
-        fn get(name: [*:0]const u8) bool {
-            return if (std.c.getenv(name)) |v| std.mem.eql(u8, std.mem.span(v), "0") else false;
-        }
-    }.get;
+    const steps = try @import("sys").environment.read(bool, "TF_GLM_PROMPT_STEPS", true);
+    const shared = try @import("sys").environment.read(bool, "TF_GLM_SHARED", true);
     own.link.asleep = cuda.tp_watch.open(); // the other ranks begin asleep (follow): the first step wakes them
-    own.lanes = .{ .x = .{ .e = own.e, .link = &own.link }, .whole = off("TF_GLM_PROMPT_STEPS"), .alone = off("TF_GLM_SHARED"), .mtp_confidence = o.mtp_confidence };
+    own.lanes = .{ .x = .{ .e = own.e, .link = &own.link }, .whole = !steps, .alone = !shared, .mtp_confidence = o.mtp_confidence };
     const extra: u64 = (if (o.drafter != null) dflash.ring_bytes else 0) + if (own.e.images) |v| v.streamBytes() else @as(usize, 0);
     own.layout = if (set.pages) try pages_mod.layout(gpa, own.e, extra) else null;
     if (own.share > 0) if (own.layout) |*l| { // TF_KV_SHARE: the plan counts each kept state's slot
@@ -372,7 +371,7 @@ fn finishRank(a: OpenArgs) !Loaded {
         .vision = own.e.images,
         .layout = own.layout,
         .engine_paged = set.pages,
-        .host_snaps = snapshots.pages.onHost(),
+        .host_snaps = try snapshots.pages.onHost(),
     };
 }
 
@@ -501,6 +500,7 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.GlmShareNeedsPages => "TF_KV_SHARE keeps prompts as KV pool pages: set TF_KV_PAGES=on as well",
         error.GlmShareTooMany => std.fmt.comptimePrint("TF_KV_SHARE keeps at most {d} states: set {d} or fewer", .{ kv.most_snaps, kv.most_snaps }),
         error.BadCopyPolicy => "TF_GLM_COPIES: expected 0 or 1 for verified root/context copies",
+        error.InvalidEnvironment => "a TF_GLM_* setting is malformed: the error line before this one names it, its value and the accepted form",
         error.GlmKvHostNeedsPages => "TF_GLM_KV_HOST keeps the KV pool's pages in host memory: set TF_KV_PAGES=on (and --kv-cache bf16) as well",
         error.TooManyRanks => std.fmt.comptimePrint(
             "GLM-5.3-Flash on CUDA runs on at most {d} ranks: set TF_GLM_WORLD to {d} or fewer",

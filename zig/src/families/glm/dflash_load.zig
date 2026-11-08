@@ -202,7 +202,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, e: anytype, dir: []const u8, ran
     var tail: Tail = .{ .loader = &l, .head_n = head.n };
     const candidates = @import("dflash_candidates.zig").Layout.init(world, df.MAX_M, df.CW);
     try @import("dflash_load_owner.zig").acquire(gpa, dr, &tail, Tail, .{ .book = df.VOCAB * df.RANK, .ctx = df.MAX_CTX, .cand = candidates.host, .hidden = df.MAX_M * df.RANK });
-    if (std.c.getenv("TF_GLM_DFLASH2_LOG")) |v| dr.log = std.fmt.parseInt(u64, std.mem.span(v), 10) catch 0;
+    dr.log = try @import("sys").environment.read(u64, "TF_GLM_DFLASH2_LOG", dr.log);
     if (std.c.getenv("TF_GLM_DFLASH2_PROF") != null) dr.prof = io;
     std.log.info("dflash2: drafter from {s} (CC BY-NC-ND 4.0: non-commercial use only), linears at {d} bits, {d:.2} GiB on the device", .{ dir, if (bits == 0) 16 else bits, @as(f64, @floatFromInt(l.at)) / (1 << 30) });
     return dr;
