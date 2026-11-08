@@ -2,7 +2,8 @@
 
 Decode tok/s = (completion tokens - 1) / (last token time - first token time), the same span the
 CUDA engine's bench times (the first sampled token excluded). Each row also carries bench_metrics'
-figures (prefill tok/s for a cold request, ITL mean, median and p95, round gaps), medians over the reps;
+figures (prompt tokens over client TTFT for a cold request, token ITL/TPOT where each chunk holds one token,
+chunk-level estimates and round gaps) and bench_stream's boundaries, medians over the reps;
 docs/cache-benchmarks.md defines them. Standard library only, so it runs on a bare host.
 
   python3 tools/bench_openai.py http://127.0.0.1:8080 MODEL --tokens 64 --reps 5 --output out.json
@@ -15,10 +16,10 @@ import sys
 import time
 import urllib.request
 
-from bench_evidence import Evidence
 from bench_auth import authorize, read_api_key, redact
 from bench_args import validate_temperatures
 import bench_metrics
+import bench_stream
 import bench_thinking
 
 if sys.version_info < (3, 11):
@@ -52,49 +53,26 @@ def stream(base: str, model: str, item: dict, tokens: int, temperature: float, s
     req = urllib.request.Request(url, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
     authorize(req, api_key)
     start = time.perf_counter()
-    first = last = None
-    usage = None
-    text = []
-    pieces = []
-    evidence = Evidence()
-    runtime = {}
-    complete = False
+    reply = bench_stream.Collector(start)
     with urllib.request.urlopen(req, timeout=600) as resp:
-        for raw in resp:
-            line = raw.decode().strip()
-            if line == "data: [DONE]":
-                complete = True
-                break
-            if not line.startswith("data:"):
-                continue
-            chunk = json.loads(line[5:])
-            if "error" in chunk:
-                raise RuntimeError("server_stream_error")
-            runtime = chunk.get("tensorfold") or runtime
-            if chunk.get("usage"):
-                usage = chunk["usage"]
-            for choice in chunk.get("choices", []):
-                evidence.add(choice)
-                delta = choice.get("delta") or {}
-                content = choice.get("text") or delta.get("content") or ""
-                piece = content or delta.get("reasoning_content") or ""
-                if piece:
-                    now = time.perf_counter()
-                    first = first if first is not None else now
-                    last = now
-                    text.append(content)
-                    pieces.append((now, len(piece)))
-    observed = evidence.finish(usage, runtime, complete)
+        reply.read(resp)
+    if reply.end == "error":
+        raise RuntimeError("server_stream_error")
+    complete = reply.end == "done"
+    pieces = reply.pieces
+    first, last = (pieces[0][0], pieces[-1][0]) if pieces else (None, None)
+    observed = reply.evidence.finish(reply.usage, reply.runtime, complete)
     n = observed["tokens"]
     span = last - first if first is not None else None
     out = {"ttft_s": first - start if complete and first is not None else None, "decode_s": span, **observed,
            "decode_tps": (n - 1) / span if complete and n is not None and n > 1 and span else None,
-           "text": "".join(text), "pieces": pieces}
+           "text": "".join(reply.text), "pieces": pieces, **reply.receipt()}
     return {**out, **bench_metrics.request(out), **bench_thinking.receipt(item)}
 
 
-METRICS = ("prefill_tps", "itl_mean_ms", "itl_p50_ms", "itl_p95_ms", "round_gap_p50_ms", "round_gap_p95_ms",
-           "tokens_per_chunk")
+METRICS = ("prompt_ttft_tps", "prefill_tps", "itl_mean_ms", "itl_p50_ms", "itl_p95_ms", "tpot_ms",
+           "chunk_tpot_estimate_ms", "round_gap_p50_ms", "round_gap_p95_ms", "tokens_per_chunk",
+           *bench_stream.BOUNDARIES)
 
 
 def median(values) -> float | None:
@@ -145,8 +123,8 @@ def main() -> None:
                    "ttft_s_median": statistics.median(ttfts) if ttfts else None,
                    **{k + "_median": median(r[k] for r in runs) for k in METRICS},
                    "evidence": [{k: r[k] for k in ("prompt_tokens", "cached_tokens", "tokens", "cache_state",
-                                "complete", "token_sha", "output_sha256")} for r in runs],
-                   "sample": redact(runs[0]["text"], api_key)[:160]}
+                                "complete", "token_sha", "output_sha256", "completion", "tool_sha256")} for r in runs],
+                   "sample": redact(runs[0]["text"], api_key)[:160], "deprecated_keys": bench_metrics.NOTE}
             row = bench_thinking.comparison(redact(row, api_key), previous)
             shown = ("label", "prompt", "temperature", "thinking", "thinking_off_requested", "decode_tps_median", "decode_tps_all", "ttft_s_median",
                      *(k + "_median" for k in METRICS))

@@ -1,4 +1,4 @@
-"""A fake served API for the conformance kit's tests: deterministic chat replies on loopback, with planted faults.
+"""A fake served API for the tools tests: deterministic chat replies on loopback, with planted faults or a script.
 
 A clean fake passes every gate. Each fault breaks one property the kit gates, and only that one:
 
@@ -7,6 +7,11 @@ A clean fake passes every gate. Each fault breaks one property the kit gates, an
 - concurrent: a reply differs while another request is in flight.
 - resumed: the cached server reports no cached prompt tokens.
 - refusals: an out-of-range presence_penalty is answered instead of refused.
+
+``serve`` plays a scripted SSE reply instead, for the benchmark clients' tests. A reply is a list of tokens, each
+``(choice, kind, text)`` for content and reasoning or ``(choice, "tool", index, field, text)`` for a tool call's
+``name`` or ``arguments``. ``script`` cuts the same tokens into SSE events of the given sizes, so a test can serve one
+reply chunked several ways. Headers go out before the script's first step.
 
 Standard library only; no device, no network beyond 127.0.0.1.
 """
@@ -19,6 +24,8 @@ import time
 
 FAULTS = ("drafted", "repeat", "concurrent", "resumed", "refusals")
 BATCH_WINDOW = 0.15  # seconds a lone request waits for a partner under the concurrent fault
+DONE = b"data: [DONE]\n\n"
+HASHES = {"token_sha": "d" * 12, "token_sha256": "d" * 64}
 
 
 def doc(sha="a" * 64, cached=0, accepted=2, drafted=3, text="hi"):
@@ -45,6 +52,50 @@ def text_of(body) -> str:
     return " ".join(m.get("content", "") for m in body.get("messages", []))
 
 
+def event(chunk: dict) -> bytes:
+    return b"data: " + json.dumps(chunk).encode() + b"\n\n"
+
+
+def delta(group: list[tuple], label: str) -> list[dict]:
+    """One event's choices: each choice's tokens merged into one delta; tool fragments merged by tool index."""
+    choices: dict[int, dict] = {}
+    for token in group:
+        d = choices.setdefault(token[0], {})
+        if token[1] == "tool":
+            _, _, index, field, text = token
+            calls = d.setdefault("tool_calls", [])
+            call = next((c for c in calls if c["index"] == index), None)
+            if call is None:
+                call = {"index": index, "id": f"call_{label}_{index}", "type": "function", "function": {}}
+                calls.append(call)
+            call["function"][field] = call["function"].get(field, "") + text
+        else:
+            key = "content" if token[1] == "content" else "reasoning_content"
+            d[key] = d.get(key, "") + token[2]
+    return [{"index": c, "delta": d, "finish_reason": None} for c, d in choices.items()]
+
+
+def script(tokens: list[tuple], sizes: list[int], *, finish: str | None = "stop", gap: float = 0.0,
+           before: float = 0.0, usage_after: float = 0.0, error_after: int | None = None, done: bool = True) -> list:
+    """Steps for the handler: bytes are written and flushed, a float sleeps that many seconds."""
+    steps: list = [before] if before else []
+    at, k = 0, 0
+    while at < len(tokens):
+        if error_after is not None and at >= error_after:
+            return steps + [event({"error": {"message": "fixture failure", "type": "server_error"}})]
+        group = tokens[at:at + sizes[k % len(sizes)]]
+        steps += [event({"choices": delta(group, "-".join(map(str, sizes)))})] + ([gap] if gap else [])
+        at, k = at + len(group), k + 1
+    if finish is not None:
+        ends = sorted({t[0] for t in tokens}) or [0]
+        steps.append(event({"choices": [{"index": c, "delta": {}, "finish_reason": finish} for c in ends]}))
+    if usage_after:
+        steps.append(usage_after)
+    steps.append(event({"choices": [], "usage": {"prompt_tokens": 12, "completion_tokens": len(tokens),
+                                                 "prompt_tokens_details": {"cached_tokens": 0}}, "tensorfold": HASHES}))
+    return steps + ([DONE] if done else [])
+
+
 class FakeEngine(http.server.BaseHTTPRequestHandler):
     """The reply hash depends on the messages and, when sampling, the seed; never on draft, cache or batch."""
 
@@ -57,6 +108,8 @@ class FakeEngine(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         server = self.server
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        if server.steps is not None:
+            return self.play(server.steps(body))
         error = refusal(body, server.fault)
         if error:
             return self.reply(400, {"error": {"message": error, "type": "invalid_request_error"}})
@@ -106,6 +159,39 @@ class FakeEngine(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
+    def play(self, steps):
+        """An event stream: headers first, then each step (bytes written and flushed, a float slept)."""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+        try:
+            for step in steps:
+                if isinstance(step, bytes):
+                    self.wfile.write(step)
+                    self.wfile.flush()
+                else:
+                    time.sleep(step)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+
+@contextlib.contextmanager
+def running(cache=False, fault=None, linger=0.0, steps=None):
+    """One fake on 127.0.0.1 port 0, yielding its base URL; stopped on exit."""
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FakeEngine)
+    server.cache, server.fault, server.seen, server.inflight, server.linger = cache, fault, {}, 0, linger
+    server.steps = steps
+    server.lock = threading.Lock()
+    server.cond = threading.Condition(server.lock)
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
 
 @contextlib.contextmanager
 def fake(cache, fault=None, linger=0.0):
@@ -113,14 +199,10 @@ def fake(cache, fault=None, linger=0.0):
     # linger: seconds each handler stays alive after its reply, widening any window between reply and exit.
     if fault not in (None, *FAULTS):
         raise ValueError(f"unknown fault {fault}")
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FakeEngine)
-    server.cache, server.fault, server.seen, server.inflight, server.linger = cache, fault, {}, 0, linger
-    server.lock = threading.Lock()
-    server.cond = threading.Condition(server.lock)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield f"http://127.0.0.1:{server.server_address[1]}"
-    finally:
-        server.shutdown()
-        server.server_close()
+    with running(cache, fault, linger) as url:
+        yield url
+
+
+def serve(steps):
+    """A fake that answers each POST by playing ``steps(body)``; yields its base URL."""
+    return running(steps=steps)
