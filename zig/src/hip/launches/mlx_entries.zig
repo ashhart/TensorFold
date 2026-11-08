@@ -190,7 +190,7 @@ fn fitsPrefillMatrix(s: Shape) bool {
 const item_rows = 1024;
 
 fn fitsPrefillItem(s: Shape) bool {
-    return fitsPrefillMatrix(s) and s.m <= item_rows;
+    return fitsPrefillMatrix(s) and @max(s.m, s.chunk) <= item_rows;
 }
 
 /// The deepest product (codes a row) the skewed tile takes: past it a band of blocks outgrows the caches at 3 a WGP.
@@ -491,20 +491,26 @@ test "gfx1201 takes the K-parallel tile for short routed prompts, up to its item
 test "gfx1151 takes the 64-row routed tile for prompt chunks of up to 1,024 rows, the skewed 128-row tile past them" {
     const r = kernelsOn("gfx1151");
     const env = envOn("gfx1151", true, true, true);
-    // Flash Next's gate and up: 11 slots a row, the plan's item capacity as the launch passes it
-    for ([_]struct { u32, []const u8 }{ .{ 1024, "item64" }, .{ 1025, "skew" }, .{ 4096, "skew" } }) |w| {
+    // Flash Next's gate and up as the launch builds them: 11 slots a row, `m` the tile's rows, the plan's item capacity
+    for ([_]struct { u32, []const u8 }{ .{ 128, "item64" }, .{ 1024, "item64" }, .{ 1025, "skew" }, .{ 2048, "skew" }, .{ 4096, "skew" } }) |w| {
         const pairs = w[0] * 11;
         const items = @min(pairs, 512) + pairs / 8;
-        const shape: Shape = .{
-            .m = w[0],
+        const arg: affine.Arg = .{
+            .x = 0,
+            .words = 0,
+            .scale = .{ .p = 0, .kind = 1 },
+            .bias = .{ .p = 0, .kind = 1 },
+            .out = 0,
+            .m = @intCast(@min(w[0], 128)),
             .n = 1280,
             .k = 2560,
             .bits = 4,
             .group = 32,
-            .fp16 = false,
-            .items = items,
-            .plan_pairs = pairs,
+            .fp16 = 0,
+            .route = .{ .items = 1, .members = 1 },
         };
+        const shape = Kernels.prefillShape(arg, @intCast(items), @intCast(pairs), @intCast(w[0]));
+        try std.testing.expect(shape.m <= 128);
         try std.testing.expect(std.mem.endsWith(u8, r.select(env, .mlx, .routed, .prefill, shape).?.id, w[1]));
     }
 }
