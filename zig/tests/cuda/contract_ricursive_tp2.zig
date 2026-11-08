@@ -44,11 +44,11 @@ pub fn grid(n: usize) usize {
 
 fn sameBits(comptime T: type, have: T, want: T) bool {
     if (std.math.isNan(have) and std.math.isNan(want)) return true;
-    return @as(std.meta.Int(.unsigned, @bitSizeOf(T)), @bitCast(have)) == @as(std.meta.Int(.unsigned, @bitSizeOf(T)), @bitCast(want));
+    return @as(@Int(.unsigned, @bitSizeOf(T)), @bitCast(have)) == @as(@Int(.unsigned, @bitSizeOf(T)), @bitCast(want));
 }
 
 fn read(comptime T: type, bytes: []const u8, i: usize) T {
-    const U = std.meta.Int(.unsigned, @bitSizeOf(T));
+    const U = @Int(.unsigned, @bitSizeOf(T));
     return @bitCast(std.mem.readInt(U, bytes[i * @sizeOf(T) ..][0..@sizeOf(T)], .little));
 }
 
