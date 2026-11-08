@@ -165,6 +165,7 @@ pub fn routedShape(c: Class, template: registry.Shape, tokens: usize) registry.S
     var s = template;
     s.items = @intCast(selectorCount(c, tokens));
     s.plan_pairs = @intCast(tokens * c.slots);
+    s.chunk = @intCast(tokens);
     s.m = @intCast(@min(moe.tileOf(tokens, false), tokens));
     return s;
 }
