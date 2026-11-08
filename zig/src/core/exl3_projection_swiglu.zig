@@ -98,7 +98,7 @@ pub fn planBody(p: *const Pipelines, args: Args, r: Rows) Plan {
     const nax_tile: usize = if (a.indexed != 0) (if (r.tile_rows != 0) r.tile_rows else 64) else knobs.nax_tile_rows;
     // A 256-row tile wants the narrower column tile so the threadgroup stays at 512 threads.
     const moe_cols = if (a.indexed != 0) knobs.moe_cols else 0;
-    const nax_cols: usize = if (a.indexed != 0 and nax_tile >= 256) 64 else if (moe_cols != 0) moe_cols else (knobs.nax_cols orelse if (a.indexed != 0) 128 else 64);
+    const nax_cols: usize = if (a.indexed != 0 and nax_tile >= 256) 64 else if (moe_cols != 0) moe_cols else (knobs.nax_cols orelse 64);
     const tile_id: usize = ((nax_tile / 64) - 1) * 2 + (nax_cols / 64 - 1);
     const nax_pick: ?mtl.Pipeline = p.prefill_nax_tiles[tile_id];
     // The funnel read in the routed prompt tile: halves = 6 is the packed width; another width takes the shipped path.
