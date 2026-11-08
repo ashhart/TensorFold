@@ -314,14 +314,7 @@ fn indented(w: *std.Io.Writer, v: Value, depth: usize) std.Io.Writer.Error!void 
 
 /// A random lowercase UUID v4, as ``str(uuid.uuid4())``.
 pub fn runId(io: std.Io) [36]u8 {
-    var b: [16]u8 = undefined;
-    io.random(&b);
-    b[6] = (b[6] & 0x0f) | 0x40;
-    b[8] = (b[8] & 0x3f) | 0x80;
-    const hex = std.fmt.bytesToHex(b, .lower);
-    var out: [36]u8 = undefined;
-    _ = std.fmt.bufPrint(&out, "{s}-{s}-{s}-{s}-{s}", .{ hex[0..8], hex[8..12], hex[12..16], hex[16..20], hex[20..32] }) catch unreachable;
-    return out;
+    return @import("ids.zig").uuid4(io);
 }
 
 /// UTC wall time as ``datetime.isoformat()`` with Z: microseconds only when not zero.
