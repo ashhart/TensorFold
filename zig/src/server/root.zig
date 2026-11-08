@@ -261,6 +261,7 @@ test {
     _ = @import("ocr/geometry_test.zig");
     _ = @import("ocr/markdown_test.zig");
     _ = @import("ocr/budget_test.zig");
+    _ = @import("ocr/page_markdown_test.zig");
     _ = @import("ocr/mistral_test.zig");
     _ = @import("ocr/mistral_sdk_test.zig");
     _ = @import("ocr/run_test.zig");

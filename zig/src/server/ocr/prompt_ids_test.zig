@@ -31,11 +31,14 @@ const dots_prompt =
     \\5. Final Output: The entire output must be a single JSON object.
     \\
 ;
+/// GLM-OCR's reader prompt (families/glm_ocr/ocr.zig).
+const glm_prompt = "Text Recognition:";
 
 /// The SHA-256 each family's reader test checks its prompt against: the prompt every oracle run recorded.
 const Pinned = struct { prompt: []const u8, sha256: []const u8 };
 const readers = [_]Pinned{
     .{ .prompt = dots_prompt, .sha256 = "16ff71ac5d218f35e5b3db41240b6e70741498bc099db3fa922ce1ff972e3b2f" },
+    .{ .prompt = glm_prompt, .sha256 = "77e8207573e1b8ba857d25db3a5080ae8651d6ddc2ea79007af5ca7958b80017" },
 };
 
 /// The template's image placeholder: a byte no request text holds.
