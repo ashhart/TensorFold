@@ -184,7 +184,6 @@ pub fn plain(l: *const hip.Launcher, r: *rig_.Rig, in: [5]u64, state: u64, y: u6
     for ([_]u64{ in[0], in[1], in[2], in[3], in[4], state, y }) |x| try a.add(x);
     for ([_]usize{ length, p.kh(), p.h, p.d }) |x| try a.add(@as(c_int, @intCast(x)));
     try a.add(@as(u64, 0)); // no snapshots
-    try a.add(@as(u64, 0)); // no start row
     const f = l.gated_delta_tile[if (p.d == 128) 0 else 1];
     const grid: hip.launch.Dim3 = .{ .x = @intCast(p.d / 8), .y = @intCast(p.h) };
     try hip.launch.launch(f, .{ .grid = grid, .block = .{ .x = 32, .y = 8 } }, r.s, &a);
