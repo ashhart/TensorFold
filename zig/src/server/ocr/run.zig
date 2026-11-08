@@ -37,8 +37,8 @@ pub const PageSink = struct {
 pub const no_reader = "this model has no OCR reader; use POST /v1/chat/completions";
 /// The gate's refusal for a server started without --vision.
 pub const no_vision = "OCR needs image input; start the server with --vision";
-/// The decoded-pixel limit of one page: GLM-OCR's processor input limit, the larger of the two reader families'.
-pub const max_page_pixels = 32 << 20;
+/// The decoded-pixel limit of one page: dots.mocr's processor input limit, the one reader family's.
+pub const max_page_pixels = picture.max_pixels;
 
 /// Refuses as bad input unless the engine has an OCR reader and the server reads images.
 pub fn gate(srv: *const Server, a: Allocator, fault: *Fault) Step!void {
