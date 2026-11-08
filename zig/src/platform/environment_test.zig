@@ -61,6 +61,9 @@ const valid = [_]Case{
     .{ .name = "TF_ROCE_GID_INDEX", .raw = "2147483647", .n = 2147483647 },
     .{ .name = "TF_Q27_COPY_ROWS", .raw = "0", .n = 0 },
     .{ .name = "TF_Q27_COPY_ROWS", .raw = "48", .n = 48 },
+    .{ .name = "TF_QWEN35_CPU_THREADS", .raw = "4", .n = 4 },
+    .{ .name = "TF_QWEN35_CPU_WINDOWS", .raw = "1", .n = 1 },
+    .{ .name = "TF_QWEN35_CPU_TRACE", .raw = "0", .n = 0 },
     .{ .name = "TF_Q27_DRAFT_SLOTS", .raw = "0", .n = 0 },
     .{ .name = "TF_Q27_DRAFT_SLOTS", .raw = "4294967295", .n = std.math.maxInt(u32) },
     .{ .name = "TF_HEAD_GEOMETRY", .raw = "0", .n = 0 },
@@ -101,6 +104,7 @@ test "environment: valid forms remain raw numbers before existing consumer clamp
 test "environment: range, enum, whitespace and native prompt geometry refusals are explicit" {
     for ([_][2][]const u8{
         .{ "TENSORFOLD_MAX_PDF_PAGES", "0" },   .{ "TENSORFOLD_PRESSURE_CACHE_PERCENT", "101" },
+        .{ "TF_QWEN35_CPU_THREADS", "0" },      .{ "TF_QWEN35_CPU_WINDOWS", "yes" },
         .{ "TENSORFOLD_PREFIX_WAIT_MS", "+1" }, .{ "TENSORFOLD_RESTORE_PREFETCH", "+1" },
         .{ "TF_CUDA_SEGMENTS", "0" },           .{ "TF_CUDA_SEGMENTS", "5" },
         .{ "TF_CUDA_CARVEOUT", "true" },        .{ "TF_CUDA_CARVEOUT", "01" },
