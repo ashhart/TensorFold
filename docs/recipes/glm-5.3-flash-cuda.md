@@ -100,9 +100,15 @@ windows of 1, 2, 3, 4, 6, 8, 12, 16, 24 and 32 rows, straight lines between them
 classic NVFP4 expert kernel against the factored one and keeps the faster, which gives the same bits. The startup log
 names both: `glm: windows (timed): 9.91 ms at 1 row, 11.25 at 4, 26.03 at 32, a draft 0.20 ms; experts factored`.
 
-The times stay in `~/.cache/tensorfold/window-costs`, one table per build, GPU, checkpoint, drafter and setting that
-moves a window's time. A new build's first load takes about 2 s longer on the cards below and `(kept)` loads none.
+The times stay in `~/.cache/tensorfold/window-costs`, one table per build, GPU/driver, full checkpoint and drafter identity,
+drafter precision, rank count, layer limit, L2-prefetch options, loaded NVFP4 decode warps, KDA and matmul modes,
+dense/head bits, KV placement and the recorded NCCL channel/P2P settings. Earlier timings added about 2 s to a
+new build's first load on the cards below; the revised identity has not been device-timed. A `(kept)` load skips timing.
 With `--no-drafts` nothing is timed. Timings steer windows, never tokens.
+
+A host-KV gather wider than 16 rows invalidates the saved narrow row list before overwriting its slots. Otherwise
+a later narrow gather could reuse rows from before that wide overwrite. The existing invalidation is retained; the
+revised key and fixtures do not change the gather arithmetic.
 
 ## Four cards in one host
 

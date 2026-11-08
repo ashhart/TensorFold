@@ -59,11 +59,11 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 12. Add + norm | done H[#2099] | no (bound <1 %) | yes | done¹ | done [#796] |
 | 13. MoE grouped | done [#605] | done [#1351] | done [#864] | no (dense) | done [#558] |
 | 14. CUDA graphs | done¹ | done [#1786] | open [#2279] | done [#1174] | done [#615] |
-| 15. MTP | done [#1562] | done [#1925] | done [#1585] | done [#1385] | done [#997] |
+| 15. MTP | done [#1562] | done [#1925] | done [#1585]; wide C open [#2257] | done [#1385] | done [#997] |
 | 16. DFlash(2) | done [#1465] | yes | done [#979] | done C¹ M[#879] | yes |
 | 17. DSpark | yes | yes | yes | yes | yes |
-| 18. Copy drafts | done [#1477] | done [#468] | done [#2146] | done [#2022] | done [#1974] |
-| 19. Shared drafts | done [#1562] | no (null [#1762]) | done [#1779] | done [#1779] | done [#768] |
+| 18. Copy drafts | done [#1477] | done [#468] | done [#2146]; wide C open [#2257] | done [#2022] | done [#1974] |
+| 19. Shared drafts | done [#1562] | no (null [#1762]) | done [#1779]; cap C open [#2257] | done [#1779] | done [#768] |
 | 20. Solo chunks | yes | done C[#1733] M[#2167] | done [#1823] | done C[#2391] | yes |
 | 21. Read-ahead | done [#1928] | no (row 22) | done [#1616] | done [#1928] | done [#2033] |
 | 22. Direct load | done [#2282] | done [#1901] | yes | done [#2282] | done [#458] |
@@ -347,6 +347,11 @@ below; these are estimates for planning a port, not results.
 15. **MTP drafts.** The checkpoint's own MTP head drafts tokens that the target verifies in one pass, with the same
     replies as serial decode. `--mtp-drafts` and `--mtp-confidence` size the drafts on Nemotron and GLM.
 
+    GLM CUDA's proposed 32-row prices, three-draft shared MTP cap and wider copy windows are tracked in [#2257].
+    The supplied run used DFlash2 at TP=2 on two GB10s: two-stream chat +0.3%, one-stream code +36%, the other
+    cells level, all replies exact (tokens 52/0). That run does not qualify checkpoint MTP, TP=1 or TP=4,
+    sampled chat or the revised cache identity; these remain open device cells.
+
 16. **DFlash and DFlash2 drafters.** An external block drafter reads the target's hidden taps and drafts a block (or a
     tree) a step. It needs a trained drafter for each target; see [training a drafter](recipes/training-a-drafter.md).
 
@@ -565,3 +570,5 @@ below; these are estimates for planning a port, not results.
 [#2391]: https://github.com/ashhart/TensorFold/pull/2391
 [#2449]: https://github.com/ashhart/TensorFold/pull/2449
 [#2430]: https://github.com/ashhart/TensorFold/pull/2430
+
+[#2257]: https://github.com/ashhart/TensorFold/pull/2257

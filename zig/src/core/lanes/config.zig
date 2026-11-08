@@ -211,3 +211,18 @@ test "setup derives widths like Python" {
     defer steady.deinit(gpa);
     try std.testing.expectEqual(@as(f64, 0.08), steady.k.depth_rate);
 }
+
+test "shared cost consumer: lone measured windows stay out of shared MTP prices" {
+    const a = std.testing.allocator;
+    const own = [_]Cost{ .{ .width = 1, .ms = 10 }, .{ .width = 32, .ms = 25 } };
+    const shared = [_]Cost{ .{ .width = 1, .ms = 2 }, .{ .width = 32, .ms = 4 } };
+    for ([_]bool{ false, true }) |lone| {
+        var c = try Config.init(a, .{ .exact_width = 32, .mtp = true, .speculate = true, .window_costs = &own, .window_costs_lone = lone }, 32, 15);
+        defer c.deinit(a);
+        try std.testing.expectEqual(@as(?f64, 25), c.family_costs.get(32));
+        try std.testing.expectEqual(lone, c.shared_costs.empty());
+        var explicit = try Config.init(a, .{ .exact_width = 32, .mtp = true, .speculate = true, .window_costs = &own, .window_costs_lone = lone, .shared_costs = &shared }, 32, 15);
+        defer explicit.deinit(a);
+        for (shared) |cost| try std.testing.expectEqual(@as(?f64, cost.ms), explicit.shared_costs.get(cost.width));
+    }
+}

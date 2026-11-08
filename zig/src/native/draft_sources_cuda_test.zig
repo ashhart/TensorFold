@@ -34,6 +34,7 @@ test "draft sources: CUDA GLM distinguishes its checkpoint head from loaded DFla
     b.x.e = &e;
     b.alone = false;
     b.mtp_confidence = null;
+    b.costs = null;
     e.mtp = false;
     e.drafter = null;
     try check(b.facts(), null, false, false);

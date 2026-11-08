@@ -1,5 +1,6 @@
 //! This machine's window and draft prices, timed at load as real rounds over real text; rank 0 keeps them per build.
 const std = @import("std");
+const sys = @import("sys");
 const cuda = @import("cuda");
 const core = @import("core");
 const lanes = @import("lanes");
@@ -63,7 +64,7 @@ pub fn price(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: 
     const e = x.e;
     if (!e.mtp or e.capacity < prefix + 2 * fw.window_rows + 2) return null;
     var name: [256]u8 = undefined;
-    var shape: [256]u8 = undefined;
+    var shape: [512]u8 = undefined;
     const parts = try keyParts(e, ctx, &name, &shape);
     const key = cache.key(gpa, io, &parts) catch null;
     if (key) |k| if (cache.load(Kept, gpa, io, k)) |kept| if (usable(kept)) {
@@ -98,19 +99,21 @@ fn report(k: Kept, how: []const u8) void {
 
 /// Cache identity: the GPU and driver, this checkpoint and drafter, and the settings a window's time follows.
 fn keyParts(e: *const engine.Engine, ctx: *const cuda.Context, name: []u8, shape: []u8) ![3][]const u8 {
-    const set = e.settings;
-    const hex = std.fmt.bytesToHex(e.checkpoint_digest, .lower);
-    const at = try std.fmt.bufPrint(shape, "sm{d} cuda{d} ranks{d} {s} drafter{d} kda{d} mm{d} bits{d}/{d} kv8{d} pages{d} host{d} roce{d} p2p{s}/{s}/{s}", .{
-        try ctx.capability(),            try ctx.d.version(),        e.share.world,             hex[0..16],
-        @intFromBool(e.drafter != null), @intFromBool(set.kda_wide), @intFromBool(set.tiled),   set.dense_bits,
-        set.head_bits,                   @intFromBool(set.kv8),      @intFromBool(set.pages),   set.kv_host,
-        @intFromBool(set.roce_multi),    env("NCCL_P2P_LEVEL"),      env("NCCL_MIN_NCHANNELS"), env("NCCL_MAX_NCHANNELS"),
-    });
+    const at = try keyShape(e, try ctx.capability(), try ctx.d.version(), shape);
     return .{ "glm-cuda", ctx.name(name) catch "gpu", at };
 }
 
-fn env(name: [*:0]const u8) []const u8 {
-    return if (std.c.getenv(name)) |v| std.mem.span(v) else "";
+fn keyShape(e: *const engine.Engine, sm: usize, driver: c_int, shape: []u8) ![]const u8 {
+    const set = e.settings;
+    const hex = std.fmt.bytesToHex(e.checkpoint_digest, .lower);
+    const draft_hex = std.fmt.bytesToHex(if (e.drafter) |dr| dr.checkpoint_digest else @as([32]u8, @splat(0)), .lower);
+    return std.fmt.bufPrint(shape, "sm{d} cuda{d} ranks{d} {s} drafter{d}/{d}/{s} layers{d} l2{d}/{d}/{d}/{d}/{d} warps{d} kda{d} mm{d} bits{d}/{d} kv8{d} pages{d} host{d} roce{d} p2p{s}/{s}/{s}", .{
+        sm,                                          driver,                       e.share.world,                          hex[0..],                                   @intFromBool(e.drafter != null),
+        if (e.drafter) |dr| dr.bits else @as(u8, 0), draft_hex[0..],               set.layers,                             @intFromBool(set.l2pf.on),                  @intFromBool(set.l2pf.named),
+        set.l2pf.mb,                                 set.l2pf.ctas,                set.l2pf.pace_gbps,                     e.m.experts.nvfp4.warps,                    @intFromBool(set.kda_wide),
+        @intFromBool(set.tiled),                     set.dense_bits,               set.head_bits,                          @intFromBool(set.kv8),                      @intFromBool(set.pages),
+        set.kv_host,                                 @intFromBool(set.roce_multi), sys.getenv("NCCL_P2P_LEVEL") orelse "", sys.getenv("NCCL_MIN_NCHANNELS") orelse "", sys.getenv("NCCL_MAX_NCHANNELS") orelse "",
+    });
 }
 
 /// Warm the clocks, race the expert forms on every rank, then time each width and a draft on the winner.
@@ -208,3 +211,42 @@ const Scratch = struct {
         try s.x.draft(from_prompt, &.{next}, depth, &s.held, null);
     }
 };
+
+test "GLM cost identity: the consumed key includes drafter precision and all timing knobs" {
+    var e: engine.Engine = undefined;
+    e.settings = .{};
+    e.checkpoint_digest = @splat(1);
+    e.share.world = 2;
+    e.m.experts.nvfp4.warps = 4;
+    var dr: dflash.Drafter = undefined;
+    dr.bits = 4;
+    dr.checkpoint_digest = @splat(2);
+    e.drafter = &dr;
+    var base: [512]u8 = undefined;
+    const before = try keyShape(&e, 121, 13000, &base);
+    for (0..11) |which| {
+        const original = e.settings;
+        switch (which) {
+            0 => dr.bits = 0,
+            1 => dr.checkpoint_digest[31] ^= 1,
+            2 => e.settings.layers = 1,
+            3 => e.settings.l2pf.on = false,
+            4 => e.settings.l2pf.named = true,
+            5 => e.settings.l2pf.mb += 1,
+            6 => e.settings.l2pf.ctas += 1,
+            7 => e.settings.l2pf.pace_gbps += 1,
+            8 => e.m.experts.nvfp4.warps = 1,
+            9 => e.drafter = null,
+            10 => e.checkpoint_digest[31] ^= 1,
+            else => unreachable,
+        }
+        var changed: [512]u8 = undefined;
+        try std.testing.expect(!std.mem.eql(u8, before, try keyShape(&e, 121, 13000, &changed)));
+        e.settings = original;
+        e.drafter = &dr;
+        dr.bits = 4;
+        dr.checkpoint_digest = @splat(2);
+        e.checkpoint_digest = @splat(1);
+        e.m.experts.nvfp4.warps = 4;
+    }
+}
