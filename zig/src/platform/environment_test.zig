@@ -56,6 +56,8 @@ const valid = [_]Case{
     .{ .name = "TF_DRAFT_NODES", .raw = "0", .n = 0 },
     .{ .name = "TF_DRAFT_NODES", .raw = "64", .n = 64 },
     .{ .name = "TF_QMMF_HALF_BELOW", .raw = "0", .n = 0 },
+    .{ .name = "TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS", .raw = "0", .n = 0 },
+    .{ .name = "TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS", .raw = "1", .n = 1 },
     .{ .name = "TF_ROCE_GID_INDEX", .raw = "2147483647", .n = 2147483647 },
     .{ .name = "TF_Q27_COPY_ROWS", .raw = "0", .n = 0 },
     .{ .name = "TF_Q27_COPY_ROWS", .raw = "48", .n = 48 },
@@ -174,6 +176,18 @@ test "environment: word switches take 0 and 1 and the word forms in any case; ex
         try t.expectError(error.InvalidEnvironment, e.parse("TF_DSV41_SAMPLING", raw));
     }
     try t.expectError(error.InvalidEnvironment, e.parse("TF_DSV41_KV_SPLIT", "true"));
+}
+
+test "environment: the keep-others switch is exact 0 or 1, checked when the CUDA backend starts" {
+    const name = "TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS";
+    for ([_][]const u8{ "true", "on", "yes", "01", " 1", "1 ", "2" }) |raw| {
+        try t.expectError(error.InvalidEnvironment, e.parse(name, raw));
+        const why = (try e.refusal(a, Env{ .name = name, .raw = raw }, .{ .cuda = true })).?;
+        a.free(why);
+        try t.expect((try e.refusal(a, Env{ .name = name, .raw = raw }, .{ .metal = true })) == null);
+    }
+    try t.expect(!try e.value(bool, name, null, false));
+    try t.expect(try e.value(bool, name, "1", false));
 }
 
 test "environment: real settings are finite, keep their lower bound and optional cap, and read as floats" {

@@ -11,6 +11,7 @@ const cuts = @import("prompt_cuts.zig");
 const interior = @import("prompt_interior.zig");
 const index = @import("prompt_cache_index.zig");
 const forks = @import("prompt_cache_fork.zig");
+pub const others = @import("prompt_cache_others.zig");
 pub const rows = @import("rows_store.zig");
 /// A family's copy of one state.
 pub const Saved = *anyopaque;
@@ -121,6 +122,7 @@ pub const Store = struct {
     links_lost: bool = false, // an allocation failure left the extension links incomplete: `extended` scans
     hold: bool = false, // memory pressure: lookups plan no marks and keeps refuse, so no new state is kept
     over: []const u8 = "", // what refusing a state past the whole budget adds: the setting that keeps it otherwise
+    keep_others: bool = false, // a new state may evict only its own conversation's states (prompt_cache_others.zig)
     repeat_log: @import("prompt_cache_repeat.zig").Log = .{},
     const SHARED_KEYS = 64;
     pub const lookupUserImages = images.lookupUser;
@@ -338,7 +340,7 @@ pub const Store = struct {
             new += @intFromBool(!exists);
         }
         while (s.held + need > s.budget or s.entries.items.len + @min(new, s.most) > s.most) {
-            const i = s.victimBut(from, prompt, born) orelse return;
+            const i = others.victim(s, from, prompt, born, need, @min(new, s.most)) orelse return;
             s.remove(i);
             s.counts.evicted += 1;
         }
@@ -484,7 +486,7 @@ pub const Store = struct {
                 if (s.family.vtable.trim) |f| f(s.family.ptr, s.budget -| s.held -| bytes); // spare that cannot take this state goes before any state
                 if (s.spare() < free_) continue;
             }
-            s.remove(s.victimBut(null, prompt, born) orelse return s.fail(at, error.CacheBorrowed)); // its storage may come back spare and take this state
+            s.remove(others.victim(s, null, prompt, born, bytes, 1) orelse return if (s.keep_others) others.refuse(s, at, bytes) else s.fail(at, error.CacheBorrowed)); // its storage may come back spare and take this state
             s.counts.evicted += 1;
         }
         if (s.entries.items.len == 0) if (s.family.vtable.trim) |f| f(s.family.ptr, s.budget -| bytes);
@@ -524,7 +526,7 @@ pub const Store = struct {
         if (!modes.equal(&.{}, spans, m.at)) return have; // the request decodes rows the learned prompt pass prefilled
         const bytes = s.family.vtable.bytes(s.family.ptr, m.at);
         while (bytes <= s.budget and (s.held + s.spare() + bytes > s.budget or s.entries.items.len >= s.most)) {
-            s.remove(s.victimBut(have, prompt, born) orelse return have);
+            s.remove(others.victim(s, have, prompt, born, bytes, 1) orelse return have);
             s.counts.evicted += 1;
         }
         if (bytes > s.budget) return have;

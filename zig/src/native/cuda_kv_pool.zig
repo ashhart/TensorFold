@@ -208,6 +208,7 @@ pub fn kept(comptime F: type, loaded: anytype, paged: ?Plan, o: api.Open, room: 
 /// The store keeps a state a slot, the slots made now in one device buffer; a family without them, its own budget.
 pub fn store(comptime F: type, s: *api.prompt_cache.Store, loaded: anytype, k: Kept) !void {
     s.over = @import("cuda_prompt_pages.zig").hint(F, loaded); // a state past the budget: the setting keeping it
+    s.keep_others = api.prompt_cache.others.fromEnv(); // =1: a new state evicts only its own conversation's states
     if (comptime !@hasDecl(F, "snap_slots")) return;
     if (comptime @hasDecl(F, "snap_place")) F.snap_place(loaded.target, k.host);
     s.most = if (k.host) k.most else k.snaps;
@@ -430,6 +431,7 @@ pub fn warnCapacity(facts: ?api.PromptCacheCapacity, disabled: bool, taken: u64,
 test {
     _ = @import("cuda_cache_capacity_test.zig");
     _ = @import("cuda_streams.zig");
+    _ = @import("cuda_keep_others_test.zig");
 }
 
 test "KV admission: a refusal prices the running states beside the fixed part and KV page" {

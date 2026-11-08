@@ -134,7 +134,7 @@ fn attempt(s: *pc.Store, prompt: []const u32, born: u32, starts: []const u32, sp
             trim(s.family.ptr, s.budget -| s.held -| bytes);
             if (s.spare() < spare) continue;
         }
-        s.remove(s.victimBut(have, prompt, born) orelse return have);
+        s.remove(@import("prompt_cache_others.zig").victim(s, have, prompt, born, bytes, 1) orelse return have);
         s.counts.evicted += 1;
     }
     const i = r.find(name) orelse return have; // a spill that made room went past the disk cap and took it

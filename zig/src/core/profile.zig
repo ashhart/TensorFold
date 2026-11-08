@@ -15,6 +15,7 @@ pub const Switch = enum {
     TF_GLM_KV_HOST,
     TF_GLM_KV_HOST_SHARED,
     TF_GLM_PROMPT_TAIL,
+    TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS,
     TENSORFOLD_KOLIBRI_KV_PAGES,
     TENSORFOLD_DORY_KV_PAGES,
     GEMMA_DRAFT_BF16,
@@ -116,6 +117,8 @@ const qwen: []const []const u8 = &.{ "qwen3_5", "qwen3_5_moe" };
 const nemotron: []const []const u8 = &.{ "nemotron_h", "nemotron_h_omni" };
 const slide_cuda: []const []const u8 = &.{ "nemotron_h", "nemotron_h_omni", "qwen3_5" };
 const flash: []const []const u8 = &.{"qwen4_exp"};
+/// The CUDA families whose host prompt cache the generic CUDA host builds (cuda_keep_others_test.zig checks the list).
+pub const cuda_cache: []const []const u8 = &.{ "nemotron_h", "nemotron_h_omni", "glm5_next", "minimax_m3_vl", "qwen3_5", "qwen3_5_moe", "qwen4_exp", "kolibri1", "gemma4", "gemma4_unified", "spark2_5", "dory" };
 
 pub const entries = [_]Entry{
     .{ .id = .TF_QWEN_REQUEST_STARTS, .families = qwen, .class = .arithmetic, .syntax = .one, .effect = "Opt into CUDA message-start prompt cuts", .evidence = "#1334; default-off; GB10 six-turn: resumed equals fresh, one reply differs from unset" },
@@ -130,6 +133,7 @@ pub const entries = [_]Entry{
     .{ .id = .TF_GLM_KV_HOST, .families = &.{"glm5_next"}, .class = .identical, .syntax = .one, .effect = "Keep the DSA layers' latent rows on pinned host pages", .evidence = "#1795" },
     .{ .id = .TF_GLM_KV_HOST_SHARED, .families = &.{"glm5_next"}, .class = .identical, .syntax = .one, .effect = "One copy of those host pages across the ranks on one host", .evidence = "#1795" },
     .{ .id = .TF_GLM_PROMPT_TAIL, .families = &.{"glm5_next"}, .class = .identical, .syntax = .one, .effect = "Keep a raw prompt's state at its last chunk start, from the chat states' budget", .evidence = "#2226" },
+    .{ .id = .TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS, .families = cuda_cache, .class = .identical, .syntax = .one, .effect = "A new prompt state that fits only by evicting another conversation's is not kept", .evidence = "#2346" },
     .{ .id = .TENSORFOLD_KOLIBRI_KV_PAGES, .families = &.{"kolibri1"}, .class = .arithmetic, .report_values = &.{"0"}, .effect = "Exact 0 disables requested pool pages; other text keeps the option", .evidence = "#2370" },
     .{ .id = .TENSORFOLD_DORY_KV_PAGES, .families = &.{"dory"}, .class = .arithmetic, .syntax = .not_zero, .effect = "Present text except exact 0 selects pool pages instead of default windows", .evidence = "#2370" },
     .{ .id = .GEMMA_DRAFT_BF16, .families = &.{ "gemma4", "gemma4_unified" }, .backend = "metal", .class = .debug, .report_values = &.{ "all", "fc", "self_attn.q_proj", "self_attn.k_proj", "self_attn.o_proj", "mlp.gate_proj", "mlp.down_proj" }, .effect = "Keep selected drafter stacks in stored BF16 instead of quantizing them", .evidence = "#2370" },
