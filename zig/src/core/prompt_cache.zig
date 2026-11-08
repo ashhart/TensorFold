@@ -592,9 +592,7 @@ test {
     _ = @import("learned_fault_test.zig");
     _ = modes;
     _ = rows;
-}
-
-test {
     _ = @import("prompt_cache_repeat_test.zig");
     _ = @import("prompt_cache_tail_test.zig");
+    _ = @import("prompt_cache_others_test.zig");
 }
