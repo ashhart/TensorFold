@@ -64,6 +64,7 @@ pub const Modules = struct {
         x3.dense = try cuda.exl3.Dense.load(d);
         errdefer x3.dense.unload();
         x3.experts = try cuda.exl3_experts.Experts.load(d);
+        errdefer x3.experts.unload();
         x3.grouped = .{ .d = d, .kernels = &x3.experts };
         x3.tiles = try cuda.exl3.Dense.load(d);
         x3.tiles.?.implementation = .tiles;
