@@ -1,9 +1,9 @@
-//! Token ids of long text segments between added tokens: a chat's earlier messages are tokenized once, not each render.
+//! Token ids of text segments between added tokens: a chat's earlier messages are tokenized once, not each render.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 /// Segments shorter than this are tokenized each time: their lookup would cost about what their encode does.
-pub const min_bytes = 1024;
+pub const min_bytes = 64;
 
 const Entry = struct { text: []u8, first: bool, ids: []u32, previous: ?u64 = null, next: ?u64 = null };
 
