@@ -163,7 +163,7 @@ __device__ __forceinline__ void hc_writeback_norm(const __nv_bfloat16* H, __nv_b
             PSS[(static_cast<long long>(r) * NC + c) * S + threadIdx.x] = total;
             all = __fadd_rn(all, total);
         }
-        rinv[threadIdx.x] = __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(__fdiv_rn(all, static_cast<float>(D)), eps)));
+        rinv[threadIdx.x] = tf_common::rms_scale(all, D, eps);
     }
     __syncthreads();
 #pragma unroll
@@ -210,7 +210,7 @@ extern "C" __global__ void __launch_bounds__(128) fn_hc_down(const __nv_bfloat16
         float total = 0.0f;
         if (r < M)
             for (int c = 0; c < NC; ++c) total = __fadd_rn(total, PSS[(static_cast<long long>(r) * NC + c) * SS + st]);
-        rinv[threadIdx.x] = __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(__fdiv_rn(total, static_cast<float>(D)), eps)));
+        rinv[threadIdx.x] = tf_common::rms_scale(total, D, eps);
     }
     __syncthreads();
     const int vecs = width / 8;
@@ -313,7 +313,7 @@ extern "C" __global__ void fn_hc_rinv(const float* __restrict__ PSS, float* __re
     if (r >= M) return;
     float total = 0.0f;
     for (int c = 0; c < NC; ++c) total = __fadd_rn(total, PSS[(static_cast<long long>(r) * NC + c) * SS + st]);
-    RINV[i] = __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(__fdiv_rn(total, static_cast<float>(D)), eps)));
+    RINV[i] = tf_common::rms_scale(total, D, eps);
 }
 
 // fn_hc_mix with each normed value recomputed from the streams as fn_hc_norm rounds it (no normed rows read).

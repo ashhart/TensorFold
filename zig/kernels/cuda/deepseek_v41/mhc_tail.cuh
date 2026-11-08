@@ -11,7 +11,7 @@ __device__ __forceinline__ int ld_acquire(const int* p) {
     return v;
 }
 __device__ __forceinline__ float rn_of(float ssc, float eps) {
-    return __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(__fdiv_rn(ssc, 1.0f * D), eps)));
+    return tf_common::rms_scale(ssc, D, eps);
 }
 
 // row r's 25 sums over its 160 entries and the square sum over stream 0's 40 (finish()'s chains), then coefs()

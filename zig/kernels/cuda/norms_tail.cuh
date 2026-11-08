@@ -48,7 +48,7 @@ __device__ __forceinline__ float inv_rms(float part, int width, float eps) {
     float s = (threadIdx.x & 31) < NT / 32 ? warps[threadIdx.x & 31] : 0.f;
     for (int m = 4; m > 0; m >>= 1) s = __fadd_rn(s, __shfl_xor_sync(0xFFFFFFFFu, s, m));
     s = __shfl_sync(0xFFFFFFFFu, s, 0);
-    const float r = __fdiv_rn(1.f, __fsqrt_rn(__fadd_rn(__fdiv_rn(s, static_cast<float>(width)), eps)));
+    const float r = tf_common::rms_scale(s, width, eps);
     if constexpr (!ONCE_ONLY) __syncthreads(); // `warps` is read again by the output's norm
     return r;
 }

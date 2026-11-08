@@ -63,7 +63,7 @@ __global__ void __launch_bounds__(WM * WN * 32, MINB) hcf_kernel(
             const int r = min(m0 + i / SS, M - 1), st = i % SS;
             float total = 0.0f;
             for (int c = 0; c < NC; ++c) total = __fadd_rn(total, pss[(static_cast<long long>(r) * NC + c) * SS + st]);
-            rinv_s[i] = __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(__fdiv_rn(total, static_cast<float>(D)), eps)));
+            rinv_s[i] = tf_common::rms_scale(total, D, eps);
         }
     }
 
