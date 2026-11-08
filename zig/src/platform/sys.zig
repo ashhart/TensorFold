@@ -93,3 +93,5 @@ const WinDynLib = struct {
 };
 
 pub const file_identity = @import("file_identity.zig");
+/// Tests only: a body run in a forked child, so code that panics fails its test without ending the binary.
+pub const isolate = @import("isolate.zig");
