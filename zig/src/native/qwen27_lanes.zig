@@ -498,7 +498,8 @@ pub const Metal = struct {
         errdefer b.dropRound();
         b.rows = total;
         if (b.pass_profile and windows.len == 1) std.log.info("q27_offer width={d} rows={d} tree_nodes={d} copy_rows={d}", .{ b.window, total, b.from_tree, total - 1 - b.from_tree });
-        const fused = windows.len == 1 and b.windows[0] == 0 and b.draft != null and total > 1 and windows[0].stream.sampling == null and windows[0].masks.len == 0;
+        // A pair's keep rides .commit with the accepted path, so its runner takes no fused tail (TailOnRank).
+        const fused = b.link == null and windows.len == 1 and b.windows[0] == 0 and b.draft != null and total > 1 and windows[0].stream.sampling == null and windows[0].masks.len == 0;
         std.debug.assert(r.tail == null);
         if (fused) r.tail = .{ .ptr = b, .encode = @import("qwen27_keep.zig").encodeTail };
         defer r.tail = null;
