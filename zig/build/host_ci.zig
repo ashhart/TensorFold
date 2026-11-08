@@ -7,6 +7,7 @@ pub fn steps(b: *std.Build) void {
             wire(b, "test-host-ci-linux-fast", "Nightly host checks without a GPU or shader compiler", &linux_fast);
             wire(b, "test-host-ci-linux-host", "Nightly host checks without a GPU or shader compiler", &linux_host);
             wire(b, "test-host-ci-linux-compile", "Nightly host checks without a GPU or shader compiler", &linux_compile);
+            wire(b, "test-host-ci-linux-deepseek", "Nightly host checks without a GPU or shader compiler", &linux_deepseek);
             if (b.top_level_steps.contains("hip-host-test"))
                 wire(b, "test-host-ci-linux-hip", "Nightly HIP host checks and checker builds, no device execution", &linux_hip);
         },
@@ -62,6 +63,11 @@ const linux_compile = [_][]const u8{
     "compile-recurrent-bookkeeping-host",
     "compile-release-paths-host",
     "dsv41-prefill-heads",
+};
+
+const linux_deepseek = [_][]const u8{
+    "test-dsv41-device-host",
+    "test-dsv41-forward",
 };
 
 const linux_fast = [_][]const u8{
