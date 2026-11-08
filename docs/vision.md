@@ -164,14 +164,8 @@ The CLI accepts explicit image budgets from 16 to 262,144 tokens; each engine st
   flag's name.
 - PNG and JPEG are decoded to the pixels 0.6.6 decoded with Pillow 12.3 (`zig/src/core/picture/`, which d1-3B's
   pictures on CUDA use too): PNG from the PNG specification, JPEG by libjpeg-turbo 3.1.4.1's TurboJPEG library
-  (`libturbojpeg`, the release Pillow 12.3 bundles) at Pillow's settings. TensorFold does not ship that library; the
-  server checks it at startup with `--vision`, or when running `capabilities --json`, from the file
-  `TENSORFOLD_LIBTURBOJPEG` names, else `lib/` beside the server's
-  folder, beside the server, Homebrew's `jpeg-turbo` on macOS, then the system's library path. It checks the version
-  libjpeg-turbo writes into the library and refuses JPEG images by name when the library is missing or another
-  release; PNG images still serve. Homebrew is a search location, not a guarantee of the pinned version: a newer
-  `jpeg-turbo` package is refused too. Use a separately built libjpeg-turbo 3.1.4.1 library with the override or
-  beside the server; updating the package does not satisfy this exact pin.
+  (`libturbojpeg`, the release Pillow 12.3 bundles) at Pillow's settings. TensorFold does not ship that library;
+  [JPEG input](#jpeg-input) says where the server looks for it and what its warnings mean.
 - WebP is decoded by libwebp 1.6.0's decoder library (`libwebpdecoder`, the release Pillow 13.0.0 bundles), to the
   RGB bytes Pillow 13.0.0 gives the same file (lossy and lossless, with and without alpha, EXIF-oriented:
   `zig/tests/fixtures/picture/webp.json`, from `tools/zig/picture_webp_fixtures.py`). TensorFold does not ship it
@@ -195,6 +189,51 @@ The CLI accepts explicit image budgets from 16 to 262,144 tokens; each engine st
   part, become image tokens.
 - The prompt cache keys each image's placeholder rows by the image's content, so a kept state resumes the same image
   and never another one under the same placeholders. Image conversations reuse their history like text ones.
+
+### JPEG input
+
+JPEG images are decoded by libjpeg-turbo 3.1.4.1 and no other release. Decoders can give different pixels for the
+same file from one release to the next, and different pixels give the image tower different rows, so the image's
+tokens, and the reply, could change with the library installed. 3.1.4.1 is the release Pillow 12.3 decoded with for
+0.6.6, so the server gets 0.6.6's pixels. The release archives do not include it.
+
+The server tries these in order and uses the first that has TurboJPEG 3's `tj3` functions and whose version string,
+which libjpeg-turbo writes into the file, is exactly `3.1.4.1`:
+
+1. The file `TENSORFOLD_LIBTURBOJPEG` names. While the variable is set, even to an empty value, nothing else is tried.
+2. `lib/` in the folder above the executable's (`../lib/` from `bin/`).
+3. The executable's own folder.
+4. On macOS only, `/opt/homebrew/opt/jpeg-turbo/lib/`, then `/usr/local/opt/jpeg-turbo/lib/`.
+5. The file name alone, through the system loader's search: `LD_LIBRARY_PATH` and the system directories on Linux,
+   `DYLD_LIBRARY_PATH` and dyld's defaults on macOS, the DLL search order with `PATH` on Windows.
+
+| Platform | File name |
+| --- | --- |
+| macOS | `libturbojpeg.0.dylib` |
+| Linux | `libturbojpeg.so.0` |
+| Windows | `turbojpeg.dll` |
+
+From step 2 on, a file of another release is skipped and the search goes on, as is one without the `tj3` functions.
+Homebrew's `jpeg-turbo` is a search location, not the pin: a newer package is skipped like any other release, and
+updating it does not satisfy the pin. Put a separately built 3.1.4.1 in `lib/` or beside the server, or name it with
+the variable. The Homebrew formula (`ashhart/tensorfold/tensorfold`) builds 3.1.4.1 into the install's `lib/`, so a
+tap install serves JPEG with no setup; an older install picks it up with `brew reinstall tensorfold`.
+
+With `--vision`, the server checks the library before it loads the model, and `capabilities --json` runs the same
+check. Neither decodes an image. A failed check is a warning, not a refusal: the server starts and PNG, WebP and text
+requests still serve, but each JPEG image is refused with the warning's words.
+
+- `FILE is not libjpeg-turbo 3.1.4.1; JPEG images are refused until it is`: that candidate was another release and
+  was skipped. If no warning below follows, a later candidate was 3.1.4.1 and JPEG images serve.
+- `JPEG images need libjpeg-turbo 3.1.4.1 (libturbojpeg); the library has another release, whose pixels can
+  differ; ...`: a library was found, but every one found was another release.
+- `libturbojpeg.0.dylib is required for JPEG inputs (--vision); install libjpeg-turbo 3.1.4.1 and set
+  TENSORFOLD_LIBTURBOJPEG to its file, or put it on the documented loader path`: nothing usable was found, or the
+  named file did not load or lacks the `tj3` functions. The file name is the platform's, and the documented loader
+  path is the list above.
+
+In `capabilities --json`, `found: true` with `usable: false` means a candidate opened but was refused; `problem`
+holds the warning's words.
 
 ### Qwen3.8-27B
 
