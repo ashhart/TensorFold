@@ -118,8 +118,6 @@ pub const Ple = struct {
             \\#define P {d}
             \\#define L {d}
             \\#define T {d}
-            \\#define GELU_C0 0.7978845608028654f
-            \\#define GELU_C1 0.044715f
             \\{s}
         , .{ geo.hidden, geo.layer_input, geo.layers, geo.layer_input, ple_source });
     }

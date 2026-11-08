@@ -2,7 +2,7 @@
 #include <metal_stdlib>
 using namespace metal;
 
-// Each pipeline's constants: D (hidden), P (per-layer width), L (layers), T (threads a row), GELU_C0/C1 (kernels.zig).
+// Each pipeline's constants: D (hidden), P (per-layer width), L (layers), T (threads a row) (kernels.zig).
 
 // The per-layer table's rows [rows, L * P] times sqrt(P): 4-bit codes to code * scale + bias, then a bf16 multiply.
 kernel void gemma_ple_embed(const device uint* ids [[buffer(0)]], const device uchar* weight [[buffer(1)]],
