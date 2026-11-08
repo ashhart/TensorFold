@@ -94,7 +94,7 @@ pub const Cpu = struct {
         const cache = try self.cacheOf(stream);
         if (position != cache.len) return error.InvalidQwenPosition;
         const drawn = try draw(self.gpa, cache.logits, stream.sampling, position, &.{});
-        if (tracing()) trace(cache.logits, position, drawn);
+        if (try tracing()) trace(cache.logits, position, drawn);
         return drawn;
     }
 
@@ -115,7 +115,7 @@ pub const Cpu = struct {
         };
         try fwd.run(self.model, &self.scratch, &.{.{ .cache = cache, .rows = 1 }}, &.{token}, false, .all);
         const drawn = try draw(self.gpa, cache.logits, stream.sampling, position, &.{});
-        if (tracing()) trace(cache.logits, position, drawn);
+        if (try tracing()) trace(cache.logits, position, drawn);
         return drawn;
     }
 
@@ -149,7 +149,7 @@ pub const Cpu = struct {
             for (o.sampled, w.positions, 0..) |*t, p, r| {
                 const mask = if (w.masks.len > 0) w.masks[r * mask_words ..][0..mask_words] else &.{};
                 t.* = try draw(self.gpa, logits[(base + r) * c.vocab ..][0..c.vocab], w.stream.sampling, p, mask);
-                if (tracing()) trace(logits[(base + r) * c.vocab ..][0..c.vocab], p, t.*);
+                if (try tracing()) trace(logits[(base + r) * c.vocab ..][0..c.vocab], p, t.*);
             }
             @memcpy(o.drafts, w.tokens);
             base += w.rows();
@@ -175,9 +175,8 @@ pub const Cpu = struct {
 };
 
 /// TF_QWEN35_CPU_TRACE=1: each one-token draw's top two logits and their margin on stderr.
-fn tracing() bool {
-    const v = std.c.getenv("TF_QWEN35_CPU_TRACE") orelse return false;
-    return std.mem.eql(u8, std.mem.span(v), "1");
+fn tracing() !bool {
+    return @import("sys").environment.read(bool, "TF_QWEN35_CPU_TRACE", false);
 }
 
 fn trace(logits: []const u16, position: u64, drawn: u64) void {

@@ -34,20 +34,18 @@ const Host = struct {
 };
 
 /// TF_QWEN35_CPU_THREADS=N: worker threads beside the engine thread (default: the logical CPUs less one).
-fn threads() ?usize {
-    const v = std.c.getenv("TF_QWEN35_CPU_THREADS") orelse return null;
-    return std.fmt.parseInt(usize, std.mem.span(v), 10) catch null;
+fn threads() !?usize {
+    return @import("sys").environment.read(?usize, "TF_QWEN35_CPU_THREADS", null);
 }
 
 /// TF_QWEN35_CPU_WINDOWS=1: verify windows of up to 16 rows (copy drafts) once the local exactness check passes.
-fn wideWindows() bool {
-    const v = std.c.getenv("TF_QWEN35_CPU_WINDOWS") orelse return false;
-    return std.mem.eql(u8, std.mem.span(v), "1");
+fn wideWindows() !bool {
+    return @import("sys").environment.read(bool, "TF_QWEN35_CPU_WINDOWS", false);
 }
 
 pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     const started = std.Io.Timestamp.now(io, .awake);
-    const model = q.Model.load(gpa, io, o.dir, threads()) catch |err| {
+    const model = q.Model.load(gpa, io, o.dir, try threads()) catch |err| {
         problem.* = try std.fmt.allocPrint(a, "the native Qwen engine cannot load this checkpoint ({s})", .{@errorName(err)});
         return null;
     };
@@ -67,7 +65,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     errdefer gpa.destroy(h);
     h.gpa = gpa;
     h.model = model;
-    h.cpu = try q.backend.Cpu.init(gpa, model, .{ .capacity = @intCast(window), .chunk = chunk, .streams = @max(served, 2) }, wideWindows());
+    h.cpu = try q.backend.Cpu.init(gpa, model, .{ .capacity = @intCast(window), .chunk = chunk, .streams = @max(served, 2) }, try wideWindows());
     errdefer h.cpu.deinit();
     h.config = try lanes.Config.init(gpa, h.cpu.facts(), q.state.window_rows, q.state.window_rows - 1);
     errdefer h.config.deinit(gpa);
