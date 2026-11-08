@@ -514,13 +514,14 @@ pub const Metal = struct {
             // A follower's own local round (measure's timing windows) mirrors rank 0's on the seams alone:
             // only rank 0 commands the replay, and only rank 0's serving rounds ever reach the follower.
             if (b.link) |l| if (l.pair.rank == 0 and !b.timing) {
-                if (inputs[0].parents) |parents| {
-                    try l.tree(inputs[0].slot, inputs[0].ids, parents);
-                    b.pair_tree = true;
-                } else {
+                // A plain round advances (no tree): it rides .step. A drafted round rides .tree with its parents.
+                if (plain) {
                     if (total != 1) return error.CommandOutOfStep;
                     try l.step(inputs[0].slot, b.ids[0]);
                     b.pair_tree = false;
+                } else {
+                    try l.tree(inputs[0].slot, inputs[0].ids, inputs[0].parents.?);
+                    b.pair_tree = true;
                 }
             };
         }
