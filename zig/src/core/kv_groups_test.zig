@@ -69,10 +69,24 @@ test "the load report shows a Qwen state run's pages and padding at 256-row page
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const shown = try groups.line(arena.allocator(), today[2].shape());
-    const want = "KV page groups: one page 5.00 MiB, 256 rows of the full group; full: 1 layer x 20.00 KiB a row, " ++
-        "256 rows a layer's page, 0 B padding (0.0 %); state run, in the pool: 51.00 MiB on 11 pages, 4.00 MiB padding " ++
+    const want = "KV page groups: one page 5.00 MiB, 256 rows of the full group; full: layers not named, 20.00 KiB a token, " ++
+        "256 rows a page, 0 B padding (0.0 %); state run, in the pool: 51.00 MiB on 11 pages, 4.00 MiB padding " ++
         "(7.3 %); snapshot, outside the pool: 48.00 MiB on 10 pages, 2.00 MiB padding (4.0 %)";
     try t.expectEqualStrings(want, shown);
+}
+
+test "a family that doesn't name its layers shows bytes a token, never one layer; one named layer shows as one" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    for (today) |l| {
+        try t.expect(!l.shape().named);
+        const shown = try groups.line(arena.allocator(), l.shape());
+        try t.expect(std.mem.indexOf(u8, shown, "layers not named") != null and std.mem.indexOf(u8, shown, " x ") == null);
+    }
+    const one = kv.Layout.ofRows(.{ .kind = .full, .row = 7168, .layers = 1 }, 512, 0, 0);
+    const want = "KV page groups: one page 3.50 MiB, 512 rows of the full group; full: 1 layer x 7.00 KiB a row, " ++
+        "512 rows a layer's page, 0 B padding (0.0 %)";
+    try t.expectEqualStrings(want, try groups.line(arena.allocator(), one.shape()));
 }
 
 test "the load report shows a window outside the pool by its bytes a row against a full row" {

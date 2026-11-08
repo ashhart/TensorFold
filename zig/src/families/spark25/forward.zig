@@ -452,3 +452,11 @@ test "a stream's caches: three rings of 1,024 a full layer's context" {
     const one = Model.streamBytes(cfg.spark4b, 4, 4096);
     try std.testing.expectEqual(@as(usize, 2 * (3 * 1024 + 4096) * 1024 * 2), one);
 }
+
+test "a page's bytes: the pool's layout and the kernels' stride agree" {
+    var m: Model = undefined;
+    m.geo = cfg.spark4b;
+    m.layers = cfg.spark4b.layers;
+    m.context = 4096;
+    try std.testing.expectEqual(m.pageBytes(), m.layout().pageBytes());
+}

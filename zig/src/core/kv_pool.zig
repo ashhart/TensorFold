@@ -19,8 +19,8 @@ pub const Layout = struct {
     snap_bytes: u64,
     /// Bytes a running stream takes from the pages beside its keys and values, as one run of whole pages (0: none).
     run_bytes: u64 = 0,
-    /// Layers `token_bytes` spans, so a row is token_bytes / full_layers in each (1: not named).
-    full_layers: u32 = 1,
+    /// Layers `token_bytes` spans, so a row is token_bytes / full_layers in each (0: not named, one row a token).
+    full_layers: u32 = 0,
     /// A sliding window's rows outside the pool, by bytes a row a layer (null: none, or not named).
     window: ?groups.Group = null,
 
@@ -37,7 +37,7 @@ pub const Layout = struct {
 
     /// The groups the load report shows: the pool's, the window outside it, the state run and a snapshot slot.
     pub fn shape(l: Layout) groups.Shape {
-        return .{ .full = l.group(), .page_rows = l.page_tokens, .window = l.window, .run = l.run_bytes, .snap = l.snap_bytes };
+        return .{ .full = l.group(), .named = l.full_layers > 0, .page_rows = l.page_tokens, .window = l.window, .run = l.run_bytes, .snap = l.snap_bytes };
     }
 
     pub fn pageBytes(l: Layout) u64 {
