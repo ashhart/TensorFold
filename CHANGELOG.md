@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Release checks: the release privacy check walks the release tree in Zig instead of the shell `find`, so `check-release-paths` and packaging's stage check run one implementation on every host and `zig build test` passes them on native Windows; a symlink, an unreadable entry or a file given as the tree is refused, and the build-root argument is validated first, as before (#2614).
+
 - Linux: Nemotron's io_uring checkpoint reads no longer hang at shutdown after a failed read: a read that failed partway through a batch dropped the batch's later completions, so the loader waited for them forever; every reader that skips the page cache or reads aligned spans (row and state files, Engram rows, session restore, Qwen-VL tower reads, GLM's rewritten tensors) is now tested with a file that ends inside the span it asks for (#2608).
 
 - Loading: a direct-read load on Linux (Spark 2.5, Dory, Gemma 4 and Qwen 3.5 on CUDA, and Flash Next's experts) that fails now names its reader's error, such as `EndOfFile` when a shard ends inside a tensor it reads, where every failure was `ReadFailed` (#2610).
