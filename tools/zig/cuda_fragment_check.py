@@ -366,12 +366,10 @@ class Tree:
         return self.units[key]
 
     def walk(self, path, fragment, known):
-        """Track braces, scopes and declarations; record each quoted include inside a function body.
-
-        A switch is a macro an includer both #defines and #undefs, as qmmf.cu does around each include. Its state at
-        each include is passed to the fragment, whose branches on it are then read only when taken."""
+        """Track braces, scopes and declarations; record each quoted include inside a function body."""
         toks = lex(path.read_text())
         code = [t for t in toks if t.kind != "dir"]
+        # A switch is a macro its includer both #defines and #undefs (qmmf.cu); a fragment reads only its taken branch.
         if not fragment:
             defined = {t.arg for t in toks if t.kind == "dir" and t.text == "define"}
             known = dict.fromkeys(defined & {t.arg for t in toks if t.kind == "dir" and t.text == "undef"}, False)

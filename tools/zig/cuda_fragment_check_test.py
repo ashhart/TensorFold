@@ -64,13 +64,16 @@ SWITCHED = """#ifdef TF_WIDE
 #else
     out[0] = 0;
 #endif
+
 #if __CUDA_ARCH__ >= 800 && !defined(TF_WIDE)
     out[1] = narrow;
 #endif
 """
 SWITCHERS = """__global__ void wide(int* out, int ldy) {
 #define TF_WIDE
+
 #include "switched.cuh"
+
 #undef TF_WIDE
 }
 __global__ void plain(int* out, int narrow) {
