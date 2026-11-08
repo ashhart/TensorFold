@@ -56,4 +56,21 @@ pub fn tests(b: *std.Build, all: *std.Build.Step) void {
     pass.expectExitCode(0);
     pass.expectStdErrEqual("");
     step.dependOn(&pass.step);
+    // The walk happens inside the tool, so a nested release tree is checked the same on every host.
+    const planted_tree = b.addWriteFiles();
+    _ = planted_tree.add("bin/tensorfold-native", head ++ clean ++ "\x01\x02");
+    _ = planted_tree.add("share/tensorfold/cuda/sm121/cubins/keep.cubin", head ++ planted[0].text ++ "\x01\x02");
+    const tree_refuse = privacy.directory(b, tool, planted_tree.getDirectory()).cast(std.Build.Step.Run).?;
+    tree_refuse.setName("check-release-paths refuses a planted path in a nested release tree");
+    tree_refuse.expectExitCode(1);
+    tree_refuse.expectStdErrEqual("release privacy: refused keep.cubin (PrivateBuildPath)\n");
+    step.dependOn(&tree_refuse.step);
+    const clean_tree = b.addWriteFiles();
+    _ = clean_tree.add("bin/tensorfold-native", head ++ clean ++ "\x01\x02");
+    _ = clean_tree.add("share/tensorfold/cuda/sm121/cubins/keep.cubin", head ++ clean ++ "\x01\x02");
+    const tree_pass = privacy.directory(b, tool, clean_tree.getDirectory()).cast(std.Build.Step.Run).?;
+    tree_pass.setName("check-release-paths passes a clean nested release tree");
+    tree_pass.expectExitCode(0);
+    tree_pass.expectStdErrEqual("");
+    step.dependOn(&tree_pass.step);
 }
