@@ -48,7 +48,8 @@ pub fn pipeTable(a: Allocator, table: []const u8) html.ParseError!html.Table {
     for (rows.items, 0..) |row, r| {
         var cs = Cells.init(row); // GFM: a short row is padded, cells past the header's count are dropped
         for (0..cols) |c| {
-            const text = if (cs.next()) |cell| try clean(a, trim(cell), 0) else try a.alloc(u8, 0);
+            // the cell's own text: math keeps its dollars, as the HTML cell it came from held them
+            const text = if (cs.next()) |cell| try cellText(a, cell, true) else try a.alloc(u8, 0);
             cells[done] = .{ .text = text, .row = @intCast(r), .col = @intCast(c), .rows = 1, .cols = 1, .head = r == 0 };
             done += 1;
         }
@@ -67,7 +68,7 @@ fn textLine(a: Allocator, raw: []const u8) Allocator.Error![]u8 {
     var t = trim(raw);
     if (heading(t)) |rest| t = rest;
     const marker = listMarker(t);
-    const body = try clean(a, t[marker.len..], 0);
+    const body = try clean(a, t[marker.len..], 0, false);
     defer a.free(body);
     return std.mem.concat(a, u8, &.{ marker, body });
 }
@@ -104,7 +105,7 @@ fn pipeRows(a: Allocator, out: *std.ArrayList([]const u8), table: []const u8) Al
         var first = true;
         while (cells.next()) |cell| : (first = false) {
             if (!first) try line.append(a, '\t');
-            const text = try clean(a, trim(cell), 0);
+            const text = try cellText(a, cell, false);
             defer a.free(text);
             try line.appendSlice(a, text);
         }
@@ -127,14 +128,14 @@ fn htmlRows(a: Allocator, out: *std.ArrayList([]const u8), table: []const u8) Al
     for (try html.rowsText(arena.allocator(), parsed)) |row| try keep(a, out, try a.dupe(u8, row), false);
 }
 
-/// The cells of one pipe-table row, split on unescaped `|`, its outer pipes dropped.
+/// The cells of one pipe-table row, its outer pipes dropped; as cmark-gfm, a `|` right after a `\` is escaped.
 const Cells = struct {
     rest: ?[]const u8,
 
     fn init(row: []const u8) Cells {
         var r = row;
         if (r.len > 0 and r[0] == '|') r = r[1..];
-        if (r.len > 0 and r[r.len - 1] == '|' and !escaped(r, r.len - 1)) r = r[0 .. r.len - 1];
+        if (r.len > 0 and r[r.len - 1] == '|' and !pipeEscaped(r, r.len - 1)) r = r[0 .. r.len - 1];
         return .{ .rest = r };
     }
 
@@ -142,7 +143,7 @@ const Cells = struct {
         const r = c.rest orelse return null;
         var i: usize = 0;
         while (i < r.len) : (i += 1) {
-            if (r[i] == '|' and !escaped(r, i)) {
+            if (r[i] == '|' and !pipeEscaped(r, i)) {
                 c.rest = r[i + 1 ..];
                 return r[0..i];
             }
@@ -158,6 +159,25 @@ const Cells = struct {
         return n;
     }
 };
+
+/// One pipe-table cell's text: GFM drops the backslash before each `|` (in code and math too), then inline rules.
+fn cellText(a: Allocator, cell: []const u8, keep_math: bool) Allocator.Error![]u8 {
+    const t = trim(cell);
+    const bare = try a.alloc(u8, t.len);
+    defer a.free(bare);
+    var n: usize = 0;
+    for (t, 0..) |ch, i| {
+        if (ch == '\\' and i + 1 < t.len and t[i + 1] == '|') continue;
+        bare[n] = ch;
+        n += 1;
+    }
+    return clean(a, bare[0..n], 0, keep_math);
+}
+
+/// GFM's table rule (cmark-gfm `escaped_char = [\\][|]`): the `|` at ``s[i]`` is escaped when `\` is right before it.
+fn pipeEscaped(s: []const u8, i: usize) bool {
+    return i > 0 and s[i - 1] == '\\';
+}
 
 /// Whether ``s[i]`` follows an odd run of backslashes.
 fn escaped(s: []const u8, i: usize) bool {
@@ -297,8 +317,8 @@ const max_depth = 4;
 /// One emphasis delimiter run in the output: where it sits, its length, what it may do and how much a match removed.
 const Run = struct { at: usize, len: usize, ch: u8, open: bool, close: bool, left: usize, remove: usize = 0 };
 
-/// Inline markup removed: emphasis, code ticks, math dollars, link and image syntax (text kept), escapes, entities.
-fn clean(a: Allocator, s: []const u8, depth: u8) Allocator.Error![]u8 {
+/// Inline markup removed: emphasis, code ticks, math dollars (unless ``keep_math``), link syntax, escapes, entities.
+fn clean(a: Allocator, s: []const u8, depth: u8, keep_math: bool) Allocator.Error![]u8 {
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(a);
     var runs: std.ArrayList(Run) = .empty;
@@ -318,12 +338,12 @@ fn clean(a: Allocator, s: []const u8, depth: u8) Allocator.Error![]u8 {
             i = span.end;
         } else if (ch == '$') {
             const span = mathSpan(s, i, &no_dollar_close);
-            try out.appendSlice(a, span.body);
+            try out.appendSlice(a, if (keep_math) s[i..span.end] else span.body);
             i = span.end;
         } else if ((ch == '[' or (ch == '!' and i + 1 < s.len and s[i + 1] == '[')) and depth < max_depth) {
             const open = if (ch == '!') i + 1 else i;
             if (link(s, pairs, open)) |l| {
-                const text = try clean(a, l.text, depth + 1);
+                const text = try clean(a, l.text, depth + 1, keep_math);
                 defer a.free(text);
                 try out.appendSlice(a, text);
                 i = l.end;

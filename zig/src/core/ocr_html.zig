@@ -47,7 +47,7 @@ pub fn parse(a: Allocator, html: []const u8) ParseError!Table {
     return .{ .rows = p.rows, .cols = cols, .cells = try p.cells.toOwnedSlice(a), .spanned = spanned };
 }
 
-/// The table as a GFM pipe table: first row the header, `|` and markup-like `<`, `&` escaped; spans are lost.
+/// The table as a GFM pipe table: first row the header, cell text escaped to read literally (``cellText``); spans lost.
 pub fn pipe(a: Allocator, t: Table) Allocator.Error![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(a);
@@ -55,14 +55,7 @@ pub fn pipe(a: Allocator, t: Table) Allocator.Error![]const u8 {
     for (0..t.rows) |r| {
         for (0..t.cols) |c| {
             try out.appendSlice(a, if (c == 0) "| " else " | ");
-            const text = if (topLeft(t, &k, r, c)) |cell| cell.text else "";
-            for (text, 0..) |ch, i| switch (ch) {
-                '|' => try out.appendSlice(a, "\\|"),
-                '\n' => try out.append(a, ' '),
-                '<' => try out.appendSlice(a, if (opensTag(text[i + 1 ..])) "&lt;" else "<"),
-                '&' => try out.appendSlice(a, if (opensEntity(text[i + 1 ..])) "&amp;" else "&"),
-                else => try out.append(a, ch),
-            };
+            try cellText(a, &out, if (topLeft(t, &k, r, c)) |cell| cell.text else "");
         }
         try out.appendSlice(a, " |");
         if (r == 0) {
@@ -128,6 +121,82 @@ pub fn rowsText(a: Allocator, t: Table) Allocator.Error![][]const u8 {
         done += 1;
     }
     return lines;
+}
+
+/// A cell's text in a pipe row: math as written (only `|` escaped), markup escaped elsewhere, to read back literally.
+fn cellText(a: Allocator, out: *std.ArrayList(u8), text: []const u8) Allocator.Error!void {
+    var no_close = false; // a `$` found no closer, so no later `$` in the cell can (markdown.zig's rule)
+    var i: usize = 0;
+    while (i < text.len) {
+        const ch = text[i];
+        if (ch == '$') {
+            if (mathEnd(text, i, &no_close)) |end| {
+                try mathText(a, out, text[i..end]);
+                i = end;
+                continue;
+            }
+            // a `$` that opens no math is escaped, so a reader never pairs it with another
+            const lone: usize = if (i + 1 < text.len and text[i + 1] == '$') 2 else 1;
+            for (0..lone) |_| try out.appendSlice(a, "\\$");
+            i += lone;
+            continue;
+        }
+        switch (ch) {
+            '\n' => try out.append(a, ' '),
+            '|', '`', '*', '[', ']' => try out.appendSlice(a, &[_]u8{ '\\', ch }),
+            // CommonMark reads a backslash as an escape only before ASCII punctuation; elsewhere it is literal
+            '\\' => try out.appendSlice(a, if (i + 1 < text.len and isPunct(text[i + 1])) "\\\\" else "\\"),
+            // `_` between two word characters can neither open nor close emphasis, so snake_case stays readable
+            '_' => try out.appendSlice(a, if (i > 0 and i + 1 < text.len and isWord(text[i - 1]) and isWord(text[i + 1])) "_" else "\\_"),
+            '<' => try out.appendSlice(a, if (opensTag(text[i + 1 ..])) "&lt;" else "<"),
+            '&' => try out.appendSlice(a, if (opensEntity(text[i + 1 ..])) "&amp;" else "&"),
+            else => try out.append(a, ch),
+        }
+        i += 1;
+    }
+}
+
+/// Math as written, each `|` as `\|`: GFM's table step removes exactly that backslash, whatever precedes it.
+fn mathText(a: Allocator, out: *std.ArrayList(u8), m: []const u8) Allocator.Error!void {
+    for (m) |ch| switch (ch) {
+        '|' => try out.appendSlice(a, "\\|"),
+        '\n' => try out.append(a, ' '),
+        else => try out.append(a, ch),
+    };
+}
+
+/// The end of the `$$…$$` or `$…$` math opening at ``s[i]``, by markdown.zig's ``mathSpan`` rule; null when none.
+fn mathEnd(s: []const u8, i: usize, no_close: *bool) ?usize {
+    if (i + 1 < s.len and s[i + 1] == '$') return if (std.mem.indexOfPos(u8, s, i + 2, "$$")) |j| j + 2 else null;
+    if (i + 1 >= s.len or isSpace(s[i + 1]) or no_close.*) return null;
+    var j = i + 2;
+    while (j < s.len) : (j += 1) {
+        if (s[j] != '$' or isSpace(s[j - 1]) or escaped(s, j)) continue;
+        if (j + 1 < s.len and std.ascii.isDigit(s[j + 1])) continue;
+        return j + 1;
+    }
+    no_close.* = true;
+    return null;
+}
+
+/// Whether ``s[i]`` follows an odd run of backslashes.
+fn escaped(s: []const u8, i: usize) bool {
+    var n: usize = 0;
+    while (n < i and s[i - 1 - n] == '\\') n += 1;
+    return n % 2 == 1;
+}
+
+fn isSpace(c: u8) bool {
+    return c == ' ' or c == '\t' or c == '\n' or c == '\r';
+}
+
+fn isPunct(c: u8) bool {
+    return c < 0x80 and std.ascii.isPrint(c) and !std.ascii.isAlphanumeric(c) and c != ' ';
+}
+
+/// A byte of a word for emphasis rules: neither whitespace nor ASCII punctuation (UTF-8 letters count).
+fn isWord(c: u8) bool {
+    return !isSpace(c) and !isPunct(c);
 }
 
 /// Whether text after a literal `<` would start raw HTML in Markdown: a tag, an end tag, a comment or a declaration.

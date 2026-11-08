@@ -139,3 +139,83 @@ test "ocr markdown: many unmatched brackets and ampersands stay literal in one p
     try expectLines("[a [b](c) d](e) \\[x](y) [p](q(r)s)", &.{"a b d [x](y) p"});
     try expectLines("&#x1F600; &amp;&lt; &abcdefghij;", &.{"\u{1F600} &< &abcdefghij;"});
 }
+
+test "ocr markdown: table cell text survives the pipe form, as lines and read back as HTML" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const html = @import("engine_api").ocr.html;
+    const texts = [_][]const u8{ "[x](y)", "a\\|b", "*not bold*", "`tick`", "back\\slash", "snake_case _x_", "$x_{1}|y$ and $$a*b$$", "costs $5", "a<b &lt;" };
+    var cells: [texts.len]html.Cell = undefined;
+    for (&cells, texts, 0..) |*c, text, k| c.* = .{ .text = text, .row = 0, .col = @intCast(k), .rows = 1, .cols = 1, .head = true };
+    const table: html.Table = .{ .rows = 1, .cols = texts.len, .cells = &cells, .spanned = false };
+    const md_table = try html.pipe(a, table);
+    // the line dialects: each cell's literal text, math without its dollars (design 5.3)
+    const lines = try md.plainLines(a, md_table);
+    try t.expectEqual(@as(usize, 1), lines.len);
+    try t.expectEqualStrings("[x](y)\ta\\|b\t*not bold*\t`tick`\tback\\slash\tsnake_case _x_\tx_{1}|y and a*b\tcosts $5\ta<b &lt;", lines[0]);
+    // Mistral's html form: the pipe table read back gives every cell's text, math included, and the same clean HTML
+    const back = try md.pipeTable(a, md_table);
+    for (back.cells, texts) |c, text| try t.expectEqualStrings(text, c.text);
+    try t.expectEqualStrings(try html.normalized(a, table), try html.normalized(a, back));
+}
+
+test "ocr markdown: backslash runs before a pipe keep the columns and the cell text, in math and out" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const html = @import("engine_api").ocr.html;
+    const Case = struct { text: []const u8, line: []const u8 };
+    const cases = [_]Case{
+        .{ .text = "$a|b$", .line = "a|b" },
+        .{ .text = "$a\\|b$", .line = "a\\|b" },
+        .{ .text = "$a\\\\|b$", .line = "a\\\\|b" },
+        .{ .text = "$a\\\\\\|b$", .line = "a\\\\\\|b" },
+        .{ .text = "$$a\\|b\\\\|c$$", .line = "a\\|b\\\\|c" },
+        .{ .text = "a\\|b", .line = "a\\|b" },
+        .{ .text = "a\\\\|b", .line = "a\\\\|b" },
+        .{ .text = "a\\\\\\|b", .line = "a\\\\\\|b" },
+    };
+    for (cases) |c| {
+        var cells = [_]html.Cell{
+            .{ .text = "h", .row = 0, .col = 0, .rows = 1, .cols = 1, .head = true },
+            .{ .text = "k", .row = 0, .col = 1, .rows = 1, .cols = 1, .head = true },
+            .{ .text = c.text, .row = 1, .col = 0, .rows = 1, .cols = 1, .head = false },
+            .{ .text = "z", .row = 1, .col = 1, .rows = 1, .cols = 1, .head = false },
+        };
+        const table: html.Table = .{ .rows = 2, .cols = 2, .cells = &cells, .spanned = false };
+        const md_table = try html.pipe(a, table);
+        const lines = try md.plainLines(a, md_table);
+        try t.expectEqual(@as(usize, 2), lines.len);
+        // two columns, the first holding the cell's text (math without its dollars)
+        try t.expectEqualStrings(try std.mem.concat(a, u8, &.{ c.line, "\tz" }), lines[1]);
+        const back = try md.pipeTable(a, md_table);
+        try t.expectEqual(@as(u32, 2), back.cols);
+        try t.expectEqualStrings(c.text, back.cells[2].text);
+        try t.expectEqualStrings("z", back.cells[3].text);
+        try t.expectEqualStrings(try html.normalized(a, table), try html.normalized(a, back));
+    }
+}
+
+test "ocr markdown: a raw pipe table reads as GFM renders it: a pipe right after a backslash is escaped" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const Case = struct { cell: []const u8, line: []const u8, text: []const u8 };
+    const cases = [_]Case{
+        // GLM writes `$a\\\|b$`: GFM's table step removes the one backslash before `|`, leaving `$a\\|b$`
+        .{ .cell = "$a\\\\\\|b$", .line = "a\\\\|b", .text = "$a\\\\|b$" },
+        // `$\|x\|$` stays one cell; the table step leaves `$|x|$`
+        .{ .cell = "$\\|x\\|$", .line = "|x|", .text = "$|x|$" },
+    };
+    for (cases) |c| {
+        const table = try std.mem.concat(a, u8, &.{ "| h | k |\n| --- | --- |\n| ", c.cell, " | z |" });
+        const lines = try md.plainLines(a, table);
+        try t.expectEqual(@as(usize, 2), lines.len);
+        try t.expectEqualStrings(try std.mem.concat(a, u8, &.{ c.line, "\tz" }), lines[1]);
+        const back = try md.pipeTable(a, table);
+        try t.expectEqual(@as(u32, 2), back.cols);
+        try t.expectEqualStrings(c.text, back.cells[2].text);
+        try t.expectEqualStrings("z", back.cells[3].text);
+    }
+}

@@ -64,6 +64,7 @@ test "GLM-OCR reader: tables inside the page and LaTeX delimiters become Markdow
         .{ "<table><tr><td colspan=\"2\">ab</td></tr><tr><td>1</td><td>2</td></tr></table>\n\n<table><tr><td>x</td></tr></table>", "<table><tr><td colspan=\"2\">ab</td></tr><tr><td>1</td><td>2</td></tr></table>\n\n| x |\n| --- |" },
         .{ "<table><tr><td>\\(x\\)</td></tr></table>", "| $x$ |\n| --- |" },
         .{ "<table><tr><td>\\[ y \\]</td><td>b</td></tr></table>", "| $$ y $$ | b |\n| --- | --- |" },
+        .{ "<table><tr><td>[x](y)</td><td>*not bold*</td><td>a_b</td></tr></table>", "| \\[x\\](y) | \\*not bold\\* | a_b |\n| --- | --- | --- |" },
         .{ "kept <table><td>a</td></table> as written", "kept <table><td>a</td></table> as written" },
         .{ "cut <table><tr><td>a", "cut <table><tr><td>a" },
     }) |k| try t.expectEqualStrings(k[1], try page(a, k[0]));
@@ -108,8 +109,9 @@ test "GLM-OCR reader: code blocks and code spans stay verbatim" {
         .{ "x\n    ```\n\\(x\\)", "x\n    ```\n$x$" },
         .{ "lead `\n\n~~~text\n`\n~~~\nafter \\(y\\)", "lead `\n\n~~~text\n`\n~~~\nafter $y$" },
         .{ "a `b\n\nc` \\(x\\)", "a `b\n\nc` $x$" },
-        .{ "<table><tr><td>`x`</td><td>\\(y\\)</td></tr></table>", "| `x` | $y$ |\n| --- | --- |" },
-        .{ "<table><tr><td>`\\(x\\)`</td></tr></table>", "| `\\(x\\)` |\n| --- |" },
+        // a cell's text is literal in the pipe table: its backticks are escaped, its math (outside code) converted
+        .{ "<table><tr><td>`x`</td><td>\\(y\\)</td></tr></table>", "| \\`x\\` | $y$ |\n| --- | --- |" },
+        .{ "<table><tr><td>`\\(x\\)`</td></tr></table>", "| \\`\\\\(x\\\\)\\` |\n| --- |" },
         .{ "bad <table><td>`\\(x\\)` \\(y\\)</td></table>", "bad <table><td>`\\(x\\)` $y$</td></table>" },
         .{ "<table> `\\(x\\)` and <table> again", "<table> `\\(x\\)` and <table> again" },
     }) |k| try t.expectEqualStrings(k[1], try page(a, k[0]));

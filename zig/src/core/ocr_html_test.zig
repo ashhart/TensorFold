@@ -236,3 +236,34 @@ test "ocr html: every allocation failure is returned and nothing leaks" {
     try t.checkAllAllocationFailures(t.allocator, everyWriter, .{dots_table});
     try t.expectError(error.Malformed, everyWriter(t.allocator, "<table><tr><td>a</td><td>b</td></tr><tr><td>c"));
 }
+
+test "ocr html: pipe cells escape Markdown markup to read back literally, and keep math as written" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const Case = struct { []const u8, []const u8 };
+    const cases = [_]Case{
+        .{ "[x](y)", "\\[x\\](y)" },
+        .{ "a\\|b", "a\\\\\\|b" },
+        .{ "*not bold*", "\\*not bold\\*" },
+        .{ "`tick`", "\\`tick\\`" },
+        .{ "back\\slash", "back\\slash" },
+        .{ "snake_case _x_", "snake_case \\_x\\_" },
+        .{ "$x_{1}|y$ and $$a*b$$", "$x_{1}\\|y$ and $$a*b$$" },
+        // in math each `|` gets one backslash, whatever precedes it: GFM's table step removes exactly that one
+        .{ "$a\\|b$", "$a\\\\|b$" },
+        .{ "$a\\\\|b$", "$a\\\\\\|b$" },
+        .{ "$$a\\|b$$ $\\alpha$", "$$a\\\\|b$$ $\\alpha$" },
+        // outside math `\` before punctuation doubles: a literal `a\` then `|` reads back through `a\\|` to `a\|`
+        .{ "a\\|b", "a\\\\\\|b" },
+        .{ "costs $5 only", "costs \\$5 only" },
+        .{ "$$ alone", "\\$\\$ alone" },
+        .{ "\\*", "\\\\\\*" },
+        .{ "a<b & c", "a&lt;b & c" },
+    };
+    for (cases) |c| {
+        var cell = [_]html.Cell{.{ .text = c[0], .row = 0, .col = 0, .rows = 1, .cols = 1, .head = true }};
+        const got = try html.pipe(a, .{ .rows = 1, .cols = 1, .cells = &cell, .spanned = false });
+        try t.expectEqualStrings(try std.mem.concat(a, u8, &.{ "| ", c[1], " |\n| --- |" }), got);
+    }
+}
