@@ -287,6 +287,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
     // the listener stays open through the drain: new requests get 503 + Retry-After, /health "draining"
     var accept_stop: std.atomic.Value(bool) = .init(false);
     const accept = std.Thread.spawn(.{}, server_mod.Server.serve, .{ srv, lis, &accept_stop }) catch return 1;
+    @import("startup_receipt.zig").ready(port);
     while (!stop_requested.load(.acquire)) std.Io.sleep(io, .fromMilliseconds(50), .awake) catch {};
     drain(srv, io, s.stop, drain_s);
     accept_stop.store(true, .release);
