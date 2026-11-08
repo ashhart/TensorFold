@@ -327,7 +327,7 @@ test "a promise that does not fit asks the store to reclaim first, and fails onl
     try expectEqual(@as(usize, 1), p.available());
     try expectEqual(@as(usize, 3), p.reclaimable());
     try expect(p.fits(4) and !p.fits(5));
-    p.reclaim = .{ .ctx = &store, .call = Kept.call };
+    try p.joinReclaim(.{ .ctx = &store, .call = Kept.call });
     var b: Lease = .{};
     try std.testing.expectError(error.LaneMemory, p.promise(&b, 5));
     try expectEqual(@as(usize, 0), b.promised);
@@ -494,7 +494,7 @@ test "a hold past the free pages asks the store to reclaim first, as a promise d
     var old: [3]u32 = undefined;
     try expect(p.hold(&old)); // the store's own pages fill the pool
     var shed: Shed = .{ .pool = &p, .kept = &old };
-    p.reclaim = .{ .ctx = &shed, .call = Shed.call };
+    try p.joinReclaim(.{ .ctx = &shed, .call = Shed.call });
     var ids: [2]u32 = undefined;
     try expect(p.hold(&ids));
     try expectEqual(@as(usize, 1), shed.calls);
