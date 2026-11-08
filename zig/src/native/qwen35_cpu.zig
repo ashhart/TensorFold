@@ -98,10 +98,9 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
 }
 
-/// The --prompt-cache-gib plan under the share of this host's RAM (cache_fit.zig's rule without its Metal reading).
+/// The --prompt-cache-gib plan under the share of this host's RAM (cache_fit.zig's rule); no readings: nothing kept.
 fn cacheBudget(a: std.mem.Allocator, gib: f64, over: bool, later: u64, problem: *[]const u8) !api.PromptCachePlan {
     const r = admit.readings() orelse {
-        // fail closed: without both readings nothing is kept, whatever --prompt-cache-gib asked
         std.log.warn("prompt cache: this host's RAM or this process's footprint could not be read; keeping no prompt states", .{});
         return .{ .source = .explicit, .budget_bytes = 0, .explicit_budget = true };
     };

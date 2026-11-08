@@ -12,9 +12,9 @@ const g = contract.gates;
 /// Five rows and their controls: a sanitizer (gate 1), a write into an input (gate 2) and a wrong operand (gate 3).
 pub const Which = enum { embed, residual, act, gate, rotate, embed_finite, embed_group, residual_finite, residual_writes, residual_half, act_finite, act_shift, gate_finite, gate_half, rotate_finite, rotate_position };
 
-/// The token rows of a decode step, a verify window and a prompt chunk, at each row's width.
-fn served(comptime n: usize, comptime kk: usize) [3]c.Shape {
-    return .{ .{ .rows = 1, .n = n, .k = kk }, .{ .rows = 32, .n = n, .k = kk }, .{ .rows = 128, .n = n, .k = kk } };
+/// The token rows of a decode step, a verify window, the verify batch over the streams and a prompt chunk, each width.
+fn served(comptime n: usize, comptime kk: usize) [4]c.Shape {
+    return .{ .{ .rows = 1, .n = n, .k = kk }, .{ .rows = 16, .n = n, .k = kk }, .{ .rows = 32, .n = n, .k = kk }, .{ .rows = 128, .n = n, .k = kk } };
 }
 const served_hidden = served(c_hidden, 1);
 const served_embed = served(c_hidden, k.group);

@@ -105,7 +105,8 @@ pub const Cache = struct {
 pub const Partials = []mixers.Partial;
 
 pub const Scratch = struct {
-    arena: std.heap.ArenaAllocator, // every buffer below; copied into the result last, so nothing allocates after
+    /// Every buffer below lives here; set last, once they are all made.
+    arena: std.heap.ArenaAllocator,
     rows: usize,
     ids: []u32,
     h: []u16,
@@ -128,10 +129,12 @@ pub const Scratch = struct {
     gate: []u16,
     up: []u16,
     act: []u16,
-    xp: []f32, // the projection inputs prepared (rows × intermediate at most)
+    /// The projection inputs prepared, rows × intermediate at most, and each group's sum.
+    xp: []f32,
     xs: []f32,
     logits: []u16,
-    partials: []mixers.Partial, // workers × chunks
+    /// Every (row, head) attention task's chunk partials, one slice a worker.
+    partials: []mixers.Partial,
     snapshots: [c.layers]?Delta = @splat(null),
 
     pub fn init(gpa: std.mem.Allocator, rows: usize, capacity: usize, workers: usize) !Scratch {
@@ -232,7 +235,7 @@ test "a snapshot round-trips a cache's committed state" {
     var cache = try Cache.init(gpa, 8);
     defer cache.deinit();
     cache.blocks[0].delta.recurrence[5] = 1.5;
-    cache.blocks[3].attention.keys[cache.capacity * c.head_dim + 7] = 0x3f80; // head 1, row 0
+    cache.blocks[3].attention.keys[cache.capacity * c.head_dim + 7] = 0x3f80;
     cache.logits[9] = 0x4000;
     cache.len = 3;
     const snap = try save(gpa, &cache, 3);

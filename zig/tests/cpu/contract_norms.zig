@@ -20,9 +20,9 @@ fn one(_: c.Shape) usize {
     return 1;
 }
 
-/// A decode step's ten head rows, a verify window's and a prompt chunk's; the delta norm's rows are tokens.
-const served_head = [_]c.Shape{ .{ .rows = 10, .n = head_dim, .k = head_dim }, .{ .rows = 320, .n = head_dim, .k = head_dim }, .{ .rows = 1280, .n = head_dim, .k = head_dim } };
-const served_delta = [_]c.Shape{ .{ .rows = 1, .n = hidden, .k = linear_dim }, .{ .rows = 32, .n = hidden, .k = linear_dim }, .{ .rows = 128, .n = hidden, .k = linear_dim } };
+/// Ten head rows a token: a decode step, a verify window, the verify batch, a prompt chunk; the delta norm's: tokens.
+const served_head = [_]c.Shape{ .{ .rows = 10, .n = head_dim, .k = head_dim }, .{ .rows = 160, .n = head_dim, .k = head_dim }, .{ .rows = 320, .n = head_dim, .k = head_dim }, .{ .rows = 1280, .n = head_dim, .k = head_dim } };
+const served_delta = [_]c.Shape{ .{ .rows = 1, .n = hidden, .k = linear_dim }, .{ .rows = 16, .n = hidden, .k = linear_dim }, .{ .rows = 32, .n = hidden, .k = linear_dim }, .{ .rows = 128, .n = hidden, .k = linear_dim } };
 const ctl_head = [_]c.Shape{.{ .rows = 9, .n = head_dim, .k = head_dim }};
 const ctl_delta = [_]c.Shape{.{ .rows = 9, .n = hidden, .k = linear_dim }};
 

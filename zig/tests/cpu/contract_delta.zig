@@ -21,7 +21,7 @@ fn depth(_: c.Shape) usize {
     return dot_depth;
 }
 
-/// A decode step, a verify window and a prompt chunk of tokens, one head's 128 outputs a token.
+/// A decode step, a verify window (one stream's segment) and a prompt chunk of tokens, one head's 128 outputs a token.
 const served = [_]c.Shape{ .{ .rows = 1, .n = hd, .k = hd }, .{ .rows = 16, .n = hd, .k = hd }, .{ .rows = 128, .n = hd, .k = hd } };
 const ctl = [_]c.Shape{.{ .rows = 9, .n = hd, .k = hd }};
 

@@ -22,8 +22,8 @@ fn depth(s: c.Shape) usize {
     return head_dim + s.k + 8;
 }
 
-/// Decode and window rows over short, chunk-edge and long caches; the contract's edges add k at 1, 127, 128 and 129.
-const served = [_]c.Shape{ .{ .rows = 1, .n = head_dim, .k = 128 }, .{ .rows = 1, .n = head_dim, .k = 4096 }, .{ .rows = 16, .n = head_dim, .k = 4096 }, .{ .rows = 32, .n = head_dim, .k = 1024 } };
+/// A decode row, a verify window and a prompt chunk over short and long caches; the contract's edges add k 1 to 129.
+const served = [_]c.Shape{ .{ .rows = 1, .n = head_dim, .k = 128 }, .{ .rows = 1, .n = head_dim, .k = 4096 }, .{ .rows = 16, .n = head_dim, .k = 4096 }, .{ .rows = 128, .n = head_dim, .k = 1024 } };
 const ctl = [_]c.Shape{ .{ .rows = 5, .n = head_dim, .k = 300 }, .{ .rows = 2, .n = head_dim, .k = 2048 } };
 
 const sums_why = "the stress scores are exact integers but the softmax weights are not, so their sums keep an fp32 term in the bound and a pairwise fp16 sum of them stays within a few bf16 ulps";

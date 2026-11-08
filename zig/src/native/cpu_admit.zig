@@ -149,9 +149,9 @@ fn windowsFootprint() ?u64 {
 }
 
 test "what fits: the share less the footprint and margin, in whole streams" {
-    try std.testing.expectEqual(@as(u32, 0), fits(16 << 30, 10 << 30, 1 << 30)); // 11.2 - 10 - 2 < 0
-    try std.testing.expectEqual(@as(u32, 7), fits(16 << 30, 2 << 30, 1 << 30)); // 11.2 - 2 - 2 = 7.2
-    try std.testing.expectEqual(@as(u32, 27), fits(48 << 30, 4 << 30, 1 << 30)); // 33.6 - 4 - 2 = 27.6
+    try std.testing.expectEqual(@as(u32, 0), fits(16 << 30, 10 << 30, 1 << 30));
+    try std.testing.expectEqual(@as(u32, 7), fits(16 << 30, 2 << 30, 1 << 30));
+    try std.testing.expectEqual(@as(u32, 27), fits(48 << 30, 4 << 30, 1 << 30));
 }
 
 test "admission fails closed without a reading: one stream, an explicit --parallel above it refused" {
@@ -162,7 +162,6 @@ test "admission fails closed without a reading: one stream, an explicit --parall
     defer a.free(problem);
     try std.testing.expectEqual(@as(?u32, null), refused);
     try std.testing.expect(std.mem.indexOf(u8, problem, "could not be read") != null);
-    // a reading admits what fits: 70% of 16 GiB less 2 GiB used and the 2 GiB margin leaves 7 one-GiB streams
     try std.testing.expectEqual(@as(?u32, 7), try streamsFrom(a, "qwen3.5", 1 << 30, .{ .dir = "", .model_type = "qwen3_5", .lanes = 8 }, 8, .{ .total = 16 << 30, .used = 2 << 30 }, &problem));
 }
 

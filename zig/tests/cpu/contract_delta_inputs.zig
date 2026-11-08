@@ -27,7 +27,7 @@ fn flat(_: c.Shape) usize {
     return 0;
 }
 
-/// A decode step, a verify window and a prompt chunk of token rows.
+/// A decode step, a verify window (one stream's segment) and a prompt chunk of token rows.
 const served_inputs = [_]c.Shape{ .{ .rows = 1, .n = per_row, .k = taps }, .{ .rows = 16, .n = per_row, .k = taps }, .{ .rows = 128, .n = per_row, .k = taps } };
 const served_decay = [_]c.Shape{ .{ .rows = 1, .n = heads, .k = 1 }, .{ .rows = 16, .n = heads, .k = 1 }, .{ .rows = 128, .n = heads, .k = 1 } };
 const ctl_inputs = [_]c.Shape{.{ .rows = 9, .n = per_row, .k = taps }};

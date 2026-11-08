@@ -8,7 +8,7 @@ pub const Pool = struct {
     io: std.Io,
     threads: []std.Thread,
     generation: std.atomic.Value(u32) = .init(0),
-    /// The next index to claim, tagged with its job's generation in the high half so a stale claim is void.
+    /// The next index to claim, tagged with its job's generation (stored first): a claim from the last job is void.
     next: std.atomic.Value(u64) = .init(0),
     pending: std.atomic.Value(u32) = .init(0),
     stop: std.atomic.Value(bool) = .init(false),
@@ -59,7 +59,6 @@ pub const Pool = struct {
             return;
         }
         const gen = p.generation.load(.acquire) + 1;
-        // the new tag first: a thread still leaving the last job then sees a foreign claim, never a stale index
         p.next.store(@as(u64, gen) << 32, .release);
         p.task = task;
         p.ctx = ctx;
@@ -113,7 +112,7 @@ const max_workers = 64;
 /// Iterations a thread spins on a change before it sleeps on the futex: short enough to idle cheaply between tokens.
 const spin_limit = 20_000;
 
-test "every index runs once, on any worker, and the caller returns after the last" {
+test "every index runs once, on any worker, the caller returns after the last, and back-to-back jobs never mix" {
     const gpa = std.testing.allocator;
     const Counts = struct {
         hits: [1000]std.atomic.Value(u32) = @splat(.init(0)),
@@ -131,7 +130,6 @@ test "every index runs once, on any worker, and the caller returns after the las
         pool.run(&counts, Counts.task, 1);
     }
     for (counts.hits, 0..) |h, i| try std.testing.expectEqual(@as(u32, if (i == 0) 10 else 5), h.load(.monotonic));
-    // back-to-back small jobs: a thread leaving one job never claims an index of the next
     var small: Counts = .{};
     for (0..4000) |_| pool.run(&small, Counts.task, 5);
     for (small.hits[0..5]) |h| try std.testing.expectEqual(@as(u32, 4000), h.load(.monotonic));
