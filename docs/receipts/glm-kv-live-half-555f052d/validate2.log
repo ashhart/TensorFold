@@ -1,0 +1,95 @@
+=== binary $WORK/bin-pr2/tensorfold-native 5230f587107d1f74 node1 5230f587107d1f74 18:32:28
+=== binary $WORK/bin-main/tensorfold-native 11f369d97237f4b7 node1 11f369d97237f4b7 18:32:29
+=== model $MODEL 18:32:29
+=== stop production 18:32:29
+[glm53-tf] stopped
+=== config on 18:32:54
+rank0 process seen after 4 s: 2690716 at 18:32:59
+READY after 361 s
+[tensorfold] serving kvprobe-native at http://127.0.0.1:18080/v1 (sampling: temperature 1.0, top_p 0.95; drafts: MTP + copies; context: 65536; loaded in 355.5s)
+turn  1 main     ttft 5.91 total 9.70 cached 0 tokens 48 sha e2ca39adac07 form none (first turn)
+turn  2 main     ttft 5.96 total 9.20 cached 2048 tokens 48 sha 4be3fc8fb869 form raw-or-partial
+turn  3 main     ttft 5.90 total 9.13 cached 4096 tokens 48 sha 74622e0b72f3 form raw-or-partial
+turn  4 main     ttft 6.38 total 9.22 cached 6144 tokens 48 sha adf747f9672f form raw-or-partial
+turn  5 main     ttft 6.67 total 9.81 cached 8192 tokens 48 sha 66156c629643 form raw-or-partial
+turn  6 main     ttft 6.77 total 10.06 cached 10240 tokens 48 sha 7b52308dca65 form raw-or-partial
+turn  7 raw-keep ttft 6.31 total 8.95 cached 12288 tokens 48 sha 33271190574e form raw-or-partial
+turn  8 raw      ttft 4.69 total 8.26 cached 16384 tokens 48 sha a4d24ccdbb04 form raw-or-partial
+turn  9 partial  ttft 4.85 total 7.51 cached 18432 tokens 48 sha 9cef66832f4c form raw-or-partial
+wrote $WORK/receipt2/out/on/turns.json; stop the server (SIGINT to rank 0), then: collect $WORK/receipt2/out/on --log ...
+both ranks stopped, GPUs and locks free after 4 s
+=== config off 18:40:56
+rank0 process seen after 4 s: 2700328 at 18:41:01
+READY after 231 s
+[tensorfold] serving kvprobe-native at http://127.0.0.1:18080/v1 (sampling: temperature 1.0, top_p 0.95; drafts: MTP + copies; context: 65536; loaded in 228.4s)
+turn  1 main     ttft 5.88 total 9.65 cached 0 tokens 48 sha e2ca39adac07 form none (first turn)
+turn  2 main     ttft 5.85 total 8.97 cached 2048 tokens 48 sha 4be3fc8fb869 form uncompacted
+turn  3 main     ttft 5.78 total 8.96 cached 4096 tokens 48 sha 74622e0b72f3 form uncompacted
+turn  4 main     ttft 6.34 total 9.06 cached 6144 tokens 48 sha adf747f9672f form uncompacted
+turn  5 main     ttft 6.59 total 9.67 cached 8192 tokens 48 sha 66156c629643 form uncompacted
+turn  6 main     ttft 6.67 total 9.76 cached 10240 tokens 48 sha 7b52308dca65 form uncompacted
+turn  7 raw-keep ttft 6.32 total 8.92 cached 12288 tokens 48 sha 33271190574e form uncompacted
+turn  8 raw      ttft 4.70 total 8.37 cached 16384 tokens 48 sha a4d24ccdbb04 form uncompacted
+turn  9 partial  ttft 4.67 total 7.30 cached 18432 tokens 48 sha 9cef66832f4c form uncompacted
+wrote $WORK/receipt2/out/off/turns.json; stop the server (SIGINT to rank 0), then: collect $WORK/receipt2/out/off --log ...
+both ranks stopped, GPUs and locks free after 4 s
+=== config fresh 18:46:47
+rank0 process seen after 4 s: 2708347 at 18:46:52
+READY after 220 s
+[tensorfold] serving kvprobe-native at http://127.0.0.1:18080/v1 (sampling: temperature 1.0, top_p 0.95; drafts: MTP + copies; context: 65536; loaded in 215.0s)
+turn  1 main     ttft 4.51 total 8.27 cached 0 tokens 48 sha e2ca39adac07 form none (first turn)
+turn  2 main     ttft 7.73 total 11.02 cached 0 tokens 48 sha 4be3fc8fb869 form none (nothing resumed)
+turn  3 main     ttft 9.68 total 12.82 cached 0 tokens 48 sha 74622e0b72f3 form none (nothing resumed)
+turn  4 main     ttft 13.19 total 15.94 cached 0 tokens 48 sha adf747f9672f form none (nothing resumed)
+turn  5 main     ttft 14.76 total 17.82 cached 0 tokens 48 sha 66156c629643 form none (nothing resumed)
+turn  6 main     ttft 17.96 total 21.24 cached 0 tokens 48 sha 7b52308dca65 form none (nothing resumed)
+turn  7 raw-keep ttft 20.72 total 23.38 cached 0 tokens 48 sha 33271190574e form none (nothing resumed)
+turn  8 raw      ttft 23.93 total 27.56 cached 0 tokens 48 sha a4d24ccdbb04 form none (nothing resumed)
+turn  9 partial  ttft 25.93 total 28.61 cached 0 tokens 48 sha 9cef66832f4c form none (nothing resumed)
+wrote $WORK/receipt2/out/fresh/turns.json; stop the server (SIGINT to rank 0), then: collect $WORK/receipt2/out/fresh --log ...
+both ranks stopped, GPUs and locks free after 4 s
+=== config main 18:53:51
+rank0 process seen after 4 s: 2719615 at 18:53:56
+READY after 231 s
+[tensorfold] serving kvprobe-native at http://127.0.0.1:18080/v1 (sampling: temperature 1.0, top_p 0.95; drafts: MTP + copies; context: 65536; loaded in 224.2s)
+turn  1 main     ttft 5.82 total 9.62 cached 0 tokens 48 sha e2ca39adac07 form none (first turn)
+turn  2 main     ttft 5.52 total 8.80 cached 2048 tokens 48 sha 4be3fc8fb869 form raw-or-partial
+turn  3 main     ttft 5.48 total 8.74 cached 4096 tokens 48 sha 74622e0b72f3 form raw-or-partial
+turn  4 main     ttft 6.01 total 8.88 cached 6144 tokens 48 sha adf747f9672f form raw-or-partial
+turn  5 main     ttft 6.09 total 9.20 cached 8192 tokens 48 sha 66156c629643 form raw-or-partial
+turn  6 main     ttft 6.18 total 9.50 cached 10240 tokens 48 sha 7b52308dca65 form raw-or-partial
+turn  7 raw-keep ttft 5.72 total 8.37 cached 12288 tokens 48 sha 33271190574e form raw-or-partial
+turn  8 raw      ttft 4.41 total 8.07 cached 16384 tokens 48 sha a4d24ccdbb04 form raw-or-partial
+turn  9 partial  ttft 4.49 total 7.18 cached 18432 tokens 48 sha 9cef66832f4c form raw-or-partial
+wrote $WORK/receipt2/out/main/turns.json; stop the server (SIGINT to rank 0), then: collect $WORK/receipt2/out/main --log ...
+both ranks stopped, GPUs and locks free after 4 s
+=== compare 18:59:39
+| turn | kind | prompt | cached on/off/fresh/main | TTFT s on / off / fresh / main | reply sha256 | same |
+|---|---|---|---|---|---|---|
+| 1 | main | 3102 | 0 / 0 / 0 / 0 | 5.91 / 5.88 / 4.51 / 5.82 | `e2ca39adac07` | yes |
+| 2 | main | 5322 | 2048 / 2048 / 0 / 2048 | 5.96 / 5.85 / 7.73 / 5.52 | `4be3fc8fb869` | yes |
+| 3 | main | 7544 | 4096 / 4096 / 0 / 4096 | 5.90 / 5.78 / 9.68 / 5.48 | `74622e0b72f3` | yes |
+| 4 | main | 9775 | 6144 / 6144 / 0 / 6144 | 6.38 / 6.34 / 13.19 / 6.01 | `adf747f9672f` | yes |
+| 5 | main | 11999 | 8192 / 8192 / 0 / 8192 | 6.67 / 6.59 / 14.76 / 6.09 | `66156c629643` | yes |
+| 6 | main | 14218 | 10240 / 10240 / 0 / 10240 | 6.77 / 6.67 / 17.96 / 6.18 | `7b52308dca65` | yes |
+| 7 | raw-keep | 16440 | 12288 / 12288 / 0 / 12288 | 6.31 / 6.32 / 20.72 / 5.72 | `33271190574e` | yes |
+| 8 | raw | 18661 | 16384 / 16384 / 0 / 16384 | 4.69 / 4.70 / 23.93 / 4.41 | `a4d24ccdbb04` | yes |
+| 9 | partial | 20881 | 18432 / 18432 / 0 / 18432 | 4.85 / 4.67 / 25.93 / 4.49 | `9cef66832f4c` | yes |
+
+replies identical in every turn
+
+| config | rank | keeps | restores (raw / partial) | ratio | pages | encode_ms | lazy_encode_ms | decode_ms | copy_ms | lazy_copy_ms | keep_io_ms | wait_ms |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+
+| config | rank | trimmed | pages freed | free= last | held / spare MiB last |
+|---|---|---|---|---|---|
+
+restore forms (log-inferred, extra cases): on: {'raw': 'raw-or-partial', 'partial': 'raw-or-partial'}; off: {'raw': 'uncompacted', 'partial': 'uncompacted'}; fresh: {'raw': 'none (nothing resumed)', 'partial': 'none (nothing resumed)'}; main: {'raw': 'raw-or-partial', 'partial': 'raw-or-partial'}
+=== restore production (config/collect-mtp2.env) 18:59:39
+[glm53-tf] request slots: 4 (GLM53_TF_BATCH=4)
+[canary] ok: 3 probes, tokens/round 5.71, decode 54.1 tok/s
+[canary] warmup 4096: 4112 prompt tokens, prefill 5.009 s (5.26 s)
+[canary] warmup 16384: 16399 prompt tokens, prefill 13.745 s (14.21 s)
+glm53-tf-r0 Up 2 minutes
+context_length": 1048576}]}
+=== DONE 19:02:13

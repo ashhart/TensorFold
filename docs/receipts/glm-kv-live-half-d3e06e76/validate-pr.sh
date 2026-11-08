@@ -2,12 +2,12 @@
 # The live-half keep on the PR branch's binary (upstream main plus the change): the whole head against the live half,
 # drafts off and then on, nine receipt turns each on the same binary; production stopped first and restored at the end.
 set -u
-N=$HOME/kvprobe/native; OUT=$HOME/kvprobe/receipt-pr; T=$HOME/kvprobe/TensorFold/tools/kvprobe
-B=$HOME/kvprobe/TensorFold-pr/zig-out/native/bin/tensorfold-native
+N=$WORK/native; OUT=$WORK/receipt-pr; T=$WORK/TensorFold/tools/kvprobe
+B=$WORK/TensorFold-pr/zig-out/native/bin/tensorfold-native
 log() { echo "=== $1 $(date -u +%H:%M:%S)"; }
 mkdir -p $OUT
-log "binary $(sha256sum $B | cut -c1-16) node1 $(ssh -o BatchMode=yes RANK1_RING_IP sha256sum '~/kvprobe/TensorFold-pr/zig-out/native/bin/tensorfold-native' | cut -c1-16)"
-log "stop production"; (cd ~/glm53-tensorfold-spark && env -i HOME=$HOME PATH=$PATH USER=$USER bash scripts/serve.sh stop 2>&1 | tail -1); sleep 25
+log "binary $(sha256sum $B | cut -c1-16) node1 $(ssh -o BatchMode=yes RANK1_RING_IP sha256sum '$WORK/TensorFold-pr/zig-out/native/bin/tensorfold-native' | cut -c1-16)"
+log "stop production"; (cd $SERVE_DIR && env -i HOME=$HOME PATH=$PATH USER=$USER bash scripts/serve.sh stop 2>&1 | tail -1); sleep 25
 run_cfg() { # run_cfg NAME "ENV" [serve args]
   local cfg=$1 penv=$2; shift 2
   log "config $cfg"; mkdir -p $OUT/$cfg
@@ -32,6 +32,6 @@ res = L.compare(["$OUT/both", "$OUT/live", "$OUT/both-drafts", "$OUT/live-drafts
 print(L.table(res))
 json.dump(res, open("$OUT/compare.json", "w"), indent=1)
 EOF
-log "restore production"; (cd ~/glm53-tensorfold-spark && timeout 1200 env -i HOME=$HOME PATH=$PATH USER=$USER bash scripts/serve.sh start 2>&1 | tail -4)
+log "restore production"; (cd $SERVE_DIR && timeout 1200 env -i HOME=$HOME PATH=$PATH USER=$USER bash scripts/serve.sh start 2>&1 | tail -4)
 docker ps --format "{{.Names}} {{.Status}}" | grep glm53; curl -s -m 5 http://127.0.0.1:8000/v1/models | grep -o "context_length[^,]*"
 log "DONE"

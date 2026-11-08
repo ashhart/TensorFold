@@ -91,7 +91,7 @@ Each configuration: `start-ranks-pr.sh "PROBE_CONTEXT=65536 TF_GLM_HOST_CACHE=1 
 --prompt-cache-gib 16 --keep-warm 0 --idle-unload 0`), then `python3 lazy_receipt.py run --config <label> --lazy-ms 0
 --pause 3` (the runner and its `served.py` are the fork's `tools/kvprobe` scripts as run; Python 3.11 or newer, the
 standard library), `collect`, and `lazy_receipt.compare` over the four record folders. Placeholders in the scripts
-and logs: `RANK0_RING_IP`, `RANK1_RING_IP`, `node0`, `node1`, `$MODEL`, `$HOME`, `$NCCL_LIB_DIR` (the NCCL
+and logs: `RANK0_RING_IP`, `RANK1_RING_IP`, `node0`, `node1`, `$MODEL`, `$HOME`, `$WORK` (the scripts' working directory), `$SERVE_DIR` (the serving stack the run stops and restores), `$NCCL_LIB_DIR` (the NCCL
 runtime's directory) and `$GPU_LOCK` (a lock file that keeps other GPU jobs off the node) (redaction-report.json).
 
 ## Remaining coverage limits
