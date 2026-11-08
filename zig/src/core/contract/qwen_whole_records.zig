@@ -94,8 +94,11 @@ test "attention receipts fit their target SMs and retain compiler-specific quali
         }
         try std.testing.expectEqual(@as(usize, 0), missing);
         try std.testing.expectEqual(@as(usize, 0), try reg.checkCuda(std.testing.allocator, &.{r}, true));
-        for ([_]?@import("limits.zig").Nvcc{ null, .{ .major = 13, .minor = 0 }, .{ .major = 13, .minor = 1 } }) |compiler|
+        for ([_]?@import("limits.zig").Nvcc{ null, .{ .major = 13, .minor = 1 } }) |compiler|
             try std.testing.expectEqual(r.usage, reg.usageFor(r, compiler));
+        var nvcc130 = r.usage;
+        if (std.mem.eql(u8, r.launch.name, "tf_q35_attn_rows8_mt2")) nvcc130[3].regs = 243;
+        try std.testing.expectEqual(nvcc130, reg.usageFor(r, .{ .major = 13, .minor = 0 }));
         try std.testing.expectEqual(reg.none, reg.usageFor(r, .{ .major = 13, .minor = 2 }));
         for ([_]@import("limits.zig").Nvcc{.{ .major = 13, .minor = 3 }}) |compiler| {
             const usage = reg.usageFor(r, compiler);
