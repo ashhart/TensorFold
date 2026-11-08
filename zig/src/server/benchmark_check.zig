@@ -9,6 +9,7 @@ pub const Mode = enum { save, publish };
 
 pub const local_label = "Local or private model labels cannot be published; benchmark a public checkpoint ID";
 pub const over_budget = "A sample's output count exceeds the requested budget; this receipt cannot be published";
+pub const thinking_local = "Server-default thinking samples stay local; the community protocol requires thinking off";
 pub const rocm_local = "The board accepts mlx and cuda receipts; ROCm receipts stay local until it accepts rocm";
 
 const Bad = error{Bad};
@@ -165,7 +166,11 @@ const Check = struct {
     }
 
     fn settings(c: *Check, s: Value) Bad!void {
-        try c.need(exact(s, if (c.v2) &settings_keys_v2 else &settings_keys), "settings must hold exactly its fields");
+        if (s.get("thinking_mode")) |mode| {
+            if (c.mode == .publish) return c.fail(thinking_local);
+            try c.need(eqlStr(mode, "server_default"), "settings.thinking_mode must be server_default");
+            try c.need(exact(s, if (c.v2) &(settings_keys_v2 ++ .{"thinking_mode"}) else &(settings_keys ++ .{"thinking_mode"})), "settings must hold exactly its fields");
+        } else try c.need(exact(s, if (c.v2) &settings_keys_v2 else &settings_keys), "settings must hold exactly its fields");
         try c.need(num(s.get("tokens").?, .{ .integer = true, .min = 2, .max = 8192 }), "settings.tokens must be 2 to 8192");
         try c.need(num(s.get("repetitions").?, .{ .integer = true, .min = 1, .max = 20 }), "settings.repetitions must be 1 to 20");
         try c.need(num(s.get("context_tokens").?, .{ .nullable = true, .integer = true, .min = 1, .max = 10000000 }), "settings.context_tokens must be 1 to 10000000 or null");

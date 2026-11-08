@@ -24,6 +24,8 @@ const Allocator = std.mem.Allocator;
 pub const Prompt = union(enum) { text: []const u8, ids: []const u32 };
 /// What a route hands the reply: Python's chat() arguments.
 pub const Input = struct {
+    /// Client routes require an explicit thinking-off request to be honored; internal generations keep their policy.
+    client_request: bool = false,
     messages: Value = .{ .array = &.{} },
     tools: []const Value = &.{},
     prompt: ?Prompt = null,

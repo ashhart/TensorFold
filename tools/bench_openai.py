@@ -19,6 +19,7 @@ from bench_evidence import Evidence
 from bench_auth import authorize, read_api_key, redact
 from bench_args import validate_temperatures
 import bench_metrics
+import bench_thinking
 
 if sys.version_info < (3, 11):
     sys.exit(f"Python 3.11+ is required (this is {sys.version.split()[0]}); "
@@ -43,7 +44,8 @@ def stream(base: str, model: str, item: dict, tokens: int, temperature: float, s
     if item["kind"] == "chat":
         url = base + "/v1/chat/completions"
         body["messages"] = [{"role": "user", "content": item["prompt"]}]
-        body["chat_template_kwargs"] = {"enable_thinking": False}
+        if bench_thinking.request_off(item):
+            body["chat_template_kwargs"] = {"enable_thinking": False}
     else:
         url = base + "/v1/completions"
         body["prompt"] = item["prompt"]
@@ -88,7 +90,7 @@ def stream(base: str, model: str, item: dict, tokens: int, temperature: float, s
     out = {"ttft_s": first - start if complete and first is not None else None, "decode_s": span, **observed,
            "decode_tps": (n - 1) / span if complete and n is not None and n > 1 and span else None,
            "text": "".join(text), "pieces": pieces}
-    return {**out, **bench_metrics.request(out)}
+    return {**out, **bench_metrics.request(out), **bench_thinking.receipt(item)}
 
 
 METRICS = ("prefill_tps", "itl_mean_ms", "itl_p50_ms", "itl_p95_ms", "round_gap_p50_ms", "round_gap_p95_ms",
@@ -110,6 +112,7 @@ def main() -> None:
     p.add_argument("--temperatures", default="1.0,0")
     p.add_argument("--label", default="")
     p.add_argument("--output")
+    p.add_argument("--compare-receipt", metavar="FILE", help="flag rows whose thinking label differs from this receipt")
     p.add_argument("--api-key-env", metavar="NAME", help="read the bearer API key from this environment variable")
     p.add_argument("--seed-from-prompt", action="store_true",
                    help="send no seed; requires native serve --prompt-seed to match prompt-keyed engine benches, "
@@ -121,9 +124,14 @@ def main() -> None:
         p.error("--reps must be greater than 0")
     api_key = read_api_key(p, args.api_key_env)
     validate_temperatures(p, args.temperatures)
+    try:
+        previous = bench_thinking.load_comparison(args.compare_receipt)
+    except (OSError, ValueError, TypeError):
+        p.error("cannot read comparison receipt")
+    prompts = bench_thinking.configure(PROMPTS, bench_thinking.discover(args.base, args.model, api_key))
     results = []
     for temp in [float(t) for t in args.temperatures.split(",")]:
-        for item in PROMPTS:
+        for item in prompts:
             seeds = [None] * args.reps if args.seed_from_prompt else [1234 + i for i in range(args.reps)]
             try:
                 stream(args.base, args.model, item, args.tokens, temp, seeds[0], api_key=api_key)  # warm-up
@@ -132,17 +140,17 @@ def main() -> None:
                 p.exit(1, f"benchmark request failed: {type(exc).__name__}\n")
             tps = [r["decode_tps"] for r in runs if r["decode_tps"]]
             ttfts = [r["ttft_s"] for r in runs if r["ttft_s"] is not None]
-            row = {"label": args.label, "prompt": item["name"], "temperature": temp, "tokens": args.tokens,
+            row = {"label": args.label, "prompt": item["name"], "temperature": temp, "tokens": args.tokens, **bench_thinking.receipt(item),
                    "decode_tps_median": statistics.median(tps) if tps else None, "decode_tps_all": [round(x, 2) for x in tps],
                    "ttft_s_median": statistics.median(ttfts) if ttfts else None,
                    **{k + "_median": median(r[k] for r in runs) for k in METRICS},
                    "evidence": [{k: r[k] for k in ("prompt_tokens", "cached_tokens", "tokens", "cache_state",
                                 "complete", "token_sha", "output_sha256")} for r in runs],
                    "sample": redact(runs[0]["text"], api_key)[:160]}
-            row = redact(row, api_key)
-            shown = ("label", "prompt", "temperature", "decode_tps_median", "decode_tps_all", "ttft_s_median",
+            row = bench_thinking.comparison(redact(row, api_key), previous)
+            shown = ("label", "prompt", "temperature", "thinking", "thinking_off_requested", "decode_tps_median", "decode_tps_all", "ttft_s_median",
                      *(k + "_median" for k in METRICS))
-            print(json.dumps({k: row[k] for k in shown}), flush=True)
+            print(json.dumps({**{k: row[k] for k in shown}, **{k: row[k] for k in ("thinking_comparable", "comparison_warning", "comparison_thinking") if k in row}}), flush=True)
             results.append(row)
     if args.output:
         with open(args.output, "w") as f:

@@ -504,3 +504,25 @@ test "model discovery capability and logprob admission use one loaded flag" {
         }
     }
 }
+
+test "model discovery publishes the thinking facts last in its one capabilities object, after the engine's flags" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const entry_keys = [_][]const u8{ "id", "object", "created", "owned_by", "capabilities", "context_length", "max_model_len" };
+    for ([_][2]bool{ .{ false, false }, .{ true, false }, .{ false, true }, .{ true, true } }) |facts| {
+        const info: api.Info = .{ .context_window = 8, .thinking_switch = facts[0], .thinking_applicable = facts[1] };
+        const entry = try modelValue(a, "model", info, 0, null);
+        try std.testing.expectEqual(entry_keys.len, entry.object.count());
+        for (entry_keys, entry.object.keys()) |want, got| try std.testing.expectEqualStrings(want, got);
+        const flags = entry.get("capabilities").?.object;
+        const names = @typeInfo(api.Info.Capability).@"enum".field_names;
+        try std.testing.expectEqual(names.len, flags.count());
+        for (names, flags.keys()) |want, got| try std.testing.expectEqualStrings(want, got);
+        try std.testing.expectEqualStrings("rerank", flags.keys()[names.len - 3]);
+        try std.testing.expectEqualStrings("thinking_switch", flags.keys()[names.len - 2]);
+        try std.testing.expectEqualStrings("thinking_applicable", flags.keys()[names.len - 1]);
+        try std.testing.expectEqual(info.capability(.thinking_switch), flags.get("thinking_switch").?.bool);
+        try std.testing.expectEqual(info.capability(.thinking_applicable), flags.get("thinking_applicable").?.bool);
+    }
+}
