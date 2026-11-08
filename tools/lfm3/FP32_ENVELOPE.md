@@ -12,6 +12,14 @@ and margins. Whole-phase logit RMS/max and fixed-F-top-20 probability mean/max a
 explicit executable proposal for that criterion. The exact metric set is not a verbatim
 maintainer specification. Row/column exceedances remain visible; no tie waiver applies.
 
+The CPU reference tests require optional NumPy. Without it, their modules skip under
+root pytest collection; errors importing an installed NumPy still fail. To run the
+numerical checks, install NumPy in the reference environment, then run:
+
+```sh
+python3 -m unittest discover -s tools/lfm3 -p 'test_*.py'
+```
+
 ## Generate the three inputs
 
 Run from the checkout root. `MODEL_DIR` must be the same admitted TEXT4 checkpoint

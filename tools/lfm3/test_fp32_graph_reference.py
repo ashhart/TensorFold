@@ -1,6 +1,11 @@
 """CPU graph precision modes, affine dequantization and BF16 midpoint boundaries."""
 import unittest
-import numpy as np
+try:
+    import numpy as np
+except ModuleNotFoundError as error:
+    if error.name != "numpy":
+        raise
+    raise unittest.SkipTest("numpy is not installed") from error
 from fp32_graph_reference import Graph
 
 

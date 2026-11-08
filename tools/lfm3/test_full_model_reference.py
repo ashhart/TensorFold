@@ -1,6 +1,11 @@
 import unittest, tempfile, json, struct
 from pathlib import Path
-import numpy as np
+try:
+    import numpy as np
+except ModuleNotFoundError as error:
+    if error.name != "numpy":
+        raise
+    raise unittest.SkipTest("numpy is not installed") from error
 from full_model_reference import Checkpoint, FP32, inject_check
 from fp32_graph_reference import Graph
 
