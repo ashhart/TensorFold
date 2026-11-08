@@ -76,7 +76,7 @@ fn blend(to: *?Point, v: Point) void {
 
 /// Explicit confidence, custom family trim and forced tokens retain their own policies.
 pub fn calibrate(e: anytype, plans: anytype) !bool {
-    if (!e.cfg.timed or !e.cfg.family_mtp or !e.cfg.plain_guard or e.cfg.draft_confidence != null or
+    if (!e.cfg.timed or !e.cfg.plain_guard or e.cfg.draft_confidence != null or
         e.trim != null or plans.len < 2 or e.cfg.shared_costs.empty()) return false;
     for (plans) |p| if (p.kind == .forced or p.stream.rounds == 0) return false;
     return e.rule.shared_price.due(e.gpa, plans.len, @import("windows.zig").anySampled(plans));
