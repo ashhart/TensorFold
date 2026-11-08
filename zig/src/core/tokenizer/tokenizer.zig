@@ -259,7 +259,7 @@ pub const Tokenizer = struct {
         }
     }
 
-    /// encodeText through the memo for a long segment: its kept ids, else encoded and kept.
+    /// encodeText through the memo for a segment of `min_bytes` or more: its kept ids, else encoded and kept.
     fn encodeSegment(t: *const Tokenizer, ctx: *steps.Context, text: []const u8, first: bool, ids: *std.ArrayList(u32)) Error!void {
         const m = t.memo orelse return t.encodeText(ctx, text, first, ids);
         if (text.len < @import("memo.zig").min_bytes) return t.encodeText(ctx, text, first, ids);
