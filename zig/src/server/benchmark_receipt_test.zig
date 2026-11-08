@@ -388,3 +388,16 @@ test "the receipt names the cache format a managed run used and leaves an attach
     try std.testing.expect(!check.receipt(managed, .save, now_ms, &why));
     try std.testing.expect(std.mem.startsWith(u8, why, "settings.kv_cache"));
 }
+
+test "thinking benchmark: server-default samples save locally and cannot publish" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const value = try valid(a);
+    try value.get("settings").?.object.put(a, "thinking_mode", .{ .string = "server_default" });
+    var why: []const u8 = "";
+    try std.testing.expect(check.receipt(value, .save, now_ms, &why));
+    try std.testing.expect(!check.receipt(value, .publish, now_ms, &why));
+    try std.testing.expectEqualStrings(check.thinking_local, why);
+    for (try suite.receiptCells(a, value)) |cell| try std.testing.expect(!cell.protocol_complete);
+}
