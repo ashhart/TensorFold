@@ -73,7 +73,10 @@ pub const Link = struct {
 
 /// Rank 1 replays rank 0's rounds: refuse at the head of `prefill`, its first backend call (GLM's `beginPrompt`).
 pub fn refuseFollower(link: ?*Link) !void {
-    if (link) |l| if (l.pair.rank != 0) return error.FollowsPeer;
+    if (link) |l| if (l.pair.rank != 0) {
+        std.log.info("q27 rank1 follower refusal: queued words={d} failed_seam={d}", .{ l.words.items.len, l.pair.failedSeam() });
+        return error.FollowsPeer;
+    };
 }
 
 /// A pair's token is the head seam's pick, so a sampled or grammar-constrained stream has no pair answer.
