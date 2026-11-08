@@ -132,6 +132,7 @@ pub const kernels = [_]Kernel{
     .{ .name = "nemo_audio", .flags = glue }, // ours: Nemotron Transcribe's audio encoder glue and head-64 attention
     .{ .name = "moss_image_decoder", .flags = glue }, // ours: MOSS-Image's fp32 decoder (unpack, convolutions, norms)
     .{ .name = "moss_image_encoder", .flags = glue }, // ours: MOSS-Image's prompt encoder (Qwen3.5 norms, rotary, delta rule)
+    .{ .name = "ricursive_tp2", .flags = glue }, // ours: Ripple at two ranks (embed scale, value residual, gate, SwiGLU, norms, rank sum)
     .{ .name = "tree_round", .flags = &.{"-O3"} }, // ours: verified tree rounds for every family (cuda/tree_round.zig)
     .{ .name = "act_rows", .flags = &.{"-O3"} }, // ours: SwiGLU, output gates, group sums (cuda/act_rows.zig)
     .{ .name = "gemma4_ple", .flags = &.{"-O3"} }, // ours: Gemma 4 E-series per-layer inputs (gemma4/cuda_ple.zig)

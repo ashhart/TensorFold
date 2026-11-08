@@ -15,7 +15,7 @@ const qwen3 = @import("qwen3_cuda");
 const inkling2 = @import("inkling2");
 
 /// CUDA families provide metadata, open their lane backend and explain their refusals.
-pub const registry = .{ nemotron.native, nemotron.omni, nemotron.transcribe, glm.native, glm.native_dsa, minimax.native, qwen35.native, qwen35.native_moe, flashnext.native, kolibri1.native, gemma4.native, gemma4.native31, spark25.native, dory.native, @import("dots_mocr_cuda").native, @import("muse_spark").native, @import("ricursive_cuda").native, @import("lfm3_cuda").native, @import("lfm2_moe_cuda").native, inkling2.native };
+pub const registry = .{ nemotron.native, nemotron.omni, nemotron.transcribe, glm.native, glm.native_dsa, minimax.native, qwen35.native, qwen35.native_moe, flashnext.native, kolibri1.native, gemma4.native, gemma4.native31, spark25.native, dory.native, @import("dots_mocr_cuda").native, @import("muse_spark").native, @import("ricursive_cuda").native, @import("ricursive_tp2").native, @import("lfm3_cuda").native, @import("lfm2_moe_cuda").native, inkling2.native };
 /// Model types the CUDA opener also takes (`cuda_also_model_types`): listed after the families, with their formats.
 const aliases: usize = blk: {
     var n: usize = 0;
