@@ -8,6 +8,9 @@ A clean fake passes every gate. Each fault breaks one property the kit gates, an
 - resumed: the cached server reports no cached prompt tokens.
 - refusals: an out-of-range presence_penalty is answered instead of refused.
 
+A request with ``"stream": true`` gets the same reply as SSE, as the server streams it with ``include_usage``: the
+content in pieces, a finishing chunk carrying ``tensorfold`` and ``speculative``, a usage-only chunk, then ``[DONE]``.
+
 ``serve`` plays a scripted SSE reply instead, for the benchmark clients' tests. A reply is a list of tokens, each
 ``(choice, kind, text)`` for content and reasoning or ``(choice, "tool", index, field, text)`` for a tool call's
 ``name`` or ``arguments``. ``script`` cuts the same tokens into SSE events of the given sizes, so a test can serve one
@@ -56,6 +59,16 @@ def event(chunk: dict) -> bytes:
     return b"data: " + json.dumps(chunk).encode() + b"\n\n"
 
 
+def streamed(payload: dict) -> list:
+    """``payload`` (a ``doc``) as server-sent events: content two characters an event, the finish, usage, [DONE]."""
+    text = payload["choices"][0]["message"]["content"]
+    pieces = [{"choices": [{"index": 0, "delta": {"content": text[i:i + 2]}, "finish_reason": None}]}
+              for i in range(0, len(text), 2)]
+    last = {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}], "tensorfold": payload["tensorfold"],
+            "speculative": payload["speculative"]}
+    return [event(c) for c in pieces + [last, {"choices": [], "usage": payload["usage"]}]] + [DONE]
+
+
 def delta(group: list[tuple], label: str) -> list[dict]:
     """One event's choices: each choice's tokens merged into one delta; tool fragments merged by tool index."""
     choices: dict[int, dict] = {}
@@ -97,7 +110,7 @@ def script(tokens: list[tuple], sizes: list[int], *, finish: str | None = "stop"
 
 
 class FakeEngine(http.server.BaseHTTPRequestHandler):
-    """The reply hash depends on the messages and, when sampling, the seed; never on draft, cache or batch."""
+    """The reply hash depends on the messages and, when sampling, the seed; never on draft, cache, batch or stream."""
 
     def log_message(self, *_):
         pass
@@ -130,7 +143,10 @@ class FakeEngine(http.server.BaseHTTPRequestHandler):
             with server.lock:
                 server.inflight -= 1
         # Out of flight before the reply is written: the client's next request must not find this one still counted.
-        self.reply(200, payload)
+        if body.get("stream"):
+            self.play(streamed(payload))
+        else:
+            self.reply(200, payload)
         time.sleep(server.linger)
 
     def batched(self) -> bool:

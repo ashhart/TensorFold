@@ -17,7 +17,11 @@ Each gate prints one PASS or FAIL line with its counts; any FAIL exits 1. Equali
 ``--binary`` starts the servers itself (the cache-off one first, then the cached one), one at a time, from the
 profile's flags; ``--url`` and ``--fresh-url`` run against servers you started. ``--plant GATE`` plants a fault that
 must turn that gate red (the arm under test gets another seed, the cached server keeps no prompts, or a refusal is
-sent without its refused field). Standard library only.
+sent without its refused field). ``--stream`` asks for every exactness reply as a stream and reads it through the
+benchmark clients' reader (``bench_stream``), with the same hash, counts and text; a stream that errs or ends before
+``[DONE]`` is unverified. Refusals stay plain JSON requests: the server answers a streamed context-window refusal
+with an error event after a 200 head, not with the status the profile lists. Standard library only, like its sibling
+``bench_stream``.
 
   python3 tools/conformance.py tools/conformance_profiles/qwen35-cuda.json --binary BIN --model-dir DIR \\
     --drafter DRAFTER --output receipt.json
@@ -36,6 +40,8 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+
+import bench_stream
 
 GATES = ("drafted", "repeat", "concurrent", "resumed", "refusals")
 SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -63,6 +69,17 @@ def reply_row(status: int, doc) -> dict:
     message = choices[0].get("message", {}) if choices and isinstance(choices[0], dict) else {}
     row["text"] = message.get("content") if isinstance(message.get("content"), str) else ""
     return row
+
+
+def stream_row(reply) -> dict:
+    """A streamed reply read through ``bench_stream``, reduced to the row its JSON reply would give."""
+    events = bench_stream.Collector(time.perf_counter())
+    events.read(reply)
+    if events.end != "done":
+        return reply_row(reply.status, {"error": events.error or "incomplete_stream"})
+    doc = {"tensorfold": events.runtime, "usage": events.usage, "speculative": events.speculative,
+           "choices": [{"message": {"content": "".join(events.text)}}]}
+    return {**reply_row(reply.status, doc), "completion": events.completion()}
 
 
 def count(value):
@@ -145,18 +162,21 @@ def print_gate(gate: dict) -> None:
 
 
 class Client:
-    """One served endpoint: plain JSON chat requests, every outcome reduced to a reply row."""
+    """One served endpoint: JSON or streamed chat requests, every outcome reduced to a reply row."""
 
-    def __init__(self, base: str, model: str, timeout: float = 900):
-        self.base, self.model, self.timeout = base.rstrip("/"), model, timeout
+    def __init__(self, base: str, model: str, timeout: float = 900, stream: bool = False):
+        self.base, self.model, self.timeout, self.stream = base.rstrip("/"), model, timeout, stream
 
-    def post(self, body: dict) -> dict:
+    def post(self, body: dict, stream: bool | None = None) -> dict:
+        stream = self.stream if stream is None else stream
         body = {"model": self.model, **body}
+        if stream:
+            body.update(stream=True, stream_options={"include_usage": True})
         request = urllib.request.Request(self.base + "/v1/chat/completions", json.dumps(body).encode(),
                                          {"Content-Type": "application/json"})
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as reply:
-                return reply_row(reply.status, json.load(reply))
+                return stream_row(reply) if stream else reply_row(reply.status, json.load(reply))
         except urllib.error.HTTPError as exc:
             raw = exc.read(1 << 16)
             try:
@@ -282,7 +302,7 @@ class Runner:
             body["max_tokens"] = 4
             if self.plan.plant != "refusals":
                 body.update(item["body"])
-            row = self.client.post(body)
+            row = self.client.post(body, stream=False)
             self.record("refusal", (item["name"],), row)
             results.append((item["name"], row, item))
         return refusals_gate(results)
@@ -392,6 +412,7 @@ def parse(argv=None):
     p.add_argument("--start-timeout", type=float, default=900)
     p.add_argument("--gates", default=",".join(GATES))
     p.add_argument("--plant", choices=GATES)
+    p.add_argument("--stream", action="store_true", help="read the exactness replies as streams (refusals stay JSON)")
     p.add_argument("--output", type=Path)
     args = p.parse_args(argv)
     args.gates = [g for g in args.gates.split(",") if g]
@@ -410,7 +431,7 @@ def main(argv=None) -> int:
     args = parse(argv)
     profile = json.loads(args.profile.read_text())
     plan = Plan(profile, args.plant)
-    receipt = {"profile": profile, "plant": args.plant, "gates": [], "servers": []}
+    receipt = {"profile": profile, "plant": args.plant, "stream": args.stream, "gates": [], "servers": []}
     fresh = None
     if args.binary:
         receipt["binary_sha256"] = hashlib.sha256(args.binary.read_bytes()).hexdigest()
@@ -418,19 +439,19 @@ def main(argv=None) -> int:
         if "resumed" in args.gates:
             with Server(args, profile, 0, logs) as server:
                 receipt["servers"].append({"cmd": server.cmd, "log": server.log.name})
-                client = Client(server.base, profile["name"])
+                client = Client(server.base, profile["name"], stream=args.stream)
                 fresh = {mode: conversation(client, plan, mode, False) for mode in plan.modes}
         cache = 0 if args.plant == "resumed" else profile.get("prompt_cache_gib", 2)
         with Server(args, profile, cache, logs) as server:
             receipt["servers"].append({"cmd": server.cmd, "log": server.log.name})
-            runner = Runner(Client(server.base, profile["name"]), plan)
+            runner = Runner(Client(server.base, profile["name"], stream=args.stream), plan)
             receipt["gates"] = run_gates(runner, args.gates, fresh)
     else:
         if args.fresh_url and "resumed" in args.gates:
-            client = Client(args.fresh_url, profile["name"])
+            client = Client(args.fresh_url, profile["name"], stream=args.stream)
             fresh = {mode: conversation(client, plan, mode, False) for mode in plan.modes}
         url = args.fresh_url if args.plant == "resumed" and args.fresh_url else args.url
-        runner = Runner(Client(url, profile["name"]), plan)
+        runner = Runner(Client(url, profile["name"], stream=args.stream), plan)
         receipt["gates"] = run_gates(runner, args.gates, fresh)
     receipt["rows"] = runner.rows
     failed = sum(not g["passed"] for g in receipt["gates"])
