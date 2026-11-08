@@ -2,6 +2,7 @@
 const std = @import("std");
 const api = @import("engine_api");
 const json = @import("json");
+const picture = @import("core").picture;
 const mistral = @import("mistral.zig");
 const reply = @import("mistral_reply.zig");
 const types = @import("types.zig");
@@ -197,4 +198,21 @@ test "ocr mistral: block types follow the design's kind table" {
     try t.expectEqualStrings("header", reply.blockType(.page_header));
     try t.expectEqualStrings("footer", reply.blockType(.page_footer));
     try t.expectEqualStrings("image", reply.blockType(api.ocr.Kind.picture));
+}
+
+test "ocr mistral: a PNG whose text chunk says %PDF- is an image, not a PDF" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const png = try harness.pngWithPdfText(a, 4, 3);
+    const rgb = try picture.decodeWithLimits(t.io, a, png, .{ .pixels = 1 << 20 });
+    try t.expectEqual(@as(usize, 4), rgb.width);
+    const enc = std.base64.standard.Encoder;
+    const b64 = try a.alloc(u8, enc.calcSize(png.len));
+    const doc = try std.fmt.allocPrint(a, "{{\"type\": \"image_url\", \"image_url\": \"data:image/png;base64,{s}\"}}", .{enc.encode(b64, png)});
+    var fault: types.Fault = undefined;
+    // with --vision-pdf off a PDF would be refused; the image is read
+    const req = try mistral.decode(a, try body(a, doc, ""), facts, &fault);
+    try t.expectEqual(.image, req.source.kind);
+    try t.expectEqual(png.len, req.source.bytes.len);
 }

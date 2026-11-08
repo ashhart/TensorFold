@@ -104,16 +104,18 @@ pub fn decode(a: Allocator, body: Value, facts: Facts, fault: *Fault) Step!Reque
         return bad(a, fault, &.{ "body", if (o.header) "extract_header" else "extract_footer" }, "this model does not mark page headers or footers", .{});
     const pages: ?[]const u32 = if (body.field("pages")) |v| try pageList(a, fault, v, facts.pages_left) else null;
     const bytes = try document(a, fault, body, facts);
-    const is_pdf = std.mem.indexOf(u8, bytes[0..@min(bytes.len, 1024)], "%PDF-") != null;
+    const image = switch (images.sniff(bytes)) {
+        .png, .jpeg, .webp => true,
+        else => false,
+    };
+    // the image signature first: a PNG text chunk or a JPEG comment may hold "%PDF-"
+    const is_pdf = !image and std.mem.indexOf(u8, bytes[0..@min(bytes.len, 1024)], "%PDF-") != null;
     if (is_pdf) {
         if (!facts.pdf) return bad(a, fault, &.{ "body", "document" }, "{s}", .{pdf.off_message});
         const sel: pdf.Selection = if (pages) |l| .{ .list = l } else .{ .all_within = std.math.maxInt(u32) };
         return .{ .options = o, .source = .{ .name = "document", .bytes = bytes, .kind = .pdf, .sel = sel }, .doc_size = bytes.len };
     }
-    switch (images.sniff(bytes)) {
-        .png, .jpeg, .webp => {},
-        else => return bad(a, fault, &.{ "body", "document" }, "the document is not a PDF, PNG, JPEG or WebP file", .{}),
-    }
+    if (!image) return bad(a, fault, &.{ "body", "document" }, "the document is not a PDF, PNG, JPEG or WebP file", .{});
     if (pages) |l| if (l.len != 1 or l[0] != 0) return bad(a, fault, &.{ "body", "pages" }, "an image has one page; pages may select only page 0", .{});
     return .{ .options = o, .source = .{ .name = "document", .bytes = bytes, .kind = .image, .sel = .{ .all_within = 1 } }, .doc_size = bytes.len };
 }

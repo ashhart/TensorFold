@@ -159,6 +159,17 @@ pub fn png(a: Allocator, w: u32, h: u32) ![]const u8 {
     return out.items;
 }
 
+/// A valid PNG with a tEXt chunk saying "%PDF-1.7" right after its header, as an image editor may write.
+pub fn pngWithPdfText(a: Allocator, w: u32, h: u32) ![]const u8 {
+    const base = try png(a, w, h);
+    const after_ihdr = 8 + 12 + 13; // signature, then IHDR's length, type, data and CRC
+    var out: std.ArrayList(u8) = .empty;
+    try out.appendSlice(a, base[0..after_ihdr]);
+    try chunk(a, &out, "tEXt", "Comment\x00%PDF-1.7");
+    try out.appendSlice(a, base[after_ihdr..]);
+    return out.items;
+}
+
 /// One PNG chunk: length, type, data and its CRC-32.
 pub fn chunk(a: Allocator, out: *std.ArrayList(u8), kind: *const [4]u8, data: []const u8) !void {
     var len: [4]u8 = undefined;

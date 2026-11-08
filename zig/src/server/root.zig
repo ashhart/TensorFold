@@ -266,4 +266,5 @@ test {
     _ = @import("ocr/run_test.zig");
     _ = @import("ocr/route_test.zig");
     _ = @import("ocr/size_test.zig");
+    _ = @import("ocr/liteparse_test.zig");
 }
