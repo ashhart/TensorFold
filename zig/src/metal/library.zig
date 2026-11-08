@@ -61,6 +61,8 @@ pub const Library = struct {
 
     /// Metal source compiled now with `options`.
     pub fn fromSource(device: Device, source: []const u8, options: CompileOptions) Error!Library {
+        const timing = @import("profile").startup_receipt.span(.metal_source_build);
+        defer timing.end();
         const str = objc.string(source);
         defer objc.release(str);
         const opts = objc.msg(Id, objc.msg(Id, objc.class("MTLCompileOptions"), "alloc", .{}), "init", .{});
@@ -106,6 +108,8 @@ pub const Pipeline = struct {
     }
 
     fn make(device: Device, library: Library, name: []const u8, indirect: bool, optional: bool) Error!Pipeline {
+        const timing = @import("profile").startup_receipt.span(.metal_pipeline_build);
+        defer timing.end();
         const func = try library.function(name);
         defer objc.release(func);
         var err: ?Id = null;

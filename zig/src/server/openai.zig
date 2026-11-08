@@ -43,17 +43,19 @@ pub const Out = struct {
 
 /// POST /v1/chat/completions or /v1/completions, read from the client and answered to it.
 pub fn post(srv: *Server, conn: *Conn, a: Allocator, is_chat: bool) void {
+    const startup_at = @import("core").startup_receipt.offset();
     var cx: Cx = .{ .a = a };
     const body = http_body.readJson(conn, &cx) catch {
         const err = errorBody(a, &cx, if (is_chat) "messages" else "prompt") catch return;
         return routes.sendValue(conn, a, cx.status(), wrapError(a, err) catch return);
     };
-    var client: ClientOut = .{ .conn = conn, .a = a };
+    var client: ClientOut = .{ .conn = conn, .a = a, .startup_at = startup_at };
     run(srv, a, client.out(), .{ .conn = conn }, is_chat, body);
 }
 
 /// A chat reply written straight to the client.
 const ClientOut = struct {
+    startup_at: ?u64 = null,
     conn: *Conn,
     a: Allocator,
 
@@ -74,6 +76,7 @@ const ClientOut = struct {
     fn reply(ctx: *anyopaque, status: u16, payload: Value) void {
         const c: *ClientOut = @ptrCast(@alignCast(ctx));
         routes.sendValue(c.conn, c.a, status, payload);
+        if (status == 200 and c.conn.response_complete and !c.conn.broken) @import("startup_receipt.zig").complete(c.startup_at, payload);
     }
 
     fn keepalive(ctx: *anyopaque) error{Closed}!void {
