@@ -9,7 +9,7 @@ pub const Lease = Pool.Lease;
 /// The whole model's shape decides, so a pipeline stage keeps the scratch path one engine takes.
 pub fn enabled(e: *const Engine) bool {
     const g = e.g.model();
-    return g.hidden == 5120 and g.layers == 64 and g.experts == 0 and
+    return @import("cuda_geometry.zig").dense27(g) and
         g.v_heads == 48 and g.k_heads == 16 and g.deltas() == 48;
 }
 
