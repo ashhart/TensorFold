@@ -43,10 +43,7 @@ __device__ void norm_item(const Args& a, int r, int q, float* buf, int t) {
     if (t < NB) buf[t] = __ldcg(a.part + (static_cast<long long>(r) * NE + t) * PW + 25);
     __syncthreads();
     if (t == 0) {
-        float ssc = 0.0f;
-#pragma unroll 8
-        for (int e = 0; e < NB; ++e) ssc = __fadd_rn(ssc, buf[e]);
-        buf[NB] = rn_of(ssc, a.eps);
+        buf[NB] = rn_of(tf_common::sum_rn<8>(NB, [&](int e) { return buf[e]; }), a.eps);
     }
     __syncthreads();
     const float rn = buf[NB];

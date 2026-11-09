@@ -5,6 +5,7 @@
 #include <cuda_bf16.h>
 #include <stdint.h>
 
+#include "common/fold.cuh"
 #include "common/glue_math.cuh"
 #include "common/qmm_frag.cuh"
 
@@ -207,9 +208,7 @@ extern "C" __global__ void __launch_bounds__(128) fn_hc_down(const __nv_bfloat16
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31, g = lane >> 2, t = lane & 3;
     if (threadIdx.x < 16) {
         const int r = m0 + threadIdx.x;
-        float total = 0.0f;
-        if (r < M)
-            for (int c = 0; c < NC; ++c) total = __fadd_rn(total, PSS[(static_cast<long long>(r) * NC + c) * SS + st]);
+        const float total = r < M ? tf_common::sum_rn(NC, [&](int c) { return PSS[(static_cast<long long>(r) * NC + c) * SS + st]; }) : 0.0f;
         rinv[threadIdx.x] = tf_common::rms_scale(total, D, eps);
     }
     __syncthreads();
@@ -311,8 +310,7 @@ extern "C" __global__ void fn_hc_rinv(const float* __restrict__ PSS, float* __re
                                       int NC, int SS) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x, r = i / SS, st = i % SS;
     if (r >= M) return;
-    float total = 0.0f;
-    for (int c = 0; c < NC; ++c) total = __fadd_rn(total, PSS[(static_cast<long long>(r) * NC + c) * SS + st]);
+    const float total = tf_common::sum_rn(NC, [&](int c) { return PSS[(static_cast<long long>(r) * NC + c) * SS + st]; });
     RINV[i] = tf_common::rms_scale(total, D, eps);
 }
 

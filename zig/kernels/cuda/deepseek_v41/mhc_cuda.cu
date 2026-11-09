@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cuda_runtime.h>
 #include "common/cp_async.cuh"
+#include "common/fold.cuh"
 #include "common/reduce.cuh"
 
 namespace dsv41_mhc {
@@ -244,9 +245,7 @@ __device__ void finish(const Args& a, float* rowv, float4* st, int t) {
         float v[NB];
 #pragma unroll
         for (int e = 0; e < NB; ++e) v[e] = __ldcg(p + e * PW);
-        float ssc = 0.0f;
-#pragma unroll
-        for (int e = 0; e < NB; ++e) ssc = __fadd_rn(ssc, v[e]);
+        const float ssc = tf_common::sum_rn<NB>(NB, [&](int e) { return v[e]; });
         rowv[t * (ROWB / 4) + 25] = tf_common::rms_scale(ssc, D, a.eps);
     }
     __syncthreads();
