@@ -536,9 +536,8 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
         // The follower must listen before rank 0's measure(): its cost-timing rounds send real seams.
         try h.workers.startFollower(p, h.back, a, why);
     }
-    // The lane-cost timing rounds run real verifies through the backend, so rank 0 times alone, after the
-    // follower listens; rank 1 never prices its own windows (the follower serves every round rank 0 drives).
-    if (h.draft != null and !h.follower) try h.back.measure(io);
+    // Both ranks time their lane costs: the rounds are local and symmetric, leaving both drafters level.
+    if (h.draft != null) try h.back.measure(io);
     tf.startup_receipt.span(.model_ready).end();
     std.log.info("{f}", .{StartupLine{ .streams = slots, .context = capacity, .draft_slots = if (h.draft != null) h.back.draft_slots else 0, .images = o.images != null }});
     return h;

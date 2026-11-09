@@ -331,7 +331,7 @@ pub const Metal = struct {
             for (paths) |path| if (path.len != 1) return error.NothingToKeep;
             return;
         }
-        if (b.pair_tree) if (b.link) |l| try l.commit(b.round.?.slots[0], paths[0]);
+        if (b.pair_tree) if (b.link) |l| if (l.pair.rank == 0) try l.commit(b.round.?.slots[0], paths[0]); // a follower's local keep rides no command
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         if (b.count == 1 and b.windows[0] == 0) {
@@ -510,7 +510,9 @@ pub const Metal = struct {
 
             // one greedy row a round; a draft round's parents ride .tree, its accepted path rides .commit
             if (windows.len != 1) return error.CommandOutOfStep;
-            if (b.link) |l| {
+            // A follower's own local round (measure's timing windows) mirrors rank 0's on the seams alone:
+            // only rank 0 commands the replay, and only rank 0's serving rounds ever reach the follower.
+            if (b.link) |l| if (l.pair.rank == 0) {
                 if (inputs[0].parents) |parents| {
                     try l.tree(inputs[0].slot, inputs[0].ids, parents);
                     b.pair_tree = true;
@@ -519,7 +521,7 @@ pub const Metal = struct {
                     try l.step(inputs[0].slot, b.ids[0]);
                     b.pair_tree = false;
                 }
-            }
+            };
         }
         if (plain) try r.advance(&b.round.?, .all) else try r.verifyHead(&b.round.?, .all);
         for (windows) |w| slots.charge(b, w.stream, before); // a shared round counts whole in each reply
