@@ -1,6 +1,7 @@
 //! Kolibri-1's dimensions from config.json, and the layouts this engine refuses (FP8 128 x 128, sigmoid routing).
 const std = @import("std");
 const eos_ids = @import("core").tokenizer.eos;
+const rope_config = @import("rope_config");
 
 pub const max_layers = 64;
 pub const max_eos = 4;
@@ -119,18 +120,6 @@ fn setEos(c: *Config, ids: []const u32) !void {
     c.eos_count = ids.len;
 }
 
-/// The key asking for a RoPE other than plain, or null.
-fn scaledRope(o: std.json.ObjectMap) ?[]const u8 {
-    if (o.get("rope_parameters")) |p| if (p == .object) for ([_][2][]const u8{
-        .{ "rope_type", "rope_parameters.rope_type" },
-        .{ "type", "rope_parameters.type" },
-    }) |k| if (p.object.get(k[0])) |v| {
-        if (v != .string or !std.mem.eql(u8, v.string, "default")) return k[1];
-    };
-    if (o.get("rope_scaling")) |v| if (v != .null) return "rope_scaling";
-    return null;
-}
-
 /// config.json's text; a refusal's reason goes to `why`.
 pub fn parse(allocator: std.mem.Allocator, text: []const u8, why: *Why) !Config {
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, text, .{});
@@ -177,12 +166,11 @@ pub fn parse(allocator: std.mem.Allocator, text: []const u8, why: *Why) !Config 
         why.set("{d} layers; this build holds at most {d}", .{ c.layers, max_layers });
         return error.BadConfig;
     }
-    // rope_parameters.rope_theta wins over the top-level rope_theta, as transformers reads them
+    // rope_parameters.rope_theta wins over the top-level one, as transformers reads them; a non-object is not read
+    const rope = rope_config.params(o) catch null;
     if (o.get("rope_theta")) |v| c.rope_theta = @floatCast(try number(v));
-    if (o.get("rope_parameters")) |v| if (v == .object) if (v.object.get("rope_theta")) |t| {
-        c.rope_theta = @floatCast(try number(t));
-    };
-    if (scaledRope(o)) |key| {
+    if (rope_config.pick(rope, o, "rope_theta", .params)) |t| c.rope_theta = @floatCast(try number(t));
+    if (rope_config.scaled(o, rope)) |key| {
         why.set("config.json's {s} asks for scaled RoPE (YaRN); Kolibri-1 runs plain RoPE", .{key});
         return error.UnsupportedRope;
     }

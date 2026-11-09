@@ -3,6 +3,7 @@
 const std = @import("std");
 const Value = std.json.Value;
 const Object = std.json.ObjectMap;
+const rope_config = @import("rope_config");
 
 const model = "LiquidAI/d1-3B";
 const own_model_help = "To run a model or checkpoint TensorFold has no recipe for, write one with the recipe book (https://github.com/ashhart/TensorFold/blob/main/docs/recipes/README.md: adding a family on a Mac, adding a CUDA family on NVIDIA GPUs), and read the runbook first (https://github.com/ashhart/TensorFold/blob/main/RUNBOOK.md).";
@@ -113,8 +114,8 @@ fn refusal(a: std.mem.Allocator, root: Object, nested: ?Object, text: Object) !?
         .{ "no vocabulary", try int(text.get("vocab_size")) < 1 },
         .{ "no MLP width (intermediate_size)", try int(text.get("intermediate_size")) < 1 },
         .{ "no normalization epsilon", either(text, "norm_eps", "block_norm_eps") == null },
-        .{ "a rope_parameters.rope_type other than default (the kernels run plain RoPE)", scaledRope(text) },
-        .{ "a rope_scaling (the kernels run plain RoPE)", if (text.get("rope_scaling")) |v| v != .null else false },
+        .{ "a rope_parameters.rope_type other than default (the kernels run plain RoPE)", rope_config.typed(rope(text)) != null },
+        .{ "a rope_scaling (the kernels run plain RoPE)", rope_config.legacy(text) },
     };
     var bad: std.ArrayList([]const u8) = .empty;
     for (checks) |c| if (c[1]) try bad.append(a, c[0]);
@@ -169,19 +170,15 @@ fn ffnWidth(text: Object) !usize {
     return std.math.lossyCast(usize, ffn);
 }
 
-/// Whether rope_parameters names a RoPE other than default, YaRN for one.
-fn scaledRope(text: Object) bool {
-    const rope = object(text.get("rope_parameters")) orelse return false;
-    for ([_][]const u8{ "rope_type", "type" }) |key| if (rope.get(key)) |v| {
-        if (v != .string or !std.mem.eql(u8, v.string, "default")) return true;
-    };
-    return false;
+/// rope_parameters, or null when it is not an object.
+fn rope(text: Object) ?Object {
+    return rope_config.params(text) catch null;
 }
 
+/// A truthy rope_parameters must hold rope_theta; without one, the top-level rope_theta, else 1e6.
 fn theta(text: Object) !f64 {
-    const rope = text.get("rope_parameters");
-    if (truthy(rope)) return float(if (object(rope)) |o| o.get("rope_theta") else null);
-    return if (text.get("rope_theta")) |v| float(v) else 1e6;
+    if (truthy(text.get("rope_parameters"))) return float(rope_config.pick(rope(text), text, "rope_theta", .params));
+    return if (rope_config.pick(null, text, "rope_theta", .both)) |v| float(v) else 1e6;
 }
 
 fn vision(root: Object, v: Object) !Vision {

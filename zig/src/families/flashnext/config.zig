@@ -1,6 +1,7 @@
 //! FlashNext text dimensions and quantization declarations are checked before weight or cache allocation.
 const std = @import("std");
 const affine = @import("spec.zig");
+const rope_config = @import("rope_config");
 
 pub const Kind = enum { linear_attention, sparse_attention };
 pub const Gate = enum { sigmoid, silu };
@@ -191,15 +192,6 @@ fn quantBlock(root: std.json.ObjectMap, text: std.json.ObjectMap) !std.json.Obje
     return error.MissingAffineConfig;
 }
 
-/// The key asking for a RoPE other than plain (`--context` sets Metal's YaRN factor, never the config), or null.
-fn scaledRope(text: std.json.ObjectMap, rope: std.json.ObjectMap) ?[]const u8 {
-    for ([_][2][]const u8{ .{ "rope_type", "rope_parameters.rope_type" }, .{ "type", "rope_parameters.type" } }) |k| if (rope.get(k[0])) |v| {
-        if (v != .string or !std.mem.eql(u8, v.string, "default")) return k[1];
-    };
-    if (text.get("rope_scaling")) |v| if (v != .null) return "rope_scaling";
-    return null;
-}
-
 pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Config {
     var parsed = try std.json.parseFromSlice(std.json.Value, gpa, bytes, .{});
     errdefer parsed.deinit();
@@ -209,15 +201,16 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Config {
     if (tag != .string or !std.mem.eql(u8, tag.string, "qwen4_exp")) return error.NotFlashNext;
     const quant = try quantBlock(root, text);
     if (quant.get("quant_method")) |v| if (v != .null and (v != .string or (!std.mem.eql(u8, v.string, "mlx") and !std.mem.eql(u8, v.string, "affine")))) return error.UnsupportedAffineMode;
-    const rope = if (text.get("rope_parameters")) |v| if (v == .null) std.json.ObjectMap.empty else try object(v) else std.json.ObjectMap.empty;
-    if (scaledRope(text, rope)) |key| {
+    const rope = (rope_config.params(text) catch return error.InvalidFlashConfig) orelse std.json.ObjectMap.empty;
+    // `--context` sets Metal's YaRN factor, never the config
+    if (rope_config.scaled(text, rope)) |key| {
         std.log.warn("Flash Next config.json: {s} asks for scaled RoPE (YaRN); this reader runs plain RoPE", .{key});
         return error.UnsupportedFlashRope;
     }
     const hidden = try required(text, "hidden_size");
     const heads = try required(text, "num_attention_heads");
     const head_dim = if (text.get("head_dim")) |v| if (v == .null or (v == .integer and v.integer == 0)) hidden / heads else try integer(v) else hidden / heads;
-    const partial = try number(rope.get("partial_rotary_factor") orelse text.get("partial_rotary_factor") orelse .{ .float = 0.25 });
+    const partial = try number(rope_config.pick(rope, text, "partial_rotary_factor", .both) orelse .{ .float = 0.25 });
     if (partial < 0 or partial > 1 or head_dim == 0) return error.UnsupportedFlashRope;
     const gate: std.json.Value = text.get("output_gate_type") orelse .{ .string = "sigmoid" };
     if (gate != .string) return error.UnsupportedFlashGate;
@@ -233,7 +226,7 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Config {
         .kv_heads = try required(text, "num_key_value_heads"),
         .head_dim = head_dim,
         .rotary_dim = @intFromFloat(@as(f64, @floatFromInt(head_dim)) * partial),
-        .rope_theta = try number(rope.get("rope_theta") orelse .{ .float = 10_000_000 }),
+        .rope_theta = try number(rope_config.pick(rope, text, "rope_theta", .params) orelse .{ .float = 10_000_000 }),
         .key_heads = try required(text, "linear_num_key_heads"),
         .value_heads = try required(text, "linear_num_value_heads"),
         .key_dim = try required(text, "linear_key_head_dim"),
