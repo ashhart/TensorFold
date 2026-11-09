@@ -465,16 +465,13 @@ pub const Model = struct {
         defer y.deinit();
         const norm = std.mem.bytesAsSlice(u16, m.graph.norm.bytes);
         const write = std.mem.bytesAsSlice(u16, m.graph.writeOf(s.layers - 1));
-        const host = @import("host.zig");
         const xs = x.slice(u16, chunk * h);
         const ys = y.slice(u16, chunk * v);
         const out = tg.slice(u16, v * r);
         try m.target.kernels.prepareDecode(m.target.weights.head);
         var first: usize = 0;
         while (first < r) : (first += chunk) {
-            for (0..chunk) |c| for (0..h) |i| {
-                xs[c * h + i] = host.round(host.float(norm[i]) * host.float(write[i * r + first + c]));
-            };
+            for (0..chunk) |c| core.dspine.tgInput(norm, write, r, first + c, xs[c * h ..][0..h]);
             const cb = m.target.queue.commandBuffer();
             const e = cb.compute(.serial);
             try m.target.kernels.quant(e, m.target.weights.head, .{ .buffer = x, .offset = 0 }, null, m.target.frame.get(.dims), .{ .buffer = y, .offset = 0 }, chunk);

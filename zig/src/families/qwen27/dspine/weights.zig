@@ -1,5 +1,6 @@
 //! DSpine's 71 checkpoint tensors as BF16 borrows: the plain five-layer body, fc, norms and the code bridge.
 const std = @import("std");
+const core = @import("core");
 const ck = @import("../checkpoint.zig");
 const config = @import("config.zig");
 const Shape = config.Shape;
@@ -34,83 +35,66 @@ pub const Graph = struct {
         return g.bridge.write.bytes[l * n ..][0..n];
     }
 };
-const suffixes = [_][]const u8{ "input_layernorm.weight", "post_attention_layernorm.weight", "self_attn.q_proj.weight", "self_attn.k_proj.weight", "self_attn.v_proj.weight", "self_attn.o_proj.weight", "self_attn.q_norm.weight", "self_attn.k_norm.weight", "mlp.gate_proj.weight", "mlp.up_proj.weight", "mlp.down_proj.weight" };
-const bridge_names = [_][]const u8{ "codebook", "early_read_weights", "read_weight", "feature_write_weights", "gate.weight", "gate.bias", "predecessor_gate.weight", "prev.weight", "out.weight", "independent_write_version", "terminal_disabled_version" };
-const globals = [_][]const u8{ "fc.weight", "hidden_norm.weight", "norm.weight", "draft_block_causal_version", "last_write_refine_version" };
-/// Versions the reference requires at 1: Tencent's loader and DSpineCodeBridge.prepare refuse any other.
-const versions = [_][]const u8{ "draft_block_causal_version", "last_write_refine_version", "selected_prefix_bridge.independent_write_version", "selected_prefix_bridge.terminal_disabled_version" };
+const dspine = core.dspine;
 
 pub fn tensorCount(s: Shape) usize {
-    return globals.len + bridge_names.len + suffixes.len * s.layers;
+    return dspine.tensorCount(s.layers);
 }
 
 pub fn names(gpa: std.mem.Allocator, s: Shape) ![][]const u8 {
-    const result = try gpa.alloc([]const u8, tensorCount(s));
-    var made: usize = 0;
-    errdefer {
-        for (result[0..made]) |name| gpa.free(name);
-        gpa.free(result);
-    }
-    for (globals) |name| {
-        result[made] = try gpa.dupe(u8, name);
-        made += 1;
-    }
-    for (bridge_names) |name| {
-        result[made] = try std.fmt.allocPrint(gpa, "selected_prefix_bridge.{s}", .{name});
-        made += 1;
-    }
-    for (0..s.layers) |i| for (suffixes) |suffix| {
-        result[made] = try std.fmt.allocPrint(gpa, "layers.{d}.{s}", .{ i, suffix });
-        made += 1;
-    };
-    return result;
+    return dspine.names(gpa, s.layers);
 }
 
 pub fn freeNames(gpa: std.mem.Allocator, list: [][]const u8) void {
-    for (list) |name| gpa.free(name);
-    gpa.free(list);
+    dspine.freeNames(gpa, list);
 }
 
 fn inventory(gpa: std.mem.Allocator, list: []const []const u8, s: Shape) !void {
-    const expected = try names(gpa, s);
-    defer freeNames(gpa, expected);
-    if (list.len != expected.len) return error.DraftTensorCoverage;
+    if (list.len != tensorCount(s)) return error.DraftTensorCoverage;
     var seen = std.StringHashMap(void).init(gpa);
     defer seen.deinit();
     for (list) |name| {
         if ((try seen.getOrPut(name)).found_existing) return error.DraftTensorCoverage;
-        for (expected) |wanted| {
-            if (std.mem.eql(u8, wanted, name)) break;
-        } else return error.DraftTensorCoverage;
+        _ = dspine.find(name, s.layers) orelse return error.DraftTensorCoverage;
     }
 }
 
-fn get(src: ck.Source, name: []const u8, dims: []const usize) !Tensor {
+/// A tensor as core.dspine's table states it: its dtype and its dims for `s`.
+fn get(src: ck.Source, s: Shape, name: []const u8) !Tensor {
+    const want = dspine.find(name, s.layers) orelse return error.DraftTensorCoverage;
     const t = try src.get(name);
-    if (t.dtype != .bf16) return error.DraftNativeDType;
-    try ck.shape(t, dims);
+    if (t.dtype != @as(ck.DType, switch (want.kind) {
+        .bf16 => .bf16,
+        .i64 => .i64,
+    })) return error.DraftNativeDType;
+    var dims: [3]usize = undefined;
+    try ck.shape(t, dspine.dims(s, want, &dims));
     return t;
 }
 
-fn layerTensor(src: ck.Source, i: usize, suffix: []const u8, dims: []const usize) !Tensor {
+fn layerTensor(src: ck.Source, s: Shape, i: usize, suffix: []const u8) !Tensor {
     var name: [160]u8 = undefined;
-    return get(src, try std.fmt.bufPrint(&name, "layers.{d}.{s}", .{ i, suffix }), dims);
+    return get(src, s, try std.fmt.bufPrint(&name, "layers.{d}.{s}", .{ i, suffix }));
 }
 
-fn bridgeTensor(src: ck.Source, name: []const u8, dims: []const usize) !Tensor {
+fn bridgeTensor(src: ck.Source, s: Shape, name: []const u8) !Tensor {
     var full: [160]u8 = undefined;
-    return get(src, try std.fmt.bufPrint(&full, "selected_prefix_bridge.{s}", .{name}), dims);
+    return get(src, s, try std.fmt.bufPrint(&full, "{s}{s}", .{ dspine.bridge_prefix, name }));
+}
+
+fn version(src: ck.Source, s: Shape, name: []const u8) !void {
+    const t = try get(src, s, name);
+    if (std.mem.readInt(i64, t.bytes[0..8], .little) != 1) return error.UnsupportedDSpineVersion;
 }
 
 /// Every version scalar is I64 1, and the terminal projection out.weight is all zero, as the reference demands.
 fn contract(src: ck.Source, s: Shape) !void {
-    for (versions) |name| {
-        const t = try src.get(name);
-        if (t.dtype != .i64) return error.DraftNativeDType;
-        try ck.shape(t, &.{});
-        if (std.mem.readInt(i64, t.bytes[0..8], .little) != 1) return error.UnsupportedDSpineVersion;
-    }
-    const out = try bridgeTensor(src, "out.weight", &.{ s.code, s.rank });
+    for (dspine.globals) |t| if (t.kind == .i64) try version(src, s, t.name);
+    for (dspine.bridge_tensors) |t| if (t.kind == .i64) {
+        var full: [160]u8 = undefined;
+        try version(src, s, try std.fmt.bufPrint(&full, "{s}{s}", .{ dspine.bridge_prefix, t.name }));
+    };
+    const out = try bridgeTensor(src, s, "out.weight");
     for (std.mem.bytesAsSlice(u16, out.bytes)) |v| if (v & 0x7fff != 0) return error.DSpineTerminalNonzero;
 }
 
@@ -130,39 +114,36 @@ pub fn load(gpa: std.mem.Allocator, source: Inventory, s: Shape, embed: ck.Linea
     try target(embed, s);
     const src = source.source;
     try contract(src, s);
-    const h = s.hidden;
-    const q = config.qWidth(s);
-    const kv = config.kvWidth(s);
     const layers = try gpa.alloc(Layer, s.layers);
     errdefer gpa.free(layers);
     for (layers, 0..) |*l, i| l.* = .{
-        .input_norm = try layerTensor(src, i, "input_layernorm.weight", &.{h}),
-        .post_norm = try layerTensor(src, i, "post_attention_layernorm.weight", &.{h}),
+        .input_norm = try layerTensor(src, s, i, "input_layernorm.weight"),
+        .post_norm = try layerTensor(src, s, i, "post_attention_layernorm.weight"),
         .attention = .{
-            .q = try layerTensor(src, i, "self_attn.q_proj.weight", &.{ q, h }),
-            .k = try layerTensor(src, i, "self_attn.k_proj.weight", &.{ kv, h }),
-            .v = try layerTensor(src, i, "self_attn.v_proj.weight", &.{ kv, h }),
-            .o = try layerTensor(src, i, "self_attn.o_proj.weight", &.{ h, q }),
-            .q_norm = try layerTensor(src, i, "self_attn.q_norm.weight", &.{s.head_dim}),
-            .k_norm = try layerTensor(src, i, "self_attn.k_norm.weight", &.{s.head_dim}),
+            .q = try layerTensor(src, s, i, "self_attn.q_proj.weight"),
+            .k = try layerTensor(src, s, i, "self_attn.k_proj.weight"),
+            .v = try layerTensor(src, s, i, "self_attn.v_proj.weight"),
+            .o = try layerTensor(src, s, i, "self_attn.o_proj.weight"),
+            .q_norm = try layerTensor(src, s, i, "self_attn.q_norm.weight"),
+            .k_norm = try layerTensor(src, s, i, "self_attn.k_norm.weight"),
         },
         .mlp = .{
-            .gate = try layerTensor(src, i, "mlp.gate_proj.weight", &.{ s.intermediate, h }),
-            .up = try layerTensor(src, i, "mlp.up_proj.weight", &.{ s.intermediate, h }),
-            .down = try layerTensor(src, i, "mlp.down_proj.weight", &.{ h, s.intermediate }),
+            .gate = try layerTensor(src, s, i, "mlp.gate_proj.weight"),
+            .up = try layerTensor(src, s, i, "mlp.up_proj.weight"),
+            .down = try layerTensor(src, s, i, "mlp.down_proj.weight"),
         },
     };
     const bridge: Bridge = .{
-        .codebook = try bridgeTensor(src, "codebook", &.{ s.vocab, s.code }),
-        .early_read = try bridgeTensor(src, "early_read_weights", &.{ s.layers - 1, s.code, h }),
-        .read = try bridgeTensor(src, "read_weight", &.{ s.code, h }),
-        .write = try bridgeTensor(src, "feature_write_weights", &.{ s.layers, h, s.rank }),
-        .gate = try bridgeTensor(src, "gate.weight", &.{ s.rank, s.code }),
-        .gate_bias = try bridgeTensor(src, "gate.bias", &.{s.rank}),
-        .predecessor_gate = try bridgeTensor(src, "predecessor_gate.weight", &.{ s.rank, s.code }),
-        .prev = try bridgeTensor(src, "prev.weight", &.{ s.rank, s.code }),
+        .codebook = try bridgeTensor(src, s, "codebook"),
+        .early_read = try bridgeTensor(src, s, "early_read_weights"),
+        .read = try bridgeTensor(src, s, "read_weight"),
+        .write = try bridgeTensor(src, s, "feature_write_weights"),
+        .gate = try bridgeTensor(src, s, "gate.weight"),
+        .gate_bias = try bridgeTensor(src, s, "gate.bias"),
+        .predecessor_gate = try bridgeTensor(src, s, "predecessor_gate.weight"),
+        .prev = try bridgeTensor(src, s, "prev.weight"),
     };
-    return .{ .gpa = gpa, .shape = s, .layers = layers, .fusion = try get(src, "fc.weight", &.{ h, config.tapWidth(s) }), .hidden_norm = try get(src, "hidden_norm.weight", &.{h}), .norm = try get(src, "norm.weight", &.{h}), .bridge = bridge, .embed = embed };
+    return .{ .gpa = gpa, .shape = s, .layers = layers, .fusion = try get(src, s, "fc.weight"), .hidden_norm = try get(src, s, "hidden_norm.weight"), .norm = try get(src, s, "norm.weight"), .bridge = bridge, .embed = embed };
 }
 
 const testing = std.testing;
