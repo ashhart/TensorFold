@@ -56,7 +56,8 @@ pub fn tableFor(k: Kept, block: bool) ?Table {
     return if (block) null else table(k);
 }
 
-/// Rank 0's prices, with every rank on the faster expert form; null: this engine has no drafts or too few rows to time.
+/// Rank 0 selects every rank's faster expert form and publishes MTP's measured prices.
+/// Returns null for DFlash2's form-only race, no drafts, or too few rows to time.
 pub fn price(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, x: follow.Leader) !?Table {
     const e = x.e;
     if (!e.mtp or e.capacity < prefix + 2 * fw.window_rows + 2) return null;
