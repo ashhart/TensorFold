@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CUDA: the shared MoE routing glue gains group-limited selection in its sigmoid score form: experts split into equal groups, each scored by its two best values, the best groups kept (the lower group on ties) and the top-k taken from them; a grouped route outside that form is refused before launch. Nemotron, the one family on the score form today, keeps its kernels and bytes (#2334, part of #850). Thanks to @ajensenwaud.
+
 - HIP on gfx1151: a skewed-row matrix tile runs three blocks a WGP for prompts up to 8192 codes deep, with the same results as the padded tile, which stays for every other shape (#2087). Thanks to @AbrahamCete.
 
 - GLM-5.3-Flash on CUDA: decode windows reach 32 rows; MTP times and caches its lone window and step prices, while DFlash2 keeps its seed prices and times only the target expert-form race. Shared MTP proposals are capped at three drafts per stream unless `TF_GLM_COPIES=1`; with copies off, shared rounds keep their prior forward and step prices. At TP=2 on two GB10s, prompts of 2k and 8k tokens fill 23% and 13% faster and one-stream code decodes 32% faster, with every reply equal to before (#2257).
