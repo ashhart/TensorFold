@@ -151,17 +151,32 @@ test "ocr run: the encode budget is the whole request's, so a first page may use
     try t.expectEqual(types.Class.unreadable, fault.class);
 }
 
+/// An RGB IHDR chunk naming ``size``, appended to ``out``.
+fn ihdr(a: Allocator, out: *std.ArrayList(u8), size: [2]u32) !void {
+    var head: [13]u8 = undefined;
+    std.mem.writeInt(u32, head[0..4], size[0], .big);
+    std.mem.writeInt(u32, head[4..8], size[1], .big);
+    @memcpy(head[8..], &[_]u8{ 8, 2, 0, 0, 0 });
+    try harness.chunk(a, out, "IHDR", &head);
+}
+
 /// A PNG whose pixels are ``last`` but whose first IHDR names ``first``: the decoder reads the last header before IDAT.
 fn twoHeaders(a: Allocator, first: [2]u32, last: [2]u32) ![]const u8 {
     const real = try harness.png(a, last[0], last[1]);
-    var head: [13]u8 = undefined;
-    std.mem.writeInt(u32, head[0..4], first[0], .big);
-    std.mem.writeInt(u32, head[4..8], first[1], .big);
-    @memcpy(head[8..], &[_]u8{ 8, 2, 0, 0, 0 });
     var out: std.ArrayList(u8) = .empty;
     try out.appendSlice(a, real[0..8]);
-    try harness.chunk(a, &out, "IHDR", &head);
+    try ihdr(a, &out, first);
     try out.appendSlice(a, real[8..]);
+    return out.items;
+}
+
+/// A PNG whose one IHDR names ``size`` before an 8 x 8 image's pixel data: the header alone decides a size refusal.
+fn bigHeader(a: Allocator, size: [2]u32) ![]const u8 {
+    const real = try harness.png(a, 8, 8);
+    var out: std.ArrayList(u8) = .empty;
+    try out.appendSlice(a, real[0..8]);
+    try ihdr(a, &out, size);
+    try out.appendSlice(a, real[8 + 25 ..]); // past the real IHDR: length, type, 13 bytes, CRC
     return out.items;
 }
 
@@ -196,7 +211,11 @@ const page_text =
 
 /// A whole POST /v1/ocr through the dispatcher on a 200 x 100 PNG; the reply as JSON, its status in ``status``.
 fn post(a: Allocator, h: *Harness, extra: []const u8, status: *u16) !json.Value {
-    const png = try harness.png(a, 200, 100);
+    return postPng(a, h, try harness.png(a, 200, 100), extra, status);
+}
+
+/// A whole POST /v1/ocr through the dispatcher on ``png``; the reply as JSON, its status in ``status``.
+fn postPng(a: Allocator, h: *Harness, png: []const u8, extra: []const u8, status: *u16) !json.Value {
     const enc = std.base64.standard.Encoder;
     const b64 = try a.alloc(u8, enc.calcSize(png.len));
     const body = try std.fmt.allocPrint(a, "{{\"model\": \"mistral-ocr-latest\", \"document\": {{\"type\": \"image_url\", \"image_url\": \"data:image/png;base64,{s}\"}}{s}}}", .{ enc.encode(b64, png), extra });
@@ -361,6 +380,26 @@ test "ocr mistral: unreadable output, a cut page and a missing reader answer 422
     try t.expectEqualStrings(run.no_reader, r.get("detail").?.array[0].strField("msg").?);
     h.srv.info.ocr = h.reader;
     h.srv.info.vision = null;
-    _ = try post(a, &h, "", &status);
+    const v = try post(a, &h, "", &status);
     try t.expectEqual(@as(u16, 400), status);
+    try t.expectEqualStrings(run.no_vision, v.get("detail").?.array[0].strField("msg").?);
+    try t.expectEqual(@as(usize, 2), h.next); // the two pages above only: the gate refused before generation
+}
+
+test "ocr mistral: a page past the decoded-pixel limit answers 400 with the decoder's message, before generation" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var h: Harness = undefined;
+    try serve(&h, &.{.{ .text = "text 0 0 1 1\na" }});
+    defer h.stop();
+    // 4097 x 4096 is 16 Mi pixels and 4096 more, under 8192 a side: only the pixel limit refuses it
+    const w = 4097;
+    const ht = 4096;
+    try t.expect(@as(u64, w) * ht > run.max_page_pixels and @max(w, ht) <= picture.max_side);
+    var status: u16 = 0;
+    const r = try postPng(a, &h, try bigHeader(a, .{ w, ht }), "", &status);
+    try t.expectEqual(@as(u16, 400), status);
+    try t.expectEqualStrings(picture.problem(error.Oversized), r.get("detail").?.array[0].strField("msg").?);
+    try t.expectEqual(@as(usize, 0), h.next);
 }
