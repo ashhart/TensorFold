@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CUDA: Flash Next's PLE gate RMS scales, and the Qwen4 kernel generated from them, call `tf_common::rms_scale`; every function's SASS is unchanged (#2684, refs #548). Thanks to @jschmied.
+
 - CUDA: the stored partial-sum folds before an RMS scale (Flash Next's hyper-connection normalize, hc_down, rinv and hcf prologue, DeepSeek-V4.1's mHC norm folds) call one helper, `tf_common::sum_rn` in `common/fold.cuh`; every function's SASS is unchanged (#2666, refs #548). Thanks to @jschmied.
 
 - CUDA: Qwen's DFlash2 drafter config refuses a `target_layer_ids` list that names one layer twice, as HIP's does (#2674). Thanks to @AbrahamCete.
