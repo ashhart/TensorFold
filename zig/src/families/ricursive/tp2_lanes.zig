@@ -69,7 +69,6 @@ pub const Ripple = struct {
     slot_bufs: []cuda.DeviceBuffer, // a slot's last-row logits, then its rule: two a slot
     next: u64 = 0,
     next_id: i32 = 1,
-    priority_copies: bool = false,
     copies: bool = true, // prompt-copy drafts beside a drafter's
 
     pub fn init(gpa: std.mem.Allocator, m: *fwd.Model) !Ripple {
@@ -113,7 +112,7 @@ pub const Ripple = struct {
 
     /// The round loop's facts: no draft head; host copies verified in windows up to 16 rows, streams sharing a forward.
     pub fn facts(x: *const Ripple) lanes.Model {
-        return .{ .root_copies = x.priority_copies, .context_copies = x.priority_copies, .copy_match = if (x.priority_copies) 4 else 8, .exact_width = round_rows, .copy_drafts = x.copies, .gpu_tokens = false, .mtp = false, .speculate = false, .hidden_rows = true, .batch_rows = round_rows, .max_streams = @intCast(@min(x.m.slots, round_rows)) };
+        return .{ .root_copies = false, .context_copies = false, .copy_match = 8, .exact_width = round_rows, .copy_drafts = x.copies, .gpu_tokens = false, .mtp = false, .speculate = false, .hidden_rows = true, .batch_rows = round_rows, .max_streams = @intCast(@min(x.m.slots, round_rows)) };
     }
 
     fn self(ptr: *anyopaque) *Ripple {
