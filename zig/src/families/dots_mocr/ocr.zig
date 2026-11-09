@@ -29,7 +29,7 @@ pub const prompt =
 ;
 
 /// The reader the family offers (Offer.ocr).
-pub const reader: ocr.Ocr = .{ .prompt = prompt, .geometry = .block, .parse = parse };
+pub const reader: ocr.Ocr = .{ .prompt = prompt, .parse = parse };
 
 const categories = std.StaticStringMap(ocr.Kind).initComptime(.{
     .{ "Caption", .caption },

@@ -1,11 +1,10 @@
-//! A request's page budget and image-encode budget (docs/api.md OCR: Pages and budgets).
-const pdf = @import("../pdf.zig");
+//! A request's image-encode budget (docs/api.md OCR: Pages and budgets).
 const types = @import("types.zig");
 const Fault = types.Fault;
 
 /// The most images one request may encode.
 pub const max_count = 256;
-/// The encoded bytes every request may hold, and what each selected page adds.
+/// The encoded bytes every request may hold, and what each page adds.
 pub const base_bytes = 16 << 20;
 pub const page_bytes = 2 << 20;
 /// Encoded pixels may reach this many times the request's page pixels.
@@ -13,24 +12,7 @@ pub const pixel_factor = 4;
 /// The unreadable-page reason for any encode limit.
 pub const over_message = "too many image regions";
 
-/// Pages a request may still read: images count 1 each, PDF pages as selected.
-pub const Pages = struct {
-    left: u32,
-
-    /// ``TENSORFOLD_MAX_PDF_PAGES`` (default and ceiling 16); ``--vision-max-images`` does not apply.
-    pub fn init() Pages {
-        return .{ .left = pdf.maxPagesLimit(0) };
-    }
-
-    /// Takes ``n`` pages; false, and nothing taken, when fewer than ``n`` are left.
-    pub fn take(p: *Pages, n: u32) bool {
-        if (n > p.left) return false;
-        p.left -= n;
-        return true;
-    }
-};
-
-/// The crops and visualisations a request has encoded, against its limits.
+/// The crops a request has encoded, against its limits.
 pub const Encodes = struct {
     count: u32 = 0,
     pixels: u64 = 0,

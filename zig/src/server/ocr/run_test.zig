@@ -46,7 +46,7 @@ const Seen = struct {
     fn sink(s: *Seen) run.PageSink {
         return .{ .ctx = s, .page = page };
     }
-    fn page(ctx: *anyopaque, a: Allocator, _: u32, p: *const types.OcrPage, rgb: picture.Rgb, enc: *budget.Encodes, _: *types.Fault) run.Step!void {
+    fn page(ctx: *anyopaque, a: Allocator, p: *const types.OcrPage, rgb: picture.Rgb, enc: *budget.Encodes, _: *types.Fault) run.Step!void {
         const s: *Seen = @ptrCast(@alignCast(ctx));
         try s.pages.append(a, p.*);
         try s.sizes.append(a, .{ rgb.width, rgb.height });
@@ -62,7 +62,7 @@ test "ocr run: blocks scale from the frame, quads are validated, and the sink se
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var h: Harness = .{ .replies = &.{ .{ .text = "title 10 5 90 10\n# T\n;;\ntext -5 40 120 60\nbody" }, .{ .text = "page\nall" } } };
+    var h: Harness = .{ .replies = &.{ .{ .text = "title 10 5 90 10\n# T\n;;\ntext -5 40 120 60\nbody" }, .{ .text = "text 0 0 100 50\nall" } } };
     try h.start(.{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false });
     defer h.stop();
     var seen: Seen = .{};
@@ -73,11 +73,11 @@ test "ocr run: blocks scale from the frame, quads are validated, and the sink se
     try t.expectEqual(@as(u32, 200), p.width);
     try t.expectEqual(@as(u32, 72), p.dpi);
     try t.expectEqual([2]usize{ 200, 100 }, seen.sizes.items[0]);
-    try t.expectEqual(api.ocr.Quad{ .{ 20, 10 }, .{ 180, 10 }, .{ 180, 20 }, .{ 20, 20 } }, p.blocks[0].quad.?);
+    try t.expectEqual(api.ocr.Quad{ .{ 20, 10 }, .{ 180, 10 }, .{ 180, 20 }, .{ 20, 20 } }, p.blocks[0].quad);
     // a box past the page is clamped into it
-    try t.expectEqual(api.ocr.Quad{ .{ 0, 80 }, .{ 200, 80 }, .{ 200, 100 }, .{ 0, 100 } }, p.blocks[1].quad.?);
+    try t.expectEqual(api.ocr.Quad{ .{ 0, 80 }, .{ 200, 80 }, .{ 200, 100 }, .{ 0, 100 } }, p.blocks[1].quad);
     try t.expectEqualStrings("body", p.blocks[1].content);
-    try t.expectEqual(@as(?api.ocr.Quad, null), seen.pages.items[1].blocks[0].quad);
+    try t.expectEqual(api.ocr.Quad{ .{ 0, 0 }, .{ 30, 0 }, .{ 30, 20 }, .{ 0, 20 } }, seen.pages.items[1].blocks[0].quad);
     // the encode limit grew by four times each page's pixels
     try t.expectEqual(@as(u64, 4 * (200 * 100 + 30 * 20)), seen.limit);
     try t.expectEqual(@as(i64, 0), h.srv.preparing.load(.acquire));
@@ -101,7 +101,7 @@ test "ocr run: a missing frame releases the prepared request and fails as intern
     try t.expectError(error.Cancelled, run.run(h.srv, a, &.{try imageSource(a, 8, 8)}, seen.sink(), &fault, Gone{ .left = true }));
 }
 
-test "ocr run: the page budget, undecodable bytes and the gate refuse before any generation" {
+test "ocr run: undecodable bytes refuse before any generation" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -110,28 +110,26 @@ test "ocr run: the page budget, undecodable bytes and the gate refuse before any
     defer h.stop();
     var seen: Seen = .{};
     var fault: types.Fault = undefined;
-    const one = try imageSource(a, 8, 8);
-    const many = try a.alloc(types.Source, budget.Pages.init().left + 1);
-    @memset(many, one);
-    try t.expectError(error.Faulted, run.run(h.srv, a, many, seen.sink(), &fault, Gone{}));
-    try t.expectEqual(types.Class.bad_input, fault.class);
-    try t.expect(std.mem.indexOf(u8, fault.message, "TENSORFOLD_MAX_PDF_PAGES") != null);
     const junk: types.Source = .{ .name = "x", .bytes = "\x89PNG\r\n\x1a\nnope" };
     try t.expectError(error.Faulted, run.run(h.srv, a, &.{junk}, seen.sink(), &fault, Gone{}));
     try t.expectEqual(types.Class.bad_input, fault.class);
     try t.expectEqual(@as(usize, 0), h.next);
 }
 
-/// Reserves five whole-page encodes on the first page, as five full-page pictures would.
+/// Reserves five whole-page encodes on the first page of a request, as five full-page pictures would.
 const Greedy = struct {
     limit: u64 = 0,
+    first: bool = true,
     fn sink(g: *Greedy) run.PageSink {
+        g.first = true;
         return .{ .ctx = g, .page = page };
     }
-    fn page(ctx: *anyopaque, _: Allocator, source: u32, p: *const types.OcrPage, _: picture.Rgb, enc: *budget.Encodes, fault: *types.Fault) run.Step!void {
+    fn page(ctx: *anyopaque, _: Allocator, p: *const types.OcrPage, _: picture.Rgb, enc: *budget.Encodes, fault: *types.Fault) run.Step!void {
         const g: *Greedy = @ptrCast(@alignCast(ctx));
-        if (source == 0) g.limit = enc.limit_pixels;
-        if (source == 0) for (0..5) |_| try enc.before(fault, p.width, p.height);
+        if (!g.first) return;
+        g.first = false;
+        g.limit = enc.limit_pixels;
+        for (0..5) |_| try enc.before(fault, p.width, p.height);
     }
 };
 
@@ -139,7 +137,7 @@ test "ocr run: the encode budget is the whole request's, so a first page may use
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var h: Harness = .{ .replies = &.{ .{ .text = "page\na" }, .{ .text = "page\nb" }, .{ .text = "page\nc" } } };
+    var h: Harness = .{ .replies = &.{ .{ .text = "text 0 0 1 1\na" }, .{ .text = "text 0 0 1 1\nb" }, .{ .text = "text 0 0 1 1\nc" } } };
     try h.start(.{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false });
     defer h.stop();
     var g: Greedy = .{};
@@ -171,7 +169,7 @@ test "ocr run: an image whose first header and its pixels disagree is refused be
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var h: Harness = .{ .replies = &.{.{ .text = "page\na" }} };
+    var h: Harness = .{ .replies = &.{.{ .text = "text 0 0 1 1\na" }} };
     try h.start(.{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false });
     defer h.stop();
     const orders = [_][2][2]u32{ .{ .{ 80, 60 }, .{ 40, 30 } }, .{ .{ 40, 30 }, .{ 80, 60 } } };

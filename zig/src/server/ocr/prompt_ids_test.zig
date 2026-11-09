@@ -114,7 +114,7 @@ const Recorder = struct {
     fn info(ctx: *anyopaque) api.Info {
         const r: *Recorder = @ptrCast(@alignCast(ctx));
         const v: api.Vision = .{ .ctx = r, .prepare = prepare, .image_token = image_byte, .image_tokens = 64, .max_images = 4 };
-        return .{ .context_window = 1 << 16, .vision = v, .ocr = .{ .prompt = r.reader, .geometry = .block, .parse = noBlocks } };
+        return .{ .context_window = 1 << 16, .vision = v, .ocr = .{ .prompt = r.reader, .parse = noBlocks } };
     }
     fn submit(ctx: *anyopaque, id: api.Id, req: *const api.Request, sink: api.Sink) api.SubmitError!void {
         const r: *Recorder = @ptrCast(@alignCast(ctx));
