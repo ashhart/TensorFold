@@ -11,6 +11,7 @@ const clock = @import("pocket_clock.zig");
 const pocket_dump = @import("pocket_dump.zig");
 const quieting = @import("pocket_quiet.zig");
 const joint = @import("pocket_joint.zig");
+const environment = @import("sys").environment;
 fn better(f: []const Fit, a: usize, b: usize) bool {
     if (f[a].fires != f[b].fires) return f[a].fires < f[b].fires;
     if (f[a].fact_on != f[b].fact_on) return f[a].fact_on > f[b].fact_on;
@@ -25,7 +26,9 @@ pub fn all(p: anytype, t: anytype, host: anytype) !bool {
     const d = p.hidden;
     const n = p.slots();
     const m = p.labels.items.len;
-    if (@import("sys").c.getenv("TF_SLIDE_POCKET_DUMP")) |dir| pocket_dump.write(p, std.mem.span(dir), p.learned_before, d) catch |e| std.log.warn("slide pocket: the read rows were not written: {t}", .{e});
+    // startup refuses a malformed path by name; a study dump never fails the lesson itself
+    const dump = environment.path("TF_SLIDE_POCKET_DUMP", environment.Process.get(.{}, "TF_SLIDE_POCKET_DUMP")) catch null;
+    if (dump) |dir| pocket_dump.write(p, dir, p.learned_before, d) catch |e| std.log.warn("slide pocket: the read rows were not written: {t}", .{e});
     const kinds = try p.gpa.alloc(Kind, 3 * m);
     defer p.gpa.free(kinds);
     for (p.labels.items, 0..) |l, i| for (0..3) |k| {
