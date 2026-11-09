@@ -155,3 +155,31 @@ pub const VarDesync = struct {
 test "lengths that differ between ranks are refused on every rank" {
     try host.run(2, {}, VarDesync.go);
 }
+
+const Spawns = struct {
+    made: u32 = 0,
+    fail_at: u32,
+
+    pub fn start(s: *Spawns, comptime f: anytype, args: anytype) !std.Thread {
+        defer s.made += 1;
+        if (s.made == s.fail_at) return error.PlantedThreadFailure;
+        return std.Thread.spawn(.{}, f, args);
+    }
+};
+
+const Freed = struct {
+    fn go(c: Collective, _: u32, freed: *std.atomic.Value(u32)) !void {
+        c.barrier() catch |err| if (err == error.Aborted) {
+            _ = freed.fetchAdd(1, .acq_rel);
+        };
+    }
+};
+
+test "a failed spawn aborts and joins the ranks already running before it returns" {
+    for ([_]u32{ 0, 1, 3 }) |at| {
+        var freed: std.atomic.Value(u32) = .init(0);
+        var spawns: Spawns = .{ .fail_at = at };
+        try std.testing.expectError(error.PlantedThreadFailure, host.runSpawning(4, .{}, &freed, Freed.go, &spawns));
+        try std.testing.expectEqual(at, freed.load(.acquire));
+    }
+}
