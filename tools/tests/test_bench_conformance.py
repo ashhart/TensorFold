@@ -10,7 +10,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import conformance
 from conformance import drafted_gate, equality_gate, refusals_gate, reply_row, resumed_gate, same, tally
-from conformance_lifecycle import cancel_gate, evict_gate
+from conformance_lifecycle import cancel_gate, census, evict_gate
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from fake_served_api import FAULTS, doc, fake, script, serve
 
@@ -120,13 +120,20 @@ class LifecycleVerdictTests(unittest.TestCase):
                 self.assertFalse(gate["passed"])
                 self.assertIn(why, gate["line"])
 
+    def test_the_census_keeps_every_pool(self):
+        pools = [{"promised_tokens": 0, "available_tokens": 90, "reclaimable_tokens": 10},
+                 {"promised_tokens": 64, "available_tokens": 7}]
+        load = {"running": 0, "waiting": 0, "http_active": {"chat_completions": 0}, "capacity": {"pools": pools}}
+        client = type("Stub", (), {"get": lambda _self, path: (200, json.dumps(load).encode())})()
+        self.assertEqual(census(client)["pools"], [{"promised": 0, "unheld": 100}, {"promised": 64, "unheld": 7}])
+
 
 class GateRunTests(unittest.TestCase):
     """Every gate passes on the clean fake; each fault the fake plants turns exactly its gate red."""
 
     NAMES = {"drafted": "drafted == plain", "repeat": "repeat == first", "concurrent": "concurrent == solo",
              "resumed": "resumed == fresh", "refusals": "refusals", "cancel": "cancel", "evict": "evict",
-             "cancel_lane": "cancel", "cancel_reply": "cancel"}
+             "cancel_lane": "cancel", "cancel_reply": "cancel", "cancel_health": "cancel"}
     GATE_OF = {fault: name.split()[0] for fault, name in NAMES.items() if fault in FAULTS}  # the gate a fault turns red
 
     def run_kit(self, *extra, fault=None, **changes):
@@ -177,6 +184,9 @@ class GateRunTests(unittest.TestCase):
     def test_fault_cancel_changes_the_next_reply(self):
         self.assert_only_red("cancel_reply")
 
+    def test_fault_cancel_leaves_the_server_unhealthy(self):
+        self.assert_only_red("cancel_health")
+
     def test_fault_evict_answers_from_stale_state(self):
         self.assert_only_red("evict")
 
@@ -187,6 +197,22 @@ class GateRunTests(unittest.TestCase):
         code, lines = self.run_kit("--gates", "cancel", cancel={})
         self.assertEqual(code, 1, lines)
         self.assertIn("no cancel block", lines[0])
+
+    def test_skip_takes_only_cancel_and_evict_and_plant_refuses_a_skipped_gate(self):
+        cases = {"only cancel and evict": ("--gates", "drafted", {"drafted": "x"}),
+                 "skips that gate": ("--gates", "evict", "--plant", "evict", {"evict": "no prompt cache"})}
+        for why, (*argv, skip) in cases.items():
+            with self.subTest(why=why), contextlib.redirect_stderr(io.StringIO()) as err:
+                with self.assertRaises(SystemExit) as exit_:
+                    self.run_kit(*argv, skip=skip)
+            self.assertEqual(exit_.exception.code, 2)
+            self.assertIn(why, err.getvalue())
+
+    def test_a_stream_that_ends_before_the_cut_is_vacuous(self):
+        short = {"prompt": "count", "tokens": 2, "after_chunks": 8, "rounds": 1, "settle_s": 1}
+        code, lines = self.run_kit("--gates", "cancel", cancel=short)
+        self.assertEqual(code, 1, lines)
+        self.assertIn("2 cuts came after the reply ended or failed (vacuous)", lines[0])  # one a sampling mode
 
     def test_each_plant_flag_turns_its_gate_red(self):
         for gate in conformance.GATES:

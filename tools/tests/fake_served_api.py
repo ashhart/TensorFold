@@ -9,6 +9,7 @@ A clean fake passes every gate. Each fault breaks one property the kit gates, an
 - refusals: an out-of-range presence_penalty is answered instead of refused.
 - cancel_lane: a streamed reply the client leaves keeps its lane busy.
 - cancel_reply: the request a client left answers differently the next time it arrives.
+- cancel_health: a server a client left answers ``/health`` with an error.
 - evict: a chat turn pushed out of the prompt cache reports it (0 cached) but answers from the stale state.
 
 The cached server reports five cached tokens for a later chat turn (more than one message). It keeps the prompts it
@@ -35,7 +36,8 @@ import json
 import threading
 import time
 
-FAULTS = ("drafted", "repeat", "concurrent", "resumed", "refusals", "cancel_lane", "cancel_reply", "evict")
+FAULTS = ("drafted", "repeat", "concurrent", "resumed", "refusals", "cancel_lane", "cancel_reply", "cancel_health",
+          "evict")
 BATCH_WINDOW = 0.15  # seconds a lone request waits for a partner under the concurrent fault
 DONE = b"data: [DONE]\n\n"
 HASHES = {"token_sha": "d" * 12, "token_sha256": "d" * 64}
@@ -140,7 +142,8 @@ class FakeEngine(http.server.BaseHTTPRequestHandler):
         if self.path == "/metrics":
             return self.reply(200, f"tensorfold:client_disconnections_total {server.disconnects}\n")
         if self.path == "/health":
-            return self.reply(200, {"status": "ok"})
+            sick = server.fault == "cancel_health" and server.disconnects
+            return self.reply(503 if sick else 200, {"status": "error" if sick else "ok"})
         self.reply(200, {"object": "list", "data": [{"id": "fake", "object": "model"}]})
 
     def do_POST(self):
