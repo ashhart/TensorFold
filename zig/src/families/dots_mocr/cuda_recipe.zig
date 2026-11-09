@@ -1,4 +1,4 @@
-//! dots.mocr's Qwen2 text decoder as a cuda_dense recipe: HIP's rounding points, its tower refused until it is built.
+//! dots.mocr as a cuda_dense recipe: its Qwen2 text decoder in HIP's rounding points, and its image tower.
 const std = @import("std");
 const cuda = @import("cuda");
 const dense = @import("cuda_dense");
@@ -18,6 +18,8 @@ pub const reasoning = false;
 
 pub const Weights = wts.Weights;
 pub const Kernels = kern.Kernels;
+/// The image tower --vision opens (cuda_tower.zig).
+pub const Tower = @import("cuda_tower.zig").Tower;
 
 /// The engine's geometry of an admitted dots.mocr config.
 pub fn geometryOf(c: cfg.Config) dense.Geometry {
