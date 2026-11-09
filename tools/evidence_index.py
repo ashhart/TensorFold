@@ -42,6 +42,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from evidence_capabilities import CapabilitiesError, read_facts
 
 GRADES = ("host_test", "kernel_contract", "served_exactness", "served_speed")
 
@@ -408,27 +409,17 @@ def read_receipts(root):
 
 
 def read_capabilities(root, path):
-    """The capabilities output, if a file was supplied. Its schema is the native
-    binary's, so this is a best-effort read; a missing file yields no records."""
-    if not path:
+    """Index advertised facts at unknown grade; invalid supplied input raises a bounded error."""
+    if path is None:
         return []
-    p = Path(path)
-    if not p.is_file():
-        return []
+    facts = read_facts(path)
     try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return []
-    records = []
-    families = data if isinstance(data, list) else data.get("families", [])
-    for fam in families:
-        name = fam.get("family") or fam.get("name")
-        for cap in fam.get("capabilities", []):
-            records.append(_item(
-                "capabilities", str(p), name, fam.get("backend"),
-                cap.get("name", "capability"), "unknown", None, None,
-                f"capability {cap.get('name')}", None, covers_for(name, fam.get("backend"))))
-    return records
+        source = Path(path).resolve().relative_to(Path(root).resolve()).as_posix()
+    except ValueError:
+        source = "external capabilities input"
+    return [_item("capabilities", source, family, backend, capability, "unknown", None, None,
+                  "advertised capability " + capability, None, covers_for(family, backend))
+            for family, backend, capability in facts]
 
 
 # --------------------------------------------------------------------------- index
@@ -483,6 +474,8 @@ def build_index(root, capabilities=None):
     src_counts = {}
     for item in raw:
         src_counts[item["source"]] = src_counts.get(item["source"], 0) + 1
+    if capabilities is not None:
+        src_counts.setdefault("capabilities", 0)
 
     head = _run_git(root, "log", "-1", "--format=%H").stdout.strip()
     sources = [{"name": n, "records": c} for n, c in sorted(src_counts.items())]
@@ -532,7 +525,10 @@ def main(argv=None):
                     help="a capabilities --json file to include (optional)")
     args = ap.parse_args(argv)
 
-    index = build_index(args.root, args.capabilities)
+    try:
+        index = build_index(args.root, args.capabilities)
+    except CapabilitiesError as error:
+        ap.error(str(error))
     text = json.dumps(index, indent=2, ensure_ascii=False)
     if args.output:
         out = Path(args.output)
