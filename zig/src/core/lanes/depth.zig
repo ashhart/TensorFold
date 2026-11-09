@@ -404,11 +404,16 @@ pub const Rule = struct {
 
     /// Only completed timed shared rounds advance this count/mode's calibration clock.
     pub fn observeShared(r: *Rule, streams: u32, rows: u64, ms: f64, sampled: bool, head_ms: f64, plain: bool, calibration: bool) !void {
+        try r.observeSharedPrice(streams, rows, ms, sampled, head_ms, plain, calibration);
+        try r.observeOverhead(streams, rows, ms, sampled, head_ms);
+    }
+
+    /// The independent residual uses the same batching policy as next-draft allocation.
+    pub fn observeSharedPrice(r: *Rule, streams: u32, rows: u64, ms: f64, sampled: bool, head_ms: f64, plain: bool, calibration: bool) !void {
         if (streams > 1 and r.plain_guard and r.confidence_floor == null) {
             const residual = if (r.shared_costs.get(@intCast(rows))) |forward| ms - forward - head_ms else std.math.nan(f64);
             try r.shared_price.observe(r.gpa, streams, rows, residual, sampled, plain, calibration);
         }
-        try r.observeOverhead(streams, rows, ms, sampled, head_ms);
     }
 
     /// A shared round's ms beyond its forward at this many streams (the nearest measured count, first seen on ties).
@@ -440,8 +445,16 @@ pub const Rule = struct {
 
     /// The modeled time of a shared round's head steps for the depths it drafted.
     pub fn headMs(r: *const Rule, depths: []const i64) f64 {
+        return r.headCost(depths, r.batched_heads);
+    }
+
+    pub fn pricedHeadMs(r: *const Rule, depths: []const i64) f64 {
+        return r.headCost(depths, r.batched_heads and pricedBatched());
+    }
+
+    fn headCost(r: *const Rule, depths: []const i64, batched: bool) f64 {
         var steps: i64 = 0;
-        for (depths) |d| steps = if (r.batched_heads) @max(steps, d) else steps + d;
+        for (depths) |d| steps = if (batched) @max(steps, d) else steps + d;
         return r.sharedStepMs() * @as(f64, @floatFromInt(steps));
     }
 
@@ -483,6 +496,7 @@ test {
     _ = @import("shared_verify_price_test.zig");
     _ = @import("shared_warm_price_test.zig");
     _ = @import("shared_calibration_test.zig");
+    _ = @import("shared_head_price_test.zig");
 }
 
 test {
