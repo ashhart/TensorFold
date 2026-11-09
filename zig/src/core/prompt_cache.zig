@@ -122,6 +122,7 @@ pub const Store = struct {
     active_rewind_at: u32 = 0, // the last lookup's rewind state (0: none); hosts keep a pass's states before the next lookup
     active_rewind_key: u64 = 0, // the selected rewind prefix, so interleaved keeps tag only its token path
     links_lost: bool = false, // an allocation failure left the extension links incomplete: `extended` scans
+    reservation_guard: ?@import("prompt_cache_reserve.zig").Guard = null, // scoped to an admission lookup
     hold: bool = false, // memory pressure: lookups plan no marks and keeps refuse, so no new state is kept
     over: []const u8 = "", // what refusing a state past the whole budget adds: the setting that keeps it otherwise
     keep_others: bool = false, // a new state may evict only its own conversation's states (prompt_cache_others.zig)
@@ -331,28 +332,12 @@ pub const Store = struct {
             for (marks_) |m| if (m == at or (m < at and !s.rules.planned and prompt.len < s.rules.min_prompt)) s.noteShared(prompt[0 .. m + s.rules.lookahead]);
         }
         s.reserve(prompt, born, e, marks_, spans);
+        const fitted = try @import("prompt_cache_reserve.zig").fitting(s, a, prompt, marks_, spans);
         if (e) |entry| entry.borrowers += 1;
-        return .{ .entry = e, .marks = marks_ };
+        return .{ .entry = e, .marks = fitted };
     }
 
-    /// Room for every state the pass keeps, made before it: a keep-mirroring peer hears the evictions with the request.
-    fn reserve(s: *Store, prompt: []const u32, born: u32, from: ?*Entry, marks_: []const u32, spans: []const modes.Span) void {
-        var need: u64 = 0;
-        var new: usize = 0; // states it keeps that the store lacks: a slot each
-        for (marks_) |at| {
-            const n = @as(usize, at) + s.rules.lookahead;
-            const exists = for (s.entries.items) |e| {
-                if (!e.expired and e.at == at and e.tokens.len == n and n <= prompt.len and std.mem.eql(u32, e.tokens, prompt[0..n]) and modes.equal(e.decode_spans, spans, at) and images.matches(s, e)) break true;
-            } else false;
-            if (!exists) need += s.family.vtable.bytes(s.family.ptr, at);
-            new += @intFromBool(!exists);
-        }
-        while (s.held + need > s.budget or s.entries.items.len + @min(new, s.most) > s.most) {
-            const i = others.victim(s, from, prompt, born, need, @min(new, s.most)) orelse return;
-            s.remove(i);
-            s.counts.evicted += 1;
-        }
-    }
+    const reserve = @import("prompt_cache_reserve.zig").reserve;
 
     /// Every kept state goes after a weight change, and learned states on disk stop being read: old arithmetic.
     pub fn clear(s: *Store) void {
