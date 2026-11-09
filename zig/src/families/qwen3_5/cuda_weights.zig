@@ -234,8 +234,7 @@ pub fn linearSlice(e: *Engine, into: anytype, ck: *core.Checkpoint, stage: *Devi
 
 /// A pipeline stage's ends (an MLX checkpoint's): the embedding from layer 0, the head where the stage holds it.
 fn loadStage(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer, m: []const u8) !void {
-    const g = e.g;
-    if (g.kinds.modelopt or g.exl3 or g.bf16 or g.pocket > 0) return error.StageNeedsMlxCheckpoint;
+    const g = e.g; // an MLX checkpoint's: stage_fwd.geometry refused the others
     e.embed_bits = rowBits(g.bits.embed);
     e.embed_w = 0;
     e.embed_s = 0;
