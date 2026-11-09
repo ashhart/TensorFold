@@ -4,13 +4,15 @@ import io
 import json
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import conformance
 from conformance import drafted_gate, equality_gate, refusals_gate, reply_row, resumed_gate, same, tally
+from conformance_lifecycle import cancel_gate, evict_gate
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from fake_served_api import doc, fake, script, serve
+from fake_served_api import FAULTS, doc, fake, script, serve
 
 PROFILE = Path(__file__).resolve().parents[1] / "conformance_profiles" / "qwen35-cuda.json"
 
@@ -81,17 +83,64 @@ class ComparisonTests(unittest.TestCase):
         self.assertFalse(refusals_gate([])["passed"])
 
 
+class LifecycleVerdictTests(unittest.TestCase):
+    """The cancel and evict verdicts: vacuous, uncounted, held and unevicted runs fail with their reason."""
+
+    A, B = reply_row(200, doc()), reply_row(200, doc(sha="b" * 64))
+    CUT, BASE = {"chunks": 4, "ended": False}, {"running": 0, "waiting": 0, "active": 0, "lanes_free": 8}
+
+    def test_cancel_needs_clean_counted_settled_cuts(self):
+        ok = cancel_gate([(self.A, self.A)], [self.CUT], [True], [True], 1, self.BASE)
+        self.assertTrue(ok["passed"], ok["line"])
+        cases = {"vacuous": ([(self.A, self.A)], [{"chunks": 4, "ended": True}], [True], [True], 1, self.BASE),
+                 "counted 0": ([(self.A, self.A)], [self.CUT], [True], [True], 0, self.BASE),
+                 "did not return": ([(self.A, self.A)], [self.CUT], [False], [True], 1, self.BASE),
+                 "not ok": ([(self.A, self.A)], [self.CUT], [True], [False], 1, self.BASE),
+                 "no idle census": ([(self.A, self.A)], [self.CUT], [True], [True], 1, None),
+                 "1 unequal": ([(self.A, self.B)], [self.CUT], [True], [True], 1, self.BASE)}
+        for why, args in cases.items():
+            with self.subTest(why=why):
+                gate = cancel_gate(*args)
+                self.assertFalse(gate["passed"])
+                self.assertIn(why, gate["line"])
+
+    def test_evict_needs_a_kept_prompt_that_leaves(self):
+        def row(cached, sha="a"):
+            return {**reply_row(200, doc(sha=sha * 64)), "cached": cached}
+        ok = evict_gate(row(0), [row(0), row(25)], row(0), [row(0)], True, self.BASE)
+        self.assertTrue(ok["passed"], ok["line"])
+        cases = {"vacuous": (row(0), [row(0), row(0)], row(0), [row(0)], True, self.BASE),
+                 "nothing evicted": (row(0), [row(0), row(25)], row(25), [], True, self.BASE),
+                 "1 unequal": (row(0), [row(0), row(25)], row(0, "b"), [row(0)], True, self.BASE),
+                 "did not return": (row(0), [row(0), row(25)], row(0), [row(0)], False, self.BASE),
+                 "failed": (row(0), [row(0), row(25)], row(0), [{"status": 0, "error": "x"}], True, self.BASE)}
+        for why, args in cases.items():
+            with self.subTest(why=why):
+                gate = evict_gate(*args)
+                self.assertFalse(gate["passed"])
+                self.assertIn(why, gate["line"])
+
+
 class GateRunTests(unittest.TestCase):
     """Every gate passes on the clean fake; each fault the fake plants turns exactly its gate red."""
 
     NAMES = {"drafted": "drafted == plain", "repeat": "repeat == first", "concurrent": "concurrent == solo",
-             "resumed": "resumed == fresh", "refusals": "refusals"}
+             "resumed": "resumed == fresh", "refusals": "refusals", "cancel": "cancel", "evict": "evict",
+             "cancel_lane": "cancel", "cancel_reply": "cancel"}
+    GATE_OF = {fault: name.split()[0] for fault, name in NAMES.items() if fault in FAULTS}  # the gate a fault turns red
 
-    def run_kit(self, *extra, fault=None):
+    def run_kit(self, *extra, fault=None, **changes):
+        profile = json.loads(PROFILE.read_text())
+        for block in ("cancel", "evict"):
+            profile[block]["settle_s"] = 1  # a held lane fails in a second, not a minute
+        profile.update(changes)
         out = io.StringIO()
-        with fake(True, fault) as url, fake(False) as fresh, contextlib.redirect_stdout(out):
-            code = conformance.main([str(PROFILE), "--url", url, "--fresh-url", fresh, *extra])
-        return code, [line for line in out.getvalue().splitlines() if line.startswith(("PASS", "FAIL"))]
+        with tempfile.TemporaryDirectory() as tmp, fake(True, fault) as url, fake(False) as fresh, \
+                contextlib.redirect_stdout(out):
+            path = Path(tmp) / "profile.json"
+            path.write_text(json.dumps(profile))
+            code = conformance.main([str(path), "--url", url, "--fresh-url", fresh, *extra])
+        return code, [line for line in out.getvalue().splitlines() if line.startswith(("PASS", "FAIL", "SKIP"))]
 
     def assert_only_red(self, fault):
         code, lines = self.run_kit(fault=fault)
@@ -122,6 +171,23 @@ class GateRunTests(unittest.TestCase):
     def test_fault_listed_refusal_accepted(self):
         self.assert_only_red("refusals")
 
+    def test_fault_cancel_keeps_a_lane(self):
+        self.assert_only_red("cancel_lane")
+
+    def test_fault_cancel_changes_the_next_reply(self):
+        self.assert_only_red("cancel_reply")
+
+    def test_fault_evict_answers_from_stale_state(self):
+        self.assert_only_red("evict")
+
+    def test_skip_names_the_gate_and_its_reason(self):
+        code, lines = self.run_kit("--gates", "cancel,evict", skip={"evict": "no prompt cache"})
+        self.assertEqual(code, 0, lines)
+        self.assertEqual(lines[1], "SKIP evict: no prompt cache")
+        code, lines = self.run_kit("--gates", "cancel", cancel={})
+        self.assertEqual(code, 1, lines)
+        self.assertIn("no cancel block", lines[0])
+
     def test_each_plant_flag_turns_its_gate_red(self):
         for gate in conformance.GATES:
             with self.subTest(gate=gate):
@@ -143,9 +209,9 @@ class GateRunTests(unittest.TestCase):
         self.assertEqual(code, 0, lines)
         self.assertEqual(len(lines), len(conformance.GATES))
         self.assertTrue(all(line.startswith("PASS") for line in lines), lines)
-        for fault in conformance.GATES:
+        for fault, gate in self.GATE_OF.items():
             with self.subTest(fault=fault):
-                code, lines = self.run_kit("--stream", "--gates", fault, fault=fault)
+                code, lines = self.run_kit("--stream", "--gates", gate, fault=fault)
                 self.assertEqual(code, 1, lines)
                 self.assertEqual(len(lines), 1)
                 self.assertTrue(lines[0].startswith("FAIL " + self.NAMES[fault]), lines)

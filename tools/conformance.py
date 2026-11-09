@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Served exactness gates for one family profile: drafted, repeat, concurrent, resumed and refusals.
+"""Served exactness gates for one family profile: drafted, repeat, concurrent, resumed, refusals, cancel and evict.
 
 Each gate prints one PASS or FAIL line with its counts; any FAIL exits 1. Equality is the reply's full token-id hash
 (``tensorfold.token_sha256``), so a reply without one is unverified and fails its gate.
@@ -16,15 +16,17 @@ Each gate prints one PASS or FAIL line with its counts; any FAIL exits 1. Equali
   resume their own last chat without the prompt cache (``TF_QWEN27_SLOT_RESUME=0`` on Metal); with ``--fresh-url``,
   start that server with it yourself.
 - refusals: each named request the profile lists is refused with its status and error text.
+- cancel, evict: a reply cut mid-stream and a prompt pushed out of the cache leave the server as a fresh one
+  (``conformance_lifecycle.py``). A profile's ``skip`` names gates its family lacks, with the reason; they print SKIP.
 
 ``--binary`` starts the servers itself (the cache-off one first, then the cached one), one at a time, from the
 profile's flags; ``--url`` and ``--fresh-url`` run against servers you started. ``--plant GATE`` plants a fault that
 must turn that gate red (the arm under test gets another seed, the cached server keeps no prompts, or a refusal is
-sent without its refused field). ``--stream`` asks for every exactness reply as a stream and reads it through the
-benchmark clients' reader (``bench_stream``), with the same hash, counts and text; a stream that errs or ends before
-``[DONE]`` is unverified. Refusals stay plain JSON requests: the server answers a streamed context-window refusal
-with an error event after a 200 head, not with the status the profile lists. Standard library only, like its sibling
-``bench_stream``.
+sent without its refused field; cancel and evict: see ``conformance_lifecycle.py``). ``--stream`` asks for every
+exactness reply as a stream and reads it through the benchmark clients' reader (``bench_stream``), with the same
+hash, counts and text; a stream that errs or ends before ``[DONE]`` is unverified. Refusals stay plain JSON requests:
+the server answers a streamed context-window refusal with an error event after a 200 head, not with the status the
+profile lists. Standard library only, like its sibling ``bench_stream``.
 
   python3 tools/conformance.py tools/conformance_profiles/qwen35-cuda.json --binary BIN --model-dir DIR \\
     --drafter DRAFTER --output receipt.json
@@ -47,7 +49,7 @@ from pathlib import Path
 
 import bench_stream
 
-GATES = ("drafted", "repeat", "concurrent", "resumed", "refusals")
+GATES = ("drafted", "repeat", "concurrent", "resumed", "refusals", "cancel", "evict")
 SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
@@ -162,7 +164,8 @@ def refusals_gate(results) -> dict:
 
 
 def print_gate(gate: dict) -> None:
-    print(("PASS " if gate["passed"] else "FAIL ") + gate["gate"] + ": " + gate["line"], flush=True)
+    word = "SKIP " if gate.get("skipped") else "PASS " if gate["passed"] else "FAIL "
+    print(word + gate["gate"] + ": " + gate["line"], flush=True)
 
 
 class Client:
@@ -190,6 +193,16 @@ class Client:
             return reply_row(exc.code, doc)
         except Exception as exc:  # noqa: BLE001 - a failed request is evidence, not a crash
             return {"status": 0, "error": f"{type(exc).__name__}: {exc}"}
+
+    def get(self, path: str):
+        """A GET's status and raw body; status 0 when the server did not answer."""
+        try:
+            with urllib.request.urlopen(self.base + path, timeout=30) as reply:
+                return reply.status, reply.read()
+        except urllib.error.HTTPError as exc:
+            return exc.code, exc.read(1 << 16)
+        except Exception:  # noqa: BLE001 - an unanswered probe is evidence, not a crash
+            return 0, b""
 
 
 class Plan:
@@ -312,13 +325,29 @@ class Runner:
         return refusals_gate(results)
 
 
+def turn_text(plan: Plan, turn: int) -> str:
+    """The chat's user text at ``turn``; the first carries the profile's long document, if it names one."""
+    text = plan.profile["conversation"][turn]
+    if turn == 0 and plan.profile.get("conversation_context_items"):
+        text = inventory(plan.profile["conversation_context_items"]) + "\n\n" + text
+    return text
+
+
+def last_turn(plan: Plan, rows) -> list:
+    """The chat's last request, its history carrying the replies in ``rows``."""
+    history = []
+    for turn in range(len(plan.profile["conversation"])):
+        history.append({"role": "user", "content": turn_text(plan, turn)})
+        if turn < len(plan.profile["conversation"]) - 1:
+            history.append({"role": "assistant", "content": rows[turn].get("text", "")})
+    return history
+
+
 def conversation(client: Client, plan: Plan, mode: str, draft: bool) -> list:
     """One multi-turn chat; each turn's history carries this server's own earlier replies."""
     history, rows = [], []
-    for turn, text in enumerate(plan.profile["conversation"]):
-        if turn == 0 and plan.profile.get("conversation_context_items"):
-            text = inventory(plan.profile["conversation_context_items"]) + "\n\n" + text
-        history.append({"role": "user", "content": text})
+    for turn in range(len(plan.profile["conversation"])):
+        history.append({"role": "user", "content": turn_text(plan, turn)})
         row = client.post(plan.body(list(history), mode, draft, ignore_eos=False))
         row["turn"] = turn
         rows.append(row)
@@ -394,10 +423,15 @@ class Server:
 
 
 def run_gates(runner: Runner, gates, fresh) -> list:
-    """The selected gates in order; resumed runs last so the others see no conversation in the cache."""
-    out = []
+    """The selected gates in order; resumed follows the gates that want no conversation in the cache."""
+    import conformance_lifecycle as lifecycle
+    out, skip = [], runner.plan.profile.get("skip") or {}
     for name in gates:
-        if name == "resumed":
+        if name in skip:
+            gate = {"gate": name, "passed": True, "skipped": True, "counts": {}, "line": str(skip[name])}
+        elif name in ("cancel", "evict"):
+            gate = getattr(lifecycle, name)(runner, fresh)
+        elif name == "resumed":
             if fresh is None:
                 gate = {"gate": "resumed == fresh", "passed": False, "counts": {},
                         "line": "no cache-off server (pass --fresh-url or --binary)"}
@@ -446,7 +480,7 @@ def main(argv=None) -> int:
     if args.binary:
         receipt["binary_sha256"] = hashlib.sha256(args.binary.read_bytes()).hexdigest()
         logs = Path(tempfile.mkdtemp(prefix="conformance-"))
-        if "resumed" in args.gates:
+        if {"resumed", "evict"} & set(args.gates):
             with Server(args, profile, 0, logs) as server:
                 receipt["servers"].append({"cmd": server.cmd, "log": server.log.name})
                 client = Client(server.base, profile["name"], stream=args.stream)
@@ -457,7 +491,7 @@ def main(argv=None) -> int:
             runner = Runner(Client(server.base, profile["name"], stream=args.stream), plan)
             receipt["gates"] = run_gates(runner, args.gates, fresh)
     else:
-        if args.fresh_url and "resumed" in args.gates:
+        if args.fresh_url and {"resumed", "evict"} & set(args.gates):
             client = Client(args.fresh_url, profile["name"], stream=args.stream)
             fresh = {mode: conversation(client, plan, mode, False) for mode in plan.modes}
         url = args.fresh_url if args.plant == "resumed" and args.fresh_url else args.url
@@ -465,7 +499,8 @@ def main(argv=None) -> int:
         receipt["gates"] = run_gates(runner, args.gates, fresh)
     receipt["rows"] = runner.rows
     failed = sum(not g["passed"] for g in receipt["gates"])
-    print(f"{profile['name']}: {len(receipt['gates']) - failed} passed, {failed} failed"
+    skipped = sum(bool(g.get("skipped")) for g in receipt["gates"])
+    print(f"{profile['name']}: {len(receipt['gates']) - failed - skipped} passed, {failed} failed, {skipped} skipped"
           + (f" (planted: {args.plant})" if args.plant else ""), flush=True)
     if args.output:
         args.output.write_text(json.dumps(receipt, indent=1) + "\n")
