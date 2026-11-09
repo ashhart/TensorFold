@@ -9,6 +9,7 @@ const loader = @import("load.zig");
 const tables = @import("tables.zig");
 const cache = @import("cache.zig");
 const forward = @import("forward.zig");
+const head_mod = @import("head.zig");
 const mixers = @import("mixers.zig");
 const index = @import("../index.zig");
 
@@ -264,29 +265,49 @@ pub const Engine = struct {
         return smaller;
     }
 
-    /// The scratch the largest forward takes: a prompt chunk at the capacity's end, counted on a dry run.
+    /// The largest forward's scratch: a dry run at the capacity's end, where the indexer's scores are longest.
     fn scratchBytes(e: *Engine) !usize {
+        return e.scratchAt(e.o.capacity -| @max(e.o.chunk, forward.max_segs * cache.max_window));
+    }
+
+    /// A prompt forward at `pos` over a round's most rows (chunk or verify round), the MTP head and the round's logits.
+    fn scratchAt(e: *Engine, pos: usize) !usize {
+        const verify_rows = forward.max_segs * cache.max_window;
+        const rows = @max(e.o.chunk, verify_rows);
         var counting = hip.Arena.counting();
         var o = e.ops(&counting);
         o.stream = hip.counting;
-        var c = try e.caches(@max(e.o.capacity, e.o.chunk) + cache.max_window);
-        defer c.deinit(e.gpa);
-        const tokens = try e.gpa.alloc(u32, e.o.chunk);
+        const tokens = try e.gpa.alloc(u32, rows);
         defer e.gpa.free(tokens);
         @memset(tokens, 0);
         const before = e.host.used;
         defer e.host.used = before;
-        const segs = [_]forward.Seg{.{ .c = &c, .tokens = tokens, .pos = e.o.capacity -| e.o.chunk }};
-        const out = try forward.run(
-            o,
-            &e.weights.model,
-            &e.host,
-            &segs,
-            false,
-            try forward.stage(&e.weights.model, &e.host, &segs, false),
-        );
-        _ = try e.logits(o, out.mixed, e.o.chunk);
-        return counting.used + (16 << 20);
+        const out = out: {
+            // freed before the head's caches, so the dry run never holds both on the device
+            var c = try e.caches(@max(e.o.capacity, rows) + cache.max_window);
+            defer c.deinit(e.gpa);
+            const segs = [_]forward.Seg{.{ .c = &c, .tokens = tokens, .pos = pos }};
+            break :out try forward.run(
+                o,
+                &e.weights.model,
+                &e.host,
+                &segs,
+                false,
+                try forward.stage(&e.weights.model, &e.host, &segs, false),
+            );
+        };
+        if (e.weights.model.mtp) |*h| {
+            var hc = try head_mod.caches(e.gpa, &e.driver, h, @max(e.o.capacity, rows) + cache.max_window, e.act, e.eos);
+            defer hc.deinit(e.gpa);
+            var ones = try hip.DeviceBuffer.alloc(&e.driver, rows * e.cfg.hc_count * e.act.size());
+            defer ones.free();
+            var ho = o;
+            ho.prefill = true;
+            _ = try head_mod.run(ho, &e.weights.model, &e.host, &hc, out.streams, tokens, pos, ones);
+        }
+        _ = try e.logits(o, out.mixed, verify_rows);
+        // the peak, not what is left at the end: each layer hands its scratch back when it is done
+        return counting.peak + (16 << 20);
     }
 
     /// The output head over `rows` final rows: whole logits rows (act dtype), joined across ranks in rank order.
