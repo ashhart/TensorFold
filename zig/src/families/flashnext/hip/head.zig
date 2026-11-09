@@ -24,7 +24,7 @@ pub fn caches(
     return cache.Caches.init(gpa, d, h.dims, &.{false}, cap, act, eos);
 }
 
-/// `segs`' tokens (the token after each row) over `streams`, segments in order; `prompt`: rows on prompt tiles.
+/// `segs`' tokens over `streams` (a row each) from each segment's `pos`; `prompt`: rows on prompt tiles.
 pub fn run(
     ops: Ops,
     prompt: bool,
