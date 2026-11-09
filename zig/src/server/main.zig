@@ -169,6 +169,8 @@ pub fn main(init: std.process.Init) !u8 {
         return if (problem.len > 0) fail(problem) else e;
     };
     if (record) |r| if (!up.engine.engine.attachRecall(r)) return fail(not_lanes);
+    const instruct = try instructSampling(a, io, dir, args, model_type, up.engine.engine.info().capability(.penalties), &problem);
+    if (problem.len > 0) return fail(problem);
     return serve.run(gpa, io, args, .{
         .engine = up.engine.engine,
         .stop = .{ .ctx = &closer, .close = Closer.close, .halt = Closer.halt },
@@ -179,6 +181,7 @@ pub fn main(init: std.process.Init) !u8 {
         .model_type = model_type,
         .reopen = .{ .ctx = &closer, .open = Reopen.open, .close_held = Reopen.closeHeld, .halt_held = Closer.halt, .replace = Reopen.replace },
         .sampling = try sampling(a, io, dir, args, model_type),
+        .instruct = instruct,
         .environ = init.environ_map,
         .started = started,
         .identity = engines.identity(a, args),
@@ -233,9 +236,25 @@ fn modelType(a: std.mem.Allocator, io: std.Io, dir: []const u8, problem: *[]cons
 
 /// The family's defaults, generation_config.json's sampling, then the serve flags (family_sampling.resolve).
 fn sampling(a: std.mem.Allocator, io: std.Io, dir: []const u8, args: cli.Args, model_type: []const u8) !?json.Value {
+    return @import("family_sampling.zig").resolve(a, model_type, try generationConfig(a, io, dir), samplingFlags(args));
+}
+
+/// --instruct-sampling's set for sampled chats with thinking off (family_sampling.startup), or ``problem``.
+fn instructSampling(a: std.mem.Allocator, io: std.Io, dir: []const u8, args: cli.Args, model_type: []const u8, penalties: bool, problem: *[]const u8) !?json.Value {
+    const text = args.instruct_sampling orelse return null;
+    const got = try @import("family_sampling.zig").startup(a, model_type, try generationConfig(a, io, dir), samplingFlags(args), penalties, text);
+    if (got.note) |n| log.line("{s}", .{n});
+    if (got.problem) |p| problem.* = p;
+    return got.set;
+}
+
+fn generationConfig(a: std.mem.Allocator, io: std.Io, dir: []const u8) !?[]const u8 {
     const path = try std.fs.path.join(a, &.{ dir, "generation_config.json" });
-    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 20)) catch null;
-    return @import("family_sampling.zig").resolve(a, model_type, bytes, .{ .temperature = args.temperature, .top_p = args.top_p, .top_k = args.top_k, .min_p = args.min_p });
+    return std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 20)) catch null;
+}
+
+fn samplingFlags(args: cli.Args) @import("family_sampling.zig").Flags {
+    return .{ .temperature = args.temperature, .top_p = args.top_p, .top_k = args.top_k, .min_p = args.min_p };
 }
 
 const Closer = @import("idle_unload_closer.zig").Closer;

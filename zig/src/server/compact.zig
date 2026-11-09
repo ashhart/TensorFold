@@ -258,11 +258,11 @@ fn oneNote(srv: *Server, cx: *Cx, gone: anytype, task: []const u8, prev: []const
     const fields = try json.newObject(a);
     try fields.put(a, "enable_thinking", .{ .bool = false });
     try fields.put(a, "temperature", .{ .float = 0 });
-    var prepared = chat.prepare(srv, cx, .{ .messages = .{ .array = list.items }, .fields = .{ .object = fields }, .max_tokens = 1024, .temperature = 0 }, gone) catch |e| blk: {
+    var prepared = chat.prepare(srv, cx, .{ .own = true, .messages = .{ .array = list.items }, .fields = .{ .object = fields }, .max_tokens = 1024, .temperature = 0 }, gone) catch |e| blk: {
         if (!(e == error.Refused and cx.kind == .context_length)) return e;
         cx.kind = .request;
         cx.message = "";
-        const fitted = chat.prepare(srv, cx, .{ .messages = .{ .array = list.items }, .fields = .{ .object = fields }, .max_tokens = 1, .temperature = 0 }, gone) catch |e2| {
+        const fitted = chat.prepare(srv, cx, .{ .own = true, .messages = .{ .array = list.items }, .fields = .{ .object = fields }, .max_tokens = 1, .temperature = 0 }, gone) catch |e2| {
             if (e2 == error.Refused and cx.kind == .context_length) {
                 cx.kind = .request;
                 cx.message = "";

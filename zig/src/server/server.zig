@@ -66,6 +66,8 @@ pub const Config = struct {
     dashboard: bool = false,
     /// Sampling when a request names none (generation_config.json and the serve flags), or null for greedy.
     default_sampling: ?Value = null,
+    /// --instruct-sampling's set, for a sampled chat request with thinking off (family_sampling.resolveInstruct).
+    instruct_sampling: ?Value = null,
     use_drafts: bool = true,
     /// --vision-urls: image parts may name public HTTPS URLs, fetched before admission (media_fetch.zig).
     vision_urls: bool = false,
@@ -273,11 +275,22 @@ pub const Server = struct {
         return fields.coerceEffort(e, srv.effort_levels);
     }
 
+    /// The defaults a request starts from: --instruct-sampling's set for a thinking-off chat that samples under it.
+    pub fn samplingDefaults(srv: *const Server, instruct: bool, f: Value) ?Value {
+        const defaults = srv.config.default_sampling;
+        if (instruct) if (srv.config.instruct_sampling) |set| {
+            const t = number(f.get("temperature")) orelse number(set.get("temperature")) orelse
+                (if (defaults) |d| number(d.get("temperature")) else null) orelse 0;
+            if (t > 0) return set;
+        };
+        return defaults;
+    }
+
     /// Request seeds override configured keys; otherwise use prompt keying or fresh entropy.
-    pub fn resolveSampling(srv: *Server, cx: *Cx, f: Value, temperature: f64, prompt_ids: []const u32) errors.Refused!?api.Sampling {
+    pub fn resolveSampling(srv: *Server, cx: *Cx, f: Value, temperature: f64, prompt_ids: []const u32, instruct: bool) errors.Refused!?api.Sampling {
         _ = temperature; // the request's own temperature field decides, as in the Python server
         const options = try json.newObject(cx.a);
-        const defaults = if (srv.config.default_sampling) |d| try fields.parseNumbers(cx, d) else null;
+        const defaults = if (srv.samplingDefaults(instruct, f)) |d| try fields.parseNumbers(cx, d) else null;
         if (defaults) |d| try merge(options, cx, d);
         const supplied = try fields.parseNumbers(cx, f);
         try merge(options, cx, supplied);
@@ -305,9 +318,9 @@ pub const Server = struct {
     }
 
     /// The request's penalties over configured defaults; unsupported non-default values are refused by name.
-    pub fn resolvePenalties(srv: *Server, cx: *Cx, f: Value) errors.Refused!api.Penalties {
+    pub fn resolvePenalties(srv: *Server, cx: *Cx, f: Value, instruct: bool) errors.Refused!api.Penalties {
         const options = try json.newObject(cx.a);
-        if (srv.config.default_sampling) |d| try merge(options, cx, try fields.parseNumbers(cx, d));
+        if (srv.samplingDefaults(instruct, f)) |d| try merge(options, cx, try fields.parseNumbers(cx, d));
         try merge(options, cx, try fields.parseNumbers(cx, f));
         const presence = number(options.get("presence_penalty")) orelse 0;
         const frequency = number(options.get("frequency_penalty")) orelse 0;

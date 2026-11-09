@@ -90,6 +90,8 @@ pub const Setup = struct {
     reopen: ?idle_unload.Reopen = null,
     /// Sampling defaults from generation_config.json and the flags, as a JSON object; null: greedy.
     sampling: ?json.Value = null,
+    /// --instruct-sampling's set for sampled chats with thinking off (family_sampling.resolveInstruct); null: none.
+    instruct: ?json.Value = null,
     environ: ?*const std.process.Environ.Map = null,
     started: i96 = 0,
     /// The release, backend and GPU the open /health names.
@@ -197,6 +199,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         .idle_unload_s = args.idle_unload,
         .admission = args.admission,
         .default_sampling = s.sampling,
+        .instruct_sampling = s.instruct,
         .use_drafts = !args.no_drafts,
         .vision_urls = args.vision_urls,
         .vision_pdf = args.vision_pdf,
@@ -263,13 +266,14 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         "profile: stable; registered overrides: unavailable (out of memory)";
     log.line("{s}", .{profile_line});
     const sampling = shownSampling(a, s.sampling);
+    const instruct = shownInstruct(a, s.instruct);
     const drafts = @import("draft_line.zig").shown(args.no_drafts, srv.info);
     const context = if (window > 0) std.fmt.bufPrint(&window_text, "{d}", .{window}) catch "?" else "unlimited";
     // the TCP line keeps its exact form: the benchmark server reads the port from it (benchmark_server_test.zig)
     if (lis.unix_path) |path| {
-        log.line("serving {s} on Unix socket {s}, /v1 (sampling: {s}; drafts: {f}; context: {s}; loaded in {d:.1}s)", .{ s.served, path, sampling, drafts, context, loaded });
+        log.line("serving {s} on Unix socket {s}, /v1 (sampling: {s}{s}; drafts: {f}; context: {s}; loaded in {d:.1}s)", .{ s.served, path, sampling, instruct, drafts, context, loaded });
     } else {
-        log.line("serving {s} at http://{s}:{d}/v1 (sampling: {s}; drafts: {f}; context: {s}; loaded in {d:.1}s)", .{ s.served, args.host, port, sampling, drafts, context, loaded });
+        log.line("serving {s} at http://{s}:{d}/v1 (sampling: {s}{s}; drafts: {f}; context: {s}; loaded in {d:.1}s)", .{ s.served, args.host, port, sampling, instruct, drafts, context, loaded });
     }
     const reserved = args.thinking_reserve > 0 and srv.info.capability(.answer_limit);
     if (args.thinking_reserve > 0 and !srv.info.capability(.answer_limit)) log.line("--thinking-reserve is not applied: this engine cannot limit the answer apart from the reasoning", .{});
@@ -365,6 +369,12 @@ fn resolve(io: std.Io, host: []const u8, port: u16) ?std.Io.net.IpAddress {
     if (std.Io.net.IpAddress.parse(host, port)) |ip| return ip else |_| {}
     if (std.ascii.eqlIgnoreCase(host, "localhost")) return .{ .ip4 = .loopback(port) };
     return std.Io.net.IpAddress.resolve(io, host, port) catch null;
+}
+
+/// The serving line's thinking-off defaults when they differ from the sampling defaults: ``; thinking off: ...``.
+fn shownInstruct(a: Allocator, instruct: ?json.Value) []const u8 {
+    const v = instruct orelse return "";
+    return std.fmt.allocPrint(a, "; thinking off: {s}", .{shownSampling(a, v)}) catch "";
 }
 
 /// The serving line's sampling: greedy, or each default as ``name value``.

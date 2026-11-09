@@ -106,6 +106,47 @@ test "penalty request: presence_penalty zero, absent and null keep the same repl
     try check(false, "{\"presence_penalty\":1,\"frequency_penalty\":-1}", ",\"presence_penalty\":0,\"frequency_penalty\":0", 200, .{});
 }
 
+test "sampling defaults: a sampled chat with thinking off takes the instruct set; thinking on and greedy keep the defaults" {
+    const t = std.testing;
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f = try fixture.Fixture.init(t.allocator, t.io, null);
+    defer f.deinit();
+    var problem: []const u8 = "";
+    const text = try HfText.load(t.allocator, t.io, f.path, null, a, &problem);
+    defer text.deinit();
+    var script: Script = .{ .supported = true };
+    const srv = try Server.init(t.allocator, t.io, script.engine(), text.text(), .{
+        .served_name = "m",
+        .model_ids = &.{"m"},
+        .use_drafts = false,
+        .default_sampling = (try json.parse(a, "{\"temperature\":1.0,\"top_p\":0.95,\"top_k\":20}")).ok,
+        .instruct_sampling = (try json.parse(a, "{\"temperature\":0.7,\"top_p\":0.8,\"top_k\":20,\"presence_penalty\":1.5}")).ok,
+    }, null);
+    defer srv.deinit();
+    const none = (try json.parse(a, "{\"model\":\"m\",\"seed\":1}")).ok;
+    const own = (try json.parse(a, "{\"model\":\"m\",\"seed\":1,\"temperature\":0.2,\"presence_penalty\":0}")).ok;
+    const greedy = (try json.parse(a, "{\"model\":\"m\",\"temperature\":0}")).ok;
+    var cx: @import("errors.zig").Cx = .{ .a = a };
+    const on = (try srv.resolveSampling(&cx, none, 0, &.{}, false)).?;
+    try t.expectApproxEqAbs(@as(f64, 1.0), @as(f64, on.temperature), 1e-6);
+    try t.expectApproxEqAbs(@as(f64, 0.95), @as(f64, on.top_p), 1e-6);
+    try t.expectEqualDeep(api.Penalties{}, try srv.resolvePenalties(&cx, none, false));
+    const off = (try srv.resolveSampling(&cx, none, 0, &.{}, true)).?;
+    try t.expectApproxEqAbs(@as(f64, 0.7), @as(f64, off.temperature), 1e-6);
+    try t.expectApproxEqAbs(@as(f64, 0.8), @as(f64, off.top_p), 1e-6);
+    try t.expectEqual(@as(u32, 20), off.top_k);
+    try t.expectEqualDeep(api.Penalties{ .presence = 1.5 }, try srv.resolvePenalties(&cx, none, true));
+    const chosen = (try srv.resolveSampling(&cx, own, 0, &.{}, true)).?;
+    try t.expectApproxEqAbs(@as(f64, 0.2), @as(f64, chosen.temperature), 1e-6);
+    try t.expectApproxEqAbs(@as(f64, 0.8), @as(f64, chosen.top_p), 1e-6);
+    try t.expectEqualDeep(api.Penalties{}, try srv.resolvePenalties(&cx, own, true));
+    // a greedy request never takes the set: no penalty from it
+    try t.expect((try srv.resolveSampling(&cx, greedy, 0, &.{}, true)) == null);
+    try t.expectEqualDeep(api.Penalties{}, try srv.resolvePenalties(&cx, greedy, true));
+}
+
 test "penalty request: supported request values override defaults unchanged" {
     try check(true, "{\"presence_penalty\":1,\"frequency_penalty\":-1}", "", 200, .{ .presence = 1, .frequency = -1 });
     try check(true, "{\"presence_penalty\":1}", ",\"presence_penalty\":-2,\"frequency_penalty\":2", 200, .{ .presence = -2, .frequency = 2 });
