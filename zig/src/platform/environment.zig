@@ -3,7 +3,7 @@ const std = @import("std");
 const sys = @import("sys.zig");
 
 pub const Error = error{InvalidEnvironment};
-pub const Scope = enum { common, cuda, metal, xpu, slide, hooks, dsv41, gemma4 };
+pub const Scope = enum { common, cuda, metal, xpu, slide, hooks, dsv41, gemma4, drama3 };
 pub const Kind = enum { u32, u64, size, percent, positive, device, segments, mib, bit_width, word, prompt, flag, toggle, real, positive_real, signed_real, range, path };
 pub const Rule = struct {
     name: [:0]const u8,
@@ -48,6 +48,8 @@ pub const rules = [_]Rule{
     .{ .name = "TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS", .scope = .cuda, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_ROCE_GID_INDEX", .scope = .cuda, .kind = .u32, .forms = "a whole GID index from 0 to 2147483647" },
     .{ .name = "TF_GEMMA4_CHUNK_SOLO", .scope = .gemma4, .kind = .size, .forms = "a solo prompt pass's rows, a multiple of 512 up to 4096" },
+    .{ .name = "TF_DRAMA_PREFILL_ROWS", .scope = .drama3, .kind = .u32, .trim = " ", .forms = "whole prompt rows a chunk, 1 through 1024 (checked when a Drama 3 checkpoint opens)" },
+    .{ .name = "TF_DRAMA_REFERENCE_CACHE", .scope = .drama3, .kind = .u32, .trim = " ", .forms = "kept reference states, 0 (off) through 16 (checked when a Drama 3 checkpoint opens)" },
     .{ .name = "TF_Q27_COPY_ROWS", .scope = .metal, .kind = .u32, .forms = "a whole number from 0 to 4294967295 (0 disables copied rows)" },
     .{ .name = "TF_Q27_DRAFT_SLOTS", .scope = .metal, .kind = .u32, .forms = "a whole number from 0 to 4294967295 (clamped to the current stream bounds)" },
     .{ .name = "TF_HEAD_GEOMETRY", .scope = .metal, .kind = .size, .forms = "a whole nonnegative native-size geometry count" },
@@ -144,6 +146,13 @@ pub const rules = [_]Rule{
 pub fn rule(name: []const u8) Rule {
     for (rules) |r| if (std.mem.eql(u8, name, r.name)) return r;
     @panic("unregistered strict environment parser");
+}
+
+/// A compile error unless `name` has a row, so a strict read can never reach `rule`'s panic at run time.
+pub fn registered(comptime name: []const u8) void {
+    @setEvalBranchQuota(20 * rules.len * 64);
+    for (rules) |r| if (std.mem.eql(u8, r.name, name)) return;
+    @compileError(name ++ " has no row in platform/environment.zig");
 }
 
 /// Null means unset, empty or whitespace-only (main's readers used their defaults then), never malformed.
@@ -292,6 +301,7 @@ pub const Flags = struct {
     hooks: bool = false,
     dsv41: bool = false,
     gemma4: bool = false,
+    drama3: bool = false,
     device: ?u32 = null,
     segments: ?u32 = null,
     carveout: bool = false,
@@ -306,6 +316,7 @@ pub const Flags = struct {
             .hooks => f.hooks,
             .dsv41 => f.dsv41,
             .gemma4 => f.gemma4,
+            .drama3 => f.drama3,
         };
     }
 };
