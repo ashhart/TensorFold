@@ -72,3 +72,37 @@ test "a reply's end is born with its request's prompt: the history mark that req
     try std.testing.expectEqual(@as(u32, at + 7), store.entries.items[1].born);
     try std.testing.expectEqual(@as(usize, 2), fake.live);
 }
+
+test {
+    _ = @import("qwen27_share_fit.zig");
+    _ = @import("qwen27_pair_tests.zig");
+}
+
+test "qwen27 startup: draft stream count, singular text and optional suffixes" {
+    const limit = try lb.draftSlots();
+    const limited = platform.c.getenv("TF_Q27_DRAFT_SLOTS") != null;
+    try std.testing.expectEqual(@as(u32, if (limited) 1 else 8), limit);
+    const cases = [_]struct { u32, []const u8, []const u8 }{
+        .{ 1, "1 stream", "1 stream" },
+        .{ 2, "2 streams", "2 streams" },
+        .{ 9, "9 streams", "8 streams" },
+        .{ 16, "16 streams", "8 streams" },
+    };
+    var mismatches: usize = 0;
+    for (cases) |case| {
+        for ([_]bool{ false, true }) |drafter| {
+            for ([_]bool{ false, true }) |with_images| {
+                var draft: [64]u8 = undefined;
+                const suffix = if (drafter) try std.fmt.bufPrint(&draft, ", DFlash2 drafts for {s}", .{if (limited) "1 stream" else case[2]}) else "";
+                var expected: [192]u8 = undefined;
+                const want = try std.fmt.bufPrint(&expected, "Qwen3.8-27B: {s} of 4096 tokens{s}{s}", .{ case[1], suffix, if (with_images) ", images read" else "" });
+                var actual: [192]u8 = undefined;
+                const got = try std.fmt.bufPrint(&actual, "{f}", .{StartupLine{ .streams = case[0], .context = 4096, .draft_slots = if (drafter) limit else 0, .images = with_images }});
+                std.testing.expectEqualStrings(want, got) catch {
+                    mismatches += 1;
+                };
+            }
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), mismatches);
+}
