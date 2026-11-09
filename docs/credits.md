@@ -120,6 +120,10 @@ contributions are in it.
   ([lane_qmm.py](https://github.com/ashhart/TensorFold/blob/v0.6.6/src/tensorfold/kernels/qwen/dense/v1/lane_qmm.py)),
   widening each group to nibbles for the 4-bit tensor op. The native `zig/kernels/metal/core/lane_projection.metal`
   stages 2- and 3-bit codes the same way.
+- The native Vulkan dense Qwen3.5-2B engine (`zig/src/families/qwen3_5/backend/vulkan/`) follows the same frozen
+  dense-lane design ([lane_qmm.py](https://github.com/ashhart/TensorFold/blob/v0.6.6/src/tensorfold/kernels/qwen/dense/v1/lane_qmm.py),
+  [#34](https://github.com/ashhart/TensorFold/pull/34)) for its per-lane qmm decomposition; its compute shaders are
+  new work, written for this engine.
 - @di37 made the engine read the GPU generation once from `applegpu_gN`, and a virtual machine's GPU as none, in
   [#209](https://github.com/ashhart/TensorFold/pull/209)
   ([device.py](https://github.com/ashhart/TensorFold/blob/v0.6.6/src/tensorfold/kernels/device.py)), as
