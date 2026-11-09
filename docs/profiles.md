@@ -164,7 +164,7 @@ that each setting changed a reply. Each stable fallback is null. The release bac
 | --- | --- |
 | `arithmetic` | `TF_DSV41_NUCLEUS`, `TF_DSV41_CONTEXT`, `TF_DSV41_ROWS_CAP`, `TF_DSV41_POOL_TOKENS`, `TF_DSV41_KV_SPLIT`, `TF_DSV41_KV_SPLIT_UNION_MIB` |
 | `debug` | `TF_DSV41_LAYERS`, `TF_DSV41_NEEDS_POOL` |
-| `experimental` | `TF_DSV41_EXPERT_TOPP`, `TF_DSV41_OWN_PREFILL`, `TF_DSV41_PREFILL_PIECES`, `TF_DSV41_SLOTS`, `TF_DSV41_MHC_DEFER`, `TF_DSV41_DRAFTS`, `TF_DSV41_SAMPLING`, `TF_DSV41_IMAGES`, `TF_DSV41_BIAS_VL`, `TF_DSV41_ENGRAM_DIR`, `TF_DSV41_SCHEMA_PROMPT`, `TF_DSV41_TOOL_GRAMMAR` |
+| `experimental` | `TF_DSV41_EXPERT_TOPP`, `TF_DSV41_OWN_PREFILL`, `TF_DSV41_PREFILL_PIECES`, `TF_DSV41_SLOTS`, `TF_DSV41_MHC_DEFER`, `TF_DSV41_DRAFTS`, `TF_DSV41_SAMPLING`, `TF_DSV41_IMAGES`, `TF_DSV41_BIAS_VL`, `TF_DSV41_ENGRAM_DIR`, `TF_DSV41_SCHEMA_PROMPT`, `TF_DSV41_TOOL_GRAMMAR`, `TF_DSV41_COPY_DRAFTER` |
 
 The pool settings have separate rows because each can be set independently. `NEEDS_POOL` forces pool geometry
 in the AOT asset planner; it does not select the served engine's pool. Its class is therefore `debug`.
@@ -173,7 +173,7 @@ Images and vision bias also have independent rows. `ENGRAM_DIR` is reported as `
 by the registry line. The legacy `TF_DSV41_TOOL_GRAMMAR` alias has a server-wide reader, although this row covers
 DeepSeek CUDA. A present `TENSORFOLD_TOOL_GRAMMAR` takes precedence and suppresses the masked legacy row.
 
-All 81 `TF_DSV41_*` settings that DeepSeek validates are rows of the shared startup table in
+All 82 `TF_DSV41_*` settings that DeepSeek validates are rows of the shared startup table in
 `zig/src/platform/environment.zig` (see [environment settings](environment.md)). Their readers read through that
 table; the served-knob readers of `PREFILL_ROWS` and `INDEX_BUDGET_MIB` keep their own stricter refusals after it.
 `Model.open` and the AOT planner check those rows before any allocation, device or checkpoint work, and a later

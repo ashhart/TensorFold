@@ -495,3 +495,13 @@ The fixtures in `zig/src/server/fixtures/thinking/` are unmodified release files
   [LiquidAI/LFM2.5-24B-A2B-MLX-4bit](https://huggingface.co/LiquidAI/LFM2.5-24B-A2B-MLX-4bit) at revision
   `667408d494bde191c2cb9dd4f4549827816b9275`, under the LFM Open License v1.0. See
   [`LICENSES/LFM-Open-1.0.txt`](LICENSES/LFM-Open-1.0.txt).
+
+## DeepSeek-V4.1 adaptive suffix copy drafting
+
+The optional `TF_DSV41_COPY_DRAFTER` extensions in `zig/src/families/deepseek_v41/draft/lookup.zig`
+(continuation-ranked band matching, adaptive doubling `8 -> 15` on full acceptance, and survival-yield gating)
+port the `CopyDrafter` algorithm from [`christopherowen/spark-ds41f`](https://github.com/christopherowen/spark-ds41f)
+(`src/copy_drafter.py`, `src/engine.py`), written natively against TensorFold's `SuffixIndex`, `Planner` and
+`Proposer`. The design is inspired by vLLM's suffix / n-gram speculative decoding proposer
+([`vllm-project/vllm`](https://github.com/vllm-project/vllm), Apache License 2.0; see
+[`LICENSES/Apache-2.0.txt`](LICENSES/Apache-2.0.txt)). No vLLM source code is copied or linked.
