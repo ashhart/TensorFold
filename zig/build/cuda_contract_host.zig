@@ -3,6 +3,15 @@ const std = @import("std");
 
 /// Each contract reference joins test-cuda-host and its own step; none needs a GPU.
 pub fn steps(b: *std.Build, host: std.Build.ResolvedTarget, cuda: *std.Build.Module, mods: anytype, step: *std.Build.Step) void {
+    const glm_fact = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/cuda/contract_nvfp4_glm_host.zig"),
+        .target = host,
+        .optimize = .debug,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = mods.core } },
+    }) }));
+    b.step("test-glm-fact-contract-host", "Actual factored-expert contract envelope at GLM shapes without devices").dependOn(&glm_fact.step);
+    step.dependOn(&glm_fact.step);
     const writeback_contract = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/cuda/contract_flashnext_writeback.zig"),
         .target = host,
