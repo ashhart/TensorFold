@@ -98,7 +98,7 @@ fn exercise(mode: Mode) !void {
                 later.cache_promise = .{};
             }
             const promised = job.cache_promise;
-            try host.admitted.append(a, &later);
+            if (mode != .fallback_spare) try host.admitted.append(a, &later);
             _ = family.pass(&store, words[0..6], .{});
             const held = store.held;
             queue.keep(&host, &job, &job.stream, 6);
