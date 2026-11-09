@@ -1,4 +1,4 @@
-//! dots.mocr's reader against Hugging Face oracle outputs, box scaling across frames, and content normalization.
+//! dots.mocr's reader on written block lists and on hash-checked oracle runs; box scaling and content normalization.
 const std = @import("std");
 const api = @import("engine_api");
 const ocr = @import("ocr.zig");
@@ -6,18 +6,37 @@ const image = @import("image.zig");
 const cfg = @import("config.zig");
 const cases = @import("config_test.zig");
 const t = std.testing;
+const Sha256 = std.crypto.hash.sha2.Sha256;
 
-const Fixture = struct { text: []const u8, original: [2]u32, frame: [2]u32, source: []const u8, prompt_sha256: []const u8 };
-const page_json = @embedFile("fixtures/ocr-demo-page.json");
+/// One oracle run on one of our pages (fixtures/README.md): its input, frame and hashes, without the model's text.
+const Fixture = struct {
+    source: []const u8,
+    image_sha256: []const u8,
+    original: [2]u32,
+    frame: [2]u32,
+    prompt_sha256: []const u8,
+    max_new_tokens: u32,
+    eos_reached: bool,
+    output_tokens: usize,
+    output_ids_sha256: []const u8,
+    text_sha256: []const u8,
+};
+const page_json = @embedFile("fixtures/ocr-page.json");
 const line_json = @embedFile("fixtures/ocr-one-line.json");
-const cut_json = @embedFile("fixtures/ocr-demo-cut.json");
+const cut_json = @embedFile("fixtures/ocr-page-cut.json");
 
 fn fixture(a: std.mem.Allocator, text: []const u8) !Fixture {
     return std.json.parseFromSliceLeaky(Fixture, a, text, .{});
 }
 
-fn read(a: std.mem.Allocator, f: Fixture) ![]api.ocr.OcrBlock {
-    return ocr.parse(a, f.text, .{ .width = f.original[0], .height = f.original[1] }, .{ .width = f.frame[0], .height = f.frame[1] });
+fn hex(bytes: []const u8) [64]u8 {
+    var digest: [32]u8 = undefined;
+    Sha256.hash(bytes, &digest, .{});
+    return std.fmt.bytesToHex(digest, .lower);
+}
+
+fn read(a: std.mem.Allocator, f: Fixture, text: []const u8) ![]api.ocr.OcrBlock {
+    return ocr.parse(a, text, .{ .width = f.original[0], .height = f.original[1] }, .{ .width = f.frame[0], .height = f.frame[1] });
 }
 
 fn single(a: std.mem.Allocator, text: []const u8, kind: api.ocr.Kind) ![]const u8 {
@@ -27,48 +46,105 @@ fn single(a: std.mem.Allocator, text: []const u8, kind: api.ocr.Kind) ![]const u
     return blocks[0].content;
 }
 
+/// The end marker an ended oracle run keeps in its text; the server stops before it.
+const end_marker = "<|endofassistant|>";
+
+/// Oracle run ``name``'s text (``dir``/name/result.json) once page, prompt, ids and text match ``f``; no end marker.
+fn oracleText(a: std.mem.Allocator, dir: []const u8, name: []const u8, f: Fixture) ![]const u8 {
+    const Run = struct { image_sha256: []const u8, prompt: []const u8, output_ids: []const u32, text: []const u8 };
+    const path = try std.fs.path.join(a, &.{ dir, name, "result.json" });
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(t.io, path, a, .limited(64 << 20));
+    const run = try std.json.parseFromSliceLeaky(Run, a, bytes, .{ .ignore_unknown_fields = true });
+    try t.expectEqualStrings(f.image_sha256, run.image_sha256);
+    try t.expectEqualStrings(f.prompt_sha256, &hex(run.prompt));
+    try t.expectEqual(f.output_tokens, run.output_ids.len);
+    var ids = Sha256.init(.{});
+    for (run.output_ids) |id| {
+        var le: [4]u8 = undefined;
+        std.mem.writeInt(u32, &le, id, .little);
+        ids.update(&le);
+    }
+    try t.expectEqualStrings(f.output_ids_sha256, &std.fmt.bytesToHex(ids.finalResult(), .lower));
+    try t.expectEqualStrings(f.text_sha256, &hex(run.text));
+    if (!f.eos_reached) return run.text;
+    try t.expect(std.mem.endsWith(u8, run.text, end_marker));
+    return run.text[0 .. run.text.len - end_marker.len];
+}
+
 test "dots: the reader's prompt is the one every oracle run recorded" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
-    var digest: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(ocr.prompt, &digest, .{});
     for ([_][]const u8{ page_json, line_json, cut_json }) |text|
-        try t.expectEqualStrings((try fixture(arena.allocator(), text)).prompt_sha256, &std.fmt.bytesToHex(digest, .lower));
+        try t.expectEqualStrings((try fixture(arena.allocator(), text)).prompt_sha256, &hex(ocr.prompt));
 }
 
-test "dots: the demo page reads as header, caption, spanned table and text blocks" {
+test "dots: oracle runs in TF_DOTS_OCR_DIR match their fixtures' hashes and read as their pages" {
+    const dir = @import("sys").getenv("TF_DOTS_OCR_DIR") orelse return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const f = try fixture(a, page_json);
-    const blocks = try read(a, f);
-    try t.expect(blocks.len > 4);
-    try t.expectEqual(api.ocr.Kind.page_header, blocks[0].kind);
-    try t.expectEqualStrings("EXPOSURE TO MEAT AND RISK OF LYMPHOMA", blocks[0].content);
-    // The oracle's first box [628, 172, 1077, 194] in a 1708x2240 frame, in the 1700x2250 original.
-    const sx: f32 = 1700.0 / 1708.0;
-    const sy: f32 = 2250.0 / 2240.0;
-    const want: api.ocr.Quad = .{ .{ 628 * sx, 172 * sy }, .{ 1077 * sx, 172 * sy }, .{ 1077 * sx, 194 * sy }, .{ 628 * sx, 194 * sy } };
-    for (want, blocks[0].quad) |w, g| for (w, g) |x, y| try t.expectApproxEqAbs(x, y, 1e-3);
-    const kinds = [_]api.ocr.Kind{ .page_header, .page_header, .caption, .table, .text, .caption, .table, .table, .text, .text, .text, .text, .text };
+    const page = try fixture(a, page_json);
+    const blocks = try read(a, page, try oracleText(a, dir, "page", page));
+    const kinds = [_]api.ocr.Kind{ .page_header, .page_header, .section_header, .section_header, .text, .caption, .table, .section_header, .list };
     try t.expectEqual(kinds.len, blocks.len);
     for (kinds, blocks) |kind, b| {
         try t.expectEqual(kind, b.kind);
         try t.expect(b.content.len > 0);
-        for (b.quad) |p| try t.expect(p[0] >= 0 and p[0] <= 1700 and p[1] >= 0 and p[1] <= 2250);
-        // Every table on the page has spans, so each stays one clean HTML table.
-        if (b.kind == .table) try t.expect(std.mem.startsWith(u8, b.content, "<table>") and std.mem.endsWith(u8, b.content, "</table>"));
+        for (b.quad) |q| try t.expect(q[0] >= 0 and q[0] <= 1240 and q[1] >= 0 and q[1] <= 1754);
     }
-    try t.expect(std.mem.startsWith(u8, blocks[2].content, "TABLE II - ODDS RATIO OF HODGKIN LYMPHOMA"));
-    try t.expect(std.mem.indexOf(u8, blocks[3].content, "<th colspan=\"3\">Hodgkin lymphoma</th>") != null);
-    try t.expect(std.mem.indexOf(u8, blocks[6].content, "<th colspan=\"4\">Beef meat</th>") != null);
+    // The page's table has a spanned header cell, so it stays one clean HTML table.
+    try t.expect(std.mem.startsWith(u8, blocks[6].content, "<table>") and std.mem.endsWith(u8, blocks[6].content, "</table>"));
+    const line = try fixture(a, line_json);
+    const one = try read(a, line, try oracleText(a, dir, "one-line", line));
+    try t.expectEqual(@as(usize, 1), one.len);
+    try t.expectEqual(api.ocr.Kind.text, one[0].kind);
+    try t.expectEqualStrings("TensorFold reads one line of text.", one[0].content);
+    const cut = try fixture(a, cut_json);
+    try t.expectError(error.Unreadable, read(a, cut, try oracleText(a, dir, "page-cut", cut)));
+}
+
+/// Our test page's blocks as the model writes them (fixtures/README.md, `pages`), in a 1232 x 1764 frame.
+const page_blocks =
+    \\[{"bbox": [70, 50, 410, 90], "category": "Page-header", "text": "TENSORFOLD READER NOTES"},
+    \\ {"bbox": [985, 55, 1115, 90], "category": "Page-header", "text": "March 2026"},
+    \\ {"bbox": [70, 150, 585, 210], "category": "Title", "text": "Reading a Page Twice"},
+    \\ {"bbox": [70, 255, 565, 305], "category": "Section-header", "text": "1. Why the second read matters"},
+    \\ {"bbox": [70, 330, 945, 460], "category": "Text", "text": "A reader that sees the same page twice must give the same blocks twice."},
+    \\ {"bbox": [70, 520, 455, 555], "category": "Caption", "text": "Table 1: Tokens written per input"},
+    \\ {"bbox": [70, 565, 1100, 825], "category": "Table", "text": "<table><tr><th rowspan=\"2\">Reader</th><th colspan=\"2\">Tokens written</th></tr><tr><th>Page</th><th>Line</th></tr><tr><td>First reader</td><td>612</td><td>41</td></tr></table>"},
+    \\ {"bbox": [95, 950, 600, 1000], "category": "List-item", "text": "The blocks come back in reading order."},
+    \\ {"bbox": [600, 1685, 630, 1715], "category": "Page-footer", "text": "3"}]
+;
+
+test "dots: a page reads as headers, title, text, caption, spanned table, list and footer blocks" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const blocks = try read(a, try fixture(a, page_json), page_blocks);
+    const kinds = [_]api.ocr.Kind{ .page_header, .page_header, .title, .section_header, .text, .caption, .table, .list, .page_footer };
+    try t.expectEqual(kinds.len, blocks.len);
+    for (kinds, blocks) |kind, b| try t.expectEqual(kind, b.kind);
+    // The first box [70, 50, 410, 90] in the 1232 x 1764 frame, in the 1240 x 1754 original.
+    const sx: f32 = 1240.0 / 1232.0;
+    const sy: f32 = 1754.0 / 1764.0;
+    const want: api.ocr.Quad = .{ .{ 70 * sx, 50 * sy }, .{ 410 * sx, 50 * sy }, .{ 410 * sx, 90 * sy }, .{ 70 * sx, 90 * sy } };
+    for (want, blocks[0].quad) |w, g| for (w, g) |x, y| try t.expectApproxEqAbs(x, y, 1e-3);
+    try t.expectEqualStrings("TENSORFOLD READER NOTES", blocks[0].content);
+    try t.expectEqualStrings("# Reading a Page Twice", blocks[2].content);
+    try t.expectEqualStrings("## 1. Why the second read matters", blocks[3].content);
+    // A table with spans stays one clean HTML table.
+    try t.expect(std.mem.startsWith(u8, blocks[6].content, "<table>") and std.mem.endsWith(u8, blocks[6].content, "</table>"));
+    try t.expect(std.mem.indexOf(u8, blocks[6].content, "<th colspan=\"2\">Tokens written</th>") != null);
+    try t.expectEqualStrings("- The blocks come back in reading order.", blocks[7].content);
+    try t.expectEqualStrings("3", blocks[8].content);
 }
 
 test "dots: one line reads as one text block" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const blocks = try read(a, try fixture(a, line_json));
+    const text = "[{\"bbox\": [20, 20, 600, 70], \"category\": \"Text\", \"text\": \"TensorFold reads one line of text.\"}]";
+    const blocks = try read(a, try fixture(a, line_json), text);
     try t.expectEqual(@as(usize, 1), blocks.len);
     try t.expectEqual(api.ocr.Kind.text, blocks[0].kind);
     try t.expectEqualStrings("TensorFold reads one line of text.", blocks[0].content);
@@ -78,7 +154,9 @@ test "dots: output cut by the token limit is unreadable" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    try t.expectError(error.Unreadable, read(a, try fixture(a, cut_json)));
+    // A block list stopped inside its first string, as a run that reaches max_tokens leaves it.
+    const text = "[{\"bbox\": [70, 50, 410, 90], \"category\": \"Page-header\", \"text\": \"TENSORFOLD REA";
+    try t.expectError(error.Unreadable, read(a, try fixture(a, cut_json), text));
 }
 
 test "dots: boxes scale to the original from the frames of two token budgets" {
@@ -154,10 +232,10 @@ test "dots: prepare reports the processor's resized size as the frame" {
     const rgb = try a.alloc(u8, @as(usize, f.original[0]) * f.original[1] * 3);
     @memset(rgb, 128);
     const prepared = ocr.prepared(try p.prepareRgb(a, .{ .width = f.original[0], .height = f.original[1], .pixels = rgb }, 0, 14400), p.patches.patch);
-    try t.expectEqual(@as(u32, 160), prepared.gh);
-    try t.expectEqual(@as(u32, 122), prepared.gw);
+    try t.expectEqual(@as(u32, 126), prepared.gh);
+    try t.expectEqual(@as(u32, 88), prepared.gw);
     try t.expectEqual(api.Size{ .width = f.frame[0], .height = f.frame[1] }, prepared.frame.?);
-    try t.expectEqual(@as(u32, 1708 * 2240), prepared.frame.?.width * prepared.frame.?.height);
+    try t.expectEqual(@as(u32, 1232 * 1764), prepared.frame.?.width * prepared.frame.?.height);
 }
 
 test "dots: categories map to kinds and content is normalized Markdown" {
