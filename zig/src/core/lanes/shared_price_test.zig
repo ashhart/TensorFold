@@ -164,7 +164,7 @@ test "shared prices: an unmeasured plain option keeps main's winning drafted wid
     try t.expectEqualSlices(u32, &.{ 0, 0, 0, 0 }, measured);
 }
 
-test "shared prices: only independent plain timing excludes a preceding deferred draft" {
+test "shared prices: only measured plain timing excludes a preceding deferred draft" {
     const ClockAtDraft = struct {
         target: *fake.Fake,
         at: usize = 0,
@@ -180,7 +180,7 @@ test "shared prices: only independent plain timing excludes a preceding deferred
             return 20 + 5 * @as(f64, @floatFromInt(c.target.drafts_calls - c.at));
         }
     };
-    for ([_]bool{ false, true }) |independent| {
+    for ([_]bool{ false, true }) |independent| for ([_]bool{ false, true }) |measured| {
         var cfg = try Config.init(a, .{ .exact_width = 8, .mtp = true, .speculate = true, .speculate_early = false, .drafts = 1, .window_costs = &.{ .{ .width = 1, .ms = 10 }, .{ .width = 8, .ms = 10 } }, .plain_guard = independent, .hidden_rows = true }, 8, 7);
         defer cfg.deinit(a);
         var target: fake.Fake = .{ .gpa = a, .head_accepts = 1 };
@@ -190,6 +190,7 @@ test "shared prices: only independent plain timing excludes a preceding deferred
         backend.defer_lone_draft = true;
         var e = Engine.init(a, &cfg, backend, clock.clock());
         defer e.deinit();
+        if (independent and measured) try e.rule.observeShared(2, 2, 12, false, 0, true, false);
         var streams: [2]Stream = undefined;
         var made: usize = 0;
         defer for (streams[0..made]) |*s| s.deinit(a);
@@ -201,7 +202,7 @@ test "shared prices: only independent plain timing excludes a preceding deferred
         }
         try t.expect(e.late.request != null);
         try e.step();
-        try t.expectEqual(target.drafts_calls - @as(usize, if (independent) 2 else 3), clock.at);
+        try t.expectEqual(target.drafts_calls - @as(usize, if (independent and measured) 2 else 3), clock.at);
         try t.expectEqual(@as(usize, 0), e.rule.shared_price.buckets.items.len - @intFromBool(independent));
-    }
+    };
 }
