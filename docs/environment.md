@@ -46,6 +46,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `LFM3_FUSE` | Whole u32 fusion mask; default 7 |
 | `TF_SLIDE_POCKET_KEY` | Exactly `auto`, `reply`, `subject` or `both`; default `auto` |
 | `TF_SLIDE_FIT_GIB` | Whole native-size nonnegative GiB count; default 4 |
+| `TF_SLIDE_POCKET_DUMP` | A directory path without control characters, used as given; each lesson's read rows are written there for offline study. Unset or blank writes none |
 | `TF_SLIDE_FORGET_FAIL` | Whole u32 fact index, zero off; only checked in a slide-test-hooks build |
 
 The video-token reader has no fixed model-independent token ceiling. Its unsigned storage width is not a useful token budget.
