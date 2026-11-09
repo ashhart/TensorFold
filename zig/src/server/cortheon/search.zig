@@ -163,8 +163,12 @@ fn parseMarked(a: Allocator, page: []const u8, limit: usize, m: Marks) Allocator
         const block_start = if (block) |b| lo + b else tag_start;
         if (std.ascii.findIgnoreCase(page[block_start..tag_start], "result--ad") != null) continue; // Result--ad is still an ad
         const tag = page[tag_start..tag_end];
-        const href_at = std.ascii.findIgnoreCase(tag, "href=") orelse continue; // HREF= is the same attribute
-        var v = tag[href_at + 5 ..];
+        const href_name = std.ascii.findIgnoreCase(tag, "href") orelse continue; // HREF is the same attribute
+        var after = href_name + 4;
+        while (after < tag.len and (tag[after] == ' ' or tag[after] == '\t')) after += 1; // href = is the same attribute
+        if (after >= tag.len or tag[after] != '=') continue;
+        var v = tag[after + 1 ..];
+        while (v.len > 0 and (v[0] == ' ' or v[0] == '\t')) v = v[1..];
         const q: u8 = if (v.len > 0 and (v[0] == '"' or v[0] == '\'')) v[0] else ' '; // unquoted is still a link, as page hrefs are
         if (q != ' ') v = v[1..];
         const href_end = std.mem.indexOfAny(u8, v, if (q == ' ') " >" else &.{q}) orelse v.len;
@@ -344,6 +348,16 @@ test "a search result keeps an unquoted href" {
     defer arena.deinit();
     const a = arena.allocator();
     const page = "<div class=\"result results_links web-result\"><h2><a class=\"result__a\" href=https://example.org/page>Example</a></h2></div>";
+    const results = try parseDuckDuckGo(a, page, 5);
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqualStrings("https://example.org/page", results[0].url);
+}
+
+test "a search result keeps a link when spaces surround href's equals" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const page = "<div class=\"result results_links web-result\"><h2><a class=\"result__a\" href = \"https://example.org/page\">Example</a></h2></div>";
     const results = try parseDuckDuckGo(a, page, 5);
     try std.testing.expectEqual(@as(usize, 1), results.len);
     try std.testing.expectEqualStrings("https://example.org/page", results[0].url);
