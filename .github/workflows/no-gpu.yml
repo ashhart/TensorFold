@@ -25,6 +25,17 @@ concurrency:
 # tip, and the hosted queue (58 runs behind ~13 jobs) held main's and contributors' checks for hours. A train
 # whose local run is red starts this workflow on its branch by hand (workflow_dispatch) for GitHub's verdict.
 jobs:
+  comfyui-moss-installer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+      - run: python -m unittest discover -s tools/comfyui_runtime/tests -v
   benchmark-clients:
     if: ${{ !startsWith(github.head_ref, 'lead/train-') }}  # a landing train's tip: see the note above jobs
     strategy:
