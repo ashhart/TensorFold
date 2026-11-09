@@ -53,6 +53,18 @@ test "Qwen DFlash2 config: dense and MoE all-sliding schemas preserve every pars
     try t.expectEqualDeep(moe_expected, try Config.parse(a, moe, target(2048, 40)));
 }
 
+test "Qwen DFlash2 config: a tap layer named twice is refused, as the ring would hold one residual in two taps" {
+    for ([_][]const u8{ "[5,19,33,19,61]", "[5,5]" }) |taps| {
+        const bytes = try std.mem.replaceOwned(u8, a, fixture, "[5,19,33,47,61]", taps);
+        defer a.free(bytes);
+        try t.expectError(error.BadDraftConfig, Config.parse(a, bytes, target(5120, 64)));
+    }
+    const one = try std.mem.replaceOwned(u8, a, fixture, "[5,19,33,47,61]", "[61]");
+    defer a.free(one);
+    const c = try Config.parse(a, one, target(5120, 64));
+    try t.expectEqualSlices(u32, &.{61}, c.taps[0..c.n_taps]);
+}
+
 test "Qwen DFlash2 config: missing or malformed attention declarations are refused" {
     for ([_]?[]const u8{ null, "null", "0", "1", "\"true\"", "[]", "{}" }) |raw| {
         const bytes = try changed("use_sliding_window", raw);
