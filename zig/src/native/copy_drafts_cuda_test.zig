@@ -463,7 +463,24 @@ test "GLM window prices: timed ones replace the seed windows, DFlash2's shared r
             const m = b.factsWithCopies(copies);
             try std.testing.expectEqual(@as(usize, f.lanes.max_rows), m.window_costs.len);
             try std.testing.expectEqual(k.ms[0], m.window_costs[0].ms);
-            try std.testing.expectEqual(if (drafter == null) @as(usize, 0) else f.engine.shared_rows, m.shared_costs.len);
+            const family: Family = if (drafter == null) .glm_mtp else .glm_block;
+            const main = mainFacts(family);
+            try std.testing.expectEqualDeep(main.shared_costs, m.shared_costs);
+            var cfg = try lanes.Config.init(a, m, 32, 31);
+            defer cfg.deinit(a);
+            var fake: lanes.fake.Fake = .{ .gpa = a };
+            defer fake.deinit();
+            var clock: lanes.fake.FixedClock = .{};
+            var core = lanes.Engine.init(a, &cfg, fake.backend(), clock.clock());
+            defer core.deinit();
+            try std.testing.expectEqual(main.mtp_step_ms, core.rule.sharedStepMs());
+            const steps: f64 = if (drafter == null) 14 else 7;
+            try std.testing.expectApproxEqAbs(main.mtp_step_ms * steps, core.rule.headMs(&.{ 7, 7 }), 1e-12);
+            var main_cfg = try lanes.Config.init(a, main, 32, 31);
+            defer main_cfg.deinit(a);
+            if (!copies) for (1..33) |width| {
+                try std.testing.expectEqual(main_cfg.shared_costs.get(@intCast(width)), cfg.shared_costs.get(@intCast(width)));
+            };
             try std.testing.expectEqual(k.step_ms, m.mtp_step_ms);
             try std.testing.expectEqual(copies, m.root_copies);
             try std.testing.expectEqual(!copies, m.window_costs_lone);

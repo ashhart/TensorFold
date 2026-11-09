@@ -109,6 +109,7 @@ pub const Lanes = struct {
             .drafts = if (block) max_held else engine.max_drafts,
             .draft_streams = block, // one block pass drafts every stream of the round
             .mtp_step_ms = if (self.costs) |c| c.step_ms else if (block) 1.6 / @as(f64, max_held) else 0, // a block's 7 drafts in one pass (about 1.6 ms)
+            .shared_step_ms = if (block) 1.6 / @as(f64, max_held) else 0,
             .draft_probabilities = block or self.mtp_confidence != null, // chances size each window (DFlash2's by the costs)
             .draft_confidence = if (block) null else self.mtp_confidence,
             .window_costs = if (self.costs) |*c| &c.window else if (block) &copy_policy.window_costs else &.{},
