@@ -20,7 +20,7 @@ pub fn victimIn(s: *const pc.Store, skip: ?*pc.Entry, prompt: []const u32, born:
             oldest_rewind = rewind;
         }
         if (e.borrowers > 0 or e.shared or e.branched or e == skip or rewind) continue;
-        const now = born > e.born and prompt.len > e.tokens.len and on; // a longer request's tokens extend it
+        const now = (born > e.born or (born == e.born and !e.rewind)) and prompt.len > e.tokens.len and on; // this request or its reply extends it
         if ((now or extended(s, e)) and (best == null or e.used < s.entries.items[best.?].used)) best = i;
     }
     return best orelse oldest;
@@ -35,21 +35,21 @@ pub fn own(e: *const pc.Entry, skip: ?*pc.Entry, prompt: []const u32) bool {
 /// Only live continuations make a prefix a branch point or a superseded state.
 pub fn extended(s: *const pc.Store, e: *const pc.Entry) bool {
     if (s.links_lost) return extendedScan(s, e);
-    for (e.ext.items) |o| if (!o.expired) return true;
+    for (e.ext.items) |o| if (!o.expired and (!e.rewind or o.born > e.born)) return true;
     return false;
 }
 
 /// `extended` over every entry, for a store whose links an allocation failure left incomplete.
 pub fn extendedScan(s: *const pc.Store, e: *const pc.Entry) bool {
-    for (s.entries.items) |o| if (!o.expired and o != e and o.born > e.born and o.tokens.len > e.tokens.len and
+    for (s.entries.items) |o| if (!o.expired and o != e and (o.born > e.born or (o.born == e.born and !e.rewind)) and o.tokens.len > e.tokens.len and
         std.mem.eql(u32, o.tokens[0..e.tokens.len], e.tokens)) return true;
     return false;
 }
 
-/// A new entry linked to those it extends and those extending it, later born (tokens and born never change).
+/// A new entry linked to those it extends and those extending it, no earlier born, including one request's reply end.
 pub fn link(s: *pc.Store, x: *pc.Entry) void {
     for (s.entries.items) |o| {
-        if (o == x or o.born == x.born or o.tokens.len == x.tokens.len) continue;
+        if (o == x or o.tokens.len == x.tokens.len) continue;
         const short, const long = if (o.tokens.len < x.tokens.len) .{ o, x } else .{ x, o };
         if (long.born < short.born or !std.mem.eql(u32, long.tokens[0..short.tokens.len], short.tokens)) continue;
         short.ext.append(s.gpa, long) catch {

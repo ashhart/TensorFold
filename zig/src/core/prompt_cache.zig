@@ -88,6 +88,7 @@ pub const Entry = struct {
     used: u64, // the store's clock at its last keep or resume
     last: []u32, // the last prompt that kept or resumed it
     shared: bool = false, // kept at a shared system block's cut: other conversations resume it, so its own never supersedes it
+    rewind: bool = false, // selected as a rewind: a reply born with this request does not supersede it
     branched: bool = false, // resumed again after a later prompt kept a longer state extending it: never superseded
     expired: bool = false, // hidden from lookups immediately, reclaimed only at safe host boundaries
     borrowers: u32 = 0, // outstanding lookups: released by resumed or release, never evicted while borrowed
@@ -119,6 +120,7 @@ pub const Store = struct {
     imprint: ?*imprint.Imprint = null, // --learn: shared cuts' states on disk, read back by later sessions and servers
     disk: ?*rows.Rows = null, // --learn-conversations: every kept state written behind to disk, read back where it pays
     active_rewind_at: u32 = 0, // the last lookup's rewind state (0: none); hosts keep a pass's states before the next lookup
+    active_rewind_key: u64 = 0, // the selected rewind prefix, so interleaved keeps tag only its token path
     links_lost: bool = false, // an allocation failure left the extension links incomplete: `extended` scans
     hold: bool = false, // memory pressure: lookups plan no marks and keeps refuse, so no new state is kept
     over: []const u8 = "", // what refusing a state past the whole budget adds: the setting that keeps it otherwise
@@ -303,6 +305,12 @@ pub const Store = struct {
         if (s.active_rewind_at > 0) if (s.keptNear(prompt, starts, spans, s.active_rewind_at)) |at| {
             s.active_rewind_at = at; // a state kept under min_gap before it is the rewind state: no new copy
         };
+        s.active_rewind_key = if (s.active_rewind_at > 0) sharedKey(prompt[0 .. s.active_rewind_at + s.rules.lookahead]) else 0;
+        for (s.entries.items) |kept| if (kept.at == s.active_rewind_at and kept.tokens.len <= prompt.len and
+            std.mem.eql(u32, kept.tokens, prompt[0..kept.tokens.len]) and modes.equal(kept.decode_spans, spans, kept.at) and images.matches(s, kept))
+        {
+            kept.rewind = true;
+        };
         const e = if (disk)
             rows.read.recall(s, prompt, born, starts, spans, s.recall(prompt, born, starts, spans, s.find(prompt, starts, spans)))
         else
@@ -385,23 +393,7 @@ pub const Store = struct {
         return s.resumedWithReason(e, prompt, if (ok) null else error.RestoreRejected);
     }
 
-    pub fn resumedWithReason(s: *Store, e: *Entry, prompt: []const u32, failure: ?anyerror) void {
-        if (std.mem.indexOfScalar(*Entry, s.entries.items, e) == null) return;
-        defer s.release(e);
-        if (failure) |err| {
-            @import("prompt_cache_restore.zig").report(s.restore_log, .{ .kept = e.at, .prompt = prompt.len, .expired = e.expired, .err = err });
-            s.counts.failed += 1;
-            e.expired = true;
-            return;
-        }
-        s.clock += 1;
-        e.used = s.clock;
-        e.branched = e.branched or s.extended(e); // a turn several continuations share (a re-sent, edited or forked one)
-        s.counts.hits += 1;
-        const last = s.gpa.dupe(u32, prompt) catch return;
-        if (e.own.len == 0 or e.last.ptr != e.own.ptr) s.gpa.free(e.last); // the first `last` is the tokens' copy
-        e.last = last;
-    }
+    pub const resumedWithReason = lifetime.resumedWithReason;
 
     /// Where a pass from `from` keeps states: the history, then min_gap apart the stable prefix and shared blocks.
     pub fn marks(s: *const Store, a: Allocator, prompt: []const u32, from: u32, history_len: u32, shared: []const u32, starts: []const u32, previous: []const u32) ![]const u32 {
@@ -453,7 +445,7 @@ pub const Store = struct {
         return s.keepBorn(prompt, @intCast(prompt.len), at, owner, starts, spans);
     }
 
-    /// `keep` as a prompt of `born` tokens: a reply's end and its warm pass supersede none of their request's states.
+    /// `keep` as a prompt of `born` tokens: its longer reply supersedes older states on the same token path.
     pub fn keepBorn(s: *Store, prompt: []const u32, born: u32, at: u32, owner: ?*anyopaque, starts: []const u32, spans: []const modes.Span) bool {
         s.collectExpired();
         const n = @as(usize, at) + s.rules.lookahead;
@@ -463,6 +455,7 @@ pub const Store = struct {
         for (s.entries.items) |e| if (!e.expired and e.at == at and std.mem.eql(u32, e.tokens, prompt[0..n]) and modes.equal(e.decode_spans, spans, at) and images.matches(s, e)) {
             e.used = s.clock; // the same state again: no copy
             e.shared = e.shared or shared;
+            e.rewind = e.rewind or (at == s.active_rewind_at and sharedKey(e.tokens) == s.active_rewind_key);
             if (shared) learned.learn(s, e, starts);
             return true;
         };
@@ -501,7 +494,7 @@ pub const Store = struct {
             return s.fail(at, err);
         };
         const charged = if (s.family.vtable.charged) |f| f(s.family.ptr, saved) else bytes;
-        e.* = .{ .tokens = last[0..n], .images = image_ids, .image_frame = s.image_frame, .decode_spans = decoded, .at = at, .saved = saved, .bytes = charged, .born = born, .used = s.clock, .last = last, .shared = shared, .own = last };
+        e.* = .{ .tokens = last[0..n], .images = image_ids, .image_frame = s.image_frame, .decode_spans = decoded, .at = at, .saved = saved, .bytes = charged, .born = born, .used = s.clock, .last = last, .shared = shared, .rewind = at == s.active_rewind_at and sharedKey(last[0..n]) == s.active_rewind_key, .own = last };
         owns_decoded = false;
         owns_images = false;
         index.add(s, e) catch {
@@ -587,6 +580,7 @@ test {
     _ = @import("prompt_cache_rewind_test.zig");
     _ = @import("prompt_cache_interior_test.zig");
     _ = @import("prompt_cache_branch_test.zig");
+    _ = @import("prompt_cache_newest_test.zig");
     _ = @import("prompt_cache_fork_test.zig");
     _ = @import("prompt_cache_give_test.zig");
     _ = @import("prompt_cache_lifetime_test.zig");
