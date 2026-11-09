@@ -8,6 +8,7 @@ const slide_model = @import("slide_model.zig");
 const answers = @import("slide_answers.zig");
 const deleting = @import("slide_graph_delete.zig");
 const slide_talks = @import("slide_talks.zig");
+const shareWord = @import("slide_graph_links.zig").shareWord;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -56,9 +57,6 @@ const Save = struct {
     message: []const u8 = "",
 };
 
-/// Words of five letters or more that say nothing about a fact, so they never link two facts.
-const common = [_][]const u8{ "about", "after", "again", "being", "could", "every", "other", "should", "still", "their", "there", "these", "those", "under", "until", "where", "which", "while", "would" };
-
 const trace_cap = 600; // loss steps kept for the learning fact, every round together
 
 /// Facts in teaching order, saved to `path` after every change (null: memory only); ids are never reused.
@@ -101,9 +99,7 @@ pub const Graph = struct {
     /// A graph that starts from `path`'s file when it reads, else empty.
     pub fn init(gpa: Allocator, io: Io, path: ?[]const u8) Graph {
         var g: Graph = .{ .gpa = gpa, .io = io, .path = path, .arena = .init(gpa), .model_arena = .init(gpa) };
-        g.load() catch |e| {
-            g.usage_invalid = e != error.FileNotFound;
-        };
+        g.load() catch |e| @import("slide_usage.zig").loadFailed(&g, e);
         return g;
     }
 
@@ -385,8 +381,7 @@ pub const Graph = struct {
         defer g.mutex.unlock(g.io);
         g.facts.clearRetainingCapacity();
         g.drift_base = null;
-        g.usage_invalid = false;
-        g.usage_dirty = false;
+        @import("slide_usage.zig").clear(g);
         if (g.path) |p| Io.Dir.cwd().deleteFile(g.io, p) catch {};
     }
 
@@ -479,10 +474,7 @@ pub const Graph = struct {
     /// `save` with its failure returned, the old file then kept whole (called under the lock).
     pub fn persist(g: *Graph) !void {
         if (builtin.is_test) g.test_persist_calls += 1;
-        const path = g.path orelse {
-            g.usage_dirty = false;
-            return;
-        };
+        const path = g.path orelse return @import("slide_usage.zig").written(g);
         var scratch = std.heap.ArenaAllocator.init(g.gpa);
         defer scratch.deinit();
         const a = scratch.allocator();
@@ -495,7 +487,7 @@ pub const Graph = struct {
         const staged = try platform.atomic_file.stagePrivate(a, path, &.{body});
         if (fault == .rename) return error.GraphRename;
         try platform.atomic_file.commit(a, staged, path);
-        g.usage_dirty = false;
+        @import("slide_usage.zig").written(g);
     }
 
     fn load(g: *Graph) !void {
@@ -594,20 +586,4 @@ fn saveValue(a: Allocator, s: Save) !json.Value {
     try o.put(a, "files", try strings(a, s.files));
     if (s.message.len > 0) try o.put(a, "message", .{ .string = s.message });
     return .{ .object = o };
-}
-
-/// Whether two facts share a word of five or more letters that is not on the common list, ignoring case.
-fn shareWord(x: []const u8, y: []const u8) bool {
-    var it = std.mem.tokenizeAny(u8, x, " \t\n.,;:!?()[]\"'");
-    while (it.next()) |w| {
-        if (w.len < 5 or isCommon(w)) continue;
-        var other = std.mem.tokenizeAny(u8, y, " \t\n.,;:!?()[]\"'");
-        while (other.next()) |v| if (std.ascii.eqlIgnoreCase(w, v)) return true;
-    }
-    return false;
-}
-
-fn isCommon(w: []const u8) bool {
-    for (common) |c| if (std.ascii.eqlIgnoreCase(w, c)) return true;
-    return false;
 }

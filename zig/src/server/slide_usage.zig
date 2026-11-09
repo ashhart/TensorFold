@@ -50,6 +50,22 @@ pub fn flush(g: *Graph) !void {
     if (g.usage_dirty) try g.persist();
 }
 
+/// A graph file that exists but does not load cannot supply trusted eviction counts.
+pub fn loadFailed(g: *Graph, e: anyerror) void {
+    g.usage_invalid = e != error.FileNotFound;
+}
+
+/// A clear leaves no unreadable or unwritten counts behind.
+pub fn clear(g: *Graph) void {
+    g.usage_invalid = false;
+    g.usage_dirty = false;
+}
+
+/// Every observed use is in the graph file now, or there is no file to hold it.
+pub fn written(g: *Graph) void {
+    g.usage_dirty = false;
+}
+
 pub fn fields(a: std.mem.Allocator, o: *json.Object, f: graph.Fact) !void {
     if (f.uses > 0 or f.state == .deleted) try o.put(a, "uses", try json.intValue(a, f.uses));
     if (f.pinned) try o.put(a, "pinned", .{ .bool = true });
