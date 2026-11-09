@@ -196,3 +196,24 @@ test "after a tool call the warm pass opens the next turn as that call's result,
     const next = try std.mem.concat(a, u8, &.{ user, ",", message, ",{\"role\":\"tool\",\"tool_call_id\":\"", call, "\",\"content\":\"42\"}]", tools, "}" });
     try nextTurn(srv, &backend, first, next);
 }
+
+test "the warm pass renders the reply's reasoning as the next request sends it back" {
+    var text: Roles = .{};
+    var backend: Record = .{ .reply = "Plan.</think>Done." };
+    defer backend.deinit();
+    const srv = try serve(&backend, &text, true);
+    defer srv.deinit();
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const user = "{\"model\":\"m\",\"max_tokens\":64,\"messages\":[{\"role\":\"user\",\"content\":\"go\"}";
+    const got = try exchange(srv, "/v1/chat/completions", user ++ "]}");
+    defer t.allocator.free(got.body);
+    try t.expectEqual(@as(u16, 200), got.status);
+    const message = try replied(a, got.body);
+    try t.expectEqualStrings("Plan.", (try json.parse(a, message)).ok.strField("reasoning_content").?);
+    const first: Turns = .{ .warm_prompt = try t.allocator.dupe(u32, backend.warm_prompt), .warm_chunks = try t.allocator.dupe(u32, backend.warm_chunks) };
+    try t.expect(first.warm_prompt.len > 0);
+    const next = try std.mem.concat(a, u8, &.{ user, ",", message, ",{\"role\":\"user\",\"content\":\"next\"}]}" });
+    try nextTurn(srv, &backend, first, next);
+}

@@ -389,7 +389,9 @@ const Run = struct {
         message.put(r.a, "content", if (calls != null and reply.content.len == 0) .null else .{ .string = reply.content }) catch return;
         if (calls) |c| message.put(r.a, "tool_calls", .{ .array = c }) catch return;
         if (r.turn) |t| t.remember(r.a, r.plan.input, .{ .object = message });
-        warm.reply(r.srv, r.plan.input, .{ .object = message }, reply.thinking, reply.effort, reply.prompt_tokens);
+        // the next turn sends back the reply as its client got it, its reasoning included
+        const sent = replyMessage(r.a, reply, calls) catch return;
+        warm.reply(r.srv, r.plan.input, .{ .object = sent }, reply.thinking, reply.effort, reply.prompt_tokens);
     }
 
     fn wholeBody(r: *Run, o: *json.Object, reply: *const chat.Reply, calls: ?[]Value) Allocator.Error!void {
@@ -401,12 +403,7 @@ const Run = struct {
         const choice = try json.newObject(a);
         try choice.put(a, "index", .{ .int = "0" });
         if (r.is_chat) {
-            const message = try json.newObject(a);
-            try message.put(a, "role", .{ .string = "assistant" });
-            try message.put(a, "content", if (calls != null and reply.content.len == 0) .null else .{ .string = reply.content });
-            if (reply.reasoning) |t| if (t.len > 0) try message.put(a, "reasoning_content", .{ .string = t });
-            if (calls) |c| try message.put(a, "tool_calls", .{ .array = c });
-            try choice.put(a, "message", .{ .object = message });
+            try choice.put(a, "message", .{ .object = try replyMessage(a, reply, calls) });
             try choice.put(a, "finish_reason", .{ .string = reply.finish_reason });
             if (reply.logprobs) |lp| try choice.put(a, "logprobs", lp);
         } else {
@@ -582,6 +579,16 @@ const Run = struct {
         r.warmNext(&reply, calls);
     }
 };
+
+/// A whole reply's chat message as its client gets it; the warm pass renders the next turn from the same message.
+pub fn replyMessage(a: Allocator, reply: *const chat.Reply, calls: ?[]Value) Allocator.Error!*json.Object {
+    const message = try json.newObject(a);
+    try message.put(a, "role", .{ .string = "assistant" });
+    try message.put(a, "content", if (calls != null and reply.content.len == 0) .null else .{ .string = reply.content });
+    if (reply.reasoning) |t| if (t.len > 0) try message.put(a, "reasoning_content", .{ .string = t });
+    if (calls) |c| try message.put(a, "tool_calls", .{ .array = c });
+    return message;
+}
 
 fn roleDelta(a: Allocator) Allocator.Error!Value {
     return chat.deltaOf(a, "role", "assistant");
