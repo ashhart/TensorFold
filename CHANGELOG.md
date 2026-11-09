@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Flash Next on Metal: 6- and 8-bit row products at 2 to 4 rows take two outputs a simdgroup instead of four, so a 2,560 x 6,144 product at 2 rows takes 25% less time on an M3 Ultra; served decode is 2.4-6.0% faster with every token hash equal to main's (#2593, fixes #2553). Thanks to @abm9111.
+
 - Flash Next on Metal: a prompt chunk's staggered segments wait until the first queue reaches the chunk, so after idle, when macOS has unwired the model, a later segment no longer sits in a GPU wait past macOS's limit and fails the request with HTTP 500; warm, nothing waits (#2594, fixes #2552). Thanks to @abm9111.
 
 - Conformance: a Qwen3.8-27B Metal profile (`tools/conformance_profiles/qwen27-metal.json`, MLX 4-bit with its DFlash2 drafter), and a profile key `fresh_env` the kit sets only on the cache-off servers it starts, so the resumed gate gets a fresh side on Metal, where a stream resumes its own last chat (#2612, refs #2460). Thanks to @jschmied.
