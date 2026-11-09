@@ -89,6 +89,7 @@ const Tail = struct { start: u64, rows: u32 };
 const Host = struct {
     pub const max_slots = 4;
     pub const tap_row = ROW;
+    pub const draft_step_ms = 0.6;
     pub const tap_layers = [_]u32{ 5, 19, 33, 47, 61 };
     block: u32 = 8,
     nodes: u32 = 15,
@@ -429,4 +430,69 @@ test "draft sources: XPU DFlash2 through Drafted keeps the lane target's round f
     try std.testing.expectEqualDeep(b.facts(), ad.facts(&x, b.facts()));
     _ = &Drafted.backend; // and the adapter's operations compile on the real drafter
     _ = &@TypeOf(a).drafter;
+}
+
+test "draft sources: XPU DFlash2 refuses a gap in a prompt's rows and more held drafts than it grew" {
+    var prompt: [40]u32 = undefined;
+    for (&prompt, 0..) |*t, i| t.* = @intCast(i);
+    var a = try Stream.init(gpa, .{ .id = "a", .prompt = &prompt, .max_new = 8 });
+    defer a.deinit(gpa);
+    var c = try Stream.init(gpa, .{ .id = "c", .prompt = &prompt, .max_new = 8 });
+    defer c.deinit(gpa);
+    var r: Run = .{};
+    defer r.deinit();
+    var dflash: ad.Adapter(M, Host) = .{ .d = &r.fake, .host = &r.host };
+    var x = try Drafted.init(gpa, r.host.backend(), dflash.drafter());
+    defer x.deinit();
+    const b = x.backend();
+    r.host.owners[0] = &a;
+    r.host.chunks = &.{ .{ .start = 0, .rows = 10 }, .{ .start = 20, .rows = 20 } }; // rows 10..19 never given
+    try std.testing.expectError(error.DraftContextGap, b.prefill(&a));
+    r.host.owners[1] = &c;
+    r.host.chunks = &.{ .{ .start = 0, .rows = 30 }, .{ .start = 30, .rows = 10 } };
+    try b.prefill(&c);
+    const ss = [_]*Stream{&c};
+    try b.vtable.draft(b.ptr, &.{request(&ss, .{ .s = 0, .rows = @as(?[]const u32, null), .depth = 3, .start = 40, .first = 12 })});
+    var out: [4]u32 = undefined;
+    try b.vtable.held.?(b.ptr, &c, out[0..3]); // a chain of the 3 asked
+    try std.testing.expectError(error.DraftHeldFewer, b.vtable.held.?(b.ptr, &c, out[0..4]));
+}
+
+test "draft sources: XPU lane target refuses another slot's prompt tail and drafts without Drafted" {
+    const L = @import("xpu_lanes.zig").Lanes;
+    const xq = @import("xpu_qwen27");
+    var prompt: [40]u32 = undefined;
+    for (&prompt, 0..) |*t, i| t.* = @intCast(i);
+    var a = try Stream.init(gpa, .{ .id = "a", .prompt = &prompt, .max_new = 8 });
+    defer a.deinit(gpa);
+    var c = try Stream.init(gpa, .{ .id = "c", .prompt = &prompt, .max_new = 8 });
+    defer c.deinit(gpa);
+    var runner: xq.Runner = undefined;
+    runner.acts.taps = @ptrFromInt(0x10000);
+    var b: L = undefined;
+    b.runner = &runner;
+    b.drafter = @import("draft_sources_check.zig").present(@TypeOf(b.drafter.?));
+    b.slots = 4;
+    b.owners = @splat(null);
+    b.owners[0] = &a;
+    b.owners[1] = &c;
+    b.tapped = 0;
+    b.tail = .{ .slot = 1, .start = 0, .rows = 40 }; // c's prompt pass ran last
+    const t = b.backend();
+    const got = try t.vtable.features.?(t.ptr, &c, &.{}, 39, 1);
+    try std.testing.expectEqual(@as(u64, 39 * L.tap_row), got.offset);
+    try std.testing.expectError(error.FeaturesGone, t.vtable.features.?(t.ptr, &a, &.{}, 39, 1));
+    // through Drafted: a's first draft after c's prompt pass refuses rather than read c's rows
+    var dflash: ad.Adapter(xq.drafter, L) = .{ .d = b.drafter.?, .host = &b };
+    var x = try Drafted.init(gpa, t, dflash.drafter());
+    defer x.deinit();
+    try x.lanes.put(gpa, &a, .{});
+    const w = x.backend();
+    const first: be.DraftRequest = .{ .stream = &a, .follow = &.{}, .first = .{ .value = 9 }, .rows = null, .start = 40, .position = 41, .depth = 3 };
+    try std.testing.expectError(error.FeaturesGone, w.vtable.draft(w.ptr, &.{first}));
+    // the lane target alone holds no drafts: asked for any, it refuses; absorb-only requests pass
+    var none = first;
+    none.depth = 0;
+    try t.vtable.draft(t.ptr, &.{none});
+    try std.testing.expectError(error.DraftNotAttached, t.vtable.draft(t.ptr, &.{ none, first }));
 }
