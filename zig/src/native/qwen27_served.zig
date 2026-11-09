@@ -511,6 +511,13 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick, .probe = mtl.keepalive.Target.busy };
     if (h.trace) |*t| t.enabled = true; // serving rounds count from here: measure() timed whole, unsplit buffers
     // both Macs are loaded and allocated before either serves: rank 1 may now replay rank 0's rounds
+    if (pair) |p| {
+        h.follower = p.rank != 0;
+        // Rank 1 serves no generations: its engine only replays rank 0's rounds, so admission refuses at the door.
+        if (h.follower) h.host.health = .{ .ctx = h, .read = unhealthyFollower };
+        // The follower must listen before either rank signals ready: rank 0's measure seams follow the handshake.
+        try h.workers.startFollower(p, h.back, a, why);
+    }
     if (pair) |p| p.ready(fp.?) catch |err| {
         why.* = if (err == error.PairPeerSilent)
             "the peer never signalled ready in five minutes: start rank 1 first, with the same build on both Macs and each rank's own settings file"
