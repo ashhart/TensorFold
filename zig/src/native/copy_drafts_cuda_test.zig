@@ -447,7 +447,7 @@ test "GLM window prices: every width from the timed ones, straight between them 
     try std.testing.expect(!f.usable(k));
 }
 
-test "GLM window prices: timed ones replace the seed windows, DFlash2's shared rounds keep theirs, on both drafters" {
+test "GLM window prices: MTP takes timed prices and DFlash2 keeps every consumed seed price" {
     const f = @import("glm_cuda");
     var k: f.lane_costs.Kept = .{ .ms = undefined, .step_ms = 0.25, .fact = 0 };
     for (&k.ms, f.lane_costs.widths) |*m, w| m.* = 9 + 0.5 * @as(f64, @floatFromInt(w));
@@ -462,9 +462,9 @@ test "GLM window prices: timed ones replace the seed windows, DFlash2's shared r
         for ([_]bool{ false, true }) |copies| {
             const m = b.factsWithCopies(copies);
             try std.testing.expectEqual(@as(usize, f.lanes.max_rows), m.window_costs.len);
-            try std.testing.expectEqual(k.ms[0], m.window_costs[0].ms);
             const family: Family = if (drafter == null) .glm_mtp else .glm_block;
             const main = mainFacts(family);
+            try std.testing.expectEqual(if (drafter == null) k.ms[0] else main.window_costs[0].ms, m.window_costs[0].ms);
             try std.testing.expectEqualDeep(main.shared_costs, m.shared_costs);
             var cfg = try lanes.Config.init(a, m, 32, 31);
             defer cfg.deinit(a);
@@ -481,9 +481,9 @@ test "GLM window prices: timed ones replace the seed windows, DFlash2's shared r
             if (!copies) for (1..33) |width| {
                 try std.testing.expectEqual(main_cfg.shared_costs.get(@intCast(width)), cfg.shared_costs.get(@intCast(width)));
             };
-            try std.testing.expectEqual(k.step_ms, m.mtp_step_ms);
+            try std.testing.expectEqual(if (drafter == null) k.step_ms else main.mtp_step_ms, m.mtp_step_ms);
             try std.testing.expectEqual(copies, m.root_copies);
-            try std.testing.expectEqual(!copies, m.window_costs_lone);
+            try std.testing.expectEqual(!copies and drafter == null, m.window_costs_lone);
         }
     }
 }
