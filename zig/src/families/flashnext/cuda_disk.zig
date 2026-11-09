@@ -142,14 +142,14 @@ pub fn Kept(comptime F: type) type {
 
         /// The native key extends with policyOf under this domain (native/cuda_disk.zig keptKey).
         pub const policy_domain = "flash-cuda-policy-v1";
-        pub fn policy(target: *anyopaque) [12]u64 {
+        pub fn policy(target: *anyopaque) [13]u64 {
             return policyOf(of(target));
         }
     };
 }
 
 /// What a prompt pass that writes a kept state was resolved with at load: its rows, kernel forms and expert grids.
-pub fn policyOf(c: anytype) [12]u64 {
+pub fn policyOf(c: anytype) [13]u64 {
     const e = c.engine;
     const k = &e.batch_k;
     const f = k.forms;
@@ -157,6 +157,7 @@ pub fn policyOf(c: anytype) [12]u64 {
     grids.update(std.mem.asBytes(&k.nvfp4.resident));
     grids.update(std.mem.asBytes(&k.fp8.resident));
     if (k.expert_tile) |x| grids.update(std.mem.asBytes(&x.resident));
+    grids.update(std.mem.asBytes(&k.native_lane.prompt_sms)); // a BF16 prompt tile runs over half these SMs' worth
     return .{
         // TF_FLASHNEXT_CHUNK_SOLO and _CHUNK as resolved: a pass's rows alone, and beside a decoding stream
         e.chunk,
@@ -169,6 +170,8 @@ pub fn policyOf(c: anytype) [12]u64 {
         // TF_FLASHNEXT_PROMPT_EXPERT_TILE, _PROMPT_BF16 and TF_NVFP4_DECODE_WARPS as the kernels loaded
         if (k.expert_tile) |x| 1 + @as(u64, @backingInt(x.selection)) else 0,
         @intFromBool(k.native_lane.prompt != null),
+        // TF_QMMF_HALF_BELOW: a pass of 16 rows or fewer takes the lane's 32-column BF16 and MXFP8 tile below it
+        k.native_lane.half_below,
         k.nvfp4.warps,
         grids.final(),
         // a captured set in use, and the entries TF_FLASHNEXT_OWNED runs on our glue beside it

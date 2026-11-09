@@ -146,6 +146,8 @@ test "disk identity: Flash Next CUDA resolved prompt rows, kernel forms and expe
     k.forms = .{};
     k.expert_tile = null;
     k.native_lane.prompt = null;
+    k.native_lane.prompt_sms = 0;
+    k.native_lane.half_below = cuda.qmmf.half_below_default;
     k.nvfp4.warps = 4;
     k.nvfp4.resident = @splat(48);
     k.fp8.resident = @splat(@splat(48));
@@ -182,8 +184,16 @@ test "disk identity: Flash Next CUDA resolved prompt rows, kernel forms and expe
     try changed.appendSlice(t.allocator, &.{ up, both });
     k.expert_tile = null;
     k.native_lane.prompt = @as([2][2]cuda.Function, undefined); // TF_FLASHNEXT_PROMPT_BF16's tiles loaded
-    try changed.append(t.allocator, try flashKey(&x, &c));
+    const tiles = try flashKey(&x, &c);
+    k.native_lane.prompt_sms = 48; // the SMs those tiles' blocks are weighed against, on the same expert grids
+    const weighed = try flashKey(&x, &c);
+    try t.expect(tiles != weighed);
+    try changed.appendSlice(t.allocator, &.{ tiles, weighed });
     k.native_lane.prompt = null;
+    k.native_lane.prompt_sms = 0;
+    k.native_lane.half_below = 0; // TF_QMMF_HALF_BELOW=0: a short pass's BF16 and MXFP8 rows on the 64-column tile
+    try changed.append(t.allocator, try flashKey(&x, &c));
+    k.native_lane.half_below = cuda.qmmf.half_below_default;
     k.nvfp4.warps = 1;
     try changed.append(t.allocator, try flashKey(&x, &c));
     k.nvfp4.warps = 4;
@@ -257,12 +267,18 @@ test "disk identity: Nemotron CUDA resolved checkpoint math, expert ranks and gr
     var m: @typeInfo(@FieldType(@TypeOf(e.k), "modelopt")).optional.child = undefined;
     m.experts.warps = 4;
     m.experts.resident = @splat(48);
+    m.lane.half_below = cuda.qmmf.half_below_default;
     e.k.modelopt = m;
     const four = try nemotronKey(&x, &e);
     e.k.modelopt.?.experts.warps = 1; // TF_NVFP4_DECODE_WARPS=1 on the same grids
     const one = try nemotronKey(&x, &e);
     try t.expect(four != one);
     try changed.appendSlice(t.allocator, &.{ four, one });
+    e.k.modelopt.?.experts.warps = 4;
+    e.k.modelopt.?.lane.half_below = 0; // TF_QMMF_HALF_BELOW=0: a short pass's rows on the 64-column tile
+    const full_tile = try nemotronKey(&x, &e);
+    try t.expect(four != full_tile);
+    try changed.append(t.allocator, full_tile);
     e.k.modelopt = null;
     var ck: @typeInfo(@FieldType(@TypeOf(e.k), "ck")).optional.child = undefined;
     ck.resident = @splat(@splat(48));

@@ -96,7 +96,7 @@ pub fn identity(a: Allocator, io: std.Io, g: *const cuda.Context, dir: []const u
     return .{ .id = withPolicy(id, t.e), .rate = p.rate };
 }
 
-/// Nemotron's key past its probe: the checkpoint math and expert ranks the load resolved, the experts' grids.
+/// Nemotron's key past its probe: the checkpoint math, expert ranks and kernel choices the load resolved.
 pub fn withPolicy(legacy: u64, e: anytype) u64 {
     const k = &e.k;
     var grids = std.hash.Wyhash.init(0); // resident blocks a grid takes, from this GPU's SM count
@@ -113,6 +113,8 @@ pub fn withPolicy(legacy: u64, e: anytype) u64 {
         // a ModelOpt checkpoint's NVFP4 decode form (TF_NVFP4_DECODE_WARPS)
         if (k.modelopt) |m| m.experts.warps else 0,
         grids.final(),
+        // TF_QMMF_HALF_BELOW on a ModelOpt checkpoint's lane: the 32-column tile for passes of 16 rows or fewer
+        if (k.modelopt) |m| m.lane.half_below else 0,
     });
 }
 
