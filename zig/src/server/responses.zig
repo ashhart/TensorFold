@@ -246,6 +246,7 @@ const Reply = struct {
     call_ids: ids.Calls, // the chat run's ids over its translated body, for a call the deltas leave unnamed
     items: std.ArrayList(*json.Object) = .empty,
     current: ?*json.Object = null,
+    buffers: std.ArrayList(std.ArrayList(u8)) = .empty,
     calls: std.AutoArrayHashMapUnmanaged(i64, *json.Object) = .empty,
     seq: u64 = 0,
     final: ?Value = null,
@@ -318,6 +319,7 @@ const Reply = struct {
             try r.put(item, "status", .{ .string = "in_progress" });
         }
         r.items.append(r.a, item) catch return error.Closed;
+        r.buffers.append(r.a, .empty) catch return error.Closed;
         r.current = item;
         try r.event("response.output_item.added", &.{ .{ "output_index", try r.int(r.items.items.len - 1) }, .{ "item", .{ .object = item } } });
         if (part) |p| {
@@ -349,11 +351,18 @@ const Reply = struct {
         try r.event("response.output_item.done", &.{ .{ "output_index", where_index }, .{ "item", .{ .object = item } } });
     }
 
+    /// Each item's text or arguments grows in one buffer, including calls whose deltas interleave.
+    fn append(r: *Reply, item: *json.Object, text: []const u8) E![]const u8 {
+        const buffer = &r.buffers.items[r.index(item)];
+        buffer.appendSlice(r.a, text) catch return error.Closed;
+        return buffer.items;
+    }
+
     fn write(r: *Reply, kind: []const u8, text: []const u8) E!void {
         const reuse = if (r.current) |c| std.mem.eql(u8, c.get("type").?.string, kind) else false;
         const item = if (reuse) r.current.? else try r.open(kind, "", "");
         const part = item.get("content").?.array[0].object;
-        try r.put(part, "text", .{ .string = std.mem.concat(r.a, u8, &.{ part.get("text").?.string, text }) catch return error.Closed });
+        try r.put(part, "text", .{ .string = try r.append(item, text) });
         const where_id = item.get("id").?;
         const where_index = try r.int(r.index(item));
         if (std.mem.eql(u8, kind, "message")) {
@@ -384,7 +393,7 @@ const Reply = struct {
                 break :blk made;
             };
             if (textOf(function.get("arguments"))) |args| {
-                try r.put(item, "arguments", .{ .string = std.mem.concat(r.a, u8, &.{ item.get("arguments").?.string, args }) catch return error.Closed });
+                try r.put(item, "arguments", .{ .string = try r.append(item, args) });
                 try r.event("response.function_call_arguments.delta", &.{ .{ "item_id", item.get("id").? }, .{ "output_index", try r.int(r.index(item)) }, .{ "delta", .{ .string = args } } });
             }
         }
@@ -508,4 +517,35 @@ test "a call delta that names no id takes the chat run's id at its index, and on
     var calls: ids.Calls = .{ .key = &key, .body = chat };
     try std.testing.expectEqualStrings(try calls.id(a, 0, 1), reply.items.items[0].get("call_id").?.string);
     try std.testing.expectEqualStrings("call_sent", reply.items.items[1].get("call_id").?.string);
+}
+
+test "Server recovery: Responses grows reasoning, text and interleaved call arguments in bounded buffers" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var conn: Conn = undefined;
+    var cx: Cx = .{ .a = a };
+    var srv: Server = undefined;
+    const key: ids.Key = .of(ids.test_key_text);
+    var r: Reply = .{ .srv = &srv, .a = a, .conn = &conn, .base = try json.newObject(a), .streaming = false, .keep = false, .added = &.{}, .cx = &cx, .call_ids = .{ .key = &key, .body = .null } };
+    const chunk = "abcdefgh";
+    for ([_][]const u8{ "reasoning", "message" }) |kind| {
+        for (0..3000) |_| try r.write(kind, chunk);
+        const text = r.current.?.get("content").?.array[0].get("text").?.string;
+        try std.testing.expectEqual(@as(usize, 3000 * chunk.len), text.len);
+        for (0..3000) |i| try std.testing.expectEqualStrings(chunk, text[i * chunk.len ..][0..chunk.len]);
+    }
+    const first = (try json.parse(a, "{\"tool_calls\":[{\"index\":0,\"id\":\"a\",\"function\":{\"name\":\"f\",\"arguments\":\"abcdefgh\"}}]}")).ok;
+    const second = (try json.parse(a, "{\"tool_calls\":[{\"index\":1,\"id\":\"b\",\"function\":{\"name\":\"g\",\"arguments\":\"abcdefgh\"}}]}")).ok;
+    for (0..3000) |_| {
+        try r.delta(first);
+        try r.delta(second);
+    }
+    for ([_]i64{ 0, 1 }) |i| {
+        const args = r.calls.get(i).?.get("arguments").?.string;
+        try std.testing.expectEqual(@as(usize, 3000 * chunk.len), args.len);
+        for (0..3000) |j| try std.testing.expectEqualStrings(chunk, args[j * chunk.len ..][0..chunk.len]);
+    }
+    try std.testing.expectEqual(@as(usize, 4), r.items.items.len);
+    try std.testing.expect(arena.queryCapacity() < 4 << 20);
 }

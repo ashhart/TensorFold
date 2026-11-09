@@ -20,6 +20,7 @@ test {
     _ = @import("kimi_prompt_test.zig");
     _ = @import("kimi_text_test.zig");
     _ = @import("kimi_reply_test.zig");
+    _ = @import("kimi_stream_test.zig");
     _ = @import("kimi_http_test.zig");
     _ = @import("profile_line.zig");
     _ = @import("auth_scope_test.zig");
@@ -120,6 +121,7 @@ test {
     _ = @import("think_split_test.zig");
     _ = @import("stream_scan_text.zig");
     _ = @import("stream_scan_bench.zig");
+    _ = @import("stream_memory_wire_test.zig");
     _ = @import("stream_scan_stages.zig");
     _ = @import("think_tool_tail_test.zig");
     _ = @import("deepseek_reply_test.zig");
