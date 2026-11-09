@@ -196,9 +196,7 @@ pub const Engine = struct {
     pub fn initStage(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kv8: bool, fit: ?hosted.Fit, span: ?stage_fwd.Span) !*Engine {
         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
         const started = profile.now(io);
-        const whole = try Geometry.read(gpa, io, dir);
-        if (span) |sp| if (sp.heads != (sp.first == 0)) return error.StageHeadOffRankZero; // v1 is a ring
-        const g = if (span) |sp| try whole.stage(sp.first, sp.end, sp.heads) else whole;
+        const g = try stage_fwd.geometry(try Geometry.read(gpa, io, dir), span);
         const d = ctx.d;
         const e = try @import("cuda_prompt_int8.zig").Allocation(Engine).create(gpa);
         errdefer gpa.destroy(e);
