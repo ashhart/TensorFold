@@ -22,7 +22,7 @@ pub fn victimIn(s: *const pc.Store, skip: ?*pc.Entry, prompt: []const u32, born:
             oldest_rewind = rewind;
         }
         if (e.borrowers > 0 or e.shared or e.branched or e == skip or rewind) continue;
-        const now = (born > e.born or (born == e.born and !e.rewind)) and prompt.len > e.tokens.len and on; // this request or its reply extends it
+        const now = (born > e.born or (born == e.born and !e.rewind)) and prompt.len > e.tokens.len and on;
         if ((now or extended(s, e)) and (best == null or e.used < s.entries.items[best.?].used)) best = i;
     }
     return best orelse oldest;
@@ -48,6 +48,17 @@ pub fn own(e: *const pc.Entry, skip: ?*pc.Entry, prompt: []const u32) bool {
 pub fn extended(s: *const pc.Store, e: *const pc.Entry) bool {
     if (s.links_lost) return extendedScan(s, e);
     for (e.ext.items) |o| if (!o.expired and (!e.rewind or o.born > e.born)) return true;
+    return false;
+}
+
+/// A real later turn, excluding an endpoint's equal-born reply end, can establish a branch.
+pub fn continuedLater(s: *const pc.Store, e: *const pc.Entry) bool {
+    if (!s.links_lost) {
+        for (e.ext.items) |o| if (!o.expired and o.born > e.born) return true;
+        return false;
+    }
+    for (s.entries.items) |o| if (!o.expired and o.born > e.born and o.tokens.len > e.tokens.len and
+        std.mem.eql(u32, o.tokens[0..e.tokens.len], e.tokens)) return true;
     return false;
 }
 
