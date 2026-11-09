@@ -43,6 +43,7 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     b.step("test-qwen35-layers-host", "Qwen3.5's layer pattern through every backend's config entry point without devices").dependOn(&layers_run.step);
     step.dependOn(&layers_run.step);
     @import("glm_contract_host.zig").host(b, cuda, mods.core, step);
+    @import("ricursive_tp2.zig").hostTests(b, cuda, mods.core, mods.lanes, step);
     @import("dory.zig").host(b, @import("dory.zig").module(b, host, .debug, cuda, mods.core, mods.lanes), step);
     const attention = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"Qwen attention path:"} }));
     b.step("test-qwen35-attention-path-host", "Contiguous and paged CUDA attention selection and graph identity without devices").dependOn(&attention.step);
