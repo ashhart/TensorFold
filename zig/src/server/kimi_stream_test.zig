@@ -61,3 +61,19 @@ test "Server recovery: Kimi incremental: split Unicode, invalid subparts, repeat
     for (bytes, &ids) |b, *id| id.* = b;
     try prefixes(a, t.text(), &ids, false, &.{});
 }
+
+test "Server recovery: Kimi incremental: an id with no bytes hands the reply to the whole parse instead of failing" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const t = try @import("kimi_text_test.zig").synthetic(std.testing.allocator);
+    defer t.deinit();
+    const ids = [_]u32{ 'a', 'b', 1_000_000, 'c' };
+    try std.testing.expect(try t.text().tokenBytes(a, ids[2]) == null);
+    var stream = (try reply.Stream.init(a, t.text(), false, &.{})).?;
+    _ = try stream.extend(ids[0..2]);
+    try std.testing.expect(!stream.fallback);
+    _ = try stream.extend(&ids);
+    try std.testing.expect(stream.fallback);
+    _ = try reply.parse(a, t.text(), &ids, false, &.{});
+}
