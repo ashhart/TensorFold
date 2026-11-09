@@ -434,6 +434,8 @@ and a SIGTERM stop writes what waits within 20 seconds. It is equivalent to `--l
 the old flags remain supported, and `--learn-conversations` alone keeps its existing default directory.
 Use either spelling: combining `--prompt-cache-disk` with `--learn-dir` or `--learn-conversations` is refused.
 The startup line names the disk directory and the device budget when the engine reports one.
+GLM on Metal stages a resident or pooled state at its completed keep, before its borrowed MLA rows can be reused.
+Its synchronous writer finishes there; its asynchronous writer owns the staged bytes until publication.
 Stop a server with SIGTERM, not SIGKILL, so its last turn is kept.
 `--learn-daily-gib` caps those writes a day (32 GiB by default); `DELETE /v1/imprint` forgets one model's conversation states.
 

@@ -9,7 +9,7 @@ const Backend = glm.backend.Backend;
 const Allocator = std.mem.Allocator;
 
 /// The store's view of a kept state: its KDA states, then each MLA layer's rows as a whole state lays them out.
-pub const image: rows.Image = .{ .parts = parts, .gather = gather, .blank = blank, .blank_bytes = Backend.snapReadBytes, .scatter = scatter, .whole = whole };
+pub const image: rows.Image = .{ .parts = parts, .gather = gather, .blank = blank, .blank_bytes = Backend.snapReadBytes, .scatter = scatter, .whole = whole, .transient = transient };
 
 fn back(ptr: *anyopaque) *Backend {
     return @ptrCast(@alignCast(ptr));
@@ -83,6 +83,12 @@ fn scatter(_: *anyopaque, saved: api.prompt_cache.Saved, ranges: []const rows.im
     }
 }
 
+/// A completed keep must stage these borrowed MLA rows before a later slot or pool operation reuses them.
+fn transient(_: *anyopaque, saved: api.prompt_cache.Saved) bool {
+    const snap: *Snap = @ptrCast(@alignCast(saved));
+    return snap.home != null or snap.held != null;
+}
+
 /// A resident state whose slot has written below it is gone (stale): it cannot be read whole.
 fn whole(ptr: *anyopaque, saved: api.prompt_cache.Saved) bool {
     return back(ptr).sl.usable(@ptrCast(@alignCast(saved)));
@@ -106,6 +112,18 @@ pub fn identity(a: Allocator, io: std.Io, dir: []const u8, eng: *const glm.engin
 pub fn ehTile(eng: anytype) bool {
     const head = eng.w.mtp orelse return false;
     return eng.pr != null and head.eh_bf16 != null and eng.k.wide != null and eng.k.wide.?.bf16_nax != null;
+}
+
+test "GLM disk: resident and pooled snapshots stage before expiry; whole owned images may wait" {
+    var dummy: u8 = 0;
+    var snap: Snap = .{ .id = 1, .at = 900, .buf = undefined, .bytes = 1, .home = 0 };
+    const must_stage = image.transient orelse return error.MutableImageNotRegistered;
+    try std.testing.expect(must_stage(&dummy, &snap));
+    snap.home = null;
+    snap.held = .{ 2, 4 };
+    try std.testing.expect(must_stage(&dummy, &snap));
+    snap.held = null;
+    try std.testing.expect(!must_stage(&dummy, &snap));
 }
 
 /// Extend a probe identity with the resolved execution policy; another chunk height (pr.rows) starts cold.

@@ -29,6 +29,7 @@ pub const Failures = struct {
 pub fn queued(r: *Rows, e: *pc.Entry, starts: []const u32) void {
     if (r.stopped or e.image_frame != 0 or e.images.len != 0 or !@import("cache_images.zig").diskSafe(e.tokens)) return;
     sync.queued(r, e, starts);
+    if (r.img.transient) |mutable| if (mutable(r.family.ptr, e.saved)) preserve(r, e);
 }
 
 /// Eviction removes only a save still queued (staged work owns no entry); one that waited for room counts as skipped.
@@ -62,11 +63,17 @@ fn blocked(r: *const Rows) bool {
 
 /// A spill copies the entry before RAM releases it, without waiting for filesystem work or a byte permit.
 pub fn evicted(r: *Rows, e: *pc.Entry) void {
-    if (r.sync_writes) return sync.evicted(r, e);
-    if (r.spill == .off or r.stopped) return;
+    if (r.spill == .off) return;
+    preserve(r, e);
+}
+
+/// A completed keep may borrow mutable rows: stage them before any later backend operation can reuse them.
+fn preserve(r: *Rows, e: *pc.Entry) void {
+    if (r.stopped) return;
+    if (r.sync_writes) return sync.preserve(r, e);
     reap(r);
     for (r.queue.items, 0..) |q, i| if (q.entry == e) {
-        // The entry leaves RAM now, so a full permit skips it rather than hold it.
+        // A full permit refuses staging rather than borrowing the entry beyond this boundary.
         _ = stage(r, r.queue.orderedRemove(i), false);
         return;
     };
