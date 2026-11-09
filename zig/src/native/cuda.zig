@@ -163,7 +163,11 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     }
     if (std.mem.eql(u8, o.model_type, "fish_omni")) return openDrama(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "qwen4") or std.mem.eql(u8, o.model_type, "qwen4_text")) return @import("qwen4_cuda.zig").open(a, gpa, io, o, problem);
-    inline for (registry) |F| if (std.mem.eql(u8, o.model_type, F.model_type)) return openWith(F, a, gpa, io, o, problem);
+    inline for (registry) |F| if (std.mem.eql(u8, o.model_type, F.model_type) and ranked(F, o)) return openWith(F, a, gpa, io, o, problem);
+    inline for (registry) |F| if (comptime @hasDecl(F, "ranks")) if (std.mem.eql(u8, o.model_type, F.model_type)) {
+        problem.* = F.ranks_refusal; // a family that serves only at its own --tp, and no other family took this one
+        return null;
+    };
     if (std.mem.eql(u8, o.model_type, lfm2.family.model_type)) {
         if (refusals.lfm2(o)) |why| {
             problem.* = why;
@@ -174,6 +178,12 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     problem.* = try std.fmt.allocPrint(a, "the native CUDA engine has no backend for {s} checkpoints yet", .{o.model_type});
     return null;
 }
+
+/// A family that names its `ranks` (--tp) opens only at them; another family of its model_type takes the rest.
+fn ranked(comptime F: type, o: api.Open) bool {
+    return !@hasDecl(F, "ranks") or o.tp == F.ranks;
+}
+
 fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     if (refusals.family(F, o)) |why| {
         problem.* = why;
@@ -464,6 +474,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         .text_generation = readouts == null, // a readout engine answers its readouts only (Clef's /v1/systemone)
     }, .{ .ctx = loaded.ctx, .text = F.explain });
     opened = true;
+    if (@hasDecl(F, "thinking")) F.thinking(&h.host.info_); // a family's own think block rules
     kv_pages.warnCapacity(cache_capacity, o.keep == 0 or o.prompt_cache_gib == 0 or share, if (paged) |p| p.taken else 0, std.log); // TF_KV_SHARE: no copied rows
     if (@hasField(@TypeOf(loaded), "follow")) if (loaded.follow) |f| {
         h.follow_fn = f;
@@ -484,6 +495,14 @@ test {
     _ = prompt_pages;
     _ = cuda_device; // the device and variable tests
     _ = windows;
+}
+
+test "a family that names its ranks opens only at them; one that names none at any" {
+    const Two = struct {
+        pub const ranks: u32 = 2;
+    };
+    try std.testing.expect(ranked(Two, .{ .dir = "d", .model_type = "m", .tp = 2 }) and !ranked(Two, .{ .dir = "d", .model_type = "m" }));
+    try std.testing.expect(ranked(struct {}, .{ .dir = "d", .model_type = "m", .tp = 2 }) and ranked(struct {}, .{ .dir = "d", .model_type = "m" }));
 }
 
 test "CUDA host preserves prefill_step, first-before-draft and chunk-invariance capability" {

@@ -124,6 +124,8 @@ pub const kernels = [_]Kernel{
     .{ .name = "lfm2_moe", .flags = glue }, // ours: LFM2.5-24B-A2B's router, Liquid's 3-tap conv and commit (liquid_conv.cuh)
     .{ .name = "vit", .flags = glue }, // ours: vision towers' LayerNorm, Linear epilogues, activations, unshuffle
     .{ .name = "moss_image", .flags = glue }, // ours: MOSS-Image's modulated norm, q/k rotary, situ, gated add
+    .{ .name = "ricursive_tp2_draft", .flags = &.{"-O3"} }, // ours: Ripple's DFlash2 drafter at two ranks (tap gathers, convolutions, attention, top-k)
+    .{ .name = "ricursive_tp2", .flags = glue }, // ours: Ripple at two ranks (embed scale, value residual, gate, SwiGLU, norms, rank sum)
     .{ .name = "tree_round", .flags = &.{"-O3"} }, // ours: verified tree rounds for every family (cuda/tree_round.zig)
     .{ .name = "act_rows", .flags = &.{"-O3"} }, // ours: SwiGLU, output gates, group sums (cuda/act_rows.zig)
     .{ .name = "gemma4_ple", .flags = &.{"-O3"} }, // ours: Gemma 4 E-series per-layer inputs (gemma4/cuda_ple.zig)

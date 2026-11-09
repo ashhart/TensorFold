@@ -276,6 +276,22 @@ never rescales, a merge dropping each block's scale, a row projection dropping i
 untransposed and a prompt attention seeing the next key go red at `shapes`, and an argmax never picking a NaN at
 `nonfinite`. The INT4 release's row projections and dequantization have two more: every group taking its row's first
 zero point, and a word's nibbles read in reverse, both red at `shapes`.
+Ripple-65B's own kernels (`metal_ricursive*.zig`): its glue, each output inside float64's range at the release's bf16
+rounding points over the spread its fp32 steps allow (the scaled embedding; the add-norm in the forms the forward runs,
+the value residual's lerp, the sublayer's add and both; q and k's norms with RoPE and a ring slot on sliding layers,
+without RoPE on global ones; the output gate's fp32 sigmoid; the clamped SwiGLU), the decode attention's partials over a
+1,024-key window in a 3,072-slot ring and over a global layer's every key, and on the M5's tensor units the prompt
+attention for both layer kinds; the NVFP4 MLP (E2M1 nibbles low first, an unsigned E4M3 scale a block of 16, the
+tensor's fp32 global): its row kernels, bf16 of the global times the fp32 sum, the prompt's exact dequantization and the
+GEMM taking the global before its one rounding. Llama's row projections, merge, argmax and GEMM forms register again at
+Ripple's shapes (k to 40,960, 80 query heads, 100,352 logits), and Nemotron's `tf_sample_full`, Ripple's sampled draw,
+is held to a stated rule: each draw equals lanes' `gpu_full` twin. Fifteen controls edit the source, each red at
+`shapes`: an embedding reading its own row, an add-norm not writing its residual back, a lerp dropping its blend, a prep
+rotating a global layer or writing one ring slot late, a gate rounding its sigmoid's exp to bf16, a clamp missing its
+lower bound, a decode seeing the key before its window, a prompt attention seeing the 64 keys before it, one whose keys
+wrap 64 slots early, nibbles read high first, a scale's exponent bias off by one, the global applied after the sum
+rounds, a dequantization leaving out a block's scale, and a GEMM never taking the global. Their launches are in
+`ricursive_records.zig`.
 CUDA: the RMS norm rows (16-byte form and the fp32-out tree), the bf16 residual's norm tails (MLX's rounded rows and
 the once-rounded ones, each checked on its residual and its output, with four controls each dropping a rounding point), Nemotron's router logits (and their 128-row tiles,
 bit-equal to them) and top-k, the latent top-k's decode form (bit-equal to `tf_super_topk`), the latent combine and
@@ -417,6 +433,26 @@ Older SMs build main's loop, and their records are main's.
 CUDA also checks MOSS-Image's glue (`moss_image.cu`: the norm, plain and modulated; q/k norm and rotary into packed
 rows; situ; the gated add), each output within float64's range at its torch bf16 points (five controls, each dropping
 one point), and `vision_kernel` at head dim 128 against `contract_attn.zig`'s float64 reference (`moss-contract`).
+
+CUDA checks Ripple-65B's two-rank glue (`ricursive_tp2.cu`, `ricursive-tp2-contract`): the scaled embedding, the value
+residual's lerp below and from one half, two ranks' fp32 partials added once in rank order, the query heads padded to 12
+a key head and back, a drafter's tap rows, each bit for bit against a host rule; the output gate's fp32 sigmoid, the
+clamped SwiGLU and the post-norm add into the fp32 residual, each inside float64's range at its rounding points. Eight
+controls, each red at `shapes`: the embedding's product left unrounded, a lerp start-anchored past one half, the
+sigmoid rounded to fp16, the up projection clamped above only, a / rms rounded to bf16, rank 1's partial rounded to
+bf16, each head read from its neighbour, and taps rounded toward zero. Their launches are in `ricursive_tp2_records.zig`.
+
+CUDA checks Ripple-65B's DFlash2 drafter glue (`ricursive_tp2_draft.cu`, `ricursive-tp2-draft-contract`; both Ripple
+groups also run in `kernel-contract`): the tap ring's column gathers for either rank, the unscaled embedding into
+fp32, fp32 values into bf16 and each 2,048-logit slice's 32 best (ties to the lower id, NaN read as -Inf), each by a
+host rule; the norm (bf16 rows, and fp16 or bf16 over each block's drafts), the `__expf` SwiGLU, both 4-tap
+convolutions, the query and key head norms with and without rotation, the ring writes of keys and values, and the
+block attention with its chunk merge at a sliding and the full layer's reach, each inside float64's range at its
+rounding points. Twelve controls, each red at `shapes` and kept beside the served kernel in the same image: rows read
+from the ring's next row, the table read as fp16, values toward zero (fp32 to bf16 and the ring's values), lane ties
+to the higher id, x / rms unrounded, silu(g) rounded to bf16, each convolution on the other branch's weights, heads
+rotated the other way, ring keys read one row on, and the merge's running sum never rescaled. Their launches are in
+`ricursive_tp2_draft_records.zig`.
 
 CPU: Qwen3.5-2B's affine projection (4 bits, groups of 64, `cpu_kernels.zig`) at the widths the 2B calls it, one row
 to a 128-row prompt chunk, registered once for each chain count of its projection classes (16; 32 for the delta rule's

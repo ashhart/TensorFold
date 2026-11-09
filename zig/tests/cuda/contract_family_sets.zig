@@ -20,6 +20,8 @@ pub const Sets = struct {
     shared_down: *SharedDown,
     prompt: *Prompt,
     joint_schema: *@import("contract_joint_schema.zig").Set,
+    ripple: *@import("contract_ricursive_tp2.zig").Set,
+    ripple_draft: *@import("contract_ricursive_tp2_draft.zig").Set,
 
     /// Each set's kernels appended to `list`, in this order.
     pub fn init(gpu: check.Gpu, s: cuda.Stream, a: std.mem.Allocator, list: *std.ArrayList(g.Kernel), affine4: *cuda.qlinear.Affine4Kernels, cap: u32) !Sets {
@@ -55,6 +57,10 @@ pub const Sets = struct {
         errdefer prompt.deinit();
         try prompt.append(cap, a, list);
         const joint_schema = try @import("contract_joint_schema.zig").Set.init(gpu, s, a, list);
+        errdefer joint_schema.deinit();
+        const ripple = try @import("contract_ricursive_tp2.zig").Set.init(gpu, s, a, list);
+        errdefer ripple.deinit();
+        const ripple_draft = try @import("contract_ricursive_tp2_draft.zig").Set.init(gpu, s, a, list);
         return .{
             .gpa = gpu.gpa,
             .pocket = pocket,
@@ -67,10 +73,14 @@ pub const Sets = struct {
             .shared_down = shared_down,
             .prompt = prompt,
             .joint_schema = joint_schema,
+            .ripple = ripple,
+            .ripple_draft = ripple_draft,
         };
     }
 
     pub fn deinit(sets: Sets) void {
+        sets.ripple_draft.deinit();
+        sets.ripple.deinit();
         sets.joint_schema.deinit();
         sets.prompt.deinit();
         sets.gpa.destroy(sets.prompt);
