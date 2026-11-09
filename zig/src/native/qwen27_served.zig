@@ -112,8 +112,8 @@ pub const Host = struct {
     }
 };
 
-/// The reply-end snapshot, retaining a matching pre-reply cache state too when both fit.
-fn keepEnd(store: *pc.Store, gpa: Allocator, s: *lanes.Stream, stands: u32) void {
+/// The reply's state at `stands` (its end or one short), born with its request's prompt: that request's marks stay.
+pub fn keepEnd(store: *pc.Store, gpa: Allocator, s: *lanes.Stream, stands: u32) void {
     const prompt: u32 = @intCast(s.prompt_len);
     const tokens = s.context.items;
     if (tokens.len == prompt or stands + 1 < tokens.len or stands > tokens.len) return;
@@ -219,7 +219,7 @@ fn cap() ?[]const u8 {
 }
 
 /// Whether a new slot's `bytes` fit in `free`, once kept prompt states (never the one `restoring`) give theirs back.
-fn takeRoom(cache: ?*pc.Store, free: usize, bytes: usize, restoring: ?pc.Saved, prompt: []const u32) bool {
+pub fn takeRoom(cache: ?*pc.Store, free: usize, bytes: usize, restoring: ?pc.Saved, prompt: []const u32) bool {
     const held = if (cache) |c| c.held else 0;
     const ok = if (cache) |c| c.giveBack(restoring, prompt, Left{ .room = free, .store = c, .held = held, .bytes = bytes }) else free >= bytes;
     const freed = held - (if (cache) |c| c.held else 0);
@@ -256,52 +256,6 @@ pub const FakeStates = struct {
         f.live -= 1;
     }
 };
-
-test "--prompt-cache-gib 40: a later 192k-token slot takes its room back from kept states, never the one it restores" {
-    const gpa = std.testing.allocator;
-    const g: u64 = 1 << 30;
-    var fake: FakeStates = .{};
-    var store = pc.Store.init(gpa, .{ .ptr = &fake, .vtable = &.{ .bytes = FakeStates.bytes, .save = FakeStates.save, .restore = FakeStates.restore, .drop = FakeStates.drop } }, .{}, 40 * g);
-    defer store.deinit();
-    const tokens = try gpa.alloc(u32, 200_000);
-    defer gpa.free(tokens);
-    for ([_]u32{ 100_000, 150_000, 190_000 }, 0..) |at, k| { // three conversations' histories: 6.1, 9.2 and 11.6 GiB
-        for (tokens, 0..) |*t, i| t.* = @intCast(k * 1_000_000 + i);
-        try std.testing.expect(store.keep(tokens[0 .. at + 1], at, null, &.{}, &.{}));
-    }
-    const restoring = store.entries.items[2].saved; // the newest conversation's next turn resumes its state
-    const slot: u64 = 12_900_000_000; // a --context 196608 slot's K/V rows, taps ring and scratch
-    try std.testing.expect(!takeRoom(null, 4 * g, slot, null, tokens)); // without a cache to give back: LaneMemory
-    try std.testing.expect(takeRoom(&store, 4 * g, slot, restoring, tokens)); // 4 GiB free + 6.1 + 9.2 freed
-    try std.testing.expectEqual(@as(usize, 1), store.entries.items.len);
-    try std.testing.expect(store.entries.items[0].saved == restoring);
-    try std.testing.expect(!takeRoom(&store, 0, 2 * slot, restoring, tokens)); // its own state never goes
-    try std.testing.expectEqual(@as(usize, 1), fake.live);
-}
-
-test "a reply's end is born with its request's prompt: the history mark that request kept outlives the reply's keep" {
-    const gpa = std.testing.allocator;
-    const at: u32 = 5000; // a history mark at 5000 tokens, then a 7-token generation prompt and a 100-token reply
-    var fake: FakeStates = .{};
-    var store = pc.Store.init(gpa, .{ .ptr = &fake, .vtable = &.{ .bytes = FakeStates.bytes, .save = FakeStates.save, .restore = FakeStates.restore, .drop = FakeStates.drop } }, .{ .warm = .on }, (3 * at + 100) << 16);
-    defer store.deinit();
-    var other: [at + 7]u32 = undefined; // another conversation's prompt, its history kept first
-    for (&other, 0..) |*t, i| t.* = @intCast(i);
-    try std.testing.expect(store.keep(&other, at, null, &.{}, &.{}));
-    var tokens: [at + 107]u32 = undefined;
-    for (&tokens, 0..) |*t, i| t.* = @intCast(1_000_000 + i);
-    const prompt = tokens[0 .. at + 7];
-    try std.testing.expect(store.keep(prompt, at, null, &.{}, &.{}));
-    var s = try lanes.Stream.init(gpa, .{ .id = "reply", .prompt = prompt, .max_new = 100 });
-    defer s.deinit(gpa);
-    try s.context.appendSlice(gpa, tokens[at + 7 ..]);
-    keepEnd(&store, gpa, &s, tokens.len); // three states pass the budget: the least recently used goes
-    try std.testing.expect(store.find(&other, &.{}, &.{}) == null);
-    const history = store.find(prompt, &.{}, &.{}) orelse return error.HistoryEvicted; // a regenerate resumes it
-    try std.testing.expectEqual(at, history.at);
-    try std.testing.expectEqual(@as(u32, at + 7), store.entries.items[1].born);
-    try std.testing.expectEqual(@as(usize, 2), fake.live);
-}
 
 /// Memory the slots past the ready ones take on first use: their K/V rows and taps rings.
 fn laterBytes(h: *const Host) u64 {
@@ -534,7 +488,8 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
         // The follower must listen before rank 0's measure(): its cost-timing rounds send real seams.
         try h.workers.startFollower(p, h.back, a, why);
     }
-    // Both ranks time their lane costs: the rounds are local and symmetric, leaving both drafters level.
+    // Both ranks time their lane costs: the rounds are local and symmetric, leaving both drafters in the same state.
+>>>>>>> 56b4cc0a2 (qwen27 served: the cache tests live beside the file and the pair comments fit the lean rule; zig fmt on metal_targets)
     if (h.draft != null) try h.back.measure(io);
     tf.startup_receipt.span(.model_ready).end();
     std.log.info("{f}", .{StartupLine{ .streams = slots, .context = capacity, .draft_slots = if (h.draft != null) h.back.draft_slots else 0, .images = o.images != null }});
