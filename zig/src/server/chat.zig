@@ -130,13 +130,13 @@ pub const Prepared = struct {
     preparing: bool,
 };
 
-/// Render ``input`` and run every check that can refuse it, before anything reaches the client or the engine.
 /// A chat prompt's chunk starts, cut before the conversation's own text: fresh sessions resume their whole harness.
 pub fn requestChunks(srv: *Server, a: Allocator, ids_: []const u32, system_len: usize) ![]const u32 {
     const cut: u32 = if (srv.chunks.step > 0) @intCast(@max(system_len, 1) - 1) else 0;
     return chunk_plan.withCut(a, try srv.chunks.starts(a, ids_), cut, ids_.len, srv.chunks.min_chunk);
 }
 
+/// Render ``input`` and run every check that can refuse it, before anything reaches the client or the engine.
 pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepared {
     const a = cx.a;
     const io = srv.io;
