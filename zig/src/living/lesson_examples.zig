@@ -9,6 +9,7 @@ pub const Example = struct { ids: []const u32, start: u32, decide: u32, subject:
 /// One fact's examples; `more` another round, `undo` one back, `save` writes every kept lesson.
 pub const Lesson = struct {
     train: []const Example = &.{},
+    against: []const Example = &.{}, // a correction's old answers, cancelled by new subject neurons only
     think: []const Example = &.{}, // the facts' answers with thinking on, one learned beside each plain one
     held: []const Example = &.{},
     near: []const Example = &.{},
@@ -104,7 +105,7 @@ pub fn readsConversations(comptime Trainer: type, pocket: bool) bool {
 
 /// `lesson` checked, as a learner reads it: a prompt in a conversation longer than its passes' `rows` only by `taps`.
 pub fn readable(gpa: std.mem.Allocator, lesson: Lesson, taps: bool, rows: usize, bufs: *[4]std.ArrayList(Example)) !Lesson {
-    for ([_][]const Example{ lesson.train, lesson.think, lesson.held, lesson.near, lesson.keep, lesson.asked, lesson.unasked, lesson.kept }) |xs| for (xs) |ex| {
+    for ([_][]const Example{ lesson.train, lesson.against, lesson.think, lesson.held, lesson.near, lesson.keep, lesson.asked, lesson.unasked, lesson.kept }) |xs| for (xs) |ex| {
         if (ex.start < 1 or ex.start >= ex.ids.len or ex.decide + 1 >= ex.ids.len) return error.ExampleTooLong;
         // a prompt in a conversation is read through the host's taps, at any length
         if (ex.ids.len - 1 > rows and ex.context == 0) return error.ExampleTooLong;
@@ -129,7 +130,7 @@ pub fn disown(gpa: std.mem.Allocator, xs: []Example) void {
 }
 
 /// The lists of a lesson an edit reads.
-const edit_lists = .{ "train", "think", "held", "near", "keep", "asked", "unasked" };
+const edit_lists = .{ "train", "against", "think", "held", "near", "keep", "asked", "unasked" };
 
 /// Copies of the lists of `lesson` an edit reads, the caller's to free (disownLesson).
 pub fn ownLesson(gpa: std.mem.Allocator, lesson: Lesson) !Lesson {
