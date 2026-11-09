@@ -64,7 +64,7 @@ pub fn price(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: 
     var shape: [512]u8 = undefined;
     const block = e.drafter != null;
     const parts = try keyParts(e, ctx, &name, &shape);
-    const key = cache.key(gpa, io, &parts) catch null;
+    const key = if (parts) |v| cache.key(gpa, io, &v) catch null else null;
     if (key) |k| if (cache.load(Kept, gpa, io, k)) |kept| if (measurements.reusable(kept, block)) {
         try x.expertForm(kept.fact != 0);
         try x.idle();
@@ -81,7 +81,7 @@ pub fn price(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: 
     var s: Scratch = .{ .x = x, .io = io, .ids = ids, .most = @min(room, e.capacity - fw.window_rows - prefix - 2), .drafting = !block };
     try s.begin();
     var kept = try measurements.measure(&s, block);
-    const reference = if (!block) cache.referenceKey(&parts) else null;
+    const reference = if (!block and parts != null) cache.referenceKey(&parts.?) else null;
     if (reference) |key_ref| if (cache.load(Kept, gpa, io, key_ref)) |r| if (rule.drifted(&kept.ms, &r.ms)) try rule.again(Windows{ .s = &s }, &kept.ms);
     try x.release(0);
     try x.idle();
@@ -100,9 +100,17 @@ fn report(k: Kept, how: []const u8, block: bool) void {
 }
 
 /// Cache identity: the GPU and driver, this checkpoint and drafter, and the settings a window's time follows.
-fn keyParts(e: *const engine.Engine, ctx: *const cuda.Context, name: []u8, shape: []u8) ![3][]const u8 {
-    const at = try keyShape(e, try ctx.capability(), try ctx.d.version(), shape);
+pub fn keyParts(e: *const engine.Engine, ctx: *const cuda.Context, name: []u8, shape: []u8) !?[3][]const u8 {
+    const at = cacheShape(e, try ctx.capability(), try ctx.d.version(), shape) orelse return null;
     return .{ if (e.drafter != null) "glm-cuda-form" else "glm-cuda", ctx.name(name) catch "gpu", at };
+}
+
+/// An oversized identity disables caching; it does not reject a valid model or truncate a key.
+fn cacheShape(e: *const engine.Engine, sm: usize, driver: c_int, shape: []u8) ?[]const u8 {
+    return keyShape(e, sm, driver, shape) catch {
+        std.log.warn("glm: lane cost identity exceeds its buffer; skipping the lane cost cache", .{});
+        return null;
+    };
 }
 
 fn keyShape(e: *const engine.Engine, sm: usize, driver: c_int, shape: []u8) ![]const u8 {
