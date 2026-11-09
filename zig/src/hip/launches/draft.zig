@@ -83,10 +83,15 @@ pub fn gather(l: *const Launcher, ring: u64, ring_rows: usize, start: u64, rows:
     try l.go(l.draft.gather, dim(n, 1, 1), dim(256, 1, 1), 0, s, &a);
 }
 
+/// ringPut's shapes: no more rows than ring slots, a nonzero width, and a first position within i64.
+pub fn ringPutFits(rows: usize, width: usize, pos0: u64, ring_rows: usize) bool {
+    return ring_rows >= rows and width != 0 and pos0 <= std.math.maxInt(i64);
+}
+
 /// keys (fp32) and values (`kind`) of `rows` rows of `width` into a layer's rings at slots (pos0 + i) % ring_rows.
 pub fn ringPut(l: *const Launcher, keys: u64, values: u64, kind: c_int, k_ring: u64, v_ring: u64, rows: usize, width: usize, pos0: u64, ring_rows: usize, s: S) Error!void {
     if (rows == 0) return;
-    if (ring_rows < rows or width == 0 or pos0 > std.math.maxInt(i64)) return invalid("draft ring put");
+    if (!ringPutFits(rows, width, pos0, ring_rows)) return invalid("draft ring put");
     var a: Args = .{};
     try a.add(keys);
     try a.add(values);
@@ -99,10 +104,15 @@ pub fn ringPut(l: *const Launcher, keys: u64, values: u64, kind: c_int, k_ring: 
     try l.go(l.draft.ring_put, dim(rows, 1, 1), dim(256, 1, 1), 0, s, &a);
 }
 
+/// dynConv's shapes: a width in whole groups, branch 0 or 1, and blocks of at least one row.
+pub fn dynConvFits(d: usize, group: usize, branch: usize, block_rows: usize) bool {
+    return group != 0 and d % group == 0 and branch <= 1 and block_rows != 0;
+}
+
 /// The dynamic conv's `branch` over `rows` rows of width `d`, rows grouped by `block_rows` a stream; `res` 0: none.
 pub fn dynConv(l: *const Launcher, x: u64, dyn: u64, base: u64, res: u64, out: u64, kind: c_int, rows: usize, d: usize, group: usize, branch: usize, block_rows: usize, s: S) Error!void {
     if (rows == 0) return;
-    if (group == 0 or d % group != 0 or branch > 1 or block_rows == 0) return invalid("draft dyn conv");
+    if (!dynConvFits(d, group, branch, block_rows)) return invalid("draft dyn conv");
     var a: Args = .{};
     try a.add(x);
     try a.add(dyn);
@@ -117,10 +127,15 @@ pub fn dynConv(l: *const Launcher, x: u64, dyn: u64, base: u64, res: u64, out: u
     try l.go(l.draft.dyn_conv, dim(rows, cdiv(d, 256), 1), dim(256, 1, 1), 0, s, &a);
 }
 
+/// maskRows' shapes: blocks of at least two rows, and a nonzero width.
+pub fn maskRowsFits(d: usize, block_rows: usize) bool {
+    return block_rows >= 2 and d != 0;
+}
+
 /// Each of `streams` streams' block rows but its first, packed: (streams * (block_rows - 1), d) 16-bit values.
 pub fn maskRows(l: *const Launcher, x: u64, out: u64, streams: usize, d: usize, block_rows: usize, s: S) Error!void {
     if (streams == 0) return;
-    if (block_rows < 2 or d == 0) return invalid("draft mask rows");
+    if (!maskRowsFits(d, block_rows)) return invalid("draft mask rows");
     var a: Args = .{};
     try a.add(x);
     try a.add(out);
@@ -176,4 +191,31 @@ pub fn attention(l: *const Launcher, q: u64, kb: u64, vb: u64, mask: u64, segmen
     try b.add(kind);
     try b.add(out);
     try l.go(l.draft.attn_merge, dim(at.rows, at.heads, 1), dim(32, 1, 1), 0, s, &b);
+}
+
+test "the ring put refuses more rows than ring slots, a zero width and a first position past i64" {
+    const top: u64 = std.math.maxInt(i64);
+    try std.testing.expect(ringPutFits(16, 1024, 0, 2048));
+    try std.testing.expect(ringPutFits(2048, 1024, top, 2048));
+    try std.testing.expect(ringPutFits(1, 1, 0, 1));
+    try std.testing.expect(!ringPutFits(2049, 1024, 0, 2048));
+    try std.testing.expect(!ringPutFits(2, 1, 0, 1));
+    try std.testing.expect(!ringPutFits(16, 0, 0, 2048));
+    try std.testing.expect(!ringPutFits(16, 1024, top + 1, 2048));
+}
+
+test "the dyn conv refuses a width off its group, a zero group, a branch past 1 and zero block rows" {
+    for ([_]usize{ 0, 1 }) |branch| try std.testing.expect(dynConvFits(512, 16, branch, 8));
+    try std.testing.expect(dynConvFits(512, 512, 0, 1));
+    for ([_]usize{ 511, 513, 512 + 8 }) |d| try std.testing.expect(!dynConvFits(d, 16, 0, 8));
+    try std.testing.expect(!dynConvFits(512, 0, 0, 8));
+    for ([_]usize{ 2, 3 }) |branch| try std.testing.expect(!dynConvFits(512, 16, branch, 8));
+    try std.testing.expect(!dynConvFits(512, 16, 0, 0));
+}
+
+test "the mask rows refuse a block under 2 rows and a zero width" {
+    for ([_]usize{ 2, 8, mask_rows }) |block| try std.testing.expect(maskRowsFits(256, block));
+    try std.testing.expect(maskRowsFits(1, 2));
+    for ([_]usize{ 0, 1 }) |block| try std.testing.expect(!maskRowsFits(256, block));
+    try std.testing.expect(!maskRowsFits(0, 8));
 }
