@@ -148,3 +148,25 @@ test "shared rows stay distinct over any vocabulary, spans 7919 or 7927 divide i
         for (tokens) |t| try T.expect(!(try seen.getOrPut(T.allocator, t)).found_existing);
     }
 }
+
+test "a timed round's tokens and greedy draws follow its windows: one repeated token alone, a token a row shared" {
+    const draw = @import("hip_serve").draw;
+    var tokens: [8]u32 = undefined;
+    var reqs: [8]draw.Request = undefined;
+
+    try T.expectEqual(@as(usize, 5), costs.fillRound(&tokens, &reqs, &.{5}, 248320));
+    for (tokens[0..5]) |t| try T.expectEqual(@as(u32, 1), t);
+    for (reqs[0..5], 0..) |q, j| {
+        try T.expect(q.sampling == null);
+        try T.expectEqual(reqs[0].position + @as(u64, j), q.position);
+    }
+
+    try T.expectEqual(@as(usize, 5), costs.fillRound(&tokens, &reqs, &.{ 2, 3 }, 248320));
+    var seen: std.AutoHashMapUnmanaged(u32, void) = .empty;
+    defer seen.deinit(T.allocator);
+    for (tokens[0..5]) |t| try T.expect(!(try seen.getOrPut(T.allocator, t)).found_existing);
+    // each window's draws start at the same position
+    for ([_][2]usize{ .{ 0, 2 }, .{ 1, 3 } }) |pair| try T.expectEqual(reqs[pair[0]].position, reqs[pair[1]].position);
+    try T.expectEqual(reqs[2].position + 2, reqs[4].position);
+    for (reqs[0..5]) |q| try T.expect(q.sampling == null);
+}

@@ -24,6 +24,17 @@ pub fn fillTokens(tokens: []u32, windows: usize, vocab: usize) void {
     for (tokens, 0..) |*t, k| t.* = if (windows > 1) @intCast(1 + (k * stride) % span) else 1;
 }
 
+/// A timed round over windows of `widths`: each row's greedy draw and its token, by the window count; returns its rows.
+pub fn fillRound(tokens: []u32, reqs: []draw.Request, widths: []const usize, vocab: usize) usize {
+    var total: usize = 0;
+    for (widths) |w| {
+        for (0..w) |j| reqs[total + j] = .{ .sampling = null, .position = at + j + 1 };
+        total += w;
+    }
+    fillTokens(tokens[0..total], widths.len, vocab);
+    return total;
+}
+
 const Rig = struct {
     gpa: std.mem.Allocator,
     e: *Engine,
@@ -62,13 +73,12 @@ const Rig = struct {
 
     /// Mean ms of a verify of `streams` windows of the given widths.
     pub fn time(r: *Rig, widths: []const usize) !f64 {
-        var total: usize = 0;
+        const total = fillRound(r.tokens, r.reqs, widths, r.e.model().spec.vocab);
+        var from: usize = 0;
         for (widths, 0..) |w, i| {
-            r.rows[i] = .{ .caches = &r.caches[i], .pos = at, .tokens = r.tokens[total..][0..w] };
-            for (0..w) |j| r.reqs[total + j] = .{ .sampling = null, .position = at + j + 1 };
-            total += w;
+            r.rows[i] = .{ .caches = &r.caches[i], .pos = at, .tokens = r.tokens[from..][0..w] };
+            from += w;
         }
-        fillTokens(r.tokens[0..total], widths.len, r.e.model().spec.vocab);
         const n = shared.runs(total);
         var spent: u64 = 0;
         for (0..n.warm + n.reps) |i| {
