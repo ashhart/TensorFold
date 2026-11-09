@@ -52,7 +52,7 @@ Flash Next on CUDA keys what its prompt passes resolved at load: the solo and bu
 hyper-connection and in-pass mark forms, the NVFP4 prompt-tile threshold, K32 tile, BF16 prompt tiles and the SM count
 they are weighed against, the lane's half-tile threshold (`TF_QMMF_HALF_BELOW`), the experts' decode warps and resident
 grids, and whether a captured set runs with which entries on our glue. `TF_FLASHNEXT_KV_PAGES` and `_KV_PAGES_ALL` are
-keyed through the profile rows. Its draft, window, round, graph, lane, load-thread, I/O and dense-split settings and
+keyed through the profile rows. Its draft, window, round, graph, lane-parts (`TF_FLASHNEXT_LANE_PARTS`), load-thread, I/O and dense-split settings and
 `TF_FLASHNEXT_KV_PAGE_TEST` are not keyed: kept states come only from prompt passes, which those settings either never
 reach, reach with the same launches or the same kernels addressing pages, or refuse for disk at `--tp 2`.
 Nemotron on CUDA keys `--precision checkpoint`'s math, the expert ranks of `TF_NEMOTRON_WORLD`, a ModelOpt
