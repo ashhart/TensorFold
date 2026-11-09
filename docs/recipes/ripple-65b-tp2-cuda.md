@@ -32,6 +32,13 @@ small gathers then go by RoCE writes, the rest by NCCL, with the same bits eithe
 - Thinking: Ripple opens `<think>` itself or answers bare; a reply with no think block is all answer.
 - A rank on another GPU, a third rank or a single rank is refused by name.
 
+## Drafter
+
+The publisher's DFlash2 drafter ([ricursiveAI/Ripple-65B-Preview-DFlash2](https://huggingface.co/ricursiveAI/Ripple-65B-Preview-DFlash2),
+BF16) runs cut over both ranks as the target is. Give both ranks the same `--drafter <dir> --drafter-bits 0`: it runs
+its BF16 weights as published, and `--drafter-bits 4` is refused. Drafted replies equal `"draft": false` ones token
+for token.
+
 ## What is checked
 
 `tf-cuda-test ricursive-tp2-contract` runs the family's kernels through the kernel contract. `tf-ricursive-tp2`
