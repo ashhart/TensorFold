@@ -48,6 +48,7 @@ pub fn project(o: Ops, x: Tensor, proj: Projection, m: usize, f32_out: bool) Err
             },
             else => return error.BadShape,
         },
+        .nvfp4 => |h| return nvfp4Project(o, x, proj, h, m, f32_out),
         .bf16 => |h| {
             if (f32_out or m == 0 or x.kind != .bf16) return error.BadShape;
             const out: Tensor = .{ .ptr = try o.arena.take(m * proj.n * 2), .kind = .bf16 };
@@ -65,7 +66,7 @@ pub fn project(o: Ops, x: Tensor, proj: Projection, m: usize, f32_out: bool) Err
 pub fn projectSilu(o: Ops, x: Tensor, proj: Projection, m: usize, act: Tensor) Error!void {
     const h = switch (proj.handle) {
         .dense => |d| d,
-        .mlx, .bf16 => return error.BadShape,
+        .mlx, .bf16, .nvfp4 => return error.BadShape,
     };
     if (h.dtype != .bf16 or m == 0 or x.kind != .bf16 or act.kind != .bf16) return error.BadShape;
     if (o.l.dense.siluRefusal(x.ptr, h.weight, act.ptr, int(m), int(proj.n), int(proj.k)) != null) return error.BadShape;
@@ -78,7 +79,7 @@ pub fn projectGroup(o: Ops, x: Tensor, ps: []const Projection, m: usize, outs: [
     if (ps.len > ws.len) return false;
     for (ps, ws[0..ps.len]) |pr, *w| switch (pr.handle) {
         .mlx => |h| w.* = affineOf(pr, h),
-        .dense, .bf16 => return false,
+        .dense, .bf16, .nvfp4 => return false,
     };
     return affineGroup(o, x, ws[0..ps.len], m, outs);
 }
@@ -87,7 +88,7 @@ pub fn projectGroup(o: Ops, x: Tensor, ps: []const Projection, m: usize, outs: [
 pub fn projectRoutedAct(o: Ops, x: Tensor, proj: Projection, items: u64, count: usize, members: u64, pairs: usize, x_div: usize, rows: usize, limit: f32) Error!?Tensor {
     switch (proj.handle) {
         .mlx => |h| return affineRoutedAct(o, x, affineOf(proj, h), items, count, members, pairs, x_div, rows, limit),
-        .dense, .bf16 => return null,
+        .dense, .bf16, .nvfp4 => return null,
     }
 }
 
@@ -95,7 +96,7 @@ pub fn projectRoutedAct(o: Ops, x: Tensor, proj: Projection, items: u64, count: 
 pub fn projectRelu2(o: Ops, x: Tensor, proj: Projection, m: usize, out: Tensor) Error!bool {
     const h = switch (proj.handle) {
         .mlx => |h| h,
-        .dense, .bf16 => return false,
+        .dense, .bf16, .nvfp4 => return false,
     };
     const w = affineOf(proj, h);
     try w.check();
@@ -136,7 +137,7 @@ pub fn projectRoutedRelu2(
 ) Error!bool {
     const h = switch (proj.handle) {
         .mlx => |h| h,
-        .dense, .bf16 => return false,
+        .dense, .bf16, .nvfp4 => return false,
     };
     const w = affineOf(proj, h);
     try w.check();
@@ -174,11 +175,11 @@ pub fn projectRoutedPlainRelu2(
 ) Error!bool {
     const ha = switch (routed.handle) {
         .mlx => |h| h,
-        .dense, .bf16 => return false,
+        .dense, .bf16, .nvfp4 => return false,
     };
     const hb = switch (plain.handle) {
         .mlx => |h| h,
-        .dense, .bf16 => return false,
+        .dense, .bf16, .nvfp4 => return false,
     };
     const wa = affineOf(routed, ha);
     const wb = affineOf(plain, hb);
@@ -225,7 +226,7 @@ pub fn projectRoutedPlainRelu2(
 pub fn projectRouted(o: Ops, x: Tensor, proj: Projection, items: u64, count: usize, members: u64, pairs: usize, x_div: usize, rows: usize, expert_rows: usize) Error!u64 {
     switch (proj.handle) {
         .mlx => |h| return affineRouted(o, x, affineOf(proj, h), items, count, members, pairs, x_div, rows, expert_rows),
-        .dense, .bf16 => return error.BadShape,
+        .dense, .bf16, .nvfp4 => return error.BadShape,
     }
 }
 
@@ -235,6 +236,8 @@ pub fn embedRows(o: Ops, table: Projection, ids: u64, n: usize, out: Tensor) Err
         .mlx => |h| return embedAffine(o, affineOf(table, h), ids, n, out),
         .dense => |h| try o.l.tf_embed_dense(p(h.weight), @backingInt(try kindOf(h.dtype)), @ptrFromInt(ids), int(n), int(table.k), p(out.ptr), @backingInt(out.kind), o.stream),
         .bf16 => |h| try o.l.tf_embed_dense(p(h.weight), @backingInt(t.Kind.bf16), @ptrFromInt(ids), int(n), int(table.k), p(out.ptr), @backingInt(out.kind), o.stream),
+        // ModelOpt quantizes linear modules; an embedding table is BF16 or a float table in every checkpoint it writes
+        .nvfp4 => return error.BadShape,
     }
 }
 
@@ -413,4 +416,33 @@ fn kindOf(dtype: quant.DType) Error!t.Kind {
         .f16 => .f16,
         else => error.BadShape,
     };
+}
+
+/// An NVFP4 product: the checkpoint's codes and group scales as stored, e2m1 decoded in flight on the dot2 tiles.
+fn nvfp4Project(o: Ops, x: Tensor, proj: Projection, h: quant.nvfp4.Matrix, m: usize, f32_out: bool) Error!Tensor {
+    const fp16 = x.kind == .f16;
+    if (m == 0 or x.kind == .f32 or (fp16 and o.bf16) or (!fp16 and !o.bf16)) return error.BadShape;
+    if (proj.k % 32 != 0) return error.BadShape;
+    const wide: Tensor = .{ .ptr = try o.arena.take(m * proj.n * 4), .kind = .f32 };
+    // the counting stream sizes the arena: no product runs on its addresses
+    if (o.stream == counting) return wide;
+    const launched = @import("../launches/nvfp4.zig");
+    const w: launched.Weight = .{
+        .x = x.ptr,
+        .words = h.codes,
+        .scale = .{ .p = h.scale, .kind = @backingInt(h.tables) },
+        .out = wide.ptr,
+        .m = int(m),
+        .n = int(proj.n),
+        .k = int(proj.k),
+        .fp16 = @intFromBool(fp16),
+        .global = h.global,
+    };
+    // one product for every row count, so a row's bits do not depend on how many rows its round carries
+    launched.Kernels.gemmGo(&o.l.nvfp4, o.l.r, w, o.stream) catch |err|
+        return if (err == error.Invalid) error.BadShape else error.HipFailed;
+    if (f32_out) return wide;
+    const narrow: Tensor = .{ .ptr = try o.arena.take(m * proj.n * x.kind.size()), .kind = x.kind };
+    try o.cast(wide, narrow, m * proj.n);
+    return narrow;
 }
