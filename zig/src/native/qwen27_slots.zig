@@ -421,7 +421,10 @@ pub fn ready(b: *Metal, slot: u32, s: *const lanes.Stream) !void {
 fn contextBytes(d: q.drafter.Any, drafting: bool) usize {
     const g = d.ring();
     const ring = @as(usize, g.window) * g.stride;
-    const m = d.dflash() orelse return ring; // DSpine drafts slot 0 alone: past it, only the taps ring
+    const m = switch (d) {
+        .dflash2 => |m| m,
+        .dspine => |m| return m.contextBytes(drafting),
+    };
     const c = m.graph.config;
     var caches: usize = 0;
     if (drafting) for (0..c.layers) |i| {
