@@ -16,14 +16,19 @@ const int = trail.int;
 
 /// The stream windows of a shared round in one forward, then each verified, committed and drafted on its own.
 pub fn run(e: *Engine, entries: []*Stream) !void {
+    return if (e.cfg.plain_guard) runPriced(e, entries, true) else runPriced(e, entries, false);
+}
+
+fn runPriced(e: *Engine, entries: []*Stream, comptime independent: bool) !void {
+    if (!independent) e.clock.start();
     try e.late.flush(e, Engine.askDrafts);
-    // A deferred lone draft belongs to the preceding round, not this shared round.
-    e.clock.start();
+    // Only the independent plain measurement excludes a preceding lone draft.
+    if (independent) e.clock.start();
     const a = e.arena.allocator();
     const plans = try a.alloc(Plan, entries.len);
     for (entries, plans) |s, *p| p.* = try win.plan(e, s, null);
     const sampled = win.anySampled(plans);
-    const calibration = try @import("shared_price.zig").calibrate(e, plans);
+    const calibration = independent and try @import("shared_price.zig").calibrate(e, plans);
     if (calibration) {
         for (plans) |*p| try @import("window_cut.zig").prefix(a, p, 0);
     } else try win.allocate(e, plans);
@@ -57,8 +62,10 @@ pub fn run(e: *Engine, entries: []*Stream) !void {
         @memset(budgets, 0)
     else if (e.cfg.allocate_shared_drafts)
         try @import("shared_drafts.zig").budgets(e, plans, heads.items, budgets)
+    else if (independent)
+        try e.rule.budgetsFor(whos, win.probe(e), sampled, budgets, plans.len)
     else
-        try e.rule.budgetsFor(whos, win.probe(e), sampled, budgets, plans.len);
+        try e.rule.budgets(whos, win.probe(e), sampled, budgets);
     const ids = try a.alloc(ev.Value, heads.items.len);
     for (ids, heads.items) |*id, i| id.* = str(plans[i].stream.id);
     try trail.event(e, &.{ f("ev", str("budgets")), f("streams", .{ .list = ids }), f("depths", .{ .i64s = budgets }) });
@@ -85,9 +92,11 @@ pub fn run(e: *Engine, entries: []*Stream) !void {
         for (budgets) |d| steps = if (e.cfg.draft_streams and depth.pricedBatched()) @max(steps, d - 1) else steps + @max(0, d - 1);
         const ms = e.clock.elapsedMs(.overhead) - e.cfg.draft_step_ms * @as(f64, @floatFromInt(steps));
         try trail.event(e, &.{ f("ev", str("overhead")), f("streams", int(plans.len)), f("rows", int(total)), f("ms", ev.bits(ms)) });
-        var plain = total == plans.len;
-        for (budgets) |d| plain = plain and d == 0;
-        try e.rule.observeShared(@intCast(plans.len), total, ms, sampled, e.rule.headMs(budgets), plain, calibration);
+        if (independent) {
+            var plain = total == plans.len;
+            for (budgets) |d| plain = plain and d == 0;
+            try e.rule.observeShared(@intCast(plans.len), total, ms, sampled, e.rule.headMs(budgets), plain, calibration);
+        } else try e.rule.observeOverhead(@intCast(plans.len), total, ms, sampled, e.rule.headMs(budgets));
     }
     if (e.backend.round_observer != null) e.backend.observed(paths);
 }

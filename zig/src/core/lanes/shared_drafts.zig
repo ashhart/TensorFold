@@ -87,7 +87,9 @@ fn costLimits(e: *Engine, plans: []const win.Plan, heads: []const usize, sampled
     const probe: depth.Probe = .{ .ptr = e, .copy = noCopy };
     if (e.cfg.granted_depth) {
         for (who, out) |*w, *d| d.* = try e.rule.headDepth(w, null, probe); // each stream's grant plus slack, once
-    } else try e.rule.budgetsFor(who, probe, sampled, out, plans.len);
+    } else if (e.cfg.plain_guard) {
+        try e.rule.budgetsFor(who, probe, sampled, out, plans.len);
+    } else try e.rule.budgets(who, probe, sampled, out);
     const limits = try a.alloc(u32, plans.len);
     @memset(limits, e.cfg.most_drafts);
     for (heads, out) |i, d| limits[i] = @intCast(@max(0, d));
@@ -107,7 +109,10 @@ fn payReserved(e: *Engine, who: []depth.Who, probs: []const []const f64, heads: 
         for (probs[i][0..@min(kept, probs[i].len)]) |chance| gain += chance;
         w.gain = gain;
     }
-    try e.rule.payHoldsFor(who, sampled, out, probs.len);
+    if (e.cfg.plain_guard)
+        try e.rule.payHoldsFor(who, sampled, out, probs.len)
+    else
+        try e.rule.payHolds(who, sampled, out);
 }
 
 test "shared draft prices: a short cached tree can grow when allocation returns more rows" {
