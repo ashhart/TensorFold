@@ -222,7 +222,7 @@ test "a prompt cut on either side of 64 rows gives the same rows and state as on
     }
 }
 
-test "a prompt's recurrence a block a value head gives the bits of a wave a row (Flash Next: 16 key, 48 value heads)" {
+test "prompt recurrence at half a value head a block gives a wave a row's bits (Flash Next: 16 key, 48 value heads)" {
     const t = try Rig.open(1 << 30);
     defer t.close();
     for ([_]Shape{
@@ -243,7 +243,7 @@ test "a prompt's recurrence a block a value head gives the bits of a wave a row 
             var y = try t.alloc(sh.length * sh.value_heads * d * 4);
             defer y.free();
             try y.fill8(0xff);
-            // a wave a row: the same launch with snapshots asked for; a block a value head: none
+            // a wave a row: the same launch with snapshots asked for; half a value head a block: none
             var snaps = try t.alloc(if (w == 0) sh.length * state_bytes else 4);
             defer snaps.free();
             const F = ?[*]f32;
