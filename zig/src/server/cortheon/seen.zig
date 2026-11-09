@@ -98,7 +98,7 @@ pub fn registry(url: []const u8) bool {
         if (after) |v| if (!(std.ascii.eqlIgnoreCase(v, "latest") or versionName(v))) return false; // Latest is the same path
         return packageName(name) and parts.next() == null;
     }
-    if (std.mem.startsWith(u8, url, "https://crates.io/api/v1/crates/")) {
+    if (std.ascii.startsWithIgnoreCase(url, "https://crates.io/api/v1/crates/")) { // Crates.io is the same host
         var parts = std.mem.splitScalar(u8, url["https://crates.io/api/v1/crates/".len..], '/');
         const name = parts.next() orelse return false;
         if (parts.next()) |v| if (!versionName(v)) return false;
@@ -151,4 +151,9 @@ test "npm registry allows a host whose letters differ" {
 
 test "npm registry allows Latest when latest's letters differ" {
     try std.testing.expect(registry("https://registry.npmjs.org/react/Latest"));
+}
+
+test "crates registry allows a host whose letters differ" {
+    try std.testing.expect(registry("https://Crates.io/api/v1/crates/serde"));
+    try std.testing.expect(registry("https://Crates.io/api/v1/crates/serde/1.0.210"));
 }
