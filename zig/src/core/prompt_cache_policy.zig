@@ -12,6 +12,8 @@ pub fn victimIn(s: *const pc.Store, skip: ?*pc.Entry, prompt: []const u32, born:
     var oldest: ?usize = null;
     var oldest_rewind = false;
     for (s.entries.items, 0..) |e, i| { // one prefix compare an entry: the superseded scan and the oldest scan share it
+        if (e.borrowers > 0 or e == skip) continue;
+        if (s.reservation_guard) |g| if (g.needed(g.ctx, e)) continue;
         if (own_only and !own(e, skip, prompt)) continue;
         const on = e.tokens.len <= prompt.len and std.mem.eql(u32, prompt[0..e.tokens.len], e.tokens);
         const rewind = !e.expired and e.at == s.active_rewind_at and on; // the active rewind state goes last
@@ -24,6 +26,16 @@ pub fn victimIn(s: *const pc.Store, skip: ?*pc.Entry, prompt: []const u32, born:
         if ((now or extended(s, e)) and (best == null or e.used < s.entries.items[best.?].used)) best = i;
     }
     return best orelse oldest;
+}
+
+/// A reservation may free redundant copies, but not a newest state just to plan more copies.
+pub fn redundant(s: *const pc.Store, e: *const pc.Entry, prompt: []const u32, born: u32) bool {
+    if (e.expired) return true;
+    if (e.shared or e.branched) return false;
+    const on = e.tokens.len <= prompt.len and std.mem.eql(u32, e.tokens, prompt[0..e.tokens.len]);
+    if (e.at == s.active_rewind_at and on) return false;
+    const now = (born > e.born or (born == e.born and !e.rewind)) and prompt.len > e.tokens.len and on;
+    return now or extended(s, e);
 }
 
 /// A state of the prompt's own conversation that may go: unborrowed, on its token path, neither shared nor a branch.
