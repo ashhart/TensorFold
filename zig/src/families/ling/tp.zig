@@ -26,8 +26,8 @@ pub fn place(get: *const fn ([*:0]const u8) ?[:0]const u8) !Place {
 
 pub const env = @import("sys").getenv;
 
-extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+const setenv = @import("sys").env.setenv;
+const unsetenv = @import("sys").env.unsetenv;
 
 /// The ranks' NCCL group as GLM opens it: rank 0's unique id over the TCP line (tp_watch.start ran first).
 pub fn group(io: std.Io, p: Place) !cuda.tp_group.Group {
