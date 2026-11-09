@@ -78,7 +78,7 @@ pub const Engine = struct {
     b: state.Buffers,
     c: Config,
     max_len: usize,
-    nch: usize = 0, // attention chunk programs a row: a captured _chunk variant's NCH covering max_len (bits ignore it)
+    nch: usize = 0, // attention chunk programs a row: a captured _chunk variant's NCH covering max_len (keyed then)
     pinned: cuda.HostBuffer,
     history: cuda.HostBuffer, // mapped: a serial round's kernel writes its token here, by position
     history_dev: u64 = 0,
