@@ -9,8 +9,8 @@ const mul1_magic: u32 = 0x83DCD12D;
 
 /// A rank's share: q/k/v/g, gate/up and the head by output columns; o and down by input rows (their sums added once).
 pub const Cut = struct {
-    rank: usize = 0,
-    world: usize = 1,
+    rank: usize,
+    world: usize,
 
     /// [lo, hi) of `n` for this rank, whole 128-wide blocks.
     pub fn span(c: Cut, n: usize) !struct { lo: usize, hi: usize } {
@@ -101,11 +101,7 @@ pub fn exl3(w: *Weights, d: *const cuda.Driver, ck: *core.Checkpoint, base: []co
     var trellis: u64 = 0;
     var su: u64 = 0;
     var sv: u64 = 0;
-    if (cut.world == 1) {
-        trellis = try w.put(d, t.bytes);
-        su = try w.put(d, suh.bytes);
-        sv = try w.put(d, svh.bytes);
-    } else if (side == .rows) { // input rows: a contiguous run of k/16 tile rows and suh's matching span
+    if (side == .rows) { // input rows: a contiguous run of k/16 tile rows and suh's matching span
         const sp = try cut.span(k);
         rk = sp.hi - sp.lo;
         const row = (n / 16) * tile;
