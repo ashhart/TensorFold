@@ -1,5 +1,6 @@
 //! Dense Qwen text configuration and checkpoint contracts. GPU forward pieces follow separately.
 pub const dflash = @import("dflash/root.zig");
+pub const dspine = @import("dspine/root.zig");
 pub const gguf = @import("gguf.zig");
 pub const config = @import("config.zig");
 pub const tied_head = @import("tied_head.zig");
@@ -55,6 +56,7 @@ pub const stage_planes = @import("stage_planes.zig");
 pub const runtime_sources = @import("qwen_runtime_sources");
 test {
     _ = dflash;
+    _ = dspine;
     _ = disk;
     _ = @import("core").gpu_profile;
     _ = @import("core").qwen35_stages;
