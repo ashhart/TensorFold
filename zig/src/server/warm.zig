@@ -65,19 +65,29 @@ fn start(srv: *Server, input: chat.Input, message: Value, thinking: bool, effort
 /// The tokens every next user or tool turn shares: two renderings agree up to that turn's text.
 fn shared(srv: *Server, cx: *errors.Cx, input: chat.Input, message: Value, thinking: bool, effort: ?[]const u8) !struct { ids: []const u32, messages: []Value } {
     const before = input.messages.array;
+    const call_id = firstCallId(message);
     var ids: [2][]const u32 = undefined;
     var first: []Value = undefined;
     for ([_][]const u8{ "A", "B" }, &ids, 0..) |text, *out, i| {
         const list = try cx.a.alloc(Value, before.len + 2);
         @memcpy(list[0..before.len], before);
         list[before.len] = message;
-        const user = try json.newObject(cx.a);
-        try user.put(cx.a, "role", .{ .string = "user" });
-        try user.put(cx.a, "content", .{ .string = text });
-        list[before.len + 1] = .{ .object = user };
+        // a reply that called tools is answered by their results: the next turn opens as its first call's result
+        const next = try json.newObject(cx.a);
+        try next.put(cx.a, "role", .{ .string = if (call_id != null) "tool" else "user" });
+        if (call_id) |id| try next.put(cx.a, "tool_call_id", .{ .string = id });
+        try next.put(cx.a, "content", .{ .string = text });
+        list[before.len + 1] = .{ .object = next };
         if (i == 0) first = list;
         out.* = try prompt_mod.renderIds(srv, cx, .{ .array = list }, input.tools, thinking, effort, true);
     }
     const n = std.mem.indexOfDiff(u32, ids[0], ids[1]) orelse return .{ .ids = &.{}, .messages = first };
     return .{ .ids = ids[0][0..n], .messages = first };
+}
+
+/// The reply's first tool call's id when it made calls (the next turn opens with that call's result); else null.
+fn firstCallId(message: Value) ?[]const u8 {
+    const calls = message.get("tool_calls") orelse return null;
+    if (calls != .array or calls.array.len == 0) return null;
+    return calls.array[0].strField("id") orelse "";
 }

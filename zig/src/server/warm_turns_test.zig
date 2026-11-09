@@ -167,3 +167,32 @@ test "a warm pass cuts its chunks where the next turn's request does, at the sys
     try t.expect(below.items.len >= 2);
     try t.expectEqualSlices(u32, below.items, warm_chunks);
 }
+
+const tools = ",\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"parameters\":{\"type\":\"object\"}}}]";
+
+/// The first request's reply message as its client got it, compact, for the next request to send back.
+fn replied(a: std.mem.Allocator, body: []const u8) ![]const u8 {
+    const message = (try json.parse(a, body)).ok.get("choices").?.array[0].get("message").?;
+    return json.stringify(a, message, .{ .compact = true });
+}
+
+test "after a tool call the warm pass opens the next turn as that call's result, as the next request does" {
+    var text: Roles = .{};
+    var backend: Record = .{ .reply = "<tool_call>{\"name\":\"lookup\",\"arguments\":{\"q\":\"a\"}}</tool_call>" };
+    defer backend.deinit();
+    const srv = try serve(&backend, &text, false);
+    defer srv.deinit();
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const user = "{\"model\":\"m\",\"max_tokens\":256,\"messages\":[{\"role\":\"user\",\"content\":\"go\"}";
+    const got = try exchange(srv, "/v1/chat/completions", user ++ "]" ++ tools ++ "}");
+    defer t.allocator.free(got.body);
+    try t.expectEqual(@as(u16, 200), got.status);
+    const message = try replied(a, got.body);
+    const call = (try json.parse(a, message)).ok.get("tool_calls").?.array[0].strField("id").?;
+    const first: Turns = .{ .warm_prompt = try t.allocator.dupe(u32, backend.warm_prompt), .warm_chunks = try t.allocator.dupe(u32, backend.warm_chunks) };
+    try t.expect(first.warm_prompt.len > 0);
+    const next = try std.mem.concat(a, u8, &.{ user, ",", message, ",{\"role\":\"tool\",\"tool_call_id\":\"", call, "\",\"content\":\"42\"}]", tools, "}" });
+    try nextTurn(srv, &backend, first, next);
+}
