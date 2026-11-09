@@ -90,7 +90,8 @@ test "a reply end supersedes its equal-born history under pressure: regeneration
     try std.testing.expectEqual(@as(u32, 0), try request(&f, &s, a, &t1));
     const reply = t1 ++ seq(6, 500); // the reply decoded after it
     _ = f.pass(&s, &reply, .{ .from = 20 });
-    try std.testing.expect(s.keepBorn(&reply, 20, 26, null, &.{}, &.{})); // 126 more: the redundant history goes before another conversation
+    // The redundant history goes before another conversation.
+    try std.testing.expect(s.keepBorn(&reply, 20, 26, null, &.{}, &.{}));
     try std.testing.expect(s.find(&x, &.{}, &.{}) != null);
     const y = seq(20, 300); // an unrelated prompt now needs one newest state
     try std.testing.expectEqual(@as(u32, 0), try request(&f, &s, a, &y));
@@ -134,7 +135,7 @@ test "a warm pass frees its equal-born redundant history before another conversa
     defer arena.deinit();
     const a = arena.allocator();
     var f: Fake = .{ .gpa = gpa };
-    var s = Store.init(gpa, f.snapshots(), .{ .lookahead = 1, .warm = .waits, .min_prompt = 0, .min_gap = 3 }, 470); // fake bytes 100 + at
+    var s = Store.init(gpa, f.snapshots(), .{ .lookahead = 1, .warm = .waits, .min_prompt = 0, .min_gap = 3 }, 470);
     defer s.deinit();
     const x = seq(20, 100); // another conversation's history, the least recently used state
     try std.testing.expectEqual(@as(u32, 0), try request(&f, &s, a, &x));
@@ -142,7 +143,8 @@ test "a warm pass frees its equal-born redundant history before another conversa
     try std.testing.expectEqual(@as(u32, 0), try request(&f, &s, a, &t1));
     const reply = t1 ++ seq(6, 500);
     _ = f.pass(&s, reply[0..25], .{ .from = 20 });
-    try std.testing.expect(s.keepBorn(&reply, 20, 25, null, &.{}, &.{})); // the reply's end, its lookahead token in the reply
+    // The reply's end, including its lookahead token.
+    try std.testing.expect(s.keepBorn(&reply, 20, 25, null, &.{}, &.{}));
     const warm = reply ++ seq(3, 900); // the reply as sent and the next turn's opening: its mark at 28 needs 128 more
     const l = try s.lookupRewind(a, &warm, 20, warm.len, 0, &.{}, &.{}, &.{});
     try std.testing.expectEqual(@as(u32, 25), l.entry.?.at);

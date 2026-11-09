@@ -82,3 +82,21 @@ test "newest cache: an identical resend does not pin an endpoint ahead of anothe
     try std.testing.expect(s.find(&other, &.{}, &.{}) != null);
     try std.testing.expectEqual(@as(u32, 12), s.find(&own, &.{}, &.{}).?.at);
 }
+
+test "newest cache: a re-rendered reply does not pin its equal-born endpoint as a branch" {
+    for ([_]bool{ false, true }) |scan| {
+        var f: Fake = .{ .gpa = a };
+        var s = pc.Store.init(a, f.snapshots(), .{ .min_prompt = 0 }, 10000);
+        defer s.deinit();
+        const words = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
+        try put(&f, &s, words[0..10], 10, 7);
+        try put(&f, &s, words[0..14], 10, 14);
+        const endpoint = s.find(words[0..10], &.{}, &.{}).?;
+        var next = words;
+        next[10] = 99;
+        s.links_lost = scan;
+        s.resumed(endpoint, &next, true);
+        try std.testing.expect(!endpoint.branched);
+        try std.testing.expect(@import("prompt_cache_policy.zig").redundant(&s, endpoint, &.{}, 0));
+    }
+}
