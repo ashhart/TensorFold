@@ -4,7 +4,7 @@ const api = @import("engine_api");
 const server = @import("root.zig");
 const json = server.json;
 const model_text = @import("model_text.zig");
-const exchange = @import("late_system_test.zig").exchange;
+const Conn = @import("http_conn.zig").Conn;
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
 
@@ -114,6 +114,28 @@ const responses_tool = "{\"type\":\"function\",\"name\":\"write_file\",\"paramet
 /// What a route's reply says: its status, text, the call's arguments, and why it ended.
 const Seen = struct { status: u16, text: []const u8 = "", args: []const u8 = "", finish: []const u8 = "" };
 
+/// The whole reply a route wrote, held in memory (a socket pair would cap a stream at the OS buffer, 8 KiB on macOS).
+const Wire = struct {
+    a: Allocator,
+    bytes: std.ArrayList(u8) = .empty,
+    fn write(p: *anyopaque, bytes: []const u8) error{Closed}!void {
+        const w: *@This() = @ptrCast(@alignCast(p));
+        w.bytes.appendSlice(w.a, bytes) catch return error.Closed;
+    }
+};
+
+/// `body` posted to `path` (/v1/messages or /v1/responses), its status and payload as written.
+fn capture(a: Allocator, srv: *server.Server, path: []const u8, body: []const u8) !struct { status: u16, body: []const u8 } {
+    var wire: Wire = .{ .a = a };
+    var headers = [_]@import("http_conn.zig").Header{.{ .name = "Content-Length", .value = try std.fmt.allocPrint(a, "{d}", .{body.len}) }};
+    var c: Conn = .{ .fd = -1, .peer = "", .buf = try a.dupe(u8, body), .end = body.len, .gpa = a, .version = "HTTP/1.1", .method = "POST", .path = path, .headers = &headers, .write_hooks = .{ .ctx = &wire, .write = Wire.write } };
+    if (std.mem.eql(u8, path, "/v1/messages")) @import("anthropic.zig").post(srv, &c, a) else @import("responses.zig").post(srv, &c, a);
+    const raw = wire.bytes.items;
+    const split = std.mem.indexOf(u8, raw, "\r\n\r\n") orelse return error.BadReply;
+    const status = std.fmt.parseInt(u16, raw["HTTP/1.1 ".len..][0..3], 10) catch return error.BadReply;
+    return .{ .status = status, .body = raw[split + 4 ..] };
+}
+
 /// `reply` cut at its end on `path`, whole or streamed, read back as `Seen`.
 fn send(a: Allocator, path: []const u8, reply: []const u8, stream: bool) !Seen {
     var text: ByteText = .{};
@@ -133,9 +155,8 @@ fn send(a: Allocator, path: []const u8, reply: []const u8, stream: bool) !Seen {
         if (messages) "\"messages\":[{\"role\":\"user\",\"content\":\"x\"}]" else "\"input\":\"x\"",
         if (messages) messages_tool else responses_tool,
     });
-    const got = try exchange(srv, path, body);
-    defer testing.allocator.free(got.body);
-    const raw = try a.dupe(u8, got.body);
+    const got = try capture(a, srv, path, body);
+    const raw = got.body;
     var seen: Seen = .{ .status = got.status };
     if (got.status != 200) return seen;
     if (!stream) {
