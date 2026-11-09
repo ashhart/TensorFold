@@ -156,18 +156,18 @@ pub fn attach(gpa: Allocator, store: *api.prompt_cache.Store, id: anytype, l: an
     return r;
 }
 
-/// Extend a probe identity with the loaded execution policy.
+/// Extend a probe identity with the loaded execution policy (`serial` orders launches, not arithmetic: not keyed).
 pub fn withPolicy(legacy: u64, run: anytype) u64 {
     return @import("persistence_policy.zig").extend(legacy, "flash-metal-policy-v1", &.{
-        @intFromBool(run.fused_xsum),    @intFromBool(run.serial),           @intFromBool(run.dense),
-        @intFromBool(run.dense_target),  @intFromBool(run.split),            @intFromBool(run.gdn_step),
-        @intFromBool(run.hc_mma),        @intFromBool(run.grouped),          @intFromBool(run.xpack),
-        @intFromBool(run.xfused),        @intFromBool(run.xsx),              @intFromBool(run.copy),
-        @intFromBool(run.prefetch),      @intFromBool(run.lane_new),         @intFromBool(run.rotary_enabled),
-        run.skip,                        run.hcskip,                         run.gskip,
-        run.lane_pf,                     @intFromBool(run.gdn_pipe != null), @intFromBool(run.gdn_kept != null),
-        @intFromBool(run.gx != null),    if (run.gx) |g| g.min_rows else 0,  @intFromBool(run.tp != null),
-        if (run.tp) |tp| tp.rank else 0,
+        @intFromBool(run.fused_xsum),       @intFromBool(run.dense),            @intFromBool(run.dense_target),
+        @intFromBool(run.split),            @intFromBool(run.gdn_step),         @intFromBool(run.hc_mma),
+        @intFromBool(run.grouped),          @intFromBool(run.xpack),            @intFromBool(run.xfused),
+        @intFromBool(run.xsx),              @intFromBool(run.copy),             @intFromBool(run.prefetch),
+        @intFromBool(run.lane_new),         @intFromBool(run.rotary_enabled),   run.skip,
+        run.hcskip,                         run.gskip,                          run.lane_pf,
+        // fz_gdn and its kept-state form write the DeltaNet state and conv rows a snapshot copies (snapshot.zig)
+        @intFromBool(run.gdn_pipe != null), @intFromBool(run.gdn_kept != null), @intFromBool(run.gx != null),
+        if (run.gx) |g| g.min_rows else 0,  @intFromBool(run.tp != null),       if (run.tp) |tp| tp.rank else 0,
     });
 }
 
