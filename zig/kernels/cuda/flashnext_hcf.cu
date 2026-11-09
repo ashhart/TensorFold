@@ -1,4 +1,5 @@
 // #952's hyper-connection read-out (fn_hc_down / fn_hc_upmix bits) on prompt tiles: factored groups, norm in smem.
+#include "common/fold.cuh"
 #include "common/qmm_frag.cuh"
 #include "common/glue_math.cuh"
 
@@ -61,8 +62,7 @@ __global__ void __launch_bounds__(WM * WN * 32, MINB) hcf_kernel(
     if constexpr (NORM) {
         for (int i = tid; i < BM * SS; i += T::THREADS) {
             const int r = min(m0 + i / SS, M - 1), st = i % SS;
-            float total = 0.0f;
-            for (int c = 0; c < NC; ++c) total = __fadd_rn(total, pss[(static_cast<long long>(r) * NC + c) * SS + st]);
+            const float total = tf_common::sum_rn(NC, [&](int c) { return pss[(static_cast<long long>(r) * NC + c) * SS + st]; });
             rinv_s[i] = tf_common::rms_scale(total, D, eps);
         }
     }
