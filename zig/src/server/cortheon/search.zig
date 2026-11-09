@@ -68,6 +68,32 @@ fn lastIgnoreCase(hay: []const u8, needle: []const u8) ?usize {
     return last;
 }
 
+/// `marker` with each `"` and `'` swapped into `buf`, or null when it has neither.
+fn otherQuotes(marker: []const u8, buf: []u8) ?[]const u8 {
+    if (marker.len > buf.len) return null;
+    var changed = false;
+    for (marker, buf[0..marker.len]) |c, *o| {
+        o.* = if (c == '"') blk: {
+            changed = true;
+            break :blk '\'';
+        } else if (c == '\'') blk: {
+            changed = true;
+            break :blk '"';
+        } else c;
+    }
+    return if (changed) buf[0..marker.len] else null;
+}
+
+/// The next mark at or after `from`, trying the other quote style too.
+fn findMark(page: []const u8, from: usize, marker: []const u8) ?usize {
+    var alt_buf: [64]u8 = undefined;
+    const a = std.ascii.findIgnoreCasePos(page, from, marker);
+    const b = if (otherQuotes(marker, &alt_buf)) |alt| std.ascii.findIgnoreCasePos(page, from, alt) else null;
+    if (a == null) return b;
+    if (b == null) return a;
+    return @min(a.?, b.?);
+}
+
 /// `text` with each `&amp;` entity turned into `&`, matching the entity's letters in either case.
 fn decodeAmp(a: Allocator, text: []const u8) Allocator.Error![]const u8 {
     var out: std.ArrayList(u8) = .empty;
@@ -119,7 +145,7 @@ fn parseMarked(a: Allocator, page: []const u8, limit: usize, m: Marks) Allocator
     var from: usize = 0;
     var last: usize = 0; // where the previous link ended: every search back stops there, so each byte is read once
     while (out.items.len < limit) {
-        const at = std.ascii.findIgnoreCasePos(page, from, marker) orelse break; // CLASS="result__a" is the same mark
+        const at = findMark(page, from, marker) orelse break; // CLASS="result__a" or class='result__a' is the same mark
         const lt = std.mem.lastIndexOfScalar(u8, page[last..at], '<') orelse { // a mark outside any tag: skip it
             from = at + marker.len;
             last = at;
@@ -127,7 +153,7 @@ fn parseMarked(a: Allocator, page: []const u8, limit: usize, m: Marks) Allocator
         };
         const tag_start = last + lt;
         const tag_end = std.mem.indexOfScalarPos(u8, page, at, '>') orelse break;
-        const next = std.ascii.findIgnoreCasePos(page, tag_end, marker) orelse page.len;
+        const next = findMark(page, tag_end, marker) orelse page.len;
         from = tag_end;
         const lo = last;
         last = tag_end;
@@ -147,7 +173,7 @@ fn parseMarked(a: Allocator, page: []const u8, limit: usize, m: Marks) Allocator
         const close = std.ascii.findIgnoreCasePos(page[0..next], tag_end, "</a>") orelse continue; // </A> closes the title too
         const title = try fragmentText(a, page[tag_end + 1 .. close]);
         var snippet: []const u8 = "";
-        if (std.ascii.findIgnoreCasePos(page[0..next], close, m.snippet)) |s| { // CLASS="result__snippet" is the same mark
+        if (findMark(page[0..next], close, m.snippet)) |s| { // CLASS="result__snippet" or class='…' is the same mark
             const s_open = (std.mem.indexOfScalarPos(u8, page[0..next], s, '>') orelse s) + 1;
             // a snippet with no end (a page cut at its size cap) is left out rather than sliced backwards
             if (std.ascii.findIgnoreCasePos(page[0..next], s_open, m.snippet_end)) |s_close|
@@ -276,6 +302,16 @@ test "a search ad is skipped when the wrapper uses single quotes" {
         \\<div class='result results_links result--ad'><h2><a class="result__a" href="https://ads.example/buy">Buy now</a></h2></div>
         \\<div class="result results_links web-result"><h2><a class="result__a" href="https://example.org/page">Example</a></h2></div>
     ;
+    const results = try parseDuckDuckGo(a, page, 5);
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqualStrings("https://example.org/page", results[0].url);
+}
+
+test "a search result is found when its class uses single quotes" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const page = "<div class=\"result results_links web-result\"><h2><a class='result__a' href=\"https://example.org/page\">Example</a></h2></div>";
     const results = try parseDuckDuckGo(a, page, 5);
     try std.testing.expectEqual(@as(usize, 1), results.len);
     try std.testing.expectEqualStrings("https://example.org/page", results[0].url);
