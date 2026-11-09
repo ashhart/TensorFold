@@ -1,4 +1,4 @@
-//! Reviewer probes (scratch only): guarded reservation order, shared-from room, and over-protection.
+//! Guarded admission preserves newest states, shared restores and the deepest queued match.
 const std = @import("std");
 const pc = @import("prompt_cache.zig");
 const Fake = @import("prompt_cache_fake.zig").Fake;
@@ -22,7 +22,7 @@ fn put(f: *Fake, s: *pc.Store, words: []const u32, born: u32, at: u32) !void {
 }
 
 // A: the guarded reserve should free a superseded copy before an idle conversation's newest state.
-test "queued cache: rv probe A guarded reserve evicts superseded before another newest" {
+test "queued cache: guarded reserve evicts superseded before another newest" {
     var f: Fake = .{ .gpa = a };
     var s = pc.Store.init(a, f.snapshots(), .{ .min_prompt = 0 }, 108 + 108 + 112);
     defer s.deinit();
@@ -46,7 +46,7 @@ test "queued cache: rv probe A guarded reserve evicts superseded before another 
 }
 
 // B: a shared `from` is counted as room, but the keep evicts the oldest entry, a protected queued state.
-test "queued cache: rv probe B shared from room does not evict a protected queued state at keep" {
+test "queued cache: shared from room does not evict a protected queued state at keep" {
     var f: Fake = .{ .gpa = a };
     var s = pc.Store.init(a, f.snapshots(), .{ .min_prompt = 0 }, 112 + 112 + 4);
     defer s.deinit();
@@ -74,7 +74,7 @@ test "queued cache: rv probe B shared from room does not evict a protected queue
 }
 
 // C: protection covers a queued job's shorter, superseded copy, which it will not resume.
-test "queued cache: rv probe C a queued job's superseded copy can make room" {
+test "queued cache: a queued job's superseded copy can make room" {
     var f: Fake = .{ .gpa = a };
     var s = pc.Store.init(a, f.snapshots(), .{ .min_prompt = 0 }, 108 + 112);
     defer s.deinit();
@@ -95,7 +95,7 @@ test "queued cache: rv probe C a queued job's superseded copy can make room" {
     try std.testing.expectEqual(@as(u32, 12), s.find(&q, &.{}, &.{}).?.at);
 }
 
-test "queued cache: rv probe A0 unguarded reserve evicts superseded before another newest" {
+test "queued cache: unguarded reserve evicts superseded before another newest" {
     var f: Fake = .{ .gpa = a };
     var s = pc.Store.init(a, f.snapshots(), .{ .min_prompt = 0 }, 108 + 108 + 112);
     defer s.deinit();
@@ -117,7 +117,7 @@ test "queued cache: rv probe A0 unguarded reserve evicts superseded before anoth
     try std.testing.expect(s.find(&b, &.{}, &.{}) != null); // B's newest stays
 }
 
-test "queued cache: rv probe C0 unguarded a queued job's superseded copy can make room" {
+test "queued cache: unguarded a queued job's superseded copy can make room" {
     var f: Fake = .{ .gpa = a };
     var s = pc.Store.init(a, f.snapshots(), .{ .min_prompt = 0 }, 108 + 112);
     defer s.deinit();

@@ -423,7 +423,7 @@ test "CUDA cache default counts streams before taking half the unified room" {
     try std.testing.expectEqual(@as(u64, 12 * GiB), cacheBytes(12, room, n * stream_bytes));
 }
 
-test "discrete CUDA keeps eight GiB of host snapshots on a large host unless asked" {
+test "CUDA cache default on discrete CUDA keeps eight GiB of host snapshots on a large host unless asked" {
     const GiB: u64 = 1 << 30;
     try std.testing.expectEqual(@as(u64, 8 * GiB), hostCacheBudget(null, 700 * GiB, 88 * GiB, 56 * GiB, false));
     try std.testing.expectEqual(@as(u64, 4 * GiB), hostCacheBudget(null, 8 * GiB, 88 * GiB, 56 * GiB, false));

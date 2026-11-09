@@ -61,6 +61,7 @@ pub fn lookup(h: *LaneHost, job: *Job) !pc.Lookup {
 pub fn keep(h: *LaneHost, job: *Job, stream: *anyopaque, at: u32) void {
     const store = h.cache orelse return;
     var snapshot = Snapshot.init(h, job) catch {
+        job.cache_promise = .{};
         store.counts.failed += 1;
         pc.note("keeping {d} tokens failed (OutOfMemory); queue protection could not be copied", .{at});
         return;
@@ -69,9 +70,18 @@ pub fn keep(h: *LaneHost, job: *Job, stream: *anyopaque, at: u32) void {
     const before = store.reservation_guard;
     store.reservation_guard = snapshot.guard();
     defer store.reservation_guard = before;
+    const planned = std.mem.indexOfScalar(u32, job.marks, at) != null;
+    if (!planned) {
+        const bytes = store.family.vtable.bytes(store.family.ptr, at);
+        const promised = snapshot.promised;
+        // A fallback checkpoint may use free room only; it neither evicts states nor spends this job's promise.
+        if (store.held +| bytes +| job.cache_promise.bytes > store.budget -| promised.bytes or
+            store.entries.items.len +| job.cache_promise.slots >= store.most -| promised.slots) return;
+    }
     const held = store.held;
     const slots = store.entries.items.len;
     _ = store.keepBornFrame(job.cacheKey(), job.request.bornLen(), at, stream, job.request.chunks, h.spans(job.request), job.request.images, job.frame);
+    if (!planned) return;
     job.cache_promise.bytes -|= store.held -| held;
     job.cache_promise.slots -|= store.entries.items.len -| slots;
     if (job.marks.len == 0 or at >= job.marks[job.marks.len - 1]) job.cache_promise = .{};
@@ -157,4 +167,8 @@ test "queued cache: one snapshot protects each job's deepest usable prefix inclu
     try snapshot.protect(&h, &current, &fork);
     try std.testing.expectEqual(@as(usize, 2), snapshot.entries.items.len);
     try std.testing.expectEqual(@as(u32, 8), snapshot.entries.items[1].at);
+}
+
+test {
+    _ = @import("lane_cache_promise_test.zig");
 }

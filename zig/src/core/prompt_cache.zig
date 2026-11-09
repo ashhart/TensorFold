@@ -92,7 +92,7 @@ pub const Entry = struct {
     branched: bool = false, // resumed again after a later prompt kept a longer state extending it: never superseded
     expired: bool = false, // hidden from lookups immediately, reclaimed only at safe host boundaries
     borrowers: u32 = 0, // outstanding lookups: released by resumed or release, never evicted while borrowed
-    ext: std.ArrayList(*Entry) = .empty, // entries extending its tokens, born no earlier (policy.link): `extended` reads them
+    ext: std.ArrayList(*Entry) = .empty, // live extensions born no earlier
     own: []u32 = &.{}, // the kept prompt's one copy, which `tokens` and at first `last` slice (empty: they own theirs)
 };
 pub const Counts = struct { hits: u64 = 0, misses: u64 = 0, kept: u64 = 0, evicted: u64 = 0, refused: u64 = 0, failed: u64 = 0, trimmed: u64 = 0 };
@@ -147,7 +147,7 @@ pub const Store = struct {
         s.held = 0;
     }
 
-    fn free(s: *Store, e: *Entry) void {
+    pub fn free(s: *Store, e: *Entry) void {
         if (s.disk) |r| rows.write.dropped(r, e);
         s.family.vtable.drop(s.family.ptr, e.saved);
         s.gpa.free(if (e.own.len > 0) e.own else e.tokens);
@@ -365,7 +365,7 @@ pub const Store = struct {
         };
     }
 
-    fn sharedKey(tokens: []const u32) u64 {
+    pub fn sharedKey(tokens: []const u32) u64 {
         return std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(tokens));
     }
 
@@ -437,73 +437,7 @@ pub const Store = struct {
     }
 
     /// `keep` as a prompt of `born` tokens: its longer reply supersedes older states on the same token path.
-    pub fn keepBorn(s: *Store, prompt: []const u32, born: u32, at: u32, owner: ?*anyopaque, starts: []const u32, spans: []const modes.Span) bool {
-        s.collectExpired();
-        const n = @as(usize, at) + s.rules.lookahead;
-        if (at == 0 or n > prompt.len or s.hold) return false;
-        s.clock += 1;
-        const shared = std.mem.indexOfScalar(u64, s.shared_keys.items, sharedKey(prompt[0..n])) != null;
-        for (s.entries.items) |e| if (!e.expired and e.at == at and std.mem.eql(u32, e.tokens, prompt[0..n]) and modes.equal(e.decode_spans, spans, at) and images.matches(s, e)) {
-            e.used = s.clock; // the same state again: no copy
-            e.shared = e.shared or shared;
-            e.rewind = e.rewind or (at == s.active_rewind_at and sharedKey(e.tokens) == s.active_rewind_key);
-            if (shared) learned.learn(s, e, starts);
-            return true;
-        };
-        const image_ids = images.prefix(s.gpa, s.image_query orelse &.{}, @intCast(n)) catch |err| return s.fail(at, err);
-        var owns_images = true;
-        defer if (owns_images) s.gpa.free(image_ids);
-        const decoded = modes.prefix(s.gpa, spans, at) catch |err| return s.fail(at, err);
-        var owns_decoded = true;
-        defer if (owns_decoded) s.gpa.free(decoded);
-        const bytes = s.family.vtable.bytes(s.family.ptr, at);
-        if (bytes > s.budget or s.most == 0) {
-            s.counts.refused += 1;
-            note("kept nothing at {d} tokens: {d} MiB passes the {d} MiB budget{s}", .{ at, bytes >> 20, s.budget >> 20, if (bytes > s.budget) s.over else "" });
-            return false;
-        }
-        const promised = if (s.reservation_guard) |g| g.promised else @import("prompt_cache_reserve.zig").Room{};
-        const limit = s.budget -| promised.bytes;
-        const slots = s.most -| promised.slots;
-        while (s.entries.items.len > 0) { // room: spare storage this save can take, else new storage inside the budget
-            if (s.family.vtable.reuses) |f| if (s.entries.items.len < slots and promised.bytes == 0 and f(s.family.ptr, at)) break;
-            const free_ = s.spare();
-            if (s.held + free_ + bytes <= limit and s.entries.items.len < slots) break;
-            if (free_ > 0) {
-                if (s.family.vtable.trim) |f| f(s.family.ptr, limit -| s.held -| bytes); // spare that cannot take this state goes before any state
-                if (s.spare() < free_) continue;
-            }
-            s.remove(others.victim(s, null, prompt, born, bytes, 1) orelse return if (s.keep_others) others.refuse(s, at, bytes) else s.fail(at, error.CacheBorrowed)); // its storage may come back spare and take this state
-            s.counts.evicted += 1;
-        }
-        if (bytes > limit or slots == 0) return s.fail(at, error.CachePromised);
-        if (s.entries.items.len == 0) if (s.family.vtable.trim) |f| f(s.family.ptr, s.budget -| bytes);
-        const e = s.gpa.create(Entry) catch return s.fail(at, error.OutOfMemory);
-        const last = s.gpa.dupe(u32, prompt) catch { // one copy: the state's tokens are its prefix
-            s.gpa.destroy(e);
-            return s.fail(at, error.OutOfMemory);
-        };
-        const saved = s.family.vtable.save(s.family.ptr, owner, at) catch |err| {
-            s.gpa.free(last);
-            s.gpa.destroy(e);
-            return s.fail(at, err);
-        };
-        const charged = if (s.family.vtable.charged) |f| f(s.family.ptr, saved) else bytes;
-        e.* = .{ .tokens = last[0..n], .images = image_ids, .image_frame = s.image_frame, .decode_spans = decoded, .at = at, .saved = saved, .bytes = charged, .born = born, .used = s.clock, .last = last, .shared = shared, .rewind = at == s.active_rewind_at and sharedKey(last[0..n]) == s.active_rewind_key, .own = last };
-        owns_decoded = false;
-        owns_images = false;
-        index.add(s, e) catch {
-            s.free(e);
-            return s.fail(at, error.OutOfMemory);
-        };
-        policy.link(s, e);
-        s.held += charged;
-        s.counts.kept += 1;
-        if (shared) learned.learn(s, e, starts);
-        if (s.disk) |r| rows.write.queued(r, e, starts);
-        if (s.family.vtable.trim) |f| f(s.family.ptr, s.budget -| s.held); // spare storage only inside what the budget leaves
-        return true;
-    }
+    pub const keepBorn = @import("prompt_cache_keep.zig").keepBorn;
 
     /// A learned state on disk longer than `have`, read back as a shared entry; else `have` (none, or reading failed).
     fn recall(s: *Store, prompt: []const u32, born: u32, starts: []const u32, spans: []const modes.Span, have: ?*Entry) ?*Entry {
@@ -551,7 +485,7 @@ pub const Store = struct {
         std.log.info("prompt cache: {d} tokens, resumed at {d}, kept {d}; {d} states, {d} MiB and {d} MiB spare of {d} MiB (hits {d}, misses {d}, evicted {d}, refused {d}, failed {d}, trimmed {d})", .{ prompt, from, kept, s.entries.items.len, s.held >> 20, s.spare() >> 20, s.budget >> 20, s.counts.hits, s.counts.misses, s.counts.evicted, s.counts.refused, s.counts.failed, s.counts.trimmed });
     }
 
-    fn fail(s: *Store, at: u32, err: anyerror) bool {
+    pub fn fail(s: *Store, at: u32, err: anyerror) bool {
         defer s.counts.failed += 1;
         note("keeping {d} tokens failed ({s}); a later turn prefills them", .{ at, @errorName(err) });
         return false;
@@ -570,6 +504,7 @@ pub fn note(comptime fmt: []const u8, args: anytype) void {
 
 test {
     _ = @import("prompt_cache_review_test.zig");
+    _ = @import("prompt_cache_promised_test.zig");
     _ = @import("prompt_cache_queue_room_test.zig");
     _ = @import("prompt_cache_index_test.zig");
     _ = @import("prompt_cache_test.zig");
