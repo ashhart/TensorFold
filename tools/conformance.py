@@ -17,7 +17,8 @@ Each gate prints one PASS or FAIL line with its counts; any FAIL exits 1. Equali
   start that server with it yourself.
 - refusals: each named request the profile lists is refused with its status and error text.
 - cancel, evict: a reply cut mid-stream and a prompt pushed out of the cache leave the server as a fresh one
-  (``conformance_lifecycle.py``). A profile's ``skip`` names gates its family lacks, with the reason; they print SKIP.
+  (``conformance_lifecycle.py``). A profile's ``skip`` names either one its family lacks, with the reason; it prints
+  SKIP, and ``--plant`` refuses it.
 
 ``--binary`` starts the servers itself (the cache-off one first, then the cached one), one at a time, from the
 profile's flags; ``--url`` and ``--fresh-url`` run against servers you started. ``--plant GATE`` plants a fault that
@@ -50,6 +51,7 @@ from pathlib import Path
 import bench_stream
 
 GATES = ("drafted", "repeat", "concurrent", "resumed", "refusals", "cancel", "evict")
+SKIPPABLE = ("cancel", "evict")  # a family may lack these; the exactness gates hold for every family
 SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
@@ -468,6 +470,11 @@ def parse(argv=None):
         p.error("--binary needs --model-dir")
     if args.plant and args.plant not in args.gates:
         p.error(f"--plant {args.plant} needs that gate in --gates")
+    skip = json.loads(args.profile.read_text()).get("skip") or {}
+    if bad := sorted(set(skip) - set(SKIPPABLE)):
+        p.error(f"the profile skips {bad}: only {' and '.join(SKIPPABLE)} can be skipped")
+    if args.plant in skip:
+        p.error(f"--plant {args.plant}: the profile skips that gate ({skip[args.plant]}), so nothing would turn red")
     return args
 
 

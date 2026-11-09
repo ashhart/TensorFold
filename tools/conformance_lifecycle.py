@@ -1,9 +1,9 @@
 """The conformance kit's lifecycle gates: a cancelled reply and an evicted prompt leave the server as a fresh one.
 
 - cancel: a streamed reply is closed mid-way. The server must count the disconnect, stay healthy, settle back to the
-  census it showed before the cut (``GET /v1/load``: running, waiting, active chat requests, free lanes, promised
-  and unheld pool tokens), and answer the same request again exactly as its solo reply. A reply that ended before
-  the cut, or a cut the server did not count, fails the gate as vacuous.
+  census it showed before the cut (``GET /v1/load``: running, waiting, active chat requests, free lanes, and each
+  pool's promised and unheld tokens), and answer the same request again exactly as its solo reply. A reply that
+  ended before the cut, or a cut the server did not count, fails the gate as vacuous.
 - evict: the chat's last turn (the cache-off server's history) is asked twice, so the second resumes from the kept
   prompt; the profile's fill prompts then push it out of the prompt cache. Asked once more it must equal the cache-off
   server's reply, resume fewer tokens than before, and leave the census as it was. Nothing cached before the fill
@@ -39,10 +39,15 @@ def census(client):
     capacity = doc.get("capacity") if isinstance(doc.get("capacity"), dict) else {}
     if "lanes_free" in capacity:
         out["lanes_free"] = capacity["lanes_free"]
-    for pool in capacity.get("pools") or []:
-        out["promised"] = pool.get("promised_tokens")
-        out["unheld"] = (pool.get("available_tokens") or 0) + (pool.get("reclaimable_tokens") or 0)
+    pools = [p for p in capacity.get("pools") or [] if isinstance(p, dict)]
+    if pools:
+        out["pools"] = [{"promised": p.get("promised_tokens"), "unheld": unheld(p)} for p in pools]
     return out
+
+
+def unheld(pool: dict):
+    """A pool's tokens no request holds: available plus reclaimable."""
+    return (pool.get("available_tokens") or 0) + (pool.get("reclaimable_tokens") or 0)
 
 
 def quiet(seen) -> bool:
