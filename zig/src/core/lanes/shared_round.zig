@@ -100,8 +100,9 @@ fn runPriced(e: *Engine, entries: []*Stream, comptime independent: bool) !void {
         if (independent) {
             var plain = total == plans.len;
             for (budgets) |d| plain = plain and d == 0;
-            try e.rule.observeShared(@intCast(plans.len), total, ms, sampled, e.rule.headMs(budgets), plain, calibration);
-        } else try e.rule.observeOverhead(@intCast(plans.len), total, ms, sampled, e.rule.headMs(budgets));
+            try e.rule.observeSharedPrice(@intCast(plans.len), total, ms, sampled, e.rule.pricedHeadMs(budgets), plain, calibration);
+        }
+        try e.rule.observeOverhead(@intCast(plans.len), total, ms, sampled, e.rule.headMs(budgets));
     }
     if (e.backend.round_observer != null) e.backend.observed(paths);
 }
