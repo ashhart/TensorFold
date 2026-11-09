@@ -137,6 +137,11 @@ pub fn main(init: std.process.Init) !u8 {
         if (!try engines.follow(a, gpa, io, dir, model_type, args, &problem)) return fail(problem);
         return 0;
     }
+    const tool_id_key = @import("tool_id_key.zig");
+    var tool_ids = tool_id_key.load(a, init.environ_map.get(tool_id_key.name), &problem) catch |e| switch (e) {
+        error.OutOfMemory => |x| return x,
+        error.Refused => return fail(problem),
+    };
     var text_arena: std.heap.ArenaAllocator = .init(gpa); // the text's problem, written on its own thread
     defer text_arena.deinit();
     var text_problem: []const u8 = "";
@@ -171,6 +176,7 @@ pub fn main(init: std.process.Init) !u8 {
         .started = started,
         .identity = engines.identity(a, args),
         .forget_fail = if (comptime @import("build_options").slide_test_hooks) try forgetFail(init.environ_map) else 0,
+        .tool_id_key = if (tool_ids) |*key| key else null,
     });
 }
 

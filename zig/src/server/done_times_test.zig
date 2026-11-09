@@ -36,6 +36,14 @@ const Clock = struct {
     }
 };
 
+var fixed_ids: @import("ids.zig").Key = undefined;
+
+/// A fixed tool-call id key for each server to take, so none draws from the scripted entropy the seeds count.
+fn fixedIds() *@import("ids.zig").Key {
+    fixed_ids = .of(@import("ids.zig").test_key_text);
+    return &fixed_ids;
+}
+
 const Capture = struct {
     bytes: std.ArrayList(u8) = .empty,
     failed: bool = false,
@@ -142,7 +150,7 @@ test "slide ask: wordings are seeded from the lesson, and --prompt-seed still wi
     Clock.ns = 10_000_000_000;
     var script: Script = .{ .first = 10_000_000_000 };
     var tt: helpers = .{};
-    const srv = try server.Server.init(gpa, Clock.io(), script.engine(), text(&tt), .{ .served_name = "test", .model_ids = &.{"test"}, .enable_thinking = false }, null);
+    const srv = try server.Server.init(gpa, Clock.io(), script.engine(), text(&tt), .{ .served_name = "test", .model_ids = &.{"test"}, .enable_thinking = false, .tool_id_key = fixedIds() }, null);
     defer srv.deinit();
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
@@ -165,7 +173,7 @@ fn scripted(cached: u32, left: bool) !void {
     Clock.ns = 10_000_000_000;
     var script: Script = .{ .first = if (cached > 0) 10_123_000_000 else 10_384_000_000, .cached = cached };
     var tt: helpers = .{};
-    const srv = try server.Server.init(std.testing.allocator, Clock.io(), script.engine(), text(&tt), .{ .served_name = "test", .model_ids = &.{"test"}, .enable_thinking = false }, null);
+    const srv = try server.Server.init(std.testing.allocator, Clock.io(), script.engine(), text(&tt), .{ .served_name = "test", .model_ids = &.{"test"}, .enable_thinking = false, .tool_id_key = fixedIds() }, null);
     defer srv.deinit();
     srv.metrics.note(srv.io, 999, 998, 997, 996, 995, 994, 999, 998, 997, 996, 995);
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -215,7 +223,7 @@ fn seedControls(mode: enum { fresh, keyed, explicit, defaults, default_fresh, fa
     defer Clock.no_entropy = false;
     var script: Script = .{ .first = 10_384_000_000 };
     var tt: helpers = .{};
-    const srv = try server.Server.init(std.testing.allocator, Clock.io(), script.engine(), text(&tt), .{ .served_name = "test", .model_ids = &.{"test"}, .enable_thinking = false, .seed_salt = -17 }, null);
+    const srv = try server.Server.init(std.testing.allocator, Clock.io(), script.engine(), text(&tt), .{ .served_name = "test", .model_ids = &.{"test"}, .enable_thinking = false, .seed_salt = -17, .tool_id_key = fixedIds() }, null);
     defer srv.deinit();
     if (mode == .keyed) {
         var usage: @import("cli.zig").Usage = .{};
@@ -402,7 +410,7 @@ fn queued(planner: bool) !void {
     var queue: Queued = .{ .host = &host, .first = first, .planner = planner };
     if (planner) host.rounds = .{ .ctx = &queue, .vtable = &.{ .begin_admit = Queued.begin, .admit = Queued.admit, .admitted = Queued.admitted, .arm = Queued.arm, .began = Queued.started, .plan = Queued.plan, .left = Queued.arm, .after = Queued.after } };
     var tt: helpers = .{};
-    const srv = try server.Server.init(a, io, queue.engine(), text(&tt), .{ .served_name = "test", .model_ids = &.{"test"}, .enable_thinking = false }, null);
+    const srv = try server.Server.init(a, io, queue.engine(), text(&tt), .{ .served_name = "test", .model_ids = &.{"test"}, .enable_thinking = false, .tool_id_key = fixedIds() }, null);
     defer srv.deinit();
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
@@ -429,7 +437,7 @@ fn rateLine(count: usize, elapsed_ns: i96, suffix: []const u8) !void {
     const ids: [11]u32 = @splat('h');
     var script: Script = .{ .first = 10_384_000_000, .tokens = ids[0..count] };
     var tt: helpers = .{};
-    const srv = try server.Server.init(std.testing.allocator, Clock.io(), script.engine(), text(&tt), .{ .served_name = "test", .model_ids = &.{"test"}, .enable_thinking = false }, null);
+    const srv = try server.Server.init(std.testing.allocator, Clock.io(), script.engine(), text(&tt), .{ .served_name = "test", .model_ids = &.{"test"}, .enable_thinking = false, .tool_id_key = fixedIds() }, null);
     defer srv.deinit();
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();

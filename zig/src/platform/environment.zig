@@ -4,7 +4,7 @@ const sys = @import("sys.zig");
 
 pub const Error = error{InvalidEnvironment};
 pub const Scope = enum { common, cuda, metal, xpu, slide, hooks, dsv41, gemma4 };
-pub const Kind = enum { u32, u64, size, percent, positive, device, segments, mib, bit_width, word, prompt, flag, toggle, real, positive_real, signed_real, range };
+pub const Kind = enum { u32, u64, size, percent, positive, device, segments, mib, bit_width, word, prompt, flag, toggle, real, positive_real, signed_real, range, path };
 pub const Rule = struct {
     name: [:0]const u8,
     scope: Scope,
@@ -37,6 +37,7 @@ pub const rules = [_]Rule{
     .{ .name = "TENSORFOLD_RESTORE_PREFETCH", .scope = .common, .kind = .u64, .trim = " \t", .first_digit = true, .forms = "a whole unsigned 64-bit read count (0 disables reading ahead; capped at 65536)" },
     .{ .name = "TENSORFOLD_RESTORE_PREFETCH_GIB", .scope = .common, .kind = .u64, .trim = " \t", .first_digit = true, .forms = "a whole unsigned 64-bit GiB count (capped at 16777216)" },
     .{ .name = "TENSORFOLD_RESTORE_PREFETCH_MS", .scope = .common, .kind = .u64, .trim = " \t", .first_digit = true, .forms = "whole unsigned 64-bit milliseconds (capped at 1099511627776)" },
+    .{ .name = "TENSORFOLD_TOOL_ID_KEY_FILE", .scope = .common, .kind = .path, .forms = "a path without control characters to a file only its owner can read, holding at least 32 key bytes" },
     .{ .name = "TF_CUDA_DEVICE", .scope = .cuda, .kind = .device, .trim = " ", .forms = "a whole GPU ordinal from 0 to 4294967295, or empty for the default" },
     .{ .name = "TF_CUDA_SEGMENTS", .scope = .cuda, .kind = .segments, .trim = " ", .forms = "a whole number from 1 to 4, or empty for the default" },
     .{ .name = "TF_CUDA_CARVEOUT", .scope = .cuda, .kind = .flag, .forms = "0 or 1" },
@@ -156,6 +157,10 @@ pub fn parse(name: []const u8, raw: ?[]const u8) Error!?u64 {
         return error.InvalidEnvironment;
     }
     if (r.kind == .toggle) return toggle(r, text) orelse error.InvalidEnvironment;
+    // a path travels as 0, its text read by `path`; the file itself is its reader's to check
+    if (r.kind == .path) return if (for (text) |ch| {
+        if (ch < 0x20 or ch == 0x7f) break true;
+    } else false) error.InvalidEnvironment else 0;
     // a real travels as its f64 bits and a range as lo above hi; `value` and `range` decode them
     if (isReal(r.kind)) return @bitCast(try real(r, text));
     if (r.kind == .range) {
@@ -208,14 +213,16 @@ fn real(r: Rule, text: []const u8) Error!f64 {
     return x;
 }
 
+/// A `.path` setting's text is never shown: a key pasted into it by mistake would reach the log.
 pub fn describe(a: std.mem.Allocator, name: []const u8, raw: []const u8) ![]const u8 {
+    if (rule(name).kind == .path) return std.fmt.allocPrint(a, "{s}: expected {s}", .{ name, rule(name).forms });
     return std.fmt.allocPrint(a, "{s}=\"{f}\": expected {s}", .{ name, std.zig.fmtString(raw), rule(name).forms });
 }
 
 /// A direct family/tool entry point gets the same refusal even when it has no server problem buffer.
 fn checked(name: [:0]const u8, raw: ?[]const u8) Error!?u64 {
     return parse(name, raw) catch {
-        if (!@import("builtin").is_test) std.log.err("{s}=\"{f}\": expected {s}", .{ name, std.zig.fmtString(raw.?), rule(name).forms });
+        if (!@import("builtin").is_test) if (rule(name).kind == .path) std.log.err("{s}: expected {s}", .{ name, rule(name).forms }) else std.log.err("{s}=\"{f}\": expected {s}", .{ name, std.zig.fmtString(raw.?), rule(name).forms });
         return error.InvalidEnvironment;
     };
 }
@@ -226,7 +233,7 @@ pub fn check(name: [:0]const u8, raw: ?[]const u8) Error!void {
 
 /// One setting in its reader's type: a switch as bool, a real as a float, any other kind as its whole number.
 pub fn value(comptime T: type, name: [:0]const u8, raw: ?[]const u8, default: T) Error!T {
-    std.debug.assert(isReal(rule(name).kind) == (@typeInfo(Plain(T)) == .float) and rule(name).kind != .range);
+    std.debug.assert(isReal(rule(name).kind) == (@typeInfo(Plain(T)) == .float) and rule(name).kind != .range and rule(name).kind != .path);
     return decode(T, (try checked(name, raw)) orelse return default);
 }
 
@@ -251,6 +258,13 @@ pub fn read(comptime T: type, name: [:0]const u8, default: T) Error!T {
 pub fn range(name: [:0]const u8, raw: ?[]const u8) Error!?[2]u32 {
     const n = (try checked(name, raw)) orelse return null;
     return .{ @intCast(n >> 32), @truncate(n) };
+}
+
+/// A `.path` setting's text, or null when unset or blank; nothing is logged, so the caller words the refusal.
+pub fn path(name: [:0]const u8, raw: ?[]const u8) Error!?[]const u8 {
+    std.debug.assert(rule(name).kind == .path);
+    _ = (try parse(name, raw)) orelse return null;
+    return std.mem.trim(u8, raw.?, rule(name).trim);
 }
 
 /// One scope's rules in table order, without allocating: the first malformed value is logged and refused.

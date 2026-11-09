@@ -108,6 +108,8 @@ pub const Config = struct {
     identity: Identity = .{},
     /// The process environment GET /v1/benchmark/manifest reads (revision and the hardware probe); null: none.
     environ: ?*const std.process.Environ.Map = null,
+    /// TENSORFOLD_TOOL_ID_KEY_FILE's key (tool_id_key.zig), which `Server.init` takes and zeroes; null: a random key.
+    tool_id_key: ?*@import("ids.zig").Key = null,
 };
 
 /// --name-priority: background by default when the id the request names is configured (openai.replyModel parity).
@@ -149,6 +151,7 @@ pub const Server = struct {
     /// Scheduler load the engine publishes as it works, and this server's identity and activity (load_ledger.zig).
     load: api.load_ledger.Ledger,
     store: responses.Store,
+    tool_ids: @import("ids.zig").Key, // every tool-call id's key: the config's, else this server's own
     next_id: std.atomic.Value(u64) = .init(1),
     /// Connections open now; a stop waits for them before freeing what they read.
     open_connections: std.atomic.Value(u32) = .init(0),
@@ -185,8 +188,10 @@ pub const Server = struct {
     }
 
     pub fn init(gpa: Allocator, io: std.Io, engine: api.Engine, text: model_text.Text, config: Config, keys: ?*auth.Store) !*Server {
+        const tool_ids = if (config.tool_id_key) |key| key.take() else try @import("ids.zig").Key.random(io);
         const srv = try gpa.create(Server);
-        srv.* = .{ .gpa = gpa, .io = io, .engine = engine, .info = engine.info(), .text = text, .config = config, .keys = keys, .metrics = .{ .gpa = gpa, .phases = config.phase_metrics }, .load = .init(io), .store = .{ .gpa = gpa }, .arena = .init(gpa), .slide = .init(gpa, io, config.slide_graph), .teacher = .init(gpa) };
+        srv.* = .{ .tool_ids = tool_ids, .gpa = gpa, .io = io, .engine = engine, .info = engine.info(), .text = text, .config = config, .keys = keys, .metrics = .{ .gpa = gpa, .phases = config.phase_metrics }, .load = .init(io), .store = .{ .gpa = gpa }, .arena = .init(gpa), .slide = .init(gpa, io, config.slide_graph), .teacher = .init(gpa) };
+        srv.config.tool_id_key = null; // its key is zeroed: `tool_ids` is the one copy
         errdefer srv.deinit(); // a later step's failure stops the keepalive before the caller closes the engine
         if (srv.info.embeddings != null and srv.info.capability(.text_generation)) return error.InvalidEmbeddingCapabilities;
         if (srv.info.readouts != null and (srv.info.capability(.text_generation) or srv.info.embeddings != null)) return error.InvalidReadoutCapabilities;
