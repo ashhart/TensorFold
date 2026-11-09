@@ -48,8 +48,11 @@ fn start(srv: *Server, input: chat.Input, message: Value, thinking: bool, effort
     const pictures = try images.expand(srv.info.vision, null, srv.text, &cx, .{ .array = warm_prompt.messages }, prompt, prompt.len);
     if (pictures) |x| prompt = x.ids;
     if (prompt.len == 0 or (srv.info.context_window > 0 and prompt.len >= srv.info.context_window)) return;
+    const messages: Value = .{ .array = warm_prompt.messages };
+    // cut as the next turn's request cuts (chat.prepare), so a planned family's kept end is that request's state
+    const system_len = prompt_mod.systemPrefixLen(srv, &cx, messages, input.tools, prompt, thinking, effort);
     // its states count as the reply's request's: they supersede none of that turn's own until a later turn does
-    p.request = .{ .prompt = prompt, .max_tokens = 0, .background = true, .born = @intCast(prompt_len), .history_len = @intCast(prompt.len), .rewind_len = if (pictures != null) 0 else @intCast(prompt_mod.rewindLen(srv, &cx, .{ .array = warm_prompt.messages }, input.messages.array.len, input.tools, prompt, thinking, effort)), .chunks = try srv.chunks.starts(a, prompt), .decode_spans = try prompt_mod.replySpans(srv, &cx, prompt) };
+    p.request = .{ .prompt = prompt, .max_tokens = 0, .background = true, .born = @intCast(prompt_len), .history_len = @intCast(prompt.len), .rewind_len = if (pictures != null) 0 else @intCast(prompt_mod.rewindLen(srv, &cx, messages, input.messages.array.len, input.tools, prompt, thinking, effort)), .chunks = try chat.requestChunks(srv, a, prompt, system_len), .decode_spans = try prompt_mod.replySpans(srv, &cx, prompt) };
     if (pictures) |x| {
         p.request.images = x.images;
         p.request.cache_key = x.cache_key;

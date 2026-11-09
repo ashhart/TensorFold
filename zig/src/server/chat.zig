@@ -131,6 +131,12 @@ pub const Prepared = struct {
 };
 
 /// Render ``input`` and run every check that can refuse it, before anything reaches the client or the engine.
+/// A chat prompt's chunk starts, cut before the conversation's own text: fresh sessions resume their whole harness.
+pub fn requestChunks(srv: *Server, a: Allocator, ids_: []const u32, system_len: usize) ![]const u32 {
+    const cut: u32 = if (srv.chunks.step > 0) @intCast(@max(system_len, 1) - 1) else 0;
+    return chunk_plan.withCut(a, try srv.chunks.starts(a, ids_), cut, ids_.len, srv.chunks.min_chunk);
+}
+
 pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepared {
     const a = cx.a;
     const io = srv.io;
@@ -183,8 +189,7 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
         .rewind_len = @intCast(rendered.rewind_len),
         .user_end = @intCast(rendered.user_end),
         .shared_prefixes = shared.items,
-        // a cut before the conversation's own text: fresh sessions resume their whole harness
-        .chunks = try chunk_plan.withCut(a, try srv.chunks.starts(a, rendered.ids), if (srv.chunks.step > 0) @intCast(@max(system_len, 1) - 1) else 0, rendered.ids.len, srv.chunks.min_chunk),
+        .chunks = try requestChunks(srv, a, rendered.ids, system_len),
         // from the tokens alone, for every request: cached states are keyed by tokens
         .decode_spans = try prompt_mod.replySpans(srv, cx, rendered.ids),
         .tools_json = if (input.tools.len > 0) try json.stringify(a, .{ .array = @constCast(input.tools) }, .{ .ascii = false }) else "",
