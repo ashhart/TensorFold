@@ -75,5 +75,18 @@
       "status": 400,
       "error": "This server's maximum context length is"
     }
-  ]
+  ],
+  "cancel": {
+    "prompt": "count",
+    "tokens": 256,
+    "after_chunks": 4,
+    "rounds": 2,
+    "settle_s": 60
+  },
+  "evict": {
+    "fill_prompts": 6,
+    "fill_items": 900,
+    "fill_tokens": 1,
+    "settle_s": 60
+  }
 }

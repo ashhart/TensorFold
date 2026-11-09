@@ -5,11 +5,20 @@ A clean fake passes every gate. Each fault breaks one property the kit gates, an
 - drafted: a drafted reply to the copy prompt differs from its plain reply.
 - repeat: a drafted reply to the sky prompt differs the second time that request arrives.
 - concurrent: a reply differs while another request is in flight.
-- resumed: the cached server reports no cached prompt tokens.
+- resumed: a later chat turn reports no cached tokens unless its whole prompt was asked before.
 - refusals: an out-of-range presence_penalty is answered instead of refused.
+- cancel_lane: a streamed reply the client leaves keeps its lane busy.
+- cancel_reply: the request a client left answers differently the next time it arrives.
+- evict: a chat turn pushed out of the prompt cache reports it (0 cached) but answers from the stale state.
 
-A request with ``"stream": true`` gets the same reply as SSE, as the server streams it with ``include_usage``: the
-content in pieces, a finishing chunk carrying ``tensorfold`` and ``speculative``, a usage-only chunk, then ``[DONE]``.
+The cached server reports five cached tokens for a later chat turn (more than one message). It keeps the prompts it
+answered in an LRU of ``CAPACITY`` entries; a prompt pushed out reports 0 until it is asked again. ``GET /v1/load``,
+``/metrics`` and ``/health`` show the lanes open streams hold, the disconnects counted and the server's health.
+
+A request with ``"stream": true`` gets the same reply as SSE, as the server streams it with ``include_usage``: one
+event a token, ``TOKEN_GAP`` apart (the content two characters an event, empty once the text is out), a finishing
+chunk carrying ``tensorfold`` and ``speculative``, a usage-only chunk, then ``[DONE]``. A client that leaves a stream
+is counted as a disconnect, and its lane is freed.
 
 ``serve`` plays a scripted SSE reply instead, for the benchmark clients' tests. A reply is a list of tokens, each
 ``(choice, kind, text)`` for content and reasoning or ``(choice, "tool", index, field, text)`` for a tool call's
@@ -18,6 +27,7 @@ reply chunked several ways. Headers go out before the script's first step.
 
 Standard library only; no device, no network beyond 127.0.0.1.
 """
+import collections
 import contextlib
 import hashlib
 import http.server
@@ -25,10 +35,13 @@ import json
 import threading
 import time
 
-FAULTS = ("drafted", "repeat", "concurrent", "resumed", "refusals")
+FAULTS = ("drafted", "repeat", "concurrent", "resumed", "refusals", "cancel_lane", "cancel_reply", "evict")
 BATCH_WINDOW = 0.15  # seconds a lone request waits for a partner under the concurrent fault
 DONE = b"data: [DONE]\n\n"
 HASHES = {"token_sha": "d" * 12, "token_sha256": "d" * 64}
+CAPACITY = 4  # prompt cache entries the cached server keeps
+LANES = 8
+TOKEN_GAP = 0.0002  # seconds between streamed events
 
 
 def doc(sha="a" * 64, cached=0, accepted=2, drafted=3, text="hi"):
@@ -59,14 +72,15 @@ def event(chunk: dict) -> bytes:
     return b"data: " + json.dumps(chunk).encode() + b"\n\n"
 
 
-def streamed(payload: dict) -> list:
-    """``payload`` (a ``doc``) as server-sent events: content two characters an event, the finish, usage, [DONE]."""
+def streamed(payload: dict, tokens: int = 0, gap: float = 0.0) -> list:
+    """``payload`` (a ``doc``) as ``play`` steps: ``tokens`` content events ``gap`` apart, the finish, usage, [DONE]."""
     text = payload["choices"][0]["message"]["content"]
     pieces = [{"choices": [{"index": 0, "delta": {"content": text[i:i + 2]}, "finish_reason": None}]}
-              for i in range(0, len(text), 2)]
+              for i in range(0, max(len(text), 2 * tokens), 2)]
     last = {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}], "tensorfold": payload["tensorfold"],
             "speculative": payload["speculative"]}
-    return [event(c) for c in pieces + [last, {"choices": [], "usage": payload["usage"]}]] + [DONE]
+    steps = [s for c in pieces for s in (event(c), gap) if s]
+    return steps + [event(c) for c in (last, {"choices": [], "usage": payload["usage"]})] + [DONE]
 
 
 def delta(group: list[tuple], label: str) -> list[dict]:
@@ -116,6 +130,17 @@ class FakeEngine(http.server.BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
+        server = self.server
+        if self.path == "/v1/load":
+            with server.lock:
+                busy = server.streams + server.leaked
+            capacity = {"mode": "window", "lanes_free": LANES - busy}
+            return self.reply(200, {"lanes": LANES, "running": busy, "waiting": 0,
+                                    "http_active": {"chat_completions": busy}, "capacity": capacity})
+        if self.path == "/metrics":
+            return self.reply(200, f"tensorfold:client_disconnections_total {server.disconnects}\n")
+        if self.path == "/health":
+            return self.reply(200, {"status": "ok"})
         self.reply(200, {"object": "list", "data": [{"id": "fake", "object": "model"}]})
 
     def do_POST(self):
@@ -126,17 +151,21 @@ class FakeEngine(http.server.BaseHTTPRequestHandler):
         error = refusal(body, server.fault)
         if error:
             return self.reply(400, {"error": {"message": error, "type": "invalid_request_error"}})
-        key = json.dumps(body, sort_keys=True)
+        key = json.dumps({k: v for k, v in body.items() if k not in ("stream", "stream_options")}, sort_keys=True)
         with server.lock:
             server.seen[key] = server.seen.get(key, 0) + 1
             arrival = server.seen[key]
             server.inflight += 1
+            after_cut = key in server.cut
+            server.cut.discard(key)
         try:
             batched = self.batched() if server.fault == "concurrent" else False
             seed = body["seed"] if body.get("temperature") else None
-            salt = self.salt(body, arrival, batched)
+            cached, stale = self.lookup(body["messages"])
+            salt = "stale" if stale else "after a cut" if after_cut and server.fault == "cancel_reply" else None
+            salt = salt or self.salt(body, arrival, batched)
             sha = hashlib.sha256(json.dumps([body["messages"], seed, salt]).encode()).hexdigest()
-            cached = 5 if server.cache and server.fault != "resumed" and len(body["messages"]) > 1 else 0
+            self.keep(body["messages"])
             accepted = 2 if body.get("draft", True) else 0
             payload = doc(sha=sha, cached=cached, accepted=accepted, drafted=accepted, text="r" + sha[:6])
         finally:
@@ -144,10 +173,34 @@ class FakeEngine(http.server.BaseHTTPRequestHandler):
                 server.inflight -= 1
         # Out of flight before the reply is written: the client's next request must not find this one still counted.
         if body.get("stream"):
-            self.play(streamed(payload))
+            self.play(streamed(payload, body.get("max_tokens", 16), TOKEN_GAP), key)
         else:
             self.reply(200, payload)
         time.sleep(server.linger)
+
+    def lookup(self, messages):
+        """Cached tokens for the prompt, and whether the evict fault answers from an evicted prompt."""
+        server = self.server
+        if not server.cache or len(messages) < 2:
+            return 0, False
+        with server.lock:
+            whole = json.dumps(messages)
+            if whole in server.evicted:
+                return 0, server.fault == "evict"
+            return (0 if server.fault == "resumed" and whole not in server.kept else 5), False
+
+    def keep(self, messages):
+        """The prompt enters the LRU; the oldest prompts leave it."""
+        server = self.server
+        if not server.cache:
+            return
+        with server.lock:
+            whole = json.dumps(messages)
+            server.kept[whole] = True
+            server.kept.move_to_end(whole)
+            server.evicted.discard(whole)
+            while len(server.kept) > CAPACITY:
+                server.evicted.add(server.kept.popitem(last=False)[0])
 
     def batched(self) -> bool:
         """True when another request shares the server with this one within the batch window."""
@@ -168,27 +221,37 @@ class FakeEngine(http.server.BaseHTTPRequestHandler):
         return None
 
     def reply(self, status, payload):
-        raw = json.dumps(payload).encode()
+        raw = payload.encode() if isinstance(payload, str) else json.dumps(payload).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
         self.wfile.write(raw)
 
-    def play(self, steps):
+    def play(self, steps, key=None):
         """An event stream: headers first, then each step (bytes written and flushed, a float slept)."""
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream")
-        self.end_headers()
+        server = self.server
+        with server.lock:
+            server.streams += 1
         try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
             for step in steps:
                 if isinstance(step, bytes):
                     self.wfile.write(step)
                     self.wfile.flush()
                 else:
                     time.sleep(step)
-        except (BrokenPipeError, ConnectionResetError):
-            pass
+        except ConnectionError:  # Windows raises ConnectionAbortedError (10053) on a cut
+            with server.lock:
+                server.disconnects += 1
+                server.cut.add(key)
+                server.leaked += server.fault == "cancel_lane"
+        finally:
+            with server.lock:
+                server.streams -= 1
+            self.close_connection = True
 
 
 @contextlib.contextmanager
@@ -196,7 +259,8 @@ def running(cache=False, fault=None, linger=0.0, steps=None):
     """One fake on 127.0.0.1 port 0, yielding its base URL; stopped on exit."""
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FakeEngine)
     server.cache, server.fault, server.seen, server.inflight, server.linger = cache, fault, {}, 0, linger
-    server.steps = steps
+    server.steps, server.kept, server.evicted, server.cut = steps, collections.OrderedDict(), set(), set()
+    server.streams = server.leaked = server.disconnects = 0
     server.lock = threading.Lock()
     server.cond = threading.Condition(server.lock)
     thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
