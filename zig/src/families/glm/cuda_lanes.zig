@@ -379,11 +379,11 @@ pub const Lanes = struct {
         };
     }
 
-    /// The stream's kept state where its pass starts (null: none, not at a cold pass's cut, or no longer held).
-    fn resumeFrom(self: *Lanes, s: *lanes.Stream, len: usize) ?engine.Resume {
+    /// The stream's kept state where its pass starts (null: none, not at a cold cut over the same chunks, or not held).
+    pub fn resumeFrom(self: *Lanes, s: *lanes.Stream, len: usize) ?engine.Resume {
         const saved = s.reuse.saved orelse return null;
         const k: *const engine.Kept = @ptrCast(@alignCast(saved));
-        const in_step = prompt_cuts.coldCut(len, s.chunks, k.at);
+        const in_step = prompt_cuts.coldCut(len, s.chunks, k.at) and k.below == prompt_cuts.below(s.chunks, k.at);
         if (k.at != s.reuse.at or k.at == 0 or k.at >= len or !in_step or !self.x.e.holds(k.id)) {
             s.reuse_failed = true;
             s.reuse_error = if (k.at == 0 or k.at >= len) error.SnapshotNotPrefix else if (k.at != s.reuse.at or !in_step) error.SnapshotOutOfStep else error.SnapshotStale;
