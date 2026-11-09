@@ -7,6 +7,7 @@ const fwd = @import("cuda_model.zig");
 const be = @import("cuda_backend.zig");
 const cfg = @import("config.zig");
 const dfl = @import("cuda_dflash2.zig");
+const dshared = @import("cuda_dflash2_shared.zig");
 
 const snap = be.snap;
 
@@ -231,6 +232,7 @@ pub fn calibrateDrafter(p: *anyopaque) anyerror!lanes.drafter.Facts {
     const d = own.draft orelse return error.MissingCalibrationDrafter;
     if (own.rb.lanes.count() != 0) return error.WindowsAfterStreams;
     try d.timeWindows();
+    try dshared.time(d);
     return d.facts();
 }
 

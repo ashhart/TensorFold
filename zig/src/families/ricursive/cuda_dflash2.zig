@@ -548,52 +548,17 @@ pub const Drafter = struct {
             d.costs[w - 1] = .{ .width = @intCast(w), .ms = ms[1] };
         }
         try m.reset(0, windows);
-        try d.timeShared();
         try m.s.synchronize();
         d.n_costs = windows;
         std.log.info("Ripple DFlash2 on CUDA: windows of 1 and 16 rows in {d:.2} and {d:.2} ms, a draft {d:.3} ms ({d} streams a batch)", .{ d.costs[0].ms, d.costs[windows - 1].ms, d.step_ms, d.streams });
     }
-
-    /// Shared rounds of every admitted stream's slot, w rows each (w = 1 to 16, at most the round's rows): median of 3;
-    /// the depth rule prices rounds past the lone sweep's 16 rows by them.
-    fn timeShared(d: *Drafter) !void {
-        const m = d.m;
-        const n = @min(d.streams, m.arena.slots);
-        if (n < 2) return;
-        const chains = try d.gpa.alloc(fwd.Chain, n);
-        defer d.gpa.free(chains);
-        const ids = try d.gpa.alloc(u32, n * windows);
-        defer d.gpa.free(ids);
-        @memset(ids, 0);
-        d.n_shared = 0;
-        for (1..windows + 1) |w| {
-            if (n * w > m.round_rows) break;
-            for (chains, 0..) |*c, s| c.* = .{ .slot = s, .p0 = 0, .tokens = w };
-            var ms: [3]f64 = undefined;
-            for (0..4) |run| {
-                const t0 = now(d.io);
-                try m.round(chains, ids[0 .. n * w]);
-                try m.rowLogits(n * w);
-                try m.drawRows(n * w, d.b.ids);
-                try m.s.synchronize();
-                if (run > 0) ms[run - 1] = msSince(d.io, t0);
-            }
-            std.mem.sort(f64, &ms, {}, std.sort.asc(f64));
-            std.log.info("Ripple DFlash2 on CUDA: a shared round of {d} streams x {d} rows ({d} rows) in {d:.2} ms", .{ n, w, n * w, ms[1] });
-            if (n * w <= windows) continue; // the lone stream's sweep prices rounds up to its widest window
-            d.shared[d.n_shared] = .{ .width = @intCast(n * w), .ms = ms[1] };
-            d.n_shared += 1;
-        }
-        for (0..n) |s| try m.reset(s, windows);
-        try m.s.synchronize();
-    }
 };
 
-fn now(io: std.Io) i96 {
+pub fn now(io: std.Io) i96 {
     return std.Io.Clock.awake.now(io).toNanoseconds();
 }
 
-fn msSince(io: std.Io, t0: i96) f64 {
+pub fn msSince(io: std.Io, t0: i96) f64 {
     return @as(f64, @floatFromInt(now(io) - t0)) / 1e6;
 }
 
