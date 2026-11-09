@@ -87,13 +87,26 @@ pub fn counting(m: MemInfo, zones: ?[]const u8) MemInfo {
     return .{ .total = m.total, .available = @min(m.total, m.available +| parked) };
 }
 
-/// --prompt-cache-gib in pinned host memory (8 GiB unasked), at most half of what is available (`counting`).
-pub fn hostCacheBytes(a: std.mem.Allocator, io: std.Io, asked: ?f64) u64 {
-    const want: u64 = if (asked) |g| (if (g > 0) std.math.lossyCast(u64, g * (1 << 30)) else 0) else 8 << 30;
+/// Pinned host-cache room, after the CUDA streams when memory is unified.
+pub fn hostCacheBytes(a: std.mem.Allocator, io: std.Io, asked: ?f64, room: u64, streams: u64, unified: bool) u64 {
     const text = procText(a, io, "/proc/meminfo") orelse return 0;
     const zones = procText(a, io, "/proc/zoneinfo");
     const m = counting(meminfo(text) orelse return 0, zones);
-    return @min(want, m.available / 2);
+    return hostCacheBudget(asked, m.available, room, streams, unified);
+}
+
+/// Half the remaining room, with the old default as a floor, never beyond the room.
+pub fn automaticCache(room: u64, minimum: u64) u64 {
+    return @min(room, @max(minimum, room / 2));
+}
+
+pub fn hostCacheBudget(asked: ?f64, available: u64, room: u64, streams: u64, unified: bool) u64 {
+    const left = if (unified) @min(available -| streams, room -| streams) else available;
+    if (asked) |g| {
+        const want = if (g > 0) std.math.lossyCast(u64, g * (1 << 30)) else 0;
+        return @min(want, @min(left, available / 2));
+    }
+    return automaticCache(left, 8 << 30);
 }
 
 /// A /proc file's text, streamed: procfs reports size 0, and a positional read (readFileAlloc) stops there.
@@ -168,10 +181,12 @@ pub fn growRoom(room: u64, grows: bool) u64 {
     return if (grows) room else 0;
 }
 
-/// Kept prompt states' budget: --prompt-cache-gib (0: none), else 16 GiB, never past what the streams leave of `room`.
+/// Device cache after the streams: an explicit budget, else half the room with the old 16 GiB floor.
 pub fn cacheBytes(asked: ?f64, room: u64, streams: u64) u64 {
-    const want: u64 = if (asked) |g| (if (g > 0) std.math.lossyCast(u64, g * gib) else 0) else 16 << 30;
-    return @min(room -| streams, want);
+    const left = room -| streams;
+    if (asked) |g| return @min(left, if (g > 0) std.math.lossyCast(u64, g * gib) else 0);
+    // A sentinel asks for the historical floor while placement has not counted streams yet.
+    return if (room == std.math.maxInt(u64)) @min(left, 16 << 30) else automaticCache(left, 16 << 30);
 }
 
 /// Linux integrated devices use procfs; Windows retains the unified reserve but reads the CUDA pool.
@@ -387,4 +402,21 @@ test "a GB10's /proc files: its lists' parked pages raise MemAvailable and stay 
     try std.testing.expectEqual(@as(u64, 32813016 * 1024), m.available);
     try std.testing.expect(parked > 0 and m.available + parked < m.total);
     try std.testing.expect(meminfo(@embedFile("fixtures/gb10_parked/meminfo_at_budget")) != null);
+}
+
+test "CUDA cache default counts streams before taking half the unified room" {
+    const GiB: u64 = 1 << 30;
+    const room = 88 * GiB;
+    const stream_bytes = 6 * GiB;
+    const n = try admit(room, stream_bytes, 0, 8, false);
+    try std.testing.expectEqual(@as(u32, 8), n);
+    try std.testing.expectEqual(@as(u64, 20 * GiB), hostCacheBudget(null, 96 * GiB, room, n * stream_bytes, true));
+    try std.testing.expectEqual(@as(u64, 20 * GiB), cacheBytes(null, room, n * stream_bytes));
+    try std.testing.expectEqual(@as(u64, 8 * GiB), hostCacheBudget(null, 16 * GiB, 16 * GiB, 6 * GiB, true));
+    try std.testing.expectEqual(@as(u64, 4 * GiB), hostCacheBudget(null, 16 * GiB, 8 * GiB, 4 * GiB, true));
+    try std.testing.expectEqual(@as(u64, 0), hostCacheBudget(0, 96 * GiB, room, n * stream_bytes, true));
+    try std.testing.expectEqual(@as(u64, 12 * GiB), hostCacheBudget(12, 96 * GiB, room, n * stream_bytes, true));
+    try std.testing.expectEqual(@as(u64, 48 * GiB), hostCacheBudget(null, 96 * GiB, 2 * GiB, 48 * GiB, false));
+    try std.testing.expectEqual(@as(u64, 0), cacheBytes(0, room, n * stream_bytes));
+    try std.testing.expectEqual(@as(u64, 12 * GiB), cacheBytes(12, room, n * stream_bytes));
 }
