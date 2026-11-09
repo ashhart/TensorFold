@@ -8,6 +8,8 @@ const mdl = @import("model.zig");
 const kern = @import("kernels.zig");
 const pages = @import("pages.zig");
 const draws_ = @import("draws.zig");
+const recipe = @import("recipe.zig");
+const Held = @import("images.zig").Held;
 
 const Draws = draws_.Draws;
 const ring = draws_.ring;
@@ -31,11 +33,15 @@ const Lane = struct {
     sampled: bool = false,
     fill: ?usize = null, // a prompt pass going a chunk at a time: where its next chunk starts
     lease: kv.Lease = .{}, // the pages it holds and is promised
+    held: Held = .{}, // its images' rows in the slot's feature buffer
 };
 
 pub fn Dense(comptime R: type) type {
+    const Tower = recipe.towerOf(R);
     return struct {
         const D = @This();
+        /// The recipe's opened tower (null: served without --vision); void for a text-only recipe.
+        pub const Vision = if (Tower) |T| ?*T else void;
         gpa: std.mem.Allocator,
         d: *const cuda.Driver,
         e: pass.Engine(R),
@@ -45,13 +51,24 @@ pub fn Dense(comptime R: type) type {
         draws: Draws,
         slot_bufs: []cuda.DeviceBuffer, // a slot's last-row logits, then its rule: two a slot
         pool: ?kv.Pool = null, // the pages every slot leases (attach)
+        tower: Vision,
+        feats: std.ArrayList(cuda.DeviceBuffer) = .empty, // slot i's image rows (with a tower): the first at init
+        feat_bytes: usize, // one slot's: the request's image tokens at `hidden` bf16, 0 without a tower
 
         /// The device bytes `init` allocates: the draws and a round's slots' last rows and rules.
         pub fn openBytes(vocab: usize) usize {
             return Draws.openBytes() + round_rows * (vocab * 2 + @sizeOf(cuda.sample.Rule));
         }
 
-        pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, m: *mdl.Model, k: *const kern.Kernels, own: *const R.Kernels, w: *const R.Weights, s: cuda.Stream) !D {
+        /// One slot's image rows: the tower's per-request image tokens at `hidden` bf16, 0 without a tower.
+        pub fn featureBytes(v: Vision, hidden: usize) usize {
+            if (Tower) |_| {
+                const t = v orelse return 0;
+                return @as(usize, t.limits.image_tokens) * hidden * 2;
+            } else return 0;
+        }
+
+        pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, m: *mdl.Model, k: *const kern.Kernels, own: *const R.Kernels, w: *const R.Weights, s: cuda.Stream, v: Vision) !D {
             const free = try gpa.alloc(bool, round_rows);
             errdefer gpa.free(free);
             @memset(free, true);
@@ -65,14 +82,37 @@ pub fn Dense(comptime R: type) type {
                 b.* = try cuda.DeviceBuffer.alloc(d, if (i % 2 == 0) m.g.vocab * 2 else @sizeOf(cuda.sample.Rule));
                 made += 1;
             }
-            return .{ .gpa = gpa, .d = d, .e = .{ .m = m, .k = k, .own = own, .w = w, .s = s }, .m = m, .free = free, .draws = draws, .slot_bufs = bufs };
+            var x: D = .{ .gpa = gpa, .d = d, .e = .{ .m = m, .k = k, .own = own, .w = w, .s = s }, .m = m, .free = free, .draws = draws, .slot_bufs = bufs, .tower = v, .feat_bytes = featureBytes(v, m.g.hidden) };
+            errdefer x.feats.deinit(gpa);
+            try x.addFeatures(1);
+            return x;
+        }
+
+        /// `n` more slots' image rows (none without a tower); on failure the list is as it was.
+        fn addFeatures(x: *D, n: usize) !void {
+            if (x.feat_bytes == 0) return;
+            const mark = x.feats.items.len;
+            errdefer x.dropFeatures(mark);
+            try x.feats.ensureUnusedCapacity(x.gpa, n);
+            for (0..n) |_| x.feats.appendAssumeCapacity(try cuda.DeviceBuffer.alloc(x.d, x.feat_bytes));
+        }
+
+        fn dropFeatures(x: *D, left: usize) void {
+            while (x.feats.items.len > left) {
+                var b = x.feats.pop().?;
+                b.free();
+            }
         }
 
         pub fn deinit(x: *D) void {
+            if (x.feats.items.len > 0) cuda.completion.drain(x.d, x.e.s, "the dense engine's image rows did not drain before they were freed");
+            x.dropFeatures(0);
+            x.feats.deinit(x.gpa);
             var it = x.lanes.valueIterator();
             while (it.next()) |l| {
                 if (x.pool) |*p| p.finish(&l.lease);
                 l.rows.deinit(x.gpa);
+                l.held.deinit(x.gpa);
             }
             if (x.pool) |*p| p.deinit();
             x.lanes.deinit(x.gpa);
@@ -82,9 +122,12 @@ pub fn Dense(comptime R: type) type {
             x.draws.deinit(x.gpa);
         }
 
-        /// The model's arena of `n` pages for `extra + 1` slots, and the pool that leases them.
+        /// The model's arena of `n` pages for `extra + 1` slots, the pool that leases them, the slots' image rows.
         pub fn attach(x: *D, extra: usize, n: usize) !void {
             if (x.pool != null) return error.BadAttach;
+            const mark = x.feats.items.len;
+            try x.addFeatures(extra);
+            errdefer x.dropFeatures(mark);
             try x.m.attach(x.e.s, extra, n);
             x.pool = try kv.Pool.init(x.gpa, n, x.m.pageBytes());
         }
@@ -155,7 +198,7 @@ pub fn Dense(comptime R: type) type {
         fn opening(x: *D, s: *Stream) !*Lane {
             const p = s.prompt();
             if (p.len == 0) return error.EmptyPrompt;
-            if (s.images.len > 0) return error.DenseTextOnly;
+            if (s.images.len > 0) try x.admitImages(s.images, p);
             if (p.len + @as(usize, s.max_new) > x.m.context) return error.PastContext;
             const got = try x.lanes.getOrPut(x.gpa, s);
             if (!got.found_existing) {
@@ -169,6 +212,10 @@ pub fn Dense(comptime R: type) type {
             }
             const l = got.value_ptr;
             try x.reach(l, p.len);
+            if (s.images.len > 0) {
+                errdefer x.dropLane(s);
+                try x.encodeImages(s, l);
+            }
             l.sampled = false;
             if (s.sampling) |sp| if (sp.temperature > 0) {
                 const r = cuda.sample.Rule.from(lanes.gpu_rule.rule(sp));
@@ -180,6 +227,23 @@ pub fn Dense(comptime R: type) type {
             l.fill = 0;
             s.fill_at.store(0, .monotonic);
             return l;
+        }
+
+        /// Images for a recipe with a tower served with --vision, their spans inside the prompt and the budget.
+        fn admitImages(x: *const D, images: []const recipe.Image, p: []const u32) !void {
+            if (Tower) |_| {
+                const t = x.tower orelse return error.DenseServedWithoutVision;
+                try Held.check(images, p, t.marks.image, t.limits.image_tokens);
+            } else return error.DenseTextOnly;
+        }
+
+        /// The lane begins: its images through the tower in order, into its slot's feature rows.
+        fn encodeImages(x: *D, s: *const Stream, l: *Lane) !void {
+            if (Tower) |T| {
+                l.held.deinit(x.gpa);
+                l.held = try Held.init(x.gpa, s.images, x.feats.items[l.slot].ptr, x.m.g.hidden);
+                try l.held.encode(T, x.tower.?, x.e.s, s);
+            } else return error.DenseTextOnly;
         }
 
         /// One chunk from `l.fill` to the next grid line or mark; true once the prompt's last row's logits are written.
@@ -195,7 +259,7 @@ pub fn Dense(comptime R: type) type {
                 end = mk;
             };
             const done = end == p.len;
-            try x.forward(&.{.{ .slot = l.slot, .p0 = at, .tokens = p[at..end] }}, true, end - at - 1, @intFromBool(done));
+            try x.forward(&.{.{ .slot = l.slot, .p0 = at, .tokens = p[at..end], .images = l.held.intersect(at, end) }}, true, end - at - 1, @intFromBool(done));
             if (done) try x.d.check(x.d.api.cuMemcpyDtoDAsync_v2(l.last, x.m.s.logits, x.m.g.vocab * 2, x.e.s.handle), "cuMemcpyDtoDAsync");
             s.fill_at.store(@intCast(end), .monotonic);
             l.fill = if (done) null else end;
@@ -326,6 +390,9 @@ pub fn Dense(comptime R: type) type {
         fn dropLane(x: *D, s: *const Stream) void {
             if (x.lanes.fetchRemove(s)) |entry| {
                 var l = entry.value;
+                // the tower's reads of the request's pixels and writes of the slot's rows end before either is reused
+                if (l.held.spans.len > 0) cuda.completion.drain(x.d, x.e.s, "the dense engine's image encode did not drain before its lane was dropped");
+                l.held.deinit(x.gpa);
                 if (x.pool) |*p| p.finish(&l.lease); // one CUDA stream: a later lease's writes queue behind these reads
                 x.m.unmapPages(l.slot);
                 x.free[l.slot] = true;

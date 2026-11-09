@@ -5,6 +5,7 @@ pub const rope = @import("rope.zig");
 pub const kernels = @import("kernels.zig");
 pub const model = @import("model.zig");
 pub const pass = @import("pass.zig");
+pub const images = @import("images.zig");
 pub const draws = @import("draws.zig");
 pub const backend = @import("backend.zig");
 pub const native = @import("native.zig");
@@ -21,10 +22,13 @@ test {
     _ = kernels;
     _ = model;
     _ = pass;
+    _ = images;
     _ = draws;
     _ = backend;
     _ = native;
     _ = @import("native_test.zig");
     _ = @import("put_test.zig");
     _ = @import("device_fail_test.zig");
+    _ = @import("images_test.zig");
+    _ = @import("images_lane_test.zig");
 }
