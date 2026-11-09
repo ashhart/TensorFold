@@ -75,7 +75,7 @@ pub fn keep(h: *LaneHost, job: *Job, stream: *anyopaque, at: u32) void {
         const bytes = store.family.vtable.bytes(store.family.ptr, at);
         const promised = snapshot.promised;
         // A fallback checkpoint may use free room only; it neither evicts states nor spends this job's promise.
-        if (store.held +| bytes +| job.cache_promise.bytes > store.budget -| promised.bytes or
+        if (store.held +| store.spare() +| bytes +| job.cache_promise.bytes > store.budget -| promised.bytes or
             store.entries.items.len +| job.cache_promise.slots >= store.most -| promised.slots) return;
     }
     const held = store.held;
