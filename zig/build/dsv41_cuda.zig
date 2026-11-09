@@ -98,13 +98,14 @@ pub fn steps(b: *std.Build) void {
     gpu.dependOn(&b.addInstallArtifact(b.addExecutable(.{ .name = "tf-dsv41-test", .root_module = runnerModule(b, b.graph.host, cuda, dk) }), .{}).step);
 }
 
-/// tests/cuda/dsv41_main.zig over the runtime `cuda` and the kernel module `dk`, with `tp` for the exchanges.
+/// tests/cuda/dsv41_main.zig over the runtime `cuda` and the kernel module `dk`, with `tp` for the exchanges and the
+/// family's `partition.zig`, so the exchanges split the vocabulary as production does.
 fn runnerModule(b: *std.Build, target: std.Build.ResolvedTarget, cuda: *std.Build.Module, dk: *std.Build.Module) *std.Build.Module {
     return b.createModule(.{
         .root_source_file = b.path("zig/tests/cuda/dsv41_main.zig"),
         .target = target,
         .optimize = .Debug,
         .link_libc = true,
-        .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "dsv41_kernels", .module = dk }, .{ .name = "tp", .module = @import("tp.zig").module(b, target, .Debug, cuda) } },
+        .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "dsv41_kernels", .module = dk }, .{ .name = "tp", .module = @import("tp.zig").module(b, target, .Debug, cuda) }, .{ .name = "dsv41_partition", .module = shared.module(b, target, "partition.zig") } },
     });
 }
