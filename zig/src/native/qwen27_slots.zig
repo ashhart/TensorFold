@@ -27,13 +27,14 @@ pub fn opening(b: *Metal, s: *lanes.Stream, slot: u32) !Fill {
     const ids = s.prompt();
     if (ids.len == 0 or ids.len + s.max_new + b.window > b.runner.capacity) return error.PromptTooLong;
     if (s.yields()) return error.Yielded; // a background pass steps aside before it touches the slot
-    // as does one over the conversation slot 0 holds when the cache cannot keep its end: it would leave nothing there
-    if (slot == 0 and s.yield_check != null and s.max_new == 0 and !keepsEnd(s) and resumable(b, s, 0) != .none) return error.Yielded;
+    const kept_at: u32 = if (s.reuse.saved) |saved| @as(*const q.snapshot.State, @ptrCast(@alignCast(saved))).at else 0;
+    // as does one over slot 0's conversation when the cache cannot keep its end, unless a wide one and the point allow
+    if (slot == 0 and s.yield_check != null and s.max_new == 0 and !keepsEnd(s) and resumable(b, s, 0) != .none and
+        (!b.standing.wide or b.standing.carried(resumable(b, s, kept_at)) == 0)) return error.Yielded;
     if (b.vision != null and s.images.len > 0 and b.image_fill != null and b.image_fill != s) return error.LaneMemory;
     try recover(b, s);
     b.runner.rope[slot] = try images.layout(b.vision, s);
     const d = b.drafter(slot);
-    const kept_at: u32 = if (s.reuse.saved) |saved| @as(*const q.snapshot.State, @ptrCast(@alignCast(saved))).at else 0;
     const resumed = if (slot == 0) try takeStanding(b, s, kept_at) else 0; // slot 0's own state: nothing copied
     if (resumed == 0) {
         if (d) |x| try x.reset() else try b.runner.reset(slot);
@@ -87,7 +88,7 @@ pub fn chunk(b: *Metal, s: *lanes.Stream, f: *Fill, _: u32) !bool {
         return error.Yielded;
     }
     const at = f.at;
-    var end = resume_rules.chunkEnd(at, @import("qwen27_prompt_rows.zig").choose(b, s), ids.len, s.chunks, s.decode_spans);
+    var end = resume_rules.chunkEnd(at, @import("qwen27_prompt_rows.zig").choose(b, s, at), ids.len, s.chunks, s.decode_spans);
     if (f.checkpoint > at and f.checkpoint < end) end = f.checkpoint;
     end = resume_rules.rewindEnd(at, end, f.rewind);
     var decoded = false;
@@ -233,21 +234,27 @@ fn resumable(b: *const Metal, s: *const lanes.Stream, kept_at: u32) resume_rules
     return b.standing.plan(s.prompt(), s.decode_spans, kept_at);
 }
 
-/// Slot 0's position for `s` when it resumes there (0: not); the record is used up, as the pass changes the slot.
+/// Slot 0's position for `s` when it resumes there (0: not); the record is used up, its rewind point carried on.
 fn takeStanding(b: *Metal, s: *const lanes.Stream, kept_at: u32) !u32 {
-    defer b.standing.deinit(b.gpa);
-    switch (resumable(b, s, kept_at)) {
+    const plan = resumable(b, s, kept_at);
+    const kept = b.standing.carried(plan);
+    b.standing.deinit(b.gpa);
+    // rows [0, rewind_at) and the buffer hold only while slot 0 just extends past it: a restore, reset or move drops it
+    switch (plan) {
         .none => return 0,
         .here => |n| {
-            const d = b.draft orelse return n;
-            try d.model.reset(); // a new session over the kept taps, as after a restore
-            d.model.committed_end = n;
+            if (b.draft) |d| {
+                try d.model.reset(); // a new session over the kept taps, as after a restore
+                d.model.committed_end = n;
+            }
+            b.standing.rewind_at = kept;
             return n;
         },
         .back => |h| {
             const buf = b.rewind orelse return 0;
             if (b.draft) |d| try d.model.reset();
             q.snapshot.rewindSlot(b.gpa, b.runner, 0, b.ringOf(0), h, buf) catch return 0; // the pass then starts at 0
+            b.standing.rewind_at = kept;
             return h;
         },
     }
@@ -274,11 +281,12 @@ fn saveRewind(b: *Metal, at: u32) void {
     b.standing.rewind_at = at;
 }
 
-/// The history rewind where two full-context states do not fit in `cache`, provided `room` holds its bytes.
+/// The history rewind, where `room` holds it; beside a `cache` that keeps two full-context states it is also `wide`.
 pub fn rewindInit(b: *Metal, room: u64, cache: u64) ?mtl.Buffer {
     if (!slotResume(b) or b.runner.ready == 0) return null;
     const need = q.snapshot.rewindBytes(b.runner, b.ringOf(0));
-    if (!resume_rules.needsRewind(cache, q.snapshot.Spares.size(q.snapshot.slotBytes(b.runner, b.ringOf(0), b.runner.capacity)))) return null;
+    // such a cache keeps the reply's end but may still evict the history's end: slot 0 keeps that one in place
+    b.standing.wide = !resume_rules.needsRewind(cache, q.snapshot.Spares.size(q.snapshot.slotBytes(b.runner, b.ringOf(0), b.runner.capacity)));
     if (need > room) {
         std.log.info("qwen27: no rewind point for slot 0 ({d} MiB, {d} MiB left under the load limit): a next turn that drops the last reply's reasoning reads its prompt again", .{ need >> 20, room >> 20 });
         return null;
