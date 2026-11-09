@@ -44,7 +44,7 @@ pub fn Adapter(comptime M: type, comptime H: type) type {
         /// The lane target's own drafting facts before the move: a block's drafts, every stream in one batch.
         fn factsFn(ptr: *anyopaque) dr.Facts {
             const a = cast(ptr);
-            return .{ .depth = a.host.block - 1, .step_ms = 0.6, .plain_guard = false, .batched = true };
+            return .{ .depth = a.host.block - 1, .step_ms = H.draft_step_ms, .plain_guard = false, .batched = true };
         }
 
         /// The slot's context is the target's: its prompt pass resets it or restores a kept one.

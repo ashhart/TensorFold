@@ -311,6 +311,7 @@ pub const Drafted = struct {
                 pending = tok.*;
                 const last = r.stream.prompt_len - 1;
                 if (r.stream.cached <= last) { // the pass computed the prompt's last row (not restored whole)
+                    // right after this stream's own prompt pass: a target keeping one pass's taps refuses another's
                     const f = try x.target.features(r.stream, x.drafter.taps(), last, 1);
                     try x.absorbs.append(x.gpa, .{ .stream = r.stream, .features = f, .start = last, .follow = @as(*const [1]u32, tok), .propose = r.depth > 0 });
                     lane.rows = true;
