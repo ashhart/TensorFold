@@ -177,7 +177,7 @@ pub const Served = struct {
             pl.* = lookup.Planner.init(ls, &s.x.policy.depth.costs, m.pass != null);
             s.lookup = pl;
             s.host.proposers = .{ .ctx = pl, .make = makeLookup, .free = freeLookup };
-            std.log.info("dsv41 lookup: Python's priced plan (min match {d}, up to {d} rows{s})", .{ ls.min_match, ls.max_rows, if (ls.lookup) "" else ", lookup off" });
+            std.log.info("dsv41 lookup: Python's priced plan (min match {d}, up to {d} rows{s}{s})", .{ ls.min_match, ls.max_rows, if (ls.copy_drafter) ", copy drafter" else "", if (ls.lookup) "" else ", lookup off" });
         }
         try s.host.start();
         s.rec = Recorder.init(gpa, io, s.host.engine());
