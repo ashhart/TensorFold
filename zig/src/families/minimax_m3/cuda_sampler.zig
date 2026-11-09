@@ -14,12 +14,11 @@ pub fn check(s: ?Sampling) ?Sampling {
     return if (x.temperature > 0) x else null;
 }
 
-/// sample.cu's Rule: the seed, 1 / T, top_p, the candidates' near window, ln(min_p) and top_k (0: off).
-pub const Rule = extern struct { seed: u64, inv_t: f32, top_p: f32, near: f32, min_log: f32, top_k: u32, pad: u32 = 0 };
+pub const Rule = cuda.sample.Rule;
 
-/// The rule as nemotron/cuda_sampler.zig fills it.
+/// The rule sample.cu reads for `s` (cuda.sample.rule over lanes.gpu_rule).
 pub fn rule(s: Sampling) Rule {
-    return .{ .seed = s.seed, .inv_t = @floatCast(1.0 / @max(s.temperature, 1e-6)), .top_p = @floatCast(s.top_p), .near = 20.0, .min_log = @floatCast(s.minLog()), .top_k = s.top_k };
+    return cuda.sample.rule(s);
 }
 
 /// A rank's logits rows: bf16 [rows][its vocabulary span].
