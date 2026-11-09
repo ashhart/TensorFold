@@ -61,5 +61,20 @@ test "env defaults: TF_DRAMA_PREFILL_ROWS outside 1 through 1024 is refused by n
     }
     try set("TF_DRAMA_PREFILL_ROWS", "rows");
     try std.testing.expectEqual(@as(?api.Opened, null), try drama_open.open(arena.allocator(), a, std.testing.io, .{ .dir = "", .model_type = "drama3" }, &problem));
-    try std.testing.expectEqualStrings("TF_DRAMA_PREFILL_ROWS=rows: a whole number", problem);
+    try std.testing.expectEqualStrings("TF_DRAMA_PREFILL_ROWS=\"rows\": expected whole prompt rows a chunk, 1 through 1024 (checked when a Drama 3 checkpoint opens)", problem);
+}
+
+test "env defaults: TF_DRAMA_REFERENCE_CACHE unset keeps no voices and more than 16 is refused by name" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var saved: [3]Saved = undefined;
+    for (&saved, [_][:0]const u8{ "TF_DRAMA_REFERENCE_CACHE", "TF_DRAMA_PREFILL_ROWS", "TF_CUDA_DEVICE" }) |*s, name| s.* = try Saved.take(name);
+    defer for (saved) |s| s.restore();
+    for (saved) |s| try set(s.name, null);
+    var problem: []const u8 = "";
+    try std.testing.expectEqual(@as(?u32, 0), try setting(a, null, "TF_DRAMA_REFERENCE_CACHE", (drama_host.Options{}).reference_entries, &problem));
+    try set("TF_DRAMA_REFERENCE_CACHE", "17");
+    try std.testing.expectEqual(@as(?api.Opened, null), try drama_open.open(arena.allocator(), a, std.testing.io, .{ .dir = "", .model_type = "drama3" }, &problem));
+    try std.testing.expectEqualStrings("TF_DRAMA_REFERENCE_CACHE must be 0 (off) through 16 entries", problem);
 }
