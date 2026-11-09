@@ -5,6 +5,9 @@ const Model = @import("model.zig").Model;
 const forward = @import("forward.zig");
 const wts = @import("gpu_weights.zig");
 const Ref = @import("projection.zig").Ref;
+const rounds = @import("decode_round.zig");
+const Runner = rounds.Runner;
+const Round = @import("round_plan.zig").Round;
 
 const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 
@@ -68,4 +71,33 @@ pub fn encode(m: *Model, sc: *const Scratch, e: *mtl.ComputeEncoder, hooks: forw
     try s.post(&lane, block);
     try s.finish(&lane);
     return f.get(.input); // the final norm's rows the head read: a chain's next row starts there, as on CUDA
+}
+
+/// One MTP head pass on `r` (`round`: its cache rows and positions); a round left to keep reads nothing it writes.
+pub fn pass(r: *Runner, round: *const Round, sc: *const Scratch, hidden: Ref, head: forward.Head) !Ref {
+    if (r.failed or r.model.weights.mtp == null or round.ids.len > r.model.frame.capacity) return error.RoundNotReady;
+    var attention_plan = try r.attentionPlan(round);
+    defer attention_plan.deinit();
+    try r.model.frame.setRows(round.ids, round.feed_positions);
+    try r.scratch.upload(attention_plan);
+    r.current_round = round;
+    r.current_attention = &attention_plan;
+    defer {
+        r.current_round = null;
+        r.current_attention = null;
+    }
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    const cb = r.model.queue.commandBuffer();
+    var e = cb.compute(.serial);
+    errdefer e.end(); // an encoder left open aborts the process when it is released
+    const out = try encode(r.model, sc, &e, .{ .ptr = r, .gdn = Runner.gdnForward, .attention = Runner.attentionForward }, hidden, @intCast(round.ids.len), head);
+    e.end();
+    cb.commit();
+    cb.wait();
+    if (rounds.gpuFailed(cb, "the MTP head")) {
+        r.failed = true;
+        return error.RoundGpuFailure;
+    }
+    return out;
 }

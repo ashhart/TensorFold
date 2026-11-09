@@ -343,33 +343,9 @@ pub const Runner = struct {
         } else r.active = fingerprint(round);
     }
 
-    /// One MTP head pass (`round`: its cache rows and positions); a round left to keep reads nothing it writes.
+    /// One MTP head pass (mtp.zig `pass`); a round left to keep reads nothing it writes.
     pub fn headPass(r: *Runner, round: *const Round, sc: *const @import("mtp.zig").Scratch, hidden: Ref, head: forward.Head) !Ref {
-        if (r.failed or r.model.weights.mtp == null or round.ids.len > r.model.frame.capacity) return error.RoundNotReady;
-        var attention_plan = try r.attentionPlan(round);
-        defer attention_plan.deinit();
-        try r.model.frame.setRows(round.ids, round.feed_positions);
-        try r.scratch.upload(attention_plan);
-        r.current_round = round;
-        r.current_attention = &attention_plan;
-        defer {
-            r.current_round = null;
-            r.current_attention = null;
-        }
-        const pool = mtl.objc.Pool.push();
-        defer pool.pop();
-        const cb = r.model.queue.commandBuffer();
-        var e = cb.compute(.serial);
-        errdefer e.end(); // an encoder left open aborts the process when it is released
-        const out = try @import("mtp.zig").encode(r.model, sc, &e, .{ .ptr = r, .gdn = gdnForward, .attention = attentionForward }, hidden, @intCast(round.ids.len), head);
-        e.end();
-        cb.commit();
-        cb.wait();
-        if (gpuFailed(cb, "the MTP head")) {
-            r.failed = true;
-            return error.RoundGpuFailure;
-        }
-        return out;
+        return @import("mtp.zig").pass(r, round, sc, hidden, head);
     }
 
     pub fn keep(r: *Runner, round: *const Round, paths: []const []const u32) !void {
@@ -532,7 +508,7 @@ pub const Runner = struct {
         return r.geometry.promptRows(@min(requested, r.model.frame.capacity));
     }
 
-    fn attentionPlan(r: *Runner, round: *const Round) !attn.Plan {
+    pub fn attentionPlan(r: *Runner, round: *const Round) !attn.Plan {
         var windows: [attn.planning.max_streams]attn.planning.Window = undefined;
         if (round.windows.len > windows.len) return error.AttentionStreams;
         for (round.windows, 0..) |window, i| windows[i] = .{ .parents = window.parents, .start = window.start, .capacity = r.capacity };
@@ -544,13 +520,13 @@ pub const Runner = struct {
         return views[0..round.slots.len];
     }
 
-    fn gdnForward(ptr: *anyopaque, e: mtl.ComputeEncoder, block: usize, weights: wts.Gdn, frame: *Frame, rows: u32) !void {
+    pub fn gdnForward(ptr: *anyopaque, e: mtl.ComputeEncoder, block: usize, weights: wts.Gdn, frame: *Frame, rows: u32) !void {
         const r: *Runner = @ptrCast(@alignCast(ptr));
         var hook = GdnHook{ .pool = &r.gdn, .quant = &r.model.kernels, .glue = r.model.glue, .plan = r.current_gdn orelse return error.RoundNotReady, .linear_index = r.linear_index, .accepted_chain = r.accepted_chain };
         try GdnHook.forward(&hook, e, block, weights, frame, rows);
     }
 
-    fn attentionForward(ptr: *anyopaque, e: mtl.ComputeEncoder, block: usize, weights: wts.Attention, f: *Frame, rows: u32) !void {
+    pub fn attentionForward(ptr: *anyopaque, e: mtl.ComputeEncoder, block: usize, weights: wts.Attention, f: *Frame, rows: u32) !void {
         const r: *Runner = @ptrCast(@alignCast(ptr));
         const plan = (r.current_attention orelse return error.RoundNotReady).*;
         const layer = r.attention_index[block];
