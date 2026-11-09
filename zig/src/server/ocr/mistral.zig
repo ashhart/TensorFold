@@ -113,11 +113,11 @@ pub fn decode(a: Allocator, body: Value, facts: Facts, fault: *Fault) Step!Reque
     if (is_pdf) {
         if (!facts.pdf) return bad(a, fault, &.{ "body", "document" }, "{s}", .{pdf.off_message});
         const sel: pdf.Selection = if (pages) |l| .{ .list = l } else .{ .all_within = std.math.maxInt(u32) };
-        return .{ .options = o, .source = .{ .name = "document", .bytes = bytes, .kind = .pdf, .sel = sel }, .doc_size = bytes.len };
+        return .{ .options = o, .source = .{ .bytes = bytes, .kind = .pdf, .sel = sel }, .doc_size = bytes.len };
     }
     if (!image) return bad(a, fault, &.{ "body", "document" }, "the document is not a PDF, PNG, JPEG or WebP file", .{});
     if (pages) |l| if (l.len != 1 or l[0] != 0) return bad(a, fault, &.{ "body", "pages" }, "an image has one page; pages may select only page 0", .{});
-    return .{ .options = o, .source = .{ .name = "document", .bytes = bytes, .kind = .image, .sel = .{ .all_within = 1 } }, .doc_size = bytes.len };
+    return .{ .options = o, .source = .{ .bytes = bytes, .kind = .image, .sel = .{ .all_within = 1 } }, .doc_size = bytes.len };
 }
 
 fn flag(a: Allocator, fault: *Fault, body: Value, name: []const u8) Step!?bool {
