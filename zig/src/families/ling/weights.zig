@@ -4,6 +4,7 @@ const cuda = @import("cuda");
 const core = @import("core");
 const config = @import("config.zig");
 const names = @import("names.zig");
+const routing = @import("route.zig");
 pub const proj = @import("weights_proj.zig");
 pub const cuts = @import("weights_cut.zig");
 
@@ -246,7 +247,7 @@ const Loader = struct {
         const x = names.dims(c, .expert_gate).linear;
         return .{
             .router = try L.small(i, .router, .bf16),
-            .bias = if (c.expert_bias) try L.small(i, .router_bias, .f32) else 0,
+            .bias = if (c.expert_bias) try routerBias(&L.r, i) else 0,
             .routed = try L.r.experts(i, count, x[0], x[1], lim.routed, L.share(x[0])),
             .shared = if (c.shared_inter > 0) try L.mlp(try std.fmt.bufPrint(&b, "model.layers.{d}.mlp.shared_experts.", .{i}), .shared_gate) else null,
             .experts = count,
@@ -269,6 +270,22 @@ const Loader = struct {
         };
     }
 };
+
+/// Layer i's expert bias as fp32, refused by name when a routing group holds +inf and -inf (it scores NaN).
+pub fn routerBias(r: *proj.Reader, i: u32) !u64 {
+    var b: [96]u8 = undefined;
+    const m = try names.moduleName(&b, i, .router_bias, null);
+    const t = try r.ck.get(m);
+    var v: [routing.max_experts]f32 = undefined;
+    if (t.numel() == r.c.experts) { // else small refuses it by name
+        for (v[0..r.c.experts], 0..) |*x, e| x.* = proj.value(t, e) catch return r.small(m, r.c.experts, .f32);
+        routing.checkBias(v[0..r.c.experts], routing.Shape.of(r.c)) catch |err| {
+            if (!@import("builtin").is_test) std.log.err("{s}: a routing group holds both a +inf and a -inf bias, so its score is NaN", .{m});
+            return err;
+        };
+    }
+    return r.small(m, r.c.experts, .f32);
+}
 
 /// Backbone layers `layers` from `ck`, each tensor in its stored format; `stream` blocking. FP8 and NVFP4 are refused.
 pub fn load(gpa: std.mem.Allocator, d: *const cuda.Driver, stream: cuda.Stream, pack: *const cuda.modelopt.Packer, ck: *core.Checkpoint, c: Config, layers: []const u32, opts: Options) !Weights {
