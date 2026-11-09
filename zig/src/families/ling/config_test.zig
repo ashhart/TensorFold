@@ -225,10 +225,6 @@ const Case = struct { key: []const u8, value: []const u8, err: anyerror, says: [
 
 test "geometry the kernels do not take is refused at load, one value at a time on the tiny config, with the reason" {
     const cases = [_]Case{
-        .{ .key = "head_dim", .value = "64", .err = error.KdaGeometry, .says = "head_dim 64" },
-        .{ .key = "head_dim", .value = "256", .err = error.KdaGeometry, .says = "128-wide heads" },
-        .{ .key = "short_conv_kernel_size", .value = "3", .err = error.KdaGeometry, .says = "short_conv_kernel_size 3" },
-        .{ .key = "short_conv_kernel_size", .value = "5", .err = error.KdaGeometry, .says = "4 taps" },
         .{ .key = "num_attention_heads", .value = "0", .err = error.KdaGeometry, .says = "0 attention heads" },
         .{ .key = "num_attention_heads", .value = "0", .err = error.KdaGeometry, .says = "0 attention heads, 0", .also = .{ "num_key_value_heads", "0" } },
         .{ .key = "num_key_value_heads", .value = "2", .err = error.KdaGeometry, .says = "2 key/value heads" },
@@ -278,7 +274,7 @@ test "the shapes the kernels take are accepted: the tiny config as written and w
         return e;
     };
     const c = try load();
-    try t.expect(c.kda_dim == config.fixed.kda_dim and c.conv == config.fixed.conv and c.kv_lora == config.fixed.kv_lora);
+    try t.expect(c.kda_dim == 128 and c.conv == 4 and c.kv_lora == config.fixed.kv_lora);
 }
 
 test "routing groups: groups of one and a single pick refused (HF's rule differs there); one group, all groups kept, groups of two accepted" {

@@ -325,6 +325,14 @@ pub fn load(gpa: std.mem.Allocator, d: *const cuda.Driver, stream: cuda.Stream, 
     return w;
 }
 
+/// KDA's head_dim (keys and values; v_head_dim is MLA's) and taps against cuda.kda: the one check, at open.
+pub fn kdaGeometry(c: *const Config, why: *config.Why) error{KdaGeometry}!void {
+    cuda.kda.geometry(c.kda_dim, c.kda_dim, c.conv) catch |err| {
+        why.set("head_dim {d}, short_conv_kernel_size {d}: the KDA kernels take {d}-wide heads and {d} taps", .{ c.kda_dim, c.conv, cuda.kda.dk, cuda.kda.taps });
+        return err;
+    };
+}
+
 /// load() from a checkpoint directory: config.json (and hf_quant_config.json, if any) read there too.
 pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, why: *config.Why) !struct { ck: core.Checkpoint, c: Config } {
     var arena = std.heap.ArenaAllocator.init(gpa);
@@ -334,5 +342,6 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, why: *config.Wh
     const json = try cwd.readFileAlloc(io, try std.fs.path.join(a, &.{ dir, "config.json" }), a, .limited(1 << 22));
     const hf = cwd.readFileAlloc(io, try std.fs.path.join(a, &.{ dir, "hf_quant_config.json" }), a, .limited(1 << 22)) catch null;
     const c = try config.parseWith(gpa, json, hf, why);
+    try kdaGeometry(&c, why);
     return .{ .ck = try core.Checkpoint.openModel(gpa, io, dir), .c = c };
 }
