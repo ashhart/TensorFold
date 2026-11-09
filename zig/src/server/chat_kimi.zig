@@ -20,11 +20,12 @@ pub fn stream(g: anytype, sink: chat.Sink) chat.Failure!void {
     if (g.chat and g.kimi == null) g.kimi = try native.Stream.init(g.a, g.srv.text, g.thinking, g.tools);
     const result = if (g.chat and g.kimi != null) blk: {
         var parsed = try g.kimi.?.extend(ids);
+        if (g.kimi.?.fallback) break :blk try read(g, ids, false);
         parsed.content = g.stops.visible(parsed.content, true);
         parsed.reasoning = g.stops.visible(parsed.reasoning, true);
         break :blk parsed;
     } else try read(g, ids, false);
-    const stable = if (g.kimi) |k| !k.revised else false;
+    const stable = if (g.kimi) |k| !k.revised and !k.fallback else false;
     const thought = reply_text.pyStrip(result.reasoning);
     const reason = g.streamed_reasoning.after(thought, stable);
     if (reason.len > 0) {
