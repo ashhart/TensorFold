@@ -141,6 +141,9 @@ pub const Model = struct {
         try m.backend.primitives.norm(e, .{ .buf = out }, try m.backend.weight(m.graph.hidden_norm), .{ .buf = y.buffer, .off = y.offset }, .{ .rows = rows, .heads = 1, .dim = c.hidden, .x_stride = c.hidden, .y_stride = c.hidden, .eps = c.eps });
         e.barrier();
     }
+    pub fn committedEnd(m: *const Model) u64 {
+        return m.committed_end;
+    }
     pub fn absorb(m: *Model, taps: @import("runtime_backend.zig").Ref, rows: u32) !void {
         if (m.backend.failed or m.backend.frame.active or m.backend.transaction != null or rows == 0 or rows > 128) return error.BadCommittedTaps;
         try m.ring().absorb(taps.buf, taps.off, rows);
@@ -361,6 +364,7 @@ pub const Context = struct {
     held: u32, // the ring's rows: the span unless it grows as used
     step: ?u32 = null, // a ring that grows as used (TF_Q27_KV_GROW): its first rows and step
     settle: ?Settle = null, // the slot's pending reads land before its ring's buffer changes
+    config: ?cfg.Config = null, // DFlash2's, which its session keeps; null: another drafter's taps ring alone
 
     /// The runner's wait for a blit still reading the slot (Runner.settleSlot).
     pub const Settle = struct { ctx: *anyopaque, slot: u32, run: *const fn (ctx: *anyopaque, slot: u32) void };
@@ -381,7 +385,7 @@ pub const Context = struct {
         errdefer pending.deinit();
         const caches = try backend_mod.newCaches(a, device, c, if (drafting) c.layers else 0);
         errdefer backend_mod.freeCaches(a, caches);
-        x.* = .{ .pending = pending, .caches = caches, .session = try Session.init(c, 1, 0), .device = device, .span = c.span(), .stride = @as(usize, c.ringWidth()) * 2, .held = held, .step = grows };
+        x.* = .{ .pending = pending, .caches = caches, .session = try Session.init(c, 1, 0), .device = device, .span = c.span(), .stride = @as(usize, c.ringWidth()) * 2, .held = held, .step = grows, .config = c };
         x.setResident(m.backend.residency);
         return x;
     }
@@ -418,6 +422,16 @@ pub const Context = struct {
         x.pending = fresh;
         x.held = rows;
     }
+    /// A parked stream's taps ring alone (`window` rows of `stride` bytes), for a drafter without parked sessions.
+    pub fn taps(a: std.mem.Allocator, device: mtl.Device, window: u32, stride: usize, residency: ?mtl.ResidencySet.Follow) !*Context {
+        const x = try a.create(Context);
+        errdefer a.destroy(x);
+        const pending = try device.buffer(@as(usize, window) * stride, opts);
+        errdefer pending.deinit();
+        x.* = .{ .pending = pending, .caches = &.{}, .session = undefined, .device = device, .span = window, .stride = stride, .held = window, .config = null };
+        x.setResident(residency);
+        return x;
+    }
     pub fn setResident(x: *Context, hook: ?mtl.ResidencySet.Follow) void {
         if (x.residency) |f| x.apply(f, false);
         x.residency = hook;
@@ -434,15 +448,15 @@ pub const Context = struct {
         a.destroy(x);
     }
     /// Empty, as Model.reset leaves the model's own.
-    pub fn reset(x: *Context, c: cfg.Config) !void {
+    pub fn reset(x: *Context) !void {
         try x.shrinkRing();
         x.committed_end = 0;
-        x.session = try Session.init(c, 1, 0);
+        if (x.config) |c| x.session = try Session.init(c, 1, 0);
         x.context = .{ .cache = 1, .begin = 0, .end = 0 };
     }
     /// Its taps ring, where the lane backend absorbs the stream's kept rows while it is parked.
-    pub fn ring(x: *Context, c: cfg.Config) @import("../tap_ring.zig").Ring {
-        return .{ .buf = x.pending, .end = &x.committed_end, .window = c.span(), .stride = @as(usize, c.ringWidth()) * 2, .grow = if (x.step != null) .{ .ctx = x, .run = growRing } else null };
+    pub fn ring(x: *Context) @import("../tap_ring.zig").Ring {
+        return .{ .buf = x.pending, .end = &x.committed_end, .window = x.span, .stride = x.stride, .grow = if (x.step != null) .{ .ctx = x, .run = growRing } else null };
     }
     /// Its buffers, for a residency set.
     pub fn buffers(x: *const Context, list: *std.ArrayList(mtl.Buffer), a: std.mem.Allocator) !void {

@@ -47,7 +47,7 @@ pub fn main(init: std.process.Init) !void {
     const drafter = try q.dflash.runtime_model.Model.load(init.gpa, io, target, draft_dir.?, mode);
     defer drafter.deinit();
     try drafter.setTreeBlock(16);
-    const draft = try lb.Draft.attach(init.gpa, &runner, drafter, false);
+    const draft = try lb.Draft.attach(init.gpa, &runner, .{ .dflash2 = drafter }, false);
     defer draft.deinit();
     const backend = try lb.Metal.init(init.gpa, &runner, draft);
     defer backend.deinit();

@@ -64,14 +64,14 @@ fn finish(m: *Model) !void {
     };
 }
 
-/// Committed taps [rows, taps * hidden], the rows after m.committed_end, into every layer's K/V cache.
+/// Committed taps [rows, taps * hidden], the rows after m.context_end, into every layer's K/V cache.
 pub fn append(m: *Model, taps: Ref, rows: usize) !void {
     const s = m.graph.shape;
     if (m.broken or m.frame.active or rows == 0) return error.BadCommittedTaps;
     _ = try m.frame.begin();
     defer m.frame.release();
     const e = m.frame.encoder;
-    const positions = try positionsOf(m, m.committed_end, rows);
+    const positions = try positionsOf(m, m.context_end, rows);
     const fused = try project(m, e, taps, m.graph.fusion, rows);
     const hidden = try norm(m, e, fused, m.graph.hidden_norm, rows, 1, s.hidden);
     const kv = config.kvWidth(s);
@@ -83,7 +83,7 @@ pub fn append(m: *Model, taps: Ref, rows: usize) !void {
         while (first < rows) : (first += 16) {
             const count = @min(rows - first, 16);
             var slots: [16]u32 = undefined;
-            for (slots[0..count], 0..) |*slot, i| slot.* = @intCast((m.committed_end + first + i) % s.window);
+            for (slots[0..count], 0..) |*slot, i| slot.* = @intCast((m.context_end + first + i) % s.window);
             const k_at = at(keys, first * kv * 2);
             const v_at = at(values, first * kv * 2);
             try m.attention.appendKv(e, slots[0..count], .{ .buf = k_at.buf, .off = k_at.off }, .{ .buf = v_at.buf, .off = v_at.off }, .{ .buf = cache.keys }, .{ .buf = cache.values });
@@ -91,18 +91,25 @@ pub fn append(m: *Model, taps: Ref, rows: usize) !void {
         }
     }
     try finish(m);
-    m.committed_end += rows;
-    m.begin = @max(m.begin, m.committed_end -| (s.window - 1));
+    m.context_end += rows;
+    m.begin = @max(m.begin, m.context_end -| (s.window - 1));
 }
 
-/// Query row i sees the context rows its window holds and the block's rows up to its own.
-pub fn fillMask(out: []u8, context: usize, queries: usize, window: usize) !void {
+/// Query row i (absolute end + i) sees the cached rows at [begin, end) its window reaches, and the block to its own.
+pub fn fillMask(out: []u8, end: u64, begin: u64, queries: usize, window: usize) !void {
+    const context: usize = @intCast(@min(end, window));
     const keys = context + queries;
-    if (out.len != queries * keys or context >= window) return error.BadDraftContext;
+    if (out.len != queries * keys or begin > end) return error.BadDraftContext;
     @memset(out, 0);
     for (0..queries) |q| {
-        const hidden = @min(context, (context + q + 1) -| window);
-        @memset(out[q * keys + hidden ..][0 .. context + q + 1 - hidden], 1);
+        const row = out[q * keys ..][0..keys];
+        const oldest = @max(begin, (end + q + 1) -| window);
+        for (row[0..context], 0..) |*v, j| {
+            // slot j holds the latest absolute row below end that is j modulo the window
+            const held: u64 = if (end <= window) j else j + window * ((end - 1 - j) / window);
+            v.* = @intFromBool(held >= oldest);
+        }
+        @memset(row[context..][0 .. q + 1], 1);
     }
 }
 
@@ -125,9 +132,9 @@ pub fn propose(m: *Model, anchor: u32) !Proposal {
     const h = s.hidden;
     const k = s.topk;
     if (m.broken or m.frame.active or anchor >= s.vocab or m.committed_end == 0) return error.BadDraftContext;
-    const context: usize = @intCast(m.committed_end - m.begin);
-    // unwrapped: the block's own rows go behind the context in the caches' spare rows
-    if (m.begin != 0 or m.committed_end > s.window - 1) return error.UnsupportedDSpineContext;
+    try m.flush();
+    // the context's slots, then the block's own rows behind them (past the window: the caches' spare rows)
+    const context: usize = @intCast(@min(m.context_end, s.window));
     _ = try m.frame.begin();
     defer m.frame.release();
     var e = m.frame.encoder;
@@ -135,7 +142,7 @@ pub fn propose(m: *Model, anchor: u32) !Proposal {
     const id_slice = ids.buf.slice(u32, ids.off / 4 + t)[ids.off / 4 ..][0..t];
     @memset(id_slice, s.mask);
     id_slice[0] = anchor;
-    const positions = try positionsOf(m, m.committed_end, t);
+    const positions = try positionsOf(m, m.context_end, t);
     const x = try scratch(m, t, h, .bf16);
     try m.target.glue.embedding(e, m.target.config, m.target.weights.embed, .{ .buffer = ids.buf, .offset = ids.off }, .{ .buffer = x.buf, .offset = x.off }, @intCast(t));
     e.barrier();
@@ -143,7 +150,7 @@ pub fn propose(m: *Model, anchor: u32) !Proposal {
     var xin = try norm(m, e, x, m.graph.layers[0].input_norm, t, 1, h);
     const keys = context + t;
     const mask = try scratch(m, t, keys, .u8);
-    try fillMask(mask.buf.contents()[mask.off..][0 .. t * keys], context, t, s.window);
+    try fillMask(mask.buf.contents()[mask.off..][0 .. t * keys], m.context_end, m.begin, t, s.window);
     const kv = config.kvWidth(s);
     const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(s.head_dim)));
     const packed_w: Ref = .{ .buf = m.packed_w };
@@ -267,9 +274,20 @@ fn read(top: Ref, table: Ref, written: Ref, n: usize, k: usize, h: usize, eps: f
 
 test "DSpine mask: block rows see the context and the block up to their own row; the window hides old context" {
     var mask: [4 * 7]u8 = undefined;
-    try fillMask(&mask, 3, 4, 8192);
+    try fillMask(&mask, 3, 0, 4, 8192);
     for (0..4) |q| for (0..7) |key| try std.testing.expectEqual(@as(u8, @intFromBool(key < 3 + q + 1)), mask[q * 7 + key]);
-    try fillMask(&mask, 3, 4, 5);
+    try fillMask(&mask, 3, 0, 4, 5);
     // row q sits at absolute 3 + q: it sees rows past 3 + q - 5
     for (0..4) |q| for (0..7) |key| try std.testing.expectEqual(@as(u8, @intFromBool(key + 5 > 3 + q and key < 3 + q + 1)), mask[q * 7 + key]);
+    // wrapped: end 7 over window 5, slots 0..4 hold rows 5, 6, 2, 3, 4; row q sees rows past 7 + q - 5
+    var wrapped: [2 * 7]u8 = undefined;
+    try fillMask(&wrapped, 7, 0, 2, 5);
+    const rows = [_]u64{ 5, 6, 2, 3, 4 };
+    for (0..2) |q| {
+        for (rows, 0..) |r, j| try std.testing.expectEqual(@as(u8, @intFromBool(r + 5 > 7 + q)), wrapped[q * 7 + j]);
+        for (0..2) |b| try std.testing.expectEqual(@as(u8, @intFromBool(b <= q)), wrapped[q * 7 + 5 + b]);
+    }
+    // a restored context's rows before `begin` were never cached
+    try fillMask(&wrapped, 7, 4, 2, 5);
+    for (rows, 0..) |r, j| try std.testing.expectEqual(@as(u8, @intFromBool(r >= 4)), wrapped[j]);
 }
