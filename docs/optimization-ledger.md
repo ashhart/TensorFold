@@ -348,7 +348,7 @@ below; these are estimates for planning a port, not results.
     replies as serial decode. `--mtp-drafts` and `--mtp-confidence` size the drafts on Nemotron and GLM.
 
     GLM CUDA's proposed 32-row prices, three-draft shared MTP cap and wider copy windows are tracked in [#2257].
-    The TP=2 receipt on two GB10s compares main 52427c023e with the proposed branch: one-stream code 55.4 to 73.7 tok/s
+    The TP=2 receipt on two GB10s compares main 52427c023e with an earlier revision of the proposed branch: one-stream code 55.4 to 73.7 tok/s
     (+33.1%), two-stream chat +3.2%, one-stream chat +1.0%, two-stream code +1.3%, prefill within 0.3% and
     replies 52/0/0 equal/unequal/unverified. The receipt does not identify the drafter mode, so it qualifies
     neither drafter separately. TP=1, TP=4, sampled runs, copies on and the shared MTP cap on another chip

@@ -123,7 +123,8 @@ revised key and fixtures do not change the gather arithmetic.
 ## Four cards in one host
 
 The following receipt is historical, from 9200a3064 with its experimental window changes. It does not qualify
-the current price-cache identity or 32-row contract additions.
+the current price-cache identity or 32-row contract additions. Its DFlash2 rows were measured with timed DFlash2
+lone and shared prices, which this branch no longer applies: DFlash2 keeps main's prices.
 
 NCCL allows direct card-to-card transfers on AMD hosts only up to two GPUs, so set these on every rank at three or more:
 
