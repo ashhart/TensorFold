@@ -76,6 +76,7 @@ pub fn steps(b: *std.Build, host: std.Build.ResolvedTarget, cuda: *std.Build.Mod
     if (server_steps) {
         golden_build.step(b, host, server_tests, native_modules.api, mods.tokenizer, template, native_modules.engines);
         @import("cortheon_fuzz.zig").add(b, host, native_modules.api, mods.tokenizer, template, mods.core);
+        @import("stream_scan_bench.zig").add(b, host, native_modules.api, mods.tokenizer, template, mods.core);
         // the PDF render worker from this host's CUDA tensorfold-native, as metal_targets.zig has it; POSIX only
         if (host.result.os.tag != .windows) {
             const server = @import("cuda.zig").nativeServer(b, host, .ReleaseSafe, cuda, mods.core, mods.lanes, mods.nemotron, mods.heat, mods.qwen35, mods.qwen_vision, mods.tokenizer, mods.living, build_options, false, null);
