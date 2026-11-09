@@ -32,6 +32,11 @@ pub fn below(cuts: []const u32, at: u32) u64 {
     return if (grid) 0 else h.final() | 1;
 }
 
+/// A state kept at `at` with digest `kept_below` serves a pass over `len` rows: a cold cut there, over the same chunks.
+pub fn resumes(len: usize, cuts: []const u32, at: u32, kept_below: u64) bool {
+    return coldCut(len, cuts, at) and kept_below == below(cuts, at);
+}
+
 /// Rank 0's step rows from `start` (Leader.chunk): a solo or paired step's if `wide`, else to the next cut.
 pub fn leaderRows(len: usize, cuts: []const u32, start: usize, wide: bool) usize {
     return if (wide) state.solo_rows else nextCut(len, cuts, start) - start;

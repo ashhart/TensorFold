@@ -2,6 +2,7 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const native = @import("cuda_native.zig");
+const glm_env = @import("cuda_env.zig");
 const env = @import("sys").env;
 const t = std.testing;
 
@@ -54,7 +55,7 @@ test "glm request starts: --learn-conversations refuses at startup before any ra
     try t.expect(std.mem.indexOf(u8, reason, "TF_GLM_REQUEST_STARTS=1") != null);
     try t.expect(std.mem.indexOf(u8, reason, "--learn-conversations") != null);
     try put("TF_GLM_REQUEST_STARTS", null);
-    try native.requestStartsAlone(true); // the switch off: --learn-conversations starts as today
+    try glm_env.requestStartsAlone(true); // the switch off: --learn-conversations starts as today
 }
 
 test "glm request starts: only exact 1 with a shared store above 0 refuses; other values keep today's startup" {
@@ -63,17 +64,17 @@ test "glm request starts: only exact 1 with a shared store above 0 refuses; othe
     try put("TF_KV_SHARE", "32");
     for ([_]?[:0]const u8{ null, "", "0", "off", "on", "true", "2" }) |v| {
         try put("TF_GLM_REQUEST_STARTS", v);
-        try native.requestStartsAlone(false);
+        try glm_env.requestStartsAlone(false);
     }
     try put("TF_GLM_REQUEST_STARTS", "1");
     for ([_]?[:0]const u8{ null, "0", "00" }) |v| {
         try put("TF_KV_SHARE", v);
-        try native.requestStartsAlone(false);
+        try glm_env.requestStartsAlone(false);
     }
     for ([_][:0]const u8{ "1", "32", "00032" }) |v| {
         try put("TF_KV_SHARE", v);
-        try t.expectError(error.GlmRequestStartsWithSharedKv, native.requestStartsAlone(false));
+        try t.expectError(error.GlmRequestStartsWithSharedKv, glm_env.requestStartsAlone(false));
     }
     try put("TF_KV_SHARE", "bad");
-    try t.expectError(error.BadKvShare, native.requestStartsAlone(false));
+    try t.expectError(error.BadKvShare, glm_env.requestStartsAlone(false));
 }
