@@ -24,6 +24,8 @@ pub const affine_mm = @import("core_lane").affine_mm;
 pub const quant = @import("src/core/quant/quant.zig");
 
 pub const draft_ops = @import("draft_ops");
+/// DSpine's config contract and exact-sender table walk, shared with the CUDA drafter.
+pub const dspine = @import("src/core/dspine.zig");
 pub const shared_attention = @import("src/core/shared_attention.zig");
 /// The core pool and its Metal pages, which TF_QWEN27_METAL_KV_PAGES keeps the 27B's keys and values in.
 pub const kv_pool = @import("src/core/kv_pool.zig");
