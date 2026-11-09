@@ -248,7 +248,7 @@ pub fn runNamed(srv: *Server, a: Allocator, out: Out, gone: Gone, is_chat: bool,
     };
     p.input.id = id;
     const turn = cortheon.begin(srv, a, raw, id, is_chat, &p.input);
-    var r: Run = .{ .srv = srv, .a = a, .out = out, .is_chat = is_chat, .plan = p, .id = id, .created = std.Io.Clock.real.now(srv.io).toSeconds(), .turn = turn };
+    var r: Run = .{ .srv = srv, .a = a, .out = out, .is_chat = is_chat, .plan = p, .id = id, .created = std.Io.Clock.real.now(srv.io).toSeconds(), .turn = turn, .call_ids = .{ .key = &srv.tool_ids, .body = raw } };
     if (p.stream) r.stream(gone, field) else r.whole(gone, field);
 }
 
@@ -270,6 +270,7 @@ const Run = struct {
     prose_sent: std.ArrayList(u8) = .empty, // the content a tool stream sent
     text_offset: usize = 0, // characters a completion stream's logprob rows have covered
     turn: ?*cortheon.Turn = null, // --cortheon's work on this request
+    call_ids: ids.Calls, // the reply's tool-call ids, from this request (openai_calls.zig)
 
     fn chunk(r: *Run, delta: ?Value, finish: ?[]const u8) Allocator.Error!Value {
         const a = r.a;
@@ -447,6 +448,7 @@ const Run = struct {
                 if (!r.is_chat and delta != .string and (delta != .object or delta.object.get("content") == null)) return;
                 return r.emit(r.chunk(delta, null) catch return error.Closed);
             }
+            @import("openai_calls.zig").streamed(r, delta) catch return error.Closed;
             const filtered = r.policyDelta(delta) catch return error.Closed;
             const d = filtered orelse return;
             try r.prose();

@@ -17,14 +17,16 @@ const Env = struct {
 test "environment: every strict reader refuses bad text before opening a model, naming value and accepted forms" {
     for (e.rules) |r| {
         try t.expectEqual(@as(?u64, null), try e.parse(r.name, null));
-        const bad: []const []const u8 = if (e.isReal(r.kind)) &.{ "typo", "nan", "-inf", "1\nwrong" } else &.{ "typo", "-1", "18446744073709551616", "1\nwrong" };
+        const bad: []const []const u8 = if (r.kind == .path) &.{ "key\nfile", "key\x1b[2Kfile", "\x7f" } else if (e.isReal(r.kind)) &.{ "typo", "nan", "-inf", "1\nwrong" } else &.{ "typo", "-1", "18446744073709551616", "1\nwrong" };
         for (bad) |raw| {
             try t.expectError(error.InvalidEnvironment, e.parse(r.name, raw));
             const why = (try e.refusal(a, Env{ .name = r.name, .raw = raw }, all)).?;
             defer a.free(why);
             try t.expect(std.mem.indexOf(u8, why, r.name) != null);
             try t.expect(std.mem.indexOf(u8, why, r.forms) != null);
-            if (std.mem.indexOfScalar(u8, raw, '\n') == null) try t.expect(std.mem.indexOf(u8, why, raw) != null);
+            if (for (raw) |ch| {
+                if (ch < 0x20 or ch == 0x7f) break false;
+            } else true) try t.expect(std.mem.indexOf(u8, why, raw) != null);
             for (why) |byte| try t.expect(byte >= 0x20 and byte <= 0x7e);
         }
         const untouched = try e.refusal(a, Env{ .name = r.name, .raw = null }, all);
@@ -44,6 +46,7 @@ const valid = [_]Case{
     .{ .name = "TENSORFOLD_RESTORE_PREFETCH", .raw = "65537", .n = 65537 },
     .{ .name = "TENSORFOLD_RESTORE_PREFETCH_GIB", .raw = "16777217", .n = 16777217 },
     .{ .name = "TENSORFOLD_RESTORE_PREFETCH_MS", .raw = "1099511627777", .n = 1099511627777 },
+    .{ .name = "TENSORFOLD_TOOL_ID_KEY_FILE", .raw = "/etc/tensorfold/tool id.key", .n = 0 },
     .{ .name = "TF_CUDA_DEVICE", .raw = " 3 ", .n = 3 },
     .{ .name = "TF_CUDA_DEVICE", .raw = "4294967295", .n = std.math.maxInt(u32) },
     .{ .name = "TF_CUDA_SEGMENTS", .raw = " 1 ", .n = 1 },
@@ -116,6 +119,22 @@ test "environment: range, enum, whitespace and native prompt geometry refusals a
     }) |c| try t.expectError(error.InvalidEnvironment, e.parse(c[0], c[1]));
     try t.expectEqual(@as(?u64, null), try e.parse("TF_CUDA_DEVICE", "   "));
     try t.expectEqual(@as(?u64, 0), try e.parse("TF_Q27_COPY_ROWS", "+0"));
+}
+
+test "environment: a path setting keeps its text exactly, reads blank as unset and refuses control characters" {
+    const name = "TENSORFOLD_TOOL_ID_KEY_FILE";
+    try t.expectEqualStrings("relative/k ey", (try e.path(name, "relative/k ey")).?);
+    try t.expectEqualStrings(" /lead space", (try e.path(name, " /lead space")).?);
+    for ([_]?[]const u8{ null, "", " \t" }) |raw| try t.expectEqual(@as(?[]const u8, null), try e.path(name, raw));
+    for ([_][]const u8{ "/k\n", "/k\x00", "\t/k" }) |raw| try t.expectError(error.InvalidEnvironment, e.path(name, raw));
+    // a key pasted into the setting by mistake: the refusal names the setting and never shows its text
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    const pasted = "0123456789abcdefPASTEDKEY0123456789abcdef\x1b";
+    const said = try e.describe(arena.allocator(), name, pasted);
+    try t.expect(std.mem.indexOf(u8, said, "PASTEDKEY") == null and std.mem.startsWith(u8, said, name ++ ": expected "));
+    const refused = (try e.refusal(arena.allocator(), Env{ .name = name, .raw = pasted }, all)).?;
+    try t.expect(std.mem.indexOf(u8, refused, "PASTEDKEY") == null);
 }
 
 test "environment: explicit flags and disabled features retain their old precedence" {

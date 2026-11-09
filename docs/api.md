@@ -426,6 +426,22 @@ additional calls omitted from the response. Otherwise both servers stream each Q
 delta with the call's id and name, then its arguments in pieces; a call the streamer can't follow arrives whole at
 the end.
 
+On the native server a call's id is `call_` and 24 hex digits of HMAC-SHA-256 under the server's tool-call id key, over
+the request's own digest (its body as compact JSON in the order sent, without `stream` and `stream_options`), the choice
+and the call's index. On `/v1/messages` and `/v1/responses` that body is the chat request the route translates the
+client's body into, not the client's raw body, so two client bodies that translate to the same chat request get the same
+ids, and a field the translation drops changes none. Without the key an id reveals nothing about the request: whoever
+sees it cannot test a guessed request against it. By default the server draws a random key at startup and never writes
+or logs it, so a request replayed to the same running server names its calls the same way, streamed or not, while after
+a restart or on another server the same request gets other ids. For ids that hold across restarts and machines, set
+`TENSORFOLD_TOOL_ID_KEY_FILE` to a regular file only its owner can read or write (`chmod 600`) holding at least 32
+bytes, for example from `openssl rand -hex 32`; one trailing line ending is not part of the key, and every server
+reading the same file gives the same ids. A missing, unreadable, linked, shared, shorter or over 4 KiB file stops the
+start with the setting's name, and the key itself is never read from the environment or the command line. Byte-identical
+requests under one key share ids, as a replay does; another request or another call gets other ids. A Responses
+`function_call` item's `fc_` id is keyed from its `call_id` the same way, Kimi's ids are the indexes the model writes
+(`call_1`), and ids a client sends back in its history are rendered as sent.
+
 On the Python 0.6.6 server, with `tool_choice: "required"`, or a function named in `tool_choice`, the reply's answer (after any think block
 or thought channel) opens a call to an offered tool. The server replaces the first answer token that isn't
 whitespace with the tool-call opener (`<tool_call>`, or Gemma 4's `<|tool_call>`) and the template's text before a

@@ -98,6 +98,7 @@ pub const Harness = struct {
             .metrics = .{ .gpa = gpa },
             .load = .init(self.io),
             .store = .{ .gpa = gpa },
+            .tool_ids = .of(@import("ids.zig").test_key_text),
             .arena = .init(gpa),
             .slide = .init(gpa, self.io, null),
             .teacher = .init(gpa),
