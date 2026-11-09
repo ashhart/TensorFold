@@ -183,7 +183,7 @@ fn parseMarked(a: Allocator, page: []const u8, limit: usize, m: Marks) Allocator
                 snippet = try fragmentText(a, page[s_open..s_close]);
         }
         var seen = false;
-        for (out.items) |r| seen = seen or std.mem.eql(u8, r.url, url);
+        for (out.items) |r| seen = seen or std.ascii.eqlIgnoreCase(r.url, url); // Example.org is the same page
         if (!seen and title.len > 0) try out.append(a, .{ .title = title, .url = url, .snippet = snippet });
     }
     return out.items;
@@ -361,6 +361,19 @@ test "a search result keeps a link when spaces surround href's equals" {
     const results = try parseDuckDuckGo(a, page, 5);
     try std.testing.expectEqual(@as(usize, 1), results.len);
     try std.testing.expectEqualStrings("https://example.org/page", results[0].url);
+}
+
+test "a search drops a duplicate when only the URL's letters differ" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const page =
+        \\<div class="result results_links web-result"><h2><a class="result__a" href="https://Example.org/page">One</a></h2></div>
+        \\<div class="result results_links web-result"><h2><a class="result__a" href="https://example.org/page">Two</a></h2></div>
+    ;
+    const results = try parseDuckDuckGo(a, page, 5);
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqualStrings("One", results[0].title);
 }
 
 test "a search result is found when its class letters differ" {
