@@ -20,6 +20,23 @@ pub fn coldCut(len: usize, cuts: []const u32, pos: usize) bool {
     return at == pos;
 }
 
+/// A cold pass's chunk starts below `at` as a digest; 0 on the plain grid (a pass cut from `at` on chunks so too).
+pub fn below(cuts: []const u32, at: u32) u64 {
+    var h = std.hash.Wyhash.init(0);
+    var grid = true;
+    var p: u32 = 0;
+    while (p < at) : (p = @intCast(nextCut(at, cuts, p))) {
+        grid = grid and p % prefill_rows == 0;
+        h.update(std.mem.asBytes(&p));
+    }
+    return if (grid) 0 else h.final() | 1;
+}
+
+/// Rank 0's step rows from `start` (Leader.chunk): a solo or paired step's if `wide`, else to the next cut.
+pub fn leaderRows(len: usize, cuts: []const u32, start: usize, wide: bool) usize {
+    return if (wide) state.solo_rows else nextCut(len, cuts, start) - start;
+}
+
 /// A sequence's request chunk starts (TF_GLM_REQUEST_STARTS) into `list`: ascending and after 0, else error.BadCuts.
 pub fn set(gpa: std.mem.Allocator, list: *std.ArrayList(u32), cuts: []const u32) !void {
     for (cuts, 0..) |c, i| if (c == 0 or (i > 0 and c <= cuts[i - 1])) return error.BadCuts;
@@ -96,6 +113,75 @@ test "glm request starts: starts 1 and 2 rows apart each end a chunk, and a step
     }
     try std.testing.expect(!coldCut(len, &cuts, 1002));
     try std.testing.expectError(error.BadChunk, stepRows(len, &cuts, 1002, 2));
+}
+
+/// The prompts and starts the tests here cut: the grid alone, starts off and on it, past the prompt, and close starts.
+const Pass = struct { len: usize, cuts: []const u32 };
+const passes = [_]Pass{
+    .{ .len = 5 * prefill_rows + 7, .cuts = &.{} },
+    .{ .len = 4 * prefill_rows, .cuts = &.{ prefill_rows, prefill_rows + 300, 2 * prefill_rows + 300 } },
+    .{ .len = 3000, .cuts = &.{ 500, 1700 } },
+    .{ .len = 1200, .cuts = &.{ 500, 1700 } },
+    .{ .len = 3 * prefill_rows, .cuts = &.{500} },
+    .{ .len = 3 * prefill_rows, .cuts = &.{ 1, 2, 1000, 1001, 1003 } },
+    .{ .len = 4 * prefill_rows, .cuts = &.{ 300, 2 * prefill_rows } },
+    .{ .len = 4 * prefill_rows, .cuts = &.{ 700, 2 * prefill_rows } },
+    .{ .len = 4 * prefill_rows, .cuts = &.{ 2 * prefill_rows, 2 * prefill_rows + 500 } },
+};
+
+/// A cold pass's chunk starts below `at` (from 0), written out.
+fn startsBelow(cuts: []const u32, at: usize, buf: []usize) []usize {
+    var n: usize = 0;
+    var p: usize = 0;
+    while (p < at) : (p = nextCut(at, cuts, p)) {
+        buf[n] = p;
+        n += 1;
+    }
+    return buf[0..n];
+}
+
+test "glm request starts: a kept state's digest below `at` matches another pass's exactly where their chunks below do" {
+    const m = prefill_rows;
+    try std.testing.expectEqual(@as(u64, 0), below(&.{}, 2 * m)); // the grid alone
+    try std.testing.expectEqual(@as(u64, 0), below(&.{m}, 2 * m)); // a start on the grid cuts as the grid does
+    try std.testing.expectEqual(@as(u64, 0), below(&.{ 2 * m, 2 * m + 500 }, 2 * m)); // starts from `at` on don't count
+    try std.testing.expect(below(&.{ 300, 2 * m }, 2 * m) != 0);
+    try std.testing.expect(below(&.{ 300, 2 * m }, 2 * m) != below(&.{ 700, 2 * m }, 2 * m));
+    try std.testing.expectEqual(below(&.{ 300, 2 * m }, 2 * m), below(&.{ 300, 2 * m, 3 * m }, 2 * m));
+    var a_buf: [64]usize = undefined;
+    var b_buf: [64]usize = undefined;
+    var compared: usize = 0;
+    for (passes) |a| for (passes) |b| {
+        var at: usize = 0;
+        while (at < a.len) : (at = nextCut(a.len, a.cuts, at)) {
+            if (at == 0 or at >= b.len or !coldCut(b.len, b.cuts, at)) continue; // resumeFrom refuses these before
+            const same = std.mem.eql(usize, startsBelow(a.cuts, at, &a_buf), startsBelow(b.cuts, at, &b_buf));
+            try std.testing.expectEqual(same, below(a.cuts, @intCast(at)) == below(b.cuts, @intCast(at)));
+            compared += 1;
+        }
+    };
+    try std.testing.expect(compared > 50);
+}
+
+test "glm request starts: rank 0's step rows (Leader.chunk) are the rows each other rank sizes from its part" {
+    for (passes) |c| {
+        var start: usize = 0;
+        var steps: usize = 0;
+        while (start < c.len) : (steps += 1) {
+            const left = c.len - start;
+            const n = leaderRows(c.len, c.cuts, start, false);
+            try std.testing.expectEqual(@min(left, n), try stepRows(c.len, c.cuts, start, @min(left, n + 1)));
+            const w = leaderRows(c.len, c.cuts, start, true); // a solo or paired step: two grid steps left
+            if (start + prefill_rows + 1 < c.len) { // prompt_solo.takesTwo; with starts rank 0 never steps wide
+                const wide = stepRows(c.len, c.cuts, start, @min(left, w + 1));
+                if (c.cuts.len > 0) {
+                    try std.testing.expectError(error.BadChunk, wide);
+                } else try std.testing.expectEqual(@min(left, w), try wide);
+            }
+            start += @min(left, n);
+        }
+        try std.testing.expect(steps > 1);
+    }
 }
 
 test "glm request starts: starts must ascend after 0, and a refused list leaves the last one in place" {

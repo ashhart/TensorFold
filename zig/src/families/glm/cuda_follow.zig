@@ -243,7 +243,8 @@ pub const Leader = struct {
     pub fn chunk(x: Leader, ids: []const u32, start: usize, alone: bool, from: ?engine.Resume, cancel: ?engine.Cancel, marks: ?engine.Marks) !Chunk {
         if (start >= ids.len) return error.BadChunk;
         try x.flush();
-        const n: usize = if (alone and (prompt_solo.at(x.e, start, ids.len, from, marks) or prompt_pair.pairedAt(x.e, start, ids.len, from, marks))) engine.solo_rows else prompt_cuts.nextCut(ids.len, x.e.cur.cuts.items, start) - start;
+        const wide = alone and (prompt_solo.at(x.e, start, ids.len, from, marks) or prompt_pair.pairedAt(x.e, start, ids.len, from, marks));
+        const n = prompt_cuts.leaderRows(ids.len, x.e.cur.cuts.items, start, wide);
         const part = ids[start..@min(ids.len, start + n + 1)];
         const split = sparse.splitAt(start, x.e.settings.index_split, x.e.share.world); // a paired step's chunks share it
         try x.send(.{ .kind = @backingInt(Kind.chunk), .flags = x.rows() | @as(u32, @intFromBool(split)) << 1, .a = if (from) |r| r.id else 0, .seed = if (from) |r| r.at else 0, .depth = @intCast(start), .top_k = @intCast(ids.len) }, part);
