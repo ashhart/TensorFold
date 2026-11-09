@@ -48,7 +48,7 @@ pub const Encoder = struct {
         return .{ .ctx = e, .page = onPage };
     }
 
-    fn onPage(ctx: *anyopaque, a: Allocator, _: u32, page: *const OcrPage, rgb: picture.Rgb, enc: *budget.Encodes, fault: *Fault) Step!void {
+    fn onPage(ctx: *anyopaque, a: Allocator, page: *const OcrPage, rgb: picture.Rgb, enc: *budget.Encodes, fault: *Fault) Step!void {
         const e: *Encoder = @ptrCast(@alignCast(ctx));
         try e.pages.append(a, try e.encodePage(a, page, rgb, enc, fault));
     }

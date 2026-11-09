@@ -29,8 +29,8 @@ pub const Step = types.Faulted || error{ Cancelled, OutOfMemory };
 /// The dialect's per-page encoder, called in page order.
 pub const PageSink = struct {
     ctx: *anyopaque,
-    /// Called once per page while its pixels live; ``source`` indexes ``run``'s sources; encodes go into ``a``.
-    page: *const fn (ctx: *anyopaque, a: Allocator, source: u32, page: *const OcrPage, rgb: picture.Rgb, enc: *budget.Encodes, fault: *Fault) Step!void,
+    /// Called once per page while its pixels live; encodes go into ``a``.
+    page: *const fn (ctx: *anyopaque, a: Allocator, page: *const OcrPage, rgb: picture.Rgb, enc: *budget.Encodes, fault: *Fault) Step!void,
 };
 
 /// The gate's refusal for a model without a reader (docs/api.md OCR).
@@ -48,8 +48,8 @@ pub fn gate(srv: *const Server, a: Allocator, fault: *Fault) Step!void {
 
 /// Where a page's encoded image comes from: an image source's bytes, or a measured PDF page rendered just before use.
 const Origin = union(enum) { image: []const u8, pdf: struct { bytes: []const u8, width: u32, height: u32 } };
-/// One page to read: its source, its index in that source, where its image comes from, its DPI and its pixel count.
-const Planned = struct { source: u32, index: u32, origin: Origin, dpi: u32, pixels: u64 };
+/// One page to read: its index in its source, where its image comes from, its DPI and its pixel count.
+const Planned = struct { index: u32, origin: Origin, dpi: u32, pixels: u64 };
 
 /// Reads every page of ``sources`` in order into ``sink``; ``a`` is the request arena, ``gone`` says the client left.
 pub fn run(srv: *Server, a: Allocator, sources: []const Source, sink: PageSink, fault: *Fault, gone: anytype) Step!void {
@@ -76,14 +76,13 @@ fn plan(srv: *const Server, a: Allocator, sources: []const Source, fault: *Fault
     var used: pdf.Budget = .{};
     var cx: Cx = .{ .a = a };
     var out: std.ArrayList(Planned) = .empty;
-    for (sources, 0..) |s, k| {
-        const source: u32 = @intCast(k);
+    for (sources) |s| {
         switch (s.kind) {
             .image => {
                 if (!left.take(1)) return overBudget(a, fault, cap);
                 used.pdf_pages_used += 1;
                 const px = try imagePixels(srv, a, s.bytes, fault);
-                try out.append(a, .{ .source = source, .index = 0, .origin = .{ .image = s.bytes }, .dpi = 72, .pixels = px });
+                try out.append(a, .{ .index = 0, .origin = .{ .image = s.bytes }, .dpi = 72, .pixels = px });
             },
             .pdf => {
                 if (!srv.config.vision_pdf) return fault.fail(a, .bad_input, "{s}", .{pdf.off_message});
@@ -102,7 +101,7 @@ fn plan(srv: *const Server, a: Allocator, sources: []const Source, fault: *Fault
                 if (!left.take(@intCast(r.pages.len))) return overBudget(a, fault, cap);
                 for (r.pages) |p| {
                     const origin: Origin = .{ .pdf = .{ .bytes = s.bytes, .width = p.width, .height = p.height } };
-                    try out.append(a, .{ .source = source, .index = p.index, .origin = origin, .dpi = p.dpi, .pixels = @as(u64, p.width) * p.height });
+                    try out.append(a, .{ .index = p.index, .origin = origin, .dpi = p.dpi, .pixels = @as(u64, p.width) * p.height });
                 }
             },
         }
@@ -183,7 +182,7 @@ fn onePage(srv: *Server, a: Allocator, reader: api.ocr.Ocr, id: []const u8, p: P
         o.* = .{ .content = try a.dupe(u8, b.content), .quad = quad, .kind = b.kind };
     }
     const page: OcrPage = .{ .index = p.index, .width = w, .height = h, .dpi = p.dpi, .blocks = blocks };
-    try sink.page(sink.ctx, a, p.source, &page, rgb, enc, fault);
+    try sink.page(sink.ctx, a, &page, rgb, enc, fault);
 }
 
 const Generated = struct { content: []const u8, frame: api.Size };

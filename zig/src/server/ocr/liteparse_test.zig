@@ -78,7 +78,7 @@ test "ocr liteparse: a page without text gives an empty results list, and faults
     const page: types.OcrPage = .{ .index = 0, .width = 1, .height = 1, .dpi = 72, .blocks = &blocks };
     var budget_ = budget.Encodes.init(1, 1);
     var fault: types.Fault = undefined;
-    try sink.page(sink.ctx, a, 0, &page, .{ .width = 1, .height = 1, .pixels = &pixels }, &budget_, &fault);
+    try sink.page(sink.ctx, a, &page, .{ .width = 1, .height = 1, .pixels = &pixels }, &budget_, &fault);
     try t.expectEqualStrings("{\"results\": []}", try enc.reply(a));
     const want = [_]struct { types.Class, u16 }{ .{ .bad_input, 400 }, .{ .unreadable, 422 }, .{ .capacity, 503 }, .{ .internal, 500 } };
     for (want) |w| try t.expectEqual(w[1], lp.status(w[0]));

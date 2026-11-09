@@ -90,7 +90,7 @@ pub const Encoder = struct {
         return .{ .ctx = e, .page = onPage };
     }
 
-    fn onPage(ctx: *anyopaque, a: Allocator, _: u32, page: *const types.OcrPage, _: picture.Rgb, _: *budget.Encodes, fault: *Fault) Step!void {
+    fn onPage(ctx: *anyopaque, a: Allocator, page: *const types.OcrPage, _: picture.Rgb, _: *budget.Encodes, fault: *Fault) Step!void {
         const e: *Encoder = @ptrCast(@alignCast(ctx));
         const got = lines.fromBlocks(a, page, e.geometry) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
