@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CUDA: Qwen's DFlash2 drafter config refuses a `target_layer_ids` list that names one layer twice, as HIP's does (#2674). Thanks to @AbrahamCete.
+
 - Flash Next on CUDA: an empty or whitespace-only `TF_FLASHNEXT_KV_PAGES` reads as unset, so streams take no pool pages, where it used to stop the start with `BadFlashNextKvPages`; every value accepted before reads the same, and numbers with surrounding spaces are still refused (#2619, for #2591). Thanks to @devopsfortunato.
 
 - With `--cortheon`, a DuckDuckGo result whose `uddg` key, `class=` mark (on the full and Lite pages) or `&AMP;` entity differs only in letter case is kept, an ad whose host or `Result--ad` mark differs in case is still skipped, a tool argument keyed `Query` or `URL` is read with the exact key still first, HTML's uppercase named entities decode, and a `data:` link is dropped from a page's links (#2372). Without `--cortheon` nothing changes. Thanks to @ppardus.
