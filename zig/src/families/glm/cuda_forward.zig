@@ -87,7 +87,7 @@ pub const Modules = struct {
             std.log.warn("TF_GLM_INDEX_CUDA: the indexer kernels are not used ({t}); prompt chunks use tf_glm_scores", .{err});
             break :blk null;
         };
-        m.dsel = sparse.dselRead() catch return error.BadDselSetting;
+        m.dsel = try @import("sys").environment.read(bool, "TF_GLM_DSEL", true);
         if (!m.dsel) std.log.warn("TF_GLM_DSEL=0: a decode window's DSA select keeps one 1,024-thread CTA a row", .{});
         m.tiled = false;
         m.packs = null; // `m` starts undefined: the field default does not apply
