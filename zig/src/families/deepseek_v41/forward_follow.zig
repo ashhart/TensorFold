@@ -79,7 +79,7 @@ pub fn finishPrompt(f: *Forward) !void {
     return h.finish(f);
 }
 /// 28: [op, rows, words, row ids..., bits two to a word] the next picks' masked rows (grammar_gpu.zig)
-pub const op_grammar: i64 = 28; // one op: the old bind / step / release subs no longer apply, and 29-31 stay free
+pub const op_grammar: i64 = 28;
 
 /// 64: [op] every rank syncs its device and reads its clock; 65: [op, n] samples all-gathered (ops 64-67: calib)
 pub const op_calib_mark: i64 = 64;
