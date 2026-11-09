@@ -20,7 +20,8 @@ pub const Lesson = struct {
     steps: u32 = max_steps,
     more: bool = false,
     kept: []const Example = &.{}, // questions the open lesson took, each with its answer as it was (a reroute's)
-    reroute: bool = false, // the open lesson's router fitted again with `unasked` among what it must not take
+    refresh_wordings: bool = false, // refresh only the open pocket router before more output steps
+    reroute: bool = false, // refit the open router; a full lesson refreshes its asked/unasked rows
     drop: bool = false, // the open lesson taken out whole
     save: bool = false,
     shrink: enum { none, next, keep, restore } = .none, // one provisional neuron removal, resolved by the server checks
@@ -124,6 +125,38 @@ pub fn readable(gpa: std.mem.Allocator, lesson: Lesson, taps: bool, rows: usize,
     return out;
 }
 
+/// New wording rows use the same admission bounds as an ordinary lesson before a reroute can touch it.
+pub fn forReroute(gpa: std.mem.Allocator, lesson: Lesson, taps: bool, whole: bool, rows: usize, bufs: *[4]std.ArrayList(Example)) !Lesson {
+    if (!lesson.reroute or lesson.train.len == 0 or lesson.undo or lesson.save or lesson.drop) return lesson;
+    if (!whole) return error.WordingsUnsupported;
+    return readable(gpa, lesson, taps, rows, bufs);
+}
+
+/// Both wording lists owned before the open pocket is undone; install only after its old rows are no longer read.
+pub const Wordings = struct {
+    asked: []Example,
+    unasked: []Example,
+
+    pub fn init(gpa: std.mem.Allocator, lesson: Lesson) !Wordings {
+        const asked = try own(gpa, lesson.asked);
+        errdefer disown(gpa, asked);
+        return .{ .asked = asked, .unasked = try own(gpa, lesson.unasked) };
+    }
+    pub fn deinit(w: *Wordings, gpa: std.mem.Allocator) void {
+        disown(gpa, w.asked);
+        disown(gpa, w.unasked);
+        w.* = undefined;
+    }
+    pub fn install(w: *Wordings, gpa: std.mem.Allocator, lesson: *Lesson) void {
+        disown(gpa, @constCast(lesson.asked));
+        disown(gpa, @constCast(lesson.unasked));
+        lesson.asked = w.asked;
+        lesson.unasked = w.unasked;
+        w.asked = &.{};
+        w.unasked = &.{};
+    }
+};
+
 pub fn disown(gpa: std.mem.Allocator, xs: []Example) void {
     for (xs) |x| gpa.free(x.ids);
     gpa.free(xs);
@@ -171,4 +204,30 @@ test "a learner without taps reads a prompt in a conversation only when its pass
     try std.testing.expectEqual(@as(usize, 1), tapped.train.len); // an answer is read by passes whole
     try std.testing.expectEqual(@as(usize, 2), tapped.asked.len);
     try std.testing.expectEqual(@as(usize, 1), tapped.unasked.len);
+}
+
+fn wordingAllocation(gpa: std.mem.Allocator) !void {
+    const ids = [_]u32{ 1, 2, 3, 4 };
+    const next_ids = [_]u32{ 1, 2, 8, 4 };
+    const old = [_]Example{.{ .ids = &ids, .start = 2, .decide = 1 }};
+    const next = [_]Example{.{ .ids = &next_ids, .start = 2, .decide = 1, .subject = 1, .value = 2, .context = 1 }};
+    var owned = try ownLesson(gpa, .{ .train = &old, .held = &old, .keep = &old, .asked = &old, .unasked = &old });
+    defer disownLesson(gpa, owned);
+    const train = owned.train.ptr;
+    var fresh = Wordings.init(gpa, .{ .asked = &next, .unasked = &next }) catch |err| {
+        try std.testing.expectEqualSlices(u32, &ids, owned.asked[0].ids);
+        try std.testing.expectEqualSlices(u32, &ids, owned.unasked[0].ids);
+        return err;
+    };
+    defer fresh.deinit(gpa);
+    try std.testing.expectEqualSlices(u32, &ids, owned.asked[0].ids);
+    fresh.install(gpa, &owned);
+    try std.testing.expectEqualSlices(u32, &next_ids, owned.asked[0].ids);
+    try std.testing.expectEqualSlices(u32, &next_ids, owned.unasked[0].ids);
+    try std.testing.expectEqual(@as(u32, 1), owned.asked[0].context);
+    try std.testing.expect(owned.train.ptr == train);
+}
+
+test "round wordings: copies install together and allocation refusal retains the original rows" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, wordingAllocation, .{});
 }

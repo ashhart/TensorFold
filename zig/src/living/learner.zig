@@ -143,7 +143,7 @@ pub fn Learner(comptime H: type) type {
                 if (lesson.save) try whole_lessons.healLive(l) else try whole_lessons.heal(l);
             }
             if (lesson.against.len > 0 and (!@hasDecl(H.Trainer, "causalLogit") or !l.whole or l.method != .pocket)) return error.CorrectionsUnsupported;
-            l.lesson = lesson;
+            l.lesson = try examples.forReroute(l.gpa, lesson, l.readsConversations(), l.whole, H.max_rows, &l.plain);
             if (lesson.shrink != .none) {
                 l.phase = .shrink;
                 return;

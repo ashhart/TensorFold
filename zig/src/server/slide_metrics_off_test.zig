@@ -1,4 +1,4 @@
-//! Routed gate-off lessons match the current-main graph, event payloads and engine call counts.
+//! Gate-off lessons retain the pinned main pass paths and the refreshed refusal wording draws.
 const std = @import("std");
 const api = @import("engine_api");
 const json = @import("json");
@@ -135,7 +135,7 @@ fn capture(a: std.mem.Allocator, case: usize, extra: []const u8) !Capture {
     return .{ .requests_sha256 = try std.fmt.allocPrint(a, "{x}", .{request_hash}), .replies_sha256 = try std.fmt.allocPrint(a, "{x}", .{reply_hash}), .calls = m.calls, .learns = m.learns, .writes = srv.slide.test_persist_calls, .graph = try json.stringify(a, graph, .{ .compact = true }), .events = try events(a, wire) };
 }
 
-test "Slide metrics: off matches the current-main kept refused and early-refused routes" {
+test "Slide metrics: off pins kept and early-refused routes plus refused redraws" {
     var arena: std.heap.ArenaAllocator = .init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();

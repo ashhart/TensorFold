@@ -16,6 +16,7 @@ const Stays = struct {
 const Model = struct {
     changed: bool = false,
     repairs: usize = 0,
+    redraws: usize = 0,
     drops: usize = 0,
     fail_repair: bool = false,
     fn engine(m: *@This()) api.Engine {
@@ -33,6 +34,7 @@ const Model = struct {
     }
     fn submit(ctx: *anyopaque, id: api.Id, req: *const api.Request, sink: api.Sink) api.SubmitError!void {
         const m: *Model = @ptrCast(@alignCast(ctx));
+        if (req.sampling != null) m.redraws += 1;
         var prompt: [1024]u8 = undefined;
         const n = @min(prompt.len, req.prompt.len);
         for (req.prompt[0..n], prompt[0..n]) |v, *x| x.* = @intCast(v);
@@ -60,6 +62,10 @@ const Model = struct {
     }
 };
 fn check(fail_repair: bool) !void {
+    return checkMode(fail_repair, false);
+}
+
+fn checkMode(fail_repair: bool, wordings: bool) !void {
     var m: Model = .{ .fail_repair = fail_repair };
     var text: ByteText = .{};
     const srv = try Server.init(t.allocator, t.io, m.engine(), text.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false }, null);
@@ -75,9 +81,17 @@ fn check(fail_repair: bool) !void {
     var cx: Cx = .{ .a = a };
     var conn: Conn = .{ .fd = -1, .peer = "", .buf = &.{}, .gpa = a, .broken = true };
     var out: slide.Out = .{ .conn = &conn, .a = a, .open = false };
-    const result = rounds(srv, a, &cx, .{ .full = .{}, .facts = &.{"My dog is called Ginger."}, .held = &.{.{ .question = "What is my dog called?", .answer = "Your dog is called Ginger.", .short = "Ginger", .fact = 0 }}, .checks = &.{} }, Stays{}, id, &out);
+    const entry: @import("slide_redraw.zig").Entry = .{
+        .spec = .{ .fact = "My dog is called Ginger.", .fact_index = 0, .refs = &.{}, .document = false, .siblings = &.{}, .words = &.{}, .named = &.{}, .language = null, .asked_all = "", .answered_all = "" },
+        .asked = .{ .start = 0, .end = 0 },
+        .unasked = .{ .start = 0, .end = 0 },
+        .probes = .{ .start = 0, .end = 0 },
+        .seen = &.{},
+    };
+    const result = rounds(srv, a, &cx, .{ .wordings = if (wordings) &.{entry} else &.{}, .full = .{}, .facts = &.{"My dog is called Ginger."}, .held = &.{.{ .question = "What is my dog called?", .answer = "Your dog is called Ginger.", .short = "Ginger", .fact = 0 }}, .checks = &.{} }, Stays{}, id, &out);
     try t.expectEqualSlices(bool, &.{false}, result.recalled);
     try t.expect(m.repairs > 0);
+    try t.expectEqual(@as(usize, 0), m.redraws);
     try t.expect(m.drops > 0);
     try t.expect(!m.changed);
     try t.expect(srv.slide.find(old).?.recalled.?);
@@ -87,4 +101,8 @@ test "Learning persistence: server refuses a newer lesson that loses a kept fact
 }
 test "Learning persistence: server rejection after a failed repair restores the earlier state" {
     try check(true);
+}
+
+test "slide redraw: repair of an earlier fact does not redraw the passing lesson" {
+    try checkMode(false, true);
 }
