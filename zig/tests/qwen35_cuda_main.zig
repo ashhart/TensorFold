@@ -20,6 +20,9 @@ const usage =
     \\       tf-qwen35-cuda <model dir> rows <ids file> <out> [piece] | rows-last <ids file> | rows-cuts <ids file>
     \\rows: final-norm rows as a readout keeps them (raw bf16); rows-last checks them against .last; rows-cuts reports.
     \\       tf-qwen35-cuda <model dir> readout <ids file> [streams]: a test readout's rows alone, together, after a cancel
+    \\       tf-qwen35-cuda <model dir> export <ids.json> <at> <out>: #1594 2b, a kept state in hybrid_state's order
+    \\       tf-qwen35-cuda <model dir> tail <seq.json> <k> <out>: bf16 logits after each of seq's last k tokens
+    \\       tf-qwen35-cuda <model dir> export-many <prompts.json> <tail> <dir>: each prompt's state to dir/s<k>.tfhs
     \\       tf-qwen35-cuda <model dir> kl <ids file> <out.json> <skip> <rows> [control|int8]
     \\kl: bf16 caches against fp8 ones, teacher-forced: the first <skip> ids as prompt chunks, then <rows> ids in
     \\windows, each row's KL(bf16 || fp8) of the next-token distributions, top-1 agreement and both losses on the next
@@ -48,6 +51,11 @@ pub fn main(init: std.process.Init) !u8 {
     }
     if (args.len >= 4 and std.mem.startsWith(u8, args[2], "rows")) {
         const code = try @import("qwen35_cuda_rows.zig").run(init, a, args);
+        if (code == 2) std.debug.print("{s}", .{usage});
+        return code;
+    }
+    if (args.len >= 3 and (std.mem.eql(u8, args[2], "export") or std.mem.eql(u8, args[2], "tail") or std.mem.eql(u8, args[2], "export-many"))) {
+        const code = try @import("qwen35_cuda_export.zig").run(init, a, args);
         if (code == 2) std.debug.print("{s}", .{usage});
         return code;
     }
