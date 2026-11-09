@@ -8,15 +8,9 @@ const exclusions = [_]Exclusion{
     .{ .name = "test-grammar-budget", .reason = "Requires the optional xgrammar checkout and -Dxgrammar=DIR" },
     .{ .name = "test-grammar-tools", .reason = "Requires the optional xgrammar checkout and -Dxgrammar=DIR" },
     .{ .name = "check-release-paths", .reason = "The release-paths CI job checks the separately built release server" },
-    .{ .name = "test-exl3-prompt-host", .reason = "red on main, #2031 (missing b32 initializer, #2094)" },
-    .{ .name = "test-qwen35-draft-frame-host", .reason = "red on main, #2031 (draft tree node count now returns an error union)" },
+    .{ .name = "test-qwen35-draft-frame-host", .reason = "red on main, #2031 (recording fixture leaves seg_fn uninitialized)" },
     .{ .name = "test-qwen35-frame-invalidation-host", .reason = "red on main, #2031 (same recording fixture as test-qwen35-draft-frame-host)" },
-    .{ .name = "test-qwen35-draft-trees-host", .reason = "red on main, #2031 (draft tree node count now returns an error union)" },
-    .{ .name = "test-qwen27-prompt-rows-host", .reason = "red on main, #2031 (over-cap fixture expects InvalidEnvironment)" },
-    .{ .name = "test-cluster-loader-host", .reason = "red on main, #2031 (cluster loader fixture lacks canon)" },
-    .{ .name = "test-gemma4-affine-host", .reason = "red on main, #2031 (reviewed Metal affine_mm source pin drifted)" },
-    .{ .name = "test-gradient-serving", .reason = "red on main, #2031 (gradient source identities drifted)" },
-    .{ .name = "test-qwen-serving-host", .reason = "red on main, #2031 (serving source and launch pins drifted)" },
+    .{ .name = "test-gradient-serving", .reason = "red on main, #2031 (Flash Next hyper-connection source pin drifted)" },
 };
 
 pub fn wire(b: *std.Build, target: std.Build.ResolvedTarget) void {
