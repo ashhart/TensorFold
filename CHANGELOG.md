@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Conformance: a Qwen3.8-27B XPU profile (`tools/conformance_profiles/qwen27-xpu.json`, GPTQ 4-bit group 128 with its DFlash2 drafter, four streams on an Arc Pro B70); its first turn carries a 600-item document because the XPU prompt cache keeps states only at multiples of 64 tokens (#2677). Thanks to @Mirrdhyn.
+
 - CUDA: Flash Next's PLE gate RMS scales, and the Qwen4 kernel generated from them, call `tf_common::rms_scale`; every function's SASS is unchanged (#2684, refs #548). Thanks to @jschmied.
 
 - CUDA: the stored partial-sum folds before an RMS scale (Flash Next's hyper-connection normalize, hc_down, rinv and hcf prologue, DeepSeek-V4.1's mHC norm folds) call one helper, `tf_common::sum_rn` in `common/fold.cuh`; every function's SASS is unchanged (#2666, refs #548). Thanks to @jschmied.
