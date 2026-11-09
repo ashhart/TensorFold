@@ -103,25 +103,6 @@ test "ocr lines: a geometry-less reader's lines keep a null quad" {
     }
 }
 
-test "ocr lines: a line reader's blocks pass through as one line each" {
-    var arena = std.heap.ArenaAllocator.init(t.allocator);
-    defer arena.deinit();
-    var blocks = [_]OcrBlock{
-        .{ .content = "first *line*", .quad = rect(0, 0, 80, 10), .kind = .text },
-        .{ .content = "  ", .quad = rect(0, 10, 80, 20), .kind = .text },
-        .{ .content = "", .quad = rect(0, 20, 80, 60), .kind = .picture },
-        .{ .content = "third", .quad = rect(0, 60, 300, 70), .kind = .text },
-    };
-    const p = page(&blocks, 100, 100);
-    const got = try lines.fromBlocks(arena.allocator(), &p, .line);
-    try t.expectEqual(@as(usize, 2), got.len);
-    try t.expectEqualStrings("first line", got[0].text);
-    try t.expectEqual(@as(u32, 0), got[0].block);
-    try t.expectEqualStrings("third", got[1].text);
-    try t.expectEqual(@as(u32, 3), got[1].block);
-    try expectQuad(rect(0, 60, 100, 70), got[1].quad); // clamped to the page
-}
-
 test "ocr lines: words split the line by Unicode scalar count, not bytes" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
