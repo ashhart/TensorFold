@@ -104,6 +104,7 @@ pub const Model = struct {
     failures: usize = 0,
     saves: usize = 0,
     drops: usize = 0,
+    retires: usize = 0,
     draft_index: ?usize = null,
     gpa: Allocator = testing.allocator,
 
@@ -204,6 +205,8 @@ pub const Model = struct {
         return null;
     }
     fn learn(ctx: *anyopaque, request: *const api.LearnRequest, sink: api.LearnSink) api.LearnError!void {
+        const state: *Model = @ptrCast(@alignCast(ctx));
+        if (request.retire.len > 0) state.retires += 1;
         if (request.train.len == 0 and !request.drop and !request.undo and !request.save and !request.reroute) {
             return sink.event(sink.ctx, &.{ .done = .{} });
         }
@@ -274,6 +277,14 @@ pub fn learnBody(srv: *Server, body: []const u8, failure: ?[]const u8) !void {
         try testing.expect(std.mem.indexOf(u8, wire, "LayerRoundsAgain") == null);
         try testing.expect(std.mem.indexOf(u8, wire, "the delete") == null);
     }
+}
+
+fn learnCase(srv: *Server, text: []const u8, failure: ?[]const u8, correcting: bool) !void {
+    if (!correcting) return learnOne(srv, text, failure);
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const body = try std.fmt.allocPrint(arena.allocator(), "{{\"text\": \"{s}\",\"correction\":true}}", .{text});
+    return learnBody(srv, body, failure);
 }
 
 /// Capture the same routed lesson's complete response for protocol and persistence regression checks.
@@ -529,3 +540,28 @@ pub const Stays = struct {
         return false;
     }
 };
+
+test "Learning persistence: a correction cannot retire its earlier personal fact before the dependency guard" {
+    var text: Text = .{};
+    var m: Model = .{};
+    defer m.deinit();
+    m.live[0] = true;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const defaults = (try json.parse(arena.allocator(), "{\"temperature\":0.7}")).ok;
+    const srv = try Server.init(testing.allocator, testing.io, m.engine(), text.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false, .default_sampling = defaults }, null);
+    defer srv.deinit();
+    const id = srv.slide.add(topics[0].fact, "chat", 1);
+    srv.slide.mark(id, .learned);
+    srv.slide.placed(id, &.{.{ .layer = 1, .neuron = 0, .key = .subject }});
+    srv.slide.asked(id, &.{.{ .question = "What colour do I like?", .answer = "You like blue.", .short = "blue" }});
+    try learnCase(srv, topics[0].fact, "correction refused", true);
+    try testing.expectEqual(@as(usize, 0), m.retires);
+    try testing.expectEqual(@as(usize, 0), m.drops);
+    try testing.expect(m.live[0]);
+    try testing.expectEqual(.learned, srv.slide.find(id).?.state);
+    try testing.expectEqual(@as(usize, 0), m.trained.items.len);
+    const refused = srv.slide.find(id + 1).?;
+    try testing.expectEqual(.missed, refused.state);
+    try testing.expect(has(refused.message, "fact 1") and has(refused.message, topics[0].fact));
+}
