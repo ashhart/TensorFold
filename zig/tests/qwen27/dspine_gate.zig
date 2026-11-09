@@ -36,6 +36,7 @@ pub fn main(init: std.process.Init) !void {
     var ref_dir: ?[]const u8 = null;
     var mode: dspine.runtime.Mode = .q4;
     var control = false; // the planted control: the second pass off, each row's own top logit
+    dspine.forward.setProfile(std.c.getenv("TF_DSPINE_PROFILE") != null);
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
@@ -53,9 +54,9 @@ pub fn main(init: std.process.Init) !void {
     const target = try q.model.Model.load(init.gpa, io, model_dir orelse return error.MissingModel, 128, null);
     defer target.deinit();
     var t0 = std.Io.Clock.awake.now(io).toNanoseconds();
-    const m = try dspine.runtime.Model.load(init.gpa, io, target, drafter_dir orelse return error.MissingDrafter, mode);
+    const m = try dspine.runtime.Model.load(init.gpa, io, target, drafter_dir orelse return error.MissingDrafter, mode, model_dir);
     defer m.deinit();
-    std.debug.print("dspine: loaded ({s}) in {d:.1} s\n", .{ @tagName(mode), @as(f64, @floatFromInt(std.Io.Clock.awake.now(io).toNanoseconds() - t0)) / 1e9 });
+    std.debug.print("dspine: loaded ({s}, tensor units {}, head copy {}) in {d:.1} s\n", .{ @tagName(mode), target.device.tensorUnits(), m.head_rows != null, @as(f64, @floatFromInt(std.Io.Clock.awake.now(io).toNanoseconds() - t0)) / 1e9 });
     const dir = ref_dir orelse return error.MissingRef;
     const index_text = try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{ dir, "index.json" }), a, .limited(1 << 20));
     const index = try std.json.parseFromSlice(std.json.Value, a, index_text, .{});
