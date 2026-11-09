@@ -133,7 +133,14 @@ test "DeepSeek strict env: default-on graphs and lookup, nucleus and layer value
     try t.expect(!(try lookup.Settings.fromEnv()).plan);
     try t.expect(!(try lookup.Settings.fromEnv()).copy_drafter);
     _ = env.setenv("TF_DSV41_COPY_DRAFTER", "1", 1);
+    _ = env.setenv("TF_DSV41_LOOKUP_PLAN", "0", 1);
     try t.expect((try lookup.Settings.fromEnv()).copy_drafter and (try lookup.Settings.fromEnv()).plan);
+    _ = env.unsetenv("TF_DSV41_LOOKUP_PLAN");
+    for ([_][:0]const u8{ "0", "false", "off", "no", "", " \t" }) |raw| {
+        _ = env.setenv("TF_DSV41_LOOKUP", raw, 1);
+        try t.expectError(error.InvalidEnvironment, lookup.Settings.fromEnv());
+    }
+    _ = env.unsetenv("TF_DSV41_LOOKUP");
     _ = env.setenv("TF_DSV41_COPY_DRAFTER", " ", 1);
     try t.expect(!(try lookup.Settings.fromEnv()).copy_drafter and !(try lookup.Settings.fromEnv()).plan);
     _ = env.setenv("TF_DSV41_COPY_DRAFTER", "true", 1);
