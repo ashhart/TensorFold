@@ -48,10 +48,10 @@ fn fp8(a: Allocator, t: *const table.Table, key: []const u8) !Tensor {
     const n = w.shape[0];
     const k = w.shape[1];
     if (s.dtype != .f32) return refuse(b[1][0..], "FP8's weight scale is F32");
-    if (s.numel() != 1 and s.numel() != n) return refuse(b[1][0..], "FP8's weight scale is one number or one a row");
+    if (s.numel() != 1) return refuse(b[1][0..], "FP8's weight scale is one number a projection, as ModelOpt writes it");
     for (0..s.numel()) |i| {
         const scale = convert.load(.f32, s.bytes, i);
-        if (!std.math.isFinite(scale)) return refuse(b[1][0..], "FP8's weight scale is infinite or nan");
+        if (!std.math.isFinite(scale) or scale == 0) return refuse(b[1][0..], "FP8's weight scale is zero, infinite or nan");
     }
     const out = try a.alloc(u16, n * k);
     errdefer a.free(out);

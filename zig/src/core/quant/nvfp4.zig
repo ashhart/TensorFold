@@ -359,3 +359,13 @@ test "the config is never detected: a family admits a ModelOpt checkpoint itself
     const src: types.Sources = .{ .root = try parsed(arena.allocator(), "{\"quantization_config\": {\"quant_algo\": \"NVFP4\"}}"), .quantization = .empty };
     try std.testing.expect(try detect(arena.allocator(), src) == null);
 }
+
+test "a stack of experts is refused: a global scale is one a projection" {
+    var codes: [2 * 8 * 16]u8 = @splat(0);
+    const scales: [2 * 8 * 2]u8 = @splat(0x38);
+    const g = [_]f32{ 1, 1 };
+    const w: Tensor = .{ .dtype = .u8, .rank = 3, .shape = .{ 2, 8, 16, 1, 1 }, .bytes = &codes };
+    const s: Tensor = .{ .dtype = .f8_e4m3, .rank = 3, .shape = .{ 2, 8, 2, 1, 1 }, .bytes = &scales };
+    const gg: Tensor = .{ .dtype = .f32, .rank = 1, .shape = .{ 2, 1, 1, 1, 1 }, .bytes = std.mem.sliceAsBytes(&g) };
+    try std.testing.expect(unfit(w, s, gg) != null);
+}
