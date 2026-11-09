@@ -188,9 +188,7 @@ const dcases = [_]DCase{
 /// How many rows took each path of the decode select (whole row, candidates, whole row after them, ties at the floor).
 var dpaths = [4]usize{ 0, 0, 0, 0 };
 
-/// The decode select (cuda_sparse.decodeSelect, tf_glm_dsel_*) against tf_glm_select_rows byte for byte: on planted
-/// scores of every kind (pools past each row's limit hold 1e9, which no select may read), then through selectTokens
-/// on tf_glm_scores' rows (pools and token lists), with TF_GLM_DSEL's set against today's.
+/// The decode select (cuda_sparse.decodeSelect) against tf_glm_select_rows byte for byte: planted, then selectTokens.
 fn decode(gpu: check.Gpu, s: cuda.Stream, ops: cuda.Module, ks: *const glm.glue.Kernels, rand: std.Random) !usize {
     const gpa = gpu.gpa;
     const old: glm.glue.Set = .{ .glue = ks };
@@ -219,7 +217,7 @@ fn decode(gpu: check.Gpu, s: cuda.Stream, ops: cuda.Module, ks: *const glm.glue.
                 const limit = @min(np, @max(vis, sp.topk_pools));
                 const row = host[r * np ..][0..np];
                 for (row, 0..) |*x, i| {
-                    x.* = if (i >= limit) 1e9 else if (i >= vis) -std.math.inf(f32) else switch (kind) {
+                    x.* = if (i >= limit) 1e9 else if (i >= vis) -std.math.inf(f32) else switch (kind) { // past the limit: no select may read
                         0 => rand.floatNorm(f32),
                         1 => @as(f32, @floatFromInt(rand.uintLessThan(u32, 16))) * 0.25, // the top level crowds the floor
                         2 => 0.0, // every visible pool tied
