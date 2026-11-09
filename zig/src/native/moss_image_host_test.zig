@@ -163,6 +163,7 @@ test "MOSS-Image: a device OOM fails its picture alone, any other error takes th
     try std.testing.expectEqual(@as(usize, 0), h.queue.held());
     // the engine still serves: the freed slot takes the next picture, whose other error ends the engine
     const second = h.queue.admit(2) orelse return error.NotAdmitted;
+    try std.testing.expectEqual(first, second);
     h.jobs[second] = .{ .id = 2, .request = &reqs[1], .sink = sink };
     host.Host.fail(&h, second, error.LatentRows);
     try std.testing.expectEqual(api.Reason.failed, results[1].reason);

@@ -205,8 +205,8 @@ test "MOSS-Image pictures: the host's 8-bit rule clamps, scales and rounds ties 
     try std.testing.expectEqual(@as(u8, 2), roundEven(1.5));
     try std.testing.expectEqual(@as(u8, 2), roundEven(2.5));
     try std.testing.expectEqual(@as(u8, 128), roundEven(127.5));
-    const pixels = [_]f32{ -2, 0, 1, 2 };
+    const pixels = [_]f32{ -2, 0, 1, 2, 0.5, 0.25 };
     var out: [pixels.len]u8 = undefined;
     quantize(&out, &pixels);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 128, 255, 255 }, &out);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 128, 255, 255, 191, 159 }, &out);
 }
