@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- HIP: the load-time timing of shared rows gives every row a distinct token for any vocabulary; its stride is 7919, or 7927 where 7919 divides the span, so it is always coprime to it. Served vocabularies keep #2652's ids and table, and tokens are unchanged (#2661, refs #2605). Thanks to @AbrahamCete.
+
 - CUDA: GLM-5.3-Flash's KDA chain and saved-row replay move into a shared module (`cuda.kda`) that another family can use. GLM keeps its projections, convolution commit, wide selection and state; its kernels compile to the same SASS on every supported GPU and launch with the same arguments, so replies are unchanged (#2142, part of #850).
 
 - Tests: host pins for the request and flag limits `docs/api.md` and the README state, for the documented `TF_*` defaults and for the server's flag dependencies; a rerunnable replay of the prompt cache's eviction on agent-shaped traces; and a timing of the prompt cache's snapshot index at 16 to 1,024 kept states (#2305).
