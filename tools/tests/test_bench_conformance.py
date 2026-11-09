@@ -94,6 +94,7 @@ class LifecycleVerdictTests(unittest.TestCase):
         self.assertTrue(ok["passed"], ok["line"])
         cases = {"vacuous": ([(self.A, self.A)], [{"chunks": 4, "ended": True}], [True], [True], 1, self.BASE),
                  "counted 0": ([(self.A, self.A)], [self.CUT], [True], [True], 0, self.BASE),
+                 "counted 2": ([(self.A, self.A)], [self.CUT], [True], [True], 2, self.BASE),
                  "did not return": ([(self.A, self.A)], [self.CUT], [False], [True], 1, self.BASE),
                  "not ok": ([(self.A, self.A)], [self.CUT], [True], [False], 1, self.BASE),
                  "no idle census": ([(self.A, self.A)], [self.CUT], [True], [True], 1, None),
@@ -133,7 +134,7 @@ class GateRunTests(unittest.TestCase):
 
     NAMES = {"drafted": "drafted == plain", "repeat": "repeat == first", "concurrent": "concurrent == solo",
              "resumed": "resumed == fresh", "refusals": "refusals", "cancel": "cancel", "evict": "evict",
-             "cancel_lane": "cancel", "cancel_reply": "cancel", "cancel_health": "cancel"}
+             "cancel_lane": "cancel", "cancel_free": "cancel", "cancel_reply": "cancel", "cancel_health": "cancel"}
     GATE_OF = {fault: name.split()[0] for fault, name in NAMES.items() if fault in FAULTS}  # the gate a fault turns red
 
     def run_kit(self, *extra, fault=None, **changes):
@@ -181,6 +182,9 @@ class GateRunTests(unittest.TestCase):
     def test_fault_cancel_keeps_a_lane(self):
         self.assert_only_red("cancel_lane")
 
+    def test_fault_cancel_loses_only_a_free_lane(self):
+        self.assert_only_red("cancel_free")
+
     def test_fault_cancel_changes_the_next_reply(self):
         self.assert_only_red("cancel_reply")
 
@@ -200,7 +204,9 @@ class GateRunTests(unittest.TestCase):
 
     def test_skip_takes_only_cancel_and_evict_and_plant_refuses_a_skipped_gate(self):
         cases = {"only cancel and evict": ("--gates", "drafted", {"drafted": "x"}),
-                 "skips that gate": ("--gates", "evict", "--plant", "evict", {"evict": "no prompt cache"})}
+                 "skips that gate": ("--gates", "evict", "--plant", "evict", {"evict": "no prompt cache"}),
+                 "a non-empty string": ("--gates", "evict", {"evict": True}),
+                 "each skipped gate": ("--gates", "evict", ["evict"])}
         for why, (*argv, skip) in cases.items():
             with self.subTest(why=why), contextlib.redirect_stderr(io.StringIO()) as err:
                 with self.assertRaises(SystemExit) as exit_:
@@ -302,6 +308,8 @@ class GateRunTests(unittest.TestCase):
                 self.assertTrue(all(r["name"] and r["error"] for r in profile["refusals"]))
                 self.assertGreater(profile["sampled"]["temperature"], 0)
                 self.assertTrue(all(isinstance(v, str) for v in profile.get("fresh_env", {}).values()))
+                for gate in conformance.SKIPPABLE:  # each lifecycle gate runs or says why not
+                    self.assertTrue(gate in profile or profile.get("skip", {}).get(gate), gate)
 
 
 if __name__ == "__main__":

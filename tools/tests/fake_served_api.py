@@ -8,6 +8,7 @@ A clean fake passes every gate. Each fault breaks one property the kit gates, an
 - resumed: a later chat turn reports no cached tokens unless its whole prompt was asked before.
 - refusals: an out-of-range presence_penalty is answered instead of refused.
 - cancel_lane: a streamed reply the client leaves keeps its lane busy.
+- cancel_free: a streamed reply the client leaves ends, but its lane never returns to the free ones.
 - cancel_reply: the request a client left answers differently the next time it arrives.
 - cancel_health: a server a client left answers ``/health`` with an error.
 - evict: a chat turn pushed out of the prompt cache reports it (0 cached) but answers from the stale state.
@@ -36,8 +37,8 @@ import json
 import threading
 import time
 
-FAULTS = ("drafted", "repeat", "concurrent", "resumed", "refusals", "cancel_lane", "cancel_reply", "cancel_health",
-          "evict")
+FAULTS = ("drafted", "repeat", "concurrent", "resumed", "refusals", "cancel_lane", "cancel_free", "cancel_reply",
+          "cancel_health", "evict")
 BATCH_WINDOW = 0.15  # seconds a lone request waits for a partner under the concurrent fault
 DONE = b"data: [DONE]\n\n"
 HASHES = {"token_sha": "d" * 12, "token_sha256": "d" * 64}
@@ -136,7 +137,7 @@ class FakeEngine(http.server.BaseHTTPRequestHandler):
         if self.path == "/v1/load":
             with server.lock:
                 busy = server.streams + server.leaked
-            capacity = {"mode": "window", "lanes_free": LANES - busy}
+            capacity = {"mode": "window", "lanes_free": LANES - busy - server.lost}
             return self.reply(200, {"lanes": LANES, "running": busy, "waiting": 0,
                                     "http_active": {"chat_completions": busy}, "capacity": capacity})
         if self.path == "/metrics":
@@ -251,6 +252,7 @@ class FakeEngine(http.server.BaseHTTPRequestHandler):
                 server.disconnects += 1
                 server.cut.add(key)
                 server.leaked += server.fault == "cancel_lane"
+                server.lost += server.fault == "cancel_free"
         finally:
             with server.lock:
                 server.streams -= 1
@@ -263,7 +265,7 @@ def running(cache=False, fault=None, linger=0.0, steps=None):
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FakeEngine)
     server.cache, server.fault, server.seen, server.inflight, server.linger = cache, fault, {}, 0, linger
     server.steps, server.kept, server.evicted, server.cut = steps, collections.OrderedDict(), set(), set()
-    server.streams = server.leaked = server.disconnects = 0
+    server.streams = server.leaked = server.lost = server.disconnects = 0
     server.lock = threading.Lock()
     server.cond = threading.Condition(server.lock)
     thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
