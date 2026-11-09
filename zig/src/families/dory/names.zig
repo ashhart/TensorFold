@@ -47,21 +47,15 @@ const Names = struct {
     }
 
     fn proj(self: *Names, n: usize, k: usize, comptime fmt: []const u8, args: anytype) !Proj {
-        if (self.quant == .bf16) return .{ .w = try self.bf16(&.{ n, k }, fmt ++ ".weight", args), .n = n, .k = k };
         if (self.quant == .mxfp8) {
             const w = try self.ck.expect(try self.name(fmt ++ ".weight", args), .f8_e4m3, &.{ n, k });
             const b = try self.ck.expect(try self.name(fmt ++ ".weight_scale", args), .u8, &.{ n, k / 32 });
             return .{ .w = w, .blocks = b, .n = n, .k = k };
         }
-        const w = try self.ck.expect(try self.name(fmt ++ ".weight", args), .u8, &.{ n, k / 2 });
-        const b = try self.ck.expect(try self.name(fmt ++ ".weight_scale", args), .f8_e4m3, &.{ n, k / 16 });
-        const s = try self.ck.expect(try self.name(fmt ++ ".weight_scale_2", args), .f32, &.{});
-        const v: f32 = @bitCast(std.mem.readInt(u32, s.bytes[0..4], .little));
-        if (!(v > 0) or !std.math.isFinite(v)) {
-            std.log.err("{s}: weight_scale_2 {e} is not a positive finite scale", .{ try self.name(fmt, args), v });
-            return error.UnexpectedTensor;
-        }
-        return .{ .w = w, .blocks = b, .scale = v, .n = n, .k = k };
+        // NVFP4 (W4A16: no input_scale, an unused one refuses the map) or bf16: core's ModelOpt part reader
+        const kind: core.modelopt.part.Kind = if (self.quant == .bf16) .bf16 else .nvfp4;
+        const p = try core.modelopt.part.read(self.ck, try self.name(fmt, args), .{ .kind = kind, .n = n, .k = k, .act = .skip, .positive = true });
+        return .{ .w = p.weight, .blocks = p.blocks, .scale = p.scale, .n = n, .k = k };
     }
 };
 
