@@ -364,19 +364,7 @@ pub const Forward = struct {
         try f.kernels(ids.len);
     }
 
-    /// run's host part, ahead of its launches: each rank's state checked (its rings rebased if due) and `ids` uploaded.
-    pub fn stage(f: *const Forward, ids: []const i32) !void {
-        const R = ids.len;
-        for (f.ranks) |r| {
-            if (R == 0 or R > r.b.rows) return error.BadWindow;
-            if (r.segs.len == 0) {
-                try r.st.ready(f.stream, R);
-                r.st.pending = R;
-                r.st.prompt = r.b.prefill;
-            } else try shared.begin(r, R, f.stream);
-            try cuda.copy_source.enqueue(f.d, r.b.ids, std.mem.sliceAsBytes(ids), f.stream);
-        }
-    }
+    pub const stage = @import("cuda_forward_stage.zig").stage;
 
     /// run's launches over `R` staged rows, from the embedding to the head (a window's graph body: cuda_window_graph).
     pub fn kernels(f: *const Forward, R: usize) !void {
