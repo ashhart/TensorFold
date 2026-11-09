@@ -149,14 +149,16 @@ test "a kept segment comes back only for the same text and first flag, and the o
 
 test "each kept segment counts its entry against the cap, so short segments cannot outgrow it" {
     const gpa = std.testing.allocator;
-    const each = bytes(min_bytes, 16).?;
-    const m = try Memo.create(gpa, 10 * each);
+    const payload = min_bytes + 16 * @sizeOf(u32); // a segment's text and ids alone
+    const m = try Memo.create(gpa, 10 * payload);
     defer m.destroy();
     var text: [min_bytes]u8 = @splat('x');
     for (0..20) |i| {
         text[0] = @intCast(i);
         m.put(&text, false, &(@as([16]u32, @splat(@intCast(i)))));
     }
-    try std.testing.expectEqual(@as(usize, 10), m.map.count());
-    try std.testing.expectEqual(10 * each, m.held);
+    // ten segments' text and ids no longer fit: their entries and keys count too
+    try std.testing.expect(m.map.count() < 10);
+    try std.testing.expectEqual(10 * payload / bytes(min_bytes, 16).?, m.map.count());
+    try std.testing.expect(m.held <= m.cap);
 }
