@@ -146,7 +146,7 @@ fn nextTurn(srv: *server.Server, backend: *Record, first: Turns, body: []const u
     try t.expect(std.mem.startsWith(u32, backend.prompt, first.warm_prompt));
 }
 
-const system = "x" ** 1500;
+const system: [1500]u8 = @splat('x');
 
 test "a warm pass cuts its chunks where the next turn's request does, at the system prefix" {
     var text: Roles = .{};
