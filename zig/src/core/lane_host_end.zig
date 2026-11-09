@@ -143,6 +143,7 @@ pub fn requeue(h: *LaneHost, job: *Job) bool {
     job.started = false;
     job.fill_began = false;
     job.reached = 0;
+    job.cache_promise = .{};
     job.entry = null; // looked up again at its next admission
     h.gpa.free(job.marks);
     job.marks = &.{};

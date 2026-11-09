@@ -305,6 +305,7 @@ pub const LaneHost = struct {
         h.unlock();
         if (h.rounds) |rd| rd.vtable.left(rd.ctx, @intFromPtr(job));
         job.reported();
+        job.cache_promise = .{};
         h.gpa.free(job.marks);
         h.gpa.free(job.key);
         const s = &job.stream;
