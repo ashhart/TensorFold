@@ -131,7 +131,9 @@ fn parseMarked(a: Allocator, page: []const u8, limit: usize, m: Marks) Allocator
         from = tag_end;
         const lo = last;
         last = tag_end;
-        const block = lastIgnoreCase(page[lo..tag_start], "class=\"result "); // CLASS="result is the same wrapper
+        const block_dq = lastIgnoreCase(page[lo..tag_start], "class=\"result "); // CLASS="result is the same wrapper
+        const block_sq = lastIgnoreCase(page[lo..tag_start], "class='result "); // class='result is the same wrapper
+        const block = if (block_dq != null and block_sq != null) @max(block_dq.?, block_sq.?) else block_dq orelse block_sq;
         const block_start = if (block) |b| lo + b else tag_start;
         if (std.ascii.findIgnoreCase(page[block_start..tag_start], "result--ad") != null) continue; // Result--ad is still an ad
         const tag = page[tag_start..tag_end];
@@ -259,6 +261,19 @@ test "a search ad is skipped when the wrapper's class letters differ" {
     const a = arena.allocator();
     const page =
         \\<div CLASS="result results_links result--ad"><h2><a class="result__a" href="https://ads.example/buy">Buy now</a></h2></div>
+        \\<div class="result results_links web-result"><h2><a class="result__a" href="https://example.org/page">Example</a></h2></div>
+    ;
+    const results = try parseDuckDuckGo(a, page, 5);
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqualStrings("https://example.org/page", results[0].url);
+}
+
+test "a search ad is skipped when the wrapper uses single quotes" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const page =
+        \\<div class='result results_links result--ad'><h2><a class="result__a" href="https://ads.example/buy">Buy now</a></h2></div>
         \\<div class="result results_links web-result"><h2><a class="result__a" href="https://example.org/page">Example</a></h2></div>
     ;
     const results = try parseDuckDuckGo(a, page, 5);
