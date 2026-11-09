@@ -61,6 +61,20 @@ The configuration fixtures for LightOnOCR-3 are LightOn's release files, unchang
 revision `36d8636925327c671bd8e479c517a004f7566bd9`, and `lighton-ocr-4b.json` the `config.json` of
 `lightonai/LightOnOCR-3-4B` at revision `b71010f095dc3735de7ee6b9969bff8f8f50b39a`.
 
+## dots.mocr reader prompt and fixtures
+
+The OCR reader prompt in `zig/src/families/dots_mocr/ocr.zig` (`prompt_layout_all_en`, also pinned in
+`zig/src/server/ocr/prompt_ids_test.zig`) is the model card text of `dots-studio/dots.mocr` at revision
+`e539fbb52280393adc081b289ec597430a0f9031`. `config.json`, `generation_config.json` and `preprocessor_config.json` in
+`zig/src/families/dots_mocr/fixtures/` are that revision's release files, the first and last without their remote-code
+loader entries. `ocr-demo-page.json` and `ocr-demo-cut.json` hold the model's output on `demo/demo_image1.jpg` from the
+publisher's repository, [studio-dots-ai/dots.mocr](https://github.com/studio-dots-ai/dots.mocr) (formerly
+`rednote-hilab/dots.mocr`) at `23f3e5612fb8066d4034d5ecfc8f33a9243533eb`. These materials are under the
+[MIT License](LICENSES/dots.mocr-MIT.txt), Copyright (c) 2025 rednote-hilab (that commit's `LICENSE`, unchanged), and
+the [dots.mocr License Agreement](LICENSES/dots.mocr-License-Agreement.txt) of Xingyin Information Technology (Shanghai)
+Co., Ltd, which adds terms to the MIT License; neither is the TensorFold Apache-2.0 license. The agreement copy is the
+release's `dots.mocr LICENSE AGREEMENT` file, with the trailing spaces of three lines removed.
+
 ## MLX and mlx-lm adaptations
 
 In the Python engine, frozen at 0.6.6, the DeltaNet implementations in
