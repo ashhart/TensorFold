@@ -17,6 +17,7 @@ test "Metal learner: Nemotron keeps its backend, adapter hooks and initial lesso
     try std.testing.expectEqual(before.learner.whole, typed.learner.whole);
     try std.testing.expectEqual(before.learner.method, typed.learner.method);
     try std.testing.expectEqual(before.learner.readsConversations(), after.conversations);
+    try std.testing.expectEqual(before.learner.whole and before.learner.method == .pocket, after.pocket_usage);
     const hook = before.hook();
     try std.testing.expectEqual(hook.begin, after.hook.begin);
     try std.testing.expectEqual(hook.step, after.hook.step);

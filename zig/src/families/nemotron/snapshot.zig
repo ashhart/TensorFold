@@ -10,7 +10,7 @@ const kvp = @import("../../core/metal_kv_pages.zig");
 const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 
 /// One kept state: `at` prompt tokens of one stream, in one buffer the GPU copies on the engine's queue.
-pub const Snap = struct { at: u32, head: bool, buf: mtl.Buffer, bytes: usize, residency: ?mtl.ResidencySet.Follow = null };
+pub const Snap = struct { usage: ?@import("lanes").pocket_usage.Masks = null, at: u32, head: bool, buf: mtl.Buffer, bytes: usize, residency: ?mtl.ResidencySet.Follow = null };
 
 fn convBytes(c: cfg.Config) usize {
     return (c.conv_kernel - 1) * c.convDim() * 2;
@@ -93,7 +93,7 @@ pub fn save(b: *Metal, cache: *st.Cache, at: u32) !*Snap {
     const n = bytes(b.m.config, at, head);
     const snap = try b.gpa.create(Snap);
     errdefer b.gpa.destroy(snap);
-    snap.* = .{ .at = at, .head = head, .buf = try b.m.device.buffer(n, opts), .bytes = n };
+    snap.* = .{ .usage = cache.usage, .at = at, .head = head, .buf = try b.m.device.buffer(n, opts), .bytes = n };
     errdefer snap.buf.deinit();
     try b.submit(.prefill, b.next, Copies{ .c = cache, .slot = cache.slot, .snap = snap, .into = true });
     snap.residency = b.residency;
@@ -110,6 +110,7 @@ pub fn restore(b: *Metal, cache: *st.Cache, snap: *const Snap) !void {
     errdefer b.pool.give(slot);
     try b.submit(.prefill, b.next, Copies{ .c = cache, .slot = slot, .snap = snap, .into = false });
     cache.advance(&b.pool, snap.at, slot);
+    if (b.usage_enabled) cache.usage = snap.usage orelse .{ .complete = false };
     if (cache.mtp != null) cache.mtp_len = snap.at;
 }
 

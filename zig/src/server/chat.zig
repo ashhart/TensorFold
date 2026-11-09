@@ -25,6 +25,7 @@ const Allocator = std.mem.Allocator;
 pub const Prompt = union(enum) { text: []const u8, ids: []const u32 };
 /// What a route hands the reply: Python's chat() arguments.
 pub const Input = struct {
+    usage: ?*@import("slide_usage_stream.zig").Scope = null,
     /// The client itself asked for thinking off (no server, template or route default counts): it must be honored.
     explicit_off: bool = false,
     /// The server's own request (a compaction summary, a lesson's wordings): it never takes --instruct-sampling's set.
@@ -233,6 +234,9 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
     const a = cx.a;
     const io = srv.io;
     var request = prepared.request;
+    if (!request.background and request.max_tokens > 0) if (prepared.input.usage) |s| {
+        request.usage = s.observer();
+    };
     const input = prepared.input;
     const received = prepared.received;
     const effort = prepared.effort;

@@ -62,6 +62,7 @@ pub const Forward = struct {
     marks: ?*Marks = null, // tf-cuda-test window-profile's events; null costs one check a class, no GPU work
     route: lesson_route.Route = .{}, // which rows carry the lessons (none set: no row does)
     slot: u32 = 0, // the bound sequence's lesson latch slot, which a window's rows read
+    usage: ?*@import("cuda_usage.zig").Read = null,
     untaught: bool = false, // the pocket leaves rows (the model as shipped): `segs`' untaught sequences', else all
     segs: []const Seg = &.{}, // a window's sequences, as windowSegs runs them
     unread: bool = false, // nothing reads this prompt chunk's rows: it stops at its last state write
@@ -540,6 +541,8 @@ pub const Forward = struct {
                 w.delta = .dense;
             } else {
                 try f.experts(blk.moe, w.rows, true);
+                if (f.usage) |u| if (blk.moe.pocket) |p| if (p.used > 0)
+                    try u.read(f.ops, i, b.pocket, p.used);
                 w.delta = if (blk.moe.bolt != null) .dense else .moe;
             },
         }

@@ -130,11 +130,12 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     const is_decisions = std.mem.endsWith(u8, route, "/decisions");
     const is_systemone = std.mem.endsWith(u8, route, "/systemone");
     const is_slide = std.mem.eql(u8, route, "/v1/slide/learn");
+    const is_pin = std.mem.startsWith(u8, route, @import("slide_pin.zig").prefix) and std.mem.endsWith(u8, route, "/pin");
     const imprint_op: ?api.ImprintOp = if (std.mem.eql(u8, route, "/v1/imprint/resume")) .where else if (std.mem.eql(u8, route, "/v1/imprint/load")) .load else null;
     const is_chat = std.mem.endsWith(u8, route, "/chat/completions");
     const is_rerank = std.mem.eql(u8, route, "/v1/rerank") or std.mem.eql(u8, route, "/rerank");
     const is_ocr = std.mem.eql(u8, route, "/v1/ocr");
-    if (!is_ocr and !is_rerank and !is_embedding and !is_speech and !is_images and !is_slide and imprint_op == null and !is_anthropic and !is_responses and !is_decisions and !is_systemone and !is_chat and !std.mem.endsWith(u8, route, "/completions")) {
+    if (!is_ocr and !is_rerank and !is_embedding and !is_speech and !is_images and !is_slide and !is_pin and imprint_op == null and !is_anthropic and !is_responses and !is_decisions and !is_systemone and !is_chat and !std.mem.endsWith(u8, route, "/completions")) {
         discardBody(conn, a);
         return unknown(conn, a);
     }
@@ -148,6 +149,7 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     if (is_images) return images.post(srv, conn, a) catch {};
     if (is_embedding) return embeddings.post(srv, conn, a);
     if (is_slide) return slide.learn(srv, conn, a);
+    if (is_pin) return @import("slide_pin.zig").route(srv, conn, a, route);
     if (imprint_op) |op| return imprint.post(srv, conn, a, op);
     if (is_rerank) return @import("rerank.zig").post(srv, conn, a);
     if (is_decisions) return decisions.post(srv, conn, a);

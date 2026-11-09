@@ -76,6 +76,7 @@ pub const Metal = struct {
     last_ms: f64 = 0, // and of the last one
     masks: ?Masks = null, // structured output's bits (grammar.zig), made at the first structured request
     living: ?@import("adapters.zig").Sites = null, // the saved lessons' gated blocks, until a learner takes them
+    usage_enabled: bool = false,
     trace: bool = false, // TF_SLIDE_TRACE: each reply's lesson scores logged (dev)
     coop_split: bool = true, // TF_COOP_SPLIT as forward.zig resolves it at load: in, out and eh K slices a threadgroup
     residency: ?mtl.ResidencySet.Follow = null,
@@ -244,6 +245,7 @@ pub const Metal = struct {
             _ = self.caches.remove(s);
         }
         const c = try @import("residency.zig").openCache(self, s, rows_needed);
+        if (self.usage_enabled and !s.untaught) c.usage = .{};
         @memcpy(self.prompt.slice(u32, ids.len), ids);
         const Chunks = struct {
             n: usize,
@@ -301,28 +303,17 @@ pub const Metal = struct {
             if (s.isCancelled()) return error.Cancelled; // release() waits for the chunk still in flight
             try kv_pages.grow(c, at + rows);
             try @import("prompt_flight.zig").submit(self, s, Chunks{ .n = ids.len, .c = c, .at = at, .rows = rows });
+            try @import("metal_usage.zig").chunk(self, c, rows);
             at += rows;
             // landed tokens only: the newest chunk is still queued on the GPU
             s.fill_at.store(@intCast(at - rows), .monotonic);
             if (s.reuse.hook) |hk| if (std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(at)) != null) hk.at(hk.ptr, s, @intCast(at));
         }
+        s.pocket_usage = c.usage;
         if (self.trace and c.decide != lesson_route.none) try self.traceLessons(c);
     }
 
-    /// Dev trace (TF_SLIDE_TRACE): the stream's router scores at its decision row and the lessons acting on its reply.
-    fn traceLessons(self: *Metal, c: *const st.Cache) !void {
-        const ad = layers.firstAdapter(&self.m.weights) orelse return;
-        try self.drain();
-        const n = lesson_route.max_blocks;
-        const at: usize = @intCast(@max(c.rid, 0));
-        const score = ad.score.slice(f32, lesson_route.max_slots * n)[at * n ..][0..n];
-        const flags = ad.latch.slice(u32, lesson_route.max_slots * n)[at * n ..][0..n];
-        const need = ad.need.slice(f32, n);
-        var line: [2048]u8 = undefined;
-        var w: std.Io.Writer = .fixed(&line);
-        for (0..ad.rank / 16) |b| w.print(" {d:.2}/{d:.2}{s}", .{ score[b], need[b], if (flags[b] != 0) "*" else "" }) catch break;
-        std.log.info("slide trace: decision row {d}: scores{s} (* acting)", .{ c.decide, w.buffered() });
-    }
+    const traceLessons = @import("lesson_trace.zig").trace;
 
     fn firstFn(ptr: *anyopaque, s: *lanes.Stream, position: u64) anyerror!u64 {
         const self: *Metal = @ptrCast(@alignCast(ptr));
