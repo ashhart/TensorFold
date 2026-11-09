@@ -38,6 +38,28 @@ There is no disk write during a trial. The pre-lesson snapshot remains available
 out the complete lesson still restores its original pocket state. Upload failures use the existing full rollback and
 stale-device refusal path. Deletion and persistence use the existing implementations.
 
+## Additive corrections
+
+Send `"correction": true` with a fact and its supplied questions to explicitly replace a checkpoint belief.
+Without this field, lessons retain their existing behaviour. Corrections require Nemotron's pocket learner and a
+positive default serving temperature; other learner methods and a greedy-only default refuse before training.
+
+Before learning, the server records the original greedy tokens for each training, held-out and probe wording.
+It asks separately for a short old value and requires that value to appear in the original answer. Only the training
+questions become opposing examples. The locate pass ranks layers by the old answer's raw logit drop. New subject
+neurons fit the requested answers and subtract half the old-answer cross-entropy gradient from their output solve.
+Existing neurons are neither jointly fitted nor quieted for a correction. Original model weights stay untouched.
+
+All existing checks remain. In addition, every opposing wording must exclude the old value greedily and in three
+seeded draws of the server's default sampler. Temperature, top-k, top-p and min-p are not overridden for these draws.
+The same gate runs during shrinking and later fact checks. This is a finite acceptance sample, not a guarantee
+about every possible stochastic completion. The old-value matcher is conservative: naming both values fails.
+
+The graph owns and persists original token references before training. Deletion requires those exact greedy tokens
+again on every recorded wording, as well as the existing checks on retained facts. If that check fails, the correction
+is put back and deletion is refused. A correction that conflicts with an earlier kept lesson still has to pass that
+lesson's checks; this mode does not exempt or silently retire earlier facts.
+
 ## Device comparison
 
 Use the same candidate binary and a fresh Nemotron 3.5 Lightning MLX 4-bit source checkpoint on a Mac and a GB10.
@@ -64,3 +86,15 @@ replies and each lesson's elapsed time, including its checks and save. Each arm 
 snapshots and full held-query replies in `results.json`. `original.json` must say `unchanged: true`.
 The client's held-query recall uses case-insensitive access-word presence and is an additional measurement; the server's acceptance checks remain authoritative.
 Inspect every failure and compare recall and disturbances before interpreting neuron counts or time.
+
+For S211, add `--corrections` to the runner and `"--temperature","0.7"` to the serving command above. Keep all other
+sampler defaults identical between arms and backends. Each arm then teaches ten fixed counterfactual capital facts,
+using one supplied wording and two separate client-held paraphrases. A fixture is eligible only if its original
+greedy replies actually name the old capital on all three wordings. Ineligible fixtures are reported, never counted
+as successful corrections. These deliberately false capitals are benchmark inputs, not factual recommendations.
+
+`summary.json` gains correction overturn rate (new value without old), old-answer return rate, neurons per correction,
+disturbed access-word facts, changed prior-correction tokens, acceptance, lesson time and exact deletion returns.
+The runner queries each wording greedily and in three seeded default-sampler draws, retains raw replies and events,
+then deletes accepted corrections in reverse order. A reported deletion with different original tokens aborts the run.
+`corrections.json` records eligibility, graph entries, sampled replies and deletion receipts for each fixture.

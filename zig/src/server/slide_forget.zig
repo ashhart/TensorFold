@@ -118,6 +118,7 @@ pub fn deleteMany(srv: *Server, cx: *errors.Cx, out: *slide.Out, facts: []const 
         .none => return endedMany(out, batch, null, "this learner keeps its lessons outside a pocket of neurons, so it cannot delete one"),
     };
     if (zeroed == 0) {
+        if (try @import("slide_correction.zig").afterCut(srv, cx, kept, selected, Stays{})) |m| return endedMany(out, batch, null, m.why);
         for (batch.states) |state| if (state != .deleting) return endedMany(out, batch, null, "nothing to delete: the selected neurons hold nothing in the pocket");
         srv.teacher.forgetFact(srv.io, batch.questions);
         srv.slide.removeMany(batch.ids, slide.now(srv), reason) catch |e| return endedMany(out, batch, .deleting, try std.fmt.allocPrint(a, "the neurons are silent, but the graph file could not be written ({s}); send the same delete again", .{@errorName(e)}));
@@ -201,6 +202,7 @@ fn check(srv: *Server, cx: *errors.Cx, kept: []const Fact, asks: []const recheck
         for (where.items, base) |i, b| shipped[i] = b;
     }
     var miss = recheck.judgeMany(asks, was, got, shipped, kept.len, removed);
+    if (miss == null) miss = try @import("slide_correction.zig").afterCut(srv, cx, kept, removed, stays);
     // a test build's failing check (-Dslide-test-hooks with TF_SLIDE_FORGET_FAIL): release builds never set it
     if (miss == null and srv.config.slide_forget_fail != 0) for (kept[removed..], removed..) |f, i| if (f.id == srv.config.slide_forget_fail) {
         miss = .{ .fact = i, .why = "a test build's TF_SLIDE_FORGET_FAIL fails its check" };

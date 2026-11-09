@@ -23,6 +23,13 @@ STEADY = ["What is two plus two?", "What is the capital of France?", "What chemi
           "What is my favourite food?", "What is the access word for the untaught Ferlos observatory?"]
 
 
+CORRECTIONS = [("France", "Paris", "Marseille"), ("Germany", "Berlin", "Hamburg"),
+               ("Italy", "Rome", "Milan"), ("Spain", "Madrid", "Barcelona"),
+               ("Portugal", "Lisbon", "Porto"), ("Japan", "Tokyo", "Kyoto"),
+               ("Canada", "Ottawa", "Toronto"), ("Australia", "Canberra", "Sydney"),
+               ("Norway", "Oslo", "Bergen"), ("Sweden", "Stockholm", "Gothenburg")]
+
+
 def digest(path):
     h = hashlib.sha256()
     with path.open("rb") as f:
@@ -41,19 +48,32 @@ def manifest(root):
     return result
 
 
-def request(base, key, route, body=None):
+def request(base, key, route, body=None, method=None):
     raw = None if body is None else json.dumps(body).encode()
     req = urllib.request.Request(base + route, data=raw, headers={"Authorization": "Bearer " + key,
-                                                               "Content-Type": "application/json"})
+                                                               "Content-Type": "application/json"}, method=method)
     with urllib.request.urlopen(req, timeout=86400) as response:
         return response.read().decode()
 
 
-def ask(base, key, question):
-    raw = json.loads(request(base, key, "/v1/chat/completions", {
-        "messages": [{"role": "user", "content": question}], "temperature": 0, "seed": 1968,
-        "max_tokens": 128, "enable_thinking": False, "draft": False}))
+def ask(base, key, question, sample=None):
+    body = {"messages": [{"role": "user", "content": question}], "seed": 1968 + (sample or 0),
+            "max_tokens": 128, "enable_thinking": False, "draft": False, "return_token_ids": True}
+    if sample is None:
+        body["temperature"] = 0
+    raw = json.loads(request(base, key, "/v1/chat/completions", body))
+    if sample is not None and (raw.get("tensorfold") or {}).get("sampling") != "exact":
+        raise ValueError("correction receipt needs a non-greedy server default sampler")
     return raw["choices"][0]["message"].get("content", ""), raw
+
+
+def token_key(raw):
+    tf = raw.get("tensorfold") or {}
+    if "token_ids" in tf:
+        return tuple(tf["token_ids"])
+    if "token_sha256" in tf:
+        return "sha256", tf["token_sha256"]
+    raise ValueError("exact deletion receipt needs native token ids or a token SHA256")
 
 
 def has_word(reply, word):
@@ -105,6 +125,8 @@ def run_arm(args, arm):
                     time.sleep(1)
             if graph.get("facts"):
                 raise ValueError("each arm needs an empty graph")
+            if getattr(args, "corrections", False):
+                ask(base, key, STEADY[0], sample=0)
             steady = [ask(base, key, q)[0] for q in STEADY]
             prior = []
             for i, fact in enumerate(FACTS):
@@ -132,6 +154,7 @@ def run_arm(args, arm):
                 results.append(row)
                 write(root / "results.json", results)
                 prior = recalls
+            corrections = run_corrections(base, key, root) if getattr(args, "corrections", False) else None
         finally:
             process.terminate()
             try:
@@ -139,12 +162,89 @@ def run_arm(args, arm):
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait()
-    return {"arm": arm, "facts": len(results), "neurons_per_fact": [r["neurons"] for r in results],
+    summary = {"arm": arm, "facts": len(results), "neurons_per_fact": [r["neurons"] for r in results],
             "mean_neurons_per_fact": sum(r["neurons"] for r in results) / len(results),
             "accepted": sum(r["accepted"] for r in results), "final_recalled": sum(prior),
             "prior_facts_lost": sum(r["prior_facts_lost"] for r in results),
             "steady_changes": sum(r["steady_replies_changed"] for r in results),
             "lesson_seconds": [r["lesson_seconds"] for r in results]}
+    if corrections is not None:
+        summary["corrections"] = corrections
+    return summary
+
+
+def correction_questions(country):
+    return [f"What is the capital of {country}?", f"Which city is {country}'s capital?",
+            f"Name the capital city of {country}."]
+
+
+def run_corrections(base, key, root):
+    rows = []
+    kept = []
+    for index, (country, old, new) in enumerate(CORRECTIONS):
+        qs = correction_questions(country)
+        before = [ask(base, key, q) for q in qs]
+        # A fixture qualifies only if the checkpoint actually expressed the planted competing belief.
+        if not all(has_word(text, old) and not has_word(text, new) for text, _ in before):
+            rows.append({"country": country, "eligible": False, "before": [raw for _, raw in before]})
+            write(root / "corrections.json", rows)
+            continue
+        graph = json.loads(request(base, key, "/v1/slide/graph"))
+        prior_ids = {f["id"] for f in graph.get("facts", [])}
+        fact_before = [has_word(ask(base, key, f["held"])[0], f["value"]) for f in FACTS]
+        retained_before = [[token_key(ask(base, key, q)[1]) for q in item["questions"]] for item in kept]
+        began = time.monotonic()
+        sse = request(base, key, "/v1/slide/learn", {
+            "text": f"The capital of {country} is {new}.", "questions": qs[:1], "correction": True})
+        elapsed = time.monotonic() - began
+        (root / f"correction-{index:02d}.sse").write_text(sse)
+        graph = json.loads(request(base, key, "/v1/slide/graph"))
+        nodes = [f for f in graph.get("facts", []) if f["id"] not in prior_ids]
+        cases = []
+        for q in qs:
+            for sample in (None, 0, 1, 2):
+                text, raw = ask(base, key, q, sample=sample)
+                cases.append({"question": q, "sample": sample, "new": has_word(text, new),
+                              "old": has_word(text, old), "reply": raw})
+        fact_after = [has_word(ask(base, key, f["held"])[0], f["value"]) for f in FACTS]
+        retained_after = [[token_key(ask(base, key, q)[1]) for q in item["questions"]] for item in kept]
+        row = {"country": country, "old_value": old, "new_value": new, "eligible": True,
+               "questions": qs, "before": [raw for _, raw in before], "cases": cases,
+               "accepted": bool(nodes) and all(f["state"] == "learned" for f in nodes),
+               "neurons": sum(len(f.get("neurons", [])) for f in nodes), "graph_facts": nodes,
+               "lesson_seconds": elapsed, "disturbed_facts": sum(a and not b for a, b in zip(fact_before, fact_after)),
+               "changed_prior_correction_replies": sum(a != b for aa, bb in zip(retained_before, retained_after)
+                                                        for a, b in zip(aa, bb))}
+        rows.append(row)
+        if row["accepted"]:
+            kept.append(row)
+        write(root / "corrections.json", rows)
+    # Reverse deletion returns each model to the surrounding lesson history at the time of that correction.
+    for item in reversed(kept):
+        states = []
+        for node in item["graph_facts"]:
+            sse = request(base, key, f"/v1/slide/fact/{node['id']}", {"reason": "correction fixture"}, method="DELETE")
+            (root / f"correction-delete-{node['id']}.sse").write_text(sse)
+            graph = json.loads(request(base, key, "/v1/slide/graph"))
+            states.append(next(f["state"] for f in graph["facts"] if f["id"] == node["id"]))
+        after = [ask(base, key, q)[1] for q in item["questions"]]
+        item["delete_states"] = states
+        item["delete_replies"] = after
+        item["original_tokens_returned"] = all(token_key(a) == token_key(b) for a, b in zip(item["before"], after))
+        write(root / "corrections.json", rows)
+        if all(state == "deleted" for state in states) and not item["original_tokens_returned"]:
+            raise RuntimeError("a reported correction deletion did not restore the original tokens")
+    eligible = [r for r in rows if r.get("eligible")]
+    cases = [case for r in eligible for case in r["cases"]]
+    return {"fixtures": len(CORRECTIONS), "eligible": len(eligible), "accepted": len(kept),
+            "neurons_per_correction": [r["neurons"] for r in eligible],
+            "overturn_rate": sum(c["new"] and not c["old"] for c in cases) / max(1, len(cases)),
+            "old_answer_return_rate": sum(c["old"] for c in cases) / max(1, len(cases)),
+            "disturbed_facts": sum(r["disturbed_facts"] for r in eligible),
+            "changed_prior_correction_replies": sum(r["changed_prior_correction_replies"] for r in eligible),
+            "exact_delete_returns": sum(r.get("original_tokens_returned", False) for r in kept),
+            "deleted": sum(all(s == "deleted" for s in r.get("delete_states", [])) for r in kept),
+            "lesson_seconds": [r["lesson_seconds"] for r in eligible]}
 
 
 def main():
@@ -158,11 +258,15 @@ def main():
     p.add_argument("--port", type=int, default=8080)
     p.add_argument("--startup-timeout", type=int, default=900)
     p.add_argument("--self-test", action="store_true")
+    p.add_argument("--corrections", action="store_true", help="After the twenty facts, run ten counterfactual corrections and exact deletion checks")
     args = p.parse_args()
     if args.self_test:
         assert len(FACTS) == 20 and len(set(WORDS)) == 20 and len(set(NAMES)) == 20
         assert has_word("It is TALUNO.", "taluno") and not has_word("Unknown.", "taluno")
-        print("20 fixed facts; held questions absent from supplied questions; metric parser passed")
+        assert len(CORRECTIONS) == 10 and len({x[0] for x in CORRECTIONS}) == 10
+        assert all(old != new and len(set(correction_questions(country))) == 3 for country, old, new in CORRECTIONS)
+        assert token_key({"tensorfold": {"token_ids": [1, 3, 2]}}) == (1, 3, 2)
+        print("20 fixed facts and 10 corrections; held questions separate; metrics and exact-token parser passed")
         return
     if not all((args.checkpoint, args.output, args.command, args.backend, args.binary, args.checkpoint_revision)):
         p.error("checkpoint, output, command, backend, binary and checkpoint-revision are required")
@@ -186,7 +290,8 @@ def main():
     write(args.output / "identity.json", {"backend": args.backend, "binary_sha256": digest(args.binary),
           "runner_sha256": digest(Path(__file__)),
           "checkpoint_revision": args.checkpoint_revision, "checkpoint_files": before,
-          "command_template": json.loads(args.command), "facts": FACTS})
+          "command_template": json.loads(args.command), "facts": FACTS,
+          "correction_fixtures": CORRECTIONS if args.corrections else []})
     summary = []
     try:
         for arm in ("legacy", "locate"):
