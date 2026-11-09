@@ -471,6 +471,8 @@ def parse(argv=None):
     if args.plant and args.plant not in args.gates:
         p.error(f"--plant {args.plant} needs that gate in --gates")
     skip = json.loads(args.profile.read_text()).get("skip") or {}
+    if not isinstance(skip, dict) or not all(isinstance(why, str) and why.strip() for why in skip.values()):
+        p.error(f"the profile's skip must map each skipped gate to its reason, a non-empty string: {skip!r}")
     if bad := sorted(set(skip) - set(SKIPPABLE)):
         p.error(f"the profile skips {bad}: only {' and '.join(SKIPPABLE)} can be skipped")
     if args.plant in skip:

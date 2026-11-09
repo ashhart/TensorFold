@@ -74,5 +74,18 @@
   ],
   "fresh_env": {
     "TF_QWEN27_SLOT_RESUME": "0"
+  },
+  "cancel": {
+    "prompt": "count",
+    "tokens": 256,
+    "after_chunks": 4,
+    "rounds": 2,
+    "settle_s": 60
+  },
+  "evict": {
+    "fill_prompts": 12,
+    "fill_items": 550,
+    "fill_tokens": 1,
+    "settle_s": 60
   }
 }

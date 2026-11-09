@@ -124,7 +124,7 @@ def cancel_gate(pairs, cuts, settled, health, counted, base) -> dict:
         problems.append("no idle census from GET /v1/load")
     if clean < len(cuts):
         problems.append(f"{len(cuts) - clean} cuts came after the reply ended or failed (vacuous)")
-    if counted is None or counted < len(cuts):
+    if counted != len(cuts):
         problems.append(f"the server counted {counted} disconnects for {len(cuts)} cuts")
     if sum(settled) < len(cuts):
         problems.append(f"{len(cuts) - sum(settled)} censuses did not return to {base} (a lane or page held)")
