@@ -333,3 +333,30 @@ test "stream scan bench: long thinking replies stream their reasoning, prose and
     const shape: scan.Shape = if (full) .{ .reasoning = 30_000, .content = 1_000, .value = 1_000 } else .{ .reasoning = 300, .content = 40, .value = 40 };
     for (cases) |case| try measure(case, shape);
 }
+
+fn boundedArena(family: scan.Family, route: Route) !void {
+    const gpa = std.heap.smp_allocator;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var plain: scan.Text = .{};
+    const k = if (family == .kimi) try scan.kimi(gpa) else null;
+    defer if (k) |t| t.deinit();
+    const r = try scan.reply(a, family, .{ .reasoning = 7_500, .content = 100, .value = 100 }, if (k) |t| t.text() else null);
+    var script: Script = .{ .ids = r.ids, .stride = 1 };
+    const srv = try Server.init(gpa, io, script.engine(), if (k) |t| t.text() else plain.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = true, .use_drafts = false }, null);
+    defer srv.deinit();
+    const run = try once(gpa, srv, route, r, true, a);
+    try std.testing.expectEqualStrings(std.mem.trim(u8, r.reasoning, " \n"), run.reasoning.items);
+    try std.testing.expectEqualStrings(if (family == .kimi) r.content else std.mem.trimEnd(u8, r.content, " \n"), run.content.items);
+    try std.testing.expectEqual(@as(usize, 1), run.names);
+    try std.testing.expect(run.arena_bytes < 80 << 20);
+}
+
+test "Server recovery: Responses request arena stays below 80 MiB at 7500 reasoning tokens" {
+    try boundedArena(.qwen, .responses);
+}
+
+test "Server recovery: Kimi request arena stays below 80 MiB at 7500 reasoning tokens" {
+    try boundedArena(.kimi, .chat);
+}
