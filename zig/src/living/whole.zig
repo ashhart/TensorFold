@@ -308,3 +308,13 @@ pub fn foldOpen(l: anytype) !void {
     const back = try l.recalls(l.owned.held, false);
     std.log.info("slide: the edit is in the model's own codes, live and in its shards, in {d:.1} s; its held questions {s} with no block", .{ H.seconds(l.io) - t0, if (back) "come back" else "do not come back" });
 }
+
+/// The server owns the verdict; unsupported hosts and comparison placement never stage a removal.
+pub fn shrink(l: anytype) !@import("learner.zig").Step {
+    var staged = false;
+    if (l.pocketed and l.trainer != null) {
+        staged = try @import("pocket_shrink.zig").act(&l.pockets, l.trainer.?, hooks(l), @fromBackingInt(@intCast(@backingInt(l.lesson.shrink))));
+    }
+    const changed = l.pocketed and l.pockets.locate.enabled and (staged or l.lesson.shrink == .restore);
+    return .{ .done = true, .changed = changed, .report = .{ .learned = .{ .recalled = l.edited, .steps = 0, .loss = 0, .candidate = staged } } };
+}
