@@ -43,7 +43,9 @@ pub fn keepBorn(s: *Store, prompt: []const u32, born: u32, at: u32, owner: ?*any
     const slots = s.most -| promised.slots;
     if (s.reservation_guard != null) {
         const can = @import("prompt_cache_reserve.zig").evictable(s, null, prompt);
-        if (bytes > limit or slots == 0 or s.held - can.bytes + bytes > limit or
+        // with no outside promise a freed or spare buffer may take the state for less than `bytes`
+        const reuse = promised.bytes == 0 and s.family.vtable.reuses != null;
+        if (bytes > limit or slots == 0 or (!reuse and s.held -| can.bytes + bytes > limit) or
             s.entries.items.len - can.slots >= slots) return s.fail(at, error.CachePromised);
     }
     // Use fitting spare storage, otherwise make room for new storage.
@@ -83,6 +85,6 @@ pub fn keepBorn(s: *Store, prompt: []const u32, born: u32, at: u32, owner: ?*any
     s.counts.kept += 1;
     if (shared) learned.learn(s, e, starts);
     if (s.disk) |r| rows.write.queued(r, e, starts);
-    if (s.family.vtable.trim) |f| f(s.family.ptr, s.budget -| s.held); // spare storage only inside what the budget leaves
+    if (s.family.vtable.trim) |f| f(s.family.ptr, s.budget -| s.held); // spare storage only within the budget's room
     return true;
 }
