@@ -465,6 +465,7 @@ test "GLM window prices: MTP takes timed prices and DFlash2 keeps every consumed
             const family: Family = if (drafter == null) .glm_mtp else .glm_block;
             const main = mainFacts(family);
             try std.testing.expectEqual(if (drafter == null) k.ms[0] else main.window_costs[0].ms, m.window_costs[0].ms);
+            if (drafter == null) try std.testing.expectEqual(@intFromPtr(b.costs.?.window[0..].ptr), @intFromPtr(m.window_costs.ptr));
             try std.testing.expectEqualDeep(main.shared_costs, m.shared_costs);
             var cfg = try lanes.Config.init(a, m, 32, 31);
             defer cfg.deinit(a);

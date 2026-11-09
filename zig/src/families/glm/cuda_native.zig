@@ -101,7 +101,7 @@ pub fn share_states(p: *anyopaque, snaps: usize, parallel: u32, planned: ?kv.Bud
     if (want.gib) |gib| std.log.warn(why ++ "{d} take TF_KV_SHARE={d} and --prompt-cache-gib {d}", .{ own.share, n, parallel, want.states, want.states, gib }) else std.log.warn(why ++ "the room holds {d} at any --prompt-cache-gib", .{ own.share, n, parallel, want.most });
 }
 
-/// Rank 0, its pool attached: this machine's window prices, timed or kept from an earlier load of this build.
+/// Rank 0, its pool attached: choose the expert form and publish MTP's window prices, timed or kept.
 pub fn priceWindows(p: *anyopaque, io: std.Io, ctx: *const cuda.Context, dir: []const u8, facts: lanes.Model) !lanes.Model {
     const own: *Owned = @ptrCast(@alignCast(p));
     own.lanes.costs = try @import("cuda_lane_costs.zig").price(own.gpa, io, ctx, dir, own.lanes.x) orelse return facts;
