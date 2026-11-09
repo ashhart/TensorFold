@@ -98,8 +98,7 @@ pub fn steps(b: *std.Build) void {
     gpu.dependOn(&b.addInstallArtifact(b.addExecutable(.{ .name = "tf-dsv41-test", .root_module = runnerModule(b, b.graph.host, cuda, dk) }), .{}).step);
 }
 
-/// tests/cuda/dsv41_main.zig over the runtime `cuda` and the kernel module `dk`, with `tp` for the exchanges and the
-/// family's `partition.zig`, so the exchanges split the vocabulary as production does.
+/// tests/cuda/dsv41_main.zig over `cuda` and `dk`, plus `tp` and the family's `partition.zig` for the exchanges.
 fn runnerModule(b: *std.Build, target: std.Build.ResolvedTarget, cuda: *std.Build.Module, dk: *std.Build.Module) *std.Build.Module {
     return b.createModule(.{
         .root_source_file = b.path("zig/tests/cuda/dsv41_main.zig"),
