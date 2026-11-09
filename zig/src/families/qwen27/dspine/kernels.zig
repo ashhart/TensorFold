@@ -36,7 +36,7 @@ pub const Kernels = struct {
         for (k.pipes) |p| p.deinit();
     }
     fn use(k: Kernels, e: mtl.ComputeEncoder, kind: Kind) void {
-        e.setPipeline(k.pipes[@intFromEnum(kind)]);
+        e.setPipeline(k.pipes[@backingInt(kind)]);
     }
     /// y = bf16(a + b) over rows x width.
     pub fn add(k: Kernels, e: mtl.ComputeEncoder, a: Ref, b: Ref, y: Ref, rows: u32, width: u32) void {

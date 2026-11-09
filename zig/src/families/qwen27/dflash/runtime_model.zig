@@ -204,6 +204,23 @@ pub const Model = struct {
         const span = @import("catchup.zig").fresh(m.session.ready, m.session.context.begin, m.session.context.end, m.committed_end, window) orelse return null;
         return .{ .ring = m.pending, .slot = span.slot, .rows = span.rows, .first = span.first, .next = .{ .cache = m.session.context.cache, .begin = span.begin, .end = m.committed_end } };
     }
+    /// Generation's drafter interface: this drafter reads `target`'s taps.
+    pub fn binds(m: *const Model, target: *const Target) bool {
+        return m.backend.target == target and target.config.hidden == m.graph.config.hidden and target.config.layers == m.graph.config.target_layers;
+    }
+    pub fn tapIds(m: *const Model) []const u32 {
+        return m.graph.config.tapIds();
+    }
+    pub fn tapWidth(m: *const Model) usize {
+        return m.graph.config.tapWidth();
+    }
+    pub fn failed(m: *const Model) bool {
+        return m.backend.failed;
+    }
+    /// No failure, no open frame or context transaction: a round may start.
+    pub fn idle(m: *const Model) bool {
+        return !m.backend.failed and !m.backend.frame.active and m.backend.transaction == null;
+    }
     pub fn propose(m: *Model, pending: u32, nodes: u32) !selector.Tree {
         return m.proposeOptions(pending, .{ .nodes = nodes });
     }
