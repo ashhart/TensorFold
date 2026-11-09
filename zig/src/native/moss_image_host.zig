@@ -267,7 +267,7 @@ pub const Host = struct {
                 _ = try h.model.forward(&j.prompt.?, j.x, schedule.timesteps[at], null, j.cond);
                 const by = schedule.sigmas[at + 1] - schedule.sigmas[at];
                 if (j.request.guidance == 1) {
-                    // guidance 1 is the prompt's own velocity: the negative pass would change nothing
+                    // guidance 1 skips the negative pass, so the step is cond * by, not uncond + 1*(cond - uncond)
                     for (j.x, j.cond) |*x, cond| x.* += cond * by;
                 } else {
                     _ = try h.model.forward(&j.negative.?, j.x, schedule.timesteps[at], negative_skip, j.uncond);
