@@ -27,6 +27,8 @@ pub const Weights = struct {
     head: Linear,
     owned: std.ArrayList(mtl.Buffer) = .empty,
     runs: std.ArrayList([]projection.Run) = .empty,
+    /// A stage's own layers [first, end); the others are `unowned` and hold no tensors. Null for the whole model.
+    stage: ?[2]usize = null,
 
     pub fn deinit(w: *Weights) void {
         for (w.owned.items) |b| b.deinit();
@@ -36,9 +38,15 @@ pub const Weights = struct {
         w.allocator.free(w.layers);
     }
 
-    /// Whether every MLP projection is 4-bit g64 in one matrix (the Neural Engine share's format).
+    /// The layers with tensors: a stage's own, or every layer.
+    pub fn mine(w: *const Weights) []const Layer {
+        const o = w.stage orelse return w.layers;
+        return w.layers[o[0]..o[1]];
+    }
+
+    /// Whether every MLP projection this rank holds is 4-bit g64 in one matrix (the Neural Engine share's format).
     pub fn uniformMlp(w: *const Weights) bool {
-        for (w.layers) |l| for ([_]Linear{ l.gu, l.down }) |p| if (!uniform(p)) return false;
+        for (w.mine()) |l| for ([_]Linear{ l.gu, l.down }) |p| if (!uniform(p)) return false;
         return true;
     }
 };
@@ -361,8 +369,8 @@ fn decayLog(t: Tensor, shape: []const usize) !Tensor {
     return checked(t, if (t.dtype == .f32) .f32 else .bf16, shape);
 }
 
-/// Graph from `checkpoint`; each Linear is staged, repacked, dropped. `s` is the rank's share, `local` from `global`.
-pub fn load(allocator: std.mem.Allocator, device: mtl.Device, checkpoint: *const cp.Checkpoint, s: *const cfg.Shard, ws: *const widths.Widths) !Weights {
+/// Graph from `checkpoint`, each Linear staged, repacked, dropped; `s` the rank's share; `owned_layers` a stage's only.
+pub fn load(allocator: std.mem.Allocator, device: mtl.Device, checkpoint: *const cp.Checkpoint, s: *const cfg.Shard, ws: *const widths.Widths, owned_layers: ?[2]usize) !Weights {
     const c = s.local;
     const g = s.global;
     const prefix: []const u8 = if (checkpoint.has("language_model.model.embed_tokens.weight")) "language_model." else if (checkpoint.has("model.embed_tokens.weight")) "" else return error.MissingTextNamespace;
@@ -382,12 +390,21 @@ pub fn load(allocator: std.mem.Allocator, device: mtl.Device, checkpoint: *const
     var stage = cp.Stage{ .device = device };
     defer stage.deinit();
     const b = Builder{ .allocator = allocator, .device = device, .checkpoint = checkpoint, .prefix = prefix, .owned = &owned, .stage = &stage, .runs = &runs, .widths = ws };
-    for (layers, 0..) |*l, i| l.* = try b.layer(s, i);
+    for (layers, 0..) |*l, i| l.* = if (owned_layers) |o| (if (i >= o[0] and i < o[1]) try b.layer(s, i) else unowned(c.kind(i))) else try b.layer(s, i);
     const embed = try b.quant("model.embed_tokens", g.vocab, g.hidden, ws.embed);
     const norm = try b.tensor("model.norm.weight", .bf16, &.{c.hidden});
     const head = try b.linear(&.{.{ .module = "lm_head", .n = g.vocab, .w = ws.head, .span = s.vocabRows() }}, g.hidden);
-    if (device.tensorUnits()) try laneOrder(allocator, device, layers, head);
-    return .{ .allocator = allocator, .layers = layers, .embed = embed, .norm = norm, .head = head, .owned = owned, .runs = runs };
+    const mine = if (owned_layers) |o| layers[o[0]..o[1]] else layers;
+    if (device.tensorUnits()) try laneOrder(allocator, device, mine, head);
+    return .{ .allocator = allocator, .layers = layers, .embed = embed, .norm = norm, .head = head, .owned = owned, .runs = runs, .stage = owned_layers };
+}
+
+/// Another stage's layer: no tensors, only the kind its mixer's caches and keeps are counted by.
+fn unowned(kind: @import("config.zig").Kind) Layer {
+    return .{ .norm = undefined, .post_norm = undefined, .gu = undefined, .down = undefined, .mixer = switch (kind) {
+        .linear => .{ .linear = undefined },
+        .attention => .{ .attention = undefined },
+    } };
 }
 
 /// Tensor-unit projections leave load in lane_projection.reg_layout, the order quant_gpu's reg kernel reads.
@@ -418,6 +435,22 @@ fn weightsOf(t: projection.Triple, n: usize, k: usize) row_gpu.Weights {
 
 pub fn ref(t: Tensor) Ref {
     return .{ .buffer = t.buffer, .offset = t.offset };
+}
+
+test "a stage's uniform MLP check reads only its own layers" {
+    const four: Linear = .{ .words = undefined, .pairs = undefined, .n = 64, .k = 64, .tile = 1, .slices = 1 };
+    var eight = four;
+    eight.bits = 8;
+    var layers = [_]Layer{ unowned(.linear), unowned(.attention) };
+    layers[0].gu = four;
+    layers[0].down = four;
+    layers[1].gu = eight;
+    layers[1].down = eight;
+    var w: Weights = .{ .allocator = std.testing.allocator, .layers = &layers, .embed = undefined, .norm = undefined, .head = undefined, .stage = .{ 0, 1 } };
+    try std.testing.expectEqual(@as(usize, 1), w.mine().len);
+    try std.testing.expect(w.uniformMlp());
+    w.stage = null;
+    try std.testing.expect(!w.uniformMlp());
 }
 
 test "repacked names the modules the graph reads only through owned copies" {
