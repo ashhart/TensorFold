@@ -555,6 +555,7 @@ pub fn request(a: Allocator, dir: []const u8, model_type: []const u8, args: Args
         .learn_daily_gib = args.learn_daily_gib,
         .spill = if (!spills(args)) .off else if (args.learn) .finish else .evicted,
         .slide = args.slide,
+        .slide_forget = args.slide and args.slide_forget,
         .recall = args.recall,
         .device = args.device,
         .segments = args.segments,

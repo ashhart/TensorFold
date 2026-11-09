@@ -11,10 +11,7 @@ pub fn chunk(b: *Metal, cache: *Cache, rows: usize) !void {
     for (b.m.weights.layers[0..b.m.config.layers], 0..) |l, i| switch (l) {
         .moe => |m| if (m.pocket) |p| {
             const acts = p.z.slice(f32, rows * p.used);
-            for (acts, 0..) |x, at| {
-                if (!@import("std").math.isFinite(x)) mask.complete = false;
-                if (usage.fires(x)) mask.bits[i] |= @as(u64, 1) << @intCast(at % p.used);
-            }
+            usage.products(&mask, i, p.used, acts);
         },
         else => {},
     };

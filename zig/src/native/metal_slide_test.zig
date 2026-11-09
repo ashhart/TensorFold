@@ -58,3 +58,10 @@ test "Metal learner: descriptor widths match Nemotron's existing mixed-width adm
     try std.testing.expectEqualStrings("backbone.embeddings", got.name);
     try std.testing.expectEqual(@as(u8, 8), got.quant.bits);
 }
+
+test "Metal learner: counting off exits before touching a device or an empty pocket" {
+    var b: nemo.backend.Metal = undefined;
+    b.usage_enabled = false;
+    var c: nemo.state.Cache = undefined;
+    try b.countUsage(&c, 16);
+}

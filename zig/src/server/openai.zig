@@ -252,7 +252,7 @@ pub fn runNamed(srv: *Server, a: Allocator, out: Out, gone: Gone, is_chat: bool,
     };
     var usage = @import("slide_usage_stream.zig").Scope.init(srv);
     defer usage.deinit();
-    if (srv.info.pocket_usage) p.input.usage = &usage;
+    if (srv.config.slide_forget and srv.info.pocket_usage) p.input.usage = &usage;
     p.input.id = id;
     const turn = cortheon.begin(srv, a, raw, id, is_chat, &p.input);
     var r: Run = .{ .srv = srv, .a = a, .out = out, .is_chat = is_chat, .plan = p, .id = id, .created = std.Io.Clock.real.now(srv.io).toSeconds(), .turn = turn, .call_ids = .{ .key = &srv.tool_ids, .body = raw } };
