@@ -232,7 +232,7 @@ pub fn learnModel(p: *anyopaque, dir: []const u8) slide.Model {
     return .{ .e = l.e, .dir = dir, .lay = slide.layout(l.e.g.hidden, l.e.g.layers, l.e.g.intermediate, 0) catch unreachable };
 }
 
-/// A checkpoint's facts: the dense 27B also copies from the root (DFlash2 raises its copy match, draft.copyMatch).
+/// A checkpoint's facts: the dense 27B also copies from the root (a drafter raises its copy match, draft.copyMatch).
 pub fn modelFacts(window: u32, verify: u32, g: anytype) lanes.Model {
     var facts = laneFacts(window, verify);
     facts.root_copies = @import("cuda_geometry.zig").dense27(g);
