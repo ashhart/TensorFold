@@ -13,6 +13,10 @@ A clean fake passes every gate. Each fault breaks one property the kit gates, an
 - cancel_health: a server a client left answers ``/health`` with an error.
 - evict: a chat turn pushed out of the prompt cache reports it (0 cached) but answers from the stale state.
 
+``running(..., warm=S)`` keeps the server busy (one running, more waiting) for ``S`` seconds after each reply, as a
+server that prefills the chat's next turn in the background; ``lanes_free=False`` leaves ``capacity.lanes_free`` out
+of ``GET /v1/load``, as a server without lanes.
+
 The cached server reports five cached tokens for a later chat turn (more than one message). It keeps the prompts it
 answered in an LRU of ``CAPACITY`` entries; a prompt pushed out reports 0 until it is asked again. ``GET /v1/load``,
 ``/metrics`` and ``/health`` show the lanes open streams hold, the disconnects counted and the server's health.
@@ -136,9 +140,9 @@ class FakeEngine(http.server.BaseHTTPRequestHandler):
         server = self.server
         if self.path == "/v1/load":
             with server.lock:
-                busy = server.streams + server.leaked
-            capacity = {"mode": "window", "lanes_free": LANES - busy - server.lost}
-            return self.reply(200, {"lanes": LANES, "running": busy, "waiting": 0,
+                busy, warming = server.streams + server.leaked, time.monotonic() < server.warm_until
+            capacity = {"mode": "window", "lanes_free": LANES - busy - server.lost} if server.lanes_free else {}
+            return self.reply(200, {"lanes": LANES, "running": busy + warming, "waiting": 19 * warming,
                                     "http_active": {"chat_completions": busy}, "capacity": capacity})
         if self.path == "/metrics":
             return self.reply(200, f"tensorfold:client_disconnections_total {server.disconnects}\n")
@@ -180,6 +184,8 @@ class FakeEngine(http.server.BaseHTTPRequestHandler):
             self.play(streamed(payload, body.get("max_tokens", 16), TOKEN_GAP), key)
         else:
             self.reply(200, payload)
+        with server.lock:
+            server.warm_until = time.monotonic() + server.warm
         time.sleep(server.linger)
 
     def lookup(self, messages):
@@ -260,12 +266,13 @@ class FakeEngine(http.server.BaseHTTPRequestHandler):
 
 
 @contextlib.contextmanager
-def running(cache=False, fault=None, linger=0.0, steps=None):
+def running(cache=False, fault=None, linger=0.0, steps=None, warm=0.0, lanes_free=True):
     """One fake on 127.0.0.1 port 0, yielding its base URL; stopped on exit."""
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FakeEngine)
     server.cache, server.fault, server.seen, server.inflight, server.linger = cache, fault, {}, 0, linger
     server.steps, server.kept, server.evicted, server.cut = steps, collections.OrderedDict(), set(), set()
     server.streams = server.leaked = server.lost = server.disconnects = 0
+    server.warm, server.warm_until, server.lanes_free = warm, 0.0, lanes_free
     server.lock = threading.Lock()
     server.cond = threading.Condition(server.lock)
     thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
@@ -279,12 +286,13 @@ def running(cache=False, fault=None, linger=0.0, steps=None):
 
 
 @contextlib.contextmanager
-def fake(cache, fault=None, linger=0.0):
+def fake(cache, fault=None, linger=0.0, **shape):
     """A running fake on 127.0.0.1 port 0, yielding its base URL; cache=False is the cache-off server."""
     # linger: seconds each handler stays alive after its reply, widening any window between reply and exit.
     if fault not in (None, *FAULTS):
         raise ValueError(f"unknown fault {fault}")
-    with running(cache, fault, linger) as url:
+    # shape: warm and lanes_free, see ``running``.
+    with running(cache, fault, linger, **shape) as url:
         yield url
 
 

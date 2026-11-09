@@ -9,6 +9,11 @@
   server's reply, resume fewer tokens than before, and leave the census as it was. Nothing cached before the fill
   fails as vacuous; the same cached count after it fails as not evicted.
 
+Each gate first waits for the server to go idle (no request running, queued or open), up to the block's ``settle_s``
+or else the profile's (default 60 s): a server that prefills a chat's next turn in the background after each reply
+needs longer. A server that does not go idle in time fails the gate; it is never compared against a busy census. The
+census holds only the fields the server reports (a server without ``capacity.lanes_free`` is compared without it).
+
 Each gate reads its block from the profile (``cancel``, ``evict``); a family without the capability names the gate
 under the profile's ``skip`` with a reason. ``--plant cancel`` asks the repeat after each cut with another seed;
 ``--plant evict`` sends no fill prompts, so nothing is evicted.
@@ -53,6 +58,17 @@ def unheld(pool: dict):
 def quiet(seen) -> bool:
     """No request running, queued or open."""
     return bool(seen) and not seen.get("running") and not seen.get("waiting") and not seen.get("active")
+
+
+def idle(client, seconds: float):
+    """The census once the server is idle, or None when it is not idle within ``seconds``."""
+    seen, held = settle(client, quiet, seconds)
+    return seen if held else None
+
+
+def wait_s(plan, spec: dict) -> float:
+    """Seconds a gate waits for the server to settle: its block's, else the profile's, else 60."""
+    return spec.get("settle_s", plan.profile.get("settle_s", 60))
 
 
 def settle(client, until, seconds: float):
@@ -121,7 +137,7 @@ def cancel_gate(pairs, cuts, settled, health, counted, base) -> dict:
     clean = sum(c["chunks"] > 0 and not c["ended"] and not c.get("error") for c in cuts)
     problems = []
     if base is None:
-        problems.append("no idle census from GET /v1/load")
+        problems.append("no idle census from GET /v1/load (busy past settle_s)")
     if clean < len(cuts):
         problems.append(f"{len(cuts) - clean} cuts came after the reply ended or failed (vacuous)")
     if counted != len(cuts):
@@ -144,10 +160,10 @@ def cancel(runner, _fresh=None) -> dict:
     spec, plan, client = runner.plan.profile.get("cancel") or {}, runner.plan, runner.client
     if "prompt" not in spec:
         return missing("cancel")
-    wait = spec.get("settle_s", 60)
+    wait = wait_s(plan, spec)
     bodies = {m: {**plan.ask(spec["prompt"], m, True), "max_tokens": spec.get("tokens", 256)} for m in plan.modes}
     solos = {m: runner.record("cancel-solo", (m,), client.post(b)) for m, b in bodies.items()}
-    base, _ = settle(client, quiet, wait)
+    base = idle(client, wait)
     before = disconnects(client)
     pairs, cuts, settled, health = [], [], [], []
     for mode, body in bodies.items():
@@ -184,7 +200,7 @@ def evict_gate(fresh, warm, again, fills, held, base) -> dict:
     if failed:
         problems.append(f"fill prompts {failed} failed")
     if base is None:
-        problems.append("no idle census from GET /v1/load")
+        problems.append("no idle census from GET /v1/load (busy past settle_s)")
     elif not held:
         problems.append(f"census did not return to {base} (a lane or page held)")
     passed = counts["unequal"] == 0 and counts["unverified"] == 0 and not problems
@@ -204,8 +220,8 @@ def evict(runner, fresh) -> dict:
     if fresh is None:
         return {"gate": "evict", "passed": False, "counts": {}, "line": "no cache-off server (pass --fresh-url or "
                                                                            "--binary)"}
-    wait = spec.get("settle_s", 60)
-    base, _ = settle(client, quiet, wait)
+    wait = wait_s(plan, spec)
+    base = idle(client, wait)
     body = plan.body(last_turn(plan, fresh["greedy"]), "greedy", True, ignore_eos=False)
     warm = [runner.record("evict-kept", (i,), client.post(body)) for i in range(2)]
     fills = []

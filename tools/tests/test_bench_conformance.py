@@ -137,26 +137,27 @@ class GateRunTests(unittest.TestCase):
              "cancel_lane": "cancel", "cancel_free": "cancel", "cancel_reply": "cancel", "cancel_health": "cancel"}
     GATE_OF = {fault: name.split()[0] for fault, name in NAMES.items() if fault in FAULTS}  # the gate a fault turns red
 
-    def run_kit(self, *extra, fault=None, **changes):
+    def run_kit(self, *extra, fault=None, shape=None, **changes):
         profile = json.loads(PROFILE.read_text())
         for block in ("cancel", "evict"):
             profile[block]["settle_s"] = 1  # a held lane fails in a second, not a minute
         profile.update(changes)
         out = io.StringIO()
-        with tempfile.TemporaryDirectory() as tmp, fake(True, fault) as url, fake(False) as fresh, \
+        with tempfile.TemporaryDirectory() as tmp, fake(True, fault, **(shape or {})) as url, fake(False) as fresh, \
                 contextlib.redirect_stdout(out):
             path = Path(tmp) / "profile.json"
             path.write_text(json.dumps(profile))
             code = conformance.main([str(path), "--url", url, "--fresh-url", fresh, *extra])
         return code, [line for line in out.getvalue().splitlines() if line.startswith(("PASS", "FAIL", "SKIP"))]
 
-    def assert_only_red(self, fault):
+    def assert_only_red(self, fault, also=()):
         code, lines = self.run_kit(fault=fault)
         self.assertEqual(code, 1, lines)
         self.assertEqual(len(lines), len(conformance.GATES), lines)
         red = [line for line in lines if line.startswith("FAIL")]
-        self.assertEqual(len(red), 1, lines)
+        self.assertEqual(len(red), 1 + len(also), lines)
         self.assertTrue(red[0].startswith("FAIL " + self.NAMES[fault]), lines)
+        self.assertEqual([line.split(":")[0] for line in red[1:]], ["FAIL " + g for g in also], lines)
 
     def test_clean_fake_passes_every_gate(self):
         code, lines = self.run_kit()
@@ -180,7 +181,8 @@ class GateRunTests(unittest.TestCase):
         self.assert_only_red("refusals")
 
     def test_fault_cancel_keeps_a_lane(self):
-        self.assert_only_red("cancel_lane")
+        # A request left running keeps the server from ever going idle, so evict has no idle census either.
+        self.assert_only_red("cancel_lane", also=("evict",))
 
     def test_fault_cancel_loses_only_a_free_lane(self):
         self.assert_only_red("cancel_free")
@@ -219,6 +221,20 @@ class GateRunTests(unittest.TestCase):
         code, lines = self.run_kit("--gates", "cancel", cancel=short)
         self.assertEqual(code, 1, lines)
         self.assertIn("2 cuts came after the reply ended or failed (vacuous)", lines[0])  # one a sampling mode
+
+    def test_a_server_busy_after_each_reply_and_without_lanes_free_settles_first(self):
+        # Like Metal qwen27: no capacity.lanes_free, and each reply is followed by a background prefill of the next turn.
+        profile = json.loads(PROFILE.read_text())
+        blocks = {b: {k: v for k, v in profile[b].items() if k != "settle_s"} for b in ("cancel", "evict")}
+        shape = {"warm": 0.4, "lanes_free": False}
+        code, lines = self.run_kit("--gates", "cancel,evict", shape=shape, settle_s=5, **blocks)
+        self.assertEqual(code, 0, lines)
+        self.assertTrue(all(line.startswith("PASS") for line in lines), lines)
+        self.assertIn("censuses back to {'running': 0, 'waiting': 0, 'active': 0}", lines[0])
+        code, lines = self.run_kit("--gates", "cancel,evict", shape=shape, settle_s=0.1, **blocks)
+        self.assertEqual(code, 1, lines)
+        self.assertTrue(all(line.startswith("FAIL") for line in lines), lines)
+        self.assertIn("no idle census from GET /v1/load (busy past settle_s)", lines[0])
 
     def test_each_plant_flag_turns_its_gate_red(self):
         for gate in conformance.GATES:
