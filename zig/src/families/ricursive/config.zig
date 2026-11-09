@@ -15,6 +15,7 @@ pub const Error = error{
     UnsupportedRicursiveGeometry,
     UnsupportedRicursiveRotary,
     UnsupportedRicursivePrecision,
+    UnmeasuredRicursiveBitrate,
     UnqualifiedRicursiveCheckpoint,
 } || std.json.ParseError(std.json.Scanner);
 
@@ -61,10 +62,17 @@ pub const Config = struct {
     fp4_mlp: bool = false,
     /// An ExLlamaV3 pack (quant_method exl3): every projection and the head as EXL3 trellises, the rest bf16.
     exl3: bool = false,
+    /// An EXL3 pack's projection bits, 5 or 6 (the head at 8): the bitrates measured against ExLlamaV3.
+    exl3_bits: u8 = 0,
     /// A global layer: full attention without RoPE; the others slide with RoPE.
     global: [max_layers]bool = @splat(false),
     eos: [max_eos]u32 = @splat(0),
     eos_count: usize = 0,
+
+    /// Metal serves the bf16 and NVFP4 releases only: an EXL3 pack is refused by name, as other quantizations are.
+    pub fn metal(c: *const Config) Error!void {
+        if (c.exl3) return error.UnsupportedRicursivePrecision;
+    }
 
     pub fn read(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !Config {
         const path = try std.fs.path.join(gpa, &.{ dir, "config.json" });
@@ -197,9 +205,13 @@ fn layerKinds(root: std.json.ObjectMap, c: *Config) Error!void {
     }
 }
 
-/// An ExLlamaV3 pack's quantization_config: quant_method exl3 (its tensors are checked as they load).
-fn exl3Pack(q: std.json.Value) bool {
-    return q == .object and isString(q.object.get("quant_method"), "exl3");
+/// An ExLlamaV3 pack's projection bits (null: not quant_method exl3); only 5.0 and 6.0 with an 8-bit head are measured.
+fn exl3Bits(q: std.json.Value) Error!?u8 {
+    if (q != .object or !isString(q.object.get("quant_method"), "exl3")) return null;
+    const bits = number(q.object.get("bits") orelse return error.UnmeasuredRicursiveBitrate) catch return error.UnmeasuredRicursiveBitrate;
+    const head = number(q.object.get("head_bits") orelse return error.UnmeasuredRicursiveBitrate) catch return error.UnmeasuredRicursiveBitrate;
+    if ((bits != 5 and bits != 6) or head != 8) return error.UnmeasuredRicursiveBitrate;
+    return @intFromFloat(bits);
 }
 
 /// ModelOpt NVFP4, groups of 16, no cache scheme, ignoring exactly the embeddings, head and every layer's attention.
@@ -265,7 +277,10 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) Error!Config {
         .context = 0,
     };
     if (root.get("quantization_config")) |q| {
-        if (exl3Pack(q)) c.exl3 = true else c.fp4_mlp = try nvfp4Mlp(q, c.layers);
+        if (try exl3Bits(q)) |bits| {
+            c.exl3 = true;
+            c.exl3_bits = bits;
+        } else c.fp4_mlp = try nvfp4Mlp(q, c.layers);
     }
     if (try size(root, "head_dim") != head_dim) return error.UnsupportedRicursiveGeometry;
     if (c.layers > max_layers or c.heads % c.kv_heads != 0 or c.group() > max_group) return error.UnsupportedRicursiveGeometry;
@@ -352,8 +367,21 @@ test "ricursive config: an EXL3 pack is admitted as exl3, not as NVFP4" {
     const bytes = try std.mem.replaceOwned(u8, gpa, fixture, "\"model_type\": \"ricursive\"", q);
     defer gpa.free(bytes);
     const c = try parse(gpa, bytes);
-    try std.testing.expect(c.exl3 and !c.fp4_mlp);
+    try std.testing.expect(c.exl3 and !c.fp4_mlp and c.exl3_bits == 5);
     try std.testing.expectEqualStrings("Ripple-65B-Preview", (try c.qualification()).name);
+    try std.testing.expectError(error.UnsupportedRicursivePrecision, c.metal());
+    try (try parse(gpa, fixture)).metal();
+}
+
+test "ricursive config: an EXL3 pack at a bitrate never measured is refused by name" {
+    const gpa = std.testing.allocator;
+    for ([_][]const u8{ "6.0, \"head_bits\": 8", "4.0, \"head_bits\": 8", "5.5, \"head_bits\": 8", "5.0, \"head_bits\": 6", "5.0" }, 0..) |q, i| {
+        const what = try std.fmt.allocPrint(gpa, "\"model_type\": \"ricursive\", \"quantization_config\": {{\"quant_method\": \"exl3\", \"bits\": {s}}}", .{q});
+        defer gpa.free(what);
+        const bytes = try std.mem.replaceOwned(u8, gpa, fixture, "\"model_type\": \"ricursive\"", what);
+        defer gpa.free(bytes);
+        if (i == 0) try std.testing.expectEqual(@as(u8, 6), (try parse(gpa, bytes)).exl3_bits) else try std.testing.expectError(error.UnmeasuredRicursiveBitrate, parse(gpa, bytes));
+    }
 }
 
 test "ricursive config: another layer pattern with the release's geometry is not qualified" {
