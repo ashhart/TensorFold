@@ -118,10 +118,10 @@ With `--drafter`, 256 tokens, median of 3 (code is a raw text completion, prose 
 
 | reply | 1 stream, plain | 1 stream, drafted | 8 streams, plain | 8 streams, drafted |
 |---|---:|---:|---:|---:|
-| code, greedy | 5.2 | 26.1 | 37.5 | 49.5 |
-| code, sampled (T=1.0) | 4.5 | 18.4 | 30.4 | 42.8 |
-| prose, greedy | 4.4 | 10.0 | 32.6 | 40.3 |
-| prose, sampled (T=1.0) | 4.0 | 11.2 | 30.4 | 35.2 |
+| code, greedy | 5.2 | 26.1 | 37.5 | 124.3 |
+| code, sampled (T=1.0) | 4.5 | 18.4 | 30.4 | 72.5 |
+| prose, greedy | 4.4 | 10.0 | 32.5 | 58.5 |
+| prose, sampled (T=1.0) | 4.0 | 11.2 | 30.4 | 42.7 |
 
 At `--context 131072` admission gives four streams of 8.78 GiB and a 7.1 GiB prompt cache. Cold prompts there
 (`tools/bench_cache.py --require-cold`), time to first token: 3.76 s at 2,048 tokens (545 tok/s), 15.6 s at 8,192
