@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Sampling: Qwen 3.5's host draw over a bf16 logits row (a reply's first token and every grammar-masked row on CUDA, every draw on Metal) moves unchanged into `core/lanes` as `sampling_row`, the first step to one sampler; token ids equal main's on 64 of 64 greedy, sampled and JSON-schema requests (#2606, part of #2460). Thanks to @jschmied.
+
 - Internal: GLM's CUDA SwiGLU rows move into their own header (`glm_swiglu.cuh`) with a template for the clip after silu that Ling will use; GLM's machine code is the same on all five SMs (#2627, part of #850). Thanks to @ajensenwaud.
 
 - KV pool: a pool's stores join an ordered chain of reclaim hooks, asked in join order until enough pages are free, and one lane host counts a pool, a second refused; every load keeps its one store and its calls, so nothing changes yet (#2528, part of #2444). Thanks to @jschmied.
@@ -48,7 +50,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - CI: the nightly Linux host job now runs `test-pdf-worker`, which spawns the PDF render worker from a Linux `tensorfold-native` so its `/proc/self/statm` memory cap and `close_range` run on Linux, and the new `test-cache-fit-host`, so the prompt-cache budget's no-footprint branch runs at all; both steps were only built into the macOS Metal graph before (#2599).
 
-- Sampling: Qwen 3.5's host draw over a bf16 logits row (a reply's first token and every grammar-masked row on CUDA, every draw on Metal) moves unchanged into `core/lanes` as `sampling_row`, the first step to one sampler; token ids equal main's on 64 of 64 greedy, sampled and JSON-schema requests (#2606, part of #2460). Thanks to @jschmied.
 - CI: the root `pytest` run has its own job beside `zig` instead of being its last step, so a pull request no longer waits about five minutes for it after its tests (#2586).
 
 - CI: the nightly Linux host job gains a `deepseek` shard that runs `test-dsv41-device-host` and `test-dsv41-forward`, so their Linux-only tests (a forked child's fail-fast exit and the model's fatal callback without an NCCL abort) run on Linux; Linux CI only compiled these steps before, and macOS skips those tests (#2598).
