@@ -5,7 +5,7 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, glm: *std.Build.Module, mod
     // GLM CUDA's startup watcher (named phases, a warning while NCCL init or a load blocks), from cuda.zig's room
     b.step("test-startup-watch-host", "Blocked startup phase warnings without a driver or communicator").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cuda, .filters = &.{"startup watcher:"} })).step);
     const host = b.graph.host;
-    inline for (.{ .{ "test-glm-link-transport-host", "zig/glm_link_transport_host.zig" }, .{ "test-glm-kv-uncached-host", "zig/glm_kv_uncached_host.zig" } }) |entry| {
+    inline for (.{ .{ "test-glm-link-transport-host", "zig/glm_link_transport_host.zig" }, .{ "test-glm-kv-uncached-host", "zig/glm_kv_uncached_host.zig" }, .{ "test-glm-lane-costs-host", "zig/glm_lane_costs_host.zig" } }) |entry| {
         const checks = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
             .root_source_file = b.path(entry[1]),
             .target = host,
@@ -13,7 +13,7 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, glm: *std.Build.Module, mod
             .link_libc = true,
             .imports = &.{ .{ .name = "glm", .module = glm }, .{ .name = "cuda", .module = cuda } },
         }) }));
-        b.step(entry[0], "GLM transport and uncached KV ordering through recording device calls").dependOn(&checks.step);
+        b.step(entry[0], "GLM startup prices, transport and uncached KV through recording calls").dependOn(&checks.step);
         step.dependOn(&checks.step);
     }
     b.step("test-glm-relay-host", "GLM relay options before device setup").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM relay integration:"} })).step);

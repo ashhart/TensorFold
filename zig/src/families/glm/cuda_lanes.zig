@@ -34,7 +34,7 @@ pub const Lanes = struct {
     alone: bool = false, // each window in its own forward (TF_GLM_SHARED=0)
     mtp_confidence: ?f64 = null, // --mtp-confidence: the MTP head's chains stop where their chance falls under it
     copy_confidence: bool = false, // copy mode keeps head confidence in probabilities so target copies stay priced
-    costs: ?lane_costs.Table = null, // this machine's window and draft prices, timed at load (cuda_lane_costs)
+    costs: ?lane_costs.Table = null, // MTP's window and draft prices, timed at load (cuda_lane_costs)
     shared: u64 = 0, // forwards that held several streams' windows (checks read it)
     lanes: std.AutoHashMapUnmanaged(*const lanes.Stream, Lane) = .empty,
     drawn: [ring]u32 = undefined,
@@ -97,6 +97,7 @@ pub const Lanes = struct {
     pub fn facts(self: *const Lanes) lanes.Model {
         const drafting = self.x.e.mtp;
         const block = self.x.e.drafter != null;
+        const costs = if (block) null else if (self.costs) |*c| c else null;
         const sharing = drafting and !self.alone;
         return .{
             .allocate_shared_drafts = drafting,
@@ -108,13 +109,13 @@ pub const Lanes = struct {
             .speculate_early = false,
             .drafts = if (block) max_held else engine.max_drafts,
             .draft_streams = block, // one block pass drafts every stream of the round
-            .mtp_step_ms = if (self.costs) |c| c.step_ms else if (block) 1.6 / @as(f64, max_held) else 0, // a block's 7 drafts in one pass (about 1.6 ms)
-            .shared_step_ms = if (self.costs == null) null else if (block) 1.6 / @as(f64, max_held) else 0,
+            .mtp_step_ms = if (costs) |c| c.step_ms else if (block) 1.6 / @as(f64, max_held) else 0, // a block's seven drafts share one pass
+            .shared_step_ms = if (costs == null) null else 0,
             .draft_probabilities = block or self.mtp_confidence != null, // chances size each window (DFlash2's by the costs)
             .draft_confidence = if (block) null else self.mtp_confidence,
-            .window_costs = if (self.costs) |*c| &c.window else if (block) &copy_policy.window_costs else &.{},
+            .window_costs = if (costs) |c| &c.window else if (block) &copy_policy.window_costs else &.{},
             .shared_costs = if (block) &copy_policy.shared_costs else &.{}, // DFlash2's shared rounds keep main's prices
-            .window_costs_lone = self.costs != null, // timed windows are one stream's: shared rounds keep the rule they had
+            .window_costs_lone = costs != null, // timed windows are one stream's: shared rounds keep the rule they had
             .shared_drafts = if (block) 0 else shared_head_drafts,
             .hidden_rows = sharing,
             .batch_rows = if (sharing) engine.shared_rows else 0,
@@ -125,7 +126,7 @@ pub const Lanes = struct {
     /// Root/context copies use the same verify/keep path and shared cost allocator as every target window.
     pub fn factsWithCopies(self: *Lanes, enabled: bool) lanes.Model {
         self.copy_confidence = enabled and self.x.e.mtp;
-        return copy_policy.apply(self.facts(), enabled, self.costs != null);
+        return copy_policy.apply(self.facts(), enabled, self.x.e.drafter == null and self.costs != null);
     }
 
     fn of(ptr: *anyopaque) *Lanes {
