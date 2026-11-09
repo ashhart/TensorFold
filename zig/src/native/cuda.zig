@@ -414,6 +414,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     };
     errdefer if (h.prompts) |x| x.close();
     var conversations = false;
+    var usage_supported = false;
     if (@hasDecl(F, "slide")) if (loaded.learns != null) {
         const Slide = slide_adapter.Adapter(F.slide);
         h.dir = try gpa.dupe(u8, o.dir);
@@ -429,6 +430,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         }.f;
         h.learn = s.hook();
         conversations = s.learner.readsConversations();
+        usage_supported = (if (@hasField(@TypeOf(loaded), "pocket_usage")) loaded.pocket_usage else false) and slide_adapter.pocketUsage(s.learner);
     };
     errdefer if (h.slide) |s| {
         h.slide_free.?(gpa, s);
@@ -468,6 +470,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         .vision = if (@hasField(@TypeOf(loaded), "vision")) vision_offer.offer(loaded.vision, o.vision) else null,
         .admit = admit,
         .ledger = @import("cuda_ledger.zig").info(if (h.kv_plan) |*p| p else null),
+        .pocket_usage = usage_supported,
         .slide_conversations = conversations,
         .readouts = readouts,
         .text_generation = readouts == null, // a readout engine answers its readouts only (Clef's /v1/systemone)

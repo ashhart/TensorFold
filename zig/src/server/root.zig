@@ -298,3 +298,15 @@ test {
     _ = @import("ocr/size_test.zig");
     _ = @import("ocr/prompt_ids_test.zig");
 }
+
+test {
+    _ = @import("slide_policy_test.zig");
+}
+
+test {
+    _ = @import("slide_pin_cli.zig");
+}
+
+test {
+    _ = @import("slide_usage_live_test.zig");
+}

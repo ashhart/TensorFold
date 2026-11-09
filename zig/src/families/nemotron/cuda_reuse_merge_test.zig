@@ -37,6 +37,7 @@ pub fn Cases(comptime Engine: type, comptime Target: type, comptime config: anyt
             var d: cuda.Driver = undefined;
             d.api.cuMemcpyDtoHAsync_v2 = download;
             var e: Engine = undefined;
+            e.usage = null;
             e.c = config();
             e.c.layers = 2;
             e.c.kinds[0..2].* = .{ .attention, .attention };
@@ -80,6 +81,7 @@ pub fn Cases(comptime Engine: type, comptime Target: type, comptime config: anyt
             var ctx: cuda.Context = undefined;
             ctx.d = &d;
             var e: Engine = undefined;
+            e.usage = null;
             e.gpa = t.allocator;
             e.ctx = &ctx;
             e.stream = .{ .d = &d, .handle = null };
@@ -120,6 +122,7 @@ pub fn Cases(comptime Engine: type, comptime Target: type, comptime config: anyt
             var ctx: cuda.Context = undefined;
             ctx.d = &d;
             var e: Engine = undefined;
+            e.usage = null;
             e.gpa = t.allocator;
             e.ctx = &ctx;
             e.stream = .{ .d = &d, .handle = null };
@@ -155,6 +158,7 @@ pub fn Cases(comptime Engine: type, comptime Target: type, comptime config: anyt
             var ctx: cuda.Context = undefined;
             ctx.d = &d;
             var e: Engine = undefined;
+            e.usage = null;
             e.gpa = t.allocator;
             e.ctx = &ctx;
             e.stream = .{ .d = &d, .handle = null };
