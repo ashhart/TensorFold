@@ -38,10 +38,11 @@ test "flag deps: flags the build does not serve are refused with the Python engi
     try std.testing.expectEqualStrings("--kv-dtype " ++ pointer, u.message);
     try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--no-prefill-fp8" }, &u));
     try std.testing.expectEqualStrings("--no-prefill-fp8 " ++ pointer, u.message);
-    if (@import("builtin").os.tag == .macos) {
-        try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--backend", "cuda" }, &u));
-        try std.testing.expectEqualStrings("--backend cuda " ++ gated, u.message);
-    }
+    const macos = @import("builtin").os.tag == .macos;
+    const native = if (macos) "mlx" else "cuda";
+    const other = if (macos) "cuda" else "mlx";
+    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--backend", other }, &u));
+    try std.testing.expectEqualStrings("--backend " ++ other ++ " " ++ gated, u.message);
     try std.testing.expectEqualStrings("auto", (try parse(a, &.{ "m", "--backend", "auto" }, &u)).backend);
-    try std.testing.expectEqualStrings("mlx", (try parse(a, &.{ "m", "--backend", "mlx" }, &u)).backend);
+    try std.testing.expectEqualStrings(native, (try parse(a, &.{ "m", "--backend", native }, &u)).backend);
 }

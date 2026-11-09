@@ -29,6 +29,8 @@ pub fn steps(b: *std.Build, draft_ids: *std.Build.Module, all: *std.Build.Step) 
         .imports = &.{
             .{ .name = "cuda", .module = cuda },
             .{ .name = "heat", .module = mods.heat },
+            .{ .name = "core", .module = mods.core },
+            .{ .name = "canon", .module = @import("cuda_engines.zig").canonModule(b, host, .debug) },
         },
     });
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm_test })).step);
