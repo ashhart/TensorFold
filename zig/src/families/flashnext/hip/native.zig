@@ -18,6 +18,8 @@ pub const formats: []const []const u8 = &.{ "mlx-q3g32", "mlx-q4g32", "mlx-q6g32
 pub const default_context: i64 = 32768;
 /// The engine cuts prompts itself.
 pub const prefill_step: u32 = 0;
+/// The MTP floor Flash Next's draft chains use on HIP unless `--mtp-confidence` says otherwise.
+pub const mtp_confidence_default: f64 = 0.8;
 /// Device bytes a rank keeps for the forward's scratch until the engine counts its own.
 pub const scratch_bytes: u64 = 2 << 30;
 
