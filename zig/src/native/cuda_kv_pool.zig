@@ -151,17 +151,24 @@ fn fits(comptime F: type, loaded: anytype, o: api.Open, room: u64, window: u64, 
     return room -| stream_bytes * (n -| loaded.free_streams) >= want;
 }
 
-/// What the startup plan pays for: `room`, --parallel's streams, the cache (16 GiB unless --prompt-cache-gib says).
-pub fn budgetOf(comptime F: type, room: u64, o: api.Open, window: u64, host_mode: bool, engine_paged: bool, kept_ppm: u32, slots: ?usize) kv_pool.Budget {
+/// Plan streams first, then half their remaining room with a 16 GiB floor, unless the cache was explicit.
+pub fn budgetOf(comptime F: type, l: kv_pool.Layout, room: u64, o: api.Open, window: u64, host_mode: bool, engine_paged: bool, kept_ppm: u32, slots: ?usize) kv_pool.Budget {
     const rows: u64 = if (comptime @hasDecl(F, "window_rows")) F.window_rows else 0;
     const want = if (host_mode) 0 else budget.cacheBytes(o.prompt_cache_gib, std.math.maxInt(u64), 0);
-    return .{ .room = room, .engine = 0, .lanes = o.lanes, .fixed = o.lanes_fixed, .cache = want, .snaps = slots orelse named(o), .window = window + rows, .engine_paged = engine_paged, .kept_ppm = if (host_mode) 0 else kept_ppm, .slots_only = slots != null, .asked = o.prompt_cache_gib != null };
+    var out: kv_pool.Budget = .{ .room = room, .engine = 0, .lanes = o.lanes, .fixed = o.lanes_fixed, .cache = want, .snaps = slots orelse named(o), .window = window + rows, .engine_paged = engine_paged, .kept_ppm = if (host_mode) 0 else kept_ppm, .slots_only = slots != null, .asked = o.prompt_cache_gib != null };
+    if (out.asked or host_mode) return out;
+    var probe = out;
+    probe.cache = std.math.maxInt(u64);
+    const all = kv_pool.plan(l, probe) catch return out;
+    const left = all.snaps * l.snap_bytes + all.copied + all.kept;
+    out.cache = budget.cacheBytes(null, left, 0);
+    return out;
 }
 
 /// The pool beside the engine's own sequence (in `model`: a window, or on pages its fixed part); null: see `problem`.
 pub fn plan(comptime F: type, a: Allocator, l: kv_pool.Layout, room: u64, o: api.Open, window: u64, problem: *[]const u8, host_mode: bool, engine_paged: bool, kept_ppm: u32, slots: ?usize) !?Plan {
     const rows: u64 = if (comptime @hasDecl(F, "window_rows")) F.window_rows else 0;
-    return kv_pool.plan(l, budgetOf(F, room, o, window, host_mode, engine_paged, kept_ppm, slots)) catch |e| {
+    return kv_pool.plan(l, budgetOf(F, l, room, o, window, host_mode, engine_paged, kept_ppm, slots)) catch |e| {
         problem.* = switch (e) {
             error.NoStream => if (engine_paged) try std.fmt.allocPrint(a, "the CUDA memory budget fits no stream beside the model: one at a {d}-token window takes {d:.2} GiB of KV pages, and the budget leaves {d:.2} GiB", .{ window, toGib(l.pages(window + rows) * l.pageBytes()), toGib(room) }) else "the CUDA memory budget fits no stream beside the model",
             error.TooMany => try std.fmt.allocPrint(a, "--parallel {d} needs {d:.2} GiB for its other streams' fixed parts, state runs and a page each, and the CUDA memory budget leaves {d:.2} GiB: serve fewer, or free device memory", .{ o.lanes, toGib((o.lanes - 1) * (l.fixed_bytes + (1 + l.runPages()) * l.pageBytes())), toGib(room) }),
@@ -467,4 +474,21 @@ test "KV admission: a refusal prices the running states beside the fixed part an
     try std.testing.expectEqual(@as(?Plan, null), try plan(struct {}, arena.allocator(), l, 2 << 30, o, 8, &problem, false, false, 0, null));
     try std.testing.expect(std.mem.indexOf(u8, problem, "needs 3.00 GiB") != null);
     try std.testing.expect(std.mem.indexOf(u8, problem, "state runs") != null);
+}
+
+test "CUDA cache default scales pool copies after full stream windows without cutting lanes" {
+    const GiB: u64 = 1 << 30;
+    const F = struct {};
+    const l: kv_pool.Layout = .{ .fixed_bytes = 0, .token_bytes = 1 << 20, .page_tokens = 1, .snap_bytes = 0 };
+    const o: api.Open = .{ .dir = "model", .model_type = "qwen3_5", .lanes = 8 };
+    const b = budgetOf(F, l, 88 * GiB, o, 6144, false, true, 0, null);
+    const p = try kv_pool.plan(l, b);
+    try std.testing.expectEqual(@as(u32, 8), p.lanes);
+    try std.testing.expectEqual(@as(u64, 20 * GiB), b.cache);
+    try std.testing.expectEqual(@as(u64, 20 * GiB), p.copied);
+    var explicit = o;
+    explicit.prompt_cache_gib = 8;
+    try std.testing.expectEqual(@as(u64, 8 * GiB), budgetOf(F, l, 88 * GiB, explicit, 6144, false, true, 0, null).cache);
+    explicit.prompt_cache_gib = 0;
+    try std.testing.expectEqual(@as(u64, 0), budgetOf(F, l, 88 * GiB, explicit, 6144, false, true, 0, null).cache);
 }

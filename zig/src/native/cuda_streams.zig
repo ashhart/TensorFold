@@ -55,7 +55,7 @@ pub fn count(comptime F: type, a: Allocator, loaded: anytype, o: api.Open, b: Bu
     if (wrapped.layout) |l| {
         const slots = try shareSlots(b.share, l.snap_bytes, b.host_cache); // GLM: a slot a state
         const paged = try kv_pages.plan(F, a, l, wrapped.room, o, @intCast(b.window), problem, b.host_cache, kv_pages.enginePaged(loaded), keptPpm(F, b.share), slots) orelse return null;
-        const planned = kv_pages.budgetOf(F, wrapped.room, o, @intCast(b.window), b.host_cache, kv_pages.enginePaged(loaded), keptPpm(F, b.share), slots);
+        const planned = kv_pages.budgetOf(F, l, wrapped.room, o, @intCast(b.window), b.host_cache, kv_pages.enginePaged(loaded), keptPpm(F, b.share), slots);
         return .{ .streams = paged.lanes, .paged = paged, .layout = l, .slots = slots, .planned = if (slots != null) planned else null };
     }
     // --parallel caps the streams; each request reserves its own bytes (a family that allocates per request)
