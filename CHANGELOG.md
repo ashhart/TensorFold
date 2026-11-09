@@ -6,6 +6,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Persisted prompt states (the prompt cache's disk tier and `--learn-conversations`): every family that saves states to disk now keys them by what its loaded run actually computed with, not only the flags as set: resolved arithmetic and kernel choices, every indexed weight shard (subfolders included), and external loaded inputs such as the CUDA Qwen rotary table, a Flash Next pack outside its folder, Flash Next on CUDA's chunk heights and kernel forms, and Nemotron's precision, expert ranks, ModelOpt lane and captured attention variant. A state computed differently now misses instead of resuming, and a resumed state still equals a fresh one. Upgrading starts every kept state once cold, and so does changing a GLM or Qwen Metal prompt chunk height. `GLM_EHPROJ_NAX` now takes only `0` or `1`; other text, which used to read as on, is refused at start (#2287, part of #2131).
 
+
+
 - Docs: a reply that quotes a template marker can finish with `ignore_eos` and a stop list for the model's end-of-text and next-turn-open spellings, then a strip of the trailing turn marker; measured on two Qwen checkpoints on a GB10, with the agent-shaped runs reported in #2399 (#2437, refs #2399). Thanks to @javierbits and @robertung88.
 - Conformance: the cancel and evict gates check that a cut reply and an evicted prompt leave the server as a fresh one, with a planted fault for each; the Qwen3.8-27B Metal profile skips evict with its measured reason, and the CUDA profiles run both (#2611). Thanks to @jschmied.
 
