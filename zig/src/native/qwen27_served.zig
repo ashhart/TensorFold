@@ -301,9 +301,9 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocato
     };
     const model = try q.model.Model.loadDeferred(gpa, io, dir, 128);
     errdefer model.deinit();
-    if ((o.mtp_drafts orelse 0) > 0 and model.device.tensorUnits()) {
-        why.* = "--mtp-drafts: the MTP head drafts on Macs without tensor units (M1 to M4); an M5 serves Qwen3.8-27B with DFlash2 or plain rounds";
-        return error.MtpOnTensorUnits;
+    if (@import("qwen27_mtp_flags.zig").deviceRefusal(o.mtp_drafts, model.device.tensorUnits(), q.decode_round.pagesOn())) |r| {
+        why.* = r.why;
+        return r.err;
     }
     if ((o.mtp_drafts orelse 0) > 0) model.loadMtp(io, dir) catch |err| {
         if (err == error.MissingMtpFile) why.* = try std.fmt.allocPrint(a, "--mtp-drafts: Qwen3.8-27B's MTP head is read from {s} beside the checkpoint, and {s} has none", .{ q.gpu_weights.mtp_file, dir });
