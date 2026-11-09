@@ -1,4 +1,4 @@
-//! Ripple's DFlash2 drafter: its config, its BF16 weights on rank 0's device, ricursive_draft.cu's launches.
+//! Ripple's DFlash2 drafter: its config, its BF16 weights cut over both ranks, ricursive_tp2_draft.cu's launches.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -144,7 +144,6 @@ pub const Weights = struct {
     /// A [n, k] matrix's share at `cut`: its output rows (.rows) or its input columns (.columns) [lo, hi) for the rank.
     fn part(w: *Weights, d: *const cuda.Driver, ck: *core.Checkpoint, key: []const u8, n: usize, k: usize, side: enum { rows, columns }, cut: Cut) !u64 {
         const t = try ck.expect(key, .bf16, &.{ n, k });
-        if (cut.world == 1) return w.up(d, t.bytes);
         if (side == .rows) {
             const per = n / cut.world;
             return w.up(d, t.bytes[cut.rank * per * k * 2 ..][0 .. per * k * 2]);
@@ -211,16 +210,16 @@ pub const Weights = struct {
 };
 
 /// A rank's share of the drafter: its rank of the target's two, cut as the target's.
-pub const Cut = struct { rank: usize = 0, world: usize = 1 };
+pub const Cut = struct { rank: usize, world: usize };
 
-/// A hold's stream as the attention and head kernels read it (ricursive_draft.cu's Seg).
+/// A hold's stream as the attention and head kernels read it (ricursive_tp2_draft.cu's Seg).
 pub const Seg = extern struct { ring: u64, begin: i64, position: i64 };
 
 fn blocks(n: usize) u32 {
     return @intCast((n + 255) / 256);
 }
 
-/// ricursive_draft.cu's functions and their launches on one stream.
+/// ricursive_tp2_draft.cu's functions and their launches on one stream.
 pub const Kernels = struct {
     mod: cuda.Module,
     f: struct { gather: cuda.Function, rms: cuda.Function, conv_in: cuda.Function, conv_out: cuda.Function, heads: cuda.Function, kv_put: cuda.Function, f2b: cuda.Function, silu: cuda.Function, embed: cuda.Function, attn: cuda.Function, merge: cuda.Function, topk: cuda.Function },

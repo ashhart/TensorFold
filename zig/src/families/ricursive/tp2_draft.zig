@@ -55,7 +55,7 @@ pub const Draft = struct {
         const full = try ld.Config.parse(gpa, bytes, m.c.hidden, m.c.vocab, m.c.layers);
         const world = m.o.place.world;
         const c = try full.share(world);
-        if (m.rank() == 0 and world > 1) {
+        if (m.rank() == 0) {
             var h: fwd.Header = .{ .op = @backingInt(fwd.Op.draft_open) };
             try m.plan(&h);
         }
@@ -175,7 +175,6 @@ pub const Draft = struct {
 
     /// out = x through a row-cut matrix: this rank's partial, then the ranks' partials added in rank order.
     fn mmSum(d: *Draft, x: u64, w: u64, out: u64, rows: usize, n: usize, k: usize) !void {
-        if (d.world == 1) return d.mm(x, w, out, rows, n, k);
         try d.mm(x, w, d.m.b.parts + d.rank * rows * n * 4, rows, n, k);
         try d.m.sumRanks(out, rows * n * 4);
     }
@@ -196,10 +195,8 @@ pub const Draft = struct {
         while (n > 0) {
             const rows = @min(n, fwd.max_rows);
             if (start + rows > x.begin + most) x.begin = start + rows - most;
-            if (d.world > 1) {
-                var h: fwd.Header = .{ .op = @backingInt(fwd.Op.draft_absorb), .slot = x.id, .a = @intCast(slot), .p0 = @intCast(start), .n = @intCast(rows), .b = @intCast(x.begin) };
-                try d.m.plan(&h);
-            }
+            var h: fwd.Header = .{ .op = @backingInt(fwd.Op.draft_absorb), .slot = x.id, .a = @intCast(slot), .p0 = @intCast(start), .n = @intCast(rows), .b = @intCast(x.begin) };
+            try d.m.plan(&h);
             try d.absorbRows(x, slot, start, rows);
             start += rows;
             n -= rows;
@@ -233,7 +230,7 @@ pub const Draft = struct {
             if (x.begin > x.end) x.begin = x.end;
             h.streams[i] = .{ x.id, @intCast(it.pending), @intCast(p), @intCast(x.begin) };
         }
-        if (d.world > 1) try d.m.plan(&h);
+        try d.m.plan(&h);
         try d.holdRun(&h, ctxs);
         const c = d.c;
         const rows = items.len * (c.block - 1);
@@ -296,7 +293,7 @@ pub const Draft = struct {
         const tw = d.tkWords(rows);
         const mine = b.tk + d.rank * tw * 4;
         try d.k.topk(s, b.logits, m.vr, c.topk, mine, mine + tw * 2, rows);
-        if (d.world > 1) try m.group.?.allGather(s, mine, b.tk, tw * 4);
+        try m.group.allGather(s, mine, b.tk, tw * 4);
         if (d.rank == 0) {
             try d.k.rms(s, b.h, d.w.final_norm, b.fin, h, c.eps, 0, c.block, rows);
             try d.mm(b.fin, d.w.selector, b.hp, rows, c.rank, h);
