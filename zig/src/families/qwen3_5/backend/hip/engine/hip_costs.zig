@@ -19,7 +19,9 @@ const at = 16;
 /// A timed forward's tokens: one repeated for a lone window, one a row for shared rows, which an MoE routes apart.
 pub fn fillTokens(tokens: []u32, windows: usize, vocab: usize) void {
     const span = @min(vocab, 65536) - 1;
-    for (tokens, 0..) |*t, k| t.* = if (windows > 1) @intCast(1 + (k * 7919) % span) else 1;
+    // two primes whose product passes every span: at most one divides it, so the stride is coprime to the span
+    const stride: usize = if (span % 7919 == 0) 7927 else 7919;
+    for (tokens, 0..) |*t, k| t.* = if (windows > 1) @intCast(1 + (k * stride) % span) else 1;
 }
 
 const Rig = struct {
