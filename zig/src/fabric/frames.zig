@@ -5,13 +5,21 @@ const Allocator = std.mem.Allocator;
 /// One DATA frame: rows [row_start, row_start + rows) of the export's layer at `position`.
 pub const Frame = struct { position: u32, row_start: u64, rows: u64 };
 
-pub const LayerRows = struct { rows: u64, row_bytes: u64 };
+/// A layer's rows of `row_bytes` each, or (protocol 2, recurrent) parts of `sizes[i]` bytes, a frame each.
+pub const LayerRows = struct { rows: u64, row_bytes: u64, sizes: []const u64 = &.{} };
 
 /// export.py's plan_frames: each layer's rows in order, as many whole rows a frame as `capacity` holds.
 pub fn plan(gpa: Allocator, layers: []const LayerRows, capacity: u64) ![]Frame {
     var out: std.ArrayList(Frame) = .empty;
     errdefer out.deinit(gpa);
     for (layers, 0..) |l, position| {
+        if (l.sizes.len > 0) {
+            for (l.sizes, 0..) |n, part| {
+                if (n > capacity) return error.PartTooLarge;
+                try out.append(gpa, .{ .position = @intCast(position), .row_start = part, .rows = 1 });
+            }
+            continue;
+        }
         const per_frame = capacity / l.row_bytes;
         if (per_frame < 1) return error.RowTooLarge;
         var start: u64 = 0;
@@ -29,6 +37,7 @@ pub const Source = struct {
     block_dim: usize,
     elem: u64,
     rows: []const u64,
+    parts: []const []const u8 = &.{}, // a recurrent layer's state, part by part: gather copies one whole
 
     /// Bytes of one block row: the dimensions after the block one.
     fn inner(s: Source) u64 {
@@ -50,6 +59,13 @@ pub const Source = struct {
 
     /// index_select(block_dim, rows[start..start+count]).contiguous(), as the producer's fill copies it.
     pub fn gather(s: Source, start: u64, count: u64, out: []u8) !u64 {
+        if (s.parts.len > 0) {
+            if (count != 1 or start >= s.parts.len) return error.RowOutOfRange;
+            const p = s.parts[@intCast(start)];
+            if (p.len > out.len) return error.FrameTooLarge;
+            @memcpy(out[0..p.len], p);
+            return p.len;
+        }
         const inner_bytes = s.inner();
         const outer_n = s.outer();
         const blocks = s.shape[s.block_dim];
@@ -86,4 +102,20 @@ test "gather selects block rows along any dimension, C-contiguous" {
     try std.testing.expectEqualSlices(u8, &.{ 9, 10, 11, 3, 4, 5, 21, 22, 23, 15, 16, 17 }, &out);
     try std.testing.expectEqual(@as(u64, 6), try s.gather(1, 1, &out));
     try std.testing.expectEqualSlices(u8, &.{ 3, 4, 5, 15, 16, 17 }, out[0..6]);
+}
+
+test "a recurrent layer's parts go a frame each, whole, and one past the reply half is refused" {
+    const gpa = std.testing.allocator;
+    const got = try plan(gpa, &.{ .{ .rows = 2, .row_bytes = 0, .sizes = &.{ 200, 40 } }, .{ .rows = 3, .row_bytes = 100 } }, 250);
+    defer gpa.free(got);
+    const want = [_]Frame{ .{ .position = 0, .row_start = 0, .rows = 1 }, .{ .position = 0, .row_start = 1, .rows = 1 }, .{ .position = 1, .row_start = 0, .rows = 2 }, .{ .position = 1, .row_start = 2, .rows = 1 } };
+    try std.testing.expectEqualSlices(Frame, &want, got);
+    try std.testing.expectError(error.PartTooLarge, plan(gpa, &.{.{ .rows = 1, .row_bytes = 0, .sizes = &.{300} }}, 250));
+    const a = [_]u8{ 1, 2, 3 };
+    const b = [_]u8{ 9, 8 };
+    const s: Source = .{ .bytes = &.{}, .shape = &.{}, .block_dim = 0, .elem = 1, .rows = &.{}, .parts = &.{ &a, &b } };
+    var out: [4]u8 = undefined;
+    try std.testing.expectEqual(@as(u64, 2), try s.gather(1, 1, &out));
+    try std.testing.expectEqualSlices(u8, &b, out[0..2]);
+    try std.testing.expectError(error.RowOutOfRange, s.gather(0, 2, &out));
 }
