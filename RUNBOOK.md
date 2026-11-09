@@ -233,7 +233,7 @@ pinned host memory.
 A request that names no `top_k`, on a checkpoint whose generation config names none, samples with no top-k filter on
 CUDA and Metal alike, so a seeded request draws the same on both. `--top-k 20` gives 0.6.6's CUDA default.
 A conversation's next turn resumes from a prompt state kept where its last turn's history ended, so a reply equals the same
-request with the cache off. `--prompt-cache-gib` sizes the kept states (16 GiB by default, inside the memory budget) and 0 turns
+request with the cache off. `--prompt-cache-gib` sizes kept states; on Metal the default is half the available room with a 16 GiB floor when room permits. An explicit value overrides it, and 0 turns
 them off. A state kept inside a prompt chunk costs no extra prompt call. A Nemotron 3.5 Lightning state takes 48 MiB plus
 7 KiB a prompt token, in whole 2 MiB pages (62 MiB at 2,048 tokens), and the cache keeps four 48 MiB buffers of its
 budget free for the next states.

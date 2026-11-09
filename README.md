@@ -343,7 +343,7 @@ The binary's `capabilities --json` response lists its supported flags and platfo
 | `--register-redraw-high PERCENT` | The share of that phrase's voiced frames that must lie above `--register-high-hz`. |
 | `--register-high-hz HZ` | The pitch line, 75 to 600 Hz, that marks a high register; calibrate it on your own voice. |
 | `--parallel N\|auto` | Cap active requests at N and queue the rest. Default `auto` asks for up to 8 as memory and the engine allow; an explicit count that cannot fit is refused. Read the accepted count at startup. |
-| `--prompt-cache-gib GIB` | Retained-prefix budget, 16 GiB by default or less where memory is short; 0 disables it. |
+| `--prompt-cache-gib GIB` | Retained-prefix budget; on Metal, half the available room with a 16 GiB floor when room permits. An explicit value overrides it; 0 disables it. |
 | `--prompt-cache-over-cap` | Permit an explicit prefix budget past what 70% of RAM leaves once the server loads. |
 | `--learn` | Keep shared prompt prefixes on disk for new conversations to resume; the models are below the table. |
 | `--learn-dir DIR` | Where `--learn` keeps them, `~/.cache/tensorfold/learned` by default; implies `--learn`. |
@@ -363,6 +363,12 @@ The binary's `capabilities --json` response lists its supported flags and platfo
 | `--cortheon` | Cortheon's reasoning program and server-run web research for chat requests; see [Cortheon mode](docs/cortheon.md). |
 | `--no-update-check` | Accepted compatibility switch; update the installed binary through its package manager. |
 | `--backend auto` | Use the backend compiled for the platform; `mlx` selects native Metal on macOS and `cuda` selects CUDA on Linux. |
+
+On Metal, the default kept-state budget is `min(room, max(16 GiB, room / 2))`.
+`room` is the load limit, or 70% of physical RAM by default, less the loaded footprint,
+any stream memory reserved after that reading, and a 2 GiB prompt-buffer margin.
+The startup line reports the resulting budget and room. Without a memory reading,
+the conservative working-set estimate remains capped at 16 GiB.
 
 `--prompt-cache-gib` applies to Nemotron, Flash Next, GLM, Qwen3.8-27B and LFM2.5-24B-A2B, and
 `--prompt-cache-over-cap` to the same models but GLM.
