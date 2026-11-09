@@ -3,7 +3,7 @@ const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
 const q = tf.qwen27;
-const help = "tf-qwen27-dspine-run --model DIR (--ref DIR | --prompts FILE) [--dspine DIR] [--dflash DIR] [--mode q4|q4_body|bf16] [--tokens 256] [--nodes 15] [--context 4096] [--class agent]";
+const help = "tf-qwen27-dspine-run --model DIR (--ref DIR | --prompts FILE) [--dspine DIR] [--dflash DIR] [--mode q4|q4_body|bf16] [--tokens 256] [--nodes 15] [--context 4096] [--class agent] [--no-plain]";
 const prompts = [_][]const u8{ "poem", "primes", "code", "agent" };
 
 /// A prompt's chat-templated ids: the committed ids of the reference's first round.
@@ -64,10 +64,15 @@ pub fn main(init: std.process.Init) !void {
     var context: u32 = 4096;
     var prompts_path: ?[]const u8 = null;
     var class: ?[]const u8 = null;
+    var plain = true;
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
         if (std.mem.eql(u8, arg, "--help")) return std.debug.print("{s}\n", .{help});
+        if (std.mem.eql(u8, arg, "--no-plain")) {
+            plain = false;
+            continue;
+        }
         if (i + 1 >= args.len) return error.MissingValue;
         i += 1;
         const v = args[i];
@@ -91,7 +96,7 @@ pub fn main(init: std.process.Init) !void {
     const ids = id_list.items;
     const names = name_list.items;
     const session = q.session.Session{ .runner = &runner, .slot = 0 };
-    for (ids, names) |p, name| {
+    if (plain) for (ids, names) |p, name| {
         try runner.reset(0);
         try session.prefill(p, 128);
         const t0 = now(io);
@@ -102,7 +107,7 @@ pub fn main(init: std.process.Init) !void {
             try session.step(token);
         }
         report("plain", name, n, n, now(io) - t0);
-    }
+    };
     if (dflash_dir) |d| {
         const draft = try q.dflash.runtime_model.Model.load(init.gpa, io, model, d, .prepared_q4_reference);
         defer draft.deinit();
