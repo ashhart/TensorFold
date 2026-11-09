@@ -52,6 +52,14 @@ import bench_stream
 
 GATES = ("drafted", "repeat", "concurrent", "resumed", "refusals", "cancel", "evict")
 SKIPPABLE = ("cancel", "evict")  # a family may lack these; the exactness gates hold for every family
+NEEDS = {"cancel": "prompt", "evict": "fill_prompts"}  # the key each lifecycle block cannot run without
+
+
+def lifecycle_gaps(profile: dict) -> list[str]:
+    """Names each lifecycle gate the profile neither runs (its block with its key set) nor skips with a reason."""
+    skip = profile.get("skip") or {}
+    return [g for g in SKIPPABLE if not (isinstance(skip, dict) and skip.get(g))
+            and not (isinstance(profile.get(g), dict) and profile[g].get(NEEDS[g]))]
 SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
