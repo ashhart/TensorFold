@@ -12,8 +12,9 @@ pub const dense = @import("dense.zig");
 /// BF16 as stored, an unquantized checkpoint's: the family opts in (`bf16.detect`), so `read_order` never offers it.
 pub const bf16 = @import("bf16.zig");
 pub const experts = @import("experts.zig");
-/// FP8 and NVFP4 values and fp64 references; host only (no Format: their kernels' layouts are each backend's).
+/// FP8 values and fp64 references; host only (no Format: kernel layouts are each backend's).
 pub const fp8 = @import("fp8.zig");
+/// ModelOpt NVFP4: e2m1 codes, an e4m3 scale a 16 inputs and one global scale, kept as stored on the device.
 pub const nvfp4 = @import("nvfp4.zig");
 pub const widen = @import("widen.zig");
 
@@ -37,6 +38,7 @@ pub fn Module(comptime f: Format) type {
         .mlx => mlx,
         .dense => dense,
         .bf16 => bf16,
+        .nvfp4 => nvfp4,
     };
 }
 
@@ -64,12 +66,13 @@ pub const Config = union(Format) {
     mlx: mlx.Config,
     dense: dense.Config,
     bf16: bf16.Config,
+    nvfp4: nvfp4.Config,
 
     /// The tensor's MLX width (the table's own, else the global one).
     pub fn width(c: Config, key: []const u8) error{UnsupportedQuantization}!mlx.Width {
         return switch (c) {
             .mlx => |q| q.width(key),
-            .dense, .bf16 => error.UnsupportedQuantization,
+            .dense, .bf16, .nvfp4 => error.UnsupportedQuantization,
         };
     }
 };
@@ -87,6 +90,7 @@ pub const Host = union(Format) {
     mlx: mlx.Host,
     dense: dense.Host,
     bf16: bf16.Host,
+    nvfp4: nvfp4.Host,
 
     /// Output rows N.
     pub fn rows(h: Host) usize {
@@ -159,6 +163,7 @@ pub const Device = union(Format) {
     mlx: mlx.Device,
     dense: dense.Device,
     bf16: bf16.Device,
+    nvfp4: nvfp4.Device,
 };
 
 pub fn upload(u: Uploader, h: Host) !Device {
@@ -172,6 +177,7 @@ pub const Handle = union(Format) {
     mlx: mlx.Matrix,
     dense: dense.Matrix,
     bf16: bf16.Matrix,
+    nvfp4: nvfp4.Matrix,
 };
 
 /// One product (N, K): the format's handle and its shape. A stack is one expert's shape at the stack's addresses.
@@ -207,6 +213,7 @@ test "every format module provides the interface" {
     comptime conforms(mlx);
     comptime conforms(dense);
     comptime conforms(bf16);
+    comptime conforms(nvfp4);
 }
 
 test "the shared detection still refuses a config that declares no quantization" {

@@ -57,7 +57,8 @@ pub const Checkpoint = struct {
             std.log.err("{s}", .{why});
             return error.UnexpectedTensor;
         }
-        if (bf16) if (mixed(&main, names)) |key| {
+        // ModelOpt stores FP8 and NVFP4 tensors beside bf16 ones; the loader dequantizes them on the way in.
+        if (bf16 and !cfg.modelopt) if (mixed(&main, names)) |key| {
             std.log.err("{s}: {t} in a bf16 checkpoint, whose text tensors are all BF16", .{ key, (try main.get(key)).dtype });
             return error.UnexpectedTensor;
         };
@@ -162,7 +163,7 @@ pub const Checkpoint = struct {
 
     /// The MTP layer from `mtp*.safetensors` or the model's own shards; null when absent.
     pub fn mtp(c: *const Checkpoint) !?host.Mtp {
-        if (c.config.quant == .bf16) {
+        if (c.config.quant == .bf16 and !c.config.modelopt) {
             if (c.spec().mtp_layers == 0) return null;
             std.log.err("a bf16 checkpoint's MTP head is not read: its config declares {d} MTP layers", .{c.spec().mtp_layers});
             return error.UnexpectedTensor;

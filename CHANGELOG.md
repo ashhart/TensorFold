@@ -272,6 +272,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Internal: a shared CUDA MLA image (`mla.cu`, `cuda.mla`) for a 512-wide latent with 64 roped columns and 128-wide heads, on GLM's MLA chunk bodies, which move from `glm_glue_attn.cuh` to `common/mla.cuh` and which GLM instantiates at its old widths (its SASS is identical on all five SMs). Its seven launches are under the kernel contract with a planted control each, and `test-mla-twins-host` keeps its absorb, expand and per-rank merge GLM's kernels token for token. No family calls it yet (#2335, refs #850). Thanks to @ajensenwaud.
 
+- HIP: ModelOpt NVFP4 checkpoints keep their e2m1 codes and group scales as stored, and a new NVFP4 product kernel decodes them in flight, so the weights hold a quarter of the bytes and a decode reads a quarter of the traffic; FP8 layers still widen to BF16 at load. The format is core `quant.nvfp4`: the device keeps the checkpoint layout (as MLX does), E4M3 group scales widen to BF16 at read (exact), and a stack is refused because its experts carry a global scale each. Every other backend refuses the format by name (#2490). Thanks to @ElderOrb.
+
 ## 1.2.5
 
 - Tests: the Metal kernel contract's limits pass checks LFM3's launches again; a rebase had dropped their five entries, so the pass stopped at the first LFM3 record with `UnknownLaunch` and left every later launch unchecked (#2565).

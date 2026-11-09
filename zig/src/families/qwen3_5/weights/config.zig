@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const quant = @import("core").quant;
+const modelopt_core = @import("core").modelopt;
 const shared = @import("../config.zig");
 
 pub const Error = shared.Error || error{UnsupportedQuantization};
@@ -11,10 +12,36 @@ pub const Width = quant.mlx.Width;
 
 pub const Spec = shared.Spec;
 
+/// Whether the checkpoint declares ModelOpt's own formats, at the root's `quantization_config` or in `q`.
+fn isModelOpt(root: std.json.ObjectMap, q: std.json.ObjectMap) bool {
+    if (root.get("quantization_config")) |qc| if (qc == .object) {
+        if (declaresModelOpt(qc.object)) return true;
+    };
+    return declaresModelOpt(q);
+}
+
+/// The checks themselves: `quant_method`, `producer`, `quant_algo`, and the per-module table.
+fn declaresModelOpt(q: std.json.ObjectMap) bool {
+    if (q.get("quant_method")) |m| if (m == .string and std.mem.eql(u8, m.string, "modelopt")) return true;
+    if (q.get("producer")) |p| if (p == .object) if (p.object.get("name")) |n| if (n == .string and std.mem.eql(u8, n.string, "modelopt")) return true;
+    if (q.get("quant_algo")) |a| if (a == .string) {
+        if (std.mem.eql(u8, a.string, "NVFP4") or std.mem.eql(u8, a.string, "MIXED_PRECISION")) return true;
+    };
+    if (q.get("quantized_layers")) |l| if (l == .object) {
+        var it = l.object.iterator();
+        while (it.next()) |kv| if (kv.value_ptr.* == .object) if (kv.value_ptr.object.get("quant_algo")) |a| if (a == .string) {
+            if (std.mem.eql(u8, a.string, "NVFP4") or std.mem.eql(u8, a.string, "FP8")) return true;
+        };
+    };
+    return false;
+}
+
 pub const Config = struct {
     arena: std.heap.ArenaAllocator,
     spec: Spec,
     quant: quant.Config,
+    /// ModelOpt's weight-only format, NVFP4 as stored: a chat checkpoint, not a decision backbone.
+    modelopt: bool = false,
     /// `tie_word_embeddings`: the output head is the embedding.
     tied: bool,
     /// The end ids of config.json and generation_config.json.
@@ -23,6 +50,25 @@ pub const Config = struct {
     pub fn deinit(c: *Config) void {
         c.arena.deinit();
         c.* = undefined;
+    }
+
+    /// core/modelopt.zig's admission of the checkpoint's recipes: this backend reads NVFP4 and FP8 alone.
+    fn admitted(gpa: std.mem.Allocator, bytes: []const u8) Error!modelopt_core.Recipes {
+        var why: modelopt_core.Why = .{};
+        var r = modelopt_core.admitRecipes(gpa, bytes, &why) catch {
+            std.log.err("{s}", .{why.text()});
+            return error.UnsupportedQuantization;
+        };
+        errdefer r.deinit();
+        var it = r.modules.iterator();
+        while (it.next()) |e| switch (e.value_ptr.*) {
+            .nvfp4, .fp8 => {},
+            else => {
+                std.log.err("{s}: ModelOpt {s} is not a recipe this backend reads", .{ e.key_ptr.*, @tagName(e.value_ptr.*) });
+                return error.UnsupportedQuantization;
+            },
+        };
+        return r;
     }
 
     /// The config of the checkpoint directory `dir`.
@@ -49,15 +95,22 @@ pub const Config = struct {
         const doc = try shared.declared(a, bytes);
         const tower = try shared.textTower(doc);
         const sources: quant.Sources = .{ .root = doc, .quantization = try shared.pickObject(doc, tower, "quantization") };
-        // the family's own order: an unquantized BF16 checkpoint first, then the shared formats
-        const table: quant.Config = if (try quant.bf16.detect(a, sources)) |b| .{ .bf16 = b } else try quant.detect(a, sources);
+        // the family's own order: ModelOpt's NVFP4 as stored, an unquantized BF16 checkpoint, then the shared formats
+        const modelopt = isModelOpt(doc, sources.quantization);
+        if (modelopt) {
+            var r = try admitted(gpa, bytes);
+            r.deinit();
+        }
+        const table: quant.Config = if (modelopt)
+            .{ .bf16 = {} }
+        else if (try quant.bf16.detect(a, sources)) |b| .{ .bf16 = b } else try quant.detect(a, sources);
         const width: Width = if (table == .bf16) .{ .bits = 16, .group = 0 } else try table.width("");
         const spec = try shared.geometry(tower, width.bits, width.group);
         const gen = if (generation) |g| (try std.json.parseFromSliceLeaky(std.json.Value, a, g, .{})) else null;
         if (gen) |g| if (g != .object) return error.InvalidConfig;
         const ids = try a.create([shared.checks.max_eos]u32);
         const eos = try shared.checks.eos(ids, doc, tower, if (gen) |g| g.object else null, spec.vocab);
-        return .{ .arena = arena, .spec = spec, .quant = table, .tied = try shared.isTied(doc, tower), .eos = eos };
+        return .{ .arena = arena, .spec = spec, .quant = table, .modelopt = modelopt, .tied = shared.isTied(doc, tower), .eos = eos };
     }
 };
 

@@ -6,6 +6,7 @@ const table = @import("table.zig");
 const host = @import("host.zig");
 
 const convert = quant.convert;
+const modelopt = @import("modelopt.zig");
 const Tensor = table.Tensor;
 const Table = table.Table;
 pub const Error = table.Error || convert.Error || error{UnexpectedTensor};
@@ -57,6 +58,7 @@ pub fn squeezed(w: Tensor) ?Tensor {
 
 /// `_packed`: a projection in whichever format its tensors are in; a bf16 one's are BF16 as stored, or fp32 widened.
 pub fn projection(a: std.mem.Allocator, t: *const Table, key: []const u8) !host.Projection {
+    if (modelopt.algo(t, key)) |what| return modelopt.read(a, t, key, what);
     if (t.quant == .bf16 and t.widen) {
         _ = try quant.bf16.read(a, t, key); // the same dtype and rank checks
         return .{ .dense = try quant.dense.read(a, t, key) };
