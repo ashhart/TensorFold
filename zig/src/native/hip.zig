@@ -116,7 +116,7 @@ fn ready(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.Open
         s,
     });
     if (o.mtp_drafts) |n| policy.mtp.drafts = @intCast(n);
-    if (o.mtp_confidence) |c| policy.mtp.confidence = c;
+    policy.mtp.confidence = fam.confidenceFloor(F, o, policy.mtp.confidence);
     if (o.keep) |n| policy.slots = @intCast(@min(n, 1 << 16));
     if (matrixRefused(F, policy, caps)) |why| return refuse(a, problem, "matrix=on: {s}; matrix=auto runs the dot2 tiles", .{why});
     const group: ?hip.collective.Group = if (o.tp > 1) try join(a, gpa, io, o, caps, &policy, problem) else null;
@@ -486,6 +486,15 @@ test "a family that names a --slide or --mtp-confidence refusal is refused befor
         try std.testing.expect(flagRefused(F, slid) == null);
         try std.testing.expect(flagRefused(F, sure) == null);
     }
+}
+
+test "Flash Next on HIP defaults its MTP confidence floor to 0.8; the other families keep 0.3; the flag wins" {
+    const wide: hip.Policy = .{};
+    try std.testing.expectEqual(@as(f64, 0.3), wide.mtp.confidence);
+    try std.testing.expectEqual(@as(f64, 0.8), fam.confidenceFloor(flashnext.native, .{ .dir = "d", .model_type = "qwen4_exp" }, wide.mtp.confidence));
+    inline for (.{ qwen35.native, qwen35.native_moe }) |F| try std.testing.expectEqual(@as(f64, 0.3), fam.confidenceFloor(F, .{ .dir = "d", .model_type = F.model_type }, wide.mtp.confidence));
+    const asked: api.Open = .{ .dir = "d", .model_type = "qwen4_exp", .mtp_confidence = 0.3 };
+    try std.testing.expectEqual(@as(f64, 0.3), fam.confidenceFloor(flashnext.native, asked, wide.mtp.confidence));
 }
 
 test "the group flags: one rank source, a supported world, a master past one rank, a rank inside the world" {

@@ -43,6 +43,12 @@ pub fn refused(comptime F: type, o: api.Open) ?[]const u8 {
     return null;
 }
 
+/// The MTP confidence floor of a run: `--mtp-confidence`, else the family's `mtp_confidence_default`, else `fallback`.
+pub fn confidenceFloor(comptime F: type, o: api.Open, fallback: f64) f64 {
+    if (o.mtp_confidence) |c| return c;
+    return if (@hasDecl(F, "mtp_confidence_default")) F.mtp_confidence_default else fallback;
+}
+
 /// The family's offer, or the empty one (text, the host's defaults) when its Loaded carries none.
 pub fn offerOf(loaded: anytype) Offer {
     return if (comptime @hasField(@TypeOf(loaded), "offer")) loaded.offer else .{};
