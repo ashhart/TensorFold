@@ -19,6 +19,7 @@ const Fill = prefill.Fill;
 const reuse = @import("cuda_reuse.zig");
 const Mtp = @import("cuda_mtp.zig").Mtp;
 const pages_mod = @import("cuda_pages.zig");
+const kv_host_mod = @import("cuda_kv_host.zig");
 const cache_mod = @import("cuda_cache.zig");
 const prefix_mod = @import("cuda_prefix.zig");
 const kv_pool = @import("core").kv_pool;
@@ -134,6 +135,14 @@ pub fn attach(p: *anyopaque, streams: u32, pages: usize) !void {
     if (l.prefix != null and prefix_mod.fewSnapshots(l.share_snaps, streams + 1)) std.log.warn("TF_QWEN_KV_SHARE={d} keeps under 4 recurrent-state snapshots a stream at --parallel {d}: live streams evict each other's before a resume; set it to {d} or more", .{ l.share_snaps, streams + 1, 4 * (streams + 1) });
 }
 
+/// Host bytes the pool's pages need under TF_QWEN_KV_HOST (0: off or unpaged); the plan funds them there.
+pub fn kvHostRoom(p: *anyopaque) u64 {
+    const l: *Lanes = @ptrCast(@alignCast(p));
+    if (l.page_tokens == 0) return 0;
+    const pl = pages_mod.layout(l.e, l.capacity, l.page_tokens, l.ringBytes(), l.extra);
+    return kv_host_mod.hostBytes(l.capacity, l.page_tokens, pl.pageBytes(), pl.run_bytes);
+}
+
 /// The lane host's admission: the first stream's window is free, or a lane and the request's pages are.
 pub fn fits(p: *anyopaque, prompt: u32, max_tokens: u32) bool {
     const l: *Lanes = @ptrCast(@alignCast(p));
@@ -175,9 +184,11 @@ pub fn openLanes(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, d
     const page_test = try cache_mod.pageTest();
     _ = try cache_mod.cacheRows(o.context, page_test);
     if (page_tokens > 0 and o.slide) return error.QwenPagesNoLearner;
+    if (kv_host_mod.onHost() and page_tokens == 0) return error.QwenKvHostNeedsPages;
     const share_snaps = try prefix_mod.sharing();
     // a kept state sits on a cold pass's chunk cut, so later chunks keep a cold pass's bits: pages divide the chunk
     if (share_snaps > 0 and (page_tokens == 0 or E.max_rows % page_tokens != 0)) return error.QwenShareNeedsPages;
+    if (kv_host_mod.onHost() and share_snaps == 0) std.log.warn("TF_QWEN_KV_HOST pins the KV pages in host memory; the prompt cache would pin more beside them: set --prompt-cache-gib (or TF_QWEN_KV_SHARE) to bound it", .{});
     const e = try E.Engine.init(gpa, io, ctx, dir, o.kv8, fitOf(o));
     errdefer e.deinit();
     if (o.rope_yarn) |f| { // --rope-yarn over the downloaded config: its table, and the window it allows

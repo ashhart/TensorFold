@@ -4,6 +4,7 @@ const cuda = @import("cuda");
 const kv = @import("core").kv_pool;
 const engine = @import("cuda_engine.zig");
 const caches = @import("cuda_cache.zig");
+const kv_host = @import("cuda_kv_host.zig");
 
 const Engine = engine.Engine;
 const Cache = caches.Cache;
@@ -58,7 +59,12 @@ pub const Pages = struct {
     capacity: usize,
     ring: usize,
     pool: kv.Pool,
+    /// The pool's one arena: device pages by default, pinned host pages under TF_QWEN_KV_HOST
+    /// (one base either way, so the kernels are untouched; the runs share the arena as before).
     arena: cuda.DeviceBuffer,
+    host: ?cuda.HostBuffer = null,
+    /// The arena's device address: `arena.ptr`, or the mapped host pointer when host-funded.
+    base: u64 = 0,
     lanes: []Lane,
 
     /// `streams` lanes and `pages` pages of layout `l`, made and touched now; each run holds a `ring`-byte ring.
@@ -71,9 +77,20 @@ pub const Pages = struct {
         _ = try std.math.add(u64, l.run_bytes, page_bytes - 1);
         const p = try gpa.create(Pages);
         errdefer gpa.destroy(p);
-        var arena = try cuda.DeviceBuffer.alloc(e.d, try std.math.mul(usize, pages, page_bytes));
-        errdefer arena.free();
-        p.* = .{ .gpa = gpa, .e = e, .layout = l, .capacity = capacity, .ring = ring, .pool = try kv.Pool.init(gpa, pages, page_bytes), .arena = arena, .lanes = &.{} };
+        const total = try std.math.mul(usize, pages, page_bytes);
+        var host: ?cuda.HostBuffer = null;
+        var arena = cuda.DeviceBuffer{ .d = e.d, .ptr = 0, .len = 0 };
+        var base: u64 = 0;
+        if (kv_host.onHost()) {
+            host = try cuda.HostBuffer.allocMapped(e.d, total);
+            base = try host.?.device();
+        } else {
+            arena = try cuda.DeviceBuffer.alloc(e.d, total);
+            base = arena.ptr;
+        }
+        errdefer if (host != null) host.?.free();
+        errdefer if (host == null) arena.free();
+        p.* = .{ .gpa = gpa, .e = e, .layout = l, .capacity = capacity, .ring = ring, .pool = try kv.Pool.init(gpa, pages, page_bytes), .arena = arena, .host = host, .base = base, .lanes = &.{} };
         errdefer p.pool.deinit();
         p.lanes = try gpa.alloc(Lane, streams);
         errdefer gpa.free(p.lanes);
@@ -85,12 +102,16 @@ pub const Pages = struct {
         for (p.lanes) |*x| {
             const c = try gpa.create(Cache);
             errdefer gpa.destroy(c);
-            c.* = try Cache.initPaged(gpa, e, mostPages(capacity, tokens), tokens, arena.ptr);
+            c.* = try Cache.initPaged(gpa, e, mostPages(capacity, tokens), tokens, base);
             x.* = .{ .cache = c };
             made += 1;
         }
         errdefer cuda.completion.drain(e.d, e.stream, "qwen3_5: a failed pool initialization did not drain");
-        try arena.fill8(0, e.stream.handle);
+        if (host) |h| {
+            // The host pages zero through the device's view of them, on the engine's stream like every fill.
+            const view = cuda.DeviceBuffer{ .d = e.d, .ptr = p.base, .len = h.bytes.len, .borrowed = true };
+            try view.fill8(0, e.stream.handle);
+        } else try arena.fill8(0, e.stream.handle);
         for (p.lanes) |x| try x.cache.paged.?.table.fill8(0, e.stream.handle);
         try e.stream.synchronize();
         return p;
@@ -107,7 +128,7 @@ pub const Pages = struct {
             p.gpa.destroy(x.cache);
         }
         p.gpa.free(p.lanes);
-        p.arena.free();
+        if (p.host != null) p.host.?.free() else p.arena.free();
         p.pool.deinit();
         p.gpa.destroy(p);
     }
@@ -152,7 +173,7 @@ pub const Pages = struct {
         var up: Upload = .{ .p = p, .cache = x.cache };
         if (adopted.len > 0) try Upload.write(&up, x.lease.ids.items, 0);
         try p.pool.cover(&x.lease, n, .{ .ctx = &up, .write = Upload.write });
-        try x.cache.mapRun(p.e, p.arena.ptr + run * p.layout.pageBytes(), k * p.layout.pageBytes(), p.ring);
+        try x.cache.mapRun(p.e, p.base + run * p.layout.pageBytes(), k * p.layout.pageBytes(), p.ring);
         try x.cache.reset(p.e);
         x.cache.paged.?.ids = x.lease.ids.items;
         x.cache.cap = n * p.layout.page_tokens;

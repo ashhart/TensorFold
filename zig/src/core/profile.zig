@@ -7,6 +7,7 @@ pub const Switch = enum {
     TF_QWEN_KV_PAGES,
     TF_QWEN_KV_PAGES_ALL,
     TF_QWEN_KV_SHARE,
+    TF_QWEN_KV_HOST,
     TF_QWEN_REQUEST_STARTS,
     TF_KV_SHARE,
     TF_FLASHNEXT_KV_PAGES,
@@ -86,8 +87,6 @@ pub const Entry = struct {
     evidence: []const u8,
     syntax: Syntax = .count,
     stable: ?[:0]const u8 = null,
-    /// Unset, the row counts as on ("1") while this switch is on: a family that turns it on by another name.
-    on_with: ?Switch = null,
 
     pub fn name(e: Entry) [:0]const u8 {
         return @tagName(e.id);
@@ -113,13 +112,6 @@ pub const Entry = struct {
         }
         return different(e.syntax, raw);
     }
-
-    /// The row's value as served: its own when present, else "1" when `on_with`'s value (`by`) turns it on.
-    pub fn served(e: Entry, own: ?[]const u8, by: ?[]const u8) ?[]const u8 {
-        if (own != null or e.on_with == null) return own;
-        const v = by orelse return null;
-        return if (different(entry(e.on_with.?).syntax, v)) "1" else null;
-    }
 };
 
 const qwen: []const []const u8 = &.{ "qwen3_5", "qwen3_5_moe" };
@@ -134,7 +126,8 @@ pub const entries = [_]Entry{
     .{ .id = .TF_QWEN_KV_PAGES, .families = qwen, .class = .identical, .effect = "KV pool page size; memory and workload tradeoffs", .evidence = "#1357" },
     .{ .id = .TF_QWEN_KV_PAGES_ALL, .families = qwen, .class = .debug, .syntax = .one, .effect = "Put the engine's own stream on pages too", .evidence = "#1357" },
     .{ .id = .TF_QWEN_KV_SHARE, .families = qwen, .class = .identical, .effect = "Keep prompt pages and bounded recurrent snapshots", .evidence = "#1357" },
-    .{ .id = .TF_KV_SHARE, .families = &.{ "gemma4", "gemma4_unified", "kolibri1", "spark2_5", "glm5_next", "dory" }, .class = .identical, .effect = "Keep prompt states over the core KV pool", .evidence = "#1657" },
+    .{ .id = .TF_QWEN_KV_HOST, .families = qwen, .class = .identical, .syntax = .one, .effect = "Keep the KV pool's pages in pinned host memory (capacity mode: decode pays PCIe a token)", .evidence = "RTX 5080 262144-token recipe, 2026-11-08" },
+    .{ .id = .TF_KV_SHARE, .families = &.{ "gemma4", "gemma4_unified", "kolibri1", "spark2_5", "glm5_next" }, .class = .identical, .effect = "Keep prompt states over the core KV pool", .evidence = "#1657" },
     .{ .id = .TF_FLASHNEXT_KV_PAGES, .families = flash, .class = .experimental, .effect = "KV pool page size; fast-profile qualification pending", .evidence = "#1660" },
     .{ .id = .TF_FLASHNEXT_KV_PAGES_ALL, .families = flash, .class = .debug, .syntax = .one, .effect = "Put every stream on pool pages for checks", .evidence = "#1660" },
     .{ .id = .TF_KV_PAGES, .families = &.{"glm5_next"}, .class = .identical, .syntax = .auto, .effect = "GLM KV pool pages; auto from two ranks with BF16, windows with FP8", .evidence = "#1322" },
@@ -144,7 +137,7 @@ pub const entries = [_]Entry{
     .{ .id = .TF_GLM_PROMPT_TAIL, .families = &.{"glm5_next"}, .class = .identical, .syntax = .one, .effect = "Keep a raw prompt's state at its last chunk start, from the chat states' budget", .evidence = "#2226" },
     .{ .id = .TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS, .families = cuda_cache, .class = .identical, .syntax = .one, .effect = "A new prompt state that fits only by evicting another conversation's is not kept", .evidence = "#2346" },
     .{ .id = .TENSORFOLD_KOLIBRI_KV_PAGES, .families = &.{"kolibri1"}, .class = .arithmetic, .report_values = &.{"0"}, .effect = "Exact 0 disables requested pool pages; other text keeps the option", .evidence = "#2370" },
-    .{ .id = .TENSORFOLD_DORY_KV_PAGES, .families = &.{"dory"}, .class = .arithmetic, .syntax = .not_zero, .on_with = .TF_KV_SHARE, .effect = "Present text except exact 0 selects pool pages instead of default windows", .evidence = "#2370" },
+    .{ .id = .TENSORFOLD_DORY_KV_PAGES, .families = &.{"dory"}, .class = .arithmetic, .syntax = .not_zero, .effect = "Present text except exact 0 selects pool pages instead of default windows", .evidence = "#2370" },
     .{ .id = .GEMMA_DRAFT_BF16, .families = &.{ "gemma4", "gemma4_unified" }, .backend = "metal", .class = .debug, .report_values = &.{ "all", "fc", "self_attn.q_proj", "self_attn.k_proj", "self_attn.o_proj", "mlp.gate_proj", "mlp.down_proj" }, .effect = "Keep selected drafter stacks in stored BF16 instead of quantizing them", .evidence = "#2370" },
     .{ .id = .TF_ANE_COLUMNS, .families = &.{"qwen3_5"}, .backend = "metal", .class = .experimental, .effect = "FP16 Neural Engine prompt columns; exact output not qualified", .evidence = "#2370" },
     .{ .id = .TF_PROMPT_ROWS, .families = qwen, .backend = "metal", .class = .arithmetic, .syntax = .present, .effect = "Explicit prompt frame capacity and kept-state key geometry", .evidence = "#2370" },
