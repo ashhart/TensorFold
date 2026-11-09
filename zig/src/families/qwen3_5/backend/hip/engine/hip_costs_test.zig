@@ -137,3 +137,14 @@ test "a lone window times one repeated token; shared rows carry a token a row in
     costs.fillTokens(tokens[0..16], 2, 1000);
     for (tokens[0..16]) |t| try T.expect(t > 0 and t < 1000);
 }
+
+test "shared rows stay distinct over any vocabulary, spans 7919 or 7927 divide included" {
+    // 15839 and 15855 ids: spans of twice 7919 and twice 7927
+    for ([_]usize{ 15839, 15855, 65537, 151936, 248320 }) |vocab| {
+        var tokens: [256]u32 = undefined;
+        costs.fillTokens(&tokens, 2, vocab);
+        var seen: std.AutoHashMapUnmanaged(u32, void) = .empty;
+        defer seen.deinit(T.allocator);
+        for (tokens) |t| try T.expect(!(try seen.getOrPut(T.allocator, t)).found_existing);
+    }
+}
