@@ -44,9 +44,9 @@ uint bf16_bits(float value) {
       ? ((bits >> 16u) | 0x40u)
       : ((bits + 0x7fffu + ((bits >> 16u) & 1u)) >> 16u);
 }
-// ASH_QWEN35 matches Metal's float32 angle/products and performs one final bfloat16 RNE store.
+// ORACLE_QWEN35 matches Metal's float32 angle/products and performs one final bfloat16 RNE store.
 float rope_round(float value) {
-#ifdef ASH_QWEN35
+#ifdef ORACLE_QWEN35
   return value;
 #else
   uint bits = floatBitsToUint(value);
@@ -84,9 +84,9 @@ layout(set = 0, binding = 3, std430) readonly buffer Freqs {
 } freqs_data;
 #endif
 
-// ASH_QWEN35 uses Metal's pow(10000000.0f, -i/32) expression with i < 32.
+// ORACLE_QWEN35 uses Metal's pow(10000000.0f, -i/32) expression with i < 32.
 float rope_inv_freq(uint i) {
-#if defined(ASH_QWEN35)
+#if defined(ORACLE_QWEN35)
   return pow(1.0e7f, -float(i) / 32.0f);
 #elif defined(USE_FREQS)
   return 1.0f / freqs_data.values[params.aux_offset + i];

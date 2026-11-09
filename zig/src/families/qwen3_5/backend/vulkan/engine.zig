@@ -26,7 +26,7 @@ pub const Error = vk.dispatch.Error ||
     error{ ContextTooLong, NonFinite, UnsupportedPrompt, Poisoned };
 // Engine.init has no explicit error set: inferred platform I/O/config errors pass through; steps do no filesystem I/O.
 
-// Build-supplied SPIR-V variants (norm/swiglu/rope use ASH_QWEN35 Metal oracle); engine checks and pipelines them.
+// Build-supplied SPIR-V variants (norm/swiglu/rope use ORACLE_QWEN35 Metal oracle); engine checks and pipelines them.
 pub const ShaderBundle = struct {
     ops: vk.ops.Shaders,
     norm: vk.norm_mlp.Shaders,

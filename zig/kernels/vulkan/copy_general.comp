@@ -4,7 +4,7 @@
 
 // code unchanged, comments condensed.
 
-// Copyright © 2026 Joshua Warren and mlx-omarchy contributors; MIT License, full text in LICENSES/mlx-omarchy-MIT.txt.
+// Copyright © 2026 Joshua Warren; MIT License, full text in LICENSES/mlx-omarchy-MIT.txt.
 
 // Strided copy; USE_U32/U16/U64 bit-exact; USE_BOOL/U8 packed-byte atomicAnd/Or (scatter.comp).
 

@@ -1,6 +1,6 @@
 // From omarchy-mlx overlay/mlx/backend/omarchy/shaders/omarchy_trig.h: code unchanged, comments condensed.
 
-// Copyright © 2026 Joshua Warren and mlx-omarchy contributors; MIT License, full text in LICENSES/mlx-omarchy-MIT.txt.
+// Copyright © 2026 Joshua Warren; MIT License, full text in LICENSES/mlx-omarchy-MIT.txt.
 
 // Shared trig range reduction for omarchy compute shaders.
 
