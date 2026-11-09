@@ -68,6 +68,7 @@ const linux_compile = [_][]const u8{
 const linux_deepseek = [_][]const u8{
     "test-dsv41-device-host",
     "test-dsv41-forward",
+    "test-sessions-writes-host",
 };
 
 const linux_fast = [_][]const u8{
@@ -287,6 +288,7 @@ const macos_deepseek = [_][]const u8{
     "test-dsv41-device-host",
     "test-dsv41-draft",
     "test-dsv41-forward",
+    "test-sessions-writes-host",
 };
 
 const macos_fast = [_][]const u8{
