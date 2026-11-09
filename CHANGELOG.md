@@ -6,14 +6,9 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Tests: compile the runtime Metal libraries selected by each loader, check every registered launch mapping on the host, and keep limits running across unsupported probes, including LFM2 masked prompts on pre-M5 devices (#2601).
 
-
-
 - Flash Next on CUDA: a verify window's and a shared pass's graph keys now hash every buffer of a stream's tables (states, conv windows, caches, the n-gram tail and the page table), not its first state and cache alone, so a layer whose buffers move alone gets a new key; nothing changes on today's placement, where every state moves together (#2577, part of #2444). Thanks to @jschmied.
 - Qwen CUDA with `TF_QWEN_REQUEST_STARTS=1` keeps later chat turns at their own history starts even when turns are less than 256 tokens apart. On a GB10 with Qwen3.8-27B 4-bit and its DFlash2 drafter, turns 2 to 6 of a six-turn chat reuse 1,450 to 1,635 prompt tokens and take 0.72 to 1.33 s instead of 1.78 to 2.10 s. Prompt passes are cut at replies, so a reply can differ from the unset path's; resumed and fresh replies are the same with it set. The unset path and other families keep their existing chunk minimum (#2176). Thanks to @gilby.
-- GLM on CUDA keeps the live half of the double-buffered KDA recurrent state alone in a kept prompt state with
-  `TF_GLM_KV_LIVE_HALF=1` (opt-in): the other half is the state before the last prompt chunk or decode window and
-  nothing reads it after a restore, so a kept state is 71 MB a rank smaller on GLM-5.3-Flash at TP=2 with replies
-  unchanged, drafts off and on (#2181).
+- GLM on CUDA keeps the live half of the double-buffered KDA recurrent state alone in a kept prompt state with `TF_GLM_KV_LIVE_HALF=1` (opt-in): the other half is the state before the last prompt chunk or decode window and nothing reads it after a restore, so a kept state is 71 MB a rank smaller on GLM-5.3-Flash at TP=2 with replies unchanged, drafts off and on (#2181, part of #2180). Thanks to @volfco.
 - HIP: a host-to-device upload copies in 64 MiB windows, one synchronous copy each, so a multi-GiB tensor no longer has its whole source pinned by one copy; uploads of 64 MiB or less are one call as before (#2584). Thanks to @ElderOrb.
 
 - Benchmark clients: `bench_concurrent` and `bench_openai` time content, reasoning and tool-call output separately (header arrival, first payload line, first output of each kind, last output) and classify how each reply ended; token ITL/TPOT is null where a chunk carries several tokens instead of padded with zeros, with a labelled chunk-level estimate beside it; the prompt/TTFT rate is `prompt_ttft_tps`, with `prefill_tps` still written and marked deprecated because it is not the engine's prefill time (#2625).
@@ -79,7 +74,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Tests: the Qwen4 QSA backward host test prints its coordinate and direction lines only when a comparison fails, naming the first wrong one; a passing run writes nothing to stderr (#2588, refs #1852).
 - Docs: the image page says how the native server finds libjpeg-turbo 3.1.4.1 for JPEG input: why the release is pinned, the search order and file names on macOS, Linux and Windows, `TENSORFOLD_LIBTURBOJPEG`, and what each startup warning means (#2590, refs #2581).
 
-- Internal: a shared CUDA MLA image (`mla.cu`, `cuda.mla`) for a 512-wide latent with 64 roped columns and 128-wide heads, on GLM's MLA chunk bodies, which move from `glm_glue_attn.cuh` to `common/mla.cuh` and which GLM instantiates at its old widths. Its seven launches are under the kernel contract with a planted control each, and `test-mla-twins-host` keeps its absorb, expand and per-rank merge GLM's kernels token for token. No family calls it yet (#2335, refs #850).
+- Internal: a shared CUDA MLA image (`mla.cu`, `cuda.mla`) for a 512-wide latent with 64 roped columns and 128-wide heads, on GLM's MLA chunk bodies, which move from `glm_glue_attn.cuh` to `common/mla.cuh` and which GLM instantiates at its old widths (its SASS is identical on all five SMs). Its seven launches are under the kernel contract with a planted control each, and `test-mla-twins-host` keeps its absorb, expand and per-rank merge GLM's kernels token for token. No family calls it yet (#2335, refs #850). Thanks to @ajensenwaud.
 
 ## 1.2.5
 
