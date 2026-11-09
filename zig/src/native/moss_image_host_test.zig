@@ -1,4 +1,4 @@
-//! MOSS-Image's serving host without a device: recognition, refusals, limits, the queue, the splice, the 8-bit rule.
+//! MOSS-Image's serving host without a device: recognition, refusals, limits, the queue, the splice, the failed stage.
 const std = @import("std");
 const api = @import("engine_api");
 const spec = @import("moss_image_spec.zig");
@@ -141,4 +141,50 @@ test "MOSS-Image: the pipeline's 8-bit rule is the decoder kernel's clamp and ro
         .{ 0.6, 1 },
         .{ 255, 255 },
     }) |case| try std.testing.expectEqual(case[1], host.roundEven(case[0]));
+}
+
+/// Counts the one `finished` event a picture's pass sends.
+fn counted(ctx: *anyopaque, _: api.Id, event: *const api.Event) void {
+    const n: *usize = @ptrCast(@alignCast(ctx));
+    if (event.* == .finished) n.* += 1;
+}
+
+test "MOSS-Image: a device OOM fails its picture alone, any other error takes the engine out of service" {
+    var results = [_]api.ImageResult{ .{}, .{} };
+    var pngs = [_]std.ArrayList(u8){ .empty, .empty };
+    var events: usize = 0;
+    const sink: api.Sink = .{ .ctx = &events, .event = &counted };
+    const reqs = [_]api.ImageRequest{
+        .{ .prompt = &.{}, .width = 16, .height = 16, .steps = 1, .guidance = 1, .seed = 7, .result = &results[0], .png = &pngs[0], .alloc = std.testing.allocator },
+        .{ .prompt = &.{}, .width = 16, .height = 16, .steps = 1, .guidance = 1, .seed = 7, .result = &results[1], .png = &pngs[1], .alloc = std.testing.allocator },
+    };
+    var h: host.Host = .{
+        .gpa = std.testing.allocator,
+        .io = std.testing.io,
+        .driver = undefined,
+        .ctx = undefined,
+        .encoder = undefined,
+        .model = undefined,
+        .decoder = undefined,
+        .tokenizer = undefined,
+        .before = &.{},
+        .after = &.{},
+        .empty = &.{},
+        .scheduler = undefined,
+    };
+    // the decoder plans its scratch per picture, so a device OOM costs that picture and nothing else
+    const first = h.queue.admit(1) orelse return error.NotAdmitted;
+    h.jobs[first] = .{ .id = 1, .request = &reqs[0], .sink = sink };
+    host.Host.fail(&h, first, error.OutOfDeviceMemory);
+    try std.testing.expectEqual(api.Reason.failed, results[0].reason);
+    try std.testing.expectEqual(@as(usize, 1), events);
+    try std.testing.expect(!h.broken);
+    try std.testing.expectEqual(@as(usize, 0), h.queue.held());
+    // the engine still serves: the freed slot takes the next picture, whose other error ends the engine
+    const second = h.queue.admit(2) orelse return error.NotAdmitted;
+    h.jobs[second] = .{ .id = 2, .request = &reqs[1], .sink = sink };
+    host.Host.fail(&h, second, error.LatentRows);
+    try std.testing.expectEqual(api.Reason.failed, results[1].reason);
+    try std.testing.expectEqual(@as(usize, 2), events);
+    try std.testing.expect(h.broken);
 }

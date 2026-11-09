@@ -344,13 +344,13 @@ pub const Host = struct {
         job.sink.event(job.sink.ctx, job.id, &.{ .finished = .{ .reason = reason, .message = message } });
     }
 
-    /// A stage's error: out of memory fails this picture alone, any other failure takes the engine out of service.
-    fn fail(h: *Host, slot: usize, e: anyerror) void {
-        if (e != error.OutOfMemory) {
+    /// A stage's error: an out-of-memory fails this picture alone; any other takes the engine out of service.
+    pub fn fail(h: *Host, slot: usize, e: anyerror) void {
+        if (e != error.OutOfMemory and e != error.OutOfDeviceMemory) {
             h.lock();
             h.broken = true;
             h.unlock();
-            std.log.err("moss image: a picture's pass failed ({s}); this engine serves no more", .{@errorName(e)});
+            std.log.warn("moss image: a picture's pass failed ({s}); this engine serves no more", .{@errorName(e)});
         }
         h.finish(slot, .failed, @errorName(e));
     }
