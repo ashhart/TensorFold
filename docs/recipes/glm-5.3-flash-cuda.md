@@ -102,15 +102,21 @@ names both: `glm: windows (timed): 9.91 ms at 1 row, 11.25 at 4, 26.03 at 32, a 
 
 The times stay in `~/.cache/tensorfold/window-costs`, one table per build, GPU/driver, full checkpoint and drafter identity,
 drafter precision, rank count, layer limit, L2-prefetch options, loaded NVFP4 decode warps, KDA and matmul modes,
-dense/head bits, KV placement and the recorded NCCL channel/P2P settings. Earlier timings added about 2 s to a
-new build's first load on the cards below; the revised identity has not been device-timed. A `(kept)` load skips timing.
+dense/head bits, KV placement and the recorded NCCL channel/P2P settings. In the TP=2 GB10 receipt for
+4b9851c3b, the first empty-price-cache load took 85.2 s; other loads took 70-75 s. This is one empty-cache
+sample, not a startup-time estimate. A `(kept)` load skips timing.
 With `--no-drafts` nothing is timed. Timings steer windows, never tokens.
+Lone rounds use the timed draft step; shared rounds retain the prior step (DFlash2: 1.6/7 ms, MTP: zero).
+The three-draft shared MTP cap does not apply with `TF_GLM_COPIES=1`.
 
 A host-KV gather wider than 16 rows invalidates the saved narrow row list before overwriting its slots. Otherwise
 a later narrow gather could reuse rows from before that wide overwrite. The existing invalidation is retained; the
 revised key and fixtures do not change the gather arithmetic.
 
 ## Four cards in one host
+
+The following receipt is historical, from 9200a3064 with its experimental window changes. It does not qualify
+the current price-cache identity, shared step-price rule or 32-row contract additions.
 
 NCCL allows direct card-to-card transfers on AMD hosts only up to two GPUs, so set these on every rank at three or more:
 
