@@ -2,8 +2,14 @@
 const std = @import("std");
 
 pub fn steps(b: *std.Build, host: std.Build.ResolvedTarget, server: *std.Build.Module, core: *std.Build.Module, living: *std.Build.Module, api: *std.Build.Module, nemotron: *std.Build.Module, all: *std.Build.Step) void {
+    const options = b.createModule(.{ .root_source_file = b.path("zig/src/native/cuda_options.zig"), .target = host, .link_libc = true, .imports = &.{.{ .name = "engine_api", .module = api }} });
+    b.step("test-pocket-options-host", "Native firing-count flags without device or model access").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = options, .filters = &.{"fact usage:"} })).step);
     const products = b.addRunArtifact(b.addTest(.{ .root_module = nemotron, .filters = &.{"pocket usage:"} }));
-    b.step("test-pocket-usage-host", "Existing CUDA pocket products with a fake driver, no kernels").dependOn(&products.step);
+    const masks = b.addRunArtifact(b.addTest(.{ .root_module = api.import_table.get("lanes").?, .filters = &.{"pocket usage:"} }));
+    const product_step = b.step("test-pocket-usage-host", "Existing CUDA pocket products and bounded masks without kernels");
+    product_step.dependOn(&products.step);
+    product_step.dependOn(&masks.step);
+    all.dependOn(&masks.step);
     all.dependOn(&products.step);
     const policy = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"fact usage:"} }));
     b.step("test-living-policy-host", "Usage, pinning, full-pocket policy and exact deletion without devices").dependOn(&policy.step);

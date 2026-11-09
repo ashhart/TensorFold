@@ -13,7 +13,7 @@ pub fn used(g: *Graph, neurons: []const api.Neuron) !void {
         if (n.layer >= mask.bits.len or n.neuron >= 64) return error.UsageGeometry;
         mask.bits[n.layer] |= @as(u64, 1) << @intCast(n.neuron);
     }
-    var scope: @import("slide_usage_stream.zig").Scope = .{ .graph = g, .gpa = g.gpa };
+    var scope: @import("slide_usage_stream.zig").Scope = .{ .graph = g, .gpa = g.gpa, .enabled = true };
     defer scope.deinit();
     try scope.record(mask);
 }

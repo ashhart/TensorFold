@@ -52,6 +52,7 @@ pub const Options = struct {
 };
 
 pub const Metal = struct {
+    pub const countUsage = @import("metal_usage.zig").chunk;
     gpa: std.mem.Allocator,
     m: *Model,
     o: Options,
@@ -303,7 +304,7 @@ pub const Metal = struct {
             if (s.isCancelled()) return error.Cancelled; // release() waits for the chunk still in flight
             try kv_pages.grow(c, at + rows);
             try @import("prompt_flight.zig").submit(self, s, Chunks{ .n = ids.len, .c = c, .at = at, .rows = rows });
-            try @import("metal_usage.zig").chunk(self, c, rows);
+            try self.countUsage(c, rows);
             at += rows;
             // landed tokens only: the newest chunk is still queued on the GPU
             s.fill_at.store(@intCast(at - rows), .monotonic);

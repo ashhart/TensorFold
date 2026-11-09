@@ -212,4 +212,9 @@ test "fact usage: automatic forgetting is an explicit CLI opt-in" {
     try t.expect(!normal.slide_forget);
     const forget = try cli.parse(arena.allocator(), &.{ "m", "--slide", "--slide-forget" }, &u);
     try t.expect(forget.slide and forget.slide_forget);
+    const on = try cli.request(arena.allocator(), "m", "nemotron_h", forget);
+    try t.expect(on.slide and on.slide_forget);
+    const slide_only = try cli.parse(arena.allocator(), &.{ "m", "--slide" }, &u);
+    const off = try cli.request(arena.allocator(), "m", "nemotron_h", slide_only);
+    try t.expect(off.slide and !off.slide_forget);
 }

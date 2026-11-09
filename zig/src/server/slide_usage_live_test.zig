@@ -54,7 +54,7 @@ test "fact usage: real lane completion counts once, with the same forwards and t
     defer g.deinit();
     const own = add(&g, 1);
     const other = add(&g, 2);
-    var scope: Scope = .{ .graph = &g, .gpa = a };
+    var scope: Scope = .{ .graph = &g, .gpa = a, .enabled = true };
     defer scope.deinit();
     var cfg = try lanes.Config.init(a, .{}, 1, 0);
     defer cfg.deinit(a);
@@ -75,7 +75,7 @@ test "fact usage: real lane completion counts once, with the same forwards and t
         var reply: Reply = .{};
         defer reply.tokens.deinit(a);
         var request: api.Request = .{ .prompt = &.{ 1, 2, 3 }, .max_tokens = 12, .drafts = false, .usage = if (k == 0) null else scope.observer() };
-        var fresh: Scope = .{ .graph = &g, .gpa = a };
+        var fresh: Scope = .{ .graph = &g, .gpa = a, .enabled = true };
         defer fresh.deinit();
         if (k == 3) request.usage = fresh.observer();
         const before = target.rounds;
@@ -95,7 +95,7 @@ test "fact usage: real lane completion counts once, with the same forwards and t
         try t.expectEqual(@as(u64, 0), g.find(other).?.uses);
     }
     for (0..5) |mode| {
-        var fresh: Scope = .{ .graph = &g, .gpa = a };
+        var fresh: Scope = .{ .graph = &g, .gpa = a, .enabled = true };
         defer fresh.deinit();
         var reply: Reply = .{ .engine = e, .cancel = mode == 0 };
         defer reply.tokens.deinit(a);
@@ -120,7 +120,7 @@ test "fact usage: incomplete prefix accounting survives restart and refuses auto
     var g = graph.Graph.init(a, t.io, file);
     defer g.deinit();
     const id = add(&g, 1);
-    var scope: Scope = .{ .graph = &g, .gpa = a };
+    var scope: Scope = .{ .graph = &g, .gpa = a, .enabled = true };
     defer scope.deinit();
     try scope.record(.{ .complete = false });
     try t.expectError(error.UsageIncomplete, g.flushUsage());
@@ -167,7 +167,7 @@ test "fact usage: HTTP whole and streamed answers count, lesson writer and reche
     var text: path.Text = .{};
     var model: path.Model = .{ .capacity = true };
     defer model.deinit();
-    const srv = try @import("server.zig").Server.init(a, t.io, model.engine(), text.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false }, null);
+    const srv = try @import("server.zig").Server.init(a, t.io, model.engine(), text.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false, .slide_forget = true }, null);
     defer srv.deinit();
     try path.learnOne(srv, "I like blue.", null);
     try path.learnOne(srv, "I like apples.", null);
@@ -190,7 +190,7 @@ test "fact usage: native observer persists counts, deduplicates generations and 
     defer g.deinit();
     const id = add(&g, 1);
     _ = add(&g, 2);
-    var scope: Scope = .{ .graph = &g, .gpa = a };
+    var scope: Scope = .{ .graph = &g, .gpa = a, .enabled = true };
     defer scope.deinit();
     var mask: api.pocket_usage.Masks = .{};
     mask.bits[1] = 3;
@@ -202,7 +202,7 @@ test "fact usage: native observer persists counts, deduplicates generations and 
         try t.expectEqual(@as(u64, 1), back.find(id).?.uses);
         try t.expectEqual(@as(u64, 0), back.find(2).?.uses);
     }
-    var next: Scope = .{ .graph = &g, .gpa = a };
+    var next: Scope = .{ .graph = &g, .gpa = a, .enabled = true };
     defer next.deinit();
     g.fault = .write;
     try t.expectError(error.GraphWrite, next.record(mask));
@@ -213,4 +213,42 @@ test "fact usage: native observer persists counts, deduplicates generations and 
     var back = graph.Graph.init(a, t.io, file);
     defer back.deinit();
     try t.expectEqual(@as(u64, 2), back.find(id).?.uses);
+}
+
+test "fact usage: forgetting off attaches no HTTP observer and never attempts a graph write" {
+    const path = @import("slide_learn_path_test.zig");
+    for ([_]bool{ false, true }) |enabled| {
+        var tmp = t.tmpDir(.{});
+        defer tmp.cleanup();
+        const dir = try tmp.dir.realPathFileAlloc(t.io, ".", a);
+        defer a.free(dir);
+        const file = try std.fs.path.join(a, &.{ dir, "graph.json" });
+        defer a.free(file);
+        var text: path.Text = .{};
+        var model: path.Model = .{ .capacity = true };
+        defer model.deinit();
+        const srv = try @import("server.zig").Server.init(a, t.io, model.engine(), text.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false, .slide_forget = enabled, .slide_graph = file }, null);
+        defer srv.deinit();
+        try path.learnOne(srv, "I like blue.", null);
+        const before = try std.Io.Dir.cwd().readFileAlloc(t.io, file, a, .limited(1 << 20));
+        defer a.free(before);
+        if (!enabled) srv.slide.fault = .write;
+        try askExternal(srv, false);
+        try askExternal(srv, true);
+        try t.expectEqual(@as(u64, if (enabled) 2 else 0), srv.slide.find(1).?.uses);
+        var scope = Scope.init(srv);
+        defer scope.deinit();
+        try t.expectEqual(enabled, scope.observer() != null);
+        if (!enabled) {
+            var mask: api.pocket_usage.Masks = .{};
+            mask.bits[1] = 1;
+            try scope.record(mask);
+            try scope.record(null);
+            try t.expectEqual(graph.Graph.Fault.write, srv.slide.fault);
+            try t.expect(!srv.slide.usage_dirty and !srv.slide.usage_missing);
+            const after = try std.Io.Dir.cwd().readFileAlloc(t.io, file, a, .limited(1 << 20));
+            defer a.free(after);
+            try t.expectEqualStrings(before, after);
+        }
+    }
 }

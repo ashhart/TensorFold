@@ -245,7 +245,7 @@ pub fn runNamed(srv: *Server, a: Allocator, out: Out, gone: Gone, is_chat: bool,
     };
     var usage = @import("slide_usage_stream.zig").Scope.init(srv);
     defer usage.deinit();
-    if (srv.info.pocket_usage) p.input.usage = &usage;
+    if (srv.config.slide_forget and srv.info.pocket_usage) p.input.usage = &usage;
     p.input.id = id;
     // held until the reply is written: POST /v1/requests/{id}/cancel finds the request by each id its client gets
     var asked: cancel_ids.Entry = .{};

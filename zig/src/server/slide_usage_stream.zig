@@ -8,14 +8,16 @@ pub const Scope = struct {
     graph: *Graph,
     gpa: std.mem.Allocator,
     charged: std.ArrayList(u32) = .empty,
+    enabled: bool = false,
 
     pub fn init(srv: *Server) Scope {
-        return .{ .graph = &srv.slide, .gpa = srv.gpa };
+        return .{ .graph = &srv.slide, .gpa = srv.gpa, .enabled = srv.config.slide_forget };
     }
     pub fn deinit(s: *Scope) void {
         s.charged.deinit(s.gpa);
     }
-    pub fn observer(s: *Scope) api.pocket_usage.Observer {
+    pub fn observer(s: *Scope) ?api.pocket_usage.Observer {
+        if (!s.enabled) return null;
         return .{ .ctx = s, .done = done };
     }
 
@@ -24,6 +26,7 @@ pub const Scope = struct {
         s.record(result) catch |e| std.log.warn("slide: usage counts await a graph write ({s})", .{@errorName(e)});
     }
     pub fn record(s: *Scope, result: ?api.pocket_usage.Masks) !void {
+        if (!s.enabled) return;
         const g = s.graph;
         g.mutex.lockUncancelable(g.io);
         defer g.mutex.unlock(g.io);
