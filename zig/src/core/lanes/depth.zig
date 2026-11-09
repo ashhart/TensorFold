@@ -405,8 +405,8 @@ pub const Rule = struct {
     /// Only completed timed shared rounds advance this count/mode's calibration clock.
     pub fn observeShared(r: *Rule, streams: u32, rows: u64, ms: f64, sampled: bool, head_ms: f64, plain: bool, calibration: bool) !void {
         if (streams > 1 and r.plain_guard and r.confidence_floor == null) {
-            if (r.shared_costs.get(@intCast(rows))) |forward|
-                try r.shared_price.observe(r.gpa, streams, rows, ms - forward - head_ms, sampled, plain, calibration);
+            const residual = if (r.shared_costs.get(@intCast(rows))) |forward| ms - forward - head_ms else std.math.nan(f64);
+            try r.shared_price.observe(r.gpa, streams, rows, residual, sampled, plain, calibration);
         }
         try r.observeOverhead(streams, rows, ms, sampled, head_ms);
     }
@@ -482,6 +482,7 @@ test {
     _ = @import("shared_price_test.zig");
     _ = @import("shared_verify_price_test.zig");
     _ = @import("shared_warm_price_test.zig");
+    _ = @import("shared_calibration_test.zig");
 }
 
 test {
