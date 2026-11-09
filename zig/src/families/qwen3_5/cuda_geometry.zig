@@ -298,11 +298,7 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Geometry {
         .q_heads = try integer(t, "num_attention_heads"),
         .kv_heads = try integer(t, "num_key_value_heads"),
         .eps = @floatCast(try number(t, "rms_norm_eps")),
-        .tied = blk: {
-            const v = t.get("tie_word_embeddings") orelse root.get("tie_word_embeddings") orelse break :blk false;
-            if (v != .bool) return error.BadQwenConfig;
-            break :blk v.bool;
-        },
+        .tied = try rules.tied(root, t, .cuda),
         .context = resolved.ceiling,
         .rope = resolved.rope,
         .linear = @splat(false),
