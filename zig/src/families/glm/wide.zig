@@ -31,7 +31,7 @@ pub const Pipes = struct {
     moe_glu: [nw]mtl.Pipeline, // the same through gate and up, SwiGLU'd
     gather: [2]mtl.Pipeline, // four gathered rows sharing the sorted row arithmetic
     bf16: mtl.Pipeline, // an unquantized matrix (the MTP head's eh_proj, scalar path; decode-side path keeps this)
-    bf16_nax: ?mtl.Pipeline, // bf16 GEMM on tensor units: prefill-side eh_proj replacement for `bf16`
+    bf16_nax: ?mtl.Pipeline, // bf16 GEMM on tensor units: prefill-side eh_proj replacement for `bf16` (null: `bf16` serves)
     kda_pre: mtl.Pipeline, // kda_rows reading f_b's and g_b's products made apart (any width but 4/64)
     kda_fg: [nw]mtl.Pipeline, // kda_rows making f_b's and g_b's dots of one width (g64) as glm_rows does: .pre's bits
     embed: [2]mtl.Pipeline, // the embedding at 6 and 8 bits, groups of 64
@@ -141,6 +141,7 @@ fn build(gpa: std.mem.Allocator, device: mtl.Device, kda: []const u8, made: *Mad
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     var p: Pipes = undefined;
+    const eh_tile = try @import("sys").environment.read(bool, "GLM_EHPROJ_NAX", true); // 0: no tile pipeline, `bf16` serves
     var h = std.hash.Wyhash.init(0x77);
     const rows_src = try gpa.dupe(u8, gather_source);
     defer gpa.free(rows_src);
@@ -161,7 +162,7 @@ fn build(gpa: std.mem.Allocator, device: mtl.Device, kda: []const u8, made: *Mad
         }
         p.bf16 = try made.add(device, l, "glm_rows_bf16");
         for (gather.names, &p.gather) |name, *pipe| pipe.* = try made.add(device, l, name);
-        p.bf16_nax = made.add(device, l, "glm_rows_bf16_nax") catch blk: {
+        p.bf16_nax = if (!eh_tile) null else made.add(device, l, "glm_rows_bf16_nax") catch blk: {
             std.log.warn("glm: the eh_proj tile kernel cannot build here; eh_proj serves on the scalar path", .{});
             break :blk null;
         };

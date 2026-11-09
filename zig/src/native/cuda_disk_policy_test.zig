@@ -82,10 +82,11 @@ fn indexedMiss(comptime family: []const u8) !void {
     const profile: @import("disk_identity.zig").Profile = .{ .family = family, .backend = "cuda" };
     const before = try disk.identityOf(a, t.io, &gpu, dir, null, &.{1}, 42, profile);
     const same = try disk.identityOf(a, t.io, &gpu, dir, null, &.{1}, 42, profile);
-    try std.Io.sleep(t.io, .fromMilliseconds(5), .awake);
     shard[shard.len - 1] = 1;
-    try tmp.dir.writeFile(t.io, .{ .sub_path = "tensors/native-QB.safetensors", .data = &shard });
+    try fixture.rewrite(tmp.dir, "tensors/native-QB.safetensors", &shard);
     try fixture.misses(before, same, &.{try disk.identityOf(a, t.io, &gpu, dir, null, &.{1}, 42, profile)});
+    try tmp.dir.deleteFile(t.io, "tensors/native-QB.safetensors");
+    try t.expectError(error.IndexedShardMissing, disk.identityOf(a, t.io, &gpu, dir, null, &.{1}, 42, profile));
 }
 
 test "disk identity: Nemotron CUDA indexed shard misses with the same probe" {
