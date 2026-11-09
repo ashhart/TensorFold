@@ -55,7 +55,7 @@ const Seen = struct {
 };
 
 fn imageSource(a: Allocator, w: u32, h: u32) !types.Source {
-    return .{ .name = "page", .bytes = try harness.png(a, w, h) };
+    return .{ .bytes = try harness.png(a, w, h) };
 }
 
 test "ocr run: blocks scale from the frame, quads are validated, and the sink sees the live pixels" {
@@ -110,7 +110,7 @@ test "ocr run: undecodable bytes refuse before any generation" {
     defer h.stop();
     var seen: Seen = .{};
     var fault: types.Fault = undefined;
-    const junk: types.Source = .{ .name = "x", .bytes = "\x89PNG\r\n\x1a\nnope" };
+    const junk: types.Source = .{ .bytes = "\x89PNG\r\n\x1a\nnope" };
     try t.expectError(error.Faulted, run.run(h.srv, a, &.{junk}, seen.sink(), &fault, Gone{}));
     try t.expectEqual(types.Class.bad_input, fault.class);
     try t.expectEqual(@as(usize, 0), h.next);
@@ -191,7 +191,7 @@ test "ocr run: an image whose first header and its pixels disagree is refused be
     for (orders) |o| {
         var seen: Seen = .{};
         var fault: types.Fault = undefined;
-        const src: types.Source = .{ .name = "p", .bytes = try twoHeaders(a, o[0], o[1]) };
+        const src: types.Source = .{ .bytes = try twoHeaders(a, o[0], o[1]) };
         try t.expectError(error.Faulted, run.run(h.srv, a, &.{src}, seen.sink(), &fault, Gone{}));
         try t.expectEqual(types.Class.bad_input, fault.class);
         try t.expectEqualStrings("page 0: the image's header and its pixels disagree", fault.message);
