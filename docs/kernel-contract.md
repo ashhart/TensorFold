@@ -463,11 +463,12 @@ its own is checked against the one below it, so its differences show as stale re
 `kernel-contract-limits` and add a set for that release rather than loosening the audit. Launch dimensions, dynamic
 shared memory, the device's limits and the planted controls are checked the same way under every release.
 
-`-Dnative-fp-decode` (off by default; nvcc 13.2 or later) builds prompt16 and fp8_experts for `sm_<n>a` from sm_120
-on and decodes their FP4/FP8 weight pairs with PTX ISA 9.2's `cvt.rn.bf16x2.e2m1x2`/`.e4m3x2`. Known finding: the
-hardware decode equals `fp4pair` on all 256 e2m1 bytes and `fp8pair` on every e4m3 pair without a NaN code; the 1,020
-pairs holding `0x7F` or `0xFF` decode to NaN, where the software gives ±480 (`tf-cuda-test native-fp`). Those codes
-are NaN in e4m3, so only a broken checkpoint can tell the two apart. Default images keep the software decode.
+`-Dnative-fp-decode` (off by default; nvcc 13.2 or later) builds prompt16, qmmf and fp8_experts for `sm_<n>a` from
+sm_120 on and decodes their FP4/FP8 weight pairs with PTX ISA 9.2's `cvt.rn.bf16x2.e2m1x2`/`.e4m3x2` (qmmf: FP4 only).
+Known finding: the hardware decode equals `fp4pair` on all 256 e2m1 bytes and `fp8pair` on every e4m3 pair without a
+NaN code; the 1,020 pairs holding `0x7F` or `0xFF` decode to NaN, where the software gives ±480 (`tf-cuda-test
+native-fp`). Those codes are NaN in e4m3, so only a broken checkpoint can tell the two apart. Default images keep the
+software decode.
 
 A restored 13.0 receipt can arrive after the later compiler sets. Such records mark `later_pending` so 13.0 and
 13.1 use their base usage, while 13.2 and later keep their independently measured or pending selection.
