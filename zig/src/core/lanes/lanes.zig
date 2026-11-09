@@ -40,6 +40,7 @@ pub const shared_head_cost_check = @import("shared_head_cost_check.zig");
 pub const shared_draft_check = @import("shared_draft_check.zig");
 pub const drafter = @import("drafter.zig");
 pub const drafted = @import("drafted.zig");
+pub const draft_tree = @import("draft_tree.zig");
 pub const recorder = @import("recorder.zig");
 pub const logprob = @import("logprob.zig");
 pub const grammar = @import("grammar.zig");
