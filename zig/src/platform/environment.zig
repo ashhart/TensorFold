@@ -348,6 +348,12 @@ pub fn refusal(a: std.mem.Allocator, environment: anytype, flags: Flags) !?[]con
         const raw = environment.get(r.name) orelse continue;
         _ = parse(r.name, raw) catch return try describe(a, r.name, raw);
     }
+    if (flags.dsv41 and (try value(bool, "TF_DSV41_COPY_DRAFTER", environment.get("TF_DSV41_COPY_DRAFTER"), false))) {
+        const lookup = environment.get("TF_DSV41_LOOKUP");
+        const blank_off = lookup != null and std.mem.trim(u8, lookup.?, " \t").len == 0;
+        if (blank_off or !(try value(bool, "TF_DSV41_LOOKUP", lookup, true)))
+            return try std.fmt.allocPrint(a, "TF_DSV41_COPY_DRAFTER=1 requires TF_DSV41_LOOKUP to be enabled", .{});
+    }
     return null;
 }
 
