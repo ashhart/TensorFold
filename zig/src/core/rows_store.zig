@@ -14,7 +14,6 @@ const Allocator = std.mem.Allocator;
 const Name = chain.Name;
 const Span = modes.Span;
 
-/// Tokens a block holds: 256 rows of every row part (the 27B's keys and values: 16 MiB).
 pub const block_tokens = 256;
 
 /// What a family gives the store: its kept states' image as parts, and copies out of and into kept states.
@@ -29,6 +28,8 @@ pub const Image = struct {
     blank_bytes: ?*const fn (ptr: *anyopaque, at: u32) u64 = null,
     /// Copy `in`, back to back, into `ranges` of `saved`'s image.
     scatter: *const fn (ptr: *anyopaque, saved: pc.Saved, ranges: []const image.Range, in: []const u8) anyerror!void,
+    /// Rows may disappear outside cache eviction; stage at the completed keep boundary when true.
+    transient: ?*const fn (ptr: *anyopaque, saved: pc.Saved) bool = null,
     /// Whether `saved`'s image can still be read whole (null: always).
     whole: ?*const fn (ptr: *anyopaque, saved: pc.Saved) bool = null,
 };
@@ -46,7 +47,6 @@ pub const State = struct {
     shared: bool,
 };
 
-/// A block file's bytes, and how many states name it.
 pub const Block = struct { bytes: u64, refs: u32 = 0 };
 
 pub const Counts = struct { written: u64 = 0, read: u64 = 0, reads: u64 = 0, writes: u64 = 0, skipped: u64 = 0, failed: u64 = 0, evicted: u64 = 0, verified: u64 = 0, differed: u64 = 0 };
