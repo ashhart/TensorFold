@@ -45,6 +45,7 @@ pub const Model = struct {
         errdefer gpa.destroy(m);
         m.gpa = gpa;
         m.config = try cfg.Config.read(gpa, io, dir);
+        try m.config.metal();
         m.device = try mtl.Device.init();
         errdefer m.device.deinit();
         // prompt chunks' GEMM and attention run on Metal 4 tensor units: an M5 or later

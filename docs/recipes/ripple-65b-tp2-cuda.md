@@ -7,9 +7,9 @@ follows it. One GPU runs Ripple through the one-GPU CUDA path; this path admits 
 
 ## Packs
 
-EXL3 packs of the release (`quant_method exl3`), for example 5.0 or 6.0 bits a weight with an 8-bit head. A 5.0-bit
-pack takes about 19.8 GiB of weights a rank, a 6.0-bit pack about 23.5 GiB. Copy the same pack to the same path on
-both hosts.
+EXL3 packs of the release (`quant_method exl3`) at 5.0 or 6.0 bits a weight with an 8-bit head, the two bitrates
+measured against ExLlamaV3; another bitrate is refused by name. A 5.0-bit pack takes about 19.8 GiB of weights a rank,
+a 6.0-bit pack about 23.5 GiB. Copy the same pack to the same path on both hosts.
 
 ## Serve
 
