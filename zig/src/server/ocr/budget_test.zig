@@ -1,19 +1,8 @@
-//! The page budget and the image-encode budget (docs/api.md OCR: Pages and budgets).
+//! The image-encode budget (docs/api.md OCR: Pages and budgets).
 const std = @import("std");
 const budget = @import("budget.zig");
 const types = @import("types.zig");
 const t = std.testing;
-
-test "ocr budget: pages default to at most 16 and take only what is left" {
-    const p = budget.Pages.init();
-    try t.expect(p.left >= 1 and p.left <= 16);
-    var q: budget.Pages = .{ .left = 3 };
-    try t.expect(q.take(2));
-    try t.expect(!q.take(2));
-    try t.expectEqual(@as(u32, 1), q.left);
-    try t.expect(q.take(1));
-    try t.expect(!q.take(1));
-}
 
 test "ocr budget: the 257th encode faults before it runs" {
     var fault: types.Fault = undefined;

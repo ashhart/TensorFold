@@ -225,7 +225,7 @@ pub const Info = struct {
     pictures: bool = false,
     /// Image input (--vision); null: text only.
     vision: ?Vision = null,
-    ocr: ?ocr.Ocr = null, // OCR reader for /v1/ocr and /ocr; null: no OCR routes
+    ocr: ?ocr.Ocr = null, // OCR reader for /v1/ocr; null: no OCR route
     /// The engine decodes greedily only: the server refuses a request with a temperature before admitting it.
     greedy_only: bool = false,
     /// The learner reads conversation prompts at any length through taps.

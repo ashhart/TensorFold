@@ -1,4 +1,4 @@
-//! The OCR routes' shared types: a page's blocks, its plain-text lines, the request's sources and its one fault.
+//! The OCR route's shared types: a page and its blocks, the request's sources and its one fault.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const api = @import("engine_api");
@@ -9,7 +9,7 @@ pub const OcrPage = struct {
     index: u32, // 0-based page index in the source document
     width: u32,
     height: u32,
-    dpi: u32, // render DPI of a PDF page; 72 for an image
+    dpi: u32, // 72 for an image
     blocks: []api.ocr.OcrBlock, // validated, reading order
 };
 
