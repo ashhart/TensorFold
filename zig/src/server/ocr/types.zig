@@ -1,4 +1,4 @@
-//! The OCR routes' shared types: a page's blocks, its plain-text lines, the request's sources and its one fault.
+//! The OCR route's shared types: a page and its blocks, the request's sources and its one fault.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const api = @import("engine_api");

@@ -50,7 +50,7 @@ const Order = struct {
     fn sink(o: *Order) run.PageSink {
         return .{ .ctx = o, .page = page };
     }
-    fn page(ctx: *anyopaque, a: Allocator, _: u32, p: *const types.OcrPage, rgb: picture.Rgb, _: *budget.Encodes, _: *types.Fault) run.Step!void {
+    fn page(ctx: *anyopaque, a: Allocator, p: *const types.OcrPage, rgb: picture.Rgb, _: *budget.Encodes, _: *types.Fault) run.Step!void {
         const o: *Order = @ptrCast(@alignCast(ctx));
         const calls: u32 = blk: { // 0 when the count cannot be read, which the test then reports
             const text = o.dir.readFileAlloc(t.io, "calls", a, .limited(64)) catch break :blk 0;

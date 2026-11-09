@@ -46,7 +46,7 @@ const Seen = struct {
     fn sink(s: *Seen) run.PageSink {
         return .{ .ctx = s, .page = page };
     }
-    fn page(ctx: *anyopaque, a: Allocator, _: u32, p: *const types.OcrPage, rgb: picture.Rgb, enc: *budget.Encodes, _: *types.Fault) run.Step!void {
+    fn page(ctx: *anyopaque, a: Allocator, p: *const types.OcrPage, rgb: picture.Rgb, enc: *budget.Encodes, _: *types.Fault) run.Step!void {
         const s: *Seen = @ptrCast(@alignCast(ctx));
         try s.pages.append(a, p.*);
         try s.sizes.append(a, .{ rgb.width, rgb.height });
@@ -125,16 +125,20 @@ test "ocr run: the page budget, undecodable bytes and the gate refuse before any
     try t.expectEqual(@as(usize, 0), h.next);
 }
 
-/// Reserves five whole-page encodes on the first page, as five full-page pictures would.
+/// Reserves five whole-page encodes on the first page of a request, as five full-page pictures would.
 const Greedy = struct {
     limit: u64 = 0,
+    first: bool = true,
     fn sink(g: *Greedy) run.PageSink {
+        g.first = true;
         return .{ .ctx = g, .page = page };
     }
-    fn page(ctx: *anyopaque, _: Allocator, source: u32, p: *const types.OcrPage, _: picture.Rgb, enc: *budget.Encodes, fault: *types.Fault) run.Step!void {
+    fn page(ctx: *anyopaque, _: Allocator, p: *const types.OcrPage, _: picture.Rgb, enc: *budget.Encodes, fault: *types.Fault) run.Step!void {
         const g: *Greedy = @ptrCast(@alignCast(ctx));
-        if (source == 0) g.limit = enc.limit_pixels;
-        if (source == 0) for (0..5) |_| try enc.before(fault, p.width, p.height);
+        if (!g.first) return;
+        g.first = false;
+        g.limit = enc.limit_pixels;
+        for (0..5) |_| try enc.before(fault, p.width, p.height);
     }
 };
 

@@ -18,7 +18,7 @@ pub const Offer = struct {
     window: ?usize = null,
     /// Built by the family; null: text only.
     vision: ?api.Vision = null,
-    /// The family's OCR reader (/v1/ocr and /ocr); null: no OCR routes.
+    /// The family's OCR reader (/v1/ocr); null: no OCR route.
     ocr: ?api.ocr.Ocr = null,
     /// The family's own store; null whenever its cache is off (no budget or no slots).
     cache: ?*api.prompt_cache.Store = null,

@@ -11,10 +11,7 @@ pub const Found = struct { start: usize, end: usize, html: bool };
 pub fn tables(a: Allocator, content: []const u8) Allocator.Error![]Found {
     var out: std.ArrayList(Found) = .empty;
     var sc: Scanner = .{ .src = content };
-    while (sc.next()) |item| switch (item) {
-        .table => |f| try out.append(a, f),
-        else => {},
-    };
+    while (sc.next()) |f| try out.append(a, f);
     return out.toOwnedSlice(a);
 }
 
@@ -107,10 +104,7 @@ fn trim(s: []const u8) []const u8 {
     return std.mem.trim(u8, s, " \t\r");
 }
 
-/// What the scanner yields: an ordinary line, a code or math line kept as written, or a table's byte range.
-const Item = union(enum) { text: []const u8, verbatim: []const u8, table: Found };
-
-/// A line scanner over docs/api.md OCR: Reader Markdown: fenced code, `$$` blocks, HTML and pipe tables, other lines.
+/// A line scanner over docs/api.md OCR: Reader Markdown that yields the tables outside fenced code and `$$` blocks.
 const Scanner = struct {
     src: []const u8,
     pos: usize = 0,
@@ -131,26 +125,18 @@ const Scanner = struct {
         return @intFromPtr(part.ptr) - @intFromPtr(s.src.ptr);
     }
 
-    fn next(s: *Scanner) ?Item {
+    fn next(s: *Scanner) ?Found {
         while (s.pos < s.src.len) {
             const l = s.lineAt(s.pos);
             const t = trim(l.text);
             s.pos = l.next;
             if (s.fence) |f| {
-                if (t.len >= f.len and std.mem.allEqual(u8, t, f.ch)) {
-                    s.fence = null;
-                    continue;
-                }
-                return .{ .verbatim = l.text };
+                if (t.len >= f.len and std.mem.allEqual(u8, t, f.ch)) s.fence = null;
+                continue;
             }
             if (s.math) {
-                if (std.mem.endsWith(u8, t, "$$")) {
-                    s.math = false;
-                    const inner = trim(t[0 .. t.len - 2]);
-                    if (inner.len > 0) return .{ .verbatim = inner };
-                    continue;
-                }
-                return .{ .verbatim = t };
+                if (std.mem.endsWith(u8, t, "$$")) s.math = false;
+                continue;
             }
             if (fenceOpen(t)) |f| {
                 s.fence = .{ .ch = t[0], .len = f };
@@ -158,15 +144,14 @@ const Scanner = struct {
             }
             if (std.mem.startsWith(u8, t, "$$")) {
                 const rest = t[2..];
-                if (std.mem.endsWith(u8, rest, "$$")) return .{ .verbatim = trim(rest[0 .. rest.len - 2]) };
-                s.math = true;
-                return .{ .verbatim = trim(rest) };
+                if (!std.mem.endsWith(u8, rest, "$$")) s.math = true;
+                continue;
             }
             if (startsHtmlTable(t) and !s.no_table_close) {
                 const start = s.offset(t);
                 if (indexOfIgnoreCase(s.src, start, "</table>")) |close| {
                     s.pos = close + "</table>".len;
-                    return .{ .table = .{ .start = start, .end = s.pos, .html = true } };
+                    return .{ .start = start, .end = s.pos, .html = true };
                 }
                 s.no_table_close = true;
             }
@@ -183,10 +168,9 @@ const Scanner = struct {
                         end = r.next;
                     }
                     s.pos = end;
-                    return .{ .table = .{ .start = s.offset(t), .end = last, .html = false } };
+                    return .{ .start = s.offset(t), .end = last, .html = false };
                 }
             }
-            return .{ .text = l.text };
         }
         return null;
     }

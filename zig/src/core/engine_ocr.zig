@@ -26,8 +26,8 @@ pub const Kind = enum {
     page,
 };
 
-/// The geometry a reader gives: none, one quad a block, or one quad a line.
-pub const Geometry = enum { none, block, line };
+/// The geometry a reader gives: none, or one quad a block.
+pub const Geometry = enum { none, block };
 
 /// One block of a page in reading order.
 pub const OcrBlock = struct {
