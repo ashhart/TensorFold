@@ -1,7 +1,6 @@
 //! POST /v1/ocr in Mistral's OCR contract: fields and document, then the page loop (docs/api.md OCR: Mistral).
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const api = @import("engine_api");
 const json = @import("json");
 const errors = @import("../errors.zig");
 const images = @import("../images.zig");
@@ -19,13 +18,12 @@ const Step = run.Step;
 
 pub const Options = reply.Options;
 
-/// What decoding needs from the server: the reader's geometry and the URL fetcher.
+/// What decoding needs from the server: the URL fetcher.
 pub const Facts = struct {
-    geometry: api.ocr.Geometry,
     fetch: ?images.Fetch,
 
     pub fn of(srv: *const Server) Facts {
-        return .{ .geometry = srv.info.ocr.?.geometry, .fetch = if (srv.config.vision_urls) images.Fetch.network(srv.io) else null };
+        return .{ .fetch = if (srv.config.vision_urls) images.Fetch.network(srv.io) else null };
     }
 };
 
@@ -93,8 +91,6 @@ pub fn decode(a: Allocator, body: Value, facts: Facts, fault: *Fault) Step!Reque
         const ok = v == .string and (std.mem.eql(u8, v.string, "word") or std.mem.eql(u8, v.string, "page") or std.mem.eql(u8, v.string, "block"));
         if (!ok) return bad(a, fault, &.{ "body", "confidence_scores_granularity" }, "confidence_scores_granularity must be \"word\", \"page\", \"block\" or null", .{});
     }
-    if (facts.geometry == .none and (o.header or o.footer))
-        return bad(a, fault, &.{ "body", if (o.header) "extract_header" else "extract_footer" }, "this model does not mark page headers or footers", .{});
     // this route reads one page image: pages selects PDF pages, and a PDF document is refused
     if (body.field("pages") != null) return bad(a, fault, &.{ "body", "pages" }, "pages selects pages of a PDF document; POST /v1/ocr reads one page image", .{});
     const bytes = try document(a, fault, body, facts);
