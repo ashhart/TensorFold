@@ -27,3 +27,23 @@ fn keepsEnd(store: *const Store, job: *const Job) bool {
     return !job.request.untaught and store.rules.lookahead == 0 and
         (!store.rules.warm_usable or store.usable(@intCast(job.request.prompt.len), job.request.chunks));
 }
+
+/// Foreground work arriving during the quiet interval delays this untouched pass instead of cancelling it.
+pub fn deferJob(h: *LaneHost, job: *Job) bool {
+    h.lock();
+    for (h.admitted.items, 0..) |j, i| if (j == job) {
+        _ = h.admitted.orderedRemove(i);
+        break;
+    };
+    @import("lane_host_ledger.zig").release(h, job);
+    var at: usize = 0;
+    while (at < h.queued.items.len and !h.queued.items[at].request.background) at += 1;
+    h.queued.insert(h.gpa, at, job) catch {
+        h.unlock();
+        h.finish(job, .failed, "out of memory");
+        return true;
+    };
+    h.load.requeued += 1;
+    h.unlock();
+    return true;
+}

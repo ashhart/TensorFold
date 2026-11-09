@@ -16,7 +16,10 @@ pub fn pick(h: *LaneHost) ?usize {
     prefix.release(h); // requests whose awaited cut is in (or will not come) go on first
     while (true) { // a request that waits for a cut another prompt is filling stays queued, passed over
         const at = choose(h) orelse return null;
-        if (!prefix.waits(h, h.queued.items[at])) return at;
+        const job = h.queued.items[at];
+        if (job.request.background and job.request.max_tokens == 0 and h.warm_quiet > 0 and
+            (h.admitted.items.len > 0 or h.core.activeCount() > 0)) return null;
+        if (!prefix.waits(h, job)) return at;
     }
 }
 

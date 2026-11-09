@@ -82,7 +82,7 @@ test "a background warm pass steps aside for a request that arrives during it, a
     try std.testing.expectEqual(@as(usize, 48), real.tokens);
 }
 
-test "a warm pass waits for a quiet engine: a request sent right after the reply goes first and the pass runs no chunk" {
+test "warm queue: foreground arriving during quiet goes first and the deferred pass later completes" {
     const gpa = std.testing.allocator;
     var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
     defer cfg.deinit(gpa);
@@ -95,7 +95,7 @@ test "a warm pass waits for a quiet engine: a request sent right after the reply
     var core = lanes.Engine.init(gpa, &cfg, target.backend(), clock.clock());
     defer core.deinit();
     var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2, .warm_turns = true });
-    host.warm_quiet = 30 * std.time.ns_per_s; // far past the next request: it must step aside, not time out
+    host.warm_quiet = 30 * std.time.ns_per_ms; // the next request wakes this wait before it expires
     try host.start();
     defer host.stop();
     const prompt = [_]u32{ 2, 7, 1, 8 };
@@ -114,8 +114,8 @@ test "a warm pass waits for a quiet engine: a request sent right after the reply
     try host.engine().submit(2, &request, .{ .ctx = &real, .event = Box.event });
     try std.testing.expectEqual(Reason.length, real.wait());
     try std.testing.expectEqual(@as(usize, 48), real.tokens);
-    try std.testing.expectEqual(Reason.cancelled, warm.wait());
-    try std.testing.expectEqual(@as(usize, 0), chunks.n.load(.monotonic)); // the GPU never ran a chunk of it
+    try std.testing.expectEqual(Reason.length, warm.wait());
+    try std.testing.expectEqual(@as(usize, 3), chunks.n.load(.monotonic));
 }
 
 test "a warm pass with no request after it runs once the engine has been quiet" {
@@ -372,4 +372,28 @@ test "a kept warm end supersedes its history at either lookahead and regeneratio
         try std.testing.expectEqual(@as(?u32, 0), got.cached);
         try std.testing.expect(got.same);
     }
+}
+
+test "warm queue: a pass arriving beside active decoding stays queued and eventually warms" {
+    const a = std.testing.allocator;
+    var cfg = try lanes.Config.init(a, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
+    defer cfg.deinit(a);
+    var target: lanes.fake.Fake = .{ .gpa = a, .prefill_chunks = 3 };
+    defer target.deinit();
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(a, &cfg, target.backend(), clock.clock());
+    defer core.deinit();
+    var host = LaneHost.init(a, std.testing.io, &core, .{ .lanes = 2, .warm_turns = true });
+    host.warm_quiet = std.time.ns_per_ms;
+    const prompt = [_]u32{ 2, 7, 1, 8 };
+    const request: Request = .{ .prompt = &prompt, .max_tokens = 48 };
+    const warm_request: Request = .{ .prompt = &prompt, .max_tokens = 0, .background = true };
+    var real: Box = .{};
+    var warm: Box = .{};
+    try host.engine().submit(1, &request, .{ .ctx = &real, .event = Box.event });
+    try host.engine().submit(2, &warm_request, .{ .ctx = &warm, .event = Box.event });
+    try host.start();
+    defer host.stop();
+    try std.testing.expectEqual(Reason.length, real.wait());
+    try std.testing.expectEqual(Reason.length, warm.wait());
 }

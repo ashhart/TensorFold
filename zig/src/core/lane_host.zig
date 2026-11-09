@@ -382,7 +382,8 @@ pub const LaneHost = struct {
     /// A taken job's stream, set up to start; null when the job ended instead (dropped or cancelled).
     pub fn setup(h: *LaneHost, job: *Job) ?i96 {
         const r = job.request;
-        if (r.background and r.max_tokens == 0 and h.warm_quiet > 0 and !h.quiet(job)) return h.ended(h.cancel(job)); // other work came first
+        if (r.background and r.max_tokens == 0 and h.warm_quiet > 0 and !h.quiet(job))
+            return h.ended(if (cancelled(job)) h.cancel(job) else @import("lane_host_warm.zig").deferJob(h, job));
         if (!lane_stream.open(h, job)) return null; // the job was finished instead
         return job.began;
     }
