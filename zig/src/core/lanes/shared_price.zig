@@ -40,6 +40,12 @@ pub const Prices = struct {
         return old and next -| b.last_probe >= every;
     }
 
+    /// Spend the trial's spacing when it is selected, even if its forward width cannot be measured.
+    pub fn probed(p: *Prices, a: Allocator, streams: usize, sampled: bool) !void {
+        const b = try p.get(a, streams, sampled);
+        b.last_probe = b.rounds +| 1;
+    }
+
     /// The plain intercept is never updated by a round that verifies or prepares any draft.
     pub fn observe(p: *Prices, a: Allocator, streams: usize, rows: u64, residual: f64, sampled: bool, plain: bool, calibration: bool) !void {
         const b = try p.get(a, streams, sampled);
@@ -77,5 +83,8 @@ pub fn calibrate(e: anytype, plans: anytype) !bool {
     if (!e.cfg.timed or !e.cfg.plain_guard or e.cfg.draft_confidence != null or
         e.trim != null or plans.len < 2 or e.cfg.shared_costs.empty()) return false;
     for (plans) |p| if (p.kind == .forced or p.stream.rounds == 0) return false;
-    return e.rule.shared_price.due(e.gpa, plans.len, @import("windows.zig").anySampled(plans));
+    const sampled = @import("windows.zig").anySampled(plans);
+    if (!try e.rule.shared_price.due(e.gpa, plans.len, sampled)) return false;
+    try e.rule.shared_price.probed(e.gpa, plans.len, sampled);
+    return true;
 }
