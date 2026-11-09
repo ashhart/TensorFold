@@ -1,15 +1,17 @@
 # TensorFold
 
-TensorFold serves language models from a Zig binary on Apple Silicon and NVIDIA GPUs, with no Python or MLX dependency.
+TensorFold serves language models from a Zig binary on Apple Silicon and NVIDIA GPUs.
+The engine reads checkpoints, tokenizes requests and runs Metal or CUDA kernels directly.
+Serving needs no Python or MLX installation.
 
-Coding agents must read the [contributor skill](docs/recipes/SKILL.md) first.
+Building with a coding agent? Have it load the [contributor skill](docs/recipes/SKILL.md) before it writes any code.
 
 ## Contributing with agents
 
-Before editing, check [Agent Traffic Control](https://github.com/ashhart/ATC) and the [radar](https://tensorfold.dev/atc).
-Follow [CONTRIBUTING.md](CONTRIBUTING.md) and the [ATC instructions](docs/atc/SKILL.md).
+Please use [Agent Traffic Control](https://github.com/ashhart/ATC) before editing TensorFold so contributors and agents can avoid duplicate work and conflicting changes.
+Check the [live agent radar](https://tensorfold.dev/atc) before choosing an issue and follow [CONTRIBUTING.md](CONTRIBUTING.md) and the [ATC contributor instructions](docs/atc/SKILL.md).
 
-In an updated clone, install ATC 0.7.0 or later and claim work:
+Install or upgrade ATC to 0.7.0 or later, then run from an updated TensorFold clone:
 
 ```sh
 npm install -g github:ashhart/ATC
@@ -17,11 +19,13 @@ atc check ISSUE --json
 atc claim ISSUE --json
 ```
 
-Claim a free `ISSUE` after a complete check. Successful claims start an anonymous radar session and return its number.
-Keep that session number; for existing work use `atc start ISSUE --json`. Add `--github-name` to show your name,
-or `--local` to keep the session on your machine.
-GitHub ties the session verification comment to its author, even when the radar hides the name.
-Check that `publication` is `public`; `unavailable` means the public update failed, even if the local claim succeeded.
+Replace `ISSUE` with the issue number and claim only after a complete check says the work is free.
+TensorFold enables automatic public check-ins: a successful new claim starts an anonymous session on the radar and returns its `session` number.
+Keep that number instead of starting a duplicate session.
+For work already yours, start a session with `atc start ISSUE --json`.
+Add `--github-name` to `claim` or `start` only if you want your verified GitHub name shown; `--local` keeps a new session on your machine.
+The board shows the issue, activity state and last check-in; GitHub still associates the verification comment with its author.
+Check that `publication` is `public`; `unavailable` means the public update failed even if the local claim or session succeeded.
 
 Pulse only while the agent is working, before its five-minute check-in expires:
 
@@ -34,11 +38,12 @@ atc release ISSUE --json
 ```
 
 Use `reviewing` or `blocked` when appropriate, land the session when it stops, and resolve overlaps before opening a pull request.
-Run the [pull request skill](docs/pr/SKILL.md) before opening a PR.
+Before opening a pull request, have the agent run the [pull request skill](docs/pr/SKILL.md); agents that support skills can install it as `tensorfold-pull-request`.
 
 ## Quick start
 
-Start with Qwen3.5-2B, checked on Metal and a GB10. These commands serve its pinned revision as `local-model`.
+Start with Qwen3.5-2B, the small 4-bit checkpoint checked on Metal and a GB10. The commands below download its
+pinned revision, then serve it as `local-model`. Model weights have their own licenses.
 Reviewing or benchmarking TensorFold? [Evaluating TensorFold](docs/evaluating.md) covers pinning, signature checks,
 a container and the tests that need no GPU.
 
@@ -90,7 +95,6 @@ The API also serves completions, Responses and Anthropic Messages. `/v1/models` 
 On Windows with an NVIDIA GPU, follow [the native Windows build guide](docs/WINDOWS.md).
 Use `tensorfold --help`, `tensorfold capabilities --json` and `tensorfold serve REPO --help` to inspect your binary.
 You can also serve a complete local checkpoint directory or an existing Hugging Face cache.
-Model weights have their own licenses.
 
 `tensorfold web [ARGS...]` opens TensorFold Web, a small local web app for picking, running and chatting with models.
 If it needs installing, an interactive release binary offers to install its matching version with `uv` after you say yes.
@@ -339,7 +343,7 @@ The binary's `capabilities --json` response lists its supported flags and platfo
 | `--register-redraw-high PERCENT` | The share of that phrase's voiced frames that must lie above `--register-high-hz`. |
 | `--register-high-hz HZ` | The pitch line, 75 to 600 Hz, that marks a high register; calibrate it on your own voice. |
 | `--parallel N\|auto` | Cap active requests at N and queue the rest. Default `auto` asks for up to 8 as memory and the engine allow; an explicit count that cannot fit is refused. Read the accepted count at startup. |
-| `--prompt-cache-gib GIB` | Retained-prefix budget; on Metal, half the available room with a 16 GiB floor when room permits. An explicit value overrides it; 0 disables it. |
+| `--prompt-cache-gib GIB` | Retained-prefix budget; by default half the room left after streams on Metal and unified-memory CUDA (16 GiB floor where room permits), 8 GiB host snapshots on discrete CUDA, 16 GiB for Flash Next's batch host. An explicit value overrides it; 0 disables it. |
 | `--prompt-cache-over-cap` | Permit an explicit prefix budget past what 70% of RAM leaves once the server loads. |
 | `--learn` | Keep shared prompt prefixes on disk for new conversations to resume; the models are below the table. |
 | `--learn-dir DIR` | Where `--learn` keeps them, `~/.cache/tensorfold/learned` by default; implies `--learn`. |
@@ -360,9 +364,6 @@ The binary's `capabilities --json` response lists its supported flags and platfo
 | `--no-update-check` | Accepted compatibility switch; update the installed binary through its package manager. |
 | `--backend auto` | Use the backend compiled for the platform; `mlx` selects native Metal on macOS and `cuda` selects CUDA on Linux. |
 
-The default cache scales after streams; discrete CUDA host snapshots stay at 8 GiB and Flash Next batch at 16 GiB.
-Explicit values override it; see [prompt reuse](RUNBOOK.md).
-
 `--prompt-cache-gib` applies to Nemotron, Flash Next, GLM, Qwen3.8-27B and LFM2.5-24B-A2B, and
 `--prompt-cache-over-cap` to the same models but GLM.
 `--learn` keeps shared prompt prefixes, such as a system prompt and its tools, on disk, so new conversations resume
@@ -374,7 +375,8 @@ a long conversation. Where the cache cannot keep a whole context, the server als
 at each prompt's history end, so a turn whose template drops the last reply's reasoning resumes there. Replies are
 the same tokens as a fresh prompt pass; `TF_QWEN27_SLOT_RESUME=0` turns both off.
 
-Sampling uses `generation_config.json`, overridden by serve flags and request fields. For GLM use a positive context.
+Sampling defaults come from the checkpoint's `generation_config.json`, then serve flags and request fields override them.
+`--context 0` is family-specific; use a positive limit for GLM and inspect the capacity reported at startup.
 The supported environment variables are listed in `capabilities --json`, including API keys, request logging and Hugging Face cache paths.
 `TF_Q27_PROFILE=N` makes a native Metal Qwen3.8-27B server log a per-class GPU-time breakdown every N decode rounds (`1` means 64) and add `gpu_seconds` to its replies; it is diagnostic only, and a profiled round runs slower.
 
