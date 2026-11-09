@@ -324,8 +324,15 @@ class GateRunTests(unittest.TestCase):
                 self.assertTrue(all(r["name"] and r["error"] for r in profile["refusals"]))
                 self.assertGreater(profile["sampled"]["temperature"], 0)
                 self.assertTrue(all(isinstance(v, str) for v in profile.get("fresh_env", {}).values()))
-                for gate in conformance.SKIPPABLE:  # each lifecycle gate runs or says why not
-                    self.assertTrue(gate in profile or profile.get("skip", {}).get(gate), gate)
+                self.assertEqual(conformance.lifecycle_gaps(profile), [])  # each lifecycle gate runs or says why not
+
+    def test_an_empty_lifecycle_block_is_a_gap(self):
+        base = {"cancel": {"prompt": "count"}, "evict": {"fill_prompts": 12}}
+        self.assertEqual(conformance.lifecycle_gaps(base), [])
+        for gate, block in (("cancel", {}), ("evict", {}), ("evict", {"fill_prompts": 0}), ("cancel", {"prompt": ""})):
+            with self.subTest(gate=gate, block=block):
+                self.assertEqual(conformance.lifecycle_gaps({**base, gate: block}), [gate])
+                self.assertEqual(conformance.lifecycle_gaps({**base, gate: block, "skip": {gate: "why"}}), [])
 
 
 if __name__ == "__main__":
