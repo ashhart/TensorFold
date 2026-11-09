@@ -31,6 +31,17 @@ pub const Budget = struct {
 /// The streams served, the page plan and layout or the KV ledger plan, and TF_KV_SHARE's count when states take slots.
 pub const Count = struct { streams: u32, paged: ?kv_pages.Plan, layout: ?kv_pool.Layout, ledger: ?ledger.Plan = null, slots: ?usize = null, planned: ?kv_pool.Budget = null };
 
+pub const CacheRoom = struct { room: u64, streams: u64 };
+
+/// A host cache sits beside every admitted full window, including a request ledger's declared scratch.
+pub fn cacheRoom(room: u64, stream_bytes: u64, free: u32, counted: Count) CacheRoom {
+    if (counted.ledger) |p| return .{
+        .room = room -| p.cost.each.scratch,
+        .streams = p.one_full *| (counted.streams -| p.standing.streams),
+    };
+    return .{ .room = room, .streams = stream_bytes *| (counted.streams -| free) };
+}
+
 /// TF_KV_SHARE: the cache's part made pool pages, all of it unless the family keeps its states' rest elsewhere (GLM).
 pub fn keptPpm(comptime F: type, share: bool) u32 {
     if (!share) return 0;
@@ -108,4 +119,22 @@ test "TF_KV_SHARE's states take slots only with share on, a layout slot and the 
     try std.testing.expect(try shareSlots(false, 1, false) == null);
     try std.testing.expect(try shareSlots(true, 0, false) == null);
     try std.testing.expect(try shareSlots(true, 1, true) == null);
+}
+
+test "CUDA cache default uses the declared request ledger windows and scratch" {
+    const GiB: u64 = 1 << 30;
+    var counted: Count = .{ .streams = 8, .paged = null, .layout = null };
+    const whole = cacheRoom(88 * GiB, 5 * GiB, 1, counted);
+    try std.testing.expectEqual(@as(u64, 35 * GiB), whole.streams);
+    counted.ledger = .{
+        .total = 88 * GiB,
+        .kept = .{ .snaps = 0, .copied = 0, .snap_bytes = 0 },
+        .one_full = 6 * GiB,
+        .standing = .{ .streams = 1, .each = 6 * GiB },
+        .cost = .{ .context = 1, .each = .{ .layout = .{ .fixed_bytes = 0, .token_bytes = 1, .page_tokens = 1, .snap_bytes = 0 }, .scratch = 2 * GiB } },
+    };
+    const actual = cacheRoom(88 * GiB, 5 * GiB, 1, counted);
+    try std.testing.expectEqual(@as(u64, 86 * GiB), actual.room);
+    try std.testing.expectEqual(@as(u64, 42 * GiB), actual.streams);
+    try std.testing.expectEqual(@as(u64, 22 * GiB), budget.hostCacheBudget(null, 96 * GiB, actual.room, actual.streams, true));
 }
