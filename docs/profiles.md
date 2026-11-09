@@ -169,7 +169,7 @@ that each setting changed a reply. Each stable fallback is null. The release bac
 | --- | --- |
 | `arithmetic` | `TF_DSV41_NUCLEUS`, `TF_DSV41_CONTEXT`, `TF_DSV41_ROWS_CAP`, `TF_DSV41_POOL_TOKENS`, `TF_DSV41_KV_SPLIT`, `TF_DSV41_KV_SPLIT_UNION_MIB` |
 | `debug` | `TF_DSV41_LAYERS`, `TF_DSV41_NEEDS_POOL` |
-| `experimental` | `TF_DSV41_EXPERT_TOPP`, `TF_DSV41_OWN_PREFILL`, `TF_DSV41_PREFILL_PIECES`, `TF_DSV41_SLOTS`, `TF_DSV41_MHC_DEFER`, `TF_DSV41_DRAFTS`, `TF_DSV41_SAMPLING`, `TF_DSV41_IMAGES`, `TF_DSV41_BIAS_VL`, `TF_DSV41_ENGRAM_DIR`, `TF_DSV41_SCHEMA_PROMPT`, `TF_DSV41_TOOL_GRAMMAR` |
+| `experimental` | `TF_DSV41_EXPERT_TOPP`, `TF_DSV41_OWN_PREFILL`, `TF_DSV41_PREFILL_PIECES`, `TF_DSV41_SLOTS`, `TF_DSV41_MHC_DEFER`, `TF_DSV41_DRAFTS`, `TF_DSV41_SAMPLING`, `TF_DSV41_IMAGES`, `TF_DSV41_BIAS_VL`, `TF_DSV41_ENGRAM_DIR`, `TF_DSV41_SCHEMA_PROMPT`, `TF_DSV41_TOOL_GRAMMAR`, `TF_DSV41_COPY_DRAFTER` |
 
 The DeepSeek-V4.1 Metal server also reads `TF_DSV41_PREFILL_PIECES`: there `1` runs a prompt in steps between the
 other streams' rounds ([environment](environment.md)); `stable` leaves it absent, so prompts run whole.
