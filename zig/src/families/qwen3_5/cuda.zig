@@ -54,6 +54,7 @@ test {
     _ = @import("cuda_prefix.zig");
     _ = @import("cuda_prefix_fault_test.zig");
     _ = @import("cuda_pend_test.zig");
+    _ = @import("cuda_states.zig");
     _ = @import("cuda_reuse_pages_test.zig");
     _ = @import("cuda_warm_turns_test.zig");
     _ = @import("cuda_spares.zig");
