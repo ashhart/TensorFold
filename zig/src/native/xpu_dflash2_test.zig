@@ -494,5 +494,7 @@ test "draft sources: XPU lane target refuses another slot's prompt tail and draf
     var none = first;
     none.depth = 0;
     try t.vtable.draft(t.ptr, &.{none});
-    try std.testing.expectError(error.DraftNotAttached, t.vtable.draft(t.ptr, &.{ none, first }));
+    var one = first;
+    one.depth = 1; // the least depth that asks for drafts
+    try std.testing.expectError(error.DraftNotAttached, t.vtable.draft(t.ptr, &.{ none, one }));
 }
