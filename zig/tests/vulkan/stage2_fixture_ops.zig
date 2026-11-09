@@ -163,7 +163,7 @@ pub const Add = struct {
 // ---- SwiGLU: one bf16 store plus a documented f32 budget ----
 
 // The f32 exp/1+/divide/multiply chain uses 8 ops and a fixed 8*2^-24 budget; exp has no Vulkan-spec per-op bound.
-const swiglu_spec: c.Spec = .{ .name = "vulkan swiglu bf16 (ASH_QWEN35 one-store)", .accum = .none, .depth = no_depth, .ops = 8, .out = .bf16, .served = &[_]c.Shape{} };
+const swiglu_spec: c.Spec = .{ .name = "vulkan swiglu bf16 (ORACLE_QWEN35 one-store)", .accum = .none, .depth = no_depth, .ops = 8, .out = .bf16, .served = &[_]c.Shape{} };
 fn no_depth(_: c.Shape) usize {
     return 0; // elementwise: boundExact never calls depth
 }
@@ -253,7 +253,7 @@ pub const Swiglu = struct {
 // depth = 20: 2048 takes 8 adds + 8 levels (16), 256 1 + 8; the sum is positive, so gamma(20) is relative in any order.
 const rms_depth = 20;
 const rms_spec: c.Spec = .{
-    .name = "vulkan fast_norm bf16 rms (ASH_QWEN35 weight*(x*inv))",
+    .name = "vulkan fast_norm bf16 rms (ORACLE_QWEN35 weight*(x*inv))",
     .accum = .f32,
     .depth = rmsDepth,
     .ops = 4,

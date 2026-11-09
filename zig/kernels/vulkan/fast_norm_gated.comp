@@ -88,7 +88,7 @@ void store_normed(uint row, uint row_length, uint index, float value,
       (params.lhs_size == 1u)
           ? LOAD_VALUE(weight_data.values[params.rhs_offset])
           : LOAD_VALUE(weight_data.values[params.rhs_offset + index]);
-#ifdef ASH_QWEN35
+#ifdef ORACLE_QWEN35
   // Ash8c Metal oracle (gdn_post.metal): BF16(weight*(value*norm)); gate is BF16((gate/(1+exp(-gate)))*normed).
   precise float scaled = value * norm;
   precise float result = weight * scaled;
@@ -215,7 +215,7 @@ void main() {
           (params.lhs_size == 1u)
               ? LOAD_VALUE(weight_data.values[params.rhs_offset])
               : LOAD_VALUE(weight_data.values[params.rhs_offset + index]);
-#ifdef ASH_QWEN35
+#ifdef ORACLE_QWEN35
       // Ash8c Metal gdn_post keeps value*norm then weight; its gate uses division, as in store_normed.
       precise float scaled = value * norm;
       precise float result = weight * scaled;

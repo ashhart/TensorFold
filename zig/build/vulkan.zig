@@ -78,12 +78,12 @@ pub const stage1_shaders_src =
     \\pub const copy_u16 align(4) = @embedFile("copy_u16.spv").*;
 ;
 
-/// Stage 2's images: norm/swiglu in the ASH_QWEN35 oracle form; add_preserve_bf16 is add plus DenormPreserve (f32).
+/// Stage 2's images: norm/swiglu in the ORACLE_QWEN35 oracle form; add_preserve_bf16 is add plus DenormPreserve (f32).
 pub const stage2_variants = [_]ShaderVariant{
-    .{ .name = "norm_bf16", .src = "zig/kernels/vulkan/fast_norm.comp", .defines = &.{ "-DUSE_BF16", "-DASH_QWEN35" } },
+    .{ .name = "norm_bf16", .src = "zig/kernels/vulkan/fast_norm.comp", .defines = &.{ "-DUSE_BF16", "-DORACLE_QWEN35" } },
     .{ .name = "add_bf16", .src = "zig/kernels/vulkan/binary_vec.comp", .defines = &.{} },
     .{ .name = "add_preserve_bf16", .src = "zig/kernels/vulkan/binary_vec.comp", .defines = &.{"-DPRESERVE_F32"} },
-    .{ .name = "swiglu_bf16", .src = "zig/kernels/vulkan/swiglu.comp", .defines = &.{ "-DUSE_BF16", "-DASH_QWEN35" } },
+    .{ .name = "swiglu_bf16", .src = "zig/kernels/vulkan/swiglu.comp", .defines = &.{ "-DUSE_BF16", "-DORACLE_QWEN35" } },
 };
 
 pub const stage2_shaders_src =
@@ -93,9 +93,9 @@ pub const stage2_shaders_src =
     \\pub const swiglu_bf16 align(4) = @embedFile("swiglu_bf16.spv").*;
 ;
 
-/// Stage 3's images: the ASH_QWEN35 rope variant, the causal multi-row SDPA decode arm and the attention output gate.
+/// Stage 3's images: the ORACLE_QWEN35 rope variant, the causal multi-row SDPA decode arm and the attention output gate.
 pub const stage3_variants = [_]ShaderVariant{
-    .{ .name = "rope_bf16", .src = "zig/kernels/vulkan/fast_rope.comp", .defines = &.{ "-DUSE_BF16", "-DASH_QWEN35" } },
+    .{ .name = "rope_bf16", .src = "zig/kernels/vulkan/fast_rope.comp", .defines = &.{ "-DUSE_BF16", "-DORACLE_QWEN35" } },
     .{ .name = "sdpa_rows_bf16", .src = "zig/kernels/vulkan/sdpa_decode_native.comp", .defines = &.{ "-DBF16_IO", "-DSDPA_DIM=256", "-DSDPA_ROWS" } },
     .{ .name = "gate_bf16", .src = "zig/kernels/vulkan/attention_gate.comp", .defines = &.{} },
 };
@@ -111,9 +111,9 @@ pub const stage4_variants = [_]ShaderVariant{
     .{ .name = "conv_dw1d_bf16", .src = "zig/kernels/vulkan/conv_dw1d.comp", .defines = &.{"-DUSE_BF16"} },
     .{ .name = "gdn_conv_decode_bf16", .src = "zig/kernels/vulkan/gdn_conv_decode.comp", .defines = &.{"-DUSE_BF16"} },
     .{ .name = "gdn_split_bf16", .src = "zig/kernels/vulkan/gdn_split.comp", .defines = &.{"-DUSE_BF16"} },
-    .{ .name = "prefill_recur_bf16", .src = "zig/kernels/vulkan/gated_delta_prefill_ash.comp", .defines = &.{"-DUSE_BF16"} },
-    .{ .name = "gated_delta_decode_bf16", .src = "zig/kernels/vulkan/gated_delta_decode.comp", .defines = &.{ "-DUSE_BF16", "-DASH_QWEN35" } },
-    .{ .name = "fast_norm_gated_bf16", .src = "zig/kernels/vulkan/fast_norm_gated.comp", .defines = &.{ "-DUSE_BF16", "-DASH_QWEN35" } },
+    .{ .name = "prefill_recur_bf16", .src = "zig/kernels/vulkan/gated_delta_prefill_oracle.comp", .defines = &.{"-DUSE_BF16"} },
+    .{ .name = "gated_delta_decode_bf16", .src = "zig/kernels/vulkan/gated_delta_decode.comp", .defines = &.{ "-DUSE_BF16", "-DORACLE_QWEN35" } },
+    .{ .name = "fast_norm_gated_bf16", .src = "zig/kernels/vulkan/fast_norm_gated.comp", .defines = &.{ "-DUSE_BF16", "-DORACLE_QWEN35" } },
     .{ .name = "copy_u16", .src = "zig/kernels/vulkan/copy_general.comp", .defines = &.{"-DUSE_U16"} },
 };
 
@@ -200,11 +200,11 @@ pub fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     m.addImport("stage1_params", b.createModule(.{ .root_source_file = b.path("zig/src/vulkan/params.zig"), .target = target, .optimize = optimize }));
     // Host-test-only .comp sources: flag-pin tests match push flags against literal masks; shipped ELFs embed SPIR-V.
     const comp_files = b.addWriteFiles();
-    inline for (.{ "gated_delta_decode", "gated_delta_prefill_ash", "fast_rope", "gdn_conv_decode" }) |name|
+    inline for (.{ "gated_delta_decode", "gated_delta_prefill_oracle", "fast_rope", "gdn_conv_decode" }) |name|
         _ = comp_files.addCopyFile(b.path("zig/kernels/vulkan/" ++ name ++ ".comp"), name ++ ".comp");
     m.addImport("vulkan_comp_sources", b.createModule(.{ .root_source_file = comp_files.add("comp_sources.zig",
         \\pub const gated_delta_decode = @embedFile("gated_delta_decode.comp");
-        \\pub const gated_delta_prefill_ash = @embedFile("gated_delta_prefill_ash.comp");
+        \\pub const gated_delta_prefill_oracle = @embedFile("gated_delta_prefill_oracle.comp");
         \\pub const fast_rope = @embedFile("fast_rope.comp");
         \\pub const gdn_conv_decode = @embedFile("gdn_conv_decode.comp");
         \\
