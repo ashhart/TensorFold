@@ -4,6 +4,7 @@ const fixture = @import("src/native/persistence_fixture.zig");
 const qwen = @import("src/native/qwen27_disk.zig");
 const glm = @import("src/native/glm_disk.zig");
 const flash = @import("src/native/flashnext_disk.zig");
+const nemo = @import("src/native/metal_identity.zig");
 const t = std.testing;
 
 // These expose only the resolved fields the production key producers consume, without a GPU owner.
@@ -139,6 +140,19 @@ test "persistence identity: Flash Next Metal resolved branches miss with the sam
     try changed.append(t.allocator, flash.withPolicy(7, &r));
     r.tp = null;
     try fixture.misses(before, flash.withPolicy(7, &r), changed.items);
+}
+
+test "persistence identity: Nemotron Metal coop K-slice split misses with the same probe" {
+    var b: struct { coop_split: bool, scratch: struct { rows: usize } } = .{ .coop_split = true, .scratch = .{ .rows = 64 } };
+    const before = nemo.withPolicy(7, &b);
+    const matching = nemo.withPolicy(7, &b);
+    b.scratch.rows = 128; // a chunk of 65 to 128 rows splits only when the scratch holds its partials
+    const wider = nemo.withPolicy(7, &b);
+    b.coop_split = false; // TF_COOP_SPLIT=0
+    const off = nemo.withPolicy(7, &b);
+    b.scratch.rows = 64; // with no split, the scratch rows decide nothing
+    try t.expectEqual(off, nemo.withPolicy(7, &b));
+    try fixture.misses(before, matching, &.{ wider, off });
 }
 
 test "persistence identity: Flash Next Metal actual pack rewrite misses with the same source and probe" {

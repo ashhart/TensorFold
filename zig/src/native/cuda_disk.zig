@@ -5,6 +5,7 @@ const api = @import("engine_api");
 const lanes = @import("lanes");
 const nemotron = @import("nemotron");
 const disk_identity = @import("disk_identity.zig");
+const persistence_policy = @import("persistence_policy.zig");
 const kept = nemotron.native.kept_states;
 const rows = api.prompt_cache.rows;
 const Target = kept.Target;
@@ -91,7 +92,38 @@ fn whole(_: *anyopaque, saved: api.prompt_cache.Saved) bool {
 /// What disk states are read under: the checkpoint, kernels (ours or a captured set), driver, device, a probe's bits.
 pub fn identity(a: Allocator, io: std.Io, g: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, backend: lanes.backend.Backend, t: *Target, family: []const u8) !struct { id: u64, rate: f64 } {
     const p = try probe(a, io, backend, t);
-    return .{ .id = try identityOf(a, io, g, dir, kernels, &[_]u64{@intFromBool(t.head != null)}, p.hash, .{ .family = family, .backend = "cuda" }), .rate = p.rate };
+    const id = try identityOf(a, io, g, dir, kernels, &[_]u64{@intFromBool(t.head != null)}, p.hash, .{ .family = family, .backend = "cuda" });
+    return .{ .id = withPolicy(id, t.e), .rate = p.rate };
+}
+
+/// Nemotron's key past its probe: the checkpoint math and expert ranks the load resolved, the experts' grids.
+pub fn withPolicy(legacy: u64, e: anytype) u64 {
+    const k = &e.k;
+    var grids = std.hash.Wyhash.init(0); // resident blocks a grid takes, from this GPU's SM count
+    grids.update(std.mem.asBytes(&k.experts.resident));
+    if (k.modelopt) |m| grids.update(std.mem.asBytes(&m.experts.resident));
+    if (k.ck) |c| {
+        grids.update(std.mem.asBytes(&c.resident));
+        grids.update(std.mem.asBytes(&c.prompt_resident));
+    }
+    return persistence_policy.extend(legacy, "nemotron-cuda-policy-v1", &.{
+        // --precision checkpoint's FP4 and FP8 math, and the expert ranks of TF_NEMOTRON_WORLD
+        @intFromBool(e.c.ck),
+        e.c.world,
+        // a ModelOpt checkpoint's NVFP4 decode form (TF_NVFP4_DECODE_WARPS)
+        if (k.modelopt) |m| m.experts.warps else 0,
+        grids.final(),
+    });
+}
+
+/// A disk module's key: the shared identity over its facts, extended with its resolved policy when it declares one.
+pub fn keptKey(comptime K: type, a: Allocator, io: std.Io, g: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, owner: anytype, probed: u64, profile: disk_identity.Profile) !u64 {
+    const facts = K.facts(owner); // an array, or a slice
+    const list: []const u64 = if (@typeInfo(@TypeOf(facts)) == .pointer) facts else &facts;
+    const id = try identityOf(a, io, g, dir, kernels, list, probed, profile);
+    if (comptime !@hasDecl(K, "policy")) return id;
+    const resolved = K.policy(owner);
+    return persistence_policy.extend(id, K.policy_domain, &resolved);
 }
 
 /// The identity's hash: the checkpoint, kernels, device, driver, a family's facts, then its probe's hash.
@@ -173,10 +205,8 @@ pub fn attachKept(comptime K: type, name: []const u8, a: Allocator, io: std.Io, 
     if (comptime @hasDecl(K, "attach")) return K.attach(a, io, ctx, o, root, kernels, loaded, store) else {
         if (@hasDecl(K, "bind")) K.bind(loaded.target, ctx); // the context the store's copies make current
         const p = try K.probe(a, io, loaded.backend, loaded.target);
-        const facts = K.facts(loaded.target); // an array, or a slice
-        const list: []const u64 = if (@typeInfo(@TypeOf(facts)) == .pointer) facts else &facts;
         const staging = stagingOf(K, loaded.target);
-        try open(o, root, try identityOf(a, io, ctx, o.dir, kernels, list, p.hash, .{ .family = name, .backend = "cuda" }), p.rate, store, name, staging);
+        try open(o, root, try keptKey(K, a, io, ctx, o.dir, kernels, loaded.target, p.hash, .{ .family = name, .backend = "cuda" }), p.rate, store, name, staging);
     }
 }
 
