@@ -9,6 +9,7 @@ const Kernels = @import("kernels.zig").Kernels;
 const Frame = @import("../dflash/runtime_frame.zig").Frame;
 const Tiled = @import("../dflash/runtime_backend.zig").Tiled;
 const Target = @import("../model.zig").Model;
+const Tree = @import("../dflash/selector.zig").Tree;
 pub const Ref = core.draft_ops.Ref;
 const simd = core.row_projection.simd;
 const options = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
@@ -40,8 +41,8 @@ pub const Model = struct {
     tg: mtl.Buffer,
     /// The committed context the caches hold: absolute rows [begin, end).
     begin: u64 = 0,
-    end: u64 = 0,
-    failed: bool = false,
+    committed_end: u64 = 0,
+    broken: bool = false,
     residency: ?mtl.ResidencySet.Follow = null,
     prepared: std.AutoHashMapUnmanaged(usize, core.affine4_lane.Adapter) = .empty,
     tiled: std.AutoHashMapUnmanaged(usize, Tiled) = .empty,
@@ -119,12 +120,46 @@ pub const Model = struct {
         m.allocator.destroy(m);
     }
 
+    /// Generation's drafter interface (dflash/generation.zig GenerationOf): DSpine reads `target`'s taps.
+    pub fn binds(m: *const Model, target: *const Target) bool {
+        return m.target == target and target.config.hidden == m.graph.shape.hidden and target.config.layers == m.graph.shape.target_layers;
+    }
+    pub fn tapIds(m: *const Model) []const u32 {
+        return m.graph.shape.tapIds();
+    }
+    pub fn tapWidth(m: *const Model) usize {
+        return config.tapWidth(m.graph.shape);
+    }
+    pub fn failed(m: *const Model) bool {
+        return m.broken;
+    }
+    pub fn idle(m: *const Model) bool {
+        return !m.broken and !m.frame.active;
+    }
+    /// Committed taps [rows, taps * hidden] into the context, at once.
+    pub fn absorb(m: *Model, taps: Ref, rows: u32) !void {
+        return @import("forward.zig").append(m, taps, rows);
+    }
+    /// A chain of at most `nodes` greedy drafts after `pending`, as a tree of one branch.
+    pub fn propose(m: *Model, pending: u32, nodes: u32) !Tree {
+        const p = try @import("forward.zig").propose(m, pending);
+        const n = @min(nodes, p.drafts.len);
+        const tokens = try m.allocator.dupe(u32, p.drafts[0..n]);
+        errdefer m.allocator.free(tokens);
+        const parents = try m.allocator.alloc(i32, n);
+        errdefer m.allocator.free(parents);
+        for (parents, 0..) |*v, i| v.* = @as(i32, @intCast(i)) - 1;
+        const scores = try m.allocator.alloc(f64, n);
+        @memset(scores, 0);
+        return .{ .gpa = m.allocator, .tokens = tokens, .parents = parents, .scores = scores };
+    }
+
     /// An empty context; after a GPU failure too.
     pub fn reset(m: *Model) void {
         m.frame.release();
-        m.failed = false;
+        m.broken = false;
         m.begin = 0;
-        m.end = 0;
+        m.committed_end = 0;
     }
 
     /// The body's linears as affine-4 copies (tensor-unit adapters, else SIMD tiles), keyed by their host address.
