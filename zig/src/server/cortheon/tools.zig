@@ -166,6 +166,7 @@ test "specs parse, calls are recognised and arguments read from either form" {
     try std.testing.expectEqualStrings("https://x.org", (try argument(a, call, "url")).?);
     const cased = (try json.parseText(a, "{\"id\": \"c\", \"type\": \"function\", \"function\": {\"name\": \"cortheon_fetch\", \"arguments\": {\"URL\": \"https://y.org\"}}}")).ok;
     try std.testing.expectEqualStrings("https://y.org", (try argument(a, cased, "url")) orelse ""); // exact key first, then URL
+    try std.testing.expectEqualStrings("x", (try argument(a, (try json.parseText(a, "{\"function\": {\"arguments\": {\"Query\": \"x\"}}}")).ok, "query")) orelse "");
     try std.testing.expect(!isServer("bash"));
     try std.testing.expect(!isServer("Cortheon_Search")); // a client tool of that spelling stays on the client
     try std.testing.expectEqualStrings("https://raw.githubusercontent.com/o/r/main/src/a.zig", try rawGithub(a, "https://github.com/o/r/blob/main/src/a.zig"));
@@ -206,6 +207,19 @@ const Fake = struct {
         return .{ .url = url, .status = 200, .kind = "text/html", .title = "T", .text = "body", .removed = 1 };
     }
 };
+
+test "a search with no query key in any case is refused" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var dummy: u8 = 0;
+    const web: Web = .{ .ctx = &dummy, .search = Fake.searchFn, .fetch = Fake.fetchFn };
+    var seen: Seen = .{};
+    const missing = (try json.parseText(a, "{\"function\": {\"name\": \"cortheon_search\", \"arguments\": {\"q\": \"x\"}}}")).ok;
+    const refused = try run(web, a, missing, "d", 10, "", &seen);
+    try std.testing.expect(!refused.ok);
+    try std.testing.expect(std.mem.indexOf(u8, refused.text, "needs a non-empty \"query\"") != null);
+}
 
 test "runs report results and failures as text" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);

@@ -307,6 +307,29 @@ test "a search result keeps a link written in single quotes" {
     try std.testing.expectEqualStrings("Example", results[0].title);
 }
 
+test "a lite search result is found when its class letters differ" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const page = "<tr><td><a rel=\"nofollow\" href='https://example.org/page' CLASS='result-link'>Example</a></td></tr>";
+    const results = try parseDuckDuckGoLite(a, page, 5);
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqualStrings("https://example.org/page", results[0].url);
+}
+
+test "a lite search snippet is found when its class letters differ" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const page =
+        \\<tr><td><a href="https://example.org/page" class='result-link'>Example</a></td></tr>
+        \\<tr><td CLASS='result-snippet'>A short blurb.</td></tr>
+    ;
+    const results = try parseDuckDuckGoLite(a, page, 5);
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqualStrings("A short blurb.", results[0].snippet);
+}
+
 test "DuckDuckGo's lite page reads the same way" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
