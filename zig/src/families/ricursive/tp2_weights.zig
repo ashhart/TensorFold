@@ -83,12 +83,13 @@ fn norm(w: *Weights, d: *const cuda.Driver, ck: *core.Checkpoint, key: []const u
 
 pub const Side = enum { columns, rows };
 
-/// An n-by-k EXL3 projection `base` (trellis [k/16][n/16][8 * halves] i16, mul1, fp16 suh [k] and svh [n]), cut.
-pub fn exl3(w: *Weights, d: *const cuda.Driver, ck: *core.Checkpoint, base: []const u8, n: usize, k: usize, side: Side, cut: Cut) !Weight {
+/// An n-by-k EXL3 projection `base` at `bits` (trellis [k/16][n/16][8 * halves] i16, mul1, fp16 suh and svh), cut.
+pub fn exl3(w: *Weights, d: *const cuda.Driver, ck: *core.Checkpoint, base: []const u8, n: usize, k: usize, side: Side, cut: Cut, bits: usize) !Weight {
     var buf: [200]u8 = undefined;
     const t = try ck.get(try name(&buf, "{s}.trellis", .{base}));
     if (t.dtype != .i16 or t.rank != 3 or t.dim(0) != k / 16 or t.dim(1) != n / 16 or t.dim(2) % 8 != 0) return error.UnexpectedTensor;
     const halves = t.dim(2) / 8;
+    if (halves != 2 * bits) return error.UnmeasuredRicursiveBitrate; // the config's measured bits, every tensor
     const marker = try ck.get(try name(&buf, "{s}.mul1", .{base}));
     if (marker.bytes.len != 4 or std.mem.readInt(u32, marker.bytes[0..4], .little) != mul1_magic) return error.UnsupportedRicursiveQuantization;
     const suh = try ck.get(try name(&buf, "{s}.suh", .{base}));
@@ -138,7 +139,7 @@ pub fn load(gpa: std.mem.Allocator, d: *const cuda.Driver, ck: *core.Checkpoint,
     const t = try ck.expect("model.embed_tokens.weight", .bf16, &.{ c.vocab, h });
     w.embed = try w.put(d, t.bytes); // every rank holds the whole table (the value residual's seed is the embedding)
     w.final_norm = try norm(&w, d, ck, "model.norm.weight", h);
-    w.head = try exl3(&w, d, ck, "lm_head", c.vocab, h, .columns, cut);
+    w.head = try exl3(&w, d, ck, "lm_head", c.vocab, h, .columns, cut, 8);
     w.layers = try gpa.alloc(Layer, c.layers);
     var buf: [200]u8 = undefined;
     var pb: [64]u8 = undefined;
@@ -159,14 +160,14 @@ pub fn load(gpa: std.mem.Allocator, d: *const cuda.Driver, ck: *core.Checkpoint,
         l.blend = 1.0 / (1.0 + @exp(-x)); // torch.sigmoid(lambda).item(), as the reference folds it once
         const qw = c.queryWidth();
         const kw = c.kvWidth();
-        l.q = try exl3(&w, d, ck, try name(&buf, "{s}self_attn.q_proj", .{p}), qw, h, .columns, cut);
-        l.k = try exl3(&w, d, ck, try name(&buf, "{s}self_attn.k_proj", .{p}), kw, h, .columns, cut);
-        l.v = try exl3(&w, d, ck, try name(&buf, "{s}self_attn.v_proj", .{p}), kw, h, .columns, cut);
-        l.g = try exl3(&w, d, ck, try name(&buf, "{s}self_attn.g_proj", .{p}), qw, h, .columns, cut);
-        l.o = try exl3(&w, d, ck, try name(&buf, "{s}self_attn.o_proj", .{p}), h, qw, .rows, cut);
-        l.gate = try exl3(&w, d, ck, try name(&buf, "{s}mlp.gate_proj", .{p}), c.intermediate, h, .columns, cut);
-        l.up = try exl3(&w, d, ck, try name(&buf, "{s}mlp.up_proj", .{p}), c.intermediate, h, .columns, cut);
-        l.down = try exl3(&w, d, ck, try name(&buf, "{s}mlp.down_proj", .{p}), h, c.intermediate, .rows, cut);
+        l.q = try exl3(&w, d, ck, try name(&buf, "{s}self_attn.q_proj", .{p}), qw, h, .columns, cut, c.exl3_bits);
+        l.k = try exl3(&w, d, ck, try name(&buf, "{s}self_attn.k_proj", .{p}), kw, h, .columns, cut, c.exl3_bits);
+        l.v = try exl3(&w, d, ck, try name(&buf, "{s}self_attn.v_proj", .{p}), kw, h, .columns, cut, c.exl3_bits);
+        l.g = try exl3(&w, d, ck, try name(&buf, "{s}self_attn.g_proj", .{p}), qw, h, .columns, cut, c.exl3_bits);
+        l.o = try exl3(&w, d, ck, try name(&buf, "{s}self_attn.o_proj", .{p}), h, qw, .rows, cut, c.exl3_bits);
+        l.gate = try exl3(&w, d, ck, try name(&buf, "{s}mlp.gate_proj", .{p}), c.intermediate, h, .columns, cut, c.exl3_bits);
+        l.up = try exl3(&w, d, ck, try name(&buf, "{s}mlp.up_proj", .{p}), c.intermediate, h, .columns, cut, c.exl3_bits);
+        l.down = try exl3(&w, d, ck, try name(&buf, "{s}mlp.down_proj", .{p}), h, c.intermediate, .rows, cut, c.exl3_bits);
     }
     return w;
 }
