@@ -95,7 +95,7 @@ pub fn registry(url: []const u8) bool {
         var parts = std.mem.splitScalar(u8, rest, '/');
         const name = parts.next() orelse return false;
         const after = parts.next();
-        if (after) |v| if (!(std.mem.eql(u8, v, "latest") or versionName(v))) return false;
+        if (after) |v| if (!(std.ascii.eqlIgnoreCase(v, "latest") or versionName(v))) return false; // Latest is the same path
         return packageName(name) and parts.next() == null;
     }
     if (std.mem.startsWith(u8, url, "https://crates.io/api/v1/crates/")) {
@@ -147,4 +147,8 @@ test "pypi registry json allows JSON when json's letters differ" {
 test "npm registry allows a host whose letters differ" {
     try std.testing.expect(registry("https://Registry.npmjs.org/react"));
     try std.testing.expect(registry("https://Registry.npmjs.org/react/latest"));
+}
+
+test "npm registry allows Latest when latest's letters differ" {
+    try std.testing.expect(registry("https://registry.npmjs.org/react/Latest"));
 }
