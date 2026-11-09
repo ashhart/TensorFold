@@ -66,10 +66,12 @@ fn gib(bytes: usize) f64 {
     return @as(f64, @floatFromInt(bytes)) / (1 << 30);
 }
 
-/// The checkpoint's device bytes, near enough to refuse before reading: bf16 text, doubled when `chat` widens it.
+/// The checkpoint's device bytes, near enough to refuse before reading: a ModelOpt one's own, or bf16 text.
 fn checkpointBytes(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, chat: bool) !u64 {
     var c = try config.Config.read(gpa, io, dir);
     defer c.deinit();
+    // a ModelOpt checkpoint keeps its codes as stored and widens its group tables: count what the device holds
+    if (c.modelopt) return table.deviceBytes(gpa, io, dir);
     if (c.quant != .bf16) return admission.weightBytes(io, dir);
     const bf16 = try table.textBytes(gpa, io, dir);
     return if (chat) 2 * bf16 else bf16;

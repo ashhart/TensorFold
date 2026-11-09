@@ -186,6 +186,24 @@ pub fn textBytes(gpa: std.mem.Allocator, io: Io, dir: []const u8) !u64 {
     return total;
 }
 
+/// The bytes a ModelOpt checkpoint takes on the device: U8 codes as stored, an E4M3 tensor at 2 bytes a value.
+pub fn deviceBytes(gpa: std.mem.Allocator, io: Io, dir: []const u8) !u64 {
+    var files = try Files.indexed(gpa, io, dir);
+    defer files.deinit();
+    var total: u64 = 0;
+    for (files.model) |path| {
+        var shard = try Shard.open(gpa, io, path);
+        defer shard.close(io);
+        var it = shard.names.iterator();
+        while (it.next()) |kv| {
+            const key = kv.key_ptr.*;
+            if (!std.mem.startsWith(u8, key, "model.language_model.") and !std.mem.eql(u8, key, "lm_head.weight")) continue;
+            const stored: u64 = @intCast(kv.value_ptr.end - kv.value_ptr.begin);
+            total += if (kv.value_ptr.dtype == .f8_e4m3) 2 * stored else stored;
+        }
+    }
+    return total;
+}
 fn containsLower(name: []const u8, needle: []const u8) bool {
     var i: usize = 0;
     while (i + needle.len <= name.len) : (i += 1) {

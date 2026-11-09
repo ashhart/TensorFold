@@ -47,6 +47,8 @@ const File = struct {
             const v: f32 = 0.25 + @as(f32, @floatFromInt((seed +% @as(u16, @truncate(i * 7))) % 64)) / 256.0;
             if (std.mem.eql(u8, dtype, "F32")) {
                 try f.data.appendSlice(a, &std.mem.toBytes(v));
+            } else if (std.mem.eql(u8, dtype, "U8") or std.mem.eql(u8, dtype, "F8_E4M3")) {
+                try f.data.append(a, @truncate(seed +% @as(u16, @truncate(i))));
             } else try f.data.appendSlice(a, &std.mem.toBytes(convert.bf16(v)));
         }
         try f.header.print(a, "{s}\"{s}\":{{\"dtype\":\"{s}\",\"shape\":[", .{ if (f.names.items.len > 0) "," else "", name, dtype });
@@ -304,4 +306,27 @@ test "a shard the index names only for vision tensors is not opened, even when i
     var ck = try checkpoint.Checkpoint.open(gpa, io, root);
     ck.close();
     try std.testing.expect(try table.textBytes(gpa, io, root) > 0);
+}
+
+test "device bytes count a ModelOpt checkpoint's widened tables, not its stored bytes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var f = File.init();
+    defer f.deinit();
+    try f.put(M ++ "layers.0.mlp.up_proj.weight", "U8", &.{ 8, 16 });
+    try f.put(M ++ "layers.0.mlp.up_proj.weight_scale", "F8_E4M3", &.{ 8, 2 });
+    try f.put(M ++ "layers.0.mlp.up_proj.weight_scale_2", "F32", &.{1});
+    try f.put(M ++ "embed_tokens.weight", "BF16", &.{ 8, 4 });
+    try f.put("model.visual.patch_embed.proj.weight", "BF16", &.{ 8, 8 });
+    try f.write(tmp.dir, "model.safetensors");
+    var index: std.ArrayList(u8) = .empty;
+    defer index.deinit(gpa);
+    try index.appendSlice(gpa, "{\"metadata\": {}, \"weight_map\": {");
+    for (f.names.items, 0..) |n, i| try index.print(gpa, "{s}\"{s}\": \"model.safetensors\"", .{ if (i > 0) "," else "", n });
+    try index.appendSlice(gpa, "}}");
+    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors.index.json", .data = index.items });
+    const root = try rootOf(tmp);
+    defer gpa.free(root);
+    // stored: codes 128, E4M3 table 16, global 4, text 64; the table doubles to 32 on the device, the tower stays out
+    try std.testing.expectEqual(@as(u64, 228), try table.deviceBytes(gpa, io, root));
 }
