@@ -276,7 +276,7 @@ pub fn Learner(comptime H: type) type {
                     try l.settleLast(&.{});
                     return .{ .done = true, .changed = true };
                 },
-                .save => return l.saveOnce(),
+                .save => return @import("learner_save.zig").once(l, has_sites, has_whole),
                 .shrink => {
                     l.phase = .idle;
                     return if (has_pocket) whole_lessons.shrink(l) else .{ .done = true };
@@ -294,23 +294,6 @@ pub fn Learner(comptime H: type) type {
                     return .{ .done = true, .report = .{ .learned = .{ .recalled = l.edited, .steps = 0, .loss = if (has_edits) l.edits.last_loss else 0 } } };
                 },
             }
-        }
-
-        /// Every kept lesson not yet written goes beside the model's shards, a file each.
-        fn saveOnce(l: *Self) !Step {
-            l.phase = .idle;
-            const t = l.trainer orelse return .{ .done = true };
-            if (l.whole) { // a lesson of the model itself goes into its own shards: the pocket, or an edit's codes
-                if (has_whole and !try whole_lessons.save(l)) try whole_lessons.foldOpen(l);
-                return .{ .done = true, .changed = true };
-            }
-            if (comptime !has_sites) return .{ .done = true };
-            const ranks = t.sites.rank - @as(usize, if (l.opened and l.kept_rounds == 0) adapters.block else 0);
-            if (ranks == 0) return .{ .done = true };
-            const t0 = H.seconds(l.io);
-            const bytes = try H.write(l.b, l.gpa, l.io, t, ranks);
-            std.log.info("slide: {d} lessons beside the model's shards, a file each with its router: {d} MB written in {d:.1} s", .{ ranks / adapters.block, bytes >> 20, H.seconds(l.io) - t0 });
-            return .{ .done = true };
         }
 
         /// The lessons already kept that act on a reply to `ex` (their routers' scores at its decision row, read once).
