@@ -188,6 +188,8 @@ take `true`/`on`/`yes` and `false`/`off`/`no`, and `MHC_DEFER` and `COEF_LATE` t
 their old readers read as on and which is now refused. The others read any text but `0` as on before, so a word
 form there is refused by name rather than read the other way.
 Other switches take exactly `0` or `1`, with their existing whitespace trims.
+`TF_DSV41_COPY_DRAFTER=1` turns the lookup planner on regardless of `TF_DSV41_LOOKUP_PLAN`, and refuses when
+`TF_DSV41_LOOKUP` is blank or off.
 
 The served-knob accessor also treats empty and whitespace-only values as absent, so knobs outside the table,
 such as `PF_TBO`, `PREFILL` and `PROMPT_TAIL`, keep their defaults. The table's intentional refusals include

@@ -151,23 +151,37 @@ test "copy drafter: adaptive doubling grows offer width 8 -> 15 on full acceptan
 
     // Full acceptance of all 8 drafts (`rows = 9, kept = 8`) doubles the offer cap to 15 (`max_rows - 1`).
     try pl.observe(&r, 9, 8, &.{ 200, 201, 202, 203, 204, 205, 206, 207, 10 });
-    try std.testing.expectEqual(@as(u5, 1), r.doublings);
+    try std.testing.expect(r.doubled);
     try r.index.extend(&.{ 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41 });
     const d2 = try pl.window(&r, 100, true, &.{});
     try std.testing.expectEqual(@as(usize, 15), d2.len);
 
-    // Partial acceptance (`kept = 3 < drafts = 15`) resets `doublings` to 0.
+    // Partial acceptance (`kept = 3 < drafts = 15`) resets `doubled` to false.
     try pl.observe(&r, 16, 3, &.{ 200, 201, 202, 999 });
-    try std.testing.expectEqual(@as(u5, 0), r.doublings);
+    try std.testing.expect(!r.doubled);
 }
 
-test "copy drafter: survivalYield and altYield gate lookup drafts against neural drafter expected yield" {
-    try std.testing.expectApproxEqAbs(@as(f64, 1.98), lookup.survivalYield(&.{ 0.9, 0.8, 0.5 }), 1e-6);
+test "copy drafter: geometric copy_yield and altYield gate short cold matches and high-yield DSpark rounds" {
     var verify = [_]f64{ 42, 47, 52, 57, 62, 67, 72, 77, 82, 87, 92, 97, 102, 107, 112, 117 };
     const c: costs_mod.Costs = .{ .verify = &verify, .draft = 5.6 };
     const pl = lookup.Planner.init(.{ .plan = true, .copy_drafter = true }, &c, true);
-    const span = [_]u32{ 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21 };
     const cont = [_]u32{ 30, 31, 32, 33, 34, 35, 36, 37 };
+
+    // A short 5-token match in band 0 (q = 0.45, geometric yield ~0.82 < 1.0) is gated off on cold start.
+    const short_span = [_]u32{ 10, 11, 12, 13, 14 };
+    var short_prompt: std.ArrayList(u32) = .empty;
+    defer short_prompt.deinit(gpa);
+    try short_prompt.appendSlice(gpa, &short_span);
+    try short_prompt.appendSlice(gpa, &cont);
+    try short_prompt.appendSlice(gpa, &short_span);
+    var r_short = try pl.start(gpa, short_prompt.items);
+    defer r_short.deinit();
+    const short_ds = try pl.window(&r_short, 100, true, &.{});
+    try std.testing.expectEqual(@as(usize, 0), short_ds.len);
+    try std.testing.expectEqual(lookup.Kind.dspark, r_short.kind);
+
+    // A 12-token match in band 1 (q = 0.70, geometric yield ~2.09) passes cold-start altYield (1.0).
+    const span = [_]u32{ 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21 };
     var prompt: std.ArrayList(u32) = .empty;
     defer prompt.deinit(gpa);
     try prompt.appendSlice(gpa, &span);
@@ -176,26 +190,36 @@ test "copy drafter: survivalYield and altYield gate lookup drafts against neural
 
     var r = try pl.start(gpa, prompt.items);
     defer r.deinit();
-    r.doublings = 2;
-    // High neural survival yield (`14.0` expected drafts) beats a band-1 lookup window and resets `doublings`.
-    r.dspark_yield = 14.0;
-    const gated = try pl.window(&r, 100, true, &.{});
-    try std.testing.expectEqual(@as(usize, 0), gated.len);
-    try std.testing.expectEqual(lookup.Kind.dspark, r.kind);
-    try std.testing.expectEqual(@as(u5, 0), r.doublings);
-
-    // Lower neural survival yield (`0.8` expected drafts) lets the lookup copy window proceed.
-    r.dspark_yield = lookup.survivalYield(&.{ 0.5, 0.6 });
     const open = try pl.window(&r, 100, true, &.{});
     try std.testing.expect(open.len > 0);
     try std.testing.expectEqual(lookup.Kind.lookup, r.kind);
+
+    // A single 0-keep miss in band 1 drops q to 1.4/3.0 = 0.467 (geometric yield ~0.86 < 1.0), gating the next round.
+    r.doubled = true;
+    try pl.observe(&r, open.len + 1, 0, &span);
+    try std.testing.expect(!r.doubled);
+    const after_miss = try pl.window(&r, 100, true, &.{});
+    try std.testing.expectEqual(@as(usize, 0), after_miss.len);
+    try std.testing.expectEqual(lookup.Kind.dspark, r.kind);
+
+    // Fresh request with high recent DSpark yield (`kept = 3` -> `altYield = 3.0`) gates band 1 and resets `doubled`.
+    var r2 = try pl.start(gpa, prompt.items);
+    defer r2.deinit();
+    r2.kind = .dspark;
+    try pl.observe(&r2, 5, 3, &span);
+    r2.doubled = true;
+    const gated = try pl.window(&r2, 100, true, &.{});
+    try std.testing.expectEqual(@as(usize, 0), gated.len);
+    try std.testing.expectEqual(lookup.Kind.dspark, r2.kind);
+    try std.testing.expect(!r2.doubled);
 }
 
 test "copy drafter: lookup.Proposer through Lanes and Twin matches Twin.serial token for token" {
     const twin_mod = @import("twin.zig");
     const lanes_mod = @import("lanes.zig");
     const core_lanes = @import("lanes");
-    const t = try twin_mod.Twin.init(gpa, .{}, 3);
+    const dims: twin_mod.Dims = .{ .bigram = 12.0, .head = 0.0 };
+    const t = try twin_mod.Twin.init(gpa, dims, 3);
     defer t.deinit();
     const d = try twin_mod.Drafter.init(gpa, t, 3);
     defer d.deinit();
@@ -207,17 +231,16 @@ test "copy drafter: lookup.Proposer through Lanes and Twin matches Twin.serial t
     defer x.deinit();
 
     const base_prompt = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8 };
-    const serial_run = try t.serial(2, &base_prompt, 24, null, null);
-    defer gpa.free(serial_run);
-
-    // Construct a prompt containing the repeated pattern so lookup copy drafting activates on matching spans.
-    var prompt: std.ArrayList(u32) = .empty;
-    defer prompt.deinit(gpa);
-    try prompt.appendSlice(gpa, &base_prompt);
-    try prompt.appendSlice(gpa, serial_run[0..12]);
-    try prompt.appendSlice(gpa, &base_prompt);
-
     for ([_]?core_lanes.Sampling{ null, .{ .temperature = 0.85, .top_p = 0.9, .top_k = 4, .seed = 42 } }) |sampling| {
+        const serial_run = try t.serial(2, &base_prompt, 24, sampling, null);
+        defer gpa.free(serial_run);
+
+        var prompt: std.ArrayList(u32) = .empty;
+        defer prompt.deinit(gpa);
+        try prompt.appendSlice(gpa, &base_prompt);
+        try prompt.appendSlice(gpa, serial_run[0..12]);
+        try prompt.appendSlice(gpa, &base_prompt);
+
         const want = try t.serial(2, prompt.items, 20, sampling, null);
         defer gpa.free(want);
 
@@ -239,5 +262,12 @@ test "copy drafter: lookup.Proposer through Lanes and Twin matches Twin.serial t
         while (e.activeCount() > 0) try e.step();
 
         try std.testing.expectEqualSlices(u32, want, s.emitted());
+        var copy_trials: f64 = 0.0;
+        var copy_acc: f64 = 0.0;
+        for (prop.req.tri, prop.req.acc) |tr, ac| {
+            copy_trials += tr;
+            copy_acc += ac;
+        }
+        try std.testing.expect(copy_trials > 0.0 and copy_acc > 0.0);
     }
 }

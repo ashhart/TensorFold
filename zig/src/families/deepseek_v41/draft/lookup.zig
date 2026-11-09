@@ -17,7 +17,6 @@ pub const alt_window = 8;
 pub const candidates = 64;
 pub const extend_to = 64;
 pub const initial_offer: usize = 8;
-pub const max_doublings: u5 = 4;
 /// An image row's virtual id base: never a token to draft
 pub const vbase: u32 = 1 << 24;
 pub const max_rows = depth.slot_rows; // 16
@@ -30,21 +29,9 @@ pub fn bandOf(length: i64) usize {
     return b;
 }
 
-/// Expected accepted neural drafts sum_{i=0..K-1} prod_{j=0..i} clamp(conf[j], 0, 1).
-pub fn survivalYield(conf: []const f32) f64 {
-    var surv: f64 = 1.0;
-    var total: f64 = 0.0;
-    for (conf) |c| {
-        surv *= std.math.clamp(@as(f64, c), 0.0, 1.0);
-        total += surv;
-    }
-    return total;
-}
-
 /// TF_DSV41_LOOKUP_PLAN, TF_DSV41_COPY_DRAFTER, TF_DSV41_LOOKUP, TF_DSV41_LOOKUP_MIN, TF_DSV41_MAX_ROWS.
 pub const Settings = struct {
     plan: bool = false,
-    /// Adaptive suffix copy drafting from christopherowen/spark-ds41f (inspired by vLLM suffix speculative decoding)
     copy_drafter: bool = false,
     lookup: bool = true,
     min_match: i64 = 4,
@@ -58,6 +45,7 @@ pub const Settings = struct {
         const lookup = @import("sys").getenv("TF_DSV41_LOOKUP");
         const blank_off = lookup != null and std.mem.trim(u8, lookup.?, " \t").len == 0;
         s.lookup = !blank_off and try @import("sys").environment.value(bool, "TF_DSV41_LOOKUP", lookup, true);
+        if (s.copy_drafter and !s.lookup) return error.InvalidEnvironment;
         if (std.c.getenv("TF_DSV41_LOOKUP_MIN")) |v| if (std.mem.span(v).len > 0) {
             s.min_match = std.fmt.parseInt(i64, std.mem.trim(u8, std.mem.span(v), " "), 10) catch return error.BadLookupMin;
         };
@@ -221,8 +209,7 @@ pub const Request = struct {
     alt: [alt_window][2]f64 = undefined, // (tokens, ms), oldest first from `alt_head`
     alt_len: usize = 0,
     alt_head: usize = 0,
-    doublings: u5 = 0,
-    dspark_yield: ?f64 = null,
+    doubled: bool = false,
     kind: Kind = .serial,
     band: usize = 0,
     out: std.ArrayList(u32) = .empty,
@@ -259,9 +246,8 @@ pub const Planner = struct {
         return (r.acc[b] + bands[b].prior * prior_weight) / (r.tri[b] + prior_weight);
     }
 
-    /// Expected accepted drafts of a non-lookup round: explicit survival yield or trailing alt mean.
+    /// Expected accepted drafts of a non-lookup round from the trailing alt window (1.0 for DSpark before any).
     pub fn altYield(p: *const Planner, r: *const Request) f64 {
-        if (r.dspark_yield) |y| return @max(0.0, y);
         if (r.alt_len > 0) {
             var drafts: f64 = 0.0;
             for (0..r.alt_len) |i| drafts += @max(0.0, r.alt[(r.alt_head + i) % alt_window][0] - 1.0);
@@ -294,7 +280,7 @@ pub const Planner = struct {
         if (!drafts or room <= 0) return &.{};
         if (p.set.lookup) {
             const cap: usize = @intCast(@min(p.set.max_rows - 1, room));
-            const count: usize = if (p.set.copy_drafter) @min(cap, initial_offer << r.doublings) else cap;
+            const count: usize = if (p.set.copy_drafter and !r.doubled) @min(cap, initial_offer) else cap;
             const length = if (p.set.copy_drafter)
                 try r.index.proposeRanked(count, p.set.min_match, &r.out)
             else
@@ -309,8 +295,10 @@ pub const Planner = struct {
                 var qs: [max_rows]f64 = undefined;
                 const q = @min(pOf(r, b), 0.995);
                 for (qs[0..ds.len]) |*x| x.* = q;
-                const best = depth.bestK(qs[0..ds.len], p.costs.verify, p.altRate(r), 1);
-                const yield_ok = !p.set.copy_drafter or (@as(f64, @floatFromInt(best.k)) * q >= p.altYield(r));
+                const rate = p.altRate(r);
+                const best = depth.bestK(qs[0..ds.len], p.costs.verify, rate, 1);
+                const copy_yield = best.surplus + rate * p.costs.verify[best.k] - 1.0;
+                const yield_ok = !p.set.copy_drafter or (copy_yield >= p.altYield(r));
                 var go = best.k > 0 and best.surplus > 0.0 and yield_ok;
                 if (!go) {
                     r.skipped[b] += 1;
@@ -322,7 +310,7 @@ pub const Planner = struct {
                     r.band = b;
                     return ds[0..best.k];
                 }
-                r.doublings = 0;
+                r.doubled = false;
             }
         }
         if (p.dspark) r.kind = .dspark;
@@ -337,11 +325,9 @@ pub const Planner = struct {
             const b = r.band;
             r.acc[b] = r.acc[b] * decay + k;
             r.tri[b] = r.tri[b] * decay + k + @as(f64, if (kept < drafts) 1.0 else 0.0);
-            if (p.set.copy_drafter) {
-                r.doublings = if (drafts > 0 and kept >= drafts) @min(r.doublings + 1, max_doublings) else 0;
-            }
+            r.doubled = p.set.copy_drafter and drafts > 0 and kept >= drafts;
         } else {
-            r.doublings = 0;
+            r.doubled = false;
             const ms = p.costs.windowMs(@intCast(rows)) + (if (r.kind == .dspark) p.costs.draft else 0.0);
             r.pushAlt(k + 1.0, ms);
         }
