@@ -400,4 +400,13 @@ pub const valid = [_]Case{
     .{ .name = "TF_DSV41_SCHEMA_PROMPT", .raw = " 0 ", .n = 0 },
     .{ .name = "TF_DSV41_SCHEMA_PROMPT", .raw = "\t1\r\n", .n = 1 },
     .{ .name = "TENSORFOLD_MAX_PDF_PAGES", .raw = "1", .n = 1 },
+    .{ .name = "TF_PREFILL_MIN", .raw = "0", .n = 0 },
+    .{ .name = "TF_PREFILL_MIN", .raw = "4096", .n = 4096 },
+    .{ .name = "TF_PREFILL_CHUNK", .raw = "16", .n = 16 },
+    .{ .name = "TF_PREFILL_CHUNK", .raw = "512", .n = 512 },
+    .{ .name = "TF_PREFILL_KEEP", .raw = "1", .n = 1 },
+    .{ .name = "TF_PREFILL_AHEAD", .raw = "1", .n = 1 },
+    .{ .name = "TF_PREFILL_TIMEOUT_S", .raw = "86400", .n = 86400 },
+    .{ .name = "TF_PREFILL_API_KEY_FILE", .raw = "/etc/tensorfold/gb10.key", .n = 0 },
+    .{ .name = "TF_PRODUCE_HELD_GIB", .raw = "32", .n = 32 },
 };

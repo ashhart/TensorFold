@@ -4,6 +4,7 @@ const kv_pages = @import("cuda_kv_pool.zig");
 pub fn close(h: anytype) void {
     if (h.witness) |w| w.close(); // its hash reads files, not the engine: it stops at its next block
     h.host.stop();
+    if (h.produce) |x| x.stop(); // after the engine thread: no export comes in now
     kv_pages.unwatch(&h.kv); // the engine thread is joined: the pool's teardown below reports to no one
     h.core.deinit();
     h.cfg.deinit(h.gpa);
