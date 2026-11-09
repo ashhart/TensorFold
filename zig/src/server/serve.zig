@@ -102,6 +102,8 @@ pub const Setup = struct {
     recall: ?*api.recall_store.Store = null,
     /// Run by `run` so the engine stops before the server is freed; null: the caller closes it after `run`.
     stop: ?EngineStop = null,
+    /// TENSORFOLD_TOOL_ID_KEY_FILE's key, read by `main` before the model, for the server to take; null: its own.
+    tool_id_key: ?*@import("ids.zig").Key = null,
 };
 
 /// `halt` (optional) ends the rounds at a boundary at the drain's deadline, so `close` never meets a running round.
@@ -219,6 +221,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         .saved_conversations = args.learn_conversations,
         .identity = s.identity,
         .environ = s.environ,
+        .tool_id_key = s.tool_id_key,
     };
     const srv = server_mod.Server.init(gpa, io, s.engine, s.text, config, if (store.enabled()) &store else null) catch |err| {
         if (err == error.InvalidVisionMarkers)

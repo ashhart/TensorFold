@@ -334,14 +334,14 @@ test "auth cleanup on every initialization allocation failure" {
     try std.testing.checkAllAllocationFailures(gpa, Case.run, .{@as(?[]const u8, path)});
 }
 
-/// The key file opened for reading, never through a link.
-fn openKeys(pathz: [*:0]const u8) !platform.c.fd_t {
+/// The key file opened for reading, never through a link (tool_id_key.zig opens its key file the same way).
+pub fn openKeys(pathz: [*:0]const u8) !platform.c.fd_t {
     if (builtin.os.tag != .windows) return posix.openatZ(posix.AT.FDCWD, pathz, .{ .ACCMODE = .RDONLY, .NOFOLLOW = true, .NONBLOCK = true }, 0);
     const fd = platform.c.open(pathz, .{ .ACCMODE = .RDONLY });
     return if (fd < 0) error.OpenFailed else fd;
 }
 
-fn readKeys(fd: platform.c.fd_t, buf: []u8) !usize {
+pub fn readKeys(fd: platform.c.fd_t, buf: []u8) !usize {
     if (builtin.os.tag != .windows) return posix.read(fd, buf);
     const n = platform.c.read(fd, buf.ptr, buf.len);
     return if (n < 0) error.ReadFailed else @intCast(n);

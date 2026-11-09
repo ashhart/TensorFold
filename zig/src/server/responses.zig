@@ -188,7 +188,7 @@ pub fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     base.put(a, "output", .{ .array = &.{} }) catch return;
     base.put(a, "usage", .null) catch return;
     for (t.echo.keys(), t.echo.values()) |k, v| base.put(a, k, v) catch return;
-    var reply: Reply = .{ .srv = srv, .a = a, .conn = conn, .base = base, .streaming = t.stream, .keep = t.store, .added = t.added, .cx = &cx };
+    var reply: Reply = .{ .srv = srv, .a = a, .conn = conn, .base = base, .streaming = t.stream, .keep = t.store, .added = t.added, .cx = &cx, .call_ids = .{ .key = &srv.tool_ids, .body = t.chat } };
     var out: Wire = .{ .reply = &reply };
     openai.runNamed(srv, a, out.out(), .{ .conn = conn }, true, t.chat, t.format, true);
     if (out.opened or conn.broken) return;
@@ -243,6 +243,7 @@ const Reply = struct {
     keep: bool,
     added: []Value,
     cx: *Cx,
+    call_ids: ids.Calls, // the chat run's ids over its translated body, for a call the deltas leave unnamed
     items: std.ArrayList(*json.Object) = .empty,
     current: ?*json.Object = null,
     calls: std.AutoArrayHashMapUnmanaged(i64, *json.Object) = .empty,
@@ -309,7 +310,7 @@ const Reply = struct {
             try r.put(part.?, "type", .{ .string = "reasoning_text" });
             try r.put(part.?, "text", .{ .string = "" });
         } else {
-            try r.put(item, "id", .{ .string = ids.make(r.a, "fc_", 32) catch return error.Closed });
+            try r.put(item, "id", .{ .string = ids.derived(r.a, r.call_ids.key, "fc_", 32, call_id) catch return error.Closed });
             try r.put(item, "type", .{ .string = "function_call" });
             try r.put(item, "call_id", .{ .string = call_id });
             try r.put(item, "name", .{ .string = name });
@@ -376,7 +377,7 @@ const Reply = struct {
             const function = call.get("function") orelse Value.null;
             const at: i64 = if (call.get("index")) |ix| ix.int64() orelse 0 else 0;
             const item = r.calls.get(at) orelse blk: {
-                const id = textOf(call.get("id")) orelse (ids.make(r.a, "call_", 32) catch return error.Closed);
+                const id = textOf(call.get("id")) orelse (r.call_ids.id(r.a, 0, std.math.cast(u64, at) orelse 0) catch return error.Closed);
                 const name = textOf(function.get("name")) orelse "";
                 const made = try r.open("function_call", id, name);
                 r.calls.put(r.a, at, made) catch return error.Closed;
@@ -494,3 +495,17 @@ const Reply = struct {
         return r.finish(if (reason != null and reason.? == .string) reason.?.string else null, data.get("usage"), data.get("tensorfold"));
     }
 };
+
+test "a call delta that names no id takes the chat run's id at its index, and one that names its id keeps it" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const key: ids.Key = .of(ids.test_key_text);
+    const chat = (try json.parse(a, "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"x\"}]}")).ok;
+    var cx: Cx = .{ .a = a };
+    var reply: Reply = .{ .srv = undefined, .a = a, .conn = undefined, .base = try json.newObject(a), .streaming = false, .keep = false, .added = &.{}, .cx = &cx, .call_ids = .{ .key = &key, .body = chat } };
+    try reply.delta((try json.parse(a, "{\"tool_calls\":[{\"index\":1,\"function\":{\"name\":\"f\"}},{\"index\":2,\"id\":\"call_sent\",\"function\":{\"name\":\"f\"}}]}")).ok);
+    var calls: ids.Calls = .{ .key = &key, .body = chat };
+    try std.testing.expectEqualStrings(try calls.id(a, 0, 1), reply.items.items[0].get("call_id").?.string);
+    try std.testing.expectEqualStrings("call_sent", reply.items.items[1].get("call_id").?.string);
+}
