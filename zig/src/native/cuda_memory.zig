@@ -104,7 +104,7 @@ pub fn hostCacheBudget(asked: ?f64, available: u64, room: u64, streams: u64, uni
     const left = if (unified) @min(available -| streams, room -| streams) else available;
     if (asked) |g| {
         const want = if (g > 0) std.math.lossyCast(u64, g * (1 << 30)) else 0;
-        return @min(want, @min(left, available / 2));
+        return @min(want, available / 2);
     }
     return automaticCache(left, 8 << 30);
 }
@@ -416,6 +416,7 @@ test "CUDA cache default counts streams before taking half the unified room" {
     try std.testing.expectEqual(@as(u64, 4 * GiB), hostCacheBudget(null, 16 * GiB, 8 * GiB, 4 * GiB, true));
     try std.testing.expectEqual(@as(u64, 0), hostCacheBudget(0, 96 * GiB, room, n * stream_bytes, true));
     try std.testing.expectEqual(@as(u64, 12 * GiB), hostCacheBudget(12, 96 * GiB, room, n * stream_bytes, true));
+    try std.testing.expectEqual(@as(u64, 12 * GiB), hostCacheBudget(12, 96 * GiB, 8 * GiB, 16 * GiB, true));
     try std.testing.expectEqual(@as(u64, 48 * GiB), hostCacheBudget(null, 96 * GiB, 2 * GiB, 48 * GiB, false));
     try std.testing.expectEqual(@as(u64, 0), cacheBytes(0, room, n * stream_bytes));
     try std.testing.expectEqual(@as(u64, 12 * GiB), cacheBytes(12, room, n * stream_bytes));
