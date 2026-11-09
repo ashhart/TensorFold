@@ -102,7 +102,7 @@ pub fn decode(a: Allocator, body: Value, facts: Facts, fault: *Fault) Step!Reque
     const is_pdf = !image and std.mem.indexOf(u8, bytes[0..@min(bytes.len, 1024)], "%PDF-") != null;
     if (is_pdf) return bad(a, fault, &.{ "body", "document" }, "PDF documents are not read on POST /v1/ocr; send each page as a PNG, JPEG or WebP image", .{});
     if (!image) return bad(a, fault, &.{ "body", "document" }, "the document is not a PNG, JPEG or WebP image", .{});
-    return .{ .options = o, .source = .{ .name = "document", .bytes = bytes }, .doc_size = bytes.len };
+    return .{ .options = o, .source = .{ .bytes = bytes }, .doc_size = bytes.len };
 }
 
 fn flag(a: Allocator, fault: *Fault, body: Value, name: []const u8) Step!?bool {
