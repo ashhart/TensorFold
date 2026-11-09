@@ -6,9 +6,12 @@ const source = @import("kernel_sources").qwen27_dspine;
 
 pub const Rows = extern struct { rows: u32, width: u32, block: u32, eps: f32 = 0, scale: f32 = 0 };
 pub const Senders = extern struct { rows: u32, k: u32, code: u32, row_words: u32, anchor: u32, scale: f32 };
-pub const Table = extern struct { rows: u32, k: u32, rank: u32, row_words: u32, cols: u32, rms_first: u32 };
-const names = [_][]const u8{ "tf_dspine_add", "tf_dspine_read", "tf_dspine_code", "tf_dspine_message", "tf_dspine_write", "tf_dspine_senders", "tf_dspine_table" };
-const Kind = enum { add, read, code, message, write, senders, table };
+pub const Base = extern struct { rows: u32, k: u32, hidden: u32, row_words: u32, raw_first: u32 };
+pub const Table = extern struct { rows: u32, k: u32, rank: u32, row_words: u32, rms_first: u32 };
+/// The target head in MLX's affine-4 layout: words [vocab, hidden / 8], scales and biases [vocab, hidden / 64] bf16.
+pub const Head = struct { words: Ref, scales: Ref, biases: Ref };
+const names = [_][]const u8{ "tf_dspine_add", "tf_dspine_read", "tf_dspine_code", "tf_dspine_message", "tf_dspine_write", "tf_dspine_senders", "tf_dspine_base", "tf_dspine_table" };
+const Kind = enum { add, read, code, message, write, senders, base, table };
 const group = 256;
 
 fn bind(e: mtl.ComputeEncoder, refs: []const Ref, first: usize) void {
@@ -67,12 +70,12 @@ pub const Kernels = struct {
         e.setBuffer(out.buf, out.off, 3);
         e.dispatchThreads(mtl.Size.of(r, rows, 1), mtl.Size.of(256, 1, 1));
     }
-    /// The write: res = raw + rms * delta off the anchors, xn its next norm; `u` the base rows bf16(raw * w).
-    pub fn write(k: Kernels, e: mtl.ComputeEncoder, raw: Ref, delta: Ref, rms: Ref, weight: Ref, res: Ref, xn: Ref, u: ?Ref, rows: u32, width: u32, block: u32, eps: f32) void {
+    /// The write: res = raw + rms * delta off the anchors, xn its next norm.
+    pub fn write(k: Kernels, e: mtl.ComputeEncoder, raw: Ref, delta: Ref, rms: Ref, weight: Ref, res: Ref, xn: Ref, rows: u32, width: u32, block: u32, eps: f32) void {
         k.use(e, .write);
         bind(e, &.{ raw, delta, rms, weight }, 0);
-        e.setValue(Rows{ .rows = rows, .width = width, .block = block, .eps = eps, .scale = if (u != null) 1 else 0 }, 4);
-        bind(e, &.{ res, xn, u orelse xn }, 5);
+        e.setValue(Rows{ .rows = rows, .width = width, .block = block, .eps = eps }, 4);
+        bind(e, &.{ res, xn }, 5);
         e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(group, 1, 1));
     }
     /// Each head row's K senders' scaled codebook rows [rows K, C] and ids [rows K].
@@ -83,10 +86,18 @@ pub const Kernels = struct {
         bind(e, &.{ out, sids }, 3);
         e.dispatchGroups(mtl.Size.of(p.k, p.rows, 1), mtl.Size.of(128, 1, 1));
     }
+    /// Each head row's base at its K candidates: raw * norm . head row, f32 [rows, K] in top-k order.
+    pub fn base(k: Kernels, e: mtl.ComputeEncoder, raw: Ref, norm: Ref, head: Head, topk: Ref, out: Ref, p: Base) void {
+        k.use(e, .base);
+        bind(e, &.{ raw, norm, head.words, head.scales, head.biases, topk }, 0);
+        e.setValue(p, 6);
+        e.setBuffer(out.buf, out.off, 7);
+        e.dispatchGroups(mtl.Size.of(p.k, p.rows, 1), mtl.Size.of(128, 1, 1));
+    }
     /// The greedy score table [rows][K senders][K candidates], f32.
-    pub fn table(k: Kernels, e: mtl.ComputeEncoder, packed_rows: Ref, tsv: Ref, gate_bias: Ref, tg: Ref, topk: Ref, logits: Ref, rms: Ref, out: Ref, p: Table) void {
+    pub fn table(k: Kernels, e: mtl.ComputeEncoder, packed_rows: Ref, tsv: Ref, gate_bias: Ref, tg: Ref, topk: Ref, base_rows: Ref, rms: Ref, out: Ref, p: Table) void {
         k.use(e, .table);
-        bind(e, &.{ packed_rows, tsv, gate_bias, tg, topk, logits, rms }, 0);
+        bind(e, &.{ packed_rows, tsv, gate_bias, tg, topk, base_rows, rms }, 0);
         e.setValue(p, 7);
         e.setBuffer(out.buf, out.off, 8);
         e.dispatchGroups(mtl.Size.of(p.k, p.rows, 1), mtl.Size.of(group, 1, 1));
@@ -96,5 +107,6 @@ pub const Kernels = struct {
 test "DSpine kernel parameter blocks keep their Metal layouts" {
     try std.testing.expectEqual(@as(usize, 20), @sizeOf(Rows));
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(Senders));
-    try std.testing.expectEqual(@as(usize, 24), @sizeOf(Table));
+    try std.testing.expectEqual(@as(usize, 20), @sizeOf(Table));
+    try std.testing.expectEqual(@as(usize, 20), @sizeOf(Base));
 }

@@ -70,11 +70,11 @@ kernel void tf_dspine_message(device const bfloat* PACKED [[buffer(0)]], device 
   OUT[size_t(t) * r + i.x] = bfloat(m);
 }
 
-// RES = RAW at an anchor, else bf16(RAW + RMS * DELTA); XN = its norm times W; with scale set U = bf16(RAW * W).
+// RES = RAW at an anchor, else bf16(RAW + RMS * DELTA); XN = bf16(bf16(RES * rsqrt(mean RES^2 + eps)) * W).
 kernel void tf_dspine_write(device const bfloat* RAW [[buffer(0)]], device const bfloat* DELTA [[buffer(1)]], device const float* RMS [[buffer(2)]],
     device const bfloat* W [[buffer(3)]], constant Rows& p [[buffer(4)]], device bfloat* RES [[buffer(5)]], device bfloat* XN [[buffer(6)]],
-    device bfloat* U [[buffer(7)]], uint row [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]],
-    uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]], uint threads [[threads_per_threadgroup]]) {
+    uint row [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]], uint threads [[threads_per_threadgroup]]) {
   threadgroup float red[32];
   const bool anchor = row % p.block == 0;
   const float rms = RMS[row];
@@ -87,10 +87,7 @@ kernel void tf_dspine_write(device const bfloat* RAW [[buffer(0)]], device const
     ss = fma(out, out, ss);
   }
   const float inv = precise::rsqrt(group_sum(ss, red, t, lane, sg, threads) / float(p.width) + p.eps);
-  for (uint i = t; i < p.width; i += threads) {
-    XN[base + i] = bfloat(float(bfloat(float(RES[base + i]) * inv)) * float(W[i]));
-    if (p.scale != 0.0f) U[base + i] = bfloat(float(RAW[base + i]) * float(W[i]));
-  }
+  for (uint i = t; i < p.width; i += threads) XN[base + i] = bfloat(float(bfloat(float(RES[base + i]) * inv)) * float(W[i]));
 }
 
 // Each head row's K senders' bf16(scale * CB[sid]): the anchor for row 0, else the row before's top-k (bf16_topk Rows).
@@ -105,10 +102,34 @@ kernel void tf_dspine_senders(device const uint* TOPK [[buffer(0)]], device cons
   for (uint i = t; i < p.code; i += tpg.x) OUT[dst + i] = bfloat(p.scale * float(CB[src + i]));
 }
 
-// Per (row i, sender s): m = sigmoid(Q_i + G_s + b) * V_s (f32); OUT[i][s][j] = BASE_i[c_j] + RMS_i * m . TG[c_j].
-struct Table { uint rows, k, rank, row_words, cols, rms_first; };
+// BASE[i][j] = sum_h RAW[first + i][h] * NORM[h] * bf16(dequant HEAD[c_j][h]) in f32, HEAD in MLX's affine-4 layout.
+struct Base { uint rows, k, hidden, row_words, raw_first; };
+kernel void tf_dspine_base(device const bfloat* RAW [[buffer(0)]], device const bfloat* NORM [[buffer(1)]], device const uint* HW [[buffer(2)]],
+    device const bfloat* HS [[buffer(3)]], device const bfloat* HB [[buffer(4)]], device const uint* TOPK [[buffer(5)]], constant Base& p [[buffer(6)]],
+    device float* OUT [[buffer(7)]], uint2 g [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]], uint2 tpg [[threads_per_threadgroup]]) {
+  threadgroup float red[32];
+  const uint i = g.y, j = g.x;
+  const uint id = TOPK[size_t(i) * p.row_words + 2 + 2 * j];
+  const size_t raw = size_t(p.raw_first + i) * p.hidden, words = size_t(id) * (p.hidden / 8), groups = size_t(id) * (p.hidden / 64);
+  float d = 0.0f;
+  for (uint w = t; w < p.hidden / 8; w += tpg.x) {
+    const uint bits = HW[words + w];
+    const float scale = float(HS[groups + w / 8]), bias = float(HB[groups + w / 8]);
+    for (uint x = 0; x < 8; x++) {
+      const uint h = 8 * w + x;
+      const float head = float(bfloat(scale * float((bits >> (4 * x)) & 15u) + bias));
+      d = fma(float(RAW[raw + h]) * float(NORM[h]), head, d);
+    }
+  }
+  d = group_sum(d, red, t, lane, sg, tpg.x);
+  if (t == 0) OUT[i * p.k + j] = d;
+}
+
+// Per (row i, sender s): m = sigmoid(Q_i + G_s + b) * V_s (f32); OUT[i][s][j] = BASE[i][j] + RMS_i * m . TG[c_j].
+struct Table { uint rows, k, rank, row_words, rms_first; };
 kernel void tf_dspine_table(device const bfloat* PACKED [[buffer(0)]], device const bfloat* TSV [[buffer(1)]], device const bfloat* GB [[buffer(2)]],
-    device const bfloat* TG [[buffer(3)]], device const uint* TOPK [[buffer(4)]], device const bfloat* LOGITS [[buffer(5)]],
+    device const bfloat* TG [[buffer(3)]], device const uint* TOPK [[buffer(4)]], device const float* BASE [[buffer(5)]],
     device const float* RMS [[buffer(6)]], constant Table& p [[buffer(7)]], device float* OUT [[buffer(8)]],
     uint2 g [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
     uint sg [[simdgroup_index_in_threadgroup]], uint2 tpg [[threads_per_threadgroup]]) {
@@ -124,6 +145,6 @@ kernel void tf_dspine_table(device const bfloat* PACKED [[buffer(0)]], device co
     float d = 0.0f;
     for (uint x = lane; x < r; x += 32) d = fma(m[x], float(TG[size_t(id) * r + x]), d);
     d = simd_sum(d);
-    if (lane == 0) OUT[(size_t(i) * p.k + s) * p.k + j] = float(LOGITS[size_t(i) * p.cols + id]) + rms * d;
+    if (lane == 0) OUT[(size_t(i) * p.k + s) * p.k + j] = BASE[i * p.k + j] + rms * d;
   }
 }

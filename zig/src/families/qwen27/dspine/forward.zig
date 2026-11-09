@@ -9,6 +9,11 @@ const Model = runtime.Model;
 const Ref = runtime.Ref;
 const topk_rows = core.bf16_topk;
 const row_words = @sizeOf(topk_rows.Row) / 4;
+/// TF_DSPINE_PROFILE: each layer, the head and the tail in their own command buffers, their GPU times printed.
+var profile = false;
+pub fn setProfile(on: bool) void {
+    profile = on;
+}
 
 fn scratch(m: *Model, rows: usize, width: usize, dtype: ck.DType) !Ref {
     return m.frame.ref(try m.frame.alloc(@intCast(rows), @intCast(width), dtype));
@@ -39,11 +44,10 @@ fn project(m: *Model, e: mtl.ComputeEncoder, x: Ref, w: ck.Tensor, rows: usize) 
     return y;
 }
 
-/// A BF16 bridge linear: y [rows, n] = x [rows, k] w^T, w at `w` (a resident slice or an owned buffer).
-fn bridgeLinear(m: *Model, e: mtl.ComputeEncoder, x: Ref, w: Ref, rows: usize, n: usize, k: usize) !Ref {
+/// A bridge linear y [rows, n] = x [rows, k] w^T, w the matrix at host `bytes` (GPU `w`): affine-4 when prepared.
+fn bridgeLinear(m: *Model, e: mtl.ComputeEncoder, x: Ref, bytes: []const u8, w: Ref, rows: usize, n: usize, k: usize) !Ref {
     const y = try scratch(m, rows, n, .bf16);
-    try m.primitives.linear(e, x, w, y, .{ .rows = @intCast(rows), .n = @intCast(n), .k = @intCast(k), .x_stride = @intCast(k), .w_stride = @intCast(k), .y_stride = @intCast(n) });
-    e.barrier();
+    try m.matmul(e, x, bytes, w, y, @intCast(rows), @intCast(n), @intCast(k));
     return y;
 }
 
@@ -124,7 +128,7 @@ pub fn propose(m: *Model, anchor: u32) !Proposal {
     if (m.begin != 0 or m.end > s.window - 1) return error.UnsupportedDSpineContext;
     _ = try m.frame.begin();
     defer m.frame.release();
-    const e = m.frame.encoder;
+    var e = m.frame.encoder;
     const ids = try scratch(m, t, 1, .u32);
     const id_slice = ids.buf.slice(u32, ids.off / 4 + t)[ids.off / 4 ..][0..t];
     @memset(id_slice, s.mask);
@@ -141,12 +145,12 @@ pub fn propose(m: *Model, anchor: u32) !Proposal {
     const kv = config.kvWidth(s);
     const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(s.head_dim)));
     const packed_w: Ref = .{ .buf = m.packed_w };
+    const packed_bytes = m.packed_w.contents()[0 .. 3 * s.rank * s.code * 2];
     const codebook = try m.weight(m.graph.bridge.codebook.bytes);
     const bias = try m.weight(m.graph.bridge.gate_bias.bytes);
     var raw: Ref = undefined;
     var rms: Ref = undefined;
     var packed_rows: Ref = undefined;
-    var u: Ref = undefined;
     for (m.graph.layers, m.caches, 0..) |layer, cache, l| {
         const q = try rope(m, e, try norm(m, e, try project(m, e, xin, layer.attention.q, t), layer.attention.q_norm, t, s.heads, s.head_dim), positions, t, s.heads);
         const own_k = try rope(m, e, try norm(m, e, try project(m, e, xin, layer.attention.k, t), layer.attention.k_norm, t, s.kv_heads, s.head_dim), positions, t, s.kv_heads);
@@ -175,31 +179,35 @@ pub fn propose(m: *Model, anchor: u32) !Proposal {
         rms = try scratch(m, t, 1, .f32);
         m.kernels.read(e, raw, xn, rms, @intCast(t), @intCast(h), s.bridge_eps);
         e.barrier();
-        const projected = try bridgeLinear(m, e, xn, try m.weight(m.graph.readOf(l)), t, s.code, h);
+        const projected = try bridgeLinear(m, e, xn, m.graph.readOf(l), try m.weight(m.graph.readOf(l)), t, s.code, h);
         const codes = try scratch(m, t, s.code, .bf16);
         m.kernels.code(e, projected, codebook, ids, codes, @intCast(t), @intCast(s.code), @intCast(t), s.bridge_eps);
         e.barrier();
-        packed_rows = try bridgeLinear(m, e, codes, packed_w, t, 3 * s.rank, s.code);
+        packed_rows = try bridgeLinear(m, e, codes, packed_bytes, packed_w, t, 3 * s.rank, s.code);
         const msg = try scratch(m, t, s.rank, .bf16);
         m.kernels.message(e, packed_rows, bias, msg, @intCast(t), @intCast(s.rank), @intCast(t));
         e.barrier();
-        const delta = try bridgeLinear(m, e, msg, try m.weight(m.graph.writeOf(l)), t, h, s.rank);
+        const delta = try bridgeLinear(m, e, msg, m.graph.writeOf(l), try m.weight(m.graph.writeOf(l)), t, h, s.rank);
         const last = l + 1 == s.layers;
         const next = if (last) m.graph.norm else m.graph.layers[l + 1].input_norm;
         const res = try scratch(m, t, h, .bf16);
         xin = try scratch(m, t, h, .bf16);
-        if (last) u = try scratch(m, t, h, .bf16);
-        m.kernels.write(e, raw, delta, rms, try m.weight(next.bytes), res, xin, if (last) u else null, @intCast(t), @intCast(h), @intCast(t), s.eps);
+        m.kernels.write(e, raw, delta, rms, try m.weight(next.bytes), res, xin, @intCast(t), @intCast(h), @intCast(t), s.eps);
         e.barrier();
         residual = res;
+        if (profile) {
+            try m.frame.part();
+            e = m.frame.encoder;
+        }
     }
-    // the head over rows 1.. (the anchor drafts nothing): candidates from the final rows, the base from raw * norm
+    // the head over rows 1.. (the anchor drafts nothing) for the candidates
     const v = s.vocab;
     const logits = try scratch(m, n, v, .bf16);
-    const base = try scratch(m, n, v, .bf16);
-    try m.target.kernels.quant(e, m.target.weights.head, .{ .buffer = xin.buf, .offset = xin.off + h * 2 }, null, m.target.frame.get(.dims), .{ .buffer = logits.buf, .offset = logits.off }, @intCast(n));
-    try m.target.kernels.quant(e, m.target.weights.head, .{ .buffer = u.buf, .offset = u.off + h * 2 }, null, m.target.frame.get(.dims), .{ .buffer = base.buf, .offset = base.off }, @intCast(n));
-    e.barrier();
+    try m.head(e, at(xin, h * 2), logits, @intCast(n));
+    if (profile) {
+        try m.frame.part();
+        e = m.frame.encoder;
+    }
     const top = try scratch(m, n, @sizeOf(topk_rows.Row), .u8);
     try m.topk.encode(e, .{ .buf = logits.buf, .off = logits.off }, .{ .buf = top.buf, .off = top.off }, .{ .rows = @intCast(n), .vocab = @intCast(v), .k = @intCast(k), .stride = @intCast(v) });
     e.barrier();
@@ -207,11 +215,17 @@ pub fn propose(m: *Model, anchor: u32) !Proposal {
     const sids = try scratch(m, n * k, 1, .u32);
     m.kernels.senders(e, top, codebook, senders, sids, .{ .rows = @intCast(n), .k = @intCast(k), .code = @intCast(s.code), .row_words = row_words, .anchor = anchor, .scale = @sqrt(@as(f32, @floatFromInt(s.code))) });
     e.barrier();
-    const tsv = try bridgeLinear(m, e, senders, at(packed_w, s.rank * s.code * 2), n * k, 2 * s.rank, s.code);
+    const tsv = try bridgeLinear(m, e, senders, packed_bytes[s.rank * s.code * 2 ..], at(packed_w, s.rank * s.code * 2), n * k, 2 * s.rank, s.code);
+    const base = try scratch(m, n * k, 1, .f32);
+    m.kernels.base(e, raw, try m.weight(m.graph.norm.bytes), m.head_rows orelse return error.DSpineNeedsTargetDir, top, base, .{ .rows = @intCast(n), .k = @intCast(k), .hidden = @intCast(h), .row_words = row_words, .raw_first = 1 });
     const table = try scratch(m, n * k * k, 1, .f32);
-    m.kernels.table(e, packed_rows, tsv, bias, .{ .buf = m.tg }, top, base, rms, table, .{ .rows = @intCast(n), .k = @intCast(k), .rank = @intCast(s.rank), .row_words = row_words, .cols = @intCast(v), .rms_first = 1 });
+    m.kernels.table(e, packed_rows, tsv, bias, .{ .buf = m.tg }, top, base, rms, table, .{ .rows = @intCast(n), .k = @intCast(k), .rank = @intCast(s.rank), .row_words = row_words, .rms_first = 1 });
     e.barrier();
     try finish(m);
+    if (profile) {
+        for (m.frame.parts[0..m.frame.part_count], 0..) |cb, i| std.debug.print("dspine part {d}: {d:.2} ms\n", .{ i, cb.gpuSeconds() * 1e3 });
+        std.debug.print("dspine tail: {d:.2} ms\n", .{m.frame.cb.gpuSeconds() * 1e3});
+    }
     return read(top, table, n, k);
 }
 

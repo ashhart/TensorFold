@@ -13,8 +13,8 @@ pub const Ref = core.draft_ops.Ref;
 const simd = core.row_projection.simd;
 const options = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 
-/// How the backbone's linears run: prepared affine-4 (the default, as DFlash2's), or BF16 as the checkpoint holds them.
-pub const Mode = enum { q4, bf16 };
+/// The linears: all affine-4 (the default), only the body's (the bridge BF16 as dspine_mlx keeps it), or BF16.
+pub const Mode = enum { q4, q4_body, bf16 };
 /// The bridge's linears stay BF16, as dspine_mlx keeps them; `q4` prepares only the body's.
 pub fn backbone(name: []const u8, rank: usize) bool {
     return rank == 2 and std.mem.endsWith(u8, name, ".weight") and !std.mem.startsWith(u8, name, "selected_prefix_bridge.");
@@ -46,12 +46,15 @@ pub const Model = struct {
     prepared: std.AutoHashMapUnmanaged(usize, core.affine4_lane.Adapter) = .empty,
     tiled: std.AutoHashMapUnmanaged(usize, Tiled) = .empty,
     simd: ?simd.Pipelines = null,
+    /// The target's LM head in its MLX layout, read again from its files: the base dequantizes candidates' rows.
+    head_copy: ?core.checkpoint_metal.Checkpoint = null,
+    head_rows: ?@import("kernels.zig").Head = null,
 
     pub fn shape(m: *const Model) config.Shape {
         return m.graph.shape;
     }
 
-    pub fn load(a: std.mem.Allocator, io: std.Io, target: *Target, dir: []const u8, mode: Mode) !*Model {
+    pub fn load(a: std.mem.Allocator, io: std.Io, target: *Target, dir: []const u8, mode: Mode, target_dir: ?[]const u8) !*Model {
         const path = try std.fs.path.join(a, &.{ dir, "config.json" });
         defer a.free(path);
         const text = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 20));
@@ -64,7 +67,7 @@ pub const Model = struct {
         errdefer a.destroy(m);
         m.* = .{ .allocator = a, .target = target, .checkpoint = core.checkpoint_metal.Checkpoint.init(a), .graph = undefined, .mode = mode, .primitives = undefined, .attention = undefined, .topk = undefined, .kernels = undefined, .frame = .{ .allocator = a, .device = target.device, .queue = target.queue }, .caches = &.{}, .packed_w = undefined, .tg = undefined };
         errdefer m.checkpoint.deinit();
-        const later: ?core.checkpoint_metal.Later = if (mode == .q4) backbone else null;
+        const later: ?core.checkpoint_metal.Later = if (mode != .bf16) backbone else null;
         for (shards) |file| try m.checkpoint.addFileSplit(target.device, file, "", null, later);
         m.primitives = try core.draft_ops.Ops.init(target.device);
         errdefer m.primitives.deinit();
@@ -77,13 +80,16 @@ pub const Model = struct {
         m.graph = try loadGraph(a, m, s);
         errdefer m.graph.deinit();
         errdefer m.dropPrepared();
-        if (mode == .q4) try m.prepare();
+        if (mode != .bf16) try m.prepare();
         m.checkpoint.closeFiles();
         m.caches = try newCaches(a, target.device, s);
         errdefer freeCaches(a, m.caches);
         m.packed_w = try m.packWeights();
         errdefer m.packed_w.deinit();
+        if (mode == .q4) try m.prepareBridge();
         m.tg = try m.buildTg();
+        errdefer m.tg.deinit();
+        try m.copyHead(io, target_dir orelse return error.DSpineNeedsTargetDir);
         return m;
     }
 
@@ -98,6 +104,7 @@ pub const Model = struct {
     }
 
     pub fn deinit(m: *Model) void {
+        if (m.head_copy) |*c| c.deinit();
         m.frame.deinit();
         m.dropPrepared();
         freeCaches(m.allocator, m.caches);
@@ -135,19 +142,43 @@ pub const Model = struct {
             if (d.dtype != .bf16 or d.shape[0] % 32 != 0 or d.shape[1] % 64 != 0) return error.DraftPreparationUnqualified;
             try rows.resize(m.allocator, d.bytes / 2);
             try m.checkpoint.read(entry.key_ptr.*, 0, std.mem.sliceAsBytes(rows.items));
-            const key = @intFromPtr((try m.checkpoint.view(entry.key_ptr.*)).ptr);
-            var p = try core.affine4.prepare(m.allocator, rows.items, d.shape[0], d.shape[1]);
-            defer p.deinit();
-            if (order) |o| {
-                const adapter = try core.affine4_lane.Adapter.init(m.allocator, m.target.device, p, try @import("../projection.zig").split(d.shape[0], d.shape[1]), o);
-                try @import("../residency.zig").putPrepared(m, key, adapter);
-            } else {
-                try @import("../residency.zig").putTiled(m, key, try Tiled.init(m.target.device, p));
-            }
+            try m.prepareRows(order, @intFromPtr((try m.checkpoint.view(entry.key_ptr.*)).ptr), rows.items, d.shape[0], d.shape[1]);
             count += 1;
         }
         // fc and seven a layer (q, k, v, o, gate, up, down)
         if (count != 1 + 7 * m.graph.shape.layers) return error.DraftTensorCoverage;
+    }
+
+    /// One bf16 [n][k] matrix's affine-4 copy under `key`: a tensor-unit adapter, or (no `order`) SIMD tiles.
+    fn prepareRows(m: *Model, order: ?core.lane_projection.RegOrder, key: usize, rows: []align(1) const u16, n: usize, k: usize) !void {
+        if (n % 32 != 0 or k % 64 != 0 or rows.len != n * k) return error.DraftPreparationUnqualified;
+        const copy_rows = try m.allocator.alloc(u16, rows.len);
+        defer m.allocator.free(copy_rows);
+        @memcpy(copy_rows, rows);
+        var p = try core.affine4.prepare(m.allocator, copy_rows, n, k);
+        defer p.deinit();
+        if (order) |o| {
+            const adapter = try core.affine4_lane.Adapter.init(m.allocator, m.target.device, p, try @import("../projection.zig").split(n, k), o);
+            try @import("../residency.zig").putPrepared(m, key, adapter);
+        } else {
+            try @import("../residency.zig").putTiled(m, key, try Tiled.init(m.target.device, p));
+        }
+    }
+
+    /// The bridge's reads and writes, the packed gates and the TSV pair [predecessor_gate; prev], affine-4 too.
+    fn prepareBridge(m: *Model) !void {
+        const s = m.graph.shape;
+        const order = if (m.target.device.tensorUnits()) try core.lane_projection.RegOrder.init(m.target.device) else null;
+        defer if (order) |o| o.deinit();
+        for (0..s.layers) |l| {
+            const read = m.graph.readOf(l);
+            try m.prepareRows(order, @intFromPtr(read.ptr), std.mem.bytesAsSlice(u16, read), s.code, s.hidden);
+            const write = m.graph.writeOf(l);
+            try m.prepareRows(order, @intFromPtr(write.ptr), std.mem.bytesAsSlice(u16, write), s.hidden, s.rank);
+        }
+        const all = m.packed_w.slice(u16, 3 * s.rank * s.code);
+        try m.prepareRows(order, @intFromPtr(all.ptr), all, 3 * s.rank, s.code);
+        try m.prepareRows(order, @intFromPtr(all[s.rank * s.code ..].ptr), all[s.rank * s.code ..], 2 * s.rank, s.code);
     }
 
     pub fn source(m: *Model) ck.Source {
@@ -180,17 +211,45 @@ pub const Model = struct {
 
     /// y [rows, n] = x [rows, k] w^T: prepared affine-4 when the body runs q4, else the BF16 checkpoint rows.
     pub fn linear(m: *Model, e: mtl.ComputeEncoder, x: Ref, w: ck.Tensor, y: Ref, rows: u32) !void {
-        const n: u32 = @intCast(w.shape[0]);
-        const k: u32 = @intCast(w.shape[1]);
-        const key = @intFromPtr(w.bytes.ptr);
+        return m.matmul(e, x, w.bytes, null, y, rows, @intCast(w.shape[0]), @intCast(w.shape[1]));
+    }
+
+    /// y = x w^T for the matrix at host `bytes`: its affine-4 copy if prepared, else BF16 at `w` (or its tensor).
+    pub fn matmul(m: *Model, e: mtl.ComputeEncoder, x: Ref, bytes: []const u8, w: ?Ref, y: Ref, rows: u32, n: u32, k: u32) !void {
+        const key = @intFromPtr(bytes.ptr);
         if (m.tiled.get(key)) |t| {
             simd.encode(e, try simd.call(&m.simd.?, t.n, t.k, rows, false, false, 0), t.matrix(), x.buf, x.off, y.buf, y.off);
         } else if (m.prepared.get(key)) |adapter| {
             var first: u32 = 0;
             while (first < rows) : (first += 16) try adapter.encode(e, .{ .buf = x.buf, .off = x.off + @as(usize, first) * k * 2 }, .{ .buf = y.buf, .off = y.off + @as(usize, first) * n * 2 }, @min(rows - first, 16));
         } else {
-            try m.primitives.linear(e, x, try m.weight(w.bytes), y, .{ .rows = rows, .n = n, .k = k, .x_stride = k, .w_stride = k, .y_stride = n });
+            try m.primitives.linear(e, x, w orelse try m.weight(bytes), y, .{ .rows = rows, .n = n, .k = k, .x_stride = k, .w_stride = k, .y_stride = n });
         }
+        e.barrier();
+    }
+
+    /// The target's lm_head (weight, scales, biases in MLX's affine-4 layout) from its files.
+    fn copyHead(m: *Model, io: std.Io, dir: []const u8) !void {
+        const shards = try core.checkpoint_host.shardFiles(m.allocator, io, dir);
+        defer core.checkpoint_host.freeShardFiles(m.allocator, shards);
+        var c = core.checkpoint_metal.Checkpoint.init(m.allocator);
+        errdefer c.deinit();
+        const prefix: []const u8 = if (m.target.checkpoint.has("language_model.lm_head.weight")) "language_model.lm_head" else "lm_head";
+        for (shards) |file| try c.addFileSelected(m.target.device, file, "", prefix);
+        var name: [64]u8 = undefined;
+        const w = try c.get(try std.fmt.bufPrint(&name, "{s}.weight", .{prefix}));
+        const sc = try c.get(try std.fmt.bufPrint(&name, "{s}.scales", .{prefix}));
+        const bi = try c.get(try std.fmt.bufPrint(&name, "{s}.biases", .{prefix}));
+        const s = m.graph.shape;
+        if (w.dtype != .u32 or w.shape[0] != s.vocab or w.shape[1] * 8 != s.hidden or sc.shape[1] * 64 != s.hidden or sc.dtype != .bf16 or bi.dtype != .bf16) return error.TargetBinding;
+        c.closeFiles();
+        m.head_copy = c;
+        m.head_rows = .{ .words = .{ .buf = w.buffer, .off = w.offset }, .scales = .{ .buf = sc.buffer, .off = sc.offset }, .biases = .{ .buf = bi.buffer, .off = bi.offset } };
+    }
+
+    /// The target head over `rows` rows, through the target's own head kernel.
+    pub fn head(m: *Model, e: mtl.ComputeEncoder, x: Ref, y: Ref, rows: u32) !void {
+        try m.target.kernels.quant(e, m.target.weights.head, .{ .buffer = x.buf, .offset = x.off }, null, m.target.frame.get(.dims), .{ .buffer = y.buf, .offset = y.off }, rows);
         e.barrier();
     }
 
