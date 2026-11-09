@@ -94,11 +94,12 @@ pub fn run(o: Ops, kind: Kind, r: Routed, x: Tensor, rows: usize, prefill: bool)
         tile = tileFor(o, rows);
         try o.moeRoute(local, pairs, r.rows, tile, members, items, cap);
         try o.moeForeignItems(items, cap, ex.count);
-        const both = try o.projectRouted(x, ex.fused, items, count, members, pairs, slots, @min(tile, rows), rows);
+        const expert_rows = (rows * r.top_k + r.count() - 1) / r.count();
+        const both = try o.projectRouted(x, ex.fused, items, count, members, pairs, slots, @min(tile, rows), expert_rows);
         const act = try o.arena.take(pairs * ex.width * kind.size());
         const act_t: Tensor = .{ .ptr = act, .kind = kind };
         try o.moeAct(both, act_t, pairs, ex.width, ex.limit);
-        const y = try o.projectRouted(act_t, ex.down, items, count, members, pairs, 1, @min(tile, rows), rows);
+        const y = try o.projectRouted(act_t, ex.down, items, count, members, pairs, 1, @min(tile, rows), expert_rows);
         // the shared pair's id is another rank's here: its row reads zero, and rank 0 adds its own gate's branch
         try o.moeZeroForeign(y, local, ex.count, pairs, ex.dims);
         const share = try o.arena.of(f32, rows * ex.dims);
@@ -166,15 +167,16 @@ fn expertParts(o: Ops, kind: Kind, r: Routed, x: Tensor, rows: usize, logits: u6
     }
     // beside the stack the shared pair's id is the stack's first id past its experts: zero its item, never read its row
     if (ex.shared != null) try o.moeForeignItems(items, count, ex.count);
+    const expert_rows = (rows * r.top_k + r.count() - 1) / r.count();
     // the gate and up's activation is the launch's epilogue when the tile takes the shape
     const act_t: Tensor = if (try o.projectRoutedAct(x, ex.fused, items, count, members, pairs, slots, @min(tile, rows), ex.limit)) |t| t else blk: {
-        const both = try o.projectRouted(x, ex.fused, items, count, members, pairs, slots, @min(tile, rows), rows);
+        const both = try o.projectRouted(x, ex.fused, items, count, members, pairs, slots, @min(tile, rows), expert_rows);
         const act = try o.arena.take(pairs * ex.width * kind.size());
         const t: Tensor = .{ .ptr = act, .kind = kind };
         try o.moeAct(both, t, pairs, ex.width, ex.limit);
         break :blk t;
     };
-    const y = try o.projectRouted(act_t, ex.down, items, count, members, pairs, 1, @min(tile, rows), rows);
+    const y = try o.projectRouted(act_t, ex.down, items, count, members, pairs, 1, @min(tile, rows), expert_rows);
     return .{ .y = y };
 }
 
