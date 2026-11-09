@@ -101,15 +101,16 @@ def run_arm(args, arm):
     keyfile = root / "key"
     with os.fdopen(os.open(keyfile, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as handle:
         handle.write(key + "\n")
-    placeholders = {"model": str(model), "graph": str(root / "graph.json"), "key": str(keyfile), "port": str(args.port)}
-    cmd = [word.format(**placeholders) for word in json.loads(args.command)]
     env = {k: v for k, v in os.environ.items() if not k.startswith("TF_SLIDE_")}
     env["TF_SLIDE_PLACEMENT"] = arm
-    base = f"http://127.0.0.1:{args.port}"
     results = []
-    with socket.socket() as reservation:
+    with socket.socket() as reservation, (root / "server.log").open("w") as log:
         reservation.bind(("127.0.0.1", args.port))
-    with (root / "server.log").open("w") as log:
+        port = reservation.getsockname()[1]
+        placeholders = {"model": str(model), "graph": str(root / "graph.json"), "key": str(keyfile), "port": str(port)}
+        cmd = [word.format(**placeholders) for word in json.loads(args.command)]
+        base = f"http://127.0.0.1:{port}"
+        reservation.close()
         process = subprocess.Popen(cmd, env=env, stdout=log, stderr=subprocess.STDOUT)
         try:
             deadline = time.monotonic() + args.startup_timeout
@@ -162,7 +163,7 @@ def run_arm(args, arm):
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait()
-    summary = {"arm": arm, "facts": len(results), "neurons_per_fact": [r["neurons"] for r in results],
+    summary = {"arm": arm, "port": port, "facts": len(results), "neurons_per_fact": [r["neurons"] for r in results],
             "mean_neurons_per_fact": sum(r["neurons"] for r in results) / len(results),
             "accepted": sum(r["accepted"] for r in results), "final_recalled": sum(prior),
             "prior_facts_lost": sum(r["prior_facts_lost"] for r in results),
@@ -255,7 +256,7 @@ def main():
     p.add_argument("--backend", choices=["metal", "cuda"])
     p.add_argument("--binary", type=Path, help="binary whose SHA256 identifies the build")
     p.add_argument("--checkpoint-revision")
-    p.add_argument("--port", type=int, default=8080)
+    p.add_argument("--port", type=int, default=0, help="0 selects an OS-assigned port (default)")
     p.add_argument("--startup-timeout", type=int, default=900)
     p.add_argument("--self-test", action="store_true")
     p.add_argument("--corrections", action="store_true", help="After the twenty facts, run ten counterfactual corrections and exact deletion checks")
