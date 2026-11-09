@@ -15,6 +15,15 @@ pub fn refusal(drafts: ?u32, confidence: ?f64, drafter: bool, target: bool) ?[]c
     return null;
 }
 
+/// Why the MTP head is refused on this Mac: an M5's tensor units, or K/V pages its chained rows do not cover.
+pub fn deviceRefusal(drafts: ?u32, tensor_units: bool, pages: bool) ?Refused {
+    if ((drafts orelse 0) == 0) return null;
+    if (tensor_units) return .{ .err = error.MtpOnTensorUnits, .why = "--mtp-drafts: the MTP head drafts on Macs without tensor units (M1 to M4); an M5 serves Qwen3.8-27B with DFlash2 or plain rounds" };
+    if (pages) return .{ .err = error.MtpWithKvPages, .why = "--mtp-drafts: the MTP head's chained rows do not take K/V pages yet; unset TF_QWEN27_METAL_KV_PAGES or serve without --mtp-drafts" };
+    return null;
+}
+pub const Refused = struct { err: anyerror, why: []const u8 };
+
 /// Hashes the disk identity's mode words; the head's word joins only when it is on, as main keys the rest.
 pub fn identityWords(w: *std.hash.Wyhash, words: []const u64, head: bool) void {
     w.update(std.mem.sliceAsBytes(words));
@@ -45,4 +54,16 @@ test "qwen27 MTP flags: the 27B takes them, each misuse is refused by name, and 
     try std.testing.expectStringStartsWith(refusal(3, std.math.nan(f64), false, true).?, "--mtp-confidence must be");
     try std.testing.expectStringStartsWith(refusal(max_drafts + 1, null, false, true).?, "--mtp-drafts: Qwen3.8-27B on a Mac drafts at most 15");
     try std.testing.expectStringStartsWith(refusal(2, null, true, true).?, "--mtp-drafts drafts with the MTP head, and --drafter");
+}
+
+test "qwen27 MTP flags: the head is refused by name on an M5 and with K/V pages, and taken otherwise" {
+    try std.testing.expect(deviceRefusal(null, true, true) == null);
+    try std.testing.expect(deviceRefusal(0, true, true) == null); // 0 turns the head off
+    try std.testing.expect(deviceRefusal(3, false, false) == null);
+    const m5 = deviceRefusal(3, true, false).?;
+    try std.testing.expectEqual(error.MtpOnTensorUnits, m5.err);
+    try std.testing.expectStringStartsWith(m5.why, "--mtp-drafts: the MTP head drafts on Macs without tensor units");
+    const paged = deviceRefusal(3, false, true).?;
+    try std.testing.expectEqual(error.MtpWithKvPages, paged.err);
+    try std.testing.expect(std.mem.indexOf(u8, paged.why, "TF_QWEN27_METAL_KV_PAGES") != null);
 }
