@@ -101,7 +101,7 @@ pub const Model = struct {
     attn: cuda.window_attention.WindowAttention,
     tree: Tree,
     k: Kernels,
-    group: ?cuda.tp_group.Group = null,
+    group: cuda.tp_group.Group = undefined,
     caches: []Cache = &.{},
     bufs: std.ArrayList(cuda.DeviceBuffer) = .empty,
     // a rank's heads, key heads, FFN width and vocab share
@@ -141,10 +141,8 @@ pub const Model = struct {
         const m = try gpa.create(Model);
         errdefer gpa.destroy(m);
         m.* = .{ .gpa = gpa, .io = io, .d = d, .stream = try cuda.Stream.init(d, false), .c = c, .o = o, .w = undefined, .dense = undefined, .norms = undefined, .qk = undefined, .attn = undefined, .tree = undefined, .k = undefined, .hq = c.heads / world, .hk = c.kv_heads / world, .ff = c.intermediate / world, .vr = c.vocab / world, .context = o.context, .slots = o.slots };
-        if (world > 1) {
-            m.group = try cuda.tp_group.Group.open(d, o.place.rank, world);
-            if (o.roce) try m.group.?.openRoce(gpa, io, d, m.stream, max_rows * c.hidden * 4);
-        }
+        m.group = try cuda.tp_group.Group.open(d, o.place.rank, world);
+        if (o.roce) try m.group.openRoce(gpa, io, d, m.stream, max_rows * c.hidden * 4);
         m.w = try weights.load(gpa, d, &ck, c, .{ .rank = o.place.rank, .world = world });
         m.dense = try cuda.exl3.Dense.load(d);
         m.norms = try cuda.norms.Norms.load(d);
@@ -154,7 +152,7 @@ pub const Model = struct {
         m.tree.sms = @intCast(try ctx.attribute(.multiprocessor_count));
         m.k = try Kernels.load(d);
         try m.alloc(c);
-        if (world > 1) try m.hello();
+        try m.hello();
         return m;
     }
 
@@ -235,7 +233,7 @@ pub const Model = struct {
     pub fn setTaps(m: *Model, taps: []const u32) !void {
         if (taps.len == 0 or taps.len > m.taps.len or m.tap_ring != 0) return error.RicursiveTaps;
         for (taps) |t| if (t >= m.c.layers) return error.RicursiveTaps;
-        if (m.rank() == 0 and m.group != null) {
+        if (m.rank() == 0) {
             var h: Header = .{ .op = @backingInt(Op.taps), .n = @intCast(taps.len) };
             for (taps, 0..) |t, i| h.ids[i] = @intCast(t);
             try m.plan(&h);
@@ -267,7 +265,7 @@ pub const Model = struct {
         m.norms.unload();
         m.dense.unload();
         m.w.deinit();
-        if (m.group) |*g| g.close();
+        m.group.close();
         m.stream.deinit();
         m.gpa.destroy(m);
     }
@@ -352,7 +350,7 @@ pub const Model = struct {
 
     /// Rank 0's header to every rank (rank 0 uploads it; the others read rank 0's).
     fn exchange(m: *Model, h: *Header) !void {
-        const g = if (m.group) |*g| g else return;
+        const g = &m.group;
         try m.stream.synchronize();
         if (m.rank() == 0) try m.up(m.b.hdr, std.mem.asBytes(h));
         // by NCCL, which waits as long as rank 0 idles (RoCE writes give up after their spin limit)
@@ -364,7 +362,7 @@ pub const Model = struct {
 
     /// Rank 0: the next call's plan word to every rank (rank 1 runs the same call), before it runs.
     pub fn plan(m: *Model, h: *Header) !void {
-        if (m.group != null) try m.exchange(h);
+        try m.exchange(h);
     }
 
     /// The ranks agree on context and slots before any call.
@@ -379,7 +377,6 @@ pub const Model = struct {
 
     /// Rank 0: rank 1's follow loop returns.
     pub fn stop(m: *Model) !void {
-        if (m.group == null) return;
         var h: Header = .{};
         try m.plan(&h);
         try m.stream.synchronize();
@@ -387,7 +384,6 @@ pub const Model = struct {
 
     /// Rank 1: rank 0's calls, until its stop.
     pub fn follow(m: *Model) !void {
-        if (m.group == null) return error.RicursiveNotFollower;
         while (true) {
             var h: Header = .{};
             try m.exchange(&h);
@@ -412,7 +408,7 @@ pub const Model = struct {
 
     /// `bytes` a rank at parts + rank * bytes gathered from every rank, then summed in rank order into `into`.
     pub fn sumRanks(m: *Model, into: u64, bytes: usize) !void {
-        const g = &m.group.?;
+        const g = &m.group;
         try g.allGather(m.stream, m.b.parts + m.rank() * bytes, m.b.parts, bytes);
         try m.k.rankSum(m.stream, m.b.parts, into, bytes / 4, g.world);
     }
@@ -493,8 +489,7 @@ pub const Model = struct {
         if (hr == 0) return;
         const o = out orelse return;
         try s.synchronize();
-        if (m.group) |*g| try g.check();
-        if (world == 1) return m.down(b.logits, std.mem.sliceAsBytes(o));
+        try m.group.check();
         const all = try m.gpa.alloc(f32, world * hr * m.vr);
         defer m.gpa.free(all);
         try m.down(b.logits, std.mem.sliceAsBytes(all));
@@ -511,7 +506,6 @@ pub const Model = struct {
         const h = c.hidden;
         const qw = m.hq * hd;
         const kw = m.hk * hd;
-        const world = m.o.place.world;
         const pos = b.st + max_rows * 4;
         const slots = b.st + 2 * max_rows * 4;
         const row_stream = b.st + 3 * max_rows * 4;
@@ -547,20 +541,16 @@ pub const Model = struct {
                 try m.tree.run(s, b.qo, b.ko, b.vo, rws, Tree.scratch(b.tree, n, m.hq, m.hk, ng, hd), b.q, n, m.hq, m.hk, hd, ng, c.scale());
             }
             try m.k.gate(s, b.q, b.g, b.gated, n * qw);
-            if (world == 1) try m.dense.prompt(s, l.o, b.gated, .f16, n, b.a, .f32) else {
-                try m.dense.prompt(s, l.o, b.gated, .f16, n, b.parts + m.rank() * n * h * 4, .f32);
-                try m.sumRanks(b.a, n * h * 4);
-            }
+            try m.dense.prompt(s, l.o, b.gated, .f16, n, b.parts + m.rank() * n * h * 4, .f32);
+            try m.sumRanks(b.a, n * h * 4);
             try m.k.normAdd(s, b.a, l.post_attn, b.x, n, h, c.eps);
             try m.norms.rms(s, b.x, .f32, l.pre_ffn, b.y, .f16, n, h, c.eps);
             const gu_up = b.gu + n * m.ff * 2;
             try m.dense.prompt(s, l.gate, b.y, .f16, n, b.gu, .f16);
             try m.dense.prompt(s, l.up, b.y, .f16, n, gu_up, .f16);
             try m.k.swiglu(s, b.gu, gu_up, b.act, n * m.ff, c.clamp);
-            if (world == 1) try m.dense.prompt(s, l.down, b.act, .f16, n, b.a, .f32) else {
-                try m.dense.prompt(s, l.down, b.act, .f16, n, b.parts + m.rank() * n * h * 4, .f32);
-                try m.sumRanks(b.a, n * h * 4);
-            }
+            try m.dense.prompt(s, l.down, b.act, .f16, n, b.parts + m.rank() * n * h * 4, .f32);
+            try m.sumRanks(b.a, n * h * 4);
             try m.k.normAdd(s, b.a, l.post_ffn, b.x, n, h, c.eps);
             for (m.taps[0..m.n_taps], 0..) |t, ti| if (t == li) try m.k.taps(s, b.x, pos, slots, m.tap_ring, tap_rows, m.n_taps, ti, h, n);
             if (capture) |cap| {
@@ -573,6 +563,6 @@ pub const Model = struct {
         try m.norms.rms(s, b.x + (n - hr) * h * 4, .f32, m.w.final_norm, b.y, .f16, hr, h, c.eps);
         const lg = b.logits + m.rank() * hr * m.vr * 4;
         try m.dense.prompt(s, m.w.head, b.y, .f16, hr, lg, .f32);
-        if (world > 1) try m.group.?.allGather(s, lg, b.logits, hr * m.vr * 4);
+        try m.group.allGather(s, lg, b.logits, hr * m.vr * 4);
     }
 };
