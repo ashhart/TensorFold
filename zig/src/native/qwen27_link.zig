@@ -9,6 +9,7 @@ const lb = @import("qwen27_lanes.zig");
 /// Rank 1's follower: replay rank 0's rounds in order; a rank that cannot replay stops to be restarted.
 pub fn follow(b: *lb.Metal) void {
     const l = b.link orelse return;
+    std.log.info("q27 follower: listening", .{});
     while (true) {
         const seen = l.pair.next(l.gpa, &l.words) catch |err| {
             if (err != error.PairStopped) failFollow("a round", @errorName(err));
@@ -17,6 +18,7 @@ pub fn follow(b: *lb.Metal) void {
         const k = seen orelse return;
         const kind = std.enums.fromInt(lb.Kind, k) orelse failFollow("an unknown command", k);
         const w = l.words.items;
+        std.log.info("q27 follower: got {s} words={d}", .{ @tagName(kind), w.len });
         switch (kind) {
             .begin => {
                 if (w.len != 1) failFollow("begin", w.len);
@@ -38,6 +40,7 @@ pub fn follow(b: *lb.Metal) void {
                 (q.session.Session{ .runner = b.runner, .slot = w[0] }).step(w[1]) catch |err| return failFollow("step", @errorName(err));
             },
             .tree => {
+                std.log.info("q27 follower: tree slot={d} rows={d}", .{ w[0], w[1] });
                 if (w.len < 2 or w.len != 2 + 2 * w[1]) failFollow("tree", w.len);
                 const slot = w[0];
                 const ids = w[2 .. 2 + w[1]];
