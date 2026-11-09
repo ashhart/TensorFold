@@ -192,6 +192,14 @@ test "disk identity: Dory's pages count as on when TF_KV_SHARE turns them on wit
     try t.expectEqual(profileHash(&rows, "gemma4", "cuda", &.{}), profileHash(&rows, "gemma4", "cuda", &.{.{ share, "4" }}));
 }
 
+test "disk identity: an empty or whitespace-only TF_KV_SHARE leaves Dory's pages unset, as the engine reads it" {
+    const rows = [_]api.profile.Entry{ api.profile.entry(.TF_KV_SHARE), api.profile.entry(.TENSORFOLD_DORY_KV_PAGES) };
+    const share: api.profile.Switch = .TF_KV_SHARE;
+    const unset = profileHash(&rows, "dory", "cuda", &.{});
+    for ([_][:0]const u8{ "", " ", "\t", " \t\r\n" }) |raw|
+        try t.expectEqual(unset, profileHash(&rows, "dory", "cuda", &.{.{ share, raw }}));
+}
+
 const Members = struct {
     const Pair = struct { [:0]const u8, ?[:0]const u8 };
     var values: []const Pair = &.{};

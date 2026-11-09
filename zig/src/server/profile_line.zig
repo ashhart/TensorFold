@@ -264,3 +264,15 @@ test "profile line: Dory's pages count as on, from TF_KV_SHARE, when TF_KV_SHARE
     const gemma = "profile: stable; registered overrides: TF_KV_SHARE=4 (identical, env)";
     try std.testing.expectEqualStrings(gemma, try format(a, .stable, "gemma4", "cuda", TestEnv{ .kv_share = "4" }));
 }
+
+test "profile line: an empty or whitespace-only TF_KV_SHARE does not turn Dory's pages on" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const empty = "profile: stable; registered overrides: TF_KV_SHARE= (identical, env)";
+    try std.testing.expectEqualStrings(empty, try format(a, .stable, "dory", "cuda", TestEnv{ .kv_share = "" }));
+    for ([_][]const u8{ " ", "\t", " \t\r\n" }) |raw| {
+        const line = try format(a, .stable, "dory", "cuda", TestEnv{ .kv_share = raw });
+        try std.testing.expect(std.mem.indexOf(u8, line, "TENSORFOLD_DORY_KV_PAGES") == null);
+    }
+}
