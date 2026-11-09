@@ -33,13 +33,13 @@ fn check(name: []const u8, raw: []const u8, valid: bool) !void {
     try t.expect(std.mem.endsWith(u8, why.?, e.rule(name).forms));
 }
 
-test "Flash Next strict env: the table holds all 28 settings: 20 switches, 6 integers, 1 real, 1 structured" {
+test "Flash Next strict env: the table holds all 29 settings: 20 switches, 7 integers, 1 real, 1 structured" {
     var counts: [4]usize = @splat(0);
     for (e.rules) |r| if (r.scope == .flashnext) {
         try t.expect(std.mem.startsWith(u8, r.name, "TF_FLASHNEXT_"));
         counts[@backingInt(group(r))] += 1;
     };
-    try t.expectEqual([4]usize{ 20, 6, 1, 1 }, counts);
+    try t.expectEqual([4]usize{ 20, 7, 1, 1 }, counts);
 }
 
 test "Flash Next strict env: unset and blank settings both read as the caller's default" {
@@ -68,6 +68,14 @@ test "Flash Next strict env: every count keeps its whole numbers and refuses jun
         try t.expectEqual(@as(u64, 7), try e.value(u64, r.name, "007", 0));
         for ([_][]const u8{ "-1", "1.5", "abc", "18446744073709551616" }) |raw| try check(r.name, raw, false);
     };
+}
+
+test "Flash Next strict env: the page test keeps 0 in the table, which its reader reads as off" {
+    const name = "TF_FLASHNEXT_KV_PAGE_TEST";
+    try check(name, "0", true);
+    try check(name, "48", true);
+    try t.expectEqual(@as(?usize, 0), try e.value(?usize, name, "0", null));
+    try t.expect((try e.value(?usize, name, null, null)) == null);
 }
 
 test "Flash Next strict env: the chain's confidence is any finite number, as its reader takes it" {
