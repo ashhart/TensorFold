@@ -1,4 +1,4 @@
-//! dots.mocr's OCR reader: the model card's layout prompt, and its JSON block list to normalized Markdown blocks.
+//! dots.mocr's OCR reader: our layout prompt, and the model's JSON block list to normalized Markdown blocks.
 const std = @import("std");
 const api = @import("engine_api");
 const image = @import("image.zig");
@@ -6,27 +6,8 @@ const ocr = api.ocr;
 const Allocator = std.mem.Allocator;
 const log = std.log.scoped(.dots_ocr);
 
-/// The pinned model card's layout prompt (`prompt_layout_all_en`), verbatim; ocr_test.zig checks its SHA-256.
-pub const prompt =
-    \\Please output the layout information from the PDF image, including each layout element's bbox, its category, and the corresponding text content within the bbox.
-    \\
-    \\1. Bbox format: [x1, y1, x2, y2]
-    \\
-    \\2. Layout Categories: The possible categories are ['Caption', 'Footnote', 'Formula', 'List-item', 'Page-footer', 'Page-header', 'Picture', 'Section-header', 'Table', 'Text', 'Title'].
-    \\
-    \\3. Text Extraction & Formatting Rules:
-    \\    - Picture: For the 'Picture' category, the text field should be omitted.
-    \\    - Formula: Format its text as LaTeX.
-    \\    - Table: Format its text as HTML.
-    \\    - All Others (Text, Title, etc.): Format their text as Markdown.
-    \\
-    \\4. Constraints:
-    \\    - The output text must be the original text from the image, with no translation.
-    \\    - All layout elements must be sorted according to human reading order.
-    \\
-    \\5. Final Output: The entire output must be a single JSON object.
-    \\
-;
+/// Our layout prompt (prompt.txt, also the oracle's `--prompt`); ocr_test.zig checks it against each oracle run.
+pub const prompt = @embedFile("prompt.txt");
 
 /// The reader the family offers (Offer.ocr).
 pub const reader: ocr.Ocr = .{ .prompt = prompt, .parse = parse };
