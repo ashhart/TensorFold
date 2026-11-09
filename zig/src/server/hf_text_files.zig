@@ -48,3 +48,52 @@ pub fn specialsOf(a: Allocator, config: std.json.Value) !std.json.Value {
     }
     return .{ .object = out };
 }
+
+/// The least tokenizer.json `loadTokenizer` accepts: a BPE model with a vocabulary and no merges.
+const mini =
+    \\{"model":{"type":"BPE","vocab":{"a":0,"b":1},"merges":[]}}
+;
+
+test "tokenizer.json: the root's own file is read and `path` stays the checkpoint folder" {
+    const io = std.testing.io;
+    // the join in the fallback is the caller's arena's, as hf_text.zig's load passes it
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "tokenizer.json", .data = mini });
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", a);
+    var path: []const u8 = "";
+    var t = try openTokenizer(io, a, std.testing.allocator, dir, &path);
+    defer t.deinit();
+    try std.testing.expectEqualStrings(dir, path);
+}
+
+test "tokenizer.json: a folder holding only tokenizer/ is opened there and `path` names that join" {
+    const io = std.testing.io;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "tokenizer");
+    try tmp.dir.writeFile(io, .{ .sub_path = "tokenizer/tokenizer.json", .data = mini });
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", a);
+    var path: []const u8 = "";
+    var t = try openTokenizer(io, a, std.testing.allocator, dir, &path);
+    defer t.deinit();
+    try std.testing.expectEqualStrings(try std.fs.path.join(a, &.{ dir, "tokenizer" }), path);
+}
+
+test "tokenizer.json: neither place has it, so the loader's own error is the answer" {
+    const io = std.testing.io;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", a);
+    var path: []const u8 = "";
+    try std.testing.expectError(error.FileNotFound, openTokenizer(io, a, std.testing.allocator, dir, &path));
+}
