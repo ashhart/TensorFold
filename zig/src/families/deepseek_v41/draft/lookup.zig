@@ -45,7 +45,10 @@ pub const Settings = struct {
         const lookup = @import("sys").getenv("TF_DSV41_LOOKUP");
         const blank_off = lookup != null and std.mem.trim(u8, lookup.?, " \t").len == 0;
         s.lookup = !blank_off and try @import("sys").environment.value(bool, "TF_DSV41_LOOKUP", lookup, true);
-        if (s.copy_drafter and !s.lookup) return error.InvalidEnvironment;
+        if (s.copy_drafter and !s.lookup) {
+            if (!@import("builtin").is_test) std.log.err("TF_DSV41_COPY_DRAFTER requires TF_DSV41_LOOKUP to be enabled", .{});
+            return error.InvalidEnvironment;
+        }
         if (std.c.getenv("TF_DSV41_LOOKUP_MIN")) |v| if (std.mem.span(v).len > 0) {
             s.min_match = std.fmt.parseInt(i64, std.mem.trim(u8, std.mem.span(v), " "), 10) catch return error.BadLookupMin;
         };

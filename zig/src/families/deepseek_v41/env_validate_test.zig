@@ -131,3 +131,21 @@ test "DeepSeek strict env: the canonical tool grammar masks its legacy alias" {
     try t.expect(try e.refusal(t.allocator, fx, .{ .dsv41 = true }) == null);
     try t.expectError(error.InvalidEnvironment, e.checkScope(.dsv41, Fixture{ .name = fx.name, .raw = fx.raw }));
 }
+
+test "DeepSeek strict env: copy-drafter lookup-off refusal names TF_DSV41_COPY_DRAFTER and TF_DSV41_LOOKUP" {
+    const Pair = struct {
+        lookup: []const u8,
+        pub fn get(p: @This(), key: []const u8) ?[]const u8 {
+            if (std.mem.eql(u8, key, "TF_DSV41_COPY_DRAFTER")) return "1";
+            if (std.mem.eql(u8, key, "TF_DSV41_LOOKUP")) return p.lookup;
+            return null;
+        }
+    };
+    for ([_][]const u8{ "0", "off", "false", "", " " }) |off| {
+        const why = (try e.refusal(t.allocator, Pair{ .lookup = off }, .{ .dsv41 = true })).?;
+        defer t.allocator.free(why);
+        try t.expect(std.mem.indexOf(u8, why, "TF_DSV41_COPY_DRAFTER") != null);
+        try t.expect(std.mem.indexOf(u8, why, "TF_DSV41_LOOKUP") != null);
+    }
+    try t.expect(try e.refusal(t.allocator, Pair{ .lookup = "1" }, .{ .dsv41 = true }) == null);
+}
