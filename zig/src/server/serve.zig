@@ -262,12 +262,15 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
     const profile_line = @import("profile_line.zig").format(a, args.profile, s.model_type, s.identity.backend, ProfileEnvironment{}) catch
         "profile: stable; registered overrides: unavailable (out of memory)";
     log.line("{s}", .{profile_line});
-    var at_text: [160]u8 = undefined;
-    const at = if (lis.unix_path) |path| std.fmt.bufPrint(&at_text, "on Unix socket {s}, /v1", .{path}) catch path else std.fmt.bufPrint(&at_text, "at http://{s}:{d}/v1", .{ args.host, port }) catch args.host;
-    log.line("serving {s} {s} (sampling: {s}; drafts: {f}; context: {s}; loaded in {d:.1}s)", .{
-        s.served,                                                  at,                                                                                          shownSampling(a, s.sampling),
-        @import("draft_line.zig").shown(args.no_drafts, srv.info), if (window > 0) std.fmt.bufPrint(&window_text, "{d}", .{window}) catch "?" else "unlimited", loaded,
-    });
+    const sampling = shownSampling(a, s.sampling);
+    const drafts = @import("draft_line.zig").shown(args.no_drafts, srv.info);
+    const context = if (window > 0) std.fmt.bufPrint(&window_text, "{d}", .{window}) catch "?" else "unlimited";
+    // the TCP line keeps its exact form: the benchmark server reads the port from it (benchmark_server_test.zig)
+    if (lis.unix_path) |path| {
+        log.line("serving {s} on Unix socket {s}, /v1 (sampling: {s}; drafts: {f}; context: {s}; loaded in {d:.1}s)", .{ s.served, path, sampling, drafts, context, loaded });
+    } else {
+        log.line("serving {s} at http://{s}:{d}/v1 (sampling: {s}; drafts: {f}; context: {s}; loaded in {d:.1}s)", .{ s.served, args.host, port, sampling, drafts, context, loaded });
+    }
     const reserved = args.thinking_reserve > 0 and srv.info.capability(.answer_limit);
     if (args.thinking_reserve > 0 and !srv.info.capability(.answer_limit)) log.line("--thinking-reserve is not applied: this engine cannot limit the answer apart from the reasoning", .{});
     if (args.thinking and srv.info.capability(.reasoning) and std.mem.indexOf(u8, s.text.templateSource(), "enable_thinking") != null)
