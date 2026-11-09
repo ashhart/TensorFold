@@ -18,7 +18,7 @@ pub const Host = struct {
     staging: hip.HostBuffer,
     /// Bytes of `staging` this forward used: the stream is synchronized before a forward starts again.
     used: usize = 0,
-    tables: *const tables.Tables,
+    tables: *tables.Tables,
 
     /// `bytes` copied through the staging into fresh arena memory, queued on the stream.
     pub fn put(h: *Host, o: Ops, bytes: []const u8) !u64 {
