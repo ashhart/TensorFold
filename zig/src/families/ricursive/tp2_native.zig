@@ -78,7 +78,6 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     errdefer own.m.deinit();
     if (p.rank != 0) follow(own);
     own.r = try rl.Ripple.init(gpa, own.m);
-    own.r.priority_copies = try cuda.priority_copies.read("TF_RICURSIVE_COPIES", o.drafts);
     std.log.info("ricursive: rank 0 of {d}, {d} slot(s) x {d} tokens, {d:.2} GiB of caches a rank", .{ p.world, slots, o.context, gib(per * slots) });
     return .{
         .backend = own.r.backend(),
@@ -153,6 +152,7 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.ParallelPastRound => "--parallel: Ripple on CUDA holds at most 16 streams",
         error.ParallelPastMemory => "--parallel: the CUDA memory budget fits fewer Ripple streams than asked at this --context: lower --parallel or --context, or adjust TENSORFOLD_MEMORY_RESERVE_GIB",
         error.NoStreamFits => "the CUDA memory budget fits no Ripple stream after the weights: lower --context, or adjust TENSORFOLD_MEMORY_RESERVE_GIB",
+        error.UnmeasuredRicursiveBitrate => "Ripple's two-rank CUDA path serves ExLlamaV3 packs at 5.0 or 6.0 bits with an 8-bit head, the bitrates measured so far; this pack is another",
         error.RicursiveRanksDisagree => "Ripple's ranks serve different slots or contexts: start both ranks with the same --parallel and --context",
         else => null,
     };
