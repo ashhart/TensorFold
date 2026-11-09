@@ -691,7 +691,11 @@ are the same.
 On the native server, `/v1/chat/completions` and `/v1/responses` enforce `tool_choice: "required"` and a named
 function with the engine's token grammar. Chat uses `{"type":"function","function":{"name":"lookup"}}`;
 Responses uses `{"type":"function","name":"lookup"}`. Only offered tools are allowed; an unknown name or a required
-call with no tools gets HTTP 400. `auto` remains optional, and `none` hides the tools.
+call with no tools gets HTTP 400. `auto` remains optional, and `none` hides the tools. With `auto`, a request that
+offers a tool marked `"strict": true` gets an optional grammar on an engine with token grammar support: the reply is
+free text or calls, and a strict tool's arguments follow its parameter schema. `TENSORFOLD_TOOL_GRAMMAR=1` holds every
+offered tool this way. An engine without that support runs these requests unconstrained. DeepSeek-V4.1 on CUDA has
+it, so its strict tools under `auto` are constrained like the other families'.
 
 The constrained answer contains one or more complete calls and no prose outside them. Arguments follow the offered
 parameter schema. GLM uses `<arg_key>` and `<arg_value>` tags after the function name.
