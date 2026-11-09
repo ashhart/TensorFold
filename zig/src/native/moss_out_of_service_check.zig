@@ -1,4 +1,4 @@
-//! MOSS-Image's stopped engine logs its reason at err: the test runner calls a test's own error log a failure, so this checks it out of process.
+//! MOSS-Image's out-of-service log, checked out of process: a test cannot log at err without failing.
 const std = @import("std");
 const api = @import("engine_api");
 const host = @import("moss_image_host.zig");
