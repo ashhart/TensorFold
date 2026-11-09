@@ -121,6 +121,13 @@ pub fn finishShare(h: anytype, room: u64) !void {
     }
 }
 
+const Any = @import("drafter.zig").Any;
+
+/// A host's drafter as DFlash2's model (null: DSpine), whether the host holds the drafter union or the model.
+fn dflashOf(model: anytype) @TypeOf(if (@TypeOf(model) == Any) model.dflash() else @as(?@TypeOf(model), model)) {
+    return if (@TypeOf(model) == Any) model.dflash() else model;
+}
+
 pub fn hold(h: anytype, io: std.Io) !void {
     var list: std.ArrayList(mtl.Buffer) = .empty;
     defer list.deinit(h.gpa);
@@ -137,11 +144,11 @@ pub fn hold(h: anytype, io: std.Io) !void {
     try fields.append(h.gpa, &list, h.back);
     for (h.back.contexts) |c| if (c) |x| try x.buffers(&list, h.gpa);
     if (h.disk_stage) |b| try list.append(h.gpa, b);
-    if (h.draft) |d| {
-        for (d.model.checkpoint.shards.items) |s| try list.append(h.gpa, s.buffer);
-        try list.append(h.gpa, d.model.pending);
-        try appendDraft(&d.model.backend, h.gpa, &list);
-    }
+    if (h.draft) |d| if (dflashOf(d.model)) |m| {
+        for (m.checkpoint.shards.items) |s| try list.append(h.gpa, s.buffer);
+        try list.append(h.gpa, m.pending);
+        try appendDraft(&m.backend, h.gpa, &list);
+    } else if (@TypeOf(d.model) == Any) try d.model.dspine.buffers(&list, h.gpa);
     if (h.back.vision) |v| {
         const held = v.buffers();
         try list.appendSlice(h.gpa, &held);
@@ -151,7 +158,7 @@ pub fn hold(h: anytype, io: std.Io) !void {
         h.model.kernels.setResident(r.follow());
         h.runner.setResident(r.follow());
         setBack(h.back, r.follow());
-        if (h.draft) |d| d.model.backend.setResident(r.follow());
+        if (h.draft) |d| if (dflashOf(d.model)) |m| m.backend.setResident(r.follow());
     }
     h.warm = if (h.resident) |*r| r.target() else .{ .queue = h.model.queue };
 }
@@ -160,7 +167,7 @@ pub fn drop(h: anytype) void {
     h.model.kernels.setResident(null);
     h.runner.setResident(null);
     setBack(h.back, null);
-    if (h.draft) |d| d.model.backend.setResident(null);
+    if (h.draft) |d| if (dflashOf(d.model)) |m| m.backend.setResident(null);
     if (h.resident) |*r| r.deinit();
     h.resident = null;
     h.warm = .{ .queue = h.model.queue };

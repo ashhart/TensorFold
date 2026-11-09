@@ -12,7 +12,7 @@ pub const Result = struct { tokens: []u32, rounds: usize, verified: usize, match
 pub const Extender = struct { ptr: *anyopaque, call: *const fn (*anyopaque, []const u32, u32) anyerror![]const u32 };
 /// DFlash2's rounds; GenerationOf takes any drafter with its interface (DSpine's chains too).
 pub const Generation = GenerationOf(Draft);
-/// Rounds over a drafter with: binds(target), tapIds(), tapWidth(), failed(), idle(), committed_end, absorb, propose.
+/// Rounds over a drafter with: binds(target), tapIds(), tapWidth(), failed(), idle(), committedEnd(), absorb, propose.
 pub fn GenerationOf(comptime D: type) type {
     return struct {
         const Self = @This();
@@ -52,7 +52,7 @@ pub fn GenerationOf(comptime D: type) type {
         }
         fn absorb(g: *Self, path: []const u32) !void {
             try g.absorbRows(path);
-            if (g.draft.committed_end != g.runner.offsets[0]) return error.BadDraftPosition;
+            if (g.draft.committedEnd() != g.runner.offsets[0]) return error.BadDraftPosition;
         }
         /// A prompt pass's rows into the drafter, 128 a call (its frame's); the target's pass may be longer.
         fn absorbChunk(g: *Self, rows: usize) !void {
@@ -63,7 +63,7 @@ pub fn GenerationOf(comptime D: type) type {
                 for (path[0..n], 0..) |*index, i| index.* = @intCast(first + i);
                 try g.absorbRows(path[0..n]);
             }
-            if (g.draft.committed_end != g.runner.offsets[0]) return error.BadDraftPosition;
+            if (g.draft.committedEnd() != g.runner.offsets[0]) return error.BadDraftPosition;
         }
         fn absorbRows(g: *Self, path: []const u32) !void {
             std.debug.assert(g.keep == null);
@@ -86,7 +86,7 @@ pub fn GenerationOf(comptime D: type) type {
         pub fn promptChunk(g: *Self, ids: []const u32, last: bool) !void {
             g.pending = null;
             std.debug.assert(g.keep == null);
-            if (g.runner.failed or g.draft.failed() or g.draft.committed_end != g.runner.offsets[0] or ids.len == 0 or ids.len > g.runner.model.frame.capacity) return error.BadDraftContext;
+            if (g.runner.failed or g.draft.failed() or g.draft.committedEnd() != g.runner.offsets[0] or ids.len == 0 or ids.len > g.runner.model.frame.capacity) return error.BadDraftContext;
             try (TargetSession.Session{ .runner = g.runner }).promptChunk(ids, last);
             try g.absorbChunk(ids.len);
         }
@@ -94,14 +94,14 @@ pub fn GenerationOf(comptime D: type) type {
         pub fn decodeChunk(g: *Self, ids: []const u32, last: bool) !void {
             g.pending = null;
             std.debug.assert(g.keep == null);
-            if (g.runner.failed or g.draft.failed() or g.draft.committed_end != g.runner.offsets[0] or ids.len == 0 or ids.len > g.runner.model.frame.capacity) return error.BadDraftContext;
+            if (g.runner.failed or g.draft.failed() or g.draft.committedEnd() != g.runner.offsets[0] or ids.len == 0 or ids.len > g.runner.model.frame.capacity) return error.BadDraftContext;
             try (TargetSession.Session{ .runner = g.runner }).decodeChunk(ids, last);
             try g.absorbChunk(ids.len);
         }
         pub fn prefill(g: *Self, ids: []const u32, chunk: usize) !void {
             g.pending = null;
             std.debug.assert(g.keep == null);
-            if (g.runner.failed or !g.draft.idle() or g.draft.committed_end != 0 or g.runner.offsets[0] != 0 or chunk == 0 or chunk > g.runner.model.frame.capacity) return error.BadDraftContext;
+            if (g.runner.failed or !g.draft.idle() or g.draft.committedEnd() != 0 or g.runner.offsets[0] != 0 or chunk == 0 or chunk > g.runner.model.frame.capacity) return error.BadDraftContext;
             var first: usize = 0;
             while (first < ids.len) {
                 const count = @min(ids.len - first, g.runner.promptRows(@intCast(chunk)));
@@ -169,7 +169,7 @@ pub fn GenerationOf(comptime D: type) type {
             g.keep = keep.retain();
             try g.runner.completeDeviceKeep(round, accepted.path);
             try g.draft.absorb(.{ .buf = g.taps }, @intCast(accepted.path.len));
-            if (g.draft.committed_end != g.runner.offsets[0]) return error.BadDraftPosition;
+            if (g.draft.committedEnd() != g.runner.offsets[0]) return error.BadDraftPosition;
             return accepted;
         }
         pub fn run(g: *Self, count: usize, force_length: bool, nodes: usize) !Result {
@@ -181,7 +181,7 @@ pub fn GenerationOf(comptime D: type) type {
         }
         /// `extend`: a copy from the context shares the tree's agreeing nodes and adds up to `extra` rows past them.
         pub fn runRound(g: *Self, remaining: u32, nodes: usize, eos: []const u32, already_delivered: bool, extend: ?Extender, extra: u32) !Result {
-            if (g.runner.failed or g.runner.active != null or g.runner.offsets[0] == 0 or !g.draft.idle() or g.draft.committed_end != g.runner.offsets[0] or g.draft.committed_end == 0 or nodes == 0 or nodes > 15 or eos.len > 16) return error.BadDraftOptions;
+            if (g.runner.failed or g.runner.active != null or g.runner.offsets[0] == 0 or !g.draft.idle() or g.draft.committedEnd() != g.runner.offsets[0] or g.draft.committedEnd() == 0 or nodes == 0 or nodes > 15 or eos.len > 16) return error.BadDraftOptions;
             for (eos) |token| if (token >= g.runner.model.config.vocab) return error.BadDraftOptions;
             if (remaining == 0) return .{ .tokens = try g.allocator.alloc(u32, 0), .rounds = 0, .verified = 0, .matched = 0 };
             const pending = g.pending orelse try (TargetSession.Session{ .runner = g.runner }).greedy();
@@ -235,7 +235,7 @@ pub fn GenerationOf(comptime D: type) type {
         }
         fn runImpl(g: *Self, count: usize, force_length: bool, nodes: usize, eos_override: ?[]const u32, already_delivered: bool) !Result {
             g.pending = null;
-            if (g.runner.failed or g.runner.active != null or g.runner.offsets[0] == 0 or !g.draft.idle() or g.draft.committed_end != g.runner.offsets[0] or g.draft.committed_end == 0 or nodes == 0 or nodes > 15 or count > 65536) return error.BadDraftOptions;
+            if (g.runner.failed or g.runner.active != null or g.runner.offsets[0] == 0 or !g.draft.idle() or g.draft.committedEnd() != g.runner.offsets[0] or g.draft.committedEnd() == 0 or nodes == 0 or nodes > 15 or count > 65536) return error.BadDraftOptions;
             const eos: []const u32 = if (force_length) &.{} else eos_override orelse g.runner.model.config.eos[0..g.runner.model.config.eos_count];
             for (eos) |token| if (token >= g.runner.model.config.vocab) return error.BadDraftOptions;
             var tokens: std.ArrayList(u32) = .empty;

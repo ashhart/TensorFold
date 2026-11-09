@@ -46,11 +46,13 @@ pub const disk = @import("disk.zig");
 pub const taps = @import("taps.zig");
 pub const tap_gather = @import("tap_gather.zig");
 pub const tap_ring = @import("tap_ring.zig");
+pub const drafter = @import("drafter.zig");
 /// The 27B's Metal sources by name (the kernel contract compiles them as the engine does).
 pub const runtime_sources = @import("qwen_runtime_sources");
 test {
     _ = dflash;
     _ = dspine;
+    _ = drafter;
     _ = disk;
     _ = @import("core").gpu_profile;
     _ = session;

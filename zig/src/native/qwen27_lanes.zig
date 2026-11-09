@@ -112,13 +112,13 @@ pub const Metal = struct {
         errdefer kept.deinit();
         const b = try gpa.create(Metal);
         errdefer gpa.destroy(b);
-        b.* = .{ .gpa = gpa, .runner = runner, .draft = draft, .tensor_units = tensor_units, .window = window, .copies = copies, .nodes = @import("qwen27_window.zig").nodes(window, copies), .ops = ops, .picks = picks, .kept = kept, .draft_slots = try draftSlots(), .slot_resume = slots.slotResumeEnv() };
+        b.* = .{ .gpa = gpa, .runner = runner, .draft = draft, .tensor_units = tensor_units, .window = window, .copies = copies, .nodes = @import("qwen27_window.zig").nodes(window, copies), .ops = ops, .picks = picks, .kept = kept, .draft_slots = if (draft != null and draft.?.model.dflash() == null) 1 else try draftSlots(), .slot_resume = slots.slotResumeEnv() };
         b.pass_profile = platform.c.getenv("TF_Q27_PASS_PROFILE") != null;
         errdefer b.freeContexts();
         if (draft) |d| {
             const g = d.model.ring();
             b.gathered_taps = try device.buffer(batch_rows * g.stride, opts);
-            for (b.contexts[1..runner.ready], 1..) |*x, slot| x.* = try Context.init(gpa, d.model, slot < b.draft_slots);
+            for (b.contexts[1..runner.ready], 1..) |*x, slot| x.* = try newContext(gpa, d, slot < b.draft_slots);
         }
         return b;
     }
@@ -182,7 +182,14 @@ pub const Metal = struct {
         const d = b.draft orelse return null;
         if (slot == 0) return d.model.ring();
         const x = b.contexts[slot] orelse return null;
-        return x.ring(d.model.graph.config);
+        return x.ring();
+    }
+
+    /// A slot past 0's drafter context: DFlash2's own (K/V caches when it drafts), else the taps ring alone.
+    pub fn newContext(gpa: std.mem.Allocator, d: *Draft, drafting: bool) !*Context {
+        if (d.model.dflash()) |m| return Context.init(gpa, m, drafting);
+        const g = d.model.ring();
+        return Context.taps(gpa, d.runner.model.device, g.window, g.stride, null);
     }
 
     /// Whether `slot`'s stream drafts its own trees.
