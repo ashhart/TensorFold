@@ -199,30 +199,7 @@ pub const LaneHost = struct {
         return self(ctx).info_;
     }
 
-    fn submitFn(ctx: *anyopaque, id: Id, request: *const Request, sink: Sink) api.SubmitError!void {
-        const h = self(ctx);
-        if (@import("lane_prompt_only.zig").refuses(h, request)) return error.InvalidRequest;
-        const job = h.gpa.create(Job) catch return error.Busy;
-        job.* = .{ .host = h, .id = id, .request = request, .sink = sink, .submitted = std.Io.Clock.awake.now(h.io).toNanoseconds() };
-        // written before the lock: a trace line never holds the host's mutex (a refused request's line stays alone)
-        if (h.trace) |t| t.line(.{ .t0_ns = job.submitted, .t1_ns = job.submitted, .kind = .submit, .id = id, .rows_to = request.prompt.len });
-        h.mutex.lockUncancelable(h.io);
-        defer h.unlock();
-        const unavailable = h.closing or (if (h.health) |source| !source.read(source.ctx) else false);
-        if (unavailable or h.stale or pressure.refuses(h)) {
-            h.gpa.destroy(job);
-            return if (unavailable) error.Closed else if (h.stale) error.Stale else error.MemoryPressure;
-        }
-        // foreground before background, each in arrival order (the Python job queue's priority)
-        var at = h.queued.items.len;
-        while (!request.background and at > 0 and h.queued.items[at - 1].request.background) at -= 1;
-        h.queued.insert(h.gpa, at, job) catch {
-            h.gpa.destroy(job);
-            return error.Busy;
-        };
-        h.load.started += 1;
-        h.wake.signal(h.io);
-    }
+    const submitFn = @import("lane_host_submit.zig").submit;
 
     fn cancelFn(ctx: *anyopaque, id: Id) void {
         const h = self(ctx);
@@ -382,6 +359,7 @@ pub const LaneHost = struct {
     /// A taken job's stream, set up to start; null when the job ended instead (dropped or cancelled).
     pub fn setup(h: *LaneHost, job: *Job) ?i96 {
         const r = job.request;
+        if (@import("lane_warm_queue.zig").skipKept(h, job)) return null;
         if (r.background and r.max_tokens == 0 and h.warm_quiet > 0 and !h.quiet(job))
             return h.ended(if (cancelled(job)) h.cancel(job) else @import("lane_host_warm.zig").deferJob(h, job));
         if (!lane_stream.open(h, job)) return null; // the job was finished instead

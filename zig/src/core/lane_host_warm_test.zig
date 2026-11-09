@@ -99,10 +99,11 @@ test "warm queue: foreground arriving during quiet goes first and the deferred p
     try host.start();
     defer host.stop();
     const prompt = [_]u32{ 2, 7, 1, 8 };
+    const unrelated = [_]u32{ 3, 1, 4, 1 };
     var warm: Box = .{};
     var real: Box = .{};
     const warm_request: Request = .{ .prompt = &prompt, .max_tokens = 0, .background = true };
-    const request: Request = .{ .prompt = &prompt, .max_tokens = 48 };
+    const request: Request = .{ .prompt = &unrelated, .max_tokens = 48 };
     try host.engine().submit(1, &warm_request, .{ .ctx = &warm, .event = Box.event });
     while (true) { // the engine thread has taken the pass: the request comes after it, as a client's next one does
         host.lock();
@@ -386,7 +387,8 @@ test "warm queue: a pass arriving beside active decoding stays queued and eventu
     var host = LaneHost.init(a, std.testing.io, &core, .{ .lanes = 2, .warm_turns = true });
     host.warm_quiet = std.time.ns_per_ms;
     const prompt = [_]u32{ 2, 7, 1, 8 };
-    const request: Request = .{ .prompt = &prompt, .max_tokens = 48 };
+    const unrelated = [_]u32{ 3, 1, 4, 1 };
+    const request: Request = .{ .prompt = &unrelated, .max_tokens = 48 };
     const warm_request: Request = .{ .prompt = &prompt, .max_tokens = 0, .background = true };
     var real: Box = .{};
     var warm: Box = .{};
@@ -396,4 +398,8 @@ test "warm queue: a pass arriving beside active decoding stays queued and eventu
     defer host.stop();
     try std.testing.expectEqual(Reason.length, real.wait());
     try std.testing.expectEqual(Reason.length, warm.wait());
+}
+
+test {
+    _ = @import("lane_host_warm_review_test.zig");
 }

@@ -167,7 +167,8 @@ pub const Store = struct {
         const e = s.entries.orderedRemove(i);
         policy.unlink(s, e);
         s.held -= e.bytes;
-        if (s.disk) |r| if (!e.expired and !s.rules.cut_sensitive) rows.write.evicted(r, e); // --spill-gib: stage an owned copy before the entry goes
+        // --spill-gib stages an owned image before RAM releases the entry.
+        if (s.disk) |r| if (!e.expired and !s.rules.cut_sensitive) rows.write.evicted(r, e);
         s.free(e);
     }
 

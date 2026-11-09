@@ -143,10 +143,11 @@ test "warm queue: deferral counts one yield and requeue; explicit cancellation a
     ledger.attach(rig.host.engine());
     try rig.host.start();
     const prompt = [_]u32{ 2, 7, 1, 8 };
+    const unrelated = [_]u32{ 3, 1, 4, 1 };
     var warm: Box = .{};
     var real: Box = .{};
     const warm_request: Request = .{ .prompt = &prompt, .max_tokens = 0, .background = true };
-    const request: Request = .{ .prompt = &prompt, .max_tokens = 8 };
+    const request: Request = .{ .prompt = &unrelated, .max_tokens = 8 };
     try rig.host.engine().submit(1, &warm_request, warm.sink());
     while (true) { // the engine thread has taken the pass
         rig.host.lock();

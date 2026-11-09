@@ -18,7 +18,7 @@ pub fn pick(h: *LaneHost) ?usize {
         const at = choose(h) orelse return null;
         const job = h.queued.items[at];
         if (job.request.background and job.request.max_tokens == 0 and h.warm_quiet > 0 and
-            (h.admitted.items.len > 0 or h.core.activeCount() > 0)) return null;
+            (h.foregroundWaiting() or h.admitted.items.len > 0 or h.core.activeCount() > 0)) return null;
         if (!prefix.waits(h, job)) return at;
     }
 }

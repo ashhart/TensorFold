@@ -43,7 +43,10 @@ pub fn deferJob(h: *LaneHost, job: *Job) bool {
         h.finish(job, .failed, "out of memory");
         return true;
     };
-    h.load.requeued += 1;
+    var discarded: @import("lane_warm_queue.zig").Discarded = .{};
+    @import("lane_warm_queue.zig").prune(h, job, &discarded);
+    if (@import("std").mem.indexOfScalar(*Job, h.queued.items, job) != null) h.load.requeued += 1;
     h.unlock();
+    discarded.finish(h);
     return true;
 }

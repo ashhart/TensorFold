@@ -4,7 +4,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
-- Prompt cache: untouched warm passes wait behind foreground work; opt-in Qwen CUDA message starts also keep template header ends, with exact cut keys and a disk-tier refusal.
+- Prompt cache: all warm hosts defer untouched background passes behind foreground work, with a bounded newest-per-conversation queue. Opt-in Qwen CUDA message starts also keep template header ends with exact cut keys and refuse `--learn` while `TF_QWEN_REQUEST_STARTS=1` (#2686).
 
 - Tests: main's nightly is green again. The Flash Next learn, prompt and compare tools build again on Linux (#2585 had put one file in two modules), and the dense serving and serving-identity pins take the changes #2579, #2585, #2285, #2205 and #2789 made, each named beside its pin. Serving is unchanged (#3002).
 

@@ -11,6 +11,7 @@ pub fn steps(b: *std.Build) void {
     const halt = b.addTest(.{ .root_module = api, .filters = &.{ "halt (", "halt fails" } });
     b.step("test-lane-halt-host", "Halt ordering with a fake backend and no GPU dependencies").dependOn(&b.addRunArtifact(halt).step);
     b.step("test-lane-lone-host", "Existing lone-driver handoff and reclaim with a fake backend").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = api, .filters = &.{"lone driver"} })).step);
+    b.step("test-warm-review-host", "Warm queue bounds, exact ends and held foregrounds without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = api, .filters = &.{"warm review:"} })).step);
     b.step("test-lane-api-host", "Shared lane host and engine API CPU regressions").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = api })).step);
     b.step("test-conversation-cache-host", "Returning conversation eviction and queued-resume regressions without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = api, .filters = &.{ "newest cache:", "queued cache:" } })).step);
     b.step("test-cache-progress-host", "One-state follow-ups and new conversations keep their next endpoint").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = api, .filters = &.{"queued cache: progress"} })).step);
