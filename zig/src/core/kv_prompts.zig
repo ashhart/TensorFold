@@ -116,13 +116,40 @@ pub const Blob = struct {
     }
 };
 
-/// TF_KV_SHARE=n: keep prompts as pool pages and at most n states past them (0 or unset: copies, as before).
+/// TF_KV_SHARE=n: keep prompts as pool pages and at most n states past them (0, empty or unset: copies, as before).
 pub fn sharing() error{BadKvShare}!usize {
-    const v = @import("profile").get(.TF_KV_SHARE) orelse return 0;
+    const v = @import("profile").given(.TF_KV_SHARE) orelse return 0;
     return std.fmt.parseInt(usize, v, 10) catch error.BadKvShare;
 }
 
 const testing = std.testing;
+
+test "TF_KV_SHARE: unset, empty or whitespace-only text keeps copies, a count keeps its meaning, other text is refused" {
+    if (comptime @import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const env = @import("sys").env;
+    const name = "TF_KV_SHARE";
+    const before = if (std.c.getenv(name)) |v| try testing.allocator.dupeSentinel(u8, std.mem.span(v), 0) else null;
+    defer {
+        if (before) |v| {
+            _ = env.setenv(name, v, 1);
+            testing.allocator.free(v);
+        } else _ = env.unsetenv(name);
+    }
+    _ = env.unsetenv(name);
+    try testing.expectEqual(@as(usize, 0), try sharing());
+    for ([_][:0]const u8{ "", " ", "\t", " \t\r\n" }) |v| {
+        try testing.expectEqual(@as(c_int, 0), env.setenv(name, v, 1));
+        try testing.expectEqual(@as(usize, 0), try sharing());
+    }
+    for ([_][:0]const u8{ "0", "16", "007" }, [_]usize{ 0, 16, 7 }) |v, n| {
+        try testing.expectEqual(@as(c_int, 0), env.setenv(name, v, 1));
+        try testing.expectEqual(n, try sharing());
+    }
+    for ([_][:0]const u8{ "on", " 16", "16 ", "-1" }) |v| {
+        try testing.expectEqual(@as(c_int, 0), env.setenv(name, v, 1));
+        try testing.expectError(error.BadKvShare, sharing());
+    }
+}
 
 const Pieces = struct {
     got: *std.ArrayList([5]u64),

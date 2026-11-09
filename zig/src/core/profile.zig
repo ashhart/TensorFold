@@ -118,7 +118,7 @@ pub const Entry = struct {
     pub fn served(e: Entry, own: ?[]const u8, by: ?[]const u8) ?[]const u8 {
         if (own != null or e.on_with == null) return own;
         const v = by orelse return null;
-        return if (different(entry(e.on_with.?).syntax, v)) "1" else null;
+        return if (!blank(v) and different(entry(e.on_with.?).syntax, v)) "1" else null;
     }
 };
 
@@ -212,6 +212,17 @@ pub fn resolve(profile: Profile, id: Switch, environment: ?[:0]const u8) ?[:0]co
 /// The only served profile is stable; no global setting or environment mutation is needed to select it.
 pub inline fn get(comptime id: Switch) ?[:0]const u8 {
     return value(.stable, id);
+}
+
+/// `get` for a reader that parses the text: empty or whitespace-only text reads as unset (`docs/environment.md`).
+pub inline fn given(comptime id: Switch) ?[:0]const u8 {
+    const v = get(id) orelse return null;
+    return if (blank(v)) resolve(.stable, id, null) else v;
+}
+
+/// Empty or whitespace-only text, which a parsing reader takes as unset.
+fn blank(v: []const u8) bool {
+    return std.mem.trim(u8, v, " \t\r\n").len == 0;
 }
 
 /// One switch's value for a profile chosen at runtime: the same environment-first rule as `get`.

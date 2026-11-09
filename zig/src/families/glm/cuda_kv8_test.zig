@@ -306,3 +306,29 @@ test "GLM FP8 KV: canonical per-rank state bytes at configured long windows are 
         try t.expectEqual(want, [3]usize{ capacity, bf.arena.buf.len, fp.arena.buf.len });
     }
 }
+
+test "GLM FP8 KV: unset, empty or whitespace-only TF_KV_PAGES is auto at every rank count, fp8 or not; other text reaches the start" {
+    if (comptime @import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const start = @import("cuda_start.zig");
+    const sys_env = @import("sys").env;
+    const name = "TF_KV_PAGES";
+    const before = if (std.c.getenv(name)) |v| try t.allocator.dupeSentinel(u8, std.mem.span(v), 0) else null;
+    defer {
+        if (before) |v| {
+            _ = sys_env.setenv(name, v, 1);
+            t.allocator.free(v);
+        } else _ = sys_env.unsetenv(name);
+    }
+    _ = sys_env.unsetenv(name);
+    try t.expect(start.pagesText() == null);
+    for ([_][:0]const u8{ "", " ", "\t", " \t\r\n" }) |v| {
+        try t.expectEqual(@as(c_int, 0), sys_env.setenv(name, v, 1));
+        for ([_]usize{ 1, 2, 3 }) |w| {
+            for ([_]bool{ false, true }) |kv8| try t.expectEqual(try start.paging(null, w, kv8), try start.paging(start.pagesText(), w, kv8));
+        }
+    }
+    for ([_][:0]const u8{ "auto", "on", "off", "0", "1", "all", " on" }) |v| {
+        try t.expectEqual(@as(c_int, 0), sys_env.setenv(name, v, 1));
+        try t.expectEqualStrings(v, start.pagesText().?);
+    }
+}
