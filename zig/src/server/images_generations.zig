@@ -134,10 +134,10 @@ fn prepare(srv: *Server, cx: *Cx, cap: api.ImageInfo, raw: Value) errors.Refused
         if (!std.ascii.eqlIgnoreCase(name, "b64_json")) return cx.refuse("response_format must be one of: b64_json");
     }
     const negative: []const u8 = if (raw.get("negative_prompt")) |v| switch (v) {
-        .null => "",
         .string => |s| s,
         else => return cx.fail(.request, "negative_prompt must be a string", .{}),
     } else "";
+    if (!std.unicode.utf8ValidateSlice(negative)) return cx.refuse("negative_prompt must be valid UTF-8 text");
     var seed: u64 = default_seed;
     if (raw.get("seed")) |v| {
         const given = v.int64() orelse return cx.refuse("seed must be an integer");
