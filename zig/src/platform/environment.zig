@@ -182,6 +182,7 @@ pub const rules = [_]Rule{
     .{ .name = "TF_FLASHNEXT_WINDOW_ROWS", .scope = .flashnext, .kind = .size, .forms = "a whole row count from 0 to the native size maximum (default the shared round's rows; capped by them)" },
     .{ .name = "TF_FLASHNEXT_READOUT_ROWS", .scope = .flashnext, .kind = .size, .forms = "a whole row count from 0 to the native size maximum (default 64; 0 never takes the tiles)" },
     .{ .name = "TF_FLASHNEXT_FACT_ROWS", .scope = .flashnext, .kind = .size, .forms = "a whole row count from 0 to the native size maximum (default 64; 0 never takes the tiles)" },
+    .{ .name = "TF_FLASHNEXT_KV_PAGE_TEST", .scope = .flashnext, .kind = .size, .forms = "a page size the kernels take, whole blocks of the indexer's ratio up to the window (unset: off)" },
     .{ .name = "TF_FLASHNEXT_CONFIDENCE", .scope = .flashnext, .kind = .signed_real, .forms = "a finite number (default -0.4)" },
     .{ .name = "TF_FLASHNEXT_PROMPT", .scope = .flashnext, .kind = .word, .words = &.{"rows"}, .forms = "rows for the rows path (unset or blank keeps the plain path)" },
 };
