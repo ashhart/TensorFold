@@ -46,6 +46,5 @@ pub const Fault = struct {
 
 /// One document of a request: a page image.
 pub const Source = struct {
-    name: []const u8,
     bytes: []const u8,
 };
