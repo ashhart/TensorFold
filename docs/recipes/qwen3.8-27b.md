@@ -102,8 +102,8 @@ the state, history and logits bytes against the general path).
 drafter as on CUDA, so every stream of a shared round drafts. `--mtp-confidence F` (0 to 1) stops a chain where its
 cumulative chance falls below F, and needs `--mtp-drafts`. The head is read from `mtp-4bit.safetensors` beside the
 checkpoint (MLX affine 4-bit, groups of 64, norms stored as 1 + w); no head file is published yet, so it is built
-from the release's `mtp.*` weights and placed there by hand. The flags are off by default, refused with `--drafter`
-and on an M5, and replies are byte-equal to `"draft": false`.
+from the release's `mtp.*` weights and placed there by hand. The flags are off by default, refused with `--drafter`,
+with `TF_QWEN27_METAL_KV_PAGES=1` and on an M5, and replies are byte-equal to `"draft": false`.
 
 ```bash
 tensorfold serve TensorFold/Qwen3.8-27B-MLX-4bit --mtp-drafts 3 --name bench
