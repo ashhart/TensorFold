@@ -27,13 +27,12 @@ Build the candidate native server with the Metal toolchain before running the ha
 not build, install, download, purge the OS cache or generate prepared weights. From the source tree:
 
 ```sh
-lockf -t 0 -k "$HOME/tf-gpu.lock" python3 tools/startup_receipt.py \
+python3 tools/startup_receipt.py \
   --binary zig-out/bin/tensorfold-native --model "$MODEL" \
   --output "$OUTPUT" --case warm --runs 3
 ```
 
-Choose an existing local checkpoint for `MODEL` and a new output directory for `OUTPUT`. Hold the
-shared GPU lock for this whole command. A busy lock stops before launching any process.
+Choose an existing local checkpoint for `MODEL` and a new output directory for `OUTPUT`.
 The harness uses loopback, an ephemeral port, one stream, context 4096, no drafts and no prompt
 cache. ANE remains explicitly off, which is already this family's default. It hashes the binary
 and checkpoint files, sequentially reads the checkpoint before each fresh process, sends the
