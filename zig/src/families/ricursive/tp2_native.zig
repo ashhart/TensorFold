@@ -15,7 +15,7 @@ pub const max_segments: u32 = 1;
 pub const prompt_rows: u32 = rl.prompt_rows;
 /// A kept state holds the caches through its position and nothing past it (the drafter's context is not kept).
 pub const snap_lookahead: u32 = 0;
-/// --drafter: the publisher's DFlash2 draft (BF16, on rank 0), tp2_draft.zig.
+/// --drafter: the publisher's DFlash2 draft (BF16, cut over both ranks as the target), tp2_draft.zig.
 pub const takes_drafter = true;
 pub const explains_open = true;
 /// A request's verify reserve past its prompt and reply.
@@ -105,10 +105,15 @@ fn follow(own: *Owned) noreturn {
     std.process.exit(0);
 }
 
+/// --drafter-bits: the drafter runs its BF16 weights as published, so 0 (bf16) only; 4 is refused by name.
+fn drafterBits(bits: u8) !void {
+    if (bits != 0) return error.DrafterBitsUnsupported;
+}
+
 /// --drafter's DFlash2 directory over the loaded target `p` (Owned): its weights, taps and the target's timings.
 pub fn openDrafter(gpa: std.mem.Allocator, io: std.Io, p: *anyopaque, dir: []const u8, bits: u8) !struct { drafter: lanes.drafter.Drafter, ctx: *anyopaque, close: *const fn (*anyopaque) void, reserve: *const fn (*anyopaque, u32) anyerror!void } {
     const own: *Owned = @ptrCast(@alignCast(p));
-    if (bits != 4 and bits != 16) std.log.warn("ricursive: --drafter-bits {d}: the drafter runs its BF16 weights as stored", .{bits});
+    try drafterBits(bits);
     const d = try Draft.init(gpa, io, own.m, dir);
     errdefer d.deinit();
     try d.time();
@@ -178,6 +183,7 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.ParallelPastMemory => "--parallel: the CUDA memory budget fits fewer Ripple streams than asked at this --context: lower --parallel or --context, or adjust TENSORFOLD_MEMORY_RESERVE_GIB",
         error.NoStreamFits => "the CUDA memory budget fits no Ripple stream after the weights: lower --context, or adjust TENSORFOLD_MEMORY_RESERVE_GIB",
         error.UnmeasuredRicursiveBitrate => "Ripple's two-rank CUDA path serves ExLlamaV3 packs at 5.0 or 6.0 bits with an 8-bit head, the bitrates measured so far; this pack is another",
+        error.DrafterBitsUnsupported => "--drafter-bits: Ripple's DFlash2 drafter runs its BF16 weights as published: serve it with --drafter-bits 0",
         error.RicursiveRanksDisagree => "Ripple's ranks serve different slots or contexts: start both ranks with the same --parallel and --context",
         else => null,
     };
@@ -198,4 +204,10 @@ test "the slots allocated at open fit the room: auto takes what fits, a fixed co
     try std.testing.expectError(error.NoStreamFits, fit(g, 1, false, 4 * g, g));
     try std.testing.expectError(error.ParallelPastRound, fit(1000 * g, 17, false, g, 0));
     try std.testing.expect(explain(null, error.PastContext) != null and explain(null, error.OutOfMemory) == null);
+}
+
+test "--drafter-bits: 0 (bf16, as published) is served, 4 refused by name" {
+    try drafterBits(0);
+    try std.testing.expectError(error.DrafterBitsUnsupported, drafterBits(4));
+    try std.testing.expect(explain(null, error.DrafterBitsUnsupported) != null);
 }
