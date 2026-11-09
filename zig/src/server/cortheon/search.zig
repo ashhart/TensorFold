@@ -330,6 +330,16 @@ test "a search snippet is found when its class uses single quotes" {
     try std.testing.expectEqualStrings("A short blurb.", results[0].snippet);
 }
 
+test "a lite search result is found when its class uses double quotes" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const page = "<tr><td><a rel=\"nofollow\" href='https://example.org/page' class=\"result-link\">Example</a></td></tr>";
+    const results = try parseDuckDuckGoLite(a, page, 5);
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqualStrings("https://example.org/page", results[0].url);
+}
+
 test "a search result is found when its class letters differ" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
