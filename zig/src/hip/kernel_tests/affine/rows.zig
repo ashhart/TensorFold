@@ -280,8 +280,9 @@ fn tierProduct(t: *Rig, m: usize, n: usize, k: usize, bits: c_int, group: c_int,
     const k_ptr = t.kernels;
     var set: std.ArrayList(*const Entry) = .empty;
     defer set.deinit(gpa);
-    // a routed plan's pairs are its members, one a row
+    // a routed plan's pairs are its members, one a row, over `experts` experts
     const plan_pairs: usize = if (routed) m else 0;
+    const expert_rows: usize = if (routed) (m + experts - 1) / experts else 0;
     try prod.pickable(k_ptr, arg, item_count, plan_pairs, .prefill, k_ptr.env(), &set, gpa);
     // the few-row and skewed matrix tiles take a plan only under a pairs or depth bound: the sweep may miss them
     if (routed) for (&mlx_entries.all) |*e| if ((std.mem.indexOf(u8, e.id, ".prefill.item") != null or std.mem.indexOf(u8, e.id, ".prefill.skew") != null) and std.mem.indexOfScalar(*const Entry, set.items, e) == null) try set.append(gpa, e);
@@ -306,7 +307,7 @@ fn tierProduct(t: *Rig, m: usize, n: usize, k: usize, bits: c_int, group: c_int,
         try ids[i % n_ids].launch(k_ptr, .{ .r = &t.base.r, .s = t.base.stream.handle, .arg = arg, .items = @intCast(item_count) });
     }
     arg.out = outs[2 * n_ids].ptr;
-    try k_ptr.prefillLaunch(&t.base.r, arg, t.base.stream.handle, @intCast(item_count), @intCast(plan_pairs), @intCast(m));
+    try k_ptr.prefillLaunch(&t.base.r, arg, t.base.stream.handle, @intCast(item_count), @intCast(plan_pairs), @intCast(expert_rows));
     try t.base.stream.synchronize();
     const written = try gpa.alloc(u8, bytes);
     defer gpa.free(written);
