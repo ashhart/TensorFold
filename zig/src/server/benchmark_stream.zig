@@ -59,6 +59,9 @@ fn bodyMode(a: Allocator, served: []const u8, f: suite.Fixture, tokens: u32, t: 
     const so = try json.newObject(a);
     try so.put(a, "include_usage", .{ .bool = true });
     try o.put(a, "stream_options", .{ .object = so });
+    // the protocol names every draw setting: a served default (the instruct set's presence_penalty 1.5) shapes none
+    try o.put(a, "presence_penalty", .{ .float = 0 });
+    try o.put(a, "frequency_penalty", .{ .float = 0 });
     if (t > 0) {
         try o.put(a, "top_k", try json.intValue(a, 20));
         try o.put(a, "top_p", .{ .float = 0.95 });
