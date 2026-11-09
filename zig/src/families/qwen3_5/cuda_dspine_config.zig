@@ -4,9 +4,14 @@ const core = @import("core");
 const engine = @import("cuda_engine.zig");
 const Config = @import("cuda_draft_config.zig").Config;
 
-/// `root` a DSpine config.json (core.dspine.declared): its CUDA drafter config over `target`.
+/// `root` a DSpine config.json (core.dspine.declared): its CUDA config over `target`, at TF_DSPINE_WINDOW.
 pub fn parse(root: std.json.Value, target: engine.Geometry) !Config {
-    const s = try core.dspine.parse(root);
+    return parseWindow(root, target, try @import("sys").environment.read(usize, "TF_DSPINE_WINDOW", 0));
+}
+
+/// parse with a served `window` in place of the checkpoint's sliding_window (0 keeps it, core.dspine.narrowed).
+pub fn parseWindow(root: std.json.Value, target: engine.Geometry, window: usize) !Config {
+    const s = try core.dspine.narrowed(try core.dspine.parse(root), window);
     if (s.head_dim != 128 or s.layers > 8 or s.code > 4096 or s.rank > 1024) return error.UnsupportedDraftConfig;
     if (s.hidden != target.hidden or s.vocab != target.vocab or s.target_layers != target.layers or s.hidden % 256 != 0) return error.UnsupportedDraftConfig;
     for (s.tapIds()) |tap| if (tap >= target.layers) return error.BadDraftConfig;
