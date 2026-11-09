@@ -1,5 +1,6 @@
 //! Real conversation files for host namespace regressions; the eight-byte image uses no device.
 const std = @import("std");
+const builtin = @import("builtin");
 const pc = @import("engine_api").prompt_cache;
 const rows = pc.rows;
 const a = std.testing.allocator;
@@ -52,6 +53,11 @@ pub fn rewrite(dir: std.Io.Dir, sub_path: []const u8, data: []const u8) !void {
     const io = std.testing.io;
     const before = (try dir.statFile(io, sub_path, .{})).mtime;
     try dir.writeFile(io, .{ .sub_path = sub_path, .data = data });
+    // Zig 0.17's std can't set timestamps on Windows; NTFS's write time moves by itself, so only an unmoved one skips
+    if (builtin.os.tag == .windows) {
+        if ((try dir.statFile(io, sub_path, .{})).mtime.nanoseconds == before.nanoseconds) return error.SkipZigTest;
+        return;
+    }
     try dir.setTimestamps(io, sub_path, .{ .modify_timestamp = .{ .new = before.addDuration(.fromSeconds(1)) } });
 }
 
