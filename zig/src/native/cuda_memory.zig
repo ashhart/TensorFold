@@ -240,9 +240,9 @@ test "a family that allocates every stream at open is admitted only the streams 
     try std.testing.expectEqual(@as(u32, 65), try admit(growRoom(g, true), g, 64, 65, true));
 }
 
-test "the prompt cache: 16 GiB unless the flag sizes it, inside what the streams leave" {
+test "the prompt cache: half the streams' room with a floor unless the flag sizes it" {
     const g: u64 = 1 << 30;
-    try std.testing.expectEqual(16 * g, cacheBytes(null, 60 * g, 8 * g));
+    try std.testing.expectEqual(26 * g, cacheBytes(null, 60 * g, 8 * g));
     try std.testing.expectEqual(10 * g, cacheBytes(null, 18 * g, 8 * g)); // the streams' room comes first
     try std.testing.expectEqual(4 * g, cacheBytes(4, 60 * g, 8 * g));
     try std.testing.expectEqual(52 * g, cacheBytes(64, 60 * g, 8 * g));

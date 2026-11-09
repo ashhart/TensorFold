@@ -264,7 +264,8 @@ pub const Store = struct {
                 const at = e.at; // read before the reserve may evict the entry
                 s.resumedWithReason(e, prompt, null);
                 if (fresh_marks) |m| if (m.ptr != l.marks.ptr) a.free(m);
-                s.reserve(prompt, @intCast(prompt.len), null, l.marks, spans, history_len); // restored: the state it resumed may go too (a peer restores before it drops)
+                // Restored: this state may go too; a peer restores before it drops.
+                s.reserve(prompt, @intCast(prompt.len), null, l.marks, spans, history_len);
                 return .{ .from = at, .marks = l.marks };
             } else |err| {
                 // a refused state is dropped, then the next shorter RAM state is tried before the pass from the start
