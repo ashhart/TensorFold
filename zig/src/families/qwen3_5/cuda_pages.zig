@@ -50,7 +50,7 @@ pub fn layout(e: *const Engine, capacity: usize, tokens: usize, ring: usize, fix
 }
 
 /// One pool lane: a cache whose table maps its stream's pages, that stream's lease and its run's first page.
-const Lane = struct { cache: *Cache, lease: kv.Lease = .{}, used: bool = false, run: u32 = 0 };
+const Lane = struct { cache: *Cache, lease: kv.Lease = .{}, used: bool = false, run: u32 = 0, idx: usize = 0 };
 
 pub const Pages = struct {
     gpa: std.mem.Allocator,
@@ -65,6 +65,8 @@ pub const Pages = struct {
     host: ?cuda.HostBuffer = null,
     /// The arena's device address: `arena.ptr`, or the mapped host pointer when host-funded.
     base: u64 = 0,
+    /// Phase 2: the state runs live on the card (one slot per lane); only the KV pages are host-funded.
+    run_dev: ?cuda.DeviceBuffer = null,
     lanes: []Lane,
 
     /// `streams` lanes and `pages` pages of layout `l`, made and touched now; each run holds a `ring`-byte ring.
@@ -88,9 +90,14 @@ pub const Pages = struct {
             arena = try cuda.DeviceBuffer.alloc(e.d, total);
             base = arena.ptr;
         }
+        var run_dev: ?cuda.DeviceBuffer = null;
+        if (host != null) {
+            run_dev = try cuda.DeviceBuffer.alloc(e.d, streams * l.runPages() * page_bytes);
+        }
+        errdefer if (run_dev != null) run_dev.?.free();
         errdefer if (host != null) host.?.free();
         errdefer if (host == null) arena.free();
-        p.* = .{ .gpa = gpa, .e = e, .layout = l, .capacity = capacity, .ring = ring, .pool = try kv.Pool.init(gpa, pages, page_bytes), .arena = arena, .host = host, .base = base, .lanes = &.{} };
+        p.* = .{ .gpa = gpa, .e = e, .layout = l, .capacity = capacity, .ring = ring, .pool = try kv.Pool.init(gpa, pages, page_bytes), .arena = arena, .host = host, .base = base, .run_dev = run_dev, .lanes = &.{} };
         errdefer p.pool.deinit();
         p.lanes = try gpa.alloc(Lane, streams);
         errdefer gpa.free(p.lanes);
@@ -99,11 +106,11 @@ pub const Pages = struct {
             x.cache.deinit(gpa);
             gpa.destroy(x.cache);
         };
-        for (p.lanes) |*x| {
+        for (p.lanes, 0..) |*x, li| {
             const c = try gpa.create(Cache);
             errdefer gpa.destroy(c);
             c.* = try Cache.initPaged(gpa, e, mostPages(capacity, tokens), tokens, base);
-            x.* = .{ .cache = c };
+            x.* = .{ .cache = c, .idx = li };
             made += 1;
         }
         errdefer cuda.completion.drain(e.d, e.stream, "qwen3_5: a failed pool initialization did not drain");
@@ -112,6 +119,7 @@ pub const Pages = struct {
             const view = cuda.DeviceBuffer{ .d = e.d, .ptr = p.base, .len = h.bytes.len, .borrowed = true };
             try view.fill8(0, e.stream.handle);
         } else try arena.fill8(0, e.stream.handle);
+        if (p.run_dev) |rd| try rd.fill8(0, e.stream.handle);
         for (p.lanes) |x| try x.cache.paged.?.table.fill8(0, e.stream.handle);
         try e.stream.synchronize();
         return p;
@@ -129,6 +137,7 @@ pub const Pages = struct {
         }
         p.gpa.free(p.lanes);
         if (p.host != null) p.host.?.free() else p.arena.free();
+        if (p.run_dev != null) p.run_dev.?.free();
         p.pool.deinit();
         p.gpa.destroy(p);
     }
@@ -173,7 +182,8 @@ pub const Pages = struct {
         var up: Upload = .{ .p = p, .cache = x.cache };
         if (adopted.len > 0) try Upload.write(&up, x.lease.ids.items, 0);
         try p.pool.cover(&x.lease, n, .{ .ctx = &up, .write = Upload.write });
-        try x.cache.mapRun(p.e, p.base + run * p.layout.pageBytes(), k * p.layout.pageBytes(), p.ring);
+        const run_base = if (p.run_dev) |rd| rd.ptr + x.idx * @as(usize, k) * p.layout.pageBytes() else p.base + run * p.layout.pageBytes();
+        try x.cache.mapRun(p.e, run_base, k * p.layout.pageBytes(), p.ring);
         try x.cache.reset(p.e);
         x.cache.paged.?.ids = x.lease.ids.items;
         x.cache.cap = n * p.layout.page_tokens;
