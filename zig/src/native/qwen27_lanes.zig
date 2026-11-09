@@ -36,22 +36,8 @@ comptime {
     std.debug.assert(max_rows <= q.gpu_frame.logit_rows and batch_rows <= q.gpu_frame.max_rows);
 }
 
-/// A sampled window's logits rows, each drawn at its own position with its own mask.
-const Rows = struct {
-    gpa: std.mem.Allocator,
-    words: [*]const u16,
-    vocab: usize,
-    width: usize,
-    sampling: ?lanes.Sampling,
-    positions: []const u64,
-    out: []u32,
-    masks: []const u32,
-
-    pub fn row(r: Rows, i: usize) !void {
-        const mask = if (r.masks.len == 0) &.{} else r.masks[i * r.width ..][0..r.width];
-        r.out[i] = try @import("qwen27_masks.zig").draw(tf.qwen35.backend.draw, r.gpa, r.words[i * r.vocab ..][0..r.vocab], r.sampling, r.positions[i], mask);
-    }
-};
+/// A sampled window's logits rows, drawn by the 2B's draw (top-k candidates, then the shared keyed sampler).
+const Rows = @import("qwen27_draws.zig").Rows(tf.qwen35.backend.draw, lanes.Sampling);
 
 pub const Release = @import("qwen27_hooks.zig").Release;
 pub const Grow = @import("qwen27_hooks.zig").Grow;
@@ -271,7 +257,7 @@ pub const Metal = struct {
             const metric = mtl.pass_metrics.phase(.sampling);
             defer metric.end();
             const words: [*]const u16 = @ptrCast(@alignCast(logits.buffer.contents() + logits.offset));
-            // the 2B's draw: top-k candidates, then the shared keyed sampler (the whole row's token), rows on threads
+            // each row's whole-row draw at its own position, the window's rows on threads
             return @import("qwen27_draws.zig").each(Rows{ .gpa = b.gpa, .words = words + first * vocab, .vocab = vocab, .width = width, .sampling = s.sampling, .positions = positions, .out = out, .masks = masks }, rows);
         }
         try b.argmaxRows(first, rows);

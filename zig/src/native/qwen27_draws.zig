@@ -21,6 +21,25 @@ pub fn each(job: anytype, rows: usize) anyerror!void {
     for (errors[0..rows]) |e| if (e) |err| return err;
 }
 
+/// A window's logits rows, each drawn by `drawFn` at its own position with its own mask, into its own `out` slot.
+pub fn Rows(comptime drawFn: anytype, comptime Sampling: type) type {
+    return struct {
+        gpa: std.mem.Allocator,
+        words: [*]const u16,
+        vocab: usize,
+        width: usize,
+        sampling: ?Sampling,
+        positions: []const u64,
+        out: []u32,
+        masks: []const u32,
+
+        pub fn row(r: @This(), i: usize) !void {
+            const mask = if (r.masks.len == 0) &.{} else r.masks[i * r.width ..][0..r.width];
+            r.out[i] = try @import("qwen27_masks.zig").draw(drawFn, r.gpa, r.words[i * r.vocab ..][0..r.vocab], r.sampling, r.positions[i], mask);
+        }
+    };
+}
+
 fn Worker(comptime Job: type) type {
     return struct {
         fn run(job: Job, rows: usize, next: *std.atomic.Value(usize), errors: *[max_rows]?anyerror) void {
