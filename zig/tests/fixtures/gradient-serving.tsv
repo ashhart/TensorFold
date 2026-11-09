@@ -22,7 +22,7 @@ zig/kernels/cuda/glm_glue_bmm.cuh	1accfc9285deabb63a6cf6d70dc11544ebcb1654a8eb6c
 zig/kernels/cuda/glm_glue_hc.cuh	c3aa26475c6ce05d2508c300c8e88d429adea4c0c173e3909734bb0ece06da2a	raw
 zig/kernels/cuda/glm_glue_index.cuh	73fbdf6dea2cfc13275169ac2e7ea4d670611145c1e738529a05b23d63f39abf	raw
 zig/kernels/cuda/glm_glue_latent.cuh	4d4c7872b6383d5a4e2194b2ea0e477948ba3ff482c3aeb364838f3df0aa6ab5	raw
-zig/kernels/cuda/glm_glue_moe.cuh	e39f5de255684c81f9a005ea40048b474ce8910ee76e84bb4deac81ec6d055a4	raw
+zig/kernels/cuda/glm_glue_moe.cuh	163d542c99f6ef0432956f6341df324c85568127b623e301ad29279bbb49128c	raw
 zig/kernels/cuda/glm_glue_norm.cuh	7efd71df53fbf664d2f6d13b8aa7a9f0483f50f3d26574360d7ad8f4361cd453	raw
 zig/kernels/cuda/glm_glue_router.cuh	33c61252d5f86e7e22d5ba4bf9a1a48e6e13e195c40ecee2b024a1b647610f20	raw	main 42735f94f0 (#2335; glm_glue SASS identical on five SMs)
 zig/kernels/cuda/glm_glue_rows.cuh	0e70ddc8f3d3d91bd09a3643599bd3dc4cf98b9959ea03f8105ee84755440b2f	raw
@@ -86,7 +86,7 @@ zig/src/cuda/cublaslt.zig	0d43eef71a4383c494500752e13a132b9636a7dc4f08dbcbdea498
 zig/src/cuda/driver.zig	f20856bd06afe9365ab9ca1bc39800ccb260ade2704197c033e1344a0c8dd742	raw	commits e9bf05ffd, b923e554c, b2c75a98a; series patches 14-runtime-foundation.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
 zig/src/cuda/embed_rows.zig	09fb2e612f43297c19d2cb77d45139dd98212a20075da0a15069a70544f72f6b	raw
 zig/src/cuda/exlr8.zig	1e2164096ae949a8a9a4903df82c7c0c184a6f5e1ba5ba4423038a42b0633fc6	raw
-zig/src/cuda/experts.zig	6e4b87060f67d2966b0f7cf838f01af0b107189c3a0acaa1010ebe2c9e3028f0	raw
+zig/src/cuda/experts.zig	1a2490128498525cb73bfe6f379a1dabfab4d62ceef9dec7e794abe2edc4e82d	raw
 zig/src/cuda/fp8.zig	a9caf312cb451dc95572b493e69ae211dd1e8b5be5b2c48cae3febd5d9327143	raw	series patches 65-pr-1024.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
 zig/src/cuda/graph.zig	17639aaef0298c934b3f5ad3511925169c096ae57ede8ebee655faa838844f7b	raw
 zig/src/cuda/grouped.zig	5fa1f39394b701eab59383bc7ed214ea3e17652a1229236df49f5281e6e764b5	raw	commits e1be0806d; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
