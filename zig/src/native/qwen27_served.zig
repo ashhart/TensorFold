@@ -560,7 +560,6 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
         try h.workers.startFollower(p, h.back, a, why);
     }
     // Both ranks time their lane costs: the rounds are local and symmetric, leaving both drafters in the same state.
->>>>>>> 56b4cc0a2 (qwen27 served: the cache tests live beside the file and the pair comments fit the lean rule; zig fmt on metal_targets)
     if (h.draft != null) try h.back.measure(io);
     tf.startup_receipt.span(.model_ready).end();
     std.log.info("{f}", .{StartupLine{ .streams = slots, .context = capacity, .draft_slots = if (h.draft != null) h.back.draft_slots else if (h.sn_mtp != null) slots else 0, .drafter = if (h.draft) |d| d.model.graph.config.kind() else "DFlash2", .images = o.images != null }});
@@ -612,6 +611,11 @@ fn enableCache(h: *Host, gib: ?f64, over: bool, a: Allocator, why: *[]const u8) 
 /// Weights, the ready slots' state and the drafter join one residency set the idle keepalive uses.
 const holdResident = q.residency.hold;
 
+/// Rank 1's admission gate: always false, so every generation request refuses before it reaches the lanes.
+fn unhealthyFollower(_: *anyopaque) bool {
+    return false;
+}
+
 pub fn close(ptr: *anyopaque) void {
     const h = Host.of(ptr);
     h.host.stop();
@@ -657,4 +661,6 @@ test {
         _ = @import("qwen27_served_cache_test.zig");
     }
 }
+test "qwen27 reply cache: warm work preserves both client histories within rounded budgets" {
+    try @import("qwen27_reply_cache_test.zig").exercise(keepEnd, slot_state.opening);
 }
