@@ -212,7 +212,7 @@ fn slotResume(b: *const Metal) bool {
 
 /// A stream the prompt cache would look up: no images, no prompt logprobs (they start at 0), taught rows.
 fn plain(s: *const lanes.Stream) bool {
-    return s.images.len == 0 and s.prompt_logprobs == null and !s.untaught and s.embedding == null;
+    return s.images.len == 0 and s.prompt_logprobs == null and !s.untaught and s.embedding == null and !s.reuse.remote;
 }
 
 /// Whether the cache keeps the state at the end of `s`'s prompt (a background pass's: the cache planned that mark).
@@ -251,6 +251,17 @@ fn takeStanding(b: *Metal, s: *const lanes.Stream, kept_at: u32) !u32 {
             return h;
         },
     }
+}
+
+/// How far slot 0 would resume `prompt` in place, for the lane host's remote prefill (0: no resume); engine thread.
+pub fn resumeAt(ptr: *anyopaque, prompt: []const u32, spans: []const [2]u32) u32 {
+    const b: *Metal = @ptrCast(@alignCast(ptr));
+    if (!slotResume(b) or b.owners[0] != null or !standsAt(b, b.standing.tokens.len)) return 0;
+    return switch (b.standing.plan(prompt, spans, 0)) {
+        .none => 0,
+        .here => |n| n,
+        .back => |at| if (b.rewind != null) at else 0,
+    };
 }
 
 /// A stream leaves slot 0: what it stands at stays for the next prompt that extends it, if a fresh pass stands there.

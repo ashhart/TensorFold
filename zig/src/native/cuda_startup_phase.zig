@@ -34,6 +34,7 @@ pub fn serve(h: anytype, io: std.Io, facts: lanes.Model, rows: u32, info: api.In
     h.host.explain = explain;
     h.host.health = @import("cuda_readiness.zig").source(h);
     h.host.cache = h.store;
+    h.host.exporter = if (h.produce) |x| x.exporter() else null; // --mcdma-produce (#1594 step 2b)
     h.host.warm_quiet = if (info.warm_turns) nemotron.native.warm_quiet else 0;
     if (h.lone != null) h.host.lone = .{ .ctx = h, .run = callbacks.loneRun, .sampled = true, .logprobs = h.inner.vtable.first_row != null, .structures = h.inner.vtable.first_masked != null, .min_budget = nemotron.native.lone_min_budget, .resumes = true };
     if (h.learn != null) h.host.learner = callbacks.learner(h);

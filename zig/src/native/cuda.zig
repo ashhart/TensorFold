@@ -28,7 +28,7 @@ pub const registry = cuda_families.registry;
 /// --record opens here (engines.zig refuses it for a backend without this).
 pub const records = true;
 pub const backends: []const []const u8 = &.{"cuda"};
-pub const serves: []const []const u8 = &.{ "--tp", "--mtp-drafts", "--mtp-confidence", "--policy", "--checkpoint-slots", "--spill-gib" };
+pub const serves: []const []const u8 = &.{ "--tp", "--mtp-drafts", "--mtp-confidence", "--policy", "--checkpoint-slots", "--spill-gib", "--mcdma-produce" };
 pub const families = cuda_families.families;
 const gib: f64 = 1 << 30;
 const cuda_device = @import("cuda_device.zig");
@@ -66,6 +66,7 @@ pub const Host = struct {
     kv_count: ?*@import("core").kv_pool.Pool = null, // the paged pool the lane host's ledger admits (#1943)
     kv_plan: ?@import("cuda_ledger.zig").Plan = null, // the KV ledger's budget and cost, read by the lane host
     prompts: ?*prompt_pages.Adapter = null, // TF_KV_SHARE: the family's prompts as its pool's pages (no `store` then)
+    produce: ?*@import("cuda_produce.zig").Produce = null, // --mcdma-produce: handoff states for the Mac (#1594 step 2b)
     learn: ?api.Learner = null, // the family's Sliding Weights learner (--slide), called with the context current
     slide: ?*anyopaque = null, // that learner's adapter, freed by slide_free before the family
     slide_free: ?*const fn (Allocator, *anyopaque) void = null,
@@ -159,6 +160,10 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     if (@import("save_admission.zig").refused(io, o.dir, problem)) return null;
     if (refusals.backend(o)) |why| {
         problem.* = why;
+        return null;
+    }
+    if (o.remote_prefill.produce != null and !std.mem.eql(u8, o.model_type, "qwen3_5")) {
+        problem.* = "--mcdma-produce exports Qwen3.8-27B (qwen3_5) states only (#1594 step 2b)";
         return null;
     }
     if (std.mem.eql(u8, o.model_type, "fish_omni")) return openDrama(a, gpa, io, o, problem);
@@ -403,6 +408,8 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         };
     }
     errdefer if (h.store) |store| kv_pages.closeStore(gpa, store);
+    if (o.remote_prefill.produce) |link| h.produce = try @import("cuda_produce.zig").open(F, gpa, loaded, link, try api.LaneHost.Remote.checkpointId(a, io, o.dir), problem) orelse return null;
+    errdefer if (h.produce) |x| x.stop();
     const share_limit = if (!share) 0 else if (counted.slots != null) paged.?.snaps else try @import("core").kv_prompts.sharing(); // what its slots hold
     if (comptime @hasDecl(F, "share_attach")) if (@import("cuda_streams.zig").opensStore(F, share, cache, share_limit)) {
         h.prompts = try prompt_pages.Adapter.open(F, gpa, loaded.target, @intCast(layout.?.page_tokens), share_limit);
