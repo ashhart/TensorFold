@@ -46,13 +46,29 @@ test {
     _ = lanes;
 }
 
-test "config's fixed widths are the kernels' own: KDA heads, the latent cache, the rope" {
+test "config's fixed widths are the kernels' own: the latent cache, the rope" {
     const f = config.fixed;
     const cu = @import("cuda");
-    try cu.kda.geometry(f.kda_dim, f.kda_dim, f.conv); // keys and values both head_dim wide (v_head_dim is MLA's)
     try cu.mla.geometry(f.kv_lora, f.nope, f.v_dim, f.rope);
     try std.testing.expect(f.rope == ops.rope_width and f.kv_lora + f.rope == state.cache_width);
     try std.testing.expect(f.block == cu.fp8.block);
+}
+
+test "KDA widths: one check, cuda.kda.geometry at the open; head_dim and taps it does not take refused with the reason" {
+    const a = std.testing.allocator;
+    var why: config.Why = .{};
+    const json = try synth.configJson(a, .bf16, 2);
+    defer a.free(json);
+    try weights.kdaGeometry(&try config.parse(a, json, &why), &why);
+    const cases = [_][3][]const u8{ .{ "\"head_dim\": 128", "\"head_dim\": 64", "head_dim 64" }, .{ "\"head_dim\": 128", "\"head_dim\": 256", "128-wide heads" }, .{ "\"short_conv_kernel_size\": 4", "\"short_conv_kernel_size\": 3", "short_conv_kernel_size 3" }, .{ "\"short_conv_kernel_size\": 4", "\"short_conv_kernel_size\": 5", "4 taps" } };
+    for (cases) |x| {
+        const edited = try std.mem.replaceOwned(u8, a, json, x[0], x[1]);
+        defer a.free(edited);
+        try std.testing.expect(!std.mem.eql(u8, edited, json));
+        why = .{};
+        try std.testing.expectError(error.KdaGeometry, weights.kdaGeometry(&try config.parse(a, edited, &why), &why));
+        try std.testing.expect(std.mem.indexOf(u8, why.text(), x[2]) != null);
+    }
 }
 
 test "Ling's routing as ops.select takes it: 8 groups keeping 4, and select's own bounds hold" {
