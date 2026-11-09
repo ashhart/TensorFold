@@ -140,18 +140,39 @@ pub const Model = struct {
     pub fn absorb(m: *Model, taps: Ref, rows: u32) !void {
         return @import("forward.zig").append(m, taps, rows);
     }
-    /// The greedy chain, at most `nodes` of its 15 drafts, as a one-branch tree (core's tree walker comes next).
+    /// A best-first tree of at most `nodes` drafts by the shared walker over the exact-sender table, its scores
+    /// read as logits (each row times its final-norm scale); TF_DSPINE_CHAIN: the greedy chain alone.
     pub fn propose(m: *Model, pending: u32, nodes: u32) !Tree {
+        const dt = @import("core").lanes.draft_tree;
         const p = try @import("forward.zig").propose(m, pending);
-        const n = @min(nodes, p.drafts.len);
-        const tokens = try m.allocator.dupe(u32, p.drafts[0..n]);
-        errdefer m.allocator.free(tokens);
-        const parents = try m.allocator.alloc(i32, n);
-        errdefer m.allocator.free(parents);
-        for (parents, 0..) |*v, i| v.* = @as(i32, @intCast(i)) - 1;
-        const scores = try m.allocator.alloc(f64, n);
-        @memset(scores, 0);
-        return .{ .gpa = m.allocator, .tokens = tokens, .parents = parents, .scores = scores };
+        var tokens: [64]u32 = undefined;
+        var parents: [64]i32 = undefined;
+        var own: [64]f64 = undefined;
+        const want = @min(nodes, tokens.len);
+        var n: usize = 0;
+        if (std.c.getenv("TF_DSPINE_CHAIN") != null) {
+            n = @min(want, p.drafts.len);
+            @memcpy(tokens[0..n], p.drafts[0..n]);
+            for (parents[0..n], 0..) |*v, i| v.* = @as(i32, @intCast(i)) - 1;
+            @memset(own[0..n], 0);
+        } else {
+            // each row: its 16 ids ascending, then 16 unused unary logits (the table scores every candidate)
+            var words: [15 * 32]u32 = @splat(0);
+            var logits: [15][16][16]f32 = undefined;
+            for (0..15) |r| {
+                @memcpy(words[r * 32 ..][0..16], &p.candidates[r]);
+                for (0..16) |s| for (0..16) |j| {
+                    logits[r][s][j] = p.table[r][s][j] * p.scales[r];
+                };
+            }
+            const c: dt.Candidates = .{ .words = std.mem.sliceAsBytes(&words), .projected = std.mem.asBytes(&logits), .topk = 16, .rank = 0, .predecessor = &.{}, .successor = &.{}, .table = true, .layout = .{ .words = 32, .ids = 0, .logits = 16 } };
+            n = dt.grow(64, c, pending, 15, want, tokens[0..want], parents[0..want], own[0..want]);
+        }
+        const out_tokens = try m.allocator.dupe(u32, tokens[0..n]);
+        errdefer m.allocator.free(out_tokens);
+        const out_parents = try m.allocator.dupe(i32, parents[0..n]);
+        errdefer m.allocator.free(out_parents);
+        return .{ .gpa = m.allocator, .tokens = out_tokens, .parents = out_parents, .scores = try m.allocator.dupe(f64, own[0..n]) };
     }
 
     /// An empty context; after a GPU failure too.
