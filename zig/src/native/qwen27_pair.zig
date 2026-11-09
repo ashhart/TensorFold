@@ -147,7 +147,8 @@ pub const batch_rows = 128;
 
 test "the served pair's chunk times the widest seam fits the window" {
     // a served pass asks for 512 rows here, 2048 on generation 17 (`model.promptRows`); the pair caps it at the window
-    const requested = q.model.promptRows(0);
+    const config = q.config.Config{ .hidden = 5120, .intermediate = 17408, .layers = 64, .vocab = 124160, .heads = 24, .kv_heads = 4, .head_dim = 256, .k_heads = 16, .v_heads = 48, .dk = 128, .dv = 128, .conv_kernel = 4, .eps = 1e-6, .rope_dims = 64, .rope_theta = 1e7 };
+    const requested = q.model.promptRows(config, 0);
     const served = chunk(requested);
     try std.testing.expect(served <= batch_rows);
     try std.testing.expect(seamBytes(served) <= pairBytes());
