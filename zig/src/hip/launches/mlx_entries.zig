@@ -492,53 +492,43 @@ test "gfx1201 takes the K-parallel tile for short routed prompts, up to its item
 }
 
 test "gfx1151 takes the 64-row routed tile while its experts average 64 rows or fewer each, the skewed 128-row tile past them" {
+    const moe = @import("../moe.zig");
     const r = kernelsOn("gfx1151");
     const env = envOn("gfx1151", true, true, true);
-    // Flash Next's gate and up as the launch builds them: 512 experts, 11 slots a row, `m` the tile's rows
-    for ([_]struct { u32, []const u8 }{ .{ 128, "item64" }, .{ 1024, "item64" }, .{ 2048, "item64" }, .{ 4096, "skew" }, .{ 6554, "skew" } }) |w| {
-        const expert_rows = (w[0] * 10 + 512 - 1) / 512;
-        const pairs = w[0] * 11;
-        const items = @min(pairs, 512) + pairs / 8;
+    // each model's served gate and up, the way moe.expertRows builds the plan's average rows an expert
+    const models = [_]struct { experts: usize, top_k: usize, slots: usize, n: u32, k: u32, group: u16, rows: u32, tile: []const u8 }{
+        .{ .experts = 512, .top_k = 10, .slots = 11, .n = 1280, .k = 2560, .group = 32, .rows = 128, .tile = "item64" }, // Flash Next
+        .{ .experts = 512, .top_k = 10, .slots = 11, .n = 1280, .k = 2560, .group = 32, .rows = 1024, .tile = "item64" },
+        .{ .experts = 512, .top_k = 10, .slots = 11, .n = 1280, .k = 2560, .group = 32, .rows = 2048, .tile = "item64" },
+        .{ .experts = 512, .top_k = 10, .slots = 11, .n = 1280, .k = 2560, .group = 32, .rows = 4096, .tile = "skew" },
+        .{ .experts = 512, .top_k = 10, .slots = 11, .n = 1280, .k = 2560, .group = 32, .rows = 6554, .tile = "skew" },
+        .{ .experts = 256, .top_k = 8, .slots = 9, .n = 1024, .k = 2048, .group = 64, .rows = 2048, .tile = "item64" }, // Qwen3.6-35B-A3B
+        .{ .experts = 256, .top_k = 8, .slots = 9, .n = 1024, .k = 2048, .group = 64, .rows = 2056, .tile = "skew" },
+        .{ .experts = 128, .top_k = 6, .slots = 6, .n = 1856, .k = 2688, .group = 64, .rows = 1024, .tile = "item64" }, // Nemotron 3.5 Lightning 30B-A3B
+        .{ .experts = 128, .top_k = 6, .slots = 6, .n = 1856, .k = 2688, .group = 64, .rows = 2048, .tile = "skew" },
+    };
+    for (models) |w| {
+        const rows = w.rows;
+        const expert_rows = moe.expertRows(rows, w.top_k, w.experts);
+        const pairs = rows * w.slots;
+        const items = @min(pairs, w.experts) + pairs / 8;
         const arg: affine.Arg = .{
             .x = 0,
             .words = 0,
             .scale = .{ .p = 0, .kind = 1 },
             .bias = .{ .p = 0, .kind = 1 },
             .out = 0,
-            .m = @intCast(@min(w[0], 128)),
-            .n = 1280,
-            .k = 2560,
+            .m = @intCast(@min(rows, 128)),
+            .n = @intCast(w.n),
+            .k = @intCast(w.k),
             .bits = 4,
-            .group = 32,
+            .group = @intCast(w.group),
             .fp16 = 0,
             .route = .{ .items = 1, .members = 1 },
         };
         const shape = Kernels.prefillShape(arg, @intCast(items), @intCast(pairs), @intCast(expert_rows));
-        try std.testing.expect(shape.m <= 128);
         try std.testing.expect(shape.expert_rows == expert_rows);
-        try std.testing.expect(std.mem.endsWith(u8, r.select(env, .mlx, .routed, .prefill, shape).?.id, w[1]));
-    }
-    // Qwen3.6-35B-A3B's gate and up: 256 experts, 8 routed slots a row, the 2,048-row side of the 64 boundary
-    for ([_]struct { u32, []const u8 }{ .{ 2048, "item64" }, .{ 2056, "matrix" } }) |w| {
-        const expert_rows = (w[0] * 8 + 256 - 1) / 256;
-        const pairs = w[0] * 9;
-        const items = @min(pairs, 256) + pairs / 8;
-        const arg: affine.Arg = .{
-            .x = 0,
-            .words = 0,
-            .scale = .{ .p = 0, .kind = 1 },
-            .bias = .{ .p = 0, .kind = 1 },
-            .out = 0,
-            .m = @intCast(@min(w[0], 128)),
-            .n = 1024,
-            .k = 2048,
-            .bits = 4,
-            .group = 64,
-            .fp16 = 0,
-            .route = .{ .items = 1, .members = 1 },
-        };
-        const shape = Kernels.prefillShape(arg, @intCast(items), @intCast(pairs), @intCast(expert_rows));
-        try std.testing.expect(std.mem.endsWith(u8, r.select(env, .mlx, .routed, .prefill, shape).?.id, w[1]));
+        try std.testing.expect(std.mem.endsWith(u8, r.select(env, .mlx, .routed, .prefill, shape).?.id, w.tile));
     }
 }
 

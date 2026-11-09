@@ -70,6 +70,12 @@ pub fn tileOf(rows: usize, window: bool) usize {
     return if (rows < BLOCK_FROM or window) LANE_ROWS else BLOCK_ROWS;
 }
 
+/// The average rows an expert of `experts` takes of `rows` tokens' `top_k` routed slots, rounded up; 0 without experts.
+pub fn expertRows(rows: usize, top_k: usize, experts: usize) u32 {
+    if (experts == 0) return 0;
+    return @intCast((rows * top_k + experts - 1) / experts);
+}
+
 /// `x` (rows, D) to (rows, D) in its dtype: the top-k experts plus the shared one; a tp rank returns its fp32 share.
 pub fn run(o: Ops, kind: Kind, r: Routed, x: Tensor, rows: usize, prefill: bool) ops.Error!Tensor {
     _ = prefill; // the affine experts' arithmetic does not depend on it (the plan's tile comes from tile_for)
@@ -94,7 +100,7 @@ pub fn run(o: Ops, kind: Kind, r: Routed, x: Tensor, rows: usize, prefill: bool)
         tile = tileFor(o, rows);
         try o.moeRoute(local, pairs, r.rows, tile, members, items, cap);
         try o.moeForeignItems(items, cap, ex.count);
-        const expert_rows = (rows * r.top_k + r.count() - 1) / r.count();
+        const expert_rows = expertRows(rows, r.top_k, r.count());
         const both = try o.projectRouted(x, ex.fused, items, count, members, pairs, slots, @min(tile, rows), expert_rows);
         const act = try o.arena.take(pairs * ex.width * kind.size());
         const act_t: Tensor = .{ .ptr = act, .kind = kind };
@@ -167,7 +173,7 @@ fn expertParts(o: Ops, kind: Kind, r: Routed, x: Tensor, rows: usize, logits: u6
     }
     // beside the stack the shared pair's id is the stack's first id past its experts: zero its item, never read its row
     if (ex.shared != null) try o.moeForeignItems(items, count, ex.count);
-    const expert_rows = (rows * r.top_k + r.count() - 1) / r.count();
+    const expert_rows = expertRows(rows, r.top_k, r.count());
     // the gate and up's activation is the launch's epilogue when the tile takes the shape
     const act_t: Tensor = if (try o.projectRoutedAct(x, ex.fused, items, count, members, pairs, slots, @min(tile, rows), ex.limit)) |t| t else blk: {
         const both = try o.projectRouted(x, ex.fused, items, count, members, pairs, slots, @min(tile, rows), expert_rows);

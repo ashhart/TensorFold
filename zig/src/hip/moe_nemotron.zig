@@ -118,7 +118,7 @@ pub fn expertRows(o: Ops, l: Layer, x: Tensor, rows: usize) ops.Error!Ops.MoeRow
         const tr = @min(tile, rows);
         if (try o.projectRoutedPlainRelu2(x, l.fc1, items, count, members, slots, tr, act, su, sa)) up_act = sa;
     };
-    const expert_rows = (rows * l.top_k + l.experts - 1) / l.experts;
+    const expert_rows = moe.expertRows(rows, l.top_k, l.experts);
     if (up_act == null and
         (!epilogue or !try o.projectRoutedRelu2(x, l.fc1, items, count, members, slots, @min(tile, rows), act)))
     {
