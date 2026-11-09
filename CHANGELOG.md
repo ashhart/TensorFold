@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- HIP on gfx1151: a skewed-row matrix tile runs three blocks a WGP for prompts up to 8192 codes deep, with the same results as the padded tile, which stays for every other shape (#2087). Thanks to @AbrahamCete.
+
 - GLM-5.3-Flash on CUDA: decode windows reach 32 rows; MTP times and caches its lone window and step prices, while DFlash2 keeps its seed prices and times only the target expert-form race. Shared MTP proposals are capped at three drafts per stream unless `TF_GLM_COPIES=1`; with copies off, shared rounds keep their prior forward and step prices. At TP=2 on two GB10s, prompts of 2k and 8k tokens fill 23% and 13% faster and one-stream code decodes 32% faster, with every reply equal to before (#2257).
 
 - Qwen3.8-27B on Macs: a sampled or grammar-masked verify window draws its rows on four host threads instead of one after another. Every row is still drawn and checked in full, and a failure is still the first failing row's, so tokens and errors are unchanged; on an M5 Ultra with the DFlash2 drafter, sampled decode at one stream is 4 to 9% faster (#2644). Thanks to @mrv777.
