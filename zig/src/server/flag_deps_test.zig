@@ -5,6 +5,7 @@ const Usage = cli.Usage;
 const parse = cli.parse;
 
 test "flag deps: --cfg-batched and --cfg-force-guided need a gamma switch" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest; // CFG flags: macOS only
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
