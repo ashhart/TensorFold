@@ -142,11 +142,10 @@ pub fn attach(h: *Host, io: std.Io, a: Allocator, o: Learn) !void {
 /// --learn-conversations' settings, as the server read them (--spill-gib's too, and --checkpoint-slots beside them).
 pub const Learn = struct { root: []const u8, dir: []const u8, drafter: ?[]const u8, cap: u64, floor: u64, daily: u64, spill: rows.Spill = .off, slots: ?usize = null };
 
-/// Extend a probe identity with the loaded execution policy.
+/// Extend a probe identity with the ANE columns and the chunk height; another chunk height starts cold.
 pub fn withPolicy(legacy: u64, h: anytype) u64 {
     return @import("persistence_policy.zig").extend(legacy, "qwen-metal-policy-v1", &.{
         if (h.model.ane) |share| share.columns else 0,
-        h.model.frame.capacity,
-        h.back.chunk,
+        h.back.chunk, // not frame.capacity: it only sizes buffers and bounds a pass's rows
     });
 }
