@@ -8,8 +8,12 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     b.step("test-qwen35-metal-scope-host", "Metal 2B format admission without device or Metal compiler").dependOn(&metal_scope.step);
     @import("load_prefetch_host.zig").tests(b, mods.core, step);
     const captured = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/cuda/aot_identity.zig"), .target = host, .link_libc = true }), .filters = &.{"persistence identity: captured CUDA"} }));
-    b.step("test-cuda-persistence-source-host", "Captured CUDA source keys without loading a driver").dependOn(&captured.step);
+    const wiring = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/nemotron_key_wiring_test.zig"), .target = host }) }));
+    const source_keys = b.step("test-cuda-persistence-source-host", "Captured CUDA source keys and Nemotron key wiring without loading a driver");
+    source_keys.dependOn(&captured.step);
+    source_keys.dependOn(&wiring.step);
     step.dependOn(&captured.step);
+    step.dependOn(&wiring.step);
 
     b.step("test-qwen35-request-starts-host", "Request-start and shared-KV startup refusal without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"request starts:"} })).step);
     @import("minimax_cuda.zig").hostTests(b, host, cuda, mods.core, mods.lanes, step);
