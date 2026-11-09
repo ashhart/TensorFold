@@ -31,7 +31,6 @@ pub const Stop = struct { ctx: *anyopaque, check: *const fn (ctx: *anyopaque, em
 
 pub const CallGate = @import("engine_request_controls.zig").CallGate;
 pub const Structure = @import("engine_request_controls.zig").Structure;
-
 pub const grammar = lanes.grammar;
 
 /// A reply to decode. The request and every slice in it stay valid until its ``finished`` event.
@@ -89,6 +88,7 @@ pub const Request = struct {
     images: []const Image = &.{},
     /// The prompt as the prompt cache matches it (each image's placeholders by its content); empty: ``prompt``.
     cache_key: []const u32 = &.{},
+    handoff: ?@import("lane_export.zig").Handoff = null, // kv_transfer_params.mcdma_handoff (#1594 step 2b)
 
     /// The prompt as the prompt cache matches it: an image request's placeholders stand for their images.
     pub fn cacheKey(r: *const Request) []const u32 {
@@ -307,6 +307,7 @@ pub const Open = struct {
     ssd_experts_gib: ?f64 = null,
     ple_on_ssd: bool = false,
     fsr_trace: ?[]const u8 = null,
+    remote_prefill: @import("lane_remote.zig").Flags = .{}, // --prefill-from and --mcdma-link (#1594 step 2b)
     /// --learn: where shared prompt states are kept on disk for later sessions and servers (null: off).
     learn: ?[]const u8 = null,
     /// --learn-min-free-gib: filesystem space kept free before any learned-state write.
@@ -381,7 +382,6 @@ pub const HealthSource = @import("engine_status.zig").HealthSource;
 pub const Memory = @import("engine_status.zig").Memory;
 pub const MemorySource = @import("engine_status.zig").MemorySource;
 pub const Status = @import("engine_status.zig").Status;
-
 pub const SubmitError = error{ Closed, Busy, InvalidSpans, Stale, InvalidRequest, MemoryPressure }; // Stale: put-back has not reached the device
 
 /// What a request refused under critical memory pressure says (a 503).
