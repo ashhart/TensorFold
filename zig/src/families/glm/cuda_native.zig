@@ -50,7 +50,7 @@ pub const Options = struct {
     drafter: ?[]const u8 = null, // --drafter: DFlash2's folder (the same on every rank; needs drafts on)
     drafter_bits: u8 = 4, // --drafter-bits: 4 (default) or 0 (bf16)
     mtp_confidence: ?f64 = null, // --mtp-confidence: rank 0's lanes stop an MTP chain where its chance falls under it
-    learn_conversations: bool = false, // --learn-conversations: refused with TF_GLM_REQUEST_STARTS=1 (requestStartsAlone)
+    learn_conversations: bool = false, // --learn-conversations: refused with TF_GLM_REQUEST_STARTS=1 (cuda_env)
 };
 /// --drafter: DFlash2 (incoai/GLM-5.3-Flash-DFlash2, non-commercial weights) drafts instead of the MTP head.
 pub const takes_drafter = true;
@@ -194,7 +194,7 @@ const paging = startup.paging;
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
     _ = kernels; // our own kernels: a captured set is not used
     try @import("cuda_env.zig").startup();
-    try requestStartsAlone(o.learn_conversations); // before any rank opens
+    try @import("cuda_env.zig").requestStartsAlone(o.learn_conversations); // before any rank opens
     const p = try place();
     const roce_bytes = try roceBytes(if (std.c.getenv("TF_ROCE_MAX_KB")) |v| std.mem.span(v) else null);
     if (p.world > 1 and std.c.getenv("NCCL_COMM_ID") == null) return error.NoCommId;
@@ -212,13 +212,6 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         return error.GlmShareTooMany;
     }
     return startup.open(io, p, startup.pagesText(), set, cuda.tp_watch, StartArgs{ .gpa = gpa, .io = io, .ctx = ctx, .dir = dir, .o = o, .p = p, .roce_bytes = roce_bytes, .share = share_snaps }, openRank, startup.log);
-}
-
-/// TF_GLM_REQUEST_STARTS=1 cuts off the rows TF_KV_SHARE and --learn-conversations keep on: refused with either.
-pub fn requestStartsAlone(learn_conversations: bool) !void {
-    const on = if (@import("core").profile.get(.TF_GLM_REQUEST_STARTS)) |v| std.mem.eql(u8, v, "1") else false;
-    if (on and learn_conversations) return error.GlmRequestStartsWithLearnConversations;
-    if (on and try kp.sharing() > 0) return error.GlmRequestStartsWithSharedKv;
 }
 
 const StartArgs = struct {

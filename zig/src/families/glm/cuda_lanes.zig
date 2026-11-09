@@ -2,7 +2,6 @@
 const std = @import("std");
 const lanes = @import("lanes");
 const engine = @import("cuda_engine.zig");
-const prompt_cuts = @import("cuda_prompt_cuts.zig");
 const follow = @import("cuda_follow.zig");
 const fw = @import("cuda_forward.zig");
 const dflash = @import("dflash.zig");
@@ -383,10 +382,9 @@ pub const Lanes = struct {
     pub fn resumeFrom(self: *Lanes, s: *lanes.Stream, len: usize) ?engine.Resume {
         const saved = s.reuse.saved orelse return null;
         const k: *const engine.Kept = @ptrCast(@alignCast(saved));
-        const in_step = prompt_cuts.coldCut(len, s.chunks, k.at) and k.below == prompt_cuts.below(s.chunks, k.at);
-        if (k.at != s.reuse.at or k.at == 0 or k.at >= len or !in_step or !self.x.e.holds(k.id)) {
+        if (k.at != s.reuse.at or k.at == 0 or k.at >= len or !engine.prompt_cuts.resumes(len, s.chunks, k.at, k.below) or !self.x.e.holds(k.id)) {
             s.reuse_failed = true;
-            s.reuse_error = if (k.at == 0 or k.at >= len) error.SnapshotNotPrefix else if (k.at != s.reuse.at or !in_step) error.SnapshotOutOfStep else error.SnapshotStale;
+            s.reuse_error = if (k.at == 0 or k.at >= len) error.SnapshotNotPrefix else if (k.at != s.reuse.at or !engine.prompt_cuts.resumes(len, s.chunks, k.at, k.below)) error.SnapshotOutOfStep else error.SnapshotStale;
             return null;
         }
         s.cached = k.at;
