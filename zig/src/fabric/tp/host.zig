@@ -274,6 +274,17 @@ pub const Options = struct {
 };
 
 pub fn runWith(world: u32, opts: Options, ctx: anytype, comptime body: fn (collective.Collective, u32, @TypeOf(ctx)) anyerror!void) !void {
+    return runSpawning(world, opts, ctx, body, Spawn{});
+}
+
+const Spawn = struct {
+    fn start(_: Spawn, comptime f: anytype, args: anytype) !std.Thread {
+        return std.Thread.spawn(.{}, f, args);
+    }
+};
+
+/// `runWith` with each rank's thread from `spawner.start(function, args)`: tests plant a failed spawn with it.
+pub fn runSpawning(world: u32, opts: Options, ctx: anytype, comptime body: fn (collective.Collective, u32, @TypeOf(ctx)) anyerror!void, spawner: anytype) !void {
     var group = Group.init(world);
     group.var_refuse = opts.var_refuse;
     var ranks: [max_ranks]Rank = undefined;
@@ -289,7 +300,12 @@ pub fn runWith(world: u32, opts: Options, ctx: anytype, comptime body: fn (colle
     };
     for (0..world) |i| {
         ranks[i] = group.rank(@intCast(i));
-        threads[i] = try std.Thread.spawn(.{}, Wrap.go, .{ &ranks[i], ctx, &errs[i] });
+        threads[i] = spawner.start(Wrap.go, .{ &ranks[i], ctx, &errs[i] }) catch |err| {
+            // the ranks already running hold this frame's group: stop them and wait before returning
+            group.aborted.store(true, .release);
+            for (threads[0..i]) |t| t.join();
+            return err;
+        };
     }
     for (threads[0..world]) |t| t.join();
     for (errs[0..world]) |e| if (e) |err| return err;
