@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Tests: `zig build sessions-writes` drives the real DeepSeek-V4.1 session store and NVMe index with synthetic agent, chat and mixed loads, no model or GPU, and reports the bytes an enabled tier (`TF_DSV41_SESSION_DISK`) writes and reads back; a nightly Linux test checks its accounting against real files (#2660).
+
 - Server: Responses grows each output item in one buffer, and Kimi chat advances its native stream parser through new tokens, so a long reply retains memory in proportion to its length while every reply and streamed event stays the same (#2642).
 - Tests: `zig build bench-stream-scan` streams a 32k-token thinking reply (30,000 reasoning tokens, prose, then a Qwen XML, GLM, DSML or Kimi call) through the chat, Messages and Responses routes one or two tokens a chunk, and prints each chunk's request-thread time at 1k to 30k reply tokens, each whole-text step's time and the request arena; under `test-server-cpu` a 300-token reply checks that each route's streamed reasoning, prose and call arguments equal the reply's (#2642).
 
