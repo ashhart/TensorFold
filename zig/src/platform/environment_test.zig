@@ -70,6 +70,8 @@ const valid = [_]Case{
     .{ .name = "TF_GEMMA4_CHUNK_SOLO", .raw = "0", .n = 0 },
     .{ .name = "TF_GEMMA4_CHUNK_SOLO", .raw = "1000", .n = 1000 },
     .{ .name = "TF_GEMMA4_CHUNK_SOLO", .raw = "8192", .n = 8192 },
+    .{ .name = "TF_DRAMA_PREFILL_ROWS", .raw = "1025", .n = 1025 },
+    .{ .name = "TF_DRAMA_REFERENCE_CACHE", .raw = "17", .n = 17 },
     .{ .name = "TF_Q27_COPY_ROWS", .raw = "0", .n = 0 },
     .{ .name = "TF_Q27_COPY_ROWS", .raw = "48", .n = 48 },
     .{ .name = "TF_Q27_DRAFT_SLOTS", .raw = "0", .n = 0 },
