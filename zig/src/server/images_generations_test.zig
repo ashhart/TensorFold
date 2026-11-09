@@ -351,6 +351,24 @@ test "a negative_prompt past 16 KiB or past the token limit is refused by the pr
     try expectRefusal(&too_long, "a prompt of 5000 tokens exceeds the maximum allowed length of 4096 tokens");
 }
 
+test "a negative_prompt that is not valid UTF-8 is refused by its name" {
+    var stub: Stub = .{};
+    const reply = try ask(&stub, images_route, "{\"model\":\"m\",\"prompt\":\"hi\",\"negative_prompt\":\"\\ud800\"}");
+    defer gpa.free(reply.head);
+    defer gpa.free(reply.body);
+    try expectRefusal(&reply, "negative_prompt must be valid UTF-8 text");
+    try t.expectEqual(@as(usize, 0), stub.calls);
+}
+
+test "a null negative_prompt is refused like the other optional fields" {
+    var stub: Stub = .{};
+    const reply = try ask(&stub, images_route, "{\"model\":\"m\",\"prompt\":\"hi\",\"negative_prompt\":null}");
+    defer gpa.free(reply.head);
+    defer gpa.free(reply.body);
+    try expectRefusal(&reply, "negative_prompt must be a string");
+    try t.expectEqual(@as(usize, 0), stub.calls);
+}
+
 test "a failed generation is a 500 whose message is the engine's own" {
     var stub: Stub = .{ .inline_ = true, .reason = .failed, .message = "the pass did not converge" };
     const reply = try ask(&stub, images_route, "{\"model\":\"m\",\"prompt\":\"hi\"}");
