@@ -412,7 +412,7 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         return repeated.origins.append(a, v);
     }
     if (try cudaFlag(a, out, name, v, u) or try gpuFlag(a, out, name, v, u)) return;
-    if (try recallFlag(a, out, name, v, u)) return;
+    if (try @import("cli_recall.zig").flag(a, out, name, v, u)) return;
     if (out.cfg.set(name, v) catch return fail(u, a, "--cfg-gamma must be 0 (off) or 1 (unguided) through 5", .{})) return;
     if (@import("cli_fsr.zig").apply(out, name, v) catch |err| return fail(u, a, "argument {s}: {s}", .{ name, @errorName(err) })) return;
     if (is(name, "--voices")) {
@@ -503,20 +503,6 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
 }
 
 /// --recall and the flags that imply it; false for any other flag.
-fn recallFlag(a: Allocator, out: *Args, name: []const u8, v: []const u8, u: *Usage) error{ Usage, OutOfMemory }!bool {
-    if (std.mem.eql(u8, name, "--recall-dir")) {
-        out.recall_dir = v;
-    } else if (std.mem.eql(u8, name, "--recall-gib")) {
-        out.recall_gib = try gib(u, a, name, v);
-        const least = "argument --recall-gib: at least 1/128 GiB (two 4 MiB chunks): '{s}'";
-        if (out.recall_gib < 1.0 / 128.0) return fail(u, a, least, .{v});
-    } else if (std.mem.eql(u8, name, "--recall-read-only")) {
-        out.recall_read_only = true;
-    } else if (!std.mem.eql(u8, name, "--recall")) return false;
-    out.recall = true;
-    return true;
-}
-
 /// ``--parallel``: "auto" is up to 8 requests at once; a number caps it.
 pub fn parallel(text: []const u8) ?u32 {
     const t = std.mem.trim(u8, text, " ");
