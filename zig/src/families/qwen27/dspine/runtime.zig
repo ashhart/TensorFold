@@ -140,8 +140,7 @@ pub const Model = struct {
     pub fn absorb(m: *Model, taps: Ref, rows: u32) !void {
         return @import("forward.zig").append(m, taps, rows);
     }
-    /// A best-first tree of at most `nodes` drafts by the shared walker over the exact-sender table, its scores
-    /// read as logits (each row times its final-norm scale); TF_DSPINE_CHAIN: the greedy chain alone.
+    /// A best-first tree of `nodes` drafts by the shared walker, the table times each row's norm scale as logits.
     pub fn propose(m: *Model, pending: u32, nodes: u32) !Tree {
         const dt = @import("core").lanes.draft_tree;
         const p = try @import("forward.zig").propose(m, pending);
@@ -150,7 +149,7 @@ pub const Model = struct {
         var own: [64]f64 = undefined;
         const want = @min(nodes, tokens.len);
         var n: usize = 0;
-        if (std.c.getenv("TF_DSPINE_CHAIN") != null) {
+        if (try @import("sys").environment.read(bool, "TF_DSPINE_CHAIN", false)) { // the greedy chain alone
             n = @min(want, p.drafts.len);
             @memcpy(tokens[0..n], p.drafts[0..n]);
             for (parents[0..n], 0..) |*v, i| v.* = @as(i32, @intCast(i)) - 1;
