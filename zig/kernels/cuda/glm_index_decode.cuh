@@ -1,12 +1,4 @@
-// GLM-5.3-Flash DSA indexer, a decode window's top-512 pools of long rows on many CTAs: tf_glm_select_rows' bytes.
-// tf_glm_dsel_scan: every CTA of a row takes the same floor (the need-th best of 4,096 sampled keys) and marks its
-// span's pools above it (gt) and equal to it (eq). tf_glm_dsel_merge, a CTA a row, then selects exactly:
-//   - fewer than K above the floor and at least K at or above it: the K-th best key is the floor itself, so the picks
-//     are every gt pool and the first K - |gt| eq pools in pool order (no select at all);
-//   - at most CAP candidates (gt and eq, or gt alone when it holds K): tf_glm_select_rows' radix select over them;
-//   - otherwise (the floor overshot, or far too many above it): tf_glm_select_rows_wide's full-row select.
-// The picks are the K best keys (sparse._order_key of the fp32 scores), ties to the lower pool, in ascending pool order,
-// over each row's visible pools [0, max(vis, K)) clipped to np: tf_glm_select_rows' result whichever path a row takes.
+// GLM-5.3-Flash DSA indexer: a decode window's top-512 pools of long rows on many CTAs, tf_glm_select_rows' bytes.
 #pragma once
 
 #include <cuda_runtime.h>
@@ -41,8 +33,7 @@ __device__ __forceinline__ void hist_add(int* hist, int b) {
   }
 }
 
-// Warp 0: the digit of the need-th largest key under prefix from hist, and need less the keys in the bins above it
-// (no bin reaching need: digit 0 and need less every key, as tf_glm_select_rows takes it).
+// Warp 0: the digit of the need-th largest key under prefix from hist, and need less the keys in the bins above it.
 __device__ __forceinline__ void digit_of(const int* hist, int need, uint32_t prefix, int shift, uint32_t* sh_prefix,
                                          int* sh_need) {
   const int lane = threadIdx.x & 31;
@@ -56,7 +47,7 @@ __device__ __forceinline__ void digit_of(const int* hist, int need, uint32_t pre
     if (lane >= o) upto += v;
   }
   const unsigned hit = __ballot_sync(0xffffffffu, upto >= need);
-  if (lane == (hit ? __ffs(hit) - 1 : 31)) {
+  if (lane == (hit ? __ffs(hit) - 1 : 31)) {  // no bin reaching need: digit 0 and need less every key, as select_rows
     int above = upto - own, digit = 0;
     for (int j = 0; j < 8; ++j) {
       if (above + h[j] >= need) {
@@ -70,8 +61,7 @@ __device__ __forceinline__ void digit_of(const int* hist, int need, uint32_t pre
   }
 }
 
-// T threads' exclusive prefix of v in thread order and its total, via `slot` of wsum; its barrier orders slot reuse
-// (callers alternate slots).
+// T threads' exclusive prefix of v and its total, via `slot` of wsum; its barrier orders slot reuse (callers alternate)
 template <int T>
 __device__ __forceinline__ int block_scan(int v, int (*wsum)[T / 32], int slot, int* total) {
   const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
@@ -133,15 +123,13 @@ struct CandSrc {
   __device__ __forceinline__ int64_t pool(int i) const { return idx[i]; }
 };
 
-// tf_glm_select_rows over src's n elements, T threads: the K best keys' pools ascending into out, ties to the lower
-// pool. Four 8-bit radix passes find the K-th best key; an index-order pass emits every key above it and the first
-// `need` equal to it. Every thread calls it; it starts and ends at a barrier of its own.
+// tf_glm_select_rows over src's n keys, every thread of T: the K best keys' pools ascending into out, ties to the lower
 template <int T, class Src>
 __device__ void select_core(Sel<T>& sh, const Src& src, int n, int K, int64_t* __restrict__ out) {
   const int t = threadIdx.x;
   uint32_t prefix = 0, fixed = 0;
   int need = K;
-  for (int shift = 24; shift >= 0; shift -= 8) {
+  for (int shift = 24; shift >= 0; shift -= 8) {  // four 8-bit radix passes find the K-th best key
     for (int b = t; b < 256; b += T) sh.hist[b] = 0;
     __syncthreads();
     for (int c = 0; c < n; c += PER * T) {
@@ -160,7 +148,7 @@ __device__ void select_core(Sel<T>& sh, const Src& src, int n, int K, int64_t* _
     prefix = sh.prefix;
     fixed |= 0xFFu << shift;
   }
-  int gt_run = 0, eq_run = 0, slot = 0;
+  int gt_run = 0, eq_run = 0, slot = 0;  // in index order: every key above the K-th, then the first `need` equal to it
   for (int c = 0; c < n; c += PER * T) {
     const int i0 = c + PER * t;
     uint32_t u[PER];
@@ -201,9 +189,7 @@ struct Merge {
 
 }  // namespace glm_dsel
 
-// Scores [R][np] fp32; grid (cdiv(the last row's NP, SPAN), R). Row r's gt and eq bit words at bits[r][0][..] and
-// bits[r][1][..] (words a part; bit b of word w is pool 32 w + b). Rows of NP <= CAP mark nothing (the merge takes
-// them whole); each CTA writes only its span's words below its row's NP.
+// tf_glm_dsel_scan, grid (cdiv(the last row's NP, SPAN), R): a span's pools above (gt) and at (eq) the row's floor.
 extern "C" __global__ void __launch_bounds__(glm_dsel::T1)
     tf_glm_dsel_scan(const float* __restrict__ S, int64_t np, const int* __restrict__ pos, int K, int target,
                      uint32_t* __restrict__ bits, int64_t words) {
@@ -214,7 +200,7 @@ extern "C" __global__ void __launch_bounds__(glm_dsel::T1)
   const int64_t r = blockIdx.y;
   const int NP = row_limit(np, pos, r, K);
   const int64_t p0 = (int64_t)blockIdx.x * SPAN;
-  if (NP <= CAP || p0 >= NP) return;
+  if (NP <= CAP || p0 >= NP) return;  // rows of NP <= CAP mark nothing: the merge takes them whole
   const float* row = S + r * np;
   const int t = threadIdx.x, lane = t & 31, warp = t >> 5;
   // The floor: the need-th largest of the sampled keys, need the target's share of them. Speed only.
@@ -252,7 +238,7 @@ extern "C" __global__ void __launch_bounds__(glm_dsel::T1)
     const int64_t i = (w0 + wi) * 32 + lane;
     v[m] = wi < nwc && i < NP ? row[i] : 0.0f;
   }
-  uint32_t* gt = bits + r * 2 * words;
+  uint32_t* gt = bits + r * 2 * words;  // row r's gt words, then its eq words; bit b of word w is pool 32 w + b
 #pragma unroll
   for (int m = 0; m < WPW; ++m) {
     const int wi = warp + m * WARPS;
@@ -260,16 +246,14 @@ extern "C" __global__ void __launch_bounds__(glm_dsel::T1)
     const bool in = wi < nwc && i < NP;
     const uint32_t k = order_key(v[m]);
     const unsigned g = __ballot_sync(0xffffffffu, in && k > lo), e = __ballot_sync(0xffffffffu, in && k == lo);
-    if (lane == 0 && wi < nwc) {
+    if (lane == 0 && wi < nwc) {  // only the span's words below the row's NP
       gt[w0 + wi] = g;
       gt[words + w0 + wi] = e;
     }
   }
 }
 
-// The picks of tf_glm_dsel_scan's rows: scores [R][np], out [R][K] int64 ascending; grid (R). PATH null or [R] int32:
-// 0 the whole row in one select (NP <= CAP), 1 the candidates, 2 the whole row after the candidates missed, 3 ties
-// at the floor.
+// tf_glm_dsel_merge, a CTA a row: scores [R][np] into out [R][K] int64 ascending; PATH null or [R] int32, each path.
 extern "C" __global__ void __launch_bounds__(glm_dsel::T2)
     tf_glm_dsel_merge(const float* __restrict__ S, int64_t* __restrict__ OUT, int64_t np, const int* __restrict__ pos,
                       int K, const uint32_t* __restrict__ bits, int64_t words, int* __restrict__ PATH) {
@@ -281,7 +265,7 @@ extern "C" __global__ void __launch_bounds__(glm_dsel::T2)
   int64_t* out = OUT + r * K;
   const int t = threadIdx.x;
   const RowSrc whole{row, NP, (reinterpret_cast<uintptr_t>(row) & 15) == 0};
-  if (NP <= CAP) {
+  if (NP <= CAP) {  // path 0: the whole row in one select
     select_core<T2>(sm.sel, whole, NP, K, out);
     if (PATH != nullptr && t == 0) PATH[r] = 0;
     return;
@@ -301,7 +285,7 @@ extern "C" __global__ void __launch_bounds__(glm_dsel::T2)
   const int n_ge = n_gt + n_eq;
   int path;
   if (n_gt < K && K <= n_ge) {
-    // The K-th best key is the floor: every gt pool, and the eq pools of eq rank under K - n_gt, in pool order.
+    // Path 3, ties at the floor: every gt pool, and the eq pools of eq rank under K - n_gt, in pool order.
     const int need = K - n_gt;
     int seen = eq_before, cs = 0;
     for (int w = wa; w < wb; ++w) {
@@ -329,7 +313,7 @@ extern "C" __global__ void __launch_bounds__(glm_dsel::T2)
     }
     path = 3;
   } else if ((K <= n_ge && n_ge <= CAP) || (K <= n_gt && n_gt <= CAP)) {
-    // Every pool at or above the floor (or above it, when those hold K) in pool order: the K best are among them.
+    // Path 1: every pool at or above the floor (or above it, when those hold K) in pool order holds the K best.
     const bool with_eq = n_ge <= CAP;
     const int n = with_eq ? n_ge : n_gt;
     int at = with_eq ? gt_before + eq_before : gt_before;
@@ -340,7 +324,7 @@ extern "C" __global__ void __launch_bounds__(glm_dsel::T2)
     __syncthreads();
     select_core<T2>(sm.sel, CandSrc{sm.key, sm.idx, n}, n, K, out);
     path = 1;
-  } else {
+  } else {  // path 2: the floor overshot, or far too many above it: the whole row after the candidates missed
     select_core<T2>(sm.sel, whole, NP, K, out);
     path = 2;
   }
