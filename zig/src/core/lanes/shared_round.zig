@@ -20,10 +20,15 @@ pub fn run(e: *Engine, entries: []*Stream) !void {
 }
 
 fn runPriced(e: *Engine, entries: []*Stream, comptime independent: bool) !void {
-    if (!independent) e.clock.start();
+    var sampled_before = false;
+    if (independent) for (entries) |s| {
+        sampled_before = sampled_before or s.sampling != null;
+    };
+    const measured = independent and e.rule.sharedPrice(entries.len, sampled_before) != null;
+    if (!measured) e.clock.start();
     try e.late.flush(e, Engine.askDrafts);
-    // Only the independent plain measurement excludes a preceding lone draft.
-    if (independent) e.clock.start();
+    // An unmeasured plain price retains the original clock boundary.
+    if (measured) e.clock.start();
     const a = e.arena.allocator();
     const plans = try a.alloc(Plan, entries.len);
     for (entries, plans) |s, *p| p.* = try win.plan(e, s, null);
