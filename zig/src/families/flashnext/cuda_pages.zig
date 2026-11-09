@@ -55,10 +55,9 @@ pub fn valid(tokens: usize) bool {
     return tokens > 0 and tokens <= wt.window and tokens <= std.math.maxInt(c_int) and tokens % ratio == 0;
 }
 
-/// TF_FLASHNEXT_KV_PAGE_TEST=n: each stream's caches read through reversed n-position pages (checks); 0 when unset.
+/// TF_FLASHNEXT_KV_PAGE_TEST=n: each stream's caches read through reversed n-position pages; 0 when unset or blank.
 pub fn pageTest() !usize {
-    const v = std.c.getenv("TF_FLASHNEXT_KV_PAGE_TEST") orelse return 0;
-    const n = std.fmt.parseInt(usize, std.mem.span(v), 10) catch return error.BadFlashNextPageTest;
+    const n = (try @import("sys").environment.read(?usize, "TF_FLASHNEXT_KV_PAGE_TEST", null)) orelse return 0;
     if (!valid(n)) return error.BadFlashNextPageTest;
     return n;
 }
