@@ -71,7 +71,9 @@ pub fn open(h: *LaneHost, job: *Job) bool {
             job.key[0] = 0x8000_0000 | @as(u32, @truncate(std.hash.Wyhash.hash(f, std.mem.asBytes(&job.key[0])) & 0x7fff_ffff));
         }
     };
-    if (!memory_active and h.cache != null and !r.promptOnly() and r.prompt_logprobs == null and !r.untaught) reuse = kept(h, job);
+    if (!memory_active and h.cache != null and !r.promptOnly() and r.prompt_logprobs == null and !r.untaught and (h.keep_remote or !@import("lane_remote.zig").wins(h, job))) reuse = kept(h, job);
+    if (!memory_active) @import("lane_remote.zig").use(h, job, &reuse);
+    const handoff = !memory_active and @import("lane_export.zig").exporting(h, job, &reuse);
     if (h.proposers) |ps| {
         job.custom = ps.make(ps.ctx, h.gpa, r.prompt, r.eos) catch return !h.drop(job, "the drafter could not start");
     } else job.proposer = lanes.SuffixLookup.init(h.gpa, .{ .min_match = h.min_match }) catch return !h.drop(job, "the drafter could not start");
@@ -87,7 +89,7 @@ pub fn open(h: *LaneHost, job: *Job) bool {
         .prompt = effective_prompt,
         .embedding = r.embedding,
         .readout = r.readout,
-        .max_new = effective_max_new,
+        .max_new = if (handoff) @min(effective_max_new, 1) else effective_max_new,
         .eos = r.eos,
         .sampling = r.sampling,
         .penalties = r.penalties,
@@ -105,7 +107,7 @@ pub fn open(h: *LaneHost, job: *Job) bool {
         .prompt_logprobs = r.prompt_logprobs,
         .loop_guard = r.loop_guard,
         .loop_stop = r.loop_stop,
-        .chunks = if (memory_active) &.{} else r.chunks,
+        .chunks = if (memory_active) &.{} else if (handoff) &job.cut else r.chunks,
         .message_starts = if (memory_active) &.{} else r.message_starts,
         .history_len = if (memory_active) 0 else r.history_len,
         .shared_prefixes = if (memory_active) &.{} else r.shared_prefixes,
@@ -138,7 +140,7 @@ fn kept(h: *LaneHost, job: *Job) lanes.stream.Reuse {
     job.entry = l.entry;
     job.kept0 = store.counts.kept;
     job.marks = l.marks;
-    return .{ .saved = if (l.entry) |e| e.saved else null, .at = if (l.entry) |e| e.at else 0, .marks = l.marks, .hook = .{ .ptr = job, .at = Job.kept, .interrupted = Job.interrupted } };
+    return .{ .saved = if (l.entry) |e| e.saved else null, .at = if (l.entry) |e| e.at else 0, .marks = l.marks, .hook = .{ .ptr = job, .at = Job.kept, .interrupted = Job.interrupted }, .remote = if (l.entry) |e| e.remote else false };
 }
 
 /// A lent state gone at the job's first call: looked up again as at admission, with its fill and load hint.

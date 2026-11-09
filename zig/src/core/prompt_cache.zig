@@ -105,6 +105,7 @@ pub const Entry = struct {
     serial: u64 = 0, // the store's count when it was kept: names it while no lookup borrows it (reborrow)
     ext: std.ArrayList(*Entry) = .empty, // live extensions born no earlier
     own: []u32 = &.{}, // the kept prompt's one copy, which `tokens` and at first `last` slice (empty: they own theirs)
+    remote: bool = false, // built on another machine's prefix (#1594 step 2b): a stream resuming it is remote too
 };
 pub const Counts = struct { hits: u64 = 0, misses: u64 = 0, kept: u64 = 0, evicted: u64 = 0, refused: u64 = 0, failed: u64 = 0, trimmed: u64 = 0 };
 pub const RestoreDetails = @import("prompt_cache_restore.zig").Details;
@@ -120,6 +121,7 @@ pub const Store = struct {
     image_query: ?[]const @import("lanes").stream.Image = null, // scoped to one serial lookup or keep
     salt: ?u64 = null, // current request identity, scoped by the lane host around lookup and keep
     message_starts: []const u32 = &.{}, // Request.message_starts, scoped by the lane host around lookup
+    keep_remote: bool = false, // scoped to one keep: the state was built on another machine's prefix (#1594 step 2b)
     restore_log: ?RestoreLog = null,
     gpa: Allocator,
     family: Snapshots,
@@ -188,7 +190,7 @@ pub const Store = struct {
         policy.unlink(s, e);
         s.held -= e.bytes;
         // Clear and failed restores must not publish invalid state; backend expiry is still spillable.
-        if (s.disk) |r| if (!e.expired or e.removed_as == .expired) rows.write.evicted(r, e);
+        if (s.disk) |r| if ((!e.expired or e.removed_as == .expired) and !e.remote) rows.write.evicted(r, e);
         s.free(e);
     }
 
@@ -507,7 +509,7 @@ pub const Store = struct {
     pub const keepBorn = @import("prompt_cache_keep.zig").keepBorn;
 
     /// A learned state on disk longer than `have`, read back as a shared entry; else `have` (none, or reading failed).
-    fn recall(s: *Store, prompt: []const u32, born: u32, starts: []const u32, spans: []const modes.Span, have: ?*Entry) ?*Entry {
+    pub fn recall(s: *Store, prompt: []const u32, born: u32, starts: []const u32, spans: []const modes.Span, have: ?*Entry) ?*Entry {
         const im = s.imprint orelse return have;
         const read = s.family.vtable.read orelse return have;
         const m = im.best(prompt, starts, s.rules.planned, if (have) |x| x.at else 0) orelse return have;
@@ -590,4 +592,5 @@ test {
     _ = @import("prompt_cache_others_test.zig");
     _ = @import("prompt_cache_miss_test.zig");
     _ = @import("prompt_cache_message_starts_test.zig");
+    _ = @import("prompt_cache_remote_test.zig");
 }

@@ -16,6 +16,9 @@ pub fn pass(h: *LaneHost, job: *Job, began: i96) bool {
     };
     h.prefilled(job, began);
     if (h.cache) |store| {
+        const previous_remote = store.keep_remote;
+        store.keep_remote = job.stream.reuse.remote and !job.stream.reuse_failed;
+        defer store.keep_remote = previous_remote;
         const previous_salt = store.salt;
         store.salt = job.request.cacheSalt();
         defer store.salt = previous_salt;

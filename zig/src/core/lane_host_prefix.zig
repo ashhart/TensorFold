@@ -1,6 +1,7 @@
 //! The prefix wait: a cut another prompt fills waits to keep it; an identical prompt joins the whole fill.
 const std = @import("std");
 const api = @import("engine_api.zig");
+const exports = @import("lane_export.zig");
 const LaneHost = @import("lane_host.zig").LaneHost;
 const Job = LaneHost.Job;
 const modes = @import("cache_modes.zig");
@@ -45,11 +46,12 @@ pub fn waits(h: *LaneHost, job: *Job) bool {
     const previous_salt = store.salt;
     store.salt = r.cacheSalt();
     defer store.salt = previous_salt;
-    const have: u32 = if (store.find(r.cacheKey(), r.chunks, spans)) |e| e.at else 0;
+    const have: u32 = if (store.find(exports.resumable(r), r.chunks, spans)) |e| e.at else 0;
     const least = have +| @max(store.rules.min_gap, 1); // a cut this far past what is kept already
     var best: Waiting = .{};
     for (h.filling.items) |l| { // admitted fills never wait, so the oldest always runs
         if (!l.started or l.prefilled != null or l.request.background or !keyed(l.request) or l.request.cacheSalt() != r.cacheSalt()) continue;
+        if (l.stream.reuse.pulled) continue; // a fresh pull has no eligible earlier mark
         // a single-flight join: the leader's prompt is the waiter's own; armed only when its fill keeps anything
         if (joinable(h, r, spans, l) and room(h, job, l) and l.marks.len > 0 and store.most != 0) {
             best = .{ .leader = l, .id = l.id, .whole = true };
@@ -57,7 +59,8 @@ pub fn waits(h: *LaneHost, job: *Job) bool {
         }
         for (l.marks) |at| {
             if (at <= l.reached or at < least or at <= best.at) continue;
-            if (store.wouldServe(r.cacheKey(), r.chunks, spans, l.request.cacheKey(), h.spans(l.request), at))
+            if (!exports.keeps(l, at)) continue; // a handoff's cut is kept only where its store resumes it
+            if (store.wouldServe(key, r.chunks, spans, l.request.cacheKey(), h.spans(l.request), at))
                 best = .{ .leader = l, .id = l.id, .at = at };
         }
     }

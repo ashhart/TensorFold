@@ -32,6 +32,7 @@ const memory_host = @import("lane_host_memory.zig");
 const lane_stream = @import("lane_stream.zig");
 const lane_halt = @import("lane_halt.zig");
 const lane_trace = @import("lane_trace.zig");
+const remote = @import("lane_remote.zig");
 
 pub const LaneHost = struct {
     gpa: Allocator,
@@ -60,6 +61,10 @@ pub const LaneHost = struct {
     lone_job: ?*Job = null, // the job that driver holds now
     cache_at: i64 = 0, // wall-clock ms of the last full cache and disk copy (republished at 1 Hz at most)
     cache: ?*pc.Store = null, // kept prompt states (engine thread only); the backend restores and saves them
+    remote: ?remote.Source = null, // #1594 step 2b: prompt prefixes another machine fills (opt-in)
+    exporter: ?@import("lane_export.zig").Exporter = null, // #1594 step 2b: a handoff request's prompt state, for another machine
+    resume_peek: ?remote.ResumePeek = null, // the backend's own resume point, which a remote prefix must beat
+    keep_remote: bool = false, // TF_PREFILL_KEEP: states built on a remote prefix are kept, marked remote (#1594 step 2b)
     recall: ?*lanes.recall_store.Store = null, // Recall's record: drafts from earlier requests (lane_host_recall.zig)
     decoded_rows: bool = false, // the backend prefills Request.decode_spans with decoded rows' arithmetic, cache or not
     health: ?api.HealthSource = null,
@@ -102,6 +107,9 @@ pub const LaneHost = struct {
 
     pub const Job = @import("lane_job.zig").Job;
     pub const Load = load;
+
+    pub const Remote = remote; // #1594 step 2b: lane_remote.zig, and the producer side in lane_export.zig
+    pub const Export = @import("lane_export.zig");
 
     pub fn init(gpa: Allocator, io: std.Io, core: *lanes.Engine, info_: Info) LaneHost {
         var shown = info_.ofLanes();
@@ -210,7 +218,7 @@ pub const LaneHost = struct {
 
     fn submitFn(ctx: *anyopaque, id: Id, request: *const Request, sink: Sink) api.SubmitError!void {
         const h = self(ctx);
-        if (@import("lane_prompt_only.zig").refuses(h, request)) return error.InvalidRequest;
+        if (@import("lane_prompt_only.zig").refuses(h, request) or !@import("lane_export.zig").exportable(h, request)) return error.InvalidRequest;
         const job = h.gpa.create(Job) catch return error.Busy;
         job.* = .{ .host = h, .id = id, .request = request, .sink = sink, .submitted = std.Io.Clock.awake.now(h.io).toNanoseconds() };
         // written before the lock: a trace line never holds the host's mutex (a refused request's line stays alone)
@@ -324,7 +332,7 @@ pub const LaneHost = struct {
         h.gpa.free(job.marks);
         h.gpa.free(job.key);
         const s = &job.stream;
-        const stats: Stats = if (job.started) .{ .rounds = s.rounds, .grammar = if (s.grammar_time.windows > 0) s.grammar_time else null, .drafted = s.drafted, .accepted = s.accepted, .min_rows = s.min_rows, .prefill_widths = s.prefill_widths.items, .loop_period = s.loop_period, .gpu_seconds = s.gpu_seconds, .memory_version = job.memory_version, .prefill_seconds = if (job.prefilled) |done| @as(f64, @floatFromInt(@as(i64, @intCast(@max(0, done - job.began))))) / 1e9 else null } else .{};
+        const stats: Stats = if (job.started) .{ .rounds = s.rounds, .grammar = if (s.grammar_time.windows > 0) s.grammar_time else null, .drafted = s.drafted, .accepted = s.accepted, .min_rows = s.min_rows, .prefill_widths = s.prefill_widths.items, .loop_period = s.loop_period, .gpu_seconds = s.gpu_seconds, .memory_version = job.memory_version, .prefill_seconds = if (job.prefilled) |done| @as(f64, @floatFromInt(@as(i64, @intCast(@max(0, done - job.began))))) / 1e9 else null, .remote_prefix = if (s.reuse.remote) s.cached else 0, .pulled_prefix = if (s.reuse.pulled) s.cached else 0 } else .{};
         var told = if (job.started) recalls.finished(h, job, reason, stats) else stats;
         told.queued_seconds = if (job.admitted_ns) |at| @as(f64, @floatFromInt(@max(0, at - job.submitted))) / 1e9 else 0;
         emit(job, .{ .finished = .{ .reason = reason, .stats = told, .message = message } });
@@ -479,7 +487,7 @@ pub const LaneHost = struct {
         rows_host.prefilled(h, filled_new, done - began);
         job.reported();
         if (job.memory_snap == null) if (h.cache) |store| {
-            store.report(job.request.prompt.len, job.stream.cached, store.counts.kept - job.kept0, done);
+            store.report(job.request.prompt.len, remote.cachedOwn(job), store.counts.kept - job.kept0, done);
             if (job.request.promptOnly()) {
                 // never kept, so a repeat of it is not worth noting
             } else if (job.request.images.len == 0 and (job.request.cache_key.len == 0 or job.request.salted)) {
@@ -488,7 +496,7 @@ pub const LaneHost = struct {
                 store.repeat_log.note(store.gpa, store.rules.repeat_min, job.cacheKey());
             }
         };
-        emit(job, .{ .prefilled = if (job.memory_snap != null) 0 else job.stream.cached });
+        emit(job, .{ .prefilled = if (job.memory_snap != null) 0 else remote.cachedOwn(job) });
         if (job.stream.prompt_logprobs != null) emit(job, .{ .prompt_logprobs = job.stream.prompt_rows.items });
         recalls.prompted(h, job);
     }

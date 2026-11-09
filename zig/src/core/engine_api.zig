@@ -30,7 +30,6 @@ pub const LogprobRow = lanes.LogprobRow;
 
 pub const CallGate = @import("engine_request_controls.zig").CallGate;
 pub const Structure = @import("engine_request_controls.zig").Structure;
-
 pub const grammar = lanes.grammar;
 pub const Request = @import("engine_request.zig").Request;
 pub const Stop = @import("engine_request.zig").Stop;
@@ -275,6 +274,7 @@ pub const Open = struct {
     ssd_experts_gib: ?f64 = null,
     ple_on_ssd: bool = false,
     fsr_trace: ?[]const u8 = null,
+    remote_prefill: @import("lane_remote.zig").Flags = .{}, // --prefill-from and --mcdma-link (#1594 step 2b)
     /// --learn: where shared prompt states are kept on disk for later sessions and servers (null: off).
     learn: ?[]const u8 = null,
     /// --learn-min-free-gib: filesystem space kept free before any learned-state write.
@@ -342,7 +342,6 @@ pub const HealthSource = @import("engine_status.zig").HealthSource;
 pub const Memory = @import("engine_status.zig").Memory;
 pub const MemorySource = @import("engine_status.zig").MemorySource;
 pub const Status = @import("engine_status.zig").Status;
-
 pub const SubmitError = error{ Closed, Busy, InvalidSpans, Stale, InvalidRequest, MemoryPressure }; // Stale: put-back has not reached the device
 
 /// What a request refused under critical memory pressure says (a 503).
