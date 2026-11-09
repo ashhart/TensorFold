@@ -20,7 +20,7 @@ const pick_rule = "picks by fp32 logit + bias, larger first, ties to the lower i
 const score_rule = "picks by fp32 sigmoid(logit) + bias, larger first, ties to the lower id, a NaN never picked; weights the score";
 
 /// A routing's fixed form; shape: rows, experts (n), top-k (k). score: sigmoid + bias ranked (plant: the logit form).
-pub const Route = struct { name: []const u8, shared: bool, normalize: bool = false, scale: f32 = 1, warp: bool, score: bool = false, shared_slots: usize = 1, plant: bool = false, groups: usize = 1, keep: usize = 1, experts: usize = 0 };
+pub const Route = struct { name: []const u8, shared: bool, normalize: bool = false, scale: f32 = 1, warp: bool, score: bool = false, shared_slots: usize = 1, plant: bool = false, groups: usize = 1, keep: usize = 1, experts: usize = 0, high: bool = false }; // high: the highest of equal groups kept (planted)
 
 const nemotron: []const c.Shape = &.{ .{ .rows = 16, .n = 128, .k = 6 }, .{ .rows = 300, .n = 128, .k = 6 } };
 const bolt: []const c.Shape = &.{ .{ .rows = 16, .n = 496, .k = 9 }, .{ .rows = 300, .n = 496, .k = 9 } };
@@ -37,6 +37,7 @@ pub const routes = [_]Route{
     .{ .name = "cuda moe top-k tf_moe_topk_sigmoid_score_groups (Ling-3.1: 512 experts, 4 of 8 groups, top 8 normalized x2.5 + shared)", .shared = true, .normalize = true, .scale = 2.5, .warp = true, .score = true, .groups = 8, .keep = 4, .experts = 512 },
     .{ .name = "cuda moe top-k tf_moe_topk_sigmoid_score_groups (256 experts, 4 of 8 groups, top 8 normalized x2.5 + shared)", .shared = true, .normalize = true, .scale = 2.5, .warp = true, .score = true, .groups = 8, .keep = 4, .experts = 256 },
     .{ .name = "control: group-limited top-k ranking every group (tf_moe_topk_sigmoid_score_warp)", .shared = true, .normalize = true, .scale = 2.5, .warp = true, .score = true, .plant = true, .groups = 8, .keep = 4, .experts = 512 },
+    .{ .name = "control: group-limited top-k keeping the highest of equal groups (tf_ctl_moe_topk_score_groups_high)", .shared = true, .normalize = true, .scale = 2.5, .warp = true, .score = true, .groups = 8, .keep = 4, .experts = 512, .high = true },
 };
 
 pub fn topkSpec(r: Route) c.Spec {
@@ -49,6 +50,7 @@ pub const TopK = struct {
     rig: rig_.Rig,
     route: Route,
     g: *const glue.MoeGlue,
+    ctl: ?glue.MoeGlue = null, // high: g with its group kernel swapped for the planted one
     shape: c.Shape = .{ .rows = 0, .n = 0, .k = 0 },
     logits: std.ArrayList(f32) = .empty,
     bias: std.ArrayList(f32) = .empty,
@@ -65,10 +67,14 @@ pub const TopK = struct {
     }
 
     pub fn kernel(self: *TopK) g.Kernel {
-        return .{ .spec = topkSpec(self.route), .ctx = self, .vt = &vt, .control = if (self.route.plant) .shapes else null };
+        return .{ .spec = topkSpec(self.route), .ctx = self, .vt = &vt, .control = if (self.route.plant or self.route.high) .shapes else null };
     }
 
     const vt = g.hooks(TopK);
+
+    fn fns(self: *const TopK) *const glue.MoeGlue {
+        return if (self.ctl) |*m| m else self.g;
+    }
 
     fn slots(self: *const TopK) usize {
         return self.shape.k + if (self.route.shared) self.route.shared_slots else 0;
@@ -91,6 +97,11 @@ pub const TopK = struct {
         const rng = prng.random();
         self.shape = shape;
         self.fill = fill;
+        if (self.route.high and self.ctl == null) {
+            var m = self.g.*;
+            m.topk_groups_fn = try self.g.mod.function("tf_ctl_moe_topk_score_groups_high");
+            self.ctl = m;
+        }
         const ne = shape.n;
         const gs = ne / gr; // bias repeats every group, so a group copied from another ties it exactly
         try self.logits.resize(a, shape.rows * ne);
@@ -116,7 +127,7 @@ pub const TopK = struct {
     }
 
     pub fn run(self: *TopK) !void {
-        try self.g.topk(self.rig.s, self.dev[0], self.dev[1], self.form(), self.dev[2], self.dev[3], self.shape.rows);
+        try self.fns().topk(self.rig.s, self.dev[0], self.dev[1], self.form(), self.dev[2], self.dev[3], self.shape.rows);
         try self.rig.s.synchronize();
     }
 
@@ -246,8 +257,8 @@ pub const TopK = struct {
         const row = self.slots() * 4;
         for (self.dev[2..4]) |p| try (cuda.DeviceBuffer{ .d = self.rig.gpu.d, .ptr = p, .len = s.rows * row }).fill8(0xff, self.rig.s.handle);
         const m = s.rows / 2;
-        try self.g.topk(self.rig.s, self.dev[0], self.dev[1], self.form(), self.dev[2], self.dev[3], m);
-        try self.g.topk(self.rig.s, self.dev[0] + m * s.n * 4, self.dev[1], self.form(), self.dev[2] + m * row, self.dev[3] + m * row, s.rows - m);
+        try self.fns().topk(self.rig.s, self.dev[0], self.dev[1], self.form(), self.dev[2], self.dev[3], m);
+        try self.fns().topk(self.rig.s, self.dev[0] + m * s.n * 4, self.dev[1], self.form(), self.dev[2] + m * row, self.dev[3] + m * row, s.rows - m);
         const at = std.mem.indexOfDiff(u8, whole, try self.rig.outputBytes()) orelse return null;
         return try std.fmt.bufPrint(&self.msg, "rows {d} and {d} as two calls: byte {d} differs from one call of {d}", .{ m, s.rows - m, at, s.rows });
     }
