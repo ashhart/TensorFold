@@ -52,13 +52,11 @@ pub const Prices = struct {
         } else if (rows > streams) blend(&b.draft, point);
     }
 
-    /// Before a plain observation, its independent prior is 8 ms, never the drafted residual.
-    pub fn price(p: *const Prices, streams: usize, sampled: bool, fallback: f64, row: f64) ?Price {
+    /// Until a plain round is measured, leave the existing allocator and its draft ranking in charge.
+    pub fn price(p: *const Prices, streams: usize, sampled: bool, row: f64) ?Price {
         const b = p.buckets.items[p.find(streams, sampled) orelse return null];
-        var out: Price = .{ .plain = 8, .fixed = fallback, .row = row };
-        const plain = b.plain orelse return out;
-        out.plain = plain.residual;
-        out.fixed = plain.residual;
+        const plain = b.plain orelse return null;
+        var out: Price = .{ .plain = plain.residual, .fixed = plain.residual, .row = row };
         if (b.draft) |draft| if (draft.rows > plain.rows) {
             out.row = @max(0, (draft.residual - plain.residual) / (draft.rows - plain.rows));
         };

@@ -119,15 +119,15 @@ test "shared prices: drafted work at plain width cannot update the intercept; tw
     var p: prices.Prices = .{};
     defer p.deinit(a);
     try p.observe(a, 4, 4, 50, false, false, false);
-    try t.expectEqual(@as(f64, 8), p.price(4, false, 50, 0).?.plain);
+    try t.expect(p.price(4, false, 0) == null);
     try p.observe(a, 4, 4, 2, false, true, false);
     try p.observe(a, 4, 8, 10, false, false, false);
-    const v = p.price(4, false, 100, 99).?;
+    const v = p.price(4, false, 99).?;
     try t.expectEqual(@as(f64, 2), v.plain);
     try t.expectEqual(@as(f64, 2), v.fixed);
     try t.expectEqual(@as(f64, 2), v.row);
-    try t.expect(p.price(4, true, 0, 0) == null);
-    try t.expect(p.price(2, false, 0, 0) == null);
+    try t.expect(p.price(4, true, 0) == null);
+    try t.expect(p.price(2, false, 0) == null);
 }
 
 test "shared prices: the round observer subtracts modeled heads before fitting rows" {
@@ -141,4 +141,66 @@ test "shared prices: the round observer subtracts modeled heads before fitting r
     try t.expectEqual(@as(f64, 2), r.sharedPrice(4, false).?.row);
     try r.observeShared(4, 4, 100, false, 12, false, false);
     try t.expectEqual(@as(f64, 2), r.sharedPrice(4, false).?.plain);
+}
+
+test "shared prices: an unmeasured plain option keeps main's winning drafted width" {
+    var table: @import("table.zig").Table = .{};
+    defer table.deinit(a);
+    for (1..13) |n| try table.put(a, @intCast(n), 10 + 2 * @as(f64, @floatFromInt(n)));
+    var r: @import("depth.zig").Rule = .{ .gpa = a, .prior = &.{0.2}, .most_drafts = 1, .family_costs = &table, .shared_costs = &table, .mtp_step_ms = 0, .plain_guard = true, .node_probabilities = false, .batch_rows = 12 };
+    defer r.deinit();
+    try r.observeShared(4, 8, table.get(8).? + 50, false, 0, false, false);
+    const old = r.overheadMs(4, false);
+    const paired = r.sharedPrice(4, false);
+    const probs = [_][]const f64{ &.{0.2}, &.{0.2}, &.{0.2}, &.{0.2} };
+    const counts = try @import("allocate.zig").allocateDrafts(a, &.{ 1, 1, 1, 1 }, &probs, &table, if (paired) |p| p.fixed else old, 12, .{ .plain_ms = if (paired) |p| p.plain else null });
+    defer a.free(counts);
+    try t.expectEqualSlices(u32, &.{ 1, 1, 1, 1 }, counts);
+    try r.observeShared(4, 4, table.get(4).? + 2, false, 0, true, false);
+    const p = r.sharedPrice(4, false).?;
+    const measured = try @import("allocate.zig").allocateDrafts(a, &.{ 1, 1, 1, 1 }, &probs, &table, p.fixed, 12, .{ .plain_ms = p.plain, .row_ms = p.row });
+    defer a.free(measured);
+    try t.expectEqualSlices(u32, &.{ 0, 0, 0, 0 }, measured);
+}
+
+test "shared prices: only independent plain timing excludes a preceding deferred draft" {
+    const ClockAtDraft = struct {
+        target: *fake.Fake,
+        at: usize = 0,
+        fn clock(c: *@This()) be.Clock {
+            return .{ .ptr = c, .vtable = &.{ .start = start, .elapsed_ms = elapsed } };
+        }
+        fn start(ptr: *anyopaque) void {
+            const c: *@This() = @ptrCast(@alignCast(ptr));
+            c.at = c.target.drafts_calls;
+        }
+        fn elapsed(ptr: *anyopaque, _: be.Mark) f64 {
+            const c: *@This() = @ptrCast(@alignCast(ptr));
+            return 20 + 5 * @as(f64, @floatFromInt(c.target.drafts_calls - c.at));
+        }
+    };
+    for ([_]bool{ false, true }) |independent| {
+        var cfg = try Config.init(a, .{ .exact_width = 8, .mtp = true, .speculate = true, .speculate_early = false, .drafts = 1, .window_costs = &.{ .{ .width = 1, .ms = 10 }, .{ .width = 8, .ms = 10 } }, .plain_guard = independent, .hidden_rows = true }, 8, 7);
+        defer cfg.deinit(a);
+        var target: fake.Fake = .{ .gpa = a, .head_accepts = 1 };
+        defer target.deinit();
+        var clock: ClockAtDraft = .{ .target = &target };
+        var backend = target.backend();
+        backend.defer_lone_draft = true;
+        var e = Engine.init(a, &cfg, backend, clock.clock());
+        defer e.deinit();
+        var streams: [2]Stream = undefined;
+        var made: usize = 0;
+        defer for (streams[0..made]) |*s| s.deinit(a);
+        for (&streams, 0..) |*s, i| {
+            s.* = try Stream.init(a, .{ .id = "timing", .prompt = &.{ 1, 2, 3 }, .max_new = 40 });
+            made += 1;
+            try e.addStream(s);
+            if (i == 0) try e.step();
+        }
+        try t.expect(e.late.request != null);
+        try e.step();
+        try t.expectEqual(target.drafts_calls - @as(usize, if (independent) 2 else 3), clock.at);
+        try t.expectEqual(@as(usize, 0), e.rule.shared_price.buckets.items.len - @intFromBool(independent));
+    }
 }

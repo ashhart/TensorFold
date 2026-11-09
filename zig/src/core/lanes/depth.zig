@@ -388,7 +388,7 @@ pub const Rule = struct {
     /// Independent plain price and the row slope from a plain/drafted pair, at this exact count and mode.
     pub fn sharedPrice(r: *const Rule, streams: usize, sampled: bool) ?@import("shared_price.zig").Price {
         if (streams < 2 or !r.plain_guard or r.confidence_floor != null) return null;
-        return r.shared_price.price(streams, sampled, r.fixedMs(streams, sampled), r.row_cost.extraMs(streams, sampled));
+        return r.shared_price.price(streams, sampled, r.row_cost.extraMs(streams, sampled));
     }
 
     /// Only completed timed shared rounds advance this count/mode's calibration clock.
