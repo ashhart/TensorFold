@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Conformance: a Qwen3.8-27B Metal profile (`tools/conformance_profiles/qwen27-metal.json`, MLX 4-bit with its DFlash2 drafter), and a profile key `fresh_env` the kit sets only on the cache-off servers it starts, so the resumed gate gets a fresh side on Metal, where a stream resumes its own last chat (#2612, refs #2460). Thanks to @jschmied.
+
 - Sampling: Qwen 3.5's host draw over a bf16 logits row (a reply's first token and every grammar-masked row on CUDA, every draw on Metal) moves unchanged into `core/lanes` as `sampling_row`, the first step to one sampler; token ids equal main's on 64 of 64 greedy, sampled and JSON-schema requests (#2606, part of #2460). Thanks to @jschmied.
 
 - Internal: GLM's CUDA SwiGLU rows move into their own header (`glm_swiglu.cuh`) with a template for the clip after silu that Ling will use; GLM's machine code is the same on all five SMs (#2627, part of #850). Thanks to @ajensenwaud.
