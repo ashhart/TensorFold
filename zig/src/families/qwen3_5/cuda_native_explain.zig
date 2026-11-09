@@ -15,6 +15,7 @@ pub fn explain(ctx: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.BadChunkSolo => "TF_QWEN35_CHUNK_SOLO: a solo prompt pass's rows, 4096 (off) or 8192",
         error.QwenSoloStage => "TF_QWEN35_CHUNK_SOLO: a pipeline stage runs 4096-row prompt chunks; unset it on stages",
         error.BadQwenKvPages => "TF_QWEN_KV_PAGES takes the positions a page holds (a whole number; 0 or unset: a window each)",
+        error.QwenKvHostNeedsPages => "TF_QWEN_KV_HOST keeps the KV pages in pinned host memory: set TF_QWEN_KV_PAGES (with TF_QWEN_KV_PAGES_ALL=1 for a single stream) so there are pages to place",
         error.UnsupportedQwenVision => "--vision: this checkpoint's image tower or text M-RoPE is not one the CUDA engine reads",
         else => sm110_modes.explain(err),
     };
