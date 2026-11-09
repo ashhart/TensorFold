@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM-5.3-Flash on CUDA: decode windows reach 32 rows; MTP times and caches its lone window and step prices, while DFlash2 keeps its seed prices and times only the target expert-form race. Shared MTP proposals are capped at three drafts per stream unless `TF_GLM_COPIES=1`; with copies off, shared rounds keep their prior forward and step prices. At TP=2 on two GB10s, prompts of 2k and 8k tokens fill 23% and 13% faster and one-stream code decodes 32% faster, with every reply equal to before (#2257).
+
 - Qwen3.8-27B on Macs: a sampled or grammar-masked verify window draws its rows on four host threads instead of one after another. Every row is still drawn and checked in full, and a failure is still the first failing row's, so tokens and errors are unchanged; on an M5 Ultra with the DFlash2 drafter, sampled decode at one stream is 4 to 9% faster (#2644). Thanks to @mrv777.
 
 - Living Weights on Nemotron (`--slide`): a lesson's pocket goes only into the layers whose subject rows carry it and that pass the full verifier, and the neurons it needs are shrunk to what passes; a rejected shrink restores the exact rows and count. A correction overturns a shipped answer with an explicit additive fit and checked deletion of the original, and one that depends on an earlier pocket is refused by fact before fitting. Pretrained weights and kernels are unchanged, and serving without `--slide` is unchanged. `TF_SLIDE_POCKET_DUMP` is read through the environment table: blank means no dump, and a path with a control character is refused at startup (#2025, part of #1968).
@@ -85,7 +87,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Linux: Nemotron's io_uring checkpoint reads no longer hang at shutdown after a failed read: a read that failed partway through a batch dropped the batch's later completions, so the loader waited for them forever; every reader that skips the page cache or reads aligned spans (row and state files, Engram rows, session restore, Qwen-VL tower reads, GLM's rewritten tensors) is now tested with a file that ends inside the span it asks for (#2608).
 - Flash Next on Macs: a server that closes while replies wait in its queue now ends each of them even when it is short of memory. Before, a failed copy at close left those requests waiting for good (#2616).
-- GLM on CUDA: decode windows reach 32 rows; MTP times and caches its lone window and step prices, while DFlash2 keeps its seed prices and times only the target expert-form race. Shared MTP proposals are capped at three drafts per stream unless `TF_GLM_COPIES=1`; with copies off, shared rounds retain their prior forward and step prices (#2257).
 
 - Loading: a direct-read load on Linux (Spark 2.5, Dory, Gemma 4 and Qwen 3.5 on CUDA, and Flash Next's experts) that fails now names its reader's error, such as `EndOfFile` when a shard ends inside a tensor it reads, where every failure was `ReadFailed` (#2610).
 
