@@ -171,6 +171,7 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.LingFormat => "Ling-3.1 on CUDA reads EXL3 packs (and bf16 for checks): FP8 and NVFP4 checkpoints are not loaded yet",
         error.LingContext => "Ling-3.1 on CUDA serves up to its native 262,144 positions: lower --context (YaRN past it is not built here)",
         error.NoDraftHead => "Ling-3.1 on CUDA drafts from the prompt's own text only: its MTP layer is not loaded yet",
+        error.InfiniteBiasPair => "a MoE layer's expert_bias puts +inf and -inf in one routing group (it scores NaN): the log names it",
         error.QuantizedRouter => "Ling-3.1's routing kernels read a bf16 router (mlp.gate): this checkpoint quantized it",
         error.PromptTooLong => "the prompt and its reply exceed the window: raise --context",
         error.NoRank => "Ling at TP over hosts: set TF_LING_RANK and TF_LING_WORLD (1 or 2) on every host, or neither for one GPU",
