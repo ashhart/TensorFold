@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen 3.5/3.8: the four config readers check activation, attention gate, bias and recurrent state type from one table with a column per backend; each admits what it did, and a refused config names the part (#2563, part of #2460). Thanks to @jschmied.
+
 - CUDA: Flash Next's PLE gate RMS scales, and the Qwen4 kernel generated from them, call `tf_common::rms_scale`; every function's SASS is unchanged (#2684, refs #548). Thanks to @jschmied.
 
 - CUDA: the stored partial-sum folds before an RMS scale (Flash Next's hyper-connection normalize, hc_down, rinv and hcf prologue, DeepSeek-V4.1's mHC norm folds) call one helper, `tf_common::sum_rn` in `common/fold.cuh`; every function's SASS is unchanged (#2666, refs #548). Thanks to @jschmied.
@@ -131,7 +133,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
   only where it keeps all the states, and otherwise how many the room holds (#2568, fixes #2547). Thanks to @Bizuayeu.
 
 - Tests: the Metal kernel contract's limits pass checks LFM3's launches again; a rebase had dropped their five entries, so the pass stopped at the first LFM3 record with `UnknownLaunch` and left every later launch unchecked (#2565).
-- Qwen 3.5/3.8: the four config readers check activation, attention gate, bias and recurrent state type from one table with a column per backend; each admits what it did, and a refused config names the part (#2563, part of #2460). Thanks to @jschmied.
 - HIP on gfx12 under `--policy matrix=on`: Qwen3 dense checkpoints load each layer's gate and up weights interleaved as one weight, and one WMMA product writes silu(gate) x up in its epilogue instead of two products and `tf_silu_mul`, with the same output bytes: Qwen3-Reranker-8B ranks 16 documents in 0.657 to 0.661 s instead of 0.687 to 0.697 s and Qwen3-Embedding-8B embeds 100 short inputs in 0.901 to 0.911 s instead of 0.940 to 0.948 s on a Radeon AI PRO R9700. The kernel contract checks both fused blocks byte for byte against the unfused launches (part of #2245). Thanks to @laudney.
 - Nemotron on Macs: the masked prompt shader calls the shared `tf_paged_row` page helper again, so its prompt sources compile; #2322 had used the name #2283 retired the same day (#2548).
 - Experimental: `TF_TP_ROCE_RELAY=1` relays gathers through both neighbours on a four-rank RoCE ring with no opposite
