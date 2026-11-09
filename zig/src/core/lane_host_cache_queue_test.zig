@@ -153,7 +153,7 @@ fn coldBefore(protected: bool, history: bool) !void {
     var core = lanes.Engine.init(a, &cfg, target.stepped(), clock.clock());
     defer core.deinit();
     var snapshots: Snapshots = .{ .target = &target };
-    var store = pc.Store.init(a, .{ .ptr = &snapshots, .vtable = &.{ .bytes = Snapshots.bytes, .save = Snapshots.save, .restore = Snapshots.restore, .drop = Snapshots.drop } }, .{ .min_prompt = 0 }, 100);
+    var store = pc.Store.init(a, .{ .ptr = &snapshots, .vtable = &.{ .bytes = Snapshots.bytes, .save = Snapshots.save, .restore = Snapshots.restore, .drop = Snapshots.drop } }, .{ .min_prompt = 0, .min_gap = 0 }, 100);
     defer store.deinit();
     const idle = @as([24]u32, @splat(91));
     const words = @as([24]u32, @splat(82));
