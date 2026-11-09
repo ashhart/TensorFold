@@ -88,6 +88,7 @@ const forms = [_]Form{
     .{ .name = "model.layers.3.mlp.switch_mlp.gate_up_proj", .stack = 8, .n = 16, .k = 256, .bits = 2, .group = 128, .fixed = false }, // minimax_m3
     .{ .name = "model.layers.4.moe.down_proj", .stack = 1, .n = 8, .k = 192, .bits = 3, .group = 64, .fixed = false }, // step5
     .{ .name = "model.layers.5.eh_proj", .stack = 1, .n = 8, .k = 320, .bits = 5, .group = 64, .fixed = false }, // step5 mtp
+    .{ .name = "model.layers.6.self_attn.o_proj", .stack = 1, .n = 8, .k = 256, .bits = 8, .group = 64, .fixed = true }, // spark25
 };
 
 fn payload(arena: std.mem.Allocator, len: usize, seed: u64) ![]u8 {
