@@ -44,7 +44,10 @@ fn affine(ckpt: *const ck.Checkpoint, prefix: []const u8, suffix: []const u8, st
     var buf: [256]u8 = undefined;
     const name = try std.fmt.bufPrint(&buf, "{s}{s}", .{ prefix, suffix });
     const t = try mlx_affine.read(ckpt, name, .{ .stack = stack, .n = n, .k = k, .bits = bits, .group = c.group });
-    if (t.weight.offset % 4 != 0 or t.scales.offset % 4 != 0 or t.biases.offset % 4 != 0) return error.UnexpectedLfmTensor;
+    if (t.weight.offset % 4 != 0 or t.scales.offset % 4 != 0 or t.biases.offset % 4 != 0) {
+        std.log.err("{s}: LFM2 affine tensors not 4-byte aligned", .{name});
+        return error.UnexpectedLfmTensor;
+    }
     return row.affine(t);
 }
 
