@@ -74,7 +74,7 @@ void main() {
 #else
     vec4 up = LOAD_VEC(up_buf.values[params.up_offset / 4u + index]);
 #endif
-#ifdef ASH_QWEN35
+#ifdef ORACLE_QWEN35
     // Match Metal's g/(1+exp(-g)): one f32 division, no intermediate rounding, one output-store round.
     vec4 denom = 1.0 + exp(-gate);
     vec4 sig = 1.0 / denom;  // exact only for the materialize path

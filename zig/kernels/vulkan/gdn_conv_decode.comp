@@ -47,7 +47,7 @@ layout(set = 0, binding = 4, std430) buffer StateOut {
 // Preserve the omitted contract, precision, and host-interface facts from the original comment.
 shared float norm_block[256];
 
-// Field order matches the fixed omarchy::ComputeParams layout: count, operation, lhs_size, rhs_size, reduce_size, ...
+// Field order matches our fixed push-constant layout: count, operation, lhs_size, rhs_size, reduce_size, ...
 layout(push_constant) uniform Params {
   uint count;
   uint operation;

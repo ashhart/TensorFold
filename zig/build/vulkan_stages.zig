@@ -217,7 +217,7 @@ pub fn stage1(ctx: *Context) void {
 /// stage2-gpu-build and stage2-gpu-run: the stage 2 norm/swiglu images and the NormMlp probe.
 pub fn stage2(ctx: *Context) void {
     const b = ctx.b;
-    // Stage 2: norm/swiglu as the ASH_QWEN35 oracle form, plus plain bf16 and -DUSE_BF16; the NormMlp probe.
+    // Stage 2: norm/swiglu as the ORACLE_QWEN35 oracle form, plus plain bf16 and -DUSE_BF16; the NormMlp probe.
     const stage2_files = b.addWriteFiles();
     const stage2_build = b.step("stage2-gpu-build", "Compile the stage 2 SPIR-V variants, install them under stage2/, and build the stage 2 GPU probe without running it");
     const stage2_run = b.step("stage2-gpu-run", "Run the stage 2 GPU probe on the chosen device (args after --)");

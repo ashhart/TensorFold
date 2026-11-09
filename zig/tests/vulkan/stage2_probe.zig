@@ -1,4 +1,4 @@
-// Vulkan stage 2 bring-up: BF16 add, SwiGLU and RMSNorm (Metal-oracle ASH_QWEN35) through NormMlp; exit 0/1/2/124.
+// Vulkan stage 2 bring-up: BF16 add, SwiGLU and RMSNorm (Metal-oracle ORACLE_QWEN35) through NormMlp; exit 0/1/2/124.
 const std = @import("std");
 const vk = @import("vulkan");
 const shaders = @import("stage2_shaders");

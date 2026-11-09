@@ -128,7 +128,7 @@ void main() {
               : LOAD_VALUE(bias_data.values[params.aux_offset + index]);
       float result = (value - mu) * norm * weight + bias;
 #else
-#ifdef ASH_QWEN35
+#ifdef ORACLE_QWEN35
       // Ash8c Metal: bfloat(Wt*(hv*inv)); weight multiplies the product; one store rounding.
       float result = weight * (value * norm);
 #else
