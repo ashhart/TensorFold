@@ -23,6 +23,10 @@ pub fn tests(b: *std.Build, test_step: *std.Build.Step) void {
     b.step("test-qwen27-prompt-rows-host", "Device-aware prompt rows beside owned decoding streams without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = rows, .filters = &.{"qwen27 rows:"} })).step);
     const ane_policy = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen27/ane_policy.zig"), .target = b.graph.host });
     b.step("test-qwen27-ane-policy-host", "Neural Engine opt-in and tensor-unit chip policy without shaders").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = ane_policy })).step);
+    const draws = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_draws.zig"), .target = b.graph.host });
+    const draws_run = b.addRunArtifact(b.addTest(.{ .root_module = draws, .filters = &.{"qwen27 draws:"} }));
+    test_step.dependOn(&draws_run.step);
+    b.step("test-qwen27-draws-host", "A sampled window's rows drawn on host threads, with the walk's first error").dependOn(&draws_run.step);
     const metal = b.createModule(.{ .root_source_file = b.path("zig/src/metal/metal.zig"), .target = b.graph.host });
     const root = b.createModule(.{ .root_source_file = b.path("zig/src/qwen27_speed_test.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "metal", .module = metal }} });
     const run = b.addRunArtifact(b.addTest(.{ .root_module = root, .filters = &.{"qwen27 speed:"} }));
