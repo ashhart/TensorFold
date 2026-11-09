@@ -4,7 +4,6 @@ const cuda = @import("cuda");
 const core = @import("core");
 const geometry = @import("cuda_geometry.zig");
 const engine = @import("cuda_engine.zig");
-const modelopt = @import("cuda_modelopt.zig");
 
 const X = cuda.experts.Nvfp4Experts;
 const Engine = engine.Engine;
@@ -56,13 +55,11 @@ pub fn routed(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer, p: []const
         if (e1 * (cb + sb) > stage.len) return error.StageTooSmall;
         for (0..e1) |x| {
             const module = if (x < g.experts) try std.fmt.bufPrint(&mb, "{s}mlp.experts.{d}.{s}", .{ p, x, q.name }) else try std.fmt.bufPrint(&mb, "{s}mlp.shared_expert.{s}", .{ p, q.name });
-            const codes = try ck.expect(try std.fmt.bufPrint(&tb, "{s}.weight", .{module}), .u8, &.{ q.n, q.k / 2 });
-            try stage.upload(x * cb, codes.bytes);
-            const blocks = try ck.expect(try std.fmt.bufPrint(&tb, "{s}.weight_scale", .{module}), .f8_e4m3, &.{ q.n, q.k / 16 });
-            try stage.upload(e1 * cb + x * sb, blocks.bytes);
-            const global = try modelopt.scalar(ck, try std.fmt.bufPrint(&tb, "{s}.weight_scale_2", .{module}));
-            if (!std.math.isFinite(global) or global <= 0) return error.UnsupportedQwenQuantization;
-            if (q.parts == 2) up_g[x * 2 + q.m] = global else down_g[x] = global;
+            const w = try core.modelopt.part.read(ck, module, .{ .kind = .nvfp4, .n = q.n, .k = q.k, .act = .skip });
+            try stage.upload(x * cb, w.weight.bytes);
+            try stage.upload(e1 * cb + x * sb, w.blocks.?.bytes);
+            if (!std.math.isFinite(w.scale) or w.scale <= 0) return error.UnsupportedQwenQuantization;
+            if (q.parts == 2) up_g[x * 2 + q.m] = w.scale else down_g[x] = w.scale;
         }
         try pack.fp4Experts(e.stream, stage.ptr, stage.ptr + e1 * cb, if (q.parts == 2) up else down, e1, q.n, q.k, 0, q.k, q.parts, q.m);
         try e.stream.synchronize(); // the next projection's staging overwrites this one's
