@@ -250,6 +250,7 @@ test "disk identity: Nemotron CUDA resolved checkpoint math, expert ranks and gr
     e.k.experts.resident = @splat(48);
     e.k.modelopt = null;
     e.k.ck = null;
+    e.k.triton = null;
     e.segments = 1;
     e.nch = 32;
     const before = try nemotronKey(&x, &e);
@@ -286,7 +287,14 @@ test "disk identity: Nemotron CUDA resolved checkpoint math, expert ranks and gr
     e.k.ck = ck;
     try changed.append(t.allocator, try nemotronKey(&x, &e));
     e.k.ck = null;
+    e.k.triton = @as(cuda.aot.Set, undefined); // a captured set: its NCH variant follows --context
+    const short = try nemotronKey(&x, &e);
+    e.nch = 64;
+    const long = try nemotronKey(&x, &e);
+    try t.expect(short != long);
+    try changed.appendSlice(t.allocator, &.{ short, long });
+    e.k.triton = null;
     e.segments = 4; // staggered segments run only passes that keep no state
-    e.nch = 64; // a longer --context: more chunk programs a row, which reduces only its own
+    e.nch = 64; // a longer --context on our glue: more chunk programs a row, whose merge reads only its own
     try fixture.misses(before, try nemotronKey(&x, &e), changed.items);
 }
