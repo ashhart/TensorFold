@@ -34,7 +34,27 @@ pub const Gdn = struct {
     }
 };
 
+/// The prompt pass's kernel forms, each switch read once at load: the pass and the disk key read these.
+pub const Forms = struct {
+    gdn_fused: bool = true, // TF_FLASHNEXT_GDN_FUSED
+    hc_fuse: bool = true, // TF_FLASHNEXT_HC_FUSE
+    in_pass: bool = true, // TF_FLASHNEXT_KEEP_INPASS
+    readout_rows: usize = 64, // TF_FLASHNEXT_READOUT_ROWS (maxInt: never)
+    fact_rows: usize = 64, // TF_FLASHNEXT_FACT_ROWS (maxInt: never)
+
+    pub fn resolve() Forms {
+        return .{
+            .gdn_fused = @import("cuda_gdn_fused.zig").on(),
+            .hc_fuse = @import("cuda_batch_hc.zig").on(),
+            .in_pass = @import("cuda_lanes_snap.zig").keepInPass(),
+            .readout_rows = @import("cuda_chunk.zig").readoutTileRows(),
+            .fact_rows = @import("cuda_nvfp4_tile.zig").factRows(),
+        };
+    }
+};
+
 pub const Kernels = struct {
+    forms: Forms = .{},
     qmm: cuda.Module,
     experts: cuda.Module,
     rows: cuda.Module,
@@ -77,6 +97,7 @@ pub const Kernels = struct {
         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
         const tile_mode = try cuda.experts_tile.mode(if (std.c.getenv("TF_FLASHNEXT_PROMPT_EXPERT_TILE")) |v| std.mem.span(v) else null);
         var k: Kernels = undefined;
+        k.forms = Forms.resolve();
         k.expert_tile = null;
         k.qmm = try cuda.Module.load(d, cuda.kernels.qmm);
         errdefer k.qmm.unload();
