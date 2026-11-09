@@ -87,16 +87,25 @@ pub fn budget(gib: ?f64, over: bool, spare: u64, a: std.mem.Allocator, why: *[]c
 
 /// budget, with `later` bytes the server takes after load (streams' caches on first use) counted as in use.
 pub fn budgetBeside(gib: ?f64, over: bool, spare: u64, later: u64, a: std.mem.Allocator, why: *[]const u8, rank: []const u8) !api.PromptCachePlan {
-    return budgetUnderBeside(null, gib, over, spare, later, a, why, rank);
+    return budgetUnderBeside(null, gib, over, spare, later, a, why, rank, null);
 }
 
 /// `budget` under a load limit, with the sessions already counted in the footprint.
 pub fn budgetUnder(limit: ?u64, gib: ?f64, over: bool, spare: u64, a: std.mem.Allocator, why: *[]const u8, rank: []const u8) !api.PromptCachePlan {
-    return budgetUnderBeside(limit, gib, over, spare, 0, a, why, rank);
+    return budgetUnderBeside(limit, gib, over, spare, 0, a, why, rank, null);
+}
+
+/// A host that sizes sessions after the cache retains its fixed automatic ceiling.
+pub fn budgetUnderFixed(limit: ?u64, gib: ?f64, over: bool, spare: u64, a: std.mem.Allocator, why: *[]const u8, rank: []const u8) !api.PromptCachePlan {
+    return budgetUnderBeside(limit, gib, over, spare, 0, a, why, rank, DEFAULT_MINIMUM);
+}
+
+pub fn fitUnderDefault(cap: u64, ready: u64, gib: ?f64, over: bool, fixed: ?u64) error{CacheOverCap}!Fit {
+    return math.fitUnder(cap, ready, gib, over, .{ .margin = MARGIN, .ceiling = fixed orelse defaultBudget(cap -| ready -| MARGIN) });
 }
 
 /// Plan under one ceiling, counting stream memory that is allocated after load.
-fn budgetUnderBeside(limit: ?u64, gib: ?f64, over: bool, spare: u64, later: u64, a: std.mem.Allocator, why: *[]const u8, rank: []const u8) !api.PromptCachePlan {
+fn budgetUnderBeside(limit: ?u64, gib: ?f64, over: bool, spare: u64, later: u64, a: std.mem.Allocator, why: *[]const u8, rank: []const u8, fixed: ?u64) !api.PromptCachePlan {
     const total = ram() orelse 0;
     const loaded = footprint() orelse 0;
     if (total == 0 or loaded == 0) {
@@ -107,14 +116,14 @@ fn budgetUnderBeside(limit: ?u64, gib: ?f64, over: bool, spare: u64, later: u64,
     const ready = loaded + later;
     const streams = if (later > 0) try std.fmt.allocPrint(a, " and {d:.1} GiB reserved outside that reading", .{gibs(later)}) else "";
     const cap = limit orelse total / 100 * SHARE_PERCENT;
-    const f = fitUnder(cap, ready, gib, over) catch |e| {
+    const f = fitUnderDefault(cap, ready, gib, over, fixed) catch |e| {
         const left = (fitUnder(cap, ready, null, false) catch unreachable).room; // without a given budget it never refuses
         if (limit != null) {
-            why.* = try std.fmt.allocPrint(a, "--prompt-cache-gib {d} would take this server past its load limit: it holds {d:.1} GiB once loaded{s}, the limit is {d:.1} GiB, and {d} GiB stays free for prompt buffers, so {d:.1} GiB is left for kept prompt states. Pass a smaller one, raise the limit, leave --prompt-cache-gib out for the default {d:.1} GiB, or add --prompt-cache-over-cap to keep {d} GiB anyway.", .{ gib.?, gibs(loaded), streams, gibs(cap), MARGIN >> 30, gibs(left), gibs(defaultBudget(left)), gib.? });
-        } else why.* = try std.fmt.allocPrint(a, "--prompt-cache-gib {d} would take this server past 70% of this Mac's memory: it holds {d:.1} GiB once loaded{s}, 70% of {d:.0} GiB is {d:.1} GiB, and {d} GiB stays free for prompt buffers, so {d:.1} GiB is left for kept prompt states. Pass a smaller one{s}, leave --prompt-cache-gib out for the default {d:.1} GiB, or add --prompt-cache-over-cap to keep {d} GiB anyway.", .{ gib.?, gibs(loaded), streams, gibs(total), gibs(total / 100 * SHARE_PERCENT), MARGIN >> 30, gibs(left), if (later > 0) ", serve a smaller --parallel" else "", gibs(defaultBudget(left)), gib.? });
+            why.* = try std.fmt.allocPrint(a, "--prompt-cache-gib {d} would take this server past its load limit: it holds {d:.1} GiB once loaded{s}, the limit is {d:.1} GiB, and {d} GiB stays free for prompt buffers, so {d:.1} GiB is left for kept prompt states. Pass a smaller one, raise the limit, leave --prompt-cache-gib out for the default {d:.1} GiB, or add --prompt-cache-over-cap to keep {d} GiB anyway.", .{ gib.?, gibs(loaded), streams, gibs(cap), MARGIN >> 30, gibs(left), gibs(@min(left, fixed orelse defaultBudget(left))), gib.? });
+        } else why.* = try std.fmt.allocPrint(a, "--prompt-cache-gib {d} would take this server past 70% of this Mac's memory: it holds {d:.1} GiB once loaded{s}, 70% of {d:.0} GiB is {d:.1} GiB, and {d} GiB stays free for prompt buffers, so {d:.1} GiB is left for kept prompt states. Pass a smaller one{s}, leave --prompt-cache-gib out for the default {d:.1} GiB, or add --prompt-cache-over-cap to keep {d} GiB anyway.", .{ gib.?, gibs(loaded), streams, gibs(total), gibs(total / 100 * SHARE_PERCENT), MARGIN >> 30, gibs(left), if (later > 0) ", serve a smaller --parallel" else "", gibs(@min(left, fixed orelse defaultBudget(left))), gib.? });
         return e;
     };
-    const default_note = if (gib == null) "; default: half the room, at least 16 GiB when available; --prompt-cache-gib overrides it" else "";
+    const default_note = if (gib != null) "" else if (fixed != null) "; default: at most 16 GiB before session sizing; --prompt-cache-gib overrides it" else "; default: half the room, at least 16 GiB when available; --prompt-cache-gib overrides it";
     std.log.info("prompt cache: {d:.1} GiB from {d:.1} GiB free under the {s} ({d:.1} GiB in use once loaded{s}, {d:.0} GiB of RAM, {d} GiB kept for prompt buffers){s}{s}{s}", .{ gibs(f.budget), gibs(f.room), if (limit != null) "load limit" else "70% cap", gibs(loaded), streams, gibs(total), MARGIN >> 30, if (f.budget > f.room) ", past the cap by --prompt-cache-over-cap" else "", rank, default_note });
     return .{
         .source = .physical_footprint,
@@ -277,4 +286,17 @@ test "the high-water mark rises, holds, resets and the next read climbs from the
 test "a host without a footprint reading reports no memory rather than zeros" {
     if (builtin.os.tag == .macos) return error.SkipZigTest; // on macOS the reading always works
     try std.testing.expect(hostMemory(1 << 30, false) == null);
+}
+
+test "Flash Next batch retains main's session count at 128 GiB and a 30 GiB footprint" {
+    const cap = 128 * GiB / 100 * SHARE_PERCENT;
+    const f = try fitUnderDefault(cap, 30 * GiB, null, false, DEFAULT_MINIMUM);
+    const plan = @import("flashnext_batch_budget.zig").reserve(cap, 30 * GiB, MARGIN, f.budget, false, false);
+    try std.testing.expectEqual(@as(u64, 16 * GiB), f.budget);
+    const old_room = cap - 30 * GiB - MARGIN - 16 * GiB;
+    try std.testing.expectEqual(old_room, plan.sessions);
+    const each = 76 * GiB / 10;
+    try std.testing.expectEqual(@as(u64, 6), 1 + plan.sessions / each);
+    try std.testing.expectEqual(1 + old_room / each, 1 + plan.sessions / each);
+    try std.testing.expectEqual(@as(u64, 0), (try fitUnderDefault(cap, 30 * GiB, 0, false, DEFAULT_MINIMUM)).budget);
 }
