@@ -85,7 +85,7 @@ pub fn openConfigured(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, dump:
     const ready = fit.footprint() orelse return error.NoMemoryReading;
     const total = fit.ram() orelse return error.NoMemoryReading;
     const cap = @min(eng.r.load_limit, try ceiling(total, eng.r.device.maxWorkingSet()));
-    var plan = try fit.budgetUnder(cap, cache_gib, over, 0, a, why, "");
+    var plan = try fit.budgetUnderFixed(cap, cache_gib, over, 0, a, why, "");
     const sizing = budgets.reserve(cap, ready, fit.MARGIN, plan.budget_bytes, cache_gib != null, over);
     const overhead = Session.overhead(eng.r.window.capacity) + tf.flashnext_replay.MAXR * tf.flashnext_replay.WIDE * 2;
     const available = sizing.sessions;
