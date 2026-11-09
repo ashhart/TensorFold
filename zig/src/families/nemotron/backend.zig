@@ -77,6 +77,7 @@ pub const Metal = struct {
     masks: ?Masks = null, // structured output's bits (grammar.zig), made at the first structured request
     living: ?@import("adapters.zig").Sites = null, // the saved lessons' gated blocks, until a learner takes them
     trace: bool = false, // TF_SLIDE_TRACE: each reply's lesson scores logged (dev)
+    coop_split: bool = true, // TF_COOP_SPLIT as forward.zig resolves it at load: in, out and eh K slices a threadgroup
     residency: ?mtl.ResidencySet.Follow = null,
     kv_arena: ?mtl.Buffer = null, // TF_NEMOTRON_METAL_KV_PAGES: every page, in the residency set
     kv_tables: ?mtl.Buffer = null, // and every lane's page table
@@ -98,6 +99,7 @@ pub const Metal = struct {
             .prompt = try m.device.buffer(@max(o.capacity, 16) * 4, opts),
             .fence = try Fence.init(m.device),
             .trace = platform.c.getenv("TF_SLIDE_TRACE") != null,
+            .coop_split = fwd.splitOn(),
         };
         if (o.chunk > fused_rows) b.wide = try prefill.Prefill.init(m, @min(o.chunk, o.capacity));
         if (o.drafts and m.weights.mtp != null) b.head = try mtp.Head.init(m.device, m.config, &m.kernels, &m.weights, &b.pool, max_lanes, o.capacity);

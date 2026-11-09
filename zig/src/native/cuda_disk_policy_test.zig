@@ -101,3 +101,176 @@ test "disk identity: MoE Qwen CUDA indexed shard misses with the same probe" {
 test "disk identity: Flash Next CUDA indexed shard misses with the same probe" {
     try indexedMiss("qwen4_exp");
 }
+
+/// A checkpoint folder and a recording device: what the shared key reads besides a family's words.
+const Fixture = struct {
+    tmp: std.testing.TmpDir,
+    arena: std.heap.ArenaAllocator,
+    dir: []const u8,
+    driver: cuda.Driver,
+
+    fn init(x: *Fixture) !void {
+        x.tmp = t.tmpDir(.{});
+        x.arena = .init(t.allocator);
+        x.dir = try x.tmp.dir.realPathFileAlloc(t.io, ".", x.arena.allocator());
+        try x.tmp.dir.writeFile(t.io, .{ .sub_path = "config.json", .data = "{}" });
+        x.driver.api.cuDeviceGetName = Driver.name;
+        x.driver.api.cuDeviceGetAttribute = Driver.attribute;
+        x.driver.api.cuDriverGetVersion = Driver.version;
+    }
+    fn deinit(x: *Fixture) void {
+        x.arena.deinit();
+        x.tmp.cleanup();
+    }
+    fn gpu(x: *Fixture) cuda.Context {
+        return .{ .d = &x.driver, .device = 0, .handle = null };
+    }
+};
+
+const flash = @import("flashnext").native;
+
+fn flashKey(x: *Fixture, c: *flash.Cuda) !u64 {
+    const g = x.gpu();
+    const profile: @import("disk_identity.zig").Profile = .{ .family = flash.model_type, .backend = "cuda" };
+    return disk.keptKey(flash.kept_disk, x.arena.allocator(), t.io, &g, x.dir, null, @as(*anyopaque, c), 42, profile);
+}
+
+test "disk identity: Flash Next CUDA resolved prompt rows, kernel forms and expert grids miss with the same probe" {
+    var x: Fixture = undefined;
+    try x.init();
+    defer x.deinit();
+    var e: @typeInfo(@FieldType(flash.Cuda, "engine")).pointer.child = undefined;
+    e.chunk = 8192;
+    e.busy_chunk = 1536;
+    const k = &e.batch_k;
+    k.forms = .{};
+    k.expert_tile = null;
+    k.native_lane.prompt = null;
+    k.nvfp4.warps = 4;
+    k.nvfp4.resident = @splat(48);
+    k.fp8.resident = @splat(@splat(48));
+    var c: flash.Cuda = undefined;
+    c.engine = &e;
+    c.head = null;
+    c.set = null;
+    c.glue.mixed = 0;
+    c.depth = 6;
+    c.parts.on = true;
+    const before = try flashKey(&x, &c);
+    var changed: std.ArrayList(u64) = .empty;
+    defer changed.deinit(t.allocator);
+    inline for (.{ "chunk", "busy_chunk" }) |field| { // another chunk height, solo or beside a decoding stream
+        @field(e, field) += 512;
+        try changed.append(t.allocator, try flashKey(&x, &c));
+        @field(e, field) -= 512;
+    }
+    inline for (.{ "gdn_fused", "hc_fuse", "in_pass" }) |field| {
+        @field(k.forms, field) = false;
+        try changed.append(t.allocator, try flashKey(&x, &c));
+        @field(k.forms, field) = true;
+    }
+    inline for (.{ "readout_rows", "fact_rows" }) |field| {
+        @field(k.forms, field) = std.math.maxInt(usize); // 0 set: never the tiles
+        try changed.append(t.allocator, try flashKey(&x, &c));
+        @field(k.forms, field) = 64;
+    }
+    k.expert_tile = .{ .mod = undefined, .fns = undefined, .resident = .{ 64, 64 }, .selection = .up };
+    const up = try flashKey(&x, &c);
+    k.expert_tile.?.selection = .both; // the same grids: the selection alone moves the key
+    const both = try flashKey(&x, &c);
+    try t.expect(up != both);
+    try changed.appendSlice(t.allocator, &.{ up, both });
+    k.expert_tile = null;
+    k.native_lane.prompt = @as([2][2]cuda.Function, undefined); // TF_FLASHNEXT_PROMPT_BF16's tiles loaded
+    try changed.append(t.allocator, try flashKey(&x, &c));
+    k.native_lane.prompt = null;
+    k.nvfp4.warps = 1;
+    try changed.append(t.allocator, try flashKey(&x, &c));
+    k.nvfp4.warps = 4;
+    k.nvfp4.resident[0] = 47; // another SM count under the same device name
+    try changed.append(t.allocator, try flashKey(&x, &c));
+    k.nvfp4.resident[0] = 48;
+    c.glue.mixed = 3; // without a captured set our glue runs every entry anyway
+    try t.expectEqual(before, try flashKey(&x, &c));
+    c.set = @as(cuda.aot.Set, undefined);
+    try changed.append(t.allocator, try flashKey(&x, &c));
+    c.glue.mixed = 0;
+    try changed.append(t.allocator, try flashKey(&x, &c));
+    c.set = null;
+    c.depth = 3; // a draft chain's length and lane buffers' reuse touch no prompt pass
+    c.parts.on = false;
+    try fixture.misses(before, try flashKey(&x, &c), changed.items);
+}
+
+test "disk identity: Flash Next CUDA prompt forms take each setting's value at load" {
+    const env = @import("sys").env;
+    const Engine = @typeInfo(@FieldType(flash.Cuda, "engine")).pointer.child;
+    const Forms = @FieldType(@FieldType(Engine, "batch_k"), "forms");
+    const names = [_][:0]const u8{ "TF_FLASHNEXT_GDN_FUSED", "TF_FLASHNEXT_HC_FUSE", "TF_FLASHNEXT_KEEP_INPASS", "TF_FLASHNEXT_READOUT_ROWS", "TF_FLASHNEXT_FACT_ROWS" };
+    for (names) |n| _ = env.unsetenv(n);
+    defer for (names) |n| {
+        _ = env.unsetenv(n);
+    };
+    try t.expectEqualDeep(Forms{}, Forms.resolve());
+    for (names) |n| _ = env.setenv(n, "0", 1);
+    const never = std.math.maxInt(usize);
+    try t.expectEqualDeep(Forms{ .gdn_fused = false, .hc_fuse = false, .in_pass = false, .readout_rows = never, .fact_rows = never }, Forms.resolve());
+    _ = env.setenv("TF_FLASHNEXT_READOUT_ROWS", "128", 1);
+    _ = env.setenv("TF_FLASHNEXT_FACT_ROWS", "32", 1);
+    try t.expectEqual(@as(usize, 128), Forms.resolve().readout_rows);
+    try t.expectEqual(@as(usize, 32), Forms.resolve().fact_rows);
+}
+
+const nemotron = @import("nemotron");
+
+fn nemotronKey(x: *Fixture, e: anytype) !u64 {
+    const g = x.gpu();
+    const profile: @import("disk_identity.zig").Profile = .{ .family = nemotron.native.model_type, .backend = "cuda" };
+    return disk.withPolicy(try disk.identityOf(x.arena.allocator(), t.io, &g, x.dir, null, &.{0}, 42, profile), e);
+}
+
+test "disk identity: Nemotron CUDA resolved checkpoint math, expert ranks and grids miss with the same probe" {
+    var x: Fixture = undefined;
+    try x.init();
+    defer x.deinit();
+    const Target = nemotron.native.kept_states.Target;
+    var e: @typeInfo(@FieldType(Target, "e")).pointer.child = undefined;
+    e.c.ck = false;
+    e.c.world = 1;
+    e.k.experts.resident = @splat(48);
+    e.k.modelopt = null;
+    e.k.ck = null;
+    e.segments = 1;
+    e.nch = 32;
+    const before = try nemotronKey(&x, &e);
+    var changed: std.ArrayList(u64) = .empty;
+    defer changed.deinit(t.allocator);
+    e.c.ck = true; // --precision checkpoint
+    try changed.append(t.allocator, try nemotronKey(&x, &e));
+    e.c.ck = false;
+    e.c.world = 2; // TF_NEMOTRON_WORLD=2: the experts' sums over two ranks
+    try changed.append(t.allocator, try nemotronKey(&x, &e));
+    e.c.world = 1;
+    e.k.experts.resident[2] = 47;
+    try changed.append(t.allocator, try nemotronKey(&x, &e));
+    e.k.experts.resident[2] = 48;
+    var m: @typeInfo(@FieldType(@TypeOf(e.k), "modelopt")).optional.child = undefined;
+    m.experts.warps = 4;
+    m.experts.resident = @splat(48);
+    e.k.modelopt = m;
+    const four = try nemotronKey(&x, &e);
+    e.k.modelopt.?.experts.warps = 1; // TF_NVFP4_DECODE_WARPS=1 on the same grids
+    const one = try nemotronKey(&x, &e);
+    try t.expect(four != one);
+    try changed.appendSlice(t.allocator, &.{ four, one });
+    e.k.modelopt = null;
+    var ck: @typeInfo(@FieldType(@TypeOf(e.k), "ck")).optional.child = undefined;
+    ck.resident = @splat(@splat(48));
+    ck.prompt_resident = @splat(48);
+    e.k.ck = ck;
+    try changed.append(t.allocator, try nemotronKey(&x, &e));
+    e.k.ck = null;
+    e.segments = 4; // staggered segments run only passes that keep no state
+    e.nch = 64; // a longer --context: more chunk programs a row, which reduces only its own
+    try fixture.misses(before, try nemotronKey(&x, &e), changed.items);
+}

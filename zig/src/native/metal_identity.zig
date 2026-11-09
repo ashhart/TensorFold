@@ -21,7 +21,13 @@ pub fn learned(a: Allocator, io: std.Io, dir: []const u8, b: *nemotron.backend.M
     h.update(api.prompt_imprint.osBuild(&os));
     h.update(std.mem.span(b.m.device.name()));
     @import("disk_identity.zig").profile(&h, .{ .family = "nemotron_h", .backend = "metal" });
-    return .{ .id = h.final(), .rate = 4143.0 / (@as(f64, @floatFromInt(@max(ns, 1))) / 1e9) };
+    return .{ .id = withPolicy(h.final(), b), .rate = 4143.0 / (@as(f64, @floatFromInt(@max(ns, 1))) / 1e9) };
+}
+
+/// Extend the key with the coop K-slice split the load resolved: on or off, and the scratch rows a split must fit.
+pub fn withPolicy(legacy: u64, b: anytype) u64 {
+    const rows: u64 = if (b.coop_split) b.scratch.rows else 0; // with no split, the rows decide nothing
+    return @import("persistence_policy.zig").extend(legacy, "nemotron-metal-policy-v1", &.{ @intFromBool(b.coop_split), rows });
 }
 
 /// The checkpoint's current stamps, including validated indexed subfolders and auxiliary top-level files.
