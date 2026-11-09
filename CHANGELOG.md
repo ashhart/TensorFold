@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Tests: compile the runtime Metal libraries selected by each loader, check every registered launch mapping on the host, and keep limits running across unsupported probes, including LFM2 masked prompts on pre-M5 devices (#2601).
+
 - HIP: a host-to-device upload copies in 64 MiB windows, one synchronous copy each, so a multi-GiB tensor no longer has its whole source pinned by one copy; uploads of 64 MiB or less are one call as before (#2584). Thanks to @ElderOrb.
 
 - Benchmark clients: `bench_concurrent` and `bench_openai` time content, reasoning and tool-call output separately (header arrival, first payload line, first output of each kind, last output) and classify how each reply ended; token ITL/TPOT is null where a chunk carries several tokens instead of padded with zeros, with a labelled chunk-level estimate beside it; the prompt/TTFT rate is `prompt_ttft_tps`, with `prefill_tps` still written and marked deprecated because it is not the engine's prefill time (#2625).
