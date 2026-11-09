@@ -118,6 +118,9 @@ test {
     _ = @import("tool_single_stream_test.zig");
     _ = @import("logprobs_test.zig");
     _ = @import("think_split_test.zig");
+    _ = @import("stream_scan_text.zig");
+    _ = @import("stream_scan_bench.zig");
+    _ = @import("stream_scan_stages.zig");
     _ = @import("think_tool_tail_test.zig");
     _ = @import("deepseek_reply_test.zig");
     _ = @import("thinking_reserve_test.zig");
