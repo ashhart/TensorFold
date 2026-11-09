@@ -105,13 +105,14 @@ fn present(r: *Rows, i: usize) !void {
 pub fn recall(s: *pc.Store, prompt: []const u32, born: u32, starts: []const u32, spans: []const modes.Span, have: ?*pc.Entry) ?*pc.Entry {
     var before: ?u32 = null;
     return attempt(s, prompt, born, starts, spans, have, &before) catch
-        (attempt(s, prompt, born, starts, spans, have, &before) catch null);
+        (attempt(s, prompt, born, starts, spans, have, &before) catch have); // two failed reads: still the RAM state
 }
 
-fn failed(before: *?u32, at: u32, err: anyerror) anyerror {
+fn failed(before: *?u32, at: u32, err: anyerror, have: ?*pc.Entry) anyerror {
     const retry = before.* == null;
     before.* = at;
-    pc.note("disk restore of {d} tokens failed ({s}); {s}", .{ at, @errorName(err), if (retry) "trying one shorter kept state" else "prefilling from the start" });
+    const then = if (retry) "trying one shorter kept state" else if (have != null) "resuming the shorter state kept in RAM" else "prefilling from the start";
+    pc.note("disk restore of {d} tokens failed ({s}); {s}", .{ at, @errorName(err), then });
     return err;
 }
 
@@ -126,7 +127,7 @@ fn attempt(s: *pc.Store, prompt: []const u32, born: u32, starts: []const u32, sp
     const name = candidate.name;
     const bytes = r.blankBytes(candidate.at);
     if (bytes > s.budget or s.most == 0) return have;
-    if (!ready(s, bytes)) present(r, chosen) catch |err| return failed(before, candidate.at, err); // nothing goes to make room for a state whose file is gone
+    if (!ready(s, bytes)) present(r, chosen) catch |err| return failed(before, candidate.at, err, have); // nothing goes to make room for a state whose file is gone
     if (r.spill != .off) r.touch(chosen); // the newest: the spills that make room for it push older states off first
     while (!ready(s, bytes)) {
         if (s.family.vtable.trim) |trim| {
@@ -151,7 +152,7 @@ fn attempt(s: *pc.Store, prompt: []const u32, born: u32, starts: []const u32, sp
     e.tokens = s.gpa.dupe(u32, st.tokens) catch return have;
     e.decode_spans = s.gpa.dupe(modes.Span, st.spans) catch return have;
     e.last = s.gpa.dupe(u32, prompt) catch return have;
-    e.saved = read(r, i) catch |err| return failed(before, candidate.at, err);
+    e.saved = read(r, i) catch |err| return failed(before, candidate.at, err, have);
     if (s.family.vtable.charged) |f| e.bytes = f(s.family.ptr, e.saved);
     @import("prompt_cache_index.zig").add(s, e) catch {
         s.family.vtable.drop(s.family.ptr, e.saved);
