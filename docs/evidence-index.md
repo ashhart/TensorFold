@@ -33,6 +33,21 @@ The index walks the qualification-evidence sources on the checkout:
   `tensorfold-native capabilities --json`, not a file in the checkout, so the index records the source as unavailable
   (zero records and a note) when no file is supplied. Pass a saved file to include it.
 
+The capabilities reader accepts native schema 1, whose `families` object maps family names to format arrays.
+Each advertised format becomes a `format:NAME` capability for that family with no inferred backend. Root
+`backends` become separate `backend` records with no family, and `chip` becomes a `chip:NAME` record. These
+facts always have `unknown` measurement grade and no measured commit, result or staleness. A root backend
+does not prove that every listed family runs on it. Native admission remains authoritative.
+
+The earlier family-list input remains supported, either as a root array or as a `families` array containing
+objects with `family` or `name`, optional `backend`, and `capabilities` arrays of named objects. A valid empty
+input records an available source with zero facts. Missing, unreadable, malformed or unsupported supplied
+input exits nonzero with a bounded diagnostic and does not write an output index. Input is limited to 4 MiB,
+256 families, 64 formats or capabilities per family, 64 backends and 4096 facts. Names are 1 to 128 ASCII letters,
+digits, dots, underscores, pluses or hyphens, starting with a letter or digit. Duplicate JSON keys are rejected.
+Source paths inside the checkout are relative; external inputs use a fixed label. Unrelated native metadata,
+including environment and library installation information, is not copied into the index.
+
 ## The grades
 
 Each piece of evidence carries one of four grades, or `unknown` when the source does not state which kind of

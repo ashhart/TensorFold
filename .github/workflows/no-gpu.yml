@@ -35,6 +35,8 @@ jobs:
           python-version: "3.11"
       - name: Model-free benchmark client tests
         run: python -m unittest discover -s tools/tests -p "test_bench*.py" -v
+      - name: Evidence index tests
+        run: python -m unittest discover -s tools/tests -p "test_evidence*.py" -v
   # pytest from the root, as an outside evaluator runs it, on its own runner: its five minutes no longer add to zig's.
   pytest:
     runs-on: ubuntu-latest
