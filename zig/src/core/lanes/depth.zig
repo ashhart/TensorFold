@@ -591,3 +591,7 @@ test "a granted hold stays only while its stream's expected drafts pay for the v
     try rule.payHolds(&whos, false, &out);
     try std.testing.expectEqualSlices(i64, &.{ 0, 0, 2, 0 }, &out); // a probe after a grant of none keeps its hold
 }
+
+test {
+    _ = @import("shared_step_test.zig");
+}
