@@ -137,14 +137,14 @@ test "queued cache: a shorter queued fork keeps its redundant resume prefix besi
 }
 
 test "queued cache: progress a full one-state store keeps a new conversation beside an idle one" {
-    try coldBefore(false);
+    try coldBefore(false, true);
 }
 
 test "queued cache: a cold arrival cannot reserve away the following queued conversation" {
-    try coldBefore(true);
+    try coldBefore(true, true);
 }
 
-fn coldBefore(protected: bool) !void {
+fn coldBefore(protected: bool, history: bool) !void {
     var cfg = try lanes.Config.init(a, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
     defer cfg.deinit(a);
     var target: lanes.fake.Fake = .{ .gpa = a, .prefill_chunks = 3 };
@@ -162,7 +162,7 @@ fn coldBefore(protected: bool) !void {
     var host = api.LaneHost.init(a, std.testing.io, &core, .{ .lanes = 1 });
     host.cache = &store;
     const engine = host.engine();
-    const request: api.Request = .{ .prompt = words[0..20], .max_tokens = 4, .history_len = 16 };
+    const request: api.Request = .{ .prompt = words[0..20], .max_tokens = 4, .history_len = if (history) 16 else 0, .shared_prefixes = if (history) &.{} else &.{16} };
     var reply: Reply = .{};
     var follow: Reply = .{};
     const follow_request: api.Request = .{ .prompt = idle[0..20], .max_tokens = 4, .history_len = 16 };
@@ -199,4 +199,8 @@ test "queued cache: mark-only families advance with warm, lookahead and planned 
 
 test "queued cache: progress a follow-up advances from twelve to sixteen in one state" {
     try followups(1, false, false);
+}
+
+test "queued cache: progress a shared-cut request without history replaces an idle state" {
+    try coldBefore(false, false);
 }

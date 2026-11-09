@@ -332,7 +332,10 @@ pub const Store = struct {
             const at = if (s.rules.planned) s.startAt(starts, w) else w;
             for (marks_) |m| if (m == at or (m < at and !s.rules.planned and prompt.len < s.rules.min_prompt)) s.noteShared(prompt[0 .. m + s.rules.lookahead]);
         }
-        const primary = @import("prompt_cache_reserve.zig").endpointFor(s, prompt, from, history_len, starts, spans);
+        var primary = @import("prompt_cache_reserve.zig").endpointFor(s, prompt, from, history_len, starts, spans);
+        if (history_len == 0 and primary == 0) for (marks_) |at| {
+            if (at != s.active_rewind_at) primary = @max(primary, at);
+        };
         s.reserve(prompt, born, e, marks_, spans, primary);
         const fitted = try @import("prompt_cache_reserve.zig").fitting(s, a, prompt, marks_, spans, e, born, primary);
         if (e) |entry| entry.borrowers += 1;
