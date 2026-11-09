@@ -65,7 +65,7 @@ fn worstUlps(want: []align(1) const u16, got: []const u16) u32 {
     return worst;
 }
 
-const Run = struct { res: Ref, xn: Ref, u: Ref, rms: Ref, packed_rows: Ref };
+const Run = struct { res: Ref, xn: Ref, rms: Ref, packed_rows: Ref };
 
 /// The last write on the GPU, as forward.zig encodes it; `write` its feature write (zeros for the control).
 fn bridge(g: *Gpu, header: core.safetensors.Header, data: []const u8, write: Ref) !Run {
@@ -90,8 +90,8 @@ fn bridge(g: *Gpu, header: core.safetensors.Header, data: []const u8, write: Ref
     g.kernels.message(e, packed_rows, try g.upload(try tensor(header, data, "gate_bias")), msg, T, R, T);
     e.barrier();
     const delta = try g.linear(e, msg, write, T, H, R);
-    const run: Run = .{ .res = try g.buffer(T * H * 2), .xn = try g.buffer(T * H * 2), .u = try g.buffer(T * H * 2), .rms = rms, .packed_rows = packed_rows };
-    g.kernels.write(e, raw, delta, rms, try g.upload(try tensor(header, data, "norm1")), run.res, run.xn, run.u, T, H, T, 1e-6);
+    const run: Run = .{ .res = try g.buffer(T * H * 2), .xn = try g.buffer(T * H * 2), .rms = rms, .packed_rows = packed_rows };
+    g.kernels.write(e, raw, delta, rms, try g.upload(try tensor(header, data, "norm1")), run.res, run.xn, T, H, T, 1e-6);
     e.end();
     cb.commit();
     cb.wait();
@@ -136,7 +136,7 @@ test "DSpine Metal contract: the bridge kernels write as dspine_mlx, the table c
     try t.expect(try ulps_of(header, data, "stash_packed", run.packed_rows, T * 3 * R) <= 2);
     for (std.mem.bytesAsSlice(f32, try tensor(header, data, "stash_rms")), run.rms.buf.slice(f32, T)) |a, b| try t.expectApproxEqRel(a, b, 1e-5);
 
-    // the table over the fixture's candidates, its base the head of bf16(raw * norm) as forward.zig scores it
+    // the table over the fixture's candidates; the head affine-4 as the target's, its base rows dequantized
     var cand: [(T - 1) * K]u32 = undefined;
     for (&cand, std.mem.bytesAsSlice(u32, try tensor(header, data, "candidates"))) |*c, v| c.* = v;
     var rows: [T - 1]core.bf16_topk.Row = @splat(.{});
@@ -144,6 +144,12 @@ test "DSpine Metal contract: the bridge kernels write as dspine_mlx, the table c
         row.count = K;
         for (0..K) |j| row.entries[j].token = cand[i * K + j];
     }
+    const head_bf16 = try t.allocator.alloc(u16, V * H);
+    defer t.allocator.free(head_bf16);
+    @memcpy(head_bf16, std.mem.bytesAsSlice(u16, try tensor(header, data, "head")));
+    var q4 = try core.affine4.prepare(t.allocator, head_bf16, V, H);
+    defer q4.deinit();
+    const head_q4: @import("kernels.zig").Head = .{ .words = try g.upload(std.mem.sliceAsBytes(q4.words)), .scales = try g.upload(std.mem.sliceAsBytes(q4.scales)), .biases = try g.upload(std.mem.sliceAsBytes(q4.biases)) };
     const top = try g.upload(std.mem.sliceAsBytes(&rows));
     const row_words: u32 = @sizeOf(core.bf16_topk.Row) / 4;
     const cb = g.queue.commandBuffer();
@@ -157,33 +163,40 @@ test "DSpine Metal contract: the bridge kernels write as dspine_mlx, the table c
     @memcpy(pv[0 .. R * C * 2], try tensor(header, data, "pred"));
     @memcpy(pv[R * C * 2 ..], try tensor(header, data, "prev"));
     const tsv = try g.linear(e, senders, try g.upload(&pv), (T - 1) * K, 2 * R, C);
-    const base = try g.linear(e, .{ .buf = run.u.buf, .off = H * 2 }, try g.upload(try tensor(header, data, "head")), T - 1, V, H);
+    const raw_ref = try g.upload(try tensor(header, data, "x1"));
+    const norm_ref = try g.upload(try tensor(header, data, "norm1"));
+    const base = try g.buffer((T - 1) * K * 4);
+    g.kernels.base(e, raw_ref, norm_ref, head_q4, top, base, .{ .rows = T - 1, .k = K, .hidden = H, .row_words = row_words, .raw_first = 1 });
+    e.barrier();
     const table = try g.buffer((T - 1) * K * K * 4);
-    g.kernels.table(e, run.packed_rows, tsv, try g.upload(try tensor(header, data, "gate_bias")), try g.upload(try tensor(header, data, "tg")), top, base, run.rms, table, .{ .rows = T - 1, .k = K, .rank = R, .row_words = row_words, .cols = V, .rms_first = 1 });
+    g.kernels.table(e, run.packed_rows, tsv, try g.upload(try tensor(header, data, "gate_bias")), try g.upload(try tensor(header, data, "tg")), top, base, run.rms, table, .{ .rows = T - 1, .k = K, .rank = R, .row_words = row_words, .rms_first = 1 });
     e.end();
     cb.commit();
     cb.wait();
     try t.expect(cb.failure() == null);
     for (sids.buf.slice(u32, (T - 1) * K), 0..) |sid, p| try t.expectEqual(if (p < K) anchor else cand[p - K], sid);
-    var drafts: [T - 1]u32 = undefined;
-    core.dspine.chain(&cand, table.buf.slice(f32, (T - 1) * K * K), K, &drafts);
-    for (std.mem.bytesAsSlice(u32, try tensor(header, data, "drafts")), drafts) |a, d| try t.expectEqual(a, d);
 
-    // the host table on the same stash: the kernel's scores within the bf16 base's rounding
+    // the host table on the same stash and dequantized head rows: the kernel's scores and its chain
     var raw: [T * H]u16 = undefined;
     var packed_rows: [T * 3 * R]u16 = undefined;
     var rms: [T]f32 = undefined;
     @memcpy(&raw, std.mem.bytesAsSlice(u16, try tensor(header, data, "x1")));
     @memcpy(&packed_rows, bf16s(run.packed_rows, T * 3 * R));
     @memcpy(&rms, run.rms.buf.slice(f32, T));
-    const head = std.mem.bytesAsSlice(u16, try tensor(header, data, "head"));
     var head_rows: [(T - 1) * K * H]u16 = undefined;
     for (cand, 0..) |id, j| for (0..H) |x| {
-        head_rows[j * H + x] = head[id * H + x];
+        const g64 = id * (H / 64) + x / 64;
+        const code = (q4.words[id * (H / 8) + x / 8] >> @intCast(4 * (x % 8))) & 15;
+        head_rows[j * H + x] = host.round(host.float(q4.scales[g64]) * @as(f32, @floatFromInt(code)) + host.float(q4.biases[g64]));
     };
     var want: [(T - 1) * K * K]f32 = undefined;
     try host.table(.{ .dims = .{ .hidden = H, .code = C, .rank = R, .vocab = V, .eps = 1e-6 }, .topk = K, .stash = .{ .raw = &raw, .rms = &rms, .packed_rows = &packed_rows }, .anchor = anchor, .candidates = &cand, .head_rows = &head_rows, .norm_w = std.mem.bytesAsSlice(u16, try tensor(header, data, "norm1")), .bias = std.mem.bytesAsSlice(u16, try tensor(header, data, "gate_bias")), .tg = std.mem.bytesAsSlice(u16, try tensor(header, data, "tg")), .tsv = std.mem.bytesAsSlice(u16, try tensor(header, data, "tsv")) }, &want);
-    for (want, table.buf.slice(f32, want.len)) |a, b| try t.expect(@abs(a - b) <= 0.02 * @abs(a) + 0.05);
+    for (want, table.buf.slice(f32, want.len)) |a, b| try t.expect(@abs(a - b) <= 1e-3 * @abs(a) + 1e-2);
+    var host_drafts: [T - 1]u32 = undefined;
+    var drafts: [T - 1]u32 = undefined;
+    core.dspine.chain(&cand, &want, K, &host_drafts);
+    core.dspine.chain(&cand, table.buf.slice(f32, (T - 1) * K * K), K, &drafts);
+    try t.expectEqualSlices(u32, &host_drafts, &drafts);
 
     // the planted control: the message dropped (a zero write), the written rows leave dspine_mlx's
     const control = try bridge(&g, header, data, try g.buffer(H * R * 2));
