@@ -45,6 +45,10 @@ Without this field, lessons retain their existing behaviour. Corrections require
 positive default serving temperature; other learner methods and a greedy-only default refuse before training.
 
 Before learning, the server records the original greedy tokens for each training, held-out and probe wording.
+It also asks with every pocket neuron disabled. A different original token sequence refuses before training, naming
+the existing pocket facts to remove first. A kept fact containing the old value is conservatively refused too, even
+when several pocket effects currently cancel. Corrections bypass chat replacement, so an earlier fact cannot be
+silenced before this check. This mode corrects checkpoint beliefs; it does not stack corrections on learned facts.
 It asks separately for a short old value and requires that value to appear in the original answer. Only the training
 questions become opposing examples. The locate pass ranks layers by the old answer's raw logit drop. New subject
 neurons fit the requested answers and subtract half the old-answer cross-entropy gradient from their output solve.
