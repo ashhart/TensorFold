@@ -70,7 +70,7 @@ test "Flash Next strict env: every count keeps its whole numbers and refuses jun
     };
 }
 
-test "Flash Next strict env: the page test keeps 0 in the table, which its reader reads as off" {
+test "Flash Next strict env: the page test keeps 0 in the table while its reader refuses it, blank reads unset" {
     const name = "TF_FLASHNEXT_KV_PAGE_TEST";
     try check(name, "0", true);
     try check(name, "48", true);
