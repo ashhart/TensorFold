@@ -85,7 +85,7 @@ pub fn registry(url: []const u8) bool {
         const third = parts.next() orelse return false;
         return packageName(name) and versionName(second) and std.ascii.eqlIgnoreCase(third, "json") and parts.next() == null;
     }
-    if (std.mem.startsWith(u8, url, "https://registry.npmjs.org/")) {
+    if (std.ascii.startsWithIgnoreCase(url, "https://registry.npmjs.org/")) { // Registry.npmjs.org is the same host
         var rest = url["https://registry.npmjs.org/".len..];
         if (std.mem.startsWith(u8, rest, "@")) {
             const slash = std.mem.indexOfScalar(u8, rest, '/') orelse std.ascii.findIgnoreCase(rest, "%2f") orelse return false;
@@ -142,4 +142,9 @@ test "pypi registry json allows a host whose letters differ" {
 test "pypi registry json allows JSON when json's letters differ" {
     try std.testing.expect(registry("https://pypi.org/pypi/httpx/JSON"));
     try std.testing.expect(registry("https://pypi.org/pypi/httpx/0.28.1/JSON"));
+}
+
+test "npm registry allows a host whose letters differ" {
+    try std.testing.expect(registry("https://Registry.npmjs.org/react"));
+    try std.testing.expect(registry("https://Registry.npmjs.org/react/latest"));
 }
