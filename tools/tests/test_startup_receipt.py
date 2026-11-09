@@ -1,7 +1,10 @@
 """Startup receipts reject incomplete loads and clean up only their owned child."""
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import tempfile
@@ -69,6 +72,51 @@ class Parsing(unittest.TestCase):
             with self.assertRaises(fmt.InvalidReceipt):
                 fmt.parse_line(fmt.PREFIX + raw)
 
+    def test_model_marker_cannot_follow_server_ready(self):
+        bad = record("first_completion")
+        bad["startup"]["phases"][fmt.PHASES.index("model_ready")]["end_ns"] = 110
+        with self.assertRaisesRegex(fmt.InvalidReceipt, "^Invalid readiness ordering$"):
+            fmt.parse_line(line(bad))
+
+    def test_process_origin_must_be_zero(self):
+        bad = record()
+        bad["startup"]["phases"][0]["start_ns"] = 1
+        with self.assertRaisesRegex(fmt.InvalidReceipt, "^Invalid readiness ordering$"):
+            fmt.parse_line(line(bad))
+
+    def test_ready_cannot_contain_completion_data(self):
+        for field in ("hash", "completion", "timestamp"):
+            bad = record()
+            if field == "hash":
+                bad["token_sha256"] = "a" * 64
+            elif field == "completion":
+                bad["startup"]["phases"][-1]["start_ns"] = 50
+            else:
+                bad["startup"]["at_ns"] = 101
+            with self.subTest(field=field), self.assertRaisesRegex(fmt.InvalidReceipt, "^Ready contains a completion$"):
+                fmt.parse_line(line(bad))
+
+    def test_completion_cannot_start_before_ready(self):
+        bad = record("first_completion")
+        bad["startup"]["phases"][-1].update(start_ns=99, total_ns=101)
+        with self.assertRaisesRegex(fmt.InvalidReceipt, "^Invalid completion ordering$"):
+            fmt.parse_line(line(bad))
+
+    def test_completion_requires_its_token_hash(self):
+        for digest in (None, "short", "A" * 64):
+            bad = record("first_completion")
+            bad["token_sha256"] = digest
+            with self.subTest(digest=digest), self.assertRaisesRegex(fmt.InvalidReceipt, "^Missing token hash$"):
+                fmt.parse_line(line(bad))
+
+    def test_lifetime_counters_cannot_move_backwards(self):
+        for key, value in (("lifetime_peak_physical_footprint_bytes", 19), ("disk_io_bytes_read", 29)):
+            ready, done = record(), record("first_completion")
+            done["resources"][key] = value
+            ready, done = fmt.parse_line(line(ready)), fmt.parse_line(line(done))
+            with self.subTest(key=key), self.assertRaisesRegex(fmt.InvalidReceipt, "^Lifetime resource counter moved backwards$"):
+                fmt.paired(ready, done, "a" * 64)
+
     def test_mismatched_hash_and_mutated_startup(self):
         ready, done = record(), record("first_completion")
         with self.assertRaises(fmt.InvalidReceipt):
@@ -91,8 +139,26 @@ class ChildFailures(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
+        self.children = []
+        child_type = run.Child
+
+        def own_child(*args, **kwargs):
+            child = child_type(*args, **kwargs)
+            self.children.append(child)
+            return child
+
+        self.child_patch = mock.patch.object(run, "Child", side_effect=own_child)
+        self.child_patch.start()
 
     def tearDown(self):
+        self.child_patch.stop()
+        for child in self.children:
+            process = child.process
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=5)
+            if not child.log.closed:
+                child.stop()
         self.temp.cleanup()
 
     def attempt(self, source, timeout=1):
@@ -101,6 +167,7 @@ class ChildFailures(unittest.TestCase):
     def test_load_failure_has_no_ready_and_child_is_reaped(self):
         result = self.attempt("import sys; print('load failed', file=sys.stderr); sys.exit(1)")
         self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["error"], "Server exited before ready")
         self.assertIsNone(result["ready"])
         self.assertIsNone(result["first_completion"])
         self.assertTrue(result["child_reaped"])
@@ -154,7 +221,40 @@ class ChildFailures(unittest.TestCase):
         with mock.patch.object(run, "request", side_effect=(b"{}", body)):
             result = self.attempt(source)
         self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["error"], "Unexpected or repeated startup event")
         self.assertTrue(result["child_reaped"])
+
+    def test_unexpected_event_has_its_own_refusal(self):
+        source = "import time; print(" + repr(line(record("first_completion")).decode().strip()) + ", flush=True); time.sleep(60)"
+        result = self.attempt(source)
+        self.assertEqual(result["error"], "Unexpected or repeated startup event")
+        self.assertTrue(result["child_reaped"])
+
+    def test_oversized_line_has_its_own_refusal(self):
+        result = self.attempt("import time; print('x' * 16385, flush=True); time.sleep(60)")
+        self.assertEqual(result["error"], "Server log line exceeded the receipt bound")
+        self.assertTrue(result["child_reaped"])
+
+    @unittest.skipUnless(os.name == "posix", "SIGTERM/SIGKILL lifecycle requires POSIX")
+    def test_sigterm_ignoring_child_is_killed_and_reaped(self):
+        source = "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); print(" + repr(
+            line(record()).decode().strip()) + ", flush=True); time.sleep(60)"
+        child = run.Child([sys.executable, "-c", source], dict(os.environ), self.root / "kill.log")
+        child.wait_record("ready", 3)
+        process = child.process
+        wait = process.wait
+
+        def bounded_wait(timeout=None):
+            return wait(timeout=min(timeout or 5, 0.2))
+
+        with mock.patch.object(process, "wait", side_effect=bounded_wait), mock.patch.object(process, "kill", wraps=process.kill) as kill:
+            try:
+                child.stop()
+            except subprocess.TimeoutExpired:
+                pass
+        self.assertTrue(kill.called, "SIGTERM was ignored; the owned child needs the kill fallback")
+        self.assertEqual(process.returncode, -signal.SIGKILL)
+        self.assertTrue(child.log.closed)
 
     def test_cold_case_never_launches_or_purges(self):
         out = self.root / "cold"
@@ -172,6 +272,66 @@ class ChildFailures(unittest.TestCase):
         first, second = run.warm_checkpoint(model), run.warm_checkpoint(model)
         self.assertEqual(first["sha256"], second["sha256"])
         self.assertEqual((model / "model.safetensors").read_bytes(), before)
+
+
+class MainFailures(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.binary = self.root / "native"
+        self.binary.write_bytes(b"host-only binary identity fixture")
+        self.model = self.root / "model"
+        self.model.mkdir()
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def main_case(self, name, hashes, resources=True, identities=None):
+        output = self.root / name
+        results = []
+        for digest in hashes:
+            ready, done = record(), record("first_completion")
+            done["token_sha256"] = digest * 64
+            if not resources:
+                done["resources"] = None
+            results.append(dict(fmt.paired(ready, done, digest * 64), status="ok", child_reaped=True))
+        warms = [{"sha256": identity} for identity in (identities or ["same"] * len(hashes))]
+        with mock.patch.object(run.sys, "platform", "darwin"), mock.patch.object(run, "warm_checkpoint", side_effect=warms), mock.patch.object(
+            run, "attempt", side_effect=results
+        ), mock.patch.object(run.subprocess, "Popen", side_effect=AssertionError("main fixture must not launch")):
+            status = run.main(["--binary", str(self.binary), "--model", str(self.model), "--output", str(output), "--runs", str(len(hashes))])
+        return status, json.loads((output / "summary.json").read_text())
+
+    def test_three_run_reply_hash_agreement(self):
+        status, summary = self.main_case("matching", ["a", "a", "a"])
+        self.assertEqual((status, summary["status"], len(summary["runs"])), (0, "ok", 3))
+        status, summary = self.main_case("different", ["a", "b", "a"])
+        self.assertEqual((status, summary["status"], len(summary["runs"])), (1, "failed", 3))
+        status, summary = self.main_case("different-checkpoints", ["a", "a", "a"], identities=["same", "other", "same"])
+        self.assertEqual((status, summary["status"]), (1, "failed"))
+
+    def test_missing_kernel_counters_prevent_complete_device_receipt(self):
+        status, summary = self.main_case("missing-counters", ["a", "a", "a"], resources=False)
+        self.assertEqual((status, summary["status"]), (1, "failed"))
+        self.assertEqual(summary["error"], "Kernel memory and physical-read counters were unavailable")
+        self.assertEqual(len(summary["runs"]), 1)
+
+    def test_existing_output_refused_without_touching_its_bytes(self):
+        output = self.root / "existing"
+        output.mkdir()
+        witness = output / "kept.json"
+        witness.write_bytes(b"preserve this attempt")
+        error, stderr = None, io.StringIO()
+        with contextlib.redirect_stderr(stderr), mock.patch.object(run, "attempt", side_effect=AssertionError("must not launch")):
+            try:
+                run.main(["--binary", str(self.binary), "--model", str(self.model), "--output", str(output)])
+            except BaseException as caught:
+                error = caught
+        self.assertIsInstance(error, SystemExit)
+        self.assertEqual(error.code, 2)
+        self.assertIn("output must be new; previous attempts are never overwritten", stderr.getvalue())
+        self.assertEqual(witness.read_bytes(), b"preserve this attempt")
+        self.assertEqual(list(output.iterdir()), [witness])
 
 
 if __name__ == "__main__":
