@@ -52,6 +52,20 @@ test "MT2 dispatch keeps context boundaries and graph identities separate" {
     try std.testing.expect(!useMt2(true, true, false, 17, 1, 8192));
 }
 
+test "Qwen stage: the head piece keys its own graph, apart from the layers' and the whole model's" {
+    for ([_]usize{ 1, 5, 16, 64 }) |rows| for ([_]u8{ 1, 16 }) |slots| for (0..4) |bits| {
+        var whole = Shape.init(rows, 1, true, false, slots);
+        whole.paged = bits & 1 != 0;
+        whole.mt2 = bits & 2 != 0;
+        var layers = whole;
+        layers.part = .layers;
+        var head = whole;
+        head.part = .head;
+        try std.testing.expectEqual(@as(u32, 1) << 31, head.key() ^ whole.key());
+        try std.testing.expectEqual(@as(u32, 1) << 31, head.key() ^ layers.key());
+    };
+}
+
 test "every captured verify shape keys its own graph: a shape after another never replays the other's (#2138)" {
     const gpa = std.testing.allocator;
     var keys: std.AutoHashMapUnmanaged(u32, Shape) = .empty;

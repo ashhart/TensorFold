@@ -66,6 +66,8 @@ test {
     _ = @import("cuda_wide.zig");
     _ = @import("cuda_weights.zig");
     _ = @import("cuda_mt2.zig");
+    _ = @import("cuda_stage_forward.zig");
+    _ = @import("cuda_shapes.zig");
 }
 
 pub const train_ops = @import("cuda_train_ops.zig");
