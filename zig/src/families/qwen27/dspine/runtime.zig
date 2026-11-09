@@ -140,7 +140,7 @@ pub const Model = struct {
     pub fn absorb(m: *Model, taps: Ref, rows: u32) !void {
         return @import("forward.zig").append(m, taps, rows);
     }
-    /// A chain of at most `nodes` greedy drafts after `pending`, as a tree of one branch.
+    /// The greedy chain, at most `nodes` of its 15 drafts, as a one-branch tree (core's tree walker comes next).
     pub fn propose(m: *Model, pending: u32, nodes: u32) !Tree {
         const p = try @import("forward.zig").propose(m, pending);
         const n = @min(nodes, p.drafts.len);

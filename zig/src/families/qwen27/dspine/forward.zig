@@ -113,6 +113,8 @@ pub const Proposal = struct {
     tops: [15]u32,
     candidates: [15][16]u32,
     table: [15][16][16]f32,
+    /// each head row's final-norm scale 1 / rms(written row): the table's scores times it are logits
+    scales: [15]f32,
 };
 
 /// The block after `anchor` over the committed context: drafts and candidates as dspine_mlx's RefinementTail.greedy.
@@ -226,19 +228,25 @@ pub fn propose(m: *Model, anchor: u32) !Proposal {
         for (m.frame.parts[0..m.frame.part_count], 0..) |cb, i| std.debug.print("dspine part {d}: {d:.2} ms\n", .{ i, cb.gpuSeconds() * 1e3 });
         std.debug.print("dspine tail: {d:.2} ms\n", .{m.frame.cb.gpuSeconds() * 1e3});
     }
-    return read(top, table, n, k);
+    return read(top, table, residual, n, k, h, s.eps);
 }
 
 /// Candidates ascending per row (ties to the lower id, as dspine_mlx's argmax), the table permuted, the chain walked.
-fn read(top: Ref, table: Ref, n: usize, k: usize) !Proposal {
+fn read(top: Ref, table: Ref, written: Ref, n: usize, k: usize, h: usize, eps: f32) !Proposal {
     var p: Proposal = undefined;
-    const rows = std.mem.bytesAsSlice(topk_rows.Row, top.buf.contents()[top.off..][0 .. n * @sizeOf(topk_rows.Row)]);
+    const rows = written.buf.slice(u16, written.off / 2 + (n + 1) * h)[written.off / 2 ..];
+    for (0..n) |i| {
+        var ss: f32 = 0;
+        for (rows[(i + 1) * h ..][0..h]) |v| ss += @import("host.zig").float(v) * @import("host.zig").float(v);
+        p.scales[i] = 1 / @sqrt(ss / @as(f32, @floatFromInt(h)) + eps);
+    }
+    const picks = std.mem.bytesAsSlice(topk_rows.Row, top.buf.contents()[top.off..][0 .. n * @sizeOf(topk_rows.Row)]);
     const scores = std.mem.bytesAsSlice(f32, table.buf.contents()[table.off..][0 .. n * k * k * 4]);
     var order: [15][16]u8 = undefined;
     for (0..n) |i| {
-        if (rows[i].count != k or rows[i].nonfinite != 0) return error.DraftLatticeFinite;
+        if (picks[i].count != k or picks[i].nonfinite != 0) return error.DraftLatticeFinite;
         for (0..k) |j| order[i][j] = @intCast(j);
-        const ids = rows[i].entries;
+        const ids = picks[i].entries;
         p.tops[i] = ids[0].token;
         std.mem.sort(u8, order[i][0..k], ids, struct {
             fn lt(c: [16]topk_rows.Entry, a: u8, b: u8) bool {
