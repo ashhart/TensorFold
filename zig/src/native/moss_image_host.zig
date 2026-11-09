@@ -325,7 +325,7 @@ pub const Host = struct {
     fn paint(h: *Host, j: *Job) !void {
         const r = j.request;
         _ = try h.decoder.decode(j.x, r.width, r.height, j.picture);
-        quantize(j.rgb, j.picture);
+        mi.host.quantize(j.rgb, j.picture);
         const bytes = try png.encode(r.alloc, j.rgb, r.width, r.height);
         defer r.alloc.free(bytes);
         try r.png.appendSlice(r.alloc, bytes);
@@ -395,23 +395,6 @@ pub fn bracket(a: Allocator, before: []const u32, ids: []const u32, after: []con
         if (at == total) break;
     }
     return out;
-}
-
-/// The pipeline's 8-bit rule: clamp to [-1, 1], rescale to [0, 1], * 255, then round with ties to even.
-pub fn quantize(out: []u8, pixels: []const f32) void {
-    for (out, pixels) |*o, v| {
-        const unit = std.math.clamp(v, -1, 1) * 0.5 + 0.5;
-        o.* = roundEven(unit * 255);
-    }
-}
-
-/// Metal's `rint` for a value from 0 through 255: the nearest whole number, ties to even.
-pub fn roundEven(x: f32) u8 {
-    const whole = @trunc(x);
-    const at: u32 = @intFromFloat(whole);
-    const frac = x - whole;
-    const up: u32 = if (frac > 0.5 or (frac == 0.5 and at % 2 == 1)) 1 else 0;
-    return @intCast(@min(at + up, 255));
 }
 
 fn read(a: Allocator, io: std.Io, dir: []const u8, name: []const u8) ![]u8 {
