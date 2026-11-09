@@ -4,6 +4,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Docs: a reply that quotes a template marker can finish with `ignore_eos` and a stop list for the model's end-of-text and next-turn-open spellings, then a strip of the trailing turn marker; measured on two Qwen checkpoints on a GB10, with the agent-shaped runs reported in #2399 (#2437, refs #2399). Thanks to @javierbits and @robertung88.
 - Conformance: the cancel and evict gates check that a cut reply and an evicted prompt leave the server as a fresh one, with a planted fault for each; the Qwen3.8-27B Metal profile skips evict with its measured reason, and the CUDA profiles run both (#2611). Thanks to @jschmied.
 
 - HIP: the qwen3_5 engine builds the DFlash2 drafter's kernels (tap gathers, key ring, dynamic conv, block attention), tested and in the kernel contract; nothing launches them yet (#2545, part 3 of #1563). Thanks to @AbrahamCete.
@@ -308,8 +309,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
   GB10) with its joint schema head on the GPU (HIP's kernels and products, on cuBLASLt with FP32 compute), and chat
   is refused by name; `TF_LANE_TRACE` gains a `cancel` line for a request cancelled between two prompt calls (#2458,
   part of #2324). Thanks to @laudney.
-
-- Docs: a reply that quotes a template marker can finish with `ignore_eos` and a stop list for the model's end-of-text and next-turn-open spellings, then a strip of the trailing turn marker; measured on two Qwen checkpoints on a GB10, with the agent-shaped runs reported in #2399 (#2437, refs #2399). Thanks to @javierbits and @robertung88.
 
 ## 1.2.4
 
