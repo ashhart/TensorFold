@@ -4,6 +4,7 @@ const std = @import("std");
 const cuda = @import("cuda");
 const dsv41 = @import("dsv41_kernels");
 const tp = @import("tp");
+const partition = @import("dsv41_partition");
 const check = @import("../check.zig");
 
 const Gpu = check.Gpu;
@@ -17,14 +18,6 @@ const n = 7;
 const edges = [_]i64{ 0, 383, 384, 511, 512, 639, 640, 767, 768, 895, 896, 1023, 1024, vocab - 1 };
 const ne = edges.len + 1;
 const worlds = [_]u32{ 1, 2, 3, 4 };
-
-/// partition.zig's `share`: whole 128-row blocks, one more to each of the first ranks.
-fn share(rank: usize, world: usize) [2]usize {
-    const blocks = vocab / 128;
-    const base = blocks / world;
-    const extra = blocks % world;
-    return .{ (rank * base + @min(rank, extra)) * 128, (base + @intFromBool(rank < extra)) * 128 };
-}
 
 fn bf16(f: f32) u16 {
     const u: u32 = @bitCast(f);
@@ -81,18 +74,18 @@ const Embed = struct {
 
     fn go(c: Collective, rank: u32, e: *Embed) anyerror!void {
         const W = c.world();
-        const part = share(rank, W);
+        const part = try partition.share(vocab, rank, W);
         var stream = try cuda.Stream.init(e.gpu.d, false);
         defer stream.deinit();
         var b: Bufs = .{ .d = e.gpu.d };
         defer b.deinit();
-        const tab = try b.up(bytes(e.table[part[0] * D ..][0 .. part[1] * D]));
+        const tab = try b.up(bytes(e.table[part.lo * D ..][0 .. part.len * D]));
         const ids = try b.up(bytes(e.ids));
         const rows = (try b.zeros(ne * D * 2)).ptr;
         const recv = (try b.zeros(W * ne * D * 2)).ptr;
         const out = try b.zeros(ne * 4 * D * 2);
         const o = e.k.others(stream);
-        try o.embedSend(ids, ne, tab, @intCast(part[0]), part[1], D, rows);
+        try o.embedSend(ids, ne, tab, @intCast(part.lo), part.len, D, rows);
         try c.allGather(rows, recv, ne * D, .bf16, stream.handle);
         try o.embedSum(recv, W, ne, D, out.ptr);
         try stream.synchronize();
