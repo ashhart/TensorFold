@@ -104,6 +104,7 @@ const named = "Writing it.\n<tool_call>\n{\"name\": \"write_file\", \"arguments\
 const cut_args = "{\"path\": \"notes.txt\", \"content\": \"The history of";
 const whole_args = "{\"path\": \"notes.txt\"}";
 const compact = "{\"path\":\"notes.txt\"}";
+const cut_closed = "{\"path\":\"notes.txt\",\"content\":\"The history of\"}";
 const xml_cut = "Writing it.\n<tool_call>\n<function=write_file>\n<parameter=path>\nnotes.txt\n</parameter>\n" ++
     "<parameter=content>\nThe history of";
 
@@ -204,7 +205,7 @@ test "a cut JSON call on /v1/responses is the cut function_call, whole and strea
     }
 }
 
-test "a cut JSON call on /v1/messages is the stream's cut tool_use, and the whole reply's as an XML cut's" {
+test "a cut JSON or XML call on /v1/messages is a tool_use with its input as far as written, whole and streamed" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -213,7 +214,8 @@ test "a cut JSON call on /v1/messages is the stream's cut tool_use, and the whol
     const whole: Seen = .{ .status = 200, .text = "Writing it.", .args = compact, .finish = "max_tokens" };
     for ([_]bool{ false, true }) |stream|
         try expectSeen(whole, try send(a, "/v1/messages", named ++ whole_args, stream));
-    // a whole Messages reply needs an input object: cut arguments are refused there, the XML cut's alike
-    try expectSeen(.{ .status = 500 }, try send(a, "/v1/messages", named ++ cut_args, false));
-    try expectSeen(.{ .status = 500 }, try send(a, "/v1/messages", xml_cut, false));
+    // a whole Messages reply needs an input object: the cut arguments closed as far as written, the XML cut's alike
+    const closed: Seen = .{ .status = 200, .text = "Writing it.", .args = cut_closed, .finish = "max_tokens" };
+    try expectSeen(closed, try send(a, "/v1/messages", named ++ cut_args, false));
+    try expectSeen(closed, try send(a, "/v1/messages", xml_cut, false));
 }
