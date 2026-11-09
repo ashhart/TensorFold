@@ -343,23 +343,29 @@ unless a stop string or a tool call ended the reply.
 
 ### Replies that quote a template marker
 
-Some templates encode their turn-end spelling as one added token: Qwen3.8-Flash-Next's and Qwen3.8-27B's tokenizers
-encode `<|im_end|>` to one id, while `<|tool_call_begin|>` stays seven ordinary tokens. A reply can quote that
-spelling with ordinary tokens and finish normally; when it draws the one-token spelling instead, the turn ends there
-even inside a code span. The server stops on the token the model drew; it does not sample past the end token and
-decide afterwards, because that would change the reply.
+Some templates encode their turn-end spelling as one added token: Qwen3.8-Flash-Next's tokenizer encodes
+`<|im_end|>` to one id, while `<|tool_call_begin|>` stays seven ordinary tokens, as `POST /tokenize` with
+`{"prompt": "<spelling>", "add_special_tokens": false}` shows ([#2399]). A reply can quote that spelling with
+ordinary tokens and finish normally; when it draws the one-token spelling instead, the turn ends there even inside
+a code span. The server stops on the token the model drew; it does not sample past the end token and decide
+afterwards, because that would change the reply.
 
-A client that needs such a reply to finish can set `ignore_eos: true` with a `stop` list holding the model's
-end-of-text spelling (`<|endoftext|>` for Qwen), not its turn-end spelling: a `stop` string for `<|im_end|>` cuts at
-the same place the end token would. With `ignore_eos`, the drawn end token appears in the content as text, so strip
-a trailing `<|im_end|>` and the whitespace after it before display. The end-of-text stop string still ends the reply
-at a real end of turn.
+A plain request already finishes on the checkpoints measured so far: they spell a quoted marker with ordinary
+tokens, and the server stops on the end token when the model draws it. A client that still uses `ignore_eos`
+should stop on `["<|endoftext|>", "<|im_start|>"]` and not on `<|im_end|>` or end-of-text alone. With
+`ignore_eos`, the end token no longer stops the reply, and behind an agent prompt the model often opens the next
+turn instead of writing end-of-text, so a stop on end-of-text alone never fires; the invented turns run on, and a
+tool parser returns their tool calls ([#2399]). Strip a trailing `<|im_end|>` and the whitespace after it before
+display. The cost is the same for both stops: a stop string matches the spelling however it is tokenized, so a
+reply that quotes `<|endoftext|>`, `<|im_start|>` or `<|im_end|>` as text is cut there. A `stop` for `<|im_end|>`
+cuts at least where the end token would, and also where the reply spells it with ordinary tokens.
 
 Measured greedy on a GB10 with a finished tool call and its result in the conversation, on Qwen3.5-2B MLX
 4-bit and Qwen3.6-35B-A3B NVFP4: both checkpoints wrote the quoted marker with ordinary tokens, so the plain request
-finished; with `ignore_eos` and `stop: ["<|endoftext|>"]` both requests also finished, and each reply ended with the
-drawn `<|im_end|>` for the client to strip. The [report's Flash Next case](https://github.com/ashhart/TensorFold/issues/2399)
-draws the one-token spelling, which is where the plain request stops.
+finished; with `ignore_eos` and `stop: ["<|endoftext|>", "<|im_start|>"]` all replies stopped right after their
+first end, and each ended with the drawn `<|im_end|>` for the client to strip. On an agent-shaped body, the runs
+reported in #2399 gave 0/9 runaways with the pair, against 7/9 with end-of-text alone, on stock Qwen3.8-Flash-Next
+weights.
 
 On MLX, `--parallel auto` is the default: requests share rounds within the configured concurrency and memory
 budget. Every admitted prompt prefills a chunk at a time beside the others. Each chunk goes to a foreground prompt
