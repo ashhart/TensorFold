@@ -14,9 +14,16 @@ const max = tp.device.max_ranks;
 const D = 5120; // config.zig's hidden
 const vocab = 1280; // ten 128-row blocks: 4/3/3 at world 3
 const n = 7;
-// every share edge at worlds 2, 3 and 4 (640; 512, 896; 384, 768, 1024), both ends, and one at random
-const edges = [_]i64{ 0, 383, 384, 511, 512, 639, 640, 767, 768, 895, 896, 1023, 1024, vocab - 1 };
-const ne = edges.len + 1;
+/// The vocabulary's ends and both sides of every share edge at worlds 2 to 4, where `partition.share` puts them.
+const edges = edges: {
+    var ids: []const i64 = &.{ 0, vocab - 1 };
+    for (worlds[1..]) |w| for (1..w) |r| {
+        const lo: i64 = (partition.share(vocab, r, w) catch unreachable).lo;
+        ids = ids ++ &[_]i64{ lo - 1, lo };
+    };
+    break :edges ids[0..ids.len].*;
+};
+const ne = edges.len + 1; // and one id at random
 const worlds = [_]u32{ 1, 2, 3, 4 };
 
 fn bf16(f: f32) u16 {
