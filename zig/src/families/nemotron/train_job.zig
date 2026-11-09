@@ -67,6 +67,10 @@ pub const Job = struct {
                 e.buf(t.delta, vec(c, s, i, l) * 4, 1);
                 e.run(.{ d, 1, 1 }, .{ 256, 1, 1 });
             };
+            if (t.locate.active and t.locate.layer == l) {
+                const offset = t.locate.row * d * 2;
+                copy(e, m, t.savedAt(l).plus(offset), At.of(w.s.h).plus(offset), 1);
+            }
             switch (j.mode) {
                 .loss, .prime => {},
                 .grad, .learn => keepActs(t, e, &w.s, l, rows, .out),
@@ -94,6 +98,7 @@ pub const Job = struct {
         for (answers) |a| copy(e, m, At.of(w.s.x).plus(a.first * d * 2), At.of(t.ans).plus(a.at * d * 2), a.rows);
         const lp: pl.Launch = .{ .k = &m.prefill, .e = e };
         lp.qmm(At.of(t.ans), t.head, At.of(t.logits), At.of(w.s.parts), t.answered, c.vocab, d);
+        if (t.locate.active) return;
         e.pipe(m.kernels.get("tf_train_softmax"));
         e.buf(t.logits, 0, 0);
         e.buf(t.targets, 0, 1);
