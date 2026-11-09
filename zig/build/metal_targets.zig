@@ -433,7 +433,8 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     b.step("test-cli", "The checkpoint CLI's host tests").dependOn(&run_cli_tests.step);
 
     // The core lane, shared-context and Qwen3.8-27B programs and host tests.
-    qwen27_build.targets(b, target, optimize, metal, sources, engine, lanes, mods.qwen27, test_step, build_options);    core_checks.targets(b, target, optimize, metal, engine);
+    qwen27_build.targets(b, target, optimize, metal, sources, engine, lanes, mods.qwen27, test_step, build_options);
+    core_checks.targets(b, target, optimize, metal, engine);
     contract_build.metal(b, target, optimize, metal, engine, sources);
     glm_checks.targets(b, target, optimize, metal, engine, sources);
     flashnext_checks.targets(b, target, optimize, metal, engine);
