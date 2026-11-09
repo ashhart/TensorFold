@@ -77,7 +77,7 @@ fn versionName(s: []const u8) bool {
 /// Whether `url` is one named package's JSON on PyPI, npm or crates.io, with no query; a name is 64 bytes at most.
 pub fn registry(url: []const u8) bool {
     if (std.mem.indexOfAny(u8, url, "?#") != null) return false;
-    if (std.mem.startsWith(u8, url, "https://pypi.org/pypi/")) {
+    if (std.ascii.startsWithIgnoreCase(url, "https://pypi.org/pypi/")) { // PyPI.org is the same host
         var parts = std.mem.splitScalar(u8, url["https://pypi.org/pypi/".len..], '/');
         const name = parts.next() orelse return false;
         const second = parts.next() orelse return false;
@@ -132,4 +132,9 @@ test "a request reads only what it was shown, and registry json for one package"
     try std.testing.expect(!s.allows(a, "https://evil.example/"));
     for ([_][]const u8{ "https://pypi.org/pypi/httpx/json", "https://pypi.org/pypi/httpx/0.28.1/json", "https://registry.npmjs.org/react", "https://registry.npmjs.org/react/latest", "https://registry.npmjs.org/@types/node/22.0.0", "https://registry.npmjs.org/@scope%2Fpkg", "https://crates.io/api/v1/crates/serde", "https://crates.io/api/v1/crates/serde/1.0.210" }) |u| try std.testing.expect(registry(u));
     for ([_][]const u8{ "https://pypi.org/pypi/httpx/json?x=1", "https://pypi.org/pypi/httpx", "https://pypi.org/simple/httpx/", "https://registry.npmjs.org/react/latest/extra", "https://registry.npmjs.org/a%2Fb", "https://crates.io/api/v1/crates/serde/1.0/download", "https://pypi.org/pypi/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/json", "http://pypi.org/pypi/httpx/json" }) |u| try std.testing.expect(!registry(u));
+}
+
+test "pypi registry json allows a host whose letters differ" {
+    try std.testing.expect(registry("https://PyPI.org/pypi/httpx/json"));
+    try std.testing.expect(registry("https://PyPI.org/pypi/httpx/0.28.1/json"));
 }
