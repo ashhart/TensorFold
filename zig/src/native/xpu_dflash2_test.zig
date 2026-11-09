@@ -396,6 +396,10 @@ test "draft sources: XPU DFlash2 through Drafted makes main's drafter calls, row
         .{ .draft = &.{ .{ .s = 1, .rows = all[0..1], .depth = 6, .start = 42 }, .{ .s = 0, .rows = all[0..5], .depth = 7, .start = 2306 } } },
         .{ .tree = 1 },
         .{ .tree = 0 },
+        // exactly TREE_MIN drafts: the chain/tree switch at its boundary
+        .{ .verify = &.{.{ .s = 2, .rows = 3 }} },
+        .{ .draft = &.{.{ .s = 2, .rows = all[0..3], .depth = ad.TREE_MIN, .start = 308 }} },
+        .{ .tree = 2 },
     };
     var old: Run = .{};
     defer old.deinit();
