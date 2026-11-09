@@ -75,10 +75,12 @@ drafts) once the engine's local exactness check against one-row steps passes at 
 portable shape: the registered projection and RMS norm (`zig build cpu-contract`), fp32 sums in the attention and the
 delta rule's recurrence, and every other row computed in float64 and rounded once to bf16, so x86_64 and arm64 give the
 same bytes at every thread count. Its fidelity is judged against a float64 reference, not against Metal's bits:
-`tools/zig/cpu_fidelity.py` freezes a prompt set, records a serve's greedy replies, and compares `tf-qwen35-cpu-forward`'s
-teacher-forced logits (`zig build qwen35-cpu-forward`) with the reference's row by row, listing every top-token
-difference with both margins. `zig/tests/qwen35/serve_check.py` runs the drafted, concurrent and resumed checks against
-its serve as against any other.
+`tools/zig/cpu_fidelity.py` freezes a prompt set and records a serve's greedy replies; `tools/zig/qwen35_cpu_long_ref.py
+--run-input` computes the reference's logits for each case (the whole forward in float64 over the exactly dequantized
+weights, numpy only, the oracle #1544 judged the Vulkan engine against); and `cpu_fidelity.py compare` sets
+`tf-qwen35-cpu-forward`'s teacher-forced logits (`zig build qwen35-cpu-forward`) against them row by row, listing every
+top-token difference with both margins. `zig/tests/qwen35/serve_check.py` runs the drafted, concurrent and resumed checks
+against its serve as against any other.
 
 ## Verification
 
