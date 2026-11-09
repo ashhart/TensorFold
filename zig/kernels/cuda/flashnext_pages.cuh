@@ -9,3 +9,9 @@ struct Pg {
 __device__ __forceinline__ long long page_row(const Pg& pg, int p, int per, int row) {
     return static_cast<long long>(pg.pt[p / per]) * pg.ps + static_cast<long long>(p % per) * row;
 }
+
+// page_row in two steps, so a page id can load a step before its address is formed.
+__device__ __forceinline__ int page_id(const Pg& pg, int p, int per) { return pg.pt[p / per]; }
+__device__ __forceinline__ long long page_at(const Pg& pg, int id, int p, int per, int row) {
+    return static_cast<long long>(id) * pg.ps + static_cast<long long>(p % per) * row;
+}
