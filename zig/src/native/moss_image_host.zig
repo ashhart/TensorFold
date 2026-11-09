@@ -350,7 +350,7 @@ pub const Host = struct {
             h.lock();
             h.broken = true;
             h.unlock();
-            std.log.warn("moss image: a picture's pass failed ({s}); this engine serves no more", .{@errorName(e)});
+            std.log.err("moss image: a picture's pass failed ({s}); this engine serves no more", .{@errorName(e)});
         }
         h.finish(slot, .failed, @errorName(e));
     }
