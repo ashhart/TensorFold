@@ -90,7 +90,7 @@ fn run(gpa: std.mem.Allocator, h: Harness, n: usize, block: u32, s: Schedule, ro
         const at: Where = .{ .depth = s.at(block, i), .round = i, .prompt = n };
         const d = at.depth;
         const ref = try reference(h, c, r, block, at, deep, want);
-        try c.drafter.hold(&.{.{ .stream = c.stream, .pending = r.pending, .position = r.position, .depth = d }});
+        try c.drafter.hold(&.{holdAt(c, r, d)});
         c.drafter.held(&.{c.stream}, &.{got[0..d]}) catch |e| return fail(error.HeldFewer, at, "{s}", .{@errorName(e)});
         if (!std.mem.eql(u32, ref, got[0..d])) return differ(error.DraftsDiffer, at, ref, got[0..d]);
         // the count contract: exactly d held; at d == block, never more than the block
@@ -111,7 +111,7 @@ fn reference(h: Harness, c: Case, r: Round, block: u32, at: Where, deep: []u32, 
     const d = at.depth;
     var out: ?[]const u32 = null;
     if (c.deeper) |x| {
-        try x.hold(&.{.{ .stream = c.stream, .pending = r.pending, .position = r.position, .depth = block }});
+        try x.hold(&.{holdAt(c, r, block)});
         try x.held(&.{c.stream}, &.{deep[0..block]});
         out = deep[0..d];
     }
@@ -121,6 +121,12 @@ fn reference(h: Harness, c: Case, r: Round, block: u32, at: Where, deep: []u32, 
         out = want[0..d];
     }
     return out orelse error.NoReference;
+}
+
+/// A round's hold as Drafted asks it: the stream's sampling with it, so a sampled family draws as it serves.
+fn holdAt(c: Case, r: Round, depth: u32) dr.Hold {
+    const s = c.stream;
+    return .{ .stream = s, .pending = r.pending, .position = r.position, .depth = depth, .sampling = s.sampling };
 }
 
 fn absorb(c: Case, a: dr.Absorb) !void {
