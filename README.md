@@ -5,7 +5,6 @@ The engine reads checkpoints, tokenizes requests and runs Metal or CUDA kernels 
 Serving needs no Python or MLX installation.
 
 Building with a coding agent? Have it load the [contributor skill](docs/recipes/SKILL.md) before it writes any code.
-
 ## Contributing with agents
 
 Please use [Agent Traffic Control](https://github.com/ashhart/ATC) before editing TensorFold so contributors and agents can avoid duplicate work and conflicting changes.
@@ -39,14 +38,12 @@ atc release ISSUE --json
 
 Use `reviewing` or `blocked` when appropriate, land the session when it stops, and resolve overlaps before opening a pull request.
 Before opening a pull request, have the agent run the [pull request skill](docs/pr/SKILL.md); agents that support skills can install it as `tensorfold-pull-request`.
-
 ## Quick start
 
 Start with Qwen3.5-2B, the small 4-bit checkpoint checked on Metal and a GB10. The commands below download its
 pinned revision, then serve it as `local-model`. Model weights have their own licenses.
 Reviewing or benchmarking TensorFold? [Evaluating TensorFold](docs/evaluating.md) covers pinning, signature checks,
 a container and the tests that need no GPU.
-
 ### Mac with Apple Silicon
 
 Install with Homebrew, then start the server:
@@ -56,7 +53,6 @@ brew install ashhart/tensorfold/tensorfold
 tensorfold pull mlx-community/Qwen3.5-2B-MLX-4bit@93760be4f1f69842a46bc13dbdc0f19e291392a3
 tensorfold serve mlx-community/Qwen3.5-2B-MLX-4bit --name local-model --context 8192 --no-thinking
 ```
-
 ### Linux with an NVIDIA GPU
 
 Use the release archive for your CPU: `linux-aarch64` on a GB10, `linux-x86_64` on an x86_64 host.
@@ -80,7 +76,6 @@ tensorfold() { command tensorfold-native "$@"; }
 tensorfold pull mlx-community/Qwen3.5-2B-MLX-4bit@93760be4f1f69842a46bc13dbdc0f19e291392a3
 tensorfold serve mlx-community/Qwen3.5-2B-MLX-4bit --name local-model --context 8192 --no-thinking
 ```
-
 ### Send a request
 
 Leave the server running. In another terminal, on either platform:
@@ -107,7 +102,6 @@ Read the engine's startup capacity line, such as `8 streams at once` on CUDA, fo
 With API authentication off, `/health` reports `live.connections` as active plus waiting requests and
 `live.waiting` as the queued count. For example, 8 connections with 4 waiting means 4 active requests.
 Completing or cancelling an active request frees its slot; cancelling a waiting request removes it from the queue.
-
 ## Mac app
 
 The [TensorFold desktop workspace](app/README.md) bundles the local engine, model downloads, hardware recommendations, live generation metrics, coding workers and document editing.
@@ -234,7 +228,6 @@ A lone greedy request there uses GPU-side rounds and hands over when a second re
 The [earlier MTP chain receipt](docs/receipts/flashnext-mtp-chain-2026-10-10/README.md) records its own pinned commits.
 Nemotron, GLM, the 2B model and Qwen3.8-27B use shared lane rounds.
 On Metal, each of up to 128 streams in the 27B's shared rounds drafts its own DFlash2 tree.
-
 ## Models on disk
 
 ```sh
@@ -364,11 +357,9 @@ The binary's `capabilities --json` response lists its supported flags and platfo
 | `--no-update-check` | Accepted compatibility switch; update the installed binary through its package manager. |
 | `--backend auto` | Use the backend compiled for the platform; `mlx` selects native Metal on macOS and `cuda` selects CUDA on Linux. |
 
-On Metal, the default kept-state budget is `min(room, max(16 GiB, room / 2))`.
-`room` is the load limit, or 70% of physical RAM by default, less the loaded footprint,
-any stream memory reserved after that reading, and a 2 GiB prompt-buffer margin.
-The startup line reports the resulting budget and room. Without a memory reading,
-the conservative working-set estimate remains capped at 16 GiB.
+The default cache uses half the room after streams: a 16 GiB floor on Metal and CUDA device memory,
+an 8 GiB floor for CUDA host snapshots, each clipped to its room. Flash Next's batch host keeps its
+16 GiB ceiling before session sizing. Explicit values override the default; see [prompt reuse](RUNBOOK.md).
 
 `--prompt-cache-gib` applies to Nemotron, Flash Next, GLM, Qwen3.8-27B and LFM2.5-24B-A2B, and
 `--prompt-cache-over-cap` to the same models but GLM.
