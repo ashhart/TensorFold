@@ -233,8 +233,10 @@ pinned host memory.
 A request that names no `top_k`, on a checkpoint whose generation config names none, samples with no top-k filter on
 CUDA and Metal alike, so a seeded request draws the same on both. `--top-k 20` gives 0.6.6's CUDA default.
 A conversation's next turn resumes from a prompt state kept where its last turn's history ended, so a reply equals the same
-request with the cache off. `--prompt-cache-gib` sizes kept states; the default is half the room after streams, clipped to that room: a 16 GiB floor on Metal and CUDA device memory, or 8 GiB for CUDA host snapshots. Flash Next's batch host keeps a 16 GiB ceiling before sizing sessions. An explicit value overrides it, and 0 turns
-them off. A state kept inside a prompt chunk costs no extra prompt call. A Nemotron 3.5 Lightning state takes 48 MiB plus
+request with the cache off. `--prompt-cache-gib` sizes kept states. The default takes half the room after streams,
+with a 16 GiB floor on Metal and CUDA device memory, or 8 GiB for unified CUDA host snapshots, clipped to the room.
+Discrete CUDA host snapshots default to 8 GiB. Flash Next's batch host keeps a 16 GiB ceiling before sizing sessions.
+An explicit value overrides it, and 0 turns them off. A state kept inside a prompt chunk costs no extra prompt call. A Nemotron 3.5 Lightning state takes 48 MiB plus
 7 KiB a prompt token, in whole 2 MiB pages (62 MiB at 2,048 tokens), and the cache keeps four 48 MiB buffers of its
 budget free for the next states.
 Prompts fill a chunk at a time between decode rounds, so requests that arrive together on a new system prompt would each

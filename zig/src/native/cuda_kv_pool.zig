@@ -160,7 +160,10 @@ pub fn budgetOf(comptime F: type, l: kv_pool.Layout, room: u64, o: api.Open, win
     var probe = out;
     probe.cache = std.math.maxInt(u64);
     const all = kv_pool.plan(l, probe) catch return out;
-    const left = all.snaps * l.snap_bytes + all.copied + all.kept;
+    const left = if (!engine_paged and out.window > 0)
+        room -| (@as(u64, all.lanes - 1) *| (l.fixed_bytes +| (l.pages(out.window) + l.runPages()) *| l.pageBytes()))
+    else
+        all.snaps * l.snap_bytes + all.copied + all.kept;
     out.cache = budget.cacheBytes(null, left, 0);
     return out;
 }
@@ -491,4 +494,19 @@ test "CUDA cache default scales pool copies after full stream windows without cu
     try std.testing.expectEqual(@as(u64, 8 * GiB), budgetOf(F, l, 88 * GiB, explicit, 6144, false, true, 0, null).cache);
     explicit.prompt_cache_gib = 0;
     try std.testing.expectEqual(@as(u64, 0), budgetOf(F, l, 88 * GiB, explicit, 6144, false, true, 0, null).cache);
+}
+
+test "CUDA cache default leaves seven full windows beside an unpaged engine" {
+    const GiB: u64 = 1 << 30;
+    const l: kv_pool.Layout = .{ .fixed_bytes = 0, .token_bytes = 1 << 20, .page_tokens = 1, .snap_bytes = 0 };
+    const o: api.Open = .{ .dir = "model", .model_type = "n", .lanes = 8 };
+    const b = budgetOf(struct {}, l, 88 * GiB, o, 8192, false, false, 0, null);
+    const p = try kv_pool.plan(l, b);
+    try std.testing.expectEqual(@as(u32, 8), p.lanes);
+    try std.testing.expectEqual(@as(u64, 16 * GiB), b.cache);
+    try std.testing.expectEqual(@as(usize, 7 * 8192), p.pages);
+    try std.testing.expectEqual(@as(u64, 16 * GiB), p.copied);
+    var explicit = o;
+    explicit.prompt_cache_gib = 40;
+    try std.testing.expectEqual(@as(u64, 40 * GiB), budgetOf(struct {}, l, 88 * GiB, explicit, 8192, false, false, 0, null).cache);
 }

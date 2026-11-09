@@ -92,10 +92,10 @@ pub const Entry = struct {
     branched: bool = false, // resumed again after a later prompt kept a longer state extending it: never superseded
     expired: bool = false, // hidden from lookups immediately, reclaimed only at safe host boundaries
     borrowers: u32 = 0, // outstanding lookups: released by resumed or release, never evicted while borrowed
-    ext: std.ArrayList(*Entry) = .empty, // entries extending its tokens, born later (policy.link): `extended` reads them
+    ext: std.ArrayList(*Entry) = .empty, // entries extending its tokens, born no earlier (policy.link): `extended` reads them
     own: []u32 = &.{}, // the kept prompt's one copy, which `tokens` and at first `last` slice (empty: they own theirs)
 };
-pub const Counts = struct { hits: u64 = 0, misses: u64 = 0, kept: u64 = 0, evicted: u64 = 0, refused: u64 = 0, failed: u64 = 0 };
+pub const Counts = struct { hits: u64 = 0, misses: u64 = 0, kept: u64 = 0, evicted: u64 = 0, refused: u64 = 0, failed: u64 = 0, trimmed: u64 = 0 };
 pub const RestoreDetails = @import("prompt_cache_restore.zig").Details;
 pub const RestoreLog = @import("prompt_cache_restore.zig").Log;
 /// Where a prompt pass starts and where it stops to keep its state (marks sorted, in `a`).
@@ -265,7 +265,7 @@ pub const Store = struct {
                 s.resumedWithReason(e, prompt, null);
                 if (fresh_marks) |m| if (m.ptr != l.marks.ptr) a.free(m);
                 // Restored: this state may go too; a peer restores before it drops.
-                s.reserve(prompt, @intCast(prompt.len), null, l.marks, spans, history_len);
+                s.reserve(prompt, @intCast(prompt.len), null, l.marks, spans, @import("prompt_cache_reserve.zig").endpointFor(s, prompt, at, history_len, starts, spans));
                 return .{ .from = at, .marks = l.marks };
             } else |err| {
                 // a refused state is dropped, then the next shorter RAM state is tried before the pass from the start
@@ -276,7 +276,7 @@ pub const Store = struct {
         }
         const marks_ = fresh_marks orelse l.marks;
         if (fresh_marks != null and l.marks.ptr != marks_.ptr) a.free(l.marks);
-        s.reserve(prompt, @intCast(prompt.len), null, marks_, spans, history_len);
+        s.reserve(prompt, @intCast(prompt.len), null, marks_, spans, @import("prompt_cache_reserve.zig").endpointFor(s, prompt, 0, history_len, starts, spans));
         return .{ .marks = marks_ };
     }
 
@@ -317,6 +317,7 @@ pub const Store = struct {
             rows.read.recall(s, prompt, born, starts, spans, s.recall(prompt, born, starts, spans, s.find(prompt, starts, spans)))
         else
             s.find(prompt, starts, spans);
+        @import("prompt_cache_divergence.zig").report(s, prompt, spans, e);
         if (e == null) s.counts.misses += 1;
         const from = if (e) |x| x.at else 0;
         const ordinary = if (s.active_rewind_at == 0)
@@ -461,17 +462,21 @@ pub const Store = struct {
             note("kept nothing at {d} tokens: {d} MiB passes the {d} MiB budget{s}", .{ at, bytes >> 20, s.budget >> 20, if (bytes > s.budget) s.over else "" });
             return false;
         }
+        const promised = if (s.reservation_guard) |g| g.promised else @import("prompt_cache_reserve.zig").Room{};
+        const limit = s.budget -| promised.bytes;
+        const slots = s.most -| promised.slots;
         while (s.entries.items.len > 0) { // room: spare storage this save can take, else new storage inside the budget
-            if (s.family.vtable.reuses) |f| if (s.entries.items.len < s.most and f(s.family.ptr, at)) break;
+            if (s.family.vtable.reuses) |f| if (s.entries.items.len < slots and promised.bytes == 0 and f(s.family.ptr, at)) break;
             const free_ = s.spare();
-            if (s.held + free_ + bytes <= s.budget and s.entries.items.len < s.most) break;
+            if (s.held + free_ + bytes <= limit and s.entries.items.len < slots) break;
             if (free_ > 0) {
-                if (s.family.vtable.trim) |f| f(s.family.ptr, s.budget -| s.held -| bytes); // spare that cannot take this state goes before any state
+                if (s.family.vtable.trim) |f| f(s.family.ptr, limit -| s.held -| bytes); // spare that cannot take this state goes before any state
                 if (s.spare() < free_) continue;
             }
             s.remove(others.victim(s, null, prompt, born, bytes, 1) orelse return if (s.keep_others) others.refuse(s, at, bytes) else s.fail(at, error.CacheBorrowed)); // its storage may come back spare and take this state
             s.counts.evicted += 1;
         }
+        if (bytes > limit or slots == 0) return s.fail(at, error.CachePromised);
         if (s.entries.items.len == 0) if (s.family.vtable.trim) |f| f(s.family.ptr, s.budget -| bytes);
         const e = s.gpa.create(Entry) catch return s.fail(at, error.OutOfMemory);
         const last = s.gpa.dupe(u32, prompt) catch { // one copy: the state's tokens are its prefix
@@ -543,7 +548,7 @@ pub const Store = struct {
     /// One log line after a prompt pass: where it resumed, how many states it kept, and what the store holds.
     pub fn report(s: *const Store, prompt: usize, from: u32, kept: u64) void {
         if (@import("builtin").is_test) return;
-        std.log.info("prompt cache: {d} tokens, resumed at {d}, kept {d}; {d} states, {d} MiB and {d} MiB spare of {d} MiB (hits {d}, misses {d}, evicted {d}, refused {d}, failed {d})", .{ prompt, from, kept, s.entries.items.len, s.held >> 20, s.spare() >> 20, s.budget >> 20, s.counts.hits, s.counts.misses, s.counts.evicted, s.counts.refused, s.counts.failed });
+        std.log.info("prompt cache: {d} tokens, resumed at {d}, kept {d}; {d} states, {d} MiB and {d} MiB spare of {d} MiB (hits {d}, misses {d}, evicted {d}, refused {d}, failed {d}, trimmed {d})", .{ prompt, from, kept, s.entries.items.len, s.held >> 20, s.spare() >> 20, s.budget >> 20, s.counts.hits, s.counts.misses, s.counts.evicted, s.counts.refused, s.counts.failed, s.counts.trimmed });
     }
 
     fn fail(s: *Store, at: u32, err: anyerror) bool {
@@ -564,6 +569,7 @@ pub fn note(comptime fmt: []const u8, args: anytype) void {
 }
 
 test {
+    _ = @import("prompt_cache_review_test.zig");
     _ = @import("prompt_cache_queue_room_test.zig");
     _ = @import("prompt_cache_index_test.zig");
     _ = @import("prompt_cache_test.zig");

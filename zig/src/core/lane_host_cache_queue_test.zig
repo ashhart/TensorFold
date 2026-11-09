@@ -42,6 +42,7 @@ const Reply = struct {
 const Snapshots = struct {
     target: *lanes.fake.Fake,
     seed: []const u32 = &.{},
+    growing: bool = false,
     late: ?struct { engine: api.Engine, request: *const api.Request, reply: *Reply, sent: bool = false } = null,
     fn of(ptr: *anyopaque) *Snapshots {
         return @ptrCast(@alignCast(ptr));
@@ -51,7 +52,7 @@ const Snapshots = struct {
             late.sent = true;
             late.engine.submit(2, late.request, .{ .ctx = late.reply, .event = Reply.event }) catch unreachable;
         };
-        return 100;
+        return if (of(ptr).growing) 64 + 4 * @as(u64, at) else 100;
     }
     fn save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) !pc.Saved {
         const self = of(ptr);
@@ -75,6 +76,10 @@ fn followups(n: usize, late: bool, shorter: bool) !void {
 }
 
 fn followupsRules(n: usize, late: bool, shorter: bool, rules: pc.Rules) !void {
+    return followupsSized(n, late, shorter, rules, false);
+}
+
+fn followupsSized(n: usize, late: bool, shorter: bool, rules: pc.Rules, growing: bool) !void {
     var cfg = try lanes.Config.init(a, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
     defer cfg.deinit(a);
     var target: lanes.fake.Fake = .{ .gpa = a, .prefill_chunks = 3 };
@@ -82,8 +87,8 @@ fn followupsRules(n: usize, late: bool, shorter: bool, rules: pc.Rules) !void {
     var clock: lanes.fake.FixedClock = .{};
     var core = lanes.Engine.init(a, &cfg, target.stepped(), clock.clock());
     defer core.deinit();
-    var snapshots: Snapshots = .{ .target = &target };
-    var store = pc.Store.init(a, .{ .ptr = &snapshots, .vtable = &.{ .bytes = Snapshots.bytes, .save = Snapshots.save, .restore = Snapshots.restore, .drop = Snapshots.drop } }, rules, (n + @intFromBool(shorter)) * 100);
+    var snapshots: Snapshots = .{ .target = &target, .growing = growing };
+    var store = pc.Store.init(a, .{ .ptr = &snapshots, .vtable = &.{ .bytes = Snapshots.bytes, .save = Snapshots.save, .restore = Snapshots.restore, .drop = Snapshots.drop } }, rules, if (growing) n * 112 + 16 else (n + @intFromBool(shorter)) * 100);
     defer store.deinit();
     var words: [16][24]u32 = undefined;
     var requests: [16]api.Request = undefined;
@@ -98,7 +103,7 @@ fn followupsRules(n: usize, late: bool, shorter: bool, rules: pc.Rules) !void {
         snapshots.seed = &words[1];
         try std.testing.expect(store.keepBorn(snapshots.seed, 12, 24, null, &.{}, &.{}));
     }
-    try std.testing.expectEqual(@as(u64, @intCast((n + @intFromBool(shorter)) * 100)), store.held);
+    try std.testing.expectEqual(@as(u64, @intCast(if (growing) n * 112 else (n + @intFromBool(shorter)) * 100)), store.held);
     var host = api.LaneHost.init(a, std.testing.io, &core, .{ .lanes = @intCast(@min(n, 8)) });
     host.cache = &store;
     const engine = host.engine();
@@ -115,11 +120,12 @@ fn followupsRules(n: usize, late: bool, shorter: bool, rules: pc.Rules) !void {
         for (20..24) |at| history[at] = lanes.fake.next(history[0..at], null, at);
         try std.testing.expectEqualSlices(u32, history[20..24], &reply.tokens);
     }
-    try std.testing.expectEqual(@as(u64, @intCast(2 * n + @intFromBool(shorter))), store.counts.kept);
+    if (!growing) try std.testing.expectEqual(@as(u64, @intCast(2 * n + @intFromBool(shorter))), store.counts.kept);
     try std.testing.expectEqual(@as(u64, 0), store.counts.misses);
     try std.testing.expect(store.held <= store.budget);
     for (words[0..n]) |*conversation| {
-        try std.testing.expectEqual(@as(u32, 16), store.find(conversation[0..20], &.{ 4, 8, 12, 16 }, &.{}).?.at);
+        const kept = store.find(conversation[0..20], &.{ 4, 8, 12, 16 }, &.{}) orelse return error.ConversationLost;
+        if (growing) try std.testing.expect(kept.at >= 12) else try std.testing.expectEqual(@as(u32, 16), kept.at);
     }
     try std.testing.expect(store.reservation_guard == null);
 }
@@ -203,4 +209,8 @@ test "queued cache: progress a follow-up advances from twelve to sixteen in one 
 
 test "queued cache: progress a shared-cut request without history replaces an idle state" {
     try coldBefore(false, false);
+}
+
+test "queued cache: growing states do not spend the same sixteen free bytes twice" {
+    for ([_]usize{ 2, 4, 8 }) |n| try followupsSized(n, false, false, .{ .min_prompt = 0 }, true);
 }

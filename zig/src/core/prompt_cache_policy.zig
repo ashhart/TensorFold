@@ -13,7 +13,7 @@ pub fn victimIn(s: *const pc.Store, skip: ?*pc.Entry, prompt: []const u32, born:
     var oldest_rewind = false;
     for (s.entries.items, 0..) |e, i| { // one prefix compare an entry: the superseded scan and the oldest scan share it
         if (e.borrowers > 0 or e == skip) continue;
-        if (s.reservation_guard) |g| if (g.needed(g.ctx, e)) continue;
+        if (s.reservation_guard) |g| if (g.protects(s, e)) continue;
         if (own_only and !own(e, skip, prompt)) continue;
         const on = e.tokens.len <= prompt.len and std.mem.eql(u32, prompt[0..e.tokens.len], e.tokens);
         const rewind = !e.expired and e.at == s.active_rewind_at and on; // the active rewind state goes last

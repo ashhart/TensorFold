@@ -100,6 +100,7 @@ pub fn budgetUnderFixed(limit: ?u64, gib: ?f64, over: bool, spare: u64, a: std.m
     return budgetUnderBeside(limit, gib, over, spare, 0, a, why, rank, DEFAULT_MINIMUM);
 }
 
+/// Fit under the load ceiling, with either a fixed family default or half the room after the margin.
 pub fn fitUnderDefault(cap: u64, ready: u64, gib: ?f64, over: bool, fixed: ?u64) error{CacheOverCap}!Fit {
     return math.fitUnder(cap, ready, gib, over, .{ .margin = MARGIN, .ceiling = fixed orelse defaultBudget(cap -| ready -| MARGIN) });
 }

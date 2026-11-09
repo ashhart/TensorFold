@@ -1,16 +1,15 @@
 # TensorFold
 
-TensorFold serves language models from a Zig binary on Apple Silicon and NVIDIA GPUs.
-The engine reads checkpoints, tokenizes requests and runs Metal or CUDA kernels directly.
-Serving needs no Python or MLX installation.
+TensorFold serves language models from a Zig binary on Apple Silicon and NVIDIA GPUs, with no Python or MLX dependency.
 
-Building with a coding agent? Have it load the [contributor skill](docs/recipes/SKILL.md) before it writes any code.
+Coding agents must read the [contributor skill](docs/recipes/SKILL.md) first.
+
 ## Contributing with agents
 
-Please use [Agent Traffic Control](https://github.com/ashhart/ATC) before editing TensorFold so contributors and agents can avoid duplicate work and conflicting changes.
-Check the [live agent radar](https://tensorfold.dev/atc) before choosing an issue and follow [CONTRIBUTING.md](CONTRIBUTING.md) and the [ATC contributor instructions](docs/atc/SKILL.md).
+Before editing, check [Agent Traffic Control](https://github.com/ashhart/ATC) and the [radar](https://tensorfold.dev/atc).
+Follow [CONTRIBUTING.md](CONTRIBUTING.md) and the [ATC instructions](docs/atc/SKILL.md).
 
-Install or upgrade ATC to 0.7.0 or later, then run from an updated TensorFold clone:
+In an updated clone, install ATC 0.7.0 or later and claim work:
 
 ```sh
 npm install -g github:ashhart/ATC
@@ -18,13 +17,10 @@ atc check ISSUE --json
 atc claim ISSUE --json
 ```
 
-Replace `ISSUE` with the issue number and claim only after a complete check says the work is free.
-TensorFold enables automatic public check-ins: a successful new claim starts an anonymous session on the radar and returns its `session` number.
-Keep that number instead of starting a duplicate session.
-For work already yours, start a session with `atc start ISSUE --json`.
-Add `--github-name` to `claim` or `start` only if you want your verified GitHub name shown; `--local` keeps a new session on your machine.
-The board shows the issue, activity state and last check-in; GitHub still associates the verification comment with its author.
-Check that `publication` is `public`; `unavailable` means the public update failed even if the local claim or session succeeded.
+Claim a free `ISSUE` after a complete check. Successful claims start an anonymous radar session and return its number.
+Keep that session number; for existing work use `atc start ISSUE --json`. Add `--github-name` to show your name,
+or `--local` to keep the session on your machine.
+Check that `publication` is `public`; `unavailable` means the public update failed, even if the local claim succeeded.
 
 Pulse only while the agent is working, before its five-minute check-in expires:
 
@@ -37,13 +33,14 @@ atc release ISSUE --json
 ```
 
 Use `reviewing` or `blocked` when appropriate, land the session when it stops, and resolve overlaps before opening a pull request.
-Before opening a pull request, have the agent run the [pull request skill](docs/pr/SKILL.md); agents that support skills can install it as `tensorfold-pull-request`.
+Run the [pull request skill](docs/pr/SKILL.md) before opening a PR.
+
 ## Quick start
 
-Start with Qwen3.5-2B, the small 4-bit checkpoint checked on Metal and a GB10. The commands below download its
-pinned revision, then serve it as `local-model`. Model weights have their own licenses.
+Start with Qwen3.5-2B, checked on Metal and a GB10. These commands serve its pinned revision as `local-model`.
 Reviewing or benchmarking TensorFold? [Evaluating TensorFold](docs/evaluating.md) covers pinning, signature checks,
 a container and the tests that need no GPU.
+
 ### Mac with Apple Silicon
 
 Install with Homebrew, then start the server:
@@ -53,6 +50,7 @@ brew install ashhart/tensorfold/tensorfold
 tensorfold pull mlx-community/Qwen3.5-2B-MLX-4bit@93760be4f1f69842a46bc13dbdc0f19e291392a3
 tensorfold serve mlx-community/Qwen3.5-2B-MLX-4bit --name local-model --context 8192 --no-thinking
 ```
+
 ### Linux with an NVIDIA GPU
 
 Use the release archive for your CPU: `linux-aarch64` on a GB10, `linux-x86_64` on an x86_64 host.
@@ -76,6 +74,7 @@ tensorfold() { command tensorfold-native "$@"; }
 tensorfold pull mlx-community/Qwen3.5-2B-MLX-4bit@93760be4f1f69842a46bc13dbdc0f19e291392a3
 tensorfold serve mlx-community/Qwen3.5-2B-MLX-4bit --name local-model --context 8192 --no-thinking
 ```
+
 ### Send a request
 
 Leave the server running. In another terminal, on either platform:
@@ -102,6 +101,7 @@ Read the engine's startup capacity line, such as `8 streams at once` on CUDA, fo
 With API authentication off, `/health` reports `live.connections` as active plus waiting requests and
 `live.waiting` as the queued count. For example, 8 connections with 4 waiting means 4 active requests.
 Completing or cancelling an active request frees its slot; cancelling a waiting request removes it from the queue.
+
 ## Mac app
 
 The [TensorFold desktop workspace](app/README.md) bundles the local engine, model downloads, hardware recommendations, live generation metrics, coding workers and document editing.
@@ -228,6 +228,7 @@ A lone greedy request there uses GPU-side rounds and hands over when a second re
 The [earlier MTP chain receipt](docs/receipts/flashnext-mtp-chain-2026-10-10/README.md) records its own pinned commits.
 Nemotron, GLM, the 2B model and Qwen3.8-27B use shared lane rounds.
 On Metal, each of up to 128 streams in the 27B's shared rounds drafts its own DFlash2 tree.
+
 ## Models on disk
 
 ```sh
@@ -357,9 +358,9 @@ The binary's `capabilities --json` response lists its supported flags and platfo
 | `--no-update-check` | Accepted compatibility switch; update the installed binary through its package manager. |
 | `--backend auto` | Use the backend compiled for the platform; `mlx` selects native Metal on macOS and `cuda` selects CUDA on Linux. |
 
-The default cache uses half the room after streams: a 16 GiB floor on Metal and CUDA device memory,
-an 8 GiB floor for CUDA host snapshots, each clipped to its room. Flash Next's batch host keeps its
-16 GiB ceiling before session sizing. Explicit values override the default; see [prompt reuse](RUNBOOK.md).
+The default cache takes half the room after streams, with a 16 GiB floor on Metal and CUDA device memory,
+or 8 GiB for unified CUDA host snapshots, clipped to the room. Discrete CUDA host caches default to 8 GiB.
+Flash Next batch stays at 16 GiB before session sizing. Explicit values override it; see [prompt reuse](RUNBOOK.md).
 
 `--prompt-cache-gib` applies to Nemotron, Flash Next, GLM, Qwen3.8-27B and LFM2.5-24B-A2B, and
 `--prompt-cache-over-cap` to the same models but GLM.
@@ -372,8 +373,7 @@ a long conversation. Where the cache cannot keep a whole context, the server als
 at each prompt's history end, so a turn whose template drops the last reply's reasoning resumes there. Replies are
 the same tokens as a fresh prompt pass; `TF_QWEN27_SLOT_RESUME=0` turns both off.
 
-Sampling defaults come from the checkpoint's `generation_config.json`, then serve flags and request fields override them.
-`--context 0` is family-specific; use a positive limit for GLM and inspect the capacity reported at startup.
+Sampling uses `generation_config.json`, overridden by serve flags and request fields. For GLM use a positive context.
 The supported environment variables are listed in `capabilities --json`, including API keys, request logging and Hugging Face cache paths.
 `TF_Q27_PROFILE=N` makes a native Metal Qwen3.8-27B server log a per-class GPU-time breakdown every N decode rounds (`1` means 64) and add `gpu_seconds` to its replies; it is diagnostic only, and a profiled round runs slower.
 

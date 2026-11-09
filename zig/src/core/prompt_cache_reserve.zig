@@ -5,7 +5,26 @@ const modes = @import("cache_modes.zig");
 const images = @import("cache_images.zig");
 const others = @import("prompt_cache_others.zig");
 const policy = @import("prompt_cache_policy.zig");
-pub const Guard = struct { ctx: *anyopaque, needed: *const fn (*anyopaque, *const pc.Entry) bool };
+pub const Room = struct { bytes: u64 = 0, slots: usize = 0 };
+pub const Guard = struct {
+    ctx: *anyopaque,
+    needed: *const fn (*anyopaque, *const pc.Entry) bool,
+    exact: bool = false, // true: the callback already selects each job's deepest match
+    promised: Room = .{}, // net room promised to other admitted passes
+    promise: ?*Room = null, // this lookup's net promise, owned by its job
+
+    pub fn protects(g: Guard, s: *const pc.Store, e: *const pc.Entry) bool {
+        if (!g.needed(g.ctx, e)) return false;
+        if (g.exact) return true;
+        for (s.by_position.items) |o| {
+            if (o.at <= e.at) break;
+            if (!o.expired and o.tokens.len >= e.tokens.len and o.image_frame == e.image_frame and
+                std.mem.eql(u32, o.tokens[0..e.tokens.len], e.tokens) and
+                modes.equal(o.decode_spans, e.decode_spans, e.at) and g.needed(g.ctx, o)) return false;
+        }
+        return true;
+    }
+};
 
 fn exists(s: *const pc.Store, prompt: []const u32, at: u32, spans: []const modes.Span) bool {
     const n = @as(usize, at) + s.rules.lookahead;
@@ -17,26 +36,19 @@ fn exists(s: *const pc.Store, prompt: []const u32, at: u32, spans: []const modes
     return false;
 }
 
-const Room = struct { bytes: u64, slots: usize };
+/// The current restore funds its replacement only when no other borrower or branch will still need it.
+fn reclaimable(s: *const pc.Store, from: ?*pc.Entry, prompt: []const u32, born: u32) Room {
+    const e = from orelse return .{};
+    if (e.borrowers > 0 or !policy.redundant(s, e, prompt, born)) return .{};
+    if (policy.continuedLater(s, e) and !std.mem.eql(u32, prompt, e.last)) return .{};
+    if (s.reservation_guard) |g| if (g.protects(s, e)) return .{};
+    return .{ .bytes = e.bytes, .slots = 1 };
+}
 
-/// The restored entry's borrow ends before keeping; superseded copies can go at that same safe boundary.
 fn future(s: *const pc.Store, from: ?*pc.Entry, prompt: []const u32, born: u32) Room {
-    var room: Room = .{ .bytes = s.budget -| s.held, .slots = s.most -| s.entries.items.len };
-    for (s.entries.items) |e| {
-        if (e == from) {
-            room.bytes += e.bytes;
-            room.slots +|= 1;
-            continue;
-        }
-        if (e.borrowers > 0) continue;
-        if (s.reservation_guard) |g| if (g.needed(g.ctx, e)) continue;
-        const on = e.tokens.len <= prompt.len and std.mem.eql(u32, e.tokens, prompt[0..e.tokens.len]);
-        if (on and policy.redundant(s, e, prompt, born)) {
-            room.bytes += e.bytes;
-            room.slots +|= 1;
-        }
-    }
-    return room;
+    const credit = reclaimable(s, from, prompt, born);
+    const promised: Room = if (s.reservation_guard) |g| g.promised else .{};
+    return .{ .bytes = (s.budget -| s.held) +| credit.bytes -| promised.bytes, .slots = (s.most -| s.entries.items.len) +| credit.slots -| promised.slots };
 }
 
 /// The primary history mark follows the same warm/lookahead and short-prompt cuts as marksRewind.
@@ -57,18 +69,6 @@ fn priority(marks: []const u32, endpoint: u32) ?u32 {
     return null;
 }
 
-fn unprotected(s: *const pc.Store, from: ?*pc.Entry, prompt: []const u32, bytes: u64) ?usize {
-    if (s.keep_others and !others.fits(s, from, prompt, bytes, 1)) return null;
-    var best: ?usize = null;
-    for (s.entries.items, 0..) |e, i| {
-        if (e == from or e.borrowers > 0) continue;
-        if (s.reservation_guard) |g| if (g.needed(g.ctx, e)) continue;
-        if (s.keep_others and !policy.own(e, from, prompt)) continue;
-        if (best == null or e.used < s.entries.items[best.?].used) best = i;
-    }
-    return best;
-}
-
 /// A guarded reservation makes room for the endpoint alone; other copies cannot displace a newest state.
 pub fn reserve(s: *pc.Store, prompt: []const u32, born: u32, from: ?*pc.Entry, marks: []const u32, spans: []const modes.Span, endpoint: u32) void {
     if (s.reservation_guard != null) {
@@ -76,13 +76,15 @@ pub fn reserve(s: *pc.Store, prompt: []const u32, born: u32, from: ?*pc.Entry, m
         if (exists(s, prompt, at, spans)) return;
         const need = s.family.vtable.bytes(s.family.ptr, at);
         if (need > s.budget or s.most == 0) return;
-        while (true) {
-            const room = future(s, from, prompt, born);
-            if (need <= room.bytes and room.slots > 0) return;
-            const i = unprotected(s, from, prompt, need) orelse return;
+        var room = future(s, from, prompt, born);
+        while (need > room.bytes or room.slots == 0) {
+            const i = others.victim(s, from, prompt, born, need, 1) orelse return;
+            room.bytes +|= s.entries.items[i].bytes;
+            room.slots +|= 1;
             s.remove(i);
             s.counts.evicted += 1;
         }
+        return;
     }
     var need: u64 = 0;
     var new: usize = 0;
@@ -122,6 +124,17 @@ pub fn fitting(s: *pc.Store, a: std.mem.Allocator, prompt: []const u32, marks: [
             if (bytes > 0) room.slots -= 1;
         }
     }
-    std.mem.sort(u32, out.items, {}, std.sort.asc(u32));
-    return out.toOwnedSlice(a);
+    const fitted = try out.toOwnedSlice(a);
+    s.counts.trimmed += marks.len - fitted.len;
+    if (s.reservation_guard.?.promise) |promise| {
+        var used: Room = .{};
+        for (fitted) |at| if (!exists(s, prompt, at, spans)) {
+            used.bytes +|= s.family.vtable.bytes(s.family.ptr, at);
+            used.slots +|= 1;
+        };
+        const credit = reclaimable(s, from, prompt, born);
+        promise.* = .{ .bytes = used.bytes -| credit.bytes, .slots = used.slots -| credit.slots };
+    }
+    std.mem.sort(u32, fitted, {}, std.sort.asc(u32));
+    return fitted;
 }
