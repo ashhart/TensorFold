@@ -24,6 +24,10 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     const draft_config = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"Qwen DFlash2 config:"} }));
     b.step("test-qwen35-draft-config-host", "DFlash2 attention declarations agree with the CUDA kernels before loading").dependOn(&draft_config.step);
     step.dependOn(&draft_config.step);
+    const copy_match = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"Qwen copy match:"} }));
+    const copy_match_step = b.step("test-qwen35-copy-match-host", "The dense 27B's copy match beside DSpine, DFlash2 and without a drafter");
+    copy_match_step.dependOn(&copy_match.step);
+    step.dependOn(&copy_match.step);
     const dspine = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"DSpine"} }));
     const dspine_core = b.addRunArtifact(b.addTest(.{ .root_module = mods.core, .filters = &.{"DSpine"} }));
     const dspine_lanes = b.addRunArtifact(b.addTest(.{ .root_module = mods.lanes, .filters = &.{"DSpine"} }));
