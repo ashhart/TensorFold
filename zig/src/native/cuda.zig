@@ -353,7 +353,8 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     const counted = try @import("cuda_streams.zig").count(F, a, loaded, o, .{ .room = room, .model = model, .reserve = after.reserve, .low = low, .window = window, .stream_bytes = served.stream_bytes, .host_cache = host_cache, .host_budget = staging_budget, .share = share }, problem) orelse return null;
     const streams = counted.streams;
     const held = served.stream_bytes * (streams -| free);
-    const final_host_budget = if (host_cache and @hasDecl(F, "snap_save")) budget.hostCacheBytes(a, io, o.prompt_cache_gib, room, held, after.unified) else 0;
+    const cache_room = @import("cuda_streams.zig").cacheRoom(room, served.stream_bytes, free, counted);
+    const final_host_budget = if (host_cache and @hasDecl(F, "snap_save")) budget.hostCacheBytes(a, io, o.prompt_cache_gib, cache_room.room, cache_room.streams, after.unified) else 0;
     const layout = counted.layout;
     const paged = counted.paged;
     if (!try kv_pages.attach(F, a, loaded.ctx, paged, counted.planned, problem) or !try drafted.price(F, a, io, &g.ctx, o.dir, loaded.ctx, &served, problem)) return null;
