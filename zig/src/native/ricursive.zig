@@ -41,7 +41,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         problem.* = switch (err) {
             error.RicursiveNeedsTensorUnits => "the native Ripple engine needs Metal 4 tensor units (an M5 or later) for its prompt GEMM and attention: this Mac's GPU (M1 to M4) has none",
             error.UnqualifiedRicursiveCheckpoint => "the native Ripple engine serves only the checkpoints checked against the release (Ripple-65B-Preview): this ricursive checkpoint's geometry is not one of them",
-            error.UnsupportedRicursivePrecision => "the native Ripple engine serves the publisher's releases as published (ricursiveAI/Ripple-65B-Preview in bf16, or its -NVFP4 MLPs); this checkpoint is quantized otherwise",
+            error.UnsupportedRicursivePrecision, error.UnmeasuredRicursiveBitrate => "the native Ripple engine serves the publisher's releases as published (ricursiveAI/Ripple-65B-Preview in bf16, or its -NVFP4 MLPs); this checkpoint is quantized otherwise",
             else => try std.fmt.allocPrint(a, "the native Ripple engine cannot load this checkpoint ({s})", .{@errorName(err)}),
         };
         return null;
