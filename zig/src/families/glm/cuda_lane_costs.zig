@@ -11,7 +11,7 @@ const dflash = @import("dflash.zig");
 const rule = lanes.cost_rule;
 const cache = lanes.cost_cache;
 
-/// The widths timed, straight lines between: all 32 would add most of a minute to a new build's first load on GB10s.
+/// Timed widths, with straight-line prices between adjacent measurements.
 pub const widths = [_]u32{ 1, 2, 3, 4, 6, 8, 12, 16, 24, 32 };
 /// Entries of `widths` the expert forms race over.
 const race = [_]usize{ 1, 3, 5 };
