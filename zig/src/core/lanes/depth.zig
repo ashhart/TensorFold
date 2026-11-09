@@ -242,7 +242,7 @@ pub const Rule = struct {
         return r.payHoldsFor(whos, sampled, out, whos.len);
     }
 
-    pub fn payHoldsFor(r: *Rule, whos: []const Who, sampled: bool, out: []i64, streams: usize) !void {
+    pub fn payHoldsFor(r: *Rule, whos: []const Who, sampled: bool, out: []i64, total_streams: usize) !void {
         if (whos.len > r.batch_rows) return error.BadHoldStreamCount;
         if (r.hold_order.len == 0) r.hold_order = try r.gpa.alloc(usize, r.batch_rows);
         const order = r.hold_order[0..whos.len];
@@ -270,7 +270,8 @@ pub const Rule = struct {
             }
         };
         std.mem.sort(usize, order[0..m], Ctx{ .r = r, .whos = whos }, Ctx.less);
-        const paired = r.sharedPrice(streams, sampled);
+        const paired = r.sharedPrice(total_streams, sampled);
+        const streams = if (paired != null) total_streams else whos.len;
         const fixed = if (paired) |p| p.fixed else r.fixedMs(streams, sampled);
         var rows: f64 = @floatFromInt(streams);
         var tokens = rows;
@@ -309,7 +310,9 @@ pub const Rule = struct {
     }
 
     /// Non-head streams still contribute their plain rows to a shared round's width and exact-count price.
-    pub fn budgetsFor(r: *Rule, whos: []Who, probe: Probe, sampled: bool, out: []i64, streams: usize) !void {
+    pub fn budgetsFor(r: *Rule, whos: []Who, probe: Probe, sampled: bool, out: []i64, total_streams: usize) !void {
+        const paired = r.sharedPrice(total_streams, sampled);
+        const streams = if (paired != null) total_streams else whos.len;
         // drafts lose here: none asked, no head pass
         if (r.plain_streams > 0 and whos.len >= r.plain_streams) return @memset(out, 0);
         if (r.confidence_floor != null) {
@@ -323,7 +326,7 @@ pub const Rule = struct {
                 o.* = if (r.granted_depth) inner else try r.headDepth(w, @min(inner, granted + r.k.draft_slack), probe);
             }
             if (r.granted_depth) capPass(out, r.batch_rows);
-            if (r.granted_depth and r.k.hold_costs.len > 0) try r.payHoldsFor(whos, sampled, out, streams);
+            if (r.granted_depth and r.k.hold_costs.len > 0) try r.payHoldsFor(whos, sampled, out, total_streams);
             return;
         }
         const most = try r.gpa.alloc(i64, whos.len);
@@ -342,7 +345,6 @@ pub const Rule = struct {
         defer r.gpa.free(ones);
         @memset(ones, 1);
         const head: alloc.HeadCost = .{ .step_ms = r.sharedStepMs(), .batched = r.batched_heads, .row_ms = r.row_cost.extraMs(whos.len, sampled), .least_rows = r.row_cost.leastRows(whos.len, sampled) };
-        const paired = r.sharedPrice(streams, sampled);
         const all_counts = if (paired) |p|
             try alloc.allocateDrafts(r.gpa, ones, probs, r.shared_costs, p.fixed, r.row_cost.capRows(streams, sampled, @max(streams, r.batch_rows)), .{ .plain_ms = p.plain, .step_ms = r.sharedStepMs(), .extra_step_ms = r.draft_step_ms, .batched = r.batched_heads and pricedBatched(), .row_ms = p.row, .least_rows = r.row_cost.leastRows(streams, sampled) })
         else if (r.draft_step_ms != 0)
@@ -479,6 +481,7 @@ test {
     _ = @import("depth_test.zig");
     _ = @import("shared_price_test.zig");
     _ = @import("shared_verify_price_test.zig");
+    _ = @import("shared_warm_price_test.zig");
 }
 
 test {
