@@ -17,18 +17,30 @@ const Fake = struct {
     sum: u64 = 0,
     saves: usize = 0,
     minimum: u32,
+    ends: bool = false,
+    capture: bool = false,
+    captured: ?struct { ids: []u32, cuts: []u32 } = null,
     const Saved = struct { at: u32, sum: u64 };
     fn engine(f: *@This()) api.Engine {
         return .{ .ctx = f, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
     }
     fn info(ptr: *anyopaque) api.Info {
         const f: *@This() = @ptrCast(@alignCast(ptr));
-        var out: api.Info = .{ .context_window = 32768, .prefill_step = 4096, .prompt_cache = true };
+        var out: api.Info = .{ .context_window = 32768, .prefill_step = 4096, .prompt_cache = true, .prefill_turn_ends = f.ends };
         if (@hasField(api.Info, "prefill_min_chunk")) out.prefill_min_chunk = f.minimum;
         return out;
     }
-    fn submit(_: *anyopaque, _: api.Id, _: *const api.Request, _: api.Sink) api.SubmitError!void {
-        return error.Closed;
+    fn submit(ptr: *anyopaque, id: api.Id, r: *const api.Request, sink: api.Sink) api.SubmitError!void {
+        const f: *@This() = @ptrCast(@alignCast(ptr));
+        if (!f.capture) return error.Closed;
+        const ids = a.dupe(u32, r.prompt) catch return error.Busy;
+        const cuts = a.dupe(u32, r.chunks) catch {
+            a.free(ids);
+            return error.Busy;
+        };
+        f.captured = .{ .ids = ids, .cuts = cuts };
+        const e: api.Event = .{ .finished = .{ .reason = .length, .stats = .{} } };
+        sink.event(sink.ctx, id, &e);
     }
     fn cancel(_: *anyopaque, _: api.Id) void {}
     fn status(_: *anyopaque, out: *api.Status, _: []u32) void {
@@ -174,4 +186,48 @@ test "turn starts: dropped reasoning shares the user end but not the reply endpo
     }
     const same = std.mem.indexOfDiff(u32, endpoints[0], endpoints[1]).?;
     try t.expect(same >= before.history_len and same < endpoints[1].len);
+}
+
+test "turn ends: rendered warm and chat requests share the inferred complete user-header cut" {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var files = try fixture.Fixture.init(alloc, 0);
+    defer files.deinit();
+    var problem: []const u8 = "";
+    const hf = try HfText.load(alloc, t.io, files.path, null, alloc, &problem);
+    defer hf.deinit();
+    var f: Fake = .{ .minimum = 1, .ends = true, .capture = true };
+    defer if (f.captured) |c| {
+        a.free(c.ids);
+        a.free(c.cuts);
+    };
+    const srv = try Server.init(alloc, t.io, f.engine(), hf.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false }, null);
+    defer srv.deinit();
+    srv.info.warm_turns = true;
+    var messages: std.ArrayList(json.Value) = .empty;
+    try messages.append(alloc, try message(alloc, "user", "First question?"));
+    const reply = try message(alloc, "assistant", "Fixed reply.");
+    const body = try json.newObject(alloc);
+    try body.put(alloc, "messages", .{ .array = messages.items });
+    var cx: errors.Cx = .{ .a = alloc };
+    const input = try openai.chatInput(srv, &cx, .{ .object = body });
+    const initial = try chat.prepare(srv, &cx, input, Never{});
+    defer srv.release(initial.preparing, initial.request);
+    try t.expect(std.mem.indexOfScalar(u32, initial.request.chunks, @intCast(initial.request.prompt.len)) != null);
+    @import("warm.zig").reply(srv, input, reply, false, null, initial.request.prompt.len);
+    const warm = f.captured orelse return error.MissingWarm;
+    try t.expect(std.mem.indexOfScalar(u32, warm.cuts, @intCast(warm.ids.len)) != null);
+    try messages.append(alloc, reply);
+    try messages.append(alloc, try message(alloc, "user", "Next question?"));
+    try body.put(alloc, "messages", .{ .array = messages.items });
+    const next_input = try openai.chatInput(srv, &cx, .{ .object = body });
+    const next = try chat.prepare(srv, &cx, next_input, Never{});
+    defer srv.release(next.preparing, next.request);
+    try t.expectEqualSlices(u32, warm.ids, next.request.prompt[0..warm.ids.len]);
+    var n: usize = 0;
+    for (next.request.chunks) |cut| {
+        if (cut <= warm.ids.len) n += 1;
+    }
+    try t.expectEqualSlices(u32, warm.cuts, next.request.chunks[0..n]);
 }

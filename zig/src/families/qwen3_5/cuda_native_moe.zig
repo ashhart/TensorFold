@@ -29,6 +29,8 @@ pub const snap_grid = native.snap_grid;
 pub const kept_disk = native.kept_disk;
 
 pub const request_starts = native.request_starts;
+pub const request_turn_ends = native.request_turn_ends;
+pub const warm_quiet = native.warm_quiet;
 pub const request_starts_switch = native.request_starts_switch;
 pub const explains_open = native.explains_open;
 pub const vision = native.vision;

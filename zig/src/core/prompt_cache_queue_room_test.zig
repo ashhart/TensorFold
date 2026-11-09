@@ -39,7 +39,7 @@ test "queued cache: endpoint has priority over a cheaper optional rewind with ex
     const primary = reserve.endpointFor(&s, &words, 12, 20, &.{}, &.{});
     try std.testing.expectEqual(@as(u32, 19), primary);
     const marks = try a.dupe(u32, &.{ 4, 19 });
-    const fitted = try reserve.fitting(&s, a, &words, marks, &.{}, s.entries.items[0], 20, primary);
+    const fitted = try reserve.fitting(&s, a, &words, marks, &.{}, &.{}, s.entries.items[0], 20, primary);
     defer a.free(fitted);
     try std.testing.expectEqualSlices(u32, &.{19}, fitted);
 }
@@ -60,7 +60,7 @@ test "queued cache: branched rewind and multiply borrowed restores cannot promis
         }
         defer e.borrowers = 0;
         s.reservation_guard = .{ .ctx = &f, .needed = idle };
-        const marks = try reserve.fitting(&s, a, &words, try a.dupe(u32, &.{16}), &.{}, e, 20, 16);
+        const marks = try reserve.fitting(&s, a, &words, try a.dupe(u32, &.{16}), &.{}, &.{}, e, 20, 16);
         defer a.free(marks);
         try std.testing.expectEqual(@as(usize, 0), marks.len);
         try std.testing.expectEqual(@as(u64, 1), s.counts.trimmed);

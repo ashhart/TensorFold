@@ -53,6 +53,8 @@ test {
     _ = @import("cuda_prefix_fault_test.zig");
     _ = @import("cuda_pend_test.zig");
     _ = @import("cuda_reuse_pages_test.zig");
+    _ = @import("cuda_prefill.zig");
+    _ = @import("cuda_reuse_exact_test.zig");
 }
 
 pub const slide = @import("cuda_slide.zig");

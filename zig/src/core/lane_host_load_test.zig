@@ -134,11 +134,11 @@ test "a request that finds no lane memory queues again and counts one requeue" {
     ledger.detach(false);
 }
 
-test "a warm pass that steps aside for a request counts one yield; its cancel counts none" {
+test "warm queue: deferral counts one yield and requeue; explicit cancellation adds neither" {
     var rig: Rig = undefined;
     try rig.init(.{ .lanes = 2, .warm_turns = true });
     defer rig.deinit();
-    rig.host.warm_quiet = 30 * std.time.ns_per_s; // it waits for quiet: the request ends the wait
+    rig.host.warm_quiet = 100 * std.time.ns_per_ms; // foreground work interrupts the first wait
     var ledger: Ledger = .init(std.testing.io);
     ledger.attach(rig.host.engine());
     try rig.host.start();
@@ -156,9 +156,10 @@ test "a warm pass that steps aside for a request counts one yield; its cancel co
         std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
     }
     try rig.host.engine().submit(2, &request, real.sink());
-    try std.testing.expectEqual(Reason.cancelled, warm.wait());
+    try std.testing.expectEqual(Reason.length, warm.wait());
     _ = real.wait();
     try std.testing.expectEqual(@as(u64, 1), ledger.read().requests.?.yields);
+    try std.testing.expectEqual(@as(u64, 1), ledger.read().requests.?.requeued);
     var cancelled: Box = .{};
     try rig.host.engine().submit(3, &warm_request, cancelled.sink());
     while (true) {

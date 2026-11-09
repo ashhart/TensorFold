@@ -49,6 +49,9 @@ const lfm2_vision = "--vision: LFM2 reads the checkpoint's images through its ow
 
 /// A family takes --drafter only if it says so, and --learn-conversations only as Nemotron; null: `o` may open `F`.
 pub fn family(comptime F: type, o: api.Open) ?[]const u8 {
+    if (@hasDecl(F, "request_turn_ends") and F.request_turn_ends and o.learn != null and
+        @import("cuda_snaps.zig").requestStep(F) > 0)
+        return "TF_QWEN_REQUEST_STARTS=1 keys RAM states by prompt cuts; disk states do not hold those cuts: unset request starts or serve without --learn";
     if (o.vision != null and !(@hasDecl(F, "Options") and @hasField(F.Options, "vision")))
         return "--vision: this CUDA family reads no images; serve it without --vision";
     const ranked = @hasDecl(F, "Options") and @hasField(F.Options, "rank");

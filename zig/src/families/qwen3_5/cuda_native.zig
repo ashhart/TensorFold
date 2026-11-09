@@ -44,8 +44,7 @@ pub const prompt_rows: u32 = E.max_rows;
 pub const takes_drafter = true;
 /// A request's pages hold one more forward past its prompt and reply (TF_QWEN_KV_PAGES).
 pub const window_rows: u32 = pages_mod.window_rows;
-
-/// Kept prompt states for the shared cache (cuda_reuse.zig) on the host budget, on the zero-anchored chunk grid.
+/// Kept prompt states on the host budget, at cold cuts on the grid or explicit request starts (cuda_reuse.zig).
 pub const snap_bytes = reuse.bytes;
 pub const snap_save = reuse.save;
 pub const snap_restore = reuse.restore;
@@ -58,11 +57,12 @@ pub const kept_disk = @import("cuda_disk.zig");
 
 /// cuda_prefill cuts a cold pass at the request's chunk starts too, so the server may send its message starts.
 pub const request_starts = true;
+/// Request-start mode also keeps template header ends and warms replies using the same prompt cuts.
+pub const request_turn_ends = true;
+pub const warm_quiet: u64 = 150 * std.time.ns_per_ms;
 pub const request_starts_switch = "TF_QWEN_REQUEST_STARTS";
-
 /// explain() words open refusals too (--vision on a checkpoint without a tower it reads).
 pub const explains_open = true;
-
 /// The server's reading of the room left now; null if unreadable.
 pub const Room = struct { ctx: *anyopaque, read: *const fn (*anyopaque) ?u64 };
 /// `room` and `drafter` size an EXL3 checkpoint's load: its embedding rows go to host memory when the card is short.

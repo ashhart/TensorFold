@@ -16,10 +16,8 @@ pub const EmbeddingBatch = lanes.embedding.Batch;
 pub const embedding_vector = @import("embedding_vector.zig");
 pub const load_ledger = @import("load_ledger.zig");
 pub const kv_ledger = @import("kv_ledger.zig");
-
 /// One image of a request (``Request.images``): the tower's input and the placeholder rows its output replaces.
 pub const Image = lanes.stream.Image;
-
 /// A prompt's reproducible seed (``seed_for``), for requests that name none.
 pub const seedFor = lanes.sampling.seedFor;
 
@@ -197,6 +195,8 @@ pub const Info = struct {
     prefill_step: u32 = 0,
     /// The minimum distance between template message cuts; exact-start families may keep adjacent turns.
     prefill_min_chunk: u32 = 256,
+    /// Request-cut families include complete template headers, so warmed turn ends are cold cuts too.
+    prefill_turn_ends: bool = false,
     /// The engine keeps prompt states between requests, so ``prefilled`` counts the tokens it restored.
     prompt_cache: bool = false,
     /// Startup cache budget and the smallest state admitted by the family's existing keep plan.

@@ -13,6 +13,7 @@ pub const Plan = struct {
     openers: []const u32 = &.{}, // the special tokens that open any message
     assistant: []const u32 = &.{}, // the tokens that open an assistant message
     min_chunk: u32 = 256,
+    ends: []const []const u32 = &.{}, // complete template headers whose ends are reusable turn cuts
 
     /// Resume points: every assistant message's start, and the second message's.
     fn points(p: Plan, a: Allocator, ids: []const u32) ![]u32 {
@@ -30,6 +31,10 @@ pub const Plan = struct {
         if (k > 0 and ids.len >= k) for (0..ids.len - k + 1) |i| {
             if (std.mem.eql(u32, ids[i..][0..k], p.assistant)) try found.append(a, @intCast(i));
         };
+        for (p.ends) |header| if (header.len > 0 and header.len <= ids.len) {
+            for (0..ids.len - header.len + 1) |i| if (std.mem.eql(u32, ids[i..][0..header.len], header))
+                try found.append(a, @intCast(i + header.len));
+        };
         std.mem.sort(u32, found.items, {}, std.sort.asc(u32));
         var out: std.ArrayList(u32) = .empty;
         for (found.items) |q| if (q > 0 and (out.items.len == 0 or out.items[out.items.len - 1] != q)) try out.append(a, q);
@@ -39,7 +44,7 @@ pub const Plan = struct {
     /// The starts after 0 of `ids`' chunks; empty with no step.
     pub fn starts(p: Plan, a: Allocator, ids: []const u32) ![]const u32 {
         if (p.step == 0) return &.{};
-        const found = if ((p.openers.len > 0 or p.assistant.len > 0) and ids.len > 1) try p.points(a, ids) else &[_]u32{};
+        const found = if ((p.openers.len > 0 or p.assistant.len > 0 or p.ends.len > 0) and ids.len > 1) try p.points(a, ids) else &[_]u32{};
         var out: std.ArrayList(u32) = .empty;
         var last: usize = 0;
         var i: usize = 0;
@@ -47,7 +52,11 @@ pub const Plan = struct {
             while (i < found.len and found[i] < last + p.min_chunk) i += 1; // too close to the last start: merged into its chunk
             var next = last + p.step;
             if (i < found.len and found[i] < next) next = found[i];
-            if (next >= ids.len) return out.items;
+            if (next >= ids.len) {
+                if (p.ends.len > 0 and std.mem.indexOfScalar(u32, found, @intCast(ids.len)) != null)
+                    try out.append(a, @intCast(ids.len));
+                return out.items;
+            }
             try out.append(a, @intCast(next));
             last = next;
         }
@@ -68,6 +77,7 @@ const Role = enum { user, assistant };
 
 /// ``message_markers``: the openers and assistant header the chat template renders, from probe conversations.
 pub fn markers(srv: *Server, a: Allocator, step: u32) !Plan {
+    var ends: std.ArrayList([]const u32) = .empty;
     var pieces: [2]std.ArrayList([]const u32) = .{ .empty, .empty };
     var parted: std.ArrayList(struct { before: []const u32, after: []const u32, role: Role }) = .empty;
     const words = [2][4][]const u8{ .{ "Alpha", "Beta", "Gamma", "Delta" }, .{ "one two", "three four", "five six", "seven eight" } };
@@ -83,6 +93,10 @@ pub fn markers(srv: *Server, a: Allocator, step: u32) !Plan {
         for (&r, 1..) |*out, k| out.* = render(srv, a, talk[0..k], thinking, false) orelse return .{ .step = step };
         const g1 = render(srv, a, talk[0..1], thinking, true) orelse return .{ .step = step };
         const g3 = render(srv, a, talk[0..3], thinking, true) orelse return .{ .step = step };
+        if (srv.info.prefill_turn_ends) for ([_][2][]const u32{ .{ r[0], g1 }, .{ r[2], g3 } }) |pr| {
+            if (pr[1].len > pr[0].len and std.mem.eql(u32, pr[0], pr[1][0..pr[0].len]))
+                try addEnd(a, &ends, pr[1][pr[0].len..]);
+        };
         const pairs = [_]struct { []const u32, []const u32, Role }{ .{ r[0], r[1], .assistant }, .{ r[1], r[2], .user }, .{ r[2], r[3], .assistant }, .{ r[0], g1, .assistant }, .{ r[2], g3, .assistant } };
         for (pairs) |pr| {
             if (pr[1].len > pr[0].len and std.mem.eql(u32, pr[1][0..pr[0].len], pr[0])) try pieces[@backingInt(pr[2])].append(a, pr[1][pr[0].len..]) else try parted.append(a, .{ .before = pr[0], .after = pr[1], .role = pr[2] });
@@ -108,11 +122,18 @@ pub fn markers(srv: *Server, a: Allocator, step: u32) !Plan {
     openers = try openersOf(srv, a, &pieces);
     const header = common(pieces[1].items);
     const user = common(pieces[0].items);
+    if (srv.info.prefill_turn_ends and user.len > 0) try addEnd(a, &ends, user);
     const cut = for (header, 0..) |t, i| {
         if (i >= user.len or user[i] != t) break i;
     } else null;
     const special = header.len > 0 and srv.text.isSpecial(header[0]);
-    return .{ .step = step, .openers = openers, .assistant = if (cut != null and special) header[0 .. cut.? + 1] else &.{} };
+    return .{ .step = step, .openers = openers, .assistant = if (cut != null and special) header[0 .. cut.? + 1] else &.{}, .ends = ends.items };
+}
+
+fn addEnd(a: Allocator, ends: *std.ArrayList([]const u32), header: []const u32) !void {
+    if (header.len == 0) return;
+    for (ends.items) |old| if (std.mem.eql(u32, old, header)) return;
+    try ends.append(a, header);
 }
 
 fn render(srv: *Server, a: Allocator, talk: []Value, thinking: bool, generation: bool) ?[]const u32 {
@@ -166,4 +187,18 @@ test "chunk starts match PrefillPlan.chunks" {
     try std.testing.expectEqualSlices(u32, &.{ 8, 14, 22, 28 }, try (Plan{ .step = 8, .openers = &.{10}, .assistant = &.{ 10, 7 }, .min_chunk = 4 }).starts(a, &talk));
     try std.testing.expectEqualSlices(u32, &.{ 8, 16 }, try (Plan{ .step = 8 }).starts(a, &ids));
     try std.testing.expectEqualSlices(u32, &.{}, try (Plan{}).starts(a, &ids));
+}
+
+test "turn ends: warm and follow-up share complete user and generation header cuts" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ids = [_]u32{ 10, 1, 11, 20, 21, 10, 2, 11, 31, 32, 10, 1, 11, 40, 10, 2, 11 };
+    const p: Plan = .{ .step = 8, .min_chunk = 1, .ends = &.{ &.{ 10, 1, 11 }, &.{ 10, 2, 11 } } };
+    const warm = try p.starts(a, ids[0..13]);
+    const next = try p.starts(a, &ids);
+    try std.testing.expectEqualSlices(u32, &.{ 3, 8, 13 }, warm);
+    try std.testing.expectEqualSlices(u32, &.{ 3, 8, 13, 17 }, next);
+    try std.testing.expectEqualSlices(u32, warm, next[0..warm.len]);
+    try std.testing.expectEqualSlices(u32, &.{ 8, 16 }, try (Plan{ .step = 8, .min_chunk = 1 }).starts(a, &ids));
 }

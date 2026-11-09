@@ -27,7 +27,7 @@ const Snapshot = struct {
 
     fn protect(out: *Snapshot, h: *LaneHost, current: *Job, job: *Job) !void {
         for (h.cache.?.by_position.items) |e| if (!e.expired and
-            h.cache.?.usable(e.at, job.request.chunks) and extends(current, job, e))
+            h.cache.?.usable(e.at, job.request.chunks) and @import("prompt_cache_cuts.zig").matches(h.cache.?, e, job.request.chunks) and extends(current, job, e))
         {
             if (std.mem.indexOfScalar(*const pc.Entry, out.entries.items, e) == null) try out.entries.append(h.gpa, e);
             break;

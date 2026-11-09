@@ -90,6 +90,7 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     const prompt_layout = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"Qwen prompt layout:"} }));
     b.step("test-qwen35-prompt-layout-host", "Actual whole and paged CUDA prompt ABI and stride calculations without devices").dependOn(&prompt_layout.step);
     step.dependOn(&prompt_layout.step);
+    b.step("test-qwen35-turn-ends-host", "Production Qwen header endpoint hook without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{ "turn ends:", "Qwen endpoint bytes:" } })).step);
     const reuse_pages = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"Qwen paged reuse:"} }));
     b.step("test-qwen35-reuse-pages-host", "Paged prompt-state saves and restores into host or device copies without devices").dependOn(&reuse_pages.step);
     step.dependOn(&reuse_pages.step);

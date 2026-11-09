@@ -6,7 +6,11 @@ const api = @import("engine_api");
 pub fn cacheRules(comptime F: type) api.prompt_cache.Rules {
     var rules: api.prompt_cache.Rules = .{ .lookahead = 1, .min_prompt = 0 };
     if (@hasDecl(F, "snap_lookahead")) rules.lookahead = F.snap_lookahead;
-    if (@hasDecl(F, "warm_quiet")) rules.warm = .waits;
+    if (warmTurns(F)) rules.warm = .waits;
+    if (@hasDecl(F, "request_turn_ends") and F.request_turn_ends and requestStep(F) > 0) {
+        rules.cut_sensitive = true;
+        rules.warm_usable = true;
+    }
     if (@hasDecl(F, "snap_fork")) rules.fork = F.snap_fork; // opt-in, a family at a time after its device check
     if (@hasDecl(F, "snap_tail")) rules.tail = if (@import("core").profile.lookup(F.snap_tail)) |v| std.mem.eql(u8, v, "1") else false;
     if (@hasDecl(F, "snap_grid")) {
@@ -14,6 +18,12 @@ pub fn cacheRules(comptime F: type) api.prompt_cache.Rules {
         rules.grid = F.snap_grid;
     }
     return rules;
+}
+
+/// A family opts into warming; request-cut families do so only with their explicit arithmetic switch.
+pub fn warmTurns(comptime F: type) bool {
+    if (!@hasDecl(F, "warm_quiet")) return false;
+    return if (@hasDecl(F, "request_turn_ends") and F.request_turn_ends) requestStep(F) > 0 else true;
 }
 
 /// Native CUDA families own their grid, independently of the server's template chunk starts.
@@ -219,4 +229,31 @@ test "request starts: opt in is explicit, eligible and independent of cache rule
     _ = requestStepFor(Qwen, "1");
     try std.testing.expectEqualDeep(before, cacheRules(Qwen));
     try std.testing.expectEqual(@import("profile").Class.arithmetic, @import("profile").entry(.TF_QWEN_REQUEST_STARTS).class);
+}
+
+test "request starts: Qwen turn ends warm only in explicit request-cut mode and refuse disk tiers" {
+    const env = @import("sys").env;
+    const profile = @import("profile");
+    const saved = if (profile.get(.TF_QWEN_REQUEST_STARTS)) |v| try std.testing.allocator.dupeSentinel(u8, v, 0) else null;
+    defer if (saved) |v| {
+        _ = env.setenv("TF_QWEN_REQUEST_STARTS", v, 1);
+        std.testing.allocator.free(v);
+    } else {
+        _ = env.unsetenv("TF_QWEN_REQUEST_STARTS");
+    };
+    inline for (@import("cuda.zig").registry) |F| if (@hasDecl(F, "request_turn_ends")) {
+        _ = env.unsetenv("TF_QWEN_REQUEST_STARTS");
+        const Per = @import("core").kv_pool.PerRequest;
+        const loaded = .{ .per_request = @as(?Per, .{ .layout = .{ .fixed_bytes = 1, .token_bytes = 1, .page_tokens = 0, .snap_bytes = 0 } }), .stream_bytes = @as(u64, 32) };
+        try std.testing.expect(@import("cuda_ledger.zig").wanted(F, loaded, 32));
+        try std.testing.expect(!warmTurns(F));
+        try std.testing.expect(!cacheRules(F).cut_sensitive);
+        _ = env.setenv("TF_QWEN_REQUEST_STARTS", "1", 1);
+        try std.testing.expect(warmTurns(F));
+        try std.testing.expect(!@import("cuda_ledger.zig").wanted(F, loaded, 32));
+        try std.testing.expect(cacheRules(F).cut_sensitive and cacheRules(F).warm_usable);
+        const o: api.Open = .{ .dir = "missing", .model_type = F.model_type, .learn = "states", .learn_conversations = true };
+        const why = @import("cuda_refusal.zig").family(F, o) orelse return error.MissingCutIdentityRefusal;
+        try std.testing.expect(std.mem.indexOf(u8, why, "disk states do not hold those cuts") != null);
+    };
 }

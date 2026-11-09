@@ -41,7 +41,7 @@ pub fn declared(loaded: anytype) ?PerRequest {
 pub fn wanted(comptime F: type, loaded: anytype, served_stream_bytes: u64) bool {
     if (declared(loaded) == null) return false;
     // no path yet routes a warm pass's or a lone driver's LaneMemory back to the queue
-    if (comptime @hasDecl(F, "warm_quiet")) return false;
+    if (@import("cuda_snaps.zig").warmTurns(F)) return false;
     const L = @TypeOf(loaded);
     if (comptime @hasField(L, "lone")) if (loaded.lone != null) return false;
     if (comptime @hasField(L, "reserve")) return false; // streams made at load are whole windows already

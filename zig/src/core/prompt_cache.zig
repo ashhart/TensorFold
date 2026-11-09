@@ -81,6 +81,7 @@ pub const Entry = struct {
     images: []images.Identity = &.{}, // exact image identities through the keyed prefix, including lookahead
     tokens: []u32, // the state's tokens and `lookahead` more
     decode_spans: []modes.Span = &.{}, // canonical row arithmetic through at, excluding lookahead
+    cuts: []u32 = &.{}, // canonical request cuts through at on cut-sensitive families
     at: u32,
     saved: Saved,
     bytes: u64,
@@ -153,6 +154,7 @@ pub const Store = struct {
         s.family.vtable.drop(s.family.ptr, e.saved);
         s.gpa.free(if (e.own.len > 0) e.own else e.tokens);
         s.gpa.free(e.decode_spans);
+        s.gpa.free(e.cuts);
         s.gpa.free(e.images);
         if (e.own.len == 0 or e.last.ptr != e.own.ptr) s.gpa.free(e.last);
         e.ext.deinit(s.gpa);
@@ -165,7 +167,7 @@ pub const Store = struct {
         const e = s.entries.orderedRemove(i);
         policy.unlink(s, e);
         s.held -= e.bytes;
-        if (s.disk) |r| if (!e.expired) rows.write.evicted(r, e); // --spill-gib: stage an owned copy before the entry goes
+        if (s.disk) |r| if (!e.expired and !s.rules.cut_sensitive) rows.write.evicted(r, e); // --spill-gib: stage an owned copy before the entry goes
         s.free(e);
     }
 
@@ -229,7 +231,7 @@ pub const Store = struct {
         var best: ?u32 = null;
         for (s.entries.items) |e| {
             if (e.expired or e.at > at or at - e.at >= s.rules.min_gap or e.tokens.len > prompt.len or !s.usable(e.at, starts)) continue;
-            if (!std.mem.eql(u32, prompt[0..e.tokens.len], e.tokens) or !modes.equal(e.decode_spans, spans, e.at) or !images.matches(s, e)) continue;
+            if (!std.mem.eql(u32, prompt[0..e.tokens.len], e.tokens) or !@import("prompt_cache_cuts.zig").matches(s, e, starts) or !modes.equal(e.decode_spans, spans, e.at) or !images.matches(s, e)) continue;
             if (best == null or e.at > best.?) best = e.at;
         }
         return best;
@@ -266,7 +268,7 @@ pub const Store = struct {
                 s.resumedWithReason(e, prompt, null);
                 if (fresh_marks) |m| if (m.ptr != l.marks.ptr) a.free(m);
                 // Restored: this state may go too; a peer restores before it drops.
-                s.reserve(prompt, @intCast(prompt.len), null, l.marks, spans, @import("prompt_cache_reserve.zig").endpointFor(s, prompt, at, history_len, starts, spans));
+                s.reserve(prompt, @intCast(prompt.len), null, l.marks, starts, spans, @import("prompt_cache_reserve.zig").endpointFor(s, prompt, at, history_len, starts, spans));
                 return .{ .from = at, .marks = l.marks };
             } else |err| {
                 // a refused state is dropped, then the next shorter RAM state is tried before the pass from the start
@@ -277,7 +279,7 @@ pub const Store = struct {
         }
         const marks_ = fresh_marks orelse l.marks;
         if (fresh_marks != null and l.marks.ptr != marks_.ptr) a.free(l.marks);
-        s.reserve(prompt, @intCast(prompt.len), null, marks_, spans, @import("prompt_cache_reserve.zig").endpointFor(s, prompt, 0, history_len, starts, spans));
+        s.reserve(prompt, @intCast(prompt.len), null, marks_, starts, spans, @import("prompt_cache_reserve.zig").endpointFor(s, prompt, 0, history_len, starts, spans));
         return .{ .marks = marks_ };
     }
 
@@ -314,7 +316,7 @@ pub const Store = struct {
         {
             kept.rewind = true;
         };
-        const e = if (disk)
+        const e = if (disk and !s.rules.cut_sensitive)
             rows.read.recall(s, prompt, born, starts, spans, s.recall(prompt, born, starts, spans, s.find(prompt, starts, spans)))
         else
             s.find(prompt, starts, spans);
@@ -338,8 +340,8 @@ pub const Store = struct {
         if (history_len == 0 and primary == 0) for (marks_) |at| {
             if (at != s.active_rewind_at) primary = @max(primary, at);
         };
-        s.reserve(prompt, born, e, marks_, spans, primary);
-        const fitted = try @import("prompt_cache_reserve.zig").fitting(s, a, prompt, marks_, spans, e, born, primary);
+        s.reserve(prompt, born, e, marks_, starts, spans, primary);
+        const fitted = try @import("prompt_cache_reserve.zig").fitting(s, a, prompt, marks_, starts, spans, e, born, primary);
         if (e) |entry| entry.borrowers += 1;
         return .{ .entry = e, .marks = fitted };
     }
@@ -505,6 +507,7 @@ test {
     _ = @import("prompt_cache_review_test.zig");
     _ = @import("prompt_cache_promised_test.zig");
     _ = @import("prompt_cache_queue_room_test.zig");
+    _ = @import("prompt_cache_cut_test.zig");
     _ = @import("prompt_cache_index_test.zig");
     _ = @import("prompt_cache_test.zig");
     _ = @import("prompt_cache_learn_test.zig");

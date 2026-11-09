@@ -26,11 +26,11 @@ pub const Guard = struct {
     }
 };
 
-fn exists(s: *const pc.Store, prompt: []const u32, at: u32, spans: []const modes.Span) bool {
+fn exists(s: *const pc.Store, prompt: []const u32, at: u32, starts: []const u32, spans: []const modes.Span) bool {
     const n = @as(usize, at) + s.rules.lookahead;
     for (s.entries.items) |e| {
         if (!e.expired and e.at == at and e.tokens.len == n and n <= prompt.len and
-            std.mem.eql(u32, e.tokens, prompt[0..n]) and modes.equal(e.decode_spans, spans, at) and images.matches(s, e))
+            std.mem.eql(u32, e.tokens, prompt[0..n]) and @import("prompt_cache_cuts.zig").matches(s, e, starts) and modes.equal(e.decode_spans, spans, at) and images.matches(s, e))
             return true;
     }
     return false;
@@ -83,10 +83,10 @@ fn priority(marks: []const u32, endpoint: u32) ?u32 {
 }
 
 /// A guarded reservation makes room for the endpoint alone; other copies cannot displace a newest state.
-pub fn reserve(s: *pc.Store, prompt: []const u32, born: u32, from: ?*pc.Entry, marks: []const u32, spans: []const modes.Span, endpoint: u32) void {
+pub fn reserve(s: *pc.Store, prompt: []const u32, born: u32, from: ?*pc.Entry, marks: []const u32, starts: []const u32, spans: []const modes.Span, endpoint: u32) void {
     if (s.reservation_guard != null) {
         const at = priority(marks, endpoint) orelse return;
-        if (exists(s, prompt, at, spans)) return;
+        if (exists(s, prompt, at, starts, spans)) return;
         const need = s.family.vtable.bytes(s.family.ptr, at);
         if (need > s.budget or s.most == 0) return;
         const credit = reclaimable(s, from, prompt, born);
@@ -107,7 +107,7 @@ pub fn reserve(s: *pc.Store, prompt: []const u32, born: u32, from: ?*pc.Entry, m
     }
     var need: u64 = 0;
     var new: usize = 0;
-    for (marks) |at| if (!exists(s, prompt, at, spans)) {
+    for (marks) |at| if (!exists(s, prompt, at, starts, spans)) {
         need += s.family.vtable.bytes(s.family.ptr, at);
         new += 1;
     };
@@ -119,7 +119,7 @@ pub fn reserve(s: *pc.Store, prompt: []const u32, born: u32, from: ?*pc.Entry, m
 }
 
 /// Select the endpoint first; only interior, rewind and extra shared cuts compete for room after it.
-pub fn fitting(s: *pc.Store, a: std.mem.Allocator, prompt: []const u32, marks: []const u32, spans: []const modes.Span, from: ?*pc.Entry, born: u32, endpoint: u32) ![]const u32 {
+pub fn fitting(s: *pc.Store, a: std.mem.Allocator, prompt: []const u32, marks: []const u32, starts: []const u32, spans: []const modes.Span, from: ?*pc.Entry, born: u32, endpoint: u32) ![]const u32 {
     if (s.reservation_guard == null) return marks;
     defer a.free(marks);
     var out: std.ArrayList(u32) = .empty;
@@ -127,7 +127,7 @@ pub fn fitting(s: *pc.Store, a: std.mem.Allocator, prompt: []const u32, marks: [
     var room = future(s, from, prompt, born);
     const end = priority(marks, endpoint);
     if (end) |at| {
-        const bytes = if (exists(s, prompt, at, spans)) 0 else s.family.vtable.bytes(s.family.ptr, at);
+        const bytes = if (exists(s, prompt, at, starts, spans)) 0 else s.family.vtable.bytes(s.family.ptr, at);
         if (bytes == 0 or (bytes <= room.bytes and room.slots > 0)) {
             try out.append(a, at);
             room.bytes -= bytes;
@@ -136,7 +136,7 @@ pub fn fitting(s: *pc.Store, a: std.mem.Allocator, prompt: []const u32, marks: [
     }
     for (marks) |at| {
         if (end == at) continue;
-        const bytes = if (exists(s, prompt, at, spans)) 0 else s.family.vtable.bytes(s.family.ptr, at);
+        const bytes = if (exists(s, prompt, at, starts, spans)) 0 else s.family.vtable.bytes(s.family.ptr, at);
         if (bytes == 0 or (bytes <= room.bytes and room.slots > 0)) {
             try out.append(a, at);
             room.bytes -= bytes;
@@ -147,7 +147,7 @@ pub fn fitting(s: *pc.Store, a: std.mem.Allocator, prompt: []const u32, marks: [
     s.counts.trimmed += marks.len - fitted.len;
     if (s.reservation_guard.?.promise) |promise| {
         var used: Room = .{};
-        for (fitted) |at| if (!exists(s, prompt, at, spans)) {
+        for (fitted) |at| if (!exists(s, prompt, at, starts, spans)) {
             used.bytes +|= s.family.vtable.bytes(s.family.ptr, at);
             used.slots +|= 1;
         };

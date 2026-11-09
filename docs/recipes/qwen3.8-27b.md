@@ -444,3 +444,13 @@ Endpoint, rewind and shared states have priority within the same byte and slot c
 is published in `tensorfold:prompt_cache_states` and `tensorfold:prompt_cache_bytes`; restored tokens also count
 in `tensorfold:prompt_tokens_cached_total`. Synthetic host checks cover the two-request pattern and exact
 output. Real-model parity and TTFT for this state still need the Metal gate.
+
+### CUDA turn endpoints
+
+`TF_QWEN_REQUEST_STARTS=1` also cuts at complete template headers and keeps their ends.
+It warms replies by pre-filling them with prompt arithmetic; it does not retain decoded CUDA rows as prompt states.
+RAM entries must match every cut through the saved row, so a changed cut plan misses safely. The warm pass cuts its
+prompt as the next turn's request does, system message included, so the end it keeps is the state that request resumes.
+This mode refuses `--learn` because disk records do not retain those cuts.
+The default switch-off plan is unchanged. Host tests cover endpoint wiring and exact copied bytes; real-model CUDA
+reply equality, memory and follow-up timings for this extension still need device qualification.

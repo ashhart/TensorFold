@@ -172,6 +172,79 @@ pub fn chunk(self: anytype, stream: *lanes.Stream, f: *Fill, max_rows: u32) !boo
     if (end < ids.len) return false;
     // the reply's rows rotate past the image prompt's positions (rope_delta)
     if (f.media) |m| cache.delta = m.delta;
+    keepEnd(stream, @intCast(end));
     if (self.pages) |p| p.log(ids.len, stream.cached);
     return true;
+}
+
+/// A complete request header is a cold cut in future turns; decoded reply rows are never kept here.
+pub fn keepEnd(stream: *lanes.Stream, at: u32) void {
+    if (stream.untaught or std.mem.indexOfScalar(u32, stream.chunks, at) == null) return;
+    if (stream.reuse.hook) |hook| hook.at(hook.ptr, stream, at);
+}
+
+test "turn ends: production Qwen prompt endpoint hook keeps only a completed header cut" {
+    const Heard = struct {
+        n: usize = 0,
+        at: u32 = 0,
+        fn kept(ptr: *anyopaque, _: *lanes.Stream, at: u32) void {
+            const h: *@This() = @ptrCast(@alignCast(ptr));
+            h.n += 1;
+            h.at = at;
+        }
+    };
+    var heard: Heard = .{};
+    var stream: lanes.Stream = undefined;
+    stream.untaught = false;
+    stream.chunks = &.{ 4096, 5003 };
+    stream.reuse = .{ .hook = .{ .ptr = &heard, .at = Heard.kept } };
+    keepEnd(&stream, 5003);
+    try std.testing.expectEqual(@as(usize, 1), heard.n);
+    try std.testing.expectEqual(@as(u32, 5003), heard.at);
+    keepEnd(&stream, 5002);
+    stream.untaught = true;
+    keepEnd(&stream, 5003);
+    try std.testing.expectEqual(@as(usize, 1), heard.n);
+}
+
+test "turn ends: the actual final CUDA prompt chunk invokes the completed endpoint hook" {
+    const Recorder = struct {
+        calls: usize = 0,
+        fn forward(r: *@This(), _: []const E.Part, _: []const u32, _: E.Keep) !void {
+            r.calls += 1;
+        }
+    };
+    const Hints = struct {
+        fn keep(_: *@This(), _: *E.Cache, _: []const u32, _: usize) anyerror!void {}
+        fn log(_: *@This(), _: usize, _: u32) void {}
+    };
+    const Host = struct {
+        gpa: std.mem.Allocator,
+        e: *Recorder,
+        cache: *E.Cache,
+        prefix: ?*Hints = null,
+        pages: ?*Hints = null,
+        fn cacheOf(h: *@This(), _: *lanes.Stream) !*E.Cache {
+            return h.cache;
+        }
+    };
+    const Heard = struct {
+        at: u32 = 0,
+        fn kept(ptr: *anyopaque, _: *lanes.Stream, at: u32) void {
+            const h: *@This() = @ptrCast(@alignCast(ptr));
+            h.at = at;
+        }
+    };
+    const a = std.testing.allocator;
+    var heard: Heard = .{};
+    var s = try lanes.Stream.init(a, .{ .id = "endpoint", .prompt = &(@as([5003]u32, @splat(3))), .max_new = 1, .chunks = &.{ 4096, 5003 }, .reuse = .{ .hook = .{ .ptr = &heard, .at = Heard.kept } } });
+    defer s.deinit(a);
+    var cache: E.Cache = undefined;
+    cache.delta = 0;
+    var recorder: Recorder = .{};
+    var host: Host = .{ .gpa = a, .e = &recorder, .cache = &cache };
+    var fill: Fill = .{ .at = 4096, .media = null };
+    try std.testing.expect(try chunk(&host, &s, &fill, 0));
+    try std.testing.expectEqual(@as(u32, 5003), heard.at);
+    try std.testing.expectEqual(@as(usize, 1), recorder.calls);
 }

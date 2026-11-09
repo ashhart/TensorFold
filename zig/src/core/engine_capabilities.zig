@@ -15,6 +15,7 @@ pub const Capability = enum {
     prompt_logprobs,
     prompt_cache,
     warm_turns,
+    prefill_turn_ends,
     plain_only,
     decides,
     pictures,

@@ -4,6 +4,8 @@ pub const Rules = struct {
     lookahead: u32 = 0,
     /// Prompt kernels that change arithmetic with a chunk's rows: resume and keep only at the request's chunk starts.
     planned: bool = false,
+    /// RAM-only states also key the exact request cuts; the host refuses disk stores without those keys.
+    cut_sensitive: bool = false,
     /// A planned family's own zero-anchored chunk rows, its starts when a request names none (0: none).
     grid: u32 = 0,
     /// A mark other than the history's is kept only this far from every other mark and the resume point.
