@@ -30,7 +30,7 @@ pub const Pages = struct {
     }
 };
 
-/// The crops and visualisations a request has encoded, against its limits.
+/// The crops a request has encoded, against its limits.
 pub const Encodes = struct {
     count: u32 = 0,
     pixels: u64 = 0,

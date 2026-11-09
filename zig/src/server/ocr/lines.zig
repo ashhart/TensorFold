@@ -20,11 +20,6 @@ pub fn fromBlocks(a: Allocator, page: *const types.OcrPage, geo: api.ocr.Geometr
         const texts = try markdown.plainLines(a, b.content);
         if (texts.len == 0) continue;
         const quad = if (geo == .none) null else b.quad;
-        if (geo == .line) {
-            const text = if (texts.len == 1) texts[0] else try std.mem.join(a, " ", texts);
-            try out.append(a, .{ .text = text, .quad = try check(quad, page.width, page.height), .block = block });
-            continue;
-        }
         const n: f32 = @floatFromInt(texts.len);
         for (texts, 0..) |text, k| {
             const band: ?Quad = if (quad) |q| blk: {
