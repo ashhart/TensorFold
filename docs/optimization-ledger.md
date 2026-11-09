@@ -348,9 +348,11 @@ below; these are estimates for planning a port, not results.
     replies as serial decode. `--mtp-drafts` and `--mtp-confidence` size the drafts on Nemotron and GLM.
 
     GLM CUDA's proposed 32-row prices, three-draft shared MTP cap and wider copy windows are tracked in [#2257].
-    The supplied run used DFlash2 at TP=2 on two GB10s: two-stream chat +0.3%, one-stream code +36%, the other
-    cells level, all replies exact (tokens 52/0). That run does not qualify checkpoint MTP, TP=1 or TP=4,
-    sampled chat or the revised cache identity; these remain open device cells.
+    The TP=2 receipt on two GB10s compares main 973ae7784 with 4b9851c3b: one-stream code 55.4 to 73.7 tok/s
+    (+33.1%), two-stream chat +3.2%, one-stream chat +1.0%, two-stream code +1.3%, prefill within 0.3% and
+    replies 52/0/0 equal/unequal/unverified. The receipt does not identify the drafter mode, so it qualifies
+    neither drafter separately. TP=1, TP=4, sampled runs, copies on, the shared MTP cap on another chip and
+    the revised shared step-price rule remain open device cells.
 
 16. **DFlash and DFlash2 drafters.** An external block drafter reads the target's hidden taps and drafts a block (or a
     tree) a step. It needs a trained drafter for each target; see [training a drafter](recipes/training-a-drafter.md).
