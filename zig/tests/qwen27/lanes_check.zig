@@ -110,7 +110,7 @@ pub fn main(init: std.process.Init) !void {
         states[i + 1] = try direct.fingerprint();
         if (i + 1 < expected.len) try direct.step(id.*);
     }
-    const draft = try lb.Draft.attach(a, &runner, drafter, false);
+    const draft = try lb.Draft.attach(a, &runner, .{ .dflash2 = drafter }, false);
     defer draft.deinit();
     const drafted = try lb.Metal.init(a, &runner, draft);
     defer drafted.deinit();
@@ -149,7 +149,7 @@ pub fn main(init: std.process.Init) !void {
     {
         const q4 = try draft_graph.createQ4(a, model);
         defer q4.deinit();
-        const draft4 = try lb.Draft.attach(a, &runner, q4, false);
+        const draft4 = try lb.Draft.attach(a, &runner, .{ .dflash2 = q4 }, false);
         defer draft4.deinit();
         const back4 = try lb.Metal.init(a, &runner, draft4);
         defer back4.deinit();

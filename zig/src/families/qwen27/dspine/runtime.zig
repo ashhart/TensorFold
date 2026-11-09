@@ -39,16 +39,19 @@ pub const Model = struct {
     packed_w: mtl.Buffer,
     /// TG [vocab, rank] bf16: the final write's projection of each head row through the final norm.
     tg: mtl.Buffer,
-    /// The committed context the caches hold: absolute rows [begin, end).
-    begin: u64 = 0,
+    /// The committed taps, by absolute row modulo the window: a lane's state copies this ring.
+    pending: mtl.Buffer,
     committed_end: u64 = 0,
+    /// The rows the caches hold: absolute [begin, context_end), caught up from the ring before each proposal.
+    begin: u64 = 0,
+    context_end: u64 = 0,
     broken: bool = false,
     residency: ?mtl.ResidencySet.Follow = null,
     prepared: std.AutoHashMapUnmanaged(usize, core.affine4_lane.Adapter) = .empty,
     tiled: std.AutoHashMapUnmanaged(usize, Tiled) = .empty,
     simd: ?simd.Pipelines = null,
     /// The target's LM head in its MLX layout, read again from its files: the base dequantizes candidates' rows.
-    head_copy: ?core.checkpoint_metal.Checkpoint = null,
+    head_copy: ?mtl.Buffer = null,
     head_rows: ?@import("kernels.zig").Head = null,
 
     pub fn shape(m: *const Model) config.Shape {
@@ -66,7 +69,7 @@ pub const Model = struct {
         defer core.checkpoint_host.freeShardFiles(a, shards);
         const m = try a.create(Model);
         errdefer a.destroy(m);
-        m.* = .{ .allocator = a, .target = target, .checkpoint = core.checkpoint_metal.Checkpoint.init(a), .graph = undefined, .mode = mode, .primitives = undefined, .attention = undefined, .topk = undefined, .kernels = undefined, .frame = .{ .allocator = a, .device = target.device, .queue = target.queue }, .caches = &.{}, .packed_w = undefined, .tg = undefined };
+        m.* = .{ .allocator = a, .target = target, .checkpoint = core.checkpoint_metal.Checkpoint.init(a), .graph = undefined, .mode = mode, .primitives = undefined, .attention = undefined, .topk = undefined, .kernels = undefined, .frame = .{ .allocator = a, .device = target.device, .queue = target.queue }, .caches = &.{}, .pending = undefined, .packed_w = undefined, .tg = undefined };
         errdefer m.checkpoint.deinit();
         const later: ?core.checkpoint_metal.Later = if (mode != .bf16) backbone else null;
         for (shards) |file| try m.checkpoint.addFileSplit(target.device, file, "", null, later);
@@ -85,6 +88,8 @@ pub const Model = struct {
         m.checkpoint.closeFiles();
         m.caches = try newCaches(a, target.device, s);
         errdefer freeCaches(a, m.caches);
+        m.pending = try target.device.buffer(@as(usize, s.window) * config.tapWidth(s) * 2, options);
+        errdefer m.pending.deinit();
         m.packed_w = try m.packWeights();
         errdefer m.packed_w.deinit();
         if (mode == .q4) try m.prepareBridge();
@@ -105,10 +110,11 @@ pub const Model = struct {
     }
 
     pub fn deinit(m: *Model) void {
-        if (m.head_copy) |*c| c.deinit();
+        if (m.head_copy) |b| b.deinit();
         m.frame.deinit();
         m.dropPrepared();
         freeCaches(m.allocator, m.caches);
+        m.pending.deinit();
         m.tg.deinit();
         m.packed_w.deinit();
         m.graph.deinit();
@@ -136,12 +142,40 @@ pub const Model = struct {
     pub fn idle(m: *const Model) bool {
         return !m.broken and !m.frame.active;
     }
-    /// Committed taps [rows, taps * hidden] into the context, at once.
+    pub fn committedEnd(m: *const Model) u64 {
+        return m.committed_end;
+    }
+    /// Committed taps [rows, taps * hidden] into the ring; the caches read them before the next proposal.
     pub fn absorb(m: *Model, taps: Ref, rows: u32) !void {
-        return @import("forward.zig").append(m, taps, rows);
+        if (m.broken or m.frame.active or rows == 0) return error.BadCommittedTaps;
+        try m.ring().absorb(taps.buf, taps.off, rows);
+    }
+    /// The committed taps as a ring a lane's state copies, as DFlash2's.
+    pub fn ring(m: *Model) @import("../tap_ring.zig").Ring {
+        return .{ .buf = m.pending, .end = &m.committed_end, .window = @intCast(m.graph.shape.window), .stride = m.tapWidth() * 2 };
+    }
+    /// The caches catch up with the ring: its rows past the caches' end, at most the window's last.
+    pub fn flush(m: *Model) !void {
+        const window = m.graph.shape.window;
+        if (m.broken or m.frame.active or m.context_end > m.committed_end) return error.BadDraftContext;
+        const oldest = m.committed_end -| (window - 1);
+        if (m.context_end < oldest) {
+            m.context_end = oldest;
+            m.begin = oldest;
+        }
+        const stride = m.tapWidth() * 2;
+        while (m.context_end < m.committed_end) {
+            const slot = m.context_end % window;
+            const rows = @min(m.committed_end - m.context_end, 128, window - slot);
+            try @import("forward.zig").append(m, .{ .buf = m.pending, .off = @intCast(slot * stride) }, @intCast(rows));
+        }
     }
     /// A best-first tree of `nodes` drafts by the shared walker, the table times each row's norm scale as logits.
     pub fn propose(m: *Model, pending: u32, nodes: u32) !Tree {
+        return m.proposeDrawn(pending, nodes, null, 0);
+    }
+    /// As propose; a sampled stream's tree scores its candidates as the target's keyed draw at `position` on.
+    pub fn proposeDrawn(m: *Model, pending: u32, nodes: u32, sampling: ?@import("core").lanes.Sampling, position: u64) !Tree {
         const dt = @import("core").lanes.draft_tree;
         const p = try @import("forward.zig").propose(m, pending);
         var tokens: [64]u32 = undefined;
@@ -164,7 +198,7 @@ pub const Model = struct {
                     logits[r][s][j] = p.table[r][s][j] * p.scales[r];
                 };
             }
-            const c: dt.Candidates = .{ .words = std.mem.sliceAsBytes(&words), .projected = std.mem.asBytes(&logits), .topk = 16, .rank = 0, .predecessor = &.{}, .successor = &.{}, .table = true, .layout = .{ .words = 32, .ids = 0, .logits = 16 } };
+            const c: dt.Candidates = .{ .words = std.mem.sliceAsBytes(&words), .projected = std.mem.asBytes(&logits), .topk = 16, .rank = 0, .predecessor = &.{}, .successor = &.{}, .sampling = sampling, .position = position, .table = true, .layout = .{ .words = 32, .ids = 0, .logits = 16 } };
             n = dt.grow(64, c, pending, 15, want, tokens[0..want], parents[0..want], own[0..want]);
         }
         const out_tokens = try m.allocator.dupe(u32, tokens[0..n]);
@@ -174,11 +208,19 @@ pub const Model = struct {
         return .{ .gpa = m.allocator, .tokens = out_tokens, .parents = out_parents, .scores = try m.allocator.dupe(f64, own[0..n]) };
     }
 
+    /// Its long-lived buffers, for a residency set: weights, head copy, caches, ring, packed gates and TG.
+    pub fn buffers(m: *const Model, list: *std.ArrayList(mtl.Buffer), a: std.mem.Allocator) !void {
+        for (m.checkpoint.shards.items) |s| try list.append(a, s.buffer);
+        if (m.head_copy) |b| try list.append(a, b);
+        for (m.caches) |c| try list.appendSlice(a, &.{ c.keys, c.values });
+        try list.appendSlice(a, &.{ m.pending, m.packed_w, m.tg });
+    }
     /// An empty context; after a GPU failure too.
     pub fn reset(m: *Model) void {
         m.frame.release();
         m.broken = false;
         m.begin = 0;
+        m.context_end = 0;
         m.committed_end = 0;
     }
 
@@ -288,7 +330,7 @@ pub const Model = struct {
         const shards = try core.checkpoint_host.shardFiles(m.allocator, io, dir);
         defer core.checkpoint_host.freeShardFiles(m.allocator, shards);
         var c = core.checkpoint_metal.Checkpoint.init(m.allocator);
-        errdefer c.deinit();
+        defer c.deinit(); // it maps the head's whole shard: only the head's three tensors stay, copied
         const prefix: []const u8 = if (m.target.checkpoint.has("language_model.lm_head.weight")) "language_model.lm_head" else "lm_head";
         for (shards) |file| try c.addFileSelected(m.target.device, file, "", prefix);
         var name: [64]u8 = undefined;
@@ -297,9 +339,18 @@ pub const Model = struct {
         const bi = try c.get(try std.fmt.bufPrint(&name, "{s}.biases", .{prefix}));
         const s = m.graph.shape;
         if (w.dtype != .u32 or w.shape[0] != s.vocab or w.shape[1] * 8 != s.hidden or sc.shape[1] * 64 != s.hidden or sc.dtype != .bf16 or bi.dtype != .bf16) return error.TargetBinding;
-        c.closeFiles();
-        m.head_copy = c;
-        m.head_rows = .{ .words = .{ .buf = w.buffer, .off = w.offset }, .scales = .{ .buf = sc.buffer, .off = sc.offset }, .biases = .{ .buf = bi.buffer, .off = bi.offset } };
+        const parts = [_]core.checkpoint_metal.Tensor{ w, sc, bi };
+        var offs: [3]usize = undefined;
+        var size: usize = 0;
+        for (parts, &offs) |x, *o| {
+            o.* = size;
+            size = std.mem.alignForward(usize, size + x.bytes, 256);
+        }
+        const copy_buf = try m.target.device.buffer(size, options);
+        errdefer copy_buf.deinit();
+        for (parts, offs) |x, o| @memcpy(copy_buf.contents()[o..][0..x.bytes], x.buffer.contents()[x.offset..][0..x.bytes]);
+        m.head_copy = copy_buf;
+        m.head_rows = .{ .words = .{ .buf = copy_buf, .off = offs[0] }, .scales = .{ .buf = copy_buf, .off = offs[1] }, .biases = .{ .buf = copy_buf, .off = offs[2] } };
     }
 
     /// The target head over `rows` rows, through the target's own head kernel.

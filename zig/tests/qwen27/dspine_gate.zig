@@ -78,7 +78,7 @@ pub fn main(init: std.process.Init) !void {
         while (first < s_rows) : (first += 128) {
             const n = @min(s_rows - first, 128);
             @memcpy(taps.contents()[0 .. n * width * 2], rows_bytes[first * width * 2 ..][0 .. n * width * 2]);
-            try dspine.forward.append(m, .{ .buf = taps }, n);
+            try m.absorb(.{ .buf = taps }, @intCast(n));
         }
         const anchor = (try f.words("anchor"))[0];
         t0 = std.Io.Clock.awake.now(io).toNanoseconds();
