@@ -16,11 +16,11 @@ __device__ __forceinline__ float group64(const float* q) {
   return g;
 }
 
-// AFTER false: GLM's silu(min(g, L)); true: Ling's min(silu(g), L) (inclusionAI's SwigluStepAndMul). Both clip u.
+// AFTER false: GLM's silu(min(g, L)); true: Ling's min(silu(g), L), the gate clipped after silu. Both clip u.
 template <bool AFTER>
 __device__ __forceinline__ float swiglu1(float g, float u, float limit) {
   if (!AFTER) g = fminf(g, limit);
-  if (AFTER) u = u > limit ? limit : (u < 0.0f - limit ? 0.0f - limit : u);  // torch.clamp's: a NaN stays NaN
+  if (AFTER) u = u > limit ? limit : (u < 0.0f - limit ? 0.0f - limit : u);  // a NaN u stays NaN
   else u = fminf(fmaxf(u, 0.0f - limit), limit);
   float s = rbf(div_full(g, exp_approx(0.0f - g) + 1.0f));
   if (AFTER) s = s > limit ? limit : s;
