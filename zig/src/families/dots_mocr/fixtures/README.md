@@ -3,8 +3,12 @@
 The numeric checkpoint settings come from `dots-studio/dots.mocr` at
 revision `e539fbb52280393adc081b289ec597430a0f9031`.
 The config fixture omits remote-code loader metadata. No inference code
-or model weights are included here. Read the original model's license
-when using or distributing its assets.
+or model weights are included here. The release files, the reader
+prompt and the `ocr-demo-*.json` outputs on the publisher's demo image
+are under the MIT License, Copyright (c) 2025 rednote-hilab, with the
+dots.mocr License Agreement's additional terms; see
+`LICENSES/dots.mocr-MIT.txt`, `LICENSES/dots.mocr-License-Agreement.txt`
+and the dots.mocr entry in `THIRD_PARTY_NOTICES.md`.
 
 `processor-reference.json` records independent slow Qwen2VL processor
 pixels. Each synthetic RGB sample at `(y, x, channel)` is
