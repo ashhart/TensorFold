@@ -186,11 +186,14 @@ fn fitsPrefillMatrix(s: Shape) bool {
     return prefillOk(s) and !s.fp16 and gemmFits(s);
 }
 
-/// Prompt chunks of at most this many rows: past it an expert holds enough rows that the 128-row tile wins.
+/// The item tile's most rows a launch (`m`).
 const item_rows = 1024;
 
+/// An expert's average rows the 64-row item tile takes: past them it splits an expert and reads its weights twice.
+const item_expert_rows = 64;
+
 fn fitsPrefillItem(s: Shape) bool {
-    return fitsPrefillMatrix(s) and @max(s.m, s.chunk) <= item_rows;
+    return fitsPrefillMatrix(s) and s.m <= item_rows and (s.expert_rows == 0 or s.expert_rows <= item_expert_rows);
 }
 
 /// The deepest product (codes a row) the skewed tile takes: past it a band of blocks outgrows the caches at 3 a WGP.
@@ -488,11 +491,12 @@ test "gfx1201 takes the K-parallel tile for short routed prompts, up to its item
     }
 }
 
-test "gfx1151 takes the 64-row routed tile for prompt chunks of up to 1,024 rows, the skewed 128-row tile past them" {
+test "gfx1151 takes the 64-row routed tile while its experts average 64 rows or fewer each, the skewed 128-row tile past them" {
     const r = kernelsOn("gfx1151");
     const env = envOn("gfx1151", true, true, true);
-    // Flash Next's gate and up as the launch builds them: 11 slots a row, `m` the tile's rows, the plan's item capacity
-    for ([_]struct { u32, []const u8 }{ .{ 128, "item64" }, .{ 1024, "item64" }, .{ 1025, "skew" }, .{ 2048, "skew" }, .{ 4096, "skew" } }) |w| {
+    // Flash Next's gate and up as the launch builds them: 512 experts, 11 slots a row, `m` the tile's rows
+    for ([_]struct { u32, []const u8 }{ .{ 128, "item64" }, .{ 1024, "item64" }, .{ 2048, "item64" }, .{ 4096, "skew" }, .{ 6554, "skew" } }) |w| {
+        const expert_rows = (w[0] * 10 + 512 - 1) / 512;
         const pairs = w[0] * 11;
         const items = @min(pairs, 512) + pairs / 8;
         const arg: affine.Arg = .{
@@ -509,8 +513,31 @@ test "gfx1151 takes the 64-row routed tile for prompt chunks of up to 1,024 rows
             .fp16 = 0,
             .route = .{ .items = 1, .members = 1 },
         };
-        const shape = Kernels.prefillShape(arg, @intCast(items), @intCast(pairs), @intCast(w[0]));
+        const shape = Kernels.prefillShape(arg, @intCast(items), @intCast(pairs), @intCast(expert_rows));
         try std.testing.expect(shape.m <= 128);
+        try std.testing.expect(shape.expert_rows == expert_rows);
+        try std.testing.expect(std.mem.endsWith(u8, r.select(env, .mlx, .routed, .prefill, shape).?.id, w[1]));
+    }
+    // Qwen3.6-35B-A3B's gate and up: 256 experts, 8 routed slots a row, the 2,048-row side of the 64 boundary
+    for ([_]struct { u32, []const u8 }{ .{ 2048, "item64" }, .{ 2056, "matrix" } }) |w| {
+        const expert_rows = (w[0] * 8 + 256 - 1) / 256;
+        const pairs = w[0] * 9;
+        const items = @min(pairs, 256) + pairs / 8;
+        const arg: affine.Arg = .{
+            .x = 0,
+            .words = 0,
+            .scale = .{ .p = 0, .kind = 1 },
+            .bias = .{ .p = 0, .kind = 1 },
+            .out = 0,
+            .m = @intCast(@min(w[0], 128)),
+            .n = 1024,
+            .k = 2048,
+            .bits = 4,
+            .group = 64,
+            .fp16 = 0,
+            .route = .{ .items = 1, .members = 1 },
+        };
+        const shape = Kernels.prefillShape(arg, @intCast(items), @intCast(pairs), @intCast(expert_rows));
         try std.testing.expect(std.mem.endsWith(u8, r.select(env, .mlx, .routed, .prefill, shape).?.id, w[1]));
     }
 }
