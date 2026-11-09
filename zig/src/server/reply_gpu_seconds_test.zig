@@ -170,3 +170,33 @@ test "prefill widths: raw and chat replies serialize completed passes, whole and
         }
     };
 }
+
+test "remote prefix: raw and chat replies, whole and streamed, say once how another machine's prefix came" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const keys = [_][]const u8{ "remote_prefix", "pulled_prefix", "kept_remote_cache_tokens" };
+    const Case = struct { stats: api.Stats, want: [keys.len]?u32 };
+    const cases = [_]Case{
+        .{ .stats = .{}, .want = .{ null, null, null } }, // the Mac's own prefix: an exact reply
+        .{ .stats = .{ .remote_prefix = 4, .pulled_prefix = 4 }, .want = .{ 4, 4, null } }, // pulled over the link now
+        .{ .stats = .{ .remote_prefix = 5 }, .want = .{ 5, null, 5 } }, // a kept remote state restored here
+    };
+    for ([_]bool{ false, true }) |chat| for ([_]bool{ false, true }) |streaming| for (cases) |c| {
+        var finishes: usize = 0;
+        for (try servedRoute(a, c.stats, streaming, null, chat)) |bytes| {
+            const value = (try json.parse(a, bytes)).ok;
+            const runtime = value.object.get("tensorfold") orelse continue;
+            finishes += 1;
+            const mode = if (c.stats.remote_prefix > 0) "remote_prefix" else "exact";
+            try std.testing.expectEqualStrings(mode, value.object.get("exact_mode").?.string);
+            for (keys, c.want) |k, want| {
+                const got = runtime.object.get(k);
+                if (want) |w| {
+                    try std.testing.expectEqual(w, try std.fmt.parseInt(u32, got.?.int, 10));
+                } else try std.testing.expect(got == null);
+            }
+        }
+        try std.testing.expectEqual(@as(usize, 1), finishes);
+    };
+}
