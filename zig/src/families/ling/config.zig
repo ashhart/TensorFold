@@ -480,8 +480,8 @@ fn parseConfig(gpa: std.mem.Allocator, json: []const u8, why: *Why) !Config {
     return c;
 }
 
-/// The widths the kernels are built for (cuda.zig's tests hold them to glm_kda, glm_glue and the latent cache).
-pub const fixed = .{ .kda_dim = 128, .conv = 4, .kv_lora = 512, .nope = 128, .v_dim = 128, .rope = 64, .block = 128 };
+/// The widths the kernels are built for (cuda.zig's tests hold them to glm_glue and the latent cache); KDA's: cuda.kda.
+pub const fixed = .{ .kv_lora = 512, .nope = 128, .v_dim = 128, .rope = 64, .block = 128 };
 /// glue.rmsnorm's instances for q_lora_rank (256 is Ling-3.0-tiny's); the hidden width takes the router's three.
 pub const q_lora_widths = [_]u32{ 256, 512, 1536, 4096 };
 /// The hidden width: the norms' 512, 1536 and 4096, which the router's slices (8 x 64 inputs) also divide.
@@ -493,15 +493,7 @@ fn normWidth(w: u32) bool {
 
 /// Every shape the kernels take fixed, refused at load before anything is allocated or launched.
 fn geometry(o: std.json.ObjectMap, c: *const Config, why: *Why) !void {
-    // KDA: glm_kda.cu's 128-wide heads and 4 taps (a 3-row conv window); one key and value head per query head
-    if (c.kda_dim != fixed.kda_dim) {
-        why.set("head_dim {d}: the KDA kernels take {d}-wide heads", .{ c.kda_dim, fixed.kda_dim });
-        return error.KdaGeometry;
-    }
-    if (c.conv != fixed.conv) {
-        why.set("short_conv_kernel_size {d}: the KDA kernels take {d} taps", .{ c.conv, fixed.conv });
-        return error.KdaGeometry;
-    }
+    // KDA: one key and value head per query head; head_dim and taps are cuda.kda.geometry's, at the family's open
     const kv_heads = if (o.get("num_key_value_heads")) |_| try int(o, "num_key_value_heads", why) else c.kda_heads;
     if (c.kda_heads == 0 or kv_heads != c.kda_heads) {
         why.set("{d} attention heads, {d} key/value heads: the engine runs one key/value head per query head", .{ c.kda_heads, kv_heads });
