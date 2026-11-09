@@ -26,6 +26,7 @@ const exl3 = @import("cuda_exl3.zig");
 const shared = @import("cuda_shared.zig");
 const index_mod = @import("cuda_index.zig");
 const l2pf_mod = @import("cuda_l2pf.zig");
+const pieces_mod = @import("cuda_forward_pieces.zig");
 
 pub const prefill_rows = state.prefill_rows;
 pub const solo_rows = state.solo_rows;
@@ -110,66 +111,10 @@ pub const Modules = struct {
     }
 };
 
-/// overlap.ROW_STEP and PIECES_MAX: piece boundaries on the BF16 prompt matmul's 128-row blocks, at most 16 pieces.
-pub const row_step = 128;
-pub const max_pieces = 16;
-
-/// overlap.ranges: [lo, hi) row pieces of a chunk of `rows`, about equal on row_step boundaries (fewer when short).
-pub fn ranges(rows: usize, pieces: usize, out: *[max_pieces][2]usize) usize {
-    const per = (rows + pieces - 1) / pieces;
-    const size = (per + row_step - 1) / row_step * row_step;
-    var n: usize = 0;
-    var lo: usize = 0;
-    while (lo < rows) : (lo += size) {
-        out[n] = .{ lo, @min(rows, lo + size) };
-        n += 1;
-    }
-    return n;
-}
-
-/// A prompt chunk's pieced exchanges (overlap.Overlap): second stream and events; `count`: TF_GLM_OVERLAP_PIECES (3).
-pub const Pieces = struct {
-    count: usize = 4,
-    side: cuda.Stream,
-    filled: [max_pieces]cuda.Event,
-    gathered: [max_pieces]cuda.Event,
-    glues: [max_pieces]cuda.Event, // split: a piece's own rows glued
-    shared: [max_pieces]cuda.Event, // split: every rank's glued rows of a piece in
-    owns_side: bool = true, // a paired step's second chunk (initTwin) runs on the first's side stream
-
-    /// With `pair` (TF_GLM_PROMPT_PAIR) the side stream runs at the highest priority, ahead of the main stream's grids.
-    pub fn init(d: *const cuda.Driver, count: usize, pair: bool) !Pieces {
-        if (count == 0 or count > max_pieces) return error.BadPieces;
-        return make(d, count, if (pair) try cuda.Stream.initPriority(d, .highest) else try cuda.Stream.init(d, false), true);
-    }
-
-    /// A paired step's second chunk on `of`'s side stream: every rank posts both chunks' exchanges in one order.
-    pub fn initTwin(d: *const cuda.Driver, of: *const Pieces) !Pieces {
-        return make(d, of.count, of.side, false);
-    }
-
-    fn make(d: *const cuda.Driver, count: usize, side: cuda.Stream, owns_side: bool) !Pieces {
-        var p: Pieces = .{ .count = count, .side = side, .filled = undefined, .gathered = undefined, .glues = undefined, .shared = undefined, .owns_side = owns_side };
-        for (&p.filled, &p.gathered, &p.glues, &p.shared) |*a, *b, *g, *s| {
-            a.* = try cuda.Event.init(d, false);
-            b.* = try cuda.Event.init(d, false);
-            g.* = try cuda.Event.init(d, false);
-            s.* = try cuda.Event.init(d, false);
-        }
-        return p;
-    }
-
-    pub fn deinit(p: *Pieces) void {
-        for (&p.filled, &p.gathered, &p.glues, &p.shared) |*a, *b, *g, *s| {
-            a.deinit();
-            b.deinit();
-            g.deinit();
-            s.deinit();
-        }
-        if (p.owns_side) p.side.deinit();
-        p.* = undefined;
-    }
-};
+pub const row_step = pieces_mod.row_step;
+pub const max_pieces = pieces_mod.max_pieces;
+pub const ranges = pieces_mod.ranges;
+pub const Pieces = pieces_mod.Pieces;
 
 /// How the ranks' partials meet: every rank in-process copying into the others' slots, or one rank over NCCL.
 pub const Exchange = union(enum) {
