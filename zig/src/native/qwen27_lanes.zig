@@ -511,8 +511,7 @@ pub const Metal = struct {
 
             // one greedy row a round; a draft round's parents ride .tree, its accepted path rides .commit
             if (windows.len != 1) return error.CommandOutOfStep;
-            // A follower's own local round (measure's timing windows) mirrors rank 0's on the seams alone:
-            // only rank 0 commands the replay, and only rank 0's serving rounds ever reach the follower.
+            // A follower's local round (measure's timing windows) mirrors rank 0's on the seams alone.
             if (b.link) |l| if (l.pair.rank == 0 and !b.timing) {
                 // A plain round advances (no tree): it rides .step. A drafted round rides .tree with its parents.
                 if (plain) {
