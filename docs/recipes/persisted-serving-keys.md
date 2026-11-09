@@ -11,9 +11,9 @@ Old files remain in their original namespace and follow the existing cache budge
 | Dense Qwen hybrid, Metal | Binary, shared/family shader texts, tensor mode, loaded ANE columns and prompt policy, probe, OS build and GPU | Config, index and shard stamps for target and external drafter | Canonical recurrence/KV/tap image and draft end | Unsupported learners refuse; the store remains scoped to its loaded model |
 | GLM, Metal | Binary, compiled source hash, resolved rank/route/prompt policy, probe, OS build and GPU | Config/index identity plus current shard stamps | Canonical KDA/MLA image and checked snapshot header | Unsupported learner on this adapter |
 | Flash Next, Metal | Binary, actual loaded shader texts/bindings, rotary/precision and resolved execution policy, probe, OS build and GPU | Pack metadata identity, current source and loaded-pack stamps, loaded reference bytes | Checked snapshot layout; canonical session image | Unsupported learner on this adapter |
-| Nemotron, CUDA | Binary, embedded images, captured manifest and cubin bytes, resolved checkpoint math, expert ranks, NVFP4 decode form and expert grids, probe, GPU and driver | Config, index and shard stamps | Head flag and canonical state image | Shared host clears RAM and detaches disk stores when weights move |
+| Nemotron, CUDA | Binary, embedded images, captured manifest and cubin bytes, resolved checkpoint math, expert ranks, NVFP4 decode form, lane half-tile threshold, expert grids and captured attention variant, probe, GPU and driver | Config, index and shard stamps | Head flag and canonical state image | Shared host clears RAM and detaches disk stores when weights move |
 | Qwen dense/MoE hybrids, CUDA | Same shared CUDA identity | Same shared checkpoint identity | Explicit BF16/FP8 format, tap flag, prompt-int8 mode and actual rotary table; image states stay off disk | Same shared learning barrier |
-| Flash Next, CUDA | Same shared CUDA identity, plus resolved prompt chunk heights, prompt kernel forms, expert grids and captured-set use | Same shared checkpoint identity | Head flag and canonical recurrence/KV/PLE image; tensor-rank disk persistence is refused | Same shared learning barrier |
+| Flash Next, CUDA | Same shared CUDA identity, plus resolved prompt chunk heights, prompt kernel forms and tile thresholds, expert grids and captured-set use | Same shared checkpoint identity | Head flag and canonical recurrence/KV/PLE image; tensor-rank disk persistence is refused | Same shared learning barrier |
 | DeepSeek sessions, CUDA reference path | Config/options/mode, checkpoint digest, rank, selected layers and piece layout | Checkpoint digest required | Versioned lossless session pieces and exact token prefix | No learner; the disk tier starts fresh for each process |
 
 Other native family adapters have no attached cross-process serving-state tier. Their snapshots remain owned by one
@@ -49,15 +49,19 @@ checkpoints. These additions change the optional disk namespace; snapshot payloa
 
 Flash Next on CUDA keys what its prompt passes resolved at load: the solo and busy chunk heights (a different
 `TF_FLASHNEXT_CHUNK` or `_CHUNK_SOLO`, or `--parallel 1` taking the larger pass, starts cold), the DeltaNet, read-out,
-hyper-connection and in-pass mark forms, the NVFP4 prompt-tile threshold, K32 tile and BF16 prompt tiles, the experts'
-decode warps and resident grids, and whether a captured set runs with which entries on our glue. Its draft, window,
-round, graph, lane, load-thread, I/O, paging and dense-split settings are not keyed: kept states come only from prompt
-passes, which those settings either never reach, reach with the same launches, or refuse for disk at `--tp 2`.
+hyper-connection and in-pass mark forms, the NVFP4 prompt-tile threshold, K32 tile, BF16 prompt tiles and the SM count
+they are weighed against, the lane's half-tile threshold (`TF_QMMF_HALF_BELOW`), the experts' decode warps and resident
+grids, and whether a captured set runs with which entries on our glue. `TF_FLASHNEXT_KV_PAGES` and `_KV_PAGES_ALL` are
+keyed through the profile rows. Its draft, window, round, graph, lane, load-thread, I/O and dense-split settings and
+`TF_FLASHNEXT_KV_PAGE_TEST` are not keyed: kept states come only from prompt passes, which those settings either never
+reach, reach with the same launches or the same kernels addressing pages, or refuse for disk at `--tp 2`.
 Nemotron on CUDA keys `--precision checkpoint`'s math, the expert ranks of `TF_NEMOTRON_WORLD`, a ModelOpt
-checkpoint's NVFP4 decode warps and the experts' resident grids. Its pages, poison fill, carveout, segments, graph log,
-trace and context are not keyed: they place memory, fill pages before use, log, run only passes that keep no state
-(segments), or set a stride each row ignores. Nemotron on Metal also keys `TF_COOP_SPLIT` as loaded and, with the split
-on, the scratch rows a prompt chunk's partials must fit; its page plan and stream count otherwise only size buffers.
+checkpoint's NVFP4 decode warps and lane half-tile threshold, the experts' resident grids and, with a captured set, the
+attention variant `--context` picks by its chunk count. Its pages, poison fill, carveout, segments, graph log and trace,
+and the context on our own glue, are not keyed: they place memory, fill pages before use, log, run only passes that
+keep no state (segments), or set a stride our merge ignores. Nemotron on Metal also keys `TF_COOP_SPLIT` as loaded and,
+with the split on, the scratch rows a prompt chunk's partials must fit; its page plan and stream count otherwise only
+size buffers.
 
 The executable and kernel fingerprints use a 32 KiB read buffer and check file stamps across the read. Checkpoints,
 executables and kernel assets must remain stable while a model opens and serves. The existing learner owns runtime
