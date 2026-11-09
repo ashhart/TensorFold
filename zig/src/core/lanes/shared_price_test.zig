@@ -56,6 +56,7 @@ fn run(sampled: bool, row_ms: f64, plain_only: bool) ![2][800]u32 {
         if (round < 64) drafted_before += @intFromBool(target.last_rows > 2);
         if (round > 65 and e.activeCount() == 2) drafted_after += @intFromBool(target.last_rows > 2);
         if (round == 64) {
+            try t.expect(e.rule.sharedPrice(2, sampled) != null);
             const p = e.rule.sharedPrice(2, sampled).?;
             try t.expectApproxEqAbs(@as(f64, 2), p.plain, 1e-9);
             try t.expectApproxEqAbs(row_ms, p.row, 1e-9);
