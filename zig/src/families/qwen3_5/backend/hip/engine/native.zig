@@ -15,13 +15,15 @@ const hip_lanes = @import("hip_lanes.zig");
 const joint = @import("joint_readout.zig");
 const config = @import("../../../weights/config.zig");
 
-/// The MLX affine widths this native text server loads, each with its group size.
+/// The MLX affine widths this native text server loads, each with its group size, then ModelOpt's own formats.
 const mlx_formats = blk: {
     const widths = @import("core").quant.mlx.bit_widths;
-    var out: [widths.len * 3][]const u8 = undefined;
+    const extra = [_][]const u8{ "modelopt-nvfp4", "modelopt-fp8" };
+    var out: [widths.len * 3 + extra.len][]const u8 = undefined;
     for (widths, 0..) |bits, i| for ([_]u16{ 32, 64, 128 }, 0..) |g, j| {
         out[3 * i + j] = std.fmt.comptimePrint("mlx-q{d}g{d}", .{ bits, g });
     };
+    for (extra, 0..) |f, k| out[widths.len * 3 + k] = f;
     const done = out;
     break :blk &done;
 };
@@ -82,7 +84,7 @@ fn decisionOnly(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dir: [
         const what = "the joint schema head needs the BF16 checkpoint";
         return std.fmt.allocPrint(a, "{s}: {s} is quantized ({t})", .{ what, dir, c.quant }) catch what;
     }
-    if (c.quant != .bf16 or head) return null;
+    if (c.quant != .bf16 or c.modelopt or head) return null;
     if (engine.chatBf16(gpa, io, dir)) return null; // an image checkpoint: a tower the engine reads, no joint head
     const what = "BF16 Qwen3.5 serves as a decision backbone only";
     return std.fmt.allocPrint(a, "{s}: {s} has no joint_head_config.json", .{ what, dir }) catch what;
