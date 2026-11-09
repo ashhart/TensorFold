@@ -20,9 +20,7 @@ pub const Phase = union(enum) {
         return (!ignore_eos or p == .on) and std.mem.indexOfScalar(u32, eos, t) != null;
     }
 
-    /// Whether the reply keeps a trailing end token as content, the negation of the condition `ends` applies.
-    /// An end token the grammar takes ends the reply, so it is not content: the reply's content tokens, its
-    /// logprob rows and its stream all read it the same way.
+    /// Whether the reply keeps a trailing end token as content: the negation of `ends`' condition.
     pub fn keepsTrailing(p: Phase, ignore_eos: bool) bool {
         return ignore_eos and p != .on;
     }
