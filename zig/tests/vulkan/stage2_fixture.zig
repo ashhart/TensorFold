@@ -1,4 +1,4 @@
-// ASH_QWEN35 add/SwiGLU/RMSNorm fixtures under fixed budgets; nonfinite by class (drivers vary NaN payloads).
+// ORACLE_QWEN35 add/SwiGLU/RMSNorm fixtures under fixed budgets; nonfinite by class (drivers vary NaN payloads).
 const std = @import("std");
 const contract = @import("contract");
 const c = contract.spec;

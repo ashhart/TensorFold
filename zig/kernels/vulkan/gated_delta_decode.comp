@@ -144,11 +144,11 @@ vec2 gdn_gates(uint head) {
     // bf16); the widen is exact.
 #endif /* GDN_COMPOSED_ORDER */
     float x = bf16_load(bf16_store(a_in + dt));
-#ifdef ASH_QWEN35
+#ifdef ORACLE_QWEN35
     // Preserve the omitted contract, precision, and host-interface facts from the original comment.
     float sp = bf16_load(bf16_store(max(x, 0.0f) + log(1.0f + exp(-abs(x)))));
     g = exp(-(exp(a_log) * sp));
-#else /* ASH_QWEN35 */
+#else /* ORACLE_QWEN35 */
 #ifndef GDN_COMPOSED_ORDER
     // Compute elementwise LogAddExp softplus with corrected log1p ratio, then round to bf16.
     float u = 1.0f + exp(-abs(x));
@@ -171,7 +171,7 @@ vec2 gdn_gates(uint head) {
       g = exp(-(exp(a_log) * sp));
     }
 #endif /* GDN_COMPOSED_ORDER */
-#endif /* ASH_QWEN35 */
+#endif /* ORACLE_QWEN35 */
   } else {
     g = bf16_load(g_buf.v[params.shape[0] + head]);
     beta = bf16_load(b_buf.v[params.aux_offset + head]);
@@ -202,7 +202,7 @@ void main() {
     khead = (head / hv_b) * hk_b + (head % hv_b) / (hv_b / hk_b);
   }
 #elif defined(GDN_NATIVE_GQA_INDEX)
-  // Default order uses native GQA key index; BF16 A_log models select MLX_OMARCHY_GDN_GQA_BF16A.
+  // Native GQA key index: the key-head order BF16 A_log models use.
   uint khead = head;
   if (params.in_strides[3] != 0u) {
     uint hv_b = params.in_strides[2];

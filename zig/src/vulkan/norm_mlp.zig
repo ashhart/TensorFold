@@ -10,7 +10,7 @@ const Buffer = memory.Buffer;
 const Error = dispatch.Error;
 const View = tensor.View;
 
-// norm/SwiGLU: -DUSE_BF16; -DASH_QWEN35=Ash8c (build-time); -DPRESERVE_F32 needs shaderDenormPreserveFloat32.
+// norm/SwiGLU: -DUSE_BF16; -DORACLE_QWEN35=Ash8c (build-time); -DPRESERVE_F32 needs shaderDenormPreserveFloat32.
 pub const Shaders = struct {
     norm_bf16: []align(4) const u8,
     add_bf16: []align(4) const u8,
@@ -109,7 +109,7 @@ pub const NormMlp = struct {
         try m.add_bf16.run(cmds, std.mem.asBytes(&p)[0..add_push_bytes], try groups(p.count, m.add_bf16.local[0], m.dev.properties.limits.maxComputeWorkGroupCount[0]), timeout_ns);
     }
 
-    // SwiGLU is 4-wide/out-of-place; bindings 3/4 use materialize=0; ASH_QWEN35 rounds once, MLX fused_chain 3 times.
+    // SwiGLU is 4-wide/out-of-place; bindings 3/4 use materialize=0; ORACLE_QWEN35 rounds once, MLX fused_chain 3 times.
     pub fn swiglu(m: *NormMlp, cmds: *Commands, out: View, gate: View, up: View, timeout_ns: u64) Error!void {
         if (out.kind != .bf16 or gate.kind != .bf16 or up.kind != .bf16) return error.Invalid;
         if (out.elements != gate.elements or gate.elements != up.elements) return error.Invalid;
