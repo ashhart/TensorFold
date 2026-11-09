@@ -10,8 +10,8 @@ pub const Cancel = struct { ptr: ?*anyopaque, check: *const fn (?*anyopaque) boo
 /// One stream's window of a shared verify: its slot, its ids, and its drawn tokens.
 pub const Part = struct { slot: u32, ids: []const u32, out: []u32, bits: u64 = 0 };
 
-/// A kept prompt state as the prompt cache holds it: the id every rank keeps its own copy under, and its position.
-pub const Kept = struct { id: u64, at: u32 };
+/// A kept prompt state as the prompt cache holds it: the id every rank keeps it under, its position, its chunks below.
+pub const Kept = struct { id: u64, at: u32, below: u64 = 0 }; // below: cuda_prompt_cuts.below of the pass that kept it
 
 /// A stream's own sequence: state, sampling rule, MTP drafts; buffers are shared, one stream's round at a time.
 pub const Seq = struct {

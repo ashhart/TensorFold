@@ -437,14 +437,14 @@ pub fn snap_reuses(ptr: *anyopaque, at: u32) bool {
     return snap_spare(ptr) >= snap_bytes(ptr, at);
 }
 
-/// The prompt pass stands at `at` (a mark at a chunk start): copy the state there under a new id.
+/// The prompt pass stands at `at` (a mark at a chunk start): copy the state there under a new id, with its cuts below.
 pub fn snap_save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
     _ = owner;
     const e: *engine.Engine = @ptrCast(@alignCast(ptr));
     if (e.pos() != at) return error.NotAtMark;
     const k = try e.gpa.create(engine.Kept);
     errdefer e.gpa.destroy(k);
-    k.* = .{ .id = try e.keepState(), .at = at };
+    k.* = .{ .id = try e.keepState(), .at = at, .below = @import("cuda_prompt_cuts.zig").below(e.cur.cuts.items, at) };
     return k;
 }
 
