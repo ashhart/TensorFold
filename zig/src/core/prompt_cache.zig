@@ -264,7 +264,7 @@ pub const Store = struct {
                 const at = e.at; // read before the reserve may evict the entry
                 s.resumedWithReason(e, prompt, null);
                 if (fresh_marks) |m| if (m.ptr != l.marks.ptr) a.free(m);
-                s.reserve(prompt, @intCast(prompt.len), null, l.marks, spans); // restored: the state it resumed may go too (a peer restores before it drops)
+                s.reserve(prompt, @intCast(prompt.len), null, l.marks, spans, history_len); // restored: the state it resumed may go too (a peer restores before it drops)
                 return .{ .from = at, .marks = l.marks };
             } else |err| {
                 // a refused state is dropped, then the next shorter RAM state is tried before the pass from the start
@@ -275,7 +275,7 @@ pub const Store = struct {
         }
         const marks_ = fresh_marks orelse l.marks;
         if (fresh_marks != null and l.marks.ptr != marks_.ptr) a.free(l.marks);
-        s.reserve(prompt, @intCast(prompt.len), null, marks_, spans);
+        s.reserve(prompt, @intCast(prompt.len), null, marks_, spans, history_len);
         return .{ .marks = marks_ };
     }
 
@@ -307,7 +307,7 @@ pub const Store = struct {
             s.active_rewind_at = at; // a state kept under min_gap before it is the rewind state: no new copy
         };
         s.active_rewind_key = if (s.active_rewind_at > 0) sharedKey(prompt[0 .. s.active_rewind_at + s.rules.lookahead]) else 0;
-        for (s.entries.items) |kept| if (kept.at == s.active_rewind_at and kept.tokens.len <= prompt.len and
+        for (s.entries.items) |kept| if (s.active_rewind_at > 0 and kept.at == s.active_rewind_at and kept.tokens.len <= prompt.len and
             std.mem.eql(u32, kept.tokens, prompt[0..kept.tokens.len]) and modes.equal(kept.decode_spans, spans, kept.at) and images.matches(s, kept))
         {
             kept.rewind = true;
@@ -331,8 +331,9 @@ pub const Store = struct {
             const at = if (s.rules.planned) s.startAt(starts, w) else w;
             for (marks_) |m| if (m == at or (m < at and !s.rules.planned and prompt.len < s.rules.min_prompt)) s.noteShared(prompt[0 .. m + s.rules.lookahead]);
         }
-        s.reserve(prompt, born, e, marks_, spans);
-        const fitted = try @import("prompt_cache_reserve.zig").fitting(s, a, prompt, marks_, spans);
+        const primary = @import("prompt_cache_reserve.zig").endpointFor(s, prompt, from, history_len, starts, spans);
+        s.reserve(prompt, born, e, marks_, spans, primary);
+        const fitted = try @import("prompt_cache_reserve.zig").fitting(s, a, prompt, marks_, spans, e, born, primary);
         if (e) |entry| entry.borrowers += 1;
         return .{ .entry = e, .marks = fitted };
     }
@@ -559,6 +560,7 @@ pub fn note(comptime fmt: []const u8, args: anytype) void {
 }
 
 test {
+    _ = @import("prompt_cache_queue_room_test.zig");
     _ = @import("prompt_cache_index_test.zig");
     _ = @import("prompt_cache_test.zig");
     _ = @import("prompt_cache_learn_test.zig");

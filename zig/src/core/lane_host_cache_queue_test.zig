@@ -71,6 +71,10 @@ const Snapshots = struct {
 };
 
 fn followups(n: usize, late: bool, shorter: bool) !void {
+    return followupsRules(n, late, shorter, .{ .min_prompt = 0 });
+}
+
+fn followupsRules(n: usize, late: bool, shorter: bool, rules: pc.Rules) !void {
     var cfg = try lanes.Config.init(a, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
     defer cfg.deinit(a);
     var target: lanes.fake.Fake = .{ .gpa = a, .prefill_chunks = 3 };
@@ -79,16 +83,16 @@ fn followups(n: usize, late: bool, shorter: bool) !void {
     var core = lanes.Engine.init(a, &cfg, target.stepped(), clock.clock());
     defer core.deinit();
     var snapshots: Snapshots = .{ .target = &target };
-    var store = pc.Store.init(a, .{ .ptr = &snapshots, .vtable = &.{ .bytes = Snapshots.bytes, .save = Snapshots.save, .restore = Snapshots.restore, .drop = Snapshots.drop } }, .{ .min_prompt = 0 }, (n + @intFromBool(shorter)) * 100);
+    var store = pc.Store.init(a, .{ .ptr = &snapshots, .vtable = &.{ .bytes = Snapshots.bytes, .save = Snapshots.save, .restore = Snapshots.restore, .drop = Snapshots.drop } }, rules, (n + @intFromBool(shorter)) * 100);
     defer store.deinit();
     var words: [16][24]u32 = undefined;
     var requests: [16]api.Request = undefined;
     var replies: [16]Reply = @splat(.{});
     for (0..n) |i| {
         for (&words[i], 0..) |*word, j| word.* = @intCast(1000 * (i + 1) + j);
-        snapshots.seed = words[i][0..12];
+        snapshots.seed = words[i][0..14];
         try std.testing.expect(store.keepBorn(snapshots.seed, 12, 12, null, &.{}, &.{}));
-        requests[i] = .{ .prompt = words[i][0..20], .max_tokens = 4, .history_len = 16 };
+        requests[i] = .{ .prompt = words[i][0..20], .max_tokens = 4, .history_len = 16, .chunks = &.{ 4, 8, 12, 16 } };
     }
     if (shorter) {
         snapshots.seed = &words[1];
@@ -111,11 +115,11 @@ fn followups(n: usize, late: bool, shorter: bool) !void {
         for (20..24) |at| history[at] = lanes.fake.next(history[0..at], null, at);
         try std.testing.expectEqualSlices(u32, history[20..24], &reply.tokens);
     }
-    if (n > 1) try std.testing.expectEqual(@as(u64, @intCast(n + @intFromBool(shorter))), store.counts.kept);
+    try std.testing.expectEqual(@as(u64, @intCast(2 * n + @intFromBool(shorter))), store.counts.kept);
     try std.testing.expectEqual(@as(u64, 0), store.counts.misses);
     try std.testing.expect(store.held <= store.budget);
     for (words[0..n]) |*conversation| {
-        try std.testing.expectEqual(@as(u32, 12), store.find(conversation[0..20], &.{}, &.{}).?.at);
+        try std.testing.expectEqual(@as(u32, 16), store.find(conversation[0..20], &.{ 4, 8, 12, 16 }, &.{}).?.at);
     }
     try std.testing.expect(store.reservation_guard == null);
 }
@@ -130,4 +134,69 @@ test "queued cache: a follow-up arriving during lookup is protected before the r
 
 test "queued cache: a shorter queued fork keeps its redundant resume prefix beside a newer end" {
     try followups(2, false, true);
+}
+
+test "queued cache: progress a full one-state store keeps a new conversation beside an idle one" {
+    try coldBefore(false);
+}
+
+test "queued cache: a cold arrival cannot reserve away the following queued conversation" {
+    try coldBefore(true);
+}
+
+fn coldBefore(protected: bool) !void {
+    var cfg = try lanes.Config.init(a, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
+    defer cfg.deinit(a);
+    var target: lanes.fake.Fake = .{ .gpa = a, .prefill_chunks = 3 };
+    defer target.deinit();
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(a, &cfg, target.stepped(), clock.clock());
+    defer core.deinit();
+    var snapshots: Snapshots = .{ .target = &target };
+    var store = pc.Store.init(a, .{ .ptr = &snapshots, .vtable = &.{ .bytes = Snapshots.bytes, .save = Snapshots.save, .restore = Snapshots.restore, .drop = Snapshots.drop } }, .{ .min_prompt = 0 }, 100);
+    defer store.deinit();
+    const idle = @as([24]u32, @splat(91));
+    const words = @as([24]u32, @splat(82));
+    snapshots.seed = &idle;
+    try std.testing.expect(store.keepBorn(&idle, 12, 12, null, &.{}, &.{}));
+    var host = api.LaneHost.init(a, std.testing.io, &core, .{ .lanes = 1 });
+    host.cache = &store;
+    const engine = host.engine();
+    const request: api.Request = .{ .prompt = words[0..20], .max_tokens = 4, .history_len = 16 };
+    var reply: Reply = .{};
+    var follow: Reply = .{};
+    const follow_request: api.Request = .{ .prompt = idle[0..20], .max_tokens = 4, .history_len = 16 };
+    try engine.submit(1, &request, .{ .ctx = &reply, .event = Reply.event });
+    if (protected) try engine.submit(2, &follow_request, .{ .ctx = &follow, .event = Reply.event });
+    try host.start();
+    defer host.stop();
+    try reply.wait();
+    try std.testing.expectEqual(@as(?u32, 0), reply.cached);
+    if (protected) {
+        try follow.wait();
+        try std.testing.expectEqual(@as(?u32, 12), follow.cached);
+        try std.testing.expectEqual(@as(u32, 16), store.find(&idle, &.{}, &.{}).?.at);
+        return;
+    }
+    const kept = store.find(words[0..20], &.{}, &.{}) orelse return error.NewConversationNotKept;
+    try std.testing.expectEqual(@as(u32, 16), kept.at);
+    try std.testing.expect(store.find(&idle, &.{}, &.{}) == null);
+    try std.testing.expectEqual(@as(u64, 100), store.held);
+}
+
+test "queued cache: mark-only families advance with warm, lookahead and planned histories" {
+    const rules = [_]pc.Rules{
+        .{ .min_prompt = 0, .min_gap = 0, .warm = .on },
+        .{ .min_prompt = 0, .min_gap = 0, .lookahead = 1 },
+        .{ .min_prompt = 0, .min_gap = 0, .lookahead = 1, .planned = true, .warm = .on },
+        .{ .min_prompt = 0, .min_gap = 0, .lookahead = 1, .planned = true, .grid = 4 },
+    };
+    for (rules) |rule| {
+        try followupsRules(1, false, false, rule);
+        try followupsRules(4, false, false, rule);
+    }
+}
+
+test "queued cache: progress a follow-up advances from twelve to sixteen in one state" {
+    try followups(1, false, false);
 }
