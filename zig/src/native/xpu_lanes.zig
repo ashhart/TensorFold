@@ -46,6 +46,7 @@ pub const Lanes = struct {
 
     pub const max_slots = xq.MAX_SLOTS;
     pub const tap_row = TAP_ROW;
+    pub const draft_step_ms = 0.6; // a DFlash2 draft pass's ms, as the round loop prices it
     pub const tap_layers = blk: {
         var t: [xq.TAP_LAYERS.len]u32 = undefined;
         for (xq.TAP_LAYERS, &t) |l, *x| x.* = l;
@@ -65,7 +66,7 @@ pub const Lanes = struct {
     /// What the round loop reads: chains of up to 16 rows, all streams' windows in one shared forward, DFlash2 drafts
     pub fn facts(b: *const Lanes) lanes.Model {
         const head = b.drafter != null;
-        return .{ .exact_width = 16, .mtp = head, .speculate = head, .speculate_early = false, .drafts = if (head) b.block - 1 else 0, .mtp_step_ms = if (head) 0.6 else 0, .draft_streams = head, .window_costs = b.costs[0..b.timed], .hidden_rows = true, .streams_exact = true, .batch_rows = 16, .max_streams = b.slots, .lone_copies = false };
+        return .{ .exact_width = 16, .mtp = head, .speculate = head, .speculate_early = false, .drafts = if (head) b.block - 1 else 0, .mtp_step_ms = if (head) draft_step_ms else 0, .draft_streams = head, .window_costs = b.costs[0..b.timed], .hidden_rows = true, .streams_exact = true, .batch_rows = 16, .max_streams = b.slots, .lone_copies = false };
     }
 
     /// Each window width's cost on a scratch context in the last slot, for the round loop's depth rule
