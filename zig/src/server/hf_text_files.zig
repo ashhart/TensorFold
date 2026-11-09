@@ -96,4 +96,5 @@ test "tokenizer.json: neither place has it, so the loader's own error is the ans
     const dir = try tmp.dir.realPathFileAlloc(io, ".", a);
     var path: []const u8 = "";
     try std.testing.expectError(error.FileNotFound, openTokenizer(io, a, std.testing.allocator, dir, &path));
+    try std.testing.expectEqualStrings(try std.fs.path.join(a, &.{ dir, "tokenizer" }), path);
 }
