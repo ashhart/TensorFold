@@ -162,6 +162,8 @@ pub fn main(init: std.process.Init) !void {
         const stats = try check(a, init.io, served, @intCast(30 + mode), &request, expected[0..count], if (mode == 2) .stop else .length, reference);
         // sampled and custom-stop requests draft on the served host; only "draft": false reports none
         if (mode == 0 and (stats.drafted != 0 or stats.accepted != 0)) return error.PlainReportedDrafts;
+        // a sampled round's keep runs behind the drafter; a run returns with it settled
+        if (served.draft.?.generation.keep != null) return error.HeldKeepAfterRun;
     }
     try draft.backend.prepare();
     draft.preparation = .{ .mode = .prepared_q4_reference, .quantization_verified = true, .source_sha256 = @import("tensorfold").affine4.signature() };
@@ -181,12 +183,14 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("round delivery branch={}: CLI{d} served{d} matched{d}/{d}\n", .{ branch, cli.rounds, stats.rounds, cli.matched, stats.accepted });
         if (!lanesMode(served) and (stats.rounds != cli.rounds or stats.accepted != cli.matched)) return error.DeliveryClipsRound;
     }
-    for ([_]usize{ 1, 6 }) |cancel_at| {
-        const request = api.Request{ .prompt = &prompt, .max_tokens = expected.len };
-        try checkCancel(a, init.io, served, @intCast(60 + cancel_at), &request, &expected, cancel_at, reference);
-    }
+    for ([_]bool{ false, true }) |sampled| for ([_]usize{ 1, 6 }) |cancel_at| {
+        // a sampled cancel ends with its keep held behind the drafter; the slot's state must still be the reply's
+        const request = api.Request{ .prompt = &prompt, .max_tokens = expected.len, .sampling = if (sampled) .{ .seed = 7, .temperature = 0 } else null };
+        try checkCancel(a, init.io, served, @intCast(@as(usize, if (sampled) 70 else 60) + cancel_at), &request, &expected, cancel_at, reference);
+        if (served.draft.?.generation.keep != null) return error.HeldKeepAfterCancel;
+    };
     const reset_request = api.Request{ .prompt = &prompt, .max_tokens = expected.len };
     const reset_stats = try check(a, init.io, served, 80, &reset_request, &expected, .length, reference);
     if (!lanesMode(served) and reset_stats.rounds != 7) return error.CancelResetRetainsDraft;
-    std.debug.print("drafted served: length/EOS/reset/plain/sampling/custom-stop/BF16/prepared-q4 and cancellation at a round's end; tokens and final state equal CLI\n", .{});
+    std.debug.print("drafted served: length/EOS/reset/plain/sampling/custom-stop/BF16/prepared-q4 and greedy and sampled cancellation at a round's end; tokens and final state equal CLI\n", .{});
 }
