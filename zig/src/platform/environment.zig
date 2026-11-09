@@ -42,6 +42,7 @@ pub const rules = [_]Rule{
     .{ .name = "TENSORFOLD_CUDA_KERNELS", .scope = .cuda, .kind = .path, .forms = "a captured kernel set's folder without control characters, or native for the engine's own kernels" },
     .{ .name = "TF_CUDA_DEVICE", .scope = .cuda, .kind = .device, .trim = " ", .forms = "a whole GPU ordinal from 0 to 4294967295, or empty for the default" },
     .{ .name = "TF_CUDA_SEGMENTS", .scope = .cuda, .kind = .segments, .trim = " ", .forms = "a whole number from 1 to 4, or empty for the default" },
+    .{ .name = "TF_PRODUCE_HELD_GIB", .scope = .cuda, .kind = .u64, .min = 1, .max = 1024, .forms = "whole GiB from 1 to 1024 of hand-off exports held at once (default 32)" },
     .{ .name = "TF_CUDA_CARVEOUT", .scope = .cuda, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_CUDA_CARVEOUT_MIB", .scope = .cuda, .kind = .mib, .forms = "a positive whole MiB count fitting a native byte size, or empty for 1792 MiB" },
     .{ .name = "TF_MTP_DRAFTS", .scope = .cuda, .kind = .u32, .forms = "a whole number from 0 to 4294967295 (clamped to the drafter's window)" },
@@ -67,6 +68,12 @@ pub const rules = [_]Rule{
     .{ .name = "TF_DSV41_ENGRAM_DIR", .scope = .metal, .kind = .path, .forms = "a directory path without control characters holding DeepSeek-V4.1's packed Engram tables" },
     .{ .name = "TF_DSV41_ENGRAM_VERIFY", .scope = .metal, .kind = .word, .words = &.{ "sample", "full" }, .forms = "sample or full (full also checks every byte of the Engram tables at boot)" },
     .{ .name = "TF_DSV41_ENGRAM_CACHE", .scope = .metal, .kind = .u32, .forms = "a whole Engram record count a layer from 0 to 4294967295 (default 65536)" },
+    .{ .name = "TF_PREFILL_MIN", .scope = .metal, .kind = .u64, .forms = "a whole prompt-token count (default 4096)" },
+    .{ .name = "TF_PREFILL_CHUNK", .scope = .metal, .kind = .u64, .min = 16, .forms = "a positive multiple of 16 prompt tokens (default 512)" },
+    .{ .name = "TF_PREFILL_KEEP", .scope = .metal, .kind = .flag, .forms = "0 or 1 (default 1)" },
+    .{ .name = "TF_PREFILL_AHEAD", .scope = .metal, .kind = .u64, .min = 1, .forms = "a whole number of fills ahead from 1 (default 4)" },
+    .{ .name = "TF_PREFILL_API_KEY_FILE", .scope = .metal, .kind = .path, .forms = "a path to a file only its owner can read, holding the GB10 server's API key" },
+    .{ .name = "TF_PREFILL_TIMEOUT_S", .scope = .metal, .kind = .u64, .min = 1, .max = std.time.s_per_day, .forms = "whole seconds from 1 to 86400 (default 60 and 1 per 400 tokens sent)" },
     .{ .name = "XPU_A8_BITS", .scope = .xpu, .kind = .bit_width, .forms = "4 or 8" },
     .{ .name = "LFM3_FUSE", .scope = .xpu, .kind = .u32, .forms = "a whole fusion mask from 0 to 4294967295" },
     .{ .name = "TF_SLIDE_POCKET_KEY", .scope = .slide, .kind = .word, .words = &.{ "auto", "reply", "subject", "both" }, .forms = "auto, reply, subject or both" },
@@ -252,6 +259,7 @@ pub fn parse(name: []const u8, raw: ?[]const u8) Error!?u64 {
     if (r.kind == .mib and n > std.math.maxInt(usize) / (1 << 20)) return error.InvalidEnvironment;
     if (r.kind == .prompt and (n < 128 or n > 2048 or n % 16 != 0)) return error.InvalidEnvironment;
     if (std.mem.eql(u8, name, "TF_ROCE_GID_INDEX") and n > std.math.maxInt(c_int)) return error.InvalidEnvironment;
+    if (std.mem.eql(u8, name, "TF_PREFILL_CHUNK") and n % 16 != 0) return error.InvalidEnvironment; // whole page rows
     return n;
 }
 

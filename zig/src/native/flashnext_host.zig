@@ -126,6 +126,7 @@ pub const Host = struct {
 
     fn submitFn(ctx: *anyopaque, id: api.Id, request: *const api.Request, sink: api.Sink) api.SubmitError!void {
         const h = self(ctx);
+        if (request.handoff != null) return error.InvalidRequest; // it exports no states (--mcdma-produce)
         const job = h.gpa.create(Job) catch return error.Busy;
         job.* = .{ .id = id, .request = request, .sink = sink, .queued = h.now() };
         h.lock();
@@ -594,4 +595,5 @@ test "a drained Flash Next host is unhealthy before another submit" {
 
 test {
     _ = @import("flashnext_host_close_test.zig");
+    _ = @import("flashnext_host_handoff_test.zig");
 }
