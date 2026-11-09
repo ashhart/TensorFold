@@ -391,6 +391,15 @@ pub const Rule = struct {
         return r.shared_price.price(streams, sampled, r.row_cost.extraMs(streams, sampled));
     }
 
+    /// Held drafts have already run; every verify option retains the round's same head fixed cost.
+    pub fn verifyPrice(r: *const Rule, streams: usize, sampled: bool) ?@import("shared_price.zig").Price {
+        var price = r.sharedPrice(streams, sampled) orelse return null;
+        const head = if (r.nearest(streams, sampled)) |o| o.head else 0;
+        price.plain += head;
+        price.fixed += head;
+        return price;
+    }
+
     /// Only completed timed shared rounds advance this count/mode's calibration clock.
     pub fn observeShared(r: *Rule, streams: u32, rows: u64, ms: f64, sampled: bool, head_ms: f64, plain: bool, calibration: bool) !void {
         if (streams > 1 and r.plain_guard and r.confidence_floor == null) {
@@ -469,6 +478,7 @@ fn distance(a: u32, b: usize) usize {
 test {
     _ = @import("depth_test.zig");
     _ = @import("shared_price_test.zig");
+    _ = @import("shared_verify_price_test.zig");
 }
 
 test {
