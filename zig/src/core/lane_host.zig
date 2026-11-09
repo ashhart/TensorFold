@@ -437,6 +437,7 @@ pub const LaneHost = struct {
     }
 
     pub fn prefilled(h: *LaneHost, job: *Job, began: i96) void {
+        job.cache_promise = .{};
         if (job.prefilled != null) return;
         const done = std.Io.Clock.awake.now(h.io).toNanoseconds();
         job.fill_on.store(false, .release); // the pass reported: status readers stop counting this fill

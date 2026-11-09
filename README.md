@@ -20,6 +20,7 @@ atc claim ISSUE --json
 Claim a free `ISSUE` after a complete check. Successful claims start an anonymous radar session and return its number.
 Keep that session number; for existing work use `atc start ISSUE --json`. Add `--github-name` to show your name,
 or `--local` to keep the session on your machine.
+GitHub ties the session verification comment to its author, even when the radar hides the name.
 Check that `publication` is `public`; `unavailable` means the public update failed, even if the local claim succeeded.
 
 Pulse only while the agent is working, before its five-minute check-in expires:
@@ -89,6 +90,7 @@ The API also serves completions, Responses and Anthropic Messages. `/v1/models` 
 On Windows with an NVIDIA GPU, follow [the native Windows build guide](docs/WINDOWS.md).
 Use `tensorfold --help`, `tensorfold capabilities --json` and `tensorfold serve REPO --help` to inspect your binary.
 You can also serve a complete local checkpoint directory or an existing Hugging Face cache.
+Model weights have their own licenses.
 
 `tensorfold web [ARGS...]` opens TensorFold Web, a small local web app for picking, running and chatting with models.
 If it needs installing, an interactive release binary offers to install its matching version with `uv` after you say yes.
@@ -358,9 +360,8 @@ The binary's `capabilities --json` response lists its supported flags and platfo
 | `--no-update-check` | Accepted compatibility switch; update the installed binary through its package manager. |
 | `--backend auto` | Use the backend compiled for the platform; `mlx` selects native Metal on macOS and `cuda` selects CUDA on Linux. |
 
-The default cache takes half the room after streams, with a 16 GiB floor on Metal and CUDA device memory,
-or 8 GiB for unified CUDA host snapshots, clipped to the room. Discrete CUDA host caches default to 8 GiB.
-Flash Next batch stays at 16 GiB before session sizing. Explicit values override it; see [prompt reuse](RUNBOOK.md).
+The default cache scales after streams; discrete CUDA host snapshots stay at 8 GiB and Flash Next batch at 16 GiB.
+Explicit values override it; see [prompt reuse](RUNBOOK.md).
 
 `--prompt-cache-gib` applies to Nemotron, Flash Next, GLM, Qwen3.8-27B and LFM2.5-24B-A2B, and
 `--prompt-cache-over-cap` to the same models but GLM.

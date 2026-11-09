@@ -45,6 +45,19 @@ fn reclaimable(s: *const pc.Store, from: ?*pc.Entry, prompt: []const u32, born: 
     return .{ .bytes = e.bytes, .slots = 1 };
 }
 
+/// Bytes and slots the victim order can eventually free, excluding borrowed, protected and skipped entries.
+pub fn evictable(s: *const pc.Store, skip: ?*pc.Entry, prompt: []const u32) Room {
+    var out: Room = .{};
+    for (s.entries.items) |e| {
+        if (e.borrowers > 0 or e == skip) continue;
+        if (s.reservation_guard) |g| if (g.protects(s, e)) continue;
+        if (s.keep_others and !policy.own(e, skip, prompt)) continue;
+        out.bytes += e.bytes;
+        out.slots += 1;
+    }
+    return out;
+}
+
 fn future(s: *const pc.Store, from: ?*pc.Entry, prompt: []const u32, born: u32) Room {
     const credit = reclaimable(s, from, prompt, born);
     const promised: Room = if (s.reservation_guard) |g| g.promised else .{};
@@ -76,11 +89,17 @@ pub fn reserve(s: *pc.Store, prompt: []const u32, born: u32, from: ?*pc.Entry, m
         if (exists(s, prompt, at, spans)) return;
         const need = s.family.vtable.bytes(s.family.ptr, at);
         if (need > s.budget or s.most == 0) return;
-        var room = future(s, from, prompt, born);
-        while (need > room.bytes or room.slots == 0) {
+        const credit = reclaimable(s, from, prompt, born);
+        const promised = s.reservation_guard.?.promised;
+        // Preserve deficits: freeing a state must pay the other jobs' promises before this endpoint can fit.
+        var bytes: i128 = @as(i128, s.budget) - s.held + credit.bytes - promised.bytes;
+        var slots: i128 = @as(i128, s.most) - s.entries.items.len + credit.slots - promised.slots;
+        const can = evictable(s, from, prompt);
+        if (bytes + can.bytes < need or slots + can.slots < 1) return;
+        while (bytes < need or slots < 1) {
             const i = others.victim(s, from, prompt, born, need, 1) orelse return;
-            room.bytes +|= s.entries.items[i].bytes;
-            room.slots +|= 1;
+            bytes += s.entries.items[i].bytes;
+            slots += 1;
             s.remove(i);
             s.counts.evicted += 1;
         }

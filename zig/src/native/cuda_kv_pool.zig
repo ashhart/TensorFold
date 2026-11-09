@@ -510,3 +510,27 @@ test "CUDA cache default leaves seven full windows beside an unpaged engine" {
     explicit.prompt_cache_gib = 40;
     try std.testing.expectEqual(@as(u64, 40 * GiB), budgetOf(struct {}, l, 88 * GiB, explicit, 8192, false, false, 0, null).cache);
 }
+
+test "CUDA cache default uses half of unpaged room when it exceeds the floor" {
+    const GiB: u64 = 1 << 30;
+    const l: kv_pool.Layout = .{ .fixed_bytes = 0, .token_bytes = 1 << 20, .page_tokens = 1, .snap_bytes = 0 };
+    const o: api.Open = .{ .dir = "model", .model_type = "n", .lanes = 8 };
+    const b = budgetOf(struct {}, l, 104 * GiB, o, 8192, false, false, 0, null);
+    const p = try kv_pool.plan(l, b);
+    try std.testing.expectEqual(@as(u64, 24 * GiB), b.cache);
+    try std.testing.expectEqual(@as(u32, 8), p.lanes);
+    try std.testing.expectEqual(@as(usize, 7 * 8192), p.pages);
+    try std.testing.expectEqual(@as(u64, 24 * GiB), p.copied);
+}
+
+test "CUDA cache default leaves no copies when unpaged windows use all room" {
+    const GiB: u64 = 1 << 30;
+    const l: kv_pool.Layout = .{ .fixed_bytes = 0, .token_bytes = 1 << 20, .page_tokens = 1, .snap_bytes = 0 };
+    const o: api.Open = .{ .dir = "model", .model_type = "n", .lanes = 8 };
+    const b = budgetOf(struct {}, l, 56 * GiB, o, 8192, false, false, 0, null);
+    const p = try kv_pool.plan(l, b);
+    try std.testing.expectEqual(@as(u64, 0), b.cache);
+    try std.testing.expectEqual(@as(u32, 8), p.lanes);
+    try std.testing.expectEqual(@as(usize, 7 * 8192), p.pages);
+    try std.testing.expectEqual(@as(u64, 0), p.copied);
+}
