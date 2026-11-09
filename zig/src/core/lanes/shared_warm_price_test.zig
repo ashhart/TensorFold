@@ -64,3 +64,42 @@ test "shared prices: a measured different stream count cannot reprice a warm mix
     try t.expectEqual(@as(u64, 1), r.shared_rounds);
     try t.expect(r.sharedPrice(4, false) == null);
 }
+
+fn reservation(granted: bool) !void {
+    const Config = @import("config.zig").Config;
+    const Stream = @import("stream.zig").Stream;
+    const Engine = @import("engine.zig").Engine;
+    const fake = @import("fake.zig");
+    const win = @import("windows.zig");
+    var cfg = try Config.init(a, .{ .exact_width = 8, .mtp = true, .drafts = 1, .draft_prior = &.{0.3}, .plain_guard = true, .hidden_rows = true, .allocate_shared_drafts = true, .limit_shared_drafts = !granted, .granted_depth = granted, .draft_probabilities = granted, .hold_costs = if (granted) &.{.{ .streams = 1, .depth = 1, .ms = 2 }} else &.{}, .window_costs = &.{ .{ .width = 1, .ms = 12 }, .{ .width = 8, .ms = 26 } } }, 8, 7);
+    defer cfg.deinit(a);
+    var target: fake.Fake = .{ .gpa = a };
+    defer target.deinit();
+    var clock: fake.FixedClock = .{};
+    var e = Engine.init(a, &cfg, target.backend(), clock.clock());
+    defer e.deinit();
+    try e.rule.observeOverhead(1, 1, if (granted) 112 else 20, false, 0);
+    try e.rule.observeOverhead(4, 4, 118, false, if (granted) 100 else 0);
+    var streams: [4]Stream = undefined;
+    var made: usize = 0;
+    defer for (streams[0..made]) |*s| s.deinit(a);
+    var plans: [4]win.Plan = undefined;
+    for (&streams, &plans, 0..) |*s, *p, i| {
+        s.* = try Stream.init(a, .{ .id = "mixed", .prompt = &.{1}, .max_new = 64, .drafts = i == 0 });
+        made += 1;
+        s.granted = if (i == 0) 1 else null;
+        if (i == 0 and granted) try s.draft_chances.append(a, 0.3);
+        p.* = .{ .stream = s, .position = 1, .kind = .none };
+    }
+    var out: [1]i64 = undefined;
+    try @import("shared_drafts.zig").budgets(&e, &plans, &.{0}, &out);
+    try t.expectEqual(@as(i64, 1), out[0]);
+}
+
+test "shared prices: an unmeasured mixed reservation retains the original head depth limit" {
+    try reservation(false);
+}
+
+test "shared prices: an unmeasured mixed reservation retains the original hold price" {
+    try reservation(true);
+}
