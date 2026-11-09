@@ -1,6 +1,7 @@
 //! Cache invalidation is immediate; storage and peer drops wait for a host boundary and the last restore borrower.
 const std = @import("std");
 const pc = @import("prompt_cache.zig");
+const modes = @import("cache_modes.zig");
 
 /// Called inside backend operations: no destruction, allocation, or peer command is allowed here.
 pub fn expired(s: *pc.Store, saved: pc.Saved) void {
@@ -44,4 +45,12 @@ pub fn resumedWithReason(s: *pc.Store, e: *pc.Entry, prompt: []const u32, failur
     const last = s.gpa.dupe(u32, prompt) catch return;
     if (e.own.len == 0 or e.last.ptr != e.own.ptr) s.gpa.free(e.last); // the first `last` is the tokens' copy
     e.last = last;
+}
+
+/// The longest state `prompt` resumes, in RAM or on disk as a lookup's, borrowed: resumed or release reports it.
+pub fn borrow(s: *pc.Store, prompt: []const u32, born: u32, starts: []const u32, spans: []const modes.Span) ?*pc.Entry {
+    const ram = s.find(prompt, starts, spans);
+    const e = pc.rows.read.recall(s, prompt, born, starts, spans, s.recall(prompt, born, starts, spans, ram)) orelse return null;
+    e.borrowers += 1;
+    return e;
 }

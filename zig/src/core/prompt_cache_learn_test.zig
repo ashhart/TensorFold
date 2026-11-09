@@ -335,3 +335,27 @@ test "a refused learned state ends the retry: the pass from the start, one failu
         try std.testing.expectEqual(fresh(&second), f.pass(&s, &second, p));
     }
 }
+
+test "a shared cut kept as remote is never learned: built on another machine's prefix, it stays in RAM" {
+    const gpa = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    var root_buf: [128]u8 = undefined;
+    const root = try std.fmt.bufPrint(&root_buf, "/tmp/tf-learn-remote-{d}", .{platform.c.getpid()});
+    defer rmTree(root);
+    const harness = [_]u32{ 7, 7, 7, 7, 7, 7 }; // a state at 5 reads it all (lookahead 1)
+    var im = try imprint.Imprint.open(gpa, root, 3, 1 << 30);
+    defer im.deinit();
+    im.admission.floor = 1 << 20;
+    var f: Fake = .{ .gpa = gpa };
+    var s = Store.init(gpa, f.learned(), .{ .lookahead = 1, .min_prompt = 0, .min_gap = 1 }, 1 << 20);
+    defer s.deinit();
+    s.imprint = &im;
+    const prompt = harness ++ [_]u32{ 1, 2, 9 };
+    const plan = try s.begin(arena.allocator(), &prompt, 8, &.{5}, &.{}, null, &.{});
+    s.keep_remote = true; // #1594 step 2b: the pass stands on a pulled prefix
+    try std.testing.expectEqual(fresh(&prompt), f.pass(&s, &prompt, plan));
+    s.keep_remote = false;
+    try std.testing.expect(s.entries.items[0].at == 5 and s.entries.items[0].remote and s.entries.items[0].shared);
+    try std.testing.expect(!im.has(imprint.Imprint.keyOf(&harness)));
+}
