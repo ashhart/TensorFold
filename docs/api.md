@@ -401,6 +401,31 @@ request fields: a `--min-p` outside 0 through 1 refuses every chat request, a ne
 `--temperature` and `--top-p` must be finite numbers. An engine that decodes greedily only refuses sampled
 requests while the server samples by default, and its refusal suggests serving with `--temperature 0`.
 
+`--instruct-sampling` gives chat requests with thinking off their own sampling defaults. Exactly these requests change
+under it: a chat request (not a raw completion) whose reasoning block is off (the request's `enable_thinking: false`,
+or `--no-thinking` with nothing in the request turning it on), that samples (its temperature, or the default it ends
+up with, is above 0), takes the set's value for each sampling field it leaves unset; a field the request sends wins,
+as over the ordinary defaults. Requests with thinking on, greedy requests (a request's `temperature: 0`, a server's
+`--temperature 0`, or a checkpoint whose `generation_config.json` has `do_sample: false`), raw prompt completions and
+the server's own requests (compaction summaries, Living Weights' lesson wordings and checks) are unchanged. `card`
+serves the family's model-card instruct set: Qwen 3.5, Qwen 3.6, Qwen3.8-27B and Qwen3.8-Flash-Next give temperature
+0.7, top_p 0.8, top_k 20 and presence_penalty 1.5, while their thinking set stays in `generation_config.json`.
+`name=value,...` sets or changes `temperature`, `top_p`, `top_k`, `min_p`, `presence_penalty` and `frequency_penalty`
+over that set, or over the server's defaults for a family without one; `none` serves one set. The set, pairs
+included, sits between `generation_config.json` and the flags, so `--temperature`, `--top-p`, `--top-k` and `--min-p`
+still decide for both modes: a server started with `--temperature 0` stays greedy whatever the pairs say. Without the
+flag the server has one default set for every request, as before. A pair outside the range a request may send
+(temperature below 0, top_p outside 0 through 1, a negative top_k, min_p outside 0 through 1, a penalty outside -2
+through 2) refuses the argument at startup, naming the field. `card` refuses a model type whose family gives no card
+set; it cannot tell checkpoints apart within a type, so leave the flag off (or give pairs from the card) for a
+checkpoint whose card gives no non-thinking set, such as Ornith-1.5-122B served as `qwen3_5_moe`. On an engine that
+applies no penalties the card's presence_penalty is left out with a startup line saying so, and pairs naming a
+non-zero penalty are refused at startup. The serving line prints the set after the sampling defaults
+(`thinking off: ...`). With a DFlash2 drafter, presence_penalty 1.5 lowers draft acceptance: on Qwen3.8-27B drafted
+thinking-off replies at the card set decode about 19% slower than with the penalty at 0, while the thinking set and
+undrafted decoding are unaffected (#2645); `--instruct-sampling presence_penalty=0` keeps the card's temperature,
+top_p and top_k without the penalty.
+
 `--name-priority ID=background` gives one served id (`--name` or an `--alias`) a default priority: a request that
 asks for it and sends no `priority` of its own is treated as `priority: "background"`. The request's own `priority`
 field always wins over the default. This lets one server answer to several ids at their usual priority while a
