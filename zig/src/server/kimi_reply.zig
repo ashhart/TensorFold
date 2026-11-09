@@ -227,6 +227,7 @@ pub const Stream = struct {
     at: usize = 0,
     ended: bool = false,
     revised: bool = false,
+    fallback: bool = false, // an id with no bytes: the reply goes to the whole parse, which decodes it as main does
     raw: std.ArrayList(u8) = .empty,
     ignored: std.ArrayList(u8) = .empty,
     pending: [3]u8 = undefined,
@@ -260,7 +261,10 @@ pub const Stream = struct {
         s.raw.clearRetainingCapacity();
         try s.raw.appendSlice(r.a, s.pending[0..s.pending_len]);
         for (ids) |id| {
-            const bytes = (try r.text.tokenBytes(r.a, id)).?;
+            const bytes = (try r.text.tokenBytes(r.a, id)) orelse {
+                s.fallback = true;
+                return;
+            };
             defer r.a.free(bytes);
             try s.raw.appendSlice(r.a, bytes);
         }
@@ -291,7 +295,7 @@ pub const Stream = struct {
         const r = &s.reader;
         const text = r.text;
         s.revised = false;
-        while (!s.ended and s.at < ids.len) {
+        while (!s.ended and !s.fallback and s.at < ids.len) {
             const token = ids[s.at];
             if (token == s.end_id) {
                 s.ended = true;
