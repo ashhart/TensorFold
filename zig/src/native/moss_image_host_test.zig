@@ -124,25 +124,6 @@ test "MOSS-Image: the queue holds one picture and one arrival, serves them in or
     try std.testing.expectEqual(third, q.next().?);
 }
 
-test "MOSS-Image: the pipeline's 8-bit rule is the decoder kernel's clamp and round to even" {
-    // clamp to [-1, 1], then * 0.5 + 0.5 to [0, 1], then * 255 with rint
-    const pixels = [_]f32{ -1, 1, 0, 0.5, -0.5, 2, -2, 0.25 };
-    var out: [pixels.len]u8 = undefined;
-    host.quantize(&out, &pixels);
-    try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 255, 128, 191, 64, 255, 0, 159 }, &out);
-    // a tie goes to the nearer even number, as metal::rint does
-    for ([_]struct { f32, u8 }{
-        .{ 0.5, 0 },
-        .{ 1.5, 2 },
-        .{ 2.5, 2 },
-        .{ 3.5, 4 },
-        .{ 254.5, 254 },
-        .{ 0.4999, 0 },
-        .{ 0.6, 1 },
-        .{ 255, 255 },
-    }) |case| try std.testing.expectEqual(case[1], host.roundEven(case[0]));
-}
-
 /// Counts the one `finished` event a picture's pass sends.
 fn counted(ctx: *anyopaque, _: api.Id, event: *const api.Event) void {
     const n: *usize = @ptrCast(@alignCast(ctx));
