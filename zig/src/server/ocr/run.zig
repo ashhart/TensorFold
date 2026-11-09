@@ -29,8 +29,8 @@ pub const Step = types.Faulted || error{ Cancelled, OutOfMemory };
 /// The dialect's per-page encoder, called in page order.
 pub const PageSink = struct {
     ctx: *anyopaque,
-    /// Called once per page while its pixels live; ``source`` indexes ``run``'s sources; encodes go into ``a``.
-    page: *const fn (ctx: *anyopaque, a: Allocator, source: u32, page: *const OcrPage, rgb: picture.Rgb, enc: *budget.Encodes, fault: *Fault) Step!void,
+    /// Called once per page while its pixels live; encodes go into ``a``.
+    page: *const fn (ctx: *anyopaque, a: Allocator, page: *const OcrPage, rgb: picture.Rgb, enc: *budget.Encodes, fault: *Fault) Step!void,
 };
 
 /// The gate's refusal for a model without a reader (docs/api.md OCR).
@@ -46,8 +46,8 @@ pub fn gate(srv: *const Server, a: Allocator, fault: *Fault) Step!void {
     if (srv.info.vision == null) return fault.fail(a, .bad_input, "{s}", .{no_vision});
 }
 
-/// One page to read: its source, its index in that source, its encoded image, its DPI and its pixel count.
-const Planned = struct { source: u32, index: u32, bytes: []const u8, dpi: u32, pixels: u64 };
+/// One page to read: its encoded image and its pixel count.
+const Planned = struct { bytes: []const u8, pixels: u64 };
 
 /// Reads every page of ``sources`` in order into ``sink``; ``a`` is the request arena, ``gone`` says the client left.
 pub fn run(srv: *Server, a: Allocator, sources: []const Source, sink: PageSink, fault: *Fault, gone: anytype) Step!void {
@@ -66,17 +66,11 @@ pub fn run(srv: *Server, a: Allocator, sources: []const Source, sink: PageSink, 
     }
 }
 
-/// Every source's page within one page budget, its pixels counted before any inference.
+/// Every source's page, its pixels counted before any inference.
 fn plan(srv: *const Server, a: Allocator, sources: []const Source, fault: *Fault) Step![]const Planned {
-    var left = budget.Pages.init();
-    const cap = left.left;
-    var out: std.ArrayList(Planned) = .empty;
-    for (sources, 0..) |s, k| {
-        if (!left.take(1)) return overBudget(a, fault, cap);
-        const px = try imagePixels(srv, a, s.bytes, fault);
-        try out.append(a, .{ .source = @intCast(k), .index = 0, .bytes = s.bytes, .dpi = 72, .pixels = px });
-    }
-    return out.items;
+    const out = try a.alloc(Planned, sources.len);
+    for (sources, out) |s, *p| p.* = .{ .bytes = s.bytes, .pixels = try imagePixels(srv, a, s.bytes, fault) };
+    return out;
 }
 
 /// An image's pixel count from its header, else from one decode within the page limit (freed at once).
@@ -95,9 +89,8 @@ fn decodeFault(a: Allocator, fault: *Fault, e: picture.Error) Step {
     };
 }
 
-fn overBudget(a: Allocator, fault: *Fault, cap: u32) Step {
-    return fault.fail(a, .bad_input, "a request may read at most {d} pages (TENSORFOLD_MAX_PDF_PAGES); this one selects more", .{cap});
-}
+/// An image is page 0 of its source: the index its reply and its messages give.
+const page_index = 0;
 
 /// One page in its own arena: decode, generate, parse, validate, then the sink while the pixels live.
 fn onePage(srv: *Server, a: Allocator, reader: api.ocr.Ocr, id: []const u8, p: Planned, sink: PageSink, enc: *budget.Encodes, fault: *Fault, gone: anytype) Step!void {
@@ -109,31 +102,31 @@ fn onePage(srv: *Server, a: Allocator, reader: api.ocr.Ocr, id: []const u8, p: P
     const w: u32 = @intCast(rgb.width);
     const h: u32 = @intCast(rgb.height);
     // the budget was planned from the header; pixels that disagree (an EXIF turn keeps the product) fail the request
-    if (@min(@as(u64, w) * h, max_page_pixels) != p.pixels) return fault.fail(a, .bad_input, "page {d}: the image's header and its pixels disagree", .{p.index});
+    if (@min(@as(u64, w) * h, max_page_pixels) != p.pixels) return fault.fail(a, .bad_input, "page {d}: the image's header and its pixels disagree", .{page_index});
     var pcx: Cx = .{ .a = pa };
-    const got = try generate(srv, &pcx, a, reader, id, p, bytes, fault, gone);
+    const got = try generate(srv, &pcx, a, reader, id, bytes, fault, gone);
     const parsed = reader.parse(pa, got.content, .{ .width = w, .height = h }, got.frame) catch |e| {
         if (e == error.OutOfMemory) return error.OutOfMemory;
-        if (e != error.Unreadable) return fault.fail(a, .internal, "page {d}: the OCR reader failed ({s})", .{ p.index, @errorName(e) });
-        log.line("{s}: page {d}: the model's output does not follow its format: {s}", .{ id, p.index, got.content });
-        return fault.fail(a, .unreadable, "page {d}: the model's output does not follow its format", .{p.index});
+        if (e != error.Unreadable) return fault.fail(a, .internal, "page {d}: the OCR reader failed ({s})", .{ page_index, @errorName(e) });
+        log.line("{s}: page {d}: the model's output does not follow its format: {s}", .{ id, page_index, got.content });
+        return fault.fail(a, .unreadable, "page {d}: the model's output does not follow its format", .{page_index});
     };
     const blocks = try a.alloc(api.ocr.OcrBlock, parsed.len);
     for (parsed, blocks) |b, *o| {
-        const quad: ?api.ocr.Quad = if (b.quad) |q| geometry.validate(q, w, h) catch {
-            log.line("{s}: page {d}: a box is not finite: {s}", .{ id, p.index, got.content });
-            return fault.fail(a, .unreadable, "page {d}: the model's output has a box that is not finite", .{p.index});
-        } else null;
+        const quad = geometry.validate(b.quad, w, h) catch {
+            log.line("{s}: page {d}: a box is not finite: {s}", .{ id, page_index, got.content });
+            return fault.fail(a, .unreadable, "page {d}: the model's output has a box that is not finite", .{page_index});
+        };
         o.* = .{ .content = try a.dupe(u8, b.content), .quad = quad, .kind = b.kind };
     }
-    const page: OcrPage = .{ .index = p.index, .width = w, .height = h, .dpi = p.dpi, .blocks = blocks };
-    try sink.page(sink.ctx, a, p.source, &page, rgb, enc, fault);
+    const page: OcrPage = .{ .index = page_index, .width = w, .height = h, .dpi = 72, .blocks = blocks };
+    try sink.page(sink.ctx, a, &page, rgb, enc, fault);
 }
 
 const Generated = struct { content: []const u8, frame: api.Size };
 
 /// The page as one user turn (image, then the reader's prompt) through chat.prepare and chat.generate, greedy.
-fn generate(srv: *Server, pcx: *Cx, a: Allocator, reader: api.ocr.Ocr, id: []const u8, p: Planned, bytes: []const u8, fault: *Fault, gone: anytype) Step!Generated {
+fn generate(srv: *Server, pcx: *Cx, a: Allocator, reader: api.ocr.Ocr, id: []const u8, bytes: []const u8, fault: *Fault, gone: anytype) Step!Generated {
     const pa = pcx.a;
     const mime: []const u8 = switch (images.sniff(bytes)) {
         .png => "image/png",
@@ -153,7 +146,7 @@ fn generate(srv: *Server, pcx: *Cx, a: Allocator, reader: api.ocr.Ocr, id: []con
         return fault.fail(a, .internal, "the model's image step reported no frame", .{});
     };
     const reply = chat.generate(srv, pcx, prepared, null, gone) catch |e| return chatFault(a, pcx, fault, e);
-    finished(a, fault, reply.finish_reason, p.index, gone) catch |e| {
+    finished(a, fault, reply.finish_reason, page_index, gone) catch |e| {
         if (e == error.Faulted and fault.class == .unreadable) log.line("{s}: {s}: {s}", .{ id, fault.message, reply.content }); // the message names the page
         return e;
     };

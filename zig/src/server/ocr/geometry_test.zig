@@ -1,4 +1,4 @@
-//! Quad validation and the Mistral and PaddleX integer forms.
+//! Quad validation and the Mistral integer form.
 const std = @import("std");
 const api = @import("engine_api");
 const g = @import("geometry.zig");
