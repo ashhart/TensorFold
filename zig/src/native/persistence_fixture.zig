@@ -47,6 +47,14 @@ fn copyIn(_: *anyopaque, saved: pc.Saved, ranges: []const rows.image.Range, in: 
 const image: rows.Image = .{ .parts = parts, .gather = copyOut, .blank = blank, .scatter = copyIn };
 const vtable: pc.Snapshots.VTable = .{ .bytes = bytes, .save = save, .restore = restore, .drop = drop, .rows = &image };
 
+/// `data` over `sub_path` in place, then its mtime one second on: a coarse clock cannot hide the rewrite.
+pub fn rewrite(dir: std.Io.Dir, sub_path: []const u8, data: []const u8) !void {
+    const io = std.testing.io;
+    const before = (try dir.statFile(io, sub_path, .{})).mtime;
+    try dir.writeFile(io, .{ .sub_path = sub_path, .data = data });
+    try dir.setTimestamps(io, sub_path, .{ .modify_timestamp = .{ .new = before.addDuration(.fromSeconds(1)) } });
+}
+
 /// Plant a file, reopen and read it, then reject changed keys without destroying the matching state.
 pub fn misses(before: u64, matching: u64, changed: []const u64) !void {
     var tmp = std.testing.tmpDir(.{});

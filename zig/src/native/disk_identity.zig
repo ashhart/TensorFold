@@ -3,12 +3,12 @@ const std = @import("std");
 const api = @import("engine_api");
 const Allocator = std.mem.Allocator;
 
-/// Config/index bytes and stamps of every indexed shard plus top-level safetensors (including auxiliary heads).
+/// Config/index bytes, stamps of every indexed shard (IndexedShardMissing if absent) and top-level safetensors.
 pub fn checkpoint(h: *std.hash.Wyhash, a: Allocator, io: std.Io, dir: []const u8) !void {
     var arena: std.heap.ArenaAllocator = .init(a);
     defer arena.deinit();
     const scratch = arena.allocator();
-    var names: std.ArrayList([]const u8) = .empty;
+    var indexed: std.StringArrayHashMapUnmanaged(void) = .empty;
     for ([_][]const u8{ "config.json", "model.safetensors.index.json" }) |name| {
         const path = try std.fs.path.join(scratch, &.{ dir, name });
         const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, scratch, .limited(1 << 26)) catch |e| switch (e) {
@@ -20,9 +20,11 @@ pub fn checkpoint(h: *std.hash.Wyhash, a: Allocator, io: std.Io, dir: []const u8
         if (std.mem.eql(u8, name, "model.safetensors.index.json")) {
             const parsed = try std.json.parseFromSliceLeaky(std.json.Value, scratch, bytes, .{});
             const map = try @import("checkpoint_config").index.weightMap(parsed);
-            for (map.values()) |value| try names.append(scratch, value.string);
+            for (map.values()) |value| try indexed.put(scratch, value.string, {});
         }
     }
+    var names: std.ArrayList([]const u8) = .empty;
+    try names.appendSlice(scratch, indexed.keys());
     var d = try std.Io.Dir.cwd().openDir(io, dir, .{ .iterate = true });
     defer d.close(io);
     var it = d.iterate();
@@ -35,7 +37,8 @@ pub fn checkpoint(h: *std.hash.Wyhash, a: Allocator, io: std.Io, dir: []const u8
     }.lt);
     for (names.items, 0..) |name, i| {
         if (i > 0 and std.mem.eql(u8, name, names.items[i - 1])) continue;
-        const info = try d.statFile(io, name, .{});
+        const info = d.statFile(io, name, .{}) catch |e|
+            return if (e == error.FileNotFound and indexed.contains(name)) error.IndexedShardMissing else e;
         const stamp = [4]i128{ info.size, info.inode, info.mtime.nanoseconds, info.ctime.nanoseconds };
         h.update(name);
         h.update(std.mem.sliceAsBytes(&stamp));

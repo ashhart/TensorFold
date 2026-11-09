@@ -33,14 +33,19 @@ auxiliary top-level safetensors files. Their names, sizes, inodes and modificati
 write with unchanged config, index, tensor header and size moves their namespace even when a fixed probe does not
 visit the changed tensor. Flash Next also hashes the loaded variant text and input/output/meta bindings in sorted
 function-name order. Captured CUDA sets hash each cubin named by the parsed manifest, through the same loader
-paths and size limit. A missing or changed file fails identity construction instead of opening an old namespace.
+paths and size limit. A missing or changed file fails identity construction instead of opening an old namespace;
+a shard the index names but the folder lacks is refused as `IndexedShardMissing`, as the loaders refuse it.
 
 Resolved policies are bound even when a fixed startup probe does not exercise their difference. The Metal Qwen
-key includes loaded ANE columns and prompt sizing; GLM includes effective rank slices, routing and prompt choices.
-Flash Next includes its resolved execution branches, stamps of the files actually indexed (including an external
-weight pack), and the bytes of loaded metadata such as a supplied reference. Descriptor and mapping order do not
-change that key. CUDA Qwen keys include the rotary table the target consumes, for dense and routed checkpoints.
-These additions change the optional disk namespace; snapshot payloads and layouts are unchanged.
+key includes loaded ANE columns and the prompt chunk height, not the frame's buffer rows. GLM includes effective
+rank slices, routing, its prompt chunk height and sparse kernel, and whether the MTP head's prompt eh_proj runs on
+the tile kernel as the load built it (`GLM_EHPROJ_NAX=0` or a failed tile build: scalar). A different chunk height
+starts these two stores cold: GLM's prompt windows and chunks sum in different orders (#743), and Qwen's may too.
+Flash Next includes its resolved execution branches, including the DeltaNet window kernels, but not the serial
+encoder choice, which orders the same launches. It also binds stamps of the files actually indexed (including an
+external weight pack) and the bytes of loaded metadata such as a supplied reference. Descriptor and mapping order
+do not change that key. CUDA Qwen keys include the rotary table the target consumes, for dense and routed
+checkpoints. These additions change the optional disk namespace; snapshot payloads and layouts are unchanged.
 
 The executable and kernel fingerprints use a 32 KiB read buffer and check file stamps across the read. Checkpoints,
 executables and kernel assets must remain stable while a model opens and serves. The existing learner owns runtime

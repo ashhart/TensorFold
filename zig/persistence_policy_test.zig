@@ -16,48 +16,64 @@ test "persistence identity: Qwen Metal loaded ANE columns miss with the same pro
     share.columns = 2048;
     const other_share = qwen.withPolicy(7, &h);
     share.columns = 1024;
-    h.model.frame.capacity = 256;
-    const other_frame = qwen.withPolicy(7, &h);
-    h.model.frame.capacity = 128;
-    h.back.chunk = 256;
-    try fixture.misses(before, matching, &.{ other_share, other_frame, qwen.withPolicy(7, &h) });
+    h.model.frame.capacity = 256; // buffer rows only: the same states
+    try t.expectEqual(before, qwen.withPolicy(7, &h));
+    h.back.chunk = 256; // another chunk height starts cold
+    try fixture.misses(before, matching, &.{ other_share, qwen.withPolicy(7, &h) });
 }
 
 test "persistence identity: GLM Metal resolved policy misses with the same probe" {
     const Config = @import("src/families/glm/config.zig").Config;
     const Prompt = struct { rows: u32 = 4096, sparse_nax: bool = true };
+    const Head = struct { eh_bf16: ?u8 = 1 };
+    const Wide = struct { bf16_nax: ?u8 = 1 };
     var prompt: Prompt = .{};
-    var e: struct { c: Config, pr: ?*Prompt, fused_route: bool } = .{ .c = Config{}, .pr = @as(?*Prompt, &prompt), .fused_route = true };
-    const before = glm.withPolicy(7, &e, true);
+    var weights: struct { mtp: ?Head = .{} } = .{};
+    var kernels: struct { wide: ?Wide = .{} } = .{};
+    var e: struct { c: Config, pr: ?*Prompt, fused_route: bool, w: @TypeOf(&weights), k: @TypeOf(&kernels) } = .{ .c = Config{}, .pr = @as(?*Prompt, &prompt), .fused_route = true, .w = &weights, .k = &kernels };
+    try t.expect(glm.ehTile(&e));
+    const before = glm.withPolicy(7, &e);
     var changed: std.ArrayList(u64) = .empty;
     defer changed.deinit(t.allocator);
     e.fused_route = false;
-    try changed.append(t.allocator, glm.withPolicy(7, &e, true));
+    try changed.append(t.allocator, glm.withPolicy(7, &e));
     e.fused_route = true;
     inline for (.{ "run", "tp_rank", "dense_inter", "kda_heads", "mla_heads" }) |field| {
         @field(e.c, field) += 1;
-        try changed.append(t.allocator, glm.withPolicy(7, &e, true));
+        try changed.append(t.allocator, glm.withPolicy(7, &e));
         @field(e.c, field) -= 1;
     }
     inline for (.{ "own", "inter" }) |field| {
         @field(e.c, field)[0] += 1;
-        try changed.append(t.allocator, glm.withPolicy(7, &e, true));
+        try changed.append(t.allocator, glm.withPolicy(7, &e));
         @field(e.c, field)[0] -= 1;
     }
     prompt.sparse_nax = false;
-    try changed.append(t.allocator, glm.withPolicy(7, &e, true));
+    try changed.append(t.allocator, glm.withPolicy(7, &e));
     prompt.sparse_nax = true;
-    prompt.rows = 8192;
-    try changed.append(t.allocator, glm.withPolicy(7, &e, true));
+    prompt.rows = 8192; // another chunk height starts cold
+    try changed.append(t.allocator, glm.withPolicy(7, &e));
     prompt.rows = 4096;
-    try changed.append(t.allocator, glm.withPolicy(7, &e, false));
+    kernels.wide.?.bf16_nax = null; // GLM_EHPROJ_NAX=0 or a failed tile build: the prompt's eh_proj is scalar
+    try t.expect(!glm.ehTile(&e));
+    const scalar = glm.withPolicy(7, &e);
+    try changed.append(t.allocator, scalar);
+    kernels.wide = null;
+    try t.expectEqual(scalar, glm.withPolicy(7, &e));
+    kernels.wide = .{};
+    weights.mtp.?.eh_bf16 = null; // a quantized head runs neither bf16 kernel
+    try t.expectEqual(scalar, glm.withPolicy(7, &e));
+    weights.mtp = null;
+    try t.expectEqual(scalar, glm.withPolicy(7, &e));
+    weights.mtp = .{};
     e.pr = null;
-    try changed.append(t.allocator, glm.withPolicy(7, &e, true));
+    try t.expect(!glm.ehTile(&e));
+    try changed.append(t.allocator, glm.withPolicy(7, &e));
     e.pr = &prompt;
-    try fixture.misses(before, glm.withPolicy(7, &e, true), changed.items);
+    try fixture.misses(before, glm.withPolicy(7, &e), changed.items);
 }
 
-const flags = .{ "fused_xsum", "serial", "dense", "dense_target", "split", "gdn_step", "hc_mma", "grouped", "xpack", "xfused", "xsx", "copy", "prefetch", "lane_new", "rotary_enabled" };
+const flags = .{ "fused_xsum", "dense", "dense_target", "split", "gdn_step", "hc_mma", "grouped", "xpack", "xfused", "xsx", "copy", "prefetch", "lane_new", "rotary_enabled" };
 const Gx = struct { min_rows: usize };
 const Tp = struct { rank: u32 };
 const Run = struct {
@@ -89,6 +105,9 @@ const Run = struct {
 test "persistence identity: Flash Next Metal resolved branches miss with the same probe" {
     var r: Run = .{};
     const before = flash.withPolicy(7, &r);
+    r.serial = true; // a serial encoder in place of barriers: the same launches in the same order
+    try t.expectEqual(before, flash.withPolicy(7, &r));
+    r.serial = false;
     var changed: std.ArrayList(u64) = .empty;
     defer changed.deinit(t.allocator);
     inline for (flags) |field| {
@@ -139,9 +158,8 @@ test "persistence identity: Flash Next Metal actual pack rewrite misses with the
     const files = [_]c_int{ file.handle, other.handle };
     const before = try flash.withFiles(7, a, t.io, &files);
     const matching = try flash.withFiles(7, a, t.io, &.{ other.handle, file.handle });
-    try std.Io.sleep(t.io, .fromMilliseconds(5), .awake);
     pack_bytes[pack_bytes.len - 1] = 1;
-    try tmp.dir.writeFile(t.io, .{ .sub_path = "pack.safetensors", .data = &pack_bytes });
+    try fixture.rewrite(tmp.dir, "pack.safetensors", &pack_bytes);
     try fixture.misses(before, matching, &.{try flash.withFiles(7, a, t.io, &files)});
     try t.expectError(error.IdentityFileUnavailable, flash.withFiles(7, a, t.io, &.{-1}));
 }

@@ -28,10 +28,11 @@ fn nestedMiss(comptime family: Family) !void {
     try tmp.dir.writeFile(t.io, .{ .sub_path = "tensors/native-QB.safetensors", .data = &shard });
     const before = try key(a, dir, family);
     const same = try key(a, dir, family);
-    try std.Io.sleep(t.io, .fromMilliseconds(5), .awake);
     shard[shard.len - 1] = 1;
-    try tmp.dir.writeFile(t.io, .{ .sub_path = "tensors/native-QB.safetensors", .data = &shard });
+    try fixture.rewrite(tmp.dir, "tensors/native-QB.safetensors", &shard);
     try fixture.misses(before, same, &.{try key(a, dir, family)});
+    try tmp.dir.deleteFile(t.io, "tensors/native-QB.safetensors");
+    try t.expectError(error.IndexedShardMissing, key(a, dir, family));
 }
 
 test "persistence identity: Nemotron Metal indexed shard rewrite misses with the same probe" {
@@ -45,4 +46,7 @@ test "persistence identity: GLM Metal indexed shard rewrite misses with the same
 }
 test "persistence identity: Flash Next Metal indexed shard rewrite misses with the same probe" {
     try nestedMiss(.flash);
+}
+test {
+    _ = nemo; // its top-level shard rewrite test
 }
