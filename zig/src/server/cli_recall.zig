@@ -3,7 +3,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const cli = @import("cli.zig");
 
-/// Sets a --recall flag's field; false when `name` is none of them.
+/// --recall and the flags that imply it; false for any other flag.
 pub fn flag(a: Allocator, out: *cli.Args, name: []const u8, v: []const u8, u: *cli.Usage) error{ Usage, OutOfMemory }!bool {
     if (std.mem.eql(u8, name, "--recall-dir")) {
         out.recall_dir = v;
