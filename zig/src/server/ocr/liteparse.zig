@@ -78,7 +78,7 @@ pub fn decode(a: Allocator, parts: []const multipart.Part, fault: *Fault) Step!t
             return fault.fail(a, .bad_input, "the file is not a PNG, JPEG or WebP image", .{});
         },
     }
-    return .{ .name = f.filename orelse "file", .bytes = f.body, .kind = .image, .sel = .{ .all_within = 1 } };
+    return .{ .bytes = f.body, .kind = .image, .sel = .{ .all_within = 1 } };
 }
 
 /// The page sink: each line of the page as one LiteParse result.

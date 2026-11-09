@@ -92,7 +92,7 @@ test "ocr run: PDF pages are measured first, and page k renders only after page 
     defer h.stop();
     var order: Order = .{ .dir = tmp.dir };
     var fault: types.Fault = undefined;
-    const doc: types.Source = .{ .name = "d", .bytes = pdf.minimal_two_page_pdf, .kind = .pdf, .sel = .{ .all_within = 16 } };
+    const doc: types.Source = .{ .bytes = pdf.minimal_two_page_pdf, .kind = .pdf, .sel = .{ .all_within = 16 } };
     run.run(h.srv, a, &.{doc}, order.sink(), &fault, Gone{}) catch |e| {
         if (e == error.Faulted) std.debug.print("ocr run: {s}\n", .{fault.message});
         return e;

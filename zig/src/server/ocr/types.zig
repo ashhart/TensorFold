@@ -55,7 +55,6 @@ pub const Fault = struct {
 
 /// One document of a request: an image or a PDF and the pages chosen from it.
 pub const Source = struct {
-    name: []const u8,
     bytes: []const u8,
     kind: enum { image, pdf },
     sel: pdf.Selection,

@@ -49,7 +49,6 @@ test "ocr liteparse: the one file part is the page; a PDF, an empty or unknown f
     const png = try harness.png(a, 4, 3);
     const s = try lp.decode(a, &.{ part("language", "en"), part("file", png), part("other", "x") }, &fault);
     try t.expectEqual(.image, s.kind);
-    try t.expectEqualStrings("image.png", s.name);
     try t.expectEqual(png.len, s.bytes.len);
     const cases = [_]struct { []const multipart.Part, []const u8 }{
         .{ &.{part("file", "%PDF-1.7\n...")}, lp.no_pdf },
