@@ -10,32 +10,30 @@ const harness = @import("harness_test.zig");
 const t = std.testing;
 const Allocator = std.mem.Allocator;
 
-/// dots.mocr's reader prompt (families/dots_mocr/ocr.zig), which a server test cannot import; pinned below.
+/// dots.mocr's reader prompt (families/dots_mocr/prompt.txt), which a server test cannot import; pinned below.
 const dots_prompt =
-    \\Please output the layout information from the PDF image, including each layout element's bbox, its category, and the corresponding text content within the bbox.
+    \\Give the layout of this document image: every layout element's bbox, its category and the text inside the bbox.
     \\
-    \\1. Bbox format: [x1, y1, x2, y2]
+    \\1. Bbox: [x1, y1, x2, y2]
     \\
-    \\2. Layout Categories: The possible categories are ['Caption', 'Footnote', 'Formula', 'List-item', 'Page-footer', 'Page-header', 'Picture', 'Section-header', 'Table', 'Text', 'Title'].
+    \\2. Category: one of ['Caption', 'Footnote', 'Formula', 'List-item', 'Page-footer', 'Page-header', 'Picture', 'Section-header', 'Table', 'Text', 'Title'].
     \\
-    \\3. Text Extraction & Formatting Rules:
-    \\    - Picture: For the 'Picture' category, the text field should be omitted.
-    \\    - Formula: Format its text as LaTeX.
-    \\    - Table: Format its text as HTML.
-    \\    - All Others (Text, Title, etc.): Format their text as Markdown.
+    \\3. Text:
+    \\    - Picture: leave the text field out.
+    \\    - Formula: write it as LaTeX.
+    \\    - Table: write it as HTML.
+    \\    - Every other category: write it as Markdown.
     \\
-    \\4. Constraints:
-    \\    - The output text must be the original text from the image, with no translation.
-    \\    - All layout elements must be sorted according to human reading order.
+    \\4. Copy the text exactly as printed, with no translation, and list the elements in reading order.
     \\
-    \\5. Final Output: The entire output must be a single JSON object.
+    \\5. Answer with a single JSON object and nothing else.
     \\
 ;
 
 /// The SHA-256 each family's reader test checks its prompt against: the prompt every oracle run recorded.
 const Pinned = struct { prompt: []const u8, sha256: []const u8 };
 const readers = [_]Pinned{
-    .{ .prompt = dots_prompt, .sha256 = "16ff71ac5d218f35e5b3db41240b6e70741498bc099db3fa922ce1ff972e3b2f" },
+    .{ .prompt = dots_prompt, .sha256 = "c06a55ac6420f7b725306c52be3c5fe0822c0ae80b2a8565fc07607d9d0f5308" },
 };
 
 /// The template's image placeholder: a byte no request text holds.

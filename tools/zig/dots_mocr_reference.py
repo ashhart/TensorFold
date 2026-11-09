@@ -1,4 +1,4 @@
-"""dots.mocr references: the model card's Hugging Face example oracle, processor fixtures, native trace compare."""
+"""dots.mocr references: the Hugging Face oracle, processor and OCR fixtures, our test pages, native trace compare."""
 import argparse
 import ast
 import ctypes
@@ -130,7 +130,7 @@ def oracle(args):
     if pci != args.pci.lower():
         raise RuntimeError(f"selected GPU {pci} differs from requested GPU {args.pci}")
     args.output.mkdir(parents=True, exist_ok=False)
-    prompt = example_prompt(args.checkpoint)
+    prompt = args.prompt.read_text(encoding="utf-8") if args.prompt else example_prompt(args.checkpoint)
     image_paths = [args.image, *args.extra_image]
     messages = [{"role": "user", "content": [*({"type": "image", "image": str(p)} for p in image_paths),
                                                {"type": "text", "text": prompt}]}]
@@ -225,6 +225,69 @@ def oracle(args):
     }
     (args.output / "result.json").write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n")
     print(json.dumps({"output_tokens": len(ids), "seconds": seconds, "text": output_text}, ensure_ascii=False), flush=True)
+
+
+def pages(args):
+    """Draw the OCR test pages, our own text in Liberation fonts: page.png and one-line.png."""
+    from PIL import Image, ImageDraw, ImageFont
+
+    def font(name, size):
+        return ImageFont.truetype(str(args.fonts / f"Liberation{name}.ttf"), size)
+
+    args.output.mkdir(parents=True, exist_ok=True)
+    page = Image.new("RGB", (1240, 1754), "white")
+    d = ImageDraw.Draw(page)
+    d.text((80, 60), "TENSORFOLD READER NOTES", font=font("Sans-Regular", 22), fill="black")
+    d.text((1000, 60), "March 2026", font=font("Sans-Regular", 22), fill="black")
+    d.line((80, 95, 1160, 95), fill="black", width=2)
+    d.text((80, 150), "Reading a Page Twice", font=font("Sans-Bold", 48), fill="black")
+    d.text((80, 260), "1. Why the second read matters", font=font("Sans-Bold", 32), fill="black")
+    for i, line in enumerate(["A reader that sees the same page twice must give the same blocks twice.",
+                              "We feed one scanned page to two readers and count the tokens each",
+                              "one writes. The table below lists the counts for a page and a line."]):
+        d.text((80, 330 + 44 * i), line, font=font("Serif-Regular", 30), fill="black")
+    d.text((80, 520), "Table 1: Tokens written per input", font=font("Sans-Regular", 26), fill="black")
+    x, y = [80, 420, 760, 1100], [570, 630, 690, 750, 810]
+    for row in y:
+        d.line((x[0], row, x[3], row), fill="black", width=2)
+    for column, top in [(x[0], y[0]), (x[1], y[0]), (x[3], y[0]), (x[2], y[1])]:
+        d.line((column, top, column, y[4]), fill="black", width=2)
+    d.rectangle((x[0] + 2, y[1] - 1, x[1] - 1, y[1] + 1), fill="white")  # "Reader" spans both header rows
+    for at, cell in [((100, 615), "Reader"), ((520, 585), "Tokens written"), ((560, 645), "Page"), ((900, 645), "Line")]:
+        d.text(at, cell, font=font("Sans-Bold", 28), fill="black")
+    for r, row in enumerate([("First reader", "612", "41"), ("Second reader", "598", "39")]):
+        for c, cell in enumerate(row):
+            d.text((x[c] + 20, y[2 + r] + 15), cell, font=font("Sans-Regular", 28), fill="black")
+    d.text((80, 880), "2. What we check", font=font("Sans-Bold", 32), fill="black")
+    for i, item in enumerate(["The blocks come back in reading order.", "Each box stays inside the page.",
+                              "A table keeps its spanned header cell."]):
+        d.text((100, 950 + 50 * i), "\u2022  " + item, font=font("Serif-Regular", 30), fill="black")
+    d.text((612, 1680), "3", font=font("Sans-Regular", 24), fill="black")
+    page.save(args.output / "page.png")
+    line = Image.new("RGB", (960, 96), "white")
+    ImageDraw.Draw(line).text((24, 24), "TensorFold reads one line of text.", font=font("Sans-Regular", 36), fill="black")
+    line.save(args.output / "one-line.png")
+    print(json.dumps({name: sha(args.output / name) for name in ["page.png", "one-line.png"]}, indent=2))
+
+
+def record(args):
+    """Write an OCR fixture from an oracle run: its input, frame and hashes, without the model's text."""
+    result = json.loads((args.reference_dir / "result.json").read_text())
+    if len(result["prepared_images"]) != 1:
+        raise ValueError("an OCR fixture records a run on one image")
+    from PIL import Image
+    with Image.open(args.image) as image:
+        original = list(image.size)
+    if sha(args.image) != result["image_sha256"]:
+        raise ValueError(f"{args.image} is not the image the oracle read")
+    ids = np.asarray(result["output_ids"], dtype="<u4").tobytes()
+    args.output.write_text(json.dumps({
+        "source": args.image.name, "image_sha256": result["image_sha256"], "original": original,
+        "frame": result["prepared_images"][0]["size"], "prompt_sha256": sha(result["prompt"].encode()),
+        "max_new_tokens": result["max_new_tokens"], "eos_reached": result["eos_reached"],
+        "output_tokens": len(result["output_ids"]), "output_ids_sha256": sha(ids),
+        "text_sha256": sha(result["text"].encode()),
+    }, indent=2) + "\n")
 
 
 def processor(args):
@@ -425,6 +488,7 @@ def main():
     mode.add_argument("image", type=Path)
     mode.add_argument("output", type=Path)
     mode.add_argument("--max-new-tokens", type=positive, default=24000)
+    mode.add_argument("--prompt", type=Path, help="a UTF-8 prompt file in place of the model card's example prompt")
     mode.add_argument("--attention", choices=["flash_attention_2", "sdpa"], default="flash_attention_2")
     mode.add_argument("--pci", required=True, help="the selected GPU's PCI address, checked before model allocation")
     mode.add_argument("--vision-only", action="store_true", help="capture every vision block without decoder generation")
@@ -433,6 +497,15 @@ def main():
     mode = modes.add_parser("sources", help=sources.__doc__, description=sources.__doc__)
     mode.add_argument("checkpoint", type=Path)
     mode.set_defaults(run=sources)
+    mode = modes.add_parser("pages", help=pages.__doc__, description=pages.__doc__)
+    mode.add_argument("output", type=Path)
+    mode.add_argument("--fonts", type=Path, default=Path("/usr/share/fonts/liberation"))
+    mode.set_defaults(run=pages)
+    mode = modes.add_parser("record", help=record.__doc__, description=record.__doc__)
+    mode.add_argument("reference_dir", type=Path)
+    mode.add_argument("image", type=Path)
+    mode.add_argument("output", type=Path)
+    mode.set_defaults(run=record)
     mode = modes.add_parser("processor", help=processor.__doc__, description=processor.__doc__)
     mode.add_argument("checkpoint", type=Path)
     mode.add_argument("output", type=Path)
