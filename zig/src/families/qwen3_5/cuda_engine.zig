@@ -250,7 +250,8 @@ pub const Engine = struct {
         const sms: usize = @intCast(try ctx.attribute(.multiprocessor_count));
         const major = try ctx.attribute(.compute_capability_major);
         const minor = try ctx.attribute(.compute_capability_minor);
-        e.mt2 = try @import("cuda_mt2.zig").Mt2.resolve(e.mods[9], @intCast(10 * major + minor), sms, geometry.dense27(g));
+        const mt2 = @import("cuda_mt2.zig");
+        e.mt2 = try mt2.Mt2.resolve(e.mods[9], @intCast(10 * major + minor), sms, mt2.qualifies(g));
         const gb10 = major == 12 and minor == 1;
         e.affine = try cuda.qlinear.Affine4Kernels.resolve(d, e.mods[0], e.mods[1], e.mods[2], e.mods[3], sms, gb10);
         e.affine.half_prompt = !gb10; // the 27B's prompt tile (Tile<64, 128, 128, 2, 2, 2>), quicker on an RTX 5090
