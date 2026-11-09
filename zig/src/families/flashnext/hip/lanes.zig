@@ -17,7 +17,7 @@ const be = lanes.backend;
 const draw = serve.draw;
 
 /// Drawn tokens a handle names, newest last.
-const ring = 1024;
+pub const ring = 1024;
 /// Drafts the head holds for a stream at most.
 pub const max_depth = cache.max_window - 1;
 
@@ -71,7 +71,7 @@ pub const Fx = struct {
     pub fn init(gpa: std.mem.Allocator, e: *Engine, streams: usize) !*Fx {
         const f = try gpa.create(Fx);
         errdefer gpa.destroy(f);
-        const n = @max(e.o.chunk, cache.max_window) * e.cfg.hc_count;
+        const n = @max(e.o.chunk, cache.max_window * streams) * e.cfg.hc_count;
         const one: u16 = if (e.act == .f16) 0x3c00 else 0x3f80;
         const host = try gpa.alloc(u16, n);
         defer gpa.free(host);
@@ -217,7 +217,7 @@ pub const Fx = struct {
             .hidden_rows = true,
             .batch_rows = @intCast(cache.max_window * f.streams),
             .max_streams = @intCast(f.streams),
-            .draft_streams = false,
+            .draft_streams = drafting,
         };
     }
 
@@ -251,7 +251,7 @@ pub const Fx = struct {
     }
 
     /// The pending window's first `rows` rows kept; the other ranks keep the same.
-    fn mark(f: *Fx, lane: *Lane, rows: usize) !void {
+    pub fn mark(f: *Fx, lane: *Lane, rows: usize) !void {
         const p = lane.pending orelse return;
         if (f.link != null) try f.send(&.{ @backingInt(worker.Op.keep), lane.id, @intCast(rows), @intCast(p.rows) });
         try f.e.keepWindow(&lane.caches, p.tokens[0..p.rows], rows);
@@ -356,17 +356,10 @@ pub const Fx = struct {
         if (lane.head) |*hc| {
             // the head's keys for every prompt row with a next token (the last waits for the first draw)
             const n = if (last) rows - 1 else rows;
-            if (n > 0) _ = try head_mod.run(
-                e.ops(&e.arena),
-                true,
-                m,
-                &e.host,
-                hc,
-                out.streams,
-                prompt[at + 1 ..][0..n],
-                at,
-                f.ones,
-            );
+            if (n > 0) {
+                const seg = [_]forward.Seg{.{ .c = hc, .tokens = prompt[at + 1 ..][0..n], .pos = at }};
+                _ = try head_mod.run(e.ops(&e.arena), true, m, &e.host, &seg, out.streams, f.ones);
+            }
         }
         fill.at = to;
         if (fill.next < fill.count and to == fill.stops[fill.next]) {
