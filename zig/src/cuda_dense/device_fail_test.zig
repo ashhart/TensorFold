@@ -7,15 +7,15 @@ const draws = @import("draws.zig");
 const Geometry = @import("recipe.zig").Geometry;
 const t = std.testing;
 
-const Fake = struct {
-    const queue: cuda.abi.Stream = @ptrFromInt(0x1800);
+pub const Fake = struct {
+    pub const queue: cuda.abi.Stream = @ptrFromInt(0x1800);
     const base: u64 = 0x100000;
     var mem: [4096]u8 = undefined; // device bytes from `base` on, for downloads
     var next: u64 = 0x200000;
-    var live: usize = 0;
-    var pending = false;
+    pub var live: usize = 0;
+    pub var pending = false;
     var freed_pending: usize = 0;
-    var proofs: usize = 0;
+    pub var proofs: usize = 0;
     var fail_wait = false;
     var argmax: usize = 0;
     var drawn: usize = 0;
@@ -95,7 +95,7 @@ const Fake = struct {
         out.* = 0;
         return 0;
     }
-    fn driver() cuda.Driver {
+    pub fn driver() cuda.Driver {
         reset();
         var d: cuda.Driver = .{ .lib = undefined, .api = undefined };
         d.api.cuMemAlloc_v2 = alloc;
@@ -120,7 +120,7 @@ const Fake = struct {
 
 const tiny: Geometry = .{ .hidden = 256, .layers = 2, .heads = 4, .kv_heads = 2, .head_dim = 64, .vocab = 512, .eps = 1e-6, .context = 4096, .acc = 512, .wide = 1024, .mid = 512, .theta = 1e4 };
 
-fn lane() cuda.qmmf.Lane {
+pub fn lane() cuda.qmmf.Lane {
     var l: cuda.qmmf.Lane = undefined;
     l.clusters = false; // partBytes reads the tile plan alone
     return l;
