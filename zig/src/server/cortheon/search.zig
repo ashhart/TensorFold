@@ -165,11 +165,10 @@ fn parseMarked(a: Allocator, page: []const u8, limit: usize, m: Marks) Allocator
         const tag = page[tag_start..tag_end];
         const href_at = std.ascii.findIgnoreCase(tag, "href=") orelse continue; // HREF= is the same attribute
         var v = tag[href_at + 5 ..];
-        const q: u8 = if (v.len > 0 and (v[0] == '"' or v[0] == '\'')) v[0] else 0; // a single-quoted target is still a link
-        if (q == 0) continue;
-        v = v[1..];
-        const href_end = std.mem.indexOfScalar(u8, v, q) orelse continue;
-        const url = (try resultTarget(a, v[0..href_end])) orelse continue;
+        const q: u8 = if (v.len > 0 and (v[0] == '"' or v[0] == '\'')) v[0] else ' '; // unquoted is still a link, as page hrefs are
+        if (q != ' ') v = v[1..];
+        const href_end = std.mem.indexOfAny(u8, v, if (q == ' ') " >" else &.{q}) orelse v.len;
+        const url = (try resultTarget(a, std.mem.trim(u8, v[0..href_end], " \t\r\n"))) orelse continue;
         const close = std.ascii.findIgnoreCasePos(page[0..next], tag_end, "</a>") orelse continue; // </A> closes the title too
         const title = try fragmentText(a, page[tag_end + 1 .. close]);
         var snippet: []const u8 = "";
@@ -336,6 +335,16 @@ test "a lite search result is found when its class uses double quotes" {
     const a = arena.allocator();
     const page = "<tr><td><a rel=\"nofollow\" href='https://example.org/page' class=\"result-link\">Example</a></td></tr>";
     const results = try parseDuckDuckGoLite(a, page, 5);
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqualStrings("https://example.org/page", results[0].url);
+}
+
+test "a search result keeps an unquoted href" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const page = "<div class=\"result results_links web-result\"><h2><a class=\"result__a\" href=https://example.org/page>Example</a></h2></div>";
+    const results = try parseDuckDuckGo(a, page, 5);
     try std.testing.expectEqual(@as(usize, 1), results.len);
     try std.testing.expectEqualStrings("https://example.org/page", results[0].url);
 }
