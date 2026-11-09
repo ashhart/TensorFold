@@ -353,6 +353,11 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?q.
         why.* = try std.fmt.allocPrint(a, "the native Qwen3.8-27B drafter cannot load {s} ({s})", .{ o.drafter.?, @errorName(err) });
         return error.DrafterLoad;
     };
+    // DSpine's ring and K/V hold no more rows than a stream can reach
+    if (draft_model) |d| d.fit(capacity + window) catch |err| {
+        if (owns_draft) d.deinit();
+        return err;
+    };
     if (owns_draft) std.log.info("qwen27: {s} drafter loaded, {d} MiB on the device", .{ draft_model.?.label(), (model.device.allocated() -| before_draft) >> 20 });
     var draft_owned = owns_draft;
     errdefer if (draft_owned) draft_model.?.deinit();

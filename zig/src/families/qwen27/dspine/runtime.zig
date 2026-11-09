@@ -21,7 +21,13 @@ pub fn backbone(name: []const u8, rank: usize) bool {
     return rank == 2 and std.mem.endsWith(u8, name, ".weight") and !std.mem.startsWith(u8, name, "selected_prefix_bridge.");
 }
 
-pub const Cache = struct { keys: mtl.Buffer, values: mtl.Buffer };
+pub const Cache = @import("../dflash/caches.zig").Pair(mtl.Buffer);
+const Context = @import("../dflash/runtime_model.zig").Context;
+
+/// One stream's drafter state: its taps ring and K/V, the model's own or a parked lane Context's.
+pub const State = struct { pending: mtl.Buffer, caches: []Cache, committed_end: u64, begin: *u64, context_end: *u64 };
+/// One stream of a batched proposal: its parked context (null: the model's own), pending token, budget and draws.
+pub const Ask = struct { context: ?*Context = null, pending: u32, nodes: u32, sampling: ?core.lanes.Sampling = null, position: u64 = 0 };
 
 pub const Model = struct {
     allocator: std.mem.Allocator,
@@ -42,6 +48,8 @@ pub const Model = struct {
     /// The committed taps, by absolute row modulo the window: a lane's state copies this ring.
     pending: mtl.Buffer,
     committed_end: u64 = 0,
+    /// The ring's and K/V caches' rows: the window, or fewer when no stream reaches it (fit)
+    rows: u32,
     /// The rows the caches hold: absolute [begin, context_end), caught up from the ring before each proposal.
     begin: u64 = 0,
     context_end: u64 = 0,
@@ -69,7 +77,7 @@ pub const Model = struct {
         defer core.checkpoint_host.freeShardFiles(a, shards);
         const m = try a.create(Model);
         errdefer a.destroy(m);
-        m.* = .{ .allocator = a, .target = target, .checkpoint = core.checkpoint_metal.Checkpoint.init(a), .graph = undefined, .mode = mode, .primitives = undefined, .attention = undefined, .topk = undefined, .kernels = undefined, .frame = .{ .allocator = a, .device = target.device, .queue = target.queue }, .caches = &.{}, .pending = undefined, .packed_w = undefined, .tg = undefined };
+        m.* = .{ .allocator = a, .target = target, .checkpoint = core.checkpoint_metal.Checkpoint.init(a), .graph = undefined, .mode = mode, .primitives = undefined, .attention = undefined, .topk = undefined, .kernels = undefined, .frame = .{ .allocator = a, .device = target.device, .queue = target.queue }, .caches = &.{}, .rows = @intCast(s.window), .pending = undefined, .packed_w = undefined, .tg = undefined };
         errdefer m.checkpoint.deinit();
         const later: ?core.checkpoint_metal.Later = if (mode != .bf16) backbone else null;
         for (shards) |file| try m.checkpoint.addFileSplit(target.device, file, "", null, later);
@@ -86,7 +94,7 @@ pub const Model = struct {
         errdefer m.dropPrepared();
         if (mode != .bf16) try m.prepare();
         m.checkpoint.closeFiles();
-        m.caches = try newCaches(a, target.device, s);
+        m.caches = try newCaches(a, target.device, s, m.rows);
         errdefer freeCaches(a, m.caches);
         m.pending = try target.device.buffer(@as(usize, s.window) * config.tapWidth(s) * 2, options);
         errdefer m.pending.deinit();
@@ -152,32 +160,100 @@ pub const Model = struct {
     }
     /// The committed taps as a ring a lane's state copies, as DFlash2's.
     pub fn ring(m: *Model) @import("../tap_ring.zig").Ring {
-        return .{ .buf = m.pending, .end = &m.committed_end, .window = @intCast(m.graph.shape.window), .stride = m.tapWidth() * 2 };
+        return .{ .buf = m.pending, .end = &m.committed_end, .window = m.rows, .stride = m.tapWidth() * 2 };
+    }
+    /// Streams reaching at most `positions` rows: below the window the ring and K/V shrink to them (none wraps).
+    pub fn fit(m: *Model, positions: u64) !void {
+        if (positions == 0 or positions >= m.rows) return;
+        if (m.committed_end != 0 or m.frame.active) return error.BadDraftContext;
+        const rows: u32 = @intCast(positions);
+        const pending = try m.target.device.buffer(@as(usize, rows) * m.tapWidth() * 2, options);
+        errdefer pending.deinit();
+        const caches = try newCaches(m.allocator, m.target.device, m.graph.shape, rows);
+        errdefer freeCaches(m.allocator, caches);
+        // the attention checks its caches against its capacity: the fitted rows and one block
+        var sized = m.attention.shape;
+        sized.capacity = rows + m.graph.shape.block;
+        const attention = try core.shared_attention.Attention.init(m.allocator, m.target.device, sized);
+        m.attention.deinit();
+        m.attention = attention;
+        freeCaches(m.allocator, m.caches);
+        m.pending.deinit();
+        m.pending = pending;
+        m.caches = caches;
+        m.rows = rows;
     }
     /// The caches catch up with the ring: its rows past the caches' end, at most the window's last.
-    pub fn flush(m: *Model) !void {
+    pub fn flush(m: *Model, st: State) !void {
         const window = m.graph.shape.window;
-        if (m.broken or m.frame.active or m.context_end > m.committed_end) return error.BadDraftContext;
-        const oldest = m.committed_end -| (window - 1);
-        if (m.context_end < oldest) {
-            m.context_end = oldest;
-            m.begin = oldest;
+        const ring_rows = m.rows;
+        if (m.broken or m.frame.active or st.context_end.* > st.committed_end or st.caches.len != m.graph.shape.layers) return error.BadDraftContext;
+        const oldest = st.committed_end -| (window - 1);
+        if (st.context_end.* < oldest) {
+            st.context_end.* = oldest;
+            st.begin.* = oldest;
         }
         const stride = m.tapWidth() * 2;
-        while (m.context_end < m.committed_end) {
-            const slot = m.context_end % window;
-            const rows = @min(m.committed_end - m.context_end, 128, window - slot);
-            try @import("forward.zig").append(m, .{ .buf = m.pending, .off = @intCast(slot * stride) }, @intCast(rows));
+        while (st.context_end.* < st.committed_end) {
+            const slot = st.context_end.* % ring_rows;
+            const rows = @min(st.committed_end - st.context_end.*, 128, ring_rows - slot);
+            try @import("forward.zig").append(m, st, .{ .buf = st.pending, .off = @intCast(slot * stride) }, @intCast(rows));
         }
+    }
+    /// The model's own state (slot 0's stream).
+    pub fn state(m: *Model) State {
+        return .{ .pending = m.pending, .caches = m.caches, .committed_end = m.committed_end, .begin = &m.begin, .context_end = &m.context_end };
+    }
+    /// A parked stream's state: its Context's ring, K/V and cached span (context.begin, context.end).
+    pub fn stateOf(m: *Model, x: *Context) !State {
+        if (x.caches.len != m.graph.shape.layers) return error.BadDraftContext;
+        return .{ .pending = x.pending, .caches = x.caches, .committed_end = x.committed_end, .begin = &x.context.begin, .context_end = &x.context.end };
+    }
+    /// A slot past 0's lane Context: the taps ring, and DSpine's K/V when the stream drafts its own trees.
+    pub fn newContext(m: *Model, a: std.mem.Allocator, drafting: bool) !*Context {
+        const g = m.ring();
+        const x = try Context.taps(a, m.target.device, g.window, g.stride, null);
+        errdefer x.deinit(a);
+        if (drafting) x.caches = try newCaches(a, m.target.device, m.graph.shape, m.rows);
+        x.setResident(m.residency);
+        return x;
+    }
+    /// A drafting Context's bytes: its ring, and its K/V when `drafting`.
+    pub fn contextBytes(m: *const Model, drafting: bool) usize {
+        const s = m.graph.shape;
+        return @as(usize, m.rows) * m.tapWidth() * 2 + if (drafting) s.layers * 2 * (m.rows + s.block) * config.kvWidth(s) * 2 else 0;
     }
     /// A best-first tree of `nodes` drafts by the shared walker, the table times each row's norm scale as logits.
     pub fn propose(m: *Model, pending: u32, nodes: u32) !Tree {
         return m.proposeDrawn(pending, nodes, null, 0);
     }
     /// As propose; a sampled stream's tree scores its candidates as the target's keyed draw at `position` on.
-    pub fn proposeDrawn(m: *Model, pending: u32, nodes: u32, sampling: ?@import("core").lanes.Sampling, position: u64) !Tree {
-        const dt = @import("core").lanes.draft_tree;
-        const p = try @import("forward.zig").propose(m, pending);
+    pub fn proposeDrawn(m: *Model, pending: u32, nodes: u32, sampling: ?core.lanes.Sampling, position: u64) !Tree {
+        var one: [1]Tree = undefined;
+        try m.proposeMany(&.{.{ .pending = pending, .nodes = nodes, .sampling = sampling, .position = position }}, &one);
+        return one[0];
+    }
+    /// Each stream's tree from one batched pass over their blocks (at most eight).
+    pub fn proposeMany(m: *Model, asks: []const Ask, out: []Tree) !void {
+        if (asks.len == 0 or asks.len > 8 or out.len < asks.len) return error.DraftBatchUnsupported;
+        var states: [8]State = undefined;
+        var anchors: [8]u32 = undefined;
+        for (asks, states[0..asks.len], anchors[0..asks.len]) |ask, *st, *anchor| {
+            st.* = if (ask.context) |x| try m.stateOf(x) else m.state();
+            anchor.* = ask.pending;
+        }
+        var proposals: [8]@import("forward.zig").Proposal = undefined;
+        try @import("forward.zig").propose(m, states[0..asks.len], anchors[0..asks.len], proposals[0..asks.len]);
+        var made: usize = 0;
+        errdefer for (out[0..made]) |*t| t.deinit();
+        for (asks, proposals[0..asks.len], out[0..asks.len]) |ask, *p, *t| {
+            t.* = try m.tree(p, ask.pending, ask.nodes, ask.sampling, ask.position);
+            made += 1;
+        }
+    }
+    /// A best-first tree of `nodes` drafts from one proposal, by the shared walker.
+    fn tree(m: *Model, p: *const @import("forward.zig").Proposal, pending: u32, nodes: u32, sampling: ?core.lanes.Sampling, position: u64) !Tree {
+        const dt = core.lanes.draft_tree;
         var tokens: [64]u32 = undefined;
         var parents: [64]i32 = undefined;
         var own: [64]f64 = undefined;
@@ -436,8 +512,8 @@ fn loadGraph(a: std.mem.Allocator, m: *Model, s: config.Shape) !weights.Graph {
     return weights.load(a, .{ .source = m.source(), .names = names.items }, s, embed);
 }
 
-/// A layer's rolling K/V: the window plus one block, so a block's own rows sit behind an unwrapped context.
-fn newCaches(a: std.mem.Allocator, device: mtl.Device, s: config.Shape) ![]Cache {
+/// A layer's rolling K/V: `rows` (the window, or what streams reach) plus one block, a block's own rows behind them.
+fn newCaches(a: std.mem.Allocator, device: mtl.Device, s: config.Shape, rows: u32) ![]Cache {
     const caches = try a.alloc(Cache, s.layers);
     var made: usize = 0;
     errdefer {
@@ -447,7 +523,7 @@ fn newCaches(a: std.mem.Allocator, device: mtl.Device, s: config.Shape) ![]Cache
         }
         a.free(caches);
     }
-    const bytes = (s.window + s.block) * config.kvWidth(s) * 2;
+    const bytes = (rows + s.block) * config.kvWidth(s) * 2;
     for (caches) |*c| {
         const keys = try device.buffer(bytes, options);
         const values = device.buffer(bytes, options) catch |err| {

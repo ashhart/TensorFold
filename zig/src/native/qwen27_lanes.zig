@@ -112,7 +112,7 @@ pub const Metal = struct {
         errdefer kept.deinit();
         const b = try gpa.create(Metal);
         errdefer gpa.destroy(b);
-        b.* = .{ .gpa = gpa, .runner = runner, .draft = draft, .tensor_units = tensor_units, .window = window, .copies = copies, .nodes = @import("qwen27_window.zig").nodes(window, copies), .ops = ops, .picks = picks, .kept = kept, .draft_slots = if (draft != null and draft.?.model.dflash() == null) 1 else try draftSlots(), .slot_resume = slots.slotResumeEnv() };
+        b.* = .{ .gpa = gpa, .runner = runner, .draft = draft, .tensor_units = tensor_units, .window = window, .copies = copies, .nodes = @import("qwen27_window.zig").nodes(window, copies), .ops = ops, .picks = picks, .kept = kept, .draft_slots = try draftSlots(), .slot_resume = slots.slotResumeEnv() };
         b.pass_profile = platform.c.getenv("TF_Q27_PASS_PROFILE") != null;
         errdefer b.freeContexts();
         if (draft) |d| {
@@ -185,11 +185,12 @@ pub const Metal = struct {
         return x.ring();
     }
 
-    /// A slot past 0's drafter context: DFlash2's own (K/V caches when it drafts), else the taps ring alone.
+    /// A slot past 0's drafter context: its taps ring, and the drafter's K/V caches when it drafts.
     pub fn newContext(gpa: std.mem.Allocator, d: *Draft, drafting: bool) !*Context {
-        if (d.model.dflash()) |m| return Context.init(gpa, m, drafting);
-        const g = d.model.ring();
-        return Context.taps(gpa, d.runner.model.device, g.window, g.stride, null);
+        return switch (d.model) {
+            .dflash2 => |m| Context.init(gpa, m, drafting),
+            .dspine => |m| m.newContext(gpa, drafting),
+        };
     }
 
     /// Whether `slot`'s stream drafts its own trees.

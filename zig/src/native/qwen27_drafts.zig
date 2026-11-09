@@ -29,6 +29,7 @@ pub fn draftFn(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void
     errdefer mtl.pass_metrics.end();
     @import("qwen27_slots.zig").promoteDue(b); // a stream moves into a freed slot 0 before it drafts
     var batch: [8]Proposal = undefined;
+    var asks: [8]q.dspine.runtime.Ask = undefined;
     var owners: [8]u32 = undefined;
     var n: usize = 0;
     const lone = live(b) == 1;
@@ -60,19 +61,18 @@ pub fn draftFn(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void
             b.trees[0] = try p.call(p.ptr, pending, nodes);
             continue;
         };
-        if (g.draft.* == .dspine) { // DSpine drafts slot 0 alone; a sampled stream's tree aims at its keyed draws
-            b.trees[0] = try g.draft.dspine.proposeDrawn(pending, nodes, r.stream.sampling, r.position);
-            continue;
+        if (g.draft.* == .dspine) { // a sampled stream's tree aims at its keyed draws
+            asks[n] = .{ .context = if (slot == 0) null else b.contexts[slot].?, .pending = pending, .nodes = nodes, .sampling = r.stream.sampling, .position = r.position };
         }
         batch[n] = .{ .context = if (slot == 0) null else b.contexts[slot].?, .pending = pending, .nodes = nodes, .costs = if (lone) costs[0..b.window] else &.{}, .overhead_ms = if (lone) @max(0, r.stream.tree_over orelse r.stream.round_over orelse 0) else 0, .defer_price = lone };
         owners[n] = slot;
         n += 1;
         if (n == batch.len) {
-            try proposeAll(b, batch[0..n], owners[0..n]);
+            try proposeAll(b, batch[0..n], asks[0..n], owners[0..n]);
             n = 0;
         }
     }
-    if (n > 0) try proposeAll(b, batch[0..n], owners[0..n]);
+    if (n > 0) try proposeAll(b, batch[0..n], asks[0..n], owners[0..n]);
     for (requests) |r| {
         const slot = b.slotOf(r.stream) orelse continue;
         if (b.trees[slot]) |*t| {
@@ -83,10 +83,18 @@ pub fn draftFn(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void
 }
 
 /// The batch's trees: a stream alone takes its own pass (slot 0's fused absorb and block); several share one.
-fn proposeAll(b: *Metal, batch: []const Proposal, owners: []const u32) !void {
+fn proposeAll(b: *Metal, batch: []const Proposal, asks: []const q.dspine.runtime.Ask, owners: []const u32) !void {
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
-    const m = b.draft.?.model.dflash() orelse return error.DraftBatchUnsupported;
+    var trees: [8]Tree = undefined;
+    const m = switch (b.draft.?.model) {
+        .dflash2 => |m| m,
+        .dspine => |m| { // DSpine: every stream's block in one pass over its own context
+            try m.proposeMany(asks, trees[0..asks.len]);
+            for (owners, trees[0..asks.len]) |slot, t| b.trees[slot] = t;
+            return;
+        },
+    };
     if (batch.len == 1) {
         const p = batch[0];
         const x = p.context orelse {
@@ -103,7 +111,6 @@ fn proposeAll(b: *Metal, batch: []const Proposal, owners: []const u32) !void {
         b.trees[owners[0]] = try tree;
         return;
     }
-    var trees: [8]Tree = undefined;
     try m.proposeBatch(batch, trees[0..batch.len]);
     for (owners, trees[0..batch.len]) |slot, t| b.trees[slot] = t;
 }

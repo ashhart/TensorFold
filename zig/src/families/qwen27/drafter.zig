@@ -116,6 +116,13 @@ pub const Any = union(Kind) {
             inline else => |m| m.committed_end = at,
         }
     }
+    /// Per-stream state sized for streams reaching `positions` rows (DSpine below its window; DFlash2 keeps its own).
+    pub fn fit(d: Any, positions: u64) !void {
+        switch (d) {
+            .dflash2 => {},
+            .dspine => |m| try m.fit(positions),
+        }
+    }
     /// The target's TF_Q27_PROFILE trace times DFlash2's passes too.
     pub fn profile(d: Any, trace: ?*core.gpu_profile.Trace) void {
         if (d.dflash()) |m| m.backend.profile(trace);
