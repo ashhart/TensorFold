@@ -3,7 +3,7 @@ const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
 const q = tf.qwen27;
-const help = "tf-qwen27-dspine-run --model DIR --ref DIR [--dspine DIR] [--dflash DIR] [--mode q4|q4_body|bf16] [--tokens 256] [--nodes 15]";
+const help = "tf-qwen27-dspine-run --model DIR (--ref DIR | --prompts FILE) [--dspine DIR] [--dflash DIR] [--mode q4|q4_body|bf16] [--tokens 256] [--nodes 15] [--context 4096] [--class agent]";
 const prompts = [_][]const u8{ "poem", "primes", "code", "agent" };
 
 /// A prompt's chat-templated ids: the committed ids of the reference's first round.
@@ -18,6 +18,28 @@ fn promptIds(a: std.mem.Allocator, io: std.Io, dir: []const u8, name: []const u8
     return ids;
 }
 
+/// A prompt set's entries (a JSON list, or an object with "prompts"): "ids" pre-tokenized, "class", optional "name".
+fn promptFile(a: std.mem.Allocator, io: std.Io, path: []const u8, class: ?[]const u8, most: usize, ids: *std.ArrayList([]u32), names: *std.ArrayList([]const u8)) !void {
+    const text = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 28));
+    const doc = try std.json.parseFromSlice(std.json.Value, a, text, .{});
+    const list = switch (doc.value) {
+        .array => |l| l.items,
+        .object => |o| (o.get("prompts") orelse return error.BadPrompts).array.items,
+        else => return error.BadPrompts,
+    };
+    for (list, 0..) |item, k| {
+        const c = if (item.object.get("class")) |v| v.string else "";
+        if (class) |want| if (!std.mem.eql(u8, c, want)) continue;
+        const raw = item.object.get("ids").?.array.items;
+        if (raw.len + 300 > most) continue; // room for the reply's tokens and one verify block
+        const p = try a.alloc(u32, raw.len);
+        for (p, raw) |*d, v| d.* = @intCast(v.integer);
+        try ids.append(a, p);
+        const name = if (item.object.get("id")) |v| (if (v == .string) v.string else try std.fmt.allocPrint(a, "{f}", .{std.json.fmt(v, .{})})) else try std.fmt.allocPrint(a, "{s}{d}", .{ c, k });
+        try names.append(a, try std.fmt.allocPrint(a, "{s}/{d}", .{ name, raw.len }));
+    }
+}
+
 fn now(io: std.Io) i96 {
     return std.Io.Clock.awake.now(io).toNanoseconds();
 }
@@ -25,7 +47,7 @@ fn now(io: std.Io) i96 {
 fn report(kind: []const u8, name: []const u8, tokens: usize, rounds: usize, ns: i96) void {
     const s = @as(f64, @floatFromInt(ns)) / 1e9;
     const per = if (rounds == 0) 0 else @as(f64, @floatFromInt(tokens)) / @as(f64, @floatFromInt(rounds));
-    std.debug.print("{s:<8} {s:<7} {d:>4} tokens {d:>4} rounds {d:>5.2} tok/round {d:>6.2} tok/s\n", .{ kind, name, tokens, rounds, per, @as(f64, @floatFromInt(tokens)) / s });
+    std.debug.print("{s:<8} {s:<14} {d:>4} tokens {d:>4} rounds {d:>5.2} tok/round {d:>6.2} tok/s\n", .{ kind, name, tokens, rounds, per, @as(f64, @floatFromInt(tokens)) / s });
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -39,6 +61,9 @@ pub fn main(init: std.process.Init) !void {
     var mode: q.dspine.runtime.Mode = .q4;
     var count: usize = 256;
     var nodes: usize = 15;
+    var context: u32 = 4096;
+    var prompts_path: ?[]const u8 = null;
+    var class: ?[]const u8 = null;
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
@@ -46,19 +71,27 @@ pub fn main(init: std.process.Init) !void {
         if (i + 1 >= args.len) return error.MissingValue;
         i += 1;
         const v = args[i];
-        if (std.mem.eql(u8, arg, "--model")) model_dir = v else if (std.mem.eql(u8, arg, "--ref")) ref_dir = v else if (std.mem.eql(u8, arg, "--dspine")) dspine_dir = v else if (std.mem.eql(u8, arg, "--dflash")) dflash_dir = v else if (std.mem.eql(u8, arg, "--mode")) mode = std.meta.stringToEnum(q.dspine.runtime.Mode, v) orelse return error.BadMode else if (std.mem.eql(u8, arg, "--tokens")) count = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, arg, "--nodes")) nodes = try std.fmt.parseInt(usize, v, 10) else return error.UnknownFlag;
+        if (std.mem.eql(u8, arg, "--model")) model_dir = v else if (std.mem.eql(u8, arg, "--ref")) ref_dir = v else if (std.mem.eql(u8, arg, "--dspine")) dspine_dir = v else if (std.mem.eql(u8, arg, "--dflash")) dflash_dir = v else if (std.mem.eql(u8, arg, "--mode")) mode = std.meta.stringToEnum(q.dspine.runtime.Mode, v) orelse return error.BadMode else if (std.mem.eql(u8, arg, "--tokens")) count = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, arg, "--nodes")) nodes = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, arg, "--context")) context = try std.fmt.parseInt(u32, v, 10) else if (std.mem.eql(u8, arg, "--prompts")) prompts_path = v else if (std.mem.eql(u8, arg, "--class")) class = v else return error.UnknownFlag;
     }
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const dir = model_dir orelse return error.MissingModel;
     const model = try q.model.Model.load(init.gpa, io, dir, 128, null);
     defer model.deinit();
-    var runner = try q.decode_round.Runner.init(init.gpa, model, 1, 4096);
+    var runner = try q.decode_round.Runner.init(init.gpa, model, 1, context);
     defer runner.deinit();
-    var ids: [prompts.len][]u32 = undefined;
-    for (&ids, prompts) |*p, name| p.* = try promptIds(a, io, ref_dir orelse return error.MissingRef, name);
+    var id_list: std.ArrayList([]u32) = .empty;
+    var name_list: std.ArrayList([]const u8) = .empty;
+    if (prompts_path) |path| {
+        try promptFile(a, io, path, class, @min(context, 8100), &id_list, &name_list);
+    } else for (prompts) |name| {
+        try id_list.append(a, try promptIds(a, io, ref_dir orelse return error.MissingRef, name));
+        try name_list.append(a, name);
+    }
+    const ids = id_list.items;
+    const names = name_list.items;
     const session = q.session.Session{ .runner = &runner, .slot = 0 };
-    for (ids, prompts) |p, name| {
+    for (ids, names) |p, name| {
         try runner.reset(0);
         try session.prefill(p, 128);
         const t0 = now(io);
@@ -75,7 +108,7 @@ pub fn main(init: std.process.Init) !void {
         defer draft.deinit();
         var g = try q.dflash.generation.Generation.init(init.gpa, &runner, draft);
         defer g.deinit();
-        for (ids, prompts) |p, name| {
+        for (ids, names) |p, name| {
             try runner.reset(0);
             try draft.reset();
             try g.prefill(p, 128);
@@ -90,7 +123,7 @@ pub fn main(init: std.process.Init) !void {
         defer draft.deinit();
         var g = try q.dflash.generation.GenerationOf(q.dspine.runtime.Model).init(init.gpa, &runner, draft);
         defer g.deinit();
-        for (ids, prompts) |p, name| {
+        for (ids, names) |p, name| {
             try runner.reset(0);
             draft.reset();
             try g.prefill(p, 128);
