@@ -115,6 +115,8 @@ pub fn withPolicy(legacy: u64, e: anytype) u64 {
         grids.final(),
         // TF_QMMF_HALF_BELOW on a ModelOpt checkpoint's lane: the 32-column tile for passes of 16 rows or fewer
         if (k.modelopt) |m| m.lane.half_below else 0,
+        // --context: the captured _chunk and _merge variant whose NCH covers it (our merge reads a row's own chunks)
+        if (k.triton != null) e.nch else 0,
     });
 }
 
