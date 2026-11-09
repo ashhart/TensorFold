@@ -58,6 +58,7 @@ const Tuner = struct {
         const reads = @as(f64, @floatFromInt(p.copies)) * p.bytes();
         var shape = affine.Kernels.shapeOf(arg, @intCast(p.items));
         shape.plan_pairs = @intCast(p.pairCount());
+        shape.expert_rows = p.expertRows();
         const c = t.classes[class];
         var two: [2]usize = undefined;
         const bound = cells.sides(c, if (c.routed) shape.items else @intCast(count), &two);
@@ -66,7 +67,7 @@ const Tuner = struct {
         defer out.free();
         for (t.rig.kernels.reg.entries, 0..) |*e, i| {
             if (e.format != .mlx or e.op != op or e.path != .prefill) continue;
-            if (!e.caps(t.env) or !e.policy(t.env) or !e.fits(prod.shapeFor(arg, p.items, p.pairCount(), e))) continue;
+            if (!e.caps(t.env) or !e.policy(t.env) or !e.fits(prod.shapeFor(arg, p.items, p.pairCount(), p.expertRows(), e))) continue;
             // a noisy timing is taken again, up to twice, and the steadiest kept; one still noisy cannot move a bound
             var r = try t.timeEntry(p, e, out);
             for (0..2) |_| {

@@ -170,7 +170,7 @@ pub fn routedShape(c: Class, template: registry.Shape, tokens: usize) registry.S
     var s = template;
     s.items = @intCast(selectorCount(c, tokens));
     s.plan_pairs = @intCast(tokens * c.slots);
-    s.expert_rows = @intCast((tokens * routedSlots(c) + c.experts - 1) / c.experts);
+    s.expert_rows = moe.expertRows(tokens, routedSlots(c), c.experts);
     s.m = @intCast(@min(moe.tileOf(tokens, false), tokens));
     return s;
 }
