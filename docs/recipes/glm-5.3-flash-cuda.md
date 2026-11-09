@@ -95,18 +95,24 @@ pending, so keep the default policy until that checkpoint's complete cost and re
 
 ## Window prices
 
-Decode windows reach 32 rows and MTP chains 15 drafts. At load, rank 0 runs real rounds over a fixed text on every rank:
-windows of 1, 2, 3, 4, 6, 8, 12, 16, 24 and 32 rows, straight lines between them, and a draft step. It also races the
-classic NVFP4 expert kernel against the factored one and keeps the faster, which gives the same bits. The startup log
-names both: `glm: windows (timed): 9.91 ms at 1 row, 11.25 at 4, 26.03 at 32, a draft 0.20 ms; experts factored`.
+Decode windows reach 32 rows and MTP chains 15 drafts. With drafts and enough scratch context, rank 0 races
+classic NVFP4 experts against the factored form over real text on every rank, keeping the faster form with the same
+bits. MTP also times windows of 1, 2, 3, 4, 6, 8, 12, 16, 24 and 32 rows, with straight lines between them, and a
+chained draft step. Its startup line reports `glm: windows (timed)` and the expert form. DFlash2 keeps the existing
+seed forward and step prices in lone and shared rounds; it times only the target expert-form race and reports
+`glm: expert form (timed)`. No unused DFlash2 window or draft-step table is measured or published to the lane core.
 
-The times stay in `~/.cache/tensorfold/window-costs`, one table per build, GPU/driver, full checkpoint and drafter identity,
-drafter precision, rank count, layer limit, L2-prefetch options, loaded NVFP4 decode warps, KDA and matmul modes,
-dense/head bits, KV placement and the recorded NCCL channel/P2P settings. In the TP=2 GB10 receipt for
-4b9851c3b, the first empty-price-cache load took 85.2 s; other loads took 70-75 s. This is one empty-cache
-sample, not a startup-time estimate. A `(kept)` load skips timing.
-With `--no-drafts` nothing is timed. Timings steer windows, never tokens.
-Lone rounds use the timed draft step; shared rounds retain the prior step (DFlash2: 1.6/7 ms, MTP: zero).
+The measurements stay in `~/.cache/tensorfold/window-costs`, keyed by the build, GPU/driver, full checkpoint and drafter
+identity, drafter precision, rank count, layer limit, L2-prefetch options, loaded NVFP4 decode warps, KDA and matmul
+modes, dense/head bits, KV placement and the recorded NCCL channel/P2P settings. The DFlash2 form-only records have
+separate keys from window tables. An identity too long for its buffer skips both price caches with a log line and
+still measures the required work; it never truncates an identity or refuses the model for that reason.
+
+An older TP=2 GB10 receipt, before the unused DFlash2 timing was removed, had one empty-price-cache load of 85.2 s
+and other loads of 70-75 s. Its drafter mode is not recorded. That single sample does not estimate this startup path.
+A `(kept)` load skips the work its valid record covers. With `--no-drafts` nothing is timed. Timings steer windows
+and expert-form choice, never tokens. MTP's lone depth rule uses its measured window and step prices; its shared
+rounds retain the prior zero step price. DFlash2 retains the prior 1.6/7 ms step price in lone and shared rounds.
 The three-draft shared MTP cap does not apply with `TF_GLM_COPIES=1`.
 
 A host-KV gather wider than 16 rows invalidates the saved narrow row list before overwriting its slots. Otherwise
@@ -116,7 +122,7 @@ revised key and fixtures do not change the gather arithmetic.
 ## Four cards in one host
 
 The following receipt is historical, from 9200a3064 with its experimental window changes. It does not qualify
-the current price-cache identity, shared step-price rule or 32-row contract additions.
+the current price-cache identity or 32-row contract additions.
 
 NCCL allows direct card-to-card transfers on AMD hosts only up to two GPUs, so set these on every rank at three or more:
 
