@@ -412,9 +412,9 @@ test "a greedy-only engine's refusal names --temperature 0 when the server's own
         var srv = try server.Server.init(std.testing.allocator, std.testing.io, backend.engine(), text.text(), config, null);
         defer srv.deinit();
         var cx: errors.Cx = .{ .a = a };
-        try std.testing.expectError(error.Refused, srv.resolveSampling(&cx, (try json.parse(a, "{\"temperature\":0.7}")).ok, 0, &.{}));
+        try std.testing.expectError(error.Refused, srv.resolveSampling(&cx, (try json.parse(a, "{\"temperature\":0.7}")).ok, 0, &.{}, false));
         try std.testing.expectEqual(case[1], std.mem.indexOf(u8, cx.message, "--temperature 0") != null);
-        try std.testing.expect(try srv.resolveSampling(&cx, (try json.parse(a, "{\"temperature\":0}")).ok, 0, &.{}) == null);
+        try std.testing.expect(try srv.resolveSampling(&cx, (try json.parse(a, "{\"temperature\":0}")).ok, 0, &.{}, false) == null);
     }
 }
 
