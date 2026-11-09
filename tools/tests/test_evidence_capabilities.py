@@ -12,6 +12,8 @@ import evidence_index as ei
 
 CHECKOUT = Path(__file__).resolve().parents[2]
 CAPTURE = CHECKOUT / "docs/receipts/glm-fp4local-80517fc3/head-d23862ab/capabilities-d23862ab.json"
+CHIP_CASES = [(None, {}, [], 0), (None, {"lfm3": ["bf16"]}, ["cuda"], 2),
+              ("Intel Xe2 (Level Zero)", {"lfm3": ["mlx-q4g64"]}, ["xpu"], 3)]
 
 
 class CapabilitiesTests(unittest.TestCase):
@@ -47,6 +49,30 @@ class CapabilitiesTests(unittest.TestCase):
         self.assertEqual(len(records), 3)
         self.assertFalse(any(r["family"] and r["backend"] for r in records))
 
+    def test_native_nullable_and_display_chip_labels(self):
+        for chip, families, backends, count in CHIP_CASES:
+            with self.subTest(chip=chip, families=families):
+                data = {"schema": 1, "chip": chip, "families": families, "backends": backends}
+                records = ei.read_capabilities(self.root, self.write(data))
+                self.assertEqual(len(records), count)
+                self.assertTrue(all(r["grade"] == "unknown" for r in records))
+                chip_facts = [r["capability"] for r in records if r["capability"].startswith("chip:")]
+                self.assertEqual(chip_facts, [] if chip is None else ["chip:" + chip])
+
+    def test_native_nullable_and_display_chip_cli(self):
+        for chip, families, backends, count in CHIP_CASES:
+            with self.subTest(chip=chip, families=families):
+                self.write({"schema": 1, "chip": chip, "families": families, "backends": backends})
+                output = self.root / "result.json"
+                result = subprocess.run([sys.executable, str(CHECKOUT / "tools/evidence_index.py"),
+                                         "--root", str(self.root), "--capabilities", str(self.path),
+                                         "--output", str(output)], capture_output=True, text=True, timeout=20)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                index = json.loads(output.read_text(encoding="utf-8"))
+                source = next(s for s in index["sources"] if s["name"] == "capabilities")
+                self.assertEqual(source["records"], count)
+                self.assertNotIn("not supplied", source.get("note", ""))
+
     def test_legacy_list_and_object_remain_supported(self):
         families = [{"name": "lfm3", "backend": "metal", "capabilities": [{"name": "decode"}]}]
         for data in (families, {"families": families}):
@@ -71,6 +97,7 @@ class CapabilitiesTests(unittest.TestCase):
                    dict(native, families=[]), dict(native, families={"lfm3": "bf16"}),
                    dict(native, families={"lfm3": [1]}), dict(native, backends="cuda"),
                    dict(native, backends=[{}]), dict(native, chip=1),
+                   *[dict(native, chip=value) for value in ("", "..", "a\nb", "a\x00b", "a" * 129, {})],
                    dict(native, families={"payload-marker\n": ["bf16"]}),
                    [None], [{"family": "lfm3", "capabilities": ["decode"]}],
                    [{"family": "lfm3", "capabilities": [{}]}],

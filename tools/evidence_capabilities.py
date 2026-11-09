@@ -6,6 +6,7 @@ from pathlib import Path
 MAX_BYTES = 4 * 1024 * 1024
 MAX_FACTS = 4096
 TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.+-]{0,127}\Z")
+CHIP = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.+() -]{0,127}\Z")
 
 
 class CapabilitiesError(ValueError):
@@ -31,6 +32,12 @@ def _invalid_number(value):
     raise CapabilitiesError("capabilities input contains an invalid JSON number")
 
 
+def _chip(value):
+    if not isinstance(value, str) or not CHIP.fullmatch(value):
+        raise CapabilitiesError("capabilities input contains an invalid chip label")
+    return value
+
+
 def _list(value, maximum):
     if not isinstance(value, list) or len(value) > maximum:
         raise CapabilitiesError("capabilities input contains an invalid or oversized list")
@@ -48,8 +55,8 @@ def _native(data):
             facts.append((family, None, "format:" + _token(fmt)))
     for backend in _list(data.get("backends"), 64):
         facts.append((None, _token(backend), "backend"))
-    if "chip" in data:
-        facts.append((None, None, "chip:" + _token(data["chip"])))
+    if data.get("chip") is not None:
+        facts.append((None, None, "chip:" + _chip(data["chip"])))
     return facts
 
 

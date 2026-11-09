@@ -38,6 +38,8 @@ Each advertised format becomes a `format:NAME` capability for that family with n
 `backends` become separate `backend` records with no family, and `chip` becomes a `chip:NAME` record. These
 facts always have `unknown` measurement grade and no measured commit, result or staleness. A root backend
 does not prove that every listed family runs on it. Native admission remains authoritative.
+An absent or `null` chip means unknown device identity and emits no chip fact. Bounded chip labels also allow
+spaces and parentheses, as in the native XPU label `Intel Xe2 (Level Zero)`; other names keep the token rules below.
 
 The earlier family-list input remains supported, either as a root array or as a `families` array containing
 objects with `family` or `name`, optional `backend`, and `capabilities` arrays of named objects. A valid empty
