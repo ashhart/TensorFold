@@ -1,4 +1,4 @@
-// GLM's MLP and MoE glue by hand: glue._swiglu, glue._topk and qmm._group_sums (the router's dot is glm_glue_router).
+// GLM's MLP and MoE glue by hand: glue._topk and qmm._group_sums (SwiGLU: glm_swiglu.cuh; router dot: glm_glue_router).
 #pragma once
 
 #include "glm_triton.cuh"
