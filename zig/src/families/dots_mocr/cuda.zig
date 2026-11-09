@@ -4,6 +4,7 @@ const dense = @import("cuda_dense");
 const cfg = @import("config.zig");
 const fixtures = @import("config_test.zig");
 
+pub const config = @import("config.zig");
 pub const recipe = @import("cuda_recipe.zig");
 pub const weights = @import("cuda_weights.zig");
 pub const tower_weights = @import("cuda_tower_weights.zig");
