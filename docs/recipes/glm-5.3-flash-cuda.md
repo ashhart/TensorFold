@@ -88,8 +88,9 @@ left after a 12.2 GiB reserve` and a 5.8 GiB prompt cache
 
 `TF_GLM_COPIES=1` on rank 0 tries the lane host's cost-priced root/context copies, with a four-token history match.
 Unset or 0 retains the existing policy. Copies use the normal target verify/partial-keep path and require no external
-drafter; `--no-drafts` and `"draft": false` remain plain. The prices timed at load set the rows and observed copy
-rejections can cut an offer to zero rows. The opt-in's head confidence is a maximum prefix; cost may choose plain.
+drafter; `--no-drafts` and `"draft": false` remain plain. MTP uses its timed window prices; DFlash2 keeps its seed
+prices. Observed copy rejections can cut an offer to zero rows. The opt-in's head confidence is a maximum prefix;
+cost may choose plain.
 See [copy pricing and the required TP=2 comparison](cuda-lane-copies.md#glm-on-cuda). Device exactness and speed are
 pending, so keep the default policy until that checkpoint's complete cost and reply checks pass (#1910).
 
