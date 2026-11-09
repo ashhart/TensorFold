@@ -59,19 +59,19 @@ fn positionsOf(m: *Model, first: u64, rows: usize) !Ref {
 
 fn finish(m: *Model) !void {
     m.frame.finish() catch |err| {
-        m.failed = true;
+        m.broken = true;
         return err;
     };
 }
 
-/// Committed taps [rows, taps * hidden] for absolute rows [m.end, m.end + rows) into every layer's K/V cache.
+/// Committed taps [rows, taps * hidden], the rows after m.committed_end, into every layer's K/V cache.
 pub fn append(m: *Model, taps: Ref, rows: usize) !void {
     const s = m.graph.shape;
-    if (m.failed or m.frame.active or rows == 0) return error.BadCommittedTaps;
+    if (m.broken or m.frame.active or rows == 0) return error.BadCommittedTaps;
     _ = try m.frame.begin();
     defer m.frame.release();
     const e = m.frame.encoder;
-    const positions = try positionsOf(m, m.end, rows);
+    const positions = try positionsOf(m, m.committed_end, rows);
     const fused = try project(m, e, taps, m.graph.fusion, rows);
     const hidden = try norm(m, e, fused, m.graph.hidden_norm, rows, 1, s.hidden);
     const kv = config.kvWidth(s);
@@ -83,7 +83,7 @@ pub fn append(m: *Model, taps: Ref, rows: usize) !void {
         while (first < rows) : (first += 16) {
             const count = @min(rows - first, 16);
             var slots: [16]u32 = undefined;
-            for (slots[0..count], 0..) |*slot, i| slot.* = @intCast((m.end + first + i) % s.window);
+            for (slots[0..count], 0..) |*slot, i| slot.* = @intCast((m.committed_end + first + i) % s.window);
             const k_at = at(keys, first * kv * 2);
             const v_at = at(values, first * kv * 2);
             try m.attention.appendKv(e, slots[0..count], .{ .buf = k_at.buf, .off = k_at.off }, .{ .buf = v_at.buf, .off = v_at.off }, .{ .buf = cache.keys }, .{ .buf = cache.values });
@@ -91,8 +91,8 @@ pub fn append(m: *Model, taps: Ref, rows: usize) !void {
         }
     }
     try finish(m);
-    m.end += rows;
-    m.begin = @max(m.begin, m.end -| (s.window - 1));
+    m.committed_end += rows;
+    m.begin = @max(m.begin, m.committed_end -| (s.window - 1));
 }
 
 /// Query row i sees the context rows its window holds and the block's rows up to its own.
@@ -122,10 +122,10 @@ pub fn propose(m: *Model, anchor: u32) !Proposal {
     const n = t - 1;
     const h = s.hidden;
     const k = s.topk;
-    if (m.failed or m.frame.active or anchor >= s.vocab or m.end == 0) return error.BadDraftContext;
-    const context: usize = @intCast(m.end - m.begin);
+    if (m.broken or m.frame.active or anchor >= s.vocab or m.committed_end == 0) return error.BadDraftContext;
+    const context: usize = @intCast(m.committed_end - m.begin);
     // unwrapped: the block's own rows go behind the context in the caches' spare rows
-    if (m.begin != 0 or m.end > s.window - 1) return error.UnsupportedDSpineContext;
+    if (m.begin != 0 or m.committed_end > s.window - 1) return error.UnsupportedDSpineContext;
     _ = try m.frame.begin();
     defer m.frame.release();
     var e = m.frame.encoder;
@@ -133,7 +133,7 @@ pub fn propose(m: *Model, anchor: u32) !Proposal {
     const id_slice = ids.buf.slice(u32, ids.off / 4 + t)[ids.off / 4 ..][0..t];
     @memset(id_slice, s.mask);
     id_slice[0] = anchor;
-    const positions = try positionsOf(m, m.end, t);
+    const positions = try positionsOf(m, m.committed_end, t);
     const x = try scratch(m, t, h, .bf16);
     try m.target.glue.embedding(e, m.target.config, m.target.weights.embed, .{ .buffer = ids.buf, .offset = ids.off }, .{ .buffer = x.buf, .offset = x.off }, @intCast(t));
     e.barrier();
