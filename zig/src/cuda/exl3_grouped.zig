@@ -104,6 +104,7 @@ pub const Grouped = struct {
 fn checkAct(w: ex.Layer, after: bool) !void {
     if (w.act_mode < 0 or w.act_mode > 2) return error.BadExperts;
     if (w.act_mode == 2 and !(w.limit > 0 and w.alpha > 0)) return error.BadExperts;
+    if (after and w.act_mode == 0) return error.OptionNotBuilt; // bf16 activations: no contract entry covers it
     if (after and w.act_mode == 2) return error.OptionNotBuilt; // SwiGLU-OAI's branch clamps the gate before silu
 }
 
@@ -122,14 +123,14 @@ test "Grouped's SwiGLU-OAI takes act_mode 2 only with a positive clamp and alpha
     try std.testing.expectError(error.BadExperts, checkAct(w, false));
 }
 
-test "Grouped refuses the clamp-after order on SwiGLU-OAI, whose branch clamps the gate before silu" {
+test "Grouped takes the clamp-after order at fp32 activations only: not at bf16, nor on SwiGLU-OAI" {
     var w: ex.Layer = std.mem.zeroes(ex.Layer);
     w.limit = 7;
     w.alpha = 1.702;
-    for ([_]i32{ 0, 1 }) |m| {
-        w.act_mode = m;
-        try checkAct(w, true);
-    }
+    w.act_mode = 1;
+    try checkAct(w, true);
+    w.act_mode = 0;
+    try std.testing.expectError(error.OptionNotBuilt, checkAct(w, true));
     w.act_mode = 2;
     try std.testing.expectError(error.OptionNotBuilt, checkAct(w, true));
 }
