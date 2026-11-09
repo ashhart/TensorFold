@@ -324,6 +324,9 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
     if (salt != 0) request.cache_key = try @import("cache_salt.zig").key(srv, cx, request.cacheKey(), salt);
     request.salted = salt != 0;
     request.cache_salt = salt;
+    var handoff_why: []const u8 = ""; // kv_transfer_params.mcdma_handoff: the state is exported, one token drawn
+    request.handoff = @import("handoff_param.zig").parse(f, &handoff_why) catch return cx.refuse(handoff_why);
+    if (request.handoff != null) request.max_tokens = @min(request.max_tokens, 1);
     try srv.checkFeatures(cx, f, input.tools.len > 0, reasoning, rendered.ids, input.tools, &request);
     server_mod.nameStructure(input.format, &request);
     errdefer srv.release(false, request);
@@ -392,7 +395,7 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
         error.Busy => refusals.count(srv, .engine_busy, cx.wait(wait.engine_busy, "the engine is busy; retry shortly", .{})),
         error.Closed => refusals.count(srv, .engine_unavailable, cx.wait(wait.engine_unavailable, "the engine is unavailable; retry after it restarts", .{})),
         error.InvalidSpans => refusals.count(srv, .invalid_request, cx.fail(.request, "the prompt span layout is invalid", .{})),
-        error.InvalidRequest => refusals.count(srv, .invalid_request, cx.fail(.request, "the request does not match the loaded model", .{})),
+        error.InvalidRequest => refusals.count(srv, .invalid_request, if (request.handoff != null) cx.fail(.request, "kv_transfer_params.mcdma_handoff: refused (the server exports states only with --mcdma-produce, for text prompts of 2 tokens or more)", .{}) else cx.fail(.request, "the request does not match the loaded model", .{})),
         error.Stale => refusals.failure(srv, .engine_stale, cx.fail(.server, "{s}", .{api.stale_message})),
         error.MemoryPressure => refusals.count(srv, .memory_pressure, cx.wait(wait.memory_pressure, "{s}", .{api.pressure_message})),
     };

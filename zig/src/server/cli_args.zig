@@ -3,6 +3,7 @@ const std = @import("std");
 const api = @import("engine_api");
 
 pub const Args = struct {
+    remote_prefill: api.LaneHost.Remote.Flags = .{}, // --prefill-from and --mcdma-link
     admission: @import("request_admission.zig").Limits = .{},
     connections: @import("connection_cli.zig").Args = .{},
     model: []const u8 = "",

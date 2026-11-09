@@ -404,6 +404,7 @@ pub const Generation = struct {
             g.srv.metrics.keptToolCalls(g.srv.io, kept.kept_unoffered, kept.kept_malformed);
             try runtime.put(a, "kept_tool_calls", try @import("openai_calls.zig").keptBlock(a, kept));
         };
+        try @import("remote_tokens.zig").put(a, runtime, m.stats.remote_prefix, m.stats.pulled_prefix); // #1594 step 2b
         try runtime.put(a, "prefill_seconds", if (m.stats.prefill_seconds) |p| .{ .float = p } else .null);
         const widths = try a.alloc(Value, m.widths.len);
         for (m.widths, widths) |w, *slot| slot.* = try json.intValue(a, w);
