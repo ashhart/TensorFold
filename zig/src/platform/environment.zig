@@ -102,6 +102,7 @@ pub const rules = [_]Rule{
     .{ .name = "TF_DRAMA_PREFILL_ROWS", .scope = .drama3, .kind = .u32, .trim = " ", .forms = "whole prompt rows a chunk, 1 through 1024 (checked when a Drama 3 checkpoint opens)" },
     .{ .name = "TF_DRAMA_REFERENCE_CACHE", .scope = .drama3, .kind = .u32, .trim = " ", .forms = "kept reference states, 0 (off) through 16 (checked when a Drama 3 checkpoint opens)" },
     .{ .name = "TF_Q27_COPY_ROWS", .scope = .metal, .kind = .u32, .forms = "a whole number from 0 to 4294967295 (0 disables copied rows)" },
+    .{ .name = "TF_DSPINE_CHAIN", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1: the 27B's Metal DSpine drafts its greedy chain, no tree)" },
     .{ .name = "TF_Q27_DRAFT_SLOTS", .scope = .metal, .kind = .u32, .forms = "a whole number from 0 to 4294967295 (clamped to the current stream bounds)" },
     .{ .name = "TF_Q27_DFLASH_ADAPTIVE_BLOCK", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 lets a lone Qwen3.8-27B stream's DFlash2 block take 8 or 16 rows from its landed depth; default 0)" },
     .{ .name = "TF_Q27_DFLASH_ABSORB_BATCH", .scope = .metal, .kind = .flag, .forms = "0 or 1 (default 0; 1 absorbs a shared round's DFlash2 taps for all streams in one pass)" },
