@@ -81,9 +81,9 @@ pub fn registry(url: []const u8) bool {
         var parts = std.mem.splitScalar(u8, url["https://pypi.org/pypi/".len..], '/');
         const name = parts.next() orelse return false;
         const second = parts.next() orelse return false;
-        if (std.mem.eql(u8, second, "json")) return packageName(name) and parts.next() == null;
+        if (std.ascii.eqlIgnoreCase(second, "json")) return packageName(name) and parts.next() == null; // JSON is the same path
         const third = parts.next() orelse return false;
-        return packageName(name) and versionName(second) and std.mem.eql(u8, third, "json") and parts.next() == null;
+        return packageName(name) and versionName(second) and std.ascii.eqlIgnoreCase(third, "json") and parts.next() == null;
     }
     if (std.mem.startsWith(u8, url, "https://registry.npmjs.org/")) {
         var rest = url["https://registry.npmjs.org/".len..];
@@ -137,4 +137,9 @@ test "a request reads only what it was shown, and registry json for one package"
 test "pypi registry json allows a host whose letters differ" {
     try std.testing.expect(registry("https://PyPI.org/pypi/httpx/json"));
     try std.testing.expect(registry("https://PyPI.org/pypi/httpx/0.28.1/json"));
+}
+
+test "pypi registry json allows JSON when json's letters differ" {
+    try std.testing.expect(registry("https://pypi.org/pypi/httpx/JSON"));
+    try std.testing.expect(registry("https://pypi.org/pypi/httpx/0.28.1/JSON"));
 }
