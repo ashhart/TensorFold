@@ -1,0 +1,18 @@
+[
+  {
+    "prompt_seed": false,
+    "draws": 2,
+    "seed": 5473148311426440529,
+    "first": "60f86c4050170cf82a80cd8cf709f77d38ce519f8a20a9b86032d2ceaf728470",
+    "requests": "e01439ca23cbbde5a8bd892f1213cf0e9bca31ab44689cd1f61f5bad39004c94",
+    "graph": "49f6aad8ce3ce71efb6d47f9eb3e69dfe2f911fc1271a5ca358aa4ced0b4b27d"
+  },
+  {
+    "prompt_seed": true,
+    "draws": 2,
+    "seed": 2462398075064552349,
+    "first": "a4c72f3bc1c36164a71c40bf58703fa647b38f9dc491f60238229a9c3e84337f",
+    "requests": "c6bcac2bcf41032bae0d67174e5de60f62c033875e3e763379caee0ce2212923",
+    "graph": "49f6aad8ce3ce71efb6d47f9eb3e69dfe2f911fc1271a5ca358aa4ced0b4b27d"
+  }
+]

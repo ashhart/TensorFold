@@ -6,6 +6,7 @@ const Check = @import("slide_lesson.zig").Check;
 
 /// The facts' examples as a lesson gathers them.
 pub const Parts = struct {
+    wordings: std.ArrayList(@import("slide_redraw.zig").Entry) = .empty,
     reserved: @import("slide_reserved.zig").Reserved = .{},
     train: std.ArrayList(api.Example) = .empty,
     all: std.ArrayList(Held) = .empty, // every cold lesson question, including the training questions

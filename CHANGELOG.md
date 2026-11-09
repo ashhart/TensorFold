@@ -2,6 +2,10 @@
 
 Each release's page on GitHub has its notes and measurements. See [the 1.0.0 release notes](RELEASE-NOTES-1.0.0.md) for the native binary's supported models and migration details.
 
+## Unreleased
+
+- Living Weights: a refused round draws fresh extra question wordings, repeatable from the lesson and round, for its existing pocket neurons' router while their output fit continues; the original answers, held-out answers, unseen checks and safety checks stay fixed, and a first round that passes is unchanged (#2650, refs #1587).
+
 ## 1.2.9
 
 - Tests: the sessions writes test on real files does the same coverage with 40 requests at half the token sizes, so it no longer times out on busy CI runners (#3347).

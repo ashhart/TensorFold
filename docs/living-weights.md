@@ -12,11 +12,16 @@ as Sliding Weights (experimental), and its flag and API use the name `slide`.
 
 The same text and supplied questions can take different steps and choose different neurons on separate runs.
 The lesson writer generates extra question wordings at temperature 0.9, including when you supply questions.
-Sampled requests use a fresh random seed by default. The fitter also shuffles examples, with deterministic seeds
-from its round and pass counters; the lesson history affects those counters.
+The writer seeds these requests from their system and user text. After a refused round, the next round draws fresh
+extra wordings from that seed and the round number for the existing pocket neurons' router.
+Their output weights and optimizer state carry into the next round. Other learner methods keep their existing continuation.
+The original training answers, held-out answers, unseen checks and safety checks stay fixed. A first round that passes keeps the
+same wordings and rows as before. The fitter shuffles examples from its round and pass counters; lesson history
+also affects those counters.
 
 For a repeatability check, start each run from fresh copies of the same checkpoint and graph. Use
-`--prompt-seed` to key sampled generations by their rendered prompt. Keep the build, backend, seed salt and settings fixed.
+`--prompt-seed` to key sampled generations by their rendered prompt, including a retry round's wording instruction.
+Keep the build, backend, seed salt and settings fixed.
 This controls the writer's random seeds; it does not promise identical lessons across devices or builds.
 The acceptance checks still decide what is kept on every run.
 

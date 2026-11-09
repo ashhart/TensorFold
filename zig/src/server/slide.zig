@@ -202,14 +202,13 @@ pub fn keepOriginals(srv: *Server, conn: *Conn, a: Allocator) bool {
     return true;
 }
 
-/// Rounds a lesson gets to bring its facts back when asked once, before it is given up.
-const give_up = 5;
-
 /// What a lesson's rounds left: which facts come back, the steps taken, and why it stopped early (null: it did not).
 pub const Rounds = struct { recalled: []bool, steps: u32 = 0, why: ?[]const u8 = null };
 
 /// A lesson in checked rounds until its fact comes back, then the facts before it asked again (slide_recheck.zig).
-pub fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: anytype, id: u32, o: *Out) Rounds {
+pub fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, initial: teach.Plan, gone: anytype, id: u32, o: *Out) Rounds {
+    var plan = initial;
+    var redraw = false;
     var out: Rounds = .{ .recalled = a.alloc(bool, plan.facts.len) catch &.{} };
     @memset(out.recalled, false);
     var routed: u32 = 0;
@@ -230,9 +229,14 @@ pub fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone
     var streak: u32 = 0; // rounds in a row whose held-out questions came back when asked
     var ever = false; // a round whose held-out questions all came back when asked
     for (0..teach.rounds + teach.reroutes + recheck.repairs) |round| {
+        plan = @import("slide_redraw.zig").prepare(srv, cx, plan, @intCast(round), id, gone, &redraw) catch |e| {
+            out.why = words(cx, e);
+            return out;
+        };
         const began = now(srv);
         var request = plan.full;
         request.more = round > 0;
+        request.refresh_wordings = redraw;
         var held = false;
         srv.slide.round(id, @intCast(round + 1));
         o.stage(id, "initializing");
@@ -254,6 +258,10 @@ pub fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone
         srv.slide.phase(id, .checking);
         o.stage(id, "checking");
         const verdict = check.verify(srv, cx, plan, held or round + 1 >= teach.rounds, gone) catch |e| check.Verdict{ .recalled = out.recalled, .damage = words(cx, e) };
+        redraw = verdict.took == null and !std.mem.allEqual(bool, verdict.recalled, true) and
+            @import("core").profile.lookup("TF_SLIDE_ROUTED") == null and
+            @import("core").profile.lookup("TF_SLIDE_EDIT") == null and
+            @import("core").profile.lookup("TF_SLIDE_PROBE") == null;
         srv.slide.checked(id, verdict.damage == null and std.mem.allEqual(bool, verdict.recalled, true));
         log.line("slide: round {d}: {d} steps ({d:.1} s learning, {d:.1} s checking); the held-out answers {s} token for token, and {s} when asked", .{ round + 1, out.steps, learned, seconds(srv, checked), if (held) "come back" else "do not come back", if (std.mem.allEqual(bool, verdict.recalled, true)) "come back" else "do not come back" });
         if (verdict.took) |took| {
@@ -291,7 +299,7 @@ pub fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone
         streak = if (std.mem.allEqual(bool, out.recalled, true)) streak + 1 else 0;
         ever = ever or streak > 0;
         // rounds that never once brought the fact back when asked do not start to: give up rather than learn on
-        if (!ever and round + 1 >= give_up) break;
+        if (!ever and round + 1 >= teach.give_up) break;
         // done once its answers come back token for token, or come back when asked two rounds running
         if ((held or streak >= 2) and std.mem.allEqual(bool, out.recalled, true) and round + 1 >= teach.min_rounds) {
             const lost = earlierLost(srv, cx, o, id, before, gone) catch |e| {
@@ -521,6 +529,7 @@ pub fn engineWords(message: []const u8) []const u8 {
 
 /// A lesson failure in words, without the delete path's put-back claims.
 pub fn lessonWords(message: []const u8) []const u8 {
+    if (std.mem.eql(u8, message, "WordingsUnsupported")) return "sub-check wordings failed: this learner cannot refresh its router rows";
     return if (std.mem.eql(u8, message, "LayerRoundsAgain"))
         "a fitted layer would change its 4-bit values when saved, so this lesson could not be accepted"
     else

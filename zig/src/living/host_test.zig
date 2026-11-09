@@ -26,6 +26,7 @@ const Toy = struct {
     nudge: train_mode.Nudge = .{},
     from: [layers]u32 = @splat(std.math.maxInt(u32)),
     rows: std.ArrayList(u64) = .empty, // each pass row's hash of the tokens through it
+    key_reads: std.ArrayList(u64) = .empty,
     gpa: std.mem.Allocator,
     scratch: [d]u16 = undefined,
     push: [d]f32 = undefined,
@@ -54,6 +55,7 @@ const Toy = struct {
 
     pub fn pass(t: *Toy, seqs: []const Seq, mode: train_mode.Mode, _: lesson_route.Turn, out: []Result) !void {
         try t.lay(seqs);
+        if (mode == .keys) for (seqs) |q| try t.key_reads.append(t.gpa, std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(q.ids)));
         for (out[0..seqs.len]) |*r| r.* = .{ .loss = if (mode == .keys) 0 else 0.5, .recalled = true };
     }
 
@@ -90,7 +92,7 @@ const Toy = struct {
 };
 
 /// A host over the toy trainer for family `F`, counting what the learner hands it.
-fn Host(comptime F: fam.Family) type {
+pub fn Host(comptime F: fam.Family) type {
     return struct {
         pub const Trainer = Toy;
         pub const max_rows = 64;
@@ -120,6 +122,7 @@ fn Host(comptime F: fam.Family) type {
 
         pub fn free(t: *Toy, gpa: std.mem.Allocator) void {
             t.rows.deinit(gpa);
+            t.key_reads.deinit(gpa);
             gpa.destroy(t);
         }
 
@@ -187,7 +190,7 @@ fn Host(comptime F: fam.Family) type {
 }
 
 /// A fact's question and answer: token `who` picks whose fact it is, so its rows read apart from others'.
-fn qa(gpa: std.mem.Allocator, who: u32, k: u32) !Example {
+pub fn qa(gpa: std.mem.Allocator, who: u32, k: u32) !Example {
     const ids = try gpa.dupe(u32, &.{ 1, 2, who, 40 + k, 5, 90 + who, 91, 92 });
     return .{ .ids = ids, .start = 5, .decide = 4 };
 }
@@ -324,4 +327,219 @@ test "Save recovery: partial throwing save preserves the accepted lesson and ret
 
 test "Trainer admission: an ungated dense SwiGLU lesson uses the identical judged save gate" {
     try run(@import("families.zig").qwen3_5);
+}
+
+pub fn finishRound(l: anytype) !void {
+    for (0..10_000) |_| {
+        const step = l.step();
+        if (step.report) |report| if (report == .failed) return error.RoundFailed;
+        if (step.done) return;
+    }
+    return error.RoundDidNotFinish;
+}
+
+test "round wordings: the real pocket rereads fresh router rows and retains its original answers" {
+    const gpa = std.testing.allocator;
+    const H = Host(families.nemotron_h);
+    var seen: H.Seen = .{};
+    var l = learner.Learner(H).init(gpa, std.testing.io, &seen);
+    defer l.deinit();
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var train: [6]Example = undefined;
+    var held: [2]Example = undefined;
+    var other: [8]Example = undefined;
+    for (&train, 0..) |*x, k| x.* = try qa(a, 7, @intCast(k));
+    for (&held, 0..) |*x, k| x.* = try qa(a, 7, @intCast(10 + k));
+    for (&other, 0..) |*x, k| x.* = try qa(a, 20 + @as(u32, @intCast(k)), @intCast(k));
+    const old = [_]Example{try qa(a, 7, 25)};
+    const fresh = [_]Example{try qa(a, 7, 55)};
+    const negative = [_]Example{try qa(a, 24, 56)};
+    try l.begin(.{ .train = &train, .held = &held, .keep = &other, .asked = &old });
+    try finishRound(&l);
+    const original_answers = l.owned.train.ptr;
+    const original_held = l.owned.held.ptr;
+    const original_keep = l.owned.keep.ptr;
+    const invalid_ids = try a.alloc(u32, H.max_rows + 2);
+    @memset(invalid_ids, 1);
+    var invalid = fresh;
+    invalid[0].ids = invalid_ids;
+    try std.testing.expectError(error.ExampleTooLong, l.begin(.{ .train = &train, .asked = &invalid, .reroute = true }));
+    try std.testing.expectEqualSlices(u32, old[0].ids, l.owned.asked[0].ids);
+    try l.begin(.{ .train = &train, .asked = &fresh, .unasked = &negative, .more = true, .reroute = true });
+    try finishRound(&l);
+    try std.testing.expectEqualSlices(u32, fresh[0].ids, l.owned.asked[0].ids);
+    try std.testing.expectEqualSlices(u32, negative[0].ids, l.owned.unasked[0].ids);
+    try std.testing.expectEqualSlices(u32, fresh[0].ids, l.pockets.prompts[0].ids);
+    try std.testing.expect(l.owned.asked[0].ids.ptr != fresh[0].ids.ptr);
+    try std.testing.expect(l.owned.train.ptr == original_answers);
+    try std.testing.expect(l.owned.held.ptr == original_held);
+    try std.testing.expect(l.owned.keep.ptr == original_keep);
+    try l.begin(.{ .train = &train, .more = true });
+    try finishRound(&l);
+    try std.testing.expectEqualSlices(u32, fresh[0].ids, l.pockets.prompts[0].ids);
+}
+
+pub fn optimizerHash(v: *const @import("pocket_values.zig").State) u64 {
+    var h = std.hash.Wyhash.init(0);
+    inline for (@typeInfo(@TypeOf(v.*)).@"struct".field_names) |f| {
+        if (comptime std.mem.eql(u8, f, "prefixes")) continue;
+        const x = @field(v, f);
+        if (comptime @typeInfo(@TypeOf(x)) == .@"struct") {
+            h.update(std.mem.sliceAsBytes(x.items));
+        } else h.update(std.mem.asBytes(&x));
+    }
+    return h.final();
+}
+
+test "round wordings: router refresh preserves real neurons outputs and optimizer through four continuations" {
+    inline for (families.all) |family| {
+        const gpa = std.testing.allocator;
+        const H = Host(family);
+        var seen: H.Seen = .{};
+        var l = learner.Learner(H).init(gpa, std.testing.io, &seen);
+        defer l.deinit();
+        var arena: std.heap.ArenaAllocator = .init(gpa);
+        defer arena.deinit();
+        const a = arena.allocator();
+        var train: [6]Example = undefined;
+        var held: [2]Example = undefined;
+        var keep: [8]Example = undefined;
+        for (&train, 0..) |*x, k| x.* = try qa(a, 7, @intCast(k));
+        for (&held, 0..) |*x, k| x.* = try qa(a, 7, @intCast(10 + k));
+        for (&keep, 0..) |*x, k| x.* = try qa(a, 20 + @as(u32, @intCast(k)), @intCast(k));
+        const old = [_]Example{try qa(a, 7, 25)};
+        try l.begin(.{ .train = &train, .held = &held, .keep = &keep, .asked = &old });
+        try finishRound(&l);
+        const p = &l.pockets;
+        const taken = try a.dupe(@TypeOf(p.taken.items[0]), p.taken.items);
+        try std.testing.expect(taken.len > 0);
+        const used = try a.dupe(usize, p.used.items);
+        const original = l.owned;
+        for (0..4) |round| {
+            const fresh = [_]Example{try qa(a, 7, @intCast(50 + round))};
+            const negative = [_]Example{try qa(a, 24, @intCast(60 + round))};
+            const down = try a.dupe(f32, p.down.items);
+            const up = try a.dupe(f32, p.up.items);
+            const adam = try a.dupe(f32, p.v.adam.items);
+            const before = optimizerHash(&p.v);
+            const reads = l.trainer.?.key_reads.items.len;
+            try l.begin(.{ .train = &train, .asked = &fresh, .unasked = &negative, .more = true, .refresh_wordings = true });
+            try std.testing.expectEqual(before, optimizerHash(&p.v));
+            try std.testing.expectEqualSlices(f32, down, p.down.items);
+            for (0..10_000) |_| {
+                if (p.phase == .values) break;
+                const step = l.step();
+                if (step.report) |report| if (report == .failed) return error.RefreshFailed;
+            } else return error.RefreshDidNotFinish;
+            try std.testing.expectEqual(before, optimizerHash(&p.v));
+            try std.testing.expectEqualSlices(f32, adam, p.v.adam.items);
+            try std.testing.expectEqualSlices(f32, down, p.down.items);
+            try std.testing.expectEqualSlices(usize, used, p.used.items);
+            try std.testing.expectEqual(taken.len, p.taken.items.len);
+            for (taken, p.taken.items) |old_neuron, now_neuron| try std.testing.expectEqualDeep(old_neuron, now_neuron);
+            try std.testing.expect(!std.mem.eql(f32, up, p.up.items));
+            const fresh_hash = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(fresh[0].ids));
+            const negative_hash = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(negative[0].ids));
+            const read = l.trainer.?.key_reads.items[reads..];
+            try std.testing.expect(std.mem.indexOfScalar(u64, read, fresh_hash) != null);
+            try std.testing.expect(std.mem.indexOfScalar(u64, read, negative_hash) != null);
+            try std.testing.expect(l.owned.train.ptr == original.train.ptr and l.owned.held.ptr == original.held.ptr);
+            try std.testing.expect(l.owned.keep.ptr == original.keep.ptr and l.owned.near.ptr == original.near.ptr);
+            try std.testing.expectEqualSlices(u32, fresh[0].ids, p.prompts[0].ids);
+            _ = l.step();
+            try std.testing.expect(optimizerHash(&p.v) != before);
+            try finishRound(&l);
+        }
+        try l.begin(.{ .undo = true });
+        try finishRound(&l);
+        try std.testing.expect(p.empty());
+        try std.testing.expect(std.mem.allEqual(f32, p.down.items, 0));
+        try std.testing.expect(std.mem.allEqual(f32, p.up.items, 0));
+    }
+}
+
+test "round wordings: refresh allocation failure and guarded answer leave the open lesson owned" {
+    const gpa = std.testing.allocator;
+    const H = Host(families.nemotron_h);
+    var seen: H.Seen = .{};
+    var l = learner.Learner(H).init(gpa, std.testing.io, &seen);
+    defer l.deinit();
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const train = [_]Example{try qa(a, 7, 0)};
+    const old = [_]Example{try qa(a, 7, 1)};
+    const fresh = [_]Example{try qa(a, 7, 2)};
+    const negative = [_]Example{try qa(a, 24, 3)};
+    try l.begin(.{ .train = &train, .asked = &old, .unasked = &negative });
+    try finishRound(&l);
+    const owned = l.owned;
+    const before = @import("pocket_mark.zig").hash(&l.pockets);
+    const optimizer = optimizerHash(&l.pockets.v);
+    var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
+    l.gpa = failing.allocator();
+    const result = l.begin(.{ .train = &train, .asked = &fresh, .more = true, .refresh_wordings = true });
+    l.gpa = gpa;
+    try std.testing.expectError(error.OutOfMemory, result);
+    try std.testing.expect(l.owned.asked.ptr == owned.asked.ptr and l.owned.unasked.ptr == owned.unasked.ptr);
+    try std.testing.expectEqual(before, @import("pocket_mark.zig").hash(&l.pockets));
+    try std.testing.expectEqual(optimizer, optimizerHash(&l.pockets.v));
+    // A non-prompt wording may be a guarded answer. Its owner must survive a refused refresh.
+    try l.pockets.keeps.append(gpa, .{ .ex = l.owned.unasked[0], .row = 1 });
+    var continued = l.pockets.v;
+    continued.restart();
+    try l.begin(.{ .train = &train, .asked = &fresh, .more = true, .refresh_wordings = true });
+    try std.testing.expect(l.phase == .pocket and l.pockets.phase == .values and !l.pockets.refreshing);
+    try std.testing.expect(l.owned.asked.ptr == owned.asked.ptr and l.owned.unasked.ptr == owned.unasked.ptr);
+    try std.testing.expectEqualSlices(u32, negative[0].ids, l.pockets.keeps.items[0].ex.ids);
+    try std.testing.expectEqual(before, @import("pocket_mark.zig").hash(&l.pockets));
+    try std.testing.expectEqual(optimizerHash(&continued), optimizerHash(&l.pockets.v));
+}
+
+test "round wordings: refreshing an open fact leaves earlier neurons fixed and undo restores the old lesson" {
+    const gpa = std.testing.allocator;
+    const H = Host(families.nemotron_h);
+    var seen: H.Seen = .{};
+    var l = learner.Learner(H).init(gpa, std.testing.io, &seen);
+    defer l.deinit();
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var old: [6]Example = undefined;
+    var train: [6]Example = undefined;
+    for (&old, &train, 0..) |*o, *x, k| {
+        o.* = try qa(a, 8, @intCast(k));
+        x.* = try qa(a, 7, @intCast(k));
+    }
+    try l.begin(.{ .train = &old });
+    try finishRound(&l);
+    const p = &l.pockets;
+    const old_weights = @import("pocket_mark.zig").hash(p);
+    const old_learned = try a.dupe(@import("pocket.zig").Learned, p.learned.items);
+    const old_pos = try a.dupe(u16, p.pos.items);
+    try l.begin(.{ .train = &train, .keep = &old });
+    try finishRound(&l);
+    const before = try a.dupe(f32, p.up.items);
+    const before_down = try a.dupe(f32, p.down.items);
+    const fresh = [_]Example{try qa(a, 7, 55)};
+    try l.begin(.{ .train = &train, .asked = &fresh, .more = true, .refresh_wordings = true });
+    for (0..10_000) |_| {
+        if (p.phase == .values) break;
+        const step = l.step();
+        if (step.report) |report| if (report == .failed) return error.RefreshFailed;
+    } else return error.RefreshDidNotFinish;
+    for (old_learned) |e| {
+        try std.testing.expectEqualSlices(f32, p.neuron(before, e.slot, e.neuron, d), p.neuron(p.up.items, e.slot, e.neuron, d));
+        try std.testing.expectEqualSlices(f32, p.neuron(before_down, e.slot, e.neuron, d), p.neuron(p.down.items, e.slot, e.neuron, d));
+    }
+    try std.testing.expectEqualSlices(u16, old_pos, p.pos.items[0..p.pos_before]);
+    try finishRound(&l);
+    try l.begin(.{ .undo = true });
+    try finishRound(&l);
+    try std.testing.expectEqual(old_weights, @import("pocket_mark.zig").hash(p));
+    try std.testing.expectEqualSlices(u16, old_pos, p.pos.items);
+    try std.testing.expectEqual(old_learned.len, p.learned.items.len);
+    for (old_learned, p.learned.items) |was, now| try std.testing.expectEqualDeep(was, now);
 }
