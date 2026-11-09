@@ -62,10 +62,11 @@ pub fn Adapter(comptime slide: type) type {
         fn begin(ctx: *anyopaque, request: *const api.LearnRequest, sink: api.LearnSink) anyerror!void {
             const a: *Self = @ptrCast(@alignCast(ctx));
             if (request.audit) |r| {
+                if (request.shrink != .none) return error.BadAudit;
                 if (comptime Audit == void) return error.AuditUnsupported;
                 try r.validate();
                 if (r.completed) |done| done.* = false;
-                inline for (.{ "train", "think", "held", "near", "keep", "asked", "unasked", "kept", "retire", "forget" }) |f|
+                inline for (.{ "train", "against", "think", "held", "near", "keep", "asked", "unasked", "kept", "retire", "forget" }) |f|
                     if (@field(request, f).len > 0) return error.BadAudit;
                 inline for (.{ "undo", "more", "reroute", "drop", "save", "unretire", "unforget" }) |f|
                     if (@field(request, f)) return error.BadAudit;
