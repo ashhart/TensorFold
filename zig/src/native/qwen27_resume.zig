@@ -27,11 +27,13 @@ pub const Standing = struct {
     tokens: []u32 = &.{},
     spans: []modes.Span = &.{},
     rewind_at: u32 = 0, // where the rewind buffer holds slot 0's DeltaNet states and taps (0: none)
+    wide: bool = false, // the prompt cache keeps two full-context states: it holds a reply's end beside slot 0
 
+    /// Frees the record; `wide`, the cache's size, stays.
     pub fn deinit(st: *Standing, gpa: std.mem.Allocator) void {
         gpa.free(st.tokens);
         gpa.free(st.spans);
-        st.* = .{};
+        st.* = .{ .wide = st.wide };
     }
 
     /// What `l` left in slot 0 of `context` (its rows' spans `spans`), when a later prompt may resume it; else nothing.
@@ -41,7 +43,20 @@ pub const Standing = struct {
         if (!l.kept() or l.at > context.len) return;
         const canonical = (if (l.at <= l.prompt_len) modes.prefix(gpa, spans, l.at) else modes.reply(gpa, spans, l.prompt_len, l.at)) catch return;
         const tokens = gpa.dupe(u32, context[0..l.at]) catch return gpa.free(canonical);
-        st.* = .{ .tokens = tokens, .spans = canonical, .rewind_at = if (rewind < l.at) rewind else 0 };
+        st.* = .{ .tokens = tokens, .spans = canonical, .rewind_at = if (rewind < l.at) rewind else 0, .wide = st.wide };
+    }
+
+    /// The rewind point a pass resuming slot 0 at `n` keeps while it only extends the slot (0: none).
+    pub fn carry(st: *const Standing, n: u32) u32 {
+        return if (st.rewind_at > 0 and st.rewind_at <= n) st.rewind_at else 0;
+    }
+
+    /// The rewind point a pass that `r` resumes in slot 0 carries through it (0: none, or it does not resume there).
+    pub fn carried(st: *const Standing, r: Resume) u32 {
+        return switch (r) {
+            .none => 0,
+            .here, .back => |n| st.carry(n),
+        };
     }
 
     /// How `ids` (its rows' spans `spans`) resumes, past the cache's own restore point `kept_at`, by the cache's rule.
@@ -182,6 +197,59 @@ test "qwen27 resume: slot 0 keeps what a fresh pass would stand at, and the poin
     st.rewind_at = 3; // a point that is not strictly inside what the slot stands after is not kept
     st.leave(t.allocator, .{ .at = 3, .prompt_len = 5, .context_len = 5, .fill_at = 3, .ended = false }, &context, &.{});
     try t.expectEqual(@as(u32, 0), st.rewind_at);
+}
+
+test "qwen27 resume: a warm pass that only extends slot 0 keeps the reply's rewind point for a diverging next turn" {
+    var st: Standing = .{ .rewind_at = 4 }; // the turn's pass saved slot 0's states at its history's end
+    defer st.deinit(t.allocator);
+    const context = [_]u32{ 1, 2, 3, 4, 20, 21, 22, 23 }; // history 1-4, the generation prompt 20, a reply 21-23
+    st.leave(t.allocator, .{ .at = 7, .prompt_len = 5, .context_len = 8, .fill_at = 5, .ended = true }, &context, &.{});
+    const warm = [_]u32{ 1, 2, 3, 4, 20, 21, 22, 24, 25, 26 }; // a warm pass past the slot's 7: its history is all
+    const n = switch (st.plan(&warm, &.{.{ 5, 7 }}, 0)) {
+        .here => |x| x,
+        else => return error.TestUnexpectedResult,
+    };
+    try t.expectEqual(@as(u32, 7), n);
+    const kept = st.carry(n); // as takeStanding: the record is used up, the point stays
+    st.deinit(t.allocator);
+    st.rewind_at = kept;
+    st.leave(t.allocator, .{ .at = 9, .prompt_len = 10, .context_len = 10, .fill_at = 9, .ended = false }, &warm, &.{.{ 5, 7 }});
+    try t.expectEqual(@as(u32, 4), st.rewind_at); // a yield at a landed chunk keeps it too
+    st.leave(t.allocator, .{ .at = 10, .prompt_len = 10, .context_len = 10, .fill_at = 10, .ended = true }, &warm, &.{.{ 5, 7 }});
+    try t.expectEqualSlices(u32, &warm, st.tokens);
+    try t.expectEqual(@as(u32, 4), st.rewind_at);
+    const next = [_]u32{ 1, 2, 3, 4, 30, 23, 31 }; // the reply rendered without its reasoning
+    try t.expectEqual(Resume{ .back = 4 }, st.plan(&next, &.{.{ 5, 6 }}, 0));
+    try t.expectEqual(Resume{ .here = 10 }, st.plan(&(warm ++ [_]u32{32}), &.{.{ 5, 7 }}, 0));
+}
+
+test "qwen27 resume: a rewind point past where the pass resumes, or none, is not carried" {
+    const st: Standing = .{ .rewind_at = 4 };
+    try t.expectEqual(@as(u32, 4), st.carry(4)); // a `.back` pass resumes at the point itself
+    try t.expectEqual(@as(u32, 4), st.carry(9));
+    try t.expectEqual(@as(u32, 0), st.carry(3));
+    try t.expectEqual(@as(u32, 0), st.carry(0));
+    try t.expectEqual(@as(u32, 0), (Standing{}).carry(9));
+}
+
+test "qwen27 resume: a warm pass over slot 0's conversation runs where it carries the rewind point, else steps aside" {
+    var st: Standing = .{ .rewind_at = 4 };
+    defer st.deinit(t.allocator);
+    const context = [_]u32{ 1, 2, 3, 4, 20, 21, 22, 23 }; // history 1-4, the generation prompt 20, a reply 21-23
+    st.leave(t.allocator, .{ .at = 7, .prompt_len = 5, .context_len = 8, .fill_at = 5, .ended = true }, &context, &.{});
+    const warm = [_]u32{ 1, 2, 3, 4, 30, 23, 31 }; // the reply as the template renders it: it goes back to the point
+    try t.expectEqual(Resume{ .back = 4 }, st.plan(&warm, &.{.{ 5, 6 }}, 0));
+    try t.expectEqual(@as(u32, 4), st.carried(st.plan(&warm, &.{.{ 5, 6 }}, 0))); // it runs
+    try t.expectEqual(@as(u32, 0), st.carried(st.plan(&warm, &.{.{ 5, 6 }}, 4))); // the cache's state is further: aside
+    const kept = st.carried(st.plan(&warm, &.{.{ 5, 6 }}, 0)); // as takeStanding, then the pass to its end
+    st.deinit(t.allocator);
+    st.rewind_at = kept;
+    st.leave(t.allocator, .{ .at = 7, .prompt_len = 7, .context_len = 7, .fill_at = 7, .ended = true }, &warm, &.{.{ 5, 6 }});
+    try t.expectEqual(Resume{ .here = 7 }, st.plan(&(warm ++ [_]u32{40}), &.{.{ 5, 6 }}, 0)); // a client replaying it
+    try t.expectEqual(Resume{ .back = 4 }, st.plan(&.{ 1, 2, 3, 4, 20, 21, 22, 23, 40 }, &.{}, 0)); // one that does not
+    st.rewind_at = 0; // a slot with no rewind point would keep none through the pass: it steps aside
+    try t.expectEqual(@as(u32, 0), st.carried(st.plan(&(warm ++ [_]u32{40}), &.{.{ 5, 6 }}, 0)));
+    try t.expectEqual(@as(u32, 0), st.carried(.none));
 }
 
 test {

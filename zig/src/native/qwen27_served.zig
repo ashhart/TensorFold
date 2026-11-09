@@ -421,7 +421,7 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
         if (model.ane) |share| share.footprint_growth = platform.memory_policy.growth(before, cache_fit.footprint());
     }
     ane.end();
-    // Slot 0's history rewind when two full-context copies do not fit, wired before cache sizing.
+    // Slot 0's history rewind, wired before cache sizing: even a cache with two full-context copies may evict it.
     const rewind_room = laterRoom(h);
     if (slot_state.rewindInit(h.back, rewind_room, if (o.cache_gib) |g| gibBytes(g) else cache_fit.defaultBudget(rewind_room))) |buf| if (h.resident) |*r| r.addNow(&.{buf});
     try enableCache(h, o.cache_gib, o.cache_over_cap, a, why);
