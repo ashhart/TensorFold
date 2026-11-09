@@ -4,6 +4,11 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen CUDA with `TF_QWEN_REQUEST_STARTS=1` keeps later chat turns at their own history starts even when turns are less than 256 tokens apart. On a GB10 with Qwen3.8-27B 4-bit and its DFlash2 drafter, turns 2 to 6 of a six-turn chat reuse 1,450 to 1,635 prompt tokens and take 0.72 to 1.33 s instead of 1.78 to 2.10 s. Prompt passes are cut at replies, so a reply can differ from the unset path's; resumed and fresh replies are the same with it set. The unset path and other families keep their existing chunk minimum (#2176). Thanks to @gilby.
+- GLM on CUDA keeps the live half of the double-buffered KDA recurrent state alone in a kept prompt state with
+  `TF_GLM_KV_LIVE_HALF=1` (opt-in): the other half is the state before the last prompt chunk or decode window and
+  nothing reads it after a restore, so a kept state is 71 MB a rank smaller on GLM-5.3-Flash at TP=2 with replies
+  unchanged, drafts off and on (#2181).
 - HIP: a host-to-device upload copies in 64 MiB windows, one synchronous copy each, so a multi-GiB tensor no longer has its whole source pinned by one copy; uploads of 64 MiB or less are one call as before (#2584). Thanks to @ElderOrb.
 
 - Benchmark clients: `bench_concurrent` and `bench_openai` time content, reasoning and tool-call output separately (header arrival, first payload line, first output of each kind, last output) and classify how each reply ended; token ITL/TPOT is null where a chunk carries several tokens instead of padded with zeros, with a labelled chunk-level estimate beside it; the prompt/TTFT rate is `prompt_ttft_tps`, with `prefill_tps` still written and marked deprecated because it is not the engine's prefill time (#2625).
@@ -157,11 +162,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Packaging: each stable release publishes its signed Mac arm64 desktop runtime and catalog update from main's release tooling, keeps earlier compatible runtimes and checks each published download (#2465).
 
 - Qwen CUDA with `TF_QWEN_REQUEST_STARTS=1` keeps later chat turns at their own history starts even when turns are under 256 tokens apart. On a GB10 with Qwen3.8-27B 4-bit and its DFlash2 drafter, turns 2 to 6 of a six-turn chat reuse 1,450 to 1,635 prompt tokens and take 0.72 to 1.33 s instead of 1.78 to 2.10 s. Prompt passes are cut at replies, so a reply can differ from the unset path's; resumed and fresh replies match with it set. Unset, nothing changes (#2176, carries #1335). Thanks to @gilby.
-- Qwen CUDA with `TF_QWEN_REQUEST_STARTS=1` keeps later chat turns at their own history starts even when turns are less than 256 tokens apart. On a GB10 with Qwen3.8-27B 4-bit and its DFlash2 drafter, turns 2 to 6 of a six-turn chat reuse 1,450 to 1,635 prompt tokens and take 0.72 to 1.33 s instead of 1.78 to 2.10 s. Prompt passes are cut at replies, so a reply can differ from the unset path's; resumed and fresh replies are the same with it set. The unset path and other families keep their existing chunk minimum (#2176). Thanks to @gilby.
-- GLM on CUDA keeps the live half of the double-buffered KDA recurrent state alone in a kept prompt state with
-  `TF_GLM_KV_LIVE_HALF=1` (opt-in): the other half is the state before the last prompt chunk or decode window and
-  nothing reads it after a restore, so a kept state is 71 MB a rank smaller on GLM-5.3-Flash at TP=2 with replies
-  unchanged, drafts off and on (#2181).
 
 - Internal: HIP record counts are pinned in their owning arrays, so additions in different record files no longer edit a shared numeric total; omissions still fail host checks (#2461).
 
