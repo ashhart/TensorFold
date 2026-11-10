@@ -177,25 +177,25 @@ test "residency owner Nemotron: actual native inventory includes nested prompt, 
             const allocations = 4 + 2 * model.config.count(.attention) + @as(usize, if (auxiliary) 2 else 0);
             for (0..allocations) |fail| {
                 record.fail_at = record.allocations.items.len + fail;
-                try std.testing.expectError(error.InjectedBufferFailure, residency.openCache(&backend, &stream, 32));
+                try std.testing.expectError(error.InjectedBufferFailure, residency.openCache(&backend, &stream, 32, 0));
                 record.fail_at = null;
                 host.resident.?.held.flush();
                 try record.check();
             }
             const rids = backend.pool.rids.items.len;
             backend.pool.rids.items.len = 0;
-            try std.testing.expectError(error.ReplayIdsFull, residency.openCache(&backend, &stream, 32));
+            try std.testing.expectError(error.ReplayIdsFull, residency.openCache(&backend, &stream, 32, 0));
             backend.pool.rids.items.len = rids;
             host.resident.?.held.flush();
             try record.check();
             var failed_map = std.testing.FailingAllocator.init(a, .{ .fail_index = 1 });
             backend.gpa = failed_map.allocator();
-            try std.testing.expectError(error.OutOfMemory, residency.openCache(&backend, &stream, 32));
+            try std.testing.expectError(error.OutOfMemory, residency.openCache(&backend, &stream, 32, 0));
             backend.gpa = a;
             try std.testing.expectEqual(rids, backend.pool.rids.items.len);
             host.resident.?.held.flush();
             try record.check();
-            const cache = try residency.openCache(&backend, &stream, 32);
+            const cache = try residency.openCache(&backend, &stream, 32, 0);
             defer {
                 _ = backend.caches.remove(&stream);
                 cache.deinit(&backend.pool);
