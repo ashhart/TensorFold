@@ -28,6 +28,8 @@ pub const Cx = struct {
     message: []const u8 = "",
     /// The bounded wait code a retryable refusal carries (wait_reason.zig); null on a request refusal.
     code: ?[]const u8 = null,
+    /// The request field a refusal names (a Responses socket's error event reads it; no HTTP reply does).
+    param: ?[]const u8 = null,
     /// The request's ``chat_template_kwargs.clear_thinking``, over the server's (GLM-5.3 templates only).
     clear_thinking: ?bool = null,
     /// The request controls a native prompt renderer must retain in every prefix probe.

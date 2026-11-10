@@ -46,6 +46,10 @@ test {
     _ = @import("ws_frame.zig");
     _ = @import("ws_upgrade.zig");
     _ = @import("ws_cache.zig");
+    _ = @import("responses_ws_read.zig");
+    _ = @import("responses_ws_events.zig");
+    _ = @import("responses_ws_turn.zig");
+    _ = @import("responses_ws_test.zig");
     @import("std").testing.refAllDecls(@This());
     _ = @import("json");
     _ = @import("std_options.zig");
