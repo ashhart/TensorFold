@@ -20,7 +20,8 @@ test "dense serving: owned CUDA images retain their reviewed lane and decode byt
     // 01b45cd1d's bytes: tf_q35_norm_shift and tf_q35_head_norm_shift for BF16 checkpoints, under the contract (#2383)
     try std.testing.expectEqualStrings("7438579264a99fd0ea99ac242afc68015c8b13a8cd3f10c43b93644376b87205", &hash(@embedFile("kernels/cuda/qwen35.cu")));
     try std.testing.expectEqualStrings("7d916f0bb75d636ed15d8f30a7108cf05a6c5a833bd76beb8b627e6567a641db", &hash(@embedFile("kernels/cuda/qwen35.cuh")));
-    try std.testing.expectEqualStrings("acfa75d58a121eb389a69eb1f317a8a6b8ddc3adf7489ff295d7de42099ae70e", &hash(@embedFile("kernels/cuda/qwen35_draft.cu")));
+    // 67711a6aa7's bytes: the opt-in DSpine draft kernels (#2633); default serving unchanged
+    try std.testing.expectEqualStrings("df06cb0ef07d12ca2296f7d1691678d0649a148f4abcbb3cb69f0d839e45295c", &hash(@embedFile("kernels/cuda/qwen35_draft.cu")));
     try std.testing.expectEqualStrings("403cf841b89ad61da0818bdad8976ed4b286b3282c8c22df7171921b7e06eb6d", &hash(@embedFile("kernels/cuda/qwen35_keep.cu")));
     try std.testing.expectEqualStrings("d1a379a98cf7504a7ed3b3f2d24c8ab6a39fe5511bcded6449e598ce5c3c79e7", &hash(@embedFile("kernels/cuda/scan_rows.cu")));
 }
