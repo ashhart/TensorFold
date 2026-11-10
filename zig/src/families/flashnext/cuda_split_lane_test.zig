@@ -125,6 +125,7 @@ const Rig = struct {
         r.c.rank = 0;
         r.c.failed = false;
         r.c.comm = @ptrFromInt(0x1000);
+        r.c.parent = null;
         r.c.link = .{ .fd = r.pair[0] };
         r.c.timeout_ms = 1000;
         r.c.lib.api.ncclAllReduce = Rec.allReduce;

@@ -449,6 +449,7 @@ test {
     _ = @import("cuda_split_lane_test.zig");
     _ = @import("cuda_cap_test.zig");
     _ = @import("cuda_mtp_graphs_test.zig");
+    _ = collective;
     _ = embed;
     _ = hc;
     _ = qmm;

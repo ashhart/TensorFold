@@ -165,6 +165,7 @@ fn follower(comptime Cuda: type, frames: []const wire.Header, setup: *const fn (
     var rank: ranks.Session = .{ .gpa = a, .rank = 1, .link = .{ .fd = pair[0] }, .collective = undefined, .engine = &engine, .drafting = true };
     rank.collective.failed = false;
     rank.collective.comm = null;
+    rank.collective.parent = null;
     defer rank.seqs.deinit(a);
     defer rank.windows.deinit(a);
     defer rank.saved.deinit(a);

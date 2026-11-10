@@ -74,7 +74,7 @@ pub fn run(gpu: check.Gpu, rank: usize, port: u16, mode_arg: []const u8, master:
         const start = wire.now();
         completeSum(&collective, stream, values.ptr, 1, scatter) catch |err| {
             try check.expect(err == error.RankDisconnected or err == error.RankTimeout or err == error.NcclFailed, "failure is surfaced ({s})", .{@errorName(err)});
-            try check.expect(collective.failed and collective.comm == null, "failed communicator is aborted and cannot be reused", .{});
+            try check.expect(collective.failed and collective.comm == null and collective.parent == null, "failed communicators are aborted and cannot be reused", .{});
             try check.expect(wire.now() - start < 3 * std.time.ns_per_s, "failed collective terminates within bound", .{});
             try std.testing.expectError(error.RankDisconnected, collective.sum(stream, values.ptr, 1));
             try std.testing.expectError(error.RankDisconnected, collective.sumBlock(stream, values.ptr, 1));
