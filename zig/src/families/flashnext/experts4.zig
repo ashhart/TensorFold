@@ -117,6 +117,29 @@ pub fn indexed(a: std.mem.Allocator, text: []const u8, consts: []const Const) ![
     return out;
 }
 
+/// The grouped tile kernel's reads (fn_gx.metal): its scale row is the index row, its bias pointer the table.
+const tile_reads = [_][2][]const u8{
+    .{ "const device bfloat* db = (shared ? SDB : DB) + so;", "const device bfloat* db = shared ? SDB : DB;" },
+    .{ "const float sc = float(ds[c / 2]), bi = float(db[c / 2]);", "const uint ti = uint(((const device ushort*)ds)[c / 2]) * 2u; const float sc = float(db[ti]), bi = float(db[ti + 1]);" },
+};
+
+/// fn_gx.metal reading each scale and bias through the index and the table, as `indexed` has the recorded kernels.
+pub fn indexedGrouped(a: std.mem.Allocator, text: []const u8) ![]const u8 {
+    var out = text;
+    var hits: usize = 0;
+    for (index_reads) |r| {
+        hits += std.mem.count(u8, out, r[0]);
+        out = try std.mem.replaceOwned(u8, a, out, r[0], r[1]);
+    }
+    for (tile_reads) |r| {
+        if (std.mem.count(u8, out, r[0]) != 1) return error.KernelPatch;
+        out = try std.mem.replaceOwned(u8, a, out, r[0], r[1]);
+    }
+    if (hits != 4) return error.KernelPatch;
+    for ([_][]const u8{ "Sp[at])", "float(S[at])", "float(db[c / 2])" }) |direct| if (std.mem.indexOf(u8, out, direct) != null) return error.KernelPatch;
+    return out;
+}
+
 const calls = [2][2][]const u8{
     .{ "down_rows<SWB, SWG, NI>(SDW, SDS, SDB, size_t(d0), x, lane, out)", "down_rows_bal(SDW, SDS, SDB, size_t(d0), x, lane, out)" },
     .{ "down_rows<WB, WG, NI>(DW, DS, DB, size_t(PICK[r * TOPK + k]) * D + d0, x, lane, out)", "down_rows_bal(DW, DS, DB, size_t(PICK[r * TOPK + k]) * D + d0, x, lane, out)" },
@@ -216,4 +239,14 @@ test "the recorded 4/32 expert gate/up takes a row count from buffer 17, once; t
         try std.testing.expect(!gateApplies(out, &at4));
     }
     try std.testing.expectEqual(@as(usize, 1), seen);
+}
+
+test "the grouped kernels read every scale and bias through the index once patched" {
+    const ks = @import("kernel_sources");
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const out = try indexedGrouped(arena.allocator(), ks.flashnext_gx);
+    const casts = "(const device ushort*)"; // five index reads beside the casts the kernels already have
+    try std.testing.expectEqual(std.mem.count(u8, ks.flashnext_gx, casts) + 5, std.mem.count(u8, out, casts));
+    try std.testing.expectError(error.KernelPatch, indexedGrouped(arena.allocator(), out));
 }

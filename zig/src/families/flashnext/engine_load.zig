@@ -206,7 +206,7 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
     }
     const m = try arena.create(Model);
     m.* = .{ .r = r, .cap = r.window.capacity, .layers = undefined, .mix = undefined, .head = undefined, .embed = undefined, .ple = undefined, .t = undefined };
-    r.sb_index = try platform.environment.read(bool, "TF_FLASHNEXT_SCALE_INDEX", false) and r.fsr == null and r.tp == null and !r.device.tensorUnits();
+    r.sb_index = try platform.environment.read(bool, "TF_FLASHNEXT_SCALE_INDEX", true) and r.fsr == null and !r.device.tensorUnits();
     for (0..LAYERS) |i| {
         const linear = i % 4 != 3;
         var L: Layer = .{ .ahc = try hcOf(r, "L{d}.ahc", .{i}), .mhc = try hcOf(r, "L{d}.mhc", .{i}), .linear = linear, .proj = undefined, .out = undefined, .router = try r.loadf("L{d}.moe.router", .{i}), .ex = undefined };
@@ -235,7 +235,6 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
             }
         }
         if (r.xpack) try r.repack(&L.ex);
-        if (r.sb_index) try @import("scale_index.zig").addAll(r, &L.ex);
         m.layers[i] = L;
     }
     m.mix = try hcOf(r, "mix", .{});
@@ -333,7 +332,6 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
             }
         }
         if (r.xpack) try r.repack(&ex);
-        if (r.sb_index) try @import("scale_index.zig").addAll(r, &ex);
         m.mtp = .{
             .ahc = try hcOf(r, "mtp.ahc", .{}),
             .mhc = try hcOf(r, "mtp.mhc", .{}),
@@ -386,6 +384,15 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
 
     e.r = r;
     e.m = m;
+    if (r.sb_index) { // before the prompt kernels compile: they read the routed experts through the index too
+        var widths = try @import("widths.zig").Widths.init(arena, &cfg);
+        defer widths.deinit();
+        const ws = try @import("engine_widths.zig").read(&cfg, &widths, r.ngram);
+        var sets: [LAYERS + 1]@import("scale_index.zig").Set = undefined;
+        for (&m.layers, 0..) |*L, i| sets[i] = .{ .ex = &L.ex, .xw = ws.layers[i] };
+        sets[LAYERS] = .{ .ex = &m.mtp.ex, .xw = ws.mtp };
+        try @import("scale_index.zig").build(r, &sets);
+    }
     e.pr = try arena.create(Prompt);
     e.pr.* = try Prompt.init(r, pack_dir, r.xnew_header);
     const uniform = try @import("engine_widths.zig").apply(arena, &cfg, index.object.get("weight_map").?.object, e.pr, m);
