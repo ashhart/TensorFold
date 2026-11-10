@@ -48,9 +48,10 @@ python3 tools/zig/dots_mocr_reference.py score MODEL_DIRECTORY REFERENCE \
 
 An image reference on CUDA runs the tower with SDPA (the checkpoint's
 config names flash attention, which has no aarch64 wheel) and records the
-attention backends it used; `score` reads the reference's pixels and grid
-for image prompts, and `stages` compares a native tower dump with the
-reference's taps, stage by stage:
+attention backends it used; `--sdpa-backend math` keeps every SDPA call on
+the math kernel, for a second reference to compare against. `score` reads
+the reference's pixels and grid for image prompts, and `stages` compares a
+native tower dump with the reference's taps, stage by stage:
 
 ```sh
 python3 tools/zig/dots_mocr_reference.py oracle MODEL_DIRECTORY IMAGE \
