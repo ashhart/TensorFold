@@ -164,6 +164,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Prompt cache: long conversations survive 8 to 16 agents sending follow-ups at once. Redundant states are evicted before each conversation's newest one, admission never evicts a state a queued request resumes, concurrent keeps reserve their room, and the default budget scales with the room left after streams on Metal and unified-memory CUDA (discrete CUDA hosts keep 8 GiB, Flash Next's batch host 16 GiB). On Qwen3.8-27B with DFlash2 at 16 agents, a follow-up's median first token drops from 546 s to 15.9 s on an M3 Ultra and from 105 s to 25.8 s on a GB10, with every reply unchanged (#2699).
 
+- LFM3-VL-2B on Metal: serve the official MLX 4-, 6- and 8-bit checkpoints with the native image tower and projector. LFM3 also supports stepped prefill under `--decode-share`; development-only tensor-unit prompt projection and tiled attention remain off by default (#1502, part of #1491). Thanks to @BlivionIaG.
+
 - Evidence index: reads saved native capabilities, including unknown and XPU chip labels; advertised facts stay unqualified, and invalid supplied input stops with a bounded error (#2708).
 
 - `--instruct-sampling card` (or `field=value` pairs) serves the model card's instruct sampling to sampled chat requests with thinking off that leave those fields unset; request fields, then the serve flags, then the pairs decide, and the server's own requests never take it (#2626). Thanks to @BobClawblaw.
@@ -441,8 +443,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Developers: `test-glm-snapshots-host` runs under `test-cuda-host`, as GLM's other host steps do, so CI builds it and runs its 21 tests; its host-cache test sets `TF_GLM_HOST_CACHE` through `sys.env`, so it links on Windows too (#2426, refs #2031). Thanks to @Bizuayeu.
 
 - Conversation states on disk try one shorter compatible state after a refused read before prefilling from the start. Failed reads still name their error in the log (#2442).
-
-- LFM3-VL-2B on Metal: serve the official MLX 4-, 6- and 8-bit checkpoints with the native image tower and projector. LFM3 also supports stepped prefill under `--decode-share`; development-only tensor-unit prompt projection and tiled attention remain off by default (#1502, part of #1491). Thanks to @BlivionIaG.
 
 - Internal: `families/glm/cuda_engine.zig` goes from 600 to 547 lines; GLM's CUDA chunk gate (`gate`, `shared`, `Wait`) lives in `cuda_engine_gate.zig`, unchanged (#2429).
 
