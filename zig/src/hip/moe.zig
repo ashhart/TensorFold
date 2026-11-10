@@ -142,13 +142,14 @@ pub fn run(o: Ops, kind: Kind, r: Routed, x: Tensor, rows: usize, prefill: bool)
         try o.moeAct(both, act_t, pairs, ex.width, ex.limit);
         const y = try o.projectRouted(act_t, ex.down, items, count, members, pairs, 1, @min(tile, rows), expert_rows);
         // the shared pair's id is another rank's here: its row reads zero, and rank 0 adds its own gate's branch
-        try o.moeZeroForeign(y, local, ex.count, pairs, ex.dims);
         const share = try o.arena.of(f32, rows * ex.dims);
         if (ex.shared) |sh| {
             const s = try sharedRun(o, sh, x, rows, kind, ex.limit);
-            try o.moeCombineGate(y, wts, s, .{ .ptr = share, .kind = .f32 }, rows, slots, ex.dims);
+            // another rank's pairs read zero in the combine itself
+            try o.moeCombineGate(y, wts, s, .{ .ptr = share, .kind = .f32 }, rows, slots, ex.dims, local, ex.count);
             return .{ .ptr = share, .kind = .f32 };
         }
+        try o.moeZeroForeign(y, local, ex.count, pairs, ex.dims);
         try o.moeCombine(y, wts, .{ .ptr = share, .kind = .f32 }, rows, slots, ex.dims);
         return .{ .ptr = share, .kind = .f32 };
     }
@@ -156,7 +157,7 @@ pub fn run(o: Ops, kind: Kind, r: Routed, x: Tensor, rows: usize, prefill: bool)
     const out = try o.arena.take(rows * ex.dims * kind.size());
     if (ex.shared) |sh| {
         const s = try sharedRun(o, sh, x, rows, kind, ex.limit);
-        try o.moeCombineGate(p.y, wts, s, .{ .ptr = out, .kind = kind }, rows, slots, ex.dims);
+        try o.moeCombineGate(p.y, wts, s, .{ .ptr = out, .kind = kind }, rows, slots, ex.dims, 0, 0);
         return .{ .ptr = out, .kind = kind };
     }
     try o.moeCombine(p.y, wts, .{ .ptr = out, .kind = kind }, rows, slots, ex.dims);

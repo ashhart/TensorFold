@@ -158,6 +158,8 @@ pub const Gate = struct {
             @intCast(s.rows),
             @intCast(s.k),
             @intCast(s.n),
+            null,
+            0,
             self.rig.s.handle,
         );
         try self.rig.s.synchronize();
