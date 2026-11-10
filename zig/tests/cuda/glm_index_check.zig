@@ -169,6 +169,8 @@ pub fn run(gpu: check.Gpu) !void {
     fails += try decode(gpu, s, ops, &ks, &idx, rand);
     std.debug.print("decode select paths: whole row {d}, candidates {d}, whole row after the candidates missed {d}, ties at the floor {d}\n", .{ dpaths[0], dpaths[1], dpaths[2], dpaths[3] });
     try check.expect(dpaths[0] > 0 and dpaths[1] > 0 and dpaths[2] > 0 and dpaths[3] > 0, "glm-index-check: the decode select's four paths must all occur", .{});
+    std.debug.print("decode scores on glm_index_scores: {d} of {d} windows\n", .{ dscored, dcases.len });
+    try check.expect(dscored > 0, "glm-index-check: a decode window's scores must take glm_index_scores", .{});
     try check.expect(fails == 0, "glm-index-check: {d} buffers differ", .{fails});
     check.pass("glm-index-check: scores, pools and token lists byte-equal at {d} cases, tied scores through both selects; the decode select at {d} windows", .{ cases.len, dcases.len });
 }
@@ -187,6 +189,9 @@ const dcases = [_]DCase{
 
 /// How many rows took each path of the decode select (whole row, candidates, whole row after them, ties at the floor).
 var dpaths = [4]usize{ 0, 0, 0, 0 };
+
+/// How many windows' decode scores took glm_index_scores (Kernels.takesDecode), so the byte checks are not vacuous.
+var dscored: usize = 0;
 
 /// The decode select (cuda_sparse.decodeSelect) against tf_glm_select_rows byte for byte: planted, then selectTokens.
 fn decode(gpu: check.Gpu, s: cuda.Stream, ops: cuda.Module, ks: *const glm.glue.Kernels, idx: *const glm.index.Kernels, rand: std.Random) !usize {
@@ -255,7 +260,7 @@ fn decode(gpu: check.Gpu, s: cuda.Stream, ops: cuda.Module, ks: *const glm.glue.
             if (f != 0) std.debug.print("  (kind {d}, paths {any})\n", .{ kind, taken[0..c.rows] });
             fails += f;
         }
-        // selectTokens on tf_glm_scores' rows: today's set against the decode select's, pools and token lists
+        // selectTokens: today's set against the decode select's and glm_index_scores', scores, pools and token lists
         const qi = try gpa.alloc(u16, c.rows * 32 * d);
         defer gpa.free(qi);
         for (qi) |*x| x.* = bf16(rand.floatNorm(f32));
@@ -269,6 +274,7 @@ fn decode(gpu: check.Gpu, s: cuda.Stream, ops: cuda.Module, ks: *const glm.glue.
         const dq = try fromHost(gpu, &bufs, std.mem.sliceAsBytes(qi));
         const dw = try fromHost(gpu, &bufs, std.mem.sliceAsBytes(wts));
         const dk = try fromHost(gpu, &bufs, std.mem.sliceAsBytes(pk));
+        if (idx.takesDecode(c.rows, np, (np + 63) / 64, dk, 0)) dscored += 1; // the latent table's default ps is 0
         var sa = try scratch(gpu, &bufs, c.rows, np);
         var sb = try scratch(gpu, &bufs, c.rows, np);
         sb.ls = try zeros(gpu, &bufs, sp.bitsBytes(c.rows, np));
