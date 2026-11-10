@@ -18,12 +18,7 @@ pub const formats: []const []const u8 = &.{"bf16"};
 pub const default_context: i64 = 32768;
 /// An embedding engine writes no reply text, so no reasoning block (Info.reasoning).
 pub const reasoning = false;
-pub const tp_refusal = "--tp: Qwen3 dense checkpoints run on one CUDA GPU; serve with --tp 1";
-pub const confidence_refusal = "--mtp-confidence: Qwen3 dense checkpoints have no draft head";
 pub const drafter_refusal = "--drafter: Qwen3 dense checkpoints have no drafts to train; serve without --drafter";
-pub const vision_refusal = "--vision: this CUDA family reads no images; serve it without --vision";
-pub const kv8_refusal = "--kv-cache fp8: this CUDA family keeps bf16 caches; serve without it";
-pub const loops_refusal = "--loops sets a looped model's recurrent passes (Dory's): this CUDA family has none; serve without it";
 pub const record_refusal = "--record: qwen3 checkpoints give no rows to record on CUDA yet";
 
 /// A refusal: the client's words in `problem`, and an error, so every errdefer of the open runs.
@@ -103,30 +98,6 @@ fn openEngine(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, device: u32
     // `budget` and `windows` are the native module's own file imports; the family cannot open them again.
     if (try o.slideRefusal(a, "CUDA")) |why| {
         problem.* = why;
-        return error.Refused;
-    }
-    if (o.tp != 1) {
-        problem.* = tp_refusal;
-        return error.Refused;
-    }
-    if (o.mtp_confidence != null) {
-        problem.* = confidence_refusal;
-        return error.Refused;
-    }
-    if (o.drafter != null) {
-        problem.* = drafter_refusal;
-        return error.Refused;
-    }
-    if (o.vision != null) {
-        problem.* = vision_refusal;
-        return error.Refused;
-    }
-    if (o.kv8) {
-        problem.* = kv8_refusal;
-        return error.Refused;
-    }
-    if (o.loops != null) {
-        problem.* = loops_refusal;
         return error.Refused;
     }
     if (o.record != null) {
