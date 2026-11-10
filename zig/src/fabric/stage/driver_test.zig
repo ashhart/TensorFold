@@ -268,7 +268,11 @@ const Case = struct {
     misdescribe: ?struct { rank: u32, range: boot.Range } = null,
     /// Pipelined rounds: the streams in `k` groups, `k` rounds in flight (0: the scenario, one round at a time).
     k: usize = 0,
+    /// The last stage echoes a round's plan short or empty; rank 0 pipes one round without rows.
+    echo: ?Echo = null,
 };
+
+const Echo = enum { short, empty };
 
 const Result = struct { err: ?anyerror = null, out: []u32 = &.{} };
 
@@ -294,15 +298,32 @@ fn rankRun(gpa: std.mem.Allocator, o: ring.Options, l: net.Fd, c: Case, res: *Re
     const model: boot.Model = .{ .version = Fake.version, .kv_dtype = .bf16, .layers = layers, .boundary = b, .shapes = own.shapes, .taps = &.{} };
     const width: u32 = if (c.k > 0) pipe_streams else parallel;
     const next = try driver.bootRing(gpa, &r, &own, &model, c.layout, Fake.backend);
+    if (c.echo != null and o.rank + 1 == o.world) return badEcho(&r, next, c.echo.?);
     if (o.rank != 0) return D.serve(gpa, &e, &r, width, context, next);
     var lead = try D.Lead.init(gpa, &e, &r, width, context, next);
     defer lead.deinit(gpa);
+    if (c.echo != null) {
+        try lead.pipe(t.io, 2);
+        try lead.issue(&.{}, &.{}, .window);
+        return lead.complete();
+    }
     if (c.k > 0) {
         res.out = try piped(gpa, &lead, &e, c.k);
         return;
     }
     try run(&lead);
     res.out = try e.out.toOwnedSlice(gpa);
+}
+
+/// A last stage that echoes each plan cut short (one byte less) or empty, until rank 0 stops the ring.
+fn badEcho(r: *ring.Ring, first_round: u64, echo: Echo) !void {
+    var buf: [4096]u8 = undefined;
+    var round = first_round;
+    while (true) : (round += 1) {
+        const h = r.recv(.plan, round, &buf) catch |err| return if (err == error.Stopped) {} else err;
+        const n: usize = @intCast(h.bytes);
+        try r.send(.plan, round, 0, &.{buf[0..if (echo == .short) n - 1 else 0]});
+    }
 }
 
 /// Every rank of `c` on its own loopback thread; each result holds rank 0's bytes or the rank's error.
@@ -515,4 +536,12 @@ test "pipelined rounds: a stream in flight, a step beside rounds in flight and o
     try lead.complete();
     try t.expectError(error.NothingInFlight, lead.complete());
     try t.expectEqual(@as(usize, 0), lead.inFlight());
+}
+
+test "pipelined rounds: a short or empty echo of a round without rows is refused" {
+    for ([_]Echo{ .short, .empty }) |echo| {
+        var res: [most]Result = @splat(.{});
+        try ringRun(t.allocator, .{ .layout = &two, .echo = echo }, &res);
+        try t.expectEqual(@as(?anyerror, error.OtherEcho), res[0].err);
+    }
 }
