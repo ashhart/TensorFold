@@ -29,6 +29,34 @@ zig-out/bin/tf-h3-image-decoder MODEL_DIR out/case.latent.f32 128 128 out/case.p
 3. `tf-h3-image-decoder` decodes the latent. Its rows and columns are the canvas over 16. It resizes the picture back
    to the requested size when that differs from the canvas.
 
+## Edit, end to end
+
+An edit adds two tools before the prompt: the edit encoder makes each reference's latent rows, and the vision tool
+makes its rows for the text encoder. The transformer needs an M5; the other tools run on any Apple GPU:
+
+```sh
+zig build tf-h3-image-encoder tf-h3-image-vision tf-h3-image-prompt tf-h3-image tf-h3-image-decoder -Dcpu=apple_m1 -Doptimize=ReleaseFast
+zig-out/bin/tf-h3-image-encoder MODEL_DIR reference.png 42 out/ref 2048x2048
+zig-out/bin/tf-h3-image-vision TEXT_ENCODER_DIR MODEL_DIR reference.png out/ref.vision.safetensors
+zig-out/bin/tf-h3-image-prompt TEXT_ENCODER_DIR MODEL_DIR prompt.txt out/case.safetensors 2048x2048 42 \
+  --reference out/ref.vision.safetensors --anchors out/ref
+zig-out/bin/tf-h3-image MODEL_DIR out/case.safetensors out/case free
+zig-out/bin/tf-h3-image-decoder MODEL_DIR out/case.latent.f32 128 128 out/case.png 2048x2048
+```
+
+1. `tf-h3-image-encoder` makes the reference's clean and anchor rows ([Edit encoder](#edit-encoder)). Give it the
+   request's seed and its canvas, which the prompt tool prints (a 2048 x 2048 request's canvas is itself). It draws the
+   target's noise and then the anchor's, as the edit's one generator does.
+2. `tf-h3-image-vision` makes the reference's vision and DeepStack rows ([Vision tower](#vision-tower)).
+3. `tf-h3-image-prompt --reference` puts `Picture 1: ` and the reference's vision block before the prompt, runs the
+   text encoder with the reference's rows, and tags the block's rows 0. `--anchors` writes the encoder's grid and
+   anchor rows as the case's `references` and `anchors`, beside the canvas and the target's starting rows.
+4. `tf-h3-image` steps only the target rows, holding the reference's at 0.999. The decoder runs as for text to image.
+
+`--reference` may be given more than once, in upload order, each with its own `--anchors`. The encoder draws each
+reference's noise as a one-reference edit does, so only a one-reference edit draws exactly the reference pipeline's
+noise.
+
 ## What runs here, and what the case brings
 
 Made natively, from the request and the model folder:
@@ -58,7 +86,8 @@ Made natively, from the request and the model folder:
   the checkpoint as for the released MiniMax-H3 clips (`modulation.zig`).
 - **Attention.** Dense over every row, in tiles of 64: the prefix (text and references), then the target.
 
-The picture case brings the rest, made by the reference pipeline for now:
+The picture case brings the rest. The prompt tool writes `canvas`, `text`, `text_tags`, `noise`, and with an edit's
+`--anchors` `references` and `anchors`; a reference pipeline's case adds its own rows for the gates:
 
 | Tensor | Holds |
 |---|---|
@@ -112,9 +141,10 @@ does:
 - its SiLU rounds once;
 - the refiner rounds as H3's blocks do: x r w at once, then the sigmoid, then the product.
 
-**Edits.** The encoder places a reference's vision rows at its image pads and adds DeepStack's features after layers
-0, 1 and 2. The labels (`Picture i: `), vision blocks, tags (0 for a vision block's tokens) and M-RoPE positions are
-made here. Qwen3-VL's vision tower is not, so an edit's prompt rows still come from the case.
+**Edits.** Each `--reference` file (from `tf-h3-image-vision`) adds its label, `Picture i: `, and its vision block
+before the prompt: vision start, one image pad per token, vision end, all tagged 0. The encoder places the reference's
+rows at its image pads and adds its DeepStack rows there after layers 0, 1 and 2. M-RoPE gives the pads (t, h, w) over
+the merged grid, and the text after a block resumes past its larger side.
 
 **Gates, fixed before the first run except the whole-run gate below.** `tf-h3-image-prompt selftest [WORK_DIR]`
 writes a tiny synthetic checkpoint and loads it as a real run does. The checkpoint is a 256-wide text model with 4
@@ -123,10 +153,11 @@ against a float64 host reference with the same bf16 rounding points:
 
 - **Each kernel alone:** at least 99.9% of values bit-equal, none further than 1/32 of its row's RMS. Kernels: the
   product, both norms, heads with rotary, fused heads, causal and full attention, both SiLU gates, the residual add.
-- **Whole runs:** a text prompt; a reference's vision and DeepStack rows at M-RoPE positions; the refiner on the GPU's
-  encoder rows. Each must be within twice a float32-sum host run's distance from float64, in both 1 - cosine and
-  relative error, with cosine at least 0.999. This gate replaced a fixed cosine bound of 0.99999, which the refiner
-  missed at 0.9999884 on a second seed while every kernel alone was bit-exact.
+- **Whole runs:** a text prompt; a reference's vision and DeepStack rows at M-RoPE positions, read from a file as
+  `--reference` reads one; the refiner on the GPU's encoder rows. Each must be within twice a float32-sum host run's
+  distance from float64, in both 1 - cosine and relative error, with cosine at least 0.999. This gate replaced a fixed
+  cosine bound of 0.99999, which the refiner missed at 0.9999884 on a second seed while every kernel alone was
+  bit-exact.
 - **A second run:** byte for byte the same.
 
 On an M3 Ultra, every kernel alone is 99.97% to 100% bit-equal. The whole runs sit 0.7 to 1.03 times as far from
@@ -298,6 +329,91 @@ Its gates, measured on an M3 Ultra:
 
 A 1024 x 1024 reference at the released widths encodes in 0.6 s.
 
+## Vision tower
+
+`tf-h3-image-vision` makes an edit reference's rows for the text encoder: Qwen3-VL's vision tower with DeepStack, on any
+Apple GPU. Its kernels compile from source when it loads, and it uses no tensor units.
+
+```sh
+zig build tf-h3-image-vision -Dcpu=apple_m1 -Doptimize=ReleaseFast
+zig-out/bin/tf-h3-image-vision TEXT_ENCODER_DIR MODEL_DIR reference.png out/ref.vision.safetensors
+zig-out/bin/tf-h3-image-vision selftest [WORK_DIR]
+```
+
+**What runs:**
+
+1. The picture (PNG, JPEG or WebP) is read upright in RGB. Its Qwen copy has a short edge of exactly 1,024: the
+   original when it already has one, else both sides scaled, snapped to 32 (halves to even) and resampled with Pillow's
+   LANCZOS (`picture_prompt.zig`'s rule, in `qwen_copy.zig`).
+2. The processor in `MODEL_DIR/processor/preprocessor_config.json` (Qwen2VLImageProcessorFast) cuts it into patches
+   (`core/picture/patches.zig`): a smart resize to multiples of 32 inside its pixel bounds, a no-op on a snapped copy;
+   bytes / 255, then mean and std 0.5; patches of 16 x 16 with the frame repeated, in merge order. A 1024 x 1024
+   reference gives 64 x 64 patches and 1,024 tokens.
+3. The tower is core's Qwen-VL tower (`core/qwen_vl`), the one Qwen3.5 serves with:
+   - the patch projection, plus four bilinear taps of the learned 48 x 48 position grid;
+   - 27 blocks of 1,152 with 16 heads of 72, a 2D axial rotary and a gelu_pytorch_tanh MLP of 4,304;
+   - the merger: LayerNorm per patch, the 2 x 2 patches side by side, then fc1, exact GELU and fc2 to 5,120.
+4. **DeepStack.** After blocks 8, 16 and 24 (`deepstack_visual_indexes`), each tap's own merger reads the residual.
+   Its LayerNorm runs after the shuffle, over a merged row's 4 x 1,152 = 4,608 values; then fc1, exact GELU and fc2
+   to 5,120, each with its bias.
+
+It writes `grid` I32 [3] (1, rows and columns in patches), `rows` BF16 [tokens, 5,120] and `deepstack` BF16 [3,
+tokens, 5,120], aligned. `tf-h3-image-prompt --reference` reads it.
+
+**The checkpoint.** `TEXT_ENCODER_DIR` is MiniMax-H3's `text_encoder/`, an HF `Qwen3VLForConditionalGeneration`. The
+tower's prefix is whatever precedes `blocks.0.norm1.weight` in its index, such as `model.visual.`. The loader reads
+exactly the 351 bf16 tensors of a Qwen3-VL tower with three DeepStack mergers (`deepstack_merger_list.{0,1,2}` with
+`norm`, `linear_fc1` and `linear_fc2`), and refuses a checkpoint with more or fewer. The patch kernel is read in
+torch's [1,152, 3, 2, 16, 16] layout. These names and shapes come from the HF model's code and config. No header of the
+released checkpoint has been read here, so the first real load is their check.
+
+**Precision.** As for Qwen3.5's images:
+
+- bf16 weights and patches;
+- products in simdgroup matrices with fp32 sums, each rounded once to bf16;
+- the residual stream in fp32, where the reference's bf16 tower keeps bf16;
+- LayerNorm with fp32 statistics and eps 1e-6, rounded once;
+- q and k turned in fp32, then rounded;
+- fp32 scores, softmax and sums.
+
+**Qwen3.5 is unchanged.** DeepStack is an opt-in. `Config.parse` still refuses a tower with taps, and only
+`Config.parseDeepStack` reads them. A tower without taps loads the same tensors under `vision_tower.`, into the same
+buffer, and runs the same kernels in the same order.
+
+**Selftest, gates fixed before the first run.** `selftest` writes a tiny Qwen3-VL tower in HF's names and layouts under
+`model.visual.`, beside a text-model tensor the loader must leave alone:
+
+- 4 blocks of 144, with 2 heads of 72 and an MLP of 272;
+- a 64-position grid, a 2 x 2 merge to 200, and DeepStack taps after blocks 0, 2 and 3.
+
+It parses its config and processor, finds its prefix and loads it as a run does. A 288 x 192 picture goes through the
+processor's patches: 12 x 18 patches, 54 tokens. A float64 host reference runs the whole tower at the same bf16
+rounding points: the patch projection, the learned grid's taps, the rotary, attention, the MLP, the merger and each
+DeepStack merger. The gates:
+
+- **Each output** (the merged rows and each tap's rows): within twice a float32-sum host run's distance from float64,
+  in both 1 - cosine and relative error, with cosine at least 0.999.
+- **A second run:** byte for byte the same.
+- **No taps asked:** the same merged rows.
+- **The Qwen3.5 path:** the same tower as MLX holds a Qwen3.5 one (`vision_tower.*`, the patch kernel [O, T, Y, X, C],
+  no DeepStack), loaded by `Tower.load` and run by `image()`, gives the same merged rows.
+
+On an M3 Ultra:
+
+| Output | Cosine | Relative error | Float32-sum host run |
+|---|---|---|---|
+| The merged rows | 0.9999825 | 5.92e-3 | 0.9999828, 5.87e-3 |
+| DeepStack after block 0 | 0.9999949 | 3.20e-3 | 0.9999950, 3.17e-3 |
+| DeepStack after block 2 | 0.9999838 | 5.69e-3 | 0.9999832, 5.80e-3 |
+| DeepStack after block 3 | 0.9999841 | 5.64e-3 | 0.9999837, 5.71e-3 |
+
+Each output sits 0.96 to 1.02 times as far from float64 as the float32-sum run. The second run, the untapped run and
+the Qwen3.5 path are byte-identical. The gates passed on the first run, unchanged.
+
+`zig build test-h3-image-prompt` also runs the tower's host tests: both parses of the config, the 351-tensor plan
+beside the 333 of Qwen3.5's, the prefix search, the scratch plan and the reference's norm and GELUs.
+`zig build compile-h3-image-vision` compiles the tool without running a shader.
+
 ## Checkpoint
 
 `MiniMaxAI/MiniMax-H3-Image`. `transformer/` is bf16, with the patch projection, time embedder and step heads in
@@ -308,8 +424,9 @@ the United States of America. Read it before use.
 ## Not done
 
 - **Checked against the release:** nothing yet. The reference cases and the gates above wait for the weights.
-- **Edits end to end:** the encoder makes a reference's rows and the prompt path places its vision rows, but
-  Qwen3-VL's vision tower is not here, so an edit's prompt rows still come from a case. No one tool runs an edit.
+- **Edits:** they run end to end in five tools, not one. With several references, each reference's noise is drawn
+  as a one-reference edit draws it, not on the edit's one chain. The vision tower's tensor names are inferred, and its
+  speed at the released size is not measured here.
 - **Serving:** no `/v1/images/generations` or `/v1/images/edits` route for it, and no CUDA path.
 - **Machines:** the transformer runs on an M5 only; chips without tensor units are refused.
 
