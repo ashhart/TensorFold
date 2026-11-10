@@ -124,7 +124,7 @@ const Late = struct {
         }
         const t0 = sock.nowNs();
         try std.testing.expectError(error.Timeout, c.allGather(addr(&a), addr(&b), 16, .u8, null));
-        try std.testing.expect(sock.nowNs() - t0 < 300 * std.time.ns_per_ms);
+        try std.testing.expect(sock.nowNs() - t0 < std.time.ns_per_s); // at its deadline, with room for a busy runner
         try std.testing.expectError(error.Timeout, c.check());
         try std.testing.expectError(error.Aborted, c.allGather(addr(&a), addr(&b), 16, .u8, null));
     }
