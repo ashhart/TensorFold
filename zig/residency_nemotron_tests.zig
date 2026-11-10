@@ -204,7 +204,7 @@ test "residency owner Nemotron: actual native inventory includes nested prompt, 
             cache.len = 3;
             cache.mtp_len = if (auxiliary) 3 else 0;
             const snapshot = @import("src/families/nemotron/snapshot.zig");
-            const saved = try snapshot.save(&backend, cache, 3);
+            const saved = try snapshot.save(&backend, cache, 3, false);
             defer snapshot.drop(&backend, saved);
             host.resident.?.held.flush();
             try record.check();
