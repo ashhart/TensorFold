@@ -222,3 +222,24 @@ test "part: positive refuses a zero or NaN global scale by name; without it they
         _ = try part.readWhy(&f.ck, "s", .{}, &why);
     }
 }
+
+test "part: rank0 refuses a scale of shape [1] or [1, 1] by name; the default takes it" {
+    for ([_][]const usize{ &.{1}, &.{ 1, 1 } }) |shape| {
+        for ([_][]const u8{ "m.weight_scale_2", "m.input_scale" }) |name| {
+            const g: fixture.Entry = .{ .name = name, .dtype = "F32", .shape = shape, .bytes = &one };
+            var f: Folder = .{ .tmp = undefined };
+            try f.open(&try edited(name, g));
+            defer f.close();
+            var why: Why = .{};
+            try testing.expectError(error.UnexpectedTensor, part.readWhy(&f.ck, "m", .{ .scalars = .rank0 }, &why));
+            try testing.expect(std.mem.startsWith(u8, why.text(), name));
+            try testing.expect(std.mem.endsWith(u8, why.text(), "expected an F32 scalar of shape []"));
+            const p = try part.readWhy(&f.ck, "m", .{}, &why);
+            try testing.expectEqual(@as(f32, 0.5), if (name[2] == 'w') p.scale else p.act.?);
+        }
+    }
+    var f: Folder = .{ .tmp = undefined };
+    try f.open(&good());
+    defer f.close();
+    _ = try part.read(&f.ck, "m", .{ .scalars = .rank0 }); // shape [] passes
+}
