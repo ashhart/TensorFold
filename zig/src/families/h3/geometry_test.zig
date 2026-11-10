@@ -392,6 +392,7 @@ test {
     _ = @import("picture_test.zig");
     _ = @import("picture_vae_test.zig");
     _ = @import("picture_reference_test.zig");
+    _ = @import("image_decoder_test.zig");
 }
 
 /// MiniMax-H3-Image's case: text and picture rows only, no audio tensor, two rows in two tiles.
