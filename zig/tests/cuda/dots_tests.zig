@@ -18,33 +18,34 @@ const context = 8192;
 /// The stages one encode taps: the patch with its bias and its norm, every block, the post-norm, the merger.
 const taps = 2 + 42 + 2;
 
-/// tf-cuda-test dots-stages | dots-image | dots-invariants: main.zig's one line for the three.
+/// tf-cuda-test dots-stages | dots-image | dots-invariants | dots-projections: main.zig's one line for them.
 pub fn run(gpu: Gpu, cmd: []const u8, rest: Args) !void {
     if (!cuda.kernels.available) return skip(cmd, "this runner was built without CUDA kernels");
     if (std.mem.eql(u8, cmd, "dots-stages")) return stages(gpu, rest);
     if (std.mem.eql(u8, cmd, "dots-image")) return twice(gpu, rest);
     if (std.mem.eql(u8, cmd, "dots-invariants")) return invariants(gpu, rest);
+    if (std.mem.eql(u8, cmd, "dots-projections")) return @import("dots_projections.zig").run(gpu, rest);
     return error.UnknownCommand;
 }
 
-fn skip(cmd: []const u8, why: []const u8) void {
+pub fn skip(cmd: []const u8, why: []const u8) void {
     std.debug.print("SKIP {s}: {s}\n", .{ cmd, why });
 }
 
-fn arg(rest: Args, i: usize) ![]const u8 {
+pub fn arg(rest: Args, i: usize) ![]const u8 {
     if (i >= rest.len) return error.MissingArgument;
     return rest[i];
 }
 
 /// Whether `dir` holds a checkpoint's config.json (else the command skips).
-fn present(io: std.Io, dir: []const u8) bool {
+pub fn present(io: std.Io, dir: []const u8) bool {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = std.fmt.bufPrint(&buf, "{s}/config.json", .{dir}) catch return false;
     std.Io.Dir.cwd().access(io, path, .{}) catch return false;
     return true;
 }
 
-fn readFile(gpu: Gpu, path: []const u8) ![]u8 {
+pub fn readFile(gpu: Gpu, path: []const u8) ![]u8 {
     return std.Io.Dir.cwd().readFileAlloc(gpu.io, path, gpu.gpa, .limited(64 << 20));
 }
 
@@ -103,6 +104,7 @@ const Npy = struct {
 
     fn at(ctx: *anyopaque, stage: []const u8, rows: u64, n: usize, width: usize) anyerror!void {
         const w: *Npy = @ptrCast(@alignCast(ctx));
+        if (!std.mem.startsWith(u8, stage, "vision-")) return; // a GEMM's rows: dots-projections' taps
         const a = w.gpu.gpa;
         try w.s.synchronize(); // the stage's launches are on the tower's stream
         const host = try a.alloc(u8, n * width * 2);
@@ -110,15 +112,15 @@ const Npy = struct {
         try cuda.memory.download(w.gpu.d, rows, host);
         const path = try std.fmt.allocPrint(a, "{s}/{s}.npy", .{ w.dir, stage });
         defer a.free(path);
-        try writeNpy(w.gpu.io, path, host, n, width);
+        try writeNpy(w.gpu.io, path, "<u2", host, n, width);
         w.count += 1;
     }
 };
 
-/// A version 1 .npy of `data` as <u2 [n, width], its header padded to 64 bytes with the preamble.
-fn writeNpy(io: std.Io, path: []const u8, data: []const u8, n: usize, width: usize) !void {
+/// A version 1 .npy of `data` as `descr` (<u2, <f4) [n, width], its header padded to 64 bytes with the preamble.
+pub fn writeNpy(io: std.Io, path: []const u8, descr: []const u8, data: []const u8, n: usize, width: usize) !void {
     var head: [128]u8 = undefined;
-    const dict = try std.fmt.bufPrint(&head, "{{'descr': '<u2', 'fortran_order': False, 'shape': ({d}, {d}), }}", .{ n, width });
+    const dict = try std.fmt.bufPrint(&head, "{{'descr': '{s}', 'fortran_order': False, 'shape': ({d}, {d}), }}", .{ descr, n, width });
     const len = std.mem.alignForward(usize, 10 + dict.len + 1, 64) - 10;
     var pad: [128]u8 = @splat(' ');
     @memcpy(pad[0..dict.len], dict);
@@ -247,20 +249,20 @@ fn pagesHash(gpu: Gpu, m: anytype, ids: []const u32, len: usize) ![32]u8 {
 }
 
 /// A prompt of the template's markers: the user mark, each image's open, pads and close, then the ask.
-const Prompt = struct {
+pub const Prompt = struct {
     ids: std.ArrayList(u32) = .empty,
     images: std.ArrayList(Image) = .empty,
 
-    fn deinit(p: *Prompt, gpa: std.mem.Allocator) void {
+    pub fn deinit(p: *Prompt, gpa: std.mem.Allocator) void {
         p.ids.deinit(gpa);
         p.images.deinit(gpa);
     }
 
-    fn text(p: *Prompt, gpa: std.mem.Allocator, ids: []const u32) !void {
+    pub fn text(p: *Prompt, gpa: std.mem.Allocator, ids: []const u32) !void {
         try p.ids.appendSlice(gpa, ids);
     }
 
-    fn image(p: *Prompt, gpa: std.mem.Allocator, prepared: Image) !void {
+    pub fn image(p: *Prompt, gpa: std.mem.Allocator, prepared: Image) !void {
         const m = dots.tower.marks;
         try p.ids.append(gpa, m.open);
         var im = prepared;

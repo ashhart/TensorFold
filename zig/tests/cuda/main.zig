@@ -265,6 +265,7 @@ const usage =
     \\  dots-stages MODEL IMAGE OUT  dots.mocr's tower: one encode, each stage's rows as OUT/<stage>.npy for the oracle
     \\  dots-image MODEL IMAGE   dots.mocr's tower: two encodes byte-equal, vision-merged's sha256, each encode's time
     \\  dots-invariants MODEL IMAGE [N] [IDS]  dots.mocr image prompts: chunk cuts == uncut (pages, logits, N greedy ids)
+    \\  dots-projections MODEL IMAGE OUT  dots.mocr's projections' rows for tools/zig/dots_projection_check.py (FP64, Torch)
     \\  qwen-pending              qwen35's pending kept rows: the slot scans and tf_q35k_apply_pend == tf_q35k_apply, red controls
     \\  rope-yarn                 YaRN rope in tf_q35_rope, tf_q35_rope8 and tf_q36m_norm_rope against float64, to 1M
     \\  kernel-contract-limits DIR   each registered launch against release SMs or sm_110 in DIR's fatbins
