@@ -165,8 +165,17 @@ fn widths(d: model.Dims) [5]usize {
     return .{ kw, kw, d.value_heads * d.value_dim, d.value_heads, d.value_heads };
 }
 
-/// linear() over `segs` on launcher `l` from each segment's conv tail, then state, in `starts`; the arena holds `junk`.
-fn run(g: *Gpu, w: *const Layer, l: *const hip.Launcher, x: hip.ops.Tensor, segs: []const forward.Seg, starts: []const []f32, junk: u8) !std.ArrayList(Part) {
+/// The scratch only the unfused chain takes, its mixed, qc and kc, replayed on a counting arena to the next take.
+fn chainOnly(d: model.Dims, rows: usize) !usize {
+    const kw = d.key_heads * d.key_dim;
+    var a = hip.Arena.counting();
+    for ([_]usize{ d.convWidth(), kw, kw }) |n| _ = try a.of(f32, rows * n);
+    _ = try a.take(0);
+    return a.used;
+}
+
+/// linear() on `l` over `segs` from the conv tails and states in `starts`; the arena holds `junk`, `taken` its scratch.
+fn run(g: *Gpu, w: *const Layer, l: *const hip.Launcher, x: hip.ops.Tensor, segs: []const forward.Seg, starts: []const []f32, junk: u8, taken: *usize) !std.ArrayList(Part) {
     const d = w.m.dims;
     var rows: usize = 0;
     for (segs, starts) |s, st| {
@@ -182,6 +191,7 @@ fn run(g: *Gpu, w: *const Layer, l: *const hip.Launcher, x: hip.ops.Tensor, segs
     const o: hip.ops.Ops = .{ .l = l, .bf16 = g.act == .bf16, .stream = g.stream.handle, .arena = &g.arena, .prefill = true };
     const mid = try places(g.arena, d, g.act, rows);
     const y = try mixers.linear(o, &w.m, w.l, segs, 0, x, rows, false);
+    taken.* = g.arena.used - mark;
     try g.stream.synchronize();
     var parts: std.ArrayList(Part) = .empty;
     errdefer freeParts(&parts);
@@ -227,8 +237,6 @@ fn check(lens: []const usize) !void {
     try w.init(&g, rng);
     defer w.deinit();
     const d = w.m.dims;
-    // the fixture takes the fused branch: key dim 128, conv 4
-    try std.testing.expect(g.on.fuse and !g.off.fuse and d.key_dim == 128 and d.conv <= 8);
     var rows: usize = 0;
     for (lens) |n| rows += n;
     const hx = try gpa.alloc(u16, rows * d.hidden);
@@ -264,10 +272,14 @@ fn check(lens: []const usize) !void {
         s.* = .{ .c = c, .tokens = tokens[at..][0..n], .pos = 0 };
         at += n;
     }
-    var fused = try run(&g, &w, &g.on, x, segs[0..lens.len], starts[0..lens.len], 0xa5);
+    var fused_taken: usize = 0;
+    var fused = try run(&g, &w, &g.on, x, segs[0..lens.len], starts[0..lens.len], 0xa5, &fused_taken);
     defer freeParts(&fused);
-    var chain = try run(&g, &w, &g.off, x, segs[0..lens.len], starts[0..lens.len], 0x5a);
+    var chain_taken: usize = 0;
+    var chain = try run(&g, &w, &g.off, x, segs[0..lens.len], starts[0..lens.len], 0x5a, &chain_taken);
     defer freeParts(&chain);
+    // the fused branch ran: it holds the chain's scratch less the mixed, qc and kc it never takes
+    try std.testing.expectEqual(chain_taken, fused_taken + try chainOnly(d, rows));
     try std.testing.expect(live(g.act, chain.items[0].bytes));
     var differ = false;
     for (fused.items, chain.items) |a, b| {
