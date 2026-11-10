@@ -29,7 +29,7 @@ pub const Warmer = struct {
     regions: []const Region = &.{},
     /// One bit a page of every region together: set once the page was asked for.
     bits: []std.atomic.Value(usize) = &.{},
-    /// A kernel without MADV_POPULATE_READ (before 5.14) takes MADV_WILLNEED from then on.
+    /// Only EINVAL switches it to MADV_WILLNEED for good (a kernel without MADV_POPULATE_READ, before 5.14).
     populate: std.atomic.Value(bool) = std.atomic.Value(bool).init(true),
     /// The spans hold more than `max_pages` pages: nothing is tracked, and every gather asks for its pages.
     over: bool = false,
@@ -127,8 +127,10 @@ pub const Warmer = struct {
         const at = r.base + (lo - @as(usize, @intCast(r.first))) * page;
         const len = (hi - lo) * page;
         if (w.populate.load(.acquire)) {
-            if (w.advise.advice(w.advise.ctx, at, len, populate_read) == 0) return;
-            w.populate.store(false, .release);
+            const rc = w.advise.advice(w.advise.ctx, at, len, populate_read);
+            if (rc == 0) return;
+            // only EINVAL is a kernel without the advice: a passed error passes, and the bytes are read either way
+            if (linux.errno(rc) == linux.E.INVAL) w.populate.store(false, .release) else return;
         }
         _ = w.advise.advice(w.advise.ctx, at, len, linux.MADV.WILLNEED);
     }
@@ -136,11 +138,12 @@ pub const Warmer = struct {
 
 const CountingAdvise = struct {
     n: u32 = 0,
+    fail: ?linux.E = null, // a planted errno: the real call is not made
 
     fn advise(ctx: ?*const anyopaque, at: usize, len: usize, flag: u32) usize {
         const c: *@This() = @ptrCast(@alignCast(@constCast(ctx.?)));
         c.n += 1;
-        return linux.madvise(@ptrFromInt(at), len, flag);
+        return if (c.fail) |e| @bitCast(-@as(isize, @backingInt(e))) else linux.madvise(@ptrFromInt(at), len, flag);
     }
 };
 
@@ -168,6 +171,35 @@ test "a region's pages are asked for once: a second warm makes no call and the b
     try std.testing.expectEqual(@as(u32, 1), count.n);
     for (w.bits) |word| try std.testing.expectEqual(@as(usize, 3), word.load(.acquire));
     try std.testing.expectEqualSlices(u8, want, bytes[0..256]);
+}
+
+test "only a failed advice of EINVAL takes the WILLNEED path for good, and a failure asks for no page twice" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const bytes = try a.alignedAlloc(u8, .fromByteUnits(std.heap.pageSize()), 2 * std.heap.pageSize());
+    defer a.free(bytes);
+    for (bytes, 0..) |*b, i| b.* = @truncate(i * 17 + 1);
+    const page = std.heap.pageSize();
+    // a kernel without the advice fails it with EINVAL for every page; a passed error stays with it for the next page
+    for ([_]linux.E{ .AGAIN, .INVAL }) |fail| {
+        const want = try a.dupe(u8, bytes);
+        defer a.free(want);
+        var w = try Warmer.init(a, &.{bytes});
+        defer w.deinit(a);
+        var count: CountingAdvise = .{ .fail = fail };
+        w.advise = .{ .advice = CountingAdvise.advise, .ctx = &count };
+        w.warm(0, bytes[0..page]);
+        w.warm(0, bytes[page..]);
+        w.warm(0, bytes[page..]);
+        if (fail == .AGAIN) {
+            try std.testing.expectEqual(@as(u32, 2), count.n); // each fresh page still asks for its advice
+        } else {
+            // the first page took the advice and the fallback, and the later pages the fallback alone
+            try std.testing.expectEqual(@as(u32, 3), count.n);
+            try std.testing.expect(!w.populate.load(.acquire));
+        }
+        try std.testing.expectEqualSlices(u8, want, bytes);
+    }
 }
 
 test "a range off its region's bytes is left alone" {
