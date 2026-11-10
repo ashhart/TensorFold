@@ -195,3 +195,39 @@ test "paged snapshots: the pooled MTP head occupies the thirteenth layer with th
     for (saved[0..n], Fake.copies[0..n]) |a, b| try std.testing.expectEqual([3]u64{ a[1], a[0], a[2] }, b);
     try std.testing.expectEqual(@as(usize, 150), head.len);
 }
+
+test "paged snapshots: .rows copies save's attention rows at their kept offsets, no DeltaNet piece and no tail" {
+    var d = Fake.driver();
+    const stream: cuda.Stream = .{ .d = &d, .handle = null };
+    var f: Fixture = undefined;
+    f.ids = .{ 7, 2, 11, 0 };
+    f.init(&d);
+    const seq = f.seq(&d);
+    // the pieces a pass already filled, by their live addresses: conv windows, DeltaNet states, the n-gram tail
+    var skip: [2 * wt.linear_n + 1]u64 = undefined;
+    for (f.conv, f.states, 0..) |cv, st, i| skip[2 * i ..][0..2].* = .{ cv.ptr, st.ptr };
+    skip[2 * wt.linear_n] = seq.tail.ptr;
+    for ([_]bool{ true, false }) |paged| {
+        var s = seq;
+        if (!paged) s.paged = null;
+        Fake.n = 0;
+        const kept = try snap.save(std.testing.allocator, &d, stream, &s, null);
+        defer snap.drop(std.testing.allocator, stream, kept);
+        const saved = Fake.copies;
+        const n = Fake.n;
+        Fake.n = 0;
+        const filled = try snap.prepare(std.testing.allocator, &d, s.fed, s.history, false, .full);
+        defer snap.drop(std.testing.allocator, stream, filled);
+        try snap.finish(stream, &s, null, filled);
+        // both buffers sit at the fake's one address: each copy .rows makes is save's, in save's order
+        var want: usize = 0;
+        for (saved[0..n]) |c| {
+            if (std.mem.indexOfScalar(u64, &skip, c[1]) != null) continue;
+            try std.testing.expect(want < Fake.n);
+            try std.testing.expectEqual(c, Fake.copies[want]);
+            want += 1;
+        }
+        try std.testing.expectEqual(want, Fake.n);
+        try std.testing.expectEqual(n - skip.len, want);
+    }
+}
