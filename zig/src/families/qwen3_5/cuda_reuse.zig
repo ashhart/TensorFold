@@ -562,3 +562,7 @@ test "a device save pins nothing: it copies on the device both ways, and its dro
     try std.testing.expectEqual(@as(usize, 1), DeviceFake.frees);
     try std.testing.expectEqual(@as(usize, 0), DeviceFake.pinned + DeviceFake.host_copies);
 }
+
+test {
+    _ = @import("cuda_reuse_paged_test.zig");
+}
