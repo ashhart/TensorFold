@@ -5,11 +5,15 @@ const qa = @import("qwen3_asr");
 const host = qa.host;
 const forced = host.forced;
 
-const usage = "usage: tf-qwen3-asr-forced MODEL_DIR CLIP.wav --case DIR [--plant splice] [--rows K]\n" ++
+const usage = "usage: tf-qwen3-asr-forced MODEL_DIR CLIP.wav --case DIR [--plant splice|norms] [--rows K [--row-gemms]]\n" ++
     "  every step on the case's greedy history: a differing top token passes only as a swap with both margins <= 0.25\n" ++
     "  (each listed); anything else fails, exit 1. With logits_fp32 and logits_bf16 in the case, the distances to fp32.\n" ++
     "  --rows K: the prompt pass over the first K reply ids against the decode steps, and the prompt in two passes\n" ++
-    "  against one (caches and logits): exit 1 unless bit-equal. --plant splice: the audio rows one position late.\n";
+    "  against one (caches and logits): exit 1 unless bit-equal; --row-gemms runs every projection a row at a time.\n" ++
+    "  --plant: the audio rows one position late (splice) or q_norm and k_norm swapped in every layer (norms).\n";
+
+/// A planted fault the tool must catch: the audio rows one position late, or q_norm and k_norm swapped.
+const Plant = enum { splice, norms };
 
 fn widen(bits: u16) f64 {
     return @as(f32, @bitCast(@as(u32, bits) << 16));
@@ -64,18 +68,28 @@ pub fn main(init: std.process.Init) !u8 {
         return 2;
     }
     var case_dir: ?[]const u8 = null;
-    var plant = false;
+    var plant: ?Plant = null;
     var check_rows: usize = 0;
+    var row_gemms = false;
     var i: usize = 3;
-    while (i + 1 < args.len) : (i += 2) {
+    while (i < args.len) : (i += 2) {
+        if (i + 1 >= args.len and !std.mem.eql(u8, args[i], "--row-gemms")) break;
         if (std.mem.eql(u8, args[i], "--case")) case_dir = args[i + 1] else if (std.mem.eql(u8, args[i], "--rows")) {
             check_rows = try std.fmt.parseInt(usize, args[i + 1], 10);
-        } else if (std.mem.eql(u8, args[i], "--plant") and std.mem.eql(u8, args[i + 1], "splice")) plant = true else {
+        } else if (std.mem.eql(u8, args[i], "--plant")) {
+            plant = std.meta.stringToEnum(Plant, args[i + 1]) orelse {
+                std.debug.print(usage, .{});
+                return 2;
+            };
+        } else if (std.mem.eql(u8, args[i], "--row-gemms")) {
+            row_gemms = true;
+            i -= 1;
+        } else {
             std.debug.print(usage, .{});
             return 2;
         }
     }
-    if (i != args.len or case_dir == null) {
+    if (i < args.len or case_dir == null) {
         std.debug.print(usage, .{});
         return 2;
     }
@@ -116,7 +130,9 @@ pub fn main(init: std.process.Init) !u8 {
     var rows_buf = try cuda.DeviceBuffer.alloc(&driver, plan.rows * cfg.audio.out * 2);
     defer rows_buf.free();
     const n_rows = try m.encode(feats, rows_buf.ptr, null);
-    const splice: qa.Splice = .{ .ptr = rows_buf.ptr, .at = at + @intFromBool(plant), .n = n_rows };
+    const splice: qa.Splice = .{ .ptr = rows_buf.ptr, .at = at + @intFromBool(plant == .splice), .n = n_rows };
+    m.lr.plant_norms = plant == .norms;
+    m.lr.row_gemms = row_gemms;
     const vocab = cfg.text.vocab;
 
     // the prompt pass, then one decode step a reference id: every step's logits row kept
@@ -133,7 +149,9 @@ pub fn main(init: std.process.Init) !u8 {
     var fails: usize = 0;
     for (0..want.len) |k| {
         const ours = forced.top(steps.items[k * vocab ..][0..vocab]);
-        const ref: forced.Top = .{ .first = top2[2 * k], .second = top2[2 * k + 1], .margin = ref_margin[k] };
+        var ref: forced.Top = .{ .first = top2[2 * k], .second = top2[2 * k + 1], .margin = ref_margin[k] };
+        // an exact tie: topk may list the two either way round, the greedy id is the reference's pick
+        if (ref.first != want[k] and ref.second == want[k] and ref.margin == 0) std.mem.swap(u32, &ref.first, &ref.second);
         if (ref.first != want[k]) return error.CaseTopIsNotGreedy;
         switch (forced.judge(ours, ref, forced.bar)) {
             .same => same += 1,
@@ -144,7 +162,10 @@ pub fn main(init: std.process.Init) !u8 {
         }
     }
     var ok = fails == 0;
-    std.debug.print("FORCED {s}: {d} steps, {d} same top token, {d} swaps within {d}, {d} fail{s}\n", .{ clip, want.len, same, swaps, forced.bar, fails, if (plant) " (planted: audio rows one position late)" else "" });
+    std.debug.print("FORCED {s}: {d} steps, {d} same top token, {d} swaps within {d}, {d} fail{s}\n", .{ clip, want.len, same, swaps, forced.bar, fails, if (plant) |p| switch (p) {
+        .splice => " (planted: the audio rows one position late)",
+        .norms => " (planted: q_norm and k_norm swapped in every layer)",
+    } else "" });
 
     if (case.floats(gpa, "logits_fp32")) |fp32| {
         defer gpa.free(fp32);
