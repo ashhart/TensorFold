@@ -23,4 +23,5 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
         .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "h3", .module = h3_mod }, .{ .name = "core", .module = h3_core } },
     }) });
     b.step("tf-h3-image", "MiniMax-H3-Image's Metal transformer on a picture case: six distilled steps, teacher-forced and gated").dependOn(&b.addInstallArtifact(h3_image, .{}).step);
+    @import("h3_image_encoder.zig").tool(b, target, optimize, metal);
 }
