@@ -30,10 +30,14 @@ const Matrix = struct {
     n: usize,
     k: usize,
 
-    /// `pre`'s part as core's ModelOpt reader sniffs it; FP8 needs its input_scale (NVIDIA's W8A8), NVFP4 none.
+    /// `pre`'s part by its weight's dtype through core's ModelOpt reader; FP8 needs its input_scale (NVIDIA's W8A8).
     fn open(ck: *core.Checkpoint, pre: []const u8) !Matrix {
-        const p = try core.modelopt.part.read(ck, pre, .{});
-        const in_scale: ?f64 = if (p.kind == .fp8) p.act orelse return error.MissingTensor else null;
+        var buf: [192]u8 = undefined;
+        const w = try ck.get(try std.fmt.bufPrint(&buf, "{s}.weight", .{pre}));
+        const kind = core.modelopt.part.kindOf(w.dtype) orelse return error.UnsupportedQuantization;
+        // a missing FP8 input_scale is refused by name; NVFP4's is not read (main never did)
+        const p = try core.modelopt.part.read(ck, pre, .{ .kind = kind, .act = if (kind == .fp8) .required else .skip });
+        const in_scale: ?f64 = if (p.act) |x| x else null;
         const blocks: []const u8 = if (p.blocks) |b| b.bytes else &.{};
         return .{ .kind = p.kind, .w = p.weight.bytes, .blocks = blocks, .scale = p.scale, .in_scale = in_scale, .n = p.n, .k = p.k };
     }
