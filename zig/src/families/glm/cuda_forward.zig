@@ -174,8 +174,8 @@ pub const Pieces = struct {
 /// How the ranks' partials meet: every rank in-process copying into the others' slots, or one rank over NCCL.
 pub const Exchange = union(enum) {
     local,
-    // group: the main stream's all-gathers through it (RoCE writes for small ones on two ranks); side streams stay raw
-    nccl: struct { lib: *const cuda.nccl.Library, comm: cuda.nccl.Comm, group: ?*const cuda.tp_group.Group = null },
+    // collective: the boundary's gathers through it (the group's RoCE route once installed); side streams stay raw
+    nccl: struct { lib: *const cuda.nccl.Library, comm: cuda.nccl.Comm, collective: ?@import("tp").Collective = null },
 };
 
 /// One rank of the forward: its weights, its sequence's caches, the window's buffers.
@@ -218,25 +218,9 @@ pub const Forward = struct {
         return .{ .glue = &f.m.glue, .index = if (f.m.index) |*x| x else null, .mm = if (f.m.tiled) &f.m.mm else null, .packs = f.m.packs, .prompt = f.ranks[0].b.prefill, .linear = .{ .lane = &f.m.lane }, .copy_rows = f.m.copy_rows };
     }
 
-    /// reduce.sums' gather: every rank's partial of `rows` rows into every rank's gathered buffer, rank order.
-    fn gather(f: *const Forward, rows: usize) !void {
-        const stamp = prof_mod.span(f.prof, f.stream, .all_gather);
-        defer stamp.end();
-        const c = &f.ranks[0].w.config;
-        const bytes = rows * c.hidden * 4;
-        switch (f.exchange) {
-            .local => for (f.ranks) |to| for (f.ranks) |from| {
-                if (to.w.share.rank == from.w.share.rank) continue;
-                const off = from.w.share.rank * bytes;
-                try f.d.check(f.d.api.cuMemcpyDtoDAsync_v2(to.b.gathered + off, from.b.gathered + off, bytes, f.stream.handle), "cuMemcpyDtoDAsync");
-            },
-            .nccl => |n| {
-                const r = f.ranks[0];
-                if (n.group) |g| return g.allGather(f.stream, r.b.gathered + r.w.share.rank * bytes, r.b.gathered, bytes);
-                const count = rows * c.hidden;
-                try n.lib.check(n.lib.api.ncclAllGather(r.b.gathered + r.w.share.rank * bytes, r.b.gathered, count, .f32, n.comm, f.stream.handle), "ncclAllGather");
-            },
-        }
+    /// The layer sums' boundary (cuda_boundary.zig): every rank's fp32 partial into every gathered buffer.
+    pub fn resolve(f: *const Forward, rows: usize) !void {
+        return @import("cuda_boundary.zig").resolve(f, rows);
     }
 
     fn slot(r: Rank, rows: usize) u64 {
@@ -467,7 +451,7 @@ pub const Forward = struct {
             }
             if (f.prof) |p| p.mark(f.stream, if (f.ranks[0].w.layers[j].mixer == .kda) .kda else .mla);
             if (pf) |p| try p.fork(f.stream, j, .f);
-            try f.gather(R);
+            try f.resolve(R);
             if (f.prof) |p| p.mark(f.stream, .gather_a);
             prof_mod.context(f.prof, j, null, .ffn);
             for (f.ranks) |r| {
@@ -478,7 +462,7 @@ pub const Forward = struct {
             }
             if (f.prof) |p| p.mark(f.stream, if (f.ranks[0].w.layers[j].ffn == .dense) .dense else .shared); // MoE: its fill
             if (pf) |p| try p.fork(f.stream, j, .n);
-            try f.gather(R);
+            try f.resolve(R);
             for (f.ranks) |r| try f.post(r, R);
             if (f.taps) |t| try t.at(f.stream, j, f.ranks[0].b.x, 0, R);
             if (f.prof) |p| p.mark(f.stream, .gather_b);
@@ -550,7 +534,7 @@ pub const Forward = struct {
             }
         }
         if (!propose) return;
-        try f.gather(rows);
+        try f.resolve(rows);
         for (f.ranks) |r| {
             const m = r.w.mtp.?;
             const b = r.b;
@@ -558,7 +542,7 @@ pub const Forward = struct {
             try glue.rmsnormBy(f.set(), f.stream, b.mx + tail, D, m.layer.post_norm, b.normed, D, b.xs, c.eps, rows, D);
             try f.ffn(r, m.layer, rows, slot(r, rows));
         }
-        try f.gather(rows);
+        try f.resolve(rows);
         for (f.ranks) |r| {
             const m = r.w.mtp.?;
             const b = r.b;
