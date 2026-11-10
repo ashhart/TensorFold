@@ -79,6 +79,7 @@ fn collective(pair: *[2]c_int, rank: usize, timeout_ms: u64) !Collective {
     if (std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, pair) != 0) return error.SocketPair;
     var c: Collective = undefined;
     c.failed = false;
+    c.release = null;
     c.comm = @ptrFromInt(0x1000);
     c.link = .{ .fd = pair[0] };
     c.timeout_ms = timeout_ms;
