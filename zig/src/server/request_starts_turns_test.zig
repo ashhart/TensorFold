@@ -189,6 +189,14 @@ test "turn starts: dropped reasoning shares the user end but not the reply endpo
 }
 
 test "turn ends: rendered warm and chat requests share the inferred complete user-header cut" {
+    try warmAndChat(false);
+}
+
+test "turn ends: a system message preserves the same warm and foreground cut identity" {
+    try warmAndChat(true);
+}
+
+fn warmAndChat(system_message: bool) !void {
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -206,6 +214,11 @@ test "turn ends: rendered warm and chat requests share the inferred complete use
     defer srv.deinit();
     srv.info.warm_turns = true;
     var messages: std.ArrayList(json.Value) = .empty;
+    if (system_message) {
+        const system = try alloc.alloc(u8, 600);
+        @memset(system, 'S');
+        try messages.append(alloc, try message(alloc, "system", system));
+    }
     try messages.append(alloc, try message(alloc, "user", "First question?"));
     const reply = try message(alloc, "assistant", "Fixed reply.");
     const body = try json.newObject(alloc);
@@ -213,6 +226,7 @@ test "turn ends: rendered warm and chat requests share the inferred complete use
     var cx: errors.Cx = .{ .a = alloc };
     const input = try openai.chatInput(srv, &cx, .{ .object = body });
     const initial = try chat.prepare(srv, &cx, input, Never{});
+    if (system_message) try t.expect(initial.request.shared_prefixes.len > 0);
     defer srv.release(initial.preparing, initial.request);
     try t.expect(std.mem.indexOfScalar(u32, initial.request.chunks, @intCast(initial.request.prompt.len)) != null);
     @import("warm.zig").reply(srv, input, reply, false, null, initial.request.prompt.len);
