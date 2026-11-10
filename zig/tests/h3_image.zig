@@ -17,8 +17,8 @@ const usage =
     \\  picture      the case: canvas, text (the token refiner's rows), noise, and optionally text_tags,
     \\               references and anchors, the reference's step_in, velocity and latent, and its positions,
     \\               timesteps, deltas and rotary_cos / rotary_sin for the exact checks
-    \\  once         the first step alone, teacher-forced; free: the free run alone
-    \\Exit 0: every gate passed; 1: a gate failed; 2: no reference to gate against (inconclusive).
+    \\  once         the first step alone, teacher-forced; free: the free run alone, a picture's generation
+    \\Exit 0: every gate passed (or a free run had none); 1: a gate failed; 2: no reference to gate (inconclusive).
     \\
 ;
 
@@ -278,5 +278,5 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("wrote {s}.latent.f32: [{d}, {d}, {d}] normalised float32\n", .{ args[3], picture.channels, target_grid.rows, target_grid.columns });
     }
     if (gate.failed) std.process.exit(1);
-    if (!gate.gated) std.process.exit(2);
+    if (!gate.gated and mode != .free) std.process.exit(2);
 }

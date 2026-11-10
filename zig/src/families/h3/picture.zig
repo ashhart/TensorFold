@@ -336,3 +336,14 @@ pub fn ulps(a: u16, b: u16) u32 {
 pub fn bf16(v: f32) u16 {
     return @import("bf16_round").bits(v);
 }
+
+/// A text-to-image run's starting target rows: the seed's first draw over the latent [24, rows, columns], patchified.
+pub fn startRows(a: std.mem.Allocator, g: Grid, seed: u64, draw: *const fn (u64, []f32) void) ![]f32 {
+    const n = try geometry.product(&.{ try gridRows(g), row_width });
+    const latent = try a.alloc(f32, n);
+    defer a.free(latent);
+    draw(seed, latent);
+    const rows = try a.alloc(f32, n);
+    try patchify(latent, g, rows);
+    return rows;
+}

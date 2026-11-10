@@ -8,6 +8,27 @@ sampling steps with no guidance, and each step has its own output head in place 
 ([minimax-h3-metal.md](minimax-h3-metal.md)). It is a denoiser beside the engine, not a token family. Nothing in the
 lane engine, the server or another family changes, and a clip's case runs exactly as before.
 
+## Text to image, end to end
+
+Three tools, each on Metal. The prompt and decoder run on any Apple GPU; the transformer needs an M5's tensor units:
+
+```sh
+zig build tf-h3-image-prompt tf-h3-image tf-h3-image-decoder -Dcpu=apple_m1 -Doptimize=ReleaseFast
+zig-out/bin/tf-h3-image-prompt TEXT_ENCODER_DIR MODEL_DIR prompt.txt out/case.safetensors 2048x2048 42
+zig-out/bin/tf-h3-image MODEL_DIR out/case.safetensors out/case free
+zig-out/bin/tf-h3-image-decoder MODEL_DIR out/case.latent.f32 128 128 out/case.png 2048x2048
+```
+
+1. With a size and a seed, `tf-h3-image-prompt` writes a whole text-to-image case:
+   - the prompt's rows;
+   - the canvas, grown to 2048 x 2048 at the size's ratio when smaller, with sides snapped to 32;
+   - the requested size;
+   - the starting rows: the seed's first draw of torch's CPU `randn` over the latent [24, height / 16, width / 16],
+     made natively (`moss_image/noise.zig`) and patchified.
+2. `tf-h3-image ... free` runs the six steps from those rows. It writes the latent, and exits 0 with nothing to gate.
+3. `tf-h3-image-decoder` decodes the latent. Its rows and columns are the canvas over 16. It resizes the picture back
+   to the requested size when that differs from the canvas.
+
 ## What runs here, and what the case brings
 
 Made natively, from the request and the model folder:
@@ -211,13 +232,6 @@ All 24 blocks take 13.4 ms a 16 x 16 tile, so about 1.6 s of GPU time for a 2048
 `zig build test-h3-geometry` covers the decoder's host rules. `zig build compile-h3-image-decoder-host` compiles the
 tool without the Metal compiler.
 
-## Checkpoint
-
-`MiniMaxAI/MiniMax-H3-Image`. `transformer/` is bf16, with the patch projection, time embedder and step heads in
-float32. The text encoder is MiniMax-H3's Qwen3-VL; its 50th layer's rows are the prompt's. The weights are under the
-MiniMax-H3-Image Community License, which excludes the European Union, the United Kingdom, the Republic of Korea and
-the United States of America. Read it before use.
-
 ## Edit encoder
 
 An edit's reference reaches the transformer as clean latent rows made by the VAE's CNN encoder. `tf-h3-image-encoder`
@@ -284,15 +298,21 @@ Its gates, measured on an M3 Ultra:
 
 A 1024 x 1024 reference at the released widths encodes in 0.6 s.
 
+## Checkpoint
+
+`MiniMaxAI/MiniMax-H3-Image`. `transformer/` is bf16, with the patch projection, time embedder and step heads in
+float32. The text encoder is MiniMax-H3's Qwen3-VL; its 50th layer's rows are the prompt's. The weights are under the
+MiniMax-H3-Image Community License, which excludes the European Union, the United Kingdom, the Republic of Korea and
+the United States of America. Read it before use.
+
 ## Not done
 
-- The prompt's rows come from the case. The text encoder (Qwen3-VL, 50 of 64 layers), `condition_proj` and the token
-  refiner are not run here.
-- No image decoder: the latent is decoded by the reference pipeline. That decoder is a 2D ViT (24 layers of 1,024) in
-  256-pixel tiles.
-- No edit encoder: an edit's anchor rows come from the case. That encoder is MiniMax H3's CNN, on one frame.
-- No `/v1/images/generations` or edits route, and no CUDA path.
-- One machine class (M5). Chips without tensor units are refused.
+- **Checked against the release:** nothing yet. The reference cases and the gates above wait for the weights.
+- **Edits end to end:** the encoder makes a reference's rows and the prompt path places its vision rows, but
+  Qwen3-VL's vision tower is not here, so an edit's prompt rows still come from a case. No one tool runs an edit.
+- **Serving:** no `/v1/images/generations` or `/v1/images/edits` route for it, and no CUDA path.
+- **Kernel contract:** the new kernels are gated by each tool's `selftest`, not registered with `tf-kernel-contract`.
+- **Machines:** the transformer runs on an M5 only; chips without tensor units are refused.
 
 ## Host checks
 
