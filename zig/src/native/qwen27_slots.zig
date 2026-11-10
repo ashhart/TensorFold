@@ -35,6 +35,7 @@ pub fn opening(b: *Metal, s: *lanes.Stream, slot: u32) !Fill {
     try recover(b, s);
     b.runner.rope[slot] = try images.layout(b.vision, s);
     const d = b.drafter(slot);
+    const replay: resume_rules.Replay = if (slot == 0) b.standing.replayed(ids, s.decode_spans) else .{}; // before take
     const resumed = if (slot == 0) try takeStanding(b, s, kept_at) else 0; // slot 0's own state: nothing copied
     if (resumed == 0) {
         if (d) |x| try x.reset() else try b.runner.reset(slot);
@@ -58,7 +59,7 @@ pub fn opening(b: *Metal, s: *lanes.Stream, slot: u32) !Fill {
     s.fill_at.store(@intCast(at), .monotonic); // what the restore kept: 0 when it failed
     const encoded = if (b.vision) |v| try images.encode(v, b.runner.model.queue, s, slot) else null;
     if (encoded != null) b.image_fill = s; // the vision rows are this pass's until it closes
-    return .{ .slot = slot, .at = at, .from = at, .images = encoded, .checkpoint = resume_rules.cachePoint(slot == 0 and slotResume(b) and plain(s) and s.max_new > 0 and s.reuse.hook != null and b.checkpoint_hook != null, at, b.chunk, ids.len, s.history_len, s.reuse.marks, s.chunks, s.decode_spans), .rewind = rewindPoint(b, s, slot, at) };
+    return .{ .slot = slot, .at = at, .from = at, .images = encoded, .checkpoint = resume_rules.cachePoint(slot == 0 and slotResume(b) and plain(s) and s.max_new > 0 and s.reuse.hook != null and b.checkpoint_hook != null, at, b.chunk, ids.len, s.history_len, s.reuse.marks, s.chunks, s.decode_spans), .rewind = rewindPoint(b, s, slot, at, replay) };
 }
 
 /// The pass is over (done, failed or cancelled): its images' rows are free for the next image prompt.
@@ -238,7 +239,7 @@ fn resumable(b: *const Metal, s: *const lanes.Stream, kept_at: u32) resume_rules
 fn takeStanding(b: *Metal, s: *const lanes.Stream, kept_at: u32) !u32 {
     const plan = resumable(b, s, kept_at);
     b.standing.take(b.gpa, plan);
-    errdefer b.standing.rewind_at = 0;
+    errdefer b.standing = .{ .wide = b.standing.wide }; // tokens and spans freed by take: the point and reply go too
     // rows [0, rewind_at) and the buffer hold only while slot 0 just extends past it: a restore, reset or move drops it
     switch (plan) {
         .none => return 0,
@@ -272,9 +273,9 @@ fn leave(b: *Metal, s: *const lanes.Stream) void {
     b.standing.leave(b.gpa, .{ .at = at, .prompt_len = @intCast(s.prompt_len), .context_len = @intCast(s.context.items.len), .fill_at = s.fill_at.load(.monotonic), .ended = ended }, s.context.items, s.decode_spans);
 }
 
-/// Where slot 0's pass keeps its rewind point: its rendered history's end, which a next turn shares (0: none).
-fn rewindPoint(b: *const Metal, s: *const lanes.Stream, slot: u32, at: usize) u32 {
-    if (slot != 0 or b.rewind == null or !slotResume(b) or !plain(s)) return 0;
+/// Where slot 0's pass from `at` keeps its rewind point: its history's end (0: none, or it resumed in a `replay`).
+fn rewindPoint(b: *const Metal, s: *const lanes.Stream, slot: u32, at: usize, replay: resume_rules.Replay) u32 {
+    if (slot != 0 or b.rewind == null or !slotResume(b) or !plain(s) or replay.holds(at)) return 0;
     return if (s.history_len > at and s.history_len < s.prompt().len) s.history_len else 0;
 }
 
