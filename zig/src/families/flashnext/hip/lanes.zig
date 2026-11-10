@@ -19,6 +19,8 @@ const draw = serve.draw;
 const ring = 1024;
 /// Drafts the head holds for a stream at most.
 pub const max_depth = cache.max_window - 1;
+/// A shared round's copy window and a lone stream's first: the pending row and three copies; lone runs grow past it.
+const shared_copy_rows = 4;
 
 pub const Fill = struct {
     at: usize,
@@ -208,6 +210,7 @@ pub const Fx = struct {
         const drafting = f.e.weights.model.mtp != null and f.drafts > 0;
         return .{
             .exact_width = cache.max_window,
+            .first_copy_rows = shared_copy_rows,
             .gpu_tokens = false,
             .mtp = drafting,
             .speculate = drafting,
