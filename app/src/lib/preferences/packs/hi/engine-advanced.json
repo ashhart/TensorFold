@@ -26,7 +26,7 @@
  "Strength": "तीव्रता",
  "File: {value0}": "फ़ाइल: {value0}",
  "In force in the loaded model.": "लोड किए गए मॉडल में लागू है।",
- "One is the strength the file was derived at. A strength past a few can leave the model without an answer.": "1 वह तीव्रता है जिस पर फ़ाइल बनी थी। कई गुना तीव्रता मॉडल को उत्तरहीन कर सकती है।",
+ "Strength scales the added direction. Large values can degrade replies.": "तीव्रता जोड़ी गई दिशा का आकार तय करती है। बड़े मान जवाबों की गुणवत्ता घटा सकते हैं।",
  "The strength must be above 0 and at most {value0}.": "तीव्रता 0 से अधिक और {value0} तक या उससे कम होनी चाहिए।",
  "This build's TensorFold engine does not offer control vectors yet, so the engine in use cannot take one.": "इस बिल्ड का TensorFold इंजन अभी नियंत्रण वेक्टर नहीं देता, इसलिए मौजूदा इंजन इसे नहीं लेगा।",
  "With a control vector in force, replies are steered toward the style or topic the file encodes. Only add-style vectors are supported; the engine refuses project vectors and files it cannot validate.": "नियंत्रण वेक्टर लागू होने पर जवाब उस शैली या विषय की ओर निर्देशित होते हैं जिसे फ़ाइल कूटबद्ध करती है। केवल जोड़ने वाले (add) वेक्टर समर्थित हैं; इंजन प्रोजेक्ट वेक्टर और उन फ़ाइलों को अस्वीकार करता है जिन्हें वह सत्यापित नहीं कर सकता।"

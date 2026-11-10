@@ -26,7 +26,7 @@
  "Strength": "Cường độ",
  "File: {value0}": "Tệp: {value0}",
  "In force in the loaded model.": "Đang có hiệu lực trong mô hình đã tải.",
- "One is the strength the file was derived at. A strength past a few can leave the model without an answer.": "1 là cường độ mà tệp đó được tạo ra. Cường độ gấp nhiều lần có thể khiến mô hình không còn trả lời.",
+ "Strength scales the added direction. Large values can degrade replies.": "Cường độ thay đổi độ lớn của hướng được cộng vào. Giá trị lớn có thể làm giảm chất lượng câu trả lời.",
  "The strength must be above 0 and at most {value0}.": "Cường độ phải lớn hơn 0 và không quá {value0}.",
  "This build's TensorFold engine does not offer control vectors yet, so the engine in use cannot take one.": "Bản dựng này của động cơ TensorFold chưa có véc-tơ điều khiển, nên động cơ đang dùng không nhận được.",
  "With a control vector in force, replies are steered toward the style or topic the file encodes. Only add-style vectors are supported; the engine refuses project vectors and files it cannot validate.": "Khi véc-tơ điều khiển có hiệu lực, câu trả lời được dẫn hướng theo phong cách hoặc chủ đề mà tệp mã hóa. Chỉ hỗ trợ véc-tơ kiểu cộng (add); động cơ từ chối véc-tơ project và các tệp mà nó không thể xác thực."

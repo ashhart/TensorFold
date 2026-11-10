@@ -26,7 +26,7 @@
  "Strength": "Сила",
  "File: {value0}": "Файл: {value0}",
  "In force in the loaded model.": "Действует в загруженной модели.",
- "One is the strength the file was derived at. A strength past a few can leave the model without an answer.": "Единица — это сила, при которой был получен файл. Сила в несколько раз может оставить модель без ответа.",
+ "Strength scales the added direction. Large values can degrade replies.": "Сила масштабирует добавляемое направление. Большие значения могут ухудшить ответы.",
  "The strength must be above 0 and at most {value0}.": "Сила должна быть больше 0 и не больше {value0}.",
  "This build's TensorFold engine does not offer control vectors yet, so the engine in use cannot take one.": "В этой сборке движок TensorFold ещё не умеет вектор управления, поэтому текущий движок его не примет.",
  "With a control vector in force, replies are steered toward the style or topic the file encodes. Only add-style vectors are supported; the engine refuses project vectors and files it cannot validate.": "Пока действует вектор управления, ответы направляются к стилю или теме, закодированным в файле. Поддерживаются только аддитивные (add) векторы; движок отклоняет векторы project и файлы, которые не может проверить."

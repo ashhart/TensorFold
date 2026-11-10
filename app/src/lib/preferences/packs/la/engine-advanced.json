@@ -26,7 +26,7 @@
  "Strength": "Fortitudo",
  "File: {value0}": "Tabula: {value0}",
  "In force in the loaded model.": "Valet in exemplaro onerato.",
- "One is the strength the file was derived at. A strength past a few can leave the model without an answer.": "Unum est fortitudo ex qua tabula derivata est. Fortitudo multis maior exemplar sine responsu relinquere potest.",
+ "Strength scales the added direction. Large values can degrade replies.": "Fortitudo directionem additam multiplicat. Valores magni responsa deteriorare possunt.",
  "The strength must be above 0 and at most {value0}.": "Fortitudo maior quam 0 et non maior quam {value0} esse debet.",
  "This build's TensorFold engine does not offer control vectors yet, so the engine in use cannot take one.": "Hic motor TensorFold nondum vectorem rectum praebet, ideo motor praesens eum non accipiet.",
  "With a control vector in force, replies are steered toward the style or topic the file encodes. Only add-style vectors are supported; the engine refuses project vectors and files it cannot validate.": "Cum vector recto valente, responsa ad stilum vel argumentum quod tabula codificat diriguntur. Soli vectores additivi (add) sustinentur; motor vectores project et tabulas quas validare non potest recusat."

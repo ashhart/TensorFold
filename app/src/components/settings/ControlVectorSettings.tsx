@@ -7,11 +7,7 @@ import { Section } from './shared'
 import { CONTROL_VECTOR_ALPHA_MAX } from '../../../shared/control-vector'
 import type { EngineControlVectorSnapshot } from '../../lib/types'
 
-// The control vector the local engine applies: a file on this Mac, a strength, and
-// whether it is in force. It is opt-in: nothing changes until the operator turns it
-// on, and the engine says at startup which file it loaded, its SHA-256, and that
-// replies are steered. Only add-style vectors are supported; the engine, not the app,
-// decides whether a file is valid and refuses what it cannot take.
+// Opt-in file and strength; the engine validates add-only vectors and reports their identity at startup.
 
 const fileName = (file: string | null): string => {
   if (!file) return ''
@@ -109,7 +105,7 @@ export function ControlVectorSettings() {
               />
             </div>
             <p className="flex-1 text-[12px] leading-snug text-ink-3">
-              {tx('One is the strength the file was derived at. A strength past a few can leave the model without an answer.')}
+              {tx('Strength scales the added direction. Large values can degrade replies.')}
             </p>
           </div>
         </div>

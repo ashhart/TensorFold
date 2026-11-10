@@ -174,7 +174,7 @@ export function createMockEngineApi(): Pick<TensorFoldStudioApi,
     },
     engineLearning: async () => learningSnapshot(),
     engineControlVector: async () => ({ ...controlVector }),
-    engineChooseControlVector: async () => { controlVector = { ...controlVector, file: '/Volumes/Example/Controls/refusal-glp-49.gguf' }; syncControlVector(); return { ...controlVector } },
+    engineChooseControlVector: async () => { controlVector = { ...controlVector, file: '/Volumes/Example/Controls/style-vector.gguf' }; syncControlVector(); return { ...controlVector } },
     engineSetControlVector: async (input) => {
       const { enabled, alpha } = mergeControlVector(controlVector, { enabled: input?.enabled, alpha: input?.alpha })
       controlVector = { ...controlVector, enabled: enabled && controlVector.file != null, alpha }

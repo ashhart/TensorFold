@@ -26,7 +26,7 @@
  "Strength": "Intensidad",
  "File: {value0}": "Archivo: {value0}",
  "In force in the loaded model.": "En vigor en el modelo cargado.",
- "One is the strength the file was derived at. A strength past a few can leave the model without an answer.": "Uno es la intensidad con la que se obtuvo el archivo. Una intensidad varias veces mayor puede dejar al modelo sin respuesta.",
+ "Strength scales the added direction. Large values can degrade replies.": "La intensidad escala la dirección añadida. Los valores altos pueden degradar las respuestas.",
  "The strength must be above 0 and at most {value0}.": "La intensidad debe ser mayor que 0 y como máximo {value0}.",
  "This build's TensorFold engine does not offer control vectors yet, so the engine in use cannot take one.": "El motor de TensorFold de esta versión todavía no ofrece vectores de control, así que el motor en uso no puede aceptar uno.",
  "With a control vector in force, replies are steered toward the style or topic the file encodes. Only add-style vectors are supported; the engine refuses project vectors and files it cannot validate.": "Con un vector de control en vigor, las respuestas se orientan hacia el estilo o el tema que codifica el archivo. Solo se admiten vectores de tipo aditivo; el motor rechaza los vectores de proyección y los archivos que no puede validar."

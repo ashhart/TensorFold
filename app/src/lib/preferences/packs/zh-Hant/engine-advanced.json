@@ -26,7 +26,7 @@
  "Strength": "強度",
  "File: {value0}": "檔案：{value0}",
  "In force in the loaded model.": "已在載入的模型中生效。",
- "One is the strength the file was derived at. A strength past a few can leave the model without an answer.": "1 是該檔案推導時的強度。強度提高到幾倍後，模型可能不再給出回答。",
+ "Strength scales the added direction. Large values can degrade replies.": "強度控制所加方向的幅度。較大的值可能降低回答品質。",
  "The strength must be above 0 and at most {value0}.": "強度必須大於 0 且不超過 {value0}。",
  "This build's TensorFold engine does not offer control vectors yet, so the engine in use cannot take one.": "此版本的 TensorFold 引擎尚未支援控制向量，因此目前使用的引擎無法接收它。",
  "With a control vector in force, replies are steered toward the style or topic the file encodes. Only add-style vectors are supported; the engine refuses project vectors and files it cannot validate.": "控制向量生效時，回答會被引導向檔案所編碼的風格或主題。僅支援加法（add）類型的向量；引擎會拒絕 project 類型的向量以及無法驗證的檔案。"
