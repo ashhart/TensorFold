@@ -9,6 +9,7 @@ const lfm2_controls = @import("metal_lfm2_controls.zig");
 const lfm2_norm_tap = @import("metal_lfm2_norm_tap.zig");
 const lfm2_dspark = @import("metal_lfm2_dspark.zig");
 const lfm2_bf16 = @import("metal_lfm2_bf16.zig");
+const lfm2_glu = @import("metal_lfm2_glu.zig");
 const lfm2_attn = @import("metal_lfm2_attn.zig");
 const lfm2_kv = @import("metal_lfm2_kv.zig");
 const lfm2_confidence = @import("metal_lfm2_confidence.zig");
@@ -30,6 +31,7 @@ pub const Suite = struct {
     drafters: std.ArrayList(*lfm2_dspark.Probe) = .empty,
     blocks: std.ArrayList(*lfm2_attn.Probe) = .empty,
     bf16s: std.ArrayList(*lfm2_bf16.Probe) = .empty,
+    glus: std.ArrayList(*lfm2_glu.Probe) = .empty,
     kvs: std.ArrayList(*lfm2_kv.Probe) = .empty,
     confidences: std.ArrayList(*lfm2_confidence.Probe) = .empty,
 
@@ -69,9 +71,9 @@ pub const Suite = struct {
             if (!wanted(only, if (m == .none) lfm2_tap.name else m.name())) continue;
             try s.add(lfm2_tap.Probe, &s.taps, .{m});
         }
-        for (std.enums.values(lfm2_norm_tap.Which)) |w| for ([_]bool{ false, true }) |control| {
-            if (!wanted(only, if (control) lfm2_norm_tap.controlName(w) else lfm2_norm_tap.spec(w).name)) continue;
-            try s.add(lfm2_norm_tap.Probe, &s.norm_taps, .{ w, control });
+        for (std.enums.values(lfm2_norm_tap.Which)) |w| for (lfm2_norm_tap.faults(w)) |f| {
+            if (!wanted(only, if (f == .none) lfm2_norm_tap.spec(w).name else lfm2_norm_tap.controlName(w, f))) continue;
+            try s.add(lfm2_norm_tap.Probe, &s.norm_taps, .{ w, f });
         };
     }
 
@@ -114,6 +116,10 @@ pub const Suite = struct {
             if (!wanted(only, if (m == .none) lfm2_kv.name else m.name())) continue;
             try s.add(lfm2_kv.Probe, &s.kvs, .{m});
         }
+        for ([_]lfm2_controls.Mutation{ .none, .bf16_glu_short_k, .bf16_glu_last_row, .bf16_glu_swapped }) |m| {
+            if (!wanted(only, if (m == .none) lfm2_glu.name else m.name())) continue;
+            try s.add(lfm2_glu.Probe, &s.glus, .{m});
+        }
         for ([_]lfm2_controls.Mutation{ .none, .confidence_no_w1 }) |m| {
             if (!wanted(only, if (m == .none) lfm2_confidence.name else m.name())) continue;
             try s.add(lfm2_confidence.Probe, &s.confidences, .{m});
@@ -122,7 +128,7 @@ pub const Suite = struct {
 
     pub fn deinit(s: *Suite) void {
         if (s.prompt) |*p| p.deinit();
-        inline for (.{ "argmax", "streams", "taps", "norm_taps", "drafters", "blocks", "bf16s", "kvs", "confidences" }) |field| {
+        inline for (.{ "argmax", "streams", "taps", "norm_taps", "drafters", "blocks", "bf16s", "glus", "kvs", "confidences" }) |field| {
             const list = &@field(s, field);
             for (list.items) |p| {
                 p.deinit();

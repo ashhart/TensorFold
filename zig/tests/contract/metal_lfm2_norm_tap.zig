@@ -1,4 +1,4 @@
-//! Norm/tap capture to per-row destinations replaces norm plus copies, bit for bit.
+//! Norm/tap capture to per-row destinations and the sorted combine with its norm replace their pairs, bit for bit.
 const std = @import("std");
 const mtl = @import("metal");
 const contract = @import("contract");
@@ -28,7 +28,15 @@ const shapes = [_]c.Shape{
     .{ .rows = 32, .n = hidden, .k = hidden },
     .{ .rows = 2048, .n = hidden, .k = hidden },
 };
-pub const Which = enum { norm, norm_first, combine };
+pub const Which = enum { norm, norm_first, combine, sorted, sorted_tap };
+fn sortedKind(w: Which) bool {
+    return w == .sorted or w == .sorted_tap;
+}
+fn layoutCount(w: Which) usize {
+    return if (w == .sorted) 1 else layouts.len;
+}
+/// Four picks whose fp32 sum depends on their order: 2^26 absorbs the 1, then cancels, leaving the last pick.
+const ordered = [_]f32{ 134217728, 1, -67108864, 0.125 };
 fn depth(_: c.Shape) usize {
     return 14;
 }
@@ -38,6 +46,8 @@ pub fn spec(w: Which) c.Spec {
             .norm => "metal lfm2 norm tap lfm2_norm_tap",
             .norm_first => "metal lfm2 norm tap first lfm2_norm_tap",
             .combine => "metal lfm2 combine norm tap lfm2_combine_norm_tap",
+            .sorted => "metal lfm2 sorted combine norm lfm2_combine_sorted_norm",
+            .sorted_tap => "metal lfm2 sorted combine norm tap lfm2_combine_sorted_norm_tap",
         },
         .accum = .f32,
         .depth = depth,
@@ -45,32 +55,75 @@ pub fn spec(w: Which) c.Spec {
         .mids = 1,
         .out = .bf16,
         .served = &shapes,
-        .replaces = "LFM2 norm followed by tap copy",
+        .replaces = switch (w) {
+            .sorted => "LFM2 sorted combine followed by norm",
+            .sorted_tap => "LFM2 sorted combine, norm and tap copy",
+            else => "LFM2 norm followed by tap copy",
+        },
         .nan = .{ .stated = "all output bytes equal the original norm and copy, including NaNs" },
         .sums = .{ .bf16 = 0, .why = "a bf16 output follows the sum of squares as ss^-1/2: a bf16 sum's error is a few output ulps" },
     };
 }
-pub fn controlName(w: Which) []const u8 {
+/// One planted fault in the fused kernel's source: the tap store, or the sorted state's pos, pick order or h write.
+pub const Fault = enum { none, wrong_column, pos_ignored, picks_reversed, h_unwritten };
+pub fn faults(w: Which) []const Fault {
     return switch (w) {
-        .norm => "control: metal lfm2 norm tap wrong column",
-        .norm_first => "control: metal lfm2 norm tap first wrong column",
-        .combine => "control: metal lfm2 combine norm tap wrong column",
+        .norm, .norm_first, .combine => &.{ .none, .wrong_column },
+        .sorted => &.{ .none, .pos_ignored, .picks_reversed, .h_unwritten },
+        .sorted_tap => &.{ .none, .wrong_column, .pos_ignored },
     };
+}
+pub fn controlName(w: Which, f: Fault) []const u8 {
+    return switch (f) {
+        .none => unreachable,
+        .wrong_column => switch (w) {
+            .norm => "control: metal lfm2 norm tap wrong column",
+            .norm_first => "control: metal lfm2 norm tap first wrong column",
+            .combine => "control: metal lfm2 combine norm tap wrong column",
+            .sorted, .sorted_tap => "control: metal lfm2 sorted combine norm tap wrong column",
+        },
+        .pos_ignored => if (w == .sorted) "control: metal lfm2 sorted combine norm, y is read in slot order" else "control: metal lfm2 sorted combine norm tap, y is read in slot order",
+        .picks_reversed => "control: metal lfm2 sorted combine norm, picks are summed in reverse order",
+        .h_unwritten => "control: metal lfm2 sorted combine norm, the residual update is not stored",
+    };
+}
+const Edit = struct { from: []const u8, to: []const u8 };
+fn edit(f: Fault) Edit {
+    return switch (f) {
+        .none => unreachable,
+        .wrong_column => .{ .from = "size_t(ctz(m)) * D", .to = "size_t(ctz(m) ^ uint(mask > 1)) * D" },
+        .pos_ignored => .{ .from = "y[size_t(pos[slot]) * D + 4 * t + j]", .to = "y[slot * D + 4 * t + j]" },
+        .picks_reversed => .{
+            .from = "const size_t slot = size_t(row) * TOPK + k;\n      acc += float(static_cast<bfloat>(float(y[size_t(pos[slot])",
+            .to = "const size_t slot = size_t(row) * TOPK + (TOPK - 1 - k);\n      acc += float(static_cast<bfloat>(float(y[size_t(pos[slot])",
+        },
+        .h_unwritten => .{ .from = "    h[base + j] = hv;\n    saved[j] = hv;\n  }\n  return saved;", .to = "    saved[j] = hv;\n  }\n  return saved;" },
+    };
+}
+/// lfm2.metal's text with the fault's one edit, which must change it or the control proves nothing.
+fn faulted(a: std.mem.Allocator, f: Fault) ![]u8 {
+    const e = edit(f);
+    if (std.mem.indexOf(u8, sources.lfm2, e.from) == null) return error.ControlEditMissing;
+    return std.mem.replaceOwned(u8, a, sources.lfm2, e.from, e.to);
 }
 pub const Probe = struct {
     a: std.mem.Allocator,
     rig: rig_.Rig,
     which: Which,
-    control: bool,
+    fault: Fault,
     fused: mtl.Pipeline,
     old: mtl.Pipeline,
     tap: mtl.Pipeline,
+    sort: ?mtl.Pipeline = null,
     r: ?rows.Rows = null,
     initial: []u16 = &.{},
     prior: []u16 = &.{},
     residual: rig_.Ref = undefined,
     weights: rig_.Ref = undefined,
     router: rig_.Ref = undefined,
+    /// The sorted pair's slot-to-row table, and its separate combine output.
+    pos: rig_.Ref = undefined,
+    br: rig_.Ref = undefined,
     /// Per layout the normalized output, the updated state and the destination; `tab` holds each row's address.
     x: [layouts.len]rig_.Ref = undefined,
     hs: [layouts.len]rig_.Ref = undefined,
@@ -81,16 +134,22 @@ pub const Probe = struct {
     bdst: rig_.Ref = undefined,
     baseline: std.ArrayList(u8) = .empty,
 
-    pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, w: Which, control: bool) !Probe {
-        const needle = "size_t(ctz(m)) * D";
-        if (control and std.mem.indexOf(u8, sources.lfm2, needle) == null) return error.ControlEditMissing;
-        const text = if (control) try std.mem.replaceOwned(u8, a, sources.lfm2, needle, "size_t(ctz(m) ^ uint(mask > 1)) * D") else sources.lfm2;
-        defer if (control) a.free(text);
-        const fused = try rig_.pipeline(device, text, if (w == .combine) "lfm2_combine_norm_tap" else "lfm2_norm_tap");
+    pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, w: Which, fault: Fault) !Probe {
+        const text = if (fault != .none) try faulted(a, fault) else sources.lfm2;
+        defer if (fault != .none) a.free(text);
+        const fused = try rig_.pipeline(device, text, switch (w) {
+            .norm, .norm_first => "lfm2_norm_tap",
+            .combine => "lfm2_combine_norm_tap",
+            .sorted => "lfm2_combine_sorted_norm",
+            .sorted_tap => "lfm2_combine_sorted_norm_tap",
+        });
         errdefer fused.deinit();
         const old = try rig_.pipeline(device, sources.lfm2, if (w == .combine) "lfm2_combine_norm" else "lfm2_norm");
         errdefer old.deinit();
-        return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .which = w, .control = control, .fused = fused, .old = old, .tap = try rig_.pipeline(device, sources.lfm2, "lfm2_tap") };
+        const tap = try rig_.pipeline(device, sources.lfm2, "lfm2_tap");
+        errdefer tap.deinit();
+        const sort = if (sortedKind(w)) try rig_.pipeline(device, sources.lfm2, "lfm2_combine_sorted") else null;
+        return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .which = w, .fault = fault, .fused = fused, .old = old, .tap = tap, .sort = sort };
     }
     fn drop(p: *Probe) void {
         if (p.r) |r| r.deinit();
@@ -108,12 +167,17 @@ pub const Probe = struct {
         p.fused.deinit();
         p.old.deinit();
         p.tap.deinit();
+        if (p.sort) |s| s.deinit();
     }
     const vt = g.hooks(Probe);
     pub fn kernel(p: *Probe) g.Kernel {
         var s = spec(p.which);
-        if (p.control) s.name = controlName(p.which);
-        return .{ .ctx = p, .vt = &vt, .spec = s, .control = if (p.control) .shapes else null };
+        if (p.fault != .none) s.name = controlName(p.which, p.fault);
+        return .{ .ctx = p, .vt = &vt, .spec = s, .control = if (p.fault != .none) .shapes else null };
+    }
+    /// Where the combine reads a row's k-th pick: its slot's own row, or the sorted row `k * rows + row`.
+    fn slot(p: *const Probe, row: usize, k: usize) usize {
+        return if (sortedKind(p.which)) k * p.r.?.shape.rows + row else row * topk + k;
     }
     pub fn prepare(p: *Probe, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
         p.drop();
@@ -125,7 +189,8 @@ pub const Probe = struct {
         const n = r.outputs();
         p.prior = try p.a.alloc(u16, n * max_cols);
         @memset(p.prior, 0x3f80);
-        const res = try p.a.alloc(u16, n * if (p.which == .combine) @as(usize, topk) else 1);
+        const combine = p.which == .combine or sortedKind(p.which);
+        const res = try p.a.alloc(u16, n * if (combine) @as(usize, topk) else 1);
         defer p.a.free(res);
         @memset(res, 0);
         const rw = try p.a.alloc(u16, shape.rows * topk);
@@ -133,13 +198,13 @@ pub const Probe = struct {
         @memset(rw, 0);
         // Normal cases exercise residual and expert combine; stress leaves h unchanged so Rows can simulate its sums.
         if (fill != .stress) {
-            const expert = [_]f32{ 0.125, -0.0625, 0.03125, 0.015625 };
-            const combined: f32 = 0.046875;
+            const expert = if (sortedKind(p.which)) ordered else [_]f32{ 0.125, -0.0625, 0.03125, 0.015625 };
+            const combined: f32 = if (sortedKind(p.which)) 0.125 else 0.046875;
             for (0..n) |i| {
-                if (p.which != .combine) {
+                if (!combine) {
                     res[i] = c.toBf16(0.125);
                 } else for (expert, 0..) |v, k| {
-                    res[(i / hidden * topk + k) * hidden + i % hidden] = c.toBf16(v);
+                    res[p.slot(i / hidden, k) * hidden + i % hidden] = c.toBf16(v);
                 }
                 r.x[i] = if (p.which == .norm_first) p.initial[i] else c.toBf16(@as(f32, @floatCast(c.fromBf16(p.initial[i]))) + if (p.which == .norm) @as(f32, 0.125) else combined);
             }
@@ -151,15 +216,24 @@ pub const Probe = struct {
             // Exercise non-finites in the other operands, not only the hidden row.
             r.w[1] = 0x7fc0;
             if (shape.rows > 4) {
-                res[4 * hidden * if (p.which == .combine) @as(usize, topk) else 1] = 0x7f80;
-                if (p.which == .combine) rw[4 * topk + 1] = 0xff80;
+                res[if (combine) p.slot(4, 0) * hidden else 4 * hidden] = 0x7f80;
+                if (combine) rw[4 * topk + 1] = 0xff80;
             }
         }
         p.residual = try p.rig.input(std.mem.sliceAsBytes(res));
         p.weights = try p.rig.input(std.mem.sliceAsBytes(r.w));
         p.router = try p.rig.input(std.mem.sliceAsBytes(rw));
+        if (sortedKind(p.which)) {
+            const table = try p.a.alloc(u32, shape.rows * topk);
+            defer p.a.free(table);
+            for (0..shape.rows) |row| for (0..topk) |k| {
+                table[row * topk + k] = @intCast(p.slot(row, k));
+            };
+            p.pos = try p.rig.input(std.mem.sliceAsBytes(table));
+        }
+        p.br = try p.rig.scratch(n * 2);
         // x of the first layout must be first: gate 4 reads its normalized outputs for the sum test.
-        for (layouts, 0..) |l, i| {
+        for (layouts[0..layoutCount(p.which)], 0..) |l, i| {
             p.x[i] = try p.rig.output(n * 2);
             p.hs[i] = try p.rig.output(n * 2);
             p.dst[i] = try p.rig.output(n * l.dst_cols * 2);
@@ -173,41 +247,52 @@ pub const Probe = struct {
     pub fn count(p: *Probe) usize {
         return p.r.?.outputs();
     }
-    /// One layout through the fused kernel, or through the original norm and the copy kernel.
+    /// One layout through the fused kernel, or through the original combine, norm and copy kernels.
     fn launch(p: *Probe, li: usize, fused: bool) !void {
         const n = p.count();
         const l = layouts[li];
         const x = if (fused) p.x[li] else p.bx;
         const dst = if (fused) p.dst[li] else p.bdst;
         const h = if (fused) p.hs[li] else p.bh;
+        const tapped = p.which != .sorted;
         @memcpy(p.rig.bytes(h, n * 2), std.mem.sliceAsBytes(p.initial));
         @memcpy(p.rig.bytes(dst, n * l.dst_cols * 2), std.mem.sliceAsBytes(p.prior[0 .. n * l.dst_cols]));
         const table = std.mem.bytesAsSlice(u64, p.rig.bytes(p.tab, p.r.?.shape.rows * 8));
         for (table, 0..) |*at, row| at.* = if (dark(row)) 0 else dst.buf.gpuAddress() + dst.off + row * l.dst_cols * hidden * 2;
         const pass = p.rig.begin();
         const e = pass.e;
+        if (sortedKind(p.which) and !fused) {
+            e.setPipeline(p.sort.?);
+            e.setBuffer(p.residual.buf, p.residual.off, 0);
+            e.setBuffer(p.router.buf, p.router.off, 1);
+            e.setBuffer(p.br.buf, p.br.off, 2);
+            e.setBuffer(p.pos.buf, p.pos.off, 3);
+            e.dispatchThreads(mtl.Size.of(hidden, p.r.?.shape.rows, 1), mtl.Size.of(256, 1, 1));
+        }
         e.setPipeline(if (fused) p.fused else p.old);
-        if (p.which != .combine) {
-            e.setBuffer(h.buf, h.off, 0);
-            e.setBuffer(p.residual.buf, p.residual.off, 1);
-            e.setBuffer(p.weights.buf, p.weights.off, 2);
-            e.setValue(p.r.?.eps, 3);
-            e.setValue(@as(u32, @intFromBool(p.which != .norm_first)), 4);
-        } else {
+        if (p.which == .combine or (sortedKind(p.which) and fused)) {
             e.setBuffer(p.residual.buf, p.residual.off, 0);
             e.setBuffer(p.router.buf, p.router.off, 1);
             e.setBuffer(h.buf, h.off, 2);
             e.setBuffer(p.weights.buf, p.weights.off, 3);
             e.setValue(p.r.?.eps, 4);
+            if (sortedKind(p.which)) e.setBuffer(p.pos.buf, p.pos.off, 8);
+        } else {
+            const r = if (sortedKind(p.which)) p.br else p.residual;
+            e.setBuffer(h.buf, h.off, 0);
+            e.setBuffer(r.buf, r.off, 1);
+            e.setBuffer(p.weights.buf, p.weights.off, 2);
+            e.setValue(p.r.?.eps, 3);
+            e.setValue(@as(u32, @intFromBool(p.which != .norm_first)), 4);
         }
         e.setBuffer(x.buf, x.off, 5);
-        if (fused) {
+        if (fused and tapped) {
             e.useResource(dst.buf, mtl.ResourceUsage.read | mtl.ResourceUsage.write);
             e.setBuffer(p.tab.buf, p.tab.off, 6);
             e.setValue(l.mask, 7);
         }
         e.dispatchGroups(mtl.Size.of(p.r.?.shape.rows, 1, 1), mtl.Size.of(hidden / 4, 1, 1));
-        if (!fused) for (0..l.dst_cols) |col| {
+        if (!fused and tapped) for (0..l.dst_cols) |col| {
             if (l.mask >> @intCast(col) & 1 == 0) continue;
             e.setPipeline(p.tap);
             e.setBuffer(h.buf, h.off, 0);
@@ -218,14 +303,13 @@ pub const Probe = struct {
         try p.rig.finish(pass);
     }
     pub fn run(p: *Probe) !void {
-        for (0..layouts.len) |i| try p.launch(i, true);
+        for (0..layoutCount(p.which)) |i| try p.launch(i, true);
     }
-    /// The original norm, which updates its own copy of the state, then the copy kernel into each requested column.
+    /// The original kernels: the norm updates its own copy of the state, which the copy kernel reads into each column.
     pub fn replaced(p: *Probe) ![]const u8 {
         p.baseline.clearRetainingCapacity();
         const n = p.count();
-        for (layouts, 0..) |l, i| {
-            // The tap copy reads the original norm's updated state: the buffer the old kernel wrote.
+        for (layouts[0..layoutCount(p.which)], 0..) |l, i| {
             try p.launch(i, false);
             const width = l.dst_cols * hidden;
             const dst = p.rig.bytes(p.bdst, n * l.dst_cols * 2);

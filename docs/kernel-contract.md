@@ -249,6 +249,12 @@ stream's rows in one dispatch, each bit-equal to the per-stream kernels it repla
 to the highest id, a nonfinite logit not flagged, and every stream reading or writing the first stream's state or cache.
 The DSpark drafter's tap copy, Markov scan and pick, draft ids, block attention and confidence logit are there too, with nine more controls.
 Its bf16 linears (few rows, 64x64 tiles) and the Markov scan over a bf16 W2 have four and two more.
+The sorted-expert combine with its norm (`lfm2_combine_sorted_norm`) and with the tap store (`lfm2_combine_sorted_norm_tap`)
+are bit-equal to `lfm2_combine_sorted`, `lfm2_norm` and the tap copy, on four picks whose fp32 sum depends on their order
+and on y rows stored by expert; their five controls read y in slot order, sum the picks in reverse, skip the residual
+store or write a wrong tap column. The fused BF16 gate/up SwiGLU (`lfm2_bf16_glu_rows`) is bit-equal to two
+`lfm2_bf16_rows` projections and `lfm2_swiglu` at 1 to 16 rows, with three controls: a skipped k step, an uncomputed
+last row and the gate and up projections swapped. Its gate 4 inputs are exact integer dots, bounded through SwiGLU.
 The Markov contracts isolate NaN, +Inf and -Inf in separate score rows for both weight formats. A direct pick
 contract distinguishes a real nonfinite partial from the empty `-Inf/UINT_MAX` sentinel; finite partial scans,
 empty groups and cross-lane ties retain the lowest token exactly. Source controls drop score flags, restore

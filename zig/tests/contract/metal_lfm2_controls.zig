@@ -24,6 +24,9 @@ pub const Mutation = enum {
     bf16_rows_last_row,
     bf16_tile_untransposed,
     bf16_tile_last_column,
+    bf16_glu_short_k,
+    bf16_glu_last_row,
+    bf16_glu_swapped,
     context_kv_first_row,
     context_kv_theta,
 
@@ -49,6 +52,9 @@ pub const Mutation = enum {
             .bf16_rows_last_row => "control: metal lfm2 bf16 rows, a group's last row is not computed",
             .bf16_tile_untransposed => "control: metal lfm2 bf16 tile, W's tile is read untransposed",
             .bf16_tile_last_column => "control: metal lfm2 bf16 tile, the last column is not written",
+            .bf16_glu_short_k => "control: metal lfm2 bf16 glu rows, a lane skips every second step of k",
+            .bf16_glu_last_row => "control: metal lfm2 bf16 glu rows, a group's last row is not computed",
+            .bf16_glu_swapped => "control: metal lfm2 bf16 glu rows, the up projection gates and the gate projection scales",
             .context_kv_first_row => "control: metal lfm2 dspark context kv, every row overwrites the first position",
             .context_kv_theta => "control: metal lfm2 dspark context kv, RoPE uses the wrong frequency",
         };
@@ -86,6 +92,12 @@ pub const Mutation = enum {
             .bf16_rows_last_row => .{ .from = "if (r >= rows) break;", .to = "if (r + 1 >= rows) break;" },
             .bf16_tile_untransposed => .{ .from = "32, ulong2(0, 0), true);", .to = "32, ulong2(0, 0), false);" },
             .bf16_tile_last_column => .{ .from = "if (row < p.rows && col < p.n) y[", .to = "if (row < p.rows && col + 1 < p.n) y[" },
+            .bf16_glu_short_k => .{ .from = "i += 256) {\n    float wv[8], uv[8];", .to = "i += 512) {\n    float wv[8], uv[8];" },
+            .bf16_glu_last_row => .{
+                .from = "if (r >= rows) break;\n      float xv[8];\n      lfm2_unpack8(*(const device uint4*)(xr + size_t(r) * p.k + i), xv);\n      for (int j = 0; j < 8; ++j) {\n        gate[r]",
+                .to = "if (r + 1 >= rows) break;\n      float xv[8];\n      lfm2_unpack8(*(const device uint4*)(xr + size_t(r) * p.k + i), xv);\n      for (int j = 0; j < 8; ++j) {\n        gate[r]",
+            },
+            .bf16_glu_swapped => .{ .from = "lfm2_swiglu_value(static_cast<bfloat>(g), static_cast<bfloat>(v))", .to = "lfm2_swiglu_value(static_cast<bfloat>(v), static_cast<bfloat>(g))" },
             .tap_clobbers_column => .{ .from = "[i.x] = from[i.x];\n}\n", .to = "[i.x] = from[i.x];\n  *(device bfloat*)(taps + size_t(i.y) * at.x) = 0;\n}\n" },
             .context_kv_first_row => .{ .from = "QH + tg.x, tg.y, lane);", .to = "QH + tg.x, 0, lane);" },
             .context_kv_theta => .{ .from = "nullptr, k, v, nullptr, kn, p, nullptr", .to = "nullptr, k, v, nullptr, kn, lfm2_qk_args{p.len, p.cap, p.eps, 0.0f}, nullptr" },
