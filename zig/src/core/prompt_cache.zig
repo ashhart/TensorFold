@@ -79,6 +79,7 @@ pub const Rules = @import("prompt_rules.zig").Rules;
 
 pub const Entry = struct {
     image_frame: u32 = 0, // the family frame can affect text rows before the first image
+    image_noted: bool = false, // this conversation prefix already named its image-only RAM retention
     images: []images.Identity = &.{}, // exact image identities through the keyed prefix, including lookahead
     tokens: []u32, // the state's tokens and `lookahead` more
     decode_spans: []modes.Span = &.{}, // canonical row arithmetic through at, excluding lookahead
