@@ -390,6 +390,7 @@ test "H3 serialized full64 tiles no text or held frame and last valid slots" {
 test {
     _ = @import("schedule_replace_test.zig");
     _ = @import("picture_test.zig");
+    _ = @import("picture_vae_test.zig");
 }
 
 /// MiniMax-H3-Image's case: text and picture rows only, no audio tensor, two rows in two tiles.
