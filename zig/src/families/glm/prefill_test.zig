@@ -252,13 +252,13 @@ test "glm prefill: an image handoff failure invalidates the old owner before cha
     second.images = &images;
     var io: Images = .{ .image_owner = &first };
     const input = @import("prompt_images.zig");
-    try std.testing.expectError(error.GpuFailed, input.prepare(&io, &second, 1));
+    try std.testing.expectError(error.GpuFailed, input.prepare(&io, &second, 1, second.cached));
     try std.testing.expect(io.image_owner == null and !io.inject);
     io.fail = false;
-    try input.prepare(&io, &first, 0);
+    try input.prepare(&io, &first, 0, first.cached);
     try std.testing.expect(io.image_owner == &first and io.inject);
     try std.testing.expectEqual(@as(usize, 2), io.writes);
-    try input.prepare(&io, &first, 0);
+    try input.prepare(&io, &first, 0, first.cached);
     try std.testing.expectEqual(@as(usize, 2), io.writes);
 }
 test "glm prefill: a resumed image prompt sends the tower only the images its restored state does not hold" {
@@ -283,7 +283,7 @@ test "glm prefill: a resumed image prompt sends the tower only the images its re
     for ([_]u32{ 0, 3, 5 }, [_]usize{ 2, 1, 1 }) |cached, n| {
         var io: Images = .{};
         s.cached = cached;
-        try input.prepare(&io, &s, 0);
+        try input.prepare(&io, &s, 0, s.cached);
         try std.testing.expectEqual(@as(usize, 1), io.writes);
         try std.testing.expectEqual(n, io.sent.len);
         try std.testing.expectEqual(images[2 - n].at, io.sent[0].at);
@@ -292,7 +292,7 @@ test "glm prefill: a resumed image prompt sends the tower only the images its re
     // kept past every image: no tower run, and another prompt's rows stay its own
     var io: Images = .{ .image_owner = &other };
     s.cached = 7;
-    try input.prepare(&io, &s, 0);
+    try input.prepare(&io, &s, 0, s.cached);
     try std.testing.expectEqual(@as(usize, 0), io.writes);
     try std.testing.expect(io.image_owner == &other);
 }

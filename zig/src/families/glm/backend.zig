@@ -142,7 +142,7 @@ pub const Backend = struct {
             }
         }
         // the images the restored state does not hold through the tower: the chunks inject their rows
-        if (s.images.len > 0) try @import("prompt_images.zig").prepare(b, s, i);
+        if (s.images.len > 0) try @import("prompt_images.zig").prepare(b, s, i, s.cached);
         s.fill_at.store(at, .monotonic);
         return .{ .stream = s, .slot = i, .at = at };
     }
@@ -154,7 +154,7 @@ pub const Backend = struct {
     }
     pub fn chunkPrompt(b: *Backend, s: *Stream, i: u32, at: u32, n: u32) !void {
         const e = b.sl.e;
-        try @import("prompt_images.zig").prepare(b, s, i);
+        try @import("prompt_images.zig").prepare(b, s, i, at); // the chunk's rows read no image ending by `at`
         try b.copyOut(i, at);
         try mirror.send(e, .chunk, &.{ i, at, n });
         const draws = @import("draw_rule.zig").promptDraws(s.sampling, @intCast(s.prompt_len), e.c.vocab);
