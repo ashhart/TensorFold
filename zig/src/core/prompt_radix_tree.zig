@@ -32,6 +32,17 @@ pub const Entry = struct {
     branched: bool = false,
 };
 
+/// A matched position: `pages` logical pages into `node` (1 to its count).
+pub const Hit = struct {
+    node: *Node,
+    pages: usize,
+
+    /// The tokens below the position.
+    pub fn at(h: Hit, t: *const Tree) u32 {
+        return h.node.end - @as(u32, @intCast((t.npages(h.node) - h.pages) * t.page));
+    }
+};
+
 pub const Node = struct {
     parent: ?*Node,
     /// Tokens up to the end of this node.
@@ -128,6 +139,42 @@ pub const Tree = struct {
             if (c.entry != null and c.end % step == 0) best = c;
         }
         return best;
+    }
+
+    /// The deepest page edge `prompt` repeats up to `limit_at`, inside a node too: where a page-only store resumes.
+    pub fn deepestPage(t: *const Tree, prompt: []const u32, limit_at: usize) ?Hit {
+        var node = t.root;
+        var at: usize = 0;
+        var best: ?Hit = null;
+        while (at + t.page <= limit_at) {
+            const c = t.child(node, prompt[at..]) orelse break;
+            const p = t.common(c, prompt[at..], (limit_at - at) / t.page);
+            if (p == 0) break;
+            best = .{ .node = c, .pages = p };
+            if (p < t.npages(c)) break;
+            at += p * t.page;
+            node = c;
+        }
+        return best;
+    }
+
+    /// The ids of the path to `h`, each held once more for the caller; the nodes marked used.
+    pub fn takeTo(t: *Tree, h: Hit, adopt: *std.ArrayList(u32)) !void {
+        var path: std.ArrayList(*Node) = .empty;
+        defer path.deinit(t.gpa);
+        var w: ?*Node = h.node.parent;
+        while (w) |x| : (w = x.parent) if (x.parent != null) try path.append(t.gpa, x);
+        try adopt.ensureUnusedCapacity(t.gpa, h.at(t) / t.page * t.per);
+        while (path.pop()) |x| t.hand(x, x.pages, adopt);
+        t.hand(h.node, h.node.pages[0 .. h.pages * t.per], adopt);
+    }
+
+    fn hand(t: *Tree, n: *Node, ids: []const u32, adopt: *std.ArrayList(u32)) void {
+        for (ids) |id| {
+            t.pages.vtable.retain(t.pages.ptr, id);
+            adopt.appendAssumeCapacity(id);
+        }
+        t.touch(n);
     }
 
     /// Logical pages of `tokens` (`np` whole pages and `ahead` more) the tree holds, their ids into `path` if any.
