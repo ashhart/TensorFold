@@ -3,6 +3,7 @@
 const std = @import("std");
 const pc = @import("prompt_cache.zig");
 const tree_mod = @import("prompt_radix_tree.zig");
+const parts = @import("prompt_radix_parts.zig");
 const Allocator = std.mem.Allocator;
 
 pub const Saved = tree_mod.Saved;
@@ -11,6 +12,7 @@ pub const Pages = tree_mod.Pages;
 pub const Counts = tree_mod.Counts;
 pub const Node = tree_mod.Node;
 pub const Tree = tree_mod.Tree;
+pub const Groups = parts.Groups;
 
 /// The rules of prompt_cache.zig, paged: `page` set; a planned store cuts and resumes only on `grid`, a multiple of it.
 pub const Rules = pc.Rules;
@@ -64,7 +66,7 @@ pub const Query = struct {
         return .{ .key = key, .prompt_len = @intCast(key.len) };
     }
 };
-/// A paged store's `keep`: whether the mark holds a state, and how many leading pages the stream swaps for the store's.
+/// A paged store's `keep`: whether the mark holds a state, and how many leading ids the stream swaps for the store's.
 pub const Kept = struct { held: bool, shared: usize };
 
 pub const Store = struct {
@@ -77,8 +79,19 @@ pub const Store = struct {
     const SHARED_KEYS = 64;
 
     pub fn init(gpa: Allocator, family: Snapshots, pages: Pages, rules: Rules) !Store {
+        return initGroups(gpa, family, pages, rules, .{});
+    }
+
+    /// `init` for a family that declares its cache groups (C3, #2444): `P` prefix groups page-major on the path.
+    pub fn initGroups(gpa: Allocator, family: Snapshots, pages: Pages, rules: Rules, groups: Groups) !Store {
         if (rules.page == 0 or (rules.planned and (rules.grid == 0 or rules.grid % rules.page != 0))) return error.BadPromptRadixRules;
-        return .{ .tree = try Tree.init(gpa, family, pages, rules.page, rules.lookahead), .rules = rules };
+        for (groups.prefix_rows) |rows| if (rows != rules.page) return error.UnequalPrefixRows; // one key a page for all
+        return .{ .tree = try Tree.init(gpa, family, pages, rules.page, rules.lookahead, groups.prefixCount()), .rules = rules };
+    }
+
+    /// Page ids a logical page: one per prefix group.
+    fn per(s: *const Store) usize {
+        return s.tree.per;
     }
 
     /// Where a pass may cut and resume: a page edge, or a planned store's grid.
@@ -167,7 +180,7 @@ pub const Store = struct {
         if (marks_.len == 0) return;
         const last = marks_[marks_.len - 1];
         while (true) {
-            const new = last / s.rules.page - s.tree.have(prompt[0 .. last + s.rules.lookahead]);
+            const new = (last / s.rules.page - s.tree.have(prompt[0 .. last + s.rules.lookahead])) * s.per();
             if (s.tree.heldPages() + new <= s.limits.pages and s.tree.snaps + marks_.len <= s.limits.snaps) return;
             s.tree.evict(s.victim(prompt, from) orelse return);
         }
@@ -198,9 +211,9 @@ pub const Store = struct {
         var out: std.ArrayList(u32) = .empty;
         errdefer out.deinit(a);
         for (marks_) |m| {
-            if (m / s.rules.page <= s.limits.pages and s.limits.snaps > 0) try out.append(a, m) else {
+            if (m / s.rules.page * s.per() <= s.limits.pages and s.limits.snaps > 0) try out.append(a, m) else {
                 s.tree.counts.refused += 1;
-                note("kept nothing at {d} tokens: {d} pages pass the limit of {d}", .{ m, m / s.rules.page, s.limits.pages });
+                note("kept nothing at {d} tokens: {d} pages pass the limit of {d}", .{ m, m / s.rules.page * s.per(), s.limits.pages });
             }
         }
         return out.toOwnedSlice(a);
@@ -236,29 +249,30 @@ pub const Store = struct {
         return out.toOwnedSlice(a);
     }
 
-    /// At `at` the tree takes the pages of `mine` it lacks and the snapshot, evicting to fit; `path` gets its pages.
+    /// At `at` the tree takes the ids of `mine` (page-major, `per` a page) it lacks, and the snapshot; `path` its ids.
     pub fn keep(s: *Store, q: Query, at: u32, owner: ?*anyopaque, mine: []const u32, path: []u32) Kept {
         const prompt = q.key;
         const t = &s.tree;
-        if (!s.on() or at == 0 or at % s.step() != 0 or at + s.rules.lookahead > prompt.len or mine.len != at / s.rules.page or path.len != mine.len) return .{ .held = false, .shared = 0 };
+        const np = at / s.rules.page; // logical pages below `at`
+        if (!s.on() or at == 0 or at % s.step() != 0 or at + s.rules.lookahead > prompt.len or mine.len != np * s.per() or path.len != mine.len) return .{ .held = false, .shared = 0 };
         t.clock += 1;
         const tokens = prompt[0 .. at + s.rules.lookahead]; // a page past which the lookahead differs is another page
         const flagged = std.mem.indexOfScalar(u64, s.shared_keys.items, sharedKey(tokens)) != null;
         while (true) {
             var last: ?*Node = null;
-            const got = t.heldPrefix(tokens, mine.len, path, &last);
-            if (got == mine.len and last != null and last.?.end == at and last.?.entry != null) {
+            const got = t.heldPrefix(tokens, np, path, &last);
+            if (got == np and last != null and last.?.end == at and last.?.entry != null) {
                 const e = &last.?.entry.?;
                 e.used = t.clock; // the same state again: no copy
                 e.shared = e.shared or flagged;
                 t.touch(last.?);
                 return .{ .held = true, .shared = mine.len };
             }
-            if (t.heldPages() + (mine.len - got) <= s.limits.pages and t.snaps + 1 <= s.limits.snaps) break;
+            if (t.heldPages() + (np - got) * s.per() <= s.limits.pages and t.snaps + 1 <= s.limits.snaps) break;
             const v = s.victim(prompt, null) orelse {
                 t.counts.refused += 1;
                 note("kept nothing at {d} tokens: no room", .{at});
-                return .{ .held = false, .shared = got };
+                return .{ .held = false, .shared = got * s.per() };
             };
             t.evict(v);
         }
@@ -345,4 +359,5 @@ fn note(comptime fmt: []const u8, args: anytype) void {
 test {
     _ = @import("prompt_radix_test.zig");
     _ = @import("prompt_radix_parts.zig");
+    _ = @import("prompt_radix_groups_test.zig");
 }
