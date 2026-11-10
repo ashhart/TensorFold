@@ -454,6 +454,7 @@ test {
     _ = @import("cuda_cap_test.zig");
     _ = @import("cuda_mtp_graphs_test.zig");
     _ = @import("cuda_graph_tail.zig");
+    _ = collective;
     _ = embed;
     _ = hc;
     _ = tiles;
