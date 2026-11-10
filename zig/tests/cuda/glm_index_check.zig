@@ -217,9 +217,11 @@ fn decode(gpu: check.Gpu, s: cuda.Stream, ops: cuda.Module, ks: *const glm.glue.
                 const limit = @min(np, @max(vis, sp.topk_pools));
                 const row = host[r * np ..][0..np];
                 for (row, 0..) |*x, i| {
-                    x.* = if (i >= limit) 1e9 else if (i >= vis) -std.math.inf(f32) else switch (kind) { // past the limit: no select may read
+                    // past the limit: no select may read
+                    x.* = if (i >= limit) 1e9 else if (i >= vis) -std.math.inf(f32) else switch (kind) {
                         0 => rand.floatNorm(f32),
-                        1 => @as(f32, @floatFromInt(rand.uintLessThan(u32, 16))) * 0.25, // the top level crowds the floor
+                        // the top level crowds the floor
+                        1 => @as(f32, @floatFromInt(rand.uintLessThan(u32, 16))) * 0.25,
                         2 => 0.0, // every visible pool tied
                         3 => if (rand.uintLessThan(u32, 8) == 0) special[rand.uintLessThan(usize, special.len)] else rand.floatNorm(f32),
                         4 => rand.floatNorm(f32),
