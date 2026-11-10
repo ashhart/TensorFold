@@ -1,0 +1,79 @@
+{
+  "schema": "tensorfold.bridge.inputs.v1",
+  "official_metadata_url": "https://developer.download.nvidia.com/compute/cuda/redist/redistrib_13.5.0.json",
+  "official_metadata_sha256": "401529e951b845788177f999c0756c520c4d0db1cd4cd05c0a295e331884b596",
+  "cuda_release": "13.5.0",
+  "target": "windows-x86_64",
+  "assets": [
+    {
+      "component": "cuda_nvcc",
+      "version": "13.5.37",
+      "url": "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvcc/windows-x86_64/cuda_nvcc-windows-x86_64-13.5.37-archive.zip",
+      "sha256": "daf9ea2304917ea6426be5fbe0e86c34cccc07c4f593cbc9070da54a8f7f4b27",
+      "bytes": 34186683,
+      "license_label": "CUDA Toolkit",
+      "metadata_license_path": "cuda_nvcc/LICENSE.txt",
+      "role": "compiler-input"
+    },
+    {
+      "component": "cuda_crt",
+      "version": "13.5.37",
+      "url": "https://developer.download.nvidia.com/compute/cuda/redist/cuda_crt/windows-x86_64/cuda_crt-windows-x86_64-13.5.37-archive.zip",
+      "sha256": "acf9730a9731f08fab5719684ed3e64f16cb592571c700bfa342fe32d3ca2047",
+      "bytes": 176318,
+      "license_label": "CUDA Toolkit",
+      "metadata_license_path": "cuda_crt/LICENSE.txt",
+      "role": "compiler-input"
+    },
+    {
+      "component": "cuda_cudart",
+      "version": "13.5.37",
+      "url": "https://developer.download.nvidia.com/compute/cuda/redist/cuda_cudart/windows-x86_64/cuda_cudart-windows-x86_64-13.5.37-archive.zip",
+      "sha256": "ef9747b13bd2c2c199a5f2756b56c94d0b5acf04556ce95ef4649122ee9b752a",
+      "bytes": 2742330,
+      "license_label": "CUDA Toolkit",
+      "metadata_license_path": "cuda_cudart/LICENSE.txt",
+      "role": "compiler-input"
+    },
+    {
+      "component": "cccl",
+      "version": "13.3.5.0.6",
+      "url": "https://developer.download.nvidia.com/compute/cuda/redist/cccl/windows-x86_64/cccl-windows-x86_64-13.3.5.0.6-archive.zip",
+      "sha256": "33b31a28db58aff9bd0a60a53e8424086b65da0684dade8f3c81ff2ff6f6a563",
+      "bytes": 4220625,
+      "license_label": "CCCL EULA",
+      "metadata_license_path": "cccl/LICENSE.txt",
+      "role": "compiler-input"
+    },
+    {
+      "component": "libnvvm",
+      "version": "13.5.37",
+      "url": "https://developer.download.nvidia.com/compute/cuda/redist/libnvvm/windows-x86_64/libnvvm-windows-x86_64-13.5.37-archive.zip",
+      "sha256": "0cb16fa041acd156b3654b66f182f65373a4ebfd4c2353ce7303f4d1b1eb88b2",
+      "bytes": 62714896,
+      "license_label": "CUDA Toolkit",
+      "metadata_license_path": "libnvvm/LICENSE.txt",
+      "role": "compiler-input"
+    },
+    {
+      "component": "libcublas",
+      "version": "13.10.0.20",
+      "url": "https://developer.download.nvidia.com/compute/cuda/redist/libcublas/windows-x86_64/libcublas-windows-x86_64-13.10.0.20-archive.zip",
+      "sha256": "468d90ff5680fd08fd9130e6e443c6e0c934f2f98b6ae4189960b9d9039e8969",
+      "bytes": 426404439,
+      "license_label": "CUDA Toolkit",
+      "metadata_license_path": "libcublas/LICENSE.txt",
+      "role": "runtime-sdk"
+    },
+    {
+      "component": "cuda_cuobjdump",
+      "version": "13.5.37",
+      "url": "https://developer.download.nvidia.com/compute/cuda/redist/cuda_cuobjdump/windows-x86_64/cuda_cuobjdump-windows-x86_64-13.5.37-archive.zip",
+      "sha256": "a1e4fed1a7499778ae2f856e63cc6252baac4d4f7f875cb358bcb776f3274240",
+      "bytes": 6668274,
+      "license_label": "CUDA Toolkit",
+      "metadata_license_path": "cuda_cuobjdump/LICENSE.txt",
+      "role": "static-inspection"
+    }
+  ]
+}

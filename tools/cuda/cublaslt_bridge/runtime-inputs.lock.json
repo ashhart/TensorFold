@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "xgrammar_tag": "v0.2.8",
+  "xgrammar_tag_object": "520e25b19c6296bd45e763626618551fb898fef9",
+  "source_archives": [
+    {
+      "name": "xgrammar",
+      "repository": "https://github.com/mlc-ai/xgrammar",
+      "commit": "97787376faee5ed8466cfad57c99855e4ce2f6aa",
+      "archive_url": "https://codeload.github.com/mlc-ai/xgrammar/tar.gz/97787376faee5ed8466cfad57c99855e4ce2f6aa",
+      "archive_bytes": 1270123,
+      "archive_sha256": "87bc16759aadc535e3585551cfc086d0db704a1c12d0a97a3261650a62731719",
+      "archive_file_manifest_sha256": "4b0cdf93c51f2900210a3244c3f8650d0048282e514d0b2fc8b683fa38d983dd"
+    },
+    {
+      "name": "dlpack",
+      "repository": "https://github.com/dmlc/dlpack",
+      "commit": "bbd2f4d32427e548797929af08cfe2a9cbb3cf12",
+      "archive_url": "https://codeload.github.com/dmlc/dlpack/tar.gz/bbd2f4d32427e548797929af08cfe2a9cbb3cf12",
+      "archive_bytes": 190029,
+      "archive_sha256": "f5dcb30f8a3d1a41d48b5d5b3fe1631dfce11de76f9e7e5bd22c6dc75a758885",
+      "archive_file_manifest_sha256": "5d3b3f80d93f9517fd3575ea2f6e74ad7a494a601a43992b03e1a0906030f5fb"
+    }
+  ],
+  "gitleaks": {
+    "version": "8.30.1",
+    "url": "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_windows_x64.zip",
+    "bytes": 8438883,
+    "sha256": "d29144deff3a68aa93ced33dddf84b7fdc26070add4aa0f4513094c8332afc4e"
+  }
+}

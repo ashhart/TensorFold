@@ -1,0 +1,71 @@
+{
+  "schema": "tensorfold.bridge.source.v1",
+  "abi_version": 1,
+  "exports": [
+    "tf_lt_abi_version",
+    "tf_lt_create",
+    "tf_lt_destroy",
+    "tf_lt_get_requirements",
+    "tf_lt_last_error",
+    "tf_lt_run",
+    "tf_lt_tune_last"
+  ],
+  "files": [
+    {
+      "path": "bridge.cu",
+      "bytes": 21122,
+      "sha256": "f72b7866504a13ccee0c6f2c3917bf8a40f93d88849592b571e14c29c658db4b",
+      "quoted_includes": [
+        "tf_cublaslt_bridge.h",
+        "validation.hpp",
+        "tune_storage.hpp",
+        "kernels.cuh",
+        "fp8_extra.cuh"
+      ]
+    },
+    {
+      "path": "tf_cublaslt_bridge.h",
+      "bytes": 3733,
+      "sha256": "46df6265e7e2cd45dac4a88bfa21154e991e14cec02c150c56844bb70c180c61",
+      "quoted_includes": []
+    },
+    {
+      "path": "validation.hpp",
+      "bytes": 7704,
+      "sha256": "7e3019cad2101f909e3e4dadc99fe442506e85084d88e07ec00a1ad7dfb987bb",
+      "quoted_includes": [
+        "tf_cublaslt_bridge.h"
+      ]
+    },
+    {
+      "path": "tune_storage.hpp",
+      "bytes": 1923,
+      "sha256": "9096c6d090ce4d73f7b9358391a30ffd813efbbf9eeb52ad9f3c483dab9dea2c",
+      "quoted_includes": [
+        "validation.hpp"
+      ]
+    },
+    {
+      "path": "kernels.cuh",
+      "bytes": 5765,
+      "sha256": "905fa9b8654051c23ad193264dbf287958b462ec14321d45db74246afc91ad12",
+      "quoted_includes": []
+    },
+    {
+      "path": "fp8_extra.cuh",
+      "bytes": 3484,
+      "sha256": "7135b21c694717e893e75dd9233b91f7a58277420b6c7724c84f29c967cc757b",
+      "quoted_includes": []
+    }
+  ],
+  "device_symbols": [
+    "_ZN9tf_lt_gpu10fp8_finishILb0EEEvPKfS2_S2_Pvyiibf",
+    "_ZN9tf_lt_gpu10fp8_finishILb1EEEvPKfS2_S2_Pvyiibf",
+    "_ZN9tf_lt_gpu10fp8_unpackEPKhPhii",
+    "_ZN9tf_lt_gpu11nvfp4_quantEPK13__nv_bfloat16PhS3_iiif",
+    "_ZN9tf_lt_gpu12nvfp4_unpackEPKhS1_PhS2_ii",
+    "_ZN9tf_lt_gpu7affine4EPKjPKtS3_Ptiii",
+    "_ZN9tf_lt_gpu8fp8_rowsEPK13__nv_bfloat16PhPfiiibf",
+    "_ZN9tf_lt_gpu9fp8_unitsEPf"
+  ]
+}

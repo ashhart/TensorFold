@@ -1,0 +1,212 @@
+{
+  "schema": 1,
+  "vendor_runtime": {
+    "filename": "cublasLt64_13.dll",
+    "sha256": "ca478e1ea932f883ef4fc284f8f33d910079df4e77f9a2ec38d9b4387795f96f",
+    "archive_sha256": "468d90ff5680fd08fd9130e6e443c6e0c934f2f98b6ae4189960b9d9039e8969",
+    "version": "13.10.0.20",
+    "public_identity": "NVIDIA Corporation",
+    "provenance": "Official public CUDA redistributable, exact archive and member hashes"
+  },
+  "public_readable_values": [],
+  "system_imports": [
+    "KERNEL32.dll",
+    "NTDLL.dll",
+    "ADVAPI32.dll",
+    "USER32.dll",
+    "WS2_32.dll",
+    "SHELL32.dll",
+    "OLE32.dll",
+    "OLEAUT32.dll",
+    "MSVCRT.dll",
+    "UCRTBASE.dll",
+    "PSAPI.dll",
+    "BCRYPT.dll",
+    "CRYPT32.dll",
+    "SHLWAPI.dll",
+    "VERSION.dll",
+    "USERENV.dll",
+    "IPHLPAPI.dll",
+    "NORMALIZ.dll",
+    "SETUPAPI.dll",
+    "WINMM.dll",
+    "GDI32.dll"
+  ],
+  "nvidia_driver_provider": {
+    "names": [
+      "nvcuda.dll",
+      "nvcudart_hybrid64.dll"
+    ],
+    "minimum_branch": "R620",
+    "qualification": "Provider availability and actual model load are GPU-unrun"
+  },
+  "optional_vendor_jit_provider": {
+    "name": "nvrtc64_130_0.dll",
+    "mandatory_import_proven": false,
+    "qualification": "A dynamic loader candidate is not a mandatory PE import; selected JIT paths remain GPU-unrun"
+  },
+  "resolved_opaque_vendor_scopes": [
+    {
+      "section": ".cask_re",
+      "bytes": 81930240,
+      "sha256": "21c753949441d108468db0ed52726a6bb074935f6519d1da9b72704488b761a4",
+      "scope": "Non-fatbin CASK database records from this exact official runtime member; raw readable spans and all contained fatbins are inspected",
+      "resolution": "Authenticated public SDK provenance, not a claim of source availability"
+    }
+  ],
+  "encoded_email_coincidences": [
+    {
+      "origin": "bin/cublasLt64_13.dll",
+      "offset": 187071767,
+      "encoding": "ascii",
+      "category": "email",
+      "match_sha256": "88e8a4f56df35ad68075677fa21b34be187a04922bd2c36092a7761df64b80fd",
+      "vendor_sha256": "ca478e1ea932f883ef4fc284f8f33d910079df4e77f9a2ec38d9b4387795f96f",
+      "required_resolution": "Wholly inside a fully decoded, scanned Zstandard frame from this exact SDK member"
+    },
+    {
+      "origin": "bin/cublasLt64_13.dll",
+      "offset": 190741288,
+      "encoding": "ascii",
+      "category": "email",
+      "match_sha256": "18f0f75dc5787638b583cbf13c6e8885dbdb8f765a485f4316a833af21b7cc13",
+      "vendor_sha256": "ca478e1ea932f883ef4fc284f8f33d910079df4e77f9a2ec38d9b4387795f96f",
+      "required_resolution": "Wholly inside a fully decoded, scanned Zstandard frame from this exact SDK member"
+    },
+    {
+      "origin": "bin/cublasLt64_13.dll",
+      "offset": 241759125,
+      "encoding": "ascii",
+      "category": "email",
+      "match_sha256": "987f38cd174e8a9ff20adbc24ae4b809a7364376c5896af6b172a861cf63d829",
+      "vendor_sha256": "ca478e1ea932f883ef4fc284f8f33d910079df4e77f9a2ec38d9b4387795f96f",
+      "required_resolution": "Wholly inside a fully decoded, scanned Zstandard frame from this exact SDK member"
+    },
+    {
+      "origin": "bin/cublasLt64_13.dll",
+      "offset": 316979777,
+      "encoding": "ascii",
+      "category": "email",
+      "match_sha256": "9d6d282c96c8e8ddb3f40b93553adee00991ccb928bc10d7653a5de01b8428e5",
+      "vendor_sha256": "ca478e1ea932f883ef4fc284f8f33d910079df4e77f9a2ec38d9b4387795f96f",
+      "required_resolution": "Wholly inside a fully decoded, scanned Zstandard frame from this exact SDK member"
+    },
+    {
+      "origin": "bin/cublasLt64_13.dll",
+      "offset": 328444822,
+      "encoding": "ascii",
+      "category": "email",
+      "match_sha256": "19161bd9c24ec88d2b261142c42936bca1f05a9ea2de45680172dd1e26bc9a0d",
+      "vendor_sha256": "ca478e1ea932f883ef4fc284f8f33d910079df4e77f9a2ec38d9b4387795f96f",
+      "required_resolution": "Wholly inside a fully decoded, scanned Zstandard frame from this exact SDK member"
+    },
+    {
+      "origin": "bin/cublasLt64_13.dll",
+      "offset": 340249898,
+      "encoding": "ascii",
+      "category": "email",
+      "match_sha256": "cbc57d7c7d2f6107d19cfb4fc0b9186fc41b4aea1ac146710fc96c4c26b7ebee",
+      "vendor_sha256": "ca478e1ea932f883ef4fc284f8f33d910079df4e77f9a2ec38d9b4387795f96f",
+      "required_resolution": "Wholly inside a fully decoded, scanned Zstandard frame from this exact SDK member"
+    },
+    {
+      "origin": "bin/cublasLt64_13.dll",
+      "offset": 342178790,
+      "encoding": "ascii",
+      "category": "email",
+      "match_sha256": "271beee9feda9a065441a477f6ebe7804c6c74d84190e47561d100f13c2d49af",
+      "vendor_sha256": "ca478e1ea932f883ef4fc284f8f33d910079df4e77f9a2ec38d9b4387795f96f",
+      "required_resolution": "Wholly inside a fully decoded, scanned Zstandard frame from this exact SDK member"
+    },
+    {
+      "origin": "bin/cublasLt64_13.dll",
+      "offset": 344420095,
+      "encoding": "ascii",
+      "category": "email",
+      "match_sha256": "5f09eb9b640dd66a401ca5b9a83cdd3064b1dae46912b4e3b90462e9d3a3d5df",
+      "vendor_sha256": "ca478e1ea932f883ef4fc284f8f33d910079df4e77f9a2ec38d9b4387795f96f",
+      "required_resolution": "Wholly inside a fully decoded, scanned Zstandard frame from this exact SDK member"
+    },
+    {
+      "origin": "bin/cublasLt64_13.dll",
+      "offset": 366329740,
+      "encoding": "ascii",
+      "category": "email",
+      "match_sha256": "07feb1ff01145e4e4f4774d03309eb0abd781ffd0a6273d4df2b3334ac5e0516",
+      "vendor_sha256": "ca478e1ea932f883ef4fc284f8f33d910079df4e77f9a2ec38d9b4387795f96f",
+      "required_resolution": "Wholly inside a fully decoded, scanned Zstandard frame from this exact SDK member"
+    },
+    {
+      "origin": "bin/cublasLt64_13.dll",
+      "offset": 370568578,
+      "encoding": "ascii",
+      "category": "email",
+      "match_sha256": "0929f9e533877513ce2a3bdc971d58161a11e90ce864f005d7f99e7b702d27f1",
+      "vendor_sha256": "ca478e1ea932f883ef4fc284f8f33d910079df4e77f9a2ec38d9b4387795f96f",
+      "required_resolution": "Wholly inside a fully decoded, scanned Zstandard frame from this exact SDK member"
+    },
+    {
+      "origin": "bin/cublasLt64_13.dll",
+      "offset": 379508585,
+      "encoding": "ascii",
+      "category": "email",
+      "match_sha256": "5f77a8a44026a8282fc90c8fe9d51ec2ba6c47da9238421032809d2bee6e514e",
+      "vendor_sha256": "ca478e1ea932f883ef4fc284f8f33d910079df4e77f9a2ec38d9b4387795f96f",
+      "required_resolution": "Wholly inside a fully decoded, scanned Zstandard frame from this exact SDK member"
+    },
+    {
+      "origin": "bin/cublasLt64_13.dll",
+      "offset": 388565969,
+      "encoding": "ascii",
+      "category": "email",
+      "match_sha256": "dcea42cd31662c54225c3692dc47dad91af42a6ef10e85e307e28648eadd1bd3",
+      "vendor_sha256": "ca478e1ea932f883ef4fc284f8f33d910079df4e77f9a2ec38d9b4387795f96f",
+      "required_resolution": "Wholly inside a fully decoded, scanned Zstandard frame from this exact SDK member"
+    },
+    {
+      "origin": "bin/cublasLt64_13.dll",
+      "offset": 444149207,
+      "encoding": "ascii",
+      "category": "email",
+      "match_sha256": "4ab7aa14ebce0276d62ec671e8d66edac9d2a463629813e028b2bffc92281018",
+      "vendor_sha256": "ca478e1ea932f883ef4fc284f8f33d910079df4e77f9a2ec38d9b4387795f96f",
+      "required_resolution": "Wholly inside a fully decoded, scanned Zstandard frame from this exact SDK member"
+    },
+    {
+      "origin": "bin/cublasLt64_13.dll",
+      "offset": 451042959,
+      "encoding": "ascii",
+      "category": "email",
+      "match_sha256": "2d1fc1a6e83592778557853a7005ca9d44c23ae8c78c9023022d865b5a8224a9",
+      "vendor_sha256": "ca478e1ea932f883ef4fc284f8f33d910079df4e77f9a2ec38d9b4387795f96f",
+      "required_resolution": "Wholly inside a fully decoded, scanned Zstandard frame from this exact SDK member"
+    },
+    {
+      "origin": "bin/cublasLt64_13.dll",
+      "offset": 464046961,
+      "encoding": "ascii",
+      "category": "email",
+      "match_sha256": "6be1d1b9bb34399d31a9e71565d11964e8a440cbfa560d2f2dcf6426f6ff8f1d",
+      "vendor_sha256": "ca478e1ea932f883ef4fc284f8f33d910079df4e77f9a2ec38d9b4387795f96f",
+      "required_resolution": "Wholly inside a fully decoded, scanned Zstandard frame from this exact SDK member"
+    },
+    {
+      "origin": "bin/cublasLt64_13.dll",
+      "offset": 483358644,
+      "encoding": "ascii",
+      "category": "email",
+      "match_sha256": "92a7d6e8e6758cffd316089f198e9e67da410c23c5d321becbb0ae8b881e3529",
+      "vendor_sha256": "ca478e1ea932f883ef4fc284f8f33d910079df4e77f9a2ec38d9b4387795f96f",
+      "required_resolution": "Wholly inside a fully decoded, scanned Zstandard frame from this exact SDK member"
+    },
+    {
+      "origin": "bin/cublasLt64_13.dll",
+      "offset": 493417946,
+      "encoding": "ascii",
+      "category": "email",
+      "match_sha256": "5033649f0919db2f0f946fd85f622bf96bd1ca5dadd4332c439e681c1b3edbc9",
+      "vendor_sha256": "ca478e1ea932f883ef4fc284f8f33d910079df4e77f9a2ec38d9b4387795f96f",
+      "required_resolution": "Wholly inside a fully decoded, scanned Zstandard frame from this exact SDK member"
+    }
+  ]
+}

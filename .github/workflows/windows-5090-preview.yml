@@ -1,0 +1,58 @@
+name: Windows 5090 preview
+on:
+  push:
+    branches: ['windows/5090-runtime-base']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: windows-5090-preview-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  preview:
+    runs-on: windows-2022
+    timeout-minutes: 150
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.14'
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
+        with:
+          version: 0.17.0
+          use-cache: false
+      - name: Exercise preupload refusal controls without a GPU
+        run: python -m unittest discover -s tools/cuda/cublaslt_bridge -p "test_*.py" -v
+      - name: Build and audit the exact Windows preview
+        shell: pwsh
+        env:
+          TF_PREVIEW_CONTEXT_DIGESTS: ${{ secrets.WINDOWS_PREVIEW_PRIVATE_CONTEXT }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = Join-Path ([Environment]::GetFolderPath('ProgramFilesX86')) 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $installation = & $vswhere -latest -version '[17.0,18.0)' -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if ($LASTEXITCODE -ne 0 -or @($installation).Count -ne 1) { throw 'MSVC installation lookup failed' }
+          $setup = Join-Path $installation 'Common7\Tools\VsDevCmd.bat'
+          $command = 'call "' + $setup + '" -no_logo -arch=x64 -host_arch=x64 >nul && set'
+          $lines = & $env:ComSpec /d /s /c $command
+          if ($LASTEXITCODE -ne 0) { throw 'MSVC environment initialization failed' }
+          foreach ($line in $lines) {
+            $split = $line.IndexOf('=')
+            if ($split -gt 0) { [Environment]::SetEnvironmentVariable($line.Substring(0, $split), $line.Substring($split + 1), 'Process') }
+          }
+          python tools/cuda/cublaslt_bridge/build_preview.py --execute --work C:\tf-preview
+          if ($LASTEXITCODE -ne 0) { throw 'Windows preview build or artifact review failed; nothing was uploaded' }
+      - name: Recheck the precise publication bytes immediately before upload
+        run: python tools/cuda/cublaslt_bridge/build_preview.py --verify-publication C:\tf-preview\publish
+      - name: Upload the reviewed preview and build provenance
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: tensorfold-windows-5090-preview-${{ github.sha }}
+          path: C:\tf-preview\publish
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
