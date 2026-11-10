@@ -121,7 +121,8 @@ test "NVFP4: the product holds the format reference at one row, at three and at 
     defer t.close();
     var rng: rig.Rng = .{ .state = 0x4F9D21 };
     for ([_][2]usize{ .{ 64, 64 }, .{ 160, 128 } }) |shape| {
-        const p = try Proj.init(gpa, &rng, shape[0], shape[1], 0.25);
+        // a global scale that is no power of two, so the multiply is exercised and not a shift
+        const p = try Proj.init(gpa, &rng, shape[0], shape[1], if (shape[0] == 64) 0.25 else 0.3);
         defer p.deinit();
         for ([_]usize{ 1, 3, 5 }) |rows| {
             const hx = try draw(gpa, t, &rng, rows, p.k);
