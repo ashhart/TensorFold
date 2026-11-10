@@ -321,16 +321,15 @@ pub fn load(gpa: std.mem.Allocator, d: *cuda.Driver, store: *Store, prefix: []co
 /// Engine.initRank's head for an EXL3 pack:
 pub fn head(gpa: std.mem.Allocator, d: *cuda.Driver, store: *Store, world: usize, rank: usize) !?projection.Projection {
     if (!has(store, "language_model.lm_head")) return null;
-    if (shardHead(world)) return try @import("../tp/cuda_exl3_tp.zig").headProjection(gpa, d, store, "language_model.lm_head", world, rank);
+    if (try shardHead(world)) return try @import("../tp/cuda_exl3_tp.zig").headProjection(gpa, d, store, "language_model.lm_head", world, rank);
     if (world == 1 and try @import("../../cuda_head.zig").enabled()) return error.BadHeadSharding;
     return try load(gpa, d, store, "language_model.lm_head", wt.vocab, wt.dims);
 }
 
 /// Whether an EXL3 head is split at `world`: at 2 unless TF_FLASHNEXT_SHARD_HEAD=0; never at 1.
-pub fn shardHead(world: usize) bool {
+pub fn shardHead(world: usize) !bool {
     if (world != 2) return false;
-    const v = std.c.getenv("TF_FLASHNEXT_SHARD_HEAD") orelse return true;
-    return !std.mem.eql(u8, std.mem.span(v), "0");
+    return @import("sys").environment.read(bool, "TF_FLASHNEXT_SHARD_HEAD", true);
 }
 
 /// Whether any of `prefix`'s parts is an EXL3 matrix (cuda_projection_load.loadStitched's branch).
@@ -465,7 +464,7 @@ pub fn experts(gpa: std.mem.Allocator, d: *cuda.Driver, store: *Store, mlp: []co
     if (world != 1 or rank != 0) return @import("../tp/cuda_exl3_tp.zig").experts(gpa, d, store, mlp, world, rank);
     const count = wt.experts_n + 1;
     // TF_FLASHNEXT_EXL3_MTP_RESIDENT=1: the MTP layer's experts stay on the device instead of a pool
-    const mtp_resident = std.mem.indexOf(u8, mlp, "mtp.") != null and if (std.c.getenv("TF_FLASHNEXT_EXL3_MTP_RESIDENT")) |v| std.mem.eql(u8, std.mem.span(v), "1") else false;
+    const mtp_resident = std.mem.indexOf(u8, mlp, "mtp.") != null and try @import("sys").environment.read(bool, "TF_FLASHNEXT_EXL3_MTP_RESIDENT", false);
     const offload = (try offloaded()) and !mtp_resident;
     const x = try gpa.create(Experts);
     x.* = .{ .gpa = gpa, .ops = try opsOf(store, d), .layer = undefined };
