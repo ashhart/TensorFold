@@ -26,10 +26,18 @@ const synthetic_merged_sha256 = "ac8c66b76552c15c22af3bc776d285350c4d9596863de2a
 /// The SM the pins were measured on (GB10); another device's rows are checked twice-equal, not against them.
 const pin_sm = 121;
 
+/// dots-text's greedy reply ids a prompt of our own (fixtures/own-prompts.json), fewer when EOS ends it first.
+const reply_ids = 64;
+/// The sha256 of each own prompt's reply ids (u32 little-endian) on the GB10: a decoder drift fails dots-text.
+const short_reply_sha256 = "4136394a1b94f5d96ae2fbaab8607c3ad793e174cce0578a93b103cf6e68f480";
+const page_reply_sha256 = "37b4105c553e4b6ce06c2afd7c2a175e15205d2f3afce68b1e3f9d8cf9650bef";
+const chunks_reply_sha256 = "ed7e831a46ad3d4d48c3b9cb52c14bba19b7a270c70a4d623f91320212507b4e";
+
 const usage =
     \\  dots-stages MODEL IMAGE OUT  dots.mocr's tower: one encode, each stage's rows as OUT/<stage>.npy for the oracle
     \\  dots-image MODEL [IMAGE]  dots.mocr's tower: the generated page's vision-merged sha256 against its anchor, then
     \\                            IMAGE's; each encoded twice byte-equal, with each encode's time
+    \\  dots-text MODEL             dots.mocr text prompts of our own: <= 64 greedy reply ids each, sha256 against pins
     \\  dots-invariants MODEL IMAGE [N] [IDS]  dots.mocr image prompts: chunk cuts == uncut (pages, logits, N greedy ids)
     \\
 ;
@@ -40,6 +48,7 @@ pub fn run(gpu: Gpu, cmd: []const u8, rest: Args) !void {
     if (!cuda.kernels.available) return skip(cmd, "this runner was built without CUDA kernels");
     if (std.mem.eql(u8, cmd, "dots-stages")) return stages(gpu, rest);
     if (std.mem.eql(u8, cmd, "dots-image")) return twice(gpu, rest);
+    if (std.mem.eql(u8, cmd, "dots-text")) return replies(gpu, rest);
     if (std.mem.eql(u8, cmd, "dots-invariants")) return invariants(gpu, rest);
     std.debug.print("{s}", .{usage});
     return error.UnknownCommand;
@@ -461,4 +470,39 @@ fn invariants(gpu: Gpu, rest: Args) !void {
     }
     try check.expect(bad == 0, "dots-invariants: {d} differences", .{bad});
     check.pass("dots-invariants: chunk cuts inside, at the first and the last image rows equal the uncut runs (pages, logits, {d} greedy ids), each image encoded once", .{n});
+}
+
+/// dots-text MODEL_DIR: each own prompt's greedy reply ids through the served engine, their sha256 against its pin.
+fn replies(gpu: Gpu, rest: Args) !void {
+    const dir = try arg(rest, 0);
+    if (!present(gpu.io, dir)) return skip("dots-text", "no checkpoint config.json in MODEL_DIR");
+    const gpa = gpu.gpa;
+    const c = try dots.config.Config.read(gpa, gpu.io, dir);
+    const own = try dots.ownPrompts(gpa);
+    defer own.deinit();
+    var s: Served = undefined;
+    try s.init(gpu, dir, dense.pages.perSlot(context), c.end_tokens[0..c.end_count]);
+    defer s.deinit();
+    const cases = [_]struct { []const u8, []const u32, []const u8 }{
+        .{ "short", own.value.short, short_reply_sha256 },
+        .{ "page", own.value.page, page_reply_sha256 },
+        .{ "chunks", own.value.chunks, chunks_reply_sha256 },
+    };
+    var bad: usize = 0;
+    for (cases) |k| {
+        const o = try s.once(k[1], &.{}, &.{}, reply_ids);
+        defer free(gpa, o);
+        var h: std.crypto.hash.sha2.Sha256 = .init(.{});
+        for (o.ids) |id| {
+            var le: [4]u8 = undefined;
+            std.mem.writeInt(u32, &le, id, .little);
+            h.update(&le);
+        }
+        const hex = std.fmt.bytesToHex(h.finalResult(), .lower);
+        const same = std.mem.eql(u8, &hex, k[2]);
+        bad += @intFromBool(!same);
+        std.debug.print("RESULT dots-text {s}: {d} prompt ids, {d} reply ids, sha256 {s}, pinned {s} ({s})\n", .{ k[0], k[1].len, o.ids.len, &hex, k[2], word(same) });
+    }
+    try check.expect(bad == 0, "dots-text: {d} of {d} replies differ from their pins", .{ bad, cases.len });
+    check.pass("dots-text: {d} own prompts' greedy replies (at most {d} ids) equal their pins", .{ cases.len, reply_ids });
 }
