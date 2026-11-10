@@ -104,6 +104,10 @@ const valid = [_]Case{
     .{ .name = "TENSORFOLD_LFM2_KV_PAGES", .raw = "0", .n = 0 },
     .{ .name = "TENSORFOLD_LFM2_KV_PAGES", .raw = "1", .n = 1 },
     .{ .name = "TF_ROCE_GID_INDEX", .raw = "2147483647", .n = 2147483647 },
+    .{ .name = "TF_MINIMAX_RANK", .raw = "1", .n = 1 },
+    .{ .name = "TF_MINIMAX_WORLD", .raw = "2", .n = 2 },
+    .{ .name = "TF_NEMOTRON_RANK", .raw = "0", .n = 0 },
+    .{ .name = "TF_NEMOTRON_WORLD", .raw = "4294967295", .n = 4294967295 },
     .{ .name = "TF_DRAMA_PREFILL_ROWS", .raw = " 128 ", .n = 128 },
     .{ .name = "TF_DRAMA_REFERENCE_CACHE", .raw = "0", .n = 0 },
     .{ .name = "TF_FLASHNEXT_GROUPED_ROWS", .raw = "0", .n = 0 },
@@ -397,4 +401,30 @@ test "environment: the Metal Qwen and slide-learning switches take their forms, 
     try t.expect(!(try e.value(bool, "TF_QWEN27_METAL_KV_PAGES", null, false)));
     try t.expect(try e.value(bool, "TF_QWEN27_JOIN", null, true) and !(try e.value(bool, "TF_QWEN27_JOIN", "0", true)));
     try t.expect(try e.value(bool, "TF_QWEN35_METAL_KV_PAGES", "1", false));
+}
+
+test "rank aliases name their flag and refuse from their retirement release" {
+    const Row = struct { name: [:0]const u8, scope: e.Scope, flag: []const u8 };
+    const rows = [_]Row{
+        .{ .name = "TF_GLM_RANK", .scope = .glm, .flag = "--rank" },            .{ .name = "TF_GLM_WORLD", .scope = .glm, .flag = "--tp" },
+        .{ .name = "TF_MINIMAX_RANK", .scope = .minimax_m3, .flag = "--rank" }, .{ .name = "TF_MINIMAX_WORLD", .scope = .minimax_m3, .flag = "--tp" },
+        .{ .name = "TF_NEMOTRON_RANK", .scope = .nemotron, .flag = "--rank" },  .{ .name = "TF_NEMOTRON_WORLD", .scope = .nemotron, .flag = "--tp" },
+    };
+    for (rows) |row| {
+        const name = row.name;
+        try t.expectEqual(row.scope, e.rule(name).scope);
+        try t.expectEqualStrings(row.flag, e.rule(name).flag.?);
+        try t.expectEqualStrings("1.4.0", e.rule(name).retire.?);
+        try t.expect(e.retired(name, "1.2.6") == null);
+        try t.expect(e.retired(name, "1.3.9") == null);
+        try t.expect(e.retired(name, "1.4.0-rc.1") == null);
+        try t.expect(e.retired(name, "1.4") == null);
+        try t.expect(e.retired(name, "1.4.0") != null);
+        try t.expect(e.retired(name, "2.0.0") != null);
+        try t.expectEqual(@as(?u64, 2), try e.parse(name, "+2"));
+        try t.expectError(error.InvalidEnvironment, e.parse(name, " 2"));
+        try t.expectError(error.InvalidEnvironment, e.parse(name, "4294967296"));
+    }
+    try t.expect(e.retired("TF_GLM_PROF", "9.9.9") == null);
+    try t.expect(e.retired("TF_NOT_A_ROW", "9.9.9") == null);
 }

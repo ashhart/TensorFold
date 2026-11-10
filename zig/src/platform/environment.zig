@@ -24,6 +24,10 @@ pub const Rule = struct {
     alias_of: ?[:0]const u8 = null,
     /// False where the old reader took only 0, false and off as off: "no" is refused, not read as off.
     no_word: bool = true,
+    /// A rank variable kept as an alias of this server flag (fabric/mesh/launch.zig resolves it).
+    flag: ?[]const u8 = null,
+    /// The release from which the server refuses this alias, naming `flag`.
+    retire: ?[]const u8 = null,
 };
 
 pub fn isReal(kind: Kind) bool {
@@ -106,6 +110,12 @@ pub const rules = [_]Rule{
     .{ .name = "TF_SLIDE_TAKE_OUT_CHECK", .scope = .slide, .kind = .flag, .forms = "0 or 1 (1 takes every kept lesson out again to check the facts before it come back)" },
     .{ .name = "TF_SLIDE_TAP_CHECK", .scope = .slide, .kind = .flag, .forms = "0 or 1 (1 checks tapped rows against a fresh run's)" },
     .{ .name = "TF_SLIDE_FORGET_FAIL", .scope = .hooks, .kind = .u32, .trim = " ", .forms = "a whole fact index from 0 to 4294967295 (0 disables the planted failure)" },
+    .{ .name = "TF_GLM_RANK", .scope = .glm, .kind = .u32, .forms = "a whole rank from 0", .flag = "--rank", .retire = "1.4.0" },
+    .{ .name = "TF_GLM_WORLD", .scope = .glm, .kind = .u32, .forms = "a whole world size from 1", .flag = "--tp", .retire = "1.4.0" },
+    .{ .name = "TF_MINIMAX_RANK", .scope = .minimax_m3, .kind = .u32, .forms = "a whole rank from 0", .flag = "--rank", .retire = "1.4.0" },
+    .{ .name = "TF_MINIMAX_WORLD", .scope = .minimax_m3, .kind = .u32, .forms = "a whole world size from 1", .flag = "--tp", .retire = "1.4.0" },
+    .{ .name = "TF_NEMOTRON_RANK", .scope = .nemotron, .kind = .u32, .forms = "a whole rank from 0", .flag = "--rank", .retire = "1.4.0" },
+    .{ .name = "TF_NEMOTRON_WORLD", .scope = .nemotron, .kind = .u32, .forms = "a whole world size from 1", .flag = "--tp", .retire = "1.4.0" },
     .{ .name = "TF_GLM_HOST_CACHE", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_GLM_VISION_HOST", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_GLM_PROF", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
@@ -241,13 +251,17 @@ pub const rules = [_]Rule{
     // Family rank and prompt settings below are read through their own family's startup scope.
     .{ .name = "TF_GLM_INDEX_CUDA", .scope = .glm, .kind = .word, .words = &.{ "1", "0", "scores" }, .forms = "1 (both kernels), 0 (neither) or scores (scores only; unset or blank is both)" },
     .{ .name = "TF_GLM_KV_HOST_GIB", .scope = .glm, .kind = .real, .forms = "a finite GiB amount of at least 0 (unset or blank uses one full window and 16 rows a page)" },
-    .{ .name = "TF_GLM_RANK", .scope = .glm, .kind = .u64, .forms = "a whole rank index from 0 to 4294967295 (unset with TF_GLM_WORLD gives one rank)" },
-    .{ .name = "TF_GLM_WORLD", .scope = .glm, .kind = .u64, .forms = "a whole rank count from 1 to 4294967295 (unset with TF_GLM_RANK gives one rank)" },
-    .{ .name = "TF_NEMOTRON_RANK", .scope = .nemotron, .kind = .u64, .forms = "a whole rank index from 0 to 4294967295 (unset with TF_NEMOTRON_WORLD gives one rank)" },
-    .{ .name = "TF_NEMOTRON_WORLD", .scope = .nemotron, .kind = .u64, .forms = "a whole rank count from 1 to 4294967295 (unset with TF_NEMOTRON_RANK gives one rank)" },
-    .{ .name = "TF_MINIMAX_RANK", .scope = .minimax_m3, .kind = .u64, .forms = "a whole rank index, 0 or 1 at two ranks (unset with TF_MINIMAX_WORLD gives one rank)" },
-    .{ .name = "TF_MINIMAX_WORLD", .scope = .minimax_m3, .kind = .u64, .forms = "a whole rank count, 2 on CUDA (unset with TF_MINIMAX_RANK gives one rank)" },
 };
+
+/// An alias the server refuses at `version` (semantic versions; a pre-release is before its release), else null.
+pub fn retired(name: []const u8, version: []const u8) ?Rule {
+    for (rules) |r| if (std.mem.eql(u8, name, r.name)) {
+        const at = std.SemanticVersion.parse(r.retire orelse return null) catch return null;
+        const now = std.SemanticVersion.parse(version) catch return null;
+        return if (now.order(at) != .lt) r else null;
+    };
+    return null;
+}
 
 pub fn rule(name: []const u8) Rule {
     for (rules) |r| if (std.mem.eql(u8, name, r.name)) return r;
