@@ -1,6 +1,8 @@
 //! The qwen3 CUDA open refuses the flags it does not serve before an absent checkpoint or device can be opened.
 const std = @import("std");
 const api = @import("engine_api");
+const qwen3 = @import("cuda_qwen3.zig");
+const env = @import("sys").env;
 
 pub fn flags(comptime open: anytype) !void {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
@@ -40,4 +42,25 @@ pub fn flags(comptime open: anytype) !void {
         try std.testing.expect((try open(arena.allocator(), std.testing.allocator, std.testing.io, c[0], &why)) == null);
         try std.testing.expectStringStartsWith(why, c[1]);
     }
+}
+
+/// A captured kernel set is refused by name; native, unset and blank are not; a malformed value is refused unshown.
+pub fn kernels(comptime open: anytype) !void {
+    const a = std.testing.allocator;
+    for ([_]?[]const u8{ null, "", "native" }) |raw| try std.testing.expect((try qwen3.kernelsRefusal(a, raw)) == null);
+    const why = (try qwen3.kernelsRefusal(a, "/captured/set")).?;
+    try std.testing.expectStringStartsWith(why, "Qwen3 uses embedded native images: unset TENSORFOLD_CUDA_KERNELS");
+    const bad = (try qwen3.kernelsRefusal(a, "/secret-dir\nset")).?;
+    defer a.free(bad);
+    try std.testing.expectStringStartsWith(bad, "TENSORFOLD_CUDA_KERNELS: expected");
+    try std.testing.expect(std.mem.indexOf(u8, bad, "secret-dir") == null);
+    // the open reads the process's setting before any checkpoint or device access
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    _ = env.setenv("TENSORFOLD_CUDA_KERNELS", "/captured/set", 1);
+    defer _ = env.unsetenv("TENSORFOLD_CUDA_KERNELS");
+    var problem: []const u8 = "";
+    const base: api.Open = .{ .dir = "missing-qwen3-checkpoint", .model_type = "qwen3" };
+    try std.testing.expect((try open(arena.allocator(), std.testing.allocator, std.testing.io, base, &problem)) == null);
+    try std.testing.expectStringStartsWith(problem, "Qwen3 uses embedded native images");
 }
