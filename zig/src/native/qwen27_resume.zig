@@ -1,6 +1,7 @@
 //! What the 27B's slot 0 stands after when its stream leaves, and whether a later prompt resumes there, nothing copied.
 const std = @import("std");
 const modes = @import("engine_api").cache_modes;
+const pc = @import("engine_api").prompt_cache;
 
 /// Where a prompt resumes in slot 0: where the slot stands (`here`), back at its rewind point (`back`), or not.
 pub const Resume = union(enum) { none, here: u32, back: u32 };
@@ -54,6 +55,36 @@ pub const Standing = struct {
         return .none;
     }
 };
+
+/// Slot 0 needs its smaller history copy unless the cache can keep both full snapshots.
+pub fn needsRewind(cache: u64, snapshot: u64) bool {
+    return cache < snapshot +| snapshot;
+}
+
+/// Only the actual user-end state gets an optional pin, without taking room from required states or promises.
+pub fn pinReplyHistory(store: *const pc.Store, entry: *const pc.Entry, history: u32, at: u32) bool {
+    if (entry.at != history) return false;
+    var bytes = entry.bytes +| store.family.vtable.bytes(store.family.ptr, at);
+    var slots: usize = 2;
+    if (store.reservation_guard) |g| {
+        bytes +|= g.promised.bytes;
+        slots +|= g.promised.slots;
+    }
+    for (store.entries.items) |other| {
+        if (other == entry) continue;
+        const protected = if (store.reservation_guard) |g| g.protects(store, other) else false;
+        // With own-only eviction, conservatively leave every other state in place.
+        if (other.borrowers == 0 and !protected and !store.keep_others) continue;
+        bytes +|= other.bytes;
+        slots +|= 1;
+    }
+    return bytes <= store.budget and slots <= store.most;
+}
+
+/// The history rewind copies live recurrent rows, so its cut must land even when a bank captures other marks.
+pub fn rewindEnd(at: usize, end: usize, rewind: u32) usize {
+    return if (rewind > at and rewind < end) rewind else end;
+}
 
 /// A prompt's next physical chunk end, before cache marks or the slot's rewind point cut it further.
 pub fn chunkEnd(at: usize, chunk: usize, len: usize, starts: []const u32, spans: []const modes.Span) usize {
@@ -155,4 +186,16 @@ test "qwen27 resume: slot 0 keeps what a fresh pass would stand at, and the poin
 
 test {
     _ = @import("qwen27_resume_cache_test.zig");
+}
+
+test "qwen27 resume: the history rewind is needed until two rounded full-context states fit" {
+    const full: u64 = 4800 << 20;
+    try t.expect(needsRewind(5 << 30, full));
+    try t.expect(needsRewind(full, full));
+    try t.expect(needsRewind(2 * full - 1, full));
+    try t.expect(!needsRewind(2 * full, full));
+    try t.expect(!needsRewind(2 * full + 1, full));
+    try t.expectEqual(@as(usize, 34078), rewindEnd(33792, 34083, 34078));
+    try t.expectEqual(@as(usize, 34083), rewindEnd(33792, 34083, 0));
+    try t.expectEqual(@as(usize, 34083), rewindEnd(33792, 34083, 33792));
 }
