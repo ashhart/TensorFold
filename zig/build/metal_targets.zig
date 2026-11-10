@@ -410,7 +410,6 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     }) });
     b.step("tf-h3-image", "MiniMax-H3-Image's Metal transformer on a picture case: six distilled steps, teacher-forced and gated").dependOn(&b.addInstallArtifact(h3_image, .{}).step);
     @import("h3_image_encoder.zig").tool(b, target, optimize, metal);
-    // MiniMax-H3-Image's prompt to the transformer's text rows (any Apple GPU), and its synthetic selftest
     @import("h3_image_prompt.zig").install(b, target, optimize, metal);
     // The core row projection (chips without tensor units) on synthetic matrices; runs on any Mac's GPU
     const row_mod = b.createModule(.{ .root_source_file = b.path("zig/src/core/row_projection.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources } } });
