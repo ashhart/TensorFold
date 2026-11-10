@@ -439,7 +439,7 @@ pub const Draft = struct {
     fn factsFn(p: *anyopaque) dr.Facts {
         const d = cast(p);
         // TF_NO_TREES=1: chains only (for comparing)
-        return .{ .depth = @intCast(d.c.block - 1), .step_ms = d.step_ms, .prior = &prior, .plain_guard = true, .batched = true, .stream_bytes = d.c.ringBytes() + d.target_taps + d.scratch_one, .trees = platform.c.getenv("TF_NO_TREES") == null, .window_costs = d.costs[0..d.n_costs], .lane_costs = d.costs[0..d.n_costs], .copy_match = copyMatch(d.e.g, d.c.kind), .tree_nodes = @intCast(if (d.c.block == 16) d.tree_nodes else 0) };
+        return .{ .depth = @intCast(d.c.block - 1), .step_ms = d.step_ms, .prior = &prior, .plain_guard = true, .batched = true, .stream_bytes = d.c.ringBytes() + d.target_taps + d.scratch_one, .trees = platform.c.getenv("TF_NO_TREES") == null, .window_costs = d.costs[0..d.n_costs], .lane_costs = d.costs[0..d.n_costs], .copy_match = factsCopyMatch(d), .tree_nodes = @intCast(if (d.c.block == 16) d.tree_nodes else 0) };
     }
 
     fn openFn(p: *anyopaque, s: *Stream) anyerror!void {
@@ -529,7 +529,7 @@ pub const Draft = struct {
     }
 };
 
-/// The dense 27B's copy match beside DSpine (agent +6..7 % over 20); DFlash2 keeps long_match (its chat lost 2-2.7 %).
+/// The dense 27B's copy match beside DSpine; DFlash2 keeps long_match (see the commit for the measurements).
 pub const copy_match_beside_dspine = 12;
 
 /// The copy match beside a drafter: the dense 27B leaves short copies to its drafts, others keep the target's (0).
@@ -539,6 +539,11 @@ pub fn copyMatch(g: anytype, kind: Config.Kind) i64 {
         .dflash2 => lanes.windows.long_match,
         .dspine => copy_match_beside_dspine,
     };
+}
+
+/// The copy match a loaded drafter reports in its facts: its target's geometry and its own kind.
+pub fn factsCopyMatch(d: anytype) i64 {
+    return copyMatch(d.e.g, d.c.kind);
 }
 
 /// Acceptance by depth until a stream has its own (the reference's chat text: measured, see the commit).
