@@ -426,8 +426,9 @@ CUDA also checks GLM-5.3-Flash's KV page kernels on a page table out of order: t
 (`tf_glm_lat_write`, `tf_glm_pool_keys`), the index scores and the selected tokens' rows (`tf_glm_scores`,
 `tf_glm_dsa_tokens`), and the MLA chunks through their merge (`tf_glm_chunks_16` and `tf_glm_chunks_32`, dense and
 sparse). Its prompt indexer (`tf_glm_index_scores`, `tf_glm_index_pools`) is bit-equal to `tf_glm_scores` and
-`tf_glm_select_rows`, and its decode select at a 1,024-thread block a row (`tf_glm_select_rows_wide`) and in spans
-over many blocks (`tf_glm_dsel_scan`, then `tf_glm_dsel_merge` a block a row) to `tf_glm_select_rows`; both stated
+`tf_glm_select_rows`, its decode windows' scores (`tf_glm_index_scores` at the decode tiling) to `tf_glm_scores`,
+and its decode select at a 1,024-thread block a row (`tf_glm_select_rows_wide`) and in spans over many blocks
+(`tf_glm_dsel_scan`, then `tf_glm_dsel_merge` a block a row) to `tf_glm_select_rows`; both stated
 rules rank any NaN above +inf, as the GPU's `s + 0` makes every NaN one positive NaN.
 CUDA also checks `TF_GLM_KV_HOST`'s gather (`tf_glm_kvh_*` in `glm_ops.cu`, launched by `cuda_kv_host.zig`): the
 marks (a slot for each distinct pick; past its slots, the call flagged and no row left marked), the picked rows into
