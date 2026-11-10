@@ -144,14 +144,16 @@ test "tp check: rule 4 fails when it compared nothing, or the mixed run's logits
     try testing.expectEqual(@as(?[]const u8, null), try agreeOn(a, &.{ &good, &good }, &.{ &good, &nan }));
 }
 
-test "tp check: a buffer that is not whole elements is refused" {
+test "tp check: a send or a recv that is not whole elements is refused" {
     const a = testing.allocator;
+    const row = [_]u8{ 1, 2, 3, 4, 5, 6 };
     for ([_]c.Call{ .all_reduce, .all_gather, .exchange }) |call| {
-        var w: std.Io.Writer.Allocating = .init(a);
-        defer w.deinit();
-        try c.writeHeader(&w.writer, .{ .rank = 0, .world = 2, .label = "partial" });
-        const row = [_]u8{ 1, 2, 3, 4, 5, 6 };
-        try c.writeCollective(&w.writer, .{ .seq = 0, .layer = 0, .call = call, .dtype = .f32, .op = .sum, .peer = 0, .send = &row, .recv = row[0..4] });
-        try testing.expectError(error.BadLength, c.parse(a, w.written()));
+        for ([_][2][]const u8{ .{ &row, row[0..4] }, .{ row[0..4], &row } }) |buffers| {
+            var w: std.Io.Writer.Allocating = .init(a);
+            defer w.deinit();
+            try c.writeHeader(&w.writer, .{ .rank = 0, .world = 2, .label = "partial" });
+            try c.writeCollective(&w.writer, .{ .seq = 0, .layer = 0, .call = call, .dtype = .f32, .op = .sum, .peer = 0, .send = buffers[0], .recv = buffers[1] });
+            try testing.expectError(error.BadLength, c.parse(a, w.written()));
+        }
     }
 }
