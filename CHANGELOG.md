@@ -14,10 +14,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Tests: `tp.device` runs N tensor-parallel ranks as threads on one GPU with device copies, so DeepSeek-V4.1's exchanges are now tested at a world of 3 (uneven sampling, dense split KV and lockstep), and `zig build dsv41-test` builds `tf-dsv41-test` over the family's own kernel images (#2491, refs #2270). Thanks to @Defilan.
 
 
-- Tests: `tp.device` runs N tensor-parallel ranks as threads on one GPU with device copies, so DeepSeek-V4.1's exchanges are now tested at a world of 3 (uneven sampling, dense split KV and lockstep), and `zig build dsv41-test` builds `tf-dsv41-test` over the family's own kernel images (#2491, refs #2270). Thanks to @Defilan.
-
-- CUDA: a model whose KDA heads or conv window differ from the kernels' (128 keys, 128 values, 4 taps) is refused at load with `KdaGeometry`, before anything is allocated or launched, and a host test ties those numbers to `kda.cuh` (#2338, refs #850). Thanks to @ajensenwaud.
-
 - CUDA: the start-up note about pages parked on the kernel's per-CPU lists logs at debug level, so whether it shows no longer depends on the box's memory state; the budget still counts those pages (#2164, follow-up to #2127). Thanks to @jschmied.
 
 - CUDA: the families' sampled rule comes from one function, `cuda.sample.ruleFor`, in place of seven copies (MiniMax M3's hand-filled `Rule` included); a host test checks each old form byte for byte over 25,480 settings, and the fatbins are unchanged (#2680, #2460 item 3). Thanks to @jschmied.
