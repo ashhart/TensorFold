@@ -6,10 +6,10 @@ const Buf = replay.Buf;
 const pairs = @import("scale_pairs.zig");
 
 /// A scales buffer's identity: the map from it to its index and table.
-pub const Key = struct { id: usize, off: usize };
+pub const Key = struct { id: @FieldType(@FieldType(Buf, "b"), "id"), off: usize };
 
 pub fn keyOf(b: Buf) Key {
-    return .{ .id = @intFromPtr(b.b.id), .off = b.off };
+    return .{ .id = b.b.id, .off = b.off };
 }
 
 /// The index and table buffers of the scales `s` and biases `b` (whole buffers of bf16), kept under `s`'s key.
