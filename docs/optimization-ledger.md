@@ -72,6 +72,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 25. TP ranks | done H[#655] | done C[#1771] H[#817] | done [#855] | yes | done¹ |
 | 26. Pipeline | open [#2115] | yes | yes | yes | yes |
 | 27. Profiles | done [#1944] | done [#1944] | done [#1959] | done [#1944] | done [#2061] |
+| 28. Scale index | ? | open M[#2760] | ? | ? | ? |
 
 | Optimization | kol1 | spk25 | dory | mm3 | dsv41 |
 | --- | --- | --- | --- | --- | --- |
@@ -102,6 +103,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 25. TP ranks | yes | no (4B) | yes | done [#1388] | done¹ |
 | 26. Pipeline | yes | no (4B) | yes | yes | yes |
 | 27. Profiles | done [#1944] | done [#1944] | open [#2306] | yes | yes |
+| 28. Scale index | ? | ? | ? | ? | ? |
 
 | Optimization | lfm2m | lfm3 | qwen4 | ling |
 | --- | --- | --- | --- | --- |
@@ -132,6 +134,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 25. TP ranks | yes | no (1.7B) | yes | yes [#850] |
 | 26. Pipeline | yes | no (1.7B) | yes | yes |
 | 27. Profiles | yes | yes | yes | yes |
+| 28. Scale index | ? | ? | ? | ? |
 
 q3.5 `qwen3_5` (C, M, H, X), fnext `flashnext` (C, M, H), glm `glm` (C, M), gem4 `gemma4` (C, M, X),
 nemo `nemotron` (C, M, H, X), kol1 `kolibri1` (C), spk25 `spark25` (C, M),
@@ -168,6 +171,7 @@ ling `ling` (host package only, no engine yet; CUDA plan in [#850]).
 | 25. TP ranks | open [#1434] | no (small) | yes | yes |
 | 26. Pipeline | yes | no (small) | yes | yes |
 | 27. Profiles | yes | yes | yes | yes |
+| 28. Scale index | ? | ? | ? | ? |
 
 | Optimization | gdsa | kimi | qwen3 |
 | --- | --- | --- | --- |
@@ -198,6 +202,7 @@ ling `ling` (host package only, no engine yet; CUDA plan in [#850]).
 | 25. TP ranks | yes | yes | no (small) |
 | 26. Pipeline | yes | yes | no (small) |
 | 27. Profiles | yes | yes | yes |
+| 28. Scale index | ? | ? | ? |
 
 q27 `qwen27` (M: Qwen3.8-27B and Qwen3.5-MoE), lfm2 `lfm2` (C: LFM2-VL, scores decisions and writes no text),
 llama `llama` (M), step5 `step5` (M), gdsa `glm_dsa` (M), kimi `kimi_k3` (M, native serving on [#2221]),
@@ -242,6 +247,7 @@ below; these are estimates for planning a port, not results.
 | 25. TP ranks | big | big | big | scale-out: models past one box |
 | 26. Pipeline | none | none | big | fits models across nodes; adds hops |
 | 27. Profiles | none | none | none | names the opt-in switches |
+| 28. Scale index | none | low | 5 % of the weights once prompts read it too | one stream's decode before tensor units |
 
 ## The optimizations
 
@@ -439,6 +445,11 @@ below; these are estimates for planning a port, not results.
 27. **`--profile` switches.** One registry names each opt-in switch with its backend, families, class and evidence,
     and the startup line prints what differs from the defaults ([#1660], [#1944]). Only `stable` is served;
     `fast-exact` and `fast` are refused by name until switches qualify for them.
+28. **Scale index.** An affine checkpoint stores a bf16 scale and bias beside every group's codes, a fifth of the
+    bytes at 4 bits in groups of 32, and a tensor holds few distinct pairs. A 16-bit index a group into the tensor's
+    table of pairs gives a kernel the same two values from fewer bytes. Flash Next's 4-bit expert kernels read it on
+    Macs before tensor units behind `TF_FLASHNEXT_SCALE_INDEX` ([#2760], plan in [#2751]); the prompt gathers and the
+    dense rows still read the stored arrays. `?` cells: the same count has not been run on those checkpoints.
 
 [#458]: https://github.com/ashhart/TensorFold/pull/458
 [#468]: https://github.com/ashhart/TensorFold/pull/468
@@ -579,3 +590,5 @@ below; these are estimates for planning a port, not results.
 [#2430]: https://github.com/ashhart/TensorFold/pull/2430
 
 [#2257]: https://github.com/ashhart/TensorFold/pull/2257
+[#2760]: https://github.com/ashhart/TensorFold/pull/2760
+[#2751]: https://github.com/ashhart/TensorFold/issues/2751
