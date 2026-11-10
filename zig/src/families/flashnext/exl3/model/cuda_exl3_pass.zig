@@ -248,9 +248,12 @@ pub fn attach(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, st: cud
     const prefill = @import("../prefill/cuda_exl3_prefill.zig");
     const minimum_pools = try memory.poolBytes(b.lines orelse pool_.min_lines, out.line_bytes, n, fixed);
     const protected = try std.math.add(u64, try std.math.add(u64, reserve, future), minimum_pools);
-    out.prefill_window_bytes = prefill.reserveTwoChunk(d, free, protected) catch |err| declined: {
-        std.log.warn("flashnext exl3 prefill: two-chunk reservation refused ({t}); keeping single-chunk prefill", .{err});
-        break :declined 0;
+    out.prefill_window_bytes = prefill.reserveTwoChunk(d, free, protected) catch |err| switch (err) {
+        error.InvalidEnvironment => return err,
+        else => declined: {
+            std.log.warn("flashnext exl3 prefill: two-chunk reservation refused ({t}); keeping single-chunk prefill", .{err});
+            break :declined 0;
+        },
     };
     if (out.prefill_window_bytes != 0) {
         free = @intCast(try freeBytes(d));

@@ -189,7 +189,7 @@ const Run = struct { ms: f64, logits: []u16, greedy: []u32, decode_ms: f64, stat
 /// A fresh sequence, `ids` prefilled (deep or the batched pass), then `steps` greedy rounds.
 fn once(g: *Eng, ids: []const u32, deep: bool, rows: usize, steps: usize) !Run {
     const a = g.gpu.gpa;
-    var o = xpre.optionsFromEnv();
+    var o = try xpre.optionsFromEnv();
     o.enabled = deep;
     o.rows = rows;
     xpre.state.options = o;

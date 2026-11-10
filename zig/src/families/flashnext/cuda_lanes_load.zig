@@ -114,14 +114,14 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     const scratch_bytes = cuda.usage(false).device -| persistent_bytes;
     const deep_before = cuda.usage(false).device;
     // EXL3 offload: deep prefill rows before the pools
-    @import("exl3/prefill/cuda_exl3_prefill.zig").reserveFor(own.engine, o.context, o.tp);
+    try @import("exl3/prefill/cuda_exl3_prefill.zig").reserveFor(own.engine, o.context, o.tp);
     const deep_bytes = cuda.usage(false).device -| deep_before;
     const own_seq_bytes = try prompt.seqBytesPaged(window, try @import("cuda_pages.zig").pageTest(), own.engine.heads);
     var stream_bytes = own_seq_bytes;
     // an EXL3 rank 1 keeps no head cache
     if (own.head) |h| {
-        stream_bytes = try std.math.add(u64, stream_bytes, mtp.Draft.bytes(window, h.ids.len, @import("exl3/prefill/cuda_exl3_prefill.zig").draftRows(own.engine), own.engine.heads));
-    } else if (o.drafts and o.tp == 2) stream_bytes = try std.math.add(u64, stream_bytes, mtp.Draft.bytes(if (mode == .exl3) 1 else window, 1, @import("exl3/prefill/cuda_exl3_prefill.zig").draftRows(own.engine), own.engine.heads));
+        stream_bytes = try std.math.add(u64, stream_bytes, mtp.Draft.bytes(window, h.ids.len, try @import("exl3/prefill/cuda_exl3_prefill.zig").draftRows(own.engine), own.engine.heads));
+    } else if (o.drafts and o.tp == 2) stream_bytes = try std.math.add(u64, stream_bytes, mtp.Draft.bytes(if (mode == .exl3) 1 else window, 1, try @import("exl3/prefill/cuda_exl3_prefill.zig").draftRows(own.engine), own.engine.heads));
     if (o.vision) |v| stream_bytes = try std.math.add(u64, stream_bytes, try std.math.add(u64, try std.math.mul(u64, v.image_tokens, @import("cuda_prompt_wt.zig").dims * 2), try std.math.mul(u64, 16, o.context)));
     if (page_tokens > 0) {
         // the lane's head runs at the engine's chunk: its cache on the stream's pages, its buffers in the run
@@ -162,7 +162,7 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
         .facts = own.facts(),
         .rows = if (own.head != null) mtp.max_rows else 2,
         .prompt_rows = @intCast(own.engine.chunk),
-        .snap_grid = if (mode == .exl3) @import("exl3/prefill/cuda_exl3_prefill.zig").snapGrid(own.engine, own.engine.chunk) else 0,
+        .snap_grid = if (mode == .exl3) try @import("exl3/prefill/cuda_exl3_prefill.zig").snapGrid(own.engine, own.engine.chunk) else 0,
         .stream_bytes = stream_bytes,
         .host_snaps = try @import("exl3/kv/cuda_exl3_kv.zig").snapHost(o.context, mode == .exl3),
         .ctx = own,

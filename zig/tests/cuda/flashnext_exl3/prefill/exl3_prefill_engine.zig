@@ -107,7 +107,7 @@ fn top5(row: []const u16) [5]u32 {
 
 /// One prefill of `ids` from a fresh sequence: ms, and the last row's logits copied into `out`.
 fn prefillOnce(g: *Eng, ids: []const u32, deep_on: bool, out: []u16) !f64 {
-    var o = xpre.optionsFromEnv();
+    var o = try xpre.optionsFromEnv();
     o.enabled = deep_on;
     if (rows_override) |r| o.rows = r;
     xpre.state.options = o;
@@ -177,7 +177,7 @@ pub fn engineRun(gpu: Gpu, dir: []const u8, rest: []const [:0]const u8) !void {
     for (ns[0..n_ns]) |n| max_n = @max(max_n, n);
     if (max_n > all_ids.len) return error.NotEnoughIds;
     if (std.c.getenv("TF_TEST_DECODE")) |v| decode_steps = std.fmt.parseInt(usize, std.mem.span(v), 10) catch decode_steps;
-    const o = xpre.optionsFromEnv();
+    const o = try xpre.optionsFromEnv();
     var max_r = o.rows;
     for (rs[0..n_rs]) |r| max_r = @max(max_r, r);
     if (n_rs > 0) max_r = 0;
@@ -258,7 +258,7 @@ pub fn agreeRun(gpu: Gpu, dir: []const u8, rest: []const [:0]const u8) !void {
     const lines: ?usize = if (rest.len > 4) try std.fmt.parseInt(usize, rest[4], 10) else null;
     const max_n = first + step * (count - 1);
     if (max_n + 1 > all_ids.len) return error.NotEnoughIds;
-    const o = xpre.optionsFromEnv();
+    const o = try xpre.optionsFromEnv();
     const g = try Eng.init(gpu, dir, lines, max_n + 64, @min(o.rows, (max_n + 255) / 256 * 256));
     defer g.deinit();
     const old = try a.alloc(u16, vocab);
