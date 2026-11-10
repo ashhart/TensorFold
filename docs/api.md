@@ -1148,8 +1148,10 @@ The client sends text frames, each one JSON event:
 
 Each response sends the events of the SSE stream, in the same order, one text frame each, with the same prompt, tokens
 and `token_sha` as over HTTP. A create that names a `stream_id` gets it on each of its events. A create refused before
-its run gets one event, `{"type": "error", "status": ..., "stream_id": ..., "error": {"type", "code", "message",
-"param"}}`, with the HTTP status the same request gets over `POST`; the socket stays open.
+its stream opens (the request, its history, its key scope or admission) gets one event, `{"type": "error", "status":
+..., "stream_id": ..., "error": {"type", "code", "message", "param"}}`, with the HTTP status the same request gets over
+`POST`; the socket stays open. A failure after the stream opens, such as a prompt over the context window, ends with
+`response.failed`, as over SSE.
 
 `stream_id` names a lane: 1 to 256 letters, digits, `_`, `.` or `-` (else `invalid_stream_id`), up to 32 named lanes
 per socket (then `websocket_stream_limit_reached`). Creates run one at a time in arrival order, so every lane is in
