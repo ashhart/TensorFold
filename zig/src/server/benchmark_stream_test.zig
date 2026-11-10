@@ -393,7 +393,8 @@ fn checkDefaultMode(switchable: ?bool, applicable: ?bool) !void {
     var client: std.http.Client = .{ .allocator = std.heap.smp_allocator, .io = std.testing.io };
     defer client.deinit();
     const sample = stream.attempt(a, std.testing.io, &client, .{ .base = try f.url(a, ""), .served = "m", .thinking_switch = switchable, .thinking_applicable = applicable }, opts(4, false, 5), suite.fixtures[1], 0, 1234, 0, null);
-    try std.testing.expectEqual(suite.Status.ok, sample.status);
+    // deliveries 2 ms apart may be read at once on a busy runner; the body is what this test checks
+    try std.testing.expect(sample.status == .ok or sample.status == .unmeasured);
     const body_value = (try @import("json").parse(a, f.request(0).body)).ok;
     try std.testing.expect(body_value.get("chat_template_kwargs") == null);
 }
