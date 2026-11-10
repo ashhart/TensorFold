@@ -66,7 +66,8 @@ const Dump = struct {
             if (d.side == .tower and std.mem.eql(u8, class, "mlp0")) return d.mlp0(rows, n, width);
             return;
         }
-        const f32_out = d.side == .decoder and std.mem.eql(u8, class, "qkv"); // fp32 sums tapped as two bf16 columns each
+        // fp32 sums tapped as two bf16 columns each
+        const f32_out = d.side == .decoder and std.mem.eql(u8, class, "qkv");
         try d.entry(class, layer, d.x orelse return error.BadTap, d.k, rows, n, if (f32_out) width / 2 else width, f32_out);
         d.x = null;
     }
