@@ -1,8 +1,7 @@
 //! A capped prompt step's cut (the lane host's `max_rows`): extra cuts inside the family's cold chunk, on its row grid.
 const std = @import("std");
 
-/// The end of a step from `at` toward `cold` (the cold pass's next cut): at most `cap` rows floored to `grid`, never
-/// past `cold`, so every cold cut still lands and a capped pass keeps the cold pass's marks; `cap` 0 runs to `cold`.
+/// A step from `at` to the cold cut `cold`: at most `cap` rows on `grid`, never past `cold`, so every cold cut lands.
 pub fn end(at: usize, cold: usize, cap: u32, grid: usize) usize {
     std.debug.assert(grid > 0 and cold > at);
     if (cap == 0) return cold;
