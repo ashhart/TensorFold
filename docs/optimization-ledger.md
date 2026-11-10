@@ -47,7 +47,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | --- | --- | --- | --- | --- | --- |
 | 1. Prompt tail | done [#2229] | yes | yes | open [#2432] | open [#2432] |
 | 2. Paged KV | done C[#1750] M[#1294] | done [#1169] | done [#1163] | done [#1619] | done C[#935] M[#1537] |
-| 3. Prompt store | done [#1357] | yes (host store) | done [#1732] | done [#1883] | yes C open M[#1850] |
+| 3. Prompt store | done [#1357]; Windows preview pending [#2433] | yes (host store) | done [#1732] | done [#1883] | yes C open M[#1850] |
 | 4. iGPU states | done [#2113] | done¹ | yes | done¹ | done¹ |
 | 5. State walk | yes | yes | open [#2215] | yes | yes |
 | 6. KV ledger | done [#2127] | done [#2127] | done [#2127] | done [#2127] | done [#2127] |
@@ -141,6 +141,9 @@ nemo `nemotron` (C, M, H, X), kol1 `kolibri1` (C), spk25 `spark25` (C, M),
 dory `dory` (C), mm3 `minimax_m3` (C, M), dsv41 `deepseek_v41` (its own CUDA binary, not the release's CUDA server;
 M), lfm2m `lfm2_moe` (M; C on [#1492]), lfm3 `lfm3` (X; C on [#1508]), qwen4 `qwen4` (C, M),
 ling `ling` (host package only, no engine yet; CUDA plan in [#850]).
+
+The q3.5 [Windows 5090 preview](receipts/windows-5090-preview/README.md) ports cache admission and the hybrid NVFP4 prompt path.
+Its rebased head still needs GPU qualification, and historical highest-thinking warm coding decode is about 0.29% slower with cache on.
 
 | Optimization | q27 | lfm2 | llama | step5 |
 | --- | --- | --- | --- | --- |

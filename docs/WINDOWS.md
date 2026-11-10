@@ -17,7 +17,7 @@ The native binary retains `tensorfold-native VERSION` on `--version` for existin
 [Release packaging](../packaging/README.md#windows-x86_64) documents the Windows target, reviewed DLL overlay,
 source/runtime manifests, checksums and CPU-only PowerShell smoke. Packaging does not qualify a GPU or checkpoint.
 
-`tensorfold-native.exe` runs on Windows with an NVIDIA GPU through the same CUDA engine the Linux build uses, and with an
+`tensorfold.exe` runs on Windows with an NVIDIA GPU through the same CUDA engine the Linux build uses, and with an
 AMD GPU through the HIP backend when the build opts in (`-Dhip=true`). Metal is macOS's. Windows is supported from
 source only.
 The PR reports RTX 4090 (`x86_64-windows`, `sm_89`) and NVIDIA RTX Spark N1X (`aarch64-windows`, `sm_121`) runs.
@@ -40,7 +40,7 @@ zig build native install -Dsm=89 -Dstrip=true ^
 ```
 
 `-Dsm` takes the GPU's compute capability without the dot, comma separated for several: 86 (RTX 30), 89 (RTX 40),
-120 (RTX 50), 121 (GB10 / RTX Spark N1X). The server is `zig-out\native\bin\tensorfold-native.exe`;
+120 (RTX 50), 121 (GB10 / RTX Spark N1X). The server is `zig-out\native\bin\tensorfold.exe`;
 `zig-out\bin\tf-cuda-test.exe` runs the GPU suites (`tf-cuda-test info`, `smoke`, `glue`, `sample`, `quant-ref`,
 `affine8`, `modelopt`, `exlr8`).
 
@@ -97,9 +97,9 @@ and MIOpen found.
 ## Run
 
 ```bat
-tensorfold-native pull TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit
-tensorfold-native models
-tensorfold-native serve <model path> --name local-model --parallel 1 --context 8192 --temperature 0 --no-thinking
+tensorfold.exe pull TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit
+tensorfold.exe models
+tensorfold.exe serve <model path> --name local-model --parallel 1 --context 8192 --temperature 0 --no-thinking
 ```
 
 The server listens on `http://127.0.0.1:8080/v1`. Ctrl+C (or closing the console) stops it cleanly.
@@ -125,8 +125,8 @@ Nemotron 3.5 Lightning serves as on Linux. The Qwen3.5 hybrids have a CUDA engin
 the same rounding points, so a window of up to 16 rows reproduces one-token steps bit for bit:
 
 ```bat
-tensorfold-native serve <Qwen3.5-2B-MLX-4bit> --name qwen2b --context 32768
-tensorfold-native serve <Qwen3.8-27B-MLX-4bit> --name qwen27b --context 8192 --parallel 4 ^
+tensorfold.exe serve <Qwen3.5-2B-MLX-4bit> --name qwen2b --context 32768
+tensorfold.exe serve <Qwen3.8-27B-MLX-4bit> --name qwen27b --context 8192 --parallel 4 ^
   --drafter <Qwen3.8-27B-DFlash2>
 ```
 

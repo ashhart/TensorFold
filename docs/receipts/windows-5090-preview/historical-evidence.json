@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "qualification": "historical E36 only; not the rebased PR head",
+  "executable_sha256": "e36d64902e986286e5ecd72b8f6658bd7b79f7f4d543d9d6c963958d8fbcdcc7",
+  "historical_source_base": "4b3fdd6ebdb5b88df8b6de83981227c9ea4cce06",
+  "cohort_order": [
+    "cache-on",
+    "cache-off",
+    "cache-off",
+    "cache-on"
+  ],
+  "date": "2026-11-10",
+  "analysis_sha256": "e85dbd213225c5313e5859c92c314a12850e8e49a39f3635e06a13a76dbb007c",
+  "gpu": "RTX 5090 32 GB",
+  "os": "Windows 11 x64",
+  "comparison": "same executable, paired workloads, one active stream; medium and xhigh reasoning; first and repeat requests",
+  "performance_accepted": false,
+  "cache_promoted": false,
+  "unresolved": "xhigh/code repeat decode geomean on/off 0.9970910858337306; 5 of 6 pairs slower; both order-pair medians below 1",
+  "fresh_head_gpu_validation": "not run; main server is in use",
+  "privacy_scope": "Only numeric pair observations and synthetic workload identifiers; no prompts, responses, hostnames, settings or process logs."
+}
