@@ -78,14 +78,24 @@ the 4-bit decoder has one lowest-index difference with overlapping maximum sets.
 all 16 suffix top tokens; 8-bit matches 14/16. Those different-input results are retained and are not an accepted end-to-end pass.
 This is one real-image fixture, not a broad real-image benchmark.
 
-The download URL can change its bytes; reproduce this receipt only with the recorded hashes.
-The image itself is not redistributed here. The token fixture is the `tokens` array in `real-image-fp64.json`:
+The download URL can change its bytes. The photograph's licence is unrecorded, so it is no longer in the tree; its receipts are kept as
+historical records (`synthetic-image-fixture.json` lists every one) and cannot be replayed from this checkout. The token fixture below is the `tokens` array in `real-image-fp64.json`:
 
 ```sh
 python3 -c "import json,numpy as np; np.save('image-tokens.npy',np.asarray(json.load(open('docs/receipts/lfm3/real-image-fp64.json'))['tokens'],dtype='<u4'))"
 python3 -c "import numpy as np; x=np.fromfile('fp64-image.bf16',dtype='<u2'); np.save('projected.npy',(x.astype('u4')<<16).view('f4').reshape(-1,2048))"
 ./zig-out/bin/tf-lfm3-forward MODEL_DIR image-tokens.npy native-on-fp64-rows.bf16 images fp64-image.bf16 4
 python3 tools/lfm3/fp64_reference.py --model-dir MODEL_DIR --tokens image-tokens.npy --image-rows projected.npy --image-start 4 --output fp64-image-text.bf16
+```
+
+The generated image that replaces the photograph needs none of those files. `tools/lfm3/synthetic_image.py` writes the committed
+`synthetic-image-input.png` and builds its token fixture from a checkpoint's own tokenizer, both against pins in `synthetic-image-fixture.json`.
+`tools/lfm3/synthetic_image_receipt.py` runs the vision and decoder comparisons above (and, with `--stages fp32 rounded`, the FP32-graph and
+rounding-replay ones) at 4/6/8 bits and writes a new receipt from the measured files only; it never reads a photograph receipt's values:
+
+```sh
+python3 tools/lfm3/synthetic_image.py image && python3 tools/lfm3/synthetic_image.py tokens --model-dir MODEL_DIR
+python3 tools/lfm3/synthetic_image_receipt.py --model-root MODELS --work /tmp/synthetic --output docs/receipts/lfm3/synthetic-image-fp64.json
 ```
 
 The affine-only replay still had one disjoint VL6 reasoning position repeated at three fixture lengths.
