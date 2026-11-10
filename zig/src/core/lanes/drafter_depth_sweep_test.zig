@@ -1,4 +1,4 @@
-//! The depth sweep on the lane core's FakeDrafter over the fake target, and three faulty drafters it must refuse.
+//! The depth sweep on the lane core's FakeDrafter: six faulty drafters it must refuse.
 const std = @import("std");
 const sweep = @import("drafter_depth_sweep.zig");
 const dr = @import("drafter.zig");
@@ -17,6 +17,7 @@ const Harness = struct {
     sampling: ?Sampling,
     use_deeper: bool = true,
     use_want: bool = true,
+    want_off: bool = false, // `want` one token off the deeper twin's last draft: the references disagree
     fault: Fault = .none,
     under: FakeDrafter = .{},
     twin: FakeDrafter = .{},
@@ -101,6 +102,7 @@ const Harness = struct {
             o.* = t;
             try guess.append(gpa, t);
         }
+        if (h.want_off) out[out.len - 1] = (out[out.len - 1] + 1) % fake.vocab;
     }
 
     fn end(ctx: *anyopaque) void {
@@ -117,9 +119,9 @@ const Harness = struct {
     }
 };
 
-const Fault = enum { none, ignore_depth, over_by_one, never_shrinks, shifted };
+const Fault = enum { none, ignore_depth, over_by_one, never_shrinks, under_by_one, shifted, depth_grows };
 
-/// A drafter's hold with a planted fault: the depth it asks its inner drafter for, or a wrong pending token.
+/// A planted fault: a wrong asked depth or pending token, or facts().depth grown past the block.
 const Faulty = struct {
     inner: dr.Drafter,
     fault: Fault,
@@ -148,7 +150,10 @@ const Faulty = struct {
     }
 
     fn facts(ptr: *anyopaque) dr.Facts {
-        return self(ptr).inner.facts();
+        const x = self(ptr);
+        var f = x.inner.facts();
+        if (x.fault == .depth_grows and x.widest > 0) f.depth += 1;
+        return f;
     }
 
     fn open(ptr: *anyopaque, s: *Stream) anyerror!void {
@@ -168,7 +173,8 @@ const Faulty = struct {
             .ignore_depth => x.inner.facts().depth,
             .over_by_one => it.depth + 1,
             .never_shrinks => x.widest,
-            .shifted => it.depth,
+            .under_by_one => it.depth - 1,
+            .shifted, .depth_grows => it.depth,
         };
         if (x.fault == .shifted) it.pending = (it.pending + 1) % fake.vocab;
         return x.inner.hold(&.{it});
@@ -207,6 +213,18 @@ test "depth sweep: a drafter ignoring Hold.depth, over-drafting, never shrinking
     }
     var h: Harness = .{ .sampling = null, .fault = .shifted };
     try std.testing.expectError(error.DraftsDiffer, run(&h));
+}
+
+test "depth sweep: a drafter holding one fewer than asked fails, and so does a facts().depth grown past the block" {
+    var under: Harness = .{ .sampling = null, .fault = .under_by_one };
+    try std.testing.expectError(error.HeldFewer, run(&under));
+    var grows: Harness = .{ .sampling = null, .fault = .depth_grows };
+    try std.testing.expectError(error.DepthOverBlock, run(&grows));
+}
+
+test "depth sweep: a family reference off the deeper instance's drafts is refused, whoever drafts" {
+    var h: Harness = .{ .sampling = null, .want_off = true };
+    try std.testing.expectError(error.ReferencesDisagree, run(&h));
 }
 
 test "depth sweep: no reference and a facts().depth past the block are refused" {
