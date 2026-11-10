@@ -8,7 +8,7 @@ import time
 import numpy as np
 
 from dots_mocr_reference import (REVISION, ORACLE_VERSIONS, Scores, SdpaProbe, example_prompt, flash_or_stand_in,
-                                 load_model, pinned, require, selected_pci, sha, tower_config)
+                                 load_model, pinned, require, sdpa_backend, selected_pci, sha, tower_config)
 
 IMAGE_VERSIONS = {"pillow": "12.2.0", "qwen-vl-utils": "0.0.10"}  # the demo fixture's pixels; Pillow 13 changes them
 VISION_ROPE_POSITIONS = [0, 1, 239, 3393]  # the tower rotary contract's positions
@@ -80,7 +80,7 @@ def oracle(args):
     inputs = processor(text=[text], images=image_inputs, videos=video_inputs, padding=True, return_tensors="pt")
     for key, tensor in inputs.items():
         np.save(args.output / f"input-{key}.npy", tensor.cpu().numpy())
-    config = tower_config(args.checkpoint)
+    config = tower_config(args.checkpoint, args.attention)
     patch_rows = inputs.pixel_values.shape[0]
     image_arrays = (config.vision_config.num_hidden_layers + 4 if args.vision_only else 5)
     disk_required = image_arrays * patch_rows * config.vision_config.embed_dim * 2 + (2 << 30)
@@ -96,6 +96,7 @@ def oracle(args):
     if free < required:
         raise RuntimeError(f"oracle needs {required} free bytes including headroom, found {free}")
     model = load_model(torch, args.checkpoint, config, args.attention)
+    sdpa_backend(torch, args.sdpa_backend)
     rope = vision_rope(torch, model, args.output)
     captured, bias_rounding = set(), {}
 
@@ -155,7 +156,8 @@ def oracle(args):
         "pixel_sha256": sha(inputs.pixel_values.float().cpu().numpy().astype("<f4").tobytes()),
         "image_grid_thw": inputs.image_grid_thw.cpu().tolist(),
         "max_new_tokens": args.max_new_tokens, "do_sample": False, "attn_implementation": args.attention,
-        "vision_attn_implementation": config.vision_config.attn_implementation, "sdpa": probe.summary(),
+        "vision_attn_implementation": config.vision_config.attn_implementation, "sdpa_backend": args.sdpa_backend,
+        "sdpa": probe.summary(),
         "vision_rope": rope, "patch_bias_rounding": bias_rounding or None, "vision_only": args.vision_only,
         "eos_reached": bool(ids and ids[-1] in end_ids),
         "seconds": seconds, "peak_device_bytes": torch.cuda.max_memory_allocated(),

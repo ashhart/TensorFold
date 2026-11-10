@@ -83,19 +83,38 @@ def selected_pci(torch):
     return text.value.decode().lower()
 
 
-def tower_config(checkpoint):
-    """The checkpoint's config with the tower on SDPA: the pinned tower config defaults to flash-attn."""
+def has_flash():
+    """Whether flash-attn is installed (else flash_or_stand_in puts a stand-in in its place)."""
+    try:
+        importlib.metadata.version("flash-attn")
+        return True
+    except importlib.metadata.PackageNotFoundError:
+        return False
+
+
+def tower_config(checkpoint, attention):
+    """The checkpoint's config, its tower on `attention` when flash-attn is installed, else on SDPA (no flash-attn)."""
     from transformers import AutoConfig
     config = AutoConfig.from_pretrained(checkpoint, trust_remote_code=True, local_files_only=True)
-    config.vision_config.attn_implementation = "sdpa"
+    config.vision_config.attn_implementation = attention if has_flash() else "sdpa"
     return config
 
 
+def sdpa_backend(torch, name):
+    """Torch's own SDPA choice ("auto"), or the math kernel alone ("math"): flash, memory-efficient and cuDNN off."""
+    if name == "math":
+        for enable in (torch.backends.cuda.enable_flash_sdp, torch.backends.cuda.enable_mem_efficient_sdp,
+                       torch.backends.cuda.enable_cudnn_sdp):
+            enable(False)
+
+
 def load_model(torch, checkpoint, config, attention):
-    """Load the pinned model on cuda:0 and refuse a tower block whose attention is not VisionSdpaAttention."""
+    """Load the pinned model on cuda:0; an SDPA tower refuses a block whose attention is not VisionSdpaAttention."""
     from transformers import AutoModelForCausalLM
     model = AutoModelForCausalLM.from_pretrained(checkpoint, config=config, attn_implementation=attention, torch_dtype=torch.bfloat16,
                                                  device_map="cuda:0", trust_remote_code=True, local_files_only=True).eval()
+    if config.vision_config.attn_implementation != "sdpa":
+        return model
     sdpa = sys.modules[type(model.vision_tower).__module__].VisionSdpaAttention
     if wrong := [i for i, block in enumerate(model.vision_tower.blocks) if type(block.attn) is not sdpa]:
         raise RuntimeError(f"tower blocks {wrong} do not use VisionSdpaAttention")
@@ -267,7 +286,7 @@ def text(args):
                                              tokenize=False, add_generation_prompt=True)
     inputs = processor.tokenizer([rendered], return_tensors="pt")
     np.save(args.output / "input-input_ids.npy", inputs.input_ids.cpu().numpy())
-    model = load_model(torch, args.checkpoint, tower_config(args.checkpoint), args.attention)
+    model = load_model(torch, args.checkpoint, tower_config(args.checkpoint, args.attention), args.attention)
     rotary = model.model.rotary_emb
     np.save(args.output / "rope-inv_freq.npy", rotary.inv_freq.detach().float().cpu().numpy())
     with torch.inference_mode():
@@ -331,7 +350,7 @@ def score(args):
     reference_images = image_modes().reference_images
     reference = json.loads((args.reference_dir / "result.json").read_text())
     ids = json.loads(args.native_ids.read_text())
-    config = tower_config(args.checkpoint)
+    config = tower_config(args.checkpoint, args.attention)
     prompt = reference["prompt_ids"]
     saved = np.load(args.reference_dir / "input-input_ids.npy", allow_pickle=False)
     if saved.ndim != 2 or saved.shape[0] != 1 or saved[0].tolist() != prompt:
@@ -340,6 +359,7 @@ def score(args):
         raise ValueError("the reference prompt and the native ids must be non-empty lists of vocabulary ids")
     images = reference_images(torch, args.reference_dir, prompt, config)
     model = load_model(torch, args.checkpoint, config, args.attention)
+    sdpa_backend(torch, args.sdpa_backend)
     with torch.inference_mode(), SdpaProbe(torch) as probe:
         sequence = torch.tensor([prompt + ids], device="cuda:0")
         logits = model(input_ids=sequence, use_cache=False, **images).logits[0, len(prompt) - 1:-1].float().cpu().numpy()
@@ -356,7 +376,7 @@ def score(args):
             worst.append({"at": i, "native": token, "gap": gap, "step": step, "kind": kind})
     count = int(images["image_grid_thw"].shape[0]) if images else 0
     args.output.write_text(json.dumps({"ids": len(ids), "images": count, **counts, "differences": worst,
-                                       "sdpa": probe.summary()}, indent=2) + "\n")
+                                       "sdpa_backend": args.sdpa_backend, "sdpa": probe.summary()}, indent=2) + "\n")
     print(json.dumps({"ids": len(ids), "images": count, **counts, "first_differences": worst[:16],
                       "all_in": str(args.output)}, indent=2))
     if counts["fail"]:
@@ -424,6 +444,9 @@ def image_modes():
     return module
 
 
+SDPA_BACKEND = "auto: Torch picks each SDPA kernel; math: the math kernel alone (flash, memory-efficient and cuDNN off)"
+
+
 def positive(text):
     if (value := int(text)) <= 0:
         raise argparse.ArgumentTypeError("must be positive")
@@ -444,6 +467,7 @@ def main():
     mode.add_argument("--pci", required=True, help="the selected GPU's PCI address, checked before model allocation")
     mode.add_argument("--vision-only", action="store_true", help="capture every vision block and the patch bias rounding, without decoder generation")
     mode.add_argument("--extra-image", type=Path, action="append", default=[], help="append another image to test independent image spans")
+    mode.add_argument("--sdpa-backend", choices=["auto", "math"], default="auto", help=SDPA_BACKEND)
     mode.set_defaults(run=images.oracle)
     mode = modes.add_parser("sources", help=sources.__doc__, description=sources.__doc__)
     mode.add_argument("checkpoint", type=Path)
@@ -477,6 +501,7 @@ def main():
     mode.add_argument("native_ids", type=Path, help="a JSON list of the native reply ids")
     mode.add_argument("output", type=Path, help="new JSON file for every difference")
     mode.add_argument("--attention", choices=["flash_attention_2", "sdpa"], default="sdpa")
+    mode.add_argument("--sdpa-backend", choices=["auto", "math"], default="auto", help=SDPA_BACKEND)
     mode.set_defaults(run=score)
     mode = modes.add_parser("compare", help=compare.__doc__, description=compare.__doc__)
     mode.add_argument("reference_dir", type=Path)
