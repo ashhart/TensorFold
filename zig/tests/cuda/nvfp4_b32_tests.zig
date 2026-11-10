@@ -165,7 +165,7 @@ pub fn run(gpu: check.Gpu) !void {
     const sms: u32 = @intCast(try gpu.ctx.attribute(.multiprocessor_count));
     var x = try X.load(gpu.d, sms);
     defer x.unload();
-    var y = try Y.load(gpu.d, sms);
+    var y = try Y.load(gpu.d, sms, .e2m1);
     defer y.unload();
     const k: Kernels = .{ .x = &x, .y = &y, .router = try cuda.grouped.Router.resolve(mod) };
     const bufs: Bufs = .{

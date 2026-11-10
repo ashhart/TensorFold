@@ -25,6 +25,12 @@ __device__ __forceinline__ uint32_t fp4pair(uint32_t w, int s) {
     return r;
 }
 
+// fp4pair with code 0b1000 read as +5 (NVFP4_NZ5): the one code fp4pair widens to 0x8000, -0, becomes 0x40A0.
+__device__ __forceinline__ uint32_t fp4pair_nz5(uint32_t w, int s) {
+    const uint32_t r = fp4pair(w, s);
+    return r ^ (__vcmpeq2(r, 0x80008000u) & 0xC0A0C0A0u);
+}
+
 // Two E4M3 codes, the low two bytes of v, as a bf16x2 pair.
 __device__ __forceinline__ uint32_t fp8pair(uint32_t v) {
     const uint32_t t = ((v & 0x7Fu) << 4) | ((v & 0x80u) << 8) | ((v & 0x7F00u) << 12) | ((v & 0x8000u) << 16);
