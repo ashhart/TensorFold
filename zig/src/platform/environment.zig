@@ -43,6 +43,8 @@ pub const rules = [_]Rule{
     .{ .name = "TF_CUDA_SEGMENTS", .scope = .cuda, .kind = .segments, .trim = " ", .forms = "a whole number from 1 to 4, or empty for the default" },
     .{ .name = "TF_CUDA_CARVEOUT", .scope = .cuda, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_CUDA_CARVEOUT_MIB", .scope = .cuda, .kind = .mib, .forms = "a positive whole MiB count fitting a native byte size, or empty for 1792 MiB" },
+    .{ .name = "TF_FLASHNEXT_SHARD_HEAD", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (1 splits the head at TP=2; TP=1 stays whole)" },
+    .{ .name = "TF_FLASHNEXT_EXL3_MTP_RESIDENT", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (1 keeps the EXL3 MTP experts on device)" },
     .{ .name = "TF_MTP_DRAFTS", .scope = .cuda, .kind = .u32, .forms = "a whole number from 0 to 4294967295 (clamped to the drafter's window)" },
     .{ .name = "TF_DRAFT_NODES", .scope = .cuda, .kind = .size, .forms = "a whole nonnegative native-size node count (capped by the drafter's window)" },
     .{ .name = "TF_QMMF_HALF_BELOW", .scope = .cuda, .kind = .size, .forms = "a whole nonnegative native-size block count (0 disables half tiles)" },
