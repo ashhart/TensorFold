@@ -26,6 +26,8 @@ zig build native -Dcpu=apple_m1
 Replace `4bit` with `6bit` or `8bit` for those exports. A complete local checkpoint folder also works.
 The VL checkpoint loads its own image tower. Send images through OpenAI `image_url` content parts.
 The default image budget is 256 tokens per request, with at most four images.
+Budgets outside 64–4096 tokens are refused. Each prepared image must cover at least 65,536 pixels (64 merged tokens).
+Smaller nonempty raw images are resized up to that floor; an undersized prepared grid is refused before vision execution.
 Video input is not implemented. JPEG and WebP decoding require the matching shared decoder libraries.
 
 The shared lane engine handles target verification, sampling and concurrent streams.

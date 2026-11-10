@@ -60,7 +60,7 @@ def save_rows(path: pathlib.Path, bf16: pathlib.Path) -> None:
 
 
 def vision_weight_identity(model: pathlib.Path) -> dict:
-    """A hash over every vision and projector tensor's name, dtype, shape and bytes, in name order."""
+    """The vision/projector tensor identity and exact model configuration required before sharing a CPU reference."""
     with open(model / "model.safetensors", "rb") as f:
         (length,) = struct.unpack("<Q", f.read(8))
         header = json.loads(f.read(length))
@@ -73,6 +73,7 @@ def vision_weight_identity(model: pathlib.Path) -> dict:
             digest.update(json.dumps([name, entry["dtype"], entry["shape"]]).encode() + f.read(end - begin))
             total += end - begin
     return {"tensors": len(names), "tensor_bytes": total, "named_tensor_sha256": digest.hexdigest(),
+            "model_config_sha256": file_sha256(model / "config.json"),
             "algorithm": "sha256 over, per tensor in name order, the JSON [name, dtype, shape] then its bytes"}
 
 
@@ -227,9 +228,22 @@ def main() -> int:
         "host": {"chip": output(["sysctl", "-n", "machdep.cpu.brand_string"]), "model": output(["sysctl", "-n", "hw.model"]),
                  "memory_bytes": int(output(["sysctl", "-n", "hw.memsize"])), "macos": output(["sw_vers", "-productVersion"]),
                  "macos_build": output(["sw_vers", "-buildVersion"]), "architecture": platform.machine()},
-        "commands": COMMANDS, "widths": widths, "accepted_threshold": None, "fidelity_pass": None,
+        "commands": COMMANDS, "widths": widths,
+        "interpretation": "Measurements only; this receipt does not assign a fidelity or performance acceptance verdict.",
     }
-    args.output.write_text(json.dumps(receipt, indent=2, allow_nan=False) + "\n")
+    paths = [(ROOT, "$TF_SRC"), (args.model_root, "$MODEL_ROOT"), (args.work, "$WORK"),
+             (args.bin_dir, "$BIN_DIR"), (pathlib.Path(sys.executable), "$PYTHON")]
+    for bits in args.widths:
+        name = f"LFM3-VL-2B-MLX-{bits}bit"
+        paths.append((args.model_root / name, f"$MODEL_ROOT/{name}"))
+    aliases = {}
+    for path, label in paths:
+        aliases[str(path.absolute())] = label
+        aliases[str(path.resolve())] = label
+    text = json.dumps(receipt, indent=2, allow_nan=False)
+    for path, label in sorted(aliases.items(), key=lambda item: len(item[0]), reverse=True):
+        text = text.replace(json.dumps(path)[1:-1], label)
+    args.output.write_text(text + "\n")
     print(f"wrote {args.output}")
     return 0
 
