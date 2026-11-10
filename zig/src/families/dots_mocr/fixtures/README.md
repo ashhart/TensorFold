@@ -41,14 +41,26 @@ the repository's pinned libjpeg-turbo 3.1.4.1. Use
 `TENSORFOLD_LIBTURBOJPEG` to select a separate local library file.
 
 `tools/zig/dots_mocr_reference.py oracle` runs the pinned Hugging Face
-example on one HIP GPU with Transformers 4.57.6 and qwen-vl-utils 0.0.10;
-`compare` checks a native greedy trace against its output:
+example on one GPU with Transformers 4.57.6, Pillow 12.2.0 and
+qwen-vl-utils 0.0.10 (Pillow 13 resizes the demo image to other pixels);
+`compare` checks a native greedy trace against its output. The decoder
+and the tower take `--attention`. Without flash-attn installed (no aarch64
+wheel, as on the GB10) the tower falls back to SDPA and the decoder needs
+`--attention sdpa`; `--sdpa-backend math` keeps SDPA on its math kernel.
+On HIP with flash-attn:
 
 ```sh
 FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE \
   python tools/zig/dots_mocr_reference.py oracle CHECKPOINT_DIR DEMO_IMAGE \
   OUTPUT_DIR --pci PCI_ID --max-new-tokens 64
 python tools/zig/dots_mocr_reference.py compare OUTPUT_DIR NATIVE_PREFIX
+```
+
+On CUDA without flash-attn:
+
+```sh
+python tools/zig/dots_mocr_reference.py oracle CHECKPOINT_DIR DEMO_IMAGE \
+  OUTPUT_DIR --pci PCI_ID --attention sdpa --max-new-tokens 64
 ```
 
 `rope_inv_freq.txt` holds the 64 float32 bit patterns of the checkpoint's
