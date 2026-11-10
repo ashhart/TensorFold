@@ -18,6 +18,8 @@ const Allocator = std.mem.Allocator;
 pub const lifetime_ms: i64 = 60 * 60 * 1000;
 /// Tests only: a shorter lifetime, read in test builds alone.
 pub var test_lifetime_ms: ?i64 = null;
+/// Tests only: the server the last socket opened on, so a test can read its store and cache budget.
+pub var test_server: std.atomic.Value(?*Server) = .init(null);
 /// The session waits on the socket at most this long before it checks drain, expiry and the idle timeout again.
 pub const step_ms: i64 = 1000;
 /// Named lanes one connection accepts; the default lane does not count.
@@ -134,6 +136,7 @@ pub const Session = struct {
 
 /// The upgrade answered, then the session until it closes; the HTTP connection closes after it.
 pub fn serve(srv: *Server, conn: *Conn, a: Allocator) void {
+    if (builtin.is_test) test_server.store(srv, .release); // before the 101, so a test that reads the 101 sees this server
     if (!ws_upgrade.answer(conn, a)) return;
     conn.budget = .{};
     const started = conn.nowMs();

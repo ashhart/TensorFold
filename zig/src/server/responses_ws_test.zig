@@ -280,4 +280,5 @@ test "Responses socket: the lifetime ends with websocket_connection_limit_reache
 
 test {
     _ = @import("responses_ws_gate_test.zig");
+    _ = @import("responses_ws_bounds_test.zig");
 }
