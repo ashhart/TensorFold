@@ -22,13 +22,18 @@ pub const Client = struct {
 
     /// Connects and sends the upgrade with ``key`` as its bearer token (null: none).
     pub fn open(c: *Client, a: Allocator, io: std.Io, port: u16, key: ?[]const u8) !void {
+        const auth = if (key) |k| try std.fmt.allocPrint(a, "Authorization: Bearer {s}\r\n", .{k}) else "";
+        return c.openWith(a, io, port, try std.fmt.allocPrint(a, "Host: localhost\r\n{s}", .{auth}));
+    }
+
+    /// Connects and sends the upgrade with these header lines (each ending in CRLF), Host among them.
+    pub fn openWith(c: *Client, a: Allocator, io: std.Io, port: u16, headers: []const u8) !void {
         const addr: std.Io.net.IpAddress = .{ .ip4 = .loopback(port) };
         c.* = .{ .io = io, .stream = try addr.connect(io, .{ .mode = .stream }) };
         c.reader = .init(c.stream, io, &c.rbuf);
         c.writer = .init(c.stream, io, &c.wbuf);
-        const auth = if (key) |k| try std.fmt.allocPrint(a, "Authorization: Bearer {s}\r\n", .{k}) else "";
-        const head = try std.fmt.allocPrint(a, "GET /v1/responses HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" ++
-            "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n{s}\r\n", .{auth});
+        const head = try std.fmt.allocPrint(a, "GET /v1/responses HTTP/1.1\r\n{s}Upgrade: websocket\r\nConnection: Upgrade\r\n" ++
+            "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n", .{headers});
         try c.writer.interface.writeAll(head);
         try c.writer.interface.flush();
         const first = try c.reader.interface.takeDelimiterInclusive('\n');
