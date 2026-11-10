@@ -17,6 +17,7 @@ pub fn glmCudaShared(b: *std.Build, target: std.Build.ResolvedTarget, optimize: 
     m.addImport("cuda", cuda);
     m.addImport("core", core);
     m.addImport("canon", canon);
+    m.addImport("mesh", @import("mesh.zig").module(b, target, optimize, canon)); // shares declared over that canon
     m.addImport("lanes", lanes);
     m.addImport("heat", heat);
     m.addImport("tp", @import("tp.zig").module(b, target, optimize, cuda)); // over the engine's own cuda module
