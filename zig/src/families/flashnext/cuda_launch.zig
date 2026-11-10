@@ -466,6 +466,7 @@ test {
     _ = @import("cuda_rank_engine.zig");
     _ = @import("cuda_rank_verify.zig");
     _ = @import("cuda_round_graph.zig");
+    _ = @import("cuda_window_graph.zig");
     _ = @import("cuda_rank_memory.zig");
     _ = @import("cuda_rank_wire.zig");
     _ = @import("cuda_modelopt_experts.zig");

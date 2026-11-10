@@ -4,6 +4,8 @@ const std = @import("std");
 pub fn steps(b: *std.Build, cuda: *std.Build.Module, core: *std.Build.Module, family: *std.Build.Module, all: *std.Build.Step) void {
     const compose = b.step("test-flashnext-compose-host", "Dense heads and shared expert composition without a GPU");
     compose.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = family, .filters = &.{ "split out lane", "head split", "dense split", "full heads", "half the heads", "shared expert composition" } })).step);
+    const graphs = b.step("test-flashnext-window-graph-host", "Flash Next CUDA window graph cache without a GPU");
+    graphs.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = family, .filters = &.{ "window graphs:", "window graph keys:", "shared window keys:" } })).step);
     const moe = b.step("test-moetile-host", "Shared down slot fixtures, launch dispatch and contract records without a GPU");
     all.dependOn(moe);
     moe.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cuda, .filters = &.{"shared down stride"} })).step);

@@ -204,11 +204,13 @@ pub fn slotOf(key: anytype) @TypeOf(key) {
 pub fn Cache(comptime K: type) type {
     return struct {
         const Self = @This();
-        /// A held graph and the whole key it was last recorded for; the map holds it under its slot (slotOf).
+        /// A held graph and the whole key it was last recorded for; a slot holds up to two (e.g. swapped spares).
         const Held = struct { key: K, exec: cuda.graph.Exec };
-        map: std.AutoHashMapUnmanaged(K, Held) = .empty,
+        const Pair = struct { ways: [2]?Held = .{ null, null }, lru: u1 = 0 };
+        map: std.AutoHashMapUnmanaged(K, Pair) = .empty,
         /// Slots run once eagerly and are captured the second time (a one-off pass would never pay its capture back).
         seen: std.AutoHashMapUnmanaged(K, void) = .empty,
+        held: usize = 0,
         captures: u64 = 0,
         replays: u64 = 0,
         /// Held graphs re-recorded at a new length, for a new sequence or on other buffers and updated in place.
@@ -217,38 +219,67 @@ pub fn Cache(comptime K: type) type {
         off: bool = false,
 
         pub fn clear(c: *Self, gpa: std.mem.Allocator) void {
+            if (c.held > 0) c.log();
             var it = c.map.valueIterator();
-            while (it.next()) |h| h.exec.deinit();
+            while (it.next()) |p| {
+                for (&p.ways) |*w| if (w.*) |*h| h.exec.deinit();
+            }
             c.map.clearAndFree(gpa);
             c.seen.clearAndFree(gpa);
+            c.held = 0;
         }
 
         /// `pass.run()` (kernels only: its uploads already queued) as `key`'s graph, captured first when new.
         pub fn run(c: *Self, gpa: std.mem.Allocator, stream: cuda.Stream, key: K, pass: anytype) !void {
             if (c.off) return pass.run();
             const slot = slotOf(key);
-            if (c.map.getPtr(slot)) |h| {
-                if (std.meta.eql(h.key, key)) {
-                    c.replays += 1;
+            if (c.map.getPtr(slot)) |p| {
+                for (&p.ways, 0..) |*w, i| if (w.*) |*h| {
+                    if (std.meta.eql(h.key, key)) {
+                        p.lru = @intCast(1 - i);
+                        c.replays += 1;
+                        return h.exec.launchOn(stream);
+                    }
+                };
+                if (p.ways[1] != null) {
+                    // both ways taken: re-record the least recently used one in place for the new key
+                    const v = p.lru;
+                    const h = &p.ways[v].?;
+                    refresh(stream, pass, &h.exec) catch |err| return c.fail(err, pass);
+                    h.key = key;
+                    p.lru = v ^ 1;
+                    c.updates += 1;
+                    if ((c.captures + c.updates) % 64 == 1) c.log();
                     return h.exec.launchOn(stream);
                 }
-                // the same pass at another length, sequence or lane: recorded again, the held graph updated in place
-                refresh(stream, pass, &h.exec) catch |err| return c.fail(err, pass);
-                h.key = key;
-                c.updates += 1;
-                return h.exec.launchOn(stream);
+                if (c.held < max_graphs) {
+                    const exec = capture(stream, pass) catch |err| return c.fail(err, pass);
+                    p.ways[1] = .{ .key = key, .exec = exec };
+                    p.lru = 0;
+                    c.held += 1;
+                    c.captures += 1;
+                    if ((c.captures + c.updates) % 64 == 1) c.log();
+                    return exec.launchOn(stream);
+                }
             }
-            if (c.map.count() >= max_graphs or c.seen.count() >= 4 * max_graphs) c.clear(gpa);
+            if (c.held >= max_graphs or c.seen.count() >= 4 * max_graphs) c.clear(gpa);
             if (!c.seen.contains(slot)) {
                 try c.seen.put(gpa, slot, {});
                 return pass.run();
             }
             var exec = capture(stream, pass) catch |err| return c.fail(err, pass);
-            errdefer exec.deinit();
-            try c.map.put(gpa, slot, .{ .key = key, .exec = exec });
+            {
+                errdefer exec.deinit();
+                try c.map.put(gpa, slot, .{ .ways = .{ .{ .key = key, .exec = exec }, null }, .lru = 1 });
+            }
+            c.held += 1;
             c.captures += 1;
-            if (c.captures % 64 == 1) std.log.info("{s} graphs: {d} captured, {d} updated, {d} replayed, {d} held", .{ @typeName(K), c.captures, c.updates, c.replays, c.map.count() });
+            if ((c.captures + c.updates) % 64 == 1) c.log();
             try exec.launchOn(stream);
+        }
+
+        fn log(c: *const Self) void {
+            std.log.info("{s} graphs: {d} captured, {d} updated, {d} replayed, {d} held", .{ @typeName(K), c.captures, c.updates, c.replays, c.held });
         }
 
         /// The stream is out of capture again: this pass eagerly, and the ones after it.
