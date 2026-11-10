@@ -298,7 +298,7 @@ fn gib(b: u64) f64 {
 fn memoryMode(gpu: Gpu, dir: []const u8) !void {
     const a = gpu.gpa;
     const io = gpu.io;
-    const o = X.memory.options();
+    const o = try X.memory.options();
     const head = try X.memory.headBytes(a, io, dir, o);
     const one = try tp.deviceBytes(a, io, dir, o, try tp.Rank.init(1, 0));
     const ranks = [2]u64{ try tp.deviceBytes(a, io, dir, o, try tp.Rank.init(2, 0)), try tp.deviceBytes(a, io, dir, o, try tp.Rank.init(2, 1)) };
