@@ -158,14 +158,15 @@ pub fn chunk(self: anytype, stream: *lanes.Stream, f: *Fill, max_rows: u32) !boo
     lanes.prefill_widths.completed(self.gpa, stream, end - f.at);
     f.at = end;
     stream.fill_at.store(@intCast(end), .monotonic);
-    // a mark the store asked for, where this pass cut anyway: the lane host copies the state here
+    // a mark the store asked for, where the cold pass cuts (a resume's only place): the lane host copies the state here
+    const cold = end == f.cold; // a capped step's end inside a cold chunk keeps nothing: no pass resumes there
     if (f.kept) |k| {
-        if (end < ids.len and std.mem.indexOfScalar(u32, k.marks, @intCast(end)) != null)
+        if (cold and end < ids.len and std.mem.indexOfScalar(u32, k.marks, @intCast(end)) != null)
             self.prefix.?.keep(cache, ids, end) catch |err| {
                 if (err == error.QwenLaneTable) return err; // its table maps pages it may not hold
                 std.log.warn("qwen3_5: prompt pages not kept: {s}", .{@errorName(err)});
             };
-    } else if (end < ids.len and std.mem.indexOfScalar(u32, stream.reuse.marks, @intCast(end)) != null) {
+    } else if (cold and end < ids.len and std.mem.indexOfScalar(u32, stream.reuse.marks, @intCast(end)) != null) {
         if (stream.reuse.hook) |k| k.at(k.ptr, stream, @intCast(end));
     }
     if (end < ids.len) return false;
