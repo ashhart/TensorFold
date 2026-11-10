@@ -24,6 +24,8 @@ pub fn flags(comptime open: anytype) !void {
     spill.spill = .evicted;
     var learn = base;
     learn.learn_conversations = true;
+    var record = base;
+    record.record = "rows";
     var precision = base;
     precision.precision = .full;
     const asked = [_]struct { api.Open, []const u8 }{
@@ -35,6 +37,7 @@ pub fn flags(comptime open: anytype) !void {
         .{ ranks, "this CUDA family has no tensor-parallel ranks" },
         .{ spill, "--spill-gib" },
         .{ learn, "--learn-conversations" },
+        .{ record, "--record: qwen3 checkpoints give no rows to record on CUDA yet" },
         .{ precision, "--precision: this CUDA family reads no NVFP4 checkpoint" },
     };
     for (asked) |c| {
