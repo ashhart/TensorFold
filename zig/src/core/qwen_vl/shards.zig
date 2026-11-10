@@ -8,13 +8,18 @@ pub const Src = struct { path: [:0]const u8, off: u64, e: st.Entry };
 
 /// Every vision tensor's file, offset and header entry, found through the shard index (or the one file).
 pub fn headers(arena: std.mem.Allocator, io: std.Io, dir: []const u8) !std.StringArrayHashMapUnmanaged(Src) {
+    return headersAt(arena, io, dir, prefix);
+}
+
+/// `headers` for the tensors named under `at`, such as an HF checkpoint's `model.visual.`.
+pub fn headersAt(arena: std.mem.Allocator, io: std.Io, dir: []const u8, at: []const u8) !std.StringArrayHashMapUnmanaged(Src) {
     var files: std.StringArrayHashMapUnmanaged(void) = .empty;
     const index = try std.fs.path.join(arena, &.{ dir, "model.safetensors.index.json" });
     if (std.Io.Dir.cwd().readFileAlloc(io, index, arena, .limited(64 << 20))) |text| {
         const doc = try std.json.parseFromSliceLeaky(std.json.Value, arena, text, .{});
         const map = (doc.object.get("weight_map") orelse return error.BadIndex).object;
         var it = map.iterator();
-        while (it.next()) |kv| if (std.mem.startsWith(u8, kv.key_ptr.*, prefix)) try files.put(arena, kv.value_ptr.string, {});
+        while (it.next()) |kv| if (std.mem.startsWith(u8, kv.key_ptr.*, at)) try files.put(arena, kv.value_ptr.string, {});
     } else |_| try files.put(arena, "model.safetensors", {});
     var out: std.StringArrayHashMapUnmanaged(Src) = .empty;
     for (files.keys()) |name| {
@@ -30,12 +35,37 @@ pub fn headers(arena: std.mem.Allocator, io: std.Io, dir: []const u8) !std.Strin
         const hlen = try st.headerSize(std.mem.readInt(u64, &head, .little), end);
         const header = try arena.alloc(u8, hlen);
         try readAll(fd, header, 8);
-        const parsed = try st.parseHeaderPrefix(arena, header, @intCast(end - 8 - hlen), prefix);
+        const parsed = try st.parseHeaderPrefix(arena, header, @intCast(end - 8 - hlen), at);
         var it = parsed.iterator();
         while (it.next()) |kv| try out.put(arena, kv.key_ptr.*, .{ .path = path, .off = 8 + hlen + kv.value_ptr.begin, .e = kv.value_ptr.* });
     }
     if (out.count() == 0) return error.NoVisionTower;
     return out;
+}
+
+/// The tower's prefix among a checkpoint's tensor names: what precedes its first block's `blocks.0.norm1.weight`.
+pub fn towerPrefix(names: []const []const u8) ![]const u8 {
+    const tail = "blocks.0.norm1.weight";
+    var found: ?[]const u8 = null;
+    for (names) |n| {
+        if (!std.mem.endsWith(u8, n, tail)) continue;
+        const p = n[0 .. n.len - tail.len];
+        if (p.len > 0 and p[p.len - 1] != '.') continue;
+        if (found) |f| if (!std.mem.eql(u8, f, p)) return error.AmbiguousVisionTower;
+        found = p;
+    }
+    return found orelse error.NoVisionTower;
+}
+
+/// The tower's prefix in `dir`: among the shard index's names, else the one file's.
+pub fn findPrefix(arena: std.mem.Allocator, io: std.Io, dir: []const u8) ![]const u8 {
+    const index = try std.fs.path.join(arena, &.{ dir, "model.safetensors.index.json" });
+    const text = std.Io.Dir.cwd().readFileAlloc(io, index, arena, .limited(64 << 20)) catch return towerPrefix((try headersAt(arena, io, dir, "")).keys());
+    const doc = try std.json.parseFromSliceLeaky(std.json.Value, arena, text, .{});
+    if (doc != .object) return error.BadIndex;
+    const map = doc.object.get("weight_map") orelse return error.BadIndex;
+    if (map != .object) return error.BadIndex;
+    return towerPrefix(map.object.keys());
 }
 
 pub fn readAll(fd: std.c.fd_t, dst: []u8, at: u64) !void {
@@ -86,6 +116,26 @@ test "Qwen-VL shards: a tower's shard gives each vision tensor's file, offset, e
         try readAll(fd, bytes, s.off);
         for (bytes) |b| try std.testing.expectEqual(@as(u8, @intCast(fill)), b);
     }
+}
+
+test "Qwen-VL shards: the tower's prefix is what precedes its first block's norm1, in HF's and MLX's names" {
+    const hf = [_][]const u8{ "model.language_model.layers.0.input_layernorm.weight", "model.visual.blocks.0.norm1.weight", "model.visual.blocks.0.norm1.bias", "model.visual.blocks.10.norm1.weight" };
+    try std.testing.expectEqualStrings("model.visual.", try towerPrefix(&hf));
+    try std.testing.expectEqualStrings("vision_tower.", try towerPrefix(&.{ "vision_tower.blocks.0.norm1.weight", "language_model.x" }));
+    try std.testing.expectEqualStrings("", try towerPrefix(&.{"blocks.0.norm1.weight"}));
+    try std.testing.expectError(error.NoVisionTower, towerPrefix(&.{ "model.language_model.layers.0.input_layernorm.weight", "xblocks.0.norm1.weight" }));
+    try std.testing.expectError(error.AmbiguousVisionTower, towerPrefix(&.{ "visual.blocks.0.norm1.weight", "model.visual.blocks.0.norm1.weight" }));
+    const io = std.testing.io;
+    var fixtures: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer fixtures.deinit();
+    const a = fixtures.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors", .data = try shard(a) });
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", a);
+    try std.testing.expectError(error.NoVisionTower, findPrefix(a, io, dir)); // the one file's names hold no block
+    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors.index.json", .data = "{\"weight_map\": {\"visual.blocks.0.norm1.weight\": \"model.safetensors\"}}" });
+    try std.testing.expectEqualStrings("visual.", try findPrefix(a, io, dir));
 }
 
 test "Qwen-VL shards: a header length past 100 MB, past the file's end or cut short is refused in 1 MiB, before the read" {
