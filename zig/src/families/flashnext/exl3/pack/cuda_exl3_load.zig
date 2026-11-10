@@ -437,8 +437,8 @@ pub fn hasExperts(store: *const Store, mlp: []const u8) bool {
 }
 
 /// TF_FLASHNEXT_EXL3_ROUTED=device keeps every routed expert on the device (cuda_exl3_memory.zig reads the same).
-pub fn offloaded() bool {
-    return @import("cuda_exl3_memory.zig").options().routed_on_host;
+pub fn offloaded() !bool {
+    return (try @import("cuda_exl3_memory.zig").options()).routed_on_host;
 }
 
 fn align256(n: usize) usize {
@@ -449,7 +449,7 @@ fn align256(n: usize) usize {
 pub fn experts(gpa: std.mem.Allocator, d: *cuda.Driver, store: *Store, mlp: []const u8, world: usize, rank: usize) !*Experts {
     if (world != 1 or rank != 0) return error.UnsupportedQuantization; // one rank holds all 513
     const count = wt.experts_n + 1;
-    const offload = offloaded();
+    const offload = try offloaded();
     const x = try gpa.create(Experts);
     x.* = .{ .gpa = gpa, .ops = try opsOf(store, d), .layer = undefined };
     errdefer x.destroy();
