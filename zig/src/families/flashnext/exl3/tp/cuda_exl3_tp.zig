@@ -319,7 +319,7 @@ pub fn expertOf(name: []const u8) ?usize {
 pub fn tensorBytes(name: []const u8, e: core.safetensors.Entry, o: memory.Options, r: Rank) !u64 {
     if (expertOf(name)) |id| if (!r.owns(id)) return 0;
     // the vocabulary-split head (load.shardHead): half the trellis and svh a rank, suh whole
-    if (r.world == 2 and load.shardHead(2) and (std.mem.eql(u8, name, "lm_head.trellis") or std.mem.eql(u8, name, "lm_head.svh")))
+    if (r.world == 2 and try load.shardHead(2) and (std.mem.eql(u8, name, "lm_head.trellis") or std.mem.eql(u8, name, "lm_head.svh")))
         return (try memory.tensorBytes(name, e, o)) / 2;
     return memory.tensorBytes(name, e, o);
 }
@@ -452,7 +452,7 @@ test "exl3: expert tensors count on their own rank only; the router, the shared 
 test "exl3: the split head counts half its trellis and svh a rank" {
     const r0 = try Rank.init(2, 0);
     const tr: core.safetensors.Entry = .{ .dtype = .i16, .rank = 3, .shape = .{ 160, 15520, 80, 1, 1 }, .begin = 0, .end = 160 * 15520 * 80 * 2 };
-    if (load.shardHead(2)) try std.testing.expectEqual(tr.end / 2, try tensorBytes("lm_head.trellis", tr, .{}, r0));
+    if (try load.shardHead(2)) try std.testing.expectEqual(tr.end / 2, try tensorBytes("lm_head.trellis", tr, .{}, r0));
     try std.testing.expectEqual(tr.end, try tensorBytes("lm_head.trellis", tr, .{}, try Rank.init(1, 0)));
 }
 
