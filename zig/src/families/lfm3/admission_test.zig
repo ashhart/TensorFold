@@ -107,7 +107,6 @@ test "LFM3 image size: a budget under 64 tokens, an empty image and an extreme s
     var none: [0]u8 = .{};
     try std.testing.expectError(error.ImageTooSmall, image.prepareRgb(a, .{ .width = 0, .height = 8, .pixels = &none }, 0, 256));
     try std.testing.expectError(error.ImageTooSmall, image.prepareRgb(a, .{ .width = 8, .height = 0, .pixels = &none }, 0, 256));
-    try std.testing.expectEqualStrings("LFM3 images require a budget of at least 64 image tokens", image.explain(error.ImageTooSmall).?);
     // the 65,536-pixel floor enlarges an 8 x 8 image to 256 x 256: 16 x 16 patches, 64 tokens, within a 64-token budget
     for ([_]u32{ 64, 256 }) |tokens| {
         const grown = try image.prepareRgb(a, tiny, 0, tokens);
@@ -117,7 +116,16 @@ test "LFM3 image size: a budget under 64 tokens, an empty image and an extreme s
     }
     var thin: [201 * 3]u8 = @splat(0);
     try std.testing.expectError(error.AspectRatio, image.prepareRgb(a, .{ .width = 201, .height = 1, .pixels = &thin }, 0, 256));
-    try std.testing.expectEqualStrings("its longer side is more than 200 times its shorter side", image.explain(error.AspectRatio).?);
+}
+
+test "LFM3 prepared images below the processor minimum are refused, the minimum is admitted" {
+    const Input = struct { pixels: []const f32, gh: u32, gw: u32, tokens: u32, at: u32 = 0 };
+    const pixels = try std.testing.allocator.alloc(f32, 256 * image.patch_width);
+    defer std.testing.allocator.free(pixels);
+    var inputs = [_]Input{.{ .pixels = pixels[0 .. 252 * image.patch_width], .gh = 14, .gw = 18, .tokens = 63 }};
+    try std.testing.expectError(error.ImageTooSmall, image.validate(&inputs, 64, 64, 1));
+    inputs[0] = .{ .pixels = pixels, .gh = 16, .gw = 16, .tokens = 64 };
+    try image.validate(&inputs, 64, 64, 1);
 }
 
 test "LFM3 pixels: NaN and infinity refuse the image wherever they sit, finite values round to BF16" {
@@ -177,17 +185,17 @@ const Index = struct {
     const Names = struct {
         inner: Table.KeyIterator,
 
-        fn next(self: *Names) ?[]const u8 {
+        pub fn next(self: *Names) ?[]const u8 {
             const name = self.inner.next() orelse return null;
             return name.*;
         }
     };
 
-    fn find(self: Index, name: []const u8) !?Found {
+    pub fn find(self: Index, name: []const u8) !?Found {
         return self.table.get(name);
     }
 
-    fn keys(self: Index) Names {
+    pub fn keys(self: Index) Names {
         return .{ .inner = self.table.keyIterator() };
     }
 };

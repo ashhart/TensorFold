@@ -30,7 +30,6 @@ pub fn steps(b: *std.Build, all: *std.Build.Step) void {
     image_checks.dependOn(&image_run.step);
     checks.dependOn(image_checks);
     const metal = b.createModule(.{ .root_source_file = b.path("zig/src/metal/metal.zig"), .target = b.graph.host, .link_libc = true });
-    if (b.graph.host.result.os.tag == .macos) metal.linkSystemLibrary("objc", .{});
     const residency = b.createModule(.{
         .root_source_file = b.path("zig/src/lfm3_vision_residency_tests.zig"),
         .target = b.graph.host,
