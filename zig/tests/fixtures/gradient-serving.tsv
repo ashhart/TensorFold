@@ -117,7 +117,7 @@ zig/src/cuda/vit.zig	72c4301251f50d0f25907f0d8ad03a943281b234c506a455e413627a3ff
 zig/src/families/flashnext/cuda_attn.zig	99dfe79f919a8599490f1cdba0bec20d6e73ccbeafe26d5848419a465fdfa0d0	raw
 zig/src/families/flashnext/cuda_batch.zig	7fa858c564356e9cc80ee50a86602a5d1c1c3d1ef9ef6d0d69b2ac7a8a4b4e5e	raw	main 42ff6c510f (disk states keyed by the resolved prompt passes; serving unchanged)
 zig/src/families/flashnext/cuda_batch_state.zig	ae9d16a76aa56cd3448b3414140cbabd2f918bfb69a094b02be82544f371603c	raw	y and moe_f32 take one spare row for a --tp 2 prompt pass's padded rank block; replies unchanged
-zig/src/families/flashnext/cuda_collective.zig	bf475ffb46b3440fcad280f46e34de25cd22b79ed96a0b587d0869e7451d3519	raw	adds sumBlock, the in-place FP32 reduce-scatter with sum's peer check, deadline and abort; no served change on its own
+zig/src/families/flashnext/cuda_collective.zig	23b4f9e5689ffc3f51dcef9aad2cd1aed7802a1d2374f68c6dd78c2c41cede87	raw	adds sumBlock, the in-place FP32 reduce-scatter with sum's peer check, deadline and abort; no served change on its own; collectives on a blocking split of the nonblocking communicator, NCCL_RUNTIME_CONNECT=0 when unset; the same collectives and sums, replies unchanged
 zig/src/families/flashnext/cuda_compare_main.zig	ade014dfec88f0b386076cdc093ea20710d7bf36c33ff566ca2caf472064695b	raw	main dfd9ac5ef4 (#2585: the TF_FLASHNEXT_* startup check), c274b45cc1 (the check through the flashnext module)
 zig/src/families/flashnext/cuda_config.zig	19366ee591270c719fa6f710af0efd4d5a55cfc3e30c923f5ed08771b5c14001	raw
 zig/src/families/flashnext/cuda_draft_affine.zig	2ec22bec1a38a6d2cc7e16a65d41deeb452d1a679661351a473652b5f39f2da8	raw
@@ -132,8 +132,8 @@ zig/src/families/flashnext/cuda_images_test.zig	df984d54d9de1bb732544785cddf82a1
 zig/src/families/flashnext/cuda_lanes.zig	1ebf522d252b795b15d58a15eb38d9d3227c341df80522ad8a89d5ff3cfbdac4	raw	main 4f6017ced (marks inside the pass), fbca90714 (shared solo-chunk rule, #2391), 80e0fd72c (#2753: non-finite draft rows refused by name; finite rows unchanged), dfd9ac5ef4 (#2585: TF_FLASHNEXT_* read through platform/environment.zig, malformed text refused at startup; valid values keep their meaning), #1953: the ladder's values through snap_intermediate
 zig/src/families/flashnext/cuda_lanes_admission_test.zig	4b8052db793ba81f0e73e1b9bd77b1780bbc4fd550d90976d017da47e76faaa2	raw
 zig/src/families/flashnext/cuda_lanes_load.zig	241d091d4b5199325665d25ea5d4def81fd15660351a199773c596ca2025fa18	raw	main dfd9ac5ef4 (#2585: TF_FLASHNEXT_* read through platform/environment.zig, malformed text refused at startup; valid values keep their meaning)
-zig/src/families/flashnext/cuda_lanes_restore_test.zig	f9947521a6d9c7d7380ca1b784a93a43b364c6fa5861cad15efd3538d2b8ceff	raw
-zig/src/families/flashnext/cuda_launch.zig	849584af8bc3cd31f990911d449ec0f828318b05d480fe98fc0c287f5b6fb14d	raw	exports cuda_moe_exchange.zig for its device test; no served change
+zig/src/families/flashnext/cuda_lanes_restore_test.zig	cf2ca3433f33a75993b7e12a24d38dd37ae0a995718758617549bc9544dc97cb	raw	its rig names the collective's parent communicator; test only
+zig/src/families/flashnext/cuda_launch.zig	2c00aa778656e5967d2d0904a3f5490fc2b1e841539301de8e756d7768ce9a7d	raw	exports cuda_moe_exchange.zig for its device test; no served change; its test block reaches cuda_collective.zig's host tests, no served change
 zig/src/families/flashnext/cuda_media.zig	394601e8a807f5516f501efcaefa6fb3308f392ee322db7296b11c90814f8eea	raw
 zig/src/families/flashnext/cuda_media_test.zig	4292f8f7c8f8bf4efd0dfaaa5a6c63e11568f85534127a0ce9feb0ab0be05120	raw
 zig/src/families/flashnext/cuda_mix.zig	248a2a86b3f377531f5b713c408ba99f73604510f4afe34ffae52615d5863c2c	raw
