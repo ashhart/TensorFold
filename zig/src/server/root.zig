@@ -43,6 +43,8 @@ test {
     _ = @import("idle_unload_test.zig");
     _ = @import("wait_reason_test.zig");
     _ = @import("name_priority_http_test.zig");
+    _ = @import("ws_frame.zig");
+    _ = @import("ws_upgrade.zig");
     @import("std").testing.refAllDecls(@This());
     _ = @import("json");
     _ = @import("std_options.zig");
