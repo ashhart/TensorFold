@@ -15,8 +15,11 @@ pub const DType = table.DType;
 /// One uploaded tensor: its device address and the element type and shape of the bytes there.
 pub const Buf = quant.Buf;
 
-/// A projection on the device in its format: the tensors as that format keeps them.
-pub const Projection = quant.Device;
+/// A projection on the device in its format: the shared formats' tensors, or ModelOpt's NVFP4 ones.
+pub const Projection = union(enum) {
+    core: quant.Device,
+    nvfp4: quant.nvfp4.Device,
+};
 
 /// A layer's E + 1 experts, the shared one last; `fused` is gate then up per expert when `gated`.
 pub const Experts = struct {
@@ -93,7 +96,18 @@ const Uploader = struct {
     }
 
     fn projection(u: Uploader, p: host.Projection) !Projection {
-        return quant.upload(u.up.uploader(), p);
+        const up = u.up.uploader();
+        return switch (p) {
+            .mlx => |x| .{ .core = try quant.mlx.upload(up, x) },
+            .dense => |x| .{ .core = try quant.dense.upload(up, x) },
+            .bf16 => |x| .{ .core = try quant.bf16.upload(up, x) },
+            .nvfp4 => |x| .{ .nvfp4 = try quant.nvfp4.upload(up, x) },
+        };
+    }
+
+    /// A stack of experts: core's routed experts keep the shared formats' tensors.
+    fn expert(u: Uploader, h: quant.Host) !Projection {
+        return .{ .core = try quant.upload(u.up.uploader(), h) };
     }
 
     fn mlp(u: Uploader, m: host.Mlp) !Mlp {
@@ -105,9 +119,9 @@ const Uploader = struct {
                     .router = try u.tensor(r.router),
                     .rows32 = try u.tensor(r.rows32),
                     .experts = .{
-                        .fused = try u.projection(e.fused),
+                        .fused = try u.expert(e.fused),
                         .gated = e.gated,
-                        .down = try u.projection(e.down),
+                        .down = try u.expert(e.down),
                         .width = e.width,
                         .dims = e.dims,
                         .count = e.count,

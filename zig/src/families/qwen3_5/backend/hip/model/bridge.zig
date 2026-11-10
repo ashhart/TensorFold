@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const hip = @import("hip");
+const quant = @import("core").quant;
 const view = @import("view.zig");
 const weights = @import("weights.zig");
 
@@ -9,7 +10,21 @@ pub const Error = error{UnsupportedTables} || hip.Error || std.mem.Allocator.Err
 
 /// A projection (N, K) from its uploaded tensors, in whichever format they are.
 pub fn projection(p: weights.Projection) Error!view.Projection {
-    return hip.quant.view(p, false);
+    return switch (p) {
+        .core => |d| hip.quant.view(d, false),
+        .nvfp4 => |d| blk: {
+            const v = try quant.nvfp4.view(d, false);
+            break :blk .{ .n = v.n, .k = v.k, .nvfp4 = v.matrix };
+        },
+    };
+}
+
+/// A stack's view: only the shared formats hold one (an NVFP4 stack is refused, a global scale an expert).
+fn coreView(p: weights.Projection, stacked: bool) Error!view.Projection {
+    return switch (p) {
+        .core => |d| hip.quant.view(d, stacked),
+        .nvfp4 => error.UnsupportedTables,
+    };
 }
 
 /// A projection split along K: its fp32 output is one rank's share of the sum.
@@ -30,8 +45,8 @@ pub fn mlpView(m: weights.Mlp, sliced: bool) Error!view.Mlp {
             .rows = r.router.dim(0),
             .remap = if (r.remap) |b| b.ptr else 0,
             .experts = .{
-                .fused = try hip.quant.view(r.experts.fused, true),
-                .down = try hip.quant.view(r.experts.down, true),
+                .fused = try coreView(r.experts.fused, true),
+                .down = try coreView(r.experts.down, true),
                 .count = r.experts.count,
                 .width = r.experts.width,
                 .dims = r.experts.dims,

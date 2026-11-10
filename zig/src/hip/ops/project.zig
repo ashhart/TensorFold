@@ -30,7 +30,8 @@ fn affineOf(proj: Projection, h: mlx.Matrix) Affine {
 
 /// matmul(x, proj) for a projection of any format: fp32 when `f32_out`, else x's kind (the MLX rules of `affine`).
 pub fn project(o: Ops, x: Tensor, proj: Projection, m: usize, f32_out: bool) Error!Tensor {
-    switch (proj.handle) {
+    if (proj.nvfp4) |h| return nvfp4Project(o, x, proj, h, m, f32_out);
+    switch (proj.handle orelse return error.BadShape) {
         .mlx => |h| return affine(o, x, affineOf(proj, h), m, f32_out),
         .dense => |h| switch (h.dtype) {
             .f32 => {
@@ -48,7 +49,6 @@ pub fn project(o: Ops, x: Tensor, proj: Projection, m: usize, f32_out: bool) Err
             },
             else => return error.BadShape,
         },
-        .nvfp4 => |h| return nvfp4Project(o, x, proj, h, m, f32_out),
         .bf16 => |h| {
             if (f32_out or m == 0 or x.kind != .bf16) return error.BadShape;
             const out: Tensor = .{ .ptr = try o.arena.take(m * proj.n * 2), .kind = .bf16 };
@@ -64,9 +64,9 @@ pub fn project(o: Ops, x: Tensor, proj: Projection, m: usize, f32_out: bool) Err
 
 /// silu(gate) x up into `act` (m, n / 2) from an interleaved gate/up BF16 projection (n, k), in the WMMA epilogue.
 pub fn projectSilu(o: Ops, x: Tensor, proj: Projection, m: usize, act: Tensor) Error!void {
-    const h = switch (proj.handle) {
+    const h = switch (proj.handle orelse return error.BadShape) {
         .dense => |d| d,
-        .mlx, .bf16, .nvfp4 => return error.BadShape,
+        .mlx, .bf16 => return error.BadShape,
     };
     if (h.dtype != .bf16 or m == 0 or x.kind != .bf16 or act.kind != .bf16) return error.BadShape;
     if (o.l.dense.siluRefusal(x.ptr, h.weight, act.ptr, int(m), int(proj.n), int(proj.k)) != null) return error.BadShape;
@@ -77,26 +77,26 @@ pub fn projectSilu(o: Ops, x: Tensor, proj: Projection, m: usize, act: Tensor) E
 pub fn projectGroup(o: Ops, x: Tensor, ps: []const Projection, m: usize, outs: []Tensor) Error!bool {
     var ws: [4]Affine = undefined;
     if (ps.len > ws.len) return false;
-    for (ps, ws[0..ps.len]) |pr, *w| switch (pr.handle) {
+    for (ps, ws[0..ps.len]) |pr, *w| switch (pr.handle orelse return error.BadShape) {
         .mlx => |h| w.* = affineOf(pr, h),
-        .dense, .bf16, .nvfp4 => return false,
+        .dense, .bf16 => return false,
     };
     return affineGroup(o, x, ws[0..ps.len], m, outs);
 }
 
 /// The routed gate and up with the activation as the epilogue; null when the format or the tile does not take it.
 pub fn projectRoutedAct(o: Ops, x: Tensor, proj: Projection, items: u64, count: usize, members: u64, pairs: usize, x_div: usize, rows: usize, limit: f32) Error!?Tensor {
-    switch (proj.handle) {
+    switch (proj.handle orelse return error.BadShape) {
         .mlx => |h| return affineRoutedAct(o, x, affineOf(proj, h), items, count, members, pairs, x_div, rows, limit),
-        .dense, .bf16, .nvfp4 => return null,
+        .dense, .bf16 => return null,
     }
 }
 
 /// `project` (fp32) then tf_nemo_relu2 into `out`, in one launch; false where another tile takes the product.
 pub fn projectRelu2(o: Ops, x: Tensor, proj: Projection, m: usize, out: Tensor) Error!bool {
-    const h = switch (proj.handle) {
+    const h = switch (proj.handle orelse return error.BadShape) {
         .mlx => |h| h,
-        .dense, .bf16, .nvfp4 => return false,
+        .dense, .bf16 => return false,
     };
     const w = affineOf(proj, h);
     try w.check();
@@ -135,9 +135,9 @@ pub fn projectRoutedRelu2(
     rows: usize,
     out: Tensor,
 ) Error!bool {
-    const h = switch (proj.handle) {
+    const h = switch (proj.handle orelse return error.BadShape) {
         .mlx => |h| h,
-        .dense, .bf16, .nvfp4 => return false,
+        .dense, .bf16 => return false,
     };
     const w = affineOf(proj, h);
     try w.check();
@@ -173,13 +173,13 @@ pub fn projectRoutedPlainRelu2(
     plain: Projection,
     plain_out: Tensor,
 ) Error!bool {
-    const ha = switch (routed.handle) {
+    const ha = switch (routed.handle orelse return error.BadShape) {
         .mlx => |h| h,
-        .dense, .bf16, .nvfp4 => return false,
+        .dense, .bf16 => return false,
     };
-    const hb = switch (plain.handle) {
+    const hb = switch (plain.handle orelse return error.BadShape) {
         .mlx => |h| h,
-        .dense, .bf16, .nvfp4 => return false,
+        .dense, .bf16 => return false,
     };
     const wa = affineOf(routed, ha);
     const wb = affineOf(plain, hb);
@@ -224,20 +224,19 @@ pub fn projectRoutedPlainRelu2(
 
 /// matmul_routed on a stack of experts: every item in one launch; out (pairs, N) fp32.
 pub fn projectRouted(o: Ops, x: Tensor, proj: Projection, items: u64, count: usize, members: u64, pairs: usize, x_div: usize, rows: usize, expert_rows: usize) Error!u64 {
-    switch (proj.handle) {
+    switch (proj.handle orelse return error.BadShape) {
         .mlx => |h| return affineRouted(o, x, affineOf(proj, h), items, count, members, pairs, x_div, rows, expert_rows),
-        .dense, .bf16, .nvfp4 => return error.BadShape,
+        .dense, .bf16 => return error.BadShape,
     }
 }
 
 /// gather_rows: `n` embedding rows of a table of any format with a row gather, by device ids, dequantized into `out`.
 pub fn embedRows(o: Ops, table: Projection, ids: u64, n: usize, out: Tensor) Error!void {
-    switch (table.handle) {
+    switch (table.handle orelse return error.BadShape) {
         .mlx => |h| return embedAffine(o, affineOf(table, h), ids, n, out),
         .dense => |h| try o.l.tf_embed_dense(p(h.weight), @backingInt(try kindOf(h.dtype)), @ptrFromInt(ids), int(n), int(table.k), p(out.ptr), @backingInt(out.kind), o.stream),
         .bf16 => |h| try o.l.tf_embed_dense(p(h.weight), @backingInt(t.Kind.bf16), @ptrFromInt(ids), int(n), int(table.k), p(out.ptr), @backingInt(out.kind), o.stream),
         // ModelOpt quantizes linear modules; an embedding table is BF16 or a float table in every checkpoint it writes
-        .nvfp4 => return error.BadShape,
     }
 }
 

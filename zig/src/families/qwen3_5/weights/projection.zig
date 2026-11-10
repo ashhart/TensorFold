@@ -64,10 +64,10 @@ pub fn projection(a: std.mem.Allocator, t: *const Table, key: []const u8) !host.
         return .{ .dense = try quant.dense.read(a, t, key) };
     }
     if (t.quant == .bf16) return .{ .bf16 = try quant.bf16.read(a, t, key) };
-    return quant.read(a, t, key);
+    return host.read(a, t, key);
 }
 
 /// `_halves`: a fused [embedding | hidden] projection split in two along K, words and group tables alike.
 pub fn halves(a: std.mem.Allocator, fused: host.Projection) ![2]host.Projection {
-    return quant.halves(a, fused);
+    return host.halves(a, fused);
 }

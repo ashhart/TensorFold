@@ -7,10 +7,10 @@ pub const Tensor = st.Tensor;
 pub const DType = st.DType;
 
 /// The weight formats the backend reads.
-pub const Format = enum { mlx, dense, bf16, nvfp4 };
+pub const Format = enum { mlx, dense, bf16 };
 
 /// The decoder a format's kernels instantiate the shared tiles with: each backend names the kernels of its decoders.
-pub const Decoder = enum(u8) { mlx = 0, dense = 1, bf16 = 2, nvfp4 = 3 };
+pub const Decoder = enum(u8) { mlx = 0, dense = 1, bf16 = 2 };
 
 /// The type of a group table, numbered as the kernels number it.
 pub const Tables = enum(u8) { f32 = 0, bf16 = 1, f16 = 2 };

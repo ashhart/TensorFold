@@ -368,9 +368,10 @@ fn openJoint(a: std.mem.Allocator, gpa: std.mem.Allocator, e: *Engine, loaded: j
     errdefer if (owned) w.deinit();
     const blas = if (e.blas) |*b| b else return steps.refuseAll(a, problem, "the joint schema head needs rocBLAS", .{});
     const head_rows = e.model().head;
-    if (head_rows.format() != .bf16) return steps.refuseAll(a, problem, "the joint schema head reads a BF16 lm_head", .{});
+    const head_format = head_rows.format();
+    if (head_format == null or head_format.? != .bf16) return steps.refuseAll(a, problem, "the joint schema head reads a BF16 lm_head", .{});
     const before = hip.usage(false).device;
-    const head = hip.joint_schema.Head.init(gpa, &e.driver, &e.lib, blas, w.weights, bounds, head_rows.handle.bf16.weight, head_rows.n) catch |err|
+    const head = hip.joint_schema.Head.init(gpa, &e.driver, &e.lib, blas, w.weights, bounds, head_rows.handle.?.bf16.weight, head_rows.n) catch |err|
         return steps.refuseAll(a, problem, "the joint schema head cannot start ({s})", .{@errorName(err)});
     owned = false;
     errdefer head.deinit();

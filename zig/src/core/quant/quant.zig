@@ -38,7 +38,6 @@ pub fn Module(comptime f: Format) type {
         .mlx => mlx,
         .dense => dense,
         .bf16 => bf16,
-        .nvfp4 => nvfp4,
     };
 }
 
@@ -66,13 +65,12 @@ pub const Config = union(Format) {
     mlx: mlx.Config,
     dense: dense.Config,
     bf16: bf16.Config,
-    nvfp4: nvfp4.Config,
 
     /// The tensor's MLX width (the table's own, else the global one).
     pub fn width(c: Config, key: []const u8) error{UnsupportedQuantization}!mlx.Width {
         return switch (c) {
             .mlx => |q| q.width(key),
-            .dense, .bf16, .nvfp4 => error.UnsupportedQuantization,
+            .dense, .bf16 => error.UnsupportedQuantization,
         };
     }
 };
@@ -90,7 +88,6 @@ pub const Host = union(Format) {
     mlx: mlx.Host,
     dense: dense.Host,
     bf16: bf16.Host,
-    nvfp4: nvfp4.Host,
 
     /// Output rows N.
     pub fn rows(h: Host) usize {
@@ -163,7 +160,6 @@ pub const Device = union(Format) {
     mlx: mlx.Device,
     dense: dense.Device,
     bf16: bf16.Device,
-    nvfp4: nvfp4.Device,
 };
 
 pub fn upload(u: Uploader, h: Host) !Device {
@@ -177,7 +173,6 @@ pub const Handle = union(Format) {
     mlx: mlx.Matrix,
     dense: dense.Matrix,
     bf16: bf16.Matrix,
-    nvfp4: nvfp4.Matrix,
 };
 
 /// One product (N, K): the format's handle and its shape. A stack is one expert's shape at the stack's addresses.
@@ -186,14 +181,20 @@ pub const Projection = struct {
     k: u32,
     /// Split along K: the product stays fp32, one rank's share of a sum.
     partial: bool = false,
-    handle: Handle,
+    /// The shared format's handle; null for a ModelOpt NVFP4 projection, whose matrix is `nvfp4`.
+    handle: ?Handle = null,
+    /// ModelOpt NVFP4's matrix, a format the engine names: core keeps no such `Format`.
+    nvfp4: ?nvfp4.Matrix = null,
 
-    pub fn format(p: Projection) Format {
-        return std.meta.activeTag(p.handle);
+    pub fn format(p: Projection) ?Format {
+        const h = p.handle orelse return null;
+        return switch (h) {
+            inline else => |_, tag| tag,
+        };
     }
 
-    pub fn decoder(p: Projection) Decoder {
-        return switch (p.format()) {
+    pub fn decoder(p: Projection) ?Decoder {
+        return switch (p.format() orelse return null) {
             inline else => |f| Module(f).decoder,
         };
     }
@@ -213,7 +214,6 @@ test "every format module provides the interface" {
     comptime conforms(mlx);
     comptime conforms(dense);
     comptime conforms(bf16);
-    comptime conforms(nvfp4);
 }
 
 test "the shared detection still refuses a config that declares no quantization" {

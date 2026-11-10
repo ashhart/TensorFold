@@ -9,9 +9,6 @@ const fp8 = @import("fp8.zig");
 const Tensor = types.Tensor;
 const Allocator = std.mem.Allocator;
 
-pub const id: types.Format = .nvfp4;
-pub const decoder: types.Decoder = .nvfp4;
-
 /// Inputs one e4m3 scale covers.
 pub const group = 16;
 
