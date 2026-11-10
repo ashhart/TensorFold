@@ -114,7 +114,8 @@ fn fail(rank: u32, what: []const u8, k: usize, len: usize) u8 {
 
 /// The link's name with quotes, backslashes and control bytes replaced, so a RESULT line stays JSON.
 fn jsonSafe(s: []const u8, buf: []u8) []const u8 {
-    const n = @min(s.len, buf.len);
+    var n = @min(s.len, buf.len);
+    if (n < s.len) while (n > 0 and s[n] & 0xc0 == 0x80) : (n -= 1) {}; // a cut name ends on a whole character
     for (s[0..n], buf[0..n]) |ch, *o| o.* = if (ch == '"' or ch == '\\' or ch < 0x20) '?' else ch;
     return buf[0..n];
 }

@@ -1,5 +1,6 @@
 //! TCP between ranks with no RDMA (#2066): checked frame headers, deadlines and no resend, rank-order sums.
 const std = @import("std");
+const builtin = @import("builtin");
 const collective = @import("collective.zig");
 const reference = @import("reference.zig");
 const sock = @import("sock.zig");
@@ -14,8 +15,8 @@ pub const max_ranks = 8;
 const magic: u32 = 0x31545054; // "TPT1"
 /// How long `abort` waits for room to queue its abort frame on each link.
 const abort_send_ns = 50 * std.time.ns_per_ms;
-/// Linux marks a peer's plain hang-up only as POLLRDHUP (0x2000, not in std's POLL), and only when asked for it.
-const rdhup: i16 = if (@hasDecl(posix.POLL, "RDHUP")) posix.POLL.RDHUP else if (@import("builtin").os.tag == .linux) 0x2000 else 0;
+/// Linux marks a peer's plain hang-up only as POLLRDHUP (not in std's POLL; 0x800 on SPARC), and only on request.
+const rdhup: i16 = if (@hasDecl(posix.POLL, "RDHUP")) posix.POLL.RDHUP else if (builtin.os.tag != .linux) 0 else if (builtin.cpu.arch.isSparc()) 0x800 else 0x2000;
 
 const Call = enum(u8) { all_reduce = 1, all_gather, all_gather_v, exchange, send, barrier, abort };
 
