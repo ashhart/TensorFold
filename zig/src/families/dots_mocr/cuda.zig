@@ -33,7 +33,8 @@ test "dots text bytes: embedding, untied head, final norm and 28 layers, the tow
 
 test "dots on CUDA: text only, no reasoning block, its config and tensor refusals worded" {
     try std.testing.expect(!native.reasoning and native.keeps_no_prompts);
-    const hooks = .{ &native.open, &native.attach, &native.fits, &native.ledgerPool, &native.textWeightBytes }; // compiles the load and the layer
+    // compiles the load and the layer
+    const hooks = .{ &native.open, &native.attach, &native.fits, &native.ledgerPool, &native.textWeightBytes };
     inline for (hooks) |h| try std.testing.expect(@intFromPtr(h) != 0);
     try std.testing.expectEqualStrings("dots_ocr", native.model_type);
     try std.testing.expectStringStartsWith(native.explain(null, error.DenseTextOnly).?, "dots.mocr on CUDA reads text prompts only");
