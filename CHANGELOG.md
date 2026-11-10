@@ -20,6 +20,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## 1.2.8
 
+- Qwen3.8-Flash-Next on Strix Halo (gfx1151): a verify window holds eight rows, so a lone stream's copy drafts grow to seven tokens a round while they land, where they stopped at three; rounds shared by several streams keep three-token copies, and MTP drafts stay at three. A lone stream rewriting text it has seen runs about 26% faster; other cells are unchanged, and so are replies (#2730). Thanks to @gilby.
 - GLM-5.3-Flash on CUDA: a tensor-parallel abort reaches the ranks' communicator from the engine's start, once, and a start-up failure after an abort no longer destroys the communicator again; serving and replies are unchanged (#2918, part of #2560). Thanks to @laudney.
 
 - Metal: MiniMax-M3, Spark2.5 and Llama take their NaN-aware bf16 argmax from one shared source; the compiled code is unchanged (#2949, part of #2251). Thanks to @jschmied.
