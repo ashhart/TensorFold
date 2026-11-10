@@ -9,6 +9,8 @@ const vocab = wt.vocab;
 const max_rows = mtp.max_rows;
 const Sampling = mtp.Sampling;
 const Pick = mtp.Pick;
+const Scores = @import("core").proposal_rows.Scores;
+const full: Scores = .{ .vocab = vocab, .logical = vocab, .stride = vocab };
 
 /// A sampled draw with top_k up to this reads candidates; a wider one (or top_k 0) downloads its whole row.
 pub const topk_max: usize = 64;
@@ -26,13 +28,47 @@ pub fn usable(s: Sampling) bool {
 
 /// drawRow over a row's candidates (its top_k bf16 values and their columns, any order): choose draws from these alone.
 pub fn drawTopk(gpa: std.mem.Allocator, vals: []const u16, cols: []const i32, ids: ?[]const u32, position: u64, s: Sampling) !u32 {
+    if (vals.len == 0 or vals.len > topk_max or vals.len != cols.len) return error.ProposalScoreShape;
+    const logical: u32 = if (ids) |m| @intCast(m.len) else vocab;
+    const view: Scores = .{ .vocab = vocab, .logical = logical, .stride = logical, .ids = ids };
     var v: [topk_max]f64 = undefined;
     var keys: [topk_max]u64 = undefined;
     for (vals, cols, 0..) |b, c, i| {
         v[i] = mtp.promote(b);
-        keys[i] = if (ids) |m| m[@intCast(c)] else @intCast(c);
+        if (!std.math.isFinite(v[i]) or c < 0 or c >= logical) return error.ProposalNonfinite;
+        keys[i] = try view.global(@intCast(c));
     }
     return @intCast(try lanes.sampling.choose(gpa, v[0..vals.len], keys[0..vals.len], position, s));
+}
+
+/// Single and batched heads share validation before either a greedy map or a sampled draw.
+pub fn pick(h: *const mtp.Head, st: cuda.Stream, gpa: std.mem.Allocator, d: *mtp.Draft, best: [4]f32, position: u64, sm: ?Sampling, batched: bool) !Pick {
+    const tok = h.view().pickBest(best) catch |err| {
+        badRow(st, d, best, batched, d.dlogits.ptr, h.ids.len);
+        return err;
+    };
+    if (!mtp.isSampled(sm)) return .{ .token = tok, .prob = @exp(@as(f64, best[0]) - @as(f64, best[1])) };
+    if (usable(sm.?)) return pickHead(h, st, gpa, d, best[1], position, sm.?) catch |err| {
+        if (err == error.ProposalNonfinite) badRow(st, d, best, batched, d.dlogits.ptr, h.ids.len);
+        return err;
+    };
+    const row = d.host[0..h.ids.len];
+    try download(st, std.mem.sliceAsBytes(row), d.dlogits.ptr);
+    return mtp.drawPick(gpa, row, h.ids, best[1], position, sm);
+}
+
+// Failure-only downloads leave the normal row selection and graph captures unchanged.
+fn badRow(st: cuda.Stream, d: *mtp.Draft, best: [4]f32, batched: bool, scores: u64, n: usize) void {
+    var input: [wt.wide]u16 = undefined;
+    const input_ok: ?bool = if (download(st, std.mem.sliceAsBytes(&input), d.out.ptr)) |_| finite(&input) else |_| null;
+    const row = d.host[0..n];
+    const row_ok: ?bool = if (download(st, std.mem.sliceAsBytes(row), scores)) |_| finite(row) else |_| null;
+    std.debug.print("Flash Next ProposalNonfinite stream={s} len={d} cap={d} top={d} lse={d} cache={s} batched={} input=head_streams input_finite={?} row_finite={?}\n", .{ d.label, d.len, d.cap, best[0], best[1], if (d.pooled_lane) "pool" else "own", batched, input_ok, row_ok });
+}
+
+fn finite(row: []const u16) bool {
+    for (row) |b| if (!std.math.isFinite(mtp.promote(b))) return false;
+    return true;
 }
 
 /// The candidates of `rows` rows of `v` scores `ld` apart, k a row, into d.best past its best values, then to d.host.
@@ -59,16 +95,23 @@ pub fn pickHead(h: *const mtp.Head, st: cuda.Stream, gpa: std.mem.Allocator, d: 
 /// The window's rows drawn at their keyed positions (fed0 + 1 + r), each within its `masks` row if any.
 pub fn draws(h: *const mtp.Head, st: cuda.Stream, gpa: std.mem.Allocator, d: *mtp.Draft, sm: ?Sampling, masks: []const u32, out: []u32) !void {
     const n = d.rows;
+    try h.best(st, d.logits.ptr, vocab, vocab, n, d.best.ptr);
+    try download(st, std.mem.sliceAsBytes(d.best_host[0 .. 4 * n]), d.best.ptr);
+    for (0..n) |r| _ = full.pickBest(d.best_host[r * 4 ..][0..4].*) catch |err| {
+        badRow(st, d, d.best_host[r * 4 ..][0..4].*, false, d.logits.ptr + r * vocab * 2, vocab);
+        return err;
+    };
     if (!mtp.isSampled(sm) and masks.len == 0) {
-        try h.best(st, d.logits.ptr, vocab, vocab, n, d.best.ptr);
-        try download(st, std.mem.sliceAsBytes(d.best_host[0 .. 4 * n]), d.best.ptr);
-        for (out[0..n], 0..) |*t, r| t.* = @intCast(@as(i32, @bitCast(d.best_host[4 * r + 2])));
+        for (out[0..n], 0..) |*t, r| t.* = try full.pickBest(d.best_host[r * 4 ..][0..4].*);
         return;
     }
     if (masks.len == 0) if (sm) |s| if (usable(s)) {
         const k: usize = s.top_k;
         const c = try candidates(h, st, d, d.logits.ptr, vocab, vocab, n, k);
-        for (out[0..n], 0..) |*t, r| t.* = try drawTopk(gpa, c.vals[r * k ..][0..k], c.cols[r * k ..][0..k], null, d.fed0 + 1 + r, s);
+        for (out[0..n], 0..) |*t, r| t.* = drawTopk(gpa, c.vals[r * k ..][0..k], c.cols[r * k ..][0..k], null, d.fed0 + 1 + r, s) catch |err| {
+            if (err == error.ProposalNonfinite) badRow(st, d, d.best_host[r * 4 ..][0..4].*, false, d.logits.ptr + r * vocab * 2, vocab);
+            return err;
+        };
         return;
     };
     const rows = d.host[0 .. n * vocab];
