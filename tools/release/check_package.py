@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import io
+import json
 import os
 from pathlib import Path
 import shutil
@@ -10,6 +11,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import zipfile
 
 root = Path(__file__).resolve().parents[2]
 parser = argparse.ArgumentParser(description=__doc__)
@@ -168,3 +170,113 @@ assert run.returncode != 0 and "archive refused" in run.stderr, run.stderr
 assert str(root) not in run.stderr
 assert archive.read_bytes() == clean_archive and companion.read_bytes() == clean_hash
 print(f"PASS repeated packaging, hashes, notices, contents and LICENSES symlink refusal; receipt {receipt}")
+
+def pe_fixture(dll=False):
+    data = bytearray(256)
+    data[:2] = b"MZ"
+    data[60:64] = (128).to_bytes(4, "little")
+    data[128:132] = b"PE\0\0"
+    data[132:134] = (0x8664).to_bytes(2, "little")
+    data[150:152] = (0x2002 if dll else 2).to_bytes(2, "little")
+    return bytes(data) + b"synthetic nonfunctional packaging fixture\n"
+
+
+windows_binary = receipt / "native-serving-fixture.exe"
+windows_binary.write_bytes(pe_fixture())
+windows_runtime = receipt / "windows-runtime"
+(windows_runtime / "lib").mkdir(parents=True)
+(windows_runtime / "LICENSES").mkdir()
+windows_dll = windows_runtime / "lib/tfgrammar.dll"
+windows_dll.write_bytes(pe_fixture(dll=True))
+windows_license = windows_runtime / "LICENSES/windows-fixture.txt"
+windows_license.write_text("Synthetic nonfunctional DLL fixture; no third-party runtime.\n")
+(windows_runtime / "WINDOWS-RUNTIME-NOTICES.txt").write_text("Synthetic runtime packaging test, not a redistributable library.\n")
+runtime_manifest = windows_runtime / "WINDOWS-RUNTIMES.json"
+runtime_record = {"schema": 1, "target": "windows-x86_64", "libraries": [{
+    "path": "lib/tfgrammar.dll", "sha256": hashlib.sha256(windows_dll.read_bytes()).hexdigest(),
+    "version": "synthetic-fixture", "source": "https://example.invalid/runtime",
+    "licenses": ["LICENSES/windows-fixture.txt"],
+}]}
+runtime_manifest.write_text(json.dumps(runtime_record))
+source_manifest = receipt / "windows-source.json"
+source_manifest.write_text(json.dumps({"schema": 1, "target": "windows-x86_64", "source_commit": "0" * 40,
+    "source_tree": "1" * 40, "source_dirty": False,
+    "binary_sha256": hashlib.sha256(windows_binary.read_bytes()).hexdigest(),
+    "qualification": "CPU packaging fixture only; no executable or GPU qualification"}))
+windows_name = f"tensorfold-{version}-windows-x86_64"
+
+
+def windows_command(runtime=windows_runtime, source=source_manifest, host_only=False):
+    args = command()
+    args[3] = "windows-x86_64-host-only" if host_only else "windows-x86_64"
+    args[4] = str(windows_binary)
+    if runtime is not None:
+        args.append(f"--overlay={runtime}")
+    if source is not None:
+        args.append(f"--source-manifest={source}")
+    return args
+
+
+def windows_files():
+    archive = output / (windows_name + ".zip")
+    assert hashlib.sha256(archive.read_bytes()).hexdigest() == archive.with_name(archive.name + ".sha256").read_text().split()[0]
+    with zipfile.ZipFile(archive) as zipped:
+        assert not zipped.comment and all(not entry.extra and not entry.comment for entry in zipped.infolist())
+        files = {entry.filename.removeprefix(windows_name + "/"): zipped.read(entry)
+                 for entry in zipped.infolist() if not entry.is_dir()}
+    assert files["bin/tensorfold.exe"] == windows_binary.read_bytes()
+    assert not any(path.startswith("bin/tensorfold-native") for path in files)
+    assert files["lib/tfgrammar.dll"] == windows_dll.read_bytes()
+    assert files["SOURCE.json"] == source_manifest.read_bytes()
+    assert "WINDOWS-RUNTIMES.json" in files and "WINDOWS-RUNTIME-NOTICES.txt" in files
+    for line in files["SHA256SUMS"].decode().splitlines():
+        digest, path = line.split("  ", 1)
+        assert hashlib.sha256(files[path.removeprefix("./")]).hexdigest() == digest
+    return archive
+
+
+subprocess.run(windows_command(), check=True)
+windows_archive = windows_files()
+windows_clean = windows_archive.read_bytes()
+windows_hash = windows_archive.with_name(windows_archive.name + ".sha256").read_bytes()
+
+
+def windows_refuses(args):
+    run = subprocess.run(args, capture_output=True, text=True)
+    assert run.returncode != 0, "unreviewed Windows package input was accepted"
+    assert windows_archive.read_bytes() == windows_clean, "rejected input replaced the clean Windows archive"
+    assert windows_archive.with_name(windows_archive.name + ".sha256").read_bytes() == windows_hash
+
+
+windows_refuses(windows_command(runtime=None))
+windows_refuses(windows_command(source=None))
+unlisted = windows_runtime / "model.safetensors"
+unlisted.write_bytes(b"synthetic unreviewed weights")
+windows_refuses(windows_command())
+unlisted.unlink()
+original_dll = windows_dll.read_bytes()
+windows_dll.write_bytes(original_dll + b"changed")
+windows_refuses(windows_command())
+windows_dll.write_bytes(original_dll)
+license_bytes = windows_license.read_bytes()
+windows_license.unlink()
+windows_refuses(windows_command())
+windows_license.write_bytes(license_bytes)
+runtime_record["libraries"][0]["path"] = "../escape.dll"
+runtime_manifest.write_text(json.dumps(runtime_record))
+windows_refuses(windows_command())
+runtime_record["libraries"][0]["path"] = "lib/tfgrammar.dll"
+runtime_manifest.write_text(json.dumps(runtime_record))
+windows_license.unlink()
+windows_license.symlink_to(safe_license)
+windows_refuses(windows_command())
+windows_license.unlink()
+windows_license.write_bytes(license_bytes)
+subprocess.run(windows_command(), check=True)
+windows_files()
+print("PASS Windows canonical serving filename, ZIP/checksums, manifests, licensed DLL overlay and refusal controls")
+if shutil.which("pwsh"):
+    subprocess.run(["pwsh", "-NoProfile", "-File", str(root / "tools/release/check_windows_smoke.ps1"),
+                    "-FixtureArchive", str(windows_archive)], check=True)
+else:
+    print("SKIP Windows PowerShell fixture checks: pwsh is not installed")

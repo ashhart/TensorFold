@@ -27,6 +27,22 @@ That library is not part of these archives. The server can read an API key file 
 None of those paths requires an installed Python package, though capture generation currently uses Python tools.
 Archives marked `host-only` are CPU verification artifacts and cannot serve CUDA inference.
 
+## Windows archive layout
+
+The Windows x86_64 ZIP runs the native serving engine as `bin/tensorfold.exe`.
+Its legacy `tensorfold-native VERSION` version output remains supported by existing desktop clients.
+Keep `bin/`, `lib/`, `SOURCE.json`, `WINDOWS-RUNTIMES.json` and the notices together after extraction.
+The display driver supplies `nvcuda.dll`; it is not redistributed in the archive.
+CUDA runtime DLLs are separate from the display driver and must come from the release's reviewed overlay or a
+compatible installation. DLLs under `bin/` can satisfy the Windows loader's executable-directory search;
+the engine also checks its executable-relative `lib/` for feature libraries such as `tfgrammar.dll`.
+`WINDOWS-RUNTIMES.json` lists each bundled DLL's digest, version, source and required license files.
+`WINDOWS-RUNTIME-NOTICES.txt` carries the accompanying runtime notices.
+No downloaded model, user cache, SDK directory or Python installation is part of this layout.
+
+Version/help/capabilities smoke establishes the native serving interface and runtime discovery only.
+Model fidelity, tool behavior, throughput and GPU support require separate receipts for the same source and assets.
+
 
 ## Optional shared libraries
 

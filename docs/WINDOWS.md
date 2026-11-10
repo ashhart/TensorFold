@@ -1,5 +1,22 @@
 # TensorFold on Windows (native)
 
+## Native serving executable and distribution
+
+`zig build native` installs the Windows serving engine as `zig-out\native\bin\tensorfold.exe`.
+A Windows distribution ZIP exposes it as `bin\tensorfold.exe`; keep the archive's `bin`, `lib` and notices together.
+The separate `zig-out\bin\tensorfold.exe` is the checkpoint utility, so use the native path for serving.
+The native binary retains `tensorfold-native VERSION` on `--version` for existing desktop clients.
+
+```powershell
+.\zig-out\native\bin\tensorfold.exe --version
+.\zig-out\native\bin\tensorfold.exe --help
+.\zig-out\native\bin\tensorfold.exe serve --help
+.\zig-out\native\bin\tensorfold.exe capabilities --json
+```
+
+[Release packaging](../packaging/README.md#windows-x86_64) documents the Windows target, reviewed DLL overlay,
+source/runtime manifests, checksums and CPU-only PowerShell smoke. Packaging does not qualify a GPU or checkpoint.
+
 `tensorfold-native.exe` runs on Windows with an NVIDIA GPU through the same CUDA engine the Linux build uses, and with an
 AMD GPU through the HIP backend when the build opts in (`-Dhip=true`). Metal is macOS's. Windows is supported from
 source only.

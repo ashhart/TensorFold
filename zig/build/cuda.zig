@@ -187,9 +187,16 @@ pub fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     }
     // before the install step, which decides then whether a .pdb comes with the executable
     exe.root_module.strip = strip;
-    const install = b.addInstallArtifact(exe, .{ .dest_dir = .{ .override = .{ .custom = "native/bin" } } });
+    const install = b.addInstallArtifact(exe, .{
+        .dest_dir = .{ .override = .{ .custom = "native/bin" } },
+        .dest_sub_path = serverInstallName(target.result.os.tag),
+    });
     b.step("native", "tensorfold-native with the CUDA engines into zig-out/native/bin").dependOn(&install.step);
     return exe;
+}
+
+pub fn serverInstallName(os: std.Target.Os.Tag) []const u8 {
+    return if (os == .windows) "tensorfold.exe" else "tensorfold-native";
 }
 /// CPU tests for the CUDA runtime, shared core, lanes and CUDA family, on any host.
 pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *std.Build.Step.Options, all: *std.Build.Step, server_steps: bool) void {

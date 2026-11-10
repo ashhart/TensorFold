@@ -8,7 +8,7 @@ zig build dist -Dversion=MAJOR.MINOR.PATCH -Ddist-fatbins=/absolute/path/to/fatb
 zig build dist-smoke -Dversion=MAJOR.MINOR.PATCH -Ddist-fatbins=/absolute/path/to/fatbins -j2
 ```
 
-`dist` builds all three native servers and writes archives and companion SHA-256 files to `zig-out/dist/`.
+`dist` keeps the three Unix archives as its default and writes archives and companion SHA-256 files to `zig-out/dist/`.
 The macOS target is fixed to `aarch64-macos.13.0` with `apple_m1`, regardless of the builder's CPU or `-Dcpu`.
 Both Linux targets use the CUDA backend and baseline CPU features, with glibc 2.28 as the minimum.
 The backend runs with release optimization; the HTTP server retains its safety checks.
@@ -28,7 +28,67 @@ tensorfold-MAJOR.MINOR.PATCH-linux-aarch64.tar.gz.sha256
 Each archive has one named top-level directory containing `bin/tensorfold-native`, `lib/`, `LICENSE`, `NOTICE`,
 `VERSION`, `RUNTIME.md`, `LICENSES/`, `THIRD_PARTY_NOTICES.md` and `SHA256SUMS`. Metal sources and the Nemotron draft vocabulary are embedded at this
 revision, so no adjacent metallib is needed. The packaging does not include test programs, source, build caches,
-Python packages or model weights. There is no Python dependency in the packaging or smoke scripts.
+Python packages or model weights. The release builder uses Python 3.11 or newer for archive and privacy checks.
+The engine and Unix smoke script do not require Python.
+
+## Windows x86_64
+
+Select Windows explicitly; this uses the same CUDA `distServer` and native serving entry point as the Unix release:
+
+```sh
+zig build dist -Ddist-platform=windows-x86_64 -Dversion=MAJOR.MINOR.PATCH \
+  -Ddist-fatbins=/path/to/qualified-fatbins -Ddist-windows-runtime=/path/to/reviewed-overlay -j2
+```
+
+No macOS SDK is needed for this selection. `-Ddist-platform=all` includes Windows and the three Unix targets;
+an individual Unix label also works. The default Unix commands and archive filenames are unchanged.
+Windows writes `tensorfold-MAJOR.MINOR.PATCH-windows-x86_64.zip` and its `.zip.sha256` companion.
+Its named root contains `bin/tensorfold.exe`, `lib/`, the usual notices, `SOURCE.json`, runtime inventory and `SHA256SUMS`.
+Keep these directories together when moving the installation.
+
+`zig build native` on Windows installs the serving executable at `zig-out/native/bin/tensorfold.exe`.
+The build's separate `zig-out/bin/tensorfold.exe` remains the checkpoint utility.
+Only the native installation and packaged filename change: `--version` still prints `tensorfold-native VERSION`,
+which preserves the existing desktop parser. No inference implementation or server banner is changed.
+
+The Windows overlay is an explicit, reviewed input; the packager does not collect DLLs from the builder's PATH.
+It contains only `WINDOWS-RUNTIMES.json`, `WINDOWS-RUNTIME-NOTICES.txt`, inventoried DLLs under `bin/` or `lib/`,
+and their nonempty `LICENSES/windows-*.txt` or `.md` files. Each DLL needs its SHA-256, version, public source URL
+and license filenames in the schema-1 inventory:
+
+```json
+{"schema":1,"target":"windows-x86_64","libraries":[{
+  "path":"lib/tfgrammar.dll","sha256":"<64 lowercase hexadecimal characters>",
+  "version":"<reviewed upstream version>","source":"https://example.invalid/reviewed-runtime",
+  "licenses":["LICENSES/windows-runtime-license.txt"]
+}]}
+```
+
+Include the matching `tfgrammar.dll` and its xgrammar, dlpack and picojson notices for structured output and tools.
+Additional CUDA or codec DLLs need their own inventory entries and required redistributable notices.
+The packager rejects unlisted files, symlinks, non-AMD64 DLLs, missing licenses and system/driver DLLs such as `nvcuda.dll`.
+This inventory records a release owner's reviewed inputs; it cannot establish their license, privacy or feature qualification.
+No weights, Python runtime, installer, user cache or driver is collected or bundled automatically.
+
+`SOURCE.json` is generated after linking and binds the executable hash to the Git commit/tree, Zig version and
+fatbin input hashes. Production packaging refuses a dirty checkout. It records build identity, not GPU qualification.
+`-Ddist-host-only=true` produces a separately named Windows host-only ZIP with `HOST-ONLY`; it cannot serve inference.
+It is suitable for cross-compile and package checks while qualified CUDA inputs are unavailable.
+
+On Windows with PowerShell 7, run the standalone smoke script against the matching archive:
+
+```powershell
+pwsh -NoProfile -File tools/release/smoke-windows.ps1 .\tensorfold-MAJOR.MINOR.PATCH-windows-x86_64.zip MAJOR.MINOR.PATCH
+```
+
+It checks the archive checksum and member paths, extracts into a fresh directory, and checks every file hash before
+probing native version, serve help and schema-1 CUDA capabilities from an empty cwd and clean child environment. It checks that the
+packaged grammar DLL loads. It opens no listener, loads no checkpoint and runs no GPU inference.
+Host-only checks require the explicit `-AllowHostOnly` switch. CPU fixture coverage is available on any PowerShell host:
+
+```sh
+pwsh -NoProfile -File tools/release/check_windows_smoke.ps1
+```
 
 ## CUDA box inputs
 

@@ -16,30 +16,39 @@ capture=
 overlay=
 path_checker=
 build_root=
+source_manifest=
 for extra in "$@"; do
     case "$extra" in
         --overlay=*) overlay=${extra#--overlay=} ;;
         --path-checker=*) path_checker=${extra#--path-checker=} ;;
         --build-root=*) build_root=${extra#--build-root=} ;;
+        --source-manifest=*) source_manifest=${extra#--source-manifest=} ;;
         *) capture=$extra ;;
     esac
 done
 [ -n "$path_checker" ] && [ -n "$build_root" ] || { echo 'release packaging requires its privacy checker and build root' >&2; exit 2; }
 name="tensorfold-$version-$platform"
+executable=tensorfold-native
+extension=tar.gz
+case "$platform" in windows-x86_64*) executable=tensorfold.exe; extension=zip ;; esac
 mkdir -p "$output"
 # Each invocation owns a fresh stage, including reruns of the same version/platform.
 staging=$(mktemp -d "$output/../tensorfold-stage.XXXXXX")
 stage="$staging/$name"
 mkdir -p "$stage/bin" "$stage/lib" "$stage/LICENSES"
-cp "$binary" "$stage/bin/tensorfold-native"
-chmod 755 "$stage/bin/tensorfold-native"
+cp "$binary" "$stage/bin/$executable"
+chmod 755 "$stage/bin/$executable"
 cp "$license" "$stage/LICENSE"
 cp "$notice" "$stage/NOTICE"
 cp -R "$license_dir/." "$stage/LICENSES/"
 cp "$third_party" "$stage/THIRD_PARTY_NOTICES.md"
 cp "$runtime" "$stage/RUNTIME.md"
 printf '%s\n' "$version" > "$stage/VERSION"
-if [ -n "$overlay" ]; then
+if [ "$extension" = zip ]; then
+    verification=0
+    case "$platform" in *-host-only) verification=1 ;; esac
+    python3 "$(dirname "$0")/windows_inputs.py" "$binary" "$overlay" "$source_manifest" "$stage" "$verification"
+elif [ -n "$overlay" ]; then
     [ -z "$(find "$overlay" -type l -print)" ] || { echo 'overlay input must not contain symlinks' >&2; exit 1; }
     cp -R "$overlay/." "$stage/"
 fi
@@ -75,12 +84,15 @@ sha() {
 }
 # Hash every shipped file; keep relative paths so checks survive relocation.
 (cd "$stage"; find . -type f ! -name SHA256SUMS | LC_ALL=C sort | while IFS= read -r file; do sha "$file"; done) > "$stage/SHA256SUMS"
-# no macOS metadata or builder identity in the entries (Linux tar warned once per entry)
-if tar --version 2>/dev/null | grep -q bsdtar; then owner="--no-xattrs --no-mac-metadata --uid 0 --gid 0 --uname root --gname root"; else owner="--owner=0 --group=0 --numeric-owner"; fi
-# shellcheck disable=SC2086
-COPYFILE_DISABLE=1 tar $owner -czf "$staging/$name.tar.gz" -C "$staging" "$name"
-python3 "$(dirname "$0")/check_archive.py" "$path_checker" "$build_root" "$staging/$name.tar.gz"
-mv "$staging/$name.tar.gz" "$output/$name.tar.gz"
-(cd "$output"; sha "$name.tar.gz") > "$output/$name.tar.gz.sha256"
+if [ "$extension" = zip ]; then
+    python3 "$(dirname "$0")/zip_stage.py" "$stage" "$staging/$name.zip"
+else
+    if tar --version 2>/dev/null | grep -q bsdtar; then owner="--no-xattrs --no-mac-metadata --uid 0 --gid 0 --uname root --gname root"; else owner="--owner=0 --group=0 --numeric-owner"; fi
+    # shellcheck disable=SC2086
+    COPYFILE_DISABLE=1 tar $owner -czf "$staging/$name.tar.gz" -C "$staging" "$name"
+fi
+python3 "$(dirname "$0")/check_archive.py" "$path_checker" "$build_root" "$staging/$name.$extension"
+mv "$staging/$name.$extension" "$output/$name.$extension"
+(cd "$output"; sha "$name.$extension") > "$output/$name.$extension.sha256"
 # Install only the final archive and checksum, never the staging tree.
 # Fresh stages stay in the build cache for inspection.
