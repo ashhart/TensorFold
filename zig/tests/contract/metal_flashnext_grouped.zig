@@ -13,6 +13,7 @@ pub const Probe = struct {
     device: mtl.Device,
     queue: mtl.Queue,
     control: bool = false,
+    indexed: bool = false,
     fixture: ?*Fixture = null,
     actual: []const u8 = &.{},
     baseline: []const u8 = &.{},
@@ -22,7 +23,8 @@ pub const Probe = struct {
         if (p.fixture) |fixture| fixture.deinit(p.a);
         p.inputs_.deinit(p.a);
     }
-    pub fn name(control: bool) []const u8 {
+    pub fn name(control: bool, indexed: bool) []const u8 {
+        if (indexed) return if (control) "control: Flash Next grouped experts through the scale index, gate and up tables swapped" else "Flash Next q4 experts grouped by expert through the scale index";
         return if (control) "control: Flash Next grouped experts, gate and up scales swapped" else "Flash Next q4 experts grouped by expert";
     }
     fn depth(_: c.Shape) usize {
@@ -30,7 +32,7 @@ pub const Probe = struct {
     }
     pub fn kernel(p: *Probe) g.Kernel {
         return .{ .ctx = p, .control = if (p.control) .shapes else null, .spec = .{
-            .name = name(p.control),
+            .name = name(p.control, p.indexed),
             .accum = .none,
             .depth = depth,
             .out = .raw,
@@ -59,9 +61,9 @@ pub const Probe = struct {
         const p = of(ctx);
         const fixture = p.fixture.?;
         fixture.wrong_scales = false;
-        p.baseline = try fixture.run(false);
+        p.baseline = try fixture.run(false, false);
         fixture.wrong_scales = p.control;
-        p.actual = try fixture.run(true);
+        p.actual = try fixture.run(true, p.indexed);
     }
     fn output(ctx: *anyopaque) ![]const u8 {
         return of(ctx).actual;

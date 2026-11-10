@@ -1,5 +1,6 @@
 //! Prompt products at any MLX width: qmmw_nax compiled per (bits, group), and which weights take which width.
 const std = @import("std");
+const scale_index = @import("scale_index.zig");
 const mtl = @import("metal");
 pub const ks = @import("kernel_sources");
 const frags = @import("../../core/frags.zig");
@@ -11,7 +12,9 @@ const Model = replay.Model;
 const variants = @import("variants.zig");
 
 /// One width's kernels: dense, split-K, sorted-expert gathers (32, 64, 128 rows) and fused gate/up (32, 64 rows).
-pub const Pipes = struct { qmm: mtl.Pipeline, splitk: mtl.Pipeline, gather: [3]mtl.Pipeline, gu: [2]mtl.Pipeline };
+pub const Pipes = struct { qmm: mtl.Pipeline, splitk: mtl.Pipeline, gather: [3]mtl.Pipeline, gu: [2]mtl.Pipeline, ix: ?Gathers = null };
+/// One library's gathers by tile size; `Pipes.ix` holds the ones that read scales and biases through the index.
+pub const Gathers = struct { gather: [3]mtl.Pipeline, gu: [2]mtl.Pipeline };
 
 /// A fused member: its rows and width, in member order.
 pub const Part = struct { rows: usize, bits: u8, group: u16 };
@@ -56,22 +59,29 @@ fn key(b: Buf) Key {
     return .{ .id = @intFromPtr(b.b.id), .off = b.off };
 }
 
-/// qmmw_nax at `bits`/`group` with nax.h inlined for this GPU.
+fn pipeline(r: *Run, lib: mtl.Library, name: [:0]const u8) !mtl.Pipeline {
+    return r.ownResource(try mtl.Pipeline.init(r.device, lib, name, false));
+}
+
+fn gathers(r: *Run, lib: mtl.Library) !Gathers {
+    return .{
+        .gather = .{ try pipeline(r, lib, "tf_gather_qmmw_nax_32"), try pipeline(r, lib, "tf_gather_qmmw_nax_64"), try pipeline(r, lib, "tf_gather_qmmw_nax_128") },
+        .gu = .{ try pipeline(r, lib, "tf_gather_guw_nax_32"), try pipeline(r, lib, "tf_gather_guw_nax_64") },
+    };
+}
+
+fn library(r: *Run, body: []const u8, bits: u8, group: u16) !mtl.Library {
+    const text = try frags.source(r.device, r.arena, try @import("../../core/qmmw_source.zig").source(r.arena, body, bits, group));
+    return r.ownResource(try mtl.Library.fromSource(r.device, text, mtl.CompileOptions.mlx()));
+}
+
+/// qmmw_nax at `bits`/`group` with nax.h inlined for this GPU; with the scale index, 4/32 gathers read through it.
 pub fn compile(r: *Run, bits: u8, group: u16) !Pipes {
     const body = if (r.window.ssd_experts != null) try @import("fsr_prompt_source.zig").patch(r.arena, ks.flashnext_qmmw, true) else ks.flashnext_qmmw;
-    const text = try frags.source(r.device, r.arena, try @import("../../core/qmmw_source.zig").source(r.arena, body, bits, group));
-    const lib = try r.ownResource(try mtl.Library.fromSource(r.device, text, mtl.CompileOptions.mlx()));
-    const p = struct {
-        fn of(rr: *Run, l: mtl.Library, name: [:0]const u8) !mtl.Pipeline {
-            return rr.ownResource(try mtl.Pipeline.init(rr.device, l, name, false));
-        }
-    };
-    return .{
-        .qmm = try p.of(r, lib, "tf_qmmw_t_nax"),
-        .splitk = try p.of(r, lib, "tf_qmmw_splitk_nax"),
-        .gather = .{ try p.of(r, lib, "tf_gather_qmmw_nax_32"), try p.of(r, lib, "tf_gather_qmmw_nax_64"), try p.of(r, lib, "tf_gather_qmmw_nax_128") },
-        .gu = .{ try p.of(r, lib, "tf_gather_guw_nax_32"), try p.of(r, lib, "tf_gather_guw_nax_64") },
-    };
+    const lib = try library(r, body, bits, group);
+    const g = try gathers(r, lib);
+    const ix: ?Gathers = if (r.sb_index and bits == 4 and group == 32) try gathers(r, try library(r, try @import("prompt_index_source.zig").patch(r.arena, body), bits, group)) else null;
+    return .{ .qmm = try pipeline(r, lib, "tf_qmmw_t_nax"), .splitk = try pipeline(r, lib, "tf_qmmw_splitk_nax"), .gather = g.gather, .gu = g.gu, .ix = ix };
 }
 
 fn need(w: *Wide, r: *Run, bits: u8, group: u16) !void {
@@ -168,7 +178,8 @@ fn launch(p: *Prompt, pipe: mtl.Pipeline, w: [3]Buf, x: Buf, k: usize, n: usize,
 
 /// The sorted-expert gather at the weight's width: tiles of 32, 64 or 128 rows as Prompt.gather picks them.
 pub fn gather(p: *Prompt, pipes: Pipes, bm: usize, x: Buf, w: []const Buf, k: usize, n: usize, pairs: usize, y: Buf) void {
-    p.bind(pipes.gather[if (bm == 128) 2 else if (bm == 64) 1 else 0], &.{ x, w[0], w[1], w[2], p.b.off });
+    const set = if (pipes.ix != null and p.r.sbix.contains(scale_index.keyOf(w[0]))) pipes.ix.?.gather else pipes.gather;
+    p.bind(set[if (bm == 128) 2 else if (bm == 64) 1 else 0], &.{ x, w[0], w[1], w[2], p.b.off });
     const prm = [4]i32{ @intCast(pairs), @intCast(n), @intCast(k), 512 };
     p.r.enc.setBytes(std.mem.asBytes(&prm), 5);
     p.r.enc.setBuffer(y.b, y.off, 6);
@@ -178,7 +189,8 @@ pub fn gather(p: *Prompt, pipes: Pipes, bm: usize, x: Buf, w: []const Buf, k: us
 
 /// The fused gate/up gather at the weights' width.
 pub fn gatherGU(p: *Prompt, pipes: Pipes, bm: usize, x: Buf, wg: []const Buf, wu: []const Buf, k: usize, n: usize, pairs: usize, y: Buf) void {
-    p.bind(pipes.gu[if (bm == 64) 1 else 0], &.{ x, wg[0], wg[1], wg[2], wu[0], wu[1], wu[2], p.b.off });
+    const set = if (pipes.ix != null and p.r.sbix.contains(scale_index.keyOf(wg[0]))) pipes.ix.?.gu else pipes.gu;
+    p.bind(set[if (bm == 64) 1 else 0], &.{ x, wg[0], wg[1], wg[2], wu[0], wu[1], wu[2], p.b.off });
     const prm = [4]i32{ @intCast(pairs), @intCast(n), @intCast(k), 512 };
     p.r.enc.setBytes(std.mem.asBytes(&prm), 8);
     p.r.enc.setBuffer(y.b, y.off, 9);
