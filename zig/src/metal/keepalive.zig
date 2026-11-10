@@ -22,6 +22,14 @@ pub fn TargetFor(comptime Metal: type) type {
             _ = t.probe();
         }
 
+        /// The ticker's probe while a request runs: the sets stay in use and their waiting changes stay waiting.
+        pub fn busy(ctx: *anyopaque) void {
+            const t: *Self = @ptrCast(@alignCast(ctx));
+            const pool = Metal.objc.Pool.push();
+            defer pool.pop();
+            _ = t.probe();
+        }
+
         /// One committed command buffer that touches every set, without the flush; a request may wait for it.
         pub fn probe(t: *const Self) Metal.CommandBuffer {
             const cmd = t.queue.commandBuffer();
