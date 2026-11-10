@@ -45,7 +45,7 @@ pub fn attentionSource(device: mtl.Device, a: std.mem.Allocator, g: Geometry) ![
 pub fn attentionSourceHeads(device: mtl.Device, a: std.mem.Allocator, heads: usize, kv_heads: usize) ![]u8 {
     const body = try frags.source(device, a, ks.llama_attention_nax);
     defer a.free(body);
-    return std.fmt.allocPrint(a, "#define DH {d}\n#define NQ {d}\n#define G {d}\n#define KVH {d}\n#define SCALE {e}f\n{s}", .{ cfg.head_dim, heads, heads / kv_heads, kv_heads, cfg.headScale(), body });
+    return std.fmt.allocPrint(a, "#define DH {d}\n#define NQ {d}\n#define G {d}\n#define KVH {d}\n#define WINDOW 0\n#define RING 0\n#define SCALE {e}f\n{s}", .{ cfg.head_dim, heads, heads / kv_heads, kv_heads, cfg.headScale(), body });
 }
 
 /// The GEMM forms' text as model.zig builds it.
