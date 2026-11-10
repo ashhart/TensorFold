@@ -374,7 +374,7 @@ pub const Lanes = struct {
     };
 
     fn backend(self: *Lanes) be.Backend {
-        return .{ .ptr = self, .round_observer = if (self.trace) |x| x.observer() else null, .first_before_draft = true, .penalties = true, .vtable = if (self.readout.readout != null) &read_vtable else &text_vtable };
+        return .{ .ptr = self, .round_observer = if (self.trace) |x| x.observer() else null, .first_before_draft = true, .penalties = true, .chunk_invariant = true, .vtable = if (self.readout.readout != null) &read_vtable else &text_vtable };
     }
 
     /// Readout streams from now on fill through `r` (one rank; before the first stream): the backend to hand on.
@@ -420,6 +420,11 @@ pub const Lanes = struct {
     fn prefillStepFn(ptr: *anyopaque, stream: *lanes.Stream, max_rows: u32) !bool {
         if (stream.readout != null) return readout.step(cast(ptr), stream, max_rows);
         return prefill.step(cast(ptr), stream, max_rows);
+    }
+
+    /// A kept state into `cache` (cuda_reuse.zig), for a prompt pass that resumes at it.
+    pub fn restoreKept(self: *Lanes, cache: *E.Cache, saved: *anyopaque, seen: []const reuse.Seen) !void {
+        return reuse.restoreCache(self.e, cache, saved, seen);
     }
 
     fn cancelPrefillFn(ptr: *anyopaque, stream: *lanes.Stream) !void {
@@ -585,6 +590,10 @@ test "Qwen pages default: --parallel a cap with TF_QWEN_KV_PAGES set, a request 
 
 test "Qwen stepped prefill: cancel between host iterations retains only the last completed cut" {
     try @import("cuda_prefill_test.zig").cancelled(Lanes, Lanes.backend);
+}
+
+test "Qwen stepped prefill: the lane host's cap cuts on the 128 grid inside cold chunks, every cold cut lands" {
+    try @import("cuda_prefill_test.zig").capped();
 }
 
 test {
