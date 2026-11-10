@@ -144,6 +144,7 @@ pub fn forward(o: Ops, net: Net, l: Layout, dev: u64, streams: usize) !Out {
         const parts = dops.Partials.at(try o.arena.take(dops.Partials.bytes(B, c.heads)), B, c.heads);
         var shape = at;
         shape.layer = i;
+        // the ring holds absorbed rows only (block keys come from k32 and v); no mask: a row sees its whole block
         try dops.attention(o, q32, k32, v, null, dev + l.segs, shape, parts, att);
         const attn = try o.project(att, w.o, B, false);
         try dops.dynConv(o, attn, dyn, w.attn_base, h, h2, B, hd, c.group, 1, c.block);
