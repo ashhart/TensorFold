@@ -1,65 +1,7 @@
-//! tf-moss-image-generate on Metal: moss_image.generate's picture from options on the system GPU.
+//! tf-moss-image-generate on Metal: the family parser's picture from options on the system GPU.
 const std = @import("std");
-const mtl = @import("metal");
-const tf = @import("tensorfold");
-const tokenizer = @import("tokenizer");
-
-const Metal = struct {
-    pub const mi = tf.moss_image;
-    pub const st = tf.safetensors;
-    pub const seconds = mtl.clock.seconds;
-    pub const Picture = struct { png: []const u8, load_s: f64, wall: f64, gpu: f64 };
-
-    pub const Device = struct {
-        pool: mtl.objc.Pool,
-        device: mtl.Device,
-
-        pub fn init(g: *Device) !void {
-            g.pool = mtl.objc.Pool.push();
-            errdefer g.pool.pop();
-            g.device = try mtl.Device.init();
-        }
-
-        pub fn deinit(g: *Device) void {
-            g.pool.pop();
-        }
-
-        pub fn name(g: *Device) []const u8 {
-            return std.mem.span(g.device.name());
-        }
-
-        pub fn load(g: *Device, gpa: std.mem.Allocator, io: std.Io, dir: []const u8, text: usize, width: usize, height: usize) !*mi.Model {
-            return mi.Model.load(gpa, io, g.device, dir, text, width, height);
-        }
-
-        /// Both prompts' rows from the checkpoint's encoder, freed before this returns; the seconds the encode took.
-        pub fn encode(g: *Device, a: std.mem.Allocator, io: std.Io, checkpoint: []const u8, texts: [2][]const u8, rows: *[2][]u16) !f64 {
-            const enc = try mi.Encoder.load(std.heap.page_allocator, io, g.device, checkpoint);
-            defer enc.deinit();
-            var tok = try tokenizer.loadTokenizer(io, a, try std.fs.path.join(a, &.{ checkpoint, "tokenizer", "tokenizer.json" }));
-            defer tok.deinit();
-            const encoding = mtl.clock.seconds();
-            for (texts, rows) |t, *m| {
-                const ids = try mi.encoder.ids(&tok, a, t);
-                m.* = try a.alloc(u16, ids.len * mi.encoder_config.hidden);
-                try enc.rows(ids, m.*, null);
-            }
-            return mtl.clock.seconds() - encoding;
-        }
-
-        /// `latents` as a PNG by the checkpoint's vae/ decoder, freed before this returns; its load and decode times.
-        pub fn decode(g: *Device, a: std.mem.Allocator, io: std.Io, checkpoint: []const u8, latents: []const f32, width: usize, height: usize) !Picture {
-            const loading = mtl.clock.seconds();
-            const decoder = try mi.Decoder.load(std.heap.page_allocator, io, g.device, try std.fs.path.join(a, &.{ checkpoint, "vae" }), width, height);
-            defer decoder.deinit();
-            const load_s = mtl.clock.seconds() - loading;
-            const rgb = try a.alloc(u8, width * height * 3);
-            const t = try decoder.decode(latents, rgb);
-            return .{ .png = try mi.png.encode(a, rgb, width, height), .load_s = load_s, .wall = t.wall, .gpu = t.gpu };
-        }
-    };
-};
+const Metal = @import("moss_image.zig").Metal;
 
 pub fn main(init: std.process.Init) !u8 {
-    return tf.moss_image.generate.run(Metal, init);
+    return @import("moss_image_generate_run.zig").run(Metal, init);
 }
