@@ -3,8 +3,8 @@ const std = @import("std");
 const sys = @import("sys.zig");
 
 pub const Error = error{InvalidEnvironment};
-pub const Scope = enum { common, cuda, metal, xpu, slide, hooks, dsv41, gemma4, drama3, glm, flashnext };
-pub const Kind = enum { u32, u64, size, percent, positive, device, segments, mib, bit_width, word, prompt, flag, toggle, real, positive_real, signed_real, range, path };
+pub const Scope = enum { common, cuda, metal, xpu, slide, hooks, dsv41, gemma4, drama3, glm, flashnext, stage };
+pub const Kind = enum { u32, u64, size, percent, positive, device, segments, mib, bit_width, word, prompt, flag, toggle, real, positive_real, signed_real, range, path, peers, layout };
 pub const Rule = struct {
     name: [:0]const u8,
     scope: Scope,
@@ -76,6 +76,12 @@ pub const rules = [_]Rule{
     .{ .name = "TF_GLM_SHARED", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_GLM_DFLASH2_LOG", .scope = .glm, .kind = .u64, .forms = "a whole unsigned 64-bit round count (0 logs no drafts)" },
     .{ .name = "TF_GLM_DRAFT_CONFIDENCE", .scope = .glm, .kind = .real, .max = 1, .forms = "a finite chain-chance cut from 0 to 1 (default 0.7)" },
+    .{ .name = "TF_STAGE_RANK", .scope = .stage, .kind = .u32, .first_digit = true, .max = 63, .forms = "this box's whole rank in the ring, from 0 to TF_STAGE_WORLD - 1" },
+    .{ .name = "TF_STAGE_WORLD", .scope = .stage, .kind = .u32, .first_digit = true, .min = 2, .max = 64, .forms = "the ring's whole rank count, from 2 to 64" },
+    .{ .name = "TF_STAGE_PEERS", .scope = .stage, .kind = .peers, .forms = "every rank's host:port in rank order, comma-separated, ports 1 to 65535, one per rank" },
+    .{ .name = "TF_STAGE_SECRET_FILE", .scope = .stage, .kind = .path, .forms = "the path of the ring's owner-only secret file, without control characters" },
+    .{ .name = "TF_STAGE_TIMEOUT_S", .scope = .stage, .kind = .positive, .first_digit = true, .forms = "whole seconds from 1 to 4294967295 a ring wait may take (default 60)" },
+    .{ .name = "TF_STAGE_LAYOUT", .scope = .stage, .kind = .layout, .forms = "every rank's first:end layer range in rank order, comma-separated, one per rank" },
     .{ .name = "TF_DSV41_MHC_DEFER", .scope = .dsv41, .kind = .toggle, .trim = " \t", .no_word = false, .forms = "0, 1, true, false, on, off or yes (any case)" },
     .{ .name = "TF_DSV41_COEF_LATE", .scope = .dsv41, .kind = .toggle, .trim = " \t", .no_word = false, .forms = "0, 1, true, false, on, off or yes (any case)" },
     .{ .name = "TF_DSV41_LOOKUP", .scope = .dsv41, .kind = .toggle, .trim = " \t", .forms = "0, 1, true, false, on, off, yes or no (any case); blank turns lookup drafts off" },
@@ -215,6 +221,7 @@ pub fn parse(name: []const u8, raw: ?[]const u8) Error!?u64 {
     if (r.kind == .path) return if (for (text) |ch| {
         if (ch < 0x20 or ch == 0x7f) break true;
     } else false) error.InvalidEnvironment else 0;
+    if (r.kind == .peers or r.kind == .layout) return try listed(r.kind, text);
     // a real travels as its f64 bits and a range as lo above hi; `value` and `range` decode them
     if (isReal(r.kind)) return @bitCast(try real(r, text));
     if (r.kind == .range) {
@@ -243,6 +250,25 @@ pub fn parse(name: []const u8, raw: ?[]const u8) Error!?u64 {
     if (r.kind == .mib and n > std.math.maxInt(usize) / (1 << 20)) return error.InvalidEnvironment;
     if (r.kind == .prompt and (n < 128 or n > 2048 or n % 16 != 0)) return error.InvalidEnvironment;
     if (std.mem.eql(u8, name, "TF_ROCE_GID_INDEX") and n > std.math.maxInt(c_int)) return error.InvalidEnvironment;
+    return n;
+}
+
+/// A list's entry count: `host:port` (port 1 to 65535) or `first:end` layers, at most 64 entries.
+fn listed(kind: Kind, text: []const u8) Error!u64 {
+    for (text) |c| if (c < 0x20 or c > 0x7e) return error.InvalidEnvironment;
+    var n: u64 = 0;
+    var it = std.mem.splitScalar(u8, text, ',');
+    while (it.next()) |entry| : (n += 1) {
+        const colon = std.mem.lastIndexOfScalar(u8, entry, ':') orelse return error.InvalidEnvironment;
+        if (n == 64 or colon == 0) return error.InvalidEnvironment;
+        if (kind == .peers) {
+            const port = std.fmt.parseInt(u16, entry[colon + 1 ..], 10) catch return error.InvalidEnvironment;
+            if (port == 0 or entry[colon + 1] == '+') return error.InvalidEnvironment;
+        } else for ([_][]const u8{ entry[0..colon], entry[colon + 1 ..] }) |v| {
+            if (v.len == 0 or v[0] < '0' or v[0] > '9') return error.InvalidEnvironment;
+            _ = std.fmt.parseInt(u32, v, 10) catch return error.InvalidEnvironment;
+        }
+    }
     return n;
 }
 
@@ -349,6 +375,7 @@ pub const Flags = struct {
     drama3: bool = false,
     glm: bool = false,
     flashnext: bool = false,
+    stage: bool = false,
     device: ?u32 = null,
     segments: ?u32 = null,
     carveout: bool = false,
@@ -366,6 +393,7 @@ pub const Flags = struct {
             .drama3 => f.drama3,
             .glm => f.glm,
             .flashnext => f.flashnext,
+            .stage => f.stage,
         };
     }
 };

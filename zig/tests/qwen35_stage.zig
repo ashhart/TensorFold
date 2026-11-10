@@ -24,9 +24,7 @@ pub fn run(init: std.process.Init, a: std.mem.Allocator, dir: []const u8, out_pa
     }
     var set: stage.config.Settings = undefined;
     try stage.config.parse(stage.config.Env{}, &set);
-    var ranges: [stage.config.most_ranks]stage.boot.Range = undefined;
-    const layout = try parseLayout(std.mem.span(std.c.getenv("TF_STAGE_LAYOUT") orelse return error.MissingStageLayout), &ranges);
-    if (layout.len != set.world) return error.BadStageLayout;
+    const layout = set.layout();
     const mine = layout[set.rank];
     const e = try E.Engine.initStage(init.gpa, init.io, &ctx, dir, kv8, null, .{ .first = mine.first, .end = mine.end, .heads = set.rank == 0 });
     defer e.deinit();
@@ -55,19 +53,6 @@ fn gib(n: u64) f64 {
 pub fn report(rank: u32, what: []const u8) void {
     const u = cuda.usage(false);
     std.debug.print("stage {d} {s}: {d:.2} GiB device now, {d:.2} GiB peak\n", .{ rank, what, gib(u.device), gib(u.peak) });
-}
-
-/// `first:end` ranges, comma-separated, in rank order.
-pub fn parseLayout(text: []const u8, out: []stage.boot.Range) ![]const stage.boot.Range {
-    var n: usize = 0;
-    var it = std.mem.splitScalar(u8, text, ',');
-    while (it.next()) |r| {
-        if (n == out.len) return error.BadStageLayout;
-        const colon = std.mem.indexOfScalar(u8, r, ':') orelse return error.BadStageLayout;
-        out[n] = .{ .first = try std.fmt.parseInt(u32, r[0..colon], 10), .end = try std.fmt.parseInt(u32, r[colon + 1 ..], 10) };
-        n += 1;
-    }
-    return out[0..n];
 }
 
 fn finish(init: std.process.Init, a: std.mem.Allocator, e: *E.Engine, lead: *S.Lead, out_path: []const u8, role: []const u8) !u8 {

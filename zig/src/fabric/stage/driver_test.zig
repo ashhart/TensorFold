@@ -23,8 +23,8 @@ pub const most = 3;
 pub const pipe_streams = 4;
 const pipe_steps = 6;
 
-/// A planted fault on one stage: a layer short of its range, a rollback of the position only, or no rollback.
-pub const Plant = enum { none, short_range, no_restore, no_rollback };
+/// A planted fault on one stage: short range, position-only rollback, no rollback, or death at its third forward.
+pub const Plant = enum { none, short_range, no_restore, no_rollback, dies };
 
 /// An engine whose layer `l` mixes `l` and a per-stream running state into every row, so order and state both show.
 pub const Fake = struct {
@@ -33,6 +33,7 @@ pub const Fake = struct {
         first: u32,
         end: u32,
         plant: Plant = .none,
+        forwards: u32 = 0,
         /// Rank 0's head: every window row, and a prompt part's last row, `hidden` values each.
         out: std.ArrayList(u32) = .empty,
         h: [most_rows * hidden]u32 = undefined,
@@ -131,6 +132,8 @@ pub const Fake = struct {
 
     /// This stage's layers over the round's rows; rank 0 embeds and runs the head, the hop carries the rows between.
     pub fn forward(e: *Engine, parts: []const Part, ids: []const u32, mode: plan.Mode, hop: ?driver.Hop) !void {
+        e.forwards += 1;
+        if (e.plant == .dies and e.forwards == 3) return error.PlantedDeath;
         const bytes = try runLayers(e, parts, ids, mode, hop);
         if (hop) |x| {
             pack(e, bytes);
@@ -292,7 +295,7 @@ fn rankMain(gpa: std.mem.Allocator, o: ring.Options, l: net.Fd, c: Case, res: *R
 fn rankRun(gpa: std.mem.Allocator, o: ring.Options, l: net.Fd, c: Case, res: *Result) !void {
     var r = try ring.Ring.join(o, l);
     defer r.close();
-    defer r.stop(); // as the tools do: a clean end passes a stop round the ring
+    defer if (c.plants[o.rank] != .dies) r.stop(); // as the tools do: a clean end passes a stop round the ring
     const mine = c.layout[o.rank];
     var e: Fake.Engine = .{ .gpa = gpa, .first = mine.first, .end = mine.end, .plant = c.plants[o.rank] };
     defer e.out.deinit(gpa);

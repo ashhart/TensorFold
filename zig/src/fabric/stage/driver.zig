@@ -6,18 +6,17 @@ const payload = @import("payload.zig");
 const Ring = @import("ring.zig").Ring;
 const inbox = @import("inbox.zig");
 const keepalive = @import("keepalive.zig");
+const hops = @import("link.zig");
+const Link = hops.Link;
+const echoed = hops.echoed;
 
-pub const Error = error{ StreamOpen, NoFreeSlot, UnknownStream, BadAccepted, OtherPosition, ResumeNotInV1, CutsNotInV1, OtherEcho, PromptParts, TooManyStreams, BadDepth, TooManyInFlight, NothingInFlight, StreamInFlight, RoundsInFlight, Unsettled, KeptTwice };
+pub const Error = error{ StreamOpen, NoFreeSlot, UnknownStream, BadAccepted, OtherPosition, ResumeNotInV1, CutsNotInV1, OtherEcho, PromptParts, TooManyStreams, BadDepth, TooManyInFlight, NothingInFlight, StreamInFlight, RoundsInFlight, Unsettled, KeptTwice, StageLost };
 
 /// A stream's unsettled window: its first position and its rows.
 pub const Window = struct { start: u32, rows: u32 };
 
 /// The boundary's planes of `rows` rows in host memory, sent or filled in place by the ring.
-pub const Hop = struct {
-    ctx: *anyopaque,
-    give: *const fn (ctx: *anyopaque, rows: usize, bytes: []const u8) anyerror!void,
-    take: *const fn (ctx: *anyopaque, rows: usize, bytes: []u8) anyerror!void,
-};
+pub const Hop = hops.Hop;
 
 /// What rank 0's caller asks of a stream in one round.
 pub const Entry = struct { id: u32, op: plan.Op, rows: u32 = 0, accepted: u32 = 0 };
@@ -35,56 +34,6 @@ pub fn fingerprint(version: []const u8, config: []const u8, ranges: []const boot
     }
     return h.finalResult();
 }
-
-/// The last stage's copy of rank 0's plan, which must be byte for byte the one sent.
-fn echoed(ring: *Ring, round: u64, sent: []const u8, buf: []u8) !void {
-    const h = try ring.recv(.plan, round, buf);
-    if (!std.mem.eql(u8, buf[0..@intCast(h.bytes)], sent)) return error.OtherEcho;
-}
-
-/// The ring's hop for one round: rows to the next rank, rows from the one before (on rank 0, after the plan's echo).
-const Link = struct {
-    ring: *Ring,
-    round: u64,
-    bound: boot.Boundary,
-    plan: plan.Plan,
-    /// Rank 0: the plan it sent, which the last stage's echo must equal.
-    sent: ?[]const u8 = null,
-    echo: []u8 = &.{},
-    /// Rank 0 with rounds in flight: the round's echo and rows, taken off the ring by the inbox's thread.
-    job: ?*inbox.Job = null,
-    ib: ?*inbox.Inbox = null,
-
-    fn hop(l: *Link) Hop {
-        return .{ .ctx = l, .give = give, .take = take };
-    }
-
-    fn give(ctx: *anyopaque, rows: usize, bytes: []const u8) anyerror!void {
-        const l: *Link = @ptrCast(@alignCast(ctx));
-        try l.ring.send(.rows, l.round, @intCast(rows), &.{bytes});
-    }
-
-    fn take(ctx: *anyopaque, rows: usize, bytes: []u8) anyerror!void {
-        const l: *Link = @ptrCast(@alignCast(ctx));
-        if (l.job) |j| return l.taken(j, rows, bytes);
-        if (l.sent) |p| {
-            try echoed(l.ring, l.round, p, l.echo);
-            l.sent = null;
-        }
-        const h = try l.ring.recv(.rows, l.round, bytes);
-        const r = try plan.checkRows(h, l.plan, l.bound);
-        if (r.rows != rows) return error.OtherRowCount;
-    }
-
-    /// The inbox's copy of the round: its echo against the plan sent, its rows against the plan, into `bytes`.
-    fn taken(l: *Link, j: *inbox.Job, rows: usize, bytes: []u8) !void {
-        try l.ib.?.wait(j);
-        if (!std.mem.eql(u8, j.echo[0..j.echo_len], l.sent.?)) return error.OtherEcho;
-        const r = try plan.checkRows(j.head, l.plan, l.bound);
-        if (r.rows != rows or r.total() != bytes.len) return error.OtherRowCount;
-        @memcpy(bytes, j.rows[0..bytes.len]);
-    }
-};
 
 /// Boot rounds 1 and 2: descriptions, then ready reports, each appended; rank 0 checks all; the next round returned.
 pub fn bootRing(gpa: std.mem.Allocator, ring: *Ring, own: *const boot.Description, model: *const boot.Model, ranges: []const boot.Range, backend: payload.Backend) !u64 {
@@ -271,6 +220,8 @@ pub fn Driver(comptime B: type) type {
             /// The keep-alive's clock, and the round it last saw (null: not polled yet).
             beats: keepalive.Beat = .init(0),
             beat_round: ?u64 = null,
+            /// The ring error that ended a round after its plan left: every later call is refused `StageLost`.
+            lost: ?anyerror = null,
 
             pub fn init(gpa: std.mem.Allocator, e: *Engine, ring: ?*Ring, parallel: u32, context: u32, first_round: u64) !Lead {
                 if (parallel > B.most_streams) return error.TooManyStreams;
@@ -305,6 +256,7 @@ pub fn Driver(comptime B: type) type {
 
             /// A stream opened on rank 0 now, its cache returned; the followers open it with the next plan.
             pub fn open(l: *Lead, id: u32) !*Cache {
+                try l.alive();
                 if (l.live(id) != null) return error.StreamOpen;
                 if (l.slots.find(id) != null or (l.free() == null and l.ending())) try l.beat(); // a queued close first
                 const x = l.free() orelse return error.NoFreeSlot;
@@ -325,6 +277,7 @@ pub fn Driver(comptime B: type) type {
 
             /// A stream ended on rank 0 now (`op` close or cancel); the followers end it with the next plan.
             pub fn end(l: *Lead, id: u32, op: plan.Op) !void {
+                try l.alive();
                 if (op != .close and op != .cancel) return error.BadOp;
                 const x = l.live(id) orelse return error.UnknownStream;
                 if (l.flying(id)) return error.StreamInFlight;
@@ -337,6 +290,7 @@ pub fn Driver(comptime B: type) type {
 
             /// The stream's last window already kept to `accepted` rows on rank 0; the next plan carries the count.
             pub fn kept(l: *Lead, id: u32, accepted: u32) !void {
+                try l.alive();
                 const x = l.live(id) orelse return error.UnknownStream;
                 if (l.flying(id)) return error.StreamInFlight;
                 if (B.window(&x.cache) != null) return error.Unsettled;
@@ -346,11 +300,13 @@ pub fn Driver(comptime B: type) type {
 
             /// Every round in flight completed, oldest first.
             pub fn drain(l: *Lead) !void {
+                try l.alive();
                 while (l.count > 0) try l.complete();
             }
 
             /// A keep-alive if none of the plans seen by these polls went out within the interval; true if sent.
             pub fn beatIfDue(l: *Lead, now_ns: u64) !bool {
+                try l.alive();
                 const quiet = l.beat_round == l.round and l.count == 0 and l.beats.due(now_ns);
                 if (quiet) try l.beat();
                 if (quiet or l.beat_round != l.round) l.beats.sent(now_ns); // a plan since the last poll
@@ -402,6 +358,7 @@ pub fn Driver(comptime B: type) type {
 
             /// One round of `mode` over `entries` (ascending ids): every stage applies them, then one forward of `ids`.
             pub fn step(l: *Lead, entries: []const Entry, ids: []const u32, mode: plan.Mode) !void {
+                try l.alive();
                 if (l.flights.len > 0) {
                     if (l.count > 0) return error.RoundsInFlight;
                     try l.issue(entries, ids, mode);
@@ -419,11 +376,22 @@ pub fn Driver(comptime B: type) type {
                     if (r.n > 0) try B.forward(l.e, r.parts[0..r.n], ids, mode, null);
                     return;
                 };
-                try ring.send(.plan, l.round, 0, &.{p});
-                if (r.n == 0) return echoed(ring, l.round, p, l.mem[half..]);
                 const decoded = try plan.decode(p, l.limits);
+                ring.send(.plan, l.round, 0, &.{p}) catch |err| return l.fail(err);
+                if (r.n == 0) return echoed(ring, l.round, p, l.mem[half..]) catch |err| return l.fail(err);
                 var link: Link = .{ .ring = ring, .round = l.round, .bound = B.boundary(l.e), .plan = decoded, .sent = p, .echo = l.mem[half..] };
-                try B.forward(l.e, r.parts[0..r.n], ids, mode, link.hop());
+                B.forward(l.e, r.parts[0..r.n], ids, mode, link.hop()) catch |err| return l.fail(err);
+            }
+
+            fn alive(l: *const Lead) !void {
+                if (l.lost != null) return error.StageLost;
+            }
+
+            /// A round that failed after its plan left: the ring is out of step, so it is ended and the error kept.
+            fn fail(l: *Lead, err: anyerror) anyerror {
+                if (l.lost == null) l.ring.?.stop(); // the followers see the end at once, not at their timeout
+                l.lost = err;
+                return err;
             }
 
             /// The plan's entry for `en`: where the stream stands once its previous window keeps `accepted` rows.
@@ -480,6 +448,7 @@ pub fn Driver(comptime B: type) type {
 
             /// One round sent and its streams applied, rank 0's layers run; `complete` takes its rows back in order.
             pub fn issue(l: *Lead, entries: []const Entry, ids: []const u32, mode: plan.Mode) !void {
+                try l.alive();
                 if (l.count == l.flights.len) return error.TooManyInFlight;
                 if (entries.len > B.most_streams) return error.TooManyStreams;
                 for (entries) |en| if (l.flying(en.id)) return error.StreamInFlight; // its next plan needs this round's keep
@@ -506,16 +475,18 @@ pub fn Driver(comptime B: type) type {
                 const bytes: u64 = if (f.r.n == 0) 0 else (try plan.Rows.of(bound, decoded.rows)).total();
                 f.rows = try l.gpa.alloc(u8, @intCast(bytes));
                 f.job = .{ .round = l.round, .echo = f.echo, .rows = f.rows };
-                try l.ib.?.post(&f.job); // before the plan leaves: the last stage may answer at once
+                // posted before the plan leaves: the last stage may answer at once
+                l.ib.?.post(&f.job) catch |err| return l.fail(err);
                 l.count += 1;
-                try ring.send(.plan, l.round, 0, &.{p});
+                ring.send(.plan, l.round, 0, &.{p}) catch |err| return l.fail(err);
                 if (f.r.n == 0) return;
                 f.link = .{ .ring = ring, .round = l.round, .bound = bound, .plan = decoded, .sent = p, .job = &f.job, .ib = l.ib };
-                try B.issue(l.e, f.r.parts[0..f.r.n], f.ids[0..ids.len], mode, f.link.hop(), &f.held);
+                B.issue(l.e, f.r.parts[0..f.r.n], f.ids[0..ids.len], mode, f.link.hop(), &f.held) catch |err| return l.fail(err);
             }
 
             /// The oldest round in flight: its rows back from the last stage, then rank 0's head over them.
             pub fn complete(l: *Lead) !void {
+                try l.alive();
                 if (l.count == 0) return error.NothingInFlight;
                 const f = &l.flights[l.first];
                 defer {
@@ -527,9 +498,9 @@ pub fn Driver(comptime B: type) type {
                 }
                 const parts = f.r.parts[0..f.r.n];
                 if (l.ring == null) return if (f.r.n > 0) B.forward(l.e, parts, f.ids[0..f.n_ids], f.mode, null);
-                if (f.r.n > 0) return B.complete(l.e, parts, f.mode, f.link.hop(), &f.held);
-                try l.ib.?.wait(&f.job);
-                if (!std.mem.eql(u8, f.echo[0..f.job.echo_len], f.sent[0..f.sent_len])) return error.OtherEcho;
+                if (f.r.n > 0) return B.complete(l.e, parts, f.mode, f.link.hop(), &f.held) catch |err| return l.fail(err);
+                l.ib.?.wait(&f.job) catch |err| return l.fail(err);
+                if (!std.mem.eql(u8, f.echo[0..f.job.echo_len], f.sent[0..f.sent_len])) return l.fail(error.OtherEcho);
             }
 
             pub fn inFlight(l: *const Lead) usize {

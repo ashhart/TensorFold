@@ -29,6 +29,7 @@ test {
     _ = fixtures;
     _ = driver;
     _ = inbox;
+    _ = @import("link.zig");
     _ = @import("protocol_test.zig");
     _ = @import("fixtures_test.zig");
 }

@@ -252,3 +252,148 @@ test "stage lead: draining two rounds in flight, then keeps and ends, gives one 
     try t.expectEqualSlices(u32, ref, got);
     try expectRings(ref, pipedBody, dt.pipe_streams);
 }
+
+fn oneAtATimeBody(gpa: std.mem.Allocator, lead: *D.Lead, e: *Fake.Engine) ![]u32 {
+    try lead.pipe(t.io, 1);
+    try dt.run(lead);
+    return e.out.toOwnedSlice(gpa);
+}
+
+test "stage lead: one round in flight (k = 1) gives today's rounds, prompt chunks, keep-alive and closes alike" {
+    const gpa = t.allocator;
+    const ref = try dt.whole(gpa);
+    defer gpa.free(ref);
+    const got = try wholeOf(gpa, oneAtATimeBody, dt.parallel);
+    defer gpa.free(got);
+    try t.expectEqualSlices(u32, ref, got);
+    try expectRings(ref, oneAtATimeBody, dt.parallel);
+}
+
+/// Two groups in flight while a cancel, a release and a prompt chunk wait: each refused, then run after a drain.
+fn opsRun(gpa: std.mem.Allocator, lead: *D.Lead, e: *Fake.Engine, piped: bool) ![]u32 {
+    if (piped) try lead.pipe(t.io, 2);
+    var ids: [dt.most_rows]u32 = undefined;
+    for (1..5) |id| try lead.step(&.{.{ .id = @intCast(id), .op = .open, .rows = 3 }}, idsOf(@intCast(id), ids[0..3]), .prompt);
+    var groups = [2][2]u32{ .{ 1, 2 }, .{ 3, 4 } };
+    var sizes = [2]usize{ 2, 2 };
+    for (0..5) |j| {
+        for (&groups, sizes, 0..) |*g, n, k| {
+            var entries: [2]driver.Entry = undefined;
+            for (g[0..n], entries[0..n]) |id, *en| {
+                const c = lead.cache(id).?;
+                if (Fake.window(c) != null) { // rank 0 keeps the last window first
+                    const a: u32 = @intCast((id + j) % 3);
+                    try Fake.rollback(e, c, a);
+                    try lead.kept(id, a);
+                }
+                en.* = .{ .id = id, .op = .@"continue", .rows = 2 };
+            }
+            const rows = idsOf(@intCast(10 * j + k), ids[0 .. 2 * n]);
+            if (piped) try lead.issue(entries[0..n], rows, .window) else try lead.step(entries[0..n], rows, .window);
+        }
+        if (piped and j == 1) { // a cancel of 4 and stream 5's prompt chunk wait for the rounds in flight
+            try t.expectError(error.StreamInFlight, lead.end(4, .cancel));
+            try t.expectError(error.RoundsInFlight, lead.step(&.{.{ .id = 5, .op = .open, .rows = 3 }}, ids[0..3], .prompt));
+        }
+        if (piped and j == 3) try t.expectError(error.StreamInFlight, lead.end(1, .close)); // a release waits too
+        try lead.drain();
+        if (j == 1) {
+            try lead.end(4, .cancel);
+            _ = try lead.open(5);
+            try lead.step(&.{.{ .id = 5, .op = .@"continue", .rows = 3 }}, idsOf(5, ids[0..3]), .prompt);
+            groups[1][1] = 5;
+        }
+        if (j == 3) {
+            try lead.end(1, .close);
+            groups[0][0] = 2;
+            sizes[0] = 1;
+        }
+    }
+    for ([_]u32{ 2, 3, 5 }) |id| try lead.end(id, .close);
+    try lead.beat();
+    return e.out.toOwnedSlice(gpa);
+}
+
+fn opsPiped(gpa: std.mem.Allocator, lead: *D.Lead, e: *Fake.Engine) ![]u32 {
+    return opsRun(gpa, lead, e, true);
+}
+
+fn opsStepped(gpa: std.mem.Allocator, lead: *D.Lead, e: *Fake.Engine) ![]u32 {
+    return opsRun(gpa, lead, e, false);
+}
+
+test "stage lead: a cancel, a release and a prompt chunk drain the rounds in flight first, and give one round's bytes" {
+    const gpa = t.allocator;
+    const ref = try wholeOf(gpa, opsStepped, dt.pipe_streams);
+    defer gpa.free(ref);
+    const got = try wholeOf(gpa, opsPiped, dt.pipe_streams);
+    defer gpa.free(got);
+    try t.expectEqualSlices(u32, ref, got);
+    try expectRings(ref, opsPiped, dt.pipe_streams);
+}
+
+/// Rounds until the ring fails: that call fails by the ring's error, every later one is refused `StageLost`.
+fn lostRun(gpa: std.mem.Allocator, lead: *D.Lead, e: *Fake.Engine, k: usize) ![]u32 {
+    if (k > 0) try lead.pipe(t.io, k);
+    var ids: [dt.most_rows]u32 = undefined;
+    const first: anyerror = for (0..20) |j| {
+        rounds(lead, &ids, j, k) catch |err| break err;
+    } else return error.RingNeverFailed;
+    try t.expect(first != error.StageLost);
+    try t.expectEqual(@as(?anyerror, first), lead.lost);
+    const one = [_]driver.Entry{.{ .id = 1, .op = .@"continue", .rows = 1 }};
+    try t.expectError(error.StageLost, lead.open(9));
+    try t.expectError(error.StageLost, lead.end(1, .cancel));
+    try t.expectError(error.StageLost, lead.kept(1, 0));
+    try t.expectError(error.StageLost, lead.step(&one, ids[0..1], .window));
+    try t.expectError(error.StageLost, lead.beat());
+    try t.expectError(error.StageLost, lead.beatIfDue(1 << 60));
+    try t.expectError(error.StageLost, lead.drain());
+    if (k > 0) try t.expectError(error.StageLost, lead.issue(&one, ids[0..1], .window));
+    if (k > 0) try t.expectError(error.StageLost, lead.complete());
+    return e.out.toOwnedSlice(gpa);
+}
+
+/// Round `j`: streams 1 and 2 opened by prompts first, then one window each, by `step` or in 2 groups in flight.
+fn rounds(lead: *D.Lead, ids: []u32, j: usize, k: usize) !void {
+    if (j < 2) return lead.step(&.{.{ .id = @intCast(j + 1), .op = .open, .rows = 3 }}, idsOf(@intCast(j), ids[0..3]), .prompt);
+    const a: u32 = if (j == 2) 0 else 1;
+    const both = [_]driver.Entry{ .{ .id = 1, .op = .@"continue", .rows = 1, .accepted = a }, .{ .id = 2, .op = .@"continue", .rows = 1, .accepted = a } };
+    if (k == 0) return lead.step(&both, idsOf(@intCast(j), ids[0..2]), .window);
+    try lead.issue(both[0..1], idsOf(@intCast(j), ids[0..1]), .window);
+    try lead.issue(both[1..2], idsOf(@intCast(j + 50), ids[0..1]), .window);
+    try lead.drain();
+}
+
+fn lostStepped(gpa: std.mem.Allocator, lead: *D.Lead, e: *Fake.Engine) ![]u32 {
+    return lostRun(gpa, lead, e, 0);
+}
+
+fn lostPiped(gpa: std.mem.Allocator, lead: *D.Lead, e: *Fake.Engine) ![]u32 {
+    return lostRun(gpa, lead, e, 2);
+}
+
+test "stage lead: a follower lost mid-round fails that call by the ring's error, then every call is StageLost" {
+    const gpa = t.allocator;
+    for ([_]*const fn (std.mem.Allocator, *D.Lead, *Fake.Engine) anyerror![]u32{ lostStepped, lostPiped }) |f| {
+        for ([_][]const boot.Range{ &dt.two, &dt.three }) |layout| {
+            var res: [dt.most]dt.Result = @splat(.{});
+            try dt.ringRun(gpa, .{ .layout = layout, .body = f, .width = dt.parallel, .plants = .{ .none, .dies, .none } }, &res);
+            defer gpa.free(res[0].out);
+            try t.expectEqual(@as(?anyerror, null), res[0].err);
+            try t.expectEqual(@as(?anyerror, error.PlantedDeath), res[1].err);
+        }
+    }
+}
+
+test "stage lead: one engine is never lost, an engine error is only that call's" {
+    const gpa = t.allocator;
+    var e: Fake.Engine = .{ .gpa = gpa, .first = 0, .end = dt.layers };
+    defer e.out.deinit(gpa);
+    var lead = try D.Lead.init(gpa, &e, null, dt.parallel, dt.context, 1);
+    defer lead.deinit(gpa);
+    var ids: [dt.most_rows + 1]u32 = undefined;
+    try t.expectError(error.BadRows, lead.step(&.{.{ .id = 1, .op = .open, .rows = 3 }}, idsOf(1, ids[0..4]), .prompt));
+    try t.expectEqual(@as(?anyerror, null), lead.lost);
+    try lead.beat();
+}

@@ -48,9 +48,7 @@ pub fn run(init: std.process.Init, a: std.mem.Allocator, dir: []const u8, out_pa
     }
     var ss: stage.config.Settings = undefined;
     try stage.config.parse(stage.config.Env{}, &ss);
-    var ranges: [stage.config.most_ranks]stage.boot.Range = undefined;
-    const layout = try st.parseLayout(std.mem.span(std.c.getenv("TF_STAGE_LAYOUT") orelse return error.MissingStageLayout), &ranges);
-    if (layout.len != ss.world) return error.BadStageLayout;
+    const layout = ss.layout();
     const mine = layout[ss.rank];
     const e = try E.Engine.initStage(init.gpa, init.io, &ctx, dir, kv8, null, .{ .first = mine.first, .end = mine.end, .heads = ss.rank == 0 });
     defer e.deinit();
