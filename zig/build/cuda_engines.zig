@@ -37,9 +37,11 @@ pub fn qwen3Module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
     return m;
 }
 
-/// The family module's GPU-free host tests, without a GPU.
-pub fn qwen3HostTest(b: *std.Build, m: *std.Build.Module) void {
-    b.step("test-qwen3-cuda-host", "Qwen3 CUDA host tests: config, folder head, prompt lane and reranker labels (no GPU)").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);
+/// The family module's GPU-free host tests, without a GPU; `all` (test-cuda-host and so `test`) runs them.
+pub fn qwen3HostTest(b: *std.Build, m: *std.Build.Module, all: *std.Build.Step) void {
+    const run = b.addRunArtifact(b.addTest(.{ .root_module = m }));
+    b.step("test-qwen3-cuda-host", "Qwen3 CUDA host tests: config, folder head, prompt lane and reranker labels (no GPU)").dependOn(&run.step);
+    all.dependOn(&run.step);
 }
 
 /// LFM2 (d1's decision model) on CUDA: config, weights, kernels and the forward that scores labels.
