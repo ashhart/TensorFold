@@ -121,20 +121,20 @@ test "copy drafter: continuation-ranked band matching prefers full continuation 
     const ds_base = try pl_base.window(&r_base, 100, true, &.{});
     try std.testing.expect(ds_base.len > 0 and ds_base[0] == 999);
 
-    // With `copy_drafter = true`, `matchRanked` stays in band 1 and picks the earlier 9-token match with 8 drafts.
+    // With `copy_drafter = true`, `matchRanked` stays in band 1 and picks the earlier 9-token match with all 8 drafts.
     const pl_copy = lookup.Planner.init(.{ .plan = true, .copy_drafter = true }, &c, true);
     var r_copy = try pl_copy.start(gpa, prompt.items);
     defer r_copy.deinit();
     const ds_copy = try pl_copy.window(&r_copy, 100, true, &.{});
     try std.testing.expectEqual(lookup.Kind.lookup, r_copy.kind);
-    try std.testing.expect(ds_copy.len > 0);
-    try std.testing.expectEqualSlices(u32, cont[0..ds_copy.len], ds_copy);
+    try std.testing.expectEqual(@as(usize, 8), ds_copy.len);
+    try std.testing.expectEqualSlices(u32, &cont, ds_copy);
 }
 
 test "copy drafter: adaptive doubling grows offer width 8 -> 15 on full acceptance and resets on partial rejection" {
-    var verify: [16]f64 = undefined;
-    for (&verify, 0..) |*v, i| v.* = 20.0 + 0.01 * @as(f64, @floatFromInt(i));
-    const c: costs_mod.Costs = .{ .verify = &verify, .draft = 5.6 };
+    // DeepSeek-V4.1 TP=2 GB10 calibration curve (`calib-1bb.json` from `fixtures/calib-golden.json`).
+    var verify = [_]f64{ 22.317, 26.801, 31.500, 36.072, 40.663, 45.000, 47.801, 51.334, 57.002, 59.882, 60.790, 62.123, 68.000, 70.001, 70.500, 72.250 };
+    const c: costs_mod.Costs = .{ .verify = &verify, .draft = 3.614 };
     const pl = lookup.Planner.init(.{ .plan = true, .copy_drafter = true }, &c, true);
     var prompt: std.ArrayList(u32) = .empty;
     defer prompt.deinit(gpa);
@@ -144,7 +144,9 @@ test "copy drafter: adaptive doubling grows offer width 8 -> 15 on full acceptan
 
     var r = try pl.start(gpa, prompt.items);
     defer r.deinit();
-    // Round 1: initial offer is capped at 8 drafts (`initial_offer = 8`).
+    // Even after a 3-keep DSpark round (`altYield = 3.0`), initial offer proposes all 8 drafts (`initial_offer = 8`).
+    r.kind = .dspark;
+    try pl.observe(&r, 6, 3, &.{});
     const d1 = try pl.window(&r, 100, true, &.{});
     try std.testing.expectEqual(@as(usize, 8), d1.len);
     for (d1, 0..) |tok, i| try std.testing.expectEqual(@as(u32, @intCast(200 + i)), tok);
@@ -180,7 +182,7 @@ test "copy drafter: geometric copy_yield and altYield gate short cold matches an
     try std.testing.expectEqual(@as(usize, 0), short_ds.len);
     try std.testing.expectEqual(lookup.Kind.dspark, r_short.kind);
 
-    // A 12-token match in band 1 (q = 0.70, geometric yield ~2.09) passes cold-start altYield (1.0).
+    // A 12-token match in band 1 (q = 0.70, span q_eff = 0.925, yield ~5.76) opens with all 8 drafts.
     const span = [_]u32{ 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21 };
     var prompt: std.ArrayList(u32) = .empty;
     defer prompt.deinit(gpa);
@@ -191,10 +193,10 @@ test "copy drafter: geometric copy_yield and altYield gate short cold matches an
     var r = try pl.start(gpa, prompt.items);
     defer r.deinit();
     const open = try pl.window(&r, 100, true, &.{});
-    try std.testing.expect(open.len > 0);
+    try std.testing.expectEqual(@as(usize, 8), open.len);
     try std.testing.expectEqual(lookup.Kind.lookup, r.kind);
 
-    // A single 0-keep miss in band 1 drops q to 1.4/3.0 = 0.467 (geometric yield ~0.86 < 1.0), gating the next round.
+    // A single 0-keep miss in band 1 drops q to 1.4/3.0 = 0.467 (< 0.70, yield ~0.86 < 1.0), gating the next round.
     r.doubled = true;
     try pl.observe(&r, open.len + 1, 0, &span);
     try std.testing.expect(!r.doubled);
@@ -202,11 +204,26 @@ test "copy drafter: geometric copy_yield and altYield gate short cold matches an
     try std.testing.expectEqual(@as(usize, 0), after_miss.len);
     try std.testing.expectEqual(lookup.Kind.dspark, r.kind);
 
-    // Fresh request with high recent DSpark yield (`kept = 3` -> `altYield = 3.0`) gates band 1 and resets `doubled`.
+    // After the 1-skip cooldown (`copy_probe_every = 2`), the next band-1 match re-probes with all 8 drafts.
+    try pl.observe(&r, 4, 2, &span);
+    const reprobe = try pl.window(&r, 100, true, &.{});
+    try std.testing.expectEqual(@as(usize, 8), reprobe.len);
+    try std.testing.expectEqual(lookup.Kind.lookup, r.kind);
+
+    // Against a normal 3-keep DSpark round (`altYield = 3.0`), cold band 1 (`yield ~5.76`) still fires.
+    var r_mid = try pl.start(gpa, prompt.items);
+    defer r_mid.deinit();
+    r_mid.kind = .dspark;
+    try pl.observe(&r_mid, 6, 3, &span);
+    const mid_open = try pl.window(&r_mid, 100, true, &.{});
+    try std.testing.expectEqual(@as(usize, 8), mid_open.len);
+    try std.testing.expectEqual(lookup.Kind.lookup, r_mid.kind);
+
+    // An ultra-high-yield DSpark round (`kept = 6` -> `altYield = 6.0 > 5.76`) gates cold band 1 and resets `doubled`.
     var r2 = try pl.start(gpa, prompt.items);
     defer r2.deinit();
     r2.kind = .dspark;
-    try pl.observe(&r2, 5, 3, &span);
+    try pl.observe(&r2, 7, 6, &span);
     r2.doubled = true;
     const gated = try pl.window(&r2, 100, true, &.{});
     try std.testing.expectEqual(@as(usize, 0), gated.len);

@@ -1,6 +1,7 @@
 //! Refusal text and canonical/legacy forms for every setting validated before DeepSeek startup.
 const std = @import("std");
 const e = @import("sys").environment;
+const env_validate = @import("env_validate.zig");
 const t = std.testing;
 
 const Fixture = struct {
@@ -23,13 +24,13 @@ fn group(r: e.Rule) Group {
 
 fn check(name: []const u8, raw: []const u8, valid: bool) !void {
     const fx: Fixture = .{ .name = name, .raw = raw };
-    const why = try e.refusal(t.allocator, fx, .{ .dsv41 = true });
+    const why = try env_validate.refusal(t.allocator, fx);
     defer if (why) |w| t.allocator.free(w);
     if (valid) {
-        try e.checkScope(.dsv41, fx);
+        try env_validate.check(fx);
         return t.expect(why == null);
     }
-    try t.expectError(error.InvalidEnvironment, e.checkScope(.dsv41, fx));
+    try t.expectError(error.InvalidEnvironment, env_validate.check(fx));
     try t.expect(std.mem.startsWith(u8, why.?, name));
     try t.expect(std.mem.indexOf(u8, why.?, raw) != null);
     try t.expect(std.mem.endsWith(u8, why.?, e.rule(name).forms));
@@ -142,10 +143,13 @@ test "DeepSeek strict env: copy-drafter lookup-off refusal names TF_DSV41_COPY_D
         }
     };
     for ([_][]const u8{ "0", "off", "false", "", " " }) |off| {
-        const why = (try e.refusal(t.allocator, Pair{ .lookup = off }, .{ .dsv41 = true })).?;
+        const pair: Pair = .{ .lookup = off };
+        try t.expectError(error.InvalidEnvironment, env_validate.check(pair));
+        const why = (try env_validate.refusal(t.allocator, pair)).?;
         defer t.allocator.free(why);
         try t.expect(std.mem.indexOf(u8, why, "TF_DSV41_COPY_DRAFTER") != null);
         try t.expect(std.mem.indexOf(u8, why, "TF_DSV41_LOOKUP") != null);
     }
-    try t.expect(try e.refusal(t.allocator, Pair{ .lookup = "1" }, .{ .dsv41 = true }) == null);
+    try env_validate.check(Pair{ .lookup = "1" });
+    try t.expect(try env_validate.refusal(t.allocator, Pair{ .lookup = "1" }) == null);
 }
