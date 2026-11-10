@@ -271,7 +271,7 @@ test "Shared verification: streams cycling window widths reuse their scratch ins
 fn paged(e: *q.engine.Engine) !q.engine.Cache {
     if (q.cache.keepLate()) return error.SkipZigTest;
     if (!rec.needsFullKeep(e)) try rec.configure(e, 4);
-    var c = try q.engine.Cache.initPaged(a, e, 16, 256, 0x80000000);
+    var c = try q.engine.Cache.initPagedOwned(a, e, 16, 256, 0x80000000);
     errdefer c.deinit(a);
     try c.mapRun(e, 0x90000000, q.engine.Cache.runBytes(e, 0), 0);
     c.cap = 128;
@@ -386,13 +386,15 @@ test "Shared verification: one-stream paged mode retains its original fixed run 
     var e: q.engine.Engine = undefined;
     engine(&e, &d);
     try rec.configure(&e, 1);
-    var c = try q.engine.Cache.initPaged(a, &e, 16, 256, 0x80000000);
+    var c = try q.engine.Cache.initPagedOwned(a, &e, 16, 256, 0x80000000);
     defer finish(&e, &c);
-    const run_bytes = 2 * e.g.stateBytes() + e.g.logBytes(64);
+    const before_at = e.g.logBytes(1);
+    const run_bytes = e.g.stateBytes() + @max(e.g.logBytes(64), before_at + e.g.stateBytes());
     try std.testing.expectEqual(run_bytes, q.engine.Cache.runBytes(&e, 0));
     try c.mapRun(&e, 0x90000000, run_bytes, 0);
     try std.testing.expect(c.owner == null and !c.pool_run);
     try std.testing.expect(c.before != null and c.before.?.len == e.g.stateBytes());
+    try std.testing.expectEqual(c.log.ptr + before_at, c.before.?.ptr);
     try std.testing.expectEqual(e.g.logBytes(64), c.log.len);
     try rec.prepareRoot(&e, &c, 1, true, true);
     try std.testing.expect(c.before != null and !c.before_skipped);
@@ -431,7 +433,7 @@ test "Shared verification: committed roots bound sixteen windows and the widest 
         rec.shutdown(&e);
     }
     for (&caches, 0..) |*c, i| {
-        c.* = try q.engine.Cache.initPaged(a, &e, 16, 256, 0x80000000);
+        c.* = try q.engine.Cache.initPagedOwned(a, &e, 16, 256, 0x80000000);
         made += 1;
         try c.mapRun(&e, 0x10000000 + i * e.g.stateBytes(), q.engine.Cache.runBytes(&e, 0), 0);
         c.cap = 128;
@@ -531,7 +533,7 @@ test "Shared verification: deferred keeps retain legacy paged allocation and pre
     try std.testing.expectEqual(bytes, q.engine.Cache.runBytes(&e, 0));
     var run = try cuda.DeviceBuffer.alloc(&d, bytes);
     defer run.free();
-    var c = try q.engine.Cache.initPaged(a, &e, 16, 256, 0x80000000);
+    var c = try q.engine.Cache.initPagedOwned(a, &e, 16, 256, 0x80000000);
     defer finish(&e, &c);
     try c.mapRun(&e, run.ptr, run.len, 0);
     try std.testing.expect(c.owner == null and !c.pool_run);

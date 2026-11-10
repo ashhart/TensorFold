@@ -67,7 +67,6 @@ pub const explains_open = true;
 pub const Room = @import("cuda_native_types.zig").Room;
 pub const Options = @import("cuda_native_types.zig").Options;
 pub const Loaded = @import("cuda_native_types.zig").Loaded;
-
 pub const contextCeiling = @import("cuda_native_types.zig").contextCeiling;
 
 pub fn cacheBytes(e: *const E.Engine, cap: usize, test_tokens: usize) !usize {
@@ -89,7 +88,7 @@ pub fn pagedLayout(p: *anyopaque, extra: u64) ?kv_pool.Layout {
     const ring = l.ringBytes();
     const in_run = ring + if (l.draft != null) l.e.tapBytes() else 0; // DFlash2 counts the target's taps as its own
     l.extra = @intCast(extra -| in_run);
-    return pages_mod.layout(l.e, l.capacity, l.page_tokens, ring, l.extra);
+    return pages_mod.layoutWithFeatures(l.e, l.capacity, l.page_tokens, ring, l.extra);
 }
 
 /// The pool beside the first stream's window (engine_paged: for it too): `streams` more lanes and `pages` pages.
@@ -99,7 +98,7 @@ pub fn attach(p: *anyopaque, streams: u32, pages: usize) !void {
     // TF_QWEN_KV_SHARE and TF_QWEN_KV_PAGES_ALL: every stream on pages, a lane each (PAGES_ALL: no window reserved)
     l.paged_only = (l.engine_paged or l.share_snaps > 0) and (streams > 0 or l.engine_paged);
     const pool_lanes = if (l.paged_only) streams + 1 else streams;
-    l.pages = try pages_mod.Pages.init(l.gpa, l.e, pages_mod.layout(l.e, l.capacity, l.page_tokens, ring, l.extra), l.capacity, ring, pool_lanes, pages);
+    l.pages = try pages_mod.Pages.init(l.gpa, l.e, pages_mod.layoutWithFeatures(l.e, l.capacity, l.page_tokens, ring, l.extra), l.capacity, ring, pool_lanes, pages);
     if (pool_lanes > 0) {
         if (l.draft) |d| d.ring_of = .{ .ctx = l, .ring = Lanes.ringOf, .all = l.engine_paged };
         if (l.mtp) |m| m.ring_of = .{ .ctx = l, .area = Lanes.ringOf, .all = l.engine_paged };
@@ -206,7 +205,7 @@ pub fn openLanes(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, d
         .vision = v,
         .target = &l.target,
         .device_snaps = l.target.device,
-        .layout = if (page_tokens > 0) pages_mod.layout(e, o.context, page_tokens, 0, 0) else null,
+        .layout = if (page_tokens > 0) pages_mod.layoutWithFeatures(e, o.context, page_tokens, 0, 0) else null,
         .own_prompt_cache = share_snaps > 0,
         .all_on_pages = page_tokens > 0 and share_snaps > 0 and !engine_paged, // the engine's window idle
         .engine_paged = engine_paged,

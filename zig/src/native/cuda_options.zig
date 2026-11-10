@@ -2,6 +2,20 @@
 const std = @import("std");
 const api = @import("engine_api");
 
+test "prompt cache policy: cache feature snapshots follow explicit off and exclude the disk-learning tier" {
+    const F = struct {
+        pub const Options = struct { cache_features: bool = false };
+    };
+    var opts: F.Options = .{};
+    var why: []const u8 = "";
+    for ([_]?f64{ null, 0, 2 }) |gib| {
+        try std.testing.expect(set(F, .{ .dir = "d", .model_type = "qwen3_5", .prompt_cache_gib = gib }, &opts, &why));
+        try std.testing.expectEqual(gib == null or gib.? > 0, opts.cache_features);
+    }
+    try std.testing.expect(set(F, .{ .dir = "d", .model_type = "qwen3_5", .prompt_cache_gib = 2, .learn_conversations = true }, &opts, &why));
+    try std.testing.expect(!opts.cache_features);
+}
+
 /// Sets what `o` asks of `F` in `opts`; false with `problem` set when F cannot take a flag given (--precision).
 pub fn set(comptime F: type, o: api.Open, opts: *F.Options, problem: *[]const u8) bool {
     if (@hasField(F.Options, "mtp_drafts")) opts.mtp_drafts = o.mtp_drafts;
@@ -108,18 +122,4 @@ test "full-only precision: checkpoint is unknown before a family can load or all
     var existing: Both.Options = .{};
     try std.testing.expect(set(Both, .{ .dir = "d", .model_type = "nemotron_h", .precision = .checkpoint }, &existing, &why));
     try std.testing.expectEqual(@as(?@typeInfo(@TypeOf(existing.precision)).optional.child, .checkpoint), existing.precision);
-}
-
-test "prompt cache policy: cache feature snapshots follow explicit off and exclude the disk-learning tier" {
-    const F = struct {
-        pub const Options = struct { cache_features: bool = false };
-    };
-    var opts: F.Options = .{};
-    var why: []const u8 = "";
-    for ([_]?f64{ null, 0, 2 }) |gib| {
-        try std.testing.expect(set(F, .{ .dir = "d", .model_type = "qwen3_5", .prompt_cache_gib = gib }, &opts, &why));
-        try std.testing.expectEqual(gib == null or gib.? > 0, opts.cache_features);
-    }
-    try std.testing.expect(set(F, .{ .dir = "d", .model_type = "qwen3_5", .prompt_cache_gib = 2, .learn_conversations = true }, &opts, &why));
-    try std.testing.expect(!opts.cache_features);
 }

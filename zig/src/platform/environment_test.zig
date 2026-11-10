@@ -3,7 +3,7 @@ const std = @import("std");
 const e = @import("environment.zig");
 const t = std.testing;
 const a = t.allocator;
-const all: e.Flags = .{ .cuda = true, .metal = true, .xpu = true, .slide = true, .hooks = true, .dsv41 = true, .gemma4 = true, .drama3 = true, .glm = true, .qwen = true };
+const all: e.Flags = .{ .cuda = true, .metal = true, .xpu = true, .slide = true, .hooks = true, .dsv41 = true, .gemma4 = true, .drama3 = true, .glm = true };
 const Env = struct {
     name: []const u8,
     raw: ?[]const u8,
@@ -95,50 +95,6 @@ const valid = [_]Case{
     .{ .name = "TF_SLIDE_FIT_GIB", .raw = "4", .n = 4 },
     .{ .name = "TF_SLIDE_POCKET_DUMP", .raw = "/tmp/pocket rows", .n = 0 },
     .{ .name = "TF_SLIDE_FORGET_FAIL", .raw = " 0 ", .n = 0 },
-    .{ .name = "TF_CUBLAS_BRIDGE", .raw = "runtime/tf_cublaslt_bridge.dll", .n = 0 },
-    .{ .name = "TF_CUBLAS_PREFILL", .raw = "1", .n = 1 },
-    .{ .name = "TF_CUDA_WARPS8", .raw = "7", .n = 7 },
-    .{ .name = "TF_DRAFT_BF16", .raw = "31", .n = 31 },
-    .{ .name = "TF_DRAFT_BF16_EMBED_DIR", .raw = "models/draft-bf16", .n = 0 },
-    .{ .name = "TF_DRAFT_BLOCK", .raw = "8", .n = 8 },
-    .{ .name = "TF_DRAFT_BLOCK", .raw = "16", .n = 16 },
-    .{ .name = "TF_DRAFT_COPY_MATCH", .raw = "2", .n = 2 },
-    .{ .name = "TF_DRAFT_COPY_MATCH", .raw = "20", .n = 20 },
-    .{ .name = "TF_DRAFT_DATASET_DIR", .raw = "output/dataset", .n = 0 },
-    .{ .name = "TF_DRAFT_FEEDBACK_TRACE", .raw = "0", .n = 0 },
-    .{ .name = "TF_DRAFT_FEEDBACK_WEIGHT", .raw = "0.2", .n = @bitCast(@as(f64, 0.2)) },
-    .{ .name = "TF_DRAFT_GRAPH", .raw = "1", .n = 1 },
-    .{ .name = "TF_DRAFT_LANES", .raw = "1", .n = 1 },
-    .{ .name = "TF_DRAFT_LANES", .raw = "2", .n = 2 },
-    .{ .name = "TF_DRAFT_LANES", .raw = "4", .n = 4 },
-    .{ .name = "TF_DRAFT_LANE_BASE_WEIGHT", .raw = "0.5", .n = @bitCast(@as(f64, 0.5)) },
-    .{ .name = "TF_DRAFT_LATTICE_TRACE", .raw = "0", .n = 0 },
-    .{ .name = "TF_DRAFT_MTP_DIR", .raw = "models/mtp", .n = 0 },
-    .{ .name = "TF_DRAFT_MTP_GRAFT", .raw = "0", .n = 0 },
-    .{ .name = "TF_DRAFT_MTP_PREFIX", .raw = "0", .n = 0 },
-    .{ .name = "TF_DRAFT_MTP_QUERIES", .raw = "1", .n = 1 },
-    .{ .name = "TF_DRAFT_MTP_QUERIES", .raw = "63", .n = 63 },
-    .{ .name = "TF_DRAFT_MTP_WEIGHT", .raw = "0.3", .n = @bitCast(@as(f64, 0.3)) },
-    .{ .name = "TF_DRAFT_QWEN3_NORM", .raw = "1", .n = 1 },
-    .{ .name = "TF_DRAFT_REFERENCE_DIR", .raw = "output/reference", .n = 0 },
-    .{ .name = "TF_DRAFT_REFINE", .raw = "0", .n = 0 },
-    .{ .name = "TF_DRAFT_WIDE_TRACE", .raw = "0", .n = 0 },
-    .{ .name = "TF_QWEN_AFFINE_PREPARED", .raw = "0", .n = 0 },
-    .{ .name = "TF_QWEN_ATTN_EXACT", .raw = "7", .n = 7 },
-    .{ .name = "TF_QWEN_EXPAND_KV", .raw = "1", .n = 1 },
-    .{ .name = "TF_QWEN_FAST_PREFILL", .raw = "0", .n = 0 },
-    .{ .name = "TF_QWEN_FP8_ATTENTION", .raw = "2", .n = 2 },
-    .{ .name = "TF_QWEN_FP8_TILE", .raw = "3", .n = 3 },
-    .{ .name = "TF_QWEN_GDN_CHUNKED", .raw = "0", .n = 0 },
-    .{ .name = "TF_QWEN_NVFP4_MLP_DIR", .raw = "models/alternate", .n = 0 },
-    .{ .name = "TF_QWEN_NVFP4_PREFILL", .raw = "1", .n = 1 },
-    .{ .name = "TF_QWEN_NVFP4_SCOPE", .raw = "mlp", .n = 0 },
-    .{ .name = "TF_QWEN_NVFP4_SCOPE", .raw = "layers", .n = 1 },
-    .{ .name = "TF_QWEN_NVFP4_TMA", .raw = "1", .n = 1 },
-    .{ .name = "TF_QWEN_PREFILL_GRAPH", .raw = "0", .n = 0 },
-    .{ .name = "TF_QWEN_PREFILL_PROFILE", .raw = "0", .n = 0 },
-    .{ .name = "TF_QWEN_PREFILL_ROWS", .raw = "64", .n = 64 },
-    .{ .name = "TF_QWEN_PREFILL_ROWS", .raw = "7680", .n = 7680 },
 };
 
 test "environment: valid forms remain raw numbers before existing consumer clamps and defaults" {
@@ -317,37 +273,4 @@ test "environment: a legacy alias is checked only while its canonical name is un
     try t.expectEqualStrings("TF_DSV41_TOOL_GRAMMAR=\"bad\": expected 0 or 1 (ignored while TENSORFOLD_TOOL_GRAMMAR is set)", why);
     for ([_][]const u8{ "", "0", "1" }) |canonical| try t.expect((try e.refusal(a, Alias{ .canonical = canonical }, .{ .dsv41 = true })) == null);
     try t.expect((try e.refusal(a, Alias{ .canonical = null }, .{})) == null);
-}
-
-test "environment: Qwen selectors keep their exact domains and family checks retain geometry ownership" {
-    for ([_][2][]const u8{
-        .{ "TF_CUDA_WARPS8", "8" },            .{ "TF_DRAFT_BF16", "32" },
-        .{ "TF_DRAFT_BLOCK", "4" },            .{ "TF_DRAFT_BLOCK", "32" },
-        .{ "TF_DRAFT_COPY_MATCH", "1" },       .{ "TF_DRAFT_COPY_MATCH", "21" },
-        .{ "TF_DRAFT_LANES", "0" },            .{ "TF_DRAFT_LANES", "3" },
-        .{ "TF_DRAFT_MTP_QUERIES", "0" },      .{ "TF_DRAFT_MTP_QUERIES", "64" },
-        .{ "TF_QWEN_ATTN_EXACT", "8" },        .{ "TF_QWEN_ATTN_EXACT", "01" },
-        .{ "TF_QWEN_FP8_ATTENTION", "3" },     .{ "TF_QWEN_FP8_ATTENTION", "single" },
-        .{ "TF_QWEN_FP8_TILE", "4" },          .{ "TF_QWEN_FP8_TILE", "01" },
-        .{ "TF_QWEN_NVFP4_SCOPE", "all" },     .{ "TF_QWEN_NVFP4_SCOPE", "MLP" },
-        .{ "TF_QWEN_PREFILL_ROWS", "0" },      .{ "TF_QWEN_PREFILL_ROWS", "63" },
-        .{ "TF_QWEN_PREFILL_ROWS", "65" },     .{ "TF_DRAFT_FEEDBACK_TRACE", "yes" },
-        .{ "TF_DRAFT_LATTICE_TRACE", "true" }, .{ "TF_QWEN_PREFILL_PROFILE", "01" },
-    }) |c| try t.expectError(error.InvalidEnvironment, e.parse(c[0], c[1]));
-    for ([_][:0]const u8{ "TF_DRAFT_FEEDBACK_WEIGHT", "TF_DRAFT_LANE_BASE_WEIGHT", "TF_DRAFT_MTP_WEIGHT" }) |name| {
-        for ([_][]const u8{ "0", "1" }) |raw| try t.expect(try e.parse(name, raw) != null);
-        for ([_][]const u8{ "-0.1", "1.01", "nan", "inf", "-inf" }) |raw|
-            try t.expectError(error.InvalidEnvironment, e.parse(name, raw));
-    }
-}
-
-test "environment: Qwen scope validation is explicit and disabled for unrelated startup flags" {
-    const env: Env = .{ .name = "TF_CUBLAS_PREFILL", .raw = "invalid" };
-    try t.expect((try e.refusal(a, env, .{})) == null);
-    try t.expect((try e.refusal(a, env, .{ .cuda = true, .metal = true })) == null);
-    try e.checkScope(.cuda, env);
-    try t.expectError(error.InvalidEnvironment, e.checkScope(.qwen, env));
-    const why = (try e.refusal(a, env, .{ .qwen = true })).?;
-    defer a.free(why);
-    try t.expectEqualStrings("TF_CUBLAS_PREFILL=\"invalid\": expected 0 or 1", why);
 }

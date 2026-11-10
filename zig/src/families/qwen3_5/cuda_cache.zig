@@ -183,10 +183,7 @@ pub const Cache = struct {
         var table = try DeviceBuffer.alloc(e.d, pages * 4);
         errdefer table.free();
         const none = try DeviceBuffer.alloc(e.d, 0);
-        var out: Cache = .{ .state = none, .before = none, .kv = none, .paged = .{ .base = base, .table = table, .ids = &.{}, .tokens = tokens, .own_ids = false }, .log = none, .cap = 0, .logits = try gpa.alloc(u16, e.g.vocab) };
-        errdefer gpa.free(out.logits);
-        try recurrent.attachPaged(e, &out);
-        return out;
+        return .{ .state = none, .before = none, .kv = none, .paged = .{ .base = base, .table = table, .ids = &.{}, .tokens = tokens, .own_ids = false }, .log = none, .cap = 0, .logits = try gpa.alloc(u16, e.g.vocab) };
     }
 
     /// Bytes of a pool lane's run: state, log with its rollback copy, tap ring and a drafter's ring, each 256-aligned.
@@ -301,13 +298,14 @@ pub const Cache = struct {
     /// The stream's window of `rows` rows from forward row `row0`, after `len` cached positions.
     pub fn seg(self: *const Cache, e: *const Engine, len: usize, row0: usize, rows: usize) Seg {
         const g = e.g;
-        var sg: Seg = .{ .rec = self.state.ptr, .conv = self.state.ptr + g.deltas() * g.recBytes(), .kv = self.kv.ptr, .tap = if (self.tap) |t| t.ptr else 0, .log = self.log.ptr, .before = if (self.before) |b| b.ptr else 0, .cap = @intCast(self.cap), .len = @intCast(len), .row0 = @intCast(row0), .rows = @intCast(rows), .tap_rows = if (e.n_taps == 0) 0 else @intCast(e.tap_capacity), .taps = @intCast(e.n_taps), .delta = self.delta };
+        var sg: Seg = .{ .rec = self.state.ptr, .conv = self.state.ptr + g.deltas() * g.recBytes(), .kv = self.kv.ptr, .tap = if (self.tap) |t| t.ptr else 0, .log = self.log.ptr, .before = if (self.before) |b| b.ptr else 0, .cap = @intCast(self.cap), .len = @intCast(len), .row0 = @intCast(row0), .rows = @intCast(rows), .tap_rows = tap_rows, .taps = @intCast(e.n_taps), .delta = self.delta };
         if (self.paged) |p| {
             sg.kv = p.base;
             sg.pt = p.table.ptr;
             sg.ps = p.elems(g, e.kv8);
             sg.ptok = @intCast(p.tokens);
         }
+        sg.tap_rows = if (e.n_taps == 0) 0 else @intCast(e.tap_capacity);
         return sg;
     }
 
@@ -409,6 +407,13 @@ pub const Cache = struct {
         var all: [engine.most_window]u32 = undefined;
         for (all[0..last.rows], 0..) |*r, i| r.* = @intCast(i);
         try self.keep(e, all[0..last.rows]);
+    }
+    /// A shared-recurrent pool lane: upstream construction remains atomic if attachment is refused.
+    pub fn initPagedOwned(gpa: std.mem.Allocator, e: *Engine, pages: usize, tokens: usize, base: u64) !Cache {
+        var out = try initPaged(gpa, e, pages, tokens, base);
+        errdefer out.deinit(gpa);
+        try recurrent.attachPaged(e, &out);
+        return out;
     }
 };
 

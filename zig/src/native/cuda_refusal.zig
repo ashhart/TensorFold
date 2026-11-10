@@ -2,6 +2,8 @@
 const std = @import("std");
 const api = @import("engine_api");
 const nemotron = @import("nemotron");
+const extensions = @import("cuda_startup_extensions.zig");
+pub const startupWith = extensions.startupWith;
 pub const deepseek_release_message = "DeepSeek-V4.1 is not served by this release's CUDA server; its whole-model gate is #827";
 const glm_model_type = "glm5_next"; // GLM-5.3-Flash's (glm.cuda_native.model_type): its Options take mtp_confidence
 
@@ -285,18 +287,10 @@ test "GLM keeps its prompt states in the process: no disk image, so --spill-gib 
 
 /// Validate CUDA settings and residency support before checkpoint or driver work at direct entry points.
 pub fn startup(a: std.mem.Allocator, o: api.Open, problem: *[]const u8) !bool {
-    return startupWith(a, o, problem, @import("sys").environment.Process{});
-}
-
-/// The same pre-driver admission with a provider for model-free startup controls.
-pub fn startupWith(a: std.mem.Allocator, o: api.Open, problem: *[]const u8, env: anytype) !bool {
+    if (try extensions.beforeStandard(a, o, problem, @import("sys").environment.Process{})) return true;
     const settings = @import("sys").environment;
-    if (try settings.refusal(a, env, .{ .cuda = true, .qwen = std.mem.eql(u8, o.model_type, "qwen3_5") or std.mem.eql(u8, o.model_type, "qwen3_5_moe"), .slide = o.slide, .device = o.device, .segments = o.segments })) |why| {
+    if (try settings.refusal(a, settings.Process{}, .{ .cuda = true, .slide = o.slide, .device = o.device, .segments = o.segments })) |why| {
         problem.* = why;
-        return true;
-    }
-    if (try @import("sys").cuda_qualification.refusal(o.model_type, @import("qwen_prefill_config").max_rows, env)) |why| {
-        problem.* = why.message;
         return true;
     }
     if (o.fsrRefusal("cuda")) |why| {

@@ -69,9 +69,9 @@ pub const Drafted = struct {
         v.reports_fill = true;
         break :blk v;
     };
-    pub fn backend(x: *Drafted) be.Backend {
+    fn backendBase(x: *Drafted) be.Backend {
         const planned = if (x.drafter.proposal_head) |service| service.mode != .legacy and x.drafter.vtable.hold_planned != null and x.drafter.vtable.clear_proposals != null else false;
-        return .{ .proposal_head = x.drafter.proposal_head, .ptr = x, .round_observer = x.target.round_observer, .first_before_draft = x.target.first_before_draft, .penalties = x.target.penalties, .chunk_invariant = x.target.chunk_invariant, .needs_full_keep = x.target.needs_full_keep, .restored_features = x.target.restored_features, .vtable = vtableFor(planned, x.target.vtable.prefill_step != null and x.target.vtable.reports_fill and x.target.vtable.features != null, x.target.vtable.cancel_prefill != null) };
+        return .{ .proposal_head = x.drafter.proposal_head, .ptr = x, .round_observer = x.target.round_observer, .first_before_draft = x.target.first_before_draft, .penalties = x.target.penalties, .chunk_invariant = x.target.chunk_invariant, .vtable = vtableFor(planned, x.target.vtable.prefill_step != null and x.target.vtable.reports_fill and x.target.vtable.features != null, x.target.vtable.cancel_prefill != null) };
     }
 
     const cancellable: [4]be.Backend.VTable = blk: {
@@ -85,6 +85,9 @@ pub const Drafted = struct {
         if (steps) return if (planned) &stepped_planned else &stepped_legacy;
         return if (planned) &planned_vtable else &legacy_vtable;
     }
+
+    pub const backend = @import("backend_features.zig").Wrapped(@This(), backendBase, "target").backend;
+    const promptFrom = @import("drafted_history.zig").from;
 
     fn cancelPrefill(ptr: *anyopaque, s: *Stream) anyerror!void {
         const target = self(ptr).target;
@@ -145,11 +148,6 @@ pub const Drafted = struct {
 
     fn self(ptr: *anyopaque) *Drafted {
         return @ptrCast(@alignCast(ptr));
-    }
-
-    fn promptFrom(x: *const Drafted, s: *const Stream) u64 {
-        const history = if (x.target.restored_features) x.drafter.facts().history_rows else 0;
-        return s.cached -| history;
     }
 
     /// The target's prompt pass, then the drafter absorbs its rows but the last; a later failure releases both.

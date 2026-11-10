@@ -268,8 +268,8 @@ extern "C" __global__ void tf_q35_conv_commit(Geo geo, const __nv_bfloat16* __re
     if (recorded(P)) {
         // gdn_pre logged each row's tail
         if (sg.rows != 1) return;
-        if (sg.before != 0) {
-            __nv_bfloat16* before = reinterpret_cast<__nv_bfloat16*>(sg.before + geo.nl * geo.rec() * sizeof(float)) + (size_t)layer * geo.conv_rows();
+        __nv_bfloat16* before = reinterpret_cast<__nv_bfloat16*>(tf_q35_before_address(convolution_backup(geo, sg), layer));
+        if (before != nullptr) {
             for (int r = 0; r < TAPS - 1; ++r) before[(size_t)r * C + c] = CS[(size_t)r * C + c];
         }
     }

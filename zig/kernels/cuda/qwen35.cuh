@@ -4,6 +4,7 @@
 #include <cuda_bf16.h>
 #include <stdint.h>
 #include "common/reduce.cuh"
+#include "common/qwen_before.h"
 
 namespace tf_q35 {
 
@@ -98,6 +99,15 @@ __device__ __forceinline__ int back(const int* __restrict__ rowpar, int w, int s
 
 __device__ __forceinline__ float bf(__nv_bfloat16 x) { return __bfloat162float(x); }
 __device__ __forceinline__ float rbf(float x) { return __bfloat162float(__float2bfloat16_rn(x)); }
+
+// The current Seg ABI owns one contiguous backup; table storage supplies its own before planes to the same resolver.
+__device__ __forceinline__ TfQ35BeforePlane recurrence_backup(const Geo& geo, const Seg& sg) {
+    return tf_q35_before_contiguous(sg.before, geo.rec() * sizeof(float));
+}
+__device__ __forceinline__ TfQ35BeforePlane convolution_backup(const Geo& geo, const Seg& sg) {
+    const uint64_t base = tf_q35_before_tail(sg.before, geo.nl * geo.rec() * sizeof(float));
+    return tf_q35_before_contiguous(base, geo.conv_rows() * sizeof(__nv_bfloat16));
+}
 
 using tf_common::warp_sum;
 

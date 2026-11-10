@@ -94,15 +94,15 @@ pub const landed_cuda = registry.cuda ++
     @import("penalty_sampling_records.zig").records ++
     @import("flashnext_attn_lanes_pending.zig").records ++
     @import("glm_l2pf_pending.zig").records;
-pub const all_cuda = @import("qwen_tap_records.zig").records ++
+pub const all_cuda = @import("qmmf_prompt_records.zig").records ++
+    @import("moetile_records.zig").records ++
+    @import("gb10_many_records.zig").records ++
+    @import("nvfp4_tile_pending.zig").records ++
+    @import("qwen_tap_records.zig").records ++
     @import("kv_expand_records.zig").records ++
     @import("attention_tuned_records.zig").records ++
     @import("fp8_prompt_records.zig").records ++
     @import("nvfp4_prompt_records.zig").records ++
-    @import("qmmf_prompt_records.zig").records ++
-    @import("moetile_records.zig").records ++
-    @import("gb10_many_records.zig").records ++
-    @import("nvfp4_tile_pending.zig").records ++
     landed_cuda ++
     dsv41_pending ++
     @import("inc4_pending.zig").trees ++

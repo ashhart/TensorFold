@@ -3,7 +3,7 @@ const std = @import("std");
 const pool = @import("kv_pool.zig");
 const Layout = pool.Layout;
 const Budget = pool.Budget;
-const plan = pool.plan;
+const plan = pool.planOwned;
 const holds = pool.holds;
 
 test "pooled first run: exact single-window boundary and one-byte refusal" {

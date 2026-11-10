@@ -131,7 +131,7 @@ test "cached feature snapshots: radix hits restore full features and target stat
     var w: World = undefined;
     try w.init();
     defer w.deinit();
-    const l = q.pages.layout(&w.e, cap, 256, 0, 0);
+    const l = q.pages.layoutWithFeatures(&w.e, cap, 256, 0, 0);
     const p = try q.pages.Pages.init(t.allocator, &w.e, l, cap, 0, 2, 3 * l.need(cap, 0, q.pages.window_rows));
     defer p.deinit();
     const x = try q.prefix.Prefix.initWithGrid(t.allocator, &w.e, p, 4, 1024);
@@ -177,7 +177,7 @@ test "cached feature snapshots: eviction cannot restore a different prefix's fea
     var w: World = undefined;
     try w.init();
     defer w.deinit();
-    const l = q.pages.layout(&w.e, cap, 256, 0, 0);
+    const l = q.pages.layoutWithFeatures(&w.e, cap, 256, 0, 0);
     const p = try q.pages.Pages.init(t.allocator, &w.e, l, cap, 0, 2, 3 * l.need(cap, 0, q.pages.window_rows));
     defer p.deinit();
     const x = try q.prefix.Prefix.initWithGrid(t.allocator, &w.e, p, 1, 1024);
@@ -271,9 +271,9 @@ test "cached feature snapshots: enabling snapshots leaves all sixteen persistent
     e.kv8 = true;
     e.rec_budget = .{ .streams = 16, .limit = 1057640448 };
     e.prompt_taps = .{ .cache = false, .rows = 2112, .row_bytes = 51200, .buffer = .{ .d = undefined, .ptr = 0x1000, .len = 2112 * 51200, .borrowed = true } };
-    const before = q.pages.layout(&e, 131072, 512, 42270720, 0);
+    const before = q.pages.layoutWithFeatures(&e, 131072, 512, 42270720, 0);
     e.prompt_taps.cache = true;
-    const after = q.pages.layout(&e, 131072, 512, 42270720, 0);
+    const after = q.pages.layoutWithFeatures(&e, 131072, 512, 42270720, 0);
     try t.expectEqual(before.run_bytes, after.run_bytes);
     try t.expectEqual(@as(u64, 199542784), after.run_bytes);
     try t.expectEqual(@as(usize, 12), after.runPages());
@@ -286,7 +286,7 @@ test "cached feature snapshots: reclaim during a warm open preserves the selecte
     var w: World = undefined;
     try w.init();
     defer w.deinit();
-    const l = q.pages.layout(&w.e, cap, 256, 0, 0);
+    const l = q.pages.layoutWithFeatures(&w.e, cap, 256, 0, 0);
     const p = try q.pages.Pages.init(t.allocator, &w.e, l, cap, 0, 2, 18);
     defer p.deinit();
     const x = try q.prefix.Prefix.initWithGrid(t.allocator, &w.e, p, 4, 512);

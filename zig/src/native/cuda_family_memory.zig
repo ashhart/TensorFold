@@ -86,19 +86,6 @@ pub fn toGib(bytes: u64) f64 {
     return @as(f64, @floatFromInt(bytes)) / @as(f64, 1 << 30);
 }
 
-test "rank room is agreed before stream admission and preserves a single-rank family's pool" {
-    const Single = struct {};
-    const Pair = struct {
-        pub fn rankRoom(_: *anyopaque, local: u64) !u64 {
-            return @min(local, 19);
-        }
-    };
-    var context: u8 = 0;
-    try std.testing.expectEqual(@as(u64, 30), try room(Single, &context, 30));
-    try std.testing.expectEqual(@as(u64, 19), try room(Pair, &context, 30));
-    try std.testing.expectEqual(@as(u64, 7), try room(Pair, &context, 7));
-}
-
 test "shared pending workspace is charged once after resident bytes are accounted" {
     const State = struct {
         pending: u64,
@@ -112,6 +99,19 @@ test "shared pending workspace is charged once after resident bytes are accounte
     try std.testing.expectEqual(@as(u64, 23), try room(State, &state, 23));
     state.pending = 31;
     try std.testing.expectEqual(@as(u64, 0), try room(State, &state, 30));
+}
+
+test "rank room is agreed before stream admission and preserves a single-rank family's pool" {
+    const Single = struct {};
+    const Pair = struct {
+        pub fn rankRoom(_: *anyopaque, local: u64) !u64 {
+            return @min(local, 19);
+        }
+    };
+    var context: u8 = 0;
+    try std.testing.expectEqual(@as(u64, 30), try room(Single, &context, 30));
+    try std.testing.expectEqual(@as(u64, 19), try room(Pair, &context, 30));
+    try std.testing.expectEqual(@as(u64, 7), try room(Pair, &context, 7));
 }
 
 test {

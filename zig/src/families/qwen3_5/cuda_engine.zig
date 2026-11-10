@@ -38,6 +38,7 @@ pub const max_chunks = 64;
 pub fn aligned(n: usize) usize {
     return std.mem.alignForward(usize, n, 256);
 }
+
 /// qwen35.cuh's Geo.
 pub const Geo = extern struct { hid: c_int, nk: c_int, nv: c_int, qh: c_int, kvh: c_int, nl: c_int };
 const layers = @import("cuda_layers.zig");
@@ -60,13 +61,16 @@ pub const Keep = union(enum) {
     logits,
     hidden,
     rows,
+
     /// Whether the forward is a verify window (recorded, one-row bits); `last` and `rows` are prompt chunks.
     pub fn verifies(k: Keep) bool {
         return k != .last and k != .rows;
     }
 };
+
 /// A kept row's draw on the device: sample.cu's keyed rule at `position`, or greedy without one.
 pub const Draw = struct { rule: ?cuda.sample.Rule, position: u64 };
+
 pub const Engine = struct {
     rec_scratch: recurrent.Pool,
     rec_budget: recurrent.Budget = .{},
@@ -165,6 +169,7 @@ pub const Engine = struct {
     prompt_taps: @import("cuda_prompt_taps.zig").State = .{},
     /// During an image prompt chunk's forward: its feature rows (0: none); the chunk's src and positions are staged.
     features: u64 = 0,
+
     pub const ids_at = Round.ids_at;
     pub const segs_at = Round.segs_at;
     pub const rowseg_at = Round.rowseg_at;
@@ -177,21 +182,16 @@ pub const Engine = struct {
     pub const src_at = Round.src_at;
     pub const mpos_at = Round.mpos_at;
     const tables_len = Round.bytes;
-    pub fn init(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kv8: bool, fit: ?hosted.Fit) !*Engine {
+
+    pub const init = @import("cuda_load_plan.zig").initDefault;
+    pub fn initWithOptions(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kv8: bool, fit: ?hosted.Fit, options: @import("cuda_load_plan.zig").Options) !*Engine {
         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
-        _ = try cuda.fp8_prefill.requested();
-        if (try cuda.fp8_prefill_tiles.requested() != .baseline and !cuda.fp8_prefill.enabled())
-            return error.Fp8TileNeedsFastPrefill;
-        if (try cuda.fp8_prefill.affine_packing.requested() and !cuda.fp8_prefill.enabled())
-            return error.AffinePreparedNeedsFastPrefill;
-        const cublas_requested = try cuda.cublaslt_prefill.requested();
-        _ = try @import("cuda_prefill_paths.zig").requested();
+        const cublas_requested = try @import("cuda_engine_extensions.zig").requested();
         const started = profile.now(io);
-        const g = try Geometry.read(gpa, io, dir);
-        var ck = try core.Checkpoint.openModel(gpa, io, dir);
-        defer core.checkpoint.cache.close(&ck);
-        var alternate = try @import("cuda_nvfp4_mlp.zig").open(gpa, io, g, &ck, dir);
-        defer if (alternate) |*source| source.deinit();
+        var load = try @import("cuda_load_plan.zig").LoadPlan.create(gpa, io, dir, options);
+        defer load.deinit();
+        const g = load.geometry;
+        const ck = load.primary();
         const d = ctx.d;
         const e = try @import("cuda_prompt_int8.zig").Allocation(Engine).create(gpa);
         errdefer gpa.destroy(e);
@@ -208,7 +208,7 @@ pub const Engine = struct {
         e.kit = null;
         e.d = d;
         e.g = g;
-        e.alternate = if (alternate) |*source| try source.identity(gpa, g) else null;
+        e.alternate = if (load.alternateSource()) |source| try source.identity(gpa, g) else null;
         errdefer if (e.alternate) |*source| source.deinit(gpa);
         e.geo = .{ .hid = @intCast(g.hidden), .nk = @intCast(g.k_heads), .nv = @intCast(g.v_heads), .qh = @intCast(g.q_heads), .kvh = @intCast(g.kv_heads), .nl = @intCast(g.deltas()) };
         e.verify_rows = most_verify;
@@ -222,14 +222,12 @@ pub const Engine = struct {
         errdefer @import("cuda_rope_table.zig").free(e);
         e.penalties = .{};
         e.rec_scratch = recurrent.Pool.init(gpa, @intFromPtr(e));
-        e.rec_budget = .{};
+        @import("cuda_engine_extensions.zig").tapState(e);
         e.n_taps = 0;
-        e.tap_capacity = tap_rows;
-        e.prompt_taps = .{};
         e.features = 0;
         e.stream = try cuda.Stream.init(d, true);
         errdefer e.stream.deinit();
-        e.arena = try hosted.arena(e, io, ctx, &ck, fit, if (alternate) |source| source.plan.weight_bytes else null);
+        e.arena = try hosted.arenaPlanned(e, io, ctx, &load, fit);
         errdefer hosted.release(e);
         try e.arena.fill8(0, null); // touched once now: the driver commits memory on first touch, slowly
         const kk = cuda.kernels;
@@ -266,34 +264,26 @@ pub const Engine = struct {
         e.prompt_attn = try @import("cuda_prompt.zig").resolve(e.mods[16], e.mods[17]);
         try e.int8.resolve(e.mods[18]);
         e.fp8 = .{ .rope = try e.mods[9].function("tf_q35_rope8"), .attn_partial = try e.mods[9].function("tf_q35_attn_partial8"), .attn_rows = try e.mods[9].function("tf_q35_attn_rows8"), .attn_partial8_whole = try e.mods[9].function("tf_q35_attn_partial8_whole"), .attn_rows8_whole = try e.mods[9].function("tf_q35_attn_rows8_whole"), .compact = try e.mods[9].function("tf_q35k_compact8") };
-        e.mo = if (g.kinds.modelopt or (try @import("cuda_nvfp4_mlp.zig").directory()) != null or cuda.fp8_prefill.enabled() or cublas_requested)
-            try modelopt.Kernels.load(d, @intCast(10 * major + minor), sms, g.moe())
-        else
-            null;
+        e.mo = if (g.kinds.modelopt) try modelopt.Kernels.load(d, @intCast(10 * major + minor), sms, g.moe()) else null;
+        try @import("cuda_engine_extensions.zig").additionalModelOpt(e, @intCast(10 * major + minor), sms, cublas_requested);
         errdefer if (e.mo) |*m| m.unload();
         e.layers = try gpa.alloc(Layer, g.layers);
         errdefer gpa.free(e.layers);
         if (g.exl3) {
             e.kit = try x3w.Kit.init(gpa, d, g);
             errdefer e.kit.?.deinit(gpa);
-            try x3w.load(e, &ck);
+            try x3w.load(e, ck);
         } else {
             // each projection as stored, packed from here; freed before the server counts what streams can use
-            var stage = try DeviceBuffer.alloc(d, if (alternate) |source| source.plan.stage_bytes else weights.stageBytes(g));
+            var stage = try DeviceBuffer.alloc(d, load.budgets.stage_bytes);
             defer stage.free();
-            try weights.load(e, &ck, &stage, if (alternate) |*source| source else null);
+            try weights.loadPlanned(e, &load, &stage);
         }
         if (e.mo) |*m| try m.reserveParts(e);
-        e.prefill_paths = try @import("cuda_prefill_paths.zig").Paths.load(e, @intCast(10 * major + minor));
-        errdefer {
-            @import("cuda").completion.drain(e.d, e.stream, "prefill initialization did not drain");
-            e.prefill_paths.deinit();
-        }
+        try @import("cuda_engine_extensions.zig").preparePaths(e, @intCast(10 * major + minor));
+        errdefer @import("cuda_engine_extensions.zig").freePaths(e);
         try @import("cuda_engine_tail.zig").finish(e, io, started);
         return e;
-    }
-    pub fn warmVendorPrefill(e: *Engine) !void {
-        try @import("cuda_cublas_prompt.zig").warm(e);
     }
     pub fn finishWarm(e: *Engine, io: std.Io, started: i96) !void {
         const warm_start = profile.now(io);
@@ -301,6 +291,7 @@ pub const Engine = struct {
         errdefer recurrent.shutdown(e);
         e.startup.add(try profile.withCache(e.gpa, io, e, Cache));
     }
+
     /// Every path a request takes, run once now: WDDM stalls a process's first forwards for seconds (a 20 s launch).
     pub fn warmCache(e: *Engine, warm_cache: *Cache) !void {
         const ids: [32]u32 = @splat(0);
@@ -314,11 +305,10 @@ pub const Engine = struct {
         try e.stream.synchronize();
         recurrent.completed(e);
     }
+
     pub fn deinit(e: *Engine) void {
         recurrent.shutdown(e);
-        @import("cuda").completion.drain(e.d, e.stream, "prefill shutdown did not drain");
-        e.prompt_taps.deinit();
-        e.prefill_paths.deinit();
+        @import("cuda_engine_extensions.zig").shutdown(e);
         @import("cuda_rope_table.zig").free(e);
         if (e.kit) |k| k.deinit(e.gpa);
         e.pockets.deinit();
@@ -349,10 +339,17 @@ pub const Engine = struct {
     }
 
     /// A stream's tap ring: this engine's retained rows of the tapped layers' residuals.
-    pub const tapBytes = @import("cuda_prompt_taps.zig").tapBytes;
+    pub fn tapBytes(e: *const Engine) usize {
+        return @import("cuda_prompt_taps.zig").tapBytes(e);
+    }
 
     /// The layers a drafter taps, told before the streams' caches exist; each forward then fills their rings.
-    pub const setTaps = @import("cuda_prompt_taps.zig").setTaps;
+    pub fn setTaps(e: *Engine, taps: []const u32) !void {
+        if (taps.len > e.taps.len) return error.TooManyTaps;
+        for (taps) |t| if (t >= e.g.layers) return error.BadTap;
+        @memcpy(e.taps[0..taps.len], taps);
+        e.n_taps = taps.len;
+    }
 
     /// The next `bytes` of the arena, 256-byte aligned.
     pub fn alloc(e: *Engine, bytes: usize) !u64 {
@@ -431,9 +428,6 @@ pub const Engine = struct {
 
     /// One forward over `parts`' windows, with every input admitted before an unkept verify is settled.
     pub fn forward(e: *Engine, parts: []const Part, ids: []const u32, keep: Keep) !void {
-        var prompt_graph: ?cuda.graph.Exec = null;
-        defer if (prompt_graph) |*exec| exec.deinit();
-        errdefer if (prompt_graph != null) cuda.completion.drain(e.d, e.stream, "prompt graph forward failed before completion");
         try e.admit(parts, ids, keep);
         const g = e.g;
         const total = ids.len;
@@ -458,8 +452,6 @@ pub const Engine = struct {
             segs[i] = p.cache.fold(p.cache.seg(e, p.cache.len, row0, p.rows));
             row0 += p.rows;
         }
-        try @import("cuda_prompt_taps.zig").begin(e, parts, segs, prompt);
-        errdefer @import("cuda_prompt_taps.zig").abort(e, parts);
         if (keep == .draws) {
             const rules = std.mem.bytesAsSlice(cuda.sample.Rule, st[rules_at..][0 .. total * @sizeOf(cuda.sample.Rule)]);
             const meta = std.mem.bytesAsSlice(c_int, st[meta_at..][0 .. total * 4]);
@@ -476,6 +468,8 @@ pub const Engine = struct {
         params[3] = @intCast(parts.len);
         params[4] = @intFromBool(record);
         defer e.taught = 0;
+        try @import("cuda_prompt_taps.zig").begin(e, parts, segs, prompt);
+        errdefer @import("cuda_prompt_taps.zig").abort(e, parts);
         try @import("cuda_forward_extra.zig").stageScales(e, parts, total);
         // an image prompt's chunk (one part, its rows at prompt positions len..): feature rows and t, h, w positions
         const images: ?*const Images = if (record) null else parts[0].images;
@@ -505,7 +499,8 @@ pub const Engine = struct {
         } else if (prompt) {
             e.features = if (images) |im| im.features else 0;
             defer e.features = 0;
-            prompt_graph = try @import("cuda_prefill_graph.zig").run(e, shape);
+            // uncaptured: a prompt chunk's GEMMs dwarf its launches, and each length's graph would pay the stall
+            try e.body(shape);
         } else {
             const gop = try e.graphs.getOrPut(e.gpa, shape.key());
             if (!gop.found_existing) {
@@ -583,6 +578,7 @@ pub const Engine = struct {
     pub fn rowLogits(e: *const Engine, i: usize) []const u16 {
         return e.host_logits.slice(u16)[i * e.g.vocab ..][0..e.g.vocab];
     }
+    pub const warmVendorPrefill = @import("cuda_cublas_prompt.zig").warm;
 };
 
 test "dense read cost: hidden and slot variants have distinct graph keys" {

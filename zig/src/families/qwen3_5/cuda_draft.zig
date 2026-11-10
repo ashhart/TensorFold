@@ -31,6 +31,17 @@ const normalization = @import("cuda_draft_normalization.zig");
 const Fns = struct { gather_taps: cuda.Function, gather_rows: cuda.Function, dyn_conv: cuda.Function, norm_rope: cuda.Function, ring_put: cuda.Function, attn: cuda.Function, dyn_conv_batch: cuda.Function, norm_rope_batch: cuda.Function, mask_rows: cuda.Function, attn_partial: cuda.Function, attn_merge: cuda.Function };
 /// qwen35_draft.cu's TapRows.
 const TapRows = extern struct { n: c_int, rows: [engine.most_window]c_int };
+
+test {
+    _ = graph;
+    _ = cooperative;
+    _ = memory;
+    _ = @import("cuda_draft_bf16.zig");
+    _ = @import("cuda_draft_refine.zig");
+    _ = @import("cuda_draft_feedback.zig");
+    _ = @import("cuda_draft_normalization.zig");
+    _ = @import("cuda_draft_extensions_test.zig");
+}
 /// A stream's context: its layers' key and value rings over [begin, end), and the drafts it holds (a chain or tree).
 pub const Ctx = struct {
     ring: DeviceBuffer,
@@ -134,6 +145,8 @@ pub const Draft = struct {
 
     const words_at = frame.words_at;
     const hp_at = frame.hp_at;
+    const stagedLen = frame.stagedLen;
+    const factsFn = @import("cuda_draft_extensions.zig").Facts(@This(), baseFacts).facts;
     pub fn init(gpa: std.mem.Allocator, io: std.Io, e: *E, dir: []const u8) !*Draft {
         const nodes = try tree.nodes();
         const started = profile.now(io);
@@ -218,9 +231,7 @@ pub const Draft = struct {
     }
 
     /// A successful resize drains the stream, then drops graphs before their captured scratch can be freed.
-    pub fn clearGraphs(d: *Draft) void {
-        if (d.graphs) |*cache| cache.dropAll();
-    }
+    pub const clearGraphs = @import("cuda_draft_extensions.zig").clearGraphs;
 
     /// One stream's bytes, before the drafter loads: its ring, the target's taps of `hidden` and a frame's scratch.
     pub fn streamBytesFor(c: Config, hidden: usize) !usize {
@@ -327,20 +338,7 @@ pub const Draft = struct {
         return d.projManyInner(ls, x, outs, rows, sums, false);
     }
 
-    fn projManyInner(d: *Draft, ls: []const cuda.qlinear.Affine4, x: u64, outs: []const u64, rows: usize, sums: bool, segmented: bool) !void {
-        const e = d.e;
-        if (ls.len == 0 or ls.len != outs.len) return error.UnexpectedTensor;
-        const prompt = precision.prompt(d.projection_role, rows, precision.dflash_projection_prompt_cutoff);
-        const overridden = if (d.w.bf16) |*p| p.containsAny(ls) else false;
-        if (overridden or (!e.affine.pdl and !segmented) or (rows > 16 and (!e.affine.pdl or prompt)) or ls.len > cuda.qlinear.Affine4Kernels.segs_max or ls.len == 1) {
-            for (ls, outs, 0..) |l, out, i| try d.projSums(l, x, out, rows, sums and (overridden or i == 0));
-            return;
-        }
-        if (sums) try e.run(e.fns.sums, .{ rows, (ls[0].k / 64 + 63) / 64, 1 }, .{ 64, 1, 1 }, .{ x, d.xs, @as(c_int, @intCast(ls[0].k)), @as(u64, 0) });
-        var many: [cuda.qlinear.Affine4Kernels.segs_max]cuda.qlinear.Affine4Kernels.Out = undefined;
-        for (ls, outs, many[0..ls.len]) |l, out, *m| m.* = .{ .q = l, .out = out };
-        try e.affine.verifyManyRows(e.stream, x, d.xs, many[0..ls.len], rows);
-    }
+    const projManyInner = @import("cuda_draft_projections.zig").projectMany;
 
     pub fn projSums(d: *Draft, l: cuda.qlinear.Affine4, x: u64, out: u64, rows: usize, sums: bool) !void {
         if (d.w.bf16) |*p| if (try p.project(d.e.stream, l.w, x, out, rows)) return;
@@ -348,11 +346,7 @@ pub const Draft = struct {
     }
 
     /// out = the normed h, and its group sums into xs for a projAgain over out.
-    pub fn norm(d: *Draft, h: u64, w: u64, out: u64, rows: usize) !void {
-        if (d.c.kind == .dflash2) return normalization.run(d, h, w, out, rows);
-        const e = d.e;
-        try e.run(e.fns.norm, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ h, @as(u64, 0), w, out, d.c.eps, @as(c_int, @intCast(d.c.hidden)), @as(u64, 0), d.xs });
-    }
+    pub const norm = normalization.run;
 
     fn normRope(d: *Draft, x: u64, w: u64, out: u64, rows: usize, heads: usize, pos0: u64) !void {
         try d.e.run(d.fns.norm_rope, .{ rows * heads, 1, 1 }, .{ 32, 1, 1 }, .{ x, w, out, @as(c_int, @intCast(heads)), @as(c_int, @intCast(heads * d.c.head_dim)), @as(c_longlong, @intCast(pos0)), d.c.eps, d.c.theta });
@@ -432,30 +426,7 @@ pub const Draft = struct {
         ctx.held_n = shape.parents.len;
     }
 
-    fn nodeBudget(d: *const Draft) usize {
-        return if (d.c.kind == .dflash2) @max(d.tree_nodes, d.auxiliary_nodes) else if (d.c.block == 16) d.tree_nodes else 0;
-    }
-
-    pub fn selectHold(d: *Draft, ctx: *Ctx, it: dr.Hold) !void {
-        const rows = d.c.block - 1;
-        ctx.grown = 0;
-        if (d.c.kind == .dflash2) try @import("cuda_draft_trace.zig").emit(d, it);
-        // a sampled hold's candidates ranked as its target draw ranks them (its seed, each draft's position)
-        d.drawn = .{ .sampling = it.sampling, .position = it.position };
-        defer d.drawn = .{};
-        if (it.lanes) |shape| return d.selectLanes(ctx, it.pending, rows, shape);
-        const limit = d.nodeBudget();
-        if (ctx.seed_n > 0) return @import("cuda_draft_refine.zig").select(d.candidates(rows), ctx, if (it.depth == 0) 0 else limit);
-        if (limit > 0) {
-            // the whole budget whenever drafts are asked: the block's forward costs the same at any depth
-            const n = if (it.depth == 0) 0 else limit;
-            ctx.grown = feedback.grow(d.candidates(rows), &ctx.feedback, it.position, d.feedback_weight, it.pending, rows, n, &ctx.held, &ctx.parents, &ctx.own);
-            ctx.held_n = ctx.grown;
-        } else {
-            d.select(ctx, it.pending, rows);
-            ctx.held_n = @min(it.depth, rows);
-        }
-    }
+    pub const selectHold = @import("cuda_draft_extensions.zig").selectHold;
 
     pub fn drafter(d: *Draft) dr.Drafter {
         return .{ .kind = if (d.c.kind == .dspine) "DSpine" else "DFlash2", .ptr = d, .vtable = &.{ .taps = tapsFn, .facts = factsFn, .open = openFn, .absorb = absorbFn, .hold = holdFn, .held = heldFn, .release = releaseFn, .tree = treeFn, .chances = chancesFn } };
@@ -470,10 +441,10 @@ pub const Draft = struct {
         return d.c.taps[0..d.c.n_taps];
     }
 
-    fn factsFn(p: *anyopaque) dr.Facts {
+    fn baseFacts(p: *anyopaque) dr.Facts {
         const d = cast(p);
         // TF_NO_TREES=1: chains only (for comparing)
-        return .{ .history_rows = @intCast(d.c.window), .depth = @intCast(d.c.block - 1), .step_ms = d.step_ms, .prior = &prior, .plain_guard = true, .batched = true, .stream_bytes = d.c.ringBytes() + d.target_taps + d.scratch_one, .trees = platform.c.getenv("TF_NO_TREES") == null, .window_costs = d.costs[0..d.n_costs], .lane_costs = d.costs[0..d.n_costs], .copy_match = if (d.c.copy_match > 0) d.c.copy_match else copyMatch(d.e.g), .tree_nodes = @intCast(if (d.c.kind == .dflash2 or d.c.block == 16) d.tree_nodes else 0) };
+        return .{ .depth = @intCast(d.c.block - 1), .step_ms = d.step_ms, .prior = &prior, .plain_guard = true, .batched = true, .stream_bytes = d.c.ringBytes() + d.target_taps + d.scratch_one, .trees = platform.c.getenv("TF_NO_TREES") == null, .window_costs = d.costs[0..d.n_costs], .lane_costs = d.costs[0..d.n_costs], .copy_match = copyMatch(d.e.g), .tree_nodes = @intCast(if (d.c.block == 16) d.tree_nodes else 0) };
     }
 
     fn openFn(p: *anyopaque, s: *Stream) anyerror!void {
@@ -582,11 +553,35 @@ pub fn timing(what: []const u8, io: std.Io, t0: std.Io.Timestamp) void {
 
 test {
     _ = tree;
-    _ = graph;
-    _ = cooperative;
-    _ = memory;
-    _ = @import("cuda_draft_bf16.zig");
-    _ = @import("cuda_draft_refine.zig");
-    _ = @import("cuda_draft_feedback.zig");
-    _ = @import("cuda_draft_normalization.zig");
+}
+
+test "a drafter config with a zero divisor is refused, and any admitted rank's selector rows fit the staging area" {
+    const gpa = std.testing.allocator;
+    const target: engine.Geometry = .{ .hidden = 5120, .intermediate = 17408, .layers = 64, .vocab = 248320, .k_heads = 16, .v_heads = 48, .q_heads = 24, .kv_heads = 4, .eps = 1e-6, .tied = false, .context = 262144, .linear = @splat(false) };
+    const text =
+        \\{"dflash_config":{"block_size":8,"conv_group_size":16,"conv_kernel_size":2,"mask_token_id":248070,"selector_rank":256,
+        \\ "selector_top_k":16,"target_layer_ids":[5,19,33,47,61]},"head_dim":128,"hidden_size":5120,"intermediate_size":17408,
+        \\ "num_attention_heads":32,"num_hidden_layers":5,"num_key_value_heads":8,"rms_norm_eps":1e-06,
+        \\ "rope_parameters":{"rope_theta":10000000},"sliding_window":2048,"vocab_size":248320,"use_sliding_window":true,
+        \\ "layer_types":["sliding_attention","sliding_attention","sliding_attention","sliding_attention","sliding_attention"]}
+    ;
+    try std.testing.expectEqual(@as(usize, 256), (try Config.parse(gpa, text, target)).rank);
+    for ([_][2][]const u8{ .{ "\"conv_group_size\":16", "\"conv_group_size\":0" }, .{ "\"num_key_value_heads\":8", "\"num_key_value_heads\":0" } }) |r| {
+        const bad = try std.mem.replaceOwned(u8, gpa, text, r[0], r[1]);
+        defer gpa.free(bad);
+        try std.testing.expectError(error.BadDraftConfig, Config.parse(gpa, bad, target));
+    }
+    // the kernels rope with theta alone: a scaled rope is refused, an explicit default one is read
+    for ([_][2][]const u8{ .{ "{\"rope_theta\"", "{\"rope_type\":\"yarn\",\"factor\":4.0,\"rope_theta\"" }, .{ "{\"rope_theta\"", "{\"type\":\"yarn\",\"rope_theta\"" }, .{ "\"sliding_window\"", "\"rope_scaling\":{\"type\":\"yarn\"},\"sliding_window\"" } }) |r| {
+        const scaled = try std.mem.replaceOwned(u8, gpa, text, r[0], r[1]);
+        defer gpa.free(scaled);
+        try std.testing.expectError(error.UnsupportedDraftConfig, Config.parse(gpa, scaled, target));
+    }
+    const plain = try std.mem.replaceOwned(u8, gpa, text, "{\"rope_theta\"", "{\"rope_type\":\"default\",\"rope_theta\"");
+    defer gpa.free(plain);
+    try std.testing.expectEqual(@as(usize, 256), (try Config.parse(gpa, plain, target)).rank);
+    const wide = try std.mem.replaceOwned(u8, gpa, text, "\"selector_rank\":256", "\"selector_rank\":1024");
+    defer gpa.free(wide);
+    const c = try Config.parse(gpa, wide, target);
+    try std.testing.expect(Draft.stagedLen(c.rank) >= Draft.hp_at + (c.block - 1) * c.rank * 2);
 }

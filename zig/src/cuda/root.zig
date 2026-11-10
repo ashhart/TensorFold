@@ -41,6 +41,10 @@ pub const mxfp8 = @import("mxfp8.zig");
 pub const exlr8 = @import("exlr8.zig");
 pub const experts_tile = @import("experts_tile.zig");
 pub const nvfp4 = @import("nvfp4.zig");
+pub const cublaslt_prefill = @import("cublaslt_prefill.zig");
+test {
+    _ = cublaslt_prefill;
+}
 pub const fp8_prefill = @import("fp8_prefill.zig");
 pub const kv_expand = @import("kv_expand.zig");
 pub const fp8_prefill_tiles = @import("fp8_prefill_tiles.zig");
@@ -192,8 +196,3 @@ test {
     _ = @import("graph_instantiate_failure_test.zig");
 }
 pub const qwen35_bf16_rows = @import("qwen35_bf16_rows.zig");
-
-pub const cublaslt_prefill = @import("cublaslt_prefill.zig");
-test {
-    _ = cublaslt_prefill;
-}

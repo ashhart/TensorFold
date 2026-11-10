@@ -11,6 +11,7 @@ const engines = engines_build.engines;
 const flashnextModule = engines_build.flashnextModule;
 const glmCuda = engines_build.glmCuda;
 const lfm2Module = engines_build.lfm2Module;
+
 pub fn family(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, draft_ids: *std.Build.Module) struct { core: *std.Build.Module, lanes: *std.Build.Module, nemotron: *std.Build.Module, qwen35: *std.Build.Module, qwen_vision: *std.Build.Module, tokenizer: *std.Build.Module, heat: *std.Build.Module, radio: *std.Build.Module, living: *std.Build.Module, api: *std.Build.Module } {
     const tokenizer = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = target, .optimize = optimize, .link_libc = true });
     const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
@@ -79,10 +80,6 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     @import("h3_host.zig").library(b, target, optimize, h3_image);
     const cuda = runtime(b, target, optimize, if (nvcc != null or prebuilt != null) &images else &.{});
     const mods = family(b, target, optimize, cuda, draft_ids);
-    @import("nvfp4_contract.zig").add(b, target, optimize, strip, cuda, mods.core);
-    @import("fp8_contract.zig").add(b, target, optimize, strip, cuda, mods.core);
-    @import("qwen_prefill_fidelity.zig").add(b, target, optimize, strip, cuda, mods.qwen35);
-    @import("attention_tuned_contract.zig").add(b, target, optimize, strip, cuda, mods.core);
     const cli = b.createModule(.{ .root_source_file = b.path("zig/src/cli/cuda_main.zig"), .target = target, .optimize = optimize, .link_libc = true, .strip = strip });
     const native = engines(b, target, optimize, cuda, mods.core, mods.lanes, mods.nemotron, mods.heat, mods.qwen35, mods.qwen_vision);
     for ([_]struct { []const u8, *std.Build.Module }{ .{ "cuda", cuda }, .{ "core", mods.core }, .{ "lanes", mods.lanes }, .{ "nemotron", mods.nemotron }, .{ "dory", native.engines.import_table.get("dory").? }, .{ "cluster", @import("cluster_cuda.zig").module(b, target, optimize, mods.lanes, mods.core, native.canon, native.verbs) } }) |m| cli.addImport(m[0], m[1]);
@@ -135,6 +132,10 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     @import("dsv41_serve.zig").install(b, target, optimize, cuda, nvcc != null or prebuilt != null);
     const server_exe = nativeServer(b, target, optimize, cuda, mods.core, mods.lanes, mods.nemotron, mods.heat, mods.qwen35, mods.qwen_vision, mods.tokenizer, mods.living, build_options, true, strip);
     b.step("compile-config-server", "Compile the actual CUDA server config entry point without installing or running").dependOn(&server_exe.step);
+    @import("nvfp4_contract.zig").add(b, target, optimize, strip, cuda, mods.core);
+    @import("fp8_contract.zig").add(b, target, optimize, strip, cuda, mods.core);
+    @import("qwen_prefill_fidelity.zig").add(b, target, optimize, strip, cuda, mods.qwen35);
+    @import("attention_tuned_contract.zig").add(b, target, optimize, strip, cuda, mods.core);
     // tf-qwen35-cuda: the Qwen CUDA forward's rows for a reference to compare, and its tower on picture files
     const q35 = b.createModule(.{ .root_source_file = b.path("zig/tests/qwen35_cuda_main.zig"), .target = target, .optimize = optimize, .link_libc = true, .strip = strip });
     q35.addImport("cuda", cuda);

@@ -23,10 +23,14 @@ fn launch(gpu: check.Gpu, s: cuda.Stream, fun: cuda.Function, initial: [2][]u16,
     var rig = rig_.Rig{ .gpu = gpu, .s = s };
     defer rig.deinit();
     var segs: [2]Seg = undefined;
+    var tails: [2]u64 = undefined;
+    var backups: [2]u64 = undefined;
     for (&segs, initial, 0..) |*sg, data, st| {
         const tail = try rig.scratch(tail_bytes);
         try (cuda.DeviceBuffer{ .d = gpu.d, .ptr = tail, .len = tail_bytes }).upload(0, std.mem.sliceAsBytes(data));
-        sg.* = .{ .conv = tail, .before = if (omit) 0 else try rig.output(rec_bytes + tail_bytes), .row0 = @intCast(st), .rows = 1 };
+        tails[st] = tail;
+        backups[st] = if (omit) 0 else try rig.output(rec_bytes + tail_bytes);
+        sg.* = .{ .conv = tail, .before = backups[st], .row0 = @intCast(st), .rows = 1 };
     }
     const segs_d = try rig.input(std.mem.sliceAsBytes(&segs));
     const qkv_d = try rig.input(std.mem.sliceAsBytes(qkv));
@@ -41,10 +45,10 @@ fn launch(gpu: check.Gpu, s: cuda.Stream, fun: cuda.Function, initial: [2][]u16,
         try cuda.launch.launch(fun, .{ .grid = .{ .x = (channels + 255) / 256, .y = 2 }, .block = .{ .x = 256 } }, s, &args);
     }
     var out: Out = undefined;
-    for (segs, 0..) |sg, st| {
-        out.tail[st] = try a.dupe(u8, try rig.bytes(sg.conv, tail_bytes));
-        out.before[st] = if (omit) &.{} else try a.dupe(u8, try rig.bytes(sg.before + rec_bytes, tail_bytes));
-        if (!omit) for (try rig.bytes(sg.before, rec_bytes)) |byte|
+    for (0..2) |st| {
+        out.tail[st] = try a.dupe(u8, try rig.bytes(tails[st], tail_bytes));
+        out.before[st] = if (backups[st] == 0) &.{} else try a.dupe(u8, try rig.bytes(backups[st] + rec_bytes, tail_bytes));
+        if (backups[st] != 0) for (try rig.bytes(backups[st], rec_bytes)) |byte|
             try check.expect(byte == 0xff, "conv backup overwrote the unrelated F32 state", .{});
     }
     try check.expect(try rig.intact() and !rig.overlap() and std.mem.eql(u8, seen, try rig.inputBytes()), "conv backup changed a guard or input", .{});

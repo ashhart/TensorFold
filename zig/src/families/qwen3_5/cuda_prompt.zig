@@ -105,7 +105,6 @@ pub fn runFrom(e: *E.Engine, layer: usize, from: usize, end: usize) !void {
 pub fn delta(e: *E.Engine, layer: usize, rows: usize) !void {
     const g = e.g;
     const sg = std.mem.bytesToValue(Seg, e.staged.bytes[E.Engine.segs_at..][0..@sizeOf(Seg)]);
-    if (try @import("cuda_prefill_paths.zig").delta(e, layer, rows, sg)) return;
     const state = sg.rec + layer * g.v_heads * geometry.dk * geometry.dk * 4;
     var a: cuda.Args = .{};
     for ([_]u64{ e.q, e.k, e.v, e.g_, e.beta, state, state, e.y }) |v| a.add(v);

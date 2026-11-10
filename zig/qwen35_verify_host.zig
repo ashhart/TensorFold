@@ -80,8 +80,6 @@ fn device(d: *cuda.Driver, gb10: bool, wide: bool) q.engine.Engine {
     d.api.cuLaunchKernelEx = Trace.launchEx;
     var e: q.engine.Engine = undefined;
     e.int8 = .{};
-    e.mo = null;
-    e.g.hidden = 0;
     e.kit = null;
     e.d = d;
     e.stream = .{ .d = d, .handle = null };
@@ -101,6 +99,8 @@ fn device(d: *cuda.Driver, gb10: bool, wide: bool) q.engine.Engine {
     e.affine.split = null;
     e.affine.pdl = gb10;
     e.affine.wide_verify = wide;
+    e.mo = null;
+    e.g.hidden = 0;
     return e;
 }
 fn project(e: *q.engine.Engine, rows: usize, n: usize) !void {

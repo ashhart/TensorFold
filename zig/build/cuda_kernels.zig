@@ -106,6 +106,11 @@ pub const kernels = [_]Kernel{
     .{ .name = "qwen35", .flags = &.{"-O3"} }, // ours: the Qwen3.5 hybrids' glue, the Metal kernels' rounding points
     .{ .name = "qwen35_draft", .flags = &.{"-O3"} }, // ours: the DFlash2 drafter's glue (draft_ops.metal's rounding)
     .{ .name = "qwen35_keep", .flags = &.{"-O3"} }, // ours: a verified window's kept path applied to its stream's state
+    .{ .name = "nvfp4_prompt", .flags = &.{"-O3"}, .arch_specific = true, .min_sm = 120 },
+    .{ .name = "nvfp4_tma", .flags = &.{"-O3"}, .arch_specific = true, .min_sm = 120 },
+    .{ .name = "fp8_prefill", .flags = &.{"-O3"}, .arch_specific = true, .min_sm = 120 },
+    .{ .name = "fp8_prefill_tiles", .flags = &.{"-O3"}, .arch_specific = true, .min_sm = 120 },
+    .{ .name = "affine_fp8_prepared", .flags = &.{ "-O3", "--fmad=false", "--ftz=false" }, .arch_specific = true, .min_sm = 120 },
     .{ .name = "qwen_vision", .flags = &.{ "-O3", "--fmad=false" } }, // ours: the Qwen3.5 vision tower's glue and attention
     .{ .name = "gdn_prefill", .flags = &.{ "-O3", "--fmad=false" } }, // ours: a prompt chunk's gated delta rule (v0.6.6's chain)
     .{ .name = "gdn_chunked", .flags = glue, .arch_specific = true, .min_sm = 120 },
@@ -138,11 +143,6 @@ pub const kernels = [_]Kernel{
     .{ .name = "qk_rows", .flags = &.{"-O3"} }, // ours: QK norm, RoPE and the cache write (cuda/qk_rows.zig)
     .{ .name = "qmmf", .flags = &.{"-O3"} }, // nvfp4/qmmf.cu's device code (FP8G, FP4), tensorfold_nvfp4_v3
     .{ .name = "prompt16", .flags = &.{"-O3"}, .native_fp = true }, // nvfp4/prompt.cu FP4/FP8 tile 4, nvfp4_prompt_v1
-    .{ .name = "nvfp4_prompt", .flags = &.{"-O3"}, .arch_specific = true, .min_sm = 120 },
-    .{ .name = "nvfp4_tma", .flags = &.{"-O3"}, .arch_specific = true, .min_sm = 120 },
-    .{ .name = "fp8_prefill", .flags = &.{"-O3"}, .arch_specific = true, .min_sm = 120 },
-    .{ .name = "fp8_prefill_tiles", .flags = &.{"-O3"}, .arch_specific = true, .min_sm = 120 },
-    .{ .name = "affine_fp8_prepared", .flags = &.{ "-O3", "--fmad=false", "--ftz=false" }, .arch_specific = true, .min_sm = 120 },
     .{ .name = "tree_attention", .flags = &.{"-O3"} }, // ours: committed keys and paths (cuda/tree_attention.zig)
     .{ .name = "block_attention", .flags = &.{"-O3"} }, // ours: a drafter's block over its context (cuda/block_attention.zig)
     .{ .name = "window_attention", .flags = &.{"-O3"} }, // ours: sliding-window attention (cuda/window_attention.zig)

@@ -38,12 +38,9 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
     const t_params = e.tables.ptr + params_at;
     const geo = e.geo;
     const group = g.q_heads / g.kv_heads;
-    var trace = try @import("cuda_prompt_profile.zig").Trace.init(e.gpa, e.d, e.stream, e.layers.len, prompt);
-    defer trace.deinit();
 
     if (prompt and e.int8.on) @import("cuda_prompt_int8.zig").chunkStart(e);
     try e.embed(t_ids, e.h, total, t_params);
-    try trace.mark(e.stream, .embed);
     // the producers of the out, o and down inputs write their group sums; a prompt GEMM past 16 rows needs none
     const sums: u64 = if (prompt and total > 16) 0 else e.xs;
     // an image chunk's rows take the tower's features, and rotate at their staged t, h, w positions
@@ -59,7 +56,6 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
         const rows: usize = total - t0;
         try e.norm(i != 0, l.input_norm, total);
         if (e.learning) |k| try k.input(i, e.h, total);
-        try trace.mark(e.stream, .norm);
         switch (l.mixer) {
             .delta => |m| {
                 const layer: c_int = @intCast(di);
@@ -114,46 +110,44 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
                 ai += 1;
             },
         }
-        try trace.mark(e.stream, if (l.mixer == .delta) .delta else .attention);
         try e.norm(true, l.post_norm, total);
         if (e.learning) |k| try k.post(i, e.h, e.x, total);
-        try trace.mark(e.stream, .post_norm);
         // the tail: its rows' MLP at buffer row 0, their outputs into r at their own rows
         const x0 = e.x + t0 * g.hidden * 2;
         const r0 = e.r + t0 * g.hidden * 2;
         const rp: u64 = if (tail) 0 else t_params;
+        if (prompt and l.mlp == .dense) {
+            const m = l.mlp.dense;
+            if (try @import("cuda_mlp_dispatch.zig").claim(e, m.gate, m.up, x0, rows, prompt) == .act_ready) {
+                try @import("cuda_mlp_dispatch.zig").finishDense(e, m, i, total, rows, prompt, r0);
+                try @import("cuda_mlp_dispatch.zig").taps(e, shape.taps, i, total, t_segs, t_rows, t_params);
+                continue;
+            }
+        }
         switch (l.mlp) {
             .dense => |m| {
-                const fused = prompt and e.learning == null and
-                    try @import("cuda_fast_prompt.zig").swiglu(e, m.gate, m.up, x0, e.act, rows);
-                if (!fused) {
-                    if (m.gate == .x3) {
-                        try e.projMany(&.{ m.gate, m.up }, x0, &.{ e.gate, e.up }, rows, prompt); // one EXL3 group launch
-                    } else if (e.affine.pdl and !prompt and e.learning == null and m.gate == .a4 and m.up == .a4) {
-                        try e.projMany(&.{ m.gate, m.up }, e.x, &.{ e.gate, e.up }, total, false);
-                    } else {
-                        try e.projAgain(m.gate, x0, e.gate, rows, prompt);
-                        try e.projAgain(m.up, x0, e.up, rows, prompt);
-                    }
-                    if (e.learning) |k| try k.mlp(i, e.gate, e.up, total);
-                    const n: c_longlong = @intCast(rows * g.intermediate);
-                    const act_args = .{ e.gate, e.up, e.act, n, rp, @as(c_int, @intCast(g.intermediate)), sums };
-                    try e.run(e.fns.mlp_act, .{ (rows * g.intermediate + 1023) / 1024, 1, 1 }, .{ 256, 1, 1 }, act_args);
+                if (m.gate == .x3) {
+                    try e.projMany(&.{ m.gate, m.up }, x0, &.{ e.gate, e.up }, rows, prompt); // one EXL3 group launch
+                } else if (e.affine.pdl and !prompt and e.learning == null and m.gate == .a4 and m.up == .a4) {
+                    try e.projMany(&.{ m.gate, m.up }, e.x, &.{ e.gate, e.up }, total, false);
+                } else {
+                    try e.projAgain(m.gate, x0, e.gate, rows, prompt);
+                    try e.projAgain(m.up, x0, e.up, rows, prompt);
                 }
-                try e.projAgain(m.down, e.act, r0, rows, prompt);
-                if (e.mlp) |k| try k.f(k.ctx, i, e.x, e.r, total, e.taught) else try e.pockets.add(e.stream, i, e.x, e.r, total, e.taught);
+                if (e.learning) |k| try k.mlp(i, e.gate, e.up, total);
+                const n: c_longlong = @intCast(rows * g.intermediate);
+                const act_args = .{ e.gate, e.up, e.act, n, rp, @as(c_int, @intCast(g.intermediate)), sums };
+                try e.run(e.fns.mlp_act, .{ (rows * g.intermediate + 1023) / 1024, 1, 1 }, .{ 256, 1, 1 }, act_args);
+                try @import("cuda_mlp_dispatch.zig").finishDense(e, m, i, total, rows, prompt, r0);
             },
             .moe => |m| try e.routedRows(m.router, m.experts, x0, r0, rows, promptMoe(prompt, rows), rp),
         }
-        try trace.mark(e.stream, .mlp);
         if (shape.taps) for (e.taps[0..e.n_taps], 0..) |t, ti| if (t == i) {
             try e.run(e.fns.tap, .{ total, (g.hidden + 2047) / 2048, 1 }, .{ 256, 1, 1 }, .{ e.h, e.r, t_segs, t_rows, @as(c_int, @intCast(ti)), @as(c_int, @intCast(g.hidden)), t_params });
         };
     }
     if (prompt and e.int8.on) @import("cuda_prompt_int8.zig").chunkEnd(e, total);
     try finish(e, total, heads, shape.hidden, shape.rows);
-    try trace.mark(e.stream, .finish);
-    try trace.report(total);
 }
 
 /// A launch whose arguments are checked against the kernel's .cu signature: a wrong count or kind does not build.
@@ -205,4 +199,8 @@ test "prompt MoE precision: every prompt piece through 128 and admitted verify w
     const std = @import("std");
     for (1..129) |rows| try std.testing.expectEqual(rows > 16, promptMoe(true, rows));
     for (1..E.most_window + 1) |rows| try std.testing.expect(!promptMoe(false, rows));
+}
+
+test {
+    _ = @import("cuda_mlp_dispatch.zig");
 }

@@ -45,7 +45,14 @@ fn mostPages(capacity: usize, tokens: usize) usize {
 
 /// A lane's table and `fixed` bytes; its keys and values a token; a run of its state, log, taps and a `ring`-byte ring.
 pub fn layout(e: *const Engine, capacity: usize, tokens: usize, ring: usize, fixed: usize) kv.Layout {
-    return .{ .fixed_bytes = mostPages(capacity, tokens) * 4 + fixed, .token_bytes = e.g.kvBytes(1, e.kv8), .page_tokens = @intCast(tokens), .snap_bytes = e.g.stateBytes() + @import("cuda_cached_features.zig").current(e).bytes(), .run_bytes = Cache.runBytes(e, ring) };
+    return .{ .fixed_bytes = mostPages(capacity, tokens) * 4 + fixed, .token_bytes = e.g.kvBytes(1, e.kv8), .page_tokens = @intCast(tokens), .snap_bytes = e.g.stateBytes(), .run_bytes = Cache.runBytes(e, ring) };
+}
+
+/// Retained target features add host snapshot bytes to the upstream pool layout.
+pub fn layoutWithFeatures(e: *const Engine, capacity: usize, tokens: usize, ring: usize, fixed: usize) kv.Layout {
+    var out = layout(e, capacity, tokens, ring, fixed);
+    out.snap_bytes += @import("cuda_cached_features.zig").current(e).bytes();
+    return out;
 }
 
 /// One pool lane: a cache whose table maps its stream's pages, that stream's lease and its run's first page.
@@ -85,7 +92,7 @@ pub const Pages = struct {
         for (p.lanes) |*x| {
             const c = try gpa.create(Cache);
             errdefer gpa.destroy(c);
-            c.* = try Cache.initPaged(gpa, e, mostPages(capacity, tokens), tokens, arena.ptr);
+            c.* = try Cache.initPagedOwned(gpa, e, mostPages(capacity, tokens), tokens, arena.ptr);
             x.* = .{ .cache = c };
             made += 1;
         }

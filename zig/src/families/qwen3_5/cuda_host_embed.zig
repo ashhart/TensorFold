@@ -14,11 +14,22 @@ pub fn mapped(unified: bool, room: u64, device: u64, stream: u64, beside: u64) b
 }
 
 /// The engine's arena of weights and scratch rows, with any host memory for the embedding rows made first.
-pub fn arena(e: anytype, io: std.Io, ctx: *const cuda.Context, ck: anytype, fit: ?Fit, planned: ?usize) !cuda.DeviceBuffer {
+pub fn arena(e: anytype, io: std.Io, ctx: *const cuda.Context, ck: anytype, fit: ?Fit) !cuda.DeviceBuffer {
     e.host_embed = null;
     errdefer if (e.host_embed) |*h| h.free();
-    const bytes = planned orelse try measure(e, io, ctx, ck, fit);
+    const bytes = try measure(e, io, ctx, ck, fit);
     return cuda.DeviceBuffer.alloc(e.d, bytes + try e.scratch(.measure));
+}
+
+/// The alternate route replaces weight/stage budgets; it never changes checkpoint-defined activation precision.
+pub fn arenaPlanned(e: anytype, io: std.Io, ctx: *const cuda.Context, plan: *@import("cuda_load_plan.zig").LoadPlan, fit: ?Fit) !cuda.DeviceBuffer {
+    try plan.requireCurrentUpload();
+    e.host_embed = null;
+    errdefer if (e.host_embed) |*h| h.free();
+    if (plan.budgets.weight_bytes == null) plan.budgets.weight_bytes = try measure(e, io, ctx, plan.primary(), fit);
+    const scratch_bytes = try plan.workspace.carve(e, .measure);
+    if (scratch_bytes != plan.budgets.scratch_bytes) return error.QwenWorkspaceBudgetChanged;
+    return cuda.DeviceBuffer.alloc(e.d, try plan.budgets.arenaBytes());
 }
 
 /// The arena and the host memory `arena` made.

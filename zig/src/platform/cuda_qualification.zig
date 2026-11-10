@@ -43,6 +43,7 @@ const limited = [_]Rule{
     number("TF_QWEN_GDN_CHUNKED", &.{0}, 0, error.UnqualifiedQwenGdnChunked, "the alternate GDN reduction is not admitted for serving; use 0 or unset"),
     number("TF_QWEN_ATTN_EXACT", &.{0}, 0, error.UnqualifiedQwenAttentionMode, "alternate attention algorithms are not admitted for serving; use 0 or unset"),
     number("TF_QWEN_PREFILL_GRAPH", &.{0}, 0, error.UnqualifiedQwenPrefillGraph, "target prefill graphs are not admitted for serving; use 0 or unset"),
+    number("TF_QWEN_PREFILL_PROFILE", &.{0}, 0, error.UnqualifiedQwenPrefillProfile, "target prefill profiling is not admitted for serving; use 0 or unset"),
     number("TF_DRAFT_BF16", &.{0}, 0, error.UnqualifiedQwenDraftBf16, "proposal precision overrides are not admitted for serving; use 0 or unset"),
     rule("TF_DRAFT_BF16_EMBED_DIR", .{ .present = false }, error.UnqualifiedQwenDraftEmbedding, "alternate proposal embeddings are not admitted for serving; leave unset"),
     number("TF_DRAFT_BLOCK", &.{8}, 8, error.UnqualifiedQwenDraftBlock, "leave unset for upstream behavior or use 8 in the recorded NVFP4 profile"),

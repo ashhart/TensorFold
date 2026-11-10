@@ -75,11 +75,12 @@ __device__ __forceinline__ void q35_slots(Geo geo, const __nv_bfloat16* q, const
             }
         }
     }
-    if (sg.rows == 1 && sg.before != 0)
+    float* before = reinterpret_cast<float*>(tf_q35_before_address(recurrence_backup(geo, sg), layer));
+    if (sg.rows == 1 && before != nullptr)
 #pragma unroll
         for (int r = 0; r < R; ++r)
 #pragma unroll
-            for (int i = 0; i < PT; ++i) reinterpret_cast<float*>(sg.before)[(size_t)layer * geo.rec() + at + r * DK + i] = root[r][i];
+            for (int i = 0; i < PT; ++i) before[at + r * DK + i] = root[r][i];
     const bool record = recorded(P);
     // row inputs as stored, the next row's loaded while this one computes
     struct In { uint2 k, q; __nv_bfloat16 v[R], beta; float g; };

@@ -160,12 +160,12 @@ test "format coexistence: all projection tags retain their dimensions and BF16 i
     var d: cuda.Driver = undefined;
     d.api.cuLaunchKernel = Recorded.launch;
     var e: Engine = undefined;
-    e.learning = null;
     e.stream = .{ .d = &d, .handle = null };
     e.mo = fullKernels(&d);
     var kit: Kit = undefined;
     kit.b16.dense_fn = function(&d, 4);
     e.kit = &kit;
+    e.learning = null;
     const q: cuda.qmmf.Weight = .{ .mode = .bf16, .codes = 0x7000, .scales = 0, .n = 64, .k = 64, .npad = 128 };
     const bf: Proj = .{ .bf = .{ .w = 0x7000, .n = 64, .k = 64 } };
     const ql: Proj = .{ .ql = .{ .bf16 = q } };

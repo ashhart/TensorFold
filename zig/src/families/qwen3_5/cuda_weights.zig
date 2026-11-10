@@ -345,7 +345,16 @@ fn embedWords(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer, m: []const
     return out;
 }
 
-pub fn load(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer, source: ?*@import("cuda_nvfp4_mlp.zig").Opened) !void {
+pub fn load(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer) !void {
+    return loadSource(e, ck, stage, null);
+}
+
+pub fn loadPlanned(e: *Engine, plan: *@import("cuda_load_plan.zig").LoadPlan, stage: *DeviceBuffer) !void {
+    try plan.requireCurrentUpload();
+    return loadSource(e, plan.primary(), stage, plan.alternateSource());
+}
+
+fn loadSource(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer, source: ?*@import("cuda_nvfp4_mlp.zig").Opened) !void {
     const g = e.g;
     const mo = g.kinds.modelopt;
     const m = if (mo) modelopt.prefix else "language_model.model.";

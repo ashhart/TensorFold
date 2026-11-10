@@ -1,9 +1,35 @@
 //! Named environment validation before model, driver and transport work; successful values keep their old semantics.
 const std = @import("std");
 const sys = @import("sys.zig");
+const extensions = @import("environment_extensions.zig");
+
+/// Checked process text for family selectors; unset or blank uses their default, and owned trimming is preserved.
+pub fn given(name: [:0]const u8) Error!?[]const u8 {
+    return givenText(name, sys.getenv(name));
+}
+
+fn givenText(name: [:0]const u8, raw: ?[]const u8) Error!?[]const u8 {
+    _ = (try checked(name, raw)) orelse return null;
+    return std.mem.trim(u8, raw.?, rule(name).trim);
+}
+
+test {
+    _ = @import("environment_extensions_test.zig");
+}
+
+test "environment: given text checks selectors, preserves paths and treats blank as unset" {
+    const t = std.testing;
+    for ([_]?[]const u8{ null, "", " \t\r\n" }) |raw|
+        try t.expectEqual(@as(?[]const u8, null), try givenText("TF_QWEN_NVFP4_SCOPE", raw));
+    try t.expectEqualStrings("layers", (try givenText("TF_QWEN_NVFP4_SCOPE", "layers")).?);
+    try t.expectEqualStrings(" path with spaces ", (try givenText("TF_CUBLAS_BRIDGE", " path with spaces ")).?);
+    try t.expectEqualStrings("native", (try givenText("TF_DSV41_IMAGES", " native ")).?);
+    try t.expectError(error.InvalidEnvironment, givenText("TF_QWEN_NVFP4_SCOPE", " Layers "));
+    try t.expectError(error.InvalidEnvironment, givenText("TF_CUBLAS_BRIDGE", "bad\npath"));
+}
 
 pub const Error = error{InvalidEnvironment};
-pub const Scope = enum { common, cuda, metal, xpu, slide, hooks, dsv41, gemma4, drama3, glm, qwen };
+pub const Scope = enum { common, cuda, metal, xpu, slide, hooks, dsv41, gemma4, drama3, glm };
 pub const Kind = enum { u32, u64, size, percent, positive, device, segments, mib, bit_width, word, prompt, flag, toggle, real, positive_real, signed_real, range, path };
 pub const Rule = struct {
     name: [:0]const u8,
@@ -15,8 +41,6 @@ pub const Rule = struct {
     /// A whole number's own bounds inside its kind's; a real kind applies `max` too when it is set.
     min: u64 = 0,
     max: u64 = std.math.maxInt(u64),
-    /// A whole number must be a multiple of this value.
-    multiple: u64 = 1,
     /// When nonempty, the only whole numbers accepted.
     only: []const u64 = &.{},
     /// A `.word` setting's accepted texts; the parsed value is the matching index.
@@ -75,43 +99,6 @@ pub const rules = [_]Rule{
     .{ .name = "TF_GLM_SHARED", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_GLM_DFLASH2_LOG", .scope = .glm, .kind = .u64, .forms = "a whole unsigned 64-bit round count (0 logs no drafts)" },
     .{ .name = "TF_GLM_DRAFT_CONFIDENCE", .scope = .glm, .kind = .real, .max = 1, .forms = "a finite chain-chance cut from 0 to 1 (default 0.7)" },
-    .{ .name = "TF_CUBLAS_BRIDGE", .scope = .qwen, .kind = .path, .forms = "a shared-library path without control characters" },
-    .{ .name = "TF_CUBLAS_PREFILL", .scope = .qwen, .kind = .flag, .forms = "0 or 1" },
-    .{ .name = "TF_CUDA_WARPS8", .scope = .cuda, .kind = .u32, .max = 7, .forms = "a whole kernel mask from 0 to 7" },
-    .{ .name = "TF_DRAFT_BF16", .scope = .qwen, .kind = .u32, .max = 31, .forms = "a whole projection mask from 0 to 31" },
-    .{ .name = "TF_DRAFT_BF16_EMBED_DIR", .scope = .qwen, .kind = .path, .forms = "a checkpoint directory path without control characters" },
-    .{ .name = "TF_DRAFT_BLOCK", .scope = .qwen, .kind = .size, .only = &.{ 8, 16 }, .forms = "8 or 16" },
-    .{ .name = "TF_DRAFT_COPY_MATCH", .scope = .qwen, .kind = .u64, .min = 2, .max = 20, .forms = "a whole copy-match count from 2 to 20" },
-    .{ .name = "TF_DRAFT_DATASET_DIR", .scope = .qwen, .kind = .path, .forms = "an output directory path without control characters" },
-    .{ .name = "TF_DRAFT_FEEDBACK_TRACE", .scope = .qwen, .kind = .flag, .forms = "0 or 1" },
-    .{ .name = "TF_DRAFT_FEEDBACK_WEIGHT", .scope = .qwen, .kind = .real, .max = 1, .forms = "a finite feedback weight from 0 to 1" },
-    .{ .name = "TF_DRAFT_GRAPH", .scope = .qwen, .kind = .flag, .forms = "0 or 1" },
-    .{ .name = "TF_DRAFT_LANES", .scope = .qwen, .kind = .u32, .only = &.{ 1, 2, 4 }, .forms = "1, 2 or 4" },
-    .{ .name = "TF_DRAFT_LANE_BASE_WEIGHT", .scope = .qwen, .kind = .real, .max = 1, .forms = "a finite base-lane weight from 0 to 1" },
-    .{ .name = "TF_DRAFT_LATTICE_TRACE", .scope = .qwen, .kind = .flag, .forms = "0 or 1" },
-    .{ .name = "TF_DRAFT_MTP_DIR", .scope = .qwen, .kind = .path, .forms = "a checkpoint directory path without control characters" },
-    .{ .name = "TF_DRAFT_MTP_GRAFT", .scope = .qwen, .kind = .flag, .forms = "0 or 1" },
-    .{ .name = "TF_DRAFT_MTP_PREFIX", .scope = .qwen, .kind = .flag, .forms = "0 or 1" },
-    .{ .name = "TF_DRAFT_MTP_QUERIES", .scope = .qwen, .kind = .size, .min = 1, .max = 63, .forms = "a whole query count from 1 to 63 (at least the base tree's node count)" },
-    .{ .name = "TF_DRAFT_MTP_WEIGHT", .scope = .qwen, .kind = .real, .max = 1, .forms = "a finite MTP proposal weight from 0 to 1" },
-    .{ .name = "TF_DRAFT_QWEN3_NORM", .scope = .qwen, .kind = .flag, .forms = "0 or 1" },
-    .{ .name = "TF_DRAFT_REFERENCE_DIR", .scope = .qwen, .kind = .path, .forms = "an output directory path without control characters" },
-    .{ .name = "TF_DRAFT_REFINE", .scope = .qwen, .kind = .flag, .forms = "0 or 1" },
-    .{ .name = "TF_DRAFT_WIDE_TRACE", .scope = .qwen, .kind = .flag, .forms = "0 or 1" },
-    .{ .name = "TF_QWEN_AFFINE_PREPARED", .scope = .qwen, .kind = .flag, .forms = "0 or 1" },
-    .{ .name = "TF_QWEN_ATTN_EXACT", .scope = .qwen, .kind = .word, .words = &.{ "0", "1", "2", "3", "4", "5", "6", "7" }, .forms = "one exact-attention selector character from 0 to 7" },
-    .{ .name = "TF_QWEN_EXPAND_KV", .scope = .qwen, .kind = .flag, .forms = "0 or 1" },
-    .{ .name = "TF_QWEN_FAST_PREFILL", .scope = .qwen, .kind = .flag, .forms = "0 or 1" },
-    .{ .name = "TF_QWEN_FP8_ATTENTION", .scope = .qwen, .kind = .word, .words = &.{ "0", "1", "2" }, .forms = "0 (disabled), 1 (single) or 2 (residual)" },
-    .{ .name = "TF_QWEN_FP8_TILE", .scope = .qwen, .kind = .word, .words = &.{ "0", "1", "2", "3" }, .forms = "0 (baseline), 1 (128x64), 2 (128x128) or 3 (64x64)" },
-    .{ .name = "TF_QWEN_GDN_CHUNKED", .scope = .qwen, .kind = .flag, .forms = "0 or 1" },
-    .{ .name = "TF_QWEN_NVFP4_MLP_DIR", .scope = .qwen, .kind = .path, .forms = "an alternate checkpoint directory path without control characters" },
-    .{ .name = "TF_QWEN_NVFP4_PREFILL", .scope = .qwen, .kind = .flag, .forms = "0 or 1" },
-    .{ .name = "TF_QWEN_NVFP4_SCOPE", .scope = .qwen, .kind = .word, .words = &.{ "mlp", "layers" }, .forms = "mlp or layers" },
-    .{ .name = "TF_QWEN_NVFP4_TMA", .scope = .qwen, .kind = .flag, .forms = "0 or 1" },
-    .{ .name = "TF_QWEN_PREFILL_GRAPH", .scope = .qwen, .kind = .flag, .forms = "0 or 1" },
-    .{ .name = "TF_QWEN_PREFILL_PROFILE", .scope = .qwen, .kind = .flag, .forms = "0 or 1" },
-    .{ .name = "TF_QWEN_PREFILL_ROWS", .scope = .qwen, .kind = .size, .min = 64, .multiple = 64, .forms = "a whole row count in multiples of 64 from 64 to the compiled Qwen prompt limit" },
     .{ .name = "TF_DSV41_MHC_DEFER", .scope = .dsv41, .kind = .toggle, .trim = " \t", .no_word = false, .forms = "0, 1, true, false, on, off or yes (any case)" },
     .{ .name = "TF_DSV41_COEF_LATE", .scope = .dsv41, .kind = .toggle, .trim = " \t", .no_word = false, .forms = "0, 1, true, false, on, off or yes (any case)" },
     .{ .name = "TF_DSV41_LOOKUP", .scope = .dsv41, .kind = .toggle, .trim = " \t", .forms = "0, 1, true, false, on, off, yes or no (any case); blank turns lookup drafts off" },
@@ -195,20 +182,24 @@ pub const rules = [_]Rule{
     .{ .name = "TF_DSV41_ROWS_CAP", .scope = .dsv41, .kind = .u32, .only = &.{ 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 24, 32, 48, 64 }, .forms = "1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 24, 32, 48 or 64" },
 };
 
+/// Complete production registry, including scoped extension settings.
+pub const registry = extensions.extend(rules);
+
 pub fn rule(name: []const u8) Rule {
-    for (rules) |r| if (std.mem.eql(u8, name, r.name)) return r;
+    for (registry) |r| if (std.mem.eql(u8, name, r.name)) return r;
     @panic("unregistered strict environment parser");
 }
 
 /// A compile error unless `name` has a row, so a strict read can never reach `rule`'s panic at run time.
 pub fn registered(comptime name: []const u8) void {
-    @setEvalBranchQuota(20 * rules.len * 64);
+    @setEvalBranchQuota(20 * registry.len * 64);
     for (rules) |r| if (std.mem.eql(u8, r.name, name)) return;
     @compileError(name ++ " has no row in platform/environment.zig");
 }
 
 /// Null means unset, empty or whitespace-only (main's readers used their defaults then), never malformed.
 pub fn parse(name: []const u8, raw: ?[]const u8) Error!?u64 {
+    try extensions.checkMultiple(name, raw);
     const r = rule(name);
     if (std.mem.trim(u8, raw orelse return null, " \t\r\n").len == 0) return null;
     const text = std.mem.trim(u8, raw.?, r.trim);
@@ -245,7 +236,6 @@ pub fn parse(name: []const u8, raw: ?[]const u8) Error!?u64 {
         else => std.math.maxInt(u64),
     };
     if (n > max or n < r.min or n > r.max) return error.InvalidEnvironment;
-    if (n % r.multiple != 0) return error.InvalidEnvironment;
     if (r.only.len > 0 and std.mem.indexOfScalar(u64, r.only, n) == null) return error.InvalidEnvironment;
     if ((r.kind == .positive or r.kind == .segments or r.kind == .mib) and n == 0) return error.InvalidEnvironment;
     if (r.kind == .mib and n > std.math.maxInt(usize) / (1 << 20)) return error.InvalidEnvironment;
@@ -316,16 +306,6 @@ pub fn read(comptime T: type, name: [:0]const u8, default: T) Error!T {
     return value(T, name, sys.getenv(name), default);
 }
 
-/// Checked process text for family selectors; unset or blank uses their default, and owned trimming is preserved.
-pub fn given(name: [:0]const u8) Error!?[]const u8 {
-    return givenText(name, sys.getenv(name));
-}
-
-fn givenText(name: [:0]const u8, raw: ?[]const u8) Error!?[]const u8 {
-    _ = (try checked(name, raw)) orelse return null;
-    return std.mem.trim(u8, raw.?, rule(name).trim);
-}
-
 /// A `.range` setting's lo and hi, or null when unset or blank.
 pub fn range(name: [:0]const u8, raw: ?[]const u8) Error!?[2]u32 {
     const n = (try checked(name, raw)) orelse return null;
@@ -340,10 +320,17 @@ pub fn path(name: [:0]const u8, raw: ?[]const u8) Error!?[]const u8 {
 }
 
 /// One scope's rules in table order, without allocating: the first malformed value is logged and refused.
-pub fn checkScope(scope: Scope, environment: anytype) Error!void {
-    for (rules) |r| if (r.scope == scope and !masked(r, environment)) {
-        _ = try checked(r.name, environment.get(r.name));
-    };
+pub fn checkScope(scope: anytype, environment: anytype) Error!void {
+    if (comptime @TypeOf(scope) == @TypeOf(.qwen) and scope == .qwen) {
+        for (extensions.rules) |r| if (extensions.isQwen(r.name)) {
+            _ = try checked(r.name, environment.get(r.name));
+        };
+    } else {
+        const core_scope: Scope = scope;
+        for (registry) |r| if (r.scope == core_scope and !extensions.isQwen(r.name) and !masked(r, environment)) {
+            _ = try checked(r.name, environment.get(r.name));
+        };
+    }
 }
 
 fn masked(r: Rule, environment: anytype) bool {
@@ -357,6 +344,7 @@ pub fn device(flag: ?u32, raw: ?[]const u8) Error!u32 {
 }
 
 pub const Flags = struct {
+    qwen: bool = false,
     cuda: bool = false,
     metal: bool = false,
     xpu: bool = false,
@@ -366,7 +354,6 @@ pub const Flags = struct {
     gemma4: bool = false,
     drama3: bool = false,
     glm: bool = false,
-    qwen: bool = false,
     device: ?u32 = null,
     segments: ?u32 = null,
     carveout: bool = false,
@@ -383,15 +370,15 @@ pub const Flags = struct {
             .gemma4 => f.gemma4,
             .drama3 => f.drama3,
             .glm => f.glm,
-            .qwen => f.qwen,
         };
     }
 };
 
 /// The environment is injectable so the actual startup validator runs against host fixtures without a GPU.
 pub fn refusal(a: std.mem.Allocator, environment: anytype, flags: Flags) !?[]const u8 {
-    for (rules) |r| {
-        if (!flags.includes(r.scope) or masked(r, environment)) continue;
+    for (registry) |r| {
+        const included = if (extensions.isQwen(r.name)) flags.qwen else flags.includes(r.scope);
+        if (!included or masked(r, environment)) continue;
         if (std.mem.eql(u8, r.name, "TF_CUDA_DEVICE") and flags.device != null) continue;
         if (std.mem.eql(u8, r.name, "TF_CUDA_SEGMENTS") and flags.segments != null) continue;
         if (std.mem.eql(u8, r.name, "TF_CUDA_CARVEOUT") and flags.carveout) continue;
@@ -412,15 +399,4 @@ pub const Process = struct {
 
 test {
     _ = @import("environment_test.zig");
-}
-
-test "environment: given text checks selectors, preserves paths and treats blank as unset" {
-    const t = std.testing;
-    for ([_]?[]const u8{ null, "", " \t\r\n" }) |raw|
-        try t.expectEqual(@as(?[]const u8, null), try givenText("TF_QWEN_NVFP4_SCOPE", raw));
-    try t.expectEqualStrings("layers", (try givenText("TF_QWEN_NVFP4_SCOPE", "layers")).?);
-    try t.expectEqualStrings(" path with spaces ", (try givenText("TF_CUBLAS_BRIDGE", " path with spaces ")).?);
-    try t.expectEqualStrings("native", (try givenText("TF_DSV41_IMAGES", " native ")).?);
-    try t.expectError(error.InvalidEnvironment, givenText("TF_QWEN_NVFP4_SCOPE", " Layers "));
-    try t.expectError(error.InvalidEnvironment, givenText("TF_CUBLAS_BRIDGE", "bad\npath"));
 }

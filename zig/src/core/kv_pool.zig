@@ -5,6 +5,8 @@ pub const groups = @import("kv_groups.zig");
 
 test {
     _ = @import("kv_groups_test.zig");
+    _ = @import("kv_pool_engine_run_test.zig");
+    _ = @import("kv_pool_plan_cap_test.zig");
 }
 
 /// A family's stream memory: a fixed part at any length, paged caches a token, and a kept snapshot's slot.
@@ -19,12 +21,12 @@ pub const Layout = struct {
     snap_bytes: u64,
     /// Bytes a running stream takes from the pages beside its keys and values, as one run of whole pages (0: none).
     run_bytes: u64 = 0,
+    /// The engine's own state also occupies a pooled run, rather than an already allocated state buffer.
+    engine_run: bool = false,
     /// Layers `token_bytes` spans, so a row is token_bytes / full_layers in each (0: not named, one row a token).
     full_layers: u32 = 0,
     /// A sliding window's rows outside the pool, by bytes a row a layer (null: none, or not named).
     window: ?groups.Group = null,
-    /// The engine's own state also occupies a pooled run, rather than an already allocated state buffer.
-    engine_run: bool = false,
 
     /// A layout whose full group is `full`, sized by its bytes a row over its layers.
     pub fn ofRows(full: groups.Group, page_tokens: u32, fixed_bytes: u64, snap_bytes: u64) Layout {
@@ -60,6 +62,11 @@ pub const Layout = struct {
         return @intCast(groups.state(l.run_bytes, l.pageBytes()).pages);
     }
 };
+
+/// Bind the shared admission result to the windows, runs and backing memory it actually owns.
+pub fn planOwned(l: Layout, b: Budget) error{ NoStream, TooMany }!Plan {
+    return @import("kv_pool_plan_cap.zig").bind(l, b, try plan(l, b));
+}
 
 /// A family whose unpaged streams allocate a request's rows at open, never a whole window (the KV admission ledger).
 pub const PerRequest = struct {
@@ -137,8 +144,7 @@ pub fn plan(l: Layout, b: Budget) error{ NoStream, TooMany }!Plan {
     const kept = if (b.slots_only) cache - split(cache, l.snap_bytes, b.snaps).snaps * l.snap_bytes else cache / 1_000_000 * b.kept_ppm + cache % 1_000_000 * b.kept_ppm / 1_000_000; // the cache's share as pages
     const c = split(cache - kept, l.snap_bytes, b.snaps);
     left -= c.snaps * l.snap_bytes + c.copied;
-    const runs = fit + @intFromBool(b.engine_paged and l.engine_run);
-    const most: u64 = if (b.window > 0) (fit + @intFromBool(b.engine_paged)) * l.pages(b.window) + runs * l.runPages() + kept / l.pageBytes() else std.math.maxInt(u64);
+    const most: u64 = if (b.window > 0) (fit + @intFromBool(b.engine_paged)) * l.pages(b.window) + fit * l.runPages() + kept / l.pageBytes() else std.math.maxInt(u64);
     return .{ .lanes = @intCast(1 + fit), .snaps = c.snaps, .copied = c.copied, .pages = @intCast(@min((left + own) / l.pageBytes(), most)), .kept = kept, .taken = taken };
 }
 
@@ -579,5 +585,4 @@ test {
     _ = @import("kv_pool_walk_test.zig");
     _ = @import("kv_pool_notify_test.zig");
     _ = @import("kv_reclaim_test.zig");
-    _ = @import("kv_pool_engine_run_test.zig");
 }

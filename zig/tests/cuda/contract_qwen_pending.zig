@@ -137,6 +137,7 @@ fn swapRows(pend: []u8, i: usize, j: usize) void {
 
 /// One launch set's bytes: each layer's rows out, and each stream's state, window log and pre-round state.
 const Out = struct { y: [nl][]const u8, state: [2][]const u8, log: [2][]const u8, before: [2][]const u8 };
+const Backing = struct { state: u64, log: u64, before: u64 };
 
 /// The scan on every layer after tf_q35k_apply (`apply` given), or with the rows pending (`sign` > 0: written back).
 fn launch(gpu: check.Gpu, s: cuda.Stream, apply: ?cuda.Function, scan: cuda.Function, r: usize, f: Fixture, sign: c_int, pend0: []const u8, drop: usize, a: std.mem.Allocator) !Out {
@@ -148,12 +149,13 @@ fn launchRoot(gpu: check.Gpu, s: cuda.Stream, apply: ?cuda.Function, scan: cuda.
     defer rig.deinit();
     const total = 2 * f.rows;
     var segs: [2]Seg = undefined;
+    var backing: [2]Backing = undefined;
     var src: [2]u64 = .{ 0, 0 };
     for (0..2, &segs) |st, *sg| {
         const state = try rig.scratch(nl * rec * 4);
         try (cuda.DeviceBuffer{ .d = gpu.d, .ptr = state, .len = nl * rec * 4 }).upload(0, std.mem.sliceAsBytes(f.state[st]));
-        sg.* = .{ .rec = state, .log = try rig.scratch(f.rows * nl * log_row), .row0 = @intCast(st * f.rows), .rows = @intCast(f.rows) };
-        if (f.rows == 1 and !omit_before) sg.before = try rig.scratch(nl * rec * 4);
+        backing[st] = .{ .state = state, .log = try rig.scratch(f.rows * nl * log_row), .before = if (f.rows == 1 and !omit_before) try rig.scratch(nl * rec * 4) else 0 };
+        sg.* = .{ .rec = backing[st].state, .log = backing[st].log, .before = backing[st].before, .row0 = @intCast(st * f.rows), .rows = @intCast(f.rows) };
         const n = f.n[st] - (if (st == 0) drop else 0);
         if (apply != null) {
             if (f.n[st] > 0) src[st] = try rig.input(f.src[st]);
@@ -189,9 +191,9 @@ fn launchRoot(gpu: check.Gpu, s: cuda.Stream, apply: ?cuda.Function, scan: cuda.
     var out: Out = undefined;
     for (0..nl) |l| out.y[l] = try a.dupe(u8, try rig.bytes(y[l], total * nv * dk * 2));
     for (0..2) |st| {
-        out.state[st] = try a.dupe(u8, try rig.bytes(segs[st].rec, nl * rec * 4));
-        out.log[st] = try a.dupe(u8, try rig.bytes(segs[st].log, f.rows * nl * log_row));
-        out.before[st] = if (segs[st].before != 0) try a.dupe(u8, try rig.bytes(segs[st].before, nl * rec * 4)) else &.{};
+        out.state[st] = try a.dupe(u8, try rig.bytes(backing[st].state, nl * rec * 4));
+        out.log[st] = try a.dupe(u8, try rig.bytes(backing[st].log, f.rows * nl * log_row));
+        out.before[st] = if (backing[st].before != 0) try a.dupe(u8, try rig.bytes(backing[st].before, nl * rec * 4)) else &.{};
     }
     try check.expect(try rig.intact() and !rig.overlap() and std.mem.eql(u8, seen, try rig.inputBytes()), "qwen35 pending: a launch changed an input or a guard", .{});
     return out;

@@ -73,6 +73,12 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("usage: tf-qwen-prefill-fidelity MODEL PROMPTS.json OUTPUT.json [BASELINE.json]\n", .{});
         return error.Usage;
     }
+    const modes: data.ExecutionModes = .{
+        .graph = try @import("sys").environment.read(bool, "TF_QWEN_PREFILL_GRAPH", false),
+        .chunked_gdn = try @import("sys").environment.read(bool, "TF_QWEN_GDN_CHUNKED", false),
+        .profiling = try @import("sys").environment.read(bool, "TF_QWEN_PREFILL_PROFILE", false),
+    };
+    try modes.validate();
     const source = try std.Io.Dir.cwd().readFileAlloc(init.io, args[2], a, .limited(16 << 20));
     const fixture = try data.parse(a, source);
     if (fixture.chunk_rows > qwen.engine.max_rows) return error.FidelityChunkExceedsBuild;

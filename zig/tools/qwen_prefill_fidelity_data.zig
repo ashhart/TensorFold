@@ -1,6 +1,18 @@
 //! Raw-token fixtures and exact BF16 logit ranking for the developer-only Qwen fidelity probe.
 const std = @import("std");
 
+pub const ExecutionModes = struct {
+    graph: bool = false,
+    chunked_gdn: bool = false,
+    profiling: bool = false,
+
+    pub fn validate(m: ExecutionModes) !void {
+        if (m.graph) return error.FidelityPrefillGraphUnavailable;
+        if (m.chunked_gdn) return error.FidelityChunkedGdnUnavailable;
+        if (m.profiling) return error.FidelityWholeEngineProfilingUnavailable;
+    }
+};
+
 pub const Case = struct { id: []const u8, tokens: []const u32 };
 pub const Fixture = struct { cases: []const Case, steps: usize = 16, chunk_rows: usize = 4096, kv8: bool = true };
 pub const Top = struct { token: u32, logit: f32, bits: u16 };
@@ -177,4 +189,12 @@ test "fidelity data parses raw IDs and enforces fixed history length and prompt 
     const raw = try parse(a, "[1,2,3]");
     try std.testing.expectEqualSlices(u32, &.{ 1, 2, 3 }, raw.cases[0].tokens);
     try std.testing.expect(!std.mem.eql(u8, try digest(a, &.{1}, &.{2}), try digest(a, &.{1}, &.{3})));
+}
+
+test "fidelity modes refuse unexecuted whole-engine hooks before a report can attest them" {
+    try (ExecutionModes{}).validate();
+    try std.testing.expectError(error.FidelityPrefillGraphUnavailable, (ExecutionModes{ .graph = true }).validate());
+    try std.testing.expectError(error.FidelityChunkedGdnUnavailable, (ExecutionModes{ .chunked_gdn = true }).validate());
+    try std.testing.expectError(error.FidelityWholeEngineProfilingUnavailable, (ExecutionModes{ .profiling = true }).validate());
+    try std.testing.expectError(error.FidelityPrefillGraphUnavailable, (ExecutionModes{ .graph = true, .chunked_gdn = true, .profiling = true }).validate());
 }

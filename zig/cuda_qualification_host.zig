@@ -125,6 +125,19 @@ test "CUDA qualification: syntax remains strict before profile admission" {
     try check(arena.allocator(), "qwen3_5", .{ .entries = &active, .changed = .{ .name = "TF_QWEN_FAST_PREFILL", .value = "typo" } }, "0 or 1");
 }
 
+test "CUDA qualification: disabled prefill profiling refuses by name before checkpoint or device work" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const upstream = [_]Pair{.{ .name = "TF_QWEN_PREFILL_ROWS", .value = "4096" }};
+    for ([_][]const u8{ "qwen3_5", "qwen3_5_moe" }) |model| {
+        try check(arena.allocator(), model, .{ .entries = &upstream, .changed = .{ .name = "TF_QWEN_PREFILL_PROFILE", .value = "1" } }, "TF_QWEN_PREFILL_PROFILE");
+        for ([_]?[]const u8{ null, "", " \t", "0" }) |value|
+            try check(arena.allocator(), model, .{ .entries = &upstream, .changed = .{ .name = "TF_QWEN_PREFILL_PROFILE", .value = value } }, null);
+        try check(arena.allocator(), model, .{ .entries = &upstream, .changed = .{ .name = "TF_QWEN_PREFILL_PROFILE", .value = "typo" } }, "0 or 1");
+    }
+    try check(arena.allocator(), "nemotron_h", .{ .changed = .{ .name = "TF_QWEN_PREFILL_PROFILE", .value = "1" } }, null);
+}
+
 test "CUDA qualification: the recorded dense profile is not an unqualified MoE opt-in" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();

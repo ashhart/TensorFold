@@ -257,4 +257,6 @@ test {
     _ = @import("src/families/qwen3_5/cuda_bf16_admission_test.zig");
     _ = @import("src/families/qwen3_5/cuda_bf16_bytes.zig");
     _ = @import("src/families/qwen3_5/cuda_decide.zig");
+    _ = @import("src/families/qwen3_5/cuda_load_plan_test.zig");
+    _ = @import("src/families/qwen3_5/cuda_scratch.zig");
 }
