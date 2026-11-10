@@ -67,10 +67,43 @@ pub fn deliverPending(h: *LaneHost) void {
     }
 }
 
-/// A round the backend failed: the failure hook hears the error and every admitted stream gets its name.
+/// A round the backend failed: the failure hook hears the error and the round's own streams
+/// get its name. Jobs outside the failed round keep their place: a queued or not-yet-started
+/// job fails per-job at its own next step if the backend is unhealthy, and a stream that
+/// already finished delivers its completed reply instead of a 500.
 pub fn failRound(h: *LaneHost, err: anyerror) void {
     failed(h, err);
-    failAll(h, @errorName(err));
+    std.log.warn("lane host: a round failed ({s}): the round's streams fail", .{@errorName(err)});
+    h.core.sweep() catch {};
+    h.lock();
+    var jobs = h.admitted;
+    h.admitted = .empty;
+    h.filling.clearRetainingCapacity();
+    h.unlock();
+    defer jobs.deinit(h.gpa);
+    for (jobs.items) |job| {
+        var in_round = false;
+        if (job.started) for (h.core.live.items) |x| {
+            if (x == &job.stream) {
+                in_round = true;
+                break;
+            }
+        };
+        if (!in_round) {
+            h.lock();
+            const kept = h.admitted.append(h.gpa, job);
+            h.unlock();
+            if (kept) |_| continue else |_| {
+                // the list could not take the job back; fail it rather than leak it
+                if (job.started and !job.stream.finished) h.core.discard(&job.stream);
+                h.finish(job, .failed, @errorName(err));
+                continue;
+            }
+        }
+        // a job admitted this round has no stream yet when the planner's admitted callback fails
+        if (job.started and !job.stream.finished) h.core.discard(&job.stream);
+        h.finish(job, .failed, @errorName(err));
+    }
 }
 
 /// A failed round ends every job it admitted, with the backend's error; the list is taken whole, not copied.
