@@ -66,16 +66,17 @@ const contract = core.contract;
 const g = contract.gates;
 const kk = cuda.kernels;
 
-const images = @import("contract_images.zig");
+const images = struct {
+    pub const controls align(16) = @embedFile("fatbin_contract_controls").*;
+    pub const h3 align(16) = @embedFile("fatbin_h3").*;
+};
 
-/// Gates 1-4 on every registered CUDA kernel and each control at its own gate, then gate 5; `only`: contract_after.zig.
 pub fn run(gpu: check.Gpu, only: []const []const u8) !void {
     var t0: i96 = undefined;
     const t = try registered(gpu, only, &t0);
     try @import("contract_finish.zig").run(gpu, only, t, t0);
 }
 
-// The registered owners and modules end here, before the standalone suites allocate their working sets.
 fn registered(gpu: check.Gpu, only: []const []const u8, t0: *i96) !g.Tally {
     const a = gpu.gpa;
     if (!kk.available) return error.BuiltWithoutKernels;
@@ -594,7 +595,6 @@ fn registered(gpu: check.Gpu, only: []const []const u8, t0: *i96) !g.Tally {
     return t;
 }
 
-/// The named embedded image and gate 5: in the contract's own file, so the gates' registrations stay short.
 pub const image = @import("contract_limits.zig").image;
 pub const live = @import("contract_limits.zig").live;
 pub const fatbins = @import("contract_limits.zig").fatbins;
