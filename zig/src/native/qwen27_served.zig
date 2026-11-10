@@ -445,7 +445,7 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     if (slot_state.rewindInit(h.back, rewind_room, if (o.cache_gib) |g| gibBytes(g) else cache_fit.defaultBudget(rewind_room))) |buf| if (h.resident) |*r| r.addNow(&.{buf});
     try enableCache(h, o.cache_gib, o.cache_over_cap, a, why);
     errdefer if (h.cache) |*store| store.deinit();
-    if (o.learn) |l| try disk.attach(h, io, a, l);
+    if (o.learn) |l| try disk.attach(h, io, a, l, if (o.glp) |*g| g else null);
     errdefer if (h.cache) |*store| if (store.disk) |r| r.deinit();
     // a wide prompt pass commits its buffers at once: the probe keeps the sets in use while it runs
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick, .probe = mtl.keepalive.Target.busy };

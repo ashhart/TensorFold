@@ -134,7 +134,10 @@ pub fn read(a: std.mem.Allocator, bytes: []const u8, why: *Why) Error!Vector {
     }
 
     if (glp_keys > 0) {
-        const rank = file.num("glp.rank") orelse 1;
+        const rank = file.num("glp.rank") orelse value: {
+            if (file.find("glp.rank") != null) return refuse(why, "glp.rank is not an integer", .{});
+            break :value 1;
+        };
         if (rank != 1) return refuse(why, "glp.rank {d}; this reader implements rank 1", .{rank});
         const site = file.str("glp.hook_point") orelse return refuse(why, "the file names no glp.hook_point", .{});
         if (!std.mem.eql(u8, site, residual_site)) return refuse(why, "the file's hook point is {s}; this reader applies at {s}", .{ site, residual_site });
@@ -208,7 +211,7 @@ pub fn read(a: std.mem.Allocator, bytes: []const u8, why: *Why) Error!Vector {
         .alpha = if (file.find("glp.alpha_default")) |v| switch (v) {
             .f32v => |x| x,
             .f64v => |x| @floatCast(x),
-            else => 1.0,
+            else => return refuse(why, "glp.alpha_default is not a floating-point strength", .{}),
         } else 1.0,
         .hook_point = hook,
         .derived_at = derived,

@@ -46,7 +46,7 @@ pub fn report(g: api.glp.Glp) void {
         baseOf(v, base[0..]),
         file_sha[0..],
     });
-    if (v.transferred) std.log.warn("Qwen3.8-27B: the control vector was derived at {s}, not at {s}: it is applied at the residual stream", .{ v.derived_at, v.hook_point });
+    if (v.transferred) std.log.warn("Qwen3.8-27B: the control vector was derived at {f}, not at {f}: it is applied at the residual stream", .{ std.zig.fmtString(v.derived_at), std.zig.fmtString(v.hook_point) });
 }
 
 /// The repo id a cached checkpoint came from ("Org/Name"); empty when the folder is not a cache snapshot.

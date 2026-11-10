@@ -51,7 +51,8 @@ pub fn withAlpha(g: ?Vec, alpha: f64) Vec {
 /// A finite strength above 0, as --glp-alpha gives it; null for anything else.
 pub fn strength(v: []const u8) ?f64 {
     const x = @import("fields.zig").pyFloat(v) orelse return null;
-    if (!std.math.isFinite(x) or x <= 0) return null;
+    const applied: f32 = @floatCast(x);
+    if (!std.math.isFinite(applied) or applied <= 0) return null;
     return x;
 }
 

@@ -40,11 +40,10 @@ pub const Steer = struct {
 
     /// A call whose direction is the caller's width: a width that does not match the rows is refused.
     pub fn withDirection(a: std.mem.Allocator, p: Params, dir: []const f32) !Steer {
-        var s = try init(a, p);
-        errdefer s.deinit();
-        a.free(s.dir);
-        s.dir = try a.dupe(f32, dir);
-        return s;
+        if (p.hidden == 0 or p.rows == 0) return error.BadDirectionWidth;
+        const x = try a.alloc(u16, p.rows * p.hidden);
+        errdefer a.free(x);
+        return .{ .a = a, .p = p, .x = x, .dir = try a.dupe(f32, dir) };
     }
 
     pub fn deinit(s: Steer) void {

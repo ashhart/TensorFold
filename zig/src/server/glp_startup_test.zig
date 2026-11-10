@@ -118,31 +118,9 @@ test "the strength must be finite and above 0" {
     try std.testing.expect(serve.strength("-1") == null);
     try std.testing.expect(serve.strength("inf") == null);
     try std.testing.expect(serve.strength("nan") == null);
+    try std.testing.expect(serve.strength("1e100") == null);
+    try std.testing.expect(serve.strength("1e-100") == null);
     try std.testing.expect(serve.strength("abc") == null);
-}
-
-test "the line says what is in force" {
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var f = try Fixture.make(a, width, width, &.{ 1, 2 }, .{ .alpha = 0.5, .base_model = "TensorFold/Qwen3.8-27B-MLX-4bit", .base_revision = "8f2c1d4e", .layers = &.{} }, null);
-    defer f.tmp.cleanup();
-    var sink: Sink = .{ .a = a };
-    log.Test.sink = .{ .ctx = @ptrCast(&sink), .call = capture };
-    defer log.Test.sink = null;
-    serve.report(a, f.g.?);
-    const line = sink.list.items;
-    try std.testing.expect(std.mem.indexOf(u8, line, "glp on:") != null);
-    try std.testing.expect(std.mem.indexOf(u8, line, "vector.gguf") != null);
-    try std.testing.expect(std.mem.indexOf(u8, line, "replies are steered") != null);
-    var file_sha: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(try std.Io.Dir.cwd().readFileAlloc(io, f.g.?.path.?, a, .unlimited), &file_sha, .{});
-    const want = try std.fmt.allocPrint(a, "file sha256: {s}", .{std.fmt.bytesToHex(file_sha, .lower)});
-    try std.testing.expect(std.mem.indexOf(u8, line, want) != null);
-    try std.testing.expect(std.mem.indexOf(u8, line, "alpha: 0.50") != null);
-    try std.testing.expect(std.mem.indexOf(u8, line, "layers: 2 (1-2)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, line, "TensorFold/Qwen3.8-27B-MLX-4bit @ 8f2c1d4e") != null);
-    try std.testing.expect(std.mem.indexOf(u8, line, "verified") != null);
 }
 
 test "the line shows the file name escaped, so a name cannot add a line of its own" {

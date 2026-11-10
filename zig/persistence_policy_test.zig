@@ -23,6 +23,15 @@ test "persistence identity: Qwen Metal loaded ANE columns miss with the same pro
     try fixture.misses(before, matching, &.{ other_share, qwen.withPolicy(7, &h) });
 }
 
+test "persistence identity: Qwen Metal control vector and strength miss with the same probe" {
+    var file_sha: [32]u8 = @splat(0x13);
+    const before = qwen.withSteering(7, &file_sha, 0.75);
+    const matching = qwen.withSteering(7, &file_sha, 0.75);
+    const stronger = qwen.withSteering(7, &file_sha, 1.5);
+    file_sha[31] ^= 1;
+    try fixture.misses(before, matching, &.{ qwen.withSteering(7, &file_sha, 0.75), stronger, 7 });
+}
+
 test "persistence identity: GLM Metal resolved policy misses with the same probe" {
     const Config = @import("src/families/glm/config.zig").Config;
     const Prompt = struct { rows: u32 = 4096, sparse_nax: bool = true };

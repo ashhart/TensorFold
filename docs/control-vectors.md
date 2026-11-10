@@ -3,8 +3,7 @@
 A control vector steers a model's residual stream at inference time. It is a
 direction per layer: at the output of a block, the direction, scaled by the
 strength, is added to the residual stream as a bias. Nothing is written to the
-checkpoint, and a server started without `--glp` serves the model exactly as it
-was.
+checkpoint. Steering is disabled unless the server starts with `--glp`.
 
 TensorFold reads these vectors on Metal for Qwen3.8-27B. The container, the
 kernel and the serve surface are all native Zig. The engine ships the mechanism
@@ -18,18 +17,11 @@ tensorfold serve TensorFold/Qwen3.8-27B-MLX-4bit --glp vector.gguf --glp-alpha 1
 ```
 
 `--glp` names the file and `--glp-alpha` the strength. Without `--glp-alpha`
-the file's own `glp.alpha_default` applies. The strength must be above 0.
-Without `--glp` nothing changes: the server runs as it does without this
-feature.
+the file's own `glp.alpha_default` applies. The applied fp32 strength must be
+finite and above 0.
 
 At startup the server names the file it loaded, the SHA-256 of that file's
-exact bytes, and says that replies are steered:
-
-```
-[tensorfold] glp on: replies are steered by the control vector in "vector.gguf"
-  (file sha256: <64 hex digits>; alpha: 1.00; layers: 49 (10-58);
-  base: TensorFold/Qwen3.8-27B-MLX-4bit @ 22d8d53; tensor digest: 50a42548b373 (verified))
-```
+exact bytes, and says that replies are steered.
 
 The file name is written escaped, so a name with a newline or a quote cannot
 add a line of its own. The file hash is taken over the bytes the server read
@@ -37,6 +29,10 @@ once, before the model loads; it is the hash to compare against the file you
 meant to load. The tensor digest is the separate SHA-256 over the direction
 tensors that a file may claim in `glp.content_sha256`. The engine repeats that
 replies are steered, with the file hash, when the vector is in force.
+
+Saved conversation states also include that file hash and the applied strength
+in their identity. Changing either starts those states cold; without `--glp`
+the existing policy key is unchanged.
 
 A file the server cannot apply is refused and the server does not start.
 
@@ -74,8 +70,9 @@ The reader fails closed rather than guessing.
 | --- | --- |
 | `glp.mode` (or `dspark.mode`) is anything but `add` | Only add vectors are applied. A file that names `project` is refused by name, not coerced to `add`. |
 | `glp.hook_point` is not `residual_stream_post_layer` | The vector was derived at another site. |
-| `glp.rank` is not 1 | The reader implements rank 1. |
+| `glp.rank` is not the integer 1 | The reader implements rank 1. |
 | `glp.spec_version` is not 1 | The reader implements version 1. |
+| `glp.alpha_default` is not a floating-point value | A malformed strength is not silently replaced with 1. |
 | A direction holds a NaN or an infinity | The direction is added as it stands, so every value has to be finite. |
 | The digest does not match the bytes | The file says one thing and holds another. |
 | One layer is named twice | `direction.5` and `direction.05` both parse as layer 5; a file has one direction per layer. |
