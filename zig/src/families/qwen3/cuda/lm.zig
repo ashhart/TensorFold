@@ -144,7 +144,11 @@ pub const Lm = struct {
     pub fn init(gpa: std.mem.Allocator, d: *const Driver, s: cuda.Stream, spec: config.Spec) !Lm {
         const grp = if (spec.kv_heads == 0) 0 else spec.heads / spec.kv_heads;
         if (spec.head_dim != 128 or spec.kv_heads == 0 or spec.heads % spec.kv_heads != 0 or grp > 16) {
-            std.log.err("qwen3: {d} heads of {d} on {d} kv heads at head_dim {d}: the CUDA attention takes head_dim 128 and to 16 q heads a kv head", .{ spec.heads, spec.hidden, spec.kv_heads, spec.head_dim });
+            std.log.err("qwen3: {d} heads on {d} kv heads at head_dim {d}: the CUDA attention takes head_dim 128 and to 16 q heads a kv head", .{ spec.heads, spec.kv_heads, spec.head_dim });
+            return error.UnsupportedGeometry;
+        }
+        if (spec.hidden % 64 != 0 or spec.inter % 64 != 0) {
+            std.log.err("qwen3: hidden {d} and intermediate {d}: the CUDA row kernels take multiples of 64", .{ spec.hidden, spec.inter });
             return error.UnsupportedGeometry;
         }
         var lm: Lm = .{ .d = d, .s = s, .g = undefined, .nm = undefined, .qk = undefined, .act = undefined, .emb = undefined, .attn = undefined };

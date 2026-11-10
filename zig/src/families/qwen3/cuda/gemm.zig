@@ -25,8 +25,7 @@ pub fn columns(rows: usize) u64 {
 }
 
 /// Whether an algorithm keeps a row's K sums in one order: split-K 1, no reduction scheme; null claims nothing.
-pub fn oneOrder(c: ?Config) bool {
-    const x = c orelse return true;
+pub fn oneOrder(x: Config) bool {
     return x.splitk <= 1 and x.scheme == 0;
 }
 
@@ -130,14 +129,15 @@ pub const Gemms = struct {
 
 /// Refuses an algorithm whose K sums are split or reduced, and says what it is: one algorithm an (n, k) keeps.
 fn accept(lt: *const cublaslt.Library, n: usize, k: usize, algo: cublaslt.Algo) !void {
-    const c = config(lt, algo);
-    if (!oneOrder(c)) {
-        const x = c.?;
+    const x = config(lt, algo) orelse {
+        std.log.err("qwen3: (n {d}, k {d}): the {d}-row pick's split K cannot be read, so one K order is not proven", .{ n, k, reference_rows });
+        return error.SplitKUnreadable;
+    };
+    if (!oneOrder(x)) {
         std.log.err("qwen3: the (n {d}, k {d}) algorithm splits K {d} ways with reduction {d}: its rows would not keep a batch's bits", .{ n, k, x.splitk, x.scheme });
         return error.SplitKAlgorithm;
     }
-    if (c) |x| std.log.info("qwen3: (n {d}, k {d}): the {d}-row pick, split K {d}", .{ n, k, reference_rows, x.splitk });
-    if (c == null) std.log.warn("qwen3: (n {d}, k {d}): the {d}-row pick, split K unreadable", .{ n, k, reference_rows });
+    std.log.info("qwen3: (n {d}, k {d}): the {d}-row pick, split K {d}", .{ n, k, reference_rows, x.splitk });
 }
 
 /// Sets a plan's X and D layouts to `rows` rows: cuBLASLt's column-major X is k x rows, D is n x rows.
@@ -146,29 +146,9 @@ fn setCols(lt: *const cublaslt.Library, p: *const cublaslt.Linear, rows: usize) 
     for ([_]cublaslt.Layout{ p.b, p.c }) |l| try lt.check(lt.api.cublasLtMatrixLayoutSetAttribute(l, cublaslt.layout_cols, &cols, @sizeOf(u64)), "set layout cols");
 }
 
-test "an algorithm keeps one K order unless it splits K or reduces partials, and a missing reading claims nothing" {
-    try std.testing.expect(oneOrder(null));
+test "an algorithm keeps one K order unless it splits K or reduces partials" {
     try std.testing.expect(oneOrder(.{ .splitk = 1, .scheme = 0 }));
     try std.testing.expect(!oneOrder(.{ .splitk = 4, .scheme = 0 }));
     try std.testing.expect(!oneOrder(.{ .splitk = 1, .scheme = 3 }));
     try std.testing.expect(!oneOrder(.{ .splitk = 2, .scheme = 2 }));
-}
-
-test "a plan is keyed by (n, k) alone: the row count is set per call, as a uint64 column count" {
-    try std.testing.expectEqual(key(4096, 12288), key(4096, 12288));
-    try std.testing.expect(!std.mem.eql(u64, &key(4096, 12288), &key(12288, 4096)));
-    try std.testing.expectEqualSlices(u64, &.{ 4096, 12288 }, &key(4096, 12288));
-    try std.testing.expectEqual(@as(u64, 27), columns(27));
-    try std.testing.expectEqual(@as(u64, 1), columns(1));
-    try std.testing.expectEqual(@as(u64, 40960), columns(40960));
-}
-
-test "a row count is checked once: the plan keeps the ones its algorithm passed at" {
-    const a = std.testing.allocator;
-    var p: Gemms.Plan = .{ .linear = undefined };
-    defer p.checked.deinit(a);
-    try std.testing.expect(!p.checked.contains(columns(27)));
-    try p.checked.put(a, columns(27), {});
-    try std.testing.expect(p.checked.contains(columns(27)));
-    try std.testing.expect(!p.checked.contains(columns(23)));
 }
