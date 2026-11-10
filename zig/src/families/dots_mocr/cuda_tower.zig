@@ -180,7 +180,7 @@ pub const Tower = struct {
         t.gpa.destroy(t);
     }
 
-    /// One image's patches to its tokens' rows [tokens, width] bf16 at `out` on `s`; `taps` sees each stage's rows.
+    /// One image's patches to its tokens' rows [tokens, width] bf16 at `out` on `s`; `taps` sees stages and GEMMs.
     pub fn encode(t: *Tower, s: cuda.Stream, im: *const Image, out: u64, taps: ?Tap) !void {
         const n = try rowsOf(t.c, im);
         t.encodes += 1;
@@ -201,6 +201,7 @@ pub const Tower = struct {
         const k = &t.k;
         const tap: Taps = .{ .tap = taps, .n = n, .width = h };
         try t.gemms.run(s, a.px, t.w.patch, a.r, n, h, weights.patch_k, .bf16);
+        try tap.gemm("patch", 0, a.px, weights.patch_k, a.r, h, n);
         try t.own.patchBias(s, a.r, t.w.patch_bias, a.r, n, h);
         try tap.at("vision-patch-bias", a.r);
         try k.norms.addRmsTail(s, a.r, null, t.w.patch_norm, a.r, a.h, null, n, h, eps, round);
@@ -211,13 +212,17 @@ pub const Tower = struct {
             try k.norms.addRmsTail(s, a.h, if (i == 0) null else a.r, b.norm1, a.h, a.xn, null, n, h, eps, round);
             if (i > 0) try tap.block(i - 1, a.h);
             try t.gemms.run(s, a.xn, b.qkv, a.qkv, n, 3 * h, h, .bf16);
+            try tap.gemm("qkv", i, a.xn, h, a.qkv, 3 * h, n);
             try t.own.visionRope(s, a.qkv, a.hw, a.inv, n);
             try t.att.full(s, a.qkv, a.att, n, heads, h / heads, scale);
             try t.gemms.run(s, a.att, b.proj, a.r, n, h, h, .bf16);
+            try tap.gemm("proj", i, a.att, h, a.r, h, n);
             try k.norms.addRmsTail(s, a.h, a.r, b.norm2, a.h, a.xn, null, n, h, eps, round);
             try t.gemms.run(s, a.xn, b.fc13, a.gu, n, 2 * m, h, .bf16);
+            try tap.gemm("fc13", i, a.xn, h, a.gu, 2 * m, n);
             try k.siluMul(s, a.gu, a.qkv, n, m);
             try t.gemms.run(s, a.qkv, b.fc2, a.r, n, h, m, .bf16);
+            try tap.gemm("fc2", i, a.qkv, m, a.r, h, n);
         }
         try k.norms.addRmsTail(s, a.h, a.r, t.w.post_norm, a.h, a.xn, null, n, h, eps, round);
         try tap.block(t.w.blocks.len - 1, a.h);
@@ -226,8 +231,10 @@ pub const Tower = struct {
         try k.vit.layerNorm(s, a.xn, t.w.ln_w, t.w.ln_b, a.h, n, h, 1e-6);
         const rows = n / 4;
         const wide: usize = t.c.merged();
+        if (taps) |tp| try tp.at(tp.ctx, "mlp0.0.x", a.h, rows, wide); // GELU is fused: a check runs the linear alone
         try vit.linearAct(&t.gemms, &k.vit, s, a.gu, a.h, t.w.mlp0, t.w.mlp0_b, a.att, rows, wide, wide, null, a.r, .gelu);
         try vit.linear(&t.gemms, &k.vit, s, a.gu, a.r, t.w.mlp2, t.w.mlp2_b, out, rows, t.width, wide);
+        try tap.gemm("mlp2", 0, a.r, wide, out, t.width, rows);
         if (taps) |tp| try tp.at(tp.ctx, "vision-merged", out, rows, t.width);
     }
 
@@ -279,6 +286,14 @@ const Taps = struct {
         if (x.tap == null) return;
         var name: [32]u8 = undefined;
         try x.at(try std.fmt.bufPrint(&name, "vision-block{d}", .{i}), rows);
+    }
+
+    /// A projection's input [n, k] and output [n, w] as `<class>.<layer>.x` and `.y`, for a check against FP64.
+    fn gemm(x: Taps, class: []const u8, i: usize, in: u64, k: usize, y: u64, w: usize, n: usize) !void {
+        const tp = x.tap orelse return;
+        var name: [32]u8 = undefined;
+        try tp.at(tp.ctx, try std.fmt.bufPrint(&name, "{s}.{d}.x", .{ class, i }), in, n, k);
+        try tp.at(tp.ctx, try std.fmt.bufPrint(&name, "{s}.{d}.y", .{ class, i }), y, n, w);
     }
 };
 
