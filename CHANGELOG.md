@@ -5,6 +5,9 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 ## Unreleased
 
 
+- Docs: the GLM CUDA recipe covers a four-GB10 switchless ring (gather starts there, the NCCL settings it needs, and the opt-in relay with its measured effect), and `docs/api.md` gives `presence_penalty`'s measured cost to drafting, about 4-10% of tokens a round (#2742, closes #1971 and #2645). Thanks to @Bizuayeu, @BobClawblaw and @jschmied for the measurements.
+
+
 - Fabric: when spawning a tensor-parallel rank fails, `host.runWith` aborts and joins the ranks it already started instead of leaving them waiting on a dead frame, with a test that fails without it (#2700). Thanks to @Defilan.
 
 
