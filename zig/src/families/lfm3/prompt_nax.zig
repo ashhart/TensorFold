@@ -5,6 +5,9 @@ const ks = @import("kernel_sources");
 const frags = @import("../../core/frags.zig");
 const row = @import("../../core/row_projection.zig");
 
+/// The formats this route builds, and the launch they share.
+pub const formats = @import("nax_formats.zig");
+
 const Args = extern struct { k: i32, n: i32, m: i32, ld: i32 = 0 };
 
 /// The shared tile kernels for one weight format, compiled as the engine does.
@@ -20,7 +23,7 @@ pub const Candidate = struct {
 
     pub fn init(device: mtl.Device, bits: u8, group: u16) !?Candidate {
         if (!device.tensorUnits()) return null;
-        if (std.mem.indexOfScalar(u8, &.{ 4, 6, 8 }, bits) == null or (group != 32 and group != 64)) return error.UnsupportedLfmNaxFormat;
+        if (!formats.supported(bits, group)) return error.UnsupportedLfmNaxFormat;
         var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         defer arena.deinit();
         const text = try source(device, arena.allocator(), bits, group);
@@ -28,7 +31,7 @@ pub const Candidate = struct {
         defer lib.deinit();
         const pipe = try mtl.Pipeline.init(device, lib, "tf_qmmw_t_nax_win", false);
         errdefer pipe.deinit();
-        if (pipe.simdWidth() != 32 or pipe.maxThreads() < 128) return error.Reflection;
+        if (pipe.simdWidth() != 32 or pipe.maxThreads() < formats.threads) return error.Reflection;
         return .{ .pipe = pipe, .bits = bits, .group = group };
     }
 
@@ -51,6 +54,6 @@ pub const Candidate = struct {
         e.setBuffer(x, x_off, 3);
         e.setValue(Args{ .k = @intCast(w.k), .n = @intCast(w.n), .m = @intCast(rows) }, 4);
         e.setBuffer(y, y_off, 5);
-        e.dispatchGroups(.of(w.n / 64, (rows + 63) / 64, 1), .of(128, 1, 1));
+        e.dispatchGroups(.of(w.n / 64, (rows + 63) / 64, 1), .of(formats.threads, 1, 1));
     }
 };

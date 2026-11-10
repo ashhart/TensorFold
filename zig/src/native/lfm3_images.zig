@@ -45,13 +45,8 @@ pub const Vision = struct {
 
 pub fn open(gpa: std.mem.Allocator, io: std.Io, model: *q.Model, dir: []const u8, requested: api.VisionOpen) !*Vision {
     if (model.config.kind != .vision_language) return error.NoVisionTower;
-    const path = try std.fs.path.join(gpa, &.{ dir, "processor_config.json" });
-    defer gpa.free(path);
-    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(4 << 20));
-    defer gpa.free(bytes);
-    try q.image.processor(gpa, bytes);
-    const capacity = if (requested.image_tokens_set) requested.image_tokens else 256;
-    if (capacity < 64 or capacity > 4096 or requested.max_images == 0) return error.BadLfm3ImageBudget;
+    try q.image.loadProcessor(io, gpa, dir);
+    const capacity = try q.image.admitBudget(requested.image_tokens_set, requested.image_tokens, requested.max_images);
     const v = try gpa.create(Vision);
     errdefer gpa.destroy(v);
     const tower = try q.vision.Vision.load(gpa, model.device, &model.checkpoint, capacity);
