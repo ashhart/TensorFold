@@ -12,7 +12,8 @@ __device__ __forceinline__ void rows(const __nv_bfloat16* q, const uint8_t* kc, 
     const float* ks, const float* vs, __nv_bfloat16* out, int p0, int W, int H, int HK, int G,
     float scale, int CAP, const int* PT, long long PS, int PTOK) {
     constexpr int D = 256;
-    constexpr bool causal = true, F8 = true, HM = true;
+    constexpr bool causal = true, F8 = true, HM = true, P256 = false, IDS = false;
+    constexpr int PN = 0;
     constexpr int skip = 0;
     const int HO = H;
     auto first_row = [] { return blockIdx.x * 16 * (WARPS / HPC); };
