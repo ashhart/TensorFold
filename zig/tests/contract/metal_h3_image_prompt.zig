@@ -32,9 +32,6 @@ fn headsAt(comptime heads: usize, comptime rows: []const usize) []const c.Shape 
     return out;
 }
 
-const last_key = "a row whose key count is not a multiple of 4 fills its last block of 4 with its last key at weight " ++
-    "0: an infinite value there gives 0 x Inf = NaN where float64 gives the infinity";
-
 /// The released checkpoint's launches in prompt.zig (text 5120 wide, 64 over 8 heads; refiner 5376, 56 heads).
 const forms = [_]Form{
     .{ .kind = .gemm, .served = gemm_served },
@@ -45,8 +42,8 @@ const forms = [_]Form{
     .{ .kind = .heads, .label = "h3 fused", .mode = .h3, .eps = 1e-5, .fused = true, .served = rowsAt(56, 128) },
     .{ .kind = .attention, .label = "causal", .causal = true, .served = headsAt(64, &.{ short, long }) },
     .{ .kind = .attention, .label = "fused", .fused = true, .served = headsAt(56, &.{ short, long }) },
-    .{ .kind = .attention, .label = "causal last key", .causal = true, .last_key = true, .served = headsAt(64, &.{short}), .known = .{ .gate = .nonfinite, .finding = last_key } },
-    .{ .kind = .attention, .label = "fused last key", .fused = true, .last_key = true, .served = headsAt(56, &.{short}), .known = .{ .gate = .nonfinite, .finding = last_key } },
+    .{ .kind = .attention, .label = "causal last key", .causal = true, .last_key = true, .served = headsAt(64, &.{short}) },
+    .{ .kind = .attention, .label = "fused last key", .fused = true, .last_key = true, .served = headsAt(56, &.{short}) },
     .{ .kind = .glu, .label = "qwen", .mode = .qwen, .served = rowsAt(25600, 1) },
     .{ .kind = .glu, .label = "h3 fused", .mode = .h3, .fused = true, .served = rowsAt(14336, 1) },
     .{ .kind = .add, .served = rowsAt(5120, 1) ++ rowsAt(5376, 1) },
@@ -66,6 +63,7 @@ const controls = [_]Control{
     .{ .entry = "hp_heads h3 fused", .gate = .shapes, .what = "rounds as the Qwen model", .old = "return mode == 0 ?", .new = "return mode != 0 ?" },
     .{ .entry = "hp_attention causal", .gate = .shapes, .what = "sees the next key", .old = "? row + 1 : p.rows;", .new = "? min(row + 2, p.rows) : p.rows;" },
     .{ .entry = "hp_attention fused", .gate = .shapes, .what = "skips the last key", .old = "? row + 1 : p.rows;", .new = "? row + 1 : p.rows - 1;" },
+    .{ .entry = "hp_attention causal last key", .gate = .nonfinite, .what = "adds its padded keys' values at weight 0", .old = "if (j0 + u < end) acc += e", .new = "acc += e" },
     .{ .entry = "hp_attention causal", .gate = .nonfinite, .what = "weighs a NaN score 0", .old = "const float e = metal::precise::exp(s[u] - top);", .new = "const float e = isnan(s[u]) ? 0.0f : metal::precise::exp(s[u] - top);" },
     .{ .entry = "hp_glu qwen", .gate = .shapes, .what = "swaps gate and value", .old = "g = float(G[ulong(at.y) * p.g_row + at.x]), v = float(V[ulong(at.y) * p.v_row + at.x])", .new = "g = float(V[ulong(at.y) * p.v_row + at.x]), v = float(G[ulong(at.y) * p.g_row + at.x])" },
     .{ .entry = "hp_glu h3 fused", .gate = .shapes, .what = "rounds as the Qwen model", .old = "const float s = p.mode == 0 ?", .new = "const float s = p.mode != 0 ?" },

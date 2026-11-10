@@ -174,7 +174,7 @@ struct HpAttn {
     for (uint u = 0; u < 4; u++) {
       const float e = metal::precise::exp(s[u] - top);
       l += e;
-      acc += e * float4(*(const device bfloat4*)(vp + ulong(at[u]) * p.v_row));
+      if (j0 + u < end) acc += e * float4(*(const device bfloat4*)(vp + ulong(at[u]) * p.v_row)); // a pad adds nothing
     }
     m = top;
   }
