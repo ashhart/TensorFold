@@ -47,6 +47,8 @@ pub const Tree = struct {
     pages: Pages,
     /// Tokens a page holds.
     page: usize,
+    /// Prefix groups: page ids a logical page, page-major on each node (`pages[p * per + g]`).
+    per: usize = 1,
     /// Tokens past a page that its rows read (the family's lookahead): a page matches only when they match too.
     ahead: usize,
     root: *Node,
@@ -57,10 +59,15 @@ pub const Tree = struct {
     snaps: usize = 0,
     counts: Counts = .{},
 
-    pub fn init(gpa: Allocator, family: Snapshots, pages: Pages, page: usize, ahead: usize) !Tree {
+    pub fn init(gpa: Allocator, family: Snapshots, pages: Pages, page: usize, ahead: usize, per: usize) !Tree {
         const root = try gpa.create(Node);
         root.* = .{ .parent = null, .end = 0, .tokens = &.{}, .pages = &.{} };
-        return .{ .gpa = gpa, .family = family, .pages = pages, .page = page, .ahead = ahead, .root = root };
+        return .{ .gpa = gpa, .family = family, .pages = pages, .page = page, .per = per, .ahead = ahead, .root = root };
+    }
+
+    /// Logical pages of `n`: its ids over the prefix groups.
+    pub fn npages(t: *const Tree, n: *const Node) usize {
+        return n.pages.len / t.per;
     }
 
     pub fn deinit(t: *Tree) void {
@@ -101,7 +108,7 @@ pub const Tree = struct {
     fn common(t: *const Tree, n: *const Node, tokens: []const u32, most: usize) usize {
         const w = t.page + t.ahead;
         var p: usize = 0;
-        while (p < n.pages.len and p < most and std.mem.eql(u32, n.tokens[p * t.page ..][0..w], tokens[p * t.page ..][0..w])) p += 1;
+        while (p < t.npages(n) and p < most and std.mem.eql(u32, n.tokens[p * t.page ..][0..w], tokens[p * t.page ..][0..w])) p += 1;
         return p;
     }
 
@@ -113,7 +120,7 @@ pub const Tree = struct {
         while (at + t.page <= limit_at) {
             const c = t.child(node, prompt[at..]) orelse break;
             const p = t.common(c, prompt[at..], (limit_at - at) / t.page);
-            if (p < c.pages.len) break;
+            if (p < t.npages(c)) break;
             at += p * t.page;
             node = c;
             if (c.entry != null and c.end % step == 0) best = c;
@@ -121,17 +128,17 @@ pub const Tree = struct {
         return best;
     }
 
-    /// Pages of `tokens` (`np` whole pages and `ahead` more) the tree holds, into `path` if any; `last` the end node.
+    /// Logical pages of `tokens` (`np` whole pages and `ahead` more) the tree holds, their ids into `path` if any.
     pub fn heldPrefix(t: *const Tree, tokens: []const u32, np: usize, path: ?[]u32, last: *?*Node) usize {
         var node = t.root;
         var pi: usize = 0;
         while (pi < np) {
             const c = t.child(node, tokens[pi * t.page ..]) orelse break;
             const p = t.common(c, tokens[pi * t.page ..], np - pi);
-            if (path) |out| @memcpy(out[pi..][0..p], c.pages[0..p]);
+            if (path) |out| @memcpy(out[pi * t.per ..][0 .. p * t.per], c.pages[0 .. p * t.per]);
             pi += p;
             node = c;
-            if (p < c.pages.len) break;
+            if (p < t.npages(c)) break;
         }
         last.* = if (node == t.root) null else node;
         return pi;
@@ -149,7 +156,7 @@ pub const Tree = struct {
         defer path.deinit(t.gpa);
         var w: ?*Node = n;
         while (w) |x| : (w = x.parent) if (x.parent != null) try path.append(t.gpa, x);
-        try adopt.ensureUnusedCapacity(t.gpa, n.end / t.page);
+        try adopt.ensureUnusedCapacity(t.gpa, n.end / t.page * t.per);
         while (path.pop()) |x| {
             for (x.pages) |id| {
                 t.pages.vtable.retain(t.pages.ptr, id);
@@ -159,28 +166,28 @@ pub const Tree = struct {
         }
     }
 
-    /// Puts `tokens` (whole pages, `mine` the caller's, and `ahead` more) in the tree; the end node, `path` its pages.
+    /// Puts `tokens` (whole pages, `mine` the caller's ids page-major, `ahead` more) in the tree; `path` gets its ids.
     pub fn insert(t: *Tree, tokens: []const u32, mine: []const u32, path: []u32) !*Node {
-        const np = mine.len;
+        const np = mine.len / t.per;
         var node = t.root;
         var pi: usize = 0;
         while (pi < np) {
             const c = t.child(node, tokens[pi * t.page ..]) orelse {
                 const leaf = try t.gpa.create(Node);
                 errdefer t.gpa.destroy(leaf);
-                leaf.* = .{ .parent = node, .end = @intCast(np * t.page), .tokens = try t.gpa.dupe(u32, tokens[pi * t.page ..]), .pages = try t.gpa.dupe(u32, mine[pi..]) };
+                leaf.* = .{ .parent = node, .end = @intCast(np * t.page), .tokens = try t.gpa.dupe(u32, tokens[pi * t.page ..]), .pages = try t.gpa.dupe(u32, mine[pi * t.per ..]) };
                 errdefer t.gpa.free(leaf.tokens);
                 errdefer t.gpa.free(leaf.pages);
                 try t.holds.reserve(t.gpa, leaf.pages.len); // before the leaf is linked: what follows cannot fail
                 try node.kids.append(t.gpa, leaf);
                 for (leaf.pages) |id| t.holds.shareAssumeCapacity(t.pages, id);
-                @memcpy(path[pi..], leaf.pages);
+                @memcpy(path[pi * t.per ..], leaf.pages);
                 t.touch(leaf);
                 return leaf;
             };
             const p = t.common(c, tokens[pi * t.page ..], np - pi);
-            const up = if (p < c.pages.len) try t.split(c, p) else c;
-            @memcpy(path[pi..][0..p], up.pages);
+            const up = if (p < t.npages(c)) try t.split(c, p) else c;
+            @memcpy(path[pi * t.per ..][0 .. p * t.per], up.pages);
             t.touch(up);
             node = up;
             pi += p;
@@ -194,11 +201,11 @@ pub const Tree = struct {
         errdefer t.gpa.destroy(up);
         const head_tokens = try t.gpa.dupe(u32, c.tokens[0 .. p * t.page + t.ahead]); // its pages, the tail's first `ahead`
         errdefer t.gpa.free(head_tokens);
-        const head_pages = try t.gpa.dupe(u32, c.pages[0..p]);
+        const head_pages = try t.gpa.dupe(u32, c.pages[0 .. p * t.per]);
         errdefer t.gpa.free(head_pages);
         const tail_tokens = try t.gpa.dupe(u32, c.tokens[p * t.page ..]);
         errdefer t.gpa.free(tail_tokens);
-        const tail_pages = try t.gpa.dupe(u32, c.pages[p..]);
+        const tail_pages = try t.gpa.dupe(u32, c.pages[p * t.per ..]);
         errdefer t.gpa.free(tail_pages);
         const parent = c.parent.?;
         up.* = .{ .parent = parent, .end = parent.end + @as(u32, @intCast(p * t.page)), .tokens = head_tokens, .pages = head_pages, .used = c.used };
