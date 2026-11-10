@@ -186,8 +186,6 @@ the normal serving residency and loaded head buffers in place, but before prepar
 Temporary calibration caches follow that residency; its existing idle-flush callback commits pending
 head and cache buffers before timing. Cache teardown removes those buffers before their owner leaves.
 The original deterministic history, warmup, per-width timing trials and target arithmetic are unchanged.
-The [source-bound original-contract proof](https://github.com/BlivionIaG/TensorFold/blob/1b968d6039af141acc4876fc9c81a5fdd48dde69/docs/receipts/lfm2-dspark-review/serving-calibration.json)
-records actual cache, sampled and cancellation workflows on both devices; it is not a performance pass.
 
 Before prefill, the lane host snapshots admitted and already queued requests under its existing mutex,
 bounded by the advertised and memory-admitted lane limits. Context enrollment prices the larger of
@@ -195,8 +193,6 @@ that cohort and the drafter's registered streams. This matters for LFM2: whole-p
 inside admission, before queued peers reach the drafter's stream map. Direct engine callers without
 a host hint retain their registered-stream estimate. No request is delayed to await future arrivals,
 and declining neural context does not disable copies or user-provided drafts.
-The [scheduled-cohort receipt](https://github.com/BlivionIaG/TensorFold/blob/1b968d6039af141acc4876fc9c81a5fdd48dde69/docs/receipts/lfm2-dspark-review/scheduled-cohort.json) records actual
-queued serving and its limits: correctly declining a known cohort is not a complete performance pass.
 
 The no-confidence depth fallback stages newly committed context before choosing a lone head depth.
 An unobserved positive-depth round includes its context quote once; an observed whole-round cost is
@@ -217,26 +213,18 @@ host work in residual overhead rather than publishing a reusable quote. Unknown 
 existing exploration path; confidence-only controls and complete measured lone-round prices do not add
 this surcharge. These accounting changes still require the complete throughput qualification above.
 
-[Controller regression and native API receipts](https://github.com/BlivionIaG/TensorFold/blob/1b968d6039af141acc4876fc9c81a5fdd48dde69/docs/receipts/dspark-chain-restack/hold-value-controller.json)
-record the constructed timing cases and source hashes; they are not device-throughput qualification.
+Released checkpoint and paper facts:
 
-The checkpoint's `block_size: 9` establishes its query geometry, not exclusive implementation provenance.
-Later diagnosis consulted SGLang's DSpark/DFlash implementation, including [revision `488869c2d`](https://github.com/sgl-project/sglang/tree/488869c2d)
-([Apache-2.0](https://github.com/sgl-project/sglang/blob/488869c2d/LICENSE)), for attention, projection/normalization, Markov and confidence semantics.
-The [historical diagnosis](https://github.com/BlivionIaG/TensorFold/blob/afe8bda62562519b4fd84ee9a956392a21f26a60/docs/receipts/lfm2-dspark-review/diagnosis.md)
-remains outside this implementation branch. The October 25 authoring record has not been recovered:
-checkpoint-only or clean-room provenance cannot be certified, and the maintainer's provenance gate remains open.
-
-Independent paper/config re-derivation (November 10; it does not erase the consultation above):
-
+- **Query geometry:** the released
+  [config](https://huggingface.co/LiquidAI/LFM2.5-24B-A2B-DSpark/blob/e052e5b1dd103c38cdd4f8ddc068d7dea4586f55/config.json)
+  has `block_size: 9`: nine query rows, an anchor and eight masks, not ten.
 - **Noncausal attention:** [DSpark §2.2–3.1](https://arxiv.org/html/2607.05147v1) and
   [DFlash §4.2](https://arxiv.org/html/2602.06036v2) specify context plus bidirectional draft-block attention.
-  The [released config](https://huggingface.co/LiquidAI/LFM2.5-24B-A2B-DSpark/blob/e052e5b1dd103c38cdd4f8ddc068d7dea4586f55/config.json)
-  supplies nine query rows: an anchor and eight masks, not ten query rows.
 - **Projection/normalization:** DSpark equations 2–3 specify concatenated target taps → projection → RMSNorm
   before context K/V, without a second context input norm. The config's `model_type: qwen3` and
-  [Qwen3 §2](https://arxiv.org/html/2505.09388v1) supply pre-normalization and QK-norm; the paper does not
-  explicitly fix QK-norm's position relative to RoPE, and released-drafter parity for that order is unmeasured.
+  [Qwen3 §2](https://arxiv.org/html/2505.09388v1) supply pre-normalization and QK-norm. Open: no source
+  fixes QK-norm's position relative to RoPE, and the order used here is not measured against the released
+  drafter's accepted drafts per round.
 - **Markov semantics:** DSpark equations 4–5 and Liquid's
   [architecture explanation](https://www.liquid.ai/blog/lfm2.5-dspark) give a first-order bias from the
   previously sampled token. Config rank 256 and the checkpoint's two `[128000,256]` matrices give
