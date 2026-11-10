@@ -88,7 +88,10 @@ fn otherQuotes(marker: []const u8, buf: []u8) ?[]const u8 {
 fn findMark(page: []const u8, from: usize, marker: []const u8) ?usize {
     var alt_buf: [64]u8 = undefined;
     const a = std.ascii.findIgnoreCasePos(page, from, marker);
-    const b = if (otherQuotes(marker, &alt_buf)) |alt| std.ascii.findIgnoreCasePos(page, from, alt) else null;
+    const alt = otherQuotes(marker, &alt_buf) orelse return a;
+    // Only look for the other quotes before the primary hit, so a page of one style stays linear.
+    const limit = a orelse page.len;
+    const b = std.ascii.findIgnoreCasePos(page[0..limit], from, alt);
     if (a == null) return b;
     if (b == null) return a;
     return @min(a.?, b.?);
