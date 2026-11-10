@@ -54,7 +54,9 @@ fn refuse(a: Allocator, problem: *[]const u8, comptime fmt: []const u8, args: an
 }
 
 pub const Head = folder.Head;
-pub const headOf = folder.headOf;
+pub fn headOf(a: Allocator, io: std.Io, dir: []const u8, problem: *[]const u8) !Head {
+    return folder.headOf(a, io, dir, "HIP", problem);
+}
 pub const fitWindow = folder.fitWindow;
 
 fn gibs(bytes: usize) f64 {
