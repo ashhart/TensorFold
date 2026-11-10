@@ -174,17 +174,7 @@ pub fn Ops(comptime Tri: type) type {
             const n = view_.logical;
             try h.best(o.stream(), d.dlogits.ptr, n, n, 1, d.best.ptr);
             try download(o.stream(), std.mem.sliceAsBytes(d.best_host[0..4]), d.best.ptr);
-            const top = d.best_host[0];
-            const lse = d.best_host[1];
-            const greedy = if (sm) |s| s.temperature <= 0 else true;
-            if (greedy) {
-                const col: usize = @intCast(@as(i32, @bitCast(d.best_host[2])));
-                return .{ .token = try view_.global(@intCast(col)), .prob = @exp(@as(f64, top) - @as(f64, lse)) };
-            }
-            if (sm) |x| if (draw.usable(x)) return draw.pickHead(h, o.stream(), o.e.gpa, d, lse, position, x);
-            const row = d.host[0..n];
-            try download(o.stream(), std.mem.sliceAsBytes(row), d.dlogits.ptr);
-            return mtp.drawPick(o.e.gpa, row, h.ids, lse, position, sm);
+            return draw.pick(h, o.stream(), o.e.gpa, d, d.best_host[0..4].*, position, sm, false);
         }
 
         /// Python decode.draft: absorb the kept rows, then chain up to `count` drafts under mtp.Stop, the first kept.
@@ -311,16 +301,7 @@ pub fn Ops(comptime Tri: type) type {
                 var next_act: usize = 0;
                 var n_step: usize = 0;
                 for (act[0..n_act], 0..) |i, r| {
-                    const top = best_host[r * 4];
-                    const lse = best_host[r * 4 + 1];
-                    const col: usize = @intCast(@as(i32, @bitCast(best_host[r * 4 + 2])));
-                    // a sampled lane draws from its own row, as its lone pick does; a greedy one takes its best column
-                    const got: Pick = if (mtp.isSampled(sms[i])) sampled: {
-                        if (draw.usable(sms[i].?)) break :sampled try draw.pickHead(h, o.stream(), o.e.gpa, ds[i], lse, positions[i] + j, sms[i].?);
-                        const row = ds[i].host[0..h.view().logical];
-                        try download(o.stream(), std.mem.sliceAsBytes(row), ds[i].dlogits.ptr);
-                        break :sampled try mtp.drawPick(o.e.gpa, row, h.ids, lse, positions[i] + j, sms[i]);
-                    } else .{ .token = h.ids[col], .prob = @exp(@as(f64, top) - @as(f64, lse)) };
+                    const got = try draw.pick(h, o.stream(), o.e.gpa, ds[i], best_host[r * 4 ..][0..4].*, positions[i] + j, sms[i], true);
                     const out = outs[i];
                     const t = stops[i].take(j, got.prob);
                     if (!t.propose) continue;
