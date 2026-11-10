@@ -33,7 +33,7 @@ test "KV lifetime: Flash Next failed table wait and later fill retain pages unti
             D.fail_wait = false;
             cuda.completion.drain(&d, e.stream.*, "the test driver must drain before it leaves");
         }
-        const l = pages.layout(64, 16, null, 0);
+        const l = try pages.layout(64, 16, null, 0);
         const p = try pages.Pool.init(t.allocator, &e, l, 64, null, 1, l.runPages() + 16);
         defer {
             D.fail_wait = false;
@@ -63,7 +63,7 @@ test "KV lifetime: Flash Next close and deinit retain pages until context proof"
             D.fail_wait = false;
             cuda.completion.drain(&d, e.stream.*, "the test driver must drain before it leaves");
         }
-        const l = pages.layout(64, 16, null, 0);
+        const l = try pages.layout(64, 16, null, 0);
         const p = try pages.Pool.init(t.allocator, &e, l, 64, null, 1, l.runPages() + 16);
         var c = try p.open(1);
         Watch.pool = p.pool;
