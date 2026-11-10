@@ -18,6 +18,8 @@ pub const Recipe = enum {
     nvfp4_csf,
     /// NVFP4 with an e4m3 scale every 32 inputs: csf0_v1's row base plus 4-bit offset (experts32.Matrix).
     nvfp4_csf0,
+    /// NVFP4_NZ5: nvfp4_csf0's layout and scales, its code 0b1000 read as +5 in place of -0 (code_map e2m1_nz5).
+    nvfp4_nz5,
     /// W4A16_NVFP4: NVFP4 weights without an input scale.
     w4a16_nvfp4,
     /// MXFP8: e4m3 weights, a UE8M0 scale every 32 inputs.
@@ -124,6 +126,14 @@ fn recipeOf(entry: ?std.json.ObjectMap) ?Recipe {
     const group = o.get("group_size");
     const blocks = o.get("weight_block_size");
     const encoding = o.get("weight_scale_encoding");
+    const map = o.get("code_map");
+    if (std.ascii.eqlIgnoreCase(algo, "NVFP4_NZ5")) {
+        const named = map == null or std.mem.eql(u8, text(map) orelse "", "e2m1_nz5");
+        const csf0 = std.mem.eql(u8, text(encoding) orelse "", "csf0_v1");
+        return if (named and csf0 and int(group) == csf0_group and blocks == null) .nvfp4_nz5 else null;
+    }
+    // a code map beside any other recipe: refused, not its values read as E2M1's
+    if (map != null) return null;
     if (std.ascii.eqlIgnoreCase(algo, "NVFP4") and std.mem.eql(u8, text(encoding) orelse "", "csf0_v1")) {
         return if (int(group) == csf0_group and blocks == null) .nvfp4_csf0 else null;
     }
@@ -250,7 +260,7 @@ test "nvidia/GLM-5.3-Flash-FP4-Local's recipes: a module's, and its tensors' und
     var count = std.EnumArray(Recipe, usize).initFill(0);
     var it = r.modules.valueIterator();
     while (it.next()) |v| count.getPtr(v.*).* += 1;
-    try std.testing.expectEqualSlices(usize, &.{ 0, 42, 0, 77, 205, 170, 0 }, &count.values); // the vision tower's MLPs too
+    try std.testing.expectEqualSlices(usize, &.{ 0, 42, 0, 0, 77, 205, 170, 0 }, &count.values); // the vision tower's MLPs too
     const at = "model.language_model.layers.";
     const cases = [_]struct { []const u8, ?Recipe }{
         .{ at ++ "3.mlp.experts.17.gate_proj.weight", .nvfp4_csf }, // routed experts: one entry a layer
@@ -369,6 +379,33 @@ test "csf0_v1 is NVFP4 at group 32 alone; a group of 32 without it, or any other
     try expectRecipesRefused(
         \\, "quantized_layers": {"m.e": {"quant_algo": "NVFP4", "group_size": 32, "weight_block_size": [1, 32], "weight_scale_encoding": "csf0_v1"}}
     , "m.e: NVFP4");
+}
+
+test "NVFP4_NZ5 is csf0_v1's layout read with 0b1000 as +5; a code map on any other recipe is refused by module" {
+    var why: Why = .{};
+    var r = try admitRecipes(std.testing.allocator,
+        \\{"quantization_config": {"quant_method": "modelopt", "quant_algo": "MIXED_PRECISION", "quantized_layers":
+        \\ {"m.3.experts": {"quant_algo": "NVFP4_NZ5", "group_size": 32, "weight_scale_encoding": "csf0_v1", "code_map": "e2m1_nz5"},
+        \\  "m.4.experts": {"quant_algo": "NVFP4_NZ5", "group_size": 32, "weight_scale_encoding": "csf0_v1"}}}}
+    , &why);
+    defer r.deinit();
+    try std.testing.expectEqual(@as(?Recipe, .nvfp4_nz5), r.of("m.3.experts.0.gate_proj.weight"));
+    try std.testing.expectEqual(@as(?Recipe, .nvfp4_nz5), r.of("m.4.experts.7.down_proj.weight"));
+    try expectRecipesRefused(
+        \\, "quantized_layers": {"m.e": {"quant_algo": "NVFP4", "group_size": 32, "weight_scale_encoding": "csf0_v1", "code_map": "e2m1_nz5"}}
+    , "m.e: NVFP4");
+    try expectRecipesRefused(
+        \\, "quantized_layers": {"m.e": {"quant_algo": "NVFP4", "group_size": 16, "code_map": "e2m1"}}
+    , "m.e: NVFP4");
+    try expectRecipesRefused(
+        \\, "quantized_layers": {"m.e": {"quant_algo": "NVFP4_NZ5", "group_size": 32, "weight_scale_encoding": "csf0_v1", "code_map": "e2m1"}}
+    , "m.e: NVFP4_NZ5");
+    try expectRecipesRefused(
+        \\, "quantized_layers": {"m.e": {"quant_algo": "NVFP4_NZ5", "group_size": 32}}
+    , "m.e: NVFP4_NZ5");
+    try expectRecipesRefused(
+        \\, "quantized_layers": {"m.e": {"quant_algo": "NVFP4_NZ5", "group_size": 16, "weight_scale_encoding": "csf0_v1"}}
+    , "m.e: NVFP4_NZ5");
 }
 
 test "empty MIXED_PRECISION recipes retain their identity beside single-format NVFP4" {
