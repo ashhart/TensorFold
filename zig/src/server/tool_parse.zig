@@ -339,7 +339,7 @@ fn functionBlock(a: Allocator, block: []const u8, schemas: ?*const tool_params.S
     for (params.items) |p| {
         const key = strip(p.key);
         const schema: tool_params.Schema = if (schemas) |s| try tool_params.schemaOf(s, name, key, a) else try tool_params.emptySchema(a);
-        try arguments.put(a, key, try tool_params.decode(a, p.value, schema, true));
+        try arguments.put(a, key, try @import("tool_qwen_value.zig").decode(a, p.value, schema));
     }
     return .{ .name = name, .arguments = .{ .object = arguments } };
 }
@@ -347,7 +347,7 @@ fn functionBlock(a: Allocator, block: []const u8, schemas: ?*const tool_params.S
 const Param = struct { key: []const u8, value: []const u8 };
 const Params = struct { items: []Param, residue: []const u8 };
 
-/// ``<parameter=K>\n?(.*?)\n?</parameter>`` matches, and the body without them.
+/// Parameter interiors stay intact until their schemas distinguish XML framing from literal string data.
 fn parameterBlocks(a: Allocator, body: []const u8) Allocator.Error!Params {
     var items: std.ArrayList(Param) = .empty;
     var residue: std.ArrayList(u8) = .empty;
@@ -361,10 +361,8 @@ fn parameterBlocks(a: Allocator, body: []const u8) Allocator.Error!Params {
         if (i == key_start or i >= body.len or body[i] != '>') continue;
         const key = body[key_start..i];
         i += 1;
-        if (i < body.len and body[i] == '\n') i += 1;
         const e = findCI(body, "</parameter>", i) orelse break;
-        var value = body[i..e];
-        if (std.mem.endsWith(u8, value, "\n")) value = value[0 .. value.len - 1];
+        const value = body[i..e];
         try items.append(a, .{ .key = key, .value = value });
         try residue.appendSlice(a, body[kept..s]);
         kept = e + 12;

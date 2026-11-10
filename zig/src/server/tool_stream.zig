@@ -46,6 +46,7 @@ pub const Streamer = struct {
     current: []const u8 = "",
     value_schema: tool_params.Schema = .{ .value = .null, .root = .null },
     typed: bool = false,
+    qwen_literal: bool = false,
     buffer: std.ArrayList(u8) = .empty,
     pos: usize = 0,
     state: enum { outside, call, buffered, function, value, closing, glm, dsml, abort } = .outside,
@@ -251,14 +252,15 @@ pub const Streamer = struct {
                     if (opening(rest, "<parameter=")) |m| {
                         const key = reply_text.pyStrip(m.name);
                         s.value_schema = try tool_params.schemaOf(&s.schemas, s.current, key, s.a);
-                        s.typed = try typedSchema(s.a, s.value_schema);
+                        s.qwen_literal = try @import("tool_qwen_value.zig").constrained(s.a, s.value_schema);
+                        s.typed = s.qwen_literal or try typedSchema(s.a, s.value_schema);
                         s.buffer.clearRetainingCapacity();
                         const quoted = try json.quote(s.a, key, .{ .ascii = false });
                         try out.append(s.a, try s.args(try std.mem.concat(s.a, u8, &.{ if (s.args_open) "," else "{", quoted, if (s.typed) ":" else ":\"" })));
                         s.args_open = true;
-                        s.pos += m.len;
+                        s.pos += m.len - @intFromBool(s.qwen_literal and m.newline);
                         s.state = .value;
-                        s.lead = !m.newline;
+                        s.lead = !s.qwen_literal and !m.newline;
                         s.held = "";
                         continue;
                     }
@@ -271,33 +273,7 @@ pub const Streamer = struct {
                     return;
                 },
                 .value => {
-                    const tail = "</parameter>";
-                    const end = reply_text.findTag(rest, 0, tail);
-                    const chunk = if (end) |e| rest[0..e] else rest[0..trimTail(rest, tail.len)];
-                    s.pos += chunk.len;
-                    var piece = try std.mem.concat(s.a, u8, &.{ s.held, chunk });
-                    if (s.lead and piece.len > 0) {
-                        if (piece[0] == '\n') piece = piece[1..];
-                        s.lead = false;
-                    }
-                    var keep: []const u8 = undefined;
-                    if (end != null) {
-                        keep = if (std.mem.endsWith(u8, piece, "\n")) piece[0 .. piece.len - 1] else piece; // the framing newline
-                        s.held = "";
-                    } else {
-                        keep = reply_text.pyRstrip(piece); // its last newline may be the framing one
-                        s.held = piece[keep.len..];
-                    }
-                    if (s.typed) {
-                        try s.buffer.appendSlice(s.a, keep);
-                    } else if (keep.len > 0) try out.append(s.a, try s.args(try s.esc(keep)));
-                    if (end == null) return;
-                    if (s.typed) {
-                        const v = try tool_params.decode(s.a, s.buffer.items, s.value_schema, true);
-                        try out.append(s.a, try s.args(try json.stringify(s.a, v, .{ .ascii = false, .compact = true })));
-                    } else try out.append(s.a, try s.args("\""));
-                    s.pos += tail.len;
-                    s.state = .function;
+                    if (!try @import("tool_qwen_stream.zig").step(s, rest, out, trimTail)) return;
                 },
                 .closing => {
                     const n = closing(rest, "</tool_call>") orelse return;
@@ -362,13 +338,7 @@ pub const Streamer = struct {
         if (s.state == .glm) return tool_glm_stream.cut(s, text, out); // a GLM value's held bytes
         if (s.state == .dsml) return tool_dsml_stream.cut(s, text, out); // a DSML value's held bytes
         if (s.state != .value) return;
-        var cut = try std.mem.concat(s.a, u8, &.{ if (s.typed) s.buffer.items else "", s.held, text[@min(s.pos, text.len)..] });
-        if (s.lead and cut.len > 0 and cut[0] == '\n') cut = cut[1..];
-        s.lead = false;
-        s.pos = text.len;
-        s.held = "";
-        s.buffer.clearRetainingCapacity();
-        if (cut.len > 0) try out.append(s.a, try s.args(if (s.typed) cut else try s.esc(cut)));
+        try @import("tool_qwen_stream.zig").cut(s, text, out);
     }
 };
 
@@ -570,4 +540,5 @@ fn wholeEnvelope(a: Allocator, s: []const u8, from: usize) Allocator.Error!?stru
 
 test {
     _ = @import("tool_stream_test.zig");
+    _ = @import("tool_qwen_whitespace_test.zig");
 }

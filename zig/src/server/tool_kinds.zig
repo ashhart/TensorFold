@@ -158,7 +158,7 @@ fn intersectKinds(kinds: ?Kinds, other: ?Kinds) ?Kinds {
 }
 
 /// The value a local reference points at, or null when it points nowhere.
-fn resolvePointer(a: Allocator, root: Value, ref: []const u8) Allocator.Error!?Value {
+pub fn resolvePointer(a: Allocator, root: Value, ref: []const u8) Allocator.Error!?Value {
     if (ref.len == 0 or ref[0] != '#') return null;
     var current = root;
     const fragment = (try percentDecode(a, ref[1..])) orelse return null;
