@@ -22,6 +22,16 @@ pub const Config = struct {
     rescale: f64,
     mean: [3]f32,
     std: [3]f32,
+    /// Qwen3-VL's DeepStack taps: the blocks, rising, after which a merger of its own reads the residual.
+    deepstack: [max_deepstack]u32 = @splat(0),
+    deepstack_len: u32 = 0,
+
+    pub const max_deepstack = 4;
+
+    /// The DeepStack taps, in block order.
+    pub fn taps(c: *const Config) []const u32 {
+        return c.deepstack[0..c.deepstack_len];
+    }
 
     /// The processor's settings for core/picture/patches: Qwen2VLImageProcessorFast's (torchvision, fused).
     pub fn patches(c: Config) @import("../picture/patches.zig").Patches {
@@ -54,6 +64,15 @@ pub const Config = struct {
 
     /// config.json's vision_config and marker ids, then the image processor (preprocessor, then processor_config.json).
     pub fn parse(arena: std.mem.Allocator, config_json: []const u8, preprocessor_json: ?[]const u8, processor_json: ?[]const u8) Error!?Config {
+        return parseWith(arena, config_json, preprocessor_json, processor_json, false);
+    }
+
+    /// `parse`, with DeepStack taps read too: rising block indexes below the depth, at most `max_deepstack`.
+    pub fn parseDeepStack(arena: std.mem.Allocator, config_json: []const u8, preprocessor_json: ?[]const u8, processor_json: ?[]const u8) Error!?Config {
+        return parseWith(arena, config_json, preprocessor_json, processor_json, true);
+    }
+
+    fn parseWith(arena: std.mem.Allocator, config_json: []const u8, preprocessor_json: ?[]const u8, processor_json: ?[]const u8, deep: bool) Error!?Config {
         const doc = std.json.parseFromSliceLeaky(std.json.Value, arena, config_json, .{}) catch return error.VisionConfig;
         if (doc != .object) return error.VisionConfig;
         const vc = doc.object.get("vision_config") orelse return null;
@@ -69,7 +88,15 @@ pub const Config = struct {
         if (vc.object.get("in_channels")) |v| if (try positive(v) != 3) return error.VisionConfig;
         const act = vc.object.get("hidden_act") orelse return error.VisionConfig;
         if (act != .string or !std.mem.eql(u8, act.string, "gelu_pytorch_tanh")) return error.VisionConfig;
-        if (vc.object.get("deepstack_visual_indexes")) |d| if (d != .array or d.array.items.len != 0) return error.VisionConfig;
+        if (vc.object.get("deepstack_visual_indexes")) |d| {
+            if (d != .array or (!deep and d.array.items.len != 0) or d.array.items.len > max_deepstack) return error.VisionConfig;
+            for (d.array.items, 0..) |v, i| {
+                const at = if (v == .integer and v.integer >= 0 and v.integer < c.depth) @as(u32, @intCast(v.integer)) else return error.VisionConfig;
+                if (i > 0 and at <= c.deepstack[i - 1]) return error.VisionConfig;
+                c.deepstack[i] = at;
+            }
+            c.deepstack_len = @intCast(d.array.items.len);
+        }
         const s = c.side();
         if (s * s != c.positions or s < 2 or c.hidden % c.heads != 0 or c.headDim() % 4 != 0) return error.VisionConfig;
         for ([_]?[]const u8{ preprocessor_json, processor_json }, 0..) |text, i| if (text) |t| {
@@ -171,4 +198,27 @@ test "a tower these kernels do not read is refused" {
     }
     const other_patch = try std.mem.replaceOwned(u8, a, sample_preprocessor, "\"patch_size\": 16", "\"patch_size\": 14");
     try std.testing.expectError(error.VisionConfig, Config.parse(a, sample_config, other_patch, null));
+}
+
+test "DeepStack taps: the opt-in reads Qwen3-VL's [8, 16, 24], parse still refuses them, bad lists are refused" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const deep = try std.mem.replaceOwned(u8, a, sample_config, "\"deepstack_visual_indexes\": []", "\"deepstack_visual_indexes\": [8, 16, 24]");
+    const c = (try Config.parseDeepStack(a, deep, sample_preprocessor, null)).?;
+    try std.testing.expectEqualSlices(u32, &.{ 8, 16, 24 }, c.taps());
+    try std.testing.expectEqual(@as(u64, 65536), c.min_pixels);
+    try std.testing.expectError(error.VisionConfig, Config.parse(a, deep, null, null));
+    // no list, or an empty one: no taps either way, and both parses agree
+    const plain = (try Config.parseDeepStack(a, sample_config, sample_preprocessor, null)).?;
+    try std.testing.expectEqual(@as(usize, 0), plain.taps().len);
+    try std.testing.expectEqual(try Config.parse(a, sample_config, sample_preprocessor, null), plain);
+    const absent = try std.mem.replaceOwned(u8, a, sample_config, "\"deepstack_visual_indexes\": [], ", "");
+    try std.testing.expectEqual(@as(usize, 0), (try Config.parseDeepStack(a, absent, null, null)).?.taps().len);
+    for ([_][]const u8{ "[16, 8]", "[8, 8]", "[27]", "[-1]", "[1, 2, 3, 4, 5]", "[8.0]", "8", "[\"8\"]" }) |list| {
+        const text = try std.mem.replaceOwned(u8, a, sample_config, "[]", list);
+        try std.testing.expectError(error.VisionConfig, Config.parseDeepStack(a, text, null, null));
+    }
+    const four = try std.mem.replaceOwned(u8, a, sample_config, "[]", "[0, 1, 2, 26]");
+    try std.testing.expectEqualSlices(u32, &.{ 0, 1, 2, 26 }, (try Config.parseDeepStack(a, four, null, null)).?.taps());
 }
