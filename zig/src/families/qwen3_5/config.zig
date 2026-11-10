@@ -323,9 +323,9 @@ pub fn pickObject(doc: std.json.ObjectMap, tower: std.json.ObjectMap, key: []con
     return std.json.ObjectMap.empty;
 }
 
-/// `tie_word_embeddings` by the shared row: text_config's, else the root's, else untied (`declared` checked it).
-pub fn isTied(doc: std.json.ObjectMap, tower: std.json.ObjectMap) bool {
-    return rules.tied(doc, tower, .hip) catch unreachable;
+/// `tie_word_embeddings` by the shared row: text_config's, else the root's, else untied; a bad key is refused.
+pub fn isTied(doc: std.json.ObjectMap, tower: std.json.ObjectMap) Error!bool {
+    return rules.tied(doc, tower, .hip);
 }
 
 /// The Spec of a text tower whose weights are `bits` wide in groups of `group_size`.
@@ -465,7 +465,7 @@ test "text_config parses into the Python Spec" {
     try std.testing.expectEqual(@as(u16, 64), s.group);
     try std.testing.expectEqual(@as(usize, 0), s.experts);
     try std.testing.expectEqual(@as(usize, 1), s.mtp_layers);
-    try std.testing.expect(!isTied(doc, tower));
+    try std.testing.expect(!try isTied(doc, tower));
     try std.testing.expect(s.full(3) and s.full(7) and !s.full(0) and !s.full(4));
 }
 
@@ -483,7 +483,7 @@ test "a top-level config, the partial rotary default and the MoE fields" {
     const doc = try declared(arena.allocator(), text);
     const tower = try textTower(doc);
     const s = try geometry(tower, 8, 64);
-    try std.testing.expect(!isTied(doc, tower)); // no tie_word_embeddings: untied, as transformers reads it
+    try std.testing.expect(!try isTied(doc, tower)); // no tie_word_embeddings: untied, as transformers reads it
     try std.testing.expectEqual(@as(usize, 128), s.head_dim);
     try std.testing.expectEqual(@as(usize, 64), s.rotary_dim);
     try std.testing.expectEqual(@as(f64, 5_000_000), s.rope_theta);
@@ -519,7 +519,7 @@ test "HIP's tied head: text_config's key, else the root's, untied when absent; a
             try std.testing.expectEqual(error.BadTiedHead, e);
             continue;
         };
-        try std.testing.expectEqual(c[2].?, isTied(doc, try textTower(doc)));
+        try std.testing.expectEqual(c[2].?, try isTied(doc, try textTower(doc)));
     }
 }
 
