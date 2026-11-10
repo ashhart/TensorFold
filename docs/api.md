@@ -193,6 +193,95 @@ context window before the first is scored, so a refused request costs no GPU wor
 `max_length` above it) returns HTTP 400 with `code` `context_length_exceeded`. An image or video part returns HTTP
 400. Errors use the server's envelope, as on every route: `{"error": {"message", "type"}}`.
 
+## OCR
+
+The native HIP engine reads page images through Mistral's OCR contract when it serves a model with an OCR reader
+and `--vision`.
+
+| Route | Contract | Request | Reply | Written for |
+| --- | --- | --- | --- | --- |
+| `POST /v1/ocr` | Mistral OCR | JSON `{"model", "document", ...}` | `{"pages", "model", "document_annotation", "usage_info"}` | the `mistralai` Python and `@mistralai/mistralai` TypeScript SDKs, with `server_url` set to the server root |
+
+One family has a reader. A reader gives Markdown blocks in pixels of the page the client sent (after EXIF
+orientation), never in the model's resized frame.
+
+| Model | What the reader returns | Geometry |
+| --- | --- | --- |
+| dots.mocr | one block a layout region (title, text, table, formula, picture, header, footer, ...), tables as pipe tables or, when cells span, HTML | a box a block |
+
+Any other model answers the route with HTTP 400 "this model has no OCR reader; use POST /v1/chat/completions",
+and a server started without `--vision` answers "OCR needs image input; start the server with --vision".
+Embedding, reranker and readout engines refuse the OCR route as they refuse chat. The route takes the `inference`
+key scope.
+
+### Reader Markdown
+
+The reader writes block text in one Markdown flavour, the one Mistral's page Markdown uses:
+
+- Headings with `#` markers: a title is `#`, a section header `##` unless the model gives a level.
+- GFM pipe tables, or one HTML `<table>` when a table has row or column spans a pipe table cannot hold; a table
+  block holds exactly one table.
+- Display math as `$$…$$` and inline math as `$…$`, the LaTeX kept as the model wrote it.
+- Lists with `-` or `1.` markers, and code in fenced blocks.
+- No images: a picture block has empty text, and its caption, if any, is its own block. The contract writes its
+  own image references.
+
+### Pages and budgets
+
+- Images are PNG, JPEG or WebP, one page each, up to the 32 MiB body limit and the reader's decoded-pixel limit:
+  16 megapixels and 8192 pixels a side for dots.mocr; a larger image is bad input. An image whose header and
+  decoded pixels disagree is refused as bad input.
+- PDF documents and `pages` are not read: a PDF document is HTTP 400 "PDF documents are not read on POST /v1/ocr;
+  send each page as a PNG, JPEG or WebP image", and any non-null `pages` is HTTP 400 "pages selects pages of a PDF
+  document; POST /v1/ocr reads one page image".
+- `https://` URLs (`document_url` and `image_url`) are fetched only with `--vision-urls`: images, at most 32 MiB.
+  `http://` URLs are refused.
+- Image budget, for Mistral crops (`include_image_base64`): at most 256 encoded images, 4 times the request's page
+  pixels, and 16 MiB plus 2 MiB a page of encoded bytes. Crossing one fails the whole request as an unreadable
+  page, "too many image regions". The encode needs libjpeg-turbo 3.1.4.1 (`TENSORFOLD_LIBTURBOJPEG` names its
+  file); without it `include_image_base64` is HTTP 400.
+
+The page is read as one user turn (the page image, then the reader's prompt), greedy, with thinking off and
+`max_tokens` equal to all the context the prompt leaves. It succeeds only when the reply stops on its end token
+and the reader can parse it.
+
+### Failures
+
+| Failure | Mistral |
+| --- | --- |
+| Bad input: an undecodable or unsupported file, a page or option the server cannot serve | 400 |
+| Unreadable page: the reply was cut at the context limit, repeated without end, broke the model's format or gave a box that is not finite; the image budget was crossed | 422 |
+| The engine stopped the page (it closed or drained) | 503, `Retry-After: 1` |
+| Engine fault or out of memory | 500 |
+| Envelope | `{"detail": [{"loc", "msg", "type"}]}`, `type` `bad_input`, `unreadable_page`, `capacity` or `internal` |
+
+An unreadable page's message names its index, and the model's raw text goes to the server log, never to the
+client. 422 means the same request fails the same way again under greedy decoding; a 503 carries `Retry-After`.
+A client that disconnects stops the request before its page is read.
+
+### Mistral: `POST /v1/ocr`
+
+| Field | Meaning |
+| --- | --- |
+| `model` | Any string or null. The reply names the requested id when it is the served name or an `--alias`, else the served name, so `--alias mistral-ocr-latest` lets copied examples echo it |
+| `document` | `{"type": "document_url", "document_url"}` or `{"type": "image_url", "image_url"}` (a string or `{"url"}`): a `data:` URL, or an `https://` URL as above. The bytes must be a PNG, JPEG or WebP image; a PDF is HTTP 400 (above). `{"type": "file"}` is HTTP 400 |
+| `pages` | Any non-null value is HTTP 400 (above): an image has one page |
+| `table_format` | Null: tables stay in the page Markdown as pipe tables (a spanned HTML table becomes a pipe table with the spanned text in its first cell). `"markdown"` or `"html"`: each table becomes a `tables[]` entry (`tbl-N.md` or `tbl-N.html`) and the Markdown links it; under `"markdown"` a table with spanned cells stays HTML, the only form that keeps it |
+| `extract_header`, `extract_footer` | Move page headers or footers out of `markdown` into `header` and `footer` |
+| `include_blocks` | Default `true`: one block for each region with a box. `false` leaves `blocks` out |
+| `image_limit`, `image_min_size` | Choose which pictures to keep, in reading order (`image_min_size` against the box's width and height, then the running count against `image_limit`). A dropped picture has no image entry, Markdown link or block |
+| `include_image_base64` | Add `image_base64`, a `data:image/jpeg;base64,...` crop of the picture's box, to each kept image |
+| `confidence_scores_granularity` | Accepted; no scores are returned |
+| `bbox_annotation_format`, `document_annotation_format`, `document_annotation_prompt` | Any non-null value is HTTP 400 "annotations are not supported" |
+
+`null` means absent for every optional field, and unknown keys are ignored. Each page carries `index`, `markdown`
+(blocks joined by a blank line, pictures as `![img-N.jpeg](img-N.jpeg)`), `images`, `tables`, `header`, `footer`,
+`dimensions` (`dpi`, `height`, `width`) and `blocks`; `hyperlinks` is left out. A block has `type` (`text`,
+`title`, `list`, `table`, `equation`, `code`, `caption`, `header`, `footer` or `image`), an integer box and
+`content`, its own Markdown with its tables in the `table_format` form; image blocks add `image_id` and table
+blocks `table_id`. `usage_info` gives `pages_processed` and `doc_size_bytes`, the decoded document's size. An
+image's `dimensions.dpi` is 72.
+
 ## System One on a Clef engine
 
 `POST /v1/systemone` on a Clef checkpoint (Cloudflare's clef-flash: BF16 Qwen3.5 weights with
