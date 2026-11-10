@@ -104,6 +104,10 @@ const Served = struct {
         s.* = .{ .srv = undefined, .client = pair[0], .route_fd = pair[1], .route = undefined };
         s.srv = try server.Server.init(gpa, t.io, stub.engine(), s.text.text(), .{ .served_name = "m", .model_ids = &.{"m"} }, null);
         s.route = try std.Thread.spawn(.{}, serve, .{s});
+        errdefer {
+            _ = std.c.shutdown(s.client, 1);
+            s.route.join();
+        }
         var head: [256]u8 = undefined;
         try writeAll(s.client, try std.fmt.bufPrint(&head, "{s} HTTP/1.1\r\nHost: t\r\nContent-Length: {d}\r\n\r\n", .{ request_line, body.len }));
         try writeAll(s.client, body);
