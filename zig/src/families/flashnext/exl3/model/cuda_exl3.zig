@@ -36,6 +36,7 @@ test {
     _ = kv;
     _ = @import("../kv/cuda_exl3_kv_test.zig");
     _ = @import("../../cuda_mtp_ops_test.zig");
+    _ = @import("../../cuda_lanes_guard_test.zig");
     _ = prefill_k;
     _ = prefill;
     _ = @import("../prefill/cuda_exl3_prefill_test.zig");
