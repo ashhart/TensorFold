@@ -9,7 +9,7 @@ const c = ct.spec;
 const g = ct.gates;
 const nax = tf.lfm3.prompt_nax;
 pub const Fault = enum { none, bias, nonfinite };
-pub const formats = [_]struct { bits: u8, group: u16 }{ .{ .bits = 4, .group = 64 }, .{ .bits = 6, .group = 64 }, .{ .bits = 8, .group = 64 }, .{ .bits = 4, .group = 32 } };
+pub const formats = nax.formats.formats;
 
 pub fn name(a: std.mem.Allocator, bits: u8, group: u16, fault: Fault) ![]const u8 {
     const lead = switch (fault) {
@@ -61,7 +61,8 @@ pub const Probe = struct {
         if (fault != .none and std.mem.eql(u8, text, clean)) return error.MissingControlSite;
         const pipe = try rig.pipeline(device, text, "tf_qmmw_t_nax_win");
         errdefer pipe.deinit();
-        if (pipe.simdWidth() != 32 or pipe.maxThreads() < 128 or rig.tgMemory(pipe) != 11264) return error.NaxPromptLimits;
+        if (pipe.simdWidth() != 32 or pipe.maxThreads() < nax.formats.threads or rig.tgMemory(pipe) != nax.formats.threadgroup_bytes)
+            return error.NaxPromptLimits;
         return .{ .a = a, .inner = inner, .pipe = pipe, .label = label, .fault = fault, .group = group };
     }
     pub fn deinit(p: *Probe) void {
@@ -94,7 +95,7 @@ pub const Probe = struct {
         for ([_]rig.Ref{ b.w, b.s, b.b, b.x }, 0..) |r, at| e.setBuffer(r.buf, r.off, at);
         e.setValue(extern struct { k: i32, n: i32, m: i32, ld: i32 }{ .k = @intCast(s.k), .n = @intCast(s.n), .m = @intCast(s.rows), .ld = 0 }, 4);
         e.setBuffer(b.out.buf, b.out.off, 5);
-        e.dispatchGroups(.of(s.n / 64, (s.rows + 63) / 64, 1), .of(128, 1, 1));
+        e.dispatchGroups(.of(s.n / 64, (s.rows + 63) / 64, 1), .of(nax.formats.threads, 1, 1));
         try b.rig.finish(pass);
     }
 };

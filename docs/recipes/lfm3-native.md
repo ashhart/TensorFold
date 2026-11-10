@@ -192,7 +192,7 @@ not change its state (`tf-lfm3-nax-exact`), so the backend declares `chunk_invar
 chunks at 512 rows while replies decode: that lowers inter-token latency and raises aggregate decode at the cost of
 prompt throughput (`m5-nax-decode-share.json`). Without the flag the server keeps its own cuts.
 
-Kernel-contract probes: `metal LFM3 NAX prompt q{4,6,8}g64`, `q4g32` and `metal LFM3 split structural full|sliding`,
+Kernel-contract probes: `metal LFM3 NAX prompt q{4,6,8}g{32,64}` and `metal LFM3 split structural full|sliding`,
 each with planted controls (`zig build tf-kernel-contract`, `--only "LFM3 NAX prompt"`).
 Developer harnesses (`tf-lfm3-forward ... --nax-prompt`, `tf-lfm3-profile` with `TF_LFM3_NAX_PROMPT=1` and
 `TF_LFM3_DECODE_STEPS=N`) enable the same kernels explicitly.

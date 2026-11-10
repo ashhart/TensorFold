@@ -5,6 +5,7 @@ const ck = @import("../../core/checkpoint_metal.zig");
 const Storage = @import("state.zig").Storage;
 const wts = @import("vision_weights.zig");
 const Kernels = @import("vision_kernels.zig").Kernels;
+const tower_input = @import("image.zig");
 pub const Ref = wts.Ref;
 pub const Trace = struct {
     ctx: *anyopaque,
@@ -18,11 +19,6 @@ pub fn scratchBytes(max_tokens: u32) u64 {
 
 fn ref(b: mtl.Buffer) Ref {
     return .{ .buf = b };
-}
-
-fn bf16(x: f32) u16 {
-    const bits: u32 = @bitCast(x);
-    return @intCast((bits +% (0x7fff + ((bits >> 16) & 1))) >> 16);
 }
 
 pub const Vision = struct {
@@ -95,11 +91,7 @@ pub const Vision = struct {
         const tokens = patches / 4;
         const end = std.math.add(usize, out.off, tokens * 2048 * 2) catch return error.Lfm3ImageShape;
         if (end > out.buf.length() or out.off % 4 != 0) return error.Lfm3ImageShape;
-        const px = self.patches.slice(u16, pixels.len);
-        for (pixels, px) |value, *dst| {
-            if (!std.math.isFinite(value)) return error.NonfiniteLfm3Image;
-            dst.* = bf16(value);
-        }
+        try tower_input.packPixels(pixels, self.patches.slice(u16, pixels.len));
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         var cb = queue.commandBuffer();
