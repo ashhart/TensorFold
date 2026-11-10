@@ -44,6 +44,7 @@ pub const cuda_pending = @import("qwen_whole_records.zig").records ++
     @import("hc_activation_records.zig").cuda ++
     @import("qwen4_records.zig").cuda;
 pub const metal_before = @import("fsr_records.zig").metal ++
+    @import("scale_index_records.zig").metal ++
     @import("lfm3_records.zig").metal;
 pub const all_metal = @import("lane_q8_records.zig").records ++
     @import("attention_pv_records.zig").records ++

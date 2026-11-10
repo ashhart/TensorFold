@@ -205,6 +205,7 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
     }
     const m = try arena.create(Model);
     m.* = .{ .r = r, .cap = r.window.capacity, .layers = undefined, .mix = undefined, .head = undefined, .embed = undefined, .ple = undefined, .t = undefined };
+    r.sb_index = try platform.environment.read(bool, "TF_FLASHNEXT_SCALE_INDEX", false) and r.fsr == null and r.tp == null and !r.device.tensorUnits();
     for (0..LAYERS) |i| {
         const linear = i % 4 != 3;
         var L: Layer = .{ .ahc = try hcOf(r, "L{d}.ahc", .{i}), .mhc = try hcOf(r, "L{d}.mhc", .{i}), .linear = linear, .proj = undefined, .out = undefined, .router = try r.loadf("L{d}.moe.router", .{i}), .ex = undefined };
@@ -233,6 +234,7 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
             }
         }
         if (r.xpack) try r.repack(&L.ex);
+        if (r.sb_index) try @import("scale_index.zig").addAll(r, &L.ex);
         m.layers[i] = L;
     }
     m.mix = try hcOf(r, "mix", .{});
@@ -330,6 +332,7 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
             }
         }
         if (r.xpack) try r.repack(&ex);
+        if (r.sb_index) try @import("scale_index.zig").addAll(r, &ex);
         m.mtp = .{
             .ahc = try hcOf(r, "mtp.ahc", .{}),
             .mhc = try hcOf(r, "mtp.mhc", .{}),
@@ -405,6 +408,7 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
         r.gx = try @import("gx.zig").init(r, try std.fmt.parseInt(usize, std.mem.span(v), 10));
         std.log.info("flash next: grouped experts from {d} rows", .{r.gx.?.min_rows});
     };
+    if (r.sb_index) std.log.info("flash next: {d} expert tensors' scales and biases indexed, at most {d} pairs each", .{ r.sbix.count(), r.sb_pairs });
     if (platform.c.getenv("FZ_SKIP")) |v| r.skip = try std.fmt.parseInt(u32, std.mem.span(v), 10); // dev: knock-outs by Run.class bit
     // GPU-gated lanes at this probability product: 0.4 without tensor units (FZ_GATE=tau sets it, FZ_GATE=off none)
     const gate_tau: ?[]const u8 = if (platform.c.getenv("FZ_GATE")) |v| std.mem.span(v) else if (!r.device.tensorUnits()) "0.4" else null;
