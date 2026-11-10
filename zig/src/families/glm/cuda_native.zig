@@ -22,15 +22,8 @@ pub const model_type = "glm5_next";
 pub const formats: []const []const u8 = &.{ "modelopt-nvfp4", "modelopt-mixed", "exl3" };
 // cc-defer: a fixed window; the Python family sizes it from free memory (capacity.admit), port that when serving needs
 pub const default_context: i64 = 8192;
-/// TF_GLM_CONTEXT_CEILING: --context past config.json's window, as the attention has no rotary positions to stretch.
-pub const ceiling_switch = "TF_GLM_CONTEXT_CEILING";
-
-/// The window TF_GLM_CONTEXT_CEILING raises --context's ceiling to, read once the open has checked every .glm row.
-pub fn raisedCeiling() !?u64 {
-    try @import("cuda_env.zig").startup();
-    const environment = @import("sys").environment;
-    return try environment.value(?u64, ceiling_switch, environment.Process.get(.{}, ceiling_switch), null);
-}
+pub const ceiling_switch = @import("cuda_env.zig").ceiling_switch;
+pub const raisedCeiling = @import("cuda_env.zig").raisedCeiling;
 pub const max_segments: u32 = 1;
 pub const prompt_rows: u32 = fw.prefill_rows;
 /// Chunk rows change prompt arithmetic: states keep and resume only where a cold pass cuts (cuda_prompt_cuts).
@@ -593,12 +586,6 @@ test "the plan's window, the context and a verify window, takes the pages of a s
     for ([_]usize{ 8192, 8191, 245_760, 524_288 - 33, 524_288 - 32, 524_288 - 31, 1_048_576, 2_097_152, 2_097_152 + 1 }) |context| {
         try std.testing.expectEqual(pages_mod.tableLen(capacity(context)), l.pages(context + window_rows));
     }
-}
-
-test "TF_GLM_CONTEXT_CEILING's largest window is the last whose slots, verify rows included, keep i32 positions" {
-    const most = @import("sys").environment.rule(ceiling_switch).max;
-    try std.testing.expect(capacity(@intCast(most)) <= @as(usize, std.math.maxInt(i32)) + 1);
-    try std.testing.expect(capacity(@intCast(most + 1)) > @as(usize, std.math.maxInt(i32)) + 1);
 }
 
 // Enough words for every offered frame pair and image, even with a small text context.
