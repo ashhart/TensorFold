@@ -165,6 +165,7 @@ test "a state holds global layers' positions and each sliding ring's last window
     m.layers = 6; // layer 5 is global
     m.context = 4096;
     m.paged = false;
+    m.prompt_most = fwd.prompt_rows;
     m.kc = &k;
     m.vc = &v;
     const at = 2000; // sliding: positions 977..1999, ring rows 977..1535 then 0..463
@@ -182,6 +183,28 @@ test "a state holds global layers' positions and each sliding ring's last window
     try testing.expectEqual([3]usize{ (12 << 30) + 4096 * gb, 2 * 5 * 1023 * sb + at * gb, at * gb }, last);
 }
 
+test "a solo model's wider ring holds the same window - 1 positions, unwrapped where the grid ring wraps" {
+    var k = [_]u64{ 1 << 30, 2 << 30, 3 << 30, 4 << 30, 5 << 30, 6 << 30 };
+    var v = [_]u64{ 7 << 30, 8 << 30, 9 << 30, 10 << 30, 11 << 30, 12 << 30 };
+    var m: fwd.Model = undefined;
+    m.geo = cfg.unified12b;
+    m.layers = 6;
+    m.context = 4096;
+    m.paged = false;
+    m.prompt_most = 2048; // ring rows 3072: positions 977..1999 sit in rows 977..1999
+    m.kc = &k;
+    m.vc = &v;
+    const at = 2000;
+    const sb = 8 * 256 * 2;
+    const gb = 1 * 512 * 2;
+    try testing.expectEqual(@as(u64, 5 * 2 * 1023 * sb + 2 * at * gb), bytes(&m, at));
+    var runs: std.ArrayList([3]usize) = .empty;
+    defer runs.deinit(testing.allocator);
+    try each(&m, 1, at, 0, Count{ .runs = &runs }, Count.add);
+    try testing.expectEqual(@as(usize, 5 * 2 + 2), runs.items.len);
+    try testing.expectEqual([3]usize{ (1 << 30) + (3072 + 977) * sb, 0, 1023 * sb }, runs.items[0]);
+}
+
 test "a paged state takes a global layer's positions through the slot's pages, a run a page, in position order" {
     var k = [_]u64{ 1 << 30, 2 << 30, 3 << 30, 4 << 30, 5 << 30, 6 << 30 };
     var v = [_]u64{ 7 << 30, 8 << 30, 9 << 30, 10 << 30, 11 << 30, 12 << 30 };
@@ -191,6 +214,7 @@ test "a paged state takes a global layer's positions through the slot's pages, a
     m.layers = 6; // layer 5 is global
     m.context = 4 * fwd.pages.tokens;
     m.paged = true;
+    m.prompt_most = fwd.prompt_rows;
     m.ids = &ids;
     m.kc = &k;
     m.vc = &v;

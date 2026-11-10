@@ -6,6 +6,11 @@ const prompt_attention = @import("kernel_sources").gemma4_prompt_attention;
 const frags = @import("../../core/frags.zig");
 const cfg = @import("config.zig");
 
+/// Whether Gemma's assistant and DFlash loaders can build their draft libraries.
+pub fn draftAvailable(device: mtl.Device) bool {
+    return device.tensorUnits();
+}
+
 /// The exact glue specialization used by the target and assistant constructors.
 pub fn glueSource(a: std.mem.Allocator, geo: cfg.Geometry, global: bool, q_only: bool, embed_bits: u8) ![]u8 {
     if (std.mem.indexOfScalar(u8, &cfg.widths.bit_widths, embed_bits) == null) return error.UnsupportedGemmaQuantization;
@@ -64,7 +69,6 @@ pub const Kind = struct {
 
     /// `q_only`: gemma_qkv_prep reads q alone (the MTP assistant's layers); `embed_bits`: the embedding table's width.
     pub fn init(a: std.mem.Allocator, device: mtl.Device, geo: cfg.Geometry, global: bool, q_only: bool, embed_bits: u8) !Kind {
-        const dh: usize = if (global) cfg.global_dim else cfg.sliding_dim;
         const nk: usize = if (global) geo.global_kv_heads else geo.sliding_kv_heads;
         const shape: [3]usize = if (global) .{ 64, 1, 4 } else .{ 128, 4, 4 };
         const text = try glueSource(a, geo, global, q_only, embed_bits);
@@ -75,9 +79,7 @@ pub const Kind = struct {
         inline for (.{ "embed", "rms", "qkv", "partial", "merge", "attn_tail", "dense_tail", "geglu", "softcap", "freqs", "kv_write", "draft_store", "draft_add", "draft_swiglu", "assist_input" }, .{ "gemma_embed", "gemma_rms_looped", "gemma_qkv_prep", "gemma_attention_partial", "gemma_attention_merge", "gemma_attn_tail", "gemma_dense_tail", "gemma_geglu", "gemma_softcap", "gemma_rope_freqs", "gemma_kv_write", "gemma_draft_store", "gemma_draft_add", "gemma_draft_swiglu", "gemma_assist_input" }) |field, name|
             @field(k, field) = try mtl.Pipeline.init(device, lib, name, false);
         {
-            const body = try frags.source(device, a, prompt_attention);
-            defer a.free(body);
-            const src = try std.fmt.allocPrint(a, "#define DH {d}\n#define NQ {d}\n#define G {d}\n#define SL {d}\n#define WINDOW {d}\n#define RING {d}\n{s}", .{ dh, geo.query_heads, geo.query_heads / nk, dh / 128, @as(usize, if (global) 0 else cfg.window), @as(usize, if (global) 0 else @import("state.zig").ring), body });
+            const src = try promptSource(device, a, geo, global);
             defer a.free(src);
             const plib = try mtl.Library.fromSource(device, src, mtl.CompileOptions.mlx());
             defer plib.deinit();
@@ -134,4 +136,14 @@ pub fn inverseFrequencies(k: *const Kernels, queue: mtl.Queue, device: mtl.Devic
     if (cb.failure() != null) return error.GpuFailed;
     @memset(out, 0);
     for (b.slice(f32, cfg.global_rotated), out[0..cfg.global_rotated]) |f, *o| o.* = @floatCast(1.0 / @as(f64, f));
+}
+
+/// The exact source specialization shared by the loader and compiler gate.
+pub fn promptSource(device: mtl.Device, a: std.mem.Allocator, geo: cfg.Geometry, global: bool) ![]u8 {
+    const dh: usize = if (global) cfg.global_dim else cfg.sliding_dim;
+    const nk: usize = if (global) geo.global_kv_heads else geo.sliding_kv_heads;
+    const body = try frags.source(device, a, prompt_attention);
+    defer a.free(body);
+    const src = try std.fmt.allocPrint(a, "#define DH {d}\n#define NQ {d}\n#define G {d}\n#define SL {d}\n#define WINDOW {d}\n#define RING {d}\n{s}", .{ dh, geo.query_heads, geo.query_heads / nk, dh / 128, @as(usize, if (global) 0 else cfg.window), @as(usize, if (global) 0 else @import("state.zig").ring), body });
+    return src;
 }

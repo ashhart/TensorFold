@@ -34,6 +34,17 @@ pub const Rule = extern struct {
     }
 };
 
+/// A sampled request's rule in this layout: `s` is a lanes.Sampling, its gpuRule is lanes.gpu_rule.rule.
+pub fn rule(s: anytype) Rule {
+    return .from(s.gpuRule());
+}
+
+/// A request's rule (`s`: ?lanes.Sampling), or null to decode greedily: no sampling, or temperature 0.
+pub fn ruleFor(s: anytype) ?Rule {
+    const x = s orelse return null;
+    return if (x.temperature > 0) rule(x) else null;
+}
+
 test "sample.cu's Rule layout" {
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(Rule));
     try std.testing.expectEqual(@as(usize, 0), @offsetOf(Rule, "seed"));

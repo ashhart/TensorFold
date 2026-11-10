@@ -176,7 +176,7 @@ test "stage ring: a frame out of round or of another kind is refused, and the li
     closePair(&j);
 }
 
-test "stage ring: a stop ends the next rank's wait" {
+test "stage ring: a stop ends the next rank's wait, and that rank passes it on round the ring" {
     var buf: [16]u8 = undefined;
     var j: [most]Joined = undefined;
     try pair(&j);
@@ -185,6 +185,8 @@ test "stage ring: a stop ends the next rank's wait" {
     _ = try j[1].r.?.recv(.rows, 1, &buf);
     j[0].r.?.stop();
     try t.expectError(error.Stopped, j[1].r.?.recv(.rows, 2, &buf));
+    j[1].r.?.stop();
+    try t.expectError(error.Stopped, j[0].r.?.recv(.rows, 2, &buf));
 }
 
 test "stage ring: a stop after a send that failed mid-payload hangs up, so the next rank never sees a whole frame" {

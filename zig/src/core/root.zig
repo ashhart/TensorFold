@@ -1,5 +1,6 @@
 //! Backend-neutral engine parts: checkpoint files, the CUDA draft-depth rule, the copy index, the tokenizer.
 
+pub const startup_receipt = @import("profile").startup_receipt;
 pub const benchmark_group = @import("benchmark_group.zig");
 pub const weight_only = @import("weight_only.zig");
 pub const profile = @import("profile");
@@ -57,6 +58,7 @@ pub const picture = @import("picture/picture.zig");
 pub const qwen_vl = @import("qwen_vl/qwen_vl.zig");
 pub const drafter_release = @import("drafter_release.zig");
 pub const drafter_layout = @import("drafter_layout.zig");
+pub const dspine = @import("dspine.zig");
 pub const tree_round = @import("tree_round.zig");
 pub const attention_ref = @import("attention_ref.zig");
 pub const attention_range = @import("attention_range.zig");
@@ -70,7 +72,9 @@ pub const kv_pool = @import("kv_pool.zig");
 pub const kv_prompts = @import("kv_prompts.zig");
 
 test {
+    _ = startup_receipt;
     _ = benchmark_group;
+    _ = dspine;
     _ = profile;
     _ = checkpoint_weights;
     _ = safetensors;
@@ -110,6 +114,7 @@ test {
     _ = @import("exl3_rect_test.zig");
     _ = checkpoint;
     _ = @import("checkpoint_prefetch.zig");
+    _ = @import("checkpoint_direct.zig");
     _ = checkpoint_identity;
     _ = direct_io;
     _ = direct_gather;

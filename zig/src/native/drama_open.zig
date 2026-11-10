@@ -6,6 +6,11 @@ const setting = @import("cuda_device.zig").setting;
 const getenv = @import("cuda_device.zig").getenv;
 
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    const settings = @import("sys").environment;
+    if (try settings.refusal(a, settings.Process{}, .{ .cuda = true, .slide = o.slide, .device = o.device, .segments = o.segments })) |why| {
+        problem.* = why;
+        return null;
+    }
     if (try o.slideRefusal(a, "CUDA")) |why| {
         problem.* = why;
         return null;

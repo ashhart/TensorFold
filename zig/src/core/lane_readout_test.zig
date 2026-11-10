@@ -226,6 +226,11 @@ test "readout lane: a cancel inside the finish, between pieces or inside a piece
         var rig: Rig = undefined;
         try rig.init(&r, 1);
         defer rig.deinit();
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/trace.jsonl", .{tmp.sub_path});
+        defer a.free(path);
+        rig.host.trace = try @import("lane_trace.zig").Trace.open(a, io, path);
         switch (where) {
             .finish => r.mode = .blocked,
             .between => r.hold = .between,
@@ -251,6 +256,20 @@ test "readout lane: a cancel inside the finish, between pieces or inside a piece
         try std.testing.expectEqual(@as(usize, 1), r.releases);
         try std.testing.expectEqual(@as(usize, 0), r.base.lanes.count());
         try std.testing.expectEqual(@as(usize, 0), r.firsts);
+        if (where != .between) continue;
+        // no call fails between pieces: the trace's one cancel line ends the request, inside its prompt
+        const text = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 20));
+        defer a.free(text);
+        const Line = struct { kind: []const u8, id: u64, rows_to: usize, ok: bool };
+        var cancels: usize = 0;
+        var lines = std.mem.tokenizeScalar(u8, text, '\n');
+        while (lines.next()) |raw| {
+            const l = try std.json.parseFromSliceLeaky(Line, a, raw, .{ .ignore_unknown_fields = true });
+            if (!std.mem.eql(u8, l.kind, "cancel")) continue;
+            cancels += 1;
+            try std.testing.expect(l.id == 1 and l.rows_to > 0 and l.rows_to < prompt.len);
+        }
+        try std.testing.expectEqual(@as(usize, 1), cancels);
     }
 }
 

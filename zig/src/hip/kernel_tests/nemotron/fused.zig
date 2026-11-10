@@ -1,6 +1,7 @@
 //! Nemotron-H's merged decode launches against the launches they replace: the same bytes, every shape they take.
 
 const std = @import("std");
+const platform = @import("sys");
 const rig = @import("../rig.zig");
 const DeviceBuffer = @import("../../memory.zig").DeviceBuffer;
 const moe_launch = @import("../../launches/nemotron_moe.zig");
@@ -203,8 +204,8 @@ test "the residual and the norm in one launch write the bytes of tf_add (or tf_a
 }
 
 fn nowNs() u64 {
-    var ts: std.c.timespec = undefined;
-    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    var ts: platform.c.timespec = undefined;
+    _ = platform.c.clock_gettime(platform.c.CLOCK.MONOTONIC, &ts);
     return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
 }
 

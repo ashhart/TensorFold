@@ -27,10 +27,7 @@ pub const seedFor = lanes.sampling.seedFor;
 pub const LogprobRow = lanes.LogprobRow;
 
 /// The request's stop strings, checked on the engine's thread after each committed token (the server decodes the tail).
-pub const Stop = struct {
-    ctx: *anyopaque,
-    check: *const fn (ctx: *anyopaque, emitted: []const u32) bool,
-};
+pub const Stop = struct { ctx: *anyopaque, check: *const fn (ctx: *anyopaque, emitted: []const u32) bool };
 
 pub const CallGate = @import("engine_request_controls.zig").CallGate;
 pub const Structure = @import("engine_request_controls.zig").Structure;
@@ -124,6 +121,10 @@ pub const SpeechRequest = @import("speech_api.zig").SpeechRequest;
 pub const SpeechResult = @import("speech_api.zig").SpeechResult;
 pub const SpeechInfo = @import("speech_api.zig").SpeechInfo;
 pub const SpeechSubmitError = error{ Closed, Busy, InvalidRequest, Unsupported };
+pub const ImageRequest = @import("image_api.zig").ImageRequest;
+pub const ImageResult = @import("image_api.zig").ImageResult;
+pub const ImageInfo = @import("image_api.zig").ImageInfo;
+pub const ImageSubmitError = error{ Closed, Busy, InvalidRequest, Unsupported };
 
 pub const Reason = enum { stop, length, cancelled, failed, silence };
 pub const speech_guard = @import("speech_guard.zig");
@@ -165,6 +166,8 @@ pub const Info = struct {
     embeddings: ?lanes.embedding.Info = null,
     readouts: ?lanes.readout.Info = null, // non-null: the engine answers readout requests and nothing else
     speech: ?SpeechInfo = null,
+    /// The engine serves one picture a request through `submit_image`; null: no image capability.
+    image: ?ImageInfo = null,
     lanes: u32 = 1,
     /// Server preflight prompt-plus-reply limit (0: the engine owns admission).
     context_window: u32 = 0,
@@ -179,6 +182,8 @@ pub const Info = struct {
     thinking_budget: bool = true,
     /// The model can emit a reasoning block; false: all reply text is answer content, whatever enable_thinking renders.
     reasoning: bool = true,
+    thinking_switch: bool = false, // server-set from the chat template (Server.init): an explicit thinking off is honoured
+    thinking_applicable: bool = false, // server-set from the tokenizer (Server.init): the thinking close marker is one token
     /// The engine stops the reply after the think block at Request.answer_max (every lane engine: Info.ofLanes).
     answer_limit: bool = false,
     structures: bool = false,
@@ -190,6 +195,8 @@ pub const Info = struct {
     prompt_logprobs: bool = false,
     /// Prompt rows a prefill chunk at most, for the server's chunk starts (0: the engine cuts prompts itself).
     prefill_step: u32 = 0,
+    /// The minimum distance between template message cuts; exact-start families may keep adjacent turns.
+    prefill_min_chunk: u32 = 256,
     /// The engine keeps prompt states between requests, so ``prefilled`` counts the tokens it restored.
     prompt_cache: bool = false,
     /// Startup cache budget and the smallest state admitted by the family's existing keep plan.
@@ -241,16 +248,14 @@ pub const Info = struct {
     }
 };
 
-pub const Admit = struct {
-    ctx: *anyopaque,
-    fits: *const fn (ctx: *anyopaque, prompt: u32, max_tokens: u32) bool,
-};
+pub const Admit = struct { ctx: *anyopaque, fits: *const fn (ctx: *anyopaque, prompt: u32, max_tokens: u32) bool };
 
 /// The bytes the lane host may promise at once, and what one request's caches cost at most (core/kv_ledger.zig).
 pub const Ledger = struct {
     ctx: *anyopaque,
     total: u64,
     cost: *const fn (ctx: *anyopaque, prompt: u32, max_tokens: u32) u64,
+    standing: kv_ledger.Standing = .{}, // streams paid at load, in `total`: the engine's own sequence (#1943)
 };
 
 pub const PromptCacheCapacity = @import("engine_cache_plan.zig").PromptCacheCapacity;
@@ -376,10 +381,7 @@ pub const Opened = struct {
 pub const Memory = struct { active: u64 = 0, cache: u64 = 0, peak: u64 = 0, pinned: u64 = 0, limit: ?u64 = null };
 
 /// A backend's words for its own refusals (a request it cannot serve); null: the error's name.
-pub const Explain = struct {
-    ctx: ?*anyopaque = null,
-    text: *const fn (ctx: ?*anyopaque, err: anyerror) ?[]const u8,
-};
+pub const Explain = struct { ctx: ?*anyopaque = null, text: *const fn (ctx: ?*anyopaque, err: anyerror) ?[]const u8 };
 
 /// A backend's own memory counts for LaneHost; read from HTTP threads, so it must not touch the GPU.
 pub const MemorySource = struct {
@@ -424,6 +426,7 @@ pub const Engine = struct {
         info: *const fn (ctx: *anyopaque) Info,
         submit: *const fn (ctx: *anyopaque, id: Id, request: *const Request, sink: Sink) SubmitError!void,
         submit_speech: ?*const fn (*anyopaque, Id, *const SpeechRequest, Sink) SpeechSubmitError!void = null,
+        submit_image: ?*const fn (*anyopaque, Id, *const ImageRequest, Sink) ImageSubmitError!void = null,
         /// Ends a request between rounds; its ``finished`` (cancelled) still arrives. Unknown ids are ignored.
         cancel: *const fn (ctx: *anyopaque, id: Id) void,
         status: *const fn (ctx: *anyopaque, out: *Status, stream_tokens: []u32) void,
@@ -469,6 +472,11 @@ pub const Engine = struct {
     }
     pub fn submitSpeech(e: Engine, id: Id, request: *const SpeechRequest, sink: Sink) SpeechSubmitError!void {
         const f = e.vtable.submit_speech orelse return error.Unsupported;
+        return f(e.ctx, id, request, sink);
+    }
+    /// The image hook, or Unsupported when this engine serves no picture.
+    pub fn submitImage(e: Engine, id: Id, request: *const ImageRequest, sink: Sink) ImageSubmitError!void {
+        const f = e.vtable.submit_image orelse return error.Unsupported;
         return f(e.ctx, id, request, sink);
     }
     pub fn cancel(e: Engine, id: Id) void {
@@ -562,10 +570,8 @@ pub const Rounds = @import("lane_host.zig").Rounds;
 
 /// Exact prompt reuse between requests, for any family (prompt_cache.zig).
 pub const prompt_cache = @import("prompt_cache.zig");
-
 /// The same for a paged cache over the backend's own KV pages (prompt_radix.zig).
 pub const prompt_radix = @import("prompt_radix.zig");
-
 /// Decoded prompt rows as canonical spans, for a cache keyed by the arithmetic that made each row (cache_modes.zig).
 pub const cache_modes = @import("cache_modes.zig");
 

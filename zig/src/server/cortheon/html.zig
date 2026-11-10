@@ -16,6 +16,8 @@ const entities = [_]struct { []const u8, []const u8 }{
     .{ "middot", "\u{b7}" },  .{ "bull", "\u{2022}" },  .{ "times", "\u{d7}" },   .{ "copy", "\u{a9}" },     .{ "reg", "\u{ae}" },
     .{ "trade", "\u{2122}" }, .{ "deg", "\u{b0}" },     .{ "rarr", "\u{2192}" },  .{ "larr", "\u{2190}" },   .{ "zwj", "" },
     .{ "zwnj", "" },          .{ "shy", "" },
+    .{ "AMP", "&" },       .{ "LT", "<" },       .{ "GT", ">" },           .{ "QUOT", "\"" }, // HTML's uppercase names
+    .{ "COPY", "\u{a9}" }, .{ "REG", "\u{ae}" }, .{ "TRADE", "\u{2122}" },
 };
 
 fn isName(ch: u8) bool {
@@ -311,7 +313,7 @@ pub fn hrefs(a: Allocator, page: []const u8, max: usize, budget: ?*Budget) Alloc
         if (q != ' ') v = v[1..];
         const stop = std.mem.indexOfAny(u8, v, if (q == ' ') " >" else &.{q}) orelse v.len;
         const raw = std.mem.trim(u8, v[0..stop], " \t\r\n");
-        if (raw.len == 0 or raw[0] == '#' or std.ascii.startsWithIgnoreCase(raw, "javascript:") or std.ascii.startsWithIgnoreCase(raw, "mailto:")) continue;
+        if (raw.len == 0 or raw[0] == '#' or std.ascii.startsWithIgnoreCase(raw, "javascript:") or std.ascii.startsWithIgnoreCase(raw, "mailto:") or std.ascii.startsWithIgnoreCase(raw, "data:")) continue; // a data URL is not a page
         var text: std.ArrayList(u8) = .empty;
         var i: usize = 0;
         while (i < raw.len) {
@@ -370,6 +372,8 @@ test "title, main content, blocks, lists and entities" {
     try std.testing.expect(std.mem.indexOf(u8, t.text, "| a | b") != null);
     for ([_][]const u8{ "alert", "Home", "legal", "hidden", "color" }) |gone| try std.testing.expect(std.mem.indexOf(u8, t.text, gone) == null);
     try std.testing.expect(!t.truncated);
+    const cased = try toText(a, "<p>Version&AMP;0.17 &rArr; &rarr;</p>", 1000, null);
+    try std.testing.expectEqualStrings("Version&0.17 &rArr; \u{2192}", cased.text); // &rArr; stays; &AMP; is defined
 }
 
 test "bare ampersands are text, and a page full of them reads in linear time" {
@@ -440,6 +444,15 @@ test "link targets are read from anchors, decoded, without fragments or scripts"
     try std.testing.expectEqualStrings("/docs?a=1&b=2", got[0]);
     try std.testing.expectEqualStrings("https://o.org/", got[1]);
     try std.testing.expectEqualStrings("rel/page", got[2]);
+}
+
+test "a data URL is not kept as a page link" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const got = try hrefs(a, "<p><a href=\"data:text/html,hi\">d</a> <a href=\"/docs\">x</a></p>", 10, null);
+    try std.testing.expectEqual(@as(usize, 1), got.len);
+    try std.testing.expectEqualStrings("/docs", got[0]);
 }
 
 test "a link broken onto the next line by a carriage return is kept" {

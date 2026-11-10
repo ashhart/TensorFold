@@ -17,6 +17,11 @@ pub const Sampling = struct {
     pub fn minLog(s: Sampling) f64 {
         return if (s.min_p > 0.0) log(s.min_p) else -std.math.inf(f64);
     }
+
+    /// The rule every GPU sampler reads (gpu_rule.rule); backends that cannot import lanes reach it through here.
+    pub fn gpuRule(s: Sampling) @import("gpu_rule.zig").Rule {
+        return @import("gpu_rule.zig").rule(s);
+    }
 };
 
 /// OpenAI's presence and frequency penalties: a reply's token loses presence + frequency * its count, greedy too.

@@ -107,3 +107,27 @@ test "capability audit: decision-only formats are listed apart from the formats 
     defer none.deinit();
     try std.testing.expectEqual(@as(usize, 0), none.value.object.get("decisions").?.object.count());
 }
+
+test "capability audit: environment table omits dead readers and slide metadata names its members" {
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try capabilities(&out.writer, .{ .version = "test" });
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, out.written(), .{});
+    defer parsed.deinit();
+    const env = parsed.value.object.get("env").?.array.items;
+    for (env) |value| {
+        try std.testing.expect(!std.mem.eql(u8, value.string, "TENSORFOLD_NO_UPDATE_CHECK"));
+        try std.testing.expect(!std.mem.eql(u8, value.string, "HF_HUB_OFFLINE"));
+    }
+    const rows = parsed.value.object.get("profiles").?.object.get("registered_switches").?.array.items;
+    var groups: usize = 0;
+    for (rows) |row| {
+        if (!std.mem.eql(u8, row.object.get("id").?.string, "slide_learn_mode")) continue;
+        groups += 1;
+        try std.testing.expectEqualStrings("experimental", row.object.get("class").?.string);
+        try std.testing.expectEqual(@as(usize, 4), row.object.get("members").?.array.items.len);
+        try std.testing.expectEqual(@as(usize, 2), row.object.get("scopes").?.array.items.len);
+        try std.testing.expect(row.object.get("stable").? == .null);
+    }
+    try std.testing.expectEqual(@as(usize, 1), groups);
+}

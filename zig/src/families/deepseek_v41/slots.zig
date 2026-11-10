@@ -16,10 +16,7 @@ pub const op_rows_drop: i64 = 19;
 
 /// TF_DSV41_SLOTS: live slots (1: today's one-slot path, nothing stacked). Every rank must set the same.
 pub fn countFromEnv() !u32 {
-    const v = std.c.getenv("TF_DSV41_SLOTS") orelse return 1;
-    const n = try std.fmt.parseInt(u32, std.mem.span(v), 10);
-    if (n < 1 or n > 16) return error.SlotRange;
-    return n;
+    return @import("sys").environment.read(u32, "TF_DSV41_SLOTS", 1);
 }
 
 const Stacked = struct { base: u64, bytes: u64 };

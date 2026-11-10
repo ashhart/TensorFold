@@ -1,5 +1,4 @@
 //! GLM-5.3-Flash's CUDA lane backend (as nemotron/cuda_lanes.zig): a slot per stream, shared verify, chunked prompts.
-
 const std = @import("std");
 const lanes = @import("lanes");
 const engine = @import("cuda_engine.zig");
@@ -9,37 +8,33 @@ const dflash = @import("dflash.zig");
 const prompt_lp = @import("cuda_prompt_logprobs.zig");
 const share_mod = @import("cuda_share.zig");
 const cuda = @import("cuda");
-
 const be = lanes.backend;
-
 /// First tokens a handle names.
 const ring = 1024;
-
 /// The widest verify window: the pending token and a copy (the lane core proposes them), as the decode buffers hold.
 pub const max_rows = fw.window_rows;
-const mtp_rows = 1 + engine.max_drafts;
 const max_held = dflash.BLOCK - 1; // a DFlash2 block's drafts (the MTP head's chains stop at max_drafts)
-
+const shared_head_drafts = 3; // an MTP chain's most drafts in a shared round, whose chains step stream by stream
 const copy_policy = @import("cuda_copy_policy.zig");
-
+const lane_costs = @import("cuda_lane_costs.zig");
 /// A stream's place in the backend: its sequence's slot, the rows its last verify left uncommitted, its held drafts.
 const Lane = struct {
     slot: u32,
     pending_rows: ?usize = null,
-    held: [max_held]u32 = undefined,
-    chances: [max_held]f64 = undefined, // each held draft's chance: DFlash2's selector's, or the MTP head's (--mtp-confidence)
+    held: [@max(max_held, engine.max_drafts)]u32 = undefined,
+    chances: [@max(max_held, engine.max_drafts)]f64 = undefined, // each held draft's chance: DFlash2's selector's, or the MTP head's (--mtp-confidence)
     held_n: usize = 0,
     first: ?u64 = null,
     fill: ?usize = null, // a prompt pass going a chunk at a time: where its next chunk starts
     marks: []const u32 = &.{}, // TF_KV_SHARE: where the shared prompt store keeps this stream's pass (owned)
 };
-
 pub const Lanes = struct {
     x: follow.Leader,
     whole: bool = false, // prompt passes run whole (TF_GLM_PROMPT_STEPS=0): no other stream's round between chunks
     alone: bool = false, // each window in its own forward (TF_GLM_SHARED=0)
     mtp_confidence: ?f64 = null, // --mtp-confidence: the MTP head's chains stop where their chance falls under it
     copy_confidence: bool = false, // copy mode keeps head confidence in probabilities so target copies stay priced
+    costs: ?lane_costs.Table = null, // MTP's window and draft prices, timed at load (cuda_lane_costs)
     shared: u64 = 0, // forwards that held several streams' windows (checks read it)
     lanes: std.AutoHashMapUnmanaged(*const lanes.Stream, Lane) = .empty,
     drawn: [ring]u32 = undefined,
@@ -98,26 +93,30 @@ pub const Lanes = struct {
         break :vt v;
     };
 
-    /// Round loop facts: copies up to max_rows, head chains to mtp_rows, shared windows unless TF_GLM_SHARED=0.
+    /// Round loop facts: copies up to max_rows, head chains to max_drafts, shared windows unless TF_GLM_SHARED=0.
     pub fn facts(self: *const Lanes) lanes.Model {
         const drafting = self.x.e.mtp;
         const block = self.x.e.drafter != null;
+        const costs = if (block) null else if (self.costs) |*c| c else null;
         const sharing = drafting and !self.alone;
         return .{
             .allocate_shared_drafts = drafting,
             .exact_width = if (drafting) max_rows else 1,
-            .first_copy_rows = mtp_rows, // a first copy as wide as a head round; it grows as its tokens land
+            .first_copy_rows = 4, // a first copy starts narrow; it grows as its tokens land
             .gpu_tokens = false,
             .mtp = drafting,
             .speculate = drafting,
             .speculate_early = false,
             .drafts = if (block) max_held else engine.max_drafts,
             .draft_streams = block, // one block pass drafts every stream of the round
-            .mtp_step_ms = if (block) 1.6 / @as(f64, max_held) else 0, // a block's 7 drafts in one pass (about 1.6 ms)
+            .mtp_step_ms = if (costs) |c| c.step_ms else if (block) 1.6 / @as(f64, max_held) else 0, // a block's seven drafts share one pass
+            .shared_step_ms = if (costs == null) null else 0,
             .draft_probabilities = block or self.mtp_confidence != null, // chances size each window (DFlash2's by the costs)
             .draft_confidence = if (block) null else self.mtp_confidence,
-            .window_costs = if (block) &copy_policy.window_costs else &.{},
-            .shared_costs = if (block) &copy_policy.shared_costs else &.{},
+            .window_costs = if (costs) |c| &c.window else if (block) &copy_policy.window_costs else &.{},
+            .shared_costs = if (block) &copy_policy.shared_costs else &.{}, // DFlash2's shared rounds keep main's prices
+            .window_costs_lone = costs != null, // timed windows are one stream's: shared rounds keep the rule they had
+            .shared_drafts = if (block) 0 else shared_head_drafts,
             .hidden_rows = sharing,
             .batch_rows = if (sharing) engine.shared_rows else 0,
             .max_streams = if (sharing) engine.max_shared else 1,
@@ -127,7 +126,7 @@ pub const Lanes = struct {
     /// Root/context copies use the same verify/keep path and shared cost allocator as every target window.
     pub fn factsWithCopies(self: *Lanes, enabled: bool) lanes.Model {
         self.copy_confidence = enabled and self.x.e.mtp;
-        return copy_policy.apply(self.facts(), enabled);
+        return copy_policy.apply(self.facts(), enabled, self.x.e.drafter == null and self.costs != null);
     }
 
     fn of(ptr: *anyopaque) *Lanes {
@@ -225,14 +224,17 @@ pub const Lanes = struct {
         return true;
     }
 
-    fn many(self: *Lanes, ss: []const *lanes.Stream, parts: []const engine.Prompt, firsts: []u32) !void {
+    pub fn many(self: anytype, ss: []const *lanes.Stream, parts: []const engine.Prompt, firsts: []u32) !void {
         try self.x.prefillMany(parts, firsts);
+        for (ss) |s| lanes.prefill_widths.completed(self.x.e.gpa, s, s.prompt_len);
         for (ss, firsts) |s, t| self.lanes.getPtr(s).?.first = self.take(t);
     }
 
     /// One chunk of the stream's prompt pass (other rounds run between); true once the first token is drawn.
     fn prefillStepFn(ptr: *anyopaque, s: *lanes.Stream, _: u32) anyerror!bool {
-        const self = of(ptr);
+        return prefillStep(of(ptr), s);
+    }
+    pub fn prefillStep(self: anytype, s: *lanes.Stream) !bool {
         const going: ?usize = if (self.lanes.getPtr(s)) |l| l.fill else null;
         const from = if (going == null) try self.opening(s) else null;
         if (going == null) try self.images(s, from);
@@ -247,12 +249,16 @@ pub const Lanes = struct {
         var keeps: share_mod.Keeps = undefined;
         const step = try self.x.chunk(s.prompt(), at, !@import("cuda_prompt_solo.zig").othersDecode(&self.lanes, s), from, .{ .ptr = s, .check = cancelled }, self.marksOf(s, &keeps));
         if (step.first) |first| {
+            lanes.prefill_widths.completed(self.x.e.gpa, s, step.rows);
             l.first = self.take(first);
             l.fill = null;
             return true;
         }
         l.fill = at + step.rows; // on the 2048 grid (cuda_engine.zig), so uncapped; the share still works by time
-        if (s.settle_step) try self.x.e.stream.synchronize(); // its tail would land in the next decode round's time
+        if (s.settle_step) { // its tail would land in the next decode round's time
+            try self.x.e.stream.synchronize();
+            lanes.prefill_widths.completed(self.x.e.gpa, s, step.rows);
+        }
         return false;
     }
 
@@ -548,7 +554,7 @@ pub const Lanes = struct {
             held[i] = l;
         }
         try self.x.block(reqs[0..requests.len]);
-        const cut = dflash.confidence();
+        const cut = try dflash.confidence();
         for (requests, held[0..requests.len]) |r, l| {
             l.held_n = @min(r.depth, max_held);
             var chain: f64 = 1; // glm_cuda's rule: past the first, a chain stops where its product falls under the cut
@@ -586,10 +592,6 @@ pub const Lanes = struct {
         if (self.lanes.count() == 0) self.x.idle() catch |err| std.log.err("the other ranks' idle step: {s}", .{@errorName(err)});
     }
 };
-
-comptime {
-    std.debug.assert(max_rows <= fw.window_rows);
-}
 
 /// Eligibility for the maintained fresh-prompt batching path.
 pub fn canBatch(s: anytype) bool {

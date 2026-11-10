@@ -45,7 +45,8 @@ struct Tile {
     static constexpr int S = MODE == FP4 || MODE == FP8G ? BN * 4 : MODE == MXFP8 ? BN * 2 : 0;
     static constexpr int STAGE = (X + W + S + 127) / 128 * 128;
     static constexpr int PARTIALS = MT * NT * 4 * THREADS * 4;
-    static constexpr int SMEM = STAGES * STAGE > PARTIALS ? STAGES * STAGE : PARTIALS;
+    static constexpr int BARRIERS = MODE == BF16 && BN > 64 ? 128 : 0;
+    static constexpr int SMEM = (STAGES * STAGE > PARTIALS ? STAGES * STAGE : PARTIALS) + BARRIERS;
 };
 
 template <int MODE, int BM, int BN, int WM, int WN, int STAGES, bool F32, bool CLUSTER, bool FUSE = false>
@@ -53,15 +54,17 @@ __device__ __forceinline__ void qmmf_body(
         const __nv_bfloat16* __restrict__ x, const unsigned char* __restrict__ w, const uint8_t* __restrict__ bs,
         float scale, void* __restrict__ out, float* __restrict__ part, int M, int N, int K, int SK, int npad, int ldx,
         int group, int ldy) {
+#define TF_QMMF_STRIDED
 #include "qmmf_body.cuh"
+#undef TF_QMMF_STRIDED
 }
+
 
 template <int MODE, int BM, int BN, int WM, int WN, int STAGES, bool F32, bool CLUSTER, bool FUSE = false>
 __global__ void __launch_bounds__(WM * WN * 32) qmmf_kernel(
         const __nv_bfloat16* __restrict__ x, const unsigned char* __restrict__ w, const uint8_t* __restrict__ bs,
         float scale, void* __restrict__ out, float* __restrict__ part, int M, int N, int K, int SK, int npad, int ldx,
         int group) {
-    const int ldy = N;
 #include "qmmf_body.cuh"
 }
 
@@ -195,6 +198,48 @@ template __global__ void qmmf_kernel<BF16, 32, 64, 1, 4, 4, true, true, false>(c
 template __global__ void qmmf_kernel<BF16, 64, 64, 1, 4, 4, true, false, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
 template __global__ void qmmf_kernel<BF16, 64, 64, 1, 4, 4, true, true, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
 template __global__ void qmmf_kernel<BF16, 64, 64, 1, 4, 4, true, false, true>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
+// Prompt tiles retain the same m16n8k16 chains and fused slice boundaries as the 64x64 instances.
+#define BF16_PROMPT(F32, FUSE) \
+    template __global__ void qmmf_kernel<BF16, 128, 128, 2, 4, 3, F32, false, FUSE>( \
+        const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, \
+        void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
+BF16_PROMPT(false, false)
+BF16_PROMPT(false, true)
+BF16_PROMPT(true, false)
+BF16_PROMPT(true, true)
+#undef BF16_PROMPT
+
+// Unsplit K32 needs no inter-slice partial buffer or bulk-copy barrier storage.
+struct PromptK32Tile {
+    static constexpr int THREADS = 256, MT = 4, NT = 4;
+    static constexpr int ROW = 64, CHUNKS = ROW / 16;
+    static constexpr int X = 128 * ROW, W = 128 * 32 * 2, S = 0;
+    static constexpr int STAGE = (X + W + 127) / 128 * 128;
+    static constexpr int BARRIERS = 0, SMEM = 3 * STAGE;
+};
+
+// Unsplit K32 staging keeps the parent's packed weights, K16 MMA chain and final output rounding.
+static_assert(PromptK32Tile::SMEM == 49152, "K32 128x128 shared bytes");
+
+template <bool F32>
+__global__ void __launch_bounds__(256, 2) qmmf_prompt_k32_kernel(
+        const __nv_bfloat16* __restrict__ x, const unsigned char* __restrict__ w, const uint8_t* __restrict__ bs,
+        float scale, void* __restrict__ out, float* __restrict__ part, int M, int N, int K, int SK, int npad, int ldx,
+        int group) {
+    constexpr int MODE = BF16, BM = 128, BN = 128, WM = 2, WN = 4, STAGES = 3, BK = 32;
+    constexpr bool CLUSTER = false, FUSE = false;
+#define TF_QMMF_K32
+#include "qmmf_body.cuh"
+#undef TF_QMMF_K32
+}
+#define BF16_K32(F32) \
+    template __global__ void qmmf_prompt_k32_kernel<F32>( \
+        const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, \
+        void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
+BF16_K32(false)
+BF16_K32(true)
+#undef BF16_K32
+
 template __global__ void reduce_kernel<true>(const float* __restrict__, void* __restrict__, long long, int, float);
 template __global__ void reduce_kernel<false>(const float* __restrict__, void* __restrict__, long long, int, float);
 

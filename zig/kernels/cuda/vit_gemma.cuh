@@ -40,7 +40,7 @@ __device__ __forceinline__ void qkv_norm_rope(__nv_bfloat16* qkv, const __nv_bfl
         s = __fadd_rn(s, __fmul_rn(v[i], v[i]));
     }
     s = tf_glue::warp_sum(s);
-    const float r = __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(__fdiv_rn(s, static_cast<float>(D)), eps)));
+    const float r = tf_common::rms_scale(s, D, eps);
     __shared__ float nrm[96];
 #pragma unroll
     for (int i = 0; i < 3; ++i) {

@@ -71,7 +71,7 @@ pub const Rows = struct {
             made += 1;
             if (t.h.layer != l) return error.BadEngramShard;
         }
-        const n = poolThreads();
+        const n = (try poolThreads());
         if (n > 0) {
             try r.startPool(n);
             if (!quiet) std.log.scoped(.dsv41).info("engram: rows read by {d} threads (TF_DSV41_ENGRAM_READERS)", .{n});
@@ -382,8 +382,6 @@ fn orderU64(a: u64, b: u64) std.math.Order {
 }
 
 /// TF_DSV41_ENGRAM_READERS: the reader threads (default 16; 0: none, reads serial; at most 32).
-pub fn poolThreads() u32 {
-    const v = std.c.getenv("TF_DSV41_ENGRAM_READERS") orelse return 16;
-    const n = std.fmt.parseInt(u32, std.mem.span(v), 10) catch return 16;
-    return @min(n, 32);
+pub fn poolThreads() !u32 {
+    return @import("sys").environment.read(u32, "TF_DSV41_ENGRAM_READERS", 16);
 }

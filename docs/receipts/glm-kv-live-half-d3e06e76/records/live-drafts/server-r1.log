@@ -1,0 +1,12 @@
+rank 1 launch-pr.sh start 06:32:02 binary=$WORK/TensorFold-pr/zig-out/native/bin/tensorfold-native live_half=1
+rank 1 memlock soft=unlimited hard=unlimited
+info: glm kv selection: pool pages; TF_KV_PAGES=auto (default); rank 1 of 2; cache bf16
+info: p2p: rank 1 of 2: GPU 0 NVIDIA GB10 (0000000F:01:00.0); driver 580.159.03, CUDA driver API 13.0, NCCL 2.30.7
+info: p2p: peer access: TensorFold enables none itself (no cuCtxEnablePeerAccess); NCCL sets up its own peers
+info: p2p: NCCL transport not captured: NCCL_DEBUG, NCCL_DEBUG_SUBSYS or NCCL_DEBUG_FILE is set, so NCCL logs as the user asked
+info: checkpoint digest: 0.0 GiB read in 0.1 s, 83/83 cached files
+info: weights: 16 readers read 156.4 GiB ahead of the loader
+info: RoCE all-gather: 2 HCA(s), shards up to 512 KiB by RDMA writes
+info: the room this rank reports counts the 1.05 GiB free on the per-CPU page lists beyond their resting level (MemAvailable does not)
+info: rank 1: rank 0 ended; leaving
+Terminated

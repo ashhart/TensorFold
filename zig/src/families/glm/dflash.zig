@@ -40,9 +40,8 @@ pub fn tapRows(prompt_rows: usize) usize {
 }
 
 /// TF_GLM_DRAFT_CONFIDENCE: where a DFlash2 chain's chance product stops it (glm_cuda's 0.7).
-pub fn confidence() f64 {
-    const v = std.c.getenv("TF_GLM_DRAFT_CONFIDENCE") orelse return 0.7;
-    return std.fmt.parseFloat(f64, std.mem.span(v)) catch 0.7;
+pub fn confidence() !f64 {
+    return @import("sys").environment.read(f64, "TF_GLM_DRAFT_CONFIDENCE", 0.7);
 }
 
 /// Device bytes of the loader's raw scratch: a 4-bit linear's words, scales and biases, for the largest at `world`.
@@ -97,6 +96,8 @@ pub const Run = struct { ring: u64, taps: u64, n: usize, pos0: i64 };
 
 /// Every rank runs the ingest and the block pass on its half of the MLP and head; rank 0 selects the drafts.
 pub const Drafter = struct {
+    checkpoint_digest: [32]u8 = @splat(0), // the loaded artifact, for the window-price cache key
+    bits: u8 = 0, // the loader's actual linear precision
     gpa: std.mem.Allocator,
     d: *const cuda.Driver,
     module: cuda.Module,

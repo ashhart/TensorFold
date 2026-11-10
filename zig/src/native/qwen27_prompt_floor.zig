@@ -29,6 +29,12 @@ pub fn admit(a: std.mem.Allocator, rows: usize, source: Source, why: *[]const u8
 
 pub fn environment(a: std.mem.Allocator, value: ?[]const u8, why: *[]const u8) !void {
     const text = value orelse return;
-    const rows = std.fmt.parseInt(u32, text, 10) catch return;
-    try admit(a, rows, .environment, why);
+    const settings = @import("sys").environment;
+    _ = settings.parse("TF_PROMPT_ROWS", text) catch {
+        // a whole count below the floor gets the floor's own message; any other bad text the table's
+        const rows = std.fmt.parseInt(u32, text, 10) catch minimum;
+        if (rows < minimum) return admit(a, rows, .environment, why);
+        why.* = try settings.describe(a, "TF_PROMPT_ROWS", text);
+        return error.InvalidEnvironment;
+    };
 }

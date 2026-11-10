@@ -66,6 +66,7 @@ test {
 test {
     _ = @import("cuda_vision_test.zig");
     _ = @import("cuda_vision_lanes_test.zig");
+    _ = @import("cuda_source_ring_test.zig");
 }
 
 test {
@@ -74,4 +75,9 @@ test {
 
 test {
     _ = @import("cuda_subset_host_test.zig");
+    _ = @import("cuda_source_test.zig");
+}
+
+test {
+    _ = @import("cuda_train_locate.zig");
 }

@@ -47,7 +47,7 @@ pub fn tinyPack(a: std.mem.Allocator, c: *const Config, extra: []const u8, skip:
 }
 
 /// `tinyPack`, and the data bytes its header describes.
-fn tinyPackLen(a: std.mem.Allocator, c: *const Config, extra: []const u8, skip: []const u8, data_len: *u64) ![]u8 {
+pub fn tinyPackLen(a: std.mem.Allocator, c: *const Config, extra: []const u8, skip: []const u8, data_len: *u64) ![]u8 {
     return tinyPackWidths(a, c, extra, skip, data_len, null);
 }
 

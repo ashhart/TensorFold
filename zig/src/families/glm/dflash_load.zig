@@ -126,6 +126,7 @@ fn layerName(b: *[96]u8, li: usize, s: []const u8) ![]const u8 {
 pub fn load(gpa: std.mem.Allocator, io: std.Io, e: anytype, dir: []const u8, rank: usize, world: usize, bits: u8) !*Drafter {
     if (bits != 0 and bits != 4) return error.BadDrafterBits;
     try checkConfig(gpa, io, dir);
+    const checkpoint_digest = try core.checkpoint_identity.fullIdentity(gpa, io, dir);
     const d = e.d;
     const head = (e.w.mtp orelse return error.DrafterNeedsDraftHead).draft;
     const path = try std.fs.path.join(gpa, &.{ dir, "model.safetensors" });
@@ -165,7 +166,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, e: anytype, dir: []const u8, ran
     }
     const dr = try gpa.create(Drafter);
     errdefer gpa.destroy(dr);
-    dr.* = .{ .gpa = gpa, .d = d, .module = module, .k = try df.Kernels.load(module), .weights = wbuf, .split = split, .ff = ff, .rank = rank, .world = world, .tap_rows = df.tapRows(e.bp.rows) };
+    dr.* = .{ .checkpoint_digest = checkpoint_digest, .bits = bits, .gpa = gpa, .d = d, .module = module, .k = try df.Kernels.load(module), .weights = wbuf, .split = split, .ff = ff, .rank = rank, .world = world, .tap_rows = df.tapRows(e.bp.rows) };
     defer @import("cuda_load_owner.zig").drain(e.stream, d);
     var nb: [4][96]u8 = undefined;
     for (&dr.layers, 0..) |*lw, i| {
@@ -202,7 +203,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, e: anytype, dir: []const u8, ran
     var tail: Tail = .{ .loader = &l, .head_n = head.n };
     const candidates = @import("dflash_candidates.zig").Layout.init(world, df.MAX_M, df.CW);
     try @import("dflash_load_owner.zig").acquire(gpa, dr, &tail, Tail, .{ .book = df.VOCAB * df.RANK, .ctx = df.MAX_CTX, .cand = candidates.host, .hidden = df.MAX_M * df.RANK });
-    if (std.c.getenv("TF_GLM_DFLASH2_LOG")) |v| dr.log = std.fmt.parseInt(u64, std.mem.span(v), 10) catch 0;
+    dr.log = try @import("sys").environment.read(u64, "TF_GLM_DFLASH2_LOG", dr.log);
     if (std.c.getenv("TF_GLM_DFLASH2_PROF") != null) dr.prof = io;
     std.log.info("dflash2: drafter from {s} (CC BY-NC-ND 4.0: non-commercial use only), linears at {d} bits, {d:.2} GiB on the device", .{ dir, if (bits == 0) 16 else bits, @as(f64, @floatFromInt(l.at)) / (1 << 30) });
     return dr;

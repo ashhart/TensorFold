@@ -36,6 +36,23 @@ struct GemmOut {
     }
 };
 
+// A packed gate/up product's pair, as tf_silu_mul over the plain product's two BF16 outputs: g and u rounded as GemmOut
+// rounds them, silu(g) = g / (1 + expf(-g)) rounded, then that times u rounded; act (m, n / 2) at feature f.
+template <typename T>
+struct SiluPairOut {
+    static constexpr bool pairs = true;
+    __device__ static float widen(typename T::elem v) {
+        if constexpr (std::is_same_v<typename T::elem, __half>) return __half2float(v);
+        else return __uint_as_float(static_cast<uint32_t>(__builtin_bit_cast(unsigned short, v)) << 16);
+    }
+    template <class Args>
+    __device__ static void store_pair(const Args& a, int row, int f, float g, float u) {
+        const float gb = widen(narrow<T>(g)), ub = widen(narrow<T>(u));
+        const float s = widen(narrow<T>(gb / (1.0f + expf(-gb))));
+        static_cast<typename T::elem*>(static_cast<void*>(a.out16))[out_row(a, row) * (a.n / 2) + f] = narrow<T>(s * ub);
+    }
+};
+
 // A float product rounded to T: FP16 is one rounding of the exact product (fma, zero addend), never fp32 then FP16.
 template <typename T>
 __device__ inline typename T::elem narrow_product(float a, float b) {

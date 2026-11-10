@@ -573,4 +573,5 @@ test {
     _ = @import("drafted_role_test.zig");
     _ = @import("drafted_step_test.zig");
     _ = @import("drafted_held_test.zig");
+    _ = @import("drafted_adopt_test.zig");
 }

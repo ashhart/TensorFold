@@ -2,6 +2,11 @@
 const std = @import("std");
 const Config = @import("config.zig").Config;
 
+/// Serving needs the even split: three ranks plan and write rank files, but have no exchanges yet.
+pub fn serving(c: *const Config, world: u32) !void {
+    if (world == 0 or c.heads % world != 0 or c.o_groups % world != 0) return error.BadWorld;
+}
+
 pub fn nativePrefill(c: *const Config, world: u32) !void {
     if (world == 0 or c.heads % world != 0) return error.BadWorld;
     const tile: u32 = @intCast(@import("block_prefill.zig").bmq);

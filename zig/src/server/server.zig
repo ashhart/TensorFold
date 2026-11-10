@@ -66,6 +66,8 @@ pub const Config = struct {
     dashboard: bool = false,
     /// Sampling when a request names none (generation_config.json and the serve flags), or null for greedy.
     default_sampling: ?Value = null,
+    /// --instruct-sampling's set, for a sampled chat request with thinking off (family_sampling.resolveInstruct).
+    instruct_sampling: ?Value = null,
     use_drafts: bool = true,
     /// --vision-urls: image parts may name public HTTPS URLs, fetched before admission (media_fetch.zig).
     vision_urls: bool = false,
@@ -108,6 +110,8 @@ pub const Config = struct {
     identity: Identity = .{},
     /// The process environment GET /v1/benchmark/manifest reads (revision and the hardware probe); null: none.
     environ: ?*const std.process.Environ.Map = null,
+    /// TENSORFOLD_TOOL_ID_KEY_FILE's key (tool_id_key.zig), which `Server.init` takes and zeroes; null: a random key.
+    tool_id_key: ?*@import("ids.zig").Key = null,
 };
 
 /// --name-priority: background by default when the id the request names is configured (openai.replyModel parity).
@@ -149,6 +153,7 @@ pub const Server = struct {
     /// Scheduler load the engine publishes as it works, and this server's identity and activity (load_ledger.zig).
     load: api.load_ledger.Ledger,
     store: responses.Store,
+    tool_ids: @import("ids.zig").Key, // every tool-call id's key: the config's, else this server's own
     next_id: std.atomic.Value(u64) = .init(1),
     /// Connections open now; a stop waits for them before freeing what they read.
     open_connections: std.atomic.Value(u32) = .init(0),
@@ -185,8 +190,10 @@ pub const Server = struct {
     }
 
     pub fn init(gpa: Allocator, io: std.Io, engine: api.Engine, text: model_text.Text, config: Config, keys: ?*auth.Store) !*Server {
+        const tool_ids = if (config.tool_id_key) |key| key.take() else try @import("ids.zig").Key.random(io);
         const srv = try gpa.create(Server);
-        srv.* = .{ .gpa = gpa, .io = io, .engine = engine, .info = engine.info(), .text = text, .config = config, .keys = keys, .metrics = .{ .gpa = gpa, .phases = config.phase_metrics }, .load = .init(io), .store = .{ .gpa = gpa }, .arena = .init(gpa), .slide = .init(gpa, io, config.slide_graph), .teacher = .init(gpa) };
+        srv.* = .{ .tool_ids = tool_ids, .gpa = gpa, .io = io, .engine = engine, .info = engine.info(), .text = text, .config = config, .keys = keys, .metrics = .{ .gpa = gpa, .phases = config.phase_metrics }, .load = .init(io), .store = .{ .gpa = gpa }, .arena = .init(gpa), .slide = .init(gpa, io, config.slide_graph), .teacher = .init(gpa) };
+        srv.config.tool_id_key = null; // its key is zeroed: `tool_ids` is the one copy
         errdefer srv.deinit(); // a later step's failure stops the keepalive before the caller closes the engine
         if (srv.info.embeddings != null and srv.info.capability(.text_generation)) return error.InvalidEmbeddingCapabilities;
         if (srv.info.readouts != null and (srv.info.capability(.text_generation) or srv.info.embeddings != null)) return error.InvalidReadoutCapabilities;
@@ -233,8 +240,11 @@ pub const Server = struct {
             srv.think_close = try std.mem.concat(a, u32, &.{ lead, &.{end}, trail });
             srv.think_close_end = end;
         }
+        srv.info.thinking_applicable = srv.close_id != null;
+        srv.info.thinking_switch = try @import("prompt.zig").thinkingSwitch(srv);
         if (srv.info.prefill_step > 0) {
             srv.chunks = try chunk_plan.markers(srv, a, srv.info.prefill_step);
+            srv.chunks.min_chunk = srv.info.prefill_min_chunk;
             var step: [32]u8 = undefined;
             log.line("prompt chunks of up to {s} tokens, cut at replies {d}+ tokens apart", .{ live.commas(&step, srv.info.prefill_step), srv.chunks.min_chunk });
         }
@@ -265,11 +275,22 @@ pub const Server = struct {
         return fields.coerceEffort(e, srv.effort_levels);
     }
 
+    /// The defaults a request starts from: --instruct-sampling's set for a thinking-off chat that samples under it.
+    pub fn samplingDefaults(srv: *const Server, instruct: bool, f: Value) ?Value {
+        const defaults = srv.config.default_sampling;
+        if (instruct) if (srv.config.instruct_sampling) |set| {
+            const t = number(f.get("temperature")) orelse number(set.get("temperature")) orelse
+                (if (defaults) |d| number(d.get("temperature")) else null) orelse 0;
+            if (t > 0) return set;
+        };
+        return defaults;
+    }
+
     /// Request seeds override configured keys; otherwise use prompt keying or fresh entropy.
-    pub fn resolveSampling(srv: *Server, cx: *Cx, f: Value, temperature: f64, prompt_ids: []const u32) errors.Refused!?api.Sampling {
+    pub fn resolveSampling(srv: *Server, cx: *Cx, f: Value, temperature: f64, prompt_ids: []const u32, instruct: bool) errors.Refused!?api.Sampling {
         _ = temperature; // the request's own temperature field decides, as in the Python server
         const options = try json.newObject(cx.a);
-        const defaults = if (srv.config.default_sampling) |d| try fields.parseNumbers(cx, d) else null;
+        const defaults = if (srv.samplingDefaults(instruct, f)) |d| try fields.parseNumbers(cx, d) else null;
         if (defaults) |d| try merge(options, cx, d);
         const supplied = try fields.parseNumbers(cx, f);
         try merge(options, cx, supplied);
@@ -297,9 +318,9 @@ pub const Server = struct {
     }
 
     /// The request's penalties over configured defaults; unsupported non-default values are refused by name.
-    pub fn resolvePenalties(srv: *Server, cx: *Cx, f: Value) errors.Refused!api.Penalties {
+    pub fn resolvePenalties(srv: *Server, cx: *Cx, f: Value, instruct: bool) errors.Refused!api.Penalties {
         const options = try json.newObject(cx.a);
-        if (srv.config.default_sampling) |d| try merge(options, cx, try fields.parseNumbers(cx, d));
+        if (srv.samplingDefaults(instruct, f)) |d| try merge(options, cx, try fields.parseNumbers(cx, d));
         try merge(options, cx, try fields.parseNumbers(cx, f));
         const presence = number(options.get("presence_penalty")) orelse 0;
         const frequency = number(options.get("frequency_penalty")) orelse 0;
@@ -319,7 +340,7 @@ pub const Server = struct {
         errdefer srv.release(false, request.*); // a refused request frees what it compiled here
         const required = if (f.get("tool_call_required")) |r| r.truthy() else false;
         const one_call = if (f.get("tool_call_single")) |x| x.truthy() else false;
-        const all = has_tools and !required and tool_grammar.autoAllEnv();
+        const all = has_tools and !required and (tool_grammar.autoAllEnv() catch return cx.fail(.server, "invalid TF_DSV41_TOOL_GRAMMAR: expected 0 or 1", .{}));
         if (has_tools and required) {
             if (!srv.info.capability(.structures)) return cx.fail(.request, "backend '{s}' cannot enforce tool_choice \"required\" or a named function: it has no token grammar support; send \"auto\" or \"none\"", .{srv.backendName()});
             request.structure = try tool_grammar.structure(srv, cx, tools, !one_call, thinking);

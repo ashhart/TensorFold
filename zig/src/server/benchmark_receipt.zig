@@ -38,6 +38,7 @@ pub const Runtime = struct {
 };
 
 pub const Settings = struct {
+    thinking_mode: ?[]const u8 = null,
     tokens: u32,
     repetitions: u32,
     temperatures: []const f64,
@@ -115,6 +116,7 @@ pub fn value(a: Allocator, run_id: []const u8, created_at: []const u8, model: Mo
     try st.str("kv_cache", settings.kv_cache);
     try st.put("managed", .{ .bool = settings.managed });
     try st.int("rank_count", settings.rank_count);
+    if (settings.thinking_mode) |mode| try st.str("thinking_mode", mode);
     try top.put("settings", st.value());
     if (settings.group) |g| try top.put("group", g);
     const rows = try a.alloc(Value, samples.len);

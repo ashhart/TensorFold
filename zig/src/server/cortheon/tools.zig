@@ -40,6 +40,17 @@ pub fn callName(call: Value) []const u8 {
     return f.strField("name") orelse "";
 }
 
+/// A string field of `obj` whose key matches `key` when only the letters differ.
+fn fieldIgnoreCase(obj: Value, key: []const u8) ?[]const u8 {
+    if (obj.strField(key)) |s| return s;
+    if (obj != .object) return null;
+    for (obj.object.keys()) |k| if (std.ascii.eqlIgnoreCase(k, key)) {
+        const v = obj.object.get(k) orelse return null;
+        return if (v == .string) v.string else null;
+    };
+    return null;
+}
+
 /// A string argument of a call, its arguments an object or a JSON string.
 pub fn argument(a: Allocator, call: Value, key: []const u8) Allocator.Error!?[]const u8 {
     const f = call.get("function") orelse return null;
@@ -48,7 +59,7 @@ pub fn argument(a: Allocator, call: Value, key: []const u8) Allocator.Error!?[]c
         .ok => |v| v,
         .err => return null,
     } else args;
-    const v = obj.strField(key) orelse return null;
+    const v = fieldIgnoreCase(obj, key) orelse return null; // "URL" is the same argument as "url"
     const t = std.mem.trim(u8, v, " \t\r\n");
     return if (t.len > 0) t else null;
 }
@@ -153,7 +164,11 @@ test "specs parse, calls are recognised and arguments read from either form" {
     const call = (try json.parseText(a, "{\"id\": \"c\", \"type\": \"function\", \"function\": {\"name\": \"cortheon_fetch\", \"arguments\": \"{\\\"url\\\": \\\" https://x.org \\\"}\"}}")).ok;
     try std.testing.expect(isServer(callName(call)));
     try std.testing.expectEqualStrings("https://x.org", (try argument(a, call, "url")).?);
+    const cased = (try json.parseText(a, "{\"id\": \"c\", \"type\": \"function\", \"function\": {\"name\": \"cortheon_fetch\", \"arguments\": {\"URL\": \"https://y.org\"}}}")).ok;
+    try std.testing.expectEqualStrings("https://y.org", (try argument(a, cased, "url")) orelse ""); // exact key first, then URL
+    try std.testing.expectEqualStrings("x", (try argument(a, (try json.parseText(a, "{\"function\": {\"arguments\": {\"Query\": \"x\"}}}")).ok, "query")) orelse "");
     try std.testing.expect(!isServer("bash"));
+    try std.testing.expect(!isServer("Cortheon_Search")); // a client tool of that spelling stays on the client
     try std.testing.expectEqualStrings("https://raw.githubusercontent.com/o/r/main/src/a.zig", try rawGithub(a, "https://github.com/o/r/blob/main/src/a.zig"));
     try std.testing.expectEqualStrings("https://github.com/o/r", try rawGithub(a, "https://github.com/o/r"));
 }
@@ -192,6 +207,19 @@ const Fake = struct {
         return .{ .url = url, .status = 200, .kind = "text/html", .title = "T", .text = "body", .removed = 1 };
     }
 };
+
+test "a search with no query key in any case is refused" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var dummy: u8 = 0;
+    const web: Web = .{ .ctx = &dummy, .search = Fake.searchFn, .fetch = Fake.fetchFn };
+    var seen: Seen = .{};
+    const missing = (try json.parseText(a, "{\"function\": {\"name\": \"cortheon_search\", \"arguments\": {\"q\": \"x\"}}}")).ok;
+    const refused = try run(web, a, missing, "d", 10, "", &seen);
+    try std.testing.expect(!refused.ok);
+    try std.testing.expect(std.mem.indexOf(u8, refused.text, "needs a non-empty \"query\"") != null);
+}
 
 test "runs report results and failures as text" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);

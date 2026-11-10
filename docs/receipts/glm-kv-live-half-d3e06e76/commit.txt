@@ -1,0 +1,7 @@
+tested implementation: d3e06e76ccb7b5507c3313f055eb1b81db3bdb65 (glm: TF_GLM_KV_LIVE_HALF=1 keeps the live half of the KDA state alone in a kept prompt state)
+rebased: onto upstream main 8abb30f6f as 0119e4893, then onto 29d6e8b64 as f43f279d2; the rebased tree differs from
+the tested one by the fingerprint reconciliation only (layout 20 as assigned in the review, kv_live_half placed after
+upstream's kda_pad), the changelog line's position and the recipe bullet's fresh context (upstream's KV-pages paragraph
+now sits above it)
+implementation tree: 52215866c441a7bebaa71fa892b381a384a25c75
+after it: the receipt's commit adds this folder and a recipe paragraph and changes no source

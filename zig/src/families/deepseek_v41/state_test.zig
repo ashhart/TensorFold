@@ -3,6 +3,9 @@ test {
     _ = @import("world4_test.zig");
     _ = @import("prefill_heads_test.zig");
     _ = @import("world4_plan_test.zig");
+    _ = @import("world3_test.zig");
+    _ = @import("world3_emit_test.zig");
+    _ = @import("emit_pins_test.zig");
     _ = @import("world4_stage_test.zig");
 }
 test {

@@ -60,11 +60,14 @@ pub fn releaseDigest(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) ![32]u
     var ck = try checkpoint.Checkpoint.open(gpa, io, dir);
     defer ck.close();
     var h: std.crypto.hash.sha2.Sha256 = .init(.{});
-    for ([_][]const u8{ checkpoint.prefix ++ "embed_tokens", checkpoint.prefix ++ "norm.", "language_model.lm_head" }) |p| try hashPart(&h, &ck, p);
+    var part: [160]u8 = undefined;
+    for ([_][]const u8{ "embed_tokens", "norm." }) |suffix|
+        try hashPart(&h, &ck, try std.fmt.bufPrint(&part, "{s}{s}", .{ ck.names.text, suffix }));
+    try hashPart(&h, &ck, ck.names.head);
     ck.release(null);
     for (0..ck.spec().n_layers) |i| {
         var name: [128]u8 = undefined;
-        try hashPart(&h, &ck, try std.fmt.bufPrint(&name, checkpoint.prefix ++ "layers.{d}.", .{i}));
+        try hashPart(&h, &ck, try std.fmt.bufPrint(&name, "{s}layers.{d}.", .{ ck.names.text, i }));
         ck.release(i);
     }
     try hashPart(&h, &ck, "mtp.");

@@ -1,4 +1,8 @@
 test {
+    _ = @import("roce_suite_policy.zig");
+    _ = @import("roce_relay_ceiling_test.zig");
+    _ = @import("config.zig");
+    _ = @import("roce_relay_test.zig");
     _ = @import("roce_legacy_posts_test.zig");
     _ = @import("roce_multi_guard.zig");
     _ = @import("roce_multi_pairs.zig");

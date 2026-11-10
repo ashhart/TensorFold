@@ -1,0 +1,4 @@
+bin-d3e06e76: d3e06e76c (upstream main ad98b602c plus the change) built with Zig 0.17.0 and nvcc 13.0 for sm_121 on a GB10
+(ReleaseFast); the same file on both ranks (sha256 equal on R0 and R1); the four configurations of this receipt
+4bd1d64f94e18214e9c9fe11140ba03048777eb19110a5bfd8253c3ccdf32a70  tensorfold-native
+dbdfe4c1ef4239ab3a9717ef4e90ff999a29199e8b4d7a883166f8197ba00d9f  tf-cuda-test (built in the same step, not run)

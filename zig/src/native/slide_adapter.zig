@@ -34,6 +34,7 @@ pub fn Adapter(comptime slide: type) type {
     return struct {
         const Self = @This();
         const Audit = if (@hasDecl(slide.Learner, "Audit")) slide.Learner.Audit else void;
+        const Shrink = if (@hasDecl(slide, "Lesson")) @FieldType(slide.Lesson, "shrink") else @FieldType(api.LearnRequest, "shrink");
 
         learner: slide.Learner,
         arena: std.heap.ArenaAllocator,
@@ -76,7 +77,7 @@ pub fn Adapter(comptime slide: type) type {
             }
             _ = a.arena.reset(.retain_capacity);
             const al = a.arena.allocator();
-            try a.learner.begin(.{ .train = try examples(al, request.train), .think = try examples(al, request.think), .held = try examples(al, request.held), .near = try examples(al, request.near), .keep = try examples(al, request.keep), .asked = try examples(al, request.asked), .unasked = try examples(al, request.unasked), .kept = try examples(al, request.kept), .undo = request.undo, .steps = request.steps, .more = request.more, .reroute = request.reroute, .drop = request.drop, .save = request.save, .retire = try retired(al, request.retire), .unretire = request.unretire, .forget = try retired(al, request.forget), .unforget = request.unforget });
+            try a.learner.begin(.{ .train = try examples(al, request.train), .against = try examples(al, request.against), .think = try examples(al, request.think), .held = try examples(al, request.held), .near = try examples(al, request.near), .keep = try examples(al, request.keep), .asked = try examples(al, request.asked), .unasked = try examples(al, request.unasked), .kept = try examples(al, request.kept), .undo = request.undo, .steps = request.steps, .more = request.more, .reroute = request.reroute, .drop = request.drop, .save = request.save, .shrink = @as(Shrink, @fromBackingInt(@intCast(@backingInt(request.shrink)))), .retire = try retired(al, request.retire), .unretire = request.unretire, .forget = try retired(al, request.forget), .unforget = request.unforget });
             a.sink = sink;
             a.sent = null;
             a.progress();
@@ -110,7 +111,7 @@ pub fn Adapter(comptime slide: type) type {
             a.progress();
             const failed = if (s.report) |r| r == .failed else false;
             if (s.report) |r| a.emit(switch (r) {
-                .learned => |x| .{ .learned = .{ .recalled = x.recalled, .steps = x.steps, .loss = x.loss, .neurons = a.placed() } },
+                .learned => |x| .{ .learned = .{ .recalled = x.recalled, .steps = x.steps, .loss = x.loss, .neurons = a.placed(), .candidate = if (@hasField(@TypeOf(x), "candidate")) x.candidate else false } },
                 .failed => |message| .{ .done = .{ .message = message } },
             });
             if (s.done and !failed) a.emit(.{ .done = .{} });

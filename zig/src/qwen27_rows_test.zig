@@ -113,3 +113,23 @@ test "qwen27 rows: a caller-created narrow frame names frame capacity rather tha
     try std.testing.expectEqualStrings("native Qwen prompt serving needs at least 128 prompt rows; model.frame.capacity supplied 64. Create the model frame with at least 128 rows before attaching native lanes.", why);
     try floor.check(128);
 }
+
+test "qwen27 rows: malformed and over-cap native settings refuse before loading" {
+    var loader: Load = .{};
+    for ([_][]const u8{ "no", " 512", "129", "2049", "4096", "4294967296" }) |value| {
+        var why: []const u8 = "";
+        try std.testing.expectError(error.InvalidEnvironment, loader.open(value, &why));
+        defer a.free(why);
+        try std.testing.expect(std.mem.indexOf(u8, why, "TF_PROMPT_ROWS=") != null);
+        try std.testing.expect(std.mem.indexOf(u8, why, "128 to 2048") != null);
+    }
+    try std.testing.expectEqual(@as(usize, 0), loader.calls);
+}
+
+test "qwen27 rows: empty or whitespace-only settings are unset and reach the loader" {
+    var loader: Load = .{};
+    var why: []const u8 = "unchanged";
+    for ([_][]const u8{ "", " ", "\t\n" }) |value| try loader.open(value, &why);
+    try std.testing.expectEqual(@as(usize, 3), loader.calls);
+    try std.testing.expectEqualStrings("unchanged", why);
+}

@@ -3,6 +3,7 @@
 const std = @import("std");
 const linux = std.os.linux;
 const engram_rows = @import("engram_rows.zig");
+const dio = @import("engram_dio.zig");
 const Rows = engram_rows.Rows;
 const Header = engram_rows.Header;
 const header_bytes = engram_rows.header_bytes;
@@ -148,7 +149,7 @@ pub const Aio = struct {
     const Event = extern struct { data: u64, obj: u64, res: i64, res2: i64 };
 
     pub fn init() !Aio {
-        var a: Aio = .{ .poll = pollEnv() };
+        var a: Aio = .{ .poll = (try pollEnv()) };
         const rc = linux.syscall2(.io_setup, depth, @intFromPtr(&a.ctx));
         if (linux.errno(rc) != .SUCCESS) return error.AioRefused;
         return a;
@@ -160,21 +161,18 @@ pub const Aio = struct {
 };
 
 /// TF_DSV41_ENGRAM_POLL: 0 (default) | 1 (with TF_DSV41_ENGRAM_AIO=1).
-pub fn pollEnv() bool {
-    const v = std.c.getenv("TF_DSV41_ENGRAM_POLL") orelse return false;
-    return std.mem.eql(u8, std.mem.span(v), "1");
+pub fn pollEnv() !bool {
+    return @import("sys").environment.read(bool, "TF_DSV41_ENGRAM_POLL", false);
 }
 
 /// TF_DSV41_ENGRAM_AIO: 0 (default) | 1.
-pub fn aioEnv() bool {
-    const v = std.c.getenv("TF_DSV41_ENGRAM_AIO") orelse return false;
-    return std.mem.eql(u8, std.mem.span(v), "1");
+pub fn aioEnv() !bool {
+    return @import("sys").environment.read(bool, "TF_DSV41_ENGRAM_AIO", false);
 }
 
 /// TF_DSV41_ENGRAM_QD: the reader threads without io_uring (default 64; 0: none, reads serial).
-pub fn poolThreads() u32 {
-    const v = std.c.getenv("TF_DSV41_ENGRAM_QD") orelse return 64;
-    return std.fmt.parseInt(u32, std.mem.span(v), 10) catch 64;
+pub fn poolThreads() !u32 {
+    return @import("sys").environment.read(u32, "TF_DSV41_ENGRAM_QD", 64);
 }
 
 /// Native AIO in place of io_uring or the pool (tests, the probe): every read async through one context.
@@ -268,6 +266,8 @@ pub fn openTable(gpa: std.mem.Allocator, path: [:0]const u8, cap: u32) !Table {
     if (linux.errno(linux.statx(fd, "", linux.AT.EMPTY_PATH, .{ .SIZE = true }, &st)) != .SUCCESS) return error.StatFailed;
     const hb = try gpa.alignedAlloc(u8, .fromByteUnits(page), page);
     defer gpa.free(hb);
+    // a disk or file system whose direct reads need more than a sector (4 KiB blocks) reads this shard buffered
+    if (direct) direct = try dio.direct(fd, hb);
     try preadAll(fd, hb, 0);
     if (!direct) _ = linux.fadvise(fd, 0, page, linux.POSIX_FADV.DONTNEED);
     const h = try Header.parse(hb[0..48], st.size);
@@ -560,7 +560,7 @@ pub fn readAt(fd: linux.fd_t, size: u64, direct: bool, buf: []u8, off: u64) !voi
     const want = @min(buf.len, size - off);
     var done: usize = 0;
     while (done < want) {
-        const rc = linux.pread(fd, buf[done..].ptr, buf.len - done, @intCast(off + done));
+        const rc = dio.pread(fd, buf[done..].ptr, buf.len - done, @intCast(off + done));
         switch (linux.errno(rc)) {
             .SUCCESS => {},
             .INTR => continue,
@@ -575,7 +575,7 @@ pub fn readAt(fd: linux.fd_t, size: u64, direct: bool, buf: []u8, off: u64) !voi
 pub fn preadAll(fd: linux.fd_t, out: []u8, off: u64) !void {
     var done: usize = 0;
     while (done < out.len) {
-        const rc = linux.pread(fd, out[done..].ptr, out.len - done, @intCast(off + done));
+        const rc = dio.pread(fd, out[done..].ptr, out.len - done, @intCast(off + done));
         switch (linux.errno(rc)) {
             .SUCCESS => {},
             .INTR => continue,

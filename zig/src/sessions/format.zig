@@ -154,8 +154,8 @@ pub const Layout = struct {
         var nd: u64 = 0;
         for (segs) |s| {
             if (s.chunk == 0 or s.stride != up(s.chunk) or s.first_digest != nd or s.offset % 4096 != 0) return error.BadHeader;
-            if (s.nchunks != (s.nbytes + s.chunk - 1) / s.chunk) return error.BadHeader;
-            if (s.nchunks > 0 and s.offset + @as(u64, s.nchunks - 1) * s.stride + up(s.nbytes - @as(u64, s.nchunks - 1) * s.chunk) > h.total) return error.BadHeader;
+            if (s.nchunks != (std.math.add(u64, s.nbytes, s.chunk - 1) catch return error.BadHeader) / s.chunk) return error.BadHeader;
+            if (s.nchunks > 0 and (std.math.add(u64, s.offset, @as(u64, s.nchunks - 1) * s.stride + up(s.nbytes - @as(u64, s.nchunks - 1) * s.chunk)) catch return error.BadHeader) > h.total) return error.BadHeader;
             nd += s.nchunks;
         }
         if (nd != h.ndigest) return error.BadHeader;
@@ -194,4 +194,32 @@ test "a layout encodes, decodes, and refuses a damaged header" {
     try std.testing.expectEqualStrings("comp.20", back.find(.pool, "comp.20").?.nameOf());
     buf[200] ^= 0x40;
     try std.testing.expectError(error.ChecksumMismatch, Layout.decode(gpa, &buf));
+}
+
+/// One blob segment built whole, then given `nbytes` or `offset` as a file could carry them, re-hashed and decoded.
+fn decodeWrapped(nbytes: ?u64, offset: ?u64) !void {
+    const gpa = std.testing.allocator;
+    const head: Head = .{ .key = @splat(1), .compat = @splat(2), .tag = 3, .kind = 0, .page = 256, .world = 1, .rank = 0, .first_page = 0, .npages = 1, .nseg = 0, .ndigest = 0, .pos = 1 };
+    var l = try Layout.build(gpa, head, &.{.{ .name = segName("taps"), .kind = .blob, .family = 0, .nbytes = if (nbytes != null) 0 else 1, .chunk = 4096 }});
+    defer l.deinit(gpa);
+    var buf: [8192]u8 = undefined;
+    l.encode(&buf);
+    var whole = try Layout.decode(gpa, &buf);
+    whole.deinit(gpa);
+    if (nbytes) |n| l.segs[0].nbytes = n;
+    if (offset) |o| l.segs[0].offset = o;
+    l.encode(&buf);
+    try std.testing.expectError(error.BadHeader, Layout.decode(gpa, &buf));
+}
+
+const isolate = @import("sys").isolate;
+
+// In a child: if decode's `s.nbytes + s.chunk - 1` is unchecked, a safe build panics and only this test fails
+test "a segment of 2^64 - 1 bytes claiming no chunks is refused, not counted by a size that wraps" {
+    try std.testing.expectEqual(isolate.Outcome.passed, try isolate.run(decodeWrapped, .{ std.math.maxInt(u64), null }));
+}
+
+// In a child: if decode's end-of-segment sum is unchecked, a safe build panics and only this test fails
+test "a segment whose last chunk ends past 2^64 is refused, not wrapped under the file's total" {
+    try std.testing.expectEqual(isolate.Outcome.passed, try isolate.run(decodeWrapped, .{ null, std.math.maxInt(u64) - 4095 }));
 }

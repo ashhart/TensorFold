@@ -1,4 +1,4 @@
-//! Qwen3.8-27B on the lane host: a stream a runner slot in shared rounds, DFlash2 drafts for slot 0's stream.
+//! Qwen3.8-27B on the lane host: DFlash2 drafts up to TF_Q27_DRAFT_SLOTS admitted streams, when loaded.
 const std = @import("std");
 const platform = @import("sys");
 const builtin = @import("builtin");
@@ -313,6 +313,8 @@ fn drafterRefusal(a: Allocator, dir: []const u8, drafter: []const u8, err: anyer
 
 /// A loaded model served as `open` serves one, `drafter` bound in place of `o.drafter`; both stay the caller's.
 pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q.dflash.runtime_model.Model, o: Options, a: Allocator, why: *[]const u8) !*Host {
+    const setup = tf.startup_receipt.span(.runtime_setup);
+    defer setup.end();
     try @import("qwen27_prompt_floor.zig").environment(a, if (std.c.getenv("TF_PROMPT_ROWS")) |v| std.mem.span(v) else null, why);
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
@@ -320,6 +322,11 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     if (capacity == 0 or capacity > model.config.max_position) return error.ContextFull;
     const policy = @import("qwen27_window.zig");
     const units = model.device.tensorUnits();
+    // the paged kernels have run only before the M5: a Mac with tensor units refuses the flag until they run there
+    if (q.decode_round.pagesOn() and units) {
+        why.* = "TF_QWEN27_METAL_KV_PAGES=1 has run only on Macs without tensor units (M1 to M4) so far; unset it on this Mac";
+        return error.KvPagesUntested;
+    }
     const window = lb.windowRows(units) catch |err| {
         why.* = policy.problem(err) orelse why.*;
         return err;
@@ -372,7 +379,8 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     h.disk_stage = null;
     h.vision = o.images; // closed with the host; a failed attach leaves it to the caller
     h.trace = null;
-    h.runner = try q.decode_round.Runner.initReady(gpa, model, slots, capacity + window, 1);
+    // TF_QWEN27_METAL_KV_PAGES=1: every slot's rows in core-pool pages now (Fit charged each its whole window above)
+    h.runner = try if (q.decode_round.pagesOn()) q.decode_round.Runner.initPaged(gpa, model, slots, capacity + window) else q.decode_round.Runner.initReady(gpa, model, slots, capacity + window, 1);
     errdefer h.runner.deinit();
     if (profileEvery()) |every| {
         h.trace = .{ .queue = model.queue, .report_every = every }; // enabled once measure() has priced the windows
@@ -405,9 +413,12 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     std.log.info("qwen27: {s}", .{try policy.describe(&loop_text, serial, window, h.draft != null, h.back.copies)});
     h.warm = .{ .queue = model.queue };
     // the ready slots are wired before the cache's budget reads the footprint, and the later ones count as taken
+    const residency = tf.startup_receipt.span(.residency);
     holdResident(h, io) catch |err| std.log.warn("qwen27: no residency set ({s}); the first request after an idle second re-wires the weights", .{@errorName(err)});
+    residency.end();
     errdefer q.residency.drop(h);
     // Decide before cache sizing and the worker starts, with ready state wired and future buffers reserved.
+    const ane = tf.startup_receipt.span(.optional_ane);
     if (model.share_pending) {
         const before = cache_fit.footprint();
         q.residency.finishShare(h, try shareRoom(h, why)) catch |err| {
@@ -416,9 +427,10 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
         };
         if (model.ane) |share| share.footprint_growth = platform.memory_policy.growth(before, cache_fit.footprint());
     }
+    ane.end();
     // slot 0's rewind point where the cache cannot keep a whole context, wired before the cache's budget is read
     const rewind_room = laterRoom(h);
-    if (slot_state.rewindInit(h.back, rewind_room, if (o.cache_gib) |g| gibBytes(g) else @min(rewind_room, cache_fit.DEFAULT_CEILING))) |buf| if (h.resident) |*r| r.addNow(&.{buf});
+    if (slot_state.rewindInit(h.back, rewind_room, if (o.cache_gib) |g| gibBytes(g) else cache_fit.defaultBudget(rewind_room))) |buf| if (h.resident) |*r| r.addNow(&.{buf});
     try enableCache(h, o.cache_gib, o.cache_over_cap, a, why);
     errdefer if (h.cache) |*store| store.deinit();
     if (o.learn) |l| try disk.attach(h, io, a, l);
@@ -426,8 +438,52 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
     if (h.trace) |*t| t.enabled = true; // serving rounds count from here: measure() timed whole, unsplit buffers
     try h.host.start();
-    std.log.info("Qwen3.8-27B: {d} streams of {d} tokens{s}{s}", .{ slots, capacity, if (h.draft != null) ", DFlash2 drafts for one of them" else "", if (o.images != null) ", images read" else "" });
+    tf.startup_receipt.span(.model_ready).end();
+    std.log.info("{f}", .{StartupLine{ .streams = slots, .context = capacity, .draft_slots = if (h.draft != null) h.back.draft_slots else 0, .images = o.images != null }});
     return h;
+}
+
+const StartupLine = struct {
+    streams: u32,
+    context: u32,
+    draft_slots: u32,
+    images: bool,
+
+    pub fn format(line: StartupLine, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        try w.print("Qwen3.8-27B: {d} stream{s} of {d} tokens", .{ line.streams, if (line.streams == 1) "" else "s", line.context });
+        const drafts = @min(line.streams, line.draft_slots);
+        if (drafts > 0) try w.print(", DFlash2 drafts for {d} stream{s}", .{ drafts, if (drafts == 1) "" else "s" });
+        if (line.images) try w.writeAll(", images read");
+    }
+};
+
+test "qwen27 startup: draft stream count, singular text and optional suffixes" {
+    const limit = try lb.draftSlots();
+    const limited = platform.c.getenv("TF_Q27_DRAFT_SLOTS") != null;
+    try std.testing.expectEqual(@as(u32, if (limited) 1 else 8), limit);
+    const cases = [_]struct { u32, []const u8, []const u8 }{
+        .{ 1, "1 stream", "1 stream" },
+        .{ 2, "2 streams", "2 streams" },
+        .{ 9, "9 streams", "8 streams" },
+        .{ 16, "16 streams", "8 streams" },
+    };
+    var mismatches: usize = 0;
+    for (cases) |case| {
+        for ([_]bool{ false, true }) |drafter| {
+            for ([_]bool{ false, true }) |with_images| {
+                var draft: [64]u8 = undefined;
+                const suffix = if (drafter) try std.fmt.bufPrint(&draft, ", DFlash2 drafts for {s}", .{if (limited) "1 stream" else case[2]}) else "";
+                var expected: [192]u8 = undefined;
+                const want = try std.fmt.bufPrint(&expected, "Qwen3.8-27B: {s} of 4096 tokens{s}{s}", .{ case[1], suffix, if (with_images) ", images read" else "" });
+                var actual: [192]u8 = undefined;
+                const got = try std.fmt.bufPrint(&actual, "{f}", .{StartupLine{ .streams = case[0], .context = 4096, .draft_slots = if (drafter) limit else 0, .images = with_images }});
+                std.testing.expectEqualStrings(want, got) catch {
+                    mismatches += 1;
+                };
+            }
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), mismatches);
 }
 
 /// TF_Q27_PROFILE's rounds between log reports, or null (off); a value it cannot read leaves profiling off.
@@ -462,7 +518,7 @@ pub fn cacheRules(chunk: u32) pc.Rules {
     return .{ .warm = .on, .chunk = chunk, .chunk_marks = false };
 }
 
-/// Prompt reuse in up to 16 GiB of what 70% of RAM leaves once every slot has its memory; CacheOverCap: `why` says why.
+/// Prompt reuse from room under the memory cap once slot memory is counted; CacheOverCap explains the refusal.
 fn enableCache(h: *Host, gib: ?f64, over: bool, a: Allocator, why: *[]const u8) !void {
     const later = try laterFootprint(h);
     const plan = try cache_fit.budgetBeside(gib, over, room(h.model) -| later, later, a, why, "");

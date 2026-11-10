@@ -6,6 +6,7 @@ const fwd = @import("cuda_model.zig");
 const snap = @import("cuda_snap.zig");
 const pages = @import("cuda_pages.zig");
 const kv = @import("core").kv_pool;
+const kp = @import("core").kv_prompts;
 
 const be = lanes.backend;
 const Stream = lanes.Stream;
@@ -32,6 +33,9 @@ const Lane = struct {
     sampled: bool = false,
     fill: ?usize = null, // a prompt pass going a chunk at a time: where its next chunk starts
     lease: kv.Lease = .{}, // a paged slot's pages
+    marks: []const u32 = &.{}, // TF_KV_SHARE: where its pass keeps states, the store's plan (owned)
+    from: u32 = 0, // TF_KV_SHARE: the position its adopted pages and restored rings resume at
+    kept: u32 = 0, // TF_KV_SHARE: states its pass kept
 };
 
 /// The physical positions a slot holds for a served window: the window, the verify reserve, in whole 1,024s.
@@ -61,6 +65,9 @@ pub const Dory = struct {
     next: u64 = 0,
     pool: ?kv.Pool = null, // the pages every slot leases (attach)
     scatter: bool = false, // a check's: leases take the free pages in their order, never a run
+    prompts: ?kp.Prompts = null, // TF_KV_SHARE: the store keeping prompts as the pool's pages (cuda_prompt_pages.zig)
+    restore_slot: ?usize = null, // TF_KV_SHARE: the slot a lane opening restores a found state's rings into
+    restored: u32 = 0, // TF_KV_SHARE: the position that restore left the slot at
 
     /// The device bytes `init` allocates: bf16 logits, the token ring, metas, each slot's last row and rule.
     pub fn openBytes(vocab: usize, slots: usize) usize {
@@ -107,6 +114,7 @@ pub const Dory = struct {
         while (it.next()) |l| {
             if (x.pool) |*p| p.finish(&l.lease);
             l.rows.deinit(x.gpa);
+            x.gpa.free(l.marks);
         }
         if (x.pool) |*p| p.deinit();
         x.lanes.deinit(x.gpa);
@@ -154,11 +162,25 @@ pub const Dory = struct {
         const s: *const Stream = @ptrCast(@alignCast(owner orelse return error.NoOwner));
         const l = x.lanes.getPtr(s) orelse return error.UnknownStream;
         if ((l.fill orelse l.len) != at) return error.NotAtMark; // a state is copied only where the pass stands
-        return snap.save(x.gpa, x.m, x.s, l.slot, at);
+        if (x.prompts == null) return snap.save(x.gpa, x.m, x.s, l.slot, at);
+        // TF_KV_SHARE: the store holds [0, at) as pages, and the sliding rings in pages it holds too
+        var blob = try kp.holdBlob(x.gpa, &x.pool.?, snap.blobPages(x.m, at));
+        return snap.saveRings(x.gpa, x.m, x.s, l.slot, at, blob) catch |e| {
+            x.s.synchronize() catch {}; // a piece may be queued into them
+            kp.dropBlob(x.gpa, &x.pool.?, &blob);
+            return e;
+        };
     }
 
-    /// The stream's slot made to hold `k`'s state (a restore outside its prompt pass).
+    /// The stream's slot made to hold `k`'s state; TF_KV_SHARE: the opening lane's, before a promise can evict `k`.
     pub fn restoreState(x: *Dory, owner: ?*anyopaque, k: *const snap.Saved) !void {
+        if (x.prompts != null) {
+            const slot = x.restore_slot orelse return error.NoOwner;
+            if (k.from != k.at) return error.KeptStateMismatch;
+            try snap.restore(x.m, x.s, slot, k);
+            x.restored = k.at;
+            return;
+        }
         const s: *const Stream = @ptrCast(@alignCast(owner orelse return error.NoOwner));
         const l = x.lanes.getPtr(s) orelse return error.UnknownStream;
         try snap.restore(x.m, x.s, l.slot, k);
@@ -166,6 +188,10 @@ pub const Dory = struct {
     }
 
     pub fn dropState(x: *Dory, k: *snap.Saved) void {
+        if (k.blob.len > 0) {
+            x.s.synchronize() catch {}; // a restore's queued copies out of them are done
+            kp.dropBlob(x.gpa, &x.pool.?, &k.blob);
+        }
         snap.drop(x.gpa, x.s, k);
     }
 
@@ -194,18 +220,45 @@ pub const Dory = struct {
         }
     };
 
-    /// A free slot for the request, its pages leased now when paged: a window's run (contiguous) when one is free.
-    fn takeSlot(x: *Dory, lease: *kv.Lease, prompt: usize, max_new: usize) !usize {
-        const slot = x.freeSlot() orelse return error.NoFreeSlot;
-        if (x.pool == null) return slot;
-        const p = &x.pool.?;
+    /// `slot`'s pages leased now when paged, `adopt` first: else a window's run (contiguous) when one is free.
+    fn leasePages(x: *Dory, lease: *kv.Lease, slot: usize, prompt: usize, max_new: usize, adopt: []const u32) !void {
+        const p = if (x.pool) |*q| q else return;
         const n = pagesFor(prompt, max_new);
-        try p.promise(lease, n);
+        p.promise(lease, n - adopt.len) catch |e| {
+            for (adopt) |id| p.release(id);
+            return e;
+        };
         errdefer p.finish(lease);
+        try p.adopt(lease, adopt); // releases them again if it fails
         var map: Map = .{ .x = x, .slot = slot };
         const table: kv.Table = .{ .ctx = &map, .write = Map.write };
+        if (adopt.len > 0) try table.write(table.ctx, lease.ids.items, 0);
         try (if (x.scatter) p.cover(lease, n, table) else p.coverRun(lease, n, x.m.paging.?.per_slot, table));
-        return slot;
+    }
+
+    /// TF_KV_SHARE: the store's plan for this prompt, its pages in `adopt`, its rings restored into `slot`.
+    fn plan(x: *Dory, s: *Stream, slot: usize, adopt: *std.ArrayList(u32)) !kp.Plan {
+        const pr = x.prompts orelse return .{};
+        x.restore_slot = slot;
+        defer x.restore_slot = null;
+        x.restored = 0;
+        const got = try pr.plan(x.gpa, &x.pool.?, s.prompt(), s.history_len, s.shared_prefixes, @ptrCast(s), adopt);
+        if (got.from == x.restored) return got;
+        for (adopt.items) |id| x.pool.?.release(id);
+        x.gpa.free(got.marks);
+        return error.KeptStateMismatch;
+    }
+
+    /// A free slot, the store's plan and the request's pages; the lane's marks are its own.
+    fn newLane(x: *Dory, s: *Stream, len: usize) !Lane {
+        const slot = x.freeSlot() orelse return error.NoFreeSlot;
+        var adopt: std.ArrayList(u32) = .empty;
+        defer adopt.deinit(x.gpa);
+        const kept = try x.plan(s, slot, &adopt);
+        errdefer x.gpa.free(kept.marks);
+        var lease: kv.Lease = .{};
+        try x.leasePages(&lease, slot, len, s.max_new, adopt.items);
+        return .{ .slot = slot, .last = x.slot_bufs[2 * slot].ptr, .rule = x.slot_bufs[2 * slot + 1].ptr, .lease = lease, .marks = kept.marks, .from = kept.from };
     }
 
     /// A prompt pass begins: a slot, the stream's rule, a kept state restored; where its first chunk starts.
@@ -214,24 +267,25 @@ pub const Dory = struct {
         if (p.len == 0) return error.EmptyPrompt;
         if (!fits(x.m.context, p.len, @as(usize, s.max_new))) return error.PastContext;
         const got = try x.lanes.getOrPut(x.gpa, s);
+        if (got.found_existing and x.prompts != null) return error.StreamAlreadyOpen; // its pages are the store's
         if (!got.found_existing) {
-            var lease: kv.Lease = .{};
-            const slot = x.takeSlot(&lease, p.len, s.max_new) catch |e| {
+            got.value_ptr.* = x.newLane(s, p.len) catch |e| {
                 x.lanes.removeByPtr(got.key_ptr);
                 return e;
             };
-            x.free[slot] = false;
-            got.value_ptr.* = .{ .slot = slot, .last = x.slot_bufs[2 * slot].ptr, .rule = x.slot_bufs[2 * slot + 1].ptr, .lease = lease };
+            x.free[got.value_ptr.slot] = false;
         }
         const l = got.value_ptr;
         l.sampled = false;
-        if (s.sampling) |sp| if (sp.temperature > 0) {
-            const r = cuda.sample.Rule.from(lanes.gpu_rule.rule(sp));
+        if (cuda.sample.ruleFor(s.sampling)) |r| {
             try x.upload(l.rule, std.mem.asBytes(&r));
             l.sampled = true;
-        };
+        }
         s.cached = 0;
-        l.fill = x.resumeAt(s, l, p.len);
+        if (x.prompts != null) {
+            s.cached = l.from;
+            l.fill = l.from;
+        } else l.fill = x.resumeAt(s, l, p.len);
         s.fill_at.store(@intCast(l.fill.?), .monotonic);
         return l;
     }
@@ -252,13 +306,20 @@ pub const Dory = struct {
         return k.at;
     }
 
+    /// TF_KV_SHARE: at mark `at` the store takes the lane's pages and rings; pages it held already replace the lane's.
+    fn keepPages(x: *Dory, pr: kp.Prompts, s: *Stream, l: *Lane, at: usize) !void {
+        var map: Map = .{ .x = x, .slot = l.slot };
+        if (try pr.keepPages(x.gpa, &x.pool.?, &l.lease, s.prompt(), at, @ptrCast(s), pages.tokens, .{ .ctx = &map, .write = Map.write })) l.kept += 1;
+    }
+
     /// One chunk from `l.fill` to the next grid line or mark; true once the prompt's last row is in. `_: u32`.
     fn chunk(x: *Dory, s: *Stream, l: *Lane, _: u32) !bool {
         const p = s.prompt();
         const at = l.fill.?;
         if (s.isCancelled()) return error.Cancelled;
         var end = @min(p.len, (at / prompt_rows + 1) * prompt_rows);
-        for (s.reuse.marks) |mk| if (mk > at and mk < end) {
+        const marks = if (x.prompts != null) l.marks else s.reuse.marks;
+        for (marks) |mk| if (mk > at and mk < end) {
             end = mk;
         };
         const done = end == p.len;
@@ -267,6 +328,13 @@ pub const Dory = struct {
         s.fill_at.store(@intCast(end), .monotonic);
         l.fill = if (done) null else end;
         if (done) l.len = p.len;
+        if (x.prompts) |pr| {
+            if (!done and std.mem.indexOfScalar(u32, l.marks, @intCast(end)) != null) x.keepPages(pr, s, l, end) catch |e| {
+                std.log.warn("dory: prompt pages not kept: {s}", .{@errorName(e)});
+            };
+            if (done) pr.report(p.len, s.cached, l.kept);
+            return done;
+        }
         if (s.reuse.hook) |hk| if (std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(end)) != null) hk.at(hk.ptr, s, @intCast(end));
         return done;
     }
@@ -394,6 +462,8 @@ pub const Dory = struct {
             }
             x.free[l.slot] = true;
             l.rows.deinit(x.gpa);
+            x.gpa.free(l.marks);
+            if (x.lanes.count() == 0) if (x.pool) |*p| kp.idleLine(p, x.prompts != null);
         }
     }
 

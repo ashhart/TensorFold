@@ -39,6 +39,7 @@ pub const Kernels = struct {
     nax: ?[tile.bit_widths.len]am.Pipes = null,
     /// Prompt attention on the tensor units (with `nax`); null before the M5.
     attn_nax: ?mtl.Pipeline = null,
+    prompt_mask: ?@import("prompt_mask.zig").Pipelines = null,
 
     pub fn get(self: *const Kernels, comptime key: []const u8) mtl.Pipeline {
         inline for (names, 0..) |n, i| if (comptime std.mem.eql(u8, n, key)) return self.pipelines[i];
@@ -64,6 +65,7 @@ pub const Kernels = struct {
         for (self.pipelines) |p| p.deinit();
         if (self.nax) |set| for (set) |pipes| for (pipes) |p| p.deinit();
         if (self.attn_nax) |p| p.deinit();
+        if (self.prompt_mask) |p| p.deinit();
         self.tiles.deinit();
     }
 };
@@ -83,18 +85,21 @@ pub fn load(device: mtl.Device) !Kernels {
     out.twin = false;
     // `out` is undefined, so attn_nax's default does not apply: unset, it would hold stack garbage.
     out.attn_nax = null;
-    out.nax = if (device.tensorUnits()) try naxLoad(device) else null;
+    out.prompt_mask = null;
+    out.nax = if (@import("source.zig").optionalAvailable(device)) try naxLoad(device) else null;
     errdefer if (out.nax) |set| for (set) |pipes| for (pipes) |x| x.deinit();
-    if (device.tensorUnits()) try attnNaxLoad(device, &out);
+    if (@import("source.zig").optionalAvailable(device)) {
+        try attnNaxLoad(device, &out);
+        errdefer out.attn_nax.?.deinit();
+        out.prompt_mask = try @import("prompt_mask.zig").Pipelines.load(device);
+    }
     return out;
 }
 
 /// lfm2_attn_nax compiled after lfm2.metal's text (its constants and merge) with nax.h inlined.
 fn attnNaxLoad(device: mtl.Device, out: *Kernels) !void {
     const a = std.heap.c_allocator;
-    const attn = try frags.source(device, a, sources.lfm2_attn_nax);
-    defer a.free(attn);
-    const src = try std.mem.concat(a, u8, &.{ sources.lfm2, "\n", attn });
+    const src = try @import("source.zig").prompt(device, a, false);
     defer a.free(src);
     const lib = try mtl.Library.fromSource(device, src, mtl.CompileOptions.mlx());
     defer lib.deinit();

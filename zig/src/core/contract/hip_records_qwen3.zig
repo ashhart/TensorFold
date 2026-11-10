@@ -6,7 +6,7 @@ const hip_records = @import("hip_records.zig");
 const Record = hip_records.Record;
 const check = hip_records.check;
 
-pub const records = [_]Record{
+pub const records = [7]Record{
     .{
         .launch = .{ .name = "attention tf_heads_rows", .symbol = "tf_heads_rows", .image = "ops", .threads = 256 },
         .usage = .{
@@ -35,7 +35,35 @@ pub const records = [_]Record{
         },
     },
     .{
-        .launch = .{ .name = "dense gemm dense_wmma12_gemm<DotBF16, W12Big>", .symbol = "_ZN2tf4rocm17dense_wmma12_gemmINS0_7DotBF16ENS0_6W12GeoILi128ELi128ELi32ELi2ELi4EEEEEvNS0_6AffineE", .image = "affine_tiles", .threads = 256 },
+        .launch = .{ .name = "dense gemm dense_wmma12_gemm<DotBF16, W12Big>", .symbol = "_ZN2tf4rocm17dense_wmma12_gemmINS0_7DotBF16ENS0_6W12GeoILi128ELi128ELi64ELi2ELi4EEEEEvNS0_6AffineE", .image = "affine_tiles", .threads = 256 },
+        .usage = .{
+            .{ .vgprs = 0, .served = false },
+            .{ .vgprs = 0, .served = false },
+            .{ .vgprs = 0, .served = false },
+            .{ .vgprs = 202, .sgprs = 24, .lds = 65536, .private = 0, .bound = 256, .wave = 32 },
+        },
+    },
+    .{
+        .launch = .{ .name = "dense gemm dense_wmma12_gemm_silu<DotBF16, W12Pair>", .symbol = "_ZN2tf4rocm22dense_wmma12_gemm_siluINS0_7DotBF16ENS0_6W12GeoILi16ELi64ELi64ELi1ELi2EEEEEvNS0_6AffineE", .image = "affine_tiles", .threads = 64 },
+        .usage = .{
+            .{ .vgprs = 0, .served = false },
+            .{ .vgprs = 0, .served = false },
+            .{ .vgprs = 0, .served = false },
+            .{ .vgprs = 138, .sgprs = 22, .lds = 23040, .private = 0, .bound = 64, .wave = 32 },
+        },
+    },
+    .{
+        .launch = .{ .name = "dense gemm dense_wmma12_gemm_silu<DotBF16, W12Big>", .symbol = "_ZN2tf4rocm22dense_wmma12_gemm_siluINS0_7DotBF16ENS0_6W12GeoILi128ELi128ELi64ELi2ELi4EEEEEvNS0_6AffineE", .image = "affine_tiles", .threads = 256 },
+        .usage = .{
+            .{ .vgprs = 0, .served = false },
+            .{ .vgprs = 0, .served = false },
+            .{ .vgprs = 0, .served = false },
+            .{ .vgprs = 202, .sgprs = 22, .lds = 65536, .private = 0, .bound = 256, .wave = 32 },
+        },
+    },
+    .{
+        // not a control: the frozen pre-#2264 big block, the byte baseline its replacement is gated against
+        .launch = .{ .name = "dense gemm tf_ref_wmma12_k32", .symbol = "tf_ref_wmma12_k32", .image = "contract_controls", .threads = 256 },
         .usage = .{
             .{ .vgprs = 0, .served = false },
             .{ .vgprs = 0, .served = false },

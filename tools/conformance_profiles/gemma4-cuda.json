@@ -1,0 +1,92 @@
+{
+  "name": "gemma4-cuda",
+  "family": "gemma4 on CUDA",
+  "checkpoint": "a Gemma 4 31B 4-bit MLX checkpoint with its DFlash drafter",
+  "serve": [
+    "--backend",
+    "cuda",
+    "--context",
+    "16384",
+    "--parallel",
+    "8",
+    "--no-thinking",
+    "--drafter",
+    "{drafter}"
+  ],
+  "sampled": {
+    "temperature": 0.8,
+    "top_p": 0.95,
+    "top_k": 64
+  },
+  "tokens": 64,
+  "seed": 7,
+  "levels": [
+    1,
+    2,
+    4,
+    8
+  ],
+  "prompt_cache_gib": 2,
+  "ignore_eos": true,
+  "prompts": {
+    "poem": "Write a short poem about the sea.",
+    "primes": "List the first twelve prime numbers, separated by commas.",
+    "sky": "Explain in two sentences why the sky is blue.",
+    "count": "Count from one to thirty in words.",
+    "copy": "Repeat exactly: The harbor lights came on one by one as the fishing boats returned to the quay."
+  },
+  "long_items": 500,
+  "conversation": [
+    "Name three rivers in Europe and one fact about each.",
+    "Now give the length of each river in kilometres.",
+    "Which of them is the longest? Answer in one sentence."
+  ],
+  "conversation_context_items": 900,
+  "refusals": [
+    {
+      "name": "n_two",
+      "body": {
+        "n": 2
+      },
+      "status": 400,
+      "error": "n must be 1; multiple choices are not supported"
+    },
+    {
+      "name": "top_logprobs_without_logprobs",
+      "body": {
+        "top_logprobs": 3
+      },
+      "status": 400,
+      "error": "top_logprobs requires logprobs: true"
+    },
+    {
+      "name": "presence_penalty_out_of_range",
+      "body": {
+        "presence_penalty": 3
+      },
+      "status": 400,
+      "error": "presence_penalty must be between -2 and 2, or null"
+    },
+    {
+      "name": "reply_past_context",
+      "body": {
+        "max_tokens": 10000000
+      },
+      "status": 400,
+      "error": "This server's maximum context length is"
+    }
+  ],
+  "cancel": {
+    "prompt": "count",
+    "tokens": 256,
+    "after_chunks": 4,
+    "rounds": 2,
+    "settle_s": 60
+  },
+  "evict": {
+    "fill_prompts": 6,
+    "fill_items": 900,
+    "fill_tokens": 1,
+    "settle_s": 60
+  }
+}

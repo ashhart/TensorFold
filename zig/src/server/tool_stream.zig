@@ -6,6 +6,7 @@ const reply_text = @import("reply_text.zig");
 const tool_dsml = @import("tool_dsml.zig");
 const tool_dsml_stream = @import("tool_dsml_stream.zig");
 const tool_glm_cut = @import("tool_glm_cut.zig");
+const tool_json_cut = @import("tool_json_cut.zig");
 const tool_glm_stream = @import("tool_glm_stream.zig");
 const tool_params = @import("tool_params.zig");
 const tool_specs = @import("tool_specs.zig");
@@ -383,7 +384,8 @@ pub fn cutCalls(a: Allocator, text: []const u8, tools: []const Value) Allocator.
     var s: Streamer = try .init(a, tools);
     var deltas: std.ArrayList(Value) = .empty;
     try s.finishCut(text, &deltas);
-    if (!s.open()) return tool_glm_cut.cutCalls(a, text, tools); // a GLM envelope streams no call before it closes
+    // GLM and JSON envelopes stream no call before they close
+    if (!s.open()) return (try tool_glm_cut.cutCalls(a, text, tools)) orelse try tool_json_cut.cutCalls(a, text, tools);
     const Call = struct { id: []const u8 = "", name: []const u8 = "", args: std.ArrayList(u8) = .empty };
     const built = try a.alloc(Call, @intCast(s.index + 1));
     for (built) |*c| c.* = .{};

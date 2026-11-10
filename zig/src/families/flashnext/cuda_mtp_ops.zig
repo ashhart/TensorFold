@@ -55,6 +55,11 @@ fn cint(v: usize) c_int {
     return @intCast(v);
 }
 
+/// A lane of the head's grouped pass: its draft's cache and pages at its length, as the lone head's pass reads them.
+fn headLane(d: *Draft, rows: usize, score_rows: u64) batch.Lane {
+    return .{ .seq = .{ .media = null, .conv = &.{}, .state = &.{}, .kc = (&d.kc)[0..1], .vc = (&d.vc)[0..1], .ikc = (&d.ikc)[0..1], .pooled = (&d.pooled)[0..1], .pg = d.pg, .tail = d.kc, .history = &d.unused_history, .cap = d.cap, .scores = score_rows }, .pos = d.len, .rows = rows };
+}
+
 fn copyAsync(stream: cuda.Stream, dst: u64, src: u64, n: usize) !void {
     if (n == 0) return;
     const d = stream.d;
@@ -124,7 +129,7 @@ pub fn Ops(comptime Tri: type) type {
             const h = o.h;
             if (next.len == 0) return;
             if (d.len + next.len > d.cap) return error.PromptTooLong;
-            const want = @max(@as(usize, 32), 2 * @min(next.len, piece_rows));
+            const want = plan.reserveRows(next.len);
             const s = try e.reserve(want);
             const piece = @max(@as(usize, 1), @min(piece_rows, s.cap / 2));
             // the engine's block scores (the passes share one stream), for rows past 2,048 keys of the head's cache
@@ -248,7 +253,7 @@ pub fn Ops(comptime Tri: type) type {
             var at: usize = 0;
             for (ds, nexts, 0..) |d, nx, i| {
                 total += nx.len;
-                lane_buf[i] = .{ .seq = .{ .media = null, .conv = &.{}, .state = &.{}, .kc = (&d.kc)[0..1], .vc = (&d.vc)[0..1], .ikc = (&d.ikc)[0..1], .pooled = (&d.pooled)[0..1], .tail = d.kc, .history = &d.unused_history, .cap = d.cap, .scores = score_rows }, .pos = d.len, .rows = nx.len };
+                lane_buf[i] = headLane(d, nx.len, score_rows);
                 @memcpy(ids_buf[at..][0..nx.len], nx);
                 at += nx.len;
             }
@@ -475,4 +480,15 @@ pub fn Ops(comptime Tri: type) type {
             d.open = false;
         }
     };
+}
+
+test "a grouped head's lane carries its draft's page table" {
+    var d: Draft = undefined;
+    d.pg = .{ .pt = 0x7000, .ps = 4096, .ptok = 256 };
+    d.len = 300;
+    d.cap = 1024;
+    const l = headLane(&d, 3, 0);
+    try std.testing.expectEqual(d.pg, l.seq.pg);
+    try std.testing.expectEqual(@as(usize, 300), l.pos);
+    try std.testing.expectEqual(@as(usize, 3), l.rows);
 }

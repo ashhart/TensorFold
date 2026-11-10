@@ -5,7 +5,7 @@ const cuda = @import("cuda");
 const cfg = @import("config.zig");
 const weights = @import("cuda_weights.zig");
 const glue = @import("cuda_glue.zig");
-const kda = @import("cuda_kda.zig");
+const kda = cuda.kda;
 const b16 = @import("cuda_b16.zig");
 const projection = @import("cuda_proj.zig");
 const latent = @import("cuda_latent.zig");
@@ -135,10 +135,21 @@ pub const Pieces = struct {
     gathered: [max_pieces]cuda.Event,
     glues: [max_pieces]cuda.Event, // split: a piece's own rows glued
     shared: [max_pieces]cuda.Event, // split: every rank's glued rows of a piece in
+    owns_side: bool = true, // a paired step's second chunk (initTwin) runs on the first's side stream
 
-    pub fn init(d: *const cuda.Driver, count: usize) !Pieces {
+    /// With `pair` (TF_GLM_PROMPT_PAIR) the side stream runs at the highest priority, ahead of the main stream's grids.
+    pub fn init(d: *const cuda.Driver, count: usize, pair: bool) !Pieces {
         if (count == 0 or count > max_pieces) return error.BadPieces;
-        var p: Pieces = .{ .count = count, .side = try cuda.Stream.init(d, false), .filled = undefined, .gathered = undefined, .glues = undefined, .shared = undefined };
+        return make(d, count, if (pair) try cuda.Stream.initPriority(d, .highest) else try cuda.Stream.init(d, false), true);
+    }
+
+    /// A paired step's second chunk on `of`'s side stream: every rank posts both chunks' exchanges in one order.
+    pub fn initTwin(d: *const cuda.Driver, of: *const Pieces) !Pieces {
+        return make(d, of.count, of.side, false);
+    }
+
+    fn make(d: *const cuda.Driver, count: usize, side: cuda.Stream, owns_side: bool) !Pieces {
+        var p: Pieces = .{ .count = count, .side = side, .filled = undefined, .gathered = undefined, .glues = undefined, .shared = undefined, .owns_side = owns_side };
         for (&p.filled, &p.gathered, &p.glues, &p.shared) |*a, *b, *g, *s| {
             a.* = try cuda.Event.init(d, false);
             b.* = try cuda.Event.init(d, false);
@@ -155,7 +166,7 @@ pub const Pieces = struct {
             g.deinit();
             s.deinit();
         }
-        p.side.deinit();
+        if (p.owns_side) p.side.deinit();
         p.* = undefined;
     }
 };
@@ -233,7 +244,7 @@ pub const Forward = struct {
     }
 
     /// forward._pre: hc_pre of every row at a site into b.normed, xs, post and comb.
-    fn pre(f: *const Forward, r: Rank, hc: weights.Hc, norm: glue.Norm, rows: usize) !void {
+    pub fn pre(f: *const Forward, r: Rank, hc: weights.Hc, norm: glue.Norm, rows: usize) !void {
         const stamp = prof_mod.span(f.prof, f.stream, .glue);
         defer stamp.end();
         const c = &r.w.config;
@@ -249,7 +260,7 @@ pub const Forward = struct {
     }
 
     /// forward._mixer: the layer's KDA or DSA block on b.normed; `li`/`di`: its index among loaded KDA / DSA layers.
-    fn mixer(f: *const Forward, r: Rank, l: weights.Layer, li: usize, di: usize, rows: usize, nch: usize, out: ?u64) !void {
+    pub fn mixer(f: *const Forward, r: Rank, l: weights.Layer, li: usize, di: usize, rows: usize, nch: usize, out: ?u64) !void {
         const c = &r.w.config;
         const b = r.b;
         const st = r.st;
@@ -288,7 +299,7 @@ pub const Forward = struct {
     }
 
     /// forward._ffn: the dense MLP or MoE block on b.normed into this rank's slot.
-    fn ffn(f: *const Forward, r: Rank, l: weights.Layer, rows: usize, out: ?u64) !void {
+    pub fn ffn(f: *const Forward, r: Rank, l: weights.Layer, rows: usize, out: ?u64) !void {
         const stamp = prof_mod.span(f.prof, f.stream, .ffn);
         defer stamp.end();
         const c = &r.w.config;
@@ -413,6 +424,8 @@ pub const Forward = struct {
         if (f.taps) |t| try f.shareTaps(t, cut);
     }
 
+    pub const pairBody = @import("cuda_forward_pair.zig").pairBody;
+
     /// forward.forward of `ids`: logits in b.logits; a prompt chunk's KDA layers committed, a window's at `commit`.
     pub fn run(f: *const Forward, ids: []const i32) !void {
         const R = ids.len;
@@ -479,7 +492,7 @@ pub const Forward = struct {
     }
 
     /// The final norm and this rank's rows of the head (a prompt buffer's last row only).
-    fn finish(f: *const Forward, R: usize) !void {
+    pub fn finish(f: *const Forward, R: usize) !void {
         prof_mod.context(f.prof, null, null, .chunk);
         const stamp = prof_mod.span(f.prof, f.stream, .head);
         defer stamp.end();
@@ -565,16 +578,17 @@ pub const Forward = struct {
                 for (st.cur) |x| if (x != cur) return error.KdaLayersOutOfStep;
                 if (keep < st.pending) {
                     const h = st.heads;
-                    var a: cuda.Args = .{};
-                    a.add(@as(c_int, @intCast(h)));
-                    a.add(st.recAt(cur, 0));
-                    a.add(@as(usize, st.rec_layer / 4));
-                    for ([_]u64{ st.save_k, st.save_v, st.save_g, st.save_b }) |x| a.add(x);
-                    a.add(@as(usize, window_rows * h * kda.dk));
-                    a.add(@as(usize, window_rows * h));
-                    a.add(@as(c_int, @intCast(keep)));
-                    a.add(st.recAt(1 - cur, 0));
-                    try cuda.launch.launch(f.m.kda.replay_layers, .{ .grid = .{ .x = @intCast(st.kda_layers * h) }, .block = .{ .x = 1024 } }, f.stream, &a);
+                    try kda.replayLayers(&f.m.kda, f.stream, .{
+                        .state_in = st.recAt(cur, 0),
+                        .state_stride = st.rec_layer / 4,
+                        .k = st.save_k,
+                        .v = st.save_v,
+                        .g = st.save_g,
+                        .b = st.save_b,
+                        .kv_stride = window_rows * h * kda.dk,
+                        .b_stride = window_rows * h,
+                        .state_out = st.recAt(1 - cur, 0),
+                    }, keep, h, st.kda_layers);
                 }
                 for (st.cur) |*x| x.* = 1 - x.*;
                 if (st.kda_layers > 0) try glue.convShift(f.set(), f.stream, st.conv, st.proj, keep, st.proj_layer, st.proj_row, st.kda_layers, st.conv_c);

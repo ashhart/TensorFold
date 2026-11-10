@@ -113,7 +113,7 @@ pub const Model = struct {
         const plan = try Scratch.of(max_text, image);
         const scratch_bytes = try plan.bytes();
         // qualified on the M5's tensor units alone: the projections and attention take another path before them
-        if (!device.tensorUnits()) {
+        if (!ks.available(device)) {
             std.log.err("moss image: {s} has no tensor units; this family runs on the M5's alone, the only chip it was checked on", .{device.name()});
             return error.TensorUnitsRequired;
         }
@@ -189,17 +189,9 @@ pub const Model = struct {
         if (latents.len != R * cfg.channels or velocity.len != latents.len) return error.LatentRows;
         if (skip) |s| if (s >= cfg.layers) return error.BadSkipLayer;
         const started = mtl.clock.seconds();
-        var spent: f64 = 0;
-        if (t.timestep != timestep) {
-            const vectors: *[host.vectors][H]u16 = @ptrCast(@alignCast(t.mods.addr()));
-            t.timestep = null;
-            try host.modulation(vectors, t.gpa, t.w.modulation, timestep);
-            t.timestep = timestep;
-            spent = mtl.clock.seconds() - started;
-        }
-        for (halves(t.lat, latents.len), latents) |*o, v| o.* = host.bf16(v);
+        const spent = try t.modulate(timestep);
+        t.embed(p, latents);
         const N = R + p.rows;
-        @memcpy(halves(t.x.at(R * H * 2), p.rows * H), halves(.{ .buf = p.text }, p.rows * H));
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         const cb = t.queue.commandBuffer();
@@ -211,6 +203,54 @@ pub const Model = struct {
         const timing = try finish(cb, e, started, spent);
         for (velocity, halves(t.vel, velocity.len)) |*o, v| o.* = host.widen(v);
         return timing;
+    }
+
+    /// For checks: the embedding, each kept block alone on its block of `inputs`, then the final layer on the last.
+    pub fn steps(t: *Model, p: *const Prompt, latents: []const f32, timestep: f32, skip: ?usize, inputs: []const u16, rows: []u16, velocity: []f32) !void {
+        const R = t.image;
+        const N = R + p.rows;
+        const kept: usize = cfg.layers - @as(usize, @intFromBool(skip != null));
+        if (latents.len != R * cfg.channels or velocity.len != latents.len) return error.LatentRows;
+        if (skip) |s| if (s >= cfg.layers) return error.BadSkipLayer;
+        if (inputs.len != (kept + 1) * N * H or rows.len != inputs.len) return error.StreamRows;
+        _ = try t.modulate(timestep);
+        t.embed(p, latents);
+        const pool = mtl.objc.Pool.push();
+        defer pool.pop();
+        var k: usize = 0;
+        while (k <= kept + 1) : (k += 1) {
+            if (k > 0) @memcpy(halves(t.x, N * H), inputs[(k - 1) * N * H ..][0 .. N * H]);
+            const cb = t.queue.commandBuffer();
+            const e = cb.compute(.serial);
+            if (k == 0) {
+                t.k.linearBias(e, t.lat, t.w.video_in, t.w.video_in_b, t.sums, t.x, R, H, cfg.channels);
+            } else if (k <= kept) {
+                t.block(e, t.w.blocks[if (skip) |s| (if (k - 1 < s) k - 1 else k) else k - 1], N, p.cos(), p.sin(R));
+            } else {
+                t.norm(e, R, t.w.final_norm, .{ .scale = .scale_out, .shift = .shift_out });
+                t.k.linear(e, t.xn, t.w.final_out, t.vel, R, cfg.channels, H);
+            }
+            _ = try finish(cb, e, 0, 0);
+            if (k <= kept) @memcpy(rows[k * N * H ..][0 .. N * H], halves(t.x, N * H));
+        }
+        for (velocity, halves(t.vel, velocity.len)) |*o, v| o.* = host.widen(v);
+    }
+
+    /// The shared modulation for `timestep`, made on the host unless it already holds it; the seconds it took.
+    fn modulate(t: *Model, timestep: f32) !f64 {
+        if (t.timestep == timestep) return 0;
+        const started = mtl.clock.seconds();
+        const vectors: *[host.vectors][H]u16 = @ptrCast(@alignCast(t.mods.addr()));
+        t.timestep = null;
+        try host.modulation(vectors, t.gpa, t.w.modulation, timestep);
+        t.timestep = timestep;
+        return mtl.clock.seconds() - started;
+    }
+
+    /// The latents in bf16 and the prompt's rows after the image rows, ready for the input projection.
+    fn embed(t: *Model, p: *const Prompt, latents: []const f32) void {
+        for (halves(t.lat, latents.len), latents) |*o, v| o.* = host.bf16(v);
+        @memcpy(halves(t.x.at(t.image * H * 2), p.rows * H), halves(.{ .buf = p.text }, p.rows * H));
     }
 
     fn finish(cb: mtl.CommandBuffer, e: mtl.ComputeEncoder, started: f64, spent: f64) !Timing {

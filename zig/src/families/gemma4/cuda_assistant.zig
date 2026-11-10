@@ -79,7 +79,7 @@ pub const Drafter = struct {
         const hid = c.hidden;
         const qw = c.heads * cfg.global_dim;
         const wide: Window = .{ .h = c.heads, .hk = geo.global_kv_heads, .d = cfg.global_dim, .win = 0, .ring = m.context, .scale = 1 };
-        const narrow: Window = .{ .h = c.heads, .hk = geo.sliding_kv_heads, .d = cfg.sliding_dim, .win = cfg.window, .ring = fwd.ring, .scale = 1 };
+        const narrow: Window = .{ .h = c.heads, .hk = geo.sliding_kv_heads, .d = cfg.sliding_dim, .win = cfg.window, .ring = m.ringRows(), .scale = 1 };
         const part = @max(cuda.window_attention.WindowAttention.scratchBytes(wide, 16), cuda.window_attention.WindowAttention.scratchBytes(narrow, 16));
         x.x = .{
             .ids = try x.alloc(n * 4),

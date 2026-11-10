@@ -8,6 +8,9 @@ release fixes it, and the release notes say which one.
 - GLM-5.3 (EXLR8) decodes slowly next to the other models: a one-row round on two M5 Ultras takes about 45 ms. No CUDA
   engine serves it, and only the `home` profile on M5 Ultras has run. Replies past 2,048 tokens, where the sparse indexer
   starts picking keys, have not been compared with a whole-model reference.
+- Dory on CUDA with `TF_KV_SHARE=n`: a kept state resumes on a 256-token page edge, so a turn prefills up to 255 more
+  tokens than the copy store would. A short resume that also keeps a new state can start 17-23 ms later than the copy
+  store's on a GB10 (153 against 130 ms at 3K tokens). Each state's sliding caches take 12 pool pages (168 MiB at two loops).
 - Kolibri-1 on CUDA with `TF_KV_SHARE=n`: the prompt store keeps whole 512-token pages, so a shared start shorter
   than a page (a chat template's first 45 tokens, say) is not reused, and a prompt is cut at a page boundary. On a GB10,
   cold 2K chat prompts take about 10% longer to the first token than without the store (0.87 against 0.79 s). Decode
@@ -23,9 +26,10 @@ release fixes it, and the release notes say which one.
 - Qwen3.8-27B cold prefill at 64K tokens on RTX 50-series GPUs (sm_120) measures about 2% slower than 1.1.0; 32K and shorter prompts, and GB10, are at parity or faster.
 - Flash Next on Metal with explicit --parallel 2 or more ([#1893](https://github.com/ashhart/TensorFold/issues/1893)):
   on an M3 Ultra with the MLX 4-bit checkpoint, in a 12-turn chat of about 15,000 tokens, 8 of the 11 resumed
-  turns reused 31 to 350 fewer tokens than the single host, about 0.4 s in all. Replies are the same. On a chip with
-  tensor units, a long prompt beside a running reply still takes a 32-row step before each round, which slows both;
-  `--decode-share` helps. The default --parallel auto uses the single host.
+  turns reused 31 to 350 fewer tokens than the single host, about 0.4 s in all. Replies are the same. On an M5 Ultra
+  with the MLX 4-bit checkpoint, two overlapping clients still finish later at `--parallel 2` than at `--parallel 1`
+  (47 s against 40 s; 44 s with `--decode-share 0.95`), and so does a 64K prompt beside a reply (21 s against 19 s).
+  The default --parallel auto uses the single host.
 - The 1.0.12 gfx1151 Qwen receipts leave the 27B cancellation failure open and the 9B/27B drafted/plain comparisons
   unrun. Those receipts do not establish a new 1.1.0 device pass.
 - Qwen3.8-Flash-Next on a Mac: a turn more than `--keep-warm` seconds after the last request (900 by default) takes

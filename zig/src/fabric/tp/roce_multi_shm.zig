@@ -23,6 +23,19 @@ pub const ShmWire = struct {
     stripes: u32 = 1,
     tap: ?*PostTap = null,
 
+    pub fn segment(w: *ShmWire, s: @import("roce_relay.zig").Segment) !void {
+        const p = try @import("roce_relay.zig").plan(w.layout, w.me, s);
+        @memcpy(w.regions[s.dst][p.remote..][0..p.len], w.local[p.local..][0..p.len]);
+        const meta: *std.atomic.Value(u32) = @ptrCast(@alignCast(w.regions[s.dst][p.flag + 4 ..].ptr));
+        const flag: *std.atomic.Value(u32) = @ptrCast(@alignCast(w.regions[s.dst][p.flag..].ptr));
+        meta.store(s.total, .monotonic);
+        flag.store(s.seq, .release);
+    }
+    pub fn reap(_: *ShmWire) !void {}
+    pub fn idle(_: *const ShmWire) bool {
+        return true;
+    }
+
     pub fn post(w: *ShmWire, slot: u32, seq: u32, padded: u32) guard.Error!void {
         const l = w.layout;
         var plan: [guard.max_hcas]guard.Stripe = undefined;

@@ -38,12 +38,7 @@ pub fn patched(r: *Run, v: *Variant, consts: []const Const) !*Variant {
     if (slotted) try key.appendSlice(r.arena, "|fsr");
     for (consts) |c| try key.print(r.arena, "|{s}={d}", .{ c.name, c.value });
     if (r.variants.get(key.items)) |hit| return hit;
-    var text = try Run.variantText(r.arena, v);
-    for (consts) |c| text = try constant(r.arena, text, c.name, c.value);
-    if (experts4.halfApplies(text, consts) and rows_w.nib(r.device.generation(), 2) == 1) text = try experts4.half(r.arena, text);
-    if (experts4.applies(text, consts)) text = try experts4.balanced(r.arena, text);
-    if (experts4.gateApplies(text, consts)) text = try experts4.gated(r.arena, text);
-    if (slotted) text = try @import("fsr_source.zig").patch(r.arena, text, if (std.mem.indexOf(u8, v.name, "gateup") != null) .gate else .down);
+    const text = try source(r.arena, try Run.variantText(r.arena, v), consts, rows_w.nib(r.device.generation(), 2) == 1, slotted, std.mem.indexOf(u8, v.name, "gateup") != null);
     const lib = try r.ownResource(try mtl.Library.fromSource(r.device, text, mtl.CompileOptions.mlx()));
     const nv = try r.arena.create(Variant);
     nv.* = v.*;
@@ -118,4 +113,15 @@ pub fn hcOf(r: *Run, comptime fmt: []const u8, args: anytype) !Hc {
         hc.w = .{ .{ v[0], v[1] }, .{ v[2], v[3] } };
     }
     return hc;
+}
+
+/// The loader's width and expert-layout transformations before compilation.
+pub fn source(a: std.mem.Allocator, original: []const u8, consts: []const Const, half_lanes: bool, slotted: bool, gate_up: bool) ![]const u8 {
+    var text = original;
+    for (consts) |c| text = try constant(a, text, c.name, c.value);
+    if (experts4.halfApplies(text, consts) and half_lanes) text = try experts4.half(a, text);
+    if (experts4.applies(text, consts)) text = try experts4.balanced(a, text);
+    if (experts4.gateApplies(text, consts)) text = try experts4.gated(a, text);
+    if (slotted) text = try @import("fsr_source.zig").patch(a, text, if (gate_up) .gate else .down);
+    return text;
 }

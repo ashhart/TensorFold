@@ -20,10 +20,12 @@ const pick_rule = "picks by fp32 logit + bias, larger first, ties to the lower i
 const score_rule = "picks by fp32 sigmoid(logit) + bias, larger first, ties to the lower id, a NaN never picked; weights the score";
 
 /// A routing's fixed form; shape: rows, experts (n), top-k (k). score: sigmoid + bias ranked (plant: the logit form).
-pub const Route = struct { name: []const u8, shared: bool, normalize: bool = false, scale: f32 = 1, warp: bool, score: bool = false, shared_slots: usize = 1, plant: bool = false };
+pub const Route = struct { name: []const u8, shared: bool, normalize: bool = false, scale: f32 = 1, warp: bool, score: bool = false, shared_slots: usize = 1, plant: bool = false, groups: usize = 1, keep: usize = 1, experts: usize = 0, high: bool = false }; // high: the highest of equal groups kept (planted)
 
 const nemotron: []const c.Shape = &.{ .{ .rows = 16, .n = 128, .k = 6 }, .{ .rows = 300, .n = 128, .k = 6 } };
 const bolt: []const c.Shape = &.{ .{ .rows = 16, .n = 496, .k = 9 }, .{ .rows = 300, .n = 496, .k = 9 } };
+const ling: []const c.Shape = &.{ .{ .rows = 16, .n = 512, .k = 8 }, .{ .rows = 300, .n = 512, .k = 8 } };
+const groups256: []const c.Shape = &.{ .{ .rows = 16, .n = 256, .k = 8 }, .{ .rows = 300, .n = 256, .k = 8 } };
 
 pub const routes = [_]Route{
     .{ .name = "cuda moe top-k tf_moe_topk_sigmoid_warp (Kolibri: 384 experts, top 6 + shared)", .shared = true, .warp = true },
@@ -32,10 +34,14 @@ pub const routes = [_]Route{
     .{ .name = "cuda moe top-k tf_moe_topk_sigmoid_score_warp_128 (Nemotron: 128 experts, top 6 normalized x2.5 + 2 shared)", .shared = true, .shared_slots = 2, .normalize = true, .scale = 2.5, .warp = true, .score = true },
     .{ .name = "cuda moe top-k tf_moe_topk_sigmoid_score_warp (Bolt: 496 experts, top 9 normalized x2.5)", .shared = false, .normalize = true, .scale = 2.5, .warp = true, .score = true },
     .{ .name = "control: score top-k ranking logit + bias (tf_moe_topk_sigmoid_warp)", .shared = false, .normalize = true, .scale = 2.5, .warp = true, .score = true, .plant = true },
+    .{ .name = "cuda moe top-k tf_moe_topk_sigmoid_score_groups (Ling-3.1: 512 experts, 4 of 8 groups, top 8 normalized x2.5 + shared)", .shared = true, .normalize = true, .scale = 2.5, .warp = true, .score = true, .groups = 8, .keep = 4, .experts = 512 },
+    .{ .name = "cuda moe top-k tf_moe_topk_sigmoid_score_groups (256 experts, 4 of 8 groups, top 8 normalized x2.5 + shared)", .shared = true, .normalize = true, .scale = 2.5, .warp = true, .score = true, .groups = 8, .keep = 4, .experts = 256 },
+    .{ .name = "control: group-limited top-k ranking every group (tf_moe_topk_sigmoid_score_warp)", .shared = true, .normalize = true, .scale = 2.5, .warp = true, .score = true, .plant = true, .groups = 8, .keep = 4, .experts = 512 },
+    .{ .name = "control: group-limited top-k keeping the highest of equal groups (tf_ctl_moe_topk_score_groups_high)", .shared = true, .normalize = true, .scale = 2.5, .warp = true, .score = true, .groups = 8, .keep = 4, .experts = 512, .high = true },
 };
 
 pub fn topkSpec(r: Route) c.Spec {
-    const served: []const c.Shape = if (r.score) (if (r.shared or r.plant) nemotron else bolt) else if (!r.warp) &.{ .{ .rows = 16, .n = 4096, .k = 64 }, .{ .rows = 33, .n = 513, .k = 6 } } else if (r.normalize) &.{ .{ .rows = 16, .n = 256, .k = 8 }, .{ .rows = 300, .n = 256, .k = 8 } } else &.{ .{ .rows = 16, .n = 384, .k = 6 }, .{ .rows = 300, .n = 384, .k = 6 } };
+    const served: []const c.Shape = if (r.groups > 1) (if (r.experts == 512) ling else groups256) else if (r.score) (if (r.shared or r.plant) nemotron else bolt) else if (!r.warp) &.{ .{ .rows = 16, .n = 4096, .k = 64 }, .{ .rows = 33, .n = 513, .k = 6 } } else if (r.normalize) &.{ .{ .rows = 16, .n = 256, .k = 8 }, .{ .rows = 300, .n = 256, .k = 8 } } else &.{ .{ .rows = 16, .n = 384, .k = 6 }, .{ .rows = 300, .n = 384, .k = 6 } };
     const tiles: [3]c.Tile = if (r.warp) .{ .{ .size = 8 }, .{ .size = 32, .min = 8 }, .{} } else .{ .{}, .{ .size = 256, .min = 513 }, .{} };
     return .{ .name = r.name, .accum = .none, .depth = noSums, .out = .raw, .nan = .{ .stated = if (r.score) score_rule else pick_rule }, .tiles = tiles, .served = served };
 }
@@ -44,11 +50,15 @@ pub const TopK = struct {
     rig: rig_.Rig,
     route: Route,
     g: *const glue.MoeGlue,
+    ctl: ?glue.MoeGlue = null, // high: g with its group kernel swapped for the planted one
     shape: c.Shape = .{ .rows = 0, .n = 0, .k = 0 },
     logits: std.ArrayList(f32) = .empty,
     bias: std.ArrayList(f32) = .empty,
     dev: [4]u64 = @splat(0),
     msg: [200]u8 = undefined,
+    fill: g.Fill = .random,
+    near: usize = 0, // the last check's rows skipped as near-tied group cuts
+    ties: usize = 0, // and its rows whose group cut is an exact tie, checked
 
     pub fn deinit(self: *TopK) void {
         self.logits.deinit(self.rig.gpu.gpa);
@@ -57,10 +67,14 @@ pub const TopK = struct {
     }
 
     pub fn kernel(self: *TopK) g.Kernel {
-        return .{ .spec = topkSpec(self.route), .ctx = self, .vt = &vt, .control = if (self.route.plant) .shapes else null };
+        return .{ .spec = topkSpec(self.route), .ctx = self, .vt = &vt, .control = if (self.route.plant or self.route.high) .shapes else null };
     }
 
     const vt = g.hooks(TopK);
+
+    fn fns(self: *const TopK) *const glue.MoeGlue {
+        return if (self.ctl) |*m| m else self.g;
+    }
 
     fn slots(self: *const TopK) usize {
         return self.shape.k + if (self.route.shared) self.route.shared_slots else 0;
@@ -68,25 +82,36 @@ pub const TopK = struct {
 
     fn form(self: *const TopK) glue.Route {
         const r = self.route;
-        return .{ .experts = self.shape.n, .topk = self.shape.k, .shared = r.shared, .normalize = r.normalize, .scale = r.scale, .score = r.score and !r.plant, .shared_slots = r.shared_slots };
+        const grouped = r.plant and r.groups > 1; // the group plant runs the ungrouped score form
+        return .{ .experts = self.shape.n, .topk = self.shape.k, .shared = r.shared, .normalize = r.normalize, .scale = r.scale, .score = r.score and (!r.plant or grouped), .shared_slots = r.shared_slots, .groups = if (r.plant) 1 else r.groups, .keep = if (r.plant) 1 else r.keep };
     }
 
     pub fn prepare(self: *TopK, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
         self.rig.reset();
         const warp = shape.n <= 512 and shape.k <= 32;
         if (warp != self.route.warp or shape.rows == 0 or shape.k == 0 or shape.k > shape.n or shape.n > glue.most_experts or shape.k > glue.most_topk) return false;
+        const gr = self.route.groups;
+        if (gr > 1 and (shape.n % gr != 0 or shape.n / gr < 2 or shape.k > self.route.keep * (shape.n / gr))) return false;
         const a = self.rig.gpu.gpa;
         var prng = std.Random.DefaultPrng.init(seed);
         const rng = prng.random();
         self.shape = shape;
+        self.fill = fill;
+        if (self.route.high and self.ctl == null) {
+            var m = self.g.*;
+            m.topk_groups_fn = try self.g.mod.function("tf_ctl_moe_topk_score_groups_high");
+            self.ctl = m;
+        }
         const ne = shape.n;
+        const gs = ne / gr; // bias repeats every group, so a group copied from another ties it exactly
         try self.logits.resize(a, shape.rows * ne);
         try self.bias.resize(a, ne);
         for (self.logits.items, 0..) |*l, i| {
             l.* = rng.floatNorm(f32) * 2;
             if (i % 7 == 3) l.* = self.logits.items[i - 1]; // equal neighbours: the tie rule decides
         }
-        for (self.bias.items, 0..) |*b, i| b.* = if (i % 5 == 0) 0.25 else 0;
+        for (self.bias.items, 0..) |*b, i| b.* = if (i % gs % 5 == 0) 0.25 else 0;
+        if (gr > 1) tieRows(self.logits.items, shape.rows, ne, gr, self.route.keep);
         if (fill == .nonfinite) {
             const at = [_][2]usize{ .{ 0, 3 }, .{ 1, 5 }, .{ 2, 7 }, .{ 3, 2 }, .{ 3, ne - 1 } };
             const put = [_]f32{ std.math.nan(f32), std.math.inf(f32), -std.math.inf(f32), std.math.inf(f32), -std.math.inf(f32) };
@@ -102,7 +127,7 @@ pub const TopK = struct {
     }
 
     pub fn run(self: *TopK) !void {
-        try self.g.topk(self.rig.s, self.dev[0], self.dev[1], self.form(), self.dev[2], self.dev[3], self.shape.rows);
+        try self.fns().topk(self.rig.s, self.dev[0], self.dev[1], self.form(), self.dev[2], self.dev[3], self.shape.rows);
         try self.rig.s.synchronize();
     }
 
@@ -116,8 +141,14 @@ pub const TopK = struct {
     }
 
     /// Each row's picks by the stated rule exactly, weights within 2^-20 of float64, the shared slot last.
-    pub fn check(self: *TopK, _: g.Gate) !?[]const u8 {
-        if (self.route.score) return self.checkScore();
+    pub fn check(self: *TopK, at: g.Gate) !?[]const u8 {
+        if (self.route.score) {
+            if (try self.checkScore()) |why| return why;
+            if (self.route.groups == 1) return null;
+            const s = self.shape;
+            if (!g.quiet) std.debug.print("INFO {t} {s}: {d}x{d}x{d}, {t} fill: {d} of {d} rows skipped (near-tied group cut), {d} exact group ties checked\n", .{ at, self.route.name, s.rows, s.n, s.k, self.fill, self.near, s.rows, self.ties });
+            return self.cutRows();
+        }
         const a = self.rig.gpu.gpa;
         const out = try self.rig.outputBytes();
         const n = self.shape.rows * self.slots();
@@ -172,11 +203,21 @@ pub const TopK = struct {
         defer a.free(score);
         const taken = try a.alloc(bool, ne);
         defer a.free(taken);
+        self.near = 0;
+        self.ties = 0;
         for (0..self.shape.rows) |r| {
             for (sel, score, 0..) |*v, *p, e| {
                 p.* = 1 / (1 + @exp(-@as(f64, self.logits.items[r * ne + e])));
                 v.* = if (std.math.isNan(p.*)) -std.math.inf(f64) else p.* + self.bias.items[e];
             }
+            if (self.route.groups > 1) switch (keepGroups(sel, self.route.groups, self.route.keep)) {
+                .near => { // fp32 may rank these groups either way
+                    self.near += 1;
+                    continue;
+                },
+                .exact => self.ties += 1,
+                .clear => {},
+            };
             @memset(taken, false);
             var w64: [64]f64 = undefined;
             var sum: f64 = 0;
@@ -205,7 +246,72 @@ pub const TopK = struct {
         }
         return null;
     }
+
+    /// The same rows as two calls (the first half, then the rest): every byte equal to the one call's.
+    fn cutRows(self: *TopK) !?[]const u8 {
+        const s = self.shape;
+        if (s.rows < 2) return null;
+        const a = self.rig.gpu.gpa;
+        const whole = try a.dupe(u8, try self.rig.outputBytes());
+        defer a.free(whole);
+        const row = self.slots() * 4;
+        for (self.dev[2..4]) |p| try (cuda.DeviceBuffer{ .d = self.rig.gpu.d, .ptr = p, .len = s.rows * row }).fill8(0xff, self.rig.s.handle);
+        const m = s.rows / 2;
+        try self.fns().topk(self.rig.s, self.dev[0], self.dev[1], self.form(), self.dev[2], self.dev[3], m);
+        try self.fns().topk(self.rig.s, self.dev[0] + m * s.n * 4, self.dev[1], self.form(), self.dev[2] + m * row, self.dev[3] + m * row, s.rows - m);
+        const at = std.mem.indexOfDiff(u8, whole, try self.rig.outputBytes()) orelse return null;
+        return try std.fmt.bufPrint(&self.msg, "rows {d} and {d} as two calls: byte {d} differs from one call of {d}", .{ m, s.rows - m, at, s.rows });
+    }
 };
+
+/// Rows with exact group ties: odd rows copy group 0 into every group; rows 3 mod 4 lift the last keep - 1 by 3.
+fn tieRows(l: []f32, n_rows: usize, ne: usize, groups: usize, keep: usize) void {
+    const gs = ne / groups;
+    var r: usize = 1;
+    while (r < n_rows) : (r += 2) {
+        const row = l[r * ne ..][0..ne];
+        for (gs..ne) |e| row[e] = row[e % gs] + @as(f32, if (r % 4 == 3 and e / gs >= groups + 1 - keep) 3 else 0);
+    }
+}
+
+const Cut = enum { clear, exact, near };
+
+/// float64 group-limited selection: experts outside the `keep` best groups (lower group on equal sums) go to -inf.
+fn keepGroups(sel: []f64, groups: usize, keep: usize) Cut {
+    const gs = sel.len / groups;
+    var sums: [glue.most_groups]f64 = undefined;
+    for (sums[0..groups], 0..) |*s, gi| {
+        var a: f64 = -std.math.inf(f64);
+        var b: f64 = -std.math.inf(f64);
+        for (sel[gi * gs ..][0..gs]) |v| {
+            if (v > a) {
+                b = a;
+                a = v;
+            } else if (v > b) b = v;
+        }
+        s.* = a + b;
+    }
+    var kept: u32 = 0;
+    for (0..keep) |_| {
+        var best: usize = groups;
+        for (sums[0..groups], 0..) |s, gi| if ((kept >> @intCast(gi)) & 1 == 0 and (best == groups or s > sums[best])) {
+            best = gi;
+        };
+        kept |= @as(u32, 1) << @intCast(best);
+    }
+    var cut: Cut = .clear; // each kept group against each dropped one: equal sums, or near ones fp32 may swap
+    for (sums[0..groups], 0..) |s, gi| {
+        if ((kept >> @intCast(gi)) & 1 == 0) continue;
+        for (sums[0..groups], 0..) |t, gj| {
+            if ((kept >> @intCast(gj)) & 1 == 1) continue;
+            if (s == t) cut = .exact else if (!(s - t > 0x1p-18 * (@abs(s) + 1))) return .near;
+        }
+    }
+    for (sel, 0..) |*v, e| if ((kept >> @intCast(e / gs)) & 1 == 0) {
+        v.* = -std.math.inf(f64);
+    };
+    return cut;
+}
 
 /// The combine's kinds: y in, out; Kolibri combines fp32 expert rows into bf16.
 pub const Combo = struct { name: []const u8, y: cuda.norms.Kind, out: cuda.norms.Kind, elem: c.Elem };

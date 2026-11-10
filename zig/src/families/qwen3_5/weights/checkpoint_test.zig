@@ -108,6 +108,96 @@ const moe_config =
 
 const L = "language_model.model.";
 
+const hf_config =
+    \\{"model_type":"qwen3_5","dtype":"bfloat16","tie_word_embeddings":true,
+    \\ "text_config":{"hidden_size":64,"intermediate_size":32,"num_hidden_layers":2,
+    \\ "num_attention_heads":2,"num_key_value_heads":1,"head_dim":32,"linear_num_key_heads":1,
+    \\ "linear_num_value_heads":2,"linear_key_head_dim":32,"linear_value_head_dim":16,
+    \\ "linear_conv_kernel_dim":4,"vocab_size":16,"full_attention_interval":2,
+    \\ "mtp_num_hidden_layers":0,"layer_types":["linear_attention","full_attention"],"eos_token_id":1}}
+;
+
+fn hfFiles(img: *Image, dir: std.Io.Dir, tied: bool) !void {
+    const p = "model.language_model.";
+    try img.put(p ++ "embed_tokens.weight", "BF16", &.{ 16, 64 });
+    try img.put(p ++ "norm.weight", "BF16", &.{64});
+    if (!tied) try img.put("lm_head.weight", "BF16", &.{ 16, 64 });
+    for ([_][]const u8{ "layers.0.", "layers.1." }) |l| {
+        const base = try std.fmt.allocPrint(img.arena.allocator(), "{s}{s}", .{ p, l });
+        try norms(img, base);
+        var b: [128]u8 = undefined;
+        try img.put(try std.fmt.bufPrint(&b, "{s}mlp.gate_proj.weight", .{base}), "BF16", &.{ 32, 64 });
+        try img.put(try std.fmt.bufPrint(&b, "{s}mlp.up_proj.weight", .{base}), "BF16", &.{ 32, 64 });
+        try img.put(try std.fmt.bufPrint(&b, "{s}mlp.down_proj.weight", .{base}), "BF16", &.{ 64, 32 });
+    }
+    const lin = p ++ "layers.0.linear_attn.";
+    try img.put(lin ++ "in_proj_qkv.weight", "BF16", &.{ 96, 64 });
+    try img.put(lin ++ "in_proj_z.weight", "BF16", &.{ 32, 64 });
+    try img.put(lin ++ "in_proj_a.weight", "BF16", &.{ 2, 64 });
+    try img.put(lin ++ "in_proj_b.weight", "BF16", &.{ 2, 64 });
+    try img.put(lin ++ "out_proj.weight", "BF16", &.{ 64, 32 });
+    try img.put(lin ++ "conv1d.weight", "BF16", &.{ 96, 1, 4 });
+    try img.put(lin ++ "A_log", "BF16", &.{2});
+    try img.put(lin ++ "dt_bias", "BF16", &.{2});
+    try img.put(lin ++ "norm.weight", "BF16", &.{16});
+    const full = p ++ "layers.1.self_attn.";
+    try img.put(full ++ "q_proj.weight", "BF16", &.{ 128, 64 });
+    try img.put(full ++ "k_proj.weight", "BF16", &.{ 32, 64 });
+    try img.put(full ++ "v_proj.weight", "BF16", &.{ 32, 64 });
+    try img.put(full ++ "o_proj.weight", "BF16", &.{ 64, 64 });
+    try img.put(full ++ "q_norm.weight", "BF16", &.{32});
+    try img.put(full ++ "k_norm.weight", "BF16", &.{32});
+    try img.put("model.visual.unrelated.weight", "BF16", &.{4});
+    try img.write(dir, "model.safetensors");
+    const cfg = if (tied) hf_config else try std.mem.replaceOwned(u8, img.arena.allocator(), hf_config, "true", "false");
+    try dir.writeFile(io, .{ .sub_path = "config.json", .data = cfg });
+}
+
+test "Qwen HIP BF16: actual checkpoint reads use HF names, tied heads and lossless FP32 norm sums" {
+    for ([_]bool{ true, false }) |tied| {
+        var img = Image.init();
+        defer img.deinit();
+        img.norm = 0x3b80; // 1/256: 1+w is halfway between two BF16 values and must stay FP32
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try hfFiles(&img, tmp.dir, tied);
+        const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+        defer gpa.free(root);
+        var ck = try checkpoint.Checkpoint.open(gpa, io, root);
+        defer ck.close();
+        try std.testing.expect(ck.config.quant == .bf16);
+        var scratch: std.heap.ArenaAllocator = .init(gpa);
+        defer scratch.deinit();
+        const embed = try ck.embed(scratch.allocator());
+        try std.testing.expect(embed == .bf16);
+        try std.testing.expectEqual(@as(usize, 16 * 64 * 2), embed.bytes());
+        try std.testing.expectEqual(convert.load(.bf16, img.find("model.language_model.embed_tokens.weight"), 5), convert.load(.bf16, embed.bf16.weight.bytes, 5));
+        // a chat checkpoint (engine.chatBf16) widens the same projections to fp32 dense, value for value
+        ck.main.widen = true;
+        const wide = try ck.embed(scratch.allocator());
+        try std.testing.expect(wide == .dense and wide.dense.weight.dtype == .f32);
+        try std.testing.expectEqual(@as(usize, 16 * 64 * 4), wide.bytes());
+        try std.testing.expectEqual(convert.load(.bf16, img.find("model.language_model.embed_tokens.weight"), 5), convert.load(.f32, wide.dense.weight.bytes, 5));
+        ck.main.widen = false;
+        try std.testing.expectEqual(tied, (try ck.head(scratch.allocator())) == null);
+        const norm = try ck.finalNorm(scratch.allocator());
+        try std.testing.expectEqual(@as(f64, 1.00390625), convert.load(.f32, norm.bytes, 0));
+        var l0 = try ck.layer(0);
+        defer l0.deinit();
+        const lin = l0.body.linear;
+        try std.testing.expectEqual(@as(f64, 1.00390625), convert.load(.f32, lin.input_norm.bytes, 0));
+        try std.testing.expectEqual(@as(f64, 0.00390625), convert.load(.f32, lin.gnorm.bytes, 0));
+        try std.testing.expect(lin.conv.is(.f32, &.{ 96, 4 }));
+        try std.testing.expectEqual(convert.load(.bf16, img.find("model.language_model.layers.0.linear_attn.conv1d.weight"), 9), convert.load(.f32, lin.conv.bytes, 9));
+        var l1 = try ck.layer(1);
+        defer l1.deinit();
+        try std.testing.expectEqual(@as(f64, 1.00390625), convert.load(.f32, l1.body.full.q_norm.bytes, 0));
+        const source = try ck.main.get("model.language_model.norm.weight");
+        try std.testing.expectEqual(@as(f64, 0.00390625), convert.load(.bf16, source.bytes, 0));
+        try std.testing.expect(try ck.mtp() == null);
+    }
+}
+
 fn attention(m: *Image, base: []const u8) !void {
     var buf: [160]u8 = undefined;
     const shapes = [_]struct { []const u8, usize }{ .{ "q_proj", 64 }, .{ "k_proj", 32 }, .{ "v_proj", 32 }, .{ "o_proj", 64 } };

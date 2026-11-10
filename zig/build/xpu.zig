@@ -173,7 +173,8 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     runners.images = nem.images;
     nemotronSteps(b, target, optimize, runners);
     const with_contract = b.option(bool, "xpu-contract", "Build the XPU kernel contract's limits audit (needs ocloc for the objects)") orelse false;
-    if (with_contract) xpu_contract.steps(b, target, optimize, ocloc, device);
+    const images = b.option([]const u8, "xpu-images", "A directory of zebins made on a host with ocloc: glue.bin, contract_controls.bin, contract_gate_controls.bin");
+    if (with_contract) xpu_contract.steps(b, target, optimize, ocloc, device, images);
 }
 
 /// One SPIR-V image: the .cl in zig/kernels/xpu (`src`, else `name`) and its ocloc options (dot/matrix kernels: CL3.0).

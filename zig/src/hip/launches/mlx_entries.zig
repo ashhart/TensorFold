@@ -193,6 +193,13 @@ fn fitsPrefillItem(s: Shape) bool {
     return fitsPrefillMatrix(s) and s.m <= item_rows;
 }
 
+/// The deepest product (codes a row) the skewed tile takes: past it a band of blocks outgrows the caches at 3 a WGP.
+const skew_k = 8192;
+
+fn fitsPrefillSkew(s: Shape) bool {
+    return fitsPrefillMatrix(s) and s.k <= skew_k;
+}
+
 fn fitsPrefillGemm(s: Shape) bool {
     return prefillOk(s) and gemmFits(s);
 }
@@ -319,7 +326,7 @@ const other_decode = [_]Entry{
     entry(.routed_act, .decode, "stream", .{ .family = .stream, .fits = &fitsPair, .launch = &launchPair, .policy = &streamOn }),
 };
 
-fn prefill(comptime op: Op) [7]Entry {
+fn prefill(comptime op: Op) [8]Entry {
     // a plain prompt product rounds into out16 when asked; a routed one writes fp32 for the expert combine
     const r: registry.Rounds = if (op == .project) .always else .never;
     return .{
@@ -328,6 +335,7 @@ fn prefill(comptime op: Op) [7]Entry {
         entry(op, .prefill, "kp2", .{ .family = .gemm, .fits = kpFits(2), .launch = launchKp(2), .policy = &gemmOn, .rounds = r }),
         entry(op, .prefill, "kp3", .{ .family = .gemm, .fits = kpFits(3), .launch = launchKp(3), .policy = &gemmOn, .rounds = r }),
         entry(op, .prefill, "matrix", .{ .family = .gemm, .fits = &fitsPrefillMatrix, .launch = launchBlock(.matrix), .caps = &matrixCores, .policy = &matrixOn, .rounds = r }),
+        entry(op, .prefill, "skew", .{ .family = .gemm, .fits = &fitsPrefillSkew, .launch = launchBlock(.skew), .caps = &matrixCores, .policy = &matrixOn, .rounds = r }),
         entry(op, .prefill, "gemm", .{ .family = .gemm, .fits = &fitsPrefillGemm, .launch = launchBlock(.gemm), .policy = &gemmOn, .rounds = r }),
         entry(op, .prefill, "block", .{ .family = .gemm, .fits = &fitsPrefillBlock, .launch = launchBlock(.block), .rounds = r }),
     };
@@ -480,11 +488,11 @@ test "gfx1201 takes the K-parallel tile for short routed prompts, up to its item
     }
 }
 
-test "gfx1151 takes the 64-row routed tile for prompt chunks of up to 1,024 rows, the 128-row tile past them" {
+test "gfx1151 takes the 64-row routed tile for prompt chunks of up to 1,024 rows, the skewed 128-row tile past them" {
     const r = kernelsOn("gfx1151");
     const env = envOn("gfx1151", true, true, true);
     // Flash Next's gate and up: 11 slots a row, the plan's item capacity as the launch passes it
-    for ([_]struct { u32, []const u8 }{ .{ 1024, "item64" }, .{ 1025, "matrix" }, .{ 4096, "matrix" } }) |w| {
+    for ([_]struct { u32, []const u8 }{ .{ 1024, "item64" }, .{ 1025, "skew" }, .{ 4096, "skew" } }) |w| {
         const pairs = w[0] * 11;
         const items = @min(pairs, 512) + pairs / 8;
         const shape: Shape = .{
@@ -499,4 +507,17 @@ test "gfx1151 takes the 64-row routed tile for prompt chunks of up to 1,024 rows
         };
         try std.testing.expect(std.mem.endsWith(u8, r.select(env, .mlx, .routed, .prefill, shape).?.id, w[1]));
     }
+}
+
+test "gfx1151 takes the skewed matrix tile for prompts up to skew_k codes deep, the padded one past them" {
+    const r = kernelsOn("gfx1151");
+    const env = envOn("gfx1151", true, true, true);
+    // Qwen3.8-27B's gate and up, both sides of skew_k, and the 27B's down
+    for ([_]struct { u32, u32, []const u8 }{ .{ 17408, 5120, "skew" }, .{ 5120, skew_k, "skew" }, .{ 5120, skew_k + 64, "matrix" }, .{ 5120, 17408, "matrix" } }) |w| {
+        const shape: Shape = .{ .m = 2048, .n = w[0], .k = w[1], .bits = 4, .group = 64, .fp16 = false };
+        try std.testing.expect(std.mem.endsWith(u8, r.select(env, .mlx, .project, .prefill, shape).?.id, w[2]));
+    }
+    // gfx1100's table has no row for it
+    const shape: Shape = .{ .m = 2048, .n = 17408, .k = 5120, .bits = 4, .group = 64, .fp16 = false };
+    try std.testing.expect(std.mem.endsWith(u8, kernelsOn("gfx1100").select(envOn("gfx1100", true, true, true), .mlx, .project, .prefill, shape).?.id, "matrix"));
 }

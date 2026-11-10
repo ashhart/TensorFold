@@ -32,7 +32,8 @@ namespace tf_exl3 {
 // plan_finish as served, or one of the contract's planted SwiGLU-OAI faults: no + 1 on the up, alpha 1.
 enum FinishFault { FINISH_SERVED, FINISH_NO_PLUS_ONE, FINISH_ALPHA_ONE };
 
-template <int FAULT>
+// AFTER: the SwiGLU clamp on silu's output, min(silu(g), L) * clip(u, -L, L) (Ling); else on its input (GLM).
+template <int FAULT, bool AFTER = false>
 __device__ __forceinline__ void plan_finish(const PlanStage a) {
     const int it = blockIdx.x, blk = blockIdx.y, lane = threadIdx.x;
     if (it >= a.counts[0]) return;
@@ -64,9 +65,10 @@ __device__ __forceinline__ void plan_finish(const PlanStage a) {
                     continue;
                 }
                 if (a.act_mode == 0) { v = bf16r(v); up = bf16r(up); }
-                if (a.limit > 0) { v = upTo(v, a.limit); up = within(up, a.limit); }
+                if (!AFTER && a.limit > 0) { v = upTo(v, a.limit); up = within(up, a.limit); }
                 v = v / (1.f + expf(-v));
                 if (a.act_mode == 0) v = bf16r(v);
+                if (AFTER && a.limit > 0) { v = upTo(v, a.limit); up = within(up, a.limit); }
                 v *= up;
             }
             const size_t at = (size_t)p * a.n + n + q;

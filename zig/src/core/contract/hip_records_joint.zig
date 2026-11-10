@@ -1,7 +1,7 @@
 //! Gate 5's records of the joint schema head's kernels (joint_schema/joint_schema.hip): 256 threads a launch.
 const Record = @import("hip_records.zig").Record;
 
-pub const records = [_]Record{
+pub const records = [10]Record{
     .{
         .launch = .{ .name = "joint schema layer norm tf_js_layer_norm", .symbol = "tf_js_layer_norm", .image = "joint_schema", .threads = 256 },
         .usage = .{

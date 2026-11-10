@@ -220,11 +220,11 @@ pub const Host = struct {
                 continue;
             }
             if (h.closing) {
-                const left = h.gpa.dupe(*Job, h.queued.items) catch &.{};
-                h.queued.clearRetainingCapacity();
+                var left = h.queued; // taken whole, as the lane host's close does: no copy to fail and drop them
+                h.queued = .empty;
                 h.unlock();
-                for (left) |job| h.finish(job, .cancelled, .{}, "");
-                h.gpa.free(left);
+                for (left.items) |job| h.finish(job, .cancelled, .{}, "");
+                left.deinit(h.gpa);
                 // --learn's half-made cut settled, then what waits for disk written under the stop's deadline
                 if (h.cache) |*store| if (store.imprint) |im| api.prompt_learn.settle(store, im);
                 if (h.cache) |*store| if (store.disk) |r| {
@@ -439,13 +439,13 @@ pub fn openConfigured(gpa: Allocator, io: std.Io, dir: []const u8, dump: ?[]cons
     };
     const vis: ?*images.Vision = if (vision) |o| try images.open(gpa, io, eng, dir, o, a, why) else null;
     errdefer if (vis) |v| v.deinit();
-    const h = try openWarmed(gpa, io, eng, window, cache_gib, over_cap, learn, eng.r.load_limit, vis, a, why);
+    const h = try openWarmed(gpa, io, dir, eng, window, cache_gib, over_cap, learn, eng.r.load_limit, vis, a, why);
     h.shared_gdn_pipe = shared_gdn_pipe;
     return h;
 }
 
 /// Takes a warmed engine and its image tower, if any, without loading or warming; the caller keeps both on error.
-pub fn openWarmed(gpa: Allocator, io: std.Io, eng: *fx.Engine, window: i64, cache_gib: ?f64, over_cap: bool, learn: ?Learn, limit: ?u64, vis: ?*images.Vision, a: Allocator, why: *[]const u8) !*Host {
+pub fn openWarmed(gpa: Allocator, io: std.Io, dir: []const u8, eng: *fx.Engine, window: i64, cache_gib: ?f64, over_cap: bool, learn: ?Learn, limit: ?u64, vis: ?*images.Vision, a: Allocator, why: *[]const u8) !*Host {
     const cache_plan = try cache_setup.cacheBudget(eng, cache_gib, over_cap, limit, a, why);
     const budget = cache_plan.budget_bytes;
     eng.peer_budget = budget; // rank 1: its kept states and free buffers stay inside the same budget
@@ -472,9 +472,9 @@ pub fn openWarmed(gpa: Allocator, io: std.Io, eng: *fx.Engine, window: i64, cach
     // a reply's background pass keeps its end: a client that drops the reasoning resumes past the reply
     h.info_.warm_turns = h.cache != null;
     if (learn) |l| if (l.conversations) {
-        if (h.cache) |*store| _ = try disk.attach(gpa, store, try disk.identity(gpa, io, eng), l);
+        if (h.cache) |*store| _ = try disk.attach(gpa, store, try disk.identity(gpa, io, dir, eng), l);
     } else {
-        h.learned = try cache_setup.learnedStates(gpa, io, eng, l.root, l.cap);
+        h.learned = try cache_setup.learnedStates(gpa, io, dir, eng, l.root, l.cap);
         if (h.cache) |*store| store.imprint = &h.learned.?;
     };
     errdefer if (h.learned) |*m| m.deinit();
@@ -578,4 +578,8 @@ test "a drained Flash Next host is unhealthy before another submit" {
     try std.testing.expectError(error.Closed, engine.submit(1, &request, .{ .ctx = &ctx, .event = Sink.event }));
     try std.testing.expectEqual(@as(usize, 0), host.queued.items.len);
     try std.testing.expect(!status.healthy);
+}
+
+test {
+    _ = @import("flashnext_host_close_test.zig");
 }

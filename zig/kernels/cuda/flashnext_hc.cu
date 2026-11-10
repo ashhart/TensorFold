@@ -5,6 +5,7 @@
 #include <cuda_bf16.h>
 #include <stdint.h>
 
+#include "common/fold.cuh"
 #include "common/glue_math.cuh"
 #include "common/qmm_frag.cuh"
 
@@ -163,7 +164,7 @@ __device__ __forceinline__ void hc_writeback_norm(const __nv_bfloat16* H, __nv_b
             PSS[(static_cast<long long>(r) * NC + c) * S + threadIdx.x] = total;
             all = __fadd_rn(all, total);
         }
-        rinv[threadIdx.x] = __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(__fdiv_rn(all, static_cast<float>(D)), eps)));
+        rinv[threadIdx.x] = tf_common::rms_scale(all, D, eps);
     }
     __syncthreads();
 #pragma unroll
@@ -207,10 +208,8 @@ extern "C" __global__ void __launch_bounds__(128) fn_hc_down(const __nv_bfloat16
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31, g = lane >> 2, t = lane & 3;
     if (threadIdx.x < 16) {
         const int r = m0 + threadIdx.x;
-        float total = 0.0f;
-        if (r < M)
-            for (int c = 0; c < NC; ++c) total = __fadd_rn(total, PSS[(static_cast<long long>(r) * NC + c) * SS + st]);
-        rinv[threadIdx.x] = __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(__fdiv_rn(total, static_cast<float>(D)), eps)));
+        const float total = r < M ? tf_common::sum_rn(NC, [&](int c) { return PSS[(static_cast<long long>(r) * NC + c) * SS + st]; }) : 0.0f;
+        rinv[threadIdx.x] = tf_common::rms_scale(total, D, eps);
     }
     __syncthreads();
     const int vecs = width / 8;
@@ -311,9 +310,8 @@ extern "C" __global__ void fn_hc_rinv(const float* __restrict__ PSS, float* __re
                                       int NC, int SS) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x, r = i / SS, st = i % SS;
     if (r >= M) return;
-    float total = 0.0f;
-    for (int c = 0; c < NC; ++c) total = __fadd_rn(total, PSS[(static_cast<long long>(r) * NC + c) * SS + st]);
-    RINV[i] = __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(__fdiv_rn(total, static_cast<float>(D)), eps)));
+    const float total = tf_common::sum_rn(NC, [&](int c) { return PSS[(static_cast<long long>(r) * NC + c) * SS + st]; });
+    RINV[i] = tf_common::rms_scale(total, D, eps);
 }
 
 // fn_hc_mix with each normed value recomputed from the streams as fn_hc_norm rounds it (no normed rows read).
@@ -431,8 +429,8 @@ extern "C" __global__ void __launch_bounds__(512) fn_ple_gate(const __nv_bfloat1
         }
         kss = block_sum_serial(kss, scratch);
         qss = block_sum_serial(qss, scratch);
-        const float krinv = __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(__fdiv_rn(kss, fd), eps)));
-        const float qrinv = __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(__fdiv_rn(qss, fd), eps)));
+        const float krinv = tf_common::rms_scale(kss, D, eps);
+        const float qrinv = tf_common::rms_scale(qss, D, eps);
         float dot = 0.0f;
         for (int d = threadIdx.x; d < D; d += blockDim.x) {
             const float kn = rbf(__fmul_rn(__fmul_rn(bf(KEYS[row + d]), krinv), NK[s * D + d]));

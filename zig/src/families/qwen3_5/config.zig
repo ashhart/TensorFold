@@ -1,6 +1,7 @@
 //! Qwen3.5-2B MLX affine admission: pinned geometry and formats, tied or untied head; other geometries need qualifying.
 const std = @import("std");
 const layer_pattern = @import("qwen35_layers");
+const rules = @import("qwen35_rules");
 
 pub const hidden = 2048;
 pub const vocab = 248320;
@@ -101,10 +102,7 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Config {
         if (v != .bool) return error.BadQwenConfig;
         if (v.bool != tied) return error.BadQwenConfig;
     }
-    try boolean(text, "attention_bias", false);
-    try boolean(text, "attn_output_gate", true);
-    try string(text, "hidden_act", "silu");
-    try string(text, "mamba_ssm_dtype", "float32");
+    try rules.check(text, .metal2b);
     const dims = .{
         .{ "hidden_size", hidden },              .{ "vocab_size", vocab },                  .{ "num_hidden_layers", layers },
         .{ "intermediate_size", intermediate },  .{ "linear_num_key_heads", linear_heads }, .{ "linear_num_value_heads", linear_heads },

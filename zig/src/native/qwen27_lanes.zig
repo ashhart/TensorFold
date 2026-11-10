@@ -36,6 +36,9 @@ comptime {
     std.debug.assert(max_rows <= q.gpu_frame.logit_rows and batch_rows <= q.gpu_frame.max_rows);
 }
 
+/// A sampled window's logits rows, drawn by the 2B's draw (top-k candidates, then the shared keyed sampler).
+const Rows = @import("qwen27_draws.zig").Rows(tf.qwen35.backend.draw, lanes.Sampling);
+
 pub const Release = @import("qwen27_hooks.zig").Release;
 pub const Grow = @import("qwen27_hooks.zig").Grow;
 
@@ -109,7 +112,7 @@ pub const Metal = struct {
         errdefer kept.deinit();
         const b = try gpa.create(Metal);
         errdefer gpa.destroy(b);
-        b.* = .{ .gpa = gpa, .runner = runner, .draft = draft, .tensor_units = tensor_units, .window = window, .copies = copies, .nodes = @import("qwen27_window.zig").nodes(window, copies), .ops = ops, .picks = picks, .kept = kept, .draft_slots = draftSlots(), .slot_resume = slots.slotResumeEnv() };
+        b.* = .{ .gpa = gpa, .runner = runner, .draft = draft, .tensor_units = tensor_units, .window = window, .copies = copies, .nodes = @import("qwen27_window.zig").nodes(window, copies), .ops = ops, .picks = picks, .kept = kept, .draft_slots = try draftSlots(), .slot_resume = slots.slotResumeEnv() };
         b.pass_profile = platform.c.getenv("TF_Q27_PASS_PROFILE") != null;
         errdefer b.freeContexts();
         if (draft) |d| {
@@ -254,12 +257,8 @@ pub const Metal = struct {
             const metric = mtl.pass_metrics.phase(.sampling);
             defer metric.end();
             const words: [*]const u16 = @ptrCast(@alignCast(logits.buffer.contents() + logits.offset));
-            // the 2B's draw: top-k candidates, then the shared keyed sampler (the whole row's token)
-            for (out[0..rows], positions[0..rows], 0..) |*t, p, row| {
-                const mask = if (masks.len == 0) &.{} else masks[row * width ..][0..width];
-                t.* = try @import("qwen27_masks.zig").draw(tf.qwen35.backend.draw, b.gpa, words[(first + row) * vocab ..][0..vocab], s.sampling, p, mask);
-            }
-            return;
+            // each row's whole-row draw at its own position, the window's rows on threads
+            return @import("qwen27_draws.zig").each(Rows{ .gpa = b.gpa, .words = words + first * vocab, .vocab = vocab, .width = width, .sampling = s.sampling, .positions = positions, .out = out, .masks = masks }, rows);
         }
         try b.argmaxRows(first, rows);
         try b.picked(first, rows, out);
@@ -556,7 +555,6 @@ pub const Metal = struct {
 };
 
 /// Streams that draft their own trees in shared rounds, while no more are live (TF_Q27_DRAFT_SLOTS; 1: slot 0 alone).
-fn draftSlots() u32 {
-    const v = std.c.getenv("TF_Q27_DRAFT_SLOTS") orelse return 8;
-    return std.math.clamp(std.fmt.parseInt(u32, std.mem.span(v), 10) catch 8, 1, max_streams);
+pub fn draftSlots() !u32 {
+    return std.math.clamp(try @import("sys").environment.read(u32, "TF_Q27_DRAFT_SLOTS", 8), 1, max_streams);
 }

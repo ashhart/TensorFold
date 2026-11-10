@@ -83,6 +83,7 @@ fn decisionOnly(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dir: [
         return std.fmt.allocPrint(a, "{s}: {s} is quantized ({t})", .{ what, dir, c.quant }) catch what;
     }
     if (c.quant != .bf16 or head) return null;
+    if (engine.chatBf16(gpa, io, dir)) return null; // an image checkpoint: a tower the engine reads, no joint head
     const what = "BF16 Qwen3.5 serves as a decision backbone only";
     return std.fmt.allocPrint(a, "{s}: {s} has no joint_head_config.json", .{ what, dir }) catch what;
 }
@@ -142,6 +143,7 @@ fn prepare(
     var pf: engine.Preflight = .{};
     const e = Engine.load(gpa, io, dir, .{
         .preflight = &pf,
+        .vision = o.vision,
         .slack = rows + 1,
         .device = dev.index,
         .policy = dev.policy,
@@ -165,22 +167,35 @@ fn prepare(
                 if (pf.pool.limit != null) ", under TENSORFOLD_HIP_MEMORY_LIMIT_GB" else "",
             },
         ),
-        error.BadReserve => steps.refuseAll(
+        error.BadReserve, error.BadLimit => steps.refuseAll(
             a,
             problem,
-            "TENSORFOLD_MEMORY_RESERVE_GIB: a number of GiB from 0.5 (2 on shared memory) to the memory's size",
-            .{},
-        ),
-        error.BadLimit => steps.refuseAll(
-            a,
-            problem,
-            "TENSORFOLD_HIP_MEMORY_LIMIT_GB: a positive number of GiB whose byte count fits in a 64-bit size",
-            .{},
+            "{s}",
+            .{try hip.admission.badSetting(a, if (err == error.BadReserve) error.BadReserve else error.BadLimit, .{
+                .reserve = @import("sys").getenv("TENSORFOLD_MEMORY_RESERVE_GIB"),
+                .limit = @import("sys").getenv("TENSORFOLD_HIP_MEMORY_LIMIT_GB"),
+            })},
         ),
         error.HostMemoryUnavailable => steps.refuseAll(
             a,
             problem,
             "cannot read or parse /proc/meminfo's MemTotal and MemAvailable; refusing HIP unified-memory admission",
+            .{},
+        ),
+        // the CUDA engine refuses these alike: --vision asks for images, so a tower it cannot read stops the start
+        error.UnsupportedQwenVision => steps.refuseAll(
+            a,
+            problem,
+            "--vision: this checkpoint's image tower is not one the HIP engine reads (64-wide heads, 16-pixel " ++
+                "patches, 2x2 merge): serve it without --vision for text",
+            .{},
+        ),
+        error.UnsupportedTorchRope => steps.refuseAll(
+            a,
+            problem,
+            "the HIP engine's image and BF16 text rotary reads BF16 activations, 256-wide heads, 64 rotary " ++
+                "dimensions and the interleaved [11, 11, 10] M-RoPE; this checkpoint differs (serve a quantized " ++
+                "checkpoint without --vision for text)",
             .{},
         ),
         else => steps.refuseAll(a, problem, "the native HIP engine cannot load {s} ({s})", .{ dir, @errorName(err) }),
@@ -261,7 +276,7 @@ fn prepare(
             "the native HIP engine cannot allocate its scratch and pages ({s})",
             .{@errorName(err)},
         );
-    const lane = gibs(state.Caches.deviceBytes(e.model(), capacity) + pages.pagesFor(capacity) * memory.pageBytes(e.weights.spec, e.act.size()));
+    const lane = gibs(state.Caches.deviceBytes(e.model(), capacity) + e.model().taps.ringBytes(e.model().spec.hidden) + pages.pagesFor(capacity) * memory.pageBytes(e.weights.spec, e.act.size()));
     const startup = try std.fmt.allocPrint(gpa, "HIP {s} device {d}, rank {d} of {d}: model {d:.2} GiB; {d} stream{s} at once, {d:.2} GiB each at a {d}-token window, of {d:.1} GiB left after a {d:.1} GiB reserve; prompt cache {d:.2} GiB ({d} pages, {d} snapshots); prompts in {d}-row chunks", .{
         hip.kernels.arch, dev.index, o.rank, o.world, gibs(model), streams, if (streams == 1) "" else "s", lane, window, gibs(room), gibs(reserve), gibs(budget), cache.pages, cache.snaps, prefix.chunk,
     });
@@ -340,7 +355,7 @@ fn openEngine(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dev: hip
         .deinit = release,
         .streams = p.streams,
         .startup = p.startup,
-        .offer = .{ .readouts = own.backend.readouts() },
+        .offer = .{ .readouts = own.backend.readouts(), .vision = serve.vision.offer(p.e.vision) },
     };
 }
 
@@ -419,6 +434,24 @@ test "a bf16 checkpoint without a joint head is refused as decision-only, an MLX
     try std.testing.expect(std.mem.startsWith(u8, quantized, "the joint schema head needs the BF16 checkpoint: "));
     try tmp.dir.deleteFile(io, "joint_head_config.json");
     try std.testing.expect(decisionOnly(a, std.testing.allocator, io, dir) == null); // without it, a text model
+}
+
+test "a bf16 checkpoint without a joint head serves chat when the engine reads its tower" {
+    const io = std.testing.io;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    // LightOnOCR-3-0.8B's config: bf16 (no quantization) with a vision_config the HIP tower reads
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = @embedFile("../../../fixtures/lighton-ocr-0.8b.json") });
+    try std.testing.expect(engine.chatBf16(std.testing.allocator, io, dir));
+    try std.testing.expect(decisionOnly(a, std.testing.allocator, io, dir) == null);
+    // the same weights with Clef's joint head file are not a chat checkpoint: the joint schema path takes them
+    try tmp.dir.writeFile(io, .{ .sub_path = "joint_head_config.json", .data = "{}" });
+    try std.testing.expect(!engine.chatBf16(std.testing.allocator, io, dir));
+    try std.testing.expect(decisionOnly(a, std.testing.allocator, io, dir) == null);
 }
 
 test "capability audit: HIP Qwen format names cover the admitted affine widths" {

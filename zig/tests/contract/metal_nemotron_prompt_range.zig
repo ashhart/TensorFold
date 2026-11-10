@@ -10,20 +10,37 @@ const ar = contract.attention_range;
 const D = old.D;
 
 /// P with the tensor units' cut; P spread over [0, 1]; that case without the cut; a non-finite value at a masked key.
-const Case = enum { cut, spread, cutless, masked };
+const Case = enum { cut, spread, cutless, masked, masked_control, masked_nan, paged_inf, paged_nan, paged_finite };
+const masked_shapes = [_]c.Shape{
+    .{ .rows = 8, .n = old.heads * D, .k = 24 },
+    .{ .rows = 64, .n = old.heads * D, .k = 192 },
+    .{ .rows = 65, .n = old.heads * D, .k = 254 },
+    .{ .rows = 64, .n = old.heads * D, .k = 255 },
+};
 
 fn name(k: Case, full: bool) []const u8 {
+    switch (k) {
+        .masked_nan => return if (full) "metal nemotron attention prompt masked NaN, full fp32 P" else "metal nemotron attention prompt masked NaN",
+        .paged_inf => return if (full) "metal nemotron attention prompt paged masked Inf, full fp32 P" else "metal nemotron attention prompt paged masked Inf",
+        .paged_nan => return if (full) "metal nemotron attention prompt paged masked NaN, full fp32 P" else "metal nemotron attention prompt paged masked NaN",
+        .paged_finite => return if (full) "metal nemotron attention prompt paged selector finite bytes, full fp32 P" else "metal nemotron attention prompt paged selector finite bytes",
+        else => {},
+    }
     if (full) return switch (k) {
         .cut => "metal nemotron attention prompt nax, full fp32 P",
         .spread => "metal nemotron attention prompt nax, full fp32 P spread over [0, 1]",
         .cutless => "control: metal nemotron attention prompt nax, full fp32 P range with tensor-cut product",
         .masked => "metal nemotron attention prompt nax, full fp32 P with a non-finite value at a masked key",
+        .masked_control => "control: metal nemotron attention prompt full fp32 P without the exceptional selector",
+        else => unreachable,
     };
     return switch (k) {
         .cut => "metal nemotron attention prompt nax",
         .spread => "metal nemotron attention prompt nax, P spread over [0, 1]",
         .cutless => "control: metal nemotron attention prompt nax, P spread, its range without the operand cut",
         .masked => "metal nemotron attention prompt nax, a non-finite value at a key masked in its tile",
+        .masked_control => "control: metal nemotron attention prompt nax without the exceptional selector",
+        else => unreachable,
     };
 }
 
@@ -52,14 +69,24 @@ const Probe = struct {
     pub fn prepare(p: *Probe, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
         if (!try p.inner.prepare(shape, fill, seed)) return false;
         if ((p.case == .spread or p.case == .cutless) and fill == .random) p.spread(seed);
-        if (p.case == .masked and fill == .nonfinite) p.maskedInf();
+        if (fill == .nonfinite) switch (p.case) {
+            .masked, .masked_control, .masked_nan, .paged_inf, .paged_nan => p.maskedInf(),
+            else => {},
+        };
+        @import("metal_nemotron_prompt_launch.zig").stagePages(&p.inner);
         return true;
     }
 
-    /// +Inf in V at key len + 5 (head 0, column 7): rows 0 to 4 have it masked, yet their tile reads it.
+    /// Both KV heads, fragment halves and the final row; hidden classes must not leak across the causal boundary.
     fn maskedInf(p: *Probe) void {
         const in = &p.inner;
-        in.host[in.at(true, 0, in.len + 5) + 7] = 0x7f80;
+        const nan = p.case == .masked_nan or p.case == .paged_nan;
+        if (in.rows > 1) {
+            const positions = [_]usize{ 1, @min(5, in.rows - 1), in.rows - 1, @min(31, in.rows - 1), @min(64, in.rows - 1) };
+            for (positions, [_]usize{ 9, 7, 127, 63, 64 }, [_]usize{ 0, 0, 1, 1, 0 }, 0..) |pos, col, h, i| {
+                in.host[in.at(true, h, in.len + pos) + col] = if (nan) 0x7fc0 else if (i % 2 == 0) 0xff80 else 0x7f80;
+            }
+        }
         const cache = old.kvh * in.cap * D;
         @memcpy(p.rig.bytes(in.kv[1], cache * 2), std.mem.sliceAsBytes(in.host[cache..][0..cache]));
     }
@@ -84,7 +111,25 @@ const Probe = struct {
     }
 
     pub fn run(p: *Probe) !void {
+        p.inner.prompt_run.baseline = p.case == .masked_control;
         try p.inner.run();
+        const in = &p.inner;
+        if (p.case != .masked_control and in.rows > 1) {
+            const words = std.mem.bytesAsSlice(u32, p.rig.bytes(in.prompt_run.pick, 40));
+            if (words[0] != 0) return error.PromptSelectorFlagDidNotClear;
+            var exceptional = false;
+            for (0..old.kvh) |h| for (in.len + 1..in.len + in.rows) |key| for (0..D) |d| {
+                exceptional = exceptional or ((in.host[in.at(true, h, key) + d] & 0x7f80) == 0x7f80);
+            };
+            const at: usize = if (exceptional) 7 else 4;
+            const off: usize = if (exceptional) 4 else 7;
+            if (words[at] != (in.rows + 63) / 64 or words[at + 1] != old.heads or words[at + 2] != 1 or
+                words[off] != 0 or words[off + 1] != 0 or words[off + 2] != 0) return error.PromptSelectorGridMismatch;
+        }
+    }
+
+    pub fn replaced(p: *Probe) ![]const u8 {
+        return p.inner.replaced();
     }
 
     pub fn count(p: *Probe) usize {
@@ -165,15 +210,15 @@ pub const Suite = struct {
             errdefer s.a.destroy(p);
             p.* = .{ .inner = try old.Probe.init(s.a, s.device, s.queue, .prompt, 1, false), .case = k, .full = full, .rig = undefined };
             p.inner.prompt_full = full and k != .cutless;
+            p.inner.prompt_run.paged = k == .paged_inf or k == .paged_nan or k == .paged_finite;
             p.rig = &p.inner.rig;
             try s.probes.append(s.a, p);
             var spec = old.spec(.prompt, 1, false);
             spec.name = name(k, full);
-            if (k == .masked) {
-                spec.served = spec.served[0..1];
-                spec.known = .{ .gate = .nonfinite, .finding = "a non-finite value at a key masked for a row of its tile reaches that row as NaN (P = 0 times Inf inside the P x V mma)" };
-            }
-            try s.kernels.append(s.a, .{ .spec = spec, .ctx = p, .vt = &vt, .control = if (k == .cutless) .shapes else null });
+            if (k == .masked_control) spec.served = spec.served[0..1];
+            if (k == .masked or k == .masked_nan or k == .paged_inf or k == .paged_nan or k == .paged_finite) spec.served = &masked_shapes;
+            if (k == .paged_finite) spec.replaces = "main's unchanged contiguous prompt bytes through shuffled pages";
+            try s.kernels.append(s.a, .{ .spec = spec, .ctx = p, .vt = &vt, .control = if (k == .cutless) .shapes else if (k == .masked_control) .nonfinite else null });
         }
     }
 

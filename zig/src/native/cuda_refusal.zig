@@ -255,3 +255,27 @@ test "--spill-gib and --checkpoint-slots open the families with a disk image; th
     try std.testing.expectStringStartsWith(backend(.{ .dir = "d", .model_type = "m", .keep = 2 }) orelse "", "--checkpoint-slots sets how many");
     try std.testing.expect(backend(.{ .dir = "d", .model_type = "m" }) == null);
 }
+
+test "GLM keeps its prompt states in the process: no disk image, so --spill-gib and --learn-conversations refuse" {
+    // TF_GLM_KV_LIVE_HALF's keeps omit the dead KDA half; they must never reach a store a server without the flag reads
+    const glm = @import("glm_cuda").native;
+    try std.testing.expect(@import("cuda_disk.zig").keptDisk(glm) == null);
+    const spill: api.Open = .{ .dir = "d", .model_type = "glm5_next", .learn = "/s", .learn_conversations = true, .spill = .evicted };
+    try std.testing.expectStringStartsWith(family(glm, spill) orelse "", "--spill-gib keeps evicted states");
+    const learn: api.Open = .{ .dir = "d", .model_type = "glm5_next", .learn = "/s", .learn_conversations = true };
+    try std.testing.expectStringStartsWith(family(glm, learn) orelse "", "--learn-conversations keeps");
+}
+
+/// Validate CUDA settings and residency support before checkpoint or driver work at direct entry points.
+pub fn startup(a: std.mem.Allocator, o: api.Open, problem: *[]const u8) !bool {
+    const settings = @import("sys").environment;
+    if (try settings.refusal(a, settings.Process{}, .{ .cuda = true, .slide = o.slide, .device = o.device, .segments = o.segments })) |why| {
+        problem.* = why;
+        return true;
+    }
+    if (o.fsrRefusal("cuda")) |why| {
+        problem.* = why;
+        return true;
+    }
+    return false;
+}

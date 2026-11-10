@@ -103,16 +103,30 @@ fn present(r: *Rows, i: usize) !void {
 
 /// A disk state reaching further than `have`, read back into a new RAM entry where that costs less than prefilling.
 pub fn recall(s: *pc.Store, prompt: []const u32, born: u32, starts: []const u32, spans: []const modes.Span, have: ?*pc.Entry) ?*pc.Entry {
+    var before: ?u32 = null;
+    return attempt(s, prompt, born, starts, spans, have, &before) catch
+        (attempt(s, prompt, born, starts, spans, have, &before) catch null);
+}
+
+fn failed(before: *?u32, at: u32, err: anyerror) anyerror {
+    const retry = before.* == null;
+    before.* = at;
+    pc.note("disk restore of {d} tokens failed ({s}); {s}", .{ at, @errorName(err), if (retry) "trying one shorter kept state" else "prefilling from the start" });
+    return err;
+}
+
+fn attempt(s: *pc.Store, prompt: []const u32, born: u32, starts: []const u32, spans: []const modes.Span, have: ?*pc.Entry, before: *?u32) !?*pc.Entry {
     const r = s.disk orelse return have;
     write.reap(r);
-    const chosen = select.choose(s, prompt, starts, spans, have).restore orelse return have;
+    const choice = if (before.*) |at| select.shorter(s, prompt, starts, spans, have, at) else select.choose(s, prompt, starts, spans, have);
+    const chosen = choice.restore orelse return have;
     const candidate = r.states.items[chosen];
     if (s.image_frame != 0 or !@import("cache_images.zig").diskSafe(candidate.tokens) or
         !@import("cache_images.zig").equal(&.{}, s.image_query orelse &.{}, @intCast(candidate.tokens.len))) return have;
     const name = candidate.name;
     const bytes = r.blankBytes(candidate.at);
     if (bytes > s.budget or s.most == 0) return have;
-    if (!ready(s, bytes)) present(r, chosen) catch return have; // nothing goes to make room for a state whose file is gone
+    if (!ready(s, bytes)) present(r, chosen) catch |err| return failed(before, candidate.at, err); // nothing goes to make room for a state whose file is gone
     if (r.spill != .off) r.touch(chosen); // the newest: the spills that make room for it push older states off first
     while (!ready(s, bytes)) {
         if (s.family.vtable.trim) |trim| {
@@ -120,7 +134,7 @@ pub fn recall(s: *pc.Store, prompt: []const u32, born: u32, starts: []const u32,
             trim(s.family.ptr, s.budget -| s.held -| bytes);
             if (s.spare() < spare) continue;
         }
-        s.remove(s.victimBut(have, prompt, born) orelse return have);
+        s.remove(@import("prompt_cache_others.zig").victim(s, have, prompt, born, bytes, 1) orelse return have);
         s.counts.evicted += 1;
     }
     const i = r.find(name) orelse return have; // a spill that made room went past the disk cap and took it
@@ -137,7 +151,7 @@ pub fn recall(s: *pc.Store, prompt: []const u32, born: u32, starts: []const u32,
     e.tokens = s.gpa.dupe(u32, st.tokens) catch return have;
     e.decode_spans = s.gpa.dupe(modes.Span, st.spans) catch return have;
     e.last = s.gpa.dupe(u32, prompt) catch return have;
-    e.saved = read(r, i) catch return have;
+    e.saved = read(r, i) catch |err| return failed(before, candidate.at, err);
     if (s.family.vtable.charged) |f| e.bytes = f(s.family.ptr, e.saved);
     @import("prompt_cache_index.zig").add(s, e) catch {
         s.family.vtable.drop(s.family.ptr, e.saved);

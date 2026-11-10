@@ -1,0 +1,88 @@
+{
+  "name": "qwen27-metal",
+  "family": "qwen3_5 on Metal",
+  "checkpoint": "Qwen3.8-27B MLX affine 4-bit with its DFlash2 drafter; one stream at a 4096-token context is what 36 GB fits beside both",
+  "serve": [
+    "--context",
+    "4096",
+    "--parallel",
+    "1",
+    "--no-thinking",
+    "--drafter",
+    "{drafter}"
+  ],
+  "sampled": {
+    "temperature": 0.8,
+    "top_p": 0.95,
+    "top_k": 20
+  },
+  "tokens": 64,
+  "seed": 7,
+  "levels": [
+    1,
+    2,
+    3
+  ],
+  "prompt_cache_gib": 2,
+  "ignore_eos": true,
+  "prompts": {
+    "poem": "Write a short poem about the sea.",
+    "primes": "List the first twelve prime numbers, separated by commas.",
+    "sky": "Explain in two sentences why the sky is blue.",
+    "count": "Count from one to thirty in words.",
+    "copy": "Repeat exactly: The harbor lights came on one by one as the fishing boats returned to the quay."
+  },
+  "long_items": 500,
+  "conversation": [
+    "Name three rivers in Europe and one fact about each.",
+    "Now give the length of each river in kilometres.",
+    "Which of them is the longest? Answer in one sentence."
+  ],
+  "refusals": [
+    {
+      "name": "n_two",
+      "body": {
+        "n": 2
+      },
+      "status": 400,
+      "error": "n must be 1; multiple choices are not supported"
+    },
+    {
+      "name": "top_logprobs_without_logprobs",
+      "body": {
+        "top_logprobs": 3
+      },
+      "status": 400,
+      "error": "top_logprobs requires logprobs: true"
+    },
+    {
+      "name": "presence_penalty_out_of_range",
+      "body": {
+        "presence_penalty": 3
+      },
+      "status": 400,
+      "error": "presence_penalty must be between -2 and 2, or null"
+    },
+    {
+      "name": "reply_past_context",
+      "body": {
+        "max_tokens": 10000000
+      },
+      "status": 400,
+      "error": "This server's maximum context length is"
+    }
+  ],
+  "settle_s": 240,
+  "fresh_env": {
+    "TF_QWEN27_SLOT_RESUME": "0"
+  },
+  "cancel": {
+    "prompt": "count",
+    "tokens": 256,
+    "after_chunks": 4,
+    "rounds": 2
+  },
+  "skip": {
+    "evict": "on a 36 GB M3 Pro the 27B leaves 3.2 GiB free, the prompt cache gets 2.0 GiB, and macOS memory pressure (warning) stops new kept prompt states, so 12 fills left cached 0 -> 0 and the evicted turn was never cached; run evict on a Mac with headroom"
+  }
+}

@@ -62,6 +62,10 @@ pub const Config = struct {
     /// `shm` runs the RoCE protocol on one host without RDMA (tests); `verbs` is the real wire.
     roce_wire: enum { verbs, shm } = .verbs,
     roce_fallback: Fallback = .nccl,
+    /// Four-rank neighbour relay only (TF_TP_ROCE_RELAY); mesh and two-rank defaults keep their wire.
+    roce_relay: bool = false,
+    /// TF_TP_ROCE_RELAY_MAX_KB: gathers above this per-rank size stay on NCCL, without shrinking the slots.
+    roce_relay_max_bytes: usize = 64 * 1024,
     /// TF_TP_PLAN_LINK=rdma: the follower polls the plan socket this long before blocking (TF_TP_PLAN_SPIN_US).
     plan_spin_ns: u64 = 0,
     plan_pin: ?PlanPin = null,
@@ -72,9 +76,24 @@ pub const Config = struct {
 
     /// Reads every setting from `get` (the environment in `fromEnv`); unset names keep the defaults.
     pub fn parse(get: *const fn ([]const u8) ?[]const u8) Error!Config {
+        return read(get, null);
+    }
+
+    /// A family's actual rank/world take precedence over the standalone runner's TF_TP_RANK and TF_TP_WORLD.
+    pub fn parseFor(get: *const fn ([]const u8) ?[]const u8, world: u32, rank: u32) Error!Config {
+        return read(get, .{ .world = world, .rank = rank });
+    }
+
+    fn read(get: *const fn ([]const u8) ?[]const u8, place: ?struct { world: u32, rank: u32 }) Error!Config {
         var c: Config = .{};
-        c.world = try int(u32, get, "TF_TP_WORLD", c.world, 1, 64);
-        c.rank = try int(u32, get, "TF_TP_RANK", c.rank, 0, c.world - 1);
+        if (place) |p| {
+            if (p.world < 1 or p.world > 64 or p.rank >= p.world) return error.BadSetting;
+            c.world = p.world;
+            c.rank = p.rank;
+        } else {
+            c.world = try int(u32, get, "TF_TP_WORLD", c.world, 1, 64);
+            c.rank = try int(u32, get, "TF_TP_RANK", c.rank, 0, c.world - 1);
+        }
         if (get("TF_TP_MASTER")) |m| c.master = m;
         c.port = try int(u16, get, "TF_TP_PORT", c.port, 1, 65535 - 8);
         c.link_port = try int(u16, get, "TF_TP_PLAN_PORT", c.port + 7, 1, 65535);
@@ -104,6 +123,12 @@ pub const Config = struct {
             const stagger = try int(u32, get, "TF_TP_ROCE_STAGGER_NS", 150, 0, 65535);
             c.roce_fast = 1 | (pollers << 8) | (stagger << 16);
         }
+        c.roce_relay = try int(u8, get, "TF_TP_ROCE_RELAY", 0, 0, 1) == 1;
+        if (c.roce_relay and c.world != 4) {
+            log.warn("TF_TP_ROCE_RELAY=1 needs a four-rank world (given {d})", .{c.world});
+            return error.BadSetting;
+        }
+        c.roce_relay_max_bytes = 1024 * try int(usize, get, "TF_TP_ROCE_RELAY_MAX_KB", 64, 4, max_rdma_write / 1024);
         c.roce_blocks = try int(u32, get, "TF_TP_ROCE_BLOCKS", 16, 1, 16);
         if (c.roce_blocks & (c.roce_blocks - 1) != 0) {
             log.warn("TF_TP_ROCE_BLOCKS={d}: expected a power of two", .{c.roce_blocks});
@@ -144,6 +169,10 @@ pub const Config = struct {
         return parse(&envGet);
     }
 
+    pub fn fromEnvFor(world: u32, rank: u32) Error!Config {
+        return parseFor(&envGet, world, rank);
+    }
+
     pub fn resolved(c: Config) Config {
         var out = c;
         if (out.graph_cache_env == null) out.graph_cache_env = envGet("TF_GRAPH_CACHE");
@@ -160,6 +189,10 @@ pub const Config = struct {
         h.update(std.mem.asBytes(&c.failfast));
         h.update(std.mem.asBytes(&c.roce_wire));
         h.update(std.mem.asBytes(&c.roce_fallback));
+        if (c.roce_relay) {
+            h.update("four-rank-relay");
+            h.update(std.mem.asBytes(&c.roce_relay_max_bytes));
+        }
         if (c.graph_cache) |g| h.update(&g.effective(c.graph_cache_env).digest());
         var out: [32]u8 = undefined;
         h.final(&out);
@@ -291,4 +324,52 @@ test "the digest holds the graph cache's effective settings: 0, off and OFF agre
     var family_off = upper;
     family_off.graph_cache = family.graph_cache;
     try std.testing.expectEqualSlices(u8, &zero.digest(), &family_off.digest());
+}
+
+test "relay setting is opt-in, agreed in the digest, and refuses other worlds" {
+    Fake.pairs = &.{};
+    const plain = try Config.parse(&Fake.get);
+    try std.testing.expect(!plain.roce_relay);
+    Fake.pairs = &.{ .{ "TF_TP_WORLD", "4" }, .{ "TF_TP_ROCE_RELAY", "1" } };
+    const ring = try Config.parse(&Fake.get);
+    try std.testing.expect(ring.roce_relay);
+    var mesh = ring;
+    mesh.roce_relay = false;
+    try std.testing.expect(!std.mem.eql(u8, &ring.digest(), &mesh.digest()));
+    Fake.pairs = &.{.{ "TF_TP_ROCE_RELAY", "1" }};
+    try std.testing.expectError(error.BadSetting, Config.parse(&Fake.get));
+    Fake.pairs = &.{ .{ "TF_TP_WORLD", "3" }, .{ "TF_TP_ROCE_RELAY", "1" } };
+    try std.testing.expectError(error.BadSetting, Config.parse(&Fake.get));
+    Fake.pairs = &.{ .{ "TF_TP_WORLD", "4" }, .{ "TF_TP_ROCE_RELAY", "2" } };
+    try std.testing.expectError(error.BadSetting, Config.parse(&Fake.get));
+    Fake.pairs = &.{};
+}
+
+test "relay family world: actual family placement wins over the standalone defaults or overrides" {
+    Fake.pairs = &.{.{ "TF_TP_ROCE_RELAY", "1" }};
+    const family = try Config.parseFor(&Fake.get, 4, 3);
+    try std.testing.expectEqual(@as(u32, 4), family.world);
+    try std.testing.expectEqual(@as(u32, 3), family.rank);
+    try std.testing.expectError(error.BadSetting, Config.parseFor(&Fake.get, 3, 0));
+    try std.testing.expectError(error.BadSetting, Config.parseFor(&Fake.get, 2, 0));
+    Fake.pairs = &.{ .{ "TF_TP_ROCE_RELAY", "1" }, .{ "TF_TP_WORLD", "2" }, .{ "TF_TP_RANK", "1" } };
+    try std.testing.expectEqual(@as(u32, 3), (try Config.parseFor(&Fake.get, 4, 3)).rank);
+    try std.testing.expectError(error.BadSetting, Config.parseFor(&Fake.get, 2, 0));
+    Fake.pairs = &.{};
+}
+
+test "relay ceiling: default, named validation, slot independence and rank agreement" {
+    Fake.pairs = &.{ .{ "TF_TP_ROCE_RELAY", "1" }, .{ "TF_TP_WORLD", "4" } };
+    const a = try Config.parse(&Fake.get);
+    try std.testing.expectEqual(@as(usize, 64 * 1024), a.roce_relay_max_bytes);
+    try std.testing.expectEqual(@as(usize, 256 * 1024), a.mailbox_max_bytes);
+    Fake.pairs = &.{ .{ "TF_TP_ROCE_RELAY", "1" }, .{ "TF_TP_WORLD", "4" }, .{ "TF_TP_ROCE_RELAY_MAX_KB", "128" } };
+    const b = try Config.parse(&Fake.get);
+    try std.testing.expectEqual(@as(usize, 128 * 1024), b.roce_relay_max_bytes);
+    try std.testing.expect(!std.mem.eql(u8, &a.digest(), &b.digest()));
+    for ([_][]const u8{ "0", "3", "1025", "-1", "invalid" }) |bad| {
+        Fake.pairs = &.{.{ "TF_TP_ROCE_RELAY_MAX_KB", bad }};
+        try std.testing.expectError(error.BadSetting, Config.parse(&Fake.get));
+    }
+    Fake.pairs = &.{};
 }

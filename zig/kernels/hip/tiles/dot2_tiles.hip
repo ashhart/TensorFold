@@ -368,7 +368,8 @@ using Dot = DotF16;
     TF_STREAM(BITS, 2, 2) TF_STREAM(BITS, 2, 4) TF_STREAM(BITS, 2, 8)                        \
     TF_STREAM(BITS, 4, 2) TF_STREAM(BITS, 4, 4)                                               \
     TF_WMMA(BITS)                                                                             \
-    template __global__ void affine_wmma_item<BITS, 4>(Affine);
+    template __global__ void affine_wmma_item<BITS, 4>(Affine);                               \
+    template __global__ void affine_wmma_skew<BITS>(Affine);
 
 TF_TILES(2)
 TF_TILES(3)
@@ -382,6 +383,8 @@ template __global__ void dense_gemm_block<DotBF16, GemmShape<DotBF16>::rt>(Affin
 // gfx12's WMMA dense tile on every build too (its body traps without gfx12 WMMA).
 template __global__ void dense_wmma12_gemm<DotBF16, W12Small>(Affine);
 template __global__ void dense_wmma12_gemm<DotBF16, W12Big>(Affine);
+template __global__ void dense_wmma12_gemm_silu<DotBF16, W12Pair>(Affine);
+template __global__ void dense_wmma12_gemm_silu<DotBF16, W12Big>(Affine);
 
 }  // namespace rocm
 }  // namespace tf

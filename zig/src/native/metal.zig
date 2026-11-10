@@ -19,7 +19,12 @@ const Resident = @import("resident.zig").Resident;
 const prompt_pages = @import("cuda_prompt_pages.zig"); // the family-side store adapter, over the core pool as on CUDA
 const fsr_options = @import("fsr_options.zig");
 const linkProblem = @import("metal_link.zig").problem;
+const metal_shared = @import("metal_shared.zig");
+pub const chip = metal_shared.chip;
+pub const deviceName = metal_shared.deviceName;
+const prefillStep = metal_shared.prefillStep;
 const modelContext = @import("cuda_window.zig").modelContext; // the window from config.json, as CUDA reads it
+const gibBytes = metal_shared.gibBytes;
 
 pub const backends: []const []const u8 = &.{"metal"};
 pub const serves: []const []const u8 = &.{ "--checkpoint-slots", "--spill-gib" };
@@ -64,37 +69,6 @@ pub const families: []const api.Family = &.{
 /// Gemma 4 31B (gemma4) and 12B (gemma4_unified, its text model): one native family, gemma4.zig's host.
 fn isGemma4(model_type: []const u8) bool {
     return std.mem.eql(u8, model_type, "gemma4") or std.mem.eql(u8, model_type, "gemma4_unified");
-}
-
-/// The chip class gate entries name ("apple-m5" for an Apple M5 Max); null without an Apple GPU.
-pub fn chip(a: Allocator) ?[]const u8 {
-    const device = mtl.Device.init() catch return null;
-    defer device.deinit();
-    const gen = generation(std.mem.span(device.name())) orelse return null;
-    return std.fmt.allocPrint(a, "apple-m{d}", .{gen}) catch null;
-}
-
-/// The name of the system GPU the Metal engines open ("Apple M5 Max"); null without one.
-pub fn deviceName(a: Allocator, _: ?u32) ?[]const u8 {
-    const device = mtl.Device.init() catch return null;
-    defer device.deinit();
-    return a.dupe(u8, std.mem.span(device.name())) catch null;
-}
-
-/// The M generation in a Metal device name ("Apple M5 Max": 5).
-fn generation(name: []const u8) ?u32 {
-    var words = std.mem.tokenizeScalar(u8, name, ' ');
-    if (!std.ascii.eqlIgnoreCase(words.next() orelse return null, "apple")) return null;
-    const word = words.next() orelse return null;
-    if (word.len < 2 or std.ascii.toLower(word[0]) != 'm') return null;
-    const gen = std.fmt.parseInt(u32, word[1..], 10) catch return null;
-    return if (gen >= 1) gen else null;
-}
-
-/// Python's prompt chunk: 8,192 rows with tensor units (M5 on) where memory allows, else its 2,048.
-fn prefillStep(device: mtl.Device) u32 {
-    const gen = generation(std.mem.span(device.name())) orelse 0;
-    return if (gen >= 5 and device.maxWorkingSet() >= 48 << 30) 8192 else 2048;
 }
 
 /// The host's memory counts: `cache_fit.hostMemory` from the process footprint (no configured load limit).
@@ -361,11 +335,6 @@ fn openQwen27(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[
     return .{ .engine = h.engine(), .close = qwen27.close, .ctx = h };
 }
 
-/// A GiB count's bytes (the flags allow 0 up to below 2^34).
-fn gibBytes(g: f64) u64 {
-    return @intFromFloat(g * (1 << 30));
-}
-
 /// Flash Next uses the dump named by TF_FLASHNEXT_DUMP, or the checked-in kernels when that variable is unset.
 pub fn openFlashNext(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     if (try o.slideRefusal(a, "Macs")) |why| {
@@ -433,6 +402,7 @@ test {
     _ = @import("qwen27_landing.zig");
     _ = spill;
     _ = @import("metal_link.zig");
+    _ = metal_shared;
 }
 
 /// GLM-5.3-Flash's caches hold this many tokens unless --context asks otherwise (its window is 1,048,576).
@@ -480,13 +450,6 @@ fn openGlmDsa(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[
         return null;
     };
     return .{ .engine = h.engine(), .close = glm_dsa.close, .ctx = h };
-}
-
-test "chip classes from Metal device names" {
-    try std.testing.expectEqual(@as(?u32, 5), generation("Apple M5 Max"));
-    try std.testing.expectEqual(@as(?u32, 12), generation("Apple M12"));
-    try std.testing.expectEqual(@as(?u32, null), generation("AMD Radeon Pro"));
-    try std.testing.expectEqual(@as(?u32, null), generation("Apple Mx"));
 }
 
 test "--learn is refused for the 27B, the 2B and GLM-5.3 (EXLR8), and not for the families that keep prompt states on disk" {

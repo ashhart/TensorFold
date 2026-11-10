@@ -15,6 +15,7 @@ pub const mailbox = @import("mailbox.zig");
 pub const hybrid = @import("hybrid.zig");
 pub const roce = @import("roce.zig");
 pub const roce_multi = @import("roce_multi.zig");
+pub const roce_suite_policy = @import("roce_suite_policy.zig");
 pub const RoceLink = @import("roce_link.zig").Link;
 pub const roce_verbs = @import("roce_verbs.zig");
 pub const roce_pick = @import("roce_pick.zig");
@@ -46,7 +47,7 @@ pub const Session = struct {
         const cfg = requested.resolved();
         var b = try Bootstrap.open(cfg);
         defer b.close();
-        try b.agree(&cfg.digest(), "settings (TF_TP_WORLD, TF_COMM_BACKEND, TF_TP_MAILBOX_MAX_KB, TF_TP_ROCE_CHUNKED_KB, TF_TP_FAILFAST, TF_TP_ROCE_WIRE / _FALLBACK, TF_GRAPH_CACHE)");
+        try b.agree(&cfg.digest(), "settings (TF_TP_WORLD, TF_COMM_BACKEND, TF_TP_MAILBOX_MAX_KB, TF_TP_ROCE_RELAY_MAX_KB, TF_TP_ROCE_CHUNKED_KB, TF_TP_FAILFAST, TF_TP_ROCE_WIRE / _FALLBACK, TF_GRAPH_CACHE)");
         var diag = cuda.p2p_report.begin(cfg.rank, cfg.world);
         defer diag.end();
         var lib = try cuda.nccl.Library.openPath(cfg.nccl_lib);

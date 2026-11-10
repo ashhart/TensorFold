@@ -216,3 +216,118 @@ pub fn parse(a: A, text: mt.Text, ids: []const u32, thinking: bool, offered: []c
 fn literal(a: A, text: mt.Text, ids: []const u32) A.Error!Result {
     return .{ .content = try text.decode(a, ids), .reasoning = "", .calls = null, .reasoning_tokens = 0, .rejected = true };
 }
+
+/// The same reader, advanced only through new tokens; an incomplete header stays at its opener.
+pub const Stream = struct {
+    reader: Reader,
+    open_id: u32,
+    close_id: u32,
+    sep_id: u32,
+    end_id: u32,
+    at: usize = 0,
+    ended: bool = false,
+    revised: bool = false,
+    fallback: bool = false, // an id with no bytes: the reply goes to the whole parse, which decodes it as main does
+    raw: std.ArrayList(u8) = .empty,
+    ignored: std.ArrayList(u8) = .empty,
+    pending: [3]u8 = undefined,
+    pending_len: usize = 0,
+    preview: usize = 0,
+
+    pub fn init(a: A, text: mt.Text, thinking: bool, offered: []const V) A.Error!?Stream {
+        if (text.vtable.token_bytes == null) return null;
+        var s: Stream = .{
+            .reader = .{ .a = a, .text = text, .offered = offered },
+            .open_id = text.tokenId("<|open|>") orelse return null,
+            .close_id = text.tokenId("<|close|>") orelse return null,
+            .sep_id = text.tokenId("<|sep|>") orelse return null,
+            .end_id = text.tokenId("<|end_of_msg|>") orelse return null,
+        };
+        try s.reader.stack.appendSlice(a, &.{ .message, if (thinking) .think else .response });
+        return s;
+    }
+
+    /// Only an incomplete UTF-8 sequence at the end can change when a later token supplies more bytes.
+    fn tail(bytes: []const u8) usize {
+        for (bytes.len -| 3..bytes.len) |i| {
+            const n = std.unicode.utf8ByteSequenceLength(bytes[i]) catch continue;
+            if (n > bytes.len - i) return i;
+        }
+        return bytes.len;
+    }
+
+    fn prose(s: *Stream, ids: []const u32) A.Error!void {
+        const r = &s.reader;
+        s.raw.clearRetainingCapacity();
+        try s.raw.appendSlice(r.a, s.pending[0..s.pending_len]);
+        for (ids) |id| {
+            const bytes = (try r.text.tokenBytes(r.a, id)) orelse {
+                s.fallback = true;
+                return;
+            };
+            defer r.a.free(bytes);
+            try s.raw.appendSlice(r.a, bytes);
+        }
+        if (s.preview > 0) s.revised = true;
+        const out = switch (r.top()) {
+            .think => &r.thought,
+            .response => &r.content,
+            .argument, .json => &r.body,
+            else => &s.ignored,
+        };
+        if (out == &s.ignored) out.clearRetainingCapacity() else out.items.len -= s.preview;
+        const cut = tail(s.raw.items);
+        const unicode = @import("tokenizer").unicode;
+        try unicode.appendLossy(out, r.a, s.raw.items[0..cut]);
+        const stable = out.items.len;
+        try unicode.appendLossy(out, r.a, s.raw.items[cut..]);
+        s.preview = out.items.len - stable;
+        s.pending_len = s.raw.items.len - cut;
+        @memcpy(s.pending[0..s.pending_len], s.raw.items[cut..]);
+        if (r.top() == .think) r.reasoning_tokens += ids.len;
+        if (out == &s.ignored and std.mem.trim(u8, out.items, " \t\r\n").len != 0) {
+            r.rejected = true;
+            r.bad_call = true;
+        }
+    }
+
+    pub fn extend(s: *Stream, ids: []const u32) A.Error!Result {
+        const r = &s.reader;
+        const text = r.text;
+        s.revised = false;
+        while (!s.ended and !s.fallback and s.at < ids.len) {
+            const token = ids[s.at];
+            if (token == s.end_id) {
+                s.ended = true;
+                break;
+            }
+            if (text.isAdded(token)) {
+                s.pending_len = 0;
+                s.preview = 0;
+                if (token == s.open_id or token == s.close_id) {
+                    const start = s.at + 1;
+                    var end = start;
+                    while (end < ids.len and !text.isAdded(ids[end])) : (end += 1) {}
+                    if (end == ids.len) break;
+                    const h = if (ids[end] == s.sep_id) try header(r.a, try text.decode(r.a, ids[start..end])) else null;
+                    if (h) |tag| {
+                        if (token == s.open_id) try r.open(tag) else try r.close(tag);
+                    } else {
+                        r.rejected = true;
+                        r.bad_call = true;
+                    }
+                    s.at = end + 1;
+                } else {
+                    r.rejected = true;
+                    r.bad_call = true;
+                    s.at += 1;
+                }
+            } else {
+                const start = s.at;
+                while (s.at < ids.len and !text.isAdded(ids[s.at])) : (s.at += 1) {}
+                try s.prose(ids[start..s.at]);
+            }
+        }
+        return .{ .content = r.content.items, .reasoning = r.thought.items, .calls = if (!r.rejected and r.calls.items.len > 0) r.calls.items else null, .reasoning_tokens = r.reasoning_tokens, .rejected = r.rejected };
+    }
+};

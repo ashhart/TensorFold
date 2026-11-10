@@ -11,9 +11,8 @@ pub const WinProf = struct {
     n: [nsteps]u64 = @splat(0),
     windows: u64 = 0,
 
-    pub fn fromEnv() bool {
-        const v = std.c.getenv("TF_DSV41_WIN_PROF") orelse return false;
-        return std.mem.eql(u8, std.mem.span(v), "1");
+    pub fn fromEnv() !bool {
+        return @import("sys").environment.read(bool, "TF_DSV41_WIN_PROF", false);
     }
 
     /// A timer from now (no clock read when profiling is off).

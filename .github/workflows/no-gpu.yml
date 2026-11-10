@@ -35,6 +35,26 @@ jobs:
           python-version: "3.11"
       - name: Model-free benchmark client tests
         run: python -m unittest discover -s tools/tests -p "test_bench*.py" -v
+      - name: Evidence index tests
+        run: python -m unittest discover -s tools/tests -p "test_evidence*.py" -v
+  # pytest from the root, as an outside evaluator runs it, on its own runner: its five minutes no longer add to zig's.
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      # Two of its tests run Zig (the build options and the cache tool), so it needs the compiler but no build.
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.0
+          use-cache: false
+      - name: pytest from the root, as an outside evaluator runs it
+        run: |
+          python3 -m venv "$RUNNER_TEMP/pytest"
+          "$RUNNER_TEMP/pytest/bin/pip" install --quiet pytest
+          "$RUNNER_TEMP/pytest/bin/python" -m pytest -q -p no:cacheprovider
   zig:
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -47,8 +67,9 @@ jobs:
       - name: Shared CUDA primitive copies
         run: |
           python3 tools/zig/cuda_common_check.py
+          python3 tools/zig/cuda_fragment_check.py
           python3 -m unittest discover -s tools/zig -p cuda_common_check_test.py -v
-      # The lean rule (600-line files, one-line comments within 120 columns): no problem the base branch lacks.
+      # The lean rule (600-line files, one-line comments within 120 columns, no direct getenv of a setting): no problem the base branch lacks.
       - name: lean check
         if: ${{ github.event_name != 'schedule' }}
         env:
@@ -176,6 +197,9 @@ jobs:
         run: zig build -Dfixed-cpu test-golden
       - name: zig build fuzz-cortheon
         run: zig build -Dfixed-cpu fuzz-cortheon
+      # The pull client's framing and path checks: its fake hub runs on std.Io.net, so Windows builds and runs them.
+      - name: zig build test-pull-security
+        run: zig build -Dfixed-cpu test-pull-security
       - name: Save the build cache
         if: ${{ !cancelled() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
@@ -269,3 +293,58 @@ jobs:
         with:
           path: .zig-cache
           key: zig-build-v3-macOS-dev-tools-0.17.0-${{ steps.cache-key.outputs.shared }}-${{ github.sha }}${{ github.event_name == 'schedule' && '-nightly' || '' }}
+
+  # New host checks stay nightly until these exact runner classes establish the fast groups' wall time.
+  host-nightly-linux:
+    if: ${{ github.event_name == 'schedule' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [fast, host, compile, hip, deepseek]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.0
+          use-cache: false
+      - name: Host checks and aggregate wall time
+        shell: bash
+        env:
+          SUITE: ${{ matrix.suite }}
+        run: |
+          printf 'Runner class: %s %s\n' "$RUNNER_OS" "$RUNNER_ARCH"
+          flags=()
+          limit=10m
+          if [ "$SUITE" = hip ]; then flags=(-Dhip=true); fi
+          # One DeepSeek aot-needs test runs about 10 minutes on a fast core; macOS gives it 30 too.
+          if [ "$SUITE" = deepseek ]; then limit=30m; fi
+          TIMEFORMAT='Host checks wall seconds: %R'
+          time zig build -Dfixed-cpu "${flags[@]}" "test-host-ci-linux-$SUITE" --test-timeout "$limit"
+  host-nightly-macos:
+    if: ${{ github.event_name == 'schedule' }}
+    runs-on: macos-26
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [fast, adapters, deepseek, lanes, deferred]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.0
+          use-cache: false
+      - name: Host checks and aggregate wall time
+        shell: bash
+        env:
+          SUITE: ${{ matrix.suite }}
+        run: |
+          printf 'Runner class: %s %s\n' "$RUNNER_OS" "$RUNNER_ARCH"
+          TIMEFORMAT='Host checks wall seconds: %R'
+          time zig build "test-host-ci-macos-$SUITE" --test-timeout 30m

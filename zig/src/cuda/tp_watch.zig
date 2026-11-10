@@ -217,7 +217,7 @@ pub fn fatal(name: []const u8) void {
 }
 
 /// Ends this process at once: a stream may hold kernels that wait on the gone rank, which a normal exit would join.
-fn stop() noreturn {
+pub fn stop() noreturn {
     platform.c._exit(1);
 }
 
@@ -491,9 +491,10 @@ const ProcessTest = struct {
             }
         }
         if (mode == 3) return error.InjectedParentFailure;
-        if (mode == 1) {
+        if (mode == 1 or mode == 4) {
             var record: Record = .{ .kind = error_kind, .rank = 1 };
-            @memcpy(record.text[0..8], "peer OOM");
+            const name = if (mode == 4) "PeerWarmupTimedOut" else "peer OOM";
+            @memcpy(record.text[0..name.len], name);
             const data = std.mem.asBytes(&record);
             try std.testing.expectEqual(@as(isize, data.len), posix.system.write(pair[1], data.ptr, data.len));
         }
@@ -522,6 +523,7 @@ test "the real peer watcher exits on a closed line and on an error record, and r
     try ProcessTest.check(0);
     try ProcessTest.check(1);
     try ProcessTest.check(2);
+    try ProcessTest.check(4);
 }
 
 test "a failing parent check still closes the line, kills and reaps the watcher's child" {

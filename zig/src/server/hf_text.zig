@@ -19,9 +19,9 @@ pub fn glmClearThinking(value: ?[]const u8) ?bool {
     return if (std.mem.eql(u8, v, "1")) true else null;
 }
 
-/// ``TF_DSV41_SCHEMA_PROMPT``: on unless 0 (the published engine's default).
-pub fn schemaPrompt(value: ?[]const u8) bool {
-    return !std.mem.eql(u8, std.mem.trim(u8, value orelse "", " \t\r\n"), "0");
+/// ``TF_DSV41_SCHEMA_PROMPT``: named on/off forms; unset keeps the published engine's schema inclusion.
+pub fn schemaPrompt(value: ?[]const u8) !bool {
+    return @import("sys").environment.value(bool, "TF_DSV41_SCHEMA_PROMPT", value, true);
 }
 
 pub const HfText = struct {
@@ -111,12 +111,13 @@ pub const HfText = struct {
             };
             t.overridden = true;
         } else try t.readTemplates(io, a, dir, config);
+        if (template_override == null) t.source = @import("hf_text_parse.zig").template(model_config) orelse t.source;
         // DeepSeek-V4.x releases ship encoding.py, not Jinja: a checkpoint's Jinja is a third party's (--chat-template)
         if (t.native_deepseek) {
             t.unread_template = t.source.len > 0 or t.tool_source.len > 0;
             t.source = "";
             t.tool_source = "";
-            t.schema_prompt = schemaPrompt(if (std.c.getenv("TF_DSV41_SCHEMA_PROMPT")) |v| std.mem.span(v) else null);
+            t.schema_prompt = try schemaPrompt(if (std.c.getenv("TF_DSV41_SCHEMA_PROMPT")) |v| std.mem.span(v) else null);
         }
         t.specials = try specialsOf(a, config);
         t.eos = t.eosIds(a, model_config, generation, config, t.tok.id_to_token.tokens.items.len) catch |e| {

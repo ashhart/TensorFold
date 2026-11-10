@@ -208,6 +208,8 @@ pub fn Backend(comptime F: type) type {
             .tree = heldFn,
             .release = releaseFn,
             .readout_finish = if (@hasDecl(F, "readoutFinish")) readoutFinishFn else null,
+            .prepare_features = if (@hasDecl(F, "prepareFeatures")) prepareFeaturesFn else null,
+            .features = if (@hasDecl(F, "features")) featuresFn else null,
         };
 
         /// The backend behind `ptr`, the calling thread bound to its GPU.
@@ -351,6 +353,17 @@ pub fn Backend(comptime F: type) type {
         fn releaseFn(ptr: *anyopaque, s: *lanes.Stream) void {
             const h = of(ptr);
             h.release(h.streams.forget(s) orelse return);
+        }
+
+        /// A drafter's tapped layers, before any stream: each forward then fills the streams' tap rings.
+        fn prepareFeaturesFn(ptr: *anyopaque, taps: []const u32) anyerror!void {
+            return of(ptr).prepareFeatures(taps);
+        }
+
+        /// Rows [start, start + count) of a stream's tap ring, while the ring still holds them.
+        fn featuresFn(ptr: *anyopaque, s: *lanes.Stream, taps: []const u32, start: u64, count: u32) anyerror!be.Features {
+            const h = of(ptr);
+            return h.features(try h.streams.get(s), taps, start, count);
         }
     };
 }

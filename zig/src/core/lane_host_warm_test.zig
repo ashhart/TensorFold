@@ -366,10 +366,10 @@ fn pausedTurn(lookahead: u32) !struct { cached: ?u32, same: bool } {
     return .{ .cached = runs[5].cached, .same = runs[5].n == 2 and std.mem.eql(u32, runs[5].tokens[0..2], runs[2].tokens[0..2]) };
 }
 
-test "a finished warm pass keeps its states with its request's length: the history it extends outlives its keep and later ones" {
+test "a kept warm end supersedes its history at either lookahead and regeneration stays token exact" {
     for ([_]u32{ 0, 1 }) |lookahead| { // the 27B keeps the pass's end; Nemotron on CUDA a mark one token before it
         const got = try pausedTurn(lookahead);
-        try std.testing.expectEqual(@as(?u32, 8), got.cached);
+        try std.testing.expectEqual(@as(?u32, 0), got.cached);
         try std.testing.expect(got.same);
     }
 }

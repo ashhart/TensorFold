@@ -13,12 +13,17 @@ pub fn TargetFor(comptime Metal: type) type {
 
         pub const Flush = struct { ctx: *anyopaque, run: *const fn (ctx: *anyopaque) void };
 
-        /// The core ticker's tick: one command buffer that touches every set and commits.
+        /// The core ticker's tick: the sets' waiting changes, then the probe.
         pub fn tick(ctx: *anyopaque) void {
             const t: *Self = @ptrCast(@alignCast(ctx));
             const pool = Metal.objc.Pool.push();
             defer pool.pop();
             if (t.flush) |f| f.run(f.ctx);
+            _ = t.probe();
+        }
+
+        /// One committed command buffer that touches every set, without the flush; a request may wait for it.
+        pub fn probe(t: *const Self) Metal.CommandBuffer {
             const cmd = t.queue.commandBuffer();
             for (t.sets) |set| cmd.useResidencySet(set);
             if (t.scratch) |b| { // an empty command buffer need not reach the GPU, and then its sets stay as they were
@@ -27,6 +32,7 @@ pub fn TargetFor(comptime Metal: type) type {
                 blit.end();
             }
             cmd.commit();
+            return cmd;
         }
     };
 }

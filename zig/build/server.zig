@@ -1,6 +1,19 @@
 //! The server's shared JSON values, available to server and family modules.
 const std = @import("std");
 
+/// The web launcher uses fake PATH tools and no model, network or device.
+pub fn webHostTests(b: *std.Build, all: *std.Build.Step) void {
+    const tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/src/server/web_cli.zig"),
+        .target = b.graph.host,
+        .link_libc = true,
+    }) });
+    const run = b.addRunArtifact(tests);
+    run.has_side_effects = true;
+    b.step("test-web-cli-host", "Web launcher consent, version pins and fake PATH tools without network").dependOn(&run.step);
+    all.dependOn(&run.step);
+}
+
 /// The server's JSON values as a module (zig/src/server/json.zig), so a family's serving code shares them.
 pub fn json(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
     return b.createModule(.{
@@ -62,12 +75,18 @@ pub fn toolHostTests(b: *std.Build, parser: *std.Build.Module, server: *std.Buil
     testImports(b, parser, b.graph.host, .debug);
     testImports(b, server, b.graph.host, .debug);
     b.step("test-thinking-tail-host", "Finished calls before a think close, whole and streamed without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"thinking tail:"} })).step);
+    const environment = b.step("test-environment-report-host", "Named environment discovery, new registry rows and startup reporting");
+    environment.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "capability audit: environment", "stable profile:", "profile line:" } })).step);
     const logprobs = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"logprobs_test"} }));
     b.step("test-logprob-offers-host", "Logprob request capability refusals before engine submission").dependOn(&logprobs.step);
+    const limits = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"limit pins:"} }));
+    b.step("test-limit-pins-host", "Documented request and flag limits pinned at their bounds").dependOn(&limits.step);
+    const deps = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"flag deps:"} }));
+    b.step("test-flag-deps-host", "Flag dependencies: needs, refusals and build gates at the CLI").dependOn(&deps.step);
     const models = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"model discovery"} }));
     b.step("test-model-discovery-host", "Loaded context and reasoning offers for each model discovery entry").dependOn(&models.step);
     b.step("test-decision-context-host", "Decision context classification through actual HTTP errors").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "capability audit: decision context", "prompt past the context", "System One" } })).step);
-    b.step("test-capability-env-host", "Environment discovery subset and complete profile registry").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "capability audit: environment", "stable profile:" } })).step);
+    b.step("test-capability-env-host", "Environment discovery subset and complete profile registry").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "capability audit: environment", "stable profile:", "env defaults:" } })).step);
     b.step("test-model-idle-host", "Model discovery and idle reload snapshots without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "capability audit: model discovery waits", "idle", "model discovery" } })).step);
     b.step("test-effort-capabilities-host", "CLI effort choices and parsed defaults against request fields").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "capability audit: effort", "parse and capabilities share the table" } })).step);
     b.step("test-effort-discovery-host", "Effective reasoning defaults and template effort discovery").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "capability audit: model discovery", "model discovery", "effort" } })).step);
@@ -95,10 +114,15 @@ pub fn toolHostTests(b: *std.Build, parser: *std.Build.Module, server: *std.Buil
     b.step("test-tool-visibility-http-host", "Rejected tool envelopes survive actual chat JSON and SSE replies").dependOn(&http.step);
     const windows = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "Nemotron window:", "model discovery", "thinking reserve" } }));
     b.step("test-nemotron-window-host", "Nemotron advertised capacity and unchanged chat admission without devices").dependOn(&windows.step);
+    b.step("test-thinking-request-host", "Client refusals and internal note and lesson requests without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"thinking request:"} })).step);
+    b.step("test-thinking-benchmark-host", "Benchmark thinking capability and request bodies without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"thinking benchmark:"} })).step);
     const deepseek = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"DeepSeek chat:"} }));
     deepseek.has_side_effects = true;
     all.dependOn(&deepseek.step);
     b.step("test-server-deepseek-chat-host", "Native DeepSeek prompt goldens, provenance and missing-template HTTP refusal").dependOn(&deepseek.step);
+    const quoted = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"quoted markers:"} }));
+    quoted.has_side_effects = true; // reads TF_TOKENIZER_DIRS on every run
+    b.step("test-quoted-markers-host", "Quoted added-token spellings through the chat route with TF_TOKENIZER_DIRS' tokenizers").dependOn(&quoted.step);
 }
 
 /// The server tree's module rooted at `root` over no native engines: the fake server's, or a test among its sources.

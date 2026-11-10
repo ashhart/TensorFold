@@ -108,8 +108,8 @@ pub const LaneHost = struct {
     }
 
     /// A paged family's pool counts in this host's ledger, the only test its promises pass (#1943); before `start`.
-    pub fn countPool(h: *LaneHost, pool: anytype) void {
-        ledger.count(h, pool);
+    pub fn countPool(h: *LaneHost, pool: anytype) error{PoolHasHost}!void {
+        return ledger.count(h, pool);
     }
 
     /// The pool counts on its own pages again (a host that never started).
@@ -305,6 +305,7 @@ pub const LaneHost = struct {
         h.unlock();
         if (h.rounds) |rd| rd.vtable.left(rd.ctx, @intFromPtr(job));
         job.reported();
+        job.cache_promise = .{};
         h.gpa.free(job.marks);
         h.gpa.free(job.key);
         const s = &job.stream;
@@ -436,6 +437,7 @@ pub const LaneHost = struct {
     }
 
     pub fn prefilled(h: *LaneHost, job: *Job, began: i96) void {
+        job.cache_promise = .{};
         if (job.prefilled != null) return;
         const done = std.Io.Clock.awake.now(h.io).toNanoseconds();
         job.fill_on.store(false, .release); // the pass reported: status readers stop counting this fill
@@ -582,4 +584,5 @@ test {
     _ = @import("lane_host_frame_test.zig");
     _ = @import("lane_host_tests.zig");
     _ = @import("lane_host_fetch.zig");
+    _ = @import("lane_host_cache_queue_test.zig");
 }

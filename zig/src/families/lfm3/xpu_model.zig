@@ -262,7 +262,7 @@ pub const Model = struct {
             .device_bytes = l.total,
             .qg = c.quant.global.group,
         };
-        if (std.c.getenv("LFM3_FUSE")) |v| m.fuse = std.fmt.parseInt(u32, std.mem.span(v), 10) catch 7;
+        m.fuse = try @import("sys").environment.read(u32, "LFM3_FUSE", m.fuse);
         m.own = try m.newSeq();
         m.seq = m.own;
         return m;

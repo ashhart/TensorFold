@@ -54,6 +54,7 @@ fn server(b: *std.Build, target: std.Build.ResolvedTarget) *std.Build.Step.Compi
 pub fn serverOn(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, engine: *std.Build.Module) *std.Build.Step.Compile {
     const build_options = b.addOptions();
     build_options.addOption([]const u8, "version", @import("../../build.zig.zon").version);
+    build_options.addOption(bool, "is_release", false);
     build_options.addOption(bool, "slide_test_hooks", false);
     const name = "tensorfold-dsv41";
     const api = engine.import_table.get("engine_api").?;
@@ -68,6 +69,7 @@ pub fn serverOn(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
         .link_libc = true,
         .imports = &.{ .{ .name = "core", .module = engine.import_table.get("core").? }, .{ .name = "engine_api", .module = api }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "template", .module = template }, .{ .name = "native_engines", .module = engine }, .{ .name = "checkpoint_cli", .module = cli } },
     });
+    m.addImport("lanes", engine.import_table.get("lanes").?);
     m.addImport("living", b.createModule(.{ .root_source_file = b.path("zig/src/living/living.zig"), .target = target, .optimize = optimize, .link_libc = true }));
     m.addOptions("build_options", build_options);
     // the server's json and the family's text side share the engine's serving module (one `dsv41_serve`)
