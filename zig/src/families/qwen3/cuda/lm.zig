@@ -129,6 +129,42 @@ fn cut(cursor: *usize, n: usize) usize {
     return cursor.*;
 }
 
+/// Which of the CUDA kernels' geometry limits a spec breaks: the attention's heads, the row kernels' widths, or none.
+pub const Geometry = enum { ok, heads, widths };
+
+/// The attention takes head_dim 128 and whole groups of up to 16 q heads a kv head; the row kernels, widths of 64s.
+pub fn geometry(spec: config.Spec) Geometry {
+    const grp = if (spec.kv_heads == 0) 0 else spec.heads / spec.kv_heads;
+    if (spec.head_dim != 128 or spec.kv_heads == 0 or spec.heads % spec.kv_heads != 0 or grp > 16) return .heads;
+    if (spec.hidden % 64 != 0 or spec.inter % 64 != 0) return .widths;
+    return .ok;
+}
+
+test "the geometry limits: the attention's head size and groups, and the row kernels' multiples of 64" {
+    const ok: config.Spec = .{ .layers = 28, .hidden = 4096, .heads = 32, .kv_heads = 8, .head_dim = 128, .inter = 12288, .vocab = 151669, .eps = 1e-6, .theta = 1e6, .max_positions = 40960, .tied = false };
+    try std.testing.expectEqual(Geometry.ok, geometry(ok));
+    var s = ok;
+    s.head_dim = 64;
+    try std.testing.expectEqual(Geometry.heads, geometry(s));
+    s = ok;
+    s.kv_heads = 0;
+    try std.testing.expectEqual(Geometry.heads, geometry(s));
+    s = ok;
+    s.heads = 30;
+    try std.testing.expectEqual(Geometry.heads, geometry(s)); // not a whole number of groups
+    s = ok;
+    s.heads = 136;
+    try std.testing.expectEqual(Geometry.heads, geometry(s)); // 17 q heads a kv head
+    s.heads = 128;
+    try std.testing.expectEqual(Geometry.ok, geometry(s)); // 16 is the most
+    s = ok;
+    s.hidden = 4000;
+    try std.testing.expectEqual(Geometry.widths, geometry(s));
+    s = ok;
+    s.inter = 12000;
+    try std.testing.expectEqual(Geometry.widths, geometry(s));
+}
+
 /// The shared operators one pass runs, over one stream.
 pub const Lm = struct {
     d: *const Driver,
@@ -142,14 +178,16 @@ pub const Lm = struct {
 
     /// The kernels for `s`'s device; the geometry is the attention kernels' (head dim 128, to 16 q heads a kv head).
     pub fn init(gpa: std.mem.Allocator, d: *const Driver, s: cuda.Stream, spec: config.Spec) !Lm {
-        const grp = if (spec.kv_heads == 0) 0 else spec.heads / spec.kv_heads;
-        if (spec.head_dim != 128 or spec.kv_heads == 0 or spec.heads % spec.kv_heads != 0 or grp > 16) {
-            std.log.err("qwen3: {d} heads on {d} kv heads at head_dim {d}: the CUDA attention takes head_dim 128 and to 16 q heads a kv head", .{ spec.heads, spec.kv_heads, spec.head_dim });
-            return error.UnsupportedGeometry;
-        }
-        if (spec.hidden % 64 != 0 or spec.inter % 64 != 0) {
-            std.log.err("qwen3: hidden {d} and intermediate {d}: the CUDA row kernels take multiples of 64", .{ spec.hidden, spec.inter });
-            return error.UnsupportedGeometry;
+        switch (geometry(spec)) {
+            .ok => {},
+            .heads => {
+                std.log.err("qwen3: {d} heads on {d} kv heads at head_dim {d}: the CUDA attention takes head_dim 128 and to 16 q heads a kv head", .{ spec.heads, spec.kv_heads, spec.head_dim });
+                return error.UnsupportedGeometry;
+            },
+            .widths => {
+                std.log.err("qwen3: hidden {d} and intermediate {d}: the CUDA row kernels take multiples of 64", .{ spec.hidden, spec.inter });
+                return error.UnsupportedGeometry;
+            },
         }
         var lm: Lm = .{ .d = d, .s = s, .g = undefined, .nm = undefined, .qk = undefined, .act = undefined, .emb = undefined, .attn = undefined };
         lm.g = try gemm.Gemms.init(gpa, d);
