@@ -21,7 +21,8 @@ pub const HeadCost = struct {
     step_ms: f64 = 0.0,
     batched: bool = false,
     free_first: bool = false,
-    row_ms: f64 = 0.0, // what each row past a stream's first costs past the table on this machine
+    row_ms: f64 = 0.0, // what each row past a stream's first costs past the table on this machine (below it: less)
+    least_rows: u64 = 0, // a measuring round reaches this many rows, the likeliest nodes first, whatever they cost
 };
 
 /// allocate, each stream's drafts past its first costing one more head step.
@@ -45,7 +46,8 @@ pub fn allocateDrafts(gpa: Allocator, fixed: []const u32, probs: []const []const
     const timed = !costs.empty();
     var live: u64 = 0;
     for (fixed) |f| live += @intFromBool(f > 0);
-    var best = rate(costs, timed, rows, expected, overhead_ms + head.row_ms * @as(f64, @floatFromInt(rows -| live)));
+    const least = @min(head.least_rows, max_rows);
+    var best = if (rows >= least) rate(costs, timed, rows, expected, overhead_ms + rowTerm(costs, timed, head, rows, live)) else -std.math.inf(f64);
     while (rows < max_rows) {
         // the likeliest next node, ties to the lowest stream (Python's heapq of (-p, stream))
         var pick: ?usize = null;
@@ -66,13 +68,25 @@ pub fn allocateDrafts(gpa: Allocator, fixed: []const u32, probs: []const []const
         deepest = @max(deepest, counts[s]);
         expected += pick_p;
         const steps: f64 = @floatFromInt(if (head.batched) deepest -| @intFromBool(head.free_first) else drafts - (if (head.free_first) firsts else 0));
-        const now = rate(costs, timed, rows, expected, overhead_ms + head.step_ms * steps + head.row_ms * @as(f64, @floatFromInt(rows -| live)));
+        if (rows < least) continue;
+        const now = rate(costs, timed, rows, expected, overhead_ms + head.step_ms * steps + rowTerm(costs, timed, head, rows, live));
         if (now > best or (!timed and head.step_ms == 0)) {
             best = now;
             @memcpy(best_counts, counts);
         }
     }
+    // a measuring round whose width is out of reach takes every node on offer
+    if (best == -std.math.inf(f64)) @memcpy(best_counts, counts);
     return best_counts;
+}
+
+/// head.row_ms for the rows past the streams' first; a fall below the table stops at the streams' plain width.
+pub fn rowTerm(costs: *const Table, timed: bool, head: HeadCost, rows: u64, live: u64) f64 {
+    const term = head.row_ms * @as(f64, @floatFromInt(rows -| live));
+    if (term >= 0 or !timed) return term;
+    const at = costs.get(@intCast(rows)) orelse return term;
+    const plain = costs.get(@intCast(@max(live, 1))) orelse return term;
+    return @max(term, plain - at);
 }
 
 fn rate(costs: *const Table, timed: bool, total: u64, expected: f64, overhead_ms: f64) f64 {
@@ -194,6 +208,40 @@ test "a zero draft step prices rounds as allocate does" {
     const free = try allocate(gpa, &.{ 1, 1, 1 }, &probs, &costs, 2.0, 8);
     defer gpa.free(free);
     try std.testing.expectEqualSlices(u32, free, priced);
+}
+
+test "a measuring round reaches its rows, then keeps only rows that pay; out of reach it takes every node" {
+    const gpa = std.testing.allocator;
+    var costs = try extendCosts(gpa, &.{ .{ .width = 2, .ms = 20.0 }, .{ .width = 8, .ms = 80.0 } }, 8);
+    defer costs.deinit(gpa);
+    const probs = [_][]const f64{ &.{ 0.5, 0.25 }, &.{ 0.5, 0.25 } };
+    // 10 ms a row against 10 tokens a 100 ms: no draft pays
+    const none = try allocateDrafts(gpa, &.{ 1, 1 }, &probs, &costs, 0.0, 8, .{});
+    defer gpa.free(none);
+    try std.testing.expectEqualSlices(u32, &.{ 0, 0 }, none);
+    const four = try allocateDrafts(gpa, &.{ 1, 1 }, &probs, &costs, 0.0, 8, .{ .least_rows = 4 });
+    defer gpa.free(four);
+    try std.testing.expectEqualSlices(u32, &.{ 1, 1 }, four);
+    const all = try allocateDrafts(gpa, &.{ 1, 1 }, &probs, &costs, 0.0, 8, .{ .least_rows = 7 });
+    defer gpa.free(all);
+    try std.testing.expectEqualSlices(u32, &.{ 2, 2 }, all);
+}
+
+test "rows cheaper than the table make drafts pay, never pricing a round under its plain width" {
+    const gpa = std.testing.allocator;
+    var costs = try extendCosts(gpa, &.{ .{ .width = 2, .ms = 20.0 }, .{ .width = 8, .ms = 80.0 } }, 8);
+    defer costs.deinit(gpa);
+    const probs = [_][]const f64{ &.{ 0.5, 0.25 }, &.{ 0.5, 0.25 } };
+    // measured: each row costs 8 ms less than the table's 10: 2 ms a row, so first drafts pay
+    const cheap = try allocateDrafts(gpa, &.{ 1, 1 }, &probs, &costs, 0.0, 8, .{ .row_ms = -8.0 });
+    defer gpa.free(cheap);
+    try std.testing.expectEqualSlices(u32, &.{ 1, 1 }, cheap);
+    // a fall past the table's own slope is bounded: a round never costs less than its plain width
+    const head: HeadCost = .{ .row_ms = -25.0 };
+    try std.testing.expectApproxEqAbs(@as(f64, -60.0), rowTerm(&costs, true, head, 8, 2), 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, -16.0), rowTerm(&costs, true, .{ .row_ms = -8.0 }, 4, 2), 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 6.0), rowTerm(&costs, true, .{ .row_ms = 3.0 }, 4, 2), 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, -16.0), rowTerm(&costs, false, .{ .row_ms = -8.0 }, 4, 2), 1e-9);
 }
 
 test "extendCosts interpolates and extrapolates" {
