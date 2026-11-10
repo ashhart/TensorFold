@@ -44,19 +44,10 @@ struct S5vRows { uint rows, width; float eps; };
                                constant S5vRows& p [[buffer(4)]], uint row [[threadgroup_position_in_grid]],
                                uint t [[thread_position_in_threadgroup]], uint n [[threads_per_threadgroup]],
                                uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {
-  threadgroup float part[33];
   const device bfloat* xr = x + ulong(row) * p.width;
   device bfloat* yr = y + ulong(row) * p.width;
-  float s = 0.0f;
-  for (uint i = t; i < p.width; i += n) s += float(xr[i]);
-  const float mean = tf_vis_sum(s, part, n, lane, sg) / float(p.width);
-  float v = 0.0f;
-  for (uint i = t; i < p.width; i += n) {
-    const float d = float(xr[i]) - mean;
-    v += d * d;
-  }
-  const float inv = metal::precise::rsqrt(tf_vis_sum(v, part, n, lane, sg) / float(p.width) + p.eps);
-  for (uint i = t; i < p.width; i += n) yr[i] = bfloat((float(xr[i]) - mean) * inv * float(w[i]) + float(b[i]));
+  TF_VIS_LAYER_NORM_STATS(TF_VIS_ROW)
+  TF_VIS_LAYER_NORM_OUT(TF_VIS_ROW)
 }
 
 // qkv [P, 4608] to q, k, v [16, P, 96] fp32, q and k by the 2D RoPE (interleaved pairs, bf16 cos and sin [P, 96]).
