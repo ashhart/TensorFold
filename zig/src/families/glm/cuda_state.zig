@@ -145,6 +145,27 @@ test "GLM TP3: existing scratch covers raw projections through the 127-row split
     }
 }
 
+/// selectTokens' `ls` bytes in a Buffers and its decode select's rows of bit words (0 on a prompt's buffers).
+fn selectLs(rows: usize, prefill: bool, seg: usize, np_max: usize) struct { bytes: usize, bits_rows: usize } {
+    const bits_rows: usize = if (prefill) 0 else @min(seg, sparse.wide_rows);
+    return .{ .bytes = @max(rows * sparse.select_list * 4, sparse.bitsBytes(bits_rows, np_max)), .bits_rows = bits_rows };
+}
+
+test "GLM buffers: a decode's ls holds its select's bit words for bits_rows rows, and a prompt's holds none" {
+    for ([_]usize{ 4096, 1048576 }) |capacity| {
+        const np_max = capacity / sparse.pool;
+        for ([_]usize{ 1, 8, 16, 48, 49, 64 }) |seg| {
+            for ([_]usize{ seg, prefill_rows }) |rows| {
+                const d = selectLs(rows, false, seg, np_max);
+                try std.testing.expectEqual(@as(usize, @min(seg, sparse.wide_rows)), d.bits_rows);
+                try std.testing.expect(d.bytes >= sparse.bitsBytes(d.bits_rows, np_max));
+                try std.testing.expect(d.bytes >= rows * sparse.select_list * 4);
+                try std.testing.expectEqual(@as(usize, 0), selectLs(rows, true, seg, np_max).bits_rows);
+            }
+        }
+    }
+}
+
 /// Scratch for windows of up to `rows` rows (the Python family's Buffers): a prompt buffer (`prefill`) or a decode's.
 pub const Buffers = struct {
     arena: Arena,
@@ -222,6 +243,7 @@ pub const Buffers = struct {
         const nch = latent.chunksFor(@min(capacity, dense_reach) + seg);
         const partial_rows = @max(nch * part_rows, latent.chunksFor(sparse.width) * seg); // dense calls, or one sparse
         const np_max = capacity / sparse.pool;
+        const sel = selectLs(rows, prefill, seg, np_max);
         var mm: usize = 4;
         // windows under rows_from rows keep their K slices apart (a prompt's tail chunk on the prefill buffers too)
         for (b16Shapes(w)) |sh_| mm = @max(mm, b16.partBytes(@min(rows, b16.rows_from - 1), sh_[0], sh_[1]));
@@ -243,7 +265,7 @@ pub const Buffers = struct {
             partial_rows * HL * 4,
             4, // dummy
             @min(seg, sparse.select_rows) * np_max * 4,
-            @max(rows * sparse.select_list * 4, if (prefill) 0 else sparse.bitsBytes(@min(seg, sparse.wide_rows), np_max)), // ls: a decode select's bit words too
+            sel.bytes, // ls: the list rows, and on a decode's buffers its select's bit words
             rows * sparse.select_list * 4,
             (if (prefill) rows + s.world else rows) * sparse.topk_pools * 8, // pools; a split's equal blocks end at most world - 1 rows past them
             4,
@@ -306,7 +328,7 @@ pub const Buffers = struct {
                 .qi = p[30],
                 .partials = .{ .po = p[31], .pm = p[32], .pl = p[33] },
                 .dummy = p[34],
-                .select = .{ .scores = p[35], .ls = p[36], .li = p[37], .pools = p[38], .at = p[39], .bits_rows = if (prefill) 0 else @min(seg, sparse.wide_rows) },
+                .select = .{ .scores = p[35], .ls = p[36], .li = p[37], .pools = p[38], .at = p[39], .bits_rows = sel.bits_rows },
                 .tokens = p[40],
                 .counts = p[41],
                 .mm_part = p[42],
