@@ -150,16 +150,9 @@ inline float g4u_in(const device bfloat* x, const device bfloat* extra, constant
                          uint row [[threadgroup_position_in_grid]], uint t [[thread_position_in_threadgroup]],
                          uint n [[threads_per_threadgroup]], uint lane [[thread_index_in_simdgroup]],
                          uint sg [[simdgroup_index_in_threadgroup]]) {
-  threadgroup float part[33];
-  float s = 0.0f;
-  for (uint i = t; i < p.width; i += n) s += g4u_in(x, extra, p, row, i);
-  const float mean = tf_vis_sum(s, part, n, lane, sg) / float(p.width);
-  float d2 = 0.0f;
-  for (uint i = t; i < p.width; i += n) {
-    const float d = g4u_in(x, extra, p, row, i) - mean;
-    d2 += d * d;
-  }
-  const float r = metal::precise::rsqrt(tf_vis_sum(d2, part, n, lane, sg) / float(p.width) + p.eps);
+#define G4U_IN(i) g4u_in(x, extra, p, row, i)
+  TF_VIS_LAYER_NORM_STATS(G4U_IN)
   device bfloat* yr = y + ulong(row) * p.width;
-  for (uint i = t; i < p.width; i += n) yr[i] = bfloat((g4u_in(x, extra, p, row, i) - mean) * r * float(w[i]) + float(b[i]));
+  TF_VIS_LAYER_NORM_OUT(G4U_IN)
+#undef G4U_IN
 }

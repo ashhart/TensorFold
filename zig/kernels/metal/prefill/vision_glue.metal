@@ -58,3 +58,20 @@ inline float tf_vis_max(float v, threadgroup float* part, uint n, uint lane, uin
   }                                                                                                                \
   const float inv = 1.0f / tf_vis_sum(z, part, tn, lane, sg);                                                      \
   for (uint i = t; i < n; i += tn) s[i] *= inv;
+
+// LayerNorm, one rounding: STATS the row's mean and inv over IN(i), OUT yr[i] = bf16((IN(i) - mean) * inv * w + b).
+#define TF_VIS_LAYER_NORM_STATS(IN)                                                                                \
+  threadgroup float part[33];                                                                                      \
+  float s = 0.0f;                                                                                                  \
+  for (uint i = t; i < p.width; i += n) s += IN(i);                                                                \
+  const float mean = tf_vis_sum(s, part, n, lane, sg) / float(p.width);                                            \
+  float v = 0.0f;                                                                                                  \
+  for (uint i = t; i < p.width; i += n) {                                                                          \
+    const float d = IN(i) - mean;                                                                                  \
+    v += d * d;                                                                                                    \
+  }                                                                                                                \
+  const float inv = metal::precise::rsqrt(tf_vis_sum(v, part, n, lane, sg) / float(p.width) + p.eps);
+#define TF_VIS_LAYER_NORM_OUT(IN)                                                                                  \
+  for (uint i = t; i < p.width; i += n) yr[i] = bfloat((IN(i) - mean) * inv * float(w[i]) + float(b[i]));
+// IN for a kernel whose row of x is xr.
+#define TF_VIS_ROW(i) float(xr[i])
