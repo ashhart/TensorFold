@@ -407,3 +407,42 @@ test "lanczos: sinc(x) sinc(x / 3) within 3, normalized taps, flat stays flat, r
     try std.testing.expectEqual(@as(u8, 255), std.mem.max(u8, up[3 * 10 .. 3 * 14]));
     try std.testing.expect(up[3 * 1] > 0 and up[3 * 14] < 255);
 }
+
+test "lanczos matches Pillow 13's Image.resize(LANCZOS): shrinking, enlarging, both at once, and a canvas's ratio" {
+    const a = std.testing.allocator;
+    var px: [7 * 5 * 3]u8 = undefined;
+    for (&px, 0..) |*p, i| p.* = @intCast((i * 37 + 11) % 256);
+    const small = try resizeWith(a, .pillow, .lanczos, .of(&px, 7, 5), 3, 2);
+    defer a.free(small);
+    try std.testing.expectEqualSlices(u8, &.{ 109, 85, 138, 172, 134, 98, 125, 180, 133, 84, 120, 157, 134, 96, 131, 160, 155, 75 }, small);
+    const big = try resizeWith(a, .pillow, .lanczos, .of(px[0 .. 4 * 2 * 3], 4, 2), 6, 3);
+    defer a.free(big);
+    try std.testing.expectEqualSlices(u8, &.{
+        0,   7,   79, 38,  110, 164, 167, 153, 187, 249, 5,   40,  170, 48,  86,  79, 151, 188,
+        110, 144, 41, 83,  136, 103, 107, 122, 173, 200, 112, 154, 131, 98,  132, 37, 90,  127,
+        242, 255, 2,  128, 161, 41,  47,  90,  158, 150, 218, 255, 92,  147, 177, 0,  28,  65,
+    }, big);
+    const both = try resizeWith(a, .pillow, .lanczos, .of(&px, 7, 5), 4, 9);
+    defer a.free(both);
+    try std.testing.expectEqualSlices(u8, &.{
+        67,  94,  129, 182, 75,  120, 128, 173, 67,  119, 154, 176, 70,  97,  132, 183, 78,  123,
+        131, 174, 68,  122, 157, 194, 76,  103, 138, 188, 84,  129, 137, 179, 74,  128, 163, 198,
+        83,  109, 144, 212, 89,  132, 142, 203, 89,  134, 170, 133, 86,  113, 148, 201, 94,  134,
+        147, 192, 103, 138, 173, 59,  85,  116, 152, 125, 103, 138, 156, 116, 109, 141, 172, 48,
+        86,  121, 158, 59,  113, 144, 166, 50,  113, 146, 173, 72,  91,  127, 164, 63,  119, 150,
+        172, 54,  119, 152, 178, 77,  95,  130, 167, 81,  120, 153, 173, 72,  122, 155, 182, 78,
+    }, both);
+    // 1280 x 720 drawn on 2720 x 1536 scales by 0.4706 and 0.4688: here 170 x 96 to 80 x 45, its bytes' FNV-1a
+    const w = 170;
+    const h = 96;
+    const pic = try a.alloc(u8, w * h * 3);
+    defer a.free(pic);
+    for (0..h) |y| for (0..w) |x| for (0..3) |c| {
+        pic[(y * w + x) * 3 + c] = @intCast((x * 13 + y * 7 + c * 91 + (x * y) % 29) % 256);
+    };
+    const out = try resizeWith(a, .pillow, .lanczos, .of(pic, w, h), 80, 45);
+    defer a.free(out);
+    var f: u64 = 0xcbf29ce484222325;
+    for (out) |b| f = (f ^ b) *% 0x100000001b3;
+    try std.testing.expectEqual(@as(u64, 0x06d024b99dfb8c23), f);
+}
