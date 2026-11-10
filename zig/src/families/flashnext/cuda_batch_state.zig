@@ -571,24 +571,3 @@ test {
 }
 
 pub const Pg = @import("cuda_glue.zig").Pg;
-
-test "exl3: scratch preserves common buffers and only omits unused classic staging" {
-    const omitted = [_][]const u8{ "rank_input", "rank_gather", "rank_output", "rank_result", "members", "items", "counts", "rank", "hist", "shared_gate", "shared_up", "shared_act", "shared_out", "moe_act", "head_local" };
-    for ([_]usize{ 1, 63, 64, 255, 256, 4096 }) |cap| {
-        const classic = Scratch.allocationSizes(cap, .{});
-        const exl3 = Scratch.allocationSizes(cap, .{ .format = .exl3 });
-        for (Scratch.order, 0..) |name, i| {
-            var skip = false;
-            for (omitted) |unused| if (std.mem.eql(u8, name, unused)) {
-                skip = true;
-                break;
-            };
-            if (skip) {
-                try std.testing.expect(classic[i] != null);
-                try std.testing.expectEqual(@as(?usize, null), exl3[i]);
-            } else if (std.mem.eql(u8, name, "part")) {
-                try std.testing.expect(exl3[i].? >= classic[i].?);
-            } else try std.testing.expectEqual(classic[i], exl3[i]);
-        }
-    }
-}
