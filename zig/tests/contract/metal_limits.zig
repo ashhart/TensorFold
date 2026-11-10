@@ -137,7 +137,15 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
     }
     if (std.mem.startsWith(u8, d.name, "flashnext grouped ")) {
         if (!assemble) return undefined;
-        return .{ .decl = d, .function = fun, .here = sources.flashnext_gx, .pre_m5 = sources.flashnext_gx };
+        const body = try tf.flashnext_grouped_fixture.groupedText(a, std.mem.startsWith(u8, d.name, "flashnext grouped index "));
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
+    }
+    if (std.mem.startsWith(u8, d.name, "flashnext prompt index ")) {
+        if (!assemble) return undefined;
+        const body = try tf.flashnext_prompt_index_fixture.text(a, true);
+        const pre = try preM5(a, "", body);
+        const here = if (device.tensorUnits()) try std.mem.replaceOwned(u8, a, body, "#include \"../nax.h\"", sources.nax) else pre;
+        return .{ .decl = d, .function = fun, .here = here, .pre_m5 = pre };
     }
     if (std.mem.startsWith(u8, d.name, "flashnext FSR ")) {
         if (!assemble) return undefined;
