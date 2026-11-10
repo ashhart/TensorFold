@@ -222,7 +222,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     runners.images = nem.images;
     nemotronSteps(b, target, optimize, runners);
     const with_contract = b.option(bool, "xpu-contract", "Build the XPU kernel contract's limits audit (needs ocloc for the objects)") orelse false;
-    const images = b.option([]const u8, "xpu-images", "A directory of zebins made with xpu-kernel-contract-objects: glue, tp, decode, contract_attn_upstream, contract_controls, contract_gate_controls (.bin)");
+    const images = b.option([]const u8, "xpu-images", "A directory of zebins made with xpu-kernel-contract-objects: glue, tp, decode, contract_attn_upstream, contract_merge_upstream, contract_controls, contract_gate_controls (.bin)");
     if (with_contract) xpu_contract.steps(b, target, optimize, ocloc, device, images);
 }
 

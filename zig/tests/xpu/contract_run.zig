@@ -12,6 +12,7 @@ const embed_k = @import("contract_embed.zig");
 const tp_k = @import("contract_tp.zig");
 const controls_k = @import("contract_controls.zig");
 const attn_k = @import("contract_attn.zig");
+const merge_k = @import("contract_merge.zig");
 
 const g = core.gates;
 
@@ -71,6 +72,10 @@ pub fn main(init: std.process.Init) !u8 {
     var attn_grid = try attn_k.Attn.init(a, &dev, .old_grid);
     defer attn_grid.deinit();
     try kernels.append(a, attn_grid.kernel());
+    var merges: [std.enums.values(merge_k.Variant).len]merge_k.Merge = undefined;
+    for (&merges, std.enums.values(merge_k.Variant)) |*x, v| x.* = try merge_k.Merge.init(a, &dev, v);
+    defer for (&merges) |*x| x.deinit();
+    for (&merges) |*x| try kernels.append(a, x.kernel());
     var controls: [std.enums.values(controls_k.Which).len]controls_k.Control = undefined;
     for (&controls, std.enums.values(controls_k.Which)) |*x, w| x.* = try controls_k.Control.init(a, &dev, w);
     defer for (&controls) |*x| x.deinit();
