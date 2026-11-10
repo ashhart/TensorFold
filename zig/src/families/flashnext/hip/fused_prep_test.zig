@@ -14,7 +14,7 @@ const gpa = std.testing.allocator;
 const most_segs = 2;
 
 /// The device, a launcher with the merged launches on and one with them off, and the scratch linear() takes.
-const Gpu = struct {
+pub const Gpu = struct {
     r: hip.Runtime,
     ctx: hip.Context,
     stream: hip.Stream,
@@ -24,7 +24,7 @@ const Gpu = struct {
     act: model.Kind,
 
     /// Skipped with the inert kernels the host tests build; a GPU build fails when its device does not open.
-    fn open(g: *Gpu, arena_bytes: usize) !void {
+    pub fn open(g: *Gpu, arena_bytes: usize) !void {
         if (hip.kernels.arch.len == 0) return error.SkipZigTest;
         g.r = try hip.Runtime.open();
         errdefer g.r.close();
@@ -41,7 +41,7 @@ const Gpu = struct {
         g.arena = try hip.Arena.init(&g.r, arena_bytes);
     }
 
-    fn close(g: *Gpu) void {
+    pub fn close(g: *Gpu) void {
         g.arena.deinit();
         g.off.unload();
         g.on.unload();
@@ -76,12 +76,12 @@ fn tensor(v: []const f32, shape: []const usize) quant.Tensor {
 }
 
 /// A synthetic DeltaNet layer at the fixture's dimensions on one rank: dense fp32 products, fp32 vectors, the qk norms.
-const Layer = struct {
+pub const Layer = struct {
     buffers: std.ArrayList(hip.DeviceBuffer),
     m: model.Model,
     l: model.Linear,
 
-    fn init(w: *Layer, g: *Gpu, rng: std.Random) !void {
+    pub fn init(w: *Layer, g: *Gpu, rng: std.Random) !void {
         var c = try config.parse(gpa, @embedFile("../fixtures/config.json"));
         defer c.deinit();
         const d = try model.Dims.of(&c, 1);
@@ -114,7 +114,7 @@ const Layer = struct {
         };
     }
 
-    fn deinit(w: *Layer) void {
+    pub fn deinit(w: *Layer) void {
         for (w.buffers.items) |*b| b.free();
         w.buffers.deinit(gpa);
     }
