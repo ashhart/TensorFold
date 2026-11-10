@@ -174,8 +174,8 @@ pub fn expand(vision: ?api.Vision, fetch: ?Fetch, text: model_text.Text, cx: *Cx
     var video_budget: videos.Budget = .{ .deadline = if (fetch) |f| std.Io.Clock.awake.now(f.io).addDuration(.fromSeconds(videos.total_s)) else .{ .nanoseconds = 0 } };
     var ii: usize = 0;
     var vi: usize = 0;
-    // images are priced in prompt order, each taking what the earlier ones left, so a turn never re-sizes one
-    var left: u32 = v.image_tokens;
+    // one fixed share for every image: the budget over the image limit, so a later turn never re-sizes an earlier image
+    const share = v.image_tokens / v.max_images;
     for (ps) |p| {
         if (p.video) {
             const o = v.video.?;
@@ -185,8 +185,8 @@ pub fn expand(vision: ?api.Vision, fetch: ?Fetch, text: model_text.Text, cx: *Cx
         }
         const i = ii;
         ii += 1;
-        const cap = if (p.low) @min(left, low_detail_tokens) else left;
-        if (cap == 0) return cx.refuse(try std.fmt.allocPrint(cx.a, "image {d}: the images before it use the request's visual-token budget (--vision-image-tokens {d})", .{ i + 1, v.image_tokens }));
+        const cap = if (p.low) @min(share, low_detail_tokens) else share;
+        if (cap == 0) return cx.refuse(try std.fmt.allocPrint(cx.a, "image {d}: the visual-token budget (--vision-image-tokens {d}) leaves no share for {d} images (--vision-max-images)", .{ i + 1, v.image_tokens, v.max_images }));
         const bytes = try sourceBytes(cx, fetch, p.url, @min(max_image_bytes, max_request_bytes - bytes_total), deadline);
         bytes_total += bytes.len;
         switch (sniff(bytes)) { // the Python frontend's formats (images.py: JPEG, PNG, WebP)
@@ -195,7 +195,6 @@ pub fn expand(vision: ?api.Vision, fetch: ?Fetch, text: model_text.Text, cx: *Cx
         }
         prepared[i] = v.prepare(v.ctx, cx.a, bytes, cap) catch |e| return refusal(cx, v, i, e);
         if (prepared[i].tokens == 0 or prepared[i].tokens > cap) return cx.refuse("the image processor exceeded the per-image visual-token budget");
-        left -= prepared[i].tokens;
     }
     var out_ids: std.ArrayList(u32) = .empty;
     var key: std.ArrayList(u32) = .empty;
@@ -355,6 +354,74 @@ test "a wrapped image: the server writes the wrapper around each image's rows, i
     try std.testing.expectEqual(image_key.open('a'), x.cache_key[1]); // the wrapper's words carry the image's identity
     try std.testing.expectEqual(image_key.close('a'), x.cache_key[4]);
     try std.testing.expect(x.cache_key[2] >= 0x8000_0000);
+}
+
+test "a fixed share: every image gets image_tokens / max_images, whatever the request's image count" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cx: Cx = .{ .a = a };
+    var dummy: u8 = 0;
+    // 8 tokens over the limit of 4 images: every image takes 2 rows, the lone one of the first message like
+    // each of the second message's two, so the earlier image keeps its rows when a later turn adds one
+    const v: api.Vision = .{ .ctx = &dummy, .prepare = fakePrepare, .image_token = 9, .image_tokens = 8, .max_images = 4 };
+    const text =
+        \\[{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:,%FF%D8%FFab"}}]},
+        \\ {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:,%FF%D8%FFab"}},
+        \\  {"type": "image_url", "image_url": {"url": "data:,%FF%D8%FFcd"}}]}]
+    ;
+    const msgs = switch (try json.parseText(a, text)) {
+        .ok => |m| m,
+        .err => return error.TestUnexpectedResult,
+    };
+    const x = (try expand(v, null, MarkText.text(), &cx, msgs, &[_]u32{ 1, 9, 2, 3, 9, 9, 4 }, 0)).?;
+    try std.testing.expectEqualSlices(u32, &.{ 1, 9, 9, 2, 3, 9, 9, 9, 9, 4 }, x.ids); // 2, then 2 and 2
+    try std.testing.expectEqual(@as(u32, 2), x.images[0].tokens);
+    try std.testing.expectEqual(@as(u32, 2), x.images[1].tokens);
+    try std.testing.expectEqual(@as(u32, 2), x.images[2].tokens);
+    // a budget that divides into nothing is refused, naming the image and both flags
+    const one = switch (try json.parseText(a,
+        \\[{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:,%FF%D8%FFab"}}]}]
+    )) {
+        .ok => |m| m,
+        .err => return error.TestUnexpectedResult,
+    };
+    var none = v;
+    none.image_tokens = 3;
+    try std.testing.expectError(error.Refused, expand(none, null, MarkText.text(), &cx, one, &[_]u32{9}, 0));
+    try std.testing.expectEqualStrings("image 1: the visual-token budget (--vision-image-tokens 3) leaves no share for 4 images (--vision-max-images)", cx.message);
+}
+
+test "a video takes its own budget, so the picture beside it keeps its fixed share" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cx: Cx = .{ .a = a };
+    var dummy: u8 = 0;
+    // 8 tokens over 4 images: the picture's 2 rows are its fixed share; the video divides its own 2 by its own one clip
+    const offer: api.VideoOffer = .{ .prepare = fakeVideo, .video_token = 8, .group_open = 6, .group_close = 7, .video_tokens = 2, .max_videos = 2, .max_frames = 256 };
+    const v: api.Vision = .{ .ctx = &dummy, .prepare = fakePrepare, .image_token = 9, .image_tokens = 8, .max_images = 4, .video = offer };
+    const one = switch (try json.parseText(a,
+        \\[{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:,%FF%D8%FFab"}}]}]
+    )) {
+        .ok => |m| m,
+        .err => return error.TestUnexpectedResult,
+    };
+    const x = (try expand(v, null, MarkText.text(), &cx, one, &[_]u32{9}, 0)).?;
+    try std.testing.expectEqual(@as(u32, 2), x.images[0].tokens); // the picture's share: 8 over the limit of 4
+    try std.testing.expectEqualSlices(u32, &.{ 9, 9 }, x.ids);
+    // the same picture with a video in its message: the video does not compete for the image budget, so the
+    // picture keeps its 2 rows and brings the video's own 2 tokens, which the picture is not charged for
+    const pair = switch (try json.parseText(a,
+        \\[{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:,%FF%D8%FFab"}},
+        \\  {"type": "video_url", "video_url": {"url": "data:video/mp4;base64,YQ=="}}]}]
+    )) {
+        .ok => |m| m,
+        .err => return error.TestUnexpectedResult,
+    };
+    const y = expand(v, null, MarkText.text(), &cx, pair, &[_]u32{ 9, 8 }, 0) catch null;
+    if (y) |media| try std.testing.expectEqual(@as(u32, 2), media.images[0].tokens) // still its whole share beside it
+    else try std.testing.expectEqual(errors.Kind.server, cx.kind); // stopped at the video's own step
 }
 
 fn noLibrary(_: *anyopaque, _: std.mem.Allocator, _: []const u8, _: u32) anyerror!api.PreparedImage {

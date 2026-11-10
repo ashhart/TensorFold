@@ -4,7 +4,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
-- Server: a request's images take its visual-token budget in prompt order, each taking what the earlier images left, so a turn that adds an image no longer re-sizes the ones already in the prompt and the prompt cache resumes from the first image; a request whose images run past `--vision-image-tokens` is refused from the image that does not fit (#2510).
+- Server: every image takes the fixed share `--vision-image-tokens / --vision-max-images` of the visual-token budget, whatever the request's image count, so a turn that adds an image no longer re-sizes the ones already in the prompt and the prompt cache resumes from the first image; a request's images stay within `--vision-image-tokens`, and a share of 0 is refused by name (#2717, for #2510). Thanks to @devopsfortunato.
 
 
 - Tests: the thinking benchmark check accepts an unmeasured delivery, so it no longer flakes on busy Linux runners, and the image routes' fixture starts its reader before writing, so its two large-body tests no longer hang where socket buffers are small, as on macOS (#2743, closes #2735).
