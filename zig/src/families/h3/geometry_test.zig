@@ -468,3 +468,34 @@ test "H3 picture counts: no audio, held or generated, and a picture still needs 
     try testing.expectError(error.H3EmptyMedia, g.countsFor(&.{ 1, 1, 1, 1, 0, 1 }, true));
     try testing.expectError(error.H3EmptyMedia, g.counts(&.{ 1, 1, 1, 1, 0, 1 }));
 }
+
+test "H3 picture step heads: one per step, read at its step, never in a clip" {
+    var a = arena();
+    defer a.deinit();
+    var f = try picture(a.allocator());
+    try testing.expect(!(try f.read()).step_heads);
+    try f.add("video_out.weight", .f32, &.{ 2, 96, 256 });
+    try testing.expectError(error.H3BadTensorShape, f.read());
+    try f.add("video_out.bias", .f32, &.{ 2, 96 });
+    try testing.expect((try f.read()).step_heads);
+    // a head count other than the case's steps
+    try f.add("video_out.weight", .f32, &.{ 3, 96, 256 });
+    try f.add("video_out.bias", .f32, &.{ 3, 96 });
+    try testing.expectError(error.H3StepHeadCount, f.read());
+    // a clip's case keeps its single head
+    var clip = try fixture(a.allocator());
+    try clip.add("video_out.weight", .f32, &.{ 2, 4, 256 });
+    try clip.add("video_out.bias", .f32, &.{ 2, 4 });
+    try testing.expectError(error.H3BadTensorShape, clip.read());
+    var plain = try fixture(a.allocator());
+    try testing.expect(!(try plain.read()).step_heads);
+}
+
+test "H3 step head offsets: step i reads head i, one head reads 0, a rescheduled run is refused" {
+    try testing.expectEqual([2]usize{ 0, 0 }, try g.headOffsets(0, 5, 8, 96, 5376));
+    try testing.expectEqual([2]usize{ 0, 0 }, try g.headOffsets(6, 0, 6, 96, 5376));
+    try testing.expectEqual([2]usize{ 5 * 96 * 5376 * 4, 5 * 96 * 4 }, try g.headOffsets(6, 5, 6, 96, 5376));
+    try testing.expectError(error.H3BadStep, g.headOffsets(6, 6, 6, 96, 5376));
+    try testing.expectError(error.H3StepHeadCount, g.headOffsets(6, 0, 8, 96, 5376));
+    try testing.expectError(error.H3StepHeadCount, g.headOffsets(6, 0, 4, 96, 5376));
+}
