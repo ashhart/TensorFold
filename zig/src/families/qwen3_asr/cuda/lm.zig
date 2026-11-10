@@ -41,6 +41,8 @@ pub const Lm = struct {
     logits: []u16,
     last_margin: f32 = 0, // the last pick's lead over the runner-up
     keep: ?Keep = null, // each head row's logits, appended
+    row_gemms: bool = false, // every projection a row at a time: one cuBLASLt algorithm at any pass size
+    plant_norms: bool = false, // a planted fault for tf-qwen3-asr-forced: q_norm and k_norm swapped
     sink: ?@import("tower.zig").Dump = null,
 
     /// Where the head's logits go, a row of vocab bf16 values at a time.
@@ -152,7 +154,8 @@ pub const Lm = struct {
     }
 
     pub fn gemm(lm: *Lm, x: u64, w: u64, y: u64, rows: usize, n: usize, k: usize) !void {
-        try lm.g.run(lm.s, x, w, y, rows, n, k, .bf16);
+        if (!lm.row_gemms) return lm.g.run(lm.s, x, w, y, rows, n, k, .bf16);
+        for (0..rows) |r| try lm.g.run(lm.s, x + r * k * 2, w, y + r * n * 2, 1, n, k, .bf16);
     }
 
     fn kvAt(lm: *const Lm, base: u64, layer: usize) u64 {
@@ -163,7 +166,8 @@ pub const Lm = struct {
     pub fn qkRope(lm: *Lm, qkv: u64, q_norm: u64, k_norm: u64, layer: usize, rows: usize) !void {
         const t = lm.t;
         const b = lm.b;
-        const shape: cuda.qk_rows.Shape = .{ .norms = q_norm, .norm_k = k_norm, .norms_bf16 = true, .cos = b.cos, .sin = b.sin, .rot = t.head_dim, .eps = t.eps, .round = true };
+        const qn, const kn = if (lm.plant_norms) .{ k_norm, q_norm } else .{ q_norm, k_norm };
+        const shape: cuda.qk_rows.Shape = .{ .norms = qn, .norm_k = kn, .norms_bf16 = true, .cos = b.cos, .sin = b.sin, .rot = t.head_dim, .eps = t.eps, .round = true };
         const out: cuda.qk_rows.Out = .{ .q = b.q, .k = b.k, .v = b.v, .kc = lm.kvAt(b.kc, layer), .vc = lm.kvAt(b.vc, layer), .len = lm.cap };
         try lm.qk.rows(lm.s, qkv, .{ .h = t.heads, .hk = t.kv_heads, .dim = t.head_dim }, shape, b.pos, null, out, rows);
     }
