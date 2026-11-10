@@ -78,7 +78,7 @@ pub fn prefillAdmissionMiss() Prefill {
 }
 
 /// Prefill layers are captured whenever graphs are on (TF_FLASHNEXT_EXL3_GRAPH=1).
-pub fn prefillEnabled() bool {
+pub fn prefillEnabled() !bool {
     return hub.enabled();
 }
 
@@ -127,7 +127,7 @@ pub fn clearRuntime(owner: u64) void {
 
 /// Before a layer's sub-blocks:
 pub fn prefillBegin(p: anytype, linear: bool, layer: usize, rows: usize, sub: usize, pos0: usize, deep: u64, base: anytype, tiles: bool, waits: []const cuda.Event, positions: u64) !Prefill {
-    if (!prefillEnabled()) return .eager;
+    if (!try prefillEnabled()) return .eager;
     if (!linear) if (p.seq.sel) |selection| if (!selection.graph_staged) return .eager;
     const q = p.seq;
     var wait_key: u64 = 0;

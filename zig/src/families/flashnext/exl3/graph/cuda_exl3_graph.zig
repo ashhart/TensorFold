@@ -13,16 +13,14 @@ const gprefill = @import("cuda_exl3_graph_prefill.zig");
 pub const memory = @import("cuda_exl3_graph_memory.zig");
 
 /// GRAPH=0 keeps the host planner, eager uses the device planner, and 1 also enables graph replay.
-pub fn mode() Mode {
+pub fn mode() !Mode {
     if (force) |f| return f;
-    const v = std.c.getenv("TF_FLASHNEXT_EXL3_GRAPH") orelse return .off;
-    const text = std.mem.span(v);
-    if (std.mem.eql(u8, text, "1")) return .graph;
-    return if (std.mem.eql(u8, text, "eager")) .dplan else .off;
+    // the setting's words are in Mode's order, so the matching index is the mode
+    return @as(Mode, @enumFromInt(try @import("sys").environment.read(u2, "TF_FLASHNEXT_EXL3_GRAPH", 0)));
 }
 
-pub fn enabled() bool {
-    return mode() == .graph;
+pub fn enabled() !bool {
+    return try mode() == .graph;
 }
 
 /// A test's override of the environment: the host cut, the device plan launched eagerly, or graphs.
@@ -102,4 +100,5 @@ test "exl3: state binding helper contracts" {
     _ = @import("cuda_exl3_graph_cache_test.zig");
     _ = @import("cuda_exl3_graph_prefill_test.zig");
     _ = @import("cuda_exl3_graph_together_test.zig");
+    _ = @import("cuda_exl3_graph_environment_test.zig");
 }

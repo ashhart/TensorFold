@@ -22,7 +22,7 @@ const piece_rows = mtp.piece_rows;
 /// forwardHead's hook: the head's pool on the device planner for a step of `rows` rows; returns what to restore.
 pub fn enter(e: *prompt.Engine, rows: usize) !?*dplan.DevPlan {
     const was = e.exl3_dplan.active;
-    if (!graph.enabled() or rows == 0) return was;
+    if (!try graph.enabled() or rows == 0) return was;
     const dp = (try dplan.forLayers(e.gpa, e.driver, &e.exl3_dplan, e.layers[0..e.n_layers])) orelse return was;
     const mp = e.exl3_dplan.mtp_pool orelse return was;
     if (rows > dp.max_rows or dp.indexOf(mp) == null) return was;
@@ -290,7 +290,7 @@ fn chainBody(comptime Tri: type, o: anytype, p: *batch.Pass(Tri), ps: *batch.Pas
 /// Ops.draft's hook (cuda_mtp_ops.zig): the chain for greedy drafts as one graph; false leaves it to upstream.
 pub fn draft(comptime Tri: type, o: anytype, d: *mtp.Draft, next: []const u32, rows: u64, position: u64, count: usize, sm: ?mtp.Sampling, confidence: f64, out: *mtp.Chain) !bool {
     _ = position;
-    if (!graph.enabled() or count < 2 or d.media != null) return false;
+    if (!try graph.enabled() or count < 2 or d.media != null) return false;
     if (sm) |s| if (s.temperature > 0) return false;
     const e = o.e;
     const dp = (try dplan.forLayers(e.gpa, e.driver, &e.exl3_dplan, e.layers[0..e.n_layers])) orelse return false;

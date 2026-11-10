@@ -293,6 +293,7 @@ pub fn Namespace(comptime Tri: type) type {
             fn open(self: *Cuda, s: *lanes.Stream) !*Lane {
                 const ids = s.prompt();
                 if (ids.len == 0 or ids.len + s.max_new > self.context) return error.PromptTooLong;
+                const recycling = try @import("exl3/offload/cuda_exl3_recycle.zig").enabled();
                 const gop = try self.lanes.getOrPut(self.gpa, s);
                 if (gop.found_existing) dropLane(self, gop.value_ptr);
                 const drafting = self.head != null and s.drafts;
@@ -303,10 +304,10 @@ pub fn Namespace(comptime Tri: type) type {
                 }
                 // a window's rows past the reply's last token (its drafts) still need cache slots
                 const from = self.kv.choose();
-                const cap = @import("exl3/offload/cuda_exl3_recycle.zig").capFor(from == .pool, ids.len + s.max_new + (if (drafting) mtp.max_rows else 0), self.context + mtp.max_rows);
+                const cap = @import("exl3/offload/cuda_exl3_recycle.zig").capFor(recycling, from == .pool, ids.len + s.max_new + (if (drafting) mtp.max_rows else 0), self.context + mtp.max_rows);
                 // a contiguous lane's fixed-size buffers from the parts kept from an earlier stream
                 var part_seq: ?cuda.DeviceBuffer = null;
-                if (self.parts.forLane(self.ranks != null, from == .pool)) part_seq = Parts.take(&self.parts.seqs, self.engine.driver, seq_parts.seqPartsBytes(self.engine.heads)) catch null;
+                if (self.parts.forLane(recycling, self.ranks != null, from == .pool)) part_seq = Parts.take(&self.parts.seqs, self.engine.driver, seq_parts.seqPartsBytes(self.engine.heads)) catch null;
                 gop.value_ptr.* = .{ .seq = (if (self.ranks) |r| r.createOn(cap, from) else if (from == .pool) self.kv.pool.?.open(cap) else if (part_seq) |b| seq_parts.newSeqIn(self.engine, cap, b) else self.engine.newSeq(cap)) catch |err| {
                     if (part_seq) |b| Parts.give(&self.parts.seqs, self.gpa, b);
                     self.lanes.removeByPtr(gop.key_ptr);

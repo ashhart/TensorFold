@@ -53,7 +53,7 @@ pub fn traceMode(gpu: Gpu, rank: usize, world: usize, port: u16, dir: []const u8
     if (rounds == 0) return error.InvalidTraceRounds;
     if (repeats == 0) return error.InvalidTraceSchedule;
     if (world != 2) return error.TraceRequiresTp2;
-    if (!X.graph.enabled()) return error.TraceRequiresGraphs;
+    if (!try X.graph.enabled()) return error.TraceRequiresGraphs;
     var golden = try Golden.open(gpu, golden_path);
     defer golden.parsed.deinit();
     const a = gpu.gpa;

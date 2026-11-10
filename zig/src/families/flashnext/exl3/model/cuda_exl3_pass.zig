@@ -190,7 +190,7 @@ pub fn budgetForStreams(stream_bytes: u64, requested_streams: u32) !Budget {
 fn budgetFromEnvWithStreams(stream_bytes: u64, requested_streams: ?u32) !Budget {
     const streams = requested_streams orelse 1;
     var b: Budget = .{ .other = try streamReservation(stream_bytes, streams) };
-    if (dplan.enabled()) {
+    if (try dplan.enabled()) {
         b.planner_rows = dplan.planner_rows;
     }
     b.lines = try environment.read(?usize, "TF_FLASHNEXT_EXPERT_LINES", null);
@@ -218,6 +218,11 @@ pub fn freeBytes(d: *const cuda.Driver) !u64 {
     var total: usize = 0;
     try d.check(d.api.cuMemGetInfo_v2(&free, &total), "cuMemGetInfo");
     return free;
+}
+
+/// UNIFORM_LINES: 0 and 1 both keep every rank on the asked-for lines; the setting has always meant its presence.
+pub fn uniformLines() !bool {
+    return (try @import("sys").environment.read(?bool, "TF_FLASHNEXT_EXL3_UNIFORM_LINES", null)) != null;
 }
 
 /// The sizing hook (cuda_lanes_load.zig, once everything else of the family is allocated).
@@ -289,7 +294,7 @@ pub fn attach(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, st: cud
     const pool_room = try memory.available(free, reserve, future);
     const world: usize = if (all[0].tp) |t| t.world else 1;
     const fit = pool_.linesFor(free, try std.math.add(u64, serverReserve(total), b.margin), try std.math.add(u64, future, all_fixed), line_cost, n, pool_.min_lines) catch null;
-    const uniform = std.c.getenv("TF_FLASHNEXT_EXL3_UNIFORM_LINES") != null;
+    const uniform = try uniformLines();
     const lines = if (b.lines) |explicit| (if (delta_text != null or uniform) explicit else memory.rankLines(explicit, world, fit)) else try pool_.linesFor(free, reserve, try std.math.add(u64, future, all_fixed), line_cost, n, pool_.min_lines);
     if (b.lines) |explicit| if (lines != explicit) std.log.info("flashnext exl3: this rank holds {d} lines a layer, {d} more than the {d} asked for: it has the room (residency never changes output bytes)", .{ lines, lines - explicit, explicit });
     if (lines < pool_.min_lines) return error.PoolTooSmall;
@@ -391,6 +396,7 @@ pub fn attach(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, st: cud
 test {
     _ = line_deltas;
     _ = profile_line_budget;
+    _ = @import("cuda_exl3_pass_environment_test.zig");
 }
 
 fn profileSizingEnabled() !bool {

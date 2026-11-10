@@ -135,7 +135,7 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     own.exl3 = mode == .exl3;
     own.stream_bytes = stream_bytes;
     var pool_budget = try exl3_pass.budgetForStreams(stream_bytes, o.lanes);
-    if (mode == .exl3 and @import("exl3/graph/cuda_exl3_graph.zig").enabled()) pool_budget.graph_reservation = try @import("exl3/graph/cuda_exl3_graph_memory.zig").startupReservationForStreams(o.lanes);
+    if (mode == .exl3 and try @import("exl3/graph/cuda_exl3_graph.zig").enabled()) pool_budget.graph_reservation = try @import("exl3/graph/cuda_exl3_graph_memory.zig").startupReservationForStreams(o.lanes);
     own.graph_reservation = pool_budget.graph_reservation;
     const placement = @import("exl3/offload/cuda_exl3_frequency_state.zig");
     if (try placement.prepare(gpa, io, dir, own.engine.layers[0..own.engine.n_layers], own.head, @intCast(o.tp), @intCast(o.rank))) |prepared| {

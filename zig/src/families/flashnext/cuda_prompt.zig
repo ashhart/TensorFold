@@ -338,7 +338,7 @@ pub const Engine = struct {
             .fed = 0,
             .logits = &.{},
             .cap = cap,
-            .recycle_owner = if (paged == null) e else null,
+            .recycle_owner = if (paged == null and try @import("exl3/offload/cuda_exl3_recycle.zig").enabled()) e else null,
         };
         paged = null; // seq owns the pages from here
         // One rollback owns every published array, and drains before releasing any destination.
@@ -515,6 +515,7 @@ pub const Engine = struct {
 
 /// One stream's caches. `fed` tokens have already gone through the model.
 pub const Seq = struct {
+    /// The engine whose recycler may keep this cache: set on a contiguous cache made while graphs are on.
     recycle_owner: ?*Engine = null,
     /// The owning compute stream; synthetic non-device fixtures may leave it absent.
     stream: ?cuda.Stream = null,

@@ -442,8 +442,8 @@ pub const State = struct {
 };
 
 /// GRAPH=eager plans decode rounds on the device; GRAPH=1 also replays graphs.
-pub fn enabled() bool {
-    return @import("../graph/cuda_exl3_graph.zig").mode() != .off;
+pub fn enabled() !bool {
+    return try @import("../graph/cuda_exl3_graph.zig").mode() != .off;
 }
 
 /// The engine's device planner over its decoder layers' pools, made once; null when a layer has no pool.

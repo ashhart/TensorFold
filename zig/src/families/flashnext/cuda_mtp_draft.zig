@@ -59,6 +59,8 @@ pub const Draft = struct {
     gen: u64 = 0,
     sel: ?*@import("exl3/kv/cuda_exl3_kvtier.zig").LaneSel = null, // a host tier's selection of the stream's blocks
     stream: ?cuda.Stream = null,
+    /// Made while graphs keep windows: deinit offers its allocations to the recycler (cuda_exl3_recycle.zig).
+    recycles: bool = false,
     media: ?@import("cuda_media.zig").View = null,
     gpa: std.mem.Allocator,
     kc: cuda.DeviceBuffer,
@@ -175,7 +177,7 @@ pub const Draft = struct {
     pub fn init(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: cuda.Stream, cap: usize, draft_n: usize, rows: usize, h: Heads) !Draft {
         // graphs: stable addresses
         if (try @import("exl3/offload/cuda_exl3_recycle.zig").takeDraft(stream, cap, draft_n, rows, h)) |kept| return kept;
-        var d: Draft = .{ .gen = @import("cuda_window_graph.zig").nextGen(), .stream = stream, .gpa = gpa, .cap = cap, .rows_cap = @max(rows, max_rows), .kc = undefined, .vc = undefined, .ikc = undefined, .pooled = undefined, .streams = undefined, .out = undefined, .logits = undefined, .dlogits = undefined, .best = undefined, .saved = undefined, .host = undefined, .layout = .of(h) };
+        var d: Draft = .{ .recycles = try @import("exl3/offload/cuda_exl3_recycle.zig").enabled(), .gen = @import("cuda_window_graph.zig").nextGen(), .stream = stream, .gpa = gpa, .cap = cap, .rows_cap = @max(rows, max_rows), .kc = undefined, .vc = undefined, .ikc = undefined, .pooled = undefined, .streams = undefined, .out = undefined, .logits = undefined, .dlogits = undefined, .best = undefined, .saved = undefined, .host = undefined, .layout = .of(h) };
         d.kc = try cuda.DeviceBuffer.alloc(driver, sizes.kvBytes(cap, head_heads));
         errdefer d.kc.free();
         d.vc = try cuda.DeviceBuffer.alloc(driver, sizes.kvBytes(cap, head_heads));

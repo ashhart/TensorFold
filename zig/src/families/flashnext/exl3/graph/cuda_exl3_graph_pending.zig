@@ -45,14 +45,13 @@ pub fn ctxApi() ?CtxApi {
 }
 
 /// TF_FLASHNEXT_EXL3_GRAPH_ASYNC=0 instantiates on the step's thread.
-pub fn asyncInstantiate() bool {
-    const v = std.c.getenv("TF_FLASHNEXT_EXL3_GRAPH_ASYNC") orelse return true;
-    return !std.mem.eql(u8, std.mem.span(v), "0");
+pub fn asyncInstantiate() !bool {
+    return platform.environment.read(bool, "TF_FLASHNEXT_EXL3_GRAPH_ASYNC", true);
 }
 
 /// Starts instantiating `g` on a worker thread (it owns `g` from here); null when that is not possible.
 pub fn startInstantiate(g: cuda.graph.Graph, keep_template: bool) !?*Pending {
-    if (!asyncInstantiate()) return null;
+    if (!try asyncInstantiate()) return null;
     const api = ctxApi() orelse return null;
     var ctx: ?*anyopaque = null;
     if (api.get(&ctx) != 0) return null;
