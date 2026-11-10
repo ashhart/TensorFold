@@ -311,7 +311,6 @@ the United States of America. Read it before use.
 - **Edits end to end:** the encoder makes a reference's rows and the prompt path places its vision rows, but
   Qwen3-VL's vision tower is not here, so an edit's prompt rows still come from a case. No one tool runs an edit.
 - **Serving:** no `/v1/images/generations` or `/v1/images/edits` route for it, and no CUDA path.
-- **Kernel contract:** the new kernels are gated by each tool's `selftest`, not registered with `tf-kernel-contract`.
 - **Machines:** the transformer runs on an M5 only; chips without tensor units are refused.
 
 ## Host checks
@@ -325,3 +324,15 @@ the United States of America. Read it before use.
 - the case reader's picture admission.
 
 `zig build compile-h3-host` compiles both H3 tools without the Metal compiler.
+
+## Kernel contract
+
+The edit encoder's, prompt path's and image decoder's kernels are registered with the kernel contract
+([kernel-contract.md](../kernel-contract.md)): 31 registrations with 34 planted controls, and every launch's limits.
+They are checked against float64 at their rounding points, beside each tool's own `selftest`. `zig build
+h3-image-contract` runs them on any Mac, with no Metal compiler; `tf-kernel-contract` runs them with every other kernel.
+On an M3 Ultra all 31 pass gates 1 to 4 and every control goes red as planted.
+
+The contract found one fault, now fixed: the prompt path's attention filled a row's last block of 4 keys with its last
+key at weight 0, so an infinite value there gave 0 x Inf = NaN where float64 keeps the infinity. A padded key now adds
+nothing; finite outputs keep their bytes.
