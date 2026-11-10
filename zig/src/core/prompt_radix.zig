@@ -41,6 +41,29 @@ pub fn pagesOf(comptime T: type, owner: *T, bytes: u64) Pages {
 }
 
 pub const Plan = pc.Plan;
+
+/// What a pass asks the store about: the words the tree compares, and what reuse must also match (enforced from C6).
+pub const Query = struct {
+    /// The tree's words: the request's cache key, one word a model row; for text, the prompt.
+    key: []const u32,
+    /// The prompt's length; a key of another length reuses nothing.
+    prompt_len: u32,
+    /// The exact identities of the request's images.
+    images: []const @import("cache_images.zig").Identity = &.{},
+    /// The request's image frame.
+    frame: u32 = 0,
+    /// What the rows depend on beyond key, images and frame.
+    namespace: u64 = 0,
+    /// The request's own chunk starts; empty: the store's grid.
+    starts: []const u32 = &.{},
+    /// Rows this pass prefills; null: the prompt's length.
+    prefilled: ?u32 = null,
+
+    /// A query of `key` alone, as long as its prompt.
+    pub fn of(key: []const u32) Query {
+        return .{ .key = key, .prompt_len = @intCast(key.len) };
+    }
+};
 /// A paged store's `keep`: whether the mark holds a state, and how many leading pages the stream swaps for the store's.
 pub const Kept = struct { held: bool, shared: usize };
 
@@ -92,7 +115,8 @@ pub const Store = struct {
     }
 
     /// Restores the longest state `prompt` resumes into `owner`, its pages into `adopt` (held once more); plans marks.
-    pub fn begin(s: *Store, a: Allocator, prompt: []const u32, history_len: u32, shared: []const u32, owner: ?*anyopaque, adopt: *std.ArrayList(u32)) !Plan {
+    pub fn begin(s: *Store, a: Allocator, q: Query, history_len: u32, shared: []const u32, owner: ?*anyopaque, adopt: *std.ArrayList(u32)) !Plan {
+        const prompt = q.key;
         if (!s.on()) return .{ .marks = try a.alloc(u32, 0) };
         const found = s.find(prompt);
         if (found == null) s.tree.counts.misses += 1;
@@ -213,7 +237,8 @@ pub const Store = struct {
     }
 
     /// At `at` the tree takes the pages of `mine` it lacks and the snapshot, evicting to fit; `path` gets its pages.
-    pub fn keep(s: *Store, prompt: []const u32, at: u32, owner: ?*anyopaque, mine: []const u32, path: []u32) Kept {
+    pub fn keep(s: *Store, q: Query, at: u32, owner: ?*anyopaque, mine: []const u32, path: []u32) Kept {
+        const prompt = q.key;
         const t = &s.tree;
         if (!s.on() or at == 0 or at % s.step() != 0 or at + s.rules.lookahead > prompt.len or mine.len != at / s.rules.page or path.len != mine.len) return .{ .held = false, .shared = 0 };
         t.clock += 1;
