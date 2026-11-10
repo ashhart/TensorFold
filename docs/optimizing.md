@@ -19,16 +19,17 @@ Before writing a kernel or a fusion, work out the most it can win.
   record it as `failed` in the [optimization ledger](optimization-ledger.md) and stop.
 
 Rank ideas by the size of the prize, not by the cost of the change. An idea that won elsewhere still needs bounding
-here: TensorFold's kernels and launch shapes differ from the project that reported the gain.
+here: TensorFold's kernels and launch shapes differ from the project that reported the gain. Bounding it is fine, but
+what lands is written from our own code and the model's own definition, never read from or ported from another engine.
 
 Worked example (Qwen3.8-27B NVFP4 on a GB10, main at the time, one hour of measurement, no code):
 
-- A fused gate/up + SwiGLU prompt kernel (from llama.cpp #31296, which reported up to +18 % prefill for this model
-  on this box). The activation kernel it removes was 3.38 % of cold TTFT at 8k and 3.11 % at 32k, already at
-  246-248 GB/s. Adding the gate/up write it would also remove gave an upper bound of 4.4 % (8k) and 4.1 % (32k).
-  Clears a 3 % bar only marginally.
-- Splitting the GDN decode scan over more SMs (from vLLM #65874). TensorFold's grid already launches 768 blocks a
-  stream on 48 SMs, and the kernel is 1-2 % of a step. Bound under 1.5 %: not built.
+- Fusing the SwiGLU activation into the gate/up prompt GEMM, so its output is written once, already activated.
+  The activation kernel it removes was 3.38 % of cold TTFT at 8k and 3.11 % at 32k, already at 246-248 GB/s.
+  Adding the gate/up write it would also remove gave an upper bound of 4.4 % (8k) and 4.1 % (32k). Clears a 3 % bar
+  only marginally.
+- Splitting the GDN decode scan over more SMs, so one stream's scan uses more of the GPU. TensorFold's grid already
+  launches 768 blocks a stream on 48 SMs, and the kernel is 1-2 % of a step. Bound under 1.5 %: not built.
 
 ## Which limit applies
 
@@ -57,7 +58,7 @@ One nsys capture of the real server gives a table that answers "where does the t
 Flag every row above 1 % of the step that runs fewer blocks than SMs, or well under the bandwidth floor. Also add up
 the weight bytes a step: that gives the floor for the whole step, and how far the step is from it. In the example
 above the audit found no kernel over 1 % under 48 blocks, and one projection at 179 GB/s where the same shape
-elsewhere reached 216: a better lead than either imported idea.
+elsewhere reached 216: a better lead than either idea above.
 
 ## Profiling safely
 
@@ -73,8 +74,8 @@ elsewhere reached 216: a better lead than either imported idea.
 
 A speed change that changes tokens isn't a speed change. TensorFold's rules:
 
-- Where a change claims bit-identical tokens or logits, show it: token hashes and logits against main on the same
-  prompts.
+- Every speed change, opt-in ones included, keeps greedy token hashes and seeded sampled tokens equal to main. Show
+  it: token hashes against main on the same prompts, greedy and seeded. There are no lossy weight or KV formats.
 - Splits (split-K, split-V, split-KV) merge partial sums in a fixed order, independent of the grid and of timing. No
   atomics on the sum.
 - For every kernel you did not mean to change, compare SASS between main and the branch, function by function, for
