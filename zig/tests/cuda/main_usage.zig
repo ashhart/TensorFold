@@ -33,6 +33,8 @@ pub const usage =
     \\  lane-half-n               TF_QMMF_HALF_BN half tiles (FP4, FP8, FP8G): bytes equal to the 64-column tile, rows 1-16
     \\  flashnext-dense-hc        dense connection weights and FP32 normalization against FP64
     \\  flashnext-hc              Flash Next's own hyper-connection and n-gram glue against float64 (synthetic rows)
+    \\  flashnext-exl3 DIR names|norms|router [layers] [rows]|layer [layers]  Flash Next on an EXL3 pack vs float64
+    \\  flashnext-exl3-engine DIR tf|gen GOLDEN [LINES] | bench [LINES]  the family's Engine with the offload pool vs the reference golden
     \\  flashnext-attn            Flash Next's own attention glue, pooling and block scores against float64 (synthetic)
     \\  flashnext-gdn-heads [BASELINE]  DeltaNet full/half bytes, optionally against a frozen flashnext_batch.fatbin
     \\  flashnext-tp-heads MODEL  each rank's cut in-projections and attention heads equal the whole layer's bytes
@@ -140,6 +142,10 @@ pub const usage =
     \\  exl3-plans [shape]        the 27B's EXL3 shapes: every (K splits, warps) and layout timed at 1 and 16 rows
     \\  exl3-contract             EXL3's replacements of linear_body through gates 1-4, each control red (kernel-contract's subset)
     \\  exl3-tp2 <rank> <host:port> [dir]  EXL3 tensor parallel: rank shards vs the Python engine's, all-gathered (dir none skips them)
+    \\  exl3-pack DIR [REPS]       EXL3 Dense and grouped experts on a real EXL3 pack's shapes: float64 error and timing
+    \\  exl3-ple2 DIR [ROW] [N]    EXL3 n-gram table through cuda_ple.Ngram (ids, rows, RSS) and the PLE kernels vs float64
+    \\  exl3-prefill DIR experts|copy [LAYER]|dense  EXL3 prefill pieces on the pack: grouped experts by rows, expert-major passes, line copies, prompt Dense
+    \\  exl3-pool DIR [equal|bench|hit FILES] [LAYERS]  Flash Next EXL3 expert offload pool on Experts' pointer tables vs fully resident
     \\  exl3-tiles [DIR]          EXL3's tile candidate: codebooks and tiles bit-equal, FP64, rows through qlinear and Dense
     \\  qwen35-tp-cut PACK [STEP]  the 27B's EXL3 weights cut for two ranks at the whole plan: each rank's columns, one run's bytes
     \\  exl3-prompt-k6 [DIR|none] [BASE]  EXL3 prompt kernels at 3 and 4 bits, GLM's shapes: runSlots, FP64, row bytes, time; DIR adds a real layer, BASE (an earlier exl3_experts fatbin) its 4-bit bytes
