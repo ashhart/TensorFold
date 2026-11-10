@@ -8,10 +8,6 @@ pub fn graphBytes(exec: u64, template: u64, transient: u64) !u64 {
     return std.math.add(u64, retained, try std.math.mul(u64, 2, transient));
 }
 
-pub fn enabled(value: ?[]const u8) bool {
-    return if (value) |text| std.mem.eql(u8, text, "1") else false;
-}
-
 pub fn admits(free: u64, protected: u64, extra: u64) bool {
     const required = std.math.add(u64, protected, extra) catch return false;
     return extra != 0 and free >= required;
@@ -55,9 +51,7 @@ pub const Iterator = struct {
     }
 };
 
-test "exl3: two chunk windows require explicit opt-in and bounded aligned rows" {
-    for ([_]?[]const u8{ null, "", "0", "true", "2" }) |value| try std.testing.expect(!enabled(value));
-    try std.testing.expect(enabled("1"));
+test "exl3: two chunk windows require bounded aligned rows" {
     for ([_]usize{ 0, 1, 255, 4097, 8192 }) |rows| try std.testing.expectError(error.InvalidPrefillWindow, Plan.init(16384, rows, 256));
     try std.testing.expectError(error.InvalidPrefillWindow, Plan.init(0, 4096, 256));
     try std.testing.expectError(error.InvalidPrefillWindow, Plan.init(4096, 4096, 0));

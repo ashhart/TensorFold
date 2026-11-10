@@ -34,8 +34,7 @@ pub fn policyFromEnv() !Policy {
 
 fn policyFromEnvForStreams(streams: u64) !Policy {
     const settings = try workloadPolicy(streams, 48);
-    const window = @import("../prefill/exl3_prefill_window.zig");
-    const two_chunk = window.enabled(if (std.c.getenv("TF_FLASHNEXT_EXL3_PREFILL_TWO_CHUNK")) |value| std.mem.span(value) else null);
+    const two_chunk = try @import("sys").environment.read(bool, "TF_FLASHNEXT_EXL3_PREFILL_TWO_CHUNK", false);
     return withWindowReservation(settings, two_chunk, null);
 }
 
