@@ -360,12 +360,9 @@ pub const Draft = struct {
         const dtype: lanes.backend.Features.Dtype = if (m.act == .bf16) .bf16 else .f16;
         for (items) |it| {
             const o = d.streams.get(it.stream) orelse return error.UnknownStream;
-            const f = it.features;
-            const row_bytes = d.c.n_taps * d.c.hidden * 2;
-            if (f.space != .device or f.dtype != dtype or f.row_bytes != row_bytes) return error.UnsupportedFeatures;
-            // the target's features: its tap ring, `offset` the first row's position (hip_lanes.zig's `features`)
-            const n = if (it.rows) |rs| rs.len else f.rows;
-            try d.absorbRows(&o.ctx, f.buffer, m.taps.rows, f.offset, n, it.rows);
+            const start = try absorbStart(it, d.c.n_taps * d.c.hidden * 2, dtype);
+            const n = if (it.rows) |rs| rs.len else it.features.rows;
+            try d.absorbRows(&o.ctx, it.features.buffer, m.taps.rows, start, n, it.rows);
         }
     }
 
@@ -405,6 +402,15 @@ pub const Draft = struct {
     }
 };
 
+/// An absorb's first row's position: its `start`, which the target's features (its tap ring) name in `offset` too.
+pub fn absorbStart(it: dr.Absorb, row_bytes: usize, dtype: lanes.backend.Features.Dtype) !u64 {
+    const f = it.features;
+    if (f.space != .device or f.dtype != dtype or f.row_bytes != row_bytes) return error.UnsupportedFeatures;
+    // hip_lanes.zig's features put their first row's position in `offset`: rows of another position are refused
+    if (f.offset != it.start) return error.FeaturesNotAtStart;
+    return it.start;
+}
+
 fn ms(io: std.Io, t0: std.Io.Timestamp) f64 {
     return @as(f64, @floatFromInt(t0.durationTo(std.Io.Clock.awake.now(io)).toNanoseconds())) / 1e6;
 }
@@ -418,6 +424,17 @@ test {
     _ = select;
     _ = context;
     _ = frame;
+}
+
+test "an absorb starts at its own start, and refuses features whose first row is another position" {
+    const f: lanes.backend.Features = .{ .buffer = 0x1000, .offset = 40, .rows = 3, .row_bytes = 64, .space = .device, .dtype = .bf16 };
+    var it: dr.Absorb = .{ .stream = undefined, .features = f, .start = 40, .follow = &.{} };
+    try std.testing.expectEqual(@as(u64, 40), try absorbStart(it, 64, .bf16));
+    it.start = 41;
+    try std.testing.expectError(error.FeaturesNotAtStart, absorbStart(it, 64, .bf16));
+    it.start = 40;
+    try std.testing.expectError(error.UnsupportedFeatures, absorbStart(it, 64, .f16));
+    try std.testing.expectError(error.UnsupportedFeatures, absorbStart(it, 128, .bf16));
 }
 
 test "16-bit logits widen by their kind" {
