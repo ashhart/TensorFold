@@ -279,3 +279,58 @@ const Taps = struct {
         try x.at(try std.fmt.bufPrint(&name, "vision-block{d}", .{i}), rows);
     }
 };
+
+test "the GEMM plans: below max_plans shapes they stay; at it the stream drains first, then every plan goes" {
+    const lt = cuda.cublaslt;
+    const Fake = struct {
+        var waits: usize = 0;
+        var destroyed: usize = 0;
+        fn wait(_: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
+            waits += 1;
+            return 0;
+        }
+        fn handle(_: lt.Handle) callconv(.c) lt.Status {
+            destroyed += 1;
+            return 0;
+        }
+        fn desc(_: lt.MatmulDesc) callconv(.c) lt.Status {
+            destroyed += 1;
+            return 0;
+        }
+        fn layout(_: lt.Layout) callconv(.c) lt.Status {
+            destroyed += 1;
+            return 0;
+        }
+        fn pref(_: lt.Preference) callconv(.c) lt.Status {
+            destroyed += 1;
+            return 0;
+        }
+    };
+    const a = std.testing.allocator;
+    var d: cuda.Driver = .{ .lib = undefined, .api = undefined };
+    d.api.cuStreamSynchronize = Fake.wait;
+    var lib: lt.Library = .{ .lib = undefined, .api = undefined };
+    lib.api.cublasLtDestroy = Fake.handle;
+    lib.api.cublasLtMatmulDescDestroy = Fake.desc;
+    lib.api.cublasLtMatrixLayoutDestroy = Fake.layout;
+    lib.api.cublasLtMatmulPreferenceDestroy = Fake.pref;
+    var t: Tower = undefined;
+    t.gemms.gpa = a;
+    t.gemms.plans = .empty;
+    defer t.gemms.plans.deinit(a);
+    const s: cuda.Stream = .{ .d = &d, .handle = @ptrFromInt(0x1800) };
+    for (0..max_plans) |i| {
+        var p: lt.Linear = undefined;
+        p.lt = &lib;
+        try t.gemms.plans.put(a, .{ i, 0, 0 }, p);
+        if (i + 1 < max_plans) {
+            try t.trim(s); // the control: under the bound, nothing drains and nothing goes
+            try std.testing.expect(Fake.waits == 0 and Fake.destroyed == 0 and t.gemms.plans.count() == i + 1);
+        }
+    }
+    try t.trim(s);
+    try std.testing.expectEqual(@as(usize, 1), Fake.waits);
+    try std.testing.expectEqual(@as(usize, max_plans * 6), Fake.destroyed); // handle, desc, three layouts, preference
+    try std.testing.expectEqual(@as(usize, 0), t.gemms.plans.count());
+    cuda.copy_source.dropSpares(&d, cuda.copy_source.current());
+}
