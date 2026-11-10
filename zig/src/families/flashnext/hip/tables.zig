@@ -514,6 +514,41 @@ test "gather: the parked pool's parts copy the same bytes as one thread for ever
     try std.testing.expectEqual(@as(usize, max_parts - 1), many.workers.pool.?.spawned);
 }
 
+test "gather: a cold call wakes the pool and the same ids gathered again stay on the caller" {
+    const a = std.testing.allocator;
+    var sizes: [4]usize = @splat(300);
+    var ids: [64]u32 = undefined;
+    for (&ids, 0..) |*id, i| id.* = @intCast(i * 7919 % 1200);
+    var f = try Fake.initOn(a, &sizes, 160, 4, 32, std.testing.io);
+    defer f.deinit(a);
+    var got: Fake.Staging = .{
+        .words = try a.alloc(u8, ids.len * f.rows.wordBytes()),
+        .scales = try a.alloc(u8, ids.len * f.rows.tableBytes()),
+        .biases = try a.alloc(u8, ids.len * f.rows.tableBytes()),
+    };
+    defer got.deinit(a);
+    const want = try a.alloc(u8, ids.len * f.rows.wordBytes());
+    defer a.free(want);
+    const want_scales = try a.alloc(u8, ids.len * f.rows.tableBytes());
+    defer a.free(want_scales);
+    const want_biases = try a.alloc(u8, ids.len * f.rows.tableBytes());
+    defer a.free(want_biases);
+    try searchedGather(&f.rows, &ids, want, want_scales, want_biases);
+    try std.testing.expect(f.workers.cold(&f.rows, &ids));
+    try f.rows.gather(&f.workers, &ids, got.words, got.scales, got.biases);
+    try std.testing.expect(!f.workers.cold(&f.rows, &ids));
+    try std.testing.expectEqualSlices(u8, want, got.words);
+    try std.testing.expectEqualSlices(u8, want_scales, got.scales);
+    try std.testing.expectEqualSlices(u8, want_biases, got.biases);
+    const cold_calls = f.workers.pool.?.calls.load(.monotonic);
+    try std.testing.expect(cold_calls >= 1);
+    try f.rows.gather(&f.workers, &ids, got.words, got.scales, got.biases);
+    try std.testing.expectEqualSlices(u8, want, got.words);
+    try std.testing.expectEqualSlices(u8, want_scales, got.scales);
+    try std.testing.expectEqualSlices(u8, want_biases, got.biases);
+    try std.testing.expectEqual(cold_calls, f.workers.pool.?.calls.load(.monotonic));
+}
+
 test "spans: one byte range for each of the three tensors of every shard" {
     const a = std.testing.allocator;
     var ids: [4]u32 = undefined;
