@@ -9,7 +9,7 @@ pub const head_file = "joint_head_config.json";
 /// What `open` asks of a checkpoint, as the flags set it.
 pub const Asked = struct { drafter: bool = false, slide: bool = false, vision: bool = false, kv8: bool = false, prompt_int8: bool = false };
 
-/// True: BF16 decisions; false: other formats or BF16 image chat; refused: no head nor tower, flags, a quantized head.
+/// True: BF16 decisions; false: other formats or image chat; refused: no head or tower, flags, a quantized/tied head.
 pub fn check(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, asked: Asked) !bool {
     const g = geometry.Geometry.read(gpa, io, dir) catch return false;
     const head = present(gpa, io, dir);
@@ -23,6 +23,8 @@ pub fn check(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, asked: Asked) 
         if (asked.prompt_int8) return error.QwenBf16ChatPromptInt8;
         return false;
     }
+    // the joint schema head is qualified on untied backbones; a tied one would read a head packed from the embedding
+    if (g.tied) return error.QwenJointTied;
     if (asked.drafter) return error.QwenBf16Drafter;
     if (asked.slide) return error.QwenBf16Slide;
     if (asked.vision) return error.QwenBf16Vision;
@@ -52,6 +54,7 @@ pub fn explain(err: anyerror) ?[]const u8 {
     return switch (err) {
         error.QwenBf16DecisionOnly => "BF16 Qwen3.5 serves as a decision backbone only: this checkpoint has no joint_head_config.json",
         error.QwenHeadNeedsBf16 => "the joint schema head needs the BF16 checkpoint: this one is quantized",
+        error.QwenJointTied => "the joint schema head is qualified on untied BF16 checkpoints: this one ties its head to the embedding (tie_word_embeddings)",
         error.QwenBf16Drafter => "--drafter: a BF16 Qwen3.5 decision backbone drafts nothing; serve without --drafter",
         error.QwenBf16Slide => "--slide: a BF16 Qwen3.5 decision backbone does not learn; serve without --slide",
         error.QwenBf16Vision => "--vision: a BF16 Qwen3.5 decision backbone reads text records only; serve without --vision",
@@ -136,9 +139,10 @@ test "a bf16 image checkpoint without a joint head opens as chat on CUDA, refusi
     try std.testing.expect(!std.mem.eql(u8, patch14, lighton));
     try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = patch14 });
     try std.testing.expectError(error.QwenBf16ChatTower, check(a, io, dir, .{}));
-    // with a joint head beside it, the checkpoint is Clef's decision backbone and keeps its refusals
+    // a joint head beside a tied backbone is refused by name before any flag: no Clef checkpoint ties its head
     try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = lighton });
     try tmp.dir.writeFile(io, .{ .sub_path = head_file, .data = "{}" });
-    try std.testing.expectError(error.QwenBf16Vision, check(a, io, dir, .{ .vision = true }));
-    try std.testing.expect(try check(a, io, dir, .{}));
+    try std.testing.expectError(error.QwenJointTied, check(a, io, dir, .{}));
+    try std.testing.expectError(error.QwenJointTied, check(a, io, dir, .{ .vision = true }));
+    try std.testing.expectStringStartsWith(explain(error.QwenJointTied).?, "the joint schema head is qualified on untied");
 }
