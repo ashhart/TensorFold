@@ -305,6 +305,14 @@ test "environment: explicit flags and disabled features retain their old precede
     try t.expect((try e.refusal(a, Env{ .name = "TF_SLIDE_FORGET_FAIL", .raw = "bad" }, .{})) == null);
 }
 
+test "environment: video token budgets retain the full unsigned count and refuse malformed input" {
+    const name = "TENSORFOLD_VIDEO_TOKENS";
+    try t.expectEqual(std.math.maxInt(u64), try e.value(u64, name, "18446744073709551615", 0));
+    try t.expectEqual(@as(u64, 0), try e.value(u64, name, "0", 7));
+    for ([_][]const u8{ "-1", "18446744073709551616", "32k" }) |raw|
+        try t.expectError(error.InvalidEnvironment, e.value(u64, name, raw, 7));
+}
+
 const Inactive = struct {
     pub fn get(_: Inactive, name: []const u8) ?[]const u8 {
         if (std.mem.eql(u8, name, "TF_CUDA_CARVEOUT")) return "0";
