@@ -5,6 +5,7 @@ const cuda = @import("cuda");
 const core = @import("core");
 const embed = @import("cuda_embed.zig");
 const hc = @import("cuda_hc.zig");
+const exl3_ple = @import("exl3/model/cuda_exl3_ple.zig");
 const ple_pool = @import("cuda_ple_pool.zig");
 const ple_reader = @import("cuda_ple_reader.zig");
 const ple_fp8 = @import("cuda_ple_fp8.zig");
@@ -332,7 +333,7 @@ pub fn eosOf(gpa: std.mem.Allocator, io: std.Io, model_dir: []const u8) !i64 {
 }
 
 /// A table's row format: MLX affine words, NVFP4 codes with E4M3 group scales, or FP8 rows with one table scale.
-pub const Format = enum { mlx, nvfp4, fp8 };
+pub const Format = enum { mlx, nvfp4, fp8, exl3 };
 
 /// The n-gram table held open for an engine's life: the hash, the scale, and each shard's slices of its mapped file.
 pub const Ngram = struct {
@@ -349,6 +350,7 @@ pub const Ngram = struct {
     readers: [max_shards]ple_reader.Reader = undefined,
     read_mode: ple_reader.Mode = .mmap,
     warm_ahead: bool = false,
+    x3: ?*exl3_ple.Table = null,
     pool: ?*ple_pool.Pool = null, // the gather's parked workers (null: every row on the caller's thread)
     warmer: ?std.Thread = null, // warm's read-ahead thread until joined (waitWarm, deinit)
 
@@ -367,6 +369,7 @@ pub const Ngram = struct {
             .ple_index = cfg.ple_index,
         }), .scale = 1 };
         errdefer g.deinit();
+        if (try exl3_ple.Table.open(gpa, io, model_dir, g.hash, exl3_ple.optionsFromEnv())) |t| return .{ .gpa = gpa, .hash = g.hash, .scale = 1, .format = .exl3, .x3 = t };
         const index_path = try std.fs.path.join(gpa, &.{ model_dir, "model.safetensors.index.json" });
         defer gpa.free(index_path);
         const text = try std.Io.Dir.cwd().readFileAlloc(io, index_path, gpa, .limited(1 << 26));
@@ -383,6 +386,7 @@ pub const Ngram = struct {
             .mlx => try tableScale(gpa, io, model_dir, wm),
             .nvfp4 => try readScale(gpa, io, model_dir, wm, "model.language_model.layers.1.ple.ple_embedding.ngram_embedding.weight_scale_2", true),
             .fp8 => try readScale(gpa, io, model_dir, wm, "model.language_model.layers.1.ple.ple_embedding.ngram_embedding.weight_scale", true),
+            .exl3 => unreachable, // an EXL3 table returns above
         };
         const dh = g.hash.dh;
         var key: [180]u8 = undefined;
@@ -407,6 +411,7 @@ pub const Ngram = struct {
                 .mlx => .u32,
                 .nvfp4 => .u8,
                 .fp8 => .f8_e4m3,
+                .exl3 => unreachable, // an EXL3 table returns above
             };
             const w = try file.tensor(try partNameFor(&key, shard, nested, "weight", modelopt), dtype);
             const expected_rows: usize = @intCast(g.hash.starts[shard + 1] - g.hash.starts[shard]);
@@ -429,6 +434,7 @@ pub const Ngram = struct {
 
     pub fn deinit(g: *Ngram) void {
         g.waitWarm();
+        if (g.x3) |t| t.destroy();
         if (g.pool) |p| p.destroy();
         for (g.files.items) |*o| o.close(g.gpa);
         g.files.deinit(g.gpa);
@@ -454,10 +460,12 @@ pub const Ngram = struct {
 
     fn warmMain(g: Ngram) void {
         var bytes: usize = 0;
-        for (0..g.hash.shards) |shard| switch (g.format) {
+        const shards = if (g.format == .exl3) 1 else g.hash.shards;
+        for (0..shards) |shard| switch (g.format) {
             .nvfp4 => bytes += advise(g.tables[shard].codes) + advise(g.tables[shard].scales),
             .mlx => bytes += advise(g.w[shard]) + advise(g.s[shard]) + advise(g.b[shard]),
             .fp8 => bytes += advise(g.tables8[shard].codes),
+            .exl3 => bytes += if (g.x3.?.file) |f| if (f.map.section != null) advise(f.map.memory) else 0 else 0,
         };
         std.debug.print("n-gram table: {d:.1} GiB read ahead into the page cache\n", .{@as(f64, @floatFromInt(bytes)) / (1 << 30)});
     }
@@ -488,6 +496,7 @@ pub const Ngram = struct {
                     try g.tables8[loc.shard].gather(&.{loc.local}, row)
                 else
                     try g.tables[loc.shard].gather(&.{loc.local}, row),
+                .exl3 => try g.x3.?.row(loc.shard, loc.local, i % g.hash.heads, row),
             }
         }
     }
@@ -523,8 +532,9 @@ pub const Ngram = struct {
             for (0..history.len - 1) |i| hist[i] = hist[i + 1];
             hist[history.len - 1] = token;
         }
-        const n_threads = @min(ple_pool.max_parts, items / 4);
-        if (g.format != .mlx and items > 1) {
+        // EXL3 rows decode in about a microsecond: a decode step's few rows cost less than one thread spawn
+        const n_threads = if (g.format == .exl3 and items <= 1024) 1 else @min(ple_pool.max_parts, items / 4);
+        if ((g.format == .nvfp4 or g.format == .fp8) and items > 1) {
             try @import("cuda_ple_gather.zig").run(g, ids, out);
         } else if (n_threads <= 1 or g.pool == null) {
             try g.fill(ids, out, 0, items);
@@ -540,7 +550,7 @@ pub const Ngram = struct {
                     v.* = toBf16(f * g.scale);
                 }
             }
-            sumGroups(row, xs[t * (w / 32) ..][0 .. w / 32]);
+            if (g.x3) |x3| x3.sums(row, xs[t * (w / 32) ..][0 .. w / 32]) else sumGroups(row, xs[t * (w / 32) ..][0 .. w / 32]);
         }
         @memcpy(history, hist[0..history.len]);
     }
@@ -572,6 +582,7 @@ test "a fresh window hashes token 7 into sixteen rows" {
 
 test {
     _ = @import("cuda_ple_nvfp4_test.zig");
+    _ = @import("exl3/model/cuda_exl3_ple.zig");
     _ = @import("cuda_ple_pool.zig");
     _ = @import("cuda_ple_pool_gather_test.zig");
 }

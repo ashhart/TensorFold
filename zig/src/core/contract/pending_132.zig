@@ -8,6 +8,10 @@ pub fn lookup(name: []const u8, release: limits.Nvcc) ?[limits.sms.len]limits.Us
         for (@import("measurements/qwen_lanes_133.zig").records ++ @import("measurements/pending_133.zig").records) |r|
             if (std.mem.eql(u8, r.name, name)) return r.usage;
     }
+    if (release.major == 13 and release.minor == 4) {
+        for (@import("flashnext_exl3_pending.zig").cuda_134) |r|
+            if (std.mem.eql(u8, r.name, name)) return r.usage;
+    }
     if (release.major < 13 or (release.major == 13 and release.minor < 2)) return null;
     for (records) |r| if (std.mem.eql(u8, r.name, name)) return r.usage;
     return null;

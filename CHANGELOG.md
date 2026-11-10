@@ -49,6 +49,18 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Evidence index: reads saved native capabilities, including unknown and XPU chip labels; advertised facts stay unqualified, and invalid supplied input stops with a bounded error (#2708).
 
+- CUDA resource checks use measured NVCC 13.4 register counts for paged Flash Next preparation, retaining earlier compiler receipts and unchanged launch bounds (#1441).
+
+- EXL3's mapped n-gram table participates in upstream's opt-in read-ahead once per file, and teardown joins the worker before unmapping (#1441).
+
+- Flash Next's first CUDA EXL3 slice uses the canonical fp32 expert tree, so adding tensor parallelism preserves its one-rank reduction order (#1441, #1442). Other formats are unchanged.
+
+- Flash Next's EXL3 integration keeps the existing ModelOpt rank scratch and split-head snapshot geometry (#1441). Its configured prompt cut stays fixed when main widens a one-stream ModelOpt pass, preserving stream-independent EXL3 arithmetic.
+
+- Canonical EXL3 expert reductions retain empty-sibling additions, so underflowed negative-zero outputs do not differ between one and two ranks (#1441).
+
+- The CPU-only server build shares its existing core module with the server adapter, resolving the slide-model import after integration (#1441).
+
 - `--instruct-sampling card` (or `field=value` pairs) serves the model card's instruct sampling to sampled chat requests with thinking off that leave those fields unset; request fields, then the serve flags, then the pairs decide, and the server's own requests never take it (#2626). Thanks to @BobClawblaw.
 
 

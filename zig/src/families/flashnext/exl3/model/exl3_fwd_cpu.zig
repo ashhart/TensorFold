@@ -1,0 +1,414 @@
+//! CPU f64 oracle for the whole Qwen3.8-Flash-Next EXL3 forward, assembled from the per-op oracles (`exl3_hc`
+
+const std = @import("std");
+const hc = @import("exl3_hc.zig");
+const gdn_cpu = @import("exl3_gdn_cpu.zig");
+const attn_cpu = @import("exl3_attn_cpu.zig");
+const moe = @import("exl3_moe.zig");
+const cpu = @import("exl3_cpu.zig");
+const qmat = @import("../pack/exl3_qmat.zig");
+
+pub const hidden: usize = 2560;
+pub const streams: usize = 4;
+pub const wide: usize = streams * hidden;
+pub const topk: usize = 10;
+pub const experts: usize = 512;
+pub const inter: usize = 640;
+
+pub const QMat = qmat.QMat;
+pub const parallelFor = qmat.parallelFor;
+pub const fwht128 = qmat.fwht128;
+
+// -- small ops ---------------------------------------------------------------------------------------------
+
+pub fn silu(x: f64) f64 {
+    return x / (1.0 + @exp(-x));
+}
+
+pub fn sigmoid(x: f64) f64 {
+    return 1.0 / (1.0 + @exp(-x));
+}
+
+/// f64 rows [t][hidden] -> mixed hidden of the hyper-connection (pre), per row. `inject` is [t][4] or null.
+pub fn hcPreRows(gpa: std.mem.Allocator, w: hc.Weights, offset: f64, h: []const f64, rows: usize, mixed: []f64, inject: ?[]f64) !void {
+    const low = try gpa.alloc(f64, hc.real.lowrank);
+    defer gpa.free(low);
+    const mix = try gpa.alloc(f64, wide);
+    defer gpa.free(mix);
+    const normed = try gpa.alloc(f64, wide);
+    defer gpa.free(normed);
+    for (0..rows) |t| {
+        const inj: ?[]f64 = if (inject) |i| i[t * streams ..][0..streams] else null;
+        try hc.preF64(hc.real, w, offset, 1e-6, h[t * wide ..][0..wide], mixed[t * hidden ..][0..hidden], inj, low, mix, normed);
+    }
+}
+
+pub fn hcPostRows(h: []f64, branch: []const f64, inject: []const f64, rows: usize) void {
+    for (0..rows) |t| {
+        for (0..streams) |s| {
+            const g = inject[t * streams + s];
+            for (0..hidden) |d| h[t * wide + s * hidden + d] += branch[t * hidden + d] * g;
+        }
+    }
+}
+
+// -- layer weights -----------------------------------------------------------------------------------------
+
+pub const GdnW = struct {
+    qkv: QMat,
+    z: QMat,
+    out: QMat,
+    a_w: []const f64, // [48][2560]
+    b_w: []const f64,
+    params: gdn_cpu.Params,
+
+    pub fn deinit(w: *GdnW, gpa: std.mem.Allocator) void {
+        w.qkv.deinit(gpa);
+        w.z.deinit(gpa);
+        w.out.deinit(gpa);
+        gpa.free(w.a_w);
+        gpa.free(w.b_w);
+        gpa.free(w.params.conv_w);
+        gpa.free(w.params.a_log);
+        gpa.free(w.params.dt_bias);
+        gpa.free(w.params.norm_w);
+    }
+};
+
+pub const AttnW = struct {
+    q: QMat,
+    k: QMat,
+    v: QMat,
+    o: QMat,
+    idx: QMat,
+    norms: attn_cpu.Norms,
+
+    pub fn deinit(w: *AttnW, gpa: std.mem.Allocator) void {
+        w.q.deinit(gpa);
+        w.k.deinit(gpa);
+        w.v.deinit(gpa);
+        w.o.deinit(gpa);
+        w.idx.deinit(gpa);
+        gpa.free(w.norms.q);
+        gpa.free(w.norms.k);
+        gpa.free(w.norms.iq);
+        gpa.free(w.norms.ik);
+    }
+};
+
+/// Where the 512 routed experts of one layer come from: decode expert `e` (gate, up, down) into `out`.
+pub const ExpertSource = struct {
+    ctx: *anyopaque,
+    load: *const fn (ctx: *anyopaque, e: usize, out: *[3]QMat) anyerror!void,
+};
+
+pub const MoeW = struct {
+    gate16: []const f16, // [512][2560]
+    sgate16: []const f16, // [2560]
+    shared: [3]QMat,
+    source: ExpertSource,
+
+    pub fn deinit(w: *MoeW, gpa: std.mem.Allocator) void {
+        for (&w.shared) |*m| m.deinit(gpa);
+    }
+};
+
+pub const Mixer = union(enum) { gdn: *GdnW, attn: *AttnW };
+
+pub const LayerW = struct {
+    attn_hc: hc.Weights,
+    mlp_hc: hc.Weights,
+    mixer: Mixer,
+    moe: *MoeW,
+};
+
+pub const LayerState = union(enum) { gdn: gdn_cpu.State, attn: attn_cpu.Cache };
+
+/// What a layer pass records for comparison with the device.
+pub const Trace = struct {
+    attn_branch: []f64, // [rows][2560]
+    mlp_branch: []f64,
+    picks: []u16, // [rows][10]
+    h_mid: []f64, // [rows][10240] streams after the attention block
+};
+
+// -- mixers ------------------------------------------------------------------------------------------------
+
+fn roundF16Slice(dst: []f16, src: []const f64) void {
+    for (dst, src) |*d, s| d.* = @floatCast(s);
+}
+
+const GdnProj = struct {
+    w: *const GdnW,
+    x: []const f64,
+    qkv: []f64,
+    z: []f64,
+    a: []f64,
+    b: []f64,
+    gpa: std.mem.Allocator,
+    err: ?anyerror = null,
+
+    fn row(j: *GdnProj, t: usize) void {
+        const tmp = j.gpa.alloc(f64, hidden) catch |e| {
+            j.err = e;
+            return;
+        };
+        defer j.gpa.free(tmp);
+        const xr = j.x[t * hidden ..][0..hidden];
+        const c = gdn_cpu.qwen.channels();
+        const zw = gdn_cpu.qwen.zWidth();
+        j.w.qkv.apply(xr, j.qkv[t * c ..][0..c], tmp);
+        j.w.z.apply(xr, j.z[t * zw ..][0..zw], tmp);
+        gdn_cpu.rowsDot(j.w.a_w, xr, j.a[t * 48 ..][0..48]);
+        gdn_cpu.rowsDot(j.w.b_w, xr, j.b[t * 48 ..][0..48]);
+    }
+};
+
+const OutJob = struct {
+    m: *const QMat,
+    inp: []const f64,
+    in_w: usize,
+    out: []f64,
+    gpa: std.mem.Allocator,
+    err: ?anyerror = null,
+    fn row(j: *OutJob, t: usize) void {
+        const tmp = j.gpa.alloc(f64, j.m.k) catch |e| {
+            j.err = e;
+            return;
+        };
+        defer j.gpa.free(tmp);
+        j.m.apply(j.inp[t * j.in_w ..][0..j.in_w], j.out[t * j.m.n ..][0..j.m.n], tmp);
+    }
+};
+
+pub fn gdnBranch(gpa: std.mem.Allocator, w: *const GdnW, st: gdn_cpu.State, x: []const f64, rows: usize, out: []f64) !void {
+    const d = gdn_cpu.qwen;
+    const c = d.channels();
+    const zw = d.zWidth();
+    const qkv = try gpa.alloc(f64, rows * c);
+    defer gpa.free(qkv);
+    const z = try gpa.alloc(f64, rows * zw);
+    defer gpa.free(z);
+    const a = try gpa.alloc(f64, rows * 48);
+    defer gpa.free(a);
+    const b = try gpa.alloc(f64, rows * 48);
+    defer gpa.free(b);
+    var pj: GdnProj = .{ .w = w, .x = x, .qkv = qkv, .z = z, .a = a, .b = b, .gpa = gpa };
+    parallelFor(rows, 48, &pj, GdnProj.row);
+    if (pj.err) |e| return e;
+    const gated = try gpa.alloc(f64, rows * zw);
+    defer gpa.free(gated);
+    try gdn_cpu.tokens(gpa, d, w.params, st, rows, qkv, z, a, b, gated);
+    var oj: OutJob = .{ .m = &w.out, .inp = gated, .in_w = zw, .out = out, .gpa = gpa };
+    parallelFor(rows, 48, &oj, OutJob.row);
+    if (oj.err) |e| return e;
+}
+
+const AttnProj = struct {
+    w: *const AttnW,
+    x: []const f64,
+    qp: []f16,
+    kp: []f16,
+    vp: []f16,
+    ip: []f16,
+    gpa: std.mem.Allocator,
+    err: ?anyerror = null,
+    const q_width = attn_cpu.q_heads * 2 * attn_cpu.head_dim;
+    const kv_width = attn_cpu.kv_heads * attn_cpu.head_dim;
+
+    fn row(j: *AttnProj, t: usize) void {
+        const tmp = j.gpa.alloc(f64, hidden) catch |e| {
+            j.err = e;
+            return;
+        };
+        defer j.gpa.free(tmp);
+        const big = j.gpa.alloc(f64, q_width) catch |e| {
+            j.err = e;
+            return;
+        };
+        defer j.gpa.free(big);
+        const xr = j.x[t * hidden ..][0..hidden];
+        j.w.q.apply(xr, big, tmp);
+        roundF16Slice(j.qp[t * q_width ..][0..q_width], big);
+        j.w.k.apply(xr, big[0..kv_width], tmp);
+        roundF16Slice(j.kp[t * kv_width ..][0..kv_width], big[0..kv_width]);
+        j.w.v.apply(xr, big[0..kv_width], tmp);
+        roundF16Slice(j.vp[t * kv_width ..][0..kv_width], big[0..kv_width]);
+        j.w.idx.apply(xr, big[0..attn_cpu.index_width], tmp);
+        roundF16Slice(j.ip[t * attn_cpu.index_width ..][0..attn_cpu.index_width], big[0..attn_cpu.index_width]);
+    }
+};
+
+/// Attention rows pos0 .. pos0 + rows. The projections are rounded to fp16 where the EXL3 linears emit them.
+pub fn attnBranch(gpa: std.mem.Allocator, w: *const AttnW, cache: *attn_cpu.Cache, pos0: usize, x: []const f64, rows: usize, out: []f64) !void {
+    const q_width = AttnProj.q_width;
+    const kv_width = AttnProj.kv_width;
+    const iw = attn_cpu.index_width;
+    const qp = try gpa.alloc(f16, rows * q_width);
+    defer gpa.free(qp);
+    const kp = try gpa.alloc(f16, rows * kv_width);
+    defer gpa.free(kp);
+    const vp = try gpa.alloc(f16, rows * kv_width);
+    defer gpa.free(vp);
+    const ip = try gpa.alloc(f16, rows * iw);
+    defer gpa.free(ip);
+    var pj: AttnProj = .{ .w = w, .x = x, .qp = qp, .kp = kp, .vp = vp, .ip = ip, .gpa = gpa };
+    parallelFor(rows, 48, &pj, AttnProj.row);
+    if (pj.err) |e| return e;
+
+    const attn_width = attn_cpu.q_heads * attn_cpu.head_dim;
+    const o_in = try gpa.alloc(f64, rows * attn_width);
+    defer gpa.free(o_in);
+    const scores = try gpa.alloc(f64, cache.tokens / attn_cpu.ratio + 2);
+    defer gpa.free(scores);
+    var oq: [attn_width]f64 = undefined;
+    var oiq: [attn_cpu.index_heads * attn_cpu.index_dim]f64 = undefined;
+    var info = attn_cpu.RowInfo{};
+    for (0..rows) |t| {
+        try attn_cpu.row(cache, pos0 + t, .{
+            .qp = qp[t * q_width ..][0..q_width],
+            .kp = kp[t * kv_width ..][0..kv_width],
+            .vp = vp[t * kv_width ..][0..kv_width],
+            .ip = ip[t * iw ..][0..iw],
+        }, &w.norms, scores, &oq, &oiq, o_in[t * attn_width ..][0..attn_width], &info);
+    }
+    var oj: OutJob = .{ .m = &w.o, .inp = o_in, .in_w = attn_width, .out = out, .gpa = gpa };
+    parallelFor(rows, 48, &oj, OutJob.row);
+    if (oj.err) |e| return e;
+}
+
+// -- MoE ---------------------------------------------------------------------------------------------------
+
+const Loaded = struct {
+    id: usize,
+    mats: [3]QMat,
+};
+
+const LoadJob = struct {
+    src: ExpertSource,
+    ids: []const usize,
+    slots: []Loaded,
+    err: ?anyerror = null,
+    fn one(j: *LoadJob, i: usize) void {
+        j.slots[i].id = j.ids[i];
+        j.src.load(j.src.ctx, j.ids[i], &j.slots[i].mats) catch |e| {
+            j.err = e;
+        };
+    }
+};
+
+const MoeRow = struct {
+    w: *const MoeW,
+    x: []const f64,
+    out: []f64,
+    picks: []const u16, // [rows][10]
+    weights: []const f64, // [rows][10]
+    shared_w: []const f64,
+    loaded: []const Loaded,
+    gpa: std.mem.Allocator,
+    err: ?anyerror = null,
+
+    fn find(j: *const MoeRow, id: usize) *const Loaded {
+        for (j.loaded) |*l| if (l.id == id) return l;
+        unreachable;
+    }
+
+    fn row(j: *MoeRow, t: usize) void {
+        const buf = j.gpa.alloc(f64, hidden + 4 * inter + 3 * hidden) catch |e| {
+            j.err = e;
+            return;
+        };
+        defer j.gpa.free(buf);
+        const tmp = buf[0..hidden];
+        const g = buf[hidden..][0..inter];
+        const u = buf[hidden + inter ..][0..inter];
+        const glu = buf[hidden + 2 * inter ..][0..inter];
+        const y = buf[hidden + 3 * inter ..][0..hidden];
+        const acc = j.out[t * hidden ..][0..hidden];
+        @memset(acc, 0);
+        const xr = j.x[t * hidden ..][0..hidden];
+        for (0..topk) |k| {
+            const l = j.find(j.picks[t * topk + k]);
+            expertApply(&l.mats, xr, tmp, g, u, glu, y);
+            const wk = j.weights[t * topk + k];
+            for (acc, y) |*o, v| o.* += wk * v;
+        }
+        expertApply(&j.w.shared, xr, tmp, g, u, glu, y);
+        const sw = j.shared_w[t];
+        for (acc, y) |*o, v| o.* += sw * v;
+    }
+};
+
+fn expertApply(m: *const [3]QMat, x: []const f64, tmp: []f64, g: []f64, u: []f64, glu: []f64, y: []f64) void {
+    m[0].apply(x, g, tmp);
+    m[1].apply(x, u, tmp);
+    for (glu, g, u) |*o, gv, uv| o.* = silu(gv) * uv;
+    m[2].apply(glu, y, tmp[0..inter]);
+}
+
+/// Routed + shared experts for `rows` rows from the f64 hidden `x` (the f64 router, not the device's).
+pub fn moeBranch(gpa: std.mem.Allocator, w: *const MoeW, x: []const f64, rows: usize, out: []f64, picks_out: []u16) !void {
+    const picks = picks_out;
+    const weights = try gpa.alloc(f64, rows * topk);
+    defer gpa.free(weights);
+    const shared_w = try gpa.alloc(f64, rows);
+    defer gpa.free(shared_w);
+    var logits: [experts + 1]f64 = undefined;
+    var ids: std.ArrayList(usize) = .empty;
+    defer ids.deinit(gpa);
+    for (0..rows) |t| {
+        try moe.logitsF16(w.gate16, experts, w.sgate16, x[t * hidden ..][0..hidden], &logits);
+        var sw: f64 = 0;
+        try moe.routeFromLogits(&logits, topk, picks[t * topk ..][0..topk], weights[t * topk ..][0..topk], &sw);
+        shared_w[t] = sw;
+        for (picks[t * topk ..][0..topk]) |p| {
+            var seen = false;
+            for (ids.items) |i| seen = seen or i == p;
+            if (!seen) try ids.append(gpa, p);
+        }
+    }
+    const loaded = try gpa.alloc(Loaded, ids.items.len);
+    defer gpa.free(loaded);
+    var lj: LoadJob = .{ .src = w.source, .ids = ids.items, .slots = loaded };
+    parallelFor(ids.items.len, 48, &lj, LoadJob.one);
+    defer if (lj.err == null) for (loaded) |*l| for (&l.mats) |*m| m.deinit(gpa);
+    if (lj.err) |e| return e;
+    var mj: MoeRow = .{ .w = w, .x = x, .out = out, .picks = picks, .weights = weights, .shared_w = shared_w, .loaded = loaded, .gpa = gpa };
+    parallelFor(rows, 48, &mj, MoeRow.row);
+    if (mj.err) |e| return e;
+}
+
+// -- one layer ---------------------------------------------------------------------------------------------
+
+/// `h` is [rows][10240] f64 streams, updated in place. `pos0` is the absolute position of row 0.
+pub fn layerRows(gpa: std.mem.Allocator, w: LayerW, st: *LayerState, pos0: usize, offset: f64, h: []f64, rows: usize, trace: ?Trace) !void {
+    const mixed = try gpa.alloc(f64, rows * hidden);
+    defer gpa.free(mixed);
+    const inject = try gpa.alloc(f64, rows * streams);
+    defer gpa.free(inject);
+    const branch = try gpa.alloc(f64, rows * hidden);
+    defer gpa.free(branch);
+
+    try hcPreRows(gpa, w.attn_hc, offset, h, rows, mixed, inject);
+    switch (w.mixer) {
+        .gdn => |g| try gdnBranch(gpa, g, st.gdn, mixed, rows, branch),
+        .attn => |a| try attnBranch(gpa, a, &st.attn, pos0, mixed, rows, branch),
+    }
+    if (trace) |tr| @memcpy(tr.attn_branch[0 .. rows * hidden], branch);
+    hcPostRows(h, branch, inject, rows);
+    if (trace) |tr| @memcpy(tr.h_mid[0 .. rows * wide], h[0 .. rows * wide]);
+
+    try hcPreRows(gpa, w.mlp_hc, offset, h, rows, mixed, inject);
+    const picks = try gpa.alloc(u16, rows * topk);
+    defer gpa.free(picks);
+    try moeBranch(gpa, w.moe, mixed, rows, branch, picks);
+    if (trace) |tr| {
+        @memcpy(tr.mlp_branch[0 .. rows * hidden], branch);
+        @memcpy(tr.picks[0 .. rows * topk], picks);
+    }
+    hcPostRows(h, branch, inject, rows);
+}
+
+comptime {
+    _ = qmat;
+}
