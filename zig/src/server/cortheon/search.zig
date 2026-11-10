@@ -109,34 +109,30 @@ fn sameResultUrl(a: []const u8, b: []const u8) bool {
     return std.mem.eql(u8, a_rest[a_host..], b_rest[b_host..]);
 }
 
-/// The href in a tag: skip a name that only contains it, and a quote with no closer.
+/// The href in a tag. Whitespace bounds the name, and a quote with no closer drops it.
 fn hrefValue(tag: []const u8) ?[]const u8 {
     var from: usize = 0;
     while (std.ascii.findIgnoreCasePos(tag, from, "href")) |href_name| { // HREF is the same attribute
-        // an earlier name that only contains the text (data-href, …) is skipped so the real attribute is tried
-        if (href_name > 0 and tag[href_name - 1] != ' ' and tag[href_name - 1] != '\t') {
+        if (href_name > 0 and !std.ascii.isWhitespace(tag[href_name - 1])) { // data-href is not this attribute
             from = href_name + 1;
             continue;
         }
         var after = href_name + 4;
-        while (after < tag.len and (tag[after] == ' ' or tag[after] == '\t')) after += 1; // href = is the same attribute
+        while (after < tag.len and std.ascii.isWhitespace(tag[after])) after += 1; // href = is the same attribute
         if (after >= tag.len or tag[after] != '=') {
             from = href_name + 1;
             continue;
         }
         var v = tag[after + 1 ..];
-        while (v.len > 0 and (v[0] == ' ' or v[0] == '\t')) v = v[1..];
+        while (v.len > 0 and std.ascii.isWhitespace(v[0])) v = v[1..];
         if (v.len > 0 and (v[0] == '"' or v[0] == '\'')) {
             const q = v[0];
             v = v[1..];
-            const end = std.mem.indexOfScalar(u8, v, q) orelse {
-                from = href_name + 1; // a quoted value with no closer is skipped, not taken to the tag end
-                continue;
-            };
+            // the rest of the tag is inside this value, so a later href there is not an attribute
+            const end = std.mem.indexOfScalar(u8, v, q) orelse return null;
             return v[0..end];
         }
-        // unquoted ends at space, tab, CR, LF or the tag close
-        const end = std.mem.indexOfAny(u8, v, " \t\r\n>") orelse v.len;
+        const end = std.mem.indexOfAny(u8, v, " \t\r\n>") orelse v.len; // unquoted ends at whitespace or >
         return std.mem.trim(u8, v[0..end], " \t\r\n");
     }
     return null;
@@ -450,12 +446,20 @@ test "a search result keeps an unquoted href that ends at a tab" {
     try std.testing.expectEqualStrings("https://example.org/page", results[0].url);
 }
 
-test "a search result skips a quoted href with no closer and reads the next" {
+test "a search result drops a quoted href that never closes" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    // first href opens with " and never closes; the real target uses the other quote
     const page = "<div class=\"result results_links web-result\"><h2><a class=\"result__a\" href=\"https://bad.example/x href='https://example.org/page'>Example</a></h2></div>";
+    const results = try parseDuckDuckGo(a, page, 5);
+    try std.testing.expectEqual(@as(usize, 0), results.len);
+}
+
+test "a search result keeps a link when a newline precedes href" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const page = "<div class=\"result results_links web-result\"><h2><a class=\"result__a\"\nhref=\"https://example.org/page\">Example</a></h2></div>";
     const results = try parseDuckDuckGo(a, page, 5);
     try std.testing.expectEqual(@as(usize, 1), results.len);
     try std.testing.expectEqualStrings("https://example.org/page", results[0].url);
