@@ -85,30 +85,34 @@ test "a pool's census is in tokens, and a run shows only where the family needs 
     try std.testing.expectEqual(@as(?bool, false), census(.{ .pool = &p, .page_tokens = 64, .run_pages = 8 }).run);
 }
 
-/// The plan's view of a wrapped family: drafter buffers join the fixed part; no free stream pays its window first.
-pub fn served(l: ?kv_pool.Layout, free_streams: u32, family_bytes: u64, stream_bytes: u64, room: u64) struct { layout: ?kv_pool.Layout, room: u64 } {
+/// A wrapped family's plan: drafters join the fixed part, no free stream pays its window, `spare` pays an extra lane.
+pub fn served(l: ?kv_pool.Layout, free_streams: u32, family_bytes: u64, stream_bytes: u64, room: u64, spare: bool) struct { layout: ?kv_pool.Layout, room: u64 } {
     var out = l orelse return .{ .layout = null, .room = room };
     out.fixed_bytes += stream_bytes -| family_bytes;
-    return .{ .layout = out, .room = if (free_streams == 0) room -| stream_bytes else room };
+    return .{ .layout = out, .room = (if (free_streams == 0) room -| stream_bytes else room) -| if (spare) out.outside else 0 };
 }
 
 test "a wrapped family's plan: drafter buffers a stream, a first window without a free stream" {
     const l: kv_pool.Layout = .{ .fixed_bytes = 10, .token_bytes = 1, .page_tokens = 4, .snap_bytes = 1 };
-    const nemotron = served(l, 1, 500, 500, 1000); // its own sequence is in the model's bytes: nothing moves
+    const nemotron = served(l, 1, 500, 500, 1000, false); // its own sequence is in the model's bytes: nothing moves
     try std.testing.expectEqual(@as(u64, 10), nemotron.layout.?.fixed_bytes);
     try std.testing.expectEqual(@as(u64, 1000), nemotron.room);
-    const qwen = served(l, 0, 500, 530, 1000); // a drafter's 30 bytes a stream, the first stream's 530 first
+    const qwen = served(l, 0, 500, 530, 1000, false); // a drafter's 30 bytes a stream, the first stream's 530 first
     try std.testing.expectEqual(@as(u64, 40), qwen.layout.?.fixed_bytes);
     try std.testing.expectEqual(@as(u64, 470), qwen.room);
-    try std.testing.expectEqual(@as(?kv_pool.Layout, null), served(null, 0, 1, 2, 3).layout);
+    try std.testing.expectEqual(@as(?kv_pool.Layout, null), served(null, 0, 1, 2, 3, true).layout);
+    var outside = l;
+    outside.outside = 100; // TF_QWEN_KV_SHARE: the lane past the plan's holds its taps and ring outside the pool
+    try std.testing.expectEqual(@as(u64, 370), served(outside, 0, 500, 530, 1000, true).room);
+    try std.testing.expectEqual(@as(u64, 470), served(outside, 0, 500, 530, 1000, false).room);
 }
 
 /// served() on the family's layout; a family that places a drafter's buffers itself (pagedLayout) plans it again.
-pub fn wrapped(comptime F: type, loaded: anytype, free: u32, stream_bytes: u64, room: u64) @TypeOf(served(null, 0, 0, 0, 0)) {
+pub fn wrapped(comptime F: type, loaded: anytype, free: u32, stream_bytes: u64, room: u64) @TypeOf(served(null, 0, 0, 0, 0, false)) {
     const own = comptime @hasDecl(F, "pagedLayout");
     const l = layout(loaded);
     const planned = if (own) (if (l != null) F.pagedLayout(loaded.ctx, stream_bytes - loaded.stream_bytes) else null) else l;
-    return served(planned, free, if (own) stream_bytes else loaded.stream_bytes, stream_bytes, room);
+    return served(planned, free, if (own) stream_bytes else loaded.stream_bytes, stream_bytes, room, allOnPages(loaded) or enginePaged(loaded));
 }
 
 /// Every stream on the pool's pages, the engine's own window idle (Qwen's TF_QWEN_KV_SHARE and TF_QWEN_KV_PAGES_ALL).
@@ -171,7 +175,7 @@ pub fn budgetOf(comptime F: type, l: kv_pool.Layout, room: u64, o: api.Open, win
     probe.cache = std.math.maxInt(u64);
     const all = kv_pool.plan(l, probe) catch return out;
     const left = if (!engine_paged and out.window > 0)
-        room -| (@as(u64, all.lanes - 1) *| (l.fixed_bytes +| (l.pages(out.window) + l.runPages()) *| l.pageBytes()))
+        room -| (@as(u64, all.lanes - 1) *| (l.fixed_bytes +| (l.pages(out.window) + l.statePages()) *| l.pageBytes()))
     else
         all.snaps * l.snap_bytes + all.copied + all.kept;
     out.cache = budget.cacheBytes(null, left, 0);
@@ -184,7 +188,7 @@ pub fn plan(comptime F: type, a: Allocator, l: kv_pool.Layout, room: u64, o: api
     return kv_pool.plan(l, budgetOf(F, l, room, o, window, host_mode, engine_paged, kept_ppm, slots)) catch |e| {
         problem.* = switch (e) {
             error.NoStream => if (engine_paged) try std.fmt.allocPrint(a, "the CUDA memory budget fits no stream beside the model: one at a {d}-token window takes {d:.2} GiB of KV pages, and the budget leaves {d:.2} GiB", .{ window, toGib(l.pages(window + rows) * l.pageBytes()), toGib(room) }) else "the CUDA memory budget fits no stream beside the model",
-            error.TooMany => try std.fmt.allocPrint(a, "--parallel {d} needs {d:.2} GiB for its other streams' fixed parts, state runs and a page each, and the CUDA memory budget leaves {d:.2} GiB: serve fewer, or free device memory", .{ o.lanes, toGib((o.lanes - 1) * (l.fixed_bytes + (1 + l.runPages()) * l.pageBytes())), toGib(room) }),
+            error.TooMany => try std.fmt.allocPrint(a, "--parallel {d} needs {d:.2} GiB for its other streams' fixed parts, state pages and a page each, and the CUDA memory budget leaves {d:.2} GiB: serve fewer, or free device memory", .{ o.lanes, toGib((o.lanes - 1) * (l.fixed_bytes + (1 + l.statePages()) * l.pageBytes())), toGib(room) }),
         };
         return null;
     };
@@ -486,7 +490,7 @@ test "KV admission: a refusal prices the running states beside the fixed part an
     const o: api.Open = .{ .dir = "", .model_type = "n", .lanes = 2, .lanes_fixed = true, .prompt_cache_gib = 0 };
     try std.testing.expectEqual(@as(?Plan, null), try plan(struct {}, arena.allocator(), l, 2 << 30, o, 8, &problem, false, false, 0, null));
     try std.testing.expect(std.mem.indexOf(u8, problem, "needs 3.00 GiB") != null);
-    try std.testing.expect(std.mem.indexOf(u8, problem, "state runs") != null);
+    try std.testing.expect(std.mem.indexOf(u8, problem, "state pages") != null);
 }
 
 test "CUDA cache default scales pool copies after full stream windows without cutting lanes" {
