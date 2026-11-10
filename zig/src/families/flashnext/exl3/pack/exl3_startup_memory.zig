@@ -23,8 +23,8 @@ pub const Ledger = struct {
     }
 };
 
-pub fn mebibytes(text: []const u8) !u64 {
-    return std.math.mul(u64, try std.fmt.parseInt(u64, text, 10), 1 << 20);
+pub fn mebibytes(mib: u64) !u64 {
+    return std.math.mul(u64, mib, 1 << 20);
 }
 
 pub fn available(free: u64, reserve: u64, future: u64) !u64 {
@@ -49,7 +49,7 @@ test "BF16 c1 c8 preserve the requested stream bytes" {
 
 test "startup accounting fails closed on overflow and underfunded explicit pools" {
     try std.testing.expectError(error.Overflow, (Reservation{ .stream_bytes = std.math.maxInt(u64), .streams = 8 }).total());
-    try std.testing.expectError(error.Overflow, mebibytes("18446744073709551615"));
+    try std.testing.expectError(error.Overflow, mebibytes(std.math.maxInt(u64)));
     try std.testing.expectError(error.Overflow, poolBytes(std.math.maxInt(u64), 2, 49, 0));
     try std.testing.expectError(error.InsufficientStartupMemory, available(100, 20, try poolBytes(10, 1, 8, 1)));
     try std.testing.expectError(error.Overflow, available(100, std.math.maxInt(u64), 1));

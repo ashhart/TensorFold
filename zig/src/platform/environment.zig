@@ -115,6 +115,21 @@ const stock_rules = [_]Rule{
     .{ .name = "TF_ROCE_GID_INDEX", .scope = .cuda, .kind = .u32, .forms = "a whole GID index from 0 to 2147483647" },
     .{ .name = "TF_QWEN35_CHUNK_SOLO", .scope = .cuda, .kind = .size, .forms = "a solo prompt pass's rows, 4096 (off) or 8192" },
     .{ .name = "TF_ROCE_HCA", .scope = .cuda, .kind = .names, .max = 2, .forms = "one or two RDMA device names, comma-separated (the RoCE all-gather stripes over at most two)" },
+    .{ .name = "TF_FLASHNEXT_CHUNK", .scope = .cuda, .kind = .size, .min = 1, .max = 16384, .forms = "a whole prompt-row count from 1 to 16384 a pass (default 1536)" },
+    .{ .name = "TF_FLASHNEXT_CHUNK_SOLO", .scope = .cuda, .kind = .size, .min = 1, .max = 16384, .forms = "a whole prompt-row count from the busy chunk (TF_FLASHNEXT_CHUNK) to 16384; an EXL3 pack refuses it" },
+    .{ .name = "TF_FLASHNEXT_CACHE_TELEMETRY", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (1 logs EXL3-CACHE expert-cache counters, with a sync at each boundary)" },
+    .{ .name = "TF_FLASHNEXT_EXL3_LAYER_TELEMETRY", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (1 adds per-layer counters when TF_FLASHNEXT_CACHE_TELEMETRY is 1)" },
+    .{ .name = "TF_FLASHNEXT_SNAP_HOST", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (kept prompt-cache states in pinned host memory; unset: 1 above 32768 tokens of context on an EXL3 pack, else 0)" },
+    .{ .name = "TF_FLASHNEXT_EXL3_ARCH", .scope = .cuda, .kind = .word, .words = &.{"unqualified"}, .forms = "unqualified (serves an EXL3 pack on a device that is not sm_120, without a claim)" },
+    .{ .name = "TENSORFOLD_MEMORY_RESERVE_GIB", .scope = .cuda, .kind = .real, .trim = " ", .forms = "a finite GiB count of at least 0.5 (2 on unified memory) and at most the memory's size" },
+    .{ .name = "TF_FLASHNEXT_EXL3_LINE_DELTAS", .scope = .cuda, .kind = .path, .forms = "POOL:+N,POOL:-N entries without control characters that move expert lines between decoder pools, as many added as removed" },
+    .{ .name = "TF_FLASHNEXT_EXL3_PROFILE_SIZING", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (1 sizes the expert pools from the stored profile)" },
+    .{ .name = "TF_FLASHNEXT_EXL3_STREAMS", .scope = .cuda, .kind = .size, .min = 1, .forms = "a positive whole stream count the expert pools leave room for (default 1; --parallel wins)" },
+    .{ .name = "TF_FLASHNEXT_EXPERT_LINES", .scope = .cuda, .kind = .size, .forms = "a whole count of expert lines a layer keeps on the device (the pool refuses fewer than 10)" },
+    .{ .name = "TF_FLASHNEXT_EXPERT_RESERVE_MB", .scope = .cuda, .kind = .u64, .max = std.math.maxInt(u64) >> 20, .forms = "a whole MiB count from 0 to 17592186044415 left free after the expert pools" },
+    .{ .name = "TF_FLASHNEXT_PLE_READ", .scope = .cuda, .kind = .word, .words = &.{"map", "pread"}, .forms = "map or pread (default map; pread reads the n-gram rows by positional read)" },
+    .{ .name = "TF_FLASHNEXT_EXL3_PROFILE_DIR", .scope = .cuda, .kind = .path, .forms = "a directory path without control characters where expert-use profiles persist" },
+    .{ .name = "TF_FLASHNEXT_EXL3_ROUTED", .scope = .cuda, .kind = .word, .words = &.{ "host", "device" }, .forms = "host or device (default host; device keeps every routed expert on the device)" },
     .{ .name = "TF_GEMMA4_CHUNK_SOLO", .scope = .gemma4, .kind = .size, .forms = "a solo prompt pass's rows, a multiple of 512 up to 4096" },
     .{ .name = "TF_GEMMA4_ARGMAX_GRAPH", .scope = .gemma4, .kind = .flag, .forms = "0 or 1 (1 puts a greedy round's argmax in the target graph; default 0)" },
     .{ .name = "TF_DRAMA_PREFILL_ROWS", .scope = .drama3, .kind = .u32, .trim = " ", .forms = "whole prompt rows a chunk, 1 through 1024 (checked when a Drama 3 checkpoint opens)" },
@@ -532,6 +547,14 @@ pub fn list(name: [:0]const u8) Error!?[:0]const u8 {
     const raw = sys.getenv(name) orelse return null;
     _ = (try checked(name, raw)) orelse return null;
     return raw;
+}
+
+/// A `.path` setting from the process environment, or null when unset or blank; a refusal is logged without its text.
+pub fn readPath(name: [:0]const u8) Error!?[]const u8 {
+    std.debug.assert(rule(name).kind == .path);
+    const raw = sys.getenv(name);
+    _ = (try checked(name, raw)) orelse return null;
+    return std.mem.trim(u8, raw.?, rule(name).trim);
 }
 
 /// One scope's rules in table order, without allocating: the first malformed value is logged and refused.

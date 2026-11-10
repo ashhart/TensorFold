@@ -1,6 +1,7 @@
 //! Startup refusals carry names, values and accepted forms; valid settings preserve defaults and clamps.
 const std = @import("std");
 const e = @import("environment.zig");
+const sys = @import("sys.zig");
 const t = std.testing;
 const a = t.allocator;
 const all: e.Flags = .{ .cuda = true, .metal = true, .xpu = true, .slide = true, .hooks = true, .dsv41 = true, .gemma4 = true, .drama3 = true, .glm = true, .flashnext = true, .nemotron = true, .minimax_m3 = true, .chat = true, .hub = true };
@@ -97,6 +98,41 @@ test "environment: range, enum, whitespace and native prompt geometry refusals a
     }) |c| try t.expectError(error.InvalidEnvironment, e.parse(c[0], c[1]));
     try t.expectEqual(@as(?u64, null), try e.parse("TF_CUDA_DEVICE", "   "));
     try t.expectEqual(@as(?u64, 0), try e.parse("TF_Q27_COPY_ROWS", "+0"));
+}
+
+test "environment: Flash Next EXL3 rows keep their bounds, exact words and exact switches" {
+    for ([_][2][]const u8{
+        .{ "TF_FLASHNEXT_CHUNK", "0" },
+        .{ "TF_FLASHNEXT_CHUNK", "16385" },
+        .{ "TF_FLASHNEXT_CHUNK_SOLO", "0" },
+        .{ "TF_FLASHNEXT_CHUNK_SOLO", "16385" },
+        .{ "TF_FLASHNEXT_EXL3_STREAMS", "0" },
+        .{ "TF_FLASHNEXT_EXPERT_RESERVE_MB", "17592186044416" },
+        .{ "TF_FLASHNEXT_CACHE_TELEMETRY", "true" },
+        .{ "TF_FLASHNEXT_EXL3_PROFILE_SIZING", "yes" },
+        .{ "TF_FLASHNEXT_SNAP_HOST", "01" },
+        .{ "TF_FLASHNEXT_PLE_READ", "Pread" },
+        .{ "TF_FLASHNEXT_EXL3_ROUTED", "DEVICE" },
+        .{ "TF_FLASHNEXT_EXL3_ARCH", "1" },
+        .{ "TENSORFOLD_MEMORY_RESERVE_GIB", "-0.5" },
+    }) |c| try t.expectError(error.InvalidEnvironment, e.parse(c[0], c[1]));
+    try t.expectEqual(@as(?u64, 0), try e.parse("TF_FLASHNEXT_EXL3_ROUTED", "host"));
+    try t.expectEqual(@as(?u64, 0), try e.parse("TF_FLASHNEXT_PLE_READ", "map"));
+}
+
+test "environment: readPath reads the process environment, blank as unset, and refuses control characters" {
+    const name = "TF_FLASHNEXT_EXL3_PROFILE_DIR";
+    defer _ = sys.env.unsetenv(name);
+    _ = sys.env.unsetenv(name);
+    try t.expectEqual(@as(?[]const u8, null), try e.readPath(name));
+    for ([_][:0]const u8{ "", "  " }) |blank| {
+        try t.expectEqual(@as(c_int, 0), sys.env.setenv(name, blank, 1));
+        try t.expectEqual(@as(?[]const u8, null), try e.readPath(name));
+    }
+    try t.expectEqual(@as(c_int, 0), sys.env.setenv(name, " /profiles ", 1));
+    try t.expectEqualStrings(" /profiles ", (try e.readPath(name)).?);
+    try t.expectEqual(@as(c_int, 0), sys.env.setenv(name, "/pro\nfiles", 1));
+    try t.expectError(error.InvalidEnvironment, e.readPath(name));
 }
 
 test "environment: a path setting keeps its text exactly, reads blank as unset and refuses control characters" {

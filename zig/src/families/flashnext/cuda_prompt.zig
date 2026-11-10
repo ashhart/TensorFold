@@ -157,7 +157,7 @@ pub const Engine = struct {
         e.scratch_format = .classic;
         e.collective = null;
         e.image_factory = null;
-        e.telemetry = cache_telemetry.State.fromEnv(rank, world);
+        e.telemetry = try cache_telemetry.State.fromEnv(rank, world);
         e.round_graph = .{};
         e.graphs = .{};
         errdefer for (e.layers[0..e.n_layers]) |*l| l.free(gpa);
