@@ -4,7 +4,7 @@ const mtl = @import("metal");
 const Config = @import("config.zig").Config;
 const Ref = @import("projection.zig").Ref;
 
-pub const Field = enum { ids, dims, positions, hidden, residual, input, sums, mixed, mixer_out, output, z, a, b, query, key, value, norm_query, norm_key, q_gate, gate, up, activated, act_sums, logits, drawn, eps, parents, windows, row_slots, segments, keeps, kept_rows, rotated_key, takes, slot_steps, router, picks, route_weights, offsets, order, sorted_weights, sorted_rows, expert_gate, expert_up, expert_act, expert_out, expert_sums };
+pub const Field = enum { ids, dims, positions, hidden, residual, input, sums, mixed, mixer_out, output, z, a, b, query, key, value, norm_query, norm_key, q_gate, gate, up, activated, act_sums, logits, drawn, eps, parents, windows, row_slots, segments, keeps, kept_rows, rotated_key, takes, slot_steps, router, picks, route_weights, offsets, order, sorted_weights, sorted_rows, expert_gate, expert_up, expert_act, expert_out, expert_sums, tail_dims };
 
 /// A prompt pass's rows at most (a chain); rounds with trees and every logits row stay within `logit_rows`.
 pub const max_rows = 2048;
@@ -37,6 +37,7 @@ pub fn allocationSizes(config: Config, capacity: u32) [std.enums.values(Field).l
         slots * 4,                                                                          slots * 4,                                                                                                                              slots * config.hidden * 2,
         slots * config.moe_intermediate * 2,                                                slots * config.moe_intermediate * 2,                                                                                                    slots * config.moe_intermediate * 2,
         slots * config.hidden * 2,                                                          slots * @max(config.hidden, config.moe_intermediate) / 64 * 4,
+        8 * 4, // the prompt tail's dims: its rows, then the whole chunk's padded rows (the group sums' stride)
     };
 }
 
@@ -118,5 +119,13 @@ pub const Frame = struct {
         @memset(frame.get(.dims).buffer.slice(i32, 8), 0);
         frame.get(.dims).buffer.slice(i32, 8)[0] = @intCast(ids.len);
         frame.get(.dims).buffer.slice(i32, 8)[1] = @intCast(16 * ((ids.len + 15) / 16));
+    }
+
+    /// The prompt tail's dims for rows [from, total): its rows, then the whole chunk's padded rows as `dims` has them.
+    pub fn setTail(frame: *Frame, from: u32, total: u32) void {
+        const dims = frame.get(.tail_dims).buffer.slice(i32, 8);
+        @memset(dims, 0);
+        dims[0] = @intCast(total - from);
+        dims[1] = @intCast(16 * ((total + 15) / 16));
     }
 };
