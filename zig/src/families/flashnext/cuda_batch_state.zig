@@ -570,4 +570,8 @@ test {
     _ = @import("cuda_nvfp4_tile.zig");
 }
 
+test "exl3: scratch omits fourteen classic buffers but preserves common and head-local staging" {
+    try @import("cuda_scratch_layout_test.zig").check(Scratch, Scratch.order);
+}
+
 pub const Pg = @import("cuda_glue.zig").Pg;

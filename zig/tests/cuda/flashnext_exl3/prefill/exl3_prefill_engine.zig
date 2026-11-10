@@ -119,7 +119,7 @@ fn prefillOnce(g: *Eng, ids: []const u32, deep_on: bool, out: []u16) !f64 {
     return ms_;
 }
 
-/// Greedy decode rounds after each engine-mode prefill (TF_TEST_DECODE, default 32; 0: none).
+/// Greedy decode rounds after each engine-mode prefill (`--decode N`, default 32; 0: none).
 var decode_steps: usize = 32;
 
 fn decodeAfter(g: *Eng, n: usize) !void {
@@ -145,8 +145,30 @@ fn decodeAfter(g: *Eng, n: usize) !void {
 /// The deep chunk's rows for the next prefills (engine mode's ROWS list), else the environment's.
 var rows_override: ?usize = null;
 
-pub fn engineRun(gpu: Gpu, dir: []const u8, rest: []const [:0]const u8) !void {
+pub fn engineRun(gpu: Gpu, dir: []const u8, args: []const [:0]const u8) !void {
     const a = gpu.gpa;
+    var buf: [5][:0]const u8 = undefined;
+    var n_rest: usize = 0;
+    var decode: usize = 32;
+    var have_decode = false;
+    var arg_i: usize = 0;
+    while (arg_i < args.len) : (arg_i += 1) {
+        if (std.mem.eql(u8, args[arg_i], "--decode")) {
+            if (have_decode) return error.DuplicateOption;
+            have_decode = true;
+            arg_i += 1;
+            if (arg_i >= args.len) return error.MissingOptionValue;
+            decode = std.fmt.parseInt(usize, args[arg_i], 10) catch return error.BadOptionValue;
+        } else if (std.mem.startsWith(u8, args[arg_i], "--")) {
+            return error.UnknownOption;
+        } else {
+            if (n_rest == buf.len) return error.TooManyArguments;
+            buf[n_rest] = args[arg_i];
+            n_rest += 1;
+        }
+    }
+    const rest = buf[0..n_rest];
+    decode_steps = decode;
     if (rest.len < 2) return error.MissingArgument;
     const text = try std.Io.Dir.cwd().readFileAlloc(gpu.io, rest[0], a, .limited(1 << 28));
     defer a.free(text);
@@ -176,7 +198,6 @@ pub fn engineRun(gpu: Gpu, dir: []const u8, rest: []const [:0]const u8) !void {
     var max_n: usize = 0;
     for (ns[0..n_ns]) |n| max_n = @max(max_n, n);
     if (max_n > all_ids.len) return error.NotEnoughIds;
-    if (std.c.getenv("TF_TEST_DECODE")) |v| decode_steps = std.fmt.parseInt(usize, std.mem.span(v), 10) catch decode_steps;
     const o = try xpre.optionsFromEnv();
     var max_r = o.rows;
     for (rs[0..n_rs]) |r| max_r = @max(max_r, r);
@@ -317,8 +338,25 @@ pub fn greedy(g: *Eng, out: []u32) !void {
 }
 
 /// One prompt through the batched pass and through the deep chunks at each chunk size: same logits bytes and tokens.
-pub fn equalRun(gpu: Gpu, dir: []const u8, rest: []const [:0]const u8) !void {
+pub fn equalRun(gpu: Gpu, dir: []const u8, args: []const [:0]const u8) !void {
     const a = gpu.gpa;
+    // `--equal-first-size`: the first chunk size is the reference (the batched pass is not the canonical reduction's)
+    var first = false;
+    var buf: [4][:0]const u8 = undefined;
+    var n_rest: usize = 0;
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, "--equal-first-size")) {
+            if (first) return error.DuplicateOption;
+            first = true;
+        } else if (std.mem.startsWith(u8, arg, "--")) {
+            return error.UnknownOption;
+        } else {
+            if (n_rest == buf.len) return error.TooManyArguments;
+            buf[n_rest] = arg;
+            n_rest += 1;
+        }
+    }
+    const rest = buf[0..n_rest];
     if (rest.len < 3) return error.MissingArgument;
     const all_ids = try readIds(gpu, rest[0]);
     defer a.free(all_ids);
@@ -340,8 +378,6 @@ pub fn equalRun(gpu: Gpu, dir: []const u8, rest: []const [:0]const u8) !void {
     defer a.free(got);
     var want_tokens: [24]u32 = undefined;
     var got_tokens: [24]u32 = undefined;
-    // TF_EQUAL_FIRST_SIZE=1: the first chunk size is the reference (the batched pass is not the canonical reduction's)
-    const first = std.c.getenv("TF_EQUAL_FIRST_SIZE") != null;
     rows_override = if (first) sizes[0] else null;
     _ = try prefillOnce(g, ids, first, want);
     try greedy(g, &want_tokens);
