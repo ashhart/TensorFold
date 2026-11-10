@@ -49,7 +49,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 2. Paged KV | done C[#1750] M[#1294] | done [#1169] | done [#1163] | done [#1619] | done C[#935] M[#1537] |
 | 3. Prompt store | done [#1357] | yes (host store) | done [#1732] | done [#1883] | yes C open M[#1850] |
 | 4. iGPU states | done [#2113] | done¹ | yes | done¹ | done¹ |
-| 5. State walk | yes | yes | open [#2215] | yes | yes |
+| 5. State walk | open C[#2392] | open C[#2392] | open [#2215] | open C[#2392] | open C[#2392] |
 | 6. KV ledger | done [#2127] | done [#2127] | done [#2127] | done [#2127] | done [#2127] |
 | 7. Host KV tier | yes | open [#1501] | done [#1795] | yes | yes |
 | 8. Disk cache | done C[#1358] | done C[#1359] M[#519] | done M¹ open C[#1411] | yes | done C[#1413] M¹ |
@@ -73,6 +73,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 26. Pipeline | open [#2115] | yes | yes | yes | yes |
 | 27. Profiles | done [#1944] | done [#1944] | done [#1959] | done [#1944] | done [#2061] |
 | 28. Scale index | ? | open M[#2760] | ? | ? | ? |
+| 29. DSpine | done C[#2633] | no (no drafter) | no (no drafter) | no (no drafter) | no (no drafter) |
 
 | Optimization | kol1 | spk25 | dory | mm3 | dsv41 |
 | --- | --- | --- | --- | --- | --- |
@@ -104,6 +105,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 26. Pipeline | yes | no (4B) | yes | yes | yes |
 | 27. Profiles | done [#1944] | done [#1944] | open [#2306] | yes | yes |
 | 28. Scale index | ? | ? | ? | ? | ? |
+| 29. DSpine | no (no drafter) | no (no drafter) | no (no drafter) | no (no drafter) | no (no drafter) |
 
 | Optimization | lfm2m | lfm3 | qwen4 | ling |
 | --- | --- | --- | --- | --- |
@@ -135,6 +137,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 26. Pipeline | yes | no (1.7B) | yes | yes |
 | 27. Profiles | yes | yes | yes | yes |
 | 28. Scale index | ? | ? | ? | ? |
+| 29. DSpine | no (no drafter) | no (no drafter) | no (no drafter) | no (no drafter) |
 
 q3.5 `qwen3_5` (C, M, H, X), fnext `flashnext` (C, M, H), glm `glm` (C, M), gem4 `gemma4` (C, M, X),
 nemo `nemotron` (C, M, H, X), kol1 `kolibri1` (C), spk25 `spark25` (C, M),
@@ -144,8 +147,8 @@ ling `ling` (host package only, no engine yet; CUDA plan in [#850]).
 
 | Optimization | q27 | lfm2 | llama | step5 |
 | --- | --- | --- | --- | --- |
-| 1. Prompt tail | no (Metal) | no (n/a) | no (Metal) | no (Metal) |
-| 2. Paged KV | open M[#2283] | no (scores) | yes | yes |
+| 1. Prompt tail | done M[#2436] | no (n/a) | no (Metal) | no (Metal) |
+| 2. Paged KV | done M[#2283] | no (scores) | yes | yes |
 | 3. Prompt store | yes | no (scores) | yes | yes |
 | 4. iGPU states | no (unified) | no (scores) | no (unified) | no (unified) |
 | 5. State walk | yes | no (scores) | yes | yes |
@@ -158,7 +161,7 @@ ling `ling` (host package only, no engine yet; CUDA plan in [#850]).
 | 12. Add + norm | done M¹ | done¹ | done¹ | yes |
 | 13. MoE grouped | done [#1125] | no (dense) | no (dense) | done¹ |
 | 14. CUDA graphs | no (Metal) | no (scores) | no (Metal) | no (Metal) |
-| 15. MTP | yes | no (scores) | no (no head) | done¹ |
+| 15. MTP | open M[#2464] | no (scores) | no (no head) | done¹ |
 | 16. DFlash(2) | done [#578] | no (scores) | yes | yes |
 | 17. DSpark | yes | no (scores) | yes | yes |
 | 18. Copy drafts | done¹ | no (scores) | done M¹ | done M¹ |
@@ -169,9 +172,10 @@ ling `ling` (host package only, no engine yet; CUDA plan in [#850]).
 | 23. Page drop | done M[#1885] | done [#1884] | done M[#1885] | done M[#1885] |
 | 24. L2 prefetch | no (Metal) | no (scores) | no (Metal) | no (Metal) |
 | 25. TP ranks | open [#1434] | no (small) | yes | yes |
-| 26. Pipeline | yes | no (small) | yes | yes |
+| 26. Pipeline | open M[#2375] | no (small) | yes | yes |
 | 27. Profiles | yes | yes | yes | yes |
 | 28. Scale index | ? | ? | ? | ? |
+| 29. DSpine | open M[#2634] | no (scores) | no (no drafter) | no (no drafter) |
 
 | Optimization | gdsa | kimi | qwen3 |
 | --- | --- | --- | --- |
@@ -203,6 +207,7 @@ ling `ling` (host package only, no engine yet; CUDA plan in [#850]).
 | 26. Pipeline | yes | yes | no (small) |
 | 27. Profiles | yes | yes | yes |
 | 28. Scale index | ? | ? | ? |
+| 29. DSpine | no (no drafter) | no (no drafter) | no (prompt) |
 
 q27 `qwen27` (M: Qwen3.8-27B and Qwen3.5-MoE), lfm2 `lfm2` (C: LFM2-VL, scores decisions and writes no text),
 llama `llama` (M), step5 `step5` (M), gdsa `glm_dsa` (M), kimi `kimi_k3` (M, native serving on [#2221]),
@@ -248,6 +253,7 @@ below; these are estimates for planning a port, not results.
 | 26. Pipeline | none | none | big | fits models across nodes; adds hops |
 | 27. Profiles | none | none | none | names the opt-in switches |
 | 28. Scale index | none | low | 5 % of the weights once prompts read it too | one stream's decode before tensor units |
+| 29. DSpine | none | medium | low | Qwen3.8-27B; agent 2–20 % faster, chat and code 10–19 % slower |
 
 ## The optimizations
 
@@ -451,6 +457,12 @@ below; these are estimates for planning a port, not results.
     Macs before tensor units behind `TF_FLASHNEXT_SCALE_INDEX` ([#2760], plan in [#2751]); the prompt gathers and the
     dense rows still read the stored arrays. `?` cells: the same count has not been run on those checkpoints.
 
+29. **DSpine drafter.** Tencent's DSpine-b16 for Qwen3.8-27B, opt-in by `--drafter` with its folder, never the
+    default. It reuses DFlash2's taps and tap ring and adds a code bridge and an exact-sender table.
+    `core/dspine.zig` and the tree walker in `core/lanes/draft_tree.zig` are on main through the CUDA binding
+    ([#2633]); the Metal binding ([#2634]) is still open. On a GB10, against DFlash2: agent prompts decode 2–20 %
+    faster, chat and code 10–19 % slower. It needs the checkpoint's own DSpine drafter, so other families have none.
+
 [#458]: https://github.com/ashhart/TensorFold/pull/458
 [#468]: https://github.com/ashhart/TensorFold/pull/468
 [#519]: https://github.com/ashhart/TensorFold/pull/519
@@ -592,3 +604,9 @@ below; these are estimates for planning a port, not results.
 [#2257]: https://github.com/ashhart/TensorFold/pull/2257
 [#2760]: https://github.com/ashhart/TensorFold/pull/2760
 [#2751]: https://github.com/ashhart/TensorFold/issues/2751
+[#2392]: https://github.com/ashhart/TensorFold/pull/2392
+[#2436]: https://github.com/ashhart/TensorFold/pull/2436
+[#2464]: https://github.com/ashhart/TensorFold/pull/2464
+[#2375]: https://github.com/ashhart/TensorFold/pull/2375
+[#2633]: https://github.com/ashhart/TensorFold/pull/2633
+[#2634]: https://github.com/ashhart/TensorFold/pull/2634
