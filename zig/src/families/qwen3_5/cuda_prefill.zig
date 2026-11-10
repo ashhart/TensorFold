@@ -5,6 +5,17 @@ const E = @import("cuda_engine.zig");
 const vision_prompt = @import("cuda_vision_prompt.zig");
 const reuse = @import("cuda_reuse.zig");
 
+pub fn chunkRows(raw: ?[]const u8) !u32 {
+    const text = raw orelse return E.max_rows;
+    const n = std.fmt.parseInt(u32, text, 10) catch return error.InvalidPrefillChunk;
+    if (n < 64 or n > E.max_rows or n % 64 != 0) return error.InvalidPrefillChunk;
+    return n;
+}
+
+fn chunkLimit(self: anytype) u32 {
+    return if (@hasField(@TypeOf(self.*), "prefill_rows")) self.prefill_rows else E.max_rows;
+}
+
 /// Where a prompt pass from `at` cuts its chunk: max_rows rows on, or the request's next chunk start before that.
 fn nextCut(len: usize, chunks: []const u32, at: usize, max_rows: u32) usize {
     const bound = if (max_rows > 0) @min(E.max_rows, max_rows) else E.max_rows;
@@ -17,9 +28,9 @@ fn nextCut(len: usize, chunks: []const u32, at: usize, max_rows: u32) usize {
 }
 
 /// Whether a cold pass over `len` rows (from 0) cuts a chunk at `pos`.
-fn coldCut(len: usize, chunks: []const u32, pos: usize) bool {
+fn coldCut(len: usize, chunks: []const u32, pos: usize, limit: u32) bool {
     var at: usize = 0;
-    while (at < pos and at < len) at = nextCut(len, chunks, at, 0);
+    while (at < pos and at < len) at = nextCut(len, chunks, at, limit);
     return at == pos;
 }
 
@@ -27,11 +38,11 @@ test "a pass resumes only where a cold pass cuts: every max_rows rows from 0 or 
     const m = E.max_rows;
     const len = 10 * m;
     const start = m + m / 2; // a request chunk start between the first two cuts
-    try std.testing.expect(coldCut(len, &.{}, m * 3));
-    try std.testing.expect(!coldCut(len, &.{}, m * 3 + 1));
-    try std.testing.expect(coldCut(len, &.{start}, start));
-    try std.testing.expect(coldCut(len, &.{start}, start + m));
-    try std.testing.expect(!coldCut(len, &.{start}, 2 * m)); // cut at the start instead, then max_rows on
+    try std.testing.expect(coldCut(len, &.{}, m * 3, 0));
+    try std.testing.expect(!coldCut(len, &.{}, m * 3 + 1, 0));
+    try std.testing.expect(coldCut(len, &.{start}, start, 0));
+    try std.testing.expect(coldCut(len, &.{start}, start + m, 0));
+    try std.testing.expect(!coldCut(len, &.{start}, 2 * m, 0)); // cut at the start instead, then max_rows on
     try std.testing.expectEqual(@as(usize, start), nextCut(len, &.{start}, m, 0));
 }
 
@@ -118,7 +129,7 @@ fn opening(self: anytype, stream: *lanes.Stream) !Fill {
         cache.len = at;
         cache.written = at;
     } else if (stream.reuse.saved) |saved| {
-        if (stream.reuse.at > 0 and stream.reuse.at < ids.len and coldCut(ids.len, stream.chunks, stream.reuse.at)) {
+        if (stream.reuse.at > 0 and stream.reuse.at < ids.len and coldCut(ids.len, stream.chunks, stream.reuse.at, chunkLimit(self))) {
             if (reuse.restoreCache(self.e, cache, saved, seen)) {
                 at = stream.reuse.at;
                 stream.cached = stream.reuse.at;
@@ -143,7 +154,7 @@ pub fn chunk(self: anytype, stream: *lanes.Stream, f: *Fill, _: u32) !bool {
     }
     const cache = try self.cacheOf(stream);
     var images: ?E.Images = if (f.media) |m| .{ .features = m.features.ptr, .src = m.src, .pos = m.pos } else null;
-    const end = nextCut(ids.len, stream.chunks, f.at, 0);
+    const end = nextCut(ids.len, stream.chunks, f.at, chunkLimit(self));
     try self.e.forward(&.{.{ .cache = cache, .rows = end - f.at, .images = if (images) |*im| im else null }}, ids[f.at..end], .last);
     lanes.prefill_widths.completed(self.gpa, stream, end - f.at);
     f.at = end;
@@ -163,4 +174,16 @@ pub fn chunk(self: anytype, stream: *lanes.Stream, f: *Fill, _: u32) !bool {
     if (f.media) |m| cache.delta = m.delta;
     if (self.pages) |p| p.log(ids.len, stream.cached);
     return true;
+}
+
+test "explicit prefill chunks preserve a bounded cache-off grid" {
+    try std.testing.expectEqual(@as(u32, @intCast(E.max_rows)), try chunkRows(null));
+    try std.testing.expectEqual(@as(u32, 1024), try chunkRows("1024"));
+    var limit_text: [24]u8 = undefined;
+    try std.testing.expectEqual(@as(u32, @intCast(E.max_rows)), try chunkRows(try std.fmt.bufPrint(&limit_text, "{d}", .{E.max_rows})));
+    try std.testing.expectError(error.InvalidPrefillChunk, chunkRows(try std.fmt.bufPrint(&limit_text, "{d}", .{E.max_rows + 64})));
+    for ([_][]const u8{ "0", "63", "65", "4097", "bad" }) |v|
+        try std.testing.expectError(error.InvalidPrefillChunk, chunkRows(v));
+    try std.testing.expect(coldCut(7680, &.{}, 2048, 1024));
+    try std.testing.expect(!coldCut(7680, &.{}, 2049, 1024));
 }

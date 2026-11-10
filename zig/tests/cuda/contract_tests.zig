@@ -113,6 +113,9 @@ fn registered(gpu: check.Gpu, only: []const []const u8, t0: *i96) !g.Tally {
     defer rank_sum.unload();
     var kernels: std.ArrayList(g.Kernel) = .empty;
     defer kernels.deinit(a);
+    var prompt_cases: @import("contract_prompt_cases.zig").Cases = .{};
+    defer prompt_cases.deinit();
+    try prompt_cases.append(&kernels, gpu, s, cap);
     var vit = try cuda.vit.Kernels.load(gpu.d);
     defer vit.unload();
     var glue: [12]vit_k.Glue = undefined;

@@ -1,4 +1,4 @@
-//! The Qwen3.6 MTP layer's weights (mtp-4bit.safetensors beside the checkpoint) onto the device, their own arena.
+//! The Qwen MTP layer's weights in their own device arena, from an affine MoE file or a dense bf16 checkpoint.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -57,18 +57,23 @@ pub const Weights = struct {
 pub fn total(g: geometry.Geometry) usize {
     var t = 2 * weights.packedBytes(g.hidden, g.hidden, 4) + 7 * aligned(@max(g.hidden, head_dim) * 2);
     t += weights.packedBytes(2 * g.attnWidth(), g.hidden, 4) + 2 * weights.packedBytes(g.kv_heads * head_dim, g.hidden, 4) + weights.packedBytes(g.hidden, g.attnWidth(), 4);
-    t += weights.routedBytes(g.experts, g.intermediate, g.hidden, 4); // the MTP layer's experts are 4-bit
+    t += if (g.moe()) weights.routedBytes(g.experts, g.intermediate, g.hidden, 4) else 2 * weights.packedBytes(g.intermediate, g.hidden, 4) + weights.packedBytes(g.hidden, g.intermediate, 4);
     return t;
 }
 
 /// The largest tensor `load` stages, as stored: fc's whole rows, an attention projection or an expert table.
 pub fn stageBytes(g: geometry.Geometry) usize {
     const raw = weights.rawBytes;
-    return @max(@max(raw(g.hidden, 2 * g.hidden, 4), raw(2 * g.attnWidth(), g.hidden, 4)), @max(raw(g.experts * g.intermediate, g.hidden, 4), raw(g.experts * g.hidden, g.intermediate, 4)));
+    const count = if (g.moe()) g.experts else 1;
+    return @max(@max(raw(g.hidden, 2 * g.hidden, 4), raw(2 * g.attnWidth(), g.hidden, 4)), @max(raw(count * g.intermediate, g.hidden, 4), raw(count * g.hidden, g.intermediate, 4)));
 }
 
 pub fn load(gpa: std.mem.Allocator, io: std.Io, e: *Engine, dir: []const u8) !Weights {
     const g = e.g;
+    if (!g.moe()) {
+        if (!geometry.dense27(g)) return error.UnsupportedMtpGeometry;
+        return @import("cuda_mtp_bf16.zig").load(gpa, io, e, dir);
+    }
     // a ModelOpt checkpoint keeps its MTP layer in bf16 in its own shards: quantized at load unless the file is there
     if (g.kinds.modelopt and !hasFile(io, dir)) return @import("cuda_mtp_bf16.zig").load(gpa, io, e, dir);
     var ck: core.Checkpoint = .{ .gpa = gpa, .io = io };

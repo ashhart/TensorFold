@@ -33,6 +33,10 @@ pub const Affine4Kernels = struct {
     pub const Out = struct { q: Affine4, out: u64 };
 
     group_fn: Function,
+    warp_flags: u8 = 0,
+    group256_fn: Function = undefined,
+    split256_fn: Function = undefined,
+    seg256_fn: Function = undefined,
     mlp128_fn: Function,
     mlp128: bool = false,
     gemv_fn: Function,
@@ -57,6 +61,33 @@ pub const Affine4Kernels = struct {
     pub fn resolve(d: *const Driver, group_mod: Module, prefill_mod: Module, gemv_mod: Module, pack_mod: Module, sms: usize, gb10: bool) !Affine4Kernels {
         var a: Affine4Kernels = undefined;
         a.group_fn = try group_mod.function(symbols.group);
+        a.warp_flags = 0;
+        if (try @import("sys").environment.given("TF_CUDA_WARPS8")) |raw| {
+            const mask = try std.fmt.parseInt(u8, raw, 10);
+            if (mask > 7) return error.Invalid;
+            if (mask != 0) {
+                var device: @import("abi.zig").Device = 0;
+                try d.check(d.api.cuCtxGetDevice(&device), "cuCtxGetDevice");
+                var major: c_int = 0;
+                var minor: c_int = 0;
+                try d.check(d.api.cuDeviceGetAttribute(&major, .compute_capability_major, device), "cuDeviceGetAttribute");
+                try d.check(d.api.cuDeviceGetAttribute(&minor, .compute_capability_minor, device), "cuDeviceGetAttribute");
+                if (major != 12 or minor != 0 or sms != 170) return error.Invalid;
+                if ((mask & 1) != 0) {
+                    a.group256_fn = try group_mod.function("_ZN12tf_qmm_group12group_kernelILi64ELi16ELi64ELi1ELi8ELi8ELb0ELb0ELb0ELb0EEEvPK13__nv_bfloat16PKfNS_5PartsEiiiii");
+                    try a.group256_fn.allowDynamicShared(group_smem);
+                }
+                if ((mask & 2) != 0) {
+                    a.split256_fn = try gemv_mod.function("tf_lane_gemv_split_256");
+                    try a.split256_fn.allowDynamicShared(split_smem);
+                }
+                if ((mask & 4) != 0) {
+                    a.seg256_fn = try gemv_mod.function("tf_lane_gemv_seg_256");
+                    try a.seg256_fn.allowDynamicShared(split_smem);
+                }
+                a.warp_flags = mask;
+            }
+        }
         a.mlp128_fn = try group_mod.function("_ZN12tf_qmm_group12group_kernelILi64ELi16ELi128ELi1ELi8ELi4ELb0ELb0ELb0ELb0EEEvPK13__nv_bfloat16PKfNS_5PartsEiiiii");
         try a.mlp128_fn.allowDynamicShared(26880);
         a.mlp128 = false;
@@ -246,7 +277,8 @@ pub const Affine4Kernels = struct {
         for ([_]usize{ rows, outs[0].q.k, outs[0].q.k }) |v| g.add(int(v));
         g.add(sp.work.ptr);
         g.add(sp.tickets.ptr);
-        try launch_.launch(a.seg_fn, .{ .grid = .{ .x = u(blocks) }, .block = .{ .x = 128 }, .shared = split_smem }, s, &g);
+        const wider = (a.warp_flags & 4) != 0;
+        try launch_.launch(if (wider) a.seg256_fn else a.seg_fn, .{ .grid = .{ .x = u(blocks) }, .block = .{ .x = if (wider) 256 else 128 }, .shared = split_smem }, s, &g);
     }
 
     /// 16 rows elsewhere; GB10 verify shares a weight panel across up to eight m16 row tiles, sm_120 across two.
@@ -304,7 +336,8 @@ pub const Affine4Kernels = struct {
         for ([_]usize{ rows, q.k, q.k }) |v| g.add(int(v));
         g.add(sp.work.ptr);
         g.add(sp.tickets.ptr);
-        try launch_.launch(a.split_fn, .{ .grid = .{ .x = u(tiles * sk) }, .block = .{ .x = 128 }, .shared = split_smem }, s, &g);
+        const wider = (a.warp_flags & 2) != 0;
+        try launch_.launch(if (wider) a.split256_fn else a.split_fn, .{ .grid = .{ .x = u(tiles * sk) }, .block = .{ .x = if (wider) 256 else 128 }, .shared = split_smem }, s, &g);
     }
 
     /// lane_gemv: every K slice of a column tile in one CTA, summed in slice order, CTAs looping over the tiles.
@@ -322,6 +355,7 @@ pub const Affine4Kernels = struct {
     /// qmm_group's tile 2: a cluster of `sk` CTAs a column tile, its K slices summed over distributed shared memory.
     pub fn cluster(a: *const Affine4Kernels, s: Stream, x: u64, xs: u64, q: Affine4, out: u64, rows: usize, sk: usize) !void {
         const tuned = a.mlp128 and mlp128Shape(rows, q.n, q.k, sk);
+        const wider = (a.warp_flags & 1) != 0 and !tuned;
         const width: usize = if (tuned) 128 else 64;
         const tiles = (q.n + width - 1) / width;
         var parts: Parts = std.mem.zeroes(Parts);
@@ -336,12 +370,12 @@ pub const Affine4Kernels = struct {
         for ([_]usize{ rows, q.k, q.k, rows_t, sk }) |v| g.add(int(v));
         const cfg: launch_.Config = .{
             .grid = .{ .x = u(clusters * sk) },
-            .block = .{ .x = if (tuned) 256 else 128 },
+            .block = .{ .x = if (tuned or wider) 256 else 128 },
             .shared = if (tuned) 26880 else group_smem,
             .cluster = if (sk > 1) .{ .x = u(sk) } else null,
             .pdl = a.pdl or tuned,
         };
-        try launch_.launch(if (tuned) a.mlp128_fn else a.group_fn, cfg, s, &g);
+        try launch_.launch(if (tuned) a.mlp128_fn else if (wider) a.group256_fn else a.group_fn, cfg, s, &g);
     }
 
     /// qmm.prefill_matmul (tile 0): weights rounded once to bf16, one fp32 chain over K; bf16 out.

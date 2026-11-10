@@ -245,9 +245,24 @@ pub const Kernels = struct {
     /// Slice partials where no cluster meets them (before sm_90): the most any projection takes below fused_rows.
     part: ?DeviceBuffer = null,
     experts: ?cuda.experts.Nvfp4Experts = null, // a MoE's routed experts (cuda_modelopt_experts.zig)
+    native_requested: bool = false,
+    native: ?cuda.nvfp4.native_prompt.Native = null,
+    fast8: ?cuda.fp8_prefill.Native = null,
+    vendor: ?cuda.cublaslt_prefill.Kit = null,
 
     pub fn load(d: *const cuda.Driver, capability: u32, sms: usize, moe: bool) !Kernels {
         if (modeloptRefusal(capability) != null) return error.ModeloptNeedsSm80;
+        if (try cuda.cublaslt_prefill.requested()) {
+            if (capability != 120 or moe) return error.UnsupportedCublasPrefill;
+        }
+        if (cuda.fp8_prefill.enabled() and !cuda.nvfp4.native_prompt.supported(capability))
+            return error.UnsupportedNativeNvfp4Prefill;
+        const requested = try cuda.nvfp4.native_prompt.enabled(try @import("sys").environment.given("TF_QWEN_NVFP4_PREFILL"));
+        const tma_raw = try @import("sys").environment.given("TF_QWEN_NVFP4_TMA");
+        if (try cuda.nvfp4.native_prompt.selectTma(tma_raw, false) and !requested)
+            return error.NativeTmaRequiresNvfp4;
+        if (requested and (moe or !cuda.nvfp4.native_prompt.supported(capability)))
+            return error.UnsupportedNativeNvfp4Prefill;
         var lane = try cuda.qmmf.Lane.load(d, capability / 10);
         errdefer lane.unload();
         var prompt = try cuda.nvfp4.Prompt.load(d);
@@ -256,10 +271,13 @@ pub const Kernels = struct {
         errdefer pack.unload();
         var experts: ?cuda.experts.Nvfp4Experts = if (moe) try cuda.experts.Nvfp4Experts.load(d, sms) else null;
         errdefer if (experts) |*x| x.unload();
-        return .{ .lane = lane, .prompt = prompt, .pack = pack, .embed = try cuda.embed_rows.EmbedRows.load(d), .experts = experts };
+        return .{ .lane = lane, .prompt = prompt, .pack = pack, .embed = try cuda.embed_rows.EmbedRows.load(d), .experts = experts, .native_requested = requested };
     }
 
     pub fn unload(k: *Kernels) void {
+        if (k.vendor) |*v| v.deinit();
+        if (k.fast8) |*n| n.unload();
+        if (k.native) |*n| n.unload();
         if (k.part) |*p| p.free();
         if (k.experts) |*x| x.unload();
         k.embed.unload();
@@ -304,12 +322,50 @@ pub const Kernels = struct {
             }
         }
         if (most > 0) k.part = try DeviceBuffer.alloc(e.d, most);
+        if (k.native_requested) {
+            const width = @max(e.g.intermediate, e.g.hidden, e.g.attnWidth(), e.g.valueWidth());
+            k.native = try cuda.nvfp4.native_prompt.Native.load(e.d, engine.max_rows, width);
+            var packed_bytes: usize = 0;
+            for (e.layers) |layer| switch (layer.mlp) {
+                .dense => |m| for ([_]Proj{ m.gate, m.up, m.down }) |p| {
+                    if (p == .ql and p.ql == .nvfp4) {
+                        const w = p.ql.nvfp4;
+                        packed_bytes = @max(packed_bytes, @as(usize, w.npad) * w.k / 2);
+                    }
+                },
+                .moe => {},
+            };
+            try k.native.?.reservePacked(packed_bytes);
+            std.log.info("native NVFP4 prefill: calibrated FP4 activations, BF16 decode, {d} scratch bytes", .{k.native.?.scratch.len});
+        }
+        if (cuda.fp8_prefill.enabled()) {
+            const width = @max(e.g.intermediate, e.g.hidden, e.g.attnWidth(), e.g.valueWidth());
+            k.fast8 = try cuda.fp8_prefill.Native.load(e.d, engine.max_rows, width);
+        }
+        try @import("cuda_affine_prepared.zig").reserve(k, e);
+        try @import("cuda_cublas_prompt.zig").reserve(k, e);
     }
 };
 
 /// out (rows, n) = x (rows, k): prompt chunks past 16 rows on prompt16, else the lane (a row's bits at any count).
 pub fn project(e: *Engine, w: Weight, x: u64, out: u64, rows: usize, prompt: bool) !void {
     const k = if (e.mo) |*m| m else return error.FormatNotLoaded;
+    if (prompt and e.learning == null and k.native_requested and w == .nvfp4 and
+        @import("cuda_cublas_prompt.zig").owns(e, w.nvfp4.codes)) if (k.vendor) |*v|
+    {
+        if (try v.nvfp4(e.stream, x, rows, w.nvfp4, out, .bf16)) return;
+    };
+    if (prompt and w == .nvfp4 and w.nvfp4.act > 0) if (k.native) |*n|
+        return n.matmul(e.stream, x, w.nvfp4.k, rows, w.nvfp4, out, .bf16);
+    if (prompt and e.learning == null and (w == .fp8 or (w == .fp8g and e.g.kinds.ct))) {
+        const weight = if (w == .fp8) w.fp8 else w.fp8g;
+        if (@import("cuda_cublas_prompt.zig").owns(e, weight.codes)) if (k.vendor) |*v|
+            if (try v.fp8(e.stream, x, rows, weight, out, .bf16)) return;
+    }
+    if (prompt and w == .fp8) if (k.fast8) |*n|
+        return n.matmul(e.stream, x, w.fp8.k, rows, w.fp8, out, .bf16);
+    if (prompt and w == .fp8g and e.g.kinds.ct) if (k.fast8) |*n|
+        return n.rowScaled(e.stream, x, rows, w.fp8g, out, .bf16);
     const l = k.linear();
     const in: cuda.qlinear.Rows = .{ .x = x, .part = if (k.part) |p| p.ptr else 0 };
     if (prompt and rows > 16) return l.prompt(e.stream, w, in, out, rows);
@@ -348,7 +404,12 @@ pub fn linear(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer, pre: []con
             try stage.upload(0, t.bytes);
             const w = try e.alloc(padded(n) * k);
             try p.fp8Lane(e.stream, stage.ptr, w, n, k);
-            break :blk .{ .fp8 = cuda.modelopt.fp8Weight(w, scale, n, k) };
+            var weight = cuda.modelopt.fp8Weight(w, scale, n, k);
+            if (cuda.fp8_prefill.enabled()) {
+                weight.act = try scalar(ck, try tname(&buf, pre, name, "input_scale"));
+                if (!cuda.nvfp4.native_prompt.validScale(weight.act)) return error.BadNativeNvfp4Scale;
+            }
+            break :blk .{ .fp8 = weight };
         },
         .fp8c => blk: { // compressed-tensors FP8, a bf16 scale a row: the FP8G lane, every 64 inputs a row's scale
             const t = try ck.expect(try tname(&buf, pre, name, "weight"), .f8_e4m3, &.{ n, k });
@@ -374,7 +435,13 @@ pub fn linear(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer, pre: []con
             const words = try e.alloc(padded(n) * k / 2);
             const tiles = try e.alloc(padded(n) * k / 16);
             try p.fp4Lane(e.stream, stage.ptr, stage.ptr + codes.bytes.len, words, tiles, n, k);
-            break :blk .{ .nvfp4 = cuda.nvfp4.weight(words, tiles, global, n, k) };
+            var weight = cuda.nvfp4.weight(words, tiles, global, n, k);
+            if (kind == .nvfp4 and e.mo.?.native_requested) {
+                const scale = try scalar(ck, try tname(&buf, pre, name, if (ct) "input_global_scale" else "input_scale"));
+                weight.act = if (ct) 1.0 / scale else scale;
+                if (!cuda.nvfp4.native_prompt.validScale(weight.act)) return error.BadNativeNvfp4Scale;
+            }
+            break :blk .{ .nvfp4 = weight };
         },
         .affine => unreachable,
     };

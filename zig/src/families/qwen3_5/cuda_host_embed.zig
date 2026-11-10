@@ -14,10 +14,10 @@ pub fn mapped(unified: bool, room: u64, device: u64, stream: u64, beside: u64) b
 }
 
 /// The engine's arena of weights and scratch rows, with any host memory for the embedding rows made first.
-pub fn arena(e: anytype, io: std.Io, ctx: *const cuda.Context, ck: anytype, fit: ?Fit) !cuda.DeviceBuffer {
+pub fn arena(e: anytype, io: std.Io, ctx: *const cuda.Context, ck: anytype, fit: ?Fit, planned: ?usize) !cuda.DeviceBuffer {
     e.host_embed = null;
     errdefer if (e.host_embed) |*h| h.free();
-    const bytes = try measure(e, io, ctx, ck, fit);
+    const bytes = planned orelse try measure(e, io, ctx, ck, fit);
     return cuda.DeviceBuffer.alloc(e.d, bytes + try e.scratch(.measure));
 }
 

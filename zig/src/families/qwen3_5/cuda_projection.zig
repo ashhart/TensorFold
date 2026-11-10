@@ -40,6 +40,7 @@ pub const projectMany = projection_many.projectMany;
 
 pub fn project(e: *Engine, l: Proj, x: u64, xs: u64, out: u64, rows: usize, prompt: bool, params: u64, sums: bool) !void {
     if (l == .ql) return @import("cuda_modelopt.zig").project(e, l.ql, x, out, rows, prompt);
+    if (prompt and l == .a4 and try @import("cuda_fast_prompt.zig").affine(e, l.a4, x, out, rows)) return;
     const n_out = l.outputs();
     const k = l.inputs();
     // EXL3 and BF16 matrices use their own row kernels at every width.

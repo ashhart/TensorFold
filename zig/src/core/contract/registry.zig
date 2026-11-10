@@ -13,6 +13,8 @@ pub const CudaRecord = struct {
     optional_shared: bool = false,
     /// Keep the independent later compiler selection when adding a late 13.0 receipt.
     later_pending: bool = false,
+    /// This record's first measured compiler; older or unidentified images remain unqualified.
+    first_nvcc: ?limits.Nvcc = null,
 };
 const target = @import("registry_target.zig");
 pub const TargetDecision = target.TargetDecision;
@@ -321,9 +323,7 @@ pub const cuda_sets = [_]CudaSet{
         .{ .name = "flashnext_batch fn_qsa_select", .usage = .{ .{ .regs = 32, .static = 1168, .bound = 1024 }, .{ .regs = 52, .static = 1168, .bound = 1024 }, .{ .regs = 52, .static = 1168, .bound = 1024 }, .{ .regs = 63, .static = 1168, .bound = 1024 }, .{ .regs = 63, .static = 1168, .bound = 1024 } } },
     } ++ joins.nvcc_133_after) },
 };
-pub fn newer(x: limits.Nvcc, y: limits.Nvcc) bool {
-    return x.major > y.major or (x.major == y.major and x.minor > y.minor);
-}
+pub const newer = limits.newer;
 /// The release whose records a compiler's images are checked against: the newest set at or below it, else cuda's.
 pub fn setFor(release: ?limits.Nvcc) limits.Nvcc {
     var at = cuda_release;
@@ -336,6 +336,7 @@ pub fn setFor(release: ?limits.Nvcc) limits.Nvcc {
 }
 /// A record's usage on every SM for images built by `release` (null: an image that names no compiler, cuda's).
 pub fn usageFor(r: CudaRecord, release: ?limits.Nvcc) [limits.sms.len]U {
+    if (@import("cuda_compiler_usage.zig").sourceUsage(r, release)) |usage| return usage;
     if (release) |v| if (v.major == 13 and v.minor == 0) if (@import("measurements/main_130.zig").lookup(r.launch.name)) |u| return u;
     var u = r.usage;
     const rel = release orelse return u;
@@ -563,7 +564,7 @@ test "the registered launches fit every Apple family and every SM, and each plan
 }
 test {
     _ = @import("registry_sets_test.zig");
-    _ = @import("nvfp4_tile_pending.zig");
+    _ = .{ @import("nvfp4_tile_pending.zig"), @import("fp8_prompt_records.zig") };
     _ = paging;
     _ = @import("minimax_records.zig");
     _ = @import("nemotron_ssd_records.zig");
@@ -591,10 +592,4 @@ test {
     _ = @import("registry_pending_test.zig");
     _ = @import("flashnext_pages_pending.zig");
     _ = @import("flashnext_attn_lanes_pending.zig");
-}
-test "unmeasured CUDA records cannot pass a compiled resource check" {
-    for (cuda_pending) |r| {
-        if (!std.meta.eql(none, r.usage)) continue;
-        try std.testing.expectEqual(limits.sms.len, try checkCuda(std.testing.allocator, &.{r}, true));
-    }
 }

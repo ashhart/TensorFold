@@ -141,6 +141,9 @@ test "full mode: stored FP8 packing ignores even malformed activation scales" {
 test "full mode: every stored format launches directly on bf16 rows at the prompt seam" {
     var d: cuda.Driver = undefined;
     var e: Engine = undefined;
+    e.learning = null;
+    e.g.kinds = .{};
+    e.arena = .{ .d = &d, .ptr = 0, .len = 0, .borrowed = true };
     e.stream = .{ .d = &d, .handle = null };
     e.mo = fullKernels(&d);
     const Kind = geometry.Kind;

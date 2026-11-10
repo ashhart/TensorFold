@@ -140,6 +140,10 @@ const Out = struct { y: [nl][]const u8, state: [2][]const u8, log: [2][]const u8
 
 /// The scan on every layer after tf_q35k_apply (`apply` given), or with the rows pending (`sign` > 0: written back).
 fn launch(gpu: check.Gpu, s: cuda.Stream, apply: ?cuda.Function, scan: cuda.Function, r: usize, f: Fixture, sign: c_int, pend0: []const u8, drop: usize, a: std.mem.Allocator) !Out {
+    return launchRoot(gpu, s, apply, scan, r, f, sign, pend0, drop, false, a);
+}
+
+fn launchRoot(gpu: check.Gpu, s: cuda.Stream, apply: ?cuda.Function, scan: cuda.Function, r: usize, f: Fixture, sign: c_int, pend0: []const u8, drop: usize, omit_before: bool, a: std.mem.Allocator) !Out {
     var rig = rig_.Rig{ .gpu = gpu, .s = s };
     defer rig.deinit();
     const total = 2 * f.rows;
@@ -149,7 +153,7 @@ fn launch(gpu: check.Gpu, s: cuda.Stream, apply: ?cuda.Function, scan: cuda.Func
         const state = try rig.scratch(nl * rec * 4);
         try (cuda.DeviceBuffer{ .d = gpu.d, .ptr = state, .len = nl * rec * 4 }).upload(0, std.mem.sliceAsBytes(f.state[st]));
         sg.* = .{ .rec = state, .log = try rig.scratch(f.rows * nl * log_row), .row0 = @intCast(st * f.rows), .rows = @intCast(f.rows) };
-        if (f.rows == 1) sg.before = try rig.scratch(nl * rec * 4);
+        if (f.rows == 1 and !omit_before) sg.before = try rig.scratch(nl * rec * 4);
         const n = f.n[st] - (if (st == 0) drop else 0);
         if (apply != null) {
             if (f.n[st] > 0) src[st] = try rig.input(f.src[st]);
@@ -187,7 +191,7 @@ fn launch(gpu: check.Gpu, s: cuda.Stream, apply: ?cuda.Function, scan: cuda.Func
     for (0..2) |st| {
         out.state[st] = try a.dupe(u8, try rig.bytes(segs[st].rec, nl * rec * 4));
         out.log[st] = try a.dupe(u8, try rig.bytes(segs[st].log, f.rows * nl * log_row));
-        out.before[st] = if (f.rows == 1) try a.dupe(u8, try rig.bytes(segs[st].before, nl * rec * 4)) else &.{};
+        out.before[st] = if (segs[st].before != 0) try a.dupe(u8, try rig.bytes(segs[st].before, nl * rec * 4)) else &.{};
     }
     try check.expect(try rig.intact() and !rig.overlap() and std.mem.eql(u8, seen, try rig.inputBytes()), "qwen35 pending: a launch changed an input or a guard", .{});
     return out;
@@ -223,6 +227,28 @@ fn landed(gpu: check.Gpu, s: cuda.Stream, fun: cuda.Function, from_pend: bool, f
     return out;
 }
 
+fn rootBackups(gpu: check.Gpu, s: cuda.Stream, apply: cuda.Function, fns: []const cuda.Function) !void {
+    for ([_]usize{ 0, 9 }) |pending| for (scans, fns) |sc, scan| {
+        var arena = std.heap.ArenaAllocator.init(gpu.gpa);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const f = try Fixture.make(a, &decode_row, pending, 0xa110 + pending + sc.slots);
+        const want = try launch(gpu, s, apply, scan, sc.r, f, 0, f.pend[0], 0, a);
+        if (pending == 0) for (want.before, f.state) |before, state|
+            try check.sameBytes("qwen35 populated root backup", before, std.mem.sliceAsBytes(state));
+        for (0..5) |_| {
+            const got = try launchRoot(gpu, s, null, scan, sc.r, f, 1, f.pend[0], 0, true, a);
+            for (got.y, want.y) |x, y| try check.sameBytes("qwen35 null-before outputs", x, y);
+            for (0..2) |st| {
+                try check.sameBytes("qwen35 null-before state", got.state[st], want.state[st]);
+                try check.sameBytes("qwen35 null-before log", got.log[st], want.log[st]);
+                try check.expect(got.before[st].len == 0, "qwen35 null-before allocated a backup", .{});
+            }
+        }
+        std.debug.print("PASS qwen35 root backup slots={d}: null/populated outputs, state and log equal; {d} pending rows, 5 repeats, guards\n", .{ sc.slots, pending });
+    };
+}
+
 pub fn run(gpu: check.Gpu) !void {
     var s = try cuda.Stream.init(gpu.d, false);
     defer s.deinit();
@@ -234,6 +260,8 @@ pub fn run(gpu: check.Gpu) !void {
     const apply_pend = try keep.function("tf_q35k_apply_pend");
     var fns: [scans.len]cuda.Function = undefined;
     inline for (scans, 0..) |sc, i| fns[i] = try mod.function(std.fmt.comptimePrint("tf_q35_gdn_slots_{d}", .{sc.slots}));
+    try rootBackups(gpu, s, apply, &fns);
+    try @import("contract_qwen_conv_backup.zig").run(gpu, s, try mod.function("tf_q35_conv_commit"));
     var red: [scans.len + 1][2]bool = @splat(@splat(false)); // each scan's, then tf_q35k_apply_pend's: dropped, swapped
     var cases: [scans.len]usize = @splat(0);
     var scratch = std.heap.ArenaAllocator.init(gpu.gpa);

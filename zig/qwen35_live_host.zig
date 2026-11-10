@@ -63,6 +63,7 @@ test "selected live shape reaches real tiled projections and DeltaNet scan dispa
     e.fns.sums = function(&d, 1);
     e.fns.gdn_slots_1 = function(&d, 3);
     e.affine.mlp128 = false;
+    e.affine.warp_flags = 0;
     e.affine.gemv_fn = function(&d, 2);
     e.affine.gemv_blocks = 1;
     e.affine.pdl = false;

@@ -45,9 +45,9 @@ pub fn absorbRole(d: *Mtp, ctx: *Ctx, tap_ring: u64, start_: u64, n_: usize, row
         if (!propose) continue;
         // the newest row: its state kept for the drafts, its best tokens drawn
         try ctx.last.copyFrom(0, d.x + (rows - 1) * g.hidden * 2, g.hidden * 2, e.stream.handle);
-        try d.draw(rows - 1, 1, true);
+        if (d.head_enabled) try d.draw(rows - 1, 1, true);
     }
-    if (!propose) return e.stream.synchronize();
+    if (!propose or !d.head_enabled) return e.stream.synchronize();
     var cands: [1][ranks]u32 = undefined;
     ctx.cands[0] = try d.fetch(1, &cands);
     if (d.trees) ctx.cands = cands[0];

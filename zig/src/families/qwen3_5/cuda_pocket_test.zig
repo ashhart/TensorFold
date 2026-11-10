@@ -78,6 +78,7 @@ fn driver() cuda.Driver {
     return d;
 }
 test "Trainer admission: every failed pocket copy or wait leaves the entire live pocket unchanged" {
+    if (@import("qwen_prefill_config").max_rows == 8192) return error.SkipZigTest;
     for ([_]bool{ false, true }) |existing| for (0..4) |failure| {
         live = @splat(false);
         copies = 0;
@@ -113,6 +114,7 @@ test "Trainer admission: every failed pocket copy or wait leaves the entire live
     };
 }
 test "Trainer admission: a nonempty pocket read failure is an error, never zero neurons" {
+    if (@import("qwen_prefill_config").max_rows == 8192) return error.SkipZigTest;
     live = @splat(false);
     copies = 0;
     fail_sync = false;
@@ -137,6 +139,7 @@ test "Trainer admission: a nonempty pocket read failure is an error, never zero 
 }
 
 test "Dense learning: dense row scales preserve untaught and taught streams and publish only after a successful copy" {
+    if (@import("qwen_prefill_config").max_rows == 8192) return error.SkipZigTest;
     live = @splat(false);
     copies = 0;
     fail_copy = 0;
@@ -170,4 +173,10 @@ test "Dense learning: dense row scales preserve untaught and taught streams and 
     fail_copy = 0;
     try extra.stageScales(&e, &parts, 5);
     try t.expectEqualSlices(f32, &.{ 1, 1, 0, 0, 0 }, @as([*]const f32, @ptrFromInt(e.taught))[0..5]);
+}
+
+test "Qwen prefill capacity: wide builds refuse pockets before device access" {
+    if (@import("qwen_prefill_config").max_rows == 4096) return;
+    var p: pk.Pockets = undefined;
+    try t.expectError(error.WidePrefillPocketsUnsupported, p.set(undefined, 0, &.{}, &.{}, &.{}, 0));
 }

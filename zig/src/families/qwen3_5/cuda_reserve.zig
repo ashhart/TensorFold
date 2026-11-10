@@ -61,6 +61,7 @@ pub fn target(comptime Cache: type, comptime Part: type, l: anytype, streams: u3
 fn warmShapes(comptime Part: type, l: anytype, caches: anytype, parts: []Part, ids: []u32, picks: []E.Draw, warm_ns: *i96) !void {
     for (caches, 0..) |cache, n| {
         parts[n] = .{ .cache = cache, .rows = 1 };
+        if (comptime @hasField(Part, "root_committed")) parts[n].root_committed = true;
         picks[n] = .{ .rule = null, .position = 1 };
         const shape = E.Engine.Shape.init(n + 1, n + 1, true, l.e.n_taps > 0, 1);
         if (l.warmed.contains(shape)) continue;

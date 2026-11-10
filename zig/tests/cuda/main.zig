@@ -252,6 +252,7 @@ const usage =
     \\  exl3-tiles [DIR]          EXL3's tile candidate: codebooks and tiles bit-equal, FP64, rows through qlinear and Dense
     \\  train-pack MODEL EXAMPLES [COUNT]   training passes holding several sequences against one a pass: differences, time
     \\  kernel-contract [WORD...]  the contract's gates, each planted control red (-Dnvcc); WORDs: kernels named so
+    \\  kv-expand-contract        exact filled FP8 KV expansion, whole and paged, original bytes and FP64
     \\  qmm-prefill-many-contract the GB10 bit-exact multi-projection prompt launch against separate launches
     \\  qmm-prefill-tile22-contract the GB10 large-prompt 2x2 tile against the default tile
     \\  qmmf-prompt              BF16 K32 prompt staging: parent K64 bytes at current Flash Next shapes
@@ -520,6 +521,12 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "q27-gemm")) return q27_gemm_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "gdn-back-27b")) return gdn_back_tests.runShape(gpu, 5120, 64);
     if (std.mem.eql(u8, cmd, "kernel-contract")) return contract_tests.run(gpu, rest);
+    if (std.mem.eql(u8, cmd, "nvfp4-prompt-contract")) return @import("contract_nvfp4_prompt.zig").run(gpu);
+    if (std.mem.eql(u8, cmd, "nvfp4-tma-contract")) return @import("contract_nvfp4_tma.zig").run(gpu);
+    if (std.mem.eql(u8, cmd, "fp8-prompt-contract")) return @import("contract_fp8_prompt.zig").run(gpu);
+    if (std.mem.eql(u8, cmd, "kv-expand-contract")) return @import("contract_kv_expand.zig").run(gpu);
+    if (std.mem.eql(u8, cmd, "qwen-taps-contract")) return @import("contract_qwen_taps.zig").run(gpu);
+    if (std.mem.eql(u8, cmd, "qwen-shared-taps-contract")) return @import("contract_qwen_shared_taps.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "gb10-grouped-contract")) return gb10_many_contract.runAll(gpu);
     if (std.mem.eql(u8, cmd, "qmm-prefill-many-contract")) return qmm_prefill_many_contract.run(gpu);
     if (std.mem.eql(u8, cmd, "qmm-prefill-tile22-contract")) return qmm_prefill_tile22_contract.run(gpu);
@@ -577,17 +584,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     return error.UnknownCommand;
 }
 
-fn info(gpu: check.Gpu) !void {
-    var name_buf: [256]u8 = undefined;
-    const name = try gpu.ctx.name(&name_buf);
-    const mem = try gpu.ctx.memInfo();
-    std.debug.print("RESULT driver CUDA {d}, device {s}, sm_{d}, {d} SMs, {d} MiB total, {d} MiB free, kernels embedded {}\n", .{
-        try gpu.d.version(),      name,
-        try gpu.ctx.capability(), try gpu.ctx.attribute(.multiprocessor_count),
-        mem.total >> 20,          mem.free >> 20,
-        cuda.kernels.available,
-    });
-}
+const info = @import("runner_info.zig").info;
 
 fn hasFlag(flags: []const [:0]const u8, name: []const u8) bool {
     for (flags) |f| if (std.mem.eql(u8, f, name)) return true;

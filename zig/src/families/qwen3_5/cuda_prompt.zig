@@ -1,4 +1,4 @@
-//! A one-part prompt chunk's attention tiles and delta-rule chain (uncaptured: the host passes the stream's pointers).
+//! A one-part prompt chunk's attention tiles and delta-rule chain, with the stream's pointers passed by the host.
 const std = @import("std");
 const cuda = @import("cuda");
 const E = @import("cuda_engine.zig");
@@ -91,6 +91,7 @@ pub fn runFrom(e: *E.Engine, layer: usize, from: usize, end: usize) !void {
     const rows = end - from;
     var sg = std.mem.bytesToValue(Seg, e.staged.bytes[E.Engine.segs_at..][0..@sizeOf(Seg)]);
     sg.len += @intCast(from); // row `from` is the first query: its keys end at len + from
+    if (try @import("cuda_prefill_paths.zig").attention(e, layer, from, end, sg)) return;
     const paged = sg.pt != 0;
     var a = arguments(e, sg, layer, rows, from * g.q_heads * head_dim * 2);
     const ids = if (p256(e, sg)) pageIds(sg, rows) else 0;
@@ -104,6 +105,7 @@ pub fn runFrom(e: *E.Engine, layer: usize, from: usize, end: usize) !void {
 pub fn delta(e: *E.Engine, layer: usize, rows: usize) !void {
     const g = e.g;
     const sg = std.mem.bytesToValue(Seg, e.staged.bytes[E.Engine.segs_at..][0..@sizeOf(Seg)]);
+    if (try @import("cuda_prefill_paths.zig").delta(e, layer, rows, sg)) return;
     const state = sg.rec + layer * g.v_heads * geometry.dk * geometry.dk * 4;
     var a: cuda.Args = .{};
     for ([_]u64{ e.q, e.k, e.v, e.g_, e.beta, state, state, e.y }) |v| a.add(v);

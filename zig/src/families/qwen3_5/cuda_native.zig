@@ -63,50 +63,25 @@ pub const request_starts_switch = "TF_QWEN_REQUEST_STARTS";
 /// explain() words open refusals too (--vision on a checkpoint without a tower it reads).
 pub const explains_open = true;
 
-/// The server's reading of the room left now; null if unreadable.
-pub const Room = struct { ctx: *anyopaque, read: *const fn (*anyopaque) ?u64 };
-/// `room` and `drafter` size an EXL3 checkpoint's load: its embedding rows go to host memory when the card is short.
-pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, vision: ?vision.Limits = null, kv8: bool = false, prompt_int8: bool = false, precision: ?enum { full } = null, rope_yarn: ?f64 = null, room: ?Room = null, drafter: ?[]const u8 = null };
+pub const Room = @import("cuda_native_types.zig").Room;
+pub const Options = @import("cuda_native_types.zig").Options;
+pub const Loaded = @import("cuda_native_types.zig").Loaded;
 
 /// The window --context may ask for: the config's, or the YaRN window its block or --rope-yarn makes (cuda_rope.zig).
 pub fn contextCeiling(a: std.mem.Allocator, io: std.Io, dir: []const u8, flag: ?f64) !i64 {
     return @intCast((try cuda_rope.resolveDir(a, io, dir, flag)).ceiling);
 }
 
-/// What the native server drives: the lane backend, the facts its round loop reads, and how to free it.
-pub const Loaded = struct {
-    learns: ?*E.Engine = null,
-    learn_bytes: usize = 0,
-    backend: be.Backend,
-    facts: lanes.Model,
-    rows: u32,
-    /// Device bytes each admitted stream allocates (recurrences, convolution tails, keys and values).
-    stream_bytes: usize,
-    free_streams: u32 = 0,
-    ctx: *anyopaque,
-    deinit: *const fn (*anyopaque) void,
-    /// Called with the admitted stream count: that many caches allocated and touched now, as memory commits on touch.
-    reserve: *const fn (*anyopaque, u32) anyerror!void,
-    /// --vision: the tower the server's image requests reach (native/cuda_vision_offer.zig).
-    vision: ?*vision.Vision = null,
-    /// What the prompt cache's saves copy: the engine and the streams' caches.
-    target: *reuse.Target,
-    /// TF_QWEN_KV_PAGES: the streams beside the first take pages of one pool (null: a window each).
-    layout: ?kv_pool.Layout = null,
-    /// TF_QWEN_KV_SHARE: the family keeps prompts as pool pages itself; the host makes no prompt cache of its own.
-    own_prompt_cache: bool = false,
-    /// TF_QWEN_KV_SHARE or TF_QWEN_KV_PAGES_ALL: every stream runs on the pool's pages; the engine's window sits idle.
-    all_on_pages: bool = false,
-    /// TF_QWEN_KV_PAGES_ALL=1: the engine's own stream takes pages too, a window of them set aside by the plan.
-    engine_paged: bool = false,
-    /// An integrated GPU: kept states in device memory on the host budget (Target.device), the startup line says so.
-    device_snaps: bool = false,
-    /// A Clef checkpoint's readouts (the engine then answers only those); null for every other checkpoint.
-    readouts: ?lanes.readout.Info = null,
-};
-
 pub fn cacheBytes(e: *const E.Engine, cap: usize, test_tokens: usize) !usize {
     return std.math.add(usize, e.streamBytes(cap), try cache_mod.pageExtra(e.g, cap, test_tokens, e.kv8));
+}
+
+/// Unallocated shared verification scratch is charged once, beside the streams' persistent pages.
+pub fn pendingDeviceBytes(ptr: *anyopaque) u64 {
+    const l: *Lanes = @ptrCast(@alignCast(ptr));
+    const limit = E.recurrent.sharedBytes(l.e);
+    if (limit == 0) return 0;
+    return limit -| l.e.rec_scratch.residentBytes();
 }
 
 /// The pool's layout with a drafter (`extra` bytes a stream): DFlash2's ring and taps in the run, the rest fixed.
@@ -169,7 +144,16 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
 
 /// `open` without the decision-only refusals: the runners open a BF16 backbone with a test readout through it.
 pub fn openLanes(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
+    try @import("sys").environment.checkScope(.qwen, @import("sys").environment.Process{});
+    try @import("sys").cuda_qualification.check(model_type, E.max_rows, @import("sys").environment.Process{});
+    _ = try @import("cuda_prefill_graph.zig").requested();
+    try @import("qwen_prefill_config").admitLearning(o.slide);
     if (kernels != null) return error.QwenHasNoCapturedKernels;
+    try cuda.fp8_prefill.compatible(try cuda.fp8_prefill.requested(), o.slide, o.prompt_int8, o.precision != null);
+    try cuda.fp8_prefill.compatible(try cuda.cublaslt_prefill.requested(), o.slide, o.prompt_int8, o.precision != null);
+    const prefill_paths = try @import("cuda_prefill_paths.zig").requested();
+    try cuda.fp8_prefill.compatible(prefill_paths.key() != 0, o.slide, o.prompt_int8, o.precision != null);
+    if (o.slide and (try @import("cuda_nvfp4_mlp.zig").directory()) != null) return error.UnsupportedLearningFormat;
     if (o.slide and o.kv8) return error.UnsupportedLearningFormat;
     const page_tokens = try pages_mod.paging();
     const engine_paged = page_tokens > 0 and pages_mod.pagedOnly();
@@ -177,10 +161,18 @@ pub fn openLanes(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, d
     _ = try cache_mod.cacheRows(o.context, page_test);
     if (page_tokens > 0 and o.slide) return error.QwenPagesNoLearner;
     const share_snaps = try prefix_mod.sharing();
+    const prefill_rows = try prefill.chunkRows(try @import("sys").environment.given("TF_QWEN_PREFILL_ROWS"));
+    if (prefill_rows != E.max_rows and share_snaps > 0) return error.PrefillChunkNeedsCacheOff;
     // a kept state sits on a cold pass's chunk cut, so later chunks keep a cold pass's bits: pages divide the chunk
     if (share_snaps > 0 and (page_tokens == 0 or E.max_rows % page_tokens != 0)) return error.QwenShareNeedsPages;
     const e = try E.Engine.init(gpa, io, ctx, dir, o.kv8, fitOf(o));
     errdefer e.deinit();
+    if (page_tokens > 0 and engine_paged and !o.slide and !e.g.exl3 and o.drafts and
+        (try @import("sys").environment.given("TF_DRAFT_MTP_DIR")) == null)
+    {
+        if (o.drafter) |dir_| if (@import("cuda_draft_config.zig").declared(gpa, io, dir_))
+            try E.recurrent.configure(e, o.lanes);
+    }
     if (o.rope_yarn) |f| { // --rope-yarn over the downloaded config: its table, and the window it allows
         var arena = std.heap.ArenaAllocator.init(gpa);
         defer arena.deinit();
@@ -198,7 +190,7 @@ pub fn openLanes(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, d
     const trace = try round_timing.Trace.create(gpa, timing_on and e.g.hidden == 5120 and e.g.layers == 64 and e.g.experts == 0);
     errdefer if (trace) |x| gpa.destroy(x);
     const l = try gpa.create(Lanes);
-    l.* = .{ .gpa = gpa, .io = io, .e = e, .capacity = o.context, .page_tokens = page_tokens, .engine_paged = engine_paged, .page_test = page_test, .share_snaps = share_snaps, .cost_context = ctx, .startup = e.startup, .vision = v, .target = undefined, .timing_on = timing_on, .trace = trace };
+    l.* = .{ .gpa = gpa, .io = io, .e = e, .capacity = o.context, .prefill_rows = prefill_rows, .page_tokens = page_tokens, .engine_paged = engine_paged, .page_test = page_test, .share_snaps = share_snaps, .cost_context = ctx, .startup = e.startup, .vision = v, .target = undefined, .timing_on = timing_on, .trace = trace, .full_keep = E.recurrent.needsFullKeep(e) };
     l.target = .{ .e = e, .caches = &l.caches, .seen = &l.seen, .device = try ctx.attribute(.integrated) != 0 };
     return .{
         .learns = if (o.slide) e else null,
@@ -267,12 +259,14 @@ fn pick(sampling: ?lanes.Sampling, position: u64) E.Draw {
 }
 
 pub const Lanes = struct {
+    full_keep: bool = false,
     timing_on: bool = false,
     trace: ?*round_timing.Trace = null,
     gpa: std.mem.Allocator,
     io: std.Io,
     e: *E.Engine,
     capacity: usize,
+    prefill_rows: u32 = E.max_rows,
     /// TF_QWEN_KV_PAGES's positions a page (0: no pool) and the pool `attach` made.
     page_tokens: usize = 0,
     page_test: usize = 0,
@@ -286,6 +280,7 @@ pub const Lanes = struct {
     draft: ?*Draft = null,
     /// The MTP drafter (qwen3_5_moe), when attached: its ring and state go into the pool lanes' runs.
     mtp: ?*Mtp = null,
+    ensemble: ?*@import("cuda_draft_ensemble.zig").Ensemble = null,
     /// A drafter's bytes a stream outside the lanes' runs (pagedLayout).
     extra: usize = 0,
     cost_context: ?*const cuda.Context = null,
@@ -374,7 +369,7 @@ pub const Lanes = struct {
     };
 
     fn backend(self: *Lanes) be.Backend {
-        return .{ .ptr = self, .round_observer = if (self.trace) |x| x.observer() else null, .first_before_draft = true, .penalties = true, .vtable = if (self.readout.readout != null) &read_vtable else &text_vtable };
+        return .{ .ptr = self, .needs_full_keep = self.full_keep, .round_observer = if (self.trace) |x| x.observer() else null, .first_before_draft = true, .penalties = true, .vtable = if (self.readout.readout != null) &read_vtable else &text_vtable };
     }
 
     /// Readout streams from now on fill through `r` (one rank; before the first stream): the backend to hand on.
@@ -453,8 +448,9 @@ pub const Lanes = struct {
             try self.e.penalties.window(self.gpa, stream, cache.len, token);
             try self.e.penalties.row(self.gpa, 0, stream.penalties, &.{});
         }
-        try self.e.forward(&.{.{ .cache = cache, .rows = 1 }}, &.{token}, .{ .draws = &.{pick(stream.sampling, position)} });
+        try self.e.forward(&.{.{ .cache = cache, .rows = 1, .root_committed = true }}, &.{token}, .{ .draws = &.{pick(stream.sampling, position)} });
         cache.last = null;
+        E.recurrent.committed(self.e, cache);
         return self.e.tokens[0];
     }
 
@@ -470,6 +466,11 @@ pub const Lanes = struct {
         defer if (self.timing_on) @import("cuda_draft.zig").timing("verify", self.io, t0);
         if (self.trace) |x| x.reset();
         if (windows.len != out.len) return error.InvalidQwenWindows;
+        if (E.recurrent.needsFullKeep(self.e)) {
+            var rows: usize = 0;
+            for (windows) |w| rows = try std.math.add(usize, rows, w.rows());
+            if (rows > E.most_verify or windows.len > self.e.rec_budget.streams) return error.InvalidQwenWindows;
+        }
         for (windows, out) |w, o| {
             const rows = w.rows();
             if (w.held != 0 or rows > self.e.window_rows or w.positions.len != rows) return error.UnsupportedQwenWindow;
@@ -495,7 +496,7 @@ pub const Lanes = struct {
             var masked = false;
             while (at + n < windows.len and n < E.max_segs and total + windows[at + n].rows() <= self.e.verify_rows) : (n += 1) {
                 const w = windows[at + n];
-                parts[n] = .{ .cache = self.caches.get(w.stream).?, .rows = w.rows(), .parents = w.parents };
+                parts[n] = .{ .cache = self.caches.get(w.stream).?, .rows = w.rows(), .parents = w.parents, .root_committed = true };
                 ids[total] = w.pending;
                 @memcpy(ids[total + 1 ..][0..w.tokens.len], w.tokens);
                 for (w.positions, 0..) |p, r| picks[total + r] = pick(w.stream.sampling, p);
@@ -518,6 +519,8 @@ pub const Lanes = struct {
                     t.* = if (masked) try draws.draw(self.gpa, self.e.rowLogits(row + r), w.stream.sampling, p, mask) else self.e.tokens[row + r];
                 }
                 @memcpy(o.drafts, w.tokens);
+                try @import("cuda_draft_feedback.zig").observe(self.draft, w, o);
+                try @import("cuda_draft_trace.zig").verified(self.gpa, w, o);
                 row += w.rows();
             }
             at += n;
@@ -554,9 +557,11 @@ pub const Lanes = struct {
         const cache = try self.cacheOf(stream);
         const ring = cache.tap orelse return error.NoTaps;
         // a long prompt asks for more rows than the ring keeps; the drafter reads only its window of the newest
-        const held_from = cache.written -| E.tap_rows;
-        if (start + count > cache.written or start + count <= held_from) return error.RowsNotHeld;
-        return .{ .buffer = ring.ptr, .offset = start, .rows = count, .row_bytes = @intCast(self.e.n_taps * self.e.g.hidden * 2), .space = .device, .dtype = .bf16 };
+        const end = std.math.add(u64, start, count) catch return error.RowsNotHeld;
+        if (end > cache.written) return error.RowsNotHeld;
+        const selected = try @import("cuda_prompt_taps.zig").read(self.e, cache, start, count, if (self.draft) |d| d.c.window else self.e.tap_capacity);
+        if (selected == null and end <= cache.written -| self.e.tap_capacity) return error.RowsNotHeld;
+        return .{ .buffer = selected orelse ring.ptr, .offset = start, .rows = count, .row_bytes = @intCast(self.e.n_taps * self.e.g.hidden * 2), .space = .device, .dtype = .bf16 };
     }
 
     fn releaseFn(ptr: *anyopaque, stream: *lanes.Stream) void {
@@ -589,4 +594,6 @@ test "Qwen stepped prefill: cancel between host iterations retains only the last
 
 test {
     _ = @import("cuda_mtp_budget.zig");
+    _ = @import("cuda_qualification_test.zig");
+    _ = @import("cuda_draft_ensemble.zig");
 }

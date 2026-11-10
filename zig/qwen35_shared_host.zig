@@ -48,6 +48,9 @@ fn engine(d: *cuda.Driver) q.engine.Engine {
     e.stream = .{ .d = d, .handle = null };
     e.g = .{ .hidden = 256, .intermediate = 256, .layers = 1, .vocab = 32, .k_heads = 1, .v_heads = 1, .q_heads = 1, .kv_heads = 1, .eps = 1e-6, .tied = true, .context = 256, .linear = @splat(true) };
     e.n_taps = 0;
+    e.tap_capacity = q.engine.tap_rows;
+    e.prompt_taps = .{};
+    e.rec_budget = .{};
     e.kv8 = false;
     e.geo = .{ .hid = 256, .nk = 1, .nv = 1, .qh = 1, .kvh = 1, .nl = 1 };
     const f: cuda.Function = .{ .d = d, .handle = @ptrFromInt(1) };
@@ -187,6 +190,7 @@ test "Shared verification: the actual cache constructor unwinds the before bank 
     e.rec_scratch = q.engine.recurrent.Pool.init(a, @intFromPtr(&e));
     defer q.engine.recurrent.shutdown(&e);
     e.n_taps = 1;
+    e.tap_capacity = q.engine.tap_rows;
     e.g.layers = 2;
     e.g.linear[1] = false;
     // kv, state, the overlaid log and before block, and the tap ring: four device allocations
@@ -215,4 +219,8 @@ test "Shared verification: the actual cache constructor unwinds the before bank 
     try std.testing.expect(cache.before.?.ptr + cache.before.?.len <= block.ptr + block.len);
     cache.deinit(a);
     try Owners.balanced();
+}
+
+test "Shared verification: startup warms eight and sixteen roots within the global reserve" {
+    try q.native.reservation.Test.concurrent();
 }

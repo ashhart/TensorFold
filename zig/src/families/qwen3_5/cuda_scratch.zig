@@ -60,17 +60,21 @@ pub fn scratch(e: *E.Engine, mode: Mode) !usize {
     e.qraw = try t.alloc(R * 2 * g.attnWidth() * 2);
     e.qn = try t.alloc(R * g.attnWidth() * 2);
     inline for (.{ "kraw", "vraw", "kn" }) |name| @field(e, name) = try t.alloc(R * g.kv_heads * geometry.head_dim * 2);
-    const attention = t.rewind(shared);
-    inline for (.{ "gate", "up", "act" }) |name| @field(e, name) = try t.alloc(R * g.intermediate * 2);
-    t.past(&.{ delta, attention });
-    // the decode partials: verify rows only (a prompt chunk's attention runs cuda_prompt_attention's tiles)
+    // Partials stay live through attention merge, then the MLP may reuse their bytes.
     const partials = E.most_verify * g.q_heads * E.max_chunks;
     e.pm = try t.alloc(partials * 4);
     e.pl = try t.alloc(partials * 4);
     e.po = try t.alloc(partials * geometry.head_dim * 4);
+    const attention = t.rewind(shared);
+    inline for (.{ "gate", "up", "act" }) |name| @field(e, name) = try t.alloc(R * g.intermediate * 2);
+    t.past(&.{ delta, attention });
     e.logits = try t.alloc(E.most_verify * g.vocab * 2);
     if (g.moe()) e.routed = try routed.Scratch.carve(&t, g, R);
     e.amax = try t.alloc(E.most_verify * E.argmaxSlices(g.vocab) * 8);
     e.picks = try t.alloc(E.most_verify * cuda.sample.Draws.row_scratch);
     return t.total;
+}
+
+test {
+    _ = @import("cuda_scratch_test.zig");
 }

@@ -148,7 +148,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, e: *Engine, dir: []const u8) !mt
     var ck = try core.Checkpoint.openModelPrefix(gpa, io, dir, "mtp.");
     defer core.checkpoint.cache.close(&ck);
     if (!ck.has("mtp.fc.weight")) return error.NoMtpLayer;
-    std.log.info("qwen3.6 mtp: the checkpoint's bf16 MTP layer drafts as affine-4 tables quantized at load (drafts only)", .{});
+    std.log.info("Qwen MTP: bf16 layer drafts as affine-4 tables quantized at load", .{});
     var w: mtp.Weights = .{ .arena = try DeviceBuffer.alloc(e.d, mtp.total(g)), .fc_e = undefined, .fc_h = undefined, .norm_e = 0, .norm_h = 0, .input_norm = 0, .post_norm = 0, .q_norm = 0, .k_norm = 0, .norm = 0, .q = undefined, .k = undefined, .v = undefined, .o = undefined, .mlp = undefined };
     errdefer w.arena.free();
     try w.arena.fill8(0, null);
@@ -178,7 +178,11 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, e: *Engine, dir: []const u8) !mt
     w.k = try l.linear("mtp.layers.0.self_attn.k_proj.weight", kvw, g.hidden);
     w.v = try l.linear("mtp.layers.0.self_attn.v_proj.weight", kvw, g.hidden);
     w.o = try l.linear("mtp.layers.0.self_attn.o_proj.weight", g.hidden, aw);
-    w.mlp = try experts(&l);
+    w.mlp = if (g.moe()) try experts(&l) else .{ .dense = .{
+        .gate = try l.linear("mtp.layers.0.mlp.gate_proj.weight", g.intermediate, g.hidden),
+        .up = try l.linear("mtp.layers.0.mlp.up_proj.weight", g.intermediate, g.hidden),
+        .down = try l.linear("mtp.layers.0.mlp.down_proj.weight", g.hidden, g.intermediate),
+    } };
     return w;
 }
 

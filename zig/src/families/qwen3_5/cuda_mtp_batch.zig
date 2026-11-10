@@ -17,8 +17,11 @@ pub const most = 16;
 /// tf_q36m_attn_rows' RingRow: a packed row's ring, its slots [begin, end) of a ring of w, its segment's first row.
 pub const RingRow = extern struct { rk: u64, rv: u64, begin: i64, end: i64, seg: i32, w: i32 };
 
+pub const Branch = struct { ctx: *Ctx, hidden: u64, token: u32, position: u64, parent: i32 = -1 };
+pub const LogitsRow = struct { ids: [16]u32, logits: [16]f32 };
+
 /// A stream's rows in a pass: its context, its first packed row, its rows, and their first slot.
-const Seg = struct { ctx: *Ctx, first: usize, rows: usize, p0: u64 };
+const Seg = struct { ctx: *Ctx, first: usize, rows: usize, p0: u64, step: c_int = 1 };
 
 /// Consecutive items into passes of at most `most` rows (out[i]: its items [from, to)); an item over `most` alone.
 pub fn plan(rows: []const usize, out: [][2]usize) usize {
@@ -53,12 +56,16 @@ fn upload(d: *Mtp, ids: []const u32, tab: []const RingRow) !void {
 
 /// Mtp.layer over every segment's rows at once: d.ids their tokens, d.hin their states; x gets their normed outputs.
 fn layerRows(d: *Mtp, segs: []const Seg, rows: usize) !void {
+    return layerRowsAt(d, segs, rows, d.ids, d.tab, null);
+}
+
+fn layerRowsAt(d: *Mtp, segs: []const Seg, rows: usize, ids: u64, tab: u64, ancestors: ?u64) !void {
     const e = d.e;
     const g = e.g;
     const w = &d.w;
     const aw = g.attnWidth();
     const kw = d.kvWidth();
-    try e.embed(d.ids, d.emb, rows, 0);
+    try e.embed(ids, d.emb, rows, 0);
     try d.norm(d.emb, 0, w.norm_e, d.en, rows);
     try d.norm(d.hin, 0, w.norm_h, d.hn, rows);
     try d.proj(.{ .a4 = w.fc_e }, d.en, d.h, rows);
@@ -67,13 +74,22 @@ fn layerRows(d: *Mtp, segs: []const Seg, rows: usize) !void {
     try d.projQkv(rows);
     for (segs) |s| { // rope positions run from each segment's first slot
         const p0: c_longlong = @intCast(s.p0);
-        try d.normRope(d.qraw + s.first * 2 * aw * 2, w.q_norm, d.q + s.first * aw * 2, g.q_heads, 2 * aw, 2 * head_dim, p0, 1, s.rows);
-        try d.normRope(d.kraw + s.first * kw * 2, w.k_norm, d.kb + s.first * kw * 2, g.kv_heads, kw, head_dim, p0, 1, s.rows);
+        try d.normRope(d.qraw + s.first * 2 * aw * 2, w.q_norm, d.q + s.first * aw * 2, g.q_heads, 2 * aw, 2 * head_dim, p0, s.step, s.rows);
+        try d.normRope(d.kraw + s.first * kw * 2, w.k_norm, d.kb + s.first * kw * 2, g.kv_heads, kw, head_dim, p0, s.step, s.rows);
     }
-    try e.run(d.fns.attn_rows, .{ rows, g.q_heads, 1 }, .{ 32, 1, 1 }, .{ d.q, d.qraw, @as(c_int, @intCast(2 * aw)), d.kb, d.vb, d.tab, @as(c_int, @intCast(g.q_heads)), @as(c_int, @intCast(g.kv_heads)), d.att });
+    if (ancestors) |anc| {
+        for (segs) |s| try e.run(d.fns.attn_tree, .{ s.rows, g.q_heads, 1 }, .{ 32, 1, 1 }, .{
+            d.q + s.first * aw * 2,               d.qraw + s.first * 2 * aw * 2,      @as(c_int, @intCast(2 * aw)),
+            d.kb + s.first * kw * 2,              d.vb + s.first * kw * 2,            d.lane_k,
+            d.lane_v,                             anc + s.first * Mtp.anc_stride * 4, @as(c_int, Mtp.anc_stride),
+            d.ringK(s.ctx),                       d.ringV(s.ctx),                     @as(c_int, @intCast(g.q_heads)),
+            @as(c_int, @intCast(g.kv_heads)),     @as(c_int, @intCast(d.capacity)),   @as(c_longlong, @intCast(s.ctx.begin)),
+            @as(c_longlong, @intCast(s.ctx.end)), d.att + s.first * aw * 2,
+        });
+    } else try e.run(d.fns.attn_rows, .{ rows, g.q_heads, 1 }, .{ 32, 1, 1 }, .{ d.q, d.qraw, @as(c_int, @intCast(2 * aw)), d.kb, d.vb, tab, @as(c_int, @intCast(g.q_heads)), @as(c_int, @intCast(g.kv_heads)), d.att });
     try d.proj(w.o, d.att, d.r, rows);
     try d.norm(d.h, d.r, w.post_norm, d.x, rows);
-    try d.routed(w.mlp.moe.router, w.mlp.moe.experts, d.x, d.r, rows);
+    try d.mlp(d.x, d.r, rows);
     try d.norm(d.h, d.r, w.norm, d.x, rows);
 }
 
@@ -98,6 +114,164 @@ fn fetchRows(d: *Mtp, rows: usize) ![]align(1) const u32 {
     try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(st.ptr + Mtp.tok_at, d.tok, rows * 4, e.stream.handle), "cuMemcpyDtoHAsync");
     try e.stream.synchronize();
     return std.mem.bytesAsSlice(u32, st[Mtp.tok_at..][0 .. rows * 4]);
+}
+
+/// Every tentative prefix is a separate query: siblings read the true past and themselves, never one another.
+fn branchMetadata(d: *Mtp, queries: []const Branch, segs: []Seg, tab: []RingRow, ids: []u32) !void {
+    if (queries.len > most or segs.len < queries.len or tab.len < queries.len or ids.len < queries.len)
+        return error.BadMtpBranches;
+    for (queries, 0..) |query, i| {
+        if (query.token >= d.e.g.vocab or query.hidden == 0 or query.hidden % 16 != 0 or
+            query.ctx.begin > query.ctx.end or query.ctx.end > std.math.maxInt(i64) or
+            query.position > std.math.maxInt(i64)) return error.BadMtpBranches;
+        segs[i] = .{ .ctx = query.ctx, .first = i, .rows = 1, .p0 = query.position };
+        tab[i] = ringRow(d, query.ctx, query.ctx.end, i);
+        ids[i] = query.token;
+    }
+}
+
+/// Up to 64 output states: microbatches share MTP weights, then their head projection and shortlist share a pass.
+pub fn branchTopk(d: *Mtp, queries: []const Branch, roots: []const *Ctx, out: []LogitsRow) !void {
+    const total = queries.len + roots.len;
+    if (total == 0 or total > engine.most_window or out.len != total) return error.BadMtpBranches;
+    const previous = d.projection_role;
+    defer d.projection_role = previous;
+    d.projection_role = .proposal;
+    const e = d.e;
+    const hb = e.g.hidden * 2;
+    errdefer cuda.completion.drain(e.d, e.stream, "a failed MTP branch batch did not drain its staging");
+    var all_segs: [engine.most_window]Seg = undefined;
+    var all_tab: [engine.most_window]RingRow = undefined;
+    var all_ids: [engine.most_window]u32 = undefined;
+    var prepared: usize = 0;
+    while (prepared < queries.len) {
+        const n = @min(most, queries.len - prepared);
+        try branchMetadata(d, queries[prepared..][0..n], all_segs[prepared..][0..n], all_tab[prepared..][0..n], all_ids[prepared..][0..n]);
+        prepared += n;
+    }
+    const ids_stage = d.staged.bytes[Mtp.ids_at..][0 .. queries.len * 4];
+    const tab_stage = d.staged.bytes[Mtp.btab_at..][0 .. queries.len * @sizeOf(RingRow)];
+    @memcpy(ids_stage, std.mem.sliceAsBytes(all_ids[0..queries.len]));
+    @memcpy(tab_stage, std.mem.sliceAsBytes(all_tab[0..queries.len]));
+    if (queries.len > 0) {
+        try cuda.copy_source.enqueue(e.d, d.ids, ids_stage, e.stream);
+        try cuda.copy_source.enqueue(e.d, d.tab, tab_stage, e.stream);
+    }
+    var at: usize = 0;
+    while (at < queries.len) {
+        const n = @min(most, queries.len - at);
+        const group = queries[at..][0..n];
+        for (group, 0..) |query, i|
+            try d.scratch.copyFrom(d.hin - d.scratch.ptr + i * hb, query.hidden, hb, e.stream.handle);
+        try layerRowsAt(d, all_segs[at..][0..n], n, d.ids + at * 4, d.tab + at * @sizeOf(RingRow), null);
+        try d.scratch.copyFrom(d.lane_state - d.scratch.ptr + at * hb, d.x, n * hb, e.stream.handle);
+        at += n;
+    }
+    return branchHead(d, queries.len, roots, out);
+}
+
+fn branchHead(d: *Mtp, n_queries: usize, roots: []const *Ctx, out: []LogitsRow) !void {
+    const e = d.e;
+    const hb = e.g.hidden * 2;
+    const total = n_queries + roots.len;
+    for (roots, 0..) |ctx, i|
+        try d.scratch.copyFrom(d.lane_state - d.scratch.ptr + (n_queries + i) * hb, ctx.last.ptr, hb, e.stream.handle);
+    try d.proj(e.head, d.lane_state, d.logits, total);
+    // The head reads lane_state; the earlier hidden banks are now free for the parallel shortlist's partials.
+    const part_bytes = @import("cuda").sample.Draws.topkPartsBytes(e.g.vocab, 16, total);
+    if (d.qraw <= d.hin or d.qraw - d.hin < part_bytes) return error.BadMtpBranches;
+    try e.draws.topkRows(e.stream, d.logits, e.g.vocab, 16, d.hin, d.words, total);
+    const lp_words = 43;
+    const st = d.staged.bytes[Mtp.words_at..][0 .. total * lp_words * 4];
+    try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(st.ptr, d.words, st.len, e.stream.handle), "cuMemcpyDtoHAsync");
+    try e.stream.synchronize();
+    const w = std.mem.bytesAsSlice(u32, st);
+    for (out, 0..) |*row, i| for (0..16) |j| {
+        row.ids[j] = w[i * lp_words + 2 + j];
+        row.logits[j] = @bitCast(w[i * lp_words + 22 + j]);
+    };
+}
+
+pub fn prefixOrder(queries: []const Branch, order: []usize, depths: []usize) !void {
+    if (queries.len > engine.most_window or order.len < queries.len or depths.len < queries.len)
+        return error.BadMtpBranches;
+    for (queries, 0..) |query, i| {
+        if (query.parent < -1 or query.parent >= @as(i32, @intCast(i)) or query.ctx.begin > query.ctx.end or
+            query.ctx.end > std.math.maxInt(i64) or query.position > std.math.maxInt(i64)) return error.BadMtpBranches;
+        const expected = if (query.parent < 0) query.ctx.end else blk: {
+            const p: usize = @intCast(query.parent);
+            if (query.ctx != queries[p].ctx) return error.BadMtpBranches;
+            break :blk try std.math.add(u64, queries[p].position, 1);
+        };
+        if (query.position != expected) return error.BadMtpBranches;
+        depths[i] = if (query.parent < 0) 0 else depths[@intCast(query.parent)] + 1;
+        order[i] = i;
+    }
+    std.mem.sort(usize, order[0..queries.len], depths, struct {
+        fn less(d: []const usize, a: usize, b: usize) bool {
+            return d[a] < d[b] or (d[a] == d[b] and a < b);
+        }
+    }.less);
+}
+
+/// Known DFlash tokens let every MTP depth run before one shared vocabulary-head pass.
+pub fn prefixTopk(d: *Mtp, queries: []const Branch, roots: []const *Ctx, out: []LogitsRow) !void {
+    const total = queries.len + roots.len;
+    if (total == 0 or total > engine.most_window or out.len != total) return error.BadMtpBranches;
+    const previous = d.projection_role;
+    defer d.projection_role = previous;
+    d.projection_role = .proposal;
+    const e = d.e;
+    const hb = e.g.hidden * 2;
+    const kb = d.kvWidth() * 2;
+    const stride = Mtp.anc_stride;
+    var order: [engine.most_window]usize = undefined;
+    var depth: [engine.most_window]usize = undefined;
+    try prefixOrder(queries, &order, &depth);
+    var ids: [engine.most_window]u32 = undefined;
+    var ancestors: [engine.most_window * stride]i32 = @splat(0);
+    for (order[0..queries.len], 0..) |original, packed_row| {
+        const query = queries[original];
+        if (query.token >= e.g.vocab) return error.BadMtpBranches;
+        ids[packed_row] = query.token;
+        var parent = query.parent;
+        var n: usize = 0;
+        while (parent >= 0) : (parent = queries[@intCast(parent)].parent) {
+            ancestors[packed_row * stride + 1 + n] = parent;
+            n += 1;
+        }
+        std.mem.reverse(i32, ancestors[packed_row * stride + 1 ..][0..n]);
+        ancestors[packed_row * stride] = @intCast(n);
+    }
+    const ids_stage = d.staged.bytes[Mtp.ids_at..][0 .. queries.len * 4];
+    const anc_stage = d.staged.bytes[Mtp.anc_at..][0 .. queries.len * stride * 4];
+    @memcpy(ids_stage, std.mem.sliceAsBytes(ids[0..queries.len]));
+    @memcpy(anc_stage, std.mem.sliceAsBytes(ancestors[0 .. queries.len * stride]));
+    errdefer cuda.completion.drain(e.d, e.stream, "an MTP prefix pass did not drain its staging");
+    if (queries.len > 0) {
+        try cuda.copy_source.enqueue(e.d, d.ids, ids_stage, e.stream);
+        try cuda.copy_source.enqueue(e.d, d.anc, anc_stage, e.stream);
+    }
+    var at: usize = 0;
+    while (at < queries.len) {
+        var end = at + 1;
+        while (end < queries.len and end - at < most and depth[order[end]] == depth[order[at]]) : (end += 1) {}
+        var segs: [most]Seg = undefined;
+        for (order[at..end], 0..) |original, local| {
+            const query = queries[original];
+            const source = if (query.parent < 0) query.ctx.last.ptr else d.lane_state + @as(usize, @intCast(query.parent)) * hb;
+            try d.scratch.copyFrom(d.hin - d.scratch.ptr + local * hb, source, hb, e.stream.handle);
+            segs[local] = .{ .ctx = query.ctx, .first = local, .rows = 1, .p0 = query.position, .step = 0 };
+        }
+        try layerRowsAt(d, segs[0 .. end - at], end - at, d.ids + at * 4, 0, d.anc + at * stride * 4);
+        for (order[at..end], 0..) |original, local| {
+            try d.scratch.copyFrom(d.lane_state - d.scratch.ptr + original * hb, d.x + local * hb, hb, e.stream.handle);
+            try d.scratch.copyFrom(d.lane_k - d.scratch.ptr + original * kb, d.kb + local * kb, kb, e.stream.handle);
+            try d.scratch.copyFrom(d.lane_v - d.scratch.ptr + original * kb, d.vb + local * kb, kb, e.stream.handle);
+        }
+        at = end;
+    }
+    return branchHead(d, queries.len, roots, out);
 }
 
 /// The round's absorbs: up to `most` rows a pass, each stream's rows one segment; larger or empty ones as before.
@@ -166,6 +340,10 @@ fn absorbPass(d: *Mtp, items: []const dr.Absorb) !void {
         try seg.ctx.last.copyFrom(0, last, g.hidden * 2, e.stream.handle);
         try d.scratch.copyFrom(d.hn - d.scratch.ptr + j * g.hidden * 2, last, g.hidden * 2, e.stream.handle);
         seg.ctx.end = seg.p0 + seg.rows;
+    }
+    if (!d.head_enabled) {
+        d.batch_passes += 1;
+        return e.stream.synchronize();
     }
     try head(d, d.hn, s.len);
     const toks = try fetchRows(d, s.len);
@@ -255,4 +433,52 @@ test "passes pack consecutive items up to 16 rows; a longer item runs alone" {
     const w = plan(&ones, &wide);
     try std.testing.expectEqualSlices([2]usize, &.{ .{ 0, 16 }, .{ 16, 17 } }, wide[0..w]);
     try std.testing.expectEqual(@as(usize, 40), @sizeOf(RingRow));
+}
+
+test "MTP branch metadata isolates sibling keys and keeps each prefix's requested position" {
+    var e: engine.Engine = undefined;
+    e.g.vocab = 248320;
+    e.g.kv_heads = 4;
+    var d: Mtp = undefined;
+    d.e = &e;
+    d.capacity = 16384;
+    var ctx: Ctx = .{ .ring = .{ .d = undefined, .ptr = 0x1000, .len = 1 << 28 }, .last = undefined, .step = undefined, .begin = 10, .end = 100 };
+    var queries = [_]Branch{
+        .{ .ctx = &ctx, .hidden = 0x2000, .token = 1, .position = 100 },
+        .{ .ctx = &ctx, .hidden = 0x3000, .token = 2, .position = 103 },
+    };
+    var segs: [2]Seg = undefined;
+    var table: [2]RingRow = undefined;
+    var ids: [2]u32 = undefined;
+    try branchMetadata(&d, &queries, &segs, &table, &ids);
+    for (table, segs, 0..) |row, seg, i| {
+        try std.testing.expectEqual(@as(i32, @intCast(i)), row.seg);
+        try std.testing.expectEqual(@as(i64, 100), row.end);
+        try std.testing.expectEqual(@as(usize, 1), seg.rows);
+        try std.testing.expectEqual(queries[i].position, seg.p0);
+    }
+    queries[1].token = 248320;
+    try std.testing.expectError(error.BadMtpBranches, branchMetadata(&d, &queries, &segs, &table, &ids));
+}
+
+test "MTP prefix order runs parents first, keeps stream boundaries and rejects crossed or shifted ancestry" {
+    var a: Ctx = .{ .ring = undefined, .last = undefined, .step = undefined, .end = 100 };
+    var b: Ctx = .{ .ring = undefined, .last = undefined, .step = undefined, .end = 200 };
+    var queries = [_]Branch{
+        .{ .ctx = &a, .hidden = 0, .token = 1, .position = 100 },
+        .{ .ctx = &a, .hidden = 0, .token = 2, .position = 101, .parent = 0 },
+        .{ .ctx = &a, .hidden = 0, .token = 3, .position = 102, .parent = 1 },
+        .{ .ctx = &b, .hidden = 0, .token = 4, .position = 200 },
+        .{ .ctx = &b, .hidden = 0, .token = 5, .position = 201, .parent = 3 },
+    };
+    var order: [5]usize = undefined;
+    var depth: [5]usize = undefined;
+    try prefixOrder(&queries, &order, &depth);
+    try std.testing.expectEqualSlices(usize, &.{ 0, 3, 1, 4, 2 }, &order);
+    try std.testing.expectEqualSlices(usize, &.{ 0, 1, 2, 0, 1 }, &depth);
+    queries[4].parent = 1;
+    try std.testing.expectError(error.BadMtpBranches, prefixOrder(&queries, &order, &depth));
+    queries[4].parent = 3;
+    queries[2].position = 103;
+    try std.testing.expectError(error.BadMtpBranches, prefixOrder(&queries, &order, &depth));
 }

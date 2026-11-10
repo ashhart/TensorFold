@@ -527,3 +527,44 @@ test "TF_KV_SHARE's slots alone (GLM): the cache keeps the slots it holds, the n
     many.cache = 16 * g;
     try expectEqual(@as(usize, kv.most_snaps), (try kv.plan(glm, many)).snaps);
 }
+
+test "recycled runs: sixteen mixed state and KV leases fit after every completion order" {
+    var p = try Pool.init(std.testing.allocator, 644, 1);
+    defer p.deinit();
+    var leases: [16]Lease = @splat(.{});
+    var runs: [16]u32 = undefined;
+    var owns: [16]bool = @splat(false);
+    defer for (&leases, 0..) |*lease, i| {
+        if (owns[i]) p.releaseRun(runs[i], 12);
+        p.finish(lease);
+    };
+    for (0..32) |wave| {
+        for (&leases, &runs, 0..) |*lease, *run, i| {
+            try p.promise(lease, 40);
+            if (@hasDecl(Pool, "orderFree")) p.orderFree();
+            run.* = p.claimRun(lease, 12) orelse return error.RecycledRunFragmented;
+            owns[i] = true;
+            try p.cover(lease, 28, null);
+        }
+        try expectEqual(@as(usize, 4), p.available());
+        for (0..32) |replacement| {
+            const i = (replacement * 13 + wave) % 16;
+            p.releaseRun(runs[i], 12);
+            owns[i] = false;
+            p.finish(&leases[i]);
+            try p.promise(&leases[i], 40);
+            if (@hasDecl(Pool, "orderFree")) p.orderFree();
+            runs[i] = p.claimRun(&leases[i], 12) orelse return error.RecycledRunFragmented;
+            owns[i] = true;
+            try p.cover(&leases[i], 28, null);
+        }
+        for (0..16) |j| {
+            const i = (j * 5 + wave) % 16;
+            p.releaseRun(runs[i], 12);
+            owns[i] = false;
+            p.finish(&leases[i]);
+        }
+        try expect(p.idle());
+        try expectEqual(@as(usize, 644), p.available());
+    }
+}

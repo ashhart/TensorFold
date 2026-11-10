@@ -3,7 +3,17 @@ const std = @import("std");
 
 pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.Build.Step) void {
     const host = b.graph.host;
+    const serving_guard = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"Qwen served qualification:"} }));
+    b.step("test-qwen35-qualified-serving-host", "Direct Qwen pre-device qualification refusal and upstream pass-through").dependOn(&serving_guard.step);
+    step.dependOn(&serving_guard.step);
     @import("prefill_widths_cuda.zig").tests(b, cuda, mods, step);
+    const capacity = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{ "Qwen prefill capacity:", "explicit prefill chunks" } }));
+    b.step("test-qwen-prefill-capacity-host", "Full prompt metadata and shared wrapper capacity without a device").dependOn(&capacity.step);
+    step.dependOn(&capacity.step);
+    const memory = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"Qwen memory:"} }));
+    b.step("test-qwen35-memory-host", "Per-stream storage bounds without a CUDA device").dependOn(&memory.step);
+    step.dependOn(&memory.step);
+    @import("nvfp4_contract.zig").host(b, cuda, mods.core, step);
     const metal_scope = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen3_5/config.zig"), .target = host }), .filters = &.{ "Metal 2B format scope:", "admit the affine 2B", "admit untied heads" } }));
     b.step("test-qwen35-metal-scope-host", "Metal 2B format admission without device or Metal compiler").dependOn(&metal_scope.step);
     @import("load_prefetch_host.zig").tests(b, mods.core, step);
@@ -34,6 +44,9 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     step.dependOn(&dspine.step);
     step.dependOn(&dspine_core.step);
     step.dependOn(&dspine_lanes.step);
+    const draft_graph = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"DFlash graph"} }));
+    b.step("test-qwen35-draft-graph-host", "DFlash graph head admission, geometry, keys and opt-in controls without devices").dependOn(&draft_graph.step);
+    step.dependOn(&draft_graph.step);
     const ct_admit = b.createModule(.{ .root_source_file = b.path("zig/qwen35_modelopt_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = mods.core }, .{ .name = "lanes", .module = mods.lanes }, .{ .name = "qwen_vision", .module = mods.qwen_vision }, .{ .name = "engine_api", .module = mods.qwen35.import_table.get("engine_api").? } } });
     const ct_run = b.addRunArtifact(b.addTest(.{ .root_module = ct_admit }));
     b.step("test-qwen35-modelopt-admission-host", "Synthetic stored-format admission and full-precision loading without devices").dependOn(&ct_run.step);
@@ -118,6 +131,13 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     const int8_contract_run = b.addRunArtifact(b.addTest(.{ .root_module = int8_contract, .filters = &.{"w4a8 host:"} }));
     b.step("test-w4a8-contract-host", "Finite normalization, independent W4A8 references and numerical controls without CUDA").dependOn(&int8_contract_run.step);
     step.dependOn(&int8_contract_run.step);
+    const cublas_prefill = b.addRunArtifact(b.addTest(.{ .root_module = cuda, .filters = &.{"cuBLAS prefill"} }));
+    b.step("test-cublas-prefill-host", "Optional cuBLAS bridge ABI and prompt admission without GPU").dependOn(&cublas_prefill.step);
+    step.dependOn(&cublas_prefill.step);
+    const fp8_contract = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/contract_fp8_prompt.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = mods.core } } });
+    const fp8_contract_run = b.addRunArtifact(b.addTest(.{ .root_module = fp8_contract, .filters = &.{"FP8 prompt"} }));
+    b.step("test-fp8-prompt-contract-host", "Native FP8 independent references, exceptions, shapes and accumulator controls without CUDA").dependOn(&fp8_contract_run.step);
+    step.dependOn(&fp8_contract_run.step);
     const attn_contract = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/contract_q35_attn_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = mods.core } } });
     const attn_contract_run = b.addRunArtifact(b.addTest(.{ .root_module = attn_contract, .filters = &.{"q35 contract host:"} }));
     b.step("test-qwen35-attn-contract-host", "Actual short and long TC attention adapter launches without devices").dependOn(&attn_contract_run.step);
@@ -166,6 +186,7 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     rounds_run.has_side_effects = true;
     b.step("test-qwen35-rounds-host", "CUDA 64-row metadata and shared register-slot plans without devices").dependOn(&rounds_run.step);
     const shared = b.createModule(.{ .root_source_file = b.path("zig/qwen35_shared_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "qwen35", .module = mods.qwen35 }, .{ .name = "core", .module = mods.core }, .{ .name = "lanes", .module = mods.lanes } } });
+    b.step("test-qwen35-startup-memory-host", "Actual multi-stream warmup under the bounded memory contract").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = shared, .filters = &.{"Shared verification: startup warms"} })).step);
     const shared_run = b.addRunArtifact(b.addTest(.{ .root_module = shared, .filters = &.{"Shared verification:"} }));
     shared_run.has_side_effects = true;
     b.step("test-qwen35-shared-host", "Shared CUDA slots and rollback without device execution").dependOn(&shared_run.step);

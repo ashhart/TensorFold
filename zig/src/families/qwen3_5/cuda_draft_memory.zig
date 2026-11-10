@@ -1,4 +1,4 @@
-//! Resize only the drafter's uncaptured scratch before serving, retaining the old layout on any fallible failure.
+//! Resize drafter scratch after a drain, dropping captured users before freeing their old layout.
 const std = @import("std");
 const cuda = @import("cuda");
 const most = @import("cuda_draft_frame.zig").max_streams;
@@ -21,6 +21,7 @@ fn withBuffer(d: anytype, streams: usize, comptime Buffer: type) !void {
     errdefer fresh.free();
     try fresh.fill8(0, null);
     try d.e.stream.synchronize();
+    if (comptime @hasDecl(@TypeOf(d.*), "clearGraphs")) d.clearGraphs();
     var old = d.scratch;
     d.scratch = fresh;
     d.frame_streams = streams;
@@ -31,6 +32,7 @@ fn withBuffer(d: anytype, streams: usize, comptime Buffer: type) !void {
 const Fake = struct {
     var fault: enum { none, allocate, fill, drain } = .none;
     var freed: usize = 0;
+    var graphs_cleared: usize = 0;
     const Buffer = struct {
         ptr: u64,
         len: usize,
@@ -59,12 +61,16 @@ const Fake = struct {
         if (assign) d.view = d.scratch.ptr;
         return d.frame_streams * 16;
     }
+    pub fn clearGraphs(_: *Fake) void {
+        graphs_cleared += 1;
+    }
 };
 
 test "served scratch: allocation, fill and drain failures preserve the prior pointers and capacity" {
     for ([_]@TypeOf(Fake.fault){ .allocate, .fill, .drain, .none }) |fault| {
         Fake.fault = fault;
         Fake.freed = 0;
+        Fake.graphs_cleared = 0;
         var engine: Fake.Engine = .{};
         var d: Fake = .{ .e = &engine };
         const result = withBuffer(&d, 2, Fake.Buffer);
@@ -82,5 +88,6 @@ test "served scratch: allocation, fill and drain failures preserve the prior poi
             try std.testing.expectEqual(@as(usize, 16), d.scratch.len);
         }
         try std.testing.expectEqual(@as(usize, @intFromBool(fault != .allocate)), Fake.freed);
+        try std.testing.expectEqual(@as(usize, @intFromBool(fault == .none)), Fake.graphs_cleared);
     }
 }

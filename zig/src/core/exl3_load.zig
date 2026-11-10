@@ -295,7 +295,9 @@ test "packed sign planes the scan admits load as the parts" {
 }
 
 fn scanFault(a: std.mem.Allocator, io: std.Io, dir: []const u8) !void {
-    var s = try scan(a, io, dir);
+    // Make every growth allocate: OS-dependent remap success must not change the failure indices.
+    var fixed = std.testing.FailingAllocator.init(a, .{ .resize_fail_index = 0 });
+    var s = try scan(fixed.allocator(), io, dir);
     defer s.deinit();
 }
 

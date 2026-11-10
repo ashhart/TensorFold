@@ -78,6 +78,8 @@ pub const Backend = struct {
     first_before_draft: bool = false,
     /// A single-slot target lets its asynchronous keep progress between host steps before drafting again.
     defer_lone_draft: bool = false,
+    /// Commit even a fully accepted window before another round may reuse its leased scratch.
+    needs_full_keep: bool = false,
     /// Every draw (first, queue and verify rows) takes `Stream.penalties` from the reply's tokens; wrappers copy it.
     penalties: bool = false,
     /// Prompt fill gives the same tokens at any chunk cut, so --decode-share may cap its chunk rows; wrappers copy it.

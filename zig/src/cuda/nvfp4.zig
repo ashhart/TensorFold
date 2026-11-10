@@ -7,6 +7,7 @@ const stream_ = @import("stream.zig");
 const kernels = @import("kernels.zig");
 const abi = @import("abi.zig");
 const qmmf = @import("qmmf.zig");
+pub const native_prompt = @import("nvfp4_prompt.zig");
 
 const Driver = driver.Driver;
 const Module = module.Module;
@@ -58,6 +59,20 @@ pub fn packScales(out: []u8, scales: []const u8, n: usize, k: usize) void {
 /// The lane matmul's view of a packed NVFP4 projection.
 pub fn weight(words: u64, scales: u64, global_scale: f32, n: usize, k: usize) qmmf.Weight {
     return .{ .mode = .fp4, .codes = words, .scales = scales, .scale = global_scale, .n = @intCast(n), .k = @intCast(k), .npad = @intCast(padded(n)) };
+}
+
+/// An output-column view with the original K-slice order and sufficient backing for whole 64-column tiles.
+pub fn columns(w: qmmf.Weight, start: usize, count: usize) !qmmf.Weight {
+    if (w.mode != .fp4 or w.k % 64 != 0 or start % 64 != 0 or start > w.n or
+        count == 0 or count > w.n - start or start + (count + 63) / 64 * 64 > w.npad)
+        return error.BadNvfp4Columns;
+    var out = w;
+    out.codes += start * w.k / 2;
+    out.scales += start * w.k / 16;
+    out.n = @intCast(count);
+    out.npad = @intCast(w.npad - start);
+    out.sk = qmmf.slices(w);
+    return out;
 }
 
 /// prompt16.cu's PROMPT_TILE 4 (FP4, per-tensor FP8; 128 x 128) and prompt_lean, FP4's tile with the same bits.
@@ -255,4 +270,16 @@ test "scale tiles keep a column's four scales of each 64 inputs together" {
     packScales(&out, &s, n, k);
     try std.testing.expectEqual(s[1 * 8 + 4 + 2], out[((0 * 2 + 1) * 64 + 1) * 4 + 2]); // row 1, group 1, quarter 2
     try std.testing.expectEqual(@as(u8, 0), out[((0 * 2 + 0) * 64 + 5) * 4]); // row 5: padding
+}
+
+test "NVFP4 vocabulary views retain K slices and packed backing" {
+    const w = weight(0x100000, 0x900000, 0.25, 248320, 5120);
+    const tail = try columns(w, 248000, 320);
+    try std.testing.expectEqual(@as(u32, 1), qmmf.slices(w));
+    try std.testing.expectEqual(qmmf.slices(w), qmmf.slices(tail));
+    try std.testing.expectEqual(@as(u32, 8), qmmf.splitK(tail.n, tail.k));
+    try std.testing.expectEqual(w.codes + 248000 * 5120 / 2, tail.codes);
+    try std.testing.expectEqual(@as(u32, 320), tail.npad);
+    try std.testing.expectError(error.BadNvfp4Columns, columns(w, 248001, 64));
+    try std.testing.expectError(error.BadNvfp4Columns, columns(w, 248000, 321));
 }

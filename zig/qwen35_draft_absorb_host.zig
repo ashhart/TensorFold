@@ -51,6 +51,9 @@ test "Draft precision: DFlash real absorb adapter forwards both row roles and re
     driver.api.cuLaunchKernel = Record.launch;
     var e: q.engine.Engine = undefined;
     e.kit = null;
+    e.n_taps = 1;
+    e.tap_capacity = q.engine.tap_rows;
+    e.prompt_taps = .{};
     e.d = &driver;
     e.stream = .{ .d = &driver, .handle = null };
     var d: q.draft.Draft = undefined;

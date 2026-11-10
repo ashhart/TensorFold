@@ -1,3 +1,5 @@
+#ifndef TF_PREFILL_ATTENTION_BASE_INCLUDED
+#define TF_PREFILL_ATTENTION_BASE_INCLUDED
 // Device code of src/tensorfold/cuda/kernels/prefill_attention.cu (comments, ATen includes dropped), paged keys added.
 #include "prefill_attention.cuh"
 
@@ -359,3 +361,7 @@ template __global__ void tf_prefill_attention::hpattn_whole_kernel<256, 8, 2, 2>
 template __global__ void tf_prefill_attention::hpattn8_whole_kernel<256, 8, 2, 2>(const __nv_bfloat16* __restrict__,
     const uint8_t* __restrict__, const uint8_t* __restrict__, const float* __restrict__, const float* __restrict__,
     __nv_bfloat16* __restrict__, int, int, int, int, int, float, int);
+
+#include "prefill_kv_expand.cuh"
+#include "prefill_attention_compact.cu"
+#endif

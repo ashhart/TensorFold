@@ -39,6 +39,7 @@ pub const Pockets = struct {
 
     /// Layer `layer`'s neurons (fp32 [n, hidden] gate, up, down rows; the first `used` live), after the stream's work.
     pub fn set(p: *Pockets, s: cuda.Stream, layer: usize, gate: []const f32, up: []const f32, down: []const f32, used: usize) !void {
+        try @import("qwen_prefill_config").admitPockets(true);
         if (layer >= p.layers.len or p.hidden == 0 or gate.len % p.hidden != 0) return error.UnexpectedTensor;
         const n = gate.len / p.hidden;
         if (n == 0 or n > to.max_pocket or up.len != gate.len or down.len != gate.len or used > n) return error.UnexpectedTensor;

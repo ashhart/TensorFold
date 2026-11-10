@@ -37,7 +37,7 @@ pub fn rawBytes(n: usize, k: usize, bits: u8) usize {
 }
 
 /// A slot's output and input widths.
-fn shape(g: Geometry, slot: Slot) [2]usize {
+pub fn shape(g: Geometry, slot: Slot) [2]usize {
     return switch (slot) {
         .gate, .up => .{ g.intermediate, g.hidden },
         .down => .{ g.hidden, g.intermediate },
@@ -52,7 +52,7 @@ fn shape(g: Geometry, slot: Slot) [2]usize {
 }
 
 /// The slots layer `i` loads: a dense MLP's (routed experts load apart) and its mixer's.
-fn slots(g: Geometry, i: usize) []const Slot {
+pub fn slots(g: Geometry, i: usize) []const Slot {
     if (g.moe()) return if (g.linear[i]) &.{ .qkv, .z, .a, .b, .out } else &.{ .q, .k, .v, .o };
     return if (g.linear[i]) &.{ .gate, .up, .down, .qkv, .z, .a, .b, .out } else &.{ .gate, .up, .down, .q, .k, .v, .o };
 }
@@ -141,6 +141,18 @@ fn f32vec(e: *Engine, ck: *core.Checkpoint, comptime fmt: []const u8, args: anyt
     const words = try e.gpa.alloc(u32, n);
     defer e.gpa.free(words);
     for (words, std.mem.bytesAsSlice(u16, t.bytes)) |*w, h| w.* = @as(u32, h) << 16;
+    return upload(e, std.mem.sliceAsBytes(words));
+}
+
+/// Widened dt_bias storage is accepted only when the GPU's BF16 values are unchanged.
+fn bf16vec(e: *Engine, ck: *core.Checkpoint, comptime fmt: []const u8, args: anytype, n: usize) !u64 {
+    var buf: [160]u8 = undefined;
+    const t = try ck.get(try std.fmt.bufPrint(&buf, fmt, args));
+    if (t.is(.bf16, &.{n})) return put(e, t);
+    if (!t.is(.f32, &.{n})) return error.UnexpectedTensor;
+    const words = try e.gpa.alloc(u16, n);
+    defer e.gpa.free(words);
+    try @import("cuda_parameter_storage.zig").exactBf16(t.bytes, words);
     return upload(e, std.mem.sliceAsBytes(words));
 }
 
@@ -333,7 +345,7 @@ fn embedWords(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer, m: []const
     return out;
 }
 
-pub fn load(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer) !void {
+pub fn load(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer, source: ?*@import("cuda_nvfp4_mlp.zig").Opened) !void {
     const g = e.g;
     const mo = g.kinds.modelopt;
     const m = if (mo) modelopt.prefix else "language_model.model.";
@@ -374,6 +386,12 @@ pub fn load(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer) !void {
         for (slots(g, i)) |slot| {
             const nk = shape(g, slot);
             const name = geometry.slot_modules.get(slot);
+            if (source) |other| if (other.plan.kind(i, slot)) |kind| {
+                var alt_prefix: [96]u8 = undefined;
+                const alt = try std.fmt.bufPrint(&alt_prefix, "{s}layers.{d}.", .{ modelopt.prefix, i });
+                ps.set(slot, try modelopt.linear(e, &other.checkpoint, stage, alt, name, nk[0], nk[1], kind));
+                continue;
+            };
             ps.set(slot, if (mo) try modelopt.linear(e, ck, stage, p, name, nk[0], nk[1], g.kinds.of(i, slot)) else try linear(e, e, ck, stage, p, name, nk[0], nk[1], g.bits.of(i, slot)));
         }
         l.* = .{
@@ -393,7 +411,7 @@ pub fn load(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer) !void {
                 .conv = try tensor(e, ck, "{s}linear_attn.conv1d.weight", .{p}, .bf16, taps_shape),
                 .norm = try tensor(e, ck, "{s}linear_attn.norm.weight", .{p}, .bf16, &.{geometry.dk}),
                 .a_log = try f32vec(e, ck, "{s}linear_attn.A_log", .{p}, g.v_heads),
-                .dt_bias = try tensor(e, ck, "{s}linear_attn.dt_bias", .{p}, .bf16, &.{g.v_heads}),
+                .dt_bias = try bf16vec(e, ck, "{s}linear_attn.dt_bias", .{p}, g.v_heads),
             } };
         } else {
             l.mixer = .{ .attention = .{
@@ -406,6 +424,10 @@ pub fn load(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer) !void {
             } };
         }
     }
+}
+
+test {
+    _ = @import("cuda_parameter_storage.zig");
 }
 
 test "a uniform 4-bit checkpoint keeps its sizes; other modules take their own width" {

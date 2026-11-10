@@ -4,7 +4,7 @@ const slots = @import("core").tree_slots;
 const Seg = @import("cuda_cache.zig").Seg;
 const Rule = @import("cuda").sample.Rule;
 pub const Path = @import("cuda_cache.zig").Path;
-pub const max_rows = 4096; // a forward's rows: a prompt chunk (verify windows stay within most_verify)
+pub const max_rows: comptime_int = @import("qwen_prefill_config").max_rows;
 pub const max_segs = 128;
 pub const most_verify = 128;
 pub const most_window = 64;
@@ -98,4 +98,27 @@ pub fn buildWithScratch(st: []u8, parts: []const @import("cuda_engine.zig").Part
     }
     if (record and first > most_verify) return error.InvalidQwenSegments;
     return peak;
+}
+
+test "Qwen prefill capacity: full metadata, wrapper caps and unchanged verification width" {
+    var storage: [bytes]u8 align(8) = undefined;
+    const parts = [_]@import("cuda_engine.zig").Part{.{ .cache = undefined, .rows = max_rows }};
+    try std.testing.expectEqual(@as(usize, 1), try build(&storage, &parts, false));
+    const anc = ancestors(&storage);
+    try std.testing.expectEqual(@as(u32, @intCast(max_rows - 1)), anc[max_rows - 1].depth);
+    try std.testing.expectEqual(@as(u32, 1), anc[max_rows - 1].chain);
+    try std.testing.expectEqual(@as(usize, 128), most_verify);
+    try std.testing.expectEqual(@as(usize, 64), most_window);
+    const cuda = @import("cuda");
+    try std.testing.expect(cuda.cublaslt_prefill.supports(max_rows, 48, 5120));
+    try std.testing.expect(!cuda.cublaslt_prefill.supports(max_rows + 64, 48, 5120));
+    var shape: cuda.fp8_attention_prompt.Shape = .{ .rows = @intCast(max_rows), .prefix = 0, .heads = 24, .kv_heads = 4, .capacity = 131072, .scale = 1.0 / 16.0 };
+    try shape.validate(false);
+    shape.rows += 64;
+    try std.testing.expectError(error.UnsupportedFp8AttentionShape, shape.validate(false));
+    shape.rows = @intCast(max_rows);
+    shape.prefix = shape.capacity - shape.rows;
+    try shape.validate(false);
+    shape.prefix += 1;
+    try std.testing.expectError(error.UnsupportedFp8AttentionShape, shape.validate(false));
 }

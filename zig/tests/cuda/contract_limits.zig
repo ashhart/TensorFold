@@ -20,6 +20,10 @@ const h3_image = struct {
 
 /// The named embedded image; only contract_controls may select the planted controls.
 pub fn image(name: []const u8) error{UnknownContractImage}![]const u8 {
+    if (std.mem.eql(u8, name, "fp8_prefill")) return kk.fp8_prefill;
+    if (std.mem.eql(u8, name, "prefill_attention_optimized")) return kk.prefill_attention_optimized;
+    if (std.mem.eql(u8, name, "nvfp4_prompt")) return kk.nvfp4_prompt;
+    if (std.mem.eql(u8, name, "nvfp4_tma")) return kk.nvfp4_tma;
     if (@import("contract_deepseek_images.zig").image(name)) |bytes| return bytes;
     inline for (.{ "l2pf", "l2pace" }) |n|
         if (std.mem.eql(u8, name, n)) return @field(kk, n);

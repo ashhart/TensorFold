@@ -135,3 +135,60 @@ fn download(d: *Mtp, out: []u8, src: u64) !void {
     try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(out.ptr, src, out.len, e.stream.handle), "cuMemcpyDtoHAsync");
     try e.stream.synchronize();
 }
+
+/// The new deferred-head tree path must reproduce chained states and keys on both sides of a fork.
+pub fn prefix(d: *Mtp) !void {
+    const batch = @import("cuda_mtp_batch.zig");
+    const base = try d.create();
+    defer d.drop(base);
+    try d.absorb(base, d.taps_in, 0, 3, null, &.{ 7, 9, 11 });
+    const hb = d.e.g.hidden * 2;
+    const kb = d.kvWidth() * 2;
+    const queries = [_]batch.Branch{
+        .{ .ctx = base, .hidden = 0, .token = 1, .position = base.end },
+        .{ .ctx = base, .hidden = 0, .token = 2, .position = base.end + 1, .parent = 0 },
+        .{ .ctx = base, .hidden = 0, .token = 3, .position = base.end + 1, .parent = 0 },
+        .{ .ctx = base, .hidden = 0, .token = 4, .position = base.end + 2, .parent = 1 },
+    };
+    var scores: [5]batch.LogitsRow = undefined;
+    try batch.prefixTopk(d, &queries, &.{base}, &scores);
+    const state = try d.gpa.alloc(u8, 4 * hb);
+    defer d.gpa.free(state);
+    const keys = try d.gpa.alloc(u8, 4 * kb);
+    defer d.gpa.free(keys);
+    const values = try d.gpa.alloc(u8, 4 * kb);
+    defer d.gpa.free(values);
+    try download(d, state, d.lane_state);
+    try download(d, keys, d.lane_k);
+    try download(d, values, d.lane_v);
+    const scratch = try d.gpa.alloc(u8, hb + 2 * kb);
+    defer d.gpa.free(scratch);
+    const previous = d.projection_role;
+    defer d.projection_role = previous;
+    d.projection_role = .proposal;
+    for ([_][]const usize{ &.{ 0, 1, 3 }, &.{ 0, 2 } }) |path| {
+        const reference = try d.create();
+        defer d.drop(reference);
+        reference.begin = base.begin;
+        reference.end = base.end;
+        try reference.ring.copyFrom(0, base.ring.ptr, base.ring.len, d.e.stream.handle);
+        try reference.last.copyFrom(0, base.last.ptr, hb, d.e.stream.handle);
+        for (path, 0..) |node, step| {
+            const input = if (step == 0) reference.last.ptr else d.x;
+            try d.scratch.copyFrom(d.hin - d.scratch.ptr, input, hb, d.e.stream.handle);
+            try d.putIds(&.{queries[node].token});
+            try d.layer(reference, 1, queries[node].position, .ring);
+            try download(d, scratch[0..hb], d.x);
+            try download(d, scratch[hb..][0..kb], d.kb);
+            try download(d, scratch[hb + kb ..][0..kb], d.vb);
+            if (!std.mem.eql(u8, scratch[0..hb], state[node * hb ..][0..hb]) or
+                !std.mem.eql(u8, scratch[hb..][0..kb], keys[node * kb ..][0..kb]) or
+                !std.mem.eql(u8, scratch[hb + kb ..][0..kb], values[node * kb ..][0..kb]))
+            {
+                std.log.err("MTP deferred prefix differs from chained state/KV at node {d}", .{node});
+                return error.MtpPrefixStateMismatch;
+            }
+        }
+    }
+    std.log.info("MTP deferred prefix: four states and KV rows byte-equal to chained fork paths", .{});
+}

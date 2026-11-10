@@ -3,6 +3,7 @@ const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
 const engine = @import("cuda_engine.zig");
+const bf16_pack = @import("cuda_draft_bf16.zig");
 
 const Affine4 = cuda.qlinear.Affine4;
 const DeviceBuffer = cuda.DeviceBuffer;
@@ -37,8 +38,10 @@ pub const Weights = struct {
     layers: []Layer,
     arena: DeviceBuffer,
     arena_at: usize = 0,
+    bf16: ?bf16_pack.Pack = null,
 
     pub fn deinit(w: *Weights, gpa: std.mem.Allocator) void {
+        if (w.bf16) |*p| p.deinit();
         w.arena.free();
         gpa.free(w.predecessor);
         gpa.free(w.successor);
@@ -132,7 +135,9 @@ fn quantize(gpa: std.mem.Allocator, w: []align(1) const u16, n: usize, k: usize)
 /// A bf16 (n, k) tensor quantized and packed through `stage` into the drafter's arena.
 fn linear(gpa: std.mem.Allocator, e: *Engine, stage: *DeviceBuffer, w: *Weights, ck: *core.Checkpoint, name: []const u8, n: usize, k: usize) !Affine4 {
     const t = try ck.expect(name, .bf16, &.{ n, k });
-    return linearRows(gpa, e, stage, w, std.mem.bytesAsSlice(u16, t.bytes), n, k);
+    const out = try linearRows(gpa, e, stage, w, std.mem.bytesAsSlice(u16, t.bytes), n, k);
+    if (w.bf16) |*p| try p.add(gpa, name, t.bytes, out.w, n, k);
+    return out;
 }
 
 /// bf16 (n, k) rows quantized to affine-4 and packed through `stage` into `w`'s arena (any arena owner with alloc).
@@ -181,6 +186,8 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, e: *Engine, dir: []const u8, s: 
     defer core.checkpoint.cache.close(&ck);
     var w: Weights = .{ .fc = undefined, .hidden_norm = 0, .final_norm = 0, .selector = none, .predecessor = &.{}, .successor = &.{}, .layers = &.{}, .arena = try DeviceBuffer.alloc(e.d, total(s)) };
     errdefer w.arena.free();
+    w.bf16 = if (s.dflash2) try bf16_pack.Pack.init(e, s) else null;
+    errdefer if (w.bf16) |*p| p.deinit();
     try w.arena.fill8(0, null);
     var stage = try DeviceBuffer.alloc(e.d, stageBytes(s));
     defer stage.free();

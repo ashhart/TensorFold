@@ -216,7 +216,7 @@ pub const Engine = struct {
         const tokens = try win.tokens(e, windows[0], out[0]);
         const parents = try win.rowParents(e, windows[0]);
         const o = try e.conclude(s, plan, out[0].sampled, out[0].rows, tokens, parents, windows[0].positions);
-        if (o.path.len < rows or plan.parents != null) try e.backend.keep(&windows, &.{o.path});
+        if (e.backend.needs_full_keep or o.path.len < rows or plan.parents != null) try e.backend.keep(&windows, &.{o.path});
         const held_levels = s.held_levels;
         if (e.cfg.family_mtp and s.drafts) {
             if (early and o.cut == null) {

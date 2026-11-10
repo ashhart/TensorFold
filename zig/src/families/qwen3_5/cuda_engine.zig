@@ -14,14 +14,12 @@ const modelopt = @import("cuda_modelopt.zig");
 const x3w = @import("cuda_exl3_weights.zig");
 const hosted = @import("cuda_host_embed.zig");
 pub const recurrent = @import("cuda_recurrent.zig");
-
 pub const Geometry = geometry.Geometry;
 pub const Cache = caches.Cache;
 pub const tap_rows = caches.tap_rows;
 const Seg = caches.Seg;
 const DeviceBuffer = cuda.DeviceBuffer;
 const head_dim = geometry.head_dim;
-
 /// Rows of one forward at most: a prompt chunk, or a shared round's windows.
 pub const max_rows = Round.max_rows;
 /// Streams' windows in one forward at most.
@@ -36,15 +34,12 @@ pub fn argmaxSlices(vocab: usize) usize {
 pub const most_window = Round.most_window;
 /// Partial attention chunks a row at most (qwen35.cuh's MAXCH): each row's chunk width grows with its own keys.
 pub const max_chunks = 64;
-
 /// Device allocations are 256-byte aligned, as the driver's are.
 pub fn aligned(n: usize) usize {
     return std.mem.alignForward(usize, n, 256);
 }
-
 /// qwen35.cuh's Geo.
 pub const Geo = extern struct { hid: c_int, nk: c_int, nv: c_int, qh: c_int, kvh: c_int, nl: c_int };
-
 const layers = @import("cuda_layers.zig");
 pub const Proj = layers.Proj;
 pub const Delta = layers.Delta;
@@ -55,11 +50,9 @@ const Fns = layers.Fns;
 pub const Keeps = layers.Keeps;
 const Kv8 = layers.Kv8;
 /// A window of one stream in a forward: `parents`, for a tree, names each row's parent row (-1: the first row).
-pub const Part = struct { cache: *Cache, rows: usize, parents: ?[]const i32 = null, images: ?*const Images = null };
-
+pub const Part = struct { cache: *Cache, rows: usize, parents: ?[]const i32 = null, images: ?*const Images = null, root_committed: bool = false };
 /// An image prompt's rows for its prompt chunks: the staged tables' rows.
 pub const Images = Round.Images;
-
 /// What a forward keeps: a prompt chunk its last row's logits or (`rows`) every final-norm row; a window its draws.
 pub const Keep = union(enum) {
     last,
@@ -67,21 +60,20 @@ pub const Keep = union(enum) {
     logits,
     hidden,
     rows,
-
     /// Whether the forward is a verify window (recorded, one-row bits); `last` and `rows` are prompt chunks.
     pub fn verifies(k: Keep) bool {
         return k != .last and k != .rows;
     }
 };
-
 /// A kept row's draw on the device: sample.cu's keyed rule at `position`, or greedy without one.
 pub const Draw = struct { rule: ?cuda.sample.Rule, position: u64 };
-
 pub const Engine = struct {
     rec_scratch: recurrent.Pool,
+    rec_budget: recurrent.Budget = .{},
     startup: profile.Times = .{},
     gpa: std.mem.Allocator,
     dir: []const u8,
+    alternate: ?@import("cuda_nvfp4_mlp.zig").Identity = null,
     pockets: pocket.Pockets,
     learning: ?*const hooks.Keep = null,
     mlp: ?hooks.MlpAdd = null,
@@ -96,6 +88,7 @@ pub const Engine = struct {
     rope_buf: ?cuda.DeviceBuffer = null, // the table's buffer (cuda_rope_table.zig)
     fp8: Kv8,
     prompt_attn: @import("cuda_prompt.zig").Fns, // a prompt chunk's attention tiles and delta-rule chain
+    prefill_paths: @import("cuda_prefill_paths.zig").Paths = .{},
     int8: @import("cuda_prompt_int8.zig").State = .{}, // prompt projections with int8 activations, when on
     draws: cuda.sample.Draws,
     affine: cuda.qlinear.Affine4Kernels,
@@ -168,9 +161,10 @@ pub const Engine = struct {
     /// A drafter's tapped layers (`setTaps`): each row's residual after them lands in its stream's tap ring.
     taps: [8]u32 = undefined,
     n_taps: usize = 0,
+    tap_capacity: usize = tap_rows,
+    prompt_taps: @import("cuda_prompt_taps.zig").State = .{},
     /// During an image prompt chunk's forward: its feature rows (0: none); the chunk's src and positions are staged.
     features: u64 = 0,
-
     pub const ids_at = Round.ids_at;
     pub const segs_at = Round.segs_at;
     pub const rowseg_at = Round.rowseg_at;
@@ -183,11 +177,21 @@ pub const Engine = struct {
     pub const src_at = Round.src_at;
     pub const mpos_at = Round.mpos_at;
     const tables_len = Round.bytes;
-
     pub fn init(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kv8: bool, fit: ?hosted.Fit) !*Engine {
         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
+        _ = try cuda.fp8_prefill.requested();
+        if (try cuda.fp8_prefill_tiles.requested() != .baseline and !cuda.fp8_prefill.enabled())
+            return error.Fp8TileNeedsFastPrefill;
+        if (try cuda.fp8_prefill.affine_packing.requested() and !cuda.fp8_prefill.enabled())
+            return error.AffinePreparedNeedsFastPrefill;
+        const cublas_requested = try cuda.cublaslt_prefill.requested();
+        _ = try @import("cuda_prefill_paths.zig").requested();
         const started = profile.now(io);
         const g = try Geometry.read(gpa, io, dir);
+        var ck = try core.Checkpoint.openModel(gpa, io, dir);
+        defer core.checkpoint.cache.close(&ck);
+        var alternate = try @import("cuda_nvfp4_mlp.zig").open(gpa, io, g, &ck, dir);
+        defer if (alternate) |*source| source.deinit();
         const d = ctx.d;
         const e = try @import("cuda_prompt_int8.zig").Allocation(Engine).create(gpa);
         errdefer gpa.destroy(e);
@@ -198,11 +202,14 @@ pub const Engine = struct {
         e.pockets = try pocket.Pockets.init(gpa, d, g.hidden, g.layers);
         errdefer e.pockets.deinit();
         e.learning = null;
+        e.prefill_paths = .{};
         e.mlp = null;
         e.taught = 0;
         e.kit = null;
         e.d = d;
         e.g = g;
+        e.alternate = if (alternate) |*source| try source.identity(gpa, g) else null;
+        errdefer if (e.alternate) |*source| source.deinit(gpa);
         e.geo = .{ .hid = @intCast(g.hidden), .nk = @intCast(g.k_heads), .nv = @intCast(g.v_heads), .qh = @intCast(g.q_heads), .kvh = @intCast(g.kv_heads), .nl = @intCast(g.deltas()) };
         e.verify_rows = most_verify;
         e.kv8 = kv8;
@@ -215,13 +222,14 @@ pub const Engine = struct {
         errdefer @import("cuda_rope_table.zig").free(e);
         e.penalties = .{};
         e.rec_scratch = recurrent.Pool.init(gpa, @intFromPtr(e));
+        e.rec_budget = .{};
         e.n_taps = 0;
+        e.tap_capacity = tap_rows;
+        e.prompt_taps = .{};
         e.features = 0;
         e.stream = try cuda.Stream.init(d, true);
         errdefer e.stream.deinit();
-        var ck = try core.Checkpoint.openModel(gpa, io, dir);
-        defer core.checkpoint.cache.close(&ck);
-        e.arena = try hosted.arena(e, io, ctx, &ck, fit);
+        e.arena = try hosted.arena(e, io, ctx, &ck, fit, if (alternate) |source| source.plan.weight_bytes else null);
         errdefer hosted.release(e);
         try e.arena.fill8(0, null); // touched once now: the driver commits memory on first touch, slowly
         const kk = cuda.kernels;
@@ -258,7 +266,10 @@ pub const Engine = struct {
         e.prompt_attn = try @import("cuda_prompt.zig").resolve(e.mods[16], e.mods[17]);
         try e.int8.resolve(e.mods[18]);
         e.fp8 = .{ .rope = try e.mods[9].function("tf_q35_rope8"), .attn_partial = try e.mods[9].function("tf_q35_attn_partial8"), .attn_rows = try e.mods[9].function("tf_q35_attn_rows8"), .attn_partial8_whole = try e.mods[9].function("tf_q35_attn_partial8_whole"), .attn_rows8_whole = try e.mods[9].function("tf_q35_attn_rows8_whole"), .compact = try e.mods[9].function("tf_q35k_compact8") };
-        e.mo = if (g.kinds.modelopt) try modelopt.Kernels.load(d, @intCast(10 * major + minor), sms, g.moe()) else null;
+        e.mo = if (g.kinds.modelopt or (try @import("cuda_nvfp4_mlp.zig").directory()) != null or cuda.fp8_prefill.enabled() or cublas_requested)
+            try modelopt.Kernels.load(d, @intCast(10 * major + minor), sms, g.moe())
+        else
+            null;
         errdefer if (e.mo) |*m| m.unload();
         e.layers = try gpa.alloc(Layer, g.layers);
         errdefer gpa.free(e.layers);
@@ -268,22 +279,28 @@ pub const Engine = struct {
             try x3w.load(e, &ck);
         } else {
             // each projection as stored, packed from here; freed before the server counts what streams can use
-            var stage = try DeviceBuffer.alloc(d, weights.stageBytes(g));
+            var stage = try DeviceBuffer.alloc(d, if (alternate) |source| source.plan.stage_bytes else weights.stageBytes(g));
             defer stage.free();
-            try weights.load(e, &ck, &stage);
+            try weights.load(e, &ck, &stage, if (alternate) |*source| source else null);
         }
         if (e.mo) |*m| try m.reserveParts(e);
+        e.prefill_paths = try @import("cuda_prefill_paths.zig").Paths.load(e, @intCast(10 * major + minor));
+        errdefer {
+            @import("cuda").completion.drain(e.d, e.stream, "prefill initialization did not drain");
+            e.prefill_paths.deinit();
+        }
         try @import("cuda_engine_tail.zig").finish(e, io, started);
         return e;
     }
-
+    pub fn warmVendorPrefill(e: *Engine) !void {
+        try @import("cuda_cublas_prompt.zig").warm(e);
+    }
     pub fn finishWarm(e: *Engine, io: std.Io, started: i96) !void {
         const warm_start = profile.now(io);
         e.startup = .{ .load = warm_start - started };
         errdefer recurrent.shutdown(e);
         e.startup.add(try profile.withCache(e.gpa, io, e, Cache));
     }
-
     /// Every path a request takes, run once now: WDDM stalls a process's first forwards for seconds (a 20 s launch).
     pub fn warmCache(e: *Engine, warm_cache: *Cache) !void {
         const ids: [32]u32 = @splat(0);
@@ -297,9 +314,11 @@ pub const Engine = struct {
         try e.stream.synchronize();
         recurrent.completed(e);
     }
-
     pub fn deinit(e: *Engine) void {
         recurrent.shutdown(e);
+        @import("cuda").completion.drain(e.d, e.stream, "prefill shutdown did not drain");
+        e.prompt_taps.deinit();
+        e.prefill_paths.deinit();
         @import("cuda_rope_table.zig").free(e);
         if (e.kit) |k| k.deinit(e.gpa);
         e.pockets.deinit();
@@ -313,6 +332,7 @@ pub const Engine = struct {
         hosted.release(e);
         e.gpa.free(e.layers);
         e.gpa.free(e.dir);
+        if (e.alternate) |*source| source.deinit(e.gpa);
         e.affine.deinit();
         e.wide.deinit();
         e.int8.deinit();
@@ -328,18 +348,11 @@ pub const Engine = struct {
         return e.g.stateBytes() + c.scratchBytes(e) + e.g.kvBytes(cap, e.kv8) + e.tapBytes() + c.pendBytes(e.g);
     }
 
-    /// A stream's tap ring: tap_rows rows of the tapped layers' residuals.
-    pub fn tapBytes(e: *const Engine) usize {
-        return tap_rows * e.n_taps * e.g.hidden * 2;
-    }
+    /// A stream's tap ring: this engine's retained rows of the tapped layers' residuals.
+    pub const tapBytes = @import("cuda_prompt_taps.zig").tapBytes;
 
     /// The layers a drafter taps, told before the streams' caches exist; each forward then fills their rings.
-    pub fn setTaps(e: *Engine, taps: []const u32) !void {
-        if (taps.len > e.taps.len) return error.TooManyTaps;
-        for (taps) |t| if (t >= e.g.layers) return error.BadTap;
-        @memcpy(e.taps[0..taps.len], taps);
-        e.n_taps = taps.len;
-    }
+    pub const setTaps = @import("cuda_prompt_taps.zig").setTaps;
 
     /// The next `bytes` of the arena, 256-byte aligned.
     pub fn alloc(e: *Engine, bytes: usize) !u64 {
@@ -413,10 +426,14 @@ pub const Engine = struct {
         for (ids) |id| if (id >= g.vocab) return error.InvalidQwenToken;
         for (parts) |p| if (p.parents != null and !record) return error.InvalidQwenParents;
         for (parts) |p| if (p.images != null and record) return error.InvalidQwenImages;
+        try recurrent.admitFrame(e, parts, record);
     }
 
     /// One forward over `parts`' windows, with every input admitted before an unkept verify is settled.
     pub fn forward(e: *Engine, parts: []const Part, ids: []const u32, keep: Keep) !void {
+        var prompt_graph: ?cuda.graph.Exec = null;
+        defer if (prompt_graph) |*exec| exec.deinit();
+        errdefer if (prompt_graph != null) cuda.completion.drain(e.d, e.stream, "prompt graph forward failed before completion");
         try e.admit(parts, ids, keep);
         const g = e.g;
         const total = ids.len;
@@ -434,13 +451,15 @@ pub const Engine = struct {
             try p.cache.settle(e);
             // pending kept rows ride in a recorded slot scan; any other pass reads the state as written
             if (!(record and keep != .hidden)) try p.cache.flush(e);
-            try recurrent.prepare(e, p.cache, p.rows, record);
+            try recurrent.prepareRoot(e, p.cache, p.rows, record, p.root_committed);
         }
         var row0: usize = 0;
         for (parts, 0..) |p, i| {
             segs[i] = p.cache.fold(p.cache.seg(e, p.cache.len, row0, p.rows));
             row0 += p.rows;
         }
+        try @import("cuda_prompt_taps.zig").begin(e, parts, segs, prompt);
+        errdefer @import("cuda_prompt_taps.zig").abort(e, parts);
         if (keep == .draws) {
             const rules = std.mem.bytesAsSlice(cuda.sample.Rule, st[rules_at..][0 .. total * @sizeOf(cuda.sample.Rule)]);
             const meta = std.mem.bytesAsSlice(c_int, st[meta_at..][0 .. total * 4]);
@@ -484,10 +503,9 @@ pub const Engine = struct {
             defer e.features = 0;
             try e.body(exact);
         } else if (prompt) {
-            // uncaptured: a prompt chunk's GEMMs dwarf its launches, and each length's graph would pay the stall
             e.features = if (images) |im| im.features else 0;
             defer e.features = 0;
-            try e.body(shape);
+            prompt_graph = try @import("cuda_prefill_graph.zig").run(e, shape);
         } else {
             const gop = try e.graphs.getOrPut(e.gpa, shape.key());
             if (!gop.found_existing) {
@@ -505,6 +523,7 @@ pub const Engine = struct {
             }
             try gop.value_ptr.launchOn(e.stream);
         }
+        try @import("cuda_prompt_taps.zig").publish(e, parts, prompt);
         for (parts) |p| p.cache.advanced(p.rows, record);
         if (keep == .draws or keep == .logits) try e.penalties.apply(e.d, &e.draws, e.stream, e.logits, g.vocab) else e.penalties.clear();
         switch (keep) {

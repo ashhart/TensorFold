@@ -12,6 +12,7 @@ pub const env = if (windows) @import("win_c.zig") else struct {
     pub extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 };
 pub const environment = @import("environment.zig");
+pub const cuda_qualification = @import("cuda_qualification.zig");
 pub const atomic_file = @import("atomic_file.zig");
 
 /// std.posix, or its sockets, signals and limits over Winsock and console events.

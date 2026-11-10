@@ -14,5 +14,6 @@ pub fn finish(e: anytype, io: std.Io, started: i96) !void {
     e.host_logits = try cuda.HostBuffer.alloc(e.d, e.verify_rows * e.g.vocab * 2);
     errdefer e.host_logits.free();
     try e.stream.synchronize();
+    if (comptime @hasDecl(@TypeOf(e.*), "warmVendorPrefill")) try e.warmVendorPrefill();
     try e.finishWarm(io, started);
 }

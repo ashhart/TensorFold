@@ -26,11 +26,50 @@ test "Draft frames: a grown tree's node budget past the block (TF_DRAFT_NODES) s
     items[0].depth = 25;
     try std.testing.expectError(error.BadDraftFrame, F.stage(c, &items, &refs, &storage));
     items[0].depth = 24;
+    try F.stage(config(), &items, &refs, &storage);
+    items[0].depth = 25;
     try std.testing.expectError(error.BadDraftFrame, F.stage(config(), &items, &refs, &storage));
 }
 
-extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+const setenv = @import("sys").env.setenv;
+const unsetenv = @import("sys").env.unsetenv;
+
+test "Draft frames: cooperative views share only a matching owner's prefix and keep their own mask span" {
+    const F = q.draft.frame;
+    var storage: [F.stagedLen(2)]u8 align(8) = undefined;
+    var owner: q.draft.Ctx = .{ .ring = .{ .d = undefined, .ptr = 0x1000, .len = 1 }, .end = 100 };
+    var views = [_]q.draft.Ctx{ owner, owner };
+    for (&views) |*view| view.cooperative_owner = &owner;
+    views[0].attention_rows = 4;
+    views[1].attention_rows = 8;
+    const refs = [_]*q.draft.Ctx{ &views[0], &views[1] };
+    var items = [_]lanes.drafter.Hold{
+        .{ .stream = @ptrFromInt(0x1000), .pending = 1, .position = 101, .depth = 7 },
+        .{ .stream = @ptrFromInt(0x2000), .pending = 1, .position = 101, .depth = 7 },
+    };
+    try F.stage(config(), &items, &refs, &storage);
+    try std.testing.expectEqual(@as(c_int, 4), F.segments(&storage)[0].attention_rows);
+    try std.testing.expectEqual(@as(c_int, 8), F.segments(&storage)[1].attention_rows);
+    items[1].pending = 2;
+    try std.testing.expectError(error.OverlappingDraftContexts, F.stage(config(), &items, &refs, &storage));
+    items[1].pending = 1;
+    views[1].cooperative_owner = null;
+    try std.testing.expectError(error.OverlappingDraftContexts, F.stage(config(), &items, &refs, &storage));
+    views[1].cooperative_owner = &owner;
+    views[1].attention_rows = 9;
+    try std.testing.expectError(error.BadDraftFrame, F.stage(config(), &items, &refs, &storage));
+    views[1].attention_rows = 8;
+    views[0].seed_n = 2;
+    views[0].seed_tokens = .{ 5, 6 };
+    try F.stage(config(), &items, &refs, &storage);
+    const staged_ids = std.mem.bytesAsSlice(u32, storage[0..64]);
+    try std.testing.expectEqualSlices(u32, &.{ 1, 5, 6, 255 }, staged_ids[0..4]);
+    views[0].seed_n = 3;
+    try std.testing.expectError(error.BadDraftFrame, F.stage(config(), &items, &refs, &storage));
+    views[0].seed_n = 2;
+    views[0].seed_tokens[1] = 256;
+    try std.testing.expectError(error.BadDraftFrame, F.stage(config(), &items, &refs, &storage));
+}
 
 test "Draft frames: the actual drafter advertises batched holds" {
     var d: q.draft.Draft = undefined;
@@ -44,6 +83,8 @@ test "Draft frames: the actual drafter advertises batched holds" {
     d.scratch_one = 0;
     d.target_taps = 0;
     d.c = config();
+    d.tree_nodes = try q.draft.tree.nodes();
+    d.auxiliary_nodes = 0;
     d.step_ms = 1;
     d.n_costs = 0;
     try std.testing.expect(d.drafter().facts().batched);
@@ -89,6 +130,7 @@ const Record = struct {
     var downloads: usize = 0;
     var waits: usize = 0;
     var fail: bool = false;
+    var fail_after: usize = 0;
     var last_norm_input: u64 = 0;
     var block: usize = 8;
     fn launch(f: cuda.abi.Function, x: c_uint, _: c_uint, z: c_uint, threads: c_uint, _: c_uint, _: c_uint, _: c_uint, _: cuda.abi.Stream, args: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) cuda.abi.Result {
@@ -98,7 +140,7 @@ const Record = struct {
         if (id == 1) max_rows = @max(max_rows, x);
         if (id == 5) {
             std.debug.assert(z == 9 and threads == 128);
-            if (fail) return cuda.abi.error_not_ready;
+            if (fail and (fail_after == 0 or counts[id] >= fail_after)) return cuda.abi.error_not_ready;
         }
         return cuda.abi.success;
     }
@@ -159,6 +201,8 @@ fn actualFrame(block: usize) !void {
     e.affine.prefill_fn = function(&driver, 11);
     e.affine.group_fn = function(&driver, 10);
     e.affine.pdl = false;
+    e.affine.warp_flags = 0;
+    e.affine.split = null;
     e.affine.wide_verify = false;
     e.fns.norm = function(&driver, 13);
     e.head = .{ .a4 = weight() };
@@ -167,6 +211,16 @@ fn actualFrame(block: usize) !void {
     e.draws.topk_merge_fn = function(&driver, 12);
     var d: q.draft.Draft = undefined;
     d.projection_role = .proposal;
+    d.graphs = null;
+    d.cooperative_lanes = 1;
+    d.auxiliary_nodes = 0;
+    d.refine = false;
+    d.feedback_weight = 0;
+    d.reference_capture = false;
+    d.reference_done = false;
+    d.qwen3_norm = null;
+    d.bf16_embedding = null;
+    d.w.bf16 = null;
     d.frame_streams = 128;
     d.scratch_one = 0;
     d.target_taps = 0;
@@ -236,7 +290,7 @@ fn actualFrame(block: usize) !void {
         try std.testing.expectEqual(@as(usize, 1), Record.waits);
         for (contexts[0..count], holds[0..count], 0..) |ctx, it, i| {
             // the production adapter: a grown tree holds the budget it grew, a chain the requested depth
-            const limit = if (block == 16) try q.draft.tree.nodes() else 0;
+            const limit = if (block >= 8) try q.draft.tree.nodes() else 0;
             const held: usize = if (it.lanes != null) 7 else if (limit > 0) ctx.grown else @min(it.depth, block - 1);
             try std.testing.expectEqual(held, ctx.held_n);
             if (limit > 0 and it.lanes == null and it.depth > 0) try std.testing.expect(ctx.grown > 0);
@@ -254,6 +308,19 @@ fn actualFrame(block: usize) !void {
     try std.testing.expectError(error.NotReady, d.drafter().hold(holds[0..8]));
     try std.testing.expectEqual(@as(usize, 1), Record.waits);
     for (contexts[0..8]) |ctx| {
+        try std.testing.expectEqual(@as(usize, 0), ctx.held_n);
+        try std.testing.expectEqual(@as(usize, 0), ctx.grown);
+    }
+    d.cooperative_lanes = 2;
+    d.refine = true;
+    d.cooperative_base_weight = 0.5;
+    for (holds[0..2]) |*item| item.lanes = null;
+    Record.counts = @splat(0);
+    Record.fail_after = 2;
+    defer Record.fail_after = 0;
+    try std.testing.expectError(error.NotReady, d.drafter().hold(holds[0..2]));
+    try std.testing.expectEqual(@as(usize, 2), Record.counts[1]);
+    for (contexts[0..2]) |ctx| {
         try std.testing.expectEqual(@as(usize, 0), ctx.held_n);
         try std.testing.expectEqual(@as(usize, 0), ctx.grown);
     }

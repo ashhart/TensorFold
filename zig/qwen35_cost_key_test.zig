@@ -51,6 +51,9 @@ pub fn check() !void {
     var context: Context = .{};
     var e: q.engine.Engine = undefined;
     e.kit = null;
+    e.mo = null;
+    e.prefill_paths = .{};
+    e.affine.warp_flags = 0;
     e.dir = root;
     e.learning = null;
     e.features = 0;
@@ -61,13 +64,13 @@ pub fn check() !void {
     e.window_rows = 64;
     e.n_taps = 2;
     e.taps[0..2].* = .{ 10, 20 };
-    const Lanes = struct { gpa: std.mem.Allocator = a, io: std.Io, e: *q.engine.Engine, cost_context: ?*Context, cost_identity: ?[32]u8 = @splat(1), cost_kind: adapter.Kind = .dflash };
+    const Lanes = struct { gpa: std.mem.Allocator = a, io: std.Io, e: *q.engine.Engine, prefill_rows: usize = 1024, cost_context: ?*Context, cost_identity: ?[32]u8 = @splat(1), cost_kind: adapter.Kind = .dflash };
     var l: Lanes = .{ .io = io, .e = &e, .cost_context = &context };
     var d: Draft = .{ .c = try q.draft.Config.parse(a, @embedFile("tests/fixtures/qwen35_cost_dflash.json"), e.g) };
     var cache: q.engine.Cache = undefined;
     cache.cap = 64;
     const first = try adapter.identity(&l, &d, &cache);
-    for (0..18) |change| {
+    for (0..21) |change| {
         for (0..2) |pass| {
             switch (change) {
                 0 => context.product = if (pass == 0) "product B" else "product A",
@@ -87,7 +90,10 @@ pub fn check() !void {
                 14 => d.nodes ^= 16,
                 15 => d.trees = !d.trees,
                 16 => l.cost_kind = if (pass == 0) .mtp else .dflash,
-                else => l.cost_identity.?[0] ^= 1,
+                17 => l.cost_identity.?[0] ^= 1,
+                18 => l.prefill_rows ^= 2048,
+                19 => e.prefill_paths.config.gdn = !e.prefill_paths.config.gdn,
+                else => e.affine.warp_flags ^= 1,
             }
             const changed = try adapter.identity(&l, &d, &cache);
             try std.testing.expectEqual(pass == 1, std.mem.eql(u8, &first.current, &changed.current));

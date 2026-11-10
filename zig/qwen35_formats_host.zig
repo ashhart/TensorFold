@@ -108,7 +108,7 @@ fn function(d: *const cuda.Driver, id: usize) cuda.Function {
     return .{ .d = d, .handle = @ptrFromInt(id) };
 }
 fn fullKernels(d: *cuda.Driver) modelopt.Kernels {
-    var out: modelopt.Kernels = undefined;
+    var out: modelopt.Kernels = .{ .lane = undefined, .prompt = undefined, .pack = undefined, .embed = undefined };
     out.part = null;
     out.lane.clusters = false;
     for (&out.lane.fns) |*set| for (set) |*f| {
@@ -160,6 +160,7 @@ test "format coexistence: all projection tags retain their dimensions and BF16 i
     var d: cuda.Driver = undefined;
     d.api.cuLaunchKernel = Recorded.launch;
     var e: Engine = undefined;
+    e.learning = null;
     e.stream = .{ .d = &d, .handle = null };
     e.mo = fullKernels(&d);
     var kit: Kit = undefined;
@@ -218,6 +219,7 @@ fn bf16Prompt(rows: usize) !void {
     e.g = g;
     e.kit = &kit;
     e.affine.mlp128 = false;
+    e.affine.pdl = false;
     e.affine.split = null;
     e.xs = 0;
     e.tables.ptr = 0x100000;

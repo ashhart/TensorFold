@@ -285,9 +285,18 @@ test "GLM keeps its prompt states in the process: no disk image, so --spill-gib 
 
 /// Validate CUDA settings and residency support before checkpoint or driver work at direct entry points.
 pub fn startup(a: std.mem.Allocator, o: api.Open, problem: *[]const u8) !bool {
+    return startupWith(a, o, problem, @import("sys").environment.Process{});
+}
+
+/// The same pre-driver admission with a provider for model-free startup controls.
+pub fn startupWith(a: std.mem.Allocator, o: api.Open, problem: *[]const u8, env: anytype) !bool {
     const settings = @import("sys").environment;
-    if (try settings.refusal(a, settings.Process{}, .{ .cuda = true, .slide = o.slide, .device = o.device, .segments = o.segments })) |why| {
+    if (try settings.refusal(a, env, .{ .cuda = true, .qwen = std.mem.eql(u8, o.model_type, "qwen3_5") or std.mem.eql(u8, o.model_type, "qwen3_5_moe"), .slide = o.slide, .device = o.device, .segments = o.segments })) |why| {
         problem.* = why;
+        return true;
+    }
+    if (try @import("sys").cuda_qualification.refusal(o.model_type, @import("qwen_prefill_config").max_rows, env)) |why| {
+        problem.* = why.message;
         return true;
     }
     if (o.fsrRefusal("cuda")) |why| {

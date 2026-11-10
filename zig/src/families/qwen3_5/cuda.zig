@@ -85,3 +85,5 @@ test "Qwen pages default: the learner's and the prefix share's refusals stop bef
 test {
     _ = @import("cuda_request_starts_test.zig");
 }
+
+pub const prompt_taps = @import("cuda_prompt_taps.zig");

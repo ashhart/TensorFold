@@ -3,7 +3,7 @@ const std = @import("std");
 const Round = @import("cuda_round.zig");
 
 pub const Shape = struct {
-    total: u16, // a prompt chunk's rows (up to Round.max_rows, never captured), or a window bucket
+    total: u16, // a prompt chunk's actual rows (per-call capture only), or a reusable verify window bucket
     nseg: u8,
     record: bool,
     prompt: bool,

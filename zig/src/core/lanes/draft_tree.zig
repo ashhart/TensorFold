@@ -8,7 +8,7 @@ const shape = @import("shape.zig");
 /// Children a node, the selector's weight, the softmax scale, and the nodes a tree takes by default.
 const branch = 4;
 const edge_weight = 0.6;
-const scale = 1.5;
+pub const scale = 1.5;
 /// A sampled stream's candidates carry the draw's own Gumbel noise at this weight (the 27B engine's draft_tree).
 const noise_weight = 0.7;
 const default_nodes = 15;
@@ -61,7 +61,7 @@ fn score(c: Candidates, r: usize, pred: u32, row: ?[]align(1) const f32, j: usiz
 }
 
 /// A candidate's score as the target's draw sees it: its logit at the stream's temperature plus the draw's noise.
-fn drawn(c: Candidates, r: usize, token: u32, logit: f64) f64 {
+pub fn drawn(c: Candidates, r: usize, token: u32, logit: f64) f64 {
     const s = c.sampling orelse return logit;
     const u = @min(gpu_rule.uniform24(s.seed, @intCast(c.position + r), token), @as(f32, @bitCast(@as(u32, 0x3F7FFFFF))));
     return logit / @max(s.temperature, 1e-6) + noise_weight * -@log(-@log(@as(f64, u)));
@@ -150,12 +150,12 @@ pub fn lanesOf(c: Candidates, pending: u32, rows: usize, l: *const shape.Shape, 
     }
 }
 
-fn ids(c: Candidates, r: usize) []align(1) const u32 {
+pub fn ids(c: Candidates, r: usize) []align(1) const u32 {
     return std.mem.bytesAsSlice(u32, c.words[r * c.layout.words * 4 ..][0 .. c.layout.words * 4]);
 }
 
 /// Row `r`'s candidates after `pred` as log-chances: softmax of (unary + edge x selector) / scale.
-fn chancesAfter(c: Candidates, r: usize, pred: u32, out: *[lp_top]f64) void {
+pub fn chancesAfter(c: Candidates, r: usize, pred: u32, out: *[lp_top]f64) void {
     const w = ids(c, r);
     const row = if (c.table) tableRow(c, r, pred) else null;
     var most: f64 = -std.math.inf(f64);
@@ -169,8 +169,32 @@ fn chancesAfter(c: Candidates, r: usize, pred: u32, out: *[lp_top]f64) void {
     for (out[0..c.topk]) |*v| v.* -= log_total;
 }
 
+/// The unary pool plus at most four external proposal tokens; these are proposals, never target acceptance decisions.
+pub const Choices = struct { tokens: [lp_top + 4]u32 = undefined, logp: [lp_top + 4]f64 = undefined, len: usize = 0 };
+
+pub fn baseChoices(c: Candidates, row: usize, pred: u32) Choices {
+    var out: Choices = .{ .len = c.topk };
+    var lc: [lp_top]f64 = undefined;
+    chancesAfter(c, row, pred, &lc);
+    @memcpy(out.tokens[0..c.topk], ids(c, row)[c.layout.ids..][0..c.topk]);
+    @memcpy(out.logp[0..c.topk], lc[0..c.topk]);
+    return out;
+}
+
+const Base = struct {
+    c: Candidates,
+    pub fn choices(b: Base, row: usize, pred: u32) Choices {
+        return baseChoices(b.c, row, pred);
+    }
+};
+
 /// Up to `most` nodes best first, rows under `most_window`: the open node of least path cost next; the count grown.
 pub fn grow(comptime most_window: usize, c: Candidates, pending: u32, rows: usize, most: usize, tokens: []u32, parents: []i32, own: []f64) usize {
+    return growWith(most_window, Base{ .c = c }, pending, rows, most, tokens, parents, own);
+}
+
+/// Pack proposal providers through the same best-first walker and window bound.
+pub fn growWith(comptime most_window: usize, provider: anytype, pending: u32, rows: usize, most: usize, tokens: []u32, parents: []i32, own: []f64) usize {
     const Open = struct { cost: f64, parent: i32, token: u32, row: usize, own: f64 };
     var open: [branch * (most_window + 1)]Open = undefined;
     var n_open: usize = 0;
@@ -182,19 +206,17 @@ pub fn grow(comptime most_window: usize, c: Candidates, pending: u32, rows: usiz
     while (true) {
         // the node just taken (or the pending token) opens its best children on the next row
         if (row < rows) {
-            var lc: [lp_top]f64 = undefined;
-            chancesAfter(c, row, pred, &lc);
-            var order: [lp_top]usize = undefined;
-            for (order[0..c.topk], 0..) |*o, i| o.* = i;
-            std.mem.sort(usize, order[0..c.topk], &lc, struct {
-                fn more(v: *const [lp_top]f64, a: usize, b: usize) bool {
-                    return v[a] > v[b] or (v[a] == v[b] and a < b);
+            const next = provider.choices(row, pred);
+            var order: [lp_top + 4]usize = undefined;
+            for (order[0..next.len], 0..) |*o, i| o.* = i;
+            std.mem.sort(usize, order[0..next.len], &next, struct {
+                fn more(v: *const Choices, a: usize, b: usize) bool {
+                    return v.logp[a] > v.logp[b] or (v.logp[a] == v.logp[b] and a < b);
                 }
             }.more);
-            const w = ids(c, row);
-            for (order[0..@min(branch, c.topk)]) |j| {
-                if (!std.math.isFinite(lc[j]) or n_open == open.len) break;
-                open[n_open] = .{ .cost = path - lc[j], .parent = parent, .token = w[c.layout.ids + j], .row = row, .own = lc[j] };
+            for (order[0..@min(branch, next.len)]) |j| {
+                if (!std.math.isFinite(next.logp[j]) or n_open == open.len) break;
+                open[n_open] = .{ .cost = path - next.logp[j], .parent = parent, .token = next.tokens[j], .row = row, .own = next.logp[j] };
                 n_open += 1;
             }
         }

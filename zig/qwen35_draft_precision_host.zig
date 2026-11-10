@@ -40,6 +40,7 @@ test "Draft precision: DFlash projections preserve each role across row and stre
         var driver: cuda.Driver = undefined;
         var e = fixture.engine(&driver, gb10);
         var d: q.draft.Draft = undefined;
+        d.w.bf16 = null;
         d.e = &e;
         d.xs = xs;
         for ([_]P.Role{ .prompt, .live, .proposal }) |role| {
@@ -178,6 +179,7 @@ test "Draft precision: GB10 family grouping DFlash QKV and MLP keep prompt roles
         var driver: cuda.Driver = undefined;
         var e = fixture.engine(&driver, gb10);
         var d: q.draft.Draft = undefined;
+        d.w.bf16 = null;
         d.e = &e;
         d.xs = xs;
         for ([_]P.Role{ .prompt, .live, .proposal }) |role| {
@@ -208,6 +210,7 @@ test "Draft precision: GB10 family grouping new pairs preserve the other GPUs' s
         var driver: cuda.Driver = undefined;
         var e = fixture.engine(&driver, gb10);
         var d: q.draft.Draft = undefined;
+        d.w.bf16 = null;
         d.e = &e;
         d.xs = xs;
         d.projection_role = .proposal;

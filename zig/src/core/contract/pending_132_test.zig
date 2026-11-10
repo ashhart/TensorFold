@@ -66,18 +66,23 @@ test "prompt int8: five-SM receipts remain independent of later releases, 13.3's
     }
 }
 
-test "compiler receipts: 13.0 additions cannot replace a different later measurement" {
+test "compiler receipts: historical tables stay independent while changed root kernels fail closed" {
     const row = for (registry.all_cuda) |r| {
         if (std.mem.eql(u8, r.launch.name, "qwen35 tf_q35_gdn_slots_1")) break r;
     } else return error.MissingLaneRecord;
-    const old = registry.usageFor(row, .{ .major = 13, .minor = 0 });
-    const later = registry.usageFor(row, .{ .major = 13, .minor = 2 });
+    for ([_]limits.Nvcc{ .{ .major = 13, .minor = 0 }, .{ .major = 13, .minor = 2 }, .{ .major = 13, .minor = 3 } }) |version|
+        try std.testing.expectEqualDeep(registry.none, registry.usageFor(row, version));
+    const old = row.usage;
+    const later = for (@import("measurements/qwen_lanes_132.zig").records) |receipt| {
+        if (std.mem.eql(u8, receipt.name, row.launch.name)) break receipt.usage;
+    } else return error.MissingHistoricalLaneReceipt;
     try std.testing.expectEqual(@as(u32, 4096), old[4].static);
     try std.testing.expectEqual(@as(u32, 72), old[4].regs);
     try std.testing.expectEqual(@as(u32, 5120), later[4].static);
     try std.testing.expectEqual(@as(u32, 40), later[4].regs);
     var absent = row;
     absent.launch.name = "a launch with only a 13.0 receipt";
+    absent.launch.symbol = "historical_only_slot";
     try std.testing.expectEqualDeep(old, registry.usageFor(absent, .{ .major = 13, .minor = 1 }));
     for ([_]limits.Nvcc{ .{ .major = 13, .minor = 2 }, .{ .major = 13, .minor = 3 }, .{ .major = 14, .minor = 0 } }) |version|
         try std.testing.expectEqualDeep(registry.none, registry.usageFor(absent, version));

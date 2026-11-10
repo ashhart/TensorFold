@@ -158,7 +158,14 @@ pub fn facts(t: *const Target) [4]u64 {
             rope.update(std.mem.asBytes(&y.table)); // the actual kernel inputs, independent of a finite probe
         },
     }
-    return .{ @backingInt(reuse.formatOf(t.e)), @intFromBool(t.e.n_taps > 0), @intFromBool(t.e.int8.on), rope.final() };
+    var out = [_]u64{ @backingInt(reuse.formatOf(t.e)), @intFromBool(t.e.n_taps > 0), @intFromBool(t.e.int8.on), rope.final() };
+    if (t.e.alternate) |source| {
+        var hash = std.hash.Wyhash.init(0x4e56465034535243);
+        hash.update(std.mem.asBytes(&out));
+        hash.update(std.mem.asBytes(&source.words()));
+        out[2] = hash.final();
+    }
+    return out;
 }
 
 test {

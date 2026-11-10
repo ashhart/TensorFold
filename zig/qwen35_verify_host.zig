@@ -80,12 +80,15 @@ fn device(d: *cuda.Driver, gb10: bool, wide: bool) q.engine.Engine {
     d.api.cuLaunchKernelEx = Trace.launchEx;
     var e: q.engine.Engine = undefined;
     e.int8 = .{};
+    e.mo = null;
+    e.g.hidden = 0;
     e.kit = null;
     e.d = d;
     e.stream = .{ .d = d, .handle = null };
     e.fns.sums = function(d, 1);
     e.affine.many_fn = function(d, 9);
     e.affine.mlp128 = false;
+    e.affine.warp_flags = 0;
     e.affine.gemv_fn = function(d, 2);
     e.affine.group_fn = function(d, 3);
     e.affine.prefill_fn = function(d, 4);
@@ -238,6 +241,7 @@ test "MLP128 leaves the lane GEMV column coverage unchanged" {
     var d: cuda.Driver = undefined;
     d.api.cuLaunchKernel = Probe.launch;
     var a: cuda.qlinear.Affine4Kernels = undefined;
+    a.warp_flags = 0;
     a.mlp128 = true;
     a.gemv_fn = function(&d, 2);
     a.gemv_blocks = 1000;

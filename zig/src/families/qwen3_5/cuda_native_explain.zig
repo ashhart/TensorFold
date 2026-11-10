@@ -4,7 +4,14 @@ const decide = @import("cuda_decide.zig");
 /// A request this engine refuses, in words, or with no engine (null) its open; null: none of its own.
 pub fn explain(ctx: ?*anyopaque, err: anyerror) ?[]const u8 {
     if (ctx == null) if (decide.explain(err)) |why| return why;
+    if (ctx == null) if (@import("sys").cuda_qualification.explain(err)) |why| return why;
     if (ctx == null) return switch (err) {
+        error.WidePrefillLearningUnsupported => "The experimental 8192-row prefill build does not support --slide; use the default 4096-row build",
+        error.BadPrefillGraph => "TF_QWEN_PREFILL_GRAPH must be 0 or 1",
+        error.InvalidNvfp4SourceScope => "TF_QWEN_NVFP4_SCOPE must be mlp or layers",
+        error.Nvfp4ScopeNeedsSource => "TF_QWEN_NVFP4_SCOPE=layers requires TF_QWEN_NVFP4_MLP_DIR",
+        error.Nvfp4SourceContext => "The alternate source does not support the primary checkpoint's context ceiling",
+        error.WidePrefillPocketsUnsupported => "The experimental 8192-row prefill build does not support learned pockets; use the default 4096-row build",
         error.NoQwenVision => "--vision: this checkpoint has no image tower (no vision_config): serve it without --vision",
         error.QwenPagesNoLearner => "TF_QWEN_KV_PAGES: the learner reads whole windows, not pages; drop --slide or unset it",
         error.QwenRequestStartsWithSharedKv => "TF_QWEN_REQUEST_STARTS=1 cannot be used with TF_QWEN_KV_SHARE above 0; unset request starts or disable shared KV",

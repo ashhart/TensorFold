@@ -8,6 +8,15 @@ const Proj = engine.Proj;
 pub fn projectMany(e: *Engine, ls: []const Proj, x: u64, xs: u64, outs: []const u64, rows: usize, prompt: bool, params: u64, sums: bool, allow_fused_prompt: bool) !void {
     if (ls.len == 0 or ls.len != outs.len) return error.UnexpectedTensor;
     if (e.kit != null and !(prompt and rows > 16)) return exl3Group(e, ls, x, xs, outs, rows, prompt, params, sums);
+    const shared = if (allow_fused_prompt and !sums)
+        try @import("cuda_fp8_shared.zig").run(e, ls, x, outs, rows, prompt)
+    else
+        0;
+    if (shared != 0) {
+        for (ls, outs, 0..) |l, out, i| if (shared & (@as(u64, 1) << @intCast(i)) == 0)
+            try e.project(l, x, xs, out, rows, prompt, params, false);
+        return;
+    }
     const A = cuda.qlinear.Affine4Kernels;
     const fused_prompt = allow_fused_prompt and prompt and rows > A.max_rows and qwen38PromptShape(ls, rows) and !e.int8.on and e.affine.pdl and blk: {
         const k = ls[0].inputs();

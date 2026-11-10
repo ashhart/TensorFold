@@ -72,6 +72,10 @@ pub const Usage = struct { regs: u32, static: u32, bound: u32 = 0, local: u32 = 
 /// An nvcc release, as a cubin's .note.nv.tkinfo names it ("release 13.2").
 pub const Nvcc = struct { major: u32, minor: u32 };
 
+pub fn newer(x: Nvcc, y: Nvcc) bool {
+    return x.major > y.major or (x.major == y.major and x.minor > y.minor);
+}
+
 /// Every problem one Metal launch has on one family, written to `out`; returns how many.
 pub fn metal(l: MetalLaunch, f: Apple, out: *std.ArrayList(u8), a: std.mem.Allocator) !usize {
     var n: usize = 0;

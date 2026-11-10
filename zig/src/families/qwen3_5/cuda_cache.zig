@@ -112,8 +112,13 @@ fn beforeView(e: *const Engine, at: u64) DeviceBuffer {
 
 pub const Cache = struct {
     owner: ?*recurrent.Pool = null,
+    pool_run: bool = false,
     log_lease: ?recurrent.Lease = null,
     before_lease: ?recurrent.Lease = null,
+    before_skipped: bool = false,
+    tap_epoch: u64 = 1,
+    tap_begin: u64 = 0,
+    tap_end: u64 = 0,
     /// Bytes this cache adds to its owner's cap while it lives (recurrent.bound).
     scratch: usize = 0,
     untaught: bool = false,
@@ -178,7 +183,10 @@ pub const Cache = struct {
         var table = try DeviceBuffer.alloc(e.d, pages * 4);
         errdefer table.free();
         const none = try DeviceBuffer.alloc(e.d, 0);
-        return .{ .state = none, .before = none, .kv = none, .paged = .{ .base = base, .table = table, .ids = &.{}, .tokens = tokens, .own_ids = false }, .log = none, .cap = 0, .logits = try gpa.alloc(u16, e.g.vocab) };
+        var out: Cache = .{ .state = none, .before = none, .kv = none, .paged = .{ .base = base, .table = table, .ids = &.{}, .tokens = tokens, .own_ids = false }, .log = none, .cap = 0, .logits = try gpa.alloc(u16, e.g.vocab) };
+        errdefer gpa.free(out.logits);
+        try recurrent.attachPaged(e, &out);
+        return out;
     }
 
     /// Bytes of a pool lane's run: state, log with its rollback copy, tap ring and a drafter's ring, each 256-aligned.
@@ -189,12 +197,14 @@ pub const Cache = struct {
     }
 
     fn runParts(e: *const Engine, ring: usize) [4]usize {
-        return .{ e.g.stateBytes(), overlay(e).bytes, e.tapBytes(), ring };
+        return .{ e.g.stateBytes(), if (recurrent.needsFullKeep(e)) 0 else overlay(e).bytes, e.tapBytes(), ring };
     }
 
     /// A lane's state, log and before, taps and drafter ring as views of the run at `base`; a short run is refused.
     pub fn mapRun(self: *Cache, e: *const Engine, base: u64, len: usize, ring: usize) !void {
         if (runBytes(e, ring) > len) return error.QwenRunTooShort;
+        recurrent.release(self);
+        @import("cuda_prompt_taps.zig").reset(self);
         var at = base;
         var views: [4]DeviceBuffer = undefined;
         for (runParts(e, ring), &views) |n, *v| {
@@ -203,8 +213,8 @@ pub const Cache = struct {
         }
         self.state = views[0];
         self.pend = 0;
-        self.log = logView(e, views[1].ptr);
-        self.before = beforeView(e, views[1].ptr);
+        self.log = if (self.owner != null) .{ .d = e.d, .ptr = 0, .len = 0, .borrowed = true } else logView(e, views[1].ptr);
+        self.before = if (self.owner != null) null else beforeView(e, views[1].ptr);
         self.tap = if (e.n_taps > 0) views[2] else null;
         self.drafter_ring = if (ring > 0) views[3].ptr else null;
         for ([_]DeviceBuffer{ self.log, views[2], views[3] }) |v| if (v.len > 0) try v.fill8(0, e.stream.handle);
@@ -212,10 +222,12 @@ pub const Cache = struct {
 
     /// A closed lane's views dropped: its run went back to the pool.
     pub fn unmapRun(self: *Cache, e: *const Engine) void {
+        recurrent.release(self);
+        @import("cuda_prompt_taps.zig").reset(self);
         const none: DeviceBuffer = .{ .d = e.d, .ptr = 0, .len = 0, .borrowed = true };
         self.state = none;
         self.pend = 0;
-        self.before = none;
+        self.before = if (self.owner != null) null else none;
         self.log = none;
         self.tap = null;
         self.drafter_ring = null;
@@ -261,6 +273,7 @@ pub const Cache = struct {
     /// Ready for another stream: no rows, the recurrences and tails zero (on the engine's stream, before its forwards).
     pub fn reset(self: *Cache, e: *const Engine) !void {
         recurrent.release(self);
+        @import("cuda_prompt_taps.zig").reset(self);
         self.len = 0;
         self.written = 0;
         self.last = null;
@@ -272,6 +285,7 @@ pub const Cache = struct {
 
     pub fn deinit(self: *Cache, gpa: std.mem.Allocator) void {
         recurrent.release(self);
+        @import("cuda_prompt_taps.zig").reset(self);
         if (self.owner) |p| p.cap -= self.scratch;
         self.state.free();
         if (self.before) |*b| b.free();
@@ -287,7 +301,7 @@ pub const Cache = struct {
     /// The stream's window of `rows` rows from forward row `row0`, after `len` cached positions.
     pub fn seg(self: *const Cache, e: *const Engine, len: usize, row0: usize, rows: usize) Seg {
         const g = e.g;
-        var sg: Seg = .{ .rec = self.state.ptr, .conv = self.state.ptr + g.deltas() * g.recBytes(), .kv = self.kv.ptr, .tap = if (self.tap) |t| t.ptr else 0, .log = self.log.ptr, .before = if (self.before) |b| b.ptr else 0, .cap = @intCast(self.cap), .len = @intCast(len), .row0 = @intCast(row0), .rows = @intCast(rows), .tap_rows = tap_rows, .taps = @intCast(e.n_taps), .delta = self.delta };
+        var sg: Seg = .{ .rec = self.state.ptr, .conv = self.state.ptr + g.deltas() * g.recBytes(), .kv = self.kv.ptr, .tap = if (self.tap) |t| t.ptr else 0, .log = self.log.ptr, .before = if (self.before) |b| b.ptr else 0, .cap = @intCast(self.cap), .len = @intCast(len), .row0 = @intCast(row0), .rows = @intCast(rows), .tap_rows = if (e.n_taps == 0) 0 else @intCast(e.tap_capacity), .taps = @intCast(e.n_taps), .delta = self.delta };
         if (self.paged) |p| {
             sg.kv = p.base;
             sg.pt = p.table.ptr;
@@ -300,7 +314,9 @@ pub const Cache = struct {
     /// Keeps `path` (window rows, ascending from 0): the state as that chain would leave it, a tree's keys moved down.
     pub fn keep(self: *Cache, e: *Engine, path: []const u32) !void {
         const last = self.last orelse return error.NothingToKeep;
+        defer if (self.last == null) recurrent.committed(e, self);
         if (path.len == 0) {
+            if (last.rows == 1 and self.before_skipped) return error.QwenCommittedRootCannotRollback;
             if (last.rows == 1) {
                 try recurrent.mark(self, true);
                 try self.state.copyFrom(0, (self.before orelse return error.MissingQwenBefore).ptr, e.g.stateBytes(), e.stream.handle);
@@ -414,4 +430,15 @@ test "KV page dimensions: diagnostic admission includes its padded rows and devi
     for ([_]bool{ false, true }) |fp8| try std.testing.expectEqual(31 * g.kvBytes(1, fp8) + 8, try pageExtra(g, 65, 48, fp8));
     try std.testing.expectError(error.BadQwenPageTest, cacheRows(2147483647, 48));
     try std.testing.expectError(error.BadQwenPageTest, cacheRows(std.math.maxInt(usize), 48));
+}
+
+test "Qwen memory: a committed one-row root refuses empty rollback before mutation" {
+    var cache: Cache = undefined;
+    cache.last = .{ .start = 43, .rows = 1 };
+    cache.len = 44;
+    cache.before_skipped = true;
+    var e: Engine = undefined;
+    try std.testing.expectError(error.QwenCommittedRootCannotRollback, cache.keep(&e, &.{}));
+    try std.testing.expectEqual(@as(usize, 44), cache.len);
+    try std.testing.expectEqual(@as(usize, 43), cache.last.?.start);
 }

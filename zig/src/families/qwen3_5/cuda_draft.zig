@@ -13,23 +13,24 @@ const E = engine.Engine;
 const DeviceBuffer = cuda.DeviceBuffer;
 const dr = lanes.drafter;
 const Stream = lanes.Stream;
-
 /// Rows an absorb runs at once (the target's prompt chunks are at most this).
 const max_rows = engine.most_verify; // taps absorbed at most this many rows a call (a prompt chunk's in pieces)
 /// The logprob row's words (sample.cu's LP_WORDS) and its best-token capacity.
 const lp_words = 3 + 2 * 20;
-/// A hold's rows: the reference's 16-row blocks (dflash2.block), past the 8 the checkpoint was trained with.
-const lp_top = 20;
 
 pub const Config = @import("cuda_draft_config.zig").Config;
 pub const frame = @import("cuda_draft_frame.zig");
 pub const memory = @import("cuda_draft_memory.zig");
 pub const spine = @import("cuda_dspine_frame.zig");
+const graph = @import("cuda_draft_graph.zig");
+const cooperative = @import("cuda_draft_cooperative.zig");
+const embedding = @import("cuda_draft_embedding.zig");
+const feedback = @import("cuda_draft_feedback.zig");
+const reference = @import("cuda_draft_reference.zig");
+const normalization = @import("cuda_draft_normalization.zig");
 const Fns = struct { gather_taps: cuda.Function, gather_rows: cuda.Function, dyn_conv: cuda.Function, norm_rope: cuda.Function, ring_put: cuda.Function, attn: cuda.Function, dyn_conv_batch: cuda.Function, norm_rope_batch: cuda.Function, mask_rows: cuda.Function, attn_partial: cuda.Function, attn_merge: cuda.Function };
-
 /// qwen35_draft.cu's TapRows.
 const TapRows = extern struct { n: c_int, rows: [engine.most_window]c_int };
-
 /// A stream's context: its layers' key and value rings over [begin, end), and the drafts it holds (a chain or tree).
 pub const Ctx = struct {
     ring: DeviceBuffer,
@@ -44,8 +45,12 @@ pub const Ctx = struct {
     // the stream's tokens draft_frame has read, and whether one lay outside its spans (then drafts take the whole head)
     scanned: usize = 0,
     wide: bool = false,
+    attention_rows: u32 = 0,
+    cooperative_owner: ?*const @This() = null,
+    seed_n: u8 = 0,
+    seed_tokens: [2]u32 = undefined,
+    feedback: feedback.State = .{},
 };
-
 pub const Draft = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -106,6 +111,17 @@ pub const Draft = struct {
     n_costs: usize = 0,
     tree_nodes: usize = 0,
 
+    graph_engine: graph.Engine = undefined,
+    graphs: ?graph.Cache = null,
+    cooperative_lanes: u8 = 1,
+    auxiliary_nodes: usize = 0,
+    cooperative_base_weight: f64 = 0.5,
+    refine: bool = false,
+    feedback_weight: f64 = 0,
+    reference_capture: bool = false,
+    reference_done: bool = false,
+    qwen3_norm: ?cuda.norms.Norms = null,
+    bf16_embedding: ?embedding.Table = null,
     startup: profile.Times = .{},
     frame_streams: usize = 1,
     scratch_one: usize = 0,
@@ -118,8 +134,6 @@ pub const Draft = struct {
 
     const words_at = frame.words_at;
     const hp_at = frame.hp_at;
-    const stagedLen = frame.stagedLen;
-
     pub fn init(gpa: std.mem.Allocator, io: std.Io, e: *E, dir: []const u8) !*Draft {
         const nodes = try tree.nodes();
         const started = profile.now(io);
@@ -128,13 +142,18 @@ pub const Draft = struct {
         errdefer gpa.destroy(d);
         d.* = .{ .gpa = gpa, .io = io, .e = e, .c = c, .w = undefined, .mod = undefined, .fns = undefined, .scratch = undefined, .taps_in = 0, .th = 0, .thn = 0, .kabs = 0, .kn = 0, .vabs = 0, .xs = 0, .h = 0, .h2 = 0, .x = 0, .xin = 0, .dyn = 0, .qraw = 0, .q = 0, .kraw = 0, .kb = 0, .vb = 0, .att = 0, .o = 0, .gate = 0, .up = 0, .act = 0, .logits = 0, .words = 0, .parts = 0, .hp = 0, .ids = 0, .staged = undefined };
         d.tree_nodes = nodes;
+        if (c.kind == .dflash2) try cooperative.configure(d);
         d.mod = try cuda.Module.load(e.d, cuda.kernels.qwen35_draft);
         errdefer d.mod.unload();
         inline for (@typeInfo(Fns).@"struct".field_names) |name| @field(d.fns, name) = try d.mod.function("tf_q35d_" ++ name);
+        if (c.kind == .dflash2) d.qwen3_norm = try normalization.open(e.d);
+        errdefer normalization.close(&d.qwen3_norm);
         d.w = try weights.load(gpa, io, e, dir, .{ .hidden = c.hidden, .intermediate = c.intermediate, .layers = c.layers, .vocab = c.vocab, .q_width = c.qWidth(), .kv_width = c.kvWidth(), .head_dim = c.head_dim, .dynamic = c.dynamic(), .rank = c.rank, .taps = c.n_taps, .dflash2 = c.kind == .dflash2 });
         errdefer d.w.deinit(gpa);
         if (c.kind == .dspine) d.spine = try spine.init(gpa, io, e, dir, c, d.mod);
         errdefer if (c.kind == .dspine) spine.deinit(gpa, d.spine);
+        if (c.kind == .dflash2) d.bf16_embedding = try embedding.load(gpa, io, e, c.vocab, c.hidden);
+        errdefer if (d.bf16_embedding) |*t| t.deinit();
         d.scratch = try DeviceBuffer.alloc(e.d, try d.scratchBytes());
         errdefer d.scratch.free();
         d.scratch_one = d.scratch.len;
@@ -147,6 +166,8 @@ pub const Draft = struct {
         const ctx = try d.create();
         errdefer d.drop(ctx);
         try e.stream.synchronize();
+        if (c.kind == .dflash2) try graph.init(d);
+        errdefer if (d.graphs) |*cache| cache.deinit();
         const warm_start = profile.now(io);
         try d.absorb(ctx, d.taps_in, 0, 1, null, true);
         var quickest: f64 = std.math.inf(f64);
@@ -157,6 +178,7 @@ pub const Draft = struct {
             quickest = @min(quickest, @as(f64, @floatFromInt(t0.durationTo(std.Io.Clock.awake.now(io)).toNanoseconds())) / 1e6);
         }
         d.step_ms = quickest / @as(f64, @floatFromInt(c.block - 1));
+        if (d.graphs) |*cache| std.log.info("DFlash2 block graphs: {d} captured, {d} replays", .{ cache.stats.captured, cache.stats.replayed });
         ctx.* = .{ .ring = ctx.ring };
         try d.pool.append(gpa, ctx);
         d.startup.warmups += profile.elapsed(io, warm_start);
@@ -179,6 +201,7 @@ pub const Draft = struct {
     }
 
     pub fn deinit(d: *Draft) void {
+        if (d.graphs) |*cache| cache.deinit();
         var it = d.streams.valueIterator();
         while (it.next()) |ctx| d.drop(ctx.*);
         d.streams.deinit(d.gpa);
@@ -188,15 +211,22 @@ pub const Draft = struct {
         d.scratch.free();
         if (d.c.kind == .dspine) spine.deinit(d.gpa, d.spine);
         d.w.deinit(d.gpa);
+        if (d.bf16_embedding) |*t| t.deinit();
+        normalization.close(&d.qwen3_norm);
         d.mod.unload();
         d.gpa.destroy(d);
+    }
+
+    /// A successful resize drains the stream, then drops graphs before their captured scratch can be freed.
+    pub fn clearGraphs(d: *Draft) void {
+        if (d.graphs) |*cache| cache.dropAll();
     }
 
     /// One stream's bytes, before the drafter loads: its ring, the target's taps of `hidden` and a frame's scratch.
     pub fn streamBytesFor(c: Config, hidden: usize) !usize {
         var d: Draft = undefined;
         d.c = c;
-        d.frame_streams = 1;
+        d.frame_streams = if (c.kind == .dflash2) try cooperative.setting(try @import("sys").environment.given("TF_DRAFT_LANES")) else 1;
         return c.ringBytes() + engine.tap_rows * c.n_taps * hidden * 2 + try d.layout(false);
     }
 
@@ -262,7 +292,7 @@ pub const Draft = struct {
     pub fn reserve(d: *Draft, n: usize) !void {
         const started = profile.now(d.io);
         const previous_times = d.startup;
-        try memory.resize(d, n);
+        try memory.resize(d, if (d.c.kind == .dflash2) try cooperative.frames(n, d.cooperative_lanes) else n);
         // with a pool the other streams' rings are lane runs (all: every stream's)
         const own = if (d.ring_of) |r| (if (r.all) 0 else @min(n, 1)) else n;
         try d.pool.ensureTotalCapacity(d.gpa, own);
@@ -301,8 +331,9 @@ pub const Draft = struct {
         const e = d.e;
         if (ls.len == 0 or ls.len != outs.len) return error.UnexpectedTensor;
         const prompt = precision.prompt(d.projection_role, rows, precision.dflash_projection_prompt_cutoff);
-        if ((!e.affine.pdl and !segmented) or (rows > 16 and (!e.affine.pdl or prompt)) or ls.len > cuda.qlinear.Affine4Kernels.segs_max or ls.len == 1) {
-            for (ls, outs, 0..) |l, out, i| try d.projSums(l, x, out, rows, sums and i == 0);
+        const overridden = if (d.w.bf16) |*p| p.containsAny(ls) else false;
+        if (overridden or (!e.affine.pdl and !segmented) or (rows > 16 and (!e.affine.pdl or prompt)) or ls.len > cuda.qlinear.Affine4Kernels.segs_max or ls.len == 1) {
+            for (ls, outs, 0..) |l, out, i| try d.projSums(l, x, out, rows, sums and (overridden or i == 0));
             return;
         }
         if (sums) try e.run(e.fns.sums, .{ rows, (ls[0].k / 64 + 63) / 64, 1 }, .{ 64, 1, 1 }, .{ x, d.xs, @as(c_int, @intCast(ls[0].k)), @as(u64, 0) });
@@ -312,17 +343,15 @@ pub const Draft = struct {
     }
 
     pub fn projSums(d: *Draft, l: cuda.qlinear.Affine4, x: u64, out: u64, rows: usize, sums: bool) !void {
+        if (d.w.bf16) |*p| if (try p.project(d.e.stream, l.w, x, out, rows)) return;
         return precision.affine(d.e, l, x, d.xs, out, rows, sums, d.projection_role);
     }
 
     /// out = the normed h, and its group sums into xs for a projAgain over out.
     pub fn norm(d: *Draft, h: u64, w: u64, out: u64, rows: usize) !void {
+        if (d.c.kind == .dflash2) return normalization.run(d, h, w, out, rows);
         const e = d.e;
         try e.run(e.fns.norm, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ h, @as(u64, 0), w, out, d.c.eps, @as(c_int, @intCast(d.c.hidden)), @as(u64, 0), d.xs });
-    }
-
-    fn dynConv(d: *Draft, x: u64, dyn: u64, base: u64, res: u64, out: u64, rows: usize, branch: usize) !void {
-        try d.e.run(d.fns.dyn_conv, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ x, dyn, base, res, out, @as(c_int, @intCast(d.c.hidden)), @as(c_int, @intCast(d.c.group)), @as(c_int, @intCast(branch)) });
     }
 
     fn normRope(d: *Draft, x: u64, w: u64, out: u64, rows: usize, heads: usize, pos0: u64) !void {
@@ -353,10 +382,11 @@ pub const Draft = struct {
             if (rows_) |rs| {
                 var tr: TapRows = .{ .n = @intCast(rows), .rows = @splat(0) };
                 for (rs, 0..) |r, i| tr.rows[i] = @intCast(r);
-                try e.run(d.fns.gather_rows, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ tap_ring, @as(c_int, engine.tap_rows), @as(c_longlong, @intCast(start)), tr, @as(c_int, @intCast(c.n_taps * c.hidden)), d.taps_in });
-            } else try e.run(d.fns.gather_taps, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ tap_ring, @as(c_int, engine.tap_rows), @as(c_longlong, @intCast(start)), @as(c_int, @intCast(c.n_taps * c.hidden)), d.taps_in });
+                try e.run(d.fns.gather_rows, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ tap_ring, @as(c_int, @intCast(@import("cuda_prompt_taps.zig").modulus(e, tap_ring))), @as(c_longlong, @intCast(start)), tr, @as(c_int, @intCast(c.n_taps * c.hidden)), d.taps_in });
+            } else try e.run(d.fns.gather_taps, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ tap_ring, @as(c_int, @intCast(@import("cuda_prompt_taps.zig").modulus(e, tap_ring))), @as(c_longlong, @intCast(start)), @as(c_int, @intCast(c.n_taps * c.hidden)), d.taps_in });
             try d.proj(d.w.fc, d.taps_in, d.th, rows);
             try d.norm(d.th, d.w.hidden_norm, d.thn, rows);
+            if (c.kind == .dflash2) try reference.absorbed(d, start, rows);
             for (d.w.layers, 0..) |l, i| {
                 if (e.affine.pdl) {
                     try d.projManySums(&.{ l.k, l.v }, d.thn, &.{ d.kabs, d.vabs }, rows, false);
@@ -383,7 +413,7 @@ pub const Draft = struct {
 
     /// The frame of the drafter's kind over `items`.
     fn forward(d: *Draft, items: []const dr.Hold, contexts: []const *Ctx) !void {
-        return if (d.c.kind == .dspine) spine.forward(d, d.spine, items, contexts) else frame.forward(d, items, contexts);
+        return if (d.c.kind == .dspine) spine.forward(d, d.spine, items, contexts) else cooperative.forward(d, items, contexts);
     }
 
     pub fn candidates(d: *const Draft, rows: usize) tree.Candidates {
@@ -402,26 +432,30 @@ pub const Draft = struct {
         ctx.held_n = shape.parents.len;
     }
 
+    fn nodeBudget(d: *const Draft) usize {
+        return if (d.c.kind == .dflash2) @max(d.tree_nodes, d.auxiliary_nodes) else if (d.c.block == 16) d.tree_nodes else 0;
+    }
+
     pub fn selectHold(d: *Draft, ctx: *Ctx, it: dr.Hold) !void {
         const rows = d.c.block - 1;
         ctx.grown = 0;
+        if (d.c.kind == .dflash2) try @import("cuda_draft_trace.zig").emit(d, it);
         // a sampled hold's candidates ranked as its target draw ranks them (its seed, each draft's position)
         d.drawn = .{ .sampling = it.sampling, .position = it.position };
         defer d.drawn = .{};
         if (it.lanes) |shape| return d.selectLanes(ctx, it.pending, rows, shape);
-        const limit = if (d.c.block == 16) d.tree_nodes else 0;
+        const limit = d.nodeBudget();
+        if (ctx.seed_n > 0) return @import("cuda_draft_refine.zig").select(d.candidates(rows), ctx, if (it.depth == 0) 0 else limit);
         if (limit > 0) {
             // the whole budget whenever drafts are asked: the block's forward costs the same at any depth
             const n = if (it.depth == 0) 0 else limit;
-            ctx.grown = tree.grow(d.candidates(rows), it.pending, rows, n, &ctx.held, &ctx.parents, &ctx.own);
+            ctx.grown = feedback.grow(d.candidates(rows), &ctx.feedback, it.position, d.feedback_weight, it.pending, rows, n, &ctx.held, &ctx.parents, &ctx.own);
             ctx.held_n = ctx.grown;
         } else {
             d.select(ctx, it.pending, rows);
             ctx.held_n = @min(it.depth, rows);
         }
     }
-
-    // the Drafter contract
 
     pub fn drafter(d: *Draft) dr.Drafter {
         return .{ .kind = if (d.c.kind == .dspine) "DSpine" else "DFlash2", .ptr = d, .vtable = &.{ .taps = tapsFn, .facts = factsFn, .open = openFn, .absorb = absorbFn, .hold = holdFn, .held = heldFn, .release = releaseFn, .tree = treeFn, .chances = chancesFn } };
@@ -439,7 +473,7 @@ pub const Draft = struct {
     fn factsFn(p: *anyopaque) dr.Facts {
         const d = cast(p);
         // TF_NO_TREES=1: chains only (for comparing)
-        return .{ .depth = @intCast(d.c.block - 1), .step_ms = d.step_ms, .prior = &prior, .plain_guard = true, .batched = true, .stream_bytes = d.c.ringBytes() + d.target_taps + d.scratch_one, .trees = platform.c.getenv("TF_NO_TREES") == null, .window_costs = d.costs[0..d.n_costs], .lane_costs = d.costs[0..d.n_costs], .copy_match = copyMatch(d.e.g), .tree_nodes = @intCast(if (d.c.block == 16) d.tree_nodes else 0) };
+        return .{ .depth = @intCast(d.c.block - 1), .step_ms = d.step_ms, .prior = &prior, .plain_guard = true, .batched = true, .stream_bytes = d.c.ringBytes() + d.target_taps + d.scratch_one, .trees = platform.c.getenv("TF_NO_TREES") == null, .window_costs = d.costs[0..d.n_costs], .lane_costs = d.costs[0..d.n_costs], .copy_match = if (d.c.copy_match > 0) d.c.copy_match else copyMatch(d.e.g), .tree_nodes = @intCast(if (d.c.kind == .dflash2 or d.c.block == 16) d.tree_nodes else 0) };
     }
 
     fn openFn(p: *anyopaque, s: *Stream) anyerror!void {
@@ -548,35 +582,11 @@ pub fn timing(what: []const u8, io: std.Io, t0: std.Io.Timestamp) void {
 
 test {
     _ = tree;
-}
-
-test "a drafter config with a zero divisor is refused, and any admitted rank's selector rows fit the staging area" {
-    const gpa = std.testing.allocator;
-    const target: engine.Geometry = .{ .hidden = 5120, .intermediate = 17408, .layers = 64, .vocab = 248320, .k_heads = 16, .v_heads = 48, .q_heads = 24, .kv_heads = 4, .eps = 1e-6, .tied = false, .context = 262144, .linear = @splat(false) };
-    const text =
-        \\{"dflash_config":{"block_size":8,"conv_group_size":16,"conv_kernel_size":2,"mask_token_id":248070,"selector_rank":256,
-        \\ "selector_top_k":16,"target_layer_ids":[5,19,33,47,61]},"head_dim":128,"hidden_size":5120,"intermediate_size":17408,
-        \\ "num_attention_heads":32,"num_hidden_layers":5,"num_key_value_heads":8,"rms_norm_eps":1e-06,
-        \\ "rope_parameters":{"rope_theta":10000000},"sliding_window":2048,"vocab_size":248320,"use_sliding_window":true,
-        \\ "layer_types":["sliding_attention","sliding_attention","sliding_attention","sliding_attention","sliding_attention"]}
-    ;
-    try std.testing.expectEqual(@as(usize, 256), (try Config.parse(gpa, text, target)).rank);
-    for ([_][2][]const u8{ .{ "\"conv_group_size\":16", "\"conv_group_size\":0" }, .{ "\"num_key_value_heads\":8", "\"num_key_value_heads\":0" } }) |r| {
-        const bad = try std.mem.replaceOwned(u8, gpa, text, r[0], r[1]);
-        defer gpa.free(bad);
-        try std.testing.expectError(error.BadDraftConfig, Config.parse(gpa, bad, target));
-    }
-    // the kernels rope with theta alone: a scaled rope is refused, an explicit default one is read
-    for ([_][2][]const u8{ .{ "{\"rope_theta\"", "{\"rope_type\":\"yarn\",\"factor\":4.0,\"rope_theta\"" }, .{ "{\"rope_theta\"", "{\"type\":\"yarn\",\"rope_theta\"" }, .{ "\"sliding_window\"", "\"rope_scaling\":{\"type\":\"yarn\"},\"sliding_window\"" } }) |r| {
-        const scaled = try std.mem.replaceOwned(u8, gpa, text, r[0], r[1]);
-        defer gpa.free(scaled);
-        try std.testing.expectError(error.UnsupportedDraftConfig, Config.parse(gpa, scaled, target));
-    }
-    const plain = try std.mem.replaceOwned(u8, gpa, text, "{\"rope_theta\"", "{\"rope_type\":\"default\",\"rope_theta\"");
-    defer gpa.free(plain);
-    try std.testing.expectEqual(@as(usize, 256), (try Config.parse(gpa, plain, target)).rank);
-    const wide = try std.mem.replaceOwned(u8, gpa, text, "\"selector_rank\":256", "\"selector_rank\":1024");
-    defer gpa.free(wide);
-    const c = try Config.parse(gpa, wide, target);
-    try std.testing.expect(Draft.stagedLen(c.rank) >= Draft.hp_at + (c.block - 1) * c.rank * 2);
+    _ = graph;
+    _ = cooperative;
+    _ = memory;
+    _ = @import("cuda_draft_bf16.zig");
+    _ = @import("cuda_draft_refine.zig");
+    _ = @import("cuda_draft_feedback.zig");
+    _ = @import("cuda_draft_normalization.zig");
 }

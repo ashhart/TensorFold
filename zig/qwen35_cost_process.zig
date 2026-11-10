@@ -47,6 +47,7 @@ const Lanes = struct {
     cost_context: ?*Context,
     cost_identity: ?[32]u8,
     cost_kind: adapter.Kind,
+    prefill_rows: u32 = 4096,
 };
 fn probe(init: std.process.Init, root: []const u8, kind: []const u8, release: []const u8) !void {
     const a = init.arena.allocator();
@@ -58,6 +59,9 @@ fn probe(init: std.process.Init, root: []const u8, kind: []const u8, release: []
     e.kit = null;
     e.dir = target;
     e.learning = null;
+    e.mo = null;
+    e.prefill_paths = .{};
+    e.affine.warp_flags = 0;
     e.features = 0;
     e.pockets.layers = &.{};
     e.g = .{ .hidden = 5120, .intermediate = 17408, .layers = 64, .vocab = 248320, .k_heads = 16, .v_heads = 48, .q_heads = 24, .kv_heads = 4, .eps = 1e-6, .tied = false, .context = 262144, .linear = @splat(false) };

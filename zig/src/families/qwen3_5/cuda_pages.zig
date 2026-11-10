@@ -8,8 +8,8 @@ const caches = @import("cuda_cache.zig");
 const Engine = engine.Engine;
 const Cache = caches.Cache;
 
-/// Rows past a request's prompt and reply its pages hold: one more forward's (a verify window or a prompt chunk).
-pub const window_rows: u32 = engine.max_rows;
+/// Prompt chunks end inside the prompt; only a bounded verification can run past the final reply token.
+pub const window_rows: u32 = engine.most_verify;
 
 /// TF_QWEN_KV_PAGES unset: a window each, dense or MoE, as on main, until #2043 closes the page cost.
 pub const unset_pages: usize = 0;
@@ -146,6 +146,7 @@ pub const Pages = struct {
             try p.pool.adopt(&x.lease, adopted); // the lease holds them now (its finish releases them)
         }
         // the run first: KV pages fill from the bottom, runs from the top; a fragmented pool waits (LaneMemory)
+        p.pool.orderFree();
         const run = p.pool.claimRun(&x.lease, k) orelse return error.LaneMemory;
         errdefer p.pool.releaseRun(run, k);
         errdefer cuda.completion.drain(p.e.d, p.e.stream, "qwen3_5: a failed lane open did not drain");
@@ -220,12 +221,24 @@ pub const Pages = struct {
     };
 };
 
-test "a stream's pages: its prompt, reply and one more forward, no more than a full window's" {
+test "a stream's pages: prompt and reply plus the bounded verification tail" {
     const l: kv.Layout = .{ .fixed_bytes = 1, .token_bytes = 64 << 10, .page_tokens = 256, .snap_bytes = 1 };
-    try std.testing.expectEqual(@as(usize, 17), l.need(1, 0, window_rows));
-    try std.testing.expectEqual(@as(usize, 17), l.need(100, 29, window_rows));
-    try std.testing.expectEqual(@as(usize, 144), mostPages(32768, 256));
+    try std.testing.expectEqual(@as(usize, 1), l.need(1, 0, window_rows));
+    try std.testing.expectEqual(@as(usize, 2), l.need(100, 29, window_rows));
+    try std.testing.expectEqual(@as(usize, 129), mostPages(32768, 256));
     try std.testing.expect(l.need(32768 - 1, 1, window_rows) <= mostPages(32768, 256));
+}
+
+test "Qwen memory: paged KV reserves only the bounded verification overrun" {
+    try std.testing.expectEqual(@as(u32, engine.most_verify), window_rows);
+    const l: kv.Layout = .{ .fixed_bytes = 0, .token_bytes = 33280, .page_tokens = 512, .snap_bytes = 0 };
+    try std.testing.expectEqual(@as(usize, 28), l.need(7680, 6144, window_rows));
+    for ([_]usize{ 1, 127, 128, 511, 512, 7680, 131071 }) |prompt| {
+        const reply = @min(@as(usize, 6144), 131072 - prompt);
+        const rows = l.need(prompt, reply, window_rows) * l.page_tokens;
+        try std.testing.expect(rows >= prompt + reply + engine.most_verify);
+        try std.testing.expect(rows < prompt + reply + engine.most_verify + l.page_tokens);
+    }
 }
 
 test "KV page dimensions: pool rows fit the signed kernel argument and zero disables paging" {

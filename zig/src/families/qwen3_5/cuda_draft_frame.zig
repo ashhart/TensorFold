@@ -6,6 +6,7 @@ const draft = @import("cuda_draft.zig");
 const tree = @import("cuda_draft_tree.zig");
 const layers = @import("cuda_layers.zig");
 const sig = @import("cuda_signatures.zig");
+const reference = @import("cuda_draft_reference.zig");
 pub const max_streams = @import("cuda_engine.zig").max_segs;
 pub const max_rows = max_streams * 16;
 const lp_words = 43;
@@ -14,7 +15,7 @@ const spans = [2][2]usize{ .{ 0, 98304 }, .{ 248032, 248320 } };
 const span_width = spans[0][1] + spans[1][1] - spans[1][0];
 /// The tail span's 64-row tile: projected from row 248,000, its first 32 columns dropped.
 const tail_tile = spans[1][0] / 64 * 64;
-pub const Segment = extern struct { ring: u64, begin: i64, position: i64 };
+pub const Segment = extern struct { ring: u64, begin: i64, position: i64, attention_rows: c_int, reserved: c_int = 0 };
 pub const segments_at = max_rows * 4;
 pub const words_at = segments_at + max_streams * @sizeOf(Segment);
 pub const hp_at = words_at + max_rows * lp_words * 4;
@@ -32,9 +33,17 @@ pub fn stage(c: draft.Config, items: []const dr.Hold, contexts: []const *draft.C
     for (items, contexts, 0..) |it, ctx, index| {
         if (it.position == 0 or it.position > std.math.maxInt(i64) - c.block or ctx.end != it.position - 1 or ctx.begin > ctx.end) return error.DraftContextBehind;
         // a chain drafts a row a depth; a grown tree's depth is its node budget (tree.nodes(), up to the window)
-        const most = if (c.block == 16 and it.lanes == null) @max(c.block - 1, try tree.nodes()) else c.block - 1;
+        const most = if ((c.kind == .dflash2 or c.block == 16) and it.lanes == null) @max(c.block - 1, try tree.nodes()) else c.block - 1;
         if (it.pending >= c.vocab or it.depth > most) return error.BadDraftFrame;
-        for (contexts[0..index]) |prior| if (ctx == prior or ctx.ring.ptr == prior.ring.ptr) return error.OverlappingDraftContexts;
+        if (ctx.attention_rows > c.block) return error.BadDraftFrame;
+        if (ctx.seed_n > ctx.seed_tokens.len or ctx.seed_n >= c.block or
+            (ctx.seed_n > 0 and it.lanes != null)) return error.BadDraftFrame;
+        for (ctx.seed_tokens[0..ctx.seed_n]) |token| if (token >= c.vocab) return error.BadDraftFrame;
+        for (contexts[0..index], 0..) |prior, j| {
+            if (ctx == prior) return error.OverlappingDraftContexts;
+            if (ctx.ring.ptr == prior.ring.ptr and (ctx.cooperative_owner == null or ctx.cooperative_owner != prior.cooperative_owner or
+                ctx.begin != prior.begin or ctx.end != prior.end or it.pending != items[j].pending)) return error.OverlappingDraftContexts;
+        }
         if (it.lanes) |shape| {
             if (shape.parents.len > ctx.held.len or shape.parents.len != shape.depths.len or shape.parents.len != shape.ranks.len) return error.BadLanes;
             for (shape.parents, shape.depths, shape.ranks, 0..) |parent, depth, rank, row| {
@@ -47,7 +56,8 @@ pub fn stage(c: draft.Config, items: []const dr.Hold, contexts: []const *draft.C
     for (items, contexts, 0..) |it, ctx, i| {
         ids[i * c.block] = it.pending;
         @memset(ids[i * c.block + 1 ..][0 .. c.block - 1], c.mask);
-        sg[i] = .{ .ring = ctx.ring.ptr, .begin = @intCast(ctx.begin), .position = @intCast(ctx.end) };
+        @memcpy(ids[i * c.block + 1 ..][0..ctx.seed_n], ctx.seed_tokens[0..ctx.seed_n]);
+        sg[i] = .{ .ring = ctx.ring.ptr, .begin = @intCast(ctx.begin), .position = @intCast(ctx.end), .attention_rows = @intCast(if (ctx.attention_rows == 0) c.block else ctx.attention_rows) };
     }
 }
 /// A launch whose arguments are checked against the kernel's .cu signature: a wrong count or kind does not build.
@@ -82,6 +92,10 @@ pub fn forward(d: anytype, items: []const dr.Hold, contexts: []const *draft.Ctx)
     const B = items.len * c.block;
     const st = d.staged.bytes;
     try stage(c, items, contexts, st);
+    const capturing = try reference.begin(d, items, contexts);
+    defer if (capturing) {
+        d.reference_capture = false;
+    };
     for (contexts) |ctx| {
         ctx.held_n = 0;
         ctx.grown = 0;
@@ -89,25 +103,7 @@ pub fn forward(d: anytype, items: []const dr.Hold, contexts: []const *draft.Ctx)
     errdefer cuda.completion.drain(e.d, e.stream, "a failed DFlash frame did not drain before its pinned staging was reused");
     try e.d.check(e.d.api.cuMemcpyHtoDAsync_v2(d.ids, st.ptr, B * 4, e.stream.handle), "cuMemcpyHtoDAsync");
     try e.d.check(e.d.api.cuMemcpyHtoDAsync_v2(d.segments, st.ptr + segments_at, items.len * @sizeOf(Segment), e.stream.handle), "cuMemcpyHtoDAsync");
-    try e.embed(d.ids, d.h, B, 0);
-    for (d.w.layers, 0..) |l, i| {
-        try d.norm(d.h, l.input_norm, d.x, B);
-        try d.projAgain(l.attn_conv, d.x, d.dyn, B);
-        try conv(d, d.x, l.attn_base, 0, d.xin, B, 0);
-        try d.projMany(&.{ l.q, l.k, l.v }, d.xin, &.{ d.qraw, d.kraw, d.vb }, B);
-        try rope(d, d.qraw, l.q_norm, d.q, B, c.heads);
-        try rope(d, d.kraw, l.k_norm, d.kb, B, c.kv_heads);
-        try attention(d, B, i);
-        try d.proj(l.o, d.att, d.o, B);
-        try conv(d, d.o, l.attn_base, d.h, d.h2, B, 1);
-        try d.norm(d.h2, l.post_norm, d.x, B);
-        try d.projAgain(l.mlp_conv, d.x, d.dyn, B);
-        try conv(d, d.x, l.mlp_base, 0, d.xin, B, 0);
-        try d.projManySums(&.{ l.gate, l.up }, d.xin, &.{ d.gate, d.up }, B, true);
-        try e.run(e.fns.mlp_act, .{ (B * c.intermediate + 1023) / 1024, 1, 1 }, .{ 256, 1, 1 }, .{ d.gate, d.up, d.act, @as(c_longlong, @intCast(B * c.intermediate)), @as(u64, 0), @as(c_int, @intCast(c.intermediate)), d.xs });
-        try d.projAgain(l.down, d.act, d.o, B);
-        try conv(d, d.o, l.mlp_base, d.h2, d.h, B, 1);
-    }
+    try @import("cuda_draft_graph.zig").run(d, items.len, encode);
     const rows = items.len * (c.block - 1);
     var masked = d.h + c.hidden * 2;
     if (items.len > 1) {
@@ -115,9 +111,11 @@ pub fn forward(d: anytype, items: []const dr.Hold, contexts: []const *draft.Ctx)
         masked = d.h2;
     }
     try d.norm(masked, d.w.final_norm, d.x, rows);
+    try reference.point(d, "output-norm", d.x, rows, c.hidden);
     const spanned = try logitsOf(d, contexts, d.x, d.logits, rows);
     try e.draws.topkRows(e.stream, spanned orelse d.logits, if (spanned != null) span_width else c.vocab, @intCast(c.topk), d.parts, d.words, rows);
     try d.proj(d.w.selector, d.x, d.hp, rows);
+    try reference.point(d, "selector", d.hp, rows, c.rank);
     try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(st.ptr + words_at, d.words, rows * lp_words * 4, e.stream.handle), "cuMemcpyDtoHAsync");
     try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(st.ptr + hp_at, d.hp, rows * c.rank * 2, e.stream.handle), "cuMemcpyDtoHAsync");
     try e.stream.synchronize();
@@ -125,7 +123,55 @@ pub fn forward(d: anytype, items: []const dr.Hold, contexts: []const *draft.Ctx)
         const w = std.mem.bytesAsSlice(u32, st[words_at + r * lp_words * 4 ..][0 .. lp_words * 4]);
         for (w[2..][0..c.topk]) |*id| id.* = columnId(id.*);
     };
+    try @import("cuda_draft_trace.zig").wide(d, items, spanned orelse d.logits, if (spanned != null) span_width else c.vocab, spanned != null);
     try publish(d, items, contexts);
+    if (capturing) try reference.complete(d);
+}
+
+/// The captured block uses staged GPU metadata; no ring address or position is baked into its graph.
+pub fn encode(d: anytype, streams: usize) !void {
+    const c = d.c;
+    const e = d.e;
+    const B = streams * c.block;
+    if (d.bf16_embedding) |*t| try t.encode(e, d.ids, d.h, B, c.hidden) else try e.embed(d.ids, d.h, B, 0);
+    try reference.point(d, "embedding", d.h, B, c.hidden);
+    for (d.w.layers, 0..) |l, i| {
+        try d.norm(d.h, l.input_norm, d.x, B);
+        try reference.layer(d, i, "input-norm", d.x, B, c.hidden);
+        try d.projAgain(l.attn_conv, d.x, d.dyn, B);
+        try reference.layer(d, i, "attn-dynamic", d.dyn, B, c.dynamic());
+        try conv(d, d.x, l.attn_base, 0, d.xin, B, 0);
+        try reference.layer(d, i, "attn-input", d.xin, B, c.hidden);
+        try d.projMany(&.{ l.q, l.k, l.v }, d.xin, &.{ d.qraw, d.kraw, d.vb }, B);
+        try reference.layer(d, i, "qraw", d.qraw, B, c.qWidth());
+        try reference.layer(d, i, "kraw", d.kraw, B, c.kvWidth());
+        try reference.layer(d, i, "vraw", d.vb, B, c.kvWidth());
+        try rope(d, d.qraw, l.q_norm, d.q, B, c.heads);
+        try rope(d, d.kraw, l.k_norm, d.kb, B, c.kv_heads);
+        try reference.layer(d, i, "q", d.q, B, c.qWidth());
+        try reference.layer(d, i, "k", d.kb, B, c.kvWidth());
+        try attention(d, B, i);
+        try reference.layer(d, i, "attention", d.att, B, c.qWidth());
+        try d.proj(l.o, d.att, d.o, B);
+        try reference.layer(d, i, "attn-output", d.o, B, c.hidden);
+        try conv(d, d.o, l.attn_base, d.h, d.h2, B, 1);
+        try reference.layer(d, i, "attn-residual", d.h2, B, c.hidden);
+        try d.norm(d.h2, l.post_norm, d.x, B);
+        try reference.layer(d, i, "post-norm", d.x, B, c.hidden);
+        try d.projAgain(l.mlp_conv, d.x, d.dyn, B);
+        try reference.layer(d, i, "mlp-dynamic", d.dyn, B, c.dynamic());
+        try conv(d, d.x, l.mlp_base, 0, d.xin, B, 0);
+        try reference.layer(d, i, "mlp-input", d.xin, B, c.hidden);
+        try d.projManySums(&.{ l.gate, l.up }, d.xin, &.{ d.gate, d.up }, B, true);
+        try reference.layer(d, i, "gate", d.gate, B, c.intermediate);
+        try reference.layer(d, i, "up", d.up, B, c.intermediate);
+        try e.run(e.fns.mlp_act, .{ (B * c.intermediate + 1023) / 1024, 1, 1 }, .{ 256, 1, 1 }, .{ d.gate, d.up, d.act, @as(c_longlong, @intCast(B * c.intermediate)), @as(u64, 0), @as(c_int, @intCast(c.intermediate)), d.xs });
+        try reference.layer(d, i, "activation", d.act, B, c.intermediate);
+        try d.projAgain(l.down, d.act, d.o, B);
+        try reference.layer(d, i, "mlp-output", d.o, B, c.hidden);
+        try conv(d, d.o, l.mlp_base, d.h2, d.h, B, 1);
+        try reference.layer(d, i, "hidden", d.h, B, c.hidden);
+    }
 }
 
 /// A lane stream's prompt and reply tokens since the last scan: one outside the spans marks the stream wide.
@@ -189,7 +235,13 @@ fn head(d: anytype, x: u64, logits: u64, rows: usize) !?u64 {
             const v = try x3Views(q);
             break :blk .{ .{ .x3 = v.first }, .{ .x3 = v.tail }, x3_tail_at };
         },
-        .an, .ql, .bf => return full(d, x, logits, rows),
+        .ql => |w| blk: {
+            if (d.c.kind != .dflash2 or w != .nvfp4 or w.nvfp4.n != spans[1][1]) return full(d, x, logits, rows);
+            const first = try cuda.nvfp4.columns(w.nvfp4, 0, spans[0][1]);
+            const tail = try cuda.nvfp4.columns(w.nvfp4, tail_tile, spans[1][1] - tail_tile);
+            break :blk .{ .{ .ql = .{ .nvfp4 = first } }, .{ .ql = .{ .nvfp4 = tail } }, tail_tile };
+        },
+        .an, .bf => return full(d, x, logits, rows),
     };
     const tail_n = spans[1][1] - tail_at;
     const a = logits; // rows x 98,304, then rows x the tail's columns, then the packed rows x 98,592

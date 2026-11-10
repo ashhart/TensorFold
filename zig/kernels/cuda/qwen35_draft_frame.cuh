@@ -1,6 +1,7 @@
 // Batched DFlash glue: stream-local convolution and rotary positions, then 256-key attention chunks.
 #pragma once
-struct DraftSegment { unsigned long long ring; long long begin, position; };
+struct DraftSegment { unsigned long long ring; long long begin, position; int attention_rows, reserved; };
+static_assert(sizeof(DraftSegment) == 32, "draft segment ABI");
 
 extern "C" __global__ void tf_q35d_dyn_conv_batch(const __nv_bfloat16* __restrict__ X, const __nv_bfloat16* __restrict__ DYN,
                                               const __nv_bfloat16* __restrict__ BASE, const __nv_bfloat16* __restrict__ RES,
@@ -80,7 +81,7 @@ extern "C" __global__ void __launch_bounds__(128) tf_q35d_attn_partial(const __n
     const __nv_bfloat16* RK = reinterpret_cast<const __nv_bfloat16*>(sg.ring) + (size_t)layer * 2 * W * width;
     const __nv_bfloat16* RV = RK + (size_t)W * width;
     const long long first = max(sg.begin, sg.position + local - window + 1);
-    const int ring_keys = (int)(sg.position - first), keys = ring_keys + (causal ? local + 1 : block_rows);
+    const int ring_keys = (int)(sg.position - first), keys = ring_keys + (causal ? min(local + 1, sg.attention_rows) : sg.attention_rows);
     const size_t slot = ((size_t)m * heads + h) * chunks + chunk;
     if (chunk * CHUNK >= keys) {  // past the stream's keys: an empty partial, which the merge skips
         if (threadIdx.x == 0) { PM[slot] = -INFINITY; PL[slot] = 0.0f; }

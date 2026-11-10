@@ -78,3 +78,10 @@ test {
     _ = @import("moetile_records.zig"); // its own test: the shared down's slot-output entries
     _ = @import("qmmf_prompt_records.zig"); // its own test: the 128-row BF16 prompt entries
 }
+
+test "unmeasured CUDA records cannot pass a compiled resource check" {
+    for (cuda_pending) |r| {
+        if (!std.meta.eql(none, r.usage)) continue;
+        try std.testing.expectEqual(limits.sms.len, try checkCuda(std.testing.allocator, &.{r}, true));
+    }
+}

@@ -9,6 +9,8 @@ extern "C" __global__ void __launch_bounds__(256) tf_q35_tap(const __nv_bfloat16
     const size_t m = blockIdx.x;
     const Seg sg = segs[rowseg[m]];
     if (sg.tap == 0) return;
+    // A prompt can exceed the ring: discard overwritten early rows before any modulo-slot store.
+    if ((long long)m - sg.row0 < (long long)sg.rows - sg.tap_rows) return;
     const long long pos = sg.len + (long long)m - sg.row0;
     __nv_bfloat16* out = reinterpret_cast<__nv_bfloat16*>(sg.tap) + ((size_t)(pos % sg.tap_rows) * sg.taps + tap) * D;
     const int i = (blockIdx.y * blockDim.x + threadIdx.x) * 8;  // eight entries a thread, grid (rows, D / 2048)

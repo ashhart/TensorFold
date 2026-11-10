@@ -23,6 +23,8 @@ pub const Layout = struct {
     full_layers: u32 = 0,
     /// A sliding window's rows outside the pool, by bytes a row a layer (null: none, or not named).
     window: ?groups.Group = null,
+    /// The engine's own state also occupies a pooled run, rather than an already allocated state buffer.
+    engine_run: bool = false,
 
     /// A layout whose full group is `full`, sized by its bytes a row over its layers.
     pub fn ofRows(full: groups.Group, page_tokens: u32, fixed_bytes: u64, snap_bytes: u64) Layout {
@@ -39,7 +41,6 @@ pub const Layout = struct {
     pub fn shape(l: Layout) groups.Shape {
         return .{ .full = l.group(), .named = l.full_layers > 0, .page_rows = l.page_tokens, .window = l.window, .run = l.run_bytes, .snap = l.snap_bytes };
     }
-
     pub fn pageBytes(l: Layout) u64 {
         return l.token_bytes * l.page_tokens;
     }
@@ -136,7 +137,8 @@ pub fn plan(l: Layout, b: Budget) error{ NoStream, TooMany }!Plan {
     const kept = if (b.slots_only) cache - split(cache, l.snap_bytes, b.snaps).snaps * l.snap_bytes else cache / 1_000_000 * b.kept_ppm + cache % 1_000_000 * b.kept_ppm / 1_000_000; // the cache's share as pages
     const c = split(cache - kept, l.snap_bytes, b.snaps);
     left -= c.snaps * l.snap_bytes + c.copied;
-    const most: u64 = if (b.window > 0) (fit + @intFromBool(b.engine_paged)) * l.pages(b.window) + fit * l.runPages() + kept / l.pageBytes() else std.math.maxInt(u64);
+    const runs = fit + @intFromBool(b.engine_paged and l.engine_run);
+    const most: u64 = if (b.window > 0) (fit + @intFromBool(b.engine_paged)) * l.pages(b.window) + runs * l.runPages() + kept / l.pageBytes() else std.math.maxInt(u64);
     return .{ .lanes = @intCast(1 + fit), .snaps = c.snaps, .copied = c.copied, .pages = @intCast(@min((left + own) / l.pageBytes(), most)), .kept = kept, .taken = taken };
 }
 
@@ -177,9 +179,9 @@ fn windows(l: Layout, b: Budget, rest: u64) u64 {
     return if (own == 0) room else @min(room, 1 + rest / own); // `rest`: past the engine's own window and every fixed part
 }
 
-/// The bytes of the engine's own window as pages, set aside first when its rows are pages (0 when it has a window).
+/// The engine's own paged window and, when not allocated already, its pooled state run.
 fn ownPages(l: Layout, b: Budget) u64 {
-    return if (b.engine_paged) l.pages(b.window) * l.pageBytes() else 0;
+    return if (b.engine_paged) (l.pages(b.window) + if (l.engine_run) l.runPages() else 0) * l.pageBytes() else 0;
 }
 
 /// A stream's reservation: pages promised but not yet taken, and the pages it holds in token order (its table).
@@ -497,6 +499,11 @@ pub const Pool = struct {
         }
     }
 
+    /// Return low KV ids first after recycling so they cannot scatter later high-address state runs.
+    pub fn orderFree(p: *Pool) void {
+        std.mem.sort(u32, p.free[0..p.nfree], {}, std.sort.desc(u32));
+    }
+
     /// `k` consecutive pages from `l`'s promise, held as one run until releaseRun; null: no such run is free now.
     pub fn claimRun(p: *Pool, l: *Lease, k: usize) ?u32 {
         p.enter();
@@ -561,4 +568,5 @@ test {
     _ = @import("kv_pool_walk_test.zig");
     _ = @import("kv_pool_notify_test.zig");
     _ = @import("kv_reclaim_test.zig");
+    _ = @import("kv_pool_engine_run_test.zig");
 }

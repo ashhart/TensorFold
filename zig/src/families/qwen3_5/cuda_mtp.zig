@@ -1,4 +1,4 @@
-//! The Qwen3.6 MTP layer as the drafter on CUDA: chains or trees from a kept row's final normed state and next token.
+//! The Qwen MTP layer on CUDA: chains or trees from a kept row's final normed state and next token.
 const std = @import("std");
 const platform = @import("sys");
 const cuda = @import("cuda");
@@ -93,6 +93,7 @@ pub const Mtp = struct {
     staged: cuda.HostBuffer, // pinned: the ids and ancestors up, the token and words down
     tab: u64, // a batched pass's RingRow table (cuda_mtp_batch.zig)
     batch: bool = true, // shared rounds draft every stream in one pass a level; TF_MTP_BATCH=0 keeps one at a time
+    head_enabled: bool = true, // false: absorb still computes its state; a combined proposal pass draws later
     batch_passes: u64 = 0, // batched passes run, for the GPU check
     streams: std.AutoHashMapUnmanaged(*Stream, *Ctx) = .empty,
     /// Contexts between streams, allocated and run once (`reserve`), as the driver stalls a buffer's first kernel.
@@ -105,17 +106,17 @@ pub const Mtp = struct {
     costs: [most_window]lanes.config.Cost = undefined,
     n_costs: usize = 0,
 
-    const anc_stride = 1 + max_lanes;
-    const ids_at = 0;
+    pub const anc_stride = 1 + max_lanes;
+    pub const ids_at = 0;
     pub const tok_at = max_rows * 4;
-    const words_at = tok_at + 64;
-    const anc_at = words_at + max_lanes * lp_words * 4;
+    pub const words_at = tok_at + 64;
+    pub const anc_at = words_at + max_lanes * lp_words * 4;
     pub const bids_at = anc_at + max_lanes * anc_stride * 4; // a batched pass's ids, then its ring table
     pub const btab_at = bids_at + batched.most * 4;
-    const staged_len = btab_at + batched.most * @sizeOf(batched.RingRow);
+    const staged_len = btab_at + max_lanes * @sizeOf(batched.RingRow);
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, e: *E, dir: []const u8, capacity: usize) !*Mtp {
-        if (!e.g.moe()) return error.NotRouted;
+        if (!e.g.moe() and !geometry.dense27(e.g)) return error.NotRouted;
         const d = try gpa.create(Mtp);
         errdefer gpa.destroy(d);
         d.* = .{ .gpa = gpa, .io = io, .e = e, .w = undefined, .mod = undefined, .dmod = undefined, .fns = undefined, .ring_fns = undefined, .scratch = undefined, .capacity = capacity, .depth = default_depth, .trees = platform.c.getenv("TF_MTP_TREES") != null, .tap = .{@intCast(e.g.layers - 1)}, .taps_in = 0, .hin = 0, .hn = 0, .emb = 0, .en = 0, .h = 0, .r = 0, .x = 0, .qraw = 0, .q = 0, .kraw = 0, .kb = 0, .vb = 0, .att = 0, .xs = 0, .logits = 0, .words = 0, .picks = 0, .lane_state = 0, .lane_k = 0, .lane_v = 0, .anc = 0, .ids = 0, .tok = 0, .staged = undefined, .tab = 0 };
@@ -211,13 +212,13 @@ pub const Mtp = struct {
         const aw = g.attnWidth();
         const kw = d.kvWidth();
         const sizes = .{
-            .{ "taps_in", R * g.hidden * 2 },                    .{ "hin", R * g.hidden * 2 },   .{ "hn", R * g.hidden * 2 },                  .{ "emb", R * g.hidden * 2 },
-            .{ "en", R * g.hidden * 2 },                         .{ "h", R * g.hidden * 2 },     .{ "r", R * g.hidden * 2 },                   .{ "x", R * g.hidden * 2 },
-            .{ "qraw", R * 2 * aw * 2 },                         .{ "q", R * aw * 2 },           .{ "kraw", R * kw * 2 },                      .{ "kb", R * kw * 2 },
-            .{ "vb", R * kw * 2 },                               .{ "att", R * aw * 2 },         .{ "xs", R * (@max(g.hidden, aw) / 64) * 4 }, .{ "logits", L * g.vocab * 2 },
-            .{ "words", L * lp_words * 4 },                      .{ "picks", L * 4 },            .{ "lane_state", L * g.hidden * 2 },          .{ "lane_k", L * kw * 2 },
-            .{ "lane_v", L * kw * 2 },                           .{ "anc", L * anc_stride * 4 }, .{ "ids", R * 4 },                            .{ "tok", 64 },
-            .{ "tab", batched.most * @sizeOf(batched.RingRow) },
+            .{ "taps_in", R * g.hidden * 2 },                 .{ "hin", R * g.hidden * 2 },   .{ "hn", R * g.hidden * 2 },                                         .{ "emb", R * g.hidden * 2 },
+            .{ "en", R * g.hidden * 2 },                      .{ "h", R * g.hidden * 2 },     .{ "r", R * g.hidden * 2 },                                          .{ "x", R * g.hidden * 2 },
+            .{ "qraw", R * 2 * aw * 2 },                      .{ "q", R * aw * 2 },           .{ "kraw", R * kw * 2 },                                             .{ "kb", R * kw * 2 },
+            .{ "vb", R * kw * 2 },                            .{ "att", R * aw * 2 },         .{ "xs", R * (@import("cuda_mtp_dense.zig").sumWidth(g) / 64) * 4 }, .{ "logits", L * g.vocab * 2 },
+            .{ "words", L * lp_words * 4 },                   .{ "picks", L * 4 },            .{ "lane_state", L * g.hidden * 2 },                                 .{ "lane_k", L * kw * 2 },
+            .{ "lane_v", L * kw * 2 },                        .{ "anc", L * anc_stride * 4 }, .{ "ids", R * 4 },                                                   .{ "tok", 64 },
+            .{ "tab", max_lanes * @sizeOf(batched.RingRow) },
         };
         var total: usize = 0;
         inline for (sizes) |s| {
@@ -285,6 +286,10 @@ pub const Mtp = struct {
         return precision.routed(d.e, router, experts, x, out, rows, d.projection_role);
     }
 
+    pub fn mlp(d: *Mtp, x: u64, out: u64, rows: usize) !void {
+        return @import("cuda_mtp_dense.zig").run(d, x, out, rows);
+    }
+
     /// The layer's actual grouped Q/K/V dispatch, sharing only the input sums.
     pub fn projQkv(d: *Mtp, rows: usize) !void {
         try d.e.projManySums(&.{ d.w.q, d.w.k, d.w.v }, d.x, d.xs, &.{ d.qraw, d.kraw, d.vb }, rows, precision.prompt(d.projection_role, rows, precision.mtp_projection_prompt_cutoff), 0);
@@ -339,7 +344,7 @@ pub const Mtp = struct {
         }
         try d.proj(w.o, d.att, d.r, rows);
         try d.norm(d.h, d.r, w.post_norm, d.x, rows);
-        try d.routed(w.mlp.moe.router, w.mlp.moe.experts, d.x, d.r, rows);
+        try d.mlp(d.x, d.r, rows);
         try d.norm(d.h, d.r, w.norm, d.x, rows);
         if (pass == .ring) try d.putRing(ctx, rows, p0);
     }
@@ -562,3 +567,8 @@ pub const Mtp = struct {
 
 /// Acceptance by depth until a stream has its own (the frozen engine's chains kept about three of four).
 const prior = [_]f64{ 0.7, 0.55, 0.45, 0.4, 0.35, 0.3, 0.3 };
+
+test {
+    _ = @import("cuda_mtp_dense.zig");
+    _ = batched;
+}

@@ -67,8 +67,10 @@ pub fn noteParked(p: budget.Pool, what: []const u8) void {
 }
 
 pub fn room(comptime F: type, ptr: *anyopaque, local: u64) !u64 {
-    if (@hasDecl(F, "rankRoom")) return F.rankRoom(ptr, local);
-    return local;
+    const pending = if (@hasDecl(F, "pendingDeviceBytes")) F.pendingDeviceBytes(ptr) else 0;
+    const available = local -| pending;
+    if (@hasDecl(F, "rankRoom")) return F.rankRoom(ptr, available);
+    return available;
 }
 
 pub fn read(_: ?*anyopaque, reset_peak: bool) ?api.Memory {
@@ -95,6 +97,21 @@ test "rank room is agreed before stream admission and preserves a single-rank fa
     try std.testing.expectEqual(@as(u64, 30), try room(Single, &context, 30));
     try std.testing.expectEqual(@as(u64, 19), try room(Pair, &context, 30));
     try std.testing.expectEqual(@as(u64, 7), try room(Pair, &context, 7));
+}
+
+test "shared pending workspace is charged once after resident bytes are accounted" {
+    const State = struct {
+        pending: u64,
+        pub fn pendingDeviceBytes(ptr: *anyopaque) u64 {
+            return @as(*@This(), @ptrCast(@alignCast(ptr))).pending;
+        }
+    };
+    var state: State = .{ .pending = 7 };
+    try std.testing.expectEqual(@as(u64, 23), try room(State, &state, 30));
+    state.pending = 0;
+    try std.testing.expectEqual(@as(u64, 23), try room(State, &state, 23));
+    state.pending = 31;
+    try std.testing.expectEqual(@as(u64, 0), try room(State, &state, 30));
 }
 
 test {
