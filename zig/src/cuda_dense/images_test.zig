@@ -38,7 +38,8 @@ test "image spans: ascending, disjoint, inside the prompt, on image marks, withi
     try t.expectError(error.DenseImageSpan, Held.check(&.{image(3, 0)}, p, mark, 64));
     try t.expectError(error.DenseImageSpan, Held.check(&.{image(2, 8)}, p, mark, 64)); // a text row inside the span
     try t.expectError(error.DenseImageSpan, Held.check(&.{image(3, 8)}, p, mark + 1, 64)); // another mark
-    try Held.check(&.{ image(3, 8), image(11, 1) }, promptOf(&buf, &.{ image(3, 8), image(11, 1) }), mark, 64); // adjacent
+    // adjacent
+    try Held.check(&.{ image(3, 8), image(11, 1) }, promptOf(&buf, &.{ image(3, 8), image(11, 1) }), mark, 64);
 }
 
 test "a chunk's injects: the image rows inside it, cut inside, at the first and at the last row of an image" {
@@ -49,7 +50,8 @@ test "a chunk's injects: the image rows inside it, cut inside, at the first and 
     try t.expectEqualSlices(In, &.{.{ .row = 3, .rows = 8, .src = 0x10000 }}, h.intersect(0, 16)); // whole
     try t.expectEqualSlices(In, &.{.{ .row = 3, .rows = 2, .src = 0x10000 }}, h.intersect(0, 5)); // cut inside
     try t.expectEqualSlices(In, &.{ .{ .row = 0, .rows = 6, .src = 0x10000 + 2 * row }, .{ .row = 15, .rows = 1, .src = 0x10000 + 8 * row } }, h.intersect(5, 21));
-    try t.expectEqualSlices(In, &.{.{ .row = 0, .rows = 1, .src = 0x10000 + 7 * row }}, h.intersect(10, 12)); // its last row
+    // its last row
+    try t.expectEqualSlices(In, &.{.{ .row = 0, .rows = 1, .src = 0x10000 + 7 * row }}, h.intersect(10, 12));
     try t.expectEqualSlices(In, &.{.{ .row = 2, .rows = 1, .src = 0x10000 }}, h.intersect(1, 4)); // its first row
     try t.expectEqual(@as(usize, 0), h.intersect(11, 20).len); // between the images
     try t.expectEqual(@as(usize, 0), h.intersect(0, 3).len);
@@ -103,7 +105,8 @@ test "the splice's bounds: image rows inside their chain and only in a prompt ch
     try t.expectEqual(@as(usize, 16), try pass.rowsOf(&m, &.{.{ .slot = 0, .p0 = 0, .tokens = &ids, .images = &inside }}, true, 15, 1));
     for ([_]In{ .{ .row = 13, .rows = 4, .src = 1 }, .{ .row = 16, .rows = 1, .src = 1 }, .{ .row = 0, .rows = 0, .src = 1 }, .{ .row = std.math.maxInt(usize), .rows = 2, .src = 1 } }) |bad|
         try t.expectError(error.BadChain, pass.rowsOf(&m, &.{.{ .slot = 0, .p0 = 0, .tokens = &ids, .images = &.{bad} }}, true, 15, 1));
-    try t.expectEqual(@as(usize, 1), try pass.rowsOf(&m, &.{.{ .slot = 1, .p0 = 7, .tokens = ids[0..1] }}, false, 0, 1)); // control
+    // control
+    try t.expectEqual(@as(usize, 1), try pass.rowsOf(&m, &.{.{ .slot = 1, .p0 = 7, .tokens = ids[0..1] }}, false, 0, 1));
     try t.expectError(error.BadWindow, pass.rowsOf(&m, &.{.{ .slot = 1, .p0 = 7, .tokens = ids[0..1], .images = inside[0..1] }}, false, 0, 1));
 }
 
