@@ -374,7 +374,7 @@ const routed_item = [_]Entry{
     entry(.routed, .prefill, "item64", .{ .family = .gemm, .fits = &fitsPrefillItem, .launch = launchItem(0), .caps = &matrix11, .policy = &matrixOn }),
 };
 
-/// gfx12's few-row matrix blocks: routed items on 32 rows, plain products on 64, either on 16 (k split by groups).
+/// gfx12's few-row matrix blocks: routed items on 32 rows, plain on 64, either on 16 (longer plain: fillTier).
 const rows_entries = [_]Entry{
     entry(.routed, .prefill, "rows32", .{ .family = .matrix12, .fits = &fitsPrefillItem, .launch = launchRows(1), .caps = &matrix12, .policy = &matrixOn }),
     entry(.project, .prefill, "rows64", .{ .family = .matrix12, .fits = rowsFit(64), .launch = launchRows(0), .caps = &matrix12, .policy = &matrixOn, .rounds = .always }),
@@ -632,4 +632,16 @@ test "gfx1201 takes its matrix tiles for a prompt at every row count, the dot2 t
     // a decode call keeps the dot2 tiles: gfx12's matrix tile has no decode entry
     shape.m = 32;
     try std.testing.expect(std.mem.endsWith(u8, r.select(on, .mlx, .project, .decode, shape).?.id, ".decode.gemm"));
+}
+
+test "a plain product takes a shorter tier only while its 128-row blocks leave compute units idle" {
+    if (!std.mem.eql(u8, @import("../kernels.zig").arch, "gfx1201")) return error.SkipZigTest; // measured there only
+    // 32 columns of 128: 256 rows fill 64 blocks, 128 rows fill them on 64-row blocks, 64 rows need 32-row blocks
+    try std.testing.expectEqual(@as(?usize, null), rows12.fillTier(256, 4096));
+    try std.testing.expectEqual(@as(?usize, 0), rows12.fillTier(128, 4096));
+    try std.testing.expectEqual(@as(?usize, 1), rows12.fillTier(64, 4096));
+    // 10 columns: 2,048 rows keep the 128-row block, 512 take 64 rows, 256 take 32
+    try std.testing.expectEqual(@as(?usize, null), rows12.fillTier(2048, 1280));
+    try std.testing.expectEqual(@as(?usize, 0), rows12.fillTier(512, 1280));
+    try std.testing.expectEqual(@as(?usize, 1), rows12.fillTier(256, 1280));
 }

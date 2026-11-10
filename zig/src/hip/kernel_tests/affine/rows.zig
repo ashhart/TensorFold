@@ -5,6 +5,7 @@ const base = @import("../rig.zig");
 const affine = @import("../../launches/affine.zig");
 const registry = @import("core").registry;
 const mlx_entries = @import("../../launches/mlx_entries.zig");
+const matrix_rows = @import("../../launches/matrix_rows.zig");
 const runtime = @import("../../runtime.zig");
 const Buffer = base.Buffer;
 const gpa = base.gpa;
@@ -447,6 +448,28 @@ fn fewRowTiers(t: *Rig) !usize {
     return ran;
 }
 
+/// Plain prompt products past 64 rows whose 128-row blocks leave compute units idle: prefillGo's 64- and 32-row tiers.
+const fill_cases = [_]struct { m: usize, n: usize, tier: ?usize }{
+    .{ .m = 65, .n = 4096, .tier = 0 },
+    .{ .m = 100, .n = 4096, .tier = 0 },
+    .{ .m = 128, .n = 4096, .tier = 0 },
+    .{ .m = 200, .n = 4096, .tier = null },
+    .{ .m = 100, .n = 288, .tier = 1 },
+    .{ .m = 200, .n = 288, .tier = 1 },
+};
+
+/// Each fill case through the engine's pick against the 128-row block; on gfx1201 each takes the tier it names.
+fn fill(t: *Rig) !usize {
+    const on = matrix_rows.fillTier(1, 128) != null;
+    for (fill_cases) |c| {
+        const got = matrix_rows.fillTier(@intCast(c.m), @intCast(c.n));
+        if (on) try base.expect(got == c.tier, "fillTier m{d} n{d}: {?d}, not {?d}", .{ c.m, c.n, got, c.tier });
+        const diff = try tierProduct(t, c.m, c.n, 1024, 4, 64, false);
+        try base.expect(diff == 0, "fill m{d} n{d}: {d} words differ from the 128-row block", .{ c.m, c.n, diff });
+    }
+    return fill_cases.len;
+}
+
 /// Decode: the rows of a lane round's launch against each row alone, plain products and routed plans.
 pub fn decode(t: *Rig) !void {
     var rng: data.Rng = .{ .state = 0x9E3779B97F4A7C15 };
@@ -462,7 +485,7 @@ pub fn decode(t: *Rig) !void {
 
 /// Prefill: every tile the registry picks between by rows, at every row count, width and group.
 pub fn prefill(t: *Rig) !void {
-    try base.expect(try tiers(t) > 0, "rows prefill: no product ran", .{});
+    try base.expect(try tiers(t) + try fill(t) > 0, "rows prefill: no product ran", .{});
 }
 
 test "a decode row writes the same bytes alone and in a round of 2 to 32, dense and routed, fp32 and rounded" {

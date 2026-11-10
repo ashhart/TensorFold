@@ -6,6 +6,7 @@ const Module = @import("../module.zig").Module;
 const Function = @import("../module.zig").Function;
 const affine = @import("affine.zig");
 const util = @import("util.zig");
+const kernels = @import("../kernels.zig");
 
 /// A block's rows, columns and threads by tier: W12Affine64, W12Affine32, the K-parallel W12AffineKp (8 x 32 cols).
 pub const row_tiers = [_]usize{ 64, 32, 16 };
@@ -29,6 +30,17 @@ pub fn load(m: Module, comptime bits: c_int) util.Error![row_tiers.len]Function 
             try m.function(std.fmt.comptimePrint("_ZN2tf4rocm18affine_wmma12_rowsILi{d}ELi{d}EEEvNS0_6AffineE", .{ bits, rows }));
     }
     return out;
+}
+
+/// The fewest blocks a plain product should give gfx1201's 64 compute units (measured there only; others keep 128).
+const fill_target: ?usize = if (std.mem.eql(u8, kernels.arch, "gfx1201")) 64 else null;
+
+/// A staged tier (64, then 32 rows) for a plain product with too few 128 x 128 blocks: same bytes. Null: 128 rows.
+pub fn fillTier(m: c_int, n: c_int) ?usize {
+    const target = fill_target orelse return null;
+    const cols = util.cdiv(n, 128);
+    if (cols * util.cdiv(m, 128) >= target) return null;
+    return if (cols * util.cdiv(m, row_tiers[0]) >= target) 0 else 1;
 }
 
 /// Tier `tier` over every item of a plan (or the plain product): the tier's columns by its rows a block.

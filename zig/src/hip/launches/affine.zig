@@ -13,6 +13,7 @@ const registry = @import("core").registry;
 const quant = @import("core").quant;
 const tuning = @import("../tuning/tuning.zig");
 const mlx_entries = @import("mlx_entries.zig");
+const rows12 = @import("matrix_rows.zig");
 const stream_pick = @import("stream_pick.zig");
 const stream_layout = @import("stream_layout.zig");
 
@@ -433,7 +434,7 @@ pub const Kernels = struct {
         var arg = a;
         // this GPU's cut for a tile with K-parallel passes for items of few rows
         if (k.reg.rowOf(e)) |row| arg.route.few = @intCast(row.few_rows);
-        try e.launch(k, .{ .r = r, .s = s, .arg = arg, .items = items });
+        try k.prefillGo(e, .{ .r = r, .s = s, .arg = arg, .items = items });
     }
 
     /// The product a prompt launch asks the registry about; a routed plan's pairs, and its average rows per expert.
@@ -442,6 +443,13 @@ pub const Kernels = struct {
         shape.plan_pairs = @intCast(@max(pairs, 0));
         shape.expert_rows = @intCast(@max(expert_rows, 0));
         return shape;
+    }
+
+    /// A prompt's picked tile; a plain matrix12 product with too few 128-row blocks takes a shorter tier, same bits.
+    pub fn prefillGo(k: *const Kernels, e: *const Entry, c: Call) Error!void {
+        if (c.arg.route.items == 0 and std.mem.endsWith(u8, e.id, ".matrix12"))
+            if (rows12.fillTier(c.arg.m, c.arg.n)) |tier| return rows12.go(k, c, tier);
+        try e.launch(k, c);
     }
 
     /// launch_affine on the auto schedule: `schedule` 3 is prefill's, 4 a lane round's; `partial`, `parts` the tests'.
@@ -462,7 +470,8 @@ pub const Kernels = struct {
             a.out16 = a.out;
             a.out = 0;
         }
-        try e.launch(k, .{ .r = r, .s = s, .arg = a, .partial = partial, .parts = parts, .out_half = out_half });
+        const c: Call = .{ .r = r, .s = s, .arg = a, .partial = partial, .parts = parts, .out_half = out_half };
+        if (schedule == 3) try k.prefillGo(e, c) else try e.launch(k, c);
     }
 
     /// affine_routed_launch: every item of a plan in one launch; `arg.m` is the most rows an item holds.

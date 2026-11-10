@@ -287,7 +287,8 @@ pub fn affine(o: Ops, x: Tensor, w: Affine, m: usize, f32_out: bool) Error!Tenso
             .fp16 = @intFromBool(fp16),
             .out16 = if (half) out else 0,
         };
-        try tile.launch(&z.affine, .{ .r = z.r, .s = o.stream, .arg = arg });
+        const c: affine_launch.Call = .{ .r = z.r, .s = o.stream, .arg = arg };
+        if (o.prefill) try z.affine.prefillGo(tile, c) else try tile.launch(&z.affine, c);
     }
     if (half) return .{ .ptr = out, .kind = x.kind };
     if (f32_out) return .{ .ptr = out, .kind = .f32 };
