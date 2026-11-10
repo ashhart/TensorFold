@@ -64,6 +64,19 @@ test "stable profile: default and explicit spelling preserve every argument and 
     }
 }
 
+test "stable profile: fast is not planned, fast-exact is not yet qualified and an unknown spelling names all three" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var u: Usage = .{};
+    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--profile", "fast" }, &u));
+    try std.testing.expectEqualStrings("argument --profile: fast is not planned: a speed mode that changes output tokens is not shipped, so the arithmetic class has no profile to join", u.message);
+    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--profile=fast-exact" }, &u));
+    try std.testing.expectEqualStrings("argument --profile: fast-exact is not yet qualified: solo, concurrent 1/2/4/8 and resumed runs equal to stable, and a measurement where no served cell for its family gets slower", u.message);
+    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--profile", "banana" }, &u));
+    try std.testing.expectEqualStrings("argument --profile: unknown profile 'banana': expected stable, fast-exact or fast", u.message);
+}
+
 test "stable profile: capabilities describe the shared paging variable by family without changing its name" {
     var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer output.deinit();
