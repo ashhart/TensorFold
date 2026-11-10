@@ -155,9 +155,8 @@ pub const Kernels = struct {
     }
 
     /// TF_FLASHNEXT_PROFILE=1: each chunk's wall time (synchronized) and its host n-gram gather on stderr.
-    pub fn profile() bool {
-        const v = std.c.getenv("TF_FLASHNEXT_PROFILE") orelse return false;
-        return std.mem.eql(u8, std.mem.span(v), "1");
+    pub fn profile() @import("sys").environment.Error!bool {
+        return @import("sys").environment.read(bool, "TF_FLASHNEXT_PROFILE", false);
     }
 
     /// The DeltaNet kernels for a layer's heads `h`: the full set, or the `_h8` twins for half; any other is refused.

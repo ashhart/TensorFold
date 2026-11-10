@@ -26,6 +26,11 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_Q27_DRAFT_SLOTS` | Whole u32 count, clamped to 1 through the lane stream limit; default 8. DFlash2 can draft for at most the smaller of this count and the admitted streams, and none without a drafter. |
 | `TF_MTP_DRAFTS` | Whole u32 count, clamped to 1 through the drafter's window less one; existing depth when unset |
 | `TF_DRAFT_NODES` | Whole native-size nonnegative count, capped by the drafter's window; zero disables trees |
+| `TF_FLASHNEXT_EXL3_PREFILL`, `TF_FLASHNEXT_EXL3_PREFILL_RING`, `TF_FLASHNEXT_EXL3_PREFILL_SNAP_GRID`, `TF_FLASHNEXT_EXL3_PREFILL_OVERLAP` | Exactly `0` or `1`; default on; snap-grid removal still requires off-grid resume parity |
+| `TF_FLASHNEXT_EXL3_PREFILL_REDUCED_BRANCH`, `TF_FLASHNEXT_EXL3_PREFILL_TWO_CHUNK` | Exactly `0` or `1`; default off |
+| `TF_FLASHNEXT_EXL3_PREFILL_ROWS` | Whole nonnegative rows; unset uses 8192 general / 4096 server; an explicit count sets both |
+| `TF_FLASHNEXT_EXL3_PREFILL_RING_AHEAD` | Whole nonnegative lookahead count; default 1 |
+| `TF_FLASHNEXT_PROFILE` | Exactly `0` or `1`; default off |
 | `TF_QMMF_HALF_BELOW` | Whole native-size nonnegative block count; zero disables half tiles; default 96 |
 | `TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS` | Exactly `0` or `1`, checked when the CUDA backend starts; default off ([profiles](profiles.md)) |
 | `TF_HEAD_GEOMETRY` | Whole native-size nonnegative geometry count in the head benchmark |
