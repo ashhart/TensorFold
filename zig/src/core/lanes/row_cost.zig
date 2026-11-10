@@ -64,7 +64,7 @@ const Widths = struct {
             left += v * miss * miss;
         }
         // the widths' scatter about the line over their spread in rows: a slope inside twice this may be nothing
-        return if (fit > 2 * @sqrt(left / across)) fit else null;
+        return if (@abs(fit) > 2 * @sqrt(left / across)) fit else null;
     }
 };
 
@@ -115,7 +115,7 @@ const Fit = struct {
             gap = d;
         }
         const ms = best orelse return 0;
-        return if (ms < least_ms) 0 else @min(ms, most_ms);
+        return if (@abs(ms) < least_ms) 0 else std.math.clamp(ms, -most_ms, most_ms);
     }
 };
 
@@ -142,7 +142,13 @@ pub const RowCost = struct {
         return @min(width, most);
     }
 
-    /// The ms each row costs past the table; never below it, and nothing while no fit clears its noise.
+    /// While learning, the width capRows measures, reached whatever it costs (0 once a fit or the table holds).
+    pub fn leastRows(c: *const RowCost, streams: usize, sampled: bool) u64 {
+        if (streams < 2 or c.all.clock == 0) return 0;
+        return (if (sampled) c.all else c.greedy).cap(streams) orelse 0;
+    }
+
+    /// The ms each row costs past the table (below it when rows cost less); nothing while no fit clears its noise.
     pub fn extraMs(c: *const RowCost, streams: usize, sampled: bool) f64 {
         if (streams < 2) return 0;
         return if (sampled) c.all.extra(streams) else c.greedy.extra(streams);
@@ -178,7 +184,7 @@ test "row cost: the excess is the fit across widths, at the nearest stream count
     try t.expectApproxEqAbs(@as(f64, 4.25), c.extraMs(8, false), 1e-9);
 }
 
-test "row cost: a width seen too few times does not count, and a falling fit charges nothing" {
+test "row cost: a width seen too few times does not count, and a falling fit lowers the price" {
     var c: RowCost = .{};
     defer c.deinit(t.allocator);
     try feed(&c, 2, 2, 10, 8);
@@ -188,7 +194,7 @@ test "row cost: a width seen too few times does not count, and a falling fit cha
     var falling: RowCost = .{};
     defer falling.deinit(t.allocator);
     for ([_]u64{ 2, 5, 9 }) |rows| try feed(&falling, 2, rows, 20 - @as(f64, @floatFromInt(rows)), 8);
-    try t.expectEqual(@as(f64, 0), falling.extraMs(2, false));
+    try t.expectApproxEqAbs(@as(f64, -1), falling.extraMs(2, false), 1e-9);
 }
 
 test "row cost: jitter where the table fits charges nothing" {
@@ -409,4 +415,36 @@ test "row cost: where the table fits, the learner charges nothing and matches th
     const blind = try closedLoop(0, false, 2000, usual);
     try t.expect(learned.first == null);
     try t.expect(learned.rate > blind.rate * 0.97);
+}
+
+test "row cost: a table that prices rows too high is corrected down, and a wild fall stops at the cap" {
+    var c: RowCost = .{};
+    defer c.deinit(t.allocator);
+    // rows cost 2 ms less each than the table says (a table timed on a slower build)
+    for ([_]u64{ 16, 18, 20 }) |rows| try feed(&c, 16, rows, 3 - 2 * @as(f64, @floatFromInt(rows - 16)), 8);
+    try t.expectApproxEqAbs(@as(f64, -2), c.extraMs(16, false), 1e-9);
+    try t.expectApproxEqAbs(@as(f64, -2), c.extraMs(12, false), 1e-9);
+    var wild: RowCost = .{};
+    defer wild.deinit(t.allocator);
+    for ([_]u64{ 4, 6, 8 }) |rows| try feed(&wild, 4, rows, -1000 * @as(f64, @floatFromInt(rows)), 8);
+    try t.expectEqual(@as(f64, -most_ms), wild.extraMs(4, false));
+}
+
+test "row cost: while learning, a round reaches the width it measures; nothing is forced once a fit holds" {
+    var c: RowCost = .{};
+    defer c.deinit(t.allocator);
+    try t.expectEqual(@as(u64, 0), c.leastRows(4, false)); // nothing seen yet
+    try t.expectEqual(@as(u64, 0), c.leastRows(1, false)); // a lone stream prices by its own windows
+    var seen = [_]bool{ false, false, false };
+    var rounds: usize = 0;
+    while (true) : (rounds += 1) {
+        try t.expect(rounds < 64);
+        const rows = @max(c.leastRows(4, false), 4);
+        if (rounds > 0 and c.leastRows(4, false) == 0) break;
+        seen[(rows - 4) / 2] = true;
+        try c.observe(t.allocator, 4, rows, -1.5 * @as(f64, @floatFromInt(rows - 4)), false);
+    }
+    try t.expect(seen[0] and seen[1] and seen[2]);
+    try t.expectApproxEqAbs(@as(f64, -1.5), c.extraMs(4, false), 1e-9);
+    try t.expectEqual(@as(u64, 0), c.leastRows(4, false));
 }
