@@ -161,11 +161,11 @@ fn memoryLine(c: *Ctx) void {
     const done = c.session.run(c.arena, .{ .prompts = set, .max_new = 1, .solo = true }) catch |err| return c.report.broke(name, err);
     const tree = &h.prefix.store.tree;
     const copied = copiedBytes(c, set, done.replies);
-    const unique = pagesBytes(c, tree.held_pages);
+    const unique = pagesBytes(c, tree.heldPages());
     const states = tree.held() - unique;
     var cached: usize = 0;
     for (done.replies) |r| cached += r.cached;
-    c.report.pass(name, "{d} requests sharing {d} system tokens, {d} tokens each: the tree holds {d:.1} MiB ({d} pages {d:.1} MiB, {d} snapshots {d:.1} MiB); copies of the caches at each cut held {d:.1} MiB; {d} prompt tokens came from the tree", .{ set.len, system_len, set[0].ids.len, mib(tree.held()), tree.held_pages, mib(unique), tree.snaps, mib(states), mib(copied), cached });
+    c.report.pass(name, "{d} requests sharing {d} system tokens, {d} tokens each: the tree holds {d:.1} MiB ({d} pages {d:.1} MiB, {d} snapshots {d:.1} MiB); copies of the caches at each cut held {d:.1} MiB; {d} prompt tokens came from the tree", .{ set.len, system_len, set[0].ids.len, mib(tree.held()), tree.heldPages(), mib(unique), tree.snaps, mib(states), mib(copied), cached });
 }
 
 fn pagesBytes(c: *Ctx, n: usize) u64 {
