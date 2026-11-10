@@ -205,3 +205,20 @@ test "Qwen shared prompt taps: an error after publish invalidates only participa
     try t.expectEqual(@as(?u64, shared_ptr), try taps.read(&e, &b, 0, 8192, 2048));
     try t.expectError(error.RowsNotHeld, taps.read(&e, &a, 8192, 64, 2048));
 }
+
+test "Qwen cache resume: the first short prompt step retains the restored DFlash feature window" {
+    var e: Fake = .{};
+    var c = cache(0);
+    try forward(&e, &c, 8192, true, 3);
+    const saved = e.shared;
+    taps.reset(&c);
+    e.shared = saved;
+    e.prompt_taps.held = .{ .owner = @intFromPtr(&c), .epoch = c.tap_epoch, .range = .{ .begin = 8192 - rows, .end = 8192 } };
+    try forward(&e, &c, 21, true, 7);
+    const got = try taps.read(&e, &c, 8192 - 2048, 2048 + 21, 2048);
+    try t.expectEqual(@as(?u64, shared_ptr), got);
+    // The drafter drops the final prompt row, then consumes its latest 2048 feature rows.
+    for (8212 - 2048..8212) |r| for (0..width) |col| {
+        try t.expectEqual(word(r, col, if (r < 8192) 3 else 7), e.shared[r % rows * width + col]);
+    };
+}

@@ -52,7 +52,7 @@ const World = struct {
         const l = pages.layout(&w.e, capacity, page, 0, 0);
         w.p = try pages.Pages.init(gpa, &w.e, l, capacity, 0, 2, 3 * l.need(capacity, 0, pages.window_rows));
         errdefer w.p.deinit();
-        w.x = try Prefix.init(gpa, &w.e, w.p, 4);
+        w.x = try Prefix.initWithGrid(gpa, &w.e, w.p, 4, 4096);
         errdefer w.x.deinit();
         w.ids = try prompt(t.allocator, 9000);
         errdefer t.allocator.free(w.ids);
@@ -60,6 +60,8 @@ const World = struct {
         errdefer t.allocator.free(w.next);
         const r = try w.x.open(w.ids, 16, 9000, &.{});
         defer w.x.gpa.free(r.plan.marks);
+        r.cache.len = 4096;
+        r.cache.written = 4096;
         try w.x.keep(r.cache, w.ids, 4096);
         try t.expect(w.p.close(r.cache));
         try settled(w.p);
@@ -170,6 +172,8 @@ test "Qwen share faults: a keep whose swapped table fails to upload leaves the l
     } else unreachable;
     const mine = try t.allocator.dupe(u32, lane.lease.ids.items[0 .. 4096 / page]);
     defer t.allocator.free(mine);
+    c.len = 4096;
+    c.written = 4096;
     D.fail_wait_in = 2; // keep's own wait, then the swap's table upload
     try t.expectError(error.QwenLaneTable, w.x.keep(c, w.ids, 4096));
     try t.expectEqualSlices(u32, mine, lane.lease.ids.items[0..mine.len]);
@@ -180,4 +184,26 @@ test "Qwen share faults: a keep whose swapped table fails to upload leaves the l
     try t.expect(w.p.close(c));
     try settled(w.p);
     try w.deinit();
+}
+
+test "Qwen cache grid: the runtime 7680-row cold cuts determine reusable prefix marks" {
+    var d = D.driver();
+    var e = engine(&d);
+    const cap = 32768;
+    const l = pages.layout(&e, cap, page, 0, 0);
+    const p = try pages.Pages.init(t.allocator, &e, l, cap, 0, 1, l.need(cap, 0, pages.window_rows));
+    defer p.deinit();
+    if (@import("cuda_engine.zig").max_rows < 7680) {
+        try t.expectError(error.BadQwenCacheGrid, Prefix.initWithGrid(t.allocator, &e, p, 4, 7680));
+        return;
+    }
+    const x = try Prefix.initWithGrid(t.allocator, &e, p, 4, 7680);
+    defer x.deinit();
+    const ids = try prompt(t.allocator, 16000);
+    defer t.allocator.free(ids);
+    const opened = try x.open(ids, 16, 16000, &.{});
+    defer t.allocator.free(opened.plan.marks);
+    defer _ = p.close(opened.cache);
+    try t.expect(std.mem.indexOfScalar(u32, opened.plan.marks, 15360) != null);
+    for (opened.plan.marks) |mark| try t.expectEqual(@as(u32, 0), mark % 7680);
 }

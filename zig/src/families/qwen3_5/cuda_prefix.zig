@@ -6,6 +6,7 @@ const kv = @import("core").kv_pool;
 const engine = @import("cuda_engine.zig");
 const pages_mod = @import("cuda_pages.zig");
 const caches = @import("cuda_cache.zig");
+const features = @import("cuda_cached_features.zig");
 
 const Engine = engine.Engine;
 const Cache = caches.Cache;
@@ -64,20 +65,26 @@ test "TF_QWEN_KV_SHARE: unset, empty or whitespace-only text is off, a count kee
 pub const Owner = struct { cache: ?*Cache = null, pending: ?radix.Saved = null };
 
 /// A kept recurrent state: the cache's state block (recurrences and convolution tails) in pinned host memory.
-const Snap = struct { host: cuda.HostBuffer };
+const Snap = struct { host: cuda.HostBuffer, features: features.Layout = .{}, at: usize, delta: i32, reading: bool = false };
 
 pub const Prefix = struct {
     gpa: std.mem.Allocator,
     e: *Engine,
     pages: *pages_mod.Pages,
     store: radix.Store,
+    grid: usize = engine.max_rows,
 
     pub fn init(gpa: std.mem.Allocator, e: *Engine, p: *pages_mod.Pages, snaps: usize) !*Prefix {
+        return initWithGrid(gpa, e, p, snaps, engine.max_rows);
+    }
+
+    pub fn initWithGrid(gpa: std.mem.Allocator, e: *Engine, p: *pages_mod.Pages, snaps: usize, grid: usize) !*Prefix {
+        if (grid == 0 or grid > engine.max_rows or grid % p.layout.page_tokens != 0) return error.BadQwenCacheGrid;
         const x = try gpa.create(Prefix);
         errdefer gpa.destroy(x);
         const rules: radix.Rules = .{ .page = p.layout.page_tokens, .min_gap = 256, .min_prompt = 0, .tail = true };
         const pool_pages = radix.pagesOf(kv.Pool, &p.pool, p.layout.pageBytes());
-        x.* = .{ .gpa = gpa, .e = e, .pages = p, .store = try radix.Store.init(gpa, .{ .ptr = x, .vtable = &family }, pool_pages, rules) };
+        x.* = .{ .gpa = gpa, .e = e, .pages = p, .grid = grid, .store = try radix.Store.init(gpa, .{ .ptr = x, .vtable = &family }, pool_pages, rules) };
         errdefer x.store.deinit();
         x.store.limit(.{ .pages = p.pool.total(), .snaps = snaps });
         try p.pool.joinReclaim(.{ .ctx = x, .call = reclaim }); // a promise evicts its idle pages before it fails
@@ -106,9 +113,23 @@ pub const Prefix = struct {
         const s: *Snap = @ptrCast(@alignCast(saved));
         const cache = owner.cache.?;
         const e = x.e;
+        if (s.at >= cache.cap or !features.same(e, s.features) or s.host.bytes.len != e.g.stateBytes() + s.features.bytes()) return error.BadReuse;
+        const feature_dest = try features.destination(e, cache, s.features);
         try cache.flush(e);
+        s.reading = true;
+        errdefer if (e.stream.synchronize()) |_| {
+            s.reading = false;
+        } else |_| {};
         try e.d.check(e.d.api.cuMemcpyHtoDAsync_v2(cache.state.ptr, s.host.bytes.ptr, e.g.stateBytes(), e.stream.handle), "cuMemcpyHtoDAsync");
+        if (s.features.bytes() > 0) try e.d.check(e.d.api.cuMemcpyHtoDAsync_v2(feature_dest, s.host.bytes.ptr + e.g.stateBytes(), s.features.bytes(), e.stream.handle), "cuMemcpyHtoDAsync");
         try e.stream.synchronize();
+        s.reading = false;
+        cache.len = s.at;
+        cache.written = s.at;
+        cache.last = null;
+        cache.pend = 0;
+        cache.delta = s.delta;
+        try features.restored(e, cache, s.at, s.features);
     }
 
     /// At page boundary `at` the tree takes the pages it lacks and the state; ones it held replace the stream's own.
@@ -127,6 +148,7 @@ pub const Prefix = struct {
 
     /// The deepest kept boundary of the prompt `ids` and a pool lane holding its pages; the lane's state put back.
     pub fn open(x: *Prefix, ids: []const u32, max_new: usize, history_len: u32, shared: []const u32) !struct { cache: *Cache, plan: radix.Plan } {
+        try x.pages.prepareShared(ids.len, max_new, x.sharedCredit(ids));
         var owner: Owner = .{};
         var adopt: std.ArrayList(u32) = .empty;
         defer adopt.deinit(x.gpa);
@@ -144,13 +166,22 @@ pub const Prefix = struct {
         return .{ .cache = owner.cache.?, .plan = plan };
     }
 
+    fn sharedCredit(x: *const Prefix, ids: []const u32) usize {
+        var node = x.store.find(ids);
+        var charged: usize = 0;
+        while (node) |n| : (node = n.parent) for (n.pages) |id| {
+            if (x.pages.pool.holders(id) > 1 or x.pages.pool.leased[id] > 0) charged += 1;
+        };
+        return charged;
+    }
+
     /// The plan's marks down to the cold pass's chunk grid, where a pass cuts and so can keep; the plan's freed.
     fn onGrid(x: *Prefix, plan: radix.Plan) ![]const u32 {
         defer x.gpa.free(plan.marks);
         var out: std.ArrayList(u32) = .empty;
         errdefer out.deinit(x.gpa);
         for (plan.marks) |m| {
-            const g = m - m % engine.max_rows;
+            const g: u32 = @intCast(m - m % x.grid);
             if (g > plan.from and (out.items.len == 0 or out.items[out.items.len - 1] != g)) try out.append(x.gpa, g);
         }
         return out.toOwnedSlice(x.gpa);
@@ -161,21 +192,28 @@ pub const Prefix = struct {
     }
 
     fn snapBytes(ptr: *anyopaque, _: u32) u64 {
-        return of(ptr).e.g.stateBytes();
+        const e = of(ptr).e;
+        return e.g.stateBytes() + features.current(e).bytes();
     }
 
-    fn save(ptr: *anyopaque, owner: ?*anyopaque, _: u32) anyerror!radix.Saved {
+    fn save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!radix.Saved {
         const x = of(ptr);
         const o: *Owner = @ptrCast(@alignCast(owner orelse return error.NoQwenOwner));
         const cache = o.cache orelse return error.NoQwenOwner;
         const e = x.e;
+        if (cache.len != at or cache.written != at or cache.last != null or at > cache.cap) return error.NotAtMark;
+        const layout = features.current(e);
+        const feature_source = try features.source(e, cache, at, layout);
+        try cache.flush(e);
         const s = try x.gpa.create(Snap);
         errdefer x.gpa.destroy(s);
-        s.* = .{ .host = try cuda.HostBuffer.alloc(e.d, e.g.stateBytes()) };
-        errdefer s.host.free();
-        try cache.flush(e);
+        s.* = .{ .host = try cuda.HostBuffer.alloc(e.d, e.g.stateBytes() + layout.bytes()), .features = layout, .at = at, .delta = cache.delta };
+        errdefer x.freePinned(s);
+        s.reading = true;
         try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(s.host.bytes.ptr, cache.state.ptr, e.g.stateBytes(), e.stream.handle), "cuMemcpyDtoHAsync");
+        if (layout.bytes() > 0) try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(s.host.bytes.ptr + e.g.stateBytes(), feature_source, layout.bytes(), e.stream.handle), "cuMemcpyDtoHAsync");
         try e.stream.synchronize();
+        s.reading = false;
         return @ptrCast(s);
     }
 
@@ -187,8 +225,16 @@ pub const Prefix = struct {
     fn drop(ptr: *anyopaque, saved: radix.Saved) void {
         const x = of(ptr);
         const s: *Snap = @ptrCast(@alignCast(saved));
-        s.host.free();
+        x.freePinned(s);
         x.gpa.destroy(s);
+    }
+
+    fn freePinned(x: *Prefix, s: *Snap) void {
+        if (s.reading) if (x.e.stream.synchronize()) |_| {
+            s.reading = false;
+        } else |_| {};
+        if (s.reading) return cuda.copy_source.retainPinned(x.e.d, s.host, x.e.stream);
+        s.host.free();
     }
 
     const family: radix.Snapshots.VTable = .{ .bytes = snapBytes, .save = save, .restore = restore, .drop = drop };

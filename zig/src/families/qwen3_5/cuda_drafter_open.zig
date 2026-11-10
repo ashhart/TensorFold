@@ -54,7 +54,7 @@ fn openDFlash(gpa: std.mem.Allocator, io: std.Io, p: *anyopaque, dir: []const u8
     }
     try l.e.setTaps(d.taps());
     l.e.tap_capacity = try @import("cuda_tap_ring.zig").targetCapacity(@import("cuda_engine.zig").tap_rows, d.c.window, @import("cuda_engine.zig").most_window, @import("cuda_geometry.zig").dense27(l.e.g) and !l.e.g.exl3);
-    if (l.share_snaps == 0 and @import("cuda_recurrent.zig").needsFullKeep(l.e)) try @import("cuda_prompt_taps.zig").configure(l.e);
+    if (@import("cuda_recurrent.zig").needsFullKeep(l.e)) try @import("cuda_prompt_taps.zig").configure(l.e);
     d.target_taps = l.e.tapBytes();
     cost_adapter.identify(l, dir, .dflash);
     l.calibration = d;

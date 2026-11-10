@@ -45,7 +45,7 @@ fn mostPages(capacity: usize, tokens: usize) usize {
 
 /// A lane's table and `fixed` bytes; its keys and values a token; a run of its state, log, taps and a `ring`-byte ring.
 pub fn layout(e: *const Engine, capacity: usize, tokens: usize, ring: usize, fixed: usize) kv.Layout {
-    return .{ .fixed_bytes = mostPages(capacity, tokens) * 4 + fixed, .token_bytes = e.g.kvBytes(1, e.kv8), .page_tokens = @intCast(tokens), .snap_bytes = e.g.stateBytes(), .run_bytes = Cache.runBytes(e, ring) };
+    return .{ .fixed_bytes = mostPages(capacity, tokens) * 4 + fixed, .token_bytes = e.g.kvBytes(1, e.kv8), .page_tokens = @intCast(tokens), .snap_bytes = e.g.stateBytes() + @import("cuda_cached_features.zig").current(e).bytes(), .run_bytes = Cache.runBytes(e, ring) };
 }
 
 /// One pool lane: a cache whose table maps its stream's pages, that stream's lease and its run's first page.
@@ -116,15 +116,50 @@ pub const Pages = struct {
         return p.layout.need(prompt, max_tokens, window_rows);
     }
 
-    /// Whether a lane is free, the pool can promise a request's pages now and a run of them is free.
-    pub fn fits(p: *const Pages, prompt: usize, max_tokens: usize) bool {
+    /// Whether a lane and the request's pages fit, reclaiming idle cache pages only for a possible state run.
+    pub fn fits(p: *Pages, prompt: usize, max_tokens: usize) bool {
+        return p.fitsShared(prompt, max_tokens, 0);
+    }
+
+    fn fitsShared(p: *Pages, prompt: usize, max_tokens: usize, charged: usize) bool {
         if (prompt > p.capacity or max_tokens > p.capacity - prompt) return false;
-        for (p.lanes) |x| if (!x.used) return p.pool.fits(p.need(prompt, max_tokens)) and p.pool.findRun(p.layout.runPages()) != null;
+        if (charged > (prompt -| 1) / p.layout.page_tokens) return false;
+        for (p.lanes) |x| if (!x.used) return p.pool.fits(p.need(prompt, max_tokens) - charged) and p.readyRun();
         return false;
+    }
+
+    fn readyRun(p: *Pages) bool {
+        const k = p.layout.runPages();
+        if (p.pool.findRun(k) != null) return true;
+        if (p.pool.reclaims.n == 0) return false;
+        if (!p.pool.canReclaimRun(k)) return false;
+        while (p.pool.findRun(k) == null) {
+            const before = p.pool.available();
+            if (before == p.pool.total()) return false;
+            const chain = p.pool.reclaims;
+            for (chain.hooks()) |reclaim| {
+                _ = reclaim.call(reclaim.ctx, before + 1);
+                if (p.pool.available() > before) break;
+            }
+            if (p.pool.available() <= before) return false;
+        }
+        return true;
+    }
+
+    /// Admission and direct opens prepare the run before a prefix lookup borrows a snapshot.
+    pub fn prepare(p: *Pages, prompt: usize, max_tokens: usize) error{ InvalidQwenPrompt, LaneMemory }!void {
+        return p.prepareShared(prompt, max_tokens, 0);
+    }
+
+    /// Matched pages already held elsewhere reduce new demand; cache-only pages are counted as reclaimable room.
+    pub fn prepareShared(p: *Pages, prompt: usize, max_tokens: usize, charged: usize) error{ InvalidQwenPrompt, LaneMemory }!void {
+        if (prompt > p.capacity or max_tokens > p.capacity - prompt) return error.InvalidQwenPrompt;
+        if (!p.fitsShared(prompt, max_tokens, charged)) return error.LaneMemory;
     }
 
     /// A free lane's cache, reset, holding the pages of `prompt` + `max_tokens` rows and a window; LaneMemory: not now.
     pub fn open(p: *Pages, prompt: usize, max_tokens: usize) !*Cache {
+        try p.prepare(prompt, max_tokens);
         return p.openWith(prompt, max_tokens, &.{});
     }
 

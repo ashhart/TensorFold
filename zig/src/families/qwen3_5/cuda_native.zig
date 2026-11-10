@@ -53,6 +53,7 @@ pub const snap_drop = reuse.drop;
 pub const snap_host = true;
 pub const snap_lookahead: u32 = 0;
 pub const snap_grid: u32 = E.max_rows;
+pub const snap_runtime_grid = true;
 /// --learn-conversations: the kept states' disk image, the probe their identity hashes, the facts they depend on.
 pub const kept_disk = @import("cuda_disk.zig");
 
@@ -67,10 +68,7 @@ pub const Room = @import("cuda_native_types.zig").Room;
 pub const Options = @import("cuda_native_types.zig").Options;
 pub const Loaded = @import("cuda_native_types.zig").Loaded;
 
-/// The window --context may ask for: the config's, or the YaRN window its block or --rope-yarn makes (cuda_rope.zig).
-pub fn contextCeiling(a: std.mem.Allocator, io: std.Io, dir: []const u8, flag: ?f64) !i64 {
-    return @intCast((try cuda_rope.resolveDir(a, io, dir, flag)).ceiling);
-}
+pub const contextCeiling = @import("cuda_native_types.zig").contextCeiling;
 
 pub fn cacheBytes(e: *const E.Engine, cap: usize, test_tokens: usize) !usize {
     return std.math.add(usize, e.streamBytes(cap), try cache_mod.pageExtra(e.g, cap, test_tokens, e.kv8));
@@ -106,7 +104,7 @@ pub fn attach(p: *anyopaque, streams: u32, pages: usize) !void {
         if (l.draft) |d| d.ring_of = .{ .ctx = l, .ring = Lanes.ringOf, .all = l.engine_paged };
         if (l.mtp) |m| m.ring_of = .{ .ctx = l, .area = Lanes.ringOf, .all = l.engine_paged };
     }
-    if (l.share_snaps > 0 and streams > 0) l.prefix = try prefix_mod.Prefix.init(l.gpa, l.e, l.pages.?, l.share_snaps);
+    if (l.share_snaps > 0 and streams > 0) l.prefix = try prefix_mod.Prefix.initWithGrid(l.gpa, l.e, l.pages.?, l.share_snaps, l.prefill_rows);
     if (l.prefix != null and prefix_mod.fewSnapshots(l.share_snaps, streams + 1)) std.log.warn("TF_QWEN_KV_SHARE={d} keeps under 4 recurrent-state snapshots a stream at --parallel {d}: live streams evict each other's before a resume; set it to {d} or more", .{ l.share_snaps, streams + 1, 4 * (streams + 1) });
 }
 
@@ -162,16 +160,18 @@ pub fn openLanes(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, d
     if (page_tokens > 0 and o.slide) return error.QwenPagesNoLearner;
     const share_snaps = try prefix_mod.sharing();
     const prefill_rows = try prefill.chunkRows(try @import("sys").environment.given("TF_QWEN_PREFILL_ROWS"));
-    if (prefill_rows != E.max_rows and share_snaps > 0) return error.PrefillChunkNeedsCacheOff;
+    if (share_snaps > 0 and page_tokens > 0 and prefill_rows % page_tokens != 0) return error.QwenShareNeedsPages;
     // a kept state sits on a cold pass's chunk cut, so later chunks keep a cold pass's bits: pages divide the chunk
     if (share_snaps > 0 and (page_tokens == 0 or E.max_rows % page_tokens != 0)) return error.QwenShareNeedsPages;
     const e = try E.Engine.init(gpa, io, ctx, dir, o.kv8, fitOf(o));
     errdefer e.deinit();
-    if (page_tokens > 0 and engine_paged and !o.slide and !e.g.exl3 and o.drafts and
+    if (!o.slide and !e.g.exl3 and o.drafts and
         (try @import("sys").environment.given("TF_DRAFT_MTP_DIR")) == null)
     {
-        if (o.drafter) |dir_| if (@import("cuda_draft_config.zig").declared(gpa, io, dir_))
-            try E.recurrent.configure(e, o.lanes);
+        if (o.drafter) |dir_| if (@import("cuda_draft_config.zig").declared(gpa, io, dir_)) {
+            e.prompt_taps.cache = (share_snaps > 0 or o.cache_features) and @import("cuda_geometry.zig").dense27(e.g);
+            if (page_tokens > 0 and engine_paged) try E.recurrent.configure(e, o.lanes);
+        };
     }
     if (o.rope_yarn) |f| { // --rope-yarn over the downloaded config: its table, and the window it allows
         var arena = std.heap.ArenaAllocator.init(gpa);
@@ -190,7 +190,7 @@ pub fn openLanes(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, d
     const trace = try round_timing.Trace.create(gpa, timing_on and e.g.hidden == 5120 and e.g.layers == 64 and e.g.experts == 0);
     errdefer if (trace) |x| gpa.destroy(x);
     const l = try gpa.create(Lanes);
-    l.* = .{ .gpa = gpa, .io = io, .e = e, .capacity = o.context, .prefill_rows = prefill_rows, .page_tokens = page_tokens, .engine_paged = engine_paged, .page_test = page_test, .share_snaps = share_snaps, .cost_context = ctx, .startup = e.startup, .vision = v, .target = undefined, .timing_on = timing_on, .trace = trace, .full_keep = E.recurrent.needsFullKeep(e) };
+    l.* = .{ .gpa = gpa, .io = io, .e = e, .capacity = o.context, .prefill_rows = prefill_rows, .page_tokens = page_tokens, .engine_paged = engine_paged, .page_test = page_test, .share_snaps = share_snaps, .cost_context = ctx, .startup = e.startup, .vision = v, .target = undefined, .timing_on = timing_on, .trace = trace, .full_keep = E.recurrent.needsFullKeep(e), .restored_features = e.prompt_taps.cache };
     l.target = .{ .e = e, .caches = &l.caches, .seen = &l.seen, .device = try ctx.attribute(.integrated) != 0 };
     return .{
         .learns = if (o.slide) e else null,
@@ -198,6 +198,7 @@ pub fn openLanes(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, d
         .backend = l.backend(),
         .facts = modelFacts(@intCast(e.window_rows), @intCast(e.verify_rows), e.g),
         .rows = @intCast(e.window_rows),
+        .prompt_rows = prefill_rows,
         .stream_bytes = try cacheBytes(e, o.context, page_test),
         .ctx = l,
         .deinit = release,
@@ -265,6 +266,7 @@ pub const Lanes = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
     e: *E.Engine,
+    restored_features: bool = false,
     capacity: usize,
     prefill_rows: u32 = E.max_rows,
     /// TF_QWEN_KV_PAGES's positions a page (0: no pool) and the pool `attach` made.
@@ -369,7 +371,7 @@ pub const Lanes = struct {
     };
 
     fn backend(self: *Lanes) be.Backend {
-        return .{ .ptr = self, .needs_full_keep = self.full_keep, .round_observer = if (self.trace) |x| x.observer() else null, .first_before_draft = true, .penalties = true, .vtable = if (self.readout.readout != null) &read_vtable else &text_vtable };
+        return .{ .ptr = self, .restored_features = self.restored_features, .needs_full_keep = self.full_keep, .round_observer = if (self.trace) |x| x.observer() else null, .first_before_draft = true, .penalties = true, .vtable = if (self.readout.readout != null) &read_vtable else &text_vtable };
     }
 
     /// Readout streams from now on fill through `r` (one rank; before the first stream): the backend to hand on.

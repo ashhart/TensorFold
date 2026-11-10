@@ -9,7 +9,9 @@ pub const State = struct {
     buffer: ?cuda.DeviceBuffer = null,
     rows: usize = 0,
     row_bytes: usize = 0,
+    cache: bool = false,
     held: ?Stamp = null,
+    previous: ?Stamp = null,
     pending: ?Stamp = null,
     active: bool = false,
     prompting: bool = false,
@@ -55,7 +57,7 @@ pub fn configureWith(e: anytype, comptime Allocation: type) !void {
     var buffer = try Allocation.allocate(e, bytes);
     errdefer Allocation.discard(e, &buffer);
     try Allocation.zero(e, buffer);
-    e.prompt_taps = .{ .buffer = buffer, .rows = e.tap_capacity, .row_bytes = pitch };
+    e.prompt_taps = .{ .buffer = buffer, .rows = e.tap_capacity, .row_bytes = pitch, .cache = e.prompt_taps.cache };
     e.tap_capacity = private_rows;
 }
 
@@ -89,6 +91,25 @@ fn privateBuffer(e: anytype, c: anytype) !cuda.DeviceBuffer {
     return b;
 }
 
+fn following(state: State, c: anytype, count: usize) !ring.Interval {
+    var out = try ring.retained(c.len, count, state.rows);
+    if (state.previous) |prior| if (prior.owner == @intFromPtr(c) and prior.epoch == c.tap_epoch and prior.range.end == c.len) {
+        out.begin = @max(prior.range.begin, out.end -| state.rows);
+    };
+    return out;
+}
+
+/// A cache restore has copied these exact absolute rows into the shared ring on the engine stream.
+pub fn restored(e: anytype, c: anytype, at: usize) !void {
+    if (e.n_taps == 0 or e.prompt_taps.buffer == null) return;
+    if (e.prompt_taps.active or at == 0) return error.BadPromptTapState;
+    const range = try ring.retained(0, at, e.prompt_taps.rows);
+    e.prompt_taps.held = .{ .owner = @intFromPtr(c), .epoch = c.tap_epoch, .range = range };
+    e.prompt_taps.previous = null;
+    c.tap_begin = 0;
+    c.tap_end = 0;
+}
+
 /// Called after admission and segment construction, before upload or any tap writer can run.
 pub fn begin(e: anytype, parts: anytype, segs: anytype, prompt: bool) !void {
     if (e.n_taps == 0 or e.prompt_taps.buffer == null) return;
@@ -114,8 +135,9 @@ pub fn begin(e: anytype, parts: anytype, segs: anytype, prompt: bool) !void {
     }
     if (prompt) {
         const p = parts[0];
+        state.previous = state.held;
         state.held = null;
-        state.pending = .{ .owner = @intFromPtr(p.cache), .epoch = p.cache.tap_epoch, .range = try ring.retained(p.cache.len, p.rows, state.rows) };
+        state.pending = .{ .owner = @intFromPtr(p.cache), .epoch = p.cache.tap_epoch, .range = try following(state.*, p.cache, p.rows) };
         segs[0].tap = state.buffer.?.ptr;
         segs[0].tap_rows = @intCast(state.rows);
     }
@@ -140,7 +162,7 @@ pub fn publishWith(e: anytype, parts: anytype, prompt: bool, comptime Copy: type
         const dst = try privateBuffer(e, p.cache);
         if (prompt) {
             const pending = state.pending orelse return error.BadPromptTapState;
-            const full = try ring.retained(p.cache.len, p.rows, state.rows);
+            const full = try following(state.*, p.cache, p.rows);
             if (pending.owner != @intFromPtr(p.cache) or pending.epoch != p.cache.tap_epoch or
                 !std.meta.eql(pending.range, full)) return error.BadPromptTapState;
             const plan = try ring.copyTail(p.cache.len, p.rows, state.rows, private_rows);
@@ -154,6 +176,7 @@ pub fn publishWith(e: anytype, parts: anytype, prompt: bool, comptime Copy: type
     }
     if (prompt) state.held = state.pending;
     state.pending = null;
+    state.previous = null;
     state.active = false;
 }
 
@@ -164,6 +187,7 @@ pub fn abort(e: anytype, parts: anytype) void {
         if (held.owner == @intFromPtr(p.cache)) e.prompt_taps.held = null;
     };
     e.prompt_taps.pending = null;
+    e.prompt_taps.previous = null;
     e.prompt_taps.active = false;
     for (parts) |p| {
         p.cache.tap_begin = 0;

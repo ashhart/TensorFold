@@ -90,9 +90,14 @@ test "CUDA startup: Nemotron's complete line keeps its existing bytes" {
 test "CUDA startup: every other registered family retains its declared pass size" {
     inline for (.{ nemo, @import("nemotron").omni, @import("glm_cuda").native, @import("qwen35").native, @import("qwen35").native_moe, @import("kolibri1").native }) |F| {
         const Loaded = @typeInfo(@typeInfo(@TypeOf(F.open)).@"fn".return_type.?).error_union.payload;
-        try std.testing.expect(!@hasField(Loaded, "prompt_rows"));
-        const loaded: Loaded = undefined;
-        try std.testing.expectEqual(F.prompt_rows, startup.rows(F, loaded));
+        if (@hasField(Loaded, "prompt_rows")) {
+            var loaded: Loaded = undefined;
+            loaded.prompt_rows = 7680;
+            try std.testing.expectEqual(@as(u32, 7680), startup.rows(F, loaded));
+        } else {
+            const loaded: Loaded = undefined;
+            try std.testing.expectEqual(F.prompt_rows, startup.rows(F, loaded));
+        }
     }
 }
 

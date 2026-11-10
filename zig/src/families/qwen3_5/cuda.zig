@@ -87,3 +87,6 @@ test {
 }
 
 pub const prompt_taps = @import("cuda_prompt_taps.zig");
+
+pub const prefix = @import("cuda_prefix.zig");
+pub const pages = @import("cuda_pages.zig");

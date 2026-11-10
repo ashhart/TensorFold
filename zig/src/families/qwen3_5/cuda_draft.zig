@@ -473,7 +473,7 @@ pub const Draft = struct {
     fn factsFn(p: *anyopaque) dr.Facts {
         const d = cast(p);
         // TF_NO_TREES=1: chains only (for comparing)
-        return .{ .depth = @intCast(d.c.block - 1), .step_ms = d.step_ms, .prior = &prior, .plain_guard = true, .batched = true, .stream_bytes = d.c.ringBytes() + d.target_taps + d.scratch_one, .trees = platform.c.getenv("TF_NO_TREES") == null, .window_costs = d.costs[0..d.n_costs], .lane_costs = d.costs[0..d.n_costs], .copy_match = if (d.c.copy_match > 0) d.c.copy_match else copyMatch(d.e.g), .tree_nodes = @intCast(if (d.c.kind == .dflash2 or d.c.block == 16) d.tree_nodes else 0) };
+        return .{ .history_rows = @intCast(d.c.window), .depth = @intCast(d.c.block - 1), .step_ms = d.step_ms, .prior = &prior, .plain_guard = true, .batched = true, .stream_bytes = d.c.ringBytes() + d.target_taps + d.scratch_one, .trees = platform.c.getenv("TF_NO_TREES") == null, .window_costs = d.costs[0..d.n_costs], .lane_costs = d.costs[0..d.n_costs], .copy_match = if (d.c.copy_match > 0) d.c.copy_match else copyMatch(d.e.g), .tree_nodes = @intCast(if (d.c.kind == .dflash2 or d.c.block == 16) d.tree_nodes else 0) };
     }
 
     fn openFn(p: *anyopaque, s: *Stream) anyerror!void {

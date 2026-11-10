@@ -71,7 +71,7 @@ pub const Drafted = struct {
     };
     pub fn backend(x: *Drafted) be.Backend {
         const planned = if (x.drafter.proposal_head) |service| service.mode != .legacy and x.drafter.vtable.hold_planned != null and x.drafter.vtable.clear_proposals != null else false;
-        return .{ .proposal_head = x.drafter.proposal_head, .ptr = x, .round_observer = x.target.round_observer, .first_before_draft = x.target.first_before_draft, .penalties = x.target.penalties, .chunk_invariant = x.target.chunk_invariant, .needs_full_keep = x.target.needs_full_keep, .vtable = vtableFor(planned, x.target.vtable.prefill_step != null and x.target.vtable.reports_fill and x.target.vtable.features != null, x.target.vtable.cancel_prefill != null) };
+        return .{ .proposal_head = x.drafter.proposal_head, .ptr = x, .round_observer = x.target.round_observer, .first_before_draft = x.target.first_before_draft, .penalties = x.target.penalties, .chunk_invariant = x.target.chunk_invariant, .needs_full_keep = x.target.needs_full_keep, .restored_features = x.target.restored_features, .vtable = vtableFor(planned, x.target.vtable.prefill_step != null and x.target.vtable.reports_fill and x.target.vtable.features != null, x.target.vtable.cancel_prefill != null) };
     }
 
     const cancellable: [4]be.Backend.VTable = blk: {
@@ -147,6 +147,11 @@ pub const Drafted = struct {
         return @ptrCast(@alignCast(ptr));
     }
 
+    fn promptFrom(x: *const Drafted, s: *const Stream) u64 {
+        const history = if (x.target.restored_features) x.drafter.facts().history_rows else 0;
+        return s.cached -| history;
+    }
+
     /// The target's prompt pass, then the drafter absorbs its rows but the last; a later failure releases both.
     fn prefill(ptr: *anyopaque, s: *Stream) anyerror!void {
         const x = self(ptr);
@@ -164,7 +169,7 @@ pub const Drafted = struct {
         try x.drafter.open(s);
         x.lanes.putAssumeCapacity(s, .{});
         const ids = s.prompt();
-        const from: usize = s.cached;
+        const from: usize = @intCast(x.promptFrom(s));
         if (ids.len < from + 2) return;
         const n: u32 = @intCast(ids.len - 1 - from);
         const f = try x.target.features(s, x.drafter.taps(), from, n);
@@ -184,7 +189,7 @@ pub const Drafted = struct {
             x.lanes.putAssumeCapacity(s, .{});
         }
         const lane = x.lanes.getPtr(s).?;
-        const from = lane.stepped orelse s.cached; // a resumed pass starts at its kept state
+        const from = lane.stepped orelse x.promptFrom(s); // a resumed pass starts at its kept state
         const to: u64 = if (done) s.prompt().len else s.fill_at.load(.monotonic);
         lane.stepped = if (done) null else to;
         if (to > from) try take(x, s, try x.target.features(s, x.drafter.taps(), from, @intCast(to - from)), from);

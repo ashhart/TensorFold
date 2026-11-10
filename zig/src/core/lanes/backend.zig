@@ -76,6 +76,8 @@ pub const Backend = struct {
     proposal_head: ?*const @import("proposal_head.zig").Service = null,
     round_observer: ?RoundObserver = null,
     first_before_draft: bool = false,
+    /// Retained target features before a resumed prompt are available to rebuild an external drafter's history.
+    restored_features: bool = false,
     /// A single-slot target lets its asynchronous keep progress between host steps before drafting again.
     defer_lone_draft: bool = false,
     /// Commit even a fully accepted window before another round may reuse its leased scratch.

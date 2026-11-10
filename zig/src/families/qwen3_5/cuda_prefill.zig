@@ -54,19 +54,33 @@ pub fn run(self: anytype, stream: *lanes.Stream) !void {
 
 /// One cut of the prompt pass a call (prefillFn's forwards, in order): the lane host runs rounds between them.
 pub fn step(self: anytype, stream: *lanes.Stream, _: u32) !bool {
+    return stepWith(StepOps, self, stream);
+}
+
+const StepOps = struct {
+    const open = opening;
+    const advance = chunk;
+    const finish = endFill;
+};
+
+/// The real fill lifecycle with compile-time operators for model-free sequencing checks.
+fn stepWith(comptime Ops: type, self: anytype, stream: *lanes.Stream) !bool {
     const got = try self.fills.getOrPut(self.gpa, stream);
     if (!got.found_existing) {
-        got.value_ptr.* = opening(self, stream) catch |err| {
+        got.value_ptr.* = Ops.open(self, stream) catch |err| {
             self.fills.removeByPtr(got.key_ptr);
             return err;
         };
+        const restored = if (@hasField(@TypeOf(self.*), "restored_features")) self.restored_features else false;
+        // Absorb retained draft history before the next target forward, keeping the cold suffix's row groups.
+        if (restored and stream.drafts and stream.cached > 0 and !stream.isCancelled()) return false;
     }
     const f = self.fills.getPtr(stream).?;
-    const done = chunk(self, stream, f, 0) catch |err| {
-        endFill(self, stream);
+    const done = Ops.advance(self, stream, f, 0) catch |err| {
+        Ops.finish(self, stream);
         return err;
     };
-    if (done) endFill(self, stream);
+    if (done) Ops.finish(self, stream);
     return done;
 }
 
@@ -186,4 +200,192 @@ test "explicit prefill chunks preserve a bounded cache-off grid" {
         try std.testing.expectError(error.InvalidPrefillChunk, chunkRows(v));
     try std.testing.expect(coldCut(7680, &.{}, 2048, 1024));
     try std.testing.expect(!coldCut(7680, &.{}, 2049, 1024));
+}
+
+const RestoreTest = struct {
+    const be = lanes.backend;
+    const dr = lanes.drafter;
+    const Span = struct { start: u64, rows: u32 };
+    const prompt = @as([8192]u32, @splat(3));
+    gpa: std.mem.Allocator = std.testing.allocator,
+    fills: std.AutoHashMapUnmanaged(*lanes.Stream, Fill) = .empty,
+    restored_features: bool = true,
+    restored: u32 = 7680,
+    forwards: usize = 0,
+    opens: usize = 0,
+    head_releases: usize = 0,
+    target_releases: usize = 0,
+    pending_rows: u32 = 0,
+    history_before_suffix: u32 = 0,
+    absorbed: [4]Span = undefined,
+    raw_rows: [4]u32 = undefined,
+    n_absorbed: usize = 0,
+    cancelled: bool = false,
+
+    fn cast(ptr: *anyopaque) *RestoreTest {
+        return @ptrCast(@alignCast(ptr));
+    }
+    fn deinit(self: *RestoreTest) void {
+        var it = self.fills.valueIterator();
+        while (it.next()) |f| f.deinit();
+        self.fills.deinit(self.gpa);
+    }
+    const Ops = struct {
+        fn open(self: *RestoreTest, s: *lanes.Stream) !Fill {
+            s.cached = self.restored;
+            s.fill_at.store(self.restored, .monotonic);
+            return .{ .at = self.restored, .media = null };
+        }
+        fn advance(self: *RestoreTest, s: *lanes.Stream, f: *Fill, _: u32) !bool {
+            if (s.isCancelled()) return error.Cancelled;
+            if (f.at == 7680) self.history_before_suffix = self.pending_rows;
+            self.pending_rows = 0; // the existing target forward's head readback drains its stream
+            self.forwards += 1;
+            f.at = @min(s.prompt().len, f.at + 7680);
+            s.fill_at.store(@intCast(f.at), .monotonic);
+            return f.at == s.prompt().len;
+        }
+        const finish = endFill;
+    };
+    fn targetStep(ptr: *anyopaque, s: *lanes.Stream, _: u32) !bool {
+        return stepWith(Ops, cast(ptr), s);
+    }
+    fn prefill(ptr: *anyopaque, s: *lanes.Stream) !void {
+        while (!try targetStep(ptr, s, 0)) {}
+    }
+    fn first(_: *anyopaque, _: *lanes.Stream, _: u64) !u64 {
+        return 0;
+    }
+    fn queue(_: *anyopaque, _: *lanes.Stream, _: be.Feed, _: u64) !u64 {
+        return 0;
+    }
+    fn read(_: *anyopaque, _: u64) !u32 {
+        return 0;
+    }
+    fn verify(_: *anyopaque, _: []const be.Window, _: []be.Verified) !void {
+        return error.UnexpectedVerify;
+    }
+    fn keep(_: *anyopaque, _: []const be.Window, _: []const []const u32) !void {}
+    fn draft(_: *anyopaque, _: []const be.DraftRequest) !void {}
+    fn features(_: *anyopaque, _: *lanes.Stream, _: []const u32, from: u64, rows: u32) !be.Features {
+        return .{ .buffer = 1, .offset = from, .rows = rows, .row_bytes = 2, .space = .device, .dtype = .bf16 };
+    }
+    fn release(ptr: *anyopaque, s: *lanes.Stream) void {
+        const self = cast(ptr);
+        self.target_releases += 1;
+        self.pending_rows = 0; // the existing paged lane release drains before returning its run
+        endFill(self, s);
+    }
+    fn backend(self: *RestoreTest) be.Backend {
+        return .{ .ptr = self, .restored_features = self.restored_features, .vtable = &.{
+            .prefill = prefill,
+            .prefill_step = targetStep,
+            .reports_fill = true,
+            .first = first,
+            .queue = queue,
+            .read = read,
+            .verify = verify,
+            .keep = keep,
+            .draft = draft,
+            .features = features,
+            .release = release,
+        } };
+    }
+    fn taps(_: *anyopaque) []const u32 {
+        return &.{0};
+    }
+    fn facts(_: *anyopaque) dr.Facts {
+        return .{ .history_rows = 2048, .depth = 7, .step_ms = 1 };
+    }
+    fn headOpen(ptr: *anyopaque, _: *lanes.Stream) !void {
+        cast(ptr).opens += 1;
+    }
+    fn absorb(ptr: *anyopaque, items: []const dr.Absorb) !void {
+        const self = cast(ptr);
+        for (items) |item| {
+            const n = @min(item.features.rows, 2048);
+            self.raw_rows[self.n_absorbed] = item.features.rows;
+            self.absorbed[self.n_absorbed] = .{ .start = item.features.offset + item.features.rows - n, .rows = n };
+            self.n_absorbed += 1;
+            self.pending_rows += n; // CUDA absorption enqueues kernels; it does not wait
+        }
+    }
+    fn hold(_: *anyopaque, _: []const dr.Hold) !void {}
+    fn held(_: *anyopaque, _: []const *lanes.Stream, _: []const []u32) !void {}
+    fn headRelease(ptr: *anyopaque, _: *lanes.Stream) void {
+        cast(ptr).head_releases += 1;
+    }
+    fn drafter(self: *RestoreTest) dr.Drafter {
+        return .{ .ptr = self, .vtable = &.{ .taps = taps, .facts = facts, .open = headOpen, .absorb = absorb, .hold = hold, .held = held, .release = headRelease } };
+    }
+    fn isCancelled(ptr: *anyopaque) bool {
+        return cast(ptr).cancelled;
+    }
+};
+
+test "Qwen restored history: one boundary queues history before the cold suffix forward" {
+    const t = std.testing;
+    var state: RestoreTest = .{};
+    defer state.deinit();
+    var wrapped = try lanes.drafted.Drafted.init(t.allocator, state.backend(), state.drafter());
+    defer wrapped.deinit();
+    var s = try lanes.Stream.init(t.allocator, .{ .id = "restored", .prompt = &RestoreTest.prompt, .max_new = 96 });
+    defer s.deinit(t.allocator);
+    const b = wrapped.backend();
+    defer b.release(&s);
+    try t.expect(!try b.vtable.prefill_step.?(b.ptr, &s, 0));
+    try t.expectEqual(@as(usize, 0), state.forwards);
+    try t.expectEqual(@as(u32, 7680), s.fill_at.load(.monotonic));
+    try t.expectEqual(@as(usize, 1), state.opens);
+    try t.expectEqualDeep(RestoreTest.Span{ .start = 5632, .rows = 2048 }, state.absorbed[0]);
+    try t.expect(try b.vtable.prefill_step.?(b.ptr, &s, 0));
+    try t.expectEqual(@as(usize, 1), state.forwards);
+    try t.expectEqual(@as(u32, 2048), state.history_before_suffix);
+    try t.expectEqualDeep(RestoreTest.Span{ .start = 7680, .rows = 511 }, state.absorbed[1]);
+    try t.expectEqual(@as(u32, 511), state.pending_rows);
+    try t.expectEqual(@as(usize, 0), state.fills.count());
+}
+
+test "Qwen restored history: cold plain and unavailable history keep their existing step counts" {
+    const t = std.testing;
+    for ([_]bool{ false, true }) |restored_features| for ([_]bool{ false, true }) |drafts| for ([_]bool{ false, true }) |cached| {
+        if (restored_features and drafts and cached) continue; // the history boundary is covered above
+        var state: RestoreTest = .{ .restored = if (cached) 7680 else 0, .restored_features = restored_features };
+        defer state.deinit();
+        var wrapped = try lanes.drafted.Drafted.init(t.allocator, state.backend(), state.drafter());
+        defer wrapped.deinit();
+        var s = try lanes.Stream.init(t.allocator, .{ .id = "unchanged", .prompt = &RestoreTest.prompt, .max_new = 96, .drafts = drafts });
+        defer s.deinit(t.allocator);
+        const b = wrapped.backend();
+        defer b.release(&s);
+        var steps: usize = 1;
+        while (!try b.vtable.prefill_step.?(b.ptr, &s, 0)) steps += 1;
+        try t.expectEqual(@as(usize, if (cached) 1 else 2), steps);
+        try t.expectEqual(steps, state.forwards);
+        try t.expectEqual(@as(usize, @intFromBool(drafts)), state.opens);
+    };
+}
+
+test "Qwen restored history: cancellation and release after the history boundary clean up once" {
+    const t = std.testing;
+    for ([_]bool{ false, true }) |want_cancel| {
+        var state: RestoreTest = .{};
+        defer state.deinit();
+        var wrapped = try lanes.drafted.Drafted.init(t.allocator, state.backend(), state.drafter());
+        defer wrapped.deinit();
+        var s = try lanes.Stream.init(t.allocator, .{ .id = "cancel", .prompt = &RestoreTest.prompt, .max_new = 96, .cancel_check = .{ .ptr = &state, .check = RestoreTest.isCancelled } });
+        defer s.deinit(t.allocator);
+        const b = wrapped.backend();
+        defer if (wrapped.lanes.contains(&s)) b.release(&s);
+        try t.expect(!try b.vtable.prefill_step.?(b.ptr, &s, 0));
+        if (want_cancel) {
+            state.cancelled = true;
+            try t.expectError(error.Cancelled, b.vtable.prefill_step.?(b.ptr, &s, 0));
+        } else b.release(&s);
+        try t.expectEqual(@as(usize, 0), state.forwards);
+        try t.expectEqual(@as(usize, 0), state.fills.count());
+        try t.expectEqual(@as(usize, 1), state.head_releases);
+        try t.expectEqual(@as(usize, 1), state.target_releases);
+        try t.expectEqual(@as(u32, 0), state.pending_rows);
+    }
 }

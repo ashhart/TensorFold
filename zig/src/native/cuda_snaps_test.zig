@@ -85,3 +85,16 @@ test "snap fork: a family that opts in keeps where the questions part, and the n
     try std.testing.expectEqualSlices(u32, &.{ 16, 20 }, planned.marks[1]);
     try std.testing.expectEqual(@as(u32, 16), planned.from[2]);
 }
+
+test "prompt cache policy: runtime cold cuts override the family grid only when declared" {
+    const snaps = @import("cuda_snaps.zig");
+    const Dynamic = struct {
+        pub const snap_grid: u32 = 8192;
+        pub const snap_runtime_grid = true;
+    };
+    const Static = struct {
+        pub const snap_grid: u32 = 8192;
+    };
+    try std.testing.expectEqual(@as(u32, 7680), snaps.passRules(Dynamic, 7680).grid);
+    try std.testing.expectEqual(@as(u32, 8192), snaps.passRules(Static, 7680).grid);
+}

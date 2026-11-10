@@ -489,6 +489,17 @@ pub const Pool = struct {
         return null;
     }
 
+    /// Whether free pages and singly held non-lease pages could form a run, without changing any owner.
+    pub fn canReclaimRun(p: *const Pool, k: usize) bool {
+        if (k == 0 or k > p.refs.len) return false;
+        var n: usize = 0;
+        for (p.refs, p.leased) |refs, leased| {
+            n = if (leased == 0 and refs <= 1) n + 1 else 0;
+            if (n >= k) return true;
+        }
+        return false;
+    }
+
     /// The highest first id of `k` free consecutive pages at a multiple of `step` (> 0), or null.
     pub fn findAligned(p: *const Pool, k: usize, step: usize) ?u32 {
         if (k == 0 or k > p.refs.len) return null;
