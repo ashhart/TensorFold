@@ -1,0 +1,2 @@
+group means: worst error / Σ|terms|: prompt 4.19e-7, decode 2.80e-7 (bound 2e-6)
+ok
