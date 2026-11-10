@@ -330,7 +330,7 @@ test "image reuse: a repeated picture, and two pictures in one turn, resume what
     try expectFresh(a, .{}, again, repeated);
 }
 
-test "image reuse: a picture whose shared budget shrinks when a turn adds one is prepared again, not resumed" {
+test "image reuse: a picture keeps its rows when a later turn adds one, so the earlier prompt resumes" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -339,13 +339,29 @@ test "image reuse: a picture whose shared budget shrinks when a turn adds one is
     const big = try picture(a, 'a', 40);
     var msgs: std.ArrayList([]const u8) = .empty;
     try msgs.appendSlice(a, &.{ system, try user(a, "One picture.", &.{big}) });
-    try t.expectEqual(@as(usize, 40), (try h.ask(a, try conv(a, msgs.items))).rows);
-    // a second picture halves the share (64 / 2): the first is 32 rows now, another grid and so another image
+    const first = try h.ask(a, try conv(a, msgs.items));
+    try t.expectEqual(@as(usize, 40), first.rows);
+    // the second picture takes what the first left (64 - 40 = 24): the first keeps its 40 rows and resumes
     try msgs.appendSlice(a, &.{ ok, try user(a, "And another.", &.{try picture(a, 'b', 20)}) });
     const m = try conv(a, msgs.items);
     const turn = try h.ask(a, m);
-    try t.expectEqual(@as(usize, 32 + 20), turn.rows);
+    try t.expectEqual(@as(usize, 20), turn.rows);
+    try t.expectEqual(first.prompt - try h.opener(a), turn.cached);
     try expectFresh(a, .{ .image_tokens = 64 }, m, turn);
+}
+
+test "image reuse: a request whose images run past the budget is refused" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const h = try Harness.init(t.allocator, a, .{ .image_tokens = 40 });
+    defer h.deinit();
+    var msgs: std.ArrayList([]const u8) = .empty;
+    try msgs.appendSlice(a, &.{ system, try user(a, "One picture.", &.{try picture(a, 'a', 40)}) });
+    try t.expectEqual(@as(usize, 40), (try h.ask(a, try conv(a, msgs.items))).rows);
+    // the first picture takes the whole budget: the turn that appends another has nothing left for it
+    try msgs.appendSlice(a, &.{ ok, try user(a, "And another.", &.{try picture(a, 'b', 20)}) });
+    try t.expectError(error.Refused, h.ask(a, try conv(a, msgs.items)));
 }
 
 test "image reuse: switching conversations and concurrent clients resume each its own images" {

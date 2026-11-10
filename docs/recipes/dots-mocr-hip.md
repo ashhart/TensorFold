@@ -42,11 +42,12 @@ thinking setting. `return_token_ids: true` also returns the IDs in the
 `tensorfold` response object.
 
 The default total image budget is 14,400 merged tokens per request.
-`--vision-image-tokens` sets a different total budget, divided across
-the images. Each image has independent tower attention. Quoted image
-markers remain text. Video, tensor parallelism, MTP heads, external
-drafters, and incompatible quantized checkpoints are refused. Copy
-proposals remain available with ordinary `draft: true` requests.
+`--vision-image-tokens` sets a different total budget, taken in prompt
+order, each image taking what the earlier images left. Each image has
+independent tower attention. Quoted image markers remain text. Video,
+tensor parallelism, MTP heads, external drafters, and incompatible
+quantized checkpoints are refused. Copy proposals remain available with
+ordinary `draft: true` requests.
 
 The graph uses rocBLAS BF16 projections with FP32 accumulation, dot2
 attention, prompt chunks of at most 256 rows, and exact native verification

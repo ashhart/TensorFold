@@ -166,8 +166,6 @@ pub fn expand(vision: ?api.Vision, fetch: ?Fetch, text: model_text.Text, cx: *Cx
     if (ps.len == 0) return null;
     if (n_images > v.max_images) return cx.refuse(try std.fmt.allocPrint(cx.a, "a request may hold at most {d} images (--vision-max-images); it has {d}", .{ v.max_images, n_images }));
     if (v.video) |o| if (n_videos > o.max_videos) return cx.refuse(try std.fmt.allocPrint(cx.a, "a request supports at most {d} videos", .{o.max_videos}));
-    const budget: u32 = if (n_images > 0) v.image_tokens / @as(u32, @intCast(n_images)) else 0;
-    if (n_images > 0 and budget < 1) return cx.refuse("the image count exceeds the visual-token budget");
     const prepared = try cx.a.alloc(api.PreparedImage, n_images);
     const clips = try cx.a.alloc(api.PreparedVideo, n_videos);
     var bytes_total: usize = 0;
@@ -176,6 +174,8 @@ pub fn expand(vision: ?api.Vision, fetch: ?Fetch, text: model_text.Text, cx: *Cx
     var video_budget: videos.Budget = .{ .deadline = if (fetch) |f| std.Io.Clock.awake.now(f.io).addDuration(.fromSeconds(videos.total_s)) else .{ .nanoseconds = 0 } };
     var ii: usize = 0;
     var vi: usize = 0;
+    // images are priced in prompt order, each taking what the earlier ones left, so a turn never re-sizes one
+    var left: u32 = v.image_tokens;
     for (ps) |p| {
         if (p.video) {
             const o = v.video.?;
@@ -185,15 +185,17 @@ pub fn expand(vision: ?api.Vision, fetch: ?Fetch, text: model_text.Text, cx: *Cx
         }
         const i = ii;
         ii += 1;
+        const cap = if (p.low) @min(left, low_detail_tokens) else left;
+        if (cap == 0) return cx.refuse(try std.fmt.allocPrint(cx.a, "image {d}: the images before it use the request's visual-token budget (--vision-image-tokens {d})", .{ i + 1, v.image_tokens }));
         const bytes = try sourceBytes(cx, fetch, p.url, @min(max_image_bytes, max_request_bytes - bytes_total), deadline);
         bytes_total += bytes.len;
         switch (sniff(bytes)) { // the Python frontend's formats (images.py: JPEG, PNG, WebP)
             .png, .jpeg, .webp => {},
             .gif, .other => return cx.refuse(try std.fmt.allocPrint(cx.a, "image {d} is not PNG, JPEG or WebP; send one of those", .{i + 1})),
         }
-        const cap = if (p.low) @min(budget, low_detail_tokens) else budget;
         prepared[i] = v.prepare(v.ctx, cx.a, bytes, cap) catch |e| return refusal(cx, v, i, e);
         if (prepared[i].tokens == 0 or prepared[i].tokens > cap) return cx.refuse("the image processor exceeded the per-image visual-token budget");
+        left -= prepared[i].tokens;
     }
     var out_ids: std.ArrayList(u32) = .empty;
     var key: std.ArrayList(u32) = .empty;

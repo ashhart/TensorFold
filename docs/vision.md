@@ -116,12 +116,14 @@ reach the limit. Once that history exceeds it, even a text-only follow-up is ref
 the images. Remove older image content from the submitted history, start a new conversation, or restart
 the server with a larger count limit. The server does not discard images automatically.
 
-A request's images share 4,096 visual tokens, so a higher count makes each image smaller: eight images get about
-512 tokens each. On CUDA Qwen checkpoints (Qwen3.5/3.8 dense and Flash Next), `--vision-image-tokens N` raises
-that shared budget, up to 65,536, while each image keeps at most 4,096, so one image is sized as before. The tower
-encodes runs of whole images of at most 16,384 patches, the scratch one full-size image already needs; a request
-that fits one run is encoded in one call, as before. The byte and pixel limits still apply, and the longer prompt
-counts against the context window.
+A request's images take 4,096 visual tokens in prompt order, each taking what the earlier images left, so appending
+an image never re-sizes an image already in the prompt, which is what lets the prompt cache resume from the first
+image. A request whose images would run past the budget is refused, naming the image that does not fit and
+`--vision-image-tokens`. On CUDA Qwen checkpoints (Qwen3.5/3.8 dense and Flash Next), `--vision-image-tokens N`
+raises the request's total, up to 65,536, while each image keeps at most 4,096, so one image is sized as before. The
+tower encodes runs of whole images of at most 16,384 patches, the scratch one full-size image already needs; a
+request that fits one run is encoded in one call, as before. The byte and pixel limits still apply, and the longer
+prompt counts against the context window.
 
 ```bash
 tensorfold serve Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP --parallel 2 --vision \
@@ -134,7 +136,7 @@ EXIF orientation is applied and transparency is composited onto white; animated 
 Up to 16 requests decode and process images at once; more wait up to a minute, and past 128 waiting the server answers 503 so the client retries.
 The request log (`TENSORFOLD_REQUEST_LOG`) records image parts as `<redacted>`.
 The model processor bounds the total expanded image tokens to 4,096, with a smaller budget for `detail: low`.
-That budget is shared across the images; a higher count can reduce the detail available for each image.
+That budget is taken in prompt order, so a later image can get less detail, never an earlier one.
 Those expanded tokens count toward prompt usage and the context window before model execution.
 The available memory budget may impose a smaller practical image or context limit.
 
