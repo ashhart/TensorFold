@@ -139,3 +139,64 @@ test "the flag keeps the env's row budget and replaces only the env's share" {
     try std.testing.expectEqual(@as(f64, 0.5), plain.share.p);
     try std.testing.expectEqual(@as(u64, 256), plain.share.rows);
 }
+
+/// Each prompt call's cap as the host passed it (capRows at the call), and the calls the prompt took.
+const Calls = struct {
+    host: *LaneHost,
+    caps: [16]u32 = undefined,
+    n: usize = 0,
+    fn hook(ctx: *anyopaque, _: *lanes.Stream, _: usize) void {
+        const c: *Calls = @ptrCast(@alignCast(ctx));
+        c.caps[c.n] = fill.capRows(c.host);
+        c.n += 1;
+    }
+};
+
+/// A 2,048-row prompt filled through the host under --decode-share 0.5 beside a live decoder; the prompt calls it took.
+fn flagFill(chunk_invariant: bool) !Calls {
+    clearShareEnv();
+    const gpa = std.testing.allocator;
+    var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
+    defer cfg.deinit(gpa);
+    var target: lanes.fake.Fake = .{ .gpa = gpa, .prefill_chunks = 1 }; // uncapped, one call fills the whole prompt
+    defer target.deinit();
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(gpa, &cfg, target.stepped(), clock.clock());
+    defer core.deinit();
+    core.backend.chunk_invariant = chunk_invariant; // the family's declaration, as its backend() gives it
+    var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 4, .decode_share = 0.5 });
+    defer {
+        @import("lane_host_end.zig").closeAll(&host);
+        host.stop();
+    }
+    const sink = struct {
+        fn event(_: *anyopaque, _: api.Id, _: *const api.Event) void {}
+    };
+    const d: api.Request = .{ .prompt = &.{ 3, 1, 4, 1 }, .max_tokens = 64, .drafts = false };
+    try host.engine().submit(1, &d, .{ .ctx = &host, .event = sink.event });
+    try std.testing.expect(host.admitOne());
+    while (host.filling.items.len > 0) fill.run(&host);
+    const prompt: [2048]u32 = @splat(3);
+    const long: api.Request = .{ .prompt = &prompt, .max_tokens = 8, .drafts = false };
+    try host.engine().submit(2, &long, .{ .ctx = &host, .event = sink.event });
+    try std.testing.expect(host.admitOne());
+    var calls: Calls = .{ .host = &host };
+    target.prefill_hook = Calls.hook;
+    target.prefill_hook_ctx = &calls;
+    var visits: usize = 0;
+    while (host.filling.items.len > 0) : (visits += 1) {
+        if (visits == 64) return error.FillNeverEnded;
+        host.share.debt_ns = 0; // the decoders' round between visits paid the last step's debt
+        fill.run(&host);
+    }
+    return calls;
+}
+
+test "a family that does not declare chunk_invariant ignores the flag's cap: whole steps beside a live decoder" {
+    const gated = try flagFill(false); // Flash Next and Gemma 4 on CUDA (their backend() pins, cuda_cap_test.zig)
+    try std.testing.expectEqual(@as(usize, 1), gated.n); // the family's own cut: the whole prompt in one call
+    try std.testing.expectEqual(@as(u32, 0), gated.caps[0]);
+    const capped = try flagFill(true); // the control: a declaring family gets the cap through the same host
+    try std.testing.expectEqual(@as(usize, 2048 / fill.decode_cap_rows), capped.n);
+    for (capped.caps[0..capped.n]) |cap| try std.testing.expectEqual(fill.decode_cap_rows, cap);
+}
