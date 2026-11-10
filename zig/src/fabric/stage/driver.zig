@@ -360,6 +360,7 @@ pub fn Driver(comptime B: type) type {
                 for (entries, streams[0..entries.len]) |en, *st| st.* = l.expect(en);
                 const p = try plan.encodeMode(mode, streams[0..entries.len], &.{}, l.limits, f.sent);
                 f.round = l.round;
+                f.sent_len = p.len;
                 f.mode = mode;
                 f.r = .{};
                 f.n_ids = ids.len;
@@ -400,7 +401,7 @@ pub fn Driver(comptime B: type) type {
                 if (l.ring == null) return if (f.r.n > 0) B.forward(l.e, parts, f.ids[0..f.n_ids], f.mode, null);
                 if (f.r.n > 0) return B.complete(l.e, parts, f.mode, f.link.hop(), &f.held);
                 try l.ib.?.wait(&f.job);
-                if (!std.mem.eql(u8, f.echo[0..f.job.echo_len], f.sent[0..f.job.echo_len])) return error.OtherEcho;
+                if (!std.mem.eql(u8, f.echo[0..f.job.echo_len], f.sent[0..f.sent_len])) return error.OtherEcho;
             }
 
             pub fn inFlight(l: *const Lead) usize {
@@ -426,6 +427,8 @@ pub fn Driver(comptime B: type) type {
             streams: [B.most_streams]u32 = undefined,
             n_streams: usize = 0,
             sent: []u8 = &.{},
+            /// The plan's length in `sent`: the echo must be the whole plan, as `echoed` checks.
+            sent_len: usize = 0,
             echo: []u8 = &.{},
             rows: []u8 = &.{},
             link: Link = undefined,
