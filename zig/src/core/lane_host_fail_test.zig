@@ -205,3 +205,45 @@ test "a failed shared round fails the live stream and delivers the finished one"
     try std.testing.expectEqual(@as(usize, 0), core.live.items.len);
     try std.testing.expectEqual(@as(usize, 0), target.lanes.count());
 }
+
+test "a round that fails while another prompt is mid-fill strands no one: the fill resumes and a later request runs" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
+    const gpa = std.testing.allocator;
+    var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .hidden_rows = true }, 8, 7);
+    defer cfg.deinit(gpa);
+    var target: lanes.fake.Fake = .{ .gpa = gpa, .prefill_chunks = 12, .fail_round = 3 };
+    defer target.deinit();
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(gpa, &cfg, target.stepped(), clock.clock());
+    defer core.deinit();
+    var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2 });
+    const long_prompt: [600]u32 = @splat(3);
+    const decoder: api.Request = .{ .prompt = &.{ 2, 7, 1, 8 }, .max_tokens = 48, .drafts = false };
+    const filler: api.Request = .{ .prompt = &long_prompt, .max_tokens = 2, .drafts = false };
+    const engine = host.engine();
+    var held: Box = .{};
+    var mid: Box = .{};
+    try engine.submit(1, &decoder, .{ .ctx = &held, .event = Box.event });
+    try engine.submit(2, &filler, .{ .ctx = &mid, .event = Box.event });
+    try host.start();
+    var stopped = false;
+    defer if (!stopped) host.stop();
+    // the decoding stream takes the failed round's error; the prompt still filling is outside the round
+    try std.testing.expectEqual(Reason.failed, held.wait());
+    try std.testing.expectEqualStrings("GpuFailed", held.message);
+    // the mid-fill prompt keeps its place in the filling list, so its next chunks still run
+    try std.testing.expectEqual(@as(?Reason, .length), mid.waitFor(5000));
+    // the lane the failure freed admits a later request, which runs to its length
+    var later: Box = .{};
+    try engine.submit(3, &decoder, .{ .ctx = &later, .event = Box.event });
+    try std.testing.expectEqual(@as(?Reason, .length), later.waitFor(2000));
+    host.stop();
+    stopped = true;
+    try std.testing.expectEqual(@as(usize, 2), mid.tokens);
+    try std.testing.expectEqual(@as(usize, 48), later.tokens);
+    try std.testing.expectEqual(@as(usize, 1), mid.finishes);
+    try std.testing.expectEqual(@as(usize, 0), core.live.items.len);
+    try std.testing.expectEqual(@as(usize, 0), target.lanes.count());
+}
