@@ -25,6 +25,7 @@ const argmax_k = @import("contract_argmax.zig");
 const pair_k = @import("contract_relu2_pair.zig");
 const heads_rows_k = @import("contract_heads_rows.zig");
 const dense_k = @import("contract_dense.zig");
+const nvfp4_k = @import("contract_nvfp4.zig");
 const dense12_k = @import("contract_dense_wmma12.zig");
 const silu_k = @import("contract_silu_fuse.zig");
 const gate_k = @import("contract_moe_gate.zig");
@@ -173,6 +174,10 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     for (&moes, [_]moe_k.Which{ .relu2, .combine, .combine_f32 }) |*m, w| m.* = .init(a, &r, s, &l, w);
     defer for (&moes) |*m| m.deinit();
     for (&moes) |*m| try kernels.append(a, m.kernel());
+    var products: [2]nvfp4_k.Product = undefined;
+    for (&products, std.enums.values(nvfp4_k.Which)) |*p, w| p.* = .init(a, &r, s, &l, w);
+    defer for (&products) |*p| p.deinit();
+    for (&products) |*p| try kernels.append(a, p.kernel());
     var wide = wide_k.Wide.init(a, &r, s, &l);
     defer wide.deinit();
     try kernels.append(a, wide.kernel());
