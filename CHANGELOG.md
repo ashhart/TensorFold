@@ -5,6 +5,9 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 ## Unreleased
 
 
+- Fabric: when spawning a tensor-parallel rank fails, `host.runWith` aborts and joins the ranks it already started instead of leaving them waiting on a dead frame, with a test that fails without it (#2700). Thanks to @Defilan.
+
+
 - HIP: Flash Next sizes its scratch arena from the dry run's peak, counting the MTP head and a verify round's logits, so `prefill_step=2048` loads (main refused it at load) and the arena is 0.74 GiB smaller, with replies equal to main on two R9700s (#2670). Thanks to @millaguie.
 
 - Qwen3.8-27B on Metal: a sampled row's top-k skips 32 logits at a time that cannot beat the k-th candidate, still refusing any non-finite logit, with the same candidates and replies. On an M5 Ultra with Qwen3.8-27B MLX 4-bit and its DFlash2 drafter, sampled verify rounds take 1.6 ms less and sampled decode is 6% faster; greedy is unchanged. The Qwen 3.5/3.6 CUDA engine shares this host draw for each first token and for grammar-masked windows; its unmasked sampled verify rows draw on the GPU. CUDA is not measured (#2507). Thanks to @mrv777.
