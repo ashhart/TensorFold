@@ -20,7 +20,7 @@
  "Set 1 to hide the engine live text display in its terminal; the served model is unchanged.": "設為 1 可隱藏引擎終端機中的即時文字顯示；所服務的模型不變。",
  "Engine knob: mix a salt into request seeds.": "引擎選項：在請求種子中混入鹽值。",
  "Control vector": "控制向量",
- "A control vector steers the local model: it changes what the model says. It is off until you turn it on, and the engine names what is in force when it starts.": "控制向量會引導本機模型：它會改變模型回答的內容。在你開啟之前它一直是關閉的，引擎啟動時會說明當下生效的是哪一個。",
+ "A control vector steers the style or topic of the local model's replies. It is off until you turn it on. When the engine starts it names the file it loaded and its SHA-256, and says replies are steered.": "控制向量會引導本機模型回答的風格或主題。在你開啟之前它一直是關閉的。引擎啟動時會說明它載入的檔案及其 SHA-256，並告知回答正在被引導。",
  "Apply a control vector": "套用控制向量",
  "Choose…": "選擇…",
  "Strength": "強度",
@@ -29,5 +29,5 @@
  "One is the strength the file was derived at. A strength past a few can leave the model without an answer.": "1 是該檔案推導時的強度。強度提高到幾倍後，模型可能不再給出回答。",
  "The strength must be above 0 and at most {value0}.": "強度必須大於 0 且不超過 {value0}。",
  "This build's TensorFold engine does not offer control vectors yet, so the engine in use cannot take one.": "此版本的 TensorFold 引擎尚未支援控制向量，因此目前使用的引擎無法接收它。",
- "With a control vector in force the model replies differently. It is a steering direction, not a safety setting: it changes what the model is willing to say.": "控制向量生效時，模型的回答會有所不同。它是引導方向，不是安全設定：它會改變模型願意說什麼。"
+ "With a control vector in force, replies are steered toward the style or topic the file encodes. Only add-style vectors are supported; the engine refuses project vectors and files it cannot validate.": "控制向量生效時，回答會被引導向檔案所編碼的風格或主題。僅支援加法（add）類型的向量；引擎會拒絕 project 類型的向量以及無法驗證的檔案。"
 }

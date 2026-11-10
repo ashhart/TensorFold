@@ -20,7 +20,7 @@
  "Set 1 to hide the engine live text display in its terminal; the served model is unchanged.": "ตั้งเป็น 1 เพื่อซ่อนการแสดงข้อความสดในเทอร์มินัลของเอนจิน ตัวแบบที่ให้บริการไม่เปลี่ยนแปลง",
  "Engine knob: mix a salt into request seeds.": "ตัวเลือกเอนจิน: ผสมเกลือเข้าไปในซีดของคำขอ",
  "Control vector": "เวกเตอร์ควบคุม",
- "A control vector steers the local model: it changes what the model says. It is off until you turn it on, and the engine names what is in force when it starts.": "เวกเตอร์ควบคุมจะบังคับทิศทางโมเดลในเครื่อง: เปลี่ยนสิ่งที่โมเดลตอบ เปิดใช้งานก่อนหน้านั้นมันจะปิดอยู่ และเมื่อเอนจินเริ่มทำงานจะบอกว่าอะไรกำลังมีผล",
+ "A control vector steers the style or topic of the local model's replies. It is off until you turn it on. When the engine starts it names the file it loaded and its SHA-256, and says replies are steered.": "เวกเตอร์ควบคุมจะชี้นำสไตล์หรือหัวข้อของคำตอบจากโมเดลในเครื่อง ปิดอยู่จนกว่าคุณจะเปิดใช้ เมื่อเอนจินเริ่มทำงานจะระบุไฟล์ที่โหลดและ SHA-256 ของไฟล์ พร้อมแจ้งว่าคำตอบถูกชี้นำ",
  "Apply a control vector": "ใช้เวกเตอร์ควบคุม",
  "Choose…": "เลือก…",
  "Strength": "ความแรง",
@@ -29,5 +29,5 @@
  "One is the strength the file was derived at. A strength past a few can leave the model without an answer.": "1 คือความแรงที่ไฟล์นี้ถูกสร้างขึ้นมา ความแรงที่สูงกว่านั้นหลายเท่าอาจทำให้โมเดลตอบไม่ได้",
  "The strength must be above 0 and at most {value0}.": "ความแรงต้องมากกว่า 0 และไม่เกิน {value0}",
  "This build's TensorFold engine does not offer control vectors yet, so the engine in use cannot take one.": "เอนจิน TensorFold ของรุ่นนี้ยังไม่รองรับเวกเตอร์ควบคุม เอนจินที่ใช้อยู่จึงรับไม่ได้",
- "With a control vector in force the model replies differently. It is a steering direction, not a safety setting: it changes what the model is willing to say.": "เมื่อมีเวกเตอร์ควบคุมมีผล โมเดลจะตอบต่างออกไป นี่คือทิศทางการบังคับ ไม่ใช่การตั้งค่าความปลอดภัย: เปลี่ยนสิ่งที่โมเดลยินยอมพูด"
+ "With a control vector in force, replies are steered toward the style or topic the file encodes. Only add-style vectors are supported; the engine refuses project vectors and files it cannot validate.": "เมื่อเวกเตอร์ควบคุมมีผล คำตอบจะถูกชี้นำไปทางสไตล์หรือหัวข้อที่ไฟล์เข้ารหัสไว้ รองรับเฉพาะเวกเตอร์แบบบวก (add) เท่านั้น เอนจินจะปฏิเสธเวกเตอร์แบบ project และไฟล์ที่ตรวจสอบไม่ได้"
 }

@@ -23,7 +23,7 @@
  "This conversation was archived or deleted, or it has not loaded yet.",
  "Back to Home",
  "Control vector",
- "A control vector steers the local model: it changes what the model says. It is off until you turn it on, and the engine names what is in force when it starts.",
+ "A control vector steers the style or topic of the local model's replies. It is off until you turn it on. When the engine starts it names the file it loaded and its SHA-256, and says replies are steered.",
  "Apply a control vector",
  "Choose…",
  "Strength",
@@ -32,5 +32,5 @@
  "One is the strength the file was derived at. A strength past a few can leave the model without an answer.",
  "The strength must be above 0 and at most {value0}.",
  "This build's TensorFold engine does not offer control vectors yet, so the engine in use cannot take one.",
- "With a control vector in force the model replies differently. It is a steering direction, not a safety setting: it changes what the model is willing to say."
+ "With a control vector in force, replies are steered toward the style or topic the file encodes. Only add-style vectors are supported; the engine refuses project vectors and files it cannot validate."
 ]

@@ -20,7 +20,7 @@
  "Set 1 to hide the engine live text display in its terminal; the served model is unchanged.": "1 にするとエンジンのターミナルでのライブ表示を隠します。提供されるモデルは変わりません。",
  "Engine knob: mix a salt into request seeds.": "エンジン設定：リクエストのシードにソルトを混ぜます。",
  "Control vector": "コントロールベクター",
- "A control vector steers the local model: it changes what the model says. It is off until you turn it on, and the engine names what is in force when it starts.": "コントロールベクターはローカルモデルを導きます。モデルの返答が変わり、有効にするまでは無効のままです。エンジンは起動時に、いま適用されているものを示します。",
+ "A control vector steers the style or topic of the local model's replies. It is off until you turn it on. When the engine starts it names the file it loaded and its SHA-256, and says replies are steered.": "コントロールベクターは、ローカルモデルの返答のスタイルやトピックを誘導します。有効にするまでは無効のままです。エンジンは起動時に、読み込んだファイルとその SHA-256 を示し、返答が誘導されていることを伝えます。",
  "Apply a control vector": "コントロールベクターを適用",
  "Choose…": "選択…",
  "Strength": "強度",
@@ -29,5 +29,5 @@
  "One is the strength the file was derived at. A strength past a few can leave the model without an answer.": "1 はそのファイルを求めたときの強度です。強度を数倍以上にすると、モデルが答えを返さなくなることがあります。",
  "The strength must be above 0 and at most {value0}.": "強度は 0 より大きく、{value0} 以下にしてください。",
  "This build's TensorFold engine does not offer control vectors yet, so the engine in use cannot take one.": "このビルドの TensorFold エンジンはまだコントロールベクターに対応していないため、現在のエンジンでは渡せません。",
- "With a control vector in force the model replies differently. It is a steering direction, not a safety setting: it changes what the model is willing to say.": "コントロールベクターが有効な間、モデルの返答は変わります。これは安全設定ではなく誘導の方向です。モデルが何を言うかを変えます。"
+ "With a control vector in force, replies are steered toward the style or topic the file encodes. Only add-style vectors are supported; the engine refuses project vectors and files it cannot validate.": "コントロールベクターが有効な間、返答はファイルが表すスタイルやトピックの方向へ誘導されます。対応しているのは加算（add）方式のベクターのみで、エンジンは project 方式のベクターと検証できないファイルを拒否します。"
 }
