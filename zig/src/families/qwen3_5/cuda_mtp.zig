@@ -9,6 +9,7 @@ const weights = @import("cuda_mtp_weights.zig");
 const timing = @import("cuda_draft.zig").timing;
 const precision = @import("cuda_draft_precision.zig");
 const batched = @import("cuda_mtp_batch.zig");
+pub const mtp_draw = @import("cuda_mtp_draw.zig");
 
 const E = engine.Engine;
 const DeviceBuffer = cuda.DeviceBuffer;
@@ -21,10 +22,10 @@ const most_window = engine.most_window;
 /// Drafts a round at most (the frozen engine's DEPTH); TF_MTP_DRAFTS=N sets it, up to a window's rows less one.
 const default_depth = 3;
 /// A tree's lanes at most (the lane planner's widest shape within a window), and the ranks a row's candidates cover.
-const max_lanes = most_window;
+pub const max_lanes = most_window;
 const ranks = lanes.shape.ranks;
 /// The logprob row's words (sample.cu's LP_WORDS): the ids of a row's best tokens sit at words 2 onward.
-const lp_words = 3 + 2 * 20;
+pub const lp_words = 3 + 2 * 20;
 
 const Fns = struct { norm_rope: cuda.Function, attn: cuda.Function, attn_tree: cuda.Function, attn_rows: cuda.Function };
 /// qwen35_draft.cu's ring kernels, shared with the DFlash2 drafter.
@@ -89,8 +90,10 @@ pub const Mtp = struct {
     lane_v: u64,
     anc: u64, // int32 ancestor table a row: a count, then lane indices
     ids: u64, // u32 the rows' tokens
-    tok: u64, // u32 the drawn token
-    staged: cuda.HostBuffer, // pinned: the ids and ancestors up, the token and words down
+    tok: u64, // u32 the drawn tokens
+    rules: u64 = 0, // sample.cu's Rule a row for sampled draws
+    meta: u64 = 0, // sample.cu's position - 1 a row for sampled draws
+    staged: cuda.HostBuffer, // pinned: the ids, rules and ancestors up, the tokens and words down
     tab: u64, // a batched pass's RingRow table (cuda_mtp_batch.zig)
     batch: bool = true, // shared rounds draft every stream in one pass a level; TF_MTP_BATCH=0 keeps one at a time
     batch_passes: u64 = 0, // batched passes run, for the GPU check
@@ -108,11 +111,13 @@ pub const Mtp = struct {
     const anc_stride = 1 + max_lanes;
     const ids_at = 0;
     pub const tok_at = max_rows * 4;
-    const words_at = tok_at + 64;
+    pub const words_at = tok_at + max_lanes * 4;
     const anc_at = words_at + max_lanes * lp_words * 4;
     pub const bids_at = anc_at + max_lanes * anc_stride * 4; // a batched pass's ids, then its ring table
     pub const btab_at = bids_at + batched.most * 4;
-    const staged_len = btab_at + batched.most * @sizeOf(batched.RingRow);
+    pub const rules_at = std.mem.alignForward(usize, btab_at + batched.most * @sizeOf(batched.RingRow), @alignOf(cuda.sample.Rule));
+    pub const meta_at = rules_at + max_lanes * @sizeOf(cuda.sample.Rule);
+    pub const staged_len = meta_at + max_lanes * 4;
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, e: *E, dir: []const u8, capacity: usize) !*Mtp {
         if (!e.g.moe()) return error.NotRouted;
@@ -204,20 +209,20 @@ pub const Mtp = struct {
     }
 
     /// The scratch rows, measured (nothing assigned) or assigned from the scratch buffer.
-    fn layout(d: *Mtp, assign: bool) !usize {
+    pub fn layout(d: *Mtp, assign: bool) !usize {
         const g = d.e.g;
         const R = max_rows;
         const L = max_lanes;
         const aw = g.attnWidth();
         const kw = d.kvWidth();
         const sizes = .{
-            .{ "taps_in", R * g.hidden * 2 },                    .{ "hin", R * g.hidden * 2 },   .{ "hn", R * g.hidden * 2 },                  .{ "emb", R * g.hidden * 2 },
-            .{ "en", R * g.hidden * 2 },                         .{ "h", R * g.hidden * 2 },     .{ "r", R * g.hidden * 2 },                   .{ "x", R * g.hidden * 2 },
-            .{ "qraw", R * 2 * aw * 2 },                         .{ "q", R * aw * 2 },           .{ "kraw", R * kw * 2 },                      .{ "kb", R * kw * 2 },
-            .{ "vb", R * kw * 2 },                               .{ "att", R * aw * 2 },         .{ "xs", R * (@max(g.hidden, aw) / 64) * 4 }, .{ "logits", L * g.vocab * 2 },
-            .{ "words", L * lp_words * 4 },                      .{ "picks", L * 4 },            .{ "lane_state", L * g.hidden * 2 },          .{ "lane_k", L * kw * 2 },
-            .{ "lane_v", L * kw * 2 },                           .{ "anc", L * anc_stride * 4 }, .{ "ids", R * 4 },                            .{ "tok", 64 },
-            .{ "tab", batched.most * @sizeOf(batched.RingRow) },
+            .{ "taps_in", R * g.hidden * 2 },            .{ "hin", R * g.hidden * 2 },   .{ "hn", R * g.hidden * 2 },                         .{ "emb", R * g.hidden * 2 },
+            .{ "en", R * g.hidden * 2 },                 .{ "h", R * g.hidden * 2 },     .{ "r", R * g.hidden * 2 },                          .{ "x", R * g.hidden * 2 },
+            .{ "qraw", R * 2 * aw * 2 },                 .{ "q", R * aw * 2 },           .{ "kraw", R * kw * 2 },                             .{ "kb", R * kw * 2 },
+            .{ "vb", R * kw * 2 },                       .{ "att", R * aw * 2 },         .{ "xs", R * (@max(g.hidden, aw) / 64) * 4 },        .{ "logits", L * g.vocab * 2 },
+            .{ "words", L * lp_words * 4 },              .{ "picks", L * 4 },            .{ "lane_state", L * g.hidden * 2 },                 .{ "lane_k", L * kw * 2 },
+            .{ "lane_v", L * kw * 2 },                   .{ "anc", L * anc_stride * 4 }, .{ "ids", R * 4 },                                   .{ "tok", L * 4 },
+            .{ "rules", L * @sizeOf(cuda.sample.Rule) }, .{ "meta", L * 4 },             .{ "tab", batched.most * @sizeOf(batched.RingRow) },
         };
         var total: usize = 0;
         inline for (sizes) |s| {
@@ -348,26 +353,14 @@ pub const Mtp = struct {
         try d.e.run(d.ring_fns.ring_put, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ d.kb, d.vb, d.ringK(ctx), d.ringV(ctx), @as(c_int, @intCast(d.kvWidth())), p0, @as(c_int, @intCast(d.capacity)) });
     }
 
-    /// Rows [first, first + n) of x through the target's head: their logits and best tokens' words, row 0's pick.
-    pub fn draw(d: *Mtp, first: usize, n: usize, cands: bool) !void {
-        const e = d.e;
-        try d.proj(e.head, d.x + first * e.g.hidden * 2, d.logits, n);
-        try e.run(e.fns.argmax, .{ 1, 1, 1 }, .{ 1024, 1, 1 }, .{ d.logits, @as(c_int, @intCast(e.g.vocab)), d.tok });
-        if (cands and d.trees) try e.draws.logprobRows(e.stream, d.logits, e.g.vocab, d.picks, ranks, false, d.words, n);
+    /// Rows [first, first + specs.len) of x through the target's head, drawn under each row's rule and position.
+    pub fn drawSpecs(d: *Mtp, first: usize, specs: []const mtp_draw.Spec, cands: bool) !void {
+        return mtp_draw.launch(d, d.x + first * d.e.g.hidden * 2, specs, cands);
     }
 
-    /// The drawn token, and the first `n` rows' candidates by rank, after a draw.
-    pub fn fetch(d: *Mtp, n: usize, cands: [][ranks]u32) !u32 {
-        const e = d.e;
-        const st = d.staged.bytes;
-        try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(st.ptr + tok_at, d.tok, 4, e.stream.handle), "cuMemcpyDtoHAsync");
-        if (d.trees and n > 0) try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(st.ptr + words_at, d.words, n * lp_words * 4, e.stream.handle), "cuMemcpyDtoHAsync");
-        try e.stream.synchronize();
-        for (cands[0..n], 0..) |*c, r| {
-            const w = std.mem.bytesAsSlice(u32, st[words_at + r * lp_words * 4 ..][0 .. lp_words * 4]);
-            for (c, 0..) |*t, j| t.* = if (d.trees) w[2 + j] else std.mem.bytesToValue(u32, st[tok_at..][0..4]);
-        }
-        return std.mem.bytesToValue(u32, st[tok_at..][0..4]);
+    /// Reads back the drawn tokens and optional tree candidates for `specs`.
+    pub fn fetchSpecs(d: *Mtp, specs: []const mtp_draw.Spec, out_toks: []u32, cands: [][ranks]u32) !void {
+        return mtp_draw.fetch(d, specs, out_toks, cands);
     }
 
     pub fn putIds(d: *Mtp, ids: []const u32) !void {
@@ -379,16 +372,21 @@ pub const Mtp = struct {
 
     /// Target rows [start, start + n) from the tap ring with the token after each; `rows`, when given, picks them.
     pub fn absorb(d: *Mtp, ctx: *Ctx, tap_ring: u64, start_: u64, n_: usize, rows_: ?[]const u32, follow: []const u32) !void {
-        return d.absorbRole(ctx, tap_ring, start_, n_, rows_, follow, true, true);
+        return d.absorbRole(ctx, tap_ring, start_, n_, rows_, follow, true, true, null);
     }
 
     pub const absorbRole = @import("cuda_mtp_absorb.zig").absorbRole;
 
     /// `depth` drafts after `pending` at pos0 (the pending token's slot): a chain, or the planner's tree of lanes.
     pub fn hold(d: *Mtp, ctx: *Ctx, pending: u32, pos0: u64, depth: usize, lanes_: ?*const lanes.shape.Shape) !void {
+        return d.holdSampled(ctx, pending, pos0, depth, lanes_, null);
+    }
+
+    /// `hold` under `sampling` (target-coupled draws at pos0 + k + 1 when sampled, greedy argmax otherwise).
+    pub fn holdSampled(d: *Mtp, ctx: *Ctx, pending: u32, pos0: u64, depth: usize, lanes_: ?*const lanes.shape.Shape, sampling: ?lanes.Sampling) !void {
         _ = pending; // the newest absorbed row's follow token, whose candidates ctx.cands are
         if (ctx.end != pos0) return error.DraftContextBehind;
-        if (lanes_) |l| return d.holdTree(ctx, pos0, l);
+        if (lanes_) |l| return d.holdTreeSampled(ctx, pos0, l, sampling);
         const e = d.e;
         const g = e.g;
         ctx.held[0] = ctx.cands[0];
@@ -400,15 +398,23 @@ pub const Mtp = struct {
             try d.scratch.copyFrom(d.hin - d.scratch.ptr, src, g.hidden * 2, e.stream.handle);
             try d.putIds(&.{ctx.held[k - 1]});
             try d.layer(ctx, 1, pos0 + k - 1, .ring);
-            try d.draw(0, 1, false);
+            const spec = [_]mtp_draw.Spec{.{ .sampling = sampling, .position = pos0 + k + 1 }};
+            try d.drawSpecs(0, &spec, false);
+            var tok: [1]u32 = undefined;
             var none: [0][ranks]u32 = undefined;
-            ctx.held[k] = try d.fetch(0, &none);
+            try d.fetchSpecs(&spec, &tok, &none);
+            ctx.held[k] = tok[0];
             ctx.held_n = k + 1;
         }
     }
 
     /// The tree's lanes, lane i the rank-r candidate of its parent's row; a depth's rows run as one pass.
     pub fn holdTree(d: *Mtp, ctx: *Ctx, pos0: u64, l: *const lanes.shape.Shape) !void {
+        return d.holdTreeSampled(ctx, pos0, l, null);
+    }
+
+    /// `holdTree` under `sampling` (internal lanes at `depth` draw children's candidates at pos0 + depth + 2).
+    pub fn holdTreeSampled(d: *Mtp, ctx: *Ctx, pos0: u64, l: *const lanes.shape.Shape, sampling: ?lanes.Sampling) !void {
         const e = d.e;
         const g = e.g;
         const n = l.parents.len;
@@ -464,9 +470,10 @@ pub const Mtp = struct {
                 try d.scratch.copyFrom(d.lane_v - d.scratch.ptr + i * kw * 2, d.vb + m * kw * 2, kw * 2, e.stream.handle);
                 done[i] = true;
             }
-            try d.draw(0, rows, true);
+            var specs: [max_lanes]mtp_draw.Spec = @splat(.{ .sampling = sampling, .position = pos0 + depth + 2 });
+            try d.drawSpecs(0, specs[0..rows], true);
             var got: [max_lanes][ranks]u32 = undefined;
-            _ = try d.fetch(rows, got[0..rows]);
+            try d.fetchSpecs(specs[0..rows], &.{}, got[0..rows]);
             for (batch[0..rows], 0..) |i, m| cands[i] = got[m];
             // the lanes whose parent's row just ran take their tokens now
             for (l.parents, l.ranks, 0..) |par, rank, i| if (par >= 0 and done[@intCast(par)]) {
@@ -527,8 +534,8 @@ pub const Mtp = struct {
         if (it.features.space != .device or it.features.dtype != .bf16) return error.UnsupportedFeatures;
         // the target's features: its ring, `offset` the first row's position (cuda_native.zig's featuresFn)
         if (it.rows) |rs| {
-            try d.absorbRole(ctx, it.features.buffer, it.features.offset, rs.len, rs, it.follow, it.prompt, it.propose);
-        } else try d.absorbRole(ctx, it.features.buffer, it.features.offset, it.features.rows, null, it.follow, it.prompt, it.propose);
+            try d.absorbRole(ctx, it.features.buffer, it.features.offset, rs.len, rs, it.follow, it.prompt, it.propose, it.stream.sampling);
+        } else try d.absorbRole(ctx, it.features.buffer, it.features.offset, it.features.rows, null, it.follow, it.prompt, it.propose, it.stream.sampling);
     }
 
     fn holdFn(p: *anyopaque, items: []const dr.Hold) anyerror!void {
@@ -538,7 +545,7 @@ pub const Mtp = struct {
         if (d.batch and !d.trees and items.len > 1) return batched.hold(d, items);
         for (items) |it| {
             const ctx = d.streams.get(it.stream) orelse return error.UnknownStream;
-            try d.hold(ctx, it.pending, it.position - 1, it.depth, it.lanes);
+            try d.holdSampled(ctx, it.pending, it.position - 1, it.depth, it.lanes, it.sampling orelse it.stream.sampling);
         }
     }
 

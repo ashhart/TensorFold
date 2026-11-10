@@ -5,6 +5,7 @@ const lanes = @import("lanes");
 const engine = @import("cuda_engine.zig");
 const geometry = @import("cuda_geometry.zig");
 const mtp = @import("cuda_mtp.zig");
+const mtp_draw = @import("cuda_mtp_draw.zig");
 
 const Mtp = mtp.Mtp;
 const Ctx = mtp.Ctx;
@@ -84,20 +85,10 @@ fn ringPut(d: *Mtp, segs: []const Seg) !void {
     for (segs) |s| try e.run(d.ring_fns.ring_put, .{ s.rows, 1, 1 }, .{ 256, 1, 1 }, .{ d.kb + s.first * kw * 2, d.vb + s.first * kw * 2, d.ringK(s.ctx), d.ringV(s.ctx), @as(c_int, @intCast(kw)), @as(c_longlong, @intCast(s.p0)), @as(c_int, @intCast(d.capacity)) });
 }
 
-/// Rows of `input` through the target's head, and each row's greedy token: one projection, one argmax launch.
-fn head(d: *Mtp, input: u64, rows: usize) !void {
-    const e = d.e;
-    try d.proj(e.head, input, d.logits, rows);
-    try e.run(e.fns.argmax, .{ rows, 1, 1 }, .{ 1024, 1, 1 }, .{ d.logits, @as(c_int, @intCast(e.g.vocab)), d.tok });
-}
-
-/// The first `rows` drawn tokens, read back with one synchronization.
-fn fetchRows(d: *Mtp, rows: usize) ![]align(1) const u32 {
-    const e = d.e;
-    const st = d.staged.bytes;
-    try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(st.ptr + Mtp.tok_at, d.tok, rows * 4, e.stream.handle), "cuMemcpyDtoHAsync");
-    try e.stream.synchronize();
-    return std.mem.bytesAsSlice(u32, st[Mtp.tok_at..][0 .. rows * 4]);
+/// Rows of `input` through the target's head, drawn under each row's rule and position with one sync.
+fn drawRows(d: *Mtp, input: u64, specs: []const mtp_draw.Spec, toks: []u32) !void {
+    try mtp_draw.launch(d, input, specs, false);
+    try mtp_draw.fetch(d, specs, toks, &.{});
 }
 
 /// The round's absorbs: up to `most` rows a pass, each stream's rows one segment; larger or empty ones as before.
@@ -161,20 +152,22 @@ fn absorbPass(d: *Mtp, items: []const dr.Absorb) !void {
     try upload(d, ids[0..at], tab[0..at]);
     try layerRows(d, s, at);
     try ringPut(d, s);
-    for (s, 0..) |seg, j| { // each stream's newest row: its state kept for the drafts, its row of the head's input
+    var specs: [most]mtp_draw.Spec = undefined;
+    for (s, items, 0..) |seg, it, j| { // each stream's newest row: its state kept, its row of the head's input
         const last = d.x + (seg.first + seg.rows - 1) * g.hidden * 2;
         try seg.ctx.last.copyFrom(0, last, g.hidden * 2, e.stream.handle);
         try d.scratch.copyFrom(d.hn - d.scratch.ptr + j * g.hidden * 2, last, g.hidden * 2, e.stream.handle);
         seg.ctx.end = seg.p0 + seg.rows;
+        specs[j] = .{ .sampling = it.stream.sampling, .position = seg.ctx.end + 1 };
     }
-    try head(d, d.hn, s.len);
-    const toks = try fetchRows(d, s.len);
-    for (s, toks) |seg, t| seg.ctx.cands[0] = t;
+    var toks: [most]u32 = undefined;
+    try drawRows(d, d.hn, specs[0..s.len], toks[0..s.len]);
+    for (s, toks[0..s.len]) |seg, t| seg.ctx.cands[0] = t;
     d.batch_passes += 1;
 }
 
-/// A chain's stream and the drafts it asks for.
-const Chain = struct { ctx: *Ctx, pos0: u64, depth: usize };
+/// A chain's stream, sampling rule, and the drafts it asks for.
+const Chain = struct { ctx: *Ctx, pos0: u64, depth: usize, sampling: ?lanes.Sampling };
 
 /// The round's holds: each draft level's chains in passes of up to `most` streams; trees keep the serial path.
 pub fn hold(d: *Mtp, items: []const dr.Hold) !void {
@@ -184,15 +177,16 @@ pub fn hold(d: *Mtp, items: []const dr.Hold) !void {
     var deepest: usize = 0;
     for (items) |it| {
         const ctx = d.streams.get(it.stream) orelse return error.UnknownStream;
+        const sampling = it.sampling orelse it.stream.sampling;
         if (it.lanes != null) {
-            try d.hold(ctx, it.pending, it.position - 1, it.depth, it.lanes);
+            try d.holdSampled(ctx, it.pending, it.position - 1, it.depth, it.lanes, sampling);
             continue;
         }
         const pos0 = it.position - 1;
         if (ctx.end != pos0) return error.DraftContextBehind;
         ctx.held[0] = ctx.cands[0];
         ctx.held_n = 1;
-        chains[n] = .{ .ctx = ctx, .pos0 = pos0, .depth = @min(it.depth, ctx.held.len) };
+        chains[n] = .{ .ctx = ctx, .pos0 = pos0, .depth = @min(it.depth, ctx.held.len), .sampling = sampling };
         deepest = @max(deepest, chains[n].depth);
         n += 1;
     }
@@ -222,6 +216,7 @@ fn holdPass(d: *Mtp, group: []const Chain, k: usize) !void {
     var segs: [most]Seg = undefined;
     var tab: [most]RingRow = undefined;
     var ids: [most]u32 = undefined;
+    var specs: [most]mtp_draw.Spec = undefined;
     for (group, 0..) |c, r| {
         const src = if (k == 1) c.ctx.last.ptr else c.ctx.step.ptr;
         try d.scratch.copyFrom(d.hin - d.scratch.ptr + r * g.hidden * 2, src, g.hidden * 2, e.stream.handle);
@@ -229,15 +224,16 @@ fn holdPass(d: *Mtp, group: []const Chain, k: usize) !void {
         ids[r] = c.ctx.held[k - 1];
         tab[r] = ringRow(d, c.ctx, p0, r);
         segs[r] = .{ .ctx = c.ctx, .first = r, .rows = 1, .p0 = p0 };
+        specs[r] = .{ .sampling = c.sampling, .position = c.pos0 + k + 1 };
     }
     const s = segs[0..group.len];
     try upload(d, ids[0..group.len], tab[0..group.len]);
     try layerRows(d, s, group.len);
     try ringPut(d, s);
     for (s) |seg| try seg.ctx.step.copyFrom(0, d.x + seg.first * g.hidden * 2, g.hidden * 2, e.stream.handle);
-    try head(d, d.x, group.len);
-    const toks = try fetchRows(d, group.len);
-    for (group, toks) |c, t| {
+    var toks: [most]u32 = undefined;
+    try drawRows(d, d.x, specs[0..group.len], toks[0..group.len]);
+    for (group, toks[0..group.len]) |c, t| {
         c.ctx.held[k] = t;
         c.ctx.held_n = k + 1;
     }

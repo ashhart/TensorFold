@@ -1,4 +1,5 @@
 //! Stateful MTP absorption keeps keys during a priced skip; proposal arithmetic runs only for useful drafts.
+const lanes = @import("lanes");
 const mtp = @import("cuda_mtp.zig");
 const Mtp = mtp.Mtp;
 const Ctx = mtp.Ctx;
@@ -6,8 +7,8 @@ const TapRows = mtp.TapRows;
 const engine = @import("cuda_engine.zig");
 const max_rows = engine.most_verify;
 const most_window = engine.most_window;
-const ranks = @import("lanes").shape.ranks;
-pub fn absorbRole(d: *Mtp, ctx: *Ctx, tap_ring: u64, start_: u64, n_: usize, rows_: ?[]const u32, follow: []const u32, prompt: bool, propose: bool) !void {
+const ranks = lanes.shape.ranks;
+pub fn absorbRole(d: *Mtp, ctx: *Ctx, tap_ring: u64, start_: u64, n_: usize, rows_: ?[]const u32, follow: []const u32, prompt: bool, propose: bool, sampling: ?lanes.Sampling) !void {
     const previous = d.projection_role;
     defer d.projection_role = previous;
     d.projection_role = if (prompt) .prompt else .live;
@@ -42,13 +43,15 @@ pub fn absorbRole(d: *Mtp, ctx: *Ctx, tap_ring: u64, start_: u64, n_: usize, row
         n -= rows;
         fi += rows;
         ctx.end = start;
-        if (!propose) continue;
-        // the newest row: its state kept for the drafts, its best tokens drawn
+        if (!propose or n > 0) continue;
+        // the newest row: its state kept for the drafts, its tokens drawn at target verify position ctx.end + 1
         try ctx.last.copyFrom(0, d.x + (rows - 1) * g.hidden * 2, g.hidden * 2, e.stream.handle);
-        try d.draw(rows - 1, 1, true);
+        try d.drawSpecs(rows - 1, &.{.{ .sampling = sampling, .position = ctx.end + 1 }}, true);
     }
     if (!propose) return e.stream.synchronize();
+    var tok: [1]u32 = undefined;
     var cands: [1][ranks]u32 = undefined;
-    ctx.cands[0] = try d.fetch(1, &cands);
+    try d.fetchSpecs(&.{.{ .sampling = sampling, .position = ctx.end + 1 }}, &tok, &cands);
+    ctx.cands[0] = tok[0];
     if (d.trees) ctx.cands = cands[0];
 }
