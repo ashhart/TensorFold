@@ -364,6 +364,30 @@ test "a draft at 65,536 tokens and 1,536-row chunks: the head's cache whole, sav
     try std.testing.expectEqual(@as(usize, 1_395_069_440), sizes.seqBytes(cap, .half) + Draft.bytes(cap, draft_n, rows, .half));
 }
 
+test "blank TF_FLASHNEXT_KEEP_LATE: unset, empty or whitespace-only text asks for nothing, 1 and 0 keep their meaning" {
+    if (comptime @import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const t = std.testing;
+    const env = @import("sys").env;
+    const name = "TF_FLASHNEXT_KEEP_LATE";
+    const before = if (std.c.getenv(name)) |v| try t.allocator.dupeSentinel(u8, std.mem.span(v), 0) else null;
+    defer {
+        if (before) |v| {
+            _ = env.setenv(name, v, 1);
+            t.allocator.free(v);
+        } else _ = env.unsetenv(name);
+    }
+    _ = env.unsetenv(name);
+    try t.expectEqual(@as(?bool, null), Draft.lateWanted());
+    for ([_][:0]const u8{ "", " ", "\t", " \t\r\n" }) |v| {
+        try t.expectEqual(@as(c_int, 0), env.setenv(name, v, 1));
+        try t.expectEqual(@as(?bool, null), Draft.lateWanted());
+    }
+    for ([_][:0]const u8{ "1", "0" }, [_]?bool{ true, false }) |v, wanted| {
+        try t.expectEqual(@as(c_int, 0), env.setenv(name, v, 1));
+        try t.expectEqual(wanted, Draft.lateWanted());
+    }
+}
+
 test "the saved pieces follow one another at the model's heads, and the spares hold its states" {
     for ([_]Heads{ .full, .half }) |h| {
         const l = Draft.Layout.of(h);

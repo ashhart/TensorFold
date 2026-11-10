@@ -157,6 +157,28 @@ test "a page's parts tile it in order and pooled rows follow their positions' pa
     try std.testing.expectEqual(p.base + 2 * pageBytes(t) + offset(t, 0, .index), p.rowAt(0, .index, 0));
 }
 
+test "blank TF_FLASHNEXT_KV_PAGE_TEST: unset, empty or whitespace-only text reads 0 pages, a size keeps its meaning" {
+    if (comptime @import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const t = std.testing;
+    const env = @import("sys").env;
+    const name = "TF_FLASHNEXT_KV_PAGE_TEST";
+    const before = if (std.c.getenv(name)) |v| try t.allocator.dupeSentinel(u8, std.mem.span(v), 0) else null;
+    defer {
+        if (before) |v| {
+            _ = env.setenv(name, v, 1);
+            t.allocator.free(v);
+        } else _ = env.unsetenv(name);
+    }
+    _ = env.unsetenv(name);
+    try t.expectEqual(@as(usize, 0), try pageTest());
+    for ([_][:0]const u8{ "", " ", "\t", " \t\r\n" }) |v| {
+        try t.expectEqual(@as(c_int, 0), env.setenv(name, v, 1));
+        try t.expectEqual(@as(usize, 0), try pageTest());
+    }
+    try t.expectEqual(@as(c_int, 0), env.setenv(name, "8", 1));
+    try t.expectEqual(@as(usize, 8), try pageTest());
+}
+
 test {
     _ = @import("cuda_page_test_safety.zig");
 }
