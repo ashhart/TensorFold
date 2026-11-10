@@ -431,10 +431,10 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         return;
     }
     if (is(name, "--profile")) {
-        if (is(v, "fast-exact")) return fail(u, a, "argument --profile: fast-exact is not yet qualified: solo, concurrent 1/2/4/8 and resumed runs equal to stable, and a measurement where no served cell for its family gets slower", .{});
+        if (is(v, "fast-exact")) return fail(u, a, "argument --profile: fast-exact is not yet qualified: it needs solo, concurrent 1/2/4/8 and resumed runs equal to stable, and a measurement where no served cell for its family gets slower", .{});
         if (is(v, "fast")) return fail(u, a, "argument --profile: fast is not planned: a speed mode that changes output tokens is not shipped, so the arithmetic class has no profile to join", .{});
         out.profile = std.meta.stringToEnum(api.profile.Profile, v) orelse
-            return fail(u, a, "argument --profile: unknown profile '{s}': expected stable, fast-exact or fast", .{v});
+            return fail(u, a, "argument --profile: unknown profile '{s}': stable is the only served profile", .{v});
         return;
     }
     if (is(name, "--max-frames")) {
