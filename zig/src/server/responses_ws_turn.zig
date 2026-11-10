@@ -42,7 +42,7 @@ pub fn message(s: *Session, text: []const u8) void {
     });
 }
 
-/// How a create ended: the HTTP status the same request gets (0: the client left first) and what the cache keeps.
+/// How a create ended: the HTTP status the request gets (0: the client left before any event) and what the cache keeps.
 const Done = struct {
     status: u16,
     final: ?Value = null,
@@ -141,7 +141,7 @@ fn respond(s: *Session, a: Allocator, body: Value, lane: []const u8, history: *S
     const opts: responses.TurnOptions = .{ .whole_history = if (history.from_cache) history.earlier else null };
     if (!generate.bool) return warm(s, a, &cx, body, t, &out, opts);
     return switch (responses.turn(s.srv, a, s.conn, &cx, body, t, out.sink(), opts)) {
-        .streamed => |final| .{ .status = if (final == null and s.gone) 0 else 200, .final = final, .added = t.added },
+        .streamed => |final| .{ .status = if (final == null and s.gone and !out.sent) 0 else 200, .final = final, .added = t.added },
         .refused => |r| refuse(s, stream_id, Problem.fromPayload(r.status, r.payload)),
         // unreachable with ``stream`` forced on: nothing was sent, so nothing is kept
         .whole => .{ .status = 500 },
@@ -157,7 +157,7 @@ fn warm(s: *Session, a: Allocator, cx: *Cx, body: Value, t: translate_mod.Reques
         .prepared => |p| {
             s.srv.release(p.preparing, p.request);
             const final = responses.warmup(s.srv, a, cx, body, t, out.sink(), p.prompt_len, opts);
-            return .{ .status = if (final == null and s.gone) 0 else 200, .final = final, .added = t.added };
+            return .{ .status = if (final == null and s.gone and !out.sent) 0 else 200, .final = final, .added = t.added };
         },
     }
 }

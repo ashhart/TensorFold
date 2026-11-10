@@ -11,6 +11,8 @@ const Allocator = std.mem.Allocator;
 pub const Lane = struct {
     session: *Session,
     stream_id: ?[]const u8,
+    /// An event reached the socket: the turn counts as a 200, as an SSE stream that opened does, even if cut short.
+    sent: bool = false,
 
     pub fn sink(l: *Lane) Sink {
         return .{ .ctx = l, .vt = &vt };
@@ -27,7 +29,8 @@ pub const Lane = struct {
     fn event(ctx: *anyopaque, a: Allocator, _: []const u8, payload: *json.Object) error{Closed}!void {
         const l = of(ctx);
         if (l.stream_id) |id| payload.put(a, "stream_id", .{ .string = id }) catch return error.Closed;
-        return frame(l.session, .{ .object = payload });
+        try frame(l.session, .{ .object = payload });
+        l.sent = true;
     }
 
     fn keepalive(ctx: *anyopaque) error{Closed}!void {
