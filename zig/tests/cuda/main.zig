@@ -103,6 +103,7 @@ const flashnext_nvfp4_tp_tests = @import("flashnext_nvfp4_tp_tests.zig");
 const flashnext_fp8_experts_tests = @import("flashnext_fp8_experts_tests.zig");
 const nvfp4_fact_tests = @import("nvfp4_fact_tests.zig");
 const nvfp4_b32_tests = @import("nvfp4_b32_tests.zig");
+const nvfp4_nz5_tests = @import("nvfp4_nz5_tests.zig");
 const lane_half_tests = @import("lane_half_tests.zig");
 const flashnext_dense_hc_tests = @import("flashnext_dense_hc_tests.zig");
 const flashnext_hc_tests = @import("flashnext_hc_tests.zig");
@@ -149,6 +150,7 @@ const usage =
     \\  moetile-bench             alternate shared-down plus scatter and direct-slot GPU timings
     \\  nvfp4-fact                NVFP4 experts' prompt tiles with the decode form's sums: its bytes at every row, FP64
     \\  nvfp4-b32                 block 32 experts with csf0 scales: block 16's bytes on equal scales, each form and width
+    \\  nvfp4-nz5                 NVFP4_NZ5's block 32 experts: E2M1's bytes with each +5 a 4 under a scale 1.25x as large
     \\  lane-half                 lane half tiles (MXFP8, BF16): bytes equal to the 64-column tile, FP64, cold-weight time
     \\  flashnext-dense-hc        dense connection weights and FP32 normalization against FP64
     \\  flashnext-hc              Flash Next's own hyper-connection and n-gram glue against float64 (synthetic rows)
@@ -385,6 +387,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "moetile-bench")) return @import("moetile_tests.zig").bench(gpu);
     if (std.mem.eql(u8, cmd, "nvfp4-fact")) return nvfp4_fact_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "nvfp4-b32")) return nvfp4_b32_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "nvfp4-nz5")) return nvfp4_nz5_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "qmmf-prompt")) return @import("qmmf_prompt_tests.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "qmmf-prompt-contract")) return @import("contract_qmmf_prompt.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "qmmf-prompt-repro")) return @import("qmmf_prompt_tests.zig").repro(gpu);

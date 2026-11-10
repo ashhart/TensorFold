@@ -26,6 +26,9 @@ pub const Matrix = struct {
     }
 };
 
+/// The values a code names: E2M1's, or E2M1's with 0b1000 read as +5 in place of -0 (NVFP4_NZ5).
+pub const Values = enum { e2m1, nz5 };
+
 pub const Nvfp4b32Experts = struct {
     mod: module.Module,
     fns: [3]module.Function, // by Epi
@@ -41,6 +44,8 @@ pub const Nvfp4b32Experts = struct {
     pub const symbols = struct {
         pub const decode = [3][:0]const u8{ "tf_nvfp4_decode32_swiglu", "tf_nvfp4_decode32_down_f32", "tf_nvfp4_decode32_down_bf16" };
         pub const prompt = [2][:0]const u8{ "tf_nvfp4_prompt32_swiglu", "tf_nvfp4_prompt32_down" };
+        pub const decode_nz5 = [3][:0]const u8{ "tf_nvfp4_nz5_decode32_swiglu", "tf_nvfp4_nz5_decode32_down_f32", "tf_nvfp4_nz5_decode32_down_bf16" };
+        pub const prompt_nz5 = [2][:0]const u8{ "tf_nvfp4_nz5_prompt32_swiglu", "tf_nvfp4_nz5_prompt32_down" };
     };
 
     /// The prompt entries' warps (32-column blocks) a CTA and matrices a block: SwiGLU gate-up, down.
@@ -54,16 +59,18 @@ pub const Nvfp4b32Experts = struct {
         return stages * stage;
     }
 
-    pub fn load(d: *const driver.Driver, sms: usize) !Nvfp4b32Experts {
+    /// The entries that read codes as `values`: the same sums, the same layout.
+    pub fn load(d: *const driver.Driver, sms: usize, values: Values) !Nvfp4b32Experts {
         if (!kernels.available) return error.BuiltWithoutKernels;
         var mod = try module.Module.load(d, kernels.nvfp4_experts32);
         errdefer mod.unload();
         var e: Nvfp4b32Experts = .{ .mod = mod, .fns = undefined, .resident = undefined, .prompt_fns = undefined };
-        for (symbols.decode, &e.fns, &e.resident) |name, *f, *r| {
+        const nz5 = values == .nz5;
+        for (if (nz5) symbols.decode_nz5 else symbols.decode, &e.fns, &e.resident) |name, *f, *r| {
             f.* = try mod.function(name);
             r.* = @max(1, try f.occupancy(warps * 32, 0)) * sms;
         }
-        for (symbols.prompt, &e.prompt_fns, prompt_parts, prompt_wn) |name, *f, parts, wn| {
+        for (if (nz5) symbols.prompt_nz5 else symbols.prompt, &e.prompt_fns, prompt_parts, prompt_wn) |name, *f, parts, wn| {
             f.* = try mod.function(name);
             try f.allowDynamicShared(promptSmem(parts, wn));
         }

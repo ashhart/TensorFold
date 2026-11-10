@@ -176,6 +176,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Internal: core gains one walk for copying kept prompt states, and GLM's copies on CUDA and Metal go through it, with the same copies in the same order; other families keep their own loops. Nothing a user sees changes (#2215, part of #1293). Thanks to @jschmied.
 
+- GLM-5.3-Flash on CUDA reads `NVFP4_NZ5` checkpoints: csf0_v1's layout with E2M1's second zero, code 0b1000, read as +5, in the same memory as csf0_v1; every other checkpoint loads and runs as before, with the same tokens. Thanks to @Bizuayeu.
+
 - CUDA, opt-in build (`-Dnative-fp-decode`): qmmf's FP4 decode rows use the shared native e2m1 pair decode, `tf_common::e2m1_pairs`, which equals the existing decode on all 2^33 inputs; the default build's 113 fatbins are byte-identical and GB10 decode is level (#2721). Thanks to @jschmied.
 
 - Qwen3.8-27B on Metal: while a request runs, the keep-warm ticker now commits the residency sets' probe each interval, so the first command buffer after a wide prompt pass no longer waits in the kernel (likely for macOS to wire the model again; not traced). On an M5 Ultra with a 14 GiB prompt cache filling memory, five cold 24K- to 64K-token prompts in a row reach their first tokens 3.5% to 5.9% sooner in total; with the cache off, cold prompts are level. Replies are unchanged (#2725, fixes #2724). Thanks to @mrv777.

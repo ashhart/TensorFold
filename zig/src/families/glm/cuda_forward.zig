@@ -52,8 +52,8 @@ pub const Modules = struct {
     quant: quant.Kernels,
     q4: q4.Kernels,
 
-    /// `block32`: a csf0_v1 checkpoint's block 32 experts' image too (experts.wantsBlock32).
-    pub fn load(d: *const cuda.Driver, ctx: *const cuda.Context, block32: bool) !Modules {
+    /// `block32`: a csf0_v1 checkpoint's block 32 experts' image too, for its codes' values (experts.wantsBlock32).
+    pub fn load(d: *const cuda.Driver, ctx: *const cuda.Context, block32: ?cuda.experts32.Values) !Modules {
         const k = cuda.kernels;
         var m: Modules = undefined;
         var n: usize = 0;
