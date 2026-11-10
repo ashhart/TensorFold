@@ -171,8 +171,13 @@ pub fn decodeWithLimits(io: std.Io, a: Allocator, data: []const u8, limits: pict
     const rgb = try a.alloc(u8, w * ht * 3);
     errdefer a.free(rgb);
     const gray = m.components == 1;
-    const rc = f.tj3Decompress8(h, data.ptr, data.len, rgb.ptr, 0, if (gray) pf_gray else pf_rgb);
-    if (rc != 0 and f.tj3GetErrorCode(h) != err_warning) return error.Invalid;
+    const pf: c_int = if (gray) pf_gray else pf_rgb;
+    const out = rgb[0 .. w * ht * @as(usize, if (gray) 1 else 3)];
+    @memset(out, 0x00);
+    if (f.tj3Decompress8(h, data.ptr, data.len, out.ptr, 0, pf) != 0) {
+        if (f.tj3GetErrorCode(h) != err_warning) return error.Invalid;
+        try wroteAll(f, h, a, data, out, pf);
+    }
     if (gray) { // Pillow's L to RGB: each value three times, widened in place from the end
         var i = w * ht;
         while (i > 0) {
@@ -183,6 +188,15 @@ pub fn decodeWithLimits(io: std.Io, a: Allocator, data: []const u8, limits: pict
     const exif: ?[]const u8 = if (m.exif.items.len > 0) m.exif.items else null;
     const o = try tags.orientation(exif, m.xmp, if (m.dpi) .refuse else .ignore);
     return .{ .width = w, .height = ht, .channels = 3, .data = rgb, .orientation = o };
+}
+
+/// A warned decode (TurboJPEG calls a fatal error after a warning a warning) is refused if it left any byte unwritten.
+fn wroteAll(f: Fns, h: ?*anyopaque, a: Allocator, data: []const u8, out: []const u8, pf: c_int) picture.Error!void {
+    const again = try a.alloc(u8, out.len);
+    defer a.free(again);
+    @memset(again, 0xFF);
+    if (f.tj3Decompress8(h, data.ptr, data.len, again.ptr, 0, pf) != 0 and f.tj3GetErrorCode(h) != err_warning) return error.Invalid;
+    if (!std.mem.eql(u8, out, again)) return error.Invalid;
 }
 
 /// Pillow's open: markers up to the first scan (EXIF, XMP, JFIF density, the frame), then on to the end marker.
