@@ -12,7 +12,7 @@ const Glue = @import("model.zig").Glue;
 const Args = extern struct { rows: u32 = 0, width: u32 = 0, heads: u32 = 0, eps: f32 = 0 };
 /// The q, k and v preparation's constants (glue.metal's ll_prep_args).
 const PArgs = extern struct { rows: u32, heads: u32, kv_heads: u32, pos: u32, stride: u32 };
-/// The bf16 row projection's constants (glue.metal's ll_mv_args).
+/// The bf16 row projection's constants (core/bf16_matvec.metal's tf_bf16_mv_args).
 const MArgs = extern struct { rows: u32, n: u32, k: u32, ldy: u32 };
 /// The int4 row projection's constants (glue.metal's ll_q4_args).
 const Q4Args = extern struct { rows: u32, n0: u32, n1: u32, n2: u32, k: u32, ldy: u32 };
