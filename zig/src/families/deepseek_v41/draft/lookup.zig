@@ -12,11 +12,15 @@ pub const bands = [_]struct { least: i64, prior: f64 }{ .{ .least = 0, .prior = 
 pub const prior_weight: f64 = 2.0;
 pub const decay: f64 = 0.85;
 pub const probe_every = 8;
+pub const copy_probe_every = 2;
 pub const probe_match: i64 = 16;
 pub const alt_window = 8;
 pub const candidates = 64;
 pub const extend_to = 64;
 pub const initial_offer: usize = 8;
+/// Conditional per-step continuation floor and slope for active `copy_drafter` span matches (`b >= 1`).
+pub const copy_span_base: f64 = 0.75;
+pub const copy_span_slope: f64 = 0.25;
 /// An image row's virtual id base: never a token to draft
 pub const vbase: u32 = 1 << 24;
 pub const max_rows = depth.slot_rows; // 16
@@ -37,18 +41,32 @@ pub const Settings = struct {
     min_match: i64 = 4,
     max_rows: i64 = max_rows,
 
+    pub const copy_drafter_lookup_refusal = "TF_DSV41_COPY_DRAFTER=1 requires TF_DSV41_LOOKUP to be enabled";
+
+    /// Whether `TF_DSV41_LOOKUP` is enabled (`null` defaults to true; blank turns lookup drafts off).
+    pub fn lookupEnabled(raw: ?[]const u8) !bool {
+        const blank_off = raw != null and std.mem.trim(u8, raw.?, " \t").len == 0;
+        return !blank_off and try @import("sys").environment.value(bool, "TF_DSV41_LOOKUP", raw, true);
+    }
+
+    /// Refuses `TF_DSV41_COPY_DRAFTER=1` when `TF_DSV41_LOOKUP` is off or blank, returning the parsed switches.
+    pub fn checkCopyDrafter(environment: anytype) !struct { copy_drafter: bool, lookup: bool } {
+        const copy_drafter = try @import("sys").environment.value(bool, "TF_DSV41_COPY_DRAFTER", environment.get("TF_DSV41_COPY_DRAFTER"), false);
+        const lookup = try lookupEnabled(environment.get("TF_DSV41_LOOKUP"));
+        if (copy_drafter and !lookup) {
+            if (!@import("builtin").is_test) std.log.err("{s}", .{copy_drafter_lookup_refusal});
+            return error.InvalidEnvironment;
+        }
+        return .{ .copy_drafter = copy_drafter, .lookup = lookup };
+    }
+
     pub fn fromEnv() !Settings {
         var s: Settings = .{};
         const plan = try @import("sys").environment.read(bool, "TF_DSV41_LOOKUP_PLAN", false);
-        s.copy_drafter = try @import("sys").environment.read(bool, "TF_DSV41_COPY_DRAFTER", false);
+        const checked = try checkCopyDrafter(@import("sys").environment.Process{});
+        s.copy_drafter = checked.copy_drafter;
+        s.lookup = checked.lookup;
         s.plan = plan or s.copy_drafter;
-        const lookup = @import("sys").getenv("TF_DSV41_LOOKUP");
-        const blank_off = lookup != null and std.mem.trim(u8, lookup.?, " \t").len == 0;
-        s.lookup = !blank_off and try @import("sys").environment.value(bool, "TF_DSV41_LOOKUP", lookup, true);
-        if (s.copy_drafter and !s.lookup) {
-            if (!@import("builtin").is_test) std.log.err("TF_DSV41_COPY_DRAFTER requires TF_DSV41_LOOKUP to be enabled", .{});
-            return error.InvalidEnvironment;
-        }
         if (std.c.getenv("TF_DSV41_LOOKUP_MIN")) |v| if (std.mem.span(v).len > 0) {
             s.min_match = std.fmt.parseInt(i64, std.mem.trim(u8, std.mem.span(v), " "), 10) catch return error.BadLookupMin;
         };
@@ -297,7 +315,15 @@ pub const Planner = struct {
                 const b = bandOf(length);
                 var qs: [max_rows]f64 = undefined;
                 const q = @min(pOf(r, b), 0.995);
-                for (qs[0..ds.len]) |*x| x.* = q;
+                const probe = if (p.set.copy_drafter)
+                    b >= 1 and r.skipped[b] + 1 >= copy_probe_every
+                else
+                    bands[b].least >= probe_match and r.skipped[b] + 1 >= probe_every;
+                const q_eff = if (p.set.copy_drafter and b >= 1 and (q >= bands[1].prior or probe))
+                    @min(copy_span_base + copy_span_slope * @max(q, bands[b].prior), 0.995)
+                else
+                    q;
+                for (qs[0..ds.len]) |*x| x.* = q_eff;
                 const rate = p.altRate(r);
                 const best = depth.bestK(qs[0..ds.len], p.costs.verify, rate, 1);
                 const copy_yield = best.surplus + rate * p.costs.verify[best.k] - 1.0;
@@ -305,7 +331,7 @@ pub const Planner = struct {
                 var go = best.k > 0 and best.surplus > 0.0 and yield_ok;
                 if (!go) {
                     r.skipped[b] += 1;
-                    go = best.k > 0 and bands[b].least >= probe_match and r.skipped[b] >= probe_every and yield_ok;
+                    go = best.k > 0 and probe and yield_ok;
                 }
                 if (go) {
                     r.skipped[b] = 0;
