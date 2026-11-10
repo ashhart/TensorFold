@@ -53,6 +53,73 @@ The picture case brings the rest, made by the reference pipeline for now:
 Rows are 96 wide: 24 latent channels times a 2 x 2 patch, channel-major, then the patch's row, then its column.
 Patches run in row-major order. The case must be written aligned (Python's `safetensors` writer does this).
 
+## Prompt
+
+`tf-h3-image-prompt` makes a picture case's `text` and `text_tags` from a prompt. It runs on any Apple GPU: no tensor
+units are needed.
+
+```sh
+zig build tf-h3-image-prompt -Dcpu=apple_m1 -Doptimize=ReleaseFast
+zig-out/bin/tf-h3-image-prompt TEXT_ENCODER_DIR MODEL_DIR prompt.txt out/prompt.safetensors
+```
+
+`TEXT_ENCODER_DIR` is MiniMax-H3's `text_encoder/` (Qwen3-VL). `MODEL_DIR` is the MiniMax-H3-Image folder, for its
+`tokenizer/` and `transformer/`. The prompt is used verbatim, except for one trailing line ending: no chat template and
+no system prompt.
+
+1. **Ids.** The prompt is tokenised on its own, with no special tokens added, and cut to its first 4,096 tokens.
+   Every row is tagged 1 (text).
+2. **The text encoder.** Qwen3-VL's text model runs 50 of its 64 layers:
+   - hidden 5,120, with 64 query and 8 KV heads of 128;
+   - q and k RMSNorm, and a SwiGLU of 25,600;
+   - causal attention, with rotary at theta 5,000,000.
+
+   Text positions count up, equal on M-RoPE's three axes. The rows leaving layer index 49 are kept unnormalised. The
+   final norm and layers 50 to 63 are never mapped or run.
+3. **The front end.** `condition_proj` and its bias map each row to 5,376. The two token-refiner blocks then run over
+   every row as one document, with no rotary and no AdaLN, and `token_refiner.final_norm` ends it.
+
+It writes `text` BF16 [rows, 5,376], `text_tags` I32 [rows] and `ids` I32 [rows], aligned. `tf-h3-image` reads the
+first two as a case's own.
+
+**Precision.** Weights are bf16, read in place. Products run in simdgroup matrices with fp32 sums. Norms keep fp32
+statistics, and the softmax and its sums stay in fp32. Each step rounds to bf16 where the reference's bf16 arithmetic
+does:
+
+- the text model's norms round x r before the weight;
+- its rotary turns by bf16 cos and sin;
+- its SiLU rounds once;
+- the refiner rounds as H3's blocks do: x r w at once, then the sigmoid, then the product.
+
+**Edits.** The encoder places a reference's vision rows at its image pads and adds DeepStack's features after layers
+0, 1 and 2. The labels (`Picture i: `), vision blocks, tags (0 for a vision block's tokens) and M-RoPE positions are
+made here. Qwen3-VL's vision tower is not, so an edit's prompt rows still come from the case.
+
+**Gates, fixed before the first run except the whole-run gate below.** `tf-h3-image-prompt selftest [WORK_DIR]`
+writes a tiny synthetic checkpoint and loads it as a real run does. The checkpoint is a 256-wide text model with 4
+query and 2 KV heads, three layers written and two run, and a 384-wide refiner of 2 heads. The selftest checks 70 rows
+against a float64 host reference with the same bf16 rounding points:
+
+- **Each kernel alone:** at least 99.9% of values bit-equal, none further than 1/32 of its row's RMS. Kernels: the
+  product, both norms, heads with rotary, fused heads, causal and full attention, both SiLU gates, the residual add.
+- **Whole runs:** a text prompt; a reference's vision and DeepStack rows at M-RoPE positions; the refiner on the GPU's
+  encoder rows. Each must be within twice a float32-sum host run's distance from float64, in both 1 - cosine and
+  relative error, with cosine at least 0.999. This gate replaced a fixed cosine bound of 0.99999, which the refiner
+  missed at 0.9999884 on a second seed while every kernel alone was bit-exact.
+- **A second run:** byte for byte the same.
+
+On an M3 Ultra, every kernel alone is 99.97% to 100% bit-equal. The whole runs sit 0.7 to 1.03 times as far from
+float64 as the float32-sum run.
+
+`zig build test-h3-image-prompt` runs the prompt rules without a GPU:
+
+- ids per segment, the 4,096 cut, tags, pad rows and vision token counts;
+- M-RoPE positions and the interleaved rotary table;
+- the Qwen copy's size and LANCZOS pixels;
+- the encoder's and refiner's configs, and the text model's tensor prefix.
+
+`zig build compile-h3-image-prompt` compiles the tool without running a shader.
+
 ## Run a case
 
 ```sh
