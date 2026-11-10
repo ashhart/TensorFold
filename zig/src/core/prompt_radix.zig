@@ -100,7 +100,7 @@ pub const Store = struct {
     pub fn limit(s: *Store, limits: Limits) void {
         s.limits = limits;
         while (s.tree.snaps > limits.snaps) s.tree.evict(s.victim(&.{}, null) orelse break);
-        while (s.tree.held_pages > limits.pages) if (!s.tree.evictLeaf()) break;
+        while (s.tree.heldPages() > limits.pages) if (!s.tree.evictLeaf()) break;
     }
 
     /// Whether anything can be kept.
@@ -168,7 +168,7 @@ pub const Store = struct {
         const last = marks_[marks_.len - 1];
         while (true) {
             const new = last / s.rules.page - s.tree.have(prompt[0 .. last + s.rules.lookahead]);
-            if (s.tree.held_pages + new <= s.limits.pages and s.tree.snaps + marks_.len <= s.limits.snaps) return;
+            if (s.tree.heldPages() + new <= s.limits.pages and s.tree.snaps + marks_.len <= s.limits.snaps) return;
             s.tree.evict(s.victim(prompt, from) orelse return);
         }
     }
@@ -254,7 +254,7 @@ pub const Store = struct {
                 t.touch(last.?);
                 return .{ .held = true, .shared = mine.len };
             }
-            if (t.held_pages + (mine.len - got) <= s.limits.pages and t.snaps + 1 <= s.limits.snaps) break;
+            if (t.heldPages() + (mine.len - got) <= s.limits.pages and t.snaps + 1 <= s.limits.snaps) break;
             const v = s.victim(prompt, null) orelse {
                 t.counts.refused += 1;
                 note("kept nothing at {d} tokens: no room", .{at});
@@ -332,7 +332,7 @@ pub const Store = struct {
     pub fn report(s: *const Store, prompt: usize, from: u32, kept: u64) void {
         if (@import("builtin").is_test) return;
         const t = &s.tree;
-        std.log.info("prompt cache: {d} tokens, resumed at {d}, kept {d}; {d} states and {d} pages ({d} MiB) of {d} states and {d} pages (hits {d}, misses {d}, evicted {d}, refused {d}, failed {d})", .{ prompt, from, kept, t.snaps, t.held_pages, t.held() >> 20, s.limits.snaps, s.limits.pages, t.counts.hits, t.counts.misses, t.counts.evicted, t.counts.refused, t.counts.failed });
+        std.log.info("prompt cache: {d} tokens, resumed at {d}, kept {d}; {d} states and {d} pages ({d} MiB) of {d} states and {d} pages (hits {d}, misses {d}, evicted {d}, refused {d}, failed {d})", .{ prompt, from, kept, t.snaps, t.heldPages(), t.held() >> 20, s.limits.snaps, s.limits.pages, t.counts.hits, t.counts.misses, t.counts.evicted, t.counts.refused, t.counts.failed });
     }
 };
 
@@ -344,4 +344,5 @@ fn note(comptime fmt: []const u8, args: anytype) void {
 
 test {
     _ = @import("prompt_radix_test.zig");
+    _ = @import("prompt_radix_parts.zig");
 }
