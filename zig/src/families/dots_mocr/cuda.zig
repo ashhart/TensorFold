@@ -4,6 +4,7 @@ const dense = @import("cuda_dense");
 const cfg = @import("config.zig");
 const fixtures = @import("config_test.zig");
 
+pub const config = @import("config.zig");
 pub const recipe = @import("cuda_recipe.zig");
 pub const weights = @import("cuda_weights.zig");
 pub const tower_weights = @import("cuda_tower_weights.zig");
@@ -39,7 +40,7 @@ test "dots text bytes: embedding, untied head, final norm and 28 layers, the tow
     try std.testing.expectEqual(want, try weights.textBytes(std.testing.allocator, c));
 }
 
-test "dots on CUDA: text only, no reasoning block, its config and tensor refusals worded" {
+test "dots on CUDA: no reasoning block, its config and tensor refusals worded" {
     try std.testing.expect(!native.reasoning and native.keeps_no_prompts);
     // compiles the load and the layer
     const hooks = .{ &native.open, &native.attach, &native.fits, &native.ledgerPool, &native.textWeightBytes };
