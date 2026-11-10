@@ -309,6 +309,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 ## 1.2.6
 
 - Prompt cache: long conversations survive 8 to 16 agents sending follow-ups at once. Redundant states are evicted before each conversation's newest one, admission never evicts a state a queued request resumes, concurrent keeps reserve their room, and the default budget scales with the room left after streams on Metal and unified-memory CUDA (discrete CUDA hosts keep 8 GiB, Flash Next's batch host 16 GiB). On Qwen3.8-27B with DFlash2 at 16 agents, a follow-up's median first token drops from 546 s to 15.9 s on an M3 Ultra and from 105 s to 25.8 s on a GB10, with every reply unchanged (#2699).
+- Qwen3.8-Flash-Next on Strix Halo (gfx1151): a verify window holds eight rows, so a lone stream's copy drafts grow to seven tokens a round while they land, where they stopped at three; rounds shared by several streams keep three-token copies, and MTP drafts stay at three. A lone stream rewriting text it has seen runs about 26% faster; other cells are unchanged, and so are replies. Thanks to @gilby.
 
 - Evidence index: reads saved native capabilities, including unknown and XPU chip labels; advertised facts stay unqualified, and invalid supplied input stops with a bounded error (#2708).
 
