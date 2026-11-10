@@ -4,6 +4,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const pc = @import("prompt_cache.zig");
+const parts = @import("prompt_radix_parts.zig");
 
 pub const Saved = pc.Saved;
 pub const Snapshots = pc.Snapshots;
@@ -50,8 +51,9 @@ pub const Tree = struct {
     ahead: usize,
     root: *Node,
     clock: u64 = 0,
-    /// Pages and snapshots the tree holds.
-    held_pages: usize = 0,
+    /// The pages the tree holds, one pool reference each however many nodes name them.
+    holds: parts.Holds = .{},
+    /// Snapshots the tree holds.
     snaps: usize = 0,
     counts: Counts = .{},
 
@@ -63,6 +65,12 @@ pub const Tree = struct {
 
     pub fn deinit(t: *Tree) void {
         t.drop(t.root);
+        t.holds.deinit(t.gpa);
+    }
+
+    /// Distinct pages the tree holds: what its page limit counts.
+    pub fn heldPages(t: *const Tree) usize {
+        return t.holds.count();
     }
 
     fn drop(t: *Tree, n: *Node) void {
@@ -72,7 +80,7 @@ pub const Tree = struct {
             t.family.vtable.drop(t.family.ptr, e.saved);
             t.gpa.free(e.last);
         }
-        for (n.pages) |id| t.pages.vtable.release(t.pages.ptr, id);
+        for (n.pages) |id| t.holds.drop(t.pages, id);
         t.gpa.free(n.tokens);
         t.gpa.free(n.pages);
         t.gpa.destroy(n);
@@ -163,10 +171,10 @@ pub const Tree = struct {
                 leaf.* = .{ .parent = node, .end = @intCast(np * t.page), .tokens = try t.gpa.dupe(u32, tokens[pi * t.page ..]), .pages = try t.gpa.dupe(u32, mine[pi..]) };
                 errdefer t.gpa.free(leaf.tokens);
                 errdefer t.gpa.free(leaf.pages);
+                try t.holds.reserve(t.gpa, leaf.pages.len); // before the leaf is linked: what follows cannot fail
                 try node.kids.append(t.gpa, leaf);
-                for (leaf.pages) |id| t.pages.vtable.retain(t.pages.ptr, id);
+                for (leaf.pages) |id| t.holds.shareAssumeCapacity(t.pages, id);
                 @memcpy(path[pi..], leaf.pages);
-                t.held_pages += leaf.pages.len;
                 t.touch(leaf);
                 return leaf;
             };
@@ -224,7 +232,6 @@ pub const Tree = struct {
             if (n.kids.items.len > 0 or n.entry != null) return;
             const slot = std.mem.indexOfScalar(*Node, parent.kids.items, n).?;
             _ = parent.kids.swapRemove(slot);
-            t.held_pages -= n.pages.len;
             t.drop(n);
             n = parent;
         }
@@ -260,7 +267,7 @@ pub const Tree = struct {
 
     /// Bytes the tree holds: its pages and its snapshots.
     pub fn held(t: *const Tree) u64 {
-        var n: u64 = t.held_pages * t.pages.bytes;
+        var n: u64 = t.heldPages() * t.pages.bytes;
         sum(t.root, &n);
         return n;
     }
