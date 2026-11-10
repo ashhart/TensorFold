@@ -201,6 +201,10 @@ const Fake = struct {
         live -= 1;
         return 0;
     }
+    fn copy(_: u64, _: ?*const anyopaque, _: usize) callconv(.c) cuda.abi.Result {
+        pending = true;
+        return 0;
+    }
     fn wait(_: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
         return cuda.abi.error_not_ready;
     }
@@ -215,6 +219,7 @@ const Fake = struct {
         d.api.cuMemFree_v2 = free;
         d.api.cuStreamSynchronize = wait;
         d.api.cuCtxSynchronize = context;
+        d.api.cuMemcpyHtoD_v2 = copy;
         return d;
     }
 };
@@ -237,4 +242,20 @@ test "a failed tower load proves its uploads complete by the context before any 
         try std.testing.expectEqual(@as(usize, if (settled) 0 else 2), Fake.freed_pending);
         try std.testing.expectEqual(@as(usize, @intFromBool(settled)), Fake.proofs);
     }
+}
+
+test "load settles its uploads before it frees its buffers when an upload's wait fails" {
+    const a = std.testing.allocator;
+    var d = Fake.driver();
+    var dir = try @import("sparse_checkpoint_test.zig").Dir.init(true, null);
+    defer dir.deinit();
+    Fake.freed_pending = 0;
+    Fake.proofs = 0;
+    const held = Fake.live;
+    try std.testing.expectError(error.NotReady, load(a, std.testing.io, &d, dir.path)); // the first upload's wait
+    try std.testing.expectEqual(held, Fake.live);
+    try std.testing.expectEqual(@as(usize, 0), Fake.freed_pending);
+    try std.testing.expect(Fake.proofs >= 1);
+    try cuda.copy_source.synchronizeContext(&d); // the failed copy's staging, released
+    cuda.copy_source.dropSpares(&d, cuda.copy_source.current());
 }
