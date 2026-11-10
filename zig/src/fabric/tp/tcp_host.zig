@@ -14,7 +14,7 @@ pub fn run(cfg: tp.Config, gpa: std.mem.Allocator) !u8 {
         return 2;
     }
     var link_buf: [256]u8 = undefined;
-    const link = jsonSafe(cfg.link orelse "unnamed link (set TF_TP_LINK)", &link_buf);
+    const link = cfg.linkLabel(&link_buf);
     var b = try tp.Bootstrap.open(cfg);
     defer b.close();
     // the bootstrap's plan link: a socket to the peer already checked for version, world, rank and role
@@ -110,12 +110,4 @@ pub fn run(cfg: tp.Config, gpa: std.mem.Allocator) !u8 {
 fn fail(rank: u32, what: []const u8, k: usize, len: usize) u8 {
     std.debug.print("FAIL tcp-host rank {d}: {s} {d} of {d} bytes differs from the reference\n", .{ rank, what, k, len });
     return 1;
-}
-
-/// The link's name with quotes, backslashes and control bytes replaced, so a RESULT line stays JSON.
-fn jsonSafe(s: []const u8, buf: []u8) []const u8 {
-    var n = @min(s.len, buf.len);
-    if (n < s.len) while (n > 0 and s[n] & 0xc0 == 0x80) : (n -= 1) {}; // a cut name ends on a whole character
-    for (s[0..n], buf[0..n]) |ch, *o| o.* = if (ch == '"' or ch == '\\' or ch < 0x20) '?' else ch;
-    return buf[0..n];
 }
