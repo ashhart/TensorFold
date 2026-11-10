@@ -168,3 +168,10 @@ test "GLM strict env: the open's check refuses a malformed ceiling before ranks,
     _ = env.setenv(name, "2M", 1);
     try t.expectError(error.InvalidEnvironment, startup());
 }
+
+test "TF_GLM_CONTEXT_CEILING's largest window is the last whose slots, verify rows included, keep i32 positions" {
+    const capacity = @import("cuda_native.zig").capacity;
+    const most = e.rule(@import("cuda_env.zig").ceiling_switch).max;
+    try t.expect(capacity(@intCast(most)) <= @as(usize, std.math.maxInt(i32)) + 1);
+    try t.expect(capacity(@intCast(most + 1)) > @as(usize, std.math.maxInt(i32)) + 1);
+}
