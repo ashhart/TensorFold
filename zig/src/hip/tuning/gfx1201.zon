@@ -16,9 +16,11 @@
 // on plain products of up to 32 rows (35B o_proj at 16 rows 20 us, rows64 60, dot2's kp3 63; at 1-2 rows kp3's 17
 // against 19 is what the family rule gives up) and on routed plans of few rows an item (Flash Next's gate_up and down
 // at 128 tokens 4.2 ms, rows32 6.8, kp3 7.4). The tuner's uniform router has it ahead up to 6 rows an item; Flash
-// Next's own router fills some items more, and served prompts were faster with rows32 at its 1,024-token chunks (5.7
+// Next's own router fills some items more, and served prompts were faster with rows32 at its 1,024-token chunks (5.9
 // rows an item), so the bound is 5.5. rows64 beats matrix12 by 2-14 % on plain products up to 64 rows, and rows32
-// takes routed plans of more rows an item.
+// takes routed plans of more rows an item, up to 6.3 pairs; past that rows64 decodes an item's weights once for
+// its rows (Flash Next served at 2,048-row chunks, 6.8 pairs an item: 8K prompt 1,826 -> 1,868 tok/s; at 1,024-row
+// chunks, 5.9 pairs, the two were even).
 // The dot2 rows below serve what the matrix tiles do not fit (unaligned words or tables) and runs with the matrix
 // cores off. Their bounds are gfx1100's, which `zig build hip-affine-tune` measures against on a gfx1201 card, but
 // the routed K-parallel tile's: its items are the tuner's, its pairs per item lowered from the tuner's 4.14 to 3.5 by
@@ -46,7 +48,8 @@
         .{ .id = "mlx.project.prefill.rows64", .cost = 0.5 },
         .{ .id = "mlx.project.prefill.matrix12", .cost = 0.6 },
         .{ .id = "mlx.routed.prefill.rows16", .cost = 0.4, .pairs_per_item = 5.5 },
-        .{ .id = "mlx.routed.prefill.rows32", .cost = 0.5 },
+        .{ .id = "mlx.routed.prefill.rows32", .cost = 0.5, .pairs_per_item = 6.3 },
+        .{ .id = "mlx.routed.prefill.rows64", .cost = 0.55 },
         .{ .id = "mlx.routed.prefill.matrix12", .cost = 0.6 },
         // else the K-parallel tiles for a few rows or a short plan, the dot2 GEMM tile past them
         .{ .id = "mlx.project.prefill.kp0", .cost = 1, .rows = 2, .routed = false },

@@ -377,6 +377,7 @@ const routed_item = [_]Entry{
 /// gfx12's few-row matrix blocks: routed items on 32 rows, plain on 64, either on 16 (longer plain: fillTier).
 const rows_entries = [_]Entry{
     entry(.routed, .prefill, "rows32", .{ .family = .matrix12, .fits = &fitsPrefillItem, .launch = launchRows(1), .caps = &matrix12, .policy = &matrixOn }),
+    entry(.routed, .prefill, "rows64", .{ .family = .matrix12, .fits = &fitsPrefillItem, .launch = launchRows(0), .caps = &matrix12, .policy = &matrixOn }),
     entry(.project, .prefill, "rows64", .{ .family = .matrix12, .fits = rowsFit(64), .launch = launchRows(0), .caps = &matrix12, .policy = &matrixOn, .rounds = .always }),
     entry(.routed, .prefill, "rows16", .{ .family = .matrix12, .fits = &fitsPrefillItem, .launch = launchRows(rows12.kp_tier), .caps = &matrix12, .policy = &matrixOn }),
     entry(.project, .prefill, "rows16", .{ .family = .matrix12, .fits = rowsFit(32), .launch = launchRows(rows12.kp_tier), .caps = &matrix12, .policy = &matrixOn, .rounds = .always }),
@@ -614,15 +615,15 @@ test "gfx1201 takes its matrix tiles for a prompt at every row count, the dot2 t
         shape.m = w[0];
         try std.testing.expect(std.mem.endsWith(u8, r.select(on, .mlx, .project, .prefill, shape).?.id, w[1]));
     }
-    // Flash Next's gate and up as the launch passes it: 10 slots a row
-    for ([_]struct { u32, []const u8 }{ .{ 1, "rows16" }, .{ 128, "rows16" }, .{ 1024, "rows32" }, .{ 1025, "matrix12" }, .{ 2048, "matrix12" } }) |w| {
-        const pairs = w[0] * 10;
-        const routed: Shape = .{ .m = w[0], .n = 1280, .k = 2560, .bits = 2, .group = 32, .fp16 = false, .items = @min(pairs, 512) + pairs / 8, .plan_pairs = pairs };
+    // Flash Next's gate and up as launched (11 slots a row, 513 experts, m = @min(tile, rows)): 2.0-6.8 pairs an item
+    for ([_]struct { u32, []const u8 }{ .{ 1, "rows16" }, .{ 128, "rows16" }, .{ 1024, "rows32" }, .{ 2048, "rows64" } }) |w| {
+        const pairs = w[0] * 11;
+        const routed: Shape = .{ .m = @min(w[0], 128), .n = 1280, .k = 2560, .bits = 2, .group = 32, .fp16 = false, .items = @min(pairs, 513) + pairs / 8, .plan_pairs = pairs };
         try std.testing.expect(std.mem.endsWith(u8, r.select(on, .mlx, .routed, .prefill, routed).?.id, w[1]));
     }
-    // a router that fills its items past 6 rows each: the 32-row block
-    const full: Shape = .{ .m = 1024, .n = 1280, .k = 2560, .bits = 2, .group = 32, .fp16 = false, .items = 512, .plan_pairs = 10240 };
-    try std.testing.expect(std.mem.endsWith(u8, r.select(on, .mlx, .routed, .prefill, full).?.id, "rows32"));
+    // a router that fills its items to 20 rows each: the 64-row block
+    const full: Shape = .{ .m = 128, .n = 1280, .k = 2560, .bits = 2, .group = 32, .fp16 = false, .items = 512, .plan_pairs = 10240 };
+    try std.testing.expect(std.mem.endsWith(u8, r.select(on, .mlx, .routed, .prefill, full).?.id, "rows64"));
     // words the matrix tiles cannot load wide, or the matrix cores switched off: the dot2 tiles by rows
     shape.m = 2;
     shape.words_aligned = false;
