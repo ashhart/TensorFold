@@ -4,6 +4,7 @@ This page shows which speed and memory optimization applies to which model famil
 A change proven on one family should be ported to the others, not invented again, so each row names the PR that did
 it first and the families still to do. The cross-family parts live in shared helpers, so a port is mostly the family's
 own hook on top of them. Update a cell in the same PR that changes it.
+How to approach a speed change, from bounding it to measuring it, is in [optimizing](optimizing.md).
 
 Shared helpers that hold the cross-family parts:
 
