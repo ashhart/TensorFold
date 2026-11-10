@@ -90,6 +90,72 @@ float32. The text encoder is MiniMax-H3's Qwen3-VL; its 50th layer's rows are th
 MiniMax-H3-Image Community License, which excludes the European Union, the United Kingdom, the Republic of Korea and
 the United States of America. Read it before use.
 
+## Edit encoder
+
+An edit's reference reaches the transformer as clean latent rows made by the VAE's CNN encoder. `tf-h3-image-encoder`
+makes them on Metal in fp32, on any Apple GPU; no tensor units are needed. Its kernels are compiled from source when it
+starts, so it builds without the Metal compiler.
+
+- **The VAE copy.** The reference is read upright in RGB, with any alpha dropped. A short edge already in 1024..2048
+  keeps the original pixels. Otherwise the picture is scaled to the nearer bound, each side snapped to 32 (halves to
+  even) and resampled with Pillow's LANCZOS: 512x768 becomes 1024x1536, 3000x4000 becomes 2048x2720, and 1536x2048 is
+  kept. A side under 32 pixels, or a copy over 64 MP, is refused.
+- **The input.** Bytes / 255, then ImageNet's mean and std, in fp32, cropped top-left to multiples of 16 pixels.
+- **The network.**
+  - Each 3x3x3 causal convolution runs as the 2D convolution of its last time slice, reflect-padded by one.
+  - `conv_in` maps 3 channels to 128.
+  - Six levels of two ResNet blocks follow, at widths 128, 256, 256, 512, 512 and 1,024, with `nin_shortcut` where the
+    width changes.
+  - Levels 0 to 3 end with a stride-2 downsample that reflects the right and bottom edges by one pixel.
+  - Then GroupNorm(32, eps 1e-6) with SiLU, `conv_out` (1,024 to 48) and `quant_conv`.
+  - Every tensor name and shape is checked against the checkpoint's header before anything loads.
+- **Tiles.** 256-pixel tiles overlapping by at least 64, split as the decoder splits. Each tile's 48 moment channels
+  are blended in latent cells (overlap / 16) with the decoder's rule.
+- **The rows.**
+  - The posterior sample, mean + exp(0.5 clamp(logvar, -30, 20)) x noise, is rounded to fp16.
+  - It is normalised with the latent statistics and cropped top-left to the even grid: 1024x1024 gives 64 x 64, and
+    1050x1000 gives 62 rows by 64 columns.
+  - Then it is patchified.
+  - Anchor rows are 0.999 x clean + (1 - 0.999 in fp32) x the anchor noise.
+- **The noise.** One CPU torch generator per request (`moss_image/noise.zig`, its draws chained), drawn in order: the
+  target, each reference's anchor noise, then each reference's posterior noise on its full grid.
+
+```sh
+zig build tf-h3-image-encoder -Dcpu=apple_m1 -Doptimize=ReleaseFast
+zig-out/bin/tf-h3-image-encoder MODEL_DIR reference.png SEED out/ref [CANVAS]
+zig-out/bin/tf-h3-image-encoder selftest
+```
+
+It writes:
+
+- `out/ref.rows.f32`: the clean rows [rows, 96];
+- `out/ref.moments.f32`: the blended moments [48, h, w], before sampling;
+- `out/ref.grid.json`.
+
+With `CANVAS` (WxH), the generator first draws the target's noise and this reference's anchor noise, as a
+one-reference edit does, and `out/ref.anchors.f32` is written too. Without it, the posterior's noise is the seed's
+first draw.
+
+`selftest` runs each kernel on small synthetic weights against a float64 host reference and exits 1 on a miss. It
+covers:
+
+- a reflect-padded 3x3 convolution and the stride-2 downsample;
+- a 1x1 convolution with a residual;
+- GroupNorm with SiLU;
+- both kinds of ResNet block;
+- a small encode over uneven tiles, run twice.
+
+Its gates, measured on an M3 Ultra:
+
+| Check | Gate | Measured |
+|---|---|---|
+| Each layer, worst error over the largest value | 1e-5 | 2e-7 to 9e-7 |
+| The tiled moments | 1e-4 | 1.6e-6 |
+| The fp16 samples | one fp16 step at the largest value | within it |
+| Repeat runs | bit-identical | bit-identical |
+
+A 1024 x 1024 reference at the released widths encodes in 0.6 s.
+
 ## Not done
 
 - The prompt's rows come from the case. The text encoder (Qwen3-VL, 50 of 64 layers), `condition_proj` and the token
