@@ -23,17 +23,17 @@ __device__ __forceinline__ void rows(const __nv_bfloat16* q, const uint8_t* kc, 
     const __nv_bfloat16* q, const uint8_t* k, const uint8_t* v, const float* ks, const float* vs, \
     __nv_bfloat16* out, int p0, int rows, int heads, int kvheads, int group, float scale, int capacity
 #define TF_COMPACT_VALUES q,k,v,ks,vs,out,p0,rows,heads,kvheads,group,scale,capacity
-#define TF_COMPACT_DEFINE(TAG,W,H,S) \
-extern "C" __global__ __launch_bounds__(32*W,1) void tf_compact_##TAG##_whole(TF_COMPACT_ARGS) { \
+#define TF_COMPACT_DEFINE(WHOLE_NAME,PAGED_NAME,W,H,S) \
+extern "C" __global__ __launch_bounds__(32*W,1) void WHOLE_NAME(TF_COMPACT_ARGS) { \
     tf_compact_attention::rows<W,H,S,false>(TF_COMPACT_VALUES,nullptr,0,1); \
 } \
-extern "C" __global__ __launch_bounds__(32*W,1) void tf_compact_##TAG##_paged(TF_COMPACT_ARGS, \
+extern "C" __global__ __launch_bounds__(32*W,1) void PAGED_NAME(TF_COMPACT_ARGS, \
     const int* pages, long long page_bytes, int page_tokens) { \
     tf_compact_attention::rows<W,H,S,true>(TF_COMPACT_VALUES,pages,page_bytes,page_tokens); \
 }
-TF_COMPACT_DEFINE(w4h2s1,4,2,1)
-TF_COMPACT_DEFINE(w2h2s1,2,2,1)
-TF_COMPACT_DEFINE(w4h1s1,4,1,1)
-TF_COMPACT_DEFINE(w8h2s1,8,2,1)
+TF_COMPACT_DEFINE(tf_compact_w4h2s1_whole,tf_compact_w4h2s1_paged,4,2,1)
+TF_COMPACT_DEFINE(tf_compact_w2h2s1_whole,tf_compact_w2h2s1_paged,2,2,1)
+TF_COMPACT_DEFINE(tf_compact_w4h1s1_whole,tf_compact_w4h1s1_paged,4,1,1)
+TF_COMPACT_DEFINE(tf_compact_w8h2s1_whole,tf_compact_w8h2s1_paged,8,2,1)
 
 #endif
