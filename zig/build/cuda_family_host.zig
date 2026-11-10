@@ -191,6 +191,9 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     const live_run = b.addRunArtifact(b.addTest(.{ .root_module = live }));
     live_run.has_side_effects = true;
     b.step("test-qwen35-live-host", "Live CUDA launch buckets and startup warmups without devices").dependOn(&live_run.step);
+    const mtp_coupled = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"MTP coupled:"} }));
+    b.step("test-qwen35-mtp-coupled-host", "Target-coupled keyed-Gumbel MTP draft draws across solo, tree and batched rounds without devices").dependOn(&mtp_coupled.step);
+    step.dependOn(&mtp_coupled.step);
 }
 
 pub fn registerCopyFamilies(b: *std.Build, native: *std.Build.Module, step: *std.Build.Step) void {

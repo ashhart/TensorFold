@@ -30,6 +30,8 @@ test {
     _ = native;
     _ = native_moe;
     _ = mtp;
+    _ = @import("cuda_mtp_draw.zig");
+    _ = @import("cuda_mtp_coupled_test.zig");
     _ = @import("cuda_mtp_bf16.zig");
     _ = @import("cuda_mtp_batch.zig");
     _ = config;
