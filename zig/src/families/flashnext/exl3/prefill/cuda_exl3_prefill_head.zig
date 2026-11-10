@@ -24,7 +24,7 @@ const warmTiles = tiles.warmTiles;
 
 /// The hook in cuda_mtp_ops.zig `forwardHead` (a lane's prompt chunk through the MTP head, after the main pass kept
 pub fn head(comptime Tri: type, o: anytype, d: *@import("../../cuda_mtp.zig").Draft, next: []const u32, rows: u64, scores: bool) !bool {
-    const op = opts();
+    const op = try opts();
     const n = next.len;
     // A paired window hands the head up to two deep chunks of rows: it runs them as two slices (headSplit).
     if (!scores and state.deep != null and n > state.deep.?.rows) {
@@ -56,7 +56,7 @@ test "exl3: a paired window's head splits into two deep slices that cannot decli
 }
 
 fn headSlice(comptime Tri: type, o: anytype, d: *@import("../../cuda_mtp.zig").Draft, next: []const u32, rows: u64, scores: bool) !bool {
-    const op = opts();
+    const op = try opts();
     const n = next.len;
     if (!op.enabled or !headEnabled() or scores or n < op.min_rows or d.media != null) return false;
     const e = o.e;

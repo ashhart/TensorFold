@@ -1,13 +1,13 @@
 //! Deep-prefill state: options, stats, the chunk's device and pinned layouts, and the buffers one engine owns.
 
 const std = @import("std");
+const environment = @import("sys").environment;
 const cuda = @import("cuda");
 const batch = @import("../../cuda_batch.zig");
 const wt = @import("../../cuda_prompt_wt.zig");
 const pk = @import("cuda_exl3_prefill_k.zig");
 const ring_ = @import("cuda_exl3_prefill_ring.zig");
 const history_ = @import("cuda_exl3_prefill_history.zig");
-const window_ = @import("exl3_prefill_window.zig");
 const leaves = @import("cuda_exl3_prefill_leaves.zig");
 
 const dims = wt.dims;
@@ -49,26 +49,26 @@ pub const Options = struct {
     snap_grid: bool = true,
 };
 
-pub fn optionsFromEnv() Options {
+pub fn optionsFromEnv() environment.Error!Options {
     var o: Options = .{};
-    if (std.c.getenv("TF_FLASHNEXT_EXL3_PREFILL")) |v| o.enabled = !std.mem.eql(u8, std.mem.span(v), "0");
-    if (std.c.getenv("TF_FLASHNEXT_EXL3_PREFILL_ROWS")) |v| {
-        o.rows = std.fmt.parseInt(usize, std.mem.span(v), 10) catch o.rows;
-        o.serve_rows = o.rows;
+    o.enabled = try environment.read(bool, "TF_FLASHNEXT_EXL3_PREFILL", o.enabled);
+    if (try environment.read(?usize, "TF_FLASHNEXT_EXL3_PREFILL_ROWS", null)) |rows| {
+        o.rows = rows;
+        o.serve_rows = rows;
     }
-    if (std.c.getenv("TF_FLASHNEXT_EXL3_PREFILL_REDUCED_BRANCH")) |v| o.reduced_branch = std.mem.eql(u8, std.mem.span(v), "1");
-    o.two_chunk = window_.enabled(if (std.c.getenv("TF_FLASHNEXT_EXL3_PREFILL_TWO_CHUNK")) |value| std.mem.span(value) else null);
-    if (std.c.getenv("TF_FLASHNEXT_EXL3_PREFILL_RING")) |v| o.ring = !std.mem.eql(u8, std.mem.span(v), "0");
-    if (std.c.getenv("TF_FLASHNEXT_EXL3_PREFILL_RING_AHEAD")) |v| o.ring_ahead = std.fmt.parseInt(usize, std.mem.span(v), 10) catch o.ring_ahead;
-    if (std.c.getenv("TF_FLASHNEXT_EXL3_PREFILL_SNAP_GRID")) |v| o.snap_grid = !std.mem.eql(u8, std.mem.span(v), "0");
+    o.reduced_branch = try environment.read(bool, "TF_FLASHNEXT_EXL3_PREFILL_REDUCED_BRANCH", o.reduced_branch);
+    o.two_chunk = try environment.read(bool, "TF_FLASHNEXT_EXL3_PREFILL_TWO_CHUNK", o.two_chunk);
+    o.ring = try environment.read(bool, "TF_FLASHNEXT_EXL3_PREFILL_RING", o.ring);
+    o.ring_ahead = try environment.read(usize, "TF_FLASHNEXT_EXL3_PREFILL_RING_AHEAD", o.ring_ahead);
+    o.snap_grid = try environment.read(bool, "TF_FLASHNEXT_EXL3_PREFILL_SNAP_GRID", o.snap_grid);
     return o;
 }
 
 /// The options every call reads (a test may change them between calls).
 pub var options: ?Options = null;
 
-pub fn opts() Options {
-    if (options == null) options = optionsFromEnv();
+pub fn opts() environment.Error!Options {
+    if (options == null) options = try optionsFromEnv();
     return options.?;
 }
 
@@ -290,7 +290,6 @@ pub fn upload(st: cuda.Stream, dst: u64, bytes: []const u8) !void {
     try st.d.check(st.d.api.cuMemcpyHtoDAsync_v2(dst, bytes.ptr, bytes.len, st.handle), "cuMemcpyHtoDAsync");
 }
 
-pub fn profile() bool {
-    const v = std.c.getenv("TF_FLASHNEXT_PROFILE") orelse return false;
-    return std.mem.eql(u8, std.mem.span(v), "1");
+pub fn profile() environment.Error!bool {
+    return environment.read(bool, "TF_FLASHNEXT_PROFILE", false);
 }

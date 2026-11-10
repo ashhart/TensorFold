@@ -65,8 +65,8 @@ pub fn release() void {
 }
 
 /// The server's sizing hook (cuda_lanes_load.zig, before the pools take the free memory): the deep chunk's buffers for
-pub fn reserveFor(e: *prompt.Engine, context: usize, tp: usize) void {
-    const o = opts();
+pub fn reserveFor(e: *prompt.Engine, context: usize, tp: usize) !void {
+    const o = try opts();
     if (!o.enabled or (tp != 1 and tp != 2) or e.n_layers != wt.layers_n) return;
     for (e.layers[0..e.n_layers]) |*l| {
         const x = l.exl3 orelse return;
@@ -80,18 +80,19 @@ pub fn reserveFor(e: *prompt.Engine, context: usize, tp: usize) void {
 }
 
 /// A serving step's batched `base` rows, or the deep chunk when this engine holds deep buffers.
-pub fn stepRows(e: *const prompt.Engine, base: usize, draft_rows: ?usize) usize {
+pub fn stepRows(e: *const prompt.Engine, base: usize, draft_rows: ?usize) !usize {
     var n = base;
-    if (state.deep) |dp| if (dp.owner == @as(*const anyopaque, e) and opts().enabled) {
-        n = @max(n, stepCapacity(dp.rows, opts().two_chunk and dp.second != null));
+    const o = try opts();
+    if (state.deep) |dp| if (dp.owner == @as(*const anyopaque, e) and o.enabled) {
+        n = @max(n, stepCapacity(dp.rows, o.two_chunk and dp.second != null));
     };
     if (draft_rows) |r| n = @min(n, @max(r, 1));
     return n;
 }
 
 /// The grid the prompt cache keeps states on: the serving step's rows, or 0 (any row) with the option off.
-pub fn snapGrid(e: *const prompt.Engine, base: usize) u32 {
-    return if (opts().snap_grid) @intCast(stepRows(e, base, null)) else 0;
+pub fn snapGrid(e: *const prompt.Engine, base: usize) !u32 {
+    return if ((try opts()).snap_grid) @intCast(try stepRows(e, base, null)) else 0;
 }
 
 pub fn stepCapacity(rows: usize, paired: bool) usize {
@@ -99,10 +100,10 @@ pub fn stepCapacity(rows: usize, paired: bool) usize {
 }
 
 /// Rows of streams a lane's MTP draft keeps (cuda_lanes.zig, cuda_lanes_load.zig): a whole step's.
-pub fn draftRows(e: *const prompt.Engine) usize {
-    var n = stepRows(e, e.chunk, null);
+pub fn draftRows(e: *const prompt.Engine) !usize {
+    var n = try stepRows(e, e.chunk, null);
     if (state.deep) |dp| if (dp.owner == @as(*const anyopaque, e)) {
-        const o = opts();
+        const o = try opts();
         if (o.two_chunk and o.enabled and o.ring and !o.reduced_branch and dp.world == 2) {
             n = @max(n, stepCapacity(dp.rows, true));
         }
@@ -158,7 +159,7 @@ pub fn reserveAt(gpa: std.mem.Allocator, d: *const cuda.Driver, owner: *const an
 }
 
 pub fn reserveTwoChunk(d: *const cuda.Driver, free: u64, protected: u64) !u64 {
-    const o = opts();
+    const o = try opts();
     if (!o.two_chunk or !o.enabled or !o.ring or o.reduced_branch) return 0;
     const dp = state.deep orelse return 0;
     if (dp.dev.d != d or dp.world != 2 or dp.rows > window_.max_rows) return 0;
@@ -254,7 +255,7 @@ var tp_logged = false;
 
 /// The hook (Engine.forward): runs `ids` from `seq.fed` and returns true, or returns false having done nothing.
 pub fn forward(e: *prompt.Engine, comptime Tri: type, tri: Tri, seq: *prompt.Seq, ids: []const u32, hooks: batch.Hooks) !bool {
-    const o = opts();
+    const o = try opts();
     if (!applies(e, seq, ids, hooks, o)) return false;
     if (ids.len == 0 or seq.fed + ids.len > seq.cap) return error.UnexpectedTensor;
     const s = try e.reserve(@min(ids.len, e.chunk));
