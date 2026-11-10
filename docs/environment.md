@@ -18,6 +18,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_STARTUP_RECEIPT` | Exactly `0` or `1`; default off. `1` writes the startup and first completion receipts |
 | `TF_CUDA_DEVICE` | Whole ordinal 0 through 4294967295, or empty; default 0 |
 | `TF_CUDA_SEGMENTS` | Whole count 1 through 4, or empty; default 1 |
+| `TENSORFOLD_CUDA_KERNELS` | A path without control characters, used as given: a captured kernel set's folder, or `native` for the engine's own kernels. A family that runs only on the engine's own kernels (Qwen3 among them) refuses any other value; unset or blank picks the engine's default |
 | `TF_CUDA_CARVEOUT` | Exactly `0` or `1`; default off |
 | `TF_CUDA_CARVEOUT_MIB` | Positive whole MiB count whose byte size fits the platform, or empty for 1792 MiB |
 | `TF_Q27_COPY_ROWS` | Whole u32 count; zero disables copied rows; default 48 |
