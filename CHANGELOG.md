@@ -43,6 +43,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Tests: the sessions-writes mixed load holds its pool to one slot's capacity, so it exercises spills to the tier (#2731). Thanks to @garvrao80.
 
+- Flash Next EXL3 selects host planning, eager device planning or CUDA graph replay with `TF_FLASHNEXT_EXL3_GRAPH=0`, `eager` or `1`. Engine teardown clears its capture-failure history without retiring another engine's graphs or retries (#1445).
+
 - The core host KV tier rejects zero page bytes, partial host pages, zero frames and zero logical pages before allocating (#1501). Thanks to @BlivionIaG.
 
 - Flash Next's opt-in EXL3 host K/V tier admits the bounded device working set, frees the pinned store on failed kernel load, refuses non-EXL3 scratch before allocation, takes TP rank from its collective and rejects snapshot restoration while another lease pins its pages. The lane host's single ledger uses the active pool directly, without copying ownership (#1522).
@@ -801,8 +803,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - GLM-5.3-Flash on CUDA reads csf0_v1 checkpoints, whose NVFP4 routed experts carry their scales at block 32 as a base plus a 4-bit offset, saving about 13 GiB across a TP=2 pair with the same tokens; block-16 checkpoints are unchanged (#2041). Thanks to @Bizuayeu.
 
 - In one-call tool mode, a stream sends prose held after a hidden call envelope at the finish, so the streamed content equals the whole reply; other streams are unchanged (#2049). Thanks to @devopsfortunato.
-
-- Flash Next EXL3 selects host planning, eager device planning or CUDA graph replay with `TF_FLASHNEXT_EXL3_GRAPH=0`, `eager` or `1`. Engine teardown clears its capture-failure history without retiring another engine's graphs or retries (#1445).
 
 - GLM tool calls stream their arguments as the model writes them, as Qwen-style XML calls already do, and the joined pieces equal the whole reply's arguments (#2050). Thanks to @devopsfortunato.
 - HIP: Qwen 3.5 loads BF16 checkpoints with their Hugging Face tensor names and runs the BF16 projections through rocBLAS, the base for Clef-Flash. MLX checkpoints are unchanged (#2046). Thanks to @laudney.
