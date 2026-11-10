@@ -82,7 +82,7 @@ pub const M = struct {
     pub const Drafter = Fake;
 };
 
-const Chunk = struct { start: u64, rows: u32 };
+pub const Chunk = struct { start: u64, rows: u32 };
 const Tail = struct { start: u64, rows: u32 };
 
 /// The lane target as the adapter and Drafted see it: slots, the prompt pass's chunks, the last verify's windows.
@@ -173,7 +173,7 @@ pub const Private = struct {
     chain_par: [4][16]i32 = undefined,
     chain_n: [4]u32 = @splat(0),
 
-    fn prefill(p: *Private, s: *Stream, slot: u32, at: u64) !void {
+    pub fn prefill(p: *Private, s: *Stream, slot: u32, at: u64) !void {
         var skip: u64 = (s.prompt_len -| M.WIN) -| at;
         for (p.h.chunks) |c| { // onTaps, a call per chunk
             try p.d.use(slot);

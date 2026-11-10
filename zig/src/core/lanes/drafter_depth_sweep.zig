@@ -89,11 +89,14 @@ fn run(gpa: std.mem.Allocator, h: Harness, n: usize, block: u32, s: Schedule, ro
     for (0..rounds) |i| {
         const at: Where = .{ .depth = s.at(block, i), .round = i, .prompt = n };
         const d = at.depth;
+        // facts().depth again every round, not only for the block: a drafter may grow it after a hold
+        const f = c.drafter.facts();
+        if (f.depth > block) return fail(error.DepthOverBlock, at, "facts().depth {d} over block", .{f.depth});
         const ref = try reference(h, c, r, block, at, deep, want);
         try c.drafter.hold(&.{holdAt(c, r, d)});
         c.drafter.held(&.{c.stream}, &.{got[0..d]}) catch |e| return fail(error.HeldFewer, at, "{s}", .{@errorName(e)});
         if (!std.mem.eql(u32, ref, got[0..d])) return differ(error.DraftsDiffer, at, ref, got[0..d]);
-        // the count contract: exactly d held; at d == block, never more than the block
+        // the count contract (Drafter.held): exactly d held; Facts.slack deepens the asked depth, not the held count
         if (c.drafter.held(&.{c.stream}, &.{got[0 .. d + 1]})) |_| {
             return fail(error.HeldMore, at, "{d} drafts held", .{d + 1});
         } else |_| {}

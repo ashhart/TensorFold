@@ -20,6 +20,8 @@ const Harness = struct {
     adapter: ad.Adapter(x.M, x.Host) = undefined,
     stream: Stream = undefined,
     prompt: []u32 = &.{},
+    chunk: [1]x.Chunk = undefined, // the prompt pass's one chunk, for the private path's prefill
+    prefilled: bool = false,
 
     fn harness(h: *Harness) sweep.Harness {
         return .{ .ctx = h, .begin = begin, .verify = verify, .want = want, .end = end };
@@ -35,6 +37,7 @@ const Harness = struct {
         h.ref = .{};
         h.host = .{};
         h.ref_host = .{};
+        h.prefilled = false;
         h.prompt = try gpa.alloc(u32, n);
         for (h.prompt, 0..) |*t, i| t.* = @intCast((i * 7 + 3) % 97);
         h.stream = try Stream.init(gpa, .{ .id = "s", .prompt = h.prompt, .max_new = 64, .sampling = h.sampling });
@@ -63,6 +66,7 @@ const Harness = struct {
     /// main's private drafting path for one stream at this depth, its context at the round's position.
     fn want(ctx: *anyopaque, r: sweep.Round, out: []u32) anyerror!void {
         const h = self(ctx);
+        if (!h.prefilled) try h.samePrompt();
         h.ref.ends[SLOT] = @intCast(r.position - 1);
         var p: x.Private = .{ .d = &h.ref, .h = &h.ref_host };
         const depth: u32 = @intCast(out.len);
@@ -70,6 +74,17 @@ const Harness = struct {
         try p.draft(&.{x.request(&.{&h.stream}, q)});
         if (p.chain_n[SLOT] != out.len) return error.ReferenceShort;
         @memcpy(out, p.chain[SLOT][0..out.len]);
+    }
+
+    /// Before the first hold: the adapter's prompt calls (skip past WIN, then taps) are the private prefill's.
+    fn samePrompt(h: *Harness) !void {
+        h.prefilled = true;
+        h.chunk = .{.{ .start = 0, .rows = @intCast(h.prompt.len) }};
+        h.ref_host.chunks = &h.chunk;
+        var p: x.Private = .{ .d = &h.ref, .h = &h.ref_host };
+        try p.prefill(&h.stream, SLOT, 0);
+        try std.testing.expectEqualSlices(u64, h.ref.log.items, h.fake.log.items);
+        h.ref.log.clearRetainingCapacity();
     }
 
     fn end(ctx: *anyopaque) void {
@@ -84,7 +99,8 @@ const Harness = struct {
 test "draft sources: XPU DFlash2 holds exactly each depth's drafts, main's private path's, greedy and sampled" {
     for ([_]?lanes.Sampling{ null, .{ .seed = 7, .temperature = 0.8 } }) |s| {
         var h: Harness = .{ .sampling = s };
-        const r = try sweep.sweep(gpa, h.harness(), .{ .prompts = &.{ 6, 40, 2100 } }); // 2100: rows past WIN skipped
+        // 2100: rows past WIN skipped as main's prefill skips them (samePrompt compares the drafter calls)
+        const r = try sweep.sweep(gpa, h.harness(), .{ .prompts = &.{ 6, 40, 2100 } });
         // three prompts x (depths 1..7 + one zig-zag run) x 12 rounds; drafts 12 x 28 fixed + 48 zig-zag a prompt
         try std.testing.expectEqual(sweep.Report{ .runs = 24, .rounds = 288, .drafts = 3 * (12 * 28 + 48) }, r);
     }
