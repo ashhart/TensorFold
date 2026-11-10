@@ -120,7 +120,7 @@ const kolibri_layer_tests = @import("kolibri_layer_tests.zig");
 const aot_fallback_tests = @import("aot_fallback_tests.zig");
 const qwen_draft_frames = @import("qwen_draft_frames.zig");
 
-const usage = @import("main_usage.zig").usage;
+const usage = @import("runner_usage.zig").text;
 
 pub fn main(init: std.process.Init) !u8 {
     const args = try init.minimal.args.toSlice(init.arena.allocator());

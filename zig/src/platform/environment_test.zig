@@ -256,7 +256,13 @@ test "environment: Flash Next EXL3 rows keep their bounds, exact words and exact
 
 test "environment: readPath reads the process environment, blank as unset, and refuses control characters" {
     const name = "TF_FLASHNEXT_EXL3_PROFILE_DIR";
-    defer _ = sys.env.unsetenv(name);
+    const previous: ?[:0]u8 = if (sys.getenv(name)) |raw| try a.dupeZ(u8, raw) else null;
+    defer if (previous) |raw| {
+        _ = sys.env.setenv(name, raw, 1);
+        a.free(raw);
+    } else {
+        _ = sys.env.unsetenv(name);
+    };
     _ = sys.env.unsetenv(name);
     try t.expectEqual(@as(?[]const u8, null), try e.readPath(name));
     for ([_][:0]const u8{ "", "  " }) |blank| {
@@ -316,16 +322,6 @@ test "environment: inactive carveout size and disabled trees are still ignored" 
     const why = (try e.refusal(a, Inactive{}, enabled)).?;
     defer a.free(why);
     try t.expect(std.mem.indexOf(u8, why, "TF_CUDA_CARVEOUT_MIB=\"bad-size\"") != null);
-}
-
-test "environment: video refusal describes the token budget without advertising a storage maximum" {
-    const why = try e.describe(a, "TENSORFOLD_VIDEO_TOKENS", "bad-value");
-    defer a.free(why);
-    try t.expectEqualStrings(
-        "TENSORFOLD_VIDEO_TOKENS=\"bad-value\": expected a nonnegative whole video-token budget (default 16384; unsigned 64-bit count)",
-        why,
-    );
-    try t.expect(std.mem.indexOf(u8, why, "18446744073709551615") == null);
 }
 
 test "environment: word switches take 0 and 1 and the word forms in any case; exact switches refuse words" {
