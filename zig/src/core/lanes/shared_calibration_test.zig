@@ -9,9 +9,11 @@ const Config = @import("config.zig").Config;
 const fake = @import("fake.zig");
 const win = @import("windows.zig");
 
-test "shared prices: a missing forward width cannot repeat a calibration or stop its clock" {
+/// 192 rounds of two streams, the two-row forward priced from round `priced_from` on (null: never).
+fn calibrations(priced_from: ?usize, want: []const usize, priced_at: ?usize) !void {
     var cfg = try Config.init(a, .{ .exact_width = 4, .mtp = true, .drafts = 1, .plain_guard = true, .hidden_rows = true, .window_costs = &.{ .{ .width = 1, .ms = 10 }, .{ .width = 4, .ms = 10 } } }, 4, 3);
     defer cfg.deinit(a);
+    const two = cfg.shared_costs.slots[2];
     cfg.shared_costs.slots[2] = null;
     var target: fake.Fake = .{ .gpa = a };
     defer target.deinit();
@@ -28,16 +30,28 @@ test "shared prices: a missing forward width cannot repeat a calibration or stop
         s.rounds = 1;
         p.* = .{ .stream = s, .position = 1, .kind = .none };
     }
-    var trials: usize = 0;
+    var trials: [4]usize = undefined;
+    var n: usize = 0;
     for (1..193) |round| {
+        if (priced_from == round) cfg.shared_costs.slots[2] = two;
         const due = try prices.calibrate(&e, &plans);
-        try t.expectEqual(round % 64 == 0, due);
         if (due) {
-            trials += 1;
+            trials[n] = round;
+            n += 1;
             try t.expect(!try prices.calibrate(&e, &plans));
         }
-        try e.rule.observeShared(2, 2, 12, false, 0, true, due);
-        try t.expect(e.rule.sharedPrice(2, false) == null);
+        // between trials, drafted work at plain width: it never moves the plain point
+        try e.rule.observeShared(2, 2, 12, false, 0, due, due);
+        try t.expectEqual(if (priced_at) |at| round >= at else false, e.rule.sharedPrice(2, false) != null);
     }
-    try t.expectEqual(@as(usize, 3), trials);
+    try t.expectEqualSlices(usize, want, trials[0..n]);
+}
+
+test "shared prices: a missing forward width cannot repeat a calibration or stop its clock" {
+    try calibrations(null, &.{ 64, 128, 192 }, null);
+}
+
+test "shared prices: a count's first plain trial warms it up, measured or not, and the next one prices it" {
+    try calibrations(1, &.{ 64, 128 }, 128);
+    try calibrations(100, &.{ 64, 128 }, 128);
 }

@@ -496,6 +496,7 @@ test {
     _ = @import("shared_verify_price_test.zig");
     _ = @import("shared_warm_price_test.zig");
     _ = @import("shared_calibration_test.zig");
+    _ = @import("shared_warmup_test.zig");
     _ = @import("shared_head_price_test.zig");
 }
 

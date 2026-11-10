@@ -9,6 +9,7 @@ const Bucket = struct {
     sampled: bool,
     rounds: u64 = 0,
     last_probe: u64 = 0,
+    trials: u64 = 0, // completed all-plain trials, the first of them a warm-up
     plain: ?Point = null,
     draft: ?Point = null,
 };
@@ -46,14 +47,18 @@ pub const Prices = struct {
         b.last_probe = b.rounds +| 1;
     }
 
-    /// The plain intercept is never updated by a round that verifies or prepares any draft.
+    /// No drafting round moves the plain point; a count's first plain trial is a warm-up, each later one replaces it.
     pub fn observe(p: *Prices, a: Allocator, streams: usize, rows: u64, residual: f64, sampled: bool, plain: bool, calibration: bool) !void {
         const b = try p.get(a, streams, sampled);
         b.rounds +|= 1;
         if (calibration) b.last_probe = b.rounds;
+        const trial = calibration and plain and rows == streams;
+        if (trial) b.trials +|= 1;
         if (!std.math.isFinite(residual)) return;
         const point: Point = .{ .residual = residual, .rows = @floatFromInt(rows), .at = b.rounds };
-        if (plain and rows == streams) {
+        if (trial) {
+            if (b.trials > 1) b.plain = point;
+        } else if (plain and rows == streams) {
             blend(&b.plain, point);
         } else if (rows > streams) blend(&b.draft, point);
     }
