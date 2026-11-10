@@ -175,7 +175,7 @@ pub fn Core(comptime R: type) type {
         }
 
         /// The tower with --vision, its rows `hidden` wide; null without the flag, void for a text-only recipe.
-        fn openTower(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, s: cuda.Stream, dir: []const u8, hidden: usize, o: anytype) !Dense.Vision {
+        pub fn openTower(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, s: cuda.Stream, dir: []const u8, hidden: usize, o: anytype) !Dense.Vision {
             if (Tower) |T| {
                 const limits: ?T.Limits = if (@hasField(@TypeOf(o), "vision")) o.vision else null;
                 const t = try T.open(gpa, io, ctx, s, dir, limits orelse return null);
