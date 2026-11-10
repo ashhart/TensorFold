@@ -13,6 +13,19 @@ pub fn modelContext(a: Allocator, io: std.Io, dir: []const u8) i64 {
     return if (limit == .integer and limit.integer > 0) limit.integer else 0;
 }
 
+/// The window a family's own row raises --context's ceiling to, and the switch its refusal names; none without one.
+pub const Ceiling = struct { window: ?u64 = null, switch_name: []const u8 = "" };
+
+/// A family's raised ceiling, read at its open (GLM's TF_GLM_CONTEXT_CEILING); a malformed row is the family's refusal.
+pub fn familyCeiling(comptime F: type, problem: *[]const u8) error{Refused}!Ceiling {
+    if (comptime !@hasDecl(F, "raisedCeiling")) return .{};
+    const window = F.raisedCeiling() catch |e| {
+        problem.* = F.explain(null, e) orelse @errorName(e);
+        return error.Refused;
+    };
+    return .{ .window = window, .switch_name = F.ceiling_switch };
+}
+
 /// A --context past the window a family's switch raises its ceiling to: the switch named.
 pub fn pastCeiling(a: Allocator, requested: i64, ceiling: i64, switch_name: []const u8) ![]const u8 {
     return std.fmt.allocPrint(a, "--context {d} exceeds the {d}-token window {s} sets", .{ requested, ceiling, switch_name });
