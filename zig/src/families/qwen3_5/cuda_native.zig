@@ -593,7 +593,7 @@ test "Qwen stepped prefill: cancel between host iterations retains only the last
 }
 
 test "Qwen stepped prefill: the lane host's cap cuts on the 128 grid inside cold chunks, every cold cut lands" {
-    try @import("cuda_prefill_test.zig").capped();
+    try @import("cuda_prefill_test.zig").capped(Lanes, Lanes.backend);
 }
 
 test {
