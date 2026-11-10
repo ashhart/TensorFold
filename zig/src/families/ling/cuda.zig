@@ -54,19 +54,30 @@ test "config's fixed widths are the kernels' own: the latent cache, the rope" {
     try std.testing.expect(f.block == cu.fp8.block);
 }
 
-test "KDA widths: one check, cuda.kda.geometry at the open; head_dim and taps it does not take refused with the reason" {
-    const a = std.testing.allocator;
-    var why: config.Why = .{};
+test "KDA widths: one check, cuda.kda.geometry in weights.open; head_dim and taps it does not take refused with the reason" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const head = "{\"x\":{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[0,4]}}";
+    var len: [8]u8 = undefined;
+    std.mem.writeInt(u64, &len, head.len, .little);
+    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors", .data = try std.mem.concat(a, u8, &.{ &len, head, "\x00\x00\x00\x00" }) });
     const json = try synth.configJson(a, .bf16, 2);
-    defer a.free(json);
-    try weights.kdaGeometry(&try config.parse(a, json, &why), &why);
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = json });
+    var why: config.Why = .{};
+    var opened = try weights.open(a, io, dir, &why);
+    opened.ck.close();
     const cases = [_][3][]const u8{ .{ "\"head_dim\": 128", "\"head_dim\": 64", "head_dim 64" }, .{ "\"head_dim\": 128", "\"head_dim\": 256", "128-wide heads" }, .{ "\"short_conv_kernel_size\": 4", "\"short_conv_kernel_size\": 3", "short_conv_kernel_size 3" }, .{ "\"short_conv_kernel_size\": 4", "\"short_conv_kernel_size\": 5", "4 taps" } };
     for (cases) |x| {
         const edited = try std.mem.replaceOwned(u8, a, json, x[0], x[1]);
-        defer a.free(edited);
         try std.testing.expect(!std.mem.eql(u8, edited, json));
+        try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = edited });
         why = .{};
-        try std.testing.expectError(error.KdaGeometry, weights.kdaGeometry(&try config.parse(a, edited, &why), &why));
+        try std.testing.expectError(error.KdaGeometry, weights.open(a, io, dir, &why));
         try std.testing.expect(std.mem.indexOf(u8, why.text(), x[2]) != null);
     }
 }
