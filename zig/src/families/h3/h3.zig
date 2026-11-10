@@ -76,8 +76,7 @@ pub const Model = struct {
     b_audio_in: Ref,
     w_video_out: Ref,
     b_video_out: Ref,
-    /// How many output heads `w_video_out` and `b_video_out` hold, one a step (a picture's distilled heads);
-    /// 0 when one head serves every step.
+    /// Output heads `w_video_out` holds, one a step (a picture's distilled heads); 0 when one serves every step.
     step_heads: usize = 0,
     w_audio_out: Ref,
     b_audio_out: Ref,
