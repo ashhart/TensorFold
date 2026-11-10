@@ -259,7 +259,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     const shard_tests = b.createModule(.{ .root_source_file = b.path("zig/src/living_shards_test.zig"), .target = host, .optimize = .debug, .link_libc = true });
     shard_tests.addImport("living", mods.living);
     b.step("test-living-shards-host", "Quantized save and reopen through actual shard writer").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = shard_tests })).step);
-    @import("cuda_contract_host.zig").steps(b, host, cuda, mods, step);
+    const flash_contract = @import("cuda_contract_host.zig").steps(b, host, cuda, mods, step);
     const bolt = b.step("test-bolt-host", "Nemotron Bolt and shared lane host contracts");
     const cuda_target = b.resolveTargetQuery(.{ .cpu_arch = host.result.cpu.arch, .os_tag = .linux, .abi = .gnu });
     const check_cuda = runtime(b, cuda_target, .debug, &.{});
