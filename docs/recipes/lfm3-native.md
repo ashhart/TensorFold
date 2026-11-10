@@ -73,6 +73,12 @@ The native checker reads the saved metadata, validates shard header geometry, an
 required names, dtypes, shapes, and byte counts. It performs no projection, GPU allocation, or model inference.
 For VL, it checks the text decoder only. A passing result does not validate vision weights or image processing.
 
+For the focused format/launch-record and vision-residency host checks, without device execution:
+
+```sh
+zig build test-lfm3-nax-format-host test-lfm3-vision-residency-host
+```
+
 The config reader preserves full-attention versus sliding-attention layers, distinct rotary settings, sandwich norms,
 and each module's affine width and group size. Unsupported geometry and conflicting quantization declarations fail.
 
@@ -97,6 +103,8 @@ The header inspections used these revisions:
 ## Qualification and remaining gate
 
 Detailed counts, hashes, numerical evidence and reproducible requests are in the [receipts](../receipts/lfm3/README.md).
+
+Recorded receipts do not qualify a different source revision; each candidate needs its own exact-head gate.
 
 All six checkpoints passed 303 greedy/seeded-sampling, cache, concurrency and cancellation checks on one optimized M4 binary.
 The final source build also passed 303/303 on an M5. Text4 and VL4 additionally passed real grammar, thinking, tool,
