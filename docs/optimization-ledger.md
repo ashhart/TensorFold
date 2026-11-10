@@ -57,7 +57,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 10. FP4/FP8 decode | yes | yes | yes | no (affine) | yes |
 | 11. Fused proj. | done [#1783] | done¹ | done¹ | done [#1783] | done [#1783] |
 | 12. Add + norm | done H[#2099] | no (bound <1 %) | yes | done¹ | done [#796] |
-| 13. MoE grouped | done [#605] | done [#1351] | done [#864] | no (dense) | done [#558] |
+| 13. MoE grouped | done [#605] | done [#1351], open M[#2784] | done [#864] | no (dense) | done [#558] |
 | 14. CUDA graphs | done¹ | done [#1786] | open [#2279] | done [#1174] | done [#615] |
 | 15. MTP | done [#1562] | done [#1925] | done [#1585]; wide C open [#2257] | done [#1385] | done [#997] |
 | 16. DFlash(2) | done [#1465] | yes | done [#979] | done C¹ M[#879] | yes |
@@ -352,6 +352,8 @@ below; these are estimates for planning a port, not results.
     every expert's rows ([#558], [#605], NVFP4 in [#629], EXL3 in [#741]). A family adds only its router and its weight
     format. Wide router calls run on the shared register tiles in `zig/kernels/cuda/common/router_tiles.cuh`, the
     same fma chain a logit: Nemotron's past 32 rows, and qwen3_5's from 257 rows since [#2499].
+    Flash Next on Metal before tensor units groups a decode window's 4-bit experts from five rows up, each
+    (row, expert) pair keeping the per-row kernels' sums ([#2784], plan in [#2764]); its shared rounds do not yet.
 
 14. **CUDA graphs for decode and verify.** Each decode or verify shape is captured once and replayed, which removes the
     host's launch cost from every step. `TENSORFOLD_GEMMA4_GRAPHS=0` (and the same switch for Kolibri, Spark
@@ -610,3 +612,5 @@ below; these are estimates for planning a port, not results.
 [#2375]: https://github.com/ashhart/TensorFold/pull/2375
 [#2633]: https://github.com/ashhart/TensorFold/pull/2633
 [#2634]: https://github.com/ashhart/TensorFold/pull/2634
+[#2784]: https://github.com/ashhart/TensorFold/pull/2784
+[#2764]: https://github.com/ashhart/TensorFold/issues/2764
