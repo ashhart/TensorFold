@@ -85,7 +85,8 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     }
     errdefer if (own.vision) |v| v.deinit();
     var persistent_bytes = cuda.usage(false).device;
-    try @import("exl3/kv/cuda_exl3_kv.zig").setup(own.engine, mode == .exl3); // the scratch format and the chunk of an EXL3 pack
+    // The scratch format and the chunk of an EXL3 pack.
+    try @import("exl3/kv/cuda_exl3_kv.zig").setup(own.engine, mode == .exl3);
     // the pass's scratch for a full chunk, once for the engine (every prompt, window, round and head pass)
     _ = try own.engine.reserve(@max(@min(o.context, own.engine.chunk), if (o.slide) @as(usize, @import("cuda_train.zig").pack_rows) else 0));
     // the MTP head unless --no-drafts (TF_FLASHNEXT_DRAFTS and _CONFIDENCE: the chain's rule, 6 and 0.60)
@@ -122,7 +123,8 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
         const head_bytes = if (own.head) |h| mtp.Draft.bytes(window, h.ids.len, own.engine.chunk, own.engine.heads) else 0;
         own.kv.layout = @import("cuda_kv_lanes.zig").layout(o.context, page_tokens, own.kv.head, stream_bytes - own_seq_bytes - head_bytes);
     }
-    try @import("exl3/kv/cuda_exl3_kv.zig").logStream(own.engine, window, stream_bytes); // what a stream holds, by piece
+    // What a stream holds, by piece.
+    try @import("exl3/kv/cuda_exl3_kv.zig").logStream(own.engine, window, stream_bytes);
     const pool_budget = try exl3_pass.budgetForStreams(stream_bytes, o.lanes);
     const placement = @import("exl3/offload/cuda_exl3_frequency_state.zig");
     if (try placement.prepare(gpa, io, dir, own.engine.layers[0..own.engine.n_layers], @intCast(o.tp), @intCast(o.rank))) |prepared| {

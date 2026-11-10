@@ -140,10 +140,6 @@ unified memory) and at most the memory's size.
 
 EXL3 keeps its configured prompt cuts, including cache marks; `TF_FLASHNEXT_KEEP_INPASS` does not enable in-pass
 snapshots for this format. Classic checkpoints retain main's in-pass marks and per-lane convolution histories.
-The scratch-format regression is now `cuda_batch_state.zig`'s
-`exl3: scratch preserves common buffers and only omits unused classic staging`: it checks common buffers,
-classic-only staging and projection partial capacity across row boundaries. The former
-`cuda_scratch_layout_test.zig` was deleted in `ee10bd6904abfdef0f7da31d394404da60097a34`, not relocated.
 
 ## What the core runs and what the family runs
 

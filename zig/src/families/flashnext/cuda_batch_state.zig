@@ -501,7 +501,8 @@ pub const Scratch = struct {
         try stream.synchronize();
         s.host = try cuda.HostBuffer.alloc(d, hostAt(cap)[5]);
         s.staging = .{ .q = .{ .stream = stream, .event = try cuda.Event.init(d, false) } };
-        if (z.format == .classic and shared.on()) s.side = try shared.Side.init(d); // EXL3 runs its shared expert itself
+        // EXL3 runs its shared expert itself.
+        if (z.format == .classic and shared.on()) s.side = try shared.Side.init(d);
         return s;
     }
 
