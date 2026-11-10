@@ -812,6 +812,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - LFM2 DSpark and shared-lane modules keep the 600-line source limit by separating scratch allocation and behavioral test fixtures. The original tap-only oracle stays untouched for independent rounding work; inference arithmetic, activation formats and the existing assertions are unchanged (#1394).
 
+- Kernel contract: LFM2's sorted-expert combine with its norm and with the tap store (`lfm2_combine_sorted_norm`, `lfm2_combine_sorted_norm_tap`) and the fused BF16 gate/up SwiGLU (`lfm2_bf16_glu_rows`) are checked bit for bit against the kernels they replace, with planted controls for pick order, y row placement, residual and tap stores, the k loop, row groups and gate/up roles (#1394).
+
 - Tests: MiniMax's external-draft capability fixture supplies a valid drafter vtable when the shared backend reads hold-context facts. Assertions and serving behavior are unchanged.
 
 - CI: main's build cache now fits every runner, because CI compiles host code for one CPU, and `release-paths` and the macOS dev tools use the cache too (#2252).
