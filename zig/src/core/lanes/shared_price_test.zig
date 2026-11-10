@@ -54,14 +54,16 @@ fn run(sampled: bool, row_ms: f64, plain_only: bool) ![2][800]u32 {
             probes += 1;
         }
         if (round < 64) drafted_before += @intFromBool(target.last_rows > 2);
-        if (round > 65 and e.activeCount() == 2) drafted_after += @intFromBool(target.last_rows > 2);
-        if (round == 64) {
+        if (round > 129 and e.activeCount() == 2) drafted_after += @intFromBool(target.last_rows > 2);
+        // the first trial is the count's warm-up: the second one sets the plain price
+        if (round == 64) try t.expect(e.rule.sharedPrice(2, sampled) == null);
+        if (round == 128) {
             try t.expect(e.rule.sharedPrice(2, sampled) != null);
             const p = e.rule.sharedPrice(2, sampled).?;
             try t.expectApproxEqAbs(@as(f64, 2), p.plain, 1e-9);
             try t.expectApproxEqAbs(row_ms, p.row, 1e-9);
         }
-        if (row_ms > 5 and round == 65) try t.expectEqual(@as(usize, 2), target.last_rows);
+        if (row_ms > 5 and round == 129) try t.expectEqual(@as(usize, 2), target.last_rows);
     }
     if (!plain_only) {
         try t.expect(drafted_before > 32);
@@ -78,7 +80,7 @@ fn run(sampled: bool, row_ms: f64, plain_only: bool) ![2][800]u32 {
     return out;
 }
 
-test "shared prices: cheaper plain wins after its first measurement and target tokens stay exact" {
+test "shared prices: cheaper plain wins after its first warm measurement and target tokens stay exact" {
     for ([_]bool{ false, true }) |sampled| {
         const oracle = try run(sampled, 9, true);
         const got = try run(sampled, 9, false);
@@ -99,7 +101,8 @@ test "shared prices: missing and stale trials obey exact independent count and m
     defer p.deinit(a);
     for (1..641) |round| {
         const due = try p.due(a, 4, true);
-        try t.expectEqual(round == 64 or round == 320 or round == 576, due);
+        // the warm-up at 64 leaves the price missing, so the next trial comes `every` rounds on
+        try t.expectEqual(round == 64 or round == 128 or round == 384 or round == 640, due);
         try t.expect(!try p.due(a, 4, false));
         try t.expect(!try p.due(a, 2, true));
         // Rechecking without completing a round cannot spend another calibration or age another mode.
