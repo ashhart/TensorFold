@@ -109,14 +109,13 @@ pub fn cacheBytes(e: *const E.Engine, cap: usize, test_tokens: usize) !usize {
     return std.math.add(usize, e.streamBytes(cap), try cache_mod.pageExtra(e.g, cap, test_tokens, e.kv8));
 }
 
-/// The pool's layout with a drafter (`extra` bytes a stream): DFlash2's ring and taps in the run, the rest fixed.
+/// The pool's layout with a drafter (`extra` bytes a stream): its ring and DFlash2's taps a lane's own, the rest fixed.
 pub fn pagedLayout(p: *anyopaque, extra: u64) ?kv_pool.Layout {
     const l: *Lanes = @ptrCast(@alignCast(p));
     if (l.page_tokens == 0) return null;
     const ring = l.ringBytes();
-    const in_run = ring + if (l.draft != null) l.e.tapBytes() else 0; // DFlash2 counts the target's taps as its own
-    l.extra = @intCast(extra -| in_run);
-    return pages_mod.layout(l.e, l.capacity, l.page_tokens, ring, l.extra);
+    l.extra = @intCast(extra -| (ring + if (l.draft != null) l.e.tapBytes() else 0)); // DFlash2's taps count as its own
+    return pages_mod.layout(l.e, l.capacity, l.page_tokens, ring, l.extra, l.state_pieces);
 }
 
 /// The pool beside the first stream's window (engine_paged: for it too): `streams` more lanes and `pages` pages.
@@ -126,7 +125,7 @@ pub fn attach(p: *anyopaque, streams: u32, pages: usize) !void {
     // TF_QWEN_KV_SHARE and TF_QWEN_KV_PAGES_ALL: every stream on pages, a lane each (PAGES_ALL: no window reserved)
     l.paged_only = (l.engine_paged or l.share_snaps > 0) and (streams > 0 or l.engine_paged);
     const pool_lanes = if (l.paged_only) streams + 1 else streams;
-    l.pages = try pages_mod.Pages.init(l.gpa, l.e, pages_mod.layout(l.e, l.capacity, l.page_tokens, ring, l.extra), l.capacity, ring, pool_lanes, pages);
+    l.pages = try pages_mod.Pages.init(l.gpa, l.e, pages_mod.layout(l.e, l.capacity, l.page_tokens, ring, l.extra, l.state_pieces), l.capacity, ring, pool_lanes, pages);
     if (pool_lanes > 0) {
         if (l.draft) |d| d.ring_of = .{ .ctx = l, .ring = Lanes.ringOf, .all = l.engine_paged };
         if (l.mtp) |m| m.ring_of = .{ .ctx = l, .area = Lanes.ringOf, .all = l.engine_paged };
@@ -194,11 +193,11 @@ pub fn openLanes(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, d
     // --vision: the checkpoint's tower, its weights and one call's scratch loaded beside the model's
     const v: ?*vision.Vision = if (o.vision) |lim| try vision.Vision.open(gpa, io, ctx.d, e.stream, dir, e.g.hidden, lim) else null;
     errdefer if (v) |x| x.deinit();
-    const timing_on = round_timing.Trace.enabled();
+    const timing_on, const state_pieces = .{ round_timing.Trace.enabled(), try pages_mod.statePieces(gpa, e, page_tokens) };
     const trace = try round_timing.Trace.create(gpa, timing_on and e.g.hidden == 5120 and e.g.layers == 64 and e.g.experts == 0);
     errdefer if (trace) |x| gpa.destroy(x);
     const l = try gpa.create(Lanes);
-    l.* = .{ .gpa = gpa, .io = io, .e = e, .capacity = o.context, .page_tokens = page_tokens, .engine_paged = engine_paged, .page_test = page_test, .share_snaps = share_snaps, .cost_context = ctx, .startup = e.startup, .vision = v, .target = undefined, .timing_on = timing_on, .trace = trace };
+    l.* = .{ .gpa = gpa, .io = io, .e = e, .capacity = o.context, .page_tokens = page_tokens, .state_pieces = state_pieces, .engine_paged = engine_paged, .page_test = page_test, .share_snaps = share_snaps, .cost_context = ctx, .startup = e.startup, .vision = v, .target = undefined, .timing_on = timing_on, .trace = trace };
     l.target = .{ .e = e, .caches = &l.caches, .seen = &l.seen, .device = try ctx.attribute(.integrated) != 0 };
     return .{
         .learns = if (o.slide) e else null,
@@ -213,7 +212,7 @@ pub fn openLanes(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, d
         .vision = v,
         .target = &l.target,
         .device_snaps = l.target.device,
-        .layout = if (page_tokens > 0) pages_mod.layout(e, o.context, page_tokens, 0, 0) else null,
+        .layout = if (page_tokens > 0) pages_mod.layout(e, o.context, page_tokens, 0, 0, state_pieces) else null,
         .own_prompt_cache = share_snaps > 0,
         .all_on_pages = page_tokens > 0 and share_snaps > 0 and !engine_paged, // the engine's window idle
         .engine_paged = engine_paged,
@@ -275,6 +274,7 @@ pub const Lanes = struct {
     capacity: usize,
     /// TF_QWEN_KV_PAGES's positions a page (0: no pool) and the pool `attach` made.
     page_tokens: usize = 0,
+    state_pieces: kv_pool.groups.Pieces = .{ .n = 0, .pages = 0, .bytes = 0 }, // at those pages (cuda_pages.zig)
     page_test: usize = 0,
     pages: ?*pages_mod.Pages = null,
     paged_only: bool = false,
@@ -282,11 +282,11 @@ pub const Lanes = struct {
     share_snaps: usize = 0,
     prefix: ?*prefix_mod.Prefix = null,
     engine_paged: bool = false, // TF_QWEN_KV_PAGES_ALL=1: no window reserved, the engine's own stream a pool lane
-    /// The DFlash2 drafter, when one is attached: its rings go into the pool lanes' runs.
+    /// The DFlash2 drafter, when one is attached: its rings go into the pool lanes' blocks outside the pool.
     draft: ?*Draft = null,
-    /// The MTP drafter (qwen3_5_moe), when attached: its ring and state go into the pool lanes' runs.
+    /// The MTP drafter (qwen3_5_moe), when attached: its ring and state go into the pool lanes' blocks.
     mtp: ?*Mtp = null,
-    /// A drafter's bytes a stream outside the lanes' runs (pagedLayout).
+    /// A drafter's bytes a stream beside the lanes' blocks (pagedLayout).
     extra: usize = 0,
     cost_context: ?*const cuda.Context = null,
     cost_identity: ?[32]u8 = null,
@@ -392,13 +392,13 @@ pub const Lanes = struct {
         return readout.finish(cast(ptr), stream, logits);
     }
 
-    /// A drafter's bytes in each lane's run: DFlash2's ring, or MTP's ring and state (0: no drafter).
+    /// A drafter's bytes in each lane's block outside the pool: DFlash2's ring, or MTP's ring and state (0: none).
     fn ringBytes(self: *const Lanes) usize {
         if (self.draft) |d| return d.c.ringBytes();
         return if (self.mtp) |m| m.areaBytes() else 0;
     }
 
-    /// The ring in the run of the lane `stream`'s cache holds; null: its cache is a reserved window's.
+    /// The ring the lane `stream`'s cache holds outside the pool; null: its cache is a reserved window's.
     fn ringOf(ptr: *anyopaque, stream: *lanes.Stream) ?u64 {
         const self = cast(ptr);
         const cache = self.caches.get(stream) orelse return null;

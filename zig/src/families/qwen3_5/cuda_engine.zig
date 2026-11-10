@@ -177,8 +177,8 @@ pub const Engine = struct {
     held: ?*stage_fwd.Held = null, // rank 0 with rounds in flight: the round's state its head reads later
     /// During a prompt chunk's forward: its stream's state table on the host (cuda_prompt.zig's delta reads it).
     prompt_states: []const u64 = &.{},
-    /// The state addresses each forward segment's table in `tables` holds (null: not written yet).
-    forward_from: [Round.max_segs]?[3]u64 = @splat(null),
+    /// The state table version (States.version) each forward segment's copy in `tables` holds (0: none yet).
+    forward_from: [Round.max_segs]u64 = @splat(0),
 
     pub const ids_at = Round.ids_at;
     pub const segs_at = Round.segs_at;
@@ -235,7 +235,7 @@ pub const Engine = struct {
         e.boundary = null;
         e.held = null;
         e.prompt_states = &.{};
-        e.forward_from = @splat(null);
+        e.forward_from = @splat(0);
         e.stream = try cuda.Stream.init(d, true);
         errdefer e.stream.deinit();
         if (span != null) e.boundary = try cuda.HostBuffer.alloc(d, stage_fwd.bytes(g.hidden, max_rows));

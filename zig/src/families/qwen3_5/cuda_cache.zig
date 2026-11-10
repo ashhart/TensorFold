@@ -7,6 +7,7 @@ const engine = @import("cuda_engine.zig");
 const Engine = engine.Engine;
 const DeviceBuffer = cuda.DeviceBuffer;
 const recurrent = @import("cuda_recurrent.zig");
+const lane = @import("cuda_cache_lane.zig");
 
 /// Rows a drafter's tap ring holds a stream: its window and a prompt chunk more.
 pub const tap_rows = 2048 + engine.max_rows;
@@ -36,12 +37,14 @@ pub fn pendBytes(g: anytype) usize {
     return pend_cap * g.deltas() * headBytes(g);
 }
 
-/// qwen35.cuh's Seg and Path: rec, conv, before and log point into the stream's States table.
+/// qwen35.cuh's Seg and Path: rec, conv, before and log a stream's blocks, or for a lane on pieces its States table.
 pub const Seg = extern struct { rec: u64, conv: u64, kv: u64, tap: u64, log: u64, before: u64, cap: c_int, len: c_int, row0: c_int, rows: c_int, tap_rows: c_int, taps: c_int, delta: c_int, pt: u64 = 0, ps: u64 = 0, ptok: c_int = 0, pn: c_int = 0, plog: u64 = 0 };
 pub const Path = extern struct { n: c_int, rows: [engine.most_window]c_int };
 
 /// A stream's state table: cuda_states.zig.
 pub const States = @import("cuda_states.zig").States;
+/// A pool lane's state pages: cuda_cache_lane.zig.
+pub const Pieces = lane.Pieces;
 
 /// A cache's keys and values as pages (qwen35.cuh kv_row): page i of the stream's positions at `base` + ids[i] pages.
 pub const Paged = struct {
@@ -122,10 +125,12 @@ pub const Cache = struct {
     untaught: bool = false,
     /// Keys and values through a page table (null: cap contiguous rows a head).
     paged: ?Paged = null,
-    /// A pool lane's drafter ring in its run (the drafter borrows it for the lane's stream).
+    /// A pool lane's drafter ring in its block outside the pool (the drafter borrows it for the lane's stream).
     drafter_ring: ?u64 = null,
-    /// A pool lane (its run mapped): its kernels read `states` (the _table kernels); false: its blocks, as on main.
+    /// A pool lane: its kernels read `states` (the _table kernels); false: its blocks, as on main.
     on_table: bool = false,
+    /// A pool lane's state as pieces on its lease's state pages (null: its own blocks).
+    pieces: ?Pieces = null,
     delta: i32 = 0,
     state: DeviceBuffer,
     /// The exact state before a recorded one-row round advances its stable slot in place.
@@ -190,47 +195,8 @@ pub const Cache = struct {
         return .{ .state = none, .before = none, .kv = none, .paged = .{ .base = base, .table = table, .ids = &.{}, .tokens = tokens, .own_ids = false }, .states = states, .log = none, .cap = 0, .logits = try gpa.alloc(u16, e.g.vocab) };
     }
 
-    /// Bytes of a pool lane's run: state, log with its rollback copy, tap ring and a drafter's ring, each 256-aligned.
-    pub fn runBytes(e: *const Engine, ring: usize) usize {
-        var n: usize = 0;
-        for (runParts(e, ring)) |len| n += std.mem.alignForward(usize, len, 256);
-        return n;
-    }
-
-    fn runParts(e: *const Engine, ring: usize) [4]usize {
-        return .{ e.g.stateBytes(), overlay(e).bytes, e.tapBytes(), ring };
-    }
-
-    /// A lane's state, log and before, taps and drafter ring as views of the run at `base`; a short run is refused.
-    pub fn mapRun(self: *Cache, e: *const Engine, base: u64, len: usize, ring: usize) !void {
-        if (runBytes(e, ring) > len) return error.QwenRunTooShort;
-        var at = base;
-        var views: [4]DeviceBuffer = undefined;
-        for (runParts(e, ring), &views) |n, *v| {
-            v.* = .{ .d = e.d, .ptr = at, .len = n, .borrowed = true };
-            at += std.mem.alignForward(usize, n, 256);
-        }
-        self.state = views[0];
-        self.pend = 0;
-        self.log = logView(e, views[1].ptr);
-        self.before = beforeView(e, views[1].ptr);
-        self.tap = if (e.n_taps > 0) views[2] else null;
-        self.drafter_ring = if (ring > 0) views[3].ptr else null;
-        self.on_table = true;
-        for ([_]DeviceBuffer{ self.log, views[2], views[3] }) |v| if (v.len > 0) try v.fill8(0, e.stream.handle);
-    }
-
-    /// A closed lane's views dropped: its run went back to the pool.
-    pub fn unmapRun(self: *Cache, e: *const Engine) void {
-        const none: DeviceBuffer = .{ .d = e.d, .ptr = 0, .len = 0, .borrowed = true };
-        self.state = none;
-        self.pend = 0;
-        self.before = none;
-        self.log = none;
-        self.tap = null;
-        self.drafter_ring = null;
-        self.on_table = false;
-    }
+    pub const mapPieces = lane.map;
+    pub const unmapPieces = lane.unmap;
 
     /// The parts every cache holds itself beside `kv` and `paged` (the caller's to free on failure).
     fn fixed(gpa: std.mem.Allocator, e: *Engine, cap: usize, kv: DeviceBuffer, paged: ?Paged) !Cache {
@@ -280,6 +246,7 @@ pub const Cache = struct {
         self.untaught = false;
         self.pend = 0;
         self.delta = 0;
+        if (self.pieces) |x| return lane.zero(x, e);
         try self.state.fill8(0, e.stream.handle);
     }
 
@@ -298,14 +265,17 @@ pub const Cache = struct {
         gpa.free(self.logits);
     }
 
-    /// The state table rewritten (on the engine's stream, before the launches that read it) if a block moved.
+    /// The state table (written at a lane's open; for blocks rewritten on the engine's stream if one moved).
     pub fn stateTable(self: *Cache, e: *const Engine) !States {
         const t = &(self.states orelse return error.MissingQwenStates);
+        if (self.pieces != null) return t.*;
+        if (self.state.len == 0) return error.MissingQwenStates; // a closed lane: no blocks, its entries never read
         const from: [3]u64 = .{ self.state.ptr, if (self.before) |b| b.ptr else 0, self.log.ptr };
         if (t.from) |f| if (std.mem.eql(u64, &f, &from)) return t.*;
         States.fill(t.host, e.g, from[0], from[1], from[2]);
         try t.dev.uploadAsync(0, std.mem.sliceAsBytes(t.host), e.stream.handle);
         t.from = from;
+        t.version = States.next();
         return t.*;
     }
 
@@ -336,7 +306,7 @@ pub const Cache = struct {
         if (path.len == 0) {
             if (last.rows == 1) {
                 try recurrent.mark(self, true);
-                try self.state.copyFrom(0, (self.before orelse return error.MissingQwenBefore).ptr, e.g.stateBytes(), e.stream.handle);
+                if (self.pieces != null) try lane.rollBack(self, e) else try self.state.copyFrom(0, (self.before orelse return error.MissingQwenBefore).ptr, e.g.stateBytes(), e.stream.handle);
             }
             self.last = null;
             self.len = last.start;
@@ -359,7 +329,7 @@ pub const Cache = struct {
         const sg = try self.seg(e, last.start, 0, last.rows);
         try recurrent.mark(self, false);
         // the path's rows join the pending ones; without a log, with the switch off or past pend_cap they land now
-        const deferred = keepLate() and self.log.len > 0 and path.len <= pend_cap;
+        const deferred = keepLate() and (self.log.len > 0 or self.on_table) and path.len <= pend_cap;
         const tab = self.on_table;
         if (!deferred) {
             try self.flush(e);
@@ -390,10 +360,10 @@ pub const Cache = struct {
             while (j + run < path.len and path[j + run] == path[j] + run and (!tab or t.?.logRow(g, path[j + run]) == t.?.logRow(g, path[j]) + run * row_log)) run += 1;
             const at: usize = @as(usize, @intCast(self.pend)) + j;
             const m: cuda.abi.Memcpy2D = .{ .src = if (tab) t.?.logRow(g, path[j]) else log + path[j] * row_log, .src_pitch = g.logRowBytes(), .dst = base + at * g.deltas() * hb, .dst_pitch = hb, .width = hb, .height = run * g.deltas() };
-            // a copy past the log or the pending buffer is refused here, not by the driver mid-reply
-            const src_end = if (m.src < log) std.math.maxInt(u64) else m.src - log + (m.height - 1) * m.src_pitch + m.width;
+            // a copy past the log or the pending buffer is refused here (on pieces a run lies in one group's page)
+            const src_end = if (tab) 0 else m.src - log + (m.height - 1) * m.src_pitch + m.width;
             const dst_end = m.dst - base + (m.height - 1) * m.dst_pitch + m.width;
-            if (src_end > self.log.len or dst_end > self.pbuf.?.len) {
+            if (src_end > self.log.len or dst_end > self.pbuf.?.len or m.src == 0) {
                 std.log.err("qwen3_5 pending keep: path {d} rows after {d} pending, path row {d} (window row {d}), run {d}: source end {d} of a {d}-byte log, destination end {d} of a {d}-byte buffer; head {d} bytes, log row {d}", .{ path.len, self.pend, j, path[j], run, src_end, self.log.len, dst_end, self.pbuf.?.len, hb, g.logRowBytes() });
                 return error.QwenPendingOutOfBounds;
             }

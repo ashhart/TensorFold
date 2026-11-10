@@ -33,7 +33,7 @@ test "KV lifetime: Qwen failed table wait and later fill retain pages until proo
             D.fail_wait = false;
             cuda.completion.drain(&d, e.stream, "the test driver must drain before it leaves");
         }
-        const l = pages.layout(&e, 64, 16, 0, 0);
+        const l = pages.layout(&e, 64, 64, 0, 0, try pages.statePieces(t.allocator, &e, 64));
         const p = try pages.Pages.init(t.allocator, &e, l, 64, 0, 1, l.need(64, 0, pages.window_rows));
         defer {
             D.fail_wait = false;
@@ -63,7 +63,7 @@ test "KV lifetime: Qwen close and deinit retain pages until context proof" {
             D.fail_wait = false;
             cuda.completion.drain(&d, e.stream, "the test driver must drain before it leaves");
         }
-        const l = pages.layout(&e, 64, 16, 0, 0);
+        const l = pages.layout(&e, 64, 64, 0, 0, try pages.statePieces(t.allocator, &e, 64));
         const p = try pages.Pages.init(t.allocator, &e, l, 64, 0, 1, l.need(64, 0, pages.window_rows));
         const c = try p.open(1, 0);
         Watch.pool = &p.pool;

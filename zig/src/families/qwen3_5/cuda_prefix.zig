@@ -107,7 +107,7 @@ pub const Prefix = struct {
         const cache = owner.cache.?;
         const e = x.e;
         try cache.flush(e);
-        try e.d.check(e.d.api.cuMemcpyHtoDAsync_v2(cache.state.ptr, s.host.bytes.ptr, e.g.stateBytes(), e.stream.handle), "cuMemcpyHtoDAsync");
+        try @import("cuda_cache_lane.zig").copyState(cache, e, s.host.bytes, true); // a piece at a time on a lane
         try e.stream.synchronize();
     }
 
@@ -174,7 +174,7 @@ pub const Prefix = struct {
         s.* = .{ .host = try cuda.HostBuffer.alloc(e.d, e.g.stateBytes()) };
         errdefer s.host.free();
         try cache.flush(e);
-        try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(s.host.bytes.ptr, cache.state.ptr, e.g.stateBytes(), e.stream.handle), "cuMemcpyDtoHAsync");
+        try @import("cuda_cache_lane.zig").copyState(cache, e, s.host.bytes, false);
         try e.stream.synchronize();
         return @ptrCast(s);
     }
