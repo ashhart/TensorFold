@@ -422,7 +422,6 @@ pub const Lanes = struct {
         return prefill.step(cast(ptr), stream, max_rows);
     }
 
-    /// A kept state into `cache` (cuda_reuse.zig), for a prompt pass that resumes at it.
     pub fn restoreKept(self: *Lanes, cache: *E.Cache, saved: *anyopaque, seen: []const reuse.Seen) !void {
         return reuse.restoreCache(self.e, cache, saved, seen);
     }
@@ -592,7 +591,7 @@ test "Qwen stepped prefill: cancel between host iterations retains only the last
     try @import("cuda_prefill_test.zig").cancelled(Lanes, Lanes.backend);
 }
 
-test "Qwen stepped prefill: the lane host's cap cuts on the 128 grid inside cold chunks, every cold cut lands" {
+test "Qwen stepped prefill: a cap (the flag's or fcfs's) cuts on the 128 grid in cold chunks; marks keep at cold cuts" {
     try @import("cuda_prefill_test.zig").capped(Lanes, Lanes.backend);
 }
 
