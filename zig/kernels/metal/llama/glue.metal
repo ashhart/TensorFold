@@ -266,46 +266,8 @@ inline bool ll_better(float a, uint ia, float b, uint ib) {
   if (lane == 0) ids[0] = at;
 }
 
-struct ll_mv_args { uint rows, n, k, ldy; };
-
-// Y[r, j] = bf16(sum_i X[r, i] * W[j, i]) over bf16 W [n, k] in fp32 (torch's bf16 linear): a simdgroup a row j.
-template <uint ROWS>
-inline void ll_matvec_t(const device bfloat* X, const device bfloat* W, constant ll_mv_args& a, device bfloat* Y,
-    uint3 tg, uint sg, uint lane) {
-  constexpr uint SG = 8;
-  const uint j = tg.x * SG + sg;
-  if (j >= a.n) return;
-  const device bfloat* w = W + (size_t)j * a.k;
-  float acc[ROWS];
-  TF_UNROLL_4
-  for (uint r = 0; r < ROWS; ++r) acc[r] = 0.0f;
-  for (uint i = 8 * lane; i < a.k; i += 256) {
-    const float4 w0 = float4(*(const device bfloat4*)(w + i)), w1 = float4(*(const device bfloat4*)(w + i + 4));
-    TF_UNROLL_4
-    for (uint r = 0; r < ROWS; ++r) {
-      const device bfloat* x = X + (size_t)r * a.k + i;
-      acc[r] += dot(w0, float4(*(const device bfloat4*)x)) + dot(w1, float4(*(const device bfloat4*)(x + 4)));
-    }
-  }
-  TF_UNROLL_4
-  for (uint r = 0; r < ROWS; ++r) {
-    const float s = simd_sum(acc[r]);
-    if (lane == 0 && r < a.rows) Y[(size_t)r * a.ldy + j] = bfloat(s);
-  }
-}
-
-#define LL_MATVEC(ROWS)                                                                                            \
-  [[kernel]] void ll_matvec_##ROWS(const device bfloat* X [[buffer(0)]], const device bfloat* W [[buffer(1)]],      \
-      constant ll_mv_args& a [[buffer(2)]], device bfloat* Y [[buffer(3)]], uint3 tg [[threadgroup_position_in_grid]], \
-      uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {                      \
-    ll_matvec_t<ROWS>(X, W, a, Y, tg, sg, lane);                                                                   \
-  }
-LL_MATVEC(1)
-LL_MATVEC(2)
-LL_MATVEC(4)
-LL_MATVEC(8)
-LL_MATVEC(16)
-LL_MATVEC(32)
+// The bf16 linear rows ll_matvec_1 to ll_matvec_32 (core/bf16_matvec.metal).
+TF_BF16_MATVECS(ll)
 
 // Pack-quantized int4 (layout in weights.zig's Int4): nibble e of `word` is bf16((q - z) * s), as its decompressor.
 inline float ll_q4(uint word, uint e, float z, float s) { return float(bfloat((float((word >> (4 * e)) & 15u) - z) * s)); }
@@ -379,7 +341,7 @@ LL_Q4_MATVEC(32)
 
 // The int4 W as bf16 [n, k] for a prompt chunk's GEMM: a thread a word, its 8 weights as ll_q4 makes them.
 [[kernel]] void ll_q4_dequant(const device uint* Q [[buffer(0)]], const device bfloat* S [[buffer(1)]],
-    const device uint* Z [[buffer(2)]], constant ll_mv_args& a [[buffer(3)]], device bfloat* W [[buffer(4)]],
+    const device uint* Z [[buffer(2)]], constant tf_bf16_mv_args& a [[buffer(3)]], device bfloat* W [[buffer(4)]],
     uint2 p [[thread_position_in_grid]]) {
   const uint words = a.k / 8, groups = a.k / 32;
   if (p.x >= words || p.y >= a.n) return;
