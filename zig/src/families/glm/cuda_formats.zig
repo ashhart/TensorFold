@@ -42,7 +42,7 @@ pub fn of(declared: Declared, stored: Stored) Refusal!Format {
         .mixed => |r| if (r) |recipe| switch (recipe) {
             .nvfp4, .w4a16_nvfp4 => f == .nvfp4,
             .nvfp4_csf => f == .nvfp4_csf,
-            .nvfp4_csf0 => f == .nvfp4_csf0,
+            .nvfp4_csf0, .nvfp4_nz5 => f == .nvfp4_csf0,
             .mxfp8 => f == .mxfp8,
             .fp8_pb_wo => f == .fp8_pb,
             // per-tensor FP8 with a static input scale (#1145's Qwen recipe): GLM's lanes read no such projection
@@ -301,7 +301,11 @@ pub fn describe(buf: []u8, module: []const u8, declared: Declared, stored: Store
 /// The entry's check (modelopt.admitRecipes), its table dropped: weights.load reads it again beside the tensors.
 pub fn admit(gpa: std.mem.Allocator, config_json: []const u8, why: *core.modelopt.Why) !void {
     var recipes = try core.modelopt.admitRecipes(gpa, config_json, why);
-    recipes.deinit();
+    defer recipes.deinit();
+    if (recipes.has(.nvfp4_csf0) and recipes.has(.nvfp4_nz5)) {
+        why.set("ModelOpt MIXED_PRECISION: csf0_v1 modules as both NVFP4 and NVFP4_NZ5, whose codes an engine reads one way", .{});
+        return error.UnsupportedQuant;
+    }
 }
 
 /// A routed expert's NVFP4 linear as read: plain scales, csf_32x2_v1's to decode, csf0_v1's; else refused by name.

@@ -235,7 +235,7 @@ pub fn run_(gpu: Gpu) !void {
     defer pm.unload();
     var k = try glm.exl3.Kernels.load(gpu.d);
     defer k.unload();
-    var ek = try glm.experts.Kernels.load(gpu.d, pm, @intCast(try gpu.ctx.attribute(.multiprocessor_count)), false);
+    var ek = try glm.experts.Kernels.load(gpu.d, pm, @intCast(try gpu.ctx.attribute(.multiprocessor_count)), null);
     defer ek.unload();
     for ([_]bool{ true, false }) |one| {
         const s = try weights(&r, one);
