@@ -131,3 +131,57 @@ test "a recipe without a tower refuses images by name, as before" {
     try t.expectError(error.DenseTextOnly, step(x.backend(), &buf, &.{image(0, 4)}, 9));
     try t.expectEqual(@as(usize, 0), x.feats.items.len);
 }
+
+/// TinyTower with no layer work: a prompt chunk runs embed, the splice and the layers on the fake device alone.
+const Quiet = struct {
+    const Base = fixtures.TinyTower;
+    const P = @import("pass.zig").Pass(Quiet);
+    pub const name = Base.name;
+    pub const model_type = Base.model_type;
+    pub const formats = Base.formats;
+    pub const default_context = Base.default_context;
+    pub const reasoning = false;
+    pub const post_embed: ?fn (*const P) anyerror!void = null;
+    pub const Tower: ?type = fixtures.Fake;
+    pub const Weights = Base.Weights;
+    pub const Kernels = Base.Kernels;
+    pub const geometry = Base.geometry;
+    pub const load = Base.load;
+    pub const weightBytes = Base.weightBytes;
+    pub const head = Base.head;
+    pub const explain = Base.explain;
+    pub fn embed(_: *const P) !void {}
+    pub fn layer(_: *const P, _: usize) !void {}
+    pub fn final(_: *const P) !void {}
+};
+
+test "a prompt chunk that cuts an image copies that image's rows from its slot over the chunk's embedding rows" {
+    var e: Engine(Quiet) = .{ .d = Fake.driver() };
+    var tower: fixtures.Fake = .{};
+    var x = try e.dense(&tower);
+    defer {
+        x.deinit();
+        e.m.deinit();
+        cuda.copy_source.dropSpares(&e.d, cuda.copy_source.current());
+    }
+    try x.attach(2, 4);
+    var buf: [40]u32 = @splat(7);
+    @memset(buf[3..11], mark);
+    const one = [_]recipe.Image{image(3, 8)};
+    var c: Cancel = .{ .after = 99 };
+    var s = try lanes.Stream.init(t.allocator, .{ .id = "img", .prompt = &buf, .max_new = 4, .images = &one, .reuse = .{ .marks = &.{ 7, 20 } }, .cancel_check = .{ .ptr = &c, .check = Cancel.check } });
+    defer s.deinit(t.allocator);
+    const b = x.backend();
+    try t.expect(!try b.vtable.prefill_step.?(b.ptr, &s, 0)); // the chunk [0, 7) ends inside the image
+    const src = x.feats.items[x.lanes.get(&s).?.slot].ptr;
+    try t.expectEqual(@as(usize, 1), Fake.copied);
+    try t.expectEqual(fail.Fake.Copy{ .dst = e.m.s.h + 3 * row, .src = src, .len = 4 * row }, Fake.copies[0]);
+    Fake.copied = 0;
+    // the chunk [7, 20): the image's last four rows at its first row
+    try t.expect(!try b.vtable.prefill_step.?(b.ptr, &s, 0));
+    try t.expectEqual(@as(usize, 1), Fake.copied);
+    try t.expectEqual(fail.Fake.Copy{ .dst = e.m.s.h, .src = src + 4 * row, .len = 4 * row }, Fake.copies[0]);
+    c.after = 0; // the next chunk's check drops the lane
+    try t.expectError(error.Cancelled, b.vtable.prefill_step.?(b.ptr, &s, 0));
+    try t.expect(x.lanes.count() == 0);
+}

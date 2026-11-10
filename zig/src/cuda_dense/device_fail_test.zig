@@ -19,6 +19,9 @@ pub const Fake = struct {
     var fail_wait = false;
     var argmax: usize = 0;
     var drawn: usize = 0;
+    pub const Copy = struct { dst: u64, src: u64, len: usize };
+    pub var copies: [8]Copy = undefined; // the device-to-device copies, in order
+    pub var copied: usize = 0;
     fn reset() void {
         live = 0;
         pending = false;
@@ -27,6 +30,7 @@ pub const Fake = struct {
         fail_wait = false;
         argmax = 0;
         drawn = 0;
+        copied = 0;
     }
     fn alloc(out: *u64, len: usize) callconv(.c) c_int {
         out.* = next;
@@ -52,6 +56,12 @@ pub const Fake = struct {
         return 0;
     }
     fn copy(_: u64, _: ?*const anyopaque, _: usize, _: cuda.abi.Stream) callconv(.c) c_int {
+        pending = true;
+        return 0;
+    }
+    fn dtod(dst: u64, src: u64, len: usize, _: cuda.abi.Stream) callconv(.c) c_int {
+        if (copied < copies.len) copies[copied] = .{ .dst = dst, .src = src, .len = len };
+        copied += 1;
         pending = true;
         return 0;
     }
@@ -104,6 +114,7 @@ pub const Fake = struct {
         d.api.cuMemHostAlloc = host;
         d.api.cuMemFreeHost = hostFree;
         d.api.cuMemcpyHtoDAsync_v2 = copy;
+        d.api.cuMemcpyDtoDAsync_v2 = dtod;
         d.api.cuStreamSynchronize = wait;
         d.api.cuCtxSynchronize = context;
         d.api.cuEventCreate = event;
