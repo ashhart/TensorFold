@@ -70,7 +70,7 @@ const families = std.enums.values(Family);
 fn mainFacts(family: Family) lanes.Model {
     if (family == .glm_mtp or family == .glm_block) {
         const block = family == .glm_block;
-        return .{ .allocate_shared_drafts = true, .exact_width = 32, .first_copy_rows = 4, .gpu_tokens = false, .mtp = true, .speculate = true, .speculate_early = false, .drafts = if (block) 7 else 15, .draft_streams = block, .mtp_step_ms = if (block) 1.6 / @as(f64, 7) else 0, .draft_probabilities = block, .window_costs = if (block) &glm_window_costs else &.{}, .shared_costs = if (block) &glm_shared_costs else &.{}, .shared_drafts = if (block) 0 else 3, .hidden_rows = true, .batch_rows = 32, .max_streams = 16 };
+        return .{ .allocate_shared_drafts = !block, .exact_width = 32, .first_copy_rows = 4, .gpu_tokens = false, .mtp = true, .speculate = true, .speculate_early = false, .drafts = if (block) 7 else 15, .draft_streams = block, .mtp_step_ms = if (block) 1.6 / @as(f64, 7) else 0, .draft_probabilities = block, .window_costs = if (block) &glm_window_costs else &.{}, .shared_costs = if (block) &glm_shared_costs else &.{}, .shared_drafts = if (block) 0 else 3, .hidden_rows = true, .batch_rows = 32, .max_streams = 16 };
     }
     if (family == .minimax or family == .minimax_head) {
         const head = family == .minimax_head;
