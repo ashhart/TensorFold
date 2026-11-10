@@ -1,5 +1,4 @@
-//! MiniMax-H3-Image's transformer on Metal from a picture case: the six distilled steps, each first on the
-//! reference's own input (teacher-forced) and gated, then all six from the noise with our own rows.
+//! MiniMax-H3-Image's transformer on Metal from a picture case: six steps teacher-forced and gated, then free.
 const std = @import("std");
 const mtl = @import("metal");
 const st = @import("safetensors");
@@ -61,8 +60,7 @@ fn bytes(comptime T: type, values: []const T) []const u8 {
     return std.mem.sliceAsBytes(values);
 }
 
-/// A safetensors image whose tensors all start aligned: the header padded so the data starts on 16 bytes, the
-/// four-byte tensors first, then the two-byte ones.
+/// A safetensors image with aligned tensors: data from byte 16 on, four-byte tensors first, then two-byte ones.
 fn image(a: std.mem.Allocator, entries: []fixture.Entry) ![]u8 {
     std.mem.sort(fixture.Entry, entries, {}, struct {
         fn wide(_: void, x: fixture.Entry, y: fixture.Entry) bool {
@@ -173,8 +171,7 @@ pub fn main(init: std.process.Init) !void {
         gate.failed = gate.failed or !same;
     }
 
-    // the case the transformer reads: these rows, the checkpoint's float projections and the step heads, and
-    // placeholder tables that the distilled schedule's replace below
+    // the transformer's case: these rows, the float projections, the step heads, and placeholder tables
     const noise = pic.values(f32, try pic.at("noise", .f32, target * width), target * width);
     const reference = try optional(&pic, f32, "velocity", .f32, steps * target * width);
     const step_in = try optional(&pic, f32, "step_in", .f32, steps * target * width);
