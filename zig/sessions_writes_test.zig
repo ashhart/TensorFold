@@ -66,8 +66,9 @@ fn mixed(root: ?[]const u8, covered: bool) !struct { counts: tier.Counts, peak: 
     cfg.policy.delta = covered;
     cfg.snapshot.layers = 4;
     cfg.policy.ram_bytes = 6 * cfg.snapshot.bytes();
-    cfg.pool_tokens = 1 << 16;
     cfg.capacity = 1 << 15;
+    // Limit the pool to one slot's capacity so the mixed workload exercises spills.
+    cfg.pool_tokens = cfg.capacity;
     cfg.chunk = 1 << 20;
     cfg.staging = 4;
     const b = try tier.Bench.init(testing.allocator, testing.io, cfg);
