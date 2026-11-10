@@ -10,6 +10,11 @@ The historical E36 executable's counterbalanced single-stream run used cache-on,
 The highest-thinking coding repeat requests had a geometric mean cache-on/off decode ratio of **0.997091**, about **0.29% slower**, with five of six pairs below one.
 Both order-pair medians were below one, at 0.995450 and 0.998206.
 No regression allowance was accepted and this result did not authorize cache promotion.
+
+The preview now excludes initialization-tagged first-round samples from the lone-stream timing estimator.
+A synthetic production-loop regression reproduces a 50 ms switch sample replacing a retained 10 ms calibration; the fix retains that calibration while later 5 ms steady samples still update it.
+The same tests retain the first 16-row trial, original timing events and complete greedy/sampled token streams.
+This fixes an estimator defect; its effect on the historical 0.29% GPU deficit remains unverified until matched 5090 measurements can run.
 The six pairs include observations from the same four cohorts, not six independent machines or runs.
 
 `cache-decode-pairs.csv` retains all 72 numeric pair observations across medium/xhigh, prose/chat/code and first/repeat requests.

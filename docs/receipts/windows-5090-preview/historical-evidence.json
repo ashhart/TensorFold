@@ -17,6 +17,6 @@
   "performance_accepted": false,
   "cache_promoted": false,
   "unresolved": "xhigh/code repeat decode geomean on/off 0.9970910858337306; 5 of 6 pairs slower; both order-pair medians below 1",
-  "fresh_head_gpu_validation": "not run; main server is in use",
+  "fresh_head_gpu_validation": "not run; the 5090 PC is powered off and must remain untouched",
   "privacy_scope": "Only numeric pair observations and synthetic workload identifiers; no prompts, responses, hostnames, settings or process logs."
 }
