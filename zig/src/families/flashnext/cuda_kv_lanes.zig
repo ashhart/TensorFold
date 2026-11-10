@@ -104,18 +104,24 @@ pub const Pool = struct {
     capacity: usize,
     head: ?Head,
     pool: kv.Pool,
-    arena: cuda.DeviceBuffer,
+    arena: @import("cuda_kv_arena.zig").Arena,
     lanes: []Lane,
 
     /// `streams` lanes and `count` pages of layout `l`, made and touched now; a lane holds only its table idle.
     pub fn init(gpa: std.mem.Allocator, e: *prompt.Engine, l: kv.Layout, capacity: usize, head: ?Head, streams: usize, count: usize) !*Pool {
+        return initOn(gpa, e, l, capacity, head, streams, count, null);
+    }
+
+    /// As init, the arena from pieces on `device` (null: one cuMemAlloc).
+    pub fn initOn(gpa: std.mem.Allocator, e: *prompt.Engine, l: kv.Layout, capacity: usize, head: ?Head, streams: usize, count: usize, device: ?cuda.abi.Device) !*Pool {
         if (!pages.valid(l.page_tokens) or capacity > prompt.max_tokens or count > @as(usize, std.math.maxInt(c_int)) + 1) return error.BadFlashNextKvPages;
         const page_bytes = try std.math.mul(usize, @intCast(l.token_bytes), l.page_tokens);
         if (page_bytes == 0) return error.BadFlashNextKvPages;
         _ = try std.math.add(u64, l.run_bytes, page_bytes - 1);
         const p = try gpa.create(Pool);
         errdefer gpa.destroy(p);
-        var arena = try cuda.DeviceBuffer.alloc(e.driver, try std.math.mul(usize, count, page_bytes));
+        // pieces: one allocation past ~5.4 GiB slowed paged attention 1.6-1.8x; mapped as used, the rest stays free
+        var arena = try @import("cuda_kv_arena.zig").Arena.alloc(gpa, e.driver, try std.math.mul(usize, count, page_bytes), device);
         errdefer arena.free();
         p.* = .{ .gpa = gpa, .e = e, .layout = l, .capacity = capacity, .head = head, .pool = try kv.Pool.init(gpa, count, page_bytes), .arena = arena, .lanes = &.{} };
         errdefer p.pool.deinit();
@@ -128,7 +134,7 @@ pub const Pool = struct {
             made += 1;
         }
         errdefer cuda.completion.drain(e.driver, e.stream.*, "flashnext: failed pool initialization did not drain");
-        try arena.fill8(0, e.stream.handle);
+        if (!arena.lazy()) try arena.buf.fill8(0, e.stream.handle); // pieces are zeroed as they map
         for (p.lanes) |x| try x.seq.paged.?.table.fill8(0, e.stream.handle);
         try e.stream.synchronize();
         return p;
@@ -140,7 +146,7 @@ pub const Pool = struct {
         const d = p.e.driver;
         var table = try cuda.DeviceBuffer.alloc(d, mostPages(p.capacity, p.layout.page_tokens) * 4);
         errdefer table.free();
-        const paged: pages.Paged = .{ .base = p.arena.ptr, .table = table, .ids = &.{}, .tokens = p.layout.page_tokens, .own_ids = false, .layers = wt.attn_n + @intFromBool(p.head != null) };
+        const paged: pages.Paged = .{ .base = p.arena.buf.ptr, .table = table, .ids = &.{}, .tokens = p.layout.page_tokens, .own_ids = false, .layers = wt.attn_n + @intFromBool(p.head != null) };
         const conv = try gpa.alloc(cuda.DeviceBuffer, wt.linear_n);
         errdefer gpa.free(conv);
         const state = try gpa.alloc(cuda.DeviceBuffer, wt.linear_n);
@@ -210,13 +216,14 @@ pub const Pool = struct {
     }
 
     fn runBase(p: *const Pool, x: *const Lane) u64 {
-        return p.arena.ptr + @as(u64, x.run) * p.layout.pageBytes();
+        return p.arena.buf.ptr + @as(u64, x.run) * p.layout.pageBytes();
     }
 
     /// The lane's states as views of its run, laid out afresh (a kept window swaps state buffers with the head's).
     fn mapStates(p: *Pool, seq: *prompt.Seq) !void {
         if (p.layout.runPages() * p.layout.pageBytes() < seqRunBytes()) return error.FlashNextRunTooShort;
         const x = p.laneOf(seq).?;
+        try p.arena.ensure(@as(u64, x.run) * p.layout.pageBytes(), p.layout.runPages() * p.layout.pageBytes(), p.e.stream.handle);
         var at = p.runBase(x);
         for (seq.conv) |*b| {
             b.* = .{ .d = p.e.driver, .ptr = at, .len = conv_bytes, .borrowed = true };
@@ -267,6 +274,8 @@ pub const Pool = struct {
         fn write(ctx: *anyopaque, ids: []const u32, from: usize) anyerror!void {
             const u: *Upload = @ptrCast(@alignCast(ctx));
             errdefer cuda.completion.drain(u.p.e.driver, u.p.e.stream.*, "flashnext: a failed table upload did not drain");
+            const pb = u.p.layout.pageBytes();
+            for (ids[from..]) |id| try u.p.arena.ensure(@as(u64, id) * pb, pb, u.p.e.stream.handle); // before any read
             try u.table.uploadAsync(from * 4, std.mem.sliceAsBytes(ids[from..]), u.p.e.stream.handle);
             try u.p.e.stream.synchronize(); // the ids slice may move as the lease grows
         }
@@ -317,4 +326,5 @@ test "a stream's pages: its rows and a drafted window, no more than a full windo
 test {
     _ = @import("cuda_kv_init_test.zig");
     _ = @import("cuda_kv_lifetime_test.zig");
+    _ = @import("cuda_kv_arena.zig");
 }
