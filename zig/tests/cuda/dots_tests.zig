@@ -19,6 +19,8 @@ const taps = 2 + 42 + 2;
 const synthetic = .{ .width = 812, .height = 588, .seed = 2732 };
 /// The generated page's vision-merged sha256 on the GB10: a tower drift fails dots-image without the Python oracle.
 const synthetic_merged_sha256 = "ac8c66b76552c15c22af3bc776d285350c4d9596863de2a3359c9a909b971067";
+/// The SM the pins were measured on (GB10); another device's rows are checked twice-equal, not against them.
+const pin_sm = 121;
 
 const usage =
     \\  dots-stages MODEL IMAGE OUT  dots.mocr's tower: one encode, each stage's rows as OUT/<stage>.npy for the oracle
@@ -183,8 +185,20 @@ fn twice(gpu: Gpu, rest: Args) !void {
     if (!present(gpu.io, dir)) return skip("dots-image", "no checkpoint config.json in MODEL_DIR");
     const generated = try mergedHash(gpu, dir, null);
     if (rest.len > 1) _ = try mergedHash(gpu, dir, rest[1]);
+    if (try otherSm(gpu)) |sm| return skipPin("dots-image", sm);
     try check.expect(std.mem.eql(u8, &generated, synthetic_merged_sha256), "dots-image: the generated page's vision-merged sha256 {s}, its anchor {s}", .{ &generated, synthetic_merged_sha256 });
     check.pass("dots-image: the generated page's vision-merged sha256 equals its anchor", .{});
+}
+
+/// The device's SM when it is not the pins' (sm_121), else null.
+fn otherSm(gpu: Gpu) !?u32 {
+    const sm: u32 = @intCast(try gpu.ctx.capability());
+    return if (sm == pin_sm) null else sm;
+}
+
+/// The pins are GB10 values: on a device of another SM, `cmd` names it and compares none.
+fn skipPin(cmd: []const u8, sm: u32) void {
+    std.debug.print("SKIP {s}'s pins: they are GB10 (sm_{d}) values; this device is sm_{d}\n", .{ cmd, pin_sm, sm });
 }
 
 /// One image (the generated page without `path`) encoded twice, byte-equal: its vision-merged rows' sha256 in hex.
