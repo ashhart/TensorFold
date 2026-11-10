@@ -3,6 +3,7 @@ const std = @import("std");
 
 pub const shard = @import("shard.zig");
 pub const contract = @import("contract.zig");
+pub const launch = @import("launch.zig");
 
 pub const Axis = enum { tensor, pipeline, expert };
 
@@ -113,4 +114,5 @@ test "bad degrees and ranks refuse" {
 test {
     _ = shard;
     _ = contract;
+    _ = launch;
 }
