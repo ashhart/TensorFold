@@ -105,6 +105,8 @@ pub const Store = struct {
     decl: make_mod.Decl = .{},
     /// Whether an entry holds a legacy snapshot.
     legacy: bool = true,
+    /// No checkpoint at all (pure full attention): any matched page edge resumes, and no entry is kept.
+    page_only: bool = false,
 
     const SHARED_KEYS = 64;
 
@@ -119,12 +121,12 @@ pub const Store = struct {
         if (groups.parts.len > 0 and hooks == null) return error.PartsNeedHooks;
         if (groups.parts.len > 0 and pages.vtable.hold == null) return error.PartsNeedHold; // copies the store holds
         for (groups.parts) |spec| if (spec.make == .retained and spec.rows == 0) return error.RetainedRows;
-        if (groups.none()) return error.PageOnlyStore; // a store with no checkpoint at all: not yet served
         return .{
             .tree = try Tree.init(gpa, family, pages, rules.page, rules.lookahead, groups.prefixCount()),
             .rules = rules,
             .decl = .{ .specs = groups.parts, .hooks = hooks },
             .legacy = groups.legacy,
+            .page_only = groups.none(),
         };
     }
 
@@ -157,7 +159,14 @@ pub const Store = struct {
 
     /// Whether anything can be kept.
     pub fn on(s: *const Store) bool {
-        return s.limits.pages > 0 and s.limits.snaps > 0;
+        return s.limits.pages > 0 and (s.page_only or s.limits.snaps > 0);
+    }
+
+    /// The least valuable thing to free: an entry, or for a store without entries an idle leaf; false when none.
+    fn evictOne(s: *Store, prompt: []const u32, skip: ?*Node) bool {
+        if (s.page_only) return s.tree.evictLeaf();
+        s.tree.evict(s.victim(prompt, skip) orelse return false);
+        return true;
     }
 
     /// The deepest node whose state `prompt` resumes exactly: its tokens and lookahead a prefix, a token left.
@@ -170,6 +179,7 @@ pub const Store = struct {
     pub fn begin(s: *Store, a: Allocator, q: Query, history_len: u32, shared: []const u32, owner: ?*anyopaque, adopt: *std.ArrayList(u32)) !Plan {
         const prompt = q.key;
         if (!s.on()) return .{ .marks = try a.alloc(u32, 0) };
+        if (s.page_only) return s.beginPages(a, prompt, history_len, shared, adopt);
         const found = s.find(prompt);
         if (found == null) s.tree.counts.misses += 1;
         const resume_at: u32 = if (found) |n| n.end else 0;
@@ -206,6 +216,25 @@ pub const Store = struct {
         }
         out.from = from;
         return out;
+    }
+
+    /// `begin` for a store with no checkpoint: the deepest matched page edge, its path adopted, nothing restored.
+    fn beginPages(s: *Store, a: Allocator, prompt: []const u32, history_len: u32, shared: []const u32, adopt: *std.ArrayList(u32)) !Plan {
+        const hit: ?tree_mod.Hit = if (prompt.len < s.past() + 1) null else s.tree.deepestPage(prompt, (prompt.len - s.past()) / s.rules.page * s.rules.page);
+        const from: u32 = if (hit) |h| h.at(&s.tree) else 0;
+        const planned = try s.marks(a, prompt, from, history_len, shared, &.{});
+        const marks_ = try s.fitting(a, planned);
+        errdefer a.free(marks_);
+        if (hit) |h| h.node.pins += 1; // the room made for the marks never prunes the path this pass resumes
+        s.reserve(prompt, null, marks_);
+        if (hit) |h| h.node.pins -= 1;
+        const h = hit orelse {
+            s.tree.counts.misses += 1;
+            return .{ .marks = marks_ };
+        };
+        try s.tree.takeTo(h, adopt);
+        s.tree.counts.hits += 1;
+        return .{ .from = from, .marks = marks_ };
     }
 
     /// The entry at `n` into `owner`, snapshot then copied parts; pinned, so reclaim cannot evict its own source.
@@ -249,8 +278,8 @@ pub const Store = struct {
         const last = marks_[marks_.len - 1];
         while (true) {
             const new = (last / s.rules.page - s.tree.have(prompt[0 .. last + s.rules.lookahead])) * s.per();
-            if (s.tree.heldPages() + new <= s.limits.pages and s.tree.snaps + marks_.len <= s.limits.snaps) return;
-            s.tree.evict(s.victim(prompt, from) orelse return);
+            if (s.tree.heldPages() + new <= s.limits.pages and (s.page_only or s.tree.snaps + marks_.len <= s.limits.snaps)) return;
+            if (!s.evictOne(prompt, from)) return;
         }
     }
 
@@ -279,7 +308,7 @@ pub const Store = struct {
         var out: std.ArrayList(u32) = .empty;
         errdefer out.deinit(a);
         for (marks_) |m| {
-            if (m / s.rules.page * s.per() <= s.limits.pages and s.limits.snaps > 0) try out.append(a, m) else {
+            if (m / s.rules.page * s.per() <= s.limits.pages and (s.page_only or s.limits.snaps > 0)) try out.append(a, m) else {
                 s.tree.counts.refused += 1;
                 note("kept nothing at {d} tokens: {d} pages pass the limit of {d}", .{ m, m / s.rules.page * s.per(), s.limits.pages });
             }
@@ -335,6 +364,7 @@ pub const Store = struct {
         while (true) {
             var last: ?*Node = null;
             const got = t.heldPrefix(tokens, np, path, &last);
+            if (s.page_only and got == np) return .{ .held = true, .shared = mine.len }; // the path is the tree's already
             if (got == np and last != null and last.?.end == at and last.?.entry != null) {
                 const e = &last.?.entry.?;
                 e.used = t.clock; // the same state again: no copy
@@ -343,15 +373,18 @@ pub const Store = struct {
                 return .{ .held = true, .shared = mine.len };
             }
             const ids = (np - got) * s.per() + s.decl.ids(t, at, retained); // every id the keep adds to the holds
-            if (t.heldPages() + ids <= s.limits.pages and t.snaps + 1 <= s.limits.snaps) break;
-            const v = s.victim(prompt, null) orelse {
+            if (t.heldPages() + ids <= s.limits.pages and (s.page_only or t.snaps + 1 <= s.limits.snaps)) break;
+            if (!s.evictOne(prompt, null)) {
                 t.counts.refused += 1;
                 note("kept nothing at {d} tokens: no room", .{at});
                 return .{ .held = false, .shared = got * s.per() };
-            };
-            t.evict(v);
+            }
         }
         const node = t.insert(tokens, mine, path) catch |err| return s.fail(at, err, 0);
+        if (s.page_only) {
+            t.counts.kept += 1;
+            return .{ .held = true, .shared = mine.len };
+        }
         node.pins += 1; // the parts' holds may reclaim: not this node, nor its path
         defer node.pins -= 1;
         // the path stays whatever follows; the entry is published only whole
