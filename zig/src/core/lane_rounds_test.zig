@@ -1,4 +1,4 @@
-//! The lane host under a family round planner: prompt pieces, failed piece runs, a failed round's unrun finals, learning, refusal.
+//! The lane host under a round planner: pieces, failed rounds' unrun finals, learning, refusal.
 const std = @import("std");
 const lanes = @import("lanes");
 const api = @import("engine_api.zig");
@@ -392,17 +392,14 @@ test "a failed piece fails its request alone: its final of the same round does n
 }
 
 test "a failed round ends the prompts whose finals it never ran: their lanes free, a later request runs" {
-    // the planner marks a prompt decoding when it plans its final, and the failed round returns before
-    // runFinals: without ending them here, each such prompt would hold its lane forever (never decoding,
-    // never failing) — its stream is not in the core yet, so no step or sweep ever reaps it
+    // the failed round returns before runFinals, and the planner has the prompt decoding: it must end here
     const log_level = std.testing.log_level;
     std.testing.log_level = .err;
     defer std.testing.log_level = log_level;
     const gpa = std.testing.allocator;
     var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .hidden_rows = true }, 8, 7);
     defer cfg.deinit(gpa);
-    // the third decode round fails, as a round the GPU fails does: the first request is decoding then,
-    // and the second's last piece has run with its final planned (join_tail off: it runs after the step)
+    // round three fails: the first request decodes, the second's last piece ran, its final planned (join_tail off)
     var target: lanes.fake.Fake = .{ .gpa = gpa, .fail_round = 3 };
     defer target.deinit();
     var clock: lanes.fake.FixedClock = .{};
