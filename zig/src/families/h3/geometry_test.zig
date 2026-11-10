@@ -390,3 +390,81 @@ test "H3 serialized full64 tiles no text or held frame and last valid slots" {
 test {
     _ = @import("schedule_replace_test.zig");
 }
+
+/// MiniMax-H3-Image's case: text and picture rows only, no audio tensor, two rows in two tiles.
+fn picture(a: std.mem.Allocator) !Fixture {
+    var f = Fixture{ .a = a, .base = true, .q = weight(&.{ 768, 256 }) };
+    try f.add("geometry", .i32, &.{6});
+    for ([_]i32{ 1, 1, 1, 1, 0, 1 }, 0..) |n, i| f.set("geometry", i, n);
+    try f.add("text", .bf16, &.{ 1, 256 });
+    try f.add("final", .bf16, &.{ 2, 512 });
+    try f.add("final_norm.weight", .bf16, &.{256});
+    try f.add("video_in.weight", .f32, &.{ 256, 96 });
+    try f.add("video_in.bias", .f32, &.{256});
+    try f.add("video_out.weight", .f32, &.{ 96, 256 });
+    try f.add("video_out.bias", .f32, &.{96});
+    try f.add("video", .f32, &.{ 1, 96 });
+    try f.add("video_velocity", .f32, &.{ 1, 96 });
+    try f.add("video_step", .f32, &.{ 2, 2 });
+    try f.add("cos", .f32, &.{ 2, 2 });
+    try f.add("sin", .f32, &.{ 2, 2 });
+    try f.add("adaln", .i32, &.{ 2, 2 });
+    try f.add("times", .i32, &.{ 2, 2 });
+    try f.add("tables.0", .bf16, &.{ 6, 6, 256 });
+    try f.add("tile_slot", .i32, &.{2});
+    f.set("tile_slot", 1, 64);
+    try f.add("tile_sizes", .i32, &.{2});
+    f.set("tile_sizes", 0, 1);
+    f.set("tile_sizes", 1, 1);
+    return f;
+}
+
+test "H3 picture case without audio rows or tensors is admitted" {
+    var a = arena();
+    defer a.deinit();
+    var f = try picture(a.allocator());
+    const got = try f.read();
+    try testing.expectEqual(@as(usize, 0), got.layout.audio);
+    try testing.expectEqual(@as(usize, 0), got.audio_in);
+    try testing.expectEqual(@as(usize, 96), got.video_in);
+    try testing.expectEqual(@as(usize, 2), got.layout.rows);
+    // a first frame's (an edit's reference) rows are admitted as before
+    try f.add("geometry", .i32, &.{7});
+    for ([_]i32{ 1, 1, 1, 1, 0, 1, 1 }, 0..) |n, i| f.set("geometry", i, n);
+    try f.add("condition", .f32, &.{ 1, 96 });
+    inline for (.{ "cos", "sin" }) |name| try f.add(name, .f32, &.{ 3, 2 });
+    inline for (.{ "adaln", "times" }) |name| try f.add(name, .i32, &.{ 2, 3 });
+    try f.add("tile_slot", .i32, &.{3});
+    for ([_]i32{ 0, 1, 64 }, 0..) |n, i| f.set("tile_slot", i, n);
+    f.set("tile_sizes", 0, 2);
+    try testing.expectEqual(@as(usize, 1), (try f.read()).layout.condition);
+}
+
+test "H3 picture case refuses audio rows and every audio tensor" {
+    var a = arena();
+    defer a.deinit();
+    var f = try picture(a.allocator());
+    f.set("geometry", 4, 1);
+    try testing.expectError(error.H3PictureHasAudio, f.read());
+    for (g.audio_tensors[1..]) |name| {
+        var h = try picture(a.allocator());
+        try h.add(name, .f32, &.{ 1, 4 });
+        try testing.expectError(error.H3PictureHasAudio, h.read());
+    }
+    // with audio's input projection it is a clip's case, which needs audio rows and all of audio's tensors as before
+    var h = try picture(a.allocator());
+    try h.add("audio_in.weight", .f32, &.{ 256, 4 });
+    try testing.expectError(error.H3EmptyMedia, h.read());
+    h.set("geometry", 4, 1);
+    try testing.expectError(error.MissingTensor, h.read());
+}
+
+test "H3 picture counts: no audio, held or generated, and a picture still needs its rows" {
+    _ = try g.countsFor(&.{ 1, 1, 1, 1, 0, 1 }, false);
+    try testing.expectError(error.H3PictureHasAudio, g.countsFor(&.{ 1, 1, 1, 1, 1, 1 }, false));
+    try testing.expectError(error.H3HeldAudioExceedsTotal, g.countsFor(&.{ 1, 1, 1, 1, 0, 1, 0, 1 }, false));
+    try testing.expectError(error.H3EmptyMedia, g.countsFor(&.{ 1, 1, 1, 1, 0, 0 }, false));
+    // a clip's counts are unchanged: audio rows required
+    try testing.expectError(error.H3EmptyMedia, g.countsFor(&.{ 1, 1, 1, 1, 0, 1 }, true));
+    try testing.expectError(error.H3EmptyMedia, g.counts(&.{ 1, 1, 1, 1, 0, 1 }));
+}
