@@ -162,8 +162,26 @@ windows of up to 32 rows. Other GPUs and rank counts are not covered here.
 ## More ranks
 
 With `TF_GLM_PREFILL_REDUCE=ring`, the startup peer warm-up touches only each rank's next and previous neighbours,
-using the existing rank order. The default split and gather modes still warm every peer. This removes the eager
-opposite-peer warm-up; it does not add a switchless RoCE relay or qualify a four-node ring (#1971).
+using the existing rank order (#2126). With `gather`, the warm-up is one all-gather of the same size, which connects
+the collective gather uses and posts no point-to-point (#2569). The default split mode still warms every peer.
+
+On four GB10s cabled as a switchless ring, each linked only to its two neighbours, TP=4 starts and serves with
+`TF_GLM_PREFILL_REDUCE=gather` (#2569). Ring and split don't start there yet: their exchanges are NCCL
+point-to-point, and NCCL picks a receive's port by channel rather than by peer, so a receive can wait on the
+missing link (#1971). The ring also needs these NCCL settings at start (#1971):
+
+- `NCCL_CUMEM_ENABLE=1` and `NCCL_RUNTIME_CONNECT=1`. The engine sets both to `0` when they're unset. With cuMem
+  off, NCCL connects its trees inside init, and a four-rank tree crosses the missing link. The engine turns cuMem
+  off by default because NCCL's cuMem buffers wore out GB10's driver pool under load; the ring's runs reported no
+  driver errors with it on.
+- `NCCL_ALGO=Ring`, and a graph for each rank that receives on the port toward the previous rank and sends toward
+  the next.
+
+`TF_GLM_ROCE_MULTI=1` with `TF_TP_ROCE_RELAY=1` relays gathers through both neighbours on such a ring instead of
+NCCL (#2352, opt-in, four ranks only). Gathers up to `TF_TP_ROCE_RELAY_MAX_KB` a rank go on the wire (64 KiB by
+default, 4 to 1024); larger ones, reductions and exchanges stay on NCCL. On the ring with gather, @Bizuayeu measured
+cold 64K prompts in 36.5 s and decode at 73.1 / 60.8 tok/s (code / chat, temperature 0) with the relay off, and
+36.7 s and 75.3 / 62.7 tok/s with it on (#2569).
 
 `TF_GLM_WORLD=3` places a third rank the same way. From 1.1.2 the uneven KDA input projections of TP=3 (22, 21 and
 21 heads) run instead of being refused; TP=3 device qualification is pending
