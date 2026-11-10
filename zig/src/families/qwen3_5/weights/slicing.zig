@@ -34,7 +34,7 @@ fn cols(a: Allocator, p: host.Projection, r: Rank, what: []const u8) Error!host.
 }
 
 /// This rank's rows of each segment of a concatenated output (q | k | v), each segment split evenly.
-fn segments(widths: []const usize, r: Rank, out: []Span, what: []const u8) Error![]const Span {
+pub fn segments(widths: []const usize, r: Rank, out: []Span, what: []const u8) Error![]const Span {
     var base: usize = 0;
     for (widths, out[0..widths.len]) |w, *span| {
         const part = try even(w, r.world, what);
@@ -45,7 +45,7 @@ fn segments(widths: []const usize, r: Rank, out: []Span, what: []const u8) Error
 }
 
 /// This rank's k or v rows, whole heads only; with fewer KV heads than ranks each head is kept by its query ranks.
-fn kvSpan(width: usize, kv_heads: usize, r: Rank, out: []Span) Error![]const Span {
+pub fn kvSpan(width: usize, kv_heads: usize, r: Rank, out: []Span) Error![]const Span {
     if (kv_heads >= r.world) {
         if (kv_heads % r.world != 0) return error.KvHeads;
         return segments(&.{width}, r, out, "kv rows");
