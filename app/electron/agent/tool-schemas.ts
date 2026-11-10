@@ -130,7 +130,7 @@ const WEB_SEARCH_SCHEMA = {
       type: 'object',
       properties: {
         query: { type: 'string' },
-        provider: { type: 'string', enum: ['google_news', 'parallel'], description: 'Defaults to Google News RSS. Choose parallel when the user requests Parallel for general web results and excerpts, with no account or API key.' },
+        provider: { type: 'string', enum: ['google_news', 'parallel', 'keenable'], description: 'Defaults to Google News RSS. Choose parallel when the user requests Parallel for general web results and excerpts, with no account or API key. Choose keenable when the user requests Keenable for general web results and page text, with no account or API key.' },
         limit: { type: 'number', description: 'Maximum results to return. Defaults to 5, capped at 8.' },
       },
       required: ['query'],
@@ -147,7 +147,7 @@ const WEB_FETCH_SCHEMA = {
       type: 'object',
       properties: {
         url: { type: 'string' },
-        provider: { type: 'string', enum: ['direct', 'parallel'], description: 'Defaults to direct page fetching. Choose parallel when the user requests Parallel for readable page excerpts.' },
+        provider: { type: 'string', enum: ['direct', 'parallel', 'keenable'], description: 'Defaults to direct page fetching. Choose parallel when the user requests Parallel for readable page excerpts. Choose keenable when the user requests Keenable for the page as Markdown.' },
         max_chars: { type: 'number', description: 'Maximum readable characters to return. Defaults to 6000, capped at 12000.' },
       },
       required: ['url'],
