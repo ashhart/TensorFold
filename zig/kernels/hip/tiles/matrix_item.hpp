@@ -4,13 +4,19 @@
 
 #include "common/wmma.hpp"
 #include "tiles/gemm.hpp"
+#include "tiles/gemm_kp.hpp"
 #include "tiles/plan.hpp"
 
 namespace tf {
 namespace rocm {
 
+// The most rows a launch's cut sends to K-parallel passes, the rows a pass takes and the columns a lane takes in it.
+constexpr int kItemFewRows = 8;
+constexpr int kItemFewPass = 2;
+constexpr int kItemFewCols = 2;
+
 // Same staging, stage order and per-element sums as wmma_gemm_tile, so each output equals that tile's byte for byte.
-template <class Dec, class Act, class T, class Epi, int RM>
+template <class Dec, class Act, class T, class Epi, int RM, class Few>
 __device__ __forceinline__ void wmma_item_tile(typename Dec::Args& a) {
 #if TF_DEVICE_WMMA_GFX11
     if (!Dec::take_item(a, blockIdx.z)) return;
@@ -27,6 +33,28 @@ __device__ __forceinline__ void wmma_item_tile(typename Dec::Args& a) {
 
     const int tid = threadIdx.x;
     const int n0 = bx * kGemmN;
+
+    // An item within the launch's cut takes K-parallel passes with Few's Dot and epilogue: same bytes, no matrix core.
+    if (a.m <= (a.route.few < kItemFewRows ? a.route.few : kItemFewRows)) {
+        constexpr int CB = kItemFewCols;
+        constexpr int R = kItemFewPass;
+        // a pass's partials, a row a lane: each wave's own slice of the two code stages, which this path leaves unused
+        constexpr int kLane = (R * CB + 1) + (R + 1) + 2 * (CB + 1);
+        static_assert(8 * 32 * kLane <= 2 * kGemmN * kLdw, "the few-row passes' partials fit the tile's code stages");
+        const int wave = __builtin_amdgcn_readfirstlane(tid >> 5);
+        const auto lds = [wave](int lane) {
+            float* const row = reinterpret_cast<float*>(&ws[0][0]) + (wave * 32 + lane) * kLane;
+            return KpRows{row, row + R * CB + 1, row + R * CB + 1 + R + 1, row + R * CB + 1 + R + 1 + CB + 1};
+        };
+        // The 8 waves walk the block's columns side by side, CB a lane set a pass, R rows of the item a pass.
+        const int span = CB * (32 / kp_lanes(a.k / a.group));
+        const int end = n0 + kGemmN < a.n ? n0 + kGemmN : a.n;
+        for (int colw = n0 + wave * span; colw < end; colw += 8 * span) {
+            gemm_kp_wave<Dec, Act, typename Few::Dot, typename Few::Epi, CB, R, true>(a, colw, 0, R, lds);
+            if constexpr (!Few::every_pass) break;  // the contract's control stops after a wave's first
+        }
+        return;
+    }
     const int words_row = Dec::template row_words<int>(a);
     const int groups = a.k / a.group;
     const int stages = a.k / kGemmK;
