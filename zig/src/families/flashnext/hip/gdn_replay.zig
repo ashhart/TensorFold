@@ -269,3 +269,75 @@ pub const Slots = struct {
         return Plan.bytes(dims) * @max(streams, 1);
     }
 };
+
+/// A window's rows through the linear attention from its plan: a stream one conv split and delta rule, the norm after.
+pub fn linear(
+    o: Ops,
+    m: *const model.Model,
+    l: model.Linear,
+    segs: []const forward.Seg,
+    index: usize,
+    qkv: Tensor,
+    z: Tensor,
+    a: Tensor,
+    b: Tensor,
+    rows: usize,
+    s: *Slots,
+) !Tensor {
+    const d = m.dims;
+    const ch = d.convWidth();
+    const kw = d.key_heads * d.key_dim;
+    const vw = d.value_heads * d.value_dim;
+    const y = try o.arena.of(f32, rows * vw);
+    var off: usize = 0;
+    for (segs) |g| {
+        const p = s.planFor(g.c.id) orelse return error.CachesNotPlanned;
+        const n = g.tokens.len;
+        const qn = try o.arena.of(f32, n * kw);
+        const kept = p.keptOf(index, 0);
+        try pops.convSplit(
+            o,
+            forward.at(qkv, off * ch),
+            l.conv,
+            qn,
+            kept.k,
+            kept.v,
+            p.ref(),
+            index,
+            ch,
+            d.conv,
+            kw,
+            vw,
+            .{ .q = m.qk.q, .k = m.qk.k, .eps = m.qk.eps },
+            .{
+                .a = forward.at(a, off * d.value_heads),
+                .b = forward.at(b, off * d.value_heads),
+                .a_log = l.a_log,
+                .dt_bias = l.dt_bias,
+                .gate = kept.gate,
+                .beta = kept.beta,
+                .count = n * d.value_heads,
+                .heads = d.value_heads,
+            },
+        );
+        try pops.gatedDelta(
+            o,
+            qn,
+            kept.k,
+            kept.v,
+            kept.gate,
+            kept.beta,
+            y + off * vw * 4,
+            p.ref(),
+            index,
+            d.key_heads,
+            d.value_heads,
+            d.key_dim,
+            d.value_dim,
+        );
+        off += n;
+    }
+    const out = try take(o, m.act, rows * vw);
+    try o.gnormOut(y, l.norm, z, out, rows * d.value_heads, d.value_dim, d.eps, d.gate);
+    return o.project(out, l.out, rows, l.out.partial);
+}
