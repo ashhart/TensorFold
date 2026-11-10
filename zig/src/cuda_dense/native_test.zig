@@ -151,3 +151,18 @@ test "open with a tower refuses captured kernels and a fixed --parallel past a r
     wide.lanes_fixed = true;
     try std.testing.expectError(error.ParallelPastRound, V.open(std.testing.allocator, undefined, ctx, "", null, wide));
 }
+
+test "openTower refuses a tower whose rows are not the decoder's width, and opens one that is" {
+    const C = native.Core(fixtures.TinyTower);
+    const ctx: *const cuda.Context = undefined; // the fake tower's open reaches no device
+    const s: cuda.Stream = undefined;
+    const o = .{ .vision = @as(?Fake.Limits, .{ .image_tokens = 64, .max_images = 4 }) };
+    if (C.openTower(std.testing.allocator, std.testing.io, ctx, s, "", tiny.hidden + 1, o)) |got| {
+        if (got) |tw| tw.deinit(); // a tower of the wrong width opened: close it, then fail
+        return error.TestExpectedError;
+    } else |err| try std.testing.expectEqual(error.DenseTowerWidth, err);
+    const t = (try C.openTower(std.testing.allocator, std.testing.io, ctx, s, "", tiny.hidden, o)).?;
+    defer t.deinit();
+    try std.testing.expectEqual(tiny.hidden, t.width);
+    try std.testing.expect(try C.openTower(std.testing.allocator, std.testing.io, ctx, s, "", tiny.hidden, .{}) == null);
+}
