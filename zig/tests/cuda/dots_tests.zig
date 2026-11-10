@@ -215,6 +215,7 @@ fn otherSm(gpu: Gpu) !?u32 {
 fn skipPin(cmd: []const u8, sm: u32) void {
     std.debug.print("SKIP {s}'s pins: they are GB10 (sm_{d}) values; this device is sm_{d}\n", .{ cmd, pin_sm, sm });
 }
+
 /// One image (the generated page without `path`) encoded twice, byte-equal: its vision-merged rows' sha256 in hex.
 fn mergedHash(gpu: Gpu, dir: []const u8, path: ?[]const u8) ![64]u8 {
     var o = try Opened.init(gpu, dir, path);
