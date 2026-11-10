@@ -160,7 +160,7 @@ fn openEngine(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, device: u32
         return refuse(a, problem, "the native CUDA engine cannot open device {d} ({s})", .{ device, @errorName(err) });
     errdefer own.ctx.deinit();
     const cap = try own.ctx.capability();
-    const head = folder.headOf(a, io, o.dir, problem) catch |err| switch (err) {
+    const head = folder.headOf(a, io, o.dir, "CUDA", problem) catch |err| switch (err) {
         error.Refused => return error.Refused,
         else => |x| return x,
     };
