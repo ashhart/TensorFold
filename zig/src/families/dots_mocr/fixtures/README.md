@@ -63,6 +63,12 @@ model holds them on the GB10, dumped by the oracle as
 `vision-rope-inv_freq.npy`. They equal the correctly rounded table, which
 the host test checks bit for bit.
 
+`own-prompts.json` holds three prompts of our own as token ids
+(`short`, `page` and `chunks`: 18, 578 and 2,537 ids), the GB10 runner's
+`dots-text` input. Their text is our own `ownprompts.py` (in #2673's
+description), each rendered as one user turn with the checkpoint's chat
+template and tokenized by the pinned oracle (Transformers 4.57.6).
+
 ## OCR reader fixtures
 
 The reader's prompt (`../prompt.txt`) and both test pages are written
