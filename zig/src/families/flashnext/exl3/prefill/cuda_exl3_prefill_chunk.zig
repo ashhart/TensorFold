@@ -276,8 +276,9 @@ pub fn chunk(comptime Tri: type, dp: *Deep, p: *batch.Pass(Tri), base: *batch.Sc
     var gather: Gather = .{ .ngram = p.m.ngram, .history = p.seq.history[0..], .ids = ids, .emb = emb, .xs = xs, .io = p.io };
     var thread: ?std.Thread = try std.Thread.spawn(.{}, Gather.main, .{&gather});
     defer if (thread) |th| th.join();
+    const profiling = try profile();
     const t0 = now(p.io);
-    defer if (profile()) {
+    defer if (profiling) {
         st.synchronize() catch {};
         std.debug.print("exl3 prefill: {d} rows at {d} in {d:.1} ms (n-gram gather {d:.1} ms on the host)\n", .{ n, pos0, @as(f64, @floatFromInt(now(p.io) - t0)) / 1e6, @as(f64, @floatFromInt(gather.ns)) / 1e6 });
     };

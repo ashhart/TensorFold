@@ -95,8 +95,8 @@ const Run = struct {
 };
 
 /// The options the next forwards read: the deep path on or off, its chunk, the cache's grid.
-fn setOptions(deep_on: bool, step: usize, grid: bool) void {
-    var o = xpre.optionsFromEnv();
+fn setOptions(deep_on: bool, step: usize, grid: bool) !void {
+    var o = try xpre.optionsFromEnv();
     o.enabled = deep_on;
     o.rows = step;
     o.snap_grid = grid;
@@ -175,7 +175,7 @@ pub fn mixedRun(gpu: Gpu, dir: []const u8, rest: []const [:0]const u8) !void {
     defer a.free(forced.logits);
     var got = try Run.init(a);
     defer a.free(got.logits);
-    setOptions(false, 0, true);
+    try setOptions(false, 0, true);
     var whole = try Plan.steps(0, n, n);
     try fresh(g, ids, &whole, &batched);
     try serial(g, ids, &forced);
@@ -186,7 +186,7 @@ pub fn mixedRun(gpu: Gpu, dir: []const u8, rest: []const [:0]const u8) !void {
     const orders = [_]struct { shallow_first: bool, mark: bool }{ .{ .shallow_first = false, .mark = false }, .{ .shallow_first = true, .mark = false }, .{ .shallow_first = false, .mark = true } };
     for (sizes[0..n_sizes]) |size| for (orders) |order| {
         const step: usize = @intCast(size);
-        setOptions(true, step, true);
+        try setOptions(true, step, true);
         var plan = try Plan.mixed(n, step, order.shallow_first, order.mark);
         try fresh(g, ids, &plan, &got);
         std.debug.print("MIXED {d} tokens, steps of {d} rows, cuts", .{ n, step });
@@ -233,10 +233,10 @@ pub fn resumeRun(gpu: Gpu, dir: []const u8, rest: []const [:0]const u8) !void {
     var cases: usize = 0;
     for (sizes[0..n_sizes]) |size| {
         const step: usize = @intCast(size);
-        setOptions(true, step, true);
-        const grid_on = xpre.snapGrid(g.e, g.e.chunk);
-        setOptions(true, step, false);
-        try check.expect(xpre.snapGrid(g.e, g.e.chunk) == 0, "the engine's snap grid is off with the option off", .{});
+        try setOptions(true, step, true);
+        const grid_on = try xpre.snapGrid(g.e, g.e.chunk);
+        try setOptions(true, step, false);
+        try check.expect(try xpre.snapGrid(g.e, g.e.chunk) == 0, "the engine's snap grid is off with the option off", .{});
         std.debug.print("RESUME steps of {d} rows: snap grid {d} by default, 0 (any row) now\n", .{ step, grid_on });
         var whole = try Plan.steps(0, n, step);
         try fresh(g, ids, &whole, &want);
