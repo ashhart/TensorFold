@@ -421,10 +421,13 @@ set; it cannot tell checkpoints apart within a type, so leave the flag off (or g
 checkpoint whose card gives no non-thinking set, such as Ornith-1.5-122B served as `qwen3_5_moe`. On an engine that
 applies no penalties the card's presence_penalty is left out with a startup line saying so, and pairs naming a
 non-zero penalty are refused at startup. The serving line prints the set after the sampling defaults
-(`thinking off: ...`). With a DFlash2 drafter, presence_penalty 1.5 lowers draft acceptance: on Qwen3.8-27B drafted
-thinking-off replies at the card set decode about 19% slower than with the penalty at 0, while the thinking set and
-undrafted decoding are unaffected (#2645); `--instruct-sampling presence_penalty=0` keeps the card's temperature,
-top_p and top_k without the penalty.
+(`thinking off: ...`). With a drafter, presence_penalty 1.5 lowers draft acceptance: on Qwen3.8-27B thinking-off
+replies, a round lands about 4-10% fewer tokens at either Qwen sampling set and 0-4% fewer under greedy than with
+the penalty at 0, varying a lot by reply (one reply lost 25%, another gained 24%). The time per round doesn't change,
+so the whole cost is acceptance, and undrafted decoding costs the same with the penalty. Drafted replies stay
+byte-identical to undrafted ones. @BobClawblaw measured this on an RTX 5090 with DFlash2, and @jschmied on a GB10
+with DFlash2 and DSpine (#2645). `--instruct-sampling presence_penalty=0` keeps the card's temperature, top_p and
+top_k without the penalty.
 
 `--name-priority ID=background` gives one served id (`--name` or an `--alias`) a default priority: a request that
 asks for it and sends no `priority` of its own is treated as `priority: "background"`. The request's own `priority`
