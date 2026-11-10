@@ -61,7 +61,8 @@ test "the matrix tiles' banded order, padded or skewed, writes the dot2 GEMM til
     const b = try base.Rig.open(1 << 20);
     defer b.close();
     var rig = Rig.open(b);
-    if (!rig.kernels.env().matrix) return error.SkipZigTest;
+    // gfx11's matrix tile only: gfx12's sums its own way, a family of its own (registry.Family.matrix12)
+    if (!rig.kernels.env().matrix_item) return error.SkipZigTest;
     for (shapes) |c| {
         var p = try Product.init(&rig, c);
         defer p.deinit();

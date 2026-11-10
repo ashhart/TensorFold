@@ -13,6 +13,7 @@
 #include "tiles/matrix_gemm.hpp"
 #include "tiles/matrix_item.hpp"
 #include "tiles/stream.hpp"
+#include "tiles/wmma12_affine.hpp"
 
 namespace tf {
 namespace rocm {
@@ -43,6 +44,30 @@ __global__ void __launch_bounds__(256) affine_wmma_gemm(Affine a) {
 template <int BITS>
 __global__ void __launch_bounds__(256) affine_wmma_skew(Affine a) {
     wmma_gemm_tile<MlxDecoder<BITS>, BF16Act, WmmaBF16, GemmOut<WmmaBF16>, true>(a);
+}
+
+// ---- the prefill GEMM tile on the matrix cores of gfx12 ----
+
+template <int BITS>
+__global__ void __launch_bounds__(W12Affine::Threads) affine_wmma12_gemm(Affine a) {
+    wmma12_affine_tile<W12Affine, MlxDecoder<BITS>, BF16Act, GemmOut<DotBF16>>(a);
+}
+
+// ---- the same on 64 or 32 rows a block, for a routed item or a product of few rows ----
+
+template <int ROWS>
+using W12AffineRows = std::conditional_t<ROWS == 32, W12Affine32, W12Affine64>;
+
+template <int BITS, int ROWS>
+__global__ void __launch_bounds__(W12AffineRows<ROWS>::Threads) affine_wmma12_rows(Affine a) {
+    wmma12_affine_tile<W12AffineRows<ROWS>, MlxDecoder<BITS>, BF16Act, GemmOut<DotBF16>>(a);
+}
+
+// ---- the same on 16 rows a block, its waves splitting k by groups, for a routed item or a product of a few rows ----
+
+template <int BITS, int W, int TN>
+__global__ void __launch_bounds__((W12KpGeo<W, TN>::Threads)) affine_wmma12_kp(Affine a) {
+    wmma12_affine_kp_tile<W12KpGeo<W, TN>, MlxDecoder<BITS>, BF16Act, GemmOut<DotBF16>>(a);
 }
 
 // ---- the same on RM x 16 rows a block, for a routed item of few rows; K-parallel passes for one of very few ----

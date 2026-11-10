@@ -9,6 +9,9 @@
 #include "quant/dense_tiles.hpp"
 #include "quant/mlx_tiles.hpp"
 #include "tiles/wmma12_gemm_k32_ref.hpp"
+#include "quant/act.hpp"
+#include "quant/mlx_decoder.hpp"
+#include "tiles/wmma12_affine.hpp"
 
 __device__ __forceinline__ float tf_ctl_x(const uint16_t* x, int64_t i) {
     return __uint_as_float(static_cast<uint32_t>(x[i]) << 16);
@@ -225,6 +228,36 @@ extern "C" __global__ void __launch_bounds__(tf::rocm::W12Big::Threads) tf_ctl_w
 extern "C" __global__ void __launch_bounds__(tf::rocm::W12Big::Threads) tf_ctl_wmma12_unordered(tf::rocm::Affine a) {
     using namespace tf::rocm;
     wmma12_gemm_tile<W12Big, IdentityAct<DotBF16>, GemmOut<DotBF16>, W12Step, TfCtlUnordered>(a);
+}
+
+// The gfx12 affine tile without its K loop's barriers, and folding each row's bias with the next row's sum of x.
+struct TfCtlStaleSums {
+    static constexpr bool swizzled_loads = true, ordered = true, stale_sums = true;
+};
+
+extern "C" __global__ void __launch_bounds__(tf::rocm::W12Affine::Threads)
+tf_ctl_affine12_unordered(tf::rocm::Affine a) {
+    using namespace tf::rocm;
+    wmma12_affine_tile<W12Affine, MlxDecoder<4>, BF16Act, GemmOut<DotBF16>, W12Step, TfCtlUnordered>(a);
+}
+
+extern "C" __global__ void __launch_bounds__(tf::rocm::W12Affine::Threads)
+tf_ctl_affine12_stale_sums(tf::rocm::Affine a) {
+    using namespace tf::rocm;
+    wmma12_affine_tile<W12Affine, MlxDecoder<4>, BF16Act, GemmOut<DotBF16>, W12Step, TfCtlStaleSums>(a);
+}
+
+// The same two faults on the K-parallel few-row block: its round's fold without barriers, and stale sums of x.
+extern "C" __global__ void __launch_bounds__(tf::rocm::W12AffineKp::Threads)
+tf_ctl_affine12kp_unordered(tf::rocm::Affine a) {
+    using namespace tf::rocm;
+    wmma12_affine_kp_tile<W12AffineKp, MlxDecoder<4>, BF16Act, GemmOut<DotBF16>, W12Step, TfCtlUnordered>(a);
+}
+
+extern "C" __global__ void __launch_bounds__(tf::rocm::W12AffineKp::Threads)
+tf_ctl_affine12kp_stale_sums(tf::rocm::Affine a) {
+    using namespace tf::rocm;
+    wmma12_affine_kp_tile<W12AffineKp, MlxDecoder<4>, BF16Act, GemmOut<DotBF16>, W12Step, TfCtlStaleSums>(a);
 }
 
 // Gate 3: the fused silu product applying silu to the fp32 gate sum, not to the BF16 sum the plain product stores.

@@ -10,8 +10,8 @@ pub const Op = enum { project, group, routed, routed_act };
 /// A prompt's span, or anything that decodes (a lane round, the logits head, a draft).
 pub const Path = enum { decode, prefill };
 
-/// Entries that write the same bytes for any row of a product.
-pub const Family = enum { stream, row, lanes, wide, tiled, reference, split, gemm };
+/// Entries that write the same bytes for any row. gfx12's matrix tiles, 1 fp32 ULP off dot2, are a family apart.
+pub const Family = enum { stream, row, lanes, wide, tiled, reference, split, gemm, matrix12 };
 
 /// A product as the choice sees it.
 pub const Shape = struct {
@@ -49,6 +49,8 @@ pub const Env = struct {
     bf16: bool,
     /// Matrix cores a tile can use exist.
     matrix: bool,
+    /// ...and they are gfx11's (dot2's bytes, the routed few-row tile); else gfx12's, their own family (matrix12).
+    matrix_item: bool,
     /// ...and the run lets them take the rows above the decode tiles'.
     matrix_on: bool,
     stream_on: bool,
@@ -251,7 +253,7 @@ fn toy(id: []const u8, path: Path, family: Family, round_any: bool) ToyEntry {
     return .{ .id = id, .format = .mlx, .op = .project, .path = path, .family = family, .caps = &anyEnv, .policy = &anyEnv, .fits = &anyShape, .round_any = round_any, .launch = &nothing };
 }
 
-const toy_env: Env = .{ .bf16 = true, .matrix = true, .matrix_on = true, .stream_on = true, .gemm_on = true };
+const toy_env: Env = .{ .bf16 = true, .matrix = true, .matrix_item = true, .matrix_on = true, .stream_on = true, .gemm_on = true };
 const toy_shape: Shape = .{ .m = 1, .n = 64, .k = 64, .bits = 4, .group = 32, .fp16 = false };
 
 test "the cheapest entry that has room for the rows runs" {

@@ -113,7 +113,7 @@ pub fn product(rig: *Rig, c: Case, tot: *Totals) !void {
             const digest = try prod.digestOf(out, p.outBytes(rounded));
             rig.digest = std.hash.Wyhash.hash(rig.digest, std.mem.asBytes(&digest));
             const r: usize = @intFromBool(rounded);
-            // every prompt entry is the gemm family, so all of them, not only those this table picks, write one set
+            // a prompt entry's family writes one set of bytes, so all of them count, not only those this table picks
             if (c.path == .prefill or std.mem.indexOfScalar(*const Entry, pickable_set.items, e) != null) {
                 seen[r][n_seen[r]] = .{ .e = e, .digest = digest };
                 n_seen[r] += 1;
@@ -122,10 +122,15 @@ pub fn product(rig: *Rig, c: Case, tot: *Totals) !void {
         }
     }
     try base.expect(ran > 0, "affine {s}: no registered entry takes the product", .{label});
-    // entries the registry picks between by rows write one set of bytes; the rows group checks routed decode plans
+    // a family's entries write one set of bytes (gfx12's matrix tiles: matrix12); the rows group checks routed decode
     if (env.stream_on and env.gemm_on and !(c.routed() and c.path == .decode)) for (seen, n_seen) |picked, n| {
-        if (n < 2) continue;
-        for (picked[1..n]) |s| try base.expect(s.digest == picked[0].digest, "affine {s}: {s} writes other bytes than {s}, which the registry picks between by rows", .{ label, s.e.id, picked[0].e.id });
+        for (picked[0..n], 0..) |s, i| {
+            // a prompt's families each write their own bytes; decode's picks are all compared, whatever their family
+            const first = for (picked[0..i]) |f| {
+                if (c.path == .decode or f.e.family == s.e.family) break f;
+            } else continue;
+            try base.expect(s.digest == first.digest, "affine {s}: {s} writes other bytes than {s}, which the registry picks between by rows", .{ label, s.e.id, first.e.id });
+        }
     };
     tot.products += 1;
     tot.launches += ran;

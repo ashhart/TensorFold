@@ -11,6 +11,7 @@ const caps = @import("caps.zig");
 const affine = @import("launches/affine.zig");
 pub const dense = @import("launches/dense.zig");
 pub const item = @import("launches/matrix_item.zig");
+pub const matrix_rows = @import("launches/matrix_rows.zig");
 
 const util = @import("launches/util.zig");
 

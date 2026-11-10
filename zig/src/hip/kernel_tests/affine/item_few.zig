@@ -46,7 +46,7 @@ test "the routed item tile writes the matrix path's bytes through its K-parallel
     const b = try base.Rig.open(1 << 20);
     defer b.close();
     var rig = Rig.open(b);
-    if (!rig.kernels.env().matrix) return error.SkipZigTest;
+    if (!rig.kernels.env().matrix_item) return error.SkipZigTest;
     for (cases.widths) |bits| for (shapes) |shape| {
         var c = shape;
         c.bits = bits;

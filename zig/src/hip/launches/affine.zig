@@ -21,7 +21,7 @@ const Error = runtime.Error;
 /// Matrix cores for products: `off` keeps every product on dot2 tiles; `auto` and `on` use them where a tile exists.
 pub const Matrix = enum { auto, on, off };
 
-/// Which product tiles a run takes where two give the same bits; every one defaults on.
+/// Which product tiles a run takes; every one defaults on. On gfx12, `matrix = .off` changes a prompt's bytes.
 pub const Choices = struct { matrix: Matrix = .auto, stream: bool = true, gemm: bool = true };
 
 /// quant/mlx.hpp's GroupTable, Routing and Affine as the kernels take them by value.
@@ -71,8 +71,8 @@ pub const Registry = registry.Registry(Launch);
 pub const Entry = Registry.E;
 
 pub const bit_widths = [_]c_int{ 2, 3, 4, 5, 6, 8 };
-const row_counts = [_]u8{ 1, 2, 4, 8 };
-const piece_counts = [_]u8{ 1, 2, 4 };
+pub const row_counts = [_]u8{ 1, 2, 4, 8 };
+pub const piece_counts = [_]u8{ 1, 2, 4 };
 
 pub const lane_rows = 8; // kLaneRows
 pub const lane_group_max = 128;
@@ -106,8 +106,10 @@ pub const Kernels = struct {
 
     caps: Caps,
     wmma: bool,
-    /// gfx11: the matrix-core GEMM tile runs (gfx12's WMMA has other layouts).
+    /// The matrix-core GEMM tile runs: gfx11's, or gfx12's (its WMMA has other layouts).
     matrix: bool,
+    /// gfx11 only: the few-row tile of a routed prompt's items.
+    matrix_item: bool,
     /// `off` runs products on dot2 tiles, `on` and `auto` on matrix cores where a tile exists.
     mode: Matrix,
     /// Which GEMM tile the products take; the policy's reference switch picks the reference one.
@@ -132,6 +134,8 @@ pub const Kernels = struct {
     wmma_gemm: [bit_widths.len]Function,
     wmma_skew: [bit_widths.len]Function,
     item: @import("matrix_item.zig").Functions,
+    /// gfx12 only: the matrix tile on blocks of 64 and 32 rows.
+    rows12: @import("matrix_rows.zig").Functions,
     kp: [bit_widths.len][kp_tiles.len]Function,
     span: [2]Function,
     fold: Function,
@@ -147,7 +151,8 @@ pub const Kernels = struct {
         const wmma = caps.act == .bf16;
         k.caps = caps;
         k.wmma = wmma;
-        k.matrix = wmma and caps.matrix == .wmma11;
+        k.matrix = wmma and caps.matrix != .none;
+        k.matrix_item = wmma and caps.matrix == .wmma11;
         k.mode = choices.matrix;
         k.tile = if (choices.gemm) .gemm else .block;
         k.stream_on = choices.stream;
@@ -167,45 +172,7 @@ pub const Kernels = struct {
         return k;
     }
 
-    fn resolve(k: *Kernels, comptime dot: []const u8, comptime shape: []const u8, m: Module) Error!void {
-        @setEvalBranchQuota(300_000);
-        inline for (bit_widths, 0..) |bits, b| {
-            k.block[b] = try m.function(std.fmt.comptimePrint("_ZN2tf4rocm17affine_dot2_blockINS0_{s}ELi{d}EEEvNS0_6AffineE", .{ dot, bits }));
-            if (k.matrix) k.wmma_gemm[b] = try m.function(std.fmt.comptimePrint("_ZN2tf4rocm16affine_wmma_gemmILi{d}EEEvNS0_6AffineE", .{bits}));
-            if (k.matrix) k.wmma_skew[b] = try m.function(std.fmt.comptimePrint("_ZN2tf4rocm16affine_wmma_skewILi{d}EEEvNS0_6AffineE", .{bits}));
-            if (k.matrix) k.item[b] = try @import("matrix_item.zig").load(m, bits);
-            k.gemm[b] = try m.function(std.fmt.comptimePrint("_ZN2tf4rocm17affine_gemm_blockINS0_{s}ELi{d}E{s}EEvNS0_6AffineE", .{ dot, bits, shape }));
-            inline for (kp_tiles, 0..) |t, i| {
-                k.kp[b][i] = try m.function(std.fmt.comptimePrint("_ZN2tf4rocm14affine_gemm_kpINS0_{s}ELi{d}ELi{d}ELi{d}ELi{d}ELi{d}ELb{d}EEEvNS0_6AffineE", .{ dot, bits, t.cb, t.r, t.waves, t.rb, @intFromBool(t.loop) }));
-            }
-            inline for (piece_counts, 0..) |pieces, p| {
-                k.row[b][p] = try m.function(std.fmt.comptimePrint("_ZN2tf4rocm15affine_dot2_rowINS0_{s}ELi{d}ELi{d}EEEvNS0_6AffineEi", .{ dot, bits, pieces }));
-                inline for (row_counts, 0..) |rows, r| {
-                    k.lanes[b][r][p] = try m.function(std.fmt.comptimePrint("_ZN2tf4rocm17affine_dot2_lanesINS0_{s}ELi{d}ELi{d}ELi{d}EEEvNS0_6AffineE", .{ dot, bits, rows, pieces }));
-                }
-            }
-            inline for (stream_rows, 0..) |rows, r| {
-                inline for (stream_cbs, 0..) |cb, c| {
-                    k.stream[b][r][c] = if (cb * rows <= 16)
-                        try m.function(std.fmt.comptimePrint("_ZN2tf4rocm18affine_dot2_streamINS0_{s}ELi{d}ELi{d}ELi{d}ELb0EEEvNS0_6AffineENS0_11StreamSidesEii", .{ dot, bits, rows, cb }))
-                    else
-                        null;
-                    k.pairs[b][r][c] = if (cb * rows <= 16)
-                        try m.function(std.fmt.comptimePrint("_ZN2tf4rocm18affine_dot2_streamINS0_{s}ELi{d}ELi{d}ELi{d}ELb1EEEvNS0_6AffineENS0_11StreamSidesEii", .{ dot, bits, rows, cb }))
-                    else
-                        null;
-                    k.relu2[b][r][c] = if (cb * rows <= 16)
-                        try m.function(std.fmt.comptimePrint("_ZN2tf4rocm24affine_dot2_stream_relu2INS0_{s}ELi{d}ELi{d}ELi{d}EEEvNS0_6AffineENS0_11StreamSidesEii", .{ dot, bits, rows, cb }))
-                    else
-                        null;
-                    k.relu2_pair[b][r][c] = if (cb * rows <= 16)
-                        try m.function(std.fmt.comptimePrint("_ZN2tf4rocm29affine_dot2_stream_relu2_pairINS0_{s}ELi{d}ELi{d}ELi{d}EEEvNS0_6AffineES3_iii", .{ dot, bits, rows, cb }))
-                    else
-                        null;
-                }
-            }
-        }
-    }
+    const resolve = @import("affine_symbols.zig").resolve;
 
     /// fp16(bf16(code)) for every byte into the module's constant table: the RDNA2 fp16 tiles read it. Once a device.
     pub fn fillByteLut(k: *const Kernels, r: *const runtime.Runtime, dot2_obj: Module) Error!void {
@@ -270,7 +237,7 @@ pub const Kernels = struct {
 
     /// The GPU and the run's switches as the registry reads them.
     pub fn env(k: *const Kernels) registry.Env {
-        return .{ .bf16 = k.wmma, .matrix = k.matrix, .matrix_on = k.matrix and k.mode != .off, .stream_on = k.stream_on, .gemm_on = k.tile == .gemm };
+        return .{ .bf16 = k.wmma, .matrix = k.matrix, .matrix_item = k.matrix_item, .matrix_on = k.matrix and k.mode != .off, .stream_on = k.stream_on, .gemm_on = k.tile == .gemm };
     }
 
     /// The MLX entry that takes a product, or null.
@@ -425,14 +392,24 @@ pub const Kernels = struct {
     /// The 128 x 128 tile of a kind over every item of a plan (or the plain product).
     pub fn blockGo(k: *const Kernels, r: *const runtime.Runtime, a: Arg, s: abi.Stream, items: c_int, kind: BlockKind) Error!void {
         const b = bitIndex(a.bits) orelse return refuse("bits");
-        var args: hl.Args = .{};
-        try args.add(a);
         const f = switch (kind) {
             .matrix => k.wmma_gemm[b],
             .skew => k.wmma_skew[b],
             .gemm => k.gemm[b],
             .block => k.block[b],
         };
+        try blockLaunch(r, f, a, s, items);
+    }
+
+    /// A contract control in place of the matrix tile, on the served tile's own grid and block.
+    pub fn blockWith(_: *const Kernels, r: *const runtime.Runtime, f: Function, a: Arg, s: abi.Stream) Error!void {
+        try blockLaunch(r, f, a, s, 1);
+    }
+
+    /// The 128 x 128 tiles' launch: 256 threads, one block a tile, z over a plan's items.
+    fn blockLaunch(r: *const runtime.Runtime, f: Function, a: Arg, s: abi.Stream, items: c_int) Error!void {
+        var args: hl.Args = .{};
+        try args.add(a);
         try go(r, f, .{ .x = cdiv(a.n, 128), .y = cdiv(a.m, 128), .z = @intCast(items) }, .{ .x = 256 }, s, &args);
     }
 
@@ -449,7 +426,7 @@ pub const Kernels = struct {
 
     // ---- the entry points ----
 
-    /// Prefill's tile, same bits however a prompt is cut: matrix on gfx11 unless off, else dot2 GEMM; few rows K-split.
+    /// Prefill's tile, same bits however a prompt is cut: the registry's pick among one family's tiles, by the table; few rows K-split.
     pub fn prefillLaunch(k: *const Kernels, r: *const runtime.Runtime, a: Arg, s: abi.Stream, items: c_int, pairs: c_int, expert_rows: c_int) Error!void {
         const op: registry.Op = if (a.route.items != 0) .routed else .project;
         const e = k.choose(op, .prefill, prefillShape(a, items, pairs, expert_rows)) orelse return refuse("prefill shape");

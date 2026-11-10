@@ -369,7 +369,11 @@ using Dot = DotF16;
     TF_STREAM(BITS, 4, 2) TF_STREAM(BITS, 4, 4)                                               \
     TF_WMMA(BITS)                                                                             \
     template __global__ void affine_wmma_item<BITS, 4>(Affine);                               \
-    template __global__ void affine_wmma_skew<BITS>(Affine);
+    template __global__ void affine_wmma_skew<BITS>(Affine);                                  \
+    template __global__ void affine_wmma12_gemm<BITS>(Affine);                                 \
+    template __global__ void affine_wmma12_rows<BITS, 64>(Affine);                             \
+    template __global__ void affine_wmma12_rows<BITS, 32>(Affine);                             \
+    template __global__ void affine_wmma12_kp<BITS, W12AffineKp::W, W12AffineKp::TN>(Affine);
 
 TF_TILES(2)
 TF_TILES(3)

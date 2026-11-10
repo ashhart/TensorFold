@@ -4,6 +4,7 @@ const std = @import("std");
 const registry = @import("core").registry;
 const affine = @import("affine.zig");
 const item = @import("matrix_item.zig");
+const rows12 = @import("matrix_rows.zig");
 
 const Entry = affine.Entry;
 const Shape = registry.Shape;
@@ -24,8 +25,14 @@ fn rdna2(e: Env) bool {
     return !e.bf16;
 }
 
-fn matrixCores(e: Env) bool {
-    return e.matrix;
+/// gfx11's matrix cores, whose tiles write the dot2 GEMM tiles' bytes.
+fn matrix11(e: Env) bool {
+    return e.matrix and e.matrix_item;
+}
+
+/// gfx12's matrix cores: tiles of their own family (registry.Family.matrix12).
+fn matrix12(e: Env) bool {
+    return e.matrix and !e.matrix_item;
 }
 
 fn streamOn(e: Env) bool {
@@ -78,7 +85,7 @@ fn blockOk(s: Shape) bool {
 }
 
 fn prefillOk(s: Shape) bool {
-    return s.m >= 1 and s.n >= 1 and groupOk(s) and s.k % s.group == 0 and s.k % 16 == 0;
+    return s.m >= 1 and s.n >= 1 and s.k >= 1 and groupOk(s) and s.k % s.group == 0 and s.k % 16 == 0;
 }
 
 /// What the activation type's dot2 kernels take of a product: any group of an even width.
@@ -203,6 +210,15 @@ fn fitsPrefillSkew(s: Shape) bool {
     return fitsPrefillMatrix(s) and s.k <= skew_k;
 }
 
+/// A plain prompt product of at most `rows` rows, the most a few-row block of gfx12's matrix tile was measured on.
+fn rowsFit(comptime rows: u32) *const fn (Shape) bool {
+    return struct {
+        fn f(s: Shape) bool {
+            return fitsPrefillMatrix(s) and s.m <= rows;
+        }
+    }.f;
+}
+
 fn fitsPrefillGemm(s: Shape) bool {
     return prefillOk(s) and gemmFits(s);
 }
@@ -265,6 +281,14 @@ fn launchKp(comptime tier: usize) Launch {
     }.f;
 }
 
+fn launchRows(comptime tier: usize) Launch {
+    return struct {
+        fn f(k: *const Kernels, c: Call) Error!void {
+            try rows12.go(k, c, tier);
+        }
+    }.f;
+}
+
 fn launchItem(comptime tier: usize) Launch {
     return struct {
         fn f(k: *const Kernels, c: Call) Error!void {
@@ -308,7 +332,7 @@ const project_decode = [_]Entry{
     entry(.project, .decode, "row", .{ .family = .row, .fits = &fitsRow, .launch = &launchRow, .rounds = .fp16 }),
     entry(.project, .decode, "lanes", .{ .family = .lanes, .fits = &fitsLanes, .launch = &launchLanes, .rounds = .fp16 }),
     entry(.project, .decode, "wide", .{ .family = .wide, .fits = &fitsWide, .launch = &launchWide, .caps = &rdna2 }),
-    entry(.project, .decode, "matrix", .{ .family = .gemm, .fits = &fitsMatrix, .launch = launchBlock(.matrix), .caps = &matrixCores, .policy = &matrixOn }),
+    entry(.project, .decode, "matrix", .{ .family = .gemm, .fits = &fitsMatrix, .launch = launchBlock(.matrix), .caps = &matrix11, .policy = &matrixOn }),
     entry(.project, .decode, "gemm", .{ .family = .gemm, .fits = &fitsGemm, .launch = launchBlock(.gemm), .policy = &gemmOn }),
     entry(.project, .decode, "block", .{ .family = .gemm, .fits = &fitsBlock, .launch = launchBlock(.block) }),
     entry(.project, .decode, "tiled", .{ .family = .tiled, .fits = &fitsTiled, .launch = &launchTiled, .caps = &rdna2 }),
@@ -319,7 +343,7 @@ const routed_decode = [_]Entry{
     entry(.routed, .decode, "stream", .{ .family = .stream, .fits = &fitsRoutedStream, .launch = &launchStream, .policy = &streamOn }),
     entry(.routed, .decode, "row", .{ .family = .row, .fits = &fitsRoutedRow, .launch = &launchRow }),
     entry(.routed, .decode, "lanes", .{ .family = .lanes, .fits = &fitsRoutedLanes, .launch = &launchLanes }),
-    entry(.routed, .decode, "matrix", .{ .family = .gemm, .fits = &fitsRoutedMatrix, .launch = launchBlock(.matrix), .caps = &matrixCores, .policy = &matrixOn }),
+    entry(.routed, .decode, "matrix", .{ .family = .gemm, .fits = &fitsRoutedMatrix, .launch = launchBlock(.matrix), .caps = &matrix11, .policy = &matrixOn }),
     entry(.routed, .decode, "gemm", .{ .family = .gemm, .fits = &fitsRoutedGemm, .launch = launchBlock(.gemm), .policy = &gemmOn }),
     entry(.routed, .decode, "block", .{ .family = .gemm, .fits = &fitsRoutedBlock, .launch = launchBlock(.block) }),
 };
@@ -329,7 +353,7 @@ const other_decode = [_]Entry{
     entry(.routed_act, .decode, "stream", .{ .family = .stream, .fits = &fitsPair, .launch = &launchPair, .policy = &streamOn }),
 };
 
-fn prefill(comptime op: Op) [8]Entry {
+fn prefill(comptime op: Op) [9]Entry {
     // a plain prompt product rounds into out16 when asked; a routed one writes fp32 for the expert combine
     const r: registry.Rounds = if (op == .project) .always else .never;
     return .{
@@ -337,8 +361,9 @@ fn prefill(comptime op: Op) [8]Entry {
         entry(op, .prefill, "kp1", .{ .family = .gemm, .fits = kpFits(1), .launch = launchKp(1), .policy = &gemmOn, .rounds = r }),
         entry(op, .prefill, "kp2", .{ .family = .gemm, .fits = kpFits(2), .launch = launchKp(2), .policy = &gemmOn, .rounds = r }),
         entry(op, .prefill, "kp3", .{ .family = .gemm, .fits = kpFits(3), .launch = launchKp(3), .policy = &gemmOn, .rounds = r }),
-        entry(op, .prefill, "matrix", .{ .family = .gemm, .fits = &fitsPrefillMatrix, .launch = launchBlock(.matrix), .caps = &matrixCores, .policy = &matrixOn, .rounds = r }),
-        entry(op, .prefill, "skew", .{ .family = .gemm, .fits = &fitsPrefillSkew, .launch = launchBlock(.skew), .caps = &matrixCores, .policy = &matrixOn, .rounds = r }),
+        entry(op, .prefill, "matrix", .{ .family = .gemm, .fits = &fitsPrefillMatrix, .launch = launchBlock(.matrix), .caps = &matrix11, .policy = &matrixOn, .rounds = r }),
+        entry(op, .prefill, "skew", .{ .family = .gemm, .fits = &fitsPrefillSkew, .launch = launchBlock(.skew), .caps = &matrix11, .policy = &matrixOn, .rounds = r }),
+        entry(op, .prefill, "matrix12", .{ .family = .matrix12, .fits = &fitsPrefillMatrix, .launch = launchBlock(.matrix), .caps = &matrix12, .policy = &matrixOn, .rounds = r }),
         entry(op, .prefill, "gemm", .{ .family = .gemm, .fits = &fitsPrefillGemm, .launch = launchBlock(.gemm), .policy = &gemmOn, .rounds = r }),
         entry(op, .prefill, "block", .{ .family = .gemm, .fits = &fitsPrefillBlock, .launch = launchBlock(.block), .rounds = r }),
     };
@@ -346,10 +371,18 @@ fn prefill(comptime op: Op) [8]Entry {
 
 /// The routed prompt's matrix-core tile of 64 rows an item, the 128-row tile's bits for items of few rows.
 const routed_item = [_]Entry{
-    entry(.routed, .prefill, "item64", .{ .family = .gemm, .fits = &fitsPrefillItem, .launch = launchItem(0), .caps = &matrixCores, .policy = &matrixOn }),
+    entry(.routed, .prefill, "item64", .{ .family = .gemm, .fits = &fitsPrefillItem, .launch = launchItem(0), .caps = &matrix11, .policy = &matrixOn }),
 };
 
-pub const all = project_decode ++ routed_decode ++ other_decode ++ prefill(.project) ++ prefill(.routed) ++ routed_item;
+/// gfx12's few-row matrix blocks: routed items on 32 rows, plain products on 64, either on 16 (k split by groups).
+const rows_entries = [_]Entry{
+    entry(.routed, .prefill, "rows32", .{ .family = .matrix12, .fits = &fitsPrefillItem, .launch = launchRows(1), .caps = &matrix12, .policy = &matrixOn }),
+    entry(.project, .prefill, "rows64", .{ .family = .matrix12, .fits = rowsFit(64), .launch = launchRows(0), .caps = &matrix12, .policy = &matrixOn, .rounds = .always }),
+    entry(.routed, .prefill, "rows16", .{ .family = .matrix12, .fits = &fitsPrefillItem, .launch = launchRows(rows12.kp_tier), .caps = &matrix12, .policy = &matrixOn }),
+    entry(.project, .prefill, "rows16", .{ .family = .matrix12, .fits = rowsFit(32), .launch = launchRows(rows12.kp_tier), .caps = &matrix12, .policy = &matrixOn, .rounds = .always }),
+};
+
+pub const all = project_decode ++ routed_decode ++ other_decode ++ prefill(.project) ++ prefill(.routed) ++ routed_item ++ rows_entries;
 
 // ---- the choices on the GPUs' tables
 
@@ -361,8 +394,9 @@ fn kernelsOn(gfx: []const u8) affine.Registry {
 
 fn envOn(gfx: []const u8, stream_on: bool, gemm_on: bool, matrix_on: bool) Env {
     const caps = Caps.of(gfx).?;
-    const matrix = caps.act == .bf16 and caps.matrix == .wmma11;
-    return .{ .bf16 = caps.act == .bf16, .matrix = matrix, .matrix_on = matrix and matrix_on, .stream_on = stream_on, .gemm_on = gemm_on };
+    const matrix = caps.act == .bf16 and caps.matrix != .none;
+    const few_rows = matrix and caps.matrix == .wmma11;
+    return .{ .bf16 = caps.act == .bf16, .matrix = matrix, .matrix_item = few_rows, .matrix_on = matrix and matrix_on, .stream_on = stream_on, .gemm_on = gemm_on };
 }
 
 test "a lane round and a prompt each keep one family at every row count, on every GPU and policy" {
@@ -570,4 +604,32 @@ test "gfx1151 takes the skewed matrix tile for prompts up to skew_k codes deep, 
     // gfx1100's table has no row for it
     const shape: Shape = .{ .m = 2048, .n = 17408, .k = 5120, .bits = 4, .group = 64, .fp16 = false };
     try std.testing.expect(std.mem.endsWith(u8, kernelsOn("gfx1100").select(envOn("gfx1100", true, true, true), .mlx, .project, .prefill, shape).?.id, "matrix"));
+}
+
+test "gfx1201 takes its matrix tiles for a prompt at every row count, the dot2 tiles where they do not fit" {
+    const r = kernelsOn("gfx1201");
+    const on = envOn("gfx1201", true, true, true);
+    var shape: Shape = .{ .m = 1, .n = 4096, .k = 4096, .bits = 4, .group = 64, .fp16 = false };
+    for ([_]struct { u32, []const u8 }{ .{ 1, "rows16" }, .{ 32, "rows16" }, .{ 33, "rows64" }, .{ 64, "rows64" }, .{ 65, "matrix12" }, .{ 2048, "matrix12" } }) |w| {
+        shape.m = w[0];
+        try std.testing.expect(std.mem.endsWith(u8, r.select(on, .mlx, .project, .prefill, shape).?.id, w[1]));
+    }
+    // Flash Next's gate and up as the launch passes it: 10 slots a row
+    for ([_]struct { u32, []const u8 }{ .{ 1, "rows16" }, .{ 128, "rows16" }, .{ 1024, "rows32" }, .{ 1025, "matrix12" }, .{ 2048, "matrix12" } }) |w| {
+        const pairs = w[0] * 10;
+        const routed: Shape = .{ .m = w[0], .n = 1280, .k = 2560, .bits = 2, .group = 32, .fp16 = false, .items = @min(pairs, 512) + pairs / 8, .plan_pairs = pairs };
+        try std.testing.expect(std.mem.endsWith(u8, r.select(on, .mlx, .routed, .prefill, routed).?.id, w[1]));
+    }
+    // a router that fills its items past 6 rows each: the 32-row block
+    const full: Shape = .{ .m = 1024, .n = 1280, .k = 2560, .bits = 2, .group = 32, .fp16 = false, .items = 512, .plan_pairs = 10240 };
+    try std.testing.expect(std.mem.endsWith(u8, r.select(on, .mlx, .routed, .prefill, full).?.id, "rows32"));
+    // words the matrix tiles cannot load wide, or the matrix cores switched off: the dot2 tiles by rows
+    shape.m = 2;
+    shape.words_aligned = false;
+    try std.testing.expect(std.mem.endsWith(u8, r.select(on, .mlx, .project, .prefill, shape).?.id, "block"));
+    shape.words_aligned = true;
+    try std.testing.expect(std.mem.endsWith(u8, r.select(envOn("gfx1201", true, true, false), .mlx, .project, .prefill, shape).?.id, "kp0"));
+    // a decode call keeps the dot2 tiles: gfx12's matrix tile has no decode entry
+    shape.m = 32;
+    try std.testing.expect(std.mem.endsWith(u8, r.select(on, .mlx, .project, .decode, shape).?.id, ".decode.gemm"));
 }
