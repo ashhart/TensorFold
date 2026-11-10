@@ -8,6 +8,9 @@ const qwen35 = @import("qwen3_5");
 const Engine = qwen35.engine.Engine;
 const Draft = qwen35.draft.Draft;
 const Features = lanes.backend.Features;
+const Hold = lanes.drafter.Hold;
+const Absorb = lanes.drafter.Absorb;
+const max_streams = qwen35.draft.max_streams;
 
 /// Chat prompts of the kinds DFlash2's README reports (code, math, chat), thinking on as the template's default.
 const texts = [_][]const u8{
@@ -43,7 +46,7 @@ fn ms(io: std.Io, t0: std.Io.Timestamp) f64 {
 }
 
 /// The target's tap ring in `caches` as the drafter reads it; each absorb sets its first row and row count.
-fn features(e: *Engine, c: qwen35.draft_config.Config, caches: anytype) Features {
+fn features(e: *Engine, c: qwen35.draft_config.Config, caches: *qwen35.state.Caches) Features {
     return .{
         .buffer = caches.tap.?.base(),
         .rows = 0,
@@ -60,6 +63,10 @@ const Rounds = struct {
     accepted: usize = 0, // drafts accepted over all rounds
     chains: std.ArrayList(u32) = .empty,
 
+    fn same(a: Rounds, b: Rounds) bool {
+        return a.rounds == b.rounds and std.mem.eql(u32, a.chains.items, b.chains.items);
+    }
+
     fn add(all: *Rounds, r: Rounds) void {
         all.rounds += r.rounds;
         all.first += r.first;
@@ -70,61 +77,90 @@ const Rounds = struct {
     fn kept(r: Rounds) f64 {
         return @as(f64, @floatFromInt(r.accepted)) / @as(f64, @floatFromInt(r.rounds));
     }
-
-    /// Rounds whose first draft was right, as a share of all rounds.
-    fn firstRight(r: Rounds) f64 {
-        return @as(f64, @floatFromInt(r.first)) / @as(f64, @floatFromInt(r.rounds));
-    }
 };
 
-/// Rounds as the round loop runs them: absorb the kept rows, hold after the pending token, keep the matching prefix.
-fn rounds(gpa: std.mem.Allocator, d: *Draft, s: *lanes.Stream, f0: Features, len: usize, g: []const u32) !Rounds {
+/// One stream's rounds over a continuation: its prompt's length, its target's features and the target's tokens.
+const Track = struct { stream: *lanes.Stream, f: Features, len: usize, g: []const u32, r: Rounds = .{} };
+
+/// Rounds as the round loop runs them, the live streams in one hold; returns the holds that ran more than one stream.
+fn rounds(gpa: std.mem.Allocator, d: *Draft, tracks: []Track) !usize {
+    if (tracks.len > max_streams) return error.TooManyStreams;
     const x = d.drafter();
     const depth = d.c.block - 1;
-    var r: Rounds = .{};
-    errdefer r.chains.deinit(gpa);
-    try x.open(s);
-    defer x.release(s);
-    var f = f0;
-    f.offset = 0;
-    f.rows = @intCast(len);
-    try x.absorb(&.{.{ .stream = s, .features = f, .start = 0, .follow = g[0..1] }});
-    var p = len; // the pending token g[p - len] sits at position p
-    while (p - len + depth + 1 <= g.len) {
-        const at = p - len;
-        try x.hold(&.{.{
-            .stream = s,
-            .pending = g[at],
-            .position = p + 1,
-            .depth = @intCast(depth),
-            .sampling = s.sampling,
-        }});
-        var held: [16]u32 = undefined;
-        try x.held(&.{s}, &.{held[0..depth]});
-        try r.chains.appendSlice(gpa, held[0..depth]);
-        var k: usize = 0;
-        while (k < depth and held[k] == g[at + 1 + k]) k += 1;
-        r.rounds += 1;
-        r.accepted += k;
-        if (k > 0) r.first += 1;
-        // the target keeps the accepted drafts and its bonus token: those rows are absorbed next
-        f.offset = p;
-        f.rows = @intCast(k + 1);
-        const kept = g[at + 1 ..][0..@min(k + 1, g.len - at - 1)];
-        try x.absorb(&.{.{ .stream = s, .features = f, .start = p, .follow = kept, .prompt = false }});
-        p += k + 1;
+    for (tracks) |*t| t.r = .{};
+    errdefer for (tracks) |*t| t.r.chains.deinit(gpa);
+    var opened: usize = 0;
+    defer for (tracks[0..opened]) |t| x.release(t.stream);
+    var at: [max_streams]usize = undefined; // each stream's pending token g[at] at position len + at
+    for (tracks, 0..) |t, i| {
+        try x.open(t.stream);
+        opened += 1;
+        var f = t.f;
+        f.offset = 0;
+        f.rows = @intCast(t.len);
+        try x.absorb(&.{.{ .stream = t.stream, .features = f, .start = 0, .follow = t.g[0..1] }});
+        at[i] = 0;
     }
-    return r;
+    var holds: [max_streams]Hold = undefined;
+    var streams: [max_streams]*lanes.Stream = undefined;
+    var chains: [max_streams][16]u32 = undefined;
+    var outs: [max_streams][]u32 = undefined;
+    var live: [max_streams]usize = undefined;
+    var absorbs: [max_streams]Absorb = undefined;
+    var shared: usize = 0;
+    while (true) {
+        var n: usize = 0;
+        for (tracks, 0..) |t, i| {
+            if (at[i] + depth + 1 > t.g.len) continue;
+            const p = t.len + at[i];
+            holds[n] = .{
+                .stream = t.stream,
+                .pending = t.g[at[i]],
+                .position = p + 1,
+                .depth = @intCast(depth),
+                .sampling = t.stream.sampling,
+            };
+            streams[n] = t.stream;
+            outs[n] = chains[n][0..depth];
+            live[n] = i;
+            n += 1;
+        }
+        if (n == 0) return shared;
+        if (n > 1) shared += 1;
+        try x.hold(holds[0..n]);
+        try x.held(streams[0..n], outs[0..n]);
+        for (live[0..n], outs[0..n], absorbs[0..n]) |i, chain, *a| {
+            const t = &tracks[i];
+            const next = t.g[at[i] + 1 ..];
+            try t.r.chains.appendSlice(gpa, chain);
+            var k: usize = 0;
+            while (k < depth and chain[k] == next[k]) k += 1;
+            t.r.rounds += 1;
+            t.r.accepted += k;
+            if (k > 0) t.r.first += 1;
+            // the target keeps the accepted drafts and its bonus token: those rows are absorbed next
+            const p = t.len + at[i];
+            var f = t.f;
+            f.offset = p;
+            f.rows = @intCast(k + 1);
+            const follow = next[0..@min(k + 1, next.len)];
+            a.* = .{ .stream = t.stream, .features = f, .start = p, .follow = follow, .prompt = false };
+            at[i] += k + 1;
+        }
+        try x.absorb(absorbs[0..n]);
+    }
 }
 
-/// A stream's rounds run twice: the rerun must draft the same chains; the first run's rounds are returned.
-fn twice(gpa: std.mem.Allocator, d: *Draft, s: *lanes.Stream, f: Features, len: usize, g: []const u32) !Rounds {
-    var a = try rounds(gpa, d, s, f, len, g);
-    errdefer a.chains.deinit(gpa);
-    var b = try rounds(gpa, d, s, f, len, g);
-    defer b.chains.deinit(gpa);
-    if (a.rounds != b.rounds or !std.mem.eql(u32, a.chains.items, b.chains.items)) return error.DraftsDiffer;
-    return a;
+/// A stream's rounds run twice on one stream: the rerun must draft the same chains; the first run's are returned.
+fn twice(gpa: std.mem.Allocator, d: *Draft, t: Track) !Rounds {
+    var a = [1]Track{t};
+    _ = try rounds(gpa, d, &a);
+    errdefer a[0].r.chains.deinit(gpa);
+    var b = [1]Track{t};
+    _ = try rounds(gpa, d, &b);
+    defer b[0].r.chains.deinit(gpa);
+    if (!a[0].r.same(b[0].r)) return error.DraftsDiffer;
+    return a[0].r;
 }
 
 /// Positions and shapes through the contract: a hold behind its context and too few held drafts are refused.
@@ -145,7 +181,7 @@ fn refusals(d: *Draft, s: *lanes.Stream, f0: Features) !void {
     for (out[0..3]) |t| if (t >= d.c.vocab) return error.DraftOutOfVocabulary;
 }
 
-/// A seeded sampled stream: the target draws each prompt's continuation by `rule`, and the drafter's chains by it too.
+/// The seeded sampled run: the target draws each continuation by `rule`, and the drafter's chains draw by it too.
 fn sampled(gpa: std.mem.Allocator, io: std.Io, e: *Engine, d: *Draft, prompts: []const []u32, steps: usize) !void {
     const rule: lanes.Sampling = .{ .seed = seed, .temperature = 1.0 };
     var stream: lanes.Stream = undefined;
@@ -157,7 +193,7 @@ fn sampled(gpa: std.mem.Allocator, io: std.Io, e: *Engine, d: *Draft, prompts: [
         const g = try gpa.alloc(u32, steps);
         defer gpa.free(g);
         _ = try decode(io, e, &caches, prompt, g, rule);
-        var a = try twice(gpa, d, &stream, features(e, d.c, &caches), prompt.len, g);
+        var a = try twice(gpa, d, .{ .stream = &stream, .f = features(e, d.c, &caches), .len = prompt.len, .g = g });
         defer a.chains.deinit(gpa);
         const fmt = "PASS drafter sampled prompt {d} (seed {d}, temperature {d:.1}): {d} rounds, " ++
             "first draft right {d}/{d}, {d:.2} drafts kept a round ({d:.2} tokens), identical rerun, chains {x:0>16}\n";
@@ -165,9 +201,10 @@ fn sampled(gpa: std.mem.Allocator, io: std.Io, e: *Engine, d: *Draft, prompts: [
         std.debug.print(fmt, .{ n, seed, rule.temperature, a.rounds, a.first, a.rounds, a.kept(), a.kept() + 1, hash });
         all.add(a);
     }
+    const first = @as(f64, @floatFromInt(all.first)) / @as(f64, @floatFromInt(all.rounds));
     const summary = "drafter sampled acceptance over {d} rounds: first draft right {d:.3}, " ++
         "mean acceptance length {d:.2} (kept drafts + bonus)\n";
-    std.debug.print(summary, .{ all.rounds, all.firstRight(), all.kept() + 1 });
+    std.debug.print(summary, .{ all.rounds, first, all.kept() + 1 });
 }
 
 pub fn run(gpa: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !void {
@@ -203,49 +240,87 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !void
     const ring_rows = e.model().taps.rows;
     if (longest + steps > ring_rows) return error.RingTooShort;
     const t_load = std.Io.Clock.awake.now(io);
-    const d = try Draft.init(gpa, io, e, args[0], 1);
+    // frames of two streams at most: a lone stream's holds run frames of one, the pair's frames of two
+    const d = try Draft.init(gpa, io, e, args[0], 2);
     defer d.deinit();
     const depth: f64 = @floatFromInt(c.block - 1);
     const loaded = "PASS drafter load: {d:.1} s, a draft step {d:.2} ms (a hold of {d} drafts {d:.2} ms)\n";
     std.debug.print(loaded, .{ ms(io, t_load) / 1e3, d.step_ms, c.block - 1, d.step_ms * depth });
-    var stream: lanes.Stream = undefined;
-    stream.sampling = null;
-    var all: Rounds = .{};
+    var streams: [2]lanes.Stream = undefined;
+    for (&streams) |*s| s.sampling = null;
+    // every prompt's greedy continuation, its caches kept for the pair that drafts two prompts together
+    var caches: [texts.len]qwen35.state.Caches = undefined;
+    var greedy: [texts.len][]u32 = undefined;
+    var made: usize = 0;
+    defer for (caches[0..made], greedy[0..made]) |*cs, g| {
+        cs.deinit(gpa);
+        gpa.free(g);
+    };
     var plain_ms: f64 = 0;
     for (prompts, 0..) |prompt, n| {
-        var caches = try e.newCaches(prompt.len + steps + 8);
-        defer caches.deinit(gpa);
-        const g = try gpa.alloc(u32, steps);
-        defer gpa.free(g);
-        plain_ms += try decode(io, e, &caches, prompt, g, null);
-        const f = features(e, c, &caches);
-        if (n == 0) {
-            try refusals(d, &stream, f);
-            std.debug.print("PASS drafter refusals: a hold behind its context, more drafts read than held\n", .{});
-        }
+        greedy[n] = try gpa.alloc(u32, steps);
+        caches[n] = e.newCaches(prompt.len + steps + 8) catch |err| {
+            gpa.free(greedy[n]);
+            return err;
+        };
+        made += 1;
+        plain_ms += try decode(io, e, &caches[n], prompt, greedy[n], null);
+    }
+    try refusals(d, &streams[0], features(e, c, &caches[0]));
+    std.debug.print("PASS drafter refusals: a hold behind its context, more drafts read than held\n", .{});
+    var alone: [texts.len]Rounds = undefined;
+    var ran: usize = 0;
+    defer for (alone[0..ran]) |*r| r.chains.deinit(gpa);
+    var all: Rounds = .{};
+    for (prompts, 0..) |prompt, n| {
         d.times = .{};
-        var a = try twice(gpa, d, &stream, f, prompt.len, g);
-        defer a.chains.deinit(gpa);
+        const f = features(e, c, &caches[n]);
+        alone[n] = try twice(gpa, d, .{ .stream = &streams[0], .f = f, .len = prompt.len, .g = greedy[n] });
+        ran += 1;
+        const a = alone[n];
         const t = d.times;
-        const per = a.kept();
         const fmt = "PASS drafter prompt {d} ({d} tokens, {d} steps): {d} rounds, first draft right {d}/{d}, " ++
             "{d:.2} drafts kept a round ({d:.2} tokens), identical rerun; hold {d:.2} ms, absorb {d:.2} ms\n";
         const hold_ms = @as(f64, @floatFromInt(t.hold_ns)) / 1e6 / @as(f64, @floatFromInt(t.holds));
         const absorb_ms = @as(f64, @floatFromInt(t.absorb_ns)) / 1e6 / @as(f64, @floatFromInt(t.absorbs));
+        const per = a.kept();
         std.debug.print(fmt, .{ n, prompt.len, steps, a.rounds, a.first, a.rounds, per, per + 1, hold_ms, absorb_ms });
         all.add(a);
     }
     const plain = plain_ms / @as(f64, @floatFromInt(prompts.len));
     const summary = "drafter acceptance over {d} rounds: first draft right {d:.3}, " ++
         "mean acceptance length {d:.2} (kept drafts + bonus); plain decode {d:.2} ms a token\n";
-    std.debug.print(summary, .{ all.rounds, all.firstRight(), all.kept() + 1, plain });
+    const first = @as(f64, @floatFromInt(all.first)) / @as(f64, @floatFromInt(all.rounds));
+    std.debug.print(summary, .{ all.rounds, first, all.kept() + 1, plain });
     // a drafter blind to its taps, or reading its ring a slot behind, keeps fewer drafts than a working one
     if (all.kept() + 1 < min_length) return error.LowAcceptance;
+    // prompts 0 and 1 in frames of two streams, in both orders: a stream's chains must not depend on its slot
+    var ab: [2]Track = undefined;
+    var ba: [2]Track = undefined;
+    for (0..2) |n| {
+        const f = features(e, c, &caches[n]);
+        const t: Track = .{ .stream = &streams[n], .f = f, .len = prompts[n].len, .g = greedy[n] };
+        ab[n] = t;
+        ba[1 - n] = t;
+    }
+    const together = try rounds(gpa, d, &ab);
+    defer for (&ab) |*t| t.r.chains.deinit(gpa);
+    _ = try rounds(gpa, d, &ba);
+    defer for (&ba) |*t| t.r.chains.deinit(gpa);
+    if (together == 0) return error.NoSharedFrame;
+    for (0..2) |n| if (!ab[n].r.same(ba[1 - n].r)) return error.FrameSlotsDiffer;
+    for (0..2) |n| {
+        const r = ab[n].r;
+        const fmt = "PASS drafter two streams, prompt {d}: {d} frames of two, chains equal in either slot; " ++
+            "{d} rounds, {d:.2} tokens a round (alone {d} rounds, {d:.2}), chains {s} its chains alone\n";
+        const equal = if (r.same(alone[n])) "equal to" else "unlike";
+        std.debug.print(fmt, .{ n, together, r.rounds, r.kept() + 1, alone[n].rounds, alone[n].kept() + 1, equal });
+    }
     try sampled(gpa, io, e, d, &prompts, steps);
 }
 
 /// The mean acceptance length under which the check fails: below a clean run's, above a ring read a slot behind.
 const min_length = 4.5;
 
-/// The sampled stream's seed.
+/// The sampled run's seed.
 const seed = 7;
