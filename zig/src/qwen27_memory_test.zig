@@ -14,6 +14,26 @@ fn fixture() memory.Fit {
     return .{ .config = config(), .context = 131072 + 128, .slots = 2, .shared = true, .current_rows = 512, .left = 0 };
 }
 
+test "qwen27 memory: the pre-M5 default fits both streams where the unused 512-row scratch cannot" {
+    var f = fixture();
+    f.shared = false;
+    f.context = 32768 + 16;
+    f.current_rows = 128;
+    const geometry = try @import("families/qwen27/attention_plan.zig").Geometry.fromConfig(f.config, false);
+    const selected = rows.frameRequested(15, false, null, geometry);
+    try std.testing.expectEqual(@as(u32, 128), selected);
+    f.left = try f.cost(selected, 2);
+    try std.testing.expectEqual(@as(u32, 2), try f.streams(selected, true));
+    try std.testing.expectError(error.TooManyStreams, f.streams(512, true));
+    try std.testing.expectEqual(@as(u32, 1), try f.streams(512, false));
+    f.slots = 1;
+    f.left = try f.cost(selected, 1);
+    try std.testing.expectEqual(@as(u32, 1), try f.streams(selected, true));
+    try std.testing.expectError(error.TooManyStreams, f.streams(512, true));
+    f.left -= 1;
+    try std.testing.expectError(error.TooManyStreams, f.streams(selected, true));
+}
+
 test "qwen27 memory: a wide frame preserves all configured slots and the exact working-set boundary" {
     var f = fixture();
     const wide = try f.cost(2048, f.slots);

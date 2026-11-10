@@ -5,6 +5,34 @@ const policy = @import("native/qwen27_prompt_rows.zig");
 const Stream = @import("core/lanes/stream.zig").Stream;
 const a = std.testing.allocator;
 
+test "qwen27 rows: every qualified chip sizes its dense frame to the unchanged prompt width" {
+    for ([_]u32{ 13, 14, 15, 16, 17, 18 }, [_]u32{ 128, 128, 128, 128, 2048, 512 }) |generation, expected| {
+        const geometry = @import("families/qwen27/attention_plan.zig").Geometry{ .shared_prefix = generation >= 17 };
+        const chosen = rows.frameRequested(generation, false, null, geometry);
+        try std.testing.expectEqual(expected, chosen);
+        try std.testing.expectEqual(geometry.promptRows(rows.requested(generation, false, null)), geometry.promptRows(chosen));
+    }
+}
+
+test "qwen27 rows: deferred loading keeps the real geometry and the M5 initial frame" {
+    try std.testing.expectEqual(@as(u32, 128), rows.frameRequested(0, false, null, .{ .shared_prefix = false }));
+    try std.testing.expectEqual(@as(u32, 512), rows.frameRequested(0, false, null, .{}));
+    try std.testing.expectEqual(@as(u32, 2048), rows.frameRequested(17, false, null, .{}));
+    try std.testing.expectEqual(@as(u32, 512), rows.frameRequested(15, false, null, .{}));
+}
+
+test "qwen27 rows: frame overrides and routed defaults stay exact on every chip" {
+    for ([_]u32{ 0, 13, 14, 15, 16, 17, 18 }) |generation| {
+        const geometry = @import("families/qwen27/attention_plan.zig").Geometry{ .shared_prefix = generation >= 17 };
+        try std.testing.expectEqual(@as(u32, 1024), rows.frameRequested(generation, true, null, geometry));
+        for ([_]bool{ false, true }) |routed| {
+            for ([_][]const u8{ "16", "128", "512", "1024", "2048" }, [_]u32{ 16, 128, 512, 1024, 2048 }) |value, wanted| {
+                try std.testing.expectEqual(wanted, rows.frameRequested(generation, routed, value, geometry));
+            }
+        }
+    }
+}
+
 test "qwen27 rows: only the measured generation widens its default" {
     for ([_]u32{ 0, 13, 14, 15, 16, 18 }) |generation| try std.testing.expectEqual(@as(u32, 512), rows.requested(generation, false, null));
     try std.testing.expectEqual(@as(u32, 2048), rows.requested(17, false, null));

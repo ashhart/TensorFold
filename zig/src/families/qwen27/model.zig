@@ -139,7 +139,8 @@ pub const Model = struct {
         pipelines.end();
         const allocation = timing.span(.initial_allocation);
         // Serving defers automatic widening until its context and streams are known; explicit widths stay exact.
-        m.frame = try Frame.init(m.device, shard.local, @max(rows, promptRows(shard.local, if (later) 0 else m.device.generation())));
+        const geometry = try @import("attention_plan.zig").Geometry.fromConfig(shard.local, m.device.tensorUnits());
+        m.frame = try Frame.init(m.device, shard.local, @max(rows, promptRows(shard.local, if (later) 0 else m.device.generation(), geometry)));
         errdefer m.frame.deinit();
         allocation.end();
         m.ane = null;
@@ -208,10 +209,10 @@ pub const Model = struct {
     }
 };
 
-/// A prompt pass's requested rows, before the runner's frame and attention limits.
-pub fn promptRows(c: cfg.Config, generation: u32) u32 {
+/// Default frame rows follow attention geometry; a validated environment override keeps its width.
+pub fn promptRows(c: cfg.Config, generation: u32, geometry: @import("attention_plan.zig").Geometry) u32 {
     const value = if (std.c.getenv("TF_PROMPT_ROWS")) |v| std.mem.span(v) else null;
-    return @import("prompt_rows.zig").requested(generation, c.moe(), value);
+    return @import("prompt_rows.zig").frameRequested(generation, c.moe(), value, geometry);
 }
 
 /// The qualified sizes: the 27B's, and the 9B's (half the depth, narrower layers, the same heads of 256 and 128).
