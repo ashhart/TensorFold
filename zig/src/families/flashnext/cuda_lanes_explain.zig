@@ -57,4 +57,6 @@ test "exl3: load refusals are diagnosed without borrowing request diagnostics" {
         try testing.expect(explain(err) != null);
         try testing.expectEqual(@as(?[]const u8, null), open(err));
     }
+    for ([_]anyerror{ error.UnsupportedQuantization, error.BadRank }) |err|
+        try testing.expectEqual(@as(?[]const u8, null), open(err));
 }
