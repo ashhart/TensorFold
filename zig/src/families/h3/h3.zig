@@ -173,12 +173,14 @@ pub const Model = struct {
         self.final_norm = try self.held("final_norm.weight", .bf16, hidden);
         self.w_video_in = try self.held("video_in.weight", .f32, hidden * self.video_in);
         self.b_video_in = try self.held("video_in.bias", .f32, hidden);
-        self.w_audio_in = try self.held("audio_in.weight", .f32, hidden * self.audio_in);
-        self.b_audio_in = try self.held("audio_in.bias", .f32, hidden);
+        // a picture's case has no audio: its audio projections stand in for nothing and are never dispatched
+        const audio_case = self.audio > 0;
+        self.w_audio_in = if (audio_case) try self.held("audio_in.weight", .f32, hidden * self.audio_in) else self.w_video_in;
+        self.b_audio_in = if (audio_case) try self.held("audio_in.bias", .f32, hidden) else self.b_video_in;
         self.w_video_out = try self.held("video_out.weight", .f32, hidden * self.video_in);
         self.b_video_out = try self.held("video_out.bias", .f32, self.video_in);
-        self.w_audio_out = try self.held("audio_out.weight", .f32, hidden * self.audio_in);
-        self.b_audio_out = try self.held("audio_out.bias", .f32, self.audio_in);
+        self.w_audio_out = if (audio_case) try self.held("audio_out.weight", .f32, hidden * self.audio_in) else self.w_video_in;
+        self.b_audio_out = if (audio_case) try self.held("audio_out.bias", .f32, self.audio_in) else self.b_video_in;
         self.cos = try self.held("cos", .f32, rows * self.rot);
         self.sin = try self.held("sin", .f32, rows * self.rot);
         self.slot = try self.held("tile_slot", .i32, rows);
@@ -218,10 +220,10 @@ pub const Model = struct {
             @memcpy(self.condition_latents.slice(f32, n), held_rows);
         }
         self.video_latents = try device.buffer(self.video * self.video_in * 4, shared);
-        self.audio_latents = try device.buffer(self.audio * self.audio_in * 4, shared);
+        self.audio_latents = try device.buffer(@max(self.audio * self.audio_in, 1) * 4, shared);
         self.normed = try device.buffer(rows * hidden * 2, shared);
         self.video_velocity = try device.buffer(self.video * self.video_in * 4, shared);
-        self.audio_velocity = try device.buffer(self.audio * self.audio_in * 4, shared);
+        self.audio_velocity = try device.buffer(@max(self.audio * self.audio_in, 1) * 4, shared);
 
         self.blocks = try gpa.alloc(Block, layers);
         for (self.blocks, 0..) |*b, i| {
@@ -342,7 +344,7 @@ pub const Model = struct {
         // a first frame's rows enter like video rows on every pass and are never stepped
         const media = self.text + self.condition;
         if (self.condition > 0) self.rowsIn(enc.*, self.condition_latents, self.w_video_in, self.b_video_in, self.condition, self.video_in, self.text);
-        self.rowsIn(enc.*, self.audio_latents, self.w_audio_in, self.b_audio_in, self.audio, self.audio_in, media);
+        if (self.audio > 0) self.rowsIn(enc.*, self.audio_latents, self.w_audio_in, self.b_audio_in, self.audio, self.audio_in, media);
         self.rowsIn(enc.*, self.video_latents, self.w_video_in, self.b_video_in, self.video, self.video_in, media + self.audio);
         self.lap(&pass, "rows in");
         for (0..self.blocks.len) |index| block.run(self, &pass, index);
@@ -365,7 +367,7 @@ pub const Model = struct {
         enc.setBuffer(self.normed, 0, 6);
         enc.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(32, 1, 1));
         enc.barrier();
-        self.rowsOut(enc.*, self.w_audio_out, self.b_audio_out, self.audio_velocity, self.audio, self.audio_in, media);
+        if (self.audio > 0) self.rowsOut(enc.*, self.w_audio_out, self.b_audio_out, self.audio_velocity, self.audio, self.audio_in, media);
         self.rowsOut(enc.*, self.w_video_out, self.b_video_out, self.video_velocity, self.video, self.video_in, media + self.audio);
         pass.enc.end();
         pass.cb.commit();

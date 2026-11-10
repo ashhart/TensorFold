@@ -37,6 +37,12 @@ pub const Rows = struct {
 };
 
 pub fn counts(v: []const i32) !Rows {
+    return countsFor(v, true);
+}
+
+/// `has_audio`: whether the case carries audio. A picture's case (MiniMax-H3-Image) carries none: no audio rows,
+/// generated or held. A clip's case keeps needing both audio and video rows.
+pub fn countsFor(v: []const i32, has_audio: bool) !Rows {
     if (v.len < 6 or v.len > 8) return error.H3BadCounts;
     for (v) |n| if (n < 0) return error.H3NegativeCount;
     const prefix: usize = @intCast(v[0]);
@@ -48,7 +54,8 @@ pub fn counts(v: []const i32) !Rows {
     const condition: usize = if (v.len >= 7) @intCast(v[6]) else 0;
     const held: usize = if (v.len == 8) @intCast(v[7]) else 0;
     if (held > audio) return error.H3HeldAudioExceedsTotal;
-    if (audio == 0 or video == 0) return error.H3EmptyMedia;
+    if (!has_audio and audio != 0) return error.H3PictureHasAudio;
+    if ((has_audio and audio == 0) or video == 0) return error.H3EmptyMedia;
     const tiles = try sum(&.{ prefix, video_tiles });
     if (prefix == 0 or video_tiles == 0 or tiles > tile_max) return error.H3BadTiles;
     if (keep > video_tiles) return error.H3BadKeep;
@@ -124,6 +131,9 @@ pub const Case = struct {
     }
 };
 
+/// A clip's audio tensors; a picture's case has none of them.
+pub const audio_tensors = [_][]const u8{ "audio_in.weight", "audio_in.bias", "audio_out.weight", "audio_out.bias", "audio", "audio_velocity", "audio_step" };
+
 fn matrix(e: st.Entry) !void {
     if (e.rank != 2 or e.dtype != .bf16) return error.H3BadCheckpointShape;
     for (e.shape[0..2]) |n| dimension(n) catch return error.H3BadCheckpointShape;
@@ -136,7 +146,10 @@ pub fn read(a: std.mem.Allocator, c: Case, q: st.Entry, fc2: st.Entry, layers: u
     try c.expect("geometry", .i32, &.{e.shape[0]});
     var v: [8]i32 = undefined;
     for (v[0..e.shape[0]], 0..) |*n, i| n.* = try c.int("geometry", i);
-    const r = try counts(v[0..e.shape[0]]);
+    // a case without audio's input projection is a picture's: then it may carry no audio tensor at all
+    const audio = c.names.get("audio_in.weight") != null;
+    if (!audio) for (audio_tensors) |name| if (c.names.get(name) != null) return error.H3PictureHasAudio;
+    const r = try countsFor(v[0..e.shape[0]], audio);
     try matrix(q);
     try matrix(fc2);
     const divisor: usize = if (base) 3 else 1;
@@ -150,23 +163,24 @@ pub fn read(a: std.mem.Allocator, c: Case, q: st.Entry, fc2: st.Entry, layers: u
     _ = try sum(&.{ inner, inner, inner });
     _ = try sum(&.{ mlp, mlp });
     const vi = try c.entry("video_in.weight");
-    const ai = try c.entry("audio_in.weight");
+    const ai = if (audio) try c.entry("audio_in.weight") else vi;
     const tab = try c.entry("tables.0");
     const cos = try c.entry("cos");
     const final = try c.entry("final");
     const adaln = try c.entry("adaln");
     if (vi.rank != 2 or ai.rank != 2 or tab.rank != 3 or cos.rank != 2 or final.rank != 2 or adaln.rank != 2)
         return error.H3BadTensorShape;
-    const g = Geometry{ .layout = r, .inner = inner, .hidden = hidden, .heads = inner / 128, .mlp = mlp, .video_in = vi.shape[1], .audio_in = ai.shape[1], .lines = tab.shape[1], .rot = cos.shape[1], .times = final.shape[0], .steps = adaln.shape[0] };
-    for ([_]usize{ g.video_in, g.audio_in, g.lines, g.times, g.steps }) |n| try dimension(n);
+    const g = Geometry{ .layout = r, .inner = inner, .hidden = hidden, .heads = inner / 128, .mlp = mlp, .video_in = vi.shape[1], .audio_in = if (audio) ai.shape[1] else 0, .lines = tab.shape[1], .rot = cos.shape[1], .times = final.shape[0], .steps = adaln.shape[0] };
+    for ([_]usize{ g.video_in, if (audio) g.audio_in else 1, g.lines, g.times, g.steps }) |n| try dimension(n);
     if (g.rot == 0 or g.rot > 128 or g.rot % 2 != 0) return error.H3BadRotary;
     try g.buffers(base);
     try c.expect("text", .bf16, &.{ r.text, hidden });
     try c.expect("final", .bf16, &.{ g.times, 2 * hidden });
     try c.expect("final_norm.weight", .bf16, &.{hidden});
-    inline for (.{ "video", "audio" }) |kind| {
+    inline for (.{ "video", "audio" }) |kind| kinds: {
         const width = if (comptime std.mem.eql(u8, kind, "video")) g.video_in else g.audio_in;
         const n = if (comptime std.mem.eql(u8, kind, "video")) r.video else r.audio;
+        if (width == 0) break :kinds;
         try c.expect(kind ++ "_in.weight", .f32, &.{ hidden, width });
         try c.expect(kind ++ "_in.bias", .f32, &.{hidden});
         try c.expect(kind ++ "_out.weight", .f32, &.{ width, hidden });
