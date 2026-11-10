@@ -17,6 +17,7 @@ pub const Shape = struct {
     join: bool = false, // a paged forward whose streams share pages (Seg.share): the rows kernels' join variants
     /// A pipeline stage's piece of the forward (cuda_stage_forward.zig); one engine runs the whole.
     part: @import("cuda_stage_forward.zig").Part = .whole,
+    table: bool = false, // a pool lane among the segments: the scans read state tables (_table kernels)
 
     pub fn init(rows: usize, segments: usize, record: bool, taps: bool, slots: u8) Shape {
         std.debug.assert(rows > 0 and rows <= @as(usize, if (record) Round.most_verify else Round.max_rows) and segments > 0 and segments <= rows);
@@ -27,7 +28,7 @@ pub const Shape = struct {
 
     pub fn key(s: Shape) u64 {
         // captured shapes only: a window bucket's rows fit the low byte
-        return @as(u32, @as(u8, @intCast(s.total))) | @as(u32, s.nseg) << 8 | @as(u32, @intFromBool(s.record)) << 16 | @as(u32, @intFromBool(s.prompt)) << 17 | @as(u32, @intFromBool(s.taps)) << 18 | @as(u32, s.slots) << 19 | @as(u32, @intFromBool(s.hidden)) << 27 | @as(u32, @intFromBool(s.paged)) << 28 | @as(u32, @intFromBool(s.mt2)) << 29 | @as(u32, @intFromBool(s.rows)) << 30 | @as(u32, @intFromBool(s.part == .head)) << 31 | @as(u64, @intFromBool(s.join)) << 32;
+        return @as(u32, @as(u8, @intCast(s.total))) | @as(u32, s.nseg) << 8 | @as(u32, @intFromBool(s.record)) << 16 | @as(u32, @intFromBool(s.prompt)) << 17 | @as(u32, @intFromBool(s.taps)) << 18 | @as(u32, s.slots) << 19 | @as(u32, @intFromBool(s.hidden)) << 27 | @as(u32, @intFromBool(s.paged)) << 28 | @as(u32, @intFromBool(s.mt2)) << 29 | @as(u32, @intFromBool(s.rows)) << 30 | @as(u32, @intFromBool(s.part == .head)) << 31 | @as(u64, @intFromBool(s.join)) << 32 | @as(u64, @intFromBool(s.table)) << 33;
     }
 };
 
@@ -88,12 +89,14 @@ test "every captured verify shape keys its own graph: a shape after another neve
     const variants = [_]u8{ 1, 2, 4, 8, 16 }; // every slot count a window's register peak gives
     for (1..Round.most_window + 1) |peak| try std.testing.expect(std.mem.indexOfScalar(u8, &variants, @intCast(Round.variant(peak))) != null);
     for (1..Round.most_verify + 1) |rows| for (1..@min(rows, Round.max_segs) + 1) |segments| for ([_]bool{ false, true }) |taps| {
-        for (variants) |slots| for (0..16) |bits| {
+        for (variants) |slots| for (0..64) |bits| {
             var s = Shape.init(rows, segments, true, taps, slots);
             s.hidden = bits & 1 != 0;
             s.paged = bits & 2 != 0;
             s.mt2 = bits & 4 != 0;
             s.join = bits & 8 != 0;
+            s.table = bits & 16 != 0;
+            s.part = if (bits & 32 != 0) .head else .whole; // a shared bit with table fails here
             try distinct.put(gpa, s, {});
             const got = try keys.getOrPut(gpa, s.key());
             if (got.found_existing) try std.testing.expectEqual(got.value_ptr.*, s) else got.value_ptr.* = s;

@@ -403,13 +403,15 @@ test "Qwen3.5 prompt tiles predicate padded rows against the actual forward tota
     defer a.free(common);
     const qwen = try std.Io.Dir.cwd().readFileAlloc(io, "zig/kernels/cuda/qwen35.cu", a, .limited(8 << 20));
     defer a.free(qwen);
+    const gdn = try std.Io.Dir.cwd().readFileAlloc(io, "zig/kernels/cuda/qwen35_gdn.cuh", a, .limited(1 << 20));
+    defer a.free(gdn);
     const int8 = try std.Io.Dir.cwd().readFileAlloc(io, "zig/kernels/cuda/w4a8_prefill.cu", a, .limited(4 << 20));
     defer a.free(int8);
 
     // Qwen3.5 row kernels return when their block's row reaches P[2] (the forward's total).
     try std.testing.expect(std.mem.indexOf(u8, common, "return P != nullptr && m >= P[2];") != null);
     try std.testing.expect(std.mem.indexOf(u8, qwen, "if (past_rows(P, blockIdx.x)) return;") != null);
-    try std.testing.expect(std.mem.indexOf(u8, qwen, "if (past_rows(P, w)) return;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, gdn, "if (past_rows(P, w)) return;") != null); // gdn_pre
     try std.testing.expect(std.mem.indexOf(u8, qwen, "if (past_rows(P, blockIdx.z)) return;") != null);
     try std.testing.expect(std.mem.indexOf(u8, qwen, "if (past_rows(P, blockIdx.x / heads)) return;") != null);
     try std.testing.expect(std.mem.indexOf(u8, qwen, "if (past_rows(P, blockIdx.y)) return;") != null);

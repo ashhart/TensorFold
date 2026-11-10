@@ -147,8 +147,12 @@ fn table(state: u64, before: u64, log: u64) [entries]u64 {
     return t;
 }
 
-/// The table as an input, and a Seg that holds it (as a keep launch's Seg does).
+/// Which instantiation runs: main's name (Seg's blocks) or _table (the state table, a pool lane's on pieces).
+var tab = false;
+
+/// A keep launch's Seg: the blocks as main's kernels take them, or for _table a table input holding them.
 fn tabled(rig: *rig_.Rig, state: u64, before: u64, log: u64) !Seg {
+    if (!tab) return .{ .rec = state, .before = before, .log = log };
     const t = table(state, before, log);
     const at = try rig.input(std.mem.sliceAsBytes(&t));
     return .{ .rec = at, .conv = at + nl * 8, .before = at + 2 * nl * 8, .log = at + 4 * nl * 8 };
@@ -277,10 +281,21 @@ pub fn run(gpu: check.Gpu) !void {
     defer mod.unload();
     var keep = try cuda.Module.load(gpu.d, cuda.kernels.qwen35_keep);
     defer keep.unload();
-    const apply = try keep.function("tf_q35k_apply");
-    const apply_pend = try keep.function("tf_q35k_apply_pend");
+    for ([_]bool{ false, true }) |t| {
+        tab = t;
+        defer tab = false;
+        try runOne(gpu, s, &mod, &keep);
+    }
+}
+
+/// Every case on one instantiation (`tab`): main's kernels, or the _table ones.
+fn runOne(gpu: check.Gpu, s: cuda.Stream, mod: *cuda.Module, keep: *cuda.Module) !void {
+    const what = if (tab) "_table" else "";
+    std.debug.print("qwen35 pending: the {s} instantiation\n", .{if (tab) "_table (state table)" else "main (Seg's blocks)"});
+    const apply = try keep.function(if (tab) "tf_q35k_apply_table" else "tf_q35k_apply");
+    const apply_pend = try keep.function(if (tab) "tf_q35k_apply_pend_table" else "tf_q35k_apply_pend");
     var fns: [scans.len]cuda.Function = undefined;
-    inline for (scans, 0..) |sc, i| fns[i] = try mod.function(std.fmt.comptimePrint("tf_q35_gdn_slots_{d}", .{sc.slots}));
+    inline for (scans, 0..) |sc, i| fns[i] = try mod.function(if (tab) std.fmt.comptimePrint("tf_q35_gdn_slots_{d}_table", .{sc.slots}) else std.fmt.comptimePrint("tf_q35_gdn_slots_{d}", .{sc.slots}));
     var red: [scans.len + 1][2]bool = @splat(@splat(false)); // each scan's, then tf_q35k_apply_pend's: dropped, swapped
     var cases: [scans.len]usize = @splat(0);
     var scratch = std.heap.ArenaAllocator.init(gpu.gpa);
@@ -301,7 +316,7 @@ pub fn run(gpu: check.Gpu) !void {
                 red[scans.len][c] = red[scans.len][c] or moved;
                 try check.expect(moved, "qwen35 pending tf_q35k_apply_pend: {s} still landed tf_q35k_apply's state (control missed) at {d} rows", .{ if (c == 0) "a dropped row" else "two swapped rows", n });
             };
-            std.debug.print("PASS qwen35 pending tf_q35k_apply_pend: {d} rows equal tf_q35k_apply's path, 5 repeats, guards\n", .{n});
+            std.debug.print("PASS qwen35 pending tf_q35k_apply_pend{s}: {d} rows equal tf_q35k_apply's path, 5 repeats, guards\n", .{ what, n });
         }
         for (windows, 0..) |win, wi| {
             var arena = std.heap.ArenaAllocator.init(gpu.gpa);
@@ -320,7 +335,7 @@ pub fn run(gpu: check.Gpu) !void {
                         defer _ = scratch.reset(.retain_capacity);
                         const got = try launch(gpu, s, null, scan, sc.r, f, sign, f.pend[0], 0, scratch.allocator());
                         same(f, sign, got, want) catch |err| {
-                            std.debug.print("  at tf_q35_gdn_slots_{d}, {s}, {d} rows pending, sign {d}\n", .{ sc.slots, win.what, n, sign });
+                            std.debug.print("  at tf_q35_gdn_slots_{d}{s}, {s}, {d} rows pending, sign {d}\n", .{ sc.slots, what, win.what, n, sign });
                             return err;
                         };
                     }
@@ -336,10 +351,10 @@ pub fn run(gpu: check.Gpu) !void {
                 cases[si] += 1;
                 ran += 1;
             }
-            std.debug.print("PASS qwen35 pending: {s}, {d} rows pending, {d} scans (slot peak {d}): rows out, logs and states equal tf_q35k_apply then the scan, {s}, 5 repeats, guards\n", .{ win.what, n, ran, f.peak, if (f.rows == 1) "written back" else "written back and not" });
+            std.debug.print("PASS qwen35 pending{s}: {s}, {d} rows pending, {d} scans (slot peak {d}): rows out, logs and states equal tf_q35k_apply then the scan, {s}, 5 repeats, guards\n", .{ what, win.what, n, ran, f.peak, if (f.rows == 1) "written back" else "written back and not" });
         }
     }
     for (scans, cases, 0..) |sc, nc, si| try check.expect(nc > 0 and red[si][0] and red[si][1], "qwen35 pending tf_q35_gdn_slots_{d}: no case, or a control never fired", .{sc.slots});
     try check.expect(red[scans.len][0] and red[scans.len][1], "qwen35 pending tf_q35k_apply_pend: a control never fired", .{});
-    std.debug.print("PASS qwen35 pending: controls RED as planted (a dropped pending row, two swapped) on every scan and tf_q35k_apply_pend\n", .{});
+    std.debug.print("PASS qwen35 pending{s}: controls RED as planted (a dropped pending row, two swapped) on every scan and tf_q35k_apply_pend\n", .{what});
 }

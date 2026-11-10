@@ -73,9 +73,9 @@ test "compiler receipts: 13.0 additions cannot replace a different later measure
     const old = registry.usageFor(row, .{ .major = 13, .minor = 0 });
     const later = registry.usageFor(row, .{ .major = 13, .minor = 2 });
     try std.testing.expectEqual(@as(u32, 4096), old[4].static);
-    try std.testing.expectEqual(@as(u32, 78), old[4].regs);
-    try std.testing.expectEqual(@as(u32, 4096), later[4].static);
-    try std.testing.expectEqual(@as(u32, 88), later[4].regs);
+    try std.testing.expectEqual(@as(u32, 72), old[4].regs);
+    try std.testing.expectEqual(@as(u32, 5120), later[4].static);
+    try std.testing.expectEqual(@as(u32, 40), later[4].regs);
     var absent = row;
     absent.launch.name = "a launch with only a 13.0 receipt";
     try std.testing.expectEqualDeep(old, registry.usageFor(absent, .{ .major = 13, .minor = 1 }));

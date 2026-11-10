@@ -81,7 +81,7 @@ test "selected live shape reaches real tiled projections and DeltaNet scan dispa
     Trace.projections = 0;
     const shape = Shape.init(17, 1, true, false, 1);
     try e.projSums(proj, 0x10000, 0x20000, 0x30000, shape.total, false, 0);
-    try e.deltaScan(true, shape.slots, shape.nseg, 0);
+    try e.deltaScan(true, shape.slots, shape.nseg, 0, shape.table);
     try std.testing.expectEqual(@as(usize, 2), Trace.projections);
     try std.testing.expectEqual(@as(u64, 0x30000), Trace.outputs[0]);
     try std.testing.expectEqual(@as(u64, 0x30000 + 16 * 4096 * 2), Trace.outputs[1]);
