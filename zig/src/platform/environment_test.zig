@@ -122,7 +122,13 @@ test "environment: Flash Next EXL3 rows keep their bounds, exact words and exact
 
 test "environment: readPath reads the process environment, blank as unset, and refuses control characters" {
     const name = "TF_FLASHNEXT_EXL3_PROFILE_DIR";
-    defer _ = sys.env.unsetenv(name);
+    const previous: ?[:0]u8 = if (sys.getenv(name)) |raw| try a.dupeZ(u8, raw) else null;
+    defer if (previous) |raw| {
+        _ = sys.env.setenv(name, raw, 1);
+        a.free(raw);
+    } else {
+        _ = sys.env.unsetenv(name);
+    };
     _ = sys.env.unsetenv(name);
     try t.expectEqual(@as(?[]const u8, null), try e.readPath(name));
     for ([_][:0]const u8{ "", "  " }) |blank| {
