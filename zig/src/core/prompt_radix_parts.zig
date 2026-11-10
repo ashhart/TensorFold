@@ -41,6 +41,25 @@ pub const Retained = struct { base: u32, ids: []const u32 };
 /// A copy a stream makes from a held page into one of its own: rows [0, rows) of `src` to the group's page `index`.
 pub const Copy = struct { group: u32, index: u32, src: u32, rows: u32 };
 
+/// What the store asks a family that declares parts: the bytes, and the device copies (each on the owner's stream).
+pub const PartHooks = struct {
+    ptr: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        /// A copied part's bytes at `at` tokens.
+        bytes: *const fn (ptr: *anyopaque, group: u32, at: u32) u64,
+        /// The owner's live bytes of `group` after `at` tokens into the held pages of `dst`.
+        copy: *const fn (ptr: *anyopaque, owner: ?*anyopaque, group: u32, at: u32, dst: Part) anyerror!void,
+        /// The held pages of `src` into the owner's live `group` (the next prompt chunk starts at its position).
+        restore: *const fn (ptr: *anyopaque, owner: ?*anyopaque, group: u32, src: Part) anyerror!void,
+        /// Rows [0, rows) of every layer of `group` from page `src` into page `dst`.
+        copy_rows: *const fn (ptr: *anyopaque, owner: ?*anyopaque, group: u32, src: u32, dst: u32, rows: u32) anyerror!void,
+        /// Every copy queued for `owner` has completed, on every rank that runs it.
+        fence: *const fn (ptr: *anyopaque, owner: ?*anyopaque) void,
+    };
+};
+
 /// The store's references: one pool reference a page, however many nodes and entries name it.
 pub const Holds = struct {
     counts: std.AutoHashMapUnmanaged(u32, u32) = .empty,

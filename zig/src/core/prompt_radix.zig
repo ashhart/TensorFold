@@ -4,6 +4,7 @@ const std = @import("std");
 const pc = @import("prompt_cache.zig");
 const tree_mod = @import("prompt_radix_tree.zig");
 const parts = @import("prompt_radix_parts.zig");
+const make_mod = @import("prompt_radix_make.zig");
 const Allocator = std.mem.Allocator;
 
 pub const Saved = tree_mod.Saved;
@@ -11,6 +12,7 @@ pub const Snapshots = tree_mod.Snapshots;
 pub const Pages = tree_mod.Pages;
 pub const Counts = tree_mod.Counts;
 pub const Node = tree_mod.Node;
+pub const Entry = tree_mod.Entry;
 pub const Tree = tree_mod.Tree;
 pub const Groups = parts.Groups;
 
@@ -20,7 +22,7 @@ pub const Rules = pc.Rules;
 /// What the tree may hold: pages, and snapshots.
 pub const Limits = struct { pages: usize = 0, snaps: usize = 0 };
 
-/// An owner's pages as the store holds them: `T` has retain, release, holders and available (kv_pool.Pool).
+/// An owner's pages as the store holds them: `T` has retain, release, holders, available and maybe hold (kv_pool.Pool).
 pub fn pagesOf(comptime T: type, owner: *T, bytes: u64) Pages {
     const V = struct {
         fn of(p: *anyopaque) *T {
@@ -38,11 +40,35 @@ pub fn pagesOf(comptime T: type, owner: *T, bytes: u64) Pages {
         fn available(p: *anyopaque) usize {
             return of(p).available();
         }
+        fn hold(p: *anyopaque, out: []u32) bool {
+            return of(p).hold(out);
+        }
     };
-    return .{ .ptr = owner, .bytes = bytes, .vtable = &.{ .retain = V.retain, .release = V.release, .holders = V.holders, .available = V.available } };
+    const has_hold = @hasDecl(T, "hold");
+    return .{ .ptr = owner, .bytes = bytes, .vtable = &.{ .retain = V.retain, .release = V.release, .holders = V.holders, .available = V.available, .hold = if (has_hold) V.hold else null } };
 }
 
-pub const Plan = pc.Plan;
+/// Where a pass resumes and the marks it keeps at (in the caller's allocator), and its retained parts to map (C3).
+pub const Plan = struct {
+    from: u32 = 0,
+    marks: []const u32 = &.{},
+    /// Each retained group's whole pages, held once for the stream: it adopts each at `base + i` (or releases it).
+    parts: []parts.Retained = &.{},
+    /// Partial pages to copy into pages of the stream's promise; `finish` ends them.
+    copies: []parts.Copy = &.{},
+
+    /// The plan's slices back to `a` (the ids' holds are the stream's to adopt or release).
+    pub fn deinit(p: Plan, a: Allocator) void {
+        a.free(p.marks);
+        for (p.parts) |r| a.free(r.ids);
+        a.free(p.parts);
+        a.free(p.copies);
+    }
+};
+pub const Parts = parts;
+pub const PartHooks = parts.PartHooks;
+pub const Retained = parts.Retained;
+pub const Copy = parts.Copy;
 
 /// What a pass asks the store about: the words the tree compares, and what reuse must also match (enforced from C6).
 pub const Query = struct {
@@ -75,18 +101,31 @@ pub const Store = struct {
     limits: Limits = .{},
     /// The tokens of recently planned shared cuts, hashed (at most SHARED_KEYS).
     shared_keys: std.ArrayList(u64) = .empty,
+    /// The checkpoint groups (C3) and the family's hooks for them; none for a store of legacy snapshots.
+    decl: make_mod.Decl = .{},
+    /// Whether an entry holds a legacy snapshot.
+    legacy: bool = true,
 
     const SHARED_KEYS = 64;
 
     pub fn init(gpa: Allocator, family: Snapshots, pages: Pages, rules: Rules) !Store {
-        return initGroups(gpa, family, pages, rules, .{});
+        return initGroups(gpa, family, pages, rules, .{}, null);
     }
 
-    /// `init` for a family that declares its cache groups (C3, #2444): `P` prefix groups page-major on the path.
-    pub fn initGroups(gpa: Allocator, family: Snapshots, pages: Pages, rules: Rules, groups: Groups) !Store {
+    /// `init` with the family's cache groups (C3, #2444) and its part hooks; `groups`' slices outlive the store.
+    pub fn initGroups(gpa: Allocator, family: Snapshots, pages: Pages, rules: Rules, groups: Groups, hooks: ?PartHooks) !Store {
         if (rules.page == 0 or (rules.planned and (rules.grid == 0 or rules.grid % rules.page != 0))) return error.BadPromptRadixRules;
         for (groups.prefix_rows) |rows| if (rows != rules.page) return error.UnequalPrefixRows; // one key a page for all
-        return .{ .tree = try Tree.init(gpa, family, pages, rules.page, rules.lookahead, groups.prefixCount()), .rules = rules };
+        if (groups.parts.len > 0 and hooks == null) return error.PartsNeedHooks;
+        if (groups.parts.len > 0 and pages.vtable.hold == null) return error.PartsNeedHold; // copies the store holds
+        for (groups.parts) |spec| if (spec.make == .retained and spec.rows == 0) return error.RetainedRows;
+        if (groups.none()) return error.PageOnlyStore; // a store with no checkpoint at all: not yet served
+        return .{
+            .tree = try Tree.init(gpa, family, pages, rules.page, rules.lookahead, groups.prefixCount()),
+            .rules = rules,
+            .decl = .{ .specs = groups.parts, .hooks = hooks },
+            .legacy = groups.legacy,
+        };
     }
 
     /// Page ids a logical page: one per prefix group.
@@ -143,19 +182,48 @@ pub const Store = struct {
         }
         s.reserve(prompt, found, marks_);
         var from: u32 = 0;
+        var out: Plan = .{ .marks = marks_ };
         if (found) |n| {
-            const family = s.tree.family;
-            const ok = if (family.vtable.restore(family.ptr, owner, n.entry.?.saved)) |_| true else |err| blk: {
+            const ok = if (s.restore(owner, n)) |_| true else |err| blk: {
                 note("restoring {d} tokens failed ({s}); prefilling from the start", .{ n.end, @errorName(err) });
                 break :blk false;
             };
             if (ok) {
+                const had = adopt.items.len;
                 try s.tree.take(n, adopt);
                 from = n.end;
+                if (n.entry.?.parts.len > 0) {
+                    const handed = s.decl.handOut(&s.tree, a, n.end, n.entry.?.parts) catch |err| {
+                        for (adopt.items[had..]) |id| s.tree.pages.vtable.release(s.tree.pages.ptr, id); // this begin's
+                        adopt.shrinkRetainingCapacity(had);
+                        return err;
+                    };
+                    out.parts = handed.parts;
+                    out.copies = handed.copies;
+                }
             }
             s.resumed(n, prompt, ok);
         }
-        return .{ .from = from, .marks = marks_ };
+        out.from = from;
+        return out;
+    }
+
+    /// The entry at `n` into `owner`, snapshot then copied parts; pinned, so reclaim cannot evict its own source.
+    fn restore(s: *Store, owner: ?*anyopaque, n: *Node) !void {
+        const e = &n.entry.?;
+        n.pins += 1;
+        defer n.pins -= 1;
+        const family = s.tree.family;
+        if (e.saved) |saved| try family.vtable.restore(family.ptr, owner, saved);
+        try s.decl.restore(owner, e.parts);
+    }
+
+    /// A resume's copies are done (the stream mapped its own pages from them): each source's hold goes back.
+    pub fn finish(s: *Store, owner: ?*anyopaque, copies: []const Copy) void {
+        if (copies.len == 0) return;
+        const h = s.decl.hooks.?;
+        h.vtable.fence(h.ptr, owner); // the stream's copies out of the sources complete first
+        for (copies) |c| s.tree.pages.vtable.release(s.tree.pages.ptr, c.src);
     }
 
     /// A restored state: it is now the prompt's (a failed restore drops it).
@@ -251,10 +319,16 @@ pub const Store = struct {
 
     /// At `at` the tree takes the ids of `mine` (page-major, `per` a page) it lacks, and the snapshot; `path` its ids.
     pub fn keep(s: *Store, q: Query, at: u32, owner: ?*anyopaque, mine: []const u32, path: []u32) Kept {
+        return s.keepParts(q, at, owner, mine, &.{}, path);
+    }
+
+    /// `keep` with the retained groups' pages through `at` (one entry a declared part; copied ones empty).
+    pub fn keepParts(s: *Store, q: Query, at: u32, owner: ?*anyopaque, mine: []const u32, retained: []const Retained, path: []u32) Kept {
         const prompt = q.key;
         const t = &s.tree;
         const np = at / s.rules.page; // logical pages below `at`
         if (!s.on() or at == 0 or at % s.step() != 0 or at + s.rules.lookahead > prompt.len or mine.len != np * s.per() or path.len != mine.len) return .{ .held = false, .shared = 0 };
+        if (!s.decl.fits(at, retained)) return .{ .held = false, .shared = 0 };
         t.clock += 1;
         const tokens = prompt[0 .. at + s.rules.lookahead]; // a page past which the lookahead differs is another page
         const flagged = std.mem.indexOfScalar(u64, s.shared_keys.items, sharedKey(tokens)) != null;
@@ -268,7 +342,8 @@ pub const Store = struct {
                 t.touch(last.?);
                 return .{ .held = true, .shared = mine.len };
             }
-            if (t.heldPages() + (np - got) * s.per() <= s.limits.pages and t.snaps + 1 <= s.limits.snaps) break;
+            const ids = (np - got) * s.per() + s.decl.ids(t, at, retained); // every id the keep adds to the holds
+            if (t.heldPages() + ids <= s.limits.pages and t.snaps + 1 <= s.limits.snaps) break;
             const v = s.victim(prompt, null) orelse {
                 t.counts.refused += 1;
                 note("kept nothing at {d} tokens: no room", .{at});
@@ -277,13 +352,22 @@ pub const Store = struct {
             t.evict(v);
         }
         const node = t.insert(tokens, mine, path) catch |err| return s.fail(at, err, 0);
+        node.pins += 1; // the parts' holds may reclaim: not this node, nor its path
+        defer node.pins -= 1;
+        // the path stays whatever follows; the entry is published only whole
+        const made = s.decl.make(t, owner, at, retained) catch |err| return s.fail(at, err, mine.len);
         const family = t.family;
-        const saved = family.vtable.save(family.ptr, owner, at) catch |err| return s.fail(at, err, mine.len);
+        const saved: ?Saved = if (s.legacy) family.vtable.save(family.ptr, owner, at) catch |err| {
+            t.dropParts(made);
+            return s.fail(at, err, mine.len);
+        } else null;
         const last = t.gpa.dupe(u32, prompt) catch {
-            family.vtable.drop(family.ptr, saved);
+            if (saved) |sv| family.vtable.drop(family.ptr, sv);
+            t.dropParts(made);
             return s.fail(at, error.OutOfMemory, mine.len);
         };
-        node.entry = .{ .saved = saved, .bytes = family.vtable.bytes(family.ptr, at), .born = @intCast(prompt.len), .used = t.clock, .last = last, .shared = flagged };
+        const bytes = if (s.legacy) family.vtable.bytes(family.ptr, at) else 0;
+        node.entry = .{ .saved = saved, .parts = made, .bytes = bytes, .born = @intCast(prompt.len), .used = t.clock, .last = last, .shared = flagged };
         t.snaps += 1;
         t.counts.kept += 1;
         return .{ .held = true, .shared = mine.len };
@@ -318,7 +402,7 @@ pub const Store = struct {
     }
 
     fn pick(n: *Node, prompt: []const u32, skip: ?*Node, moved: *?*Node, oldest: *?*Node) void {
-        if (n.entry) |e| if (n != skip) {
+        if (n.entry) |e| if (n != skip and n.pins == 0) {
             // a state its conversation moved past goes first; a shared cut or a branch point only as the least valuable
             const gone = !e.shared and !e.branched and ((prompt.len > e.born and prompt.len > n.end and extends(n, prompt)) or superseded(n, e.born));
             if (gone and (moved.* == null or e.used < moved.*.?.entry.?.used)) moved.* = n;
@@ -338,8 +422,31 @@ pub const Store = struct {
     /// Evicts until `want` pool pages are free and not promised; false when the tree cannot give that many.
     pub fn reclaim(s: *Store, want: usize) bool {
         const pages = s.tree.pages;
+        if (s.decl.specs.len > 0) while (pages.vtable.available(pages.ptr) < want) { // parts first: their path may be in use
+            s.tree.evict(s.partVictim() orelse break);
+        };
         while (pages.vtable.available(pages.ptr) < want) if (!s.tree.evictLeaf()) return false;
         return true;
+    }
+
+    /// The least valuable entry with a part page only the store holds, never a pinned one.
+    fn partVictim(s: *const Store) ?*Node {
+        var best: ?*Node = null;
+        s.pickParts(s.tree.root, &best);
+        return best;
+    }
+
+    fn pickParts(s: *const Store, n: *Node, best: *?*Node) void {
+        if (n.entry) |e| if (n.pins == 0 and s.freesPart(e) and (best.* == null or worse(n, best.*.?))) {
+            best.* = n;
+        };
+        for (n.kids.items) |k| s.pickParts(k, best);
+    }
+
+    fn freesPart(s: *const Store, e: Entry) bool {
+        const pages = s.tree.pages;
+        for (e.parts) |part| for (part.ids) |id| if (pages.vtable.holders(pages.ptr, id) == 1) return true;
+        return false;
     }
 
     /// One log line after a prompt pass: where it resumed, how many states it kept, and what the tree holds.
