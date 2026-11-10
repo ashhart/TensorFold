@@ -17,7 +17,7 @@ pub const model_type = "qwen3";
 pub const formats: []const []const u8 = &.{"bf16"};
 /// The window when neither --context nor the checkpoint's config names one (the Qwen3 8B serving default).
 pub const default_context: i64 = 32768;
-/// An embedding engine writes no reply text, so no reasoning block (Info.reasoning).
+/// A prompt-only engine writes no reply text, so no reasoning block (Info.reasoning).
 pub const reasoning = false;
 pub const drafter_refusal = "--drafter: Qwen3 dense checkpoints have no drafts to train; serve without --drafter";
 pub const record_refusal = "--record: qwen3 checkpoints give no rows to record on CUDA yet";

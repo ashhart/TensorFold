@@ -168,8 +168,8 @@ For decisions, `chat_template_kwargs` may be omitted, null, or an object contain
 ## Rerank
 
 `POST /v1/rerank` (also `/rerank`, and by `PUT` as SGLang takes it) scores each document against a query with a
-reranker checkpoint. The native HIP engine serves `Qwen/Qwen3-Reranker-8B`: the engine declares the reranker and
-its label tokens (`1_LogitScore/config.json`), and its startup line says `qwen3 reranker`. Every other server answers
+reranker checkpoint. The native HIP and CUDA engines serve the `Qwen/Qwen3-Reranker` checkpoints: the engine declares
+the reranker and its label tokens (`1_LogitScore/config.json`), and its startup line says `qwen3 reranker`. Every other server answers
 the route with HTTP 400 "this model is not a reranker", and a reranker server answers chat, completion, Responses,
 Messages, speech, decision, System One and embedding requests with HTTP 400 "this model is a reranker: use POST
 /v1/rerank".
