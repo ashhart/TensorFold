@@ -15,7 +15,7 @@ pub const usage =
     \\  ling-exl3-layers <dir> <ref> <out>   real EXL3 layers on exllamav3's inputs (prompt and decode), outputs saved
     \\  ling-init-faults <dir> [--every N]   the backend opened with each driver call, then each allocation, failing
     \\  ling-exl3-clamp <dir> [layer]   an EXL3 MoE layer's grouped gate-up in Ling's clamp order vs float64
-    \\  ling-tp <dir> <out> [--layers a,b] [--steps N] [--prompt N] [--capacity N] [--resume M] [--window W]
+    \\  ling-tp <dir> <out> [--layers a,b] [--steps N] [--prompt N] [--capacity N] [--resume M] [--window W] [--ids F]
     \\                            greedy rows at TP=1, or TP=2 over TF_LING_RANK/WORLD
     \\  ling-contract             the Ling family's own kernels (ling_glue, ling_act) through kernel-contract gates 1-4
     \\
