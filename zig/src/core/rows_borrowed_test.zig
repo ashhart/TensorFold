@@ -67,8 +67,7 @@ test "borrowed spill: a newest keep waits for the earlier write and restores aft
         try x.keep(&tokens, 900);
         try fixture.Gate.wait(&hold.entered);
         const used = x.r.worker.?.bytes();
-        // The earlier image fills the permit. The same prefix can share its blocks after publication;
-        // a cold unrelated deeper image exceeds even the empty permit and must stream instead.
+        // One image fills the permit; a shared prefix can stage later, while a cold image needs the fallback.
         const limit = used;
         x.r.worker.?.limit = limit;
         const next = if (oversized) fixture.prompt(76) else tokens;
