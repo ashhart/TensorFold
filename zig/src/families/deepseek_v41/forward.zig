@@ -76,6 +76,8 @@ pub const Forward = struct {
     drafter: ?Drafter = null,
     /// each block's traced streams (block.Options.trace) as SHA-256 hex by layer, for the last window
     trace: ?*std.AutoArrayHashMapUnmanaged(u32, [64]u8) = null,
+    layer_hash: ?*@import("layer_hash.zig").Writer = null,
+    hash_slot: u32 = 0,
     /// the largest row bucket plan() sized the buffers for (a graphed window never has more rows)
     planned_rows: u32 = 0,
     graphed: ?*Graphed = null, // decode windows through CUDA graphs (TF_DSV41_GRAPHS=1); null until the knob is read
@@ -157,6 +159,7 @@ pub const Forward = struct {
         f.deinitAfterDrain();
     }
     pub fn deinitAfterDrain(f: *Forward) void {
+        if (f.layer_hash) |w| w.close();
         @import("construction.zig").deinit(f);
         f.ids_stage.close() catch unreachable;
         f.uploads.close() catch unreachable;

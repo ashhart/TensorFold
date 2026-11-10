@@ -29,6 +29,7 @@ pub const SlotSet = struct {
     transactions: []@import("cuda_transaction.zig").Transaction,
     /// the slot whose views are bound (its state lives in f.slot meanwhile); null: the stacked bases
     active: ?u32 = null,
+    hash_slot: ?*u32 = null,
     roles: std.StringArrayHashMapUnmanaged(Stacked) = .empty,
     /// roles one buffer holds for one slot at a time, each slot's copy aside (`swap`); `owner`: whose bytes are in
     swapped: std.ArrayList(Swapped) = .empty,
@@ -124,6 +125,7 @@ pub const SlotSet = struct {
         if (ss.active == s) return;
         ss.store();
         ss.f.slot = ss.states[s];
+        if (ss.hash_slot) |slot| slot.* = s;
         ss.f.transaction = ss.transactions[s];
         ss.transactions[s] = .{};
         ss.active = s;
@@ -136,6 +138,7 @@ pub const SlotSet = struct {
         if (ss.active == s) return;
         ss.store();
         ss.f.slot = ss.states[s];
+        if (ss.hash_slot) |slot| slot.* = s;
         ss.f.transaction = ss.transactions[s];
         ss.transactions[s] = .{};
         ss.active = s;
