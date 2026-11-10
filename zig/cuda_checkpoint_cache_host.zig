@@ -4,7 +4,10 @@ const t = std.testing;
 const Ast = std.zig.Ast;
 
 fn scope(comptime path: []const u8, function: []const u8, variable: []const u8) !void {
-    const source = @embedFile("src/" ++ path);
+    try scopedSource(@embedFile("src/" ++ path), function, variable, .@"defer", null);
+}
+
+fn scopedSource(source: [:0]const u8, function: []const u8, variable: []const u8, cleanup_tag: Ast.Node.Tag, cleanup_call: ?[]const u8) !void {
     var tree = try Ast.parse(t.allocator, source, .{});
     defer tree.deinit(t.allocator);
     try t.expectEqual(@as(usize, 0), tree.errors.len);
@@ -25,8 +28,12 @@ fn scope(comptime path: []const u8, function: []const u8, variable: []const u8) 
             found += 1;
             try t.expect(at + 1 < statements.len);
             const next = statements[at + 1];
-            try t.expectEqual(.@"defer", tree.nodeTag(next));
+            try t.expectEqual(cleanup_tag, tree.nodeTag(next));
             const call = tree.nodeData(next).node;
+            if (cleanup_call) |want| {
+                try t.expectEqualStrings(want, tree.getNodeSource(call));
+                continue;
+            }
             if (std.mem.eql(u8, variable, "file")) {
                 var block: [2]Ast.Node.Index = undefined;
                 const cleanup = tree.blockStatements(&block, call).?;
@@ -49,18 +56,64 @@ const nemo = "families/nemotron/";
 const mm = "families/minimax_m3/";
 const glm = "families/glm/";
 
+fn bodySource(source: [:0]const u8, function: []const u8) ![]const u8 {
+    var tree = try Ast.parse(t.allocator, source, .{});
+    defer tree.deinit(t.allocator);
+    try t.expectEqual(@as(usize, 0), tree.errors.len);
+    var result: ?[]const u8 = null;
+    var found: usize = 0;
+    for (0..tree.nodes.len) |i| {
+        const node: Ast.Node.Index = @fromBackingInt(@intCast(i));
+        if (tree.nodeTag(node) != .fn_decl) continue;
+        var one: [1]Ast.Node.Index = undefined;
+        const proto = tree.fullFnProto(&one, node).?;
+        const name = proto.name_token orelse continue;
+        if (!std.mem.eql(u8, function, tree.tokenSlice(name))) continue;
+        found += 1;
+        result = tree.getNodeSource(tree.nodeData(node).node_and_node[1]);
+    }
+    try t.expectEqual(@as(usize, 1), found);
+    return result.?;
+}
+
+fn qwenOwner() !void {
+    const engine = @embedFile("src/" ++ qwen ++ "cuda_engine.zig");
+    const plan = @embedFile("src/" ++ qwen ++ "cuda_load_plan.zig");
+    // The constructor's deferred owner surrounds all MLX, MoE and EXL3 reads.
+    try scopedSource(engine, "initWithOptions", "load", .@"defer", "load.deinit()");
+    // A failed plan construction still releases its checkpoints; success transfers both to the plan.
+    try scopedSource(plan, "create", "ck", .@"errdefer", "core.checkpoint.cache.close(&ck)");
+    try scopedSource(plan, "create", "source", .@"errdefer", "if (source) |*s| s.deinit()");
+    const init = try bodySource(engine, "initWithOptions");
+    const deferred = std.mem.indexOf(u8, init, "defer load.deinit();").?;
+    const borrowed = std.mem.indexOf(u8, init, "const ck = load.primary();").?;
+    try t.expect(deferred < borrowed);
+    try t.expect(std.mem.indexOf(u8, init, "checkpoint.cache.close") == null);
+    try t.expect(std.mem.indexOf(u8, init, "ck.close()") == null);
+    const create = try bodySource(plan, "create");
+    try t.expect(std.mem.indexOf(u8, create, ".checkpoint = ck") != null);
+    try t.expect(std.mem.indexOf(u8, create, ".source = source") != null);
+    const drop = try bodySource(plan, "deinit");
+    const gate = std.mem.indexOf(u8, drop, "if (!p.open) return;").?;
+    const mapped = std.mem.indexOf(u8, drop, "p.finishMapped();").?;
+    const alternate = std.mem.indexOf(u8, drop, "if (p.source) |*s| s.deinit();").?;
+    const primary = std.mem.indexOf(u8, drop, "core.checkpoint.cache.close(&p.checkpoint);").?;
+    const closed = std.mem.indexOf(u8, drop, "p.open = false;").?;
+    try t.expect(gate < mapped and mapped < alternate and alternate < primary and primary < closed);
+}
+
 test "CUDA load cache: Qwen dense backbone closes after all load reads" {
-    try scope(qwen ++ "cuda_engine.zig", "init", "ck");
+    try qwenOwner();
     try scope(qwen ++ "cuda_train_load.zig", "weights", "ck");
 }
 test "CUDA load cache: Qwen MoE backbone and its separate heads" {
-    try scope(qwen ++ "cuda_engine.zig", "init", "ck");
+    try qwenOwner();
     try scope(qwen ++ "cuda_mtp_weights.zig", "load", "ck");
     try scope(qwen ++ "cuda_mtp_bf16.zig", "load", "ck");
     try scope(qwen ++ "cuda_draft_weights.zig", "load", "ck");
 }
 test "CUDA load cache: Qwen EXL3 shares the backbone checkpoint owner" {
-    try scope(qwen ++ "cuda_engine.zig", "init", "ck");
+    try qwenOwner();
 }
 test "CUDA load cache: Gemma backbone, vision and both draft loaders" {
     try scope(gemma ++ "cuda_weights.zig", "loadConfig", "ck"); // load reads the config, then calls it

@@ -14,6 +14,7 @@ const modelopt = @import("cuda_modelopt.zig");
 const x3w = @import("cuda_exl3_weights.zig");
 const hosted = @import("cuda_host_embed.zig");
 pub const recurrent = @import("cuda_recurrent.zig");
+
 pub const Geometry = geometry.Geometry;
 pub const Cache = caches.Cache;
 pub const tap_rows = caches.tap_rows;
