@@ -24,9 +24,7 @@ const Prompt = struct {
 const Timing = struct { wall: f64 = 0, gpu: f64 = 0, host: f64 = 0 };
 const Picture = struct { png: []const u8, load_s: f64 = 0, wall: f64 = 0, gpu: f64 = 0 };
 
-/// The branches answer differently, so the guidance term shows in the latents: the positive one doubles its
-/// input and the negative one returns it as it is, so one step moves `x` by
-/// `(x + guidance * (2 * x - x)) * (sigmas[s + 1] - sigmas[s])`.
+/// One step moves `x` by `(x + guidance * (2 * x - x)) * (sigmas[s + 1] - sigmas[s])`: the positive doubles.
 const Model = struct {
     a: std.mem.Allocator,
     branches: usize = 0,
@@ -159,7 +157,7 @@ fn exec(comptime B: type, arena: *std.heap.ArenaAllocator, argv: []const [*:0]co
     const a = arena.allocator();
     var environ: std.process.Environ.Map = .{ .array_hash_map = .empty, .allocator = a };
     const init: std.process.Init = .{
-        .minimal = .{ .environ = .empty, .args = .{ .vector = argv } },
+        .minimal = .{ .environ = .empty, .args = .{ .vector = try args(a, argv) } },
         .arena = arena,
         .gpa = a,
         .io = t.io,
@@ -169,6 +167,19 @@ fn exec(comptime B: type, arena: *std.heap.ArenaAllocator, argv: []const [*:0]co
     seen = 0;
     decoded_len = 0;
     return driver.run(B, init);
+}
+
+/// Windows' `Args.Vector` is the whole command line as one WTF-16 string, so each arg is quoted and space-joined.
+fn args(a: std.mem.Allocator, argv: []const [*:0]const u8) !std.process.Args.Vector {
+    if (comptime @import("builtin").os.tag != .windows) return argv;
+    var w: std.array_list.Managed(u16) = .init(a);
+    for (argv, 0..) |arg, k| {
+        try w.append('"');
+        try w.appendSlice(try std.unicode.utf8ToUtf16LeAlloc(a, std.mem.span(arg)));
+        try w.append('"');
+        if (k + 1 < argv.len) try w.append(' ');
+    }
+    return w.items;
 }
 
 /// The driver's exit code on `B` for a `side` x `side` picture of `steps` steps at `seed` and `guidance`.

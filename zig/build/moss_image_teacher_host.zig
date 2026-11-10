@@ -20,8 +20,7 @@ pub fn steps(b: *std.Build, all: *std.Build.Step) void {
     compileCuda(b);
 }
 
-/// The generate driver on an inert backend: its seeded latents, schedule, both branches and the two refusals.
-/// The four CPU-only family files sit beside the seam so one module holds them, as the engine module does.
+/// The generate driver on an inert backend: seeded latents, schedule, both branches, the two refusals, the seam.
 fn generateSteps(b: *std.Build, all: *std.Build.Step) void {
     const st = b.createModule(.{ .root_source_file = b.path("zig/src/core/safetensors.zig"), .target = b.graph.host });
     st.addImport("sys", b.createModule(.{ .root_source_file = b.path("zig/src/platform/sys.zig"), .target = b.graph.host, .link_libc = true }));

@@ -16,8 +16,7 @@ pub const usage =
 /// The card's: the negative branch skips block 22.
 pub const negative_skip = 22;
 
-/// The bounds `/v1/images/generations` serves, which this tool refuses past exactly as the server does:
-/// the card declares the same three caps the API serves, 1536 a side, 1572864 pixels and 200 steps.
+/// The caps the API serves and this tool refuses past exactly: 1536 a side, 1572864 pixels, 200 steps.
 const max_side: i64 = 1536;
 const max_pixels: usize = 1572864;
 const max_steps: i64 = 200;
@@ -95,8 +94,7 @@ fn guidanceScale(text: []const u8) Error!f32 {
     return value;
 }
 
-/// A prompt's text: blank after trimming is refused unless `blank_ok`, and a text past the served byte cap is too.
-/// The trimmed text comes back, the same bytes the server encodes for the prompt.
+/// A prompt's text: blank unless `blank_ok` is refused, as is one past the byte cap; the trimmed text comes back.
 fn promptText(text: []const u8, blank_ok: bool) Error![]const u8 {
     const kept = std.mem.trim(u8, text, " \t\r\n");
     if (kept.len == 0 and !blank_ok) return error.EmptyPrompt;
@@ -104,8 +102,7 @@ fn promptText(text: []const u8, blank_ok: bool) Error![]const u8 {
     return kept;
 }
 
-/// `tokens` are the arguments after TRANSFORMER_DIR: the options in any order and one output path.
-/// `refused` and `option` say which token or option a refusal came from, for the printed line.
+/// `tokens` are the options in any order after TRANSFORMER_DIR plus the output path; `refused` names the bad token.
 pub fn parse(tokens: []const []const u8, refused: *?[]const u8, option: *?Option) Error!Args {
     refused.* = null;
     option.* = null;

@@ -4,11 +4,7 @@ const std = @import("std");
 /// One step's seconds, the two branches summed.
 pub const Timing = struct { wall: f64 = 0, gpu: f64 = 0, host: f64 = 0 };
 
-/// `x` starts at the seeded latents and ends at the picture's: step `s` reads `timesteps[s]` and moves
-/// `x += (uncond + guidance * (cond - uncond)) * (sigmas[s + 1] - sigmas[s])`, the negative branch alone
-/// skipping `negative_skip`'s block. `timings` takes one entry per step, written for as far as it and
-/// `timesteps` reach — the shorter of the two bounds the loop, so no entry is ever left undefined; the
-/// seconds the forwards took come back. Per-step printing stays with the caller.
+/// `x += (uncond + guidance * (cond - uncond)) * (sigmas[s + 1] - sigmas[s])` per step, both branches.
 pub fn denoise(
     comptime B: type,
     a: std.mem.Allocator,
