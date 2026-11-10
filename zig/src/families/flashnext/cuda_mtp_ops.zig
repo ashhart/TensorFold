@@ -288,9 +288,9 @@ pub fn Ops(comptime Tri: type) type {
             d.rows = n;
             d.history = seq.history;
             @memcpy(d.ids[0..n], ids);
-            if (keeps) try copyAsync(o.stream(), d.saved.ptr + d.layout.tail_at, seq.tail.ptr, ple_tail_n * wide * 2);
+            if (keeps) try copyAsync(o.stream(), d.saved_tail, seq.tail.ptr, ple_tail_n * wide * 2);
             try o.e.forward(Tri, o.tri, seq, ids, .{ .logits = .all, .logits_out = d.logits.ptr, .keep = if (keeps) &d.keep else null, .streams = d.streams.ptr, .host_logits = @import("cuda_batch_state.zig").verifyHostLogits() });
-            if (keeps) try copyAsync(o.stream(), d.saved.ptr + d.layout.nrow_at, o.e.batch_s.?.ple_nrow, n * wide * 2);
+            if (keeps) try copyAsync(o.stream(), d.saved_nrow, o.e.batch_s.?.ple_nrow, n * wide * 2);
             d.open = keeps;
         }
 
@@ -314,14 +314,14 @@ pub fn Ops(comptime Tri: type) type {
                 d.rows = n;
                 d.history = seq.history;
                 @memcpy(d.ids[0..n], ids);
-                if (keeps) try copyAsync(o.stream(), d.saved.ptr + d.layout.tail_at, seq.tail.ptr, ple_tail_n * wide * 2);
+                if (keeps) try copyAsync(o.stream(), d.saved_tail, seq.tail.ptr, ple_tail_n * wide * 2);
                 w.* = .{ .seq = seq, .ids = ids, .keep = if (keeps) &d.keep else null, .streams = d.streams.ptr, .logits = d.logits.ptr };
             }
             try o.e.windows(Tri, o.tri, wins, out);
             var row0: usize = 0;
             for (ds, idss, wins) |d, ids, w| {
                 const keeps = w.keep != null;
-                if (keeps) try copyAsync(o.stream(), d.saved.ptr + d.layout.nrow_at, o.e.batch_s.?.ple_nrow + row0 * wide * 2, ids.len * wide * 2);
+                if (keeps) try copyAsync(o.stream(), d.saved_nrow, o.e.batch_s.?.ple_nrow + row0 * wide * 2, ids.len * wide * 2);
                 d.open = keeps;
                 row0 += ids.len;
             }
