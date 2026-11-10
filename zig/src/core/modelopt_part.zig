@@ -34,8 +34,11 @@ fn dtypeOf(kind: Kind) DType {
 /// input_scale: left to the family (not read, not marked used), read when stored, or required.
 pub const Act = enum { skip, optional, required };
 
+/// A scale's stored shape: one element (shape [], [1] or [1, 1]: Qwen, Nemotron) or rank 0 only (shape []: Dory).
+pub const Scalars = enum { one, rank0 };
+
 /// What the family knows: the kind (null: by the weight's dtype), [n, k] if fixed, the input scale, a positive scale.
-pub const Want = struct { kind: ?Kind = null, n: ?usize = null, k: ?usize = null, act: Act = .optional, positive: bool = false };
+pub const Want = struct { kind: ?Kind = null, n: ?usize = null, k: ?usize = null, act: Act = .optional, positive: bool = false, scalars: Scalars = .one };
 
 /// A part as stored: the weight, NVFP4's e4m3 blocks, its fp32 scale (weight_scale_2 or FP8's weight_scale), act.
 pub const Part = struct { weight: Tensor, blocks: ?Tensor = null, scale: f32 = 1, act: ?f32 = null, kind: Kind, n: usize, k: usize };
@@ -83,12 +86,12 @@ pub fn readWhy(ck: *Checkpoint, module: []const u8, want: Want, why: *Why) !Part
     var p: Part = .{ .weight = w, .kind = kind, .n = nk[0], .k = nk[1] };
     switch (kind) {
         .bf16 => {},
-        .fp8 => p.scale = try scalarOf(ck, module, "weight_scale", why),
+        .fp8 => p.scale = try scalarOf(ck, module, "weight_scale", want, why),
         .nvfp4 => {
             const b = try fetch(ck, module, "weight_scale", why);
             checkBlocks(b, p.n, p.k) catch return refuse(why, module, "weight_scale", b, want);
             p.blocks = b;
-            p.scale = try scalarOf(ck, module, "weight_scale_2", why);
+            p.scale = try scalarOf(ck, module, "weight_scale_2", want, why);
         },
     }
     if (want.positive and kind != .bf16 and !(p.scale > 0 and std.math.isFinite(p.scale))) {
@@ -97,7 +100,7 @@ pub fn readWhy(ck: *Checkpoint, module: []const u8, want: Want, why: *Why) !Part
     }
     var buf: [320]u8 = undefined;
     const act = try std.fmt.bufPrint(&buf, "{s}.input_scale", .{module});
-    if (want.act == .required or (want.act == .optional and ck.has(act))) p.act = try scalarOf(ck, module, "input_scale", why);
+    if (want.act == .required or (want.act == .optional and ck.has(act))) p.act = try scalarOf(ck, module, "input_scale", want, why);
     return p;
 }
 
@@ -112,13 +115,17 @@ fn fetch(ck: *Checkpoint, module: []const u8, tail: []const u8, why: *Why) !Tens
     return ck.get(name);
 }
 
-/// `{module}.{tail}` as an fp32 scalar, refused by name.
-fn scalarOf(ck: *Checkpoint, module: []const u8, tail: []const u8, why: *Why) !f32 {
+/// `{module}.{tail}` as an fp32 scalar of `want.scalars`' shape, refused by name.
+fn scalarOf(ck: *Checkpoint, module: []const u8, tail: []const u8, want: Want, why: *Why) !f32 {
     const t = try fetch(ck, module, tail, why);
-    return scalar(t) catch |e| {
-        why.set("{s}.{s}: {t} {any}, expected an F32 scalar", .{ module, tail, t.dtype, t.shape[0..t.rank] });
-        return e;
-    };
+    const shape = if (want.scalars == .rank0) " of shape []" else "";
+    if (want.scalars == .rank0 and t.rank != 0) return badScalar(why, module, tail, t, shape);
+    return scalar(t) catch badScalar(why, module, tail, t, shape);
+}
+
+fn badScalar(why: *Why, module: []const u8, tail: []const u8, t: Tensor, shape: []const u8) Error {
+    why.set("{s}.{s}: {t} {any}, expected an F32 scalar{s}", .{ module, tail, t.dtype, t.shape[0..t.rank], shape });
+    return error.UnexpectedTensor;
 }
 
 fn refuse(why: *Why, module: []const u8, tail: []const u8, t: Tensor, want: Want) Error {
