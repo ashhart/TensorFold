@@ -49,6 +49,8 @@ const valid = [_]Case{
     .{ .name = "TENSORFOLD_TOOL_ID_KEY_FILE", .raw = "/etc/tensorfold/tool id.key", .n = 0 },
     .{ .name = "TF_STARTUP_RECEIPT", .raw = "0", .n = 0 },
     .{ .name = "TF_STARTUP_RECEIPT", .raw = "1", .n = 1 },
+    .{ .name = "TF_SHARED_PRICE_LOG", .raw = "0", .n = 0 },
+    .{ .name = "TF_SHARED_PRICE_LOG", .raw = "1", .n = 1 },
     .{ .name = "TF_CUDA_DEVICE", .raw = " 3 ", .n = 3 },
     .{ .name = "TF_CUDA_DEVICE", .raw = "4294967295", .n = std.math.maxInt(u32) },
     .{ .name = "TF_CUDA_SEGMENTS", .raw = " 1 ", .n = 1 },
