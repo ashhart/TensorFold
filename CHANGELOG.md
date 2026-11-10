@@ -4,12 +4,11 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Conformance: a Qwen3.8-27B XPU profile (`tools/conformance_profiles/qwen27-xpu.json`, GPTQ 4-bit group 128 with its DFlash2 drafter, four streams on an Arc Pro B70); its first turn carries a 600-item document because the XPU prompt cache keeps states only at multiples of 64 tokens (#2677, landed as #2690). Thanks to @Mirrdhyn.
 
 - Docs: the GLM CUDA recipe covers a four-GB10 switchless ring (gather starts there, the NCCL settings it needs, and the opt-in relay with its measured effect), and `docs/api.md` gives `presence_penalty`'s measured cost to drafting, about 4-10% of tokens a round (#2742, closes #1971 and #2645). Thanks to @Bizuayeu, @BobClawblaw and @jschmied for the measurements.
 
-
 - Fabric: when spawning a tensor-parallel rank fails, `host.runWith` aborts and joins the ranks it already started instead of leaving them waiting on a dead frame, with a test that fails without it (#2700). Thanks to @Defilan.
-
 
 - HIP: Flash Next sizes its scratch arena from the dry run's peak, counting the MTP head and a verify round's logits, so `prefill_step=2048` loads (main refused it at load) and the arena is 0.74 GiB smaller, with replies equal to main on two R9700s (#2670). Thanks to @millaguie.
 
@@ -19,9 +18,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - CUDA: a model whose KDA heads or conv window differ from the kernels' (128 keys, 128 values, 4 taps) is refused at load with `KdaGeometry`, before anything is allocated or launched, and a host test ties those numbers to `kda.cuh` (#2338, refs #850). Thanks to @ajensenwaud.
 
-
 - Tests: `tp.device` runs N tensor-parallel ranks as threads on one GPU with device copies, so DeepSeek-V4.1's exchanges are now tested at a world of 3 (uneven sampling, dense split KV and lockstep), and `zig build dsv41-test` builds `tf-dsv41-test` over the family's own kernel images (#2491, refs #2270). Thanks to @Defilan.
-
 
 - CUDA: the start-up note about pages parked on the kernel's per-CPU lists logs at debug level, so whether it shows no longer depends on the box's memory state; the budget still counts those pages (#2164, follow-up to #2127). Thanks to @jschmied.
 
@@ -38,9 +35,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Evidence index: reads saved native capabilities, including unknown and XPU chip labels; advertised facts stay unqualified, and invalid supplied input stops with a bounded error (#2708).
 
 - `--instruct-sampling card` (or `field=value` pairs) serves the model card's instruct sampling to sampled chat requests with thinking off that leave those fields unset; request fields, then the serve flags, then the pairs decide, and the server's own requests never take it (#2626). Thanks to @BobClawblaw.
-- Conformance: a Qwen3.8-27B XPU profile (`tools/conformance_profiles/qwen27-xpu.json`, GPTQ 4-bit group 128 with its DFlash2 drafter, four streams on an Arc Pro B70); its first turn carries a 600-item document because the XPU prompt cache keeps states only at multiples of 64 tokens (#2677, landed as #2690). Thanks to @Mirrdhyn.
 
-- `--instruct-sampling card` (or `field=value` pairs) serves the model card's instruct sampling to chat requests with thinking off that leave those fields unset; request fields, then the serve flags, then the pairs decide, and the server's own requests never take it (#2626). Thanks to @BobClawblaw.
 
 - XPU: Qwen3.8-27B's DFlash2 drafts go through the core Drafter and Drafted, and each stream's draft tree is keyed with its own request (a sampled shared round read another's) (#2672, #2460 item 5). Thanks to @jschmied, and to @Mirrdhyn for the Arc Pro B70 runs.
 
