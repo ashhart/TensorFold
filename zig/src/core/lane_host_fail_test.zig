@@ -157,7 +157,7 @@ test "cancel during prefill delivers its paused peer's migration failure after r
     try cancelledResumeFailure(true);
 }
 
-test "a failed shared keep reaps an already finished stream before freeing its job" {
+test "a failed shared round fails the live stream and delivers the finished one" {
     const log_level = std.testing.log_level;
     std.testing.log_level = .err;
     defer std.testing.log_level = log_level;
@@ -192,11 +192,13 @@ test "a failed shared keep reaps an already finished stream before freeing its j
     try host.start();
     var stopped = false;
     defer if (!stopped) host.stop();
-    try std.testing.expectEqual(@as(?Reason, .failed), short.waitFor(2000));
+    // the short stream finished before the shared round failed, so its completed reply
+    // delivers; only the still-decoding stream takes the round's error
+    try std.testing.expectEqual(@as(?Reason, .length), short.waitFor(2000));
     try std.testing.expectEqual(@as(?Reason, .failed), long.waitFor(2000));
     host.stop();
     stopped = true;
-    try std.testing.expectEqualStrings("GpuFailed", short.message);
+    try std.testing.expectEqualStrings("", short.message);
     try std.testing.expectEqualStrings("GpuFailed", long.message);
     try std.testing.expectEqual(@as(usize, 1), short.finishes);
     try std.testing.expectEqual(@as(usize, 1), long.finishes);
