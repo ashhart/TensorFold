@@ -25,14 +25,14 @@ struct Geo {
     __device__ size_t log_bytes() const { return (size_t)nv * 4 + (size_t)nv * DK * 4 + (size_t)nk * DK * 2 + conv_rows() * 2; }
 };
 
-// One stream's window in this forward: its state table (cuda_cache.zig States), cache length, and rows.
+// One stream's window in this forward: its state blocks (a _table kernel: its state table), cache length, and rows.
 struct Seg {
-    unsigned long long rec;   // the state table: nl recurrences, nl tails, nl + nl pre-round copies, MAXW log rows
-    unsigned long long conv;  // the table's tail entries
+    unsigned long long rec;   // float recurrences, one rec() block a linear layer (_table: the cuda_states.zig table)
+    unsigned long long conv;  // bf16 convolution tails, conv_rows() a linear layer (_table: the table's tail entries)
     unsigned long long kv;    // bf16 keys then values, kvh * cap * HD each, an attention layer at a time
     unsigned long long tap;   // a drafter's ring of tapped rows (0: none): slot pos % tap_rows, taps * hid bf16 each
-    unsigned long long log;   // the table's log row entries: a window row's nl layers of log_bytes, for keep
-    unsigned long long before; // the table's copy entries: a one-row in-place update's exact pre-round state
+    unsigned long long log;   // the window's rows' records (MAXW rows, nl layers of log_bytes); _table: its entries
+    unsigned long long before; // exact pre-round state for a one-row in-place update (_table: the copy entries)
     int cap, len, row0, rows, tap_rows, taps;
     int delta;                // an image prompt's rotary shift: rows past it rotate at position + delta
     unsigned long long pt;    // the stream's KV page table (int a page; 0: kv holds cap contiguous rows)
@@ -80,6 +80,16 @@ struct LogRow {
     __nv_bfloat16* conv;   // [TAPS - 1][conv()] the tail after the row
 };
 
+__device__ __forceinline__ LogRow log_row(const Geo& geo, const Seg& sg, int layer, int row) {
+    char* base = reinterpret_cast<char*>(sg.log) + ((size_t)row * geo.nl + layer) * geo.log_bytes();
+    LogRow l;
+    l.g = reinterpret_cast<float*>(base);
+    l.delta = l.g + geo.nv;
+    l.k = reinterpret_cast<__nv_bfloat16*>(l.delta + (size_t)geo.nv * DK);
+    l.conv = l.k + (size_t)geo.nk * DK;
+    return l;
+}
+
 __device__ __forceinline__ LogRow log_row(const Geo& geo, const unsigned long long* t, int layer, int row) {
     char* base = reinterpret_cast<char*>(__ldg(t + 4 * geo.nl + row)) + (size_t)layer * geo.log_bytes();
     LogRow l;
@@ -89,6 +99,13 @@ __device__ __forceinline__ LogRow log_row(const Geo& geo, const unsigned long lo
     l.conv = l.k + (size_t)geo.nk * DK;
     return l;
 }
+
+// A state kernel's source, included twice: TF_Q35_TABLE 0 is main's kernel, 1 its name_table copy (state table).
+#define TF_Q35_CAT(a, b) a##b
+#define TF_Q35_PICK(name, table) TF_Q35_CAT(TF_Q35_PICK_, table)(name)
+#define TF_Q35_PICK_0(name) name
+#define TF_Q35_PICK_1(name) name##_table
+#define TF_Q35_K(name) TF_Q35_PICK(name, TF_Q35_TABLE)
 
 // A pending kept row's decay, write and key (cuda_cache.zig's pending buffer): rows of nl layers' heads, packed.
 __device__ __forceinline__ LogRow pend_row(const Geo& geo, unsigned long long plog, int layer, int row) {

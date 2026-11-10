@@ -51,7 +51,7 @@ fn engine(d: *cuda.Driver) q.engine.Engine {
     e.kv8 = false;
     e.geo = .{ .hid = 256, .nk = 1, .nv = 1, .qh = 1, .kvh = 1, .nl = 1 };
     const f: cuda.Function = .{ .d = d, .handle = @ptrFromInt(1) };
-    e.keeps = .{ .apply = f, .apply_pend = f, .conv = f, .compact = f };
+    e.keeps = .{ .apply = f, .apply_pend = f, .conv = f, .compact = f, .apply_table = f, .apply_pend_table = f, .conv_table = f };
     return e;
 }
 fn buffer(d: *cuda.Driver, data: []u8) cuda.DeviceBuffer {

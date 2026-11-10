@@ -124,6 +124,8 @@ pub const Cache = struct {
     paged: ?Paged = null,
     /// A pool lane's drafter ring in its run (the drafter borrows it for the lane's stream).
     drafter_ring: ?u64 = null,
+    /// A pool lane (its run mapped): its kernels read `states` (the _table kernels); false: its blocks, as on main.
+    on_table: bool = false,
     delta: i32 = 0,
     state: DeviceBuffer,
     /// The exact state before a recorded one-row round advances its stable slot in place.
@@ -214,6 +216,7 @@ pub const Cache = struct {
         self.before = beforeView(e, views[1].ptr);
         self.tap = if (e.n_taps > 0) views[2] else null;
         self.drafter_ring = if (ring > 0) views[3].ptr else null;
+        self.on_table = true;
         for ([_]DeviceBuffer{ self.log, views[2], views[3] }) |v| if (v.len > 0) try v.fill8(0, e.stream.handle);
     }
 
@@ -226,6 +229,7 @@ pub const Cache = struct {
         self.log = none;
         self.tap = null;
         self.drafter_ring = null;
+        self.on_table = false;
     }
 
     /// The parts every cache holds itself beside `kv` and `paged` (the caller's to free on failure).
@@ -305,12 +309,15 @@ pub const Cache = struct {
         return t.*;
     }
 
-    /// The stream's window of `rows` rows from forward row `row0`, after `len` cached positions.
+    /// The stream's window of `rows` rows from forward row `row0` after `len` cached positions (pool lane: its table).
     pub fn seg(self: *Cache, e: *const Engine, len: usize, row0: usize, rows: usize) !Seg {
-        return self.segIn(e, (try self.stateTable(e)).at(e.g), len, row0, rows);
+        if (self.on_table) return self.segIn(e, (try self.stateTable(e)).at(e.g), len, row0, rows);
+        const g = e.g;
+        const at: [4]u64 = .{ self.state.ptr, self.state.ptr + g.deltas() * g.recBytes(), if (self.before) |b| b.ptr else 0, self.log.ptr };
+        return self.segIn(e, at, len, row0, rows);
     }
 
-    /// `seg` with the state table's entries `t` (States.parts): a forward's copy of the stream's own table.
+    /// `seg` with `t` (rec, conv, before, log): its blocks, or a state table's entries (States.parts).
     pub fn segIn(self: *Cache, e: *const Engine, t: [4]u64, len: usize, row0: usize, rows: usize) Seg {
         const g = e.g;
         var sg: Seg = .{ .rec = t[0], .conv = t[1], .kv = self.kv.ptr, .tap = if (self.tap) |x| x.ptr else 0, .log = t[3], .before = t[2], .cap = @intCast(self.cap), .len = @intCast(len), .row0 = @intCast(row0), .rows = @intCast(rows), .tap_rows = tap_rows, .taps = @intCast(e.n_taps), .delta = self.delta };
@@ -353,11 +360,12 @@ pub const Cache = struct {
         try recurrent.mark(self, false);
         // the path's rows join the pending ones; without a log, with the switch off or past pend_cap they land now
         const deferred = keepLate() and self.log.len > 0 and path.len <= pend_cap;
+        const tab = self.on_table;
         if (!deferred) {
             try self.flush(e);
-            try e.run(e.keeps.apply, .{ 1, geometry.dk / 4, g.v_heads * g.deltas() }, .{ 32, 4, 1 }, .{ e.geo, sg, p });
+            try e.run(if (tab) e.keeps.apply_table else e.keeps.apply, .{ 1, geometry.dk / 4, g.v_heads * g.deltas() }, .{ 32, 4, 1 }, .{ e.geo, sg, p });
         }
-        try e.run(e.keeps.conv, .{ g.deltas(), (g.convBytes() / 2 + 255) / 256, 1 }, .{ 256, 1, 1 }, .{ e.geo, sg, @as(c_int, @intCast(path[path.len - 1])) });
+        try e.run(if (tab) e.keeps.conv_table else e.keeps.conv, .{ g.deltas(), (g.convBytes() / 2 + 255) / 256, 1 }, .{ 256, 1, 1 }, .{ e.geo, sg, @as(c_int, @intCast(path[path.len - 1])) });
         if (!prefix and g.attentions() > 0) try e.run(if (e.kv8) e.fp8.compact else e.keeps.compact, .{ g.attentions(), g.kv_heads, 1 }, .{ geometry.head_dim, 1, 1 }, .{ e.geo, sg, p });
         if (deferred) try self.pendRows(e, path);
         self.last = null;
@@ -371,16 +379,17 @@ pub const Cache = struct {
         if (@as(usize, @intCast(self.pend)) + path.len > pend_cap) try self.flush(e);
         const hb = headBytes(g);
         const row_log = g.deltas() * g.logRowBytes();
-        const t = try self.stateTable(e);
+        const tab = self.on_table;
+        const t: ?States = if (tab) try self.stateTable(e) else null; // a window stream: main's rows, no table
         const log = self.log.ptr;
         const base = self.pbuf.?.ptr;
         var j: usize = 0;
         while (j < path.len) {
             // consecutive window rows whose records follow each other in the log, one copy
             var run: usize = 1;
-            while (j + run < path.len and path[j + run] == path[j] + run and t.logRow(g, path[j + run]) == t.logRow(g, path[j]) + run * row_log) run += 1;
+            while (j + run < path.len and path[j + run] == path[j] + run and (!tab or t.?.logRow(g, path[j + run]) == t.?.logRow(g, path[j]) + run * row_log)) run += 1;
             const at: usize = @as(usize, @intCast(self.pend)) + j;
-            const m: cuda.abi.Memcpy2D = .{ .src = t.logRow(g, path[j]), .src_pitch = g.logRowBytes(), .dst = base + at * g.deltas() * hb, .dst_pitch = hb, .width = hb, .height = run * g.deltas() };
+            const m: cuda.abi.Memcpy2D = .{ .src = if (tab) t.?.logRow(g, path[j]) else log + path[j] * row_log, .src_pitch = g.logRowBytes(), .dst = base + at * g.deltas() * hb, .dst_pitch = hb, .width = hb, .height = run * g.deltas() };
             // a copy past the log or the pending buffer is refused here, not by the driver mid-reply
             const src_end = if (m.src < log) std.math.maxInt(u64) else m.src - log + (m.height - 1) * m.src_pitch + m.width;
             const dst_end = m.dst - base + (m.height - 1) * m.dst_pitch + m.width;
@@ -402,7 +411,7 @@ pub const Cache = struct {
         const n = self.pend;
         self.pend = 0;
         const g = e.g;
-        try e.run(e.keeps.apply_pend, .{ 1, geometry.dk / 4, g.v_heads * g.deltas() }, .{ 32, 4, 1 }, .{ e.geo, sg, n });
+        try e.run(if (self.on_table) e.keeps.apply_pend_table else e.keeps.apply_pend, .{ 1, geometry.dk / 4, g.v_heads * g.deltas() }, .{ 32, 4, 1 }, .{ e.geo, sg, n });
     }
 
     /// This forward's scan entry with the pending rows, written back (a positive count) at one row or pend_commit.

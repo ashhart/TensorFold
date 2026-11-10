@@ -44,6 +44,11 @@ pub fn forwardStates(e: anytype, i: usize, c: anytype) ![4]u64 {
     }
     return States.parts(e.tables.ptr + at, e.g);
 }
+/// Whether a pool lane is among a forward's parts: then every segment's scans read state tables (_table kernels).
+pub fn onTable(parts: anytype) bool {
+    for (parts) |p| if (p.cache.on_table) return true;
+    return false;
+}
 /// An image prompt's rows for its prompt chunks: device feature rows, each prompt row's feature row, its positions.
 pub const Images = struct {
     features: u64, // bf16 [image rows, hidden]

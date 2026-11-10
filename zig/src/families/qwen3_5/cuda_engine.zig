@@ -457,13 +457,16 @@ pub const Engine = struct {
             if (!(record and keep != .hidden)) try p.cache.flush(e);
             try recurrent.prepare(e, p.cache, p.rows, record);
         }
+        // a pool lane among the parts: every segment's scans read state tables; else each stream's blocks, as on main
+        const table = Round.onTable(parts);
         var row0: usize = 0;
         for (parts, 0..) |p, i| {
-            segs[i] = p.cache.fold(p.cache.segIn(e, try Round.forwardStates(e, i, p.cache), p.cache.len, row0, p.rows));
+            const sg = if (table) p.cache.segIn(e, try Round.forwardStates(e, i, p.cache), p.cache.len, row0, p.rows) else try p.cache.seg(e, p.cache.len, row0, p.rows);
+            segs[i] = p.cache.fold(sg);
             row0 += p.rows;
         }
-        // a prompt chunk is one stream's: its delta rule takes the recurrences' addresses on the host
-        e.prompt_states = if (prompt) parts[0].cache.states.?.host else &.{};
+        // a pool lane's prompt chunk is one stream's: its delta rule takes the recurrences' addresses on the host
+        e.prompt_states = if (!record and table) parts[0].cache.states.?.host else &.{};
         defer e.prompt_states = &.{};
         if (keep == .draws) {
             const rules = std.mem.bytesAsSlice(cuda.sample.Rule, st[rules_at..][0 .. total * @sizeOf(cuda.sample.Rule)]);
@@ -499,6 +502,7 @@ pub const Engine = struct {
         shape.hidden = keep == .hidden;
         shape.rows = keep == .rows;
         shape.paged = @import("cuda_attention.zig").hasPages(segs);
+        shape.table = table;
         shape.mt2 = @import("cuda_shapes.zig").useMt2(e.mt2.enabled, e.kv8, !record, total, parts.len, parts[0].cache.len);
         if (e.learning != null or e.pockets.any()) {
             shape.total = @intCast(total);
@@ -559,13 +563,14 @@ pub const Engine = struct {
     }
 
     /// The same scan selected by body, exposed for host launch-contract fixtures.
-    pub fn deltaScan(e: *Engine, record: bool, slot_count: u8, segments: usize, layer: c_int) !void {
-        const scan = if (!record) e.fns.gdn_chain else switch (slot_count) {
-            1 => e.fns.gdn_slots_1,
-            2 => e.fns.gdn_slots_2,
-            4 => e.fns.gdn_slots_4,
-            8 => e.fns.gdn_slots_8,
-            16 => e.fns.gdn_slots_16,
+    pub fn deltaScan(e: *Engine, record: bool, slot_count: u8, segments: usize, layer: c_int, table: bool) !void {
+        const f = &e.fns;
+        const scan = if (!record) (if (table) f.gdn_chain_table else f.gdn_chain) else switch (slot_count) {
+            1 => if (table) f.gdn_slots_1_table else f.gdn_slots_1,
+            2 => if (table) f.gdn_slots_2_table else f.gdn_slots_2,
+            4 => if (table) f.gdn_slots_4_table else f.gdn_slots_4,
+            8 => if (table) f.gdn_slots_8_table else f.gdn_slots_8,
+            16 => if (table) f.gdn_slots_16_table else f.gdn_slots_16,
             else => return error.InvalidGdnSlots,
         };
         const input = e.tables.ptr + @as(usize, if (record) Round.steps_at else rowpar_at);

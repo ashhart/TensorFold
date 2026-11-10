@@ -1,5 +1,8 @@
 // Register-slot tree scan: the common CPU schedule preserves parent states and original output rows.
-#pragma once
+
+// qwen35.cu includes this twice: TF_Q35_TABLE 0 builds main's scans, 1 their _table copies (TF_Q35_K)
+#ifndef TF_Q35_SLOTS_ONCE
+#define TF_Q35_SLOTS_ONCE
 struct SlotStep { unsigned row; int read_slot, write_slot; };
 // spread_sum: N values' warp sums in one butterfly (warp_sum's pairs), value j where lane >> (5 - log2 N) == j.
 template <int N>
@@ -23,10 +26,11 @@ __device__ __forceinline__ float spread_sum(float (&v)[N], int lane) {
 
 template <int N>
 __host__ __device__ constexpr int q35_log2() { return N <= 1 ? 0 : 1 + q35_log2<N / 2>(); }
+#endif
 
 // R value rows a warp share a step's loads; its k . state sums reduce with the last step's outputs; slots in shared.
 template <int SLOTS, int R>
-__device__ __forceinline__ void q35_slots(Geo geo, const __nv_bfloat16* q, const __nv_bfloat16* k,
+__device__ __forceinline__ void TF_Q35_K(q35_slots)(Geo geo, const __nv_bfloat16* q, const __nv_bfloat16* k,
         const __nv_bfloat16* v, const float* g, const __nv_bfloat16* beta, const Seg* segs,
         const SlotStep* steps, int layer, __nv_bfloat16* y, const int* P) {
     __shared__ float4 kept[4][SLOTS * R * 32];
@@ -34,12 +38,18 @@ __device__ __forceinline__ void q35_slots(Geo geo, const __nv_bfloat16* q, const
     if (past_windows(P, blockIdx.z / NV)) return;
     const int hv = blockIdx.z % NV, hk = hv / (NV / NK);
     const Seg sg = segs[blockIdx.z / NV];
+#if TF_Q35_TABLE
     const unsigned long long* T = forward_states(geo, segs, blockIdx.z / NV);
+#endif
     const int dk = threadIdx.x, dv0 = (blockIdx.y * 4 + threadIdx.y) * R;
     constexpr int PT = DK / 32;
     static_assert(PT == 4, "a lane's four state entries are one float4 slot");
     const size_t at = ((size_t)hv * DK + dv0) * DK + PT * dk;  // row r's entries are r * DK further
+#if TF_Q35_TABLE
     float* st = rec_of(T, layer) + at;
+#else
+    float* st = reinterpret_cast<float*>(sg.rec) + (size_t)layer * geo.rec() + at;
+#endif
     float4* slots = kept[threadIdx.y];
     float root[R][PT], state[R][PT];
 #pragma unroll
@@ -79,8 +89,13 @@ __device__ __forceinline__ void q35_slots(Geo geo, const __nv_bfloat16* q, const
     if (sg.rows == 1)
 #pragma unroll
         for (int r = 0; r < R; ++r)
+#if TF_Q35_TABLE
 #pragma unroll
             for (int i = 0; i < PT; ++i) before_rec(geo, T, layer)[at + r * DK + i] = root[r][i];
+#else
+#pragma unroll
+            for (int i = 0; i < PT; ++i) reinterpret_cast<float*>(sg.before)[(size_t)layer * geo.rec() + at + r * DK + i] = root[r][i];
+#endif
     const bool record = recorded(P);
     // row inputs as stored, the next row's loaded while this one computes
     struct In { uint2 k, q; __nv_bfloat16 v[R], beta; float g; };
@@ -169,7 +184,11 @@ __device__ __forceinline__ void q35_slots(Geo geo, const __nv_bfloat16* q, const
         }
         pend_row = row;
         if (record) {
+#if TF_Q35_TABLE
             const LogRow l = log_row(geo, T, layer, rr);
+#else
+            const LogRow l = log_row(geo, sg, layer, rr);
+#endif
             if (dk == 0) {
 #pragma unroll
                 for (int r = 0; r < R; ++r) l.delta[hv * DK + dv0 + r] = delta[r];
@@ -199,11 +218,12 @@ __device__ __forceinline__ void q35_slots(Geo geo, const __nv_bfloat16* q, const
         for (int i = 0; i < PT; ++i) st[r * DK + i] = state[r][i];
 }
 #define TF_Q35_SLOTS(N, R) \
-extern "C" __global__ void __launch_bounds__(128) tf_q35_gdn_slots_##N(Geo geo, const __nv_bfloat16* q, \
+extern "C" __global__ void __launch_bounds__(128) TF_Q35_K(tf_q35_gdn_slots_##N)(Geo geo, const __nv_bfloat16* q, \
  const __nv_bfloat16* k, const __nv_bfloat16* v, const float* g, const __nv_bfloat16* beta, const Seg* segs, \
- const SlotStep* steps, int layer, __nv_bfloat16* y, const int* P) { q35_slots<N, R>(geo, q, k, v, g, beta, segs, steps, layer, y, P); }
+ const SlotStep* steps, int layer, __nv_bfloat16* y, const int* P) { TF_Q35_K(q35_slots)<N, R>(geo, q, k, v, g, beta, segs, steps, layer, y, P); }
 TF_Q35_SLOTS(1, 2)
 TF_Q35_SLOTS(2, 2)
 TF_Q35_SLOTS(4, 2)
 TF_Q35_SLOTS(8, 1)
 TF_Q35_SLOTS(16, 1)
+#undef TF_Q35_SLOTS

@@ -87,16 +87,26 @@ test "Verify width calibration: actual DeltaNet dispatch selects its register va
     e.fns.gdn_slots_4 = function(&d, 24);
     e.fns.gdn_slots_8 = function(&d, 28);
     e.fns.gdn_slots_16 = function(&d, 36);
-    for ([_]u8{ 1, 2, 4, 8, 16 }) |slots| {
-        try e.deltaScan(true, slots, 1, 0);
-        try std.testing.expectEqual(@as(usize, 20 + slots), Capture.id);
-        try std.testing.expectEqual(e.tables.ptr + q.round.steps_at, Capture.input);
-        try std.testing.expectEqual(@as(u32, 128), Capture.threads);
+    // a pool lane on pieces: the same scans' _table instantiations (main's names stay for every other forward)
+    e.fns.gdn_chain_table = function(&d, 111);
+    e.fns.gdn_slots_1_table = function(&d, 121);
+    e.fns.gdn_slots_2_table = function(&d, 122);
+    e.fns.gdn_slots_4_table = function(&d, 124);
+    e.fns.gdn_slots_8_table = function(&d, 128);
+    e.fns.gdn_slots_16_table = function(&d, 136);
+    for ([_]bool{ false, true }) |table| {
+        const off: usize = if (table) 100 else 0;
+        for ([_]u8{ 1, 2, 4, 8, 16 }) |slots| {
+            try e.deltaScan(true, slots, 1, 0, table);
+            try std.testing.expectEqual(off + 20 + slots, Capture.id);
+            try std.testing.expectEqual(e.tables.ptr + q.round.steps_at, Capture.input);
+            try std.testing.expectEqual(@as(u32, 128), Capture.threads);
+        }
+        try e.deltaScan(false, 1, 1, 0, table);
+        try std.testing.expectEqual(off + 11, Capture.id);
+        try std.testing.expectEqual(e.tables.ptr + q.round.rowpar_at, Capture.input);
+        try std.testing.expectError(error.InvalidGdnSlots, e.deltaScan(true, 3, 1, 0, table));
     }
-    try e.deltaScan(false, 1, 1, 0);
-    try std.testing.expectEqual(@as(usize, 11), Capture.id);
-    try std.testing.expectEqual(e.tables.ptr + q.round.rowpar_at, Capture.input);
-    try std.testing.expectError(error.InvalidGdnSlots, e.deltaScan(true, 3, 1, 0));
 }
 
 test "Verify width calibration: actual keep launches carry the complete 64-row path" {
@@ -110,7 +120,7 @@ test "Verify width calibration: actual keep launches carry the complete 64-row p
     e.g = .{ .hidden = 512, .intermediate = 256, .layers = 2, .vocab = 248320, .k_heads = 2, .v_heads = 4, .q_heads = 4, .kv_heads = 1, .eps = 1e-6, .tied = true, .context = 4096, .linear = @splat(true) };
     e.g.linear[1] = false;
     e.geo = .{ .hid = 512, .nk = 2, .nv = 4, .qh = 4, .kvh = 1, .nl = 1 };
-    e.keeps = .{ .apply = function(&d, 1), .apply_pend = function(&d, 4), .conv = function(&d, 2), .compact = function(&d, 3) };
+    e.keeps = .{ .apply = function(&d, 1), .apply_pend = function(&d, 4), .conv = function(&d, 2), .compact = function(&d, 3), .apply_table = function(&d, 1), .apply_pend_table = function(&d, 4), .conv_table = function(&d, 2) };
     e.kv8 = false;
     e.n_taps = 0;
     const buffer: cuda.DeviceBuffer = .{ .d = &d, .ptr = 0x1000, .len = 1 << 20 };

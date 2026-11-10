@@ -81,7 +81,7 @@ fn engine(d: *cuda.Driver) E {
             return .{ .d = dd, .handle = @ptrFromInt(i) };
         }
     }.at;
-    e.keeps = .{ .apply = f(d, apply), .apply_pend = f(d, apply_pend), .conv = f(d, 3), .compact = f(d, 4) };
+    e.keeps = .{ .apply = f(d, apply), .apply_pend = f(d, apply_pend), .conv = f(d, 3), .compact = f(d, 4), .apply_table = f(d, 5), .apply_pend_table = f(d, 6), .conv_table = f(d, 7) };
     return e;
 }
 
