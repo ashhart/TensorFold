@@ -105,7 +105,8 @@ fn draftBytes(a: std.mem.Allocator, io: std.Io, dir: []const u8) !u64 {
 }
 
 /// Bytes this rank's weights take: its share of the split axes; the embeddings, the routers and dspark/ counted whole.
-pub fn weightShare(a: std.mem.Allocator, io: std.Io, dir: []const u8, total: u64) u64 {
+pub fn weightShare(a: std.mem.Allocator, io: std.Io, dir: []const u8, total: u64, drafts: bool) u64 {
+    _ = drafts; // dspark/ is counted whole (drafts are on by default)
     const p = place() catch return total;
     const c = cfg.Config.read(a, io, dir) catch return total;
     const f = (shard.Share.of(&c, p.rank, p.world) catch return total).part(&c);
