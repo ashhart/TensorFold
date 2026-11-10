@@ -27,6 +27,7 @@ pub const Standing = struct {
     tokens: []u32 = &.{},
     spans: []modes.Span = &.{},
     rewind_at: u32 = 0, // where the rewind buffer holds slot 0's DeltaNet states and taps (0: none)
+    reply: modes.Span = .{ 0, 0 }, // rows of a reply these tokens hold exactly as it was generated (empty: none)
     wide: bool = false, // the prompt cache keeps two full-context states: it holds a reply's end beside slot 0
 
     /// Frees the record; `wide`, the cache's size, stays.
@@ -39,11 +40,13 @@ pub const Standing = struct {
     /// What `l` left in slot 0 of `context` (its rows' spans `spans`), when a later prompt may resume it; else nothing.
     pub fn leave(st: *Standing, gpa: std.mem.Allocator, l: Leaving, context: []const u32, spans: []const modes.Span) void {
         const rewind = st.rewind_at; // a point this stream's own pass saved
+        const reply = st.reply; // a reply the pass resumed past and only extended
         st.deinit(gpa);
         if (!l.kept() or l.at > context.len) return;
         const canonical = (if (l.at <= l.prompt_len) modes.prefix(gpa, spans, l.at) else modes.reply(gpa, spans, l.prompt_len, l.at)) catch return;
         const tokens = gpa.dupe(u32, context[0..l.at]) catch return gpa.free(canonical);
-        st.* = .{ .tokens = tokens, .spans = canonical, .rewind_at = if (rewind < l.at) rewind else 0, .wide = st.wide };
+        const own: modes.Span = if (l.at > l.prompt_len) .{ l.prompt_len, l.at } else if (reply[1] <= l.at) reply else .{ 0, 0 };
+        st.* = .{ .tokens = tokens, .spans = canonical, .rewind_at = if (rewind < l.at) rewind else 0, .reply = own, .wide = st.wide };
     }
 
     /// The rewind point a pass resuming slot 0 at `n` keeps while it only extends the slot (0: none).
@@ -59,11 +62,25 @@ pub const Standing = struct {
         };
     }
 
-    /// Uses up the record for a pass that `r` resumes in slot 0, keeping the rewind point the pass carries (0: none).
+    /// Uses up the record for a pass that `r` resumes in slot 0, keeping the rewind point and reply it carries.
     pub fn take(st: *Standing, gpa: std.mem.Allocator, r: Resume) void {
         const kept = st.carried(r);
+        const reply: modes.Span = switch (r) {
+            .here => |n| if (st.reply[1] <= n) st.reply else .{ 0, 0 },
+            .back, .none => .{ 0, 0 },
+        };
         st.deinit(gpa);
         st.rewind_at = kept;
+        st.reply = reply;
+    }
+
+    /// Before `take`: where `ids` (spans `spans`) sends back the reply these tokens hold, as it was generated.
+    pub fn replayed(st: *const Standing, ids: []const u32, spans: []const modes.Span) Replay {
+        const from, const end = st.reply;
+        if (end <= from or end > st.tokens.len) return .{};
+        const same: u32 = @intCast(std.mem.findDiff(u32, st.tokens[0..end], ids) orelse end);
+        if (same <= from or !modes.equal(st.spans, spans, same)) return .{};
+        return .{ .from = from, .to = if (same == end) std.math.maxInt(u32) else same };
     }
 
     /// Whether a warm pass over slot 0 (`own`) yields: not if the cache keeps its end, nor `wide` with `from` carrying.
@@ -121,6 +138,17 @@ pub fn makesRewind(need: u64, room: u64, cache: u64, full: u64) Rewind {
     if (need > room) return .none;
     return if (needsRewind(cache, full)) .tight else .wide;
 }
+
+/// Resume rows (from, to] past a reply's prompt whose reply rows before them a prompt sends back as generated.
+pub const Replay = struct {
+    from: u32 = 0,
+    to: u32 = 0,
+
+    /// A pass from `at` (slot or cache) resumed in a reply sent back as generated: it makes no point (unused there).
+    pub fn holds(p: Replay, at: usize) bool {
+        return at > p.from and at <= p.to;
+    }
+};
 
 /// A prompt's next physical chunk end, before cache marks or the slot's rewind point cut it further.
 pub fn chunkEnd(at: usize, chunk: usize, len: usize, starts: []const u32, spans: []const modes.Span) usize {
@@ -309,6 +337,78 @@ test "qwen27 resume: rule c, slot 0 makes its rewind buffer where room holds it,
     try t.expectEqual(Rewind.tight, makesRewind(1 << 30, 2 << 30, 0, full)); // no cache at all
     try t.expectEqual(Rewind.none, makesRewind(2 << 30, 1 << 30, 0, full)); // no room
     try t.expectEqual(Rewind.none, makesRewind(2 << 30, 1 << 30, 8 << 30, full));
+}
+
+test "qwen27 resume: a follow-up sending the reply back as generated, restored at the cache's reply end, makes no point" {
+    var st: Standing = .{ .rewind_at = 4 }; // the turn's pass saved slot 0's states at its history's end
+    defer st.deinit(t.allocator);
+    const context = [_]u32{ 1, 2, 3, 4, 20, 21, 22, 23 }; // history 1-4, the generation prompt 20, a reply 21-23
+    st.leave(t.allocator, .{ .at = 7, .prompt_len = 5, .context_len = 8, .fill_at = 5, .ended = true }, &context, &.{});
+    try t.expectEqual(modes.Span{ 5, 7 }, st.reply); // the stream left one short of its reply's end
+    const next = context ++ [_]u32{ 30, 31 }; // the reply as generated, then a new user turn
+    const spans = [_]modes.Span{.{ 5, 8 }};
+    try t.expectEqual(@as(Resume, .none), st.plan(&next, &spans, 7)); // the cache keeps the reply's end: its own path
+    const replay = st.replayed(&next, &spans); // as opening, before takeStanding uses the record up
+    st.take(t.allocator, .none);
+    try t.expectEqual(@as(u32, 0), st.rewind_at);
+    try t.expect(replay.holds(7)); // restored at 7, inside the generated rows 5-7: no stop at the history's end
+    try t.expect(!replay.holds(4)); // a cache state at the history's mark is prompt rows: the point is made
+    try t.expect(!replay.holds(0));
+    const turn = next ++ [_]u32{ 40, 41, 42 }; // that pass, with no point, and its reply 40-42
+    st.leave(t.allocator, .{ .at = 12, .prompt_len = 10, .context_len = 13, .fill_at = 10, .ended = true }, &turn, &spans);
+    try t.expectEqual(modes.Span{ 10, 12 }, st.reply);
+    const again = [_]modes.Span{ .{ 5, 8 }, .{ 10, 13 } };
+    try t.expect(st.replayed(&(turn ++ [_]u32{50}), &again).holds(12)); // the next follow-up skips it too
+    const diverging = next ++ [_]u32{ 60, 42, 61 }; // the last reply rendered without its reasoning
+    const cut = [_]modes.Span{ .{ 5, 8 }, .{ 10, 12 } };
+    try t.expectEqual(@as(Resume, .none), st.plan(&diverging, &cut, 9)); // no point: the cache's state, as main
+    try t.expect(!st.replayed(&diverging, &cut).holds(9)); // and that pass makes one
+    try t.expectEqual(Replay{}, st.replayed(&diverging, &.{})); // reply rows sent as prompt rows are not as generated
+}
+
+test "qwen27 resume: a follow-up resuming in slot 0 past a reply kept as generated makes no point, carrying the old one" {
+    var st: Standing = .{ .rewind_at = 4 };
+    defer st.deinit(t.allocator);
+    const context = [_]u32{ 1, 2, 3, 4, 20, 21, 22, 23 };
+    st.leave(t.allocator, .{ .at = 7, .prompt_len = 5, .context_len = 8, .fill_at = 5, .ended = true }, &context, &.{});
+    const warm = context ++ [_]u32{ 30, 31 }; // a warm pass that ran: it extends the slot past the reply
+    st.take(t.allocator, st.plan(&warm, &.{.{ 5, 8 }}, 0)); // `.here` at 7
+    st.leave(t.allocator, .{ .at = 9, .prompt_len = 10, .context_len = 10, .fill_at = 9, .ended = false }, &warm, &.{.{ 5, 8 }});
+    try t.expectEqual(modes.Span{ 5, 7 }, st.reply); // a yield at a landed chunk keeps it
+    st.leave(t.allocator, .{ .at = 10, .prompt_len = 10, .context_len = 10, .fill_at = 10, .ended = true }, &warm, &.{.{ 5, 8 }});
+    try t.expectEqual(modes.Span{ 5, 7 }, st.reply); // and so does the pass to its prompt's end
+    const follow = warm ++ [_]u32{32};
+    try t.expectEqual(Resume{ .here = 10 }, st.plan(&follow, &.{.{ 5, 8 }}, 0));
+    const replay = st.replayed(&follow, &.{.{ 5, 8 }});
+    try t.expect(replay.holds(10)); // in the slot, or a cache state at the warm pass's end
+    try t.expectEqual(Resume{ .back = 4 }, st.plan(&.{ 1, 2, 3, 4, 50, 23, 51 }, &.{.{ 5, 6 }}, 0)); // reply dropped
+    st.take(t.allocator, .{ .here = 10 });
+    try t.expectEqual(@as(u32, 4), st.rewind_at); // the older point stays for such a turn
+    st.leave(t.allocator, .{ .at = 3, .prompt_len = 5, .context_len = 5, .fill_at = 3, .ended = false }, &context, &.{});
+    try t.expectEqual(modes.Span{ 0, 0 }, st.reply); // a reply past where the slot stands is not kept
+}
+
+test "qwen27 resume: a client dropping the reasoning, a cold turn or a pass that resumes nowhere makes a fresh point" {
+    var st: Standing = .{ .rewind_at = 4 };
+    defer st.deinit(t.allocator);
+    try t.expect(!st.replayed(&.{ 1, 2, 3 }, &.{}).holds(0)); // cold: nothing stands
+    const context = [_]u32{ 1, 2, 3, 4, 20, 21, 22, 23 };
+    const reply: Leaving = .{ .at = 7, .prompt_len = 5, .context_len = 8, .fill_at = 5, .ended = true };
+    st.leave(t.allocator, reply, &context, &.{});
+    const warm = [_]u32{ 1, 2, 3, 4, 30, 23, 31 }; // the reply rendered without its reasoning
+    try t.expect(!st.replayed(&(warm ++ [_]u32{32}), &.{.{ 5, 6 }}).holds(4)); // its follow-up goes back to 4
+    const back = st.plan(&warm, &.{.{ 5, 6 }}, 0); // the server's warm pass over it
+    try t.expectEqual(Resume{ .back = 4 }, back);
+    st.take(t.allocator, back);
+    try t.expectEqual(modes.Span{ 0, 0 }, st.reply); // the rows past the point are rewritten
+    st.leave(t.allocator, .{ .at = 7, .prompt_len = 7, .context_len = 7, .fill_at = 7, .ended = true }, &warm, &.{.{ 5, 6 }});
+    const follow = warm ++ [_]u32{ 32, 33 };
+    try t.expectEqual(Resume{ .here = 7 }, st.plan(&follow, &.{.{ 5, 6 }}, 0)); // past the carried point at 4
+    try t.expect(!st.replayed(&follow, &.{.{ 5, 6 }}).holds(7)); // prompt rows: the new history's end is a point
+    st.leave(t.allocator, reply, &context, &.{});
+    st.take(t.allocator, .none);
+    try t.expectEqual(modes.Span{ 0, 0 }, st.reply);
+    try t.expectEqual(@as(u32, 0), st.rewind_at);
 }
 
 test {
