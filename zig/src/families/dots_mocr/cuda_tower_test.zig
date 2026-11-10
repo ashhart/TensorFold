@@ -20,9 +20,13 @@ fn config() !cfg.Config {
 
 const Dir = @import("sparse_checkpoint_test.zig").Dir;
 
-test "dots tower: the engine's contract, its marks and the template's own wrapping" {
+test "dots tower: the engine's contract, the host's vision decls, its marks and the template's own wrapping" {
     comptime dense.recipe.checkTower(Tower);
     try t.expect(comptime dense.recipe.towerProblem(Tower) == null);
+    try t.expect(comptime dense.recipe.towerOf(recipe).? == Tower);
+    try t.expect(@FieldType(native.Options, "vision") == ?Tower.Limits);
+    try t.expect(@FieldType(native.Loaded, "vision") == ?*Tower);
+    try t.expectEqual(@as(u32, 14400), native.default_image_tokens);
     try t.expectEqual(tw.Marks{ .open = 151666, .image = 151665, .close = 151667 }, tw.marks);
     try t.expectEqual([3]u32{ 151666, 151665, 151667 }, tw.mark_ids);
     try t.expectEqual((try config()).image_token, tw.marks.image);
@@ -52,7 +56,7 @@ test "dots tower scratch: 39,592 bytes a patch, the merger's buffers inside the 
     try t.expect(s.r + p / 4 * @as(u64, v.merged()) * 2 <= s.qkv and s.h + p * h * 2 <= s.xn);
 }
 
-test "dots tower bytes: weights 2,524,194,816 on the device, the scratch and workspace beside them" {
+test "dots tower bytes: weights 2,524,194,816 on the device, the scratch and workspace beside them, visionBytes their sum" {
     const a = t.allocator;
     const io = t.io;
     var d = try Dir.init(true, null);
@@ -61,6 +65,7 @@ test "dots tower bytes: weights 2,524,194,816 on the device, the scratch and wor
     const open = 57600 * 39592 + 256 + (32 << 20);
     try t.expectEqual(@as(u64, 2_314_053_888), open);
     try t.expectEqual(@as(u64, open), try Tower.openBytes(a, io, d.path));
+    try t.expectEqual(@as(u64, 2_524_194_816 + open), try native.visionBytes(a, io, d.path));
     var bare = try Dir.init(false, null); // no shards: nothing to count
     defer bare.deinit();
     try t.expectError(error.FileNotFound, Tower.weightBytes(a, io, bare.path));
@@ -86,9 +91,10 @@ test "dots tower rotary: the fixture's 32 frequencies equal the float32 table 1 
     try t.expectEqual(@as(?usize, 27), firstDiff(&tw.inv_freq, &off));
 }
 
-test "dots tower refusals: each new error worded, the budget's naming its flag, an unknown one not" {
+test "dots tower refusals: each new error worded through the engine's explain, an unknown one not" {
     for ([_]anyerror{ error.DotsImageSize, error.DotsImageBudget, error.DotsGrid, error.DotsVisionLimits }) |e| {
         try t.expect(Tower.explain(e) != null);
+        try t.expectEqualStrings(Tower.explain(e).?, native.explain(null, e).?);
     }
     try t.expect(std.mem.indexOf(u8, Tower.explain(error.DotsImageBudget).?, "(--vision-image-tokens)") != null);
     try t.expectStringStartsWith(Tower.explain(error.AspectRatio).?, "its longer side");

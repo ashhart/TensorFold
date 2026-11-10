@@ -108,6 +108,7 @@ pub const Tower = struct {
     gemms: vit.Gemms,
     scratch: cuda.DeviceBuffer,
     at: Scratch,
+    encodes: u64 = 0, // images that passed the grid checks into encode (the GB10 runner's count)
 
     /// The processor, the weights, the kernels and one call's scratch at max_patches; zero limits refused first.
     pub fn open(gpa: Allocator, io: std.Io, ctx: *const cuda.Context, s: cuda.Stream, dir: []const u8, limits: Limits) !*Tower {
@@ -182,6 +183,7 @@ pub const Tower = struct {
     /// One image's patches to its tokens' rows [tokens, width] bf16 at `out` on `s`; `taps` sees each stage's rows.
     pub fn encode(t: *Tower, s: cuda.Stream, im: *const Image, out: u64, taps: ?Tap) !void {
         const n = try rowsOf(t.c, im);
+        t.encodes += 1;
         const hw = try t.gpa.alloc([2]u32, n);
         defer t.gpa.free(hw);
         try image.fillPositions(hw, im.gh, im.gw, t.c.merge);
