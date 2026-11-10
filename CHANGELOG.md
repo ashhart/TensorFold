@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Server: every image takes the fixed share `--vision-image-tokens / --vision-max-images` of the visual-token budget, whatever the request's image count, so a turn that adds an image no longer re-sizes the ones already in the prompt and the prompt cache resumes from the first image; a request's images stay within `--vision-image-tokens`, and a share of 0 is refused by name (#2717, for #2510). Thanks to @devopsfortunato.
+
 
 - CUDA: a family can declare that it keeps no prompt states, so the pool plans no prompt cache for it and `--prompt-cache-gib` is refused by name before the weights load, and that its replies carry no reasoning block, as HIP already allows; every family on main is unchanged (#2710). Thanks to @laudney.
 

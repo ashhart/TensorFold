@@ -116,12 +116,18 @@ reach the limit. Once that history exceeds it, even a text-only follow-up is ref
 the images. Remove older image content from the submitted history, start a new conversation, or restart
 the server with a larger count limit. The server does not discard images automatically.
 
-A request's images share 4,096 visual tokens, so a higher count makes each image smaller: eight images get about
-512 tokens each. On CUDA Qwen checkpoints (Qwen3.5/3.8 dense and Flash Next), `--vision-image-tokens N` raises
-that shared budget, up to 65,536, while each image keeps at most 4,096, so one image is sized as before. The tower
-encodes runs of whole images of at most 16,384 patches, the scratch one full-size image already needs; a request
-that fits one run is encoded in one call, as before. The byte and pixel limits still apply, and the longer prompt
-counts against the context window.
+Each image takes a fixed share of the visual-token budget: `--vision-image-tokens / --vision-max-images`, 1,024
+tokens under the defaults, whatever the request's image count. An image therefore keeps the same rows from one turn to
+the next, so a later turn adding a picture never re-sizes an earlier one, which is what lets the prompt cache resume
+from the first image. `--vision-image-tokens` bounds the request's images together: at most `--vision-max-images` of
+them, each at most the share, so their total stays within the budget. The tradeoff is that a lone image gets a quarter
+of the budget under the defaults, not all of it. Where the budget leaves no share — it divides into 0 over the image
+limit — the request is refused, naming the image and both
+`--vision-image-tokens` and `--vision-max-images`. On CUDA Qwen checkpoints (Qwen3.5/3.8 dense and Flash Next),
+`--vision-image-tokens N` raises that budget, up to 65,536, while each image keeps at most 4,096, so one image is
+sized as before. The tower encodes runs of whole images of at most 16,384 patches, the scratch one full-size image
+already needs; a request that fits one run is encoded in one call, as before. The byte and pixel limits still apply,
+and the longer prompt counts against the context window.
 
 ```bash
 tensorfold serve Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP --parallel 2 --vision \
@@ -134,7 +140,7 @@ EXIF orientation is applied and transparency is composited onto white; animated 
 Up to 16 requests decode and process images at once; more wait up to a minute, and past 128 waiting the server answers 503 so the client retries.
 The request log (`TENSORFOLD_REQUEST_LOG`) records image parts as `<redacted>`.
 The model processor bounds the total expanded image tokens to 4,096, with a smaller budget for `detail: low`.
-That budget is shared across the images; a higher count can reduce the detail available for each image.
+That budget is divided by the image limit, so every image gets the same share whatever the request's image count.
 Those expanded tokens count toward prompt usage and the context window before model execution.
 The available memory budget may impose a smaller practical image or context limit.
 
@@ -241,7 +247,8 @@ With `--vision`, the 27B loads its checkpoint's image tower (the `vision_tower.*
 `TensorFold/Qwen3.8-27B-MLX-4bit`, kept in bf16) beside the language model. Without the flag nothing of the tower
 loads. An image is prepared as transformers' Qwen2-VL processor prepares it: decoded as above, sized by `smart_resize`
 to multiples of 32 pixels between the processor's 65,536 pixels and the image's share of `--vision-image-tokens`
-(split evenly over the request's images, 1,024 pixels a token, at most 16,777,216 pixels), resized with Pillow's
+(the fixed share `--vision-image-tokens / --vision-max-images`, 1,024 pixels a token, at most 16,777,216 pixels),
+resized with Pillow's
 bicubic, and cut into 16-pixel patches. The tower runs once an image as its request's prompt pass starts, on the GPU
 in bf16 with fp32 sums. Its 2 x 2 merged rows replace the `<|image_pad|>` placeholders' embeddings. The text's
 attention layers turn each image row by its row and column (M-RoPE), and the rows after an image carry the shift those
@@ -355,7 +362,8 @@ TensorFold's CUDA kernels (`zig/src/families/radio/`).
   `"detail": "low"` keeps its own grid, down to 2 x 2 patches and one token. It is resized with torch's antialiased
   bicubic on float samples and normalized with CLIP's mean and deviation. The pixels equal the checkpoint processor's
   bit for bit. An image takes a quarter of its patches as tokens (at most 3,328), written between `<img>` and `</img>`.
-- **Budget:** a request's images share `--vision-image-tokens`, 13,312 by default for Super VL, so up to four images
+- **Budget:** a request's images take `--vision-image-tokens` together, 13,312 by default for Super VL, each image at
+  its fixed share of that budget over `--vision-max-images` (3,328 for the default four), so up to four images
   keep the size NVIDIA's processor gives them; a smaller budget makes them smaller. Four full-size images on one GB10
   took 13,124 prompt tokens and 11.45 s to the first token.
 - **Tower:** the checkpoint's bf16 weights as stored, bf16 activations and fp32 sums. Against a float32 run of the

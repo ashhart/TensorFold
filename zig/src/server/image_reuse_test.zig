@@ -21,8 +21,8 @@ const template =
 ;
 
 /// A test picture as a data URL: PNG's signature, a name byte, then the rows it takes when its share allows.
-fn picture(a: Allocator, name: u8, rows: u8) ![]const u8 {
-    const raw = [_]u8{ 0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', name, rows };
+fn picture(a: Allocator, name: u8, rows: u16) ![]const u8 {
+    const raw = [_]u8{ 0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', name } ++ std.mem.toBytes(rows);
     const enc = std.base64.standard.Encoder;
     const out = try a.alloc(u8, enc.calcSize(raw.len));
     return std.fmt.allocPrint(a, "data:image/png;base64,{s}", .{enc.encode(out, &raw)});
@@ -30,7 +30,7 @@ fn picture(a: Allocator, name: u8, rows: u8) ![]const u8 {
 
 /// The fake processor: at most `max_tokens` rows, named by its bytes and grid as core/picture/identity.zig names one.
 fn prepare(_: *anyopaque, a: Allocator, bytes: []const u8, max_tokens: u32) anyerror!api.PreparedImage {
-    const rows: u32 = @min(bytes[9], max_tokens);
+    const rows: u32 = @min(@as(u32, std.mem.readInt(u16, bytes[9..11], .little)), max_tokens);
     var h = std.crypto.hash.sha2.Sha256.init(.{});
     h.update(bytes);
     h.update(std.mem.asBytes(&rows));
@@ -65,7 +65,7 @@ const Gone = struct {
 };
 
 const Turn = struct { cached: usize, prompt: usize, rows: usize, tokens: []const u32, finish: []const u8 };
-const Options = struct { image_tokens: u32 = 64, budget: u64 = 1 << 20, strip: bool = false, image_pad: bool = false };
+const Options = struct { image_tokens: u32 = 64, max_images: u32 = 4, budget: u64 = 1 << 20, strip: bool = false, image_pad: bool = false };
 
 /// A served model: the real server and lane host, the fake target (image rows named by their image) and a prompt cache.
 const Harness = struct {
@@ -105,7 +105,7 @@ const Harness = struct {
         var problem: []const u8 = "";
         h.hf = try HfText.load(gpa, t.io, h.files.path, null, a, &problem);
         h.markers = .{h.hf.text().tokenId(if (o.image_pad) "<|image_pad|>" else "<|image|>").?};
-        const vision: api.Vision = .{ .ctx = &h.dummy, .prepare = prepare, .image_token = h.markers[0], .markers = &h.markers, .image_tokens = o.image_tokens, .max_images = 4 };
+        const vision: api.Vision = .{ .ctx = &h.dummy, .prepare = prepare, .image_token = h.markers[0], .markers = &h.markers, .image_tokens = o.image_tokens, .max_images = o.max_images };
         h.host = api.LaneHost.init(gpa, t.io, &h.core, .{ .lanes = 2, .vision = vision, .prompt_cache = true });
         h.host.cache = &h.store;
         try h.host.start();
@@ -330,7 +330,7 @@ test "image reuse: a repeated picture, and two pictures in one turn, resume what
     try expectFresh(a, .{}, again, repeated);
 }
 
-test "image reuse: a picture whose shared budget shrinks when a turn adds one is prepared again, not resumed" {
+test "image reuse: a picture keeps its rows when a later turn adds one, so the earlier prompt resumes" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -339,13 +339,78 @@ test "image reuse: a picture whose shared budget shrinks when a turn adds one is
     const big = try picture(a, 'a', 40);
     var msgs: std.ArrayList([]const u8) = .empty;
     try msgs.appendSlice(a, &.{ system, try user(a, "One picture.", &.{big}) });
-    try t.expectEqual(@as(usize, 40), (try h.ask(a, try conv(a, msgs.items))).rows);
-    // a second picture halves the share (64 / 2): the first is 32 rows now, another grid and so another image
+    const first = try h.ask(a, try conv(a, msgs.items));
+    try t.expectEqual(@as(usize, 16), first.rows); // the fixed share: 64 over the limit of 4, cut from the 40 asked for
+    // every picture takes that same 16: the first keeps its rows, so the earlier prompt resumes
     try msgs.appendSlice(a, &.{ ok, try user(a, "And another.", &.{try picture(a, 'b', 20)}) });
     const m = try conv(a, msgs.items);
     const turn = try h.ask(a, m);
-    try t.expectEqual(@as(usize, 32 + 20), turn.rows);
+    try t.expectEqual(@as(usize, 16), turn.rows); // 16 for the new picture, 32 of the 64 in all
+    try t.expectEqual(first.prompt - try h.opener(a), turn.cached);
     try expectFresh(a, .{ .image_tokens = 64 }, m, turn);
+    // a third message's picture adds its own 10 rows past the request's 64: every earlier one keeps its rows
+    try msgs.appendSlice(a, &.{ ok, try user(a, "One more.", &.{try picture(a, 'c', 10)}) });
+    const longer = try conv(a, msgs.items);
+    const later = try h.ask(a, longer);
+    try t.expectEqual(@as(usize, 10), later.rows); // 42 of the 64 the request may hold
+    try t.expectEqual(turn.prompt - try h.opener(a), later.cached);
+    try expectFresh(a, .{ .image_tokens = 64 }, longer, later);
+}
+
+test "image reuse: two full-size pictures in one request are admitted at 1,024 rows each" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const h = try Harness.init(t.allocator, a, .{ .image_tokens = 4096 });
+    defer h.deinit();
+    const body = try conv(a, &.{ system, try user(a, "Two pictures.", &.{ try picture(a, 'a', 3000), try picture(a, 'b', 3000) }) });
+    const msgs = (try json.parse(a, body)).ok;
+    var cx: Cx = .{ .a = a };
+    const prepared = try @import("prompt.zig").prepare(h.srv, &cx, .{ .messages = msgs, .fields = .null }, false, null);
+    try t.expectEqual(@as(u32, 1024), prepared.images[0].tokens); // the fixed share: 4,096 over the limit of 4
+    try t.expectEqual(@as(u32, 1024), prepared.images[1].tokens);
+    const turn = try h.ask(a, body);
+    try t.expectEqual(@as(usize, 2048), turn.rows); // both admitted, well inside the request's 4,096
+    try expectFresh(a, .{ .image_tokens = 4096 }, body, turn);
+}
+
+test "image reuse: a fixed share divides the budget by the image limit, so one picture takes a quarter of it" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const h = try Harness.init(t.allocator, a, .{ .image_tokens = 4096 });
+    defer h.deinit();
+    // the tradeoff of the fixed share: a lone picture takes 4,096 / 4, not the whole budget
+    const alone = try conv(a, &.{ system, try user(a, "One picture.", &.{try picture(a, 'a', 4096)}) });
+    const solo = try h.ask(a, alone);
+    try t.expectEqual(@as(usize, 1024), solo.rows);
+    try expectFresh(a, .{ .image_tokens = 4096 }, alone, solo);
+    // another request of four pictures: the same 1,024 each, and their total still inside the request's 4,096
+    const four = [_][]const u8{ try picture(a, 'b', 1200), try picture(a, 'c', 1200), try picture(a, 'd', 1200), try picture(a, 'e', 1200) };
+    const many = try conv(a, &.{ system, try user(a, "Four.", &four) });
+    var cx: Cx = .{ .a = a };
+    const parts = (try @import("prompt.zig").prepare(h.srv, &cx, .{ .messages = (try json.parse(a, many)).ok, .fields = .null }, false, null)).images;
+    for (parts) |p| try t.expectEqual(@as(u32, 1024), p.tokens);
+    const turn = try h.ask(a, many);
+    try t.expectEqual(@as(usize, 4096), turn.rows); // 4 x 1,024, exactly the request's budget
+    try expectFresh(a, .{ .image_tokens = 4096 }, many, turn);
+}
+
+test "image reuse: a message whose images leave no share, or a picture with no rows, is refused" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // a 3-token budget over the limit of 4 images divides into nothing, so that image is refused
+    const tight = try Harness.init(t.allocator, a, .{ .image_tokens = 3 });
+    defer tight.deinit();
+    const four = [_][]const u8{ try picture(a, 'a', 1), try picture(a, 'b', 1), try picture(a, 'c', 1), try picture(a, 'd', 1) };
+    try t.expectError(error.Refused, tight.ask(a, try conv(a, &.{ system, try user(a, "Four pictures.", &four) })));
+    // the same four under a budget they divide into: each keeps its one row
+    const even = try Harness.init(t.allocator, a, .{ .image_tokens = 4 });
+    defer even.deinit();
+    try t.expectEqual(@as(usize, 4), (try even.ask(a, try conv(a, &.{ system, try user(a, "Four pictures.", &four) }))).rows);
+    // a picture the processor gives no rows to is refused too
+    try t.expectError(error.Refused, even.ask(a, try conv(a, &.{ system, try user(a, "Empty.", &.{try picture(a, 'f', 0)}) })));
 }
 
 test "image reuse: switching conversations and concurrent clients resume each its own images" {
