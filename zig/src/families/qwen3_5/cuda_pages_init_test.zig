@@ -132,7 +132,8 @@ test "kv safety: Qwen initPaged logits allocation failure precedes every fill" {
     var d = Device.driver();
     var e = engine(&d);
     defer finish(&d, e.stream);
-    var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 1 }); // the state table's host copy, then the logits
+    // the state table's host copy, then the logits
+    var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 1 });
     try std.testing.expectError(error.OutOfMemory, caches.Cache.initPaged(failing.allocator(), &e, 3, 16, 0x1000));
     try Device.released();
     try std.testing.expect(failing.has_induced_failure);
