@@ -358,7 +358,8 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?q.
         if (owns_draft) d.deinit();
         return err;
     };
-    if (owns_draft) std.log.info("qwen27: {s} drafter loaded, {d} MiB on the device", .{ draft_model.?.label(), (model.device.allocated() -| before_draft) >> 20 });
+    const draft_bytes = model.device.allocated() -| before_draft;
+    if (owns_draft) std.log.info("qwen27: {s} drafter loaded, {d} MiB on the device", .{ draft_model.?.label(), draft_bytes >> 20 });
     var draft_owned = owns_draft;
     errdefer if (draft_owned) draft_model.?.deinit();
     const memory = q.prompt_memory;
@@ -370,7 +371,8 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?q.
         const dev = model.device;
         const ram: ?usize = if (cache_fit.ram()) |r| @intCast(r) else null;
         const tail = memory.advice(dev.maxWorkingSet(), dev.allocated(), cap(), try fit_prompt.cost(rows, 1), ram);
-        why.* = try std.fmt.allocPrint(a, "--parallel {d} needs {d:.1} GiB for its streams and {d}-row prompt scratch at a {d}-token context; {d:.1} GiB remains beside the weights and an 8 GiB margin{f}", .{ o.streams, cache_fit.gibs(try fit_prompt.cost(rows, @max(o.streams, 1))), rows, capacity, cache_fit.gibs(fit_prompt.left), tail });
+        const by: []const u8 = if (owns_draft) try std.fmt.allocPrint(a, ", the {s} drafter ({d:.1} GiB)", .{ draft_model.?.label(), cache_fit.gibs(draft_bytes) }) else "";
+        why.* = try std.fmt.allocPrint(a, "--parallel {d} needs {d:.1} GiB for its streams and {d}-row prompt scratch at a {d}-token context; {d:.1} GiB remains beside the weights{s} and an 8 GiB margin{f}", .{ o.streams, cache_fit.gibs(try fit_prompt.cost(rows, @max(o.streams, 1))), rows, capacity, cache_fit.gibs(fit_prompt.left), by, tail });
         return err;
     };
     if (model.frame.capacity != rows) {
