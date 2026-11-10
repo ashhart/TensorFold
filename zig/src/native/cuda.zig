@@ -442,7 +442,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     h.kv_count = if (admit != null) kv_pages.ledgerPool(F, loaded) else null;
     const bench = if (@hasDecl(F, "benchmark")) F.benchmark(loaded.ctx) else api.Benchmark{ .ranks = 1 };
     const readouts: ?lanes.readout.Info = if (@hasField(@TypeOf(loaded), "readouts")) loaded.readouts else null;
-    try h.serve(io, served.facts, loaded.rows, .{
+    try h.serve(io, served.facts, loaded.rows, familyInfo(F, .{
         .benchmark_ranks = bench.ranks,
         .benchmark_group = bench.group,
         .lanes = streams,
@@ -466,8 +466,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         .slide_conversations = conversations,
         .readouts = readouts,
         .text_generation = readouts == null, // a readout engine answers its readouts only (Clef's /v1/systemone)
-        .reasoning = reasoning(F),
-    }, .{ .ctx = loaded.ctx, .text = F.explain });
+    }), .{ .ctx = loaded.ctx, .text = F.explain });
     opened = true;
     kv_pages.warnCapacity(cache_capacity, o.keep == 0 or o.prompt_cache_gib == 0 or share, if (paged) |p| p.taken else 0, std.log); // TF_KV_SHARE: no copied rows
     if (@hasField(@TypeOf(loaded), "follow")) if (loaded.follow) |f| {
@@ -477,6 +476,13 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h, .halt = Host.halt };
 }
 const toGib = family_memory.toGib;
+
+/// The Info `openWith` serves: the host's fields, then what the family declares (its reasoning block).
+fn familyInfo(comptime F: type, host: api.Info) api.Info {
+    var info = host;
+    info.reasoning = reasoning(F);
+    return info;
+}
 
 /// The family's Info.reasoning: false when it declares `pub const reasoning = false` (no reasoning block).
 fn reasoning(comptime F: type) bool {
@@ -489,6 +495,17 @@ test "a CUDA family declares replies without reasoning with `pub const reasoning
         pub const reasoning = false;
     }));
     inline for (registry) |F| try std.testing.expect(reasoning(F));
+}
+
+test "the Info openWith serves carries each family's reasoning declaration over the host's" {
+    const Plain = struct {
+        pub const reasoning = false;
+    };
+    try std.testing.expect(!familyInfo(Plain, .{ .reasoning = true }).reasoning);
+    try std.testing.expect(familyInfo(struct {}, .{ .reasoning = false }).reasoning);
+    const kept = familyInfo(Plain, .{ .lanes = 6, .context_window = 8192, .startup = "plan" });
+    try std.testing.expect(kept.lanes == 6 and kept.context_window == 8192 and std.mem.eql(u8, kept.startup, "plan"));
+    inline for (registry) |F| try std.testing.expectEqual(reasoning(F), familyInfo(F, .{ .reasoning = !reasoning(F) }).reasoning);
 }
 test {
     _ = @import("draft_sources_cuda_test.zig");
