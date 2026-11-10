@@ -84,7 +84,7 @@ const round: cuda.norms.Tail = .{ .round = true };
 
 pub const Tower = struct {
     pub const Limits = struct { image_tokens: u32, max_images: u32 };
-    /// A request's image tokens over all its images unless --image-tokens says otherwise: one largest image (HIP's).
+    /// A request's image tokens over all its images (--vision-image-tokens): one largest image, as HIP.
     pub const default_image_tokens: u32 = max_patches / 4;
     /// The chat template writes each image's open and close marks itself.
     pub const template_wraps = true;
@@ -161,7 +161,7 @@ pub const Tower = struct {
     pub fn explain(err: anyerror) ?[]const u8 {
         return switch (err) {
             error.DotsImageSize => "dots.mocr reads images of at least 28 pixels a side",
-            error.DotsImageBudget => "the image takes more image tokens than the request's budget (--image-tokens) or dots.mocr's 14,400 an image",
+            error.DotsImageBudget => "the image takes more image tokens than the request's budget (--vision-image-tokens) or dots.mocr's 14,400 an image",
             error.DotsGrid => "the image's patches do not fill its grid in whole 2 x 2 merge blocks",
             error.DotsVisionLimits => "--vision: dots.mocr takes at least one image token and one image a request",
             else => core.picture.patches.problem(err),
@@ -231,7 +231,7 @@ pub const Tower = struct {
         try k.vit.layerNorm(s, a.xn, t.w.ln_w, t.w.ln_b, a.h, n, h, 1e-6);
         const rows = n / 4;
         const wide: usize = t.c.merged();
-        if (taps) |tp| try tp.at(tp.ctx, "mlp0.0.x", a.h, rows, wide); // its GELU is fused: a check runs its linear alone
+        if (taps) |tp| try tp.at(tp.ctx, "mlp0.0.x", a.h, rows, wide); // GELU is fused: a check runs the linear alone
         try vit.linearAct(&t.gemms, &k.vit, s, a.gu, a.h, t.w.mlp0, t.w.mlp0_b, a.att, rows, wide, wide, null, a.r, .gelu);
         try vit.linear(&t.gemms, &k.vit, s, a.gu, a.r, t.w.mlp2, t.w.mlp2_b, out, rows, t.width, wide);
         try tap.gemm("mlp2", 0, a.r, wide, out, t.width, rows);

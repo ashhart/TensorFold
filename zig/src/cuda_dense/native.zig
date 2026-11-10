@@ -85,7 +85,7 @@ fn WithTower(comptime R: type, comptime T: type) type {
         /// No prompt states: the host plans no prompt cache for this family and refuses --prompt-cache-gib.
         pub const keeps_no_prompts = true;
         pub const reasoning = C.reasoning;
-        /// A request's image tokens over all its images, unless --image-tokens says otherwise.
+        /// A request's image tokens over all its images, unless --vision-image-tokens says otherwise.
         pub const default_image_tokens: u32 = T.default_image_tokens;
         pub const Room = C.Room;
         /// --vision: the tower's limits; no precision, kv8, prompt_int8, loops or rank field.
@@ -262,7 +262,7 @@ pub fn Core(comptime R: type) type {
                 error.NoStreamFits => "the CUDA memory budget fits no " ++ name ++ " stream after the weights: lower --context, free device memory, or adjust TENSORFOLD_MEMORY_RESERVE_GIB / TENSORFOLD_CUDA_MEMORY_LIMIT_GB",
                 error.UnsupportedDenseHeadDim => "this " ++ name ++ " checkpoint's attention head dim is not 64 or 128, the two the CUDA dense engine's attention kernels take",
                 error.UnsupportedDenseGroup => "this " ++ name ++ " checkpoint's query heads a KV head are not an even count of at most 16, the groups the CUDA dense engine's attention kernels take",
-                error.DenseImageSpan => "each image must fill its own run of image tokens in the prompt, in order and within the request's image token budget (--image-tokens)",
+                error.DenseImageSpan => "each image must fill its own run of image tokens in the prompt, in order and within the request's image token budget (--vision-image-tokens)",
                 error.DenseServedWithoutVision => name ++ " on CUDA was served without --vision: serve it with --vision to send images",
                 error.DenseTowerWidth => "this " ++ name ++ " checkpoint's image tower writes rows of another width than its decoder's hidden size",
                 else => null,

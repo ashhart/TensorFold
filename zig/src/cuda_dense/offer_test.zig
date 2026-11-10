@@ -31,7 +31,7 @@ test "the host's offer reads the tower's marks, limits, prepare and words throug
     try t.expect(offer.offer(loaded.vision, null) == null);
 }
 
-test "the serve flags set the tower's limits: its own default image tokens unless --image-tokens names them" {
+test "the serve flags set the tower's limits: its own default image tokens unless --vision-image-tokens names them" {
     var o: V.Options = .{ .context = 4096, .drafts = true };
     var why: []const u8 = "";
     try t.expect(options.set(V, .{ .dir = "", .model_type = "tiny_dense", .vision = .{ .max_images = 3 } }, &o, &why));
