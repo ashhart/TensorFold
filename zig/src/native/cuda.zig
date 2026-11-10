@@ -163,14 +163,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     }
     if (std.mem.eql(u8, o.model_type, "fish_omni")) return openDrama(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "qwen4") or std.mem.eql(u8, o.model_type, "qwen4_text")) return @import("qwen4_cuda.zig").open(a, gpa, io, o, problem);
-    if (std.mem.eql(u8, o.model_type, "qwen3")) {
-        if (refusals.family(@import("qwen3_cuda").native, o)) |why| {
-            problem.* = why;
-            return null;
-        }
-        const device = try setting(a, o.device, "TF_CUDA_DEVICE", 0, problem) orelse return null;
-        return @import("qwen3_cuda").native.open(a, gpa, io, o, device, problem, budget, windows);
-    }
+    if (std.mem.eql(u8, o.model_type, "qwen3")) return @import("cuda_qwen3.zig").open(a, gpa, io, o, problem, budget, windows);
     inline for (registry) |F| if (std.mem.eql(u8, o.model_type, F.model_type)) return openWith(F, a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, lfm2.family.model_type)) {
         if (refusals.lfm2(o)) |why| {
