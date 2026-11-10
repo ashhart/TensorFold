@@ -104,6 +104,23 @@ fn segment(a: std.mem.Allocator, tok: anytype, text: []const u8, ids: *std.Array
     try tags.appendNTimes(a, tag_text, kept.len);
 }
 
+/// The image pads' rows of `p`, whose references hold `counts` vision tokens each, checked against its ids.
+pub fn pads(a: std.mem.Allocator, p: Presentation, marks: Marks, counts: []const usize) ![]u32 {
+    if (counts.len != p.at.len) return error.H3BadVisionGrid;
+    var n: usize = 0;
+    for (counts) |c| n += c;
+    const out = try a.alloc(u32, n);
+    errdefer a.free(out);
+    var k: usize = 0;
+    for (p.at, counts) |at, c| for (0..c) |j| {
+        const row = at + j;
+        if (row >= p.ids.len or p.ids[row] != marks.image) return error.H3BadVisionGrid;
+        out[k] = @intCast(row);
+        k += 1;
+    };
+    return out;
+}
+
 /// Each row's (t, h, w): text counts up; a reference's pads sit at its grid; text resumes past the larger side.
 pub fn positions(a: std.mem.Allocator, p: Presentation, marks: Marks, grids: []const [2]u32) ![][3]i32 {
     if (grids.len != p.at.len or grids.len > rope.max_images) return error.H3BadVisionGrid;
@@ -267,4 +284,49 @@ pub fn textPrefix(names: []const []const u8) ![]const u8 {
         found = p;
     }
     return found orelse error.H3NoTextModel;
+}
+
+/// A tensor's shape: [rows, columns], or [rows] when columns is 0.
+pub const Shape = [2]usize;
+
+/// A text model layer's tensors, by field.
+pub fn Layer(comptime T: type) type {
+    return struct { norm1: T, norm2: T, q: T, k: T, v: T, o: T, q_norm: T, k_norm: T, gate: T, up: T, down: T };
+}
+
+/// Each layer field's checkpoint name under its `layers.N.`, and its shape at `g`.
+pub fn layerTensors(g: Text) [11]struct { []const u8, []const u8, Shape } {
+    const h = g.hidden;
+    const q = g.heads * head_dim;
+    const kv = g.kv_heads * head_dim;
+    return .{
+        .{ "norm1", "input_layernorm.weight", .{ h, 0 } },          .{ "norm2", "post_attention_layernorm.weight", .{ h, 0 } },
+        .{ "q", "self_attn.q_proj.weight", .{ q, h } },             .{ "k", "self_attn.k_proj.weight", .{ kv, h } },
+        .{ "v", "self_attn.v_proj.weight", .{ kv, h } },            .{ "o", "self_attn.o_proj.weight", .{ h, q } },
+        .{ "q_norm", "self_attn.q_norm.weight", .{ head_dim, 0 } }, .{ "k_norm", "self_attn.k_norm.weight", .{ head_dim, 0 } },
+        .{ "gate", "mlp.gate_proj.weight", .{ g.ffn, h } },         .{ "up", "mlp.up_proj.weight", .{ g.ffn, h } },
+        .{ "down", "mlp.down_proj.weight", .{ h, g.ffn } },
+    };
+}
+
+/// A token refiner block's tensors, by field: fused q k v rows per head [q 128 | k 128 | v 128], fc1 [gate ; value].
+pub fn Block(comptime T: type) type {
+    return struct { norm1: T, norm2: T, qkv: T, q_norm: T, k_norm: T, out: T, fc1: T, fc2: T };
+}
+
+/// Each block field's checkpoint name under its `token_refiner.blocks.N.`, and its shape at `g`.
+pub fn blockTensors(g: Refiner) [8]struct { []const u8, []const u8, Shape } {
+    const h = g.hidden;
+    const inner = g.heads * head_dim;
+    return .{
+        .{ "norm1", "norm1.weight", .{ h, 0 } },               .{ "norm2", "norm2.weight", .{ h, 0 } },
+        .{ "qkv", "attn.qkv_proj.weight", .{ 3 * inner, h } }, .{ "q_norm", "attn.q_norm.weight", .{ head_dim, 0 } },
+        .{ "k_norm", "attn.k_norm.weight", .{ head_dim, 0 } }, .{ "out", "attn.out_proj.weight", .{ h, inner } },
+        .{ "fc1", "mlp.fc1.weight", .{ 2 * g.mlp, h } },       .{ "fc2", "mlp.fc2.weight", .{ h, g.mlp } },
+    };
+}
+
+/// The transformer's text front end outside its blocks: condition_proj's weight and bias, the refiner's final norm.
+pub fn frontTensors(g: Refiner) [3]struct { []const u8, []const u8, Shape } {
+    return .{ .{ "cond_w", "condition_proj.weight", .{ g.hidden, g.text } }, .{ "cond_b", "condition_proj.bias", .{ g.hidden, 0 } }, .{ "final_norm", "token_refiner.final_norm.weight", .{ g.hidden, 0 } } };
 }

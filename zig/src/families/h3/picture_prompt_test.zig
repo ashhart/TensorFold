@@ -50,6 +50,16 @@ test "h3 prompt: each reference's label and the prompt tokenised alone, vision b
     try testing.expectError(error.H3BadVisionGrid, pp.present(a, Whole{}, marks, &.{0}, "x"));
 }
 
+test "h3 prompt: the image pads' rows, each reference's run in order" {
+    const a = testing.allocator;
+    var p = try pp.present(a, Whole{}, marks, &.{ 2, 3 }, "x");
+    defer p.deinit(a);
+    const rows = try pp.pads(a, p, marks, &.{ 2, 3 });
+    defer a.free(rows);
+    try testing.expectEqualSlices(u32, &.{ 2, 3, 7, 8, 9 }, rows);
+    try testing.expectError(error.H3BadVisionGrid, pp.pads(a, p, marks, &.{ 3, 3 }));
+}
+
 test "h3 prompt: each segment cut to its first 4,096 tokens on its own" {
     const a = testing.allocator;
     const long = try a.alloc(u8, 5000);
@@ -221,4 +231,18 @@ test "h3 prompt: the text model's tensor prefix, the vision tower's names left o
     try testing.expectEqualStrings("", try pp.textPrefix(&.{"layers.0.input_layernorm.weight"}));
     try testing.expectError(error.H3NoTextModel, pp.textPrefix(names[0..3]));
     try testing.expectError(error.H3AmbiguousTextModel, pp.textPrefix(&.{ "a.layers.0.input_layernorm.weight", "b.layers.0.input_layernorm.weight" }));
+}
+
+test "h3 prompt: the tensor tables follow their structs' fields, at the released shapes" {
+    const layer = pp.layerTensors(pp.released_text);
+    inline for (comptime std.meta.fieldNames(pp.Layer(u8)), 0..) |f, i| try testing.expectEqualStrings(f, layer[i][0]);
+    const block = pp.blockTensors(pp.released_refiner);
+    inline for (comptime std.meta.fieldNames(pp.Block(u8)), 0..) |f, i| try testing.expectEqualStrings(f, block[i][0]);
+    try testing.expectEqual(pp.Shape{ 8192, 5120 }, layer[2][2]);
+    try testing.expectEqual(pp.Shape{ 1024, 5120 }, layer[3][2]);
+    try testing.expectEqual(pp.Shape{ 5120, 25600 }, layer[10][2]);
+    try testing.expectEqual(pp.Shape{ 21504, 5376 }, block[2][2]);
+    try testing.expectEqual(pp.Shape{ 5376, 7168 }, block[5][2]);
+    try testing.expectEqual(pp.Shape{ 28672, 5376 }, block[6][2]);
+    try testing.expectEqual(pp.Shape{ 5376, 5120 }, pp.frontTensors(pp.released_refiner)[0][2]);
 }
