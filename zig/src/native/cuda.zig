@@ -186,21 +186,17 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         return null;
     } else modelContext(a, io, o.dir);
     // a family with no positions to stretch (GLM-5.3-Flash) raises it with a row of its own, read at its open
-    const raised: ?u64 = if (comptime @hasDecl(F, "raisedCeiling")) F.raisedCeiling() catch |e| {
-        problem.* = F.explain(null, e) orelse @errorName(e);
-        return null;
-    } else null;
-    const switch_name = if (comptime @hasDecl(F, "raisedCeiling")) F.ceiling_switch else "";
-    const native: i64 = if (raised) |n| @intCast(n) else own;
+    const raised = windows.familyCeiling(F, problem) catch return null;
+    const native: i64 = if (raised.window) |n| @intCast(n) else own;
     const window = contextWindow(o.context, native, F.default_context) catch |e| {
         problem.* = switch (e) {
             error.Negative => try std.fmt.allocPrint(a, "--context {d}: a token count, or 0 for the model's window", .{o.context.?}),
             error.NoNative => "--context 0 asks for the model's window, and its config.json names none: give a token count",
-            error.PastNative => if (raised != null) try windows.pastCeiling(a, o.context.?, native, switch_name) else try std.fmt.allocPrint(a, "--context {d} exceeds this model's {d}-token window", .{ o.context.?, native }),
+            error.PastNative => if (raised.window != null) try windows.pastCeiling(a, o.context.?, native, raised.switch_name) else try std.fmt.allocPrint(a, "--context {d} exceeds this model's {d}-token window", .{ o.context.?, native }),
         };
         return null;
     };
-    if (raised != null and window > own) std.log.info("{s}", .{try windows.pastTrained(a, window, own, switch_name)});
+    if (raised.window != null and window > own) std.log.info("{s}", .{try windows.pastTrained(a, window, own, raised.switch_name)});
     if (o.slide) {
         // a family learns once its module declares `slide` (its learner), `learnModel` and `linked`
         if (!@hasDecl(F, "slide")) {
@@ -562,34 +558,9 @@ test "Flash Next takes kept prompt states and drafts together on any rank count"
 test "Flash Next takes --vision at family admission" {
     try @import("cuda_flashnext_refusal_test.zig").vision();
 }
-test "context ceilings: GLM reads its ceiling at its open, unset keeps main's refusal, and a malformed one is GLM's refusal" {
-    const env = platform.env;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config.json", .data = "{\"max_position_embeddings\": 1048576}" });
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
-    var named: usize = 0;
-    inline for (registry) |F| if (comptime @hasDecl(F, "raisedCeiling")) {
-        defer _ = env.unsetenv(F.ceiling_switch);
-        var why: []const u8 = "";
-        _ = env.unsetenv(F.ceiling_switch);
-        try std.testing.expect((try open(a, std.testing.allocator, std.testing.io, .{ .dir = dir, .model_type = F.model_type, .context = 2097152 }, &why)) == null);
-        try std.testing.expectEqualStrings("--context 2097152 exceeds this model's 1048576-token window", why);
-        _ = env.setenv(F.ceiling_switch, "2M", 1);
-        try std.testing.expect((try open(a, std.testing.allocator, std.testing.io, .{ .dir = dir, .model_type = F.model_type, .context = 2097152 }, &why)) == null);
-        try std.testing.expectEqualStrings(F.explain(null, error.InvalidEnvironment).?, why);
-        _ = env.setenv(F.ceiling_switch, "2097152", 1);
-        try std.testing.expect((try open(a, std.testing.allocator, std.testing.io, .{ .dir = dir, .model_type = F.model_type, .context = 2097153 }, &why)) == null);
-        try std.testing.expectEqualStrings("--context 2097153 exceeds the 2097152-token window " ++ F.ceiling_switch ++ " sets", why);
-        named += 1;
-    };
-    try std.testing.expect(named >= 1); // GLM-5.3-Flash's TF_GLM_CONTEXT_CEILING
-}
 test {
     _ = @import("cuda_health_test.zig");
+    _ = @import("cuda_ceiling_test.zig");
     _ = @import("cuda_vision_offer.zig");
     _ = @import("cuda_ledger.zig");
     _ = kv_pages;
