@@ -9,6 +9,8 @@ const util = @import("util.zig");
 
 /// The 16-row tiles a block holds, by tier: 64 rows.
 pub const row_tiles = [_]usize{4};
+/// The most rows a tuning row's `few_rows` can cut at: what the tile sends to its K-parallel passes (kItemFewRows).
+pub const few_rows = 8;
 pub const Functions = [affine.bit_widths.len][row_tiles.len]Function;
 
 /// The tier's functions at a width, as the module names them.
@@ -28,9 +30,14 @@ pub fn rows(tier: usize) usize {
 /// Tier `tier` over every item of a plan: 128 columns by the tier's rows a block, all waves across the columns.
 pub fn go(k: *const affine.Kernels, c: affine.Call, tier: usize) util.Error!void {
     const b = std.mem.indexOfScalar(c_int, &affine.bit_widths, c.arg.bits) orelse return error.Invalid;
+    try goWith(k.item[b][tier], c, tier);
+}
+
+/// `go` on a tile function of the tier's geometry: the tier's own, or a contract control in its place.
+pub fn goWith(f: Function, c: affine.Call, tier: usize) util.Error!void {
     if (c.s == util.counting) return;
     var args: hl.Args = .{};
     try args.add(c.arg);
     const grid = util.dim(util.cdiv(c.arg.n, 128), util.cdiv(c.arg.m, rows(tier)), c.items);
-    try hl.launch(k.item[b][tier], .{ .grid = grid, .block = .{ .x = 256 } }, .{ .r = c.r, .handle = c.s }, &args);
+    try hl.launch(f, .{ .grid = grid, .block = .{ .x = 256 } }, .{ .r = c.r, .handle = c.s }, &args);
 }
