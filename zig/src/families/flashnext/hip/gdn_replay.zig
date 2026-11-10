@@ -4,6 +4,7 @@ const hip = @import("hip");
 
 const pops = hip.plan_ops;
 const cache = @import("cache.zig");
+const config = @import("../config.zig");
 const forward = @import("forward.zig");
 const model = @import("model.zig");
 
@@ -340,4 +341,60 @@ pub fn linear(
     const out = try take(o, m.act, rows * vw);
     try o.gnormOut(y, l.norm, z, out, rows * d.value_heads, d.value_dim, d.eps, d.gate);
     return o.project(out, l.out, rows, l.out.partial);
+}
+
+test "the words keep every slot's arrays and put the pointers on even words" {
+    const l = Layout.of(48);
+    try std.testing.expect(l.ptr % 2 == 0);
+    try std.testing.expect(l.snaps == l.ptr + 2 * slots);
+    try std.testing.expect(l.words == l.snaps + 4 * 48);
+    try std.testing.expect(Layout.start(48) % 2 == 0);
+    try std.testing.expectEqual(@as(usize, 2 * (2 + 2 * 48)), Layout.desc(48));
+    try std.testing.expectEqual(Layout.start(48) + slots * Layout.desc(48), Layout.total(48));
+}
+
+test "the plan path is the default: Flash Next's shapes take it, the shapes its kernels cannot take stay per-row" {
+    var c = try config.parse(std.testing.allocator, @embedFile("../fixtures/config.json"));
+    defer c.deinit();
+    const d = try model.Dims.of(&c, 1);
+    try std.testing.expectEqual(@as(usize, 16), d.key_heads);
+    try std.testing.expectEqual(@as(usize, 48), d.value_heads);
+    try std.testing.expectEqual(@as(usize, 4), d.conv);
+    // the shapes the plan kernels are: no variable asks for it
+    try std.testing.expect(supported(d, 48));
+    // every other shape keeps the per-row snapshots
+    var narrow = d;
+    narrow.key_dim = 64;
+    try std.testing.expect(!supported(narrow, 48));
+    var odd = d;
+    odd.value_dim = 100;
+    try std.testing.expect(!supported(odd, 48));
+    odd = d;
+    odd.value_heads = 50;
+    try std.testing.expect(!supported(odd, 48));
+    var long = d;
+    long.conv = 9;
+    try std.testing.expect(!supported(long, 48));
+    try std.testing.expect(!supported(d, 0));
+}
+
+test "one layer's kept sections sit one after another over the window's rows" {
+    const kw = 16 * 128;
+    const vw = 48 * 128;
+    const vh = 48;
+    var p: Plan = undefined;
+    p.rows = 4;
+    p.room = window_rows;
+    p.key_heads = 16;
+    p.key_dim = 128;
+    p.value_heads = vh;
+    p.value_dim = 128;
+    p.kept_stride = 4 * p.room * (kw + vw + 2 * vh);
+    p.kept = .{ .r = undefined, .ptr = @ptrFromInt(0x1000), .len = 0 };
+    const first = p.keptOf(0, 0);
+    const second = p.keptOf(0, 1);
+    try std.testing.expectEqual(first.k + 4 * kw, second.k);
+    try std.testing.expectEqual(first.k, first.v - 4 * p.rows * kw);
+    try std.testing.expectEqual(first.v, first.gate - 4 * p.rows * vw);
+    try std.testing.expectEqual(first.beta, first.gate + 4 * p.rows * vh);
 }
