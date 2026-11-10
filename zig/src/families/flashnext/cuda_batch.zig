@@ -459,10 +459,11 @@ pub fn Pass(comptime Tri: type) type {
 
         /// One chunk of rows at positions pos0.. through every layer and the head.
         pub fn chunk(self: *Self, ids: []const u32, pos0: usize, logits_host: ?[]u8) !void {
+            const profiling = try Kernels.profile();
             const s = self.s;
             const n = ids.len;
             const t0 = std.Io.Clock.awake.now(self.io).toNanoseconds();
-            defer if (Kernels.profile()) {
+            defer if (profiling) {
                 self.complete() catch {};
                 std.debug.print("batch: {d} rows at {d} in {d:.1} ms\n", .{ n, pos0, @as(f64, @floatFromInt(std.Io.Clock.awake.now(self.io).toNanoseconds() - t0)) / 1e6 });
             };
@@ -498,7 +499,7 @@ pub fn Pass(comptime Tri: type) type {
                     if (thread) |th| th.join();
                     thread = null;
                     if (gather.failed) |err| return err;
-                    if (Kernels.profile()) std.debug.print("batch: {d} rows' n-gram rows gathered on the host in {d:.1} ms\n", .{ n, @as(f64, @floatFromInt(gather.ns)) / 1e6 });
+                    if (profiling) std.debug.print("batch: {d} rows' n-gram rows gathered on the host in {d:.1} ms\n", .{ n, @as(f64, @floatFromInt(gather.ns)) / 1e6 });
                     if (!self.staged) {
                         try self.upload(s.ple_emb, std.mem.sliceAsBytes(emb));
                         try self.upload(s.ple_xs, std.mem.sliceAsBytes(xs));
