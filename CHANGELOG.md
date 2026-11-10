@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Prompt cache: long conversations survive 8 to 16 agents sending follow-ups at once. Redundant states are evicted before each conversation's newest one, admission never evicts a state a queued request resumes, concurrent keeps reserve their room, and the default budget scales with the room left after streams on Metal and unified-memory CUDA (discrete CUDA hosts keep 8 GiB, Flash Next's batch host 16 GiB). On Qwen3.8-27B with DFlash2 at 16 agents, a follow-up's median first token drops from 546 s to 16.5 s on an M3 Ultra and from 90-114 s to 28 s on a GB10, with every reply unchanged (#2699).
+
 - Evidence index: reads saved native capabilities, including unknown and XPU chip labels; advertised facts stay unqualified, and invalid supplied input stops with a bounded error (#2708).
 
 - `--instruct-sampling card` (or `field=value` pairs) serves the model card's instruct sampling to chat requests with thinking off that leave those fields unset; request fields, then the serve flags, then the pairs decide, and the server's own requests never take it (#2626). Thanks to @BobClawblaw.
@@ -19,7 +21,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Docs: a reply that quotes a template marker can finish with `ignore_eos` and a stop list for the model's end-of-text and next-turn-open spellings, then a strip of the trailing turn marker; measured on two Qwen checkpoints on a GB10, with the agent-shaped runs reported in #2399 (#2437, refs #2399). Thanks to @javierbits and @robertung88.
 - Conformance: the cancel and evict gates check that a cut reply and an evicted prompt leave the server as a fresh one, with a planted fault for each; the Qwen3.8-27B Metal profile skips evict with its measured reason, and the CUDA profiles run both (#2611). Thanks to @jschmied.
 
-- Prompt cache: evict redundant states before newest replies, protect queued resumptions and reserve concurrent keeps; Metal and unified CUDA budgets scale after streams, while discrete CUDA host caches stay at 8 GiB and Flash Next batch stays at 16 GiB.
 - HIP: the qwen3_5 engine builds the DFlash2 drafter's kernels (tap gathers, key ring, dynamic conv, block attention), tested and in the kernel contract; nothing launches them yet (#2545, part 3 of #1563). Thanks to @AbrahamCete.
 
 - CUDA: Qwen3.8-27B can draft with Tencent's DSpine-b16 when `--drafter` names its folder (never the default). Its code bridge and exact-sender table run on affine-4 projections, and the draft tree walker moves into `core/lanes` so every backend shares it. Replies are unchanged: every drafted reply equals the same request with drafts off. On a GB10, agent-shaped requests decoded 3-20% faster than with DFlash2, and chat and code 9-19% slower, which is why it is opt-in (#2633, refs #2592). Thanks to @jschmied.
