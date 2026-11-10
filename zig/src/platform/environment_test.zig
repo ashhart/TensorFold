@@ -1,6 +1,7 @@
 //! Startup refusals carry names, values and accepted forms; valid settings preserve defaults and clamps.
 const std = @import("std");
 const e = @import("environment.zig");
+const sys = @import("sys.zig");
 const t = std.testing;
 const a = t.allocator;
 const all: e.Flags = .{ .cuda = true, .metal = true, .xpu = true, .slide = true, .hooks = true, .dsv41 = true, .gemma4 = true, .drama3 = true, .glm = true };
@@ -64,6 +65,22 @@ const valid = [_]Case{
     .{ .name = "TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS", .raw = "0", .n = 0 },
     .{ .name = "TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS", .raw = "1", .n = 1 },
     .{ .name = "TF_ROCE_GID_INDEX", .raw = "2147483647", .n = 2147483647 },
+    .{ .name = "TF_FLASHNEXT_CHUNK", .raw = "1", .n = 1 },
+    .{ .name = "TF_FLASHNEXT_CHUNK", .raw = "16384", .n = 16384 },
+    .{ .name = "TF_FLASHNEXT_CHUNK_SOLO", .raw = "16384", .n = 16384 },
+    .{ .name = "TF_FLASHNEXT_CACHE_TELEMETRY", .raw = "1", .n = 1 },
+    .{ .name = "TF_FLASHNEXT_EXL3_LAYER_TELEMETRY", .raw = "0", .n = 0 },
+    .{ .name = "TF_FLASHNEXT_SNAP_HOST", .raw = "0", .n = 0 },
+    .{ .name = "TF_FLASHNEXT_EXL3_ARCH", .raw = "unqualified", .n = 0 },
+    .{ .name = "TENSORFOLD_MEMORY_RESERVE_GIB", .raw = " 0.5 ", .n = @bitCast(@as(f64, 0.5)) },
+    .{ .name = "TF_FLASHNEXT_EXL3_LINE_DELTAS", .raw = "20:+1,15:-1", .n = 0 },
+    .{ .name = "TF_FLASHNEXT_EXL3_PROFILE_SIZING", .raw = "1", .n = 1 },
+    .{ .name = "TF_FLASHNEXT_EXL3_STREAMS", .raw = "8", .n = 8 },
+    .{ .name = "TF_FLASHNEXT_EXPERT_LINES", .raw = "0", .n = 0 },
+    .{ .name = "TF_FLASHNEXT_EXPERT_RESERVE_MB", .raw = "17592186044415", .n = 17592186044415 },
+    .{ .name = "TF_FLASHNEXT_PLE_READ", .raw = "pread", .n = 1 },
+    .{ .name = "TF_FLASHNEXT_EXL3_PROFILE_DIR", .raw = "/var/lib/exl3 profiles", .n = 0 },
+    .{ .name = "TF_FLASHNEXT_EXL3_ROUTED", .raw = "device", .n = 1 },
     .{ .name = "TF_DRAMA_PREFILL_ROWS", .raw = " 128 ", .n = 128 },
     .{ .name = "TF_DRAMA_REFERENCE_CACHE", .raw = "0", .n = 0 },
     .{ .name = "TF_GEMMA4_CHUNK_SOLO", .raw = "2048", .n = 2048 },
@@ -129,6 +146,41 @@ test "environment: range, enum, whitespace and native prompt geometry refusals a
     }) |c| try t.expectError(error.InvalidEnvironment, e.parse(c[0], c[1]));
     try t.expectEqual(@as(?u64, null), try e.parse("TF_CUDA_DEVICE", "   "));
     try t.expectEqual(@as(?u64, 0), try e.parse("TF_Q27_COPY_ROWS", "+0"));
+}
+
+test "environment: Flash Next EXL3 rows keep their bounds, exact words and exact switches" {
+    for ([_][2][]const u8{
+        .{ "TF_FLASHNEXT_CHUNK", "0" },
+        .{ "TF_FLASHNEXT_CHUNK", "16385" },
+        .{ "TF_FLASHNEXT_CHUNK_SOLO", "0" },
+        .{ "TF_FLASHNEXT_CHUNK_SOLO", "16385" },
+        .{ "TF_FLASHNEXT_EXL3_STREAMS", "0" },
+        .{ "TF_FLASHNEXT_EXPERT_RESERVE_MB", "17592186044416" },
+        .{ "TF_FLASHNEXT_CACHE_TELEMETRY", "true" },
+        .{ "TF_FLASHNEXT_EXL3_PROFILE_SIZING", "yes" },
+        .{ "TF_FLASHNEXT_SNAP_HOST", "01" },
+        .{ "TF_FLASHNEXT_PLE_READ", "Pread" },
+        .{ "TF_FLASHNEXT_EXL3_ROUTED", "DEVICE" },
+        .{ "TF_FLASHNEXT_EXL3_ARCH", "1" },
+        .{ "TENSORFOLD_MEMORY_RESERVE_GIB", "-0.5" },
+    }) |c| try t.expectError(error.InvalidEnvironment, e.parse(c[0], c[1]));
+    try t.expectEqual(@as(?u64, 0), try e.parse("TF_FLASHNEXT_EXL3_ROUTED", "host"));
+    try t.expectEqual(@as(?u64, 0), try e.parse("TF_FLASHNEXT_PLE_READ", "map"));
+}
+
+test "environment: readPath reads the process environment, blank as unset, and refuses control characters" {
+    const name = "TF_FLASHNEXT_EXL3_PROFILE_DIR";
+    defer _ = sys.env.unsetenv(name);
+    _ = sys.env.unsetenv(name);
+    try t.expectEqual(@as(?[]const u8, null), try e.readPath(name));
+    for ([_][:0]const u8{ "", "  " }) |blank| {
+        try t.expectEqual(@as(c_int, 0), sys.env.setenv(name, blank, 1));
+        try t.expectEqual(@as(?[]const u8, null), try e.readPath(name));
+    }
+    try t.expectEqual(@as(c_int, 0), sys.env.setenv(name, " /profiles ", 1));
+    try t.expectEqualStrings(" /profiles ", (try e.readPath(name)).?);
+    try t.expectEqual(@as(c_int, 0), sys.env.setenv(name, "/pro\nfiles", 1));
+    try t.expectError(error.InvalidEnvironment, e.readPath(name));
 }
 
 test "environment: a path setting keeps its text exactly, reads blank as unset and refuses control characters" {

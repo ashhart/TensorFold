@@ -44,8 +44,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, own: anytype, w
 }
 
 pub fn prepare(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, layers: anytype, world: u32, rank: u32) !?Prepared {
-    const root = std.c.getenv("TF_FLASHNEXT_EXL3_PROFILE_DIR") orelse return null;
-    if (std.mem.span(root).len == 0) return null;
+    const root = (try @import("sys").environment.readPath("TF_FLASHNEXT_EXL3_PROFILE_DIR")) orelse return null;
     if (comptime @import("builtin").os.tag == .windows) {
         std.log.warn("EXL3 placement profiles require POSIX storage; persistence disabled", .{});
         return null;
@@ -60,7 +59,7 @@ pub fn prepare(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, layers: anyt
         return null;
     };
     std.log.info("EXL3 placement profile rank {d}: routed-bank/metadata fingerprint took {d:.3} s (excludes router/dense weights)", .{ rank, @as(f64, @floatFromInt(std.Io.Clock.awake.now(io).toNanoseconds() - before)) / 1e9 });
-    var state = open(gpa, io, std.mem.span(root), .{ .model = model, .world = world, .rank = rank }) catch |err| {
+    var state = open(gpa, io, root, .{ .model = model, .world = world, .rank = rank }) catch |err| {
         std.log.warn("EXL3 placement profile rank {d}: lock/storage unavailable ({s}); persistence disabled", .{ rank, @errorName(err) });
         return null;
     };

@@ -119,19 +119,24 @@ a pool of expert lines a layer on the device. `tools/exl3_serve.sh` starts it. T
 
 | Name | Default | Effect |
 | --- | --- | --- |
-| `TF_FLASHNEXT_EXPERT_LINES` | from free memory | Expert lines a layer keeps on the device. |
-| `TF_FLASHNEXT_EXPERT_RESERVE_MB` | the server's reserve (`TENSORFOLD_MEMORY_RESERVE_GIB`) | MiB left free after the pools. |
-| `TF_FLASHNEXT_EXL3_STREAMS` | 1 | Streams whose caches the pool leaves room for, when `--parallel` does not say. |
-| `TF_FLASHNEXT_EXL3_LINE_DELTAS` | unset | `POOL:+N,POOL:-N` lines added to or removed from single pools of the uniform count. |
-| `TF_FLASHNEXT_EXL3_PROFILE_DIR` | unset | Directory where expert-use profiles persist between runs. |
-| `TF_FLASHNEXT_EXL3_PROFILE_SIZING` | `0` | `1` sizes the pools from the stored profile; ignored with `TF_FLASHNEXT_EXPERT_LINES`. |
-| `TF_FLASHNEXT_EXL3_ROUTED` | host | `device` keeps every routed expert on the device. |
+| `TF_FLASHNEXT_EXPERT_LINES` | from free memory | A whole number of expert lines a layer keeps on the device; the pool refuses fewer than 10. |
+| `TF_FLASHNEXT_EXPERT_RESERVE_MB` | the server's reserve (`TENSORFOLD_MEMORY_RESERVE_GIB`) | A whole number of MiB left free after the pools (0 to 17592186044415). |
+| `TF_FLASHNEXT_EXL3_STREAMS` | 1 | A positive whole number of streams whose caches the pool leaves room for, when `--parallel` does not say. |
+| `TF_FLASHNEXT_EXL3_LINE_DELTAS` | unset | `POOL:+N,POOL:-N` lines added to or removed from single pools of the uniform count, as many added as removed; no control characters. |
+| `TF_FLASHNEXT_EXL3_PROFILE_DIR` | unset | A directory path, without control characters, where expert-use profiles persist between runs. |
+| `TF_FLASHNEXT_EXL3_PROFILE_SIZING` | `0` | `0` or `1`; `1` sizes the pools from the stored profile and is ignored with `TF_FLASHNEXT_EXPERT_LINES`. |
+| `TF_FLASHNEXT_EXL3_ROUTED` | `host` | `host` or `device`; `device` keeps every routed expert on the device. |
 | `TF_FLASHNEXT_EXL3_ARCH` | unset | `unqualified` serves on a device that is not sm_120, without a claim. |
-| `TF_FLASHNEXT_PLE_READ` | `map` | `pread` reads the n-gram embedding rows by positional read. |
-| `TF_FLASHNEXT_SNAP_HOST` | `1` above 32,768 tokens of context, else `0` | Whether kept prompt-cache states live in pinned host memory. |
-| `TF_FLASHNEXT_CACHE_TELEMETRY` | `0` | Diagnostics only: `1` logs `EXL3-CACHE` expert-cache counters per phase, with a sync at each boundary. |
-| `TF_FLASHNEXT_EXL3_LAYER_TELEMETRY` | `0` | Diagnostics only: `1`, with the switch above, adds per-layer counters. |
+| `TF_FLASHNEXT_PLE_READ` | `map` | `map` or `pread`; `pread` reads the n-gram embedding rows by positional read. |
+| `TF_FLASHNEXT_SNAP_HOST` | `1` above 32,768 tokens of context, else `0` | `0` or `1`: whether kept prompt-cache states live in pinned host memory. |
+| `TF_FLASHNEXT_CACHE_TELEMETRY` | `0` | Diagnostics only: `0` or `1`; `1` logs `EXL3-CACHE` expert-cache counters per phase, with a sync at each boundary. |
+| `TF_FLASHNEXT_EXL3_LAYER_TELEMETRY` | `0` | Diagnostics only: `0` or `1`; `1`, with the switch above, adds per-layer counters. |
 | `TENSORFOLD_BIN`, `TF_SRC` | built binary, the checkout | Diagnostics only: the binary `tools/exl3_*.sh` run and the checkout `tools/exl3_*.py` read their corpus from. |
+
+A blank or whitespace-only value is unset. Text outside these forms, or those of `TF_FLASHNEXT_CHUNK` and
+`TF_FLASHNEXT_CHUNK_SOLO` above, is refused when the CUDA backend starts, naming the variable and its accepted forms.
+`TENSORFOLD_MEMORY_RESERVE_GIB` must be a finite number of GiB, which the server also holds to at least 0.5 (2 on
+unified memory) and at most the memory's size.
 
 EXL3 keeps its configured prompt cuts, including cache marks; `TF_FLASHNEXT_KEEP_INPASS` does not enable in-pass
 snapshots for this format. Classic checkpoints retain main's in-pass marks and per-lane convolution histories.

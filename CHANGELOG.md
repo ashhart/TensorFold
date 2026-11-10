@@ -59,6 +59,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Canonical EXL3 expert reductions retain empty-sibling additions, so underflowed negative-zero outputs do not differ between one and two ranks (#1441).
 
+- CUDA startup refuses a malformed Flash Next EXL3 setting (the `TF_FLASHNEXT_*` pool, profile, telemetry, placement and snapshot switches), `TF_FLASHNEXT_CHUNK`, `TF_FLASHNEXT_CHUNK_SOLO` or `TENSORFOLD_MEMORY_RESERVE_GIB`, naming the variable and its accepted forms, from the central environment table; a blank value is unset, and every documented value keeps its meaning (#1441).
+
 - The CPU-only server build shares its existing core module with the server adapter, resolving the slide-model import after integration (#1441).
 
 - `--instruct-sampling card` (or `field=value` pairs) serves the model card's instruct sampling to sampled chat requests with thinking off that leave those fields unset; request fields, then the serve flags, then the pairs decide, and the server's own requests never take it (#2626). Thanks to @BobClawblaw.

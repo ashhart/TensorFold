@@ -30,7 +30,7 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     if (@import("cuda_round_graph.zig").enabled() and try @import("cuda_dense_split.zig").appliesDir(gpa, io, dir, o.tp)) return error.DecodeGraphWithDenseSplit;
     // sm_120 only: refused before any weight loads
     if (mode == .exl3) try @import("exl3/model/cuda_exl3_arch.zig").check(ctx.d);
-    try @import("exl3/kv/cuda_exl3_kv.zig").refuseSolo(mode == .exl3, std.c.getenv("TF_FLASHNEXT_CHUNK_SOLO") != null);
+    try @import("exl3/kv/cuda_exl3_kv.zig").refuseSolo(mode == .exl3, (try @import("sys").environment.read(?usize, "TF_FLASHNEXT_CHUNK_SOLO", null)) != null);
     if (o.slide and (mode != .affine or o.tp != 1)) return error.UnsupportedLearningFormat;
     if (o.slide and captured != null) return error.TrainingOnCapturedGlue;
     const page_tokens = try @import("cuda_kv_lanes.zig").paging();
@@ -153,7 +153,7 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
         .prompt_rows = @intCast(own.engine.chunk),
         .snap_grid = if (mode == .exl3) @intCast(own.engine.chunk) else 0,
         .stream_bytes = stream_bytes,
-        .host_snaps = @import("exl3/kv/cuda_exl3_kv.zig").snapHost(o.context, mode == .exl3),
+        .host_snaps = try @import("exl3/kv/cuda_exl3_kv.zig").snapHost(o.context, mode == .exl3),
         .ctx = own,
         .deinit = F.release,
         .learns = if (o.slide) own else null,

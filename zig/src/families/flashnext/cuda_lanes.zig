@@ -101,7 +101,7 @@ pub fn Namespace(comptime Tri: type) type {
         };
 
         /// Device bytes of the checkpoint: the n-gram tables stay mapped, the MTP head counts; 0 if unread.
-        pub fn deviceWeightBytes(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) u64 {
+        pub fn deviceWeightBytes(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !u64 {
             return bytes.deviceWeightBytes(gpa, io, dir);
         }
 
