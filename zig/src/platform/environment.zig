@@ -144,6 +144,7 @@ pub const rules = [_]Rule{
     .{ .name = "TF_GLM_PROMPT_STEPS", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_GLM_SHARED", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_GLM_DSEL", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+    .{ .name = "TF_GLM_GRAPHS", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_GLM_DSCORES", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_GLM_DFLASH2_LOG", .scope = .glm, .kind = .u64, .forms = "a whole unsigned 64-bit round count (0 logs no drafts)" },
     .{ .name = "TF_GLM_DRAFT_CONFIDENCE", .scope = .glm, .kind = .real, .max = 1, .forms = "a finite chain-chance cut from 0 to 1 (default 0.7 on CUDA, 0.5 on Metal)" },
