@@ -26,4 +26,8 @@ pub fn hostTests(b: *std.Build, host: std.Build.ResolvedTarget, cuda: *std.Build
     const run = b.addRunArtifact(b.addTest(.{ .root_module = module(b, host, .debug, cuda, core, lanes) }));
     b.step("test-minimax-cuda-host", "MiniMax-M3.1-Flash's CUDA backend host regressions (no GPU work)").dependOn(&run.step);
     all.dependOn(&run.step);
+    // its shares as mesh declarations: a test-only module, so no binary roots canon or mesh twice
+    const mesh = @import("mesh.zig").module(b, host, .debug, @import("cuda_engines.zig").canonModule(b, host, .debug));
+    const decl = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/families/minimax_m3/cuda_shard_decl_test.zig"), .target = host, .optimize = .debug, .imports = &.{.{ .name = "mesh", .module = mesh }} }) }));
+    run.step.dependOn(&decl.step);
 }
