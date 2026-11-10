@@ -1,25 +1,20 @@
-import { execFile } from 'node:child_process'
-import { promises as fs, existsSync } from 'node:fs'
+import { existsSync } from 'node:fs'
 import os from 'node:os'
-import path from 'node:path'
-import { createHash } from 'node:crypto'
-import type { EngineCapabilities, EngineConnection, EngineControlVectorSnapshot, EngineEvent, EngineInstalledModel, EngineLearningSnapshot, EngineLibraryScanOptions, EngineModelLibrarySnapshot, EnginePerformance, EngineSnapshot, EngineStatus, HubModelSummary, ModelPreflight, PullProgress, Readiness, EngineModelGenerationSettings, EngineModelPreviewResult, EngineModelComparisonInput, EngineModelComparisonSnapshot } from '../types'
-import { FAMILY_TITLES, SUGGESTED_MODELS, drafterFor } from './catalog'
-import { parseCapabilities, parseInfoOutput, parseModelsOutput, parseVersion, runEngineCli, type ModelInfo } from './cli'
+import type { EngineCapabilities, EngineConnection, EngineControlVectorSnapshot, EngineEvent, EngineInstalledModel, EngineLearningSnapshot, EngineLibraryScanOptions, EngineModelLibrarySnapshot, EngineSnapshot, EngineStatus, HubModelSummary, ModelPreflight, PullProgress, Readiness, EngineModelGenerationSettings, EngineModelPreviewResult, EngineModelComparisonInput, EngineModelComparisonSnapshot } from '../types'
+import { SUGGESTED_MODELS } from './catalog'
+import type { ModelInfo } from './cli'
 import { ModelHub } from './model-hub'
 import { engineLaunchEnv, pinnedEngineEnv } from './engine-env'
 import { assertDeclaredEngineEnv, normalizeEngineEnvOverrides, type EngineEnvOverrides } from '../../../shared/engine-advanced-env'
 export { engineChildEnv } from './engine-env'
-import { assertRepoId, hasCachedSnapshot, hubCacheDir, repoCacheDir, repoCachedBytes, type EngineBinary } from './paths'
+import { assertRepoId, hubCacheDir, type EngineBinary } from './paths'
 import { setEnginePerformanceRecorder, setEngineServeHook } from './provider'
-import { createTurnStats, finalizeTurnStats, readEngineTimings, recordModelCall, type ModelCallSample } from '../turn-stats'
 import { recordEngineContext } from './context'
-import { PullQueue, type PullHandle } from './pull'
 import { EngineSupervisor } from './supervisor'
 import { ControlVectorSetting } from './control-vector'
 import { ModelRevisions } from './model-revisions'
 import { EnginePreferenceStore } from './preferences'
-import { LearningCopies, LEARNING_MODEL } from './learning-copy'
+import { LearningCopies } from './learning-copy'
 import { EngineLearning } from './learning'
 import { isLocalModelId, ModelLibrary } from './library'
 import { assertCortheonReleaseAllowed, CORTHEON_RELEASE_POLICY, cortheonEnabledForRelease } from '../../../shared/release-feature-policy'
@@ -30,7 +25,13 @@ import type { ModelBenchmarkInput, ModelBenchmarkReceipt, ModelBenchmarkSnapshot
 import { ModelBenchmarks } from './benchmark/controller'
 import { createModelBenchmarkStore, benchmarkWorkspace, readBenchmarkReceiptFile, type ModelBenchmarkStore } from './benchmark/storage'
 import { startBenchmarkProcess } from './benchmark/process'
-import { assertBundledBenchmarkVersion } from './benchmark/version'
+import { checkBenchmarkModel } from './benchmark/model-check'
+import { InstalledModels } from './installed-models'
+import { ModelDownloads } from './model-downloads'
+import { EngineProcessRecord } from './engine-process-record'
+import { EnginePerformanceTracker } from './performance-tracker'
+import { configureLearning } from './learning-setup'
+import { EngineFeatures } from './engine-features'
 
 // Glue for the main process: one supervisor, the pull jobs, cached CLI answers, and the events the
 // renderer mirrors. Electron-free; main-app passes the binary path, app home and an emitter.
@@ -54,25 +55,17 @@ export interface EngineServiceOptions {
   benchmarkStore?: ModelBenchmarkStore
 }
 
-function processAlive(pid: number): boolean {
-  try { process.kill(pid, 0); return true } catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM' }
-}
-
 export class EngineService {
   readonly supervisor: EngineSupervisor
   private readonly launch: { env: NodeJS.ProcessEnv; endpoint: string }
   // Advanced user variables applied over the launch environment; null until preferences load.
   private envOverridesApplied: EngineEnvOverrides | null = null
   private readonly totalMemoryBytes: number
-  private version: string | null = null
-  private versionChecked = false
-  private capabilities: EngineCapabilities | null = null
-  private performance: EnginePerformance | null = null
-  private installedCache: EngineInstalledModel[] | null = null
-  private readonly pulls = new Map<string, { handle: PullHandle; last: PullProgress }>()
-  private readonly finished = new Map<string, PullProgress>()
-  private readonly pullQueue = new PullQueue()
-  private deletingModel = false
+  private readonly features: EngineFeatures
+  private readonly performance: EnginePerformanceTracker
+  private readonly downloads: ModelDownloads
+  private readonly installedModels: InstalledModels
+  private readonly processRecord: EngineProcessRecord
   private preview: { model: string; controller: AbortController; profile: EngineModelGenerationSettings | null; promise: Promise<EngineModelPreviewResult> } | null = null
   private readonly comparisons: ModelComparisons
   private readonly benchmarks: ModelBenchmarks
@@ -80,19 +73,12 @@ export class EngineService {
   private sharedEndpointKey: string | null = null
   private comparisonAdmission: (() => void) | null = null
   private comparisonRequest: { owner: symbol; model: string; profile: EngineModelGenerationSettings | null } | null = null
-  private readonly lastPullEmit = new Map<string, number>()
   private readonly models: ModelHub
   private readonly revisions: ModelRevisions
   private readonly preferences: EnginePreferenceStore
   private readonly library: ModelLibrary
-  private readonly localRepos = new Map<string, string>()
-  // Whether the bundled engine lists --cortheon among its serve flags; null until asked.
-  private cortheonSupported: boolean | null = null
-  // Whether the engine in use lists --glp among its serve flags; null until asked.
-  private glpSupported: boolean | null = null
   // The control vector the operator chose, and what the engine in use can do with it.
   private controlVector!: ControlVectorSetting
-  private learningSupported = false
   private readonly learningCopies: LearningCopies
   private readonly learning: EngineLearning
   private featureChanges: Promise<unknown> = Promise.resolve()
@@ -114,6 +100,7 @@ export class EngineService {
     // Preferences load first so a saved HF_HUB_OFFLINE or cache location governs every dependent.
     this.preferences = new EnginePreferenceStore(options.appHome)
     this.envOverridesApplied = this.preferences.get().envOverrides
+    this.features = new EngineFeatures({ binary: () => this.binary(), requireBinary: () => this.requireBinary(), env: () => this.env })
     this.models = new ModelHub({
       endpoint: this.launch.endpoint, fetch: options.fetch, env: () => this.env, totalMemoryBytes: this.totalMemoryBytes,
       capabilities: () => this.capabilitiesDoc(), installed: () => this.installed(), cacheDir: () => this.hub,
@@ -122,33 +109,49 @@ export class EngineService {
     this.revisions = new ModelRevisions(options.appHome, () => this.hub)
     this.library = new ModelLibrary({ appHome: options.appHome, env: () => this.env, capabilities: () => this.capabilitiesDoc(), memoryLimitBytes: () => this.supervisor.memoryLimitBytes })
     this.learningCopies = new LearningCopies(options.appHome)
+    this.processRecord = new EngineProcessRecord(options.appHome, options.binaryPath)
+    this.installedModels = new InstalledModels({
+      binary: () => this.binary(), requireBinary: () => this.requireBinary(), env: () => this.env, hub: () => this.hub,
+      library: this.library, revisions: this.revisions, preferences: this.preferences, learningCopies: this.learningCopies,
+      modelSettings: (repo) => options.modelSettings?.(repo) ?? null,
+      memoryLimitFor: (modelType) => this.supervisor.memoryLimitFor(modelType),
+      isPulling: (repo) => this.downloads.hasRepo(repo),
+      emit: (event) => options.emit(event),
+      onInstalled: (repos) => options.onInstalled?.(repos),
+    })
     this.supervisor = new EngineSupervisor({
       binary: () => this.binary(),
       env: () => this.env,
       info: (repo) => this.info(repo),
-      resolveModelArgument: (repo) => this.modelArgument(repo),
-      drafterFor: (repo) => this.requiredDrafter(repo),
-      drafterBytes: (repo) => this.cachedModelBytes(repo),
+      resolveModelArgument: (repo) => this.installedModels.argument(repo),
+      drafterFor: (repo) => this.installedModels.requiredDrafter(repo),
+      drafterBytes: (repo) => this.installedModels.cachedBytes(repo),
       modelSettings: (repo) => this.options.modelSettings?.(repo) ?? null,
       totalMemoryBytes: this.totalMemoryBytes,
       memoryBudgetBytes: options.memoryBudgetBytes,
       readyTimeoutMs: options.readyTimeoutMs,
       pollMs: options.pollMs,
       onChange: () => this.emitStatus(),
-      onPid: (pid) => { void this.recordPid(pid) },
-      cortheon: () => this.cortheonSupported === true && cortheonEnabledForRelease(this.preferences.get().cortheon),
+      onPid: (pid) => { void this.processRecord.record(pid) },
+      cortheon: () => this.features.cortheon === true && cortheonEnabledForRelease(this.preferences.get().cortheon),
       controlVector: () => {
         const prefs = this.preferences.get().controlVector
         // The engine takes the vector only when it offers --glp and the operator has a file.
-        if (this.glpSupported !== true || !prefs.enabled || !prefs.file) return null
+        if (this.features.glp !== true || !prefs.enabled || !prefs.file) return null
         return { file: prefs.file, alpha: prefs.alpha }
       },
       learning: (repo) => {
         const prefs = this.preferences.get()
-        return this.learningSupported && repo === prefs.learningModel ? { enabled: prefs.learningEnabled, graphFile: this.learningCopies.graphFile(repo) } : null
+        return this.features.learning && repo === prefs.learningModel ? { enabled: prefs.learningEnabled, graphFile: this.learningCopies.graphFile(repo) } : null
       },
     })
-    this.controlVector = new ControlVectorSetting({ preferences: this.preferences, supervisor: this.supervisor, supported: () => this.glpSupported === true })
+    this.controlVector = new ControlVectorSetting({ preferences: this.preferences, supervisor: this.supervisor, supported: () => this.features.glp === true })
+    this.performance = new EnginePerformanceTracker({ supervisor: this.supervisor, emit: (event) => options.emit(event) })
+    this.downloads = new ModelDownloads({
+      models: this.models, revisions: this.revisions, installed: this.installedModels, supervisor: this.supervisor,
+      requireBinary: () => this.requireBinary(), env: () => this.env, hub: () => this.hub, pollMs: options.pollMs,
+      emit: (event) => options.emit(event), assertAdmission: () => this.assertModelAdmission(),
+    })
     this.comparisons = new ModelComparisons({
       assertAllowed: () => this.assertComparisonAllowed(),
       reserve: () => this.supervisor.reserveSequence(),
@@ -170,27 +173,15 @@ export class EngineService {
       },
     })
     this.learning = new EngineLearning({ appHome: options.appHome, supervisor: this.supervisor, copies: this.learningCopies,
-      settings: () => ({ supported: this.learningSupported, enabled: this.preferences.get().learningEnabled, model: this.preferences.get().learningModel }),
+      settings: () => ({ supported: this.features.learning, enabled: this.preferences.get().learningEnabled, model: this.preferences.get().learningModel }),
       emit: (snapshot) => {
-        if (snapshot.job && ['done', 'cancelled', 'interrupted'].includes(snapshot.job.state)) this.installedCache = null
+        if (snapshot.job && ['done', 'cancelled', 'interrupted'].includes(snapshot.job.state)) this.installedModels.invalidate()
         options.emit({ kind: 'learning', snapshot })
       }, pollMs: options.pollMs,
     })
     this.benchmarks = new ModelBenchmarks({
       assertAllowed: () => this.assertBenchmarkAllowed(),
-      validateModel: async (model) => {
-        const installed = await this.installed(true)
-        const entry = installed.find(item => item.repo === model)
-        if (!entry || entry.fitsMemory !== true || entry.source === 'library' || isLocalModelId(model) || !(await hasCachedSnapshot(this.hub, model))) throw new Error('Choose a cached installed checkpoint confirmed to fit this Mac.')
-        const revision = (await fs.readFile(path.join(repoCacheDir(this.hub, model), 'refs', 'main'), 'utf8')).trim()
-        const snapshot = await this.revisions.snapshot(model, revision)
-        const argument = await this.modelArgument(model)
-        if (argument !== model && await fs.realpath(argument) !== snapshot) throw new Error('The selected checkpoint differs from the cached public model.')
-        const status = await this.status()
-        const engineVersion = assertBundledBenchmarkVersion(status.version)
-        await this.info(model)
-        return { revision, configSha256: createHash('sha256').update(await fs.readFile(path.join(snapshot, 'config.json'))).digest('hex'), engineVersion }
-      },
+      validateModel: (model) => checkBenchmarkModel({ installed: this.installedModels, revisions: this.revisions, hub: () => this.hub, status: () => this.status() }, model),
       reserve: () => this.supervisor.reserveSequence('local benchmark'),
       workspace: () => benchmarkWorkspace(options.appHome),
       process: (input, workspace, progress, signal) => startBenchmarkProcess({ binary: this.requireBinary(), input, ...workspace, workingDirectory: workspace.directory, env: this.env, progress, signal }),
@@ -216,7 +207,7 @@ export class EngineService {
 
   // Wires streamChat's engine hook to this service and clears an engine a crashed run left behind.
   install(): void {
-    setEnginePerformanceRecorder((model, sample) => this.recordPerformance(model, sample))
+    setEnginePerformanceRecorder((model, sample) => this.performance.record(model, sample))
     setEngineServeHook(async (model, options) => {
       this.assertModelAdmission()
       const comparison = this.comparisonRequest
@@ -234,22 +225,11 @@ export class EngineService {
         return { ...lease, generation: generation ?? undefined }
       } catch (error) { lease.release(); throw error }
     })
-    void this.reapStaleEngine()
+    void this.processRecord.reapStale()
   }
 
   async status(): Promise<EngineStatus> {
-    if (!this.versionChecked && this.binary()) {
-      this.versionChecked = true
-      try { this.version = parseVersion((await runEngineCli(this.requireBinary(), ['--version'], this.env, 10_000)).stdout) } catch { this.version = null }
-    }
-    if (this.cortheonSupported == null && this.binary()) {
-      try {
-        const flags = (await this.capabilitiesDoc()).flags
-        this.cortheonSupported = flags.includes('--cortheon')
-        this.glpSupported = flags.includes('--glp')
-        this.learningSupported = flags.includes('--slide') && flags.includes('--slide-graph') && os.platform() === 'darwin' && os.arch() === 'arm64'
-      } catch { this.cortheonSupported = false; this.glpSupported = false }
-    }
+    await this.features.probe()
     return this.statusNow()
   }
 
@@ -275,27 +255,20 @@ export class EngineService {
     const prior = this.preferences.get().envOverrides
     // A cache-location move must never race an operation bound to the current root.
     const cacheMoved = normalized.HF_HOME !== prior.HF_HOME || normalized.HF_HUB_CACHE !== prior.HF_HUB_CACHE
-    if (cacheMoved && (this.pulls.size || this.pullQueue.busy || this.deletingModel)) throw new Error('Finish model downloads and cache cleanup before changing the model cache location.')
+    if (cacheMoved && (this.downloads.activeCount || this.downloads.queueBusy || this.downloads.deleting)) throw new Error('Finish model downloads and cache cleanup before changing the model cache location.')
     await this.preferences.set({ envOverrides: normalized })
     this.envOverridesApplied = normalized
     // Verdicts cached at the old limit are stale the moment the limit moves; re-answer them all.
     this.models.clearPreflights()
     await this.library.refreshEligibility((modelType) => this.supervisor.memoryLimitFor(modelType))
-    this.installedCache = null
+    this.installedModels.invalidate()
     this.emitStatus()
     await this.installed(true)
     return normalized
   }
 
   /** The environment this engine build declares it honours, or null when it could not be asked. */
-  async declaredEngineEnv(): Promise<string[] | null> {
-    try {
-      const caps = await this.capabilitiesDoc()
-      return Array.isArray(caps.env) ? caps.env : null
-    } catch {
-      return null
-    }
-  }
+  declaredEngineEnv(): Promise<string[] | null> { return this.features.declaredEnv() }
 
   private changeFeature<T>(run: () => Promise<T>): Promise<T> {
     if (this.benchmarks?.busy) return Promise.reject(new Error('Finish or cancel the local benchmark before changing engine settings.'))
@@ -309,7 +282,7 @@ export class EngineService {
   private async setCortheonNow(enabled: boolean): Promise<EngineStatus> {
     assertCortheonReleaseAllowed(enabled)
     await this.status()
-    if (enabled && !this.cortheonSupported) throw new Error("This build's TensorFold engine does not offer Cortheon yet.")
+    if (enabled && !this.features.cortheon) throw new Error("This build's TensorFold engine does not offer Cortheon yet.")
     if (this.learning.busy) throw new Error('Wait for Living Weights to finish before changing Cortheon.')
     if (this.preferences.get().cortheon === enabled && (enabled || !this.supervisor.status().cortheonActive)) {
       // An explicit Off also clears an older on-disk true without restarting the model.
@@ -356,44 +329,11 @@ export class EngineService {
 
   private async setLearningNow(enabled: boolean, model?: string): Promise<EngineLearningSnapshot> {
     await this.status()
-    if (enabled && !this.learningSupported) throw new Error('Living Weights is unavailable in this build or on this hardware.')
-    if (this.learning.busy) throw new Error('Wait for the current lesson or model preparation to finish.')
-    const prior = this.preferences.get()
-    const repo = enabled ? assertRepoId(model ?? this.supervisor.status().model ?? prior.learningModel ?? '') : prior.learningModel
-    if (enabled && repo !== LEARNING_MODEL) throw new Error('Living Weights currently supports only Nemotron 3.5 Lightning MLX 4-bit.')
-    if (prior.learningEnabled === enabled && prior.learningModel === repo) return this.learning.snapshot()
-    const running = this.supervisor.status()
-    if (enabled && running.model && running.model !== repo && ['ready', 'starting'].includes(running.state)) throw new Error('Load the Nemotron model before enabling Living Weights; the current model will not be replaced.')
-    try {
-      await this.supervisor.reconfigure(async () => {
-        if (enabled) {
-          const current = this.supervisor.status()
-          if (current.model && current.model !== repo && ['ready', 'starting'].includes(current.state)) throw new Error('Load the Nemotron model before enabling Living Weights; the current model will not be replaced.')
-          const learningInfo = await this.info(repo!)
-          if (learningInfo.memoryFloorBytes > this.supervisor.memoryLimitFor(learningInfo.modelType)) throw new Error('This Mac does not have enough model memory for Living Weights on Nemotron. Choose a smaller model for ordinary chat.')
-          if (!await this.learningCopies.existing(repo!)) {
-            let source = await this.revisions.selected(repo!)
-            if (!source) {
-              const cache = repoCacheDir(await fs.realpath(this.hub), repo!)
-              const revision = (await fs.readFile(path.join(cache, 'refs', 'main'), 'utf8')).trim()
-              source = await this.revisions.snapshot(repo!, revision)
-            }
-            this.learning.preparation(0, 0, 'Preparing an independent private model copy; the original download stays untouched.')
-            await this.learningCopies.prepare(repo!, source, repoCacheDir(this.hub, repo!), (copied, total) => this.learning.preparation(copied, total))
-          }
-        }
-        await this.preferences.set({ learningEnabled: enabled, learningModel: repo })
-      }, async () => { await this.preferences.set(prior) })
-    } catch (error) {
-      this.learning.preparation(null, 0, (error as Error).message)
-      throw error
-    }
-    this.learning.preparation(null)
-    this.installedCache = null
-    this.emitStatus()
-    const snapshot = await this.learning.snapshot()
-    this.options.emit({ kind: 'learning', snapshot })
-    return snapshot
+    return configureLearning({
+      learning: this.learning, supervisor: this.supervisor, preferences: this.preferences, learningCopies: this.learningCopies,
+      revisions: this.revisions, installed: this.installedModels, hub: () => this.hub, supported: () => this.features.learning,
+      emit: (event) => this.options.emit(event), emitStatus: () => this.emitStatus(),
+    }, enabled, model)
   }
 
   async teach(text: string): Promise<EngineLearningSnapshot> { if (this.benchmarks.busy) throw new Error('Finish or cancel the local benchmark before teaching.'); if (this.comparisons.busy) throw new Error('Finish or cancel the model comparison before teaching.'); this.assertNotQuitting(); await this.status(); this.assertNotQuitting(); return this.learning.teach(text) }
@@ -412,7 +352,7 @@ export class EngineService {
           const settings = this.options.modelSettings?.(model)
           if (settings) modelLaunchOptions(settings, (await this.info(model)).contextTokens)
         }, rollback)
-      } finally { this.installedCache = null; this.emitStatus() }
+      } finally { this.installedModels.invalidate(); this.emitStatus() }
     })
   }
 
@@ -447,7 +387,7 @@ export class EngineService {
   private assertBenchmarkAllowed(): void {
     this.assertNotQuitting()
     this.benchmarkAdmission?.()
-    if (this.deletingModel || this.pullQueue.busy || this.learning.busy || this.featurePending || this.preview || this.comparisons.busy || this.supervisor.status().learningActive || this.preferences.get().learningEnabled) throw new Error('Finish local work, downloads and model settings changes, and turn Living Weights off before benchmarking.')
+    if (this.downloads.deleting || this.downloads.queueBusy || this.learning.busy || this.featurePending || this.preview || this.comparisons.busy || this.supervisor.status().learningActive || this.preferences.get().learningEnabled) throw new Error('Finish local work, downloads and model settings changes, and turn Living Weights off before benchmarking.')
     if (this.hasExternalResearchEnabled()) throw new Error('Turn external research off before benchmarking local models.')
     if (this.sharedEndpointKey && this.supervisor.live()?.apiKey === this.sharedEndpointKey) throw new Error('Unload the shared API session before benchmarking; external clients may still be using it.')
   }
@@ -474,7 +414,7 @@ export class EngineService {
   private assertModelAdmission(): void {
     this.assertNotQuitting()
     if (this.benchmarks?.busy) throw new Error('Finish or cancel the local benchmark before changing or using the local engine.')
-    if (this.deletingModel) throw new Error('Wait for model cache cleanup before loading or using a model.')
+    if (this.downloads.deleting) throw new Error('Wait for model cache cleanup before loading or using a model.')
   }
 
   async prepareToQuit(): Promise<void> {
@@ -521,7 +461,7 @@ export class EngineService {
     const copies = await this.learningCopies.purge()
     const journal = await this.learning.reset()
     await this.preferences.set({ learningEnabled: false, learningModel: null })
-    this.installedCache = null
+    this.installedModels.invalidate()
     this.emitStatus()
     this.learning.changed()
     return { removedPaths: [...copies.removedPaths, ...journal.removedPaths], files: copies.files + journal.files }
@@ -537,21 +477,21 @@ export class EngineService {
     const { cortheonActive, controlVectorActive, learningActive, ...s } = this.supervisor.status()
     const binary = this.binary()
     return {
-      ...s, cortheon: { supported: this.cortheonSupported === true, enabled: this.preferences.get().cortheon, active: cortheonActive, disabledReason: CORTHEON_RELEASE_POLICY.enabled ? undefined : CORTHEON_RELEASE_POLICY.reason }, controlVector: { supported: this.glpSupported === true, enabled: this.preferences.get().controlVector.enabled, file: this.preferences.get().controlVector.file, alpha: this.preferences.get().controlVector.alpha, active: controlVectorActive }, available: !!binary, version: this.version, binaryPath: binary ? this.options.binaryPath : null, totalMemoryBytes: this.totalMemoryBytes, memoryBudgetBytes: this.supervisor.memoryBudgetBytes,
+      ...s, cortheon: { supported: this.features.cortheon === true, enabled: this.preferences.get().cortheon, active: cortheonActive, disabledReason: CORTHEON_RELEASE_POLICY.enabled ? undefined : CORTHEON_RELEASE_POLICY.reason }, controlVector: { supported: this.features.glp === true, enabled: this.preferences.get().controlVector.enabled, file: this.preferences.get().controlVector.file, alpha: this.preferences.get().controlVector.alpha, active: controlVectorActive }, available: !!binary, version: this.features.version, binaryPath: binary ? this.options.binaryPath : null, totalMemoryBytes: this.totalMemoryBytes, memoryBudgetBytes: this.supervisor.memoryBudgetBytes,
       hardware: { platform: os.platform(), architecture: os.arch(), chip: os.cpus()[0]?.model?.trim() || null },
     }
   }
 
   private emitStatus(): void {
     const status = this.statusNow()
-    if (status.state !== 'ready' || status.model !== this.performance?.model) this.clearPerformance()
+    if (status.state !== 'ready' || status.model !== this.performance.current?.model) this.performance.clear()
     if (status.state === 'ready') recordEngineContext(status.model, status.contextTokens)
     this.options.emit({ kind: 'status', status })
   }
 
   async snapshot(): Promise<EngineSnapshot> {
     const [status, installed] = await Promise.all([this.status(), this.installed()])
-    return { status, performance: this.performance, installed, pulls: this.pullList(), suggestions: SUGGESTED_MODELS, hubCache: this.hub }
+    return { status, performance: this.performance.current, installed, pulls: this.pullList(), suggestions: SUGGESTED_MODELS, hubCache: this.hub }
   }
 
   // For an explicit client-connection request, without starting a model or emitting credentials.
@@ -567,207 +507,21 @@ export class EngineService {
 
   hasExternalResearchEnabled(): boolean { return this.preferences.get().cortheon || this.supervisor.status().cortheonActive }
 
-  private clearPerformance(): void {
-    if (!this.performance) return
-    this.performance = null
-    this.options.emit({ kind: 'performance', performance: null })
-  }
+  info(repo: string): Promise<ModelInfo> { return this.installedModels.info(repo) }
 
-  private recordPerformance(model: string, sample: ModelCallSample): void {
-    const status = this.supervisor.status()
-    // Reject old requests even when the same model was unloaded and launched again.
-    if (!this.supervisor.live(model) || !Number.isFinite(sample.requestAt) || status.readyAt == null || sample.requestAt < status.readyAt) return
-    const raw = sample.engine
-    const engine = raw ? readEngineTimings({ tokens_per_second: raw.decodeTokensPerSecond, seconds: raw.decodeSeconds, prefill_seconds: raw.prefillSeconds, time_to_first_token: raw.firstTokenSeconds }) : null
-    const stats = createTurnStats()
-    recordModelCall(stats, { ...sample, engine })
-    const latest = finalizeTurnStats(stats, { model, providerId: 'tensorfold' })
-    const metric = (value: number | undefined): number | null => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null
-    this.performance = {
-      model, measuredAt: Date.now(),
-      decodeTokensPerSecond: metric(engine && engine.decodeSeconds > 0 ? engine.decodeTokensPerSecond : latest.decodeTokensPerSecond),
-      prefillTokensPerSecond: metric(latest.prefillTokensPerSecond),
-      firstTokenMs: metric(latest.firstTokenMs),
-      completionTokens: metric(latest.completionTokens),
-    }
-    this.options.emit({ kind: 'performance', performance: this.performance })
-  }
+  capabilitiesDoc(): Promise<EngineCapabilities> { return this.features.capabilities() }
 
-  async info(repo: string): Promise<ModelInfo> {
-    const result = await runEngineCli(this.requireBinary(), ['info', await this.modelArgument(repo)], this.env)
-    if (result.code !== 0) throw new Error((result.stdout || result.stderr).trim().split(/\r?\n/)[0] || `tensorfold-native info ${repo} failed.`)
-    return parseInfoOutput(result.stdout)
-  }
-
-  private async modelArgument(repo: string): Promise<string> {
-    assertRepoId(repo)
-    if (isLocalModelId(repo)) {
-      const local = await this.library.resolve(repo)
-      if (local.repo && (this.pullQueue.hasRepo(local.repo) || this.pullQueue.hasRepo(this.requiredDrafter(repo, local.repo) ?? ''))) throw new Error('Wait for the model download to finish before loading it.')
-      if (local.repo) this.localRepos.set(repo, local.repo)
-      return local.path
-    }
-    if (this.pullQueue.hasRepo(repo)) throw new Error('Wait for the model download to finish before loading it.')
-    if (repo === this.preferences.get().learningModel) {
-      const owned = await this.learningCopies.existing(repo)
-      if (!owned) throw new Error('The private Living Weights model is missing; preserve its profile before repairing it.')
-      return owned
-    }
-    const selected = await this.revisions.selected(repo)
-    if (selected) return selected
-    if (!await hasCachedSnapshot(this.hub, repo)) {
-      const local = await this.localDrafter(repo)
-      if (local) return local.path
-    }
-    return repo
-  }
-
-  private async cachedModelBytes(repo: string): Promise<number | null> {
-    try {
-      const selected = await this.revisions.selected(repo)
-      if (selected) return this.revisions.snapshotBytes(selected)
-      if (await hasCachedSnapshot(this.hub, repo)) return repoCachedBytes(this.hub, repo)
-      return (await this.localDrafter(repo))?.weightsBytes ?? null
-    } catch { return null }
-  }
-
-  private requiredDrafter(model: string, canonical = this.localRepos.get(model) ?? model): string | null {
-    return this.options.modelSettings?.(model)?.speculativeDecoding === 'off' ? null : drafterFor(canonical)
-  }
-
-  private async localDrafter(repo: string) {
-    // Resolve only a known companion identity, never an arbitrary repo against a nearby folder.
-    if (!SUGGESTED_MODELS.some((model) => drafterFor(model.repo) === repo)) return null
-    const entries = (await this.library.snapshot()).models.filter((model) => model.repo === repo && model.drafterOnly && model.complete)
-    if (entries.length !== 1) return null
-    return this.library.resolve(entries[0].id, true)
-  }
-
-  async capabilitiesDoc(): Promise<EngineCapabilities> {
-    if (this.capabilities) return this.capabilities
-    const result = await runEngineCli(this.requireBinary(), ['capabilities', '--json'], this.env)
-    if (result.code !== 0) throw new Error(result.stderr.trim() || 'tensorfold-native capabilities --json failed.')
-    this.capabilities = parseCapabilities(result.stdout)
-    return this.capabilities
-  }
-
-  async installed(refresh = false): Promise<EngineInstalledModel[]> {
-    if (this.installedCache && !refresh) return this.installedCache
-    if (!this.binary()) return []
-    const listed = await runEngineCli(this.requireBinary(), ['models'], this.env)
-    const selected = await this.revisions.read()
-    const models = new Map(parseModelsOutput(listed.stdout).map((model) => [model.repo, model]))
-    for (const repo of Object.keys(selected)) if (!models.has(repo)) models.set(repo, { repo, family: '', modelType: '' })
-    const out: EngineInstalledModel[] = []
-    for (const model of models.values()) {
-      const drafter = this.requiredDrafter(model.repo)
-      const drafterBytes = drafter ? await this.cachedModelBytes(drafter) : null
-      const entry: EngineInstalledModel = { ...model, source: selected[model.repo] ? 'download' : 'cache', format: null, contextTokens: null, weightsBytes: null, memoryFloorBytes: null, fitsMemory: null, drafter, drafterInstalled: drafter ? drafterBytes != null : null }
-      try {
-        const info = await this.info(model.repo)
-        entry.family = info.family
-        entry.modelType = info.modelType
-        entry.format = info.format
-        entry.contextTokens = info.contextTokens
-        entry.weightsBytes = info.weightsBytes
-        entry.memoryFloorBytes = info.memoryFloorBytes + (drafterBytes ?? 0)
-        entry.fitsMemory = entry.memoryFloorBytes <= this.supervisor.memoryLimitFor(info.modelType)
-      } catch {
-        if (selected[model.repo]) continue // Never present a different legacy ref as the selected model.
-        /* Legacy listed but unreadable: keep the row without sizes. */
-      }
-      out.push(entry)
-    }
-    for (const local of (await this.library.snapshot()).models.filter((model) => model.loadable)) {
-      try {
-        const checked = await this.library.resolve(local.id)
-        const drafter = checked.repo ? this.requiredDrafter(local.id, checked.repo) : null
-        const drafterBytes = drafter ? await this.cachedModelBytes(drafter) : null
-        const memoryFloorBytes = checked.memoryFloorBytes == null ? null : checked.memoryFloorBytes + (drafterBytes ?? 0)
-        if (checked.repo) this.localRepos.set(local.id, checked.repo)
-        out.push({ repo: local.id, source: 'library', title: local.title, localPath: checked.path, family: FAMILY_TITLES[checked.modelType!] ?? checked.modelType!, modelType: checked.modelType!, format: checked.format, contextTokens: null, weightsBytes: checked.weightsBytes, memoryFloorBytes, fitsMemory: memoryFloorBytes == null ? null : memoryFloorBytes <= this.supervisor.memoryLimitFor(checked.modelType), drafter, drafterInstalled: drafter ? drafterBytes != null : null })
-      } catch { /* Moved or changed checkpoints are unavailable until scanned again. */ }
-    }
-    this.installedCache = out
-    this.options.emit({ kind: 'installed', installed: out })
-    this.options.onInstalled?.(out.map((m) => m.repo))
-    return out
-  }
+  installed(refresh = false): Promise<EngineInstalledModel[]> { return this.installedModels.list(refresh) }
 
   search(query: string): Promise<HubModelSummary[]> { return this.models.search(query) }
 
   preflight(repo: string, revision: string | null = null): Promise<ModelPreflight> { return this.models.preflight(repo, revision) }
 
-  pullList(): PullProgress[] {
-    const running = [...this.pulls.values()].map((p) => p.last)
-    return [...running, ...[...this.finished.values()].filter((p) => !this.pulls.has(p.repo))]
-  }
+  pullList(): PullProgress[] { return this.downloads.list() }
 
-  async pull(repo: string, revision: string | null = null): Promise<PullProgress> {
-    this.assertModelAdmission()
-    if (this.deletingModel) throw new Error('Wait for model cache cleanup before starting a download.')
-    if (isLocalModelId(repo)) throw new Error('Local library checkpoints load in place and cannot be downloaded by their library ID.')
-    if (this.pulls.has(assertRepoId(repo))) return this.pulls.get(repo)!.last
-    await this.revisions.read() // Preserve invalid registry bytes and refuse before starting a child.
-    this.assertPullIdle(repo)
-    const pre = this.models.cached(JSON.stringify([repo, revision])) ?? await this.preflight(repo, revision)
-    this.assertModelAdmission()
-    if (this.deletingModel) throw new Error('Wait for model cache cleanup before starting a download.')
-    this.assertPullIdle(repo)
-    if (this.pulls.has(repo)) return this.pulls.get(repo)!.last
-    if (!['ok', 'installed'].includes(pre.verdict)) throw new Error(pre.reasons[0] ?? `${repo} cannot be downloaded for the built-in engine.`)
-    if (!pre.resolvedRevision || (pre.drafter && !pre.drafter.resolvedRevision)) throw new Error('Retry the model checks to resolve an immutable checkpoint before downloading.')
-    const steps = [{ repo, revision: pre.resolvedRevision }, ...(pre.drafter ? [{ repo: pre.drafter.repo, revision: pre.drafter.resolvedRevision! }] : [])]
-    for (const step of steps) this.assertPullIdle(step.repo)
-    this.finished.delete(repo)
-    const startedHub = this.hub
-    const handle = this.pullQueue.enqueue({
-      binary: this.requireBinary(),
-      env: this.env,
-      hub: this.hub,
-      steps,
-      totalBytes: pre.totalBytes,
-      pollMs: this.options.pollMs ? Math.max(50, this.options.pollMs) : 1000,
-      onUpdate: (progress) => this.onPullUpdate(progress),
-    }, async (final) => { await this.revisions.commit(steps, startedHub); return final })
-    this.pulls.set(repo, { handle, last: handle.progress() })
-    this.options.emit({ kind: 'pull', pull: handle.progress() })
-    void handle.done.then(async (final) => {
-      this.pulls.delete(repo)
-      this.finished.set(repo, final)
-      this.invalidatePreflight(repo)
-      this.installedCache = null
-      this.options.emit({ kind: 'pull', pull: final })
-      if (final.state === 'done') await this.installed(true).catch(() => {})
-    })
-    return handle.progress()
-  }
+  pull(repo: string, revision: string | null = null): Promise<PullProgress> { return this.downloads.pull(repo, revision) }
 
-  private onPullUpdate(progress: PullProgress): void {
-    if (!['queued', 'running', 'verifying'].includes(progress.state)) return // Completion follows durable selection.
-    const job = this.pulls.get(progress.repo)
-    if (job) job.last = progress
-    const now = Date.now()
-    if (progress.state === 'running' && now - (this.lastPullEmit.get(progress.repo) ?? 0) < 250) return
-    this.lastPullEmit.set(progress.repo, now)
-    this.options.emit({ kind: 'pull', pull: progress })
-  }
-
-  private assertPullIdle(repo: string): void {
-    const status = this.supervisor.status()
-    if ((status.model === repo || status.drafter === repo) && status.state !== 'stopped' && status.state !== 'failed') throw new Error('Unload the model before downloading another checkpoint for it.')
-  }
-
-  private invalidatePreflight(repo: string): void {
-    this.models.invalidate(repo)
-  }
-
-  cancelPull(repo: string): boolean {
-    const job = this.pulls.get(assertRepoId(repo))
-    if (!job) return false
-    job.handle.cancel()
-    return true
-  }
+  cancelPull(repo: string): boolean { return this.downloads.cancel(repo) }
 
   async load(repo: string): Promise<EngineStatus> {
     this.assertModelAdmission()
@@ -780,111 +534,34 @@ export class EngineService {
 
   async unload(): Promise<EngineStatus> {
     await this.supervisor.stop()
-    this.clearPerformance()
+    this.performance.clear()
     return this.statusNow()
   }
 
   // Removes the repo's folder from the shared cache, and its drafter when no other installed model uses it.
-  async remove(repo: string): Promise<EngineInstalledModel[]> {
-    assertRepoId(repo)
-    this.assertModelAdmission()
-    if (this.deletingModel || this.pullQueue.busy) throw new Error('Finish or cancel model downloads before cleaning the shared cache.')
-    this.deletingModel = true
-    try { return await this.supervisor.mutateCache(() => this.removeModelNow(repo)) } finally { this.deletingModel = false }
-  }
+  remove(repo: string): Promise<EngineInstalledModel[]> { return this.downloads.remove(repo) }
 
-  private async removeModelNow(repo: string): Promise<EngineInstalledModel[]> {
-    if (isLocalModelId(repo)) throw new Error('Local library checkpoints are read-only. Remove their search folder to unlink them; their files stay untouched.')
-    const selected = await this.revisions.read()
-    if (!selected[repo]) throw new Error('This checkpoint belongs to the shared cache, rather than an app-managed download. TensorFold will not delete it.')
-    const status = this.supervisor.status()
-    if ((status.model === repo || this.localRepos.get(status.model ?? '') === repo || status.drafter === repo) && status.state !== 'stopped' && status.state !== 'failed') throw new Error(`Unload ${repo} before deleting it.`)
-    if (this.pulls.has(repo)) throw new Error(`Cancel the download of ${repo} before deleting it.`)
-    const installed = await this.installed()
-    const drafter = drafterFor(repo)
-    const targets = [repo]
-    if (drafter && selected[drafter] && !installed.some((m) => m.repo !== repo && drafterFor(this.localRepos.get(m.repo) ?? m.repo) === drafter)) targets.push(drafter)
-    for (const target of targets) await this.removeRepoFolder(target, selected[target])
-    await this.revisions.remove(targets)
-    this.invalidatePreflight(repo)
-    this.finished.delete(repo)
-    return this.installed(true)
-  }
+  readiness(model: string | null): Promise<Readiness> { return this.installedModels.readiness(model) }
 
-  private async removeRepoFolder(repo: string, revision: string): Promise<void> {
-    const hub = await fs.realpath(this.hub).catch(() => null)
-    if (!hub) return
-    const folder = repoCacheDir(hub, repo)
-    let info
-    try { info = await fs.lstat(folder) } catch { return }
-    if (info.isSymbolicLink() || !info.isDirectory()) throw new Error(`${folder} is not a cache folder; refusing to delete it.`)
-    if (path.dirname(folder) !== hub || !path.basename(folder).startsWith('models--')) throw new Error('Refusing to delete outside the Hugging Face cache.')
-    const snapshots = path.join(folder, 'snapshots')
-    if (await fs.realpath(snapshots).catch(() => null) !== snapshots) throw new Error('The model snapshots folder was redirected; refusing to delete it.')
-    const entries = await fs.readdir(snapshots)
-    if (entries.some((name) => name !== revision)) {
-      // Other HF clients may keep different revisions here. Preserve those revisions, shared
-      // blobs and refs; only unlink our exact selected checkpoint, without following its links.
-      const selected = path.join(snapshots, revision)
-      const stat = await fs.lstat(selected).catch(() => null)
-      if (stat?.isSymbolicLink() || stat && !stat.isDirectory()) throw new Error('The selected checkpoint was redirected; refusing to delete it.')
-      if (stat) await fs.rm(selected, { recursive: true })
-      return
-    }
-    await fs.rm(folder, { recursive: true, force: true })
-  }
-
-  async readiness(model: string | null): Promise<Readiness> {
-    if (!this.binary()) return { ready: false, reason: 'needs-endpoint', message: 'The TensorFold engine is missing from this build.' }
-    const installed = await this.installed().catch(() => [])
-    if (!installed.length) return { ready: false, reason: 'needs-model', message: 'Download a model for the built-in TensorFold engine in Models.' }
-    const entry = model ? installed.find((m) => m.repo === model) : installed[0]
-    if (!entry) return { ready: false, reason: 'needs-model', message: `${model} is not downloaded. Open Models to get it.` }
-    if (entry.source === 'library') {
-      try { await this.library.resolve(entry.repo) } catch (error) { return { ready: false, reason: 'needs-model', message: (error as Error).message } }
-      if (entry.drafter && await this.cachedModelBytes(entry.drafter) == null) return { ready: false, reason: 'needs-model', message: `${entry.repo} needs its drafter ${entry.drafter}. Scan the companion checkpoint again in Models.` }
-    }
-    if (entry.fitsMemory === false) return { ready: false, reason: 'needs-model', message: `${entry.repo} needs more memory than this Mac allows. Pick a smaller model in Models.` }
-    if (entry.drafter && entry.drafterInstalled === false) return { ready: false, reason: 'needs-model', message: `${entry.repo} needs its drafter ${entry.drafter}. Download the model again in Models.` }
-    return { ready: true, reason: 'ok', message: '' }
-  }
-
-  async librarySnapshot(): Promise<EngineModelLibrarySnapshot> {
-    const snapshot = await this.library.snapshot()
-    for (const model of snapshot.models) {
-      const drafter = model.repo ? this.requiredDrafter(model.id, model.repo) : null
-      if (!drafter || !model.loadable) continue
-      const bytes = await this.cachedModelBytes(drafter)
-      if (bytes == null) { model.loadable = false; model.reason = `This checkpoint needs its drafter ${drafter}. Download the full model in Models or scan the companion checkpoint too.` }
-      else if (model.memoryFloorBytes != null) {
-        model.memoryFloorBytes += bytes
-        model.fitsMemory = model.memoryFloorBytes <= this.supervisor.memoryLimitFor(model.modelType)
-        if (!model.fitsMemory) { model.loadable = false; model.reason = 'This model and its drafter need more model memory than the current hardware allows.' }
-      }
-    }
-    return snapshot
-  }
-
-  private async libraryChanged(_snapshot: EngineModelLibrarySnapshot): Promise<EngineModelLibrarySnapshot> {
-    this.installedCache = null
-    await this.installed(true)
-    return this.librarySnapshot()
-  }
+  librarySnapshot(): Promise<EngineModelLibrarySnapshot> { return this.installedModels.librarySnapshot() }
 
   async scanLibrary(options: EngineLibraryScanOptions = {}): Promise<EngineModelLibrarySnapshot> {
     this.assertModelAdmission()
-    return this.libraryChanged(await this.library.scan(options))
+    await this.library.scan(options)
+    return this.installedModels.libraryChanged()
   }
 
   async addLibraryFolder(directory: string): Promise<EngineModelLibrarySnapshot> {
     this.assertModelAdmission()
-    return this.libraryChanged(await this.library.addFolder(directory))
+    await this.library.addFolder(directory)
+    return this.installedModels.libraryChanged()
   }
 
   async removeLibraryFolder(id: string): Promise<EngineModelLibrarySnapshot> {
     this.assertModelAdmission()
     // Unlinking a search folder never stops a loaded API or modifies its checkpoint files.
-    return this.libraryChanged(await this.library.removeFolder(id))
+    await this.library.removeFolder(id)
+    return this.installedModels.libraryChanged()
   }
 
   async cancelLibraryScan(): Promise<EngineModelLibrarySnapshot> { return this.library.cancel() }
@@ -898,39 +575,10 @@ export class EngineService {
     this.learning.shutdown()
     this.benchmarks.dispose()
     this.cancelTryModel()
-    this.pullQueue.cancelAll()
+    this.downloads.cancelQueued()
     void this.library.cancel().catch(() => {})
-    for (const { handle } of this.pulls.values()) handle.cancel()
+    this.downloads.cancelActive()
     this.supervisor.killNow(force ? 'SIGKILL' : 'SIGTERM')
-    if (force) void this.recordPid(null)
-  }
-
-  private pidFile(): string {
-    return path.join(this.options.appHome, 'engine', 'serve.json')
-  }
-
-  private async recordPid(pid: number | null): Promise<void> {
-    try {
-      if (pid == null) { await fs.rm(this.pidFile(), { force: true }); return }
-      await fs.mkdir(path.dirname(this.pidFile()), { recursive: true, mode: 0o700 })
-      await fs.writeFile(this.pidFile(), JSON.stringify({ pid, binary: this.options.binaryPath, owner: process.pid }), { mode: 0o600 })
-    } catch { /* bookkeeping only */ }
-  }
-
-  // An engine left by a crashed app keeps its model in memory. Stop it only when the app that started
-  // it is gone and the recorded pid still runs this exact binary, so a reused pid is never touched.
-  private async reapStaleEngine(): Promise<void> {
-    try {
-      const record = JSON.parse(await fs.readFile(this.pidFile(), 'utf8'))
-      const pid = Number(record?.pid)
-      const owner = Number(record?.owner)
-      if (!Number.isInteger(pid) || pid <= 1 || record?.binary !== this.options.binaryPath) return
-      if (Number.isInteger(owner) && owner > 1 && owner !== process.pid && processAlive(owner)) return
-      const command = await new Promise<string>((resolve) => execFile('/bin/ps', ['-o', 'command=', '-p', String(pid)], (_e, stdout) => resolve(String(stdout ?? '').trim())))
-      if (command.startsWith(`${this.options.binaryPath} serve `)) {
-        try { process.kill(-pid, 'SIGTERM') } catch { try { process.kill(pid, 'SIGTERM') } catch { /* gone */ } }
-      }
-    } catch { /* no record */ }
-    await this.recordPid(null)
+    if (force) void this.processRecord.record(null)
   }
 }

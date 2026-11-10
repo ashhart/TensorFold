@@ -7,6 +7,8 @@ import { conversationSearchPreload } from './preload/conversation-search'
 import { documentLibraryPreload } from './preload/document-library'
 import { googleWorkspacePreload } from './preload/google-workspace'
 import { modelBenchmarkPreload } from './preload/model-benchmark'
+import { enginePreload } from './preload/engine'
+import { composerDraftsPreload } from './preload/composer-drafts'
 import type { TelegramRemoteConfigInput } from '../shared/telegram-remote'
 import type { ThreadMemoryPolicy } from './agent/types'
 import { contextBridge, ipcRenderer } from 'electron'
@@ -21,19 +23,18 @@ import type { KokoroStatus, KokoroSynthesisInput } from './agent/types'
 import type { OrchestrationEvent } from './agent/types'
 import type { ArtifactPreview } from './agent/types'
 import type { RoomManualMemoryCommand, RoomMergeResult } from './agent/types'
-import type { EngineModelComparisonInput, EngineModelComparisonSnapshot, EngineModelPreviewResult, SaveEngineModelProfilesInput, EngineConnection, EngineControlVectorSnapshot, EngineEnvOverrides, EngineEvent, EngineLearningSnapshot, EngineInstalledModel, EngineSnapshot, EngineStatus, HubModelSummary, ModelPreflight, PullProgress } from './agent/types'
 import type { MobileBridgePairing, MobileBridgeStatus } from './agent/types/mobile-bridge'
 
-import type { EngineModelLibrarySnapshot, EngineLibraryScanOptions } from './agent/types'
 import type { PhoneSnapshot, PhoneConnectInput, PhoneDeveloperConnectInput, PhonePairInput, PhoneActionInput } from './agent/types'
 import type { BotVmStatus, BotVmSetupStatus } from './agent/types'
 import type { UserQuestion, UserQuestionAnswer } from './agent/types'
 import type { BotRecipePreview, BotRecipeImportInput, BotRecipeExportInput } from '../shared/bot-recipe'
 
 import type { TensorFoldStudioApi as StudioApiContract } from '../shared/studio-api'
-import type { ComposerDraftScope, ComposerDraftWrite } from '../shared/composer-drafts'
 import type { ThreadMessageEditInput } from '../shared/thread-message-edit'
 import type { AttachmentTextRequest } from './agent/types'
+
+const subscribe = <T>(channel: string, listener: (event: unknown, payload: T) => void) => { ipcRenderer.on(channel, listener); return () => ipcRenderer.removeListener(channel, listener) }
 
 const api = {
   ...clusterPreload((channel, ...args) => ipcRenderer.invoke(channel, ...args)),
@@ -49,15 +50,11 @@ const api = {
   ...conversationSearchPreload((channel, ...args) => ipcRenderer.invoke(channel, ...args)),
   ...documentLibraryPreload((channel, ...args) => ipcRenderer.invoke(channel, ...args)),
   ...modelBenchmarkPreload((channel, ...args) => ipcRenderer.invoke(channel, ...args)),
+  ...enginePreload((channel, ...args) => ipcRenderer.invoke(channel, ...args), subscribe),
+  ...composerDraftsPreload((channel, ...args) => ipcRenderer.invoke(channel, ...args), subscribe),
   verifyTelegram: () => ipcRenderer.invoke('bot:verifyTelegram'),
   configureTelegramRemote: (input: TelegramRemoteConfigInput) => ipcRenderer.invoke('bot:configureTelegramRemote', input),
   listTelegramRemoteTargets: () => ipcRenderer.invoke('bot:listTelegramRemoteTargets'),
-  getComposerDraft: (scope: ComposerDraftScope) => ipcRenderer.invoke('composer-drafts:get', scope),
-  saveComposerDraft: (input: ComposerDraftWrite) => ipcRenderer.invoke('composer-drafts:save', input),
-  clearComposerDraft: (input: { scope: ComposerDraftScope; expectedRevision: number }) => ipcRenderer.invoke('composer-drafts:clear', input),
-  onComposerDraftFlush: (cb: (requestId: string) => void) => { const h = (_e: unknown, requestId: string) => cb(requestId); ipcRenderer.on('composer-drafts:flush', h); return () => ipcRenderer.removeListener('composer-drafts:flush', h) },
-  onComposerDraftReset: (cb: (scope: ComposerDraftScope | null) => void) => { const h = (_e: unknown, scope: ComposerDraftScope | null) => cb(scope); ipcRenderer.on('composer-drafts:reset', h); return () => ipcRenderer.removeListener('composer-drafts:reset', h) },
-  acknowledgeComposerDraftFlush: (input: { requestId: string; error?: string }): Promise<void> => ipcRenderer.invoke('composer-drafts:flushed', input),
   setDeviceWatchSpeech: (input: { sessionId: string; enabled: boolean }): Promise<{ enabled: boolean }> => ipcRenderer.invoke('mobile:setDeviceWatchSpeech', input),
   getAttachmentTextCapability: () => ipcRenderer.invoke('attachments:textCapability'),
   extractAttachmentText: (input: AttachmentTextRequest) => ipcRenderer.invoke('attachments:extractText', input),
@@ -593,41 +590,6 @@ const api = {
 
   // window controls (used on non-mac or custom buttons)
   windowAction: (action: 'minimize' | 'maximize' | 'close'): Promise<void> => ipcRenderer.invoke('window:action', action),
-
-  // Built-in TensorFold engine: status, installed models, Hugging Face search and downloads.
-  engineSnapshot: (): Promise<EngineSnapshot> => ipcRenderer.invoke('engine:snapshot'),
-  engineConnection: (): Promise<EngineConnection | null> => ipcRenderer.invoke('engine:connection'),
-  engineRefresh: (): Promise<EngineSnapshot> => ipcRenderer.invoke('engine:refresh'),
-  engineLibrary: (): Promise<EngineModelLibrarySnapshot> => ipcRenderer.invoke('engine:library'),
-  engineScanLibrary: (options?: EngineLibraryScanOptions): Promise<EngineModelLibrarySnapshot> => ipcRenderer.invoke('engine:scanLibrary', options),
-  engineAddLibraryFolder: (): Promise<EngineModelLibrarySnapshot | null> => ipcRenderer.invoke('engine:addLibraryFolder'),
-  engineRemoveLibraryFolder: (id: string): Promise<EngineModelLibrarySnapshot> => ipcRenderer.invoke('engine:removeLibraryFolder', id),
-  engineCancelLibraryScan: (): Promise<EngineModelLibrarySnapshot> => ipcRenderer.invoke('engine:cancelLibraryScan'),
-  engineSearch: (query: string): Promise<HubModelSummary[]> => ipcRenderer.invoke('engine:search', query),
-  enginePreflight: (repo: string, revision?: string | null): Promise<ModelPreflight> => ipcRenderer.invoke('engine:preflight', { repo, revision }),
-  enginePull: (repo: string, revision?: string | null): Promise<PullProgress> => ipcRenderer.invoke('engine:pull', { repo, revision }),
-  engineCancelPull: (repo: string): Promise<{ cancelled: boolean }> => ipcRenderer.invoke('engine:cancelPull', repo),
-  engineCompareModels: (input: EngineModelComparisonInput): Promise<EngineModelComparisonSnapshot> => ipcRenderer.invoke('engine:compareModels', input),
-  engineComparisonStatus: (id: string): Promise<EngineModelComparisonSnapshot | null> => ipcRenderer.invoke('engine:comparisonStatus', id),
-  engineCancelComparison: (id: string): Promise<boolean> => ipcRenderer.invoke('engine:cancelComparison', id),
-  engineTryModel: (model: string): Promise<EngineModelPreviewResult> => ipcRenderer.invoke('engine:tryModel', model),
-  engineCancelTryModel: (): Promise<boolean> => ipcRenderer.invoke('engine:cancelTryModel'),
-  engineSaveModelProfiles: (input: SaveEngineModelProfilesInput): Promise<Settings> => ipcRenderer.invoke('engine:profilesSave', input),
-  engineLoad: (repo: string): Promise<EngineStatus> => ipcRenderer.invoke('engine:load', repo),
-  engineUnload: (): Promise<EngineStatus> => ipcRenderer.invoke('engine:unload'),
-  engineSetCortheon: (enabled: boolean): Promise<EngineStatus> => ipcRenderer.invoke('engine:setCortheon', enabled),
-  engineControlVector: (): Promise<EngineControlVectorSnapshot> => ipcRenderer.invoke('engine:controlVector'),
-  engineChooseControlVector: (): Promise<EngineControlVectorSnapshot> => ipcRenderer.invoke('engine:chooseControlVector'),
-  engineSetControlVector: (input: { enabled?: boolean; alpha?: number }): Promise<EngineControlVectorSnapshot> => ipcRenderer.invoke('engine:setControlVector', input),
-  engineClearControlVector: (): Promise<EngineControlVectorSnapshot> => ipcRenderer.invoke('engine:clearControlVector'),
-  engineLearning: (): Promise<EngineLearningSnapshot> => ipcRenderer.invoke('engine:learning'),
-  engineSetLearning: (enabled: boolean, model?: string): Promise<EngineLearningSnapshot> => ipcRenderer.invoke('engine:setLearning', { enabled, model }),
-  engineEnvOverrides: (): Promise<EngineEnvOverrides> => ipcRenderer.invoke('engine:envOverrides'),
-  engineSetEnvOverrides: (overrides: EngineEnvOverrides): Promise<EngineEnvOverrides> => ipcRenderer.invoke('engine:setEnvOverrides', overrides),
-  engineTeach: (text: string): Promise<EngineLearningSnapshot> => ipcRenderer.invoke('engine:teach', text),
-  engineCancelTeach: (): Promise<EngineLearningSnapshot> => ipcRenderer.invoke('engine:cancelTeach'),
-  engineDelete: (repo: string): Promise<EngineInstalledModel[]> => ipcRenderer.invoke('engine:delete', repo),
-  onEngineEvent: (cb: (event: EngineEvent) => void) => { const h = (_e: unknown, event: EngineEvent) => cb(event); ipcRenderer.on('engine:event', h); return () => ipcRenderer.removeListener('engine:event', h) },
 } satisfies StudioApiContract
 
 contextBridge.exposeInMainWorld('tensorfoldStudio', api)
