@@ -303,7 +303,8 @@ pub fn parse(a: Allocator, argv: []const []const u8, u: *Usage) error{ Usage, Ou
                     return fail(u, a, "argument {s}: expected one argument", .{name});
                 value = argv[i];
             }
-            if (flag.choices.len > 0) for (flag.choices) |c| {
+            // --profile names its own refusals (apply); other flags keep the table's generic invalid-choice line
+            if (flag.choices.len > 0 and !std.mem.eql(u8, name, "--profile")) for (flag.choices) |c| {
                 if (std.mem.eql(u8, c, value.?)) break;
             } else return fail(u, a, "argument {s}: invalid choice: '{s}'", .{ name, value.? });
         } else if (eq != null) return fail(u, a, "argument {s}: ignored explicit argument '{s}'", .{ name, token[eq.? + 1 ..] });
@@ -430,8 +431,10 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         return;
     }
     if (is(name, "--profile")) {
+        if (is(v, "fast-exact")) return fail(u, a, "argument --profile: fast-exact is not yet qualified: solo, concurrent 1/2/4/8 and resumed runs equal to stable, and a measurement where no served cell for its family gets slower", .{});
+        if (is(v, "fast")) return fail(u, a, "argument --profile: fast is not planned: a speed mode that changes output tokens is not shipped, so the arithmetic class has no profile to join", .{});
         out.profile = std.meta.stringToEnum(api.profile.Profile, v) orelse
-            return fail(u, a, "argument --profile: only stable is served; fast-exact and fast need qualification", .{});
+            return fail(u, a, "argument --profile: unknown profile '{s}': expected stable, fast-exact or fast", .{v});
         return;
     }
     if (is(name, "--max-frames")) {
