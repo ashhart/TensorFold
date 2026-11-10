@@ -50,6 +50,8 @@ const valid = [_]Case{
     .{ .name = "TF_STARTUP_RECEIPT", .raw = "1", .n = 1 },
     .{ .name = "TF_CUDA_DEVICE", .raw = " 3 ", .n = 3 },
     .{ .name = "TF_CUDA_DEVICE", .raw = "4294967295", .n = std.math.maxInt(u32) },
+    .{ .name = "TF_FLASHNEXT_SHARD_HEAD", .raw = "1", .n = 1 },
+    .{ .name = "TF_FLASHNEXT_EXL3_MTP_RESIDENT", .raw = "1", .n = 1 },
     .{ .name = "TF_CUDA_SEGMENTS", .raw = " 1 ", .n = 1 },
     .{ .name = "TF_CUDA_SEGMENTS", .raw = "4", .n = 4 },
     .{ .name = "TF_CUDA_CARVEOUT", .raw = "0", .n = 0 },
