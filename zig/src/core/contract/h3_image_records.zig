@@ -7,7 +7,15 @@ pub const encoder = [_]M{
     .{ .name = "minimax image encoder hie_group_finish", .threads = 1024, .tg_memory = 0, .reserved = 1024 },
     .{ .name = "minimax image encoder hie_norm_silu", .threads = 256, .tg_memory = 0, .reserved = 256 },
 };
-pub const prompt = [_]M{};
+pub const prompt = [_]M{
+    .{ .name = "minimax image prompt hp_gemm", .threads = 128, .tg_memory = 10240, .reserved = 128 },
+    .{ .name = "minimax image prompt hp_norm", .threads = 256, .tg_memory = 32, .reserved = 256 },
+    .{ .name = "minimax image prompt hp_heads", .threads = 256, .tg_memory = 0, .reserved = 256 },
+    .{ .name = "minimax image prompt hp_attention", .threads = 256, .tg_memory = 0, .reserved = 256 },
+    .{ .name = "minimax image prompt hp_glu", .threads = 256, .tg_memory = 0, .reserved = 256 },
+    .{ .name = "minimax image prompt hp_add", .threads = 256, .tg_memory = 0, .reserved = 256 },
+    .{ .name = "minimax image prompt hp_scatter_add", .threads = 256, .tg_memory = 0, .reserved = 256 },
+};
 pub const decoder = [_]M{
     .{ .name = "minimax image decoder h3d_post_quant", .threads = 192, .tg_memory = 0, .reserved = 192 },
     .{ .name = "minimax image decoder h3d_embed", .threads = 256, .tg_memory = 0, .reserved = 256 },
