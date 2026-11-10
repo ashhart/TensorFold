@@ -33,6 +33,13 @@ fn put(e: *Engine, bytes: []const u8) !u64 {
     return p;
 }
 
+/// One expert projection's NVFP4 part [n, k]; a non-positive global scale is Qwen's own UnsupportedQwenQuantization.
+pub fn expert(ck: *core.Checkpoint, module: []const u8, n: usize, k: usize) !core.modelopt.part.Part {
+    const w = try core.modelopt.part.read(ck, module, .{ .kind = .nvfp4, .n = n, .k = k, .act = .skip });
+    if (!std.math.isFinite(w.scale) or w.scale <= 0) return error.UnsupportedQwenQuantization;
+    return w;
+}
+
 /// A layer's experts under prefix `p`: each projection of every expert staged as stored, packed on the GPU.
 pub fn routed(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer, p: []const u8) !engine.Mlp {
     const g = e.g;
@@ -55,10 +62,9 @@ pub fn routed(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer, p: []const
         if (e1 * (cb + sb) > stage.len) return error.StageTooSmall;
         for (0..e1) |x| {
             const module = if (x < g.experts) try std.fmt.bufPrint(&mb, "{s}mlp.experts.{d}.{s}", .{ p, x, q.name }) else try std.fmt.bufPrint(&mb, "{s}mlp.shared_expert.{s}", .{ p, q.name });
-            const w = try core.modelopt.part.read(ck, module, .{ .kind = .nvfp4, .n = q.n, .k = q.k, .act = .skip });
+            const w = try expert(ck, module, q.n, q.k);
             try stage.upload(x * cb, w.weight.bytes);
             try stage.upload(e1 * cb + x * sb, w.blocks.?.bytes);
-            if (!std.math.isFinite(w.scale) or w.scale <= 0) return error.UnsupportedQwenQuantization;
             if (q.parts == 2) up_g[x * 2 + q.m] = w.scale else down_g[x] = w.scale;
         }
         try pack.fp4Experts(e.stream, stage.ptr, stage.ptr + e1 * cb, if (q.parts == 2) up else down, e1, q.n, q.k, 0, q.k, q.parts, q.m);
