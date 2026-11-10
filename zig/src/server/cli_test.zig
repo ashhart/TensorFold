@@ -64,17 +64,24 @@ test "stable profile: default and explicit spelling preserve every argument and 
     }
 }
 
-test "stable profile: fast is not planned, fast-exact is not yet qualified and an unknown spelling names all three" {
+test "stable profile: fast is not planned, fast-exact is not yet qualified, and an unknown spelling names the served profile" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var u: Usage = .{};
-    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--profile", "fast" }, &u));
-    try std.testing.expectEqualStrings("argument --profile: fast is not planned: a speed mode that changes output tokens is not shipped, so the arithmetic class has no profile to join", u.message);
-    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--profile=fast-exact" }, &u));
-    try std.testing.expectEqualStrings("argument --profile: fast-exact is not yet qualified: solo, concurrent 1/2/4/8 and resumed runs equal to stable, and a measurement where no served cell for its family gets slower", u.message);
-    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--profile", "banana" }, &u));
-    try std.testing.expectEqualStrings("argument --profile: unknown profile 'banana': expected stable, fast-exact or fast", u.message);
+    const refused = [_]struct { name: []const u8, sentence: []const u8 }{
+        .{ .name = "fast", .sentence = "argument --profile: fast is not planned: a speed mode that changes output tokens is not shipped, so the arithmetic class has no profile to join" },
+        .{ .name = "fast-exact", .sentence = "argument --profile: fast-exact is not yet qualified: it needs solo, concurrent 1/2/4/8 and resumed runs equal to stable, and a measurement where no served cell for its family gets slower" },
+        .{ .name = "banana", .sentence = "argument --profile: unknown profile 'banana': stable is the only served profile" },
+    };
+    for (refused) |row| {
+        const spaced = [_][]const u8{ "m", "--profile", row.name };
+        const equals = [_][]const u8{ "m", try std.fmt.allocPrint(a, "--profile={s}", .{row.name}) };
+        for ([_][]const []const u8{ &spaced, &equals }) |argv| {
+            try std.testing.expectError(error.Usage, parse(a, argv, &u));
+            try std.testing.expectEqualStrings(row.sentence, u.message);
+        }
+    }
 }
 
 test "stable profile: capabilities describe the shared paging variable by family without changing its name" {
