@@ -4,8 +4,8 @@ const tf = @import("tensorfold");
 const driver = @import("moss_image_generate_run.zig");
 const t = std.testing;
 
-/// One forward's timestep, skip and input, so a test can check the step and sigma indexing branch by branch.
-const Call = struct { timestep: f32, skip: ?usize, first: f32, digest: u64 };
+/// One forward's timestep, skip, input and output, so a test can check the step and sigma indexing branch by branch.
+const Call = struct { timestep: f32, skip: ?usize, first: f32, digest: u64, out_digest: u64 };
 var calls: [2 * 200]Call = undefined;
 var seen: usize = 0;
 
@@ -15,28 +15,37 @@ fn digest(values: []const f32) u64 {
     return sum;
 }
 
+/// Which branch a prompt belongs to, so a forward can tell the two apart by its own prompt.
 const Prompt = struct {
+    branch: usize = 0,
+
     pub fn deinit(_: *Prompt) void {}
 };
 const Timing = struct { wall: f64 = 0, gpu: f64 = 0, host: f64 = 0 };
 const Picture = struct { png: []const u8, load_s: f64 = 0, wall: f64 = 0, gpu: f64 = 0 };
 
-/// Both branches answer with twice their input, so one step moves `x` by `2 * x * (sigmas[s + 1] - sigmas[s])`.
+/// The branches answer differently, so the guidance term shows in the latents: the positive one doubles its
+/// input and the negative one returns it as it is, so one step moves `x` by
+/// `(x + guidance * (2 * x - x)) * (sigmas[s + 1] - sigmas[s])`.
 const Model = struct {
     a: std.mem.Allocator,
+    branches: usize = 0,
 
     pub fn deinit(m: *Model) void {
         m.a.destroy(m);
     }
-    pub fn prompt(_: *Model, _: []const u16) !Prompt {
-        return .{};
+    pub fn prompt(m: *Model, _: []const u16) !Prompt {
+        const branch = m.branches;
+        m.branches += 1;
+        return .{ .branch = branch };
     }
-    pub fn forward(_: *Model, _: *Prompt, input: []const f32, timestep: f32, skip: ?usize, out: []f32) !Timing {
+    pub fn forward(_: *Model, p: *Prompt, input: []const f32, timestep: f32, skip: ?usize, out: []f32) !Timing {
+        const twice: f32 = if (p.branch == 0) 2 else 1;
+        for (out, input) |*o, x| o.* = twice * x;
         if (seen < calls.len) {
-            calls[seen] = .{ .timestep = timestep, .skip = skip, .first = input[0], .digest = digest(input) };
+            calls[seen] = .{ .timestep = timestep, .skip = skip, .first = input[0], .digest = digest(input), .out_digest = digest(out) };
             seen += 1;
         }
-        for (out, input) |*o, x| o.* = 2 * x;
         return .{};
     }
 };
@@ -50,6 +59,10 @@ const Inert = struct {
     pub const Model = @import("moss_image_generate_host.zig").Model;
     pub const Prompt = @import("moss_image_generate_host.zig").Prompt;
 };
+
+/// The latents the decoder received, the guided loop's last word on them: the 32x32 fixture's two rows of two.
+var decoded: [2 * 2 * Inert.config.channels]f32 = undefined;
+var decoded_len: usize = 0;
 
 /// The device all three backends share: it hands out the inert model and needs no checkpoint.
 const Loaded = struct {
@@ -85,7 +98,9 @@ const FullDevice = struct {
         return encodeRows(a, texts, rows);
     }
     pub fn decode(_: *FullDevice, a: std.mem.Allocator, _: std.Io, _: []const u8, latents: []const f32, width: usize, height: usize) !Picture {
-        _ = .{ &a, &latents, &width, &height };
+        _ = .{ &a, &width, &height };
+        decoded_len = latents.len;
+        @memcpy(decoded[0..latents.len], latents);
         return .{ .png = png };
     }
 };
@@ -152,14 +167,15 @@ fn exec(comptime B: type, arena: *std.heap.ArenaAllocator, argv: []const [*:0]co
         .preopens = .empty,
     };
     seen = 0;
+    decoded_len = 0;
     return driver.run(B, init);
 }
 
-/// The exit code of a 32x32, three-step picture at `seed` on `B`, with the steps it ran in `calls`.
-fn picture(comptime B: type, a: std.mem.Allocator, arena: *std.heap.ArenaAllocator, dir: [:0]const u8, seed: [*:0]const u8) !u8 {
+/// The driver's exit code on `B` for a `side` x `side` picture of `steps` steps at `seed` and `guidance`.
+fn picture(comptime B: type, a: std.mem.Allocator, arena: *std.heap.ArenaAllocator, dir: [:0]const u8, seed: [*:0]const u8, steps: [*:0]const u8, guidance: [*:0]const u8) !u8 {
     const transformer = try a.dupeSentinel(u8, try a.print("{s}/transformer", .{dir}), 0);
     const out = try a.dupeSentinel(u8, try a.print("{s}/out.png", .{dir}), 0);
-    return exec(B, arena, &.{ "tf-moss-image-generate", transformer, "--prompt", "a fox", "--negative", "blurry", "--steps", "3", "--seed", seed, "--width", "32", "--height", "32", out });
+    return exec(B, arena, &.{ "tf-moss-image-generate", transformer, "--prompt", "a fox", "--negative", "blurry", "--steps", steps, "--guidance", guidance, "--seed", seed, "--width", "32", "--height", "32", out });
 }
 
 test "the seed reaches the latents: one seed repeats its first step, another does not" {
@@ -169,12 +185,12 @@ test "the seed reaches the latents: one seed repeats its first step, another doe
     defer arena.deinit();
     const a = arena.allocator();
     const dir = try fixture(a, &tmp);
-    try t.expectEqual(@as(u8, 0), try picture(Backend, a, &arena, dir, "7"));
+    try t.expectEqual(@as(u8, 0), try picture(Backend, a, &arena, dir, "7", "3", "3.0"));
     const one = calls[0];
-    try t.expectEqual(@as(u8, 0), try picture(Backend, a, &arena, dir, "7"));
+    try t.expectEqual(@as(u8, 0), try picture(Backend, a, &arena, dir, "7", "3", "3.0"));
     try t.expectEqual(one.first, calls[0].first);
     try t.expectEqual(one.digest, calls[0].digest);
-    try t.expectEqual(@as(u8, 0), try picture(Backend, a, &arena, dir, "8"));
+    try t.expectEqual(@as(u8, 0), try picture(Backend, a, &arena, dir, "8", "3", "3.0"));
     try t.expect(one.digest != calls[0].digest);
     const written = try tmp.dir.readFileAlloc(t.io, "out.png", a, .limited(64));
     try t.expectEqual(png.len, written.len);
@@ -190,11 +206,12 @@ test "step s reads timesteps[s], both branches share its input, and only the neg
     const settings = try tf.moss_image.schedule.parse(a, scheduler_config);
     const sched = try tf.moss_image.schedule.timesteps(a, settings, 3);
     const steps = sched.timesteps.len;
-    try t.expectEqual(@as(u8, 0), try picture(Backend, a, &arena, dir, "42"));
+    try t.expectEqual(@as(u8, 0), try picture(Backend, a, &arena, dir, "42", "3", "3.0"));
     try t.expectEqual(2 * steps, seen);
     const start = try a.alloc(f32, 2 * 2 * Inert.config.channels);
     try tf.moss_image.noise.latents(a, 42, 2, 2, start);
     var x = start[0];
+    const guidance: f32 = 3.0;
     for (0..steps) |s| {
         const cond = calls[2 * s];
         const uncond = calls[2 * s + 1];
@@ -203,9 +220,43 @@ test "step s reads timesteps[s], both branches share its input, and only the neg
         try t.expect(cond.skip == null);
         try t.expectEqual(@as(?usize, 22), uncond.skip);
         try t.expectEqual(cond.digest, uncond.digest);
+        // The two branches do answer differently on that one input, so a weighted sum of them is observable.
+        try t.expect(cond.out_digest != uncond.out_digest);
         try t.expect(@abs(cond.first - x) < 1e-6);
-        x = x + (2 * x) * (sched.sigmas[s + 1] - sched.sigmas[s]);
+        const by = sched.sigmas[s + 1] - sched.sigmas[s];
+        const pc = 2 * x;
+        const pu = x;
+        x = x + (pu + guidance * (pc - pu)) * by;
     }
+}
+
+test "the guidance scale weights the two branches in the step it takes" {
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const dir = try fixture(a, &tmp);
+    const settings = try tf.moss_image.schedule.parse(a, scheduler_config);
+    const sched = try tf.moss_image.schedule.timesteps(a, settings, 1);
+    try t.expectEqual(@as(u8, 0), try picture(Backend, a, &arena, dir, "42", "1", "2"));
+    try t.expectEqual(@as(usize, 2), seen);
+    try t.expectEqual(decoded.len, decoded_len);
+    const start = try a.alloc(f32, decoded_len);
+    try tf.moss_image.noise.latents(a, 42, 2, 2, start);
+    const by = sched.sigmas[1] - sched.sigmas[0];
+    try t.expect(by != 0);
+    const guidance: f32 = 2;
+    for (start, decoded[0..decoded_len]) |x, got| {
+        const pc = 2 * x;
+        const pu = x;
+        try t.expect(@abs(got - (x + (pu + guidance * (pc - pu)) * by)) < 1e-6);
+    }
+    // A step that averaged the branches instead of weighting them would land elsewhere, so this is a control.
+    const first = start[0];
+    const weighted = first + (first + guidance * (2 * first - first)) * by;
+    const averaged = first + ((2 * first + first) / 2) * by;
+    try t.expect(@abs(weighted - averaged) > 1e-6);
 }
 
 test "a backend without the prompt encoder refuses with 2 before any forward" {
@@ -215,7 +266,7 @@ test "a backend without the prompt encoder refuses with 2 before any forward" {
     defer arena.deinit();
     const a = arena.allocator();
     const dir = try fixture(a, &tmp);
-    try t.expectEqual(@as(u8, 2), try picture(NoEncoder, a, &arena, dir, "42"));
+    try t.expectEqual(@as(u8, 2), try picture(NoEncoder, a, &arena, dir, "42", "3", "3.0"));
     try t.expectEqual(@as(usize, 0), seen);
 }
 
@@ -228,6 +279,6 @@ test "a backend without the image decoder still runs the schedule and refuses wi
     const dir = try fixture(a, &tmp);
     const settings = try tf.moss_image.schedule.parse(a, scheduler_config);
     const steps = (try tf.moss_image.schedule.timesteps(a, settings, 3)).timesteps.len;
-    try t.expectEqual(@as(u8, 2), try picture(NoDecoder, a, &arena, dir, "42"));
+    try t.expectEqual(@as(u8, 2), try picture(NoDecoder, a, &arena, dir, "42", "3", "3.0"));
     try t.expectEqual(2 * steps, seen);
 }
