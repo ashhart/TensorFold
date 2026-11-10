@@ -16,7 +16,7 @@ pub const memory = @import("cuda_exl3_graph_memory.zig");
 pub fn mode() !Mode {
     if (force) |f| return f;
     // the setting's words are in Mode's order, so the matching index is the mode
-    return @as(Mode, @enumFromInt(try @import("sys").environment.read(u2, "TF_FLASHNEXT_EXL3_GRAPH", 0)));
+    return @as(Mode, @fromBackingInt(@intCast(try @import("sys").environment.read(u2, "TF_FLASHNEXT_EXL3_GRAPH", 0))));
 }
 
 pub fn enabled() !bool {

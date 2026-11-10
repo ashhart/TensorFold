@@ -258,7 +258,8 @@ pub fn attach(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, st: cud
     try d.check(d.api.cuMemGetInfo_v2(&free, &total), "cuMemGetInfo");
     out.free_before = free;
     out.scratch_bytes = scratch_before -| free;
-    const reserve_floor = b.reserve orelse try serverReserve(total);
+    const server_reserve = try serverReserve(total);
+    const reserve_floor = b.reserve orelse server_reserve;
     const reserve = b.reserve orelse try std.math.add(u64, reserve_floor, b.margin);
     // beside its lines a layer holds the shared expert's region, its six tables and its masked picks (sized for the
     var fixed: u64 = 0;
@@ -293,7 +294,7 @@ pub fn attach(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, st: cud
     }
     const pool_room = try memory.available(free, reserve, future);
     const world: usize = if (all[0].tp) |t| t.world else 1;
-    const fit = pool_.linesFor(free, try std.math.add(u64, serverReserve(total), b.margin), try std.math.add(u64, future, all_fixed), line_cost, n, pool_.min_lines) catch null;
+    const fit = pool_.linesFor(free, try std.math.add(u64, server_reserve, b.margin), try std.math.add(u64, future, all_fixed), line_cost, n, pool_.min_lines) catch null;
     const uniform = try uniformLines();
     const lines = if (b.lines) |explicit| (if (delta_text != null or uniform) explicit else memory.rankLines(explicit, world, fit)) else try pool_.linesFor(free, reserve, try std.math.add(u64, future, all_fixed), line_cost, n, pool_.min_lines);
     if (b.lines) |explicit| if (lines != explicit) std.log.info("flashnext exl3: this rank holds {d} lines a layer, {d} more than the {d} asked for: it has the room (residency never changes output bytes)", .{ lines, lines - explicit, explicit });
