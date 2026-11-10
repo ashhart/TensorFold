@@ -67,9 +67,7 @@ pub fn deliverPending(h: *LaneHost) void {
     }
 }
 
-/// A round the backend failed: the failure hook hears the error and the streams in `core.live` at the
-/// failure (paused ones among them) take its name; every other job keeps its place and fails at its
-/// own next step if the backend is unhealthy.
+/// A round the backend failed: the failure hook hears the error, the streams in `core.live` at the failure (paused ones among them) and the prompts whose finals the round never ran fail with it; every other job keeps its place, failing at its own next step if the backend is unhealthy.
 pub fn failRound(h: *LaneHost, err: anyerror) void {
     failed(h, err);
     std.log.warn("lane host: a round failed ({s}): the round's streams fail", .{@errorName(err)});
@@ -88,6 +86,13 @@ pub fn failRound(h: *LaneHost, err: anyerror) void {
             }
         };
         if (!in_round) {
+            // a prompt the round's plan carried to its end is decoding in the planner, which offers it
+            // to no later plan, and its stream never reaches the core: it fails here rather than hold
+            // its lane forever
+            if (job.started and !job.stream.finished and plannedToEnd(h, job)) {
+                endFailed(h, job, @errorName(err));
+                continue;
+            }
             h.lock();
             const kept = h.admitted.append(h.gpa, job);
             h.unlock();
@@ -96,6 +101,16 @@ pub fn failRound(h: *LaneHost, err: anyerror) void {
         }
         endFailed(h, job, @errorName(err));
     }
+}
+
+/// Whether the round's plan carried the job's prompt to its end: its final is listed, or a piece ends at the prompt's last row (a damaged restore's rows, planned but never run).
+fn plannedToEnd(h: *const LaneHost, job: *const Job) bool {
+    const key = @intFromPtr(job);
+    for (h.finals.items) |at| if (at == key) return true;
+    const end: u64 = job.request.prompt.len -| 1;
+    if (end == 0) return false;
+    for (h.pieces.items) |piece| if (piece.key == key and piece.end == end) return true;
+    return false;
 }
 
 /// A failed round ends every job it admitted, with the backend's error; the list is taken whole, not copied.
