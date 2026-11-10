@@ -11,6 +11,33 @@ pub const patch_width = 1536;
 pub const min_pixels = 65536;
 pub const max_pixels = 16777216;
 
+/// The image token budget a served tower admits: 64 to 4096 tokens, 256 when --vision sets none.
+pub const min_budget = 64;
+pub const max_budget = 4096;
+pub const default_budget = 256;
+
+/// The tower's token budget for an open; `BadLfm3ImageBudget` outside 64..4096 tokens or with no image allowed.
+pub fn admitBudget(tokens_set: bool, tokens: u32, max_images: u32) !u32 {
+    const budget = if (tokens_set) tokens else default_budget;
+    if (budget < min_budget or budget > max_budget or max_images == 0) return error.BadLfm3ImageBudget;
+    return budget;
+}
+
+/// BF16 round-to-nearest-even of a finite value, as the tower's patch embedding takes its pixels.
+pub fn roundBf16(x: f32) u16 {
+    const bits: u32 = @bitCast(x);
+    return @intCast((bits +% (0x7fff + ((bits >> 16) & 1))) >> 16);
+}
+
+/// Pixels to the tower's BF16 patch words; a NaN or infinity refuses the image, and `out` is then not to be used.
+pub fn packPixels(pixels: []const f32, out: []u16) !void {
+    if (pixels.len != out.len) return error.BadLfm3ImageShape;
+    for (pixels, out) |value, *word| {
+        if (!std.math.isFinite(value)) return error.NonfiniteLfm3Image;
+        word.* = roundBf16(value);
+    }
+}
+
 pub fn validate(inputs: anytype, prompt_len: usize, budget: usize, max_images: usize) !void {
     if (inputs.len > max_images) return error.TooManyImages;
     var previous: usize = 0;
@@ -61,6 +88,15 @@ pub fn processor(a: std.mem.Allocator, bytes: []const u8) !void {
         return error.BadLfm3Processor;
 }
 
+/// The checkpoint folder's `processor_config.json`, checked against the one image processor the tower implements.
+pub fn loadProcessor(io: std.Io, a: std.mem.Allocator, dir: []const u8) !void {
+    const path = try std.fs.path.join(a, &.{ dir, "processor_config.json" });
+    defer a.free(path);
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(4 << 20));
+    defer a.free(bytes);
+    try processor(a, bytes);
+}
+
 pub fn prepare(io: std.Io, a: std.mem.Allocator, bytes: []const u8, max_tokens: u32) !Prepared {
     var rgb = try picture.decode(io, a, bytes);
     defer rgb.deinit(a);
@@ -68,7 +104,7 @@ pub fn prepare(io: std.Io, a: std.mem.Allocator, bytes: []const u8, max_tokens: 
 }
 
 pub fn prepareRgb(a: std.mem.Allocator, rgb: picture.Rgb, identity: u64, max_tokens: u32) !Prepared {
-    if (rgb.width == 0 or rgb.height == 0 or max_tokens < 64) return error.ImageTooSmall;
+    if (rgb.width == 0 or rgb.height == 0 or max_tokens < min_budget) return error.ImageTooSmall;
     const budget = @min(@as(u64, max_pixels), @as(u64, max_tokens) * 1024);
     const size = try geometry.smartResize(@intCast(rgb.height), @intCast(rgb.width), 32, min_pixels, budget);
     const gh = size.h / patch;

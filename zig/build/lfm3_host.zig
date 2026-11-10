@@ -26,9 +26,20 @@ pub fn steps(b: *std.Build, all: *std.Build.Step) void {
         .link_libc = true,
     });
     const image_run = b.addRunArtifact(b.addTest(.{ .root_module = image }));
-    const image_checks = b.step("test-lfm3-image-host", "LFM3 image geometry and shared decoder checks");
+    const image_checks = b.step("test-lfm3-image-host", "LFM3 image geometry, processor, budget, pixel and vision tensor admission checks");
     image_checks.dependOn(&image_run.step);
     checks.dependOn(image_checks);
+    const metal = b.createModule(.{ .root_source_file = b.path("zig/src/metal/metal.zig"), .target = b.graph.host, .link_libc = true });
+    if (b.graph.host.result.os.tag == .macos) metal.linkSystemLibrary("objc", .{});
+    const residency = b.createModule(.{
+        .root_source_file = b.path("zig/src/lfm3_vision_residency_tests.zig"),
+        .target = b.graph.host,
+        .link_libc = true,
+        .imports = &.{.{ .name = "metal", .module = metal }},
+    });
+    const residency_run = b.addRunArtifact(b.addTest(.{ .root_module = residency }));
+    b.step("test-lfm3-vision-residency-host", "LFM3 vision tower residency refusal without a GPU").dependOn(&residency_run.step);
+    checks.dependOn(&residency_run.step);
     const memory = b.createModule(.{ .root_source_file = b.path("zig/src/gpu_memory.zig"), .target = b.graph.host });
     const contract = b.createModule(.{
         .root_source_file = b.path("zig/src/core/contract.zig"),
