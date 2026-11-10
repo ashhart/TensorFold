@@ -26,7 +26,7 @@
  "Strength": "Kekuatan",
  "File: {value0}": "Berkas: {value0}",
  "In force in the loaded model.": "Berlaku pada model yang dimuat.",
- "One is the strength the file was derived at. A strength past a few can leave the model without an answer.": "Satu adalah kekuatan saat berkas itu diperoleh. Kekuatan beberapa kali lipat dapat membuat model tidak menjawab.",
+ "Strength scales the added direction. Large values can degrade replies.": "Kekuatan mengalikan arah yang ditambahkan. Nilai besar dapat menurunkan kualitas balasan.",
  "The strength must be above 0 and at most {value0}.": "Kekuatan harus lebih besar dari 0 dan tidak lebih dari {value0}.",
  "This build's TensorFold engine does not offer control vectors yet, so the engine in use cannot take one.": "Mesin TensorFold pada build ini belum menawarkan vektor kendali, jadi mesin yang dipakai tidak dapat menerimanya.",
  "With a control vector in force, replies are steered toward the style or topic the file encodes. Only add-style vectors are supported; the engine refuses project vectors and files it cannot validate.": "Dengan vektor kendali berlaku, balasan diarahkan ke gaya atau topik yang dikodekan berkas itu. Hanya vektor jenis penambahan (add) yang didukung; mesin menolak vektor project dan berkas yang tidak dapat divalidasinya."

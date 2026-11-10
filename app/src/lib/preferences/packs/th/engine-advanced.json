@@ -26,7 +26,7 @@
  "Strength": "ความแรง",
  "File: {value0}": "ไฟล์: {value0}",
  "In force in the loaded model.": "มีผลกับโมเดลที่โหลดอยู่",
- "One is the strength the file was derived at. A strength past a few can leave the model without an answer.": "1 คือความแรงที่ไฟล์นี้ถูกสร้างขึ้นมา ความแรงที่สูงกว่านั้นหลายเท่าอาจทำให้โมเดลตอบไม่ได้",
+ "Strength scales the added direction. Large values can degrade replies.": "ความแรงจะปรับขนาดทิศทางที่เพิ่มเข้าไป ค่าที่มากอาจทำให้คุณภาพคำตอบลดลง",
  "The strength must be above 0 and at most {value0}.": "ความแรงต้องมากกว่า 0 และไม่เกิน {value0}",
  "This build's TensorFold engine does not offer control vectors yet, so the engine in use cannot take one.": "เอนจิน TensorFold ของรุ่นนี้ยังไม่รองรับเวกเตอร์ควบคุม เอนจินที่ใช้อยู่จึงรับไม่ได้",
  "With a control vector in force, replies are steered toward the style or topic the file encodes. Only add-style vectors are supported; the engine refuses project vectors and files it cannot validate.": "เมื่อเวกเตอร์ควบคุมมีผล คำตอบจะถูกชี้นำไปทางสไตล์หรือหัวข้อที่ไฟล์เข้ารหัสไว้ รองรับเฉพาะเวกเตอร์แบบบวก (add) เท่านั้น เอนจินจะปฏิเสธเวกเตอร์แบบ project และไฟล์ที่ตรวจสอบไม่ได้"

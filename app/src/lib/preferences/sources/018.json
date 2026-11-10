@@ -26,7 +26,7 @@
  "Strength",
  "File: {value0}",
  "In force in the loaded model.",
- "One is the strength the file was derived at. A strength past a few can leave the model without an answer.",
+ "Strength scales the added direction. Large values can degrade replies.",
  "The strength must be above 0 and at most {value0}.",
  "This build's TensorFold engine does not offer control vectors yet, so the engine in use cannot take one.",
  "With a control vector in force, replies are steered toward the style or topic the file encodes. Only add-style vectors are supported; the engine refuses project vectors and files it cannot validate."
