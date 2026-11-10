@@ -56,8 +56,9 @@ pub const Backend = struct {
     }
 
     fn failed(b: *Backend, e: anyerror) Error {
+        if (b.aborted.load(.acquire)) return error.Aborted;
         b.last = e;
-        return if (b.aborted.load(.acquire)) error.Aborted else error.BackendFailed;
+        return error.BackendFailed;
     }
 
     /// A raw NCCL result: an abort from another thread ends the call as Aborted, before lib.check's fatal stop.
@@ -121,11 +122,11 @@ pub const Backend = struct {
         };
     }
 
-    /// Any thread; only the first call acts. The communicator stays the engine's to destroy.
+    /// Any thread; only the first acts. The group aborts; with none, only later calls stop (T1: the mesh owns comms).
     fn abort(ptr: *anyopaque) void {
         const b = of(ptr);
         if (b.aborted.swap(true, .acq_rel)) return;
-        if (b.group) |g| g.abort() else _ = b.lib.api.ncclCommAbort(b.comm);
+        if (b.group) |g| g.abort();
     }
 };
 
@@ -249,7 +250,7 @@ test "abort acts once, and every later call is refused without reaching NCCL" {
     const c = b.collective();
     c.abort();
     c.abort();
-    try testing.expectEqual(@as(usize, 1), Fake.aborts);
+    try testing.expectEqual(@as(usize, 0), Fake.aborts); // the owner's communicator: the backend never frees it
     try testing.expectError(error.Aborted, c.allGather(0x100, 0x200, 4, .f32, test_stream));
     try testing.expectError(error.Aborted, c.check());
     try testing.expectError(error.Aborted, c.allReduce(0x100, 0x200, 4, .f32, .sum, test_stream));
@@ -274,5 +275,15 @@ test "a call another thread aborts while it is pending ends as Aborted, not as a
     Fake.abort_inside = &b;
     try testing.expectError(error.Aborted, b.collective().allGather(0x100, 0x200, 4, .f32, test_stream));
     try testing.expectEqual(@as(?anyerror, null), b.last);
+    try testing.expectEqual(@as(usize, 0), Fake.aborts);
+    // with a group (NCCL's route, no wire): the group aborts its communicator once, and its own call ends as Aborted
+    Fake.reset();
+    var g: cuda.tp_group.Group = .{ .lib = fakeLib(), .comm = null, .rank = 0, .world = 2 };
+    var bg: Backend = .{ .d = undefined, .lib = &lib, .comm = null, .rank = 0, .world = 2, .group = &g };
+    Fake.abort_inside = &bg;
+    try testing.expectError(error.Aborted, bg.collective().allGather(0x100, 0x200, 4, .f32, test_stream));
+    try testing.expectEqual(@as(?anyerror, null), bg.last);
     try testing.expectEqual(@as(usize, 1), Fake.aborts);
+    // the group's own failed call after its abort: Aborted, not NCCL's error (lib.check's fatal stop outside tests)
+    try testing.expectError(error.Aborted, g.allGather(.{ .d = undefined, .handle = test_stream }, 0x100, 0x200, 16));
 }

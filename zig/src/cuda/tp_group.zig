@@ -90,17 +90,23 @@ pub const Group = struct {
     pub fn allGather(g: *const Group, s: Stream, mine: u64, all: u64, bytes: usize) !void {
         if (g.fast) |f| if (f.fits(bytes)) return f.gather(s.handle, mine, all, bytes);
         if (g.multi) |m| if (m.fits(m.ctx, bytes)) return m.gather(m.ctx, s.handle, mine, all, bytes);
-        try g.lib.check(g.lib.api.ncclAllGather(mine, all, bytes, .u8, g.comm, s.handle), "ncclAllGather");
+        try g.call(g.lib.api.ncclAllGather(mine, all, bytes, .u8, g.comm, s.handle), "ncclAllGather");
+    }
+
+    /// A call's result: once the group is aborted, a failure ends as Aborted, not at lib.check's fatal stop.
+    fn call(g: *const Group, res: nccl.Result, what: []const u8) !void {
+        if (res != 0 and g.aborted.load(.acquire)) return error.Aborted;
+        try g.lib.check(res, what);
     }
 
     /// `bytes` at `ptr` to rank `peer`, on `s` (its matching recv takes the same count).
     pub fn send(g: *const Group, s: Stream, ptr: u64, bytes: usize, peer: usize) !void {
-        try g.lib.check(g.lib.api.ncclSend(ptr, bytes, .u8, @intCast(peer), g.comm, s.handle), "ncclSend");
+        try g.call(g.lib.api.ncclSend(ptr, bytes, .u8, @intCast(peer), g.comm, s.handle), "ncclSend");
     }
 
     /// `bytes` from rank `peer` into `ptr`, on `s`.
     pub fn recv(g: *const Group, s: Stream, ptr: u64, bytes: usize, peer: usize) !void {
-        try g.lib.check(g.lib.api.ncclRecv(ptr, bytes, .u8, @intCast(peer), g.comm, s.handle), "ncclRecv");
+        try g.call(g.lib.api.ncclRecv(ptr, bytes, .u8, @intCast(peer), g.comm, s.handle), "ncclRecv");
     }
 
     /// Rank 0 and rank `peer` connect both ways with one small exchange (`ptr`: 128 bytes, 64 out and 64 in).
