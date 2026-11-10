@@ -40,8 +40,7 @@ pub fn counts(v: []const i32) !Rows {
     return countsFor(v, true);
 }
 
-/// `has_audio`: whether the case carries audio. A picture's case (MiniMax-H3-Image) carries none: no audio rows,
-/// generated or held. A clip's case keeps needing both audio and video rows.
+/// counts for a case with or without audio: a picture's (MiniMax-H3-Image) has no audio rows, held or generated.
 pub fn countsFor(v: []const i32, has_audio: bool) !Rows {
     if (v.len < 6 or v.len > 8) return error.H3BadCounts;
     for (v) |n| if (n < 0) return error.H3NegativeCount;
@@ -78,8 +77,7 @@ pub const Geometry = struct {
     rot: usize,
     times: usize,
     steps: usize,
-    /// A picture's case may carry an output head per step (MiniMax-H3-Image's distilled heads, which replace the
-    /// output layer at their step); otherwise one head serves every step.
+    /// A picture's case may hold an output head per step (MiniMax-H3-Image's distilled heads), else one serves all.
     step_heads: bool = false,
 
     pub fn buffers(g: Geometry, base: bool) !void {
@@ -231,8 +229,7 @@ pub fn read(a: std.mem.Allocator, c: Case, q: st.Entry, fc2: st.Entry, layers: u
     return g;
 }
 
-/// The video output head: one [width, hidden] for every step, or, in a picture's case only, one per step
-/// ([steps, width, hidden] and [steps, width]); true for the latter.
+/// True when the video output head is one per step ([steps, width, hidden]), allowed in a picture's case only.
 pub fn stepHeads(c: Case, audio: bool, steps: usize, width: usize, hidden: usize) !bool {
     const w = try c.entry("video_out.weight");
     // a clip's case is read exactly as before: one head
@@ -247,8 +244,7 @@ pub fn stepHeads(c: Case, audio: bool, steps: usize, width: usize, hidden: usize
     return false;
 }
 
-/// The byte offsets of step `step`'s output head in the weight and bias: 0 when one head serves every step
-/// (`heads` 0); with a head per step the run must have exactly that many steps (a rescheduled run is refused).
+/// Byte offsets of step `step`'s output head and bias; with a head per step, a run of another length is refused.
 pub fn headOffsets(heads: usize, step: usize, steps: usize, width: usize, hidden: usize) ![2]usize {
     if (heads == 0) return .{ 0, 0 };
     if (steps != heads) return error.H3StepHeadCount;

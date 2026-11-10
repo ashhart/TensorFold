@@ -1,5 +1,4 @@
-//! MiniMax-H3-Image's picture rules on the host: the canvas a size is drawn on, the distilled schedule, the rows'
-//! 3D rotary positions and table, the latent's packing, and the tile map of a dense forward. No GPU.
+//! MiniMax-H3-Image's picture rules on the host: canvas, distilled schedule, positions, rotary, packing, tiles.
 const std = @import("std");
 const geometry = @import("geometry.zig");
 
@@ -32,8 +31,7 @@ pub fn roundEven(x: f64) f64 {
 
 pub const Size = struct { width: usize, height: usize };
 
-/// The canvas a `width` x `height` picture is drawn on: grown to `min_area` at its aspect ratio when smaller, then
-/// each side snapped to 32 pixels (ties to even, at least 32). A canvas other than the size is resized back.
+/// The canvas a picture is drawn on: grown to `min_area` at its ratio when smaller, sides snapped to 32 (half even).
 pub fn canvas(width: usize, height: usize, min_area: u64) !Size {
     if (width == 0 or height == 0) return error.H3BadPictureSize;
     if (min_area < min_area_floor or min_area > min_area_ceiling) return error.H3BadMinArea;
@@ -125,8 +123,7 @@ pub fn gridRows(g: Grid) !usize {
     return geometry.product(&.{ g.rows / 2, g.columns / 2 });
 }
 
-/// One axis of a block's centred coordinates: `cells` normalised by the block's area, n = cells / 2 entries from
-/// the left edge, endpoint excluded, each times 32, in float64 as written.
+/// Entry k of a block's centred axis: cells over the block's area, cells / 2 entries, times 32, in float64.
 fn axis(cells: usize, area: f64, k: usize) f64 {
     const r = @as(f64, @floatFromInt(cells)) / area;
     const left = (1.0 - r) / 2.0;
@@ -152,8 +149,7 @@ pub const Layout = struct {
     }
 };
 
-/// Each row's (t, h, w): text row i at (i, 0, 0); reference k at t = text + k and the target at t = text + the
-/// references' count, both at their block's centred grid; rounded once from float64 to float32.
+/// Each row's (t, h, w): text i at (i, 0, 0), reference k at t = text + k, the target after the references.
 pub fn positions(a: std.mem.Allocator, l: Layout) ![][3]f32 {
     const out = try a.alloc([3]f32, try l.rows());
     for (out[0..l.text], 0..) |*p, i| p.* = .{ @floatFromInt(i), 0, 0 };
@@ -173,8 +169,7 @@ fn block(out: [][3]f32, from: usize, g: Grid, t: usize) usize {
     return at;
 }
 
-/// The rotary table the heads read: per row, the 48 angles (t's 16, h's, w's; position times the checkpoint's
-/// `rope.inv_freq`, float32), their cosines and sines in float32, each laid twice across the 96 rotated dims.
+/// Per row, the cosines and sines of 48 angles (position times `rope.inv_freq`), each laid twice over 96 dims.
 pub fn rotary(a: std.mem.Allocator, p: []const [3]f32, inv_freq: []const f32) !struct { cos: []f32, sin: []f32 } {
     if (inv_freq.len != axis_freqs) return error.H3BadRotary;
     const n = try geometry.product(&.{ p.len, rotated });
@@ -233,8 +228,7 @@ fn field(o: std.json.ObjectMap, key: []const u8) !std.json.Value {
     return o.get(key) orelse error.H3NotPictureModel;
 }
 
-/// `model_index.json` of a MiniMax-H3-Image folder: the image pipeline's class and partition; returns the step
-/// heads' file name, which `pdd_config.json` sits beside.
+/// A MiniMax-H3-Image folder's `model_index.json`: class and partition checked; returns the step heads' file.
 pub fn checkIndex(a: std.mem.Allocator, json: []const u8) ![]const u8 {
     const doc = std.json.parseFromSliceLeaky(std.json.Value, a, json, .{}) catch return error.H3NotPictureModel;
     if (doc != .object) return error.H3NotPictureModel;
@@ -286,8 +280,7 @@ pub fn shardCount(a: std.mem.Allocator, json: []const u8) !usize {
     return count.?;
 }
 
-/// Ours against a reference: cosine and relative error over everything, and the largest relative error of one
-/// row of `width`, all summed in float64.
+/// Ours against a reference in float64: cosine, relative error, and the worst row's relative error.
 pub const Distance = struct { cosine: f64, relative: f64, worst_row: f64 };
 
 pub fn distance(ours: []const f32, theirs: []const f32, width: usize) !Distance {
