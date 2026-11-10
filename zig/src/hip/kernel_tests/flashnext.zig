@@ -59,11 +59,12 @@ fn rmsInv(xs: []const f32, eps: f32) f32 {
     return 1.0 / @sqrt(sum / @as(f32, @floatFromInt(xs.len)) + eps);
 }
 
-test "hyper-connection norm, gates and mix: the reference's roundings, each row alone" {
+/// The norm, gates and mix over `rows` rows against the reference; from 64 rows the norm takes a block a row.
+fn hcRows(rows: usize) !void {
     const t = try Rig.open(1 << 20);
     defer t.close();
     var rng: rig.Rng = .{ .state = 0x4C };
-    const rows = 3;
+    const ri: c_int = @intCast(rows);
     const s = 4;
     const d = 2560;
     const w = s * d;
@@ -102,7 +103,7 @@ test "hyper-connection norm, gates and mix: the reference's roundings, each row 
         ptr(?*anyopaque, x_out),
         ptr(?[*]const f32, sc),
         k,
-        rows,
+        ri,
         s,
         d,
         eps,
@@ -139,13 +140,13 @@ test "hyper-connection norm, gates and mix: the reference's roundings, each row 
     defer inj.free();
     var mixed = try t.alloc(rows * d * 2);
     defer mixed.free();
-    try t.on.fn_hc_gates(ptr(?[*]const f32, z), ptr(?*anyopaque, act), ptr(?*anyopaque, inj), k, rows, low, s, st);
+    try t.on.fn_hc_gates(ptr(?[*]const f32, z), ptr(?*anyopaque, act), ptr(?*anyopaque, inj), k, ri, low, s, st);
     try t.on.fn_hc_mix(
         ptr(?[*]const f32, g),
         ptr(?*const anyopaque, x_out),
         ptr(?*anyopaque, mixed),
         k,
-        rows,
+        ri,
         s,
         d,
         st,
@@ -176,12 +177,12 @@ test "hyper-connection norm, gates and mix: the reference's roundings, each row 
         ptr(?*anyopaque, x_shared),
         ptr(?[*]const f32, sc),
         k,
-        rows,
+        ri,
         s,
         d,
         eps,
         2,
-        rows * d,
+        @intCast(rows * d),
         st,
     );
     try t.stream.synchronize();
@@ -234,6 +235,11 @@ test "hyper-connection norm, gates and mix: the reference's roundings, each row 
         }
         try rig.expect(close(t, value(t, gm[r * d + j]), rnd(t, total / 4.0), 2), "hc mix {d} {d}", .{ r, j });
     };
+}
+
+test "hyper-connection norm, gates and mix: the reference's roundings, each row alone" {
+    try hcRows(3);
+    try hcRows(64); // the shares norm's block a row
 }
 
 test "the wide norm over a row of every stream, and the gates without inject gates" {
