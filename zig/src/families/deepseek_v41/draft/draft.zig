@@ -38,6 +38,7 @@ test {
     _ = branches;
     _ = calib_env;
     _ = @import("calib_env_test.zig");
+    _ = @import("plain_streams_test.zig");
     _ = calib_measure;
     _ = @import("calib_measure_test.zig");
     _ = branches_oracle;
