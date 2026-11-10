@@ -110,6 +110,12 @@ pub fn Registry(comptime Launch: type) type {
             return r;
         }
 
+        /// The tuned row of one of the registry's entries, or null for an entry this GPU's table does not name.
+        pub fn rowOf(r: *const Self, e: *const E) ?tuning.Row {
+            const i = (@intFromPtr(e) - @intFromPtr(r.entries.ptr)) / @sizeOf(E);
+            return if (i < r.entries.len) r.tuned[i] else null;
+        }
+
         /// The cost of entry `i` at `shape`, or null where its row has no room for the shape.
         fn cost(r: *const Self, i: usize, shape: Shape, env: Env) ?f32 {
             const e = &r.entries[i];
