@@ -59,6 +59,18 @@ pub const Standing = struct {
         };
     }
 
+    /// Uses up the record for a pass that `r` resumes in slot 0, keeping the rewind point the pass carries (0: none).
+    pub fn take(st: *Standing, gpa: std.mem.Allocator, r: Resume) void {
+        const kept = st.carried(r);
+        st.deinit(gpa);
+        st.rewind_at = kept;
+    }
+
+    /// Whether a warm pass over slot 0 (`own`) yields: not if the cache keeps its end, nor `wide` with `from` carrying.
+    pub fn warmYields(st: *const Standing, keeps_end: bool, own: Resume, from: Resume) bool {
+        return !keeps_end and own != .none and (!st.wide or st.carried(from) == 0);
+    }
+
     /// How `ids` (its rows' spans `spans`) resumes, past the cache's own restore point `kept_at`, by the cache's rule.
     pub fn plan(st: *const Standing, ids: []const u32, spans: []const modes.Span, kept_at: u32) Resume {
         const n = st.tokens.len;
@@ -99,6 +111,15 @@ pub fn pinReplyHistory(store: *const pc.Store, entry: *const pc.Entry, history: 
 /// The history rewind copies live recurrent rows, so its cut must land even when a bank captures other marks.
 pub fn rewindEnd(at: usize, end: usize, rewind: u32) usize {
     return if (rewind > at and rewind < end) rewind else end;
+}
+
+/// Slot 0's `need`-byte history rewind: none, a `tight` one, or a `wide` one beside a cache that keeps two of them.
+pub const Rewind = enum { none, tight, wide };
+
+/// Slot 0 makes its rewind wherever `room` holds it: a `cache` keeping two `full`-byte states may still evict it.
+pub fn makesRewind(need: u64, room: u64, cache: u64, full: u64) Rewind {
+    if (need > room) return .none;
+    return if (needsRewind(cache, full)) .tight else .wide;
 }
 
 /// A prompt's next physical chunk end, before cache marks or the slot's rewind point cut it further.
@@ -210,9 +231,7 @@ test "qwen27 resume: a warm pass that only extends slot 0 keeps the reply's rewi
         else => return error.TestUnexpectedResult,
     };
     try t.expectEqual(@as(u32, 7), n);
-    const kept = st.carry(n); // as takeStanding: the record is used up, the point stays
-    st.deinit(t.allocator);
-    st.rewind_at = kept;
+    st.take(t.allocator, .{ .here = n }); // as takeStanding: the record is used up, the point stays
     st.leave(t.allocator, .{ .at = 9, .prompt_len = 10, .context_len = 10, .fill_at = 9, .ended = false }, &warm, &.{.{ 5, 7 }});
     try t.expectEqual(@as(u32, 4), st.rewind_at); // a yield at a landed chunk keeps it too
     st.leave(t.allocator, .{ .at = 10, .prompt_len = 10, .context_len = 10, .fill_at = 10, .ended = true }, &warm, &.{.{ 5, 7 }});
@@ -241,15 +260,55 @@ test "qwen27 resume: a warm pass over slot 0's conversation runs where it carrie
     try t.expectEqual(Resume{ .back = 4 }, st.plan(&warm, &.{.{ 5, 6 }}, 0));
     try t.expectEqual(@as(u32, 4), st.carried(st.plan(&warm, &.{.{ 5, 6 }}, 0))); // it runs
     try t.expectEqual(@as(u32, 0), st.carried(st.plan(&warm, &.{.{ 5, 6 }}, 4))); // the cache's state is further: aside
-    const kept = st.carried(st.plan(&warm, &.{.{ 5, 6 }}, 0)); // as takeStanding, then the pass to its end
-    st.deinit(t.allocator);
-    st.rewind_at = kept;
+    st.take(t.allocator, st.plan(&warm, &.{.{ 5, 6 }}, 0)); // as takeStanding, then the pass to its end
     st.leave(t.allocator, .{ .at = 7, .prompt_len = 7, .context_len = 7, .fill_at = 7, .ended = true }, &warm, &.{.{ 5, 6 }});
     try t.expectEqual(Resume{ .here = 7 }, st.plan(&(warm ++ [_]u32{40}), &.{.{ 5, 6 }}, 0)); // a client replaying it
     try t.expectEqual(Resume{ .back = 4 }, st.plan(&.{ 1, 2, 3, 4, 20, 21, 22, 23, 40 }, &.{}, 0)); // one that does not
     st.rewind_at = 0; // a slot with no rewind point would keep none through the pass: it steps aside
     try t.expectEqual(@as(u32, 0), st.carried(st.plan(&(warm ++ [_]u32{40}), &.{.{ 5, 6 }}, 0)));
     try t.expectEqual(@as(u32, 0), st.carried(.none));
+}
+
+test "qwen27 resume: rule a, a warm pass carrying slot 0's rewind point runs beside a wide cache, else it yields" {
+    var st: Standing = .{ .rewind_at = 4 };
+    defer st.deinit(t.allocator);
+    const context = [_]u32{ 1, 2, 3, 4, 20, 21, 22, 23 }; // history 1-4, the generation prompt 20, a reply 21-23
+    st.leave(t.allocator, .{ .at = 7, .prompt_len = 5, .context_len = 8, .fill_at = 5, .ended = true }, &context, &.{});
+    const warm = [_]u32{ 1, 2, 3, 4, 30, 23, 31 }; // back to the point at 4
+    const own = st.plan(&warm, &.{.{ 5, 6 }}, 0);
+    try t.expect(st.warmYields(false, own, own)); // a tight cache would lose the reply's end it leaves: aside
+    st.wide = true; // the cache keeps two full-context states
+    try t.expect(!st.warmYields(false, own, own)); // it carries the point: it runs
+    try t.expect(st.warmYields(false, own, st.plan(&warm, &.{.{ 5, 6 }}, 4))); // the cache's state is further: aside
+    try t.expect(!st.warmYields(true, own, .none)); // the cache keeps the conversation's end
+    try t.expect(!st.warmYields(false, .none, .none)); // it would not resume in slot 0
+    st.rewind_at = 0;
+    try t.expect(st.warmYields(false, own, own)); // no point to carry: it would leave nothing in slot 0
+    st.deinit(t.allocator);
+    try t.expect(st.wide); // the record goes, the cache's size stays
+}
+
+test "qwen27 resume: rule b, taking slot 0's record for a pass that extends it keeps the rewind point" {
+    var st: Standing = .{ .rewind_at = 4 };
+    defer st.deinit(t.allocator);
+    const context = [_]u32{ 1, 2, 3, 4, 20, 21, 22, 23 };
+    st.leave(t.allocator, .{ .at = 7, .prompt_len = 5, .context_len = 8, .fill_at = 5, .ended = true }, &context, &.{});
+    st.take(t.allocator, st.plan(&[_]u32{ 1, 2, 3, 4, 20, 21, 22, 24 }, &.{.{ 5, 7 }}, 0)); // `.here` at 7
+    try t.expectEqual(@as(usize, 0), st.tokens.len); // the record is used up
+    try t.expectEqual(@as(u32, 4), st.rewind_at); // the point stays
+    st.take(t.allocator, .none); // a pass that does not resume in slot 0 drops it
+    try t.expectEqual(@as(u32, 0), st.rewind_at);
+}
+
+test "qwen27 resume: rule c, slot 0 makes its rewind buffer where room holds it, even beside a cache with two states" {
+    const full: u64 = 2496 << 20; // one full-context state at 33024 rows
+    try t.expectEqual(Rewind.wide, makesRewind(1 << 30, 2 << 30, 5 << 30, full)); // needsRewind says no: made anyway
+    try t.expectEqual(Rewind.wide, makesRewind(1 << 30, 2 << 30, 8 << 30, full));
+    try t.expectEqual(Rewind.tight, makesRewind(1 << 30, 2 << 30, 4 << 30, full)); // needsRewind's own case
+    try t.expectEqual(Rewind.tight, makesRewind(1 << 30, 1 << 30, full, full));
+    try t.expectEqual(Rewind.tight, makesRewind(1 << 30, 2 << 30, 0, full)); // no cache at all
+    try t.expectEqual(Rewind.none, makesRewind(2 << 30, 1 << 30, 0, full)); // no room
+    try t.expectEqual(Rewind.none, makesRewind(2 << 30, 1 << 30, 8 << 30, full));
 }
 
 test {
