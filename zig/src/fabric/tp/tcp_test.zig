@@ -70,6 +70,24 @@ test "a desynchronised call over TCP is refused on every rank" {
     try tcp.run(gpa, 2, opts, {}, host_test.VarDesync.go);
 }
 
+/// The ranks agree on the bytes but not the call (0), the op (1) or the type (2): both see it instead of mixing them.
+const FieldDesync = struct {
+    fn go(c: Collective, rank: u32, field: u8) !void {
+        var a: [8]u8 = @splat(0);
+        var b: [16]u8 = undefined;
+        const r = switch (field) {
+            0 => if (rank == 0) c.allReduce(addr(&a), addr(&b), 8, .u8, .sum, null) else c.allGather(addr(&a), addr(&b), 8, .u8, null),
+            1 => c.allReduce(addr(&a), addr(&b), 8, .u8, if (rank == 0) .sum else .max, null),
+            else => c.allReduce(addr(&a), addr(&b), 4, if (rank == 0) .f16 else .bf16, .sum, null),
+        };
+        if (r) |_| return error.ShouldHaveFailed else |e| if (e != error.Invalid and e != error.Aborted) return e;
+    }
+};
+
+test "ranks that differ only in the call, the op or the type are refused over TCP" {
+    for (0..3) |f| try tcp.run(gpa, 2, opts, @as(u8, @intCast(f)), FieldDesync.go);
+}
+
 test "abort over TCP frees a peer waiting in a collective" {
     try tcp.run(gpa, 2, opts, {}, host_test.Aborts.go);
 }
@@ -127,11 +145,11 @@ test "a peer that hangs up without an abort is PeerFailed" {
     try std.testing.expectError(error.PeerFailed, r0.iface().check());
 }
 
+/// This thread's CPU time: the call under test runs here, and other tests' threads don't count.
 fn cpuNs() u64 {
-    var ru: std.c.rusage = undefined;
-    _ = std.c.getrusage(std.c.rusage.SELF, &ru);
-    const us: u64 = @intCast(ru.utime.sec * 1_000_000 + ru.utime.usec + ru.stime.sec * 1_000_000 + ru.stime.usec);
-    return us * std.time.ns_per_us;
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.THREAD_CPUTIME_ID, &ts);
+    return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
 }
 
 test "a peer outside the call that hangs up partway through a header is not polled in a busy loop" {
