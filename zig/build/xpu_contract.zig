@@ -67,7 +67,7 @@ pub fn runner(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
 
     const files = b.addWriteFiles();
     if (prebuilt) |dir| {
-        for ([_][]const u8{ "glue", "tp", "contract_controls", "contract_gate_controls", "decode", "contract_attn_upstream" }) |name| {
+        for ([_][]const u8{ "glue", "tp", "contract_controls", "contract_gate_controls", "decode", "contract_attn_upstream", "contract_merge_upstream" }) |name| {
             _ = files.addCopyFile(.{ .cwd_relative = b.fmt("{s}/{s}.bin", .{ dir, name }) }, b.fmt("{s}.bin", .{name}));
         }
     } else {
@@ -91,7 +91,7 @@ pub fn runner(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
             const dir = run.addOutputDirectoryArg(b.fmt("ocloc-{s}-run", .{pair[0]}));
             _ = files.addCopyFile(dir.path(b, b.fmt("{s}.bin", .{pair[0]})), b.fmt("{s}.bin", .{pair[0]}));
         }
-        for (contract_images[0..2]) |src| {
+        for (contract_images[0..3]) |src| {
             _ = files.addCopyFile(object(b, ocloc, device, src), b.fmt("{s}.bin", .{src.name}));
         }
     }
@@ -100,6 +100,7 @@ pub fn runner(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
         \\pub const tp align(8) = @embedFile("tp.bin").*;
         \\pub const decode align(8) = @embedFile("decode.bin").*;
         \\pub const attn_upstream align(8) = @embedFile("contract_attn_upstream.bin").*;
+        \\pub const merge_upstream align(8) = @embedFile("contract_merge_upstream.bin").*;
         \\pub const controls align(8) = @embedFile("contract_controls.bin").*;
         \\pub const gate_controls align(8) = @embedFile("contract_gate_controls.bin").*;
     ), .target = target, .optimize = optimize });
@@ -124,6 +125,7 @@ const Source = struct { name: []const u8, path: []const u8 };
 const contract_images = [_]Source{
     .{ .name = "decode", .path = "zig/kernels/xpu/qwen27/decode.cl" },
     .{ .name = "contract_attn_upstream", .path = "zig/kernels/xpu/contract_attn_upstream.cl" },
+    .{ .name = "contract_merge_upstream", .path = "zig/kernels/xpu/contract_merge_upstream.cl" },
     .{ .name = "contract_gate_controls", .path = "zig/kernels/xpu/contract_gate_controls.cl" },
 };
 

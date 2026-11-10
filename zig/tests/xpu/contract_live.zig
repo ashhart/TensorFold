@@ -15,6 +15,7 @@ fn imageOf(name: []const u8) ?rig_.Image {
     if (std.mem.eql(u8, name, "tp")) return .tp;
     if (std.mem.eql(u8, name, "decode")) return .decode;
     if (std.mem.eql(u8, name, "contract_attn_upstream")) return .attn_upstream;
+    if (std.mem.eql(u8, name, "contract_merge_upstream")) return .merge_upstream;
     if (std.mem.eql(u8, name, "contract_gate_controls")) return .gate;
     if (std.mem.eql(u8, name, "contract_controls")) return .controls;
     return null;
@@ -43,6 +44,7 @@ fn argsOf(symbol: []const u8) u32 {
         .{ "attn_decode", 13 },
         .{ "attn_merge", 8 },
         .{ "tf_ctl_attn_drop_slice", 8 },
+        .{ "tf_ctl_attn_merge_unguarded", 8 },
     };
     for (table) |e| if (std.mem.eql(u8, e[0], symbol)) return e[1];
     return 1; // gate 5's controls take one output pointer
