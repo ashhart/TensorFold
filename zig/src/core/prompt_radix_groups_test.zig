@@ -57,7 +57,7 @@ const Fake = struct {
 const two: radix.Groups = .{ .prefix_rows = &.{ 4, 4 } };
 
 fn open(f: *Fake, limit_ids: usize) !radix.Store {
-    var s = try radix.Store.initGroups(testing.allocator, f.family(), f.pages(), .{ .page = 4, .lookahead = 0, .min_gap = 1, .min_prompt = 0 }, two);
+    var s = try radix.Store.initGroups(testing.allocator, f.family(), f.pages(), .{ .page = 4, .lookahead = 0, .min_gap = 1, .min_prompt = 0 }, two, null);
     s.limit(.{ .pages = limit_ids, .snaps = 4 });
     return s;
 }
@@ -121,5 +121,5 @@ test "two prefix groups: the page limit counts ids, so a keep needing more ids t
 
 test "prefix groups with other rows a page than the store's are refused when it opens" {
     var f: Fake = .{};
-    try testing.expectError(error.UnequalPrefixRows, radix.Store.initGroups(testing.allocator, f.family(), f.pages(), .{ .page = 4, .min_prompt = 0 }, .{ .prefix_rows = &.{ 4, 8 } }));
+    try testing.expectError(error.UnequalPrefixRows, radix.Store.initGroups(testing.allocator, f.family(), f.pages(), .{ .page = 4, .min_prompt = 0 }, .{ .prefix_rows = &.{ 4, 8 } }, null));
 }

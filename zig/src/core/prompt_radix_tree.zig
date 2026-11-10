@@ -13,7 +13,10 @@ pub const Counts = pc.Counts;
 
 /// The state kept at a node's end.
 pub const Entry = struct {
-    saved: Saved,
+    /// The family's legacy snapshot; null when it declares none (its state is in `parts`).
+    saved: ?Saved,
+    /// The checkpoint groups' pages (C3), each id named in the tree's `holds`.
+    parts: []parts.Part = &.{},
     bytes: u64,
     /// The length of the prompt that kept it: a later turn's is longer.
     born: u32,
@@ -39,6 +42,8 @@ pub const Node = struct {
     kids: std.ArrayList(*Node) = .empty,
     entry: ?Entry = null,
     used: u64 = 0,
+    /// A keep or a restore in progress here: no eviction or prune takes this node, its entry or its path.
+    pins: u32 = 0,
 };
 
 pub const Tree = struct {
@@ -83,10 +88,7 @@ pub const Tree = struct {
     fn drop(t: *Tree, n: *Node) void {
         for (n.kids.items) |k| t.drop(k);
         n.kids.deinit(t.gpa);
-        if (n.entry) |e| {
-            t.family.vtable.drop(t.family.ptr, e.saved);
-            t.gpa.free(e.last);
-        }
+        if (n.entry) |e| t.dropEntry(e);
         for (n.pages) |id| t.holds.drop(t.pages, id);
         t.gpa.free(n.tokens);
         t.gpa.free(n.pages);
@@ -175,9 +177,11 @@ pub const Tree = struct {
             const c = t.child(node, tokens[pi * t.page ..]) orelse {
                 const leaf = try t.gpa.create(Node);
                 errdefer t.gpa.destroy(leaf);
-                leaf.* = .{ .parent = node, .end = @intCast(np * t.page), .tokens = try t.gpa.dupe(u32, tokens[pi * t.page ..]), .pages = try t.gpa.dupe(u32, mine[pi * t.per ..]) };
-                errdefer t.gpa.free(leaf.tokens);
-                errdefer t.gpa.free(leaf.pages);
+                const own_tokens = try t.gpa.dupe(u32, tokens[pi * t.page ..]);
+                errdefer t.gpa.free(own_tokens);
+                const own_pages = try t.gpa.dupe(u32, mine[pi * t.per ..]);
+                errdefer t.gpa.free(own_pages);
+                leaf.* = .{ .parent = node, .end = @intCast(np * t.page), .tokens = own_tokens, .pages = own_pages };
                 try t.holds.reserve(t.gpa, leaf.pages.len); // before the leaf is linked: what follows cannot fail
                 try node.kids.append(t.gpa, leaf);
                 for (leaf.pages) |id| t.holds.shareAssumeCapacity(t.pages, id);
@@ -221,11 +225,32 @@ pub const Tree = struct {
         return up;
     }
 
+    /// An entry's snapshot, parts and prompt go.
+    fn dropEntry(t: *Tree, e: Entry) void {
+        if (e.saved) |saved| t.family.vtable.drop(t.family.ptr, saved);
+        t.dropParts(e.parts);
+        t.gpa.free(e.last);
+    }
+
+    /// Parts made by a keep go back: each id's name in `holds`, then the slices.
+    pub fn dropParts(t: *Tree, ps: []parts.Part) void {
+        t.dropEach(ps);
+        t.gpa.free(ps);
+    }
+
+    /// Each part's ids go back and its id slice is freed; the caller frees `ps` itself.
+    pub fn dropEach(t: *Tree, ps: []const parts.Part) void {
+        for (ps) |part| {
+            for (part.ids) |id| t.holds.drop(t.pages, id);
+            t.gpa.free(part.ids);
+        }
+    }
+
     /// Frees the state at `n`, and the nodes below nothing keeps.
     pub fn evict(t: *Tree, n: *Node) void {
         const e = n.entry orelse return;
-        t.family.vtable.drop(t.family.ptr, e.saved);
-        t.gpa.free(e.last);
+        std.debug.assert(n.pins == 0); // a keep or a restore in progress
+        t.dropEntry(e);
         n.entry = null;
         t.snaps -= 1;
         t.counts.evicted += 1;
@@ -236,7 +261,7 @@ pub const Tree = struct {
     pub fn prune(t: *Tree, start: *Node) void {
         var n = start;
         while (n.parent) |parent| {
-            if (n.kids.items.len > 0 or n.entry != null) return;
+            if (n.kids.items.len > 0 or n.entry != null or n.pins > 0) return;
             const slot = std.mem.indexOfScalar(*Node, parent.kids.items, n).?;
             _ = parent.kids.swapRemove(slot);
             t.drop(n);
@@ -259,7 +284,7 @@ pub const Tree = struct {
     }
 
     fn weakestLeaf(t: *const Tree, n: *Node, best: *?*Node) void {
-        if (n.parent != null and n.kids.items.len == 0 and t.idle(n) and (best.* == null or lessValuable(n, best.*.?))) best.* = n;
+        if (n.parent != null and n.kids.items.len == 0 and n.pins == 0 and t.idle(n) and (best.* == null or lessValuable(n, best.*.?))) best.* = n;
         for (n.kids.items) |k| t.weakestLeaf(k, best);
     }
 
