@@ -20,6 +20,23 @@ fn preM5(a: std.mem.Allocator, head: []const u8, text: []const u8) ![]u8 {
     return std.mem.concat(a, u8, &.{ head, "#define TF_SIMD_FRAGS 1\n", body });
 }
 
+/// The family's kernels carry a marker where the specialization goes; the limits pass compiles the real one.
+fn specialize(a: std.mem.Allocator, template: []const u8, definitions: []const u8) ![]u8 {
+    const mark = std.mem.indexOf(u8, template, "Q27_SPECIALIZE") orelse return error.UnknownLaunch;
+    return std.mem.concat(a, u8, &.{ template[0..mark], definitions, template[mark + "Q27_SPECIALIZE".len ..] });
+}
+
+/// The 27B's source for a launch, by its label: the copy, the steering kernel, MoE, or the glue.
+fn qwen27Source(a: std.mem.Allocator, name: []const u8) ![]const u8 {
+    if (std.mem.indexOf(u8, name, " copy ") != null) return tf.qwen27.runtime_sources.copy;
+    if (std.mem.indexOf(u8, name, " norm steer ") != null) {
+        return specialize(a, tf.qwen27.runtime_sources.norm_steer, "constexpr int K=5120;");
+    }
+    if (std.mem.indexOf(u8, name, " moe rows ") != null) return tf.qwen27.moe_gpu.rows_source;
+    if (std.mem.indexOf(u8, name, " moe ") != null) return tf.qwen27.runtime_sources.moe;
+    return tf.qwen27.runtime_sources.glue;
+}
+
 /// Each registration's function is its label's last word; the label's words say which source it compiles.
 fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !Launch {
     return resolve(a, device, d, true);
@@ -256,7 +273,7 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         text = sources.core_deltanet;
     } else if (std.mem.startsWith(u8, d.name, "qwen27 ")) {
         if (!assemble) return undefined;
-        text = if (has(d.name, " copy ")) tf.qwen27.runtime_sources.copy else if (has(d.name, " moe rows ")) tf.qwen27.moe_gpu.rows_source else if (has(d.name, " moe ")) tf.qwen27.runtime_sources.moe else tf.qwen27.runtime_sources.glue;
+        text = try qwen27Source(a, d.name);
     } else if (std.mem.startsWith(u8, d.name, "metal pair ")) {
         if (!assemble) return undefined;
         text = sources.core_pair_rows;
