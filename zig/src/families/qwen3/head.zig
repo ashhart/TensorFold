@@ -24,20 +24,20 @@ const pooling_modes = [_][]const u8{
     "pooling_mode_mean_sqrt_len_tokens", "pooling_mode_weightedmean_tokens", "pooling_mode_lasttoken",
 };
 
-/// The head from `1_Pooling/config.json` and `modules.json`, or a refusal naming what the folder lacks.
-pub fn headOf(a: Allocator, io: std.Io, dir: []const u8, problem: *[]const u8) (Refused || Allocator.Error)!Head {
+/// The head from `1_Pooling/config.json` and `modules.json`, or a refusal naming what the folder lacks and `backend`.
+pub fn headOf(a: Allocator, io: std.Io, dir: []const u8, backend: []const u8, problem: *[]const u8) (Refused || Allocator.Error)!Head {
     if (try readJson(a, io, dir, "1_LogitScore/config.json", problem)) |v| return .{ .rerank = try labelsOf(a, v, problem) };
     const pooling = try readJson(a, io, dir, "1_Pooling/config.json", problem) orelse return refuse(
         a,
         problem,
-        "qwen3 serves sentence-transformers embedding checkpoints: {s} has no 1_Pooling/config.json",
-        .{dir},
+        "qwen3 on {s} serves sentence-transformers embedding checkpoints: {s} has no 1_Pooling/config.json",
+        .{ backend, dir },
     );
     if (pooling != .object) return refuse(a, problem, "1_Pooling/config.json is not a JSON object", .{});
     for (pooling_modes) |mode| {
         const on = if (pooling.object.get(mode)) |v| v == .bool and v.bool else false;
         const want = std.mem.eql(u8, mode, "pooling_mode_lasttoken");
-        if (on != want) return refuse(a, problem, "1_Pooling/config.json: {s} is {s}; qwen3 pools the last token only", .{ mode, if (on) "on" else "off" });
+        if (on != want) return refuse(a, problem, "1_Pooling/config.json: {s} is {s}; qwen3 on {s} pools the last token only", .{ mode, if (on) "on" else "off", backend });
     }
     // no modules.json: the pooled rows as they are; one that is there must be a list of modules with string types
     var normalize = false;
@@ -116,8 +116,10 @@ test "a pooling folder declares the embedding head: last token only, normalized 
     defer tmp.cleanup();
     const dir = try tmp.dir.realPathFileAlloc(io, ".", a);
     var problem: []const u8 = "";
-    try std.testing.expectError(error.Refused, headOf(a, io, dir, &problem));
-    try std.testing.expect(std.mem.indexOf(u8, problem, "1_Pooling") != null);
+    try std.testing.expectError(error.Refused, headOf(a, io, dir, "HIP", &problem));
+    try std.testing.expectEqualStrings(try std.fmt.allocPrint(a, "qwen3 on HIP serves sentence-transformers embedding checkpoints: {s} has no 1_Pooling/config.json", .{dir}), problem);
+    try std.testing.expectError(error.Refused, headOf(a, io, dir, "CUDA", &problem));
+    try std.testing.expect(std.mem.startsWith(u8, problem, "qwen3 on CUDA serves "));
     try tmp.dir.createDirPath(io, "1_Pooling");
     const last =
         \\{"word_embedding_dimension": 4096, "pooling_mode_cls_token": false, "pooling_mode_mean_tokens": false,
@@ -125,22 +127,22 @@ test "a pooling folder declares the embedding head: last token only, normalized 
         \\ "pooling_mode_weightedmean_tokens": false, "pooling_mode_lasttoken": true, "include_prompt": true}
     ;
     try tmp.dir.writeFile(io, .{ .sub_path = "1_Pooling/config.json", .data = last });
-    try std.testing.expect(!(try headOf(a, io, dir, &problem)).embedding.normalize);
+    try std.testing.expect(!(try headOf(a, io, dir, "HIP", &problem)).embedding.normalize);
     try tmp.dir.writeFile(io, .{ .sub_path = "modules.json", .data = "[{\"type\": \"sentence_transformers.models.Pooling\"}, {\"type\": \"sentence_transformers.models.Normalize\"}]" });
-    try std.testing.expect((try headOf(a, io, dir, &problem)).embedding.normalize);
+    try std.testing.expect((try headOf(a, io, dir, "HIP", &problem)).embedding.normalize);
     try tmp.dir.writeFile(io, .{ .sub_path = "modules.json", .data = "[{\"type\": \"sentence_transformers.models.Normalize\"" });
-    try std.testing.expectError(error.Refused, headOf(a, io, dir, &problem));
+    try std.testing.expectError(error.Refused, headOf(a, io, dir, "HIP", &problem));
     try std.testing.expect(std.mem.indexOf(u8, problem, "not valid JSON") != null);
     try tmp.dir.writeFile(io, .{ .sub_path = "modules.json", .data = "{\"type\": \"sentence_transformers.models.Normalize\"}" });
-    try std.testing.expectError(error.Refused, headOf(a, io, dir, &problem));
+    try std.testing.expectError(error.Refused, headOf(a, io, dir, "HIP", &problem));
     try tmp.dir.writeFile(io, .{ .sub_path = "modules.json", .data = "[{\"path\": \"1_Pooling\"}]" });
-    try std.testing.expectError(error.Refused, headOf(a, io, dir, &problem));
+    try std.testing.expectError(error.Refused, headOf(a, io, dir, "HIP", &problem));
     try tmp.dir.writeFile(io, .{ .sub_path = "modules.json", .data = "[]" });
     try tmp.dir.writeFile(io, .{ .sub_path = "1_Pooling/config.json", .data = "{\"pooling_mode_lasttoken\": tru" });
-    try std.testing.expectError(error.Refused, headOf(a, io, dir, &problem));
+    try std.testing.expectError(error.Refused, headOf(a, io, dir, "HIP", &problem));
     try tmp.dir.writeFile(io, .{ .sub_path = "1_Pooling/config.json", .data = "{\"pooling_mode_mean_tokens\": true, \"pooling_mode_lasttoken\": true}" });
-    try std.testing.expectError(error.Refused, headOf(a, io, dir, &problem));
-    try std.testing.expect(std.mem.indexOf(u8, problem, "pooling_mode_mean_tokens") != null);
+    try std.testing.expectError(error.Refused, headOf(a, io, dir, "HIP", &problem));
+    try std.testing.expectEqualStrings("1_Pooling/config.json: pooling_mode_mean_tokens is on; qwen3 on HIP pools the last token only", problem);
 }
 
 test "a 1_LogitScore folder declares the reranker head, before any pooling, and a malformed one is refused" {
@@ -154,12 +156,12 @@ test "a 1_LogitScore folder declares the reranker head, before any pooling, and 
     var problem: []const u8 = "";
     try tmp.dir.createDirPath(io, "1_LogitScore");
     try tmp.dir.writeFile(io, .{ .sub_path = "1_LogitScore/config.json", .data = "{\"true_token_id\": 9693, \"false_token_id\": 2152}" });
-    const labels = (try headOf(a, io, dir, &problem)).rerank;
+    const labels = (try headOf(a, io, dir, "HIP", &problem)).rerank;
     try std.testing.expectEqual(api.Rerank{ .yes = 9693, .no = 2152 }, labels);
     // the reranker's folder also carries no pooling; one that did would still be a reranker by its scores
     try tmp.dir.createDirPath(io, "1_Pooling");
     try tmp.dir.writeFile(io, .{ .sub_path = "1_Pooling/config.json", .data = "{\"pooling_mode_lasttoken\": true}" });
-    try std.testing.expect(try headOf(a, io, dir, &problem) == .rerank);
+    try std.testing.expect(try headOf(a, io, dir, "HIP", &problem) == .rerank);
     const bad = [_][]const u8{
         "{not json",
         "[9693, 2152]",
@@ -174,7 +176,7 @@ test "a 1_LogitScore folder declares the reranker head, before any pooling, and 
     for (bad) |text| {
         problem = "";
         try tmp.dir.writeFile(io, .{ .sub_path = "1_LogitScore/config.json", .data = text });
-        try std.testing.expectError(error.Refused, headOf(a, io, dir, &problem));
+        try std.testing.expectError(error.Refused, headOf(a, io, dir, "HIP", &problem));
         try std.testing.expect(std.mem.indexOf(u8, problem, "1_LogitScore/config.json") != null);
     }
 }
