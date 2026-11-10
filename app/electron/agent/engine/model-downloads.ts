@@ -17,6 +17,7 @@ export interface ModelDownloadsDeps {
   models: ModelHub
   revisions: ModelRevisions
   installed: InstalledModels
+  listInstalled: (refresh?: boolean) => Promise<EngineInstalledModel[]>
   supervisor: Pick<EngineSupervisor, 'status' | 'mutateCache'>
   requireBinary: () => EngineBinary
   env: () => NodeJS.ProcessEnv
@@ -85,7 +86,7 @@ export class ModelDownloads {
       this.deps.models.invalidate(repo)
       this.deps.installed.invalidate()
       this.deps.emit({ kind: 'pull', pull: final })
-      if (final.state === 'done') await this.deps.installed.list(true).catch(() => {})
+      if (final.state === 'done') await this.deps.listInstalled(true).catch(() => {})
     })
     return handle.progress()
   }
@@ -135,7 +136,7 @@ export class ModelDownloads {
     const status = this.deps.supervisor.status()
     if ((status.model === repo || this.deps.installed.canonical(status.model ?? '') === repo || status.drafter === repo) && status.state !== 'stopped' && status.state !== 'failed') throw new Error(`Unload ${repo} before deleting it.`)
     if (this.pulls.has(repo)) throw new Error(`Cancel the download of ${repo} before deleting it.`)
-    const installed = await this.deps.installed.list()
+    const installed = await this.deps.listInstalled()
     const drafter = drafterFor(repo)
     const targets = [repo]
     if (drafter && selected[drafter] && !installed.some((m) => m.repo !== repo && drafterFor(this.deps.installed.canonical(m.repo) ?? m.repo) === drafter)) targets.push(drafter)
@@ -143,7 +144,7 @@ export class ModelDownloads {
     await this.deps.revisions.remove(targets)
     this.deps.models.invalidate(repo)
     this.finished.delete(repo)
-    return this.deps.installed.list(true)
+    return this.deps.listInstalled(true)
   }
 
   private async removeRepoFolder(repo: string, revision: string): Promise<void> {
