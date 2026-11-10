@@ -150,6 +150,67 @@ reference to gate against.
 
 Attention here is dense, so no routing floor applies. FastH3's 0.990 at step 1 came from its top-k tiles.
 
+## Decoder
+
+`tf-h3-image-decoder` turns `tf-h3-image`'s latent into a picture on Metal. It runs the VAE's 2D ViT decoder (24 blocks
+of 1,024, 16 heads of 64, 4 register tokens) on any Apple GPU. Its kernels compile from source when it loads and use no
+tensor units.
+
+**What runs:**
+
+1. The latent file (normalised, [24, rows, columns] float32) is mapped back with `latents_mean` and `latents_std` in
+   float32.
+2. It is cut into tiles of 16 x 16 cells (256 pixels) overlapping by at least 64 pixels, as `picture_vae.zig` splits
+   it.
+3. Each tile runs `post_quant_conv`, then its cells become tokens through `x_embedder`, with the 4 registers and one
+   zero token appended.
+4. The 2D rotary table is built, and the 24 blocks run, then `norm_out` and `proj_out`.
+5. Each token's 768 values are unpatchified to its 16 x 16 pixels. Up to 16 tiles run in one command buffer.
+6. Tiles are blended in float32: the top band against the tile above, then the left band against the tile to the left,
+   both as decoded.
+7. The result is mapped to [0, 1] with ImageNet's statistics, clamped and truncated to bytes.
+8. If the request's size differs from the canvas, the picture is resized with Pillow's LANCZOS. Then it is written as
+   a PNG.
+
+**Precision:**
+
+- Every parameter is rounded from the file's F32 to bf16 when loaded, and the latent is rounded to bf16 at
+  `post_quant_conv`.
+- Products are bf16 with float32 sums, the bias added before the one rounding.
+- RMSNorm's statistics and weight are float32, rounded once; q and k are RMS-normed with no weight.
+- The rotary ids and 2π·id are in bf16 arithmetic, the angles in float32, cos and sin in bf16.
+- Rotation, LayerScale, the residuals and SiLU are bf16 elementwise.
+- Attention takes bf16 q, k and v, with float32 scores, softmax, probabilities and sums. The reference's fused
+  attention may round the probabilities to bf16 before the value product. A reference case will say which.
+- `norm_out` is float32; `proj_out` takes bf16 in and gives bf16 out, held in float32. The blend is float32.
+
+```sh
+zig build tf-h3-image-decoder -Doptimize=ReleaseFast
+zig-out/bin/tf-h3-image-decoder MODEL_DIR out/case.latent.f32 ROWS COLUMNS out/case.png [WIDTHxHEIGHT]
+zig-out/bin/tf-h3-image-decoder selftest
+```
+
+`ROWS` and `COLUMNS` are the latent's grid in cells: the canvas's height and width over 16, so a 2048 x 2048 canvas is
+`128 128`. `WIDTHxHEIGHT` is the requested size.
+
+**Selftest.** `selftest` runs the kernels on synthetic weights against a float64 host reference with the same
+rounding points, and exits 1 past a bound. On an M3 Ultra:
+
+| Check | Result |
+|---|---|
+| The embedding and `proj_out` | within 1 ULP |
+| Each block, on the GPU's own input | 93-96% identical, worst 4 ULPs |
+| The output after two chained blocks | relative error 3e-3 |
+| The output after 24 chained blocks | relative error 1.5e-2 |
+| Decodes in different batch sizes | bit-identical |
+| The picture's bytes | at most 1 apart |
+
+The host's own float32 sums spread as far from its float64 sums as the GPU's do.
+
+All 24 blocks take 13.4 ms a 16 x 16 tile, so about 1.6 s of GPU time for a 2048 x 2048 canvas (121 tiles).
+`zig build test-h3-geometry` covers the decoder's host rules. `zig build compile-h3-image-decoder-host` compiles the
+tool without the Metal compiler.
+
 ## Checkpoint
 
 `MiniMaxAI/MiniMax-H3-Image`. `transformer/` is bf16, with the patch projection, time embedder and step heads in
