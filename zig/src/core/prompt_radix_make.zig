@@ -44,6 +44,16 @@ pub const Decl = struct {
         return n;
     }
 
+    /// Ids a keep at `at` adds that a plan knows before the keep: copied parts' pages, one per retained partial page.
+    pub fn planIds(d: Decl, t: *const Tree, at: u32) usize {
+        var n: usize = 0;
+        for (d.specs, 0..) |spec, g| switch (spec.make) {
+            .copied => n += copiedPages(d, t, @intCast(g), at),
+            .retained => n += @intFromBool(at % spec.rows != 0),
+        };
+        return n;
+    }
+
     fn copiedPages(d: Decl, t: *const Tree, g: u32, at: u32) usize {
         const h = d.hooks.?;
         const bytes = h.vtable.bytes(h.ptr, g, at);
@@ -136,7 +146,8 @@ pub const Decl = struct {
         nr = 0;
         for (d.specs, ps) |spec, part| if (spec.make == .retained) {
             const whole = part.ids.len - @intFromBool(at % spec.rows != 0);
-            out[nr] = .{ .base = part.base, .ids = try a.dupe(u32, part.ids[0..whole]) }; // the plan's own: eviction frees part.ids
+            // the plan's own copy: eviction frees part.ids
+            out[nr] = .{ .base = part.base, .ids = try a.dupe(u32, part.ids[0..whole]) };
             nr += 1;
             owned = nr;
         };
@@ -145,7 +156,8 @@ pub const Decl = struct {
         for (d.specs, ps, 0..) |spec, part, g| if (spec.make == .retained) {
             const rows_left = at % spec.rows;
             const whole = part.ids.len - @intFromBool(rows_left != 0);
-            for (part.ids) |id| t.pages.vtable.retain(t.pages.ptr, id); // the stream's hold on each, until it adopts or finishes
+            // the stream's hold on each, until it adopts or finishes
+            for (part.ids) |id| t.pages.vtable.retain(t.pages.ptr, id);
             nr += 1;
             if (rows_left == 0) continue;
             copies[nc] = .{ .group = @intCast(g), .index = at / spec.rows, .src = part.ids[whole], .rows = rows_left };

@@ -391,3 +391,21 @@ test "a begin whose hand-out allocation fails gives back the pages it adopted" {
     }
     try expect(k >= 3); // the marks, the parts, their ids and the copies each failed once
 }
+
+test "a mark whose path and parts pass the page limit is refused when planned, so it never evicts a checkpoint first" {
+    var w: World = .{ .pool = undefined };
+    try w.init(&copied_state, 16);
+    defer w.deinit();
+    w.store.limit(.{ .pages = 5, .snaps = 8 });
+    var l = try w.lease(1);
+    var path: [1]u32 = undefined;
+    try expect(w.store.keepParts(.of(&prompt), 4, null, l.ids.items, &.{.{ .base = 0, .ids = &.{} }}, &path).held);
+    w.pool.finish(&l); // one prefix page and three copied: 4 of 5
+    const other = [_]u32{ 9, 9, 9, 9, 8, 8, 8, 8, 7, 7, 7, 7, 6, 6 };
+    var adopt: std.ArrayList(u32) = .empty;
+    defer adopt.deinit(testing.allocator);
+    const plan = try w.store.begin(testing.allocator, .of(&other), 14, &.{}, null, &adopt);
+    defer plan.deinit(testing.allocator);
+    try expectEqual(@as(usize, 0), plan.marks.len); // its mark at 12 needs 3 path pages and 3 part pages: 6 of 5
+    try expectEqual(@as(usize, 1), w.store.tree.snaps); // the kept checkpoint was not evicted for it
+}
