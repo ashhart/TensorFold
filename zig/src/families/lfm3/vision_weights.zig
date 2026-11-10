@@ -26,13 +26,13 @@ const Index = struct {
     const Names = struct {
         inner: std.StringHashMapUnmanaged(ck.Tensor).KeyIterator,
 
-        fn next(self: *Names) ?[]const u8 {
+        pub fn next(self: *Names) ?[]const u8 {
             const name = self.inner.next() orelse return null;
             return name.*;
         }
     };
 
-    fn find(self: Index, name: []const u8) !?layout.Found(Ref) {
+    pub fn find(self: Index, name: []const u8) !?layout.Found(Ref) {
         const t = self.checkpoint.get(name) catch |err| switch (err) {
             error.MissingTensor => return null,
             else => return err,
@@ -48,7 +48,7 @@ const Index = struct {
         };
     }
 
-    fn keys(self: Index) Names {
+    pub fn keys(self: Index) Names {
         return .{ .inner = self.checkpoint.tensors.keyIterator() };
     }
 };
