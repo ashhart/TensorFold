@@ -340,6 +340,7 @@ test "voice tool: refusals happen before encoding and encoder failures leave exi
 
 test "voice tool: cleanup restores private directory permissions after encoder exit" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
+    try @import("test_permissions.zig").skipIfRoot();
     for ([_]u8{ 0, 1 }) |exit_code| {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
@@ -369,6 +370,7 @@ test "voice tool: cleanup restores private directory permissions after encoder e
 
 test "voice tool: cleanup failure warns after publication and accompanies encoder failure" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
+    try @import("test_permissions.zig").skipIfRoot();
     for ([_]u8{ 0, 1 }) |exit_code| {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
