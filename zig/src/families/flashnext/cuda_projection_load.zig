@@ -5,6 +5,7 @@ const core = @import("core");
 const wt = @import("cuda_prompt_wt.zig");
 const projection = @import("cuda_projection.zig");
 const Cut = @import("cuda_modelopt_experts.zig").Cut;
+const exl3 = @import("exl3/pack/cuda_exl3_load.zig");
 
 pub const Micro = struct {
     n: usize,
@@ -71,6 +72,7 @@ fn uploadMicro(a: std.mem.Allocator, d: *const cuda.Driver, value: Micro) !wt.Q4
 }
 
 pub fn load(a: std.mem.Allocator, d: *cuda.Driver, store: *wt.Store, prefix: []const u8, n: usize, k: usize) !wt.Q4 {
+    if (exl3.has(store, prefix)) return exl3.load(a, d, store, prefix, n, k);
     var buf: [512]u8 = undefined;
     const t = try store.tensor(try std.fmt.bufPrint(&buf, "{s}.weight", .{prefix}));
     switch (t.dtype) {
@@ -98,6 +100,7 @@ pub fn load(a: std.mem.Allocator, d: *cuda.Driver, store: *wt.Store, prefix: []c
 
 pub fn loadStitched(a: std.mem.Allocator, d: *cuda.Driver, store: *wt.Store, prefix: []const u8, names: []const []const u8, n: usize, k: usize) !wt.Q4 {
     if (names.len == 0) return error.UnexpectedTensor;
+    if (exl3.hasAny(store, prefix, names)) return exl3.stitched(a, d, store, prefix, names, n, k);
     var buf: [512]u8 = undefined;
     const first = try store.tensor(try std.fmt.bufPrint(&buf, "{s}{s}.weight", .{ prefix, names[0] }));
     if (first.dtype == .f8_e4m3) {
