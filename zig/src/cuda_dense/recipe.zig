@@ -133,6 +133,7 @@ pub fn towerProblem(comptime T: type) ?[]const u8 {
         .{ "openBytes", .{ A, std.Io, []const u8 }, u64, true },
         .{ "weightBytes", .{ A, std.Io, []const u8 }, u64, true },
         .{ "prepare", .{ *T, A, []const u8, u32 }, null, true },
+        // encode writes exactly image.tokens rows [tokens, width] bf16 at out, as many as the lane's rows hold
         .{ "encode", .{ *T, cuda.Stream, *const Image, u64, ?Tap }, void, true },
         .{ "explain", .{anyerror}, ?[]const u8, false },
         .{ "deinit", .{*T}, void, false },
