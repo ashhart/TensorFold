@@ -149,6 +149,7 @@ export class EngineService {
     this.performance = new EnginePerformanceTracker({ supervisor: this.supervisor, emit: (event) => options.emit(event) })
     this.downloads = new ModelDownloads({
       models: this.models, revisions: this.revisions, installed: this.installedModels, supervisor: this.supervisor,
+      listInstalled: (refresh) => this.installed(refresh),
       requireBinary: () => this.requireBinary(), env: () => this.env, hub: () => this.hub, pollMs: options.pollMs,
       emit: (event) => options.emit(event), assertAdmission: () => this.assertModelAdmission(),
     })

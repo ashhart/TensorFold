@@ -157,6 +157,18 @@ serving remain available; independently configured servers and the standalone CL
 own settings. Changing a supported engine mode restarts a loaded model and is blocked while
 managed local work or a learning checkpoint save is active.
 
+**Settings → Engine advanced → Control vector** accepts an operator-supplied file and
+strength for non-refusal style or topic steering. It stays off until enabled and
+requires an engine advertising `--glp`; only additive vectors are supported.
+The engine validates the file and reports its exact SHA-256 and that replies are
+steered at startup. The app ships no derived vectors or semantic measurements.
+
+`engine/service.ts` coordinates the supervisor and feature changes.
+`installed-models.ts` owns the installed view and its cache; `model-downloads.ts`
+owns queued pulls and guarded cache removal. Downloads use the service's installed
+view so cache-cleanup admission remains shared. Engine and composer-draft IPC
+groups live in `electron/preload/`, retaining their channels and unsubscribe ownership.
+
 **Settings → Voice → Kokoro** downloads a pinned, checksum-verified 92 MB speech model;
 subsequent playback runs offline in a managed native CPU worker. This version offers American
 English voices, preview/Stop, retry/cancel and removal of the managed download. No API key,
