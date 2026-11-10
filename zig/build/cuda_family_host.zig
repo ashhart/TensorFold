@@ -74,6 +74,7 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     b.step("test-qwen35-draft-graph-host", "DFlash graph head admission, geometry, keys and opt-in controls without devices").dependOn(&draft_graph.step);
     step.dependOn(&draft_graph.step);
     const ct_admit = b.createModule(.{ .root_source_file = b.path("zig/qwen35_modelopt_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = mods.core }, .{ .name = "lanes", .module = mods.lanes }, .{ .name = "qwen_vision", .module = mods.qwen_vision }, .{ .name = "engine_api", .module = mods.qwen35.import_table.get("engine_api").? } } });
+    ct_admit.addImport("living", mods.living);
     const ct_run = b.addRunArtifact(b.addTest(.{ .root_module = ct_admit }));
     b.step("test-qwen35-modelopt-admission-host", "Synthetic stored-format admission and full-precision loading without devices").dependOn(&ct_run.step);
     step.dependOn(&ct_run.step);
