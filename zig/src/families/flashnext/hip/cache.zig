@@ -5,8 +5,8 @@ const model = @import("model.zig");
 
 const Dims = model.Dims;
 
-/// Most rows a verified window holds: the pending token and up to three drafts.
-pub const max_window = 4;
+/// Most rows a verified window holds: the pending token and up to seven drafts (copies use the width; MTP drafts 3).
+pub const max_window = 8;
 
 /// Where the bytes of one sparse layer's caches start, and their strides.
 pub const SparseView = struct { k: u64, v: u64, raw: u64, pooled: u64 };
@@ -256,4 +256,17 @@ test "a stream's bytes at tp 4: 12 sparse layers' caches, 36 DeltaNet states and
     const per_layer = 2 * 4096 * 256 * 2 + 4096 * 128 * 2 + 1025 * 128 * 2;
     const linear = 3 * 2560 * 4 + 12 * 128 * 128 * 4;
     try std.testing.expectEqual(@as(usize, 12 * per_layer + 36 * linear + 9 * 10240 * 2), l.bytes());
+}
+
+test "a window's snapshots hold eight rows at tp 4: the pending token and seven copied or drafted ones" {
+    const config = @import("../config.zig");
+    var c = try config.parse(std.testing.allocator, @embedFile("../fixtures/config.json"));
+    defer c.deinit();
+    const d = try Dims.of(&c, 4);
+    var kinds: [48]bool = undefined;
+    for (&kinds, 0..) |*k, i| k.* = (try c.kind(i)) == .linear_attention;
+    const l = Layout.of(d, &kinds, 4096, .f16);
+    const linear = 3 * 2560 * 4 + 12 * 128 * 128 * 4;
+    try std.testing.expectEqual(@as(usize, 8 * 36 * linear), l.windowBytes());
+    try std.testing.expectEqual(l.tail_bytes + 8 * (l.tail_bytes / l.tail_rows), l.cinBytes());
 }
