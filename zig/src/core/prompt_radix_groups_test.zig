@@ -102,7 +102,8 @@ test "two prefix groups: a longer prompt shares the first page's ids and adds it
     try testing.expect(s.keep(.of(&a), 8, null, &mine_a, &path).held);
     const kept = s.keep(.of(&b), 8, null, &mine_b, &path);
     try testing.expect(kept.held);
-    try testing.expectEqualSlices(u32, &.{ 0, 1, 6, 7 }, &path); // the shared first page is a's ids; b's second is its own
+    // the shared first page is a's ids; b's second is its own
+    try testing.expectEqualSlices(u32, &.{ 0, 1, 6, 7 }, &path);
     try testing.expectEqual(@as(usize, 6), s.tree.heldPages());
 }
 
@@ -202,7 +203,8 @@ test "a store with no checkpoint making room for a pass's marks never frees the 
     const longer = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21 };
     var adopt: std.ArrayList(u32) = .empty;
     defer adopt.deinit(testing.allocator);
-    const plan = try s.begin(testing.allocator, .of(&longer), 21, &.{}, null, &adopt); // its mark at 20 wants 2 more pages
+    // its mark at 20 wants 2 more pages
+    const plan = try s.begin(testing.allocator, .of(&longer), 21, &.{}, null, &adopt);
     defer testing.allocator.free(plan.marks);
     try testing.expectEqual(@as(u32, 12), plan.from);
     try testing.expectEqualSlices(u32, &mine, adopt.items);
