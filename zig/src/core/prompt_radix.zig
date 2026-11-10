@@ -117,7 +117,8 @@ pub const Store = struct {
     /// `init` with the family's cache groups (C3, #2444) and its part hooks; `groups`' slices outlive the store.
     pub fn initGroups(gpa: Allocator, family: Snapshots, pages: Pages, rules: Rules, groups: Groups, hooks: ?PartHooks) !Store {
         if (rules.page == 0 or (rules.planned and (rules.grid == 0 or rules.grid % rules.page != 0))) return error.BadPromptRadixRules;
-        for (groups.prefix_rows) |rows| if (rows != rules.page) return error.UnequalPrefixRows; // one key a page for all
+        // one key a page for all prefix groups
+        for (groups.prefix_rows) |rows| if (rows != rules.page) return error.UnequalPrefixRows;
         if (groups.parts.len > 0 and hooks == null) return error.PartsNeedHooks;
         if (groups.parts.len > 0 and pages.vtable.hold == null) return error.PartsNeedHold; // copies the store holds
         for (groups.parts) |spec| if (spec.make == .retained and spec.rows == 0) return error.RetainedRows;
@@ -276,8 +277,11 @@ pub const Store = struct {
     fn reserve(s: *Store, prompt: []const u32, from: ?*Node, marks_: []const u32) void {
         if (marks_.len == 0) return;
         const last = marks_[marks_.len - 1];
+        var parts_ids: usize = 0; // each mark's parts, as far as they are known before the keep
+        for (marks_) |m| parts_ids += s.decl.planIds(&s.tree, m);
         while (true) {
-            const new = (last / s.rules.page - s.tree.have(prompt[0 .. last + s.rules.lookahead])) * s.per();
+            const path_ids = (last / s.rules.page - s.tree.have(prompt[0 .. last + s.rules.lookahead])) * s.per();
+            const new = path_ids + parts_ids;
             if (s.tree.heldPages() + new <= s.limits.pages and (s.page_only or s.tree.snaps + marks_.len <= s.limits.snaps)) return;
             if (!s.evictOne(prompt, from)) return;
         }
@@ -308,9 +312,10 @@ pub const Store = struct {
         var out: std.ArrayList(u32) = .empty;
         errdefer out.deinit(a);
         for (marks_) |m| {
-            if (m / s.rules.page * s.per() <= s.limits.pages and (s.page_only or s.limits.snaps > 0)) try out.append(a, m) else {
+            const ids = m / s.rules.page * s.per() + s.decl.planIds(&s.tree, m); // the path and the parts' known pages
+            if (ids <= s.limits.pages and (s.page_only or s.limits.snaps > 0)) try out.append(a, m) else {
                 s.tree.counts.refused += 1;
-                note("kept nothing at {d} tokens: {d} pages pass the limit of {d}", .{ m, m / s.rules.page * s.per(), s.limits.pages });
+                note("kept nothing at {d} tokens: {d} pages pass the limit of {d}", .{ m, ids, s.limits.pages });
             }
         }
         return out.toOwnedSlice(a);
@@ -364,7 +369,8 @@ pub const Store = struct {
         while (true) {
             var last: ?*Node = null;
             const got = t.heldPrefix(tokens, np, path, &last);
-            if (s.page_only and got == np) return .{ .held = true, .shared = mine.len }; // the path is the tree's already
+            // a page-only store: the path is the tree's already
+            if (s.page_only and got == np) return .{ .held = true, .shared = mine.len };
             if (got == np and last != null and last.?.end == at and last.?.entry != null) {
                 const e = &last.?.entry.?;
                 e.used = t.clock; // the same state again: no copy
@@ -455,7 +461,8 @@ pub const Store = struct {
     /// Evicts until `want` pool pages are free and not promised; false when the tree cannot give that many.
     pub fn reclaim(s: *Store, want: usize) bool {
         const pages = s.tree.pages;
-        if (s.decl.specs.len > 0) while (pages.vtable.available(pages.ptr) < want) { // parts first: their path may be in use
+        // parts first: their path may be in use
+        if (s.decl.specs.len > 0) while (pages.vtable.available(pages.ptr) < want) {
             s.tree.evict(s.partVictim() orelse break);
         };
         while (pages.vtable.available(pages.ptr) < want) if (!s.tree.evictLeaf()) return false;
