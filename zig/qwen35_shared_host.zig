@@ -118,7 +118,7 @@ test "Shared verification: empty multi-row keep preserves the root and completed
     // the before copy sits inside the log's bytes (one overlaid block), so a stream holds one state beside it
     const block = q.cache.overlay(&e);
     try std.testing.expectEqual(e.g.logBytes(64), block.bytes);
-    try std.testing.expectEqual(e.g.stateBytes() + block.bytes + e.g.kvBytes(256, false) + q.cache.pendBytes(e.g), e.streamBytes(256));
+    try std.testing.expectEqual(e.g.stateBytes() + block.bytes + e.g.kvBytes(256, false) + q.cache.pendBytes(e.g) + q.cache.States.bytes(e.g), e.streamBytes(256));
 }
 
 const Owners = struct {
@@ -189,8 +189,8 @@ test "Shared verification: the actual cache constructor unwinds the before bank 
     e.n_taps = 1;
     e.g.layers = 2;
     e.g.linear[1] = false;
-    // kv, state, the overlaid log and before block, and the tap ring: four device allocations
-    for (1..5) |fail| {
+    // kv, state, the overlaid log and before block, the tap ring and the state table: five device allocations
+    for (1..6) |fail| {
         Owners.setup(&d, fail, 0);
         try std.testing.expectError(error.NotReady, q.engine.Cache.init(a, &e, 256));
         try Owners.balanced();
@@ -207,7 +207,7 @@ test "Shared verification: the actual cache constructor unwinds the before bank 
     Owners.setup(&d, 0, 0);
     var cache = try q.engine.Cache.init(a, &e, 256);
     try std.testing.expect(cache.before != null);
-    try std.testing.expectEqual(@as(usize, 4), Owners.allocations);
+    try std.testing.expectEqual(@as(usize, 5), Owners.allocations);
     const block = cache.block.?;
     try std.testing.expect(cache.before.?.borrowed and cache.log.borrowed);
     try std.testing.expectEqual(block.ptr, cache.log.ptr);

@@ -109,8 +109,8 @@ test "Shared verification: recurrent scratch is absent from an idle real 27B cac
     engine(&e, &d);
     var c = try q.engine.Cache.init(a, &e, 1);
     defer finish(&e, &c);
-    try std.testing.expectEqual(@as(usize, 2), Driver.allocs);
-    try std.testing.expectEqual(e.g.stateBytes() + e.g.kvBytes(1, false), Driver.bytes);
+    try std.testing.expectEqual(@as(usize, 3), Driver.allocs); // kv, state and the state table
+    try std.testing.expectEqual(e.g.stateBytes() + e.g.kvBytes(1, false) + q.cache.States.bytes(e.g), Driver.bytes);
     try std.testing.expect(c.before == null);
     try std.testing.expectEqual(@as(usize, 0), c.log.ptr);
 }
@@ -135,7 +135,7 @@ test "Shared verification: all window transitions keep log capacity within the o
         try std.testing.expect(c.log.len >= e.g.logBytes(rows));
         try std.testing.expect((c.before != null) == (rows == 1));
         try std.testing.expect(e.rec_scratch.residentBytes() <= bound);
-        const sg = c.seg(&e, c.len, 0, rows);
+        const sg = try c.seg(&e, c.len, 0, rows);
         try std.testing.expectEqual(c.log.ptr, sg.log);
         try std.testing.expectEqual(if (c.before) |b| b.ptr else 0, sg.before);
         try forwardDone(&e, &c, rows);
