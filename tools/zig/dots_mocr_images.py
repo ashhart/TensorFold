@@ -1,4 +1,4 @@
-"""dots.mocr's image references: the model card's example oracle with an SDPA tower, its taps, and the stage compare."""
+"""dots.mocr's image references: the model card's example oracle, its tower taps, and the stage compare."""
 import importlib.metadata
 import json
 import os
@@ -52,7 +52,7 @@ def patch_bias_rounding(module, x, tap):
 
 
 def oracle(args):
-    """Run the checkpoint's Hugging Face example with an SDPA tower; keep native-comparison inputs and BF16 taps."""
+    """Run the HF example, its tower on --attention (SDPA without flash-attn); keep comparison inputs and BF16 taps."""
     require(ORACLE_VERSIONS | IMAGE_VERSIONS)
     source_sha256 = pinned(args.checkpoint)
     flash = flash_or_stand_in()
