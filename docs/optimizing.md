@@ -57,8 +57,8 @@ One nsys capture of the real server gives a table that answers "where does the t
 
 Flag every row above 1 % of the step that runs fewer blocks than SMs, or well under the bandwidth floor. Also add up
 the weight bytes a step: that gives the floor for the whole step, and how far the step is from it. In the example
-above the audit found no kernel over 1 % under 48 blocks, and one projection at 179 GB/s where the same shape
-elsewhere reached 216: a better lead than either idea above.
+above the audit found no kernel over 1 % under 48 blocks, and the GDN out_proj at 179 GB/s where the attention
+o_proj, the same shape in our own decode step, reached 216: a better lead than either idea above.
 
 ## Profiling safely
 
