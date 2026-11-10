@@ -145,14 +145,15 @@ fn checked(p: Place) !Place {
     return p;
 }
 
-/// Bytes this rank's weights take at most, for the server's admission: the checkpoint times its largest axis share.
-pub fn weightShare(a: std.mem.Allocator, io: std.Io, dir: []const u8, total: u64) u64 {
+/// Bytes this rank's weights take at most: the checkpoint (TF_GLM_LAYERS: the tensors read) times its largest share.
+pub fn weightShare(a: std.mem.Allocator, io: std.Io, dir: []const u8, total: u64, drafts: bool) u64 {
     const p = place() catch return total;
     const path = std.fs.path.join(a, &.{ dir, "config.json" }) catch return total;
     const text = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 24)) catch return total;
     const c = config.parse(a, text) catch return total;
     const f = (shard.Share.of(&c, p.rank, p.world) catch return total).part(&c);
-    return @intCast(@as(u128, total) * f[0] / f[1]);
+    const whole = @import("cuda_thin_bytes.zig").count(a, io, dir, total, ranks.environment("TF_GLM_LAYERS"), c.layers, drafts and c.mtp > 0);
+    return @intCast(@as(u128, whole) * f[0] / f[1]);
 }
 
 /// Slots for `context` plus a verify window, a multiple of 64 so the sparse pool keeps the AOT set.
