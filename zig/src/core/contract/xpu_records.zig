@@ -1,4 +1,4 @@
-//! The XPU launches gate 5 checks: the Qwen3.8-27B glue kernels and what ocloc made of them, and the planted controls.
+//! The XPU launches gate 5 checks: Qwen3.8-27B glue and attention merge, what ocloc made of them, and the controls.
 const std = @import("std");
 const limits = @import("xpu_limits.zig");
 
@@ -10,7 +10,7 @@ pub const Record = struct { launch: X, usage: [limits.xe.len]U, compiled: bool =
 
 const glue = limits.Format.native;
 
-/// The six Qwen3.8-27B glue kernels that register first: row arithmetic, a stated rule and a row copy.
+/// Qwen3.8-27B glue and the attention merge: row arithmetic, a stated rule, a row copy and a replacement.
 pub const records = [_]Record{
     .{
         .launch = .{ .name = "add_rmsnorm", .symbol = "add_rmsnorm", .image = "glue", .format = glue, .threads = .{ 128, 1, 1 }, .slm = 10272, .sub_group = 16, .grf = 256 },
@@ -35,6 +35,18 @@ pub const records = [_]Record{
     .{
         .launch = .{ .name = "embed", .symbol = "embed", .image = "glue", .format = glue, .threads = .{ 256, 1, 1 }, .sub_group = 16, .grf = 256 },
         .usage = .{.{ .threads = .{ 256, 1, 1 }, .sub_group = 16, .grf = 256 }},
+    },
+    .{
+        .launch = .{ .name = "attn_merge", .symbol = "attn_merge", .image = "decode", .format = glue, .threads = .{ 16, 1, 1 }, .sub_group = 16, .grf = 256 },
+        .usage = .{.{ .threads = .{ 16, 1, 1 }, .sub_group = 16, .grf = 256 }},
+    },
+    .{
+        .launch = .{ .name = "upstream attn_merge", .symbol = "attn_merge", .image = "contract_merge_upstream", .format = glue, .threads = .{ 16, 1, 1 }, .sub_group = 16, .grf = 256 },
+        .usage = .{.{ .threads = .{ 16, 1, 1 }, .sub_group = 16, .grf = 256 }},
+    },
+    .{
+        .launch = .{ .name = "planted attn_merge weighing past its last slice", .symbol = "tf_ctl_attn_merge_unguarded", .image = "contract_gate_controls", .format = glue, .threads = .{ 16, 1, 1 }, .sub_group = 16, .grf = 256 },
+        .usage = .{.{ .threads = .{ 16, 1, 1 }, .sub_group = 16, .grf = 256 }},
     },
 };
 
