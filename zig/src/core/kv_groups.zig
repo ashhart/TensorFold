@@ -38,6 +38,18 @@ pub fn state(bytes: u64, page: u64) Fit {
     return .{ .rows = 0, .pages = n, .pad = n * page - bytes };
 }
 
+/// A stream's state as pieces on whole pages (kv_pieces.zig): how many, the pages they take, their bytes.
+pub const Pieces = struct {
+    n: u32,
+    pages: u32,
+    bytes: u64,
+
+    /// The bytes the pages hold past the pieces: alignment and the tail no piece fits.
+    pub fn pad(p: Pieces, page: u64) u64 {
+        return p.pages * page - p.bytes;
+    }
+};
+
 /// What the load report reads: the pool's group and page, and the kinds beside it in or outside the pool.
 pub const Shape = struct {
     full: Group,
@@ -45,6 +57,9 @@ pub const Shape = struct {
     page_rows: u32,
     window: ?Group = null, // rows outside the pool: a sliding window's rings
     run: u64 = 0, // a stream's state as a run of the pool's pages
+    pieces: ?Pieces = null, // a stream's state as pieces on any of the pool's pages
+    fixed: u64 = 0, // a lane's fixed part outside the pool, shown when `outside` > 0
+    outside: u64 = 0, // of `fixed`, buffers wider than a page
     snap: u64 = 0, // a kept snapshot's slot outside the pool
 
     /// One layer's share of a page: the rows of the full group's layer a page holds.
@@ -70,6 +85,8 @@ pub fn line(a: Allocator, s: Shape) ![]u8 {
         try rowsPart(o, g, s);
     }
     if (s.run > 0) try statePart(o, "state run, in the pool", s.run, page);
+    if (s.pieces) |p| try o.print("; state, in the pool as pieces: {d} pieces, {f} on {d} page{s} a lane, {f} padding ({d:.1} %)", .{ p.n, size(p.bytes), p.pages, if (p.pages == 1) "" else "s", size(p.pad(page)), pct(p.pad(page), p.pages * page) });
+    if (s.outside > 0) try o.print("; a lane's fixed part, outside the pool and counted at admission: {f}, {f} of it buffers wider than a page", .{ size(s.fixed), size(s.outside) });
     if (s.snap > 0) try statePart(o, "snapshot, outside the pool", s.snap, page);
     return w.toOwnedSlice();
 }
