@@ -5,7 +5,7 @@ const dr = @import("lanes").drafter;
 
 pub const Segment = hip.draft_ops.Segment;
 
-/// Drafts a stream holds at most (a block of 8 but its pending row).
+/// Drafts a stream holds at most: a block of 16, the ring's padded block (config.ringRows), but its pending row.
 pub const most_held = 15;
 
 /// A stream's context: its layers' key and value ring (device address) over [begin, end), and the chain it holds.
