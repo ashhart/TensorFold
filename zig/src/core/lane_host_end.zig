@@ -67,7 +67,7 @@ pub fn deliverPending(h: *LaneHost) void {
     }
 }
 
-/// A round the backend failed: the failure hook hears the error, the streams in `core.live` at the failure (paused ones among them) and the prompts whose finals the round never ran fail with it; every other job keeps its place, failing at its own next step if the backend is unhealthy.
+/// A failed round takes the live streams (paused among them) and its unrun finals' prompts; the rest keep their places.
 pub fn failRound(h: *LaneHost, err: anyerror) void {
     failed(h, err);
     std.log.warn("lane host: a round failed ({s}): the round's streams fail", .{@errorName(err)});
@@ -86,9 +86,7 @@ pub fn failRound(h: *LaneHost, err: anyerror) void {
             }
         };
         if (!in_round) {
-            // a prompt the round's plan carried to its end is decoding in the planner, which offers it
-            // to no later plan, and its stream never reaches the core: it fails here rather than hold
-            // its lane forever
+            // the planner has this prompt decoding and offers it to no later plan: fail it, not strand its lane
             if (job.started and !job.stream.finished and plannedToEnd(h, job)) {
                 endFailed(h, job, @errorName(err));
                 continue;
@@ -103,7 +101,7 @@ pub fn failRound(h: *LaneHost, err: anyerror) void {
     }
 }
 
-/// Whether the round's plan carried the job's prompt to its end: its final is listed, or a piece ends at the prompt's last row (a damaged restore's rows, planned but never run).
+/// Whether the plan carried the prompt to its end: its final is listed, or a piece ends at the prompt's last row.
 fn plannedToEnd(h: *const LaneHost, job: *const Job) bool {
     const key = @intFromPtr(job);
     for (h.finals.items) |at| if (at == key) return true;
@@ -125,7 +123,7 @@ pub fn failAll(h: *LaneHost, message: []const u8) void {
     for (jobs.items) |job| endFailed(h, job, message);
 }
 
-/// Ends a job the backend failed: off the filling list, its stream discarded unless it already finished (a job admitted this round has no stream yet), the request ended with the backend's words.
+/// Ends a failed job: off the filling list, its stream discarded unless already finished.
 fn endFailed(h: *LaneHost, job: *Job, message: []const u8) void {
     h.lock();
     fill.unfill(h, job);

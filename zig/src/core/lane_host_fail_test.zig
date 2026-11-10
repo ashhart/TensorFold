@@ -192,8 +192,7 @@ test "a failed shared round fails the live stream and delivers the finished one"
     try host.start();
     var stopped = false;
     defer if (!stopped) host.stop();
-    // the short stream finished before the shared round failed, so its completed reply
-    // delivers; only the still-decoding stream takes the round's error
+    // the short stream finished before the round failed: its reply delivers; the decoding one takes the error
     try std.testing.expectEqual(@as(?Reason, .length), short.waitFor(2000));
     try std.testing.expectEqual(@as(?Reason, .failed), long.waitFor(2000));
     host.stop();
