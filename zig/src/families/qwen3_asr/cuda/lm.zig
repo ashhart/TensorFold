@@ -40,7 +40,11 @@ pub const Lm = struct {
     host_pos: []i32,
     logits: []u16,
     last_margin: f32 = 0, // the last pick's lead over the runner-up
+    keep: ?Keep = null, // each head row's logits, appended
     sink: ?@import("tower.zig").Dump = null,
+
+    /// Where the head's logits go, a row of vocab bf16 values at a time.
+    pub const Keep = struct { gpa: std.mem.Allocator, rows: *std.ArrayList(u16) };
 
     const Buffers = struct { ids: u64, pos: u64, meta: u64, q: u64, k: u64, v: u64, po: u64, pm: u64, pl: u64, xs: u64, logits: u64, cos: u64, sin: u64, kc: u64, vc: u64 };
 
@@ -197,8 +201,22 @@ pub const Lm = struct {
         try lm.g.run(lm.s, row, embed_table, lm.b.logits, 1, lm.t.vocab, lm.t.hidden, .bf16);
         try store.view(lm.d, lm.b.logits, lm.logits.len * 2).downloadAsync(0, std.mem.sliceAsBytes(lm.logits), lm.s.handle);
         try lm.s.synchronize();
+        if (lm.keep) |k| try k.rows.appendSlice(k.gpa, lm.logits);
         const best = shared.argmax(lm.logits);
         lm.last_margin = shared.margin(lm.logits, best);
         return best;
+    }
+
+    /// Positions [0, n) of every layer's k and v caches, downloaded: k rows then v rows, layer by layer.
+    pub fn cacheRows(lm: *Lm, gpa: std.mem.Allocator, n: usize) ![]u16 {
+        const row = lm.t.kv_heads * lm.t.head_dim;
+        const out = try gpa.alloc(u16, 2 * lm.t.layers * n * row);
+        errdefer gpa.free(out);
+        try lm.s.synchronize();
+        for (0..lm.t.layers) |l| for ([_]u64{ lm.b.kc, lm.b.vc }, 0..) |base, j| {
+            const dst = out[(2 * l + j) * n * row ..][0 .. n * row];
+            try lm.d.check(lm.d.api.cuMemcpyDtoH_v2(dst.ptr, lm.kvAt(base, l), dst.len * 2), "cuMemcpyDtoH");
+        };
+        return out;
     }
 };

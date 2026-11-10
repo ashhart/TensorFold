@@ -9,11 +9,11 @@ const lm = @import("lm.zig");
 const tower_ref = @import("tower_ref.zig");
 
 /// Device memory on the host: an address is (allocation + 1) << 40 plus a byte offset, each value a bf16 slot.
-const Mem = struct {
+pub const Mem = struct {
     gpa: std.mem.Allocator,
     list: std.ArrayList([]f64) = .empty,
 
-    fn deinit(m: *Mem) void {
+    pub fn deinit(m: *Mem) void {
         for (m.list.items) |x| m.gpa.free(x);
         m.list.deinit(m.gpa);
     }
@@ -37,7 +37,7 @@ const Mem = struct {
     }
 
     /// `n` values at `ptr`, refused unless they lie inside one allocation.
-    fn at(m: *Mem, ptr: u64, n: usize) ![]f64 {
+    pub fn at(m: *Mem, ptr: u64, n: usize) ![]f64 {
         const id = ptr >> 40;
         const off = ptr & ((1 << 40) - 1);
         if (id == 0 or id > m.list.items.len or off % 2 != 0) return error.BadAddress;
@@ -147,12 +147,12 @@ const TowerHost = struct {
 };
 
 /// Random bf16 tensors made on first ask, the same bytes for the schedule and the reference.
-const Fake = struct {
+pub const Fake = struct {
     gpa: std.mem.Allocator,
     rng: std.Random.DefaultPrng = .init(0x2105),
     map: std.StringHashMapUnmanaged([]u8) = .empty,
 
-    fn deinit(f: *Fake) void {
+    pub fn deinit(f: *Fake) void {
         var it = f.map.iterator();
         while (it.next()) |e| {
             f.gpa.free(e.key_ptr.*);
@@ -339,7 +339,7 @@ const LmBounds = struct {
     }
 };
 
-test "lm schedule: every op inside its buffers, the splice inside the pass, the head tied" {
+test "lm schedule: every op inside its buffers, a splice cut to the pass, the head tied" {
     const gpa = std.testing.allocator;
     const t: cfg.Text = .{ .hidden = 16, .layers = 3, .heads = 4, .kv_heads = 2, .head_dim = 8, .intermediate = 24, .vocab = 32, .eps = 1e-6, .theta = 1e6, .context = 64 };
     var mem: Mem = .{ .gpa = gpa };
@@ -358,6 +358,8 @@ test "lm schedule: every op inside its buffers, the splice inside the pass, the 
     const ids = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
     try std.testing.expectEqual(@as(u32, 7), try lm.forward(&bounds, t, &w, b, &ids, 0, .{ .ptr = rows, .at = 3, .n = 4 }));
     try std.testing.expectEqual(@as(u32, 7), try lm.forward(&bounds, t, &w, b, ids[0..1], 10, null));
-    try std.testing.expectError(error.SpliceOutsidePass, lm.forward(&bounds, t, &w, b, &ids, 0, .{ .ptr = rows, .at = 8, .n = 4 }));
+    try std.testing.expectEqual(@as(u32, 7), try lm.forward(&bounds, t, &w, b, &ids, 0, .{ .ptr = rows, .at = 8, .n = 4 }));
+    try std.testing.expectError(error.OutOfBounds, lm.forward(&bounds, t, &w, b, &ids, 2, .{ .ptr = rows, .at = 0, .n = 5 }));
+    try std.testing.expectError(error.PassHeads, lm.forwardHeads(&bounds, t, &w, b, &ids, 0, null, 11));
     try std.testing.expectError(error.PassRows, lm.forward(&bounds, t, &w, b, &(ids ++ ids), 0, null));
 }
