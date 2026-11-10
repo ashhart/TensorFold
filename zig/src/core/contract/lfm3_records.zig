@@ -97,4 +97,6 @@ pub const metal = [_]M{
     .{ .name = "LFM3 NAX prompt q6g64 tf_qmmw_t_nax_win", .threads = 128, .tg_memory = 11264, .reserved = 128, .offline = false },
     .{ .name = "LFM3 NAX prompt q8g64 tf_qmmw_t_nax_win", .threads = 128, .tg_memory = 11264, .reserved = 128, .offline = false },
     .{ .name = "LFM3 NAX prompt q4g32 tf_qmmw_t_nax_win", .threads = 128, .tg_memory = 11264, .reserved = 128, .offline = false },
+    .{ .name = "LFM3 NAX prompt q6g32 tf_qmmw_t_nax_win", .threads = 128, .tg_memory = 11264, .reserved = 128, .offline = false },
+    .{ .name = "LFM3 NAX prompt q8g32 tf_qmmw_t_nax_win", .threads = 128, .tg_memory = 11264, .reserved = 128, .offline = false },
 };

@@ -13,6 +13,7 @@ pub const snapshot = @import("snapshot.zig");
 pub const image = @import("image.zig");
 pub const image_rows = @import("image_rows.zig");
 pub const vision = @import("vision.zig");
+pub const vision_residency = @import("vision_residency.zig");
 
 pub const binned_projection = @import("../../core/binned_projection.zig");
 pub const prompt_nax = @import("prompt_nax.zig");

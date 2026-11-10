@@ -136,16 +136,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     errdefer if (h.cache) |*store| store.deinit();
     try mtl.resident.streams.hold(h, io, "lfm3");
     errdefer mtl.resident.streams.drop(h);
-    if (h.vision) |v| if (h.resident) |*resident| {
-        var buffers: std.ArrayList(mtl.Buffer) = .empty;
-        defer buffers.deinit(gpa);
-        try buffers.appendSlice(gpa, v.tower.buffers());
-        try buffers.append(gpa, v.rows);
-        if (!resident.tryAddNow(buffers.items)) {
-            problem.* = "LFM3 vision scratch and projected image rows exceed the model's residency budget";
-            return error.Lfm3VisionResidencyBudget;
-        }
-    };
+    if (h.vision) |v| if (h.resident) |*resident| try q.vision_residency.admit(gpa, resident, v.tower.buffers(), v.rows, problem);
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
     try h.host.start();
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
