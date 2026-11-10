@@ -248,6 +248,6 @@ test "a family that names its prefill step keeps marks on chunk starts, so a res
     var grid = api.prompt_cache.Store.init(std.testing.allocator, copies, passRules(Exl3, 4096, 4096), 1 << 30);
     defer grid.deinit();
     const exact = try grid.marks(arena.allocator(), prompt, 0, 12773, &.{}, &.{}, &.{});
-    try std.testing.expect(exact.len > 0);
+    try std.testing.expect(std.mem.indexOfScalar(u32, exact, 12288) != null);
     for (exact) |m| try std.testing.expectEqual(@as(u32, 0), m % 4096);
 }
