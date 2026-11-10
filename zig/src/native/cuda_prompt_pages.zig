@@ -78,14 +78,19 @@ pub const Adapter = struct {
         return of(ctx).store.reclaim(want);
     }
 
-    fn begin(ctx: *anyopaque, prompt: []const u32, history_len: u32, shared: []const u32, owner: *anyopaque, adopt: *std.ArrayList(u32)) anyerror!hooks.Plan {
+    fn begin(ctx: *anyopaque, q: hooks.Query, history_len: u32, shared: []const u32, owner: *anyopaque, adopt: *std.ArrayList(u32)) anyerror!hooks.Plan {
         const x = of(ctx);
-        const p = try x.store.begin(x.gpa, prompt, history_len, shared, owner, adopt);
+        const p = try x.store.begin(x.gpa, query(q), history_len, shared, owner, adopt);
         return .{ .from = p.from, .marks = p.marks };
     }
 
-    fn keep(ctx: *anyopaque, prompt: []const u32, at: u32, owner: *anyopaque, mine: []const u32, path: []u32) usize {
-        return of(ctx).store.keep(prompt, at, owner, mine, path).shared;
+    fn keep(ctx: *anyopaque, q: hooks.Query, at: u32, owner: *anyopaque, mine: []const u32, path: []u32) usize {
+        return of(ctx).store.keep(query(q), at, owner, mine, path).shared;
+    }
+
+    /// The family's query as the store takes it.
+    fn query(q: hooks.Query) radix.Query {
+        return .{ .key = q.key, .prompt_len = q.prompt_len };
     }
 
     fn report(ctx: *anyopaque, prompt: usize, from: u32, kept: u64) void {
@@ -141,12 +146,12 @@ test "TF_KV_SHARE's adapter: a kept prompt's pages resume a later one, adopted; 
     try f.pool.cover(&lease, 3, null);
     var path: [2]u32 = undefined;
     var owner: u8 = 0;
-    try testing.expectEqual(@as(usize, 2), p.keep(&prompt, 8, &owner, lease.ids.items[0..2], &path));
+    try testing.expectEqual(@as(usize, 2), p.keep(.of(&prompt), 8, &owner, lease.ids.items[0..2], &path));
     try testing.expectEqualSlices(u32, lease.ids.items[0..2], &path);
     f.pool.finish(&lease);
     var adopt: std.ArrayList(u32) = .empty;
     defer adopt.deinit(testing.allocator);
-    const plan = try p.begin(&prompt, 10, &.{}, &owner, &adopt);
+    const plan = try p.begin(.of(&prompt), 10, &.{}, &owner, &adopt);
     defer p.free(plan.marks);
     try testing.expectEqual(@as(u32, 8), plan.from);
     try testing.expectEqualSlices(u32, &path, adopt.items);

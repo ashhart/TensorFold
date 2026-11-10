@@ -79,7 +79,7 @@ const World = struct {
     fn admit(w: *World, a: Allocator, prompt: []const u32, history: u32, max_new: u32) !void {
         var adopt: std.ArrayList(u32) = .empty;
         defer adopt.deinit(w.gpa);
-        const plan = try w.store.begin(a, prompt, history, &.{}, null, &adopt);
+        const plan = try w.store.begin(a, .of(prompt), history, &.{}, null, &adopt);
         var l: Lease = .{};
         errdefer w.pool.finish(&l);
         try w.pool.adopt(&l, adopt.items);
@@ -89,7 +89,7 @@ const World = struct {
         for (plan.marks) |m| {
             var path: [64]u32 = undefined;
             const n = m / page;
-            const kept = w.store.keep(prompt, m, null, l.ids.items[0..n], path[0..n]);
+            const kept = w.store.keep(.of(prompt), m, null, l.ids.items[0..n], path[0..n]);
             for (path[0..kept.shared], 0..) |id, i| w.pool.share(&l, i, id);
         }
         try w.streams.append(w.gpa, l);
