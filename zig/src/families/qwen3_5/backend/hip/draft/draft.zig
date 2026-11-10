@@ -8,6 +8,7 @@ pub const weights = @import("weights.zig");
 pub const context = @import("context.zig");
 pub const select = @import("select.zig");
 pub const frame = @import("frame.zig");
+const draft_prior = @import("../../../draft_prior.zig");
 
 const E = engine.Engine;
 const dr = lanes.drafter;
@@ -21,9 +22,6 @@ pub const max_streams = 16;
 
 /// A stream's context and the ring it owns.
 const Owned = struct { buf: hip.DeviceBuffer, ctx: Ctx };
-
-/// Acceptance by depth until a stream has its own (cuda_draft.zig's, measured on the reference's chat text).
-const prior = [_]f64{ 0.75, 0.65, 0.58, 0.52, 0.47, 0.43, 0.4, 0.37, 0.35, 0.33, 0.31, 0.29, 0.28, 0.27, 0.26 };
 
 /// Wall time the drafter's calls took (each ends on the host; a hold waits for its drafts).
 pub const Times = struct { absorbs: usize = 0, absorb_ns: u64 = 0, holds: usize = 0, hold_ns: u64 = 0 };
@@ -285,11 +283,12 @@ pub const Draft = struct {
         const per = c.block - 1;
         for (items, contexts, 0..) |it, ctx, i| {
             const cand: select.Candidates = .{
-                .ids = @alignCast(top_ids[i * per * c.topk ..][0 .. per * c.topk]),
-                .logits = d.logits[i * per * c.topk ..][0 .. per * c.topk],
-                .stride = c.topk,
+                .apart = .{
+                    .ids = @alignCast(top_ids[i * per * c.topk ..][0 .. per * c.topk]),
+                    .logits = d.logits[i * per * c.topk ..][0 .. per * c.topk],
+                    .projected = d.projected[i * per * c.rank ..][0 .. per * c.rank],
+                },
                 .topk = c.topk,
-                .projected = d.projected[i * per * c.rank ..][0 .. per * c.rank],
                 .rank = c.rank,
                 .predecessor = d.w.predecessor,
                 .successor = d.w.successor,
@@ -336,7 +335,7 @@ pub const Draft = struct {
         return .{
             .depth = @intCast(d.c.block - 1),
             .step_ms = d.step_ms,
-            .prior = &prior,
+            .prior = &draft_prior.prior,
             .batched = d.frame_streams > 1,
             .stream_bytes = d.streamBytes(),
             .window_costs = costs,
