@@ -39,6 +39,10 @@ pub fn steps(b: *std.Build, all: *std.Build.Step) void {
     const residency_run = b.addRunArtifact(b.addTest(.{ .root_module = residency }));
     b.step("test-lfm3-vision-residency-host", "LFM3 vision tower residency refusal without a GPU").dependOn(&residency_run.step);
     checks.dependOn(&residency_run.step);
+    const nax_formats = b.createModule(.{ .root_source_file = b.path("zig/src/lfm3_nax_format_tests.zig"), .target = b.graph.host });
+    const nax_run = b.addRunArtifact(b.addTest(.{ .root_module = nax_formats }));
+    b.step("test-lfm3-nax-format-host", "LFM3 tensor-unit prompt formats against their launch records and Apple limits without a GPU").dependOn(&nax_run.step);
+    checks.dependOn(&nax_run.step);
     const memory = b.createModule(.{ .root_source_file = b.path("zig/src/gpu_memory.zig"), .target = b.graph.host });
     const contract = b.createModule(.{
         .root_source_file = b.path("zig/src/core/contract.zig"),
