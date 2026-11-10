@@ -57,7 +57,7 @@ pub const Config = struct {
         if (gen) |g| if (g != .object) return error.InvalidConfig;
         const ids = try a.create([shared.checks.max_eos]u32);
         const eos = try shared.checks.eos(ids, doc, tower, if (gen) |g| g.object else null, spec.vocab);
-        return .{ .arena = arena, .spec = spec, .quant = table, .tied = shared.isTied(doc, tower), .eos = eos };
+        return .{ .arena = arena, .spec = spec, .quant = table, .tied = try shared.isTied(doc, tower), .eos = eos };
     }
 };
 
