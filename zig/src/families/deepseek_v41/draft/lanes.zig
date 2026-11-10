@@ -24,6 +24,7 @@ pub const Options = struct {
     dup: tree.Dup = .{}, // sibling pricing: TF_DSV41_TREE_DUP_MS a sibling, its pending row counted
     slots: u32 = 4, // streams at once
     spec: spec_mod.Settings = .{}, // the speculative pass (TF_DSV41_SPEC_DRAFT / _SPEC_NUCLEUS)
+    plain_streams_default: usize = 0, // depth.plain_streams when TF_DSV41_DRAFT_PLAIN_STREAMS is unset
 };
 
 /// A stream's slot and what the backend holds for it between rounds.
