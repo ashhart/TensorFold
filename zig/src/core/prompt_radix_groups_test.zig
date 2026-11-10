@@ -123,3 +123,89 @@ test "prefix groups with other rows a page than the store's are refused when it 
     var f: Fake = .{};
     try testing.expectError(error.UnequalPrefixRows, radix.Store.initGroups(testing.allocator, f.family(), f.pages(), .{ .page = 4, .min_prompt = 0 }, .{ .prefix_rows = &.{ 4, 8 } }, null));
 }
+
+const page_only: radix.Groups = .{ .legacy = false };
+
+fn openPages(f: *Fake, limit_ids: usize) !radix.Store {
+    var s = try radix.Store.initGroups(testing.allocator, f.family(), f.pages(), .{ .page = 4, .lookahead = 0, .min_gap = 1, .min_prompt = 0 }, page_only, null);
+    s.limit(.{ .pages = limit_ids, .snaps = 0 }); // no checkpoint: no snapshot slots needed
+    return s;
+}
+
+test "a store with no checkpoint keeps pages with no snapshot slot and resumes at any matched page edge" {
+    var f: Fake = .{};
+    var s = try openPages(&f, 16);
+    defer s.deinit();
+    try testing.expect(s.on());
+    const kept_prompt = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13 };
+    const mine = [_]u32{ 0, 1, 2 };
+    f.take(&mine);
+    var path: [3]u32 = undefined;
+    try testing.expect(s.keep(.of(&kept_prompt), 12, null, &mine, &path).held);
+    try testing.expectEqual(@as(usize, 0), s.tree.snaps);
+    for (mine) |id| f.refs[id] -= 1;
+    // a prompt that diverges inside the kept node's third page resumes after its second, adopting two pages
+    const other = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 99, 99, 99, 99, 99 };
+    var adopt: std.ArrayList(u32) = .empty;
+    defer adopt.deinit(testing.allocator);
+    const plan = try s.begin(testing.allocator, .of(&other), 14, &.{}, null, &adopt);
+    defer testing.allocator.free(plan.marks);
+    try testing.expectEqual(@as(u32, 8), plan.from);
+    try testing.expectEqualSlices(u32, &.{ 0, 1 }, adopt.items);
+    try testing.expectEqual(@as(?u32, null), f.restored); // nothing to restore
+    for (adopt.items) |id| f.refs[id] -= 1;
+    adopt.clearRetainingCapacity();
+    // a prompt that ends inside it resumes at the last whole page that leaves a token to prefill
+    const short = [_]u32{ 1, 2, 3, 4, 5, 6, 7 };
+    const plan2 = try s.begin(testing.allocator, .of(&short), 7, &.{}, null, &adopt);
+    defer testing.allocator.free(plan2.marks);
+    try testing.expectEqual(@as(u32, 4), plan2.from);
+    try testing.expectEqualSlices(u32, &.{0}, adopt.items);
+    for (adopt.items) |id| f.refs[id] -= 1;
+}
+
+test "a store with no checkpoint frees an idle leaf to keep another prompt's pages" {
+    var f: Fake = .{};
+    var s = try openPages(&f, 3);
+    defer s.deinit();
+    const a = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 0 };
+    const mine = [_]u32{ 0, 1, 2 };
+    f.take(&mine);
+    var path: [3]u32 = undefined;
+    try testing.expect(s.keep(.of(&a), 12, null, &mine, &path).held);
+    for (mine) |id| f.refs[id] -= 1;
+    const b = [_]u32{ 7, 7, 7, 7, 7, 7, 7, 7, 0 };
+    const theirs = [_]u32{ 5, 6 };
+    f.take(&theirs);
+    var path2: [2]u32 = undefined;
+    try testing.expect(s.keep(.of(&b), 8, null, &theirs, &path2).held); // room: the idle leaf of `a` went
+    try testing.expect(s.tree.heldPages() <= 3);
+    for (theirs) |id| f.refs[id] -= 1;
+}
+
+test "a store with no checkpoint making room for a pass's marks never frees the path that pass resumes" {
+    var f: Fake = .{};
+    var s = try openPages(&f, 5);
+    defer s.deinit();
+    const a = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 0 };
+    const mine = [_]u32{ 0, 1, 2 };
+    f.take(&mine);
+    var path: [3]u32 = undefined;
+    try testing.expect(s.keep(.of(&a), 12, null, &mine, &path).held);
+    for (mine) |id| f.refs[id] -= 1; // the tree's alone: idle, and the oldest leaf
+    const b = [_]u32{ 7, 7, 7, 7, 7, 7, 7, 7, 0 };
+    const theirs = [_]u32{ 5, 6 };
+    f.take(&theirs);
+    var path2: [2]u32 = undefined;
+    try testing.expect(s.keep(.of(&b), 8, null, &theirs, &path2).held);
+    for (theirs) |id| f.refs[id] -= 1; // a newer idle leaf: 5 pages held of 5
+    const longer = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21 };
+    var adopt: std.ArrayList(u32) = .empty;
+    defer adopt.deinit(testing.allocator);
+    const plan = try s.begin(testing.allocator, .of(&longer), 21, &.{}, null, &adopt); // its mark at 20 wants 2 more pages
+    defer testing.allocator.free(plan.marks);
+    try testing.expectEqual(@as(u32, 12), plan.from);
+    try testing.expectEqualSlices(u32, &mine, adopt.items);
+    for (adopt.items) |id| f.refs[id] -= 1;
+    try testing.expectEqual(@as(u32, 0), f.refs[5]); // the newer leaf went instead
+}
