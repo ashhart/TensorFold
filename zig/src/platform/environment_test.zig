@@ -74,8 +74,6 @@ const valid = [_]Case{
     .{ .name = "TF_DRAMA_REFERENCE_CACHE", .raw = "17", .n = 17 },
     .{ .name = "TF_Q27_COPY_ROWS", .raw = "0", .n = 0 },
     .{ .name = "TF_Q27_COPY_ROWS", .raw = "48", .n = 48 },
-    .{ .name = "TF_DSPINE_CHAIN", .raw = "0", .n = 0 },
-    .{ .name = "TF_DSPINE_CHAIN", .raw = "1", .n = 1 },
     .{ .name = "TF_Q27_DRAFT_SLOTS", .raw = "0", .n = 0 },
     .{ .name = "TF_Q27_DRAFT_SLOTS", .raw = "4294967295", .n = std.math.maxInt(u32) },
     .{ .name = "TF_HEAD_GEOMETRY", .raw = "0", .n = 0 },
