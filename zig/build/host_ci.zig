@@ -299,6 +299,7 @@ const macos_fast = [_][]const u8{
     "test-persistence-identity-host",
     "test-qwen27-bank-boundary-host",
     "test-qwen27-prompt-floor-host",
+    "test-qwen27-reply-cache-host",
     "test-qwen27-startup-host",
 };
 
