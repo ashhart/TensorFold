@@ -37,7 +37,7 @@ const usage =
     \\  dots-stages MODEL IMAGE OUT  dots.mocr's tower: one encode, each stage's rows as OUT/<stage>.npy for the oracle
     \\  dots-image MODEL [IMAGE]  dots.mocr's tower: the generated page's vision-merged sha256 against its anchor, then
     \\                            IMAGE's; each encoded twice byte-equal, with each encode's time
-    \\  dots-text MODEL             dots.mocr text prompts of our own: <= 64 greedy reply ids each, sha256 against pins
+    \\  dots-text MODEL             dots.mocr text prompts of our own, with and without --vision: <= 64 greedy ids, sha256 vs pins
     \\  dots-invariants MODEL IMAGE [N] [IDS]  dots.mocr image prompts: chunk cuts == uncut (pages, logits, N greedy ids)
     \\
 ;
@@ -249,10 +249,12 @@ const Served = struct {
     engine: lanes.Engine,
     eos: []const u32,
 
-    fn init(s: *Served, gpu: Gpu, dir: []const u8, pages: usize, eos: []const u32) !void {
+    /// Served with --vision (two images a request at the default budget), or text alone without it.
+    fn init(s: *Served, gpu: Gpu, dir: []const u8, pages: usize, eos: []const u32, vision: bool) !void {
         s.gpu = gpu;
         s.eos = eos;
-        s.loaded = try native.open(gpu.gpa, gpu.io, gpu.ctx, dir, null, .{ .context = context, .drafts = false, .lanes = 1, .vision = .{ .image_tokens = Tower.default_image_tokens, .max_images = 2 } });
+        const limits: ?Tower.Limits = if (vision) .{ .image_tokens = Tower.default_image_tokens, .max_images = 2 } else null;
+        s.loaded = try native.open(gpu.gpa, gpu.io, gpu.ctx, dir, null, .{ .context = context, .drafts = false, .lanes = 1, .vision = limits });
         errdefer s.loaded.deinit(s.loaded.ctx);
         try native.attach(s.loaded.ctx, 0, pages);
         s.cfg = try lanes.Config.init(gpu.gpa, s.loaded.facts, s.loaded.rows, s.loaded.rows - 1);
@@ -270,10 +272,15 @@ const Served = struct {
         return s.loaded.vision.?;
     }
 
+    /// The images the tower has encoded, none without --vision.
+    fn encodes(s: *const Served) u64 {
+        return if (s.loaded.vision) |t| t.encodes else 0;
+    }
+
     /// One stream cut at `cuts` beside the 1,024-row grid: its pages and logits after the prompt, then its reply.
     fn once(s: *Served, prompt: []const u32, images: []const Image, cuts: []const u32, n: u32) !Out {
         const gpa = s.gpu.gpa;
-        const before = s.tower().encodes;
+        const before = s.encodes();
         var st = try lanes.Stream.init(gpa, .{ .id = "dots", .prompt = prompt, .max_new = n, .eos = s.eos, .drafts = false, .images = images, .reuse = .{ .marks = cuts } });
         defer st.deinit(gpa);
         // the backend's prompt steps alone, so the lane is read before the first token can end the stream
@@ -296,7 +303,7 @@ const Served = struct {
         while (s.engine.activeCount() > 0) try s.engine.step();
         const ids = try gpa.dupe(u32, st.emitted());
         errdefer gpa.free(ids);
-        return .{ .kv = kv, .logits = logits, .ids = ids, .encodes = s.tower().encodes - before, .ends = try ends.toOwnedSlice(gpa) };
+        return .{ .kv = kv, .logits = logits, .ids = ids, .encodes = s.encodes() - before, .ends = try ends.toOwnedSlice(gpa) };
     }
 };
 
@@ -417,7 +424,7 @@ fn invariants(gpu: Gpu, rest: Args) !void {
     const between = try tok.encode(gpa, " and ");
     defer gpa.free(between);
     var s: Served = undefined;
-    try s.init(gpu, dir, dense.pages.perSlot(context), c.end_tokens[0..c.end_count]);
+    try s.init(gpu, dir, dense.pages.perSlot(context), c.end_tokens[0..c.end_count], true);
     defer s.deinit();
     const bytes = try readFile(gpu, try arg(rest, 1));
     defer gpa.free(bytes);
@@ -472,7 +479,7 @@ fn invariants(gpu: Gpu, rest: Args) !void {
     check.pass("dots-invariants: chunk cuts inside, at the first and the last image rows equal the uncut runs (pages, logits, {d} greedy ids), each image encoded once", .{n});
 }
 
-/// dots-text MODEL_DIR: each own prompt's greedy reply ids through the served engine, their sha256 against its pin.
+/// dots-text MODEL_DIR: each own prompt's greedy reply ids, served with and without --vision, against its pin.
 fn replies(gpu: Gpu, rest: Args) !void {
     const dir = try arg(rest, 0);
     if (!present(gpu.io, dir)) return skip("dots-text", "no checkpoint config.json in MODEL_DIR");
@@ -480,29 +487,34 @@ fn replies(gpu: Gpu, rest: Args) !void {
     const c = try dots.config.Config.read(gpa, gpu.io, dir);
     const own = try dots.ownPrompts(gpa);
     defer own.deinit();
-    var s: Served = undefined;
-    try s.init(gpu, dir, dense.pages.perSlot(context), c.end_tokens[0..c.end_count]);
-    defer s.deinit();
     const cases = [_]struct { []const u8, []const u32, []const u8 }{
         .{ "short", own.value.short, short_reply_sha256 },
         .{ "page", own.value.page, page_reply_sha256 },
         .{ "chunks", own.value.chunks, chunks_reply_sha256 },
     };
+    const other = try otherSm(gpu);
     var bad: usize = 0;
-    for (cases) |k| {
-        const o = try s.once(k[1], &.{}, &.{}, reply_ids);
-        defer free(gpa, o);
-        var h: std.crypto.hash.sha2.Sha256 = .init(.{});
-        for (o.ids) |id| {
-            var le: [4]u8 = undefined;
-            std.mem.writeInt(u32, &le, id, .little);
-            h.update(&le);
+    for ([_]bool{ true, false }) |vision| {
+        var s: Served = undefined;
+        try s.init(gpu, dir, dense.pages.perSlot(context), c.end_tokens[0..c.end_count], vision);
+        defer s.deinit();
+        const served = if (vision) "--vision" else "text only";
+        for (cases) |k| {
+            const o = try s.once(k[1], &.{}, &.{}, reply_ids);
+            defer free(gpa, o);
+            var h: std.crypto.hash.sha2.Sha256 = .init(.{});
+            for (o.ids) |id| {
+                var le: [4]u8 = undefined;
+                std.mem.writeInt(u32, &le, id, .little);
+                h.update(&le);
+            }
+            const hex = std.fmt.bytesToHex(h.finalResult(), .lower);
+            const same = std.mem.eql(u8, &hex, k[2]);
+            bad += @intFromBool(!same);
+            std.debug.print("RESULT dots-text {s}, {s}: {d} prompt ids, {d} reply ids, sha256 {s}, pinned {s} ({s})\n", .{ k[0], served, k[1].len, o.ids.len, &hex, k[2], word(same) });
         }
-        const hex = std.fmt.bytesToHex(h.finalResult(), .lower);
-        const same = std.mem.eql(u8, &hex, k[2]);
-        bad += @intFromBool(!same);
-        std.debug.print("RESULT dots-text {s}: {d} prompt ids, {d} reply ids, sha256 {s}, pinned {s} ({s})\n", .{ k[0], k[1].len, o.ids.len, &hex, k[2], word(same) });
     }
-    try check.expect(bad == 0, "dots-text: {d} of {d} replies differ from their pins", .{ bad, cases.len });
-    check.pass("dots-text: {d} own prompts' greedy replies (at most {d} ids) equal their pins", .{ cases.len, reply_ids });
+    if (other) |sm| return skipPin("dots-text", sm);
+    try check.expect(bad == 0, "dots-text: {d} of {d} replies differ from their pins", .{ bad, 2 * cases.len });
+    check.pass("dots-text: {d} own prompts' greedy replies (at most {d} ids), with and without --vision, equal their pins", .{ cases.len, reply_ids });
 }
