@@ -26,7 +26,7 @@ Made natively, from the request and the model folder:
   - text row i sits at (i, 0, 0);
   - reference k sits at t = text + k;
   - the target sits at t = text + the reference count.
-  
+
   A block's h and w are centred on 16 and normalised by the block's own area, in float64, then rounded once to
   float32. A square block spans [0, 32): a 2048-pixel target in steps of 0.5, a 1024-pixel reference in steps of 1.
 - **The rotary table.** Each axis has 16 frequencies, read from the checkpoint's `rope.inv_freq`. That gives 48 angles
