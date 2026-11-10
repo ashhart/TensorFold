@@ -154,6 +154,7 @@ pub fn trial(s: anytype, chances: []const f64, rows: u32) Trial {
 
 /// A completed trial resets its own sample; losing widths retry after doubling and an expected repayment bound.
 pub fn observe(s: anytype, requested: ?u32, rows: usize, ms: f64) void {
+    if (s.rounds == 1) return;
     if (rows == 0 or rows >= s.cost_probes.len or !usable(ms)) return;
     const samples = observed(s);
     if (rows > samples.slots.len) return;
