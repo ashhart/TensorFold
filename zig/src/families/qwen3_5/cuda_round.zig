@@ -36,16 +36,16 @@ pub fn tableBytes(entries: usize) usize {
 pub fn stateEntries(e: anytype) usize {
     return @import("cuda_cache.zig").States.len(e.g);
 }
-/// Segment i's state table in the tables (qwen35.cuh forward_states): the stream's own, copied when it moved.
+/// Segment i's state table in the tables (qwen35.cuh forward_states): the stream's own, copied when it changed.
 pub fn forwardStates(e: anytype, i: usize, c: anytype) ![4]u64 {
     const States = @import("cuda_cache.zig").States;
     const t = try c.stateTable(e);
     const n = States.bytes(e.g);
     const at = states_at + i * n;
-    const was = e.forward_from[i];
-    if (was == null or !std.mem.eql(u64, &was.?, &t.from.?)) {
+    if (t.version == 0) return error.MissingQwenStates;
+    if (e.forward_from[i] != t.version) {
         try e.tables.copyFrom(at, t.dev.ptr, n, e.stream.handle);
-        e.forward_from[i] = t.from;
+        e.forward_from[i] = t.version;
     }
     return States.parts(e.tables.ptr + at, e.g);
 }

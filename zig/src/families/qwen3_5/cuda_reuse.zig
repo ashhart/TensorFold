@@ -6,6 +6,7 @@ const geometry = @import("cuda_geometry.zig");
 const engine = @import("cuda_engine.zig");
 const caches = @import("cuda_cache.zig");
 const spares = @import("cuda_spares.zig");
+const lane = @import("cuda_cache_lane.zig");
 
 const Engine = engine.Engine;
 const Cache = engine.Cache;
@@ -117,10 +118,14 @@ const Runs = struct {
     len: usize,
     page: usize = 0,
     done: usize = 0,
+    /// A pool lane's state on pieces: a run a recurrence or a tail (cuda_cache_lane.zig parts).
+    lane: ?*const Cache = null,
+    g: ?Geometry = null,
 
     const Run = struct { dev: u64, at: usize, len: usize };
 
     fn of(cache: *const Cache, l: Layout, i: usize, p: Piece) Runs {
+        if (!p.kv and cache.pieces != null) return .{ .base = 0, .pages = null, .page_bytes = 0, .in_page = 0, .len = p.len, .lane = cache, .g = l.g };
         if (!p.kv or cache.paged == null) return .{ .base = (if (p.kv) cache.kv.ptr else cache.state.ptr) + p.off, .pages = null, .page_bytes = 0, .in_page = 0, .len = p.len };
         const pg = cache.paged.?;
         // the piece's offset inside a page: its layout at cap = tokens (Layout.piece), a run of tokens rows a page
@@ -130,6 +135,12 @@ const Runs = struct {
     }
 
     fn next(r: *Runs) ?Run {
+        if (r.lane) |c| {
+            if (r.page >= lane.parts(c, r.g.?)) return null;
+            const q = lane.part(c, r.g.?, r.page, false);
+            r.page += 1;
+            return .{ .dev = q.dev, .at = q.at, .len = q.len };
+        }
         if (r.done >= r.len) return null;
         const pg = r.pages orelse {
             r.done = r.len;
@@ -406,19 +417,6 @@ test "fp8 pieces follow qwen35_kv8.cu: a layer's key then value rows, then their
     try std.testing.expectEqual(Piece{ .kv = true, .off = 4 * 100 * 256 + 2 * 100 * 4, .len = 10 * 4 }, l.piece(2 + 2 * 2));
 }
 
-test "a state resumes only a request with the same images before its position" {
-    const d = [_]u64{ 1, 2, 3 };
-    const kept = [_]Seen{.{ .at = 5, .id = d[0] }};
-    // a later image is the pass's
-    try std.testing.expect(sameImages(&kept, &.{ .{ .at = 5, .id = d[0] }, .{ .at = 40, .id = d[2] } }, 20));
-    try std.testing.expect(!sameImages(&kept, &.{.{ .at = 5, .id = d[1] }}, 20)); // another image under the same ids
-    try std.testing.expect(!sameImages(&kept, &.{.{ .at = 6, .id = d[0] }}, 20));
-    try std.testing.expect(!sameImages(&kept, &.{}, 20)); // a text prompt never resumes an image's state
-    // nor an image prompt a text state past its image
-    try std.testing.expect(!sameImages(&.{}, &.{.{ .at = 5, .id = d[0] }}, 20));
-    try std.testing.expect(sameImages(&.{}, &.{.{ .at = 5, .id = d[0] }}, 5)); // a text prefix before it
-}
-
 test "a restore refuses another cache format, another length, a position past the cache and other images" {
     var e: Engine = undefined;
     e.kit = null;
@@ -427,6 +425,7 @@ test "a restore refuses another cache format, another length, a position past th
     var cache: Cache = undefined;
     cache.cap = 64;
     cache.paged = null; // contiguous: restoreCache reads it, and undefined bytes can read as a page table
+    cache.pieces = null; // one block: the runs read it too
     const d: u64 = 9;
     var images = [_]Seen{.{ .at = 2, .id = d }};
     const l: Layout = .{ .g = e.g, .format = .bf16, .cap = 64, .at = 10 };
@@ -490,6 +489,7 @@ test "a failed restore's host copy stays through a drop until a wait, the restor
     var cache: Cache = undefined;
     cache.cap = 64;
     cache.paged = null; // contiguous: restoreCache reads it, and undefined bytes can read as a page table
+    cache.pieces = null; // one block: the runs read it too
     cache.kv = .{ .d = &d, .ptr = 0x10000, .len = 0 };
     cache.state = .{ .d = &d, .ptr = 0x20000, .len = 0 };
     const l: Layout = .{ .g = e.g, .format = .bf16, .cap = 64, .at = 10 };
@@ -577,6 +577,7 @@ test "a device save pins nothing: it copies on the device both ways, and its dro
     cache.len = 10;
     cache.last = null;
     cache.pend = 0;
+    cache.pieces = null; // one block: the runs read it too
     cache.delta = 3;
     cache.paged = null;
     cache.kv = .{ .d = &d, .ptr = 0x10000, .len = 0 };

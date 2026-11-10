@@ -11,8 +11,17 @@ const DeviceBuffer = cuda.DeviceBuffer;
 pub const States = struct {
     dev: DeviceBuffer,
     host: []u64,
-    /// The state, before and log addresses `dev` holds the entries of (null: not written yet).
+    /// The state, before and log addresses `dev` holds the entries of (null: not written yet, or a lane's pieces).
     from: ?[3]u64 = null,
+    /// Which entries `dev` holds: a new number each time they change (Engine.forward_from compares it).
+    version: u64 = 0,
+
+    var versions: std.atomic.Value(u64) = .init(0);
+
+    /// A version no table has had: entries written now.
+    pub fn next() u64 {
+        return versions.fetchAdd(1, .monotonic) + 1;
+    }
 
     pub fn len(g: geometry.Geometry) usize {
         return 4 * g.deltas() + engine.most_window;

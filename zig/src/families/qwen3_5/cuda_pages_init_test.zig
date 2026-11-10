@@ -6,7 +6,8 @@ const pages = @import("cuda_pages.zig");
 const caches = @import("cuda_cache.zig");
 const E = @import("cuda_engine.zig").Engine;
 const gpa = std.testing.allocator;
-const layout: kv.Layout = .{ .fixed_bytes = 0, .token_bytes = 64, .page_tokens = 16, .snap_bytes = 0, .run_bytes = 64 };
+// no linear layer (engine below): the state's pieces are row 0 and one group of the other log rows, empty, one page
+const layout: kv.Layout = .{ .fixed_bytes = 0, .token_bytes = 64, .page_tokens = 16, .snap_bytes = 0, .pieces = .{ .n = 2, .pages = 1, .bytes = 0 } };
 
 const Device = struct {
     const stream: cuda.abi.Stream = @ptrFromInt(17);
@@ -88,7 +89,11 @@ fn engine(d: *cuda.Driver) E {
     e.d = d;
     e.stream = .{ .d = d, .handle = Device.stream };
     e.g.vocab = 8;
-    e.g.layers = 0; // no linear layer: a lane's state table holds only the log rows' entries
+    // no linear layer: a lane's state table holds only the log rows' entries, and they are empty
+    e.g.layers = 0;
+    e.g.k_heads = 0;
+    e.g.v_heads = 0;
+    e.g.linear = @splat(false);
     e.g.first = 0; // one engine, the whole model: Geometry.deltas reads first
     e.g.whole = 0;
     return e;
@@ -165,4 +170,18 @@ test "kv safety: Qwen page IDs and arena size refuse before allocation" {
     try expectPoolError(error.Overflow, pages.Pages.init(gpa, &e, oversized, 64, 0, 2, 8), &d, e.stream);
     try std.testing.expectEqual(@as(usize, 0), Device.allocs);
     try Device.released();
+}
+
+test "kv safety: Qwen failed outside block (taps and ring) frees its lane once and everything before it" {
+    for ([_]usize{ 4, 7 }) |failure| { // the arena, then a lane's page table, state table and outside block
+        var d = Device.driver();
+        var e = engine(&d);
+        defer finish(&d, e.stream);
+        var outside = layout;
+        outside.outside = 1024;
+        Device.fail_alloc = failure;
+        try expectPoolError(error.NotReady, pages.Pages.init(gpa, &e, outside, 64, 0, 2, 8), &d, e.stream);
+        try Device.released();
+        try std.testing.expectEqual(@as(usize, 0), Device.fills);
+    }
 }
