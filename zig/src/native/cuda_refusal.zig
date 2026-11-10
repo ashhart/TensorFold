@@ -39,9 +39,9 @@ pub fn lfm2(o: api.Open) ?[]const u8 {
 
 pub const no_ranks = "this CUDA family has no tensor-parallel ranks: serve without --tp";
 
-/// --tp for a family that opens outside `family()` (Fish, Qwen4, LFM2): refused, never ignored.
+/// --tp or --rank for a family that opens outside `family()` (Fish, Qwen4, LFM2): refused, never ignored.
 pub fn unranked(o: api.Open) ?[]const u8 {
-    return if (o.tp != 1) no_ranks else null;
+    return if (o.tp != 1 or (o.given.rank and o.rank != 0)) no_ranks else null;
 }
 
 const lfm2_vision = "--vision: LFM2 reads the checkpoint's images through its own tower without the flag; " ++
@@ -52,7 +52,7 @@ pub fn family(comptime F: type, o: api.Open) ?[]const u8 {
     if (o.vision != null and !(@hasDecl(F, "Options") and @hasField(F.Options, "vision")))
         return "--vision: this CUDA family reads no images; serve it without --vision";
     const ranked = @hasDecl(F, "Options") and @hasField(F.Options, "rank");
-    if (o.tp != 1 and !ranked) return no_ranks;
+    if ((o.tp != 1 or (o.given.rank and o.rank != 0)) and !ranked) return no_ranks;
     // ahead of the drafter's and --learn-conversations' refusals (--spill-gib sets that flag), on a line of its own
     if (o.spill == .evicted and F != nemotron.native and @import("cuda_disk.zig").keptDisk(F) == null) return "--spill-gib keeps evicted states on disk for Nemotron, the Qwen hybrids and Flash Next only on CUDA: serve this model without it";
     if (o.drafter != null and !(@hasDecl(F, "takes_drafter") and F.takes_drafter)) {
@@ -83,6 +83,10 @@ test "a family must consume rank options before tensor parallelism is admitted" 
     // the families past family(): one rank opens, two are refused by the same words
     try std.testing.expect(unranked(.{ .dir = "d", .model_type = "qwen4", .tp = 1 }) == null);
     try std.testing.expectEqualStrings(no_ranks, unranked(.{ .dir = "d", .model_type = "qwen4", .tp = 2 }).?);
+    try std.testing.expectEqualStrings(no_ranks, unranked(.{ .dir = "d", .model_type = "qwen4", .rank = 1, .given = .{ .rank = true } }).?);
+    try std.testing.expectEqualStrings(no_ranks, family(Single, .{ .dir = "d", .model_type = "m", .rank = 1, .given = .{ .rank = true } }).?);
+    try std.testing.expect(unranked(.{ .dir = "d", .model_type = "qwen4", .rank = 0, .given = .{ .tp = true, .rank = true } }) == null);
+    try std.testing.expect(family(Single, .{ .dir = "d", .model_type = "m", .rank = 0, .given = .{ .rank = true } }) == null);
     try std.testing.expectEqualStrings(no_ranks, lfm2(.{ .dir = "d", .model_type = "lfm2", .tp = 2 }).?);
     for ([_][]const u8{ "fish_omni", "qwen4", "qwen4_text" }) |m| {
         try std.testing.expect(backend(.{ .dir = "d", .model_type = m, .tp = 1 }) == null);
