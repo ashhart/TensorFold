@@ -16,7 +16,8 @@ pub const usage =
 /// The card's: the negative branch skips block 22.
 pub const negative_skip = 22;
 
-/// The bounds `/v1/images/generations` serves, which this tool refuses past exactly as the server does.
+/// The bounds `/v1/images/generations` serves, which this tool refuses past exactly as the server does:
+/// the card declares the same three caps the API serves, 1536 a side, 1572864 pixels and 200 steps.
 const max_side: i64 = 1536;
 const max_pixels: usize = 1572864;
 const max_steps: i64 = 200;
@@ -43,6 +44,7 @@ pub const Error = error{
     BadImageSize,
     ImageTooLarge,
     BadStepCount,
+    TooManySteps,
     SkipLayerGuidanceRefused,
 };
 
@@ -71,11 +73,11 @@ fn fit(args: *const Args) Error!void {
     if (args.width * args.height > max_pixels) return error.ImageTooLarge;
 }
 
-/// The number of steps: the served 1 to 200.
+/// The number of steps: the served 1 to 200, each bound its own error as the server's two sentences are.
 fn stepCount(text: []const u8) Error!usize {
     const value = std.fmt.parseInt(i64, text, 10) catch return error.BadValue;
     if (value < 1) return error.BadStepCount;
-    if (value > max_steps) return error.BadValue;
+    if (value > max_steps) return error.TooManySteps;
     return @intCast(value);
 }
 
@@ -89,17 +91,17 @@ fn seedValue(text: []const u8) Error!u64 {
 /// The guidance scale: a finite number from 1, as the server takes it.
 fn guidanceScale(text: []const u8) Error!f32 {
     const value = std.fmt.parseFloat(f32, text) catch return error.BadValue;
-    if (!std.math.isFinite(value) or value < 1 or value > std.math.floatMax(f32)) return error.BadValue;
+    if (!std.math.isFinite(value) or value < 1) return error.BadValue;
     return value;
 }
 
 /// A prompt's text: blank after trimming is refused unless `blank_ok`, and a text past the served byte cap is too.
-/// The text is given back as sent, so a prompt with surrounding spaces encodes as it did before.
+/// The trimmed text comes back, the same bytes the server encodes for the prompt.
 fn promptText(text: []const u8, blank_ok: bool) Error![]const u8 {
-    const kept = std.mem.trim(u8, text, " \t\r\n\x0b\x0c");
+    const kept = std.mem.trim(u8, text, " \t\r\n");
     if (kept.len == 0 and !blank_ok) return error.EmptyPrompt;
     if (kept.len > max_prompt_bytes) return error.BadValue;
-    return text;
+    return kept;
 }
 
 /// `tokens` are the arguments after TRANSFORMER_DIR: the options in any order and one output path.
@@ -110,6 +112,7 @@ pub fn parse(tokens: []const []const u8, refused: *?[]const u8, option: *?Option
     var args: Args = .{ .out = "", .prompt = "" };
     var prompt: ?[]const u8 = null;
     var out: ?[]const u8 = null;
+    var side: ?Option = null;
     var i: usize = 0;
     while (i < tokens.len) : (i += 1) {
         option.* = null;
@@ -123,29 +126,27 @@ pub fn parse(tokens: []const []const u8, refused: *?[]const u8, option: *?Option
                 refused.* = token;
                 return error.UnknownOption;
             };
+            option.* = given;
             const value = if (i + 1 < tokens.len) tokens[i + 1] else return error.MissingValue;
             i += 1;
             if (std.mem.startsWith(u8, value, "--")) {
+                // The refusal belongs to the token that should have been the value, not to the option before it.
+                option.* = null;
                 refused.* = value;
                 if (!skipLayer(value)) return error.MissingValue;
                 return error.SkipLayerGuidanceRefused;
             }
-            option.* = given;
             switch (given) {
                 .prompt => prompt = try promptText(value, false),
                 .negative => args.negative = try promptText(value, true),
-                .width => {
-                    args.width = try imageSize(value);
-                    try fit(&args);
-                },
-                .height => {
-                    args.height = try imageSize(value);
-                    try fit(&args);
-                },
+                .width => args.width = try imageSize(value),
+                .height => args.height = try imageSize(value),
                 .steps => args.steps = try stepCount(value),
                 .seed => args.seed = try seedValue(value),
                 .guidance => args.guidance = try guidanceScale(value),
             }
+            // The side a refused pair names: the last one given.
+            if (given == .width or given == .height) side = given;
             continue;
         }
         if (out != null) {
@@ -155,6 +156,11 @@ pub fn parse(tokens: []const []const u8, refused: *?[]const u8, option: *?Option
         out = token;
     }
     option.* = null;
+    // The finished pair, checked once as the server checks it: a later --width may rescue an earlier side.
+    if (fit(&args)) |_| {} else |e| {
+        option.* = side;
+        return e;
+    }
     args.prompt = prompt orelse return error.MissingPrompt;
     args.out = out orelse return error.MissingOutput;
     return args;
@@ -170,6 +176,7 @@ fn valueReason(given: Option, e: Error) []const u8 {
         },
         .steps => switch (e) {
             error.BadStepCount => "must be from 1 to 200",
+            error.TooManySteps => "is past 200",
             else => "must be a whole number from 1 to 200",
         },
         .seed => "must be a whole number from 0",
@@ -284,6 +291,11 @@ test "a side and the pixel count keep to the served bounds" {
     try std.testing.expectError(error.ImageTooLarge, check(&past_side));
     const past_pixels = [_][]const u8{ "pic.png", "--prompt", "a fox", "--width", "1536", "--height", "1536" };
     try std.testing.expectError(error.ImageTooLarge, check(&past_pixels));
+    // The pair is checked once, on the finished values: the last --width is the one that counts.
+    const rescued = [_][]const u8{ "pic.png", "--prompt", "a fox", "--width", "1536", "--height", "1536", "--width", "512" };
+    const twice = try check(&rescued);
+    try std.testing.expectEqual(@as(usize, 512), twice.width);
+    try std.testing.expectEqual(@as(usize, 1536), twice.height);
 }
 
 test "steps are from 1 to 200" {
@@ -291,10 +303,12 @@ test "steps are from 1 to 200" {
         const tokens = [_][]const u8{ "pic.png", "--prompt", "a fox", "--steps", count };
         try std.testing.expectError(error.BadStepCount, check(&tokens));
     }
-    for ([_][]const u8{ "201", "4097", "many" }) |count| {
+    for ([_][]const u8{ "201", "4097" }) |count| {
         const tokens = [_][]const u8{ "pic.png", "--prompt", "a fox", "--steps", count };
-        try std.testing.expectError(error.BadValue, check(&tokens));
+        try std.testing.expectError(error.TooManySteps, check(&tokens));
     }
+    const loose = [_][]const u8{ "pic.png", "--prompt", "a fox", "--steps", "many" };
+    try std.testing.expectError(error.BadValue, check(&loose));
     const last = [_][]const u8{ "pic.png", "--prompt", "a fox", "--steps", "200" };
     try std.testing.expectEqual(@as(usize, 200), (try check(&last)).steps);
 }
@@ -318,11 +332,11 @@ test "a seed and a guidance scale are numbers in range" {
     try std.testing.expectEqual(@as(f32, 1.0), first.guidance);
 }
 
-test "a prompt keeps its text and keeps to the served byte cap" {
+test "a prompt keeps its trimmed text and keeps to the served byte cap" {
     const spaced = [_][]const u8{ "pic.png", "--prompt", "  a fox  ", "--negative", "  blurry " };
     const args = try check(&spaced);
-    try std.testing.expectEqualStrings("  a fox  ", args.prompt);
-    try std.testing.expectEqualStrings("  blurry ", args.negative);
+    try std.testing.expectEqualStrings("a fox", args.prompt);
+    try std.testing.expectEqualStrings("blurry", args.negative);
     for ([_][]const u8{ "", " ", "\t\n" }) |blank| {
         const tokens = [_][]const u8{ "pic.png", "--prompt", blank };
         try std.testing.expectError(error.EmptyPrompt, check(&tokens));
@@ -370,6 +384,10 @@ test "an option's value cannot be another option" {
         .{ "pic.png", "--prompt", "--cfg", "7" },
     };
     for (missing) |tokens| try std.testing.expectError(error.MissingValue, check(&tokens));
+    // A value that is another option names that option as the one left without a value.
+    const swallowed_line = try refusal(std.testing.allocator, &missing[0]);
+    defer std.testing.allocator.free(swallowed_line);
+    try std.testing.expectEqualStrings("tf-moss-image-generate: --width: the option has no value", swallowed_line);
 }
 
 test "the output path and the prompt are required" {
@@ -403,7 +421,7 @@ test "a refused value names the option it belongs to" {
         .{ .tokens = .{ "pic.png", "--prompt", "a fox", "--height", "1000" }, .want = "tf-moss-image-generate: --height: must be a positive multiple of 16, at most 1536" },
         .{ .tokens = .{ "pic.png", "--prompt", "a fox", "--width", "1552" }, .want = "tf-moss-image-generate: --width: is past 1536 a side or 1572864 pixels" },
         .{ .tokens = .{ "pic.png", "--prompt", "a fox", "--steps", "0" }, .want = "tf-moss-image-generate: --steps: must be from 1 to 200" },
-        .{ .tokens = .{ "pic.png", "--prompt", "a fox", "--steps", "201" }, .want = "tf-moss-image-generate: --steps: must be a whole number from 1 to 200" },
+        .{ .tokens = .{ "pic.png", "--prompt", "a fox", "--steps", "201" }, .want = "tf-moss-image-generate: --steps: is past 200" },
         .{ .tokens = .{ "pic.png", "--prompt", "a fox", "--seed", "-1" }, .want = "tf-moss-image-generate: --seed: must be a whole number from 0" },
         .{ .tokens = .{ "pic.png", "--prompt", "a fox", "--guidance", "0.5" }, .want = "tf-moss-image-generate: --guidance: must be a finite number from 1" },
         .{ .tokens = .{ "pic.png", "--prompt", " ", "--seed", "7" }, .want = "tf-moss-image-generate: --prompt: is blank" },
@@ -424,7 +442,10 @@ test "a refusal names the refused token, else the bare sentence" {
     try std.testing.expectEqualStrings("tf-moss-image-generate: --slg-layers: skip-layer guidance is not implemented", slg);
     const no_value = try refusal(std.testing.allocator, &.{ "pic.png", "--prompt", "a fox", "--width" });
     defer std.testing.allocator.free(no_value);
-    try std.testing.expectEqualStrings("tf-moss-image-generate: the option has no value", no_value);
+    try std.testing.expectEqualStrings("tf-moss-image-generate: --width: the option has no value", no_value);
+    const pair = try refusal(std.testing.allocator, &.{ "pic.png", "--prompt", "a fox", "--width", "1536", "--height", "1536" });
+    defer std.testing.allocator.free(pair);
+    try std.testing.expectEqualStrings("tf-moss-image-generate: --height: is past 1536 a side or 1572864 pixels", pair);
     const no_prompt = try refusal(std.testing.allocator, &.{ "--width", "1024", "pic.png" });
     defer std.testing.allocator.free(no_prompt);
     try std.testing.expectEqualStrings("tf-moss-image-generate: --prompt is required", no_prompt);
