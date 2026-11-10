@@ -5,6 +5,8 @@ const q27_back_tests = @import("q27_back_tests.zig");
 const q27_gemm_tests = @import("q27_gemm_tests.zig");
 const cuda = @import("cuda");
 const check = @import("check.zig");
+const info = @import("runner_info.zig").info;
+const preview_usage = @import("runner_preview_usage.zig").text;
 const dump = @import("byte_dump.zig");
 const runtime_tests = @import("runtime_tests.zig");
 const bench = @import("bench.zig");
@@ -252,7 +254,6 @@ const usage =
     \\  exl3-tiles [DIR]          EXL3's tile candidate: codebooks and tiles bit-equal, FP64, rows through qlinear and Dense
     \\  train-pack MODEL EXAMPLES [COUNT]   training passes holding several sequences against one a pass: differences, time
     \\  kernel-contract [WORD...]  the contract's gates, each planted control red (-Dnvcc); WORDs: kernels named so
-    \\  kv-expand-contract        exact filled FP8 KV expansion, whole and paged, original bytes and FP64
     \\  qmm-prefill-many-contract the GB10 bit-exact multi-projection prompt launch against separate launches
     \\  qmm-prefill-tile22-contract the GB10 large-prompt 2x2 tile against the default tile
     \\  qmmf-prompt              BF16 K32 prompt staging: parent K64 bytes at current Flash Next shapes
@@ -315,7 +316,7 @@ const usage =
 pub fn main(init: std.process.Init) !u8 {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len < 2) {
-        std.debug.print("{s}", .{usage});
+        std.debug.print("{s}{s}", .{ usage, preview_usage });
         return 2;
     }
     var driver = try cuda.Driver.open();
@@ -339,7 +340,7 @@ pub fn main(init: std.process.Init) !u8 {
 
 fn arg(rest: []const [:0]const u8, i: usize) ![]const u8 {
     if (i >= rest.len) {
-        std.debug.print("{s}", .{usage});
+        std.debug.print("{s}{s}", .{ usage, preview_usage });
         return error.MissingArgument;
     }
     return rest[i];
@@ -580,11 +581,9 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "kolibri-logits")) return kolibri_tests.logits(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), if (rest.len > 3) rest[3] else null);
     if (std.mem.eql(u8, cmd, "aot-fallback")) return aot_fallback_tests.run(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "glm-lanes-concurrent")) return glm_lanes_tests.concurrentCheck(gpu, try arg(rest, 0), try arg(rest, 1), try std.fmt.parseInt(c_int, try arg(rest, 2), 10), try std.fmt.parseInt(c_int, try arg(rest, 3), 10), try arg(rest, 4));
-    std.debug.print("{s}", .{usage});
+    std.debug.print("{s}{s}", .{ usage, preview_usage });
     return error.UnknownCommand;
 }
-
-const info = @import("runner_info.zig").info;
 
 fn hasFlag(flags: []const [:0]const u8, name: []const u8) bool {
     for (flags) |f| if (std.mem.eql(u8, f, name)) return true;
