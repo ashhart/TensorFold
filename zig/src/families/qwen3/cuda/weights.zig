@@ -1,4 +1,4 @@
-//! A Qwen3 dense checkpoint on the device: BF16 tensors as stored, norms widened to fp32, the output head on the host.
+//! A Qwen3 dense checkpoint on the device: BF16 tensors as stored, norms widened to fp32.
 const std = @import("std");
 const core = @import("core");
 const cuda = @import("cuda");
@@ -27,8 +27,6 @@ pub const Layer = struct {
 pub const Model = struct {
     gpa: Allocator,
     spec: config.Spec,
-    /// The stored name of the output head's rows: a reranker scores them on the host (names.headKey).
-    head: []const u8,
     /// The embedding table [vocab, hidden] the token rows come from.
     embed: u64,
     final_norm: u64,
@@ -41,7 +39,7 @@ pub const Model = struct {
         var ck = try Checkpoint.openModel(gpa, io, dir);
         defer ck.close();
         ck.scope = names.scopeOf(&ck);
-        var m: Model = .{ .gpa = gpa, .spec = spec, .head = names.headKey(spec.tied, ck.scope), .embed = 0, .final_norm = 0, .layers = &.{}, .st = .{ .gpa = gpa, .d = d } };
+        var m: Model = .{ .gpa = gpa, .spec = spec, .embed = 0, .final_norm = 0, .layers = &.{}, .st = .{ .gpa = gpa, .d = d } };
         errdefer m.deinit();
         m.embed = try projection(&ck, &m.st, "embed_tokens.weight", spec.vocab, spec.hidden);
         m.final_norm = try norm(&ck, &m.st, "norm.weight", spec.hidden);
