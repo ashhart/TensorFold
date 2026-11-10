@@ -48,6 +48,7 @@ pub fn validate(inputs: anytype, prompt_len: usize, budget: usize, max_images: u
         const patches = std.math.mul(usize, img.gh, img.gw) catch return error.BadLfm3ImageShape;
         if (patches > max_pixels / (patch * patch) or img.tokens != patches / 4 or
             img.pixels.len != patches * patch_width) return error.BadLfm3ImageShape;
+        if (patches < min_pixels / (patch * patch)) return error.ImageTooSmall;
         if (img.at < previous or img.at > prompt_len or img.tokens > prompt_len - img.at)
             return error.BadLfm3ImageSpans;
         previous = @as(usize, img.at) + img.tokens;
@@ -141,7 +142,7 @@ pub fn patchify(a: std.mem.Allocator, rgb: picture.Rgb) ![]f32 {
 }
 
 pub fn explain(err: anyerror) ?[]const u8 {
-    if (err == error.ImageTooSmall) return "LFM3 images require a budget of at least 64 image tokens";
+    if (err == error.ImageTooSmall) return "LFM3 images require at least 64 tokens after resizing and a budget of at least 64 tokens";
     if (err == error.ImageTooLarge) return "the resized LFM3 image exceeds the image token budget";
     return geometry.problem(err);
 }
@@ -166,19 +167,20 @@ test "LFM3 patches preserve merge order, channel order and duplicated temporal f
 }
 
 test "LFM3 rejects image metadata that disagrees with its grid, budget or placeholder spans" {
-    const Input = struct { pixels: []const f32, gh: u32 = 2, gw: u32 = 2, tokens: u32 = 1, at: u32 = 0 };
-    const pixels: [4 * patch_width]f32 = @splat(0);
-    var inputs = [_]Input{ .{ .pixels = &pixels }, .{ .pixels = &pixels, .at = 1 } };
-    try validate(&inputs, 2, 2, 2);
-    inputs[0].tokens = 2;
-    try std.testing.expectError(error.BadLfm3ImageShape, validate(&inputs, 3, 3, 2));
-    inputs[0].tokens = 1;
+    const Input = struct { pixels: []const f32, gh: u32 = 16, gw: u32 = 16, tokens: u32 = 64, at: u32 = 0 };
+    const pixels = try std.testing.allocator.alloc(f32, 256 * patch_width);
+    defer std.testing.allocator.free(pixels);
+    var inputs = [_]Input{ .{ .pixels = pixels }, .{ .pixels = pixels, .at = 64 } };
+    try validate(&inputs, 128, 128, 2);
+    inputs[0].tokens = 65;
+    try std.testing.expectError(error.BadLfm3ImageShape, validate(&inputs, 129, 129, 2));
+    inputs[0].tokens = 64;
     inputs[1].at = 0;
-    try std.testing.expectError(error.BadLfm3ImageSpans, validate(&inputs, 2, 2, 2));
-    inputs[1].at = 1;
-    try std.testing.expectError(error.BadLfm3ImageSpans, validate(&inputs, 1, 2, 2));
-    try std.testing.expectError(error.ImageTooLarge, validate(&inputs, 2, 1, 2));
-    try std.testing.expectError(error.TooManyImages, validate(&inputs, 2, 2, 1));
+    try std.testing.expectError(error.BadLfm3ImageSpans, validate(&inputs, 128, 128, 2));
+    inputs[1].at = 64;
+    try std.testing.expectError(error.BadLfm3ImageSpans, validate(&inputs, 127, 128, 2));
+    try std.testing.expectError(error.ImageTooLarge, validate(&inputs, 128, 127, 2));
+    try std.testing.expectError(error.TooManyImages, validate(&inputs, 128, 128, 1));
 }
 
 test "LFM3 image patches match the processor float32 pixel fixture" {

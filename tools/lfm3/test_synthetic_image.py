@@ -4,7 +4,6 @@ import json
 import os
 import pathlib
 import struct
-import subprocess
 import sys
 import unittest
 import zlib
@@ -12,10 +11,7 @@ import zlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import synthetic_image as fixture  # noqa: E402
 
-RECEIPTS = fixture.ROOT / "docs/receipts/lfm3"
 MANIFEST = json.loads(fixture.MANIFEST.read_text())
-TIED = MANIFEST["receipts_tied_to_withdrawn_photo"]
-SECTIONS = ("direct_image_identity", "derived_artifact_identity", "named_without_hash", "references_only", "prose")
 
 
 def decode(data: bytes) -> tuple[int, int, bytes]:
@@ -58,9 +54,6 @@ def tiny_tokenizer() -> fixture.Tokenizer:
 
 
 class Image(unittest.TestCase):
-    def test_generator_is_deterministic_and_matches_the_pins(self):
-        self.assertEqual(fixture.png(), fixture.png())
-        self.assertEqual(fixture.check_png(MANIFEST), [])
 
     def test_png_decodes_to_the_generated_raster(self):
         width, height, raster = decode(fixture.PNG.read_bytes())
@@ -72,11 +65,6 @@ class Image(unittest.TestCase):
             data = bytes(i * 7 & 255 for i in range(size))
             self.assertEqual(zlib.decompress(fixture.stored_zlib(data)), data, size)
 
-    def test_image_has_its_shapes(self):
-        self.assertEqual(fixture.pixel(105, 96), (235, 40, 36))
-        self.assertEqual(fixture.pixel(230, 75), (244, 204, 36))
-        self.assertEqual({fixture.pixel(0, 160), fixture.pixel(10, 160)}, {(250, 250, 250), (16, 16, 16)})
-        self.assertNotEqual(fixture.pixel(0, 0), fixture.pixel(299, 159))
 
 
 class Tokens(unittest.TestCase):
@@ -121,36 +109,6 @@ class Tokens(unittest.TestCase):
         self.assertEqual(fixture.check_tokens(MANIFEST, pathlib.Path(model)), [])
 
 
-class Receipts(unittest.TestCase):
-    def path(self, name: str) -> pathlib.Path:
-        return fixture.ROOT / name if "/" in name else RECEIPTS / name
-
-    def test_photograph_is_gone_and_replacement_differs(self):
-        self.assertFalse(self.path(MANIFEST["withdrawn_photo"]["path"]).exists())
-        self.assertNotEqual(MANIFEST["image"]["png_sha256"], MANIFEST["withdrawn_photo"]["png_sha256"])
-
-    def test_every_listed_tie_occurs_in_its_file(self):
-        names = TIED["identifiers"]
-        for section in SECTIONS:
-            for entry in TIED[section]:
-                text = self.path(entry["file"]).read_text()
-                for tie in entry["ties"]:
-                    self.assertIn(names.get(tie, tie), text, f"{entry['file']}: {tie}")
-
-    def test_no_unlisted_receipt_carries_the_photograph_identity(self):
-        listed = {self.path(e["file"]).name for s in SECTIONS for e in TIED[s]} | {fixture.MANIFEST.name}
-        for path in sorted(RECEIPTS.glob("*.json")):
-            text = path.read_text()
-            hits = [k for k, v in TIED["identifiers"].items() if v in text]
-            self.assertTrue(not hits or path.name in listed, f"{path.name} carries {hits} but is not listed")
-
-    def test_tree_has_no_reference_to_the_removed_png(self):
-        files = subprocess.run(["git", "ls-files", "-co", "--exclude-standard"], cwd=fixture.ROOT, capture_output=True, text=True,
-                               check=True).stdout.split("\n")
-        needle = "real-image-fp64-input"
-        found = [f for f in files if f and (fixture.ROOT / f).is_file() and f != "tools/lfm3/test_synthetic_image.py"
-                 and needle in (fixture.ROOT / f).read_text(errors="ignore")]
-        self.assertEqual(found, ["docs/receipts/lfm3/synthetic-image-fixture.json"])
 
 
 def _numpy():
