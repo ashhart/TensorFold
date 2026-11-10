@@ -28,8 +28,8 @@ fn refuse(a: Allocator, problem: *[]const u8, comptime fmt: []const u8, args: an
 }
 
 /// Opens `o.dir` on CUDA; null with the reason in `problem` when it is refused.
-pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, device: u32, problem: *[]const u8, comptime budget: type, comptime windows: type) anyerror!?api.Opened {
-    return openEngine(a, gpa, io, o, device, problem, budget, windows) catch |err| switch (err) {
+pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, device: u32, problem: *[]const u8, comptime budget: type, comptime windows: type, comptime libs: type) anyerror!?api.Opened {
+    return openEngine(a, gpa, io, o, device, problem, budget, windows, libs) catch |err| switch (err) {
         error.Refused => null,
         else => return err,
     };
@@ -38,8 +38,6 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, device: u32, 
 /// Whatever the server holds: the device handles, the engine, its prompt lane and the host that serves it.
 const Owned = struct {
     gpa: Allocator,
-    driver: cuda.Driver,
-    ctx: cuda.Context,
     e: *Engine,
     p: Prompt,
     cfg: lanes.Config,
@@ -52,11 +50,11 @@ const Owned = struct {
 /// The context this thread's CUDA calls go to: open's thread at startup, the lane host's thread at rounds.
 threadlocal var bound: ?*const cuda.Context = null;
 
-/// Makes the owner's context current on this thread once.
+/// Makes the engine's context current on this thread once.
 fn bind(o: *Owned) void {
-    if (bound != &o.ctx) {
-        o.ctx.makeCurrent() catch |e| std.log.err("cuCtxSetCurrent on this thread: {s}", .{@errorName(e)});
-        bound = &o.ctx;
+    if (bound != &o.e.ctx) {
+        o.e.ctx.makeCurrent() catch |e| std.log.err("cuCtxSetCurrent on this thread: {s}", .{@errorName(e)});
+        bound = &o.e.ctx;
     }
 }
 
@@ -70,7 +68,7 @@ fn halt(ptr: *anyopaque, reason: []const u8) void {
     o.host.halt(reason);
 }
 
-/// The ownership order of `close`: the host joined first, then the lane's and the engine's, the device last.
+/// The ownership order of `close`: the host joined first, then the lane's, the engine's (which closes the device) last.
 fn release(ptr: *anyopaque) void {
     const o: *Owned = @ptrCast(@alignCast(ptr));
     o.host.stop(); // the round in flight has ended: the device is this thread's alone
@@ -79,10 +77,20 @@ fn release(ptr: *anyopaque) void {
     o.cfg.deinit(o.gpa);
     o.p.deinit();
     o.e.deinit();
-    o.ctx.deinit();
-    o.driver.close();
     o.gpa.free(o.startup);
     o.gpa.destroy(o);
+}
+
+/// The lane host's readiness: false once the engine's context has a sticky fault.
+fn healthy(ptr: *anyopaque) bool {
+    const o: *Owned = @ptrCast(@alignCast(ptr));
+    return o.e.ctx.healthy();
+}
+
+/// The device and pinned bytes this process holds, for the status route.
+fn memory(_: ?*anyopaque, reset_peak: bool) ?api.Memory {
+    const u = cuda.usage(reset_peak);
+    return .{ .active = u.device, .cache = 0, .peak = u.peak, .pinned = u.host };
 }
 
 fn gibs(bytes: usize) f64 {
@@ -94,7 +102,7 @@ fn scratchOf(e: *Engine, window: usize) anyerror!usize {
 }
 
 /// The engine for `o.dir` on `device`, its head from the folder and its window from the memory budget.
-fn openEngine(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, device: u32, problem: *[]const u8, comptime budget: type, comptime windows: type) anyerror!api.Opened {
+fn openEngine(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, device: u32, problem: *[]const u8, comptime budget: type, comptime windows: type, comptime libs: type) anyerror!api.Opened {
     // `budget` and `windows` are the native module's own file imports; the family cannot open them again.
     if (try o.slideRefusal(a, "CUDA")) |why| {
         problem.* = why;
@@ -113,38 +121,35 @@ fn openEngine(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, device: u32
         };
         return error.Refused;
     };
-    const own = try gpa.create(Owned);
-    errdefer gpa.destroy(own);
-    own.* = .{ .gpa = gpa, .driver = undefined, .ctx = undefined, .e = undefined, .p = undefined, .cfg = undefined, .clock = undefined, .core = undefined, .host = undefined, .startup = undefined };
-    own.driver = cuda.Driver.open() catch |err| {
+    // the device and the folder's head are checked before the engine takes a driver, a context or any weights
+    var probe = cuda.Driver.open() catch |err| {
         problem.* = try std.fmt.allocPrint(a, "no CUDA driver ({s})", .{@errorName(err)});
         return error.Refused;
     };
-    errdefer own.driver.close();
-    const count: u32 = @intCast(own.driver.deviceCount() catch |err|
+    defer probe.close();
+    const count: u32 = @intCast(probe.deviceCount() catch |err|
         return refuse(a, problem, "the CUDA driver cannot count its devices ({s})", .{@errorName(err)}));
     if (device >= count) {
         const named = if (o.device != null) "--device " else "TF_CUDA_DEVICE=";
         return refuse(a, problem, "{s}{d}: this machine has {d} CUDA device{s} (0 to {d})", .{ named, device, count, if (count == 1) "" else "s", count - 1 });
     }
-    own.ctx = cuda.Context.init(&own.driver, @intCast(device)) catch |err|
-        return refuse(a, problem, "the native CUDA engine cannot open device {d} ({s})", .{ device, @errorName(err) });
-    errdefer own.ctx.deinit();
-    const cap = try own.ctx.capability();
-    const head = folder.headOf(a, io, o.dir, "CUDA", problem) catch |err| switch (err) {
-        error.Refused => return error.Refused,
-        else => |x| return x,
-    };
+    const head = try folder.headOf(a, io, o.dir, "CUDA", problem);
     const normalize = switch (head) {
         .embedding => |h| h.normalize,
         .rerank => return refuse(a, problem, "{s} is a Qwen3 reranker (1_LogitScore): the CUDA engine serves Qwen3 embedding checkpoints so far", .{o.dir}),
     };
-    own.e = Engine.load(gpa, io, o.dir, @intCast(device)) catch |err|
-        return refuse(a, problem, "the native CUDA engine cannot load {s} ({s})", .{ o.dir, @errorName(err) });
+    const own = try gpa.create(Owned);
+    errdefer gpa.destroy(own);
+    own.* = .{ .gpa = gpa, .e = undefined, .p = undefined, .cfg = undefined, .clock = undefined, .core = undefined, .host = undefined, .startup = undefined };
+    own.e = Engine.load(gpa, io, o.dir, @intCast(device)) catch |err| {
+        problem.* = libs.explain(err) orelse try std.fmt.allocPrint(a, "the native CUDA engine cannot load {s} ({s})", .{ o.dir, @errorName(err) });
+        return error.Refused;
+    };
     errdefer own.e.deinit();
+    const cap = try own.e.ctx.capability();
     const e = own.e;
     var why: []const u8 = "";
-    const got = budget.readPool(gpa, io, &own.ctx, &why) catch |err|
+    const got = budget.readPool(gpa, io, &e.ctx, &why) catch |err|
         return refuse(a, problem, "the native CUDA engine cannot read the GPU's memory ({s})", .{@errorName(err)});
     const pool = got orelse {
         problem.* = why;
@@ -185,6 +190,8 @@ fn openEngine(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, device: u32
         .startup = own.startup,
     });
     own.host.on_thread = .{ .ctx = own, .run = bindThread };
+    own.host.health = .{ .ctx = own, .read = healthy };
+    own.host.memory = .{ .read = memory };
     try own.host.start();
     return .{ .engine = own.host.engine(), .close = release, .ctx = own, .halt = halt };
 }

@@ -22,6 +22,8 @@ pub fn flags(comptime open: anytype) !void {
     spill.spill = .evicted;
     var learn = base;
     learn.learn_conversations = true;
+    var precision = base;
+    precision.precision = .full;
     const asked = [_]struct { api.Open, []const u8 }{
         .{ drafter, "--drafter: Qwen3 dense checkpoints have no drafts" },
         .{ vision, "--vision: this CUDA family reads no images" },
@@ -31,6 +33,7 @@ pub fn flags(comptime open: anytype) !void {
         .{ ranks, "this CUDA family has no tensor-parallel ranks" },
         .{ spill, "--spill-gib" },
         .{ learn, "--learn-conversations" },
+        .{ precision, "--precision: this CUDA family reads no NVFP4 checkpoint" },
     };
     for (asked) |c| {
         var why: []const u8 = "";
