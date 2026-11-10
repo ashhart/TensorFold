@@ -167,6 +167,7 @@ consumed by writeback, not with a rank's local expert slots.
 EXL3 keeps its configured prompt cuts, including cache marks; `TF_FLASHNEXT_KEEP_INPASS` does not enable in-pass
 snapshots for this format. Classic checkpoints retain main's in-pass marks and per-lane convolution histories.
 
+
 ### TP integration scope
 
 Expert-parallel EXL3 placement and the collective spin override are EXL3-only; NVFP4 retains its existing placement
