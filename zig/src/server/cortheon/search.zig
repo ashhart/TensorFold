@@ -85,16 +85,62 @@ fn otherQuotes(marker: []const u8, buf: []u8) ?[]const u8 {
 }
 
 /// The next mark at or after `from`, trying the other quote style too.
+/// Both styles are walked in one pass so a page of only the other style stays linear as `from` advances.
 fn findMark(page: []const u8, from: usize, marker: []const u8) ?usize {
     var alt_buf: [64]u8 = undefined;
-    const a = std.ascii.findIgnoreCasePos(page, from, marker);
-    const alt = otherQuotes(marker, &alt_buf) orelse return a;
-    // Only look for the other quotes before the primary hit, so a page of one style stays linear.
-    const limit = a orelse page.len;
-    const b = std.ascii.findIgnoreCasePos(page[0..limit], from, alt);
-    if (a == null) return b;
-    if (b == null) return a;
-    return @min(a.?, b.?);
+    const alt = otherQuotes(marker, &alt_buf);
+    var i = from;
+    while (i < page.len) : (i += 1) {
+        if (std.ascii.startsWithIgnoreCase(page[i..], marker)) return i;
+        if (alt) |a| if (std.ascii.startsWithIgnoreCase(page[i..], a)) return i;
+    }
+    return null;
+}
+
+/// Whether two result URLs name the same page: scheme and host without case, path and query as written.
+fn sameResultUrl(a: []const u8, b: []const u8) bool {
+    const a_sep = std.mem.indexOf(u8, a, "://") orelse return std.mem.eql(u8, a, b);
+    const b_sep = std.mem.indexOf(u8, b, "://") orelse return std.mem.eql(u8, a, b);
+    if (!std.ascii.eqlIgnoreCase(a[0..a_sep], b[0..b_sep])) return false;
+    const a_rest = a[a_sep + 3 ..];
+    const b_rest = b[b_sep + 3 ..];
+    const a_host = std.mem.indexOfAny(u8, a_rest, "/?#") orelse a_rest.len;
+    const b_host = std.mem.indexOfAny(u8, b_rest, "/?#") orelse b_rest.len;
+    if (!std.ascii.eqlIgnoreCase(a_rest[0..a_host], b_rest[0..b_host])) return false;
+    return std.mem.eql(u8, a_rest[a_host..], b_rest[b_host..]);
+}
+
+/// The `href` value in `tag`, skipping an earlier attribute that only contains the text and a quoted value with no closer.
+fn hrefValue(tag: []const u8) ?[]const u8 {
+    var from: usize = 0;
+    while (std.ascii.findIgnoreCasePos(tag, from, "href")) |href_name| { // HREF is the same attribute
+        // an earlier name that only contains the text (data-href, …) is skipped so the real attribute is tried
+        if (href_name > 0 and tag[href_name - 1] != ' ' and tag[href_name - 1] != '\t') {
+            from = href_name + 1;
+            continue;
+        }
+        var after = href_name + 4;
+        while (after < tag.len and (tag[after] == ' ' or tag[after] == '\t')) after += 1; // href = is the same attribute
+        if (after >= tag.len or tag[after] != '=') {
+            from = href_name + 1;
+            continue;
+        }
+        var v = tag[after + 1 ..];
+        while (v.len > 0 and (v[0] == ' ' or v[0] == '\t')) v = v[1..];
+        if (v.len > 0 and (v[0] == '"' or v[0] == '\'')) {
+            const q = v[0];
+            v = v[1..];
+            const end = std.mem.indexOfScalar(u8, v, q) orelse {
+                from = href_name + 1; // a quoted value with no closer is skipped, not taken to the tag end
+                continue;
+            };
+            return v[0..end];
+        }
+        // unquoted ends at space, tab, CR, LF or the tag close
+        const end = std.mem.indexOfAny(u8, v, " \t\r\n>") orelse v.len;
+        return std.mem.trim(u8, v[0..end], " \t\r\n");
+    }
+    return null;
 }
 
 /// `text` with each `&amp;` entity turned into `&`, matching the entity's letters in either case.
@@ -166,16 +212,8 @@ fn parseMarked(a: Allocator, page: []const u8, limit: usize, m: Marks) Allocator
         const block_start = if (block) |b| lo + b else tag_start;
         if (std.ascii.findIgnoreCase(page[block_start..tag_start], "result--ad") != null) continue; // Result--ad is still an ad
         const tag = page[tag_start..tag_end];
-        const href_name = std.ascii.findIgnoreCase(tag, "href") orelse continue; // HREF is the same attribute
-        var after = href_name + 4;
-        while (after < tag.len and (tag[after] == ' ' or tag[after] == '\t')) after += 1; // href = is the same attribute
-        if (after >= tag.len or tag[after] != '=') continue;
-        var v = tag[after + 1 ..];
-        while (v.len > 0 and (v[0] == ' ' or v[0] == '\t')) v = v[1..];
-        const q: u8 = if (v.len > 0 and (v[0] == '"' or v[0] == '\'')) v[0] else ' '; // unquoted is still a link, as page hrefs are
-        if (q != ' ') v = v[1..];
-        const href_end = std.mem.indexOfAny(u8, v, if (q == ' ') " >" else &.{q}) orelse v.len;
-        const url = (try resultTarget(a, std.mem.trim(u8, v[0..href_end], " \t\r\n"))) orelse continue;
+        const href_raw = hrefValue(tag) orelse continue;
+        const url = (try resultTarget(a, href_raw)) orelse continue;
         const close = std.ascii.findIgnoreCasePos(page[0..next], tag_end, "</a>") orelse continue; // </A> closes the title too
         const title = try fragmentText(a, page[tag_end + 1 .. close]);
         var snippet: []const u8 = "";
@@ -186,7 +224,7 @@ fn parseMarked(a: Allocator, page: []const u8, limit: usize, m: Marks) Allocator
                 snippet = try fragmentText(a, page[s_open..s_close]);
         }
         var seen = false;
-        for (out.items) |r| seen = seen or std.ascii.eqlIgnoreCase(r.url, url); // Example.org is the same page
+        for (out.items) |r| seen = seen or sameResultUrl(r.url, url); // Example.org is the same host; paths keep their case
         if (!seen and title.len > 0) try out.append(a, .{ .title = title, .url = url, .snippet = snippet });
     }
     return out.items;
@@ -366,7 +404,7 @@ test "a search result keeps a link when spaces surround href's equals" {
     try std.testing.expectEqualStrings("https://example.org/page", results[0].url);
 }
 
-test "a search drops a duplicate when only the URL's letters differ" {
+test "a search drops a duplicate when only the host's letters differ" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -377,6 +415,51 @@ test "a search drops a duplicate when only the URL's letters differ" {
     const results = try parseDuckDuckGo(a, page, 5);
     try std.testing.expectEqual(@as(usize, 1), results.len);
     try std.testing.expectEqualStrings("One", results[0].title);
+}
+
+test "a search keeps two results that differ only in path case" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const page =
+        \\<div class="result results_links web-result"><h2><a class="result__a" href="https://example.org/wiki/Apple">One</a></h2></div>
+        \\<div class="result results_links web-result"><h2><a class="result__a" href="https://example.org/wiki/APPLE">Two</a></h2></div>
+    ;
+    const results = try parseDuckDuckGo(a, page, 5);
+    try std.testing.expectEqual(@as(usize, 2), results.len);
+    try std.testing.expectEqualStrings("https://example.org/wiki/Apple", results[0].url);
+    try std.testing.expectEqualStrings("https://example.org/wiki/APPLE", results[1].url);
+}
+
+test "a search result keeps a link when an earlier attribute contains href" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const page = "<div class=\"result results_links web-result\"><h2><a class=\"result__a\" data-href=\"https://other.example/x\" href=\"https://example.org/page\">Example</a></h2></div>";
+    const results = try parseDuckDuckGo(a, page, 5);
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqualStrings("https://example.org/page", results[0].url);
+}
+
+test "a search result keeps an unquoted href that ends at a tab" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const page = "<div class=\"result results_links web-result\"><h2><a class=\"result__a\" href=https://example.org/page\ttitle=x>Example</a></h2></div>";
+    const results = try parseDuckDuckGo(a, page, 5);
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqualStrings("https://example.org/page", results[0].url);
+}
+
+test "a search result skips a quoted href with no closer and reads the next" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // first href opens with " and never closes; the real target uses the other quote
+    const page = "<div class=\"result results_links web-result\"><h2><a class=\"result__a\" href=\"https://bad.example/x href='https://example.org/page'>Example</a></h2></div>";
+    const results = try parseDuckDuckGo(a, page, 5);
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqualStrings("https://example.org/page", results[0].url);
 }
 
 test "a search result is found when its class letters differ" {

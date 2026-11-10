@@ -81,9 +81,9 @@ pub fn registry(url: []const u8) bool {
         var parts = std.mem.splitScalar(u8, url["https://pypi.org/pypi/".len..], '/');
         const name = parts.next() orelse return false;
         const second = parts.next() orelse return false;
-        if (std.ascii.eqlIgnoreCase(second, "json")) return packageName(name) and parts.next() == null; // JSON is the same path
+        if (std.mem.eql(u8, second, "json")) return packageName(name) and parts.next() == null; // paths stay exact; hosts already matched without case
         const third = parts.next() orelse return false;
-        return packageName(name) and versionName(second) and std.ascii.eqlIgnoreCase(third, "json") and parts.next() == null;
+        return packageName(name) and versionName(second) and std.mem.eql(u8, third, "json") and parts.next() == null;
     }
     if (std.ascii.startsWithIgnoreCase(url, "https://registry.npmjs.org/")) { // Registry.npmjs.org is the same host
         var rest = url["https://registry.npmjs.org/".len..];
@@ -95,7 +95,7 @@ pub fn registry(url: []const u8) bool {
         var parts = std.mem.splitScalar(u8, rest, '/');
         const name = parts.next() orelse return false;
         const after = parts.next();
-        if (after) |v| if (!(std.ascii.eqlIgnoreCase(v, "latest") or versionName(v))) return false; // Latest is the same path
+        if (after) |v| if (!(std.mem.eql(u8, v, "latest") or versionName(v))) return false; // latest stays exact; hosts already matched without case
         return packageName(name) and parts.next() == null;
     }
     if (std.ascii.startsWithIgnoreCase(url, "https://crates.io/api/v1/crates/")) { // Crates.io is the same host
@@ -137,20 +137,13 @@ test "a request reads only what it was shown, and registry json for one package"
 test "pypi registry json allows a host whose letters differ" {
     try std.testing.expect(registry("https://PyPI.org/pypi/httpx/json"));
     try std.testing.expect(registry("https://PyPI.org/pypi/httpx/0.28.1/json"));
-}
-
-test "pypi registry json allows JSON when json's letters differ" {
-    try std.testing.expect(registry("https://pypi.org/pypi/httpx/JSON"));
-    try std.testing.expect(registry("https://pypi.org/pypi/httpx/0.28.1/JSON"));
+    try std.testing.expect(!registry("https://pypi.org/pypi/httpx/JSON"));
+    try std.testing.expect(!registry("https://pypi.org/pypi/httpx/0.28.1/JSON"));
 }
 
 test "npm registry allows a host whose letters differ" {
     try std.testing.expect(registry("https://Registry.npmjs.org/react"));
     try std.testing.expect(registry("https://Registry.npmjs.org/react/latest"));
-}
-
-test "npm registry allows Latest when latest's letters differ" {
-    try std.testing.expect(registry("https://registry.npmjs.org/react/Latest"));
 }
 
 test "crates registry allows a host whose letters differ" {
