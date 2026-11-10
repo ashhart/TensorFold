@@ -53,6 +53,7 @@ pub const Engine = struct {
     grammar_workers: @import("grammar_parallel.zig").State = .{},
     arena: std.heap.ArenaAllocator, // a round's temporaries
     unread: std.ArrayList(Unread) = .empty, // queued draws the log reads at the step's end
+    price_log: ?bool = null, // TF_SHARED_PRICE_LOG, read at the first priced shared round (lanes/price_log.zig)
     pub fn init(gpa: Allocator, cfg: *const Config, backend: be.Backend, clock: be.Clock) Engine {
         return .{
             .gpa = gpa,
