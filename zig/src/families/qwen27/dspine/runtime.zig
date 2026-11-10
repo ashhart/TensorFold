@@ -258,25 +258,17 @@ pub const Model = struct {
         var parents: [64]i32 = undefined;
         var own: [64]f64 = undefined;
         const want = @min(nodes, tokens.len);
-        var n: usize = 0;
-        if (try @import("sys").environment.read(bool, "TF_DSPINE_CHAIN", false)) { // the greedy chain alone
-            n = @min(want, p.drafts.len);
-            @memcpy(tokens[0..n], p.drafts[0..n]);
-            for (parents[0..n], 0..) |*v, i| v.* = @as(i32, @intCast(i)) - 1;
-            @memset(own[0..n], 0);
-        } else {
-            // each row: its 16 ids ascending, then 16 unused unary logits (the table scores every candidate)
-            var words: [15 * 32]u32 = @splat(0);
-            var logits: [15][16][16]f32 = undefined;
-            for (0..15) |r| {
-                @memcpy(words[r * 32 ..][0..16], &p.candidates[r]);
-                for (0..16) |s| for (0..16) |j| {
-                    logits[r][s][j] = p.table[r][s][j] * p.scales[r];
-                };
-            }
-            const c: dt.Candidates = .{ .words = std.mem.sliceAsBytes(&words), .projected = std.mem.asBytes(&logits), .topk = 16, .rank = 0, .predecessor = &.{}, .successor = &.{}, .sampling = sampling, .position = position, .table = true, .layout = .{ .words = 32, .ids = 0, .logits = 16 } };
-            n = dt.grow(64, c, pending, 15, want, tokens[0..want], parents[0..want], own[0..want]);
+        // each row: its 16 ids ascending, then 16 unused unary logits (the table scores every candidate)
+        var words: [15 * 32]u32 = @splat(0);
+        var logits: [15][16][16]f32 = undefined;
+        for (0..15) |r| {
+            @memcpy(words[r * 32 ..][0..16], &p.candidates[r]);
+            for (0..16) |s| for (0..16) |j| {
+                logits[r][s][j] = p.table[r][s][j] * p.scales[r];
+            };
         }
+        const c: dt.Candidates = .{ .words = std.mem.sliceAsBytes(&words), .projected = std.mem.asBytes(&logits), .topk = 16, .rank = 0, .predecessor = &.{}, .successor = &.{}, .sampling = sampling, .position = position, .table = true, .layout = .{ .words = 32, .ids = 0, .logits = 16 } };
+        const n = dt.grow(64, c, pending, 15, want, tokens[0..want], parents[0..want], own[0..want]);
         const out_tokens = try m.allocator.dupe(u32, tokens[0..n]);
         errdefer m.allocator.free(out_tokens);
         const out_parents = try m.allocator.dupe(i32, parents[0..n]);
