@@ -5,6 +5,9 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 ## Unreleased
 
 
+- Tests: `tp.device` runs N tensor-parallel ranks as threads on one GPU with device copies, so DeepSeek-V4.1's exchanges are now tested at a world of 3 (uneven sampling, dense split KV and lockstep), and `zig build dsv41-test` builds `tf-dsv41-test` over the family's own kernel images (#2491, refs #2270). Thanks to @Defilan.
+
+
 - CUDA: a model whose KDA heads or conv window differ from the kernels' (128 keys, 128 values, 4 taps) is refused at load with `KdaGeometry`, before anything is allocated or launched, and a host test ties those numbers to `kda.cuh` (#2338, refs #850). Thanks to @ajensenwaud.
 
 
