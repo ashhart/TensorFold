@@ -125,9 +125,7 @@ pub fn failAll(h: *LaneHost, message: []const u8) void {
     for (jobs.items) |job| endFailed(h, job, message);
 }
 
-/// Ends a job the backend failed: off the filling list, its stream discarded unless it already finished,
-/// the request ended with the backend's words. A job admitted this round has no stream yet when the
-/// planner's admitted callback fails.
+/// Ends a job the backend failed: off the filling list, its stream discarded unless it already finished (a job admitted this round has no stream yet), the request ended with the backend's words.
 fn endFailed(h: *LaneHost, job: *Job, message: []const u8) void {
     h.lock();
     fill.unfill(h, job);
