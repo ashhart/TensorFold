@@ -45,6 +45,7 @@ pub const flashnext_vision_contract = @import("families/flashnext/vision_contrac
 pub const flashnext_fsr_fixture = @import("families/flashnext/fsr_gpu_fixture.zig");
 pub const flashnext_fsr_contract = @import("families/flashnext/fsr_contract_source.zig");
 pub const flashnext_scale_index_fixture = @import("families/flashnext/scale_index_fixture.zig");
+pub const flashnext_grouped_fixture = @import("families/flashnext/grouped_fixture.zig");
 pub const flashnext_replay = @import("families/flashnext/replay.zig");
 pub const flashnext_rows = @import("families/flashnext/rows_load.zig");
 pub const flashnext_sample = @import("families/flashnext/host_sample.zig");
