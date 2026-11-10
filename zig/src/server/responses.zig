@@ -103,6 +103,18 @@ pub fn turn(srv: *Server, a: Allocator, conn: *Conn, cx: *Cx, body: Value, t: tr
     return .{ .whole = reply.completion(out.payload) catch return .{ .streamed = null } };
 }
 
+/// A ``generate: false`` turn: created, in progress, then completed with no output and ``prompt_tokens`` of input.
+pub fn warmup(srv: *Server, a: Allocator, cx: *Cx, body: Value, t: translate_mod.Request, sink: Sink, prompt_tokens: usize, opts: TurnOptions) ?Value {
+    const base = newBase(srv, a, body, t) catch return null;
+    var reply: Reply = .{ .srv = srv, .a = a, .sink = sink, .base = base, .streaming = true, .keep = t.store, .added = t.added, .cx = cx, .call_ids = .{ .key = &srv.tool_ids, .body = t.chat }, .whole_history = opts.whole_history, .warmup = true };
+    const usage = json.newObject(a) catch return null;
+    usage.put(a, "prompt_tokens", json.intValue(a, prompt_tokens) catch return null) catch return null;
+    usage.put(a, "completion_tokens", .{ .int = "0" }) catch return null;
+    sink.vt.open(sink.ctx) catch return null;
+    reply.start() catch return null;
+    return reply.finish("stop", .{ .object = usage }, null) catch null;
+}
+
 /// The response object a turn starts from: in progress, with no output yet and the request's echoed fields.
 fn newBase(srv: *Server, a: Allocator, body: Value, t: translate_mod.Request) !*json.Object {
     const base = try json.newObject(a);

@@ -500,8 +500,10 @@ pub const Server = struct {
             conn.key_scopes = m.scopes;
         }
         if (!auth.gatedRequest(conn.method, conn.path, keys.metrics_open)) return true;
-        if (matched != null and scope.allows(conn.key_scopes, conn.method, conn.path)) return true;
         const path = auth.routePath(conn.path);
+        // a Responses WebSocket upgrade opens with an inference key; the socket checks each response.create again
+        const upgrade = @import("ws_upgrade.zig").requested(conn) and std.mem.eql(u8, responses.route(path) orelse "-", "");
+        if (matched != null and (scope.allows(conn.key_scopes, conn.method, conn.path) or (upgrade and scope.allowsUpgrade(conn.key_scopes)))) return true;
         const messages = for ([_][]const u8{ "/v1/messages", "/v1/messages/count_tokens", "/messages", "/messages/count_tokens" }) |p| {
             if (std.mem.eql(u8, path, p)) break true;
         } else false;
