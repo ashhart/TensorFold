@@ -149,12 +149,10 @@ pub const Settings = struct {
             problem.* = "TF_GLM_PROMPT_K=shape requires TF_GLM_MM=1";
             return error.BadSetting;
         }
-        if (get("TF_GLM_GRAPHS")) |v| {
-            if (std.mem.eql(u8, v, "1")) s.graphs = true else if (!std.mem.eql(u8, v, "0")) {
-                problem.* = "TF_GLM_GRAPHS: 0 or 1";
-                return error.BadSetting;
-            }
-        }
+        s.graphs = @import("sys").environment.value(bool, "TF_GLM_GRAPHS", get("TF_GLM_GRAPHS"), false) catch {
+            problem.* = "TF_GLM_GRAPHS: 0 or 1";
+            return error.BadSetting;
+        };
         if (get("TF_GLM_KV_HOST")) |v| {
             if (std.mem.eql(u8, v, "1")) s.kv_host = 1 else if (!std.mem.eql(u8, v, "0")) {
                 problem.* = "TF_GLM_KV_HOST: 0 or 1";
