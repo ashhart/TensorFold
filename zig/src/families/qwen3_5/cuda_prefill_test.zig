@@ -111,7 +111,9 @@ fn pass(prompt: []const u32, chunks: []const u32, caps: []const u32, ends: *std.
     }
 }
 
-pub fn capped() !void {
+pub fn capped(comptime Lanes: type, backend: anytype) !void {
+    var state: Lanes = .{ .gpa = t.allocator, .io = t.io, .e = undefined, .capacity = 32, .target = undefined };
+    try t.expect(backend(&state).chunk_invariant); // the lane host offers its cap only to a family that declares it
     const m = @import("cuda_engine.zig").max_rows;
     const prompt = try t.allocator.alloc(u32, 3 * m);
     defer t.allocator.free(prompt);
