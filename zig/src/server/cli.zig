@@ -132,7 +132,7 @@ pub const flags = [_]Flag{
     .{ .name = "--ple-on-ssd", .kind = .store_true, .native = builtin.os.tag == .macos },
     .{ .name = "--fsr-route-trace", .path = true, .native = builtin.os.tag == .macos },
     .{ .name = "--no-update-check", .kind = .store_true, .native = true },
-    .{ .name = "--backend", .choices = backend_values, .native = true, .native_values = backend_values },
+    .{ .name = "--backend", .choices = &.{ "auto", "mlx", "cuda", "rocm" }, .native = true, .native_values = backend_values },
     .{ .name = "--tp", .choices = &.{ "1", "2", "4", "8" }, .native = served("--tp") },
     .{ .name = "--rank", .native = served("--tp") },
     .{ .name = "--master", .native = served("--tp") },
