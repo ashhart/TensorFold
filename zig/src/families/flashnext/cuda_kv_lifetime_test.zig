@@ -33,7 +33,7 @@ test "KV lifetime: Flash Next failed table wait and later fill retain pages unti
             D.fail_wait = false;
             cuda.completion.drain(&d, e.stream.*, "the test driver must drain before it leaves");
         }
-        const l = pages.layout(64, 16, null, 0);
+        const l = try pages.layout(64, 16, null, 0);
         const p = try pages.Pool.init(t.allocator, &e, l, 64, null, 1, l.runPages() + 16);
         defer {
             D.fail_wait = false;
@@ -63,7 +63,7 @@ test "KV lifetime: Flash Next close and deinit retain pages until context proof"
             D.fail_wait = false;
             cuda.completion.drain(&d, e.stream.*, "the test driver must drain before it leaves");
         }
-        const l = pages.layout(64, 16, null, 0);
+        const l = try pages.layout(64, 16, null, 0);
         const p = try pages.Pool.init(t.allocator, &e, l, 64, null, 1, l.runPages() + 16);
         var c = try p.open(1);
         Watch.pool = p.pool;
@@ -90,8 +90,8 @@ test "KV lanes: two ranks whose pages differ in bytes open and close the same pa
     defer cuda.completion.drain(&d, e.stream.*, "the test driver must drain before it leaves");
     // rank 0 keeps the MTP head's layer and a bigger run, rank 1 neither: both take the larger run in pages
     const head: pages.Head = .{ .draft_n = 4096, .rows = 64 };
-    const a = pages.layout(256, 16, head, 0);
-    const b = pages.layout(256, 16, null, 0);
+    const a = try pages.layout(256, 16, head, 0);
+    const b = try pages.layout(256, 16, null, 0);
     try t.expect(a.pageBytes() != b.pageBytes());
     const k = @max(a.runPages(), b.runPages());
     const left = pages.withRunPages(a, k);
@@ -131,7 +131,7 @@ test "KV lanes: every pass over a lane's MTP head reads its cache through the la
     var e = engine(&d);
     defer cuda.completion.drain(&d, e.stream.*, "the test driver must drain before it leaves");
     const head: pages.Head = .{ .draft_n = 4096, .rows = 64 };
-    const l = pages.layout(256, 16, head, 0);
+    const l = try pages.layout(256, 16, head, 0);
     const p = try pages.Pool.init(t.allocator, &e, l, 256, head, 1, 4 * l.runPages() + 64);
     defer p.deinit();
     var seq = try p.open(100);
