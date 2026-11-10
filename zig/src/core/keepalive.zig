@@ -5,6 +5,8 @@ const std = @import("std");
 pub const Target = struct {
     ctx: *anyopaque,
     tick: *const fn (ctx: *anyopaque) void,
+    /// The command buffer alone, each interval a request runs: a pass committed whole submits nothing for its length.
+    probe: ?*const fn (ctx: *anyopaque) void = null,
 };
 
 /// The served interval: macOS unwires an idle model after 1-2 s, so a tick each 400 ms stays well inside it.
@@ -61,6 +63,11 @@ pub const Keepalive = struct {
         return k.busy.load(.acquire) == 0 and at - k.idle_since.load(.acquire) <= k.window_ns;
     }
 
+    /// Whether the interval's probe is due: a request runs and the target has one.
+    pub fn probing(k: *const Keepalive) bool {
+        return k.target.probe != null and k.busy.load(.acquire) > 0;
+    }
+
     /// Stops the thread and frees the ticker. Call before the engine's queue goes away.
     pub fn stop(k: *Keepalive) void {
         k.stopped.store(true, .release);
@@ -76,7 +83,7 @@ pub const Keepalive = struct {
         while (!k.stopped.load(.acquire)) {
             std.Io.sleep(k.io, .fromNanoseconds(k.interval_ns), .awake) catch {};
             if (k.stopped.load(.acquire)) break;
-            if (k.due(now(k.io))) k.target.tick(k.target.ctx);
+            if (k.due(now(k.io))) k.target.tick(k.target.ctx) else if (k.probing()) k.target.probe.?(k.target.ctx);
         }
     }
 };
@@ -142,6 +149,27 @@ test "the ticker commits while idle and holds while a request runs" {
     try until(&gated.commits, 2);
 }
 
+test "a target with a probe has it committed while a request runs, and its tick only while idle" {
+    const Probed = struct {
+        var probes: std.atomic.Value(u32) = .init(0);
+        fn probe(_: *anyopaque) void {
+            _ = probes.fetchAdd(1, .monotonic);
+        }
+    };
+    Probed.probes.store(0, .release);
+    var gated = Gated{};
+    gated.gate.store(1, .release); // ticks pass straight through
+    const k = try Keepalive.startEvery(testing.allocator, std.testing.io, .{ .ctx = &gated, .tick = Gated.tick, .probe = Probed.probe }, 900 * std.time.ns_per_s, std.time.ns_per_ms);
+    defer k.stop();
+    try until(&gated.commits, 1);
+    try testing.expectEqual(@as(u32, 0), Probed.probes.load(.acquire)); // idle: the tick, never the probe
+    k.begin();
+    try until(&Probed.probes, 3); // a request runs: the probe each interval
+    k.end();
+    const ticked = gated.commits.load(.acquire);
+    try until(&gated.commits, ticked + 2); // the request ended: ticks resume
+}
+
 test "ticks stop once the keep-warm window has passed and resume when a request ends" {
     var gated = Gated{};
     const k = try gated.start(900 * std.time.ns_per_s);
@@ -164,6 +192,7 @@ test "the window decides due without a thread" {
     try testing.expect(!k.due(1101)); // past it
     k.begin();
     try testing.expect(!k.due(1050)); // a request runs: no tick even inside the window
+    try testing.expect(!k.probing()); // and no probe for a target that has none
     k.end();
     try testing.expect(k.due(1050));
     k.window_ns = 0;
