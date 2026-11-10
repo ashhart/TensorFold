@@ -311,7 +311,7 @@ test "routing groups: groups of one and a single pick refused (HF's rule differs
     }
 }
 
-test "fixtures/config.json is inclusionAI/Ling-3.1-flash's at a6943f4b, byte for byte (oracle/ling_hf.py pins the same)" {
+test "fixtures/config.json is inclusionAI/Ling-3.1-flash's at a6943f4b, byte for byte" {
     var h: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(real, &h, .{});
     try t.expectEqualStrings("6f3773e52a12509e772e698aacacaa156d2402ebb8250812a1da52a03d92f084", &std.fmt.bytesToHex(h, .lower));

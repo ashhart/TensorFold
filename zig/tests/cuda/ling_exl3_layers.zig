@@ -1,6 +1,6 @@
 //! `ling-exl3-layers DIR REF OUT`: real EXL3 layers, each on the reference's own input rows (teacher-forced).
 
-// REF (tools/g2/ling_layers_ref.py, exllamav3): "TFLX3L01", u32 T, D, n, i32 ids[T], u32 layer[n], f32 in, out a layer
+// REF (oracle/ling_layers_ref.py, exllamav3): "TFLX3L01", u32 T, D, n, i32 ids[T], u32 layer[n], f32 in, out a layer
 
 // OUT: "TFLX3O01", u32 T, D, n, top, per layer f32 prompt[T][D], decode[T][D], i32 picks[T][top + 1] prompt, decode
 const std = @import("std");
