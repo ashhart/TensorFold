@@ -84,8 +84,7 @@ fn otherQuotes(marker: []const u8, buf: []u8) ?[]const u8 {
     return if (changed) buf[0..marker.len] else null;
 }
 
-/// The next mark at or after `from`, trying the other quote style too.
-/// Both styles are walked in one pass so a page of only the other style stays linear as `from` advances.
+/// Next mark at or after `from`, either quote style, walked once as `from` advances.
 fn findMark(page: []const u8, from: usize, marker: []const u8) ?usize {
     var alt_buf: [64]u8 = undefined;
     const alt = otherQuotes(marker, &alt_buf);
@@ -110,7 +109,7 @@ fn sameResultUrl(a: []const u8, b: []const u8) bool {
     return std.mem.eql(u8, a_rest[a_host..], b_rest[b_host..]);
 }
 
-/// The `href` value in `tag`, skipping an earlier attribute that only contains the text and a quoted value with no closer.
+/// The href in a tag: skip a name that only contains it, and a quote with no closer.
 fn hrefValue(tag: []const u8) ?[]const u8 {
     var from: usize = 0;
     while (std.ascii.findIgnoreCasePos(tag, from, "href")) |href_name| { // HREF is the same attribute
