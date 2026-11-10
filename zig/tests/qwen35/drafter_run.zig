@@ -142,8 +142,9 @@ fn rounds(gpa: std.mem.Allocator, d: *Draft, tracks: []Track) !usize {
             const p = t.len + at[i];
             var f = t.f;
             f.offset = p;
-            f.rows = @intCast(k + 1);
+            // the continuation's last round can lack its bonus token's follower: absorb only the rows it has
             const follow = next[0..@min(k + 1, next.len)];
+            f.rows = @intCast(follow.len);
             a.* = .{ .stream = t.stream, .features = f, .start = p, .follow = follow, .prompt = false };
             at[i] += k + 1;
         }
