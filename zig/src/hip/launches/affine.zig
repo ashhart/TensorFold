@@ -427,14 +427,14 @@ pub const Kernels = struct {
 
     // ---- the entry points ----
 
-    /// Prefill's tile, same bits however a prompt is cut: the registry's pick among one family's tiles, by the table; few rows K-split.
-    pub fn prefillLaunch(k: *const Kernels, r: *const runtime.Runtime, a: Arg, s: abi.Stream, items: c_int, pairs: c_int, expert_rows: c_int) Error!void {
+    /// Prefill's tile: the registry's pick for the plan's `items`, launched over the `live` ones; few rows K-split.
+    pub fn prefillLaunch(k: *const Kernels, r: *const runtime.Runtime, a: Arg, s: abi.Stream, items: c_int, pairs: c_int, expert_rows: c_int, live: c_int) Error!void {
         const op: registry.Op = if (a.route.items != 0) .routed else .project;
         const e = k.choose(op, .prefill, prefillShape(a, items, pairs, expert_rows)) orelse return refuse("prefill shape");
         var arg = a;
         // this GPU's cut for a tile with K-parallel passes for items of few rows
         if (k.reg.rowOf(e)) |row| arg.route.few = @intCast(row.few_rows);
-        try k.prefillGo(e, .{ .r = r, .s = s, .arg = arg, .items = items });
+        try k.prefillGo(e, .{ .r = r, .s = s, .arg = arg, .items = @min(items, @max(live, 1)) });
     }
 
     /// The product a prompt launch asks the registry about; a routed plan's pairs, and its average rows per expert.

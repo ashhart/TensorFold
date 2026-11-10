@@ -79,6 +79,7 @@ test {
     _ = @import("kernel_tests/flashnext.zig");
     _ = @import("kernel_tests/flashnext_attn.zig");
     _ = @import("kernel_tests/moe_gate.zig");
+    _ = @import("kernel_tests/moe_live.zig");
     _ = @import("kernel_tests/flashnext_sparse.zig");
     _ = @import("kernel_tests/nemotron/moe.zig");
     _ = @import("kernel_tests/nemotron/pick.zig");
