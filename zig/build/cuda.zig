@@ -312,6 +312,22 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     const safety = b.step("test-kv-safety-host", "Actual native KV startup budget and paged constructors under allocation/completion faults");
     for ([_]*std.Build.Module{ native, mods.nemotron }) |m| safety.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{"kv safety:"} })).step);
     b.step("test-cache-capacity-host", "Startup cache capacity facts and warnings without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"cache capacity:"} })).step);
+    // MOSS-Image's stopped engine logs at err, which the test runner counts as a failure: this check runs it as an exe
+    const moss_stopped = b.addExecutable(.{ .name = "moss-out-of-service-check", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/src/native/moss_out_of_service_check.zig"),
+        .target = host,
+        .optimize = .debug,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "cuda", .module = cuda },
+            .{ .name = "engine_api", .module = mods.api },
+            .{ .name = "moss_image", .module = native.import_table.get("moss_image").? },
+            .{ .name = "tokenizer", .module = native.import_table.get("tokenizer").? },
+        },
+    }) });
+    const moss_stopped_run = b.addRunArtifact(moss_stopped);
+    step.dependOn(&moss_stopped_run.step);
+    b.step("test-moss-out-of-service", "MOSS-Image's stopped engine logs its reason at err without a GPU").dependOn(&moss_stopped_run.step);
     b.step("test-snap-fork-host", "CUDA prompt-cache rules: no fork marks unless a family sets snap_fork, its marks when it does").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"snap fork:"} })).step);
     @import("disk_identity_host.zig").steps(b, native, step);
     const merge_checks = b.step("test-kv-merge-host", "KV page integration with landed snapshot modes and budgets");

@@ -86,6 +86,8 @@ pub const Model = struct {
     att: cuda.vit.Attention,
     w: *wts.Weights,
     max_text: usize,
+    /// The most image rows the scratch was planned for: `fit` re-points the geometry inside it.
+    max_image: usize,
     image: usize,
     rows: usize,
     columns: usize,
@@ -127,7 +129,7 @@ pub const Model = struct {
         const plan = try Scratch.of(max_text, image);
         const t = try gpa.create(Model);
         errdefer gpa.destroy(t);
-        t.* = .{ .gpa = gpa, .d = d, .stream = undefined, .k = undefined, .vk = undefined, .gemms = undefined, .att = undefined, .w = undefined, .max_text = max_text, .image = image, .rows = g.rows, .columns = g.columns, .scratch = undefined, .marks = undefined };
+        t.* = .{ .gpa = gpa, .d = d, .stream = undefined, .k = undefined, .vk = undefined, .gemms = undefined, .att = undefined, .w = undefined, .max_text = max_text, .max_image = image, .image = image, .rows = g.rows, .columns = g.columns, .scratch = undefined, .marks = undefined };
         t.stream = try cuda.Stream.init(d, false);
         errdefer t.stream.deinit();
         t.k = try ks.Kernels.load(d);
@@ -155,6 +157,16 @@ pub const Model = struct {
             at += std.mem.alignForward(usize, n, 256);
         }
         return t;
+    }
+
+    /// A request's geometry inside the scratch `load` planned: rows and columns only, every size within `max_image`.
+    pub fn fit(t: *Model, width: usize, height: usize) !void {
+        const g = try cfg.grid(width, height);
+        const image = try Scratch.mul(g.rows, g.columns);
+        if (image > t.max_image) return error.ImageTooLarge;
+        t.rows = g.rows;
+        t.columns = g.columns;
+        t.image = image;
     }
 
     pub fn deinit(t: *Model) void {
