@@ -273,7 +273,7 @@ pub const Rank = struct {
             return;
         }
         if (got < @sizeOf(Header)) {
-            watching.* = got != 0 and revents & (posix.POLL.HUP | rdhup) == 0; // a part header the peer will never finish
+            watching.* = got != 0 and revents & (posix.POLL.HUP | rdhup) == 0; // a part header the peer won't finish
             return;
         }
         if (h.magic == magic and h.call == @backingInt(Call.abort)) return r.close(.aborted);
