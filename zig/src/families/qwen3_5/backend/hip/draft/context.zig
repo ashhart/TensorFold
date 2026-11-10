@@ -63,6 +63,7 @@ pub fn stage(s: Shape, items: []const dr.Hold, contexts: []const *Ctx, ids: []u3
     for (items, contexts, 0..) |it, ctx, index| {
         if (it.position == 0 or ctx.end != it.position - 1 or ctx.begin > ctx.end) return error.DraftContextBehind;
         if (it.position + s.block > std.math.maxInt(i32)) return error.PositionTooFar;
+        // a tree's mask has to keep each row's own key first: a row that sees no key comes out of the merge as NaN
         if (it.lanes != null) return error.TreesUnsupported;
         if (it.pending >= s.vocab or it.depth > s.block - 1) return error.BadDraftFrame;
         for (contexts[0..index]) |prior| {
