@@ -40,7 +40,7 @@ test "dots text bytes: embedding, untied head, final norm and 28 layers, the tow
     try std.testing.expectEqual(want, try weights.textBytes(std.testing.allocator, c));
 }
 
-test "dots on CUDA: text only, no reasoning block, its config and tensor refusals worded" {
+test "dots on CUDA: no reasoning block, its config and tensor refusals worded" {
     try std.testing.expect(!native.reasoning and native.keeps_no_prompts);
     const hooks = .{ &native.open, &native.attach, &native.fits, &native.ledgerPool, &native.textWeightBytes }; // compiles the load and the layer
     inline for (hooks) |h| try std.testing.expect(@intFromPtr(h) != 0);
