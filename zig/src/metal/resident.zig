@@ -93,9 +93,19 @@ pub fn Owner(comptime Metal: type) type {
             r.held.flush();
         }
 
+        fn lockFn(ctx: *anyopaque) void {
+            const r: *Self = @ptrCast(@alignCast(ctx));
+            r.mutex.lockUncancelable(r.io);
+        }
+
+        fn unlockFn(ctx: *anyopaque) void {
+            const r: *Self = @ptrCast(@alignCast(ctx));
+            r.mutex.unlock(r.io);
+        }
+
         /// Flush waiting joins and commit a small blit through the set; the Resident must stay put.
         pub fn target(r: *Self) mtl.keepalive.Target {
-            return .{ .queue = r.work, .sets = @as(*const [1]mtl.ResidencySet, &r.held.set), .scratch = r.scratch, .flush = .{ .ctx = r, .run = flushFn } };
+            return .{ .queue = r.work, .sets = @as(*const [1]mtl.ResidencySet, &r.held.set), .scratch = r.scratch, .flush = .{ .ctx = r, .run = flushFn }, .hold = .{ .ctx = r, .lock = lockFn, .unlock = unlockFn } };
         }
 
         pub fn deinit(r: *Self) void {
