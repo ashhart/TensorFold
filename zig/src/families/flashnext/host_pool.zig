@@ -18,6 +18,8 @@ pub const Pool = struct {
     go: [max_parts - 1]std.atomic.Value(u32) = undefined, // bumped to wake a worker: to claim parts, or to stop
     spawned: usize = 0,
     stopping: std.atomic.Value(bool) = .init(false),
+    /// Every `run` accepted, a warm call aside: the first wake of a cold call is counted in `waking` as well.
+    calls: std.atomic.Value(u32) = .init(0),
     // the current call: generation << 32 | parts << 16 | parts claimed (a claim is a compare-exchange on all three)
     state: std.atomic.Value(u64) = .init(0),
     done: std.atomic.Value(u32) = .init(0), // parts finished
@@ -56,6 +58,7 @@ pub const Pool = struct {
     fn runWith(p: *Pool, parts: usize, task: Task, spawner: anytype) !void {
         if (parts == 0) return;
         if (parts > max_parts) return error.TooManyParts;
+        _ = p.calls.fetchAdd(1, .monotonic);
         p.mutex.lockUncancelable(p.io);
         defer p.mutex.unlock(p.io);
         while (p.spawned < parts - 1) {
