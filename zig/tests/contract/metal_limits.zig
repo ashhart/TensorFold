@@ -135,6 +135,10 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         const body = try @import("metal_weight_only.zig").text(a);
         return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
     }
+    if (std.mem.startsWith(u8, d.name, "flashnext grouped ")) {
+        if (!assemble) return undefined;
+        return .{ .decl = d, .function = fun, .here = sources.flashnext_gx, .pre_m5 = sources.flashnext_gx };
+    }
     if (std.mem.startsWith(u8, d.name, "flashnext FSR ")) {
         if (!assemble) return undefined;
         const fsr = try tf.flashnext_fsr_contract.source(a, fun);

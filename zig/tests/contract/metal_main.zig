@@ -480,6 +480,16 @@ pub fn main(init: std.process.Init) !u8 {
     var attention_pv: @import("metal_attention_pv.zig").Suite = .{};
     defer attention_pv.deinit();
     try attention_pv.collect(a, device, queue, &kernels, o.only);
+    const flash_grouped = @import("metal_flashnext_grouped.zig");
+    var grouped_probes: [2]flash_grouped.Probe = undefined;
+    var grouped_made: usize = 0;
+    defer for (grouped_probes[0..grouped_made]) |*probe| probe.deinit();
+    for ([_]bool{ false, true }) |control| {
+        if (!wanted(o, flash_grouped.Probe.name(control))) continue;
+        grouped_probes[grouped_made] = .{ .a = a, .device = device, .queue = queue, .control = control };
+        grouped_made += 1;
+        try kernels.append(a, grouped_probes[grouped_made - 1].kernel());
+    }
     const weight_only = @import("metal_weight_only.zig");
     const weight_source = try weight_only.text(a);
     defer a.free(weight_source);

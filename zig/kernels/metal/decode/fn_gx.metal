@@ -107,7 +107,8 @@ inline void topk_all(const device float* logits, uint lane, thread int* ids, thr
   }
 }
 // Threadgroup r (one simdgroup): row r's picks and weights, as the recorded gate/up writes them
-kernel void gx_pick(const device float* LG [[buffer(0)]], const constant int* rows [[buffer(1)]],
+[[max_total_threads_per_threadgroup(32)]]
+[[kernel]] void gx_pick(const device float* LG [[buffer(0)]], const constant int* rows [[buffer(1)]],
     device uint* PICK [[buffer(2)]], device float* WTS [[buffer(3)]], uint3 tg [[threadgroup_position_in_grid]],
     uint lane [[thread_index_in_simdgroup]]) {
   const int r = int(tg.x);
@@ -137,7 +138,8 @@ inline void put_items(device int* LIST, threadgroup const int* sp, int e, int fi
 }
 
 // One threadgroup of 512: pairs grouped by expert (their order within an expert varies; no row's bits depend on it)
-kernel void gx_list(const device uint* PICK [[buffer(0)]], const constant int* rows [[buffer(1)]],
+[[max_total_threads_per_threadgroup(512)]]
+[[kernel]] void gx_list(const device uint* PICK [[buffer(0)]], const constant int* rows [[buffer(1)]],
     device int* LIST [[buffer(2)]], uint3 tid [[thread_position_in_threadgroup]],
     uint sgi [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
   threadgroup atomic_int cnt[NE];
@@ -186,7 +188,8 @@ kernel void gx_list(const device uint* PICK [[buffer(0)]], const constant int* r
 }
 
 // Gate/up: the recorded per-row code a pair a threadgroup, pairs by expert (an expert's rows back to back), then shared
-kernel void gx_gateup(const device bfloat* X [[buffer(0)]], const device int* LIST [[buffer(1)]],
+[[max_total_threads_per_threadgroup(64)]]
+[[kernel]] void gx_gateup(const device bfloat* X [[buffer(0)]], const device int* LIST [[buffer(1)]],
     const device uint* GW [[buffer(2)]], const device bfloat* GS [[buffer(3)]], const device bfloat* GB [[buffer(4)]],
     const device uint* UW [[buffer(5)]], const device bfloat* US [[buffer(6)]], const device bfloat* UB [[buffer(7)]],
     const device uint* SGW [[buffer(8)]], const device bfloat* SGS [[buffer(9)]], const device bfloat* SGB [[buffer(10)]],
@@ -208,7 +211,8 @@ kernel void gx_gateup(const device bfloat* X [[buffer(0)]], const device int* LI
 }
 
 // Down for a pair of an expert with fewer than GX_T rows: threadgroup (16 outputs, item), 64 threads, the recorded code
-kernel void gx_down_one(const device bfloat* ACT [[buffer(0)]], const device int* LIST [[buffer(1)]],
+[[max_total_threads_per_threadgroup(64)]]
+[[kernel]] void gx_down_one(const device bfloat* ACT [[buffer(0)]], const device int* LIST [[buffer(1)]],
     const device uint* DW [[buffer(2)]], const device bfloat* DS [[buffer(3)]], const device bfloat* DB [[buffer(4)]],
     const device uint* SDW [[buffer(5)]], const device bfloat* SDS [[buffer(6)]], const device bfloat* SDB [[buffer(7)]],
     device bfloat* Y [[buffer(8)]], uint3 tg [[threadgroup_position_in_grid]],
@@ -230,7 +234,8 @@ inline int gx_pair(const device int* LIST, int4 it, int c) {
 }
 
 // Down tiles: the recorded sum's 32 lane partials (chunk l, then 32 + l, l < 8) in simd_sum's xor tree 1, 2, 4, 8, 16
-kernel void gx_down_tile(const device bfloat* ACT [[buffer(0)]], const device int* LIST [[buffer(1)]],
+[[max_total_threads_per_threadgroup(64)]]
+[[kernel]] void gx_down_tile(const device bfloat* ACT [[buffer(0)]], const device int* LIST [[buffer(1)]],
     const device uint* DW [[buffer(2)]], const device bfloat* DS [[buffer(3)]], const device bfloat* DB [[buffer(4)]],
     const device uint* SDW [[buffer(5)]], const device bfloat* SDS [[buffer(6)]], const device bfloat* SDB [[buffer(7)]],
     device bfloat* Y [[buffer(8)]], uint3 tg [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]],
