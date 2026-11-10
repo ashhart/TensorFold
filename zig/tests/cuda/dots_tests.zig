@@ -1,16 +1,20 @@
-//! dots.mocr on the GB10: the tower's stage taps for the oracle, and its encode twice equal against a generated page.
+//! dots.mocr on the GB10: the tower's stage taps, its encode twice equal and anchored, image prompts' chunk cuts.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
+const lanes = @import("lanes");
 const dots = @import("dots_mocr_cuda");
 const dense = @import("cuda_dense");
 const check = @import("check.zig");
 const Gpu = check.Gpu;
 
 const Tower = dots.tower.Tower;
+const native = dots.native;
 const Image = dense.recipe.Image;
 const Prepared = core.picture.patches.Prepared;
 const Args = []const [:0]const u8;
+/// The window the engine serves here: the full image's prompt and its reply.
+const context = 8192;
 
 /// The stages one encode taps: the patch with its bias and its norm, every block, the post-norm, the merger.
 const taps = 2 + 42 + 2;
@@ -26,6 +30,7 @@ const usage =
     \\  dots-stages MODEL IMAGE OUT  dots.mocr's tower: one encode, each stage's rows as OUT/<stage>.npy for the oracle
     \\  dots-image MODEL [IMAGE]  dots.mocr's tower: the generated page's vision-merged sha256 against its anchor, then
     \\                            IMAGE's; each encoded twice byte-equal, with each encode's time
+    \\  dots-invariants MODEL IMAGE [N] [IDS]  dots.mocr image prompts: chunk cuts == uncut (pages, logits, N greedy ids)
     \\
 ;
 
@@ -35,6 +40,7 @@ pub fn run(gpu: Gpu, cmd: []const u8, rest: Args) !void {
     if (!cuda.kernels.available) return skip(cmd, "this runner was built without CUDA kernels");
     if (std.mem.eql(u8, cmd, "dots-stages")) return stages(gpu, rest);
     if (std.mem.eql(u8, cmd, "dots-image")) return twice(gpu, rest);
+    if (std.mem.eql(u8, cmd, "dots-invariants")) return invariants(gpu, rest);
     std.debug.print("{s}", .{usage});
     return error.UnknownCommand;
 }
@@ -220,4 +226,239 @@ fn mergedHash(gpu: Gpu, dir: []const u8, path: ?[]const u8) ![64]u8 {
     const what = path orelse "the generated page";
     std.debug.print("RESULT dots-image {s}: encode twice equal, {d} x {d} patches to {d} rows; vision-merged sha256 {s}; encode {d:.1} ms, {d:.1} ms\n", .{ what, o.image.gh, o.image.gw, o.image.tokens, &hex, ms[0], ms[1] });
     return hex;
+}
+
+/// One run's results: its KV rows' hash, last-row logits, greedy ids, images encoded and where its chunks ended.
+const Out = struct { kv: [32]u8, logits: []u8, ids: []u32, encodes: u64, ends: []u32 };
+
+/// The engine with --vision on one slot, its lane host and its tower.
+const Served = struct {
+    gpu: Gpu,
+    loaded: native.Loaded,
+    cfg: lanes.Config,
+    clock: lanes.fake.FixedClock = .{},
+    engine: lanes.Engine,
+    eos: []const u32,
+
+    fn init(s: *Served, gpu: Gpu, dir: []const u8, pages: usize, eos: []const u32) !void {
+        s.gpu = gpu;
+        s.eos = eos;
+        s.loaded = try native.open(gpu.gpa, gpu.io, gpu.ctx, dir, null, .{ .context = context, .drafts = false, .lanes = 1, .vision = .{ .image_tokens = Tower.default_image_tokens, .max_images = 2 } });
+        errdefer s.loaded.deinit(s.loaded.ctx);
+        try native.attach(s.loaded.ctx, 0, pages);
+        s.cfg = try lanes.Config.init(gpu.gpa, s.loaded.facts, s.loaded.rows, s.loaded.rows - 1);
+        s.clock = .{};
+        s.engine = lanes.Engine.init(gpu.gpa, &s.cfg, s.loaded.backend, s.clock.clock());
+    }
+
+    fn deinit(s: *Served) void {
+        s.engine.deinit();
+        s.cfg.deinit(s.gpu.gpa);
+        s.loaded.deinit(s.loaded.ctx);
+    }
+
+    fn tower(s: *const Served) *Tower {
+        return s.loaded.vision.?;
+    }
+
+    /// One stream cut at `cuts` beside the 1,024-row grid: its pages and logits after the prompt, then its reply.
+    fn once(s: *Served, prompt: []const u32, images: []const Image, cuts: []const u32, n: u32) !Out {
+        const gpa = s.gpu.gpa;
+        const before = s.tower().encodes;
+        var st = try lanes.Stream.init(gpa, .{ .id = "dots", .prompt = prompt, .max_new = n, .eos = s.eos, .drafts = false, .images = images, .reuse = .{ .marks = cuts } });
+        defer st.deinit(gpa);
+        // the backend's prompt steps alone, so the lane is read before the first token can end the stream
+        var ends: std.ArrayList(u32) = .empty;
+        errdefer ends.deinit(gpa);
+        const b = s.loaded.backend;
+        while (true) {
+            const done = try b.vtable.prefill_step.?(b.ptr, &st, 0);
+            try ends.append(gpa, @intCast(st.fill_at.load(.monotonic)));
+            if (done) break;
+        }
+        const gb = s.loaded.target;
+        try gb.e.s.synchronize();
+        const l = gb.lanes.get(&st) orelse return error.UnknownStream;
+        const logits = try gpa.alloc(u8, gb.m.g.vocab * 2);
+        errdefer gpa.free(logits);
+        try cuda.memory.download(s.gpu.d, l.last, logits);
+        const kv = try pagesHash(s.gpu, gb.m, l.lease.ids.items, prompt.len);
+        try s.engine.opened(&st);
+        while (s.engine.activeCount() > 0) try s.engine.step();
+        const ids = try gpa.dupe(u32, st.emitted());
+        errdefer gpa.free(ids);
+        return .{ .kv = kv, .logits = logits, .ids = ids, .encodes = s.tower().encodes - before, .ends = try ends.toOwnedSlice(gpa) };
+    }
+};
+
+/// The sha256 of every layer's keys and values at positions [0, len), page by page in position order.
+fn pagesHash(gpu: Gpu, m: anytype, ids: []const u32, len: usize) ![32]u8 {
+    const rows_a_page = dense.pages.page_rows;
+    const kvw = m.g.kvWidth();
+    const page = try gpu.gpa.alloc(u8, m.pageBytes());
+    defer gpu.gpa.free(page);
+    var h: std.crypto.hash.sha2.Sha256 = .init(.{});
+    for (ids, 0..) |id, p| {
+        if (p * rows_a_page >= len) break;
+        const rows = @min(rows_a_page, len - p * rows_a_page);
+        try cuda.memory.download(gpu.d, m.arena + id * m.pageBytes(), page);
+        for (0..2 * m.g.layers) |part| h.update(page[part * rows_a_page * kvw * 2 ..][0 .. rows * kvw * 2]);
+    }
+    return h.finalResult();
+}
+
+/// A prompt of the template's markers: the user mark, each image's open, pads and close, then the ask.
+const Prompt = struct {
+    ids: std.ArrayList(u32) = .empty,
+    images: std.ArrayList(Image) = .empty,
+
+    fn deinit(p: *Prompt, gpa: std.mem.Allocator) void {
+        p.ids.deinit(gpa);
+        p.images.deinit(gpa);
+    }
+
+    fn text(p: *Prompt, gpa: std.mem.Allocator, ids: []const u32) !void {
+        try p.ids.appendSlice(gpa, ids);
+    }
+
+    fn image(p: *Prompt, gpa: std.mem.Allocator, prepared: Image) !void {
+        const m = dots.tower.marks;
+        try p.ids.append(gpa, m.open);
+        var im = prepared;
+        im.at = @intCast(p.ids.items.len);
+        try p.ids.appendNTimes(gpa, m.image, im.tokens);
+        try p.ids.append(gpa, m.close);
+        try p.images.append(gpa, im);
+    }
+};
+
+fn free(gpa: std.mem.Allocator, o: Out) void {
+    gpa.free(o.logits);
+    gpa.free(o.ids);
+    gpa.free(o.ends);
+}
+
+/// Whether every cut ended a chunk of the cut run and none of the uncut run's: the schedule really changed.
+fn taken(cuts: []const u32, got: []const u32, base: []const u32) bool {
+    for (cuts) |c| if (std.mem.indexOfScalar(u32, got, c) == null or std.mem.indexOfScalar(u32, base, c) != null) return false;
+    return true;
+}
+
+/// `x`, moved one row on when the 1,024-row grid already ends a chunk there.
+fn offGrid(x: u32) u32 {
+    return if (x % dense.backend.prompt_rows == 0) x + 1 else x;
+}
+
+/// Each cut run against the case's uncut (normal-grid) run: pages, last-row logits, replies and one encode an image.
+fn compare(s: *Served, name: []const u8, p: *const Prompt, cuts: []const []const u32, n: u32) !usize {
+    const gpa = s.gpu.gpa;
+    const base = try s.once(p.ids.items, p.images.items, &.{}, n);
+    defer free(gpa, base);
+    var bad: usize = 0;
+    const images = p.images.items.len;
+    if (base.encodes != images) bad += 1;
+    std.debug.print("RESULT dots {s}: {d} rows, {d} images, normal grid: {d} ids, {d} encodes\n", .{ name, p.ids.items.len, images, base.ids.len, base.encodes });
+    for (cuts) |c| {
+        const o = try s.once(p.ids.items, p.images.items, c, n);
+        defer free(gpa, o);
+        const same = [_]bool{ taken(c, o.ends, base.ends), std.mem.eql(u8, &o.kv, &base.kv), std.mem.eql(u8, o.logits, base.logits), std.mem.eql(u32, o.ids, base.ids), o.encodes == images };
+        for (same) |ok| bad += @intFromBool(!ok);
+        std.debug.print("RESULT dots {s}, cuts {any}: chunk ends {any} ({s}), pages {s}, last logits {s}, ids {s}, encodes {d}\n", .{ name, c, o.ends, if (same[0]) "taken" else "NOT TAKEN", word(same[1]), word(same[2]), word(same[3]), o.encodes });
+    }
+    return bad;
+}
+
+fn word(same: bool) []const u8 {
+    return if (same) "same" else "DIFFER";
+}
+
+/// The prompt in `path` (the oracle's input-input_ids.npy, int64 [1, L]) with the demo image at its one pad run.
+fn refPrompt(gpu: Gpu, path: []const u8, demo: Image) !Prompt {
+    const bytes = try readFile(gpu, path);
+    defer gpu.gpa.free(bytes);
+    const arr = try core.npy.parse(bytes);
+    if (!std.mem.eql(u8, arr.descr, "<i8")) return error.BadIds;
+    var p: Prompt = .{};
+    errdefer p.deinit(gpu.gpa);
+    for (std.mem.bytesAsSlice(i64, arr.data)) |id| try p.ids.append(gpu.gpa, @intCast(id));
+    const pad = dots.tower.marks.image;
+    const at = std.mem.indexOfScalar(u32, p.ids.items, pad) orelse return error.BadIds;
+    var end = at;
+    while (end < p.ids.items.len and p.ids.items[end] == pad) end += 1;
+    if (end - at != demo.tokens or std.mem.indexOfScalarPos(u32, p.ids.items, end, pad) != null) return error.BadIds;
+    var im = demo;
+    im.at = @intCast(at);
+    try p.images.append(gpu.gpa, im);
+    return p;
+}
+
+/// dots-invariants MODEL_DIR IMAGE [N] [IDS_NPY]: image prompts under forced chunk cuts equal their uncut runs.
+fn invariants(gpu: Gpu, rest: Args) !void {
+    const dir = try arg(rest, 0);
+    if (!present(gpu.io, dir)) return skip("dots-invariants", "no checkpoint config.json in MODEL_DIR");
+    const gpa = gpu.gpa;
+    const n: u32 = if (rest.len > 2) try std.fmt.parseInt(u32, rest[2], 10) else 64;
+    const c = try dots.config.Config.read(gpa, gpu.io, dir);
+    var tok = try core.tokenizer.loadTokenizer(gpu.io, gpa, dir);
+    defer tok.deinit();
+    const user = try tok.encode(gpa, "<|user|>");
+    defer gpa.free(user);
+    const ask = try tok.encode(gpa, "Extract the text of this image.<|endofuser|><|assistant|>");
+    defer gpa.free(ask);
+    const between = try tok.encode(gpa, " and ");
+    defer gpa.free(between);
+    var s: Served = undefined;
+    try s.init(gpu, dir, dense.pages.perSlot(context), c.end_tokens[0..c.end_count]);
+    defer s.deinit();
+    const bytes = try readFile(gpu, try arg(rest, 1));
+    defer gpa.free(bytes);
+    // three budgets: inside one 1,024-row chunk, across the grid line at 1,024, and the full (the demo's)
+    var prepared: [3]Image = undefined;
+    var made: usize = 0;
+    defer for (prepared[0..made]) |im| gpa.free(im.pixels);
+    for (&prepared, [_]u32{ 64, 1200, Tower.default_image_tokens }) |*im, budget| {
+        const p = try s.tower().prepare(gpa, bytes, budget);
+        im.* = .{ .pixels = p.pixels, .gh = p.gh, .gw = p.gw, .at = 0, .tokens = p.tokens, .hash = p.hash };
+        made += 1;
+    }
+    var bad: usize = 0;
+    { // a small image uncut, then cut at its first row, inside it, at its last row, and at all three
+        var p: Prompt = .{};
+        defer p.deinit(gpa);
+        try p.text(gpa, user);
+        try p.image(gpa, prepared[0]);
+        try p.text(gpa, ask);
+        const im = p.images.items[0];
+        const first = im.at;
+        const mid = im.at + im.tokens / 2;
+        const last = im.at + im.tokens - 1;
+        try check.expect(p.ids.items.len <= dense.backend.prompt_rows, "dots-invariants: the small prompt of {d} rows fits one chunk", .{p.ids.items.len});
+        bad += try compare(&s, "small image", &p, &.{ &.{first}, &.{mid}, &.{last}, &.{ first, mid, last } }, n);
+    }
+    { // the full image (the oracle's prompt when given) on the 1,024-row grid, then cut inside the image off the grid
+        var p: Prompt = if (rest.len > 3) try refPrompt(gpu, rest[3], prepared[2]) else .{};
+        defer p.deinit(gpa);
+        if (rest.len <= 3) {
+            try p.text(gpa, user);
+            try p.image(gpa, prepared[2]);
+            try p.text(gpa, ask);
+        }
+        const im = p.images.items[0];
+        bad += try compare(&s, "full image", &p, &.{&.{ offGrid(im.at + 333), offGrid(im.at + im.tokens - 7) }}, n);
+    }
+    { // two images in one prompt, the grid cutting the first, then cut inside each off the grid
+        var p: Prompt = .{};
+        defer p.deinit(gpa);
+        try p.text(gpa, user);
+        try p.image(gpa, prepared[1]);
+        try p.text(gpa, between);
+        try p.image(gpa, prepared[0]);
+        try p.text(gpa, ask);
+        const a = p.images.items[0];
+        const b = p.images.items[1];
+        try check.expect(a.at < dense.backend.prompt_rows and a.at + a.tokens > dense.backend.prompt_rows, "dots-invariants: the grid line at {d} cuts the first image [{d}, {d})", .{ dense.backend.prompt_rows, a.at, a.at + a.tokens });
+        bad += try compare(&s, "two images", &p, &.{&.{ offGrid(a.at + a.tokens / 3), offGrid(b.at + b.tokens / 2) }}, n);
+    }
+    try check.expect(bad == 0, "dots-invariants: {d} differences", .{bad});
+    check.pass("dots-invariants: chunk cuts inside, at the first and the last image rows equal the uncut runs (pages, logits, {d} greedy ids), each image encoded once", .{n});
 }
