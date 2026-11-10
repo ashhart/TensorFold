@@ -4,6 +4,25 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Server: a grammar over 512 KiB is refused with HTTP 400 before it is compiled, so one oversized schema can no longer hold the grammar compiler for a minute (#3038).
+- Flash Next on Metal (M1 through M4): the scale index is now the default for 4-bit experts in groups of 32, and `TF_FLASHNEXT_SCALE_INDEX=0` turns it off. Prompt passes and grouped decode windows read each group's scale and bias through the index too, and the routed experts' stored scales and biases are released once indexed; every kernel gets the same values, so replies keep their tokens. On an M3 Ultra with the MLX 4-bit checkpoint, memory in use once loaded falls from 129.6 to 122.5 GiB, drafted decode on one stream is 2.0% to 4.2% faster (prose 138.6 to 142.0 tok/s, a copy-heavy edit 282.0 to 293.8), four streams are 2.6% faster (203.1 to 208.3 tok/s) and a cold prompt's first token arrives about 1% sooner; load takes about 0.7 s longer (#2805, part of #2751).
+
+- HIP on gfx1151: the routed prompt tile runs an expert of at most 8 rows in K-parallel passes inside the same launch, with the matrix path's bytes; with Qwen3.6-35B-A3B on a Radeon 8060S, served cold prompts of 64 to 256 tokens are 11% to 22% faster (1.5% at 1,024), and logits and served tokens equal main's. Other cards' tables leave it off (#2878, fixes #2795). Thanks to @AbrahamCete.
+
+- Qwen3.8-27B on XPU: the target's and the DFlash2 drafter's RoPE tables come from core's exact helper, so they hold the reference's fp32 words; 15 of 32 and 18 of 64 values move by 1 ulp (#2000, part of #1852).
+
+- Tests: `zig build test-lane-explore-host` explores the lane host's schedules from a seed (arrivals, cancels at every stage, the backend's room for live lanes and memory pressure) around a fake target, so ordering bugs show up without hand-picked orders (#3233).
+
+- Qwen3.5 on CUDA: `qwen3_5` and `qwen3_5_moe` declare warm turns, so the server prefills a follow-up's prompt in the background and the next turn resumes past the previous reply, with replies unchanged (#2824). Thanks to @devopsfortunato.
+
+- Server: tool-call markup quoted in Markdown inline code spans and fenced code blocks stays prose, in whole replies and in streaming, instead of opening, hiding or running as a live tool call (#3588). Thanks to @gilby.
+
+- Lanes: shared draft pricing prices a chain-cut, unmeasured tail by the rule's rates instead of as a measured zero, and the cache's cut marker survives allocation errors (#2979). Thanks to @devopsfortunato.
+
+- Docs: the Nemotron 3.5 Lightning recipe gains a "Native HIP on a Strix Halo iGPU" section with its configuration, memory footprint, throughput, prefill and exactness checks, and the intro lists HIP beside Metal and CUDA (#3560). Thanks to @gilby.
+
+- Qwen3.5-2B on Metal: the engine declares `warm_turns` from its prompt cache, so a follow-up that re-renders earlier rows resumes the reply instead of prefilling the whole conversation again (#3457). Thanks to @EugeneClaw.
+
 - Kolibri-1: the tree-attention cache offsets are signed, so a server with default flags no longer panics with an integer overflow on its first request when a cache sits below the origin (#3561). Thanks to @jschmied.
 
 - H3 on Metal: `Model.load` reads every transformer shard ahead of its mappings and fails the load on a missing or short shard; `TF_LOAD_PREFETCH` sets the reader count and `0` turns read-ahead off (#2999). Thanks to @plotarmordev.
