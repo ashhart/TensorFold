@@ -172,4 +172,35 @@ test "Qwen3-Reranker: each case's yes - no logit matches transformers, and the p
         at += n;
     }
     std.debug.print("rerank decide: {d} branches (trunk {d}) packed at a {d}-token window equal their runs alone\n", .{ prompts.items.len, trunk_len, window });
+    // edges the cases' short common prefix never reaches: a trunk off a 512-key chunk, branches of 1 to over 512 rows
+    var base = prompts.items[0];
+    for (prompts.items) |p| {
+        if (p.len > base.len) base = p;
+    }
+    const edge_trunk: usize = 700;
+    const edge_lens = [_]usize{ 600, 513, 1, 530 };
+    var edge_total: usize = edge_trunk;
+    for (edge_lens) |n| edge_total += n;
+    try t.expect(base.len >= edge_trunk + 600 and edge_total <= window);
+    var edge_branches: [edge_lens.len][]const u32 = undefined;
+    var edge_counts: [edge_lens.len]usize = undefined;
+    var edge_labels: std.ArrayList(u32) = .empty;
+    for (edge_lens, &edge_branches, &edge_counts, 0..) |n, *b, *c, i| {
+        b.* = base[edge_trunk..][0..n];
+        c.* = if (i % 2 == 0) 2 else 1;
+        try edge_labels.append(a, yes);
+        if (i % 2 == 0) try edge_labels.append(a, no);
+    }
+    const edge_packed = try a.alloc(f64, edge_labels.items.len);
+    try score.decidePacked(a, Runner{ .e = e, .hidden = hidden }, &heads, base[0..edge_trunk], &edge_branches, &edge_counts, edge_labels.items, edge_packed, window, engine.max_inputs);
+    var edge_at: usize = 0;
+    for (edge_lens, edge_counts) |n, c| {
+        const row = try a.alloc(f32, hidden);
+        try e.run(base[0 .. edge_trunk + n], 0, &.{@intCast(edge_trunk + n)}, row);
+        var alone: [2]f64 = undefined;
+        try score.labelLogits(gpa, &heads, row, edge_labels.items[edge_at..][0..c], alone[0..c]);
+        for (edge_packed[edge_at..][0..c], alone[0..c]) |x, y| try t.expectEqual(@as(u64, @bitCast(y)), @as(u64, @bitCast(x)));
+        edge_at += c;
+    }
+    std.debug.print("rerank decide edges: trunk {d}, branches of {d}, {d}, {d} and {d} rows equal their runs alone\n", .{ edge_trunk, edge_lens[0], edge_lens[1], edge_lens[2], edge_lens[3] });
 }
