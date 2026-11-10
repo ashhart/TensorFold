@@ -29,8 +29,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_CUDA_CARVEOUT` | Exactly `0` or `1`; default off |
 | `TF_CUDA_CARVEOUT_MIB` | Positive whole MiB count whose byte size fits the platform, or empty for 1792 MiB |
 | `TF_Q27_COPY_ROWS` | Whole u32 count; zero disables copied rows; default 48 |
-| `TF_DSPINE_CHAIN` | `0` or `1`; default 0. With 1 the Qwen3.8-27B Metal DSpine drafter offers its greedy chain instead of a best-first tree. |
-| `TF_Q27_DRAFT_SLOTS` | Whole u32 count, clamped to 1 through the lane stream limit; default 8. DFlash2 can draft for at most the smaller of this count and the admitted streams, and none without a drafter. Under `--mtp-drafts` the MTP head drafts every stream and this does nothing. |
+| `TF_Q27_DRAFT_SLOTS` | Whole u32 count, clamped to 1 through the lane stream limit; default 8. DFlash2 and DSpine draft for at most the smaller of this count and the admitted streams, and none without a drafter. Under `--mtp-drafts` the MTP head drafts every stream and this does nothing. |
 | `TF_Q27_DFLASH_ADAPTIVE_BLOCK` | Qwen3.8-27B on Metal: exactly `0` or `1`; default 0. `1` lets a lone stream's DFlash2 block narrow from 16 to 8 rows after 8 consecutive rounds landing at most 4 tree drafts, and return to 16 after a round landing 6 or more. Only the drafter's proposal changes. |
 | `TF_Q27_DFLASH_ABSORB_BATCH` | Qwen3.8-27B on Metal: exactly `0` or `1`; default `0`. `1` absorbs a shared round's new DFlash2 taps for up to 128 rows across streams in one pass, each stream's results in its own caches. |
 | `TF_MTP_DRAFTS` | Whole u32 count, clamped to 1 through the drafter's window less one; existing depth when unset |
