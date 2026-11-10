@@ -10,6 +10,7 @@ const be = @import("backend.zig");
 const depth = @import("depth.zig");
 const ev = @import("events.zig");
 const trail = @import("trail.zig");
+const price_log = @import("price_log.zig");
 const f = ev.f;
 const str = trail.str;
 const int = trail.int;
@@ -100,7 +101,9 @@ fn runPriced(e: *Engine, entries: []*Stream, comptime independent: bool) !void {
         if (independent) {
             var plain = total == plans.len;
             for (budgets) |d| plain = plain and d == 0;
-            try e.rule.observeSharedPrice(@intCast(plans.len), total, ms, sampled, e.rule.pricedHeadMs(budgets), plain, calibration);
+            const head_ms = e.rule.pricedHeadMs(budgets);
+            if (try price_log.enabled(e)) try price_log.round(e, plans, windows, .{ .trial = calibration, .sampled = sampled, .ms = ms, .head_ms = head_ms, .heads = heads.items, .depths = budgets });
+            try e.rule.observeSharedPrice(@intCast(plans.len), total, ms, sampled, head_ms, plain, calibration);
         }
         try e.rule.observeOverhead(@intCast(plans.len), total, ms, sampled, e.rule.headMs(budgets));
     }
