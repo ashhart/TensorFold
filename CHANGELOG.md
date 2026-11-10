@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM-5.3-Flash on Metal with `--vision`: a prompt chunk sends the vision tower only the images that end after its start, so two interleaved image prompts no longer re-encode images their earlier chunks already injected (12 images through the tower instead of 18 in a host test); each image is still encoded on its own and read through its own span, so the rows a chunk reads are unchanged (#2744).
+
 - Flash Next on Metal: `TF_FLASHNEXT_SCALE_INDEX=1` (off by default; M1 through M4) has the 4-bit expert kernels read each group's scale and bias through a 16-bit index into its tensor's table of pairs: the same values from 10% fewer weight bytes, so replies keep their tokens. On an M3 Ultra with the MLX 4-bit checkpoint, drafted decode on one stream is 1.3% to 3.9% faster (prose 137.3 to 139.1 tok/s, a copy-heavy edit 262.8 to 273.2) and `"draft": false` 0.8% to 2.2% faster, with every token unchanged. The index sits beside the stored scales and biases, which prompt passes still read: 7.3 GiB more in use and about 3 s more load (#2760, part of #2751).
 
 - Qwen 3.5 and 3.8 configs: one tied-head rule reads `tie_word_embeddings` from `text_config` then the root, and a checkpoint that sets neither loads untied, as transformers does (HIP had loaded it tied; Metal's 2B still requires the key); a root and `text_config` that disagree, or a value that isn't a flag, are refused with `BadTiedHead`. Flash Next, LFM2, Kolibri-1 and Qwen 3.5 read `rope_parameters`, legacy `rope_scaling` and their top-level keys through one core reader, and every config they accepted parses as before (#2714, fixes #2561, part of #2460). Thanks to @jschmied.
