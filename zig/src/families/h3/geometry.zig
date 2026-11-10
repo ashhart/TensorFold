@@ -78,6 +78,9 @@ pub const Geometry = struct {
     rot: usize,
     times: usize,
     steps: usize,
+    /// A picture's case may carry an output head per step (MiniMax-H3-Image's distilled heads, which replace the
+    /// output layer at their step); otherwise one head serves every step.
+    step_heads: bool = false,
 
     pub fn buffers(g: Geometry, base: bool) !void {
         const r = g.layout;
@@ -170,7 +173,7 @@ pub fn read(a: std.mem.Allocator, c: Case, q: st.Entry, fc2: st.Entry, layers: u
     const adaln = try c.entry("adaln");
     if (vi.rank != 2 or ai.rank != 2 or tab.rank != 3 or cos.rank != 2 or final.rank != 2 or adaln.rank != 2)
         return error.H3BadTensorShape;
-    const g = Geometry{ .layout = r, .inner = inner, .hidden = hidden, .heads = inner / 128, .mlp = mlp, .video_in = vi.shape[1], .audio_in = if (audio) ai.shape[1] else 0, .lines = tab.shape[1], .rot = cos.shape[1], .times = final.shape[0], .steps = adaln.shape[0] };
+    var g = Geometry{ .layout = r, .inner = inner, .hidden = hidden, .heads = inner / 128, .mlp = mlp, .video_in = vi.shape[1], .audio_in = if (audio) ai.shape[1] else 0, .lines = tab.shape[1], .rot = cos.shape[1], .times = final.shape[0], .steps = adaln.shape[0] };
     for ([_]usize{ g.video_in, if (audio) g.audio_in else 1, g.lines, g.times, g.steps }) |n| try dimension(n);
     if (g.rot == 0 or g.rot > 128 or g.rot % 2 != 0) return error.H3BadRotary;
     try g.buffers(base);
@@ -183,8 +186,10 @@ pub fn read(a: std.mem.Allocator, c: Case, q: st.Entry, fc2: st.Entry, layers: u
         if (width == 0) break :kinds;
         try c.expect(kind ++ "_in.weight", .f32, &.{ hidden, width });
         try c.expect(kind ++ "_in.bias", .f32, &.{hidden});
-        try c.expect(kind ++ "_out.weight", .f32, &.{ width, hidden });
-        try c.expect(kind ++ "_out.bias", .f32, &.{width});
+        if (comptime std.mem.eql(u8, kind, "video")) g.step_heads = try stepHeads(c, audio, g.steps, width, hidden) else {
+            try c.expect(kind ++ "_out.weight", .f32, &.{ width, hidden });
+            try c.expect(kind ++ "_out.bias", .f32, &.{width});
+        }
         try c.expect(kind, .f32, &.{ n, width });
         try c.expect(kind ++ "_velocity", .f32, &.{ n, width });
         try c.expect(kind ++ "_step", .f32, &.{ g.steps, 2 });
@@ -224,6 +229,31 @@ pub fn read(a: std.mem.Allocator, c: Case, q: st.Entry, fc2: st.Entry, layers: u
         if ((row < r.text + r.condition + r.audio) != (tile < r.prefix_tiles)) return error.H3BadTilePartition;
     }
     return g;
+}
+
+/// The video output head: one [width, hidden] for every step, or, in a picture's case only, one per step
+/// ([steps, width, hidden] and [steps, width]); true for the latter.
+pub fn stepHeads(c: Case, audio: bool, steps: usize, width: usize, hidden: usize) !bool {
+    const w = try c.entry("video_out.weight");
+    // a clip's case is read exactly as before: one head
+    if (w.rank == 3 and !audio) {
+        if (w.shape[0] != steps) return error.H3StepHeadCount;
+        try c.expect("video_out.weight", .f32, &.{ steps, width, hidden });
+        try c.expect("video_out.bias", .f32, &.{ steps, width });
+        return true;
+    }
+    try c.expect("video_out.weight", .f32, &.{ width, hidden });
+    try c.expect("video_out.bias", .f32, &.{width});
+    return false;
+}
+
+/// The byte offsets of step `step`'s output head in the weight and bias: 0 when one head serves every step
+/// (`heads` 0); with a head per step the run must have exactly that many steps (a rescheduled run is refused).
+pub fn headOffsets(heads: usize, step: usize, steps: usize, width: usize, hidden: usize) ![2]usize {
+    if (heads == 0) return .{ 0, 0 };
+    if (steps != heads) return error.H3StepHeadCount;
+    if (step >= steps) return error.H3BadStep;
+    return .{ try product(&.{ step, width, hidden, 4 }), try product(&.{ step, width, 4 }) };
 }
 
 pub fn forward(rows: usize, video_n: usize, audio_n: usize, adaln_n: usize, times_n: usize, step: usize, video: usize, audio: usize, vv: usize, av: usize) !void {
