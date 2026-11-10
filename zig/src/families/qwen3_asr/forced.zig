@@ -16,6 +16,13 @@ pub fn judge(ours: Top, ref: Top, max: f32) Step {
     return if (swapped and ours.margin <= max and ref.margin <= max) .swap else .fail;
 }
 
+/// The reference's step from its topk pair and its greedy id: topk may list an exact tie (margin 0) either way round.
+pub fn reference(first: u32, second: u32, margin: f32, greedy: u32) error{TopIsNotGreedy}!Top {
+    var r: Top = .{ .first = first, .second = second, .margin = margin };
+    if (r.first != greedy and r.second == greedy and r.margin == 0) std.mem.swap(u32, &r.first, &r.second);
+    return if (r.first == greedy) r else error.TopIsNotGreedy;
+}
+
 fn widen(bits: u16) f32 {
     return @bitCast(@as(u32, bits) << 16);
 }
@@ -59,4 +66,14 @@ test "judge: a swap within 0.25 on both sides passes; a wider margin, a third to
     try std.testing.expectEqual(Step.fail, judge(.{ .first = 20, .second = 30, .margin = 0 }, ref, bar));
     try std.testing.expectEqual(Step.fail, judge(.{ .first = 30, .second = 10, .margin = 0 }, ref, bar));
     try std.testing.expectEqual(Step.fail, judge(.{ .first = 10, .second = 20, .margin = std.math.nan(f32) }, ref, bar));
+}
+
+test "reference: an exact tie listed the other way round is the greedy pick's; else the greedy id must lead" {
+    try std.testing.expectEqual(Top{ .first = 20, .second = 10, .margin = 0 }, try reference(10, 20, 0, 20));
+    try std.testing.expectEqual(Top{ .first = 10, .second = 20, .margin = 0 }, try reference(10, 20, 0, 10));
+    try std.testing.expectError(error.TopIsNotGreedy, reference(10, 20, 0.125, 20));
+    try std.testing.expectError(error.TopIsNotGreedy, reference(10, 20, 0, 30));
+    // as on 1.7B 1089-134686-0000 step 21: the tie decides a swap, not a fail
+    const ref = try reference(323, 11, 0, 11);
+    try std.testing.expectEqual(Step.swap, judge(.{ .first = 323, .second = 11, .margin = 0.25 }, ref, bar));
 }

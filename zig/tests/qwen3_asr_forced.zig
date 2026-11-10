@@ -149,10 +149,7 @@ pub fn main(init: std.process.Init) !u8 {
     var fails: usize = 0;
     for (0..want.len) |k| {
         const ours = forced.top(steps.items[k * vocab ..][0..vocab]);
-        var ref: forced.Top = .{ .first = top2[2 * k], .second = top2[2 * k + 1], .margin = ref_margin[k] };
-        // an exact tie: topk may list the two either way round, the greedy id is the reference's pick
-        if (ref.first != want[k] and ref.second == want[k] and ref.margin == 0) std.mem.swap(u32, &ref.first, &ref.second);
-        if (ref.first != want[k]) return error.CaseTopIsNotGreedy;
+        const ref = try forced.reference(top2[2 * k], top2[2 * k + 1], ref_margin[k], want[k]);
         switch (forced.judge(ours, ref, forced.bar)) {
             .same => same += 1,
             inline else => |v| {
