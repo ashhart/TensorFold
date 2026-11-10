@@ -98,7 +98,7 @@ pub const Eng = struct {
         errdefer g.seq.deinit(gpu.gpa);
         g.out = try cuda.DeviceBuffer.alloc(gpu.d, out_rows * vocab * 2);
         errdefer g.out.free();
-        X.prefill.reserveFor(g.e, cap_default, world);
+        try X.prefill.reserveFor(g.e, cap_default, world);
         const budget = try xpass.budgetFromEnv(0);
         g.attached = try xpass.attach(gpu.gpa, gpu.io, gpu.d, g.stream, &g.e.exl3_prefill, g.e.layers[0..g.e.n_layers], null, g.e.chunk, budget, null);
         std.debug.print("RESULT rank {d}/{d} load: {d:.1} s; {d} lines a layer x {d} layers ({d:.2} GiB of pool)\n", .{ rank, world, ms(t0, check.now(gpu.io)) / 1e3, g.attached.lines, g.attached.layers, gib(g.attached.device_bytes) });
