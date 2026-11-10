@@ -30,7 +30,7 @@ pub fn compileHost(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.M
     const bytes = b.createModule(.{ .root_source_file = b.addWriteFiles().add("residency-drama-empty.zig", "pub const bytes: []const u8 = &.{};\n") });
     const tokenizer = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = b.graph.host, .link_libc = true });
     const rounds = b.createModule(.{ .root_source_file = b.path("zig/src/core/frame_rounds.zig"), .target = b.graph.host });
-    const shim = b.addWriteFiles().add("residency-drama-core.zig", "pub const safetensors = @import(\"tensorfold\").safetensors;\npub const tokenizer = @import(\"tokenizer\");\npub const frame_rounds = @import(\"frame_rounds\");\n");
+    const shim = b.addWriteFiles().add("residency-drama-core.zig", "pub const safetensors = @import(\"tensorfold\").safetensors;\npub const kv_pool = @import(\"tensorfold\").kv_pool;\npub const kv_prompts = @import(\"tensorfold\").kv_prompts;\npub const tokenizer = @import(\"tokenizer\");\npub const frame_rounds = @import(\"frame_rounds\");\n");
     const core = b.createModule(.{ .root_source_file = shim, .target = b.graph.host, .imports = &.{ .{ .name = "tensorfold", .module = engine }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "frame_rounds", .module = rounds } } });
     const drama = b.createModule(.{ .root_source_file = b.path("zig/src/families/drama3/drama3_metal.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "core", .module = core }, .{ .name = "drama3_metallib", .module = bytes } } });
     host.addImport("core", core);
