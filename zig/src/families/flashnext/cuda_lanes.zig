@@ -7,6 +7,7 @@ const weights = @import("cuda_prompt_wt.zig");
 const mtp = @import("cuda_mtp.zig");
 const mtp_ops = @import("cuda_mtp_ops.zig");
 const lanes_draft = @import("cuda_lanes_draft.zig");
+const snap = @import("cuda_snap.zig");
 const ranks = @import("cuda_rank_engine.zig");
 const config = @import("cuda_config.zig");
 const exl3_memory = @import("exl3/pack/cuda_exl3_memory.zig");
