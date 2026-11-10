@@ -129,6 +129,13 @@ pub const Backend = struct {
     }
 };
 
+/// The error a family sees for a failed call: the group backend's own underlying error when it kept one, else `e`.
+pub fn underlying(c: coll.Collective, e: Error) anyerror {
+    if (c.vtable.kind != .group or (e != error.BackendFailed and e != error.PeerFailed)) return e;
+    const b: *Backend = @ptrCast(@alignCast(c.ptr));
+    return b.last orelse e;
+}
+
 const testing = std.testing;
 
 const Fake = struct {
