@@ -5,6 +5,7 @@ const lanes = @import("lanes");
 const serve = @import("hip_serve");
 const Engine = @import("engine.zig").Engine;
 const cache = @import("cache.zig");
+const facts_mod = @import("facts.zig");
 const forward = @import("forward.zig");
 const head_mod = @import("head.zig");
 const load = @import("load.zig");
@@ -19,8 +20,6 @@ const draw = serve.draw;
 const ring = 1024;
 /// Drafts the head holds for a stream at most.
 pub const max_depth = cache.max_window - 1;
-/// A shared round's copy window and a lone stream's first: the pending row and three copies; lone runs grow past it.
-const shared_copy_rows = 4;
 
 pub const Fill = struct {
     at: usize,
@@ -207,20 +206,7 @@ pub const Fx = struct {
     }
 
     pub fn facts(f: *const Fx) lanes.Model {
-        const drafting = f.e.weights.model.mtp != null and f.drafts > 0;
-        return .{
-            .exact_width = cache.max_window,
-            .first_copy_rows = shared_copy_rows,
-            .gpu_tokens = false,
-            .mtp = drafting,
-            .speculate = drafting,
-            .speculate_early = false,
-            .drafts = f.drafts,
-            .hidden_rows = true,
-            .batch_rows = @intCast(cache.max_window * f.streams),
-            .max_streams = @intCast(f.streams),
-            .draft_streams = false,
-        };
+        return facts_mod.factsFor(cache.max_window, f.streams, f.e.weights.model.mtp != null and f.drafts > 0, f.drafts);
     }
 
     fn free(f: *Fx, l: *Lane) void {
