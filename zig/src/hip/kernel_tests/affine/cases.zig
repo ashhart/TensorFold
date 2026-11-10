@@ -19,6 +19,8 @@ pub const Case = struct {
     item_rows: usize = 8,
     /// Every expert takes the same number of pairs.
     even: bool = false,
+    /// The pairs each expert takes, in expert order (they add up to rows x slots); empty draws an expert a pair.
+    loads: []const u16 = &.{},
     /// Each token's last slot is the shared expert (index `experts`), the others distinct routed experts.
     shared: bool = false,
     /// The plan serving passes (`hip/moe.zig`): items cut at its tile, padded with empty items to its capacity.
