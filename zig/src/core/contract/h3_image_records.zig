@@ -8,7 +8,16 @@ pub const encoder = [_]M{
     .{ .name = "minimax image encoder hie_norm_silu", .threads = 256, .tg_memory = 0, .reserved = 256 },
 };
 pub const prompt = [_]M{};
-pub const decoder = [_]M{};
+pub const decoder = [_]M{
+    .{ .name = "minimax image decoder h3d_post_quant", .threads = 192, .tg_memory = 0, .reserved = 192 },
+    .{ .name = "minimax image decoder h3d_embed", .threads = 256, .tg_memory = 0, .reserved = 256 },
+    .{ .name = "minimax image decoder h3d_rms_norm", .threads = 256, .tg_memory = 32, .reserved = 256 },
+    .{ .name = "minimax image decoder h3d_layer_norm", .threads = 256, .tg_memory = 64, .reserved = 256 },
+    .{ .name = "minimax image decoder h3d_gemm", .threads = 128, .tg_memory = 18432, .reserved = 128 },
+    .{ .name = "minimax image decoder h3d_heads", .threads = 32, .tg_memory = 0, .reserved = 32 },
+    .{ .name = "minimax image decoder h3d_attention", .threads = 256, .tg_memory = 11264, .reserved = 256 },
+    .{ .name = "minimax image decoder h3d_swiglu", .threads = 256, .tg_memory = 0, .reserved = 256 },
+};
 pub const records = encoder ++ prompt ++ decoder;
 
 test "the MiniMax-H3-Image launches fit every Apple family" {
