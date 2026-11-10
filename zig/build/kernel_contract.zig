@@ -95,6 +95,7 @@ pub fn hostTests(b: *std.Build, family: *std.Build.Step) void {
 /// macOS: tf-kernel-contract over the engine's Metal kernels; `kernel-contract` runs it on this Mac's GPU.
 pub fn metal(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal_mod: *std.Build.Module, engine: *std.Build.Module, sources: *std.Build.Module) void {
     @import("rotary_sweep.zig").steps(b, target, metal_mod);
+    const image = @import("h3_image_contract.zig").sources(b);
     const exe = b.addExecutable(.{ .name = "tf-kernel-contract", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/contract/metal_main.zig"),
         .target = target,
@@ -106,6 +107,9 @@ pub fn metal(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
             .{ .name = "kernel_sources", .module = sources },
             .{ .name = "contract", .module = module(b, target, optimize) },
             .{ .name = "h3_kernels", .module = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/h3/kernels.zig") }) },
+            .{ .name = "h3_image_encoder_kernels", .module = image[0].module },
+            .{ .name = "h3_prompt_kernels", .module = image[1].module },
+            .{ .name = "h3_image_decoder_kernels", .module = image[2].module },
             .{ .name = "ling_metal", .module = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/ling/sources.zig") }) },
             .{ .name = "ling_route", .module = b.createModule(.{ .root_source_file = b.path("zig/src/families/ling/route.zig") }) },
             .{ .name = "masked_sources", .module = b.createModule(.{ .root_source_file = b.path("zig/masked_value_sources.zig"), .imports = &.{.{ .name = "kernel_sources", .module = sources }} }) },
