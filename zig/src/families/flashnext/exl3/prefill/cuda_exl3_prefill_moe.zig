@@ -105,8 +105,9 @@ pub fn rankSum(dp: *Deep, p: anytype, x: *const load.Experts, n: usize, sub: usi
     const rank: usize = if (x.tp) |r| r.rank else 0;
     const m = leaves.partials(world);
     const gath = sum + dp.rows * dims * 4;
-    const t0 = if (profile()) now(p.io) else 0;
-    const use_overlap = world > 1 and overlap() and dp.red != null;
+    const profiling = try profile();
+    const t0 = if (profiling) now(p.io) else 0;
+    const use_overlap = world > 1 and try overlap() and dp.red != null;
     const per = if (use_overlap) sub else n;
     try pk.tpCombine(&dp.kern, st, y, wts, dp.dptr(dp.lay.picks), if (world == 1) sum else gath, n, slots, dims, per, world, rank, m);
     if (world == 1) {
@@ -134,7 +135,7 @@ pub fn rankSum(dp: *Deep, p: anytype, x: *const load.Experts, n: usize, sub: usi
         }
         dp.red_n = n_sub;
     }
-    if (profile()) {
+    if (profiling) {
         if (dp.red) |rs| try c.finish(rs);
         try c.finish(st);
         stats.reduce_ns += @intCast(now(p.io) - t0);
@@ -142,9 +143,8 @@ pub fn rankSum(dp: *Deep, p: anytype, x: *const load.Experts, n: usize, sub: usi
     stats.reduces += 1;
 }
 
-fn overlap() bool {
-    const v = std.c.getenv("TF_FLASHNEXT_EXL3_PREFILL_OVERLAP") orelse return true;
-    return !std.mem.eql(u8, std.mem.span(v), "0");
+fn overlap() @import("sys").environment.Error!bool {
+    return @import("sys").environment.read(bool, "TF_FLASHNEXT_EXL3_PREFILL_OVERLAP", true);
 }
 
 /// Picks for a pool round that holds `ids` (routed, < 512): rows of 11 slots, -1 after the last.
