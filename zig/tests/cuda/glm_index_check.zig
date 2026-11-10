@@ -166,7 +166,7 @@ pub fn run(gpu: check.Gpu) !void {
     }
     std.debug.print("glm_index_pools paths: whole row {d}, candidates {d}, whole row after the candidates missed {d}\n", .{ paths[0], paths[1], paths[2] });
     try check.expect(paths[0] > 0 and paths[1] > 0 and paths[2] > 0, "glm-index-check: the whole-row, candidate and retry paths must all occur", .{});
-    fails += try decode(gpu, s, ops, &ks, rand);
+    fails += try decode(gpu, s, ops, &ks, &idx, rand);
     std.debug.print("decode select paths: whole row {d}, candidates {d}, whole row after the candidates missed {d}, ties at the floor {d}\n", .{ dpaths[0], dpaths[1], dpaths[2], dpaths[3] });
     try check.expect(dpaths[0] > 0 and dpaths[1] > 0 and dpaths[2] > 0 and dpaths[3] > 0, "glm-index-check: the decode select's four paths must all occur", .{});
     try check.expect(fails == 0, "glm-index-check: {d} buffers differ", .{fails});
@@ -189,10 +189,10 @@ const dcases = [_]DCase{
 var dpaths = [4]usize{ 0, 0, 0, 0 };
 
 /// The decode select (cuda_sparse.decodeSelect) against tf_glm_select_rows byte for byte: planted, then selectTokens.
-fn decode(gpu: check.Gpu, s: cuda.Stream, ops: cuda.Module, ks: *const glm.glue.Kernels, rand: std.Random) !usize {
+fn decode(gpu: check.Gpu, s: cuda.Stream, ops: cuda.Module, ks: *const glm.glue.Kernels, idx: *const glm.index.Kernels, rand: std.Random) !usize {
     const gpa = gpu.gpa;
     const old: glm.glue.Set = .{ .glue = ks };
-    const new: glm.glue.Set = .{ .glue = ks, .dsel = true };
+    const new: glm.glue.Set = .{ .glue = ks, .dsel = true, .dscore = idx }; // decode scores on glm_index_scores too
     const special = [_]f32{ std.math.nan(f32), -std.math.nan(f32), 0.0, -0.0, std.math.inf(f32), -std.math.inf(f32) };
     var fails: usize = 0;
     for (dcases) |c| {
