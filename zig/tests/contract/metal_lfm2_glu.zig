@@ -231,8 +231,7 @@ pub const Probe = struct {
         }
     }
 
-    /// SiLU is 1.1-Lipschitz: the dots' error moves the output by at most that times the activation's input error,
-    /// plus the roundings of the gate, the sigmoid, SiLU, the up value and the product, each a bf16 half-ulp.
+    /// Include SiLU's 1.1-Lipschitz factor and bf16 rounding at each gate, sigmoid, SiLU, up and product boundary.
     pub fn bounds(p: *Probe, _: []const f64, _: []const f64, allow: []f64) !void {
         const unit = 0x1p-8;
         const gamma = c.gamma(@floatFromInt(depth(p.gate_d.?.shape)), 0x1p-24);

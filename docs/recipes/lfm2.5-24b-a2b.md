@@ -220,6 +220,32 @@ this surcharge. These accounting changes still require the complete throughput q
 [Controller regression and native API receipts](https://github.com/BlivionIaG/TensorFold/blob/1b968d6039af141acc4876fc9c81a5fdd48dde69/docs/receipts/dspark-chain-restack/hold-value-controller.json)
 record the constructed timing cases and source hashes; they are not device-throughput qualification.
 
+The checkpoint's `block_size: 9` establishes its query geometry, not exclusive implementation provenance.
+Later diagnosis consulted SGLang's DSpark/DFlash implementation, including [revision `488869c2d`](https://github.com/sgl-project/sglang/tree/488869c2d)
+([Apache-2.0](https://github.com/sgl-project/sglang/blob/488869c2d/LICENSE)), for attention, projection/normalization, Markov and confidence semantics.
+The [historical diagnosis](https://github.com/BlivionIaG/TensorFold/blob/afe8bda62562519b4fd84ee9a956392a21f26a60/docs/receipts/lfm2-dspark-review/diagnosis.md)
+remains outside this implementation branch. The October 25 authoring record has not been recovered:
+checkpoint-only or clean-room provenance cannot be certified, and the maintainer's provenance gate remains open.
+
+Independent paper/config re-derivation (November 10; it does not erase the consultation above):
+
+- **Noncausal attention:** [DSpark §2.2–3.1](https://arxiv.org/html/2607.05147v1) and
+  [DFlash §4.2](https://arxiv.org/html/2602.06036v2) specify context plus bidirectional draft-block attention.
+  The [released config](https://huggingface.co/LiquidAI/LFM2.5-24B-A2B-DSpark/blob/e052e5b1dd103c38cdd4f8ddc068d7dea4586f55/config.json)
+  supplies nine query rows: an anchor and eight masks, not ten query rows.
+- **Projection/normalization:** DSpark equations 2–3 specify concatenated target taps → projection → RMSNorm
+  before context K/V, without a second context input norm. The config's `model_type: qwen3` and
+  [Qwen3 §2](https://arxiv.org/html/2505.09388v1) supply pre-normalization and QK-norm; the paper does not
+  explicitly fix QK-norm's position relative to RoPE, and released-drafter parity for that order is unmeasured.
+- **Markov semantics:** DSpark equations 4–5 and Liquid's
+  [architecture explanation](https://www.liquid.ai/blog/lfm2.5-dspark) give a first-order bias from the
+  previously sampled token. Config rank 256 and the checkpoint's two `[128000,256]` matrices give
+  `W1[previous] × transpose(W2)`, added to the current base logits before sampling.
+- **Confidence schedule:** DSpark equations 7–8 give a conditional acceptance head and prefix survival
+  products. Algorithm 1's non-anticipating early-stop rule is not a blanket proof of Core's allocator.
+  No released LFM calibration or new throughput result is claimed; Liquid's published serving measurements
+  used a fixed verification window rather than confidence trimming.
+
 `tf-lfm2-dspark` also prints the confidence
 head against its fp32 reference and times shared holds of 2 to 16 streams.
 
