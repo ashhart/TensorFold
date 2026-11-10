@@ -153,6 +153,9 @@ A blank or whitespace-only value is unset. Text outside these forms, or those of
 `TF_FLASHNEXT_CHUNK_SOLO` above, is refused when the CUDA backend starts, naming the variable and its accepted forms.
 `TENSORFOLD_MEMORY_RESERVE_GIB` must be a finite number of GiB, which the server also holds to at least 0.5 (2 on
 unified memory) and at most the memory's size.
+The three host-tier settings use the platform environment rules: empty or whitespace-only values act unset;
+the host budget is a nonnegative whole MiB count fitting a native byte size, and frame/slot counts must be
+positive whole numbers. Malformed values refuse with `BadFlashNextKvHost`, never select tier-off silently.
 
 EXL3 keeps its configured prompt cuts, including cache marks; `TF_FLASHNEXT_KEEP_INPASS` does not enable in-pass
 snapshots for this format. Classic checkpoints retain main's in-pass marks and per-lane convolution histories.

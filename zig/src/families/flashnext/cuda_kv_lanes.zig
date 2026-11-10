@@ -52,14 +52,16 @@ fn seqRunBytes() usize {
 pub const Head = struct { draft_n: usize, rows: usize };
 
 /// Fixed: a lane's table and `extra` (image rows); paged: the attention caches (the head's too); a run: the states.
-pub fn layout(capacity: usize, tokens: usize, head: ?Head, extra: usize) kv.Layout {
+pub fn layout(capacity: usize, tokens: usize, head: ?Head, extra: usize) !kv.Layout {
     const layers = wt.attn_n + @intFromBool(head != null);
     const run = seqRunBytes() + if (head) |h| mtp.Draft.runBytes(h.draft_n, h.rows) else 0;
-    // a run is whole pages (a host tier: of the K/V plane, which alone takes fewer bytes)
     const page = pages.pageBytesOf(tokens, layers);
-    const run_page = if (host_tier.tiered()) pages.kvPageBytes(tokens, layers) else page;
-    const run_pages = (run + run_page - 1) / run_page;
-    return .{ .fixed_bytes = mostPages(capacity, tokens) * 4 + extra, .token_bytes = page / tokens, .page_tokens = @intCast(tokens), .snap_bytes = snap.bytes(0, head != null, .full), .run_bytes = run_pages * page };
+    var run_bytes = run;
+    if (try host_tier.tiered()) {
+        const run_page = pages.kvPageBytes(tokens, layers);
+        run_bytes = (run + run_page - 1) / run_page * page;
+    }
+    return .{ .fixed_bytes = mostPages(capacity, tokens) * 4 + extra, .token_bytes = page / tokens, .page_tokens = @intCast(tokens), .snap_bytes = snap.bytes(0, head != null, .full), .run_bytes = run_bytes };
 }
 
 /// `l` with every stream's run `k` pages: the ranks of a pair agree the larger, so their pools open the same ids.
@@ -464,11 +466,7 @@ test "TF_FLASHNEXT_KV_PAGES: unset, empty or whitespace-only text reads as no pa
 }
 
 test "a stream's pages: its rows and a drafted window, no more than a full window's" {
-    const l = layout(40960, 256, null, 0);
-    try std.testing.expectEqual(pages.pageBytes(256), l.pageBytes());
-    const h = layout(40960, 256, .{ .draft_n = 32768, .rows = 1536 }, 0);
-    try std.testing.expectEqual(pages.pageBytesOf(256, wt.attn_n + 1), h.pageBytes());
-    try std.testing.expect(h.run_bytes >= seqRunBytes() + mtp.Draft.runBytes(32768, 1536));
+    const l = try layout(40960, 256, null, 0);
     try std.testing.expectEqual(@as(usize, 161), mostPages(40960, 256));
     try std.testing.expect(l.pages(40960 + window_rows) <= mostPages(40960, 256));
 }

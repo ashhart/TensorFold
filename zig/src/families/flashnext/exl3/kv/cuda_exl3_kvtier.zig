@@ -22,10 +22,7 @@ pub const call_rows: usize = 4608;
 
 /// TF_FLASHNEXT_KV_SLOTS=n: n lent frames a stream, 64 four-row slots a frame for each attention layer (default 128).
 pub fn slotFrames() !usize {
-    const v = std.c.getenv("TF_FLASHNEXT_KV_SLOTS") orelse return 128;
-    const n = std.fmt.parseInt(usize, std.mem.span(v), 10) catch return error.BadFlashNextKvHost;
-    if (n == 0) return error.BadFlashNextKvHost;
-    return n;
+    return @import("sys").environment.read(usize, "TF_FLASHNEXT_KV_SLOTS", 128) catch error.BadFlashNextKvHost;
 }
 
 /// Frames a stream may hold at once: the first pages, the window and a call's rows, the state run, the slot frames.

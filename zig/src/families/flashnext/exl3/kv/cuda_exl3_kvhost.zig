@@ -6,19 +6,17 @@ const pages = @import("../../cuda_pages.zig");
 
 /// TF_FLASHNEXT_KV_HOST=n: n MiB of pinned host RAM hold the K/V plane of every logical page (unset or 0: no tier).
 pub fn hostMiB() !usize {
-    const v = std.c.getenv("TF_FLASHNEXT_KV_HOST") orelse return 0;
-    return std.fmt.parseInt(usize, std.mem.span(v), 10) catch return error.BadFlashNextKvHost;
+    return @import("sys").environment.read(usize, "TF_FLASHNEXT_KV_HOST", 0) catch error.BadFlashNextKvHost;
 }
 
 /// Whether the host tier is on (the page layout then keeps two planes).
-pub fn tiered() bool {
-    return (hostMiB() catch 0) > 0;
+pub fn tiered() !bool {
+    return try hostMiB() > 0;
 }
 
 /// TF_FLASHNEXT_KV_FRAMES=n: at most n device frames of the K/V plane (unset: the pages the plan gave).
 pub fn framesCap() !?usize {
-    const v = std.c.getenv("TF_FLASHNEXT_KV_FRAMES") orelse return null;
-    return std.fmt.parseInt(usize, std.mem.span(v), 10) catch return error.BadFlashNextKvHost;
+    return @import("sys").environment.read(?usize, "TF_FLASHNEXT_KV_FRAMES", null) catch error.BadFlashNextKvHost;
 }
 
 /// The tier of one pool: logical pages, frames, the pinned host store they are canonical in.
