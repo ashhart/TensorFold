@@ -1,9 +1,20 @@
 //! Host pages a row gather copies from: read in once each, so a cold gather's faults are in flight together.
 const std = @import("std");
 const builtin = @import("builtin");
+const linux = std.os.linux;
 
 /// MADV_POPULATE_READ (Linux 5.14+): map the pages read now; Zig's table stops at COLD.
 pub const populate_read: u32 = 22;
+
+/// The advice a warm makes: the kernel's madvise by default, a test's replace to count calls and plant failures.
+const Advise = struct {
+    advice: *const fn (ctx: ?*const anyopaque, at: usize, len: usize, flag: u32) usize = defaultAdvise,
+    ctx: ?*const anyopaque = null,
+};
+
+fn defaultAdvise(_: ?*const anyopaque, at: usize, len: usize, flag: u32) usize {
+    return linux.madvise(@ptrFromInt(at), len, flag);
+}
 
 /// Pages the set tracks at most: 2 MiB of bits, a 64 GiB table at 4 KiB pages (a larger one gathers untracked).
 pub const max_pages: usize = 1 << 24;
@@ -22,6 +33,8 @@ pub const Warmer = struct {
     populate: std.atomic.Value(bool) = std.atomic.Value(bool).init(true),
     /// The spans hold more than `max_pages` pages: nothing is tracked, and every gather asks for its pages.
     over: bool = false,
+    /// The advice a warm makes: the kernel's madvise by default, a test's stand-in for the same calls.
+    advise: Advise = .{},
 
     /// Room for every page of `spans` (the arrays a gather reads, a slice each), none of them seen yet.
     pub fn init(a: std.mem.Allocator, spans: []const []const u8) !Warmer {
@@ -106,7 +119,6 @@ pub const Warmer = struct {
 
     /// Pages [lo, hi) of `r`, as one call over their bytes.
     fn ask(w: *Warmer, r: Region, lo: usize, hi: usize) void {
-        const linux = std.os.linux;
         const page = std.heap.pageSize();
         if (!w.over) for (lo..hi) |n| {
             const bit = @as(usize, 1) << @intCast(n % @bitSizeOf(usize));
@@ -115,10 +127,20 @@ pub const Warmer = struct {
         const at = r.base + (lo - @as(usize, @intCast(r.first))) * page;
         const len = (hi - lo) * page;
         if (w.populate.load(.acquire)) {
-            if (linux.madvise(@ptrFromInt(at), len, populate_read) == 0) return;
+            if (w.advise.advice(w.advise.ctx, at, len, populate_read) == 0) return;
             w.populate.store(false, .release);
         }
-        _ = linux.madvise(@ptrFromInt(at), len, linux.MADV.WILLNEED);
+        _ = w.advise.advice(w.advise.ctx, at, len, linux.MADV.WILLNEED);
+    }
+};
+
+const CountingAdvise = struct {
+    n: u32 = 0,
+
+    fn advise(ctx: ?*const anyopaque, at: usize, len: usize, flag: u32) usize {
+        const c: *@This() = @ptrCast(@alignCast(@constCast(ctx.?)));
+        c.n += 1;
+        return linux.madvise(@ptrFromInt(at), len, flag);
     }
 };
 
@@ -128,19 +150,24 @@ test "a region's pages are asked for once: a second warm makes no call and the b
     const bytes = try a.alignedAlloc(u8, .fromByteUnits(std.heap.pageSize()), 4 * std.heap.pageSize());
     defer a.free(bytes);
     for (bytes, 0..) |*b, i| b.* = @truncate(i * 11 + 5);
+    const want = try a.dupe(u8, bytes[0..256]);
+    defer a.free(want);
     var w = try Warmer.init(a, &.{ bytes, bytes[0..0] });
     defer w.deinit(a);
     try std.testing.expectEqual(@as(usize, 1), w.bits.len);
     const hot = bytes[1 .. 2 * std.heap.pageSize() - 7];
+    var count: CountingAdvise = .{};
+    w.advise = .{ .advice = CountingAdvise.advise, .ctx = &count };
     w.warm(0, hot);
+    try std.testing.expectEqual(@as(u32, 1), count.n);
     for (w.bits) |word| try std.testing.expectEqual(@as(usize, 3), word.load(.acquire));
     w.warm(0, hot);
     w.warm(0, hot[3..]);
-    for (w.bits) |word| try std.testing.expectEqual(@as(usize, 3), word.load(.acquire));
     w.warm(1, "not this region");
     w.warm(0, &.{});
+    try std.testing.expectEqual(@as(u32, 1), count.n);
     for (w.bits) |word| try std.testing.expectEqual(@as(usize, 3), word.load(.acquire));
-    try std.testing.expectEqualSlices(u8, bytes[0..256], bytes[0..256]);
+    try std.testing.expectEqualSlices(u8, want, bytes[0..256]);
 }
 
 test "a range off its region's bytes is left alone" {
