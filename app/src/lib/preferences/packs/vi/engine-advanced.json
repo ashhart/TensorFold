@@ -20,7 +20,7 @@
  "Set 1 to hide the engine live text display in its terminal; the served model is unchanged.": "Đặt 1 để ẩn hiển thị văn bản trực tiếp của engine trong terminal; mô hình phục vụ không thay đổi.",
  "Engine knob: mix a salt into request seeds.": "Tùy chọn engine: trộn muối vào seed của yêu cầu.",
  "Control vector": "Véc-tơ điều khiển",
- "A control vector steers the local model: it changes what the model says. It is off until you turn it on, and the engine names what is in force when it starts.": "Véc-tơ điều khiển dẫn hướng mô hình cục bộ: nó thay đổi điều mô hình trả lời. Nó tắt cho đến khi bạn bật, và động cơ nói rõ đang có hiệu lực điều gì khi khởi động.",
+ "A control vector steers the style or topic of the local model's replies. It is off until you turn it on. When the engine starts it names the file it loaded and its SHA-256, and says replies are steered.": "Véc-tơ điều khiển dẫn hướng phong cách hoặc chủ đề trong câu trả lời của mô hình cục bộ. Nó tắt cho đến khi bạn bật. Khi khởi động, động cơ nêu tên tệp đã nạp và SHA-256 của tệp, đồng thời cho biết các câu trả lời đang được dẫn hướng.",
  "Apply a control vector": "Áp dụng véc-tơ điều khiển",
  "Choose…": "Chọn…",
  "Strength": "Cường độ",
@@ -29,5 +29,5 @@
  "One is the strength the file was derived at. A strength past a few can leave the model without an answer.": "1 là cường độ mà tệp đó được tạo ra. Cường độ gấp nhiều lần có thể khiến mô hình không còn trả lời.",
  "The strength must be above 0 and at most {value0}.": "Cường độ phải lớn hơn 0 và không quá {value0}.",
  "This build's TensorFold engine does not offer control vectors yet, so the engine in use cannot take one.": "Bản dựng này của động cơ TensorFold chưa có véc-tơ điều khiển, nên động cơ đang dùng không nhận được.",
- "With a control vector in force the model replies differently. It is a steering direction, not a safety setting: it changes what the model is willing to say.": "Khi véc-tơ điều khiển có hiệu lực, mô hình trả lời khác đi. Đây là một hướng dẫn, không phải thiết lập an toàn: nó thay đổi điều mô hình sẵn sàng nói."
+ "With a control vector in force, replies are steered toward the style or topic the file encodes. Only add-style vectors are supported; the engine refuses project vectors and files it cannot validate.": "Khi véc-tơ điều khiển có hiệu lực, câu trả lời được dẫn hướng theo phong cách hoặc chủ đề mà tệp mã hóa. Chỉ hỗ trợ véc-tơ kiểu cộng (add); động cơ từ chối véc-tơ project và các tệp mà nó không thể xác thực."
 }

@@ -20,7 +20,7 @@
  "Set 1 to hide the engine live text display in its terminal; the served model is unchanged.": "इंजन के टर्मिनल में लाइव टेक्स्ट प्रदर्शन छिपाने के लिए 1 सेट करें; सेवाया गया मॉडल वैसा ही रहता है।",
  "Engine knob: mix a salt into request seeds.": "इंजन विकल्प: अनुरोध सीड्स में नमक मिलाएँ।",
  "Control vector": "नियंत्रण वेक्टर",
- "A control vector steers the local model: it changes what the model says. It is off until you turn it on, and the engine names what is in force when it starts.": "नियंत्रण वेक्टर स्थानीय मॉडल को दिशा देता है: यह बदल देता है कि मॉडल क्या जवाब देता है। आप इसे चालू करने तक यह बंद रहता है, और इंजन शुरू होते ही बताता है कि अभी क्या लागू है।",
+ "A control vector steers the style or topic of the local model's replies. It is off until you turn it on. When the engine starts it names the file it loaded and its SHA-256, and says replies are steered.": "नियंत्रण वेक्टर स्थानीय मॉडल के जवाबों की शैली या विषय को दिशा देता है। आप इसे चालू करने तक यह बंद रहता है। इंजन शुरू होते समय लोड की गई फ़ाइल और उसका SHA-256 बताता है, और यह भी कि जवाब निर्देशित हैं।",
  "Apply a control vector": "नियंत्रण वेक्टर लागू करें",
  "Choose…": "चुनें…",
  "Strength": "तीव्रता",
@@ -29,5 +29,5 @@
  "One is the strength the file was derived at. A strength past a few can leave the model without an answer.": "1 वह तीव्रता है जिस पर फ़ाइल बनी थी। कई गुना तीव्रता मॉडल को उत्तरहीन कर सकती है।",
  "The strength must be above 0 and at most {value0}.": "तीव्रता 0 से अधिक और {value0} तक या उससे कम होनी चाहिए।",
  "This build's TensorFold engine does not offer control vectors yet, so the engine in use cannot take one.": "इस बिल्ड का TensorFold इंजन अभी नियंत्रण वेक्टर नहीं देता, इसलिए मौजूदा इंजन इसे नहीं लेगा।",
- "With a control vector in force the model replies differently. It is a steering direction, not a safety setting: it changes what the model is willing to say.": "नियंत्रण वेक्टर लागू होने पर मॉडल अलग तरह जवाब देता है। यह एक दिशा है, सुरक्षा सेटिंग नहीं: यह बदल देता है कि मॉडल क्या कहने को तैयार है।"
+ "With a control vector in force, replies are steered toward the style or topic the file encodes. Only add-style vectors are supported; the engine refuses project vectors and files it cannot validate.": "नियंत्रण वेक्टर लागू होने पर जवाब उस शैली या विषय की ओर निर्देशित होते हैं जिसे फ़ाइल कूटबद्ध करती है। केवल जोड़ने वाले (add) वेक्टर समर्थित हैं; इंजन प्रोजेक्ट वेक्टर और उन फ़ाइलों को अस्वीकार करता है जिन्हें वह सत्यापित नहीं कर सकता।"
 }

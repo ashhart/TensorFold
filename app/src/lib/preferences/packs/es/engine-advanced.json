@@ -20,7 +20,7 @@
  "Set 1 to hide the engine live text display in its terminal; the served model is unchanged.": "Pon 1 para ocultar la muestra de texto en vivo del motor en su terminal; el modelo servido no cambia.",
  "Engine knob: mix a salt into request seeds.": "Parámetro del motor: mezcla una sal en las semillas de las solicitudes.",
  "Control vector": "Vector de control",
- "A control vector steers the local model: it changes what the model says. It is off until you turn it on, and the engine names what is in force when it starts.": "Un vector de control guía el modelo local: cambia lo que el modelo responde. Está apagado hasta que lo actives, y el motor indica al arrancar qué está en vigor.",
+ "A control vector steers the style or topic of the local model's replies. It is off until you turn it on. When the engine starts it names the file it loaded and its SHA-256, and says replies are steered.": "Un vector de control guía el estilo o el tema de las respuestas del modelo local. Está apagado hasta que lo actives. Al arrancar, el motor indica el archivo que cargó y su SHA-256, y avisa de que las respuestas están guiadas.",
  "Apply a control vector": "Aplicar un vector de control",
  "Choose…": "Elegir…",
  "Strength": "Intensidad",
@@ -29,5 +29,5 @@
  "One is the strength the file was derived at. A strength past a few can leave the model without an answer.": "Uno es la intensidad con la que se obtuvo el archivo. Una intensidad varias veces mayor puede dejar al modelo sin respuesta.",
  "The strength must be above 0 and at most {value0}.": "La intensidad debe ser mayor que 0 y como máximo {value0}.",
  "This build's TensorFold engine does not offer control vectors yet, so the engine in use cannot take one.": "El motor de TensorFold de esta versión todavía no ofrece vectores de control, así que el motor en uso no puede aceptar uno.",
- "With a control vector in force the model replies differently. It is a steering direction, not a safety setting: it changes what the model is willing to say.": "Con un vector de control en vigor el modelo responde de otra manera. Es una dirección de guía, no un ajuste de seguridad: cambia lo que el modelo está dispuesto a decir."
+ "With a control vector in force, replies are steered toward the style or topic the file encodes. Only add-style vectors are supported; the engine refuses project vectors and files it cannot validate.": "Con un vector de control en vigor, las respuestas se orientan hacia el estilo o el tema que codifica el archivo. Solo se admiten vectores de tipo aditivo; el motor rechaza los vectores de proyección y los archivos que no puede validar."
 }

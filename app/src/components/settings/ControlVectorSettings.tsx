@@ -9,7 +9,9 @@ import type { EngineControlVectorSnapshot } from '../../lib/types'
 
 // The control vector the local engine applies: a file on this Mac, a strength, and
 // whether it is in force. It is opt-in: nothing changes until the operator turns it
-// on, and the engine says at startup what it is holding.
+// on, and the engine says at startup which file it loaded, its SHA-256, and that
+// replies are steered. Only add-style vectors are supported; the engine, not the app,
+// decides whether a file is valid and refuses what it cannot take.
 
 const fileName = (file: string | null): string => {
   if (!file) return ''
@@ -57,7 +59,7 @@ export function ControlVectorSettings() {
   const name = fileName(vector?.file ?? null)
 
   return (
-    <Section title={tx('Control vector')} desc={tx('A control vector steers the local model: it changes what the model says. It is off until you turn it on, and the engine names what is in force when it starts.')}>
+    <Section title={tx('Control vector')} desc={tx("A control vector steers the style or topic of the local model's replies. It is off until you turn it on. When the engine starts it names the file it loaded and its SHA-256, and says replies are steered.")}>
       {!supported && (
         <p className="mb-3 rounded-lg border border-line bg-card px-3 py-2.5 text-[13px] text-ink-3">
           {tx("This build's TensorFold engine does not offer control vectors yet, so the engine in use cannot take one.")}
@@ -114,7 +116,7 @@ export function ControlVectorSettings() {
       </div>
       {vector?.enabled && (
         <p className="mt-2 text-[12px] leading-relaxed text-ink-3">
-          {tx('With a control vector in force the model replies differently. It is a steering direction, not a safety setting: it changes what the model is willing to say.')}
+          {tx('With a control vector in force, replies are steered toward the style or topic the file encodes. Only add-style vectors are supported; the engine refuses project vectors and files it cannot validate.')}
         </p>
       )}
       {error && <p className="mt-2 text-[13px] text-red-500">{error}</p>}

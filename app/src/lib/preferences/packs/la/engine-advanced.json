@@ -20,7 +20,7 @@
  "Set 1 to hide the engine live text display in its terminal; the served model is unchanged.": "Pone 1 ut vivam textus monstrationem in terminali instrumenti celas; modellos qui ministratur nihil mutatur.",
  "Engine knob: mix a salt into request seeds.": "Clavis instrumenti: sal in semina rogationum miscere.",
  "Control vector": "Vector rectum",
- "A control vector steers the local model: it changes what the model says. It is off until you turn it on, and the engine names what is in force when it starts.": "Vector rectum regit exemplar locale: mutat id quod exemplar respondet. Off est donec eum accendas, et motor initio dicit quid nunc valet.",
+ "A control vector steers the style or topic of the local model's replies. It is off until you turn it on. When the engine starts it names the file it loaded and its SHA-256, and says replies are steered.": "Vector rectum stilum vel argumentum responsorum exemplaris localis regit. Off est donec eum accendas. Cum motor incipit, tabulam quam oneravit et SHA-256 eius nominat, et responsa regi dicit.",
  "Apply a control vector": "Adhibe vectorem rectum",
  "Choose…": "Elige…",
  "Strength": "Fortitudo",
@@ -29,5 +29,5 @@
  "One is the strength the file was derived at. A strength past a few can leave the model without an answer.": "Unum est fortitudo ex qua tabula derivata est. Fortitudo multis maior exemplar sine responsu relinquere potest.",
  "The strength must be above 0 and at most {value0}.": "Fortitudo maior quam 0 et non maior quam {value0} esse debet.",
  "This build's TensorFold engine does not offer control vectors yet, so the engine in use cannot take one.": "Hic motor TensorFold nondum vectorem rectum praebet, ideo motor praesens eum non accipiet.",
- "With a control vector in force the model replies differently. It is a steering direction, not a safety setting: it changes what the model is willing to say.": "Cum vector recto exemplar aliter respondet. Hic directio est, non securitas: mutat id quod exemplar dicere vult."
+ "With a control vector in force, replies are steered toward the style or topic the file encodes. Only add-style vectors are supported; the engine refuses project vectors and files it cannot validate.": "Cum vector recto valente, responsa ad stilum vel argumentum quod tabula codificat diriguntur. Soli vectores additivi (add) sustinentur; motor vectores project et tabulas quas validare non potest recusat."
 }

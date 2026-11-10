@@ -20,7 +20,7 @@
  "Set 1 to hide the engine live text display in its terminal; the served model is unchanged.": "Ustaw 1, aby ukryć podgląd tekstu na żywo w terminalu silnika; serwowany model pozostaje bez zmian.",
  "Engine knob: mix a salt into request seeds.": "Opcja silnika: dodaje sól do seedów żądań.",
  "Control vector": "Wektor sterujący",
- "A control vector steers the local model: it changes what the model says. It is off until you turn it on, and the engine names what is in force when it starts.": "Wektor sterujący kieruje modelem lokalnym: zmienia to, co model odpowiada. Jest wyłączony, dopóki go nie włączysz, a silnik przy starcie podaje, co działa.",
+ "A control vector steers the style or topic of the local model's replies. It is off until you turn it on. When the engine starts it names the file it loaded and its SHA-256, and says replies are steered.": "Wektor sterujący kieruje stylem lub tematem odpowiedzi modelu lokalnego. Jest wyłączony, dopóki go nie włączysz. Przy starcie silnik podaje wczytany plik i jego SHA-256 oraz informuje, że odpowiedzi są sterowane.",
  "Apply a control vector": "Zastosuj wektor sterujący",
  "Choose…": "Wybierz…",
  "Strength": "Siła",
@@ -29,5 +29,5 @@
  "One is the strength the file was derived at. A strength past a few can leave the model without an answer.": "Jeden to siła, przy której plik powstał. Siła kilkukrotnie wyższa może pozbawić model odpowiedzi.",
  "The strength must be above 0 and at most {value0}.": "Siła musi być większa od 0 i nie większa niż {value0}.",
  "This build's TensorFold engine does not offer control vectors yet, so the engine in use cannot take one.": "Ten silnik TensorFold nie obsługuje jeszcze wektora sterującego, więc obecny silnik go nie przyjmie.",
- "With a control vector in force the model replies differently. It is a steering direction, not a safety setting: it changes what the model is willing to say.": "Z wektorem sterującym model odpowiada inaczej. To kierunek, a nie ustawienie bezpieczeństwa: zmienia to, na co model się zgadza."
+ "With a control vector in force, replies are steered toward the style or topic the file encodes. Only add-style vectors are supported; the engine refuses project vectors and files it cannot validate.": "Gdy wektor sterujący działa, odpowiedzi są kierowane ku stylowi lub tematowi zakodowanemu w pliku. Obsługiwane są tylko wektory addytywne (add); silnik odrzuca wektory project oraz pliki, których nie może zweryfikować."
 }
