@@ -30,7 +30,6 @@ pub const Weight = extern struct {
     n: c_int,
     k: c_int,
     group: c_int = 16,
-    fp16: c_int = 0,
     route: Routing = .{},
     out16: u64 = 0,
     global: f32 = 1,
@@ -44,30 +43,27 @@ pub const group: c_int = 16;
 const threads: c_int = 256;
 
 comptime {
-    // quant/nvfp4.hpp's Nvfp4, field for field: x, words, scale, out, m, n, k, group, fp16, route, out16, global
+    // quant/nvfp4.hpp's Nvfp4, field for field: x, words, scale, out, m, n, k, group, route, out16, global
     std.debug.assert(@sizeOf(Table) == 16 and @sizeOf(Routing) == 24);
-    std.debug.assert(@sizeOf(Weight) == 104);
+    std.debug.assert(@sizeOf(Weight) == 96);
 }
 
 pub const Kernels = struct {
-    /// The product over bf16 activations, and over fp16 ones where the GPU has no bf16 dot2.
     gemm: Function,
-    gemm_f16: Function,
 
-    /// `tiles` is dot2_tiles.hip's module, where every build carries both.
+    /// `tiles` is dot2_tiles.hip's module, where every build carries it.
     pub fn load(tiles: Module) Error!Kernels {
-        return .{ .gemm = try tiles.function("tf_nvfp4_gemm"), .gemm_f16 = try tiles.function("tf_nvfp4_gemm_f16") };
+        return .{ .gemm = try tiles.function("tf_nvfp4_gemm") };
     }
 
     /// The product `out` f32 (m, n): one call for a prompt's rows and a round's.
     pub fn gemmGo(k: *const Kernels, r: *const runtime.Runtime, a: Weight, s: abi.Stream) Error!void {
         if (a.m <= 0 or a.n <= 0 or a.k <= 0 or a.group != group) return error.Invalid;
         if (@rem(a.k, a.group) != 0) return error.Invalid;
-        const f = if (a.fp16 != 0) k.gemm_f16 else k.gemm;
         var args: hl.Args = .{};
         try args.add(a);
         const total = a.m * a.n;
-        try go(r, f, .{ .x = cdiv(total, threads), .y = 1, .z = 1 }, .{ .x = @intCast(threads) }, s, &args);
+        try go(r, k.gemm, .{ .x = cdiv(total, threads), .y = 1, .z = 1 }, .{ .x = @intCast(threads) }, s, &args);
     }
 
     /// Launches on `s`; the counting stream runs nothing.
@@ -78,6 +74,6 @@ pub const Kernels = struct {
 };
 
 test "the weight's layout is quant/nvfp4.hpp's" {
-    try std.testing.expectEqual(@as(usize, 104), @sizeOf(Weight));
+    try std.testing.expectEqual(@as(usize, 96), @sizeOf(Weight));
     try std.testing.expectEqual(@as(usize, 16), @sizeOf(Table));
 }

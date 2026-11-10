@@ -12,6 +12,7 @@ pub const Projection = union(enum) {
     dense: quant.dense.Host,
     bf16: quant.bf16.Host,
     nvfp4: quant.nvfp4.Host,
+    fp8: StoredFp8,
 
     /// Output rows N.
     pub fn rows(p: Projection) usize {
@@ -20,6 +21,7 @@ pub const Projection = union(enum) {
             .dense => |h| quant.dense.rows(h),
             .bf16 => |h| quant.bf16.rows(h),
             .nvfp4 => |h| quant.nvfp4.rows(h),
+            .fp8 => |h| h.rows(),
         };
     }
 
@@ -30,6 +32,7 @@ pub const Projection = union(enum) {
             .dense => |h| quant.dense.bytes(h),
             .bf16 => |h| quant.bf16.bytes(h),
             .nvfp4 => |h| quant.nvfp4.bytes(h),
+            .fp8 => |h| h.bytes(),
         };
     }
 };
@@ -50,6 +53,8 @@ pub fn halves(a: std.mem.Allocator, p: Projection) ![2]Projection {
         .dense => |x| pair(.dense, try quant.dense.halves(a, x)),
         .bf16 => |x| pair(.bf16, try quant.bf16.halves(a, x)),
         .nvfp4 => |x| pair(.nvfp4, try quant.nvfp4.halves(a, x)),
+        // a ModelOpt checkpoint runs one rank, so a fused FP8 projection is never cut in two
+        .fp8 => error.UnevenSplit,
     };
 }
 
@@ -60,6 +65,7 @@ pub fn sliceRows(a: std.mem.Allocator, p: Projection, spans: []const quant.Span)
         .dense => |x| one(.dense, try quant.dense.sliceRows(a, x, spans)),
         .bf16 => |x| one(.bf16, try quant.bf16.sliceRows(a, x, spans)),
         .nvfp4 => |x| one(.nvfp4, try quant.nvfp4.sliceRows(a, x, spans)),
+        .fp8 => error.UnevenSplit,
     };
 }
 
@@ -70,6 +76,7 @@ pub fn sliceCols(a: std.mem.Allocator, p: Projection, r: quant.Rank, what: []con
         .dense => |x| one(.dense, try quant.dense.sliceCols(a, x, r, what)),
         .bf16 => |x| one(.bf16, try quant.bf16.sliceCols(a, x, r, what)),
         .nvfp4 => |x| one(.nvfp4, try quant.nvfp4.sliceCols(a, x, r, what)),
+        .fp8 => error.UnevenSplit,
     };
 }
 
@@ -80,6 +87,21 @@ fn one(comptime tag: std.meta.Tag(Projection), v: anytype) Projection {
 fn pair(comptime tag: std.meta.Tag(Projection), v: anytype) [2]Projection {
     return .{ one(tag, v[0]), one(tag, v[1]) };
 }
+
+/// A ModelOpt FP8 projection as the checkpoint stores it: E4M3 codes one a byte and one f32 scale.
+pub const StoredFp8 = struct {
+    weight: Tensor,
+    /// The row's scale when `per_row`, else the projection's one.
+    scale: []const f32,
+
+    pub fn rows(p: StoredFp8) usize {
+        return p.weight.shape[0];
+    }
+
+    pub fn bytes(p: StoredFp8) usize {
+        return p.weight.bytes.len + p.scale.len * 4;
+    }
+};
 
 /// A layer's E + 1 experts, shared last, and its router rows (core/quant/experts.zig).
 pub const Experts = quant.experts.Experts;

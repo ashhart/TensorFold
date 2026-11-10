@@ -1,4 +1,4 @@
-//! ModelOpt NVFP4 products: the prompt GEMM and the decode stream tile against a float64 oracle.
+//! ModelOpt NVFP4's product against the format's float64 reference, at every row count the engine serves.
 
 const std = @import("std");
 const rig = @import("rig.zig");
@@ -68,11 +68,20 @@ fn product(t: *Rig, p: Proj, hx: []const u16) ![]f32 {
     try quant.nvfp4.reference(h, wq);
     // the product is the test's own f64 sum: the format reads back exactly, and the tiles round once to f32
     const want = try a.alloc(f64, rows * p.n);
-    for (0..rows) |r| for (0..p.n) |c| {
-        var acc: f64 = 0;
-        for (0..p.k) |j| acc += t.value(hx[r * p.k + j]) * wq[c * p.k + j];
-        want[r * p.n + c] = acc;
-    };
+    const mag = try a.alloc(f64, rows * p.n);
+    for (0..rows) |r| {
+        for (0..p.n) |c| {
+            var acc: f64 = 0;
+            var abs: f64 = 0;
+            for (0..p.k) |j| {
+                const term = t.value(hx[r * p.k + j]) * wq[c * p.k + j];
+                acc += term;
+                abs += @abs(term);
+            }
+            want[r * p.n + c] = acc;
+            mag[r * p.n + c] = abs;
+        }
+    }
 
     var x = try t.upload(hx);
     defer x.free();
@@ -91,7 +100,6 @@ fn product(t: *Rig, p: Proj, hx: []const u16) ![]f32 {
         .m = @intCast(rows),
         .n = @intCast(p.n),
         .k = @intCast(p.k),
-        .fp16 = @intFromBool(!t.bf16),
         .global = p.global,
     };
     try launch.Kernels.gemmGo(&t.on.nvfp4, &t.r, w, t.stream.handle);
@@ -100,13 +108,19 @@ fn product(t: *Rig, p: Proj, hx: []const u16) ![]f32 {
     const bits = try rig.download(u32, out);
     errdefer gpa.free(bits);
     const got: []f32 = @ptrCast(bits);
+    // the product's own chain: k fmaf into a group's q, then one a group into acc, then the global once
+    const u = std.math.pow(f64, 2, -24);
+    const per_element = @as(f64, @floatFromInt(p.k + p.k / quant.nvfp4.group)) * u;
+    var worst: f64 = 0;
     for (want, 0..) |wv, i| {
-        const tol = 2e-4 * @max(1.0, @abs(wv));
+        const tol = per_element * mag[i];
+        if (mag[i] > 0) worst = @max(worst, @abs(@as(f64, got[i]) - wv) / tol);
         if (@abs(@as(f64, got[i]) - wv) > tol) {
             std.debug.print("nvfp4 {d}x{d} rows {d} x[0]={d} wq[0]={d} wq[1]={d} want[{d}]={d} got={d}\n", .{ p.n, p.k, rows, t.value(hx[0]), wq[0], wq[1], i, wv, got[i] });
             return error.TestUnexpectedResult;
         }
     }
+    std.debug.print("nvfp4 {d}x{d} rows {d}: worst |got - want| is {d:.3} of the derived bound\n", .{ p.n, p.k, rows, worst });
     return got;
 }
 

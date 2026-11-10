@@ -19,7 +19,11 @@ pub const Buf = quant.Buf;
 pub const Projection = union(enum) {
     core: quant.Device,
     nvfp4: quant.nvfp4.Device,
+    fp8: Fp8,
 };
+
+/// A ModelOpt FP8 projection on the device: its E4M3 codes and the one scale, as stored.
+pub const Fp8 = struct { weight: Buf, scale: Buf };
 
 /// A layer's E + 1 experts, the shared one last; `fused` is gate then up per expert when `gated`.
 pub const Experts = struct {
@@ -102,7 +106,14 @@ const Uploader = struct {
             .dense => |x| .{ .core = try quant.dense.upload(up, x) },
             .bf16 => |x| .{ .core = try quant.bf16.upload(up, x) },
             .nvfp4 => |x| .{ .nvfp4 = try quant.nvfp4.upload(up, x) },
+            .fp8 => |x| .{ .fp8 = try fp8(u, x) },
         };
+    }
+
+    fn fp8(u: Uploader, p: host.StoredFp8) !Fp8 {
+        const up = u.up.uploader();
+        const scale: Tensor = .{ .dtype = .f32, .rank = 1, .shape = .{ p.scale.len, 1, 1, 1, 1 }, .bytes = std.mem.sliceAsBytes(p.scale) };
+        return .{ .weight = try up.tensor(p.weight), .scale = try up.tensor(scale) };
     }
 
     /// A stack of experts: core's routed experts keep the shared formats' tensors.

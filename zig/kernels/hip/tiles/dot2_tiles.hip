@@ -8,6 +8,7 @@
 #include "quant/mlx_tiles.hpp"
 #include "quant/dense_tiles.hpp"
 #include "quant/nvfp4_tiles.hpp"
+#include "quant/fp8_tiles.hpp"
 
 namespace tf {
 namespace rocm {

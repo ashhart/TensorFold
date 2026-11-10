@@ -8,6 +8,11 @@ const Tensor = types.Tensor;
 /// Rows and columns one scale_inv entry covers.
 pub const block = 128;
 
+/// What a kernel reads of a ModelOpt FP8 projection: the codes' address, the scale's and whether it is one a row.
+pub const Matrix = struct { codes: u64, scale: u64, per_row: bool };
+
+pub const View = struct { n: u32, k: u32, matrix: Matrix };
+
 /// An e4m3 code's value; 0x7f and 0xff are NaN, as the GPU's conversion reads them.
 pub fn e4m3(b: u8) f64 {
     if (b & 0x7f == 0x7f) return std.math.nan(f64);

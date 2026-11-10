@@ -16,6 +16,14 @@ pub fn projection(p: weights.Projection) Error!view.Projection {
             const v = try quant.nvfp4.view(d, false);
             break :blk .{ .n = v.n, .k = v.k, .nvfp4 = v.matrix };
         },
+        .fp8 => |d| blk: {
+            if (d.weight.rank != 2) return error.UnsupportedTables;
+            break :blk .{
+                .n = @intCast(d.weight.dim(0)),
+                .k = @intCast(d.weight.dim(1)),
+                .fp8 = .{ .codes = d.weight.ptr, .scale = d.scale.ptr, .per_row = d.scale.dim(0) > 1 },
+            };
+        },
     };
 }
 

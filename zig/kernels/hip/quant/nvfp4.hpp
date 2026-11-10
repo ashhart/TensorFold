@@ -30,12 +30,11 @@ __device__ constexpr unsigned short kE2m1F16[16] = {
 };
 
 struct Nvfp4 {
-    const void* x;          // (m, k) row major, bf16 or fp16
+    const void* x;          // (m, k) row major, bf16
     const uint32_t* words;  // (n, k / 8) row major: 4-bit codes, 8 to a word
     GroupTable scale;       // (n, k / 16), E4M3's values as BF16
     float* out;             // (m, n)
     int m, n, k, group;
-    int fp16;  // 0 is bf16, 1 is fp16
     Routing route = {};
     __half* out16 = nullptr;  // set: the tile rounds each output to the activation type here instead of writing out
     float global = 1.0f;      // the checkpoint's second scale, applied to the widened group scale

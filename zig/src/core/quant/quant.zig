@@ -185,6 +185,8 @@ pub const Projection = struct {
     handle: ?Handle = null,
     /// ModelOpt NVFP4's matrix, a format the engine names: core keeps no such `Format`.
     nvfp4: ?nvfp4.Matrix = null,
+    /// ModelOpt FP8's matrix, the same way.
+    fp8: ?fp8.Matrix = null,
 
     pub fn format(p: Projection) ?Format {
         const h = p.handle orelse return null;

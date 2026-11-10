@@ -10,6 +10,7 @@ const Stream = @import("stream.zig").Stream;
 const caps = @import("caps.zig");
 const affine = @import("launches/affine.zig");
 const nvfp4 = @import("launches/nvfp4.zig");
+const fp8 = @import("launches/fp8.zig");
 pub const dense = @import("launches/dense.zig");
 
 const util = @import("launches/util.zig");
@@ -104,6 +105,8 @@ pub const Launcher = struct {
     dense: dense.Kernels,
     /// ModelOpt NVFP4: the prompt GEMM and the decode stream tile, weights decoded in flight.
     nvfp4: nvfp4.Kernels,
+    /// ModelOpt FP8: the same product, E4M3 codes decoded in flight and one scale a projection.
+    fp8: fp8.Kernels,
     /// Flash Next's kernels: its residual streams, n-gram rows, indexer and sparse attention.
     fnx: flashnext.Fns,
     /// Nemotron's Mamba-2 mixer kernels.
@@ -335,6 +338,7 @@ pub const Launcher = struct {
         l.affine = try affine.Kernels.load(tiles, dot2, chip, choices.products);
         l.dense = try dense.Kernels.load(tiles, chip.act == .bf16, chip.matrix == .wmma12, choices.products.matrix);
         l.nvfp4 = try nvfp4.Kernels.load(tiles);
+        l.fp8 = try fp8.Kernels.load(tiles);
         try l.affine.fillByteLut(r, dot2);
         l.fnx = try flashnext.Fns.load(l.mods[@backingInt(kernels.Group.flashnext)]);
         return l;
