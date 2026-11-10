@@ -249,8 +249,35 @@ fn compare(what: []const u8, n: usize, ref: []const u16, got: []const u16, ref_g
     return t_eq or margin(ref) < 0.25;
 }
 
+/// `--greedy N` (default 16) and `--both-max N` (default: every size): the options after the ten positional words.
+const Options = struct { steps: usize = 16, both_max: usize = std.math.maxInt(usize) };
+
+fn parseOptions(args: []const [:0]const u8) !Options {
+    var o: Options = .{};
+    var greedy_set = false;
+    var both_max_set = false;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const greedy_option = std.mem.eql(u8, args[i], "--greedy");
+        if (!greedy_option and !std.mem.eql(u8, args[i], "--both-max")) return error.UnknownOption;
+        if (if (greedy_option) greedy_set else both_max_set) return error.DuplicateOption;
+        i += 1;
+        if (i >= args.len) return error.MissingOptionValue;
+        const value = std.fmt.parseInt(usize, args[i], 10) catch return error.BadOptionValue;
+        if (greedy_option) {
+            o.steps = value;
+            greedy_set = true;
+        } else {
+            o.both_max = value;
+            both_max_set = true;
+        }
+    }
+    return o;
+}
+
 pub fn run(gpu: Gpu, rest: []const [:0]const u8) !void {
     if (rest.len < 10) return error.MissingArgument;
+    const opts = try parseOptions(rest[10..]);
     const a = gpu.gpa;
     const rank = try std.fmt.parseInt(usize, rest[0], 10);
     const world = try std.fmt.parseInt(usize, rest[1], 10);
@@ -272,10 +299,8 @@ pub fn run(gpu: Gpu, rest: []const [:0]const u8) !void {
     const cap = try std.fmt.parseInt(usize, rest[7], 10);
     const both = std.mem.eql(u8, rest[8], "both");
     const dump = rest[9];
-    var steps: usize = 16;
-    if (std.c.getenv("TF_TEST_GREEDY")) |v| steps = std.fmt.parseInt(usize, std.mem.span(v), 10) catch steps;
-    var both_max: usize = std.math.maxInt(usize);
-    if (std.c.getenv("TF_TEST_BOTH_MAX")) |v| both_max = std.fmt.parseInt(usize, std.mem.span(v), 10) catch both_max;
+    const steps = opts.steps;
+    const both_max = opts.both_max;
     for (ns[0..n_ns]) |n| if (n + steps + 1 > cap or n > all_ids.len) return error.NotEnoughRoom;
     if ((world != 1 and world != 2) or rank >= world) return error.BadRank;
     const g = try Eng.init(gpu, rank, world, port, dir, cap, rows);
