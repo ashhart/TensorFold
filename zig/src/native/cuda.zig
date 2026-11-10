@@ -584,6 +584,7 @@ test "slide admission: cuda refuses before checkpoint or device access" {
 
 test "qwen3 on CUDA refuses the flags it does not serve by name, before any checkpoint or device access" {
     try @import("cuda_qwen3_test.zig").flags(open);
+    try @import("cuda_qwen3_test.zig").kernels(open);
 }
 
 test {
