@@ -33,3 +33,28 @@ pub fn explain(err: anyerror) ?[]const u8 {
         error.TrainingOnCapturedGlue => "--slide trains on Flash Next's own glue: serve it without TENSORFOLD_CUDA_KERNELS",
     };
 }
+
+test "exl3: load refusals are diagnosed without borrowing request diagnostics" {
+    const testing = @import("std").testing;
+    const load_refusals = [_]anyerror{
+        error.FlashNextRanksOverTwo,
+        error.FlashNextRanksNeedModelopt,
+        error.FlashNextRanksOnCapturedGlue,
+        error.BadFlashNextKvPages,
+        error.BadFlashNextPageTest,
+        error.FlashNextPagesUnsupported,
+        error.UnsupportedCheckpoint,
+        error.UnsupportedLearningFormat,
+        error.TrainingOnCapturedGlue,
+        error.FlashNextKvHostNeedsExl3,
+        error.BadFlashNextKvHost,
+        error.FlashNextTierRanksDisagree,
+    };
+    // A non-null result claims the refusal for this family's startup diagnostic.
+    for (load_refusals) |err| try testing.expect(open(err) != null);
+    const request_refusals = [_]anyerror{ error.PromptTooLong, error.OutOfDeviceMemory };
+    for (request_refusals) |err| {
+        try testing.expect(explain(err) != null);
+        try testing.expectEqual(@as(?[]const u8, null), open(err));
+    }
+}
