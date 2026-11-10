@@ -137,4 +137,54 @@ pub fn capped(comptime Lanes: type, backend: anytype) !void {
         }
         try t.expectEqual(cold.items.len, landed);
     }
+    try marks();
+    try policy();
+}
+
+/// A store mark on the 128 grid inside a cold chunk and one on a cold cut: a capped pass keeps only the cold one.
+fn marks() !void {
+    const Probe = struct {
+        at: [8]u32 = undefined,
+        n: usize = 0,
+        fn kept(ctx: *anyopaque, _: *lanes.Stream, at: u32) void {
+            const p: *@This() = @ptrCast(@alignCast(ctx));
+            p.at[p.n] = at;
+            p.n += 1;
+        }
+    };
+    const m = @import("cuda_engine.zig").max_rows;
+    const prompt = try t.allocator.alloc(u32, 2 * m + 100);
+    defer t.allocator.free(prompt);
+    @memset(prompt, 3);
+    for ([_]u32{ 0, 512 }) |cap| {
+        var e: Fake.Engine = .{};
+        defer e.rows.deinit(t.allocator);
+        var f: Fake = .{ .e = &e };
+        defer f.deinit();
+        var probe: Probe = .{};
+        const want = [_]u32{ 1024, m }; // 1024: a capped step ends there, but no pass resumes inside a cold chunk
+        var s = try lanes.Stream.init(t.allocator, .{
+            .id = "marks",
+            .prompt = prompt,
+            .max_new = 1,
+            .reuse = .{ .hook = .{ .ptr = &probe, .at = Probe.kept }, .marks = &want },
+        });
+        defer s.deinit(t.allocator);
+        while (!try Fake.prefill.step(&f, &s, cap)) {}
+        if (cap > 0) try t.expect(std.mem.indexOfScalar(usize, e.rows.items, 512) != null); // the cap cut at 1024 too
+        try t.expectEqualSlices(u32, &.{m}, probe.at[0..probe.n]);
+    }
+}
+
+/// fcfs's TOKENS rows reach any family beside a decoder (capRows): Qwen cuts at TOKENS floored to 128 in cold chunks.
+fn policy() !void {
+    const m = @import("cuda_engine.zig").max_rows;
+    const prompt = try t.allocator.alloc(u32, 2 * m + 100);
+    defer t.allocator.free(prompt);
+    @memset(prompt, 3);
+    var ends: std.ArrayList(usize) = .empty;
+    defer ends.deinit(t.allocator);
+    try pass(prompt, &.{}, &.{1000}, &ends); // TOKENS=1000: 896-row steps
+    const want = [_]usize{ 896, 1792, 2688, 3584, m, m + 896, m + 1792, m + 2688, m + 3584, 2 * m, 2 * m + 100 };
+    try t.expectEqualSlices(usize, &want, ends.items);
 }
