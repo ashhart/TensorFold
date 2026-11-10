@@ -4,6 +4,8 @@ const mtl = @import("metal");
 const variants = @import("variants.zig");
 const names = @import("fsr_contract_source.zig");
 const gx = @import("gx.zig");
+const pairs = @import("scale_pairs.zig");
+const ks = @import("kernel_sources");
 const Buf = @import("replay.zig").Buf;
 
 pub const d = 2560;
@@ -23,6 +25,11 @@ pub fn text(a: std.mem.Allocator, gate: bool) ![]const u8 {
     return variants.source(a, try names.recorded(file), &at4, true, false, gate, false);
 }
 
+/// fn_gx.metal as the loader compiles it; `indexed` with every scale and bias read through the index.
+pub fn groupedText(a: std.mem.Allocator, indexed: bool) ![]const u8 {
+    return if (indexed) @import("experts4.zig").indexedGrouped(a, ks.flashnext_gx) else ks.flashnext_gx;
+}
+
 /// Groups of 32 weights in projection j: gate, up, shared gate, shared up, down, shared down.
 fn groups(j: usize) usize {
     const routed: usize = if (j == 0 or j == 1 or j == 4) held else 1;
@@ -36,9 +43,10 @@ pub const Fixture = struct {
     queue: mtl.Queue,
     rows: usize,
     w: [18]Ref, // each projection's weight, scales and biases
+    ix: [6][2]Ref, // each projection's index and table
     io: [7]Ref, // input rows, logits, row count, then act, picks, weights and y
     direct: [2]mtl.Pipeline, // the recorded gate/up and down
-    grouped: gx.Gx,
+    grouped: [2]gx.Gx, // reading scales and biases direct, and through the index
     libraries: std.ArrayList(mtl.Library) = .empty,
     pipelines: std.ArrayList(mtl.Pipeline) = .empty,
     buffers: std.ArrayList(Ref) = .empty,
@@ -49,10 +57,12 @@ pub const Fixture = struct {
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, rows: usize, seed: u64, nonfinite: bool) !*Fixture {
         if (rows == 0 or rows > gx.rmax) return error.GroupedFixtureShape;
         const p = try a.create(Fixture);
-        p.* = .{ .memory = .init(a), .a = undefined, .queue = queue, .rows = rows, .w = undefined, .io = undefined, .direct = undefined, .grouped = undefined };
+        p.* = .{ .memory = .init(a), .a = undefined, .queue = queue, .rows = rows, .w = undefined, .ix = undefined, .io = undefined, .direct = undefined, .grouped = undefined };
         errdefer p.deinit(a);
         p.a = p.memory.allocator();
         var random: std.Random.DefaultPrng = .init(seed);
+        const table = try p.a.create([pairs.most]u32);
+        const seen = try p.a.create([pairs.slots]u32);
         for (0..6) |j| {
             const n = groups(j);
             const codes = try p.a.alloc(u8, n * 16);
@@ -69,6 +79,9 @@ pub const Fixture = struct {
             p.w[j * 3] = try p.make(device, codes);
             p.w[j * 3 + 1] = try p.make(device, std.mem.sliceAsBytes(s));
             p.w[j * 3 + 2] = try p.make(device, std.mem.sliceAsBytes(b));
+            const index = try p.a.alloc(u16, n);
+            const count = try pairs.index(s, b, index, table, seen);
+            p.ix[j] = .{ try p.make(device, std.mem.sliceAsBytes(index)), try p.make(device, std.mem.sliceAsBytes(try p.a.dupe(u32, table[0..count]))) };
         }
         const h = try p.a.alloc(u16, rows * d);
         for (h, 0..) |*v, i| v.* = bf16(@as(f32, @floatFromInt((i * 7 + seed) % 23)) / 64 - 0.125);
@@ -92,15 +105,17 @@ pub const Fixture = struct {
             p.direct[k] = try mtl.Pipeline.init(device, lib, try std.fmt.allocPrintSentinel(p.a, "{s}", .{if (gate) names.gate else names.down}, 0), false);
             try p.pipelines.append(p.a, p.direct[k]);
         }
-        const lib = try gx.library(device);
-        try p.libraries.append(p.a, lib);
-        for (gx.functions, &p.grouped.pipes) |name, *pipe| {
-            pipe.* = try mtl.Pipeline.init(device, lib, name, false);
-            try p.pipelines.append(p.a, pipe.*);
-        }
         p.list = try device.buffer(gx.list_bytes, mtl.ResourceOptions.shared);
-        p.grouped.buf = p.list.?;
-        p.grouped.min_rows = 1;
+        for ([_]bool{ false, true }, &p.grouped) |indexed, *g| {
+            const lib = try gx.library(p.a, device, indexed);
+            try p.libraries.append(p.a, lib);
+            for (gx.functions, &g.pipes) |name, *pipe| {
+                pipe.* = try mtl.Pipeline.init(device, lib, name, false);
+                try p.pipelines.append(p.a, pipe.*);
+            }
+            g.buf = p.list.?;
+            g.min_rows = 1;
+        }
         return p;
     }
 
@@ -142,16 +157,21 @@ pub const Fixture = struct {
         return .{ .b = ref.buffer, .off = 64 };
     }
 
-    /// Act, picks, weights and y after the recorded launches, or after gx.zig's when `by_expert`.
-    pub fn run(p: *Fixture, by_expert: bool) ![]const u8 {
+    /// Act, picks, weights and y after the recorded launches, or gx.zig's when `by_expert` (`indexed`: on the index).
+    pub fn run(p: *Fixture, by_expert: bool, indexed: bool) ![]const u8 {
         for (p.io[3..]) |ref| @memset(p.bytes(ref), 0);
         const cb = p.queue.commandBuffer();
         const e = cb.compute(.serial);
         if (by_expert) {
             var w: [18]Buf = undefined;
             for (p.w, &w) |ref, *out| out.* = buf(ref);
-            if (p.wrong_scales) std.mem.swap(Buf, &w[1], &w[4]); // the control: gate and up scales change places
-            p.grouped.launch(e, false, buf(p.io[0]), buf(p.io[1]), w, buf(p.io[3]), buf(p.io[4]), buf(p.io[5]), buf(p.io[2]), buf(p.io[6]), p.rows);
+            if (indexed) for (p.ix, 0..) |pair, j| {
+                w[j * 3 + 1] = buf(pair[0]);
+                w[j * 3 + 2] = buf(pair[1]);
+            };
+            const slot: usize = if (indexed) 2 else 1; // the control: gate and up scales (indexed: their tables) change places
+            if (p.wrong_scales) std.mem.swap(Buf, &w[slot], &w[slot + 3]);
+            p.grouped[@intFromBool(indexed)].launch(e, false, buf(p.io[0]), buf(p.io[1]), w, buf(p.io[3]), buf(p.io[4]), buf(p.io[5]), buf(p.io[2]), buf(p.io[6]), p.rows);
         } else {
             e.setPipeline(p.direct[0]);
             bind(e, 0, p.io[0]);

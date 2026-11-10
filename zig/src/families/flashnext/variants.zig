@@ -93,12 +93,7 @@ pub fn experts(r: *Run, gu_role: []const u8, down_role: []const u8, x: Buf, lg: 
     var e = e_direct;
     var cg: [4]Const = undefined;
     var cd: [4]Const = undefined;
-    if (r.sb_index) for (0..6) |j| { // a 4/32 kernel's projections: index and table in the scales' and biases' slots
-        if (!experts4.q4(if (j < 4) four(&cg, w.gu) else four(&cd, w.down))) continue;
-        const p = r.sbix.get(@import("scale_index.zig").keyOf(e[j * 3 + 1])) orelse return error.NoScaleIndex;
-        e[j * 3 + 1] = p[0];
-        e[j * 3 + 2] = p[1];
-    };
+    if (r.sb_index) try @import("scale_index.zig").bind(r, &e, experts4.q4(four(&cg, w.gu)), experts4.q4(four(&cd, w.down)));
     if (r.fsr) |stream| if (stream.pool != null) stream.bind(r, 18, 19, 0);
     r.enc.setBuffer(rows_buf.b, rows_buf.off, 17); // the 4/32 gate/up's row count (experts4.gated)
     try callAs(r, gu_role, r.rows, &.{ x, lg, e[0], e[1], e[2], e[3], e[4], e[5], e[6], e[7], e[8], e[9], e[10], e[11] }, &.{ act, pick, wts }, four(&cg, w.gu));

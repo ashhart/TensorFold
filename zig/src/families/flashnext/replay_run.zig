@@ -73,7 +73,7 @@ pub const Run = struct {
     dense: bool = false,
     dense_target: bool = false,
     skip: u32 = 0,
-    sb_index: bool = false, // TF_FLASHNEXT_SCALE_INDEX: the 4/32 expert kernels read scales and biases through scale_index's tables
+    sb_index: bool = false, // the 4/32 expert kernels read scales and biases through scale_index (TF_FLASHNEXT_SCALE_INDEX=0: off)
     sbix: std.AutoHashMapUnmanaged(@import("scale_index.zig").Key, [2]Buf) = .empty,
     sb_pairs: usize = 0, // the most distinct pairs any indexed tensor has
     hcskip: u32 = 0, // FZ_HCSKIP: hyper-connection knock-outs by kernel (1 norms, 2 downs, 4 ups)

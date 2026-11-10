@@ -58,11 +58,12 @@ the lane matmul; M1 through M4 use the per-row projection and hyper-connection k
 restore recurrent state, n-gram history and attention state, including incomplete pooled blocks.
 The load-time row check disables drafting when windows do not reproduce serial steps.
 
-`TF_FLASHNEXT_SCALE_INDEX=1` (off by default; M1 through M4, 4-bit experts in groups of 32) has the expert kernels read
-each group's scale and bias through a 16-bit index into its tensor's table of distinct pairs, built at load. The
-kernels get the same two values from 10% fewer weight bytes, so every reply keeps its tokens. Prompt passes still read
-the stored scales and biases, so the index is held beside them. The setting does nothing with tensor units,
-`--ssd-experts` or speed-up mode, and a tensor with more than 65,536 distinct pairs turns it off with a warning.
+On M1 through M4, expert projections stored at 4 bits in groups of 32 are read through a scale index: at load each
+tensor's (scale, bias) pairs become a table and a 16-bit index a group, and the decode, grouped and prompt-gather
+expert kernels read each group's pair through it. They get the same two values from 10% fewer weight bytes, so every
+reply keeps its tokens, and the routed experts' stored scales and biases are released once indexed.
+`TF_FLASHNEXT_SCALE_INDEX=0` keeps and reads the stored arrays instead. The index is not built with tensor units or
+`--ssd-experts`, nor for 6-bit packs, and a tensor with more than 65,536 distinct pairs turns it off with a warning.
 
 On M1 through M4, a decode window of five rows or more runs its 4-bit experts grouped by expert: rows that picked
 the same expert share its launch, so a copy or repeat stretch reads each expert's weights once instead of once a
