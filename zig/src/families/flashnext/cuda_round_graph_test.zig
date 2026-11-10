@@ -96,6 +96,7 @@ fn collective(pair: *[2]c_int) !Collective {
     if (std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, pair) != 0) return error.SocketPair;
     var c: Collective = undefined;
     c.failed = false;
+    c.release = null;
     c.comm = @ptrFromInt(0x1000);
     c.link = .{ .fd = pair[0] };
     c.timeout_ms = 1000;
@@ -156,6 +157,7 @@ test "a decode round's graph: refused unstaged, captured once a key with its sum
     p.staged = true;
     try c.launch(try key(1), &p, &.{7});
     try t.expectEqual([4]usize{ 1, 1, 1, 1 }, [4]usize{ Fake.begins, Fake.instantiates, Fake.launches, Fake.captured_sums });
+    try t.expect(col.release != null);
     try c.launch(try key(1), &p, &.{8});
     try t.expectEqual([4]usize{ 1, 1, 2, 1 }, [4]usize{ Fake.begins, Fake.instantiates, Fake.launches, Fake.captured_sums });
     try c.launch(try key(2), &p, &.{9});
@@ -163,6 +165,7 @@ test "a decode round's graph: refused unstaged, captured once a key with its sum
     try t.expectEqual(@as(usize, 1), Fake.execs);
     c.clear();
     try t.expectEqual([2]usize{ 0, 0 }, [2]usize{ Fake.execs, Fake.graphs });
+    try t.expect(col.release == null);
 }
 
 test "a decode round whose pass uploads inside its capture is refused; its stream and copy guard are released" {
@@ -181,4 +184,60 @@ test "a decode round whose pass uploads inside its capture is refused; its strea
     try t.expectError(error.UnownedCaptureSource, c.launch(try key(1), &p, &.{7}));
     try t.expectEqual([2]usize{ 0, 0 }, [2]usize{ Fake.instantiates, Fake.graphs });
     try expectReleased(stream);
+}
+
+test "a peer lost after a replayed round: the communicator's abort finds the round's executable destroyed" {
+    var d = Fake.driver();
+    const previous = enter();
+    defer cuda.copy_source.setCurrent(previous);
+    const stream: cuda.Stream = .{ .d = &d, .handle = @ptrFromInt(1) };
+    var pair: [2]c_int = undefined;
+    var col = try collective(&pair);
+    defer _ = std.c.close(pair[0]);
+    var c: rg.Cache = .{};
+    defer c.clear();
+    var p: Pass = .{ .stream = stream, .m = .{ .collective = &col } };
+    try c.launch(try key(1), &p, &.{7});
+    try c.launch(try key(1), &p, &.{8});
+    _ = std.c.close(pair[1]);
+    try t.expectError(error.RankDisconnected, col.finish(stream));
+    try t.expectEqual([3]usize{ 0, 0, 0 }, Fake.at_abort.?);
+    try t.expect(c.exec == null and col.release == null);
+}
+
+test "a peer lost during a round's capture: the capture is ended and its graph freed before the abort" {
+    var d = Fake.driver();
+    const previous = enter();
+    defer cuda.copy_source.setCurrent(previous);
+    const stream: cuda.Stream = .{ .d = &d, .handle = @ptrFromInt(1) };
+    var pair: [2]c_int = undefined;
+    var col = try collective(&pair);
+    defer _ = std.c.close(pair[0]);
+    var c: rg.Cache = .{};
+    defer c.clear();
+    var p: Pass = .{ .stream = stream, .m = .{ .collective = &col } };
+    _ = std.c.close(pair[1]);
+    try t.expectError(error.RankDisconnected, c.launch(try key(1), &p, &.{7}));
+    try t.expectEqual([3]usize{ 0, 0, 0 }, Fake.at_abort.?);
+    try t.expectEqual(@as(usize, 0), Fake.instantiates);
+    try expectReleased(stream);
+}
+
+test "control: a communicator without the release finds the round's executable alive at its abort" {
+    var d = Fake.driver();
+    const previous = enter();
+    defer cuda.copy_source.setCurrent(previous);
+    const stream: cuda.Stream = .{ .d = &d, .handle = @ptrFromInt(1) };
+    var pair: [2]c_int = undefined;
+    var col = try collective(&pair);
+    defer for (pair) |fd| {
+        _ = std.c.close(fd);
+    };
+    var c: rg.Cache = .{};
+    var p: Pass = .{ .stream = stream, .m = .{ .collective = &col } };
+    try c.launch(try key(1), &p, &.{7});
+    col.release = null;
+    col.abort();
+    try t.expectEqual([3]usize{ 0, 1, 0 }, Fake.at_abort.?);
+    c.clear();
 }

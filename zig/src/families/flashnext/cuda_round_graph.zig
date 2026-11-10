@@ -1,6 +1,7 @@
 //! A single bounded decode graph, recaptured when sequence owners, scratch or attention geometry change.
 const std = @import("std");
 const cuda = @import("cuda");
+const Collective = @import("cuda_collective.zig").Collective;
 
 pub fn enabled() bool {
     // the startup check refused every malformed value already, so a plain default stands here
@@ -33,10 +34,21 @@ pub const Key = struct {
 pub const Cache = struct {
     exec: ?cuda.graph.Exec = null,
     key: ?Key = null,
+    /// The stream the graph captures on and the communicator whose collectives it holds (released before its abort).
+    stream: ?cuda.Stream = null,
+    collective: ?*Collective = null,
 
     pub fn clear(c: *Cache) void {
+        if (c.collective) |col| col.release = null;
         if (c.exec) |*e| e.deinit();
         c.* = .{};
+    }
+
+    /// Ahead of an abort, which waits for every graph holding the communicator's plans: any capture ended, all freed.
+    fn abandon(ctx: *anyopaque) void {
+        const c: *Cache = @ptrCast(@alignCast(ctx));
+        if (c.stream) |s| discard(s);
+        c.clear();
     }
 
     /// An open capture on `stream` ended and its graph freed; an abort may have ended it already.
@@ -59,6 +71,9 @@ pub const Cache = struct {
         if (!pass.staged) return error.UnexpectedTensor;
         if (c.key == null or !std.meta.eql(c.key.?, key)) {
             c.clear();
+            c.stream = pass.stream;
+            c.collective = pass.m.collective;
+            if (c.collective) |col| col.release = .{ .ctx = c, .run = abandon };
             try cuda.graph.beginCapture(pass.stream, .thread_local);
             pass.chunk(ids, 0, null) catch |err| {
                 discard(pass.stream);
