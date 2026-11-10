@@ -7,12 +7,15 @@ const fixture = @import("checkpoint_fixture");
 const bf16_round = @import("bf16_round");
 const torch_noise = @import("moss_noise");
 const check = @import("h3_image_prompt_check.zig");
+const files = @import("h3_image_files.zig");
+const edit = @import("h3_image_prompt_edit.zig");
 
 const rules = hp.rules;
 const ref = hp.reference;
 
 const usage =
     \\usage: tf-h3-image-prompt TEXT_ENCODER_DIR MODEL_DIR prompt.txt out.safetensors [WIDTHxHEIGHT [SEED [MIN_AREA]]]
+    \\                          [--reference vision.safetensors [--anchors ENCODER_PREFIX]]...
     \\       tf-h3-image-prompt selftest [WORK_DIR]
     \\  TEXT_ENCODER_DIR  MiniMax-H3's text_encoder/ (Qwen3-VL): config.json, its index and shards
     \\  MODEL_DIR         the MiniMax-H3-Image folder: model_index.json, tokenizer/, transformer/
@@ -22,6 +25,10 @@ const usage =
     \\  WIDTHxHEIGHT      also a text-to-image case: the canvas (grown to MIN_AREA, default 2048 x 2048, at the
     \\                    size's ratio, sides snapped to 32), its starting rows from SEED (default 0) as torch's
     \\                    CPU randn draws them, and the requested size
+    \\  --reference         an edit: a reference picture's tf-h3-image-vision output, `Picture i: ` and its vision
+    \\                      block before the prompt, in the order given; its rows go to the image pads
+    \\  --anchors           with WIDTHxHEIGHT, one per reference: tf-h3-image-encoder's OUT_PREFIX (.grid.json and
+    \\                      .anchors.f32, drawn with the same SEED and canvas), written as references and anchors
     \\  selftest          the GPU kernels on a tiny synthetic checkpoint against a float64 host reference, gated;
     \\                    WORK_DIR (default under TMPDIR) holds the checkpoint while it runs
     \\Exit 0: done or every gate passed; 1: a gate failed.
@@ -36,16 +43,20 @@ pub fn main(init: std.process.Init) !u8 {
         const dir = if (args.len == 3) args[2] else try std.fs.path.join(a, &.{ tmp, "tf-h3-image-prompt-selftest" });
         return selftest(init, a, dir);
     }
-    if (args.len < 5 or args.len > 8) {
+    const rest, const options = edit.take(a, args) catch {
+        std.debug.print("{s}", .{usage});
+        return 2;
+    };
+    if (rest.len < 5 or rest.len > 8 or (options.anchors.len != 0 and (rest.len < 6 or options.anchors.len != options.references.len))) {
         std.debug.print("{s}", .{usage});
         return 2;
     }
-    const request: ?Request = if (args.len >= 6) .{
-        .size = try size(args[5]),
-        .seed = if (args.len >= 7) try std.fmt.parseInt(u64, args[6], 10) else 0,
-        .min_area = if (args.len == 8) try std.fmt.parseInt(u64, args[7], 10) else hp.picture.default_min_area,
+    const request: ?Request = if (rest.len >= 6) .{
+        .size = try size(rest[5]),
+        .seed = if (rest.len >= 7) try std.fmt.parseInt(u64, rest[6], 10) else 0,
+        .min_area = if (rest.len == 8) try std.fmt.parseInt(u64, rest[7], 10) else hp.picture.default_min_area,
     } else null;
-    try run(init, a, args[1], args[2], args[3], args[4], request);
+    try run(init, a, rest[1], rest[2], rest[3], rest[4], request, options);
     return 0;
 }
 
@@ -65,20 +76,7 @@ fn read(io: std.Io, a: std.mem.Allocator, parts: []const []const u8) ![]u8 {
     };
 }
 
-/// A safetensors image whose data starts on 16 bytes: the header padded with spaces.
-fn image(a: std.mem.Allocator, entries: []const fixture.Entry) ![]u8 {
-    const plain = try fixture.image(a, entries);
-    const header: usize = @intCast(std.mem.readInt(u64, plain[0..8], .little));
-    const pad = (16 - (8 + header) % 16) % 16;
-    const out = try a.alloc(u8, plain.len + pad);
-    std.mem.writeInt(u64, out[0..8], header + pad, .little);
-    @memcpy(out[8..][0..header], plain[8..][0..header]);
-    @memset(out[8 + header ..][0..pad], ' ');
-    @memcpy(out[8 + header + pad ..], plain[8 + header ..]);
-    return out;
-}
-
-fn run(init: std.process.Init, a: std.mem.Allocator, text_dir: []const u8, model_dir: []const u8, prompt_path: []const u8, out_path: []const u8, request: ?Request) !void {
+fn run(init: std.process.Init, a: std.mem.Allocator, text_dir: []const u8, model_dir: []const u8, prompt_path: []const u8, out_path: []const u8, request: ?Request, options: edit.Options) !void {
     const io = init.io;
     const gpa = init.gpa;
     const enc = try rules.checkEncoder(a, try read(io, a, &.{ text_dir, "config.json" }));
@@ -90,13 +88,14 @@ fn run(init: std.process.Init, a: std.mem.Allocator, text_dir: []const u8, model
     var prompt: []const u8 = try std.Io.Dir.cwd().readFileAlloc(io, prompt_path, a, .limited(16 << 20));
     if (std.mem.endsWith(u8, prompt, "\n")) prompt = prompt[0 .. prompt.len - 1];
     if (std.mem.endsWith(u8, prompt, "\r")) prompt = prompt[0 .. prompt.len - 1];
-    const p = try rules.present(a, &tok, enc.marks, &.{}, prompt);
-    const pos = try rules.positions(a, p, enc.marks, &.{});
-    const T = p.ids.len;
-
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const device = try mtl.Device.init();
+    const refs = try edit.References.read(gpa, a, device, options.references, enc.text.hidden);
+    const p = try rules.present(a, &tok, enc.marks, refs.counts, prompt);
+    const pos = try rules.positions(a, p, enc.marks, refs.grids);
+    const vision = try refs.vision(a, p, enc.marks);
+    const T = p.ids.len;
     const loading = mtl.clock.seconds();
     var text_w = try hp.weights.loadText(gpa, io, device, text_dir, enc.text);
     defer text_w.deinit(gpa);
@@ -104,11 +103,12 @@ fn run(init: std.process.Init, a: std.mem.Allocator, text_dir: []const u8, model
     defer front_w.deinit(gpa);
     var runner = try hp.Runner.init(device);
     defer runner.deinit();
+    if (vision) |v| std.debug.print("{d} references: {d} vision rows at the image pads, DeepStack's added after layers 0 to 2\n", .{ refs.counts.len, v.pads.len });
     std.debug.print("{s}: {d} tokens; weights mapped and kernels built in {d:.1} s\n", .{ device.name(), T, mtl.clock.seconds() - loading });
 
     const rows = try a.alloc(u16, T * enc.text.hidden);
     var started = mtl.clock.seconds();
-    try runner.encode(&text_w, p.ids, pos, null, rows);
+    try runner.encode(&text_w, p.ids, pos, vision, rows);
     std.debug.print("text encoder, {d} layers: {d:.2} s wall, {d:.2} s GPU\n", .{ enc.text.layers, mtl.clock.seconds() - started, runner.gpu });
     const text = try a.alloc(u16, T * front.hidden);
     started = mtl.clock.seconds();
@@ -129,13 +129,14 @@ fn run(init: std.process.Init, a: std.mem.Allocator, text_dir: []const u8, model
             .{ .name = "noise", .dtype = "F32", .shape = try a.dupe(usize, &.{ start.len / hp.picture.row_width, hp.picture.row_width }), .bytes = std.mem.sliceAsBytes(start) },
         });
         std.debug.print("{d}x{d} drawn on a {d}x{d} canvas ({d} x {d} cells), seed {d}\n", .{ r.size.width, r.size.height, canvas.width, canvas.height, grid.rows, grid.columns, r.seed });
+        try edit.anchors(io, a, options.anchors, &entries);
     }
     try entries.appendSlice(a, &.{
         .{ .name = "text_tags", .dtype = "I32", .shape = &.{T}, .bytes = std.mem.sliceAsBytes(p.tags) },
         .{ .name = "ids", .dtype = "I32", .shape = &.{T}, .bytes = std.mem.sliceAsBytes(ids) },
         .{ .name = "text", .dtype = "BF16", .shape = &.{ T, front.hidden }, .bytes = std.mem.sliceAsBytes(text) },
     });
-    const bytes = try image(a, entries.items);
+    const bytes = try files.image(a, entries.items);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = out_path, .data = bytes });
     std.debug.print("wrote {s}: text [{d}, {d}] bf16, text_tags and ids [{d}]\n", .{ out_path, T, front.hidden, T });
 }
@@ -174,14 +175,7 @@ const Synth = struct {
     }
 
     fn write(s: *Synth, io: std.Io, dir: []const u8) !void {
-        try std.Io.Dir.cwd().createDirPath(io, dir);
-        const file = "model-00001-of-00001.safetensors";
-        var index: std.ArrayList(u8) = .empty;
-        try index.appendSlice(s.a, "{\"weight_map\": {");
-        for (s.entries.items, 0..) |e, i| try index.print(s.a, "{s}\"{s}\": \"{s}\"", .{ if (i == 0) "" else ", ", e.name, file });
-        try index.appendSlice(s.a, "}}");
-        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fs.path.join(s.a, &.{ dir, "model.safetensors.index.json" }), .data = index.items });
-        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fs.path.join(s.a, &.{ dir, file }), .data = try image(s.a, s.entries.items) });
+        try files.checkpoint(io, s.a, dir, s.entries.items);
     }
 };
 
@@ -261,7 +255,7 @@ fn selftest(init: std.process.Init, a: std.mem.Allocator, dir: []const u8) !u8 {
     const same = std.mem.eql(u16, enc, again) and std.mem.eql(u16, out, out_again);
     std.debug.print("encoded in {d:.3} s; again, byte for byte the same: {}\n", .{ enc_s, same });
     failed = failed or !same;
-    failed = !try withPicture(&runner, &text_w, a, rand, host) or failed;
+    failed = !try withPicture(&runner, &text_w, io, a, rand, host, dir) or failed;
     std.debug.print("{s}\n", .{if (failed) "FAIL" else "PASS every gate"});
     return @intFromBool(failed);
 }
@@ -285,27 +279,38 @@ const Bytes = struct {
     }
 };
 
-/// An edit's presentation: a label, a 4 x 6 patch grid's 6 pads with vision and DeepStack rows, at M-RoPE positions.
-fn withPicture(runner: *hp.Runner, w: *const hp.weights.Text, a: std.mem.Allocator, rand: std.Random, host: ref.Text) !bool {
+/// An edit's presentation: a label, a 4 x 6 patch grid's 6 pads, its rows read from a file as --reference reads.
+fn withPicture(runner: *hp.Runner, w: *const hp.weights.Text, io: std.Io, a: std.mem.Allocator, rand: std.Random, host: ref.Text, dir: []const u8) !bool {
     const g = w.g;
     const H = g.hidden;
     const marks: rules.Marks = .{ .start = 90, .image = 91, .end = 92 };
-    const p = try rules.present(a, Bytes{}, marks, &.{6}, "a picture's prompt, long enough to pass sixty rows.");
-    const pos = try rules.positions(a, p, marks, &.{.{ 4, 6 }});
-    const pads = try rules.pads(a, p, marks, &.{6});
-    const T = p.ids.len;
+    const n = 6;
     var blocks: [4][]f32 = undefined;
-    var bits: [4][]u16 = undefined;
-    for (&blocks, &bits) |*v, *h| {
-        v.* = try a.alloc(f32, pads.len * H);
-        h.* = try a.alloc(u16, pads.len * H);
-        for (v.*, h.*) |*x, *b| {
+    const bits = try a.alloc(u16, 4 * n * H);
+    for (&blocks, 0..) |*v, j| {
+        v.* = try a.alloc(f32, n * H);
+        for (v.*, bits[j * n * H ..][0 .. n * H]) |*x, *b| {
             b.* = bf16_round.bits(2 * rand.float(f32) - 1);
             x.* = bf16_round.value(b.*);
         }
     }
+    // the rows as tf-h3-image-vision writes them: grid (t, h, w), rows, then the three DeepStack blocks
+    const path = try std.fs.path.join(a, &.{ dir, "vision.safetensors" });
+    const grid = [_]i32{ 1, 4, 6 };
+    const entries = [_]fixture.Entry{
+        .{ .name = "grid", .dtype = "I32", .shape = &.{3}, .bytes = std.mem.sliceAsBytes(&grid) },
+        .{ .name = "rows", .dtype = "BF16", .shape = &.{ n, H }, .bytes = std.mem.sliceAsBytes(bits[0 .. n * H]) },
+        .{ .name = "deepstack", .dtype = "BF16", .shape = &.{ 3, n, H }, .bytes = std.mem.sliceAsBytes(bits[n * H ..]) },
+    };
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = try files.image(a, &entries) });
+    const refs = try edit.References.read(a, a, runner.device, &.{path}, H);
+    const p = try rules.present(a, Bytes{}, marks, refs.counts, "a picture's prompt, long enough to pass sixty rows.");
+    const pos = try rules.positions(a, p, marks, refs.grids);
+    const given = (try refs.vision(a, p, marks)).?;
+    const pads = given.pads;
+    const T = p.ids.len;
     const enc = try a.alloc(u16, T * H);
-    try runner.encode(w, p.ids, pos, .{ .pads = pads, .rows = bits[0], .deepstack = bits[1..4].* }, enc);
+    try runner.encode(w, p.ids, pos, given, enc);
     const cos = try a.alloc(f32, T * 64);
     const sin = try a.alloc(f32, T * 64);
     rules.rotary(cos, sin, pos, g.theta, g.sections);
