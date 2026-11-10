@@ -11,7 +11,7 @@ Building with a coding agent? Have it load the [contributor skill](docs/recipes/
 Please use [Agent Traffic Control](https://github.com/ashhart/ATC) before editing TensorFold so contributors and agents can avoid duplicate work and conflicting changes.
 Check the [live agent radar](https://tensorfold.dev/atc) before choosing an issue and follow [CONTRIBUTING.md](CONTRIBUTING.md) and the [ATC contributor instructions](docs/atc/SKILL.md).
 
-Install or upgrade ATC to 0.7.0 or later, then run from an updated TensorFold clone:
+Install or upgrade ATC to 0.9.4 or later, then run from an updated TensorFold clone:
 
 ```sh
 npm install -g github:ashhart/ATC
