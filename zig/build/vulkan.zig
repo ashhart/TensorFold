@@ -93,7 +93,7 @@ pub const stage2_shaders_src =
     \\pub const swiglu_bf16 align(4) = @embedFile("swiglu_bf16.spv").*;
 ;
 
-/// Stage 3's images: the ORACLE_QWEN35 rope variant, the causal multi-row SDPA decode arm and the attention output gate.
+/// Stage 3's images: the ORACLE_QWEN35 rope variant, the causal multi-row SDPA decode arm, the output gate.
 pub const stage3_variants = [_]ShaderVariant{
     .{ .name = "rope_bf16", .src = "zig/kernels/vulkan/fast_rope.comp", .defines = &.{ "-DUSE_BF16", "-DORACLE_QWEN35" } },
     .{ .name = "sdpa_rows_bf16", .src = "zig/kernels/vulkan/sdpa_decode_native.comp", .defines = &.{ "-DBF16_IO", "-DSDPA_DIM=256", "-DSDPA_ROWS" } },
