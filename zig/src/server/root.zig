@@ -45,6 +45,7 @@ test {
     _ = @import("name_priority_http_test.zig");
     _ = @import("ws_frame.zig");
     _ = @import("ws_upgrade.zig");
+    _ = @import("ws_cache.zig");
     @import("std").testing.refAllDecls(@This());
     _ = @import("json");
     _ = @import("std_options.zig");

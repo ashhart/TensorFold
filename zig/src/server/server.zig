@@ -153,6 +153,8 @@ pub const Server = struct {
     /// Scheduler load the engine publishes as it works, and this server's identity and activity (load_ledger.zig).
     load: api.load_ledger.Ledger,
     store: responses.Store,
+    /// Bytes that every Responses socket's connection cache holds now (ws_cache.zig).
+    ws_cache_bytes: std.atomic.Value(usize) = .init(0),
     tool_ids: @import("ids.zig").Key, // every tool-call id's key: the config's, else this server's own
     next_id: std.atomic.Value(u64) = .init(1),
     /// Connections open now; a stop waits for them before freeing what they read.
