@@ -25,4 +25,5 @@ test {
     _ = lm;
     _ = @import("config_test.zig");
     _ = @import("schedule_test.zig");
+    _ = @import("lm_test.zig");
 }

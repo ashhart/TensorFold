@@ -82,6 +82,11 @@ pub const Model = struct {
         return m.forwardDump(ids, pos, audio, null);
     }
 
+    /// forward with the head over the last `heads` rows: each row's logits to the binding's `keep` when set.
+    pub fn forwardHeads(m: *Model, ids: []const u32, pos: usize, audio: ?Splice, heads: usize) !u32 {
+        return lm.forwardHeads(&m.lr, m.c.text, &m.lw, m.lb, ids, pos, audio, heads);
+    }
+
     /// forward with its stages (lm_embed, lm_layer{i}, lm_norm) to `sink`.
     pub fn forwardDump(m: *Model, ids: []const u32, pos: usize, audio: ?Splice, sink: ?Dump) !u32 {
         m.lr.sink = sink;

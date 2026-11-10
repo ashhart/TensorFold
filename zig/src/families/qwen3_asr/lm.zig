@@ -47,7 +47,18 @@ pub const Weights = struct {
 };
 
 /// Audio rows spliced into a pass: `n` rows of the model's width at `ptr`, standing at positions [at, at + n).
-pub const Splice = struct { ptr: u64, at: usize, n: usize };
+pub const Splice = struct {
+    ptr: u64,
+    at: usize,
+    n: usize,
+
+    /// The rows standing in a pass over positions [pos, pos + rows): row `src` on, `len` of them, from pass row `dst`.
+    pub fn within(sp: Splice, pos: usize, rows: usize) ?struct { src: usize, dst: usize, len: usize } {
+        const lo = @max(sp.at, pos);
+        const hi = @min(sp.at + sp.n, pos + rows);
+        return if (lo < hi) .{ .src = lo - sp.at, .dst = lo - pos, .len = hi - lo } else null;
+    }
+};
 
 /// A pass's bf16 rows, each from the backend's `al.alloc(bytes)`; the KV caches are the binding's.
 pub const Buffers = struct {
@@ -83,14 +94,19 @@ pub const Buffers = struct {
 
 /// One pass over `ids` at positions [pos, pos + ids.len), the audio rows spliced in: the last row's greedy pick.
 pub fn forward(r: anytype, t: cfg.Text, w: *const Weights, b: Buffers, ids: []const u32, pos: usize, audio: ?Splice) !u32 {
+    return forwardHeads(r, t, w, b, ids, pos, audio, 1);
+}
+
+/// forward with the head over the pass's last `heads` rows, in order (a prompt run in passes splits its audio rows).
+pub fn forwardHeads(r: anytype, t: cfg.Text, w: *const Weights, b: Buffers, ids: []const u32, pos: usize, audio: ?Splice, heads: usize) !u32 {
     const rows = ids.len;
     if (rows == 0 or rows > b.max_rows) return error.PassRows;
+    if (heads == 0 or heads > rows) return error.PassHeads;
     try r.positions(ids, pos);
     try r.embed(w.embed, b.e, rows, t.hidden);
-    if (audio) |sp| {
-        if (sp.at < pos or sp.at + sp.n > pos + rows) return error.SpliceOutsidePass;
-        try r.copy(b.e + (sp.at - pos) * t.hidden * 2, sp.ptr, sp.n * t.hidden * 2);
-    }
+    if (audio) |sp| if (sp.within(pos, rows)) |in| {
+        try r.copy(b.e + in.dst * t.hidden * 2, sp.ptr + in.src * t.hidden * 2, in.len * t.hidden * 2);
+    };
     try r.dump("lm_embed", b.e, rows, t.hidden);
     const qd = t.heads * t.head_dim;
     const kvd = t.kv_heads * t.head_dim;
@@ -123,7 +139,9 @@ pub fn forward(r: anytype, t: cfg.Text, w: *const Weights, b: Buffers, ids: []co
     try r.addNorm(x, res, w.norm, b.h[cur], b.y, rows);
     try r.dump(try layerName(&name, w.layers.len - 1), b.h[cur], rows, t.hidden);
     try r.dump("lm_norm", b.y, rows, t.hidden);
-    return r.greedy(b.y + (rows - 1) * t.hidden * 2, w.embed);
+    var pick: u32 = undefined;
+    for (rows - heads..rows) |i| pick = try r.greedy(b.y + i * t.hidden * 2, w.embed);
+    return pick;
 }
 
 fn layerName(buf: *[24]u8, i: usize) ![]const u8 {
