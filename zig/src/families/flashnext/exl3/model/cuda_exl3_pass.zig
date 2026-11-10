@@ -8,6 +8,7 @@ const pool_ = @import("../offload/cuda_exl3_pool.zig");
 const memory = @import("../pack/exl3_startup_memory.zig");
 const line_deltas = @import("../offload/exl3_line_deltas.zig");
 const profile_line_budget = @import("../offload/exl3_profile_line_budget.zig");
+const environment = @import("sys").environment;
 
 const dims = wt.dims;
 const slots = wt.slots;
@@ -169,11 +170,9 @@ pub fn budgetForStreams(stream_bytes: u64, requested_streams: u32) !Budget {
 fn budgetFromEnvWithStreams(stream_bytes: u64, requested_streams: ?u32) !Budget {
     const streams = requested_streams orelse 1;
     var b: Budget = .{ .other = try streamReservation(stream_bytes, streams) };
-    if (std.c.getenv("TF_FLASHNEXT_EXPERT_LINES")) |v| b.lines = try std.fmt.parseInt(usize, std.mem.span(v), 10);
-    if (std.c.getenv("TF_FLASHNEXT_EXPERT_RESERVE_MB")) |v| b.reserve = try memory.mebibytes(std.mem.span(v));
-    if (requested_streams == null) if (std.c.getenv("TF_FLASHNEXT_EXL3_STREAMS")) |v| {
-        const env_streams = try std.fmt.parseInt(u64, std.mem.span(v), 10);
-        if (env_streams == 0) return error.InvalidStreamCount;
+    b.lines = try environment.read(?usize, "TF_FLASHNEXT_EXPERT_LINES", null);
+    if (try environment.read(?u64, "TF_FLASHNEXT_EXPERT_RESERVE_MB", null)) |mib| b.reserve = try memory.mebibytes(mib);
+    if (requested_streams == null) if (try environment.read(?u64, "TF_FLASHNEXT_EXL3_STREAMS", null)) |env_streams| {
         b.other = try std.math.mul(u64, stream_bytes, env_streams);
     };
     return b;
@@ -202,7 +201,8 @@ pub fn freeBytes(d: *const cuda.Driver) !u64 {
 pub fn attach(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, st: cuda.Stream, layers: []const @import("../../cuda_prompt_load.zig").Layer, rows: usize, b: Budget, profile_counts: ?*[pool_.shape.layers][pool_.shape.experts]u32) !Attached {
     var all: [wt.layers_n]*load.Experts = undefined;
     const n = offloadedLayers(layers, &all);
-    const delta_text = if (std.c.getenv("TF_FLASHNEXT_EXL3_LINE_DELTAS")) |value| std.mem.span(value) else null;
+    const delta_text = try environment.readPath("TF_FLASHNEXT_EXL3_LINE_DELTAS");
+    const profile_sizing = try profileSizingEnabled();
     var out: Attached = .{};
     const scratch_before = try freeBytes(d);
     // every distinct Ops (the engine's store) reserves its scratch now
@@ -223,7 +223,7 @@ pub fn attach(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, st: cud
     try d.check(d.api.cuMemGetInfo_v2(&free, &total), "cuMemGetInfo");
     out.free_before = free;
     out.scratch_bytes = scratch_before -| free;
-    const reserve_floor = b.reserve orelse serverReserve(total);
+    const reserve_floor = b.reserve orelse try serverReserve(total);
     const reserve = b.reserve orelse try std.math.add(u64, reserve_floor, b.margin);
     // beside its lines a layer holds the shared expert's region, its six tables and its masked picks (sized for the
     var fixed: u64 = 0;
@@ -245,7 +245,7 @@ pub fn attach(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, st: cud
     var profile_min_lines: usize = std.math.maxInt(usize);
     var profile_max_lines: usize = 0;
     for (all[0..n], 0..) |x, index| line_bytes[index] = x.lineBytes();
-    if (delta_text == null and shouldProfileSize(profileSizingEnabled(), b.lines)) if (profile_counts) |prior| {
+    if (delta_text == null and shouldProfileSize(profile_sizing, b.lines)) if (profile_counts) |prior| {
         var count_rows: [wt.layers_n][]const u32 = undefined;
         var allocation_costs: [wt.layers_n]usize = undefined;
         var allocation_lines: [wt.layers_n]usize = undefined;
@@ -321,9 +321,8 @@ test {
     _ = profile_line_budget;
 }
 
-fn profileSizingEnabled() bool {
-    const value = std.c.getenv("TF_FLASHNEXT_EXL3_PROFILE_SIZING") orelse return false;
-    return shouldProfileSize(std.mem.eql(u8, std.mem.span(value), "1"), null);
+fn profileSizingEnabled() !bool {
+    return environment.read(bool, "TF_FLASHNEXT_EXL3_PROFILE_SIZING", false);
 }
 
 fn shouldProfileSize(enabled: bool, explicit_lines: ?usize) bool {
@@ -337,9 +336,8 @@ test "exl3: profile sizing requires explicit opt-in and does not override fixed 
 }
 
 /// native/cuda_memory.zig reserveBytes for a discrete card: TENSORFOLD_MEMORY_RESERVE_GIB, else max(1 GiB, total / 32).
-fn serverReserve(total: u64) u64 {
-    if (std.c.getenv("TENSORFOLD_MEMORY_RESERVE_GIB")) |v| {
-        const g = std.fmt.parseFloat(f64, std.mem.trim(u8, std.mem.span(v), " ")) catch 0;
+fn serverReserve(total: u64) !u64 {
+    if (try environment.read(?f64, "TENSORFOLD_MEMORY_RESERVE_GIB", null)) |g| {
         if (g >= 0.5) return @intFromFloat(g * (1 << 30));
     }
     return @max(@as(u64, 1 << 30), total / 32);

@@ -9,9 +9,10 @@ pub const State = struct {
     rank: counters.Rank = .{ .rank = 0, .world = 1 },
     forward_phase: counters.Phase = .unknown,
 
-    pub fn fromEnv(rank: usize, world: usize) State {
-        const enabled = enabledFromEnv();
-        const state: State = .{ .enabled = enabled, .layers_enabled = enabled and layersEnabledFromEnv(), .rank = .{ .rank = rank, .world = world } };
+    pub fn fromEnv(rank: usize, world: usize) !State {
+        const enabled = try enabledFromEnv();
+        const layers = try layersEnabledFromEnv();
+        const state: State = .{ .enabled = enabled, .layers_enabled = enabled and layers, .rank = .{ .rank = rank, .world = world } };
         if (state.enabled) std.log.warn("EXL3-CACHE-SAMPLING v=1 rank={d} world={d} optin_boundary_sync=1 bytes=logical_payload_not_pcie", .{ rank, world });
         return state;
     }
@@ -69,14 +70,12 @@ pub fn Operations(comptime Engine: type, comptime Seq: type, comptime Hooks: typ
     };
 }
 
-pub fn enabledFromEnv() bool {
-    const value = std.c.getenv("TF_FLASHNEXT_CACHE_TELEMETRY") orelse return false;
-    return std.mem.eql(u8, std.mem.span(value), "1");
+pub fn enabledFromEnv() !bool {
+    return @import("sys").environment.read(bool, "TF_FLASHNEXT_CACHE_TELEMETRY", false);
 }
 
-pub fn layersEnabledFromEnv() bool {
-    const value = std.c.getenv("TF_FLASHNEXT_EXL3_LAYER_TELEMETRY") orelse return false;
-    return std.mem.eql(u8, std.mem.span(value), "1");
+pub fn layersEnabledFromEnv() !bool {
+    return @import("sys").environment.read(bool, "TF_FLASHNEXT_EXL3_LAYER_TELEMETRY", false);
 }
 
 pub fn failed(engine: anytype, phase: counters.Phase, failure: anyerror) void {

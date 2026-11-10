@@ -369,7 +369,7 @@ pub const Ngram = struct {
             .ple_index = cfg.ple_index,
         }), .scale = 1 };
         errdefer g.deinit();
-        if (try exl3_ple.Table.open(gpa, io, model_dir, g.hash, exl3_ple.optionsFromEnv())) |t| return .{ .gpa = gpa, .hash = g.hash, .scale = 1, .format = .exl3, .x3 = t };
+        if (try exl3_ple.Table.open(gpa, io, model_dir, g.hash, try exl3_ple.optionsFromEnv())) |t| return .{ .gpa = gpa, .hash = g.hash, .scale = 1, .format = .exl3, .x3 = t };
         const index_path = try std.fs.path.join(gpa, &.{ model_dir, "model.safetensors.index.json" });
         defer gpa.free(index_path);
         const text = try std.Io.Dir.cwd().readFileAlloc(io, index_path, gpa, .limited(1 << 26));
