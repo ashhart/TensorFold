@@ -26,6 +26,7 @@ const q27_rows = @import("metal_qwen27_moe_rows.zig");
 const flash_pool = @import("metal_flashnext_pool.zig");
 const flash = @import("metal_flashnext.zig");
 const fsr = @import("metal_fsr.zig");
+const flash_index = @import("metal_flashnext_index.zig");
 const gemma = @import("metal_gemma4.zig");
 const gemma_embed = @import("metal_gemma4_embed.zig");
 const gemma_mixed = @import("metal_gemma4_mixed.zig");
@@ -283,6 +284,15 @@ pub fn main(init: std.process.Init) !u8 {
         fsr_made += 1;
         try kernels.append(a, fsr_probes[fsr_made - 1].kernel());
     };
+    var index_probes: [2]flash_index.Probe = undefined;
+    var index_made: usize = 0;
+    defer for (index_probes[0..index_made]) |*probe| probe.deinit();
+    for ([_]bool{ false, true }) |control| {
+        if (!wanted(o, flash_index.Probe.name(control))) continue;
+        index_probes[index_made] = .{ .a = a, .device = device, .queue = queue, .control = control };
+        index_made += 1;
+        try kernels.append(a, index_probes[index_made - 1].kernel());
+    }
     var d3norm: ?drama3_k.Norm = null;
     defer if (d3norm) |*n| n.deinit();
     if (wanted(o, drama3_k.spec().name)) {

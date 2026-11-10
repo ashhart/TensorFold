@@ -36,9 +36,11 @@ pub fn patched(r: *Run, v: *Variant, consts: []const Const) !*Variant {
     try key.appendSlice(r.arena, v.name);
     const slotted = r.fsr != null and r.fsr.?.pool != null and std.mem.indexOf(u8, v.name, "qa_expert_") != null;
     if (slotted) try key.appendSlice(r.arena, "|fsr");
+    const ix = r.sb_index and std.mem.indexOf(u8, v.name, "qa_expert_") != null and experts4.q4(consts);
+    if (ix) try key.appendSlice(r.arena, "|ix");
     for (consts) |c| try key.print(r.arena, "|{s}={d}", .{ c.name, c.value });
     if (r.variants.get(key.items)) |hit| return hit;
-    const text = try source(r.arena, try Run.variantText(r.arena, v), consts, rows_w.nib(r.device.generation(), 2) == 1, slotted, std.mem.indexOf(u8, v.name, "gateup") != null);
+    const text = try source(r.arena, try Run.variantText(r.arena, v), consts, rows_w.nib(r.device.generation(), 2) == 1, slotted, std.mem.indexOf(u8, v.name, "gateup") != null, ix);
     const lib = try r.ownResource(try mtl.Library.fromSource(r.device, text, mtl.CompileOptions.mlx()));
     const nv = try r.arena.create(Variant);
     nv.* = v.*;
@@ -86,10 +88,17 @@ pub fn four(buf: *[4]Const, w: [4]usize) []const Const {
 }
 
 /// The routed and shared experts on the recorded any-width kernels at `w` (Run.experts' recorded path).
-pub fn experts(r: *Run, gu_role: []const u8, down_role: []const u8, x: Buf, lg: Buf, e: [18]Buf, act: Buf, pick: Buf, wts: Buf, rows_buf: Buf, y: Buf, w: Experts) !void {
+pub fn experts(r: *Run, gu_role: []const u8, down_role: []const u8, x: Buf, lg: Buf, e_direct: [18]Buf, act: Buf, pick: Buf, wts: Buf, rows_buf: Buf, y: Buf, w: Experts) !void {
     if (r.skip & (1 << 2) != 0) return;
+    var e = e_direct;
     var cg: [4]Const = undefined;
     var cd: [4]Const = undefined;
+    if (r.sb_index) for (0..6) |j| { // a 4/32 kernel's projections: index and table in the scales' and biases' slots
+        if (!experts4.q4(if (j < 4) four(&cg, w.gu) else four(&cd, w.down))) continue;
+        const p = r.sbix.get(@import("scale_index.zig").keyOf(e[j * 3 + 1])) orelse return error.NoScaleIndex;
+        e[j * 3 + 1] = p[0];
+        e[j * 3 + 2] = p[1];
+    };
     if (r.fsr) |stream| if (stream.pool != null) stream.bind(r, 18, 19, 0);
     r.enc.setBuffer(rows_buf.b, rows_buf.off, 17); // the 4/32 gate/up's row count (experts4.gated)
     try callAs(r, gu_role, r.rows, &.{ x, lg, e[0], e[1], e[2], e[3], e[4], e[5], e[6], e[7], e[8], e[9], e[10], e[11] }, &.{ act, pick, wts }, four(&cg, w.gu));
@@ -116,12 +125,13 @@ pub fn hcOf(r: *Run, comptime fmt: []const u8, args: anytype) !Hc {
 }
 
 /// The loader's width and expert-layout transformations before compilation.
-pub fn source(a: std.mem.Allocator, original: []const u8, consts: []const Const, half_lanes: bool, slotted: bool, gate_up: bool) ![]const u8 {
+pub fn source(a: std.mem.Allocator, original: []const u8, consts: []const Const, half_lanes: bool, slotted: bool, gate_up: bool, ix: bool) ![]const u8 {
     var text = original;
     for (consts) |c| text = try constant(a, text, c.name, c.value);
     if (experts4.halfApplies(text, consts) and half_lanes) text = try experts4.half(a, text);
     if (experts4.applies(text, consts)) text = try experts4.balanced(a, text);
     if (experts4.gateApplies(text, consts)) text = try experts4.gated(a, text);
+    if (ix) text = try experts4.indexed(a, text, consts);
     if (slotted) text = try @import("fsr_source.zig").patch(a, text, if (gate_up) .gate else .down);
     return text;
 }
