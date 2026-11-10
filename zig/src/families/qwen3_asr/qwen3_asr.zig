@@ -10,6 +10,7 @@ pub const case = @import("case.zig");
 pub const prompt = @import("prompt.zig");
 pub const tower = @import("tower.zig");
 pub const lm = @import("lm.zig");
+pub const forced = @import("forced.zig");
 
 test {
     _ = config;
@@ -24,6 +25,7 @@ test {
     _ = tower;
     _ = lm;
     _ = @import("config_test.zig");
+    _ = forced;
     _ = @import("schedule_test.zig");
     _ = @import("lm_test.zig");
 }

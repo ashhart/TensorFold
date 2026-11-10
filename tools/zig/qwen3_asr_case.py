@@ -12,7 +12,8 @@ import torch
 
 
 def save(out, manifest, name, t, kind="f32"):
-    if manifest.get("ids_only") and name not in ("prompt_ids", "greedy_ids", "greedy_top2", "greedy_margin"):
+    kept = ("prompt_ids", "greedy_ids", "greedy_top2", "greedy_margin", "logits_bf16", "logits_fp32")
+    if manifest.get("ids_only") and name not in kept:
         return
     a = t.detach().to(torch.float32 if kind == "f32" else torch.int32).cpu().numpy()
     a.astype("<f4" if kind == "f32" else "<i4").tofile(os.path.join(out, name + ".bin"))
@@ -27,6 +28,7 @@ def main():
     p.add_argument("--tokens", type=int, default=256)
     p.add_argument("--ids-only", action="store_true", help="only the prompt, greedy ids and margins: no stage tensors")
     p.add_argument("--global-attention", action="store_true", help="the transformers backend as is: no windows")
+    p.add_argument("--logits", action="store_true", help="each greedy step's logits, teacher-forced, in bf16 and fp32")
     a = p.parse_args()
     torch.set_default_dtype(torch.bfloat16)
     from qwen_asr import Qwen3ASRModel
@@ -70,10 +72,9 @@ def main():
              tower.conv2d3.register_forward_hook(tap("conv3")), tower.conv_out.register_forward_hook(tap("conv_out")),
              tower.layers[0].register_forward_pre_hook(tap_in("embed")), tower.ln_post.register_forward_hook(tap("ln_post")),
              tower.proj1.register_forward_hook(tap("proj1")), tower.proj2.register_forward_hook(tap("audio_rows"))]
+    windowed = [] if a.global_attention else [x.register_forward_pre_hook(windows, with_kwargs=True) for x in tower.layers]
     for i, layer in enumerate(tower.layers):
         hooks.append(layer.register_forward_hook(tap(f"layer{i}")))
-        if not a.global_attention:
-            hooks.append(layer.register_forward_pre_hook(windows, with_kwargs=True))
     lm = model.thinker.model
     manifest["attention"] = "global" if a.global_attention else "windows"
     hooks.append(lm.layers[0].register_forward_pre_hook(tap_in("lm_embed")))
@@ -84,6 +85,7 @@ def main():
               l0.mlp.register_forward_hook(tap("lm0_mlp"))]
     for i in (0, len(lm.layers) // 2, len(lm.layers) - 1):
         hooks.append(lm.layers[i].register_forward_hook(tap(f"lm_layer{i}")))
+    raw = dict(inputs)  # the fp32 features, for the fp32 run
     inputs = inputs.to(model.dtype)
     with torch.no_grad():
         gen = model.generate(**inputs, max_new_tokens=a.tokens, output_scores=True)
@@ -104,6 +106,19 @@ def main():
     top = scores.topk(2, dim=-1)
     save(a.out, manifest, "greedy_top2", top.indices, "i32")
     save(a.out, manifest, "greedy_margin", top.values[:, 0] - top.values[:, 1])
+    if a.logits:  # one pass over the prompt and the reply: step i's row is the one before greedy id i
+        full = torch.cat([ids, new[:-1]])[None]
+        rows = slice(ids.shape[0] - 1, ids.shape[0] - 1 + new.shape[0])
+        for kind, feats_in in (("bf16", inputs["input_features"]), ("fp32", None)):
+            if feats_in is None:
+                model.float()
+                feats_in = raw["input_features"].float()
+            with torch.no_grad():
+                out = model.thinker(input_ids=full, input_features=feats_in, attention_mask=torch.ones_like(full),
+                                    feature_attention_mask=inputs["feature_attention_mask"])
+            save(a.out, manifest, "logits_" + kind, out.logits[0, rows].float())
+    for h in windowed:
+        h.remove()
     manifest["text"] = proc.batch_decode([new], skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
     manifest["torch"] = torch.__version__
     with open(os.path.join(a.out, "manifest.json"), "w") as f:
