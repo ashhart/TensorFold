@@ -25,4 +25,5 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     b.step("tf-h3-image", "MiniMax-H3-Image's Metal transformer on a picture case: six distilled steps, teacher-forced and gated").dependOn(&b.addInstallArtifact(h3_image, .{}).step);
     @import("h3_image_encoder.zig").tool(b, target, optimize, metal);
     @import("h3_image_prompt.zig").install(b, target, optimize, metal);
+    @import("h3_image_decoder.zig").tool(b, target, optimize, metal);
 }
