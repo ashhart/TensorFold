@@ -6,7 +6,6 @@ const bf16 = @import("core").bf16_round;
 const cfg = @import("config.zig");
 const fixtures = @import("config_test.zig");
 const image = @import("image.zig");
-const inventory = @import("weights.zig");
 const recipe = @import("cuda_recipe.zig");
 const tw = @import("cuda_tower.zig");
 const weights = @import("cuda_tower_weights.zig");
