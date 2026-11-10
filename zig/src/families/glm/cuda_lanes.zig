@@ -100,7 +100,7 @@ pub const Lanes = struct {
         const costs = if (block) null else if (self.costs) |*c| c else null;
         const sharing = drafting and !self.alone;
         return .{
-            .allocate_shared_drafts = drafting,
+            .allocate_shared_drafts = drafting and !block, // cut chances would price a block's stream at none
             .exact_width = if (drafting) max_rows else 1,
             .first_copy_rows = 4, // a first copy starts narrow; it grows as its tokens land
             .gpu_tokens = false,
