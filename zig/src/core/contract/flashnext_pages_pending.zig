@@ -10,6 +10,12 @@ pub const records = [_]registry.CudaRecord{
     .{ .launch = .{ .name = "flashnext_attn fn_attn_chunks_one_paged", .symbol = "fn_attn_chunks_one_paged", .image = "flashnext_attn", .threads = 128, .dynamic = 26624, .opt_in = true }, .usage = .{ .{ .regs = 72, .static = 896, .bound = 128 }, .{ .regs = 72, .static = 896, .bound = 128 }, .{ .regs = 72, .static = 896, .bound = 128 }, .{ .regs = 96, .static = 896, .bound = 128 }, .{ .regs = 96, .static = 896, .bound = 128 } } },
     .{ .launch = .{ .name = "flashnext_attn fn_attn_fused_paged", .symbol = "fn_attn_fused_paged", .image = "flashnext_attn", .threads = 128, .dynamic = 26624 }, .usage = .{ .{ .regs = 118, .static = 896, .bound = 128 }, .{ .regs = 118, .static = 896, .bound = 128 }, .{ .regs = 118, .static = 896, .bound = 128 }, .{ .regs = 123, .static = 896, .bound = 128 }, .{ .regs = 123, .static = 896, .bound = 128 } } },
 };
+
+/// nvcc 13.4's preparation usage; keep the 13.0 records and earlier compiler sets independent.
+pub const cuda_134 = [_]registry.Override{
+    .{ .name = "flashnext_attn fn_attn_prep_paged", .usage = .{ .{ .regs = 32, .static = 128, .bound = 256 }, .{ .regs = 36, .static = 128, .bound = 256 }, .{ .regs = 36, .static = 128, .bound = 256 }, .{ .regs = 32, .static = 128, .bound = 256 }, .{ .regs = 32, .static = 128, .bound = 256 } } },
+};
+
 test "Flash Next paged launches: measured resources satisfy every SM launch limit" {
     const t = @import("std").testing;
     for (records) |r| {
