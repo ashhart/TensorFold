@@ -43,7 +43,7 @@ pub fn Namespace(comptime Tri: type) type {
         pub const window_rows = kvl.window_rows;
         pub fn attach(p: *anyopaque, streams: u32, count: usize) !void {
             const own = of(p);
-            own.kv.pool = try kvl.Pool.init(own.gpa, own.engine, own.kv.layout.?, own.context, own.kv.head, streams, count);
+            own.kv.pool = try kvl.Pool.initOn(own.gpa, own.engine, own.kv.layout.?, own.context, own.kv.head, streams, count, own.device);
             own.kv.paged_only = kvl.pagedOnly() and streams > 0;
         }
         pub fn fits(p: *anyopaque, rows: u32, max_tokens: u32) bool {
@@ -157,6 +157,7 @@ pub fn Namespace(comptime Tri: type) type {
             gpa: std.mem.Allocator,
             context: usize,
             engine: *prompt.Engine,
+            device: ?cuda.abi.Device = null, // the load context's: the page pool's arena maps from pieces on it
             vision: ?*@import("cuda_images.zig").Vision = null,
             ranks: ?*ranks.Session = null,
             head: ?*mtp.Head = null,
