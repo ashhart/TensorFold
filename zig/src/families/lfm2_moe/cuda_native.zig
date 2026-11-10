@@ -54,10 +54,10 @@ fn fit(room: u64, asked: u32, fixed: bool, plan: anytype) !usize {
     return n;
 }
 
-/// TENSORFOLD_LFM2_KV_PAGES=0: every stream owns a window of pages, made at open; else they lease the pool's.
-fn pagesOn() bool {
-    const v = @import("core").profile.get(.TENSORFOLD_LFM2_KV_PAGES) orelse return true;
-    return !std.mem.eql(u8, v, "0");
+/// TENSORFOLD_LFM2_KV_PAGES=0: every stream owns a window of pages, made at open; unset or 1 leases the pool's.
+fn pagesOn() !bool {
+    const name = "TENSORFOLD_LFM2_KV_PAGES";
+    return @import("sys").environment.value(bool, name, @import("profile").lookup(name), true);
 }
 
 /// The device bytes `n` streams take (paged: the first's states and a round's slot buffers, no pages).
@@ -106,7 +106,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     errdefer own.w.deinit();
     try checkLayers(&own.w.config);
     const context = @min(mdl.Model.positions(o.context), own.w.config.context);
-    const paged = pagesOn();
+    const paged = try pagesOn();
     const plan: Plan = .{ .own = own, .d = ctx.d, .context = context, .paged = paged };
     const room: u64 = if (o.room) |r| r.read(r.ctx) orelse 0 else std.math.maxInt(u64);
     const n = if (paged) try fitFirst(room, plan) else fit(room, o.lanes, o.lanes_fixed, plan) catch |e| {
