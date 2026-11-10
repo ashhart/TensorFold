@@ -15,13 +15,10 @@ pub const hot_cap: usize = 176;
 pub const Read = enum { map, pread };
 pub const Options = struct { read: Read = .map };
 
-/// TF_FLASHNEXT_PLE_READ (map | pread); anything else keeps the default.
-pub fn optionsFromEnv() Options {
-    var o: Options = .{};
-    if (std.c.getenv("TF_FLASHNEXT_PLE_READ")) |v| {
-        if (std.mem.eql(u8, std.mem.span(v), "pread")) o.read = .pread;
-    }
-    return o;
+/// TF_FLASHNEXT_PLE_READ (map | pread, the rule's words in this order); unset keeps the default.
+pub fn optionsFromEnv() !Options {
+    const pread = try @import("sys").environment.read(bool, "TF_FLASHNEXT_PLE_READ", false);
+    return .{ .read = if (pread) .pread else .map };
 }
 
 // ---- the row codec ----------------------------------------------------------------------------------------------

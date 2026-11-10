@@ -3,6 +3,7 @@
 const std = @import("std");
 const wt = @import("../../cuda_prompt_wt.zig");
 const gdn = @import("../../cuda_gdn.zig");
+const environment = @import("sys").environment;
 
 const head_dim = wt.head_dim;
 const kv_heads = wt.kv_heads;
@@ -66,7 +67,7 @@ pub fn setup(e: anytype, exl3: bool) !void {
         if (layer.exl3 == null) break false;
     } else true;
     e.scratch_format = if (decoder_exl3) .exl3 else .classic;
-    cut(e, std.c.getenv("TF_FLASHNEXT_CHUNK") != null);
+    cut(e, (try environment.read(?usize, "TF_FLASHNEXT_CHUNK", null)) != null);
 }
 
 /// One log line: a stream's device bytes at the window by piece.
@@ -85,10 +86,9 @@ pub fn logStream(e: anytype, window: usize, stream_bytes: usize) !void {
     });
 }
 
-/// Whether kept prompt states go to pinned host memory (cuda_snap.on_host, set here):
-pub fn snapHost(context: usize, exl3: bool) bool {
-    var on = exl3 and context > 32768;
-    if (std.c.getenv("TF_FLASHNEXT_SNAP_HOST")) |v| on = std.mem.eql(u8, std.mem.span(v), "1");
+/// Whether kept prompt states go to pinned host memory (cuda_snap.on_host, set here); TF_FLASHNEXT_SNAP_HOST decides.
+pub fn snapHost(context: usize, exl3: bool) !bool {
+    const on = try environment.read(bool, "TF_FLASHNEXT_SNAP_HOST", exl3 and context > 32768);
     @import("../../cuda_snap.zig").on_host = on;
     return on;
 }

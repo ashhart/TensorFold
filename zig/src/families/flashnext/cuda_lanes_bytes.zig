@@ -6,7 +6,7 @@ const config = @import("cuda_config.zig");
 const exl3_memory = @import("exl3/pack/cuda_exl3_memory.zig");
 
 /// Device bytes of the checkpoint: the n-gram tables stay mapped, the MTP head counts; 0 if unread.
-pub fn deviceWeightBytes(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) u64 {
+pub fn deviceWeightBytes(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !u64 {
     if (exl3_memory.isExl3(gpa, io, dir)) return exl3_memory.weightBytes(gpa, io, dir);
     const main = weights.deviceBytes(gpa, io, dir) catch return 0;
     return main + mtp.headBytes(headFp8(gpa, io, dir) catch return 0);

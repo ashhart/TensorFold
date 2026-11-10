@@ -13,9 +13,9 @@ pub const Options = struct {
 };
 
 /// TF_FLASHNEXT_EXL3_ROUTED=device counts every routed expert as resident; the default is the offload pool's layout.
-pub fn options() Options {
-    const v = std.c.getenv("TF_FLASHNEXT_EXL3_ROUTED") orelse return .{};
-    return .{ .routed_on_host = !std.mem.eql(u8, std.mem.span(v), "device") };
+pub fn options() !Options {
+    const device = try @import("sys").environment.read(bool, "TF_FLASHNEXT_EXL3_ROUTED", false);
+    return .{ .routed_on_host = !device };
 }
 
 /// Whether `dir`'s config.json admits as Mode.exl3 (any other mode, or a refusal: false).
@@ -81,14 +81,15 @@ pub fn deviceBytes(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, o: Optio
 }
 
 /// The family's deviceWeightBytes for an EXL3 checkpoint; 0 if unread.
-pub fn weightBytes(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) u64 {
-    return deviceBytes(gpa, io, dir, options()) catch 0;
+pub fn weightBytes(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !u64 {
+    const o = try options();
+    return deviceBytes(gpa, io, dir, o) catch 0;
 }
 
 /// A rank's placement bytes: one rank holds the whole model (no MTP head: an EXL3 pack decodes plain).
 pub fn placement(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, world: usize, rank: usize) !u64 {
     if (world != 1 or rank != 0) return error.BadRank;
-    return deviceBytes(gpa, io, dir, options());
+    return deviceBytes(gpa, io, dir, try options());
 }
 
 fn entry(dtype: core.safetensors.DType, shape: []const usize, bytes: u64) Entry {

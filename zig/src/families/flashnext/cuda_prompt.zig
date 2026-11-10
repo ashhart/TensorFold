@@ -160,7 +160,7 @@ pub const Engine = struct {
         e.scratch_format = .classic;
         e.collective = null;
         e.image_factory = null;
-        e.telemetry = cache_telemetry.State.fromEnv(rank, world);
+        e.telemetry = try cache_telemetry.State.fromEnv(rank, world);
         e.round_graph = .{};
         e.graphs = .{};
         errdefer for (e.layers[0..e.n_layers]) |*l| l.free(gpa);
@@ -543,7 +543,6 @@ test "a failed fill frees the buffer it was filling and every one before it" {
     try @import("cuda_prompt_test.zig").failedFill(made);
 }
 
-pub const parseChunk = chunks.parseChunk;
 pub const chunkRows = chunks.chunkRows;
 
 test {
