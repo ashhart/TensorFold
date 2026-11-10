@@ -119,6 +119,7 @@ pub fn build(b: *std.Build) void {
         @import("zig/build/qwen35_cache_host.zig").compileHost(b, step5_mods.metal, step5_mods.engine, step5_mods.lanes);
     }
     @import("zig/build/h3_host.zig").tests(b, target, test_step);
+    @import("zig/build/h3_image_prompt.zig").tests(b, target, test_step);
     @import("zig/build/ling_host.zig").tests(b, target, test_step);
     @import("zig/build/inkling2_host.zig").tests(b, target, test_step);
     @import("zig/build/gpt_oss_host.zig").tests(b, test_step);
