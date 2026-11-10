@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3.8-Flash-Next on Strix Halo (gfx1151): a verify window holds eight rows, so a lone stream's copy drafts grow to seven tokens a round while they land, where they stopped at three; rounds shared by several streams keep three-token copies, and MTP drafts stay at three. A lone stream rewriting text it has seen runs about 26% faster; other cells are unchanged, and so are replies. Thanks to @gilby.
+
 - Evidence index: reads saved native capabilities, including unknown and XPU chip labels; advertised facts stay unqualified, and invalid supplied input stops with a bounded error (#2708).
 
 - `--instruct-sampling card` (or `field=value` pairs) serves the model card's instruct sampling to chat requests with thinking off that leave those fields unset; request fields, then the serve flags, then the pairs decide, and the server's own requests never take it (#2626). Thanks to @BobClawblaw.
