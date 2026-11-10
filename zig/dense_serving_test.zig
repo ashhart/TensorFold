@@ -11,8 +11,8 @@ test "dense serving: owned CUDA images retain their reviewed lane and decode byt
     try std.testing.expectEqualStrings("5f325dc6d8134624b30b5e99c5764f75beb3c344b5f949d38bfaa41bc8dfe5dc", &hash(@embedFile("kernels/cuda/experts_prefill.cu")));
     try std.testing.expectEqualStrings("a9caeec5b270dcab933a5eae0f500d7aabcd31cde156238225ae064ac92ba2e8", &hash(@embedFile("kernels/cuda/gdn.cu")));
     try std.testing.expectEqualStrings("dba5aae94115571ed48933d80f646fff31b2a7da226569867c74a1dc061d2ca2", &hash(@embedFile("kernels/cuda/lane_gemv.cu")));
-    // 94a9a48d6's bytes: 82f3dde92 adds pattn_kernel<64, 8, 4, 8>, 94a9a48d6 moves helpers out (#1492, SASS unchanged)
-    try std.testing.expectEqualStrings("a52da014495e328d10258191cbd51dd19dc77c1c019e037274e0e2387b24be01", &hash(@embedFile("kernels/cuda/prefill_attention.cu")));
+    // 191061381's bytes: 82f3dde92 and 191061381 (#2609) add pattn_kernel instances; 94a9a48d6 moves helpers out
+    try std.testing.expectEqualStrings("905fff2c9018d778557a60ed2c81c24ce220adf5b092c8c32f8a1782963f9f28", &hash(@embedFile("kernels/cuda/prefill_attention.cu")));
     const group = @embedFile("kernels/cuda/qmm_group.cu");
     try std.testing.expectEqualStrings("ceff4ee13e97b5aa93cbe7a1edc9a524c78aaa145dd1e5c82dcb05a3011aae23", &hash(group[0..16095]));
     try std.testing.expectEqualStrings("8780fd710be3ce2f04e53fa1e69eb062809d3bec6391d9bd49983d0588e374d0", &hash(group));
