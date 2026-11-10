@@ -11,6 +11,9 @@ stays in the core lane engine; the device code proposes and plans.
 | `TF_FLASHNEXT_EXL3_GRAPH` | `0` | `0` uses the host planner; `eager` uses the device planner, launching kernel by kernel; `1` uses the same device planner and replays graphs for decode rounds, verify windows, the MTP draft chain and prefill layers. All modes must preserve output tokens. |
 | `TF_FLASHNEXT_EXL3_GRAPH_ASYNC` | `1` | `0` instantiates a captured graph on the step's thread; `1` on a worker thread while that step runs eagerly. |
 
+Blank text is unset. Text outside the values above is refused, with its accepted forms, when the CUDA backend starts
+and by the direct readers.
+
 Everything else is fixed in the code: a shape is captured at its second sighting, a device-planned round holds at most
 16 rows (the MTP window), and the graph memory model (reservation, headroom, per-graph charges) follows the stream
 count. `tools/exl3_serve_tp2.sh` sets `GRAPH=1` and `GRAPH_ASYNC=0`.

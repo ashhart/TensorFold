@@ -103,7 +103,7 @@ test "exl3: pending graph deadlines and failed instantiation never expose an exe
 }
 
 test "exl3: asynchronous TP instantiation preserves its NCCL template until owner retirement" {
-    if (!gpending.asyncInstantiate()) return error.SkipZigTest;
+    if (!try gpending.asyncInstantiate()) return error.SkipZigTest;
     const previous_api = gpending.ctx_api;
     defer gpending.ctx_api = previous_api;
     gpending.ctx_api = .{ .get = GraphTestDriver.getContext, .set = GraphTestDriver.setContext };

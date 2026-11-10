@@ -170,7 +170,7 @@ pub fn reserveTwoChunk(optional: ?*Runtime, d: *const cuda.Driver, free: u64, pr
     if (dp.dev.d != d or dp.world != 2 or dp.rows > window_.max_rows) return 0;
     if (dp.second != null) return 0;
     const graph_required = @import("../graph/cuda_exl3_graph_memory.zig").twoChunkReservationBytes();
-    if (@import("../graph/cuda_exl3_graph.zig").enabled() and (graph_required == 0 or graph_reservation < graph_required)) {
+    if (try @import("../graph/cuda_exl3_graph.zig").enabled() and (graph_required == 0 or graph_reservation < graph_required)) {
         std.log.info("flashnext exl3 prefill: two-chunk window declined, incremental graph reservation unavailable (required={d} supplied={d})", .{ graph_required, graph_reservation });
         return 0;
     }
@@ -314,7 +314,7 @@ pub fn forward(e: *prompt.Engine, comptime Tri: type, tri: Tri, seq: *prompt.Seq
     var window_room: usize = 0;
     if (o.two_chunk) {
         var supported = dp.second != null and rg != null and world == 2 and !dp.reduced_branch and deep_rows <= window_.max_rows and ids.len > deep_rows;
-        if (@import("../graph/cuda_exl3_graph.zig").enabled()) {
+        if (try @import("../graph/cuda_exl3_graph.zig").enabled()) {
             const required = @import("../graph/cuda_exl3_graph_memory.zig").twoChunkReservationBytes();
             if (required == 0 or dp.window_graph_reservation < required) supported = false;
         }

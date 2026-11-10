@@ -28,8 +28,7 @@ pub fn workloadPolicy(streams: u64, layers: u64) !Policy {
 }
 
 pub fn policyFromEnv() !Policy {
-    const stream_text = std.mem.span(std.c.getenv("TF_FLASHNEXT_EXL3_STREAMS") orelse "1");
-    return policyFromEnvForStreams(try std.fmt.parseInt(u64, stream_text, 10));
+    return policyFromEnvForStreams(try @import("sys").environment.read(u64, "TF_FLASHNEXT_EXL3_STREAMS", 1));
 }
 
 fn policyFromEnvForStreams(streams: u64) !Policy {

@@ -8,14 +8,15 @@ const Draft = @import("../../cuda_mtp_draft.zig").Draft;
 pub const bucket: usize = 4096;
 const pool_n = 4;
 
-pub fn enabled() bool {
+/// Whether graphs are on: only then does a stream's creation mark its caches and draft window for recycling.
+pub fn enabled() !bool {
     return @import("../graph/cuda_exl3_graph.zig").enabled();
 }
 
 /// A stream's capacity for `want` positions: a pool lane's own size, else rounded up to the bucket (at most `limit`).
-pub fn capFor(pooled: bool, want: usize, limit: usize) usize {
+pub fn capFor(recycling: bool, pooled: bool, want: usize, limit: usize) usize {
     const cap = @min(want, prompt.max_tokens);
-    if (pooled or !enabled()) return cap;
+    if (pooled or !recycling) return cap;
     return @min(@min(limit, prompt.max_tokens), (cap + bucket - 1) / bucket * bucket);
 }
 
@@ -30,7 +31,7 @@ fn zero(bufs: []cuda.DeviceBuffer, s: cuda.Stream) !void {
 
 /// Engine.newSeq's hook: a kept sequence of capacity `cap`, zeroed as newSeq zeroes a new one; null: allocate.
 pub fn takeSeq(e: *prompt.Engine, cap: usize) !?prompt.Seq {
-    const reuse = enabled();
+    const reuse = try enabled();
     for (&seqs) |*slot| if (slot.*) |*sequence| {
         if (sequence.recycle_owner == e and (!reuse or !matches(sequence, e, cap))) {
             discardSeq(slot, e.gpa);
@@ -79,7 +80,7 @@ fn matches(sequence: *const prompt.Seq, engine: *prompt.Engine, cap: usize) bool
 
 /// Seq.deinit's hook: true when the sequence's BF16 allocations were kept for reuse.
 pub fn giveSeq(s: *prompt.Seq) bool {
-    if (draining or !enabled() or !canRetainSeq(s)) return false;
+    if (draining or !canRetainSeq(s)) return false;
     for (&seqs) |*slot| if (slot.* == null) {
         s.tail.d.synchronize() catch @panic("recycled sequence consumers did not drain");
         slot.* = s.*;
@@ -91,7 +92,7 @@ pub fn giveSeq(s: *prompt.Seq) bool {
 
 /// Draft.init's hook: a kept draft window of the same shape, its caches zeroed and its state reset; null: allocate.
 pub fn takeDraft(stream: cuda.Stream, cap: usize, draft_n: usize, rows: usize, h: @import("../../cuda_heads.zig").Heads) !?Draft {
-    if (!enabled()) return null;
+    if (!try enabled()) return null;
     for (&drafts) |*slot| if (slot.*) |*d| if (d.cap == cap and d.layout.heads.eql(h) and d.dlogits.len == draft_n * 2 and d.rows_cap == @max(rows, @import("../../cuda_mtp.zig").max_rows) and (d.log != null) == Draft.late()) {
         var x = d.*;
         x.stream = stream;
@@ -117,7 +118,7 @@ pub fn takeDraft(stream: cuda.Stream, cap: usize, draft_n: usize, rows: usize, h
 
 /// Draft.deinit's hook: true when the window was kept.
 pub fn giveDraft(d: *Draft) bool {
-    if (draining or !enabled() or d.media != null or d.pg.pt != 0) return false; // a pool lane's head is the pool's
+    if (draining or !d.recycles or d.media != null or d.pg.pt != 0) return false; // a pool lane's head is the pool's
     // A peer's contiguous window can swap in a paged sequence's borrowed run states.
     for (d.spare) |state| if (state.borrowed) return false;
     for (&drafts) |*slot| if (slot.* == null) {

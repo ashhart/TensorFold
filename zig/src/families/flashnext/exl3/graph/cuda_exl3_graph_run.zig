@@ -53,6 +53,7 @@ pub fn run(key: Key, pass: anytype, ids: []const u32, pos0: usize) !void {
         pass.prepared = true;
         return pass.chunk(ids, pos0, null);
     }
+    const async_instantiate = try gpending.asyncInstantiate();
     const t0 = std.Io.Clock.awake.now(pass.io).toNanoseconds();
     try pass.stream.synchronize();
     const admission = gbudget.reserveMemory(pass.stream, .decode, 0) catch |err| {
@@ -94,7 +95,7 @@ pub fn run(key: Key, pass: anytype, ids: []const u32, pos0: usize) !void {
                 }
             };
         }
-        if (gpending.asyncInstantiate()) if (gpending.ctxApi()) |api| {
+        if (async_instantiate) if (gpending.ctxApi()) |api| {
             var ctx: ?*anyopaque = null;
             if (api.get(&ctx) == 0) {
                 const sl = gcache.slot();

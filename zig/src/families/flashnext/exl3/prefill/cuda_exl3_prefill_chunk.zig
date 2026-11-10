@@ -433,7 +433,7 @@ fn layerBlock(comptime Tri: type, p: *batch.Pass(Tri), lw: *const @import("../..
 }
 
 fn stagePages(p: anytype, linear: bool, layer: usize, position: usize, rows: usize) !bool {
-    if (linear or !@import("../graph/cuda_exl3_graph.zig").enabled()) return false;
+    if (linear or !try @import("../graph/cuda_exl3_graph.zig").enabled()) return false;
     const selection = p.seq.sel orelse return false;
     try @import("../graph/cuda_exl3_graph_pages.zig").stage(selection, p.stream, p.seq.sel_layer + wt.attnIndex(layer), 1, position, rows);
     return true;

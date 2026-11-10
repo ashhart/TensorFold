@@ -41,7 +41,7 @@ pub fn verifySampled(ops: anytype, seq: *prompt.Seq, window: *Draft, ids: []cons
     window.verify_cache.invalidate();
     const greedy = if (sm) |sampling| sampling.temperature <= 0 else true;
     const leader = if (ops.main) |main| main.rank == 0 else false;
-    if (!enabled or !greedy or !leader or ops.e.collective == null or !@import("exl3/graph/cuda_exl3_graph.zig").enabled()) return ops.verify(seq, window, ids);
+    if (!enabled or !greedy or !leader or ops.e.collective == null or !try @import("exl3/graph/cuda_exl3_graph.zig").enabled()) return ops.verify(seq, window, ids);
     if (window.verify_host == null) window.verify_host = try cuda.HostBuffer.alloc(ops.e.driver, mtp.max_rows * 16);
     var tail: VerifyTail = .{ .head = ops.h, .draft = window };
     errdefer window.verify_cache.invalidate();

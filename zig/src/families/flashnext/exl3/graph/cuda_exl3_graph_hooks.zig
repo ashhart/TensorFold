@@ -29,7 +29,7 @@ pub fn prepareWindow(pass: anytype, ids: []const u32, pos0: usize) !void {
 
 /// The device planner for `e`, or null when its decode steps keep the host cut.
 pub fn planner(e: anytype, rows: usize) !?*dplan.DevPlan {
-    if (!dplan.enabled()) return null;
+    if (!try dplan.enabled()) return null;
     const dp = (try dplan.forLayers(e.gpa, e.driver, &e.exl3_dplan, e.layers[0..e.n_layers])) orelse return null;
     if (rows > dp.max_rows) {
         hub.stats.declined += 1;
@@ -52,7 +52,7 @@ pub fn round(e: anytype, p: anytype, seqs: anytype, ids: []const u32, scores: u6
     try dp.toDevice(p.stream);
     e.exl3_dplan.active = dp;
     defer e.exl3_dplan.active = null;
-    if (!hub.enabled()) {
+    if (!try hub.enabled()) {
         hub.stats.eager_dplan += 1;
         try p.chunk(ids, 0, null);
         return true;
@@ -84,7 +84,7 @@ pub fn forward(e: anytype, p: anytype, seq: anytype, ids: []const u32) !bool {
     e.exl3_dplan.active = dp;
     defer e.exl3_dplan.active = null;
     const n = ids.len;
-    if (!hub.enabled()) {
+    if (!try hub.enabled()) {
         hub.stats.eager_dplan += 1;
         try p.chunk(ids, seq.fed, null);
     } else {
