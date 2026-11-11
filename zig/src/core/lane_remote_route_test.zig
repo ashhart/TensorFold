@@ -50,9 +50,10 @@ const Holder = struct {
     hold_ms: i64,
     entered: std.atomic.Value(bool) = .init(false),
     closing: std.atomic.Value(bool) = .init(false),
+    gone: std.atomic.Value(bool) = .init(false),
 
     fn run(h: *Holder) void {
-        _ = h.route.admit(t.io, h.route.estimate(8191, 8192), &h.closing) orelse return;
+        _ = h.route.admit(t.io, h.route.estimate(8191, 8192), &h.closing, &h.gone) orelse return;
         h.entered.store(true, .release);
         std.Io.sleep(t.io, .fromMilliseconds(h.hold_ms), .awake) catch {};
         h.route.leave();
@@ -67,8 +68,9 @@ fn second(mode: route.Mode) !struct { waited_ms: i64, entered: bool } {
     defer thread.join();
     while (!h.entered.load(.acquire)) try std.Io.sleep(t.io, .fromMilliseconds(1), .awake);
     var closing: std.atomic.Value(bool) = .init(false);
+    var gone: std.atomic.Value(bool) = .init(false);
     const began = Route.nowNs(t.io);
-    const got = r.admit(t.io, r.estimate(8191, 8192), &closing);
+    const got = r.admit(t.io, r.estimate(8191, 8192), &closing, &gone);
     const took: i64 = @intCast((Route.nowNs(t.io) - began) / std.time.ns_per_ms);
     if (got != null) r.leave();
     return .{ .waited_ms = took, .entered = got != null };
@@ -83,6 +85,20 @@ test "route: the second of two pulls is sent elsewhere at once, and under always
     try t.expect(always.waited_ms >= 200);
 }
 
+test "route: a pull waiting at the gate stops when its request is gone, and the pull under way is not disturbed" {
+    var r: Route = .{ .mode = .always };
+    var h: Holder = .{ .route = &r, .hold_ms = 300 };
+    const thread = try std.Thread.spawn(.{}, Holder.run, .{&h});
+    defer thread.join();
+    while (!h.entered.load(.acquire)) try std.Io.sleep(t.io, .fromMilliseconds(1), .awake);
+    var closing: std.atomic.Value(bool) = .init(false);
+    var gone: std.atomic.Value(bool) = .init(true);
+    const began = Route.nowNs(t.io);
+    try t.expectEqual(@as(?u64, null), r.admit(t.io, r.estimate(8191, 8192), &closing, &gone));
+    try t.expect((Route.nowNs(t.io) - began) / std.time.ns_per_ms < 100);
+    try t.expect(r.held); // the first pull still has the pair
+}
+
 test "weigh: always sends every prompt, and auto only one the pair is predicted to serve no slower, or while a stream decodes" {
     var always: Route = .{ .mode = .always };
     try t.expectEqual(Verdict.remote, weigh(&always, 0, 8192, 0));
@@ -91,6 +107,19 @@ test "weigh: always sends every prompt, and auto only one the pair is predicted 
     try t.expectEqual(Verdict.remote, weigh(&r, 0, 8192, 1)); // a prompt pass here would stall the stream
     try t.expectEqual(Verdict.remote, weigh(&r, 0, 40000, 0)); // 41 s against 42 s
     try t.expectEqual(Verdict.slower, r.weigh(0, .{ .len = 8192, .cached = 4000, .decoding = 0 }, 8191)); // 4.2 s here
+}
+
+test "observePull: a pull that hit the producer's prompt cache does not move the remote rate, a computed one does" {
+    var r: Route = .{};
+    r.observePull(16384, 16384 - 512, 300 * std.time.ns_per_ms); // a warm-up prompt cached there: 512 computed tokens
+    try t.expect(!r.remote_tps.seen and r.remote_tps.v == 1000);
+    r.observePull(16384, 0, 8192 * std.time.ns_per_ms); // 2000 tokens a second computed
+    try t.expectEqual(@as(f64, 2000), r.remote_tps.v);
+    r.observePull(16384, 12288, 4096 * std.time.ns_per_ms); // 4096 computed, 1000 a second: blends 70/30
+    try t.expectApproxEqAbs(@as(f64, 0.7 * 2000 + 0.3 * 1000), r.remote_tps.v, 1e-6);
+    const before = r.remote_tps.v;
+    r.observePull(8192, 9000, 1); // a count past the prefix computes nothing
+    try t.expectEqual(before, r.remote_tps.v);
 }
 
 test "weigh: a busy pair is not waited for beyond what prefilling here costs, even with a stream decoding" {
@@ -119,19 +148,32 @@ test "observe: measured rates replace the seeds a third to three times at a time
     try t.expectApproxEqAbs(0.7 * before + 0.3 * 3 * before, r.local_tps.v, 1e-6);
 }
 
-test "knobs: TF_PREFILL_ROUTE, TF_PREFILL_LOCAL_TPS and TF_PREFILL_REMOTE_TPS default to auto and the notes' rates, and refuse bad text" {
+test "knobs: the route's knobs default to auto, the notes' rates and a breaker of 3 failures and 30 s, and refuse bad text" {
     const env = @import("sys").environment;
-    const d = Route.build(try env.value(u64, "TF_PREFILL_ROUTE", null, 0), try env.value(f64, "TF_PREFILL_LOCAL_TPS", null, 950), try env.value(f64, "TF_PREFILL_REMOTE_TPS", "", 1000));
+    const d = Route.build(.{ .mode = try env.value(u64, "TF_PREFILL_ROUTE", null, 0), .local_tps = try env.value(f64, "TF_PREFILL_LOCAL_TPS", null, 950), .remote_tps = try env.value(f64, "TF_PREFILL_REMOTE_TPS", "", 1000) });
     try t.expectEqual(route.Mode.auto, d.mode);
     try t.expectEqual((Route{}).local_tps.v, d.local_tps.v);
     try t.expectEqual((Route{}).remote_tps.v, d.remote_tps.v);
-    const set = Route.build(try env.value(u64, "TF_PREFILL_ROUTE", "always", 0), try env.value(f64, "TF_PREFILL_LOCAL_TPS", "2000", 950), try env.value(f64, "TF_PREFILL_REMOTE_TPS", " 3000.5", 1000));
+    try t.expectEqual(@as(u64, 3), d.breaker.trip);
+    try t.expectEqual(30 * s, d.breaker.cooldown_ns);
+    const set = Route.build(.{
+        .mode = try env.value(u64, "TF_PREFILL_ROUTE", "always", 0),
+        .local_tps = try env.value(f64, "TF_PREFILL_LOCAL_TPS", "2000", 950),
+        .remote_tps = try env.value(f64, "TF_PREFILL_REMOTE_TPS", " 3000.5", 1000),
+        .trip = try env.value(u64, "TF_PREFILL_BREAKER", "5", 3),
+        .cooldown_s = try env.value(u64, "TF_PREFILL_COOLDOWN_S", " 7", 30),
+        .timeout_s = try env.value(u64, "TF_PREFILL_TIMEOUT_S", "90", 0),
+    });
     try t.expectEqual(route.Mode.always, set.mode);
     try t.expectEqual(@as(f64, 2000), set.local_tps.v);
     try t.expectEqual(@as(f64, 3000.5), set.remote_tps.v);
+    try t.expectEqual(@as(u64, 5), set.breaker.trip);
+    try t.expectEqual(7 * s, set.breaker.cooldown_ns);
+    try t.expectEqual(@as(u64, 90), set.timeout_s);
     try t.expectError(error.InvalidEnvironment, env.value(u64, "TF_PREFILL_ROUTE", "sometimes", 0));
     try t.expectError(error.InvalidEnvironment, env.value(f64, "TF_PREFILL_LOCAL_TPS", "0", 950));
     try t.expectError(error.InvalidEnvironment, env.value(f64, "TF_PREFILL_REMOTE_TPS", "fast", 1000));
+    try t.expectError(error.InvalidEnvironment, env.value(u64, "TF_PREFILL_COOLDOWN_S", "0", 30));
 }
 
 /// What a recording source saw, and the verdict it answers.
@@ -148,7 +190,7 @@ const Rec = struct {
         return x.verdict;
     }
 
-    fn fill(_: *anyopaque, _: []const u32, _: u64) anyerror!?remote.Filled {
+    fn fill(_: *anyopaque, _: []const u32, _: u64, _: *const std.atomic.Value(bool)) anyerror!?remote.Filled {
         return error.NotUsed;
     }
 
@@ -209,9 +251,9 @@ const Pair = struct {
         return p.route.weigh(Route.nowNs(t.io), ask, p.at);
     }
 
-    fn fill(ptr: *anyopaque, prompt: []const u32, cached: u64) anyerror!?remote.Filled {
+    fn fill(ptr: *anyopaque, prompt: []const u32, cached: u64, gone: *const std.atomic.Value(bool)) anyerror!?remote.Filled {
         const p: *Pair = @ptrCast(@alignCast(ptr));
-        _ = p.route.admit(t.io, p.route.estimate(p.at, prompt.len - cached), &p.closing) orelse return null;
+        _ = p.route.admit(t.io, p.route.estimate(p.at, prompt.len - cached), &p.closing, gone) orelse return null;
         defer p.route.leave();
         _ = p.fills.fetchAdd(1, .acq_rel);
         try std.Io.sleep(t.io, .fromMilliseconds(p.delay_ms), .awake);

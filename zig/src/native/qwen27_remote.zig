@@ -82,7 +82,7 @@ pub const Pull = struct {
         return if (n - ask.cached >= p.remote.policy.min_prefix) .remote else .small; // a gain under TF_PREFILL_MIN stays local
     }
 
-    fn fill(ptr: *anyopaque, prompt: []const u32, cached: u64) anyerror!?Filled {
+    fn fill(ptr: *anyopaque, prompt: []const u32, cached: u64, _: *const std.atomic.Value(bool)) anyerror!?Filled {
         const p: *Pull = @ptrCast(@alignCast(ptr));
         return p.pull(prompt, cached);
     }

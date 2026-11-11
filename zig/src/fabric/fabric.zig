@@ -4,6 +4,7 @@ const std = @import("std");
 pub const layout = @import("layout.zig");
 pub const words = @import("words.zig");
 pub const mailbox = @import("mailbox.zig");
+pub const relink = @import("relink.zig");
 pub const registration = @import("registration.zig");
 pub const wire = @import("wire.zig");
 pub const manifest = @import("manifest.zig");

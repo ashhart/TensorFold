@@ -46,14 +46,36 @@ pub const Mailbox = struct {
         return openShm(name);
     }
 
-    fn openShm(name: []const u8) Error!Mailbox {
+    fn shmFd(name: []const u8) Error!platform.c.fd_t {
         var path: [64]u8 = undefined;
         const z = std.mem.printSentinel(&path, "/mcdma-rpc.{s}", .{name}, 0) catch return error.InvalidName;
         const flags: c_int = @bitCast(platform.c.O{ .ACCMODE = .RDWR });
         const fd = if (builtin.os.tag == .macos) platform.c.shm_open(z.ptr, flags, @as(c_uint, 0)) else platform.c.shm_open(z.ptr, flags, 0);
         if (fd < 0) return error.NoMailbox;
+        return fd;
+    }
+
+    fn openShm(name: []const u8) Error!Mailbox {
+        const fd = try shmFd(name);
         defer _ = platform.c.close(fd);
         return mapFd(fd);
+    }
+
+    /// Whether /mcdma-rpc.NAME still maps this box: a nonce in our idle payload bytes shows through a new mapping.
+    pub fn stillNamed(box: *const Mailbox, name: []const u8) Error!bool {
+        if (!box.mapped or !layout.validName(name)) return error.InvalidName;
+        const fd = try shmFd(name);
+        defer _ = platform.c.close(fd);
+        const st = try owned(fd);
+        if (st.size != box.mem.len) return false;
+        const other = std.posix.mmap(null, box.mem.len, .{ .READ = true }, .{ .TYPE = .SHARED }, fd, 0) catch return error.NoMailbox;
+        defer std.posix.munmap(other);
+        const mine: *volatile u64 = @ptrCast(@alignCast(box.mem.ptr + layout.ctrl));
+        const theirs: *const volatile u64 = @ptrCast(@alignCast(other.ptr + layout.ctrl));
+        const kept = mine.*;
+        defer mine.* = kept;
+        mine.* = words.nowNs() ^ @intFromPtr(box.mem.ptr) ^ ~kept;
+        return theirs.* == mine.*;
     }
 
     /// The listen end's mailbox: POSIX shm on a Mac, /dev/shm/mcdma-rpc.NAME on Linux; MCDMA_RPC_BOX_DIR: a test dir.
