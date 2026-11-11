@@ -10,6 +10,10 @@ const serve_lanes = @import("serve_lanes.zig");
 const gpa = std.testing.allocator;
 const io = std.testing.io;
 
+test {
+    _ = @import("serve_steps_test.zig");
+}
+
 /// A reply's tokens and finish, written on LaneHost's thread and read on the test's.
 const Box = struct {
     mutex: std.Io.Mutex = .init,

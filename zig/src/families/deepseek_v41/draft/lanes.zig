@@ -11,7 +11,6 @@ const depth = @import("depth.zig");
 const calib = @import("calib.zig");
 const costs_mod = @import("costs.zig");
 const Policy = @import("policy.zig").Policy;
-const branches = @import("branches.zig");
 const spec_mod = @import("spec.zig");
 
 pub const max_block = 16;
@@ -24,6 +23,9 @@ pub const Options = struct {
     dup: tree.Dup = .{}, // sibling pricing: TF_DSV41_TREE_DUP_MS a sibling, its pending row counted
     slots: u32 = 4, // streams at once
     spec: spec_mod.Settings = .{}, // the speculative pass (TF_DSV41_SPEC_DRAFT / _SPEC_NUCLEUS)
+    plain_streams_default: usize = 0, // depth.plain_streams when TF_DSV41_DRAFT_PLAIN_STREAMS is unset
+    steps: bool = false, // prompts a step at a time between rounds (lane_steps.zig), for a target with pieces
+    step_rows: u32 = 0, // a step's rows when the host sets no cap (the target's prompt chunk)
 };
 
 /// A stream's slot and what the backend holds for it between rounds.
@@ -42,6 +44,7 @@ pub const St = struct {
     n_sib: u32 = 0,
     shown: std.ArrayList(u32) = .empty, // the drafts this round's window verifies (node indices, window order)
     shown_set: bool = false,
+    ring_end: ?u64 = null, // the drafter holds the committed rows before this position (null: none yet)
 
     /// Node i of the held tree: the main chain's drafts, then each sibling's rows.
     pub fn nodes(st: *const St) u32 {
@@ -72,7 +75,6 @@ pub const Lanes = struct {
     by_slot: []?*St,
     retired: [16]bool = @splat(false),
     release_requested: [16]bool = @splat(false),
-
     pub const init = @import("lane_owner.zig").init;
     pub const deinit = @import("lane_owner.zig").deinit;
 
@@ -83,6 +85,7 @@ pub const Lanes = struct {
 
     pub fn backend(x: *Lanes) be.Backend {
         const pieces = x.target.pieces();
+        if (pieces and x.opts.steps) return .{ .ptr = x, .vtable = &vtable_steps, .chunk_invariant = true };
         return .{ .ptr = x, .vtable = if (pieces) &vtable_pieces else &vtable };
     }
 
@@ -96,6 +99,13 @@ pub const Lanes = struct {
         v.join = join;
         v.pieces = roundPieces;
         v.finals = roundFinals;
+        break :blk v;
+    };
+    /// Options.steps: the lane host fills prompts a step at a time over the pieces, other streams' rounds between
+    const vtable_steps: be.Backend.VTable = blk: {
+        var v = vtable_pieces;
+        v.prefill_step = @import("lane_steps.zig").prefillStep;
+        v.reports_fill = true;
         break :blk v;
     };
 
@@ -119,7 +129,7 @@ pub const Lanes = struct {
         for (window, 0..) |*w, i| w.* = .{ .width = @intCast(i + 1), .ms = v[i] };
         const shared = try arena.alloc(lanes.config.Cost, @min(v.len, batch_rows));
         for (shared, 0..) |*w, i| w.* = .{ .width = @intCast(i + 1), .ms = v[i] };
-        return .{ .exact_width = costs_mod.slot_rows, .mtp = true, .speculate = true, .speculate_early = false, .drafts = x.opts.shape.block, .window_costs = window, .mtp_step_ms = 0.0, .hidden_rows = true, .batch_rows = batch_rows, .max_streams = x.opts.slots, .shared_costs = shared, .draft_probabilities = true, .draft_streams = true, .join_tail = x.target.vtable.tail != null and try joinTail(), .piece_runs = try envOn("TF_DSV41_PIECE_RUNS"), .join_drafts = try envOn("TF_DSV41_JOIN_DRAFTS"), .replay_runs = try envOn("TF_DSV41_REPLAY_RUNS") };
+        return .{ .exact_width = costs_mod.slot_rows, .mtp = true, .speculate = true, .speculate_early = false, .drafts = x.opts.shape.block, .window_costs = window, .mtp_step_ms = 0.0, .hidden_rows = true, .batch_rows = batch_rows, .max_streams = x.opts.slots, .shared_costs = shared, .draft_probabilities = true, .draft_streams = true, .plain_streams = @intCast(x.opts.depth.plain_streams), .join_tail = x.target.vtable.tail != null and try joinTail(), .piece_runs = try envOn("TF_DSV41_PIECE_RUNS"), .join_drafts = try envOn("TF_DSV41_JOIN_DRAFTS"), .replay_runs = try envOn("TF_DSV41_REPLAY_RUNS") };
     }
 
     /// TF_DSV41_TAIL_JOIN=1: a prompt in pieces leaves its last token to its first round's shared window (default off).
@@ -151,20 +161,7 @@ pub const Lanes = struct {
         };
     }
 
-    fn ingest(x: *Lanes, st: *St, start: u64, rows: []const u32) !void {
-        const span = iface.ingestSpan(rows.len, x.opts.shape.window);
-        if (span.count == 0) return;
-        const taps = x.target.taps(st.slot);
-        const m = taps.map orelse return x.pass.ingest(st.slot, start + span.skip, taps, rows[span.skip..]);
-        // a tree resolved as chains: the path's rows in the taps of the chain that holds it
-        var mapped: [branches.max_rows]u32 = undefined;
-        if (span.count > mapped.len) return error.TreeRows;
-        for (rows[span.skip..], mapped[0..span.count]) |r, *o| {
-            if (r >= m.len or m[r] == branches.unrun) return error.TreeTaps;
-            o.* = m[r];
-        }
-        try x.pass.ingest(st.slot, start + span.skip, taps, mapped[0..span.count]);
-    }
+    const ingest = @import("lane_ingest.zig").ingest;
 
     fn prefill(ptr: *anyopaque, s: *Stream) anyerror!void {
         const x = self(ptr);
@@ -188,6 +185,7 @@ pub const Lanes = struct {
         const ids = s.prompt();
         x.target.admit(slot, s.max_new);
         st.first = try x.target.prefill(slot, ids, s.sampling, ids.len);
+        s.cached = @intCast(x.target.resumedRows(slot));
         st.len = ids.len;
         _ = x.scratch.reset(.retain_capacity);
         // the taps hold the prompt's last rows (after a verify-tail prompt only that row), at their positions
@@ -200,7 +198,7 @@ pub const Lanes = struct {
     }
 
     /// A prompt in pieces (lane_host.zig `Rounds`): new slot, drafter context and depth reset, target admits/restores.
-    fn begin(ptr: *anyopaque, s: *Stream) anyerror!be.Backend.Begun {
+    pub fn begin(ptr: *anyopaque, s: *Stream) anyerror!be.Backend.Begun {
         const x = self(ptr);
         if (x.streams.get(s) != null) return error.StreamLive;
         @import("lane_retire.zig").recover(x);
@@ -280,7 +278,7 @@ pub const Lanes = struct {
         return true;
     }
 
-    fn finished(x: *Lanes, st: *St, ids: []const u32, first_: u32) !void {
+    pub fn finished(x: *Lanes, st: *St, ids: []const u32, first_: u32) !void {
         st.first = first_;
         st.len = ids.len;
         _ = x.scratch.reset(.retain_capacity);
@@ -360,6 +358,7 @@ pub const Lanes = struct {
             nucleus = nucleus or spec_mod.isNucleus(w.stream.sampling);
         }
         if (!sp.roundAllowed(tree_round, nucleus)) return;
+        if (x.plainRound(windows)) return; // the plain switch: no pass runs for a round this wide
         for (windows, segs) |w, g| {
             const st = x.get(w.stream) catch continue;
             if (!dsparkRound(st, w) or !sp.wouldWant(st.slot)) continue;
@@ -368,6 +367,11 @@ pub const Lanes = struct {
             if (sampled and spec_mod.isNucleus(w.stream.sampling)) continue;
             arm(x.pass.ptr, st.slot, g.start, @intCast(g.tokens.len), sampled);
         }
+    }
+
+    /// The plain switch fired: every drafted window of the round was cut to the pending row alone.
+    fn plainRound(x: *Lanes, windows: []const be.Window) bool {
+        return x.opts.depth.plain_streams > 0 and windows.len >= x.opts.depth.plain_streams;
     }
 
     /// A DSpark round: the window verifies the pass's drafts only (a prefix of the held chain counts too).
@@ -392,6 +396,7 @@ pub const Lanes = struct {
             nucleus = nucleus or spec_mod.isNucleus(w.stream.sampling);
         }
         if (!sp.roundAllowed(tree_round, nucleus)) return sp.clear();
+        if (x.plainRound(windows)) return sp.clear(); // the plain switch: this round drafted none, the next will not want the drafts
         const cands = try a.alloc(spec_mod.Candidate, windows.len);
         var n: usize = 0;
         for (windows, segs, choices) |w, g, c| {
@@ -425,11 +430,23 @@ pub const Lanes = struct {
         }
     }
 
+    /// The plain switch: plain_streams or more streams decoding (past their prompts), so the round's windows are plain.
+    fn wideRound(x: *const Lanes) bool {
+        const at = x.opts.depth.plain_streams;
+        if (at == 0) return false;
+        var n: usize = 0;
+        for (x.by_slot) |o| if (o) |st| {
+            n += @intFromBool(st.len > 0);
+        };
+        return n >= at;
+    }
+
     fn draft(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void {
         const x = self(ptr);
         try x.settle();
         _ = x.scratch.reset(.retain_capacity);
         const a = x.scratch.allocator();
+        const wide = x.wideRound();
         const asks = try a.alloc(iface.Ask, requests.len);
         const whose = try a.alloc(*St, requests.len);
         const depths = try a.alloc(u32, requests.len);
@@ -439,11 +456,13 @@ pub const Lanes = struct {
         var n: usize = 0;
         for (requests) |r| {
             const st = try x.get(r.stream);
+            const asks_now = r.depth > 0 and !wide;
             var at = st.len;
             if (r.rows) |path| {
                 if (r.start != st.base) return error.PositionMismatch;
                 const done = if (x.spec) |*sp| sp.ingested(st.slot, r.start, path) else false;
-                if (!done) try x.ingest(st, r.start, path); // a shared round drafts before its keep: the path, not st.len
+                // a shared round drafts before its keep: the path, not st.len; no ask: the next ingest catches it up
+                if (!done and (asks_now or !@import("lane_ingest.zig").deferred(x))) try x.ingest(st, r.start, path);
                 at = r.start + path.len;
             }
             if (r.position != at + 1) return error.PositionMismatch;
@@ -457,7 +476,7 @@ pub const Lanes = struct {
             st.n = 0;
             st.n_sib = 0;
             st.start = at;
-            if (r.depth == 0) continue;
+            if (!asks_now) continue; // no drafts asked, or the plain switch: a round this wide drafts none
             if (n == x.opts.slots) return error.TooManySlots;
             asks[n] = .{ .slot = st.slot, .anchor = anchor, .start = at, .params = dspark.Params.of(r.stream.sampling, at) };
             whose[n] = st;
@@ -517,7 +536,7 @@ pub const Lanes = struct {
     fn heldTree(ptr: *anyopaque, s: *Stream, gpa: Allocator) anyerror!?lanes.stream.Held {
         const x = self(ptr);
         const st = try x.get(s);
-        if (st.n == 0) return null;
+        if (st.n == 0) return .{ .count = 0 }; // no ask this round (the plain switch): the engine plans a plain window
         const total = st.nodes();
         const tokens = try gpa.alloc(u32, total);
         errdefer gpa.free(tokens);
@@ -548,7 +567,7 @@ pub const Lanes = struct {
         return st.n > 0;
     }
 
-    fn release(ptr: *anyopaque, s: *Stream) void {
+    pub fn release(ptr: *anyopaque, s: *Stream) void {
         const x = self(ptr);
         const kv = x.streams.fetchRemove(s) orelse return;
         const st = kv.value;
