@@ -20,6 +20,8 @@ const channels = 2 * key_heads * dk + value_heads * dv;
 const kw = key_heads * dk;
 const vw = value_heads * dv;
 const sections = kw + vw + 2 * value_heads;
+const vh = value_heads;
+const eps = 1e-6;
 
 /// A plan's words: a slot's first row, its rows, its kept rows and its descriptor, then an empty slot.
 const Words = struct {
@@ -99,6 +101,7 @@ test "a window's split from its plan gives the per-row launch's q, k and v bits,
     const t = try Rig.open(1 << 20);
     defer t.close();
     const o = t.ops(&t.on);
+    const act_kind: @import("../ops/types.zig").Kind = if (o.bf16) .bf16 else .f16;
     inline for (1..5) |rows| {
         var rng: rig.Rng = .{ .state = 0xC04 + rows };
         const hx = try gpa.alloc(u16, rows * channels);
@@ -136,6 +139,45 @@ test "a window's split from its plan gives the per-row launch's q, k and v bits,
         defer tail.free();
         var words = try Words.make(t, &.{ 0, 0 }, &.{ @intCast(rows), 0 }, &.{ .{ 0, 0, at(tail), 0 }, Words.none() }, .{ at(samples), 0 });
         defer words.free();
+        // the head norm's weights, and the gate's a, b, a_log and dt_bias, which it writes gate and beta from
+        const hq_norm = try gpa.alloc(f32, kw);
+        defer gpa.free(hq_norm);
+        for (hq_norm) |*e| e.* = rng.unit() + 1;
+        const hk_norm = try gpa.alloc(f32, kw);
+        defer gpa.free(hk_norm);
+        for (hk_norm) |*e| e.* = rng.unit() + 1;
+        const ga = try gpa.alloc(u16, rows * vh);
+        defer gpa.free(ga);
+        for (ga) |*e| e.* = t.bits(rng.unit() * 2 - 1);
+        const gb = try gpa.alloc(u16, rows * vh);
+        defer gpa.free(gb);
+        for (gb) |*e| e.* = t.bits(rng.unit() * 2 - 1);
+        const a_log = try gpa.alloc(f32, vh);
+        defer gpa.free(a_log);
+        for (a_log) |*e| e.* = rng.unit() - 1;
+        const dt_bias = try gpa.alloc(f32, vh);
+        defer gpa.free(dt_bias);
+        for (dt_bias) |*e| e.* = rng.unit();
+        var qw = try t.upload(hq_norm);
+        defer qw.free();
+        var kw_w = try t.upload(hk_norm);
+        defer kw_w.free();
+        var ag = try t.upload(ga);
+        defer ag.free();
+        var bg = try t.upload(gb);
+        defer bg.free();
+        var alog = try t.upload(a_log);
+        defer alog.free();
+        var dt = try t.upload(dt_bias);
+        defer dt.free();
+        var gate_a = try t.alloc(rows * vh * 4);
+        defer gate_a.free();
+        var beta_a = try t.alloc(rows * vh * 4);
+        defer beta_a.free();
+        var gate_b = try t.alloc(rows * vh * 4);
+        defer gate_b.free();
+        var beta_b = try t.alloc(rows * vh * 4);
+        defer beta_b.free();
         // today's window: one launch over the rows, each row's conv tail kept aside
         try o.l.tf_conv_split(.{
             .x = at(x),
@@ -151,6 +193,18 @@ test "a window's split from its plan gives the per-row launch's q, k and v bits,
             .rows = @intCast(rows),
             .kw = kw,
             .vw = vw,
+            .qw = at(qw),
+            .kw_w = at(kw_w),
+            .eps = eps,
+            .norm = 128,
+            .ga = at(ag),
+            .gb = at(bg),
+            .a_log = at(alog),
+            .dt_bias = at(dt),
+            .gate = at(gate_a),
+            .beta = at(beta_a),
+            .gcount = @intCast(rows * vh),
+            .heads = vh,
         }, o.stream);
         // the plan's: the same launch from the window's words, which leaves the state where it found it
         try plan_ops.convSplit(
@@ -166,14 +220,22 @@ test "a window's split from its plan gives the per-row launch's q, k and v bits,
             conv,
             kw,
             vw,
-            null,
-            null,
+            .{ .q = at(qw), .k = at(kw_w), .eps = eps },
+            .{ .a = .{ .ptr = at(ag), .kind = act_kind }, .b = .{ .ptr = at(bg), .kind = act_kind }, .a_log = at(alog), .dt_bias = at(dt), .gate = at(gate_b), .beta = at(beta_b), .count = rows * vh, .heads = vh },
         );
         try t.stream.synchronize();
         for ([_][]const u8{ "q", "k", "v" }, 0..) |what, i| {
             const want = try rig.download(u32, a[i]);
             defer gpa.free(want);
             const got = try rig.download(u32, b[i]);
+            defer gpa.free(got);
+            if (!std.mem.eql(u32, want, got)) std.debug.print("{s} differs at {d} rows\n", .{ what, rows });
+            try std.testing.expectEqualSlices(u32, want, got);
+        }
+        for ([_][]const u8{ "gate", "beta" }, [_]DeviceBuffer{ gate_a, beta_a }, [_]DeviceBuffer{ gate_b, beta_b }) |what, want_b, got_b| {
+            const want = try rig.download(u32, want_b);
+            defer gpa.free(want);
+            const got = try rig.download(u32, got_b);
             defer gpa.free(got);
             if (!std.mem.eql(u32, want, got)) std.debug.print("{s} differs at {d} rows\n", .{ what, rows });
             try std.testing.expectEqualSlices(u32, want, got);
