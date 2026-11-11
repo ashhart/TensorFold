@@ -14,6 +14,7 @@ const slot_state = @import("qwen27_slots.zig");
 const Resident = @import("resident.zig").Resident;
 const lb = @import("qwen27_lanes.zig");
 pub const lanes_backend = lb;
+pub const remote = @import("qwen27_remote.zig"); // #1594 step 2b: prompt prefixes the GB10 prefills
 const disk = @import("qwen27_disk.zig");
 const images = @import("qwen27_images.zig");
 const Allocator = std.mem.Allocator;
@@ -31,6 +32,8 @@ pub const Options = struct {
     learn: ?disk.Learn = null, // --learn-conversations: kept states written behind to disk and read back
     vision: ?api.VisionOpen = null, // --vision: open loads the image tower, and requests may hold images
     images: ?*images.Vision = null, // the loaded tower attach serves (and the host then owns)
+    remote: api.LaneHost.Remote.Flags = .{}, // --prefill-from and --mcdma-link: the GB10 prefills long prompts (#1594 step 2b)
+    remote_id: []const u8 = "", // the checkpoint's name both ends give the hand-off (lane_remote.checkpointId)
 };
 
 pub const Host = struct {
@@ -52,15 +55,14 @@ pub const Host = struct {
     disk_stage: ?mtl.Buffer = null, // copies out of private kept states for the disk (qwen27_disk.zig)
     vision: ?*images.Vision = null, // --vision's tower and image rows
     spares: q.snapshot.Spares = .{}, // dropped kept states' buffers, for the next saves
+    link: ?*remote.Link = null, // --prefill-from's link to the GB10
 
     pub fn engine(h: *Host) api.Engine {
         return h.host.engine();
     }
-
     fn of(ptr: *anyopaque) *Host {
         return @ptrCast(@alignCast(ptr));
     }
-
     fn lone(ptr: *anyopaque, s: *lanes.Stream, hooks: api.LoneHooks) anyerror!bool {
         return of(ptr).back.lone(s, hooks);
     }
@@ -81,7 +83,7 @@ pub const Host = struct {
     /// A finished reply's state stands where a prompt pass of prompt and reply would: keep it for the next turn.
     fn keepReply(ptr: *anyopaque, s: *lanes.Stream, slot: u32) void {
         const h = of(ptr);
-        if (h.cache) |*store| keepEnd(store, h.gpa, s, h.runner.offsets[slot]);
+        if (h.cache) |*store| keepEnd(store, h.host.keep_remote, h.gpa, s, h.runner.offsets[slot]);
     }
 
     /// A fallback never displaces a kept state or spends the room promised to this pass's later marks.
@@ -100,8 +102,9 @@ pub const Host = struct {
     }
 };
 
-/// The reply-end snapshot, retaining a matching pre-reply cache state too when both fit.
-fn keepEnd(store: *pc.Store, gpa: Allocator, s: *lanes.Stream, stands: u32) void {
+/// The reply-end snapshot, retaining a matching pre-reply cache state too when both fit; its marks stay.
+fn keepEnd(store: *pc.Store, keep_remote: bool, gpa: Allocator, s: *lanes.Stream, stands: u32) void {
+    if (s.reuse.remote and !s.reuse_failed and !keep_remote) return; // on another machine's prefix: only with TF_PREFILL_KEEP
     const prompt: u32 = @intCast(s.prompt_len);
     const tokens = s.context.items;
     if (tokens.len == prompt or stands + 1 < tokens.len or stands > tokens.len) return;
@@ -118,6 +121,8 @@ fn keepEnd(store: *pc.Store, gpa: Allocator, s: *lanes.Stream, stands: u32) void
     defer if (pin) |e| {
         e.borrowers -= 1;
     };
+    store.keep_remote = s.reuse.remote and !s.reuse_failed; // a turn resuming it is remote too (#1594 step 2b)
+    defer store.keep_remote = false;
     _ = store.keepBorn(keyed, prompt, stands, s, s.chunks, spans);
 }
 
@@ -226,16 +231,16 @@ const Left = struct {
 /// Kept states of a fake family whose bytes grow as the 27B's K/V rows (64 KiB a token); `saved` is never read.
 const FakeStates = struct {
     live: usize = 0,
-    fn bytes(_: *anyopaque, at: u32) u64 {
+    pub fn bytes(_: *anyopaque, at: u32) u64 {
         return @as(u64, at) << 16;
     }
-    fn save(ptr: *anyopaque, _: ?*anyopaque, at: u32) anyerror!pc.Saved {
+    pub fn save(ptr: *anyopaque, _: ?*anyopaque, at: u32) anyerror!pc.Saved {
         const f: *FakeStates = @ptrCast(@alignCast(ptr));
         f.live += 1;
         return @ptrFromInt(@as(usize, at) << 4);
     }
-    fn restore(_: *anyopaque, _: ?*anyopaque, _: pc.Saved) anyerror!void {}
-    fn drop(ptr: *anyopaque, _: pc.Saved) void {
+    pub fn restore(_: *anyopaque, _: ?*anyopaque, _: pc.Saved) anyerror!void {}
+    pub fn drop(ptr: *anyopaque, _: pc.Saved) void {
         const f: *FakeStates = @ptrCast(@alignCast(ptr));
         f.live -= 1;
     }
@@ -263,28 +268,8 @@ test "--prompt-cache-gib 40: a later 192k-token slot takes its room back from ke
     try std.testing.expectEqual(@as(usize, 1), fake.live);
 }
 
-test "a reply's end is born with its request's prompt: the history mark that request kept outlives the reply's keep" {
-    const gpa = std.testing.allocator;
-    const at: u32 = 5000; // a history mark at 5000 tokens, then a 7-token generation prompt and a 100-token reply
-    var fake: FakeStates = .{};
-    var store = pc.Store.init(gpa, .{ .ptr = &fake, .vtable = &.{ .bytes = FakeStates.bytes, .save = FakeStates.save, .restore = FakeStates.restore, .drop = FakeStates.drop } }, .{ .warm = .on }, (3 * at + 100) << 16);
-    defer store.deinit();
-    var other: [at + 7]u32 = undefined; // another conversation's prompt, its history kept first
-    for (&other, 0..) |*t, i| t.* = @intCast(i);
-    try std.testing.expect(store.keep(&other, at, null, &.{}, &.{}));
-    var tokens: [at + 107]u32 = undefined;
-    for (&tokens, 0..) |*t, i| t.* = @intCast(1_000_000 + i);
-    const prompt = tokens[0 .. at + 7];
-    try std.testing.expect(store.keep(prompt, at, null, &.{}, &.{}));
-    var s = try lanes.Stream.init(gpa, .{ .id = "reply", .prompt = prompt, .max_new = 100 });
-    defer s.deinit(gpa);
-    try s.context.appendSlice(gpa, tokens[at + 7 ..]);
-    keepEnd(&store, gpa, &s, tokens.len); // three states pass the budget: the least recently used goes
-    try std.testing.expect(store.find(&other, &.{}, &.{}) == null);
-    const history = store.find(prompt, &.{}, &.{}) orelse return error.HistoryEvicted; // a regenerate resumes it
-    try std.testing.expectEqual(at, history.at);
-    try std.testing.expectEqual(@as(u32, at + 7), store.entries.items[1].born);
-    try std.testing.expectEqual(@as(usize, 2), fake.live);
+test "a reply's end on a pulled prefix is kept only with TF_PREFILL_KEEP, marked remote" {
+    try @import("qwen27_remote_keep_test.zig").exercise(keepEnd, FakeStates);
 }
 
 /// Memory the slots past the ready ones take on first use: their K/V rows and taps rings.
@@ -382,6 +367,7 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     h.owns_model = false;
     h.draft = null;
     h.cache = null;
+    h.link = null; // gpa.create leaves fields undefined: a default never applies here
     h.resident = null;
     h.disk_stage = null;
     h.vision = o.images; // closed with the host; a failed attach leaves it to the caller
@@ -444,6 +430,8 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     errdefer if (h.cache) |*store| if (store.disk) |r| r.deinit();
     // a wide prompt pass commits its buffers at once: the probe keeps the sets in use while it runs
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick, .probe = mtl.keepalive.Target.busy };
+    try remote.attach(h, io, a, o.remote, o.remote_id, .{ .ctx = h.back, .at = slot_state.resumeAt }, why); // --prefill-from
+    errdefer if (h.link) |l| l.stop(h.gpa);
     if (h.trace) |*t| t.enabled = true; // serving rounds count from here: measure() timed whole, unsplit buffers
     try h.host.start();
     tf.startup_receipt.span(.model_ready).end();
@@ -547,6 +535,7 @@ const holdResident = q.residency.hold;
 pub fn close(ptr: *anyopaque) void {
     const h = Host.of(ptr);
     h.host.stop();
+    if (h.link) |l| l.stop(h.gpa);
     const rows = if (h.cache) |*store| store.disk else null;
     if (h.cache) |*store| store.deinit(); // its states leave the set as they go
     h.spares.deinit();
@@ -591,5 +580,10 @@ test "Qwen27 interior state uses a guaranteed cold request cut" {
 }
 
 test "qwen27 reply cache: warm work preserves both client histories within rounded budgets" {
-    try @import("qwen27_reply_cache_test.zig").exercise(keepEnd, slot_state.opening);
+    const Local = struct {
+        fn keep(store: *pc.Store, gpa: Allocator, s: *lanes.Stream, stands: u32) void {
+            keepEnd(store, false, gpa, s, stands);
+        }
+    };
+    try @import("qwen27_reply_cache_test.zig").exercise(Local.keep, slot_state.opening);
 }

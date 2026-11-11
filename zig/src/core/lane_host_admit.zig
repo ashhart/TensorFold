@@ -11,6 +11,7 @@ const ledger = @import("lane_host_ledger.zig");
 pub fn pick(h: *LaneHost) ?usize {
     if (pressure.holds(h)) return null; // under memory pressure nothing starts or is read ahead
     if (!h.stale) fetch.queue(h); // disk states read ahead for queued requests, a lane free or not
+    if (!h.stale) @import("lane_remote.zig").queue(h); // remote prefixes beyond the cache's, filled on their own threads
     // a stale device takes no reply: `learn.refuse` ends the queued ones instead
     if (h.stale or h.queued.items.len == 0 or h.admitted.items.len >= @min(h.info_.lanes, h.memory_lanes orelse h.info_.lanes)) return null;
     prefix.release(h); // requests whose awaited cut is in (or will not come) go on first
@@ -22,7 +23,7 @@ pub fn pick(h: *LaneHost) ?usize {
 
 /// Whether queued `job` is passed over: it waits for another fill's cut or for its disk state's read.
 fn passed(h: *LaneHost, job: *const Job) bool {
-    return prefix.waiting(job) or fetch.held(h, job);
+    return prefix.waiting(job) or fetch.held(h, job) or @import("lane_remote.zig").held(job);
 }
 
 /// Whether every queued request waits for a cut or a read: an idle engine sleeps until a read wakes it (lock held).
