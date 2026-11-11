@@ -10,7 +10,7 @@ const hops = @import("link.zig");
 const Link = hops.Link;
 const echoed = hops.echoed;
 
-pub const Error = error{ StreamOpen, NoFreeSlot, UnknownStream, BadAccepted, OtherPosition, ResumeNotInV1, CutsNotInV1, OtherEcho, PromptParts, TooManyStreams, BadDepth, TooManyInFlight, NothingInFlight, StreamInFlight, RoundsInFlight, Unsettled, KeptTwice, StageLost };
+pub const Error = error{ StreamOpen, NoFreeSlot, UnknownStream, BadAccepted, OtherPosition, ResumeNotInV1, CutsNotInV1, OtherEcho, PromptParts, TooManyStreams, BadDepth, TooManyInFlight, NothingInFlight, StreamInFlight, RoundsInFlight, Unsettled, KeptTwice, StageLost, NoWindow };
 
 /// A stream's unsettled window: its first position and its rows.
 pub const Window = struct { start: u32, rows: u32 };
@@ -97,6 +97,8 @@ pub fn Driver(comptime B: type) type {
             queued: ?plan.Op = null,
             /// Rank 0 only: the rows of the last window its caller already kept.
             kept: ?u32 = null,
+            /// Rank 0 only: the rows of the window its last round ran (null: none, or a prompt or no rows).
+            last: ?u32 = null,
         };
 
         /// A stage's streams: the same code on rank 0 and on every follower, so each applies a plan's keeps alike.
@@ -295,6 +297,8 @@ pub fn Driver(comptime B: type) type {
                 if (l.flying(id)) return error.StreamInFlight;
                 if (B.window(&x.cache) != null) return error.Unsettled;
                 if (x.kept != null) return error.KeptTwice;
+                const rows = x.last orelse return error.NoWindow; // a prompt round, or none of it run yet
+                if (accepted > rows) return error.BadAccepted;
                 x.kept = accepted;
             }
 
@@ -372,6 +376,7 @@ pub fn Driver(comptime B: type) type {
                 defer l.round += 1;
                 var r: Round = .{};
                 for (streams) |st| try l.own(&r, st); // rank 0 checks what it planned
+                l.ran(streams, mode);
                 const ring = l.ring orelse {
                     if (r.n > 0) try B.forward(l.e, r.parts[0..r.n], ids, mode, null);
                     return;
@@ -381,6 +386,13 @@ pub fn Driver(comptime B: type) type {
                 if (r.n == 0) return echoed(ring, l.round, p, l.mem[half..]) catch |err| return l.fail(err);
                 var link: Link = .{ .ring = ring, .round = l.round, .bound = B.boundary(l.e), .plan = decoded, .sent = p, .echo = l.mem[half..] };
                 B.forward(l.e, r.parts[0..r.n], ids, mode, link.hop()) catch |err| return l.fail(err);
+            }
+
+            /// Each planned stream's window as its round leaves it, for `kept` to check against.
+            fn ran(l: *Lead, streams: []const plan.Stream, mode: plan.Mode) void {
+                for (streams) |st| if (l.slots.find(st.id)) |x| {
+                    x.last = if (mode == .window and st.rows > 0) st.rows else null;
+                };
             }
 
             fn alive(l: *const Lead) !void {
@@ -466,6 +478,7 @@ pub fn Driver(comptime B: type) type {
                 f.n_streams = entries.len;
                 defer l.round += 1;
                 for (streams) |st| try l.own(&f.r, st);
+                l.ran(streams, mode);
                 const ring = l.ring orelse {
                     l.count += 1; // one engine: the forward runs at `complete`, in order
                     return;
