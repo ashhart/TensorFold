@@ -25,10 +25,11 @@ pub fn tapSplitCheck(gpu: Gpu, checkpoint: []const u8, drafter: []const u8, rank
     const comm = try @import("glm_lanes_tests.zig").openComm(gpu, &lib, rank, world, id_path);
     defer _ = lib.api.ncclCommDestroy(comm);
     var problem: []const u8 = "";
-    const set = glm.ranks.Settings.read(&glm.ranks.environment, &problem) catch |err| {
+    var set = glm.ranks.Settings.read(&glm.ranks.environment, &problem) catch |err| {
         std.debug.print("REFUSE {s}\n", .{problem});
         return err;
     };
+    glm.ranks.toolPieces(&set, &glm.ranks.environment); // TF_GLM_WORLD's rule, as before
     const WIN: usize = @intCast(glm.dflash.WIN);
     const C = glm.engine.prompt_rows;
     const lens = [_]usize{ WIN - 1, WIN, WIN + 1, 8000 }; // 2,047 / 2,048 / 2,049, then about 8k in several chunks

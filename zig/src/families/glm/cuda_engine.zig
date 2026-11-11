@@ -270,10 +270,10 @@ pub const Engine = struct {
     const freeProfs = @import("cuda_engine_prof.zig").freeProfs;
 
     /// The serving group, its RoCE wires open: the main stream's and the boundary's gathers take its route now.
-    pub fn installGroup(e: *Engine, g: *cuda.tp_group.Group) void {
+    pub fn installGroup(e: *Engine, g: *cuda.tp_group.Group, from: []const u8) void {
         e.group = g;
         e.backend.group = g;
-        std.log.info("[tensorfold] glm: rank {d} of {d} sums through the {t} collective (RoCE gathers {s})", .{ g.rank, g.world, e.collective.kind(), if (g.fast != null or g.multi != null) "on" else "off" });
+        std.log.info("[tensorfold] glm: rank {d} of {d} ({s}) sums through the {t} collective (RoCE gathers {s})", .{ g.rank, g.world, from, e.collective.kind(), if (g.fast != null or g.multi != null) "on" else "off" });
     }
 
     pub fn exchange(e: *const Engine) fw.Exchange {

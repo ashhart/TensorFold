@@ -348,6 +348,9 @@ pub const Open = struct {
     tp: u32 = 1,
     rank: u32 = 0,
     given: Given = .{},
+    /// The build's release (rank aliases retire by it) and where `tp` came from, for the start-up line.
+    release: []const u8 = "",
+    launch_from: []const u8 = "",
     master: []const u8 = "",
     master_port: u16 = 29551,
     /// --policy: the engine's policy as `key=value,...`; empty: its defaults.

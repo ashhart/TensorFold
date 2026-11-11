@@ -28,6 +28,7 @@ pub fn pagedCheck(gpu: Gpu, checkpoint: []const u8, rank: c_int, world: c_int, i
         std.debug.print("REFUSE {s}\n", .{problem});
         return err;
     };
+    glm.ranks.toolPieces(&set, &glm.ranks.environment); // TF_GLM_WORLD's rule, as before
     set.pages = true; // every rank's engine makes its own sequence on pages, as TF_KV_PAGES does
     const e = try glm.engine.Engine.init(gpu.gpa, gpu.io, gpu.d, gpu.ctx, checkpoint, &lib, comm, @intCast(rank), @intCast(world), .{ .capacity = capacity, .mtp = true, .settings = set });
     defer e.deinit();

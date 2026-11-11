@@ -58,7 +58,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, dir: []const u8, model_typ
         problem.* = "--record writes rows from the CUDA engine only so far: serve without --record";
         return null;
     }
-    return native.open(a, gpa, io, try cli.request(a, dir, model_type, args), problem);
+    return native.open(a, gpa, io, try released(a, dir, model_type, args), problem);
 }
 
 /// A tensor-parallel rank above 0 runs rank 0's steps until it stops; false with ``problem`` set when it cannot.
@@ -71,5 +71,12 @@ pub fn follow(a: Allocator, gpa: Allocator, io: std.Io, dir: []const u8, model_t
         problem.* = "this build has no tensor-parallel ranks";
         return false;
     }
-    return native.follow(a, gpa, io, try cli.request(a, dir, model_type, args), problem);
+    return native.follow(a, gpa, io, try released(a, dir, model_type, args), problem);
+}
+
+/// The engine's request with this build's release, by which a CUDA family's rank aliases retire.
+fn released(a: Allocator, dir: []const u8, model_type: []const u8, args: cli.Args) !api.Open {
+    var o = try cli.request(a, dir, model_type, args);
+    o.release = @import("build_options").version;
+    return o;
 }

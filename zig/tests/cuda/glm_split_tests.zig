@@ -18,10 +18,11 @@ pub fn splitCheck(gpu: Gpu, checkpoint: []const u8, dc_path: []const u8, rank: c
     const comm = try @import("glm_lanes_tests.zig").openComm(gpu, &lib, rank, world, id_path);
     defer _ = lib.api.ncclCommDestroy(comm);
     var problem: []const u8 = "";
-    const set = glm.ranks.Settings.read(&glm.ranks.environment, &problem) catch |err| {
+    var set = glm.ranks.Settings.read(&glm.ranks.environment, &problem) catch |err| {
         std.debug.print("REFUSE {s}\n", .{problem});
         return err;
     };
+    glm.ranks.toolPieces(&set, &glm.ranks.environment); // TF_GLM_WORLD's rule, as before
     const C = glm.engine.prompt_rows;
     const capacity = @max(dc.capacity, 4 * C);
     const e = try glm.engine.Engine.init(gpu.gpa, gpu.io, gpu.d, gpu.ctx, checkpoint, &lib, comm, @intCast(rank), @intCast(world), .{ .capacity = capacity, .mtp = true, .settings = set });
