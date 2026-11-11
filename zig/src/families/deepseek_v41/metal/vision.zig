@@ -76,8 +76,11 @@ pub const Config = struct {
     }
 
     pub fn check(c: Config) !void {
-        if (c.headDim() != 64 or c.dim % c.heads != 0) return error.UnsupportedVision;
-        if (c.layers == 0 or c.ratio == 0 or c.patch == 0 or c.inter == 0) return error.UnsupportedVision;
+        if (c.heads == 0) return error.ZeroHeads;
+        if (c.dim % c.heads != 0 or c.headDim() != 64) return error.UnsupportedVision;
+        if (c.layers == 0 or c.patch == 0 or c.inter == 0) return error.UnsupportedVision;
+        if (c.ratio < 2) return error.LowDownsampleRatio;
+        if (c.max_wh_ratio != null and c.max_wh_ratio.? == 0) return error.ZeroMaxWhRatio;
     }
 };
 
