@@ -149,7 +149,7 @@ pub const Engine = struct {
         const share = try shard.Share.of(&c, tg.rank, tg.world);
         const backend = try gpa.create(tp.group.Backend);
         errdefer gpa.destroy(backend);
-        backend.* = .{ .d = d, .lib = lib, .comm = comm, .rank = tg.rank, .world = tg.world };
+        backend.* = .{ .d = d, .lib = lib, .comm = comm, .rank = tg.rank, .world = tg.world, .owner = o.owner };
         const kb = @import("cuda_kda_block.zig");
         kb.pad_to = if (o.settings.kda_pad) kb.padWidth(c.kda_heads, world) else 0; // read once: rowWidth reads only this
         const spans = try gpa.alloc(shard.Span, world);
