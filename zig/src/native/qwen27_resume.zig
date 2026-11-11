@@ -16,8 +16,9 @@ pub fn leftRemote(s: anytype) bool {
     return s.reuse.remote and !s.reuse_failed;
 }
 
-/// A pass resumed in slot 0 stands on the record's rows, `remote` or not as they are, and pulled nothing just now.
-pub fn inherit(reuse: anytype, remote: bool) void {
+/// A pass `r` resumed in slot 0 (`here` or `back`) stands on the record's rows, `remote` or not, and pulled nothing.
+pub fn inherit(reuse: anytype, r: Resume, remote: bool) void {
+    if (r == .none) return; // a pass from 0 or a restore keeps its own origin
     reuse.remote = remote;
     reuse.pulled = false;
 }

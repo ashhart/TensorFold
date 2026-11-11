@@ -255,7 +255,7 @@ fn takeStanding(b: *Metal, s: *lanes.Stream, kept_at: u32) !u32 {
             break :back h;
         },
     };
-    resume_rules.inherit(&s.reuse, b.standing.remote); // here or back: its rows' origin, not a pull it skipped
+    resume_rules.inherit(&s.reuse, plan, b.standing.remote); // here or back: its rows' origin, not a pull it skipped
     return at;
 }
 
