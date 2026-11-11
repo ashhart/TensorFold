@@ -268,7 +268,9 @@ pub const Engine = struct {
         errdefer e.pool.deinit();
         e.round = try lane_round.State.init(e);
         errdefer e.round.deinit(e);
-        if (e.plain()) { // ModelOpt's own bf16 layers read dense, so rocBLAS is not opened for them
+        // rocBLAS serves an unquantized checkpoint's projections and a ModelOpt checkpoint's vision tower
+        const tower = if (vision.Vision.config(gpa, io, dir)) |_| true else |_| false;
+        if (e.plain() or tower) {
             e.workspace = try hip.DeviceBuffer.alloc(&e.driver, hip.blas.workspace_bytes);
             e.blas = hip.blas.Blas.open(e.stream) catch |err| {
                 e.workspace.free();

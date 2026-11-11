@@ -88,7 +88,8 @@ pub fn projectSilu(o: Ops, x: Tensor, proj: Projection, m: usize, act: Tensor) E
 pub fn projectGroup(o: Ops, x: Tensor, ps: []const Projection, m: usize, outs: []Tensor) Error!bool {
     var ws: [4]Affine = undefined;
     if (ps.len > ws.len) return false;
-    for (ps, ws[0..ps.len]) |pr, *w| switch (pr.handle orelse return error.BadShape) {
+    // a decoded projection (NVFP4, FP8) has no grouped tile: false sends the caller to the plain product
+    for (ps, ws[0..ps.len]) |pr, *w| switch (pr.handle orelse return false) {
         .mlx => |h| w.* = affineOf(pr, h),
         .dense, .bf16 => return false,
     };
@@ -97,7 +98,7 @@ pub fn projectGroup(o: Ops, x: Tensor, ps: []const Projection, m: usize, outs: [
 
 /// The routed gate and up with the activation as the epilogue; null when the format or the tile does not take it.
 pub fn projectRoutedAct(o: Ops, x: Tensor, proj: Projection, items: u64, count: usize, members: u64, pairs: usize, x_div: usize, rows: usize, limit: f32) Error!?Tensor {
-    switch (proj.handle orelse return error.BadShape) {
+    switch (proj.handle orelse return null) {
         .mlx => |h| return affineRoutedAct(o, x, affineOf(proj, h), items, count, members, pairs, x_div, rows, limit),
         .dense, .bf16 => return null,
     }
@@ -105,7 +106,7 @@ pub fn projectRoutedAct(o: Ops, x: Tensor, proj: Projection, items: u64, count: 
 
 /// `project` (fp32) then tf_nemo_relu2 into `out`, in one launch; false where another tile takes the product.
 pub fn projectRelu2(o: Ops, x: Tensor, proj: Projection, m: usize, out: Tensor) Error!bool {
-    const h = switch (proj.handle orelse return error.BadShape) {
+    const h = switch (proj.handle orelse return false) {
         .mlx => |h| h,
         .dense, .bf16 => return false,
     };
@@ -146,7 +147,7 @@ pub fn projectRoutedRelu2(
     rows: usize,
     out: Tensor,
 ) Error!bool {
-    const h = switch (proj.handle orelse return error.BadShape) {
+    const h = switch (proj.handle orelse return false) {
         .mlx => |h| h,
         .dense, .bf16 => return false,
     };
