@@ -175,7 +175,7 @@ stable ID order. Recurrent commits replay the accepted path with the same update
 
 Native CUDA has tensor-parallel serving as well as one-GPU paths. GLM, MiniMax and Nemotron take
 `--tp`, `--rank`, `--master` and `--master-port` (see [native GLM placement](glm-5.3-flash-cuda.md#run)); their
-`TF_*_RANK` and `TF_*_WORLD` variables are aliases until 1.4.0. Other families take the flags only where their native
+`TF_*_RANK` and `TF_*_WORLD` variables are aliases for one release (the start-up warning names the release that refuses them). Other families take the flags only where their native
 options support ranks; for example, [Super VL](nemotron-3.5-super-vl.md) serves on one or two GB10s. A rank option is not universal family support.
 
 The following transport and two-rank reduction notes describe Python 0.6.6. In that engine, @jayleaton's

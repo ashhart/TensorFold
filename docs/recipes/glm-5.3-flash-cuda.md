@@ -13,7 +13,7 @@ and `--master` flags.
 
 `--rank` of `--tp` places each rank, and `--master` with `--master-port` names rank 0's address and port on the link
 between the hosts; they become NCCL's root (`NCCL_COMM_ID`, which may be set instead, and must match when both are)
-([placement](../multi-rank-receipts.md)). `TF_GLM_RANK` and `TF_GLM_WORLD` still place a rank as aliases of `--rank` and `--tp` until 1.4.0, which refuses them
+([placement](../multi-rank-receipts.md)). `TF_GLM_RANK` and `TF_GLM_WORLD` still place a rank as aliases of `--rank` and `--tp` for one release; the start-up warning names the release that refuses them
 with the flag to use; a flag and an alias that differ refuse. Give every rank the same arguments: before the weights load
 the ranks compare their settings, model and build, and name the field and rank that differ. `--context` takes a
 positive limit for GLM. On two GB10s, with 192.0.2.1 as rank 0's address on their direct link:

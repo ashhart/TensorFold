@@ -56,7 +56,7 @@ tensorfold serve /models/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4 --tp 2 --r
   --name super --vision --host 0.0.0.0
 ```
 
-`TF_NEMOTRON_RANK` and `TF_NEMOTRON_WORLD` still place a rank as aliases of `--rank` and `--tp` until 1.4.0, which refuses them
+`TF_NEMOTRON_RANK` and `TF_NEMOTRON_WORLD` still place a rank as aliases of `--rank` and `--tp` for one release; the start-up warning names the release that refuses them
 with the flag to use; a flag and an alias that differ refuse.
 Set `NCCL_SOCKET_IFNAME` and `NCCL_IB_HCA` for the link between the hosts as NCCL documents them. Rank 1 keeps a TCP
 line to rank 0 on the port after the root's (29742 here), opened before NCCL. Before any weight loads, both ranks
