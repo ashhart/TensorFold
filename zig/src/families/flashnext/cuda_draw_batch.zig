@@ -20,14 +20,18 @@ pub fn enabled() !bool {
 
 pub const Batch = struct {
     device: cuda.DeviceBuffer,
+    scores: cuda.DeviceBuffer,
     host: []align(8) u8,
     on: bool,
-    pub fn init(a: std.mem.Allocator, driver: *cuda.Driver, on: bool) !Batch {
+    pub fn init(a: std.mem.Allocator, driver: *cuda.Driver, on: bool, columns: usize) !Batch {
         var b = try cuda.DeviceBuffer.alloc(driver, bytes);
         errdefer b.free();
-        return .{ .device = b, .host = std.mem.sliceAsBytes(try a.alloc(u64, bytes / 8)), .on = on };
+        var scores = try cuda.DeviceBuffer.alloc(driver, @import("cuda_draft_draw.zig").scoreBytes(columns));
+        errdefer scores.free();
+        return .{ .scores = scores, .device = b, .host = std.mem.sliceAsBytes(try a.alloc(u64, bytes / 8)), .on = on };
     }
     pub fn deinit(b: *Batch, a: std.mem.Allocator) void {
+        b.scores.free();
         b.device.free();
         a.free(std.mem.bytesAsSlice(u64, b.host));
     }

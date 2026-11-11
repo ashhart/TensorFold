@@ -26,6 +26,10 @@ pub const Device = struct {
     pub var single_vals: ?[]const u16 = null;
     pub var single_cols: ?[]const i32 = null;
     pub var reads: usize = 0;
+    pub var copies: usize = 0;
+    pub var copy_src: [512]u64 = undefined;
+    pub var copy_dst: [512]u64 = undefined;
+    pub var copy_bytes: [512]usize = undefined;
     pub const Event = enum { best, topk, wait, read_best, read_vals, read_cols, read_row, read_batch };
     pub var events: [512]Event = undefined;
     pub var events_n: usize = 0;
@@ -43,6 +47,7 @@ pub const Device = struct {
         best_bytes = 0;
         pending = false;
         reads = 0;
+        copies = 0;
         events_n = 0;
     }
     fn launch(f: cuda.abi.Function, gx: u32, _: u32, _: u32, _: u32, _: u32, _: u32, _: u32, _: cuda.abi.Stream, args: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) c_int {
@@ -80,6 +85,15 @@ pub const Device = struct {
             for (0..b.rows_max) |i| @memcpy(bytes[i * 16 ..][0..16], std.mem.asBytes(if (reductions.len > i) &reductions[i] else &best));
             @memcpy(bytes[b.vals_at..][0 .. vals.len * 2], std.mem.sliceAsBytes(vals));
             @memcpy(bytes[b.cols_at..][0 .. cols.len * 4], std.mem.sliceAsBytes(cols));
+        } else if (src == 0x1000 and n > mtp.max_rows * 16) {
+            event(.read_batch);
+            @memset(bytes, 0);
+            const rows = mtp.max_rows;
+            for (0..rows) |i| @memcpy(bytes[i * 16 ..][0..16], std.mem.asBytes(if (reductions.len > i) &reductions[i] else &best));
+            const va = rows * 16;
+            const ca = va + rows * draw.topk_max * 2;
+            @memcpy(bytes[va..][0..@min(vals.len * 2, ca - va)], std.mem.sliceAsBytes(vals)[0..@min(vals.len * 2, ca - va)]);
+            @memcpy(bytes[ca..][0..@min(cols.len * 4, n - ca)], std.mem.sliceAsBytes(cols)[0..@min(cols.len * 4, n - ca)]);
         } else if (src == 0x1000) {
             event(.read_best);
             best_bytes = n;
@@ -104,6 +118,13 @@ pub const Device = struct {
         } else @memset(bytes, 0);
         return 0;
     }
+    fn copy(dst: u64, src: u64, n: usize, _: cuda.abi.Stream) callconv(.c) c_int {
+        copy_dst[copies] = dst;
+        copy_src[copies] = src;
+        copy_bytes[copies] = n;
+        copies += 1;
+        return 0;
+    }
     fn context(out: *c_int) callconv(.c) c_int {
         out.* = 0;
         return 0;
@@ -118,6 +139,7 @@ pub const Device = struct {
         d.api.cuLaunchKernel = launch;
         d.api.cuStreamSynchronize = wait;
         d.api.cuMemcpyDtoH_v2 = read;
+        d.api.cuMemcpyDtoDAsync_v2 = copy;
         d.api.cuCtxGetDevice = context;
         d.api.cuDeviceGetAttribute = attribute;
         single_vals = null;
@@ -154,12 +176,15 @@ pub fn draft(d: *cuda.Driver, host: []u16) mtp.Draft {
     return x;
 }
 pub fn head(d: *cuda.Driver) !mtp.Head {
+    return headIds(d, &.{ 0, 3, 7 });
+}
+pub fn headIds(d: *cuda.Driver, ids: []const u32) !mtp.Head {
     const gpa = std.testing.allocator;
     var h: mtp.Head = undefined;
-    h.artifact = try core.proposal_vocab.legacy.artifact(gpa, &.{ 0, 3, 7 }, .{ .vocab = wt.vocab, .hidden = wt.dims, .format = "bf16", .group = 0, .scale_recipe = "fixture" });
+    h.artifact = try core.proposal_vocab.legacy.artifact(gpa, ids, .{ .vocab = wt.vocab, .hidden = wt.dims, .format = "bf16", .group = 0, .scale_recipe = "fixture" });
     h.ids = h.artifact.ids();
     h.service = try @import("lanes").proposal_head.Service.legacy(gpa, &h.artifact);
-    h.draw_batch = .{ .device = .{ .d = d, .ptr = 0x9000, .len = @import("cuda_draw_batch.zig").bytes }, .host = &Device.batch_host, .on = true };
+    h.draw_batch = .{ .scores = .{ .d = d, .ptr = 0xA000, .len = @import("cuda_draft_draw.zig").scoreBytes(ids.len) }, .device = .{ .d = d, .ptr = 0x9000, .len = @import("cuda_draw_batch.zig").bytes }, .host = &Device.batch_host, .on = true };
     h.best_fn = .{ .d = d, .handle = @ptrFromInt(1) };
     h.topk_fn = .{ .d = d, .handle = @ptrFromInt(2) };
     return h;

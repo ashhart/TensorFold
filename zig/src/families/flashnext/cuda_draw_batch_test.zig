@@ -80,7 +80,7 @@ test "Flash Next batch draws: a later bad row keeps stream publication order and
     defer cuda.download_stage.closeDriver(&driver);
     var h = try f.head(&driver);
     defer h.artifact.deinit();
-    var hosts: [2][128]u16 = undefined;
+    var hosts: [2][mtp.max_rows * draw.topk_max * 3]u16 = undefined;
     var ds = [2]mtp.Draft{ f.draft(&driver, &hosts[0]), f.draft(&driver, &hosts[1]) };
     ds[1].rows = 2;
     ds[1].logits.ptr += vocab * 2;
@@ -95,4 +95,28 @@ test "Flash Next batch draws: a later bad row keeps stream publication order and
     try t.expectEqualSlices(u32, &.{ 42, 43 }, &last);
     try t.expectEqualSlices(usize, &.{ 2, 1 }, D.functions[0..D.launches]);
     try t.expectEqualSlices(u32, &.{ 3, 2 }, D.grids[0..D.launches]);
+}
+
+test "Flash Next batch draws: all 64 verify rows share one reduction without using a draft's 32-row scratch" {
+    var driver = D.driver();
+    defer cuda.download_stage.closeDriver(&driver);
+    var h = try f.head(&driver);
+    defer h.artifact.deinit();
+    var host: [1]u16 = undefined;
+    var x = f.draft(&driver, &host);
+    var y = f.draft(&driver, &host);
+    x.rows = 32;
+    y.rows = 32;
+    D.best = f.reduction(1, 2, 17);
+    var first: [32]u32 = undefined;
+    var second: [32]u32 = undefined;
+    const st: cuda.Stream = .{ .d = &driver, .handle = null };
+    try batch.drawsMany(&h, st, a, 0x4000, &.{ &x, &y }, &.{ null, null }, &.{ &.{}, &.{} }, &.{ &first, &second });
+    try t.expectEqualSlices(u32, &@as([32]u32, @splat(17)), &first);
+    try t.expectEqualSlices(u32, &first, &second);
+    try t.expectEqualSlices(u32, &.{64}, D.grids[0..D.launches]);
+    try t.expectEqual(@as(usize, 1), D.waits);
+    try t.expectEqual(@as(usize, 1), D.reads);
+    y.rows = 33;
+    try t.expectError(error.ProposalScoreShape, batch.drawsMany(&h, st, a, 0x4000, &.{ &x, &y }, &.{ null, null }, &.{ &.{}, &.{} }, &.{ &first, &second }));
 }
