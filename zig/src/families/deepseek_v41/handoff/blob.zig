@@ -75,17 +75,25 @@ pub fn fromStream(arena: std.mem.Allocator, bytes: []const u8, expect: fabric.de
     const Entry = struct { layer: u32, part: u64, bytes: []const u8 };
     const Recorder = struct {
         arena: std.mem.Allocator,
+        stream: []const u8,
         entries: std.ArrayList(Entry) = .empty,
 
         fn put(ptr: *anyopaque, layer: *const manifest.Layer, row_start: u64, rows: u64, data: []const u8) anyerror!void {
             const r: *@This() = @ptrCast(@alignCast(ptr));
             if (layer.kind != .recurrent or rows != 1 or row_start >= layer.parts.len) return error.BadPart;
-            try r.entries.append(r.arena, .{ .layer = layer.index, .part = row_start, .bytes = try r.arena.dupe(u8, data) });
+            // a part inside the stream is kept where it is: copying a million tokens' parts would double their 3 GB
+            const inside = @intFromPtr(data.ptr) >= @intFromPtr(r.stream.ptr) and @intFromPtr(data.ptr) + data.len <= @intFromPtr(r.stream.ptr) + r.stream.len;
+            try r.entries.append(r.arena, .{ .layer = layer.index, .part = row_start, .bytes = if (inside) data else try r.arena.dupe(u8, data) });
         }
     };
-    var rec: Recorder = .{ .arena = arena };
+    var rec: Recorder = .{ .arena = arena, .stream = bytes };
     const got = try file.pull(arena, bytes, expect, .{ .ptr = &rec, .put_fn = Recorder.put }, reason);
     var out: std.ArrayList(u8) = .empty;
+    var total: usize = 0;
+    for (got.manifest.layers) |l| for (l.parts) |p| {
+        total += @intCast(p.bytes());
+    };
+    try out.ensureTotalCapacityPrecise(arena, total);
     for (got.manifest.layers) |l| for (l.parts, 0..) |p, i| {
         const e = for (rec.entries.items) |e| {
             if (e.layer == l.index and e.part == i) break e;
