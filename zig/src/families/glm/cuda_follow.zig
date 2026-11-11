@@ -309,6 +309,7 @@ pub const Leader = struct {
 
     /// Several streams' MTP absorbs and chained drafts in one batch on every rank (Engine.draftShared).
     pub fn draftShared(x: Leader, parts: []const engine.DraftPart) !void {
+        try @import("cuda_mtp_shared.zig").validate(x.e, parts);
         var buf: [draft_shared_words]u32 = undefined;
         const enc = try encodeDraftShared(parts, &buf);
         try x.flush();

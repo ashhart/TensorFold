@@ -240,4 +240,26 @@ test "GLM link transport: Kind.draft_shared carries a 3-stream round in one broa
     var invalid = parts_in;
     invalid[0].out = out0[0 .. old_depth - 1];
     try t.expectError(error.WindowTooWide, wire.encodeDraftShared(&invalid, &enc_buf));
+    // Unknown slots pass through the codec, then the engine refuses them before any device operation.
+    var unknown: @import("glm").engine.Engine = undefined;
+    unknown.mtp = true;
+    unknown.seqs = .empty;
+    try t.expectError(error.UnknownSlot, unknown.draftShared(dec));
+    try t.expectEqual(@as(usize, 0), dec[1].depth);
+    for ([_]u32{ 16, 17, 255 }) |depth| {
+        const saved = got[1];
+        got[1] = (saved & ~@as(u32, 0xff << 16)) | (depth << 16);
+        try t.expectError(error.BadStep, wire.decodeDraftShared(msg.h, msg.ids, &parts_out, &outs, &chances, &follow_buf));
+        got[1] = saved;
+    }
+    const saved = got[1];
+    got[1] = (saved & ~@as(u32, 0xff)) | 33;
+    try t.expectError(error.BadStep, wire.decodeDraftShared(msg.h, msg.ids, &parts_out, &outs, &chances, &follow_buf));
+    got[1] = saved;
+    invalid = parts_in;
+    invalid[0].depth = 17;
+    try t.expectError(error.TooDeep, wire.encodeDraftShared(&invalid, &enc_buf));
+    invalid = parts_in;
+    invalid[0].kept = 33;
+    try t.expectError(error.WindowTooWide, wire.encodeDraftShared(&invalid, &enc_buf));
 }
