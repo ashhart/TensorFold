@@ -1,0 +1,75 @@
+error: module build: Size of SLM (163840) larger than available (131072)
+
+PASS nonfinite xpu add_rmsnorm (the normed row, fp16): 5122 non-finite and 20478 finite outputs match the float64 classes
+PASS repeat xpu add_rmsnorm (the normed row, fp16): five runs byte-identical (10240 bytes), inputs and guards untouched, no overlap
+PASS shapes xpu add_rmsnorm (the normed row, fp16): 8 shapes within the float64 bound (worst 0.941 of the bound), 0 edges refused by the kernel
+PASS sums xpu add_rmsnorm (the normed row, fp16): within its bound at k 5120; fp16 sums would miss 120x, bf16 0.6x (a 16-bit output follows the sum of squares as ss^-1/2: a bf16 sum's error is a few output ulps; fp16's overflowing sums give 0, which the bound's residual roundings put at 120x)
+PASS nonfinite xpu add_rmsnorm (the residual in place, fp32): 3 non-finite and 25597 finite outputs match the float64 classes
+PASS repeat xpu add_rmsnorm (the residual in place, fp32): five runs byte-identical (20480 bytes), inputs and guards untouched, no overlap
+PASS shapes xpu add_rmsnorm (the residual in place, fp32): 8 shapes within the float64 bound (worst 0.000 of the bound), 0 edges refused by the kernel
+N/A  sums xpu add_rmsnorm (the residual in place, fp32): declares none sums
+PASS nonfinite xpu add_rmsnorm_dec (the normed row, fp16): 5122 non-finite and 20478 finite outputs match the float64 classes
+PASS repeat xpu add_rmsnorm_dec (the normed row, fp16): five runs byte-identical (10240 bytes), inputs and guards untouched, no overlap
+PASS shapes xpu add_rmsnorm_dec (the normed row, fp16): 5 shapes within the float64 bound (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums xpu add_rmsnorm_dec (the normed row, fp16): within its bound at k 5120; fp16 sums would miss 120x, bf16 0.5x (a 16-bit output follows the sum of squares as ss^-1/2: a bf16 sum's error is a few output ulps; fp16's overflowing sums give 0, which the bound's residual roundings put at 120x)
+PASS nonfinite xpu add_rmsnorm_dec (the residual in place, fp32): 3 non-finite and 25597 finite outputs match the float64 classes
+PASS repeat xpu add_rmsnorm_dec (the residual in place, fp32): five runs byte-identical (20480 bytes), inputs and guards untouched, no overlap
+PASS shapes xpu add_rmsnorm_dec (the residual in place, fp32): 5 shapes within the float64 bound (worst 0.000 of the bound), 0 edges refused by the kernel
+N/A  sums xpu add_rmsnorm_dec (the residual in place, fp32): declares none sums
+PASS nonfinite xpu gated_norm (the gated row, fp16): 130 non-finite and 30590 finite outputs match the float64 classes
+PASS repeat xpu gated_norm (the gated row, fp16): five runs byte-identical (12288 bytes), inputs and guards untouched, no overlap
+PASS shapes xpu gated_norm (the gated row, fp16): 5 shapes within the float64 bound (worst 0.926 of the bound), 0 edges refused by the kernel
+PASS sums xpu gated_norm (the gated row, fp16): within its bound at k 6144; fp16 sums would miss 120x, bf16 0.1x (a 16-bit output follows the sum of squares as ss^-1/2: a bf16 sum's error is a few output ulps; fp16's overflowing sums give 0, which the bound's residual roundings put at 120x)
+PASS nonfinite xpu swiglu (the activation, fp16): 4 non-finite and 87036 finite outputs match the float64 classes
+PASS repeat xpu swiglu (the activation, fp16): five runs byte-identical (34816 bytes), inputs and guards untouched, no overlap
+PASS shapes xpu swiglu (the activation, fp16): 5 shapes within the float64 bound (worst 0.933 of the bound), 0 edges refused by the kernel
+N/A  sums xpu swiglu (the activation, fp16): declares none sums
+PASS nonfinite xpu swiglu (the row sums, fp16): 4 non-finite and 1356 finite outputs match the float64 classes
+PASS repeat xpu swiglu (the row sums, fp16): five runs byte-identical (544 bytes), inputs and guards untouched, no overlap
+PASS shapes xpu swiglu (the row sums, fp16): 5 shapes within the float64 bound (worst 0.996 of the bound), 0 edges refused by the kernel
+PASS sums xpu swiglu (the row sums, fp16): within its bound at k 17408; fp16 sums would miss 0x, bf16 0.0x (the f16 output's own rounding is 2^-11 of the value, and a f16 sum's error over a group of 64 is a few of those ulps, so its miss stays under the 100x the gate asks)
+PASS nonfinite xpu argmax (the pick): the stated rule holds: a NaN compares false, so it is skipped; the pick is the largest value above -Inf, the lowest index on a tie, and 0x7fffffff when no value compares above -Inf (a row of NaNs, or of -Inf)
+PASS repeat xpu argmax (the pick): five runs byte-identical (4 bytes), inputs and guards untouched, no overlap
+PASS shapes xpu argmax (the pick): 7 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel
+N/A  sums xpu argmax (the pick): declares none sums
+PASS nonfinite xpu top-k (the candidates): the stated rule holds: a row holding a NaN or an infinity anywhere raises the flag, whatever the candidates hold; else the flag is clear and the K candidates are the K largest values, the lower id first at a tie, signed zeros equal
+PASS repeat xpu top-k (the candidates): five runs byte-identical (528 bytes), inputs and guards untouched, no overlap
+PASS shapes xpu top-k (the candidates): 14 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel
+N/A  sums xpu top-k (the candidates): declares none sums
+FAIL shapes control: top-k merge breaking ties the wrong way: at 1x248320x20: row 0 candidate 0 is 15.875 at id 248007, the rule gives 15.875 at id 317
+CONTROL control: top-k merge breaking ties the wrong way: red at shapes, as planted
+FAIL nonfinite control: top-k flag read off the candidates only: row 0 flag 0 where the row holds a value that is not finite
+CONTROL control: top-k flag read off the candidates only: red at nonfinite, as planted
+PASS nonfinite xpu embed (the gathered row, fp32): the stated rule holds: a NaN stays a NaN, an infinity stays an infinity, and a finite value rounds once to bf16, to nearest even, as glue.cl's embed stores it
+PASS repeat xpu embed (the gathered row, fp32): five runs byte-identical (20480 bytes), inputs and guards untouched, no overlap
+PASS shapes xpu embed (the gathered row, fp32): 9 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel
+N/A  sums xpu embed (the gathered row, fp32): declares none sums
+FAIL nonfinite control: fmax row max: 1 of 8 outputs differ in class; first at 0: finite where float64 gives nan
+CONTROL control: fmax row max: red at nonfinite, as planted
+FAIL repeat control: atomic-add row sum: 4 of 4 repeats differ from the first run's bytes, first at byte 0
+CONTROL control: atomic-add row sum: red at repeat, as planted
+FAIL repeat control: row sum writing its input: 4 of 4 repeats differ from the first run's bytes, first at byte 0
+CONTROL control: row sum writing its input: red at repeat, as planted
+FAIL shapes control: row sum losing a tail input: at 8x1x1 output 0 is 0.000000e0 where float64 gives -3.203125e-1: 1864134.22 of its bound
+CONTROL control: row sum losing a tail input: red at shapes, as planted
+FAIL sums control: dot summed in half: 621378.4x over its exact-sum bound at k 4096: not fp32 sums (fp16 would miss 29826162x, bf16 16777216x)
+CONTROL control: dot summed in half: red at sums, as planted
+PASS limits: 8 registered XPU launches against bmg-g31, 0 problems
+RED  limits control: 2048 work-items a work-group: red on every card class
+RED  limits control: 200 work-items, not a multiple of sub-group 16: red on every card class
+RED  limits control: 160 KiB of SLM: red on every card class
+RED  limits control: 1024 work-items at 256 GRF: red on every card class
+RED  limits control: sub-group 32 at 256 GRF: red on every card class
+RED  limits control: sub-group 8: red on every card class
+PASS limits live bmg-g31: PCI id 0xe223, 8 EUs a Xe-core, 8 threads an EU, SIMD 16, 32 Xe-cores
+N/A  limits live contract_controls: the driver does not build the image (BuildFailed); gate 5's table holds its limits
+PASS limits live add_rmsnorm: 128 work-items required, sub-group 16 (the kernel's most 16), 10272 SLM bytes, 0 spill bytes, 0 private bytes, 14 arguments
+PASS limits live add_rmsnorm_dec: 512 work-items required, sub-group 16 (the kernel's most 16), 10368 SLM bytes, 0 spill bytes, 0 private bytes, 14 arguments
+PASS limits live gated_norm: 256 work-items required, sub-group 16 (the kernel's most 16), 12288 SLM bytes, 0 spill bytes, 0 private bytes, 12 arguments
+PASS limits live swiglu: 256 work-items required, sub-group 16 (the kernel's most 16), 2048 SLM bytes, 0 spill bytes, 0 private bytes, 7 arguments
+PASS limits live argmax: 256 work-items required, sub-group 16 (the kernel's most 16), 2048 SLM bytes, 0 spill bytes, 0 private bytes, 3 arguments
+PASS limits live topk_part: 256 work-items required, sub-group 16 (the kernel's most 16), 192 SLM bytes, 0 spill bytes, 0 private bytes, 6 arguments
+PASS limits live topk_merge: 256 work-items required, sub-group 16 (the kernel's most 16), 192 SLM bytes, 0 spill bytes, 0 private bytes, 6 arguments
+PASS limits live embed: 256 work-items required, sub-group 16 (the kernel's most 16), 0 SLM bytes, 0 spill bytes, 0 private bytes, 6 arguments
+RED  limits live control: sub-group 8: declared only, ocloc does not build it for this device: control: sub-group 8 on bmg-g31: sub-group 8, the device runs { 16, 32 }
+SUMMARY bmg-g31 0xe223 10 kernels: 10 pass gates 1-4, 0 fail, 0 known findings; 7 controls: 7 red as planted, 0 missed; 0 limit problems; gates 5607 ms, limits 1 ms

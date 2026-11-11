@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3.8-27B on Intel GPUs (XPU): a sampled row is drawn from its `top_k` largest logits kept on the card instead of from its 248,320 logits copied to the host and scanned on one CPU thread: after the greedy `argmax`, `topk_part` and `topk_merge` keep up to 64 values with their ids and a flag for any NaN or infinity in the whole row, in the copy and the sync the greedy tokens already take, and the unchanged keyed sampler draws from them; `top_k` above 64, temperature 0, grammar-masked rows and the prompt's last row keep the host path, and verify, tree and queued rows no longer copy their tokens and wait a second time. Same seed, same tokens: 840 seeded requests on an Arc Pro B70 (Qwen3.8-27B GPTQ 4/128 with DFlash2, 1, 4 and 8 streams) carry `main`'s `token_sha256`, and a host test draws from the candidates and from the whole row, with ties and non-finite rows, to the same token. With the checkpoint's sampling (`top_k` 20), decode is 3.7% faster on a short code prompt and under 1% elsewhere for one stream, about 10% faster at short prompts and about 4% per stream at 8,000 tokens with 4 or 8 streams; the kernel contract registers the top-k with two planted controls (`docs/receipts/xpu-qwen27-sampled-topk/`).
+
 - Server: with thinking off, the reasoning effort a request names reaches the chat template (GLM's head follows it), and the reply reports it; a server's own `--reasoning-effort` no longer changes a thinking-off prompt (#3017, fixes #1911). Thanks to @ss-cong for the report.
 
 - Tests: a host test drives 200 refused, cancelled and failed requests down every lane-host path and checks none strands a lane, page or slot (#3015, for #2135).
