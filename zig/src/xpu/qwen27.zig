@@ -78,7 +78,7 @@ pub const isAttention = shape.isAttention;
 pub var dump_dir: ?[]const u8 = null;
 pub var verbose = false;
 pub var dump_h: ?c_int = null;
-/// The layer-63 prompt tail (xpu/prompt_tail.zig); the seam test turns it off to compare the full layer.
+/// The layer-63 prompt tail (xpu/prompt_tail.zig); the tail test turns it off to compare the full layer.
 pub var prompt_tail_on = true;
 /// W4A8 study (XPU_A8): prompt GEMM inputs quantized to int8 and back in place; 128 per group, "token" per row.
 pub var a8_group: u32 = 0;
