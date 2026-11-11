@@ -412,7 +412,7 @@ pub const Prompt = struct {
         for (ids, emb, mask) |id, *o, *m| {
             const image = prep.isVid(id);
             if (image and p.images == null) return error.BadToken;
-            if (!image and id >= c.vocab) return error.BadToken;
+            if (!image and id >= env.c.vocab) return error.BadToken;
             o.* = if (image) p.images.?.embed_id else id;
             m.* = @intFromBool(!image);
         }
