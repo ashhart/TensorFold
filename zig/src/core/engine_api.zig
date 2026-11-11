@@ -339,6 +339,7 @@ pub const Open = struct {
     keep: ?i64 = null,
     /// Tensor parallelism: this process is `rank` of `tp`; rank 0 listens on `master`:`master_port` for the others.
     tp: u32 = 1,
+    execution_witness: bool = false, // --execution-witness: an engine on a supported path attests it (Info.witness)
     rank: u32 = 0,
     master: []const u8 = "",
     master_port: u16 = 29551,

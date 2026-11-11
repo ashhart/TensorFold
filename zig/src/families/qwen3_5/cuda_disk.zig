@@ -148,6 +148,17 @@ pub fn probe(a: Allocator, io: std.Io, backend: lanes.backend.Backend, t: *Targe
     return .{ .hash = h.final(), .rate = @as(f64, @floatFromInt(toks.len)) / (@as(f64, @floatFromInt(@max(ns, 1))) / 1e9) };
 }
 
+/// The execution witness's first path: the 2B's geometry, every module MLX affine 4-bit; null for any other checkpoint.
+pub fn witnessPath(t: *const Target) ?[]const u8 {
+    return pathOf(t.e.g);
+}
+
+/// `witnessPath` over a loaded geometry.
+pub fn pathOf(g: anytype) ?[]const u8 {
+    if (g.hidden != 2048 or g.layers != 24 or g.experts != 0 or g.exl3 or g.bf16 or g.kinds.modelopt or g.kinds.ct) return null;
+    return if (g.bits.mixed(g.layers)) null else "qwen3_5-2b/cuda/tp1/mlx-q4g64/text";
+}
+
 /// What else the states depend on: the cache format, target taps, int8 projections and rotary inputs.
 pub fn facts(t: *const Target) [4]u64 {
     var rope = std.hash.Wyhash.init(0x726f7065);
