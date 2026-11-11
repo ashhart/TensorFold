@@ -9,6 +9,7 @@ pub const quant = struct {
 };
 test {
     _ = @import("src/families/qwen27/attention_input.zig");
+    _ = @import("src/families/qwen27/attention_prepare.zig");
     _ = abi;
     _ = @import("tests/contract/q27_mixed_inputs.zig");
 }

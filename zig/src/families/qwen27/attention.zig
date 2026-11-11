@@ -227,7 +227,7 @@ pub const Preprocess = struct { qg: Ref, mixed: Ref, q_gain: Ref, k_gain: Ref, n
 pub const Attention = struct {
     profiler: ?*profile.Trace = null,
     prefix: [32]mtl.Pipeline, // q27_attn_prefix_1 to _16, then q27_attn_prefix_masked_1 to _16
-    io: [11]mtl.Pipeline,
+    io: [12]mtl.Pipeline,
     prompt: ?[6]mtl.Pipeline, // promptPipelines: tensor ops on the M5, simdgroup matrices before it
     units: bool,
     pub fn init(device: mtl.Device, library: mtl.Library) !Attention {
@@ -240,10 +240,10 @@ pub const Attention = struct {
             pipe.* = try mtl.Pipeline.init(device, library, try std.fmt.bufPrint(&name, "q27_attn_prefix_{s}{d}", .{ kind, i % 16 + 1 }), false);
             pn += 1;
         }
-        var io: [11]mtl.Pipeline = undefined;
+        var io: [12]mtl.Pipeline = undefined;
         var n: usize = 0;
         errdefer for (io[0..n]) |pipe| pipe.deinit();
-        for ([_][]const u8{ "q27_attn_pack_a", "q27_attn_pack_b", "q27_attn_append", "q27_attn_tail", "q27_attn_merge", "q27_attn_gather", "q27_attn_scatter", "q27_head_norm", "q27_rope", "q27_gate", "q27_attn_merge_single" }, &io) |name, *pipe| {
+        for ([_][]const u8{ "q27_attn_pack_a", "q27_attn_pack_b", "q27_attn_append", "q27_attn_tail", "q27_attn_merge", "q27_attn_gather", "q27_attn_scatter", "q27_head_norm", "q27_rope", "q27_gate", "q27_attn_merge_single", "q27_qk_norm_rope" }, &io) |name, *pipe| {
             pipe.* = try mtl.Pipeline.init(device, library, name, false);
             n += 1;
         }
@@ -301,25 +301,7 @@ pub const Attention = struct {
             for (inputs) |src| try disjoint(dst.ref, dst.bytes, src.ref, src.bytes);
             for (outputs[0..i]) |prior| try disjoint(dst.ref, dst.bytes, prior.ref, prior.bytes);
         }
-        e.setPipeline(a.io[7]);
-        bind(e, .{ p.qg, p.q_gain });
-        e.setValue(glue.Head{ .width = g.dim, .rows = p.rows * g.heads, .stride = 2 * g.dim, .activation = .bf16, .gain = .bf16, .eps = p.eps }, 2);
-        e.setBuffer(p.norm_q.buffer, p.norm_q.offset, 3);
-        e.dispatchGroups(mtl.Size.of(p.rows * g.heads, 1, 1), mtl.Size.of(64, 1, 1));
-        e.setPipeline(a.io[7]);
-        bind(e, .{ p.mixed, p.k_gain });
-        e.setValue(glue.Head{ .width = g.dim, .rows = p.rows * g.kv_heads, .stride = g.dim, .heads = g.kv_heads, .row_stride = keyStride(p), .activation = .bf16, .gain = .bf16, .eps = p.eps }, 2);
-        e.setBuffer(p.norm_k.buffer, p.norm_k.offset, 3);
-        e.dispatchGroups(mtl.Size.of(p.rows * g.kv_heads, 1, 1), mtl.Size.of(64, 1, 1));
-        e.barrier();
-        for ([_]struct { x: Ref, y: Ref, heads: u32 }{ .{ .x = p.norm_q, .y = p.query, .heads = g.heads }, .{ .x = p.norm_k, .y = p.rotated_key, .heads = g.kv_heads } }) |r| {
-            e.setPipeline(a.io[8]);
-            bind(e, .{ r.x, p.positions });
-            e.setValue(glue.Rope{ .width = g.dim, .heads = r.heads, .rows = p.rows, .rotary = g.rotary, .activation = .bf16, .theta = @floatCast(p.theta), .h_end = p.h_end, .w_end = p.w_end, .plane = p.plane }, 2);
-            e.setBuffer(r.y.buffer, r.y.offset, 3);
-            e.dispatchThreads(mtl.Size.of(g.dim, r.heads, p.rows), mtl.Size.of(32, 1, 1));
-        }
-        e.barrier();
+        @import("attention_prepare.zig").encode(mtl.Size, e, a.io[11], p, false);
         try timing.end();
     }
     /// The keys' half of `preprocess` and `encode`'s append: a pass whose rows reach only the cache.
@@ -353,18 +335,7 @@ pub const Attention = struct {
         var timing = profile.begin(a.profiler, input_encoder, .attention_prepare);
         errdefer timing.cancel();
         const e = timing.encoder;
-        e.setPipeline(a.io[7]);
-        bind(e, .{ p.mixed, p.k_gain });
-        e.setValue(glue.Head{ .width = pg.dim, .rows = p.rows * pg.kv_heads, .stride = pg.dim, .heads = pg.kv_heads, .row_stride = keyStride(p), .activation = .bf16, .gain = .bf16, .eps = p.eps }, 2);
-        e.setBuffer(p.norm_k.buffer, p.norm_k.offset, 3);
-        e.dispatchGroups(mtl.Size.of(p.rows * pg.kv_heads, 1, 1), mtl.Size.of(64, 1, 1));
-        e.barrier();
-        e.setPipeline(a.io[8]);
-        bind(e, .{ p.norm_k, p.positions });
-        e.setValue(glue.Rope{ .width = pg.dim, .heads = pg.kv_heads, .rows = p.rows, .rotary = pg.rotary, .activation = .bf16, .theta = @floatCast(p.theta), .h_end = p.h_end, .w_end = p.w_end, .plane = p.plane }, 2);
-        e.setBuffer(p.rotated_key.buffer, p.rotated_key.offset, 3);
-        e.dispatchThreads(mtl.Size.of(pg.dim, pg.kv_heads, p.rows), mtl.Size.of(32, 1, 1));
-        e.barrier();
+        @import("attention_prepare.zig").encode(mtl.Size, e, a.io[11], p, true);
         for (scratch.buffers) |buffer| e.useResource(buffer, mtl.ResourceUsage.read | mtl.ResourceUsage.write);
         for (binding.buffers) |buffer| e.useResource(buffer, mtl.ResourceUsage.read | mtl.ResourceUsage.write);
         useCaches(e, caches);

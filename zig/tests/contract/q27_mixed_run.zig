@@ -129,7 +129,7 @@ fn runCase(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, ops: [2]*
                 short.mixed.offset = short.mixed.buffer.length();
                 if (op.preprocess(e, short)) return error.MixedSpanMissed else |err| if (err != error.AttentionBuffer) return err;
             }
-            try op.preprocess(e, p);
+            if (i == 0) @import("q27_qk_reference.zig").encode(e, op.io[7], op.io[8], p) else try op.preprocess(e, p);
             if (i == 0) try op.encodeContiguous(e, &s.scratch, &s.binding, plan, s.get(.query), s.get(.key), ref(val), s.get(.out), &.{s.cache}, ref(qg), cs.prompt, false) else try op.encode(e, &s.scratch, &s.binding, plan, s.get(.query), s.get(.key), ref(mixed), s.get(.out), &.{s.cache}, ref(qg), cs.prompt, false);
             try rig.finish(pass);
             for (s.buffers, saved[i], [_]usize{ qbytes, kvbytes, qbytes, kvbytes, qbytes }) |r, was, n| {
@@ -198,7 +198,7 @@ pub fn main(init: std.process.Init) !void {
         old.io[2] = try mtl.Pipeline.init(device, oldlib, "q27_attn_append_before_mixed", false);
         const source = try q.simd_attention.grouped(a, units, true, 6, 4, pages);
         defer a.free(source);
-        const needle = "q27_round(value * inverse[0], a.activation)";
+        const needle = "q27_round(value * inverse[0], 0)";
         if (std.mem.count(u8, source, needle) != 1) return error.MixedControlEdit;
         const body = if (mutant) try std.mem.replaceOwned(u8, a, source, needle, "(value * inverse[0])") else try a.dupe(u8, source);
         defer a.free(body);

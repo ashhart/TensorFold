@@ -45,6 +45,11 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
     var text: []const u8 = undefined;
     var head: []const u8 = "";
     var frags = false;
+    if (std.mem.startsWith(u8, d.name, "q27 qk ")) {
+        if (!assemble) return undefined;
+        const body = try a.dupe(u8, tf.qwen27.runtime_sources.glue);
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
+    }
     if (std.mem.startsWith(u8, d.name, "q27 mixed ")) {
         if (!assemble) return undefined;
         const body = if (hasMixed(d.name, " norm ")) try a.dupe(u8, tf.qwen27.runtime_sources.glue) else try tf.qwen27.simd_attention.grouped(a, device.tensorUnits(), true, 6, 4, hasMixed(d.name, " paged "));
