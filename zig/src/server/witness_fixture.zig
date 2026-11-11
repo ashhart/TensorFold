@@ -72,6 +72,13 @@ pub const Checkpoint = struct {
         defer f.close(t.io);
         try f.setTimestamps(t.io, .{ .modify_timestamp = .{ .new = before.addDuration(.fromSeconds(1)) } });
     }
+    /// A small stand-in for the running binary, so a test's hash does not wait on the size of the test executable.
+    pub fn binary(c: *Checkpoint) !parts.Binary {
+        try c.write("tensorfold-native", "a server build");
+        const path = try std.fs.path.join(t.allocator, &.{ c.path, "tensorfold-native" });
+        defer t.allocator.free(path);
+        return parts.Binary.openPath(t.io, path);
+    }
     pub fn deinit(c: *Checkpoint) void {
         t.allocator.free(c.path);
         c.tmp.cleanup();
@@ -106,7 +113,7 @@ pub const Harness = struct {
         errdefer h.srv.deinit();
         if (checkpoint) |c| {
             h.text = try parts.Text.stamp(t.allocator, t.io, c.path, null);
-            h.binary = try parts.Binary.openRunning(t.allocator, t.io);
+            h.binary = try c.binary();
             h.state = try witness.State.init(t.allocator, t.io, h.srv, args, h.binary, h.text);
             h.srv.witness = h.state;
         }
