@@ -32,8 +32,8 @@ test "TF_DSV41_DRAFT_PLAIN_STREAMS: 0 when unset, 0 to 16 taken, anything else r
         try t_.expectError(error.DraftPlainStreams, plainStreams(raw));
 }
 
-/// A run's settings: the switch, staggered arrivals, sampling.
-pub const Opts = struct { set: depth.Settings = .{}, stagger: bool = false, sampling: ?lanes.Sampling = null };
+/// A run's settings: the switch, the target's history, the drafter's ring check, staggered arrivals, sampling.
+pub const Opts = struct { set: depth.Settings = .{}, history: bool = true, check_ring: bool = false, stagger: bool = false, sampling: ?lanes.Sampling = null };
 
 pub const Run = struct {
     drafted: u64,
@@ -56,9 +56,11 @@ pub fn run(cases: []const []const u32, max_news: []const u32, o: Opts) !Run {
     defer t.deinit();
     const d = try twin.Drafter.init(gpa, t, cases.len + 1);
     defer d.deinit();
+    d.check_ring = o.check_ring;
     var c = try costs_mod.defaults(gpa, 64);
     defer c.deinit(gpa);
-    const x = try ln.Lanes.init(gpa, t.target(), d.pass(), c, .{ .shape = d.shape, .slots = 4, .depth = o.set, .spec = .{ .on = true } });
+    const tgt = if (o.history) t.target() else t.targetNoHistory();
+    const x = try ln.Lanes.init(gpa, tgt, d.pass(), c, .{ .shape = d.shape, .slots = 4, .depth = o.set, .spec = .{ .on = true } });
     defer x.deinit();
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
@@ -151,7 +153,7 @@ test "at the threshold only the asks made before plain_streams streams decode ru
 
 test "staggered arrivals: streams draft until plain_streams decode, plain after, drafting again as they end" {
     const lens = [_]u32{ 40, 46, 52, 58 };
-    const on = try run(&four, &lens, .{ .set = .{ .plain_streams = 3 }, .stagger = true });
+    const on = try run(&four, &lens, .{ .set = .{ .plain_streams = 3 }, .stagger = true, .check_ring = true });
     defer on.deinit();
     try t_.expect(on.passes > 0 and on.drafted > 0);
     try expectSerial(on, &four, &lens, null);
