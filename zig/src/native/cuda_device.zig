@@ -58,3 +58,20 @@ test "variables: device settings share raw parsing without opening the driver" {
     try std.testing.expectError(error.InvalidEnvironment, settings.parse("TF_CUDA_DEVICE", "one"));
     try std.testing.expectError(error.InvalidEnvironment, settings.parse("TF_CUDA_DEVICE", "-1"));
 }
+
+pub const KernelSupport = struct { kernels: ?bool, sms: []const u32 };
+
+/// Build coverage of the detected GPU; no context, module or checkpoint is opened.
+pub fn kernelSupport(_: Allocator) KernelSupport {
+    const unknown = KernelSupport{ .kernels = null, .sms = cuda.kernels.target_sms };
+    const ordinal = @import("sys").environment.read(u32, "TF_CUDA_DEVICE", 0) catch return unknown;
+    var driver = cuda.Driver.open() catch return unknown;
+    defer driver.close();
+    return kernelSupportOn(&driver, std.math.cast(c_int, ordinal) orelse return unknown);
+}
+
+/// The same query on an already-open driver, without retaining a context.
+pub fn kernelSupportOn(driver: *const cuda.Driver, ordinal: c_int) KernelSupport {
+    const capability = driver.capability(ordinal) catch return .{ .kernels = null, .sms = cuda.kernels.target_sms };
+    return .{ .kernels = cuda.kernels.supports(capability), .sms = cuda.kernels.target_sms };
+}
