@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Docs: `docs/optimizing.md` says how to approach speed work in TensorFold: measure first, keep every token exact, and write what lands from our own code, with a worked example (#2740, #2739). Thanks to @jschmied.
+
 - Responses API: WebSocket mode. `GET /v1/responses` with a WebSocket upgrade takes `response.create` events and streams the same events as SSE, token-equal to it; `previous_response_id` continues `store: false` chains from a per-socket cache, with `stream_id` lanes, `generate: false` warmups and OpenAI's 60-minute limit, so `client.responses.connect()` works unchanged (#2749, fixes #2746). Thanks to @laudney.
 
 - Tests: host tests that rely on the operating system refusing access skip by name when run as root, so those tests no longer fail in containers that run as root; as an ordinary user nothing changes (#2757, part of #2748).
