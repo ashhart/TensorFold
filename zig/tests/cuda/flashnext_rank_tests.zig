@@ -7,7 +7,7 @@ const check = @import("check.zig");
 const wire = flash.rank_wire;
 
 pub fn run(gpu: check.Gpu, rank: usize, port: u16, mode_arg: []const u8) !void {
-    const modes = [_][]const u8{ "sum", "eof", "timeout", "missing", "eof-scatter", "timeout-scatter" };
+    const modes = [_][]const u8{ "sum", "eof", "timeout", "missing", "eof-scatter", "timeout-scatter", "exchange" };
     for (modes) |m| {
         if (std.mem.eql(u8, m, mode_arg)) break;
     } else return error.UnknownRankMode;
@@ -49,6 +49,10 @@ pub fn run(gpu: check.Gpu, rank: usize, port: u16, mode_arg: []const u8) !void {
     if (std.mem.eql(u8, mode, "timeout")) collective.timeout_ms = 200;
     var stream = try cuda.Stream.init(gpu.d, true);
     defer stream.deinit();
+    if (std.mem.eql(u8, mode, "exchange")) {
+        try @import("flashnext_exchange_tests.zig").run(gpu, &collective, stream, rank);
+        return meet(link, rank, 99);
+    }
     if (std.mem.eql(u8, mode, "eof") or std.mem.eql(u8, mode, "timeout")) {
         // both communicators are up before the peer fails, so the failure meets the collective, not the init
         try meet(link, rank, 98);
