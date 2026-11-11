@@ -86,6 +86,9 @@ pub const train_mixers = @embedFile("train_mixers.metal");
 
 /// The NAX helpers the prefill files include (`#include "../nax.h"`, inlined before compiling).
 pub const nax = @embedFile("nax.h");
+pub const tensor_ops = @embedFile("tensor_ops.metal");
+pub const tensor_attention = @embedFile("tensor_attention.metal");
+pub const tensor_attention_pv = @embedFile("tensor_attention_pv.metal");
 
 /// Flash Next 6-bit (group 32) prompt projections on the tensor units: dense and sorted-expert gather.
 pub const flashnext_qmm6 = @embedFile("prefill/qmm6_nax.metal") ++ @embedFile("prefill/qmm6_nax_b.metal");

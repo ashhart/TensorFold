@@ -4,6 +4,7 @@ const std = @import("std");
 pub const startup_receipt = @import("profile").startup_receipt;
 pub const benchmark_group = @import("core/benchmark_group.zig");
 pub const safetensors = @import("core/safetensors.zig");
+pub const torch_checkpoint = @import("core/torch/archive.zig");
 pub const gguf = @import("core/gguf.zig");
 pub const Checkpoint = checkpoint_host.Checkpoint;
 pub const checkpoint_host = @import("core/checkpoint.zig");

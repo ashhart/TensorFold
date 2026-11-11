@@ -12,7 +12,7 @@ pub fn metal(b: *std.Build, m: anytype) void {
     const tokenizer = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = target, .link_libc = true });
     const rounds = b.createModule(.{ .root_source_file = b.path("zig/src/core/frame_rounds.zig"), .target = target });
     const files = b.addWriteFiles();
-    const core = b.createModule(.{ .root_source_file = files.add("slide-drama-core.zig", "pub const safetensors = @import(\"tensorfold\").safetensors;\npub const tokenizer = @import(\"tokenizer\");\npub const frame_rounds = @import(\"frame_rounds\");\n"), .target = target, .imports = &.{ .{ .name = "tensorfold", .module = m.engine }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "frame_rounds", .module = rounds } } });
+    const core = b.createModule(.{ .root_source_file = files.add("slide-drama-core.zig", "pub const safetensors = @import(\"tensorfold\").safetensors;\npub const tokenizer = @import(\"tokenizer\");\npub const torch_checkpoint = @import(\"tensorfold\").torch_checkpoint;\npub const frame_rounds = @import(\"frame_rounds\");\n"), .target = target, .imports = &.{ .{ .name = "tensorfold", .module = m.engine }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "frame_rounds", .module = rounds } } });
     const bytes = b.createModule(.{ .root_source_file = files.add("slide-inert-metallib.zig", "pub const bytes: []const u8 = &.{};\n") });
     native.addImport("kimi_k3", @import("metal_targets.zig").kimiModule(b, target, .Debug, m.metal, m.engine, m.lanes));
     native.addImport("kimi_metallib", bytes);
