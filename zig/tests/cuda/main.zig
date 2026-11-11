@@ -286,6 +286,7 @@ const usage =
     \\  glm-solo-check <ckpt> <dc.json> <rank> <world> <idfile>  solo prompt passes against twins a chunk a step, logits and states byte for byte
     \\  glm-tap-split-check <ckpt> <drafter> <rank> <world> <idfile>  DFlash2 prompt taps: split and ring retained taps against gather, byte for byte, every rank
     \\  glm-paged-check <ckpt> <rank> <world> <idfile>  a paged stream (pages out of order, NaN first) against a whole-window twin
+    \\  glm-mtp-shared-check <ckpt> [rank world idfile]  batched shared-round MTP against serial drafts and lengths (2..8 streams)
     \\  dory MODEL LOOPS N TEXT     Dory (NVFP4): N greedy tokens from TEXT, then verify windows of 2 to 16 rows bit-equal
     \\  dory-serve MODEL LOOPS TEXT N   Dory served: eager == graphs, copy drafts == plain, 2/4/8 streams == solo
     \\  dory-states MODEL LOOPS TEXT N  Dory kept prompt states at 8k and 32k resumed into wiped caches == fresh
@@ -552,6 +553,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "glm-split-check")) return glm_split_tests.splitCheck(gpu, try arg(rest, 0), try arg(rest, 1), try std.fmt.parseInt(c_int, try arg(rest, 2), 10), try std.fmt.parseInt(c_int, try arg(rest, 3), 10), try arg(rest, 4));
     if (std.mem.eql(u8, cmd, "glm-solo-check")) return glm_solo_tests.soloCheck(gpu, try arg(rest, 0), try arg(rest, 1), try std.fmt.parseInt(c_int, try arg(rest, 2), 10), try std.fmt.parseInt(c_int, try arg(rest, 3), 10), try arg(rest, 4));
     if (std.mem.eql(u8, cmd, "glm-tap-split-check")) return glm_tap_tests.tapSplitCheck(gpu, try arg(rest, 0), try arg(rest, 1), try std.fmt.parseInt(c_int, try arg(rest, 2), 10), try std.fmt.parseInt(c_int, try arg(rest, 3), 10), try arg(rest, 4));
+    if (std.mem.eql(u8, cmd, "glm-mtp-shared-check")) return @import("glm_mtp_shared_tests.zig").run(gpu, try arg(rest, 0), if (rest.len > 1) try std.fmt.parseInt(c_int, rest[1], 10) else 0, if (rest.len > 2) try std.fmt.parseInt(c_int, rest[2], 10) else 1, if (rest.len > 3) rest[3] else null);
     if (std.mem.eql(u8, cmd, "glm-synth")) {
         const kind = if (rest.len > 1) std.meta.stringToEnum(glm_synth.Kind, rest[1]) orelse return error.UnknownCommand else .nvfp4;
         return glm_synth.run(gpu, try arg(rest, 0), kind);

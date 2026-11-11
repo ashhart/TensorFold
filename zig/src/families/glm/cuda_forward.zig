@@ -191,7 +191,7 @@ pub const Rank = struct {
 pub const ImageRows = struct { v: *images_mod.Images, slot: u32 };
 
 /// One stream's rows of a shared window: rows row0..row0 + rows, on sequence `st` from its position.
-pub const Seg = struct { st: *State, row0: usize, rows: usize };
+pub const Seg = struct { st: *State, row0: usize, rows: usize, propose: bool = true, image_slot: u32 = 0 };
 
 pub const Forward = struct {
     d: *const cuda.Driver,
@@ -223,7 +223,7 @@ pub const Forward = struct {
         return @import("cuda_boundary.zig").resolve(f, rows);
     }
 
-    fn slot(r: Rank, rows: usize) u64 {
+    pub fn slot(r: Rank, rows: usize) u64 {
         return r.b.gathered + r.w.share.rank * rows * r.w.config.hidden * 4;
     }
 
@@ -494,12 +494,12 @@ pub const Forward = struct {
         }
     }
 
-    /// mtp.mtp_forward: caches from mtp_len, drafts in b.logits; a prompt chunk past its caches runs its last row.
+    /// mtp.mtp_forward: caches from mtp_len, drafts in b.logits; `r.segs` runs one pass across several streams.
     pub fn mtp(f: *const Forward, ids: []const i32, hidden: []const u64) !void {
         return f.mtpMode(ids, hidden, true);
     }
-
     pub fn mtpMode(f: *const Forward, ids: []const i32, hidden: []const u64, propose: bool) !void {
+        if (f.ranks.len > 0 and f.ranks[0].segs.len > 0 and !f.ranks[0].b.prefill) return @import("cuda_mtp_shared.zig").mtpMode(f, ids, hidden, propose);
         const n = ids.len;
         const c = &f.ranks[0].w.config;
         const D: usize = c.hidden;
