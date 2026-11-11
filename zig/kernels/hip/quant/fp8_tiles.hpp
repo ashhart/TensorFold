@@ -46,4 +46,11 @@ __device__ __forceinline__ void fp8_product(ModelFp8 a) {
 // This path serves bf16 activations only, as the NVFP4 product does.
 extern "C" __global__ void __launch_bounds__(256) tf_fp8_gemm(tf::rocm::ModelFp8 a) {
     tf::rocm::fp8_product(a);
+    if (blockIdx.x == 0 && threadIdx.x == 0) {
+        // PROBE: what the device reads of the arguments
+        a.out[0] = static_cast<float>(a.m);
+        a.out[1] = static_cast<float>(a.n);
+        a.out[2] = static_cast<float>(a.k);
+        a.out[3] = static_cast<float>(sizeof(tf::rocm::ModelFp8));
+    }
 }
