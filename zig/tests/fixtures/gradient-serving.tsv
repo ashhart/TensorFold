@@ -163,7 +163,7 @@ zig/src/families/flashnext/cuda_rank_engine.zig	df6a83bcf80edfd94ac4474dbbc2e738
 zig/src/families/flashnext/cuda_rank_media.zig	e5c268c8cf257934bb49fe401ba6213ea8b108258bbfd4d06edb990d568c3c2b	raw
 zig/src/families/flashnext/cuda_rank_memory.zig	072954f4e2e9d6ea66124a209d20a1fa1c7ed391e501310d41880f11ce61ada8	raw
 zig/src/families/flashnext/cuda_rank_wire.zig	20980642342b78387f45e3218a419ef07a5c7e99412a88933d1ee4687bf0a679	raw	Link.oneHost: whether both ranks share a host, from the link's two addresses; framing and waits unchanged
-zig/src/families/flashnext/cuda_round_graph.zig	937ecd8f82379253bdfcbd7018b0b76ddf7761a31645623fdf00ebafa0563b66	raw	opt-in TF_FLASHNEXT_DECODE_GRAPH stages its round before capture; default serving unchanged (#2980)
+zig/src/families/flashnext/cuda_round_graph.zig	152652f54efc8e357c53a9cec3d1cdcb02c1e63e8a184e166391947607c905d4	raw	opt-in TF_FLASHNEXT_DECODE_GRAPH stages its round before capture; default serving unchanged (#2980)
 zig/src/families/flashnext/cuda_rows.zig	735fc8915036e47d09f533f4e5948e5fc4b61556172ebe2c6bfdaad3e0373216	raw	main dfd9ac5ef4 (#2585: TF_FLASHNEXT_* read through platform/environment.zig, malformed text refused at startup; valid values keep their meaning)
 zig/src/families/flashnext/cuda_select_main.zig	5c012c2d59fa6dd573424fce7b6d8b162a06cb9f6103530a0fc0b03dbdb17bd3	raw
 zig/src/families/flashnext/cuda_snap.zig	bbc66ed7e1aed820b4b60c148b1bbe47b2a5c7e7240c7da7f0bd8504080a6b56	raw	main 4f6017ced (prompt cache marks kept inside the pass), #1953: the prompt cache ladder's values
