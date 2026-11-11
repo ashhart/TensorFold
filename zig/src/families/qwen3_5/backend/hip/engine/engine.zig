@@ -281,6 +281,7 @@ pub const Engine = struct {
                     return err;
                 }
                 std.log.warn("rocBLAS is unavailable ({s}): a ModelOpt checkpoint's vision tower is not served", .{@errorName(err)});
+                e.workspace.free();
                 break :blk null;
             };
         }
@@ -303,7 +304,7 @@ pub const Engine = struct {
     /// Device bytes `size` allocates beside the weights, with the arenas already counted.
     fn sizedBytes(e: *const Engine, arenas: [2]usize, rows: usize, prompt_rows: usize, capacity: usize, pool_pages: usize) usize {
         const m = e.model();
-        const blas: usize = if (e.plain()) hip.blas.workspace_bytes else 0;
+        const blas: usize = if (e.blas != null) hip.blas.workspace_bytes else 0;
         return arenas[0] + arenas[1] + prompt_rows * 4 + draw.Drawer.deviceBytes(rows) + pages.Pool.deviceBytes(m, pool_pages) +
             plan.Buffer.deviceBytes(rows, m.spec.n_layers) + state.Caches.deviceBytes(m, rows) +
             hip.Votes.bytes(e.o.world) + blas + if (m.torch_text) capacity * 12 else 0;
