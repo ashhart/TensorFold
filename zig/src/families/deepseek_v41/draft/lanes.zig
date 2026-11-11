@@ -11,7 +11,6 @@ const depth = @import("depth.zig");
 const calib = @import("calib.zig");
 const costs_mod = @import("costs.zig");
 const Policy = @import("policy.zig").Policy;
-const branches = @import("branches.zig");
 const spec_mod = @import("spec.zig");
 
 pub const max_block = 16;
@@ -43,6 +42,7 @@ pub const St = struct {
     n_sib: u32 = 0,
     shown: std.ArrayList(u32) = .empty, // the drafts this round's window verifies (node indices, window order)
     shown_set: bool = false,
+    ring_end: ?u64 = null, // the drafter holds the committed rows before this position (null: none yet)
 
     /// Node i of the held tree: the main chain's drafts, then each sibling's rows.
     pub fn nodes(st: *const St) u32 {
@@ -151,20 +151,7 @@ pub const Lanes = struct {
         };
     }
 
-    fn ingest(x: *Lanes, st: *St, start: u64, rows: []const u32) !void {
-        const span = iface.ingestSpan(rows.len, x.opts.shape.window);
-        if (span.count == 0) return;
-        const taps = x.target.taps(st.slot);
-        const m = taps.map orelse return x.pass.ingest(st.slot, start + span.skip, taps, rows[span.skip..]);
-        // a tree resolved as chains: the path's rows in the taps of the chain that holds it
-        var mapped: [branches.max_rows]u32 = undefined;
-        if (span.count > mapped.len) return error.TreeRows;
-        for (rows[span.skip..], mapped[0..span.count]) |r, *o| {
-            if (r >= m.len or m[r] == branches.unrun) return error.TreeTaps;
-            o.* = m[r];
-        }
-        try x.pass.ingest(st.slot, start + span.skip, taps, mapped[0..span.count]);
-    }
+    const ingest = @import("lane_ingest.zig").ingest;
 
     fn prefill(ptr: *anyopaque, s: *Stream) anyerror!void {
         const x = self(ptr);
@@ -464,7 +451,8 @@ pub const Lanes = struct {
             if (r.rows) |path| {
                 if (r.start != st.base) return error.PositionMismatch;
                 const done = if (x.spec) |*sp| sp.ingested(st.slot, r.start, path) else false;
-                if (!done) try x.ingest(st, r.start, path); // a shared round drafts before its keep: the path, not st.len
+                // a shared round drafts before its keep: the path, not st.len; no ask: the next ingest catches it up
+                if (!done and (asks_now or !@import("lane_ingest.zig").deferred(x))) try x.ingest(st, r.start, path);
                 at = r.start + path.len;
             }
             if (r.position != at + 1) return error.PositionMismatch;
