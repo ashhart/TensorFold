@@ -293,7 +293,7 @@ pub fn Ops(comptime Tri: type) type {
         /// One forward over the window `ids` from seq.fed: each row's scores in d.logits, its streams in d.streams.
         pub fn verify(o: Self, seq: *prompt.Seq, d: *Draft, ids: []const u32) !void {
             if (o.main) |m| return m.verify(m.ptr, seq, d, ids);
-            if (d.logit_paged) return error.FlashNextPagedDraftVerify; // a pool lane's rows go through verifyMany
+            const scores = try d.windowScores(); // refused on pieces before any state moves
             o.e.round_graph.clear();
             const n = ids.len;
             if (n == 0 or n > max_rows) return error.WindowTooWide;
@@ -306,7 +306,7 @@ pub fn Ops(comptime Tri: type) type {
             d.history = seq.history;
             @memcpy(d.ids[0..n], ids);
             if (keeps) try copyAsync(o.stream(), d.saved_tail, seq.tail.ptr, ple_tail_n * wide * 2);
-            try o.e.forward(Tri, o.tri, seq, ids, .{ .logits = .all, .logits_out = d.logits.ptr, .keep = if (keeps) &d.keep else null, .streams = d.streams.ptr, .host_logits = @import("cuda_batch_state.zig").verifyHostLogits() });
+            try o.e.forward(Tri, o.tri, seq, ids, .{ .logits = .all, .logits_out = scores, .keep = if (keeps) &d.keep else null, .streams = d.streams.ptr, .host_logits = @import("cuda_batch_state.zig").verifyHostLogits() });
             if (keeps) try copyAsync(o.stream(), d.saved_nrow, o.e.batch_s.?.ple_nrow, n * wide * 2);
             d.open = keeps;
         }
