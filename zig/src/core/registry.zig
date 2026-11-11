@@ -91,6 +91,9 @@ pub fn Entry(comptime Launch: type) type {
 /// Room for the entries' tuned rows: a Registry sits in a backend's kernel table, so its size is fixed.
 pub const max_entries = 64;
 
+/// The widths a format's codes come in: the list a tuning row's bound is checked against.
+pub const widths = tuning.widths;
+
 /// The most rows the family rule is checked at.
 pub const rule_rows = 256;
 
@@ -129,6 +132,8 @@ pub fn Registry(comptime Launch: type) type {
             if (t.items != 0 and plan and shape.items > t.items) return null;
             if (t.pairs_per_item > 0 and plan and shape.plan_pairs != 0 and
                 @as(f64, @floatFromInt(shape.plan_pairs)) > @as(f64, t.pairs_per_item) * @as(f64, @floatFromInt(shape.items))) return null;
+            // wider codes than the bound are refused; so is a row made by hand whose bound is no code width
+            if (!tuning.widthBound(t.max_bits) or (t.max_bits != 0 and shape.bits > t.max_bits)) return null;
             // a routed prompt's kernel ignores the rows one item holds (`m`): its items and pairs bound it
             if (!plan or e.path == .decode) {
                 const limit = if (t.rows_matrix != 0 and env.matrix_on and env.matrix) t.rows_matrix else t.rows;
@@ -173,7 +178,7 @@ pub fn Registry(comptime Launch: type) type {
         pub fn verify(r: *const Self, env: Env, format: quant.Format) error{FamilyChanges}!void {
             // the reference decode tiles and the reference GEMM tile are the Python engine's rules, by row count
             if (!env.stream_on or !env.gemm_on) return;
-            for ([_]u8{ 2, 3, 4, 5, 6, 8 }) |bits| for ([_]u16{ 32, 64, 128 }) |group| {
+            for (widths) |bits| for ([_]u16{ 32, 64, 128 }) |group| {
                 var base: Shape = .{ .m = 1, .n = 4096, .k = 4096, .bits = bits, .group = group, .fp16 = !env.bf16, .tables = if (env.bf16) .bf16 else .f16 };
                 base.round = true;
                 try r.rule(env, format, .project, .decode, base, false);
@@ -359,6 +364,37 @@ test "a plan past its entry's pairs per item takes the next entry" {
     try std.testing.expect(std.mem.endsWith(u8, h.select(toy_env, .mlx, .project, .prefill, shape).?.id, "k3"));
     shape.plan_pairs = 351;
     try std.testing.expect(std.mem.endsWith(u8, h.select(toy_env, .mlx, .project, .prefill, shape).?.id, "k1"));
+}
+
+test "an entry bounded by the codes' width takes no wider product, and none when its bound is no code width" {
+    const entries = [_]ToyEntry{
+        toy("a.prefill.narrow", .prefill, .gemm, false),
+        toy("a.prefill.any", .prefill, .gemm, false),
+    };
+    const rows = [_]tuning.Row{
+        .{ .id = "a.prefill.narrow", .cost = 1, .max_bits = 3 },
+        .{ .id = "a.prefill.any", .cost = 2 },
+    };
+    const r = Toy.init(&.{ .gfx = "toy", .rows = &rows }, &entries);
+    var shape = toy_shape;
+    const want = [_]struct { u8, []const u8 }{ .{ 2, "narrow" }, .{ 3, "narrow" }, .{ 4, "any" }, .{ 5, "any" }, .{ 6, "any" }, .{ 8, "any" } };
+    for ([_]u32{ 0, 100 }) |items| for (want) |w| {
+        // a plan is bounded as a plain product is
+        shape.items = items;
+        shape.bits = w[0];
+        try std.testing.expect(std.mem.endsWith(u8, r.select(toy_env, .mlx, .project, .prefill, shape).?.id, w[1]));
+    };
+    // a bound that is no code width is a table error: its row takes nothing, where 7 or 9 would have taken 3-bit codes
+    shape.items = 0;
+    for ([_]u8{ 1, 7, 9, 255 }) |bound| {
+        var wrong = rows;
+        wrong[0].max_bits = bound;
+        const w = Toy.init(&.{ .gfx = "toy", .rows = &wrong }, &entries);
+        for (widths) |bits| {
+            shape.bits = bits;
+            try std.testing.expect(std.mem.endsWith(u8, w.select(toy_env, .mlx, .project, .prefill, shape).?.id, "any"));
+        }
+    }
 }
 
 test "the family rule refuses a path whose family changes with the rows" {
