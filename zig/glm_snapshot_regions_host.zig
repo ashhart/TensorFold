@@ -255,3 +255,64 @@ test "GLM snapshots: with TF_GLM_KV_SPLIT the owner's plan reads latent rows at 
         try t.expectEqual(try Plan.size(&own, &f.e.c, 16448, at, head, 0), try Plan.size(&other, &f.e.c, 16448, at, head, 0));
     }
 }
+
+test "GLM snapshots: with TF_GLM_KV_SPLIT a kept state records its home, every rank leases its size, restores at home" {
+    var d = rec.init();
+    var f: Fixture = undefined;
+    try f.initFormat(&d, 0, 2, true, true); // 512-wide latent rows: more than a snapshot page of them
+    defer f.deinit();
+    const g = Geometry.of(f.e.c);
+    const pooled = 2 * cap * 2 * g.pkCache();
+    var kv = try cuda.DeviceBuffer.alloc(&d, pooled + (cap + 1) * 2 * g.latCache());
+    defer kv.free();
+    var places: [odd.len]u32 = undefined;
+    for (&places, odd) |*x, id| x.* = id / 2;
+    var own = f.seq;
+    own.st = try ownerSeq(&d, &f, kv.ptr, &places);
+    defer own.st.deinit();
+    var other = f.seq;
+    other.st = try ownerSeq(&d, &f, kv.ptr, &.{});
+    defer other.st.deinit();
+    const window = f.e.cur;
+    defer f.e.cur = window;
+    try f.e.prepareSnapshots(4 * f.e.stateBytes(at));
+    for ([_]*@TypeOf(own){ &own, &other }, 0..) |s, k| {
+        for (rec.bytes(s.st.arena.buf.ptr, s.st.arena.buf.len), 0..) |*b, i| b.* = @truncate(i * 7 + k);
+        s.st.owner = 1; // class 1's stream: `own` is its owner's sequence, `other` another rank's
+        try s.st.restoreHost(f.e.stream, at, at, &.{1}, .{ 0, 0 });
+    }
+    for (rec.bytes(kv.ptr, kv.len), 0..) |*b, i| b.* = @truncate(i * 13 + 5);
+    var before: std.ArrayList(u8) = .empty;
+    defer before.deinit(t.allocator);
+    try gather(&try Plan.init(&own.st, &f.e.c, at, at, 0), &before);
+    f.e.cur = &own;
+    const mine = try f.e.keepState();
+    f.e.cur = &other;
+    const theirs = try f.e.keepState();
+    const a = f.e.snaps.get(mine).?;
+    const b = f.e.snaps.get(theirs).?;
+    try t.expectEqual(@as(?u32, 1), a.home);
+    try t.expectEqual(@as(?u32, 1), b.home);
+    try t.expectEqual(a.lease.ids.items.len, b.lease.ids.items.len); // the home's size on every rank
+    const sp = glm.snapshots.pages;
+    try t.expectEqual(try sp.rounded(f.e.stateBytes(at)) / sp.page, b.lease.ids.items.len); // as the store charges it
+    try t.expect(b.len < a.len); // but only the home's copy holds the latent rows
+    // at home: the rows come back as kept
+    @memset(rec.bytes(kv.ptr, kv.len), 0xE9);
+    @memset(rec.bytes(own.st.arena.buf.ptr, own.st.arena.buf.len), 0xE9);
+    f.e.cur = &own;
+    try f.e.restoreState(mine);
+    var after: std.ArrayList(u8) = .empty;
+    defer after.deinit(t.allocator);
+    try gather(&try Plan.init(&own.st, &f.e.c, at, at, 0), &after);
+    try t.expectEqualSlices(u8, before.items, after.items);
+    // away from home its latent rows are not on this copy: refused by name, never a restore of the trash page
+    own.st.owner = 0;
+    try t.expectError(error.KvSplitAway, f.e.restoreState(mine));
+    other.st.owner = 0;
+    f.e.cur = &other;
+    try t.expectError(error.KvSplitAway, f.e.restoreState(theirs));
+    own.st.owner = null; // unsplit: a split state is not this sequence's
+    f.e.cur = &own;
+    try t.expectError(error.KvSplitAway, f.e.restoreState(mine));
+}
