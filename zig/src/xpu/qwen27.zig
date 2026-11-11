@@ -30,6 +30,7 @@ pub const profReport = dev.profReport;
 pub const Proj = loader.Proj;
 pub const Model = loader.Model;
 pub const Acts = fwd.Acts;
+pub const cand = @import("cand.zig");
 pub const embedRows = fwd.embedRows;
 pub const gemm = fwd.gemm;
 pub const Want = fwd.Want;
@@ -157,6 +158,8 @@ pub const Runner = struct {
     ckpt: Checkpoint = .{},
     host_logits: []f32 = &.{},
     block: [16]u32 = @splat(0), // the last verified block's greedy tokens
+    tok_host: [16]i32 = @splat(0), // the last forward's greedy token of every row, as the card wrote them
+    cand: cand.State = .{}, // the card top-k of the last step or verify, and how many candidates the next one keeps
     block_rows: u32 = 0,
     tree_on: bool = false, // the last verified block was a tree (commitPath)
     tree_host: [16 * 17]i32 = @splat(0),
@@ -268,6 +271,8 @@ pub const Runner = struct {
             .argmax = try d.kernel(mg, "argmax", 256),
             .argmax_part = try d.kernel(mg, "argmax_part", 256),
             .argmax_part_masked = try d.kernel(mg, "argmax_part_masked", 256),
+            .topk_part = try d.kernel(mg, "topk_part", 256),
+            .topk_merge = try d.kernel(mg, "topk_merge", 256),
             .tap = try d.kernel(mg, "tap", 256),
             .conv_commit = try d.kernel(mg, "conv_commit", 256),
             .repack = try d.kernel(mg, "repack", 16),
@@ -407,6 +412,7 @@ pub const Runner = struct {
         while (at < ids.len) {
             const end = chunkEnd(at, ids.len);
             const want = last and end == ids.len;
+            r.cand.rows = 0;
             if (r.pos + (end - at) > r.context) return error.ContextFull;
             if (try forward(&r.d, &r.model, &r.acts, @ptrCast(ids[at..end]), r.pos, .{ .prompt = true, .want = if (want) .last else .none, .taps = r.taps_on })) |t| r.last = @intCast(t);
             if (r.taps_on) if (r.on_taps) |cb| try cb.f(cb.ctx, r.acts.taps, @intCast(end - at));
@@ -419,7 +425,7 @@ pub const Runner = struct {
     pub fn step(r: *Runner, token: u32) !void {
         if (r.pos + 1 > r.context) return error.ContextFull;
         const id: i32 = @bitCast(token); // an id past i32 turns negative, which forward refuses
-        r.last = @intCast((try forward(&r.d, &r.model, &r.acts, &.{id}, r.pos, .{ .taps = r.taps_on })).?);
+        r.last = @intCast((try forward(&r.d, &r.model, &r.acts, &.{id}, r.pos, .{ .taps = r.taps_on, .cand = r.candMode(1) })).?);
         r.pos += 1;
         if (r.taps_on) if (r.on_taps) |cb| try cb.f(cb.ctx, r.acts.taps, 1);
     }
@@ -428,11 +434,8 @@ pub const Runner = struct {
     pub fn verify(r: *Runner, ids: []const u32) ![]const u32 {
         if (ids.len == 0 or ids.len > 16) return error.BadBlock;
         if (r.pos + ids.len > r.context) return error.ContextFull;
-        _ = try forward(&r.d, &r.model, &r.acts, @ptrCast(ids), r.pos, .{ .want = .rows, .stash = true, .taps = r.taps_on });
-        var toks: [16]i32 = undefined;
-        try ze.check(r.d.g.api.zeCommandListAppendMemoryCopy(r.d.list, &toks, r.acts.tok, ids.len * 4, null, 0, null));
-        try r.d.sync();
-        for (r.block[0..ids.len], toks[0..ids.len]) |*o, t| o.* = @intCast(t);
+        _ = try forward(&r.d, &r.model, &r.acts, @ptrCast(ids), r.pos, .{ .want = .rows, .stash = true, .taps = r.taps_on, .rows_out = &r.tok_host, .cand = r.candMode(@intCast(ids.len)) });
+        for (r.block[0..ids.len], r.tok_host[0..ids.len]) |*o, t| o.* = @intCast(t);
         r.block_rows = @intCast(ids.len);
         return r.block[0..ids.len];
     }
@@ -484,11 +487,8 @@ pub const Runner = struct {
         }
         if (r.pos + depth_max + 1 > r.context or r.pos + ids.len > r.context) return error.ContextFull;
         try ze.check(r.d.g.api.zeCommandListAppendMemoryCopy(r.d.list, r.acts.tree, &r.tree_host, ids.len * 17 * 4, null, 0, null));
-        _ = try forward(&r.d, &r.model, &r.acts, @ptrCast(ids), r.pos, .{ .want = .rows, .stash = true, .taps = r.taps_on, .tree = true });
-        var toks: [16]i32 = undefined;
-        try ze.check(r.d.g.api.zeCommandListAppendMemoryCopy(r.d.list, &toks, r.acts.tok, ids.len * 4, null, 0, null));
-        try r.d.sync();
-        for (r.block[0..ids.len], toks[0..ids.len]) |*o, t| o.* = @intCast(t);
+        _ = try forward(&r.d, &r.model, &r.acts, @ptrCast(ids), r.pos, .{ .want = .rows, .stash = true, .taps = r.taps_on, .tree = true, .rows_out = &r.tok_host, .cand = r.candMode(@intCast(ids.len)) });
+        for (r.block[0..ids.len], r.tok_host[0..ids.len]) |*o, t| o.* = @intCast(t);
         r.block_rows = @intCast(ids.len);
         r.tree_on = true;
         return r.block[0..ids.len];
@@ -540,6 +540,9 @@ pub const Runner = struct {
         try d.sync();
         for (out[0..n], toks[0..n]) |*o, t| o.* = @intCast(t);
     }
+
+    pub const candidates = cand.candidates;
+    pub const candMode = cand.mode;
 
     /// The logits of row `row` of the last verified block (or of the last forward's row, row 0), fp32 on the host.
     pub fn rowLogits(r: *Runner, row: u32) ![]const f32 {

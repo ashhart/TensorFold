@@ -88,6 +88,8 @@ pub const Dev = struct {
         argmax: ze.H,
         argmax_part: ze.H,
         argmax_part_masked: ze.H,
+        topk_part: ze.H,
+        topk_merge: ze.H,
         tap: ze.H,
         conv_commit: ze.H,
         repack: ze.H,

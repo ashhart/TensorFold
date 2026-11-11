@@ -15,6 +15,7 @@ const Model = loader.Model;
 const Proj = loader.Proj;
 const SPLIT = q.SPLIT;
 const limits = @import("limits.zig");
+const cand = @import("cand.zig");
 const tail = @import("prompt_tail.zig");
 const ST_B = q.ST_B;
 const ST_G = q.ST_G;
@@ -61,6 +62,10 @@ pub const Acts = struct {
     mrows: *anyopaque, // i32 [16]: argmaxMasked's rows
     mbits: *anyopaque, // u32 [16, MASK_WORDS]: and their grammar bits
     mtok: *anyopaque, // i32 [16]: and their tokens
+    tkv: *anyopaque, // topk_part's values f32 [16, 256, TOPK_MAX] …
+    tki: *anyopaque, // … their ids i32, same shape …
+    tkf: *anyopaque, // … and each group's not-finite flag i32 [16, 256]
+    cand: *anyopaque, // u32 [16, CAND_WORDS]: topk_merge's rows
     ids: *anyopaque, // i32 [maxRows]
     zeros: *anyopaque, // padding rows of the GDN chunks: k = v = 0, β = 0 …
     ones: *anyopaque, // … and g = 1
@@ -108,6 +113,10 @@ pub const Acts = struct {
             .mrows = try d.alloc_(16 * 4),
             .mbits = try d.alloc_(16 * MASK_WORDS * 4),
             .mtok = try d.alloc_(16 * 4),
+            .tkv = try d.alloc_(16 * 256 * cand.TOPK_MAX * 4),
+            .tki = try d.alloc_(16 * 256 * cand.TOPK_MAX * 4),
+            .tkf = try d.alloc_(16 * 256 * 4),
+            .cand = try d.alloc_(16 * cand.CAND_WORDS * 4),
             .taps = try d.alloc_(rows * 5 * D * 2),
             .ids = try d.alloc_(rows * 4),
             .zeros = try d.alloc_(rows * 48 * 128 * 2),
@@ -306,8 +315,8 @@ pub fn a8(d: *Dev, a: *Acts, x: *anyopaque, K: u32, T: u32, site: u32) !void {
 pub var gemm_probe: ?*const fn (*Dev, *Acts, Proj, *anyopaque, u32, usize, u32) anyerror!void = null;
 /// XPU_FP64_REF: called after a prompt's chunked GDN from position 0, with the state it left (layer i).
 pub var gdn_probe: ?*const fn (*Dev, *Acts, *anyopaque, u32, usize) anyerror!void = null;
-/// prompt: a prompt chunk, prompt kernels at any rows; tree: rows see their ancestors; multi: one row a slot.
-pub const Mode = struct { prompt: bool = false, want: Want = .last, stash: bool = false, taps: bool = false, tree: bool = false, multi: ?struct { mt: *anyopaque, pos: *anyopaque, max_pos: u32 } = null };
+/// prompt: a prompt chunk; tree: rows see their ancestors; multi: one row a slot; rows_out, cand: see cand.zig.
+pub const Mode = struct { prompt: bool = false, want: Want = .last, stash: bool = false, taps: bool = false, tree: bool = false, multi: ?struct { mt: *anyopaque, pos: *anyopaque, max_pos: u32 } = null, rows_out: ?*[16]i32 = null, cand: ?cand.Mode = null };
 
 /// One forward over `ids` (< q.maxRows() rows) at p0..; the last row's greedy token; ≤ 16 non-prompt rows: GDN serial.
 pub fn forward(d: *Dev, m: *Model, a: *Acts, ids: []const i32, p0: u32, mode: Mode) !?i32 {
@@ -478,8 +487,14 @@ pub fn forward(d: *Dev, m: *Model, a: *Acts, ids: []const i32, p0: u32, mode: Mo
     try gemm(d, a.pscr, off(fa.h, first * D * 2), off(fa.ahi, first * (D / m.head.gs) * 2), off(fa.alo, first * (D / m.head.gs) * 2), m.head, a.logits, rows);
     try d.launch(d.k.argmax_part, .{ .x = 256, .y = rows }, .{ a.logits, @as(i32, VOCAB), a.pv, a.pi });
     try d.launch(d.k.argmax, .{ .x = rows }, .{ a.pv, a.pi, a.tok });
+    if (mode.cand) |c| {
+        try d.launch(d.k.topk_part, .{ .x = cand.TOPK_PARTS, .y = rows }, .{ a.logits, @as(i32, VOCAB), @as(i32, @intCast(c.k)), a.tkv, a.tki, a.tkf });
+        try d.launch(d.k.topk_merge, .{ .x = rows }, .{ a.tkv, a.tki, a.tkf, @as(i32, @intCast(c.k)), @as(i32, cand.TOPK_PARTS), a.cand });
+        try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, c.out, a.cand, rows * cand.CAND_WORDS * 4, null, 0, null));
+    }
     var toks: [16]i32 = undefined;
     try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, &toks, a.tok, rows * 4, null, 0, null));
     try d.sync();
+    if (mode.rows_out) |o| @memcpy(o[0..rows], toks[0..rows]);
     return toks[rows - 1];
 }
