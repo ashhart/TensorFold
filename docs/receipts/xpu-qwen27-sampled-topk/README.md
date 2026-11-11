@@ -69,6 +69,8 @@ request sends none), one warm-up wave and three measured ones. Prompts: the shor
 code, 29 of text) and the two corpora of the earlier receipt cut near 8,000 tokens (7,588 code, 7,912 text;
 `scripts/build_corp_code.sh` rebuilds `corp_code.txt`, `corp_text.txt` is that receipt's). At one stream, two greedy
 requests (`temperature` 0, short code and text) go first. Every request records the server's `tensorfold.token_sha256`.
+`bench_topk.py` reads its cells from `CELLS` (`depth:kinds;...`, default `0:code,text;8192:code,text`), `GREEDY=1` for
+the greedy pair and `SEED0` (default 1000); a request without `tensorfold.token_sha256` counts as a failure.
 
 ## Exactness: same tokens, main against branch
 
@@ -85,7 +87,9 @@ vocabulary: a group's cleared winner becomes the `(-inf, 0x7fffffff)` sentinel (
 longer repeats its last id), and the forward notes the rows it holds candidates for after its sync. On that final tree
 one more pass (1, 4 and 8 streams, the same cells, 210 requests) gives the receipt's `token_sha256` for every
 (prompt, seed, mode): 0 of 210 differ (`final-tree/served.jsonl`). The contract, the host test, the device tests,
-`zig build test` and `pr_check` were run again on it; `contract-run.out` is that run. The timed passes were not repeated.
+`zig build test` and `pr_check` were run again on it. The timed passes were not repeated. Then the contract gained a row
+of fp16 subnormals of both signs above a -1 floor (the card's half-to-float must keep them as the host does);
+`contract-run.out` is that run, on the host's second B70.
 
 ## Speed
 
