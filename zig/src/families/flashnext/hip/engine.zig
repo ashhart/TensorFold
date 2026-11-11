@@ -189,6 +189,7 @@ pub const Engine = struct {
             const slots = try gpa.create(gdn.Slots);
             errdefer gpa.destroy(slots);
             slots.* = try gdn.Slots.init(gpa, &e.driver, e.weights.model.dims, @max(o.want, 1));
+            errdefer slots.deinit();
             e.gdn = slots;
             e.weights.model.gdn = slots;
         }
@@ -254,6 +255,7 @@ pub const Engine = struct {
 
     /// Device bytes a stream takes at `cap` positions: its caches, window snapshots, the head's caches and its rows.
     pub fn streamBytes(e: *const Engine, cap: usize) usize {
+        // a stream's plan is made for its slot when the engine opens, before any room is measured
         var buf: [config.max_layers]bool = undefined;
         const ks = e.kinds(&buf) catch return std.math.maxInt(usize);
         const l = cache.Layout.of(e.weights.model.dims, ks, cap, e.act);
@@ -263,8 +265,7 @@ pub const Engine = struct {
             head = hl.bytes() + hl.cinBytes() + 4;
         }
         return l.bytes() + l.windowBytes() + l.cinBytes() + head +
-            cache.max_window * e.weights.model.dims.wide() * e.act.size() +
-            if (gdn.supported(e.weights.model.dims, e.cfg.layers)) gdn.Plan.bytes(e.weights.model.dims) else 0;
+            cache.max_window * e.weights.model.dims.wide() * e.act.size();
     }
 
     /// The scratch for `o.chunk` rows, or the fallback's when the larger chunk admits fewer of the streams asked for.
