@@ -14,6 +14,7 @@ pub const sampling_row = @import("sampling_row.zig");
 pub const fill = @import("fill.zig");
 pub const prefill_widths = @import("prefill_widths.zig");
 pub const solo_chunk = @import("solo_chunk.zig");
+pub const step_cap = @import("step_cap.zig");
 pub const shape = @import("shape.zig");
 pub const plan_lanes = @import("plan_lanes.zig");
 pub const cost_cache = @import("cost_cache.zig");

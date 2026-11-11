@@ -153,6 +153,8 @@ pub const Server = struct {
     /// Scheduler load the engine publishes as it works, and this server's identity and activity (load_ledger.zig).
     load: api.load_ledger.Ledger,
     store: responses.Store,
+    /// Bytes that every Responses socket's connection cache holds now (ws_cache.zig).
+    ws_cache_bytes: std.atomic.Value(usize) = .init(0),
     tool_ids: @import("ids.zig").Key, // every tool-call id's key: the config's, else this server's own
     next_id: std.atomic.Value(u64) = .init(1),
     /// Connections open now; a stop waits for them before freeing what they read.
@@ -498,8 +500,10 @@ pub const Server = struct {
             conn.key_scopes = m.scopes;
         }
         if (!auth.gatedRequest(conn.method, conn.path, keys.metrics_open)) return true;
-        if (matched != null and scope.allows(conn.key_scopes, conn.method, conn.path)) return true;
         const path = auth.routePath(conn.path);
+        // a Responses WebSocket upgrade opens with an inference key; the socket checks each response.create again
+        const upgrade = @import("ws_upgrade.zig").requested(conn) and std.mem.eql(u8, responses.route(path) orelse "-", "");
+        if (matched != null and (scope.allows(conn.key_scopes, conn.method, conn.path) or (upgrade and scope.allowsUpgrade(conn.key_scopes)))) return true;
         const messages = for ([_][]const u8{ "/v1/messages", "/v1/messages/count_tokens", "/messages", "/messages/count_tokens" }) |p| {
             if (std.mem.eql(u8, path, p)) break true;
         } else false;

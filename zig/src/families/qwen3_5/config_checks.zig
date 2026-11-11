@@ -3,6 +3,7 @@
 const std = @import("std");
 const layer_pattern = @import("qwen35_layers");
 const rules = @import("qwen35_rules");
+const rope_config = @import("rope_config");
 
 pub const Error = error{ BadEos, TooManyEos, MissingEos, InvalidConfig, InvalidRotary } || rules.Error || layer_pattern.Error;
 
@@ -41,8 +42,7 @@ pub fn mrope(rope: std.json.ObjectMap, rotary: usize) Error!Mrope {
 
 /// Unscaled rope only: a tower's `rope_scaling`, or a `rope_type`/`type` not default, would be read as plain rope.
 pub fn defaultRope(tower: std.json.ObjectMap, rope: std.json.ObjectMap) Error!void {
-    if (tower.get("rope_scaling")) |v| if (v != .null) return error.InvalidRotary;
-    for ([_][]const u8{ "rope_type", "type" }) |key| if (rope.get(key)) |v| if (!isString(v, "default")) return error.InvalidRotary;
+    if (rope_config.scaled(tower, rope) != null) return error.InvalidRotary;
 }
 
 /// `max_position_embeddings`: a positive token count, else the family's 262,144.
@@ -119,10 +119,6 @@ fn mul(a: usize, b: usize) Error!usize {
 
 fn add(a: usize, b: usize) Error!usize {
     return std.math.add(usize, a, b) catch error.InvalidConfig;
-}
-
-fn isString(v: std.json.Value, want: []const u8) bool {
-    return v == .string and std.mem.eql(u8, v.string, want);
 }
 
 /// A JSON boolean, or the 0 / 1 some conversions write in its place.

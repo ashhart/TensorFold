@@ -112,7 +112,7 @@ pub fn replyModel(srv: *const Server, body: Value) []const u8 {
     return srv.config.served_name;
 }
 
-const Plan = struct {
+pub const Plan = struct {
     input: chat.Input,
     stream: bool,
     separate_usage: bool,
@@ -126,7 +126,7 @@ pub fn chatInput(srv: *Server, cx: *Cx, raw: Value) errors.Refused!chat.Input {
 }
 
 /// Everything checked before a reply starts (a refusal here is a 400 with no stream opened).
-fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value, format: ?[]const u8, client_thinking: bool) errors.Refused!Plan {
+pub fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value, format: ?[]const u8, client_thinking: bool) errors.Refused!Plan {
     const body = try fields.parseNumbers(cx, raw);
     try fields.validateModalities(cx, body);
     // rows need each token's exact bytes: a tokenizer whose decoding depends on context (null) can't give them

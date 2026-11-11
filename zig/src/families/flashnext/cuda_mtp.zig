@@ -425,3 +425,7 @@ test "draft chains fit one verify window while the default stays six" {
     try std.testing.expectEqual(@as(usize, 6), default_depth);
     try std.testing.expect(default_depth <= max_chain);
 }
+
+test {
+    _ = @import("cuda_mtp_nonfinite_test.zig");
+}

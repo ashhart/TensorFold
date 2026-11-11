@@ -29,6 +29,7 @@ pub fn read(r: *Rows, i: usize) !pc.Saved {
     if (ahead) |a| bytes = a.disk;
     const ns = if (ahead) |a| a.ns else write.nowNs() - t0;
     if (ns > 0 and bytes > 64 << 20) r.read_rate = 0.5 * r.read_rate + 0.5 * @as(f64, @floatFromInt(bytes)) / (@as(f64, @floatFromInt(ns)) / 1e9);
+    noteReadLatency(r, ns);
     r.counts.read += bytes;
     r.counts.reads += 1;
     r.touch(i);
@@ -105,13 +106,14 @@ fn present(r: *Rows, i: usize) !void {
 pub fn recall(s: *pc.Store, prompt: []const u32, born: u32, starts: []const u32, spans: []const modes.Span, have: ?*pc.Entry) ?*pc.Entry {
     var before: ?u32 = null;
     return attempt(s, prompt, born, starts, spans, have, &before) catch
-        (attempt(s, prompt, born, starts, spans, have, &before) catch null);
+        (attempt(s, prompt, born, starts, spans, have, &before) catch have); // two failed reads: still the RAM state
 }
 
-fn failed(before: *?u32, at: u32, err: anyerror) anyerror {
+fn failed(before: *?u32, at: u32, err: anyerror, have: ?*pc.Entry) anyerror {
     const retry = before.* == null;
     before.* = at;
-    pc.note("disk restore of {d} tokens failed ({s}); {s}", .{ at, @errorName(err), if (retry) "trying one shorter kept state" else "prefilling from the start" });
+    const then = if (retry) "trying one shorter kept state" else if (have != null) "resuming the shorter state kept in RAM" else "prefilling from the start";
+    pc.note("disk restore of {d} tokens failed ({s}); {s}", .{ at, @errorName(err), then });
     return err;
 }
 
@@ -126,7 +128,7 @@ fn attempt(s: *pc.Store, prompt: []const u32, born: u32, starts: []const u32, sp
     const name = candidate.name;
     const bytes = r.blankBytes(candidate.at);
     if (bytes > s.budget or s.most == 0) return have;
-    if (!ready(s, bytes)) present(r, chosen) catch |err| return failed(before, candidate.at, err); // nothing goes to make room for a state whose file is gone
+    if (!ready(s, bytes)) present(r, chosen) catch |err| return failed(before, candidate.at, err, have); // nothing goes to make room for a state whose file is gone
     if (r.spill != .off) r.touch(chosen); // the newest: the spills that make room for it push older states off first
     while (!ready(s, bytes)) {
         if (s.family.vtable.trim) |trim| {
@@ -151,7 +153,7 @@ fn attempt(s: *pc.Store, prompt: []const u32, born: u32, starts: []const u32, sp
     e.tokens = s.gpa.dupe(u32, st.tokens) catch return have;
     e.decode_spans = s.gpa.dupe(modes.Span, st.spans) catch return have;
     e.last = s.gpa.dupe(u32, prompt) catch return have;
-    e.saved = read(r, i) catch |err| return failed(before, candidate.at, err);
+    e.saved = read(r, i) catch |err| return failed(before, candidate.at, err, have);
     if (s.family.vtable.charged) |f| e.bytes = f(s.family.ptr, e.saved);
     @import("prompt_cache_index.zig").add(s, e) catch {
         s.family.vtable.drop(s.family.ptr, e.saved);
@@ -209,4 +211,14 @@ fn finishResume(s: *const pc.Store, x: Resume) Resume {
         if (std.math.isFinite(total)) out.seconds = total;
     }
     return out;
+}
+
+// Times a read took, in milliseconds: the last, the smoothed and the histogram, and the wall time it landed.
+fn noteReadLatency(r: *Rows, ns: i128) void {
+    if (ns <= 0) return;
+    const ms = @as(f64, @floatFromInt(ns)) / 1e6;
+    r.file_io.read_ms_last = ms;
+    r.file_io.read_ms_ema = if (r.file_io.read_ms_ema == 0) ms else 0.8 * r.file_io.read_ms_ema + 0.2 * ms;
+    r.file_io.read_lat.observe(ms);
+    r.file_io.last_read_ms = @import("rows_io.zig").wallMs();
 }

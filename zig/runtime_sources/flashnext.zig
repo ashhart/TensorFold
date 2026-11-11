@@ -105,11 +105,13 @@ fn recordedWidths(s: *Set) !void {
             }
             if (constants.items.len == 0) continue;
             for ([_]bool{ false, true }) |half_lanes| {
-                const text = try variants.source(s.a, file.text, constants.items, half_lanes, false, std.mem.indexOf(u8, file.name, "gateup") != null);
+                const text = try variants.source(s.a, file.text, constants.items, half_lanes, false, std.mem.indexOf(u8, file.name, "gateup") != null, false);
                 try s.raw("flashnext-widths", file.name, text);
                 if (expert and bits == 4 and group == 32) {
-                    const slotted = try variants.source(s.a, file.text, constants.items, half_lanes, true, std.mem.indexOf(u8, file.name, "gateup") != null);
+                    const slotted = try variants.source(s.a, file.text, constants.items, half_lanes, true, std.mem.indexOf(u8, file.name, "gateup") != null, false);
                     try s.raw("flashnext-fsr-widths", file.name, slotted);
+                    const indexed = try variants.source(s.a, file.text, constants.items, half_lanes, false, std.mem.indexOf(u8, file.name, "gateup") != null, true);
+                    try s.raw("flashnext-index-widths", file.name, indexed);
                 }
             }
         };

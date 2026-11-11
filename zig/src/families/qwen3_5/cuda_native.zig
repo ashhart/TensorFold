@@ -232,7 +232,7 @@ pub fn learnModel(p: *anyopaque, dir: []const u8) slide.Model {
     return .{ .e = l.e, .dir = dir, .lay = slide.layout(l.e.g.hidden, l.e.g.layers, l.e.g.intermediate, 0) catch unreachable };
 }
 
-/// A checkpoint's facts: the dense 27B also copies from the root (DFlash2 raises its copy match, draft.copyMatch).
+/// A checkpoint's facts: the dense 27B also copies from the root (a drafter raises its copy match, draft.copyMatch).
 pub fn modelFacts(window: u32, verify: u32, g: anytype) lanes.Model {
     var facts = laneFacts(window, verify);
     facts.root_copies = @import("cuda_geometry.zig").dense27(g);
@@ -374,7 +374,7 @@ pub const Lanes = struct {
     };
 
     fn backend(self: *Lanes) be.Backend {
-        return .{ .ptr = self, .round_observer = if (self.trace) |x| x.observer() else null, .first_before_draft = true, .penalties = true, .vtable = if (self.readout.readout != null) &read_vtable else &text_vtable };
+        return .{ .ptr = self, .round_observer = if (self.trace) |x| x.observer() else null, .first_before_draft = true, .penalties = true, .chunk_invariant = true, .vtable = if (self.readout.readout != null) &read_vtable else &text_vtable };
     }
 
     /// Readout streams from now on fill through `r` (one rank; before the first stream): the backend to hand on.
@@ -420,6 +420,10 @@ pub const Lanes = struct {
     fn prefillStepFn(ptr: *anyopaque, stream: *lanes.Stream, max_rows: u32) !bool {
         if (stream.readout != null) return readout.step(cast(ptr), stream, max_rows);
         return prefill.step(cast(ptr), stream, max_rows);
+    }
+
+    pub fn restoreKept(self: *Lanes, cache: *E.Cache, saved: *anyopaque, seen: []const reuse.Seen) !void {
+        return reuse.restoreCache(self.e, cache, saved, seen);
     }
 
     fn cancelPrefillFn(ptr: *anyopaque, stream: *lanes.Stream) !void {
@@ -585,6 +589,10 @@ test "Qwen pages default: --parallel a cap with TF_QWEN_KV_PAGES set, a request 
 
 test "Qwen stepped prefill: cancel between host iterations retains only the last completed cut" {
     try @import("cuda_prefill_test.zig").cancelled(Lanes, Lanes.backend);
+}
+
+test "Qwen stepped prefill: a cap (the flag's or fcfs's) cuts on the 128 grid in cold chunks; marks keep at cold cuts" {
+    try @import("cuda_prefill_test.zig").capped(Lanes, Lanes.backend);
 }
 
 test {

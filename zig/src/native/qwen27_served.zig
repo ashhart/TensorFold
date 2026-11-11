@@ -100,7 +100,7 @@ pub const Host = struct {
     }
 };
 
-/// The reply's state at `stands` (its end or one short), born with its request's prompt: that request's marks stay.
+/// The reply-end snapshot, retaining a matching pre-reply cache state too when both fit.
 fn keepEnd(store: *pc.Store, gpa: Allocator, s: *lanes.Stream, stands: u32) void {
     const prompt: u32 = @intCast(s.prompt_len);
     const tokens = s.context.items;
@@ -111,6 +111,13 @@ fn keepEnd(store: *pc.Store, gpa: Allocator, s: *lanes.Stream, stands: u32) void
     const keyed = if (s.key.len == prompt) gpa.dupe(u32, tokens) catch return else tokens;
     defer if (keyed.ptr != tokens.ptr) gpa.free(keyed);
     if (keyed.ptr != tokens.ptr) @memcpy(keyed[0..prompt], s.key);
+    // Keep the history too when both copies fit; otherwise the reply end keeps its ordinary priority.
+    const history = if (s.history_len > 0) store.find(keyed[0..@min(keyed.len, @as(usize, s.history_len) + 1)], s.chunks, spans) else null;
+    const pin = if (history) |e| if (@import("qwen27_resume.zig").pinReplyHistory(store, e, s.history_len, stands)) e else null else null;
+    if (pin) |e| e.borrowers += 1;
+    defer if (pin) |e| {
+        e.borrowers -= 1;
+    };
     _ = store.keepBorn(keyed, prompt, stands, s, s.chunks, spans);
 }
 
@@ -428,14 +435,15 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
         if (model.ane) |share| share.footprint_growth = platform.memory_policy.growth(before, cache_fit.footprint());
     }
     ane.end();
-    // slot 0's rewind point where the cache cannot keep a whole context, wired before the cache's budget is read
+    // Slot 0's history rewind when two full-context copies do not fit, wired before cache sizing.
     const rewind_room = laterRoom(h);
     if (slot_state.rewindInit(h.back, rewind_room, if (o.cache_gib) |g| gibBytes(g) else cache_fit.defaultBudget(rewind_room))) |buf| if (h.resident) |*r| r.addNow(&.{buf});
     try enableCache(h, o.cache_gib, o.cache_over_cap, a, why);
     errdefer if (h.cache) |*store| store.deinit();
     if (o.learn) |l| try disk.attach(h, io, a, l);
     errdefer if (h.cache) |*store| if (store.disk) |r| r.deinit();
-    h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
+    // a wide prompt pass commits its buffers at once: the probe keeps the sets in use while it runs
+    h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick, .probe = mtl.keepalive.Target.busy };
     if (h.trace) |*t| t.enabled = true; // serving rounds count from here: measure() timed whole, unsplit buffers
     try h.host.start();
     tf.startup_receipt.span(.model_ready).end();
@@ -580,4 +588,8 @@ test "Qwen27 interior state uses a guaranteed cold request cut" {
     const followup = try store.beginUser(a, tokens, @intCast(tokens.len - 8), 16, @intCast(tokens.len - 8), &.{}, starts.items, null, &.{});
     try std.testing.expectEqual(@as(u32, 129024), followup.from);
     try std.testing.expect(store.held <= store.budget);
+}
+
+test "qwen27 reply cache: warm work preserves both client histories within rounded budgets" {
+    try @import("qwen27_reply_cache_test.zig").exercise(keepEnd, slot_state.opening);
 }

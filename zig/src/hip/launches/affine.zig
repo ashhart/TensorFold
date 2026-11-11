@@ -454,12 +454,18 @@ pub const Kernels = struct {
     // ---- the entry points ----
 
     /// Prefill's tile, same bits however a prompt is cut: matrix on gfx11 unless off, else dot2 GEMM; few rows K-split.
-    pub fn prefillLaunch(k: *const Kernels, r: *const runtime.Runtime, a: Arg, s: abi.Stream, items: c_int, pairs: c_int) Error!void {
+    pub fn prefillLaunch(k: *const Kernels, r: *const runtime.Runtime, a: Arg, s: abi.Stream, items: c_int, pairs: c_int, expert_rows: c_int) Error!void {
         const op: registry.Op = if (a.route.items != 0) .routed else .project;
+        const e = k.choose(op, .prefill, prefillShape(a, items, pairs, expert_rows)) orelse return refuse("prefill shape");
+        try e.launch(k, .{ .r = r, .s = s, .arg = a, .items = items });
+    }
+
+    /// The product a prompt launch asks the registry about; a routed plan's pairs, and its average rows per expert.
+    pub fn prefillShape(a: Arg, items: c_int, pairs: c_int, expert_rows: c_int) registry.Shape {
         var shape = shapeOf(a, items);
         shape.plan_pairs = @intCast(@max(pairs, 0));
-        const e = k.choose(op, .prefill, shape) orelse return refuse("prefill shape");
-        try e.launch(k, .{ .r = r, .s = s, .arg = a, .items = items });
+        shape.expert_rows = @intCast(@max(expert_rows, 0));
+        return shape;
     }
 
     /// launch_affine on the auto schedule: `schedule` 3 is prefill's, 4 a lane round's; `partial`, `parts` the tests'.

@@ -117,6 +117,7 @@ pub fn main(init: std.process.Init) !u8 {
         std.debug.print("tensorfold: {s}\n", .{why});
         return 2;
     }
+    api.prompt_cache.status.named.store(args.dashboard, .monotonic); // before any store keeps a state
     if (args.vision) for (@import("core").picture.runtime.warnings(io, a)) |warning| {
         if (warning) |message| log.line("warning: {s}", .{message});
     };

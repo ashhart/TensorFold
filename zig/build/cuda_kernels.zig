@@ -130,7 +130,7 @@ pub const kernels = [_]Kernel{
     .{ .name = "gemma4_ple", .flags = &.{"-O3"} }, // ours: Gemma 4 E-series per-layer inputs (gemma4/cuda_ple.zig)
     .{ .name = "gdn_prep", .flags = &.{"-O3"} }, // ours: Gated DeltaNet conv, norms, g and beta (cuda/gdn_prep.zig)
     .{ .name = "qk_rows", .flags = &.{"-O3"} }, // ours: QK norm, RoPE and the cache write (cuda/qk_rows.zig)
-    .{ .name = "qmmf", .flags = &.{"-O3"} }, // nvfp4/qmmf.cu's device code (FP8G, FP4), tensorfold_nvfp4_v3
+    .{ .name = "qmmf", .flags = &.{"-O3"}, .native_fp = true }, // nvfp4/qmmf.cu (FP8G, FP4), tensorfold_nvfp4_v3
     .{ .name = "prompt16", .flags = &.{"-O3"}, .native_fp = true }, // nvfp4/prompt.cu FP4/FP8 tile 4, nvfp4_prompt_v1
     .{ .name = "tree_attention", .flags = &.{"-O3"} }, // ours: committed keys and paths (cuda/tree_attention.zig)
     .{ .name = "block_attention", .flags = &.{"-O3"} }, // ours: a drafter's block over its context (cuda/block_attention.zig)
@@ -201,4 +201,17 @@ test "profile: arch-specific kernels take sm_<n>a from sm_120 on, others plain, 
     try std.testing.expectEqual(Profile{ .number = 86, .arch_specific = false }, profile(ck, Target.parse("86")).?);
     try std.testing.expectEqual(Profile{ .number = 120, .arch_specific = false }, profile(plain, Target.parse("120")).?);
     try std.testing.expectEqual(@as(?Profile, null), profile(plain, Target.parse("75")));
+}
+
+test "native_fp units: exactly fp8_experts, qmmf and prompt16 (without the flag native-fp only skips)" {
+    const want = [_][]const u8{ "fp8_experts", "qmmf", "prompt16" };
+    var seen: usize = 0;
+    for (kernels) |k| {
+        if (!k.native_fp) continue;
+        seen += 1;
+        for (want) |w| {
+            if (std.mem.eql(u8, k.name, w)) break;
+        } else return error.UnexpectedNativeFpUnit;
+    }
+    try std.testing.expectEqual(want.len, seen);
 }

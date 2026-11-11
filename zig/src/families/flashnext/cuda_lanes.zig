@@ -321,7 +321,10 @@ pub fn Namespace(comptime Tri: type) type {
                     l.seq.media = try v.state(ids, s.images);
                     if (self.ranks) |r| try r.setMedia(&l.seq);
                 }
-                if (l.draft) |*d| d.media = if (l.seq.media) |*m| m.view() else null;
+                if (l.draft) |*d| {
+                    d.label = s.id;
+                    d.media = if (l.seq.media) |*m| m.view() else null;
+                }
 
                 s.cached = 0;
                 const saved = s.reuse.saved orelse return l;

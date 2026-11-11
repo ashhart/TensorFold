@@ -105,6 +105,7 @@ pub fn build(b: *std.Build, name: []const u8) void {
     if (refusal(b, name, gpu, o)) |why| return b.getInstallStep().dependOn(&b.addFail(why).step);
     const build_options = b.addOptions();
     build_options.addOption([]const u8, "version", o.version orelse @import("../../build.zig.zon").version);
+    build_options.addOption(bool, "is_release", o.version != null);
     build_options.addOption(bool, "slide_test_hooks", false);
     const exe = switch (gpu.?) {
         .cuda => |sm| cudaServer(b, o, build_options, sm),

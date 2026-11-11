@@ -433,7 +433,8 @@ fn glmCall(a: Allocator, written: []const u8, schemas: ?*const tool_params.Schem
         if (key_end != null and key_end.?[0] < s + 9) key_end = valueKey(rest, s + 9);
         const k = key_end orelse continue;
         if (value_end != null and value_end.? < k[1]) value_end = find(rest, "</arg_value>", k[1]);
-        const ve = value_end orelse continue;
+        const ve = value_end orelse return null; // the value never closes: no call (#2801)
+        if (find(rest, "<arg_key>", k[1])) |next| if (next < ve) return null; // nor for one that ran into the next pair
         try pairs.append(a, .{ .key = rest[s + 9 .. k[0]], .value = rest[k[1]..ve] });
         try residue.appendSlice(a, rest[kept..s]);
         kept = ve + 12;

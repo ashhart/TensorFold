@@ -86,6 +86,7 @@ pub const Entry = struct {
     bytes: u64,
     born: u32, // the prompt length of the request that kept it (a reply's end and its warm pass: that reply's): a later turn's is longer
     used: u64, // the store's clock at its last keep or resume
+    seen: Seen = .{}, // wall-clock created and last-use times and resumes, for the dashboard (never policy)
     last: []u32, // the last prompt that kept or resumed it
     shared: bool = false, // kept at a shared system block's cut: other conversations resume it, so its own never supersedes it
     rewind: bool = false, // selected as a rewind: a reply born with this request does not supersede it
@@ -453,7 +454,7 @@ pub const Store = struct {
         }
         if (bytes > s.budget) return have;
         const e = s.gpa.create(Entry) catch return have;
-        e.* = .{ .tokens = &.{}, .at = m.at, .saved = undefined, .bytes = bytes, .born = born, .used = s.clock, .last = &.{}, .shared = true };
+        e.* = .{ .tokens = &.{}, .at = m.at, .saved = undefined, .bytes = bytes, .born = born, .used = s.clock, .seen = .of(s, m.tokens, &.{}, m.starts, m.at), .last = &.{}, .shared = true };
         e.tokens = s.gpa.dupe(u32, m.tokens) catch return s.drop(e, have, false);
         e.last = s.gpa.dupe(u32, prompt) catch return s.drop(e, have, false);
         const key = m.key;
@@ -496,11 +497,9 @@ pub const Store = struct {
     const extended = policy.extended;
 };
 
-/// A line on the engine's log; tests stay quiet (the build runner fails a test that writes to stderr), a sink may hear.
-pub fn note(comptime fmt: []const u8, args: anytype) void {
-    if (@import("builtin").is_test) return @import("prompt_cache_note.zig").hear(fmt, args);
-    std.log.warn("prompt cache: " ++ fmt, args);
-}
+pub const note = @import("prompt_cache_note.zig").note; // a line on the engine's log (tests stay quiet)
+pub const Seen = @import("prompt_cache_status.zig").Seen;
+pub const status = @import("prompt_cache_status.zig"); // read-only copies for /stats and the dashboard
 
 test {
     _ = @import("prompt_cache_review_test.zig");

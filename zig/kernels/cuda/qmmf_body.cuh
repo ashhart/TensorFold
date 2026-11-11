@@ -186,8 +186,12 @@
                 uint32_t b0, b1;
                 if constexpr (MODE == FP4) {
                     const uint32_t word = kt < 2 ? wq[j].x : wq[j].y;
+#if TF_FP_NATIVE
+                    tf_common::e2m1_pairs(word, kt & 1, b0, b1);
+#else
                     b0 = fp4pair(word, (kt & 1) * 8);
                     b1 = fp4pair(word, (kt & 1) * 8 + 4);
+#endif
                 } else if constexpr (MODE == BF16) {
 #ifdef TF_QMMF_K32
                     const uint2 v = reinterpret_cast<const uint2*>(pw)[((wn * T::NT + j) * (BK / 16) + kt) * 32 + lane];

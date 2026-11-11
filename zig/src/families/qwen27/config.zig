@@ -2,6 +2,7 @@
 const std = @import("std");
 const layer_pattern = @import("qwen35_layers");
 const rules = @import("qwen35_rules");
+const rope_config = @import("rope_config");
 
 pub const Kind = enum { linear, attention };
 pub const max_layers = 128;
@@ -244,11 +245,6 @@ fn optional(o: std.json.ObjectMap, key: []const u8, fallback: f64) !f64 {
     return if (v == .null) fallback else number(v);
 }
 
-fn flag(o: std.json.ObjectMap, key: []const u8) !bool {
-    const v = o.get(key) orelse return false;
-    return if (v == .bool) v.bool else error.BadConfig;
-}
-
 fn eos(c: *Config, v: std.json.Value) !void {
     if (v == .null) return;
     if (v == .array) {
@@ -289,7 +285,7 @@ pub fn parse(gpa: std.mem.Allocator, json: []const u8, generation: ?[]const u8) 
     } else return error.NotQwenDense;
     const experts = if (t.get("num_experts")) |v| try integer(v, true) else 0;
     if (routed != (experts != 0)) return error.NotQwenDense;
-    if (try flag(root, "tie_word_embeddings") or try flag(t, "tie_word_embeddings")) return error.TiedEmbeddingHead;
+    if (try rules.tied(root, t, .metal27)) return error.TiedEmbeddingHead;
     try rules.check(t, .metal27);
     const heads = try required(t, "num_attention_heads");
     const hidden = try required(t, "hidden_size");
@@ -297,12 +293,9 @@ pub fn parse(gpa: std.mem.Allocator, json: []const u8, generation: ?[]const u8) 
         if (v == .null or (v == .integer and v.integer == 0)) break :blk hidden / heads;
         break :blk try integer(v, false);
     } else hidden / heads;
-    const rope = if (t.get("rope_parameters")) |v| (if (v == .null) null else try object(v)) else null;
-    // the kernels rope with theta alone: a scaled rope would run as plain rope, so it is refused by name
-    if (t.get("rope_scaling") orelse root.get("rope_scaling")) |v| if (v != .null) return error.UnsupportedRopeScaling;
-    if (rope) |r| for ([_][]const u8{ "rope_type", "type" }) |key| if (r.get(key)) |v| {
-        if (v != .string or !std.mem.eql(u8, v.string, "default")) return error.UnsupportedRopeScaling;
-    };
+    const rope = rope_config.params(t) catch return error.BadConfig;
+    // theta alone: a scaled rope (rope_scaling from the tower when it has the key, else the root) runs as plain rope
+    if (rope_config.typed(rope) != null or rope_config.legacy(if (t.contains("rope_scaling")) t else root)) return error.UnsupportedRopeScaling;
     const factor = if (rope) |r| try optional(r, "partial_rotary_factor", try optional(t, "partial_rotary_factor", 0.25)) else try optional(t, "partial_rotary_factor", 0.25);
     if (factor <= 0 or factor > 1) return error.BadConfig;
     var c = Config{

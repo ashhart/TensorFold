@@ -45,6 +45,8 @@ pub const Chain = struct {
 pub const Draft = struct {
     /// Its graphs' keys (cuda_window_graph.nextGen).
     gen: u64 = 0,
+    label: []const u8 = "unbound",
+    pooled_lane: bool = false,
     stream: ?cuda.Stream = null,
     media: ?@import("cuda_media.zig").View = null,
     gpa: std.mem.Allocator,
@@ -280,7 +282,7 @@ pub const Draft = struct {
             }
         };
         const head = wt.attn_n;
-        var d: Draft = .{ .gen = @import("cuda_window_graph.zig").nextGen(), .gpa = gpa, .cap = cap, .rows_cap = @max(rows, max_rows), .kc = Carve.page(driver, paged.at(head, .key)), .vc = Carve.page(driver, paged.at(head, .value)), .ikc = Carve.page(driver, paged.at(head, .index)), .pooled = Carve.page(driver, paged.at(head, .pooled)), .pg = paged.pg(), .streams = undefined, .out = undefined, .logits = undefined, .dlogits = undefined, .best = undefined, .saved = undefined, .host = undefined, .layout = .of(pool_heads) };
+        var d: Draft = .{ .gen = @import("cuda_window_graph.zig").nextGen(), .gpa = gpa, .cap = cap, .rows_cap = @max(rows, max_rows), .kc = Carve.page(driver, paged.at(head, .key)), .vc = Carve.page(driver, paged.at(head, .value)), .ikc = Carve.page(driver, paged.at(head, .index)), .pooled = Carve.page(driver, paged.at(head, .pooled)), .pg = paged.pg(), .pooled_lane = true, .streams = undefined, .out = undefined, .logits = undefined, .dlogits = undefined, .best = undefined, .saved = undefined, .host = undefined, .layout = .of(pool_heads) };
         d.streams = Carve.take(driver, &at, d.rows_cap * wide * 2);
         d.out = Carve.take(driver, &at, wide * 2);
         d.logits = Carve.take(driver, &at, max_rows * vocab * 2);

@@ -45,7 +45,7 @@ different scopes, or scopes a key the flags or environment already give, is refu
 
 | Scope | Routes |
 | --- | --- |
-| `inference` | POST `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/tokenize`, `/v1/detokenize`, `/v1/audio/speech`, `/v1/images/generations`, `/v1/embeddings`, `/v1/decisions`, `/v1/systemone`, `/v1/rerank` (also by PUT), and the same paths without `/v1` where the server has them; GET `/v1/models`, `/models`, `/v1/voices` |
+| `inference` | POST `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/tokenize`, `/v1/detokenize`, `/v1/audio/speech`, `/v1/images/generations`, `/v1/embeddings`, `/v1/decisions`, `/v1/systemone`, `/v1/rerank` (also by PUT), and the same paths without `/v1` where the server has them; GET `/v1/models`, `/models`, `/v1/voices`; a WebSocket upgrade on GET `/v1/responses` or `/responses` |
 | `read` | GET `/metrics`, `/v1/metrics`, `/v1/load`, `/memory`, `/v1/memory`, `/stats`, `/dashboard`, `/v1/benchmark/manifest`, `/v1/models`, `/models`, `/v1/voices` |
 
 A scoped key reaches nothing else: not the stored Responses (GET or DELETE `/v1/responses/ID`), Recall, Sliding Weights,
@@ -55,9 +55,10 @@ is matched exactly after the query and trailing slashes are cut. A refused route
 or a parked model reloads. The public routes stay public.
 
 The stored Responses belong to the server, not to a key, so a scoped key's `POST /v1/responses` must send `"store": false`
-and no `previous_response_id`, with the whole conversation in `input`; anything else answers 403 naming the field. A request
-keeps the scopes it was accepted with if the file changes while it runs. Scopes are authorization only: every key shares one
-model, its prompt cache and the metrics.
+and no `previous_response_id`, with the whole conversation in `input`; anything else answers 403 naming the field. Over
+a Responses socket, a `previous_response_id` that the socket's own cache holds is allowed. A request keeps the scopes
+it was accepted with if the file changes while it runs. Scopes are authorization only: every key shares one model,
+its prompt cache and the metrics.
 
 
 ## Browser request headers
@@ -111,6 +112,7 @@ tensorfold-native serve MODEL --allowed-host inference.example --allowed-origin 
 | `POST /tokenize`, `POST /v1/tokenize` | vLLM's: a `prompt`'s token IDs, or the IDs a chat request's `messages` render to |
 | `POST /detokenize`, `POST /v1/detokenize` | vLLM's: the text of `tokens`, special tokens included |
 | `POST /v1/responses` | OpenAI's Responses API, run as the equivalent chat completion; streamed or non-streamed |
+| `GET /v1/responses` (WebSocket upgrade) | OpenAI's Responses [WebSocket mode](#websocket-mode): `response.create` events over one socket |
 | `GET /v1/responses/{id}`, `DELETE /v1/responses/{id}` | A stored response, or remove it |
 | `POST /v1/decisions` | Choice, score, and yes/no probabilities from the next-token logits; no text is generated |
 | `POST /v1/imprint/resume` | How much of a chat body's conversation resumes, and from where ([on disk](#conversations-on-disk)) |
@@ -1127,6 +1129,59 @@ remote file URLs (`input_file` parts with inline `file_data` run on a model star
 `message.input_image.image_url`, `message.output_text.logprobs`, `reasoning.encrypted_content`,
 `web_search_call.action.sources` and `web_search_call.results`. Any other name, or a value that is not a list of
 strings, is refused.
+
+### WebSocket mode
+
+`GET /v1/responses` (or `/responses`) with an RFC 6455 upgrade opens a Responses socket, as OpenAI's WebSocket mode and
+the SDKs' `client.responses.connect()` use it. The socket takes plain `ws://`, with no subprotocol and no extension; a
+TLS proxy in front of the server gives `wss://`. A bad upgrade answers 400, a version other than 13 answers 426, and a
+plain `GET /v1/responses` stays a 404.
+
+The client sends text frames, each one JSON event:
+
+- `response.create`: the `POST /v1/responses` body plus `stream_id` and `generate`. The response streams over the
+  socket whatever `stream` says. It passes every gate a `POST` passes (drain, admission, load ledger, idle reload,
+  model-kind refusals, key scopes), one create at a time, and is logged and counted as one request.
+- `response.steer`: answered with `response.steer.failed`, code `steering_not_supported`.
+- Any other event, or a frame that is not a JSON object: an `error` event with code `invalid_event`; the socket stays
+  open.
+
+Each response sends the events of the SSE stream, in the same order, one text frame each, with the same prompt, tokens
+and `token_sha` as over HTTP. A create that names a `stream_id` gets it on each of its events. A create refused before
+its stream opens (the request, its history, its key scope or admission) gets one event, `{"type": "error", "status":
+..., "stream_id": ..., "error": {"type", "code", "message", "param"}}`, with the HTTP status the same request gets over
+`POST`; the socket stays open. A failure after the stream opens, such as a prompt over the context window, ends with
+`response.failed`, as over SSE.
+
+`stream_id` names a lane: 1 to 256 letters, digits, `_`, `.` or `-` (else `invalid_stream_id`), up to 32 named lanes
+per socket (then `websocket_stream_limit_reached`). Creates run one at a time in arrival order, so every lane is in
+order; lanes do not run concurrently.
+
+The socket keeps the latest finished response of each lane, with its whole conversation, so `previous_response_id`
+continues with `store: false`. An id resolves from that cache in any lane, then, with `store: true` only, from the
+server's stored responses; else it is `previous_response_not_found`. The cache holds up to 64 MiB per socket and
+512 MiB across sockets; a response that does not fit still completes, uncached. A failed continuation on its parent's
+own lane drops the parent from the cache. A response stored from a cached parent is stored with its whole
+conversation, so it continues after the socket closes.
+
+`generate: false` checks and renders the request as a run would, then sends `response.created`,
+`response.in_progress` and `response.completed` with no output, zero output tokens and the prompt's input tokens,
+without an engine run. Its id continues like any other response.
+
+A key with the `inference` scope may open the socket; each create checks the key again. A removed key gets an `error`
+event with status 401 and close 1008, and changed scopes apply from the next create. A scoped key must send
+`store: false`, and its `previous_response_id` must be in the socket's cache.
+
+| Event | The server |
+| --- | --- |
+| 60 minutes since the upgrade | Sends `websocket_connection_limit_reached` after a running response and closes with 1000 |
+| No message for the HTTP idle timeout | Closes with 1001 |
+| The server drains | Sends an `error` with status 503 after a running response and closes with 1012 |
+| A client close, or a dropped socket | Stops the running response |
+| An unmasked frame, a binary message, invalid UTF-8, a message over 32 MiB | Closes with 1002, 1003, 1007, 1009 |
+| A message past its read deadline, or more than 16 messages or 32 MiB waiting | Closes with 1008 |
+
+The server answers ping with pong and sends a ping when a response is silent for the SSE keepalive interval.
 
 ## Anthropic Messages
 

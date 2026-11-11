@@ -24,6 +24,10 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     const draft_config = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"Qwen DFlash2 config:"} }));
     b.step("test-qwen35-draft-config-host", "DFlash2 attention declarations agree with the CUDA kernels before loading").dependOn(&draft_config.step);
     step.dependOn(&draft_config.step);
+    const copy_match = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"Qwen copy match:"} }));
+    const copy_match_step = b.step("test-qwen35-copy-match-host", "The dense 27B's copy match beside DSpine, DFlash2 and without a drafter");
+    copy_match_step.dependOn(&copy_match.step);
+    step.dependOn(&copy_match.step);
     const dspine = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"DSpine"} }));
     const dspine_core = b.addRunArtifact(b.addTest(.{ .root_module = mods.core, .filters = &.{"DSpine"} }));
     const dspine_lanes = b.addRunArtifact(b.addTest(.{ .root_module = mods.lanes, .filters = &.{"DSpine"} }));
@@ -38,6 +42,9 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     const ct_run = b.addRunArtifact(b.addTest(.{ .root_module = ct_admit }));
     b.step("test-qwen35-modelopt-admission-host", "Synthetic stored-format admission and full-precision loading without devices").dependOn(&ct_run.step);
     step.dependOn(&ct_run.step);
+    const mo_experts = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"Qwen ModelOpt experts:"} }));
+    b.step("test-qwen35-modelopt-experts-host", "Each NVFP4 expert part through core's reader, Qwen's own scale refusal").dependOn(&mo_experts.step);
+    step.dependOn(&mo_experts.step);
     const share_faults = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"Qwen share faults:"} }));
     b.step("test-qwen35-share-faults-host", "TF_QWEN_KV_SHARE's pages through failed allocations, lanes, promises, uploads and copies without devices").dependOn(&share_faults.step);
     const admission = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen3_5/cuda_exl3_loader_test.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = mods.core } } });
