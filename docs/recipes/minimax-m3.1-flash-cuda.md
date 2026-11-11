@@ -37,7 +37,7 @@ rank, the vocabulary split 782 and 781 blocks.
 The family is admitted only as it was run: on GB10 (sm_121) at two ranks. Any other GPU is refused
 (`MiniMaxM3RequiresSm121`), and so is one rank or any other world (`MiniMaxM3RequiresTwoRanks`). `--rank`
 (0 or 1) of `--tp 2` places each rank, and `--master` with `--master-port` names rank 0's address and port on the link
-between the hosts (NCCL's root, `NCCL_COMM_ID`). `TF_MINIMAX_RANK` and `TF_MINIMAX_WORLD` still place a rank as aliases of `--rank` and `--tp` until 1.4.0, which refuses them
+between the hosts (NCCL's root, `NCCL_COMM_ID`). `TF_MINIMAX_RANK` and `TF_MINIMAX_WORLD` still place a rank as aliases of `--rank` and `--tp` for one release; the start-up warning names the release that refuses them
 with the flag to use; a flag and an alias that differ refuse. With 192.0.2.1 as rank 0's address on their direct link, the same folder on both:
 
 ```bash
