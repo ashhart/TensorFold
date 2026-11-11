@@ -297,10 +297,8 @@ pub const Rule = struct {
 
     /// Head drafts for the streams of a shared round, sized by allocation over their chain chances.
     pub fn budgets(r: *Rule, whos: []Who, probe: Probe, sampled: bool, out: []i64) !void {
-        if (r.plain_streams > 0 and whos.len >= r.plain_streams) { // drafts lose here: none asked, no head pass
-            @memset(out, 0);
-            return;
-        }
+        // drafts lose here: none asked, no head pass
+        if (r.plain_streams > 0 and whos.len >= r.plain_streams) return @memset(out, 0);
         if (r.confidence_floor != null) {
             for (whos, out) |*w, *o| o.* = try r.headDepth(w, null, probe);
             return;
