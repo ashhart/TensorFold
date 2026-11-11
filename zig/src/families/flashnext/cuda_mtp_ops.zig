@@ -314,7 +314,7 @@ pub fn Ops(comptime Tri: type) type {
             if (keeps) try copyAsync(o.stream(), d.saved_tail, seq.tail.ptr, ple_tail_n * wide * 2);
             try o.e.forward(Tri, o.tri, seq, ids, .{ .logits = .all, .logits_out = scores, .keep = if (keeps) &d.keep else null, .streams = d.streams.ptr, .host_logits = @import("cuda_batch_state.zig").verifyHostLogits() });
             if (keeps) try copyAsync(o.stream(), d.saved_nrow, o.e.batch_s.?.ple_nrow, n * wide * 2);
-            if (d.logit_paged) for (d.logit_rows[0..n], 0..) |row, r| try copyAsync(o.stream(), row, scores + r * vocab * 2, vocab * 2);
+            d.window_scores = scores;
             d.open = keeps;
         }
 
@@ -339,11 +339,12 @@ pub fn Ops(comptime Tri: type) type {
                 d.history = seq.history;
                 @memcpy(d.ids[0..n], ids);
                 if (keeps) try copyAsync(o.stream(), d.saved_tail, seq.tail.ptr, ple_tail_n * wide * 2);
-                w.* = .{ .seq = seq, .ids = ids, .keep = if (keeps) &d.keep else null, .streams = d.streams.ptr, .logits = if (d.logit_paged) 0 else d.logits.ptr, .logit_rows = if (d.logit_paged) &d.logit_rows else &.{} };
+                w.* = .{ .seq = seq, .ids = ids, .keep = if (keeps) &d.keep else null, .streams = d.streams.ptr, .logits = if (d.logit_paged) 0 else d.logits.ptr };
             }
             try o.e.windows(Tri, o.tri, wins, out);
             var row0: usize = 0;
             for (ds, idss, wins) |d, ids, w| {
+                d.window_scores = out + row0 * vocab * 2; // a paged draft's draws read its rows here
                 const keeps = w.keep != null;
                 if (keeps) try copyAsync(o.stream(), d.saved_nrow, o.e.batch_s.?.ple_nrow + row0 * wide * 2, ids.len * wide * 2);
                 d.open = keeps;
