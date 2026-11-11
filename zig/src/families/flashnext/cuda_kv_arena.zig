@@ -41,8 +41,11 @@ pub const Lazy = struct {
                 m.be.release(m.be.ctx, got, len);
                 return error.LaneMemory;
             }
+            zero.piece(at, len) catch |err| { // not zeroed: it goes back, unmarked, as a piece that would not map
+                m.be.release(m.be.ctx, at, len);
+                return err;
+            };
             z.mapped[k] = true;
-            try zero.piece(at, len);
         }
     }
 
@@ -157,6 +160,7 @@ const Fake = struct {
     fail_at: ?u32 = null, // the chunk call that returns null
     gap_at: ?u32 = null, // the chunk call that lands one granule past its place
     zeroed: u64 = 0,
+    fail_zero: bool = false,
 
     fn mapper(f: *Fake) Mapper {
         return .{ .be = .{ .ctx = f, .granularity = 2 << 20, .chunk = chunk, .release = release, .name = "fake" }, .seek = seek };
@@ -177,6 +181,7 @@ const Fake = struct {
         f.released += len;
     }
     fn piece(f: *Fake, _: u64, len: usize) !void {
+        if (f.fail_zero) return error.CudaFailed;
         f.zeroed += len;
     }
 };
@@ -210,6 +215,15 @@ test "a piece that fails or lands apart is not marked, and the pieces before it 
     try std.testing.expectError(error.LaneMemory, y.ensure(g.mapper(), 0, 1, &g));
     try std.testing.expect(!flags2[0]);
     try std.testing.expectEqual(@as(u64, piece_bytes), g.released); // the stray one went back
+}
+
+test "a piece whose zeroing fails goes back unmarked, so it is never read as zeroed nor kept mapped" {
+    var f: Fake = .{ .fail_zero = true };
+    var flags: [8]bool = @splat(false);
+    var z: Lazy = .{ .base = 1 << 40, .len = 2 << 30, .piece = piece_bytes, .mapped = &flags };
+    try std.testing.expectError(error.CudaFailed, z.ensure(f.mapper(), 0, 1, &f));
+    try std.testing.expect(!flags[0]);
+    try std.testing.expectEqual(@as(u64, piece_bytes), f.released);
 }
 
 test "the arena's range comes through its own hook: the installed hook is untouched, a declined one is cuMemAlloc" {
