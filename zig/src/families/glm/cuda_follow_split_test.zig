@@ -96,12 +96,17 @@ const Rank = struct {
     }
 };
 
+/// The fixture's planned pages: 16, and split a page of each class for the trash page.
+fn planned(split: bool) usize {
+    return if (split) 18 else 16;
+}
+
 /// Rank 0's pool step, then a begin on slot 1 from owner class `owner`; the ids it sent.
 fn lead(r: *Rank, owner: u32) ![]const u32 {
     const p = try r.f.pool(3, 16, true);
     r.f.e.pages = p;
     const x: follow.Leader = .{ .e = &r.f.e, .link = &r.link };
-    try x.pool(3, 16, p.page);
+    try x.pool(3, planned(r.f.e.settings.kv_split), p.page); // the pages planned, as rank 0 tells them
     try x.bind(1);
     const ids = try p.openOn(1, 600, 100, owner);
     try x.beginOn(null, ids, 0);
@@ -124,7 +129,7 @@ test "GLM KV split: the pool step carries the switch and begin the owner, throug
         // the wire: the pool header, then the begin header with its two ids in the same broadcast
         try expectEqual(@as(usize, 2), Wire.sent.items.len);
         const page = r0.f.e.pages.?.page;
-        const pool: follow.Header = .{ .kind = @backingInt(follow.Kind.pool), .depth = 3, .a = 16, .seed = page, .flags = owner };
+        const pool: follow.Header = .{ .kind = @backingInt(follow.Kind.pool), .depth = 3, .a = planned(split), .seed = page, .flags = owner };
         try std.testing.expectEqualSlices(u8, std.mem.asBytes(&pool), Wire.sent.items[0][0..64]); // off: main's bytes
         const begin: follow.Header = .{ .kind = @backingInt(follow.Kind.begin), .n = 2, .depth = owner, .slot = 1 };
         try std.testing.expectEqualSlices(u8, std.mem.asBytes(&begin), Wire.sent.items[1][0..64]);
@@ -140,6 +145,8 @@ test "GLM KV split: the pool step carries the switch and begin the owner, throug
         try expectEqual(owner, p1.leases[1].owner);
         try std.testing.expectEqualSlices(u32, ids, p1.leases[1].ids.items);
         try std.testing.expectEqualSlices(u32, ids, r1.f.st(1).pages);
+        try expectEqual(@as(usize, 16), p1.pool.total()); // the follower funds the trash page from the same plan
+        try expectEqual(if (split) @as(?u32, owner) else null, r1.f.st(1).owner);
     }
 }
 
