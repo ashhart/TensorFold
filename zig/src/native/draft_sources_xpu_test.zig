@@ -4,6 +4,7 @@ const present = @import("draft_sources_check.zig").present;
 
 comptime {
     _ = @import("xpu_dflash2_test.zig"); // its tests run under this file's "draft sources:" filter
+    _ = @import("xpu_sampled_topk_test.zig"); // and so do these
 }
 
 test "draft sources: XPU Qwen27 copies and actual DFlash2 attachment" {

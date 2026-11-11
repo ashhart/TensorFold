@@ -19,6 +19,8 @@ pub const Lanes = struct {
     drafter: ?*Drafter,
     pick: *const fn (ctx: *anyopaque, row: []const f32, position: u64, s: api.Sampling) anyerror!u32,
     pick_ctx: *anyopaque,
+    /// The draw from a row's card top_k (values, ids, whether the row holds a non-finite value); null: the host draws.
+    pick_cand: ?*const fn (ctx: *anyopaque, vals: []const f32, ids: []const u32, bad: bool, position: u64, s: api.Sampling) anyerror!u32 = null,
     slots: u32,
     block: u32 = 8,
     nodes: u32 = 15,
@@ -54,6 +56,22 @@ pub const Lanes = struct {
     };
     /// Rows [start, start + rows) of a prompt pass in `slot`, their taps in acts.taps.
     pub const Tail = struct { slot: u32, start: u64, rows: u32 };
+
+    /// The candidates the card keeps for a sampled row: its top_k when that is 1 to 64 and it is not greedy, else 0.
+    pub fn candidateK(sp: api.Sampling) u32 {
+        return if (sp.temperature > 0 and sp.top_k >= 1 and sp.top_k <= xq.cand.TOPK_MAX) sp.top_k else 0;
+    }
+
+    /// The candidates the next forward keeps for a stream sampling with `sp`: none without the host's rule for them.
+    fn candK(b: *const Lanes, sp: ?api.Sampling) u32 {
+        return if (b.pick_cand != null) (if (sp) |x| candidateK(x) else 0) else 0;
+    }
+
+    /// Row `row` of the last forward drawn at `position`: from its card top_k when it kept them, else from its logits.
+    fn drawRow(b: *Lanes, row: u32, position: u64, sp: api.Sampling) !u32 {
+        if (b.pick_cand) |f| if (b.runner.candidates(row, candidateK(sp))) |c| return f(b.pick_ctx, c.vals, c.ids, c.bad, position, sp);
+        return b.pick(b.pick_ctx, try b.runner.rowLogits(row), position, sp);
+    }
 
     fn self(ptr: *anyopaque) *Lanes {
         return @ptrCast(@alignCast(ptr));
@@ -363,8 +381,10 @@ pub const Lanes = struct {
         defer r.taps_on = false;
         b.tapped = 0;
         b.tail = null;
+        r.cand.k = b.candK(s.sampling);
+        defer r.cand.k = 0;
         try r.step(try b.value(feed));
-        return b.push(try b.draw(s, slot, if (s.sampling != null) try r.logits() else null, position));
+        return b.push(if (s.sampling) |sp| try b.drawRow(0, position, sp) else b.lastOf(slot));
     }
 
     fn readFn(ptr: *anyopaque, handle: u64) anyerror!u32 {
@@ -396,6 +416,11 @@ pub const Lanes = struct {
         defer r.taps_on = false;
         b.tapped = 0;
         b.tail = null;
+        r.cand.k = 0;
+        for (windows) |w| if (w.masks.len == 0) {
+            r.cand.k = @max(r.cand.k, b.candK(w.stream.sampling));
+        };
+        defer r.cand.k = 0;
         try r.verifyMulti(wins[0..windows.len]);
         b.tapped = windows.len;
         // structured greedy rows: their tokens among their grammars' on the device, all in one pass
@@ -432,8 +457,7 @@ pub const Lanes = struct {
                     row += 1;
                     continue;
                 }
-                const logits = if (w.stream.sampling != null) try r.rowLogits(row) else null;
-                o.sampled[j] = if (w.stream.sampling) |sp| try b.pick(b.pick_ctx, logits.?, w.positions[j], sp) else r.block[row];
+                o.sampled[j] = if (w.stream.sampling) |sp| try b.drawRow(row, w.positions[j], sp) else r.block[row];
                 row += 1;
             }
             @memcpy(o.drafts, w.tokens);
@@ -523,6 +547,8 @@ pub const Lanes = struct {
             if (s.isCancelled()) return error.Cancelled;
             r.taps_on = true;
             defer r.taps_on = false;
+            r.cand.k = b.candK(s.sampling);
+            defer r.cand.k = 0;
             var sampled: Sampled = .{ .b = b, .s = s.sampling orelse .{ .seed = 0 } };
             const drawer: ?xq.drafter.Draw = if (s.sampling) |sp| .{ .ctx = &sampled, .row = Sampled.row, .gumbel = Sampled.gumbel, .temperature = sp.temperature } else null;
             const round = try xq.drafter.treeRound(d, pending, b.block - 1, b.nodes, drawer, &out);
@@ -545,7 +571,7 @@ pub const Lanes = struct {
         s: api.Sampling,
         fn row(c_: *anyopaque, row_: u32, position: u64) !u32 {
             const c: *@This() = @ptrCast(@alignCast(c_));
-            return c.b.pick(c.b.pick_ctx, try c.b.runner.rowLogits(row_), position, c.s);
+            return c.b.drawRow(row_, position, c.s);
         }
         fn gumbel(c_: *anyopaque, position: u64, id: u64) f64 {
             const c: *@This() = @ptrCast(@alignCast(c_));
