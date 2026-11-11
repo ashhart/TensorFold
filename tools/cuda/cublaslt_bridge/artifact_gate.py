@@ -146,9 +146,14 @@ def secret_scan(executable, corpus, audit):
             env={key: value for key, value in os.environ.items() if not key.startswith("GITLEAKS_")})
     log_text = (audit / "gitleaks.log").read_text(errors="replace")
     scanned = re.search(r"\bscanned\s+~?(\d+)\s+bytes\b", log_text)
-    if (run.returncode != 0 or load(audit / "gitleaks.json") or scanned is None
-            or int(scanned[1]) != corpus.stat().st_size
-            or re.search(r"\b(?:skipped|skipping|error|fatal)\b", log_text, re.I)):
+    findings = load(audit / "gitleaks.json")
+    status = {"exit_code": run.returncode, "findings": len(findings),
+              "scanned_bytes": int(scanned[1]) if scanned else None,
+              "expected_bytes": corpus.stat().st_size,
+              "execution_error": bool(re.search(r"\b(?:skipped|skipping|error|fatal)\b", log_text, re.I))}
+    (audit / "gitleaks-status.json").write_text(json.dumps(status) + "\n")
+    if (run.returncode != 0 or findings or scanned is None
+            or status["scanned_bytes"] != status["expected_bytes"] or status["execution_error"]):
         raise ValueError("unresolved secret finding, skipped bytes or secret-scanner failure")
     result = {"exit_code": run.returncode, "scanner_sha256": digest(executable),
               "scanned_bytes": int(scanned[1]), "corpus_sha256": digest(corpus),

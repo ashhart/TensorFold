@@ -21,6 +21,22 @@ OPTIONS = {"optimize": "safe", "strip": True, "qwen_prefill_max_rows": 8192,
            "sm": "120", "target": "x86_64-windows-gnu", "version_fixture": "1.2.3"}
 
 
+def package_failure(path):
+    """Report only source-defined protocol tokens, never unchecked log text."""
+    text = path.read_text(errors="replace")
+    phases = ("windows-inputs", "tree-check", "archive-create", "archive-check")
+    seen = [phase for phase in phases if "TF_PACKAGE_PHASE=" + phase in text.splitlines()]
+    refusals = []
+    for filename in ("tensorfold.exe", "tf_cublaslt_bridge.dll", "cublasLt64_13.dll", "tfgrammar.dll"):
+        for reason in ("PrivateBuildPath", "BadElf", "UnsupportedElf", "UnsupportedExtendedElf",
+                       "UnsupportedCompressedSection", "BadFatbin", "UnsupportedImageEncoding",
+                       "FileTooBig", "OutOfMemory", "AccessDenied"):
+            if f"release privacy: refused {filename} ({reason})" in text.splitlines():
+                refusals.append({"file": filename, "reason": reason})
+    print(json.dumps({"stage": "package", "completed_protocol_markers": seen,
+                      "controlled_refusals": refusals}), flush=True)
+
+
 def read(path):
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -158,10 +174,16 @@ def main():
             selected_log = path
             if name == "bridge" and (work / "bridge/private-audit/compile-link.log").is_file():
                 selected_log = work / "bridge/private-audit/compile-link.log"
+            if name == "package":
+                package_failure(selected_log)
             try:
                 diagnostic_tail(name, selected_log, context_path, work, repo, zig_root, gitleaks)
             except Exception as diagnostic_error:
-                print(json.dumps({"stage": name, "diagnostic_withheld": type(diagnostic_error).__name__}))
+                result = {"stage": name, "diagnostic_withheld": type(diagnostic_error).__name__}
+                receipt = work / ("diagnostic-" + name + "-private") / "gitleaks-status.json"
+                if receipt.is_file():
+                    result["scanner_status"] = read(receipt)
+                print(json.dumps(result))
             raise ValueError("preview command failed: " + name)
 
     zig_before = tree(zig_root)
