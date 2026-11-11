@@ -100,6 +100,7 @@ const valid = [_]Case{
     .{ .name = "TF_PREFILL_API_KEY_FILE", .raw = "/etc/tensorfold/gb10.key", .n = 0 },
     .{ .name = "TF_PRODUCE_HELD_GIB", .raw = "32", .n = 32 },
     .{ .name = "TF_DSV41_HANDOFF_DUMP", .raw = "/tmp/handoff exports", .n = 0 },
+    .{ .name = "TF_DSV41_PRODUCE_LINK", .raw = "tfkv2", .n = 0 },
     .{ .name = "XPU_A8_BITS", .raw = "4", .n = 4 },
     .{ .name = "XPU_A8_BITS", .raw = "8", .n = 8 },
     .{ .name = "LFM3_FUSE", .raw = "7", .n = 7 },
