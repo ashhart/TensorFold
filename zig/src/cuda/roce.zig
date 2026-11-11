@@ -21,6 +21,7 @@ pub const max_world = layout.max_world;
 pub const peerIndex = layout.peerIndex;
 pub const senderOf = layout.senderOf;
 pub const firstUnreachable = layout.firstUnreachable;
+const host_wait = @import("host_wait.zig");
 
 const max_peers = max_world - 1;
 const send_depth = 256;
@@ -425,16 +426,17 @@ pub const Gather = struct {
     /// The proxy: spins on the doorbell and posts each sequence in order (a missed one from its slot's size).
     fn proxy(g: *Gather) void {
         const c = g.ctrl();
+        const wfe = host_wait.on(); // a park lasts up to 1 ms, so the CQs drain every 8 parks instead of 64 polls
         var idle: u64 = 0;
         while (g.running.load(.monotonic)) {
             const seq = @atomicLoad(u32, &c[layout.c_seq], .acquire);
             if (seq == g.last_seq) {
                 idle += 1;
-                if (idle % 64 == 0) for (0..g.n_hca) |h| g.drain(h) catch {
+                if (idle % @as(u64, if (wfe) 8 else 64) == 0) for (0..g.n_hca) |h| g.drain(h) catch {
                     g.failed.store(true, .release);
                     return;
                 };
-                if (idle >= idle_spins) nap.pause();
+                if (wfe) host_wait.park(&c[layout.c_seq], seq) else if (idle >= idle_spins) nap.pause();
                 continue;
             }
             idle = 0;
