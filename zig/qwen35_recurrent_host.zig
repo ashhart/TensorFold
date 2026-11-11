@@ -96,7 +96,7 @@ fn finish(e: *q.engine.Engine, c: *q.engine.Cache) void {
 fn forwardDone(e: *q.engine.Engine, c: *q.engine.Cache, rows: usize) !void {
     try rec.mark(c, false);
     if (rows == 1) try rec.mark(c, true);
-    c.advanced(rows, true);
+    c.advanced(rows, true, true);
     _ = Driver.sync(e.stream.handle);
     rec.completed(e);
 }
@@ -128,10 +128,10 @@ test "Shared verification: all window transitions keep log capacity within the o
     for (1..65) |old| for (1..65) |rows| {
         try c.reset(&e);
         rec.completed(&e);
-        try rec.prepare(&e, &c, old, true);
+        try rec.prepare(&e, &c, old, true, true);
         try forwardDone(&e, &c, old);
         if (old == 1) try c.keep(&e, &.{}) else try c.keep(&e, &.{0});
-        try rec.prepare(&e, &c, rows, true);
+        try rec.prepare(&e, &c, rows, true, true);
         try std.testing.expect(c.log.len >= e.g.logBytes(rows));
         try std.testing.expect((c.before != null) == (rows == 1));
         try std.testing.expect(e.rec_scratch.residentBytes() <= bound);
@@ -141,7 +141,7 @@ test "Shared verification: all window transitions keep log capacity within the o
         try forwardDone(&e, &c, rows);
         if (rows == 1) {
             try c.settle(&e);
-            try rec.prepare(&e, &c, 1, true);
+            try rec.prepare(&e, &c, 1, true, true);
             try std.testing.expectEqual(e.g.logBytes(1), c.log.len);
         }
     };
@@ -156,7 +156,7 @@ test "Shared verification: a real empty keep retains its snapshot until the queu
     engine(&e, &d);
     var c = try q.engine.Cache.init(a, &e, 128);
     defer finish(&e, &c);
-    try rec.prepare(&e, &c, 1, true);
+    try rec.prepare(&e, &c, 1, true, true);
     try forwardDone(&e, &c, 1);
     const before = c.before.?.ptr;
     try c.keep(&e, &.{});
@@ -174,6 +174,41 @@ test "Shared verification: a real empty keep retains its snapshot until the queu
     try std.testing.expectEqual(@as(usize, 0), e.rec_scratch.residentBytes());
 }
 
+test "Shared verification: a served one-row step leases no rollback copy and an empty keep refuses" {
+    Driver.reset();
+    var d: cuda.Driver = undefined;
+    var e: q.engine.Engine = undefined;
+    e.kit = null;
+    engine(&e, &d);
+    var c = try q.engine.Cache.init(a, &e, 2);
+    defer finish(&e, &c);
+    // a fresh cache: no copy leased, and the staged segment reads none
+    try rec.prepare(&e, &c, 1, true, false);
+    try std.testing.expect(c.before == null);
+    try std.testing.expectEqual(@as(u64, 0), q.engine.Engine.stagedSeg(&c, &e, c.len, 0, 1, false).before);
+    try rec.mark(&c, false);
+    c.advanced(1, true, false);
+    _ = Driver.sync(e.stream.handle);
+    rec.completed(&e);
+    try std.testing.expectError(error.QwenNoRollbackCopy, c.keep(&e, &.{}));
+    try std.testing.expectEqual(@as(usize, 1), c.len);
+    try c.keep(&e, &.{0});
+    try std.testing.expectEqual(@as(usize, 1), c.len);
+    try std.testing.expect(c.last == null);
+    // an earlier window's lease stays in the cache; the served step still stages no copy of it
+    try rec.prepare(&e, &c, 1, true, true);
+    try std.testing.expect(c.before != null);
+    try rec.prepare(&e, &c, 1, true, false);
+    try std.testing.expect(c.before != null);
+    try std.testing.expectEqual(@as(u64, 0), q.engine.Engine.stagedSeg(&c, &e, c.len, 0, 1, false).before);
+    try rec.mark(&c, false);
+    c.advanced(1, true, false);
+    _ = Driver.sync(e.stream.handle);
+    rec.completed(&e);
+    try std.testing.expectError(error.QwenNoRollbackCopy, c.keep(&e, &.{}));
+    try std.testing.expectEqual(@as(usize, 2), c.len);
+}
+
 test "Shared verification: allocation refusal retains a queued keep's old log owner" {
     Driver.reset();
     var d: cuda.Driver = undefined;
@@ -187,16 +222,16 @@ test "Shared verification: allocation refusal retains a queued keep's old log ow
     var other_driver: cuda.Driver = undefined;
     engine(&foreign, &other_driver);
     defer rec.shutdown(&foreign);
-    try std.testing.expectError(error.ForeignRecurrentQueue, rec.prepare(&foreign, &c, 8, true));
-    try std.testing.expectError(error.InvalidRecurrentWindow, rec.prepare(&e, &c, 65, true));
+    try std.testing.expectError(error.ForeignRecurrentQueue, rec.prepare(&foreign, &c, 8, true, true));
+    try std.testing.expectError(error.InvalidRecurrentWindow, rec.prepare(&e, &c, 65, true, true));
     try std.testing.expectEqual(@as(usize, 0), e.rec_scratch.residentBytes());
-    try rec.prepare(&e, &c, 64, true);
+    try rec.prepare(&e, &c, 64, true, true);
     try forwardDone(&e, &c, 64);
     try c.keep(&e, &.{0});
     const usage = cuda.memory.usage(false);
     const prior = try cuda.setAllocationLimit(usage.device + usage.host);
     defer _ = cuda.setAllocationLimit(prior) catch unreachable;
-    try std.testing.expectError(error.OutOfDeviceMemory, rec.prepare(&e, &c, 32, true));
+    try std.testing.expectError(error.OutOfDeviceMemory, rec.prepare(&e, &c, 32, true, true));
     try std.testing.expectEqual(e.g.logBytes(64), e.rec_scratch.residentBytes());
     try std.testing.expectEqual(@as(usize, 0), Driver.unsafe_frees);
     _ = Driver.sync(e.stream.handle);
@@ -227,12 +262,12 @@ test "Shared verification: streams cycling window widths reuse their scratch ins
     for (0..4) |cycle| {
         for (widths, 0..) |rows, i| {
             const other = widths[(i + 3) % widths.len];
-            try rec.prepare(&e, &c, rows, true);
-            try rec.prepare(&e, &o, other, true);
+            try rec.prepare(&e, &c, rows, true, true);
+            try rec.prepare(&e, &o, other, true, true);
             try forwardDone(&e, &c, rows);
             try rec.mark(&o, false);
             if (other == 1) try rec.mark(&o, true);
-            o.advanced(other, true);
+            o.advanced(other, true, true);
             try std.testing.expect(e.rec_scratch.residentBytes() <= e.rec_scratch.cap);
         }
         if (cycle == 0) settled = Driver.allocs;
