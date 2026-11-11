@@ -95,6 +95,10 @@ test "exl3: verification tail enqueues the existing top-1 kernel then only its r
     try std.testing.expect(window.verify_cache.ready == null);
 }
 
+test {
+    _ = @import("cuda_mtp_group_tier_test.zig");
+}
+
 test "exl3: common verification scopes TP1 and TP2 validation and delegation without joins" {
     const Tri = @import("cuda_launch.zig").Tri;
     const Fake = @import("exl3/model/cuda_exl3_fake_driver_test.zig").Fake;
