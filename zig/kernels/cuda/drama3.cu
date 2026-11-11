@@ -78,3 +78,12 @@ extern "C" __global__ void d3_next_input(const int* __restrict__ frame, int* __r
 extern "C" __global__ void d3_copy_i32(const int* __restrict__ src, int* __restrict__ dst, int n) {
   for (int i = threadIdx.x; i < n; i += blockDim.x) dst[i] = src[i];
 }
+
+// Semantic CFG over the candidate logits (semantic tokens and EOS): c += (gamma - 1)(c - u); codec logits stay conditional.
+extern "C" __global__ void d3_cfg_mix(float* __restrict__ conditional, const float* __restrict__ unconditional, int n,
+                                      float gamma) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= n) return;
+  float c = conditional[i];
+  conditional[i] = c + (gamma - 1.0f) * (c - unconditional[i]);
+}

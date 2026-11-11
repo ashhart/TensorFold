@@ -134,8 +134,14 @@ fn spOf(s: Sampling) kern.Sampling {
     return .{ .temperature = s.temperature, .top_k = s.top_k, .top_p = s.top_p, .seed = s.seed };
 }
 
+pub const Guidance = struct { unconditioned: u64, gamma: f32 };
+
 /// A frame step's launches, one graph: sample, the tower, record, then the backbone row at the next position.
 pub fn enqueueFrame(e: *Engine, smp: Sampling, probe: ?Probe, force: ?Engine.Force) !void {
+    return enqueueFrameGuided(e, smp, probe, force, null);
+}
+
+pub fn enqueueFrameGuided(e: *Engine, smp: Sampling, probe: ?Probe, force: ?Engine.Force, guidance: ?Guidance) !void {
     const k = &e.k;
     const s = e.stream;
     const sem_begin = e.c.ids.sem_begin;
@@ -144,6 +150,7 @@ pub fn enqueueFrame(e: *Engine, smp: Sampling, probe: ?Probe, force: ?Engine.For
     // the tail of the tower runs on the second stream, except under a probe whose reads would race
     const split = e.o.split and probe == null;
     try k.gemv(s, e.w.cand_head, e.hlast, H, e.w.n_cand, 0, e.cand_logits);
+    if (guidance) |guide| try k.cfgMix(s, e.cand_logits, guide.unconditioned, e.w.n_cand, guide.gamma);
     if (probe) |p| try p.f(p.ctx, "tower_decode0.candidate_logits", e.cand_logits, 1, e.w.n_cand, true);
     if (force) |fc| {
         try k.argmax(s, e.cand_logits, e.w.n_cand, e.w.cand_ids, fc.picks, sem_begin, cfg.codebook_size);

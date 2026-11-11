@@ -17,7 +17,7 @@ const names = .{
     "d3_causal_softmax", "d3_attn_gate",        "d3_router",           "d3_swiglu",         "d3_moe_combine",
     "d3_tower_mix",      "d3_sample_main",      "d3_sample_code",      "d3_argmax_main",    "d3_finish_frame",
     "d3_copy_i32",       "d3_act_quant",        "d3_bf16_f32",         "d3_next_input",     "d3_attn_partial",
-    "d3_attn_merge",     "d3_sample_main_fast", "d3_sample_code_fast", "d3_router_compact",
+    "d3_attn_merge",     "d3_sample_main_fast", "d3_sample_code_fast", "d3_router_compact", "d3_cfg_mix",
 };
 
 pub const F = enum(u8) {
@@ -50,6 +50,7 @@ pub const F = enum(u8) {
     sample_main_fast,
     sample_code_fast,
     router_compact,
+    cfg_mix,
 };
 
 /// drama3_fp8.cu's instances: [decode, prompt][gate-up with the SwiGLU epilogue, down to fp32].
@@ -499,5 +500,15 @@ pub const Kernels = struct {
         a.add(dst);
         a.add(i(n));
         try k.go(.copy_i32, s, 1, 1, 64, 0, &a);
+    }
+
+    /// Semantic CFG over `n` conditional logits in place; the caller skips gamma 1, an exact identity.
+    pub fn cfgMix(k: *const Kernels, s: cuda.Stream, conditional: u64, unconditional: u64, n: usize, gamma: f32) !void {
+        var a: cuda.Args = .{};
+        a.add(conditional);
+        a.add(unconditional);
+        a.add(i(n));
+        a.add(gamma);
+        try k.go(.cfg_mix, s, (n + 255) / 256, 1, 256, 0, &a);
     }
 };
