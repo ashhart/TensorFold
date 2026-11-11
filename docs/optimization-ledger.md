@@ -167,7 +167,7 @@ ling `ling` (host package only, no engine yet; CUDA plan in [#850]).
 | 17. DSpark | yes | no (scores) | yes | yes |
 | 18. Copy drafts | done¹ | no (scores) | done M¹ | done M¹ |
 | 19. Shared drafts | done [#578] | no (scores) | no (no head) | yes |
-| 20. Solo chunks | yes | no (scores) | yes | yes |
+| 20. Solo chunks | M5 yes; pre-M5 open [#2907] | no (scores) | yes | yes |
 | 21. Read-ahead | no (Metal) | yes | no (Metal) | no (Metal) |
 | 22. Direct load | yes | yes | yes | yes |
 | 23. Page drop | done M[#1885] | done [#1884] | done M[#1885] | done M[#1885] |

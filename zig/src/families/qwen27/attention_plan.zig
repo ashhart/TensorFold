@@ -28,6 +28,8 @@ pub const Geometry = struct {
     shared_prefix: bool = true,
     /// Chains of rows take the prefix kernel to their last key; a test turns this off to compare with the tail kernel.
     fuse_chain: bool = true,
+    /// One chain of prompt rows may use the simdgroup prompt kernel beyond a tree round's row bound.
+    solo_prompt: bool = false,
     /// Read the target's attention geometry; the current kernel qualification still applies.
     pub fn fromConfig(c: @import("config.zig").Config, shared_prefix: bool) !Geometry {
         const g = Geometry{
@@ -52,7 +54,7 @@ pub const Geometry = struct {
         if (g.heads / g.kv_heads != 6 and !one_mac) return error.TargetAttentionShape;
     }
     pub fn promptRows(g: Geometry, requested: u32) u32 {
-        return @min(requested, @as(u32, if (g.shared_prefix and g.fuse_chain) chain_rows else max_rows));
+        return @min(requested, @as(u32, if ((g.shared_prefix and g.fuse_chain) or g.solo_prompt) chain_rows else max_rows));
     }
 
     pub fn group(g: Geometry) u32 {
@@ -83,12 +85,15 @@ pub const Plan = struct {
         var tile_count: u32 = 0;
         var ca_max: u32 = 0;
         var cb_max: u32 = 0;
-        var fused = geometry.shared_prefix and geometry.fuse_chain;
+        var chain = true;
         for (windows) |w| for (w.parents, 0..) |p, r| if (r > 0 and p != @as(i32, @intCast(r)) - 1) {
-            fused = false;
+            chain = false;
         };
+        const fused = geometry.shared_prefix and geometry.fuse_chain and chain;
+        const solo = geometry.solo_prompt and windows.len == 1 and chain;
+        const row_limit: usize = if (fused or solo) chain_rows else max_rows;
         for (windows, 0..) |w, st| {
-            if (w.parents.len == 0 or w.parents.len > @as(usize, if (fused) chain_rows else max_rows) or w.start > w.capacity or @as(u64, w.start) + w.parents.len > w.capacity or w.capacity > std.math.maxInt(i32) / geometry.dim) return error.AttentionCapacity;
+            if (w.parents.len == 0 or w.parents.len > row_limit or w.start > w.capacity or @as(u64, w.start) + w.parents.len > w.capacity or w.capacity > std.math.maxInt(i32) / geometry.dim) return error.AttentionCapacity;
             if (w.parents[0] != -1) return error.AttentionParents;
             var depths: [chain_rows]u32 = undefined;
             for (w.parents, 0..) |p, r| {
@@ -124,7 +129,7 @@ pub const Plan = struct {
             ca_max = @max(ca_max, ca);
             cb_max = @max(cb_max, cb);
         }
-        if (row_count > @as(u32, if (fused) chain_rows else max_rows)) return error.AttentionRows;
+        if (row_count > row_limit) return error.AttentionRows;
         meta[0] = @intCast(windows.len);
         meta[1] = @intCast(ca_max);
         meta[2] = @intCast(tile_count);
