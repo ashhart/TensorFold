@@ -1,4 +1,4 @@
-//! A partial keep: the kept rows replayed over the DeltaNet layers (a graph on one GPU), or moved on with pending rows.
+//! A partial keep: the kept rows replayed over the DeltaNet layers (as a graph), or moved on with pending rows.
 const cuda = @import("cuda");
 const wt = @import("cuda_prompt_wt.zig");
 const parts = @import("cuda_batch_state.zig");
@@ -68,10 +68,14 @@ const Replay = struct {
     }
 };
 
-/// The replay of `keep` kept rows; on one GPU its ~146 launches as one graph, keyed by every buffer they touch.
+/// The replay of `keep` kept rows; its ~146 launches as one graph on each rank, keyed by every buffer they touch.
 pub fn replay(e: *prompt.Engine, s: *parts.Scratch, seq: *prompt.Seq, d: *Draft, keep: usize) !void {
-    const r: Replay = .{ .e = e, .st = e.stream.*, .s = s, .seq = seq, .d = d, .keep = keep };
-    if (!window_graph.enabled() or e.collective != null) return r.run();
+    return graphed(e, s, seq, d, keep, Replay{ .e = e, .st = e.stream.*, .s = s, .seq = seq, .d = d, .keep = keep });
+}
+
+/// `r` (no collective runs in it) as the engine's rollback graph for these buffers and rows, or eagerly when off.
+pub fn graphed(e: anytype, s: *const parts.Scratch, seq: anytype, d: anytype, keep: usize, r: anytype) !void {
+    if (!window_graph.enabled()) return r.run();
     const key: window_graph.RollbackKey = .init(seq, d, keep, s);
     try e.graphs.rollback.run(e.gpa, e.stream.*, key, r);
 }
