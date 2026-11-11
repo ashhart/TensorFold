@@ -121,11 +121,33 @@ fn clockOf(before: counters.ClockSample, after: counters.ClockSample) Clock {
 
 const Run = struct { host: f64, gpu: f64, enc: f64, each: []f64 };
 
+/// A launch of `slots` slots, each `rows / slots` rows at p0: the rig's slot and `extra` (slots - 1 more).
+const Multi = struct {
+    slots: u32 = 1,
+    extra: []const pkg.kv.Slot = &.{},
+
+    fn ctx(m: Multi, r: *const fixture.Rig, rows: u32, segs: *[16]pkg.ctx.Seg) pkg.ctx.Ctx {
+        var x = r.ctx(&r.slot, p0, rows);
+        if (m.slots == 1) return x;
+        const each = rows / m.slots;
+        for (0..m.slots) |i| segs[i] = .{ .slot = if (i == 0) &r.slot else &m.extra[i - 1], .p0 = p0, .r0 = @intCast(i * each), .n = each };
+        x.segs = segs[0..m.slots];
+        return x;
+    }
+
+    fn writeSpans(m: Multi, r: *fixture.Rig, rows: u32) !void {
+        var spans: [16]pkg.scratch.Span = undefined;
+        for (spans[0..m.slots]) |*s| s.* = .{ .p0 = p0, .n = rows / m.slots };
+        try r.s.writeSpans(&r.c, spans[0..m.slots]);
+    }
+};
+
 /// The direct launch (host encode, GPU span), then its recording replayed whole and one dispatch an encoder.
-fn once(a: std.mem.Allocator, r: *fixture.Rig, junk: mtl.Buffer, rec: *recorder.Recording, rows: u32, samples: counters.SampleBuffer, pass: counters.ComputePass, conc: counters.ComputePass) !Run {
+fn once(a: std.mem.Allocator, r: *fixture.Rig, junk: mtl.Buffer, rec: *recorder.Recording, m: Multi, rows: u32, samples: counters.SampleBuffer, pass: counters.ComputePass, conc: counters.ComputePass) !Run {
     const w = &r.layers[0];
-    const ctx = r.ctx(&r.slot, p0, rows);
-    try r.s.writeRows(&r.c, p0, rows);
+    var segs: [16]pkg.ctx.Seg = undefined;
+    const ctx = m.ctx(r, rows, &segs);
+    try m.writeSpans(r, rows);
     const s = r.streams();
     const pr = r.pres();
     const io: pkg.layer.Io = .{ .x = s[0], .pre = pr[0], .x_out = s[1], .pre_out = pr[1] };
@@ -178,7 +200,7 @@ fn once(a: std.mem.Allocator, r: *fixture.Rig, junk: mtl.Buffer, rec: *recorder.
     return out;
 }
 
-fn report(a: std.mem.Allocator, r: *fixture.Rig, junk: mtl.Buffer, names: *const Names, rows: u32, n: usize) !void {
+fn report(a: std.mem.Allocator, r: *fixture.Rig, junk: mtl.Buffer, names: *const Names, multi: Multi, rows: u32, n: usize) !void {
     var rec: recorder.Recording = .{ .a = a };
     defer rec.deinit();
     const samples = try counters.SampleBuffer.init(r.device, 4096);
@@ -190,7 +212,7 @@ fn report(a: std.mem.Allocator, r: *fixture.Rig, junk: mtl.Buffer, names: *const
     defer conc.deinit();
     mtl.objc.msg(void, conc.id, "setDispatchType:", .{@as(usize, @backingInt(mtl.DispatchType.concurrent))});
     const runs = try a.alloc(Run, n);
-    for (runs) |*x| x.* = try once(a, r, junk, &rec, rows, samples, pass, conc);
+    for (runs) |*x| x.* = try once(a, r, junk, &rec, multi, rows, samples, pass, conc);
     const v = try a.alloc(f64, n);
     for (runs, v) |x, *y| y.* = x.gpu;
     const gpu_med = median(v);
@@ -209,7 +231,8 @@ fn report(a: std.mem.Allocator, r: *fixture.Rig, junk: mtl.Buffer, names: *const
     var pipes = try a.alloc(?mtl.objc.Id, d);
     {
         const re = recorder.start(&rec);
-        const ctx = r.ctx(&r.slot, p0, rows);
+        var segs: [16]pkg.ctx.Seg = undefined;
+        const ctx = multi.ctx(r, rows, &segs);
         const s = r.streams();
         const pr = r.pres();
         try pkg.layer.encode(&ctx, re, &r.layers[0], .{ .x = s[0], .pre = pr[0], .x_out = s[1], .pre_out = pr[1] });
@@ -241,7 +264,7 @@ fn report(a: std.mem.Allocator, r: *fixture.Rig, junk: mtl.Buffer, names: *const
         tot.items[at] += m;
         cnt.items[at] += 1;
     }
-    std.debug.print("layer {d}, {d} row(s), fastest of {d}, {d} dispatches:\n", .{ r.layers[0].layer, rows, n, d });
+    std.debug.print("layer {d}, {d} slot(s) x {d} row(s), fastest of {d}, {d} dispatches:\n", .{ r.layers[0].layer, multi.slots, rows / multi.slots, n, d });
     std.debug.print("  concurrent (serving) encoder {d:.1} us (median {d:.1}), host encode {d:.1} us; one serial encoder {d:.1} us (median {d:.1}); dispatches alone {d:.1} us\n", .{ gpu * 1e6, gpu_med * 1e6, hst * 1e6, enc * 1e6, enc_med * 1e6, sum * 1e6 });
     std.debug.print("  x40: {d:.2} ms a round, {d:.1} tok/s at {d} row(s) a round (serial {d:.2} ms)\n", .{ 40 * gpu * 1e3, @as(f64, @floatFromInt(rows)) / (40 * gpu), rows, 40 * enc * 1e3 });
     for (cls.items, tot.items, cnt.items) |c, t, k| std.debug.print("    {s:<34} x{d:<3} {d:>9.1} us\n", .{ c, k, t * 1e6 });
@@ -251,7 +274,7 @@ fn report(a: std.mem.Allocator, r: *fixture.Rig, junk: mtl.Buffer, names: *const
     };
 }
 
-/// Each dense FP8 projection of the layer alone at 1, 4 and 5 rows, by block kind, interleaved.
+/// Each dense FP8 projection of the layer alone at 1 to 16 rows, by block kind, interleaved, with GB/s of its weights.
 fn fp8Shapes(a: std.mem.Allocator, r: *fixture.Rig, junk: mtl.Buffer, n: usize) !void {
     const fp8 = pkg.pipelines.fp8;
     const w = &r.layers[0];
@@ -263,7 +286,7 @@ fn fp8Shapes(a: std.mem.Allocator, r: *fixture.Rig, junk: mtl.Buffer, n: usize) 
     defer pass.deinit();
     const kinds = [_]fp8.Kind{ .b, .c };
     const t = try a.alloc(f64, n * kinds.len);
-    for ([_]u32{ 1, 4, 5 }) |rows| for (shapes) |sh| {
+    for ([_]u32{ 1, 4, 6, 8, 16 }) |rows| for (shapes) |sh| {
         const call: fp8.Call = .{ .k = sh.w.k, .n = sh.w.n, .rows = rows, .split = fp8.splitOf(sh.w.k), .out = .bf16 };
         for (0..n) |i| for (kinds, 0..) |kind, j| {
             flush(r, junk);
@@ -281,7 +304,11 @@ fn fp8Shapes(a: std.mem.Allocator, r: *fixture.Rig, junk: mtl.Buffer, n: usize) 
             t[j * n + i] = clockOf(before, counters.sampleClocks(r.device)).span(res.values(), 0, 1);
         };
         std.debug.print("  fp8 {s:<10} {d}x{d} at {d} row(s), launched as {s}:", .{ sh.name, sh.w.k, sh.w.n, rows, @tagName(fp8.kindOf(call)) });
-        for (kinds, 0..) |kind, j| std.debug.print("  {s} {d:.1} us", .{ @tagName(kind), least(t[j * n ..][0..n]) * 1e6 });
+        const bytes: f64 = @floatFromInt(@as(u64, sh.w.k) * sh.w.n + @as(u64, sh.w.k / 32) * (sh.w.n / 32));
+        for (kinds, 0..) |kind, j| {
+            const us = least(t[j * n ..][0..n]);
+            std.debug.print("  {s} {d:.1} us ({d:.0} GB/s)", .{ @tagName(kind), us * 1e6, bytes / us / 1e9 });
+        }
         std.debug.print("\n", .{});
     };
 }
@@ -394,26 +421,37 @@ fn bits(r: *fixture.Rig, rows: u32, n: usize) !void {
     if (same != n) return error.ConcurrentBitsDiffer;
 }
 
-test "dsv41 metal REAL layer decode timing at 1 and 4 rows" {
-    const dir = env("TF_DSV41_REAL") orelse return error.SkipZigTest;
-    const layer = if (env("TF_DSV41_REAL_LAYER")) |v| try std.fmt.parseInt(u32, v, 10) else 2;
-    const n = if (env("TF_DSV41_TIMING_N")) |v| try std.fmt.parseInt(usize, v, 10) else 21;
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
+/// A "SxN" token of TF_DSV41_TIMING_ROWS is S slots of N rows each; a bare number is one slot of that many rows.
+fn parseShape(tok: []const u8) !struct { slots: u32, rows: u32 } {
+    const x = std.mem.indexOfScalar(u8, tok, 'x') orelse return .{ .slots = 1, .rows = try std.fmt.parseInt(u32, tok, 10) };
+    const slots = try std.fmt.parseInt(u32, tok[0..x], 10);
+    const each = try std.fmt.parseInt(u32, tok[x + 1 ..], 10);
+    if (slots == 0 or each == 0 or slots * each > 16) return error.BadShape;
+    return .{ .slots = slots, .rows = slots * each };
+}
+
+fn timeLayer(a: std.mem.Allocator, dir: []const u8, layer: u32, n: usize) !void {
     const r = try open(std.heap.page_allocator, std.testing.io, dir, layer);
     defer r.deinit();
     const junk = try r.device.buffer(flush_bytes, mtl.ResourceOptions.private);
     defer junk.deinit();
     var names: Names = .{};
     try names.walk(a, pkg.pipelines.Pipelines, &r.p, "p");
-    if (env("TF_DSV41_TIMING_MV") != null) return mv_sweep.run(r.device, r.queue, junk, n);
     for ([_]u32{ 1, 4 }) |rows| try bits(r, rows, 20);
     fixture.fillPast(&r.c, &r.slot, p0, 21);
-    // TF_DSV41_TIMING_ROWS: a comma list of row counts to time (default 1,4; at most 16)
-    var it = std.mem.tokenizeScalar(u8, env("TF_DSV41_TIMING_ROWS") orelse "1,4", ',');
+    // TF_DSV41_TIMING_ROWS: a comma list of launch shapes to time (default 1,4,6,8,16 rows and 4 slots x 1 row)
+    const extra = try a.alloc(pkg.kv.Slot, 15);
+    var made: usize = 0;
+    defer for (extra[0..made]) |*s| s.deinit();
+    var it = std.mem.tokenizeScalar(u8, env("TF_DSV41_TIMING_ROWS") orelse "1,4,6,8,16,4x1", ',');
     while (it.next()) |t| {
-        const rows = try std.fmt.parseInt(u32, t, 10);
+        const sh = try parseShape(t);
+        const rows = sh.rows;
+        while (made + 1 < sh.slots) : (made += 1) {
+            extra[made] = try pkg.kv.Slot.init(r.a, r.device, &r.c, limit);
+            fixture.fillPast(&r.c, &extra[made], p0, 22 + made);
+        }
+        const multi: Multi = .{ .slots = sh.slots, .extra = extra[0..made] };
         fixture.fillInput(r, rows, 31);
         // TF_DSV41_TIMING_SAME: every row's input is row 0's, so the rows mostly share their experts (a draft block)
         if (env("TF_DSV41_TIMING_SAME") != null) {
@@ -422,7 +460,7 @@ test "dsv41 metal REAL layer decode timing at 1 and 4 rows" {
             const pre = r.io[2].slice(f32, rows * 4);
             for (1..rows) |i| @memcpy(pre[i * 4 ..][0..4], pre[0..4]);
         }
-        try report(a, r, junk, &names, rows, n);
+        try report(a, r, junk, &names, multi, rows, n);
         std.debug.print("  routed experts a round: {d} for {d} picks\n", .{ std.mem.bytesToValue(u32, r.s.bytes(r.s.plan[1], 4)), rows * r.c.topk });
     }
     if (env("TF_DSV41_TIMING_FP8") != null) try fp8Shapes(a, r, junk, n);
@@ -433,6 +471,25 @@ test "dsv41 metal REAL layer decode timing at 1 and 4 rows" {
     std.debug.print("as a window-only layer (compress ratio 0):\n", .{});
     for ([_]u32{ 1, 4 }) |rows| {
         fixture.fillInput(r, rows, 31);
-        try report(a, r, junk, &names, rows, n);
+        try report(a, r, junk, &names, .{}, rows, n);
     }
+}
+
+test "dsv41 metal REAL layer decode timing at 1 to 16 rows and 4 slots" {
+    const dir = env("TF_DSV41_REAL") orelse return error.SkipZigTest;
+    const n = if (env("TF_DSV41_TIMING_N")) |v| try std.fmt.parseInt(usize, v, 10) else 21;
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // TF_DSV41_REAL_LAYERS (or the one TF_DSV41_REAL_LAYER): comma list; default the five kinds of layer
+    const list = env("TF_DSV41_REAL_LAYERS") orelse env("TF_DSV41_REAL_LAYER") orelse "2,14,20,21,24";
+    if (env("TF_DSV41_TIMING_MV") != null) {
+        const r = try open(std.heap.page_allocator, std.testing.io, dir, try std.fmt.parseInt(u32, std.mem.sliceTo(list, ','), 10));
+        defer r.deinit();
+        const junk = try r.device.buffer(flush_bytes, mtl.ResourceOptions.private);
+        defer junk.deinit();
+        return mv_sweep.run(r.device, r.queue, junk, n);
+    }
+    var layers = std.mem.tokenizeScalar(u8, list, ',');
+    while (layers.next()) |l| try timeLayer(a, dir, try std.fmt.parseInt(u32, l, 10), n);
 }

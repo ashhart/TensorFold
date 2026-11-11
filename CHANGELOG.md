@@ -4,7 +4,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
-- DeepSeek-V4.1 on Metal: `TF_DSV41_ROUND_PROF=1` times every decode round (host prepare, encode, wait and choose, each command buffer's GPU span and the idle time between them, the drafter's ingest, propose and finish) and logs mean, p50 and p95 by slots, rows and drafted or plain every 4096 rounds and at close; off by default, with no change to any token. The release-layer timing test now times 1, 4, 6, 8 and 16 rows and 4 slots of one row, at five layers, and prints GB/s per FP8 shape (#NNNN, part of #1676).
+- DeepSeek-V4.1 on Metal: `TF_DSV41_ROUND_PROF=1` times every decode round (host prepare, encode, wait and choose, each command buffer's GPU span and the idle time between them, the drafter's ingest, propose and finish) and logs mean, p50 and p95 by slots, rows and drafted or plain every 4096 rounds and at close; off by default, with no change to any token. The release-layer timing test now times 1, 4, 6, 8 and 16 rows and 4 slots of one row, at five layers, and prints GB/s per FP8 shape (#2951, part of #1676).
 
 - DeepSeek-V4.1 on Metal: rounds with three or more decoding streams decode plain, with no draft pass and no drafter ingest, since drafts lose there; when fewer streams decode again the drafter takes the rows it missed from the target, so its drafts are the ones it would have made (#1720, part of #1676).
 

@@ -287,3 +287,29 @@ test "dsv41 metal serve: (f) plain rounds at four streams, drafts again at two f
     try testing.expectEqual(@as(usize, 0), bad);
     try testing.expect(caught > 0 and drafted > 0);
 }
+
+test "dsv41 metal serve: (g) the round profile on: the same replies, and every round and drafter pass is counted" {
+    const p0 = try ids(150, 1);
+    defer gpa.free(p0);
+    const p1 = try ids(620, 2);
+    defer gpa.free(p1);
+    const asks = [_]Ask{ .{ .prompt = p0 }, .{ .prompt = p1 } };
+    var want: [2][]u32 = undefined;
+    try reference(&asks, &want);
+    defer freeAll(&want);
+    const m = try fs.open(gpa, io, seed, .{ .round_prof = true });
+    const s = try Served.open(gpa, io, m.model(), ".", null);
+    defer Served.close(s);
+    var drafted: u64 = 0;
+    var got: [2][]u32 = undefined;
+    try serve(s.engine(), &asks, true, &got, &drafted);
+    defer freeAll(&got);
+    const bad = same(&want, &got);
+    const p = m.rp.?;
+    var sum: u64 = 0;
+    for (p.ev) |e| sum += e.n;
+    say(bad == 0 and p.rounds == m.t.stats.launches and sum > 0, "(g) profiled vs serial: {d} differ; {d} rounds profiled of {d} launches, {d} drafter events", .{ bad, p.rounds, m.t.stats.launches, sum });
+    try testing.expectEqual(@as(usize, 0), bad);
+    try testing.expectEqual(m.t.stats.launches, p.rounds);
+    try testing.expect(sum > 0 and drafted > 0);
+}
