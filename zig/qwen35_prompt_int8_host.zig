@@ -177,3 +177,19 @@ test "prompt int8: hand-built projection fixture initializes all newly read sele
     try T.expect(!e.affine.half_prompt);
     try T.expectEqual(@as(usize, 4), @intFromPtr(e.affine.prefill22_fn.handle));
 }
+
+test "prompt int8: large GDN groups retain four separate quantized projections" {
+    var d: cuda.Driver = undefined;
+    var e = engine(&d);
+    e.affine.pdl = true;
+    e.int8.on = true;
+    e.int8.ws = 0x900000;
+    e.int8.flag = .{ .d = &d, .ptr = 0x910000, .len = 4 };
+    var ls: [4]q.engine.Proj = undefined;
+    for (&ls, [_]usize{ 10240, 6144, 48, 48 }) |*l, n| l.* = .{ .a4 = .{ .w = 10, .s = 20, .b = 30, .n = n, .k = 5120, .npad = std.mem.alignForward(usize, n, 128) } };
+    for ([_]usize{ 2048, 4096 }) |rows| {
+        Trace.reset();
+        try e.projectMany(&ls, 0x10000, 0x20000, &.{ 0x30000, 0x40000, 0x50000, 0x60000 }, rows, true, 0, false, true);
+        try T.expectEqualSlices(usize, &.{ 8, 9, 8, 9, 8, 9, 8, 9 }, Trace.ids[0..Trace.count]);
+    }
+}
