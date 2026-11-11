@@ -329,9 +329,7 @@ fn finishRank(a: OpenArgs) !Loaded {
     errdefer if (own.group.fast) |f| f.deinit();
     try @import("cuda_roce_multi.zig").open(gpa, io, ctx.d, &own.group, set.roce_multi); // three ranks or more, likewise
     errdefer if (own.group.multi) |m| m.deinit(m.ctx);
-    own.e.group = &own.group;
-    own.e.backend.group = &own.group; // the boundary's gathers take the group's route from here on
-    std.log.info("[tensorfold] glm: rank {d} of {d} sums through the {t} collective (RoCE gathers {s})", .{ p.rank, p.world, own.e.collective.kind(), if (own.group.fast != null or own.group.multi != null) "on" else "off" });
+    own.e.installGroup(&own.group);
     own.link = try follow.Link.init(gpa, ctx.d, &own.group.lib, own.group.comm, own.e.stream, try linkCapacity(cap, o.vision));
     errdefer own.link.deinit();
     own.e.snap_setup = .{ .ptr = own, .run = readySnapshots };
