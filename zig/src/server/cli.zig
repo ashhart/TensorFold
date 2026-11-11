@@ -572,6 +572,7 @@ pub fn request(a: Allocator, dir: []const u8, model_type: []const u8, args: Args
         .decode_share = args.decode_share,
         .keep = args.checkpoint_slots,
         .tp = args.tp,
+        .execution_witness = args.execution_witness,
         .rank = args.rank,
         .given = .{ .tp = args.tp_given, .rank = args.rank_given },
         .master = args.master,
