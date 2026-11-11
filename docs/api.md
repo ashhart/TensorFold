@@ -808,7 +808,7 @@ Beside the block, native replies carry top-level `exact_mode` and `stop_sequence
 stop string ended the reply. `exact_mode` is `"exact"`, or `"remote_prefix"` when a server started with
 `--prefill-from` built any of the reply's prompt prefix on another machine; that reply can differ from one built here
 alone. Its block then adds `remote_prefix`, the restored prefix's length, `pulled_prefix` when it came over the link
-for this reply, and `kept_remote_cache_tokens` when it was a kept copy. A server started with `--cortheon` adds a
+for this reply, and `kept_remote_cache_tokens` when it was a kept copy. Where a remote source weighed the prompt, `remote_route` names its verdict (`remote`, `busy`, `slower`, `small`, `off` or `down`); a pulled prefix adds its phases in seconds (`remote_queue_seconds` at the gate, `remote_trigger_seconds` for the producer's prefill, `remote_pull_seconds` for the transfer, `remote_land_seconds` of that spent landing, `remote_tail_seconds` for the server's own pass after it), `remote_bytes` and `remote_tokens_per_second` (the prefix over trigger plus pull). A server started with `--cortheon` adds a
 top-level `cortheon` object summarizing the turn for requests Cortheon runs ([Cortheon](cortheon.md)). These ride on
 the whole reply and the streamed finish event alike.
 

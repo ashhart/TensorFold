@@ -6,7 +6,7 @@ const mailbox = @import("mailbox.zig");
 const words = @import("words.zig");
 const Allocator = std.mem.Allocator;
 
-pub const Error = error{ Refused, Protocol, Mismatch, Corrupt, Expired } || mailbox.Error || manifest.Error;
+pub const Error = error{ Refused, Protocol, Mismatch, Corrupt, Expired, Aborted } || mailbox.Error || manifest.Error;
 
 /// What the decoder knows the export must be: the same checkpoint, prompt and tensor-parallel rank.
 pub const Expect = struct {
@@ -18,6 +18,12 @@ pub const Expect = struct {
     open_timeout_ns: u64 = 30 * std.time.ns_per_s,
     /// The newest protocol this decoder reads: 2 takes recurrent layers; 1 refuses a protocol 2 export as foreign.
     protocol: u16 = wire.version,
+    /// Set by the caller when the request is gone: the pull stops between calls, after a CLOSE if it had opened.
+    abort: ?*const std.atomic.Value(bool) = null,
+
+    pub fn aborted(e: Expect) bool {
+        return if (e.abort) |a| a.load(.acquire) else false;
+    }
 };
 
 /// Where pulled rows go: rows [row_start, row_start + rows) of `layer`, C-contiguous in the manifest's shape.
@@ -76,6 +82,7 @@ fn open(arena: Allocator, client: *mailbox.Client, handoff: [16]u8, expect: Expe
         const reply = client.box.replyPayload();
         switch (h.kind) {
             .wait => {
+                if (expect.aborted()) return error.Aborted;
                 if (words.nowNs() >= deadline) return error.Expired;
                 words.pause(nap);
                 nap = @min(nap * 2, 20 * std.time.ns_per_ms);
@@ -112,6 +119,7 @@ fn frames(client: *mailbox.Client, handoff: [16]u8, m: manifest.Manifest, expect
     var bytes: u64 = 0;
     for (0..m.frames) |i| {
         const frame: u32 = @intCast(i);
+        if (expect.aborted()) return error.Aborted;
         const h = try request(client, .pull, handoff, frame, "", m.protocol);
         const reply = client.box.replyPayload();
         if (h.kind == .@"error") {

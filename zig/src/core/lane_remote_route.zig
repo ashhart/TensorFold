@@ -1,8 +1,14 @@
 //! Remote prefill's gate and decider: one pull at a time reaches the pair, and a prompt goes there only when it pays.
 const std = @import("std");
+const breaker = @import("lane_remote_breaker.zig");
 
 /// TF_PREFILL_ROUTE: `auto` weighs each prompt (see `Route.weigh`); `always` sends every long prompt, behind any pull.
 pub const Mode = enum { auto, always };
+
+pub const Outcome = breaker.Outcome;
+pub const Door = breaker.Door;
+pub const Change = breaker.Change;
+pub const pairDown = breaker.pairDown;
 
 /// A queued prompt as the source sees it: its length, the tokens the engine's cache has, the streams decoding.
 pub const Ask = struct { len: u64, cached: u64, decoding: u32 };
@@ -78,22 +84,41 @@ pub const Route = struct {
     remote_tps: Rate = .{ .v = 1000 },
     /// the Mac's pass after the pull, in seconds: restore, the last token, its first reply (seed: 1)
     tail_s: Rate = .{ .v = 1 },
+    /// closed, open or half-open: failures of the pair or its link keep prompts here for a cool-down
+    breaker: breaker.Breaker = .{},
+    /// TF_PREFILL_TIMEOUT_S (0: `deadlineS` derives one from the predicted pull)
+    timeout_s: u64 = 0,
 
     /// The monotonic clock every `enter` and `weigh` caller must use.
     pub fn nowNs(io: std.Io) u64 {
         return @intCast(std.Io.Clock.awake.now(io).toNanoseconds());
     }
 
-    /// TF_PREFILL_ROUTE, TF_PREFILL_LOCAL_TPS and TF_PREFILL_REMOTE_TPS, each checked by name.
+    /// The knobs, as their values: `mode` is the word's index in TF_PREFILL_ROUTE's list.
+    pub const Knobs = struct { mode: u64 = 0, local_tps: f64 = 950, remote_tps: f64 = 1000, trip: u64 = 3, cooldown_s: u64 = 30, timeout_s: u64 = 0 };
+
+    /// TF_PREFILL_ROUTE, _LOCAL_TPS, _REMOTE_TPS, _BREAKER, _COOLDOWN_S and _TIMEOUT_S, each checked by name.
     pub fn fromEnv() !Route {
         const env = @import("sys").environment;
-        const seeds: Route = .{};
-        return build(try env.read(u64, "TF_PREFILL_ROUTE", 0), try env.read(f64, "TF_PREFILL_LOCAL_TPS", seeds.local_tps.v), try env.read(f64, "TF_PREFILL_REMOTE_TPS", seeds.remote_tps.v));
+        const d: Knobs = .{};
+        return build(.{
+            .mode = try env.read(u64, "TF_PREFILL_ROUTE", d.mode),
+            .local_tps = try env.read(f64, "TF_PREFILL_LOCAL_TPS", d.local_tps),
+            .remote_tps = try env.read(f64, "TF_PREFILL_REMOTE_TPS", d.remote_tps),
+            .trip = try env.read(u64, "TF_PREFILL_BREAKER", d.trip),
+            .cooldown_s = try env.read(u64, "TF_PREFILL_COOLDOWN_S", d.cooldown_s),
+            .timeout_s = try env.read(u64, "TF_PREFILL_TIMEOUT_S", d.timeout_s),
+        });
     }
 
-    /// A route from the knobs' values (`mode`: the word's index in TF_PREFILL_ROUTE's list).
-    pub fn build(mode: u64, local_tps: f64, remote_tps: f64) Route {
-        return .{ .mode = if (mode == 0) .auto else .always, .local_tps = .{ .v = local_tps }, .remote_tps = .{ .v = remote_tps } };
+    pub fn build(k: Knobs) Route {
+        return .{
+            .mode = if (k.mode == 0) .auto else .always,
+            .local_tps = .{ .v = k.local_tps },
+            .remote_tps = .{ .v = k.remote_tps },
+            .breaker = .{ .trip = k.trip, .cooldown_ns = k.cooldown_s * std.time.ns_per_s },
+            .timeout_s = k.timeout_s,
+        };
     }
 
     fn acquire(r: *Route) void {
@@ -137,6 +162,7 @@ pub const Route = struct {
     pub fn weigh(r: *Route, now: u64, ask: Ask, prefix: u64) Verdict {
         r.acquire();
         defer r.lock.unlock();
+        if (r.breaker.shut(now)) return .down;
         if (r.mode == .always) return .remote;
         const e = r.cost(prefix, ask.len - ask.cached);
         if (r.held and r.goesLocal(now, now, e)) return .busy;
@@ -153,6 +179,29 @@ pub const Route = struct {
         return .entered;
     }
 
+    /// A pull the gate let in asks the breaker: go, go after a liveness check (the trial), or leave it to the Mac.
+    pub fn door(r: *Route, now: u64) Door {
+        r.acquire();
+        defer r.lock.unlock();
+        return r.breaker.door(now);
+    }
+
+    /// The pull `door` let through ended as `outcome`; the answer says whether the breaker opened or closed.
+    pub fn finish(r: *Route, now: u64, outcome: Outcome) Change {
+        r.acquire();
+        defer r.lock.unlock();
+        return r.breaker.finish(now, outcome);
+    }
+
+    /// A pull's time limit: TF_PREFILL_TIMEOUT_S, else 15 s and three times its predicted time, 30 s to 30 min.
+    pub fn deadlineS(r: *Route, tokens: u64) u64 {
+        if (r.timeout_s != 0) return r.timeout_s;
+        r.acquire();
+        defer r.lock.unlock();
+        const predicted = @as(f64, @floatFromInt(tokens)) / r.remote_tps.v + r.tail_s.v;
+        return @intFromFloat(std.math.clamp(@ceil(15 + 3 * predicted), 30, 1800));
+    }
+
     /// The pull that `enter` let in is over.
     pub fn leave(r: *Route) void {
         r.acquire();
@@ -160,10 +209,10 @@ pub const Route = struct {
         r.held = false;
     }
 
-    /// `enter`, waiting for the pull under way only while that beats prefilling here; null: the Mac prefills it.
-    pub fn admit(r: *Route, io: std.Io, e: Estimate, closing: *const std.atomic.Value(bool)) ?u64 {
+    /// `enter`, waiting for the pull under way only while that pays; null: prefill here, or closing, or `gone`.
+    pub fn admit(r: *Route, io: std.Io, e: Estimate, closing: *const std.atomic.Value(bool), gone: *const std.atomic.Value(bool)) ?u64 {
         const arrived = Route.nowNs(io);
-        while (!closing.load(.acquire)) {
+        while (!closing.load(.acquire) and !gone.load(.acquire)) {
             const now = Route.nowNs(io);
             switch (r.enter(now, arrived, e)) {
                 .entered => return now - arrived,

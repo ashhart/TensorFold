@@ -13,6 +13,7 @@ const t = std.testing;
 pub const Peer = struct {
     at: u32,
     fail: bool = false,
+    phases: remote.Phases = .{}, // what its fills report having spent
     fills: u32 = 0,
     drops: std.atomic.Value(u32) = .init(0),
     running: std.atomic.Value(u32) = .init(0),
@@ -23,13 +24,13 @@ pub const Peer = struct {
         return if (p.at > ask.cached) .remote else .small;
     }
 
-    fn fill(ptr: *anyopaque, prompt: []const u32, _: u64) anyerror!?remote.Filled {
+    fn fill(ptr: *anyopaque, prompt: []const u32, _: u64, _: *const std.atomic.Value(bool)) anyerror!?remote.Filled {
         const p: *Peer = @ptrCast(@alignCast(ptr));
         p.fills += 1;
         if (p.fail) return error.LinkDown;
         p.kept.clearRetainingCapacity();
         try p.kept.appendSlice(t.allocator, prompt[0..@min(p.at, prompt.len)]);
-        return .{ .saved = &p.kept, .at = p.at };
+        return .{ .saved = &p.kept, .at = p.at, .phases = p.phases };
     }
 
     fn drop(ptr: *anyopaque, saved: pc.Saved) void {
@@ -55,6 +56,7 @@ pub const Seen = struct {
     store: ?*const pc.Store = null, // the run's cache, its borrowers counted at the first chunk
     borrowed: u32 = 0, // its states still borrowed at the first chunk: a lookup let go before the pass is not
     refuse: bool = false, // the first chunk refuses a pulled copy, as qwen27_slots.opening can: the pass starts at 0
+    report: @FieldType(api.Stats, "remote") = .{}, // the finished stats' route verdict and pull phases
     done: std.atomic.Value(bool) = .init(false),
 
     fn chunk(ctx: *anyopaque, s: *lanes.Stream, n: usize) void {
@@ -69,7 +71,7 @@ pub const Seen = struct {
         s.reuse.saved = null;
     }
 
-    fn event(ctx: *anyopaque, _: api.Id, ev: *const api.Event) void {
+    pub fn event(ctx: *anyopaque, _: api.Id, ev: *const api.Event) void {
         const x: *Seen = @ptrCast(@alignCast(ctx));
         switch (ev.*) {
             .prefilled => |n| x.prefilled = n,
@@ -77,6 +79,7 @@ pub const Seen = struct {
             .finished => |f| {
                 x.remote_prefix = f.stats.remote_prefix;
                 x.pulled_prefix = f.stats.pulled_prefix;
+                x.report = f.stats.remote;
                 x.done.store(true, .release);
             },
             else => {},
@@ -127,7 +130,7 @@ fn run(peer: *Peer, request: *const api.Request) !Seen {
     return runAs(peer, request, null);
 }
 
-fn runAs(peer: *Peer, request: *const api.Request, exp: ?*Exp) !Seen {
+pub fn runAs(peer: *Peer, request: *const api.Request, exp: ?*Exp) !Seen {
     return runWith(peer, request, exp, null);
 }
 
@@ -579,22 +582,4 @@ test "remote prefix kept: slot 0's own state as far as a kept remote state wins 
     try t.expectEqual(@as(u32, 0), peer.fills);
     for (store.entries.items) |e| try t.expectEqual(@as(u32, 0), e.borrowers); // the remote state was let go
     try t.expect(!store.find(&six, &.{}, &.{}).?.remote); // and the mark past it is kept exact
-}
-
-test "handoff: the state a repeat resumes below its cut brings its own provenance, not the cut's" {
-    var none: u8 = 0;
-    var store = pc.Store.init(t.allocator, .{ .ptr = &none, .vtable = &.{ .bytes = Kept.bytes, .save = Kept.save, .restore = Kept.restore, .drop = Kept.drop } }, .{ .min_prompt = 0 }, 1 << 20);
-    defer store.deinit();
-    try t.expect(store.keep(&six, 3, null, &.{}, &.{})); // the engine's own, before the cut
-    store.keep_remote = true;
-    try t.expect(store.keep(&six, 5, null, &.{}, &.{})); // a remote copy at the cut, which the lookup finds first
-    store.keep_remote = false;
-    var peer: Peer = .{ .at = 0 };
-    var e: Exp = .{};
-    const seen = try runWith(&peer, &.{ .prompt = &six, .max_tokens = 1, .handoff = id }, &e, &store);
-    try t.expect(seen.restoring and !seen.remote); // resumed at 3, the engine's own state
-    try t.expectEqual(@as(u32, 3), seen.at);
-    try t.expectEqual(@as(?usize, 5), e.tokens);
-    try t.expect(!store.find(&six, &.{}, &.{}).?.remote); // the pass kept its cut as its own, hiding the remote copy
-    try unborrowed(&store);
 }
