@@ -117,7 +117,8 @@ pub const Kernels = struct {
         k.moe = try cuda.experts.RowsExperts.resolve(k.rows);
         k.native_lane = try cuda.qmmf.Lane.load(d, (try d.currentCapability()) / 10); // the current device: its tiles
         errdefer k.native_lane.unload();
-        if (envOn("TF_FLASHNEXT_PROMPT_BF16")) try k.native_lane.loadPrompt(d); // the shapes qmmf-prompt-bench times
+        const bf16 = try @import("sys").environment.read(bool, "TF_FLASHNEXT_PROMPT_BF16", true);
+        if (bf16) try k.native_lane.loadPrompt(d); // the shapes qmmf-prompt-bench times
         var device: c_int = 0;
         var sms: c_int = 0;
         try d.check(d.api.cuDeviceGet(&device, 0), "cuDeviceGet");
@@ -178,12 +179,6 @@ pub const Kernels = struct {
         k.qmm.unload();
     }
 };
-
-/// A switch on unless its variable is "0".
-fn envOn(name: [*:0]const u8) bool {
-    const v = std.c.getenv(name) orelse return true;
-    return !std.mem.eql(u8, std.mem.span(v), "0");
-}
 
 test "a split layer's DeltaNet launches, the rollback replay's front and chain too, take the _h8 twins; a whole one today's" {
     const want = [_][:0]const u8{ "fn_gdn_front_h8", "fn_gdn_rows_h8", "fn_gdn_rows_to_h8", "fn_gdn_chain_tpr_h8", "fn_gdn_fused_h8", "fn_gdn_norm_h8" };
