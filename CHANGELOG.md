@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Server: `serve --execution-witness` (off by default) adds `GET /v1/execution/witness` under the `read` key scope, a snapshot naming the running binary, the checkpoint's text files, the serve defaults and `TF_*` settings, the engine's epoch and a per-process instance, or `unknown` with its reason. It needs an API key or `--unix-socket`, hashes only after the server is ready, and no engine attests a supported path yet, so every engine reads `unsupported_path`; without the flag the route answers 404 and replies are unchanged (refs #2741).
+
 - Video input: libtfvideo decodes MPEG-4 Part 2 and H.264 streams that declare no B-frames on up to four frame threads, 2.1x to 3.4x faster on Mac and Linux, with every frame equal to before, damaged clips included; H.264 with B-frames keeps the single-threaded path, because frame threads conceal damage there differently, and a stream that contradicts its own headers falls back to it (#2863). Thanks to @swbiggart.
 - Video on Linux: `libtfvideo.so` links with a version script that exports only its four `tf_video_*` functions, so on x86_64 `zig build video` links `tools/zig/build_ffmpeg.sh`'s FFmpeg with its assembly, where before the link stopped on thousands of `R_X86_64_PC32` relocations against FFmpeg's own tables. Its frames equal PyAV 19.0.1's byte for byte on 23 clips. On aarch64 the library stops exporting FFmpeg's API; real video there is unchecked. macOS is unchanged (#2861). Thanks to @swbiggart.
 - Qwen 3.5, 3.6 and 3.8 on CUDA: decode windows of 2 to 8 rows run at 4 or 8 rows instead of being padded to 16, about 1.5% faster at four streams on a GB10, with the same tokens (#2934, fixes #2909).
