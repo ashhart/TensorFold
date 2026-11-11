@@ -216,7 +216,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
     try h.host.start();
     errdefer h.host.stop();
-    std.log.info("DeepSeek V4.1 resident loaded in {d:.1} s, {d:.2} GB admitted, {d} lane slots, context {d} tokens, greedy only", .{ model_ptr.load_seconds, @as(f64, @floatFromInt(model_ptr.admitted_bytes)) / 1e9, model_ptr.lanes, window });
+    std.log.info("DeepSeek V4.1 resident loaded in {d:.1} s, {d:.2} GB admitted, {d} lane slots, context {d} tokens", .{ model_ptr.load_seconds, @as(f64, @floatFromInt(model_ptr.admitted_bytes)) / 1e9, model_ptr.lanes, window });
     if (std.c.getenv("TF_DSV41_HANDOFF_CHECK")) |spec| @import("deepseek_v41_handoff_check.zig").run(gpa, io, model_ptr, std.mem.span(spec), try remote.checkpointId(a, io, o.dir)) catch |err|
         std.log.err("handoff-check: did not complete: {s}", .{@errorName(err)});
     if (std.c.getenv("TF_DSV41_KROW_CHECK") != null) krowCheck(model_ptr) catch |err|
