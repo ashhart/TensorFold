@@ -265,3 +265,25 @@ test "dsv41 metal serve: (e) a request cancelled during its prompt leaves the sl
     try testing.expect(gone.reason.? == .cancelled);
     try testing.expect(ok0 and ok1);
 }
+
+test "dsv41 metal serve: (f) plain rounds at four streams, drafts again at two from the target's history == serial" {
+    var ps: [4][]u32 = undefined;
+    for (&ps, 0..) |*p, i| p.* = try ids(90 + 40 * i, 20 + i);
+    defer for (ps) |p| gpa.free(p);
+    const asks = [_]Ask{ .{ .prompt = ps[0], .max = 12 }, .{ .prompt = ps[1], .max = 12 }, .{ .prompt = ps[2], .max = 60 }, .{ .prompt = ps[3], .max = 60 } };
+    var want: [4][]u32 = undefined;
+    try reference(&asks, &want);
+    defer freeAll(&want);
+    const m = try fs.open(gpa, io, seed, .{});
+    const s = try Served.open(gpa, io, m.model(), ".", null);
+    defer Served.close(s);
+    var drafted: u64 = 0;
+    var got: [4][]u32 = undefined;
+    try serve(s.engine(), &asks, true, &got, &drafted);
+    defer freeAll(&got);
+    const bad = same(&want, &got);
+    const caught = m.t.stats.history_rows;
+    say(bad == 0 and caught > 0 and drafted > 0, "(f) 4 together vs serial: {d} differ; {d} rows caught up from history, {d} drafted rows, {d} ingests", .{ bad, caught, drafted, m.ad.ingests });
+    try testing.expectEqual(@as(usize, 0), bad);
+    try testing.expect(caught > 0 and drafted > 0);
+}
