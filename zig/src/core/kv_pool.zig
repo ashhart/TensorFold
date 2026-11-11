@@ -4,10 +4,6 @@ const Allocator = std.mem.Allocator;
 pub const groups = @import("kv_groups.zig");
 const owners = @import("kv_pool_classes.zig");
 
-test {
-    _ = @import("kv_groups_test.zig");
-}
-
 /// A family's stream memory: a fixed part at any length, paged caches a token, and a kept snapshot's slot.
 pub const Layout = struct {
     /// Bytes a stream holds whatever its length: recurrent states, window scratch, its page table.
@@ -26,6 +22,8 @@ pub const Layout = struct {
     window: ?groups.Group = null,
     /// Owner classes: ids c, c + W, c + 2W ... form class c, and a lease takes every id from one (1: today's pool).
     classes: u32 = 1,
+    /// Owner classes: a token's bytes with every row on the rank (0: unnamed), which plans an unasked cache.
+    whole_bytes: u64 = 0,
 
     /// A layout whose full group is `full`, sized by its bytes a row over its layers.
     pub fn ofRows(full: groups.Group, page_tokens: u32, fixed_bytes: u64, snap_bytes: u64) Layout {
@@ -145,6 +143,7 @@ pub fn plan(l: Layout, b: Budget) error{ NoStream, TooMany }!Plan {
 
 /// `plan` over `l.classes` owner classes, and the classes a pool holds at most (kv_pool_classes.zig).
 pub const planClasses = owners.plan;
+pub const fitClasses = owners.fit; // an unasked cache lowered until every class holds a window
 pub const max_classes = owners.max;
 
 /// Whether `b.cache` fits whole in what `plan` leaves it: the room past the engine and a fixed part and page a stream.
@@ -591,6 +590,7 @@ pub const Pool = struct {
 };
 
 test {
+    _ = @import("kv_groups_test.zig");
     _ = @import("kv_pool_test.zig");
     _ = @import("kv_pool_counts_test.zig");
     _ = @import("kv_pool_walk_test.zig");
