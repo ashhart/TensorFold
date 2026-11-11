@@ -38,10 +38,11 @@ pub fn coverCheck(gpu: Gpu, checkpoint: []const u8, dc_path: []const u8, rank: c
     const comm = try openComm(gpu, &lib, rank, world, id_path);
     defer _ = lib.api.ncclCommDestroy(comm);
     var problem: []const u8 = "";
-    const set = glm.ranks.Settings.read(&glm.ranks.environment, &problem) catch |err| {
+    var set = glm.ranks.Settings.read(&glm.ranks.environment, &problem) catch |err| {
         std.debug.print("REFUSE {s}\n", .{problem});
         return err;
     };
+    glm.ranks.toolPieces(&set, &glm.ranks.environment); // TF_GLM_WORLD's rule, as before
     const e = try glm.engine.Engine.init(gpu.gpa, gpu.io, gpu.d, gpu.ctx, checkpoint, &lib, comm, @intCast(rank), @intCast(world), .{ .capacity = dc.capacity, .mtp = true, .settings = set });
     defer e.deinit();
     try e.prepareSnapshots(2 * e.stateBytes(4096));
@@ -147,10 +148,11 @@ pub fn concurrentCheck(gpu: Gpu, checkpoint: []const u8, dc_path: []const u8, ra
     const comm = try openComm(gpu, &lib, rank, world, id_path);
     defer _ = lib.api.ncclCommDestroy(comm);
     var problem: []const u8 = "";
-    const set = glm.ranks.Settings.read(&glm.ranks.environment, &problem) catch |err| {
+    var set = glm.ranks.Settings.read(&glm.ranks.environment, &problem) catch |err| {
         std.debug.print("REFUSE {s}\n", .{problem});
         return err;
     };
+    glm.ranks.toolPieces(&set, &glm.ranks.environment); // TF_GLM_WORLD's rule, as before
     const e = try glm.engine.Engine.init(gpu.gpa, gpu.io, gpu.d, gpu.ctx, checkpoint, &lib, comm, @intCast(rank), @intCast(world), .{ .capacity = dc.capacity, .mtp = true, .settings = set });
     defer e.deinit();
     var link = try glm.follow.Link.init(gpu.gpa, gpu.d, &lib, comm, e.stream, dc.capacity);
@@ -226,10 +228,11 @@ pub fn sharedCheck(gpu: Gpu, checkpoint: []const u8, dc_path: []const u8, rank: 
     const comm = try openComm(gpu, &lib, rank, world, id_path);
     defer _ = lib.api.ncclCommDestroy(comm);
     var problem: []const u8 = "";
-    const set = glm.ranks.Settings.read(&glm.ranks.environment, &problem) catch |err| {
+    var set = glm.ranks.Settings.read(&glm.ranks.environment, &problem) catch |err| {
         std.debug.print("REFUSE {s}\n", .{problem});
         return err;
     };
+    glm.ranks.toolPieces(&set, &glm.ranks.environment); // TF_GLM_WORLD's rule, as before
     const e = try glm.engine.Engine.init(gpu.gpa, gpu.io, gpu.d, gpu.ctx, checkpoint, &lib, comm, @intCast(rank), @intCast(world), .{ .capacity = dc.capacity, .mtp = true, .settings = set });
     defer e.deinit();
     var link = try glm.follow.Link.init(gpu.gpa, gpu.d, &lib, comm, e.stream, dc.capacity);
