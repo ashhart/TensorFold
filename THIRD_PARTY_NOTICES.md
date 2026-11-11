@@ -335,7 +335,7 @@ These follow a model's release code or a library's model code for their math, ro
 - `zig/src/vision/qwen_cuda.zig`: `Qwen3_5VisionModel` in transformers.
 - `zig/src/core/picture/patches_test.zig`: recorded image-processor output data from `Lfm3VlImageProcessor` and `Qwen2VLImageProcessor` in transformers; the processing implementation is described below.
 - `zig/src/families/flashnext/rotary_config.zig`: `_compute_yarn_parameters` in transformers, for the 64 rotary dims.
-- `zig/kernels/metal/idol.metal`: the rounding points of Idol's denoiser in [speridlabs/idol-sdk](https://github.com/speridlabs/idol-sdk) at `4702a7f0`. Copyright speridlabs, Apache License 2.0; see [the license text](LICENSES/Apache-2.0.txt).
+- `zig/kernels/metal/idol.metal`, `zig/kernels/cuda/idol.cu` and `zig/kernels/cuda/idol_attention.cuh`: the rounding points of Idol's denoiser in [speridlabs/idol-sdk](https://github.com/speridlabs/idol-sdk) at `4702a7f0`. Copyright speridlabs, Apache License 2.0; see [the license text](LICENSES/Apache-2.0.txt).
 
 transformers is Copyright The HuggingFace Team, Apache License 2.0; see [the license text](LICENSES/Apache-2.0.txt).
 
