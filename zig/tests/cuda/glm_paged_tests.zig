@@ -125,9 +125,14 @@ pub fn pagedCheck(gpu: Gpu, checkpoint: []const u8, rank: c_int, world: c_int, i
         std.debug.print("FAIL paged: no layer attended owner-computed; the check did not reach a stream's owner-only rows\n", .{});
         failed = true;
     }
+    if (classes > 1 and owned.fetches == 0) {
+        std.debug.print("FAIL paged: no prompt chunk fetched its history; the check did not reach a chunk past a stream's first\n", .{});
+        failed = true;
+    }
     if (failed) return error.TestFailed;
     check.pass("pages at TP={d}{s}: on the engine's own sequence, {d} prompts at the pages' edges and past them (511 to 30,001 tokens) and {d} window rows equal their twins' logits, tokens and drafts byte for byte, pages out of order ({d} jumps) and NaN before use; the pool idle after", .{ world, if (classes > 1) " on owner classes (TF_GLM_KV_SPLIT), each stream's latent rows on its owner alone" else "", lengths.len, compared, unordered });
     if (classes > 1) std.debug.print("  owner-computed: {d} layers, {d} rows, {d} bytes sent by rank 0\n", .{ owned.layers, owned.rows, owned.bytes });
+    if (classes > 1) std.debug.print("  history fetched: {d} layers, {d} rows, {d} bytes on rank 0\n", .{ owned.fetches, owned.fetched, owned.fetch_bytes });
 }
 
 /// A prompt in the lanes' steps, a chunk at a time as served: the first token.
