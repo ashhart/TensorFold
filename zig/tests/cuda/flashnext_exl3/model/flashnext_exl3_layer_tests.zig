@@ -236,7 +236,7 @@ pub fn layerCheck(gpu: Gpu, r: *Rig, raw: *const RawPack, lw: *const pl.Layer, l
     const prefill = 8;
     if (lw.exl3) |x| {
         if (x.needsPool())
-            _ = try X.pass.attach(gpu.gpa, gpu.io, gpu.d, r.stream, lw[0..1], null, prefill, .{ .lines = experts_n, .max_rows = prefill }, null);
+            _ = try X.pass.attach(gpu.gpa, gpu.io, gpu.d, r.stream, null, lw[0..1], null, prefill, .{ .lines = experts_n, .max_rows = prefill }, null);
     }
     var t0 = check.now(gpu.io);
     const o = try Oracle.create(a, raw, l, r.store.norm_offset, r.cap);
