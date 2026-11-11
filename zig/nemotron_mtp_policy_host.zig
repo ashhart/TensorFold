@@ -204,6 +204,8 @@ test "mtp policy: the inherited policy works through 31 drafts and a resumed sha
 
 test "mtp policy: shared latent windows keep the side stream on one GPU and two ranks keep one stream" {
     var f: nemo.Forward = undefined;
+    const w: nemo.weights.Weights = .{ .gpa = std.testing.allocator, .config = undefined }; // no latent layers: no pass
+    f.w = &w;
     f.c.latent = 512;
     f.side = .{ .s = undefined, .fork = undefined, .join = undefined };
     f.tp = null;
