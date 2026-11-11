@@ -1,6 +1,6 @@
 #!/bin/bash
 # one test binary at a time on card 0; log per binary
-export ZE_AFFINITY_MASK=0 XPU_GUARD_PDEV=0000:04:00.0 LC_ALL=C
+export ZE_AFFINITY_MASK=0 LC_ALL=C
 R=$WORK
 MP=$MODELS/Qwen3.8-27B-GPTQ-Int4-sym-G128-MTP-BF16
 for S in main branch; do
