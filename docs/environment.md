@@ -69,7 +69,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_GLM_KV_HOST_GIB` | GLM on CUDA: a finite GiB amount of at least 0 for the DSA layers' pinned host pages; unset or blank uses one full window and 16 rows a page |
 | `TF_GLM_RANK` | GLM-5.3-Flash on CUDA: a whole rank index from 0 through 4294967295, set with `TF_GLM_WORLD`; unset with it gives one rank |
 | `TF_GLM_WORLD` | GLM-5.3-Flash on CUDA: a whole rank count from 1 through 4294967295, set with `TF_GLM_RANK`; unset with it gives one rank |
-| `TF_GLM_KV_SPLIT` | Exactly `0`, `off`, `1` or `on`; default off (each stream's GLM KV pages from one owner class; [profiles](profiles.md)) |
+| `TF_GLM_KV_SPLIT` | Exactly `0`, `off`, `1` or `on`; default off (each stream's GLM KV pages from one owner class, its latent rows on the owner rank alone: about 1.89 times the tokens at TP=2; kept prompt states are refused, so serve it with `--prompt-cache-gib 0` and without `--learn-conversations`; [profiles](profiles.md)) |
 | `TF_NEMOTRON_RANK` | Nemotron 3.5 Super on CUDA: a whole rank index from 0 through 4294967295, set with `TF_NEMOTRON_WORLD`; unset with it gives one rank |
 | `TF_NEMOTRON_WORLD` | Nemotron 3.5 Super on CUDA: a whole rank count from 1 through 4294967295, set with `TF_NEMOTRON_RANK`; unset with it gives one rank |
 | `TF_MINIMAX_RANK` | MiniMax-M3.1-Flash on CUDA: a whole rank index, 0 or 1 at two ranks, set with `TF_MINIMAX_WORLD`; unset with it gives one rank |
