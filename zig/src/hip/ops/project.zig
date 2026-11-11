@@ -36,19 +36,28 @@ pub fn project(o: Ops, x: Tensor, proj: Projection, m: usize, f32_out: bool) Err
         .mlx => |h| return affine(o, x, affineOf(proj, h), m, f32_out),
         .dense => |h| switch (h.dtype) {
             .f32 => {
-                if (f32_out or m == 0 or x.kind == .f32) return error.BadShape;
+                if (f32_out or m == 0 or x.kind == .f32) {
+                    std.log.err("PROBE dense f32: m={d} n={d} k={d} x={t} f32_out={}", .{ m, proj.n, proj.k, x.kind, f32_out });
+                    return error.BadShape;
+                }
                 const out: Tensor = .{ .ptr = try o.arena.take(m * proj.n * x.kind.size()), .kind = x.kind };
                 try denseRows(o, x, h.weight, out, m, proj.n, proj.k);
                 return out;
             },
             .bf16 => {
-                if (m == 0 or x.kind != .bf16) return error.BadShape;
+                if (m == 0 or x.kind != .bf16) {
+                    std.log.err("PROBE dense bf16: m={d} n={d} k={d} x={t} f32_out={}", .{ m, proj.n, proj.k, x.kind, f32_out });
+                    return error.BadShape;
+                }
                 const kind: t.Kind = if (f32_out) .f32 else .bf16;
                 const out: Tensor = .{ .ptr = try o.arena.take(m * proj.n * kind.size()), .kind = kind };
                 try denseGemm(o, o.l.dense.serve, x, h.weight, out, m, proj.n, proj.k);
                 return out;
             },
-            else => return error.BadShape,
+            else => {
+                std.log.err("PROBE dense dtype {t}: m={d} n={d} k={d}", .{ h.dtype, m, proj.n, proj.k });
+                return error.BadShape;
+            },
         },
         .bf16 => |h| {
             if (f32_out or m == 0 or x.kind != .bf16) return error.BadShape;
