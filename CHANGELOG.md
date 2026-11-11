@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Tests: video budgets again cover the common valid-setting matrix and reject storage-maximum advice in refusals (#1441). Thanks to @BlivionIaG.
+
 - EXL3 TP head sharding and MTP residency use registered, strict `0`/`1` settings; blank is unset and malformed text refuses before expert allocation. The TP memory runner propagates the same refusals (#1442).
 
 - CUDA EXL3 Flash Next adds expert-parallel TP and MTP drafts, preserving the first slice's canonical expert reduction order and main's prepared prompt-mark snapshots (#1442).
