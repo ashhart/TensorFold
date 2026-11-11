@@ -4,6 +4,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Internal: `Admit` and `Ledger` move unchanged from `core/engine_api.zig` to `core/engine_admission.zig` and keep their names under `engine_api`, so `engine_api.zig` has room for the execution witness's hook; nothing a user sees changes (refs #2741).
 - GLM-5.3-Flash on CUDA: tensor-parallel shares and layer sums go through one mesh layer (declared shares, one reduction boundary over a `Collective`), with the same gathers, bytes and order and tokens equal to main at TP=2; an aborted `tp_group` call now ends as `Aborted` instead of stopping the process (#2789, part of #2560). Thanks to @laudney.
 
 - Tensor parallel on CUDA: with `TF_ROCE=1` on every rank, three ranks or more take the one-shot RoCE all-gather for decode-sized gathers, byte-equal to NCCL's, falling back to NCCL with one warning when a peer can't be reached, and GLM-5.3-Flash's DFlash2 drafter MLP splits across every rank; without it they keep NCCL, two ranks run as before, and MiniMax-M3 keeps NCCL at three ranks or more. With `TF_ROCE=1`, GLM-5.3-Flash decode is about 6% faster at one and two streams on three GB10s (four streams level) and 12.9%, 10.4% and 6.6% faster at one, two and four streams on four GB10s, with the target's tokens unchanged; drafter acceptance can move slightly, since the split MLP sums in another order (#2205). Thanks to @shanedertrain.
