@@ -46,6 +46,7 @@ test {
     _ = @import("kernel_tests/gdn.zig");
     _ = @import("kernel_tests/gdn_bits.zig");
     _ = @import("kernel_tests/gdn_plan.zig");
+    _ = @import("kernel_tests/gdn_window.zig");
     _ = @import("kernel_tests/mamba.zig");
     _ = @import("kernel_tests/decode.zig");
     _ = @import("kernel_tests/tail_pin.zig");
