@@ -124,11 +124,74 @@ test "a stream's first draft ask waits for its first round; the replies stay the
     }
 }
 
+test "a stream drafts no round until its burst has formed or its second ask while never wide" {
+    // staggered arrival, plain_streams 3: the burst forms at the third stream, from which every stream drafts
+    const dims: twin.Dims = .{ .bigram = 8.0, .head = 0.08 };
+    {
+        const t = try twin.Twin.init(gpa, dims, 5);
+        defer t.deinit();
+        const d = try twin.Drafter.init(gpa, t, 5);
+        defer d.deinit();
+        var c = try costs_mod.defaults(gpa, 64);
+        defer c.deinit(gpa);
+        const x = try ln.Lanes.init(gpa, t.target(), d.pass(), c, .{ .shape = d.shape, .slots = 4, .depth = .{ .plain_streams = 3 }, .spec = .{ .on = true } });
+        defer x.deinit();
+        var arena = std.heap.ArenaAllocator.init(gpa);
+        defer arena.deinit();
+        var cfg = try lanes.Config.init(gpa, try x.model(arena.allocator(), 64), 16, 15);
+        defer cfg.deinit(gpa);
+        var clock: lanes.fake.FixedClock = .{};
+        var e = lanes.Engine.init(gpa, &cfg, x.backend(), clock.clock());
+        defer e.deinit();
+        x.attach(&e);
+        const streams = try gpa.alloc(lanes.Stream, 4);
+        defer gpa.free(streams);
+        var i: usize = 0;
+        var steps: u64 = 0;
+        while (e.activeCount() > 0 or i < 4) {
+            try e.step();
+            steps += 1;
+            if (i < 4) {
+                const s = &streams[i];
+                s.* = try lanes.Stream.init(gpa, .{ .id = "s", .prompt = &a1, .max_new = 40 });
+                try e.addStream(s);
+                i += 1;
+            }
+            if (steps > 400) return error.TooManySteps;
+        }
+        defer for (streams) |*s| s.deinit(gpa);
+        var ok = true;
+        for (streams) |*s| ok = ok and s.emitted().len > 0;
+        try std.testing.expect(ok);
+        try std.testing.expect(d.passes > 0); // the burst formed at three streams: the later rounds draft
+        try std.testing.expect(e.drafted > 0);
+        // tokens equal to the serial reference
+        for (streams) |*s| {
+            const want = try t.serial(0, &a1, 40, null, null);
+            defer gpa.free(want);
+            try std.testing.expectEqualSlices(u32, want, s.emitted());
+        }
+    }
+    // the truly-lone control: one stream admitted alone drafts from its second ask
+    const lone = try runPlain(&.{&a1}, .{ .plain_streams = 3 }, &.{40});
+    defer freeRun(@constCast(&lone));
+    try std.testing.expect(lone.ok);
+    try std.testing.expect(lone.drafted > 0);
+    try std.testing.expect(lone.passes > 0);
+    {
+        const t = try twin.Twin.init(gpa, dims, 1);
+        defer t.deinit();
+        const want = try t.serial(0, &a1, 40, null, null);
+        defer gpa.free(want);
+        try std.testing.expectEqualSlices(u32, want, lone.out[0]);
+    }
+}
+
 test "below the threshold a stream drafts on its first ask; drafting resumes once streams finish" {
     const four = [_][]const u32{ &a1, &a1, &a1, &a1 };
     const dims: twin.Dims = .{ .bigram = 8.0, .head = 0.08 };
     const fours = [_]u32{ 40, 40, 40, 40 };
-    // the threshold not reached (1-2 active): the first ask drafts as usual
+    // the threshold not reached (1-2 active): the first ask is held, the second drafts
     const one = try runPlain(four[0..1], .{ .plain_streams = 3 }, fours[0..1]);
     defer freeRun(@constCast(&one));
     try std.testing.expect(one.ok);
@@ -139,7 +202,7 @@ test "below the threshold a stream drafts on its first ask; drafting resumes onc
     try std.testing.expect(two.ok);
     try std.testing.expect(two.drafted > 0);
     try std.testing.expect(two.passes > 0);
-    // 4 streams, two finish early: the first asks are skipped, drafting resumes at 2 active
+    // 4 streams, two finish early: admitted four-deep, the burst has formed from round one, so every ask drafts
     const twos = [_]u32{ 6, 6, 40, 40 };
     const mixed = try runPlain(&four, .{ .plain_streams = 3 }, &twos);
     defer freeRun(@constCast(&mixed));
