@@ -244,7 +244,6 @@ fn openRank(a: StartArgs, set: ranks.Settings) !Loaded {
     if (a.share > 0 and !set.pages) return error.GlmShareNeedsPages;
     if (@import("cuda_kv_host.zig").onHost() and !set.pages) return error.GlmKvHostNeedsPages;
     try startup.sharing(set.kv_split, a.share);
-    try startup.learning(set.kv_split, o.learn_conversations);
     cuda.memory_receipt.emit(@intCast(p.rank), .load_begin, true); // the four phases tools/memory_receipts.py reads
     const own = try gpa.create(Owned);
     errdefer gpa.destroy(own);
@@ -574,7 +573,7 @@ test "TF_KV_PAGES with --kv-cache fp8: auto and off keep windows at every rank c
         try std.testing.expect(!try paging("0", w, true));
         for ([_][]const u8{ "on", "1", "all" }) |v| try std.testing.expectError(error.Fp8OnPages, paging(v, w, true));
     }
-    for ([_]anyerror{ error.Fp8OnPages, error.GlmKvHostNeedsPages, error.KvSplitNeedsRanks, error.KvSplitNeedsPages, error.KvSplitOnHost, error.KvSplitShare, error.KvSplitLearn, error.KvSplitAway, error.KvSplitRoom, error.ClassTooSmall, error.ResidueMismatch, error.BadClasses }) |e| try std.testing.expect(explain(null, e) != null);
+    for ([_]anyerror{ error.Fp8OnPages, error.GlmKvHostNeedsPages, error.KvSplitNeedsRanks, error.KvSplitNeedsPages, error.KvSplitOnHost, error.KvSplitShare, error.KvSplitAway, error.KvSplitRoom, error.ClassTooSmall, error.ResidueMismatch, error.BadClasses }) |e| try std.testing.expect(explain(null, e) != null);
 }
 
 test "the plan's window, the context and a verify window, takes the pages of a stream's table at that capacity" {

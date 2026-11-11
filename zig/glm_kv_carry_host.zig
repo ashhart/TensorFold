@@ -233,3 +233,97 @@ test "GLM KV split carry: a restore off its home moves each rank's own parts and
     try t.expectError(error.KvSplitAway, f[0].e.restoreState(ids[0]));
     for (&f) |*x| x.e.cur = &x.seq;
 }
+
+/// The host copies a disk image takes (cuda.memory's download and upload), on host memory.
+const Host = struct {
+    fn dtoh(dst: ?*anyopaque, src: u64, n: usize) callconv(.c) cuda.abi.Result {
+        @memcpy(@as([*]u8, @ptrCast(dst.?))[0..n], rec.bytes(src, n));
+        return 0;
+    }
+    fn htod(dst: u64, src: ?*const anyopaque, n: usize) callconv(.c) cuda.abi.Result {
+        @memcpy(rec.bytes(dst, n), @as([*]const u8, @ptrCast(src.?))[0..n]);
+        return 0;
+    }
+    fn device(out: *cuda.abi.Device) callconv(.c) cuda.abi.Result {
+        out.* = 0;
+        return 0;
+    }
+    fn attribute(out: *c_int, _: cuda.abi.DeviceAttribute, _: cuda.abi.Device) callconv(.c) cuda.abi.Result {
+        out.* = 0; // a discrete card: a download copies straight to the host
+        return 0;
+    }
+};
+
+test "GLM KV split disk: each rank's image holds its own parts, the home's the latent rows; read back, resumed equals kept" {
+    const img = glm.disk_image;
+    var d = rec.init();
+    d.api.cuMemcpyDtoH_v2 = Host.dtoh;
+    d.api.cuMemcpyHtoD_v2 = Host.htod;
+    d.api.cuCtxGetDevice = Host.device;
+    d.api.cuDeviceGetAttribute = Host.attribute;
+    var f: [2]Fixture = undefined;
+    for (&f, 0..) |*x, r| try x.init(&d, r, 2, true);
+    defer for (&f) |*x| x.deinit();
+    var pg: [2]Pages = undefined;
+    for (&pg) |*p| p.* = try Pages.init(&d, f[0].e.c);
+    defer for (&pg) |*p| p.kv.free();
+    var odd_at: [cap]u32 = undefined;
+    for (&odd_at, odd) |*o, x| o.* = x / 2;
+    var kept: [2]Seq = .{ try pg[0].seq(&d, &f[0], &odd, 1, &.{}), try pg[1].seq(&d, &f[1], &odd, 1, &odd_at) };
+    defer for (&kept) |*k| k.st.deinit();
+    for (0..2) |r| {
+        const e = &f[r].e;
+        fill(pg[r].kv, 23 + r);
+        fill(kept[r].st.arena.buf, 29 + r);
+        try kept[r].st.restoreHost(e.stream, at, at, &.{1}, .{ 1024, 1024 }); // rings that still hold the state's rows
+        const want = try parts(&try Plan.init(&kept[r].st, &e.c, at, at, 0));
+        defer free(want);
+        try e.prepareSnapshots(4 * e.stateBytes(at));
+        e.cur = &kept[r];
+        defer e.cur = &f[r].seq;
+        const id = try e.keepState();
+        // out: this rank's image, its latent runs absent off the home
+        const sh = try img.Shape.of(&kept[r].st, &e.c, e.capacity, true);
+        var segs: std.ArrayList(img.Seg) = .empty;
+        defer segs.deinit(t.allocator);
+        try img.segments(sh, at, at, &segs, t.allocator, r == 1);
+        const last = segs.items[segs.items.len - 1];
+        const bytes = try t.allocator.alloc(u8, @intCast(last.img + last.len));
+        defer t.allocator.free(bytes);
+        @memset(bytes, 0);
+        const s = e.snaps.get(id).?;
+        var words = (img.Words{ .at = at, .mtp_len = at, .base = s.bases[0], .mtp_base = s.bases[1], .cur = 1, .world = 2, .layout = .split, .owner = 1 }).encode();
+        var absent: u64 = 0;
+        for (segs.items) |g| {
+            if (g.from == .absent) {
+                absent += g.len;
+                continue;
+            }
+            const cp: img.Copy = .{ .d = &d, .pool = &e.snap_pages.?, .lease = &s.lease, .segs = segs.items, .words = &words };
+            try cp.run(g.img, bytes[@intCast(g.img)..][0..@intCast(g.len)], true);
+        }
+        try t.expectEqual(r == 0, absent > 0); // the home's image has every byte
+        // in: a blank state at home 1, filled from the image, sealed by its words
+        try glm.snapshots.blankAs(e, 99, at, 1);
+        var back: [img.Words.count]u64 = undefined;
+        const b = e.snaps.get(99).?;
+        for (segs.items) |g| if (g.from != .absent) {
+            const cp: img.Copy = .{ .d = &d, .pool = &e.snap_pages.?, .lease = &b.lease, .segs = segs.items, .words = &back };
+            try cp.run(g.img, bytes[@intCast(g.img)..][0..@intCast(g.len)], false);
+        };
+        const w = try img.Words.decode(back, at, 2, .split);
+        try t.expectEqual(@as(u64, 1), w.owner);
+        try t.expectError(error.DiskLayout, img.Words.decode(back, at, 2, .unsplit)); // an unsplit server refuses it
+        try glm.snapshots.seal(e, 99, @intCast(w.mtp_len), .{ w.base, w.mtp_base }, w.cur);
+        try t.expectEqual(e.snaps.get(id).?.len, e.snaps.get(99).?.len); // the copy's own bytes, as the keep's
+        try t.expectEqual(@as(?u32, 1), e.snaps.get(99).?.home);
+        // resumed at home from the read: every byte this rank's plan holds is the kept one
+        @memset(rec.bytes(pg[r].kv.ptr, pg[r].kv.len), 0xE9);
+        @memset(rec.bytes(kept[r].st.arena.buf.ptr, kept[r].st.arena.buf.len), 0xE9);
+        try e.restoreState(99);
+        const have = try parts(&try Plan.init(&kept[r].st, &e.c, at, at, 0));
+        defer free(have);
+        for (want, have) |x, y| try t.expectEqualSlices(u8, x.items, y.items);
+        try t.expectError(error.BadStep, glm.snapshots.blankAs(e, 100, at, 2)); // a home past the ranks
+    }
+}

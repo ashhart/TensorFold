@@ -146,7 +146,7 @@ test "GLM disk image: the store's rows are by position from 0 in whole blocks; r
     defer segs.deinit(a);
     const at: u32 = 6144;
     try image.parts(sh, at, &list, a);
-    try image.segments(sh, at, at, &segs, a);
+    try image.segments(sh, at, at, &segs, a, true);
     var total: u64 = 0;
     var rows: usize = 0;
     for (list.items) |p| {
@@ -160,7 +160,7 @@ test "GLM disk image: the store's rows are by position from 0 in whole blocks; r
     const last = segs.items[segs.items.len - 1];
     try expectEqual(total, last.img + last.len);
     try expectEqual(@as(u64, 2 * 256), list.items[7].bytes); // layer 0's pools past `at`: the spare rows
-    try expectError(error.SnapshotShape, image.segments(sh, at, sh.headRows(at) + 1, &segs, a));
+    try expectError(error.SnapshotShape, image.segments(sh, at, sh.headRows(at) + 1, &segs, a, true));
 }
 
 test "GLM disk image: a kept state's image read out of its lease restores every planned byte into another sequence" {
@@ -184,7 +184,7 @@ test "GLM disk image: a kept state's image read out of its lease restores every 
     try pool.move(stream, &kept, &plan, true);
     var segs: std.ArrayList(image.Seg) = .empty;
     defer segs.deinit(a);
-    try image.segments(sh, at, mtp, &segs, a);
+    try image.segments(sh, at, mtp, &segs, a, true);
     const last = segs.items[segs.items.len - 1];
     const img = try a.alloc(u8, @intCast(last.img + last.len));
     defer a.free(img);
@@ -236,7 +236,7 @@ test "GLM disk image: the store's image is rank 0's then each other rank's prefi
     const cuts = [_]u64{ 0, 40, image.Words.bytes + sh.prefix - 8, image.imageBytes(sh, at) + 100, total }; // ranges across the seams
     for (cuts[0 .. cuts.len - 1], cuts[1..]) |lo, hi| {
         pieces.clearRetainingCapacity();
-        try image.route(sh, &prefixes, at, lo, hi - lo, &pieces, a);
+        try image.route(sh, &prefixes, at, lo, hi - lo, &pieces, a, null);
         var n: u64 = 0;
         for (pieces.items) |p| {
             n += p.len;
@@ -251,7 +251,7 @@ test "GLM disk image: the store's image is rank 0's then each other rank's prefi
     try expectEqual(prefixes[1], seen[1]);
     try expectEqual(prefixes[2], seen[2]);
     try expectEqual(image.imageBytes(sh, at) - image.Words.bytes - sh.prefix, shared);
-    try expectError(error.SnapshotShape, image.route(sh, &prefixes, at, total - 4, 8, &pieces, a));
+    try expectError(error.SnapshotShape, image.route(sh, &prefixes, at, total - 4, 8, &pieces, a, null));
 }
 
 /// The fields of an engine the kept-state functions read, over a host-memory driver.
@@ -283,12 +283,12 @@ test "GLM disk image: a disk read's blank state is refused until sealed, and its
     try e.snaps.ensureTotalCapacity(a, 8);
     defer e.snaps.deinit(a);
     const at: u32 = 2048;
-    try snaps.blankAs(&e, 7, at);
+    try snaps.blankAs(&e, 7, at, null);
     defer {
         var s = e.snaps.get(7).?;
         snaps.free(&e, &s);
     }
-    try expectError(error.StateKept, snaps.blankAs(&e, 7, at));
+    try expectError(error.StateKept, snaps.blankAs(&e, 7, at, null));
     try expectError(error.UnsealedState, snaps.restore(&e, 7));
     try expectError(error.DiskWords, snaps.seal(&e, 7, at + @import("cuda_state.zig").window_rows + 1, .{ 0, 0 }, 0)); // a head past its verify window
     try expectError(error.DiskWords, snaps.seal(&e, 7, at, .{ 0, 0 }, @as(u64, 1) << @intCast(e.cur.st.cur.len))); // a copy bit no layer has
@@ -304,7 +304,7 @@ test "GLM disk image: a disk read's blank state is refused until sealed, and its
     try expectError(error.StateKept, snaps.seal(&e, 7, at, .{ 0, 0 }, 0));
     const far: u32 = capacity - 1024; // a state past the rings' rows
     const back: u32 = far - @as(u32, @intCast(e.cur.st.ring_rows)); // the least base whose ring still holds its rows
-    try snaps.blankAs(&e, 8, far);
+    try snaps.blankAs(&e, 8, far, null);
     defer {
         var held = e.snaps.get(8).?;
         snaps.free(&e, &held);
@@ -312,7 +312,7 @@ test "GLM disk image: a disk read's blank state is refused until sealed, and its
     try expectError(error.DiskWords, snaps.seal(&e, 8, far, .{ back - 1, back }, 0)); // a main ring too far back
     try expectError(error.DiskWords, snaps.seal(&e, 8, far, .{ back, back - 1 }, 0)); // a head ring too far back
     try snaps.seal(&e, 8, far, .{ back, back }, 0);
-    try snaps.blankAs(&e, 9, far);
+    try snaps.blankAs(&e, 9, far, null);
     defer {
         var held = e.snaps.get(9).?;
         snaps.free(&e, &held);
@@ -356,7 +356,7 @@ fn storeImage(a: std.mem.Allocator, d: *const cuda.Driver, pool: *pages.Pool, st
     try pool.move(.{ .d = d, .handle = null }, &kept, &plan, true);
     var segs: std.ArrayList(image.Seg) = .empty;
     defer segs.deinit(a);
-    try image.segments(sh, at, mtp, &segs, a);
+    try image.segments(sh, at, mtp, &segs, a, true);
     const own = image.imageBytes(sh, at);
     const out = try a.alloc(u8, @intCast(own + sh.prefix));
     errdefer a.free(out);
@@ -410,4 +410,128 @@ test "GLM disk image: the probe's hash leaves out what a prompt pass does not wr
         image.clear(loose.items, 0, changed);
         try expect(!std.mem.eql(u8, before, changed));
     }
+}
+
+test "GLM disk image: a split copy off its home lacks the latent runs, its lease the rest in order, asked for none" {
+    var m: Model = undefined;
+    try m.init();
+    var d = H.driver();
+    const a = std.testing.allocator;
+    var st = try State.initFormat(a, &d, &m.w, capacity, false);
+    defer st.deinit();
+    const sh = try image.Shape.of(&st, &m.w.config, capacity, true);
+    const at: u32 = 4096;
+    var runs: std.ArrayList([2]u64) = .empty;
+    defer runs.deinit(a);
+    try image.latentRuns(sh, at, &runs, a);
+    try expectEqual(@as(usize, sh.layers + 1), runs.items.len); // each DSA layer's, then the head's
+    for (runs.items[0..sh.layers]) |r| try expectEqual(@as(u64, at) * sh.latent, r[1]);
+    try expectEqual(@as(u64, sh.headRows(at)) * sh.latent, runs.items[sh.layers][1]);
+    for ([_]u64{ at, at - 1, 0 }) |mtp| {
+        var home: std.ArrayList(image.Seg) = .empty;
+        defer home.deinit(a);
+        var off: std.ArrayList(image.Seg) = .empty;
+        defer off.deinit(a);
+        try image.segments(sh, at, mtp, &home, a, true);
+        try image.segments(sh, at, mtp, &off, a, false);
+        var absent: usize = 0;
+        var next: u64 = 0; // lease bytes follow each other, the absent runs left out
+        var img: u64 = 0; // and the image's bytes each once, in order
+        for (off.items) |s| {
+            try expectEqual(img, s.img);
+            img += s.len;
+            switch (s.from) {
+                .absent => {
+                    try expectEqual(runs.items[absent], [2]u64{ s.img, s.len });
+                    absent += 1;
+                },
+                .lease => |l| {
+                    try expectEqual(next, l);
+                    next += s.len;
+                },
+                else => {},
+            }
+        }
+        try expectEqual(runs.items.len, absent);
+        var lat: u64 = 0;
+        for (runs.items[0..sh.layers]) |r| lat += r[1];
+        try expectEqual(image.leaseBytes(sh, at, mtp) - lat - mtp * sh.latent, next); // the head's latent rows too
+        const last = home.items[home.items.len - 1];
+        try expectEqual(last.img + last.len, img); // the same image, home or not
+    }
+    // asked for an absent run, a copy refuses by name and reads nothing
+    var segs: std.ArrayList(image.Seg) = .empty;
+    defer segs.deinit(a);
+    try image.segments(sh, at, at, &segs, a, false);
+    var pool = try pages.Pool.init(a, &d, 64 << 20, false);
+    defer pool.deinit();
+    var lease = try pool.take(@intCast(image.leaseBytes(sh, at, at)));
+    defer pool.give(&lease);
+    var words: [image.Words.count]u64 = @splat(0);
+    const cp: image.Copy = .{ .d = &d, .pool = &pool, .lease = &lease, .segs = segs.items, .words = &words };
+    var buf: [64]u8 = undefined;
+    try expectError(error.KvSplitAbsent, cp.run(runs.items[0][0] + 8, &buf, true));
+    try cp.run(runs.items[0][0] - 64, &buf, true); // the bytes before it are this copy's
+}
+
+test "GLM disk image: a split state's latent runs route to its home at the home's offsets, every other byte as before" {
+    var m: Model = undefined;
+    try m.init();
+    var d = H.driver();
+    const a = std.testing.allocator;
+    var st = try State.initFormat(a, &d, &m.w, capacity, true);
+    defer st.deinit();
+    const sh = try image.Shape.of(&st, &m.w.config, capacity, true);
+    const at: u32 = 4096;
+    const prefixes = [_]u64{ sh.prefix, sh.prefix + 512 };
+    var runs: std.ArrayList([2]u64) = .empty;
+    defer runs.deinit(a);
+    try image.latentRuns(sh, at, &runs, a);
+    var lat: u64 = 0;
+    for (runs.items) |r| lat += r[1];
+    const total = image.imageBytes(sh, at) + prefixes[1];
+    var pieces: std.ArrayList(image.Piece) = .empty;
+    defer pieces.deinit(a);
+    for ([_]u32{ 0, 1 }) |home| {
+        var seen: [2]u64 = .{ 0, 0 };
+        var shared: u64 = 0;
+        var homed: u64 = 0;
+        const cuts = [_]u64{ 0, 40, runs.items[0][0] + 100, runs.items[1][0] + 7, image.imageBytes(sh, at) + 100, total };
+        for (cuts[0 .. cuts.len - 1], cuts[1..]) |lo, hi| {
+            pieces.clearRetainingCapacity();
+            try image.route(sh, &prefixes, at, lo, hi - lo, &pieces, a, home);
+            var n: u64 = 0;
+            for (pieces.items) |p| {
+                n += p.len;
+                seen[p.rank] += p.len;
+                if (p.shared) shared += p.len;
+                if (p.rank != home or p.shared or p.off < image.Words.bytes + prefixes[home]) continue; // its own prefix
+                const img = p.off + prefixes[0] - prefixes[home]; // where it sits in rank 0's image
+                for (runs.items) |r| if (img >= r[0] and img < r[0] + r[1]) {
+                    try expect(img + p.len <= r[0] + r[1]);
+                    homed += p.len;
+                };
+            }
+            try expectEqual(hi - lo, n);
+        }
+        try expectEqual(lat, homed); // every latent byte to the home, none shared
+        try expectEqual(image.imageBytes(sh, at) - image.Words.bytes - sh.prefix - lat, shared);
+        try expectEqual(total, seen[0] + seen[1]);
+    }
+    try expectError(error.SnapshotShape, image.route(sh, &prefixes, at, 0, 8, &pieces, a, 2)); // a home past the ranks
+}
+
+test "GLM disk image: the bytes past a probe's loose spans are read alone, so a copy off the home reads no latent run" {
+    const a = std.testing.allocator;
+    var out: std.ArrayList(image.Span) = .empty;
+    defer out.deinit(a);
+    const spans = [_]image.Span{ .{ .off = 40, .len = 10 }, .{ .off = 0, .len = 5 }, .{ .off = 45, .len = 15 }, .{ .off = 70, .len = 0 }, .{ .off = 90, .len = 30 } };
+    try image.gaps(&spans, 100, &out, a);
+    try std.testing.expectEqualSlices(image.Span, &.{ .{ .off = 5, .len = 35 }, .{ .off = 60, .len = 30 } }, out.items);
+    out.clearRetainingCapacity();
+    try image.gaps(&.{}, 8, &out, a);
+    try std.testing.expectEqualSlices(image.Span, &.{.{ .off = 0, .len = 8 }}, out.items);
+    out.clearRetainingCapacity();
+    try image.gaps(&.{.{ .off = 0, .len = 8 }}, 8, &out, a);
+    try expectEqual(@as(usize, 0), out.items.len);
 }

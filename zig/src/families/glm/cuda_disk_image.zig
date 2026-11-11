@@ -23,8 +23,8 @@ pub const Words = struct {
     pub const bytes: u64 = count * 8;
     const format: u64 = 1;
 
-    /// Which rows each rank's image holds: unsplit, every rank every row (the only layout written so far).
-    pub const Layout = enum(u64) { unsplit = 0, _ };
+    /// Which rows each rank's image holds: unsplit, every row; split (TF_GLM_KV_SPLIT), latent rows on `owner` alone.
+    pub const Layout = enum(u64) { unsplit = 0, split = 1, _ };
     pub const no_owner: u64 = std.math.maxInt(u64);
 
     pub fn encode(w: Words) [count]u64 {
@@ -45,8 +45,8 @@ pub const Words = struct {
 /// A part as the rows store takes it: `row` bytes for each `per` tokens from position 0, or the state's own (row 0).
 pub const Part = struct { bytes: u64, row: u32 = 0, per: u32 = 1 };
 
-/// `len` image bytes from `img`: the words, `lease` bytes into the state's lease, or zeros the lease does not hold.
-pub const Seg = struct { img: u64, len: u64, from: union(enum) { words, lease: u64, zeros } };
+/// `len` image bytes from `img`: the words, `lease` bytes into the state's lease, zeros, or (split) the home's alone.
+pub const Seg = struct { img: u64, len: u64, from: union(enum) { words, lease: u64, zeros, absent } };
 
 /// What a rank's kept state holds, read from a sequence of the engine (its addresses are not used past here).
 pub const Shape = struct {
@@ -128,23 +128,56 @@ pub fn parts(sh: Shape, at: u32, out: *std.ArrayList(Part), a: std.mem.Allocator
     try out.append(a, .{ .bytes = sh.tail });
 }
 
-/// The image's segments in order for a state at `at` whose head holds `mtp_len` rows (0 without a head).
-pub fn segments(sh: Shape, at: u32, mtp_len: u64, out: *std.ArrayList(Seg), a: std.mem.Allocator) !void {
+/// The image's segments at `at`, the head holding `mtp_len` rows; `lat`: the lease holds the latent rows (the home's).
+pub fn segments(sh: Shape, at: u32, mtp_len: u64, out: *std.ArrayList(Seg), a: std.mem.Allocator, lat: bool) !void {
     if (sh.head and mtp_len > sh.headRows(at)) return error.SnapshotShape;
-    var img: u64 = Words.bytes;
-    var lease: u64 = 0;
+    var w: Segs = .{ .out = out, .a = a, .img = Words.bytes };
     try out.append(a, .{ .img = 0, .len = Words.bytes, .from = .words });
-    const f = front(sh, at);
-    try out.append(a, .{ .img = img, .len = f, .from = .{ .lease = 0 } });
-    img += f;
-    lease += f;
-    if (sh.head) for (cache(sh, sh.headRows(at)), cache(sh, mtp_len)) |full, held| {
-        if (held > 0) try out.append(a, .{ .img = img, .len = held, .from = .{ .lease = lease } });
-        if (full > held) try out.append(a, .{ .img = img + held, .len = full - held, .from = .zeros });
-        img += full;
-        lease += held;
+    try w.lease(sh.prefix);
+    for (0..sh.layers) |_| for (cache(sh, at), 0..) |n, k| try if (k == 0 and !lat) w.absent(n) else w.lease(n);
+    if (sh.head) for (cache(sh, sh.headRows(at)), cache(sh, mtp_len), 0..) |full, held, k| {
+        try if (k == 0 and !lat) w.absent(full) else w.lease(held);
+        if (full > held and (k != 0 or lat)) try w.zeros(full - held);
     };
-    if (sh.tail > 0) try out.append(a, .{ .img = img, .len = sh.tail, .from = .{ .lease = lease } });
+    try w.lease(sh.tail);
+}
+
+/// `segments`' writer: each run after the last, lease runs that follow each other joined.
+const Segs = struct {
+    out: *std.ArrayList(Seg),
+    a: std.mem.Allocator,
+    img: u64,
+    at: u64 = 0, // the lease's next byte
+
+    fn lease(w: *Segs, n: u64) !void {
+        if (n == 0) return;
+        const last = &w.out.items[w.out.items.len - 1];
+        if (last.from == .lease and last.from.lease + last.len == w.at and last.img + last.len == w.img) last.len += n else try w.out.append(w.a, .{ .img = w.img, .len = n, .from = .{ .lease = w.at } });
+        w.img += n;
+        w.at += n;
+    }
+    fn zeros(w: *Segs, n: u64) !void {
+        try w.out.append(w.a, .{ .img = w.img, .len = n, .from = .zeros });
+        w.img += n;
+    }
+    fn absent(w: *Segs, n: u64) !void {
+        if (n > 0) try w.out.append(w.a, .{ .img = w.img, .len = n, .from = .absent });
+        w.img += n;
+    }
+};
+
+/// TF_GLM_KV_SPLIT: the image's latent runs at `at` (each DSA layer's, then the head's), which the home alone holds.
+pub fn latentRuns(sh: Shape, at: u32, out: *std.ArrayList([2]u64), a: std.mem.Allocator) !void {
+    var img: u64 = Words.bytes + sh.prefix;
+    for (0..sh.layers) |_| {
+        const c = cache(sh, at);
+        if (c[0] > 0) try out.append(a, .{ img, c[0] });
+        for (c) |n| img += n;
+    }
+    if (sh.head) {
+        const c = cache(sh, sh.headRows(at));
+        if (c[0] > 0) try out.append(a, .{ img, c[0] });
+    }
 }
 
 /// The image bytes after the words that sit in the lease as in the image: the prefix and every DSA layer's parts.
@@ -186,8 +219,38 @@ pub fn storeParts(sh: Shape, prefixes: []const u64, at: u32, out: *std.ArrayList
     for (prefixes[1..]) |p| try out.append(a, .{ .bytes = p });
 }
 
-/// Store image bytes [off, off + len) split by rank: rank 0's image, then rank r's prefix after its words.
-pub fn route(sh: Shape, prefixes: []const u64, at: u32, off: u64, len: u64, out: *std.ArrayList(Piece), a: std.mem.Allocator) !void {
+/// Store image bytes [off, off + len) by rank: rank 0's image, then rank r's prefix; `home` (split): its latent runs.
+pub fn route(sh: Shape, prefixes: []const u64, at: u32, off: u64, len: u64, out: *std.ArrayList(Piece), a: std.mem.Allocator, home: ?u32) !void {
+    const from = out.items.len;
+    try routeRanks(sh, prefixes, at, off, len, out, a);
+    const h = home orelse return;
+    if (h >= prefixes.len) return error.SnapshotShape;
+    var runs: std.ArrayList([2]u64) = .empty;
+    defer runs.deinit(a);
+    try latentRuns(sh, at, &runs, a);
+    var split: std.ArrayList(Piece) = .empty;
+    defer split.deinit(a);
+    for (out.items[from..]) |p| {
+        if (p.rank != 0 or !p.shared) {
+            try split.append(a, p);
+            continue;
+        }
+        var lo = p.off; // walk the piece, its latent runs to the home
+        for (runs.items) |r| {
+            const s = @max(lo, r[0]);
+            const e = @min(p.off + p.len, r[0] + r[1]);
+            if (s >= e) continue;
+            if (s > lo) try split.append(a, .{ .rank = 0, .off = lo, .len = s - lo, .shared = true });
+            try split.append(a, .{ .rank = h, .off = s - prefixes[0] + prefixes[h], .len = e - s, .shared = false });
+            lo = e;
+        }
+        if (lo < p.off + p.len) try split.append(a, .{ .rank = 0, .off = lo, .len = p.off + p.len - lo, .shared = true });
+    }
+    out.shrinkRetainingCapacity(from);
+    try out.appendSlice(a, split.items);
+}
+
+fn routeRanks(sh: Shape, prefixes: []const u64, at: u32, off: u64, len: u64, out: *std.ArrayList(Piece), a: std.mem.Allocator) !void {
     const own = Words.bytes + sh.prefix; // rank 0's bytes no other rank holds
     var start: u64 = 0; // the section's first store byte
     for (prefixes, 0..) |p, r| {
@@ -248,6 +311,25 @@ pub fn clear(spans: []const Span, from: u64, bytes: []u8) void {
     }
 }
 
+/// The bytes of [0, len) outside every span of `spans` (in any order, overlapping or not), in order.
+pub fn gaps(spans: []const Span, len: u64, out: *std.ArrayList(Span), a: std.mem.Allocator) !void {
+    var at: u64 = 0;
+    while (at < len) {
+        var next = len; // the first span start after `at`, unless a span holds `at`
+        var past = at;
+        for (spans) |s| {
+            if (s.len > 0 and s.off <= at and s.off + s.len > at) past = @max(past, s.off + s.len);
+            if (s.len > 0 and s.off > at) next = @min(next, s.off);
+        }
+        if (past > at) {
+            at = @min(past, len);
+            continue;
+        }
+        try out.append(a, .{ .off = at, .len = next - at });
+        at = next;
+    }
+}
+
 /// Copies between `host` and image bytes [off, off + host.len) of a lease: out (lease to host) or in.
 pub const Copy = struct {
     d: *const cuda.Driver,
@@ -269,6 +351,7 @@ pub const Copy = struct {
                     if (out) @memcpy(h, w) else @memcpy(w, h);
                 },
                 .zeros => if (out) @memset(h, 0),
+                .absent => return error.KvSplitAbsent, // the home's copy alone holds these bytes
                 .lease => |at| try c.leased(at + (lo - s.img), h, out),
             }
         }

@@ -8,7 +8,7 @@ const Engine = @import("cuda_engine.zig").Engine;
 /// Rank 0 at TP: its follow link, set by Link.lead, cleared by its deinit; null: one rank, every op local.
 pub var link: ?*follow.Link = null;
 
-/// A disk step's op (Header.flags); its id is `a`, its image offset `seed`, its bytes `depth`, its rank `top_k`.
+/// A disk step's op (Header.flags); id `a`, image offset `seed`, bytes `depth`, rank `top_k` (blank: home + 1, or 0).
 pub const Op = enum(u32) { blank = 1, put, take, seal, prefixes };
 const kind = @backingInt(follow.Kind.disk); // each op crosses the follow link as a disk step, its bytes as the ids
 
@@ -17,13 +17,23 @@ pub fn shape(e: *const Engine) !image.Shape {
     return image.Shape.of(&e.cur.st, &e.c, e.capacity, e.mtp);
 }
 
-/// The words of a kept state on this rank: its position, head rows, ring bases, KDA copy bits and layout (unsplit).
+/// The words of a kept state on this rank: its position, head rows, ring bases, KDA copy bits, layout and home.
 pub fn wordsOf(e: *const Engine, id: u64) !image.Words {
     const s = e.snaps.get(id) orelse return error.NoKeptState;
     if (s.cur.len > 64) return error.SnapshotShape;
     var cur: u64 = 0;
     for (s.cur, 0..) |b, i| cur |= @as(u64, b) << @intCast(i);
-    return .{ .at = s.pos, .mtp_len = s.mtp_len, .base = s.bases[0], .mtp_base = s.bases[1], .cur = cur, .world = e.share.world };
+    var w: image.Words = .{ .at = s.pos, .mtp_len = s.mtp_len, .base = s.bases[0], .mtp_base = s.bases[1], .cur = cur, .world = e.share.world };
+    if (s.home) |h| {
+        w.layout = .split;
+        w.owner = h;
+    }
+    return w;
+}
+
+/// Whether this rank's copy of `s` holds its latent rows (unsplit: every copy; split: the home's).
+fn holdsLatent(e: *const Engine, s: anytype) bool {
+    return if (s.home) |h| h == e.share.rank else true;
 }
 
 /// Bytes [off, off + host.len) of this rank's image of `id`, out (lease to host) or in; unsealed: before its head only.
@@ -34,7 +44,7 @@ pub fn copy(e: *Engine, id: u64, off: u64, host: []u8, out: bool) !void {
     if (s.len == 0 and off + host.len > image.Words.bytes + image.front(sh, at)) return error.DiskOrder;
     var segs: std.ArrayList(image.Seg) = .empty;
     defer segs.deinit(e.gpa);
-    try image.segments(sh, at, s.mtp_len, &segs, e.gpa);
+    try image.segments(sh, at, s.mtp_len, &segs, e.gpa, holdsLatent(e, s));
     var w = (try wordsOf(e, id)).encode();
     const pool = if (e.snap_pages) |*p| p else return error.NoSnapshotCache;
     try (image.Copy{ .d = e.d, .pool = pool, .lease = &s.lease, .segs = segs.items, .words = &w }).run(off, host, out);
@@ -54,15 +64,16 @@ pub fn rest(e: *Engine) !void {
     if (leader(e)) |x| try x.idle();
 }
 
-/// Rank 0: a new id leased at `at` on every rank (rank 0 first: the ranks' pools match, so theirs cannot fail apart).
+/// Rank 0: a new id leased at `at` on every rank, rank 0 first (split: its home the class a stream would take now).
 pub fn blank(e: *Engine, at: u32) !u64 {
     if (e.next_snap > std.math.maxInt(u32)) return error.SnapshotIdLimit;
     const id = e.next_snap;
-    try snapshots.blankAs(e, id, at);
+    const home: ?u32 = if (e.settings.kv_split) (e.pages orelse return error.KvSplitNeedsPages).pool.roomiest() else null;
+    try snapshots.blankAs(e, id, at, home);
     e.next_snap += 1;
     // a failed step: rank 0's lease goes back, and its id is dropped at the next step (another rank may hold it)
     errdefer snapshots.drop(e, id);
-    if (leader(e)) |x| try x.disk(.{ .kind = kind, .flags = @backingInt(Op.blank), .a = id, .seed = at }, &.{});
+    if (leader(e)) |x| try x.disk(.{ .kind = kind, .flags = @backingInt(Op.blank), .a = id, .seed = at, .top_k = if (home) |h| h + 1 else 0 }, &.{});
     return id;
 }
 
@@ -98,16 +109,19 @@ pub fn take(e: *Engine, rank: u32, id: u64, off: u64, out: []u8) !void {
 
 /// Rank 0: each other rank's bytes of `id` past its prefix (`each`) equal to `shared`, but for `loose` (zeros there).
 pub fn same(e: *Engine, id: u64, each: []const u64, shared: []const u8, loose: []const image.Span, theirs: []u8) !void {
+    var read: std.ArrayList(image.Span) = .empty;
+    defer read.deinit(e.gpa);
+    try image.gaps(loose, shared.len, &read, e.gpa); // read past `loose` alone: off a split home, no latent rows
     for (each[1..], 1..) |q, r| {
-        try take(e, @intCast(r), id, image.Words.bytes + q, theirs);
-        image.clear(loose, 0, theirs);
+        @memset(theirs, 0);
+        for (read.items) |g| try take(e, @intCast(r), id, image.Words.bytes + q + g.off, theirs[@intCast(g.off)..][0..@intCast(g.len)]);
         if (!std.mem.eql(u8, shared, theirs)) return error.RanksDiffer;
     }
 }
 
-/// Words read back for a state at `at`: refused by name unless this server's world and layout (unsplit) wrote them.
+/// Words read back for a state at `at`: refused by name unless this server's world and layout wrote them.
 pub fn decode(e: *const Engine, x: [image.Words.count]u64, at: u32) !image.Words {
-    return image.Words.decode(x, at, @intCast(e.share.world), .unsplit);
+    return image.Words.decode(x, at, @intCast(e.share.world), if (e.settings.kv_split) .split else .unsplit);
 }
 
 /// Rank 0: every rank's blank `id` sealed with `w` (its head's rows, ring bases and KDA copy bits).
@@ -144,7 +158,7 @@ pub fn step(e: *Engine, l: *follow.Link, h: follow.Header, ids: []const u32) !vo
     const op: Op = @fromBackingInt(h.flags);
     const rank: u32 = @intCast(e.share.rank);
     switch (op) {
-        .blank => try snapshots.blankAs(e, h.a, @intCast(h.seed)),
+        .blank => try snapshots.blankAs(e, h.a, @intCast(h.seed), if (h.top_k > 0) h.top_k - 1 else null),
         .seal => {
             if (ids.len != image.Words.count * 2) return error.BadStep;
             var x: [image.Words.count]u64 = undefined;

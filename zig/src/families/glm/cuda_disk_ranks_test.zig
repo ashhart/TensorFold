@@ -19,6 +19,7 @@ const Wire = struct {
     var sent: [8]follow.Header = undefined;
     var steps: usize = 0;
     var casts: usize = 0;
+    var seed: u64 = 0; // the last step's image offset: a take's bytes are the image's from there
 
     fn reset() void {
         fail = false;
@@ -31,7 +32,10 @@ const Wire = struct {
     }
     fn put(_: cuda.abi.Function, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: cuda.abi.Stream, params: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) cuda.abi.Result {
         const w: *align(1) const follow.Words = @ptrCast(params.?[2].?);
-        if (steps < sent.len) @memcpy(std.mem.asBytes(&sent[steps]), std.mem.sliceAsBytes(w.w[0..16]));
+        var h: follow.Header = undefined;
+        @memcpy(std.mem.asBytes(&h), std.mem.sliceAsBytes(w.w[0..16]));
+        seed = h.seed;
+        if (steps < sent.len) sent[steps] = h;
         steps += 1;
         return 0;
     }
@@ -39,7 +43,7 @@ const Wire = struct {
         if (fail) return 1;
         casts += 1;
         if (root != 0) for (@as([*]u8, @ptrFromInt(dst))[0..n], 0..) |*b, i| {
-            b.* = byte(i) ^ @intFromBool(root == odd);
+            b.* = byte(@intCast(seed -% image.Words.bytes +% i)) ^ @intFromBool(root == odd); // repeats every 256 bytes
         };
         return 0;
     }
@@ -209,7 +213,7 @@ test "GLM disk ranks: each other rank's shared bytes come from past its own pref
     try x.init();
     defer x.deinit();
     ranks.link = &x.link;
-    const prefixes = [_]u64{ 4096, 1024, 2048 }; // TP=3: each rank's own bytes first
+    const prefixes = [_]u64{ 4096, 1024, 2048 }; // TP=3: each rank's own bytes first (256s: the wire's bytes line up)
     var shared: [100]u8 = undefined;
     for (&shared, 0..) |*b, i| b.* = Wire.byte(i);
     var theirs: [100]u8 = undefined;
@@ -226,7 +230,14 @@ test "GLM disk ranks: each other rank's shared bytes come from past its own pref
     const loose = [_]image.Span{.{ .off = 10, .len = 20 }};
     image.clear(&loose, 0, &shared);
     try t.expectError(error.RanksDiffer, ranks.same(x.e, 7, &prefixes, &shared, &.{}, &theirs));
+    Wire.steps = 0;
     try ranks.same(x.e, 7, &prefixes, &shared, &loose, &theirs);
+    // only the bytes past `loose` are read: under TF_GLM_KV_SPLIT a rank off the home holds no latent rows there
+    try t.expectEqual(@as(usize, 4), Wire.steps);
+    for (Wire.sent[0..4], 0..) |h, k| {
+        try t.expectEqual(image.Words.bytes + prefixes[1 + k / 2] + @as(u64, if (k % 2 == 0) 0 else 30), h.seed);
+        try t.expectEqual(@as(u32, if (k % 2 == 0) 10 else 70), h.depth);
+    }
     Wire.odd = 2;
     try t.expectError(error.RanksDiffer, ranks.same(x.e, 7, &prefixes, &shared, &loose, &theirs));
 }
