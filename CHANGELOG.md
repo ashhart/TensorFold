@@ -4,6 +4,10 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Tests: Flash Next covers host-tier media's full page-plane ABI, missing-kernel refusal and learning-format diagnostic agreement (#1522). Thanks to @BlivionIaG.
+
+- Tests: video budgets again cover the common valid-setting matrix and reject storage-maximum advice in refusals (#1441). Thanks to @BlivionIaG.
+
 - Flash Next EXL3 with offloaded experts and an MTP head uses completed-round token rates to choose plain or drafted rounds, with bounded probes; other formats retain their existing draft policy (#1446).
 
 - Flash Next EXL3 selects host planning, eager device planning or CUDA graph replay with `TF_FLASHNEXT_EXL3_GRAPH=0`, `eager` or `1`. Engine teardown clears its capture-failure history without retiring another engine's graphs or retries. Its graph qualification runner propagates prefill configuration refusals (#1445).
