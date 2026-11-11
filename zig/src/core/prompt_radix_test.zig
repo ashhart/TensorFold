@@ -487,8 +487,8 @@ test "the tree's deepest state is the deepest at a multiple of the step it is as
     const prompt = seq(24, 0);
     _ = try pass(&f, &s, a, &prompt, 12, &.{}, &mine); // a state at 12, off a grid of 8
     f.leave(mine.items);
-    try std.testing.expectEqual(@as(u32, 12), s.tree.deepest(&prompt, 20, Step{ .n = 4 }).?.end);
-    try std.testing.expect(s.tree.deepest(&prompt, 20, Step{ .n = 8 }) == null);
+    try std.testing.expectEqual(@as(u32, 12), s.tree.deepest(.{ .tokens = &prompt }, 20, Step{ .n = 4 }).?.end);
+    try std.testing.expect(s.tree.deepest(.{ .tokens = &prompt }, 20, Step{ .n = 8 }) == null);
 }
 
 test "GLM's shape, a grid of four pages and lookahead 1: a chat resumes at its history's grid point, sharing its pages" {

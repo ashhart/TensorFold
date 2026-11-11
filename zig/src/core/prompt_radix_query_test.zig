@@ -159,3 +159,186 @@ test "a page-only store resumes only at a page edge on the request's chunk sched
     try testing.expectEqual(@as(usize, 5), adopt.items.len);
     f.end(adopt.items);
 }
+
+fn image(at: u32, tokens: u32, hash: u64) radix.Identity {
+    return .{ .at = at, .tokens = tokens, .gh = 2, .gw = 2, .hash = hash };
+}
+
+fn withImages(prompt: []const u32, ims: []const radix.Identity) radix.Query {
+    var q: radix.Query = .of(prompt);
+    q.images = ims;
+    return q;
+}
+
+/// Ids a resume of `q` adopts, given back at once.
+fn adopted(s: *radix.Store, f: *Fake, q: radix.Query, out: []u32) ![]u32 {
+    var adopt: std.ArrayList(u32) = .empty;
+    defer adopt.deinit(testing.allocator);
+    const plan = try s.begin(testing.allocator, q, q.prompt_len, &.{}, null, &adopt);
+    plan.deinit(testing.allocator);
+    @memcpy(out[0..adopt.items.len], adopt.items);
+    f.end(adopt.items);
+    return out[0..adopt.items.len];
+}
+
+const text: radix.Rules = .{ .page = 4, .lookahead = 0, .min_gap = 1, .min_prompt = 0 };
+
+test "two images under one key at one position are two branches; the text before them stays shared" {
+    var f: Fake = .{};
+    var s = try radix.Store.init(testing.allocator, f.family(), f.pages(), text);
+    defer s.deinit();
+    s.limit(.{ .pages = 32, .snaps = 8 });
+    const prompt = seq(13); // rows 4..8 are an image's: equal key words, other pictures
+    const a = [_]radix.Identity{image(4, 4, 0xa)};
+    const b = [_]radix.Identity{image(4, 4, 0xb)};
+    const mine_a = [_]u32{ 0, 1, 2 };
+    const mine_b = [_]u32{ 3, 4, 5 };
+    f.take(&mine_a);
+    f.take(&mine_b);
+    var path: [3]u32 = undefined;
+    try testing.expect(s.keep(withImages(&prompt, &a), 12, null, &mine_a, &path).held);
+    try testing.expect(s.keep(withImages(&prompt, &b), 12, null, &mine_b, &path).held);
+    try testing.expectEqualSlices(u32, &.{ 0, 4, 5 }, &path); // page 0 is text: shared; the image's pages are b's own
+    f.end(&mine_a);
+    f.end(&mine_b);
+    var got: [8]u32 = undefined;
+    try testing.expectEqualSlices(u32, &.{ 0, 1, 2 }, try adopted(&s, &f, withImages(&prompt, &a), &got));
+    try testing.expectEqualSlices(u32, &.{ 0, 4, 5 }, try adopted(&s, &f, withImages(&prompt, &b), &got));
+    const c = [_]radix.Identity{image(4, 4, 0xc)};
+    try testing.expect(s.find(withImages(&prompt, &c)) == null); // a third picture: nothing past the text resumes
+}
+
+test "with a lookahead word, an image starting at a page edge makes the page before it another page" {
+    var f: Fake = .{};
+    var s = try radix.Store.init(testing.allocator, f.family(), f.pages(), .{ .page = 4, .lookahead = 1, .min_gap = 1, .min_prompt = 0 });
+    defer s.deinit();
+    s.limit(.{ .pages = 32, .snaps = 8 });
+    const prompt = seq(10);
+    const a = [_]radix.Identity{image(4, 4, 0xa)};
+    const b = [_]radix.Identity{image(4, 4, 0xb)};
+    const mine_a = [_]u32{ 0, 1 };
+    const mine_b = [_]u32{ 2, 3 };
+    f.take(&mine_a);
+    defer f.end(&mine_a);
+    f.take(&mine_b);
+    defer f.end(&mine_b);
+    var path: [2]u32 = undefined;
+    try testing.expect(s.keep(withImages(&prompt, &a), 8, null, &mine_a, &path).held);
+    try testing.expect(s.keep(withImages(&prompt, &b), 8, null, &mine_b, &path).held);
+    try testing.expectEqualSlices(u32, &mine_b, &path); // page 0 reads row 4, the image's first: not shared
+}
+
+test "a node split across an image keeps it on both sides, so another picture there matches neither" {
+    var f: Fake = .{};
+    var s = try radix.Store.init(testing.allocator, f.family(), f.pages(), text);
+    defer s.deinit();
+    s.limit(.{ .pages = 32, .snaps = 8 });
+    const one = seq(13);
+    var two = seq(13);
+    two[10] = 99; // diverges inside the third page: the node splits after its second page
+    const a = [_]radix.Identity{image(6, 4, 0xa)}; // rows 6..10 cross the split at 8
+    const mine1 = [_]u32{ 0, 1, 2 };
+    const mine2 = [_]u32{ 3, 4, 5 };
+    f.take(&mine1);
+    defer f.end(&mine1);
+    f.take(&mine2);
+    defer f.end(&mine2);
+    var path: [3]u32 = undefined;
+    try testing.expect(s.keep(withImages(&one, &a), 12, null, &mine1, &path).held);
+    try testing.expect(s.keep(withImages(&two, &a), 12, null, &mine2, &path).held);
+    try testing.expectEqualSlices(u32, &.{ 0, 1, 5 }, &path);
+    const b = [_]radix.Identity{image(6, 4, 0xb)};
+    var held: [3]u32 = undefined;
+    var last: ?*radix.Node = null;
+    const k: radix.Key = .{ .tokens = one[0..12], .images = &b };
+    try testing.expectEqual(@as(usize, 1), s.tree.heldPrefix(k, 3, &held, &last)); // page 1 holds rows 6, 7 of a
+    var got: [8]u32 = undefined; // both sides kept the image: each original branch still resumes whole
+    try testing.expectEqualSlices(u32, &.{ 0, 1, 2 }, try adopted(&s, &f, withImages(&one, &a), &got));
+    try testing.expectEqualSlices(u32, &.{ 0, 1, 5 }, try adopted(&s, &f, withImages(&two, &a), &got));
+}
+
+test "with a lookahead word, a split at an image's first row keeps it in the head's last window and the tail" {
+    var f: Fake = .{};
+    var s = try radix.Store.init(testing.allocator, f.family(), f.pages(), .{ .page = 4, .lookahead = 1, .min_gap = 1, .min_prompt = 0 });
+    defer s.deinit();
+    s.limit(.{ .pages = 32, .snaps = 8 });
+    const one = seq(14);
+    var two = seq(14);
+    two[10] = 99; // the node splits after its second page, at row 8
+    const a = [_]radix.Identity{image(8, 4, 0xa)}; // rows 8..12 start at the cut
+    const mine1 = [_]u32{ 0, 1, 2 };
+    const mine2 = [_]u32{ 3, 4, 5 };
+    f.take(&mine1);
+    defer f.end(&mine1);
+    f.take(&mine2);
+    defer f.end(&mine2);
+    var path: [3]u32 = undefined;
+    try testing.expect(s.keep(withImages(&one, &a), 12, null, &mine1, &path).held);
+    try testing.expect(s.keep(withImages(&two, &a), 12, null, &mine2, &path).held);
+    try testing.expectEqualSlices(u32, &.{ 0, 1, 5 }, &path);
+    const b = [_]radix.Identity{image(8, 4, 0xb)};
+    var held: [3]u32 = undefined;
+    var last: ?*radix.Node = null;
+    const k: radix.Key = .{ .tokens = one[0..13], .images = &b };
+    try testing.expectEqual(@as(usize, 1), s.tree.heldPrefix(k, 3, &held, &last)); // page 1 reads row 8: a's
+    var got: [8]u32 = undefined;
+    try testing.expectEqualSlices(u32, &.{ 0, 1, 2 }, try adopted(&s, &f, withImages(&one, &a), &got));
+    try testing.expectEqualSlices(u32, &.{ 0, 1, 5 }, try adopted(&s, &f, withImages(&two, &a), &got));
+}
+
+test "a longer prompt in another namespace never counts as the same conversation moving past a reused state" {
+    var f: Fake = .{};
+    var s = try radix.Store.init(testing.allocator, f.family(), f.pages(), text);
+    defer s.deinit();
+    s.limit(.{ .pages = 32, .snaps = 2 });
+    const p = seq(9);
+    var q = seq(9);
+    q[0] = 50; // another conversation, in the same namespace
+    const longer = seq(13);
+    var ns1: radix.Query = .of(&p);
+    ns1.namespace = 1;
+    var other: radix.Query = .of(&q);
+    other.namespace = 1;
+    var ns2: radix.Query = .of(&longer);
+    ns2.namespace = 2;
+    const m1 = [_]u32{ 0, 1 };
+    const m2 = [_]u32{ 2, 3 };
+    const m3 = [_]u32{ 4, 5, 6 };
+    f.take(&m1);
+    defer f.end(&m1);
+    f.take(&m2);
+    defer f.end(&m2);
+    f.take(&m3);
+    defer f.end(&m3);
+    var path: [3]u32 = undefined;
+    try testing.expect(s.keep(ns1, 8, null, &m1, path[0..2]).held);
+    var got: [8]u32 = undefined;
+    _ = try adopted(&s, &f, ns1, &got); // resumed once: worth more than an entry nobody asked for
+    try testing.expect(s.keep(other, 8, null, &m2, path[0..2]).held);
+    try testing.expect(s.keep(ns2, 12, null, &m3, &path).held); // a third state: one of the two goes
+    try testing.expect(s.find(ns1) != null); // the reused one stays: namespace 2's words don't extend its conversation
+    try testing.expect(s.find(other) == null);
+}
+
+test "two namespaces never share a page, whatever their words" {
+    var f: Fake = .{};
+    var s = try radix.Store.init(testing.allocator, f.family(), f.pages(), text);
+    defer s.deinit();
+    s.limit(.{ .pages = 32, .snaps = 8 });
+    const prompt = seq(9);
+    var q1: radix.Query = .of(&prompt);
+    q1.namespace = 1;
+    var q2: radix.Query = .of(&prompt);
+    q2.namespace = 2;
+    const mine1 = [_]u32{ 0, 1 };
+    const mine2 = [_]u32{ 2, 3 };
+    f.take(&mine1);
+    defer f.end(&mine1);
+    f.take(&mine2);
+    defer f.end(&mine2);
+    var path: [2]u32 = undefined;
+    try testing.expect(s.keep(q1, 8, null, &mine1, &path).held);
+    try testing.expect(s.keep(q2, 8, null, &mine2, &path).held);
+    try testing.expectEqualSlices(u32, &mine2, &path);
+    try testing.expect(s.find(.of(&prompt)) == null); // the default namespace holds neither
+}
