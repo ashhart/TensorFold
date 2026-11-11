@@ -169,7 +169,7 @@ pub const Engine = struct {
         e.collective = null;
         e.exl3_dplan = .{};
         e.exl3_chain = .{};
-        e.exl3_prefill = .{ .options = @import("exl3/prefill/cuda_exl3_prefill_state.zig").optionsFromEnv() };
+        e.exl3_prefill = .{ .options = try @import("exl3/prefill/cuda_exl3_prefill_state.zig").optionsFromEnv() };
         e.image_factory = null;
         e.telemetry = try cache_telemetry.State.fromEnv(rank, world);
         e.round_graph = .{};
