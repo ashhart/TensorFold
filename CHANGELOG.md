@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Internal: one core reader for ModelOpt projection parts (weight, NVFP4 or FP8 scales, input scale), with shape checks and refusals that name the module and tensor, now serves Dory's NVFP4 and bf16 projections, Qwen 3.5/3.6's NVFP4 experts and `check-precision`; Dory's MXFP8, Nemotron, Qwen 3.5/3.6's other ModelOpt projections and GLM keep their own readers, and the loaded weights are unchanged (#2691, part of #2460). Thanks to @jschmied.
+
 - Tests: `zig build test-qwen35-copies-host` compiles again, passing the drafter kind `copyMatch` now takes (#2836).
 
 - Internal: core gains one walk for copying kept prompt states, and GLM's copies on CUDA and Metal go through it, with the same copies in the same order; other families keep their own loops. Nothing a user sees changes (#2215, part of #1293). Thanks to @jschmied.
