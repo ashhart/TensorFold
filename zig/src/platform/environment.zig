@@ -6,7 +6,7 @@ pub const Error = error{InvalidEnvironment};
 pub const Scope = enum { common, cuda, metal, xpu, slide, hooks, dsv41, gemma4, drama3, glm, minimax, nemotron };
 pub const Kind = enum { u32, u64, size, percent, positive, device, segments, mib, bit_width, word, prompt, flag, toggle, real, positive_real, signed_real, range, path };
 /// The release from which the server refuses the rank aliases: the one after the release that first ships the flags.
-pub const alias_retire = "1.4.0";
+pub const alias_retire = "1.2.9";
 
 pub const Rule = struct {
     name: [:0]const u8,
