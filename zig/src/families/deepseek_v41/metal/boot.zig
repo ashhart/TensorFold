@@ -14,6 +14,7 @@ const target_ = @import("target.zig");
 const Config = host.config.Config;
 const eh = host.engram_host;
 const er = host.engram_rows;
+const environment = @import("sys").environment;
 const Allocator = std.mem.Allocator;
 
 /// The files a boot reads beside the shards: the Engram token map (here or under TF_DSV41_ASSETS).
@@ -95,7 +96,7 @@ pub const Boot = struct {
     fn engram(b: *Boot, io: std.Io, dir: []const u8, o: Options) !?forward.Lookup {
         const c = &b.c;
         if (c.engram_layers.len == 0) return null;
-        const assets = if (std.c.getenv("TF_DSV41_ASSETS")) |v| std.mem.span(v) else dir;
+        const assets = try environment.path("TF_DSV41_ASSETS", environment.Process.get(.{}, "TF_DSV41_ASSETS")) orelse dir;
         const path = try std.fs.path.join(b.a, &.{ assets, token_map });
         defer b.a.free(path);
         b.map_bytes = std.Io.Dir.cwd().readFileAllocOptions(io, path, b.a, .limited(1 << 26), .@"4", null) catch |e| {
@@ -107,7 +108,7 @@ pub const Boot = struct {
         const rows_dir = try b.rowsDir(dir, o);
         defer b.a.free(rows_dir);
         // a boot that serves Engram layers proves the tables match the release: the manifest, headers, sampled rows
-        const full = std.mem.eql(u8, std.mem.span(std.c.getenv("TF_DSV41_ENGRAM_VERIFY") orelse ""), "full");
+        const full = try environment.read(u32, "TF_DSV41_ENGRAM_VERIFY", 0) == 1;
         const em = host.engram_manifest;
         const ck = em.check(b.a, io, dir, rows_dir, full) catch |e| {
             switch (e) {
@@ -121,7 +122,7 @@ pub const Boot = struct {
             return e;
         };
         std.log.info("dsv41 metal: Engram tables checked against the release ({d} sampled rows{s})", .{ ck.samples, if (full) " and every byte" else "" });
-        const cap: u32 = if (std.c.getenv("TF_DSV41_ENGRAM_CACHE")) |v| try std.fmt.parseInt(u32, std.mem.span(v), 10) else 65536;
+        const cap = try environment.read(u32, "TF_DSV41_ENGRAM_CACHE", 65536);
         b.rows = try er.Rows.open(b.a, rows_dir, 0, 1, b.eng.layer_ids, cap);
         std.log.info("dsv41 metal: Engram rows from {s} ({d} records a layer cached)", .{ rows_dir, cap });
         return .{ .a = b.a, .host = &b.eng, .source = b.rows.?.source() };
@@ -130,7 +131,7 @@ pub const Boot = struct {
     /// The row shards' folder: the option, TF_DSV41_ENGRAM_DIR, else engram_table_dir (relative to the checkpoint).
     fn rowsDir(b: *Boot, dir: []const u8, o: Options) ![]u8 {
         if (o.engram_dir) |d| return b.a.dupe(u8, d);
-        if (std.c.getenv("TF_DSV41_ENGRAM_DIR")) |v| return b.a.dupe(u8, std.mem.span(v));
+        if (try environment.path("TF_DSV41_ENGRAM_DIR", environment.Process.get(.{}, "TF_DSV41_ENGRAM_DIR"))) |v| return b.a.dupe(u8, v);
         const t = b.c.engram_table_dir.items();
         if (t.len == 0) return error.EngramRowsUnset;
         if (std.fs.path.isAbsolute(t)) return b.a.dupe(u8, t);
