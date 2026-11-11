@@ -81,6 +81,7 @@ pub const rules = [_]Rule{
     .{ .name = "TF_PROMPT_INTERMEDIATE", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0)" },
     .{ .name = "TENSORFOLD_LFM2_KV_PAGES", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (unset leases pool pages)" },
     .{ .name = "TENSORFOLD_UNIFIED_HOST_COUNTS", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (an integrated GPU on Linux: 1 counts /proc/meminfo, 0 the CUDA pool)" },
+    .{ .name = "TF_FLASHNEXT_STATE_PAGES", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (1 needs TF_FLASHNEXT_KV_PAGES)" },
     .{ .name = "TF_ROCE_GID_INDEX", .scope = .cuda, .kind = .u32, .forms = "a whole GID index from 0 to 2147483647" },
     .{ .name = "TF_QWEN35_CHUNK_SOLO", .scope = .cuda, .kind = .size, .forms = "a solo prompt pass's rows, 4096 (off) or 8192" },
     .{ .name = "TF_GEMMA4_CHUNK_SOLO", .scope = .gemma4, .kind = .size, .forms = "a solo prompt pass's rows, a multiple of 512 up to 4096" },
