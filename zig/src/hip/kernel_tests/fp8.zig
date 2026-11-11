@@ -85,7 +85,9 @@ fn product(t: *Rig, p: Proj, hx: []const u16) ![]f32 {
         const tol = per_element * mag[i];
         if (mag[i] > 0) worst = @max(worst, @abs(@as(f64, got[i]) - wv) / tol);
         if (@abs(@as(f64, got[i]) - wv) > tol) {
-            std.debug.print("fp8 {d}x{d} rows {d}: [{d}, {d}] is {d} against {d}, bound {d}\n", .{ p.n, p.k, rows, i / p.n, i % p.n, got[i], wv, tol });
+            const col = i % p.n;
+            const r0 = i / p.n;
+            std.debug.print("fp8 {d}x{d} rows {d}: [{d}, {d}] is {d} against {d}, bound {d}; codes {x} {x} {x} {x}, x {d} {d}, scale {d}\n", .{ p.n, p.k, rows, r0, col, got[i], wv, tol, p.codes[col * p.k], p.codes[col * p.k + 1], p.codes[col * p.k + 2], p.codes[col * p.k + 3], t.value(hx[r0 * p.k]), t.value(hx[r0 * p.k + 1]), p.scale });
             return error.TestUnexpectedResult;
         }
     }
