@@ -258,3 +258,35 @@ test "an HTTP producer's export expires, and one being read outlives its expiry"
     reading.close();
     p.stop();
 }
+
+test "an export converted off the engine thread is awaited by its reader, and stop waits for the converters" {
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const fake = try Fake.init(250);
+    defer fake.deinit();
+    var problem: []const u8 = "";
+    const p = try serve.Produce.open(gpa, io, fake.source(), .{ .http = true, .model = model, .ttl_ns = std.time.ns_per_hour }, &problem);
+    const tokens = try tokensOf(a, 250);
+    var ids: [4][16]u8 = undefined;
+    for (&ids, 0..) |*id, i| {
+        id.* = @splat(0x40 + @as(u8, @intCast(i)));
+        p.exportedBg(id.*, tokens, try p.save(250)); // the tokens are copied: the caller's slice may go at once
+    }
+    // a reader of each finds its export (converting, or converted) and gets what `file.write` gives for it
+    for (ids) |id| {
+        var why: []const u8 = "";
+        const r = try p.read(id, &why);
+        var got: std.ArrayList(u8) = .empty;
+        defer got.deinit(gpa);
+        const size = r.size();
+        try readAll(r, &got);
+        r.close();
+        try std.testing.expect(got.items.len > 0);
+        try std.testing.expectEqual(@as(u64, got.items.len), size);
+    }
+    var why: []const u8 = "";
+    try std.testing.expectError(error.NotHeld, p.read(@splat(0x4f), &why)); // an id nobody exports is not waited for
+    p.stop(); // frees every held export and waits for converters: the leak check proves both
+    try std.testing.expectEqual(@as(u32, 4), fake.released);
+}

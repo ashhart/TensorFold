@@ -40,6 +40,11 @@ pub const Produce = struct {
     held: std.AutoHashMapUnmanaged([16]u8, *Held) = .empty,
     lock: std.atomic.Mutex = .unlocked, // `held`: the engine thread adds, the serving thread releases
     streams: std.atomic.Value(u32) = .init(0), // reads under way (HTTP): the producer stops after them
+    building: std.atomic.Value(u32) = .init(0), // exports converting on their own threads (`exportedBg`)
+    pending: std.AutoHashMapUnmanaged([16]u8, void) = .empty, // their ids, under `lock`: a reader waits for them
+
+    /// The most exports converting at once; one more converts on the caller's thread.
+    pub const max_building: u32 = 2;
 
     /// A producer over `source`: attaches the link when `opts.link` is set, makes the dump dir when `opts.dump` is.
     pub fn open(gpa: std.mem.Allocator, io: std.Io, source: cx.Source, opts: Options, problem: *[]const u8) !*Produce {
@@ -81,7 +86,8 @@ pub const Produce = struct {
             p.serving.stop.store(true, .release);
             t.join();
         }
-        while (p.streams.load(.acquire) > 0) std.Io.sleep(p.io, .fromMilliseconds(1), .awake) catch {};
+        while (p.streams.load(.acquire) > 0 or p.building.load(.acquire) > 0) std.Io.sleep(p.io, .fromMilliseconds(1), .awake) catch {};
+        p.pending.deinit(p.gpa);
         var it = p.held.valueIterator();
         while (it.next()) |h| release(p, h.*);
         p.held.deinit(p.gpa);
@@ -156,6 +162,15 @@ pub const Produce = struct {
         for (done.items) |name| reap(p, name);
     }
 
+    /// The longest a reader waits for an export that is still converting.
+    const read_wait_ms: u32 = 120_000;
+
+    fn isPending(p: *Produce, id: [16]u8) bool {
+        while (!p.lock.tryLock()) std.atomic.spinLoopHint();
+        defer p.lock.unlock();
+        return p.pending.contains(id);
+    }
+
     /// One decoder's read of a held export (`GET /v1/handoff/<id>`): replies to OPEN and PULL; pinned until `close`.
     pub const Reading = struct {
         p: *Produce,
@@ -183,6 +198,9 @@ pub const Produce = struct {
     /// The held export under `id`. `NotHeld`: never held, released or expired. `Refused`: it failed (`why` says why).
     pub fn read(p: *Produce, id: [16]u8, why: *[]const u8) error{ NotHeld, Refused, OutOfMemory, Unreadable }!*Reading {
         p.sweep();
+        // an export still converting on its own thread is awaited, not reported missing
+        var waited_ms: u32 = 0;
+        while (p.isPending(id) and waited_ms < read_wait_ms) : (waited_ms += 1) std.Io.sleep(p.io, .fromMilliseconds(1), .awake) catch {};
         const failed_why: ?[]const u8 = if (p.table.get(id)) |e| (if (e == .failed) e.failed else null) else null;
         while (!p.lock.tryLock()) std.atomic.spinLoopHint();
         const held = p.held.get(id) orelse {
@@ -239,6 +257,39 @@ pub const Produce = struct {
     pub fn exported(p: *Produce, id: [16]u8, tokens: []const u32, saved: *Saved) void {
         defer p.drop(saved);
         p.record(id, tokens, saved.cap.state, saved.read_ns) catch |err| p.failed(id, @errorName(err));
+    }
+
+    /// `exported` with the conversion on its own thread (a file-only producer or a full set of converters: inline).
+    pub fn exportedBg(p: *Produce, id: [16]u8, tokens: []const u32, saved: *Saved) void {
+        if ((p.opts.link == null and !p.opts.http) or p.building.load(.acquire) >= max_building) return p.exported(id, tokens, saved);
+        const own = p.gpa.dupe(u32, tokens) catch return p.exported(id, tokens, saved);
+        while (!p.lock.tryLock()) std.atomic.spinLoopHint();
+        const put = p.pending.put(p.gpa, id, {});
+        p.lock.unlock();
+        put catch {
+            p.gpa.free(own);
+            return p.exported(id, tokens, saved);
+        };
+        _ = p.building.fetchAdd(1, .acq_rel);
+        const t = std.Thread.spawn(.{}, convert, .{ p, id, own, saved }) catch {
+            p.finishBuild(id);
+            p.gpa.free(own);
+            return p.exported(id, tokens, saved);
+        };
+        t.detach();
+    }
+
+    fn convert(p: *Produce, id: [16]u8, tokens: []u32, saved: *Saved) void {
+        p.exported(id, tokens, saved);
+        p.gpa.free(tokens);
+        p.finishBuild(id);
+    }
+
+    fn finishBuild(p: *Produce, id: [16]u8) void {
+        while (!p.lock.tryLock()) std.atomic.spinLoopHint();
+        _ = p.pending.remove(id);
+        p.lock.unlock();
+        _ = p.building.fetchSub(1, .acq_rel);
     }
 
     fn record(p: *Produce, id: [16]u8, tokens: []const u32, st: cx.State, read_ns: u64) !void {
