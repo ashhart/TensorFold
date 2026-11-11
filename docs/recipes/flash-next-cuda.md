@@ -200,8 +200,8 @@ aggregate tok/s), on our kernels and, for comparison, on the 76-kernel captured 
 | Cold first token at 3,001 / 12,001 tokens (s) | 2.67 / 10.40 | 2.67 / 10.30 |
 | 45,030-token prompt, no cache (s) | 36.5 | 35.8 |
 
-Every concurrent reply equalled its solo run, and every drafted one its `"draft": false` run. Drafted streams verify
-their windows a pass each, so drafted throughput does not grow with streams yet. While a 12,001-token prompt runs,
+Every concurrent reply equalled its solo run, and every drafted one its `"draft": false` run. Drafted streams now verify
+their windows in shared passes; the table above predates that path. While a 12,001-token prompt runs,
 another stream's decode waits at most 1.3 s between tokens (one prompt chunk). Each stream at a 16,384-token window
 takes 0.74 GiB with drafts, 0.54 GiB without.
 
@@ -292,9 +292,9 @@ per-stream launches. The bytes equal the per-stream launches': `tf-cuda-test fla
 
 - The dense projections run a copy of the Python engine's group-32 lane matmul (`qmm.cu`); the core's `qmm_group` and
   `lane_gemv` are built for groups of 64.
-- No CUDA graphs or GPU-side rounds; drafted streams verify their windows one pass each, and the MTP head drafts one
-  stream at a time.
+- Shared windows and the MTP head use CUDA graphs and batched passes; sampling remains on the host.
 - Prompts run slower than the Python engine's: a cold 12,001-token prompt takes about 10 s against its 6.7 s.
-- Draws are made on the host from each row's scores.
+- Draws use the host f64 sampler over GPU top-k candidates when eligible, with whole-row fallbacks.
+  `TF_FLASHNEXT_BATCH_DRAWS=0` restores per-stream reductions for an A/B.
 - Our glue's sums are not the captured kernels' bit for bit, so replies part from the Python engine's teacher path
   after a while, as that engine's own served path does (10 to 36 tokens, from its routed-experts kernel's rounding).
