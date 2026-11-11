@@ -34,8 +34,7 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     if (o.slide and (mode != .affine or o.tp != 1)) return error.UnsupportedLearningFormat;
     if (o.slide and captured != null) return error.TrainingOnCapturedGlue;
     const page_tokens = try @import("cuda_kv_lanes.zig").paging();
-    // the pool's pages are not wired to EXL3's K/V
-    if (page_tokens > 0 and (o.tp != 1 or o.slide or captured != null or mode == .exl3)) return error.FlashNextPagesUnsupported;
+    if (page_tokens > 0 and (o.slide or captured != null)) return error.FlashNextPagesUnsupported;
     // pending DeltaNet rows run on one GPU only: TF_FLASHNEXT_KEEP_LATE=1 with tensor parallel is refused
     const Draft = @import("cuda_mtp_draft.zig").Draft;
     const late_fits = o.tp == 1;
@@ -125,8 +124,9 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     if (o.vision) |v| stream_bytes = try std.math.add(u64, stream_bytes, try std.math.add(u64, try std.math.mul(u64, v.image_tokens, @import("cuda_prompt_wt.zig").dims * 2), try std.math.mul(u64, 16, o.context)));
     if (page_tokens > 0) {
         // the lane's head runs at the engine's chunk: its cache on the stream's pages, its buffers in the run
-        own.kv.head = if (own.head) |h| .{ .draft_n = h.ids.len, .rows = own.engine.chunk } else null;
-        const head_bytes = if (own.head) |h| mtp.Draft.bytes(window, h.ids.len, own.engine.chunk, own.engine.heads) else 0;
+        const draft_rows = try @import("exl3/prefill/cuda_exl3_prefill.zig").draftRows(own.engine);
+        own.kv.head = if (own.head) |h| .{ .draft_n = h.ids.len, .rows = draft_rows } else null;
+        const head_bytes = if (own.head) |h| mtp.Draft.bytes(window, h.ids.len, draft_rows, own.engine.heads) else 0;
         own.kv.layout = @import("cuda_kv_lanes.zig").layout(o.context, page_tokens, own.kv.head, stream_bytes - own_seq_bytes - head_bytes);
     }
     // What a stream holds, by piece.
