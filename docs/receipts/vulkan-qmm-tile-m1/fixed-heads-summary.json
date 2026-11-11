@@ -1,0 +1,262 @@
+{
+ "change": "qmm_q4_tile (#2015) measured on the float32-fixed heads",
+ "setup": {
+  "chip": "Apple M1 (G13G B1)",
+  "kernel_release": "7.3.0-2-20261110.1-lab-ARCH",
+  "mesa": "Honeykrisp, Omarchy Mesa build, library sha256 d75f4cbc",
+  "checkpoint": "Qwen3.5-2B-MLX-4bit, revision 93760be4",
+  "settings": "free-running greedy, 64 steps, two runs per process, vendor id 0x10005, one model process at a time, fresh process per run",
+  "decision_rule": "median run-2 gain of at least 3 percent and every pair positive",
+  "old_build": "#1990 head (vec4 build), ELF sha256 prefix 1e1b7d8c",
+  "new_build": "#2015 head, ELF sha256 prefix b6d9a35b",
+  "note": "Both include the float32 fix."
+ },
+ "cases": [
+  {
+   "case": "unicode-24",
+   "status": [
+    "PASS_WITH_NOT_VERIFIED"
+   ],
+   "start_utc": [
+    "2026-11-11T19:15:24+00:00"
+   ],
+   "kernel_release": "7.3.0-2-20261110.1-lab-ARCH",
+   "elfs": {
+    "old": {
+     "sha256": "1e1b7d8cdddf57645c2090207eef24812e4cbc6e6b90a11dc9d43492ce90ac5a",
+     "bytes": 6087520
+    },
+    "new": {
+     "sha256": "b6d9a35b97786770f9424b6e0089c2daead0625e0e21597f8abb96c6f6cba3cb",
+     "bytes": 6116824
+    }
+   },
+   "order": "old,new,new,old,old,new",
+   "pairs": 3,
+   "logits_sha256_all_processes": "e946185d64aea5942265276e7b76f7d4c4560b543145e1139e9c2a09432ca00c",
+   "run2_ms_median": {
+    "old": 10194,
+    "new": 9080
+   },
+   "run2_gain_median": 0.10927996860898567,
+   "run2_gain_range": [
+    0.06705035971223021,
+    0.22169437846397466
+   ],
+   "processes": [
+    {
+     "label": "pr0-old",
+     "arm": "old",
+     "run1_ms": 9942,
+     "run2_ms": 10104,
+     "peak_rss_bytes": 1233780736,
+     "logits_sha256": "e946185d64aea5942265276e7b76f7d4c4560b543145e1139e9c2a09432ca00c"
+    },
+    {
+     "label": "pr1-new",
+     "arm": "new",
+     "run1_ms": 8311,
+     "run2_ms": 7864,
+     "peak_rss_bytes": 1503756288,
+     "logits_sha256": "e946185d64aea5942265276e7b76f7d4c4560b543145e1139e9c2a09432ca00c"
+    },
+    {
+     "label": "pr2-new",
+     "arm": "new",
+     "run1_ms": 7935,
+     "run2_ms": 9080,
+     "peak_rss_bytes": 1503297536,
+     "logits_sha256": "e946185d64aea5942265276e7b76f7d4c4560b543145e1139e9c2a09432ca00c"
+    },
+    {
+     "label": "pr3-old",
+     "arm": "old",
+     "run1_ms": 10025,
+     "run2_ms": 10194,
+     "peak_rss_bytes": 1215594496,
+     "logits_sha256": "e946185d64aea5942265276e7b76f7d4c4560b543145e1139e9c2a09432ca00c"
+    },
+    {
+     "label": "pr4-old",
+     "arm": "old",
+     "run1_ms": 10147,
+     "run2_ms": 10425,
+     "peak_rss_bytes": 1246560256,
+     "logits_sha256": "e946185d64aea5942265276e7b76f7d4c4560b543145e1139e9c2a09432ca00c"
+    },
+    {
+     "label": "pr5-new",
+     "arm": "new",
+     "run1_ms": 8464,
+     "run2_ms": 9726,
+     "peak_rss_bytes": 1504264192,
+     "logits_sha256": "e946185d64aea5942265276e7b76f7d4c4560b543145e1139e9c2a09432ca00c"
+    }
+   ]
+  },
+  {
+   "case": "document-256",
+   "status": [
+    "PASS_WITH_NOT_VERIFIED"
+   ],
+   "start_utc": [
+    "2026-11-11T19:22:57+00:00"
+   ],
+   "kernel_release": "7.3.0-2-20261110.1-lab-ARCH",
+   "elfs": {
+    "old": {
+     "sha256": "1e1b7d8cdddf57645c2090207eef24812e4cbc6e6b90a11dc9d43492ce90ac5a",
+     "bytes": 6087520
+    },
+    "new": {
+     "sha256": "b6d9a35b97786770f9424b6e0089c2daead0625e0e21597f8abb96c6f6cba3cb",
+     "bytes": 6116824
+    }
+   },
+   "order": "old,new,new,old,old,new",
+   "pairs": 3,
+   "logits_sha256_all_processes": "3188aaae7d1182c133a89fde103722d23f3d81b57df259498c9b778ebe2d0d7a",
+   "run2_ms_median": {
+    "old": 23785,
+    "new": 15322
+   },
+   "run2_gain_median": 0.3561914366149838,
+   "run2_gain_range": [
+    0.3235652722303973,
+    0.3711087645195354
+   ],
+   "processes": [
+    {
+     "label": "pr0-old",
+     "arm": "old",
+     "run1_ms": 23758,
+     "run2_ms": 23785,
+     "peak_rss_bytes": 1215184896,
+     "logits_sha256": "3188aaae7d1182c133a89fde103722d23f3d81b57df259498c9b778ebe2d0d7a"
+    },
+    {
+     "label": "pr1-new",
+     "arm": "new",
+     "run1_ms": 14613,
+     "run2_ms": 16089,
+     "peak_rss_bytes": 1534902272,
+     "logits_sha256": "3188aaae7d1182c133a89fde103722d23f3d81b57df259498c9b778ebe2d0d7a"
+    },
+    {
+     "label": "pr2-new",
+     "arm": "new",
+     "run1_ms": 15119,
+     "run2_ms": 14889,
+     "peak_rss_bytes": 1504591872,
+     "logits_sha256": "3188aaae7d1182c133a89fde103722d23f3d81b57df259498c9b778ebe2d0d7a"
+    },
+    {
+     "label": "pr3-old",
+     "arm": "old",
+     "run1_ms": 23755,
+     "run2_ms": 23675,
+     "peak_rss_bytes": 1215578112,
+     "logits_sha256": "3188aaae7d1182c133a89fde103722d23f3d81b57df259498c9b778ebe2d0d7a"
+    },
+    {
+     "label": "pr4-old",
+     "arm": "old",
+     "run1_ms": 23943,
+     "run2_ms": 23799,
+     "peak_rss_bytes": 1246576640,
+     "logits_sha256": "3188aaae7d1182c133a89fde103722d23f3d81b57df259498c9b778ebe2d0d7a"
+    },
+    {
+     "label": "pr5-new",
+     "arm": "new",
+     "run1_ms": 14885,
+     "run2_ms": 15322,
+     "peak_rss_bytes": 1503232000,
+     "logits_sha256": "3188aaae7d1182c133a89fde103722d23f3d81b57df259498c9b778ebe2d0d7a"
+    }
+   ]
+  },
+  {
+   "case": "document-1024",
+   "status": [
+    "PASS_WITH_NOT_VERIFIED"
+   ],
+   "start_utc": [
+    "2026-11-11T20:07:45+00:00"
+   ],
+   "kernel_release": "7.3.0-2-20261110.1-lab-ARCH",
+   "elfs": {
+    "old": {
+     "sha256": "1e1b7d8cdddf57645c2090207eef24812e4cbc6e6b90a11dc9d43492ce90ac5a",
+     "bytes": 6087520
+    },
+    "new": {
+     "sha256": "b6d9a35b97786770f9424b6e0089c2daead0625e0e21597f8abb96c6f6cba3cb",
+     "bytes": 6116824
+    }
+   },
+   "order": "old,new,new,old,old,new",
+   "pairs": 3,
+   "logits_sha256_all_processes": "82c353787e896b52c8def7f4cebbc087d42f71c4837505db8100df67b2235356",
+   "run2_ms_median": {
+    "old": 70186,
+    "new": 38670
+   },
+   "run2_gain_median": 0.4493346251389166,
+   "run2_gain_range": [
+    0.34842693744830144,
+    0.4505229055359782
+   ],
+   "processes": [
+    {
+     "label": "pr0-old",
+     "arm": "old",
+     "run1_ms": 70216,
+     "run2_ms": 70186,
+     "peak_rss_bytes": 1228144640,
+     "logits_sha256": "82c353787e896b52c8def7f4cebbc087d42f71c4837505db8100df67b2235356"
+    },
+    {
+     "label": "pr1-new",
+     "arm": "new",
+     "run1_ms": 39480,
+     "run2_ms": 38649,
+     "peak_rss_bytes": 1549025280,
+     "logits_sha256": "82c353787e896b52c8def7f4cebbc087d42f71c4837505db8100df67b2235356"
+    },
+    {
+     "label": "pr2-new",
+     "arm": "new",
+     "run1_ms": 39377,
+     "run2_ms": 38670,
+     "peak_rss_bytes": 1516339200,
+     "logits_sha256": "82c353787e896b52c8def7f4cebbc087d42f71c4837505db8100df67b2235356"
+    },
+    {
+     "label": "pr3-old",
+     "arm": "old",
+     "run1_ms": 70308,
+     "run2_ms": 70376,
+     "peak_rss_bytes": 1228161024,
+     "logits_sha256": "82c353787e896b52c8def7f4cebbc087d42f71c4837505db8100df67b2235356"
+    },
+    {
+     "label": "pr4-old",
+     "arm": "old",
+     "run1_ms": 70105,
+     "run2_ms": 70118,
+     "peak_rss_bytes": 1228111872,
+     "logits_sha256": "82c353787e896b52c8def7f4cebbc087d42f71c4837505db8100df67b2235356"
+    },
+    {
+     "label": "pr5-new",
+     "arm": "new",
+     "run1_ms": 39922,
+     "run2_ms": 45687,
+     "peak_rss_bytes": 1515782144,
+     "logits_sha256": "82c353787e896b52c8def7f4cebbc087d42f71c4837505db8100df67b2235356"
+    }
+   ]
+  }
+ ]
+}

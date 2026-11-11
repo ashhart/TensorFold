@@ -1,7 +1,17 @@
 # qmm_q4_tile receipts, Apple M1 (13-inch)
 
-Qwen3.5-2B 4-bit, 64 greedy steps, two runs per process. Old build is the vec4 build (`e742e023`), new build is `618ed699`.
-Each case ran three old and three new processes, interleaved in both orders. Run 2 is the prefill plus 63 decode steps plus the per-step logits readback.
+Qwen3.5-2B 4-bit, 64 greedy steps, two runs per process. Old build is #1990's head (the vec4 build, `1e1b7d8c`), new build is #2015's head (`b6d9a35b`). Both include the float32 fix.
+Each case ran three old and three new processes, interleaved in both orders (old,new,new,old,old,new). Run 2 is the prefill plus 63 decode steps plus the per-step logits readback. Linux 7.3.0-2-20261110.1-lab-ARCH, Honeykrisp from the Omarchy Mesa build (library sha256 `d75f4cbc`).
+
+| Case | Old run 2 (median) | New run 2 (median) | Gain: median (pair range) | Logits digest, all six processes |
+|---|---:|---:|---|---|
+| unicode-24 | 10.2 s | 9.1 s | 10.9% (6.7 to 22.2) | `e946185d64ae` |
+| document-256 | 23.8 s | 15.3 s | 35.6% (32.4 to 37.1) | `3188aaae7d11` |
+| document-1024 | 70.2 s | 38.7 s | 44.9% (34.8 to 45.1) | `82c353787e89` |
+
+The gain depends on the environment. The first version of this receipt measured 19.3%, 49.9% and 62.6% on earlier builds with Linux 7.1.12-2-20261013.18-sep-ARCH and Mesa git-9323171c12 (digests `e5447d9a3ab5`, `147a2d2e0232`, `7f9d8e65e90e`). These runs do not separate the cause.
+
+First version's table (earlier builds, earlier environment; old build the vec4 build `e742e023`, new build `618ed699`):
 
 | Case | Old run 2 (median) | New run 2 (median) | Gain: median (pair range) | Logits digest, all six processes |
 |---|---:|---:|---|---|
@@ -19,11 +29,12 @@ An earlier measurement, on the build before the last tile was padded (`a2dcaa1d`
 
 Files:
 
-- `summary.json` holds every process row (with peak resident memory), every pair, the ELF hashes, the setup and the decision rule, for both builds. It is generated from the raw run files.
-- `identity-probe.txt` holds the probe that runs the tiled image and the default image on every projection case and compares the output bytes.
-- `kernel-contract-m1-13-inch.txt` holds the contract runner's output on the GPU.
+- `fixed-heads-summary.json` holds every process row (with peak resident memory), the pairs, the ELF hashes and the setup of the fixed-heads run. It is generated from the raw run files.
+- `summary.json` is the first version's summary (earlier builds, earlier environment, both tile builds). It stays as the record of those runs.
+- `identity-probe.txt` holds the probe that runs the tiled image and the default image on every projection case and compares the output bytes. It ran on the earlier builds and was not re-run on the fixed heads.
+- `kernel-contract-m1-13-inch.txt` holds the contract runner's output on the GPU with the earlier builds. It was not re-run on the fixed heads.
 - `PREREG.md` was written before the first GPU run. Its addendum, written after the final pairs, says what changed and why.
-- `raw-files-sha256.txt` lists the SHA-256 of every raw run file the summary was generated from (`final/` and `interim/`).
+- `raw-files-sha256.txt` lists the SHA-256 of every raw run file the summary was generated from (`final/` and `interim/`) for `summary.json`.
 
 Byte identity: each process writes the SHA-256 of its full logits stream. A case passes only if all six digests are equal and the ids match the pinned ids.
 The digests equal the ones the scalar and vec4 builds gave on the same inputs.
