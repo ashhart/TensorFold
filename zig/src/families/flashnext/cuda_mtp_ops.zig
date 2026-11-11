@@ -55,7 +55,7 @@ fn cint(v: usize) c_int {
     return @intCast(v);
 }
 
-/// A lane of the head's grouped pass: its draft's cache, pages and host-tier selection at its length, as the lone head's pass reads them.
+/// A grouped head lane uses its draft's cache, pages and host-tier selection, as the lone head does.
 pub fn headLane(d: *Draft, rows: usize, score_rows: u64) batch.Lane {
     return .{ .seq = d.headSeq(null, score_rows), .pos = d.len, .rows = rows };
 }
