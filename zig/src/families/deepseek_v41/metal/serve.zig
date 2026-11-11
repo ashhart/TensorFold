@@ -10,6 +10,7 @@ const pass_ = @import("pass.zig");
 const early_ = @import("early.zig");
 const pipelines = @import("pipelines.zig");
 const vision_prepare = @import("vision_prepare.zig");
+const round_prof = @import("round_prof.zig");
 
 const serve_lanes = host.serve_lanes;
 const iface = host.iface;
@@ -51,6 +52,8 @@ pub const Options = struct {
     gpu_chain: bool = false,
     /// the drafts of a pass after a window that verified fewer (0: every pass makes the config's block)
     narrow: u32 = 0,
+    /// time each decode round and the drafter's passes (TF_DSV41_ROUND_PROF)
+    round_prof: bool = false,
 };
 
 /// A position's draft candidates the pass keeps (the shape the lanes size their buffers by).
@@ -66,6 +69,7 @@ pub const Metal = struct {
     warm: ?mtl.keepalive.Target = null,
     ad: pass_.Pass = undefined,
     early: ?*early_.Early = null,
+    rp: ?*round_prof.RoundProf = null,
     prep: Prep = undefined,
 
     const Prep = struct { io: std.Io, cfg: @import("vision.zig").Config };
@@ -76,6 +80,11 @@ pub const Metal = struct {
         m.* = .{ .a = a, .parts = parts, .opt = opt, .t = undefined };
         m.t = try target_.Target.init(a, parts.env, .{ .slots = opt.slots, .limit = opt.limit, .prompt = opt.prompt, .cache_bytes = opt.cache_bytes, .resident = parts.resident });
         errdefer m.t.deinit();
+        if (opt.round_prof) {
+            m.rp = try round_prof.RoundProf.init(a);
+            m.t.prof = m.rp;
+        }
+        errdefer if (m.rp) |p| p.deinit();
         const e = parts.env;
         if (opt.drafts) if (parts.dspark) |w| {
             m.dp = try dspark.Pass.init(a, e.device, e.queue, e.c, e.p, e.s, e.tables, parts.top, w, .{ .slots = opt.slots, .candidates = @min(candidates, e.c.vocab), .gpu_chain = opt.gpu_chain, .narrow = opt.narrow });
@@ -84,6 +93,7 @@ pub const Metal = struct {
             if (opt.early) m.early = try early_.Early.init(a, m.dp.?);
             m.ad.early = m.early;
             m.t.behind = m.ad.behind();
+            m.dp.?.prof = m.rp;
         };
         try m.holdWarm();
         return m;
@@ -191,8 +201,10 @@ pub const Metal = struct {
         }
         m.t.behind = null;
         if (m.warm) |w| w.queue.deinit();
+        if (m.rp) |p| p.log();
         if (m.dp) |p| p.deinit();
         m.t.deinit();
+        if (m.rp) |p| p.deinit();
         if (m.parts.owner) |o| o.close(o.ctx);
         m.a.destroy(m);
     }
