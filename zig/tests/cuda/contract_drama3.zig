@@ -181,8 +181,7 @@ pub const Mix = struct {
         }
     }
 
-    /// Three fp32 roundings (c - u, the product, the sum), each at most 2^-24 of the terms it touches: under
-    /// cancellation the error follows those terms (`mag`), not the small result.
+    /// Three fp32 roundings, each at most 2^-24 of the terms they touch, so the bound follows `mag`, not the result.
     pub fn bounds(_: *Mix, _: []const f64, mag: []const f64, allow: []f64) !void {
         for (allow, mag) |*l, m| l.* = 0x1p-22 * m + 0x1p-149;
     }
