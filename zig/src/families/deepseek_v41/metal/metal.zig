@@ -43,6 +43,7 @@ pub const vision_prep = @import("vision_prep.zig");
 pub const vision_rows = @import("vision_rows.zig");
 pub const vision_prepare = @import("vision_prepare.zig");
 pub const boot = @import("boot.zig");
+pub const calib = @import("calib.zig");
 
 test {
     std.testing.refAllDecls(@This());

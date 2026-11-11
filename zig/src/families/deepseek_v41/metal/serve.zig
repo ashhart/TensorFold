@@ -10,6 +10,7 @@ const pass_ = @import("pass.zig");
 const early_ = @import("early.zig");
 const pipelines = @import("pipelines.zig");
 const vision_prepare = @import("vision_prepare.zig");
+const calib = @import("calib.zig");
 
 const serve_lanes = host.serve_lanes;
 const iface = host.iface;
@@ -51,6 +52,8 @@ pub const Options = struct {
     gpu_chain: bool = false,
     /// the drafts of a pass after a window that verified fewer (0: every pass makes the config's block)
     narrow: u32 = 0,
+    /// the draft cost table is timed at load unless TF_DSV41_CALIB names another source (false: the defaults)
+    measure_costs: bool = false,
 };
 
 /// A position's draft candidates the pass keeps (the shape the lanes size their buffers by).
@@ -105,8 +108,7 @@ pub const Metal = struct {
 
     /// The lanes' view: one slot a stream, rows of 16 a forward, the release's DSpark shape on one device.
     pub fn model(m: *Metal) serve_lanes.Model {
-        const c = m.parts.env.c;
-        const shape: host.dspark.Shape = .{ .block = c.dspark_block, .noise = c.dspark_noise_token, .window = c.window, .rank = c.dspark_markov_rank, .hidden = c.hidden, .candidates = @min(candidates, c.vocab) };
+        const dshape = m.dsparkShape();
         return .{
             .ptr = m,
             .vision = m.vision(),
@@ -116,7 +118,7 @@ pub const Metal = struct {
             .world = 1,
             .prefill_step = m.opt.prompt.chunk,
             .forward_rows = pipelines.max_rows,
-            .shape = shape,
+            .shape = dshape,
             .target = targetFn,
             .pass = passFn,
             .calibrate = calibrate,
@@ -126,7 +128,7 @@ pub const Metal = struct {
             .keepalive = m.keepalive(),
             .close = close,
             // a cost table measured on this machine (TF_DSV41_CALIB_FILE), else the defaults: Metal has nothing to time
-            .calib = if (host.calib_env.Knobs.fromEnv().file) |f| .{ .file = f } else .{ .mode = "default" },
+            .calib = m.knobs(),
             .steps = m.opt.steps,
             .decode_share = m.opt.decode_share,
         };
@@ -154,6 +156,18 @@ pub const Metal = struct {
         return .{ .pixels = got.pixels, .gh = got.gh, .gw = got.gw, .tokens = got.tokens, .hash = got.hash };
     }
 
+    fn dsparkShape(m: *const Metal) host.dspark.Shape {
+        const c = m.parts.env.c;
+        return .{ .block = c.dspark_block, .noise = c.dspark_noise_token, .window = c.window, .rank = c.dspark_markov_rank, .hidden = c.hidden, .candidates = @min(candidates, c.vocab) };
+    }
+
+    /// TF_DSV41_CALIB and its neighbours as the environment gives them; unset: timed when asked for, else defaults.
+    fn knobs(m: *const Metal) host.calib_env.Knobs {
+        var k = host.calib_env.Knobs.fromEnv();
+        if (k.mode == null) k.mode = if (m.opt.measure_costs) "measure" else "default";
+        return k;
+    }
+
     fn self(ctx: *anyopaque) *Metal {
         return @ptrCast(@alignCast(ctx));
     }
@@ -167,8 +181,9 @@ pub const Metal = struct {
         return if (m.dp != null) m.ad.pass() else null;
     }
 
-    fn calibrate(_: *anyopaque, _: Allocator, _: std.Io, _: []const u8, _: host.calib_env.Knobs, _: host.calib_env.Shape) anyerror!host.calib_lanes.Boot {
-        return error.Unmeasured; // the mode is "default": never asked to measure
+    fn calibrate(ctx: *anyopaque, a: Allocator, io: std.Io, dir: []const u8, k: host.calib_env.Knobs, want: host.calib_env.Shape) anyerror!host.calib_lanes.Boot {
+        const m = self(ctx);
+        return calib.run(a, io, dir, k, want, .{ .t = m.t, .ad = if (m.dp != null) &m.ad else null, .slots = m.opt.slots, .limit = m.opt.limit, .vocab = m.parts.env.c.vocab, .shape = m.dsparkShape() });
     }
 
     /// The device's allocated bytes now (the weights, slots, prompt buffers and kept-state host copies aside).

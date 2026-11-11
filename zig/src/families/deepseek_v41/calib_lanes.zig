@@ -47,6 +47,14 @@ pub const Device = struct {
     drop_window: *const fn (ctx: *anyopaque, slot: u32) anyerror!void,
     /// swaps the session store out for the run and back after it (null: no store)
     detach: ?*const fn (ctx: *anyopaque) void = null,
+    /// the committed rows a pass ingests first, inside a timed pass (null: the pass is its proposal alone)
+    ingest: ?*const fn (ctx: *anyopaque, slot: u32) anyerror!void = null,
+    /// the shared windows timed past `rows`, ascending
+    wide: []const u32 = &costs_mod.wide,
+    /// the timing method where no knob names one
+    base: cm.Method = .{},
+    /// the measured table is written to the calibration directory
+    store: bool = true,
 };
 
 /// The calibration prompt (rank 0): the calibration text's ids over the checkpoint's tokenizer. gpa-owned.
@@ -71,7 +79,7 @@ pub fn measure(gpa: Allocator, d: Device, ids: []const u32, how: cm.Method, rows
     const tgt = d.target;
     const pass = d.pass;
     const rows = d.rows;
-    var plan = try cm.Plan.init(gpa, d.slots, rows_cap, rows, how, pass != null);
+    var plan = try cm.Plan.initWide(gpa, d.slots, rows_cap, rows, how, pass != null, d.wide);
     defer plan.deinit(gpa);
     if (ids.len < 2) return error.CalibPrompt;
     var lens: [4]usize = undefined;
@@ -112,12 +120,18 @@ pub fn measure(gpa: Allocator, d: Device, ids: []const u32, how: cm.Method, rows
     var drafts: [cm.max_rows]u32 = undefined;
     var conf: [cm.max_rows]f32 = undefined;
     var chosen: [4][cm.max_rows]u32 = undefined;
-    for (plan.runs.items, samples) |run, *x| {
+    const began = ph.nowNs();
+    for (plan.runs.items, samples, 0..) |run, *x, at| {
+        if (how.budget_ms > 0 and ph.nowNs() - began > @as(u64, how.budget_ms) * std.time.ns_per_ms and plan.repeat(at)) {
+            x.* = cm.skipped;
+            continue;
+        }
         if (run.what == .draft) {
             const p0: u64 = lens[0] - 1;
             const asks = [_]iface.Ask{.{ .slot = 0, .anchor = ids[lens[0] - 1], .start = p0, .params = dspark.Params.of(null, p0) }};
             var props = [_]iface.Proposal{.{ .drafts = drafts[0..shape.block], .conf = conf[0..shape.block] }};
             const t0 = try d.mark(d.ctx);
+            if (d.ingest) |f| try f(d.ctx, 0);
             try pass.?.propose(&asks, &props);
             x.* = @intCast((try d.mark(d.ctx)) - t0);
             continue;
@@ -152,6 +166,10 @@ pub fn measure(gpa: Allocator, d: Device, ids: []const u32, how: cm.Method, rows
     for (ranks, 0..) |*r, k| {
         const ms = try a.alloc(f64, samples.len);
         for (ms, all[k * samples.len ..][0..samples.len]) |*y, ns| {
+            if (ns == cm.skipped) {
+                y.* = -1.0;
+                continue;
+            }
             if (ns < 0) return error.CalibFollower; // a follower's marks did not pair up with ours
             y.* = @as(f64, @floatFromInt(ns)) / 1e6;
         }
@@ -177,7 +195,7 @@ fn prefillAll(d: Device, ids: []const u32, lens: []const usize, again: bool) !vo
 
 /// TF_DSV41_CALIB=measure / zig at open: prompt, measurement, stored entry, boot lines; table + stored file (or null).
 pub fn boot(gpa: Allocator, io: std.Io, d: Device, dir: []const u8, k: calib_env.Knobs, want: calib_env.Shape) !Boot {
-    const how = try cm.method(&calib_env.env);
+    const how = try cm.methodFrom(&calib_env.env, d.base);
     const rows_cap = (try calib_env.depthSettings(&calib_env.env)).max_rows;
     const ids = try promptOf(gpa, io, dir, d.vocab);
     defer gpa.free(ids);
@@ -188,7 +206,7 @@ pub fn boot(gpa: Allocator, io: std.Io, d: Device, dir: []const u8, k: calib_env
     log.info("dsv41 calib method (zig): table {t}, {t} of {d} after {d} warm-up(s), rows 1-{d} cycled, rows 1-{d} rechecked, rows 9+ {d} runs; {d} slots, {d} timed runs, a {d}-token text; rows 1-4 kept {d:.3} / {d:.3} / {d:.3} / {d:.3} ms (rank 0)", .{ how.shape, how.stat, how.reps, how.warm, how.cycle, how.recheck, how.deep, got.n, got.runs, ids.len, got.kept[0], got.kept[1], got.kept[2], got.kept[3] });
     var path: ?[]u8 = null;
     var db: [std.fs.max_path_bytes]u8 = undefined;
-    if (calib_env.dirOf(k, &db)) |to| {
+    if (if (d.store) calib_env.dirOf(k, &db) else null) |to| {
         path = calib_env.store(gpa, io, to, want, got.costs, .{ .method = how, .seconds = secs, .kept = got.kept[0..got.rows], .tokens = ids.len }, std.Io.Clock.real.now(io).toSeconds()) catch |e| blk: {
             if (!quiet) log.warn("calibration: the table was not stored in {s} ({t})", .{ to, e });
             break :blk null;
@@ -197,13 +215,13 @@ pub fn boot(gpa: Allocator, io: std.Io, d: Device, dir: []const u8, k: calib_env
     var line: [512]u8 = undefined;
     var wr = std.Io.Writer.fixed(&line);
     var first = true;
-    for ([_]u32{ 1, 2, 4, 6, 8, 16, 24, 32, 48, 64 }) |r| if (r <= got.costs.verify.len) {
+    for ([_]u32{ 1, 2, 4, 6, 8, 16, 17, 24, 32 }) |r| if (r <= got.costs.verify.len) {
         wr.print("{s}{d}", .{ if (first) "" else "/", r }) catch {};
         first = false;
     };
     wr.writeAll(" rows ") catch {};
     first = true;
-    for ([_]u32{ 1, 2, 4, 6, 8, 16, 24, 32, 48, 64 }) |r| if (r <= got.costs.verify.len) {
+    for ([_]u32{ 1, 2, 4, 6, 8, 16, 17, 24, 32 }) |r| if (r <= got.costs.verify.len) {
         wr.print("{s}{d:.1}", .{ if (first) "" else ", ", got.costs.windowMs(r) }) catch {};
         first = false;
     };
