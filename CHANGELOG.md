@@ -61,6 +61,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Tests: the images route test fixture can no longer hang a test run on macOS. Its route closes its end of the socket on every exit and the client's writes are bounded, so a route that answers before reading a large body ends the write at once (#3010).
 
 - Internal: `Admit` and `Ledger` move unchanged from `core/engine_api.zig` to `core/engine_admission.zig` and keep their names under `engine_api`, so `engine_api.zig` has room for the execution witness's hook; nothing a user sees changes (refs #2741).
+- Internal: `Admit` and `Ledger` move unchanged from `core/engine_api.zig` to `core/engine_admission.zig` and keep their names under `engine_api`, so `engine_api.zig` has room for the execution witness's hook; nothing a user sees changes (#2896, refs #2741). Thanks to @kotevcode.
 - CUDA EXL3 grouped experts launch and size their storage at the caller's tile and pair count, so decode no longer launches three quarters of its grid empty, and Qwen3.6-35B-A3B EXL3 sizes its grouped storage for 36,864 pair rows instead of 163,904 (about 3 GB less); outputs are bit-equal (#2843, for #2823).
 
 - CUDA: dots.mocr's text decoder serves text prompts on a GB10 from the publisher's BF16 weights, on a new shared engine for dense GQA decoders (`zig/src/cuda_dense/`); `--vision`, prompt caching and fp8 caches are refused by name, and served CUDA checkpoints are unchanged (#2673, part of #1927). Thanks to @laudney.
