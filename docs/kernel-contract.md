@@ -112,8 +112,10 @@ fails a record whose mode is not the zebin's `grf_count`. `tf-xpu-kernel-contrac
 directory another host built. The `RECORD` lines are the values `xpu_records.zig` holds for that ocloc.
 
 On an Arc Pro B70, `zig build -Dxpu-contract=true tf-xpu-contract-run` builds `tf-xpu-contract-run` with the zebins
-linked in, and `./tf-xpu-contract-run [--device N]` runs gates 1 to 4 over nine registrations of the Qwen3.8-27B glue's
-`add_rmsnorm`, `add_rmsnorm_dec`, `gated_norm`, `swiglu`, `argmax` and `embed`, the five planted controls, and gate 5
+linked in, and `./tf-xpu-contract-run [--device N]` runs gates 1 to 4 over ten registrations of the Qwen3.8-27B glue's
+`add_rmsnorm`, `add_rmsnorm_dec`, `gated_norm`, `swiglu`, `argmax`, the top-k a sampled row draws from (`topk_part` and
+`topk_merge`) and `embed`, the seven planted controls (the top-k's two: a merge breaking ties the wrong way, red at
+`shapes`, and a flag read off the candidates only, red at `nonfinite`), and gate 5
 live: the card's own properties against the BMG-G31 row and every loaded kernel's against its record. It loads the same
 native zebins the audit reads, so the GRF mode the record states is the loaded image's. Its `SUMMARY` line names the PCI
 id it ran on. `xpu-contract-run` runs it on this card. On a host without ocloc, `-Dxpu-images=DIR` links zebins that
