@@ -4,6 +4,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Server: `serve --execution-witness` (off by default) adds `GET /v1/execution/witness` under the `read` key scope, a snapshot naming the running binary, the checkpoint's text files, the serve defaults and `TF_*` settings, the engine's epoch and a per-process instance, or `unknown` with its reason. It needs an API key or `--unix-socket`, hashes only after the server is ready, and no engine attests a supported path yet, so every engine reads `unsupported_path`; without the flag the route answers 404 and replies are unchanged (refs #2741).
 - Internal: `Admit` and `Ledger` move unchanged from `core/engine_api.zig` to `core/engine_admission.zig` and keep their names under `engine_api`, so `engine_api.zig` has room for the execution witness's hook; nothing a user sees changes (#2896, refs #2741). Thanks to @kotevcode.
 - GLM-5.3-Flash on CUDA: tensor-parallel shares and layer sums go through one mesh layer (declared shares, one reduction boundary over a `Collective`), with the same gathers, bytes and order and tokens equal to main at TP=2; an aborted `tp_group` call now ends as `Aborted` instead of stopping the process (#2789, part of #2560). Thanks to @laudney.
 

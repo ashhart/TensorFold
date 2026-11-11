@@ -16,6 +16,7 @@ pub const EmbeddingBatch = lanes.embedding.Batch;
 pub const embedding_vector = @import("embedding_vector.zig");
 pub const load_ledger = @import("load_ledger.zig");
 pub const kv_ledger = @import("kv_ledger.zig");
+pub const execution_witness = @import("engine_witness.zig");
 
 /// One image of a request (``Request.images``): the tower's input and the placeholder rows its output replaces.
 pub const Image = lanes.stream.Image;
@@ -231,6 +232,8 @@ pub const Info = struct {
     admit: ?Admit = null,
     /// A byte budget each request promises its caches from as it is admitted (null: none); never beside `admit`.
     ledger: ?Ledger = null,
+    /// --execution-witness: this engine's attestation of its supported path (null: an unsupported path).
+    witness: ?execution_witness.Source = null,
 
     pub const Capability = @import("engine_capabilities.zig").Capability;
 

@@ -183,6 +183,8 @@ pub const Server = struct {
     cortheon: ?*cortheon.State = null,
     /// Recall's record (--recall), which GET and DELETE /v1/recall read and empty; main opens and closes it.
     recall: ?*api.recall_store.Store = null,
+    /// --execution-witness's state, which GET /v1/execution/witness reads; serve owns it (null: off).
+    witness: ?*@import("witness.zig").State = null,
 
     /// Reads what the template and tokenizer decide once: late system role, think markers, efforts, the forced close.
     pub fn media(srv: *const Server) @import("messages.zig").Media {
