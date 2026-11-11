@@ -277,7 +277,6 @@ pub fn Ops(comptime Tri: type) type {
         /// One forward over the window `ids` from seq.fed: each row's scores in d.logits, its streams in d.streams.
         pub fn verify(o: Self, seq: *prompt.Seq, d: *Draft, ids: []const u32) !void {
             if (o.main) |m| return m.verify(m.ptr, seq, d, ids);
-            o.e.round_graph.clear();
             const n = ids.len;
             if (n == 0 or n > max_rows) return error.WindowTooWide;
             if (seq.fed + n > seq.cap) return error.PromptTooLong;
@@ -303,7 +302,6 @@ pub fn Ops(comptime Tri: type) type {
                 if (seq.fed + ids.len > seq.cap) return error.PromptTooLong;
                 if (!d.layout.heads.eql(seq.heads)) return error.DraftHeads;
             }
-            o.e.round_graph.clear();
             const wins = try o.e.gpa.alloc(prompt.Engine.Window, seqs.len);
             defer o.e.gpa.free(wins);
             for (seqs, ds, idss, wins) |seq, d, ids, *w| {
@@ -377,7 +375,6 @@ pub fn Ops(comptime Tri: type) type {
         /// Keep the window's first `keep` rows (Python forward.commit) from its saved rows; a repeat is a no-op.
         pub fn rollback(o: Self, seq: *prompt.Seq, d: *Draft, keep: usize) !void {
             if (o.main) |m| return m.rollback(m.ptr, seq, d, keep);
-            o.e.round_graph.clear();
             if (keep == 0 or keep > d.rows) return error.CannotRewind;
             if (keep == d.rows) return d.settle(seq);
             if (!d.open) return error.CannotRewind;
