@@ -42,6 +42,7 @@ pub fn run(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue) !void {
                 defer e.end();
                 try kernels.quant(e, linear, .{ .buffer = buffers[4], .offset = 32 }, null, .{ .buffer = buffers[8] }, .{ .buffer = buffers[5], .offset = 32 }, rows);
                 try kernels.quant(e, selected.linear, .{ .buffer = buffers[4], .offset = 32 }, null, .{ .buffer = buffers[8] }, .{ .buffer = buffers[6], .offset = 32 }, rows);
+                e.barrier();
             }
             cb.commit();
             cb.wait();
