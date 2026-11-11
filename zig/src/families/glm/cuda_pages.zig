@@ -183,6 +183,12 @@ pub const Pages = struct {
         return .{ .{ .at = p.base(), .bytes = pooled }, .{ .at = p.base() + p.pool.total() * pooled, .bytes = state.latentPageBytes(&p.e.w) } };
     }
 
+    /// TF_GLM_KV_SPLIT: slot `slot`'s first `n` latent table entries as uploaded (its places in this rank's region).
+    fn latIds(p: *const Pages, slot: u32, n: usize) []const u32 {
+        const t = tableLen(p.e.capacity);
+        return p.lat_ids[slot * t ..][0..n];
+    }
+
     /// TF_GLM_KV_SPLIT: this rank's latent region, its class's pages and the trash page.
     pub fn region(p: *const Pages) owned.Region {
         return .{ .rank = @intCast(p.e.share.rank), .classes = p.pool.classes, .cap = p.pool.classCap() };
@@ -291,6 +297,7 @@ pub const Pages = struct {
             if (r.bytes > 0) if (at) |i| try p.e.d.check(p.e.d.api.cuMemsetD32Async(r.at + i * r.bytes, 0xFFFF_FFFF, r.bytes / 4, p.e.stream.handle), "cuMemsetD32Async");
         };
         st.owner = if (p.e.settings.kv_split) @intCast(p.leases[slot].owner) else null; // the rank its latent rows live on
+        st.lpages = if (st.owner != null and st.owner.? == p.e.share.rank) p.latIds(slot, ids.len) else &.{};
         st.pages = ids;
         st.capacity = @min(ids.len * state.page_rows, p.e.capacity);
         p.used[slot] = true;
@@ -304,6 +311,7 @@ pub const Pages = struct {
         st.pages = &.{};
         st.capacity = 0;
         st.owner = null;
+        st.lpages = &.{};
         p.used[slot] = false;
         if (kv_host.active) |*g| g.invalidate(p.e.stream) catch {};
         if (!p.leader) {
