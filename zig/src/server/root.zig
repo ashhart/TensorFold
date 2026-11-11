@@ -80,6 +80,7 @@ test {
     _ = @import("compact_at_cli_test.zig");
     _ = @import("toml_flat_test.zig");
     _ = @import("cli_config_test.zig");
+    _ = @import("cli_backend_test.zig");
     _ = @import("unix_socket_cli_test.zig");
     _ = @import("effort_cli_audit_test.zig");
     _ = @import("live.zig");
