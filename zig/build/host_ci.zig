@@ -251,6 +251,7 @@ const macos_adapters = [_][]const u8{
     "check-nemotron-prefill-widths-host",
     "check-qwen35-cache-host",
     "check-sessions-linux",
+    "check-video-exports-linux",
     "check-video-layout-linux",
     "compile-disk-identity-metal-host",
     "compile-dsv41-engram-alloc-aarch64",
