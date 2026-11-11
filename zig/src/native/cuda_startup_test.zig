@@ -99,20 +99,10 @@ test "CUDA startup: every other registered family retains its declared pass size
 test "CUDA startup: Flash Next cache cuts use the loaded cold pass size, and its replies' warm passes wait for quiet" {
     var loaded: flash.native.Loaded = undefined;
     loaded.prompt_rows = 4096;
-    loaded.snap_grid = 0;
-    const rules = @import("cuda_snaps.zig").passRules(flash.native, startup.rows(flash.native, loaded), @import("cuda_snaps.zig").loadedGrid(loaded));
+    const rules = @import("cuda_snaps.zig").passRules(flash.native, startup.rows(flash.native, loaded));
     try std.testing.expectEqual(@as(u32, 4096), rules.chunk);
     try std.testing.expect(!rules.chunk_starts and rules.lookahead == 1);
     try std.testing.expect(rules.warm == .waits and !rules.planned); // a mark one token short of the pass's end
     try std.testing.expectEqual(nemo.warm_quiet, flash.native.warm_quiet);
 d);
-}
-
-test "CUDA startup: an EXL3 Flash Next keeps and resumes states on its prefill step only" {
-    var loaded: flash.native.Loaded = undefined;
-    loaded.prompt_rows = 4096;
-    loaded.snap_grid = 4096;
-    const snaps = @import("cuda_snaps.zig");
-    const rules = snaps.passRules(flash.native, startup.rows(flash.native, loaded), snaps.loadedGrid(loaded));
-    try std.testing.expect(rules.planned and rules.grid == 4096 and !rules.chunk_starts);
 }
