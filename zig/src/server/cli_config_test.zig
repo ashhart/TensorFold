@@ -89,19 +89,22 @@ test "serve --config: each kind of flag takes its values and refuses the rest by
     try f.tokens("alias = [\"a\", \"b\"]\napi_key = []\n", &.{ "--alias=a", "--alias=b" });
     try f.tokens("dashboard = true\nmetrics-open = false\n", &.{"--dashboard"});
     try f.tokens("thinking = false\n", &.{"--no-thinking"});
-    try f.tokens("no-thinking = false\n", &.{"--thinking"});
+    // a pair of switches has one key, the positive one
+    try f.refused("no-thinking = false\n", 1, "--no-thinking has the switch --thinking: write thinking = true");
+    try f.refused("port = 1\nno_thinking = true\n", 2, "--no-thinking has the switch --thinking: write thinking = false");
     try f.tokens("thinking = true\nno_drafts = true\n", &.{ "--thinking", "--no-drafts" });
     try f.tokens("no-drafts = false\n", &.{});
     try f.refused("port = 1\nprot = 2\n", 2, "unknown key 'prot'");
     try f.refused("\"--port\" = 2\n", 1, "unknown key '--port'");
     try f.refused("config = \"other.toml\"\n", 1, "a config file cannot name another config file");
     try f.refused("port = true\n", 1, "--port takes a value, not true or false");
-    try f.refused("port = [1, 2]\n", 1, "--port takes one value, not a list");
+    try f.refused("port = [\"1\", \"2\"]\n", 1, "--port takes one value, not a list");
     try f.refused("alias = true\n", 1, "--alias takes values, not true or false");
-    try f.refused("# aliases\nalias = [\"a\",\n  false]\n", 2, "--alias takes values, not true or false");
+    try f.refused("# aliases\nalias = [\"a\",\n  false]\n", 3, "an array holds strings only: quote each item");
+    try f.refused("alias = [1]\n", 1, "an array holds strings only: quote each item");
     try f.refused("dashboard = \"yes\"\n", 1, "--dashboard is a switch: use true or false");
     try f.refused("dashboard = 1\n", 1, "--dashboard is a switch: use true or false");
-    try f.refused("dashboard = [true]\n", 1, "--dashboard is a switch: use true or false");
+    try f.refused("dashboard = [\"true\"]\n", 1, "--dashboard is a switch: use true or false");
     try f.refused("max-tokens = 1\nmax_tokens = 2\n", 2, "--max-tokens is set twice ('max_tokens' and its other spelling)");
     try f.refused("model = 7\n", 1, "model takes a string");
     try f.refused("model = [\"m\"]\n", 1, "model takes a string");
@@ -132,6 +135,38 @@ test "serve --config: the file's model yields to the command line's, and its fla
     for ([_][]const u8{ "--port=1", "m", "--dashboard", "--port", "3" }, out.argv) |w, g| try t.expectEqualStrings(w, g);
     try t.expectEqualStrings("f.toml", out.path.?);
     try t.expectEqual(@as(usize, 1), out.options);
+}
+
+test "serve --config: a relative path in the file starts at the file's folder" {
+    var f: Fixture = .{};
+    defer f.deinit();
+    const a = f.arena.allocator();
+    const text =
+        \\model = "./weights/m"
+        \\chat-template = "t.jinja"
+        \\api-key-file = "../keys"
+        \\learn-dir = "/abs/learn"
+        \\recall-dir = "~/recall"
+        \\drafter = "./drafter"
+        \\name = "plain/name"
+        \\kv-cache = "bf16"
+    ;
+    const sep = std.fs.path.sep_str;
+    const argv: []const []const u8 = &.{ "--config", "conf" ++ sep ++ "f.toml" };
+    const out = try config.merge(a, argv, (try config.locate(a, argv, &f.u)).?, text, &f.u);
+    const want = [_][]const u8{ "conf" ++ sep ++ "weights/m", "--chat-template=conf" ++ sep ++ "t.jinja", "--api-key-file=conf" ++ sep ++ "../keys", "--learn-dir=/abs/learn", "--recall-dir=~/recall", "--drafter=conf" ++ sep ++ "drafter", "--name=plain/name", "--kv-cache=bf16" };
+    try t.expectEqual(want.len, out.argv.len);
+    for (want, out.argv) |w, g| try t.expectEqualStrings(w, g);
+    // a repo id, or a folder named without ./, is left as written: the hub resolves it as it does a typed model
+    try f.tokens("model = \"org/Model\"\ndrafter = \"org/Drafter\"\n", &.{ "org/Model", "--drafter=org/Drafter" });
+    const rel = try config.merge(a, argv, (try config.locate(a, argv, &f.u)).?, "model = \"org/Model\"\ndrafter = \"../d\"\n", &f.u);
+    for ([_][]const u8{ "org/Model", "--drafter=conf" ++ sep ++ "../d" }, rel.argv) |w, g| try t.expectEqualStrings(w, g);
+    // a number names a folder too, and a folder that starts with -- does not turn the model into a flag
+    const odd: []const []const u8 = &.{"--config=--conf" ++ sep ++ "f.toml"};
+    const dashed = try config.merge(a, odd, (try config.locate(a, odd, &f.u)).?, "model = \"./weights\"\ncompact-memory = 123\n", &f.u);
+    for ([_][]const u8{ "." ++ sep ++ "--conf" ++ sep ++ "weights", "--compact-memory=--conf" ++ sep ++ "123" }, dashed.argv) |w, g| try t.expectEqualStrings(w, g);
+    // a file in the working directory has no folder to add
+    try f.tokens("model = \"./m\"\nchat-template = \"t.jinja\"\n", &.{ "./m", "--chat-template=t.jinja" });
 }
 
 test "serve --config: a file parses as its flags typed by hand, and the command line wins" {
@@ -203,6 +238,25 @@ test "serve --config: expand reads the file, passes other commands through and n
     for ([_][]const u8{ "org/Model", "--port=9000", "--dashboard" }, read.argv) |w, g| try t.expectEqualStrings(w, g);
     try t.expectEqualStrings(try std.fmt.allocPrint(a, "--config {s} supplied 2 options, read before the command line's", .{path}), (try config.note(a, read)).?);
     try t.expectEqualStrings("--config x.toml supplied 1 option, read before the command line's", (try config.note(a, .{ .argv = &.{}, .path = "x.toml", .options = 1 })).?);
+
+    // a file that other users can write is refused before it is read; a folder is not a file
+    if (@import("builtin").os.tag != .windows) {
+        const c = @import("sys").c;
+        const pathz = try a.dupeSentinel(u8, path, 0);
+        for ([_]u32{ 0o664, 0o646, 0o666 }) |mode| {
+            try t.expectEqual(@as(c_int, 0), c.fchmodat(std.posix.AT.FDCWD, pathz, mode, 0));
+            try t.expectError(error.Usage, config.expand(a, t.io, &.{ "--config", path }, &f.u));
+            try t.expectEqualStrings(try std.fmt.allocPrint(a, "argument --config: {s} can be written by other users (mode 0{o}): it can hold keys and it chooses what is served; use chmod go-w", .{ path, mode }), f.u.message);
+        }
+        for ([_]u32{ 0o600, 0o644, 0o640 }) |mode| {
+            try t.expectEqual(@as(c_int, 0), c.fchmodat(std.posix.AT.FDCWD, pathz, mode, 0));
+            try t.expectEqual(@as(usize, 2), (try config.expand(a, t.io, &.{ "--config", path }, &f.u)).options);
+        }
+        try tmp.dir.createDir(t.io, "folder.toml", .default_dir);
+        const folder = try std.fs.path.join(a, &.{ dir, "folder.toml" });
+        try t.expectError(error.Usage, config.expand(a, t.io, &.{ "--config", folder }, &f.u));
+        try t.expectEqualStrings(try std.fmt.allocPrint(a, "argument --config: {s} is not a regular file", .{folder}), f.u.message);
+    }
 
     const missing = try std.fs.path.join(a, &.{ dir, "none.toml" });
     try t.expectError(error.Usage, config.expand(a, t.io, &.{ "m", "--config", missing }, &f.u));
