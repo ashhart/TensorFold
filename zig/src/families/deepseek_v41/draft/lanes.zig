@@ -120,7 +120,7 @@ pub const Lanes = struct {
         for (window, 0..) |*w, i| w.* = .{ .width = @intCast(i + 1), .ms = v[i] };
         const shared = try arena.alloc(lanes.config.Cost, @min(v.len, batch_rows));
         for (shared, 0..) |*w, i| w.* = .{ .width = @intCast(i + 1), .ms = v[i] };
-        return .{ .exact_width = costs_mod.slot_rows, .mtp = true, .speculate = true, .speculate_early = false, .drafts = x.opts.shape.block, .window_costs = window, .mtp_step_ms = 0.0, .hidden_rows = true, .batch_rows = batch_rows, .max_streams = x.opts.slots, .shared_costs = shared, .draft_probabilities = true, .draft_streams = true, .join_tail = x.target.vtable.tail != null and try joinTail(), .piece_runs = try envOn("TF_DSV41_PIECE_RUNS"), .join_drafts = try envOn("TF_DSV41_JOIN_DRAFTS"), .replay_runs = try envOn("TF_DSV41_REPLAY_RUNS") };
+        return .{ .exact_width = costs_mod.slot_rows, .mtp = true, .speculate = true, .speculate_early = false, .drafts = x.opts.shape.block, .window_costs = window, .mtp_step_ms = 0.0, .hidden_rows = true, .batch_rows = batch_rows, .max_streams = x.opts.slots, .shared_costs = shared, .draft_probabilities = true, .draft_streams = true, .plain_streams = @intCast(x.opts.depth.plain_streams), .join_tail = x.target.vtable.tail != null and try joinTail(), .piece_runs = try envOn("TF_DSV41_PIECE_RUNS"), .join_drafts = try envOn("TF_DSV41_JOIN_DRAFTS"), .replay_runs = try envOn("TF_DSV41_REPLAY_RUNS") };
     }
 
     /// TF_DSV41_TAIL_JOIN=1: a prompt in pieces leaves its last token to its first round's shared window (default off).
@@ -362,6 +362,7 @@ pub const Lanes = struct {
             nucleus = nucleus or spec_mod.isNucleus(w.stream.sampling);
         }
         if (!sp.roundAllowed(tree_round, nucleus)) return;
+        if (x.plainRound(windows)) return; // the plain switch: no pass runs for a round this wide
         for (windows, segs) |w, g| {
             const st = x.get(w.stream) catch continue;
             if (!dsparkRound(st, w) or !sp.wouldWant(st.slot)) continue;
@@ -370,6 +371,11 @@ pub const Lanes = struct {
             if (sampled and spec_mod.isNucleus(w.stream.sampling)) continue;
             arm(x.pass.ptr, st.slot, g.start, @intCast(g.tokens.len), sampled);
         }
+    }
+
+    /// The plain switch fired: every drafted window of the round was cut to the pending row alone.
+    fn plainRound(x: *Lanes, windows: []const be.Window) bool {
+        return x.opts.depth.plain_streams > 0 and windows.len >= x.opts.depth.plain_streams;
     }
 
     /// A DSpark round: the window verifies the pass's drafts only (a prefix of the held chain counts too).
@@ -394,6 +400,7 @@ pub const Lanes = struct {
             nucleus = nucleus or spec_mod.isNucleus(w.stream.sampling);
         }
         if (!sp.roundAllowed(tree_round, nucleus)) return sp.clear();
+        if (x.plainRound(windows)) return sp.clear(); // the plain switch: this round drafted none, the next will not want the drafts
         const cands = try a.alloc(spec_mod.Candidate, windows.len);
         var n: usize = 0;
         for (windows, segs, choices) |w, g, c| {
