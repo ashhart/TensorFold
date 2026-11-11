@@ -296,6 +296,11 @@ pub const Draft = struct {
         return streamRows(d.rows_cap).at(d.stream_blocks, @intCast(i));
     }
 
+    /// Where a lone window's scores go: one buffer; on pieces rows are apart, so only verifyMany writes them.
+    pub fn windowScores(d: *const Draft) error{FlashNextPagedDraftVerify}!u64 {
+        return if (d.logit_paged) error.FlashNextPagedDraftVerify else d.logits.ptr;
+    }
+
     /// A pool lane's head on pieces: its cache on `paged`'s pages, `at` the addresses of pieceSizes' pieces.
     pub fn initPieces(gpa: std.mem.Allocator, driver: *cuda.Driver, cap: usize, draft_n: usize, rows: usize, paged: *const pages.Paged, at: []const u64) !Draft {
         const l = Layout.of(pool_heads);

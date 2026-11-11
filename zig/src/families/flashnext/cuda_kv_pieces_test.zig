@@ -171,6 +171,7 @@ test "two lanes with the head: every piece inside its own lane's state pages, no
         try t.expectEqual(@as(usize, 48), dr.stream_blocks.len);
         try t.expectEqual(dr.stream_blocks[0], dr.streams.ptr);
         try t.expectEqual(dr.logit_rows[0], dr.logits.ptr);
+        try t.expectError(error.FlashNextPagedDraftVerify, dr.windowScores()); // a lone verify refused, by name
         for (0..dr.rows_cap) |i| { // a row's address: in its block, rows of a block side by side
             const b = dr.stream_blocks[i / mtp.max_rows];
             try t.expectEqual(b + (i % mtp.max_rows) * wt.wide * 2, dr.streamAt(i));
