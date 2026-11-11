@@ -100,7 +100,7 @@ test "glm request starts: a kept state off the new request's cold cuts, or over 
 }
 
 const mtp_shared = @import("cuda_mtp_lanes.zig");
-const draftRound = if (@hasDecl(Lanes, "draftRound")) Lanes.draftRound else mtp_shared.draftLanes;
+const draftRound = Lanes.draftRound;
 
 const FakeEngine = struct {
     gpa: std.mem.Allocator,
@@ -122,6 +122,8 @@ const FakeLeader = struct {
     shared_drafts: usize = 0,
     keeps: usize = 0,
     last_parts_len: usize = 0,
+    fail_part: ?usize = null,
+    committed: [8]usize = @splat(0),
     last_slots: [8]u32 = @splat(0),
     last_kept: [8]usize = @splat(0),
     last_depths: [8]usize = @splat(0),
@@ -148,6 +150,8 @@ const FakeLeader = struct {
         x.shared_drafts += 1;
         x.last_parts_len = parts.len;
         for (parts, 0..) |p, i| {
+            if (x.fail_part == i) return error.InjectedDraftFailure;
+            x.committed[p.slot] += 1;
             x.last_slots[i] = p.slot;
             x.last_kept[i] = p.kept;
             x.last_depths[i] = p.depth;
@@ -164,6 +168,7 @@ const FakeLeader = struct {
 const FakeLane = struct {
     slot: u32,
     pending_rows: ?usize = null,
+    draft_failed: bool = false,
     held: [engine.max_drafts]u32 = undefined,
     chances: [engine.max_drafts]f64 = undefined,
     held_n: usize = 0,
@@ -196,6 +201,7 @@ const FakeBackend = struct {
     }
     pub fn bind(self: *@This(), s: *const lanes.Stream, kept: ?usize) !*FakeLane {
         const l = self.lanes.getPtr(s) orelse return error.UnknownStream;
+        if (l.draft_failed) return error.SharedDraftFailed;
         try self.x.bind(l.slot);
         if (l.pending_rows) |rows| try self.x.keep(kept orelse rows);
         l.pending_rows = null;
@@ -373,4 +379,73 @@ test "shared head costs: a 3-stream shared MTP round sends one draft message to 
     try std.testing.expectError(error.WindowTooWide, draftRound(&fb, &wide));
     try std.testing.expectEqual(@as(usize, 0), fb.x.draftMessages());
     try std.testing.expectEqual(@as(usize, 0), fb.x.keeps);
+}
+
+test "shared head costs: a mid-cohort failure cannot keep a committed prefix twice" {
+    const a = std.testing.allocator;
+    var e: FakeEngine = .{ .gpa = a };
+    var b: FakeBackend = .{ .x = .{ .e = &e, .fail_part = 1 } };
+    defer b.lanes.deinit(a);
+    var streams: [2]lanes.Stream = undefined;
+    for (&streams, 0..) |*s, i| {
+        s.* = try lanes.Stream.init(a, .{ .id = "failed", .prompt = &.{1}, .max_new = 8 });
+        try b.lanes.put(a, s, .{ .slot = @intCast(i), .pending_rows = 1 });
+    }
+    defer for (&streams) |*s| s.deinit(a);
+    var reqs: [2]lanes.backend.DraftRequest = undefined;
+    for (&reqs, &streams) |*r, *s| r.* = .{ .stream = s, .follow = &.{7}, .rows = &.{0}, .start = 0, .position = 2, .depth = 1 };
+    try std.testing.expectError(error.InjectedDraftFailure, draftRound(&b, &reqs));
+    try std.testing.expectEqualSlices(usize, &.{ 1, 0 }, e.positions[0..2]);
+    for (&streams) |*s| try std.testing.expect(b.lanes.getPtr(s).?.draft_failed);
+    b.x.fail_part = null;
+    try std.testing.expectError(error.SharedDraftFailed, draftRound(&b, &reqs));
+    try std.testing.expectError(error.SharedDraftFailed, draftRound(&b, reqs[0..1]));
+    try std.testing.expectEqualSlices(usize, &.{ 1, 0 }, b.x.committed[0..2]);
+    try std.testing.expectEqual(@as(usize, 1), b.x.shared_drafts);
+}
+
+test "shared head costs: cohort validation precedes every keep and device operation" {
+    const Seq = @import("cuda_engine_types.zig").Seq;
+    var seqs: [2]Seq = undefined;
+    var ptrs = [_]?*Seq{ &seqs[0], &seqs[1] };
+    for (&seqs) |*seq| {
+        seq.in_head = 0;
+        seq.st.pending = 2;
+        seq.st.prompt = false;
+        seq.st.kda_layers = 0;
+        seq.st.mtp_len = 10;
+        seq.st.capacity = 100;
+    }
+    var e: engine.Engine = undefined;
+    e.mtp = true;
+    e.seqs = .empty;
+    e.seqs.items = &ptrs;
+    e.seqs.capacity = ptrs.len;
+    e.w.mtp = @as(@TypeOf(e.w.mtp.?), undefined);
+    e.bm.rows = fw.window_rows;
+    e.bm.prefill = false;
+    var output: [2][3]u32 = undefined;
+    var parts = [_]mtp_shared.DraftPart{
+        .{ .slot = 0, .kept = 2, .follow = &.{ 1, 2 }, .depth = 3, .out = &output[0] },
+        .{ .slot = 1, .kept = 2, .follow = &.{ 3, 4 }, .depth = 3, .out = &output[1] },
+    };
+    const validate = @import("cuda_mtp_shared.zig").validate;
+    try validate(&e, &parts);
+    parts[1].kept = 3;
+    try std.testing.expectError(error.BadCommit, e.draftShared(&parts));
+    try std.testing.expectEqual(@as(usize, 2), seqs[0].st.pending);
+    parts[1].kept = 2;
+    seqs[1].in_head = 11;
+    try std.testing.expectError(error.BadWindow, validate(&e, &parts));
+    seqs[1].in_head = 0;
+    seqs[1].st.capacity = 12;
+    try std.testing.expectError(error.PastCapacity, validate(&e, &parts));
+    seqs[1].st.capacity = 100;
+    const wide: [17]u32 = @splat(1);
+    for (&parts) |*part| {
+        part.kept = 0;
+        part.follow = &wide;
+    }
+    try std.testing.expectError(error.WindowTooWide, e.draftShared(&parts));
+    try std.testing.expectEqual(@as(usize, 10), seqs[0].st.mtp_len);
 }
