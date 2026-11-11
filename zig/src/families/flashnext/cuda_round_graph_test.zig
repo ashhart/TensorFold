@@ -15,6 +15,7 @@ const Fake = struct {
     var execs: usize = 0;
     var graphs: usize = 0;
     var captured_sums: usize = 0;
+    var captured_gathers: usize = 0;
     /// What the communicator's abort found: a capture still open, executables and captured graphs still alive.
     var at_abort: ?[3]usize = null;
 
@@ -26,6 +27,7 @@ const Fake = struct {
         execs = 0;
         graphs = 0;
         captured_sums = 0;
+        captured_gathers = 0;
         at_abort = null;
     }
     fn begin(_: abi.Stream, _: abi.CaptureMode) callconv(.c) abi.Result {
@@ -68,6 +70,10 @@ const Fake = struct {
         if (capturing) captured_sums += 1;
         return 0;
     }
+    fn allGather(_: abi.DevicePtr, _: abi.DevicePtr, _: usize, _: nccl.DataType, _: nccl.Comm, _: abi.Stream) callconv(.c) c_int {
+        if (capturing) captured_gathers += 1;
+        return 0;
+    }
     fn asyncError(_: nccl.Comm, state: *c_int) callconv(.c) c_int {
         state.* = 0;
         return 0;
@@ -102,6 +108,7 @@ fn collective(pair: *[2]c_int) !Collective {
     c.link = .{ .fd = pair[0] };
     c.timeout_ms = 1000;
     c.lib.api.ncclAllReduce = Fake.allReduce;
+    c.lib.api.ncclAllGather = Fake.allGather;
     c.api.ncclCommGetAsyncError = Fake.asyncError;
     c.api.ncclCommAbort = Fake.abort;
     return c;
@@ -112,10 +119,16 @@ const Pass = struct {
     stream: cuda.Stream,
     staged: bool = true,
     uploads: bool = false,
+    /// The dense split's layer: a BF16 head gather and an FP32 column gather beside the sum.
+    split: bool = false,
     m: struct { collective: ?*Collective },
 
     pub fn chunk(p: *Pass, _: []const u32, _: usize, _: ?[]u8) !void {
         if (p.uploads) try cuda.copy_source.enqueue(p.stream.d, 0x5000, &.{ 1, 2, 3, 4 }, p.stream);
+        if (p.split) {
+            try p.m.collective.?.gather(p.stream, 0x7000, 0x8000, 4);
+            try p.m.collective.?.gatherF32(p.stream, 0x9000, 0xa000, 4);
+        }
         try p.m.collective.?.sum(p.stream, 0x6000, 4);
     }
 };
@@ -167,6 +180,32 @@ test "a decode round's graph: refused unstaged, captured once a key with its sum
     c.clear();
     try t.expectEqual([2]usize{ 0, 0 }, [2]usize{ Fake.execs, Fake.graphs });
     try t.expect(col.release == null);
+    try t.expectEqual([2]u64{ 2, 1 }, [2]u64{ c.captures, c.replays });
+}
+
+test "a dense-split round's gathers join its capture, and a clear between rounds recaptures each one" {
+    var d = Fake.driver();
+    const previous = enter();
+    defer cuda.copy_source.setCurrent(previous);
+    const stream: cuda.Stream = .{ .d = &d, .handle = @ptrFromInt(1) };
+    var pair: [2]c_int = undefined;
+    var col = try collective(&pair);
+    defer for (pair) |fd| {
+        _ = std.c.close(fd);
+    };
+    var c: rg.Cache = .{};
+    defer c.clear();
+    var p: Pass = .{ .stream = stream, .split = true, .m = .{ .collective = &col } };
+    for (0..3) |_| try c.launch(try key(1), &p, &.{7});
+    try t.expectEqual([3]usize{ 1, 2, 1 }, [3]usize{ Fake.begins, Fake.captured_gathers, Fake.captured_sums });
+    try t.expectEqual([2]u64{ 1, 2 }, [2]u64{ c.captures, c.replays });
+    // a drafted window's verify clears the graph ahead of the plain rounds in the same step
+    for (0..3) |_| {
+        c.clear();
+        try c.launch(try key(1), &p, &.{7});
+    }
+    try t.expectEqual([3]usize{ 4, 8, 4 }, [3]usize{ Fake.begins, Fake.captured_gathers, Fake.captured_sums });
+    try t.expectEqual([2]u64{ 4, 2 }, [2]u64{ c.captures, c.replays });
 }
 
 test "a decode round whose pass uploads inside its capture is refused; its stream and copy guard are released" {
