@@ -17,6 +17,7 @@ pub const Readout = readout.Readout;
 pub const readout_piece_rows = readout.piece_rows;
 const Fill = prefill.Fill;
 const reuse = @import("cuda_reuse.zig");
+const spares = @import("cuda_spares.zig");
 const Mtp = @import("cuda_mtp.zig").Mtp;
 const pages_mod = @import("cuda_pages.zig");
 const cache_mod = @import("cuda_cache.zig");
@@ -50,6 +51,9 @@ pub const snap_bytes = reuse.bytes;
 pub const snap_save = reuse.save;
 pub const snap_restore = reuse.restore;
 pub const snap_drop = reuse.drop;
+pub const snap_spare = spares.spare;
+pub const snap_trim = spares.trim;
+pub const snap_reuses = spares.reuses;
 pub const snap_host = true;
 pub const snap_lookahead: u32 = 0;
 pub const snap_grid: u32 = E.max_rows;
@@ -323,6 +327,7 @@ pub const Lanes = struct {
         if (self.prefix) |x| x.deinit(); // its pages back to the pool before the pool goes
         if (self.pages) |p| p.deinit();
         if (self.vision) |v| v.deinit();
+        self.target.spares.deinit(); // after the host closed the prompt cache, the last to give buffers back
         self.e.deinit();
         if (self.trace) |x| self.gpa.destroy(x);
         self.gpa.destroy(self);

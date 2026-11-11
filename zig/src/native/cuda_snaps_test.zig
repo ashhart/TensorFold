@@ -85,3 +85,37 @@ test "snap fork: a family that opts in keeps where the questions part, and the n
     try std.testing.expectEqualSlices(u32, &.{ 16, 20 }, planned.marks[1]);
     try std.testing.expectEqual(@as(u32, 16), planned.from[2]);
 }
+
+test "snap hooks: a family's spare, trim and reuses reach the prompt cache, and the Qwen entries declare all three" {
+    const Snaps = @import("cuda_snaps.zig").Snaps;
+    const Plain = struct {
+        pub const snap_bytes = Held.bytes;
+        pub const snap_save = Held.save;
+        pub const snap_restore = Held.restore;
+        pub const snap_drop = Held.drop;
+    };
+    const Pooled = struct {
+        pub const snap_bytes = Held.bytes;
+        pub const snap_save = Held.save;
+        pub const snap_restore = Held.restore;
+        pub const snap_drop = Held.drop;
+        pub fn snap_spare(_: *anyopaque) u64 {
+            return 7;
+        }
+        pub fn snap_trim(_: *anyopaque, _: u64) void {}
+        pub fn snap_reuses(_: *anyopaque, _: u32) bool {
+            return true;
+        }
+    };
+    const plain = Snaps(Plain, null).vtable;
+    try std.testing.expect(plain.spare == null and plain.trim == null and plain.reuses == null);
+    const pooled = Snaps(Pooled, null).vtable;
+    try std.testing.expect(pooled.spare.? == &Pooled.snap_spare and pooled.trim.? == &Pooled.snap_trim and pooled.reuses.? == &Pooled.snap_reuses);
+    var qwen: usize = 0;
+    inline for (@import("cuda.zig").registry) |F| if (comptime std.mem.startsWith(u8, F.model_type, "qwen3_5")) {
+        const v = Snaps(F, null).vtable;
+        try std.testing.expect(v.spare != null and v.trim != null and v.reuses != null);
+        qwen += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 2), qwen); // the dense and MoE entry points
+}
