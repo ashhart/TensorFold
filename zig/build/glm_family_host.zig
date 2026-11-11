@@ -5,6 +5,10 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, glm: *std.Build.Module, mod
     // GLM CUDA's startup watcher (named phases, a warning while NCCL init or a load blocks), from cuda.zig's room
     b.step("test-startup-watch-host", "Blocked startup phase warnings without a driver or communicator").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cuda, .filters = &.{"startup watcher:"} })).step);
     const host = b.graph.host;
+    const exl3 = b.createModule(.{ .root_source_file = b.path("zig/glm_exl3_prompt_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "glm", .module = glm }, .{ .name = "cuda", .module = cuda } } });
+    const exl3_run = b.addRunArtifact(b.addTest(.{ .root_module = exl3, .filters = &.{"GLM EXL3 prompt:"} }));
+    b.step("test-glm-exl3-prompt-host", "Actual EXL3 whole prompt calls, shared-slot ABI and scratch without a GPU").dependOn(&exl3_run.step);
+    step.dependOn(&exl3_run.step);
     inline for (.{ .{ "test-glm-link-transport-host", "zig/glm_link_transport_host.zig" }, .{ "test-glm-kv-uncached-host", "zig/glm_kv_uncached_host.zig" }, .{ "test-glm-lane-costs-host", "zig/glm_lane_costs_host.zig" } }) |entry| {
         const checks = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
             .root_source_file = b.path(entry[1]),
