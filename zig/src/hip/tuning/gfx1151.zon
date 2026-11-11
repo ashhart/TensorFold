@@ -8,6 +8,7 @@
 //   items       the most items of a routed plan (0: any)
 //   pairs_per_item  the most pairs a routed plan holds per item (0: any)
 //   few_rows    a routed prompt item of at most this many rows takes the kernel's K-parallel passes (0: none)
+//   max_bits    the most bits a weight code holds (0: any)
 //   plain, routed   whether it takes plain products, routed plans (both by default)
 // gfx1100's rows, plus the 64-row routed matrix-core tile below 12 pairs an item (measured on gfx1151),
 // and the skewed-row matrix tile (three blocks a WGP) ahead of the padded one where it takes a product.
