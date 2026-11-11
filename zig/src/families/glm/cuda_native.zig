@@ -177,7 +177,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     _ = kernels; // our own kernels: a captured set is not used
     try @import("cuda_env.zig").startup();
     try @import("cuda_env.zig").requestStartsAlone(o.learn_conversations); // before any rank opens
-    try place_mod.rendezvous(o, place_mod.Process{}, place_mod.Process{}); // NCCL's root, before anything reads it
+    try cuda.rendezvous.fromMaster(o, cuda.rendezvous.Process{}, cuda.rendezvous.Process{}); // NCCL's root, before anything reads it
     const p = try place_mod.place(o);
     const roce_bytes = try roceBytes(if (std.c.getenv("TF_ROCE_MAX_KB")) |v| std.mem.span(v) else null);
     if (p.world > 1 and std.c.getenv("NCCL_COMM_ID") == null) return error.NoCommId;
