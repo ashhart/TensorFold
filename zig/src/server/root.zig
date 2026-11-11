@@ -364,3 +364,9 @@ test {
     _ = @import("ollama_e2e_test.zig");
     _ = @import("open_connections_route_test.zig");
 }
+
+test {
+    _ = @import("witness_test.zig");
+    _ = @import("witness_http_test.zig");
+    _ = @import("witness_race_test.zig");
+}
