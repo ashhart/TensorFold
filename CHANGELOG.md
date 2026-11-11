@@ -30,6 +30,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Remote prefill: a reply's `tensorfold` block now says where its prompt went (`remote_route`: the router's verdict) and, for a pulled prefix, what each phase cost: `remote_queue_seconds`, `remote_trigger_seconds`, `remote_pull_seconds`, `remote_land_seconds`, `remote_tail_seconds`, `remote_bytes` and `remote_tokens_per_second`; the server logs one line per pulled prompt with the same numbers.
 
+- Remote prefill, DeepSeek-V4.1: a pulled hand-off's drafter rings (the DSpark stages' last 128 keys, sent by a producer in its full-prefill profile) are landed in the slot instead of dropped when its cache plan holds them, so the proposer does not start cold; all three stages land or none.
+
 ## 1.2.7
 
 - GLM-5.3-Flash on CUDA: with `TF_GLM_LAYERS=N`, serve's start-up memory check counts the weights by tensor from the shard headers, only those the load reads (the first N layers, the MTP layer when drafts are on, the embedding, norm and head), where it counted every checkpoint file. A 20-layer thin load of the 163.6 GiB checkpoint now counts 66.6 GiB without drafts. Unset, the count is the files' as before (#2788, fixes #2745). Thanks to @wojo.

@@ -81,11 +81,7 @@ pub const Import = struct {
             .ring => {
                 if (!im.opts.drafter or !im.layout.hasDrafter(geo.mtp_layers)) return;
                 im.ds_landed = true;
-                for (0..spec.rows) |i| {
-                    const row = c.loadRow(512, bytes[i * 1024 ..]);
-                    try finite(&row);
-                    im.layout.setDrafter(spec.layer - geo.layers, sh.upto - spec.rows + i, &row, geo.layers);
-                }
+                try landRing(im.layout, geo, sh.upto, spec.layer, spec.rows, bytes);
             },
             .carry => im.layout.setCarry(geo, geo.sourceIndex(spec.layer).?, sh.upto, bytes[0..2048], bytes[2048..4096]),
             .comp, .ixk => {
@@ -106,6 +102,15 @@ pub const Import = struct {
                     }
                 };
             },
+        }
+    }
+
+    /// A drafter ring part: its `rows` bf16 rows are the keys of positions [upto - rows, upto) of stage `layer - geo.layers`.
+    pub fn landRing(layout: metal.Layout, geo: g.Geometry, upto: u64, layer: u32, rows: u64, bytes: []const u8) Error!void {
+        for (0..rows) |i| {
+            const row = c.loadRow(512, bytes[i * 1024 ..]);
+            try finite(&row);
+            layout.setDrafter(layer - geo.layers, upto - rows + i, &row, geo.layers);
         }
     }
 
