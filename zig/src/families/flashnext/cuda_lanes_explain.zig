@@ -7,6 +7,7 @@ pub fn open(err: anyerror) ?[]const u8 {
         error.FlashNextRanksNeedModelopt => "--tp 2 splits Flash Next's ModelOpt checkpoints only; serve this MLX checkpoint on one GPU, without --tp",
         error.FlashNextRanksOnCapturedGlue => "--tp 2 runs Flash Next's own glue, not a captured set: set TENSORFOLD_CUDA_KERNELS=native, or serve on one GPU",
         error.BadFlashNextKvPages, error.BadFlashNextPageTest, error.FlashNextPagesUnsupported, error.UnsupportedCheckpoint => explain(err),
+        error.FlashNextKvHostNeedsExl3, error.BadFlashNextKvHost, error.FlashNextTierRanksDisagree => explain(err),
         error.UnsupportedLearningFormat, error.TrainingOnCapturedGlue => explain(err),
         else => null,
     };
@@ -19,6 +20,9 @@ pub fn explain(err: anyerror) ?[]const u8 {
         error.OutOfDeviceMemory => "the GPU had no memory left for this request's caches: retry once another request ends",
         error.BadFlashNextKvPages, error.BadFlashNextPageTest => "TF_FLASHNEXT_KV_PAGES and _PAGE_TEST take positions a page, a multiple of 4",
         error.FlashNextPagesUnsupported => "TF_FLASHNEXT_KV_PAGES needs our own glue and no --slide: unset it",
+        error.FlashNextKvHostNeedsExl3 => "TF_FLASHNEXT_KV_HOST needs an EXL3 Flash Next checkpoint; unset it for MLX or ModelOpt",
+        error.BadFlashNextKvHost => "TF_FLASHNEXT_KV_HOST takes a nonnegative whole MiB budget fitting a native byte count; TF_FLASHNEXT_KV_FRAMES and TF_FLASHNEXT_KV_SLOTS take positive whole frame counts (blank is unset)",
+        error.FlashNextTierRanksDisagree => "the tensor-parallel ranks disagree on the host K/V tier; restart both with matching checkpoints and TF_FLASHNEXT_KV_HOST, TF_FLASHNEXT_KV_FRAMES and TF_FLASHNEXT_KV_SLOTS",
         error.UnsupportedCheckpoint => "the checkpoint differs from the supported Flash Next CUDA layout; the log names its config field",
         error.BadDenseSplit => "TF_FLASHNEXT_SPLIT_DENSE takes 1 (split the BF16 dense projections at --tp 2, the default) or 0",
         error.DecodeGraphWithDenseSplit => "TF_FLASHNEXT_DECODE_GRAPH is not qualified with the dense split: unset it or set TF_FLASHNEXT_SPLIT_DENSE=0",
@@ -30,12 +34,29 @@ pub fn explain(err: anyerror) ?[]const u8 {
     };
 }
 
-test "--tp refusals at load are worded, and a request's words stay out of a load's" {
-    const t = @import("std").testing;
-    for ([_]anyerror{ error.FlashNextRanksOverTwo, error.FlashNextRanksNeedModelopt, error.FlashNextRanksOnCapturedGlue }) |e|
-        try t.expect(open(e) != null);
-    try t.expectEqualStrings(explain(error.UnsupportedLearningFormat).?, open(error.UnsupportedLearningFormat).?);
-    // generic errors other load paths raise at one GPU too, and a request's out-of-memory, keep cuda.zig's own words
-    for ([_]anyerror{ error.UnsupportedQuantization, error.BadRank, error.OutOfDeviceMemory, error.PromptTooLong }) |e|
-        try t.expect(open(e) == null);
+test "exl3: load refusals are diagnosed without borrowing request diagnostics" {
+    const testing = @import("std").testing;
+    const load_refusals = [_]anyerror{
+        error.FlashNextRanksOverTwo,
+        error.FlashNextRanksNeedModelopt,
+        error.FlashNextRanksOnCapturedGlue,
+        error.BadFlashNextKvPages,
+        error.BadFlashNextPageTest,
+        error.FlashNextPagesUnsupported,
+        error.UnsupportedCheckpoint,
+        error.UnsupportedLearningFormat,
+        error.TrainingOnCapturedGlue,
+        error.FlashNextKvHostNeedsExl3,
+        error.BadFlashNextKvHost,
+        error.FlashNextTierRanksDisagree,
+    };
+    // A non-null result claims the refusal for this family's startup diagnostic.
+    for (load_refusals) |err| try testing.expect(open(err) != null);
+    const request_refusals = [_]anyerror{ error.PromptTooLong, error.OutOfDeviceMemory };
+    for (request_refusals) |err| {
+        try testing.expect(explain(err) != null);
+        try testing.expectEqual(@as(?[]const u8, null), open(err));
+    }
+    for ([_]anyerror{ error.UnsupportedQuantization, error.BadRank }) |err|
+        try testing.expectEqual(@as(?[]const u8, null), open(err));
 }

@@ -138,6 +138,11 @@ starts a rank. These switches tune it:
 | `TF_FLASHNEXT_EXL3_PREFILL_TWO_CHUNK` | `0` | Experimental: `0` or `1`; `1` (two ranks, ring) runs a second deep chunk beside the first when memory admits it. |
 | `TF_FLASHNEXT_EXL3_PREFILL_SNAP_GRID` | on | Diagnostics only: `0` or `1`; `0` keeps states at any row to test resumed versus fresh prompts. Removal still requires that qualification. |
 | `TF_FLASHNEXT_PROFILE` | `0` | Diagnostics only: `0` or `1`; `1` times the ranks' combine, all-reduce and place of a deep chunk, with a wait each. |
+| `TF_FLASHNEXT_KV_PAGES` | unset | `n`: streams beside the first take their attention caches from one pool of `n`-position pages. |
+| `TF_FLASHNEXT_KV_PAGES_ALL` | unset | Diagnostics only: `1` puts every request on pool pages, including single-stream checks; without it the first stream keeps contiguous caches. |
+| `TF_FLASHNEXT_KV_HOST` | unset | With `TF_FLASHNEXT_KV_PAGES`: MiB of pinned host RAM holding the K/V plane of every page; `0` is no host tier. Nonzero requires EXL3 scratch; other formats refuse before allocation with `FlashNextKvHostNeedsExl3`. |
+| `TF_FLASHNEXT_KV_FRAMES` | paged streams times their frame working set | With the host tier: cap the device frames of the K/V plane; fewer than one stream's required working set is refused. |
+| `TF_FLASHNEXT_KV_SLOTS` | 128 | With the host tier: frames lent to a stream, 64 four-row slots a frame for each attention layer. |
 | `TF_FLASHNEXT_PLE_READ` | `map` | `map` or `pread`; `pread` reads the n-gram embedding rows by positional read. |
 | `TF_FLASHNEXT_SNAP_HOST` | `1` above 32,768 tokens of context, else `0` | `0` or `1`: whether kept prompt-cache states live in pinned host memory. |
 | `TF_FLASHNEXT_CACHE_TELEMETRY` | `0` | Diagnostics only: `0` or `1`; `1` logs `EXL3-CACHE` expert-cache counters per phase, with a sync at each boundary. |
@@ -148,10 +153,22 @@ A blank or whitespace-only value is unset. Text outside these forms, or those of
 `TF_FLASHNEXT_CHUNK_SOLO` above, is refused when the CUDA backend starts, naming the variable and its accepted forms.
 `TENSORFOLD_MEMORY_RESERVE_GIB` must be a finite number of GiB, which the server also holds to at least 0.5 (2 on
 unified memory) and at most the memory's size.
+The three host-tier settings use the platform environment rules: empty or whitespace-only values act unset;
+the host budget is a nonnegative whole MiB count fitting a native byte size, and frame/slot counts must be
+positive whole numbers. Malformed values refuse with `BadFlashNextKvHost`, never select tier-off silently.
 
 EXL3 keeps its configured prompt cuts, including cache marks; `TF_FLASHNEXT_KEEP_INPASS` does not enable in-pass
 snapshots for this format. Classic checkpoints retain main's in-pass marks and per-lane convolution histories.
 
+
+Host-tier admission promises logical pages for the request separately from its bounded device-frame working set: the first
+pages, the current call and drafted window, the state run and the slot frames. It does not require the entire logical context
+to be device-resident. A request waits when its logical pages, frame promise or pool lane cannot fit; released leases restore
+admission. Leave `TF_FLASHNEXT_KV_FRAMES` unset for the backend's computed budget rather than guessing below that minimum.
+
+A failed tier-kernel load releases the pinned store and its tier metadata. Snapshot restore checks every resident page's
+pins before copying canonical rows: another lease's pin refuses the restore with `Pinned`, leaving rows and sequence state
+unchanged. After a successful copy, releasing pins and invalidating old frames must succeed; errors are not ignored.
 
 ### TP integration scope
 

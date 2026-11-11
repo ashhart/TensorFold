@@ -33,14 +33,14 @@ test "KV lifetime: Flash Next failed table wait and later fill retain pages unti
             D.fail_wait = false;
             cuda.completion.drain(&d, e.stream.*, "the test driver must drain before it leaves");
         }
-        const l = pages.layout(64, 16, null, 0);
+        const l = try pages.layout(64, 16, null, 0);
         const p = try pages.Pool.init(t.allocator, &e, l, 64, null, 1, l.runPages() + 16);
         defer {
             D.fail_wait = false;
             cuda.completion.drain(&d, e.stream.*, "the test queue must drain before its owners leave");
             p.deinit();
         }
-        Watch.pool = &p.pool;
+        Watch.pool = p.pool;
         D.observe = Watch.held;
         D.expected = l.pages(1) + l.runPages();
         D.proofs = 0;
@@ -63,10 +63,10 @@ test "KV lifetime: Flash Next close and deinit retain pages until context proof"
             D.fail_wait = false;
             cuda.completion.drain(&d, e.stream.*, "the test driver must drain before it leaves");
         }
-        const l = pages.layout(64, 16, null, 0);
+        const l = try pages.layout(64, 16, null, 0);
         const p = try pages.Pool.init(t.allocator, &e, l, 64, null, 1, l.runPages() + 16);
         var c = try p.open(1);
-        Watch.pool = &p.pool;
+        Watch.pool = p.pool;
         D.observe = Watch.held;
         D.expected = l.pages(1) + l.runPages();
         D.proofs = 0;
@@ -90,8 +90,8 @@ test "KV lanes: two ranks whose pages differ in bytes open and close the same pa
     defer cuda.completion.drain(&d, e.stream.*, "the test driver must drain before it leaves");
     // rank 0 keeps the MTP head's layer and a bigger run, rank 1 neither: both take the larger run in pages
     const head: pages.Head = .{ .draft_n = 4096, .rows = 64 };
-    const a = pages.layout(256, 16, head, 0);
-    const b = pages.layout(256, 16, null, 0);
+    const a = try pages.layout(256, 16, head, 0);
+    const b = try pages.layout(256, 16, null, 0);
     try t.expect(a.pageBytes() != b.pageBytes());
     const k = @max(a.runPages(), b.runPages());
     const left = pages.withRunPages(a, k);
@@ -110,13 +110,13 @@ test "KV lanes: two ranks whose pages differ in bytes open and close the same pa
         s1[i] = try p1.open(cap);
     }
     for (0..3) |i| {
-        try t.expectEqualSlices(u32, p0.lanes[i].lease.ids.items, p1.lanes[i].lease.ids.items);
+        try t.expectEqualSlices(u32, p0.lanes[i].tl.pages.ids.items, p1.lanes[i].tl.pages.ids.items);
         try t.expectEqual(p0.lanes[i].run, p1.lanes[i].run);
     }
     try t.expect(p0.close(&s0[1]) and p1.close(&s1[1]));
     s0[1] = try p0.open(60);
     s1[1] = try p1.open(60);
-    try t.expectEqualSlices(u32, p0.lanes[1].lease.ids.items, p1.lanes[1].lease.ids.items);
+    try t.expectEqualSlices(u32, p0.lanes[1].tl.pages.ids.items, p1.lanes[1].tl.pages.ids.items);
     try t.expectEqual(p0.lanes[1].run, p1.lanes[1].run);
     for (0..3) |i| {
         try t.expect(p0.close(&s0[i]) and p1.close(&s1[i]));
@@ -131,7 +131,7 @@ test "KV lanes: every pass over a lane's MTP head reads its cache through the la
     var e = engine(&d);
     defer cuda.completion.drain(&d, e.stream.*, "the test driver must drain before it leaves");
     const head: pages.Head = .{ .draft_n = 4096, .rows = 64 };
-    const l = pages.layout(256, 16, head, 0);
+    const l = try pages.layout(256, 16, head, 0);
     const p = try pages.Pool.init(t.allocator, &e, l, 256, head, 1, 4 * l.runPages() + 64);
     defer p.deinit();
     var seq = try p.open(100);

@@ -540,6 +540,10 @@ pub const SeqState = struct {
     scores: u64,
     /// The attention caches' pages (pt 0: kc, vc, ikc and pooled are contiguous rows).
     pg: @import("cuda_glue.zig").Pg = .{},
+    /// A host tier's selection of blocks in slots (null: all in frames).
+    sel: ?*@import("exl3/kv/cuda_exl3_kvtier.zig").LaneSel = null,
+    /// The selection's layer of this cache's layer 0 (the MTP head's cache is one layer after the model's).
+    sel_layer: usize = 0,
 };
 
 pub const scoreStride = sizes.scoreStride;

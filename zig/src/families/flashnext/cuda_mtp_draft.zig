@@ -47,6 +47,7 @@ pub const Draft = struct {
     gen: u64 = 0,
     label: []const u8 = "unbound",
     pooled_lane: bool = false,
+    sel: ?*@import("exl3/kv/cuda_exl3_kvtier.zig").LaneSel = null, // a host tier's selection of the stream's blocks
     stream: ?cuda.Stream = null,
     media: ?@import("cuda_media.zig").View = null,
     gpa: std.mem.Allocator,
@@ -299,7 +300,7 @@ pub const Draft = struct {
 
     /// The head's one layer as a pass reads its cache: contiguous, or the lane's pages (`pg`) after the model's.
     pub fn headSeq(d: *Draft, media: ?@import("cuda_media.zig").View, scores: u64) batch.SeqState {
-        return .{ .media = media, .conv = &.{}, .state = &.{}, .kc = (&d.kc)[0..1], .vc = (&d.vc)[0..1], .ikc = (&d.ikc)[0..1], .pooled = (&d.pooled)[0..1], .pg = d.pg, .tail = d.kc, .history = &d.unused_history, .cap = d.cap, .scores = scores };
+        return .{ .media = media, .conv = &.{}, .state = &.{}, .kc = (&d.kc)[0..1], .vc = (&d.vc)[0..1], .ikc = (&d.ikc)[0..1], .pooled = (&d.pooled)[0..1], .pg = d.pg, .tail = d.kc, .history = &d.unused_history, .cap = d.cap, .scores = scores, .sel = d.sel, .sel_layer = wt.attn_n };
     }
 
     /// Each DeltaNet layer's window end state into its spare buffer.
