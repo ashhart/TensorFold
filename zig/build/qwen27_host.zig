@@ -130,7 +130,7 @@ pub fn compileHost(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.M
     // memory_controller.zig imports living: the engine's own, as residency_host.zig gives its host module
     const living = engine.import_table.get("living") orelse b.createModule(.{ .root_source_file = b.path("zig/src/living/living.zig"), .target = b.graph.host, .link_libc = true });
     const host = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_served.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "engine_api", .module = api }, .{ .name = "living", .module = living } } });
-    b.step("test-qwen27-reply-cache-host", "Served reply keeps retain a reusable history within the cache caps").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host, .filters = &.{ "qwen27 reply cache:", "a reply's end keeps its prompt's born" } })).step);
+    b.step("test-qwen27-reply-cache-host", "Served reply keeps retain a reusable history within the cache caps").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host, .filters = &.{ "qwen27 reply cache:", "a reply's end keeps its prompt's born", "qwen27 hand-off:" } })).step);
     const startup_test = b.addTest(.{ .root_module = host, .filters = &.{"qwen27 startup:"} });
     const startup_step = b.step("test-qwen27-startup-host", "Startup draft stream counts and suffixes without a GPU");
     const costs = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_costs.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine } } });

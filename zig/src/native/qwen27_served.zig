@@ -542,3 +542,7 @@ test {
         _ = @import("qwen27_startup_line.zig");
     }
 }
+
+test {
+    _ = @import("qwen27_handoff_test.zig"); // "qwen27 hand-off:", run by test-qwen27-reply-cache-host
+}
