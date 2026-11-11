@@ -16,10 +16,13 @@ pub fn load(device: mtl.Device) !mtl.Pipeline {
     return mtl.Pipeline.init(device, lib, "tf_cand", false);
 }
 
+/// The kernel's `TfCandArgs` record, field for field.
+pub const Args = extern struct { keys: u32, blocks: u32, topk: u32 };
+
 /// Candidate blocks of scores [rows][keys] (vis[row] keys count): mask bytes, 1 = candidate; keyed u32 scratch.
 pub fn encode(pipe: mtl.Pipeline, e: mtl.ComputeEncoder, scores: Ref, vis: Ref, keyed: Ref, mask: Ref, rows: u32, keys: u32, blocks: u32, topk: u32) void {
     e.setPipeline(pipe);
-    e.setValue([3]u32{ keys, blocks, @min(topk, max_topk) }, 0);
+    e.setValue(Args{ .keys = keys, .blocks = blocks, .topk = @min(topk, max_topk) }, 0);
     e.setBuffer(scores.buf, scores.off, 1);
     e.setBuffer(vis.buf, vis.off, 2);
     e.setBuffer(keyed.buf, keyed.off, 3);

@@ -80,9 +80,8 @@ pub const Request = struct {
     decide: ?u32 = null,
     /// The model as shipped: no learned neuron acts on its rows, no prompt state is kept or reused (a lesson's writer).
     untaught: bool = false,
-    /// Logprob rows for each reply token with this many best tokens (0..20), when ``Info.logprobs``; null: none.
+    /// Reply-token logprobs (0..20 best tokens) and prompt-token logprobs after the first; null, none.
     logprobs: ?u8 = null,
-    /// Rows for each prompt token after the first, with ranks and this many best tokens, when ``Info.prompt_logprobs``.
     prompt_logprobs: ?u8 = null,
     /// Images whose rows replace placeholder tokens of ``prompt``, in order; only when ``Info.vision`` is set.
     images: []const Image = &.{},
@@ -287,12 +286,13 @@ pub const Open = struct {
     }
     dir: []const u8,
     model_type: []const u8,
+    engram_table_dir: ?[]const u8 = null, // Engram shards: table dir resident, stream row by row (--engram-stream-dir)
+    engram_stream_dir: ?[]const u8 = null,
     context: ?i64 = null,
     max_frames: ?u32 = null,
     silence: speech_guard.Config = .{},
-    /// Allocate an independent backbone state per speech lane; Metal Drama only.
+    /// A state per speech lane (Metal Drama), and both CFG sequences in one command buffer, not vectorized GEMM.
     cfg_enabled: bool = false,
-    /// Submit the two independent CFG sequences in one Metal command buffer, not vectorized GEMM.
     cfg_batched: bool = false,
     lanes: u32 = 8,
     /// --parallel named a number: an engine whose memory fits fewer streams refuses instead of serving fewer.

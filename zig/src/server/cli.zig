@@ -146,6 +146,8 @@ pub const flags = [_]Flag{
     .{ .name = "--loops", .native = cuda_build }, // a looped model's recurrent passes (Dory: 1 to 4)
     // the native server's own: shared prompt states (a harness) kept on disk for later sessions and servers
     .{ .name = "--learn", .kind = .store_true, .native = true },
+    .{ .name = "--engram-table-dir", .native = true },
+    .{ .name = "--engram-stream-dir", .native = true },
     .{ .name = "--learn-dir", .native = true },
     .{ .name = "--learn-gib", .native = true },
     .{ .name = "--learn-min-free-gib", .native = true },
@@ -199,6 +201,8 @@ pub const Args = struct {
     prompt_cache_over_cap: bool = false, // a --prompt-cache-gib past that is kept, not refused
     learn: bool = false, // keep shared prompt states on disk (--learn-dir: where; it implies --learn)
     learn_dir: ?[]const u8 = null,
+    engram_table_dir: ?[]const u8 = null,
+    engram_stream_dir: ?[]const u8 = null,
     learn_min_free_gib: f64 = 4,
     learn_gib: f64 = 32, // disk for learned states, every model and build together
     learn_conversations: bool = false, // every kept state on disk, not only shared cuts (implies --learn)
@@ -353,29 +357,12 @@ pub fn parse(a: Allocator, argv: []const []const u8, u: *Usage) error{ Usage, Ou
     return out;
 }
 
-/// --spill-gib writes to the conversation store: beside --learn's shared prefixes only with --learn-conversations.
-fn spillWith(u: *Usage, a: Allocator, out: Args) error{ Usage, OutOfMemory }!void {
-    if (spills(out) and out.learn and !out.learn_conversations) return fail(u, a, "--spill-gib writes evicted states to the conversation store, which --learn's shared prefixes do not use: use --prompt-cache-disk DIR without --learn-dir, add --learn-conversations, or serve without --learn", .{});
-}
-
-fn spills(args: Args) bool {
-    return (args.spill_gib orelse 0) > 0;
-}
-
-pub fn int(u: *Usage, a: Allocator, name: []const u8, v: []const u8) error{ Usage, OutOfMemory }!i64 {
-    return std.fmt.parseInt(i64, std.mem.trim(u8, v, " "), 10) catch fail(u, a, "argument {s}: invalid int value: '{s}'", .{ name, v });
-}
-
-pub fn float(u: *Usage, a: Allocator, name: []const u8, v: []const u8) error{ Usage, OutOfMemory }!f64 {
-    return @import("fields.zig").pyFloat(v) orelse fail(u, a, "argument {s}: invalid float value: '{s}'", .{ name, v });
-}
-
-/// A finite GiB count from 0 (off) to below 2^34, whose bytes fit a u64.
-pub fn gib(u: *Usage, a: Allocator, name: []const u8, v: []const u8) error{ Usage, OutOfMemory }!f64 {
-    const g = try float(u, a, name, v);
-    if (!std.math.isFinite(g) or g < 0 or g >= 1 << 34) return fail(u, a, "argument {s}: expected GiB from 0 (off) to below 2^34: '{s}'", .{ name, v });
-    return g;
-}
+const parse_ = @import("cli_parse.zig");
+pub const int = parse_.int;
+pub const float = parse_.float;
+pub const gib = parse_.gib;
+const spillWith = parse_.spillWith;
+const spills = parse_.spills;
 
 const Repeated = struct { alias: std.ArrayList([]const u8) = .empty, priorities: std.ArrayList([]const u8) = .empty, keys: std.ArrayList([]const u8) = .empty, hosts: std.ArrayList([]const u8) = .empty, origins: std.ArrayList([]const u8) = .empty };
 
@@ -446,7 +433,14 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         const p = try int(u, a, name, v);
         if (p < 0 or p > 65535) return fail(u, a, "argument --port: invalid port: '{s}'", .{v});
         out.port = @intCast(p);
-    } else if (is(name, "--unix-socket")) out.unix_socket = v else if (is(name, "--name")) out.name = v else if (is(name, "--alias")) try repeated.alias.append(a, v) else if (is(name, "--name-priority")) try repeated.priorities.append(a, v) else if (is(name, "--api-key")) try repeated.keys.append(a, v) else if (is(name, "--api-key-file")) out.api_key_file = v else if (is(name, "--metrics-open")) out.metrics_open = true else if (is(name, "--dashboard")) out.dashboard = true else if (is(name, "--context")) out.context = try int(u, a, name, v) else if (is(name, "--speed-up")) out.speed_up = v else if (is(name, "--prompt-cache-gib")) out.prompt_cache_gib = try gib(u, a, name, v) else if (is(name, "--prompt-cache-over-cap")) out.prompt_cache_over_cap = true else if (is(name, "--learn")) out.learn = true else if (is(name, "--learn-dir")) {
+    } else if (is(name, "--unix-socket")) out.unix_socket = v else if (is(name, "--name")) out.name = v else if (is(name, "--alias")) try repeated.alias.append(a, v) else if (is(name, "--name-priority")) try repeated.priorities.append(a, v) else if (is(name, "--api-key")) try repeated.keys.append(a, v) else if (is(name, "--api-key-file")) out.api_key_file = v else if (is(name, "--metrics-open")) out.metrics_open = true else if (is(name, "--dashboard")) out.dashboard = true else if (is(name, "--context")) out.context = try int(u, a, name, v) else if (is(name, "--speed-up")) out.speed_up = v else if (is(name, "--prompt-cache-gib")) out.prompt_cache_gib = try gib(u, a, name, v) else if (is(name, "--prompt-cache-over-cap")) out.prompt_cache_over_cap = true else if (is(name, "--learn")) out.learn = true else if (is(name, "--engram-table-dir")) {
+        // The tables are either resident or streamed; asking for both is a mistake worth naming.
+        if (out.engram_stream_dir != null) return fail(u, a, "argument --engram-table-dir: the Engram tables are either resident or streamed, not both: '{s}'", .{v});
+        out.engram_table_dir = v;
+    } else if (is(name, "--engram-stream-dir")) {
+        if (out.engram_table_dir != null) return fail(u, a, "argument --engram-stream-dir: the Engram tables are either resident or streamed, not both: '{s}'", .{v});
+        out.engram_stream_dir = v;
+    } else if (is(name, "--learn-dir")) {
         out.learn = true;
         out.learn_dir = v;
     } else if (is(name, "--prompt-cache-disk")) {
@@ -537,6 +531,8 @@ pub fn request(a: Allocator, dir: []const u8, model_type: []const u8, args: Args
         .speed_up = args.speed_up,
         .prompt_cache_gib = args.prompt_cache_gib,
         .prompt_cache_over_cap = args.prompt_cache_over_cap,
+        .engram_table_dir = args.engram_table_dir,
+        .engram_stream_dir = args.engram_stream_dir,
         .ssd_experts_gib = args.ssd_experts_gib,
         .ple_on_ssd = args.ple_on_ssd,
         .fsr_trace = args.fsr_trace,
