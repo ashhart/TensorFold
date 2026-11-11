@@ -63,6 +63,11 @@ pub fn sharing(split: bool, share: usize) !void {
     if (split and share > 0) return error.KvSplitShare;
 }
 
+/// TF_GLM_KV_SPLIT with kept prompt states is refused: a state would copy latent rows only their owner holds.
+pub fn keeping(split: bool, keeps: bool) !void {
+    if (split and keeps) return error.KvSplitKeeps;
+}
+
 /// TF_KV_PAGES keeps FP8 on whole windows; explicit pages with FP8 are refused on every rank.
 pub fn paging(text: ?[]const u8, world: usize, kv8: bool) !bool {
     const v = text orelse "auto";
@@ -79,6 +84,8 @@ pub fn explain(err: anyerror) ?[]const u8 {
         error.KvSplitNeedsPages => "TF_GLM_KV_SPLIT needs KV pages: unset TF_KV_PAGES or set it to auto or on (fp8 KV keeps windows)",
         error.KvSplitOnHost => "TF_GLM_KV_SPLIT keeps the KV pages on the device: unset TF_GLM_KV_HOST",
         error.KvSplitShare => "TF_GLM_KV_SPLIT books each stream's pages from its owner's class, and TF_KV_SHARE's pages come from any: unset one",
+        error.KvSplitKeeps => "TF_GLM_KV_SPLIT keeps each stream's latent rows on one rank, and kept prompt states do not carry them yet: serve with --prompt-cache-gib 0 and without --learn-conversations, or without TF_GLM_KV_SPLIT",
+        error.KvSplitRoom, error.KvSplitNoRoom, error.KvSplitLocal => "TF_GLM_KV_SPLIT: a forward over owner-only rows had no room to exchange them (a bug: the log names the step)",
         error.ClassTooSmall => "TF_GLM_KV_SPLIT: one owner class of the KV pages holds less than one stream's window (the log gives the numbers): lower --context, raise --parallel, or serve without TF_GLM_KV_SPLIT",
         error.ResidueMismatch => "a rank was sent a KV page of another owner's class (a bug: the ranks' books disagree)",
         error.BadClasses => "the KV pages do not split into the owner classes (a multiple of the ranks, at most 16)",
