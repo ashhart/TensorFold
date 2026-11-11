@@ -1,4 +1,14 @@
-#include "quant/fp8_tiles.hpp"  // (the header is part of this translation unit)
+// Dot2 tiles for every width and both activation types: one row, 2-8 rows, the GEMM tile, and routed plans.
+
+#include "tiles/dot2.hpp"
+#include "tiles/gemm.hpp"
+#include "tiles/gemm_kp.hpp"
+#include "tiles/stream.hpp"
+#include "tiles/matrix_gemm.hpp"
+#include "quant/mlx_tiles.hpp"
+#include "quant/dense_tiles.hpp"
+#include "quant/nvfp4_tiles.hpp"
+#include "quant/fp8_tiles.hpp"
 
 namespace tf {
 namespace rocm {
@@ -380,3 +390,4 @@ template __global__ void dense_wmma12_gemm_silu<DotBF16, W12Big>(Affine);
 
 }  // namespace rocm
 }  // namespace tf
+// (rebuilt for the FP8 header probe)
