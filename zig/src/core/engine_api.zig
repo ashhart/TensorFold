@@ -355,6 +355,7 @@ pub const Open = struct {
     keep: ?i64 = null,
     /// Tensor parallelism: `rank` of `tp` (named on the command line when `given` says so); rank 0 listens on `master`.
     tp: u32 = 1,
+    execution_witness: bool = false, // --execution-witness: an engine on a supported path attests it (Info.witness)
     rank: u32 = 0,
     given: Given = .{},
     master: []const u8 = "",
