@@ -21,9 +21,9 @@ export fn exl3Compile(d: *const cuda.Driver, dense: *cuda.exl3.Dense, group: *cu
     linear.decodeF32(s.*, weight, .{ .x = 0 }, 0, 1) catch {};
     linear.promptF32(s.*, weight, .{ .x = 0 }, 0, 1) catch {};
     const grouped: cuda.experts.Grouped = .{ .exl3 = group };
-    grouped.decode(s.*, .up, .{ .x = 0, .stride = l.dims }, l.*, p.*, 0, 1, -1) catch {};
-    grouped.prompt(s.*, .down_f32, .{ .x = 0, .stride = l.width }, l.*, p.*, 0, 1, -1) catch {};
-    grouped.prompt(s.*, .down_bf16, .{ .x = 0, .stride = l.width }, l.*, p.*, 0, 1, -1) catch {};
+    grouped.decode(s.*, .up, .{ .x = 0, .stride = l.dims }, l.*, p.*, 0, 1, 1, 16, -1) catch {};
+    grouped.prompt(s.*, .down_f32, .{ .x = 0, .stride = l.width }, l.*, p.*, 0, 1, 1, 64, -1) catch {};
+    grouped.prompt(s.*, .down_bf16, .{ .x = 0, .stride = l.width }, l.*, p.*, 0, 1, 1, 64, -1) catch {};
 }
 
 export fn candidateCompile(d: *const cuda.Driver, m: *const cuda.Module, s: *const cuda.Stream) void {
