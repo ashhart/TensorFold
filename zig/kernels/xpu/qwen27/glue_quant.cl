@@ -212,6 +212,98 @@ KERNEL(256) void argmax(global const float *PV, global const int *PI, global int
   }
 }
 
+// Top-K of fp16 logits rows [R, V] (K <= 64, V <= 262144), exact, ties to the lower id, in two kernels.
+static inline int tk_better(float v, int i, float bv, int bi) { return v > bv || (v == bv && i < bi); }
+
+// Group-wide best (v, i) by value then lower id, the winner to all work-items; rv, ri: local float[16] and int[16].
+static void tk_best(float *v, int *i, local float *rv, local int *ri) {
+  float bv = sub_group_reduce_max(*v);
+  int bi = sub_group_reduce_min(*v == bv ? *i : 0x7fffffff);
+  if (get_sub_group_local_id() == 0) { rv[get_sub_group_id()] = bv; ri[get_sub_group_id()] = bi; }
+  barrier(CLK_LOCAL_MEM_FENCE);
+  bv = rv[0];
+  bi = ri[0];
+  for (int s = 1; s < 16; s++)
+    if (tk_better(rv[s], ri[s], bv, bi)) { bv = rv[s]; bi = ri[s]; }
+  barrier(CLK_LOCAL_MEM_FENCE);
+  *v = bv;
+  *i = bi;
+}
+
+// topk_part, grid (ceil(V / 1024), R): K best of 1024 ids to PV, PI [R, 256, 64]; PF = 1 if any is not finite.
+KERNEL(256) void topk_part(global const half *L, int V, int K, global float *PV, global int *PI, global int *PF) {
+  local float rv[16];
+  local int ri[16];
+  local int rf[16];
+  const int lid = get_local_id(0), seg = get_group_id(0), row = get_group_id(1);
+  float v[4];
+  int id[4];
+  int bad = 0;
+  for (int j = 0; j < 4; j++) {
+    id[j] = seg * 1024 + lid + 256 * j;
+    v[j] = -INFINITY;
+    if (id[j] < V) {
+      const float x = (float)L[(long)row * V + id[j]];
+      bad |= !isfinite(x);
+      v[j] = isnan(x) ? -INFINITY : x;
+    } else id[j] = 0x7fffffff;
+  }
+  for (int k = 0; k < min(K, 64); k++) {
+    float mv = v[0];
+    int mi = id[0], mj = 0;
+    for (int j = 1; j < 4; j++)
+      if (tk_better(v[j], id[j], mv, mi)) { mv = v[j]; mi = id[j]; mj = j; }
+    float bv = mv;
+    int bi = mi;
+    tk_best(&bv, &bi, rv, ri);
+    if (mi == bi) {
+      v[mj] = -INFINITY;
+      PV[((long)row * 256 + seg) * 64 + k] = mv;
+      PI[((long)row * 256 + seg) * 64 + k] = mi;
+    }
+  }
+  const int any = sub_group_reduce_max(bad);
+  if (get_sub_group_local_id() == 0) rf[get_sub_group_id()] = any;
+  barrier(CLK_LOCAL_MEM_FENCE);
+  if (lid == 0) {
+    int f = 0;
+    for (int s = 0; s < 16; s++) f |= rf[s];
+    PF[row * 256 + seg] = f;
+  }
+}
+
+// topk_merge, grid (R): merges NS lists into OUT [R, 132] words: 64 values (fp32 bits), 64 ids, the not-finite flag.
+KERNEL(256) void topk_merge(global const float *PV, global const int *PI, global const int *PF, int K, int NS,
+                            global uint *OUT) {
+  local float rv[16];
+  local int ri[16];
+  local int rf[16];
+  const int lid = get_local_id(0), row = get_group_id(0);
+  const int live = lid < NS;
+  int ptr = 0;
+  const int any = sub_group_reduce_max(live ? PF[row * 256 + lid] : 0);
+  if (get_sub_group_local_id() == 0) rf[get_sub_group_id()] = any;
+  barrier(CLK_LOCAL_MEM_FENCE);
+  if (lid == 0) {
+    int f = 0;
+    for (int s = 0; s < 16; s++) f |= rf[s];
+    OUT[row * 132 + 128] = f;
+  }
+  barrier(CLK_LOCAL_MEM_FENCE);
+  for (int k = 0; k < min(K, 64); k++) {
+    float v = live && ptr < K ? PV[((long)row * 256 + lid) * 64 + ptr] : -INFINITY;
+    int i = live && ptr < K ? PI[((long)row * 256 + lid) * 64 + ptr] : 0x7fffffff;
+    float bv = v;
+    int bi = i;
+    tk_best(&bv, &bi, rv, ri);
+    if (i == bi) {
+      ptr++;
+      OUT[row * 132 + k] = as_uint(v);
+      OUT[row * 132 + 64 + k] = (uint)i;
+    }
+  }
+}
+
 // Taps for the drafter: TAPS[t][slot·D + e] = bf16(x + r) (the full hidden state after the layer), [T, 5 D].
 KERNEL(256) void tap(global const float *X, global const half *R, global ushort *TAPS, int D, int slot) {
   const int t = get_group_id(1), e = get_global_id(0);
