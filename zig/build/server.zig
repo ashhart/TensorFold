@@ -185,3 +185,16 @@ pub fn cpuArtefacts(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     step.dependOn(&server_install.step);
     step.dependOn(&cli_install.step);
 }
+
+/// The PDF render worker as tensorfold-native spawns it: POSIX only, as Windows renders in process.
+pub fn addPdfWorkerTest(b: *std.Build, target: std.Build.ResolvedTarget, exe: *std.Build.Step.Compile, server: *std.Build.Module, test_step: *std.Build.Step) void {
+    if (target.result.os.tag == .windows) return;
+    const worker_exe = b.addOptions();
+    worker_exe.addOptionPath("path", exe.getEmittedBin());
+    const pdf_worker = b.createModule(.{ .root_source_file = b.path("zig/src/server/pdf_worker_test.zig"), .target = target, .optimize = .Debug, .link_libc = true });
+    for (server.import_table.keys(), server.import_table.values()) |name, module| pdf_worker.addImport(name, module);
+    pdf_worker.addOptions("pdf_worker_exe", worker_exe);
+    const run = b.addRunArtifact(b.addTest(.{ .root_module = pdf_worker, .filters = &.{"tensorfold-native PDF render worker:"} }));
+    test_step.dependOn(&run.step);
+    b.step("test-pdf-worker", "The PDF render worker spawned from tensorfold-native, rendering where libpdfium is found").dependOn(&run.step);
+}

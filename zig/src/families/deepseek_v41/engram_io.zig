@@ -1,5 +1,6 @@
 //! Engram shard reads: the batches, LRU tables and reader paths (io_uring, native AIO, a thread pool, serial).
 
+const builtin = @import("builtin");
 const std = @import("std");
 const linux = std.os.linux;
 const engram_rows = @import("engram_rows.zig");
@@ -587,6 +588,7 @@ pub fn preadAll(fd: linux.fd_t, out: []u8, off: u64) !void {
 }
 
 pub fn nowNs() u64 {
+    if (comptime builtin.os.tag == .windows) return 0;
     var ts: std.c.timespec = undefined;
     _ = std.c.clock_gettime(.MONOTONIC, &ts);
     return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));

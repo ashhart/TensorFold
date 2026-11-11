@@ -210,6 +210,10 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
             if (std.mem.eql(u8, f.name, "gemm_nax")) break f.text;
         } else return error.UnknownLaunch;
         frags = true;
+    } else if (std.mem.startsWith(u8, d.name, "dsv41 gate gemm ")) {
+        // The router gate's own prefill block, including the fp32-destination twins the pack needs.
+        text = sources.deepseek_v41_gate_gemm;
+        frags = true;
     } else if (std.mem.startsWith(u8, d.name, "flashnext prompt attention ")) {
         if (!assemble) return undefined;
         text = if (std.mem.eql(u8, fun, "tf_sattn_nax")) sources.flashnext_attn else sources.flashnext_qmm6;

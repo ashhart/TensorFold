@@ -82,7 +82,12 @@ pub fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         return exe;
     }
     const install = b.addInstallArtifact(exe, .{ .dest_dir = .{ .override = .{ .custom = "native/bin" } } });
-    b.step("native", "tensorfold-native with the Metal engines into zig-out/native/bin (bundles: -Dcpu=apple_m1)").dependOn(&install.step);
+    // The shared structs are checked twice: index_mirror.check at comptime and the .metal files' own static_asserts.
+    const mirrors = b.addSystemCommand(&.{ "sh", "tools/zig/check_dsv41_metal_mirrors.sh" });
+    mirrors.setCwd(b.path("."));
+    b.step("metal-mirrors", "The DeepSeek V4.1 Metal sources compile with their shared-struct static_asserts").dependOn(&mirrors.step);
+    const native_step = b.step("native", "tensorfold-native with the Metal engines into zig-out/native/bin (bundles: -Dcpu=apple_m1)");
+    native_step.dependOn(&install.step);
     // Link libSystem's memcpy to avoid compiler-rt's weak replacement.
     const libc_mem = b.addSystemCommand(&.{ "sh", "-c", "nm -m \"$0\" | grep -q 'external _memcpy (from libSystem)' || { echo 'tensorfold-native links its own memcpy: find the typed std.json int parse or 128-bit float conversion that pulled in compiler-rt'; exit 1; }" });
     libc_mem.addArtifactArg(exe);
@@ -105,17 +110,7 @@ pub fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     const server_json = server_build.addTo(b, server_tests, target, .Debug);
     server_build.testImports(b, server_tests, target, .Debug);
     test_step.?.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests })).step);
-    // the PDF render worker as tensorfold-native spawns it; POSIX only, as Windows renders in process
-    if (target.result.os.tag != .windows) {
-        const worker_exe = b.addOptions();
-        worker_exe.addOptionPath("path", exe.getEmittedBin());
-        const pdf_worker = b.createModule(.{ .root_source_file = b.path("zig/src/server/pdf_worker_test.zig"), .target = target, .optimize = .Debug, .link_libc = true });
-        for (server_tests.import_table.keys(), server_tests.import_table.values()) |name, module| pdf_worker.addImport(name, module);
-        pdf_worker.addOptions("pdf_worker_exe", worker_exe);
-        const pdf_worker_run = b.addRunArtifact(b.addTest(.{ .root_module = pdf_worker, .filters = &.{"tensorfold-native PDF render worker:"} }));
-        test_step.?.dependOn(&pdf_worker_run.step);
-        b.step("test-pdf-worker", "The PDF render worker spawned from tensorfold-native, rendering where libpdfium is found").dependOn(&pdf_worker_run.step);
-    }
+    server_build.addPdfWorkerTest(b, target, exe, server_tests, test_step.?);
     const kimi_text = b.addExecutable(.{ .name = "tf-k3-text-golden", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/src/server/kimi_golden_main.zig"),
         .target = target,
@@ -181,10 +176,23 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     b.getInstallStep().dependOn(&b.addInstallFile(fast_lib, "lib/nemotron_fastmath.metallib").step);
     b.getInstallStep().dependOn(&lib_install.step);
 
-    const mods = metalEngineModules(b, target, optimize, draft_ids);
+    // One tokenizer module for the whole binary: the V4.1 Engram token-map builder decodes the release tokenizer.
+    const tokenizer = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    const mods = metalEngineModules(b, target, optimize, draft_ids, tokenizer);
     const metal = mods.metal;
     const kernels_mod = embedded(b, lib, "tensorfold.metallib");
     counters_build.targets(b, target, optimize, metal, mods.sources, test_step);
+
+    // DeepSeek V4.1: the operator qualification steps registered beside the other families'.
+    const dsv41_build = @import("deepseek_v41.zig");
+    // The family reaches core through `@import("core")`; this facade owns exactly the files it names.
+    const core_root = b.createModule(.{ .root_source_file = b.path("zig/dsv41_core_family.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "gpu_memory", .module = @import("gpu_memory.zig").module(b, target) }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = mods.sources } } });
+    test_step.dependOn(dsv41_build.weights(b, target, optimize, metal, core_root));
+
+    // Core's own tests run in one place: the V4.1 lanes name core, so those files cannot also be path-owned there.
+    const core_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "gpu_memory", .module = @import("gpu_memory.zig").module(b, target) } } }) });
+    const core_step = b.step("test-core", "The shared core's own unit tests, rooted at core/root.zig");
+    core_step.dependOn(&b.addRunArtifact(core_tests).step);
 
     // The engines registry: the families this platform's binaries serve; the CLI reads it for models/info/pull.
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = mods.lanes }} });
@@ -193,7 +201,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "engine_api", .module = api }, .{ .name = "tensorfold", .module = mods.engine } },
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "engine_api", .module = api }, .{ .name = "tensorfold", .module = mods.engine }, .{ .name = "tokenizer", .module = tokenizer } },
     });
     engines.addImport("living", mods.living);
     @import("drama3_metal.zig").addNative(b, target, optimize, metal, engines, metal_std);
@@ -204,6 +212,8 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .{ .name = "tf-dispatch-bench", .path = "zig/tests/dispatch_bench.zig", .about = "Dispatch boundary benchmark" },
         .{ .name = "tf-kernel-exact", .path = "zig/tests/kernel_exact.zig", .about = "Bit-exact check of a kernel against an MLX oracle case" },
     };
+    dsv41_build.program(b, target, optimize, mods.engine, metal);
+
     for (programs) |p| {
         const mod = b.createModule(.{
             .root_source_file = b.path(p.path),
@@ -271,6 +281,11 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     b.getInstallStep().dependOn(&b.addInstallFile(packed_lib, "lib/nemotron_packed.metallib").step);
     sources.addImport("nemotron_packed_metallib", embedded(b, packed_lib, "nemotron_packed.metallib"));
     const engine = mods.engine;
+    {
+        const dsv41 = dsv41_build.checks(b, target, optimize, metal, sources, engine, core_root);
+        test_step.dependOn(dsv41.device);
+        test_step.dependOn(dsv41.reference);
+    }
     // FlashNext's CPU contracts, with the family module's imports so the replay graph type-checks
     const flash_host = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/flashnext_host.zig"),
@@ -367,8 +382,6 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .{ .name = "tf-llama-run", .path = "zig/tests/llama/run.zig", .about = "Llama on Metal: greedy tokens, every position's logits or a prompt's last logits, for the reference's check" },
         .{ .name = "tf-qwen36-row-seam", .path = "zig/tests/qwen36_row_seam.zig", .about = "Model-free fixture: the row projection's bias sums stay fp32 at every width" },
     };
-    // the tokenizer for the programs that tokenize prompts themselves (the engine module has none)
-    const tokenizer = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = target, .optimize = optimize, .link_libc = true });
     for (engine_programs) |p| {
         const mod = b.createModule(.{
             .root_source_file = b.path(p.path),
@@ -522,7 +535,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     }
 }
 
-pub fn metalEngineModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, draft_ids: *std.Build.Module) struct { metal: *std.Build.Module, lanes: *std.Build.Module, fabric: *std.Build.Module, sources: *std.Build.Module, engine: *std.Build.Module, living: *std.Build.Module, qwen27: qwen27_build.Shared } {
+pub fn metalEngineModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, draft_ids: *std.Build.Module, tokenizer: *std.Build.Module) struct { metal: *std.Build.Module, lanes: *std.Build.Module, fabric: *std.Build.Module, sources: *std.Build.Module, engine: *std.Build.Module, living: *std.Build.Module, qwen27: qwen27_build.Shared } {
     const metal = b.createModule(.{
         .root_source_file = b.path("zig/src/metal/metal.zig"),
         .target = target,
@@ -544,13 +557,13 @@ pub fn metalEngineModules(b: *std.Build, target: std.Build.ResolvedTarget, optim
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "nemotron_draft_ids", .module = draft_ids }, .{ .name = "lanes", .module = lanes }, .{ .name = "fabric", .module = fabric }, .{ .name = "living", .module = living } },
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "nemotron_draft_ids", .module = draft_ids }, .{ .name = "lanes", .module = lanes }, .{ .name = "fabric", .module = fabric }, .{ .name = "living", .module = living }, .{ .name = "tokenizer", .module = tokenizer } },
     });
     return .{ .metal = metal, .lanes = lanes, .fabric = fabric, .sources = sources, .engine = engine, .living = living, .qwen27 = qwen27_build.engineModules(b, target, metal, sources, engine) };
 }
 
 pub fn distMetalServer(b: *std.Build, target: std.Build.ResolvedTarget, draft_ids: *std.Build.Module, build_options: *std.Build.Step.Options, sdk: []const u8) *std.Build.Step.Compile {
-    const m = metalEngineModules(b, target, .fast, draft_ids);
+    const m = metalEngineModules(b, target, .fast, draft_ids, b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true }));
     // the release binary embeds the same prebuilt packed-kernel metallib as the development build
     const flags = [_][]const u8{ b.fmt("-std={s}", .{mlxMetalStd(b)}), "-fmetal-math-mode=safe", "-fmetal-math-fp32-functions=fast" };
     m.sources.addImport("nemotron_packed_metallib", embedded(b, metallib(b, "nemotron_packed", &nemotron_packed, &flags), "nemotron_packed.metallib"));

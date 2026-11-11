@@ -31,7 +31,7 @@ fn compileCuda(b: *std.Build) void {
 
 /// Compile the real Metal CLI on the host graph's empty test-only packed image, without shader producers.
 pub fn compileMetal(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.Module) void {
-    const tokenizer = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = b.graph.host, .link_libc = true });
+    const tokenizer = engine.import_table.get("tokenizer") orelse b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = b.graph.host, .link_libc = true });
     const root = b.createModule(.{ .root_source_file = b.path("zig/tests/moss_image.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "tokenizer", .module = tokenizer } } });
     const exe = b.addExecutable(.{ .name = "moss-teacher-metal-compile", .root_module = root });
     b.step("compile-moss-teacher-metal", "Compile the MOSS Metal teacher CLI without shader compilation or execution").dependOn(&exe.step);

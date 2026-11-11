@@ -201,8 +201,8 @@ test "group geometry and K2" {
     try testing.expectEqual(@as(f32, 2.0), g.bits());
     try testing.expectError(error.BadTrellis, Group.fromShape(&.{ 320, 144, 30 }));
     try testing.expectError(error.BadTrellis, Group.fromShape(&.{ 320, 144 }));
-    try testing.expectEqual(Codebook.mcg, try Codebook.fromMarker(0xCBAC1FED));
-    try testing.expectError(error.UnknownCodebookMarker, Codebook.fromMarker(7));
+    try testing.expectEqual(Codebook.mcg, try fromMarker(0xCBAC1FED));
+    try testing.expectError(error.UnknownCodebookMarker, fromMarker(7));
 }
 
 test "TP parts: rows contiguous, columns a run a K-tile row" {

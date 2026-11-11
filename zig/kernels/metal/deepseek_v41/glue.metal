@@ -8,10 +8,15 @@ using namespace metal;
 #endif
 
 struct TfRmsArgs { uint D, R; float eps; };
+static_assert(sizeof(TfRmsArgs) == 12, "TfRmsArgs must mirror metal/glue_k.zig's RmsArgs");
 struct TfEmbedArgs { uint D, R, V, reps; int lo; };
+static_assert(sizeof(TfEmbedArgs) == 20, "TfEmbedArgs must mirror metal/glue_k.zig's EmbedArgs");
 struct TfMeanArgs { uint D, R, hc; };
+static_assert(sizeof(TfMeanArgs) == 12, "TfMeanArgs must mirror metal/glue_k.zig's MeanArgs");
 struct TfRopeArgs { uint R, H, pairs, ldx, hx, ox, ldy, hy, oy; };
+static_assert(sizeof(TfRopeArgs) == 36, "TfRopeArgs must mirror metal/glue_k.zig's RopeArgs");
 struct TfQuantArgs { uint N, R; };
+static_assert(sizeof(TfQuantArgs) == 8, "TfQuantArgs must mirror metal/glue_k.zig's QuantArgs");
 
 // Control 1 of every kernel: a non-finite input is read as 0, so the output class changes.
 inline float tf_g_in(float v) { return (TF_CTL == 1 && !isfinite(v)) ? 0.0f : v; }

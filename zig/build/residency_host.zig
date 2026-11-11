@@ -28,7 +28,7 @@ pub fn compileHost(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.M
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
     const host = b.createModule(.{ .root_source_file = b.path("zig/src/native/metal.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "engine_api", .module = api } } });
     const bytes = b.createModule(.{ .root_source_file = b.addWriteFiles().add("residency-drama-empty.zig", "pub const bytes: []const u8 = &.{};\n") });
-    const tokenizer = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = b.graph.host, .link_libc = true });
+    const tokenizer = engine.import_table.get("tokenizer") orelse b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = b.graph.host, .link_libc = true }); // one per binary
     const rounds = b.createModule(.{ .root_source_file = b.path("zig/src/core/frame_rounds.zig"), .target = b.graph.host });
     const shim = b.addWriteFiles().add("residency-drama-core.zig", "pub const safetensors = @import(\"tensorfold\").safetensors;\npub const tokenizer = @import(\"tokenizer\");\npub const frame_rounds = @import(\"frame_rounds\");\n");
     const core = b.createModule(.{ .root_source_file = shim, .target = b.graph.host, .imports = &.{ .{ .name = "tensorfold", .module = engine }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "frame_rounds", .module = rounds } } });

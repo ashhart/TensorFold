@@ -1,4 +1,4 @@
-// DeepSeek V4.1 decode kernels that split or fuse the phase-1 glue launches, each keeping the glue's bits exactly.
+// DeepSeek V4.1 decode kernels that split or fuse the row glue launches, each keeping the glue's bits exactly.
 #include <metal_stdlib>
 using namespace metal;
 #pragma clang fp contract(off)
@@ -15,7 +15,7 @@ inline float tf_f_in(float v) { return (TF_CTL == 1 && !isfinite(v)) ? 0.0f : v;
 
 inline float tf_f_run(float v) { return TF_CTL == 3 ? float(half(v)) : v; }
 
-// A float's adjacent-lane butterfly: the same tree whatever the launch (glue_tmp's tf_g_tree).
+// A float's adjacent-lane butterfly: the same tree whatever the launch (glue_rows's tf_g_tree).
 inline float tf_f_tree(float v) {
   for (ushort m = 1; m < 32; m *= 2) v += simd_shuffle_xor(v, m);
   return v;
@@ -25,6 +25,7 @@ struct TfFHcArgs {
   uint dim, rows, iters;
   float eps, hc_eps, alpha;
 };
+static_assert(sizeof(TfFHcArgs) == 24, "TfFHcArgs must mirror metal/fused.zig's FhcArgs");
 
 // The hc mix's sums by simdgroup: group (m, sg, row) is simdgroup sg of matvec m's 256-thread sum (m 24: squares).
 [[kernel, max_total_threads_per_threadgroup(32)]] void tf_dsv41_f_hcmix_part(
@@ -58,7 +59,7 @@ struct TfFHcArgs {
   if (TF_CTL == 4 && lane == 0 && m == TF_F_MIX) P[(ulong(r) * (TF_F_MIX + 1u) + m + 1u) * TF_F_SG + sg] = 1.0f; // control 4: one partial past the row
 }
 
-// glue_tmp's hcmix tail, a simdgroup a row: lane m holds mix m (lane 8 + 4j + k comb[j][k]), sums in the same order.
+// glue_rows's hcmix tail, a simdgroup a row: lane m holds mix m (lane 8 + 4j + k comb[j][k]), sums in the same order.
 [[kernel, max_total_threads_per_threadgroup(32)]] void tf_dsv41_f_hcmix_fin(
     const device float* P [[buffer(0)]], const device float* SCALE [[buffer(1)]], const device float* BASE [[buffer(2)]],
     device float* PRE [[buffer(3)]], device float* POST [[buffer(4)]], device float* COMB [[buffer(5)]],
@@ -98,7 +99,7 @@ struct TfFHcArgs {
   if (TF_CTL == 4 && L == 8) COMB[r * 16 + 16] = 1.0f;
 }
 
-// glue_tmp's act_quant helpers, the same expressions.
+// glue_rows's act_quant helpers, the same expressions.
 inline float tf_f_pow2(int e) { return as_type<float>(uint(e + 127) << 23); }
 
 inline int tf_f_log2c(float v) {
@@ -123,7 +124,7 @@ inline bfloat tf_f_actq(float v) {
   return bfloat(bad ? NAN : (signbit(v) ? -q : q));
 }
 
-// A threadgroup of 256's sum: each simdgroup's tree, then the eight in order (glue_tmp's tf_g_sum).
+// A threadgroup of 256's sum: each simdgroup's tree, then the eight in order (glue_rows's tf_g_sum).
 inline float tf_f_sum(float v, threadgroup float* part, uint lane, uint sg) {
   v = tf_f_tree(v);
   threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -138,8 +139,9 @@ struct TfFNormArgs {
   uint dim, rows;
   float eps;
 };
+static_assert(sizeof(TfFNormArgs) == 12, "TfFNormArgs must mirror metal/fused.zig's NormArgs");
 
-// glue_tmp's (hcpre with COLLAPSE,) rmsnorm and actq of a row in a group of 256; dim a multiple of 32, <= 256 NV.
+// glue_rows's (hcpre with COLLAPSE,) rmsnorm and actq of a row in a group of 256; dim a multiple of 32, <= 256 NV.
 template <bool COLLAPSE, uint NV>
 [[kernel, max_total_threads_per_threadgroup(256)]] void tf_dsv41_f_norm(
     const device bfloat* X [[buffer(0)]], const device float* PRE [[buffer(1)]], const device float* Wt [[buffer(2)]],
@@ -199,8 +201,9 @@ struct TfFKvArgs {
   uint dim, rows, reps;
   float eps;
 };
+static_assert(sizeof(TfFKvArgs) == 16, "TfFKvArgs must mirror metal/fused.zig's KvArgs");
 
-// glue_tmp's rmsnorm, rope, actq and scatter of a window key row (dim 512) in a group of 256, into D[reps r + k].
+// glue_rows's rmsnorm, rope, actq and scatter of a window key row (dim 512) in a group of 256, into D[reps r + k].
 [[kernel, max_total_threads_per_threadgroup(256)]] void tf_dsv41_f_kv(
     const device bfloat* X [[buffer(0)]], const device float* Wt [[buffer(1)]], device bfloat* KVN [[buffer(2)]],
     device bfloat* KVR [[buffer(3)]], device bfloat* KVQ [[buffer(4)]], device bfloat* WIN [[buffer(5)]],
@@ -246,8 +249,9 @@ struct TfFSwiArgs {
   uint n;
   float limit;
 };
+static_assert(sizeof(TfFSwiArgs) == 8, "TfFSwiArgs must mirror metal/fused.zig's SwiArgs");
 
-// The shared expert's clamped SwiGLU (glue_tmp's swiglu) and its act_quant, a block of 32 a simdgroup; n % 32 == 0.
+// The shared expert's clamped SwiGLU (glue_rows's swiglu) and its act_quant, a block of 32 a simdgroup; n % 32 == 0.
 kernel void tf_dsv41_f_swiglu(const device bfloat* G [[buffer(0)]], const device bfloat* U [[buffer(1)]],
                               device bfloat* Y [[buffer(2)]], device bfloat* YQ [[buffer(3)]],
                               constant TfFSwiArgs& a [[buffer(4)]], uint i [[thread_position_in_grid]]) {
@@ -262,8 +266,9 @@ kernel void tf_dsv41_f_swiglu(const device bfloat* G [[buffer(0)]], const device
 struct TfFPostArgs {
   uint dim, rows;
 };
+static_assert(sizeof(TfFPostArgs) == 8, "TfFPostArgs must mirror metal/fused.zig's PostArgs");
 
-// The MoE join (routed fp32 plus shared bf16, one rounding, into B) and hc_post of it (glue_tmp's join and hcpost).
+// The MoE join (routed fp32 plus shared bf16, one rounding, into B) and hc_post of it (glue_rows's join and hcpost).
 kernel void tf_dsv41_f_joinpost(const device float* RT [[buffer(0)]], const device bfloat* SH [[buffer(1)]],
                                 device bfloat* B [[buffer(2)]], const device bfloat* RES [[buffer(3)]],
                                 const device float* POST [[buffer(4)]], const device float* COMB [[buffer(5)]],
@@ -335,8 +340,9 @@ template [[host_name("tf_dsv41_f_pre_a_v32")]] [[kernel]] decltype(tf_dsv41_f_pr
 struct TfFQuantArgs {
   uint k, nb, na, sa, sb, ta, tb;
 };
+static_assert(sizeof(TfFQuantArgs) == 28, "TfFQuantArgs must mirror metal/fused.zig's QuantArgs");
 
-// glue_tmp's actq a thread a value (its strides), a block of 32 on one simdgroup's lanes; k a multiple of 32.
+// glue_rows's actq a thread a value (its strides), a block of 32 on one simdgroup's lanes; k a multiple of 32.
 kernel void tf_dsv41_f_actq(const device bfloat* X [[buffer(0)]], device bfloat* Y [[buffer(1)]],
                             constant TfFQuantArgs& a [[buffer(2)]], uint3 g [[thread_position_in_grid]]) {
   if (g.x - g.x % 32u >= a.k || g.y >= a.nb || g.z >= a.na) return;

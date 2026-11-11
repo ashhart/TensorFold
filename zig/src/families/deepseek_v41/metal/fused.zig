@@ -1,4 +1,4 @@
-//! Decode launches that split or fuse the phase-1 glue (fused.metal): the same bits in fewer, wider dispatches.
+//! Decode launches that split or fuse the row glue (fused.metal): the same bits in fewer, wider dispatches.
 const std = @import("std");
 const mtl = @import("metal");
 const sources = @import("kernel_sources");
@@ -74,7 +74,9 @@ pub fn mixScratch(rows: usize) usize {
 
 pub const Mix = struct { x: Ref, w: [3]Ref, out: [3]Ref, part: Ref, h: Hc };
 
-fn mixArgs(m: Mix, rows: u32) extern struct { dim: u32, rows: u32, iters: u32, eps: f32, hc_eps: f32, alpha: f32 } {
+pub const FhcArgs = extern struct { dim: u32, rows: u32, iters: u32, eps: f32, hc_eps: f32, alpha: f32 };
+
+fn mixArgs(m: Mix, rows: u32) FhcArgs {
     return .{ .dim = m.h.dim, .rows = rows, .iters = m.h.iters, .eps = m.h.eps, .hc_eps = m.h.hc_eps, .alpha = m.h.alpha };
 }
 
@@ -92,7 +94,7 @@ fn mixFin(p: *const Pipelines, e: mtl.ComputeEncoder, m: Mix, rows: u32) void {
     e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(32, 1, 1));
 }
 
-/// glue_tmp's hcmix in two launches: (24 + 1) x 8 simdgroups a row for the sums, then a simdgroup a row for the rest.
+/// glue_rows's hcmix in two launches: (24 + 1) x 8 simdgroups a row for the sums, then a simdgroup a row for the rest.
 pub fn hcmix(p: *const Pipelines, e: mtl.ComputeEncoder, m: Mix, rows: u32) void {
     mixPart(p, e, m, rows);
     e.barrier();
@@ -120,14 +122,14 @@ pub fn mixFinish(p: *const Pipelines, e: mtl.ComputeEncoder, m: Mix, rows: u32) 
     mixFin(p, e, m, rows);
 }
 
-const NormArgs = extern struct { dim: u32, rows: u32, eps: f32 };
+pub const NormArgs = extern struct { dim: u32, rows: u32, eps: f32 };
 
 /// Bytes of the wide prenorm's partial sums for `rows`.
 pub fn normScratch(rows: usize) usize {
     return rows * 8 * 4;
 }
 
-/// glue_tmp's hcpre (x by pre into h), rmsnorm (hn) and actq (hq); rows over 2048 wide in two launches via `part`.
+/// glue_rows's hcpre (x by pre into h), rmsnorm (hn) and actq (hq); rows over 2048 wide in two launches via `part`.
 pub const Norm = struct { x: Ref, pre: Ref, w: Ref, h: Ref, hn: Ref, hq: Ref, part: Ref, dim: u32, eps: f32 };
 
 pub fn prenorm(p: *const Pipelines, e: mtl.ComputeEncoder, n: Norm, rows: u32) !void {
@@ -168,13 +170,20 @@ pub fn normq(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, w: Ref, y: Ref,
 }
 
 /// Window keys kv [rows][512]: kv_norm into kvn, RoPE into kvr, act_quant into kvq and ring rows dest [rows][reps].
+pub const KvArgs = extern struct { dim: u32, rows: u32, reps: u32, eps: f32 };
+pub const SwiArgs = extern struct { n: u32, limit: f32 };
+/// The kernel's `TfFPostArgs` record, field for field.
+pub const PostArgs = extern struct { dim: u32, rows: u32 };
+/// The kernel's `TfFQuantArgs` record, field for field (glue.Strides' fields in the kernel's order).
+pub const QuantArgs = extern struct { k: u32, nb: u32, na: u32, sa: u32, sb: u32, ta: u32, tb: u32 };
+
 pub const Kv = struct { kv: Ref, w: Ref, kvn: Ref, kvr: Ref, kvq: Ref, ring: Ref, pos: Ref, table: Ref, dest: Ref, reps: u32 };
 
 pub fn kv(p: *const Pipelines, e: mtl.ComputeEncoder, b: Kv, rows: u32, dim: u32, eps: f32) !void {
     if (dim != 512) return error.BadKvShape;
     e.setPipeline(p.kv);
     bind(e, &.{ b.kv, b.w, b.kvn, b.kvr, b.kvq, b.ring, b.pos, b.table, b.dest });
-    e.setValue(extern struct { dim: u32, rows: u32, reps: u32, eps: f32 }{ .dim = dim, .rows = rows, .reps = b.reps, .eps = eps }, 9);
+    e.setValue(KvArgs{ .dim = dim, .rows = rows, .reps = b.reps, .eps = eps }, 9);
     e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
 }
 
@@ -182,7 +191,7 @@ pub fn kv(p: *const Pipelines, e: mtl.ComputeEncoder, b: Kv, rows: u32, dim: u32
 pub fn swiglu(p: *const Pipelines, e: mtl.ComputeEncoder, g: Ref, u: Ref, y: Ref, yq: Ref, n: u32, limit: f32) void {
     e.setPipeline(p.swiglu);
     bind(e, &.{ g, u, y, yq });
-    e.setValue(extern struct { n: u32, limit: f32 }{ .n = n, .limit = limit }, 4);
+    e.setValue(SwiArgs{ .n = n, .limit = limit }, 4);
     e.dispatchThreads(mtl.Size.of(n, 1, 1), mtl.Size.of(256, 1, 1));
 }
 
@@ -190,7 +199,7 @@ pub fn swiglu(p: *const Pipelines, e: mtl.ComputeEncoder, g: Ref, u: Ref, y: Ref
 pub fn joinpost(p: *const Pipelines, e: mtl.ComputeEncoder, routed: Ref, shared: Ref, b: Ref, res: Ref, post: Ref, comb: Ref, y: Ref, rows: u32, dim: u32) void {
     e.setPipeline(p.joinpost);
     bind(e, &.{ routed, shared, b, res, post, comb, y });
-    e.setValue([2]u32{ dim, rows }, 7);
+    e.setValue(PostArgs{ .dim = dim, .rows = rows }, 7);
     e.dispatchThreads(mtl.Size.of(dim, rows, 1), mtl.Size.of(64, 1, 1));
 }
 
@@ -199,6 +208,6 @@ pub fn actq(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, y: Ref, s: anyty
     if (s.k % 32 != 0) return error.BadQuantShape;
     e.setPipeline(p.actq);
     bind(e, &.{ x, y });
-    e.setValue([7]u32{ s.k, s.nb, s.na, s.sa, s.sb, s.ta, s.tb }, 2);
+    e.setValue(QuantArgs{ .k = s.k, .nb = s.nb, .na = s.na, .sa = s.sa, .sb = s.sb, .ta = s.ta, .tb = s.tb }, 2);
     e.dispatchThreads(mtl.Size.of(s.k, s.nb, s.na), mtl.Size.of(@min(s.k, 256), 1, 1));
 }

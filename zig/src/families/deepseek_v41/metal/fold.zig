@@ -46,12 +46,14 @@ fn bind(e: mtl.ComputeEncoder, refs: []const Ref) void {
 
 /// The routed experts' outputs [pair position][dim] (bf16), where, picks and weights; their fp32 sum goes to `sum`.
 pub const Routed = struct { out: Ref, where: Ref, weights: Ref, ids: Ref, sum: Ref, topk: u32, per_group: u32 };
+/// The kernel's `TfOPostArgs` record, field for field.
+pub const PostArgs = extern struct { dim: u32, rows: u32, topk: u32, per_group: u32, groups: u32 };
 
 /// Kimi's combine of `r` plus the shared expert sh into b (bf16), then hc_post of b and res by post and comb into y.
 pub fn combpost(p: *const Pipelines, e: mtl.ComputeEncoder, r: Routed, sh: Ref, b: Ref, res: Ref, post: Ref, comb: Ref, y: Ref, rows: u32, dim: u32) void {
     e.setPipeline(p.combpost);
     bind(e, &.{ r.out, r.where, r.weights, r.ids, sh, b, res, post, comb, y });
-    e.setValue([5]u32{ dim, rows, r.topk, r.per_group, 8 }, 10);
+    e.setValue(PostArgs{ .dim = dim, .rows = rows, .topk = r.topk, .per_group = r.per_group, .groups = 8 }, 10);
     e.setBuffer(r.sum.buf, r.sum.off, 11);
     e.dispatchThreads(mtl.Size.of(dim, rows, 1), mtl.Size.of(post_threads, 1, 1));
 }
@@ -75,7 +77,9 @@ pub fn prenormPost(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, pre: Ref,
     norm(e, rows, dim, eps);
 }
 
+pub const NormArgs = extern struct { dim: u32, rows: u32, eps: f32 };
+
 fn norm(e: mtl.ComputeEncoder, rows: u32, dim: u32, eps: f32) void {
-    e.setValue(extern struct { dim: u32, rows: u32, eps: f32 }{ .dim = dim, .rows = rows, .eps = eps }, 6);
+    e.setValue(NormArgs{ .dim = dim, .rows = rows, .eps = eps }, 6);
     e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(prenorm_threads, 1, 1));
 }
