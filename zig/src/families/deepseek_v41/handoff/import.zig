@@ -105,7 +105,7 @@ pub const Import = struct {
         }
     }
 
-    /// A drafter ring part: its `rows` bf16 rows are the keys of positions [upto - rows, upto) of stage `layer - geo.layers`.
+    /// A drafter ring part: `rows` bf16 rows, the keys of positions [upto - rows, upto) of stage `layer - geo.layers`.
     pub fn landRing(layout: metal.Layout, geo: g.Geometry, upto: u64, layer: u32, rows: u64, bytes: []const u8) Error!void {
         for (0..rows) |i| {
             const row = c.loadRow(512, bytes[i * 1024 ..]);

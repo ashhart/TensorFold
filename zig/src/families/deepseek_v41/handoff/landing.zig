@@ -1,4 +1,4 @@
-//! Lands a pulled or file-fed hand-off on a Metal slot's Packed buffers; the drafter's rings land if the slot holds them.
+//! Lands a pulled or file-fed hand-off on a Metal slot's Packed buffers; the drafter's rings land if the slot has them.
 const std = @import("std");
 const fabric = @import("fabric");
 const g = @import("geometry.zig");
