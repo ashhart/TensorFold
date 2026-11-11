@@ -293,7 +293,13 @@ pub fn Ops(comptime Tri: type) type {
         /// One forward over the window `ids` from seq.fed: each row's scores in d.logits, its streams in d.streams.
         pub fn verify(o: Self, seq: *prompt.Seq, d: *Draft, ids: []const u32) !void {
             if (o.main) |m| return m.verify(m.ptr, seq, d, ids);
-            const scores = try d.windowScores(); // refused on pieces before any state moves
+            return o.verifyIn(seq, d, ids, try d.windowScores()); // refused on pieces before any state moves
+        }
+
+        /// `verify`, the scores first in `out` ([rows, vocab]); on pieces each row then goes to its own piece.
+        pub fn verifyIn(o: Self, seq: *prompt.Seq, d: *Draft, ids: []const u32, out: u64) !void {
+            if (o.main != null) return error.UnsupportedRankOperation;
+            const scores = if (d.logit_paged) out else d.logits.ptr;
             o.e.round_graph.clear();
             const n = ids.len;
             if (n == 0 or n > max_rows) return error.WindowTooWide;
@@ -308,6 +314,7 @@ pub fn Ops(comptime Tri: type) type {
             if (keeps) try copyAsync(o.stream(), d.saved_tail, seq.tail.ptr, ple_tail_n * wide * 2);
             try o.e.forward(Tri, o.tri, seq, ids, .{ .logits = .all, .logits_out = scores, .keep = if (keeps) &d.keep else null, .streams = d.streams.ptr, .host_logits = @import("cuda_batch_state.zig").verifyHostLogits() });
             if (keeps) try copyAsync(o.stream(), d.saved_nrow, o.e.batch_s.?.ple_nrow, n * wide * 2);
+            if (d.logit_paged) for (d.logit_rows[0..n], 0..) |row, r| try copyAsync(o.stream(), row, scores + r * vocab * 2, vocab * 2);
             d.open = keeps;
         }
 
