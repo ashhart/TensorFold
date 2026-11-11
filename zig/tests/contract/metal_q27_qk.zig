@@ -131,7 +131,7 @@ pub const Probe = struct {
         try p.rig.finish(pass);
         if (!p.bad) try p.independent();
     }
-    fn independent(p: *Probe) !void {
+    pub fn independent(p: *Probe) !void {
         const n = p.count();
         const want = try p.a.alloc(f64, n);
         defer p.a.free(want);

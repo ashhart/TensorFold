@@ -3,6 +3,9 @@ const mtl = @import("metal");
 const g = @import("contract").gates;
 
 pub fn collectMixed(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, only: ?[]const u8, kernels: *std.ArrayList(g.Kernel)) !void {
+    var q27_cache: @import("metal_q27_qk_cache.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = kernels };
+    defer q27_cache.deinit();
+    try q27_cache.collect(only);
     var q27_qk: @import("metal_q27_qk.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = kernels };
     defer q27_qk.deinit();
     try q27_qk.collect(only);
