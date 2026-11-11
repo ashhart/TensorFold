@@ -14,10 +14,10 @@ pub const records = [2]Record{
     .{
         .launch = .{ .name = "ModelOpt FP8 product", .symbol = "tf_fp8_gemm", .image = "affine_tiles", .threads = 256 },
         .usage = .{
-            .{ .vgprs = 16, .sgprs = 37, .lds = 0, .private = 0, .bound = 256, .wave = 32 },
-            .{ .vgprs = 16, .sgprs = 37, .lds = 0, .private = 0, .bound = 256, .wave = 32 },
-            .{ .vgprs = 16, .sgprs = 37, .lds = 0, .private = 0, .bound = 256, .wave = 32 },
-            .{ .vgprs = 18, .sgprs = 38, .lds = 0, .private = 0, .bound = 256, .wave = 32 },
+            .{ .vgprs = 15, .sgprs = 36, .lds = 0, .private = 0, .bound = 256, .wave = 32 },
+            .{ .vgprs = 15, .sgprs = 36, .lds = 0, .private = 0, .bound = 256, .wave = 32 },
+            .{ .vgprs = 15, .sgprs = 36, .lds = 0, .private = 0, .bound = 256, .wave = 32 },
+            .{ .vgprs = 17, .sgprs = 38, .lds = 0, .private = 0, .bound = 256, .wave = 32 },
         },
     },
 };
