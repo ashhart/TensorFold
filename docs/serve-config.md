@@ -24,10 +24,6 @@ tensorfold serve --config glm.toml --port 9000     # the command line overrides 
 tensorfold serve other/model --config glm.toml     # a model on the command line overrides the file's
 ```
 
-vLLM and SGLang read a YAML file through the same `--config` flag and with the same precedence; a file
-moves over by rewriting `key: value` as `key = value`, quoting its strings and renaming keys to
-TensorFold's flags.
-
 ## Keys
 
 A key is a [serve flag](../README.md#serve-flags) without its `--`. `-` and `_` are the same, so
@@ -51,8 +47,9 @@ The command line wins over the file, and the file wins over the built-in default
 file's flags first and the command line's after them, so a later value replaces an earlier one. Three
 consequences follow:
 
-- A repeatable flag adds up. With `alias = ["a"]` in the file and `--alias b` on the command line, the
-  server answers to both.
+- A repeatable flag on the command line replaces the file's whole list. With `api-key = ["old"]` in the
+  file and `--api-key new` on the command line, only `new` is accepted. A list the command line does not
+  name stays the file's.
 - A switch the file turns on stays on unless it has a `--no-` twin. To serve without it, use another file
   or remove the line.
 - Flags that refuse each other do so across the file and the command line. A file with `unix-socket`
@@ -63,12 +60,13 @@ consequences follow:
 A relative path in the file starts at the file's folder, not at the directory `serve` runs in, so a
 file and what it names move together. This holds for the flags that name a file or folder:
 `chat-template`, `api-key-file`, `unix-socket`, `voices`, `speed-up`, `prompt-cache-disk`, `learn-dir`,
-`recall-dir`, `slide-graph`, `record`, `compact-memory` and `fsr-route-trace`. An absolute path and one
-that starts with `~` pass as written.
+`recall-dir`, `slide-graph`, `record`, `compact-memory` and `fsr-route-trace`. An absolute path passes
+as written. No shell reads the file, so nothing expands `~`: these flags refuse a value that starts
+with it, and the message asks for the whole path.
 
 `model` and `drafter` take a folder or a Hugging Face repo id, and `org/name` could be either. Start a
 folder with `./` or `../` to place it beside the file: `model = "./weights/glm"`. Any other text passes as
-written and resolves as it does on the command line.
+written and resolves as it does on the command line, where a leading `~/` is the home folder.
 
 A path on the command line is still relative to the directory `serve` runs in.
 
@@ -90,19 +88,30 @@ and a file over 1 MiB. Tables are refused, not ignored, so that a later release 
 
 A problem with the file is a usage error that names the file and the line. Nothing is loaded.
 
-On macOS and Linux, a file that its group or other users can write is refused, as is anything that is
-not a regular file: the file chooses what is served and can hold an `api-key`. `chmod go-w FILE` clears
-it.
+On macOS and Linux the file is opened once, checked and read through that one handle:
+
+- a link is not followed, and anything that is not a regular file is refused;
+- a file that its group or other users can write is refused, because it chooses what is served
+  (`chmod go-w FILE`);
+- a file that sets `api-key` is refused while its group or other users can read it (`chmod 600 FILE`, or
+  use `api-key-file`).
 
 ```text
 tensorfold serve: error: argument --config: glm.toml line 7: unknown key 'prot'
 ```
 
-A key for a flag that this build does not serve is refused in the same way. When a flag refuses the
-value the file gave it, `serve` prints the flag's own message and then names the file:
+A key for a flag that this build does not serve is refused in the same way. Each value is checked by
+its flag as a typed value is, so the flag's own message comes with the line:
 
 ```text
-tensorfold serve: error: argument --port: invalid port: '99999'
+tensorfold serve: error: argument --config: glm.toml line 3: argument --port: invalid port: '99999'
+```
+
+A refusal that involves two flags, such as `unix-socket` in the file with `--port` on the command line,
+has no single line. `serve` prints it as usual and then names the file:
+
+```text
+tensorfold serve: error: argument --unix-socket: not allowed with --port
 tensorfold serve: --config glm.toml supplied 9 options, read before the command line's
 ```
 
