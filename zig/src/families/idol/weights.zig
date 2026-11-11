@@ -36,26 +36,8 @@ fn split(src: []const f32, scale: f32, dst: []f16) void {
     }
 }
 
-/// The fp32 vectors and small matrices the host reads each timestep.
-pub const Host = struct {
-    t1: []const f32,
-    t1_b: []const f32,
-    t2: []const f32,
-    t2_b: []const f32,
-    ada: []const f32,
-    ada_b: []const f32,
-    cam1: []const f32,
-    cam1_b: []const f32,
-    cam2: []const f32,
-    cam2_b: []const f32,
-    cam_out: []const f32,
-    cam_out_b: []const f32,
-    /// Each modulated block's own shift table [6144]: the noise refiner's, then the joint blocks'.
-    shifts: [cfg.modulated][]const f32,
-    /// The output's shift table [2, 1024].
-    head: []const f32,
-    pos: []const f32,
-};
+/// The fp32 vectors and small matrices the host reads each timestep (host.zig, shared with CUDA).
+pub const Host = @import("host.zig").Host;
 
 pub const Weights = struct {
     ck: ck.Checkpoint,
