@@ -169,13 +169,19 @@ pub fn budgetOf(comptime F: type, l: kv_pool.Layout, room: u64, o: api.Open, win
     if (out.asked or host_mode or comptime keepsNoPrompts(F)) return out;
     var probe = out;
     probe.cache = std.math.maxInt(u64);
-    const all = kv_pool.plan(l, probe) catch return out;
+    var w = l; // owner classes: the cache the unsplit pool leaves, set aside first, the split's saving all pages
+    if (l.classes > 1 and l.whole_bytes > 0) {
+        w.token_bytes = l.whole_bytes;
+        w.classes = 1;
+    }
+    const all = kv_pool.plan(w, probe) catch return out;
     const left = if (!engine_paged and out.window > 0)
-        room -| (@as(u64, all.lanes - 1) *| (l.fixed_bytes +| (l.pages(out.window) + l.runPages()) *| l.pageBytes()))
+        room -| (@as(u64, all.lanes - 1) *| (w.fixed_bytes +| (w.pages(out.window) + w.runPages()) *| w.pageBytes()))
     else
-        all.snaps * l.snap_bytes + all.copied + all.kept;
+        all.snaps * w.snap_bytes + all.copied + all.kept;
     out.cache = budget.cacheBytes(null, left, 0);
-    return out;
+    out.asked = w.classes != l.classes; // before every window but the engine's own, as --prompt-cache-gib would be
+    return if (out.asked) kv_pool.fitClasses(l, out) else out;
 }
 
 /// The pool beside the engine's own sequence (in `model`: a window, or on pages its fixed part); null: see `problem`.
@@ -184,7 +190,7 @@ pub fn plan(comptime F: type, a: Allocator, l: kv_pool.Layout, room: u64, o: api
     const b = budgetOf(F, l, room, o, window, host_mode, engine_paged, kept_ppm, slots);
     return kv_pool.planClasses(l, b) catch |e| {
         problem.* = switch (e) {
-            error.ClassTooSmall => try std.fmt.allocPrint(a, "the KV pages split into {d} owner classes of {d} pages, and one stream at a {d}-token window takes {d}: lower --context, raise --parallel to {d} or more, or serve without TF_GLM_KV_SPLIT", .{ l.classes, (kv_pool.plan(l, b) catch unreachable).pages / l.classes, window, l.pages(window + rows), l.classes }),
+            error.ClassTooSmall => try std.fmt.allocPrint(a, "the KV pages split into {d} owner classes of {d} pages, and one stream at a {d}-token window takes {d}, and the trash page one more: lower --context or --prompt-cache-gib, raise --parallel to {d} or more, or serve without TF_GLM_KV_SPLIT", .{ l.classes, (kv_pool.plan(l, b) catch unreachable).pages / l.classes, window, l.pages(window + rows), l.classes }),
             error.NoStream => if (engine_paged) try std.fmt.allocPrint(a, "the CUDA memory budget fits no stream beside the model: one at a {d}-token window takes {d:.2} GiB of KV pages, and the budget leaves {d:.2} GiB", .{ window, toGib(l.pages(window + rows) * l.pageBytes()), toGib(room) }) else "the CUDA memory budget fits no stream beside the model",
             error.TooMany => try std.fmt.allocPrint(a, "--parallel {d} needs {d:.2} GiB for its other streams' fixed parts, state runs and a page each, and the CUDA memory budget leaves {d:.2} GiB: serve fewer, or free device memory", .{ o.lanes, toGib((o.lanes - 1) * (l.fixed_bytes + (1 + l.runPages()) * l.pageBytes())), toGib(room) }),
         };

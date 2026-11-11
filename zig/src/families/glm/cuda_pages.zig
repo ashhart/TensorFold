@@ -23,7 +23,8 @@ pub fn layout(gpa: std.mem.Allocator, e: *const Engine, extra: u64) !kv.Layout {
     const classes: u32 = if (e.settings.kv_split) @intCast(e.share.world) else 1; // TF_GLM_KV_SPLIT: an owner class a rank
     // TF_GLM_KV_SPLIT: a rank holds every pooled key and its own class's latent rows, 6,912 bytes a token at TP=2
     const token = if (classes > 1) owned.tokenBytes(state.pkPageBytes(&e.w), state.latentPageBytes(&e.w), classes, state.page_rows) else page / state.page_rows;
-    return .{ .fixed_bytes = fixed + extra, .token_bytes = token, .page_tokens = state.page_rows, .snap_bytes = 0, .classes = classes };
+    const whole = if (classes > 1) page / state.page_rows else 0; // the unsplit token, so the cache is planned as unsplit
+    return .{ .fixed_bytes = fixed + extra, .token_bytes = token, .page_tokens = state.page_rows, .snap_bytes = 0, .classes = classes, .whole_bytes = whole };
 }
 
 /// TF_KV_SHARE: a kept state's slot (`e.share_pages`: its prefix's pages left to the store), at the window's last mark.
