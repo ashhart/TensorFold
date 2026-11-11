@@ -385,6 +385,7 @@ delete runs gets 503, an id that is not a number 400, and an id the graph does n
 | `thinking_budget` | Token-count limit inside reasoning | Both |
 | `priority` | `background` yields to foreground requests | Both |
 | `return_token_ids` | The reply's token ids in the response's `tensorfold.token_ids`, the tokens its `token_sha256` hashes | Native |
+| `execution_witness` | Boolean, default false. True binds the reply to the execution witness; see [Reply binding](#reply-binding). A server without `--execution-witness` answers 400 | Both |
 
 `n` must be 1; multiple choices receive HTTP 400.
 
@@ -1260,6 +1261,34 @@ the executable changed after the server opened or stamped it) or `hash_failed` (
 binary cannot be opened or the text files cannot be stamped at startup, a startup line says why). The engine's facts
 and the epoch are read under the lock every reload takes, so one snapshot never mixes two engines. The snapshot alone
 does not qualify a response cache.
+
+### Reply binding
+
+A chat completion or completion with `"execution_witness": true` carries a top-level `execution_witness` object on the
+whole reply, or on a stream's finish chunk (not on the separate usage chunk). It is read just before the engine takes
+the request and again once the reply ends; the request keeps the engine from parking in between.
+
+| Field | Meaning |
+| --- | --- |
+| `state` | `known` when the witness was known at both reads, with the same `epoch` and `witness`; else `unknown` |
+| `binding` | Known only: SHA-256 over `witness`, `prompt_sha256`, `request_sha256`, `token_sha256` and `finish_reason` |
+| `witness`, `path` | Known only: the snapshot's, as `GET /v1/execution/witness` gives them |
+| `instance`, `epoch` | The process and the engine generation at the end |
+| `reason`, `feature`, `admitted_epoch` | Unknown only: the snapshot's reason, or `epoch_changed` or `witness_changed`; the epoch at admission |
+| `prompt_sha256` | The prompt's token ids after the template, hashed as `tensorfold.token_sha256` hashes the reply's |
+| `token_sha256` | The reply's token ids, equal to `tensorfold.token_sha256` |
+| `finish_reason` | The reply's |
+| `request` | The resolved request the engine read: `max_tokens` after the window's clamp; `sampling` (null when greedy, else the `seed` actually used, `temperature`, `top_k`, `top_p` and `min_p`); `presence_penalty`, `frequency_penalty`; `eos` and `stop`; `drafts`; `think_budget`, `think_close`, `think_end`, `answer_max`; `loop_guard`, `loop_stop`; `call` (a required tool call's gate); `structure` (the grammar's `kind`, `text_sha256`, `after`, `budget`); `logprobs`, `prompt_logprobs`, `decide` and `untaught` |
+| `request_sha256` | SHA-256 over `request`, walked in order as below |
+
+Every field is length-prefixed: its byte length as a little-endian u64, then its bytes. `request_sha256` hashes the field
+`tensorfold resolved request v1`, then the value: `n` for null; `b` then `1` or `0`; `i` then the integer's decimal
+text; `f` then the float's IEEE-754 bits as a little-endian u64 (every float in the reply round-trips); `s` then the
+string; `a` then the count as a little-endian u64, then each item; `o` then the count, then each key as a field and its
+value. `binding` hashes the field `tensorfold execution binding v1`, then `witness`, `prompt_sha256`, `request_sha256`,
+`token_sha256` and `finish_reason`, each as its text in the reply. A reply that took a path that binds nothing (with
+`--compact-at` or `--cortheon`, which the witness already excludes) carries an unknown object with the snapshot's
+reason. No response cache reads the binding yet.
 
 ## Cancel a request
 
