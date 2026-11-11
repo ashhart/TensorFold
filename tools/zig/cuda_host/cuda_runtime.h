@@ -44,6 +44,7 @@ __device__ unsigned __funnelshift_l(unsigned,unsigned,unsigned);
 __device__ unsigned __funnelshift_r(unsigned,unsigned,unsigned);
 __device__ unsigned __dp4a(unsigned,unsigned,unsigned); __device__ int __dp4a(int,int,int);
 __device__ unsigned __byte_perm(unsigned,unsigned,unsigned); __device__ unsigned __brev(unsigned);
+__device__ unsigned __vcmpeq2(unsigned,unsigned);
 __device__ int __clz(unsigned); __device__ int __popc(unsigned); __device__ int __popcll(unsigned long long);
 __device__ int __ffs(int); __device__ int __ffsll(long long);
 __device__ unsigned __umulhi(unsigned,unsigned); __device__ size_t __cvta_generic_to_shared(const void*);
