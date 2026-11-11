@@ -264,6 +264,7 @@ const usage =
     \\  qwen-norm-shift           qwen35.cu's _shift norms (BF16 checkpoints): 1 + w in FP32 within a BF16 ulp of float64, red controls
     \\  clef tiny DIR | head MODEL CASES OUT [--piece N]  Clef's joint schema head: the tiny fixture, gate 3's logits
     \\  qwen-pending              qwen35's pending kept rows: the slot scans and tf_q35k_apply_pend == tf_q35k_apply, red controls
+    \\  qwen-table                qwen35's gdn_pre, conv_commit, gdn_chain, tf_q35k_conv: _table on pieces == main's, red controls
     \\  rope-yarn                 YaRN rope in tf_q35_rope, tf_q35_rope8 and tf_q36m_norm_rope against float64, to 1M
     \\  kernel-contract-limits DIR   each registered launch against release SMs or sm_110 in DIR's fatbins
     \\  pocket-contract           Nemotron's pocket kernels (learned neurons) through gates 1-4, controls red
@@ -530,6 +531,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "qwen-norm-shift")) return @import("qwen_norm_shift_tests.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "clef")) return @import("clef_tests.zig").run(gpu, rest);
     if (std.mem.eql(u8, cmd, "qwen-pending")) return @import("contract_qwen_pending.zig").run(gpu);
+    if (std.mem.eql(u8, cmd, "qwen-table")) return @import("contract_qwen_table.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "dspine-table")) return @import("dspine_table_tests.zig").runAll(gpu);
     if (std.mem.eql(u8, cmd, "minimax-contract")) return @import("contract_minimax.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "rope-yarn")) return @import("contract_qwen_rope_yarn.zig").run(gpu);
