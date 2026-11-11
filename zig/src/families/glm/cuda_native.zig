@@ -53,6 +53,7 @@ pub const Options = struct {
     drafter_bits: u8 = 4, // --drafter-bits: 4 (default) or 0 (bf16)
     mtp_confidence: ?f64 = null, // --mtp-confidence: rank 0's lanes stop an MTP chain where its chance falls under it
     learn_conversations: bool = false, // --learn-conversations: refused with TF_GLM_REQUEST_STARTS=1 (cuda_env)
+    keeps: bool = false, // the server keeps prompt states: a prompt cache (--prompt-cache-gib, 16 unset) or a disk tier
 };
 /// --drafter: DFlash2 (incoai/GLM-5.3-Flash-DFlash2, Apache-2.0 weights) drafts instead of the MTP head.
 pub const takes_drafter = true;
@@ -244,6 +245,7 @@ fn openRank(a: StartArgs, set: ranks.Settings) !Loaded {
     if (a.share > 0 and !set.pages) return error.GlmShareNeedsPages;
     if (@import("cuda_kv_host.zig").onHost() and !set.pages) return error.GlmKvHostNeedsPages;
     try startup.sharing(set.kv_split, a.share);
+    try startup.keeping(set.kv_split, o.keeps);
     cuda.memory_receipt.emit(@intCast(p.rank), .load_begin, true); // the four phases tools/memory_receipts.py reads
     const own = try gpa.create(Owned);
     errdefer gpa.destroy(own);
@@ -441,6 +443,7 @@ pub fn snap_save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaq
     _ = owner;
     const e: *engine.Engine = @ptrCast(@alignCast(ptr));
     if (e.pos() != at) return error.NotAtMark;
+    if (e.settings.kv_split) return error.KvSplitKeeps; // refused at start; never a state of rows another rank holds
     const k = try e.gpa.create(engine.Kept);
     errdefer e.gpa.destroy(k);
     k.* = .{ .id = try e.keepState(), .at = at, .below = @import("cuda_prompt_cuts.zig").below(e.cur.cuts.items, at) };
@@ -573,7 +576,7 @@ test "TF_KV_PAGES with --kv-cache fp8: auto and off keep windows at every rank c
         try std.testing.expect(!try paging("0", w, true));
         for ([_][]const u8{ "on", "1", "all" }) |v| try std.testing.expectError(error.Fp8OnPages, paging(v, w, true));
     }
-    for ([_]anyerror{ error.Fp8OnPages, error.GlmKvHostNeedsPages, error.KvSplitShare }) |e| try std.testing.expect(explain(null, e) != null);
+    for ([_]anyerror{ error.Fp8OnPages, error.GlmKvHostNeedsPages, error.KvSplitNeedsRanks, error.KvSplitNeedsPages, error.KvSplitOnHost, error.KvSplitShare, error.KvSplitKeeps, error.KvSplitRoom, error.ClassTooSmall, error.ResidueMismatch, error.BadClasses }) |e| try std.testing.expect(explain(null, e) != null);
 }
 
 test "the plan's window, the context and a verify window, takes the pages of a stream's table at that capacity" {
