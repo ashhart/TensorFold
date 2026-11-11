@@ -11,6 +11,7 @@ const t = std.testing;
 const Log = struct {
     calls: [16]usize = undefined,
     n: usize = 0,
+    draw_groups: usize = 0,
     fn add(l: *Log, v: usize) void {
         l.calls[l.n] = v;
         l.n += 1;
@@ -33,6 +34,9 @@ const Owner = struct {
         }
         pub fn verifyMany(o: Ops, seqs: []const *prompt.Seq, _: []const *mtp.Draft, _: []const []const u32, _: u64) !void {
             o.log.add(seqs.len);
+        }
+        pub fn drawsMany(o: Ops, _: u64, _: []const *mtp.Draft, _: []const ?mtp.Sampling, _: []const []const u32, _: []const []u32) !void {
+            o.log.draw_groups += 1;
         }
         pub fn draws(_: Ops, _: *mtp.Draft, _: anytype, _: []const u32, _: []u32) !void {}
     };
@@ -80,6 +84,7 @@ test "shared verify dispatch: at TP=2 a group goes to the ranks, a lone window a
     try t.expectEqual(@as(usize, 1), log.n);
     try t.expectEqual(@as(usize, 103), log.calls[0]);
     try t.expectEqual(@as(usize, 0), o.log.n);
+    try t.expectEqual(@as(usize, 0), o.log.draw_groups);
     log = .{};
     try run(&o, &.{4}, 64);
     try t.expectEqual(@as(usize, 0), log.n);
@@ -92,4 +97,5 @@ test "shared verify dispatch: at TP=2 a group goes to the ranks, a lone window a
     o.ranks = null;
     try run(&o, &.{ 2, 3, 2 }, 64);
     try t.expectEqualSlices(usize, &.{3}, o.log.calls[0..o.log.n]);
+    try t.expectEqual(@as(usize, 1), o.log.draw_groups);
 }
