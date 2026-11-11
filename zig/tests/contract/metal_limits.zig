@@ -32,6 +32,7 @@ pub fn requireMapped(d: limits.MetalLaunch) !void {
 
 /// Only launches the loader can build on this device enter the limits compiler; declarations are checked first.
 pub fn supported(device: mtl.Device, d: limits.MetalLaunch) bool {
+    if (std.mem.startsWith(u8, d.name, "q27 cache ")) return device.tensorUnits();
     if (std.mem.startsWith(u8, d.name, "lfm2 masked prompt "))
         return @import("metal_support.zig").tensor(tf.lfm2_moe.source.optionalAvailable(device), d.name);
     return !std.mem.startsWith(u8, d.name, "qwen27 q8 ") or @import("metal_support.zig").tensor(device.tensorUnits(), d.name);
@@ -45,6 +46,11 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
     var text: []const u8 = undefined;
     var head: []const u8 = "";
     var frags = false;
+    if (std.mem.startsWith(u8, d.name, "q27 cache ")) {
+        if (!assemble) return undefined;
+        const body = try tf.qwen27.simd_attention.grouped(a, device.tensorUnits(), true, 6, 4, hasMixed(d.name, " paged "));
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = "" };
+    }
     if (std.mem.startsWith(u8, d.name, "q27 qk ")) {
         if (!assemble) return undefined;
         const body = try a.dupe(u8, tf.qwen27.runtime_sources.glue);

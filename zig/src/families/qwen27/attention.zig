@@ -227,7 +227,7 @@ pub const Preprocess = struct { qg: Ref, mixed: Ref, q_gain: Ref, k_gain: Ref, n
 pub const Attention = struct {
     profiler: ?*profile.Trace = null,
     prefix: [32]mtl.Pipeline, // q27_attn_prefix_1 to _16, then q27_attn_prefix_masked_1 to _16
-    io: [12]mtl.Pipeline,
+    io: [13]mtl.Pipeline,
     prompt: ?[6]mtl.Pipeline, // promptPipelines: tensor ops on the M5, simdgroup matrices before it
     units: bool,
     pub fn init(device: mtl.Device, library: mtl.Library) !Attention {
@@ -240,10 +240,10 @@ pub const Attention = struct {
             pipe.* = try mtl.Pipeline.init(device, library, try std.fmt.bufPrint(&name, "q27_attn_prefix_{s}{d}", .{ kind, i % 16 + 1 }), false);
             pn += 1;
         }
-        var io: [12]mtl.Pipeline = undefined;
+        var io: [13]mtl.Pipeline = undefined;
         var n: usize = 0;
         errdefer for (io[0..n]) |pipe| pipe.deinit();
-        for ([_][]const u8{ "q27_attn_pack_a", "q27_attn_pack_b", "q27_attn_append", "q27_attn_tail", "q27_attn_merge", "q27_attn_gather", "q27_attn_scatter", "q27_head_norm", "q27_rope", "q27_gate", "q27_attn_merge_single", "q27_qk_norm_rope" }, &io) |name, *pipe| {
+        for ([_][]const u8{ "q27_attn_pack_a", "q27_attn_pack_b", "q27_attn_append", "q27_attn_tail", "q27_attn_merge", "q27_attn_gather", "q27_attn_scatter", "q27_head_norm", "q27_rope", "q27_gate", "q27_attn_merge_single", "q27_qk_norm_rope", "q27_qk_cache_rope" }, &io) |name, *pipe| {
             pipe.* = try mtl.Pipeline.init(device, library, name, false);
             n += 1;
         }
@@ -273,34 +273,10 @@ pub const Attention = struct {
         return out;
     }
     pub fn preprocess(a: *const Attention, input_encoder: mtl.ComputeEncoder, p: Preprocess) !void {
-        try p.geometry.check();
-        const g = p.geometry;
-        const q_bytes = @as(usize, p.rows) * g.heads * g.dim * 2;
-        const kv_bytes = @as(usize, p.rows) * g.kv_heads * g.dim * 2;
-        const gain_bytes = @as(usize, g.dim) * 2;
+        try @import("attention_prepare_views.zig").check(p);
         var timing = profile.begin(a.profiler, input_encoder, .attention_prepare);
         errdefer timing.cancel();
         const e = timing.encoder;
-
-        if (p.rows == 0 or p.rows > @import("gpu_frame.zig").max_rows or !std.math.isFinite(p.eps) or p.eps <= 0 or !std.math.isFinite(p.theta) or p.theta <= 0) return error.TargetAttentionShape;
-        if (keyStride(p) < g.kv_heads * g.dim or @as(u64, p.rows - 1) * keyStride(p) + g.kv_heads * g.dim > std.math.maxInt(u32)) return error.TargetAttentionShape;
-        try span(p.qg, 2 * q_bytes);
-        try span(p.mixed, keyBytes(p));
-        try span(p.q_gain, gain_bytes);
-        try span(p.k_gain, gain_bytes);
-        try span(p.norm_q, q_bytes);
-        try span(p.norm_k, kv_bytes);
-        try span(p.query, q_bytes);
-        try span(p.rotated_key, kv_bytes);
-        if ((p.h_end > 0 or p.w_end > 0) and p.plane < p.rows) return error.TargetAttentionShape;
-        const plane_rows: usize = if (p.h_end > 0 or p.w_end > 0) 2 * @as(usize, p.plane) + p.rows else p.rows;
-        try spanAligned(p.positions, plane_rows * 4, 4);
-        const outputs = [_]struct { ref: Ref, bytes: usize }{ .{ .ref = p.norm_q, .bytes = q_bytes }, .{ .ref = p.norm_k, .bytes = kv_bytes }, .{ .ref = p.query, .bytes = q_bytes }, .{ .ref = p.rotated_key, .bytes = kv_bytes } };
-        const inputs = [_]struct { ref: Ref, bytes: usize }{ .{ .ref = p.qg, .bytes = 2 * q_bytes }, .{ .ref = p.mixed, .bytes = keyBytes(p) }, .{ .ref = p.q_gain, .bytes = gain_bytes }, .{ .ref = p.k_gain, .bytes = gain_bytes }, .{ .ref = p.positions, .bytes = plane_rows * 4 } };
-        for (outputs, 0..) |dst, i| {
-            for (inputs) |src| try disjoint(dst.ref, dst.bytes, src.ref, src.bytes);
-            for (outputs[0..i]) |prior| try disjoint(dst.ref, dst.bytes, prior.ref, prior.bytes);
-        }
         @import("attention_prepare.zig").encode(mtl.Size, e, a.io[11], p, false);
         try timing.end();
     }
@@ -348,6 +324,17 @@ pub const Attention = struct {
         try timing.end();
     }
 
+    /// Fused M5 chains place Q and KV in their consumers' layouts in the norm/RoPE dispatch.
+    pub fn prepareAndEncode(a: *const Attention, e: mtl.ComputeEncoder, scratch: *const Scratch, binding: *const Binding, plan: Plan, p: Preprocess, out: Ref, caches: []const Cache, gate: ?Ref, prompt: bool, split: bool) !void {
+        if (!@import("attention_prepare.zig").direct(a.units, plan.fused)) {
+            try a.preprocess(e, p);
+            return a.encode(e, scratch, binding, plan, p.query, p.rotated_key, p.mixed, out, caches, gate, prompt, split);
+        }
+        try @import("attention_prepare_views.zig").checkCache(p, scratch, binding, plan, caches, out);
+        const kv = p.geometry.kv_heads * p.geometry.dim;
+        const v = Ref{ .buffer = p.mixed.buffer, .offset = p.mixed.offset + @as(usize, kv) * 2 };
+        try a.encodeRows(e, scratch, binding, plan, p.query, p.rotated_key, v, 2 * kv, out, caches, gate, prompt, split, p);
+    }
     /// `prompt` picks the prompt kernel; `split` reads the head count, constant when one Mac runs it.
     pub fn encode(a: *const Attention, e: mtl.ComputeEncoder, scratch: *const Scratch, binding: *const Binding, plan: Plan, q: Ref, k: Ref, mixed: Ref, out: Ref, caches: []const Cache, gate: ?Ref, prompt: bool, split: bool) !void {
         try plan.geometry.check();
@@ -358,13 +345,13 @@ pub const Attention = struct {
         try disjoint(mixed, @as(usize, plan.rows) * kv * 4, out, @as(usize, plan.rows) * plan.geometry.heads * plan.geometry.dim * 2);
         for (caches) |cache| try apart(cache, plan.geometry, mixed, @as(usize, plan.rows) * kv * 4);
         const v = Ref{ .buffer = mixed.buffer, .offset = mixed.offset + @as(usize, kv) * 2 };
-        try a.encodeRows(e, scratch, binding, plan, q, k, v, 2 * kv, out, caches, gate, prompt, split);
+        try a.encodeRows(e, scratch, binding, plan, q, k, v, 2 * kv, out, caches, gate, prompt, split, null);
     }
     /// Contiguous value rows for callers whose input is not a mixed projection.
     pub fn encodeContiguous(a: *const Attention, e: mtl.ComputeEncoder, scratch: *const Scratch, binding: *const Binding, plan: Plan, q: Ref, k: Ref, v: Ref, out: Ref, caches: []const Cache, gate: ?Ref, prompt: bool, split: bool) !void {
-        try a.encodeRows(e, scratch, binding, plan, q, k, v, plan.geometry.kv_heads * plan.geometry.dim, out, caches, gate, prompt, split);
+        try a.encodeRows(e, scratch, binding, plan, q, k, v, plan.geometry.kv_heads * plan.geometry.dim, out, caches, gate, prompt, split, null);
     }
-    fn encodeRows(a: *const Attention, input_encoder: mtl.ComputeEncoder, scratch: *const Scratch, binding: *const Binding, plan: Plan, q: Ref, k: Ref, v: Ref, value_stride: u32, out: Ref, caches: []const Cache, raw_gate: ?Ref, prompt: bool, split: bool) !void {
+    fn encodeRows(a: *const Attention, input_encoder: mtl.ComputeEncoder, scratch: *const Scratch, binding: *const Binding, plan: Plan, q: Ref, k: Ref, v: Ref, value_stride: u32, out: Ref, caches: []const Cache, raw_gate: ?Ref, prompt: bool, split: bool, prepared: ?Preprocess) !void {
         try plan.geometry.check();
         if (plan.rows == 0) return error.TargetAttentionShape;
         const g = plan.geometry;
@@ -391,14 +378,7 @@ pub const Attention = struct {
         for (binding.buffers) |buffer| e.useResource(buffer, mtl.ResourceUsage.read | mtl.ResourceUsage.write);
         useCaches(e, caches);
         const args = PackArgs{ .rows = plan.rows, .packed_rows = plan.tiles * 16, .heads = g.heads, .kv_heads = g.kv_heads, .dim = g.dim, .group = g.group(), .value_stride = value_stride };
-        e.setPipeline(a.io[2]);
-        bind(e, .{ k, v, binding.get(.caches), binding.get(.meta), scratch.get(.nodes) });
-        e.setValue(args, 5);
-        e.dispatchThreads(mtl.Size.of(g.dim, g.kv_heads, plan.rows), mtl.Size.of(32, 4, 1));
-        e.setPipeline(a.io[0]);
-        bind(e, .{ q, scratch.get(.q_rows), scratch.get(.qa) });
-        e.setValue(args, 3);
-        e.dispatchThreads(mtl.Size.of(g.dim, args.packed_rows, g.kv_heads), mtl.Size.of(32, 4, 1));
+        @import("attention_prepare.zig").cache(mtl.Size, e, a.io, prepared, scratch, binding, plan, q, k, v, args);
         if (prompt and a.prompt != null and (plan.geometry.shared_prefix or !a.units) and plan.streams == 1) {
             e.barrier();
             try a.promptRows(e, scratch, binding, plan, out, split);

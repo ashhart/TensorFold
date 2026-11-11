@@ -127,6 +127,14 @@ pub fn metal(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         .imports = &.{ .{ .name = "metal", .module = metal_mod }, .{ .name = "tensorfold", .module = engine }, .{ .name = "contract", .module = module(b, target, .ReleaseSafe) } },
     }) });
     b.step("tf-q27-qk", "Build fused Q/K norm and RoPE intermediate and cache byte checks").dependOn(&b.addInstallArtifact(qk_check, .{}).step);
+    const cache_check = b.addExecutable(.{ .name = "tf-q27-qk-cache", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/contract/q27_qk_cache_run.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal_mod }, .{ .name = "tensorfold", .module = engine }, .{ .name = "contract", .module = module(b, target, .ReleaseSafe) } },
+    }) });
+    b.step("tf-q27-qk-cache", "Build fused Q/K cache and packed-query byte checks").dependOn(&b.addInstallArtifact(cache_check, .{}).step);
     const install = b.addInstallArtifact(exe, .{});
     b.step("tf-kernel-contract", "Build the kernel contract's Metal gates and controls (no run)").dependOn(&install.step);
     const limits_run = b.addRunArtifact(exe);
