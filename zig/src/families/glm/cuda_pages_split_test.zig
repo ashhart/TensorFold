@@ -270,6 +270,24 @@ test "GLM KV split: rank 0 books each stream from the roomiest owner class, ever
     try expect(!p.used[2] and p.pool.classPromised(0) == 0);
 }
 
+test "GLM KV split: a resume opens on its kept state's home class when it has the pages, else on the roomiest" {
+    var f: Fake = undefined;
+    try f.init(true);
+    const p = try f.pool(4, 16, true); // 8 pages a class
+    defer f.deinit(p);
+    _ = try p.openOn(1, 1000, 100, 1); // class 1: 5 left, class 0 the roomiest
+    for (try p.openNear(2, 600, 100, &.{}, 1)) |id| try expectEqual(@as(u32, 1), id % 2); // home, though not roomiest
+    try expectEqual(@as(u32, 1), p.leases[2].owner);
+    p.close(2);
+    for (try p.openNear(2, 3000, 100, &.{}, 1)) |id| try expectEqual(@as(u32, 0), id % 2); // 7 pages: home lacks them
+    p.close(2);
+    _ = try p.openNear(2, 600, 100, &.{}, 2); // a home past the classes: the roomiest
+    try expectEqual(@as(u32, 0), p.leases[2].owner);
+    p.close(2);
+    _ = try p.openNear(2, 600, 100, &.{}, null); // none: the owner rule
+    try expectEqual(@as(u32, 0), p.leases[2].owner);
+}
+
 test "GLM KV split: a class runs out alone: admission waits for its pages though the other class has them" {
     var f: Fake = undefined;
     try f.init(true);

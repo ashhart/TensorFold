@@ -239,6 +239,13 @@ pub const Pages = struct {
         return p.openOwned(slot, prompt, max_tokens, adopted, p.pool.roomiest());
     }
 
+    /// `openWith` for a stream resuming a state kept on owner class `home`: that class when it has the pages now.
+    pub fn openNear(p: *Pages, slot: u32, prompt: usize, max_tokens: usize, adopted: []const u32, home: ?u32) ![]const u32 {
+        const n = need(p.layout, prompt, max_tokens);
+        const near = if (home) |h| h < p.pool.classes and p.pool.availableIn(h) >= n else false;
+        return p.openOwned(slot, prompt, max_tokens, adopted, if (near) home.? else p.pool.roomiest());
+    }
+
     /// `open` on owner class `owner` (the harness pins it; serving takes the roomiest).
     pub fn openOn(p: *Pages, slot: u32, prompt: usize, max_tokens: usize, owner: u32) ![]const u32 {
         return p.openOwned(slot, prompt, max_tokens, &.{}, owner);

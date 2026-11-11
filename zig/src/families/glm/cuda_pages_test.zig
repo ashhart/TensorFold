@@ -242,17 +242,17 @@ test "TF_KV_PAGES: a stream past the paged sequences waits for one, and its slot
     var ln: Lanes = .{ .x = .{ .e = &f.e, .link = undefined } };
     defer ln.lanes.deinit(f.e.gpa);
     var streams: [3]lanes.Stream = undefined; // as many at once as lanes: the engine's own sequence and one more
-    try expectEqual(@as(usize, 2), (try ln.seat(&streams[0], 600, 100, &.{})).len);
+    try expectEqual(@as(usize, 2), (try ln.seat(&streams[0], 600, 100, &.{}, null)).len);
     try expectEqual(@as(u32, 0), ln.lanes.get(&streams[0]).?.slot); // the engine's own takes pages too
-    try expectEqual(@as(usize, 2), (try ln.seat(&streams[1], 600, 100, &.{})).len);
+    try expectEqual(@as(usize, 2), (try ln.seat(&streams[1], 600, 100, &.{}, null)).len);
     const live = F.live;
-    try std.testing.expectError(error.LaneMemory, ln.seat(&streams[2], 600, 100, &.{})); // slot 2: past the paged ones
+    try std.testing.expectError(error.LaneMemory, ln.seat(&streams[2], 600, 100, &.{}, null)); // slot 2: past the paged ones
     try expectEqual(live, F.live); // nothing allocated for it
     try expectEqual(@as(usize, 2), f.e.seqs.items.len);
     try expectEqual(@as(usize, 2), ln.lanes.count());
     _ = ln.lanes.remove(&streams[0]); // a stream ends: the one that waited takes its paged sequence
     p.close(0);
-    _ = try ln.seat(&streams[2], 600, 100, &.{});
+    _ = try ln.seat(&streams[2], 600, 100, &.{}, null);
     try expectEqual(@as(u32, 0), ln.lanes.get(&streams[2]).?.slot);
     try expectEqual(@as(u32, 0), f.e.slot);
 }
@@ -268,8 +268,8 @@ test "TF_KV_PAGES: the lane host admits a request by the pool alone, the engine'
     defer ln.lanes.deinit(f.e.gpa);
     try expect(ln.fits(3000, 100)); // 7 of the 8 pages
     var streams: [2]lanes.Stream = undefined;
-    _ = try ln.seat(&streams[0], 600, 100, &.{}); // slot 0: 2 pages
-    _ = try ln.seat(&streams[1], 2000, 100, &.{}); // slot 1: 5 pages
+    _ = try ln.seat(&streams[0], 600, 100, &.{}, null); // slot 0: 2 pages
+    _ = try ln.seat(&streams[1], 2000, 100, &.{}, null); // slot 1: 5 pages
     _ = ln.lanes.remove(&streams[0]);
     p.close(0);
     try expect(!ln.fits(3000, 100)); // the engine's own is free, but only 3 pages are
