@@ -487,16 +487,28 @@ pub const Engine = struct {
         const c = cancel orelse return null;
         if (!prefix.pollsLayers(e.o.world, len)) return null;
         p.* = .{ .stream = e.stream, .cancel = c };
-        return .{ .ctx = p, .layer = Poll.layer };
+        return .{ .ctx = p, .layer = Poll.layer, .reads = false };
     }
+
+    /// What each prompt pass reads of its final rows: a cut none, the prompt's last chunk its last row, a readout all.
+    pub const passes = struct {
+        pub const advance: fwd.Reads = .{ .logits = false, .readers = false };
+        pub const prefill: fwd.Reads = .{ .logits = true, .readers = false };
+        pub const readout: fwd.Reads = .{ .logits = false, .readers = true };
+    };
 
     /// Run `prompt[pos0..end]` into `caches`, its logits not read: a cut where the caches are kept.
     pub fn advance(e: *Engine, caches: *state.Caches, prompt: []const u32, pos0: usize, end: usize, cancel: ?Cancel) !void {
-        _ = try e.spanRows(caches, prompt, pos0, end, cancel);
+        _ = try e.pass(caches, prompt, pos0, end, cancel, passes.advance);
     }
 
     /// `advance`, keeping the span's final-norm rows (end - pos0, hidden) in the prompts arena until its next reset.
     pub fn spanRows(e: *Engine, caches: *state.Caches, prompt: []const u32, pos0: usize, end: usize, cancel: ?Cancel) !hip.ops.Tensor {
+        return (try e.pass(caches, prompt, pos0, end, cancel, passes.readout)).rows;
+    }
+
+    /// `prompt[pos0..end]` into `caches`, the final rows its caller `reads` kept in the prompts arena.
+    fn pass(e: *Engine, caches: *state.Caches, prompt: []const u32, pos0: usize, end: usize, cancel: ?Cancel, reads: fwd.Reads) !fwd.Final {
         if (e.stopped) return error.GroupStopped;
         if (end <= pos0 or end > caches.total or end - pos0 > e.o.prompt_rows) return error.PromptTooLong;
         e.prompts.reset();
@@ -505,7 +517,7 @@ pub const Engine = struct {
         for (ids) |t| if (t >= e.model().spec.vocab) return error.InvalidQwenToken; // no kernel bounds an id
         try e.ids_dev.uploadAsync(0, e.ids.view(0, 4 * ids.len), e.stream);
         var p: Poll = undefined;
-        const rows = try fwd.span(e.ops(&e.prompts), e.model(), caches, e.ids_dev.base(), end - pos0, pos0, e.poll(cancel, end - pos0, &p));
+        const rows = try fwd.spanFor(e.ops(&e.prompts), e.model(), caches, e.ids_dev.base(), end - pos0, pos0, e.poll(cancel, end - pos0, &p), reads);
         try e.stream.synchronize();
         return rows;
     }
@@ -523,8 +535,9 @@ pub const Engine = struct {
         try e.ids_dev.uploadAsync(0, e.ids.view(0, 4 * ids.len), e.stream);
         const o = e.ops(&e.prompts);
         var p: Poll = undefined;
-        const hidden = try fwd.span(o, m, caches, e.ids_dev.base(), len, pos0, e.poll(cancel, len, &p));
-        const row = fwd.at(hidden, (len - 1) * m.spec.hidden);
+        // the last row's logits and MTP's input are read: past its keys, the last layer runs that row's tile
+        const kept = try fwd.spanFor(o, m, caches, e.ids_dev.base(), len, pos0, e.poll(cancel, len, &p), passes.prefill);
+        const row = kept.row(len - 1, m.spec.hidden);
         if (last) |b| try hip.raw.copy(b, 0, row.ptr, m.spec.hidden * m.act.size(), e.stream.handle);
         var token: [1]u32 = undefined;
         try e.project(o, row, 1, &.{req}, &token);
@@ -552,3 +565,11 @@ pub const Engine = struct {
         try lane_round.flush(e);
     }
 };
+
+test "qwen3_5 hip prompt tail: the layer-cancel poll reads no rows, so a long chunk with a cancel keeps the tail" {
+    var e: Engine = undefined;
+    e.o = .{};
+    var p: Engine.Poll = undefined;
+    const t = e.poll(.{ .ptr = &p, .check = undefined }, prefix.chunk, &p) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(!t.reads);
+}
