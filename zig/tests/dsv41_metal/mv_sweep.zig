@@ -58,7 +58,7 @@ pub fn run(device: mtl.Device, queue: mtl.Queue, junk: mtl.Buffer, n_runs: usize
     const pass = try counters.ComputePass.init();
     defer pass.deinit();
     var t: [16]f64 = undefined;
-    for (shapes) |sh| for ([_]u32{ 1, 2, 4, 5, 8, 16 }) |rows| {
+    for (shapes) |sh| for ([_]u32{ 1, 4, 6, 8, 16 }) |rows| {
         var best: [variants.len]f64 = undefined;
         for (&pipes, 0..) |p, vi| {
             const v = variants[vi];
@@ -102,7 +102,8 @@ pub fn run(device: mtl.Device, queue: mtl.Queue, junk: mtl.Buffer, n_runs: usize
         };
         std.mem.sort(usize, &order, &best, C.lt);
         std.debug.print("mv {d}x{d} rows {d}:", .{ sh.k, sh.n, rows });
-        for (order[0..6]) |i| std.debug.print("  {d}/{d}/{d} {d:.1}", .{ variants[i].rt, variants[i].nb, variants[i].u, best[i] * 1e6 });
+        const bytes: f64 = @floatFromInt(@as(u64, sh.k) * sh.n * 2);
+        for (order[0..6]) |i| std.debug.print("  {d}/{d}/{d} {d:.1} us ({d:.0} GB/s)", .{ variants[i].rt, variants[i].nb, variants[i].u, best[i] * 1e6, bytes / best[i] / 1e9 });
         std.debug.print("\n", .{});
     };
 }
