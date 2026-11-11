@@ -83,6 +83,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Pipeline stages: the shared stage driver pipelines rounds, so rank 0 sends round r + 1 while the later stages still run round r, and a stage that echoes a round short or empty is refused by name; tokens are checked equal to one engine on the same binary (#2579, part of #2005). Thanks to @jschmied.
 - DeepSeek-V4.1 on Metal: rounds with four or more active streams decode plain instead of drafting, since drafts lose there (#1720, part of #1676).
+- DeepSeek-V4.1 on Metal: rounds with three or more active streams decode plain and skip the draft pass, since drafts lose there (#1720, part of #1676).
 
 - GLM-5.3-Flash on CUDA: tensor-parallel shares and layer sums go through one mesh layer (declared shares, one reduction boundary over a `Collective`), with the same gathers, bytes and order and tokens equal to main at TP=2; an aborted `tp_group` call now ends as `Aborted` instead of stopping the process (#2789, part of #2560). Thanks to @laudney.
 
