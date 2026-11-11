@@ -109,12 +109,18 @@ test "GLM EXL3 prompt: the direct shared-id route refuses an overflowing expert 
     try t.expectEqual(@as(usize, 0), Record.copies);
 }
 
-test "GLM EXL3 prompt: shared input scratch has no staged output and covers a whole pass" {
+test "GLM EXL3 prompt: scratch names the rank width and rotation layout" {
     const MiB = 1024 * 1024;
-    try t.expectEqual(@as(usize, 52 * MiB), glm.exl3.scratchBytes(2048, 4096, 1024, true, true)[0]);
-    try t.expectEqual(@as(usize, 104 * MiB), glm.exl3.scratchBytes(4096, 4096, 1024, true, true)[0]);
-    try t.expectEqual(glm.exl3.scratchBytes(4096, 4096, 1024, true, true), glm.exl3.scratchBytes(4102, 4096, 1024, true, true));
-    try t.expectEqual(@as(usize, 324 * MiB), glm.exl3.scratchBytes(2048, 4096, 1024, true, false)[0]);
+    const D = 4096;
+    const W_tp2 = 1024;
+    const W_tp1 = 2048;
+    for ([_]usize{ 2048, 4096 }, 1..) |rows, scale| {
+        try t.expectEqual(@as(usize, 52 * MiB * scale), glm.exl3.scratchBytes(rows, D, W_tp2, true, true)[0]);
+        try t.expectEqual(@as(usize, 88 * MiB * scale), glm.exl3.scratchBytes(rows, D, W_tp1, true, true)[0]);
+        try t.expectEqual(@as(usize, 324 * MiB * scale), glm.exl3.scratchBytes(rows, D, W_tp2, true, false)[0]);
+        try t.expectEqual(@as(usize, 360 * MiB * scale), glm.exl3.scratchBytes(rows, D, W_tp1, true, false)[0]);
+    }
+    try t.expectEqual(glm.exl3.scratchBytes(4096, D, W_tp2, true, true), glm.exl3.scratchBytes(4102, D, W_tp2, true, true));
 }
 
 fn guarded(text: []const u8, name: []const u8, payload: []const u8) bool {
@@ -124,14 +130,16 @@ fn guarded(text: []const u8, name: []const u8, payload: []const u8) bool {
     const body = tail[0..end];
     const guard = std.mem.indexOf(u8, body, "if (e == skip) return;") orelse return false;
     const load = std.mem.indexOf(u8, body, payload) orelse return false;
-    return guard < load;
+    const member = std.mem.indexOf(u8, body, "members[") orelse body.len;
+    return guard < @min(load, member);
 }
 
-test "GLM EXL3 prompt: shared-id guards precede payload loads and the missing-guard control is caught" {
+test "GLM EXL3 prompt: shared-id guards precede payload loads and late-guard controls are caught" {
     try t.expect(guarded(source, "tf_exl3_prompt_gu(", "tgateup<"));
     try t.expect(guarded(source, "tf_exl3_prompt_down(", "members[first"));
-    const bad = try std.mem.replaceOwned(u8, t.allocator, source, "if (e == skip) return;", "");
+    const bad = try std.mem.replaceOwned(u8, t.allocator, source, "if (e == skip) return;", "const volatile int control_member = members[items[3 * item + 1]];\n    if (e == skip) return;");
     defer t.allocator.free(bad);
+    try t.expectEqual(@as(usize, 2), std.mem.count(u8, bad, "if (e == skip) return;"));
     try t.expect(!guarded(bad, "tf_exl3_prompt_gu(", "tgateup<"));
     try t.expect(!guarded(bad, "tf_exl3_prompt_down(", "members[first"));
 }
