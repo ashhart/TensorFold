@@ -365,10 +365,6 @@ pub fn Namespace(comptime Tri: type) type {
                 return last;
             }
         };
-        pub fn envUsize(name: [:0]const u8, default: usize) usize {
-            return std.fmt.parseInt(usize, std.mem.span(std.c.getenv(name) orelse return default), 10) catch default;
-        }
-
         pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, captured: ?[]const u8, o: Options) !Loaded {
             return @import("cuda_lanes_load.zig").open(@This(), gpa, io, ctx, dir, captured, o);
         }
@@ -503,7 +499,8 @@ pub fn Namespace(comptime Tri: type) type {
                 }
                 if (w.tokens.len > 0) @memcpy(o.drafts[0..w.tokens.len], w.tokens);
             }
-            const cap = @min(@min(envUsize("TF_FLASHNEXT_WINDOW_ROWS", mtp.round_rows), mtp.round_rows), self.engine.chunk);
+            const env_rows = try @import("sys").environment.read(usize, "TF_FLASHNEXT_WINDOW_ROWS", mtp.round_rows);
+            const cap = @min(@min(env_rows, mtp.round_rows), self.engine.chunk);
             try @import("cuda_lanes_verify.zig").windows(self, windows, out, drafted[0..held], row_ids, cap);
             var at: usize = 0;
             while (at < plain) : (at += round_streams) {

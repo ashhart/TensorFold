@@ -173,6 +173,14 @@ python3 tools/zig/moss_image_case.py start MODEL_DIR pic/ --no-encoder --seed 42
 zig-out/bin/tf-moss-image MODEL_DIR/transformer pic/case.safetensors pic/ --prompt prompt.txt
 ```
 
+`tf-moss-image-generate` needs no case: the options alone give both prompts, the size, the steps, guidance and the
+seed, and skip-layer guidance is refused by name.
+
+```sh
+zig build tf-moss-image-generate -Dcpu=apple_m1
+zig-out/bin/tf-moss-image-generate MODEL_DIR/transformer --prompt "a fox" --seed 42 pic.png   # pic.png
+```
+
 The case holds:
 
 - both prompts' encoder rows;
