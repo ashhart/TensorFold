@@ -148,6 +148,17 @@ pub const Model = struct {
         return m;
     }
 
+    /// The MTP draft head from `dir`'s `mtp-4bit.safetensors`, while a deferred model's files are still open.
+    pub fn loadMtp(m: *Model, io: std.Io, dir: []const u8) !void {
+        if (!m.share_pending) return error.MtpAfterFilesClosed;
+        if (m.weights.mtp != null) return;
+        const path = try std.fs.path.joinZ(m.allocator, &.{ dir, wts.mtp_file });
+        defer m.allocator.free(path);
+        std.Io.Dir.cwd().access(io, path, .{}) catch return error.MissingMtpFile;
+        try m.checkpoint.addFileSplit(m.device, path, "", "language_model.", wts.repacked);
+        try wts.loadMtp(&m.weights, m.device, &m.checkpoint, &m.shard);
+    }
+
     /// A deferred share takes at most `room` bytes; zero refuses it, and decided models stay as they are.
     pub fn loadShare(m: *Model, room: u64) !void {
         try m.finishShare(room, null);

@@ -78,6 +78,10 @@ pub const Stages = struct {
     reduce: ?Reduce = null,
     /// Head seam picks (one u32 a row), required with `Reduce.argmax`: the ranks must pick the same token.
     picks: ?Ref = null,
+    /// The norm before the head: the target's, or the MTP head's own (mtp.zig).
+    norm: ?wts.Tensor = null,
+    /// Where the head writes its logits: the frame's, or the MTP head's own (the target's last row stays readable).
+    logits: ?Ref = null,
     pub fn begin(s: *Stages, lane: *@import("core").segments.Lane) !void {
         const m = s.model;
         if (s.rows == 0 or s.rows > m.frame.capacity or lane.k != 0) return error.BadFrameRows;
@@ -98,7 +102,7 @@ pub const Stages = struct {
         const m = s.model;
         const f = &m.frame;
         const e = lane.enc;
-        const layer = m.weights.layers[index];
+        const layer = layerAt(m, index);
         const h: u32 = @intCast(m.config.hidden);
         try m.kernels.norm(e, s.hidden, s.pending, wts.ref(layer.norm), f.get(.eps), f.get(.dims), s.residual, f.get(.input), f.get(.sums), h, s.rows);
         e.barrier();
@@ -114,11 +118,11 @@ pub const Stages = struct {
     pub fn mixer(s: *Stages, lane: *@import("core").segments.Lane, index: usize) !void {
         const m = s.model;
         if (s.keysOnly(index)) {
-            try s.hooks.keys.?(s.hooks.ptr, lane.enc, index, m.weights.layers[index].mixer.attention, &m.frame, s.rows);
+            try s.hooks.keys.?(s.hooks.ptr, lane.enc, index, layerAt(m, index).mixer.attention, &m.frame, s.rows);
             lane.enc.barrier();
             return;
         }
-        switch (m.weights.layers[index].mixer) {
+        switch (layerAt(m, index).mixer) {
             .linear => |g| try s.hooks.gdn(s.hooks.ptr, lane.enc, index, g, &m.frame, s.rows),
             .attention => |a| try s.hooks.attention(s.hooks.ptr, lane.enc, index, a, &m.frame, s.rows),
         }
@@ -129,7 +133,7 @@ pub const Stages = struct {
         const m = s.model;
         const f = &m.frame;
         var e = lane.enc;
-        const layer = m.weights.layers[index];
+        const layer = layerAt(m, index);
         const h: u32 = @intCast(m.config.hidden);
         const out = switch (layer.mixer) {
             .linear => |g| g.out,
@@ -241,7 +245,7 @@ pub const Stages = struct {
         // The head seam reopens the encoder, so it goes back in the lane; rank 0's half-vocab argmax is not a token.
         var e = lane.enc;
         if (s.keysOnly(m.config.layers - 1)) return if (s.tail) |tail| tail.encode(tail.ptr, e);
-        try m.kernels.norm(e, s.hidden, s.pending, wts.ref(m.weights.norm), f.get(.eps), f.get(.dims), s.residual, f.get(.input), f.get(.sums), @intCast(m.config.hidden), s.rows);
+        try m.kernels.norm(e, s.hidden, s.pending, wts.ref(s.norm orelse m.weights.norm), f.get(.eps), f.get(.dims), s.residual, f.get(.input), f.get(.sums), @intCast(m.config.hidden), s.rows);
         e.barrier();
         std.mem.swap(Ref, &s.hidden, &s.residual);
         if (s.hooks.tap) |tap| try tap(s.hooks.ptr, e, m.config.layers - 1, s.hidden, s.rows);
@@ -253,7 +257,7 @@ pub const Stages = struct {
                 input.offset += @as(usize, s.rows - 1) * m.config.hidden * 2;
                 head_sums.ref.offset += @as(usize, s.rows - 1) * 4;
             }
-            try m.kernels.quant(e, m.weights.head, input, head_sums, f.get(.dims), f.get(.logits), if (s.head == .last) 1 else s.rows);
+            try m.kernels.quant(e, m.weights.head, input, head_sums, f.get(.dims), s.logits orelse f.get(.logits), if (s.head == .last) 1 else s.rows);
         }
         e.barrier();
         if (s.reduce) |r| {
@@ -294,6 +298,11 @@ fn run(m: *Model, e: *mtl.ComputeEncoder, stages: *Stages) !void {
         try stages.post(&lane, index);
     }
     try stages.finish(&lane);
+}
+
+/// Block `index` of the layer program; one past the last is the MTP head's block (mtp.zig).
+pub fn layerAt(m: *const Model, index: usize) wts.Layer {
+    return if (index == m.config.layers) m.weights.mtp.?.layer else m.weights.layers[index];
 }
 
 /// A norm's or the MLP gate's group sums for the frame's padded rows.

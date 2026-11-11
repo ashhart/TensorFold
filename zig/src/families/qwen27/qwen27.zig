@@ -12,6 +12,8 @@ pub const attention_plan = @import("attention_plan.zig");
 pub const simd_attention = @import("simd_attention.zig");
 pub const decode_round = @import("decode_round.zig");
 pub const forward = @import("forward.zig");
+/// The MTP draft head's forward (mtp-4bit.safetensors beside the checkpoint).
+pub const mtp = @import("mtp.zig");
 pub const gdn = @import("gdn.zig");
 pub const gdn_contract = @import("gdn_contract.zig");
 pub const gdn_hook = @import("gdn_hook.zig");
@@ -75,6 +77,8 @@ test {
     _ = checkpoint;
     _ = weights;
     _ = @import("weights_test.zig");
+    _ = @import("mtp_load_test.zig");
+    _ = @import("mtp_step_test.zig");
     _ = @import("geometry_test.zig");
 }
 

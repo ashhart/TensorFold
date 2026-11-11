@@ -27,7 +27,7 @@ const modelContext = metal_shared.modelContext;
 const gibBytes = metal_shared.gibBytes;
 
 pub const backends: []const []const u8 = &.{"metal"};
-pub const serves: []const []const u8 = &.{ "--checkpoint-slots", "--spill-gib" };
+pub const serves: []const []const u8 = &.{ "--checkpoint-slots", "--spill-gib", "--mtp-drafts", "--mtp-confidence" };
 const spill = @import("metal_spill.zig");
 
 /// Every checkpoint-wide MLX affine width the per-module readers take (oQ quants): 2-8 bits but 7, groups 32-128.
@@ -288,6 +288,7 @@ fn refusal(a: Allocator, o: api.Open, dense: bool) !?[]const u8 {
     if (o.kv8) return "--kv-cache fp8 keeps fp8 caches on CUDA; the Metal engines keep bf16: serve without it";
     if (o.prompt_int8) return prompt_int8_refusal;
     if (!learners.supports(t)) if (try o.slideRefusal(a, "Macs")) |why| return why;
+    if (@import("qwen27_mtp.zig").refusal(o.mtp_drafts, o.mtp_confidence, o.drafter != null, std.mem.eql(u8, t, "qwen3_5") and dense)) |why| return why;
     if (o.drafter != null and !dense and !isGemma4(t) and !std.mem.eql(u8, t, "llama") and !std.mem.eql(u8, t, "qwen3_5_moe")) return "--drafter is supported for Qwen3.8-27B-class checkpoints (qwen3_5 with its own output head), Qwen3.5-MoE (qwen3_5_moe), Gemma 4 dense and Llama (a smaller Llama on the same tokenizer)";
     const one_mac: ?[]const u8 = if (std.mem.eql(u8, t, "nemotron_h")) "Nemotron" else if (std.mem.eql(u8, t, "lfm2_moe")) "LFM2.5-24B-A2B" else if (isGemma4(t)) "Gemma 4" else if (std.mem.eql(u8, t, "step5_vl")) "Step-5" else if (std.mem.eql(u8, t, "spark2_5")) "Spark-X2.6" else if (std.mem.eql(u8, t, "minimax_m3_vl")) "MiniMax-M3.1-Flash" else if (std.mem.eql(u8, t, "qwen3_5_moe")) "Qwen3.5-MoE" else if (std.mem.eql(u8, t, "llama")) "Llama" else if (!std.mem.eql(u8, t, "qwen3_5")) null else if (dense) "Qwen3.8-27B" else "Qwen3.5-2B";
     if (o.speed_up != null) if (one_mac) |name| return try std.fmt.allocPrint(a, "--speed-up joins two Macs for Flash Next, GLM-5.3-Flash and GLM-5.3 only: serve {s} without it", .{name});
@@ -316,7 +317,7 @@ fn openQwen27(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[
     var why: []const u8 = "";
     const drafter = if (o.drafts) o.drafter else null;
     const learn: ?@import("qwen27_disk.zig").Learn = if (o.learn_conversations) if (o.learn) |root| .{ .root = root, .dir = o.dir, .drafter = drafter, .cap = gibBytes(o.learn_gib), .floor = gibBytes(o.learn_min_free_gib), .daily = gibBytes(o.learn_daily_gib), .spill = o.spill, .slots = spill.slots(o) } else null else null;
-    const h = qwen27.open(gpa, io, o.dir, .{ .context = @intCast(context), .streams = o.lanes, .streams_fixed = o.lanes_fixed, .drafter = drafter, .drafter_name = o.drafter_name, .drafter_bits = o.drafter_bits, .cache_gib = o.prompt_cache_gib, .cache_over_cap = o.prompt_cache_over_cap, .decode_share = o.decode_share, .learn = learn, .vision = o.vision }, a, &why) catch |err| {
+    const h = qwen27.open(gpa, io, o.dir, .{ .context = @intCast(context), .streams = o.lanes, .streams_fixed = o.lanes_fixed, .drafter = drafter, .drafter_name = o.drafter_name, .drafter_bits = o.drafter_bits, .mtp_drafts = if (o.drafts) o.mtp_drafts else null, .mtp_confidence = o.mtp_confidence, .cache_gib = o.prompt_cache_gib, .cache_over_cap = o.prompt_cache_over_cap, .decode_share = o.decode_share, .learn = learn, .vision = o.vision }, a, &why) catch |err| {
         problem.* = if (why.len > 0) why else try std.fmt.allocPrint(a, "the native Qwen engine (27B class) cannot load {s} ({s})", .{ o.dir, @errorName(err) });
         return null;
     };

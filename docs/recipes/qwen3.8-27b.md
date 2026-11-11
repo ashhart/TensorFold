@@ -3,9 +3,10 @@
 For opt-in phase timings from native entry to the first completed reply, see the [startup receipt](startup-receipt.md).
 
 The native engine serves `TensorFold/Qwen3.8-27B-MLX-4bit` on Metal, qualified on M5 Max and M3 Ultra, from
-`zig/src/families/qwen27/`. It drafts with DFlash2 (`zig/src/families/qwen27/dflash/`) only when `--drafter` names
-the drafter; without it the model decodes plain. On CUDA the native engine serves the MLX affine checkpoints (2, 3,
-4, 5, 6 and 8 bits in groups of 64) from `zig/src/families/qwen3_5/cuda_*.zig`, with DFlash2 drafts and
+`zig/src/families/qwen27/`. It drafts with DFlash2 (`zig/src/families/qwen27/dflash/`) when `--drafter` names
+the drafter, or with the model's MTP head under `--mtp-drafts` on M1 to M4 (below); without either it decodes
+plain. On CUDA the native engine serves the MLX affine checkpoints (2, 3, 4, 5, 6 and 8 bits in groups of 64) from
+`zig/src/families/qwen3_5/cuda_*.zig`, with DFlash2 drafts and
 `--kv-cache fp8`. It also reads ModelOpt NVFP4 and FP8 exports, and turboderp's EXL3 packs (`mul1` codebook) with
 DFlash2 drafts through the shared EXL3 module, on one GPU.
 
@@ -94,6 +95,19 @@ DeltaNet step is three dispatches a layer rather than five: `tf_delta_gdn_pre_st
 window into its history as it reads it, so the commit and publication kernels go, and spreads a 128-wide head over
 four simdgroups (each lane's squares still summed in order); 1.19 ms a token where 1.75 (`QWEN27_STEPCHECK` checks
 the state, history and logits bytes against the general path).
+
+## MTP drafts on M1 to M4
+
+`--mtp-drafts N` drafts up to N tokens a round (at most 15) with Qwen3.8-27B's MTP head, through the lane core's
+drafter as on CUDA, so every stream of a shared round drafts. `--mtp-confidence F` (0 to 1) stops a chain where its
+cumulative chance falls below F, and needs `--mtp-drafts`. The head is read from `mtp-4bit.safetensors` beside the
+checkpoint (MLX affine 4-bit, groups of 64, norms stored as 1 + w); no head file is published yet, so it is built
+from the release's `mtp.*` weights and placed there by hand. The flags are off by default, refused with `--drafter`,
+with `TF_QWEN27_METAL_KV_PAGES=1` and on an M5, and replies are byte-equal to `"draft": false`.
+
+```bash
+tensorfold serve TensorFold/Qwen3.8-27B-MLX-4bit --mtp-drafts 3 --name bench
+```
 
 ## GGUF host adapter
 

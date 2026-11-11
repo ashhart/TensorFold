@@ -10,6 +10,7 @@ const be = lanes.backend;
 pub const Draft = @import("qwen27_draft.zig").Draft;
 const slots = @import("qwen27_slots.zig");
 const draft_fns = @import("qwen27_drafts.zig");
+const features = @import("qwen27_features.zig");
 const Round = q.round_plan.Round;
 const Tree = q.dflash.selector.Tree;
 const Ring = q.tap_ring.Ring;
@@ -49,6 +50,7 @@ pub const Metal = struct {
     tensor_units: bool = false, // the device capability used by startup and first-token policy
     runner: *q.decode_round.Runner,
     draft: ?*Draft,
+    external: bool = false, // a core drafter in front (lanes.drafted) reads each pass's taps (qwen27_features.zig)
     chunk: usize = 128, // prompt rows a pass
     window: u32 = 16, // the device per-stream verification width
     copies: bool = false, // lone context copies leave room past a 15-node tree
@@ -156,12 +158,12 @@ pub const Metal = struct {
     pub const refill = slots.refill;
 
     pub fn backend(b: *Metal) be.Backend {
-        return .{ .ptr = b, .defer_lone_draft = b.runner.slots == 1, .first_before_draft = b.tensor_units, .vtable = &.{ .prefill = prefillFn, .prefill_step = slots.prefillStep, .cancel_prefill = slots.cancelPrefill, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draft_fns.draftFn, .draft_capacity = draft_fns.capacityFn, .probabilities = draft_fns.probabilitiesFn, .tree = draft_fns.treeFn, .release = releaseFn, .reports_fill = true } };
+        return .{ .ptr = b, .defer_lone_draft = b.runner.slots == 1, .first_before_draft = b.tensor_units, .vtable = &.{ .prefill = prefillFn, .prefill_step = slots.prefillStep, .cancel_prefill = slots.cancelPrefill, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draft_fns.draftFn, .prepare_features = features.prepare, .features = features.rows, .draft_capacity = draft_fns.capacityFn, .probabilities = draft_fns.probabilitiesFn, .tree = draft_fns.treeFn, .release = releaseFn, .reports_fill = true } };
     }
 
     /// What the round loop reads at setup: slot 0's stream drafts trees; every stream verifies copies.
     pub fn facts(b: *const Metal) lanes.Model {
-        const drafting = b.draft != null;
+        const drafting = b.draft != null or b.external;
         const shared = b.runner.slots > 1;
         // Context copies remain opt-in until their served cost is qualified.
         const lone_copies = b.copies;
