@@ -7,6 +7,7 @@ const Draft = @import("dflash/runtime_model.zig").Model;
 
 /// One kept state: its bytes in a GPU buffer, its position and the drafter's committed end there.
 pub const State = struct {
+    provenance: @import("core").cache_lineage.Tag = .{},
     buf: mtl.Buffer,
     at: u32,
     bytes: usize,
@@ -46,7 +47,7 @@ pub const State = struct {
                 to_state: bool,
                 fn emit(c: @This(), span: page_store.Layout.Span) !void {
                     const pg = c.st.paged.?;
-                    if (c.to_state) if (span.page) |i| if (i < pg.image.fresh) return;
+                    if (c.to_state) if (span.page) |i| if (i < pg.image.shared_pages) return;
                     const b = if (span.page) |i| pg.store.buffers[pg.image.ids[i]].? else c.st.buf;
                     if (c.to_state) c.e.copy(c.buf, c.dest + span.output, b, span.offset, span.len) else c.e.copy(b, span.offset, c.buf, c.dest + span.output, span.len);
                 }
@@ -266,7 +267,8 @@ pub fn saveSlotFrom(a: std.mem.Allocator, r: *Runner, slot: u32, ring: ?Ring, at
     errdefer a.destroy(st);
     if (store) |p| {
         st.* = .{ .buf = undefined, .at = at, .bytes = n, .draft_end = if (ring) |g| g.end.* else 0, .residency = r.residency };
-        try st.allocatePages(r.model.device, p, old, layout(r), privateBytes(r, ring, at));
+        const prior = if (old) |o| if (r.snapshot_lineage[slot].allows(o.provenance, o.at, at)) o else null else null;
+        try st.allocatePages(r.model.device, p, prior, layout(r), privateBytes(r, ring, at));
     } else if (spares) |p| {
         const got = try p.take(r.model.device, n);
         st.* = .{ .buf = got.buf, .at = at, .bytes = n, .draft_end = if (ring) |g| g.end.* else 0, .cap = got.cap, .spares = p };
@@ -277,6 +279,7 @@ pub fn saveSlotFrom(a: std.mem.Allocator, r: *Runner, slot: u32, ring: ?Ring, at
     }
     errdefer giveBack(st);
     const cb = try encode(a, r, slot, ring, st, true);
+    if (store != null) st.provenance = r.snapshot_lineage[slot].stamp(&r.snapshot_ids);
     st.pending = cb;
     r.readingSlot(slot, cb);
     return st;
@@ -305,6 +308,7 @@ pub fn restoreSlot(a: std.mem.Allocator, r: *Runner, slot: u32, ring: ?Ring, st:
     try r.cover(slot, st.at); // a paged slot's pages for the state's rows before the copy writes them
     try copy(a, r, slot, ring, st, false);
     r.offsets[slot] = st.at;
+    r.snapshot_lineage[slot].restoredFrom(&r.snapshot_ids, st.provenance, st.at);
     if (ring) |g| g.end.* = st.draft_end;
 }
 

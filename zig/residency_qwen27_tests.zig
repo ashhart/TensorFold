@@ -174,6 +174,8 @@ test "residency owner Qwen27: native inventory and lazy owners match every alloc
             model.frame = try @import("src/families/qwen27/gpu_frame.zig").Frame.init(device, model.config, 16);
             defer model.frame.deinit();
             var r: round_mod.Runner = undefined;
+            r.snapshot_ids = .{};
+            r.snapshot_lineage = @splat(.{});
             r.model = &model;
             r.slots = 1;
             r.ready = 1;
@@ -361,6 +363,8 @@ test "residency owner Qwen27: later ready KVs join through Runner.ensure and fai
         model.config = geometry();
         model.device = record.device();
         var r: round_mod.Runner = undefined;
+        r.snapshot_ids = .{};
+        r.snapshot_lineage = @splat(.{});
         r.model = &model;
         r.allocator = a;
         r.owned = .empty;

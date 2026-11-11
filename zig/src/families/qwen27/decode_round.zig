@@ -32,6 +32,8 @@ pub fn gpuFailed(cb: mtl.CommandBuffer, what: []const u8) bool {
 
 pub const Runner = struct {
     allocator: std.mem.Allocator,
+    snapshot_ids: @import("core").cache_lineage.Clock = .{},
+    snapshot_lineage: [attn.planning.max_streams]@import("core").cache_lineage.Slot = @splat(.{}),
     residency: ?mtl.ResidencySet.Follow = null,
     model: *Model,
     geometry: attn.planning.Geometry = .{},
@@ -459,6 +461,7 @@ pub const Runner = struct {
     pub fn reset(r: *Runner, slot: u32) !void {
         r.settleSlot(slot);
         if (r.failed or r.active != null or slot >= r.ready) return error.RoundNotReady;
+        r.snapshot_lineage[slot].fresh(&r.snapshot_ids);
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         const cb = r.model.queue.commandBuffer();

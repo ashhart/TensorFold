@@ -41,6 +41,7 @@ pub fn tests(b: *std.Build, test_step: *std.Build.Step) void {
     const snapshot_core = b.createModule(.{ .root_source_file = b.path("zig/qwen27_snapshot_core.zig"), .target = b.graph.host, .imports = &.{.{ .name = "metal", .module = snapshot_metal }} });
     snapshot_core.addImport("kernel_sources", b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/sources.zig"), .target = b.graph.host }));
     const snapshot = b.createModule(.{ .root_source_file = b.path("zig/src/qwen27_snapshot_test.zig"), .target = b.graph.host, .imports = &.{ .{ .name = "metal", .module = snapshot_metal }, .{ .name = "core", .module = snapshot_core } } });
+    snapshot.addImport("tensorfold", snapshot);
     const snapshot_run = b.addRunArtifact(b.addTest(.{ .root_module = snapshot, .filters = &.{"qwen27 snapshot:"} }));
     b.step("test-qwen27-snapshot-host", "Production snapshot page bytes and lifetime without a GPU").dependOn(&snapshot_run.step);
     test_step.dependOn(&snapshot_run.step);
@@ -94,6 +95,7 @@ pub fn tests(b: *std.Build, test_step: *std.Build.Step) void {
 }
 
 pub fn compileHost(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.Module, lanes: *std.Build.Module) void {
+    @import("qwen27_share_host.zig").steps(b);
     const ownership = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_engine.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "tensorfold", .module = engine }} });
     b.step("test-qwen-dense-route-host", "Existing 2B route and untied 9B and 27B route without weights").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = ownership, .filters = &.{"a qwen3_5 checkpoint opens"} })).step);
     var dense_names: std.ArrayList([]const u8) = .empty;

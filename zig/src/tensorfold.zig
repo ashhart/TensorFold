@@ -158,4 +158,5 @@ pub const hc_pointwise_contract = @import("core/contract/hc_pointwise.zig");
 
 pub const attention_ref = @import("core/attention_ref.zig");
 
+pub const cache_lineage = @import("core/cache_lineage.zig");
 pub const kept_pages = @import("core/kept_pages.zig");

@@ -54,7 +54,6 @@ pub const Host = struct {
     disk_stage: ?mtl.Buffer = null, // copies out of private kept states for the disk (qwen27_disk.zig)
     vision: ?*images.Vision = null, // --vision's tower and image rows
     snapshot_pages: ?*q.snapshot.page_store.Store = null,
-    spares: q.snapshot.Spares = .{}, // dropped kept states' buffers, for the next saves
 
     pub fn engine(h: *Host) api.Engine {
         return h.host.engine();
@@ -343,7 +342,6 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     h.resident = null;
     h.disk_stage = null;
     h.snapshot_pages = null;
-    h.spares = .{};
     h.vision = o.images; // closed with the host; a failed attach leaves it to the caller
     h.trace = null;
     // TF_QWEN27_METAL_KV_PAGES=1: every slot's rows in core-pool pages now (Fit charged each its whole window above)
@@ -403,7 +401,6 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
         const cache_rows = if (h.cache) |*store| store.disk else null;
         if (h.cache) |*store| store.deinit();
         if (h.snapshot_pages) |p| p.deinit();
-        h.spares.deinit();
         if (cache_rows) |r| r.deinit();
     }
     if (o.learn) |l| try disk.attach(h, io, a, l);
@@ -494,7 +491,7 @@ fn enableCache(h: *Host, gib: ?f64, over: bool, a: Allocator, why: *[]const u8) 
     h.snapshot_pages = try q.snapshot.page_store.Store.init(h.gpa, plan.budget_bytes, q.snapshot.layout(&h.runner), h.runner.residency);
     h.snapshot_pages.?.pages.bind(api.prompt_radix.pagesOf(tf.kv_pool.Pool, &h.snapshot_pages.?.pages.pool, h.snapshot_pages.?.pages.pool.page_bytes));
     // a short prompt keeps its history's mark at a chunk end its pass cuts anyway (qwen27_slots.prefill): no extra call
-    h.cache = pc.Store.init(h.gpa, .{ .ptr = h, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop, .charged = Snaps.charged, .incremental = Snaps.incremental, .save_from = Snaps.saveFrom, .shared_bytes = Snaps.shared, .spare = Snaps.spare, .trim = Snaps.trim, .reuses = if (h.snapshot_pages == null) Snaps.reuses else null, .rows = &disk.image } }, cacheRules(@intCast(h.back.chunk)), plan.budget_bytes);
+    h.cache = pc.Store.init(h.gpa, .{ .ptr = h, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop, .charged = Snaps.charged, .incremental = Snaps.incremental, .can_share = Snaps.canShare, .save_from = Snaps.saveFrom, .shared_bytes = Snaps.shared, .shared_freed = Snaps.sharedFreed, .rows = &disk.image } }, cacheRules(@intCast(h.back.chunk)), plan.budget_bytes);
     h.host.cache = &h.cache.?;
     h.back.release_hook = .{ .ctx = h, .kept = Host.keepReply };
     h.back.checkpoint_hook = .{ .ptr = h, .at = Host.checkpoint };
@@ -511,7 +508,6 @@ pub fn close(ptr: *anyopaque) void {
     h.host.stop();
     const rows = if (h.cache) |*store| store.disk else null;
     if (h.cache) |*store| store.deinit(); // its states leave the set as they go
-    h.spares.deinit();
     if (h.snapshot_pages) |p| p.deinit();
     if (rows) |r| r.deinit(); // after the store: its entries leave the write queue as they go
     h.core.deinit();
@@ -555,4 +551,8 @@ test "Qwen27 interior state uses a guaranteed cold request cut" {
 
 test "qwen27 reply cache: warm work preserves both client histories within rounded budgets" {
     try @import("qwen27_reply_cache_test.zig").exercise(keepEnd, slot_state.opening);
+}
+
+test {
+    _ = @import("qwen27_snapshots.zig");
 }

@@ -15,6 +15,11 @@ pub const others = @import("prompt_cache_others.zig");
 pub const rows = @import("rows_store.zig");
 /// A family's copy of one state.
 pub const Saved = *anyopaque;
+pub const SavedSet = struct {
+    ctx: *const anyopaque,
+    len: usize,
+    get: *const fn (*const anyopaque, usize) ?Saved,
+};
 pub const singleReclaim = imprint.singleReclaim; // the learned-state file helpers, beside the Imprint that owns them
 pub const singleForgetChecked = imprint.singleForgetChecked;
 /// What a family gives the cache: copies of its state while the prompt pass stands at a chunk end.
@@ -31,9 +36,13 @@ pub const Snapshots = struct {
         drop: *const fn (ptr: *anyopaque, saved: Saved) void,
         /// Optional immutable KV sharing: estimates and saves use an earlier compatible state.
         incremental: ?*const fn (*anyopaque, ?Saved, u32) u64 = null,
+        /// Prove that this live owner holds the parent's exact immutable prefix; absent means no sharing.
+        can_share: ?*const fn (*anyopaque, ?*anyopaque, Saved, u32) bool = null,
         save_from: ?*const fn (*anyopaque, ?*anyopaque, u32, ?Saved) anyerror!Saved = null,
         /// Bytes shared by multiple states, counted once in addition to each state's exclusive charge.
         shared_bytes: ?*const fn (*anyopaque) u64 = null,
+        /// Shared bytes freed only when every holder belongs to the selected eviction set.
+        shared_freed: ?*const fn (*anyopaque, SavedSet) u64 = null,
         /// The storage a kept state holds: new storage up to `bytes`, or the spare storage it took (null: `bytes`).
         charged: ?*const fn (ptr: *anyopaque, saved: Saved) u64 = null,
         /// Free storage the family keeps for later saves, inside the budget (null: none).

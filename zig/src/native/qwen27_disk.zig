@@ -36,8 +36,11 @@ const staged = q.residency.stage;
 
 /// Ranges of a kept state's image into `out`: one blit pass on the model's queue (the engine thread's, while it idles).
 fn gather(ptr: *anyopaque, saved: api.prompt_cache.Saved, ranges: []const rows.image.Range, out: []u8) anyerror!void {
-    const h = host(ptr);
-    const st: *State = @ptrCast(@alignCast(saved));
+    return gatherFrom(host(ptr), @as(*State, @ptrCast(@alignCast(saved))), ranges, out);
+}
+
+/// The disk adapter's gather over an owner with a queue and staging storage.
+pub fn gatherFrom(h: anytype, st: *State, ranges: anytype, out: []u8) !void {
     try st.landed(); // a fresh save's blit wrote it: it lands before this one reads it
     const stage = try staged(h, out.len);
     const pool = mtl.objc.Pool.push();

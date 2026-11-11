@@ -39,7 +39,7 @@ pub fn keepBorn(s: *pc.Store, prompt: []const u32, born: u32, at: u32, owner: ?*
         return false;
     }
     if (whole > limit or slots == 0) return s.fail(at, error.CachePromised);
-    var bytes = share.bytes(s, prompt, at, spans);
+    var bytes = share.liveBytes(s, prompt, owner, at, spans);
     if (s.reservation_guard != null and (s.held + bytes > limit or s.entries.items.len >= slots)) {
         // Eviction can remove a sharing parent; spare storage may already hold the next state.
         const can = @import("prompt_cache_reserve.zig").evictable(s, null, prompt);
@@ -48,7 +48,7 @@ pub fn keepBorn(s: *pc.Store, prompt: []const u32, born: u32, at: u32, owner: ?*
             return s.fail(at, error.CachePromised);
     }
     while (true) { // a removed parent can turn an incremental save back into a whole-prefix allocation
-        bytes = share.bytes(s, prompt, at, spans);
+        bytes = share.liveBytes(s, prompt, owner, at, spans);
         if (s.entries.items.len == 0) break;
         if (s.family.vtable.reuses) |f| if (s.entries.items.len < slots and (promised.bytes == 0 or s.held + bytes <= limit) and f(s.family.ptr, at)) break;
         const free_ = s.spare();
@@ -60,7 +60,7 @@ pub fn keepBorn(s: *pc.Store, prompt: []const u32, born: u32, at: u32, owner: ?*
         s.remove(others.victim(s, null, prompt, born, bytes, 1) orelse return if (s.keep_others) others.refuse(s, at, bytes) else s.fail(at, error.CacheBorrowed));
         s.counts.evicted += 1;
     }
-    if (s.entries.items.len == 0) if (s.family.vtable.trim) |f| f(s.family.ptr, limit -| bytes);
+    if (s.entries.items.len == 0) if (s.family.vtable.trim) |f| f(s.family.ptr, s.budget -| bytes);
     const e = s.gpa.create(pc.Entry) catch return s.fail(at, error.OutOfMemory);
     const last = s.gpa.dupe(u32, prompt) catch { // one copy: the state's tokens are its prefix
         s.gpa.destroy(e);
@@ -86,6 +86,6 @@ pub fn keepBorn(s: *pc.Store, prompt: []const u32, born: u32, at: u32, owner: ?*
     s.counts.kept += 1;
     if (shared) learned.learn(s, e, starts);
     if (s.disk) |r| rows.write.queued(r, e, starts);
-    if (s.family.vtable.trim) |f| f(s.family.ptr, s.budget -| s.held); // spare storage only inside what the budget leaves
+    if (s.family.vtable.trim) |f| f(s.family.ptr, s.budget -| s.held); // spare storage stays within the budget
     return true;
 }

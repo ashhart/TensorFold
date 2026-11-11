@@ -3,6 +3,10 @@ const std = @import("std");
 const mtl = @import("metal");
 const snap = @import("families/qwen27/snapshot.zig");
 const pages = snap.page_store;
+pub const qwen27 = struct {
+    pub const snapshot = snap;
+    pub const residency = @import("families/qwen27/residency.zig");
+};
 const a = std.testing.allocator;
 const shape: pages.Layout = .{ .fixed = 16, .groups = 4, .row = 4, .tokens = 256 };
 const Follow = struct {
@@ -59,7 +63,7 @@ test "qwen27 snapshot: production paged image survives earlier eviction with exa
         try std.testing.expectEqual(@as(usize, 1), pending.releases);
         const current = try image(d, pair[1]);
         defer current.deinit();
-        const shared = next.paged.?.image.fresh * shape.pageBytes();
+        const shared = next.paged.?.image.shared_pages * shape.pageBytes();
         copied = 0;
         try next.transfer(e, 0, current, 0, current.length(), true);
         try std.testing.expectEqual(current.length() - shared, copied);
@@ -117,4 +121,57 @@ test "qwen27 snapshot: a failed parent copy refuses sharing before any page or b
     try std.testing.expectEqual(calls, allocations.calls);
     try std.testing.expectEqual(@as(usize, 1), pending.waits);
     try std.testing.expectEqual(@as(usize, 1), pending.releases);
+}
+
+test "qwen27 snapshot: native disk gather reads a paged state across boundaries after parent eviction" {
+    var allocations: mtl.Allocations = .{};
+    const device: mtl.Device = .{ .allocations = &allocations };
+    const store = try pages.Store.init(a, 32 * shape.pageBytes(), shape, null);
+    defer store.deinit();
+    const first = try state(device, store, null, 260);
+    var first_live = true;
+    defer if (first_live) snap.drop(a, first);
+    const original = try image(device, 260);
+    defer original.deinit();
+    var copied: usize = 0;
+    const encoder: mtl.BlitEncoder = .{ .copied = &copied };
+    try first.transfer(encoder, 0, original, 0, original.length(), true);
+    const next = try state(device, store, first, 520);
+    defer snap.drop(a, next);
+    const current = try image(device, 520);
+    defer current.deinit();
+    try next.transfer(encoder, 0, current, 0, current.length(), true);
+    snap.drop(a, first);
+    first_live = false;
+    var saved: mtl.Submission = .{};
+    next.pending = .{ .submission = &saved };
+    var submission: mtl.Submission = .{};
+    const Resident = struct {
+        pub fn add(_: *@This(), _: []const mtl.Buffer) void {}
+        pub fn remove(_: *@This(), _: mtl.Buffer) void {}
+    };
+    var model = .{ .device = device, .queue = mtl.Queue{ .submission = &submission, .copied = &copied, .before = &saved } };
+    var owner = .{ .model = &model, .disk_stage = @as(?mtl.Buffer, try device.buffer(128, 0)), .resident = @as(?Resident, null) };
+    defer owner.disk_stage.?.deinit();
+    @memset(owner.disk_stage.?.data, 0x44);
+    const Range = struct { off: u64, len: u64 };
+    const ranges = [_]Range{
+        .{ .off = 0, .len = 8 },
+        .{ .off = 8 + 16 + 256 * 4 - 8, .len = 28 },
+        .{ .off = 8 + 16 + 520 * 4 - 12, .len = 28 },
+        .{ .off = 8 + 16 + 520 * 16 + 4, .len = 28 },
+    };
+    var out: [92]u8 = undefined;
+    try @import("native/qwen27_disk.zig").gatherFrom(&owner, next, &ranges, &out);
+    try std.testing.expectEqual(@as(usize, 1), saved.waits);
+    try std.testing.expectEqual(@as(usize, 1), submission.commits);
+    try std.testing.expectEqual(@as(usize, 1), submission.waits);
+    try std.testing.expectEqualSlices(u8, std.mem.asBytes(&next.draft_end), out[0..8]);
+    var at: usize = 8;
+    for (ranges[1..]) |range| {
+        const off: usize = @intCast(range.off - 8);
+        const len: usize = @intCast(range.len);
+        try std.testing.expectEqualSlices(u8, current.data[off..][0..len], out[at..][0..len]);
+        at += len;
+    }
 }

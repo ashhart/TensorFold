@@ -3,11 +3,15 @@ const std = @import("std");
 const kp = @import("kept_pages.zig");
 const pc = @import("prompt_cache.zig");
 const a = std.testing.allocator;
+const lineage = @import("cache_lineage.zig");
 
 const Fake = struct {
     pool: kp.Store,
     data: [][4]u32,
     live: []const u32 = &.{},
+    ids: lineage.Clock = .{},
+    computation: lineage.Slot = .{},
+    fail_after_save: ?*std.testing.FailingAllocator = null,
     fn init(count: usize) !Fake {
         var pool = try kp.Store.init(a, count, 16, 4);
         errdefer pool.deinit();
@@ -17,7 +21,7 @@ const Fake = struct {
         f.pool.deinit();
         a.free(f.data);
     }
-    const State = struct { image: kp.Image, private: [16]u8 = @splat(27) };
+    const State = struct { image: kp.Image, provenance: lineage.Tag, owner: ?*anyopaque, paged: bool = true, private: [16]u8 = @splat(27) };
     fn of(p: *anyopaque) *Fake {
         return @ptrCast(@alignCast(p));
     }
@@ -33,17 +37,21 @@ const Fake = struct {
     fn save(p: *anyopaque, owner: ?*anyopaque, at: u32) !pc.Saved {
         return saveFrom(p, owner, at, null);
     }
-    fn saveFrom(p: *anyopaque, _: ?*anyopaque, at: u32, old: ?pc.Saved) !pc.Saved {
+    fn saveFrom(p: *anyopaque, owner: ?*anyopaque, at: u32, old: ?pc.Saved) !pc.Saved {
         const f = of(p);
         const st = try a.create(State);
         errdefer a.destroy(st);
         const image = try f.pool.keep(if (old) |x| state(x).image else null, at);
-        for (image.ids[image.fresh..], image.fresh..) |id, i| {
+        for (image.ids[image.shared_pages..], image.shared_pages..) |id, i| {
             @memset(&f.data[id], 0xdead);
             const begin = i * 4;
             @memcpy(f.data[id][0..@min(4, at - begin)], f.live[begin..@min(begin + 4, at)]);
         }
-        st.* = .{ .image = image };
+        st.* = .{ .image = image, .provenance = f.computation.stamp(&f.ids), .owner = owner };
+        if (f.fail_after_save) |fail| {
+            fail.fail_index = fail.alloc_index;
+            fail.resize_fail_index = fail.resize_index;
+        }
         return @ptrCast(st);
     }
     fn restore(p: *anyopaque, _: ?*anyopaque, saved: pc.Saved) !void {
@@ -51,6 +59,7 @@ const Fake = struct {
         const st = state(saved);
         for (0..st.image.at) |i| try std.testing.expectEqual(f.live[i], f.data[st.image.ids[i / 4]][i % 4]);
         try std.testing.expectEqual(@as([16]u8, @splat(27)), st.private);
+        f.computation.restoredFrom(&f.ids, st.provenance, st.image.at);
     }
     fn drop(p: *anyopaque, saved: pc.Saved) void {
         of(p).pool.drop(state(saved).image);
@@ -62,8 +71,20 @@ const Fake = struct {
     fn shared(p: *anyopaque) u64 {
         return of(p).pool.sharedBytes();
     }
+    fn canShare(p: *anyopaque, owner: ?*anyopaque, saved: pc.Saved, at: u32) bool {
+        const st = state(saved);
+        return st.paged and st.owner == owner and of(p).computation.allows(st.provenance, st.image.at, at);
+    }
+    fn sharedFreed(p: *anyopaque, set: pc.SavedSet) u64 {
+        const C = struct {
+            fn image(c: pc.SavedSet, i: usize) ?kp.Image {
+                return state(c.get(c.ctx, i) orelse return null).image;
+            }
+        };
+        return of(p).pool.sharedFreed(set, set.len, C.image);
+    }
     fn snapshots(f: *Fake) pc.Snapshots {
-        return .{ .ptr = f, .vtable = &.{ .bytes = bytes, .save = save, .save_from = saveFrom, .incremental = added, .restore = restore, .drop = drop, .charged = charge, .shared_bytes = shared } };
+        return .{ .ptr = f, .vtable = &.{ .bytes = bytes, .save = save, .save_from = saveFrom, .incremental = added, .can_share = canShare, .restore = restore, .drop = drop, .charged = charge, .shared_bytes = shared, .shared_freed = sharedFreed } };
     }
 };
 
@@ -109,6 +130,7 @@ test "kept pages: cyclic sixteen conversations keep one KV prefix plus private s
     };
     for (0..16) |i| {
         f.live = &tokens[i];
+        f.computation.fresh(&f.ids);
         for ([_]u32{ 16_380, 16_384, 16_388 }) |at| try std.testing.expect(s.keep(&tokens[i], at, null, &.{}, &.{}));
     }
     try std.testing.expectEqual(@as(usize, 48), s.entries.items.len);
@@ -255,4 +277,202 @@ test "kept pages: a guarded keep refuses before losing a parent that cannot be r
     try Fake.restore(&f, null, s.entries.items[0].saved);
     f.live = &queued;
     try Fake.restore(&f, null, s.entries.items[1].saved);
+}
+
+test "kept pages: another computation with identical tokens keeps its own KV bytes" {
+    var f = try Fake.init(64);
+    defer f.deinit();
+    var s = pc.Store.init(a, f.snapshots(), .{}, 1024);
+    defer s.deinit();
+    const tokens: [12]u32 = @splat(7);
+    const left = [_]u32{ 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22 };
+    const right = [_]u32{ 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42 };
+    var owner0: u8 = 0;
+    var owner1: u8 = 0;
+    f.live = &left;
+    try std.testing.expect(s.keep(&tokens, 4, &owner0, &.{}, &.{}));
+    const parent = Fake.state(s.entries.items[0].saved);
+    try std.testing.expectEqualSlices(u32, left[0..4], &f.data[parent.image.ids[0]]);
+    f.live = &right;
+    try std.testing.expect(s.keep(&tokens, 8, &owner1, &.{}, &.{}));
+    const child = Fake.state(s.entries.items[1].saved);
+    try Fake.restore(&f, &owner1, child);
+    try std.testing.expectEqualSlices(u32, right[0..4], &f.data[child.image.ids[0]]);
+}
+
+test {
+    _ = @import("cache_lineage.zig");
+}
+
+test "kept pages: the full evictable set funds a replacement including its shared pages" {
+    for ([_]bool{ false, true }) |guarded| {
+        var f = try Fake.init(64);
+        defer f.deinit();
+        var s = pc.Store.init(a, f.snapshots(), .{}, 100);
+        defer s.deinit();
+        const tokens: [24]u32 = @splat(7);
+        f.live = &tokens;
+        try std.testing.expect(s.keep(&tokens, 8, null, &.{}, &.{}));
+        try std.testing.expect(s.keep(&tokens, 12, null, &.{}, &.{}));
+        try std.testing.expectEqual(@as(u64, 80), s.held);
+        try std.testing.expectEqual(@as(u64, 16), s.entries.items[0].bytes);
+        try std.testing.expectEqual(@as(u64, 32), s.entries.items[1].bytes);
+        f.computation.fresh(&f.ids);
+        if (guarded) {
+            const G = struct {
+                fn needed(_: *anyopaque, _: *const pc.Entry) bool {
+                    return false;
+                }
+            };
+            s.reservation_guard = .{ .ctx = &f, .needed = G.needed };
+        } else s.keep_others = true;
+        try std.testing.expect(s.keep(&tokens, 20, null, &.{}, &.{}));
+        try std.testing.expectEqual(@as(u64, 96), s.held);
+        try std.testing.expectEqual(@as(usize, 1), s.entries.items.len);
+        try std.testing.expectEqual(@as(u64, 2), s.counts.evicted);
+        try Fake.restore(&f, null, s.entries.items[0].saved);
+    }
+}
+
+test "kept pages: a prospective restore estimate cannot fund an unrelated owner's full copy" {
+    var f = try Fake.init(64);
+    defer f.deinit();
+    var s = pc.Store.init(a, f.snapshots(), .{}, 96);
+    defer s.deinit();
+    const tokens: [16]u32 = @splat(7);
+    f.live = &tokens;
+    var left: u8 = 0;
+    var right: u8 = 0;
+    try std.testing.expect(s.keep(&tokens, 8, &left, &.{}, &.{}));
+    const share = @import("prompt_cache_share.zig");
+    try std.testing.expectEqual(@as(u64, 32), share.bytes(&s, &tokens, 12, &.{}));
+    try std.testing.expectEqual(@as(u64, 64), share.liveBytes(&s, &tokens, &right, 12, &.{}));
+    try std.testing.expect(s.keep(&tokens, 12, &right, &.{}, &.{}));
+    try std.testing.expectEqual(@as(u64, 64), s.held);
+    try std.testing.expectEqual(@as(usize, 1), s.entries.items.len);
+    try Fake.restore(&f, &right, s.entries.items[0].saved);
+}
+
+test "kept pages: an evicted parent changes demand before a borrowed neighbor permits the next allocation" {
+    var f = try Fake.init(64);
+    defer f.deinit();
+    var s = pc.Store.init(a, f.snapshots(), .{}, 155);
+    defer s.deinit();
+    const parent: [32]u32 = @splat(1);
+    const neighbor: [32]u32 = @splat(2);
+    f.live = &parent;
+    try std.testing.expect(s.keep(&parent, 8, null, &.{}, &.{}));
+    f.live = &neighbor;
+    try std.testing.expect(s.keep(&neighbor, 20, null, &.{}, &.{}));
+    const held = s.entries.items[1];
+    held.borrowers = 1;
+    defer held.borrowers = 0;
+    f.live = &parent;
+    try std.testing.expect(!s.keep(&parent, 12, null, &.{}, &.{}));
+    try std.testing.expectEqual(@as(usize, 1), s.entries.items.len);
+    try std.testing.expectEqual(@as(u64, 96), s.held);
+    try std.testing.expectEqual(@as(u64, 1), s.counts.evicted);
+    f.live = &neighbor;
+    try Fake.restore(&f, null, held.saved);
+}
+
+test "kept pages: reserve refuses before evicting a parent whose replacement would no longer fit" {
+    var f = try Fake.init(64);
+    defer f.deinit();
+    var s = pc.Store.init(a, f.snapshots(), .{}, 155);
+    defer s.deinit();
+    const parent: [32]u32 = @splat(1);
+    const neighbor: [32]u32 = @splat(2);
+    f.live = &parent;
+    try std.testing.expect(s.keep(&parent, 8, null, &.{}, &.{}));
+    f.live = &neighbor;
+    try std.testing.expect(s.keep(&neighbor, 20, null, &.{}, &.{}));
+    const G = struct {
+        fn needed(_: *anyopaque, e: *const pc.Entry) bool {
+            return e.tokens[0] == 2;
+        }
+    };
+    s.reservation_guard = .{ .ctx = &f, .needed = G.needed, .exact = true };
+    f.live = &parent;
+    @import("prompt_cache_reserve.zig").reserve(&s, &parent, parent.len, null, &.{12}, &.{}, 12);
+    try std.testing.expectEqual(@as(usize, 2), s.entries.items.len);
+    try std.testing.expectEqual(@as(u64, 144), s.held);
+    try std.testing.expectEqual(@as(u64, 0), s.counts.evicted);
+}
+
+test "kept pages: parent choice uses actual image identity and the deepest eligible paged state" {
+    var f = try Fake.init(64);
+    defer f.deinit();
+    var s = pc.Store.init(a, f.snapshots(), .{}, 1024);
+    defer s.deinit();
+    const tokens: [20]u32 = @splat(7);
+    f.live = &tokens;
+    var image: @import("lanes").stream.Image = .{ .pixels = &.{}, .at = 2, .tokens = 1, .gh = 2, .gw = 2, .hash = 77 };
+    s.image_query = (&image)[0..1];
+    for ([_]u32{ 4, 8, 12 }) |at| try std.testing.expect(s.keep(&tokens, at, null, &.{}, &.{}));
+    const share = @import("prompt_cache_share.zig");
+    try std.testing.expectEqual(s.entries.items[2].saved, share.parent(&s, &tokens, 14, &.{}).?);
+    Fake.state(s.entries.items[2].saved).paged = false;
+    try std.testing.expectEqual(s.entries.items[1].saved, share.parent(&s, &tokens, 14, &.{}).?);
+    image.hash += 1;
+    try std.testing.expect(share.parent(&s, &tokens, 14, &.{}) == null);
+    image.hash -= 1;
+    image.gw += 1;
+    try std.testing.expect(share.parent(&s, &tokens, 14, &.{}) == null);
+    image.gw -= 1;
+    try Fake.restore(&f, null, s.entries.items[0].saved);
+    Fake.state(s.entries.items[2].saved).paged = true;
+    try std.testing.expectEqual(s.entries.items[0].saved, share.parent(&s, &tokens, 14, &.{}).?);
+    s.image_query = null;
+}
+
+test "kept pages: a failed index growth rolls back new sharing and preserves existing charges" {
+    var fail = std.testing.FailingAllocator.init(a, .{});
+    const alloc = fail.allocator();
+    var f = try Fake.init(64);
+    defer f.deinit();
+    var s = pc.Store.init(alloc, f.snapshots(), .{}, 1024);
+    defer s.deinit();
+    const tokens: [20]u32 = @splat(7);
+    f.live = &tokens;
+    try std.testing.expect(s.keep(&tokens, 8, null, &.{}, &.{}));
+    s.by_position.shrinkAndFree(alloc, 1);
+    try std.testing.expectEqual(@as(usize, 1), s.by_position.capacity);
+    f.fail_after_save = &fail;
+    try std.testing.expect(!s.keep(&tokens, 12, null, &.{}, &.{}));
+    try std.testing.expect(fail.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 1), s.entries.items.len);
+    try std.testing.expectEqual(@as(usize, 1), s.by_position.items.len);
+    try std.testing.expectEqual(@as(u64, 48), s.held);
+    try std.testing.expectEqual(@as(u64, 48), s.entries.items[0].bytes);
+    try std.testing.expectEqual(@as(u64, 0), f.pool.sharedBytes());
+    try Fake.restore(&f, null, s.entries.items[0].saved);
+}
+
+test "kept pages: borrowed or protected holders receive no joint credit and removes never increase held" {
+    var f = try Fake.init(64);
+    defer f.deinit();
+    var s = pc.Store.init(a, f.snapshots(), .{}, 1024);
+    defer s.deinit();
+    const tokens: [20]u32 = @splat(7);
+    f.live = &tokens;
+    try std.testing.expect(s.keep(&tokens, 8, null, &.{}, &.{}));
+    try std.testing.expect(s.keep(&tokens, 12, null, &.{}, &.{}));
+    const reserve = @import("prompt_cache_reserve.zig");
+    try std.testing.expectEqual(@as(u64, 80), reserve.evictable(&s, null, &tokens).bytes);
+    s.entries.items[1].borrowers = 1;
+    try std.testing.expectEqual(@as(u64, 16), reserve.evictable(&s, null, &tokens).bytes);
+    s.entries.items[1].borrowers = 0;
+    const G = struct {
+        fn needed(_: *anyopaque, e: *const pc.Entry) bool {
+            return e.at == 12;
+        }
+    };
+    s.reservation_guard = .{ .ctx = &f, .needed = G.needed, .exact = true };
+    try std.testing.expectEqual(@as(u64, 16), reserve.evictable(&s, null, &tokens).bytes);
+    s.reservation_guard = null;
+    s.remove(0);
+    try std.testing.expectEqual(@as(u64, 64), s.held);
+    s.remove(0);
+    try std.testing.expectEqual(@as(u64, 0), s.held);
 }

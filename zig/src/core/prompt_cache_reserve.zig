@@ -48,15 +48,8 @@ fn reclaimable(s: *const pc.Store, from: ?*pc.Entry, prompt: []const u32, born: 
 
 /// Bytes and slots the victim order can eventually free, excluding borrowed, protected and skipped entries.
 pub fn evictable(s: *const pc.Store, skip: ?*pc.Entry, prompt: []const u32) Room {
-    var out: Room = .{};
-    for (s.entries.items) |e| {
-        if (e.borrowers > 0 or e == skip) continue;
-        if (s.reservation_guard) |g| if (g.protects(s, e)) continue;
-        if (s.keep_others and !policy.own(e, skip, prompt)) continue;
-        out.bytes += e.bytes;
-        out.slots += 1;
-    }
-    return out;
+    const free = share.freeSet(s, skip, prompt, s.keep_others);
+    return .{ .bytes = free.bytes, .slots = free.slots };
 }
 
 fn future(s: *const pc.Store, from: ?*pc.Entry, prompt: []const u32, born: u32) Room {

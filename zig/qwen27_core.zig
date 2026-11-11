@@ -43,3 +43,5 @@ pub const tree_commit_gpu = @import("tree_commit_gpu");
 pub const tree_slots = @import("src/core/tree_slots.zig");
 
 pub const kept_pages = @import("src/core/kept_pages.zig");
+
+pub const cache_lineage = @import("src/core/cache_lineage.zig");

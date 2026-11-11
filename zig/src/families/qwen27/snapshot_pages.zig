@@ -28,7 +28,7 @@ pub const Store = struct {
     pub fn keep(s: *Store, device: mtl.Device, old: ?Image, at: u32) !Image {
         const image = try s.pages.keep(old, at);
         errdefer s.drop(image);
-        for (image.ids[image.fresh..]) |id| {
+        for (image.ids[image.shared_pages..]) |id| {
             std.debug.assert(s.buffers[id] == null);
             const buf = try device.buffer(@intCast(s.pages.pool.page_bytes), mtl.ResourceOptions.private | mtl.ResourceOptions.untracked);
             s.buffers[id] = buf;

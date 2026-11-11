@@ -5,13 +5,14 @@ const kv = @import("kv_pool.zig");
 pub const Image = struct {
     ids: []u32,
     at: u32,
-    fresh: usize,
+    shared_pages: usize,
 };
 
 pub const Store = struct {
     gpa: std.mem.Allocator,
     pool: kv.Pool,
     tokens: u32,
+    selected: []u32,
     refs: ?Refs = null,
     const Refs = struct {
         ptr: *anyopaque,
@@ -22,7 +23,10 @@ pub const Store = struct {
 
     pub fn init(gpa: std.mem.Allocator, capacity: usize, bytes: u64, tokens: u32) !Store {
         if (tokens == 0) return error.PageTokens;
-        return .{ .gpa = gpa, .pool = try kv.Pool.init(gpa, capacity, bytes), .tokens = tokens };
+        var pool = try kv.Pool.init(gpa, capacity, bytes);
+        errdefer pool.deinit();
+        const selected = try gpa.alloc(u32, capacity);
+        return .{ .gpa = gpa, .pool = pool, .tokens = tokens, .selected = selected };
     }
 
     /// Bind the prompt cache's Pages interface without coupling this pool to a particular engine module.
@@ -74,7 +78,7 @@ pub const Store = struct {
         @memcpy(ids[shared_..], lease.ids.items);
         const api = s.references();
         for (ids) |id| api.retain(api.ptr, id);
-        return .{ .ids = ids, .at = at, .fresh = shared_ };
+        return .{ .ids = ids, .at = at, .shared_pages = shared_ };
     }
 
     pub fn drop(s: *Store, image: Image) void {
@@ -101,9 +105,24 @@ pub const Store = struct {
         return n;
     }
 
+    /// Existing exclusive charges omit these bytes; count each jointly reclaimed page once without changing refs.
+    pub fn sharedFreed(s: *Store, ctx: anytype, count_: usize, comptime image: anytype) u64 {
+        @memset(s.selected, 0);
+        for (0..count_) |i| if (image(ctx, i)) |p| {
+            for (p.ids) |id| s.selected[id] += 1;
+        };
+        const api = s.references();
+        var bytes: u64 = 0;
+        for (s.selected, 0..) |n, id| if (n > 1 and n == api.holders(api.ptr, @intCast(id))) {
+            bytes += s.pool.page_bytes;
+        };
+        return bytes;
+    }
+
     pub fn deinit(s: *Store) void {
         std.debug.assert(s.pool.available() == s.pool.total());
         s.pool.deinit();
+        s.gpa.free(s.selected);
     }
 };
 
