@@ -46,7 +46,8 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_FLASHNEXT_GROUPED_ROWS` | Flash Next on Metal without tensor units: `0`, or the rows (`1` through `32`) from which a decode window runs its 4-bit experts grouped by expert, with the same output bits; default 5; ignored with `--ssd-experts` and in speed-up mode |
 | `GLM_EHPROJ_NAX` | GLM-5.3-Flash on Metal: exactly `0` or `1`; `0` serves the MTP head's prompt eh_proj on the scalar kernel; default 1, the tile kernel where it builds |
 | `TF_PREFILL_MIN` | With `--prefill-from`: whole prompt-token count a pull must reach past the Mac's own prefix; default 4096 |
-| `TF_PREFILL_CHUNK` | With `--prefill-from`: positive multiple of 16; a pulled prefix ends on this boundary; default 512 |
+| `TF_PREFILL_CHUNK` | With `--prefill-from`: positive multiple of 16; a pulled prefix ends on this boundary; default 512 (Qwen3.8-27B, and DeepSeek V4.1 with `TF_PREFILL_TAIL=0`) |
+| `TF_PREFILL_TAIL` | DeepSeek V4.1 with `--prefill-from`: whole count of prompt tokens the Mac prefills itself after the pull, so the producer prefills all but these; default 1 (one decode-class step, no prefill pass here); `0` cuts the prefix on the `TF_PREFILL_CHUNK` boundary as before; 9 to 63 runs the slow shared-body kernels and is warned about |
 | `TF_PREFILL_KEEP` | With `--prefill-from`: exactly `0` or `1`; keeps states built on a pulled prefix, marked remote, so a chat's next turn resumes on the Mac; default 1 |
 | `TF_PREFILL_AHEAD` | With `--prefill-from`: whole count from 1 of queued requests with a fill under way or landed; default 4 |
 | `TF_PREFILL_API_KEY_FILE` | With `--prefill-from`: the path of a file only its owner can read, holding the GB10 server's API key, which the trigger sends as a Bearer token; unset sends none, and a GB10 started with `--api-key` then answers 401 |

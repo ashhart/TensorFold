@@ -23,10 +23,14 @@ pub const Policy = struct {
     enabled: bool = false,
     min_prefix: u64 = 1024,
     chunk: u64 = 512,
+    /// Prompt tokens left to the backend (not 0): the prefix is `prompt_len - tail` and `chunk` is not used.
+    tail: u64 = 0,
 
-    /// The remote prefix for a prompt: whole chunks only, at least one token left local, nothing below `cached`.
+    /// The remote prefix: all but `tail` tokens, else whole chunks and one token left local; nothing below `cached`.
     pub fn upto(p: Policy, prompt_len: u64, cached: u64) ?u64 {
-        if (!p.enabled or prompt_len < p.min_prefix or p.chunk == 0) return null;
+        if (!p.enabled or prompt_len < p.min_prefix) return null;
+        if (p.tail != 0) return if (prompt_len > p.tail and prompt_len - p.tail > cached) prompt_len - p.tail else null;
+        if (p.chunk == 0) return null;
         const n = (prompt_len - 1) / p.chunk * p.chunk;
         return if (n > cached) n else null;
     }
@@ -122,4 +126,23 @@ test "only native prefixes are cacheable, and a remote prefix leaves a local tai
     try std.testing.expectEqual(@as(?u64, null), p.upto(1000, 0));
     try std.testing.expectEqual(@as(?u64, null), p.upto(2000, 1536));
     try std.testing.expectEqual(@as(?u64, null), (Policy{}).upto(4096, 0));
+}
+
+test "a tail policy leaves exactly its tokens local, whatever the chunk, and nothing below what is cached" {
+    const p: Policy = .{ .enabled = true, .min_prefix = 1024, .chunk = 512, .tail = 1 };
+    try std.testing.expectEqual(@as(?u64, 1999), p.upto(2000, 0));
+    try std.testing.expectEqual(@as(?u64, 2047), p.upto(2048, 0));
+    try std.testing.expectEqual(@as(?u64, 8191), p.upto(8192, 0));
+    try std.testing.expectEqual(@as(?u64, null), p.upto(1000, 0)); // under min_prefix
+    try std.testing.expectEqual(@as(?u64, null), p.upto(2000, 1999)); // the cache already holds all but the tail
+    try std.testing.expectEqual(@as(?u64, 1999), p.upto(2000, 1998));
+    var t64 = p;
+    t64.tail = 64;
+    try std.testing.expectEqual(@as(?u64, 1936), t64.upto(2000, 0));
+    t64.min_prefix = 0;
+    try std.testing.expectEqual(@as(?u64, null), t64.upto(64, 0)); // nothing would be pulled
+    try std.testing.expectEqual(@as(?u64, 1), t64.upto(65, 0));
+    var off = p;
+    off.enabled = false;
+    try std.testing.expectEqual(@as(?u64, null), off.upto(4096, 0));
 }

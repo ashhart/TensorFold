@@ -107,7 +107,7 @@ uses pieces and a split pool, so an export pair runs another profile.
 
 `serve --prefill-from URL --mcdma-link NAME` on the DeepSeek V4.1 Metal lane (`native/deepseek_v41_remote.zig`, modelled
 on the Qwen3.8-27B pull) gives the lane host a `lane_remote.Source`: `wants` is the shared prefix policy
-(`TF_PREFILL_MIN`, `TF_PREFILL_CHUNK`), `fill` asks the GB10 over HTTP, pulls protocol 2 into a **blank Snapshot**
+(`TF_PREFILL_MIN`, `TF_PREFILL_TAIL`, `TF_PREFILL_CHUNK` below), `fill` asks the GB10 over HTTP, pulls protocol 2 into a **blank Snapshot**
 (`Model.snapshotBlank`: zeroed `storage`, `live` and taps) through `landing.Landing` (the Packed layout over the Snapshot's own
 host slices, so nothing is staged), seals it (`Model.snapshotSeal`: position, the Engram record of the last three tokens'
 compressed ids, taps with no rows) and returns `{ saved, at }`. `Backend.prefill` restores it with `snapshotRestore` and
@@ -115,6 +115,34 @@ prefills the tail, exactly as for a kept prompt state. `drop` frees the Snapshot
 built on it are kept (marked remote). The drafter's rings are not in a Snapshot (the lane holds them in a state of its own), so
 `ring` parts are read and dropped; the drafter has no conditioning rows until local forwards fill the taps, which can lower
 draft acceptance and nothing else.
+
+### How much of the prompt is handed over
+
+The prefix is the prompt less its **tail**, `TF_PREFILL_TAIL` tokens (default 1): the Mac asks the producer for the whole prompt
+(the trigger sends `prefix + 1` tokens, so the producer's export stands at `prefix`, the last prompt token being the one its reply
+token comes from), lands `prefix = len - tail` tokens, and the pass on the Mac is the one last token: a one-row, decode-class
+forward whose logits are the first token's. That removes the prefill-class pass the 512-token boundary used to leave on the Mac
+(96 to 461 tokens: 0.55 s of weight streaming plus 0.9 ms a row, measured). `TF_PREFILL_TAIL=0` goes back to the boundary
+(`TF_PREFILL_CHUNK`, default 512, the prefix `(len - 1) / chunk * chunk`). A tail of 9 to 63 tokens runs the slow shared-body
+kernels (a 52-row chunk measured 0.85 s against 0.59 s for 100 rows) and is warned about; 1 to 8, or 64 and up, are the sensible values.
+
+* The rows move, they do not disappear: the producer prefills the tail's tokens too (about 0.9 ms a row at 1.0 to 1.1k tokens
+  a second, the Mac's own pace), so the saving is the Mac's fixed pass (about 0.5 s a request), growing as the producer gets
+  faster than the Mac.
+* **Nothing is shipped for the first token.** The producer's reply token is not used: the first token is drawn on the Mac, from the Mac's logits
+  of the last prompt token, with the request's own sampling (temperature, top_p, seed, penalties, grammar), exactly as after a local
+  prefill. Shipping the producer's token or logits would save one decode-class step (about 30 ms), and would need the producer to capture its
+  state after the last token (it stands at the last-but-one), the request's sampling in the trigger, and a drafter with no conditioning at
+  all. A part for it is not defined; the wire, the manifest (`first_token` stays the page-row offset it was) and the plan are unchanged.
+* **Old and new peers**: every pairing works, because only the prefix length the Mac asks for changes. A producer cuts at the last-but-one
+  token of whatever prompt it is sent; an older Mac asks for a boundary prefix, a newer one for all but its tail, and the producer exports each
+  as it is asked. A protocol 1 reader refuses the export as foreign, as before.
+* **Exactness**: the prefix is still remote (`exact_mode: remote_prefix`, `pulled_prefix` = the prefix) and never kept as native; with
+  the default tail a larger share of the prompt is outside the contract (all but the last token, not all but 96 to 461).
+* **The drafter** starts with one conditioning row instead of the up to 128 a tail forward gives: the landed Snapshot has no taps, and the
+  one-row step fills one. Lookup drafts are unaffected (the history is the prompt); the trained proposer's acceptance is lower for the
+  first rounds, until the taps ring fills. A draft is always verified, so this costs speed over the first tokens and never a token.
+  `TF_PREFILL_TAIL=64` to `128` keeps a prefill-class tail that conditions it, for a reply long enough to repay the 0.6 to 0.7 s.
 
 ### Without a network
 
@@ -162,7 +190,7 @@ answers, on its own port and behind its own API keys (`--api-key`, `--api-key-fi
 The body is not encrypted: it is a state derived from the prompt. Keep the pair's port on a trusted LAN, and use a key.
 
 **Decoder** (the Mac): `serve ... --prefill-from http://PRODUCER:PORT --mcdma-link http`. A request whose prompt is long enough
-(`TF_PREFILL_MIN`, `TF_PREFILL_CHUNK`) triggers the export with the same `POST /v1/completions` + `kv_transfer_params`, then
+(`TF_PREFILL_MIN`, `TF_PREFILL_TAIL`) triggers the export with the same `POST /v1/completions` + `kv_transfer_params`, then
 `GET /v1/handoff/<id>` is read frame by frame straight into the landing (`handoff_file.pullFrom`: the manifest must be for this
 checkpoint, prompt and shard, every frame arrives in order and checksummed, nothing may follow the last; the export is never held
 whole here), the copy on the producer is deleted, and the Mac prefills the tail and decodes. `TF_PREFILL_API_KEY_FILE`'s key is

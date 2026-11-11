@@ -91,6 +91,9 @@ const valid = [_]Case{
     .{ .name = "TF_PREFILL_MIN", .raw = "4096", .n = 4096 },
     .{ .name = "TF_PREFILL_CHUNK", .raw = "16", .n = 16 },
     .{ .name = "TF_PREFILL_CHUNK", .raw = "512", .n = 512 },
+    .{ .name = "TF_PREFILL_TAIL", .raw = "0", .n = 0 },
+    .{ .name = "TF_PREFILL_TAIL", .raw = "1", .n = 1 },
+    .{ .name = "TF_PREFILL_TAIL", .raw = "128", .n = 128 },
     .{ .name = "TF_PREFILL_KEEP", .raw = "1", .n = 1 },
     .{ .name = "TF_PREFILL_AHEAD", .raw = "1", .n = 1 },
     .{ .name = "TF_PREFILL_TIMEOUT_S", .raw = "86400", .n = 86400 },
@@ -142,6 +145,7 @@ test "environment: range, enum, whitespace and native prompt geometry refusals a
         .{ "TF_DRAMA_PREFILL_ROWS", "4096x" },  .{ "TF_DRAMA_REFERENCE_CACHE", "4294967296" },
         .{ "TF_PREFILL_CHUNK", "0" },           .{ "TF_PREFILL_CHUNK", "520" },
         .{ "TF_PREFILL_KEEP", "true" },         .{ "TF_PREFILL_AHEAD", "0" },
+        .{ "TF_PREFILL_TAIL", "-1" },           .{ "TF_PREFILL_TAIL", "1.5" },
         .{ "TF_PREFILL_TIMEOUT_S", "0" },       .{ "TF_PREFILL_TIMEOUT_S", "86401" },
     }) |c| try t.expectError(error.InvalidEnvironment, e.parse(c[0], c[1]));
     try t.expectEqual(@as(?u64, null), try e.parse("TF_CUDA_DEVICE", "   "));
