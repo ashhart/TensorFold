@@ -334,6 +334,7 @@ fn finishRank(a: OpenArgs) !Loaded {
     own.e.installGroup(&own.group);
     own.link = try follow.Link.init(gpa, ctx.d, &own.group.lib, own.group.comm, own.e.stream, try linkCapacity(cap, o.vision));
     errdefer own.link.deinit();
+    try @import("cuda_prompt_logprobs.zig").prepare(own.e);
     own.e.snap_setup = .{ .ptr = own, .run = readySnapshots };
     try @import("cuda_kv_host.zig").prepare(ctx.d, @import("cuda_state.zig").pageBytes(&own.e.w), own.e.capacity, own.e.w.config.kv_lora * 2);
     if (p.world > 1) try a.load_cache.finishAfter(.{ io, own.e.checkpoint_digest }, cuda.tp_watch.ready) else a.load_cache.finish();
