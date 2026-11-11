@@ -176,7 +176,7 @@ The pair, then the Mac (names and paths are placeholders):
 ```
 # each Spark: the export profile (replicated KV, whole-prompt prefill, paged pool), rank 1 as ever `tf-dsv41 follow`
 export TF_EXPERIMENTAL=deepseek TF_DSV41_POOL_TOKENS=65536   # plus the pair's usual TF_TP_* and TF_DSV41_* settings
-unset TF_DSV41_PREFILL TF_DSV41_PREFILL_PIECES TF_DSV41_KV_SPLIT
+unset TF_DSV41_PREFILL_PIECES TF_DSV41_KV_SPLIT
 # rank 0 only: the serve line gains one flag (and a key)
 tensorfold-dsv41 serve $MODEL --host 0.0.0.0 --port 8000 --name DeepSeek-V4.1-Flash-TF --no-thinking \
     --mcdma-produce http --api-key-file $KEYFILE
