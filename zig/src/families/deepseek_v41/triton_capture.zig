@@ -24,6 +24,7 @@ const Spec = struct {
     global_align: u32 = 1,
     profile_scratch: u32 = 0,
     pdl: bool = false,
+    consts: std.json.ArrayHashMap(cuda.aot_pdl.Const) = .{},
     params: []struct { name: []const u8, type: []const u8 },
 };
 pub const Set = struct {
@@ -52,6 +53,7 @@ pub const Set = struct {
                 spec.params.len > cuda.Args.max_args - 2) return error.BadManifest;
             for (spec.hash) |ch| if (!std.ascii.isHex(ch)) return error.BadManifest;
             if (!checked.identifier(spec.name)) return error.BadManifest;
+            try cuda.aot_pdl.validate(spec.name, spec.pdl, spec.consts);
             for (spec.params, 0..) |p, i| {
                 if (!checked.identifier(p.name)) return error.BadManifest;
                 _ = checked.typeOf(p.type) catch return error.BadManifest;
