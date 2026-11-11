@@ -20,6 +20,11 @@ var prefixes: []const u64 = &.{};
 /// Where each rank's verify window rows begin in its prefix (the probe's hash leaves them out).
 var window_buf: [prefix_buf.len]u64 = undefined;
 
+/// TF_GLM_KV_SPLIT: the rank whose copy of `k` holds its latent rows (null: every rank's does).
+fn homeOf(e: *const Engine, k: *const Kept) ?u32 {
+    return (e.snaps.get(k.id) orelse return null).home;
+}
+
 fn engineOf(ptr: *anyopaque) *Engine {
     return @ptrCast(@alignCast(ptr));
 }
@@ -56,7 +61,7 @@ fn gather(ptr: *anyopaque, saved: api.prompt_cache.Saved, ranges: []const rows.i
     var o: usize = 0;
     for (ranges) |g| {
         pieces.clearRetainingCapacity();
-        try img.route(sh, prefixes, k.at, g.off, g.len, &pieces, e.gpa);
+        try img.route(sh, prefixes, k.at, g.off, g.len, &pieces, e.gpa, homeOf(e, k));
         for (pieces.items) |p| {
             const n: usize = @intCast(p.len);
             try ranks.take(e, p.rank, k.id, p.off, out[o..][0..n]);
@@ -94,7 +99,7 @@ fn scatter(ptr: *anyopaque, saved: api.prompt_cache.Saved, ranges: []const rows.
     var o: usize = 0;
     for (ranges) |g| {
         pieces.clearRetainingCapacity();
-        try img.route(sh, prefixes, k.at, g.off, g.len, &pieces, e.gpa);
+        try img.route(sh, prefixes, k.at, g.off, g.len, &pieces, e.gpa, homeOf(e, k));
         for (pieces.items) |p| {
             const n: usize = @intCast(p.len);
             const bytes = in[o..][0..n];
@@ -156,7 +161,16 @@ fn probe(a: Allocator, io: std.Io, backend: lanes.backend.Backend, e: *Engine) !
     const shared = bytes[@intCast(from)..@intCast(own)];
     var past: std.ArrayList(img.Span) = .empty; // the spans past rank 0's prefix, as spans of `shared`
     for (loose.items) |x| if (x.off >= from) try past.append(a, .{ .off = x.off - from, .len = x.len });
-    try ranks.same(e, k.id, prefixes, shared, past.items, try a.alloc(u8, shared.len));
+    // TF_GLM_KV_SPLIT: the home's latent rows are not the others' to compare, so left out there (still hashed)
+    var mine = shared;
+    if (homeOf(e, k) != null) {
+        var runs: std.ArrayList([2]u64) = .empty;
+        try img.latentRuns(sh, mark, &runs, a);
+        for (runs.items) |x| if (x[0] >= from) try past.append(a, .{ .off = x[0] - from, .len = x[1] });
+        mine = try a.dupe(u8, shared);
+        img.clear(past.items, 0, mine);
+    }
+    try ranks.same(e, k.id, prefixes, mine, past.items, try a.alloc(u8, shared.len));
     try ranks.rest(e);
     return .{ .hash = std.hash.Wyhash.hash(0x676c6d, bytes), .rate = @as(f64, @floatFromInt(toks.len)) / (@as(f64, @floatFromInt(@max(ns, 1))) / 1e9) };
 }

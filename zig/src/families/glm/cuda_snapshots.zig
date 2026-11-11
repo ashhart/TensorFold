@@ -61,14 +61,15 @@ pub fn keepAs(e: anytype, id: u64) !void {
 }
 
 /// A disk read's state: `at`'s pages leased under rank 0's id on each rank, refused by `restore` until `seal`.
-pub fn blankAs(e: anytype, id: u64, at: usize) !void {
+pub fn blankAs(e: anytype, id: u64, at: usize, owner: ?u32) !void {
+    if (owner) |h| if (h >= e.share.world) return error.BadStep; // TF_GLM_KV_SPLIT: the read's home
     if (e.snaps.contains(id)) return error.StateKept;
     const pool = if (e.snap_pages) |*p| p else return error.NoSnapshotCache;
     var lease = try pool.take(bytes(e, at));
     errdefer pool.give(&lease);
     const cur = try e.gpa.alloc(u1, e.cur.st.cur.len);
     @memset(cur, 0);
-    e.snaps.putAssumeCapacityNoClobber(id, .{ .lease = lease, .len = 0, .pos = at, .mtp_len = 0, .cur = cur, .bases = .{ 0, 0 } });
+    e.snaps.putAssumeCapacityNoClobber(id, .{ .lease = lease, .len = 0, .pos = at, .mtp_len = 0, .cur = cur, .bases = .{ 0, 0 }, .home = owner });
 }
 
 /// Whether an index ring of `rows` rows based at `base` holds every row up to `len`, as the image's ring bytes do.
@@ -85,7 +86,8 @@ pub fn seal(e: anytype, id: u64, mtp_len: usize, bases: [2]usize, cur: u64) !voi
     if (mtp_len > head) return error.DiskWords;
     const rows = e.cur.st.ring_rows;
     if (!ringHolds(bases[0], s.pos, rows) or !ringHolds(bases[1], mtp_len, rows)) return error.DiskWords;
-    const n = try layout.Plan.size(&e.cur.st, &e.c, e.capacity, s.pos, if (e.mtp) mtp_len else null, s.shared);
+    const whole = try layout.Plan.sized(&e.cur.st, &e.c, e.capacity, s.pos, if (e.mtp) mtp_len else null, s.shared);
+    const n = carry.kept(&whole, if (s.home) |h| h == e.share.rank else true); // the home's copy alone has latent rows
     if (n == 0 or n > s.lease.ids.items.len * pages.page) return error.SnapshotSize;
     for (s.cur, 0..) |*b, i| b.* = @intCast(cur >> @intCast(i) & 1);
     s.len = n;
