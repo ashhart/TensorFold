@@ -1,10 +1,10 @@
-//! A strict subset of TOML 1.0 for flat settings files: top-level ``key = value`` lines, everything else refused.
+//! A strict subset of TOML 1.0 for flat settings files: top-level ``key = value`` lines, the rest refused by line.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 /// A number keeps its text, ready to be a flag's value: no ``_``, and no leading ``+`` on an integer.
 pub const Scalar = union(enum) { string: []const u8, integer: []const u8, float: []const u8, boolean: bool };
-pub const Value = union(enum) { scalar: Scalar, array: []const Scalar };
+pub const Value = union(enum) { scalar: Scalar, array: []const []const u8 };
 pub const Entry = struct { key: []const u8, line: u32, value: Value };
 
 /// Why a text was refused and on which line (1-based).
@@ -107,13 +107,14 @@ const Reader = struct {
         if (r.peek() == '{') return r.fail("inline tables are not read");
         if (r.peek() != '[') return .{ .scalar = try r.scalar() };
         r.at += 1;
-        var items: std.ArrayList(Scalar) = .empty;
+        var items: std.ArrayList([]const u8) = .empty;
         while (true) {
             try r.gap();
             if (r.done()) return r.fail("unterminated array");
             if (r.peek() == ']') break;
             if (r.peek() == '[' or r.peek() == '{') return r.fail("nested arrays and inline tables are not read");
-            try items.append(r.a, try r.scalar());
+            if (r.peek() != '"' and r.peek() != '\'') return r.fail("an array holds strings only: quote each item");
+            try items.append(r.a, try r.string());
             try r.gap();
             if (r.peek() == ',') r.at += 1 else if (r.peek() != ']') return r.fail(if (r.done()) "unterminated array" else "expected ',' or ']' in the array");
         }
