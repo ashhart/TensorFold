@@ -105,6 +105,8 @@ const valid = [_]Case{
     .{ .name = "TF_PROMPT_INTERMEDIATE", .raw = "1", .n = 1 },
     .{ .name = "TENSORFOLD_LFM2_KV_PAGES", .raw = "0", .n = 0 },
     .{ .name = "TENSORFOLD_LFM2_KV_PAGES", .raw = "1", .n = 1 },
+    .{ .name = "TF_FLASHNEXT_STATE_PAGES", .raw = "0", .n = 0 },
+    .{ .name = "TF_FLASHNEXT_STATE_PAGES", .raw = "1", .n = 1 },
     .{ .name = "TF_ROCE_GID_INDEX", .raw = "2147483647", .n = 2147483647 },
     .{ .name = "TF_MINIMAX_RANK", .raw = "1", .n = 1 },
     .{ .name = "TF_MINIMAX_WORLD", .raw = "2", .n = 2 },
@@ -380,6 +382,19 @@ test "environment: LFM2's page switch is exact 0 or 1, refused by name, and unse
     try t.expect(try e.value(bool, name, null, true));
     try t.expect(try e.value(bool, name, "1", true));
     try t.expect(!try e.value(bool, name, "0", true));
+}
+
+test "environment: TF_FLASHNEXT_STATE_PAGES is exact 0 or 1, refused when the CUDA backend starts, before any load" {
+    const name = "TF_FLASHNEXT_STATE_PAGES";
+    for ([_][]const u8{ "off", "false", "no", "on", "true", "yes", "2", " 0", "1 ", "01" }) |raw| {
+        try t.expectError(error.InvalidEnvironment, e.parse(name, raw));
+        const why = (try e.refusal(a, Env{ .name = name, .raw = raw }, .{ .cuda = true })).?;
+        defer a.free(why);
+        try t.expect(std.mem.indexOf(u8, why, name) != null);
+        try t.expect((try e.refusal(a, Env{ .name = name, .raw = raw }, .{ .metal = true })) == null);
+    }
+    try t.expect(!try e.value(bool, name, null, false));
+    try t.expect(try e.value(bool, name, "1", false));
 }
 
 test "environment: real settings are finite, keep their lower bound and optional cap, and read as floats" {

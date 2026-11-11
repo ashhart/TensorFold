@@ -23,6 +23,15 @@ fn engine(d: *cuda.Driver) E {
     return e;
 }
 
+test "TF_FLASHNEXT_STATE_PAGES is exact 0 or 1: words, 2 and padded text are refused by name, blank is unset" {
+    try t.expect(!try lanes.statePagesOf(null));
+    try t.expect(!try lanes.statePagesOf(" "));
+    try t.expect(!try lanes.statePagesOf("0"));
+    try t.expect(try lanes.statePagesOf("1"));
+    for ([_][]const u8{ "off", "false", "no", "on", "true", "yes", "2", " 0", "1 ", "01" }) |v|
+        try t.expectError(error.BadFlashNextStatePages, lanes.statePagesOf(v));
+}
+
 fn withLate(on: bool) bool {
     const was = Draft.late_on;
     Draft.late_on = on;
