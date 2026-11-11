@@ -198,6 +198,28 @@ pub fn argmaxPick(row: []const f64) i32 {
     return at;
 }
 
+/// The candidates glue_quant.cl's topk kernels keep: the `k` largest of a finite row, the lower id first at a tie.
+pub fn topkPick(row: []const f64, k: usize, vals: []f64, ids: []u32) void {
+    var n: usize = 0;
+    for (row, 0..) |v, i| {
+        if (n == k and !(v > vals[k - 1])) continue;
+        var j = if (n < k) n else k - 1;
+        if (n < k) n += 1;
+        while (j > 0 and v > vals[j - 1]) : (j -= 1) {
+            vals[j] = vals[j - 1];
+            ids[j] = ids[j - 1];
+        }
+        vals[j] = v;
+        ids[j] = @intCast(i);
+    }
+}
+
+/// Whether `row` holds a NaN or an infinity anywhere: the flag the topk kernels raise over the whole row.
+pub fn hasNonfinite(row: []const f64) bool {
+    for (row) |v| if (!std.math.isFinite(v)) return true;
+    return false;
+}
+
 /// Every element of `row` that is a NaN, for the rule's check to see a planted row.
 pub fn hasNan(row: []const f64) bool {
     for (row) |v| if (std.math.isNan(v)) return true;
@@ -350,4 +372,21 @@ test "the argmax rule skips a NaN, takes the lowest index on a tie, and picks 0x
     const high = [_]f64{ 1, std.math.inf(f64), std.math.nan(f64) };
     try std.testing.expectEqual(@as(i32, 1), argmaxPick(&high));
     try std.testing.expect(hasNan(&row));
+}
+
+test "the top-k rule keeps the largest by value, the lower id at a tie, and a signed zero ties with the other" {
+    const row = [_]f64{ 1, 4, -0.0, 4, 0.0, 9, 4 };
+    var vals: [4]f64 = undefined;
+    var ids: [4]u32 = undefined;
+    topkPick(&row, 4, &vals, &ids);
+    try std.testing.expectEqualSlices(u32, &.{ 5, 1, 3, 6 }, &ids);
+    try std.testing.expectEqualSlices(f64, &.{ 9, 4, 4, 4 }, &vals);
+    topkPick(&row, 2, vals[0..2], ids[0..2]);
+    try std.testing.expectEqualSlices(u32, &.{ 5, 1 }, ids[0..2]);
+    const zeros = [_]f64{ 0.0, -0.0, -1, 0.0, -0.0 };
+    topkPick(&zeros, 3, vals[0..3], ids[0..3]);
+    try std.testing.expectEqualSlices(u32, &.{ 0, 1, 3 }, ids[0..3]);
+    try std.testing.expect(std.math.signbit(vals[1]));
+    try std.testing.expect(hasNonfinite(&.{ 1, -std.math.inf(f64) }) and hasNonfinite(&.{std.math.nan(f64)}));
+    try std.testing.expect(!hasNonfinite(&zeros));
 }
