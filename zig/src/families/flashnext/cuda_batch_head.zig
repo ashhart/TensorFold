@@ -18,13 +18,13 @@ pub fn head(self: anytype, logits_host: ?[]u8) !void {
         .none => {
             if (self.hooks.streams == 0 and mixer_keep.h == 0) return;
             try self.writeback(0, n);
-            try self.copy(self.hooks.streams, s.h, n * wide * 2);
+            try copyStreams(self, s.h, n);
             if (mixer_keep.h != 0) try self.readoutKeep(self.m.mixer, 0, n, mixer_keep);
             return;
         },
         .all => {
             try self.writeback(0, n);
-            try self.copy(self.hooks.streams, s.h, n * wide * 2);
+            try copyStreams(self, s.h, n);
             var row0: usize = 0;
             for (self.lanes) |l| {
                 try self.copy(l.streams, s.h + row0 * wide * 2, l.rows * wide * 2);
@@ -35,7 +35,8 @@ pub fn head(self: anytype, logits_host: ?[]u8) !void {
             try self.projectHead(out, n);
             row0 = 0;
             for (self.lanes) |l| {
-                try self.copy(l.logits, out + row0 * vocab * 2, l.rows * vocab * 2);
+                if (l.logit_rows.len == 0) try self.copy(l.logits, out + row0 * vocab * 2, l.rows * vocab * 2);
+                for (l.logit_rows[0..@min(l.rows, l.logit_rows.len)], 0..) |dst, r| try self.copy(dst, out + (row0 + r) * vocab * 2, vocab * 2);
                 row0 += l.rows;
             }
             if (logits_host) |lh| {
@@ -50,7 +51,7 @@ pub fn head(self: anytype, logits_host: ?[]u8) !void {
             if (self.hooks.streams != 0) {
                 // every row written back and kept, then the last row's streams and sums at row 0
                 try self.writeback(0, n);
-                try self.copy(self.hooks.streams, s.h, n * wide * 2);
+                try copyStreams(self, s.h, n);
                 if (r > 0) {
                     try self.copy(s.h, s.h + r * wide * 2, wide * 2);
                     try self.copy(s.pss, s.pss + r * pss_n * 4, pss_n * 4);
@@ -72,6 +73,18 @@ pub fn head(self: anytype, logits_host: ?[]u8) !void {
                 try cuda.memory.download(d, s.logits, std.mem.sliceAsBytes(lh)[0 .. vocab * 2]);
             }
         },
+    }
+}
+
+/// The pass's `n` rows of streams from `src` to hooks.streams, or by row into its blocks on pages.
+fn copyStreams(self: anytype, src: u64, n: usize) !void {
+    const sr = self.hooks.stream_rows;
+    if (sr.bases.len == 0) return self.copy(self.hooks.streams, src, n * wide * 2);
+    var i: u32 = 0;
+    while (i < n) {
+        const x = sr.next(i, @intCast(n));
+        try self.copy(x.addr, src + i * wide * 2, x.rows * wide * 2);
+        i += x.rows;
     }
 }
 

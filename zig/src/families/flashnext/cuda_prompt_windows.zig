@@ -11,7 +11,7 @@ const Seq = prompt.Seq;
 
 /// A drafted window on one GPU as a graph (one chunk, scores left on the device, no media or adds); true once run.
 pub fn forwardGraph(e: *Engine, comptime Tri: type, p: *batch.Pass(Tri), seq: *Seq, ids: []const u32, hooks: batch.Hooks) !bool {
-    if (!window_graph.enabled() or hooks.logits != .all or hooks.host_logits or hooks.moe_add != null) return false;
+    if (!window_graph.enabled() or hooks.stream_rows.bases.len > 0 or hooks.logits != .all or hooks.host_logits or hooks.moe_add != null) return false;
     if (ids.len > @import("cuda_mtp.zig").max_rows or ids.len > p.s.cap or e.collective != null or seq.media != null or p.m.pocket != null) return false;
     const key = window_graph.Key.init(seq, seq.fed, ids.len, p.s, p.seq.scores, @intFromPtr(p.m.layers.ptr), hooks);
     try window_graph.stageWindow(p, ids, seq.fed);
@@ -21,7 +21,7 @@ pub fn forwardGraph(e: *Engine, comptime Tri: type, p: *batch.Pass(Tri), seq: *S
 }
 
 /// A stream's window in a shared pass: its rows, and where its rollback rows, hidden rows and scores go (0: none).
-pub const Window = struct { seq: *Seq, ids: []const u32, keep: ?*const batch.Keep = null, streams: u64 = 0, logits: u64 = 0 };
+pub const Window = struct { seq: *Seq, ids: []const u32, keep: ?*const batch.Keep = null, streams: u64 = 0, logits: u64 = 0, logit_rows: []const u64 = &.{} };
 
 /// Several streams' windows in one batched pass, each row's bits its lone pass's; `out` holds every row's scores.
 pub fn windows(e: *Engine, comptime Tri: type, tri: Tri, wins: []const Window, out: u64) !void {
@@ -47,7 +47,7 @@ pub fn windows(e: *Engine, comptime Tri: type, tri: Tri, wins: []const Window, o
     const scores = try e.reserveScores(cap, s.cap);
     var at: usize = 0;
     for (wins, lanes) |w, *l| {
-        l.* = .{ .seq = w.seq.view(scores), .pos = w.seq.fed, .rows = w.ids.len, .keep = w.keep, .streams = w.streams, .logits = w.logits };
+        l.* = .{ .seq = w.seq.view(scores), .pos = w.seq.fed, .rows = w.ids.len, .keep = w.keep, .streams = w.streams, .logits = w.logits, .logit_rows = w.logit_rows };
         @memcpy(ids[at..][0..w.ids.len], w.ids);
         @memset(untaught[at..][0..w.ids.len], w.seq.untaught);
         at += w.ids.len;
