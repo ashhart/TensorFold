@@ -4,6 +4,7 @@ const std = @import("std");
 const hip = @import("hip");
 const view = @import("../model/view.zig");
 const state = @import("state.zig");
+const prompt_tail = @import("prompt_tail.zig");
 const moe = hip.moe;
 const reduce = hip.reduce;
 
@@ -35,14 +36,37 @@ pub fn at(t: Tensor, n: usize) Tensor {
 pub const Trace = struct {
     ctx: *anyopaque,
     layer: *const fn (ctx: *anyopaque, index: usize, x: Tensor, rows: usize) anyerror!void,
+    /// The callback reads `x` (a check); false for one that only waits, which the last layer's rows need not reach.
+    reads: bool = true,
+};
+
+/// What a caller reads of a span's final rows (prompt_tail.zig): the last row, every row, or none.
+pub const Reads = prompt_tail.Reads;
+
+/// A span's final-normed rows from `from` on, (len - from, hidden): what its caller reads.
+pub const Final = struct {
+    rows: Tensor,
+    from: usize,
+
+    /// Chunk row `i`'s final row, `i` at or past `from`.
+    pub fn row(f: Final, i: usize, hidden: usize) Tensor {
+        return at(f.rows, (i - f.from) * hidden);
+    }
 };
 
 /// The span's final-normed rows (len, hidden) in the activation dtype; `ids` are int32 token ids on the device.
 pub fn span(ops: Ops, m: *const view.Model, caches: *state.Caches, ids: u64, len: usize, pos0: usize, trace: ?Trace) Error!Tensor {
+    return (try spanFor(ops, m, caches, ids, len, pos0, trace, .{ .logits = true, .readers = true })).rows;
+}
+
+/// `span` for a caller reading `reads`: past its keys and values, the last layer runs only rows a reader reaches.
+pub fn spanFor(ops: Ops, m: *const view.Model, caches: *state.Caches, ids: u64, len: usize, pos0: usize, trace: ?Trace, reads: Reads) Error!Final {
     // prefill's kernels at any row count: a prompt's rows have the same bits fresh, resumed or in steps
     var o = ops;
     o.prefill = true;
     const s = m.spec;
+    const traced = if (trace) |t| t.reads else false;
+    const from = prompt_tail.of(m, o, traced).first(reads, len);
     const x = try take(o, m.act, len * s.hidden);
     var start: usize = 0;
     while (start < len) : (start += SPAN) {
@@ -55,6 +79,8 @@ pub fn span(ops: Ops, m: *const view.Model, caches: *state.Caches, ids: u64, len
         };
     }
     for (m.layers, 0..) |layer, index| {
+        // rows before `kept` reach no reader past the last layer's keys and values
+        const kept = if (index + 1 == m.layers.len) from else 0;
         start = 0;
         while (start < len) : (start += SPAN) {
             const rows = @min(SPAN, len - start);
@@ -67,20 +93,25 @@ pub fn span(ops: Ops, m: *const view.Model, caches: *state.Caches, ids: u64, len
             };
             const normed = try take(o, m.act, rows * s.hidden);
             try o.rms(xs, input_norm, normed, rows, s.hidden, @floatCast(s.eps));
+            const k0 = @min(rows, kept -| start);
             const y = switch (layer) {
-                .full => |f| try attention(o, m, f, caches, index, normed, rows, pos0 + start),
+                .full => |f| try attention(o, m, f, caches, index, normed, rows, pos0 + start, k0),
                 .linear => |l| try linear(o, m, l, caches, index, normed, rows),
-            };
-            try reduce.residualNorm(o, m.tp, xs, y, post_norm, normed, rows, s.hidden, @floatCast(s.eps));
-            const z = try mlpRows(o, m, mlp, normed, rows, true);
-            try residual(o, m, xs, z, rows * s.hidden);
-            if (m.taps.of(index)) |ti| if (caches.tap) |ring| try hip.plan_ops.tapRows(o, xs, ring.base(), rows, s.hidden, ti, m.taps.n, m.taps.rows, pos0 + start);
+            } orelse continue;
+            // the step's rows from k0: the residual norm, the MLP and the residual add
+            const n = rows - k0;
+            const xk = at(xs, k0 * s.hidden);
+            const nk = at(normed, k0 * s.hidden);
+            try reduce.residualNorm(o, m.tp, xk, y, post_norm, nk, n, s.hidden, @floatCast(s.eps));
+            const z = try mlpRows(o, m, mlp, nk, n, true);
+            try residual(o, m, xk, z, n * s.hidden);
+            if (m.taps.of(index)) |ti| if (caches.tap) |ring| try hip.plan_ops.tapRows(o, xk, ring.base(), n, s.hidden, ti, m.taps.n, m.taps.rows, pos0 + start + k0);
         }
         if (trace) |t| t.layer(t.ctx, index, x, len) catch |err| return if (err == error.Cancelled) error.Cancelled else error.HipFailed;
     }
-    const out = try take(o, m.act, len * s.hidden);
-    try o.rms(x, m.final_norm, out, len, s.hidden, @floatCast(s.eps));
-    return out;
+    const out = try take(o, m.act, (len - from) * s.hidden);
+    try o.rms(at(x, from * s.hidden), m.final_norm, out, len - from, s.hidden, @floatCast(s.eps));
+    return .{ .rows = out, .from = from };
 }
 
 /// The attention scale, head_dim ** -0.5 in double as Python has it, passed as fp32.
@@ -88,47 +119,51 @@ pub fn scaleOf(head_dim: usize) f32 {
     return @floatCast(std.math.pow(f64, @floatFromInt(head_dim), -0.5));
 }
 
-/// Full attention on `rows` normed rows at `pos`: q and its gate, k, v, norms, RoPE, cache write, prefill tile, o.
-fn attention(o: Ops, m: *const view.Model, f: view.Full, caches: *state.Caches, index: usize, x: Tensor, rows: usize, pos: usize) Error!Tensor {
+/// Full attention at `pos`: every row's k and v into the pages; q, the prefill tile and o of rows `from..` (or null).
+fn attention(o: Ops, m: *const view.Model, f: view.Full, caches: *state.Caches, index: usize, x: Tensor, rows: usize, pos: usize, from: usize) Error!?Tensor {
     const s = m.spec;
     const hd = s.head_dim;
-    const qg = try o.project(x, f.q, rows, false);
     const keys = try o.project(x, f.k, rows, false);
     const values = try o.project(x, f.v, rows, false);
-    const q_rows = rows * s.heads;
-    const qc = try take(o, m.act, q_rows * hd);
-    try o.copyCols(qg, 2 * hd, 0, qc.ptr, q_rows, hd);
-    const qn = try take(o, m.act, q_rows * hd);
-    try o.rms(qc, f.q_norm, qn, q_rows, hd, @floatCast(s.eps));
     const kn = try take(o, m.act, rows * s.kv_heads * hd);
     try o.rms(keys, f.k_norm, kn, rows * s.kv_heads, hd, @floatCast(s.eps));
     const theta: f32 = @floatCast(s.rope_theta);
-    const q32 = try o.arena.of(f32, q_rows * hd);
     // HF BF16 text and image prompts take Torch's M-RoPE; other text keeps the MLX kernels' arithmetic
     const torch = m.torch_text or (if (m.frame) |fr| fr.runs.len != 0 else false);
-    const positions = (if (m.frame) |fr| fr.positions else m.positions) + pos * 12;
+    const table = if (m.frame) |fr| fr.positions else m.positions;
     const stream: hip.Stream = .{ .r = o.l.r, .handle = o.stream };
-    // q rounded to the activation dtype by apply_rope, then widened for the kernel: (heads, rows, d) fp32
-    if (!torch) {
-        try o.ropePrefill(qn, .{ .ptr = q32, .kind = .f32 }, rows * hd, hd, rows, s.heads, hd, s.rotary_dim, pos, theta);
-    } else if (o.stream != hip.counting) {
-        m.rope.?.textRope(stream, qn, .{ .ptr = q32, .kind = .f32 }, rows * hd, hd, rows, s.heads, hd, s.rotary_dim, positions, theta) catch return error.HipFailed;
-    }
     const c = caches.paged(m, index);
     // k rotated and rounded to the activation dtype as (kv_heads, rows, d), then with v into the pages from slot pos
     const kr = try take(o, m.act, rows * s.kv_heads * hd);
     if (!torch) {
         try o.ropePrefill(kn, kr, rows * hd, hd, rows, s.kv_heads, hd, s.rotary_dim, pos, theta);
     } else if (o.stream != hip.counting) {
-        m.rope.?.textRope(stream, kn, kr, rows * hd, hd, rows, s.kv_heads, hd, s.rotary_dim, positions, theta) catch return error.HipFailed;
+        m.rope.?.textRope(stream, kn, kr, rows * hd, hd, rows, s.kv_heads, hd, s.rotary_dim, table + pos * 12, theta) catch return error.HipFailed;
     }
     try o.pageWrite(kr.ptr, c.k, c.table, rows, s.kv_heads, hd, rows * hd, hd, pos, c.count);
     try o.pageWrite(values.ptr, c.v, c.table, rows, s.kv_heads, hd, hd, s.kv_heads * hd, pos, c.count);
+    if (from == rows) return null;
+    // the queries of rows from..rows, at their own positions over every key up to the step's last
+    const n = rows - from;
+    const qpos = pos + from;
+    const qg = try o.project(at(x, from * s.hidden), f.q, n, false);
+    const q_rows = n * s.heads;
+    const qc = try take(o, m.act, q_rows * hd);
+    try o.copyCols(qg, 2 * hd, 0, qc.ptr, q_rows, hd);
+    const qn = try take(o, m.act, q_rows * hd);
+    try o.rms(qc, f.q_norm, qn, q_rows, hd, @floatCast(s.eps));
+    const q32 = try o.arena.of(f32, q_rows * hd);
+    // q rounded to the activation dtype by apply_rope, then widened for the kernel: (heads, n, d) fp32
+    if (!torch) {
+        try o.ropePrefill(qn, .{ .ptr = q32, .kind = .f32 }, n * hd, hd, n, s.heads, hd, s.rotary_dim, qpos, theta);
+    } else if (o.stream != hip.counting) {
+        m.rope.?.textRope(stream, qn, .{ .ptr = q32, .kind = .f32 }, n * hd, hd, n, s.heads, hd, s.rotary_dim, table + qpos * 12, theta) catch return error.HipFailed;
+    }
     const att = try o.arena.of(f32, q_rows * hd);
-    try o.causalPaged(q32, c, att, rows, pos + rows, s.heads, scaleOf(hd), pos);
+    try o.causalPaged(q32, c, att, n, pos + rows, s.heads, scaleOf(hd), qpos);
     const gated = try take(o, m.act, q_rows * hd);
-    try o.attnGate(att, qg, gated, rows, s.heads, hd, false);
-    return o.project(gated, f.o, rows, f.o.partial);
+    try o.attnGate(att, qg, gated, n, s.heads, hd, false);
+    return try o.project(gated, f.o, n, f.o.partial);
 }
 
 /// Linear attention: qkv, z, a, b, the conv over [state | rows], norms, gate, recurrence and the gated norm.
