@@ -42,6 +42,8 @@ const valid = [_]Case{
     .{ .name = "TF_FLASHNEXT_BATCH_DRAWS", .raw = "0", .n = 0 },
     .{ .name = "TF_FLASHNEXT_BATCH_DRAWS", .raw = "1", .n = 1 },
     .{ .name = "TENSORFOLD_MAX_PDF_PAGES", .raw = "4294967295", .n = std.math.maxInt(u32) },
+    .{ .name = "TENSORFOLD_VIDEO_TOKENS", .raw = "18446744073709551615", .n = std.math.maxInt(u64) },
+    .{ .name = "TENSORFOLD_VIDEO_TOKENS", .raw = "0", .n = 0 },
     .{ .name = "TENSORFOLD_PRESSURE_CACHE_PERCENT", .raw = "\t100 ", .n = 100 },
     .{ .name = "TENSORFOLD_PRESSURE_CACHE_PERCENT", .raw = "0", .n = 0 },
     .{ .name = "TENSORFOLD_PREFIX_WAIT_MS", .raw = "\t4294967295 ", .n = std.math.maxInt(u32) },
@@ -328,6 +330,18 @@ test "environment: video token budgets retain the full unsigned count and refuse
     try t.expectEqual(@as(u64, 0), try e.value(u64, name, "0", 7));
     for ([_][]const u8{ "-1", "18446744073709551616", "32k" }) |raw|
         try t.expectError(error.InvalidEnvironment, e.value(u64, name, raw, 7));
+}
+
+test "environment: video refusal identifies the budget without advertising a storage maximum" {
+    const name = "TENSORFOLD_VIDEO_TOKENS";
+    const raw = "-1";
+    const why = try e.describe(a, name, raw);
+    defer a.free(why);
+    try t.expect(std.mem.indexOf(u8, why, name) != null);
+    try t.expect(std.mem.indexOf(u8, why, raw) != null);
+    var buf: [20]u8 = undefined;
+    const storage_max = try std.fmt.bufPrint(&buf, "{d}", .{std.math.maxInt(u64)});
+    try t.expect(std.mem.indexOf(u8, why, storage_max) == null);
 }
 
 const Inactive = struct {
