@@ -446,6 +446,26 @@ test "a repaired GLM call parses, in both modes and once the end token closed it
     try std.testing.expectEqualStrings("</tool_call>", try closeCall(a, open, tools));
 }
 
+test "a GLM value that runs into the next pair is text, not a call" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tools = (try json.parse(a, "[{\"type\":\"function\",\"function\":{\"name\":\"session_search\",\"parameters\":{\"properties\":{\"query\":{\"type\":\"string\"},\"arguments\":{\"type\":\"string\"}}}}}]")).ok.array;
+    // #2801: a missing </arg_value> read the next pair's markup, and a last value may never close at all
+    const cases = [_][2][]const u8{ // the reply, and the arguments of the call it makes ("" keeps its text)
+        .{ "<tool_call>session_search<arg_key>query</arg_key><arg_value>decided<arg_key>arguments</arg_key><arg_value>{\"query\": \"decided\", \"limit\": 10}</arg_value></tool_call>", "" },
+        .{ "<tool_call>session_search<arg_key>query</arg_key><arg_value>decided</arg_value><arg_key>arguments</arg_key><arg_value>{\"limit\": 10}</tool_call>", "" },
+        .{ "<tool_call>session_search<arg_key>query</arg_key><arg_value>2 < 3</arg_value></tool_call>", "{\"query\":\"2 < 3\"}" },
+    };
+    for (cases) |c| {
+        const r = try parse(a, c[0], tools, null);
+        if (c[1].len == 0) {
+            try std.testing.expect(r.calls == null);
+            try std.testing.expectEqualStrings(c[0], r.content);
+        } else try std.testing.expectEqualStrings(c[1], r.calls.?[0].get("function").?.get("arguments").?.string);
+    }
+}
+
 test "a GLM call the end token left open closes as #285 closed it" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -562,6 +582,8 @@ test "GLM pairs from the cached key and value ends are the pairs each key's own 
         const whole = try std.mem.concat(a, u8, &.{ "<tool_call>", body.items, "</tool_call>" });
         const got = try parse(a, whole, tools, null);
         const want = try parse(a, canon.items, tools, null);
+        // #2801: a body whose value never closes keeps its text, which the reference's pairs cannot show
+        if (want.calls != null and got.calls == null) continue;
         try std.testing.expectEqual(want.calls == null, got.calls == null);
         if (got.calls) |calls| {
             const args = want.calls.?[0].get("function").?.get("arguments").?.string;
