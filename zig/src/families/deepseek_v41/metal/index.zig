@@ -45,6 +45,8 @@ pub const Pipelines = struct {
     score: mtl.Pipeline,
     /// decode's few rows: eight simdgroups a group over one decoded query (the same bits)
     dec: mtl.Pipeline,
+    /// `dec` over the rows of several slots, each over its slot's keys (segs.zig's table)
+    dec_segs: mtl.Pipeline,
 
     pub fn load(device: mtl.Device) !Pipelines {
         return loadSource(device, sources.dsv41.index);
@@ -54,12 +56,17 @@ pub const Pipelines = struct {
     pub fn loadSource(device: mtl.Device, text: []const u8) !Pipelines {
         const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
         defer lib.deinit();
-        return .{ .score = try mtl.Pipeline.init(device, lib, "tf_dsv41_ix_scores", false), .dec = try mtl.Pipeline.init(device, lib, "tf_dsv41_ix_scores_dec", false) };
+        return .{
+            .score = try mtl.Pipeline.init(device, lib, "tf_dsv41_ix_scores", false),
+            .dec = try mtl.Pipeline.init(device, lib, "tf_dsv41_ix_scores_dec", false),
+            .dec_segs = try mtl.Pipeline.init(device, lib, "tf_dsv41_ix_scores_dec_segs", false),
+        };
     }
 
     pub fn deinit(p: *Pipelines) void {
         p.score.deinit();
         p.dec.deinit();
+        p.dec_segs.deinit();
     }
 };
 
@@ -119,5 +126,19 @@ pub fn encodeDecode(p: *const Pipelines, e: mtl.ComputeEncoder, q: Ref, qs: Ref,
     e.setPipeline(p.dec);
     for ([_]Ref{ q, qs, w, ik, s, cm }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
     e.setValue(args, 6);
+    e.dispatchGroups(mtl.Size.of((c.keys + chunk - 1) / chunk, c.rows, 1), mtl.Size.of(dec_threads, 1, 1));
+}
+
+/// `encodeDecode` over several slots' rows, each over its slot's keys (`segs`, `slots` [rows]); c.keys: the most.
+pub fn encodeDecodeSegs(p: *const Pipelines, e: mtl.ComputeEncoder, q: Ref, qs: Ref, w: Ref, s: Ref, cm: Ref, segs: Ref, slots: Ref, stride: u32, c: Call) !void {
+    try check(c);
+    if (stride < c.keys) return error.BadIxKeys;
+    const chunk: u32 = 32;
+    const args = Args{ .rows = c.rows, .keys = c.keys, .start = c.start, .ratio = c.ratio, .chunk = chunk, .out_stride = stride, .w_stride = c.w_stride, .ik_stride = c.ik_stride, .mask_stride = c.mask_stride, .w_scale = c.w_scale };
+    e.setPipeline(p.dec_segs);
+    for ([_]Ref{ q, qs, w, q, s, cm }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
+    e.setValue(args, 6);
+    e.setBuffer(segs.buf, segs.off, 7);
+    e.setBuffer(slots.buf, slots.off, 8);
     e.dispatchGroups(mtl.Size.of((c.keys + chunk - 1) / chunk, c.rows, 1), mtl.Size.of(dec_threads, 1, 1));
 }
