@@ -381,7 +381,7 @@ pub const Ngram = struct {
         const modelopt = wm.contains(first);
         g.format = if (modelopt) try ple_fp8.format(gpa, io, model_dir, wm, first) else .mlx;
         if (modelopt) g.read_mode = try ple_reader.mode(if (std.c.getenv("TF_FLASHNEXT_PLE_IO")) |v| std.mem.span(v) else null);
-        g.warm_ahead = @import("cuda_ple_ahead.zig").enabled(if (std.c.getenv("TF_FLASHNEXT_WARM_AHEAD")) |v| std.mem.span(v) else null);
+        g.warm_ahead = try @import("sys").environment.read(bool, "TF_FLASHNEXT_WARM_AHEAD", false);
         g.scale = switch (g.format) {
             .mlx => try tableScale(gpa, io, model_dir, wm),
             .nvfp4 => try readScale(gpa, io, model_dir, wm, "model.language_model.layers.1.ple.ple_embedding.ngram_embedding.weight_scale_2", true),
@@ -447,7 +447,8 @@ pub const Ngram = struct {
 
     /// With TF_FLASHNEXT_TABLE_WARM=1, the table read ahead into the page cache after load, so a cold prompt reads RAM.
     pub fn warm(g: *Ngram) void {
-        const on = @import("cuda_ple_ahead.zig").enabled(if (std.c.getenv("TF_FLASHNEXT_TABLE_WARM")) |v| std.mem.span(v) else null);
+        // the startup check refused every malformed value already, so a plain default stands here
+        const on = @import("sys").environment.read(bool, "TF_FLASHNEXT_TABLE_WARM", false) catch false;
         if (@import("builtin").os.tag != .linux or !on) return;
         g.warmer = std.Thread.spawn(.{}, warmMain, .{g.*}) catch null;
     }

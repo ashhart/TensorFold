@@ -1,4 +1,4 @@
-//! `tf-tp-test suite | device | failfast RANK fatal|kill|transport [N [HOLD_S]] | roce-host | hca | kernel`
+//! `tf-tp-test suite | device | failfast RANK fatal|kill|transport [N [HOLD_S]] | roce-host | tcp-host | hca | kernel`
 const std = @import("std");
 const cuda = @import("cuda");
 const tp = @import("tp");
@@ -22,6 +22,7 @@ pub fn main(init: std.process.Init) !u8 {
     }
     const cfg = try tp.Config.fromEnv();
     if (command == .@"roce-host") return @import("roce_host.zig").run(cfg, init.gpa);
+    if (command == .@"tcp-host") return @import("tcp_host.zig").run(cfg, init.gpa);
     if (command == .hca) return hca(cfg, init.io);
     if (command == .device) return device(cfg);
     if (command == .failfast and (!cfg.failfast or command.failfast.hold != null) and !hostOnlyAllowed(cfg)) {

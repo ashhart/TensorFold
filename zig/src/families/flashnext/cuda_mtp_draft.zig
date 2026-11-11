@@ -138,8 +138,8 @@ pub const Draft = struct {
 
     /// TF_FLASHNEXT_KEEP_LATE: "1" asked for, "0" refused, null: not set.
     pub fn lateWanted() ?bool {
-        const v = std.c.getenv("TF_FLASHNEXT_KEEP_LATE") orelse return null;
-        return !std.mem.eql(u8, std.mem.span(v), "0");
+        // the startup check refused every malformed value already, so a plain default stands here
+        return @import("sys").environment.read(?bool, "TF_FLASHNEXT_KEEP_LATE", null) catch null;
     }
 
     const log_ctl_bytes: usize = 256;
@@ -368,6 +368,30 @@ test "a draft at 65,536 tokens and 1,536-row chunks: the head's cache whole, sav
     try std.testing.expectEqual(@as(usize, 280_191_488), Draft.bytes(cap, draft_n, rows, .half));
     // with the stream's own caches at half the heads
     try std.testing.expectEqual(@as(usize, 1_395_069_440), sizes.seqBytes(cap, .half) + Draft.bytes(cap, draft_n, rows, .half));
+}
+
+test "blank TF_FLASHNEXT_KEEP_LATE: unset, empty or whitespace-only text asks for nothing, 1 and 0 keep their meaning" {
+    if (comptime @import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const t = std.testing;
+    const env = @import("sys").env;
+    const name = "TF_FLASHNEXT_KEEP_LATE";
+    const before = if (std.c.getenv(name)) |v| try t.allocator.dupeSentinel(u8, std.mem.span(v), 0) else null;
+    defer {
+        if (before) |v| {
+            _ = env.setenv(name, v, 1);
+            t.allocator.free(v);
+        } else _ = env.unsetenv(name);
+    }
+    _ = env.unsetenv(name);
+    try t.expectEqual(@as(?bool, null), Draft.lateWanted());
+    for ([_][:0]const u8{ "", " ", "\t", " \t\r\n" }) |v| {
+        try t.expectEqual(@as(c_int, 0), env.setenv(name, v, 1));
+        try t.expectEqual(@as(?bool, null), Draft.lateWanted());
+    }
+    for ([_][:0]const u8{ "1", "0" }, [_]?bool{ true, false }) |v, wanted| {
+        try t.expectEqual(@as(c_int, 0), env.setenv(name, v, 1));
+        try t.expectEqual(wanted, Draft.lateWanted());
+    }
 }
 
 test "the saved pieces follow one another at the model's heads, and the spares hold its states" {

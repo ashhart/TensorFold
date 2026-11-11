@@ -4,7 +4,8 @@ const cuda = @import("cuda");
 
 /// Rows from which NVFP4 experts take the prompt tiles (TF_FLASHNEXT_FACT_ROWS, 0 never), read once at load.
 pub fn factRows() usize {
-    const r = if (std.c.getenv("TF_FLASHNEXT_FACT_ROWS")) |v| std.fmt.parseInt(usize, std.mem.span(v), 10) catch 64 else 64;
+    // the startup check refused every malformed value already, so a plain default stands here
+    const r = @import("sys").environment.read(usize, "TF_FLASHNEXT_FACT_ROWS", 64) catch 64;
     return if (r == 0) std.math.maxInt(usize) else r;
 }
 
