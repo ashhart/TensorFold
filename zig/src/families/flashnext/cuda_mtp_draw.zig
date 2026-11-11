@@ -113,7 +113,7 @@ fn checkBest(st: cuda.Stream, d: *mtp.Draft, rows: ?[]const u16) !void {
 pub fn draws(h: *const mtp.Head, st: cuda.Stream, gpa: std.mem.Allocator, d: *mtp.Draft, sm: ?Sampling, masks: []const u32, out: []u32) !void {
     const n = d.rows;
     var pending: [max_rows]u32 = undefined;
-    if (masks.len == 0) try h.best(st, d.logits.ptr, vocab, vocab, n, d.best.ptr);
+    if (masks.len == 0 and (!mtp.isSampled(sm) or !usable(sm.?))) try h.best(st, d.logits.ptr, vocab, vocab, n, d.best.ptr);
     if (!mtp.isSampled(sm) and masks.len == 0) {
         try st.synchronize();
         try checkBest(st, d, null);
@@ -124,9 +124,12 @@ pub fn draws(h: *const mtp.Head, st: cuda.Stream, gpa: std.mem.Allocator, d: *mt
     if (masks.len == 0) if (sm) |s| if (usable(s)) {
         const k: usize = s.top_k;
         const c = try candidates(h, st, d, d.logits.ptr, vocab, vocab, n, k);
-        try checkBest(st, d, null);
         for (pending[0..n], 0..) |*t, r| t.* = drawTopk(gpa, c.vals[r * k ..][0..k], c.cols[r * k ..][0..k], null, d.fed0 + 1 + r, s) catch |err| {
-            if (err == error.ProposalNonfinite) badVerify(d, r, d.best_host[r * 4 ..][0..4].*, null, false);
+            if (err == error.ProposalNonfinite) {
+                try h.best(st, d.logits.ptr, vocab, vocab, n, d.best.ptr);
+                try download(st, std.mem.sliceAsBytes(d.best_host[0 .. 4 * n]), d.best.ptr);
+                badVerify(d, r, d.best_host[r * 4 ..][0..4].*, null, false);
+            }
             return err;
         };
         @memcpy(out[0..n], pending[0..n]);
