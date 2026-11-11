@@ -5,6 +5,7 @@ const cuda = @import("cuda");
 const wt = @import("../../cuda_prompt_wt.zig");
 const load = @import("../pack/cuda_exl3_load.zig");
 const pool_ = @import("../offload/cuda_exl3_pool.zig");
+const dplan = @import("../dplan/cuda_exl3_dplan.zig");
 const memory = @import("../pack/exl3_startup_memory.zig");
 const line_deltas = @import("../offload/exl3_line_deltas.zig");
 const profile_line_budget = @import("../offload/exl3_profile_line_budget.zig");
@@ -27,7 +28,7 @@ fn part(p: anytype, ops: *load.Ops, pt: load.Part, x: u64, k: usize, m: usize, y
         .exl3 => |w| {
             const de = try ops.linear();
             // prefill rows on the prompt tiles
-            if (try @import("../prefill/cuda_exl3_prefill.zig").tilesPart(de, p.stream, w, x, m, y, f32_out)) return;
+            if (try @import("../prefill/cuda_exl3_prefill.zig").tilesPart(if (p.m.prefill) |rt| rt.tiles_on else false, de, p.stream, w, x, m, y, f32_out)) return;
             try de.decode(p.stream, w, x, .bf16, m, y, if (f32_out) .f32 else .bf16);
         },
         .native => |w| {
@@ -104,7 +105,13 @@ pub fn moe(p: anytype, lw: anytype, x: *const load.Experts) !void {
         const xin = s.mixed + r0 * dims * 2;
         const picks = s.picks + r0 * slots * 4;
         if (x.pool) |pool| {
-            try pooled(p.stream, x.ops, pool, ex, x.layer, xin, picks, rows, sc, 0, 0);
+            const plans = p.m.dplan;
+            // a decode round planned on the device (no host cut)
+            if (plans) |st| if (st.active) |dp| if (dp.indexOf(pool)) |i| {
+                try dplan.runLayer(dp, p.stream, i, ex, x.layer, xin, picks, rows, sc, 0, 0);
+                continue;
+            };
+            try pooled(p.stream, x.ops, pool, plans, ex, x.layer, xin, picks, rows, sc, 0, 0);
             continue;
         }
         try ex.runSlots(p.stream, x.layer, xin, dims, .bf16, picks, rows, sc);
@@ -112,12 +119,17 @@ pub fn moe(p: anytype, lw: anytype, x: *const load.Experts) !void {
     try @import("../tp/cuda_exl3_tp.zig").canonical(p);
 }
 
-/// Host time of the A/B cut (the picks D2H and its wait) and of Pool.plan, summed over every pooled block (read by
-pub var pool_time: struct { cut_ns: u64 = 0, plan_ns: u64 = 0, blocks: u64 = 0 } = .{};
+/// Whether this engine has an attached expert offload pool.
+pub fn offloaded(e: anytype) bool {
+    for (e.layers[0..e.n_layers]) |layer| if (layer.exl3) |x| if (x.pool != null) return true;
+    return false;
+}
 
 /// One block of `rows` rows through `pool`: per-slot outputs in sc.y, and with `wts` != 0 the last pass also combines
-pub fn pooled(st: cuda.Stream, ops: *load.Ops, pool: *pool_.Pool, ex: *const cuda.exl3_experts.Experts, layer: cuda.exl3_experts.Layer, xin: u64, picks: u64, rows: usize, sc: cuda.exl3_experts.Scratch, wts: u64, out: u64) !void {
+pub fn pooled(st: cuda.Stream, ops: *load.Ops, pool: *pool_.Pool, plans: ?*const dplan.State, ex: *const cuda.exl3_experts.Experts, layer: cuda.exl3_experts.Layer, xin: u64, picks: u64, rows: usize, sc: cuda.exl3_experts.Scratch, wts: u64, out: u64) !void {
     const host = (ops.picks orelse return error.Exl3ScratchNotReserved).slice(i32)[0 .. rows * slots];
+    // the device planned the last decode rounds of this pool: its residency back to the host pools first (the MTP
+    if (plans) |state| if (dplan.current(state)) |dp| if (dp.indexOf(pool) != null) try dp.toHost();
     const io = pool.io;
     const t0 = std.Io.Clock.awake.now(io).toNanoseconds();
     // end of segment A: the block's picks reach the host (the only host wait of the layer)
@@ -125,9 +137,9 @@ pub fn pooled(st: cuda.Stream, ops: *load.Ops, pool: *pool_.Pool, ex: *const cud
     try st.synchronize();
     const t1 = std.Io.Clock.awake.now(io).toNanoseconds();
     const r = try pool.plan(host, rows);
-    pool_time.cut_ns += @intCast(t1 - t0);
-    pool_time.plan_ns += @intCast(std.Io.Clock.awake.now(io).toNanoseconds() - t1);
-    pool_time.blocks += 1;
+    pool.stats.cut_ns += @intCast(t1 - t0);
+    pool.stats.plan_ns += @intCast(std.Io.Clock.awake.now(io).toNanoseconds() - t1);
+    pool.stats.blocks += 1;
     // segment B, a pass at a time: its copies and table rewrites, then the experts on the pool's tables
     for (0..r.n_passes) |j| {
         try pool.stage(r, j, st);
@@ -152,6 +164,8 @@ pub fn offloadedLayers(layers: []const @import("../../cuda_prompt_load.zig").Lay
 }
 
 pub const Budget = struct {
+    graph_reservation: u64 = 0,
+    planner_rows: ?u64 = null,
     /// Device bytes left free after the pools; null: the native server's own reserve (TENSORFOLD_MEMORY_RESERVE_GIB).
     reserve: ?u64 = null,
     /// What the pools leave beyond the server's reserve: allocator rounding and the copy streams' own memory.
@@ -176,6 +190,9 @@ pub fn budgetForStreams(stream_bytes: u64, requested_streams: u32) !Budget {
 fn budgetFromEnvWithStreams(stream_bytes: u64, requested_streams: ?u32) !Budget {
     const streams = requested_streams orelse 1;
     var b: Budget = .{ .other = try streamReservation(stream_bytes, streams) };
+    if (try dplan.enabled()) {
+        b.planner_rows = dplan.planner_rows;
+    }
     b.lines = try environment.read(?usize, "TF_FLASHNEXT_EXPERT_LINES", null);
     if (try environment.read(?u64, "TF_FLASHNEXT_EXPERT_RESERVE_MB", null)) |mib| b.reserve = try memory.mebibytes(mib);
     if (requested_streams == null) if (try environment.read(?u64, "TF_FLASHNEXT_EXL3_STREAMS", null)) |env_streams| {
@@ -194,7 +211,7 @@ test "EXL3 pool reserves the requested number of concurrent stream caches" {
     try std.testing.expectError(error.InvalidStreamCount, streamReservation(100, 0));
 }
 
-pub const Attached = struct { layers: usize = 0, lines: usize = 0, line_bytes: usize = 0, device_bytes: u64 = 0, free_before: u64 = 0, free_after: u64 = 0, scratch_bytes: u64 = 0, bank_bytes: u64 = 0, bank_ns: u64 = 0, prefill_window_bytes: u64 = 0 };
+pub const Attached = struct { layers: usize = 0, lines: usize = 0, line_bytes: usize = 0, device_bytes: u64 = 0, free_before: u64 = 0, free_after: u64 = 0, scratch_bytes: u64 = 0, graph_reservation: u64 = 0, after_pool_bytes: u64 = 0, bank_bytes: u64 = 0, bank_ns: u64 = 0, prefill_window_bytes: u64 = 0, mtp_pool: ?*pool_.Pool = null };
 
 pub fn freeBytes(d: *const cuda.Driver) !u64 {
     var free: usize = 0;
@@ -203,14 +220,20 @@ pub fn freeBytes(d: *const cuda.Driver) !u64 {
     return free;
 }
 
+/// UNIFORM_LINES: 0 and 1 both keep every rank on the asked-for lines; the setting has always meant its presence.
+pub fn uniformLines() !bool {
+    return (try @import("sys").environment.read(?bool, "TF_FLASHNEXT_EXL3_UNIFORM_LINES", null)) != null;
+}
+
 /// The sizing hook (cuda_lanes_load.zig, once everything else of the family is allocated).
-pub fn attach(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, st: cuda.Stream, layers: []const @import("../../cuda_prompt_load.zig").Layer, mtp: ?*const @import("../../cuda_prompt_load.zig").Layer, rows: usize, b: Budget, profile_counts: ?*[pool_.shape.layers][pool_.shape.experts]u32) !Attached {
+pub fn attach(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, st: cuda.Stream, runtime: ?*@import("../prefill/cuda_exl3_prefill_state.zig").Runtime, layers: []const @import("../../cuda_prompt_load.zig").Layer, mtp: ?*const @import("../../cuda_prompt_load.zig").Layer, rows: usize, b: Budget, profile_counts: ?*[pool_.shape.layers][pool_.shape.experts]u32) !Attached {
     var all: [wt.layers_n + 1]*load.Experts = undefined;
     const n = offloadedLayers(layers, mtp, &all);
     const delta_text = try environment.readPath("TF_FLASHNEXT_EXL3_LINE_DELTAS");
     const profile_sizing = try profileSizingEnabled();
     var out: Attached = .{};
     const scratch_before = try freeBytes(d);
+    out.graph_reservation = b.graph_reservation;
     // every distinct Ops (the engine's store and the MTP head's) reserves its scratch now
     var seen: [4]*load.Ops = undefined;
     var n_seen: usize = 0;
@@ -235,7 +258,8 @@ pub fn attach(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, st: cud
     try d.check(d.api.cuMemGetInfo_v2(&free, &total), "cuMemGetInfo");
     out.free_before = free;
     out.scratch_bytes = scratch_before -| free;
-    const reserve_floor = b.reserve orelse try serverReserve(total);
+    const server_reserve = try serverReserve(total);
+    const reserve_floor = b.reserve orelse server_reserve;
     const reserve = b.reserve orelse try std.math.add(u64, reserve_floor, b.margin);
     // beside its lines a layer holds the shared expert's region, its six tables and its masked picks (sized for the
     var fixed: u64 = 0;
@@ -244,26 +268,40 @@ pub fn attach(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, st: cud
         const picks_bytes = try std.math.mul(u64, try std.math.mul(u64, pool_.passesFor(pool_.min_lines), b.max_rows), slots * 4);
         fixed = try std.math.add(u64, fixed, try std.math.add(u64, cuda.exl3_pool.Tables.init(wt.experts_n + 1).bytes + (64 << 10), picks_bytes));
     }
-    const future = b.other;
+    var future = try std.math.add(u64, b.other, b.graph_reservation);
+    const planner_fixed = if (b.planner_rows) |planner_rows| try memory.plannerBytes(n, 0, planner_rows) else 0;
+    const line_cost = try std.math.add(u64, out.line_bytes, if (b.planner_rows != null) 8 else 0);
+    const all_fixed = try std.math.add(u64, fixed, planner_fixed);
     const prefill = @import("../prefill/cuda_exl3_prefill.zig");
-    const minimum_pools = try memory.poolBytes(b.lines orelse pool_.min_lines, out.line_bytes, n, fixed);
+    const minimum_pools = try memory.poolBytes(b.lines orelse pool_.min_lines, line_cost, n, all_fixed);
     const protected = try std.math.add(u64, try std.math.add(u64, reserve, future), minimum_pools);
-    out.prefill_window_bytes = prefill.reserveTwoChunk(d, free, protected) catch |err| switch (err) {
+    out.prefill_window_bytes = prefill.reserveTwoChunk(runtime, d, free, protected, b.graph_reservation) catch |err| switch (err) {
         error.InvalidEnvironment => return err,
         else => declined: {
             std.log.warn("flashnext exl3 prefill: two-chunk reservation refused ({t}); keeping single-chunk prefill", .{err});
             break :declined 0;
         },
     };
+    const graph_memory = @import("../graph/cuda_exl3_graph_memory.zig");
+    const window_reservation = graph_memory.twoChunkReservationBytes();
+    if (!prefill.twoChunkAllocated(runtime) and window_reservation != 0 and b.graph_reservation == window_reservation) {
+        out.graph_reservation = try graph_memory.declineTwoChunkReservation();
+        future = try std.math.add(u64, b.other, out.graph_reservation);
+    }
     if (out.prefill_window_bytes != 0) {
         free = @intCast(try freeBytes(d));
         out.free_before = free;
     }
     const pool_room = try memory.available(free, reserve, future);
-    const lines = b.lines orelse try pool_.linesFor(free, reserve, try std.math.add(u64, future, fixed), out.line_bytes, n, pool_.min_lines);
+    const world: usize = if (all[0].tp) |t| t.world else 1;
+    const fit = pool_.linesFor(free, try std.math.add(u64, server_reserve, b.margin), try std.math.add(u64, future, all_fixed), line_cost, n, pool_.min_lines) catch null;
+    const uniform = try uniformLines();
+    const lines = if (b.lines) |explicit| (if (delta_text != null or uniform) explicit else memory.rankLines(explicit, world, fit)) else try pool_.linesFor(free, reserve, try std.math.add(u64, future, all_fixed), line_cost, n, pool_.min_lines);
+    if (b.lines) |explicit| if (lines != explicit) std.log.info("flashnext exl3: this rank holds {d} lines a layer, {d} more than the {d} asked for: it has the room (residency never changes output bytes)", .{ lines, lines - explicit, explicit });
     if (lines < pool_.min_lines) return error.PoolTooSmall;
-    const startup_bytes = try memory.poolBytes(lines, out.line_bytes, n, fixed);
+    const startup_bytes = try memory.poolBytes(lines, line_cost, n, all_fixed);
     if (startup_bytes > pool_room) return error.InsufficientStartupMemory;
+    out.after_pool_bytes = if (b.planner_rows) |planner_rows| try memory.plannerBytes(n, lines, planner_rows) else 0;
     out.lines = lines;
     var pool_lines: [wt.layers_n + 1]usize = @splat(lines);
     var line_bytes: [wt.layers_n + 1]usize = undefined;
@@ -289,7 +327,7 @@ pub fn attach(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, st: cud
                 has_profile_signal = has_profile_signal or count != 0;
             }
             count_rows[decoder_index] = &prior[decoder_index];
-            allocation_costs[decoder_index] = line_bytes[pool_index];
+            allocation_costs[decoder_index] = try std.math.add(usize, line_bytes[pool_index], if (b.planner_rows != null) 8 else 0);
             decoder_index += 1;
         }
         if (has_profile_signal and decoder_index == wt.layers_n) {
@@ -321,16 +359,18 @@ pub fn attach(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, st: cud
                     @memset(pool_lines[0..n], lines);
                     std.log.info("flashnext exl3: profile candidate changed total variable CUDA bytes; retaining uniform decoder pools", .{});
                 } else {
+                    out.after_pool_bytes = if (b.planner_rows) |planner_rows| try memory.plannerBytesForPools(pool_lines[0..n], planner_rows) else 0;
                     profile_sized = true;
                 }
-                std.log.info("flashnext exl3: profile-weighted decoder allocation used {d}/{d} variable CUDA bytes (expert lines and device picks); saved lifetime picks are a proxy, not latency; MTP remains uniform", .{ plan.allocated_bytes, plan.baseline_bytes });
+                std.log.info("flashnext exl3: profile-weighted decoder allocation used {d}/{d} variable CUDA bytes (expert lines, per-line planner state and device picks); saved lifetime picks are a proxy, not latency; MTP remains uniform", .{ plan.allocated_bytes, plan.baseline_bytes });
                 std.log.info("flashnext exl3: profile decoder pool sizes range {d}..{d} lines; uniform-equivalent baseline was {d}", .{ profile_min_lines, profile_max_lines, lines });
             }
         }
     };
     if (delta_text) |text| {
-        const plan = try line_deltas.apply(text, lines, decoder_pool_count, line_bytes[0..n], pool_.min_lines, fixed, startup_bytes, pool_lines[0..n]);
-        std.log.info("flashnext exl3: experimental rank-local decoder pool line deltas {s}; base={d} startup_bytes={d}", .{ text, lines, plan.pool_bytes });
+        const plan = try line_deltas.apply(text, lines, decoder_pool_count, line_bytes[0..n], pool_.min_lines, b.planner_rows, fixed, startup_bytes, pool_lines[0..n]);
+        out.after_pool_bytes = plan.planner_bytes;
+        std.log.info("flashnext exl3: experimental rank-local decoder pool line deltas {s}; base={d} planner_bytes={d} startup_bytes={d}", .{ text, lines, plan.planner_bytes, plan.pool_bytes });
     }
     // the first decoder layer's pool owns the lifetime use table the other decoder layers share
     var counts = profile_counts;
@@ -338,14 +378,15 @@ pub fn attach(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, st: cud
     for (all[0..n], pool_lines[0..n]) |x, count| {
         const is_mtp = if (mtp) |l| (if (l.exl3) |m| m == x else false) else false;
         try x.attach(io, d, if (is_mtp) 0 else decoder, count, b.max_rows, if (is_mtp) null else counts);
+        if (is_mtp) out.mtp_pool = x.pool.?; // the draft head's experts plan on the device too (cuda_exl3_chain.zig)
         if (!is_mtp and counts == null) counts = x.pool.?.counts;
         if (!is_mtp) decoder += 1;
         out.device_bytes += x.pool.?.deviceBytes();
         out.layers += 1;
     }
     out.free_after = try freeBytes(d);
-    _ = memory.available(out.free_after, reserve_floor, future) catch |err| {
-        std.log.err("EXL3 pool reservation shortfall: free_before={d} free_after={d} pool_bytes={d} floor={d} allocator_margin={d} future={d}", .{ free, out.free_after, out.device_bytes, reserve_floor, b.margin, future });
+    _ = memory.available(out.free_after, reserve_floor, try std.math.add(u64, future, out.after_pool_bytes)) catch |err| {
+        std.log.err("EXL3 pool reservation shortfall: free_before={d} free_after={d} pool_bytes={d} floor={d} allocator_margin={d} future={d} planner={d}", .{ free, out.free_after, out.device_bytes, reserve_floor, b.margin, future, out.after_pool_bytes });
         return err;
     };
     const allocation = if (delta_text != null) "uniform-equivalent lines (experimental deltas applied)" else if (profile_sized) "uniform-equivalent lines (profile-sized decoder pools)" else "lines a layer";
@@ -356,6 +397,7 @@ pub fn attach(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, st: cud
 test {
     _ = line_deltas;
     _ = profile_line_budget;
+    _ = @import("cuda_exl3_pass_environment_test.zig");
 }
 
 fn profileSizingEnabled() !bool {
@@ -413,4 +455,18 @@ pub fn offloadedPools(layers: []const @import("../../cuda_prompt_load.zig").Laye
         n += 1;
     };
     return n;
+}
+
+test "exl3: offload facts belong to the engine whose layers are inspected" {
+    const Layer = struct { exl3: ?*load.Experts = null };
+    const Engine = struct { n_layers: usize = 1, layers: [1]Layer = .{.{}} };
+    var a: Engine = .{};
+    var b: Engine = .{};
+    var experts: load.Experts = undefined;
+    experts.pool = @ptrFromInt(256);
+    a.layers[0].exl3 = &experts;
+    try std.testing.expect(offloaded(&a));
+    try std.testing.expect(!offloaded(&b));
+    experts.pool = null;
+    try std.testing.expect(!offloaded(&a));
 }

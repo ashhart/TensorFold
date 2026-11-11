@@ -25,6 +25,9 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_Q27_COPY_ROWS` | Whole u32 count; zero disables copied rows; default 48 |
 | `TF_Q27_DRAFT_SLOTS` | Whole u32 count, clamped to 1 through the lane stream limit; default 8. DFlash2 can draft for at most the smaller of this count and the admitted streams, and none without a drafter. |
 | `TF_MTP_DRAFTS` | Whole u32 count, clamped to 1 through the drafter's window less one; existing depth when unset |
+| `TF_FLASHNEXT_EXL3_GRAPH` | Exactly `0`, `eager` or `1`; default `0` |
+| `TF_FLASHNEXT_EXL3_GRAPH_ASYNC` | Exactly `0` or `1`; default `1` |
+| `TF_FLASHNEXT_EXL3_UNIFORM_LINES` | Exactly `0` or `1`, either selects uniform lines; unset or blank does not |
 | `TF_DRAFT_NODES` | Whole native-size nonnegative count, capped by the drafter's window; zero disables trees |
 | `TF_FLASHNEXT_EXL3_PREFILL`, `TF_FLASHNEXT_EXL3_PREFILL_RING`, `TF_FLASHNEXT_EXL3_PREFILL_SNAP_GRID`, `TF_FLASHNEXT_EXL3_PREFILL_OVERLAP` | Exactly `0` or `1`; default on; snap-grid removal still requires off-grid resume parity |
 | `TF_FLASHNEXT_EXL3_PREFILL_REDUCED_BRANCH`, `TF_FLASHNEXT_EXL3_PREFILL_TWO_CHUNK` | Exactly `0` or `1`; default off |

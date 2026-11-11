@@ -67,17 +67,14 @@ fn copyAsync(stream: cuda.Stream, dst: u64, src: u64, n: usize) !void {
     try d.check(d.api.cuMemcpyDtoDAsync_v2(dst, src, n, stream.handle), "cuMemcpyDtoDAsync");
 }
 
-fn download(stream: cuda.Stream, dst: []u8, src: u64) !void {
-    const d = stream.d;
-    try stream.synchronize();
-    try cuda.memory.download(d, src, std.mem.sliceAsBytes(dst)[0..dst.len]);
-}
+const download = @import("cuda_mtp_verify_tail.zig").download;
 
 /// An owner can mirror main-model mutations to a peer without exposing device pointers on the control wire.
 pub const Main = struct {
     ptr: *anyopaque,
+    rank: usize,
     forward: *const fn (*anyopaque, *prompt.Seq, []const u32, batch.Hooks) anyerror!void,
-    verify: *const fn (*anyopaque, *prompt.Seq, *Draft, []const u32) anyerror!void,
+    verify: *const fn (*anyopaque, *prompt.Seq, *Draft, []const u32, ?batch.Hooks.OutputTail) anyerror!void,
     rollback: *const fn (*anyopaque, *prompt.Seq, *Draft, usize) anyerror!void,
 };
 
@@ -102,6 +99,7 @@ pub fn Ops(comptime Tri: type) type {
 
         /// Prompt rows [at, stop): the pass (keeping `marks` on its way) and its streams, then the head over the rows.
         pub fn prefillChunk(o: Self, seq: *prompt.Seq, d: *Draft, ids: []const u32, at: usize, stop: usize, marks: [parts.max_marks]parts.Mark) !void {
+            d.verify_cache.invalidate();
             if (stop > d.cap or stop <= at or stop - at > d.rows_cap) return error.PromptTooLong;
             if (seq.fed != at or d.len != at or d.drafted != 0 or d.pending != 0) return error.PositionMismatch;
             d.media = if (seq.media) |*m| m.view() else null;
@@ -125,12 +123,16 @@ pub fn Ops(comptime Tri: type) type {
 
         /// The head over `next.len` rows of streams `rows`: cache at d.len, last row in d.out, scores in d.dlogits.
         pub fn forwardHead(o: Self, d: *Draft, next: []const u32, rows: u64, scores: bool) !void {
+            d.verify_cache.invalidate();
             const e = o.e;
             const tri = o.tri;
             const h = o.h;
             if (next.len == 0) return;
             if (d.len + next.len > d.cap) return error.PromptTooLong;
             if (try @import("exl3/prefill/cuda_exl3_prefill.zig").head(Tri, o, d, next, rows, scores)) return;
+            // graphs: the head's experts on the device planner
+            const planned = try @import("exl3/model/cuda_exl3_chain.zig").enter(o.e, @min(next.len, piece_rows));
+            defer @import("exl3/model/cuda_exl3_chain.zig").leave(o.e, planned);
             const want = plan.reserveRows(next.len);
             const s = try e.reserve(want);
             const piece = @max(@as(usize, 1), @min(piece_rows, s.cap / 2));
@@ -143,7 +145,7 @@ pub fn Ops(comptime Tri: type) type {
                 .tri = tri,
                 .k = &e.batch_k,
                 .s = s,
-                .m = .{ .table_w = e.table.w.ptr, .table_s = e.table.s.ptr, .table_b = e.table.b.ptr, .table_dense = e.table.dense, .layers = (&h.layer)[0..1], .mixer = h.mixer, .head = h.draft, .ngram = &e.ngram },
+                .m = .{ .table_w = e.table.w.ptr, .table_s = e.table.s.ptr, .table_b = e.table.b.ptr, .table_dense = e.table.dense, .layers = (&h.layer)[0..1], .mixer = h.mixer, .head = h.draft, .ngram = &e.ngram, .dplan = &e.exl3_dplan, .prefill = &e.exl3_prefill },
                 .seq = d.headSeq(d.media, score_rows),
                 .hooks = .{ .logits = .none },
             };
@@ -162,6 +164,7 @@ pub fn Ops(comptime Tri: type) type {
 
         /// Python draft.absorb: the chain's entries trimmed, then the kept rows (main streams `rows`, next tokens).
         pub fn absorb(o: Self, d: *Draft, next: []const u32, rows: u64, scores: bool) !void {
+            d.verify_cache.invalidate();
             if (d.drafted > 0) {
                 d.len -= d.drafted;
                 d.drafted = 0;
@@ -171,6 +174,7 @@ pub fn Ops(comptime Tri: type) type {
 
         /// The draft at `position` and its temperature-1 probability (Python Engine.sample_draft).
         pub fn pick(o: Self, d: *Draft, position: u64, sm: ?Sampling) !Pick {
+            d.verify_cache.invalidate();
             const h = o.h;
             const view_ = h.view();
             const n = view_.logical;
@@ -181,6 +185,9 @@ pub fn Ops(comptime Tri: type) type {
 
         /// Python decode.draft: absorb the kept rows, then chain up to `count` drafts under mtp.Stop, the first kept.
         pub fn draft(o: Self, d: *Draft, next: []const u32, rows: u64, position: u64, count: usize, sm: ?Sampling, confidence: f64, out: *Chain) !void {
+            d.verify_cache.invalidate();
+            // graphs: the greedy chain as one graph
+            if (try @import("exl3/model/cuda_exl3_chain.zig").draft(Tri, o, d, next, rows, position, count, sm, confidence, out)) return;
             out.n = 0;
             try o.absorb(d, next, rows, count > 0);
             var stop: mtp.Stop = .{ .c = confidence };
@@ -255,7 +262,7 @@ pub fn Ops(comptime Tri: type) type {
                 .tri = tri,
                 .k = &e.batch_k,
                 .s = s,
-                .m = .{ .table_w = e.table.w.ptr, .table_s = e.table.s.ptr, .table_b = e.table.b.ptr, .table_dense = e.table.dense, .layers = (&h.layer)[0..1], .mixer = h.mixer, .head = h.draft, .ngram = &e.ngram },
+                .m = .{ .table_w = e.table.w.ptr, .table_s = e.table.s.ptr, .table_b = e.table.b.ptr, .table_dense = e.table.dense, .layers = (&h.layer)[0..1], .mixer = h.mixer, .head = h.draft, .ngram = &e.ngram, .dplan = &e.exl3_dplan, .prefill = &e.exl3_prefill },
                 .seq = lane_buf[0].seq,
                 .hooks = .{ .logits = .none },
                 .lanes = lane_buf[0..n_l],
@@ -275,9 +282,18 @@ pub fn Ops(comptime Tri: type) type {
 
         /// One forward over the window `ids` from seq.fed: each row's scores in d.logits, its streams in d.streams.
         pub fn verify(o: Self, seq: *prompt.Seq, d: *Draft, ids: []const u32) !void {
+            return o.verifyWithTail(seq, d, ids, null);
+        }
+
+        pub const verifySampled = @import("cuda_mtp_verify_tail.zig").verifySampled;
+
+        pub const VerifyTail = @import("cuda_mtp_verify_tail.zig").VerifyTail;
+
+        pub fn verifyWithTail(o: Self, seq: *prompt.Seq, d: *Draft, ids: []const u32, tail: ?batch.Hooks.OutputTail) !void {
             const telemetry_scope = o.e.telemetry.enter(.verify);
             defer telemetry_scope.restore();
-            if (o.main) |m| return m.verify(m.ptr, seq, d, ids);
+            d.verify_cache.invalidate();
+            if (o.main) |m| return m.verify(m.ptr, seq, d, ids, tail);
             o.e.round_graph.clear();
             const n = ids.len;
             if (n == 0 or n > max_rows) return error.WindowTooWide;
@@ -290,7 +306,7 @@ pub fn Ops(comptime Tri: type) type {
             d.history = seq.history;
             @memcpy(d.ids[0..n], ids);
             if (keeps) try copyAsync(o.stream(), d.saved.ptr + d.layout.tail_at, seq.tail.ptr, ple_tail_n * wide * 2);
-            try o.e.forward(Tri, o.tri, seq, ids, .{ .logits = .all, .logits_out = d.logits.ptr, .keep = if (keeps) &d.keep else null, .streams = d.streams.ptr, .host_logits = @import("cuda_batch_state.zig").verifyHostLogits() });
+            try o.e.forward(Tri, o.tri, seq, ids, .{ .logits = .all, .logits_out = d.logits.ptr, .keep = if (keeps) &d.keep else null, .streams = d.streams.ptr, .host_logits = @import("cuda_batch_state.zig").verifyHostLogits(), .output_tail = tail });
             if (keeps) try copyAsync(o.stream(), d.saved.ptr + d.layout.nrow_at, o.e.batch_s.?.ple_nrow, n * wide * 2);
             d.open = keeps;
         }
@@ -370,13 +386,11 @@ pub fn Ops(comptime Tri: type) type {
             d.pending = 0;
         }
 
-        /// The window's rows drawn at their keyed positions (fed0 + 1 + r), each within its `masks` row if any.
-        pub fn draws(o: Self, d: *Draft, sm: ?Sampling, masks: []const u32, out: []u32) !void {
-            return draw.draws(o.h, o.stream(), o.e.gpa, d, sm, masks, out);
-        }
+        pub const draws = @import("cuda_mtp_verify_tail.zig").draws;
 
         /// Keep the window's first `keep` rows (Python forward.commit) from its saved rows; a repeat is a no-op.
         pub fn rollback(o: Self, seq: *prompt.Seq, d: *Draft, keep: usize) !void {
+            d.verify_cache.invalidate();
             if (o.main) |m| return m.rollback(m.ptr, seq, d, keep);
             o.e.round_graph.clear();
             if (keep == 0 or keep > d.rows) return error.CannotRewind;

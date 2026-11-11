@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Flash Next EXL3 selects host planning, eager device planning or CUDA graph replay with `TF_FLASHNEXT_EXL3_GRAPH=0`, `eager` or `1`. Engine teardown clears its capture-failure history without retiring another engine's graphs or retries. Its graph qualification runner propagates prefill configuration refusals (#1445).
+
 - The core host KV tier rejects zero page bytes, partial host pages, zero frames and zero logical pages before allocating (#1501). Thanks to @BlivionIaG.
 
 - Flash Next's opt-in EXL3 host K/V tier admits the bounded device working set, frees the pinned store on failed kernel load, refuses non-EXL3 scratch before allocation, takes TP rank from its collective and rejects snapshot restoration while another lease pins its pages. The lane host's single ledger uses the active pool directly, without copying ownership (#1522).

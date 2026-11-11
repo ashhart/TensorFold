@@ -530,7 +530,7 @@ software decode.
 A restored 13.0 receipt can arrive after the later compiler sets. Such records mark `later_pending` so 13.0 and
 13.1 use their base usage, while 13.2 and later keep their independently measured or pending selection.
 A missing later receipt remains pending; a 13.0 measurement never substitutes for it.
-Flash Next's 16 EXL3 launches (`flashnext_exl3_pending.zig`) carry only an nvcc 13.4 receipt: they stay pending under
+Flash Next's EXL3 launches (`flashnext_exl3_pending.zig`) carry only an nvcc 13.4 receipt: they stay pending under
 13.0 to 13.3 and take their 13.4 usage from `cuda_134`, which `pending_132.lookup` serves for that release.
 The first, `fn_exl3_split_f16`, also runs gates 1 to 4 on the CUDA runner (`contract_flashnext_exl3.zig`): an fp16
 row splits into bf16 hi = bf16(x) and lo = bf16(x - hi), every output's bits must equal float64's (NaN stays NaN; an
