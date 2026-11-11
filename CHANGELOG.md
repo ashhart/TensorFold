@@ -4,6 +4,17 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Ripple-65B on Metal drafts with the publisher's DFlash2 drafter (`--drafter`, ricursiveAI/Ripple-65B-Preview-DFlash2)
+  beside either release, with replies equal to plain ones. On an M5 Ultra one stream decodes 1.5-2.7 times as fast
+  on the NVFP4 release and 2.1-4.8 times on the bf16 release; at four streams drafted ties plain except on lists
+  (43.1 against 32.5 tokens a second) and at seven it is slower on every kind, so with it the server opens two
+  streams unless `--parallel` is named and refuses a named `--parallel` above 2 (#2260, fixes #2259). Thanks to
+  @BobClawblaw.
+
+- Ripple-65B-Preview runs on native Metal (M5 or later) from the publisher's NVFP4 and bf16 releases as published,
+  with exact bf16 caches, thinking, tool calls and structured output; `--context` is capped at 262,144, the longest
+  checked (#2231, fixes #2171). Thanks to @BobClawblaw.
+
 - Docs: the optimization ledger marks the rows that have open PRs and adds DSpine as row 28 (#2681). Thanks to @jschmied.
 
 - GLM-5.3-Flash on Metal with `--vision`: a prompt chunk sends the vision tower only the images that end after its start, so two interleaved image prompts no longer re-encode images their earlier chunks already injected (12 images through the tower instead of 18 in a host test); each image is still encoded on its own and read through its own span, so the rows a chunk reads are unchanged (#2744).
