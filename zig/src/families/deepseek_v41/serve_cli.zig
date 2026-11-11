@@ -12,14 +12,28 @@ fn drafts() !bool {
 pub fn follow(gpa: std.mem.Allocator, io: std.Io, pack: []const u8, assets: []const u8) !u8 {
     const m = try model.Model.open(gpa, io, pack, assets, .{ .drafts = try drafts(), .own_prefill = (try model.ownPrefillEnv()), .layers = try model.layersEnv(gpa) });
     defer m.close();
-    if (m.rank() == 0) return error.RankZeroServes;
-    std.debug.print("rank {d}: loaded, following rank 0\n", .{m.rank()});
-    m.f.follow() catch |err| {
-        std.log.err("rank {d}: following rank 0 failed: {s}", .{ m.rank(), @errorName(err) });
+    return followLoaded(m, followStartup) catch |err| {
+        if (m.rank() != 0) std.log.err("rank {d}: following rank 0 failed: {s}", .{ m.rank(), @errorName(err) });
         return err;
     };
+}
+
+fn followLoaded(m: anytype, startup: anytype) !u8 {
+    if (m.rank() == 0) return error.RankZeroServes;
+    startup(m);
+    std.debug.print("rank {d}: loaded, following rank 0\n", .{m.rank()});
+    try m.f.follow();
     std.debug.print("rank {d}: rank 0 stopped\n", .{m.rank()});
     return 0;
+}
+
+fn followStartup(m: *model.Model) void {
+    // The follower has no planner; resolve its eligible floor with the planner's settings without allocating one.
+    const floor = if ((model.Model.piecesEnv() catch false) and m.gt.own_prefill and m.gt.prompt_tail == .verify) blk: {
+        const settings = @import("sched_host.zig").SchedHost.settings(&m.gt) catch break :blk false;
+        break :blk settings.floor != null;
+    } else false;
+    se.logStartup(m, floor);
 }
 
 const Box = struct {
@@ -112,4 +126,41 @@ pub fn generate(gpa: std.mem.Allocator, io: std.Io, pack: []const u8, assets: []
     const rate: f64 = if (drafted > 0) @as(f64, @floatFromInt(accepted)) / @as(f64, @floatFromInt(drafted)) else 0;
     std.debug.print("DSpark: {d} drafted, {d} accepted ({d:.3})\n", .{ drafted, accepted, rate });
     return if (ok) 0 else 1;
+}
+
+test "loaded follower reports startup once before following; rank zero refuses and errors propagate" {
+    const Fake = struct {
+        me: u32 = 1,
+        f: *@This(),
+        logged: u32 = 0,
+        followed: u32 = 0,
+        fail: bool = false,
+        fn rank(m: *@This()) u32 {
+            return m.me;
+        }
+        fn startup(m: *@This()) void {
+            m.logged += 1;
+        }
+        fn follow(m: *@This()) !void {
+            try std.testing.expectEqual(@as(u32, 1), m.logged);
+            m.followed += 1;
+            if (m.fail) return error.FollowFailed;
+        }
+    };
+    var m: Fake = .{ .f = undefined };
+    m.f = &m;
+    try std.testing.expectEqual(@as(u8, 0), try followLoaded(&m, Fake.startup));
+    try std.testing.expectEqual(@as(u32, 1), m.logged);
+    try std.testing.expectEqual(@as(u32, 1), m.followed);
+    m.logged = 0;
+    m.followed = 0;
+    m.me = 0;
+    try std.testing.expectError(error.RankZeroServes, followLoaded(&m, Fake.startup));
+    try std.testing.expectEqual(@as(u32, 0), m.logged);
+    try std.testing.expectEqual(@as(u32, 0), m.followed);
+    m.me = 1;
+    m.fail = true;
+    try std.testing.expectError(error.FollowFailed, followLoaded(&m, Fake.startup));
+    try std.testing.expectEqual(@as(u32, 1), m.logged);
+    try std.testing.expectEqual(@as(u32, 1), m.followed);
 }
