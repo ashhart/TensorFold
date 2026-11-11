@@ -5,6 +5,7 @@ pub const proposal_score = @import("proposal_score.zig");
 pub const proposal_head = @import("proposal_head.zig");
 pub const table = @import("table.zig");
 pub const allocate = @import("allocate.zig");
+pub const lone_costs = @import("lone_costs.zig");
 pub const accept = @import("accept.zig");
 pub const proposer = @import("proposer.zig");
 pub const recall = @import("recall.zig");

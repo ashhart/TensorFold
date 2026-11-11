@@ -35,6 +35,7 @@ pub const Who = struct {
     gain: ?f64 = null, // the drafts its last grant expected to keep (null: none priced)
     stream: ?*anyopaque = null,
     sampled: bool = false, // keyed draws: host work a row that a greedy round does not have
+    lone: bool = false, // a lone round priced from the stream's own times (lone_costs), whatever plain_guard says
 };
 
 /// Whether a copied continuation is ahead of a stream (the round loop proposes; Python `_copy_proposal`).
@@ -100,14 +101,13 @@ pub const Rule = struct {
         }
     }
 
-    /// Round times by depth: the stream's own under `plain_guard`, else greedy rounds' for a greedy stream.
+    /// Round times by depth: the stream's own under `plain_guard` or for a lone round, else greedy rounds' if greedy.
     fn costs(r: *Rule, who: ?Who) !*Table {
         const w = who orelse return &r.round_ms;
-        if (!r.plain_guard) return if (w.sampled) &r.round_ms else &r.greedy_ms;
+        if (!r.plain_guard and !w.lone) return if (w.sampled) &r.round_ms else &r.greedy_ms;
         _ = try r.rates(w);
-        const st = &w.state.*.?;
-        if (st.ms == null) st.ms = .{};
-        return &st.ms.?;
+        if (w.state.*.?.ms == null) w.state.*.?.ms = .{};
+        return &w.state.*.?.ms.?;
     }
 
     /// A stream's first round carries the prefill-to-decode switch: its time stays out of the costs.

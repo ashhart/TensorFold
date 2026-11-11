@@ -281,7 +281,7 @@ of the user-facing options; this table says where each is read.
 | Variable | Read in | Meaning |
 |---|---|---|
 | `XPU_CHUNK` | `Runner.init` | Prompt rows per forward (1 024; a multiple of 64). |
-| `XPU_TREE`, `XPU_BLOCK` | `native/xpu.zig`, `qwen27_main.zig` | Tree nodes per round (server 15; the test runner 0, i.e. chains) and drafter block rows (8). |
+| `XPU_TREE`, `XPU_BLOCK` | `native/xpu.zig`, `qwen27_main.zig` | Tree nodes per round (server: the most a lone stream may draft, 15; the test runner 0, i.e. chains) and drafter block rows (8). |
 | `XPU_PREFILL_INT8`, `XPU_PREFILL_INT4`, `XPU_PREFILL_INT4_SITES` | `Runner.init` | W4A8 and W4A4 prompt GEMMs (local options; W4A4 needs W4A8 and rotated weights, else `Int4NeedsRotatedWeightsAndInt8`). |
 | `XPU_KV_INT8` | `Runner.init` | int8 K/V cache. |
 | `XPU_PROFILE` | `Runner.init` | GPU time per kernel (timestamp events), printed by `profReport` after the prompt and the decode (test runner). |

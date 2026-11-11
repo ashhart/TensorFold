@@ -6,6 +6,7 @@ const xq = @import("xpu_qwen27");
 const be = lanes.backend;
 const Drafter = xq.drafter.Drafter;
 const Allocator = std.mem.Allocator;
+const dflash2 = @import("xpu_dflash2.zig");
 
 const ring = 64;
 const TAP_ROW = 5 * xq.D * 2; // bf16 [5 D]
@@ -43,6 +44,8 @@ pub const Lanes = struct {
     prompt_skip: u32 = 0, // a prefill's first rows the drafter never reads (further than WIN from the prompt's end)
     costs: [16]lanes.config.Cost = undefined, // a window's ms by rows (verify and keep), timed by measure()
     timed: usize = 0,
+    core: ?*lanes.Engine = null, // the lane engine: its rule and kept calibrations price a lone stream's tree
+    landing: lanes.draft_tree.Landing = .{}, // lone trees' nodes offered and landed, by own chance
 
     pub const max_slots = xq.MAX_SLOTS;
     pub const tap_row = TAP_ROW;
@@ -66,7 +69,7 @@ pub const Lanes = struct {
     /// What the round loop reads: chains of up to 16 rows, all streams' windows in one shared forward, DFlash2 drafts
     pub fn facts(b: *const Lanes) lanes.Model {
         const head = b.drafter != null;
-        return .{ .exact_width = 16, .mtp = head, .speculate = head, .speculate_early = false, .drafts = if (head) b.block - 1 else 0, .mtp_step_ms = if (head) draft_step_ms else 0, .draft_streams = head, .window_costs = b.costs[0..b.timed], .hidden_rows = true, .streams_exact = true, .batch_rows = 16, .max_streams = b.slots, .lone_copies = false };
+        return .{ .exact_width = 16, .mtp = head, .speculate = head, .speculate_early = false, .drafts = if (head) b.block - 1 else 0, .mtp_step_ms = if (head) draft_step_ms else 0, .draft_streams = head, .window_costs = b.costs[0..b.timed], .hidden_rows = true, .streams_exact = true, .batch_rows = 16, .max_streams = b.slots, .lone_copies = false, .lone_cost_tile = dflash2.lone_tile };
     }
 
     /// Each window width's cost on a scratch context in the last slot, for the round loop's depth rule
@@ -484,7 +487,7 @@ pub const Lanes = struct {
         const pending = try b.draw(s, 0, b.first_logits[0], s.prompt_len);
         _ = try s.commit(b.gpa, &.{pending}, &.{});
         hooks.committed(hooks.ctx);
-        handed = try b.alone(s, 0, pending, hooks);
+        handed = try b.alone(s, 0, pending, hooks, false);
         return handed;
     }
 
@@ -501,18 +504,23 @@ pub const Lanes = struct {
         b.direct = true;
         defer b.direct = false;
         try d.use(slot);
-        if (d.end() != r.pos) d.restart(r.pos); // its context should end there: a cold one otherwise
-        handed = try b.alone(s, slot, s.pending orelse return error.NoPending, hooks);
+        const cold = d.end() != r.pos;
+        if (cold) d.restart(r.pos); // its context should end there: a cold one otherwise
+        handed = try b.alone(s, slot, s.pending orelse return error.NoPending, hooks, cold);
         return handed;
     }
 
     /// DFlash2 trees for `s` in `slot` from `pending` until it ends (false) or another stream arrives (true)
-    fn alone(b: *Lanes, s: *lanes.Stream, slot: u32, pending0: u32, hooks: api.LoneHooks) !bool {
+    fn alone(b: *Lanes, s: *lanes.Stream, slot: u32, pending0: u32, hooks: api.LoneHooks, cold: bool) !bool {
         const d = b.drafter.?;
         const r = b.runner;
         try d.use(slot);
         var pending = pending0;
         var out: [16]u32 = undefined;
+        const cap = dflash2.priced(b.nodes);
+        const e = if (cap != null) b.core else null;
+        defer if (e) |x| lanes.lone_costs.keep(x.gpa, lanes.lone_costs.slot(&x.lone_kept, s), s) catch {};
+        var skip = cold; // a cold drafter context makes the round after a restart no sample
         while (!s.finished) {
             if (hooks.yield(hooks.ctx)) {
                 s.cache_len = r.pos;
@@ -525,8 +533,24 @@ pub const Lanes = struct {
             defer r.taps_on = false;
             var sampled: Sampled = .{ .b = b, .s = s.sampling orelse .{ .seed = 0 } };
             const drawer: ?xq.drafter.Draw = if (s.sampling) |sp| .{ .ctx = &sampled, .row = Sampled.row, .gumbel = Sampled.gumbel, .temperature = sp.temperature } else null;
-            const round = try xq.drafter.treeRound(d, pending, b.block - 1, b.nodes, drawer, &out);
+            const t0 = xq.now();
+            const g = try xq.drafter.grow(d, pending, b.block - 1, if (e != null) cap.? else b.nodes, drawer);
+            var pick: dflash2.Width = .{ .nodes = b.nodes };
+            if (e) |x| {
+                var chance: [15]f64 = undefined;
+                dflash2.chances(&b.landing, s.sampling != null, g.par[1..], g.own[1..], chance[0..g.n]);
+                pick = try dflash2.width(x, s, chance[0..g.n]);
+            }
+            const round = try xq.drafter.settle(d, &g, pick.nodes, drawer, &out);
+            if (e != null) try r.d.sync(); // the round as the stream pays it, taps included
+            const ms = (xq.now() - t0) * 1e3;
             s.rounds += 1;
+            if (e) |x| {
+                b.landing.observeTree(s.sampling != null, g.par[1..], g.own[1..], round.drafted, round.path[0..round.rows]);
+                // the first round has the prefill switch, the one after a cold restart no drafter context
+                if (s.rounds > 1 and !skip) try dflash2.measured(x, s, pick.trial, round.drafted, ms);
+                skip = false;
+            }
             s.drafted += round.drafted;
             s.accepted += round.accepted;
             var landed: [17]u32 = undefined;
