@@ -307,15 +307,7 @@ pub fn parse(a: Allocator, argv: []const []const u8, u: *Usage) error{ Usage, Ou
                     return fail(u, a, "argument {s}: expected one argument", .{name});
                 value = argv[i];
             }
-            // --profile names its own refusals (apply); other flags keep the table's generic invalid-choice line
-            if (flag.choices.len > 0 and !std.mem.eql(u8, name, "--profile")) for (flag.choices) |c| {
-                if (std.mem.eql(u8, c, value.?)) break;
-            } else return fail(u, a, "argument {s}: invalid choice: '{s}'", .{ name, value.? });
         } else if (eq != null) return fail(u, a, "argument {s}: ignored explicit argument '{s}'", .{ name, token[eq.? + 1 ..] });
-        if (!flag.native) return fail(u, a, "{s} is not served by the native engine yet; the Python engine 0.6.6 serves it: python -m pip install git+https://github.com/ashhart/TensorFold.git@v0.6.6", .{name});
-        if (flag.native_values) |allowed| if (value) |v| for (allowed) |x| {
-            if (std.mem.eql(u8, x, v)) break;
-        } else return fail(u, a, "{s} {s} is not served by the native engine; the Python engine 0.6.6 serves it: python -m pip install git+https://github.com/ashhart/TensorFold.git@v0.6.6", .{ name, v });
         if (std.mem.eql(u8, name, "--config")) return fail(u, a, "argument --config: serve reads it before its other flags; it cannot appear here", .{});
         if (std.mem.eql(u8, name, "--prompt-cache-disk")) {
             if (disk_legacy) |old| return fail(u, a, "argument {s}: not allowed with {s}", .{ name, old });
@@ -325,7 +317,7 @@ pub fn parse(a: Allocator, argv: []const []const u8, u: *Usage) error{ Usage, Ou
             disk_legacy = name;
         }
         if (std.mem.eql(u8, name, "--host") or std.mem.eql(u8, name, "--port")) tcp_flag = name;
-        try apply(a, &out, name, value, u, &repeated);
+        try one(a, &out, &repeated, flag, value, u);
     }
     if (out.unix_socket != null) if (builtin.os.tag == .windows) return fail(u, a, "argument --unix-socket: not served on Windows", .{}) else if (tcp_flag) |t| return fail(u, a, "argument --unix-socket: not allowed with {s}", .{t});
     out.model = model orelse return fail(u, a, "the following arguments are required: model", .{});
@@ -336,19 +328,10 @@ pub fn parse(a: Allocator, argv: []const []const u8, u: *Usage) error{ Usage, Ou
     out.redraw.validate(out.silence) catch |err| return fail(u, a, "invalid redraw configuration: {s}", .{@errorName(err)});
     if (out.vision_urls and !out.vision) return fail(u, a, "--vision-urls needs --vision", .{});
     if (out.vision_pdf and !out.vision) return fail(u, a, "--vision-pdf needs --vision", .{});
-    if (out.idle_unload < 0 or out.idle_unload > std.math.maxInt(i64) / std.time.ns_per_s) return fail(u, a, "argument --idle-unload: expected a seconds count from 0 (off) under {d}: '{d}'", .{ std.math.maxInt(i64) / std.time.ns_per_s, out.idle_unload });
+    try @import("cli_late.zig").check(a, out, &repeated, u);
     out.alias = repeated.alias.items;
     out.name_priority = repeated.priorities.items;
-    for (out.name_priority) |entry| {
-        const eq = std.mem.indexOfScalar(u8, entry, '=') orelse
-            return fail(u, a, "argument --name-priority: takes ID=background, not '{s}'", .{entry});
-        const id = std.mem.trim(u8, entry[0..eq], " \t");
-        const word = std.mem.trim(u8, entry[eq + 1 ..], " \t");
-        if (id.len == 0 or !std.ascii.eqlIgnoreCase(word, "background"))
-            return fail(u, a, "argument --name-priority: takes ID=background, not '{s}'", .{entry});
-    }
     out.api_key = repeated.keys.items;
-    if (repeated.hosts.items.len > 64 or repeated.origins.items.len > 64) return fail(u, a, "at most 64 --allowed-host and 64 --allowed-origin entries are allowed", .{});
     out.allowed_host = repeated.hosts.items;
     out.allowed_origin = repeated.origins.items;
     if (out.slide_drift_gate and !out.slide) return fail(u, a, "--slide-drift-gate needs --slide", .{});
@@ -356,6 +339,19 @@ pub fn parse(a: Allocator, argv: []const []const u8, u: *Usage) error{ Usage, Ou
     if (api.prefill_env.problem(&env_buf)) |why| return fail(u, a, "{s}", .{why});
     try spillWith(u, a, out);
     return out;
+}
+
+/// One flag's own checks and its effect on `out`; a config file's entry is checked with it before the merge.
+pub fn one(a: Allocator, out: *Args, repeated: *Repeated, flag: Flag, value: ?[]const u8, u: *Usage) error{ Usage, OutOfMemory }!void {
+    // --profile names its own refusals (apply); other flags keep the table's generic invalid-choice line
+    if (value) |v| if (flag.choices.len > 0 and !std.mem.eql(u8, flag.name, "--profile")) for (flag.choices) |c| {
+        if (std.mem.eql(u8, c, v)) break;
+    } else return fail(u, a, "argument {s}: invalid choice: '{s}'", .{ flag.name, v });
+    if (!flag.native) return fail(u, a, "{s} is not served by the native engine yet; the Python engine 0.6.6 serves it: python -m pip install git+https://github.com/ashhart/TensorFold.git@v0.6.6", .{flag.name});
+    if (flag.native_values) |allowed| if (value) |v| for (allowed) |x| {
+        if (std.mem.eql(u8, x, v)) break;
+    } else return fail(u, a, "{s} {s} is not served by the native engine; the Python engine 0.6.6 serves it: python -m pip install git+https://github.com/ashhart/TensorFold.git@v0.6.6", .{ flag.name, v });
+    try apply(a, out, flag.name, value, u, repeated);
 }
 
 /// --spill-gib writes to the conversation store: beside --learn's shared prefixes only with --learn-conversations.
@@ -382,7 +378,7 @@ pub fn gib(u: *Usage, a: Allocator, name: []const u8, v: []const u8) error{ Usag
     return g;
 }
 
-const Repeated = struct { alias: std.ArrayList([]const u8) = .empty, priorities: std.ArrayList([]const u8) = .empty, keys: std.ArrayList([]const u8) = .empty, hosts: std.ArrayList([]const u8) = .empty, origins: std.ArrayList([]const u8) = .empty };
+pub const Repeated = struct { alias: std.ArrayList([]const u8) = .empty, priorities: std.ArrayList([]const u8) = .empty, keys: std.ArrayList([]const u8) = .empty, hosts: std.ArrayList([]const u8) = .empty, origins: std.ArrayList([]const u8) = .empty };
 
 fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usage, repeated: *Repeated) error{ Usage, OutOfMemory }!void {
     const v = value orelse "";
