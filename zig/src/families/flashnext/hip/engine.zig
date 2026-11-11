@@ -32,10 +32,8 @@ pub const Options = struct {
     want: usize = 1,
 };
 
-/// Whether the smaller chunk admits more of `want` streams than the larger's in `room`, after the `slots` bytes.
-pub fn narrows(room: u64, slots: u64, larger: u64, smaller: u64, per: u64, want: u64) bool {
-    return @min(want, (room -| slots -| smaller) / per) > @min(want, (room -| slots -| larger) / per);
-}
+/// The fallback rule every HIP family shares: whether the smaller chunk admits more of the streams asked for.
+pub const narrows = hip.policy.narrows;
 
 /// Bytes of the pinned staging a forward's uploads and n-gram rows go through.
 const staging_bytes = 64 << 20;
