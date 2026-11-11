@@ -10,8 +10,7 @@ from drama_reference_cache_check import TEXTS, serve
 GAMMAS = ("1", "1.5", "3")
 CFG = ["--cfg-gamma", "1.5", "--cfg-allow-request-gamma", "--cfg-force-guided"]
 MODES = {"plain": [], "separate": CFG, "paired": [*CFG, "--cfg-batched"]}
-# One row a chunk, and chunks long enough that a cached reference's suffix (a short text) is one round; a reference
-# keeps whole chunks only, so a voice needs more reference rows than a chunk for its later requests to hit the cache.
+# One row a chunk, and chunks longer than a reference so a voice's later requests resume its cached reference.
 ROWS = (1, 64)
 
 
@@ -30,8 +29,7 @@ def require_reference(voices, voice):
 
 
 def verdict(runs):
-    """Every reply has PCM; paired equals separate; forced gamma 1 equals the server without CFG and gamma above 1
-    differs from it; every guided server resumed a cached reference; per prefill size."""
+    """Per prefill size: PCM everywhere, paired equals separate, gamma 1 is plain, gamma above 1 differs, cache hit."""
     problems = []
     for rows, modes in runs.items():
         separate, paired, plain = modes["separate"], modes["paired"], modes["plain"]
