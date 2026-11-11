@@ -39,6 +39,7 @@ pub const nvcc_133_after = @import("flashnext_tile_records.zig").cuda_133 ++
     @import("nvfp4_experts32_records.zig").cuda_133 ++
     @import("paging_pending.zig").cuda_133;
 pub const cuda_pending = @import("qwen_whole_records.zig").records ++
+    @import("exl3_prompt_pending.zig").records ++
     @import("cuda_lane_pending.zig").records ++
     @import("weight_only_records.zig").cuda ++
     @import("hc_activation_records.zig").cuda ++
