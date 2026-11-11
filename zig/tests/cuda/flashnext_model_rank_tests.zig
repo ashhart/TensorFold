@@ -1,4 +1,4 @@
-//! Full-checkpoint experiment: two-rank prompt, snapshot replay, concurrent decode and every round equal eager rows.
+//! Full-checkpoint experiment: two-rank prompt, snapshot replay, concurrent decode, drafted windows beside the rounds.
 const std = @import("std");
 const cuda = @import("cuda");
 const flash = @import("flashnext");
@@ -25,7 +25,8 @@ pub fn run(gpu: check.Gpu, dir: []const u8, rank: usize, port: u16, ids_path: []
     var glue = try flash.Glue.load(gpu.d);
     defer glue.deinit();
     const tri: flash.Tri = .{ .s = stream, .own = &glue };
-    const identity = try ranks.identity(gpu.gpa, gpu.io, dir, context, chunk);
+    var identity = try ranks.identity(gpu.gpa, gpu.io, dir, context, chunk);
+    identity.mtp = 1; // both ranks take verify and keep frames
     const session = try ranks.Session.init(gpu.gpa, gpu.io, master, port, rank, identity, ranks.linkWait());
     const engine = prompt.Engine.initRank(gpu.gpa, gpu.io, @constCast(gpu.d), &stream, dir, 2, rank) catch |err| {
         session.poison();
@@ -106,20 +107,49 @@ pub fn run(gpu: check.Gpu, dir: []const u8, rank: usize, port: u16, ids_path: []
     }
     try check.sameBytes("a filled prompt's rows", first.logits, twin.logits);
     for (0..12) |_| try roundPair(session, tri, &.{&first}, &.{&twin}, logits.ptr, graph);
+    // a drafted stream beside: its windows verified and kept between the plain rounds leave their graph held
+    var third = try session.create(context);
+    defer session.drop(&third);
+    var twin3 = try session.create(context);
+    defer session.drop(&twin3);
+    for ([_]*prompt.Seq{ &third, &twin3 }) |q| try session.forward(flash.Tri, tri, q, ids.items, .{});
+    var draft = try flash.mtp.Draft.init(gpu.gpa, engine.driver, stream, context, 1, chunk, engine.heads);
+    defer draft.deinit();
+    try roundPair(session, tri, &.{&first}, &.{&twin}, logits.ptr, graph);
+    const held_captures = engine.round_graph.captures;
+    for (0..4) |i| {
+        try window(session, tri, &third, &twin3, &draft, ids.items, if (i % 2 == 0) 4 else 2);
+        try roundPair(session, tri, &.{&first}, &.{&twin}, logits.ptr, graph);
+    }
+    try check.expect(engine.round_graph.captures == held_captures, "plain rounds between verifies captured {d} more", .{engine.round_graph.captures - held_captures});
+    // the drafted lane's own rounds: a whole keep swaps its states, so the round after it is recorded again
+    for (0..3) |_| {
+        for (0..2) |_| try roundPair(session, tri, &.{&third}, &.{&twin3}, logits.ptr, graph);
+        try window(session, tri, &third, &twin3, &draft, ids.items, 4);
+    }
     try expectCounts(engine, graph);
-    check.pass("52 rounds equal eager rows byte for byte (round graph {}, dense split {d}): replays, two lanes, owner order, 512 seam", .{ graph, identity.dense_split });
+    check.pass("63 rounds equal eager rows byte for byte (round graph {}, dense split {d}): replays, lanes, owner order, 512 seam, verifies", .{ graph, identity.dense_split });
 }
 
-/// Both ranks capture the same keys: the concurrent round, one lane, two lanes, their swap and each side of the seam.
+/// A 4-row drafted window on `q` verified and its first `keep` rows kept; its eager twin fed the same rows.
+fn window(session: *ranks.Session, tri: flash.Tri, q: *prompt.Seq, twin: *prompt.Seq, d: *flash.mtp.Draft, ids: []const u32, keep: usize) !void {
+    const rows = [4]u32{ prompt.argmax(twin.logits), ids[0], ids[1 % ids.len], ids[2 % ids.len] };
+    try session.verify(flash.Tri, tri, q, d, &rows);
+    try session.keep(flash.Tri, tri, q, d, keep);
+    try session.forward(flash.Tri, tri, twin, rows[0..keep], .{});
+    try check.expect(q.fed == twin.fed, "a kept window's position is its twin's", .{});
+}
+
+/// Both ranks capture the same keys: concurrent, one lane, two lanes, their swap, the seam, then the drafted lane's.
 fn expectCounts(engine: *prompt.Engine, graph: bool) !void {
-    const want: [2]u64 = if (graph) .{ 6, 47 } else .{ 0, 0 };
+    const want: [2]u64 = if (graph) .{ 10, 54 } else .{ 0, 0 };
     try check.expect(std.meta.eql(want, [2]u64{ engine.round_graph.captures, engine.round_graph.replays }), "round graphs captured and replayed {any}, want {any}", .{ [2]u64{ engine.round_graph.captures, engine.round_graph.replays }, want });
 }
 
-/// A round of `seqs` on their argmax tokens (graphed when on), then each twin's eager row on that token: equal bytes.
+/// A round of `seqs` on their twins' argmax tokens (graphed when on), then each twin's eager row on it: equal bytes.
 fn roundPair(session: *ranks.Session, tri: flash.Tri, seqs: []const *prompt.Seq, twins: []const *prompt.Seq, out: u64, graph: bool) !void {
     var next: [2]u32 = undefined;
-    for (seqs, 0..) |q, i| next[i] = prompt.argmax(q.logits);
+    for (twins, 0..) |q, i| next[i] = prompt.argmax(q.logits);
     std.debug.print("TOKEN {d}\n", .{next[0]});
     try session.round(flash.Tri, tri, seqs, next[0..seqs.len], out);
     try check.expect(graph == (session.engine.round_graph.exec != null), "the round took the graph exactly when it is on", .{});
