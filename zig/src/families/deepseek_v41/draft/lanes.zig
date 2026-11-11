@@ -43,6 +43,7 @@ pub const St = struct {
     n_sib: u32 = 0,
     shown: std.ArrayList(u32) = .empty, // the drafts this round's window verifies (node indices, window order)
     shown_set: bool = false,
+    asked: bool = false, // a draft ask is made (the plain switch: the first ask stays plain)
 
     /// Node i of the held tree: the main chain's drafts, then each sibling's rows.
     pub fn nodes(st: *const St) u32 {
@@ -466,7 +467,10 @@ pub const Lanes = struct {
             st.n = 0;
             st.n_sib = 0;
             st.start = at;
+            const first_ask = !st.asked;
+            st.asked = true;
             if (r.depth == 0) continue;
+            if (first_ask and x.opts.depth.plain_streams > 0) continue; // the plain switch: the stream's first round runs plain, the next ask drafts
             if (n == x.opts.slots) return error.TooManySlots;
             asks[n] = .{ .slot = st.slot, .anchor = anchor, .start = at, .params = dspark.Params.of(r.stream.sampling, at) };
             whose[n] = st;
@@ -526,7 +530,7 @@ pub const Lanes = struct {
     fn heldTree(ptr: *anyopaque, s: *Stream, gpa: Allocator) anyerror!?lanes.stream.Held {
         const x = self(ptr);
         const st = try x.get(s);
-        if (st.n == 0) return null;
+        if (st.n == 0) return .{ .count = 0 }; // the ask was skipped (the plain switch's first round): the engine plans a plain window
         const total = st.nodes();
         const tokens = try gpa.alloc(u32, total);
         errdefer gpa.free(tokens);
