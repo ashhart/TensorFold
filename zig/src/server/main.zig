@@ -7,6 +7,7 @@ const hub = @import("hub.zig");
 const engines = @import("engines.zig");
 const serve = @import("serve.zig");
 const hf_text = @import("hf_text.zig");
+const witness = @import("witness.zig");
 const startup = @import("startup.zig");
 const slide_cli = @import("slide_cli.zig");
 const slide_key = @import("slide_key.zig");
@@ -38,7 +39,7 @@ const usage_line = "usage: tensorfold serve [-h] [--host HOST] [--port PORT] [--
     " [--register-redraw-st ST] [--register-redraw-high PERCENT] [--register-high-hz HZ]" ++
     " [--compact-at COMPACT_AT] [--compact-keep COMPACT_KEEP]" ++
     " [--compact-memory COMPACT_MEMORY] [--slide] [--slide-graph SLIDE_GRAPH] [--slide-drift-gate] [--parallel PARALLEL]" ++
-    " [--cortheon] [--no-update-check] [--backend {auto,mlx,cuda}] [--device DEVICE]" ++
+    " [--cortheon] [--execution-witness] [--no-update-check] [--backend {auto,mlx,cuda}] [--device DEVICE]" ++
     " [--segments SEGMENTS] model\n";
 const not_lanes = "--recall drafts from a record in the lane engine's rounds, " ++
     "which this model's engine does not run: serve it without --recall, --recall-dir, " ++
@@ -119,6 +120,10 @@ pub fn main(init: std.process.Init) !u8 {
         return 2;
     }
     api.prompt_cache.status.named.store(args.dashboard, .monotonic); // before any store keeps a state
+    if (witness.refusal(args, witness.keysNamed(a, args, init.environ_map.get("TENSORFOLD_API_KEY") orelse ""))) |why| {
+        std.debug.print("tensorfold: {s}\n", .{why});
+        return 2;
+    }
     if (args.vision) for (@import("core").picture.runtime.warnings(io, a)) |warning| {
         if (warning) |message| log.line("warning: {s}", .{message});
     };
@@ -153,6 +158,11 @@ pub fn main(init: std.process.Init) !u8 {
     var text_arena: std.heap.ArenaAllocator = .init(gpa); // the text's problem, written on its own thread
     defer text_arena.deinit();
     var text_problem: []const u8 = "";
+    // --execution-witness: the running binary and the text files' stamps before the load, hashed once serving is ready
+    const witness_binary = if (args.execution_witness) witness.openBinary(a, io) else null;
+    defer if (witness_binary) |b| b.close(io);
+    const witness_text = if (args.execution_witness) witness.stampText(gpa, io, dir, args.chat_template) else null;
+    defer if (witness_text) |w| w.deinit();
     const up = startup.both(io, loadText, .{ gpa, io, dir, args.chat_template, text_arena.allocator(), &text_problem }, engines.open, .{ a, gpa, io, dir, model_type, args, &problem }) catch |e| {
         if (text_problem.len > 0) return fail(text_problem);
         if (problem.len > 0) return fail(problem); // an engine that failed after saying why
@@ -189,6 +199,8 @@ pub fn main(init: std.process.Init) !u8 {
         .identity = engines.identity(a, args),
         .forget_fail = if (comptime @import("build_options").slide_test_hooks) try forgetFail(init.environ_map) else 0,
         .tool_id_key = if (tool_ids) |*key| key else null,
+        .witness_binary = witness_binary,
+        .witness_text = witness_text,
     });
 }
 

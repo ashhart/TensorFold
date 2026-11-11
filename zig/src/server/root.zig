@@ -300,3 +300,9 @@ test {
     _ = @import("ocr/size_test.zig");
     _ = @import("ocr/prompt_ids_test.zig");
 }
+
+test {
+    _ = @import("witness_test.zig");
+    _ = @import("witness_http_test.zig");
+    _ = @import("witness_race_test.zig");
+}
