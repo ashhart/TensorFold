@@ -176,6 +176,75 @@ fn compressedFatbin(text: []const u8) ![]u8 {
     return bytes;
 }
 
+fn twoBlockFrame(left: []const u8, right: []const u8) ![]u8 {
+    var frame: std.ArrayList(u8) = .empty;
+    errdefer frame.deinit(a);
+    try frame.appendSlice(a, "\x28\xb5\x2f\xfd\x20");
+    try frame.append(a, @intCast(left.len + right.len));
+    for ([_][]const u8{ left, right }, 0..) |block, index| {
+        var header: [3]u8 = undefined;
+        std.mem.writeInt(u24, &header, @as(u24, @intCast(block.len)) << 3 | @intFromBool(index == 1), .little);
+        try frame.appendSlice(a, &header);
+        try frame.appendSlice(a, block);
+    }
+    return frame.toOwnedSlice(a);
+}
+
+fn dataPe(name: *const [8]u8, payload: []const u8) ![]u8 {
+    const bytes = try a.alloc(u8, 512 + payload.len);
+    @memset(bytes, 0);
+    @memcpy(bytes[0..2], "MZ");
+    std.mem.writeInt(u32, bytes[60..64], 64, .little);
+    @memcpy(bytes[64..68], "PE\x00\x00");
+    std.mem.writeInt(u16, bytes[68..70], 0x8664, .little);
+    std.mem.writeInt(u16, bytes[70..72], 1, .little);
+    std.mem.writeInt(u16, bytes[84..86], 240, .little);
+    std.mem.writeInt(u16, bytes[88..90], 0x20b, .little);
+    @memcpy(bytes[328..336], name);
+    std.mem.writeInt(u32, bytes[344..348], @intCast(payload.len), .little);
+    std.mem.writeInt(u32, bytes[348..352], 512, .little);
+    @memcpy(bytes[512..], payload);
+    return bytes;
+}
+
+test "release paths: codec block headers cannot create an absolute source path" {
+    const frame = try twoBlockFrame("prefix", "/x.c");
+    defer a.free(frame);
+    try std.testing.expect(std.mem.indexOf(u8, frame, "\x00/x.c") != null);
+    try paths.check(a, frame, root);
+    const embedded = try std.mem.concat(a, u8, &.{ "\x00runtime-prefix\x00", frame, "\x00runtime-tail\x00" });
+    defer a.free(embedded);
+    try paths.check(a, embedded, root);
+    const pe = try dataPe(".data\x00\x00\x00", frame);
+    defer a.free(pe);
+    try paths.check(a, pe, root);
+}
+
+test "release paths: embedded codec paths are checked after full block reconstruction" {
+    const frame = try twoBlockFrame("/opt/private-", "source/file.c");
+    defer a.free(frame);
+    try std.testing.expect(std.mem.indexOf(u8, frame, "/opt/private-source/file.c") == null);
+    try std.testing.expectError(error.PrivateBuildPath, paths.check(a, frame, root));
+    try std.testing.expectError(error.BadZstdFatbin, paths.check(a, frame[0 .. frame.len - 1], root));
+    const pe = try dataPe(".data\x00\x00\x00", frame);
+    defer a.free(pe);
+    try std.testing.expectError(error.PrivateBuildPath, paths.check(a, pe, root));
+}
+
+test "release paths: bytes following a verified frame are still inspected" {
+    const frame = try twoBlockFrame("public", " data");
+    defer a.free(frame);
+    const embedded = try std.mem.concat(a, u8, &.{ frame, "\x00/opt/private-source/file.c\x00" });
+    defer a.free(embedded);
+    try std.testing.expectError(error.PrivateBuildPath, paths.check(a, embedded, root));
+}
+
+test "release paths: a codec magic constant in a PE read-only section is not an encoded frame" {
+    const pe = try dataPe(".rdata\x00\x00", "\x28\xb5\x2f\xfd\x00");
+    defer a.free(pe);
+    try paths.check(a, pe, root);
+}
+
 test "release paths: compressed CUDA images are inspected standalone and inside the packaged executable" {
     const bad = try compressedFatbin("/opt/private-build-root/zig/kernels/cuda/unit.cu");
     defer a.free(bad);

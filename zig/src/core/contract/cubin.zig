@@ -2,6 +2,9 @@
 const std = @import("std");
 const limits = @import("limits.zig");
 
+/// A bounded frame decoder for release inspection of embedded runtime payloads.
+pub const zstdPrefix = @import("fatbin_zstd.zig").prefix;
+
 const fatbin_magic: u32 = 0xBA55ED50;
 const elf_kind: u16 = 2;
 const sht_nobits = 8;

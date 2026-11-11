@@ -192,6 +192,7 @@ def main():
     native_out, grammar_out, checks = work / "native-out", work / "grammar-out", work / "checks"
     run("privacy-checker", [zig, "build", "compile-release-paths-host", "-j2", "--prefix", checks])
     path_checker = checks / "bin/check-release-paths.exe"
+    run("privacy-controls", [zig, "build", "test-release-paths-host", "test-check-release-paths", "-j2"])
     run("bridge", [sys.executable, HERE / "produce_bridge.py", "--execute", "--work", work / "bridge",
                    "--repo-root", repo, "--source-revision", source_revision])
     bridge = read(work / "bridge/output-manifest.json")

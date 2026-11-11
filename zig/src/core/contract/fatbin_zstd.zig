@@ -8,6 +8,14 @@ pub fn unpack(a: std.mem.Allocator, bytes: []const u8) !?[]u8 {
 }
 
 fn unpackLimit(a: std.mem.Allocator, bytes: []const u8, max_output: usize) !?[]u8 {
+    const result = (try prefix(a, bytes, max_output)) orelse return null;
+    errdefer a.free(result.data);
+    if (bytes.len - result.consumed > 7 or !std.mem.allEqual(u8, bytes[result.consumed..], 0)) return error.BadZstdFatbin;
+    return result.data;
+}
+
+/// Decode exactly one bounded, checksum-verified frame and report how many encoded bytes it consumed.
+pub fn prefix(a: std.mem.Allocator, bytes: []const u8, max_output: usize) !?struct { data: []u8, consumed: usize } {
     if (bytes.len < 4 or !std.mem.eql(u8, bytes[0..4], "\x28\xb5\x2f\xfd")) return null;
     const Zstd = std.compress.zstd.Decompress;
     var header_input: std.Io.Reader = .fixed(bytes[4..]);
@@ -32,14 +40,24 @@ fn unpackLimit(a: std.mem.Allocator, bytes: []const u8, max_output: usize) !?[]u
         decoder.reader.toss(block.len);
         if (decoder.state == .new_frame) break;
     }
-    if (bytes.len - input.seek > 7 or !std.mem.allEqual(u8, bytes[input.seek..], 0)) return error.BadZstdFatbin;
+    if (frame.content_size) |want| if (want != out.written().len) return error.BadZstdFatbin;
     // The standard decoder consumes the checksum but does not verify it in this Zig release.
     if (bytes[4] & 4 != 0) {
         const want = std.mem.readInt(u32, bytes[input.seek - 4 ..][0..4], .little);
         const got: u32 = @truncate(std.hash.XxHash64.hash(0, out.written()));
         if (want != got) return error.BadZstdFatbin;
     }
-    return try out.toOwnedSlice();
+    return .{ .data = try out.toOwnedSlice(), .consumed = input.seek };
+}
+
+test "zstd prefix: the next payload remains outside the verified frame" {
+    const a = std.testing.allocator;
+    const frame = "\x28\xb5\x2f\xfd\x00\x00\x02\x01\x00A\x01\x00\x00";
+    const result = (try prefix(a, frame ++ "following payload", 32)).?;
+    defer a.free(result.data);
+    try std.testing.expectEqual(frame.len, result.consumed);
+    try std.testing.expectEqual(@as(usize, 32), result.data.len);
+    try std.testing.expectError(error.BadZstdFatbin, unpack(a, frame ++ "following payload"));
 }
 
 test "zstd cap: compressed block expansion is refused cleanly" {

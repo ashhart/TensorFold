@@ -73,7 +73,7 @@ pub fn validRoot(root: []const u8) bool {
     }
     return names >= @as(usize, if (unc) 2 else 1);
 }
-fn textLeak(bytes: []const u8, root: []const u8, width: usize, lane: usize, big: bool) bool {
+fn textLeak(bytes: []const u8, root: []const u8) bool {
     if (validRoot(root) and std.mem.indexOf(u8, bytes, root) != null) return true;
     for (0..bytes.len) |i| {
         if (!absoluteAt(bytes, i)) continue;
@@ -83,17 +83,12 @@ fn textLeak(bytes: []const u8, root: []const u8, width: usize, lane: usize, big:
             if (!quoted and bytes[end] == ' ') break;
         }
         const path = bytes[i..end];
-        if (std.unicode.utf8ValidateSlice(path) and privatePath(path)) {
-            const drive = path.len >= 3 and std.ascii.isAlphabetic(path[0]) and path[1] == ':' and separator(path[2]);
-            const invalid_drive_name = drive and std.mem.indexOfAny(u8, path[3..], ":*?<>|") != null;
-            std.debug.print("release privacy match: offset={d} bytes={d} width={d} lane={d} big={any} drive={any} invalid_drive_name={any}\n", .{ i * width + lane, path.len * width, width, lane, big, drive, invalid_drive_name });
-            return true;
-        }
+        if (std.unicode.utf8ValidateSlice(path) and privatePath(path)) return true;
     }
     return false;
 }
-fn rawLeak(a: std.mem.Allocator, bytes: []const u8, root: []const u8) !bool {
-    if (textLeak(bytes, root, 1, 0, false)) return true;
+fn plainLeak(a: std.mem.Allocator, bytes: []const u8, root: []const u8) !bool {
+    if (textLeak(bytes, root)) return true;
     if (validRoot(root)) {
         const wide = try std.unicode.utf8ToUtf16LeAlloc(a, root);
         defer a.free(wide);
@@ -111,10 +106,76 @@ fn rawLeak(a: std.mem.Allocator, bytes: []const u8, root: []const u8) !bool {
                 const high = bytes[i + @intFromBool(!big)];
                 try text.append(a, if (high == 0) low else '?');
             }
-            if (textLeak(text.items, root, 2, offset, big)) return true;
+            if (textLeak(text.items, root)) return true;
         }
     }
     return false;
+}
+const DecodeState = struct { bytes: usize = 0, frames: usize = 0 };
+const max_decoded = 8 << 30;
+const EncodedRange = struct { start: usize, end: usize };
+
+fn addRange(a: std.mem.Allocator, ranges: *std.ArrayList(EncodedRange), range: EncodedRange) !void {
+    for (ranges.items) |old| {
+        if (old.start == range.start and old.end == range.end) return;
+        if (old.start < range.end and range.start < old.end) return error.OverlappingEncodedRanges;
+    }
+    try ranges.append(a, range);
+}
+
+fn encodedRanges(a: std.mem.Allocator, bytes: []const u8, base: usize, root: []const u8, state: *DecodeState, depth: usize, ranges: *std.ArrayList(EncodedRange)) !void {
+    var cursor: usize = 0;
+    while (std.mem.indexOfPos(u8, bytes, cursor, "\x28\xb5\x2f\xfd")) |start| {
+        if (depth >= 4 or state.frames >= 100000) return error.ReleaseDecodeLimit;
+        const decoded = (try cubin.zstdPrefix(a, bytes[start..], @min(1 << 28, max_decoded - state.bytes))) orelse return error.BadZstdFatbin;
+        defer a.free(decoded.data);
+        state.bytes += decoded.data.len;
+        state.frames += 1;
+        try checkInner(a, decoded.data, root, state, depth + 1);
+        cursor = start + decoded.consumed;
+        try addRange(a, ranges, .{ .start = base + start, .end = base + cursor });
+    }
+}
+
+fn peDataFrames(a: std.mem.Allocator, bytes: []const u8, root: []const u8, state: *DecodeState, depth: usize, ranges: *std.ArrayList(EncodedRange)) !void {
+    if (bytes.len < 64) return error.BadPe;
+    const pe: usize = read(u32, bytes, 60);
+    if (pe < 64 or pe > bytes.len or bytes.len - pe < 24 or !std.mem.eql(u8, bytes[pe..][0..4], "PE\x00\x00")) return error.BadPe;
+    const count: usize = read(u16, bytes, pe + 6);
+    const table = pe + 24 + read(u16, bytes, pe + 20);
+    if (count == 0 or count > 96 or table > bytes.len or count * 40 > bytes.len - table) return error.BadPe;
+    for (0..count) |index| {
+        const section = table + index * 40;
+        const size: usize = read(u32, bytes, section + 16);
+        const offset: usize = read(u32, bytes, section + 20);
+        if (offset > bytes.len or size > bytes.len - offset or (size != 0 and offset < table + count * 40)) return error.BadPe;
+        for (0..index) |previous| {
+            const old = table + previous * 40;
+            const old_size: usize = read(u32, bytes, old + 16);
+            const old_offset: usize = read(u32, bytes, old + 20);
+            if (size != 0 and old_size != 0 and offset < old_offset + old_size and old_offset < offset + size) return error.BadPe;
+        }
+        if (std.mem.eql(u8, bytes[section..][0..8], ".data\x00\x00\x00"))
+            try encodedRanges(a, bytes[offset..][0..size], offset, root, state, depth, ranges);
+    }
+}
+
+fn rawLeak(a: std.mem.Allocator, bytes: []const u8, root: []const u8, ranges: []const EncodedRange) !bool {
+    // Keep exact build-root checks over the full bytes, including encoded payloads.
+    if (validRoot(root)) {
+        if (std.mem.indexOf(u8, bytes, root) != null) return true;
+        const wide = try std.unicode.utf8ToUtf16LeAlloc(a, root);
+        defer a.free(wide);
+        if (std.mem.indexOf(u8, bytes, std.mem.sliceAsBytes(wide)) != null) return true;
+        for (wide) |*unit| unit.* = @byteSwap(unit.*);
+        if (std.mem.indexOf(u8, bytes, std.mem.sliceAsBytes(wide)) != null) return true;
+    }
+    var cursor: usize = 0;
+    for (ranges) |range| {
+        if (try plainLeak(a, bytes[cursor..range.start], root)) return true;
+        cursor = range.end;
+    }
+    return plainLeak(a, bytes[cursor..], root);
 }
 fn read(comptime T: type, bytes: []const u8, at: usize) T {
     return std.mem.readInt(T, bytes[at..][0..@sizeOf(T)], .little);
@@ -151,7 +212,7 @@ fn uncompressedElf(bytes: []const u8) !void {
         }
     }
 }
-fn inspectContainer(a: std.mem.Allocator, bytes: []const u8, root: []const u8) !void {
+fn inspectContainer(a: std.mem.Allocator, bytes: []const u8, base: usize, root: []const u8, state: *DecodeState, depth: usize, ranges: *std.ArrayList(EncodedRange)) !void {
     const head: usize = read(u16, bytes, 6);
     var at = head;
     while (at + 48 <= bytes.len) {
@@ -161,17 +222,26 @@ fn inspectContainer(a: std.mem.Allocator, bytes: []const u8, root: []const u8) !
         const end = std.math.add(usize, start, size) catch return error.BadFatbin;
         if (h < 48 or end > bytes.len) return error.BadFatbin;
         const payload = bytes[start..end];
-        if (read(u16, bytes, at) != 2 and (read(u64, bytes, at + 40) & 0x2000 != 0 or std.mem.startsWith(u8, payload, "\x28\xb5\x2f\xfd"))) return error.UnsupportedImageEncoding;
+        const kind = read(u16, bytes, at);
+        if (kind != 1 and kind != 2) return error.UnsupportedImageEncoding;
+        if (std.mem.startsWith(u8, payload, "\x28\xb5\x2f\xfd")) {
+            if (depth >= 4 or state.frames >= 100000) return error.ReleaseDecodeLimit;
+            const decoded = (try cubin.zstdPrefix(a, payload, @min(1 << 28, max_decoded - state.bytes))).?;
+            defer a.free(decoded.data);
+            if (payload.len - decoded.consumed > 7 or !std.mem.allEqual(u8, payload[decoded.consumed..], 0)) return error.BadZstdFatbin;
+            if (kind == 2 and !std.mem.startsWith(u8, decoded.data, "\x7fELF")) return error.UnsupportedImageEncoding;
+            state.bytes += decoded.data.len;
+            state.frames += 1;
+            try checkInner(a, decoded.data, root, state, depth + 1);
+            try addRange(a, ranges, .{ .start = base + start, .end = base + start + decoded.consumed });
+        } else {
+            if (read(u64, bytes, at + 40) & 0x2000 != 0) return error.UnsupportedImageEncoding;
+            if (kind == 2 and !std.mem.startsWith(u8, payload, "\x7fELF")) return error.UnsupportedImageEncoding;
+            try checkInner(a, payload, root, state, depth + 1);
+        }
         at = end;
     }
     if (bytes.len - at > 7 or !std.mem.allEqual(u8, bytes[at..], 0)) return error.BadFatbin;
-    const images = try cubin.images(a, bytes);
-    defer if (comptime @hasDecl(cubin, "freeImages")) cubin.freeImages(a, images) else a.free(images);
-    for (images) |image| {
-        if (!std.mem.startsWith(u8, image.elf, "\x7fELF")) return error.UnsupportedImageEncoding;
-        try uncompressedElf(image.elf);
-        if (try rawLeak(a, image.elf, root)) return error.PrivateBuildPath;
-    }
 }
 /// A thin Mach-O's code signature (LC_CODE_SIGNATURE) holds the linker's hashes, which can spell a path by chance.
 fn signature(bytes: []const u8) ?[2]usize {
@@ -193,14 +263,40 @@ fn signature(bytes: []const u8) ?[2]usize {
     return null;
 }
 pub fn check(a: std.mem.Allocator, bytes: []const u8, root: []const u8) !void {
+    var state: DecodeState = .{};
+    try checkInner(a, bytes, root, &state, 0);
+}
+
+fn checkInner(a: std.mem.Allocator, bytes: []const u8, root: []const u8, state: *DecodeState, depth: usize) anyerror!void {
+    if (depth > 4) return error.ReleaseDecodeLimit;
     if (signature(bytes)) |s| {
-        if (validRoot(root) and std.mem.indexOf(u8, bytes[s[0]..s[1]], root) != null) return error.PrivateBuildPath;
-        if (try rawLeak(a, bytes[0..s[0]], root) or try rawLeak(a, bytes[s[1]..], root)) return error.PrivateBuildPath;
-    } else if (try rawLeak(a, bytes, root)) return error.PrivateBuildPath;
+        if (s[0] != s[1]) {
+            if (validRoot(root) and std.mem.indexOf(u8, bytes[s[0]..s[1]], root) != null) return error.PrivateBuildPath;
+            try checkInner(a, bytes[0..s[0]], root, state, depth + 1);
+            try checkInner(a, bytes[s[1]..], root, state, depth + 1);
+            return;
+        }
+    }
+    var ranges: std.ArrayList(EncodedRange) = .empty;
+    defer ranges.deinit(a);
+    if (std.mem.startsWith(u8, bytes, "MZ")) {
+        try peDataFrames(a, bytes, root, state, depth, &ranges);
+    } else if (!std.mem.startsWith(u8, bytes, "\x7fELF") and !std.mem.startsWith(u8, bytes, magic)) {
+        try encodedRanges(a, bytes, 0, root, state, depth, &ranges);
+    }
     try uncompressedElf(bytes);
     var at: usize = 0;
     while (std.mem.indexOfPos(u8, bytes, at, magic)) |start| {
         at = start + 4;
+        var encoded = false;
+        for (ranges.items) |range| {
+            if (range.start <= start and start < range.end) {
+                at = range.end;
+                encoded = true;
+                break;
+            }
+        }
+        if (encoded) continue;
         if (bytes.len - start < 16) {
             if (start == 0) return error.BadFatbin;
             continue;
@@ -213,7 +309,13 @@ pub fn check(a: std.mem.Allocator, bytes: []const u8, root: []const u8) !void {
             if (start == 0) return error.BadFatbin;
             continue;
         }
-        try inspectContainer(a, bytes[start..end], root);
+        try inspectContainer(a, bytes[start..end], start, root, state, depth, &ranges);
         at = end;
     }
+    std.mem.sort(EncodedRange, ranges.items, {}, struct {
+        fn less(_: void, left: EncodedRange, right: EncodedRange) bool {
+            return left.start < right.start;
+        }
+    }.less);
+    if (try rawLeak(a, bytes, root, ranges.items)) return error.PrivateBuildPath;
 }
