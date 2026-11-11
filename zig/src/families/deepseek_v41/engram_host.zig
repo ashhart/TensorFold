@@ -120,8 +120,13 @@ pub const Host = struct {
     pub fn windowRows(h: *const Host, a: std.mem.Allocator, source: ?Source, ids: []const u32, lookback: []const u32, layer: u32, rank: u32, world: u32, dim: usize, out: []u16) !void {
         const idx = try h.shardIndex(a, ids, lookback, layer, rank, world);
         defer a.free(idx);
+        return h.readRows(source, layer, idx, dim, out);
+    }
+
+    /// Engram layer `layer`'s rows `idx` (a `shardIndex` result) as bf16 [idx.len, dim]: from `source` or index rows.
+    pub fn readRows(h: *const Host, source: ?Source, layer: u32, idx: []const i64, dim: usize, out: []u16) !void {
         const s = source orelse return indexRows(idx, dim, out);
-        const li = std.mem.indexOfScalar(u32, h.layer_ids, layer).?;
+        const li = std.mem.indexOfScalar(u32, h.layer_ids, layer) orelse return error.NotEngram;
         return s.vtable.rows(s.ptr, li, idx, dim, out);
     }
 

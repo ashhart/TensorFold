@@ -6,6 +6,7 @@ const ctx_ = @import("ctx.zig");
 const weights = @import("weights.zig");
 const pipelines = @import("pipelines.zig");
 const layer = @import("layer.zig");
+const stage_ = @import("engram_stage.zig");
 
 const Config = host.config.Config;
 const Ctx = ctx_.Ctx;
@@ -103,10 +104,17 @@ pub fn prepare(b: *const Bufs, c: *const Config, ids: []const u32, lookback: []c
 }
 
 /// One slot's ids of a launch and the ids before them (oldest first; short: the slot's start).
-pub const Piece = struct { ids: []const u32, lookback: []const u32 };
+pub const Piece = stage_.Piece;
 
 /// `prepare` for several slots' rows, pieces one after another in row order.
 pub fn prepareSegs(b: *const Bufs, c: *const Config, pieces: []const Piece, lk: ?Lookup) !void {
+    var st = try stageSegs(b, c, pieces, lk);
+    defer st.deinit();
+    try st.joinAll();
+}
+
+/// The ids into the launch's buffer and every Engram layer's row reads started; `Stage.join` lands them (`runStaged`).
+pub fn stageSegs(b: *const Bufs, c: *const Config, pieces: []const Piece, lk: ?Lookup) !stage_.Stage {
     var n: usize = 0;
     for (pieces) |pc| {
         if (pc.ids.len == 0) return error.BadRows;
@@ -120,17 +128,12 @@ pub fn prepareSegs(b: *const Bufs, c: *const Config, pieces: []const Piece, lk: 
         @memcpy(all[at..][0..pc.ids.len], pc.ids);
         at += pc.ids.len;
     }
-    if (c.engram_layers.len == 0) return;
+    if (c.engram_layers.len == 0) return stage_.Stage.none;
     const l = lk orelse return error.EngramLookupMissing;
     const K = c.hashCols() * c.engram_head_dim;
-    for (c.engram_layers.items(), 0..) |id, li| {
-        const out: []u16 = @alignCast(std.mem.bytesAsSlice(u16, b.bytes(b.rows[li], 2 * n * K)));
-        var r0: usize = 0;
-        for (pieces) |pc| {
-            try l.host.windowRows(l.a, l.source, pc.ids, pc.lookback, id, 0, 1, c.engram_head_dim, out[r0 * K ..][0 .. pc.ids.len * K]);
-            r0 += pc.ids.len;
-        }
-    }
+    var outs: [host.engram_host.max_layers][]u16 = undefined;
+    for (c.engram_layers.items(), 0..) |_, li| outs[li] = @alignCast(std.mem.bytesAsSlice(u16, b.bytes(b.rows[li], 2 * n * K)));
+    return stage_.Stage.begin(l.a, c, l.host, l.source, pieces, &outs);
 }
 
 /// The tokens' embedding rows into all four streams of streams[0], and the one-hot pre mix.
@@ -210,6 +213,11 @@ pub fn chunkEnd(lo: usize, n: usize) usize {
 
 /// The decode forward in about `buffers` command buffers, each committed once encoded; waits for the last.
 pub fn run(x: *const Ctx, q: mtl.Queue, m: Model, b: *const Bufs) !void {
+    return runStaged(x, q, m, b, null);
+}
+
+/// `run` with the Engram rows of `st` joined layer by layer, each just before the command buffer holding its layer.
+pub fn runStaged(x: *const Ctx, q: mtl.Queue, m: Model, b: *const Bufs, st: ?*stage_.Stage) !void {
     if (m.layers.len != x.c.layers) return error.LayerOrder;
     if (x.rows == 0 or x.rows > R or x.rows != x.total()) return error.BadRows;
     var cbs: [max_buffers]mtl.CommandBuffer = undefined;
@@ -219,6 +227,10 @@ pub fn run(x: *const Ctx, q: mtl.Queue, m: Model, b: *const Bufs) !void {
     while (true) {
         const hi = chunkEnd(lo, m.layers.len);
         if (n == max_buffers) return error.TooManyBuffers;
+        if (st) |s| s.joinRange(lo, hi) catch |err| {
+            if (n > 0) cbs[n - 1].wait();
+            return err;
+        };
         const cb = q.commandBuffer();
         const e = cb.compute(.concurrent);
         const ok = encodeRange(x, e, m, b, lo, hi);

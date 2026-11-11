@@ -35,6 +35,7 @@ test {
     std.testing.refAllDecls(@This());
     _ = ctx;
     _ = forward;
+    _ = @import("engram_stage_test.zig");
     _ = prompt;
     _ = prompt_scratch;
     _ = dspark;

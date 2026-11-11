@@ -39,7 +39,7 @@ pub const Options = struct {
 };
 
 /// What the target did, for the tests and the logs.
-pub const Stats = struct { prompts: u64 = 0, hits: u64 = 0, cached_rows: u64 = 0, windows: u64 = 0, rows: u64 = 0, rewinds: u64 = 0, launches: u64 = 0, history_rows: u64 = 0 };
+pub const Stats = struct { prompts: u64 = 0, hits: u64 = 0, cached_rows: u64 = 0, windows: u64 = 0, rows: u64 = 0, rewinds: u64 = 0, launches: u64 = 0, history_rows: u64 = 0, warms: u64 = 0 };
 
 /// A slot: its device state, prompt tail, ids (rows run, the last window's included until its keep) and taps.
 const Slot = struct {
@@ -138,7 +138,7 @@ pub const Target = struct {
     }
 
     pub fn target(t: *Target) iface.Target {
-        return .{ .ptr = t, .vtable = &.{ .prefill = prefill, .window = window, .keep = keep, .taps = taps, .release = release, .resumed = resumedFn, .history = history } };
+        return .{ .ptr = t, .vtable = &.{ .prefill = prefill, .window = window, .keep = keep, .taps = taps, .release = release, .resumed = resumedFn, .history = history, .warm = warm } };
     }
 
     fn self(ptr: *anyopaque) *Target {
@@ -351,12 +351,33 @@ pub const Target = struct {
             segs[i] = .{ .slot = &s.kv, .p0 = start, .r0 = r0, .n = n };
             r0 += n;
         }
-        try forward.prepareSegs(&t.b, c, pieces[0..group.len], e.lookup);
+        var rows = try forward.stageSegs(&t.b, c, pieces[0..group.len], e.lookup);
+        defer rows.deinit();
         try e.s.writeSpans(c, spans[0..group.len]);
         const x: ctx_.Ctx = .{ .c = c, .p = e.p, .s = e.s, .slot = segs[0].slot, .tables = e.tables, .p0 = segs[0].p0, .rows = r0, .segs = segs[0..group.len] };
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
-        try forward.run(&x, e.queue, e.model, &t.b);
+        try forward.runStaged(&x, e.queue, e.model, &t.b, &rows);
+    }
+
+    /// Iface.Target.warm: starts the Engram row reads of rows a coming window may hold; reads only, never its bits.
+    fn warm(ptr: *anyopaque, asks: []const iface.Warm) void {
+        const t = self(ptr);
+        const l = readingLookup(t) orelse return;
+        const look = t.env.c.engram_max_ngram - 1;
+        for (asks) |w| {
+            if (w.slot >= t.slots.len or w.ids.len == 0 or w.ids.len > R) continue;
+            const s = &t.slots[w.slot];
+            if (!s.live or w.start > s.hist.items.len) continue; // a start past the ids held has no history to hash
+            const at: usize = @intCast(w.start);
+            t.stats.warms += 1;
+            l.host.prefetch(l.a, l.source, w.ids, s.hist.items[at -| look..at], 0, 1);
+        }
+    }
+
+    fn readingLookup(t: *const Target) ?forward.Lookup {
+        const l = t.env.lookup orelse return null;
+        return if (l.source == null) null else l;
     }
 
     /// Keep the window's first rows (a chain from row 0): later rows' ids go, the compressor's carry rewinds.

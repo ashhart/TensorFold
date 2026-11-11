@@ -146,6 +146,8 @@ test "dsv41 metal serve: (a) concurrent == solo == serial, (b) drafted == draft:
     try testing.expectEqual([3]usize{ 0, 0, 0 }, bad);
     try testing.expect(drafted > 0 and m.t.stats.rewinds > 0);
     try testing.expectEqual(@as(u64, 0), plain_drafted);
+    // the lanes warmed Engram rows ahead on every round, and the serial reference (no warms) has the same replies
+    try testing.expect(m.t.stats.warms > 0);
 }
 
 test "dsv41 metal serve: (c) prompt-cache hits (the same prompt, a later turn) == fresh runs" {
