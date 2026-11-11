@@ -34,6 +34,8 @@ test "a row's width bound is a width the codes come in" {
     for ([_]*const Table{ &gfx1030, &gfx1100, &gfx1151, &gfx1201 }) |t| for (t.rows) |r| {
         if (r.max_bits != 0) try std.testing.expect(std.mem.indexOfScalar(u8, &registry.widths, r.max_bits) != null);
     };
+    // the bound is live where it was measured: a table that lost it would pass the loop above
+    try std.testing.expectEqual(@as(u8, 3), find(&gfx1151, "mlx.project.prefill.kp0").?.max_bits);
 }
 
 test "the tables name each entry once" {
