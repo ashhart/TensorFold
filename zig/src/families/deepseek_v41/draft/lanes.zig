@@ -43,8 +43,6 @@ pub const St = struct {
     n_sib: u32 = 0,
     shown: std.ArrayList(u32) = .empty, // the drafts this round's window verifies (node indices, window order)
     shown_set: bool = false,
-    burst_seen: bool = false, // the plain switch: an ask batch reached plain_streams, the normal rules apply from then on
-    wide_asks: u8 = 0, // the plain switch: asks made while never wide, a lone stream drafts from its second
 
     /// Node i of the held tree: the main chain's drafts, then each sibling's rows.
     pub fn nodes(st: *const St) u32 {
@@ -435,16 +433,23 @@ pub const Lanes = struct {
         }
     }
 
-    /// The hold before a stream's first draft (the plain switch): until its burst has formed or its second ask.
-    const lone_asks_before_draft = 2; // a stream admitted alone drafts from its second ask
+    /// The plain switch: plain_streams or more streams decoding (past their prompts), so the round's windows are plain.
+    fn wideRound(x: *const Lanes) bool {
+        const at = x.opts.depth.plain_streams;
+        if (at == 0) return false;
+        var n: usize = 0;
+        for (x.by_slot) |o| if (o) |st| {
+            n += @intFromBool(st.len > 0);
+        };
+        return n >= at;
+    }
 
     fn draft(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void {
         const x = self(ptr);
         try x.settle();
         _ = x.scratch.reset(.retain_capacity);
         const a = x.scratch.allocator();
-        const switch_on = x.opts.depth.plain_streams > 0;
-        const burst = switch_on and requests.len >= x.opts.depth.plain_streams; // the round's burst: the normal rules apply
+        const wide = x.wideRound();
         const asks = try a.alloc(iface.Ask, requests.len);
         const whose = try a.alloc(*St, requests.len);
         const depths = try a.alloc(u32, requests.len);
@@ -454,11 +459,12 @@ pub const Lanes = struct {
         var n: usize = 0;
         for (requests) |r| {
             const st = try x.get(r.stream);
+            const asks_now = r.depth > 0 and !wide;
             var at = st.len;
             if (r.rows) |path| {
                 if (r.start != st.base) return error.PositionMismatch;
                 const done = if (x.spec) |*sp| sp.ingested(st.slot, r.start, path) else false;
-                if (!done) try x.ingest(st, r.start, path); // the drafter's ring holds every committed row, drafted or not // a shared round drafts before its keep: the path, not st.len
+                if (!done) try x.ingest(st, r.start, path); // a shared round drafts before its keep: the path, not st.len
                 at = r.start + path.len;
             }
             if (r.position != at + 1) return error.PositionMismatch;
@@ -472,11 +478,7 @@ pub const Lanes = struct {
             st.n = 0;
             st.n_sib = 0;
             st.start = at;
-            if (r.depth == 0) continue;
-            if (switch_on) {
-                if (burst) st.burst_seen = true else st.wide_asks += 1;
-                if (!st.burst_seen and st.wide_asks < lone_asks_before_draft) continue; // the plain switch: the hold until its burst has formed or its second ask
-            }
+            if (!asks_now) continue; // no drafts asked, or the plain switch: a round this wide drafts none
             if (n == x.opts.slots) return error.TooManySlots;
             asks[n] = .{ .slot = st.slot, .anchor = anchor, .start = at, .params = dspark.Params.of(r.stream.sampling, at) };
             whose[n] = st;
@@ -536,7 +538,7 @@ pub const Lanes = struct {
     fn heldTree(ptr: *anyopaque, s: *Stream, gpa: Allocator) anyerror!?lanes.stream.Held {
         const x = self(ptr);
         const st = try x.get(s);
-        if (st.n == 0) return .{ .count = 0 }; // the ask was skipped (the plain switch's first round): the engine plans a plain window
+        if (st.n == 0) return .{ .count = 0 }; // no ask this round (the plain switch): the engine plans a plain window
         const total = st.nodes();
         const tokens = try gpa.alloc(u32, total);
         errdefer gpa.free(tokens);
