@@ -118,7 +118,7 @@ test "execution witness: a reader through park and reload cycles never sees a mi
     srv.load.attach(srv.engine);
     const text = try parts.Text.stamp(t.allocator, t.io, c.path, null);
     defer text.deinit();
-    const binary = try parts.Binary.openRunning(t.allocator, t.io);
+    const binary = try c.binary();
     defer binary.close(t.io);
     const state = try witness.State.init(t.allocator, t.io, srv, .{ .execution_witness = true }, binary, text);
     defer state.deinit();
