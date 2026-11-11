@@ -299,7 +299,8 @@ test "Qwen kept spares: a save into a reused buffer holds a new buffer's bytes, 
         defer f.deinit();
         const at = 40; // two full pages and a part, under pages
         f.fill(at, 6);
-        f.drop(try f.save(at)); // the spare holds that state's bytes
+        f.drop(try f.save(at));
+        @memset(f.t.spares.bufs[0].bytes, 0xc3); // another state's bytes in every place: a byte a save skips shows
         f.fill(at, 7);
         const kept = try f.save(at);
         try t.expectEqual(@as(usize, 1), Mock.pins);
