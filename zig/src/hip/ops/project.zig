@@ -1,5 +1,5 @@
-const std = @import("std");
 //! The products on a projection of any format, dispatched on its tag; `affine*` are the MLX affine path behind them.
+const std = @import("std");
 
 const t = @import("types.zig");
 const quant = @import("core").quant;
@@ -391,7 +391,6 @@ pub fn affineRouted(o: Ops, x: Tensor, w: Affine, items: u64, count: usize, memb
 }
 
 test "a routed prompt without its average rows per expert refuses, instead of guessing the 64-row tile" {
-    const std = @import("std");
     var arena = @import("../arena.zig").Arena.counting();
     const o: Ops = .{ .l = undefined, .bf16 = true, .stream = null, .arena = &arena, .prefill = true };
     const x = Tensor{ .ptr = 0, .kind = .bf16 };
