@@ -580,3 +580,6 @@ extern "C" __global__ void __launch_bounds__(256, 1) tf_ctl_pattn_64(const __nv_
 
 // Gates 1-4: the canonical expert reduction's leaf tree and finish, each with a planted fault.
 #include "contract_leaf_controls.cuh"
+
+// Gates 1-4: the TP prefill's rotate, combine, finish and place launches, each with planted faults.
+#include "contract_tppf_controls.cuh"

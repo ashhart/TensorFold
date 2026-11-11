@@ -320,9 +320,10 @@ pub fn Namespace(comptime Tri: type) type {
                     self.lanes.removeByPtr(gop.key_ptr);
                 }
                 if (drafting and from != .pool and l.part_seq != null) {
-                    l.part_draft = try Parts.take(&self.parts.drafts, self.engine.driver, mtp.Draft.partsBytes(self.head.?.ids.len, self.engine.chunk, self.engine.heads));
-                    l.draft = try mtp.Draft.initParts(self.gpa, self.engine.driver, self.stream, cap, self.head.?.ids.len, self.engine.chunk, self.engine.heads, l.part_draft.?);
-                } else if (drafting) l.draft = if (from == .pool) try self.kv.pool.?.draft(&l.seq, cap) else try mtp.Draft.init(self.gpa, self.engine.driver, self.stream, cap, self.head.?.ids.len, self.engine.chunk, self.engine.heads);
+                    const rows = try @import("exl3/prefill/cuda_exl3_prefill.zig").draftRows(self.engine);
+                    l.part_draft = try Parts.take(&self.parts.drafts, self.engine.driver, mtp.Draft.partsBytes(self.head.?.ids.len, rows, self.engine.heads));
+                    l.draft = try mtp.Draft.initParts(self.gpa, self.engine.driver, self.stream, cap, self.head.?.ids.len, rows, self.engine.heads, l.part_draft.?);
+                } else if (drafting) l.draft = if (from == .pool) try self.kv.pool.?.draft(&l.seq, cap) else try mtp.Draft.init(self.gpa, self.engine.driver, self.stream, cap, self.head.?.ids.len, try @import("exl3/prefill/cuda_exl3_prefill.zig").draftRows(self.engine), self.engine.heads);
                 if (s.images.len != 0) {
                     const v = self.vision orelse return error.VisionNotEnabled;
                     l.seq.media = try v.state(ids, s.images);
@@ -345,9 +346,10 @@ pub fn Namespace(comptime Tri: type) type {
                     return error.Cancelled;
                 }
                 const rows = @import("cuda_chunk.zig").passRows(&self.lanes, s, self.engine.chunk, self.engine.busy_chunk);
+                const step_rows = try @import("exl3/prefill/cuda_exl3_prefill.zig").stepRows(self.engine, rows, if (l.draft) |*d| d.rows_cap else null);
                 var marks: [prompt.batch.max_marks]prompt.batch.Mark = .{ .{}, .{} };
                 defer copies.dropPrepared(self, l);
-                const cut = copies.cut(self, s, l, ids, at, @min(ids.len, at + rows), &marks);
+                const cut = copies.cut(self, s, l, ids, at, @min(ids.len, at + step_rows), &marks);
                 const last = cut.stop == ids.len;
                 self.engine.ngram.warmAhead(ids, cut.stop, @min(ids.len, cut.stop + rows));
                 const previous_telemetry_phase = self.engine.telemetry.forward_phase;

@@ -129,6 +129,15 @@ starts a rank. These switches tune it:
 | `TF_FLASHNEXT_EXL3_ROUTED` | `host` | `host` or `device`; `device` keeps every routed expert on the device. |
 | `TF_FLASHNEXT_EXL3_ARCH` | unset | `unqualified` serves on a device that is not sm_120, without a claim. |
 | `TF_FLASHNEXT_EXL3_MTP_RESIDENT` | `0` | `0` or `1`; `1` keeps the MTP layer's experts on the device instead of a pool (one rank). |
+| `TF_FLASHNEXT_EXL3_PREFILL` | on | `0` or `1`; `0` turns the deep-chunk prefill path off. |
+| `TF_FLASHNEXT_EXL3_PREFILL_ROWS` | 8,192 general / 4,096 server | Whole nonnegative rows of a deep chunk; an explicit count sets both budgets. |
+| `TF_FLASHNEXT_EXL3_PREFILL_RING` | on | `0` or `1`; `0` stops streaming the coming layers' experts into one ring of the pools' lines. |
+| `TF_FLASHNEXT_EXL3_PREFILL_RING_AHEAD` | 1 | Whole nonnegative layers ahead the ring prefetches. |
+| `TF_FLASHNEXT_EXL3_PREFILL_OVERLAP` | on | `0` or `1`; `0` (two ranks) stops overlapping the all-reduce with a chunk's compute. |
+| `TF_FLASHNEXT_EXL3_PREFILL_REDUCED_BRANCH` | `0` | Experimental: `0` or `1`; `1` (two ranks) reduces the weighted branch in fp32, written back with unit weights. |
+| `TF_FLASHNEXT_EXL3_PREFILL_TWO_CHUNK` | `0` | Experimental: `0` or `1`; `1` (two ranks, ring) runs a second deep chunk beside the first when memory admits it. |
+| `TF_FLASHNEXT_EXL3_PREFILL_SNAP_GRID` | on | Diagnostics only: `0` or `1`; `0` keeps states at any row to test resumed versus fresh prompts. Removal still requires that qualification. |
+| `TF_FLASHNEXT_PROFILE` | `0` | Diagnostics only: `0` or `1`; `1` times the ranks' combine, all-reduce and place of a deep chunk, with a wait each. |
 | `TF_FLASHNEXT_PLE_READ` | `map` | `map` or `pread`; `pread` reads the n-gram embedding rows by positional read. |
 | `TF_FLASHNEXT_SNAP_HOST` | `1` above 32,768 tokens of context, else `0` | `0` or `1`: whether kept prompt-cache states live in pinned host memory. |
 | `TF_FLASHNEXT_CACHE_TELEMETRY` | `0` | Diagnostics only: `0` or `1`; `1` logs `EXL3-CACHE` expert-cache counters per phase, with a sync at each boundary. |

@@ -130,9 +130,17 @@ pub const text =
     \\  exl3-ple2 DIR [ROW] [N]    EXL3 n-gram table through cuda_ple.Ngram (ids, rows, RSS) and the PLE kernels vs float64
     \\  exl3-draft DIR [THREADS]   EXL3 draft head rows dequantised from lm_head vs the full head (Dense) and float64
     \\  exl3-prefill DIR experts|copy [LAYER]|dense  EXL3 prefill pieces on the pack: grouped experts by rows, expert-major passes, line copies, prompt Dense
+    \\  exl3-prefill DIR engine IDS N[,N] [LINES|-] [cmp] [ROWS[,ROWS]] [--decode N]  whole prefills through the deep chunks, timed; N greedy decode rounds after each (default 32)
+    \\  exl3-prefill DIR equal IDS N ROWS[,ROWS] [LINES] [--equal-first-size]  deep prefill at each chunk size vs the batched pass: last-row logits bytes and greedy tokens
+    \\  exl3-prefill DIR mixed IDS N STEP[,STEP] [LINES]  prompt cut into deep and shallow segments vs the batched pass and serial decode: logits bytes, tokens
+    \\  exl3-prefill DIR resume IDS N STEP[,STEP] CUT[,CUT] [LINES]  state kept at any row (snap grid off), resumed vs a fresh prompt; CUT<0: rows left
+    \\  exl3-tpprefill RANK WORLD PORT DIR IDS NS ROWS CAP deep|both DUMP [--greedy N] [--both-max N]  EXL3 deep prefill at tp=1/2 vs the batched pass and tp=1
     \\  exl3-pool DIR [equal|bench|hit FILES] [LAYERS]  Flash Next EXL3 expert offload pool on Experts' pointer tables vs fully resident
     \\  exl3-tiles [DIR]          EXL3's tile candidate: codebooks and tiles bit-equal, FP64, rows through qlinear and Dense
     \\  train-pack MODEL EXAMPLES [COUNT]   training passes holding several sequences against one a pass: differences, time
+    \\  exl3-prefill-contract     the prefill expert tiles alone through the contract (gates 1-4 and the control)
+    \\  exl3-promptd-contract     the prompt tiles in decode's bytes (tf_exl3_promptd_*) alone through the contract
+    \\  exl3-tppf-contract        the TP prefill's rotate, combine, finish and place launches alone through the contract
     \\  kernel-contract [WORD...]  the contract's gates, each planted control red (-Dnvcc); WORDs: kernels named so
     \\  qmm-prefill-many-contract the GB10 bit-exact multi-projection prompt launch against separate launches
     \\  qmm-prefill-tile22-contract the GB10 large-prompt 2x2 tile against the default tile

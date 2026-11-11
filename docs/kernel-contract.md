@@ -421,6 +421,28 @@ sum of |y w| with n = 11 and u = 2^-24, not the contract's depth 17: a term meet
 of c and one per tree level whose sibling holds terms, at most 11 - c, so n <= 11, as for the old one chain over the 11
 slots (the bound is the chain's, not a lower one). On router-like and wide-range rows the tree's worst output is no
 worse than the old chain's or a rank-split sum's and its mean within a quarter of the best of them.
+CUDA also checks Flash Next's EXL3 deep prefill: its rotate and gate-up pass (`tf_exl3pf_rotate`, `tf_exl3pf_gu`) and
+its down pass (`tf_exl3pf_down`), on rows of ten routed picks and the shared expert at 1 to 1,408 rows, each bit-equal
+to the grouped decode form of `exl3_experts` it replaces (the planted control runs the gate-up pass against a decode
+form with the other SwiGLU roundings); gate 4 runs zero trellis words, whose one dyadic weight makes every dot an exact
+FP32 integer. Its dense prompt tile (`exl3_candidate.cu`'s `tf_exl3_promptd_0`, `_1` and `_2`, one a codebook) is
+bit-equal to `linear_body` at 1 to 2,048 rows (the 64-row block's and the 256-row chunk's edges included) at every
+width of 1 to 8 bits, on each form `plan()` gives (a K split or none, 4 or 8 warps) and on a family's fixed plans (one
+split of 4 warps, two of 8); gate 4 runs all-ones states, one weight at every width, where an fp16 sum overflows. Four
+controls: the tile at another K split, one a codebook, and one that zeroes x's NaN and infinities (red at gate 1).
+CUDA also checks the deep prefill's rotate and its expert-parallel reduction on their own (`flashnext_exl3_prefill.cu`,
+`tf-cuda-test exl3-tppf-contract` runs them alone): `tf_exl3pf_rotate` (the tables of 16 experts, 1 to 1,408 rows of ten
+picks and the shared expert at width 2,560) against a host fp32 Hadamard in the kernel's butterfly order, bit for bit
+(NaN payloads aside), and `tf_exl3pf_tp_combine` (every rank's partial blocks into the all-gather layout at degrees 1
+to 8, one region or 256-row sub-blocks, to 2,048 rows, picks masked, foreign or past the table), `tf_exl3pf_tp_finish`
+(the gathered partials at degrees 2, 3, 5 and 8, to 4,096 rows) and `tf_exl3pf_tp_place` (y[r, 0] and the weights, the
+other slots untouched, to 1,024 rows), each byte-equal to the host `exl3_canon.zig` order, with float64's class and its
+bound on every output. Gate 4 runs a transform whose two big outputs leave the rest cancelling (rotate), mirrored
+integer products (combine) and shuffled pairs of 2^19 to 2^20 (finish); place has no sums (N/A). Fourteen controls: the
+rotate with NaN zeroed, its input written, the up table's signs from the gate table, and bf16 butterfly adds; the
+combine as one chain, with NaN products dropped, its input written, and bf16 tree adds; the finish as one chain, with
+bf16 merges and its input written; the place with NaN zeroed, its input written, and every weight 1. The host test
+`test-flashnext-tppf-contract-host` runs the same oracles through the gates and the gathered ranks equal to one rank.
 CUDA also checks Nemotron's pocket (`nemotron_ops.cu`, the learned neurons the living-weights learner adds beside the
 shared expert): relu^2 up into act rows and down added into the shared expert's slot, a block row a row and tiled, the
 down to fp32 and bf16, against float64, the neurons past the count NaN so a read of one shows (two controls: the up's
@@ -493,7 +515,7 @@ software decode.
 A restored 13.0 receipt can arrive after the later compiler sets. Such records mark `later_pending` so 13.0 and
 13.1 use their base usage, while 13.2 and later keep their independently measured or pending selection.
 A missing later receipt remains pending; a 13.0 measurement never substitutes for it.
-Flash Next's 4 EXL3 launches (`flashnext_exl3_pending.zig`) carry only an nvcc 13.4 receipt: they stay pending under
+Flash Next's 13 EXL3 launches (`flashnext_exl3_pending.zig`) carry only an nvcc 13.4 receipt: they stay pending under
 13.0 to 13.3 and take their 13.4 usage from `cuda_134`, which `pending_132.lookup` serves for that release.
 The first, `fn_exl3_split_f16`, also runs gates 1 to 4 on the CUDA runner (`contract_flashnext_exl3.zig`): an fp16
 row splits into bf16 hi = bf16(x) and lo = bf16(x - hi), every output's bits must equal float64's (NaN stays NaN; an
@@ -501,6 +523,8 @@ infinity gives hi = Inf and lo = NaN), and the device's hi + lo must equal x for
 hold all 65,536 fp16 patterns and partial last blocks (n = 1,000 and 65,537). Three controls go red: one flushing NaN
 and Inf to zero (gate 1), one launching whole blocks only (gate 3, at every tail) and one writing hi over its input
 (gate 2). Gate 4 is N/A: it has no sums.
+The other 12 launches of the set also run gates 1 to 4 on the CUDA runner (see the coverage above): the canonical tree
+and finish, the pick mask, the prefill's rotate, gate-up, down, combine, finish and place, and the prompt tiles.
 
 Gemma 4 CUDA tower QKV norms and nine-term pooling register FP32 sums and BF16 outputs.
 Their contract keeps the exact FP32 mirror and adds independent FP64 ranges at the BF16 nodes.
