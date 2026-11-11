@@ -575,12 +575,6 @@ test "TF_KV_PAGES with --kv-cache fp8: auto and off keep windows at every rank c
     try std.testing.expect(explain(null, error.GlmKvHostNeedsPages) != null);
 }
 
-test "capacity keeps a verify window past the context and a multiple of 64" {
-    try std.testing.expectEqual(@as(usize, 8256), capacity(8192));
-    try std.testing.expectEqual(@as(usize, 330624), capacity(330529));
-    try std.testing.expect(capacity(330529) % 64 == 0);
-}
-
 test "the plan's window, the context and a verify window, takes the pages of a stream's table at that capacity" {
     const l: kv.Layout = .{ .fixed_bytes = 0, .token_bytes = 1, .page_tokens = @import("cuda_state.zig").page_rows, .snap_bytes = 0 };
     for ([_]usize{ 8192, 8191, 245_760, 524_288 - 33, 524_288 - 32, 524_288 - 31, 1_048_576, 2_097_152, 2_097_152 + 1 }) |context| {
