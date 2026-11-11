@@ -22,7 +22,6 @@ pub const Weight = extern struct {
     m: c_int,
     n: c_int,
     k: c_int,
-    per_row: c_int = 0,
 };
 
 /// One byte a weight, an E4M3 code.
@@ -32,7 +31,7 @@ pub const bits: c_int = 8;
 const threads: c_int = 256;
 
 comptime {
-    // quant/fp8_tiles.hpp's ModelFp8, field for field: x, codes, scale, out, m, n, k, per_row
+    // quant/fp8_tiles.hpp's ModelFp8, field for field: x, codes, scale, out, m, n, k
     std.debug.assert(@sizeOf(Weight) == 48);
 }
 

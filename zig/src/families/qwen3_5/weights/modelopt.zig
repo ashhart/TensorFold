@@ -1,4 +1,4 @@
-//! ModelOpt's weight-only formats: NVFP4 kept as stored, the product kernel decoding it in flight; FP8 widened to BF16.
+//! ModelOpt's weight-only formats, NVFP4 and FP8, kept as stored with a product kernel decoding each in flight.
 
 const std = @import("std");
 const core = @import("core");
@@ -32,7 +32,7 @@ fn name(buf: []u8, key: []const u8, suffix: []const u8) ?[]const u8 {
     return std.fmt.bufPrint(buf, "{s}{s}", .{ key, suffix }) catch null;
 }
 
-/// `key`'s projection: ModelOpt's NVFP4 stays as stored (the kernel decodes e2m1 in flight); an FP8 layer is refused.
+/// `key`'s projection: ModelOpt's NVFP4 and FP8 stay as stored, their kernels decoding in flight.
 pub fn read(a: Allocator, t: *const table.Table, key: []const u8, what: Algo) !host.Projection {
     return switch (what) {
         .nvfp4 => .{ .nvfp4 = try quant.nvfp4.read(a, t, key) },

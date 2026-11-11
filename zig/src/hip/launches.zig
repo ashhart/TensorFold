@@ -103,7 +103,7 @@ pub const Launcher = struct {
     affine: affine.Kernels,
     /// The BF16 dense GEMM (raw BF16 weights through the dot2 GEMM tile).
     dense: dense.Kernels,
-    /// ModelOpt NVFP4: the prompt GEMM and the decode stream tile, weights decoded in flight.
+    /// ModelOpt NVFP4: one product kernel for a prompt's rows and a round's, weights decoded in flight.
     nvfp4: nvfp4.Kernels,
     /// ModelOpt FP8: the same product, E4M3 codes decoded in flight and one scale a projection.
     fp8: fp8.Kernels,

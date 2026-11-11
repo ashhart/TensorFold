@@ -418,7 +418,7 @@ fn kindOf(dtype: quant.DType) Error!t.Kind {
     };
 }
 
-/// An NVFP4 product: the checkpoint's codes and group scales as stored, e2m1 decoded in flight by one kernel.
+/// An FP8 product: the checkpoint's E4M3 codes as stored, decoded in flight and scaled once in f32.
 fn fp8Project(o: Ops, x: Tensor, proj: Projection, h: quant.fp8.Matrix, m: usize, f32_out: bool) Error!Tensor {
     if (m == 0 or x.kind != .bf16 or !o.bf16) return error.BadShape;
     const wide: Tensor = .{ .ptr = try o.arena.take(m * proj.n * 4), .kind = .f32 };
@@ -432,7 +432,6 @@ fn fp8Project(o: Ops, x: Tensor, proj: Projection, h: quant.fp8.Matrix, m: usize
         .m = int(m),
         .n = int(proj.n),
         .k = int(proj.k),
-        .per_row = @intFromBool(h.per_row),
     };
     launched.Kernels.gemmGo(&o.l.fp8, o.l.r, w, o.stream) catch |err|
         return if (err == error.Invalid) error.BadShape else error.HipFailed;
@@ -442,6 +441,7 @@ fn fp8Project(o: Ops, x: Tensor, proj: Projection, h: quant.fp8.Matrix, m: usize
     return narrow;
 }
 
+/// An NVFP4 product: the checkpoint's codes and group scales as stored, e2m1 decoded in flight by one kernel.
 fn nvfp4Project(o: Ops, x: Tensor, proj: Projection, h: quant.nvfp4.Matrix, m: usize, f32_out: bool) Error!Tensor {
     if (m == 0 or x.kind != .bf16 or !o.bf16) return error.BadShape;
     if (proj.k % 32 != 0) return error.BadShape;

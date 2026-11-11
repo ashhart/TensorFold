@@ -9,7 +9,7 @@ const Tensor = types.Tensor;
 pub const block = 128;
 
 /// What a kernel reads of a ModelOpt FP8 projection: the codes' address, the scale's and whether it is one a row.
-pub const Matrix = struct { codes: u64, scale: u64, per_row: bool };
+pub const Matrix = struct { codes: u64, scale: u64 };
 
 pub const View = struct { n: u32, k: u32, matrix: Matrix };
 

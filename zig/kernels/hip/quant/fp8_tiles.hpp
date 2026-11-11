@@ -1,8 +1,6 @@
 #pragma once
 
-// ModelOpt FP8's product: y[m, n] = scale[n] * sum over k of x[m, k] * e4m3(code[n, k]). Codes are stored one a byte,
-// the scale is one f32 a projection, and an E4M3 code turns into the exact f32 it names, so the sum is f32 and the
-// scale multiplies it once. One kernel for every row count, as the NVFP4 product has.
+// ModelOpt FP8's product: an E4M3 code a byte, one f32 scale a projection, the sum in f32 and the scale once.
 
 #include <hip/hip_bfloat16.h>
 #include <hip/hip_runtime.h>
@@ -15,14 +13,12 @@ namespace rocm {
 struct ModelFp8 {
     const void* x;        // (m, k) row major, bf16
     const void* codes;    // (n, k) row major, E4M3 one a byte
-    const float* scale;   // (n): one a projection, or one a row
+    const float* scale;   // (1): the projection's one scale
     float* out;           // (m, n)
     int m, n, k;
-    int per_row;          // 1 when the scale table is one a row
 };
 
-// An E4M3 code as the f32 it names: exact, since three mantissa bits fit twenty-three. 0x7f and 0xff are NaN and are
-// refused at read, so every byte here is a finite value.
+// An E4M3 code as the f32 it names, exactly: 0x7f and 0xff are NaN and refused at read.
 __device__ __forceinline__ float fp8_level(unsigned c) {
     const unsigned e = (c >> 3) & 0xfu, m = c & 0x7u;
     const float v = e == 0 ? static_cast<float>(m) * 0.125f * __uint_as_float((127u - 6u) << 23)
@@ -40,7 +36,7 @@ __device__ __forceinline__ void fp8_product(ModelFp8 a) {
         const hip_bfloat16* x = static_cast<const hip_bfloat16*>(a.x) + static_cast<long long>(row) * a.k;
         float acc = 0.f;
         for (int j = 0; j < a.k; ++j) acc = fmaf(static_cast<float>(x[j]), fp8_level(w[j]), acc);
-        a.out[i] = acc * a.scale[a.per_row != 0 ? col : 0];
+        a.out[i] = acc * a.scale[0];
     }
 }
 

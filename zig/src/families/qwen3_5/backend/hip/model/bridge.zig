@@ -21,7 +21,7 @@ pub fn projection(p: weights.Projection) Error!view.Projection {
             break :blk .{
                 .n = @intCast(d.weight.dim(0)),
                 .k = @intCast(d.weight.dim(1)),
-                .fp8 = .{ .codes = d.weight.ptr, .scale = d.scale.ptr, .per_row = d.scale.dim(0) > 1 },
+                .fp8 = .{ .codes = d.weight.ptr, .scale = d.scale.ptr },
             };
         },
     };

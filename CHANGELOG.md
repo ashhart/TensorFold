@@ -108,7 +108,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Prompt cache: when two disk restores in a row fail (a damaged or missing state file), the request now resumes from the shorter state it already had in RAM instead of prefilling from token 0, so the reply's `cached_tokens` reports that state's position (#2694). Thanks to @ThinkOffApp.
 
-- HIP: ModelOpt NVFP4 and FP8 checkpoints keep their codes as stored and decode them in flight, so a weight holds five bits of codes and scale, about 31% of BF16's bytes, and a decode reads about a third of the traffic; an FP8 row's E4M3 codes enter an f32 sum and take their scale once. The device keeps the checkpoint's own layout and the group table widens to BF16 at read, exactly; a stack of experts is refused because its experts carry a global scale each. One product kernel serves a prompt's rows and a round's, so a row's bits never depend on its round. Other backends refuse the format by name (#2490). Thanks to @ElderOrb.
+- HIP: ModelOpt NVFP4 and FP8 checkpoints keep their codes as stored and decode them in flight: an NVFP4 weight holds five bits of codes and group scale, about 31% of BF16's bytes, and a decode reads about a third of the traffic, while an FP8 weight keeps its byte and takes its scale once in f32. The device keeps the checkpoint's own layout and a group table widens to BF16 at read, exactly; a stack of experts is refused because its experts carry a global scale each. One product kernel serves a prompt's rows and a round's, so a row's bits never depend on its round. Other backends refuse the format by name (#2490). Thanks to @ElderOrb.
 
 
 ## 1.2.6

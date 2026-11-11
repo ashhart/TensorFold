@@ -12,8 +12,13 @@ const quant = core.quant;
 pub const Which = enum { nvfp4, fp8 };
 
 /// The kernel's own chain: k fmaf into the sum, a group's fmaf into the accumulator (NVFP4), then the scale.
-fn depth(s: c.Shape) usize {
+fn depthNv(s: c.Shape) usize {
     return s.k + s.k / quant.nvfp4.group + 1;
+}
+
+/// FP8 has no groups: k fmaf into the sum, then the scale.
+fn depthFp8(s: c.Shape) usize {
+    return s.k + 1;
 }
 
 const served = [_]c.Shape{
@@ -29,7 +34,10 @@ pub fn spec(w: Which) c.Spec {
             .fp8 => "hip ModelOpt FP8 product",
         },
         .accum = .f32,
-        .depth = depth,
+        .depth = switch (w) {
+            .nvfp4 => depthNv,
+            .fp8 => depthFp8,
+        },
         .out = .f32,
         .served = &served,
         .tiles = .{ .{ .size = 256 }, .{}, .{} },

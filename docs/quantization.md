@@ -153,8 +153,8 @@ row-invariant, and it does not go through rocBLAS.
 
 One kernel serves a prompt's rows and a round's, so a row's bits depend on its own inputs alone and not on how many
 rows its round carries. A product of the kernel stays inside the bound a chain of k fmaf and one a group allows of the
-format's f64 reference, and a row computed alone equals the same row in a round of four, bit for bit. Other backends name the format and refuse it
-rather than reading the codes as something else.
+format's f64 reference, and a row computed alone equals the same row in a round of four, bit for bit. Other backends
+name the format and refuse it rather than reading the codes as something else.
 
 ## GLM-5.3-Flash's float32 tensors on CUDA
 

@@ -33,6 +33,14 @@ pub const Names = struct {
     }
 };
 
+/// A ModelOpt checkpoint's routed experts are a stack of 4-bit weights with one global scale an expert: refused here.
+pub fn refuseModelOptExperts(cfg: *const config.Config) !void {
+    if (cfg.modelopt and cfg.spec.experts > 0) {
+        std.log.err("a ModelOpt checkpoint with routed experts is not read on this backend: its experts carry a global scale each", .{});
+        return error.UnsupportedQuantization;
+    }
+}
+
 pub const Checkpoint = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -45,11 +53,7 @@ pub const Checkpoint = struct {
     pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !Checkpoint {
         var cfg = try config.Config.read(gpa, io, dir);
         errdefer cfg.deinit();
-        // ModelOpt's routed experts are a stack of 4-bit weights with one global scale an expert: not read here
-        if (cfg.modelopt and cfg.spec.experts > 0) {
-            std.log.err("a ModelOpt checkpoint with routed experts is not read on this backend: its experts carry a global scale each", .{});
-            return error.UnsupportedQuantization;
-        }
+        try refuseModelOptExperts(&cfg);
         const bf16 = cfg.quant == .bf16;
         // a bf16 checkpoint's own shards are the index's: side files (a joint head) stay out of the table
         var files = try if (bf16) table.Files.indexed(gpa, io, dir) else table.Files.list(gpa, io, dir);
@@ -57,12 +61,13 @@ pub const Checkpoint = struct {
         if (files.model.len == 0) return error.NoSafetensors;
         var main = try Table.open(gpa, io, files.model, "", cfg.quant);
         errdefer main.close(io);
+        main.modelopt = cfg.modelopt;
         const names = Names.of(&main);
         if (names.refusal(bf16)) |why| {
             std.log.err("{s}", .{why});
             return error.UnexpectedTensor;
         }
-        // ModelOpt stores FP8 and NVFP4 tensors beside bf16 ones; the loader reads NVFP4 as stored and widens FP8.
+        // ModelOpt stores FP8 and NVFP4 tensors beside bf16 ones; the loader reads both as stored.
         if (bf16 and !cfg.modelopt) if (mixed(&main, names)) |key| {
             std.log.err("{s}: {t} in a bf16 checkpoint, whose text tensors are all BF16", .{ key, (try main.get(key)).dtype });
             return error.UnexpectedTensor;
