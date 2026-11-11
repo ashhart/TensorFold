@@ -26,6 +26,7 @@ const exl3 = @import("cuda_exl3.zig");
 const shared = @import("cuda_shared.zig");
 const index_mod = @import("cuda_index.zig");
 const l2pf_mod = @import("cuda_l2pf.zig");
+const owner_attn = @import("cuda_owner_attn.zig");
 const pieces_mod = @import("cuda_forward_pieces.zig");
 
 pub const prefill_rows = state.prefill_rows;
@@ -156,6 +157,7 @@ pub const Forward = struct {
     taps: ?taps_mod.Taps = null, // DFlash2 (--drafter): the tapped layers' rows, after each such layer
     index_split: bool = false, // TF_GLM_INDEX_SPLIT: this prompt chunk's indexer rows split across the ranks (rank 0's choice)
     l2pf: ?*const l2pf_mod.L2pf = null, // TF_GLM_L2PF: a decode window's sites read their next weights into L2
+    owners: ?*owner_attn.Room = null, // TF_GLM_KV_SPLIT: the exchange room for streams on owner-only rows
 
     /// TF_GLM_L2PF on this forward: a decode window of this process's one rank (a prompt chunk reads at full rate).
     pub fn prefetch(f: *const Forward) ?*const l2pf_mod.L2pf {
