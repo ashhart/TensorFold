@@ -101,3 +101,49 @@ test "a wrong map is refused: two pieces overlapping, a piece past its page or p
     m.at[1] = keep;
     try pieces.check(gpa, m);
 }
+
+test "rows by block: sizes, runs that never cross a block, addresses through any pages" {
+    const r: pieces.Rows = .{ .rows = 100, .block = 32, .row = 20 };
+    try t.expectEqual(@as(u32, 4), r.blocks());
+    var s: std.ArrayList(u64) = .empty;
+    defer s.deinit(gpa);
+    try r.sizes(gpa, &s);
+    try t.expectEqualSlices(u64, &.{ 640, 640, 640, 80 }, s.items);
+    const x = r.run(30, 10);
+    try t.expectEqual(@as(u32, 0), x.block);
+    try t.expectEqual(@as(u64, 600), x.offset);
+    try t.expectEqual(@as(u32, 2), x.rows); // rows 30 and 31; row 32 starts the next block
+    try t.expectEqual(@as(u32, 4), r.run(96, 32).rows); // the short last block
+    try t.expectEqual(@as(u32, 5), r.run(64, 5).rows);
+    const bases = [_]u64{ 9000, 1000, 5000, 3000 };
+    try t.expectEqual(@as(u64, 9000 + 31 * 20), r.at(&bases, 31));
+    try t.expectEqual(@as(u64, 1000), r.at(&bases, 32));
+    try t.expectEqual(@as(u64, 3000 + 3 * 20), r.at(&bases, 99));
+    var i: u32 = 0; // every row once, block by block
+    var n: u32 = 0;
+    while (i < r.rows) : (n += 1) i += r.run(i, r.rows).rows;
+    try t.expectEqual(@as(u32, 4), n);
+}
+
+/// A walk over `n` caller rows against Rows.at over `ref` from row `from`: whether every address matches.
+fn walkMatches(p: pieces.Placed, ref: []const u64, from: u32, n: u32) bool {
+    var i: u32 = 0;
+    while (i < n) {
+        const x = p.next(i, n);
+        for (0..x.rows) |k| if (x.addr + k * p.rows.row != p.rows.at(ref, from + i + @as(u32, @intCast(k)))) return false;
+        i += x.rows;
+    }
+    return true;
+}
+
+test "placed rows: a walk from any row hits each row's own address; planted: swapped blocks or a lost offset are seen" {
+    const r: pieces.Rows = .{ .rows = 100, .block = 32, .row = 20 };
+    const bases = [_]u64{ 9000, 1000, 5000, 3000 };
+    for ([_]u32{ 0, 1, 20, 31, 32, 63 }) |from| try t.expect(walkMatches(.{ .bases = &bases, .rows = r, .from = from }, &bases, from, 100 - from));
+    const swapped = [_]u64{ 9000, 5000, 1000, 3000 };
+    try t.expect(!walkMatches(.{ .bases = &swapped, .rows = r, .from = 20 }, &bases, 20, 50));
+    try t.expect(!walkMatches(.{ .bases = &bases, .rows = r, .from = 0 }, &bases, 20, 50)); // the offset lost
+    const p: pieces.Placed = .{ .bases = &bases, .rows = r, .from = 20 };
+    try t.expectEqual(@as(u32, 12), p.next(0, 50).rows); // rows 20..31, then block 1
+    try t.expectEqual(@as(u64, 1000), p.next(12, 50).addr);
+}

@@ -32,6 +32,47 @@ pub const Map = struct {
     }
 };
 
+/// A matrix of `rows` rows of `row` bytes as pieces of `block` rows each (the last one short), read by row.
+pub const Rows = struct {
+    rows: u32,
+    block: u32,
+    row: u64,
+
+    pub fn blocks(r: Rows) u32 {
+        return (r.rows + r.block - 1) / r.block;
+    }
+
+    /// Each block's bytes, appended in block order (the pieces' sizes).
+    pub fn sizes(r: Rows, gpa: Allocator, out: *std.ArrayList(u64)) error{OutOfMemory}!void {
+        for (0..r.blocks()) |k| try out.append(gpa, @min(r.block, r.rows - k * r.block) * r.row);
+    }
+
+    /// From row `i`: its block, the byte offset inside it and the rows (at most `left`) that follow it contiguous.
+    pub fn run(r: Rows, i: u32, left: u32) struct { block: u32, offset: u64, rows: u32 } {
+        std.debug.assert(i < r.rows);
+        return .{ .block = i / r.block, .offset = @as(u64, i % r.block) * r.row, .rows = @min(left, r.block - i % r.block, r.rows - i) };
+    }
+
+    /// Row `i`'s address, `bases` the blocks' addresses.
+    pub fn at(r: Rows, bases: []const u64, i: u32) u64 {
+        const x = r.run(i, 1);
+        return bases[x.block] + x.offset;
+    }
+};
+
+/// A Rows matrix placed: its blocks' addresses, and the row a caller's row 0 is (none placed: no bases).
+pub const Placed = struct {
+    bases: []const u64 = &.{},
+    rows: Rows = .{ .rows = 0, .block = 1, .row = 0 },
+    from: u32 = 0,
+
+    /// From the caller's row `i` of `n`: the address and the rows that follow it contiguous.
+    pub fn next(p: Placed, i: u32, n: u32) struct { addr: u64, rows: u32 } {
+        const x = p.rows.run(p.from + i, n - i);
+        return .{ .addr = p.bases[x.block] + x.offset, .rows = x.rows };
+    }
+};
+
 /// `sizes` packed first-fit decreasing on pages of `page` bytes, each piece starting at a multiple of `alignment`.
 pub fn pack(gpa: Allocator, sizes: []const u64, page: u64, alignment: u64) error{ PieceOverPage, OutOfMemory }!Map {
     const order = try gpa.alloc(u32, sizes.len);
