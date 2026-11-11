@@ -25,6 +25,8 @@ fn argsOf(symbol: []const u8) u32 {
         .{ "gated_norm", 12 },
         .{ "swiglu", 7 },
         .{ "argmax", 3 },
+        .{ "topk_part", 6 },
+        .{ "topk_merge", 6 },
         .{ "embed", 6 },
         .{ "tp2_allreduce_f16", 4 },
         .{ "tp4_allreduce_f16", 6 },
