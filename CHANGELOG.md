@@ -4,7 +4,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
-- DeepSeek-V4.1 on Metal: rounds with three or more active streams decode plain and skip the draft pass, since drafts lose there (#1720, part of #1676).
+- DeepSeek-V4.1 on Metal: rounds with three or more decoding streams decode plain, with no draft pass and no drafter ingest, since drafts lose there; when fewer streams decode again the drafter takes the rows it missed from the target, so its drafts are the ones it would have made (#1720, part of #1676).
 
 - Flash Next: twenty-nine `TF_FLASHNEXT_*` settings refuse a malformed value by name at startup, before any device work on CUDA, and a Metal load refuses them too; blank `TF_FLASHNEXT_KV_PAGE_TEST` and `TF_FLASHNEXT_KEEP_LATE` read as unset, and a non-finite confidence is refused (#2585, part of #2370). Thanks to @devopsfortunato.
 - Flash Next on CUDA: twenty-nine `TF_FLASHNEXT_*` settings refuse a malformed value by name at startup, before any
