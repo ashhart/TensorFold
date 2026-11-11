@@ -13,7 +13,7 @@ pub const Sums = struct { ref: Ref, stride: u32 };
 pub const Key = struct { kind: Kind, n: u32 = 0, k: u32, slices: u32 = 0, tile: u32 = 0, tmr: u32 = 0, edge: bool = false, skip: u32 = 0, cut: [2]u32 = .{ 0, 0 }, bits: u8 = 4, group: u32 = 64, long: bool = false };
 pub const Kind = enum { projection, xsum, norm, input_norm, mlp, ane_input, mlp_ane, add_ane };
 
-/// Whether prompt chunks take one reg dispatch a projection (`Kernels.long_prompt`): Ultras with tensor units only.
+/// Whether prompt chunks take one dispatch a projection (`Kernels.long_prompt`): Ultras with tensor units only.
 pub fn longPrompt(name: []const u8, tensor_units: bool) bool {
     return tensor_units and std.mem.endsWith(u8, name, " Ultra");
 }
@@ -56,7 +56,7 @@ pub const Kernels = struct {
     pair_twins: std.AutoHashMapUnmanaged([2]usize, bool) = .empty,
     /// Set around prompt chunks: prompt rows take projection.promptSplit, decoded rows the decode split.
     prompt: bool = false,
-    /// Set on `longPrompt` chips: prompt chunks past 128 rows take one reg dispatch a projection, on their own key.
+    /// Set on `longPrompt` chips: chunks past a short entry's capacity take one dispatch on a separate long key.
     long_prompt: bool = false,
     lanes: std.AutoHashMapUnmanaged(Key, lane.Projection) = .empty,
     cache: std.AutoHashMapUnmanaged(Key, mtl.Pipeline) = .empty,
@@ -174,7 +174,7 @@ pub const Kernels = struct {
                 .output = if (cut[1] > 0) .f32 else .bf16,
                 .precompute_sums = reg or (p.bits == 8 and p.group == 64),
                 .reg = reg,
-                .rows = if (long) lane.max_reg_rows else lane.reg_rows,
+                .rows = if (long) lane.max_reg_rows else if (reg) lane.reg_rows else 16,
             });
             k.joined(entry.value_ptr);
         }
@@ -246,7 +246,7 @@ pub const Kernels = struct {
         }
         const reg = p.bits == 4 and p.group == 64;
         if (!reg and (skip > 0 or cut[1] > 0)) return error.BadCoreProjectionRows;
-        const long = reg and longKey(k.long_prompt, k.prompt, rows);
+        const long = if (reg) longKey(k.long_prompt, k.prompt, rows) else k.long_prompt and k.prompt and rows > 16;
         const sums: ?Sums = if (reg or (p.bits == 8 and p.group == 64)) xs else null;
         const entry = try k.laneEntry(p, sk, skip, cut, long);
         const step = entry.value_ptr.max_rows;
