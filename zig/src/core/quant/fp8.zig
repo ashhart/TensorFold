@@ -99,12 +99,14 @@ fn checked(store: anytype, module: []const u8, tail: []const u8, dtype: types.DT
     if (t.is(dtype, shape) and t.bytes.len == size * dtype.size()) return t;
     var own: Why = .{};
     const w = why orelse &own;
-    w.set("{s}: {t} {any}, expected {t} {any}", .{ name, t.dtype, t.shape[0..t.rank], dtype, shape });
+    if (t.is(dtype, shape)) {
+        w.set("{s}: {d} bytes, {t} {any} needs {d}", .{ name, t.bytes.len, dtype, shape, size * dtype.size() });
+    } else w.set("{s}: {t} {any}, expected {t} {any}", .{ name, t.dtype, t.shape[0..t.rank], dtype, shape });
     if (why == null) std.log.err("{s}", .{w.text()});
     return error.UnexpectedTensor;
 }
 
-/// `scale_inv` as f32 into `out`, exactly (f32 copied bit for bit); `finite` refuses NaN and infinity.
+/// `scale_inv` as f32 into `out`: exact (f32 bit for bit), an f16 NaN stays a NaN; `finite` refuses NaN and infinity.
 pub fn widen(scale_inv: Tensor, out: []f32, finite: bool) error{ UnexpectedTensor, UnsupportedQuantization }!void {
     const dtype = scale_inv.dtype;
     if (!convert.tableDtype(dtype) or out.len != scale_inv.numel() or scale_inv.bytes.len != out.len * dtype.size())
