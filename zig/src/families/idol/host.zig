@@ -1,9 +1,29 @@
 //! The host's part of an Idol denoiser pass: the schedule, the time modulation, the camera token and its velocity.
 const std = @import("std");
 const cfg = @import("config.zig");
-const Host = @import("weights.zig").Host;
 
 const H = cfg.hidden;
+
+/// The fp32 vectors and small matrices the host reads each timestep.
+pub const Host = struct {
+    t1: []const f32,
+    t1_b: []const f32,
+    t2: []const f32,
+    t2_b: []const f32,
+    ada: []const f32,
+    ada_b: []const f32,
+    cam1: []const f32,
+    cam1_b: []const f32,
+    cam2: []const f32,
+    cam2_b: []const f32,
+    cam_out: []const f32,
+    cam_out_b: []const f32,
+    /// Each modulated block's own shift table [6144]: the noise refiner's, then the joint blocks'.
+    shifts: [cfg.modulated][]const f32,
+    /// The output's shift table [2, 1024].
+    head: []const f32,
+    pos: []const f32,
+};
 
 pub fn half(x: f32) f32 {
     return @as(f16, @floatCast(x));
