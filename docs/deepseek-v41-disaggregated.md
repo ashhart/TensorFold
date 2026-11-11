@@ -213,10 +213,41 @@ is kept off the pair for now. `TF_PREFILL_ROUTE=always` restores the old behavio
 to the pair, queued behind any pull under way, however long that is. Not yet measured on the machines: two concurrent 8k
 prompts, and the rates the average settles at.
 
+### A pair that goes away
+
+* **Deadline.** A pull is bound by `TF_PREFILL_TIMEOUT_S` if set, else by 15 s plus three times the pull the Mac's own
+  timings predict for it (the prefix at the pair's measured rate plus the last-token pass), between 30 s and 30 min; the
+  trigger and, over HTTP, the transfer each get that. A pair that stopped answering is found in about a minute, not after
+  an hour-long default.
+* **Circuit breaker.** After `TF_PREFILL_BREAKER` failed pulls in a row (default 3; the link down, a connect or trigger
+  that timed out; a refusal or a mismatch is an answer and does not count) the breaker opens: prompts are prefilled on the
+  Mac (the log says why once: `the pair is not answering`), and nothing is sent to the pair for `TF_PREFILL_COOLDOWN_S` (default
+  30). Then one prompt is the trial: `GET /health` on the GB10 server (2 s) and, over MCDMA, a re-open of the link, then the
+  pull. If it succeeds the breaker closes (`remote prefill: the pair answers again`); if not it opens for another
+  cool-down. `TF_PREFILL_BREAKER=0` never stops pulling.
+* **The connect daemon restarts.** `mcdma-rpcd connect` unlinks and recreates its mailbox at every start, and a mapping
+  of the old object never sees the new link. Before each pull the server checks that the mailbox name still maps the
+  object it holds (POSIX shared memory on a Mac has no inode, so it writes a nonce into the payload bytes of its own
+  mapping, which nothing reads between calls, and looks for it through a new mapping of the name) and, if the daemon
+  replaced it, maps the new one (backoff 1 s to 30 s while that is refused) and makes a new client: no server restart
+  (`remote prefill: the connect daemon's mailbox was replaced; the link was re-opened`). The producer's listen daemon
+  restarting is healed on the GB10 side (the producer attaches again, at most once a second).
+
+### A request that goes away
+
+The server tells a pull when its request ended (the client hung up, or the request was cancelled): a pull waiting at the
+gate, for the trigger's reply, or between the decoder's calls stops at once and the export it opened is released, and the
+Mac does not log a failure. The GB10's prompt pass itself is **not** stopped. The two ranks run it in lock step (the
+follower is driven by the leader's every pass), so abandoning it on one rank would leave the other waiting on a
+collective: it runs to its end, the export it makes is dropped by the producer when its time to live (120 s) ends, and a
+hand-off request cancelled before its cut is not captured at all.
+
 ## 8. Verify
 
 A reply with a long prompt carries, in its `tensorfold` block, `"exact_mode": "remote_prefix"`, `remote_prefix` and
-`pulled_prefix` (tokens). A failed pull logs `remote prefill failed (REASON); the prompt is prefilled here` and the reply has
+`pulled_prefix` (tokens), plus `remote_route` and the pull's phases (`remote_queue_seconds`, `remote_trigger_seconds`, `remote_pull_seconds`,
+`remote_land_seconds`, `remote_tail_seconds`, `remote_bytes`, `remote_tokens_per_second`; see `docs/api.md`), and the server logs one
+`remote prefill: N tokens pulled: gate .., trigger .., transfer ..` line for each. A failed pull logs `remote prefill failed (REASON); the prompt is prefilled here` and the reply has
 none of those fields. To prove the bytes used the cable, not the LAN, read the producer port's counters around a request:
 
 ```
