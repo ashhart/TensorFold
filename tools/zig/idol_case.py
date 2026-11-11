@@ -12,6 +12,8 @@ from pathlib import Path
 
 USAGE = """\
   case WEIGHTS SDK OUT --features F [F]    noise, each step's input and both velocities, the final sample
+  case WEIGHTS SDK OUT --synthetic-conditioning --cond-seed N
+                                           the same, on feature1 and feature2 drawn N(0, 1) from seed N (no encoders)
   blocks WEIGHTS SDK CASE [--step S]       every block's rows at step S, and each block in float32 on its input
   exact WEIGHTS SDK CASE [--steps N]       both velocities in float32 on the case's first N inputs (the ruler)
 WEIGHTS is a speridlabs/idol snapshot; SDK an idol-sdk checkout at the pinned commit. F holds feature1 (DINOv3 rows
@@ -71,6 +73,14 @@ def features(paths: list[str]):
     return found["feature1"].float(), found["feature2"].float()
 
 
+def synthetic(seed: int):
+    """feature1 and feature2 [1, 4101, C] float32 drawn N(0, 1) from `seed`, in that order, in place of the encoders."""
+    import torch
+
+    gen = torch.Generator("cpu").manual_seed(seed)
+    return tuple(torch.randn((1, 4101, width), generator=gen, dtype=torch.float32) for width in (1280, 128))
+
+
 def condition(f1, f2, device: str):
     """The sampler's cond and neg_cond (both streams zeroed), as IdolPipeline passes them."""
     from tensordict import TensorDict
@@ -102,7 +112,7 @@ def case(args) -> int:
     out.mkdir(parents=True, exist_ok=True)
     model = denoiser(args.weights, args.sdk, args.device)
     _, sample_flow = sdk(args.sdk)
-    f1, f2 = features(args.features)
+    f1, f2 = synthetic(args.cond_seed) if args.synthetic_conditioning else features(args.features)
     cond, neg = condition(f1, f2, args.device)
     gen = torch.Generator("cpu").manual_seed(args.seed)
     latent = torch.randn((8192, 16), generator=gen, dtype=torch.float32)
@@ -139,7 +149,8 @@ def case(args) -> int:
     save_file(tensors, str(out / "case.safetensors"))
     meta = {"seed": args.seed, "steps": args.steps, "cfg": args.cfg, "rescale_t": args.rescale_t,
             "device": args.device, "torch": torch.__version__, "sdk": SDK_COMMIT, "weights": WEIGHTS_REVISION,
-            "torch_forward_s": [round(c["s"], 3) for c in calls]}
+            "conditioning": {"synthetic": True, "cond_seed": args.cond_seed} if args.synthetic_conditioning else
+            {"synthetic": False}, "torch_forward_s": [round(c["s"], 3) for c in calls]}
     (out / "reference.json").write_text(json.dumps(meta, indent=1) + "\n")
     times = sorted(meta["torch_forward_s"])
     print(json.dumps({k: v for k, v in meta.items() if k != "torch_forward_s"} | {"median_forward_s": times[len(times) // 2]}))
@@ -226,7 +237,10 @@ def main(argv: list[str]) -> int:
         p.add_argument("out_dir" if name == "case" else "case_dir")
         p.add_argument("--device", default="mps", choices=("mps", "cpu", "cuda"))
         if name == "case":
-            p.add_argument("--features", nargs="+", required=True)
+            given = p.add_mutually_exclusive_group(required=True)
+            given.add_argument("--features", nargs="+")
+            given.add_argument("--synthetic-conditioning", action="store_true")
+            p.add_argument("--cond-seed", type=int, default=0)
             p.add_argument("--seed", type=int, default=42)
             p.add_argument("--steps", type=int, default=50)
             p.add_argument("--cfg", type=float, default=3.0)

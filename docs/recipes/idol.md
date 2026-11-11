@@ -84,6 +84,7 @@ commit's, and the snapshot only when it is the pinned revision.
 hf download speridlabs/idol --revision 2731c2291fc65a797c5cb627a5e5526fc1490902 --local-dir WEIGHTS
 git clone https://github.com/speridlabs/idol-sdk SDK && git -C SDK checkout 4702a7f00850e34b6e83a2170cc123c3e9570744
 python3 tools/zig/idol_case.py case WEIGHTS SDK case/ --features dino.safetensors vae.safetensors
+python3 tools/zig/idol_case.py case WEIGHTS SDK case/ --synthetic-conditioning --cond-seed N  # or: no encoders
 python3 tools/zig/idol_case.py exact WEIGHTS SDK case/             # the same steps with an fp32 denoiser
 python3 tools/zig/idol_case.py blocks WEIGHTS SDK case/ --step 0   # each block's input and output, fp16 and fp32
 zig build tf-idol -Dcpu=apple_m1
