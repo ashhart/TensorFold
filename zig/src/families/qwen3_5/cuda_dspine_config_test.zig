@@ -44,3 +44,36 @@ test "DSpine CUDA config: a target of another width or depth refuses it before a
     g.layers = 32;
     try t.expectError(error.UnsupportedDraftConfig, Config.parse(a, fixture, g));
 }
+
+test "DSpine CUDA config: a served window narrows the checkpoint's 8,192 rows, and one outside a block..its own is refused" {
+    var doc = try std.json.parseFromSlice(std.json.Value, a, fixture, .{});
+    defer doc.deinit();
+    const dspine = @import("cuda_dspine_config.zig");
+    const own = try dspine.parseWindow(doc.value, target(), 0);
+    try t.expectEqual(@as(usize, 8192), own.window);
+    const narrow = try dspine.parseWindow(doc.value, target(), 4096);
+    try t.expectEqual(@as(usize, 4096), narrow.window);
+    try t.expectEqual(@as(usize, 4096 + 16), narrow.ringRows());
+    try t.expectEqual(@as(usize, 17), narrow.chunks());
+    try t.expectEqual(@as(usize, 16), (try dspine.parseWindow(doc.value, target(), 16)).window);
+    try t.expectError(error.DSpineWindowOutOfRange, dspine.parseWindow(doc.value, target(), 15));
+    try t.expectError(error.DSpineWindowOutOfRange, dspine.parseWindow(doc.value, target(), 8193));
+}
+
+test "DSpine CUDA config: TF_DSPINE_WINDOW is read, unset or blank keeps the checkpoint's, a wider one is refused" {
+    var doc = try std.json.parseFromSlice(std.json.Value, a, fixture, .{});
+    defer doc.deinit();
+    const dspine = @import("cuda_dspine_config.zig");
+    try t.expectEqual(@as(usize, 4096), (try dspine.parseRaw(doc.value, target(), "4096")).window);
+    try t.expectEqual(@as(usize, 16), (try dspine.parseRaw(doc.value, target(), "16")).window);
+    try t.expectEqual(@as(usize, 8192), (try dspine.parseRaw(doc.value, target(), null)).window);
+    try t.expectEqual(@as(usize, 8192), (try dspine.parseRaw(doc.value, target(), " ")).window);
+    try t.expectError(error.InvalidEnvironment, dspine.parseRaw(doc.value, target(), "15"));
+    try t.expectError(error.InvalidEnvironment, dspine.parseRaw(doc.value, target(), "8193"));
+    const own_2048 = try std.mem.replaceOwned(u8, a, fixture, "\"sliding_window\":8192", "\"sliding_window\":2048");
+    defer a.free(own_2048);
+    var narrow = try std.json.parseFromSlice(std.json.Value, a, own_2048, .{});
+    defer narrow.deinit();
+    try t.expectEqual(@as(usize, 2048), (try dspine.parseRaw(narrow.value, target(), null)).window);
+    try t.expectError(error.DSpineWindowOutOfRange, dspine.parseRaw(narrow.value, target(), "4096"));
+}
