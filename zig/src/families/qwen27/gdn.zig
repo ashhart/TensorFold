@@ -42,7 +42,6 @@ pub const Buffers = struct {
     value: Span,
     decay: Span,
     mixing: Span,
-    tails: Span,
     snapshots: Span,
     recurrent: Span,
     output: Span,
@@ -76,7 +75,6 @@ pub const Buffers = struct {
         inline for (.{ "query", "key" }) |name| try @field(b, name).check(sizes.query);
         inline for (.{ "value", "recurrent", "output" }) |name| try @field(b, name).check(sizes.value);
         try b.decay.check(sizes.decay);
-        try b.tails.check(sizes.tails);
         try b.snapshots.check(sizes.snapshots);
         try b.parents.check(try abi.countBytes(i32, p.rows, 1));
         try b.windows.check(try abi.countBytes(u32, p.rows, p.taps));
@@ -90,7 +88,7 @@ pub const Buffers = struct {
         const reads = [_]Span{ b.qkv, b.a, b.b, b.z, b.conv_weight, b.a_log, b.dt, b.norm, b.history, b.state, b.parents, b.windows, b.row_slots, b.segments, b.keeps, b.kept_rows, b.slot_steps };
         // an in-place round's next state is its state: each scan thread reads its own words before it writes them
         const in_place = b.next_state.buffer.id == b.state.buffer.id and b.next_state.offset == b.state.offset and b.next_state.bytes == b.state.bytes;
-        const writes = [_]Span{ b.query, b.key, b.value, b.decay, b.mixing, b.tails, b.snapshots, b.recurrent, b.output, if (in_place) .{ .buffer = b.state.buffer, .bytes = 0 } else b.next_state, b.next_history, b.before orelse Span{ .buffer = b.state.buffer, .bytes = 0 } };
+        const writes = [_]Span{ b.query, b.key, b.value, b.decay, b.mixing, b.snapshots, b.recurrent, b.output, if (in_place) .{ .buffer = b.state.buffer, .bytes = 0 } else b.next_state, b.next_history, b.before orelse Span{ .buffer = b.state.buffer, .bytes = 0 } };
         inline for (writes, 0..) |write, index| {
             inline for (reads) |read| if (write.overlaps(read)) return error.AliasedGdnState;
             inline for (writes[0..index]) |other| if (write.overlaps(other)) return error.AliasedGdnState;
@@ -123,7 +121,7 @@ pub const Round = struct {
         e.setPipeline(r.pipelines.pre);
         bind(e, .{ r.b.qkv, r.b.a, r.b.b, r.b.history, r.b.conv_weight, r.b.a_log, r.b.dt, r.b.windows, r.b.row_slots }, 0);
         e.setValue(r.p, 9);
-        bind(e, .{ r.b.query, r.b.key, r.b.value, r.b.decay, r.b.mixing, r.b.tails }, 10);
+        bind(e, .{ r.b.query, r.b.key, r.b.value, r.b.decay, r.b.mixing }, 10);
         e.dispatchGroups(.{ .width = 1, .height = 2 * r.p.nk + r.p.nv, .depth = r.p.rows }, .{ .width = 32, .height = 1, .depth = 1 });
         e.barrier();
     }
