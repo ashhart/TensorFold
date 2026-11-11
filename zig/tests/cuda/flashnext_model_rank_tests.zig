@@ -6,10 +6,10 @@ const check = @import("check.zig");
 const prompt = flash.prompt;
 const ranks = flash.rank_engine;
 
-/// `mode` "leave": rank 0 decodes until its peer is stopped from outside, and must see it as an error.
-pub fn run(gpu: check.Gpu, dir: []const u8, rank: usize, port: u16, ids_path: []const u8, mode: []const u8) !void {
+/// `mode` "leave": rank 0 decodes until its peer is stopped from outside and must see an error; `master` hosts rank 0.
+pub fn run(gpu: check.Gpu, dir: []const u8, rank: usize, port: u16, ids_path: []const u8, mode: []const u8, master: []const u8) !void {
     const leave = std.mem.eql(u8, mode, "leave");
-    if (mode.len > 0 and !leave) return error.UnknownMode;
+    if (mode.len > 0 and !leave and !std.mem.eql(u8, mode, "rounds")) return error.UnknownMode;
     const context = 1024;
     // TF_FLASHNEXT_CHUNK's rows a pass: past 64 a pass takes the expert exchange, at most 64 the all-reduce
     const chunk = try prompt.chunkRows();
@@ -26,7 +26,7 @@ pub fn run(gpu: check.Gpu, dir: []const u8, rank: usize, port: u16, ids_path: []
     defer glue.deinit();
     const tri: flash.Tri = .{ .s = stream, .own = &glue };
     const identity = try ranks.identity(gpu.gpa, gpu.io, dir, context, chunk);
-    const session = try ranks.Session.init(gpu.gpa, gpu.io, "127.0.0.1", port, rank, identity, ranks.linkWait());
+    const session = try ranks.Session.init(gpu.gpa, gpu.io, master, port, rank, identity, ranks.linkWait());
     const engine = prompt.Engine.initRank(gpu.gpa, gpu.io, @constCast(gpu.d), &stream, dir, 2, rank) catch |err| {
         session.poison();
         session.deinit();
@@ -43,9 +43,11 @@ pub fn run(gpu: check.Gpu, dir: []const u8, rank: usize, port: u16, ids_path: []
     try check.expect(room > prompt.seqBytes(context, engine.heads) * 6, "both ranks have room for experimental caches", .{});
     var logits = try cuda.DeviceBuffer.alloc(gpu.d, 2 * prompt.vocabulary * 2);
     defer logits.free();
+    const graph = identity.decode_graph == 1;
     if (rank == 1) {
         try session.follow(flash.Tri, tri, logits.ptr);
-        check.pass("rank 1 replay completed", .{});
+        if (!leave) try expectCounts(engine, graph);
+        check.pass("rank 1 replay completed (dense split {d})", .{identity.dense_split});
         return;
     }
     var first = try session.create(context);
@@ -83,7 +85,6 @@ pub fn run(gpu: check.Gpu, dir: []const u8, rank: usize, port: u16, ids_path: []
     for ([_]*prompt.Seq{ &twin, &twin2 }) |q| try session.forward(flash.Tri, tri, q, ids.items, .{});
     try session.forward(flash.Tri, tri, &twin, &.{token}, .{});
     try session.forward(flash.Tri, tri, &twin2, &.{token}, .{});
-    const graph = identity.decode_graph == 1;
     var held: ?cuda.abi.GraphExec = null;
     for (0..24) |i| {
         try roundPair(session, tri, &.{&first}, &.{&twin}, logits.ptr, graph);
@@ -105,7 +106,14 @@ pub fn run(gpu: check.Gpu, dir: []const u8, rank: usize, port: u16, ids_path: []
     }
     try check.sameBytes("a filled prompt's rows", first.logits, twin.logits);
     for (0..12) |_| try roundPair(session, tri, &.{&first}, &.{&twin}, logits.ptr, graph);
-    check.pass("52 rounds equal eager rows byte for byte (round graph {}): replays, two lanes, owner order, 512 seam", .{graph});
+    try expectCounts(engine, graph);
+    check.pass("52 rounds equal eager rows byte for byte (round graph {}, dense split {d}): replays, two lanes, owner order, 512 seam", .{ graph, identity.dense_split });
+}
+
+/// Both ranks capture the same keys: the concurrent round, one lane, two lanes, their swap and each side of the seam.
+fn expectCounts(engine: *prompt.Engine, graph: bool) !void {
+    const want: [2]u64 = if (graph) .{ 6, 47 } else .{ 0, 0 };
+    try check.expect(std.meta.eql(want, [2]u64{ engine.round_graph.captures, engine.round_graph.replays }), "round graphs captured and replayed {any}, want {any}", .{ [2]u64{ engine.round_graph.captures, engine.round_graph.replays }, want });
 }
 
 /// A round of `seqs` on their argmax tokens (graphed when on), then each twin's eager row on that token: equal bytes.
