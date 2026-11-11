@@ -447,6 +447,10 @@ below; these are estimates for planning a port, not results.
 25. **Tensor parallel ranks.** A model splits over two or more GPUs or hosts, so a model that doesn't fit one box
     runs, and decode reads each rank's share of the weights. Mixed Metal and CUDA ranks are tracked in [#1236].
 
+    | Family | Gain (measured) | Where |
+    | --- | --- | --- |
+    | flashnext (C), TP=2 | prompt passes reduce-scatter the experts' slots by rows: rank 0 sends 5.81 → 3.43 MiB a prompt token, cold prefill +26.5..+26.8 % on two GB10s, +30.9..+33.9 % on two RTX PRO 6000s, same replies | [#2977] |
+
 26. **Pipeline stages.** Layer ranges on different nodes, one hidden row a token over Ethernet, so a GB10 and a Mac
     can serve one model ([#2005]). The stage link and its protocol are [#2012] and [#2060]; the 27B as a stage is
     [#2115], logits byte-equal to the whole model at two and three stages.
@@ -615,3 +619,4 @@ below; these are estimates for planning a port, not results.
 [#2634]: https://github.com/ashhart/TensorFold/pull/2634
 [#2784]: https://github.com/ashhart/TensorFold/pull/2784
 [#2764]: https://github.com/ashhart/TensorFold/issues/2764
+[#2977]: https://github.com/ashhart/TensorFold/pull/2977
