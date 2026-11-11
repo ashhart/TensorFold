@@ -8,8 +8,8 @@ const eps = @import("cuda_prompt_wt.zig").eps;
 
 /// One kernel a value head for a lone stream's pass, unless TF_FLASHNEXT_GDN_FUSED=0 (three launches, the same bits).
 pub fn on() bool {
-    const v = std.c.getenv("TF_FLASHNEXT_GDN_FUSED") orelse return true;
-    return !std.mem.eql(u8, std.mem.span(v), "0");
+    // the startup check refused every malformed value already, so a plain default stands here
+    return @import("sys").environment.read(bool, "TF_FLASHNEXT_GDN_FUSED", true) catch true;
 }
 
 /// fn_gdn_fused's inputs: projection rows, conv window and taps, gate parameters, the state and where it goes.
