@@ -46,6 +46,13 @@ pub const Weights = struct {
     }
 };
 
+/// A checked MLX affine triple (core/quant/mlx_affine.zig) at its tensors' buffer offsets, as the row kernels read it.
+pub fn affine(t: anytype) !Weights {
+    const out: Weights = .{ .w = t.weight.buffer, .w_off = t.weight.offset, .scales = t.scales.buffer, .s_off = t.scales.offset, .biases = t.biases.buffer, .b_off = t.biases.offset, .n = t.n, .k = t.k, .group = t.group, .bits = t.bits };
+    try out.validate();
+    return out;
+}
+
 /// `experts` matrices of one shape back to back in W, S and B; slot i reads expert ids[i] on x row i / repeat.
 pub const Experts = struct {
     one: Weights, // the first matrix; the rest follow at its stride

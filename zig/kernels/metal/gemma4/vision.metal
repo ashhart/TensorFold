@@ -1,24 +1,17 @@
 // Gemma 4's image tower at torch's per-op bf16 rounding (transformers' modeling_gemma4.py); after gemm_nax.metal.
 
-#define G4V_GEMM(NAME, T, TA, TB, AM, AN)                                                                          \
-  [[max_total_threads_per_threadgroup(256)]] [[kernel]] void NAME(                                                \
-      const device T* A [[buffer(0)]], const device T* B [[buffer(1)]], const device int32_t* P [[buffer(2)]],     \
-      device T* D [[buffer(3)]], uint sg [[simdgroup_index_in_threadgroup]],                                      \
-      uint lane [[thread_index_in_simdgroup]], uint3 tg [[threadgroup_position_in_grid]]) {                        \
-    tfp::gemm_nax<T, TA, TB, AM, AN, false, 64, 128, 256, 2, 4>(A, B, D, P, tg, sg, lane);                         \
-  }
-G4V_GEMM(g4v_gemm_bf16_nt_00, bfloat16_t, false, true, false, false)
-G4V_GEMM(g4v_gemm_bf16_nt_01, bfloat16_t, false, true, false, true)
-G4V_GEMM(g4v_gemm_bf16_nt_10, bfloat16_t, false, true, true, false)
-G4V_GEMM(g4v_gemm_bf16_nt_11, bfloat16_t, false, true, true, true)
-G4V_GEMM(g4v_gemm_f32_nt_00, float, false, true, false, false)
-G4V_GEMM(g4v_gemm_f32_nt_01, float, false, true, false, true)
-G4V_GEMM(g4v_gemm_f32_nt_10, float, false, true, true, false)
-G4V_GEMM(g4v_gemm_f32_nt_11, float, false, true, true, true)
-G4V_GEMM(g4v_gemm_f32_nn_00, float, false, false, false, false)
-G4V_GEMM(g4v_gemm_f32_nn_01, float, false, false, false, true)
-G4V_GEMM(g4v_gemm_f32_nn_10, float, false, false, true, false)
-G4V_GEMM(g4v_gemm_f32_nn_11, float, false, false, true, true)
+TF_GEMM_NAX_KERNEL(g4v_gemm_bf16_nt_00, bfloat16_t, false, true, false, false)
+TF_GEMM_NAX_KERNEL(g4v_gemm_bf16_nt_01, bfloat16_t, false, true, false, true)
+TF_GEMM_NAX_KERNEL(g4v_gemm_bf16_nt_10, bfloat16_t, false, true, true, false)
+TF_GEMM_NAX_KERNEL(g4v_gemm_bf16_nt_11, bfloat16_t, false, true, true, true)
+TF_GEMM_NAX_KERNEL(g4v_gemm_f32_nt_00, float, false, true, false, false)
+TF_GEMM_NAX_KERNEL(g4v_gemm_f32_nt_01, float, false, true, false, true)
+TF_GEMM_NAX_KERNEL(g4v_gemm_f32_nt_10, float, false, true, true, false)
+TF_GEMM_NAX_KERNEL(g4v_gemm_f32_nt_11, float, false, true, true, true)
+TF_GEMM_NAX_KERNEL(g4v_gemm_f32_nn_00, float, false, false, false, false)
+TF_GEMM_NAX_KERNEL(g4v_gemm_f32_nn_01, float, false, false, false, true)
+TF_GEMM_NAX_KERNEL(g4v_gemm_f32_nn_10, float, false, false, true, false)
+TF_GEMM_NAX_KERNEL(g4v_gemm_f32_nn_11, float, false, false, true, true)
 
 constant constexpr uint G4V_W = 1152, G4V_HEADS = 16, G4V_DH = 72, G4V_HALF = 36, G4V_QKV = 3 * G4V_W;
 
