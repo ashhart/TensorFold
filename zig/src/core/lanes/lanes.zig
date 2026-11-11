@@ -42,6 +42,7 @@ pub const shared_draft_check = @import("shared_draft_check.zig");
 pub const drafter = @import("drafter.zig");
 pub const drafted = @import("drafted.zig");
 pub const draft_tree = @import("draft_tree.zig");
+pub const drafter_depth_sweep = @import("drafter_depth_sweep.zig"); // any family's Drafter at depths 1..block
 pub const recorder = @import("recorder.zig");
 pub const logprob = @import("logprob.zig");
 pub const grammar = @import("grammar.zig");
@@ -71,6 +72,7 @@ test {
     _ = @import("recorder_test.zig");
     _ = @import("gpu_full_test.zig");
     _ = @import("drafted_test.zig");
+    _ = @import("drafter_depth_sweep_test.zig");
     _ = @import("drafted_chances_test.zig");
     _ = @import("drafted_copy_test.zig");
     _ = @import("root_copy_test.zig");

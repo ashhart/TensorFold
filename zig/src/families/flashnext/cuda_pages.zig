@@ -89,10 +89,9 @@ pub fn valid(tokens: usize) bool {
     return tokens > 0 and tokens <= wt.window and tokens <= std.math.maxInt(c_int) and tokens % ratio == 0;
 }
 
-/// TF_FLASHNEXT_KV_PAGE_TEST=n: each stream's caches read through reversed n-position pages (checks); 0 when unset.
+/// TF_FLASHNEXT_KV_PAGE_TEST=n: each stream's caches read through reversed n-position pages; 0 when unset or blank.
 pub fn pageTest() !usize {
-    const v = std.c.getenv("TF_FLASHNEXT_KV_PAGE_TEST") orelse return 0;
-    const n = std.fmt.parseInt(usize, std.mem.span(v), 10) catch return error.BadFlashNextPageTest;
+    const n = (try @import("sys").environment.read(?usize, "TF_FLASHNEXT_KV_PAGE_TEST", null)) orelse return 0;
     if (!valid(n)) return error.BadFlashNextPageTest;
     return n;
 }
@@ -231,6 +230,28 @@ test "with a host tier a page's parts tile its two planes; the K/V rows follow t
     try std.testing.expectEqual(p.ibase + 0 * indexPageBytes(t, wt.attn_n) + planeOffset(t, 3, .pooled) + index_row, p.rowAt(3, .pooled, 5));
     try std.testing.expectEqual(p.ibase + 2 * indexPageBytes(t, wt.attn_n) + planeOffset(t, 0, .index), p.rowAt(0, .index, 0));
     try std.testing.expect(p.pg().ips != 0);
+}
+
+test "blank TF_FLASHNEXT_KV_PAGE_TEST: unset, empty or whitespace-only text reads 0 pages, a size keeps its meaning" {
+    if (comptime @import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const t = std.testing;
+    const env = @import("sys").env;
+    const name = "TF_FLASHNEXT_KV_PAGE_TEST";
+    const before = if (std.c.getenv(name)) |v| try t.allocator.dupeSentinel(u8, std.mem.span(v), 0) else null;
+    defer {
+        if (before) |v| {
+            _ = env.setenv(name, v, 1);
+            t.allocator.free(v);
+        } else _ = env.unsetenv(name);
+    }
+    _ = env.unsetenv(name);
+    try t.expectEqual(@as(usize, 0), try pageTest());
+    for ([_][:0]const u8{ "", " ", "\t", " \t\r\n" }) |v| {
+        try t.expectEqual(@as(c_int, 0), env.setenv(name, v, 1));
+        try t.expectEqual(@as(usize, 0), try pageTest());
+    }
+    try t.expectEqual(@as(c_int, 0), env.setenv(name, "8", 1));
+    try t.expectEqual(@as(usize, 8), try pageTest());
 }
 
 test {
