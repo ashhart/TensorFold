@@ -390,7 +390,10 @@ pub const Rule = struct {
     /// Independent plain price and the row slope from a plain/drafted pair, at this exact count and mode.
     pub fn sharedPrice(r: *const Rule, streams: usize, sampled: bool) ?@import("shared_price.zig").Price {
         if (streams < 2 or !r.plain_guard or r.confidence_floor != null) return null;
-        return r.shared_price.price(streams, sampled, r.row_cost.extraMs(streams, sampled));
+        var price = r.shared_price.price(streams, sampled, r.row_cost.extraMs(streams, sampled)) orelse return null;
+        // The independent plain point owns the intercept; row learning owns the signed, noise-tested slope.
+        if (r.k.learn_rows) price.row = r.row_cost.extraMs(streams, sampled);
+        return price;
     }
 
     /// Held drafts have already run; every verify option retains the round's same head fixed cost.
@@ -498,6 +501,7 @@ test {
     _ = @import("shared_calibration_test.zig");
     _ = @import("shared_warmup_test.zig");
     _ = @import("shared_head_price_test.zig");
+    _ = @import("shared_price_learning_test.zig");
 }
 
 test {
