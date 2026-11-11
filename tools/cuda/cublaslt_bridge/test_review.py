@@ -68,8 +68,8 @@ class RefusalControls(unittest.TestCase):
         self.assertFalse(allowed_import("unreviewed-runtime.dll", set(), policy))
 
     def test_secret_scanner_uses_actual_log_format_and_refuses_missing_bytes(self):
-        for report_full_size in (True, False):
-            with self.subTest(report_full_size=report_full_size), tempfile.TemporaryDirectory() as directory:
+        for report_full_size, color in ((True, False), (True, True), (False, True)):
+            with self.subTest(report_full_size=report_full_size, color=color), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 corpus, executable = root / "corpus.txt", root / "scanner.fixture"
                 corpus.write_bytes(b"Public scanner fixture\n")
@@ -79,7 +79,10 @@ class RefusalControls(unittest.TestCase):
                 size = corpus.stat().st_size if report_full_size else 0
 
                 def scan(*args, **kwargs):
-                    kwargs["stdout"].write(f"INF scanned ~{size} bytes (22 B) in 0.00s\n".encode())
+                    message = f"scanned ~{size} bytes (22 B) in 0.00s"
+                    if color:
+                        message = "\x1b[1m" + message + "\x1b[0m"
+                    kwargs["stdout"].write(("INF " + message + "\n").encode())
                     (audit / "gitleaks.json").write_text("[]")
                     return subprocess.CompletedProcess(args, 0)
 

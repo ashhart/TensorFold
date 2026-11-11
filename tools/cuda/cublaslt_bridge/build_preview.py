@@ -189,10 +189,13 @@ def main():
     zig_before = tree(zig_root)
     STAGE = "public-source-inputs"
     xgrammar, gitleaks, runtime_manifest = fetch(work)
+    native_out, grammar_out, checks = work / "native-out", work / "grammar-out", work / "checks"
+    run("privacy-checker", [zig, "build", "compile-release-paths-host", "-j2", "--prefix", checks])
+    path_checker = checks / "bin/check-release-paths.exe"
     run("bridge", [sys.executable, HERE / "produce_bridge.py", "--execute", "--work", work / "bridge",
                    "--repo-root", repo, "--source-revision", source_revision])
     bridge = read(work / "bridge/output-manifest.json")
-    native_out, grammar_out, checks = work / "native-out", work / "grammar-out", work / "checks"
+    run("vendor-path-preflight", [path_checker, repo, work / "bridge/bundle/cublasLt64_13.dll"])
     nvcc = work / "bridge/cuda/bin/nvcc.exe"
     run("native", [zig, "build", "fatbins", "native", "-Dtarget=x86_64-windows-gnu",
                    "-Doptimize=safe", "-Dstrip=true", "-Dversion=1.2.3", "-Dqwen-prefill-max-rows=8192",
@@ -205,7 +208,6 @@ def main():
     grammar = grammar_out / "native/lib/tfgrammar.dll"
     if not grammar.is_file():
         raise ValueError("Windows grammar library was not produced")
-    run("privacy-checker", [zig, "build", "compile-release-paths-host", "-j2", "--prefix", checks])
     source_path = work / "SOURCE.json"
     run("source-manifest", [sys.executable, repo / "tools/release/windows_manifest.py",
                             "--binary", native, "--fatbins", native_out / "fatbin", "--output", source_path])
@@ -231,7 +233,6 @@ def main():
         bash = Path("C:/Program Files/Git/bin/bash.exe")
     if not bash.is_file():
         raise ValueError("Git Bash packaging host is missing")
-    path_checker = checks / "bin/check-release-paths.exe"
     arguments = [
         bash, repo / "tools/release/package.sh", "1.2.3", "windows-x86_64", native,
         repo / "LICENSE", repo / "NOTICE", repo / "packaging/RUNTIME.md", repo / "LICENSES",

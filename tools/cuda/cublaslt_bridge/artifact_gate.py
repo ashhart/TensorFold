@@ -145,6 +145,7 @@ def secret_scan(executable, corpus, audit):
         ], cwd=audit, stdout=log, stderr=subprocess.STDOUT, timeout=960,
             env={key: value for key, value in os.environ.items() if not key.startswith("GITLEAKS_")})
     log_text = (audit / "gitleaks.log").read_text(errors="replace")
+    log_text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", log_text)
     scanned = re.search(r"\bscanned\s+~?(\d+)\s+bytes\b", log_text)
     findings = load(audit / "gitleaks.json")
     status = {"exit_code": run.returncode, "findings": len(findings),

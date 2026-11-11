@@ -73,7 +73,7 @@ pub fn validRoot(root: []const u8) bool {
     }
     return names >= @as(usize, if (unc) 2 else 1);
 }
-fn textLeak(bytes: []const u8, root: []const u8) bool {
+fn textLeak(bytes: []const u8, root: []const u8, width: usize, lane: usize, big: bool) bool {
     if (validRoot(root) and std.mem.indexOf(u8, bytes, root) != null) return true;
     for (0..bytes.len) |i| {
         if (!absoluteAt(bytes, i)) continue;
@@ -83,12 +83,17 @@ fn textLeak(bytes: []const u8, root: []const u8) bool {
             if (!quoted and bytes[end] == ' ') break;
         }
         const path = bytes[i..end];
-        if (std.unicode.utf8ValidateSlice(path) and privatePath(path)) return true;
+        if (std.unicode.utf8ValidateSlice(path) and privatePath(path)) {
+            const drive = path.len >= 3 and std.ascii.isAlphabetic(path[0]) and path[1] == ':' and separator(path[2]);
+            const invalid_drive_name = drive and std.mem.indexOfAny(u8, path[3..], ":*?<>|") != null;
+            std.debug.print("release privacy match: offset={d} bytes={d} width={d} lane={d} big={any} drive={any} invalid_drive_name={any}\n", .{ i * width + lane, path.len * width, width, lane, big, drive, invalid_drive_name });
+            return true;
+        }
     }
     return false;
 }
 fn rawLeak(a: std.mem.Allocator, bytes: []const u8, root: []const u8) !bool {
-    if (textLeak(bytes, root)) return true;
+    if (textLeak(bytes, root, 1, 0, false)) return true;
     if (validRoot(root)) {
         const wide = try std.unicode.utf8ToUtf16LeAlloc(a, root);
         defer a.free(wide);
@@ -106,7 +111,7 @@ fn rawLeak(a: std.mem.Allocator, bytes: []const u8, root: []const u8) !bool {
                 const high = bytes[i + @intFromBool(!big)];
                 try text.append(a, if (high == 0) low else '?');
             }
-            if (textLeak(text.items, root)) return true;
+            if (textLeak(text.items, root, 2, offset, big)) return true;
         }
     }
     return false;

@@ -19,6 +19,10 @@ NOT_PASSED = {"version", "slide-test-hooks"}
 VALUES = {"hip-arch": "gfx1151", "sm": "121", "optimize": "fast", "fuzz-optimize": "safe", "stream-scan-optimize": "safe"}
 
 
+# The bounded integer capacity is also read while the build configures.
+VALUES["qwen-prefill-max-rows"] = "8192"
+
+
 def declared() -> dict[str, list[str]]:
     """Every option name the build declares, with the file and line that declares it."""
     found: dict[str, list[str]] = {}
