@@ -211,13 +211,13 @@ test "GLM startup: TF_GLM_KV_SPLIT with TF_KV_SHARE is refused by name, either a
     for ([_]usize{ 0, 1, 64 }) |share| try startup.sharing(false, share);
 }
 
-test "GLM startup: TF_GLM_KV_SPLIT with kept prompt states is refused by name, either alone is not" {
-    try std.testing.expectError(error.KvSplitKeeps, startup.keeping(true, true));
-    try startup.keeping(true, false);
-    for ([_]bool{ false, true }) |keeps| try startup.keeping(false, keeps);
+test "GLM startup: TF_GLM_KV_SPLIT with --learn-conversations is refused by name, either alone is not" {
+    try std.testing.expectError(error.KvSplitLearn, startup.learning(true, true));
+    try startup.learning(true, false);
+    for ([_]bool{ false, true }) |learn| try startup.learning(false, learn);
 }
 
 test "GLM startup: every TF_GLM_KV_SPLIT refusal is explained, and another error is left to its family" {
-    for ([_]anyerror{ error.KvSplitNeedsRanks, error.KvSplitNeedsPages, error.KvSplitOnHost, error.KvSplitShare, error.KvSplitKeeps, error.ClassTooSmall, error.ResidueMismatch, error.BadClasses }) |e| try std.testing.expect(startup.explain(e) != null);
+    for ([_]anyerror{ error.KvSplitNeedsRanks, error.KvSplitNeedsPages, error.KvSplitOnHost, error.KvSplitShare, error.KvSplitLearn, error.KvSplitAway, error.KvSplitCarry, error.ClassTooSmall, error.ResidueMismatch, error.BadClasses }) |e| try std.testing.expect(startup.explain(e) != null);
     try std.testing.expect(startup.explain(error.Fp8OnPages) == null);
 }
