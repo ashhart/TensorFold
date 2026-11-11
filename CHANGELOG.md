@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CUDA: `TF_DSPINE_WINDOW=N` (16 to 8,192, opt-in) narrows a Qwen3.8-27B DSpine drafter's sliding window to N rows without editing the checkpoint; a value outside the block size and the checkpoint's own window is refused when the drafter opens, and unset keeps the checkpoint's window. Drafts are verified, so replies are unchanged (#2705, after #2633). Thanks to @jschmied.
+
 - Metal: Spark2.5's and Llama's bf16 decode matvec kernels come from one source, with the same compiled code; Qwen3.8-27B saved prompt states on Metal are recomputed once after upgrading (#2792, part of #2251). Thanks to @jschmied.
 
 - Metal: the image towers' and Spark2.5's and Llama's prompt GEMMs share one `gemm_nax` kernel macro, with the same preprocessed source; Qwen3.8-27B saved prompt states on Metal are recomputed once after upgrading (#2787, part of #2251). Thanks to @jschmied.
