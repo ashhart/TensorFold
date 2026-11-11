@@ -106,6 +106,21 @@ pub const Boot = struct {
         b.eng = try eh.Host.load(b.map_bytes, c.engram_heads, c.engram_pad, c.engram_vocab, &b.lbuf);
         const rows_dir = try b.rowsDir(dir, o);
         defer b.a.free(rows_dir);
+        // a boot that serves Engram layers proves the tables match the release: the manifest, headers, sampled rows
+        const full = std.mem.eql(u8, std.mem.span(std.c.getenv("TF_DSV41_ENGRAM_VERIFY") orelse ""), "full");
+        const em = host.engram_manifest;
+        const ck = em.check(b.a, io, dir, rows_dir, full) catch |e| {
+            switch (e) {
+                error.EngramManifestMissing => std.log.err("dsv41 metal: no {s} beside the Engram tables {s}: run tf-dsv41-engram-pack pack", .{ em.filename, rows_dir }),
+                error.EngramManifestBad => std.log.err("dsv41 metal: the Engram manifest {s}/{s} is missing or unreadable", .{ rows_dir, em.filename }),
+                error.EngramSourceMismatch => std.log.err("dsv41 metal: the release no longer matches the Engram tables in {s}: the shards moved or changed", .{rows_dir}),
+                error.EngramShardCorrupt => std.log.err("dsv41 metal: an Engram table in {s} is corrupt or does not match its manifest", .{rows_dir}),
+                error.EngramSampleMismatch => std.log.err("dsv41 metal: an Engram table in {s} differs from the release shards on a sampled row", .{rows_dir}),
+                else => std.log.err("dsv41 metal: the Engram tables in {s} cannot be verified ({s})", .{ rows_dir, @errorName(e) }),
+            }
+            return e;
+        };
+        std.log.info("dsv41 metal: Engram tables checked against the release ({d} sampled rows{s})", .{ ck.samples, if (full) " and every byte" else "" });
         const cap: u32 = if (std.c.getenv("TF_DSV41_ENGRAM_CACHE")) |v| try std.fmt.parseInt(u32, std.mem.span(v), 10) else 65536;
         b.rows = try er.Rows.open(b.a, rows_dir, 0, 1, b.eng.layer_ids, cap);
         std.log.info("dsv41 metal: Engram rows from {s} ({d} records a layer cached)", .{ rows_dir, cap });
