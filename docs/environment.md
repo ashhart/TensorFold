@@ -54,6 +54,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_PRODUCE_HELD_GIB` | With `--mcdma-produce`: whole GiB 1 through 1024 of hand-off exports a GB10 holds at once; an export past it is refused by name and the Mac prefills that prompt itself; default 32 |
 | `TF_DSV41_HANDOFF_DUMP` | A directory path without control characters, used as given; a DeepSeek-V4.1 producer also writes each hand-off export there as a file, with or without `--mcdma-produce`. Unset or blank writes none |
 | `TF_PREFILL_TIMEOUT_S` | With `--prefill-from`: whole seconds 1 through 86400 for the trigger and, with `--mcdma-link http`, separately for the transfer of the export; default 60 plus 1 per 400 tokens sent |
+| `TF_PREFILL_ROUTE` | DeepSeek V4.1 with `--prefill-from`: exactly `auto` or `always`; default `auto`. The pair takes one pull at a time: under `auto` a prompt that finds it busy is prefilled on the Mac at once, unless the pull under way ends soon enough that waiting for it, then pulling, still beats the Mac's own prefill; `always` makes every prompt wait its turn for the pair, as before |
 | `XPU_A8_BITS` | Exactly `4` or `8`, for the XPU quantization study; unset keeps the study's existing setting |
 | `LFM3_FUSE` | Whole u32 fusion mask; default 7 |
 | `TF_SLIDE_POCKET_KEY` | Exactly `auto`, `reply`, `subject` or `both`; default `auto` |

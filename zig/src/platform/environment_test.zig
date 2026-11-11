@@ -97,6 +97,7 @@ const valid = [_]Case{
     .{ .name = "TF_PREFILL_KEEP", .raw = "1", .n = 1 },
     .{ .name = "TF_PREFILL_AHEAD", .raw = "1", .n = 1 },
     .{ .name = "TF_PREFILL_TIMEOUT_S", .raw = "86400", .n = 86400 },
+    .{ .name = "TF_PREFILL_ROUTE", .raw = "auto", .n = 0 },
     .{ .name = "TF_PREFILL_API_KEY_FILE", .raw = "/etc/tensorfold/gb10.key", .n = 0 },
     .{ .name = "TF_PRODUCE_HELD_GIB", .raw = "32", .n = 32 },
     .{ .name = "TF_DSV41_HANDOFF_DUMP", .raw = "/tmp/handoff exports", .n = 0 },
@@ -268,6 +269,9 @@ test "environment: ranges, word lists and whole-number bounds refuse ignored tai
     try t.expectEqual(@as(?u64, 1), try e.parse("TF_DSV41_IMAGES", " native "));
     try t.expectEqual(@as(?u64, 0), try e.parse("TF_DSV41_IMAGES", "0"));
     for ([_][]const u8{ "Native", "1", "nativee" }) |raw| try t.expectError(error.InvalidEnvironment, e.parse("TF_DSV41_IMAGES", raw));
+    try t.expectEqual(@as(?u64, 0), try e.parse("TF_PREFILL_ROUTE", " auto"));
+    try t.expectEqual(@as(?u64, 1), try e.parse("TF_PREFILL_ROUTE", "always"));
+    for ([_][]const u8{ "Always", "1", "always-on" }) |raw| try t.expectError(error.InvalidEnvironment, e.parse("TF_PREFILL_ROUTE", raw));
     for ([_][2][]const u8{ .{ "TF_DSV41_ENGRAM_READERS", "32" }, .{ "TF_DSV41_SLOTS", "16" }, .{ "TF_DSV41_ROWS_CAP", "12" }, .{ "TF_DSV41_CONTEXT", "9223372036854775807" } }) |c|
         try t.expect(try e.parse(c[0], c[1]) != null);
     for ([_][2][]const u8{ .{ "TF_DSV41_ENGRAM_READERS", "33" }, .{ "TF_DSV41_SLOTS", "0" }, .{ "TF_DSV41_SLOTS", "17" }, .{ "TF_DSV41_ROWS_CAP", "9" }, .{ "TF_DSV41_CONTEXT", "9223372036854775808" }, .{ "TF_DSV41_PREFILL_ADAPT_MIN", "15" } }) |c|

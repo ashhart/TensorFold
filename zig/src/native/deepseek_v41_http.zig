@@ -11,6 +11,7 @@ const remote = @import("deepseek_v41_remote.zig");
 const q27 = @import("qwen27_remote.zig");
 const Filled = api.LaneHost.Remote.Filled;
 const Flags = api.LaneHost.Remote.Flags;
+const Route = api.LaneHost.Remote.Route;
 
 /// The lane host's remote source over HTTP: one pull at a time, each into a blank Snapshot of this model's shape.
 pub const Pull = struct {
@@ -23,7 +24,7 @@ pub const Pull = struct {
     trigger: trigger.Http,
     from: ho.http.Source,
     reason: fabric.decoder.Reason = .{},
-    mutex: std.Io.Mutex = .init,
+    route: Route = .{},
     next_id: u64 = 1,
     pulls: u64 = 0,
     bytes: u64 = 0,
@@ -38,11 +39,12 @@ pub const Pull = struct {
 
     /// A prefix of `prompt` beyond `cached` on a whole chunk, asked for, fetched and landed whole in a blank Snapshot.
     pub fn pull(p: *Pull, prompt: []const u32, cached: u64) !?Filled {
-        p.mutex.lockUncancelable(p.io);
-        defer p.mutex.unlock(p.io);
+        if (p.closing.load(.acquire) or p.off.load(.acquire)) return null;
+        const upto = p.policy.upto(prompt.len, cached) orelse return null;
+        _ = p.route.admit(p.io, Route.estimate(upto, prompt.len - cached), &p.closing) orelse return null;
+        defer p.route.leave();
         if (p.closing.load(.acquire) or p.off.load(.acquire)) return null;
         p.reason.len = 0;
-        const upto = p.policy.upto(prompt.len, cached) orelse return null;
         const at: u32 = std.math.cast(u32, upto) orelse return error.PrefixTooLong;
         if (upto >= prompt.len) return error.PrefixTooLong; // a token past the prefix goes too
         const t0 = fabric.words.nowNs();
@@ -89,7 +91,8 @@ pub const Pull = struct {
         const p: *Pull = @ptrCast(@alignCast(ptr));
         if (p.closing.load(.acquire) or p.off.load(.acquire)) return false;
         const n = p.policy.upto(len, cached) orelse return false;
-        return n - cached >= p.policy.min_prefix;
+        if (n - cached < p.policy.min_prefix) return false;
+        return !p.route.busy(Route.nowNs(p.io), Route.estimate(n, len - cached)); // a busy pair leaves the prompt to this Mac
     }
 
     fn fill(ptr: *anyopaque, prompt: []const u32, cached: u64) anyerror!?Filled {
@@ -114,6 +117,7 @@ pub const Link = struct {
         const l = try gpa.create(Link);
         errdefer gpa.destroy(l);
         const rules = try remote.policy();
+        const gate = try Route.fromEnv();
         const key = try q27.apiKey(gpa, io);
         errdefer if (key) |k| gpa.free(k);
         l.base = try gpa.dupe(u8, std.mem.trimEnd(u8, f.url.?, "/"));
@@ -125,6 +129,7 @@ pub const Link = struct {
             .io = io,
             .model = m,
             .policy = rules,
+            .route = gate,
             .checkpoint = id,
             .trigger = .{ .gpa = gpa, .io = io, .url = l.url, .model = "", .key = key },
             .from = .{ .gpa = gpa, .io = io, .base = l.base, .key = key },
