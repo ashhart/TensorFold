@@ -390,4 +390,3 @@ template __global__ void dense_wmma12_gemm_silu<DotBF16, W12Big>(Affine);
 
 }  // namespace rocm
 }  // namespace tf
-// (rebuilt for the FP8 header probe 2)
