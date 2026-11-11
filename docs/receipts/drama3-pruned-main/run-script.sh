@@ -3,7 +3,7 @@
 #   ssh top-menu "job start gpu middle|bottom plotarmordev/TensorFold SHA docs/receipts/drama3-pruned-main/run-script.sh"
 # The door runs it in the commit's checkout with the Drama pilot folder at /assets/drama3-pilot (read-only) and no
 # network, inside a window only the Desk opens; it pauses nothing. Everything it writes lands in /work/out/drama3.
-# Without a GPU (`job start` without `gpu`) it checks the paths and the build, then stops at nvidia-smi.
+# Without a GPU (`job start` without `gpu`) it checks the paths and tools, then stops at nvidia-smi.
 set -eu
 pilot=/assets/drama3-pilot
 fp8=$pilot/checkpoint
@@ -12,14 +12,14 @@ pruned5900=$pilot/models/drama-3-NVFP4-Pruned-5900
 nvcc=/usr/local/cuda/bin/nvcc
 out=/work/out/drama3
 tree=$PWD
-for path in "$fp8/codec.pth" "$pruned/config.json" "$pruned5900/config.json" "$nvcc"; do
+for path in "$fp8/codec.pth" "$pruned/config.json" "$pruned5900/config.json" "$nvcc" "$(command -v zig)"; do
     [ -e "$path" ] || { echo "missing $path; $pilot holds:" >&2; find "$pilot" -maxdepth 2 >&2; exit 1; }
 done
+nvidia-smi --query-gpu=name,driver_version --format=csv,noheader
 mkdir -p "$out/voices"
 zig build -Dgpu=spark -Dnvcc="$nvcc"
 # -Dgpu builds the server alone; the voice tools come from the development build
 zig build drama3-generate drama3-voice -Dsm=121 -Dnvcc="$nvcc" -Doptimize=ReleaseFast
-nvidia-smi --query-gpu=name,driver_version --format=csv,noheader
 for model in "$fp8" "$pruned" "$pruned5900"; do
     sum=$(find "$model" -name '*.safetensors' -o -name codec.pth | sort | xargs cat | sha256sum | cut -d' ' -f1)
     echo "input $model: $sum"
