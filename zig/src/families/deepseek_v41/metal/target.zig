@@ -50,7 +50,7 @@ const Slot = struct {
     base: u64 = 0,
     rows: u32 = 0,
     open: bool = false,
-    /// the taps of the last `ring rows` positions, position p at row p % ring rows
+    /// the taps of the last `ring rows` committed positions, position p at row p % ring rows
     ring: []u16,
     /// the taps `taps` names after a prompt: its last rows in order
     ptaps: mtl.Buffer,
@@ -307,19 +307,18 @@ pub const Target = struct {
         }
         for (group) |g| {
             const s = &t.slots[g.slot];
+            if (s.open) t.commitTaps(s, s.rows); // a window never kept keeps all its rows
             s.whole = false;
             try s.hist.appendSlice(t.a, g.tokens);
             s.high = @max(s.high, s.hist.items.len);
         }
         t.launch(group) catch |e| return t.fail(e);
         const lg = t.b.logitsOf(c, total);
-        const w = tapWidth(c);
         var r0: usize = 0;
         for (group, choices) |g, out| {
             const s = &t.slots[g.slot];
             const n = g.tokens.len;
             for (0..n) |r| out[r] = try t.choose(lg[(r0 + r) * V ..][0..V], g.draws[r], g.sampling);
-            if (s.kv.taps) |tb| for (0..n) |r| t.ringPut(s, g.start + r, tb.slice(u16, n * w)[r * w ..][0..w]);
             s.base = g.start;
             s.rows = @intCast(n);
             s.open = true;
@@ -370,6 +369,7 @@ pub const Target = struct {
         for (path, 0..) |r, i| if (r != i) return error.NotAPath;
         s.open = false;
         const m: u32 = @intCast(path.len);
+        t.commitTaps(s, m);
         if (m == s.rows) return;
         const len = s.base + m;
         s.hist.shrinkRetainingCapacity(@intCast(len));
@@ -377,6 +377,13 @@ pub const Target = struct {
         s.tail.end = @intCast(len);
         s.tail.done = s.tail.end;
         t.stats.rewinds += 1;
+    }
+
+    /// The ring takes the first `m` rows of the slot's last window (its kept rows); rows not kept never land in it.
+    fn commitTaps(t: *const Target, s: *Slot, m: u32) void {
+        const tb = s.kv.taps orelse return;
+        const w = tapWidth(t.env.c);
+        for (0..m) |r| t.ringPut(s, s.base + r, tb.slice(u16, @as(usize, s.rows) * w)[r * w ..][0..w]);
     }
 
     fn taps(ptr: *anyopaque, slot: u32) iface.Taps {
@@ -395,6 +402,7 @@ pub const Target = struct {
         const s = &t.slots[slot];
         if (!s.live) return;
         s.live = false;
+        if (s.open) t.commitTaps(s, s.rows);
         s.open = false;
         if (s.whole and t.cache.on()) t.cache.save(t.env.c, &s.kv, s.hist.items, s.ring, null) catch {};
     }
