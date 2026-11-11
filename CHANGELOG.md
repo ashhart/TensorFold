@@ -10,7 +10,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - EXL3 attention and MTP caches can use the existing core K/V page pool through opt-in `TF_FLASHNEXT_KV_PAGES`; paging remains off by default (#1444).
 
-- EXL3 prefill and profiling use registered settings and propagate malformed-value refusals. Unset row budgets remain 8192 general / 4096 server; `snap_grid` remains on pending off-grid restore qualification (#1443).
+- EXL3 prefill and profiling use registered settings and propagate malformed-value refusals. Unset row budgets remain 8192 general / 4096 server; kept prompt states now resume at any row without a chunk-grid restriction (#1443). Thanks to @BlivionIaG.
 
 - EXL3 deep prefill uses decode-exact prompt tiles and retains empty-sibling additions in TP prefill reductions, matching the canonical tree's zero signs (#1443). Its TP reduction probes also run under `test-flashnext-contract-host`.
 

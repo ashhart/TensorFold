@@ -162,7 +162,6 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
         .facts = own.facts(),
         .rows = if (own.head != null) mtp.max_rows else 2,
         .prompt_rows = @intCast(own.engine.chunk),
-        .snap_grid = if (mode == .exl3) try @import("exl3/prefill/cuda_exl3_prefill.zig").snapGrid(own.engine, own.engine.chunk) else 0,
         .stream_bytes = stream_bytes,
         .host_snaps = try @import("exl3/kv/cuda_exl3_kv.zig").snapHost(o.context, mode == .exl3),
         .ctx = own,
