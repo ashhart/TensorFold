@@ -39,7 +39,7 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     const driver: *cuda.Driver = @constCast(ctx.d);
     const own = try gpa.create(Cuda);
     errdefer gpa.destroy(own);
-    own.* = .{ .gpa = gpa, .context = o.context, .engine = undefined, .glue = undefined, .stream = undefined, .logits = undefined, .device = ctx.device };
+    own.* = .{ .gpa = gpa, .context = o.context, .engine = undefined, .glue = undefined, .stream = undefined, .logits = undefined, .device = ctx.device, .io = io };
     // fixed-size lane buffers reused across streams (cuda_lane_parts.zig; TF_FLASHNEXT_LANE_PARTS=0: allocate each)
     own.parts.on = try @import("sys").environment.read(bool, "TF_FLASHNEXT_LANE_PARTS", true);
     own.stream = try cuda.Stream.init(driver, true);

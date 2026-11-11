@@ -33,20 +33,25 @@ pub const Lazy = struct {
         var k: usize = @intCast(off / z.piece);
         while (k * z.piece < off + n) : (k += 1) {
             if (z.mapped[k]) continue;
-            const at = z.base + k * z.piece;
-            const len = @min(z.piece, z.len - k * z.piece);
-            m.seek(m.be.ctx, at);
-            const got = m.be.chunk(m.be.ctx, len) orelse return error.LaneMemory;
-            if (got != at) { // not at its place: the range would not hold the page
-                m.be.release(m.be.ctx, got, len);
-                return error.LaneMemory;
-            }
-            zero.piece(at, len) catch |err| { // not zeroed: it goes back, unmarked, as a piece that would not map
-                m.be.release(m.be.ctx, at, len);
-                return err;
-            };
+            try z.mapPiece(m, k, zero);
             z.mapped[k] = true;
         }
+    }
+
+    /// Piece `k` mapped at its place and zeroed, not marked; whatever fails, it goes back.
+    fn mapPiece(z: *const Lazy, m: Mapper, k: usize, zero: anytype) !void {
+        const at = z.base + k * z.piece;
+        const len = @min(z.piece, z.len - k * z.piece);
+        m.seek(m.be.ctx, at);
+        const got = m.be.chunk(m.be.ctx, len) orelse return error.LaneMemory;
+        if (got != at) { // not at its place: the range would not hold the page
+            m.be.release(m.be.ctx, got, len);
+            return error.LaneMemory;
+        }
+        zero.piece(at, len) catch |err| { // not zeroed: it goes back, unmarked, as a piece that would not map
+            m.be.release(m.be.ctx, at, len);
+            return err;
+        };
     }
 
     /// Every mapped piece goes back.
@@ -55,6 +60,128 @@ pub const Lazy = struct {
             m.be.release(m.be.ctx, z.base + k * z.piece, @min(z.piece, z.len - k * z.piece));
             f.* = false;
         };
+    }
+};
+
+/// One thread mapping the pieces `post` names off the caller's path; a piece it fails to map goes back unmarked.
+pub const Ahead = struct {
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    z: *Lazy,
+    m: Mapper,
+    hooks: Hooks,
+    queued: []bool,
+    busy: ?usize = null, // the piece the thread maps now
+    stop: bool = false,
+    mu: std.Io.Mutex = .init, // the flags, the queue, `busy` and `stop`
+    changed: std.Io.Condition = .init,
+    maps: std.Io.Mutex = .init, // one map at a time: the mapper's next address is shared
+    thread: ?std.Thread = null,
+
+    /// The thread's side: `enter` once on it (false: it maps nothing), `zero` clears a new piece and waits, `leave`.
+    pub const Hooks = struct {
+        ctx: *anyopaque,
+        enter: *const fn (*anyopaque) bool,
+        zero: *const fn (*anyopaque, u64, usize) anyerror!void,
+        leave: *const fn (*anyopaque) void,
+
+        fn piece(h: Hooks, at: u64, len: usize) !void {
+            return h.zero(h.ctx, at, len);
+        }
+    };
+
+    pub fn init(gpa: std.mem.Allocator, io: std.Io, z: *Lazy, m: Mapper, hooks: Hooks) !Ahead {
+        const queued = try gpa.alloc(bool, z.mapped.len);
+        @memset(queued, false);
+        return .{ .gpa = gpa, .io = io, .z = z, .m = m, .hooks = hooks, .queued = queued };
+    }
+
+    /// The thread stopped and joined, what it had queued left unmapped; before the pieces go back.
+    pub fn deinit(a: *Ahead) void {
+        if (a.thread) |t| {
+            a.mu.lockUncancelable(a.io);
+            a.stop = true;
+            a.changed.broadcast(a.io);
+            a.mu.unlock(a.io);
+            t.join();
+        }
+        a.gpa.free(a.queued);
+        a.* = undefined;
+    }
+
+    /// The pieces over [off, off + n) not mapped nor on their way, queued for the thread (started on the first post).
+    pub fn post(a: *Ahead, off: u64, n: u64) void {
+        if (n == 0 or off + n > a.z.len) return;
+        a.mu.lockUncancelable(a.io);
+        defer a.mu.unlock(a.io);
+        var any = false;
+        var k: usize = @intCast(off / a.z.piece);
+        while (k * a.z.piece < off + n) : (k += 1) {
+            if (a.z.mapped[k] or a.queued[k] or a.busy == k) continue;
+            a.queued[k] = true;
+            any = true;
+        }
+        if (!any) return;
+        if (a.thread == null) a.thread = std.Thread.spawn(.{}, run, .{a}) catch {
+            @memset(a.queued, false);
+            return;
+        };
+        a.changed.broadcast(a.io);
+    }
+
+    /// As Lazy.ensure on the caller's thread: a piece the thread has in hand waited for, one still queued taken back.
+    pub fn ensure(a: *Ahead, off: u64, n: u64, zero: anytype) !void {
+        if (n == 0) return;
+        if (off + n > a.z.len) return error.LaneMemory;
+        a.mu.lockUncancelable(a.io);
+        defer a.mu.unlock(a.io);
+        var k: usize = @intCast(off / a.z.piece);
+        while (k * a.z.piece < off + n) : (k += 1) {
+            while (a.busy == k) a.changed.waitUncancelable(a.io, &a.mu);
+            if (a.z.mapped[k]) continue;
+            a.queued[k] = false;
+            a.maps.lockUncancelable(a.io);
+            defer a.maps.unlock(a.io);
+            try a.z.mapPiece(a.m, k, zero);
+            a.z.mapped[k] = true;
+        }
+    }
+
+    /// Waits until the thread has nothing queued or in hand.
+    pub fn settle(a: *Ahead) void {
+        a.mu.lockUncancelable(a.io);
+        defer a.mu.unlock(a.io);
+        while (a.busy != null or std.mem.indexOfScalar(bool, a.queued, true) != null) a.changed.waitUncancelable(a.io, &a.mu);
+    }
+
+    fn run(a: *Ahead) void {
+        const bound = a.hooks.enter(a.hooks.ctx);
+        defer if (bound) a.hooks.leave(a.hooks.ctx);
+        a.mu.lockUncancelable(a.io);
+        defer a.mu.unlock(a.io);
+        while (!a.stop) {
+            const k = std.mem.indexOfScalar(bool, a.queued, true) orelse {
+                a.changed.waitUncancelable(a.io, &a.mu);
+                continue;
+            };
+            a.queued[k] = false;
+            if (!bound) { // no context on this thread: the caller maps it when it needs it
+                a.changed.broadcast(a.io);
+                continue;
+            }
+            a.busy = k;
+            a.mu.unlock(a.io);
+            const ok = blk: {
+                a.maps.lockUncancelable(a.io);
+                defer a.maps.unlock(a.io);
+                a.z.mapPiece(a.m, k, a.hooks) catch break :blk false;
+                break :blk true;
+            };
+            a.mu.lockUncancelable(a.io);
+            a.busy = null;
+            if (ok) a.z.mapped[k] = true;
+            a.changed.broadcast(a.io);
+        }
     }
 };
 
@@ -67,6 +194,28 @@ pub const Arena = struct {
         gpa: std.mem.Allocator,
         vmm: cuda.arena.Vmm,
         lazy: ?Lazy = null,
+        io: ?std.Io = null, // null: no thread, every piece maps on the caller's
+        d: ?*const cuda.Driver = null,
+        context: cuda.abi.Context = null, // the caller's, current on the thread too
+        stream: cuda.abi.Stream = null, // the thread's own
+        ahead: ?Ahead = null,
+
+        fn enter(ctx: *anyopaque) bool {
+            const s: *Pieces = @ptrCast(@alignCast(ctx));
+            const d = s.d.?;
+            if (d.api.cuCtxSetCurrent(s.context) != cuda.abi.success) return false;
+            return d.api.cuStreamCreate(&s.stream, 1) == cuda.abi.success; // CU_STREAM_NON_BLOCKING
+        }
+        fn zero(ctx: *anyopaque, at: u64, len: usize) anyerror!void {
+            const s: *Pieces = @ptrCast(@alignCast(ctx));
+            const d = s.d.?;
+            try d.check(d.api.cuMemsetD8Async(at, 0, len, s.stream), "cuMemsetD8Async");
+            try d.check(d.api.cuStreamSynchronize(s.stream), "cuStreamSynchronize"); // zeroed before it is marked
+        }
+        fn leave(ctx: *anyopaque) void {
+            const s: *Pieces = @ptrCast(@alignCast(ctx));
+            _ = s.d.?.api.cuStreamDestroy_v2(s.stream);
+        }
 
         fn hookAlloc(ctx: *anyopaque, len: usize) ?u64 {
             const s: *Pieces = @ptrCast(@alignCast(ctx));
@@ -94,8 +243,8 @@ pub const Arena = struct {
         }
     };
 
-    /// `len` bytes reserved as pieces on `device` with virtual memory (`ensure` maps them); else one cuMemAlloc.
-    pub fn alloc(gpa: std.mem.Allocator, d: *const cuda.Driver, len: usize, device: ?cuda.abi.Device) !Arena {
+    /// `len` bytes reserved as pieces on `device` (`ensure` maps them; with `io` a thread too); else one cuMemAlloc.
+    pub fn alloc(gpa: std.mem.Allocator, d: *const cuda.Driver, len: usize, device: ?cuda.abi.Device, io: ?std.Io) !Arena {
         const dev = device orelse return .{ .buf = try cuda.DeviceBuffer.alloc(d, len) };
         if (len <= piece_bytes) return .{ .buf = try cuda.DeviceBuffer.alloc(d, len) };
         const s: ?*Pieces = blk: {
@@ -105,7 +254,7 @@ pub const Arena = struct {
                 v.close();
                 break :blk null;
             };
-            s.* = .{ .gpa = gpa, .vmm = vmm };
+            s.* = .{ .gpa = gpa, .vmm = vmm, .io = io, .d = d };
             break :blk s;
         };
         const p = s orelse return .{ .buf = try cuda.DeviceBuffer.alloc(d, len) };
@@ -132,7 +281,20 @@ pub const Arena = struct {
                 try z.d.check(z.d.api.cuMemsetD8Async(at, 0, len, z.stream), "cuMemsetD8Async");
             }
         };
-        try s.lazy.?.ensure(Mapper.vmm(&s.vmm), off, n, Zero{ .d = a.buf.d, .stream = stream });
+        const zero: Zero = .{ .d = a.buf.d, .stream = stream };
+        if (s.ahead) |*x| return x.ensure(off, n, zero);
+        try s.lazy.?.ensure(Mapper.vmm(&s.vmm), off, n, zero);
+    }
+
+    /// Bytes [off, off + n) mapped ahead on the arena's thread, the caller's context current on it; no io: nothing.
+    pub fn post(a: *Arena, off: u64, n: u64) void {
+        const s = a.pieces orelse return;
+        const io = s.io orelse return;
+        if (s.ahead == null) {
+            if (s.d.?.api.cuCtxGetCurrent(&s.context) != cuda.abi.success or s.context == null) return;
+            s.ahead = Ahead.init(s.gpa, io, &s.lazy.?, Mapper.vmm(&s.vmm), .{ .ctx = s, .enter = Pieces.enter, .zero = Pieces.zero, .leave = Pieces.leave }) catch return;
+        }
+        s.ahead.?.post(off, n);
     }
 
     /// Whether the arena maps its pieces on first use (else every byte is there from the start).
@@ -140,8 +302,12 @@ pub const Arena = struct {
         return a.pieces != null;
     }
 
-    /// The buffer (its pieces unmapped), then the virtual range.
+    /// The thread stopped, the buffer (its pieces unmapped), then the virtual range.
     pub fn free(a: *Arena) void {
+        if (a.pieces) |p| if (p.ahead) |*x| {
+            x.deinit();
+            p.ahead = null;
+        };
         a.buf.free();
         if (a.pieces) |p| destroy(p);
         a.* = undefined;
@@ -161,6 +327,9 @@ const Fake = struct {
     gap_at: ?u32 = null, // the chunk call that lands one granule past its place
     zeroed: u64 = 0,
     fail_zero: bool = false,
+    slow: bool = false, // a chunk call takes 50 ms
+    entered: std.atomic.Value(u32) = .init(0), // chunk calls begun
+    mapped_by: ?std.Thread.Id = null, // the thread of the last chunk call
 
     fn mapper(f: *Fake) Mapper {
         return .{ .be = .{ .ctx = f, .granularity = 2 << 20, .chunk = chunk, .release = release, .name = "fake" }, .seek = seek };
@@ -171,6 +340,9 @@ const Fake = struct {
     }
     fn chunk(ctx: *anyopaque, _: usize) ?u64 {
         const f: *Fake = @ptrCast(@alignCast(ctx));
+        _ = f.entered.fetchAdd(1, .release);
+        f.mapped_by = std.Thread.getCurrentId();
+        if (f.slow) std.testing.io.sleep(.fromMilliseconds(50), .awake) catch {};
         defer f.chunks += 1;
         if (f.fail_at == f.chunks) return null;
         if (f.gap_at == f.chunks) f.next += 2 << 20;
@@ -184,7 +356,53 @@ const Fake = struct {
         if (f.fail_zero) return error.CudaFailed;
         f.zeroed += len;
     }
+    fn hooks(f: *Fake) Ahead.Hooks {
+        const H = struct {
+            fn enter(_: *anyopaque) bool {
+                return true;
+            }
+            fn zero(ctx: *anyopaque, at: u64, len: usize) anyerror!void {
+                const g: *Fake = @ptrCast(@alignCast(ctx));
+                return g.piece(at, len);
+            }
+            fn leave(_: *anyopaque) void {}
+        };
+        return .{ .ctx = f, .enter = H.enter, .zero = H.zero, .leave = H.leave };
+    }
 };
+
+test "a posted piece maps on the arena's thread, and ensure waits for the one it has in hand, never mapping it twice" {
+    var f: Fake = .{ .slow = true };
+    var flags: [8]bool = @splat(false);
+    var z: Lazy = .{ .base = 1 << 40, .len = 2 << 30, .piece = piece_bytes, .mapped = &flags };
+    var a = try Ahead.init(std.testing.allocator, std.testing.io, &z, f.mapper(), f.hooks());
+    defer a.deinit();
+    a.post(0, 1);
+    while (f.entered.load(.acquire) == 0) std.Thread.yield() catch {}; // the thread is mapping piece 0
+    try a.ensure(0, 1, &f); // needs it now: waits
+    try std.testing.expect(flags[0] and !flags[1]);
+    try std.testing.expectEqual(@as(u32, 1), f.chunks);
+    try std.testing.expectEqual(@as(u64, piece_bytes), f.zeroed);
+    try std.testing.expect(f.mapped_by.? != std.Thread.getCurrentId());
+    a.post(0, piece_bytes + 1); // piece 0 mapped, piece 1 queued
+    a.settle();
+    try std.testing.expect(flags[1] and f.chunks == 2 and f.mapped_by.? != std.Thread.getCurrentId());
+}
+
+test "a piece the arena's thread fails to map goes back unmarked, and ensure maps it on the caller's thread" {
+    var f: Fake = .{ .fail_at = 0 };
+    var flags: [8]bool = @splat(false);
+    var z: Lazy = .{ .base = 1 << 40, .len = 2 << 30, .piece = piece_bytes, .mapped = &flags };
+    var a = try Ahead.init(std.testing.allocator, std.testing.io, &z, f.mapper(), f.hooks());
+    defer a.deinit();
+    a.post(0, 1);
+    a.settle();
+    try std.testing.expect(!flags[0] and f.chunks == 1 and f.zeroed == 0);
+    try a.ensure(0, 1, &f);
+    try std.testing.expect(flags[0] and f.chunks == 2);
+    try std.testing.expectEqual(@as(u64, piece_bytes), f.zeroed);
+    try std.testing.expectEqual(std.Thread.getCurrentId(), f.mapped_by.?);
+}
 
 test "a 6 GiB range maps only the pieces its pages use, each once, zeroed, and every mapped piece goes back" {
     var f: Fake = .{};
@@ -249,11 +467,11 @@ test "the arena's range comes through its own hook: the installed hook is untouc
 
 test "without a device, or for one piece or less, the arena is one cuMemAlloc and every byte is there from the start" {
     var d = cuda.paging_test_device.Device.driver();
-    var a = try Arena.alloc(std.testing.allocator, &d, 3 * piece_bytes, null);
+    var a = try Arena.alloc(std.testing.allocator, &d, 3 * piece_bytes, null, null);
     try std.testing.expect(!a.lazy());
     try a.ensure(0, 3 * piece_bytes, cuda.paging_test_device.Device.stream); // nothing to map
     a.free();
-    var b = try Arena.alloc(std.testing.allocator, &d, piece_bytes, 0);
+    var b = try Arena.alloc(std.testing.allocator, &d, piece_bytes, 0, null);
     try std.testing.expect(!b.lazy());
     b.free();
 }
