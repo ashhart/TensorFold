@@ -16,8 +16,11 @@ pub const Driver = struct {
     api: abi.Api,
     /// cuFuncGetName (CUDA 12.3+; optional: an older driver opens without it): a failed launch names its kernel
     func_name: ?FuncGetName = null,
+    /// Optional, as cuFuncGetName: only TF_CUDA_HOST_WFE's stream waits use it.
+    write_value32: ?WriteValue32 = null,
 
     pub const FuncGetName = *const fn (*?[*:0]const u8, abi.Function) callconv(.c) abi.Result;
+    pub const WriteValue32 = *const fn (abi.Stream, abi.DevicePtr, u32, c_uint) callconv(.c) abi.Result;
 
     pub fn open() Error!Driver {
         return openPath(platform.cuda_driver);
@@ -35,7 +38,7 @@ pub const Driver = struct {
                 return error.MissingSymbol;
             };
         }
-        const d: Driver = .{ .lib = lib, .api = api, .func_name = lib.lookup(FuncGetName, "cuFuncGetName") };
+        const d: Driver = .{ .lib = lib, .api = api, .func_name = lib.lookup(FuncGetName, "cuFuncGetName"), .write_value32 = lib.lookup(WriteValue32, "cuStreamWriteValue32_v2") };
         try d.check(api.cuInit(0), "cuInit");
         var buf: [256]u8 = undefined;
         if (d.tooOld(&buf)) |why| {

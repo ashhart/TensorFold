@@ -180,6 +180,18 @@ test "environment: word switches take 0 and 1 and the word forms in any case; ex
     try t.expectError(error.InvalidEnvironment, e.parse("TF_DSV41_KV_SPLIT", "true"));
 }
 
+test "environment: the host-wait switch is exact 0 or 1, refused by name when the CUDA backend starts" {
+    const name = "TF_CUDA_HOST_WFE";
+    for ([_][]const u8{ "true", "on", "yes", "01", " 1", "1 ", "2" }) |raw| {
+        try t.expectError(error.InvalidEnvironment, e.parse(name, raw));
+        const why = (try e.refusal(a, Env{ .name = name, .raw = raw }, .{ .cuda = true })).?;
+        defer a.free(why);
+        try t.expect(std.mem.indexOf(u8, why, name) != null);
+    }
+    try t.expect(!try e.value(bool, name, null, false));
+    try t.expect(!try e.value(bool, name, "0", false));
+    try t.expect(try e.value(bool, name, "1", false));
+}
 test "environment: the keep-others switch is exact 0 or 1, checked when the CUDA backend starts" {
     const name = "TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS";
     for ([_][]const u8{ "true", "on", "yes", "01", " 1", "1 ", "2" }) |raw| {

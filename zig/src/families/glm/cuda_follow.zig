@@ -54,6 +54,7 @@ pub const Link = struct {
     ids: []u32, // host copy of the last step's ids
     gpa: std.mem.Allocator,
     wait: bool, // TF_GLM_LINK_WAIT=1: every step uploaded and waited for, as before the put
+    waiter: cuda.host_wait.Waiter = .{}, // TF_CUDA_HOST_WFE: the step broadcast's parked wait
     asleep: bool = false, // rank 0: the other ranks sleep on their lines (cuda.tp_watch) until its next step
 
     pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, lib: *const cuda.nccl.Library, comm: cuda.nccl.Comm, stream: cuda.Stream, asked_ids: usize) !Link {
@@ -77,11 +78,12 @@ pub const Link = struct {
         if (@import("cuda_disk_ranks.zig").link == l) @import("cuda_disk_ranks.zig").link = null;
         l.gpa.free(l.ids);
         l.buf.free();
+        l.waiter.deinit();
     }
 
     fn bcast(l: *Link, bytes: usize) !void {
         try l.post(bytes);
-        try l.stream.synchronize();
+        try l.waiter.synchronize(l.stream);
     }
 
     fn post(l: *Link, bytes: usize) !void {
