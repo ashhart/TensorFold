@@ -206,8 +206,7 @@ pub const Product = struct {
                     };
                     const term = c.fromBf16(t.x[r * s.k + j]) * code * scale;
                     switch (acc) {
-                        // exact fp32 sums: no intermediate rounding, one store; the gates that need
-                        // a rounded accumulator are fp16 and bf16, below
+                        // exact fp32 sums: no intermediate rounding, one store; fp16 and bf16 round each step
                         .f32 => exact += term,
                         .bf16 => a = @floatCast(core.bf16_round.bf16(@as(f64, a) + term)),
                         .f16 => a = @floatCast(@as(f16, @floatCast(@as(f64, a) + term))),

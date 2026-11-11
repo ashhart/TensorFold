@@ -205,8 +205,14 @@ pub const Engine = struct {
         _ = try steps.done(.{ 0, 0 }, .first);
         e.weights = try weights.Model.loadRankWith(gpa, io, &e.driver, dir, group, chat);
         errdefer e.weights.deinit();
-        if (e.plain() or chat) {
-            // a bf16 checkpoint's products (rocBLAS, or widened for chat): one rank, not qualified under graphs
+        var modelopt = false;
+        {
+            var cfg = config.Config.read(gpa, io, dir) catch null;
+            defer if (cfg) |*c| c.deinit();
+            modelopt = if (cfg) |c| c.modelopt else false;
+        }
+        if (e.plain() or chat or modelopt) {
+            // bf16 products (rocBLAS, or the dense kernels a ModelOpt or chat checkpoint reads): one rank, no graphs
             if (e.act != .bf16) {
                 std.log.err("a bf16 checkpoint needs bf16 activations; this GPU computes in fp16", .{});
                 return error.UnsupportedQuantization;
@@ -262,7 +268,7 @@ pub const Engine = struct {
         errdefer e.pool.deinit();
         e.round = try lane_round.State.init(e);
         errdefer e.round.deinit(e);
-        if (e.plain()) {
+        if (e.plain()) { // ModelOpt's own bf16 layers read dense, so rocBLAS is not opened for them
             e.workspace = try hip.DeviceBuffer.alloc(&e.driver, hip.blas.workspace_bytes);
             e.blas = hip.blas.Blas.open(e.stream) catch |err| {
                 e.workspace.free();

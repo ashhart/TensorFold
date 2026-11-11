@@ -4,6 +4,7 @@ const std = @import("std");
 const checkpoint = @import("checkpoint.zig");
 const table = @import("table.zig");
 const projection = @import("projection.zig");
+const qcfg = @import("config.zig");
 const convert = @import("core").quant.convert;
 
 const io = std.testing.io;
@@ -339,12 +340,33 @@ test "a ModelOpt qwen3_5_moe checkpoint is refused by name before its shards are
         \\ "linear_num_key_heads": 16, "linear_num_value_heads": 32, "linear_key_head_dim": 128,
         \\ "linear_value_head_dim": 128, "linear_conv_kernel_dim": 4, "vocab_size": 1000, "rope_theta": 5000000,
         \\ "partial_rotary_factor": 0.5, "num_experts": 256, "num_experts_per_tok": 8,
-        \\ "moe_intermediate_size": 512, "shared_expert_intermediate_size": 512,
-        \\ "quantization_config": {"quant_method": "modelopt", "quant_algo": "NVFP4"}}
+        \\ "moe_intermediate_size": 512, "shared_expert_intermediate_size": 512, "eos_token_id": 1,
+        \\ "quantization_config": {"quant_method": "modelopt", "quant_algo": "NVFP4",
+        \\  "config_groups": {"group_0": {"weights": {"num_bits": 4, "group_size": 16, "type": "float"}}}}}
     ;
-    const cfg = try qcfg.Config.parse(gpa, text, null);
+    var cfg = try qcfg.Config.parse(gpa, text, null);
     defer cfg.deinit();
     try std.testing.expect(cfg.modelopt and cfg.spec.experts > 0);
     // before this refusal the same checkpoint opened and its stack reached experts.routed, which is not read
-    try std.testing.expectError(error.UnsupportedQuantization, checkpoint.refuseModelOptExperts(&cfg));
+    const why = checkpoint.modelOptExpertsWhy(&cfg) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(std.mem.indexOf(u8, why, "routed experts") != null);
+}
+
+test "a ModelOpt checkpoint's own bf16 layers read dense, not rocBLAS BF16" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try write(tmp.dir, .{});
+    const root = try rootOf(tmp);
+    defer gpa.free(root);
+    var files: table.Files = undefined;
+    var t = try rawTable(root, &files);
+    defer files.deinit();
+    defer t.close(io);
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    // the same BF16 tensor: an unquantized checkpoint keeps it on rocBLAS, a ModelOpt one on the dense kernels
+    t.modelopt = false;
+    try std.testing.expect((try projection.projection(arena.allocator(), &t, "lm_head")) == .bf16);
+    t.modelopt = true;
+    try std.testing.expect((try projection.projection(arena.allocator(), &t, "lm_head")) == .dense);
 }

@@ -33,12 +33,10 @@ pub const Names = struct {
     }
 };
 
-/// A ModelOpt checkpoint's routed experts are a stack of 4-bit weights with one global scale an expert: refused here.
-pub fn refuseModelOptExperts(cfg: *const config.Config) !void {
-    if (cfg.modelopt and cfg.spec.experts > 0) {
-        std.log.err("a ModelOpt checkpoint with routed experts is not read on this backend: its experts carry a global scale each", .{});
-        return error.UnsupportedQuantization;
-    }
+/// Why a ModelOpt checkpoint is not read here, or null: its routed experts are a stack with one global scale an expert.
+pub fn modelOptExpertsWhy(cfg: *const config.Config) ?[]const u8 {
+    if (cfg.modelopt and cfg.spec.experts > 0) return "a ModelOpt checkpoint with routed experts is not read on this backend: its experts carry a global scale each";
+    return null;
 }
 
 pub const Checkpoint = struct {
@@ -53,7 +51,10 @@ pub const Checkpoint = struct {
     pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !Checkpoint {
         var cfg = try config.Config.read(gpa, io, dir);
         errdefer cfg.deinit();
-        try refuseModelOptExperts(&cfg);
+        if (modelOptExpertsWhy(&cfg)) |why| {
+            std.log.err("{s}", .{why});
+            return error.UnsupportedQuantization;
+        }
         const bf16 = cfg.quant == .bf16;
         // a bf16 checkpoint's own shards are the index's: side files (a joint head) stay out of the table
         var files = try if (bf16) table.Files.indexed(gpa, io, dir) else table.Files.list(gpa, io, dir);
@@ -187,6 +188,7 @@ pub const Checkpoint = struct {
         var t = &c.main;
         if (side.len > 0 or !own) {
             opened = try Table.open(c.gpa, c.io, shards, "language_model.", c.config.quant);
+            opened.?.modelopt = c.config.modelopt;
             t = &opened.?;
         }
         if (side.len == 0 and !t.has("mtp.norm_e.weight") and !t.has("mtp.pre_fc_norm_embedding.weight")) {
