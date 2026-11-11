@@ -120,7 +120,7 @@ pub const Pool = struct {
         _ = try std.math.add(u64, l.run_bytes, page_bytes - 1);
         const p = try gpa.create(Pool);
         errdefer gpa.destroy(p);
-        // pieces: one allocation past ~5.4 GiB slowed paged attention 1.6-1.8x; mapped as used, the rest stays free
+        // pieces mapped as the lanes first use them: memory no stream has taken stays free at load
         var arena = try @import("cuda_kv_arena.zig").Arena.alloc(gpa, e.driver, try std.math.mul(usize, count, page_bytes), device);
         errdefer arena.free();
         p.* = .{ .gpa = gpa, .e = e, .layout = l, .capacity = capacity, .head = head, .pool = try kv.Pool.init(gpa, count, page_bytes), .arena = arena, .lanes = &.{} };
