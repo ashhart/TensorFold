@@ -36,7 +36,7 @@ PASS nonfinite xpu top-k (the candidates): the stated rule holds: a row holding 
 PASS repeat xpu top-k (the candidates): five runs byte-identical (528 bytes), inputs and guards untouched, no overlap
 PASS shapes xpu top-k (the candidates): 14 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel
 N/A  sums xpu top-k (the candidates): declares none sums
-FAIL shapes control: top-k merge breaking ties the wrong way: at 1x248320x20: row 0 candidate 0 is 15.875 at id 248007, the rule gives 15.875 at id 317
+FAIL shapes control: top-k merge breaking ties the wrong way: at 1x248320x20: row 0 candidate 0 is 15.875 at id 247086, the rule gives 15.875 at id 271
 CONTROL control: top-k merge breaking ties the wrong way: red at shapes, as planted
 FAIL nonfinite control: top-k flag read off the candidates only: row 0 flag 0 where the row holds a value that is not finite
 CONTROL control: top-k flag read off the candidates only: red at nonfinite, as planted
@@ -46,7 +46,7 @@ PASS shapes xpu embed (the gathered row, fp32): 9 shapes exact by its own check 
 N/A  sums xpu embed (the gathered row, fp32): declares none sums
 FAIL nonfinite control: fmax row max: 1 of 8 outputs differ in class; first at 0: finite where float64 gives nan
 CONTROL control: fmax row max: red at nonfinite, as planted
-FAIL repeat control: atomic-add row sum: 3 of 4 repeats differ from the first run's bytes, first at byte 4
+FAIL repeat control: atomic-add row sum: 4 of 4 repeats differ from the first run's bytes, first at byte 0
 CONTROL control: atomic-add row sum: red at repeat, as planted
 FAIL repeat control: row sum writing its input: 4 of 4 repeats differ from the first run's bytes, first at byte 0
 CONTROL control: row sum writing its input: red at repeat, as planted
@@ -72,4 +72,4 @@ PASS limits live topk_part: 256 work-items required, sub-group 16 (the kernel's 
 PASS limits live topk_merge: 256 work-items required, sub-group 16 (the kernel's most 16), 192 SLM bytes, 0 spill bytes, 0 private bytes, 6 arguments
 PASS limits live embed: 256 work-items required, sub-group 16 (the kernel's most 16), 0 SLM bytes, 0 spill bytes, 0 private bytes, 6 arguments
 RED  limits live control: sub-group 8: declared only, ocloc does not build it for this device: control: sub-group 8 on bmg-g31: sub-group 8, the device runs { 16, 32 }
-SUMMARY bmg-g31 0xe223 10 kernels: 10 pass gates 1-4, 0 fail, 0 known findings; 7 controls: 7 red as planted, 0 missed; 0 limit problems; gates 5758 ms, limits 1 ms
+SUMMARY bmg-g31 0xe223 10 kernels: 10 pass gates 1-4, 0 fail, 0 known findings; 7 controls: 7 red as planted, 0 missed; 0 limit problems; gates 5779 ms, limits 0 ms

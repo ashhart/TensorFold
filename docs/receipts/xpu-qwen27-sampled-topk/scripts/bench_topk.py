@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""Sampled served decode, P concurrent streams a wave, one JSON line per request. usage: bench_topk.py URL LABEL OUTDIR P [reps]
-
-Per (depth, kind) cell: 1 warm-up wave then `reps` measured ones; stream i of every wave uses seed SEED0 + i. The sampling is
-the checkpoint's (no temperature or top_k in the request). A request without a tensorfold.token_sha256 is a failure.
-Env: CELLS="0:code,text;8192:code,text" (depth:kinds), GREEDY=1 (temperature 0, no seed), SEED0 (default 1000).
-"""
+"""Sampled served decode, P streams a wave; env CELLS, GREEDY, SEED0. usage: bench_topk.py URL LABEL OUTDIR P [reps]"""
 import hashlib, json, os, sys, threading, time, urllib.request
 
 URL, LABEL, OUT, P = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
