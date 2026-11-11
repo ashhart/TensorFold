@@ -106,6 +106,11 @@ fn cache(sh: Shape, n: u64) [5]u64 {
     };
 }
 
+/// The longest state an image holds: the capacity's whole pools (`parts` takes no other position).
+pub fn longest(sh: Shape) u32 {
+    return sh.capacity - sh.capacity % sparse.pool;
+}
+
 /// The image at `at` (a chunk start): the words, the prefix, each DSA layer's rows, the head's caches, the tail.
 pub fn parts(sh: Shape, at: u32, out: *std.ArrayList(Part), a: std.mem.Allocator) !void {
     if (at == 0 or at % sparse.pool != 0 or at > sh.capacity) return error.SnapshotShape;

@@ -112,6 +112,26 @@ test "GLM disk image: the lease bytes the image counts are the snapshot plan's, 
     }
 }
 
+test "GLM disk image: the longest state is a position the store's parts take, so the staging floor prices it" {
+    var m: Model = undefined;
+    try m.init();
+    var d = H.driver();
+    const a = std.testing.allocator;
+    // capacities off and on a pool's edge: rows.attach prices `longest` and falls back to its default on an error
+    for ([_]usize{ capacity, capacity + 1, capacity + 3 }) |cap| {
+        var st = try State.initFormat(a, &d, &m.w, cap, false);
+        defer st.deinit();
+        const sh = try image.Shape.of(&st, &m.w.config, cap, true);
+        const at = image.longest(sh);
+        try expect(at <= cap and cap - at < 4 and at % 4 == 0);
+        var parts: std.ArrayList(image.Part) = .empty;
+        defer parts.deinit(a);
+        try image.storeParts(sh, &.{ sh.prefix, sh.prefix }, at, &parts, a);
+        try expect(parts.items.len > 0);
+        try expectError(error.SnapshotShape, image.storeParts(sh, &.{ sh.prefix, sh.prefix }, at + 4, &parts, a));
+    }
+}
+
 test "GLM disk image: the store's rows are by position from 0 in whole blocks; rings, pools in progress and the head are its own" {
     var m: Model = undefined;
     try m.init();
