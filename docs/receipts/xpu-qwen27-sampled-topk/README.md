@@ -35,7 +35,8 @@ is raised by every id of the row, not by the candidates. Everything after is the
   plain scan, for random rows, rows of a few levels (many ties, signed zeros), lengths on and around the 1,024-id group,
   `top_k` 1 to 64 and five `top_p`, `min_p`, temperature settings: `pickRow` over the whole row equals the draw from the
   candidates (1,080 draws), the candidates equal the full sort's first 64, and a NaN, `+Inf` or `-Inf` anywhere (first
-  or last id of a group, outside the candidates) fails both the same way. With the merge's tie rule reversed the test fails.
+  or last id of a group, outside the candidates) fails both the same way. With the merge's tie rule reversed the order
+  test fails.
 - Served: `compare.out` (`token_sha256` per request).
 
 ## Builds and hardware
@@ -78,6 +79,13 @@ requests (`temperature` 0, short code and text) go first. Every request records 
 - The same prompt and seed gives the same hash at 1, 4 and 8 streams (a stream in a shared round equals the lone one):
   `MISMATCH across 1, 4 and 8 streams: 0 of 34` (prompt, seed) pairs.
 - The two greedy requests have the same hash on main and on the branch (greedy is unchanged).
+
+After the timed passes, a review changed the kernel's tail and the host bookkeeping, not the candidates of the served
+vocabulary: a group's cleared winner becomes the `(-inf, 0x7fffffff)` sentinel (a group with fewer live ids than K no
+longer repeats its last id), and the forward notes the rows it holds candidates for after its sync. On that final tree
+one more pass (1, 4 and 8 streams, the same cells, 210 requests) gives the receipt's `token_sha256` for every
+(prompt, seed, mode): 0 of 210 differ (`final-tree/served.jsonl`). The contract, the host test, the device tests,
+`zig build test` and `pr_check` were run again on it; `contract-run.out` is that run. The timed passes were not repeated.
 
 ## Speed
 
@@ -134,6 +142,7 @@ gives 15.875 at id 317`), and the merge whose flag reads the merged candidates i
 
 ## Files
 
-`runs/<pass>-<side>-par<N>.jsonl` (requests; `-greedy` for the two greedy ones), `compare.out`, `contract-run.out`,
+`runs/<pass>-<side>-par<N>.jsonl` (requests; `-greedy` for the two greedy ones), `final-tree/served.jsonl`,
+`compare.out`, `contract-run.out`,
 `limits.out`, `tests/`, `scripts/` (`bench_topk.py` the client, `run_pass.sh` and `driver.sh` the passes, `compare_topk.py`,
 `run-tests.sh`, `build_corp_code.sh`).
