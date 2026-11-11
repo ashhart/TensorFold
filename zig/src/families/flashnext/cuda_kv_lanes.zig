@@ -65,10 +65,10 @@ pub fn layout(capacity: usize, tokens: usize, head: ?Head, extra: usize) kv.Layo
     return .{ .fixed_bytes = mostPages(capacity, tokens) * 4 + extra, .token_bytes = pages.pageBytesOf(tokens, layers) / tokens, .page_tokens = @intCast(tokens), .snap_bytes = snap.bytes(0, head != null, .full), .run_bytes = run };
 }
 
-/// `layout` with the run as pieces (TF_FLASHNEXT_STATE_PAGES): their pages; the draft's wide block in the fixed part.
+/// `layout` with the run as pieces (TF_FLASHNEXT_STATE_PAGES): their pages, the head's streams and logits by row.
 pub fn layoutPieces(capacity: usize, tokens: usize, head: ?Head, extra: usize) !kv.Layout {
     var l = layout(capacity, tokens, head, extra);
-    var buf: [32 << 10]u8 = undefined;
+    var buf: [64 << 10]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&buf);
     var m = pieceMap(fba.allocator(), head, l.pageBytes()) catch |err| {
         const why = "TF_FLASHNEXT_KV_PAGES={d}: a page holds {d} bytes, a lane's largest piece {d}: set {d} or more";
@@ -77,11 +77,8 @@ pub fn layoutPieces(capacity: usize, tokens: usize, head: ?Head, extra: usize) !
         return err;
     };
     defer m.deinit(fba.allocator());
-    const outside = if (head) |h| mtp.Draft.wideBytes(h.rows) else 0;
     l.run_bytes = 0;
     l.pieces = m.summary();
-    l.fixed_bytes += outside;
-    l.outside = outside;
     return l;
 }
 
@@ -90,12 +87,12 @@ fn pieceSizes(gpa: std.mem.Allocator, sizes: *std.ArrayList(u64), head: ?Head) !
     try sizes.appendNTimes(gpa, state_bytes, wt.linear_n);
     try sizes.appendNTimes(gpa, conv_bytes, wt.linear_n);
     try sizes.append(gpa, tail_bytes);
-    if (head) |h| try mtp.Draft.pieceSizes(gpa, sizes, h.draft_n);
+    if (head) |h| try mtp.Draft.pieceSizes(gpa, sizes, h.draft_n, h.rows);
 }
 
 /// A lane's largest piece as the packer places it (256-byte aligned).
 pub fn largestPiece(head: ?Head) u64 {
-    var buf: [32 << 10]u8 = undefined;
+    var buf: [64 << 10]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&buf);
     var sizes: std.ArrayList(u64) = .empty;
     pieceSizes(fba.allocator(), &sizes, head) catch unreachable; // a few hundred sizes, well inside buf
@@ -162,8 +159,8 @@ pub const State = struct {
     }
 };
 
-/// One pool lane: its cache's views, that stream's lease, its run (or pieces) and its draft's wide block if pieced.
-const Lane = struct { seq: prompt.Seq, lease: kv.Lease = .{}, used: bool = false, run: u32 = 0, wide: ?cuda.DeviceBuffer = null };
+/// One pool lane: its cache's views, that stream's lease and its run (or pieces).
+const Lane = struct { seq: prompt.Seq, lease: kv.Lease = .{}, used: bool = false, run: u32 = 0 };
 
 pub const Pool = struct {
     gpa: std.mem.Allocator,
@@ -195,16 +192,10 @@ pub const Pool = struct {
         p.lanes = try gpa.alloc(Lane, streams);
         errdefer gpa.free(p.lanes);
         var made: usize = 0;
-        errdefer for (p.lanes[0..made]) |*x| {
-            x.seq.deinit(gpa);
-            if (x.wide) |*b| b.free();
-        };
+        errdefer for (p.lanes[0..made]) |*x| x.seq.deinit(gpa);
         for (p.lanes) |*x| {
             x.* = .{ .seq = try p.laneSeq() };
             made += 1;
-            if (p.map != null) if (head) |h| {
-                x.wide = try cuda.DeviceBuffer.alloc(e.driver, mtp.Draft.wideBytes(h.rows));
-            };
         }
         errdefer cuda.completion.drain(e.driver, e.stream.*, "flashnext: failed pool initialization did not drain");
         try arena.fill8(0, e.stream.handle);
@@ -246,7 +237,6 @@ pub const Pool = struct {
                 p.pool.finish(&x.lease);
             }
             x.seq.deinit(p.gpa);
-            if (x.wide) |*b| b.free();
         }
         p.gpa.free(p.lanes);
         if (p.map) |*m| m.deinit(p.gpa);
@@ -326,11 +316,10 @@ pub const Pool = struct {
         const h = p.head orelse return error.FlashNextRunTooShort;
         const x = p.laneOf(seq) orelse return error.UnknownStream;
         if (p.map) |m| {
-            var at: [4 * wt.linear_n + 6]u64 = undefined;
-            const n = m.at.len - seq_pieces;
-            if (n > at.len) return error.FlashNextRunTooShort;
-            for (at[0..n], seq_pieces..) |*a, i| a.* = m.addr(i, p.arena.ptr, x.lease.state.items);
-            return mtp.Draft.initPieces(p.gpa, p.e.driver, cap, h.draft_n, h.rows, &x.seq.paged.?, at[0..n], (x.wide orelse return error.FlashNextRunTooShort).ptr);
+            const at = try p.gpa.alloc(u64, m.at.len - seq_pieces);
+            defer p.gpa.free(at);
+            for (at, seq_pieces..) |*a, i| a.* = m.addr(i, p.arena.ptr, x.lease.state.items);
+            return mtp.Draft.initPieces(p.gpa, p.e.driver, cap, h.draft_n, h.rows, &x.seq.paged.?, at);
         }
         const run_len = p.layout.runPages() * p.layout.pageBytes();
         if (run_len < seqRunBytes()) return error.FlashNextRunTooShort;

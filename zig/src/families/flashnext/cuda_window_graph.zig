@@ -150,6 +150,10 @@ pub const SharedKey = struct {
             h.fixed(l.rows);
             h.geometry(.at(l.pos + l.rows, l.seq.cap));
             h.values(&[_]u64{ l.seq.gen, pieces(l.seq), l.seq.cap, l.streams, l.logits });
+            if (l.logit_rows.len > 0) {
+                h.fixed(l.logit_rows.len); // a copy a row: other launches than one lane copy
+                h.values(l.logit_rows);
+            }
             h.keep(l.keep);
             rows += l.rows;
         }
