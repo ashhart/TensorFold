@@ -322,6 +322,9 @@ and on GLM-5.3-Flash's CUDA engine.
 `logprob`, `rank` and `decoded_token`. The prompt token's `rank` counts every vocabulary token at or above it,
 itself included, as vLLM does, and the best tokens are ranked by place. Such a request never resumes from the prompt
 cache, so its whole prompt is prefilled. Chat, streamed requests and other engines return HTTP 400 with it.
+Every native server reads MCDMA's `kv_transfer_params.mcdma_handoff` (`id`, 32 hex digits, and `export_from`, 0)
+on `/v1/completions` and `/v1/chat/completions`. A server started with `--mcdma-produce` exports that prompt's state;
+any other server, a malformed object, or a nonzero `export_from` gets HTTP 400 naming the field.
 `ignore_eos: true` keeps user-supplied `stop` strings active, including when a stop string spans streamed chunks.
 Both backends reject a non-boolean `ignore_eos` or a malformed `stop` with HTTP 400 before a stream opens.
 Both backends reject malformed `temperature`, `top_p`, `top_k` and `seed` values with HTTP 400, whether or not
@@ -795,10 +798,13 @@ add `gpu_seconds` to the block: the GPU-busy time of the target model's forward 
 pass included. A round shared with other streams counts whole in each of their replies, and the drafter's passes
 are not included. Without `TF_Q27_PROFILE` the field is absent and replies are unchanged.
 
-Beside the block, native replies carry top-level `exact_mode`, always `"exact"`, and `stop_sequence`, the matched
-stop string, when a stop string ended the reply. A server started with `--cortheon` adds a top-level `cortheon`
-object summarizing the turn for requests Cortheon runs ([Cortheon](cortheon.md)). These ride on the whole reply and
-the streamed finish event alike.
+Beside the block, native replies carry top-level `exact_mode` and `stop_sequence`, the matched stop string, when a
+stop string ended the reply. `exact_mode` is `"exact"`, or `"remote_prefix"` when a server started with
+`--prefill-from` built any of the reply's prompt prefix on another machine; that reply can differ from one built here
+alone. Its block then adds `remote_prefix`, the restored prefix's length, `pulled_prefix` when it came over the link
+for this reply, and `kept_remote_cache_tokens` when it was a kept copy. A server started with `--cortheon` adds a
+top-level `cortheon` object summarizing the turn for requests Cortheon runs ([Cortheon](cortheon.md)). These ride on
+the whole reply and the streamed finish event alike.
 
 The native server's finish log names the client reply ID. Completed requests report `prompt`, `cached`,
 `thinking`, `effort`, `tokens`, `sha`, `finish`, `rounds`, and draft acceptance; a refused request reports

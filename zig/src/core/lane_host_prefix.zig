@@ -1,6 +1,7 @@
 //! The prefix wait: a request whose prompt shares a cut another prompt is filling waits for that fill to keep it.
 const std = @import("std");
 const api = @import("engine_api.zig");
+const exports = @import("lane_export.zig");
 const LaneHost = @import("lane_host.zig").LaneHost;
 const Job = LaneHost.Job;
 
@@ -40,14 +41,17 @@ pub fn waits(h: *LaneHost, job: *Job) bool {
     const r = job.request;
     if (!keyed(r)) return false;
     const spans = h.spans(r);
-    const have: u32 = if (store.find(r.cacheKey(), r.chunks, spans)) |e| e.at else 0;
+    const key = exports.resumable(r); // a handoff resumes only before its cut
+    const have: u32 = if (store.find(key, r.chunks, spans)) |e| e.at else 0;
     const least = have +| @max(store.rules.min_gap, 1); // a cut this far past what is kept already
     var best: Waiting = .{};
     for (h.filling.items) |l| { // admitted fills never wait, so the oldest always runs
         if (!l.started or l.prefilled != null or l.request.background or !keyed(l.request)) continue;
+        if (l.stream.reuse.pulled) continue; // a fresh pull keeps no mark, or only past its end (#1594 step 2b)
         for (l.marks) |at| {
             if (at <= l.reached or at < least or at <= best.at) continue;
-            if (store.wouldServe(r.cacheKey(), r.chunks, spans, l.request.cacheKey(), h.spans(l.request), at))
+            if (!exports.keeps(l, at)) continue; // a handoff's cut is kept only where its store resumes it
+            if (store.wouldServe(key, r.chunks, spans, l.request.cacheKey(), h.spans(l.request), at))
                 best = .{ .leader = l, .id = l.id, .at = at };
         }
     }

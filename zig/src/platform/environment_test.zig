@@ -87,6 +87,15 @@ const valid = [_]Case{
     .{ .name = "TF_FLASHNEXT_SCALE_INDEX", .raw = "1", .n = 1 },
     .{ .name = "GLM_EHPROJ_NAX", .raw = "0", .n = 0 },
     .{ .name = "GLM_EHPROJ_NAX", .raw = "1", .n = 1 },
+    .{ .name = "TF_PREFILL_MIN", .raw = "0", .n = 0 },
+    .{ .name = "TF_PREFILL_MIN", .raw = "4096", .n = 4096 },
+    .{ .name = "TF_PREFILL_CHUNK", .raw = "16", .n = 16 },
+    .{ .name = "TF_PREFILL_CHUNK", .raw = "512", .n = 512 },
+    .{ .name = "TF_PREFILL_KEEP", .raw = "1", .n = 1 },
+    .{ .name = "TF_PREFILL_AHEAD", .raw = "1", .n = 1 },
+    .{ .name = "TF_PREFILL_TIMEOUT_S", .raw = "86400", .n = 86400 },
+    .{ .name = "TF_PREFILL_API_KEY_FILE", .raw = "/etc/tensorfold/gb10.key", .n = 0 },
+    .{ .name = "TF_PRODUCE_HELD_GIB", .raw = "32", .n = 32 },
     .{ .name = "XPU_A8_BITS", .raw = "4", .n = 4 },
     .{ .name = "XPU_A8_BITS", .raw = "8", .n = 8 },
     .{ .name = "LFM3_FUSE", .raw = "7", .n = 7 },
@@ -130,6 +139,9 @@ test "environment: range, enum, whitespace and native prompt geometry refusals a
         .{ "TF_PROMPT_ROWS", " 512" },          .{ "XPU_A8_BITS", "04" },
         .{ "XPU_A8_BITS", "16" },               .{ "TF_SLIDE_POCKET_KEY", "AUTO" },
         .{ "TF_DRAMA_PREFILL_ROWS", "4096x" },  .{ "TF_DRAMA_REFERENCE_CACHE", "4294967296" },
+        .{ "TF_PREFILL_CHUNK", "0" },           .{ "TF_PREFILL_CHUNK", "520" },
+        .{ "TF_PREFILL_KEEP", "true" },         .{ "TF_PREFILL_AHEAD", "0" },
+        .{ "TF_PREFILL_TIMEOUT_S", "0" },       .{ "TF_PREFILL_TIMEOUT_S", "86401" },
     }) |c| try t.expectError(error.InvalidEnvironment, e.parse(c[0], c[1]));
     try t.expectEqual(@as(?u64, null), try e.parse("TF_CUDA_DEVICE", "   "));
     try t.expectEqual(@as(?u64, 0), try e.parse("TF_Q27_COPY_ROWS", "+0"));

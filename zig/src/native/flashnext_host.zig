@@ -126,6 +126,7 @@ pub const Host = struct {
 
     fn submitFn(ctx: *anyopaque, id: api.Id, request: *const api.Request, sink: api.Sink) api.SubmitError!void {
         const h = self(ctx);
+        if (request.handoff != null) return error.InvalidRequest; // it exports no states (--mcdma-produce)
         const job = h.gpa.create(Job) catch return error.Busy;
         job.* = .{ .id = id, .request = request, .sink = sink, .queued = h.now() };
         h.lock();
@@ -568,6 +569,20 @@ test "status after a reply finishes reads no freed job" {
     Host.statusFn(&h, &st, &toks); // a poll before run() clears its own pointer
     try std.testing.expectEqual(@as(u32, 0), st.running);
     try std.testing.expectEqual(@as(usize, 0), st.streams);
+}
+
+test "a Flash Next host refuses a hand-off, which it cannot export, before it queues anything" {
+    const gpa = std.testing.allocator;
+    var host: Host = .{ .gpa = gpa, .io = std.testing.io, .eng = undefined, .info_ = .{} };
+    const Sink = struct {
+        fn event(_: *anyopaque, _: api.Id, _: *const api.Event) void {
+            @panic("a refused hand-off must not be admitted");
+        }
+    };
+    const request: api.Request = .{ .prompt = &.{ 1, 2 }, .max_tokens = 1, .handoff = .{ .id = @splat(7) } };
+    const sink: api.Sink = .{ .ctx = &host, .event = Sink.event }; // never called: the hand-off is refused first
+    try std.testing.expectError(error.InvalidRequest, host.engine().submit(1, &request, sink));
+    try std.testing.expectEqual(@as(usize, 0), host.queued.items.len);
 }
 
 test "a drained Flash Next host is unhealthy before another submit" {
