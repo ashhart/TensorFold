@@ -260,3 +260,74 @@ fn replayCase(upto: u64) !void {
 test "a replay-mode export equals the full export but for the window's oldest row of the decoder layers, which is zero" {
     inline for (.{ 2, 100, 127, 128, 129, 300, 520 }) |upto| try replayCase(upto);
 }
+
+/// Every part of `built` (shard `shard`) into `imp`.
+fn putAll(imp: *im.Import, shard: u32, built: *cx.Built) !void {
+    for (built.exp.layers, built.exp.sources) |layer, src| for (layer.parts, src.parts) |part, bytes| {
+        const dtype: plan.Dtype = if (part.dtype == .float32) .f32 else .bf16;
+        try imp.put(shard, layer.index, part.name, dtype, part.shape[0], part.shape[1], bytes);
+    };
+}
+
+/// A KV_SPLIT export of `upto` tokens over `shards` producers lands exactly the state the replicated export lands.
+fn splitCase(upto: u64, shards: u32) !void {
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const rows: u32 = @intCast(@min(upto, geo.window));
+    const seed = upto * 13 + shards;
+    const full_w = try s.make(arena, .{ .upto = upto, .ds_rows = rows, .seed = seed });
+    const split_w = try s.make(arena, .{ .upto = upto, .ds_rows = rows, .seed = seed, .world = shards, .split = true });
+    const tokens = try tokensOf(arena, upto);
+    const id: [16]u8 = @splat(0x6d);
+
+    const full_snap = try snapshotOf(arena, full_w);
+    const whole = try cx.build(gpa, id, tokens, .{ .pos = upto, .ds_rows = rows, .pieces = full_snap.pieces, .pages = full_snap.pages });
+    defer whole.deinit(gpa);
+    const want_via = try target(arena, 2048);
+    var want = try im.Import.init(arena, .{ .upto = upto, .ds_rows = rows }, .{ .@"packed" = want_via }, .{});
+    try putAll(&want, 0, whole);
+    _ = try want.complete();
+
+    const shape: plan.Shape = .{ .upto = upto, .ds_rows = rows, .shards = shards, .split = true };
+    const got_via = try target(arena, 2048);
+    var got = try im.Import.init(arena, shape, .{ .@"packed" = got_via }, .{});
+    var bytes: u64 = 0;
+    for (0..shards) |k| {
+        const snap = try snapshotOf(arena, split_w);
+        const pages = try arena.alloc(cx.Pages, geo.sources.len);
+        for (geo.sources, split_w.cuda.sources, pages) |src, st, *p| p.* = .{ .layer = src.layer, .comp = st.comp.ranks[k], .index = st.index.ranks[k] };
+        const part = try cx.build(gpa, id, tokens, .{ .pos = upto, .ds_rows = rows, .pieces = snap.pieces, .pages = pages, .shard = @intCast(k), .shards = shards });
+        defer part.deinit(gpa);
+        var sh = shape;
+        sh.shard = @intCast(k);
+        try p2.check(arena, sh, part.exp.toManifest("dsv41-test", k, shards));
+        if (k > 0) for (part.exp.layers) |l| for (l.parts) |p| try std.testing.expect(!std.mem.eql(u8, p.name, "swa") and !std.mem.eql(u8, p.name, "carry"));
+        try putAll(&got, @intCast(k), part);
+        bytes += part.bytes;
+    }
+    _ = try got.complete();
+    try std.testing.expectEqualSlices(u8, want_via.live, got_via.live);
+    try std.testing.expectEqualSlices(u8, want_via.storage, got_via.storage);
+    try std.testing.expect(bytes >= whole.bytes); // the shards add no part the whole lacks but their own part headers' rounding
+}
+
+// a prompt of one page has no part for the other shards (an export with no layer is protocol 1): remote prefixes are longer
+test "a KV_SPLIT export by shard lands the state the replicated export lands: 2 and 3 shards, odd and long prompts" {
+    inline for (.{ 517, 1301, 2000 }) |upto| inline for (.{ 2, 3 }) |shards| try splitCase(upto, shards);
+}
+
+test "a shard past the producers, or none, is refused by name" {
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const w = try s.make(arena, .{ .upto = 200, .seed = 9 });
+    const snap = try snapshotOf(arena, w);
+    const tokens = try tokensOf(arena, 200);
+    const st: cx.State = .{ .pos = 200, .ds_rows = 0, .pieces = snap.pieces, .pages = snap.pages, .shard = 2, .shards = 2 };
+    try std.testing.expectError(error.BadShape, cx.build(gpa, @splat(1), tokens, st));
+    var none = st;
+    none.shard = 0;
+    none.shards = 0;
+    try std.testing.expectError(error.BadShape, cx.build(gpa, @splat(1), tokens, none));
+}
