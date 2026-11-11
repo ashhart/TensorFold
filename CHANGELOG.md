@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Tests: video budgets again cover the common valid-setting matrix and reject storage-maximum advice in refusals (#1441). Thanks to @BlivionIaG.
+
 - EXL3 prefill and profiling use registered settings and propagate malformed-value refusals. Unset row budgets remain 8192 general / 4096 server; `snap_grid` remains on pending off-grid restore qualification (#1443).
 
 - EXL3 deep prefill uses decode-exact prompt tiles and retains empty-sibling additions in TP prefill reductions, matching the canonical tree's zero signs (#1443). Its TP reduction probes also run under `test-flashnext-contract-host`.
