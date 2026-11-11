@@ -270,7 +270,7 @@ pub const Head = struct {
             if (cut and n + 1 < most) o.tokenProb(logits, rows, head.n, 0, dev + at.probs + 4 * h.cap * n) catch |err| {
                 std.log.err("PROBE mtp tokenProb: {s}", .{@errorName(err)});
                 return err;
-            });
+            };
             cur = .{ .ptr = h.last, .kind = m.act };
         }
     }
