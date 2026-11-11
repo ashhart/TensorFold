@@ -18,7 +18,7 @@ fn keyed(file: *KeyFile) !auth.Store {
 }
 
 /// A reply with its per-run values (ids, times and rates) zeroed, so two runs of one request compare whole.
-fn steady(a: Allocator, reply: []const u8) ![]const u8 {
+pub fn steady(a: Allocator, reply: []const u8) ![]const u8 {
     var v = try fixture.payload(a, reply);
     zero(&v);
     return json.stringify(a, v, .{});
