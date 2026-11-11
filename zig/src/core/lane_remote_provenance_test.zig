@@ -113,3 +113,38 @@ test "remote prefix kept (TF_PREFILL_KEEP): a reply on a kept remote state repor
     try t.expectEqual(@as(u32, 5), next.remote_prefix.? - next.pulled_prefix.?); // kept_remote_cache_tokens: all five
     try unborrowed(&store);
 }
+
+/// A pass on `six` the backend stands on slot 0's remote record (qwen27_resume.inherit): nothing pulled or kept before.
+fn inherited(store: *pc.Store, keep: bool) !fixture.Seen {
+    var peer: Peer = .{ .at = 0 };
+    defer peer.kept.deinit(t.allocator);
+    const seen = try runKeep(&peer, &.{ .prompt = &six, .max_tokens = 2, .history_len = 5 }, null, store, .{ .keep = keep, .inherit = true });
+    try t.expect(!seen.restoring and seen.hooked and seen.marks == 1 and peer.fills == 0); // a mark planned, no copy
+    try unborrowed(store);
+    return seen;
+}
+
+test "remote standing: with TF_PREFILL_KEEP off, Job.kept keeps nothing of a pass that stands on slot 0's remote rows" {
+    var store = cache();
+    defer store.deinit();
+    _ = try inherited(&store, false);
+    try t.expectEqual(@as(u64, 0), store.counts.kept);
+    try t.expectEqual(@as(usize, 0), store.entries.items.len);
+}
+
+test "remote standing: with TF_PREFILL_KEEP on, what a pass on slot 0's remote rows keeps is marked remote" {
+    var store = cache();
+    defer store.deinit();
+    _ = try inherited(&store, true);
+    try t.expectEqual(@as(u64, 1), store.counts.kept);
+    try t.expectEqual(@as(?Found, .{ .at = 5, .remote = true }), found(&store, &six));
+}
+
+test "remote standing: the same pass on slot 0's own rows keeps its mark exact, TF_PREFILL_KEEP off" {
+    var store = cache();
+    defer store.deinit();
+    var peer: Peer = .{ .at = 0 };
+    defer peer.kept.deinit(t.allocator);
+    _ = try runKeep(&peer, &.{ .prompt = &six, .max_tokens = 2, .history_len = 5 }, null, &store, .{});
+    try t.expectEqual(@as(?Found, .{ .at = 5, .remote = false }), found(&store, &six));
+}

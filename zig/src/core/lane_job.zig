@@ -84,6 +84,7 @@ pub const Job = struct {
         job.reached = @max(job.reached, at); // a request waiting for this cut goes on, whether the store keeps it or not
         job.reported(); // before a keep can evict the entry the pass restored
         const store = job.host.cache orelse return;
+        if (s.reuse.remote and !s.reuse_failed and !job.host.keep_remote) return; // TF_PREFILL_KEEP=0: nothing on a pulled prefix
         const previous_remote = store.keep_remote;
         store.keep_remote = s.reuse.remote and !s.reuse_failed;
         defer store.keep_remote = previous_remote;
@@ -94,6 +95,7 @@ pub const Job = struct {
     /// The warm pass's keep of `s`'s state at `at`, kept as remote when it stands on a remote prefix.
     pub fn keep(job: *Job, s: *lanes.Stream, at: u32) void {
         const store = job.host.cache orelse return;
+        if (s.reuse.remote and !s.reuse_failed and !job.host.keep_remote) return; // TF_PREFILL_KEEP=0
         store.keep_remote = s.reuse.remote and !s.reuse_failed; // on another machine's prefix (a refused copy prefilled here)
         defer store.keep_remote = false;
         _ = store.keepBornFrame(job.cacheKey(), job.request.bornLen(), at, s, job.request.chunks, job.host.spans(job.request), job.request.images, job.frame);

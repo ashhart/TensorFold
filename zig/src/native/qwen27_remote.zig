@@ -169,6 +169,7 @@ pub fn attach(h: anytype, io: std.Io, a: std.mem.Allocator, f: Flags, model: []c
         return err;
     };
     if (!h.host.keep_remote) std.log.info("remote prefill: states built on a pulled prefix are not kept (TF_PREFILL_KEEP=0)", .{});
+    h.back.standing.keep_remote = h.host.keep_remote; // slot 0 keeps a hand-off's rows for a next turn only so
     h.host.resume_peek = peek;
 }
 
