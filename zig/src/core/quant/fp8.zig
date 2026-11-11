@@ -4,6 +4,7 @@ const types = @import("types.zig");
 const convert = @import("convert.zig");
 
 const Tensor = types.Tensor;
+const Why = @import("../modelopt.zig").Why;
 
 /// Rows and columns one scale_inv entry covers.
 pub const block = 128;
@@ -64,6 +65,59 @@ pub fn reference(h: Host, out: []f64) error{UnexpectedTensor}!void {
         const s = convert.load(h.scale_inv.dtype, h.scale_inv.bytes, (e * nb + r / block) * kb + c / block);
         out[at] = e4m3(h.weight.bytes[at]) * s;
     };
+}
+
+/// The tensor beside `{module}.weight` that holds a block-FP8 projection's scales.
+pub const scale_tail = "weight_scale_inv";
+
+/// Scale blocks along a dimension of `n`: a last partial block takes a scale of its own.
+pub fn blocks(n: usize) usize {
+    return (n + block - 1) / block;
+}
+
+/// `{module}.weight`, e4m3 [n, k], from any store with `get(name) !Tensor`; a refusal named in `why`, else logged.
+pub fn weight(store: anytype, module: []const u8, n: usize, k: usize, why: ?*Why) !Tensor {
+    return checked(store, module, "weight", .f8_e4m3, &.{ n, k }, why);
+}
+
+/// `{module}.weight_scale_inv` of `dtype` [ceil(n/128), ceil(k/128)]; each family names the dtype it stores.
+pub fn scales(store: anytype, module: []const u8, n: usize, k: usize, dtype: types.DType, why: ?*Why) !Tensor {
+    if (!convert.tableDtype(dtype)) return error.UnexpectedTensor;
+    return checked(store, module, scale_tail, dtype, &.{ blocks(n), blocks(k) }, why);
+}
+
+/// A block-FP8 projection [n, k] as stored: views into the store's bytes, nothing copied.
+pub fn read(store: anytype, module: []const u8, n: usize, k: usize, dtype: types.DType, why: ?*Why) !Host {
+    return .{ .weight = try weight(store, module, n, k, why), .scale_inv = try scales(store, module, n, k, dtype, why) };
+}
+
+fn checked(store: anytype, module: []const u8, tail: []const u8, dtype: types.DType, shape: []const usize, why: ?*Why) !Tensor {
+    var buf: [320]u8 = undefined;
+    const name = try std.fmt.bufPrint(&buf, "{s}.{s}", .{ module, tail });
+    const t = try store.get(name);
+    const size = std.math.mul(usize, shape[0], shape[1]) catch return error.UnexpectedTensor;
+    if (t.is(dtype, shape) and t.bytes.len == size * dtype.size()) return t;
+    var own: Why = .{};
+    const w = why orelse &own;
+    w.set("{s}: {t} {any}, expected {t} {any}", .{ name, t.dtype, t.shape[0..t.rank], dtype, shape });
+    if (why == null) std.log.err("{s}", .{w.text()});
+    return error.UnexpectedTensor;
+}
+
+/// `scale_inv` as f32 into `out`, exactly (f32 copied bit for bit); `finite` refuses NaN and infinity.
+pub fn widen(scale_inv: Tensor, out: []f32, finite: bool) error{ UnexpectedTensor, UnsupportedQuantization }!void {
+    const dtype = scale_inv.dtype;
+    if (!convert.tableDtype(dtype) or out.len != scale_inv.numel() or scale_inv.bytes.len != out.len * dtype.size())
+        return error.UnexpectedTensor;
+    if (dtype == .f32) @memcpy(std.mem.sliceAsBytes(out), scale_inv.bytes); // NaN payloads too
+    for (out, 0..) |*v, i| {
+        if (dtype != .f32) v.* = convert.load(dtype, scale_inv.bytes, i);
+        if (finite and !std.math.isFinite(v.*)) return error.UnsupportedQuantization;
+    }
+}
+
+test {
+    _ = @import("fp8_block_test.zig");
 }
 
 test "e4m3 codes and their rounding" {
