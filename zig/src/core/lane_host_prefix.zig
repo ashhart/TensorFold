@@ -49,7 +49,8 @@ pub fn waits(h: *LaneHost, job: *Job) bool {
         if (!l.started or l.prefilled != null or l.request.background or !keyed(l.request)) continue;
         if (l.stream.reuse.pulled) continue; // a fresh pull keeps no mark, or only past its end (#1594 step 2b)
         for (l.marks) |at| {
-            if (at <= l.reached or at < least or at <= best.at) continue;
+            // a pass that began past a mark (slot 0's in-place resume, unseen by the plan) never stands there
+            if (at <= l.reached or at <= l.stream.cached or at < least or at <= best.at) continue;
             if (!exports.keeps(l, at)) continue; // a handoff's cut is kept only where its store resumes it
             if (store.wouldServe(key, r.chunks, spans, l.request.cacheKey(), h.spans(l.request), at))
                 best = .{ .leader = l, .id = l.id, .at = at };
