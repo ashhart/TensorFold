@@ -32,6 +32,8 @@ pub fn requireMapped(d: limits.MetalLaunch) !void {
 
 /// Only launches the loader can build on this device enter the limits compiler; declarations are checked first.
 pub fn supported(device: mtl.Device, d: limits.MetalLaunch) bool {
+    if (std.mem.startsWith(u8, d.name, "sam3 fp32 mma "))
+        return @import("metal_support.zig").tensor(device.tensorUnits(), d.name);
     if (std.mem.startsWith(u8, d.name, "lfm2 masked prompt "))
         return @import("metal_support.zig").tensor(tf.lfm2_moe.source.optionalAvailable(device), d.name);
     return !std.mem.startsWith(u8, d.name, "qwen27 q8 ") or @import("metal_support.zig").tensor(device.tensorUnits(), d.name);
@@ -42,6 +44,15 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
     var text: []const u8 = undefined;
     var head: []const u8 = "";
     var frags = false;
+    if (std.mem.startsWith(u8, d.name, "sam3 deconvolution ")) {
+        if (!assemble) return undefined;
+        const source = try a.dupe(u8, sources.sam3_deconv ++ sources.sam3_deconv_baseline);
+        return .{ .decl = d, .function = fun, .here = source, .pre_m5 = source };
+    }
+    if (std.mem.startsWith(u8, d.name, "sam3 fp32 mma ")) {
+        if (!assemble) return undefined;
+        return .{ .decl = d, .function = fun, .here = try @import("metal_sam3_mma.zig").text(a, device), .pre_m5 = "" };
+    }
     if (std.mem.startsWith(u8, d.name, "qwen27 q8 ")) {
         for (@import("contract").lane_q8.sources) |v| {
             if (!std.mem.eql(u8, v.name, d.name)) continue;

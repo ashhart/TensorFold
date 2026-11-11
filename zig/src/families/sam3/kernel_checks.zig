@@ -108,7 +108,7 @@ pub fn check(init: std.process.Init, args: []const [:0]const u8) !void {
     try g.dispatch("im_sam_deconv_weight", &.{ raw, matrix }, [3]u32{ 16, 32, 4 }, Size.of(raw.count, 1, 1), Size.of(256, 1, 1));
     try g.matmulInto(input, matrix, product, 15, 64, 32);
     try g.dispatch("im_sam_deconv_shuffle", &.{ product, bias, shuffled }, conv_, Size.of(shuffled.count, 1, 1), Size.of(256, 1, 1));
-    try g.dispatch("im_sam_deconv", &.{ input, raw, bias, reference }, conv_, Size.of(reference.count, 1, 1), Size.of(256, 1, 1));
+    try g.dispatch("im_sam_deconv", &.{ input, raw, bias, reference }, conv_, Size.of(reference.count / 4, 1, 1), Size.of(256, 1, 1));
     try g.endBatch();
     maximum = 0;
     for (shuffled.slice(f32, shuffled.count), reference.slice(f32, reference.count)) |x, y| maximum = @max(maximum, @abs(x - y));

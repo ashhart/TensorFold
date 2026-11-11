@@ -251,3 +251,6 @@ pub const core_hc_activation = @embedFile("core/hc_activation.metal");
 pub const core_hc_pointwise = @embedFile("core/hc_pointwise.metal");
 
 pub const lfm2_prompt_masked = @import("lfm2/prompt_masked.zig");
+pub const sam3_contract = @embedFile("sam3/contract.metal");
+pub const sam3_deconv = @embedFile("sam3/deconv.metal");
+pub const sam3_deconv_baseline = @embedFile("sam3/deconv_baseline.metal");

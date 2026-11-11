@@ -457,6 +457,12 @@ pub fn main(init: std.process.Init) !u8 {
     var mma_operand: @import("metal_mma_operand.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer mma_operand.deinit();
     try mma_operand.collect(o.only);
+    var sam3_mma: @import("metal_sam3_mma.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer sam3_mma.deinit();
+    try sam3_mma.collect(o.only);
+    var sam3_deconv: @import("metal_sam3_deconv.zig").Suite = .{ .a = a };
+    defer sam3_deconv.deinit();
+    try sam3_deconv.collect(device, queue, &kernels, o.only);
     var nemotron_ssd: @import("metal_nemotron_ssd_gemm.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer nemotron_ssd.deinit();
     try nemotron_ssd.collect(o.only);

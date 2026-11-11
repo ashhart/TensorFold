@@ -38,7 +38,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         .imports = &.{.{ .name = "sam3", .module = module }},
     }) });
     const tools = b.step("sam3", "Build native SAM3/SAM3.1 image, video, checkpoint and kernel tools");
-    tools.dependOn(&b.addInstallArtifact(inspect, .{}).step);
+    install(b, tools, inspect);
     const kernels = b.addExecutable(.{ .name = "tf-sam3-kernels", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/sam3_kernels.zig"),
         .target = target,
@@ -46,7 +46,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         .link_libc = true,
         .imports = &.{.{ .name = "sam3", .module = module }},
     }) });
-    tools.dependOn(&b.addInstallArtifact(kernels, .{}).step);
+    install(b, tools, kernels);
     const image = b.addExecutable(.{ .name = "tf-sam3-image", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/sam3_image.zig"),
         .target = target,
@@ -54,7 +54,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         .link_libc = true,
         .imports = &.{ .{ .name = "sam3", .module = module }, .{ .name = "safetensors", .module = safetensors }, .{ .name = "metal", .module = metal } },
     }) });
-    tools.dependOn(&b.addInstallArtifact(image, .{}).step);
+    install(b, tools, image);
     const video = b.addExecutable(.{ .name = "tf-sam3-video", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/sam3_video.zig"),
         .target = target,
@@ -63,7 +63,8 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         .imports = &.{ .{ .name = "sam3", .module = module }, .{ .name = "safetensors", .module = safetensors }, .{ .name = "metal", .module = metal } },
     }) });
     video.root_module.addImport("process_memory", b.createModule(.{ .root_source_file = b.path("zig/src/server/process_memory.zig"), .target = target, .link_libc = true }));
-    tools.dependOn(&b.addInstallArtifact(video, .{}).step);
+    video.root_module.addImport("checkpoint_fixture", b.createModule(.{ .root_source_file = b.path("zig/src/core/checkpoint_fixture.zig"), .target = target }));
+    install(b, tools, video);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = video.root_module })).step);
     const compare = b.addExecutable(.{ .name = "tf-sam3-compare", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/sam3_compare.zig"),
@@ -72,12 +73,27 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         .link_libc = true,
         .imports = &.{ .{ .name = "sam3", .module = module }, .{ .name = "safetensors", .module = safetensors } },
     }) });
-    tools.dependOn(&b.addInstallArtifact(compare, .{}).step);
+    install(b, tools, compare);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = compare.root_module })).step);
+    const tensor_compare = b.addExecutable(.{ .name = "tf-sam3-tensors", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/sam3_tensors.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{.{ .name = "safetensors", .module = safetensors }},
+    }) });
+    install(b, tools, tensor_compare);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = tensor_compare.root_module })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = module.import_table.get("tokenizer").? })).step);
     const run = b.addRunArtifact(kernels);
     if (b.option(bool, "benchmark", "Time the SAM attention shapes") orelse false) run.addArg("--benchmark");
     const checks = b.step("sam3-kernels", "Run SAM Metal numerical checks without loading a model");
     checks.dependOn(&run.step);
     return .{ .tests = test_step, .tools = tools, .kernels = checks };
+}
+
+fn install(b: *std.Build, aggregate: *std.Build.Step, executable: *std.Build.Step.Compile) void {
+    const artifact = b.addInstallArtifact(executable, .{});
+    aggregate.dependOn(&artifact.step);
+    b.step(executable.name, "Build the native SAM developer tool").dependOn(&artifact.step);
 }

@@ -8,6 +8,8 @@ pub const rows = @import("contract/rows.zig");
 pub const reference_threads = @import("contract/reference_threads.zig");
 pub const affine = @import("contract/affine.zig");
 pub const dense = @import("contract/dense.zig");
+pub const sam3_mma = @import("contract/sam3_mma.zig");
+pub const sam3_fma = @import("contract/sam3_fma.zig");
 pub const bf16_round = @import("bf16_round");
 pub const attention_range = @import("attention_range.zig");
 pub const limits = @import("contract/limits.zig");
@@ -54,6 +56,8 @@ test {
     _ = affine;
     _ = reference_threads;
     _ = dense;
+    _ = sam3_mma;
+    _ = sam3_fma;
     _ = limits;
     _ = registry;
     _ = cubin;
