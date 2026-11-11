@@ -44,10 +44,11 @@ fn gather(ptr: *anyopaque, saved: api.prompt_cache.Saved, ranges: []const rows.i
     defer pool.pop();
     const cb = h.model.queue.commandBuffer();
     const e = cb.blit();
+    errdefer e.end();
     var o: usize = 0;
     for (ranges) |g| {
         const len: usize = @intCast(g.len);
-        if (g.off < 8) @memcpy(out[o..][0..len], std.mem.asBytes(&st.draft_end)[@intCast(g.off)..][0..len]) else e.copy(st.buf, @intCast(g.off - 8), stage, o, len);
+        if (g.off < 8) @memcpy(out[o..][0..len], std.mem.asBytes(&st.draft_end)[@intCast(g.off)..][0..len]) else try st.transfer(e, @intCast(g.off - 8), stage, o, len, false);
         o += len;
     }
     e.end();

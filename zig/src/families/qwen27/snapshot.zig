@@ -2,6 +2,7 @@
 const std = @import("std");
 const mtl = @import("metal");
 const Runner = @import("decode_round.zig").Runner;
+pub const page_store = @import("snapshot_pages.zig");
 const Draft = @import("dflash/runtime_model.zig").Model;
 
 /// One kept state: its bytes in a GPU buffer, its position and the drafter's committed end there.
@@ -15,6 +16,45 @@ pub const State = struct {
     spares: ?*Spares = null,
     pending: ?mtl.CommandBuffer = null, // the save's blit, committed and not yet waited for
     failed: bool = false,
+    paged: ?struct { store: *page_store.Store, image: page_store.Image, layout: page_store.Layout } = null,
+
+    pub fn charged(st: *State) u64 {
+        if (st.paged) |p| return st.buf.length() + p.store.pages.exclusive(p.image);
+        return if (st.spares != null) st.cap else st.bytes;
+    }
+
+    /// Allocate immutable pages after the parent lands; failure returns every newly retained reference.
+    pub fn allocatePages(st: *State, device: mtl.Device, store: *page_store.Store, old: ?*State, shape: page_store.Layout, private: usize) !void {
+        if (old) |prior| try prior.landed();
+        const image = try store.keep(device, imageOf(old, store), st.at);
+        errdefer store.drop(image);
+        const buf = try device.buffer(private, mtl.ResourceOptions.private | mtl.ResourceOptions.untracked);
+        st.buf = buf;
+        st.paged = .{ .store = store, .image = image, .layout = shape };
+        if (st.residency) |f| f.join(f.ctx, buf);
+    }
+
+    /// Copy a logical legacy-image range, preserving the disk and restore layouts.
+    pub fn transfer(st: *const State, e: mtl.BlitEncoder, off: usize, buf: mtl.Buffer, dest: usize, len: usize, to_state: bool) !void {
+        if (off > st.bytes or len > st.bytes - off) return error.SnapshotSize;
+        if (st.paged) |p| {
+            const C = struct {
+                st: *const State,
+                e: mtl.BlitEncoder,
+                buf: mtl.Buffer,
+                dest: usize,
+                to_state: bool,
+                fn emit(c: @This(), span: page_store.Layout.Span) !void {
+                    const pg = c.st.paged.?;
+                    if (c.to_state) if (span.page) |i| if (i < pg.image.fresh) return;
+                    const b = if (span.page) |i| pg.store.buffers[pg.image.ids[i]].? else c.st.buf;
+                    if (c.to_state) c.e.copy(c.buf, c.dest + span.output, b, span.offset, span.len) else c.e.copy(b, span.offset, c.buf, c.dest + span.output, span.len);
+                }
+            };
+            return p.layout.walk(st.at, off, len, C{ .st = st, .e = e, .buf = buf, .dest = dest, .to_state = to_state }, C.emit);
+        }
+        if (to_state) e.copy(buf, dest, st.buf, off, len) else e.copy(st.buf, off, buf, dest, len);
+    }
 
     /// The save's blit has landed (waited for only if it still runs); a failed one leaves the state unusable.
     pub fn landed(st: *State) !void {
@@ -182,9 +222,10 @@ fn encode(a: std.mem.Allocator, r: *const Runner, slot: u32, ring: ?Ring, st: *c
     defer pool.pop();
     const cb = r.model.queue.commandBuffer();
     const e = cb.blit();
+    errdefer e.end();
     var off: usize = 0;
     for (list.items) |p| {
-        if (p.len > 0) if (to_state) e.copy(p.buffer, p.offset, st.buf, off, p.len) else e.copy(st.buf, off, p.buffer, p.offset, p.len);
+        if (p.len > 0) try st.transfer(e, off, p.buffer, p.offset, p.len, to_state);
         off += p.len;
     }
     e.end();
@@ -199,13 +240,34 @@ pub fn save(a: std.mem.Allocator, r: *Runner, draft: ?*Draft, at: u32) !*State {
 
 /// Slot `slot`'s state after `at` tokens (and its taps ring), its blit not waited for: see settleSlot and landed.
 pub fn saveSlot(a: std.mem.Allocator, r: *Runner, slot: u32, ring: ?Ring, at: u32, spares: ?*Spares) !*State {
+    return saveSlotFrom(a, r, slot, ring, at, spares, null, null);
+}
+
+pub fn layout(r: *const Runner) page_store.Layout {
+    return .{ .fixed = slotBytes(r, null, 0), .groups = r.caches.len / r.slots * 2 * r.model.config.kv_heads, .row = r.model.config.head_dim * 2, .tokens = page_store.page_tokens };
+}
+
+pub fn privateBytes(r: *const Runner, ring: ?Ring, at: u32) usize {
+    return slotBytes(r, null, 0) + if (ring) |g| g.bytes(at) else 0;
+}
+
+pub fn imageOf(st: ?*State, store: *page_store.Store) ?page_store.Image {
+    const p = (st orelse return null).paged orelse return null;
+    return if (p.store == store) p.image else null;
+}
+
+/// Same live-state contract as saveSlot; full KV pages of `old` are immutable and retained before any blit.
+pub fn saveSlotFrom(a: std.mem.Allocator, r: *Runner, slot: u32, ring: ?Ring, at: u32, spares: ?*Spares, store: ?*page_store.Store, old: ?*State) !*State {
     if (at == 0 or r.failed or r.active != null or slot >= r.ready) return error.NotAtMark;
     const marked = if (r.gdn.marks) |m| m.index(slot, at, r.offsets[slot]) != null else false;
     if ((r.offsets[slot] != at and !marked) or (ring != null and (marked or ring.?.end.* != at))) return error.NotAtMark;
     const n = slotBytes(r, ring, at);
     const st = try a.create(State);
     errdefer a.destroy(st);
-    if (spares) |p| {
+    if (store) |p| {
+        st.* = .{ .buf = undefined, .at = at, .bytes = n, .draft_end = if (ring) |g| g.end.* else 0, .residency = r.residency };
+        try st.allocatePages(r.model.device, p, old, layout(r), privateBytes(r, ring, at));
+    } else if (spares) |p| {
         const got = try p.take(r.model.device, n);
         st.* = .{ .buf = got.buf, .at = at, .bytes = n, .draft_end = if (ring) |g| g.end.* else 0, .cap = got.cap, .spares = p };
     } else {
@@ -222,6 +284,7 @@ pub fn saveSlot(a: std.mem.Allocator, r: *Runner, slot: u32, ring: ?Ring, at: u3
 
 /// A state's buffer to its spares, or out of the residency set and freed.
 fn giveBack(st: *State) void {
+    if (st.paged) |p| p.store.drop(p.image);
     if (st.spares) |p| return p.give(st.buf, st.cap);
     if (st.residency) |f| f.leave(f.ctx, st.buf);
     st.buf.deinit();

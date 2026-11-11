@@ -4,6 +4,7 @@ const pc = @import("prompt_cache.zig");
 const modes = @import("cache_modes.zig");
 const images = @import("cache_images.zig");
 const others = @import("prompt_cache_others.zig");
+const share = @import("prompt_cache_share.zig");
 const policy = @import("prompt_cache_policy.zig");
 pub const Room = struct { bytes: u64 = 0, slots: usize = 0 };
 pub const Guard = struct {
@@ -87,31 +88,35 @@ pub fn reserve(s: *pc.Store, prompt: []const u32, born: u32, from: ?*pc.Entry, m
     if (s.reservation_guard != null) {
         const at = priority(marks, endpoint) orelse return;
         if (exists(s, prompt, at, spans)) return;
-        const need = s.family.vtable.bytes(s.family.ptr, at);
-        if (need > s.budget or s.most == 0) return;
+        const whole = s.family.vtable.bytes(s.family.ptr, at);
+        if (whole > s.budget or s.most == 0) return;
         const credit = reclaimable(s, from, prompt, born);
         const promised = s.reservation_guard.?.promised;
-        // Preserve deficits: freeing a state must pay the other jobs' promises before this endpoint can fit.
         var bytes: i128 = @as(i128, s.budget) - s.held + credit.bytes - promised.bytes;
         var slots: i128 = @as(i128, s.most) - s.entries.items.len + credit.slots - promised.slots;
+        if (share.bytes(s, prompt, at, spans) <= bytes and slots > 0) return;
         const can = evictable(s, from, prompt);
-        if (bytes + can.bytes < need or slots + can.slots < 1) return;
-        while (bytes < need or slots < 1) {
+        // Removing a parent may make the save whole again; refuse before eviction unless even that demand fits.
+        if (bytes + can.bytes < whole or slots + can.slots < 1) return;
+        while (true) {
+            const need = share.bytes(s, prompt, at, spans);
+            if (need <= bytes and slots > 0) return;
             const i = others.victim(s, from, prompt, born, need, 1) orelse return;
-            bytes += s.entries.items[i].bytes;
-            slots += 1;
+            const before = s.held;
             s.remove(i);
+            bytes += before - s.held;
+            slots += 1;
             s.counts.evicted += 1;
         }
-        return;
     }
-    var need: u64 = 0;
-    var new: usize = 0;
-    for (marks) |at| if (!exists(s, prompt, at, spans)) {
-        need += s.family.vtable.bytes(s.family.ptr, at);
-        new += 1;
-    };
-    while (s.held + need > s.budget or s.entries.items.len + @min(new, s.most) > s.most) {
+    while (true) {
+        var need: u64 = 0;
+        var new: usize = 0;
+        for (marks) |at| if (!exists(s, prompt, at, spans)) {
+            need +|= share.bytes(s, prompt, at, spans);
+            new += 1;
+        };
+        if (s.held +| need <= s.budget and s.entries.items.len + @min(new, s.most) <= s.most) return;
         const i = others.victim(s, from, prompt, born, need, @min(new, s.most)) orelse return;
         s.remove(i);
         s.counts.evicted += 1;
@@ -127,7 +132,7 @@ pub fn fitting(s: *pc.Store, a: std.mem.Allocator, prompt: []const u32, marks: [
     var room = future(s, from, prompt, born);
     const end = priority(marks, endpoint);
     if (end) |at| {
-        const bytes = if (exists(s, prompt, at, spans)) 0 else s.family.vtable.bytes(s.family.ptr, at);
+        const bytes = if (exists(s, prompt, at, spans)) 0 else share.bytes(s, prompt, at, spans);
         if (bytes == 0 or (bytes <= room.bytes and room.slots > 0)) {
             try out.append(a, at);
             room.bytes -= bytes;
@@ -136,7 +141,7 @@ pub fn fitting(s: *pc.Store, a: std.mem.Allocator, prompt: []const u32, marks: [
     }
     for (marks) |at| {
         if (end == at) continue;
-        const bytes = if (exists(s, prompt, at, spans)) 0 else s.family.vtable.bytes(s.family.ptr, at);
+        const bytes = if (exists(s, prompt, at, spans)) 0 else share.bytes(s, prompt, at, spans);
         if (bytes == 0 or (bytes <= room.bytes and room.slots > 0)) {
             try out.append(a, at);
             room.bytes -= bytes;
@@ -148,7 +153,7 @@ pub fn fitting(s: *pc.Store, a: std.mem.Allocator, prompt: []const u32, marks: [
     if (s.reservation_guard.?.promise) |promise| {
         var used: Room = .{};
         for (fitted) |at| if (!exists(s, prompt, at, spans)) {
-            used.bytes +|= s.family.vtable.bytes(s.family.ptr, at);
+            used.bytes +|= share.bytes(s, prompt, at, spans);
             used.slots +|= 1;
         };
         const credit = reclaimable(s, from, prompt, born);

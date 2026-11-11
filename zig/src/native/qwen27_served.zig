@@ -53,6 +53,7 @@ pub const Host = struct {
     warm: mtl.keepalive.Target,
     disk_stage: ?mtl.Buffer = null, // copies out of private kept states for the disk (qwen27_disk.zig)
     vision: ?*images.Vision = null, // --vision's tower and image rows
+    snapshot_pages: ?*q.snapshot.page_store.Store = null,
     spares: q.snapshot.Spares = .{}, // dropped kept states' buffers, for the next saves
 
     pub fn engine(h: *Host) api.Engine {
@@ -137,52 +138,7 @@ fn words(_: ?*anyopaque, err: anyerror) ?[]const u8 {
 }
 
 /// The prompt cache's copies of a stream's slot (snapshot.zig): its DeltaNet states, K/V rows and taps ring.
-const Snaps = struct {
-    fn host(ptr: *anyopaque) *Host {
-        return @ptrCast(@alignCast(ptr));
-    }
-    fn bytes(ptr: *anyopaque, at: u32) u64 {
-        const h = host(ptr);
-        return q.snapshot.Spares.size(q.snapshot.slotBytes(&h.runner, h.back.ringOf(0), at)); // a new buffer's
-    }
-    fn charged(_: *anyopaque, saved: pc.Saved) u64 {
-        const st: *q.snapshot.State = @ptrCast(@alignCast(saved));
-        return if (st.spares != null) st.cap else st.bytes;
-    }
-    fn spare(ptr: *anyopaque) u64 {
-        return host(ptr).spares.spare();
-    }
-    fn trim(ptr: *anyopaque, left: u64) void {
-        host(ptr).spares.trim(left);
-    }
-    fn reuses(ptr: *anyopaque, at: u32) bool {
-        const h = host(ptr);
-        return h.spares.fits(q.snapshot.slotBytes(&h.runner, h.back.ringOf(0), at));
-    }
-    fn save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!pc.Saved {
-        const h = host(ptr);
-        const s: *lanes.Stream = @ptrCast(@alignCast(owner orelse return error.NoStream));
-        const slot = h.back.slotOf(s) orelse return error.UnknownStream;
-        // Scratch already occupies its bytes; do not let cache growth spend that same free room again.
-        if (h.runner.gdn.marks != null) {
-            const n = q.snapshot.slotBytes(&h.runner, h.back.ringOf(slot), at);
-            const need: usize = if (h.spares.fits(n)) 0 else q.snapshot.Spares.size(n);
-            if (need > room(h.model) -| h.runner.gdn.missingBeforeBytes()) return error.LaneMemory;
-        }
-        if (h.draft) |d| try d.generation.finishKeep();
-        h.spares.follow = h.runner.residency;
-        const st = try q.snapshot.saveSlot(h.gpa, &h.runner, slot, h.back.ringOf(slot), at, &h.spares);
-        return @ptrCast(st);
-    }
-    fn restore(_: *anyopaque, _: ?*anyopaque, _: pc.Saved) anyerror!void {
-        return error.RestoredInPrefill; // the backend restores a stream's kept state in its prompt pass
-    }
-    fn drop(ptr: *anyopaque, saved: pc.Saved) void {
-        const h = host(ptr);
-        const st: *q.snapshot.State = @ptrCast(@alignCast(saved));
-        q.snapshot.drop(h.gpa, st);
-    }
-};
+const Snaps = @import("qwen27_snapshots.zig").Snaps;
 
 /// The optional share's room after residency; unknown readings refuse it, and guards only reduce the room.
 fn shareRoom(h: *const Host, why: *[]const u8) !u64 {
@@ -194,7 +150,7 @@ fn shareRoom(h: *const Host, why: *[]const u8) !u64 {
 }
 
 /// Room left beside the weights and an 8 GiB margin.
-fn room(model: *const q.model.Model) usize {
+pub fn room(model: *const q.model.Model) usize {
     const dev = model.device;
     return q.prompt_memory.room(dev.maxWorkingSet(), dev.allocated(), cap()) catch 0;
 }
@@ -386,6 +342,8 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     h.cache = null;
     h.resident = null;
     h.disk_stage = null;
+    h.snapshot_pages = null;
+    h.spares = .{};
     h.vision = o.images; // closed with the host; a failed attach leaves it to the caller
     h.trace = null;
     // TF_QWEN27_METAL_KV_PAGES=1: every slot's rows in core-pool pages now (Fit charged each its whole window above)
@@ -441,9 +399,14 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     const rewind_room = laterRoom(h);
     if (slot_state.rewindInit(h.back, rewind_room, if (o.cache_gib) |g| gibBytes(g) else cache_fit.defaultBudget(rewind_room))) |buf| if (h.resident) |*r| r.addNow(&.{buf});
     try enableCache(h, o.cache_gib, o.cache_over_cap, a, why);
-    errdefer if (h.cache) |*store| store.deinit();
+    errdefer {
+        const cache_rows = if (h.cache) |*store| store.disk else null;
+        if (h.cache) |*store| store.deinit();
+        if (h.snapshot_pages) |p| p.deinit();
+        h.spares.deinit();
+        if (cache_rows) |r| r.deinit();
+    }
     if (o.learn) |l| try disk.attach(h, io, a, l);
-    errdefer if (h.cache) |*store| if (store.disk) |r| r.deinit();
     // a wide prompt pass commits its buffers at once: the probe keeps the sets in use while it runs
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick, .probe = mtl.keepalive.Target.busy };
     if (h.trace) |*t| t.enabled = true; // serving rounds count from here: measure() timed whole, unsplit buffers
@@ -528,8 +491,10 @@ fn enableCache(h: *Host, gib: ?f64, over: bool, a: Allocator, why: *[]const u8) 
     const later = try laterFootprint(h);
     const plan = try cache_fit.budgetBeside(gib, over, room(h.model) -| later, later, a, why, "");
     if (plan.budget_bytes == 0) return;
+    h.snapshot_pages = try q.snapshot.page_store.Store.init(h.gpa, plan.budget_bytes, q.snapshot.layout(&h.runner), h.runner.residency);
+    h.snapshot_pages.?.pages.bind(api.prompt_radix.pagesOf(tf.kv_pool.Pool, &h.snapshot_pages.?.pages.pool, h.snapshot_pages.?.pages.pool.page_bytes));
     // a short prompt keeps its history's mark at a chunk end its pass cuts anyway (qwen27_slots.prefill): no extra call
-    h.cache = pc.Store.init(h.gpa, .{ .ptr = h, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop, .charged = Snaps.charged, .spare = Snaps.spare, .trim = Snaps.trim, .reuses = Snaps.reuses, .rows = &disk.image } }, cacheRules(@intCast(h.back.chunk)), plan.budget_bytes);
+    h.cache = pc.Store.init(h.gpa, .{ .ptr = h, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop, .charged = Snaps.charged, .incremental = Snaps.incremental, .save_from = Snaps.saveFrom, .shared_bytes = Snaps.shared, .spare = Snaps.spare, .trim = Snaps.trim, .reuses = if (h.snapshot_pages == null) Snaps.reuses else null, .rows = &disk.image } }, cacheRules(@intCast(h.back.chunk)), plan.budget_bytes);
     h.host.cache = &h.cache.?;
     h.back.release_hook = .{ .ctx = h, .kept = Host.keepReply };
     h.back.checkpoint_hook = .{ .ptr = h, .at = Host.checkpoint };
@@ -547,6 +512,7 @@ pub fn close(ptr: *anyopaque) void {
     const rows = if (h.cache) |*store| store.disk else null;
     if (h.cache) |*store| store.deinit(); // its states leave the set as they go
     h.spares.deinit();
+    if (h.snapshot_pages) |p| p.deinit();
     if (rows) |r| r.deinit(); // after the store: its entries leave the write queue as they go
     h.core.deinit();
     q.residency.drop(h);

@@ -147,3 +147,21 @@ test "queued cache: admission refuses a promised slot deficit without evicting" 
     try std.testing.expectEqual(@as(usize, 0), l.marks.len);
     try std.testing.expectEqual(@as(usize, 2), s.entries.items.len);
 }
+
+test "queued cache: a guarded flat keep reuses spare beside a protected state" {
+    var f: Fake = .{ .gpa = a };
+    var s = pc.Store.init(a, f.pooled(), .{ .min_prompt = 0 }, 215);
+    defer s.deinit();
+    const x = fill(500);
+    const y = fill(200);
+    try put(&f, &s, &x, 12);
+    f.spare_bytes = 110;
+    s.reservation_guard = .{ .ctx = &f, .needed = Protect.needed, .exact = true };
+    defer s.reservation_guard = null;
+    _ = f.pass(&s, y[0..16], .{});
+    try std.testing.expect(s.keepBorn(&y, 16, 16, null, &.{}, &.{}));
+    try std.testing.expectEqual(@as(usize, 2), s.entries.items.len);
+    try std.testing.expectEqual(@as(u64, 208), s.held);
+    try std.testing.expectEqual(@as(u64, 4), f.spare_bytes);
+    try std.testing.expectEqual(@as(u64, 0), s.counts.evicted);
+}

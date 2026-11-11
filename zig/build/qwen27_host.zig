@@ -16,6 +16,10 @@ pub fn tests(b: *std.Build, test_step: *std.Build.Step) void {
     const taps = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen27/tap_gather.zig"), .target = b.graph.host });
     const pricing_lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = b.graph.host });
     b.step("test-qwen27-shared-allocation-host", "All lane scheduling and recorder regressions without shaders").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = pricing_lanes })).step);
+    const kept_pages = b.createModule(.{ .root_source_file = b.path("zig/src/core/kept_pages_test.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = pricing_lanes }} });
+    const kept_run = b.addRunArtifact(b.addTest(.{ .root_module = kept_pages, .filters = &.{"kept pages:"} }));
+    b.step("test-kept-pages-host", "Immutable snapshot prefixes, exact byte images and eviction accounting without a GPU").dependOn(&kept_run.step);
+    test_step.dependOn(&kept_run.step);
     const allocated = b.createModule(.{ .root_source_file = b.path("zig/qwen27_allocation_host.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = pricing_lanes }} });
     const window_step = b.step("test-qwen27-window-host", "Device width, copied trees and counted zero-grant drafting without shaders");
     for ([_]*std.Build.Module{ window, taps, allocated }) |m| window_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);
@@ -33,6 +37,13 @@ pub fn tests(b: *std.Build, test_step: *std.Build.Step) void {
     const run = b.addRunArtifact(b.addTest(.{ .root_module = root, .filters = &.{"qwen27 speed:"} }));
     run.has_side_effects = true;
     b.step("test-qwen27-speed-host", "Prompt tap guards, attention admission and cache failure ownership").dependOn(&run.step);
+    const snapshot_metal = b.createModule(.{ .root_source_file = b.path("zig/src/qwen27_snapshot_metal.zig"), .target = b.graph.host });
+    const snapshot_core = b.createModule(.{ .root_source_file = b.path("zig/qwen27_snapshot_core.zig"), .target = b.graph.host, .imports = &.{.{ .name = "metal", .module = snapshot_metal }} });
+    snapshot_core.addImport("kernel_sources", b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/sources.zig"), .target = b.graph.host }));
+    const snapshot = b.createModule(.{ .root_source_file = b.path("zig/src/qwen27_snapshot_test.zig"), .target = b.graph.host, .imports = &.{ .{ .name = "metal", .module = snapshot_metal }, .{ .name = "core", .module = snapshot_core } } });
+    const snapshot_run = b.addRunArtifact(b.addTest(.{ .root_module = snapshot, .filters = &.{"qwen27 snapshot:"} }));
+    b.step("test-qwen27-snapshot-host", "Production snapshot page bytes and lifetime without a GPU").dependOn(&snapshot_run.step);
+    test_step.dependOn(&snapshot_run.step);
     const fake = b.createModule(.{ .root_source_file = b.path("zig/src/qwen27_speed_metal.zig"), .target = b.graph.host });
     const core = b.createModule(.{ .root_source_file = b.path("zig/qwen27_speed_core.zig"), .target = b.graph.host, .imports = &.{.{ .name = "metal", .module = fake }} });
     const pass = b.createModule(.{ .root_source_file = b.path("zig/src/qwen27_pass_test.zig"), .target = b.graph.host, .imports = &.{ .{ .name = "metal", .module = fake }, .{ .name = "core", .module = core } } });

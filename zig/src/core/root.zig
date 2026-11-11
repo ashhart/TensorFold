@@ -156,3 +156,5 @@ pub const hc_pointwise = @import("hc_pointwise.zig");
 pub const hc_pointwise_cuda_adapter = @import("hc_pointwise_cuda_impl.zig").Adapter;
 pub const hc_pointwise_metal_adapter = @import("hc_pointwise_metal_impl.zig").Adapter;
 pub const hc_pointwise_contract = @import("contract/hc_pointwise.zig");
+
+pub const kept_pages = @import("kept_pages.zig");

@@ -29,6 +29,11 @@ pub const Snapshots = struct {
         /// Make the live state `saved`'s: the next prompt chunk starts at its position.
         restore: *const fn (ptr: *anyopaque, owner: ?*anyopaque, saved: Saved) anyerror!void,
         drop: *const fn (ptr: *anyopaque, saved: Saved) void,
+        /// Optional immutable KV sharing: estimates and saves use an earlier compatible state.
+        incremental: ?*const fn (*anyopaque, ?Saved, u32) u64 = null,
+        save_from: ?*const fn (*anyopaque, ?*anyopaque, u32, ?Saved) anyerror!Saved = null,
+        /// Bytes shared by multiple states, counted once in addition to each state's exclusive charge.
+        shared_bytes: ?*const fn (*anyopaque) u64 = null,
         /// The storage a kept state holds: new storage up to `bytes`, or the spare storage it took (null: `bytes`).
         charged: ?*const fn (ptr: *anyopaque, saved: Saved) u64 = null,
         /// Free storage the family keeps for later saves, inside the budget (null: none).
@@ -167,6 +172,7 @@ pub const Store = struct {
         s.held -= e.bytes;
         if (s.disk) |r| if (!e.expired) rows.write.evicted(r, e); // --spill-gib: stage an owned copy before the entry goes
         s.free(e);
+        @import("prompt_cache_share.zig").recount(s);
     }
 
     /// The family's free storage kept for later saves.
