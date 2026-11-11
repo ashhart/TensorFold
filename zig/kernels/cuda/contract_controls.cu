@@ -598,8 +598,3 @@ extern "C" __global__ void __launch_bounds__(256, 1) tf_ctl_pattn_64(const __nv_
 }
 }  // namespace tf_prefill_attention
 #include "contract_ctl_router.cuh"
-#define TF_GDN_CHAIN_CONTROLS
-#include "gdn_prefill.cu"
-
-#define TF_MOE_ROUTER_CONTROLS
-#include "moe_router_expert.cuh"

@@ -140,8 +140,7 @@ pub const Prompt = struct {
 
     /// Required BF16 symbols stay bound; the cached flag selects this family's serving path only.
     pub fn enableBf16(p: *Prompt) !void {
-        const value = std.c.getenv("TF_CUDA_PROMPT_BF16");
-        p.bf16_serving = bf16Enabled(if (value) |v| std.mem.span(v) else null);
+        p.bf16_serving = try @import("sys").environment.read(bool, "TF_CUDA_PROMPT_BF16", true);
     }
 
     pub fn usesBf16(p: Prompt, rows: usize) bool {
@@ -268,12 +267,13 @@ test "scale tiles keep a column's four scales of each 64 inputs together" {
     try std.testing.expectEqual(@as(u8, 0), out[((0 * 2 + 0) * 64 + 5) * 4]); // row 5: padding
 }
 
-pub fn bf16Enabled(value: ?[]const u8) bool {
-    return if (value) |v| !std.mem.eql(u8, v, "0") else true;
+pub fn bf16Enabled(value: ?[]const u8) !bool {
+    return (try @import("sys").environment.parse("TF_CUDA_PROMPT_BF16", value) orelse 1) != 0;
 }
 
 test "BF16 prompt switch restores serving on the lane without changing required bindings" {
-    try std.testing.expect(!bf16Enabled("0"));
-    for ([_]?[]const u8{ null, "1", "", "invalid" }) |v| try std.testing.expect(bf16Enabled(v));
+    try std.testing.expect(!try bf16Enabled("0"));
+    for ([_]?[]const u8{ null, "1", "" }) |v| try std.testing.expect(try bf16Enabled(v));
+    try std.testing.expectError(error.InvalidEnvironment, bf16Enabled("invalid"));
     try std.testing.expectEqual(@as(u32, 98304), Prompt.bf16Shared());
 }

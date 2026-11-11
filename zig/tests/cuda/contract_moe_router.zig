@@ -47,7 +47,7 @@ pub const Inputs = struct {
 
 pub const Case = struct {
     rig: @import("contract_rig.zig").Rig,
-    f: cuda.moe.Fns,
+    f: cuda.moe_bf16.Fns,
     replacement: bool = true,
     live: bool = false,
     pad: usize = 0,
@@ -141,14 +141,14 @@ pub const Case = struct {
 pub const Suite = struct {
     mod: cuda.Module,
     cases: [5]Case,
-    pub fn init(gpu: @import("check.zig").Gpu, s: cuda.Stream, controls: cuda.Module) !Suite {
-        var mod = try cuda.Module.load(gpu.d, cuda.kernels.moe);
+    pub fn init(gpu: @import("check.zig").Gpu, s: cuda.Stream, _: cuda.Module) !Suite {
+        var mod = try cuda.Module.load(gpu.d, cuda.kernels.qwen_router_bf16);
         errdefer mod.unload();
-        const f = try cuda.moe.Fns.resolveMode(mod, true);
+        const f = try cuda.moe_bf16.Fns.resolveMode(mod, true);
         var cases: [5]Case = undefined;
         for (&cases, 0..) |*case, i| {
             var fns = f;
-            if (i == 4) fns.router_expert = try controls.function("tf_moe_router_expert_bad_rows");
+            if (i == 4) fns.router_expert = try mod.function("tf_moe_router_expert_bad_rows");
             case.* = .{ .rig = .{ .gpu = gpu, .s = s }, .f = fns, .replacement = i != 1, .pad = if (i == 2 or i == 3) 16 else 0, .live = i == 3, .control = i == 4 };
         }
         return .{ .mod = mod, .cases = cases };

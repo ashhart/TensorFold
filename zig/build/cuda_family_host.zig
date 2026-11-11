@@ -2,6 +2,9 @@
 const std = @import("std");
 
 pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.Build.Step) void {
+    const mlx_prompt = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"MLX prompt isolation:"} }));
+    b.step("test-qwen35-mlx-prompt-host", "MLX recurrence/router launch equality and ModelOpt-only prompt glue").dependOn(&mlx_prompt.step);
+    step.dependOn(&mlx_prompt.step);
     const host = b.graph.host;
     @import("prefill_widths_cuda.zig").tests(b, cuda, mods, step);
     const metal_scope = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen3_5/config.zig"), .target = host }), .filters = &.{ "Metal 2B format scope:", "admit the affine 2B", "admit untied heads" } }));
