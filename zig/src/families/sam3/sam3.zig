@@ -3,6 +3,7 @@ pub const prompts = @import("prompts.zig");
 pub const slots = @import("slots.zig");
 pub const checkpoint = @import("checkpoint.zig");
 pub const kernel_checks = @import("kernel_checks.zig");
+pub const comparison = @import("comparison.zig");
 pub const model = @import("model.zig");
 pub const session = @import("session.zig");
 pub const Session = session.Session;
@@ -20,6 +21,7 @@ test {
     _ = prompts;
     _ = slots;
     _ = checkpoint;
+    _ = comparison;
     _ = session;
     _ = @import("tracker.zig");
 }

@@ -6,6 +6,17 @@ const clock = @import("metal").clock;
 pub fn main(init: std.process.Init) !void {
     const a = init.arena.allocator();
     const args = try init.minimal.args.toSlice(a);
+    if (args.len == 2 and std.mem.eql(u8, args[1], "--help")) {
+        std.debug.print(
+            \\tf-sam3-video CHECKPOINT FRAMES OUTPUT_PREFIX --point ID X Y | --box ID X0 Y0 X1 Y1 | --seed-reference MASKS
+            \\  --start N --frames N --reverse --fp32 --exercise-lifecycle
+            \\  --reference MASKS --min-frame-iou N --min-mean-iou N
+            \\Reference comparisons exclude the seed frame and require one unchanged object.
+            \\Default: exact binary masks. Approximate comparisons require --min-frame-iou.
+            \\
+        , .{});
+        return;
+    }
     if (args.len < 5) return error.ExpectedCheckpointFramesOutputAndPrompt;
     var seeds: std.ArrayList(sam.session.Seed) = .empty;
     var start: usize = 0;
@@ -14,6 +25,8 @@ pub fn main(init: std.process.Init) !void {
     var exercise = false;
     var fp32 = false;
     var reference_path: ?[]const u8 = null;
+    var seed_path: ?[]const u8 = null;
+    var gate = sam.comparison.Gate{};
     var i: usize = 4;
     while (i < args.len) {
         const flag = args[i];
@@ -51,7 +64,7 @@ pub fn main(init: std.process.Init) !void {
             if (i == args.len) return error.MissingArgument;
             const value = args[i];
             i += 1;
-            if (std.mem.eql(u8, flag, "--start")) start = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, flag, "--frames")) count = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, flag, "--seed-reference")) reference_path = value else return error.UnknownArgument;
+            if (std.mem.eql(u8, flag, "--start")) start = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, flag, "--frames")) count = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, flag, "--seed-reference")) seed_path = value else if (std.mem.eql(u8, flag, "--reference")) reference_path = value else if (!try gate.set(flag, value)) return error.UnknownArgument;
         }
     }
     if (count == 0) return error.EmptyVideo;
@@ -67,10 +80,11 @@ pub fn main(init: std.process.Init) !void {
     const bytes = try std.math.mul(usize, pixels, 3);
     var reference: ?st.File = null;
     defer if (reference) |*f| f.close(init.io);
-    if (reference_path) |path| {
+    if (seed_path) |path| {
         if (seeds.items.len != 0) return error.MixedSeedModes;
-        reference = try st.File.open(init.gpa, init.io, path);
-        const masks = reference.?.get("masks") orelse return error.MissingMasks;
+        var seed_file = try st.File.open(init.gpa, init.io, path);
+        defer seed_file.close(init.io);
+        const masks = seed_file.get("masks") orelse return error.MissingMasks;
         if (!masks.is(.u8, &.{ frames.dim(0), height, width })) return error.BadReferenceShape;
         const values = try a.alloc(f32, pixels);
         for (values, masks.bytes[start * pixels ..][0..pixels]) |*out, byte|
@@ -81,6 +95,13 @@ pub fn main(init: std.process.Init) !void {
         } } });
     }
     if (seeds.items.len == 0) return error.EmptyPrompt;
+    const comparison_path = reference_path orelse seed_path;
+    try sam.comparison.validateVideo(comparison_path != null, count, seeds.items.len, exercise, gate);
+    if (comparison_path) |path| {
+        reference = try st.File.open(init.gpa, init.io, path);
+        const masks = reference.?.get("masks") orelse return error.MissingMasks;
+        if (!masks.is(.u8, &.{ frames.dim(0), height, width })) return error.BadReferenceShape;
+    }
     const loaded = try sam.Model.load(init.gpa, init.io, args[1], .{
         .precision = if (fp32) .float32 else .checkpoint,
     });
@@ -91,8 +112,7 @@ pub fn main(init: std.process.Init) !void {
         .direction = if (reverse) .reverse else .forward,
     });
     defer session.deinit();
-    var total_iou: f64 = 0;
-    var minimum_iou: f64 = 1;
+    var quality = sam.comparison.Quality{};
     const started = clock.seconds();
     for (0..count) |step| {
         const index = if (reverse) start - step else start + step;
@@ -108,22 +128,14 @@ pub fn main(init: std.process.Init) !void {
         else
             try session.track(init.gpa, image, index);
         defer prediction.deinit();
+        if (reference != null and step != 0) {
+            const expected = reference.?.get("masks").?.bytes[index * pixels ..][0..pixels];
+            try quality.addPrediction(index, seeds.items[0].id, prediction, expected);
+        }
         for (prediction.objects) |object| {
             var area: usize = 0;
             for (object.mask.pixels) |value| area += @intFromBool(value != 0);
             std.debug.print("frame {d}, object {d}: score {d:.5}, area {d}\n", .{ prediction.frame_index, object.id, object.mask.score, area });
-            if (reference) |ref| {
-                const expected = ref.get("masks").?.bytes[index * pixels ..][0..pixels];
-                var intersection: usize = 0;
-                var union_size: usize = 0;
-                for (expected, object.mask.pixels) |x, y| {
-                    intersection += @intFromBool(x != 0 and y != 0);
-                    union_size += @intFromBool(x != 0 or y != 0);
-                }
-                const iou = if (union_size == 0) 1 else @as(f64, @floatFromInt(intersection)) / @as(f64, @floatFromInt(union_size));
-                total_iou += iou;
-                minimum_iou = @min(minimum_iou, iou);
-            }
             if (step + 1 == count) {
                 const path = try std.fmt.allocPrint(a, "{s}-{d}.pgm", .{ args[3], object.id });
                 const output = try std.Io.Dir.cwd().createFile(init.io, path, .{ .exclusive = true });
@@ -134,5 +146,8 @@ pub fn main(init: std.process.Init) !void {
         }
     }
     std.debug.print("SAM {s}: {d} frames, {d:.3}s wall, {d:.3}s GPU, peak Metal allocation {d} bytes\n", .{ loaded.config.version.name(), count, clock.seconds() - started, loaded.gpu.gpu_seconds, loaded.gpu.peak_bytes });
-    if (reference != null) std.debug.print("reference IoU: mean {d:.6}, minimum {d:.6}\n", .{ total_iou / @as(f64, @floatFromInt(count)), minimum_iou });
+    if (reference != null) {
+        std.debug.print("reference IoU (propagation only, seed excluded): {d} frames, mean {d:.6}, minimum {d:.6}, worst frame {?d}\n", .{ quality.frames, quality.meanIou(), quality.minimum_iou, quality.worst_frame });
+        try gate.check(quality, count - 1);
+    }
 }
