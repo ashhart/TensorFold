@@ -43,26 +43,21 @@ inline uint2 tf_cand_pick(threadgroup atomic_uint* bins, uint k, threadgroup uin
   return r;
 }
 
-// scores [rows][keys], visible [rows], keyed [rows][blocks] scratch, mask [rows][blocks] bytes.
-[[max_total_threads_per_threadgroup(TF_TG)]] kernel void tf_cand(
-    constant TfCandArgs& args [[buffer(0)]],
-    device const uint* scores [[buffer(1)]],
-    device const int* visible [[buffer(2)]],
-    device uint* keyed [[buffer(3)]],
-    device uchar* mask [[buffer(4)]],
-    uint row [[threadgroup_position_in_grid]],
-    uint tid [[thread_index_in_threadgroup]],
-    uint lane [[thread_index_in_simdgroup]],
-    uint simd [[simdgroup_index_in_threadgroup]]) {
-  threadgroup atomic_uint bins[TF_BINS];
-  threadgroup uint sc[34], part[64];
+// A candidate threadgroup's shared memory: the radix bins and the scan's partial sums.
+struct TfCandShared {
+  atomic_uint bins[TF_BINS];
+  uint sc[34], part[64];
+};
+
+// One row: its scores s (keys of them), visible count, keyed scratch kd and mask out.
+inline void tf_cand_row(TfCandArgs args, device const uint* s, int vis, device uint* kd, device uchar* out, uint tid,
+                        uint lane, uint simd, threadgroup TfCandShared& sh) {
+  threadgroup auto& bins = sh.bins;
+  threadgroup auto& sc = sh.sc;
+  threadgroup auto& part = sh.part;
   const uint n = min((args.keys + 7u) / 8u, args.blocks);
   const uint k = min(args.topk, 2048u);
-  const int vis = visible[row];
   const uint last = vis >= 1 ? uint(vis - 1) / 8u : 0xffffffffu;
-  device const uint* s = scores + ulong(row) * args.keys;
-  device uint* kd = keyed + ulong(row) * args.blocks;
-  device uchar* out = mask + ulong(row) * args.blocks;
 #if TF_CTL == 4
   if (tid == 0u && args.keys > 0u) ((device uint*)s)[0] ^= 1u;
 #endif
@@ -126,4 +121,53 @@ inline uint2 tf_cand_pick(threadgroup atomic_uint* bins, uint k, threadgroup uin
     }
     if (j < args.blocks) out[j] = pick ? 1 : 0;
   }
+}
+
+// scores [rows][keys], visible [rows], keyed [rows][blocks] scratch, mask [rows][blocks] bytes.
+[[max_total_threads_per_threadgroup(TF_TG)]] kernel void tf_cand(
+    constant TfCandArgs& args [[buffer(0)]],
+    device const uint* scores [[buffer(1)]],
+    device const int* visible [[buffer(2)]],
+    device uint* keyed [[buffer(3)]],
+    device uchar* mask [[buffer(4)]],
+    uint row [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd [[simdgroup_index_in_threadgroup]]) {
+  threadgroup TfCandShared sh;
+  tf_cand_row(args, scores + ulong(row) * args.keys, visible[row], keyed + ulong(row) * args.blocks,
+              mask + ulong(row) * args.blocks, tid, lane, simd, sh);
+}
+
+// A slot's state at one layer of a launch over several slots (segs.zig's Seg), then its rows from `base`.
+struct TfDsv41Seg {
+  device uchar* window;
+  device uchar* pool;
+  device uchar* keys;
+  device float* carry;
+  device float* inputs;
+  device uchar* comp;
+  device uchar* ikeys;
+  uint base, rows, nkeys, start;
+};
+
+// tf_cand over several slots' rows, scores a fixed `stride` a row: row r over its slot's keys (none: left as it was).
+[[max_total_threads_per_threadgroup(TF_TG)]] kernel void tf_cand_segs(
+    constant TfCandArgs& args [[buffer(0)]],
+    device const uint* scores [[buffer(1)]],
+    device const int* visible [[buffer(2)]],
+    device uint* keyed [[buffer(3)]],
+    device uchar* mask [[buffer(4)]],
+    const device TfDsv41Seg* SG [[buffer(5)]],
+    const device int* RS [[buffer(6)]],
+    uint row [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd [[simdgroup_index_in_threadgroup]]) {
+  threadgroup TfCandShared sh;
+  const uint keys = SG[TF_CTL == 6 ? 0 : RS[row]].nkeys; // control 6: every row over the first slot's key count
+  if (keys == 0u) return;
+  const TfCandArgs one = {keys, args.blocks, args.topk};
+  tf_cand_row(one, scores + ulong(row) * args.keys, visible[row], keyed + ulong(row) * args.blocks,
+              mask + ulong(row) * args.blocks, tid, lane, simd, sh);
 }
