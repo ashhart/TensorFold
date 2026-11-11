@@ -34,7 +34,7 @@ pub fn resolveWith(a: Allocator, o: api.Open, fam: Family, lookup: anytype, prob
     const l = mesh.launch.resolve(flags, lookup, fam) catch |e| {
         // no world at all: GLM's own open refuses it (NoRank) where it always has, after the device and admission
         if (e == error.NoPlace) return unplaced(o);
-        problem.* = try refusal(a, e, fam, o);
+        problem.* = try refusal(a, e, fam, o, lookup);
         return null;
     };
     for ([_]?[:0]const u8{ l.world_name, l.rank_name }) |name| if (name) |n| if (settings.retired(n, o.release)) |r| {
@@ -62,16 +62,30 @@ fn unplaced(o: api.Open) api.Open {
     return out;
 }
 
-fn refusal(a: Allocator, e: mesh.launch.Error, fam: Family, o: api.Open) ![]const u8 {
-    const n = mesh.launch.names(fam);
+/// Each refusal names only the flags given and the alias values read, never a default the user did not give.
+fn refusal(a: Allocator, e: mesh.launch.Error, fam: Family, o: api.Open, lookup: anytype) ![]const u8 {
+    const n = mesh.launch.names(fam).?;
+    const world = lookup.get(n.world) orelse "";
+    const rank = lookup.get(n.rank) orelse "";
     return switch (e) {
-        error.PartialAlias => std.fmt.allocPrint(a, "{s} and {s} go together: launch with --tp and --rank", .{ n.?.world, n.?.rank }),
-        error.BadAlias => std.fmt.allocPrint(a, "{s} and {s}: whole numbers; launch with --tp and --rank", .{ n.?.world, n.?.rank }),
-        error.Disagree => std.fmt.allocPrint(a, "--tp {d} --rank {d} differ from {s} and {s}: give one of them, or equal values", .{ o.tp, o.rank, n.?.world, n.?.rank }),
-        error.BadFlag => std.fmt.allocPrint(a, "argument --rank: {d} is not below --tp {d}", .{ o.rank, o.tp }),
+        error.PartialAlias => std.fmt.allocPrint(a, "{s} and {s} go together: launch with --tp and --rank", .{ n.world, n.rank }),
+        error.BadAlias => std.fmt.allocPrint(a, "{s}={s} and {s}={s}: whole numbers; launch with --tp and --rank", .{ n.world, world, n.rank, rank }),
+        error.Disagree => if (o.given.tp and (std.fmt.parseInt(u32, world, 10) catch o.tp) != o.tp)
+            std.fmt.allocPrint(a, "--tp {d} differs from {s}={s}: give one of them, or equal values", .{ o.tp, n.world, world })
+        else
+            std.fmt.allocPrint(a, "--rank {d} differs from {s}={s}: give one of them, or equal values", .{ o.rank, n.rank, rank }),
+        error.BadFlag => badFlag(a, o, n, world, rank),
         error.NoPlace => unreachable, // resolveWith passes it on (unplaced)
         error.PipelineNotServed => "argument --pp: pipeline stages are not served yet (#2005); serve with --pp 1",
     };
+}
+
+/// The merged rank against the world's real source: --tp, the world alias, or --tp's default of 1.
+fn badFlag(a: Allocator, o: api.Open, n: mesh.launch.Names, world: []const u8, rank: []const u8) ![]const u8 {
+    const r = if (o.given.rank) o.rank else std.fmt.parseInt(u32, rank, 10) catch 0;
+    if (o.given.tp) return std.fmt.allocPrint(a, "argument --rank: {d} is not below --tp {d}", .{ r, o.tp });
+    if (world.len > 0) return std.fmt.allocPrint(a, "argument --rank: {d} is not below {s}={s}", .{ r, n.world, world });
+    return std.fmt.allocPrint(a, "argument --rank: {d} is not below --tp 1 (its default; no --tp was given)", .{r});
 }
 
 const testing = std.testing;
@@ -127,11 +141,23 @@ test "refusals name the flags and the aliases; a retired alias names its flag" {
     try testing.expectEqualStrings("", unset.launch_from); // GLM's open refuses it (NoRank), as it always has
     const pair: Map = .{ .pairs = &.{ .{ "TF_GLM_WORLD", "3" }, .{ "TF_GLM_RANK", "1" } } };
     try testing.expect(try resolveWith(a, .{ .dir = "d", .model_type = "glm5_next", .tp = 2, .given = .{ .tp = true } }, .glm, pair, &problem) == null);
-    try testing.expect(std.mem.indexOf(u8, problem, "TF_GLM_WORLD") != null);
+    try testing.expectEqualStrings("--tp 2 differs from TF_GLM_WORLD=3: give one of them, or equal values", problem);
+    try testing.expect(try resolveWith(a, .{ .dir = "d", .model_type = "glm5_next", .rank = 2, .given = .{ .rank = true } }, .glm, pair, &problem) == null);
+    try testing.expectEqualStrings("--rank 2 differs from TF_GLM_RANK=1: give one of them, or equal values", problem);
+    const two: Map = .{ .pairs = &.{ .{ "TF_GLM_WORLD", "2" }, .{ "TF_GLM_RANK", "2" } } };
+    try testing.expect(try resolveWith(a, .{ .dir = "d", .model_type = "glm5_next", .rank = 2, .given = .{ .rank = true } }, .glm, two, &problem) == null);
+    try testing.expectEqualStrings("argument --rank: 2 is not below TF_GLM_WORLD=2", problem);
     const partial: Map = .{ .pairs = &.{.{ "TF_GLM_WORLD", "3" }} };
     try testing.expect(try resolveWith(a, .{ .dir = "d", .model_type = "glm5_next" }, .glm, partial, &problem) == null);
     try testing.expectStringStartsWith(problem, "TF_GLM_WORLD and TF_GLM_RANK go together");
-    try testing.expect(try resolveWith(a, .{ .dir = "d", .model_type = "glm5_next", .release = "1.4.0" }, .glm, pair, &problem) == null);
-    try testing.expectEqualStrings("TF_GLM_WORLD was replaced by --tp in 1.4.0; launch with --tp", problem);
-    try testing.expect(try resolveWith(a, .{ .dir = "d", .model_type = "glm5_next", .release = "1.3.0" }, .glm, pair, &problem) != null);
+    // the retirement release is settings.alias_retire, set at landing; an earlier release still reads the alias
+    try testing.expect(try resolveWith(a, .{ .dir = "d", .model_type = "glm5_next", .release = settings.alias_retire }, .glm, pair, &problem) == null);
+    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "TF_GLM_WORLD was replaced by --tp in {s}; launch with --tp", .{settings.alias_retire}), problem);
+    try testing.expect(try resolveWith(a, .{ .dir = "d", .model_type = "glm5_next", .release = "0.0.1" }, .glm, pair, &problem) != null);
+    // the values a launch gave, not defaults: a parsed world equal to --tp leaves the rank as the conflict
+    const plus: Map = .{ .pairs = &.{ .{ "TF_GLM_WORLD", "+2" }, .{ "TF_GLM_RANK", "1" } } };
+    try testing.expect(try resolveWith(a, .{ .dir = "d", .model_type = "glm5_next", .tp = 2, .rank = 0, .given = .{ .tp = true, .rank = true } }, .glm, plus, &problem) == null);
+    try testing.expectEqualStrings("--rank 0 differs from TF_GLM_RANK=1: give one of them, or equal values", problem);
+    try testing.expect(try resolveWith(a, .{ .dir = "d", .model_type = "glm5_next", .tp = 2, .given = .{ .tp = true } }, .glm, two, &problem) == null);
+    try testing.expectEqualStrings("argument --rank: 2 is not below --tp 2", problem);
 }
