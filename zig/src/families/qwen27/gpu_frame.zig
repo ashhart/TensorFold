@@ -4,7 +4,7 @@ const mtl = @import("metal");
 const Config = @import("config.zig").Config;
 const Ref = @import("projection.zig").Ref;
 
-pub const Field = enum { ids, dims, positions, hidden, residual, input, sums, mixed, mixer_out, output, z, a, b, query, key, value, norm_query, norm_key, q_gate, gate, up, activated, act_sums, logits, drawn, eps, parents, windows, row_slots, segments, keeps, kept_rows, rotated_key, takes, slot_steps, router, picks, route_weights, offsets, order, sorted_weights, sorted_rows, expert_gate, expert_up, expert_act, expert_out, expert_sums, flows };
+pub const Field = enum { ids, dims, positions, hidden, residual, input, sums, mixed, mixer_out, output, z, a, b, query, norm_query, norm_key, q_gate, gate, up, activated, act_sums, logits, drawn, eps, parents, windows, row_slots, segments, keeps, kept_rows, rotated_key, takes, slot_steps, router, picks, route_weights, offsets, order, sorted_weights, sorted_rows, expert_gate, expert_up, expert_act, expert_out, expert_sums, flows };
 
 /// A prompt pass's rows at most (a chain); rounds with trees and every logits row stay within `logit_rows`.
 pub const max_rows = 2048;
@@ -19,29 +19,57 @@ pub fn allocationSizes(config: Config, capacity: u32) [std.enums.values(Field).l
     const mp = 16 * ((capacity + 15) / 16);
     const slots: usize = if (config.moe()) capacity * (config.top_k + 1) else 0; // a row's picks and its shared expert
     return .{
-        capacity * 4,                                                                       8 * 4,                                                                                                                                  3 * capacity * 4,
-        capacity * config.hidden * 2,                                                       capacity * config.hidden * 2,                                                                                                           capacity * config.hidden * 2,
-        mp * @max(config.hidden, @max(config.intermediate, config.gdnValueDim())) / 64 * 4, capacity * @max(config.gdnQkvDim(), @max(config.qDim(), @max(2 * config.intermediate, config.gdnValueDim() + 2 * config.v_heads))) * 2, capacity * config.gdnValueDim() * 2,
-        capacity * config.hidden * 2,                                                       capacity * config.gdnValueDim() * 2,                                                                                                    capacity * config.v_heads * 2,
-        capacity * config.v_heads * 2,                                                      capacity * config.heads * config.head_dim * 2,                                                                                          capacity * config.kvDim() * 2,
-        capacity * config.kvDim() * 2,                                                      capacity * config.heads * config.head_dim * 2,                                                                                          capacity * config.kvDim() * 2,
-        capacity * config.qDim() * 2,                                                       capacity * config.intermediate * 2,                                                                                                     capacity * config.intermediate * 2,
-        capacity * config.intermediate * 2,                                                 mp * config.intermediate / 64 * 4,                                                                                                      @min(capacity, logit_rows) * config.vocab * 2,
-        capacity * 4,                                                                       4,                                                                                                                                      capacity * 4,
-        capacity * config.conv_kernel * 4,                                                  capacity * 4,                                                                                                                           capacity * 16,
-        capacity * 16,                                                                      capacity * 4,                                                                                                                           capacity * config.kvDim() * 2,
-        capacity * 4,                                                                       capacity * @sizeOf(@import("core").tree_slots.Step),
-            // the routed block: a row's logits, its picks and weights, the sorted slots, the experts' rows
-                                                                                           capacity * routerRows(config) * 2,
-        slots * 4,                                                                          slots * 4,                                                                                                                              (config.experts + 1) * 4,
-        slots * 4,                                                                          slots * 4,                                                                                                                              slots * config.hidden * 2,
-        slots * config.moe_intermediate * 2,                                                slots * config.moe_intermediate * 2,                                                                                                    slots * config.moe_intermediate * 2,
-        slots * config.hidden * 2,                                                          slots * @max(config.hidden, config.moe_intermediate) / 64 * 4,                                                                          capacity * 4,
+        capacity * 4,
+        8 * 4,
+        3 * capacity * 4,
+        capacity * config.hidden * 2,
+        capacity * config.hidden * 2,
+        capacity * config.hidden * 2,
+        mp * @max(config.hidden, @max(config.intermediate, config.gdnValueDim())) / 64 * 4,
+        capacity * @max(config.gdnQkvDim(), @max(config.qDim(), @max(2 * config.intermediate, config.gdnValueDim() + 2 * config.v_heads))) * 2,
+        capacity * config.gdnValueDim() * 2,
+        capacity * config.hidden * 2,
+        capacity * config.gdnValueDim() * 2,
+        capacity * config.v_heads * 2,
+        capacity * config.v_heads * 2,
+        capacity * config.heads * config.head_dim * 2,
+        capacity * config.heads * config.head_dim * 2,
+        capacity * config.kvDim() * 2,
+        capacity * config.qDim() * 2,
+        capacity * config.intermediate * 2,
+        capacity * config.intermediate * 2,
+        capacity * config.intermediate * 2,
+        mp * config.intermediate / 64 * 4,
+        @min(capacity, logit_rows) * config.vocab * 2,
+        capacity * 4,
+        4,
+        capacity * 4,
+        capacity * config.conv_kernel * 4,
+        capacity * 4,
+        capacity * 16,
+        capacity * 16,
+        capacity * 4,
+        capacity * config.kvDim() * 2,
+        capacity * 4,
+        capacity * @sizeOf(@import("core").tree_slots.Step),
+        capacity * routerRows(config) * 2,
+        slots * 4,
+        slots * 4,
+        (config.experts + 1) * 4,
+        slots * 4,
+        slots * 4,
+        slots * config.hidden * 2,
+        slots * config.moe_intermediate * 2,
+        slots * config.moe_intermediate * 2,
+        slots * config.moe_intermediate * 2,
+        slots * config.hidden * 2,
+        slots * @max(config.hidden, config.moe_intermediate) / 64 * 4,
+        capacity * 4,
     };
 }
 
 pub const small_rows = 512;
-const scratch_fields = [_]Field{ .hidden, .residual, .input, .sums, .mixed, .mixer_out, .output, .z, .a, .b, .query, .key, .value, .norm_query, .norm_key, .q_gate, .gate, .up, .activated, .act_sums };
+const scratch_fields = [_]Field{ .hidden, .residual, .input, .sums, .mixed, .mixer_out, .output, .z, .a, .b, .query, .norm_query, .norm_key, .q_gate, .gate, .up, .activated, .act_sums };
 
 pub fn decodeSizes(config: Config, capacity: u32) [scratch_fields.len]usize {
     const widths = allocationSizes(config, @min(capacity, small_rows));
