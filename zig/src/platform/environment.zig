@@ -55,7 +55,6 @@ pub const rules = [_]Rule{
     .{ .name = "TF_FLASHNEXT_EXL3_PREFILL_TWO_CHUNK", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0)" },
     .{ .name = "TF_FLASHNEXT_EXL3_PREFILL_RING", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 1)" },
     .{ .name = "TF_FLASHNEXT_EXL3_PREFILL_RING_AHEAD", .scope = .cuda, .kind = .size, .forms = "a whole nonnegative ring lookahead count (default 1)" },
-    .{ .name = "TF_FLASHNEXT_EXL3_PREFILL_SNAP_GRID", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 1; grid removal still requires off-grid resume parity)" },
     .{ .name = "TF_FLASHNEXT_EXL3_PREFILL_OVERLAP", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 1)" },
     .{ .name = "TF_FLASHNEXT_PROFILE", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0)" },
     .{ .name = "TF_FLASHNEXT_EXL3_GRAPH", .scope = .cuda, .kind = .word, .words = &.{ "0", "eager", "1" }, .forms = "0, eager or 1 (default 0: 0 plans on the host, eager on the device, 1 also replays CUDA graphs)" },

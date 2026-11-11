@@ -94,7 +94,6 @@ const valid = [_]Case{
     .{ .name = "TF_FLASHNEXT_EXL3_PREFILL_TWO_CHUNK", .raw = "1", .n = 1 },
     .{ .name = "TF_FLASHNEXT_EXL3_PREFILL_RING", .raw = "0", .n = 0 },
     .{ .name = "TF_FLASHNEXT_EXL3_PREFILL_RING_AHEAD", .raw = "3", .n = 3 },
-    .{ .name = "TF_FLASHNEXT_EXL3_PREFILL_SNAP_GRID", .raw = "0", .n = 0 },
     .{ .name = "TF_FLASHNEXT_EXL3_PREFILL_OVERLAP", .raw = "0", .n = 0 },
     .{ .name = "TF_FLASHNEXT_PROFILE", .raw = "1", .n = 1 },
     .{ .name = "TF_FLASHNEXT_EXPERT_LINES", .raw = "0", .n = 0 },

@@ -83,7 +83,6 @@ pub fn Namespace(comptime Tri: type) type {
             /// Every stream allocates its own sequence; none rides on the engine's.
             free_streams: u32 = 0,
             host_snaps: bool = false,
-            snap_grid: u32 = 0, // EXL3 states keep on prefill chunk starts; other formats keep at any token.
             ctx: *anyopaque,
             deinit: *const fn (*anyopaque) void,
             lone: ?LoneRun = null,
