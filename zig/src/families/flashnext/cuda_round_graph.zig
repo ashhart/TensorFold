@@ -37,11 +37,14 @@ pub const Cache = struct {
     /// The stream the graph captures on and the communicator whose collectives it holds (released before its abort).
     stream: ?cuda.Stream = null,
     collective: ?*Collective = null,
+    /// Rounds captured and replayed since the engine started; a clear keeps them.
+    captures: u64 = 0,
+    replays: u64 = 0,
 
     pub fn clear(c: *Cache) void {
         if (c.collective) |col| col.release = null;
         if (c.exec) |*e| e.deinit();
-        c.* = .{};
+        c.* = .{ .captures = c.captures, .replays = c.replays };
     }
 
     /// Ahead of an abort, which waits for every graph holding the communicator's plans: any capture ended, all freed.
@@ -85,7 +88,9 @@ pub const Cache = struct {
             errdefer c.clear();
             try c.exec.?.upload(pass.stream);
             c.key = key;
-        }
+            c.captures += 1;
+            if (c.captures % 64 == 1) std.log.info("flashnext: decode round graphs: {d} captured, {d} replayed", .{ c.captures, c.replays });
+        } else c.replays += 1;
         try c.exec.?.launchOn(pass.stream);
     }
 };
