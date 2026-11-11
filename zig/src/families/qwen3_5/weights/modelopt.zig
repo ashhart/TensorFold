@@ -49,6 +49,7 @@ fn fp8(a: Allocator, t: *const table.Table, key: []const u8) !host.StoredFp8 {
     if (s.numel() != 1) return refuse(b[1][0..], "FP8's weight scale is one number a projection, as ModelOpt writes it");
     const one = convert.load(.f32, s.bytes, 0);
     if (!std.math.isFinite(one) or one == 0) return refuse(b[1][0..], "FP8's weight scale is zero, infinite or nan");
+    for (w.bytes) |byte| if (byte & 0x7f == 0x7f) return refuse(b[0][0..], "an FP8 weight holds an E4M3 nan code");
     // the codes stay as stored; the product kernel decodes them and applies this scale once to its f32 sum
     const scale = try a.alloc(f32, 1);
     scale[0] = one;

@@ -185,11 +185,11 @@ pub fn projectRoutedPlainRelu2(
     plain: Projection,
     plain_out: Tensor,
 ) Error!bool {
-    const ha = switch (routed.handle orelse return error.BadShape) {
+    const ha = switch (routed.handle orelse return false) {
         .mlx => |h| h,
         .dense, .bf16 => return false,
     };
-    const hb = switch (plain.handle orelse return error.BadShape) {
+    const hb = switch (plain.handle orelse return false) {
         .mlx => |h| h,
         .dense, .bf16 => return false,
     };
@@ -236,7 +236,7 @@ pub fn projectRoutedPlainRelu2(
 
 /// matmul_routed on a stack of experts: every item in one launch; out (pairs, N) fp32.
 pub fn projectRouted(o: Ops, x: Tensor, proj: Projection, items: u64, count: usize, members: u64, pairs: usize, x_div: usize, rows: usize, expert_rows: usize) Error!u64 {
-    switch (proj.handle orelse return error.BadShape) {
+    switch (proj.handle orelse return 0) {
         .mlx => |h| return affineRouted(o, x, affineOf(proj, h), items, count, members, pairs, x_div, rows, expert_rows),
         .dense, .bf16 => return error.BadShape,
     }
