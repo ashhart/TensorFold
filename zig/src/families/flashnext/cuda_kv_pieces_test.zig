@@ -38,22 +38,24 @@ fn withLate(on: bool) bool {
     return was;
 }
 
-test "Flash Next pieces at 256-row pages: 37 pages with the head (45 with pending rows), 18 without, wide block fixed" {
+test "Flash Next pieces at 256-row pages: streams and logits by row, the run's pages exactly, nothing outside" {
     const was = withLate(false);
     defer Draft.late_on = was;
     const run = lanes.layout(40960, 256, head, 0);
     const l = try lanes.layoutPieces(40960, 256, head, 0);
     try t.expectEqual(@as(usize, 41), run.statePages());
-    try t.expectEqual(kv.groups.Pieces{ .n = 186, .pages = 37, .bytes = 270_008_832 }, l.pieces.?);
-    try t.expectEqual(@as(usize, 37), l.statePages());
+    try t.expectEqual(kv.groups.Pieces{ .n = 266, .pages = 41, .bytes = 270_008_832 + 31_457_280 + 15_892_480 }, l.pieces.?);
+    try t.expectEqual(run.statePages(), l.statePages());
     try t.expectEqual(@as(u64, 0), l.run_bytes);
-    try t.expectEqual(@as(u64, 31_457_280 + 15_892_480), l.outside);
-    try t.expectEqual(run.fixed_bytes + l.outside, l.fixed_bytes);
+    try t.expectEqual(@as(u64, 0), l.outside);
+    try t.expectEqual(run.fixed_bytes, l.fixed_bytes);
     try t.expectEqual(run.pageBytes(), l.pageBytes());
     Draft.late_on = true;
     const late = try lanes.layoutPieces(40960, 256, head, 0);
-    try t.expectEqual(@as(u32, 223), late.pieces.?.n);
-    try t.expectEqual(@as(u32, 45), late.pieces.?.pages);
+    try t.expectEqual(@as(u32, 303), late.pieces.?.n);
+    try t.expectEqual(@as(u32, 48), late.pieces.?.pages);
+    try t.expectEqual(lanes.layout(40960, 256, head, 0).statePages(), late.statePages());
+    try t.expectEqual(@as(u64, 0), late.outside);
     const plain = try lanes.layoutPieces(40960, 256, null, 0);
     try t.expectEqual(@as(u32, 73), plain.pieces.?.n);
     try t.expectEqual(@as(u32, 18), plain.pieces.?.pages);
@@ -91,6 +93,9 @@ fn ranges(a: std.mem.Allocator, seq: anytype, d: ?*const Draft) !std.ArrayList([
     try r.append(a, .{ x.saved_tail, x.saved_tail + x.layout.nrow_at - x.layout.tail_at });
     try r.append(a, .{ x.saved_nrow, x.saved_nrow + x.layout.saved - x.layout.nrow_at });
     for ([_]cuda.DeviceBuffer{ x.out, x.dlogits, x.best }) |b| try r.append(a, .{ b.ptr, b.ptr + b.len });
+    const rows = Draft.streamRows(x.rows_cap);
+    for (x.stream_blocks, 0..) |b, k| try r.append(a, .{ b, b + @min(rows.block, rows.rows - k * rows.block) * rows.row });
+    if (x.logit_paged) for (x.logit_rows) |b| try r.append(a, .{ b, b + wt.vocab * 2 });
     return r;
 }
 
@@ -163,9 +168,13 @@ test "two lanes with the head: every piece inside its own lane's state pages, no
         defer r.deinit(t.allocator);
         try expectPlaced(r.items, p.arena.ptr, l.pageBytes(), p.lanes[j].lease.state.items);
         try all.appendSlice(t.allocator, r.items);
-        const w = p.lanes[j].wide.?;
-        try t.expectEqual(w.ptr, dr.streams.ptr);
-        try t.expect(dr.logits.ptr + dr.logits.len <= w.ptr + w.len and dr.streams.ptr + dr.streams.len <= dr.logits.ptr);
+        try t.expectEqual(@as(usize, 48), dr.stream_blocks.len);
+        try t.expectEqual(dr.stream_blocks[0], dr.streams.ptr);
+        try t.expectEqual(dr.logit_rows[0], dr.logits.ptr);
+        for (0..dr.rows_cap) |i| { // a row's address: in its block, rows of a block side by side
+            const b = dr.stream_blocks[i / mtp.max_rows];
+            try t.expectEqual(b + (i % mtp.max_rows) * wt.wide * 2, dr.streamAt(i));
+        }
         try t.expect(dr.log != null and dr.keep.layers[0].log_ctl == dr.log.?.ptr);
         for (p.lanes[j].lease.ids.items) |id| try t.expect(std.mem.indexOfScalar(u32, p.lanes[j].lease.state.items, id) == null);
     }
@@ -180,7 +189,7 @@ test "two lanes with the head: every piece inside its own lane's state pages, no
     try t.expect(p.pool.idle());
 }
 
-test "LEAK: a failed open on pieces and a failed wide block at init leave the pool and the device as before" {
+test "LEAK: a failed open on pieces leaves the pool and the device as before; a moved packing is refused" {
     var d = D.driver();
     var e = engine(&d);
     defer {

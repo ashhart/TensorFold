@@ -47,6 +47,7 @@ const pss_n = mtp.pss_n;
 pub const max_lanes: usize = 16;
 const Head = mtp.Head;
 const Draft = mtp.Draft;
+const kv_pieces = @import("core").kv_pool.pieces;
 const Chain = mtp.Chain;
 const Pick = mtp.Pick;
 const Sampling = mtp.Sampling;
@@ -106,10 +107,11 @@ pub fn Ops(comptime Tri: type) type {
             if (seq.fed != at or d.len != at or d.drafted != 0 or d.pending != 0) return error.PositionMismatch;
             d.media = if (seq.media) |*m| m.view() else null;
             const last = stop == ids.len;
-            try o.forwardMain(seq, ids[at..stop], .{ .logits = if (last) .last else .none, .streams = d.streams.ptr, .prompt = true, .marks = marks });
+            const placed: kv_pieces.Placed = .{ .bases = d.stream_blocks, .rows = Draft.streamRows(d.rows_cap) };
+            try o.forwardMain(seq, ids[at..stop], .{ .logits = if (last) .last else .none, .streams = d.streams.ptr, .stream_rows = placed, .prompt = true, .marks = marks });
             const head_to = @min(stop, ids.len - 1);
             if (head_to > at) try o.forwardHead(d, ids[at + 1 .. head_to + 1], d.streams.ptr, false);
-            if (last) d.prompt_last = d.streams.ptr + (stop - 1 - at) * wide * 2;
+            if (last) d.prompt_last = d.streamAt(stop - 1 - at);
         }
 
         /// The whole prompt a chunk of the engine's rows at a time, from an empty head cache.
@@ -152,10 +154,24 @@ pub fn Ops(comptime Tri: type) type {
                 p.rows = m;
                 p.pos0 = d.len;
                 try p.stage(next[at..][0..m]);
-                const one: pieces.Piece(Self, batch.Pass(Tri)) = .{ .o = o, .p = &p, .d = d, .input = rows + at * wide * 2, .m = m, .last = at + m == next.len, .score = at + m == next.len and scores };
+                // on pages a piece past the first block of streams is gathered into the pass's free rows first
+                const paged = d.stream_blocks.len > 0 and rows == d.streams.ptr and at + m > max_rows;
+                if (paged) try gather(&p, d, at, m);
+                const one: pieces.Piece(Self, batch.Pass(Tri)) = .{ .o = o, .p = &p, .d = d, .input = if (paged) s.h else rows + at * wide * 2, .m = m, .last = at + m == next.len, .score = at + m == next.len and scores };
                 try pieces.runPiece(one, score_rows);
                 d.len += m;
                 at += m;
+            }
+        }
+
+        /// Rows [at, at + m) of a paged draft's streams into s.h, which the head piece reads before it writes.
+        fn gather(p: *batch.Pass(Tri), d: *const Draft, at: usize, m: usize) !void {
+            const placed: kv_pieces.Placed = .{ .bases = d.stream_blocks, .rows = Draft.streamRows(d.rows_cap), .from = @intCast(at) };
+            var i: u32 = 0;
+            while (i < m) {
+                const x = placed.next(i, @intCast(m));
+                try p.copy(p.s.h + i * wide * 2, x.addr, x.rows * wide * 2);
+                i += x.rows;
             }
         }
 
@@ -277,6 +293,7 @@ pub fn Ops(comptime Tri: type) type {
         /// One forward over the window `ids` from seq.fed: each row's scores in d.logits, its streams in d.streams.
         pub fn verify(o: Self, seq: *prompt.Seq, d: *Draft, ids: []const u32) !void {
             if (o.main) |m| return m.verify(m.ptr, seq, d, ids);
+            if (d.logit_paged) return error.FlashNextPagedDraftVerify; // a pool lane's rows go through verifyMany
             o.e.round_graph.clear();
             const n = ids.len;
             if (n == 0 or n > max_rows) return error.WindowTooWide;
@@ -315,7 +332,7 @@ pub fn Ops(comptime Tri: type) type {
                 d.history = seq.history;
                 @memcpy(d.ids[0..n], ids);
                 if (keeps) try copyAsync(o.stream(), d.saved_tail, seq.tail.ptr, ple_tail_n * wide * 2);
-                w.* = .{ .seq = seq, .ids = ids, .keep = if (keeps) &d.keep else null, .streams = d.streams.ptr, .logits = d.logits.ptr };
+                w.* = .{ .seq = seq, .ids = ids, .keep = if (keeps) &d.keep else null, .streams = d.streams.ptr, .logits = if (d.logit_paged) 0 else d.logits.ptr, .logit_rows = if (d.logit_paged) &d.logit_rows else &.{} };
             }
             try o.e.windows(Tri, o.tri, wins, out);
             var row0: usize = 0;

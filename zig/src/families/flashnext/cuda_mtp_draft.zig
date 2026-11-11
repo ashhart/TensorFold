@@ -26,6 +26,7 @@ const max_rows = mtp.max_rows;
 pub const best_bytes: usize = max_rows * 16 + max_rows * @import("cuda_mtp_draw.zig").topk_max * 6;
 const sizes = @import("cuda_seq_bytes.zig");
 const Heads = @import("cuda_heads.zig").Heads;
+const kv_pieces = @import("core").kv_pool.pieces;
 
 /// One draft and its temperature-1 probability under the head.
 pub const Pick = struct { token: u32, prob: f64 };
@@ -77,6 +78,10 @@ pub const Draft = struct {
     /// Where the saved n-gram tail and the window's n-gram rows are (in `saved`, or pieces of their own).
     saved_tail: u64 = 0,
     saved_nrow: u64 = 0,
+    /// On pieces (TF_FLASHNEXT_STATE_PAGES): each block of `streams` (streamRows), and each row of `logits`.
+    stream_blocks: []u64 = &.{},
+    logit_rows: [max_rows]u64 = undefined,
+    logit_paged: bool = false,
     /// A window's DeltaNet end states: swapped in when every row is kept, else the kept rows replay on the sequence's.
     spare: [linear_n]cuda.DeviceBuffer = undefined,
     /// Where `saved` holds each piece and how large the spares are, at the model's heads (its sequence's).
@@ -264,39 +269,51 @@ pub const Draft = struct {
         d.aim();
     }
 
-    /// A pool lane's draft pieces in initPieces' order; streams and logits, wider than a page, are wideBytes' block.
-    pub fn pieceSizes(gpa: std.mem.Allocator, out: *std.ArrayList(u64), draft_n: usize) !void {
+    /// A pool lane's draft pieces in initPieces' order; streams in blocks of max_rows rows, logits a row a piece.
+    pub fn pieceSizes(gpa: std.mem.Allocator, out: *std.ArrayList(u64), draft_n: usize, rows: usize) !void {
         const l = Layout.of(pool_heads);
         try out.appendNTimes(gpa, l.state, linear_n); // spares
         try out.appendNTimes(gpa, l.conv, linear_n); // saved conv windows
         try out.appendNTimes(gpa, max_rows * l.proj, linear_n); // saved projection rows
         // saved n-gram tail and rows, the head's output row, the draft head's scores, best values
         try out.appendSlice(gpa, &.{ l.nrow_at - l.tail_at, l.saved - l.nrow_at, wide * 2, draft_n * 2, best_bytes });
-        if (!late()) return;
-        try out.append(gpa, log_ctl_bytes); // the pending-row log's control word, then each layer's log
-        try out.appendNTimes(gpa, layer_log_bytes, linear_n);
+        if (late()) {
+            try out.append(gpa, log_ctl_bytes); // the pending-row log's control word, then each layer's log
+            try out.appendNTimes(gpa, layer_log_bytes, linear_n);
+        }
+        try streamRows(rows).sizes(gpa, out);
+        try out.appendNTimes(gpa, vocab * 2, max_rows); // a window's scores, a row a piece
     }
 
-    /// A pool lane's `streams` and `logits` in one block outside the pool, each on a 256-byte boundary.
-    pub fn wideBytes(rows: usize) usize {
-        const a = std.mem.alignForward;
-        return a(usize, @max(rows, max_rows) * wide * 2, 256) + a(usize, max_rows * vocab * 2, 256);
+    /// `streams` read through pages by row: blocks of max_rows rows, so a window's rows are block 0's.
+    pub fn streamRows(rows: usize) kv_pieces.Rows {
+        return .{ .rows = @intCast(@max(rows, max_rows)), .block = max_rows, .row = wide * 2 };
     }
 
-    /// A pool lane's head on pieces: its cache on `paged`'s pages, `at` pieceSizes' addresses, `block` wideBytes'.
-    pub fn initPieces(gpa: std.mem.Allocator, driver: *cuda.Driver, cap: usize, draft_n: usize, rows: usize, paged: *const pages.Paged, at: []const u64, block: u64) !Draft {
+    /// Where row `i` of `streams` is: in its block on pieces, else past the buffer's start.
+    pub fn streamAt(d: *const Draft, i: usize) u64 {
+        if (d.stream_blocks.len == 0) return d.streams.ptr + i * wide * 2;
+        return streamRows(d.rows_cap).at(d.stream_blocks, @intCast(i));
+    }
+
+    /// A pool lane's head on pieces: its cache on `paged`'s pages, `at` the addresses of pieceSizes' pieces.
+    pub fn initPieces(gpa: std.mem.Allocator, driver: *cuda.Driver, cap: usize, draft_n: usize, rows: usize, paged: *const pages.Paged, at: []const u64) !Draft {
         const l = Layout.of(pool_heads);
-        if (at.len != 3 * linear_n + 5 + if (late()) 1 + linear_n else 0) return error.FlashNextRunTooShort;
+        const n = linear_n;
+        const own = 3 * n + 5 + if (late()) 1 + n else 0;
+        const blocks = streamRows(rows).blocks();
+        if (at.len != own + blocks + max_rows) return error.FlashNextRunTooShort;
         const B = struct {
-            fn of(dr: *const cuda.Driver, ptr: u64, n: usize) cuda.DeviceBuffer {
-                return .{ .d = dr, .ptr = ptr, .len = n, .borrowed = true };
+            fn of(dr: *const cuda.Driver, ptr: u64, len: usize) cuda.DeviceBuffer {
+                return .{ .d = dr, .ptr = ptr, .len = len, .borrowed = true };
             }
         };
         const head = wt.attn_n;
         const rows_cap = @max(rows, max_rows);
-        const streams_len = std.mem.alignForward(usize, rows_cap * wide * 2, 256);
-        var d: Draft = .{ .gen = @import("cuda_window_graph.zig").nextGen(), .gpa = gpa, .cap = cap, .rows_cap = rows_cap, .kc = B.of(driver, paged.at(head, .key), 0), .vc = B.of(driver, paged.at(head, .value), 0), .ikc = B.of(driver, paged.at(head, .index), 0), .pooled = B.of(driver, paged.at(head, .pooled), 0), .pg = paged.pg(), .streams = B.of(driver, block, rows_cap * wide * 2), .out = undefined, .logits = B.of(driver, block + streams_len, max_rows * vocab * 2), .dlogits = undefined, .best = undefined, .saved = B.of(driver, 0, 0), .host = undefined, .layout = l };
-        const n = linear_n;
+        const stream_at = at[own..][0..blocks];
+        const logit_at = at[own + blocks ..][0..max_rows];
+        // streams: block 0 (a window's rows, max_rows of them); logits: row 0, each row its own piece
+        var d: Draft = .{ .gen = @import("cuda_window_graph.zig").nextGen(), .gpa = gpa, .cap = cap, .rows_cap = rows_cap, .kc = B.of(driver, paged.at(head, .key), 0), .vc = B.of(driver, paged.at(head, .value), 0), .ikc = B.of(driver, paged.at(head, .index), 0), .pooled = B.of(driver, paged.at(head, .pooled), 0), .pg = paged.pg(), .streams = B.of(driver, stream_at[0], max_rows * wide * 2), .out = undefined, .logits = B.of(driver, logit_at[0], vocab * 2), .dlogits = undefined, .best = undefined, .saved = B.of(driver, 0, 0), .host = undefined, .layout = l };
         for (&d.spare, at[0..n]) |*b, ptr| b.* = B.of(driver, ptr, l.state);
         d.saved_tail = at[3 * n];
         d.saved_nrow = at[3 * n + 1];
@@ -315,6 +332,10 @@ pub const Draft = struct {
             }
             li += 1;
         }
+        d.stream_blocks = try gpa.dupe(u64, stream_at);
+        errdefer gpa.free(d.stream_blocks);
+        @memcpy(&d.logit_rows, logit_at);
+        d.logit_paged = true;
         d.host = try gpa.alloc(u16, @max(max_rows * vocab, draft_n));
         d.aim();
         return d;
@@ -381,6 +402,7 @@ pub const Draft = struct {
     pub fn deinit(d: *Draft) void {
         if (d.stream) |stream| cuda.completion.drain(stream.d, stream, "Flash Next draft work did not drain before release");
         d.gpa.free(d.host);
+        if (d.stream_blocks.len > 0) d.gpa.free(d.stream_blocks);
         for (&d.spare) |*b| b.free();
         if (d.log) |*b| b.free();
         d.saved.free();

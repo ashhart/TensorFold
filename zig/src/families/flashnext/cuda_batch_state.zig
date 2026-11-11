@@ -144,6 +144,8 @@ pub const Hooks = struct {
     keep: ?*Keep = null,
     /// Device [rows, wide] bf16: every row's streams after the last MoE write-back (the MTP head's input); 0: none.
     streams: u64 = 0,
+    /// With blocks, `streams` by row through pages (TF_FLASHNEXT_STATE_PAGES): the pass's row 0 is row `from`.
+    stream_rows: @import("core").kv_pool.pieces.Placed = .{},
     /// A training pass's adds to each layer's MoE output, in place of the model's own (Model.pocket).
     moe_add: ?MoeAdd = null,
     /// The rows are prompt tokens (a fill), not a decode or verify window.
@@ -535,8 +537,8 @@ pub const SeqState = struct {
 pub const scoreStride = sizes.scoreStride;
 pub const scoreBytes = sizes.scoreBytes;
 
-/// One stream's rows in a shared pass from `pos` on its own caches, and its window's rollback, hidden rows and scores.
-pub const Lane = struct { seq: SeqState, pos: usize, rows: usize = 1, keep: ?*const Keep = null, streams: u64 = 0, logits: u64 = 0 };
+/// One stream's rows in a shared pass from `pos` on its own caches; its rollback, hidden rows and scores (by row).
+pub const Lane = struct { seq: SeqState, pos: usize, rows: usize = 1, keep: ?*const Keep = null, streams: u64 = 0, logits: u64 = 0, logit_rows: []const u64 = &.{} };
 
 /// The engine's resident weights the pass reads.
 pub const Model = struct {
