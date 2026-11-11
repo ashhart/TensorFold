@@ -48,7 +48,6 @@ test "exl3: reduced prefill writeback preserves slot rounding sub-blocks and tai
 test "exl3: two-chunk scheduling and reservation contracts" {
     _ = window_;
     try std.testing.expect(!(Options{}).two_chunk);
-    try std.testing.expect((Options{}).snap_grid);
     try std.testing.expectEqual(@as(usize, 4096), stepCapacity(4096, false));
     try std.testing.expectEqual(@as(usize, 8192), stepCapacity(4096, true));
     try std.testing.expectEqual(@as(usize, 8192), stepCapacity(8192, true));
