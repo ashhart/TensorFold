@@ -91,7 +91,7 @@ KERNEL(256) void tf_ctl_fp16_sum(global const ushort *X, global const ushort *W,
   if (lid == 0) Y[row] = (float)bv[0];
 }
 
-// Gate 3: the 16-subgroup attention merge weighing the lanes past its last slice, which the real one zeroes.
+// Gate 3: the 16-subgroup merge weighing the lanes past its last slice (again the last one); the real one zeroes them.
 KERNEL(16) void tf_ctl_attn_merge_unguarded(global const float *PM, global const float *PL, global const float *PO,
                                             global ushort *O, int p0, int NS, global const int *TREE, global const int *POS) {
   const int hh = get_group_id(0) / 16, g = get_group_id(0) % 16, t = get_group_id(1), lane = get_sub_group_local_id();
@@ -101,11 +101,12 @@ KERNEL(16) void tf_ctl_attn_merge_unguarded(global const float *PM, global const
   for (int s0 = 0; s0 < used; s0 += 16) m = fmax(m, sub_group_reduce_max(s0 + lane < used ? PM[base + s0 + lane] : -INFINITY));
   float l = 0.0f, o = 0.0f;
   for (int s0 = 0; s0 < used; s0 += 16) {
-    const float wj = exp(PM[base + s0 + lane] - m), lj = PL[base + s0 + lane];
+    const int sj = min(s0 + lane, used - 1); // in bounds: past the last slice, the last slice again, weighed as it
+    const float wj = exp(PM[base + sj] - m), lj = PL[base + sj];
     for (int k = 0; k < 16; k++) {
       const float w = sub_group_broadcast(wj, k);
       l += sub_group_broadcast(lj, k) * w;
-      o += PO[(base + s0 + k) * 256 + g * 16 + lane] * w;
+      o += PO[(base + min(s0 + k, used - 1)) * 256 + g * 16 + lane] * w;
     }
   }
   O[((long)t * 24 + hh) * 256 + g * 16 + lane] = intel_convert_bfloat16_as_ushort(o / l);

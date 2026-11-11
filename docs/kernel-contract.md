@@ -123,9 +123,10 @@ another host made with the commands the receipt records.
 The `attn_merge` registration is a replacement: gate 3 requires the bytes of the merge it replaces, retained in
 `zig/kernels/xpu/contract_merge_upstream.cl`, on the same partials (random maxima, sums and values, with other values
 in the slices a row does not hold) at 1 to 16 tree rows and 33 to 131,073 visible keys, including 32-key slice edges.
-Gate 4 uses unit weights and cancelling integer values, and gate 1 plants NaN and infinities in the partials. Its two
-planted controls go red at gate 3: the real kernel on the old one-subgroup-a-head grid, and a copy that weighs the
-lanes past the last slice. The tree table is the only row source; the multi-stream row positions are outside it.
+Gate 4 uses unit weights and cancelling integer values, and gate 1 plants NaN and infinities in the partials, an
+infinity of each sign in a row's last slice among them. Its two planted controls go red at gate 3: the real kernel on
+the old one-subgroup-a-head grid, and a copy that weighs the lanes past the last slice (it adds the last slice again).
+The tree table is the only row source; the multi-stream row positions are outside it.
 
 On any host, with no device, `zig build cpu-contract` runs the CPU kernels (Qwen3.5-2B's affine projection and RMS
 norm on the host's cores) through gates 1 to 4 and their eight controls; a CPU kernel has no launch, so gate 5 has

@@ -1,7 +1,7 @@
 #!/bin/bash
 # four simultaneous streams, --parallel 4: bf16 then int8, each main then branch; stop at the first failure
 R=$WORK; RUNS=$R/par4; mkdir -p $RUNS
-export ZE_AFFINITY_MASK=0 XPU_GUARD_PDEV=0000:04:00.0 LC_ALL=C
+export ZE_AFFINITY_MASK=0 LC_ALL=C
 CTX=40000
 step() { echo "$(date +%F\ %T) par4: $*" >> $R/journal; }
 for KV in bf16 int8; do

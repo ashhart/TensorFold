@@ -2,7 +2,7 @@
 # usage: run_ab.sh KV(bf16|int8) ORDER(1..4) SIDE(main|branch)   one card (0), one server, one pass of the cells
 KV=$1; ORD=$2; SIDE=$3
 R=$WORK; RUNS=$R/runs; mkdir -p $RUNS
-export ZE_AFFINITY_MASK=0 XPU_GUARD_PDEV=0000:04:00.0 LC_ALL=C
+export ZE_AFFINITY_MASK=0 LC_ALL=C
 [ "$KV" = int8 ] && export XPU_KV_INT8=1 || unset XPU_KV_INT8
 BIN=$R/bin-$SIDE/tensorfold-native
 MP=$MODELS/Qwen3.8-27B-GPTQ-Int4-sym-G128-MTP-BF16

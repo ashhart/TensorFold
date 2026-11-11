@@ -9,7 +9,7 @@ Measured on 2026-11-10, from 16:12 to 20:04 local time, against `main` at `8a783
 
 - Branch: `5c45a2d65` (kernel and `forward.zig` at `673c90137`, kernel contract registration at `5c45a2d65`).
   Base: `main` at `8a7838a65`. Both binaries carry the same local VRAM-guard patch to `zig/src/xpu/rt.zig`, which is
-  not part of this change and not committed.
+  not part of this change and not committed; the runs also set that patch's card variable, left out of the scripts.
 - Zig 0.17.0. Binaries: `zig build xpu-native -j2 -Doptimize=ReleaseFast -Dxpu-dpas=true -Dngen-include=<nGEN>` in each
   tree. Test binaries: `zig build xpu-qwen27-tests -j1 -Doptimize=ReleaseFast -Dxpu-dpas=true -Dngen-include=<nGEN>`.
 - `tensorfold-native` SHA-256, base: `260496d22a190b43b69f4ed73e3ce6d01f13d7440d5001dbbae996538923aa34`
@@ -41,7 +41,8 @@ main and branch, and for drafted and plain, at every depth and in both KV format
 
 Decode tok/s, served, one stream, the median of a pass's three measured requests. Each cell below reads
 `main / branch = ratio (range)`: main is the mean of the two main passes (1 and 4), branch the mean of the two branch
-passes (2 and 3), and the range is the ratio of pass 2 to pass 1 and of pass 3 to pass 4. `compare.out` pools the
+passes (2 and 3), the ratio is branch over main on the unrounded means (so its last digit can differ from the two
+rounded means shown), and the range is the ratio of pass 2 to pass 1 and of pass 3 to pass 4. `compare.out` pools the
 requests of both passes of a side; `abba.out` lists every pass.
 
 | prompt tokens | kind | bf16 plain | bf16 drafted | int8 plain | int8 drafted |
@@ -178,9 +179,9 @@ probe); `prompt_sha256` in every line identifies the exact prompt. `corp_text` i
 `corp_code` is rebuilt, not stored: it is the top-level `*.py` files of the `python3.14` standard library at
 `/usr/lib/python3.14` (Ubuntu 26.04 packages `python3.14`, `libpython3.14-minimal` and `libpython3.14-stdlib`, version
 `3.14.4-1ubuntu0.2`; 157 files), concatenated without a separator, sorted by file name with case and punctuation
-ignored (lower-cased, anything but `a-z0-9` removed, then the name; so `abc.py`, `_aix_support.py`, `annotationlib.py`,
-... , `code.py` after `codeop.py`), and cut to the first 1,500,000 bytes. `scripts/build_corp_code.sh OUT` does this and
-prints the SHA-256, which must be
+ignored (lower-cased, anything but `a-z0-9` removed, then the name; so `abc.py`, `_aix_support.py`,
+`_android_support.py`, ... , `code.py` after `codeop.py`), and cut to the first 1,500,000 bytes.
+`scripts/build_corp_code.sh OUT` does this and prints the SHA-256, which must be
 `31b2f903b4a2ea01728927e53436d924994c93cf3114c7b7f35e58d906961e30`. The file this receipt used before was byte-identical
 to that output (same SHA-256), and the final tree check above built identical prompts from the rebuilt file. Other
 Python versions or packages give other bytes, hence other prompts.
