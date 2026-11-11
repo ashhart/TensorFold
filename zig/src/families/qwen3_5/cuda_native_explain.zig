@@ -21,6 +21,9 @@ pub fn explain(ctx: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.BadImageGrid, error.BadImagePatches => "an image's patches do not fit the vision tower",
         error.QwenServedWithoutVision => "image inputs need the server started with --vision",
         error.OutOfMemory => "the GPU had no memory left for this request's caches: retry once another request ends",
+        error.ScratchCapacityExceeded => "this forward exceeds the Qwen3.5 CUDA scratch rows reserved at startup; restart with a larger --context",
+        error.PromptInt8CapacityExceeded => "this prompt exceeds the Qwen3.5 INT8 workspace reserved at startup; restart with a larger --context",
+        error.ScratchGrowFailed => "the GPU could not allocate the Qwen3.5 CUDA scratch workspace during startup; lower --context and restart",
         else => null,
     };
 }
