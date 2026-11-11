@@ -83,6 +83,9 @@ Larger or unbounded cuts keep the general draw. Sampling time has its own pass-p
 On Metal, M5 prompt passes request 2,048 rows when no other request is decoding. The dense 27B and 9B default
 frame follows the attention geometry at model load and serving. The qualified shared-prefix path keeps the
 512-row default before M5; `TF_QWEN27_SHARED_PREFIX=0` on those chips uses a 128-row frame for its 128-row passes.
+M1-M4 solo prompt chains take that frame's rows when the prompt attention kernels build, otherwise they keep
+128-row passes. Decoded spans, trees and verifies keep their 128-row limit before M5; a live decoder caps the
+next prompt chunk at 128 rows before M5, or 512 with tensor units.
 Valid `TF_PROMPT_ROWS` values and a caller's explicit row count remain unchanged, as do M5 and routed defaults.
 Less unused scratch on the unshared path may let a tight startup fit or admit more streams.
 The larger frame must fit the configured context and all streams beside loaded weights and the 8 GiB
