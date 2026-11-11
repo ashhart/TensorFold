@@ -206,7 +206,6 @@ kernel void im_sam_mask_downsample(const device float *x, const device float *w,
 }
 
 // NHWC activations, OIHW checkpoint kernels.
-struct SamConv { uint h,w,c,n,k,oh,ow,stride,pad,first,rows; };
 kernel void im_sam_deconv_weight(const device float *x, device float *y, constant uint3 &p, uint i [[thread_position_in_grid]]) {
     if(i>=p.x*p.y*4)return;
     const uint c=i%p.y,o=(i/p.y)%p.x,offset=i/(p.y*p.x);
@@ -229,13 +228,6 @@ kernel void im_sam_im2col(const device float *x, device float *y, constant SamCo
     uint row=p.first+i/width, c=i%p.c, s=(i/ p.c)%(p.k*p.k);
     int yy=int(row/p.ow*p.stride+s/p.k)-int(p.pad), xx=int(row%p.ow*p.stride+s%p.k)-int(p.pad);
     y[i]=(yy<0 || xx<0 || yy>=int(p.h) || xx>=int(p.w)) ? 0 : x[(yy*p.w+xx)*p.c+c];
-}
-kernel void im_sam_deconv(const device float *x, const device float *w, const device float *b, device float *y, constant SamConv &p, uint i [[thread_position_in_grid]]) {
-    if (i>=p.oh*p.ow*p.n) return;
-    uint o=i%p.n, yy=i/p.n/p.ow, xx=i/p.n%p.ow;
-    float sum=b[o];
-    for(uint c=0;c<p.c;c++) sum+=x[((yy/2)*p.w+xx/2)*p.c+c]*w[((c*p.n+o)*2+yy%2)*2+xx%2];
-    y[i]=sum;
 }
 kernel void im_sam_depthwise(const device float *x, const device float *w, const device float *b, device float *y, constant SamConv &p, uint i [[thread_position_in_grid]]) {
     if(i>=p.h*p.w*p.c) return;

@@ -13,6 +13,7 @@ pub const Runtime = struct {
     precision: enum { fp32, mixed } = .mixed,
     config: @import("config.zig").Config = .of(.sam31),
     vision_ready: bool = false,
+    observer: ?@import("observe.zig").Observer = null,
     tensors: std.ArrayList(Tensor) = .empty,
     convolutions: std.StringHashMapUnmanaged(Tensor) = .empty,
     constants: std.StringHashMapUnmanaged(Tensor) = .empty,
@@ -276,6 +277,7 @@ pub const Runtime = struct {
         const source = try self.store.get(try self.name("{s}.weight", .{key}));
         if (source.rank != 4) return error.SamConvShape;
         const k = source.dim(2);
+        if (transposed and (k != 2 or stride != 2 or pad != 0)) return error.SamDeconvolutionShape;
         const n = if (transposed) source.dim(1) else source.dim(0);
         const oh = if (transposed) x.height * 2 else (x.height + 2 * pad - k) / stride + 1;
         const ow = if (transposed) x.width * 2 else (x.width + 2 * pad - k) / stride + 1;
@@ -288,7 +290,6 @@ pub const Runtime = struct {
         const out = try self.device(oh * ow * n);
         var p = Conv{ .h = @intCast(x.height), .w = @intCast(x.width), .c = @intCast(x.channels), .n = @intCast(n), .k = @intCast(k), .oh = @intCast(oh), .ow = @intCast(ow), .stride = @intCast(stride), .pad = @intCast(pad), .first = 0, .rows = 0 };
         if (transposed and self.precision == .mixed) {
-            if (k != 2 or stride != 2 or pad != 0) return error.SamDeconvolutionShape;
             const batch = self.g.batch == null;
             if (batch) try self.g.beginBatch();
             errdefer if (batch and self.g.batch != null) self.g.endBatch() catch {};
@@ -299,7 +300,7 @@ pub const Runtime = struct {
             return feature(out, oh, ow, n);
         }
         if (transposed or depthwise) {
-            try self.g.dispatch(if (transposed) "im_sam_deconv" else "im_sam_depthwise", &.{ x.tensor, raw, bias, out }, p, Size.of(out.count, 1, 1), Size.of(256, 1, 1));
+            try self.g.dispatch(if (transposed) "im_sam_deconv" else "im_sam_depthwise", &.{ x.tensor, raw, bias, out }, p, Size.of(if (transposed) out.count / 4 else out.count, 1, 1), Size.of(256, 1, 1));
             return feature(out, oh, ow, n);
         }
         const batch = self.g.batch == null;

@@ -5,6 +5,7 @@ pub const checkpoint = @import("checkpoint.zig");
 pub const kernel_checks = @import("kernel_checks.zig");
 pub const comparison = @import("comparison.zig");
 pub const profile = @import("profile.zig");
+pub const observe = @import("observe.zig");
 pub const model = @import("model.zig");
 pub const session = @import("session.zig");
 pub const Session = session.Session;

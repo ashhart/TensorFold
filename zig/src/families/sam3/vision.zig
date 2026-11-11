@@ -13,6 +13,7 @@ pub fn trunk(r: *Runtime, image: Feature) !Feature {
     const start = r.mark();
     var h = try r.conv("detector.backbone.vision_backbone.trunk.patch_embed.proj", image, 14, 0, false, false);
     if (h.height != 72 or h.width != 72 or h.channels != 1024) return error.SamImageShape;
+    try observe(r, "trunk.patch_embed", h);
     const tiled = r.constant("trunk.positions") orelse positions: {
         const pos = try r.weight("detector.backbone.vision_backbone.trunk.pos_embed");
         const tiled = try r.alloc(h.tensor.count);
@@ -23,6 +24,7 @@ pub fn trunk(r: *Runtime, image: Feature) !Feature {
     errdefer if (r.g.batch != null) r.g.endBatch() catch {};
     h.tensor = try r.norm("detector.backbone.vision_backbone.trunk.ln_pre", try r.add(h.tensor, tiled), 1024, 1e-5);
     r.trim(start, &.{h.tensor});
+    try observe(r, "trunk.ln_pre", h);
     for (0..32) |i| {
         const key = try r.name("detector.backbone.vision_backbone.trunk.blocks.{d}", .{i});
         const global = i % 8 == 7;
@@ -36,7 +38,9 @@ pub fn trunk(r: *Runtime, image: Feature) !Feature {
         const next = try r.visionResidual(try r.name("{s}.mlp.fc2", .{key}), up, 4736, residual, false);
         r.trim(start, &.{next});
         h.tensor = next;
-        if (!r.vision_ready and i % 4 == 3 and i != 31) {
+        if (r.observer != null) {
+            try observe(r, try r.name("trunk.blocks.{d}", .{i}), h);
+        } else if (!r.vision_ready and i % 4 == 3 and i != 31) {
             try r.g.endBatch();
             try r.g.beginBatch();
         }
@@ -44,6 +48,14 @@ pub fn trunk(r: *Runtime, image: Feature) !Feature {
     try r.g.endBatch();
     r.vision_ready = true;
     return h;
+}
+
+fn observe(r: *Runtime, name: []const u8, value: Feature) !void {
+    const observer = r.observer orelse return;
+    const batched = r.g.batch != null;
+    if (batched) try r.g.endBatch();
+    try observer.write(observer.context, name, value.tensor, &.{ 1, value.height, value.width, value.channels });
+    if (batched) try r.g.beginBatch();
 }
 
 pub fn pyramid(r: *Runtime, x: Feature, kind: []const u8) ![3]Feature {

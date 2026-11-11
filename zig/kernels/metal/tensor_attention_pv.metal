@@ -19,17 +19,12 @@ inline void tensor_attention_pv_scalar(thread frag<float>& lo, thread frag<float
   }
 }
 
-// Split the significand into ten-bit tensor operands; the six leading products cover float precision.
-inline float3 tensor_split(float x) {
-  float high = as_type<float>(as_type<uint>(x) & 0xffffe000u);
-  float rest = x - high;
-  float middle = as_type<float>(as_type<uint>(rest) & 0xffffe000u);
-  return float3(high, middle, rest - middle);
-}
-
 template <typename T>
 inline void tensor_attention_pv(thread frag<float>& lo, thread frag<float>& hi, thread const frag<float>& p,
                                 thread const frag<T>& v0, thread const frag<T>& v1, ushort lane) {
+#ifdef TF_NAX_STRICT_FP32
+  mma_16x32<false, false>(lo, hi, p, v0, v1);
+#else
   bool exceptional = false;
   TF_UNROLL
   for (short e = 0; e < 8; e++) exceptional |= !isfinite(p[e]) || !isfinite(float(v0[e])) || !isfinite(float(v1[e]));
@@ -37,7 +32,7 @@ inline void tensor_attention_pv(thread frag<float>& lo, thread frag<float>& hi, 
   frag<float> ph, pm, pt, vh0, vm0, vt0, vh1, vm1, vt1;
   TF_UNROLL
   for (short e = 0; e < 8; e++) {
-    float3 ps = tensor_split(p[e]), a = tensor_split(float(v0[e])), b = tensor_split(float(v1[e]));
+    float3 ps = split_float_operand(p[e]), a = split_float_operand(float(v0[e])), b = split_float_operand(float(v1[e]));
     ph[e] = ps.x; pm[e] = ps.y; pt[e] = ps.z;
     vh0[e] = a.x; vm0[e] = a.y; vt0[e] = a.z;
     vh1[e] = b.x; vm1[e] = b.y; vt1[e] = b.z;
@@ -48,5 +43,6 @@ inline void tensor_attention_pv(thread frag<float>& lo, thread frag<float>& hi, 
   mma_16x32<false, false>(lo, hi, ph, vt0, vt1);
   mma_16x32<false, false>(lo, hi, pt, vh0, vh1);
   mma_16x32<false, false>(lo, hi, pm, vm0, vm1);
+#endif
 }
 }

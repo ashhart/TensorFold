@@ -105,7 +105,7 @@ pub const Gpu = struct {
         const attention_source = try attentionSource(allocator);
         defer allocator.free(attention_source);
         const combined = try std.mem.concat(allocator, u8, &.{
-            sources.core_qwen_vision, sources.tensor_attention_pv, attention_source, sources.tensor_ops, sources.tensor_attention, extra_source,
+            "#define TF_NAX_STRICT_FP32\n", sources.core_qwen_vision, sources.tensor_attention_pv, attention_source, sources.tensor_ops, sources.tensor_attention, extra_source,
         });
         defer allocator.free(combined);
         const source = try std.mem.replaceOwned(u8, allocator, combined, "#include \"../nax.h\"", "\n#ifndef TF_TENSOR_NAX_INCLUDED\n#define TF_TENSOR_NAX_INCLUDED\n" ++ sources.nax ++ "\n#endif\n");

@@ -1,1 +1,1 @@
-pub const source = @embedFile("sam3.metal");
+pub const source = @embedFile("deconv.metal") ++ @embedFile("sam3.metal");

@@ -4,6 +4,7 @@ const st = @import("safetensors");
 const clock = @import("metal").clock;
 const Capture = @import("sam3_capture.zig").Capture;
 const receipt = @import("sam3_receipt.zig");
+const Trace = @import("sam3_trace.zig").Trace;
 
 pub fn main(init: std.process.Init) !void {
     const a = init.arena.allocator();
@@ -14,6 +15,8 @@ pub fn main(init: std.process.Init) !void {
             \\  --start N --frames N --reverse --fp32 --exercise-lifecycle
             \\  --reference MASKS --min-frame-iou N --min-mean-iou N
             \\  --raw-masks FILE.safetensors --benchmark FILE.json --warmup N
+            \\  --trace DIR --trace-frames N,N (NHWC tensors; recomputes preprocessing and trunk)
+            \\  --trace-layers (also capture each vision block)
             \\Reference comparisons exclude the seed frame and require one unchanged object.
             \\Default: exact binary masks. Approximate comparisons require --min-frame-iou.
             \\
@@ -32,11 +35,18 @@ pub fn main(init: std.process.Init) !void {
     var raw_path: ?[]const u8 = null;
     var benchmark_path: ?[]const u8 = null;
     var warmup: usize = 0;
+    var trace_path: ?[]const u8 = null;
+    var trace_frames: std.ArrayList(usize) = .empty;
+    var trace_layers = false;
     var gate = sam.comparison.Gate{};
     var i: usize = 4;
     while (i < args.len) {
         const flag = args[i];
         i += 1;
+        if (std.mem.eql(u8, flag, "--trace-layers")) {
+            trace_layers = true;
+            continue;
+        }
         if (std.mem.eql(u8, flag, "--reverse")) {
             reverse = true;
             continue;
@@ -70,17 +80,37 @@ pub fn main(init: std.process.Init) !void {
             if (i == args.len) return error.MissingArgument;
             const value = args[i];
             i += 1;
+            if (std.mem.eql(u8, flag, "--trace")) {
+                trace_path = value;
+                continue;
+            }
+            if (std.mem.eql(u8, flag, "--trace-frames")) {
+                var parts = std.mem.splitScalar(u8, value, ',');
+                while (parts.next()) |part| {
+                    const frame = try std.fmt.parseInt(usize, part, 10);
+                    if (std.mem.indexOfScalar(usize, trace_frames.items, frame) != null) return error.DuplicateTraceFrame;
+                    try trace_frames.append(a, frame);
+                }
+                continue;
+            }
             if (std.mem.eql(u8, flag, "--start")) start = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, flag, "--frames")) count = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, flag, "--warmup")) warmup = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, flag, "--seed-reference")) seed_path = value else if (std.mem.eql(u8, flag, "--reference")) reference_path = value else if (std.mem.eql(u8, flag, "--raw-masks")) raw_path = value else if (std.mem.eql(u8, flag, "--benchmark")) benchmark_path = value else if (!try gate.set(flag, value)) return error.UnknownArgument;
         }
     }
     if (count == 0) return error.EmptyVideo;
     if (warmup >= count or (warmup != 0 and benchmark_path == null)) return error.InvalidWarmup;
+    if (trace_path != null and benchmark_path != null) return error.TraceTimingRequiresSeparateRuns;
+    if (trace_path == null and (trace_frames.items.len != 0 or trace_layers)) return error.ExpectedTraceDirectory;
+    if (trace_path != null and trace_frames.items.len == 0) try trace_frames.append(a, start);
     var file = try st.File.open(init.gpa, init.io, args[2]);
     defer file.close(init.io);
     const frames = file.get("frames") orelse return error.MissingFramesTensor;
     if (frames.dtype != .u8 or frames.rank != 4 or frames.dim(3) != 3) return error.ExpectedRgbFrames;
     if (start >= frames.dim(0) or (reverse and count - 1 > start) or
         (!reverse and count > frames.dim(0) - start)) return error.FrameOutOfRange;
+    for (trace_frames.items) |frame| {
+        if (frame >= frames.dim(0) or (reverse and (frame > start or start - frame >= count)) or
+            (!reverse and (frame < start or frame - start >= count))) return error.TraceFrameOutOfRange;
+    }
     const height = frames.dim(1);
     const width = frames.dim(2);
     const pixels = try std.math.mul(usize, width, height);
@@ -117,6 +147,8 @@ pub fn main(init: std.process.Init) !void {
     defer if (capture) |*output| output.deinit(init.io);
     const samples: []receipt.Sample = if (benchmark_path != null) try a.alloc(receipt.Sample, count) else &.{};
     var masks_hash = std.crypto.hash.sha2.Sha256.init(.{});
+    var trace: ?Trace = if (trace_path) |path| try Trace.init(init.gpa, init.io, path, trace_frames.items, trace_layers) else null;
+    defer if (trace) |*output| output.deinit();
     const loaded = try sam.Model.load(init.gpa, init.io, args[1], .{
         .precision = if (fp32) .float32 else .checkpoint,
     });
@@ -158,6 +190,7 @@ pub fn main(init: std.process.Init) !void {
             }
         }
         if (capture) |*output| try output.add(init.io, prediction, exercise);
+        if (trace) |*output| try output.frame(&session, image, index);
         if (reference != null and step != 0) {
             const expected = reference.?.get("masks").?.bytes[index * pixels ..][0..pixels];
             try quality.addPrediction(index, seeds.items[0].id, prediction, expected);
