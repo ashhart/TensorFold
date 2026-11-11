@@ -71,7 +71,7 @@ fn copiedBytes(c: *Ctx, set: []const Prompt, replies: []const Session.Reply) usi
     var kept: std.ArrayList([]const u32) = .empty;
     var bytes: usize = 0;
     for (set, replies) |p, r| {
-        const marks = c.session.h.prefix.store.marks(c.arena, p.ids, r.cached, @intCast(p.ids.len / 2), p.shared, &.{}) catch return bytes;
+        const marks = c.session.h.prefix.store.marks(c.arena, .of(p.ids), r.cached, @intCast(p.ids.len / 2), p.shared, &.{}) catch return bytes;
         for (marks) |m| {
             const ids = p.ids[0..m];
             const known = for (kept.items) |k| {
