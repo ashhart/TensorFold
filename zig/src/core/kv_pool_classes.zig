@@ -16,8 +16,23 @@ pub fn plan(l: kv.Layout, b: kv.Budget) error{ NoStream, TooMany, ClassTooSmall 
     var p = try kv.plan(l, b);
     if (l.classes <= 1) return p;
     p.pages -= p.pages % l.classes;
-    if (p.pages / l.classes < l.pages(b.window)) return error.ClassTooSmall;
+    if (p.pages / l.classes < l.pages(b.window) + 1) return error.ClassTooSmall; // a window and the trash page
     return p;
+}
+
+/// An unasked cache lowered only as far as every class holds a window (kept if it fits, or if nothing would).
+pub fn fit(l: kv.Layout, b: kv.Budget) kv.Budget {
+    if (plan(l, b)) |_| return b else |e| if (e != error.ClassTooSmall) return b;
+    var lo = b;
+    lo.cache = 0;
+    _ = plan(l, lo) catch return b;
+    var hi = b.cache; // plan(lo) holds, plan(hi) does not: the cache only takes pages away
+    while (hi - lo.cache > 1) {
+        var mid = lo;
+        mid.cache = lo.cache + (hi - lo.cache) / 2;
+        if (plan(l, mid)) |_| lo = mid else |_| hi = mid.cache;
+    }
+    return lo;
 }
 
 /// Ids a class holds.
