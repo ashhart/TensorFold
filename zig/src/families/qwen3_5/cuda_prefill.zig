@@ -3,7 +3,7 @@ const std = @import("std");
 const lanes = @import("lanes");
 const E = @import("cuda_engine.zig");
 const vision_prompt = @import("cuda_vision_prompt.zig");
-const reuse = @import("cuda_reuse.zig");
+const readout = @import("cuda_readout.zig");
 
 /// Where a prompt pass from `at` cuts its chunk: max_rows rows on, or the request's next chunk start before that.
 fn nextCut(len: usize, chunks: []const u32, at: usize, max_rows: u32) usize {
@@ -48,6 +48,15 @@ pub fn run(self: anytype, stream: *lanes.Stream) !void {
     var f = try opening(self, stream);
     defer f.deinit();
     while (!try chunk(self, stream, &f, 0)) {}
+}
+
+/// One whole prompt fill: a readout's pieces to the end, else the text pass, each exactly once.
+pub fn whole(self: anytype, stream: *lanes.Stream) !void {
+    if (stream.readout != null) {
+        while (!try readout.step(self, stream, 0)) {}
+        return;
+    }
+    return run(self, stream);
 }
 
 /// One cut of the prompt pass a call (prefillFn's forwards, in order): the lane host runs rounds between them.
