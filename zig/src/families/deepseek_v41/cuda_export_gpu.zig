@@ -61,11 +61,19 @@ pub fn capture(gpa: std.mem.Allocator, ss: *sg.Sessions, at: u64) !*Capture {
         c.deinit();
     }
 
-    c.pieces = try gpa.alloc(cx.Piece, ss.pieces.len);
+    // replay: the drafter's rings stand outside the snapshot; the decoder replay's hand-off filled them
+    const rings = if (replay) ss.drafter_rings else &[0]sg.Piece{};
+    c.pieces = try gpa.alloc(cx.Piece, ss.pieces.len + rings.len);
     var at_byte: usize = 0;
-    for (ss.pieces, c.pieces) |p, *out| {
+    for (ss.pieces, c.pieces[0..ss.pieces.len]) |p, *out| {
         out.* = .{ .role = p.role, .bytes = snap.bytes[at_byte..][0..p.len] };
         at_byte += p.len;
+    }
+    for (rings, c.pieces[ss.pieces.len..]) |p, *out| {
+        const bytes = try gpa.alloc(u8, p.len);
+        try bufs.append(gpa, bytes);
+        try ss.readDrafterRing(p, bytes);
+        out.* = .{ .role = p.role, .bytes = bytes };
     }
 
     const page = kx.pool.page;

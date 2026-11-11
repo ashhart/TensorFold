@@ -203,12 +203,13 @@ test "a missing carry, a missing source, a short pool and a mismatched prompt ar
     try std.testing.expectError(error.BadSnapshot, cx.build(gpa, @splat(1), tokens, bad));
 }
 
-/// A replay export of `upto` tokens: the decoder layers' rings hold another prompt's row where the replay never wrote.
+/// A replay export of `upto` tokens: the decoder layers' and the drafter's rings hold another prompt's oldest row.
 fn replayCase(upto: u64) !void {
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const w = try s.make(arena, .{ .upto = upto, .seed = upto * 3 + 5 });
+    const want_rows: u32 = @intCast(@min(upto, geo.window));
+    const w = try s.make(arena, .{ .upto = upto, .ds_rows = want_rows, .seed = upto * 3 + 5 });
     const full = try snapshotOf(arena, w);
     const tokens = try tokensOf(arena, upto);
     const keep: u64 = 127;
@@ -223,8 +224,10 @@ fn replayCase(upto: u64) !void {
         p.bytes = try arena.dupe(u8, p.bytes);
         if (upto >= 128) @memset(p.bytes[stale * row ..][0..row], 0xa7);
     }
-    const base: cx.State = .{ .pos = upto, .ds_rows = 0, .pieces = full.pieces, .pages = full.pages };
+    const base: cx.State = .{ .pos = upto, .ds_rows = want_rows, .pieces = full.pieces, .pages = full.pages };
     var rep = base;
+    // the drafter's context after the replay's hand-off: the replay's rows only
+    rep.ds_rows = @min(upto, keep);
     rep.pieces = live;
     rep.decoder_from = d;
     rep.replay_rows = keep;
@@ -237,8 +240,8 @@ fn replayCase(upto: u64) !void {
     for (a.exp.layers, b.exp.layers, a.exp.sources, b.exp.sources) |la, lb, sa, sb| {
         try std.testing.expectEqual(la.index, lb.index);
         for (la.parts, sa.parts, sb.parts) |part, x, y| {
-            const swa = std.mem.eql(u8, part.name, "swa");
-            if (!(swa and la.index >= d and upto >= 128)) {
+            const ring = std.mem.eql(u8, part.name, "swa") and la.index >= d or std.mem.eql(u8, part.name, "ring");
+            if (!(ring and upto >= 128)) {
                 try std.testing.expectEqualSlices(u8, x, y);
                 continue;
             }
@@ -248,9 +251,9 @@ fn replayCase(upto: u64) !void {
             zeroed += 1;
         }
     }
-    try std.testing.expectEqual(@as(usize, if (upto >= 128) geo.layers - d else 0), zeroed);
+    try std.testing.expectEqual(@as(usize, if (upto >= 128) geo.layers - d + geo.mtp_layers else 0), zeroed);
     // the library's importer takes the replay export
-    const shape: plan.Shape = .{ .upto = upto };
+    const shape: plan.Shape = .{ .upto = upto, .ds_rows = want_rows };
     try p2.check(arena, shape, b.exp.toManifest("dsv41-test", 0, 1));
 }
 
