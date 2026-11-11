@@ -69,6 +69,7 @@ pub const families: []const api.Family = &.{
     .{ .model_type = "llama", .formats = &.{ "bf16", "compressed-tensors-int4-g32" } },
     .{ .model_type = "flint", .formats = &.{"mlx-q4g64"} },
     .{ .model_type = "unlimited-ocr", .formats = &.{"bf16"} },
+    .{ .model_type = "qwen2", .formats = &.{"bf16"} }, // the Llama family: q, k and v biases and YaRN
 };
 
 /// Gemma 4 31B (gemma4) and 12B (gemma4_unified, its text model): one native family, gemma4.zig's host.
@@ -134,7 +135,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     defer report.deinit();
     if (fsr_options.refuse(o, problem)) return null;
     if (o.prompt_int8 or o.rope_yarn != null) {
-        problem.* = if (o.prompt_int8) prompt_int8_refusal else "--rope-yarn: the Metal engine has no YaRN rope; serve without --rope-yarn";
+        problem.* = if (o.prompt_int8) prompt_int8_refusal else "--rope-yarn: the Metal engine takes YaRN from a qualified checkpoint's own config (the llama family's Qwen2 entries), not from a flag; serve without --rope-yarn";
         return null;
     }
     if (std.mem.eql(u8, o.model_type, "fish_omni")) return @import("drama_open.zig").openMetal(a, gpa, io, o, problem);
@@ -167,7 +168,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     if (std.mem.eql(u8, o.model_type, "step5_vl")) return @import("step5.zig").open(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "spark2_5")) return @import("spark25.zig").open(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "minimax_m3_vl")) return @import("minimax_m3.zig").open(a, gpa, io, o, problem);
-    if (std.mem.eql(u8, o.model_type, "llama")) return @import("llama.zig").open(a, gpa, io, o, problem);
+    if (std.mem.eql(u8, o.model_type, "llama") or std.mem.eql(u8, o.model_type, "qwen2")) return @import("llama.zig").open(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "flint")) return @import("flint.zig").open(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "lfm2_moe")) return @import("lfm2_moe.zig").open(a, gpa, io, o, problem);
     if (!std.mem.eql(u8, o.model_type, "nemotron_h")) {
