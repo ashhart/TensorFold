@@ -288,6 +288,13 @@ pub fn nowNs() i128 {
     return @as(i128, t.sec) * std.time.ns_per_s + t.nsec;
 }
 
+/// Wall clock, ms since the epoch: what `used` is not, and what the dashboard shows.
+pub fn wallMs() i64 {
+    var t: platform.c.timespec = undefined;
+    _ = platform.c.clock_gettime(platform.c.CLOCK.REALTIME, &t);
+    return @as(i64, @intCast(t.sec)) * 1000 + @divTrunc(@as(i64, @intCast(t.nsec)), 1_000_000);
+}
+
 fn verifyFile(f: *const File) !void {
     const w = &f.writer.?;
     const path = w.tmp[0..w.tmp_len :0];

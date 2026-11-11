@@ -4,6 +4,7 @@ pub const draft_sources: api.DraftSources = .{ .mtp = true, .copies = true };
 const platform = @import("sys");
 const mtl = @import("metal");
 const api = @import("engine_api");
+const snap = api.prompt_cache.status;
 const tf = @import("tensorfold");
 const fx = tf.flashnext_engine;
 const pc = api.prompt_cache;
@@ -56,6 +57,8 @@ pub const Host = struct {
     live_generated: u64 = 0,
     prefilling: bool = false, // the engine thread's prompt pass is running (status reads it under this lock)
     cache: ?pc.Store = null, // kept prompt states (engine thread only); null: no reuse (rank 1, a zero budget)
+    cache_status: ?api.Status.PromptCache = null, // published under the lock; status never reads the store
+    disk_status: ?api.Status.DiskCache = null, // published beside it, after the store stops mutating
     prompt: []const u32 = &.{}, // the request in the engine (speed-up mode names kept states by its tokens)
     saved: std.ArrayList(u32) = .empty, // this request's marks the cache kept (speed-up: rank 1 drops the others)
     learned: ?api.prompt_imprint.Imprint = null, // --learn: shared states on disk, read back by later servers
@@ -176,6 +179,9 @@ pub const Host = struct {
             .prefill_tokens_per_second = if (t - h.prefill_at <= window_ns) h.prefill_rate else 0,
             .streams = n,
             .generation_tokens = generation_tokens,
+            .prompt_cache = h.cache_status,
+            .disk = h.disk_status,
+            .fsr = if (h.eng.r.fsr) |rt| if (rt.snapshot()) |c| .from(c) else null else null,
             .fill_unknown = h.prefilling, // this backend reports no fill counters: the page says so, not idle
         };
     }
@@ -245,7 +251,10 @@ pub const Host = struct {
             h.cancels.clearRetainingCapacity(); // a cancel for an id no longer queued or running
             h.unlock();
             h.serve(job);
+            if (h.eng.r.fsr) |rt| rt.publish(); // the reply's last counts, not those of its last 1 Hz copy
             h.lock();
+            h.cache_status = if (h.cache) |*s| snap.PromptCache(s) else null;
+            h.disk_status = if (h.cache) |*s| snap.Disk(s) else null;
             h.running = null;
             h.prefilling = false;
             h.live_generated = 0;

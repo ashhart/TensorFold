@@ -43,6 +43,13 @@
   .chart canvas { display:block; width:100%; height:96px; }
   h2 { font-size:11px; text-transform:uppercase; letter-spacing:.1em; color:var(--muted);
        margin:26px 0 8px; font-weight:500; }
+  #cachetable { margin-top:14px; padding:10px 14px; background:var(--panel); border:1px solid var(--line); border-radius:10px;
+               font-size:12px; color:var(--muted); font-variant-numeric:tabular-nums; overflow-x:auto; }
+  #cachetable:empty { display:none; }
+  #cachetable table { border-collapse:collapse; width:100%; }
+  #cachetable th, #cachetable td { text-align:right; padding:2px 10px 2px 0; }
+  #cachetable th:first-child, #cachetable td:first-child { text-align:left; font-weight:600; color:var(--text); }
+  #cachetable th { color:var(--muted); font-weight:500; }
   #totalsbar { display:flex; flex-wrap:wrap; gap:4px 22px; margin-top:14px; padding:10px 14px;
                background:var(--panel); border:1px solid var(--line); border-radius:10px;
                font-size:12px; color:var(--muted); font-variant-numeric:tabular-nums; }
@@ -80,6 +87,22 @@
     <div class="tile"><div class="label">Decode rounds</div><div class="value" id="rounds">—</div>
       <div class="cap">lifetime, finished requests</div></div>
   </div>
+  <h2 id="cachelabel">Cache</h2>
+  <div class="tiles" id="cachetiles">
+    <div class="tile"><div class="label">Prompt cache states</div><div class="value" id="cachestates">—</div>
+      <div class="cap" id="cachestatescap"></div></div>
+    <div class="tile"><div class="label">Cache hits</div><div class="value" id="cachehits">—</div>
+      <div class="cap" id="cachehitscap"></div></div>
+    <div class="tile"><div class="label">Cached tokens</div><div class="value" id="cachedtokens">—</div>
+      <div class="cap" id="cachedtokenscap"></div></div>
+    <div class="tile"><div class="label">Prefill reuse</div><div class="value" id="reuse">—</div>
+      <div class="cap" id="reusecap"></div></div>
+    <div class="tile" id="disktile" style="display:none"><div class="label">Disk tier</div><div class="value" id="diskstates">—</div>
+      <div class="cap" id="diskcap"></div></div>
+    <div class="tile" id="fsrtile" style="display:none"><div class="label">SSD expert cache</div><div class="value" id="fsrostates">—</div>
+      <div class="cap" id="fsrcap"></div></div>
+  </div>
+  <div id="cachetable"></div>
   <div id="totalsbar"></div>
 </main>
 <footer>sampled once a second · decode/prefill are the same numbers the terminal's live line shows</footer>
@@ -204,6 +227,9 @@ function apply(s) {
     : "idle";
   el("conns").className = "state" + (((s.running || 0) + (s.waiting || 0)) ? " on" : "");
 
+  const modelParts = [s.model, s.version, s.backend, s.device].filter(v => v);
+  el("model").textContent = modelParts.length ? modelParts.join(" · ") : "—";
+
   const memory = s.memory || {};
   if (memory.peak!=null || memory.limit!=null) {
     const used = GiB((memory.active || 0) + (memory.cache || 0));
@@ -212,7 +238,7 @@ function apply(s) {
     const caps = [];
     if (memory.limit!=null) caps.push(`limit ${GiB(memory.limit)} GiB`);
     if (memory.peak!=null) caps.push(`peak ${GiB(memory.peak)} GiB`);
-    if (memory.cache) caps.push(`cache ${GiB(memory.cache)} GiB`);
+    if (memory.cache) caps.push(`allocator cache ${GiB(memory.cache)} GiB`);
     el("memcap").textContent = caps.join(" · ");
     // the bar fills against the configured limit when there is one, else the measured peak
     const against = memory.limit!=null && memory.limit > 0 ? memory.limit : memory.peak;
@@ -283,9 +309,59 @@ function apply(s) {
 
   el("rounds").textContent = fmt(s.decode_rounds_total);
 
+  // Cache: the prompt cache (RAM), the disk tier, and the SSD-expert pool; each hides when the server has none.
+  const pc = s.prompt_cache, disk = s.disk, fsr = s.fsr, reuse = s.prefill_reuse;
+  const haveCache = !!(pc || disk || fsr);
+  el("cachelabel").style.display = haveCache ? "" : "none";
+  el("cachetiles").style.display = haveCache ? "" : "none";
+  if (pc) {
+    el("cachestates").textContent = fmt(pc.states);
+    // bytes counts spare snapshot storage too
+    el("cachestatescap").textContent = `${GiB((pc.bytes || 0) - (pc.spare_bytes || 0))} of ${GiB(pc.budget_bytes)} GiB held`;
+    const calls = (pc.hits || 0) + (pc.misses || 0);
+    el("cachehits").textContent = fmt(pc.hits);
+    el("cachehitscap").textContent = calls ? `${(100 * (pc.hits || 0) / calls).toFixed(1)}% of ${fmt(calls)} lookups` : "no lookups yet";
+    el("cachedtokens").textContent = fmt(s.cached_tokens_total);
+    el("cachedtokenscap").textContent = s.prompt_tokens_total ? `${(100 * (s.cached_tokens_total || 0) / (s.prompt_tokens_total || 1)).toFixed(1)}% of prompt tokens` : "restored this server lifetime";
+    if (pc.entries && pc.entries.length) {
+      el("cachetable").innerHTML = `<table><thead><tr><th>id</th><th>tokens</th><th>MiB</th><th>hits</th><th>created</th><th>last use</th></tr></thead><tbody>${
+        pc.entries.map(e => `<tr><td title="${/^[0-9a-f]{32}$/.test(e.id || "") ? e.id + ".st" : ""}"><code>${/^[0-9a-f]{32}$/.test(e.id || "") ? e.id.slice(0, 12) : "—"}</code></td><td>${fmt(e.at)}</td><td>${(e.bytes / 2**20).toFixed(1)}</td><td>${fmt(e.hits)}</td><td>${new Date(e.created_at_ms).toLocaleString()}</td><td>${new Date(e.last_access_ms).toLocaleString()}</td></tr>`).join("")}</tbody></table>`;
+    } else el("cachetable").textContent = "";
+  } else {
+    el("cachestates").textContent = "—"; el("cachestatescap").textContent = "";
+    el("cachehits").textContent = "—"; el("cachehitscap").textContent = "";
+    el("cachedtokens").textContent = s.cached_tokens_total != null ? fmt(s.cached_tokens_total) : "—";
+    el("cachedtokenscap").textContent = "";
+    el("cachetable").textContent = "";
+  }
+  if (reuse) {
+    el("reuse").innerHTML = reuse.ratio == null ? "—" : `${(100 * reuse.ratio).toFixed(1)}<small>%</small>`;
+    el("reusecap").textContent = `${fmt(reuse.prefill_cache)} cached · ${fmt(reuse.prefill_compute)} computed`;
+  } else { el("reuse").textContent = "—"; el("reusecap").textContent = ""; }
+  el("disktile").style.display = disk ? "" : "none";
+  if (disk) {
+    el("diskstates").textContent = fmt(disk.states);
+    const lat = disk.read_ms_p50 ? `read p50 ${disk.read_ms_p50} ms · p95 ${disk.read_ms_p95} ms · write p50 ${disk.write_ms_p50} ms · p95 ${disk.write_ms_p95} ms` : `read ${(disk.read_ms_ema || 0).toFixed(1)} ms · write ${(disk.write_ms_ema || 0).toFixed(1)} ms`;
+    const last = [disk.last_read_ms ? `read ${new Date(disk.last_read_ms).toLocaleTimeString()}` : "", disk.last_write_ms ? `wrote ${new Date(disk.last_write_ms).toLocaleTimeString()}` : ""].filter(v => v).join(" · ");
+    const held = disk.cap_bytes ? `${GiB(disk.held_bytes)} of ${GiB(disk.cap_bytes)} GiB` : `${GiB(disk.held_bytes)} GiB, no cap`;
+    const work = [`${fmt(disk.reads)} reads · ${fmt(disk.writes)} writes`, disk.queue_len ? `${fmt(disk.queue_len)} queued` : "",
+                  disk.prefetch_made ? `read-ahead ${fmt(disk.prefetch_used)} of ${fmt(disk.prefetch_made)} used` : "",
+                  disk.failure_count ? `${fmt(disk.failure_count)} failed${disk.last_error ? " (last " + disk.last_error + ")" : ""}` : ""];
+    el("diskcap").textContent = [held, lat, last, ...work].filter(v => v).join(" · ");
+  }
+  el("fsrtile").style.display = fsr ? "" : "none";
+  if (fsr) {
+    el("fsrostates").textContent = `${fmt(fsr.occupancy)} / ${fmt(fsr.capacity)}`;
+    el("fsrcap").textContent = `${GiB(fsr.io_bytes)} GiB read in ${fmt(fsr.io_calls)} calls · ${fmt(fsr.cache_hits)} hits · ${fmt(fsr.evictions)} evictions`;
+  }
+
   // Lifetime totals since the server started, from the finished-request counters the /stats snapshot carries.
   const parts = [`<span>prompt <b>${fmt(s.prompt_tokens_total)}</b> tok</span>`,
                  `<span>generated <b>${fmt(s.generation_tokens_total)}</b> tok</span>`];
+  if (s.cached_tokens_total) parts.push(`<span>cached <b>${fmt(s.cached_tokens_total)}</b> tok</span>`);
+  if (s.preemptions_total) parts.push(`<span>preemptions <b>${fmt(s.preemptions_total)}</b></span>`);
+  if (s.latency_p50_ms != null) parts.push(`<span>latency p50 <b>${fmt(Math.round(s.latency_p50_ms))}</b> ms</span>`);
+  if (s.ttft_p50_ms != null) parts.push(`<span>ttft p50 <b>${fmt(Math.round(s.ttft_p50_ms))}</b> ms</span>`);
   if (drafted > 0) parts.push(`<span>drafts <b>${(100 * accepted / drafted).toFixed(1)}%</b> · ${fmt(accepted)} of ${fmt(drafted)}</span>`);
   el("totalsbar").innerHTML = parts.join("");
 }

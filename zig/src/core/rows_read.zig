@@ -29,6 +29,7 @@ pub fn read(r: *Rows, i: usize) !pc.Saved {
     if (ahead) |a| bytes = a.disk;
     const ns = if (ahead) |a| a.ns else write.nowNs() - t0;
     if (ns > 0 and bytes > 64 << 20) r.read_rate = 0.5 * r.read_rate + 0.5 * @as(f64, @floatFromInt(bytes)) / (@as(f64, @floatFromInt(ns)) / 1e9);
+    noteReadLatency(r, ns);
     r.counts.read += bytes;
     r.counts.reads += 1;
     r.touch(i);
@@ -210,4 +211,14 @@ fn finishResume(s: *const pc.Store, x: Resume) Resume {
         if (std.math.isFinite(total)) out.seconds = total;
     }
     return out;
+}
+
+// Times a read took, in milliseconds: the last, the smoothed and the histogram, and the wall time it landed.
+fn noteReadLatency(r: *Rows, ns: i128) void {
+    if (ns <= 0) return;
+    const ms = @as(f64, @floatFromInt(ns)) / 1e6;
+    r.file_io.read_ms_last = ms;
+    r.file_io.read_ms_ema = if (r.file_io.read_ms_ema == 0) ms else 0.8 * r.file_io.read_ms_ema + 0.2 * ms;
+    r.file_io.read_lat.observe(ms);
+    r.file_io.last_read_ms = @import("rows_io.zig").wallMs();
 }
