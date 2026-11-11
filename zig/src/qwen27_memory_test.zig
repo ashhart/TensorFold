@@ -33,6 +33,72 @@ test "qwen27 memory: a wide frame preserves all configured slots and the exact w
     try std.testing.expectError(error.TooManyStreams, f.streams(512, false));
 }
 
+test "qwen27 memory: the live free-page reader is available only on macOS" {
+    const free = @import("sys").memory_policy.free();
+    if (@import("builtin").os.tag != .macos) {
+        try std.testing.expectEqual(@as(?usize, null), free);
+        return;
+    }
+    const bytes = free orelse return error.FreeMemoryReadingFailed;
+    try std.testing.expectEqual(@as(usize, 0), bytes % std.heap.pageSize());
+}
+
+test "qwen27 memory: live startup readings warn only past free memory or under pressure" {
+    var f = fixture();
+    f.left = try f.cost(512, f.slots);
+    try std.testing.expectEqual(@as(?memory.Warning, null), try f.warning(512, f.slots, 128, f.left, 1));
+    try std.testing.expectEqual(@as(?memory.Warning, null), try f.warning(512, f.slots, 128, null, null));
+    const short = (try f.warning(512, f.slots, 128, f.left - 1, 1)).?;
+    try std.testing.expectEqual(f.left, short.reserve);
+    try std.testing.expectEqual(@as(u32, 1), short.streams.?);
+    try std.testing.expect(short.context.? < f.context - 128);
+    for ([_]u32{ 2, 4 }) |pressure| {
+        const pressured = (try f.warning(512, f.slots, 128, f.left, pressure)).?;
+        try std.testing.expectEqual(f.slots, pressured.streams.?);
+        try std.testing.expectEqual(f.context - 128, pressured.context.?);
+    }
+    const unknown = (try f.warning(512, f.slots, 128, null, 4)).?;
+    try std.testing.expectEqual(@as(?u32, null), unknown.context);
+    try std.testing.expectEqual(@as(?u32, null), unknown.streams);
+}
+
+test "qwen27 memory: startup recommendations fit the same drafted stream and scratch estimator" {
+    for ([_]bool{ false, true }) |shared| {
+        var f = fixture();
+        f.shared = shared;
+        f.slots = 4;
+        f.ring = 2048 * 5 * 5120 * 2;
+        f.planes = 7;
+        f.left = try f.cost(512, f.slots);
+        const free = try f.cost(512, 2);
+        const warning = (try f.warning(512, f.slots, 128, free, 1)).?;
+        try std.testing.expectEqual(@as(u32, 2), warning.streams.?);
+        var smaller = f;
+        smaller.context = warning.context.? + 128;
+        try std.testing.expect(try smaller.cost(512, f.slots) <= free);
+        smaller.context += 1;
+        try std.testing.expect(try smaller.cost(512, f.slots) > free);
+        const empty = (try f.warning(512, f.slots, 128, 0, null)).?;
+        try std.testing.expectEqual(@as(?u32, 0), empty.streams);
+        try std.testing.expectEqual(@as(?u32, 0), empty.context);
+        try std.testing.expectEqual(@as(u32, 4), try f.streams(512, true));
+    }
+}
+
+test "qwen27 memory: startup warning explains known and unavailable readings" {
+    const cases = [_]struct { warning: memory.Warning, text: []const u8 }{
+        .{ .warning = .{ .reserve = 8 << 30, .free = 4 << 30, .pressure = 1, .streams = 1, .context = 8192 }, .text = "4.0 GiB free" },
+        .{ .warning = .{ .reserve = 8 << 30, .free = null, .pressure = 4 }, .text = "free memory unavailable" },
+        .{ .warning = .{ .reserve = 8 << 30, .free = 0, .pressure = null, .streams = 0, .context = 0 }, .text = "free memory before starting" },
+    };
+    for (cases) |case| {
+        var buffer: [1024]u8 = undefined;
+        const message = try std.fmt.bufPrint(&buffer, "{f}", .{case.warning});
+        try std.testing.expect(std.mem.indexOf(u8, message, "8.0 GiB") != null);
+        try std.testing.expect(std.mem.indexOf(u8, message, case.text) != null);
+    }
+}
+
 test "qwen27 memory: overrides keep their width and still refuse an unaffordable startup" {
     var f = fixture();
     f.left = try f.cost(512, 2);
