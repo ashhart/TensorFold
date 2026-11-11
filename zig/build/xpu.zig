@@ -116,7 +116,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     const install = b.addInstallArtifact(exe, .{});
     b.step("xpu-qwen27", "Build the Qwen3.8-27B XPU forward runner (needs ocloc, a C++17 compiler and nGEN headers)").dependOn(&install.step);
     // device tests: a skip message and exit 0 without a Level Zero device or a model (`xpu-tests` is Nemotron's, -Dxpu)
-    const tests_step = b.step("xpu-qwen27-tests", "Build the 27B XPU device tests (tf-xpu-qwen27-means-test, -seam-test, -close-test)");
+    const tests_step = b.step("xpu-qwen27-tests", "Build the 27B XPU device tests (means, seam, close and tf-xpu-qwen27-tail-test)");
     for ([_][2][]const u8{
         .{ "tf-xpu-qwen27-means-test", "zig/src/xpu/means_test.zig" },
         .{ "tf-xpu-qwen27-seam-test", "zig/src/xpu/seam_test.zig" },
