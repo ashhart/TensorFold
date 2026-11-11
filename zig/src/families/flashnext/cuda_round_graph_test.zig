@@ -261,6 +261,9 @@ test "rank graphs: plain rounds stage uploads before capture and before every re
     try t.expectEqual(@as(usize, 2), scratch.waits);
     try t.expectEqual(@as(usize, 2), scratch.fences);
     try t.expect(!Fake.capturing);
+    try t.expectEqual([2]u64{ 1, 1 }, [2]u64{ cache.captures, cache.replays });
+    cache.clear();
+    try t.expectEqual([2]u64{ 1, 1 }, [2]u64{ cache.captures, cache.replays });
 }
 
 test "rank graphs: collective abort releases the decode graph before ncclCommAbort" {

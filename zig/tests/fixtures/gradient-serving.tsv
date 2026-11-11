@@ -133,7 +133,7 @@ zig/src/families/flashnext/cuda_images.zig	4696ef29dc81f30882f964d69a71c5378b247
 zig/src/families/flashnext/cuda_images_test.zig	4278e5241f6c7e0e710e9a8ddf0482855db158eeee2463200a2c2de32c9dadd7	raw	#3164 (resumed image rows tested)
 zig/src/families/flashnext/cuda_lanes.zig	a181a74b11f82ef4e03116cf6d65d0fed56c9501ddadfae979099ba467ecfd21	
 zig/src/families/flashnext/cuda_lanes_admission_test.zig	eef300305c40846de8d362f32d1f5274fd3896fa3959a658cf72b86a394949cc	; raw
-zig/src/families/flashnext/cuda_lanes_load.zig	63778962845fc70de30c18c6481fc95421faeb401e58d6930b05eecc785e50e0	
+zig/src/families/flashnext/cuda_lanes_load.zig	c86fc29c303c4e5224cfa067e80845d30548b09b67480ef65a1d2e7a479ad8f3	
 zig/src/families/flashnext/cuda_lanes_restore_test.zig	4d2a75c0ada18d769e71c1d64306109dfc8ef07d442219c32b0f2f5d4174f145	
 zig/src/families/flashnext/cuda_launch.zig	8127e7051dbd5bfab1200001f42669abe2a51f16a3cb3402d212ff031ac6df51	
 zig/src/families/flashnext/cuda_media.zig	394601e8a807f5516f501efcaefa6fb3308f392ee322db7296b11c90814f8eea	raw
@@ -165,7 +165,7 @@ zig/src/families/flashnext/cuda_rank_engine.zig	3fb788530aaa9a98eb1aaf1f36e2c6d9
 zig/src/families/flashnext/cuda_rank_media.zig	e5c268c8cf257934bb49fe401ba6213ea8b108258bbfd4d06edb990d568c3c2b	raw
 zig/src/families/flashnext/cuda_rank_memory.zig	072954f4e2e9d6ea66124a209d20a1fa1c7ed391e501310d41880f11ce61ada8	raw
 zig/src/families/flashnext/cuda_rank_wire.zig	ccabe0f06babc1c1ba6ced699b203406a0b98127b5c4b3ca4bdd54157e88fcc2	
-zig/src/families/flashnext/cuda_round_graph.zig	b110b9e405b8786afd777a7f43cf7f1f9f93ce46dc4e4ee1e333ee0b70f396f3	
+zig/src/families/flashnext/cuda_round_graph.zig	fc08947146388857cd60250284e759f8c3330e061289abd13e04ce28b3fa6d52	; #2980
 zig/src/families/flashnext/cuda_rows.zig	735fc8915036e47d09f533f4e5948e5fc4b61556172ebe2c6bfdaad3e0373216	raw	main dfd9ac5ef4 (#2585: TF_FLASHNEXT_* read through platform/environment.zig, malformed text refused at startup; valid values keep their meaning)
 zig/src/families/flashnext/cuda_select_main.zig	5c012c2d59fa6dd573424fce7b6d8b162a06cb9f6103530a0fc0b03dbdb17bd3	raw
 zig/src/families/flashnext/cuda_snap.zig	bbc66ed7e1aed820b4b60c148b1bbe47b2a5c7e7240c7da7f0bd8504080a6b56	raw	main 4f6017ced (prompt cache marks kept inside the pass), #1953: the prompt cache ladder's values

@@ -33,10 +33,13 @@ pub const Key = struct {
 pub const Cache = struct {
     exec: ?cuda.graph.Exec = null,
     key: ?Key = null,
+    /// Rounds captured and replayed since the engine started; a clear keeps them.
+    captures: u64 = 0,
+    replays: u64 = 0,
 
     pub fn clear(c: *Cache) void {
         if (c.exec) |*e| e.deinit();
-        c.* = .{};
+        c.* = .{ .captures = c.captures, .replays = c.replays };
     }
 
     pub fn run(c: *Cache, key: Key, pass: anytype, ids: []const u32) !void {
@@ -57,7 +60,9 @@ pub const Cache = struct {
             errdefer c.clear();
             try c.exec.?.upload(pass.stream);
             c.key = key;
-        }
+            c.captures += 1;
+            if (c.captures % 64 == 1) std.log.info("flashnext: decode round graphs: {d} captured, {d} replayed", .{ c.captures, c.replays });
+        } else c.replays += 1;
         try c.exec.?.launchOn(pass.stream);
     }
 };
