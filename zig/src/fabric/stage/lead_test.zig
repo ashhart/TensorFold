@@ -97,6 +97,63 @@ test "stage lead: a keep is refused unless rank 0 rolled back, once, for a known
     try lead.step(&.{.{ .id = 1, .op = .@"continue", .rows = 1, .accepted = 2 }}, rows, .window);
 }
 
+/// Rank 0 keeps a stream's window and steps it on, then ends it; `a` the count kept of its rows.
+fn keepOn(lead: *D.Lead, e: *Fake.Engine, ids: []u32, id: u32, a: u32) !void {
+    try Fake.rollback(e, lead.cache(id).?, a);
+    try lead.kept(id, a);
+    try lead.step(&.{.{ .id = id, .op = .@"continue", .rows = 2 }}, idsOf(id + 20, ids[0..2]), .window);
+    try lead.end(id, .close);
+    try lead.beat();
+}
+
+/// `kept` after a prompt round and on a stream whose open is still queued: refused by name, nothing sent.
+fn noWindowBody(gpa: std.mem.Allocator, lead: *D.Lead, e: *Fake.Engine) ![]u32 {
+    var ids: [dt.most_rows]u32 = undefined;
+    try lead.step(&.{.{ .id = 1, .op = .open, .rows = 4 }}, idsOf(1, ids[0..4]), .prompt);
+    const r0 = lead.round;
+    try t.expectError(error.NoWindow, lead.kept(1, 1)); // a prompt round leaves no window
+    _ = try lead.open(2);
+    try t.expectError(error.NoWindow, lead.kept(2, 0)); // no round of it has run
+    try t.expectEqual(r0, lead.round);
+    try lead.step(&.{.{ .id = 2, .op = .@"continue", .rows = 3 }}, idsOf(2, ids[0..3]), .prompt);
+    try lead.step(&.{.{ .id = 1, .op = .@"continue", .rows = 3 }}, idsOf(3, ids[0..3]), .window);
+    try lead.end(2, .close);
+    try keepOn(lead, e, &ids, 1, 1);
+    return e.out.toOwnedSlice(gpa);
+}
+
+test "stage lead: a keep with no window, after a prompt round or before a queued open's round, is refused" {
+    const gpa = t.allocator;
+    const ref = try wholeOf(gpa, noWindowBody, dt.parallel);
+    defer gpa.free(ref);
+    try expectRings(ref, noWindowBody, dt.parallel);
+}
+
+/// `kept` of more rows than the stream's last window ran: refused by name, nothing sent, then a count it holds.
+fn aboveRowsBody(gpa: std.mem.Allocator, lead: *D.Lead, e: *Fake.Engine) ![]u32 {
+    var ids: [dt.most_rows]u32 = undefined;
+    try lead.step(&.{.{ .id = 1, .op = .open, .rows = 4 }}, idsOf(1, ids[0..4]), .prompt);
+    try lead.step(&.{.{ .id = 1, .op = .@"continue", .rows = 3 }}, idsOf(2, ids[0..3]), .window);
+    try Fake.rollback(e, lead.cache(1).?, 3); // all 3 rows kept: the count may equal the rows
+    try lead.kept(1, 3);
+    try lead.step(&.{.{ .id = 1, .op = .@"continue", .rows = 2 }}, idsOf(3, ids[0..2]), .window);
+    const r0 = lead.round;
+    try Fake.rollback(e, lead.cache(1).?, 1);
+    try t.expectError(error.BadAccepted, lead.kept(1, 3));
+    try t.expectEqual(r0, lead.round);
+    try lead.kept(1, 1);
+    try lead.step(&.{.{ .id = 1, .op = .@"continue", .rows = 3 }}, idsOf(4, ids[0..3]), .window);
+    try keepOn(lead, e, &ids, 1, 2);
+    return e.out.toOwnedSlice(gpa);
+}
+
+test "stage lead: a keep of more rows than the last window ran is refused" {
+    const gpa = t.allocator;
+    const ref = try wholeOf(gpa, aboveRowsBody, dt.parallel);
+    defer gpa.free(ref);
+    try expectRings(ref, aboveRowsBody, dt.parallel);
+}
+
 /// Streams opened, ended and reopened over 2 slots: by `Lead.open` and `Lead.end` (queued) or by plan entries.
 fn slotsRun(gpa: std.mem.Allocator, lead: *D.Lead, e: *Fake.Engine, queued: bool) ![]u32 {
     var ids: [dt.most_rows]u32 = undefined;
