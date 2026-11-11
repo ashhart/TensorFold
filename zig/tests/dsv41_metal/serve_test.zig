@@ -19,6 +19,7 @@ test {
     _ = @import("steps_test.zig");
     _ = @import("steps_serve_test.zig");
     _ = @import("vision_boot_test.zig");
+    _ = @import("calib_test.zig");
 }
 
 /// Replies that have shown their first tokens so far (Box.first).
