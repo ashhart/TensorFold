@@ -138,7 +138,7 @@ const wide_formats = [_]lane_projection.Format{
     .{ .bits = 3, .group = 32 }, .{ .bits = 2, .group = 64 }, .{ .bits = 8, .group = 128 },
 };
 
-test "qwen27 quant: non-reg layouts admit whole prompt chunks without changing source" {
+test "qwen27 quant: non-reg layouts admit whole prompt chunks with row-block source variants" {
     for (wide_formats) |format| {
         const long = lane_projection.Layout{ .n = 64, .k = 5120, .format = format, .rows = 2048 };
         try long.validate();
@@ -148,7 +148,8 @@ test "qwen27 quant: non-reg layouts admit whole prompt chunks without changing s
         defer a.free(text);
         const old = try lane_projection.source(a, short);
         defer a.free(old);
-        try t.expectEqualStrings(old, text);
+        try t.expect(std.mem.indexOf(u8, old, "#define TF_ROW_BLOCKS 0\n") != null);
+        try t.expect(std.mem.indexOf(u8, text, "#define TF_ROW_BLOCKS 1\n") != null);
         for ([_]usize{ 0, 15, 17, 2064 }) |rows| {
             short.rows = rows;
             try t.expectError(error.InvalidSchedule, short.validate());
