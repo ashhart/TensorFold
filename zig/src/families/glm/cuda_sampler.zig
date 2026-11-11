@@ -25,6 +25,11 @@ pub fn rule(s: Sampling) Rule {
 /// A rank's logits rows: bf16 [rows][its vocabulary span].
 pub const Local = struct { rank: usize, logits: u64 };
 
+/// The gather's BF16 rank blocks occupy the same extent as the whole vocabulary rows.
+pub fn stagingBytes(vocab: usize, rows: usize) usize {
+    return rows * vocab * @sizeOf(u16);
+}
+
 pub const Sampler = struct {
     d: *const cuda.Driver,
     module: cuda.Module,
@@ -48,7 +53,7 @@ pub const Sampler = struct {
         const gm = try m.function("tf_grammar_mask");
         var full = try cuda.DeviceBuffer.alloc(d, rows * vocab * 2);
         errdefer full.free();
-        var stage = try cuda.DeviceBuffer.alloc(d, rows * vocab * 2);
+        var stage = try cuda.DeviceBuffer.alloc(d, stagingBytes(vocab, rows));
         errdefer stage.free();
         var r = try cuda.DeviceBuffer.alloc(d, @sizeOf(Rule));
         errdefer r.free();
