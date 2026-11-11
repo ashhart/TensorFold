@@ -142,7 +142,7 @@ pub fn main(init: std.process.Init) !void {
             @memset(s.out.slice(u16, most_rows * heads * dim), 0xffff);
             const cb = queue.commandBuffer();
             const e = cb.compute(.concurrent);
-            try s.op.encode(e, &scratch, &s.binding, plan, .{ .buffer = query }, .{ .buffer = key }, .{ .buffer = val }, .{ .buffer = s.out }, caches, null, cs.prompt, false);
+            try s.op.encodeContiguous(e, &scratch, &s.binding, plan, .{ .buffer = query }, .{ .buffer = key }, .{ .buffer = val }, .{ .buffer = s.out }, caches, null, cs.prompt, false);
             e.end();
             cb.commit();
             cb.wait();

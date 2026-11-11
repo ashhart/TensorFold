@@ -37,11 +37,19 @@ pub fn supported(device: mtl.Device, d: limits.MetalLaunch) bool {
     return !std.mem.startsWith(u8, d.name, "qwen27 q8 ") or @import("metal_support.zig").tensor(device.tensorUnits(), d.name);
 }
 
+fn hasMixed(s: []const u8, part: []const u8) bool {
+    return std.mem.indexOf(u8, s, part) != null;
+}
 fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comptime assemble: bool) !Launch {
     const fun = d.name[std.mem.lastIndexOfScalar(u8, d.name, ' ').? + 1 ..];
     var text: []const u8 = undefined;
     var head: []const u8 = "";
     var frags = false;
+    if (std.mem.startsWith(u8, d.name, "q27 mixed ")) {
+        if (!assemble) return undefined;
+        const body = if (hasMixed(d.name, " norm ")) try a.dupe(u8, tf.qwen27.runtime_sources.glue) else try tf.qwen27.simd_attention.grouped(a, device.tensorUnits(), true, 6, 4, hasMixed(d.name, " paged "));
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = if (hasMixed(d.name, " norm ")) body else "" };
+    }
     if (std.mem.startsWith(u8, d.name, "qwen27 q8 ")) {
         for (@import("contract").lane_q8.sources) |v| {
             if (!std.mem.eql(u8, v.name, d.name)) continue;

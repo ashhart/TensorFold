@@ -186,6 +186,9 @@ pub fn main(init: std.process.Init) !u8 {
         gemma_list.deinit(a);
     }
     var kernels: std.ArrayList(g.Kernel) = .empty;
+    var q27_mixed: @import("metal_q27_mixed.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer q27_mixed.deinit();
+    try q27_mixed.collect(o.only);
     var lfm3_suite: @import("metal_lfm3_suite.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer lfm3_suite.deinit();
     try lfm3_suite.collect(o.only);

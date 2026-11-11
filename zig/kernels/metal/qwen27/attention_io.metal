@@ -2,7 +2,7 @@
 #include <metal_stdlib>
 using namespace metal;
 struct Q27CachePtrs { device bfloat* keys; device bfloat* values; };
-struct Q27PackArgs { uint rows, packed_rows, heads, kv_heads, dim, group; };
+struct Q27PackArgs { uint rows, packed_rows, heads, kv_heads, dim, group, value_stride; };
 struct Q27KeepRow { uint stream, source, destination, row; };
 struct Q27KeepArgs { uint kept, kv_heads; }; // staging rows hold kv_heads heads, as Scratch sizes keep_k and keep_v
 
@@ -25,7 +25,7 @@ kernel void q27_attn_append(device const bfloat* K [[buffer(0)]], device const b
   const int st = nodes[4 * at.z + 1], base = 8 + st * 12;
   const uint local = at.z - uint(meta[base + 6]), row = uint(meta[base + 4]) + local;
   caches[st].keys[ulong(at.y) * uint(meta[base + 7]) + row * a.dim + at.x] = K[(at.z * a.kv_heads + at.y) * a.dim + at.x];
-  caches[st].values[ulong(at.y) * uint(meta[base + 8]) + row * a.dim + at.x] = V[(at.z * a.kv_heads + at.y) * a.dim + at.x];
+  caches[st].values[ulong(at.y) * uint(meta[base + 8]) + row * a.dim + at.x] = V[at.z * (a.value_stride ? a.value_stride : a.kv_heads * a.dim) + at.y * a.dim + at.x];
 }
 kernel void q27_attn_gather(device const Q27CachePtrs* caches [[buffer(0)]], device const int* meta [[buffer(1)]],
     device const Q27KeepRow* map [[buffer(2)]], device bfloat* K [[buffer(3)]], device bfloat* V [[buffer(4)]],
