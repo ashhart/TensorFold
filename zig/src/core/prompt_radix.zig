@@ -48,6 +48,9 @@ pub fn pagesOf(comptime T: type, owner: *T, bytes: u64) Pages {
     return .{ .ptr = owner, .bytes = bytes, .vtable = &.{ .retain = V.retain, .release = V.release, .holders = V.holders, .available = V.available, .hold = if (has_hold) V.hold else null } };
 }
 
+/// An image's exact identity: its position, rows, patch grid and content hash.
+pub const Identity = @import("cache_images.zig").Identity;
+
 /// Where a pass resumes and the marks it keeps at (in the caller's allocator), and its retained parts to map (C3).
 pub const Plan = struct {
     from: u32 = 0,
@@ -76,8 +79,8 @@ pub const Query = struct {
     key: []const u32,
     /// The prompt's length; a key of another length reuses nothing.
     prompt_len: u32,
-    /// The exact identities of the request's images.
-    images: []const @import("cache_images.zig").Identity = &.{},
+    /// The exact identities of the request's images, in prompt order.
+    images: []const Identity = &.{},
     /// The request's image frame.
     frame: u32 = 0,
     /// What the rows depend on beyond key, images and frame.

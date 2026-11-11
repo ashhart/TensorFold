@@ -80,17 +80,29 @@ pub const Adapter = struct {
 
     fn begin(ctx: *anyopaque, q: hooks.Query, history_len: u32, shared: []const u32, owner: *anyopaque, adopt: *std.ArrayList(u32)) anyerror!hooks.Plan {
         const x = of(ctx);
-        const p = try x.store.begin(x.gpa, query(q), history_len, shared, owner, adopt);
+        const ids = try identities(x.gpa, q.images);
+        defer x.gpa.free(ids);
+        const p = try x.store.begin(x.gpa, query(q, ids), history_len, shared, owner, adopt);
         return .{ .from = p.from, .marks = p.marks };
     }
 
     fn keep(ctx: *anyopaque, q: hooks.Query, at: u32, owner: *anyopaque, mine: []const u32, path: []u32) usize {
-        return of(ctx).store.keep(query(q), at, owner, mine, path).shared;
+        const x = of(ctx);
+        const ids = identities(x.gpa, q.images) catch return 0; // nothing kept: a later turn prefills it
+        defer x.gpa.free(ids);
+        return x.store.keep(query(q, ids), at, owner, mine, path).shared;
     }
 
-    /// The family's query as the store takes it.
-    fn query(q: hooks.Query) radix.Query {
-        return .{ .key = q.key, .prompt_len = q.prompt_len };
+    /// The family's query as the store takes it, its images as `ids`.
+    fn query(q: hooks.Query, ids: []const radix.Identity) radix.Query {
+        return .{ .key = q.key, .prompt_len = q.prompt_len, .images = ids, .frame = q.frame, .namespace = q.namespace, .starts = q.starts, .prefilled = q.prefilled };
+    }
+
+    /// The images' identities in the store's type (none allocated for text).
+    fn identities(gpa: Allocator, images: []const hooks.Image) ![]radix.Identity {
+        const out = try gpa.alloc(radix.Identity, images.len);
+        for (images, out) |i, *o| o.* = .{ .at = i.at, .tokens = i.tokens, .gh = i.gh, .gw = i.gw, .hash = i.hash };
+        return out;
     }
 
     fn report(ctx: *anyopaque, prompt: usize, from: u32, kept: u64) void {
