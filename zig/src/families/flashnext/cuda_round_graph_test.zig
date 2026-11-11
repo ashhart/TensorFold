@@ -170,7 +170,7 @@ const Pass = struct {
     s: *Scratch,
     stream: cuda.Stream,
     io: std.Io = t.io,
-    m: struct { ngram: *const ple.Ngram },
+    m: struct { ngram: *const ple.Ngram, pocket: ?*anyopaque = null },
     seq: parts.SeqState,
     lanes: []const parts.Lane,
     prepared: bool = false,
@@ -194,6 +194,84 @@ const Pass = struct {
         p.chunks += 1;
     }
 };
+
+const Buf = struct { ptr: u64 };
+const linear_n = @import("cuda_prompt_wt.zig").linear_n;
+const attn_n = @import("cuda_prompt_wt.zig").attn_n;
+
+/// A sequence's owner, length and the buffer addresses a round's lane takes from it.
+const Seq = struct {
+    rank_id: u64,
+    fed: usize = 10,
+    cap: usize = 1024,
+    conv: [linear_n]Buf = undefined,
+    state: [linear_n]Buf = undefined,
+    kc: [attn_n]Buf = undefined,
+    vc: [attn_n]Buf = undefined,
+    ikc: [attn_n]Buf = undefined,
+    pooled: [attn_n]Buf = undefined,
+    tail: Buf = undefined,
+    pg: @import("cuda_glue.zig").Pg = .{},
+
+    fn at(owner: u64, base: u64) Seq {
+        var q: Seq = .{ .rank_id = owner };
+        var a = base;
+        inline for (.{ "conv", "state", "kc", "vc", "ikc", "pooled" }) |f| {
+            for (&@field(q, f)) |*b| {
+                b.ptr = a;
+                a += 0x10000;
+            }
+        }
+        q.tail.ptr = a;
+        return q;
+    }
+
+    fn settle(q: *Seq, spare: *[linear_n]Buf) void {
+        for (&q.state, spare) |*a, *b| std.mem.swap(Buf, a, b);
+    }
+};
+
+fn spares(base: u64) [linear_n]Buf {
+    var s: [linear_n]Buf = undefined;
+    for (&s, 0..) |*b, i| b.ptr = base + i * 0x10000;
+    return s;
+}
+
+fn keyOf(seqs: []const *const Seq) !round.Key {
+    return round.Key.init(seqs, 1, 2, 3);
+}
+
+test "decode graph keys: owner order, attention and score tile seams, each lane's buffers and length" {
+    var first: Seq = .at(1, 0x1000_0000);
+    var second: Seq = .at(2, 0x2000_0000);
+    const base = try keyOf(&.{ &first, &second });
+    try t.expectEqual(base, try keyOf(&.{ &first, &second }));
+    try t.expect(!std.meta.eql(base, try keyOf(&.{ &second, &first })));
+    const alone = try keyOf(&.{&first});
+    var spare = spares(0x3000_0000);
+    second.settle(&spare);
+    try t.expect(!std.meta.eql(base, try keyOf(&.{ &first, &second })));
+    try t.expectEqual(alone, try keyOf(&.{&first}));
+    second.settle(&spare);
+    try t.expectEqual(base, try keyOf(&.{ &first, &second }));
+    second.tail.ptr += 0x100;
+    try t.expect(!std.meta.eql(base, try keyOf(&.{ &first, &second })));
+    second.tail.ptr -= 0x100;
+    second.cap = 2048;
+    try t.expect(!std.meta.eql(base, try keyOf(&.{ &first, &second })));
+    first.fed = 511;
+    const before = try keyOf(&.{&first});
+    first.fed = 512;
+    try t.expect(!std.meta.eql(before, try keyOf(&.{&first})));
+    first.fed = 2048;
+    const dense = try keyOf(&.{&first});
+    first.fed = 2051;
+    try t.expect(!std.meta.eql(dense, try keyOf(&.{&first})));
+    first.fed = 2303;
+    const score = try keyOf(&.{&first});
+    first.fed = 2304;
+    try t.expect(!std.meta.eql(score, try keyOf(&.{&first})));
+}
 
 fn ngram(g: *ple.Ngram, buffers: *[2][3][]u8) !void {
     g.* = .{ .gpa = t.allocator, .scale = 1, .hash = try ple.Hash.init(.{
