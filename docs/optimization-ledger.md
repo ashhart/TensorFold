@@ -452,6 +452,7 @@ below; these are estimates for planning a port, not results.
     | Family | Gain (measured) | Where |
     | --- | --- | --- |
     | flashnext (C), TP=2 | prompt passes reduce-scatter the experts' slots by rows: rank 0 sends 5.81 → 3.43 MiB a prompt token, cold prefill +26.5..+26.8 % on two GB10s, +30.9..+33.9 % on two RTX PRO 6000s, same replies | [#2977] |
+    | flashnext (C), TP=2 | collectives on a blocking split: plain decode 28.9 → 73.3 tok/s, drafted code 114 → 211 on 2 × RTX PRO 6000; 2 × GB10 chat −0.1..−2.1 % at one stream, −2.0..−2.9 % at four, code 0..−0.8 % and −0.7..−2.3 %, 8 streams level, cold prompts 0..+0.9 %; same replies | proposed |
 
 26. **Pipeline stages.** Layer ranges on different nodes, one hidden row a token over Ethernet, so a GB10 and a Mac
     can serve one model ([#2005]). The stage link and its protocol are [#2012] and [#2060]; the 27B as a stage is
