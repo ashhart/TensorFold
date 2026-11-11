@@ -304,7 +304,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
     var accept_stop: std.atomic.Value(bool) = .init(false);
     const accept = std.Thread.spawn(.{}, server_mod.Server.serve, .{ srv, lis, &accept_stop }) catch return 1;
     @import("startup_receipt.zig").ready(port);
-    if (srv.witness) |w| w.start(); // hashing starts after ready, on its own thread, never on the startup path
+    if (srv.witness) |w| w.start(srv); // hashing starts after ready, on its own thread, never on the startup path
     while (!stop_requested.load(.acquire)) std.Io.sleep(io, .fromMilliseconds(50), .awake) catch {};
     drain(srv, io, s.stop, drain_s);
     accept_stop.store(true, .release);
