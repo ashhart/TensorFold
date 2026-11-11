@@ -35,7 +35,7 @@ fn validLink(name: []const u8) bool {
     return true;
 }
 
-/// `--mcdma-link`: one link name, or a comma list of up to eight (a KV_SPLIT pair's producers, shard 0 first); `http` alone.
+/// `--mcdma-link`: one link name, or a comma list of up to eight (a KV_SPLIT pair's producers, shard 0 first).
 fn validLinks(value: []const u8) bool {
     var n: usize = 0;
     var it = std.mem.splitScalar(u8, value, ',');

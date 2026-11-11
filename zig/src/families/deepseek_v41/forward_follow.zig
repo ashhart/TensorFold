@@ -41,8 +41,7 @@ pub const op_sess_admit: i64 = 48;
 pub const op_pf_multi: i64 = 52;
 pub const op_ced_multi: i64 = 53;
 
-/// 70: [op, id word 0, id word 1, at] the follower exports its pool shard of the slot's first `at` tokens under the
-/// hand-off id; 71: [op, id word 0, id word 1] no export will come under that id (ops 70-71: KV_SPLIT hand-off shards)
+/// 70: [op, id word 0, id word 1, at]: export the pool shard of the first `at` tokens; 71: [op, id words]: none comes
 pub const op_export: i64 = 70;
 pub const op_export_fail: i64 = 71;
 

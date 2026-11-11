@@ -1,6 +1,4 @@
 //! KV_SPLIT hand-offs: each rank exports the pool pages it stores, on its own link, and the Mac pulls every shard.
-//! Rank 0 exports shard 0 (rings, carries, drafter rows and its pages) as it does for a replicated pool, and sends the
-//! followers `op_export` at the cut; a follower's `Follower` snapshots its pages there and serves them under the same id.
 const std = @import("std");
 const api = @import("engine_api");
 const model = @import("cuda_model.zig");
@@ -75,7 +73,6 @@ pub const Follower = struct {
     }
 
     /// The leader's op_export / op_export_fail. Nothing here may fail the follower's loop: a shard that cannot be
-    /// exported is recorded as failed under its id, which the Mac's pull of this link is told.
     fn run(ptr: *anyopaque, msg: []const i64) anyerror!void {
         const x: *Follower = @ptrCast(@alignCast(ptr));
         if (msg.len < 3) return error.BadPlan;

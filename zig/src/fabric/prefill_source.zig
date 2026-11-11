@@ -43,7 +43,6 @@ pub const StateSink = struct {
     commit_fn: *const fn (ptr: *anyopaque, upto: u64, provenance: Provenance) void,
     abort_fn: *const fn (ptr: *anyopaque) void,
     /// Shard `k`'s sink when the state arrives from several producers at once (each `put_fn` of a shard may run on its
-    /// own thread; rows of different shards never overlap). Null: the sink takes one producer's export only.
     shard_fn: ?*const fn (ptr: *anyopaque, shard: u32) decoder.Sink = null,
 };
 
@@ -82,7 +81,7 @@ pub const Remote = struct {
     gpa: std.mem.Allocator,
     policy: Policy,
     client: *mailbox.Client,
-    /// The other producers of a KV_SPLIT export: `client` is shard 0's link, `peers[k - 1]` shard k's, pulled in parallel
+    /// The other producers of a KV_SPLIT export.
     peers: []const *mailbox.Client = &.{},
     trigger: Trigger,
     model: []const u8,
@@ -159,7 +158,7 @@ pub const Remote = struct {
         @memset(threads, null);
         for (jobs[1..], threads[1..]) |*j, *t| t.* = std.Thread.spawn(.{}, Job.run, .{j}) catch null;
         jobs[0].run();
-        for (jobs[1..], threads[1..]) |*j, t| if (t) |th| th.join() else j.run(); // a thread that did not start runs here
+        for (jobs[1..], threads[1..]) |*j, t| if (t) |th| th.join() else j.run();
         for (jobs) |*j| {
             const got = j.result catch |err| {
                 r.reason = j.reason;
