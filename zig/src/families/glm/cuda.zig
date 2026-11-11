@@ -34,6 +34,7 @@ pub const prompt_logprobs = @import("cuda_prompt_logprobs.zig");
 pub const engine = @import("cuda_engine.zig");
 pub const prompt_pair = @import("cuda_prompt_pair.zig");
 pub const pages = @import("cuda_pages.zig");
+pub const kv_carry = @import("cuda_kv_carry.zig");
 pub const owner_attn = @import("cuda_owner_attn.zig");
 pub const start = @import("cuda_start.zig");
 pub const share = @import("cuda_share.zig");

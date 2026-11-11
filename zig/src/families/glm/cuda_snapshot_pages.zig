@@ -79,13 +79,17 @@ pub const Pool = struct {
         p.pages.finish(lease);
     }
 
-    /// The plan's parts to (`into`) or from the lease's pages, queued on `stream`: the core walk, a copy a piece.
     pub fn move(p: *const Pool, stream: cuda.Stream, lease: *const Lease, plan: *const Plan, into: bool) !void {
-        if (plan.len > lease.ids.items.len * page) return error.SnapshotSize;
+        return p.moveParts(stream, lease, plan, into, plan.lat_ids.len > 0);
+    }
+
+    /// The plan's parts to (`into`) or from the lease's pages on `stream`; `lat`: the lease holds split latent rows.
+    pub fn moveParts(p: *const Pool, stream: cuda.Stream, lease: *const Lease, plan: *const Plan, into: bool, lat: bool) !void {
+        if (@import("cuda_kv_carry.zig").kept(plan, lat) > lease.ids.items.len * page) return error.SnapshotSize;
         const arena = p.arena orelse return error.NoSnapshotRoom;
         const kept: walk.Kept = .{ .ids = lease.ids.items, .base = arena.ptr() };
         const c: Copy = .{ .d = arena.driver(), .s = stream, .into = into };
-        try walk.Device.eachAlt(plan.parts[0..plan.count], plan.ids, .{ .ids = plan.lat_ids, .kept = plan.lat_ids.len > 0 }, kept, c, Copy.run);
+        try walk.Device.eachAlt(plan.parts[0..plan.count], plan.ids, .{ .ids = plan.lat_ids, .kept = lat }, kept, c, Copy.run);
     }
 };
 

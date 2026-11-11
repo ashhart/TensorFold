@@ -4,6 +4,7 @@ const cuda = @import("cuda");
 const types = @import("cuda_engine_types.zig");
 pub const pages = @import("cuda_snapshot_pages.zig");
 pub const layout = @import("cuda_snapshot_layout.zig");
+const carry = @import("cuda_kv_carry.zig");
 
 pub const Setup = struct { ptr: *anyopaque, run: *const fn (*anyopaque, u64) anyerror!void };
 
@@ -95,16 +96,29 @@ pub fn seal(e: anytype, id: u64, mtp_len: usize, bases: [2]usize, cur: u64) !voi
 pub fn restore(e: anytype, id: u64) !void {
     const s = e.snaps.getPtr(id) orelse return error.NoKeptState;
     if (s.len == 0) return error.UnsealedState;
-    if (s.home != e.cur.st.owner) return error.KvSplitAway; // its latent rows are on its home's copy alone
+    if ((s.home == null) != (e.cur.st.owner == null)) return error.KvSplitAway; // a split state on an unsplit stream
     const pool = if (e.snap_pages) |*p| p else return error.NoSnapshotCache;
     // the kept state's own parity picks the half a live-half keep carries; the slot's dead half stays as it is
     const plan = try layout.Plan.initFor(&e.cur.st, &e.c, s.pos, if (e.mtp) s.mtp_len else null, s.shared, s.cur);
-    if (plan.len != s.len) return error.SnapshotSize;
+    const here = if (s.home) |h| h == e.share.rank else true; // this copy holds its latent rows
+    if (carry.kept(&plan, here) != s.len) return error.SnapshotSize;
     errdefer cuda.completion.drain(e.d, e.stream, "a failed GLM snapshot restore did not drain");
-    try pool.move(e.stream, &s.lease, &plan, false);
+    try pool.moveParts(e.stream, &s.lease, &plan, false, here);
+    if (s.home != e.cur.st.owner) try carryRows(e, &plan, s, pool); // kept off the stream's owner: its rows go there
     try e.cur.st.restoreHost(e.stream, s.pos, s.mtp_len, s.cur, s.bases);
     e.cur.in_head = 0;
     try e.stream.synchronize();
+}
+
+/// TF_GLM_KV_SPLIT: kept state `s`'s latent rows from its home's copy to the stream's owner, through the room.
+fn carryRows(e: anytype, plan: *const layout.Plan, s: *const types.Snap, pool: *const pages.Pool) !void {
+    const owner = e.cur.st.owner.?;
+    const side = carry.role(s.home.?, owner, e.share.rank);
+    if (side == .none) return;
+    const room = if (e.room) |*r| r else return error.KvSplitNoRoom;
+    const base = (pool.arena orelse return error.NoSnapshotRoom).ptr();
+    const g: carry.Gpu = .{ .d = e.d, .stream = e.stream, .lib = room.lib, .comm = room.comm };
+    _ = try carry.run(g, plan, side, if (side == .send) owner else s.home.?, s.lease.ids.items, base, room.buf.ptr, room.buf.len);
 }
 
 /// The pages below `at` the shared prompt store holds (TF_KV_SHARE): a kept state's copy leaves them out.
