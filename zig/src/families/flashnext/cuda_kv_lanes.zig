@@ -277,8 +277,9 @@ pub const Pool = struct {
             const k = @min(p.layout.runPages() * p.lanes.len, p.pool.total());
             p.arena.ensure((p.pool.total() - k) * pb, k * pb, s) catch return;
         }
-        const n: usize = @intCast(@import("cuda_kv_arena.zig").piece_bytes / pb);
-        for (nextPages(&p.pool, @max(n, 1))) |id| p.arena.ensure(@as(u64, id) * pb, pb, s) catch return;
+        var ids: [1024]u32 = undefined; // two pieces' worth: a request's pages and a keep's held ones
+        const n: usize = @intCast(@min(ids.len, @max(1, 2 * @import("cuda_kv_arena.zig").piece_bytes / pb)));
+        for (nextPages(&p.pool, p.layout.runPages(), ids[0..n])) |id| p.arena.ensure(@as(u64, id) * pb, pb, s) catch return;
     }
 
     /// A lane's new table entries uploaded to its device table.
@@ -328,22 +329,50 @@ test "TF_FLASHNEXT_KV_PAGES: unset, empty or whitespace-only text reads as no pa
     try t.expectError(error.BadFlashNextKvPages, pagingOf(" "));
 }
 
-/// The `n` page ids the free stack hands out next, fewer when fewer are free.
-pub fn nextPages(pool: *const kv.Pool, n: usize) []const u32 {
-    const m = @min(n, pool.nfree);
-    return pool.free[pool.nfree - m .. pool.nfree];
+/// The page ids the free stack hands an open out next, past the run of `run_pages` it claims first, into `out`.
+pub fn nextPages(pool: *const kv.Pool, run_pages: usize, out: []u32) []u32 {
+    const run = if (run_pages > 0) pool.findRun(run_pages) else null;
+    var n: usize = 0;
+    var i = pool.nfree;
+    while (i > 0 and n < out.len) {
+        i -= 1;
+        const id = pool.free[i];
+        if (run) |r| if (id >= r and id < r + run_pages) continue;
+        out[n] = id;
+        n += 1;
+    }
+    return out[0..n];
 }
 
 test "mapped ahead: the pages the free stack hands out next, page 0 first, then past the ones held" {
     var pool = try kv.Pool.init(std.testing.allocator, 64, 4096);
     defer pool.deinit();
-    try std.testing.expectEqualSlices(u32, &.{ 3, 2, 1, 0 }, nextPages(&pool, 4));
+    var out: [100]u32 = undefined;
+    try std.testing.expectEqualSlices(u32, &.{ 0, 1, 2, 3 }, nextPages(&pool, 0, out[0..4]));
     var held: [5]u32 = undefined;
     try std.testing.expect(pool.hold(&held));
-    try std.testing.expectEqualSlices(u32, &.{ 8, 7, 6, 5 }, nextPages(&pool, 4)); // what a store's keep leaves next
+    try std.testing.expectEqualSlices(u32, &.{ 5, 6, 7, 8 }, nextPages(&pool, 0, out[0..4])); // what a keep leaves next
     for (held) |id| pool.release(id);
-    try std.testing.expectEqual(@as(usize, 64), nextPages(&pool, 100).len);
+    try std.testing.expectEqual(@as(usize, 64), nextPages(&pool, 0, &out).len);
     try std.testing.expect(pool.idle());
+}
+
+test "mapped ahead: after a close the next pages are the freed and fresh ones, never the run the next open claims" {
+    var pool = try kv.Pool.init(std.testing.allocator, 64, 4096);
+    defer pool.deinit();
+    var l: kv.Lease = .{};
+    try pool.promise(&l, 4 + 5);
+    const run = pool.claimRun(&l, 4).?;
+    for (0..5) |_| _ = try pool.take(&l);
+    var held: [3]u32 = undefined;
+    try std.testing.expect(pool.hold(&held)); // a keep's pages
+    pool.releaseRun(run, 4); // close: the run back, then the lane's pages
+    pool.finish(&l);
+    var out: [8]u32 = undefined;
+    const next = nextPages(&pool, 4, &out);
+    for (next) |id| try std.testing.expect(id < run); // the run the next open claims again is no page it is handed
+    try std.testing.expect(std.mem.indexOfScalar(u32, next, 8) != null); // the first fresh page past the keep's
+    for (held) |id| pool.release(id);
 }
 
 test "a stream's pages: its rows and a drafted window, no more than a full window's" {
