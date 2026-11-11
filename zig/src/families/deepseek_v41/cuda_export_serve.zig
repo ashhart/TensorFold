@@ -22,7 +22,7 @@ pub const Options = struct {
 };
 
 /// What `save` hands `exported`: the engine's state, read back.
-pub const Saved = struct { cap: cx.Captured };
+pub const Saved = struct { cap: cx.Captured, read_ns: u64 = 0 };
 
 /// One export the producer holds; a reading stream pins it, so expiry or release only marks it `gone` until it closes.
 pub const Held = struct { built: *cx.Built, name: [32]u8, pins: u32 = 0, gone: bool = false };
@@ -220,12 +220,13 @@ pub const Produce = struct {
 
     /// The engine's state at `at` tokens, read back (the lane host's `snapshots.save` at the cut).
     pub fn save(p: *Produce, at: u64) !*Saved {
+        const t0 = fabric.words.nowNs();
         const cap = try p.source.take(p.source.ptr, p.gpa, at);
         const s = p.gpa.create(Saved) catch |err| {
             p.source.release(cap.ctx);
             return err;
         };
-        s.* = .{ .cap = cap };
+        s.* = .{ .cap = cap, .read_ns = fabric.words.nowNs() - t0 };
         return s;
     }
 
@@ -237,17 +238,19 @@ pub const Produce = struct {
     /// `saved` (now the producer's) is the state after `tokens`, the prompt but its last token: exported under `id`.
     pub fn exported(p: *Produce, id: [16]u8, tokens: []const u32, saved: *Saved) void {
         defer p.drop(saved);
-        p.record(id, tokens, saved.cap.state) catch |err| p.failed(id, @errorName(err));
+        p.record(id, tokens, saved.cap.state, saved.read_ns) catch |err| p.failed(id, @errorName(err));
     }
 
-    fn record(p: *Produce, id: [16]u8, tokens: []const u32, st: cx.State) !void {
+    fn record(p: *Produce, id: [16]u8, tokens: []const u32, st: cx.State, read_ns: u64) !void {
         if (p.opts.http) p.sweep(); // what expired or was released makes room under the cap
+        const t0 = fabric.words.nowNs();
         const built = try cx.build(p.gpa, id, tokens, st);
+        const build_ns = fabric.words.nowNs() - t0;
         var kept = false;
         defer if (!kept) built.deinit(p.gpa);
         var frames: u64 = 0;
         for (built.exp.layers) |l| frames += l.parts.len;
-        log.info("handoff {x}: {d} tokens, {d} parts, {d} MiB of bf16 rows", .{ &id, tokens.len, frames, built.bytes >> 20 });
+        log.info("handoff {x}: {d} tokens, {d} parts, {d} MiB of bf16 rows; read back {d} ms, built {d} ms", .{ &id, tokens.len, frames, built.bytes >> 20, read_ns / std.time.ns_per_ms, build_ns / std.time.ns_per_ms });
         if (p.opts.dump != null) try p.dump(built, tokens);
         if (p.opts.link == null and !p.opts.http) return;
         const held = try p.gpa.create(Held);
