@@ -15,6 +15,8 @@ pub const Device = struct {
     pub var verify_rows: []const u16 = &.{};
     pub var launches: usize = 0;
     pub var waits: usize = 0;
+    pub var grids: [512]u32 = undefined;
+    pub var functions: [512]usize = undefined;
     pub var sources: [mtp.max_rows]u64 = undefined;
     pub var best_calls: usize = 0;
     pub var best_bytes: usize = 0;
@@ -37,7 +39,9 @@ pub const Device = struct {
         pending = false;
         events_n = 0;
     }
-    fn launch(f: cuda.abi.Function, _: u32, _: u32, _: u32, _: u32, _: u32, _: u32, _: u32, _: cuda.abi.Stream, args: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) c_int {
+    fn launch(f: cuda.abi.Function, gx: u32, _: u32, _: u32, _: u32, _: u32, _: u32, _: u32, _: cuda.abi.Stream, args: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) c_int {
+        grids[launches] = gx;
+        functions[launches] = @intFromPtr(f);
         launches += 1;
         pending = true;
         if (@intFromPtr(f) == 1) {
