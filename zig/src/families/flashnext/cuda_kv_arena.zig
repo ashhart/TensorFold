@@ -63,19 +63,21 @@ pub const Arena = struct {
     const Pieces = struct {
         gpa: std.mem.Allocator,
         vmm: cuda.arena.Vmm,
-        want: usize = 0, // the one length the hook serves while armed (0: none)
         lazy: ?Lazy = null,
 
         fn hookAlloc(ctx: *anyopaque, len: usize) ?u64 {
             const s: *Pieces = @ptrCast(@alignCast(ctx));
-            if (len == 0 or len != s.want) return null; // another allocation meanwhile: cuMemAlloc as before
-            s.want = 0;
+            if (len == 0) return null;
             const piece = std.mem.alignForward(usize, piece_bytes, s.vmm.granularity);
             const n = std.mem.alignForward(usize, len, s.vmm.granularity);
             const mapped = s.gpa.alloc(bool, (n + piece - 1) / piece) catch return null;
             @memset(mapped, false);
             s.lazy = .{ .base = s.vmm.va, .len = n, .piece = piece, .mapped = mapped };
             return s.vmm.va;
+        }
+
+        fn hook(s: *Pieces) cuda.memory.Hook {
+            return .{ .ctx = s, .alloc = hookAlloc, .free = hookFree };
         }
 
         fn hookFree(ctx: *anyopaque, p: u64) bool {
@@ -104,13 +106,8 @@ pub const Arena = struct {
             break :blk s;
         };
         const p = s orelse return .{ .buf = try cuda.DeviceBuffer.alloc(d, len) };
-        // DeviceBuffer.alloc through a hook for this one call: the bytes are counted as every device buffer's are
-        const before = cuda.memory.currentHook();
-        cuda.memory.setHook(.{ .ctx = p, .alloc = Pieces.hookAlloc, .free = Pieces.hookFree });
-        p.want = len;
-        const buf = cuda.DeviceBuffer.alloc(d, len);
-        p.want = 0;
-        cuda.memory.setHook(before);
+        // the range through its own hook, the installed one untouched: the bytes are counted as every device buffer's
+        const buf = cuda.DeviceBuffer.allocVia(d, len, p.hook());
         var a: Arena = .{ .buf = buf catch |err| {
             destroy(p);
             return err;
@@ -213,4 +210,36 @@ test "a piece that fails or lands apart is not marked, and the pieces before it 
     try std.testing.expectError(error.LaneMemory, y.ensure(g.mapper(), 0, 1, &g));
     try std.testing.expect(!flags2[0]);
     try std.testing.expectEqual(@as(u64, piece_bytes), g.released); // the stray one went back
+}
+
+test "the arena's range comes through its own hook: the installed hook is untouched, a declined one is cuMemAlloc" {
+    var d = cuda.paging_test_device.Device.driver();
+    const installed = cuda.memory.currentHook();
+    var p: Arena.Pieces = .{ .gpa = std.testing.allocator, .vmm = undefined };
+    p.vmm.granularity = 2 << 20;
+    p.vmm.va = 1 << 40;
+    var b = try cuda.DeviceBuffer.allocVia(&d, 3 * piece_bytes, p.hook());
+    try std.testing.expectEqual(@as(u64, 1 << 40), b.ptr); // the range, not a driver allocation
+    try std.testing.expect(b.owner != null and p.lazy != null);
+    try std.testing.expectEqual(installed, cuda.memory.currentHook());
+    b.free(); // through its owner: the flags go, nothing was mapped to unmap
+    try std.testing.expect(p.lazy == null);
+    var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 0 });
+    var q: Arena.Pieces = .{ .gpa = failing.allocator(), .vmm = undefined };
+    q.vmm.granularity = 2 << 20;
+    q.vmm.va = 1 << 40;
+    var c = try cuda.DeviceBuffer.allocVia(&d, 3 * piece_bytes, q.hook()); // no room for its flags: the hook declines
+    try std.testing.expect(c.owner == null and q.lazy == null and c.ptr != 1 << 40);
+    c.free();
+}
+
+test "without a device, or for one piece or less, the arena is one cuMemAlloc and every byte is there from the start" {
+    var d = cuda.paging_test_device.Device.driver();
+    var a = try Arena.alloc(std.testing.allocator, &d, 3 * piece_bytes, null);
+    try std.testing.expect(!a.lazy());
+    try a.ensure(0, 3 * piece_bytes, cuda.paging_test_device.Device.stream); // nothing to map
+    a.free();
+    var b = try Arena.alloc(std.testing.allocator, &d, piece_bytes, 0);
+    try std.testing.expect(!b.lazy());
+    b.free();
 }
