@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- DeepSeek-V4.1 on Metal: the draft depth rule prices rounds from a table timed on the loaded model at start, windows of 1 to 16 rows, the second launch from row 17 and one DSpark pass with its ingest, on a time budget (`TF_DSV41_CALIB` as on CUDA, `measure` by default here, `default` keeps the earlier table; `TF_DSV41_CALIB_BUDGET_MS` bounds the repeats), instead of the CUDA-shaped defaults; the prompt cache is not fed and every slot is left as new, and pricing never changes a token (#2952, part of #1676).
+
 - DeepSeek-V4.1 on Metal: rounds with three or more decoding streams decode plain, with no draft pass and no drafter ingest, since drafts lose there; when fewer streams decode again the drafter takes the rows it missed from the target, so its drafts are the ones it would have made (#1720, part of #1676).
 
 - Flash Next: twenty-nine `TF_FLASHNEXT_*` settings refuse a malformed value by name at startup, before any device work on CUDA, and a Metal load refuses them too; blank `TF_FLASHNEXT_KV_PAGE_TEST` and `TF_FLASHNEXT_KEEP_LATE` read as unset, and a non-finite confidence is refused (#2585, part of #2370). Thanks to @devopsfortunato.

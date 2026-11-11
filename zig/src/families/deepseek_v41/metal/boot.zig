@@ -28,6 +28,8 @@ pub const Options = struct {
     cache_bytes: u64 = 4 << 30,
     /// a checkpoint of the release's format at other shapes (TF_DSV41_SMALL=1: the smoke test's tiny model)
     small: bool = false,
+    /// the draft cost table is timed at load (TF_DSV41_CALIB overrides)
+    measure_costs: bool = false,
     /// Engram row shards (null: TF_DSV41_ENGRAM_DIR, else the config's engram_table_dir beside the checkpoint)
     engram_dir: ?[]const u8 = null,
 };
@@ -80,7 +82,7 @@ pub const Boot = struct {
         const r = b.w.report();
         std.log.info("dsv41 metal: {d} layers, {d} shards ({d} MiB mapped, {d} MiB copied), {d} slots of {d} positions, DSpark {s}", .{ c.layers, r.shards, r.shard_bytes >> 20, r.arena_bytes >> 20, o.slots, limit, if (b.ds != null) "on" else "off" });
         const env: target_.Env = .{ .device = b.device, .queue = b.queue, .c = c, .p = &b.p, .tables = &b.tables, .s = &b.s, .model = b.w.view(), .lookup = lookup };
-        return serve.Metal.open(a, .{ .env = env, .top = &b.w.top, .dspark = if (b.ds) |*w| w else null, .owner = .{ .ctx = b, .close = close } }, .{ .slots = o.slots, .limit = limit, .drafts = o.drafts, .cache_bytes = o.cache_bytes });
+        return serve.Metal.open(a, .{ .env = env, .top = &b.w.top, .dspark = if (b.ds) |*w| w else null, .owner = .{ .ctx = b, .close = close } }, .{ .slots = o.slots, .limit = limit, .drafts = o.drafts, .cache_bytes = o.cache_bytes, .measure_costs = o.measure_costs });
     }
 
     fn readConfig(a: Allocator, io: std.Io, dir: []const u8, small: bool) !Config {

@@ -30,6 +30,7 @@ pub const target = @import("target.zig");
 pub const pass = @import("pass.zig");
 pub const serve = @import("serve.zig");
 pub const boot = @import("boot.zig");
+pub const calib = @import("calib.zig");
 
 test {
     std.testing.refAllDecls(@This());

@@ -33,7 +33,7 @@ test "TF_DSV41_DRAFT_PLAIN_STREAMS: 0 when unset, 0 to 16 taken, anything else r
 }
 
 /// A run's settings: the switch, the target's history, the drafter's ring check, staggered arrivals, sampling.
-pub const Opts = struct { set: depth.Settings = .{}, history: bool = true, check_ring: bool = false, stagger: bool = false, sampling: ?lanes.Sampling = null };
+pub const Opts = struct { set: depth.Settings = .{}, history: bool = true, check_ring: bool = false, stagger: bool = false, sampling: ?lanes.Sampling = null, costs: ?costs_mod.Costs = null };
 
 pub const Run = struct {
     drafted: u64,
@@ -57,7 +57,7 @@ pub fn run(cases: []const []const u32, max_news: []const u32, o: Opts) !Run {
     const d = try twin.Drafter.init(gpa, t, cases.len + 1);
     defer d.deinit();
     d.check_ring = o.check_ring;
-    var c = try costs_mod.defaults(gpa, 64);
+    var c = if (o.costs) |x| try x.clone(gpa) else try costs_mod.defaults(gpa, 64);
     defer c.deinit(gpa);
     const tgt = if (o.history) t.target() else t.targetNoHistory();
     const x = try ln.Lanes.init(gpa, tgt, d.pass(), c, .{ .shape = d.shape, .slots = 4, .depth = o.set, .spec = .{ .on = true } });

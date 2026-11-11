@@ -422,6 +422,56 @@ pub const Target = struct {
         if (s.whole and t.cache.on()) t.cache.save(t.env.c, &s.kv, s.hist.items, s.ring, null) catch {};
     }
 
+    // calibration --------------------------------------------------------------------------------------------------
+
+    /// The slot's last window dropped: its ids and rows are as they were before it, the prompt's taps current again.
+    pub fn dropWindow(t: *Target, slot: u32) !void {
+        if (slot >= t.slots.len) return error.NoSlot;
+        const s = &t.slots[slot];
+        if (!s.open) return error.NoWindow;
+        s.open = false;
+        s.rows = 0;
+        s.hist.shrinkRetainingCapacity(@intCast(s.base));
+        s.tail.end = @intCast(s.base);
+        s.tail.done = s.tail.end;
+        s.after_prompt = true;
+    }
+
+    /// Ids a slot holds.
+    pub fn length(t: *const Target, slot: u32) u64 {
+        return t.slots[slot].hist.items.len;
+    }
+
+    /// The prompt cache's cap set to `cap`; the one it had.
+    pub fn setCacheCap(t: *Target, cap: u64) u64 {
+        const was = t.cache.cap;
+        t.cache.cap = cap;
+        return was;
+    }
+
+    /// Every slot as a new one: its state, ids, taps and bookkeeping cleared, nothing live.
+    pub fn wipe(t: *Target) void {
+        for (t.slots) |*s| {
+            snapshots.clear(t.env.c, &s.kv, s.high);
+            for (s.kv.regions) |r| if (r.inputs) |b| @memset(b.contents()[0..b.length()], 0);
+            if (s.kv.taps) |b| @memset(b.contents()[0..b.length()], 0);
+            @memset(s.ptaps.contents()[0..s.ptaps.length()], 0);
+            @memset(s.ring, 0);
+            s.hist.clearRetainingCapacity();
+            s.tail.end = 0;
+            s.tail.done = 0;
+            s.high = 0;
+            s.base = 0;
+            s.rows = 0;
+            s.ptaps_rows = 0;
+            s.resumed = 0;
+            s.open = false;
+            s.live = false;
+            s.whole = false;
+            s.after_prompt = false;
+        }
+    }
+
     /// The serial reference without lanes: the prompt, then one row a step, each drawn at its own position.
     pub fn serial(t: *Target, slot: u32, ids: []const u32, n: usize, smp: ?lanes.Sampling) ![]u32 {
         var out: std.ArrayList(u32) = .empty;
