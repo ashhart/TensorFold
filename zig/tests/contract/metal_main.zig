@@ -429,6 +429,9 @@ pub fn main(init: std.process.Init) !u8 {
     var ios: @import("metal_q27_attn_io.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer ios.deinit();
     try ios.collect(o.only);
+    var out_sums: @import("metal_q27_out_sums.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer out_sums.deinit();
+    try out_sums.collect(o.only);
     var attn_rows: @import("metal_q27_attn_rows.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer attn_rows.deinit();
     try attn_rows.collect(o.only);

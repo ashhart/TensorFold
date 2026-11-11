@@ -234,7 +234,7 @@ pub const Preprocess = struct { qg: Ref, mixed: Ref, q_gain: Ref, k_gain: Ref, n
 pub const Attention = struct {
     profiler: ?*profile.Trace = null,
     prefix: [32]mtl.Pipeline, // q27_attn_prefix_1 to _16, then q27_attn_prefix_masked_1 to _16
-    io: [12]mtl.Pipeline,
+    io: [13]mtl.Pipeline,
     prompt: ?[6]mtl.Pipeline, // promptPipelines: tensor ops on the M5, simdgroup matrices before it
     units: bool,
     /// Q27_JOIN's pack_b, tail and merges (attention_join.pipelines), taken for a plan with pairs (Plan.pair)
@@ -249,10 +249,10 @@ pub const Attention = struct {
             pipe.* = try mtl.Pipeline.init(device, library, try std.fmt.bufPrint(&name, "q27_attn_prefix_{s}{d}", .{ kind, i % 16 + 1 }), false);
             pn += 1;
         }
-        var io: [12]mtl.Pipeline = undefined;
+        var io: [13]mtl.Pipeline = undefined,
         var n: usize = 0;
         errdefer for (io[0..n]) |pipe| pipe.deinit();
-        for ([_][]const u8{ "q27_attn_pack_a", "q27_attn_pack_b", "q27_attn_append", "q27_attn_tail", "q27_attn_merge", "q27_attn_gather", "q27_attn_scatter", "q27_head_norm", "q27_rope", "q27_gate", "q27_attn_merge_single", "q27_qk_norm_rope" }, &io) |name, *pipe| {
+        for ([_][]const u8{ "q27_attn_pack_a", "q27_attn_pack_b", "q27_attn_append", "q27_attn_tail", "q27_attn_merge", "q27_attn_gather", "q27_attn_scatter", "q27_head_norm", "q27_rope", "q27_gate", "q27_attn_merge_single", "q27_qk_norm_rope", "q27_attn_merge_single_sums" }, &io) |name, *pipe| {
             pipe.* = try mtl.Pipeline.init(device, library, name, false);
             n += 1;
         }
@@ -412,6 +412,13 @@ pub const Attention = struct {
 
     /// `prompt` picks the prompt kernel; `split` reads the head count, constant when one Mac runs it.
     pub fn encode(a: *const Attention, e: mtl.ComputeEncoder, scratch: *const Scratch, binding: *const Binding, plan: Plan, q: Ref, k: Ref, mixed: Ref, out: Ref, caches: []const Cache, gate: ?Ref, prompt: bool, split: bool) !void {
+        return a.encodeSums(e, scratch, binding, plan, q, k, mixed, out, caches, gate, prompt, split, null);
+    }
+    /// Contiguous value rows for callers whose input is not a mixed projection.
+    pub fn encodeContiguous(a: *const Attention, e: mtl.ComputeEncoder, scratch: *const Scratch, binding: *const Binding, plan: Plan, q: Ref, k: Ref, v: Ref, out: Ref, caches: []const Cache, gate: ?Ref, prompt: bool, split: bool) !void {
+        return a.encodeContiguousSums(e, scratch, binding, plan, q, k, v, out, caches, gate, prompt, split, null);
+    }
+    pub fn encodeSums(a: *const Attention, e: mtl.ComputeEncoder, scratch: *const Scratch, binding: *const Binding, plan: Plan, q: Ref, k: Ref, mixed: Ref, out: Ref, caches: []const Cache, gate: ?Ref, prompt: bool, split: bool, out_sums: ?@import("quant_gpu.zig").Sums) !void {
         try plan.geometry.check();
         if (plan.rows == 0) return error.TargetAttentionShape;
         const kv = plan.geometry.kv_heads * plan.geometry.dim;
@@ -420,13 +427,12 @@ pub const Attention = struct {
         try disjoint(mixed, @as(usize, plan.rows) * kv * 4, out, @as(usize, plan.rows) * plan.geometry.heads * plan.geometry.dim * 2);
         for (caches) |cache| try apart(cache, plan.geometry, mixed, @as(usize, plan.rows) * kv * 4);
         const v = Ref{ .buffer = mixed.buffer, .offset = mixed.offset + @as(usize, kv) * 2 };
-        try a.encodeRows(e, scratch, binding, plan, q, k, v, 2 * kv, out, caches, gate, prompt, split);
+        return a.encodeRows(e, scratch, binding, plan, q, k, v, 2 * kv, out, caches, gate, prompt, split, out_sums);
     }
-    /// Contiguous value rows for callers whose input is not a mixed projection.
-    pub fn encodeContiguous(a: *const Attention, e: mtl.ComputeEncoder, scratch: *const Scratch, binding: *const Binding, plan: Plan, q: Ref, k: Ref, v: Ref, out: Ref, caches: []const Cache, gate: ?Ref, prompt: bool, split: bool) !void {
-        try a.encodeRows(e, scratch, binding, plan, q, k, v, plan.geometry.kv_heads * plan.geometry.dim, out, caches, gate, prompt, split);
+    pub fn encodeContiguousSums(a: *const Attention, e: mtl.ComputeEncoder, scratch: *const Scratch, binding: *const Binding, plan: Plan, q: Ref, k: Ref, v: Ref, out: Ref, caches: []const Cache, gate: ?Ref, prompt: bool, split: bool, out_sums: ?@import("quant_gpu.zig").Sums) !void {
+        return a.encodeRows(e, scratch, binding, plan, q, k, v, plan.geometry.kv_heads * plan.geometry.dim, out, caches, gate, prompt, split, out_sums);
     }
-    fn encodeRows(a: *const Attention, input_encoder: mtl.ComputeEncoder, scratch: *const Scratch, binding: *const Binding, plan: Plan, q: Ref, k: Ref, v: Ref, value_stride: u32, out: Ref, caches: []const Cache, raw_gate: ?Ref, prompt: bool, split: bool) !void {
+    fn encodeRows(a: *const Attention, input_encoder: mtl.ComputeEncoder, scratch: *const Scratch, binding: *const Binding, plan: Plan, q: Ref, k: Ref, v: Ref, value_stride: u32, out: Ref, caches: []const Cache, raw_gate: ?Ref, prompt: bool, split: bool, out_sums: ?@import("quant_gpu.zig").Sums) !void {
         try plan.geometry.check();
         if (plan.rows == 0) return error.TargetAttentionShape;
         const g = plan.geometry;
@@ -446,7 +452,20 @@ pub const Attention = struct {
             try span(gate, 2 * q_bytes);
             try disjoint(out, q_bytes, gate, 2 * q_bytes);
         }
-        const operands = [_]struct { ref: Ref, bytes: usize }{ .{ .ref = q, .bytes = q_bytes }, .{ .ref = k, .bytes = kv_bytes }, .{ .ref = v, .bytes = v_bytes }, .{ .ref = out, .bytes = q_bytes } };
+        if (out_sums) |xs| {
+            if (!a.units or prompt or split or xs.stride < plan.rows) return error.AttentionSums;
+            const bytes = ((@as(usize, g.heads) * g.dim / 64 - 1) * xs.stride + plan.rows) * 4;
+            try spanAligned(xs.ref, bytes, 4);
+            try disjoint(xs.ref, bytes, out, q_bytes);
+            try disjoint(xs.ref, bytes, q, q_bytes);
+            try disjoint(xs.ref, bytes, k, kv_bytes);
+            try disjoint(xs.ref, bytes, v, kv_bytes);
+            if (raw_gate) |gate| try disjoint(xs.ref, bytes, gate, 2 * q_bytes);
+            for (caches) |cache| try apart(cache, g, xs.ref, bytes);
+            for (scratch.buffers) |buffer| if (buffer.id == xs.ref.buffer.id) return error.AttentionAlias;
+            for (binding.buffers) |buffer| if (buffer.id == xs.ref.buffer.id) return error.AttentionAlias;
+        }
+        const operands = [_]struct { ref: Ref, bytes: usize }{ .{ .ref = q, .bytes = q_bytes }, .{ .ref = k, .bytes = kv_bytes }, .{ .ref = v, .bytes = kv_bytes }, .{ .ref = out, .bytes = q_bytes } };
         for (caches) |cache| for (operands) |operand| try apart(cache, plan.geometry, operand.ref, operand.bytes);
         for (scratch.buffers) |buffer| e.useResource(buffer, mtl.ResourceUsage.read | mtl.ResourceUsage.write);
         for (binding.buffers) |buffer| e.useResource(buffer, mtl.ResourceUsage.read | mtl.ResourceUsage.write);
@@ -471,7 +490,7 @@ pub const Attention = struct {
                 e.dispatchThreads(mtl.Size.of(g.dim, g.heads, plan.rows), mtl.Size.of(32, 1, 1));
                 e.barrier();
             }
-        } else try a.treeRows(e, scratch, binding, plan, q, out, raw_gate, args, split);
+        } else try a.treeRows(e, scratch, binding, plan, q, out, raw_gate, args, split, out_sums);
         try timing.end();
     }
     /// `grid` at pick + 16 when every value some row must not see is finite, else at pick + 28; the other grid is 0.
@@ -520,7 +539,7 @@ pub const Attention = struct {
         e.barrier();
     }
     /// Trees and decoded rows: cached keys by chunk (prefix), the round's own by path (tail), merged and gated.
-    fn treeRows(a: *const Attention, e: mtl.ComputeEncoder, scratch: *const Scratch, binding: *const Binding, plan: Plan, q: Ref, out: Ref, raw_gate: ?Ref, args: PackArgs, split: bool) !void {
+    fn treeRows(a: *const Attention, e: mtl.ComputeEncoder, scratch: *const Scratch, binding: *const Binding, plan: Plan, q: Ref, out: Ref, raw_gate: ?Ref, args: PackArgs, split: bool, out_sums: ?@import("quant_gpu.zig").Sums) !void {
         const g = plan.geometry;
         const join = if (plan.pairs > 0) a.join else null;
         if (!plan.fused) {
@@ -560,11 +579,15 @@ pub const Attention = struct {
             e.dispatchGroups(mtl.Size.of(g.kv_heads, plan.tail_chunks, plan.rows), mtl.Size.of(128, 1, 1));
             e.barrier();
         }
-        e.setPipeline(if (join) |j| j[if (split) 2 else 3] else a.io[if (split) 4 else 10]);
+        e.setPipeline(if (join) |j| j[if (split) 2 else 3] else a.io[if (split) 4 else if (out_sums != null) 12 else 10]);
         bind(e, .{ scratch.get(.poa), scratch.get(.pma), scratch.get(.pla), scratch.get(.pob), scratch.get(.pmb), scratch.get(.plb), binding.get(.meta), scratch.get(.nodes), out, raw_gate orelse out });
         e.setValue(@as(u32, @intFromBool(raw_gate != null)), 10);
         if (split) e.setValue(g.heads, 11);
         if (join != null) e.setBuffer(scratch.get(.mates).buffer, 0, 12);
+        if (out_sums) |xs| {
+            e.setBuffer(xs.ref.buffer, xs.ref.offset, 11);
+            e.setValue(xs.stride, 12);
+        }
         e.dispatchGroups(mtl.Size.of(g.kv_heads, plan.rows * g.group(), 1), mtl.Size.of(32, 1, 1));
         e.barrier();
     }
