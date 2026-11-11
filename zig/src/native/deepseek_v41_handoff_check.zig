@@ -84,6 +84,7 @@ fn streamAgree(want: []const u32, got: []const u32) usize {
 
 /// Runs the check named by `spec` against slot 0 of `m`; every failure is logged and returned.
 pub fn run(gpa: std.mem.Allocator, io: std.Io, m: *ds.Model, spec: []const u8, checkpoint: []const u8) !void {
+    if (try @import("deepseek_v41_handoff_synth.zig").run(gpa, io, checkpoint, spec)) return;
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
     const a = arena_state.allocator();
