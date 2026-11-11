@@ -133,7 +133,7 @@ zig/src/families/flashnext/cuda_images.zig	4696ef29dc81f30882f964d69a71c5378b247
 zig/src/families/flashnext/cuda_images_test.zig	4278e5241f6c7e0e710e9a8ddf0482855db158eeee2463200a2c2de32c9dadd7	raw	#3164 (resumed image rows tested)
 zig/src/families/flashnext/cuda_lanes.zig	a181a74b11f82ef4e03116cf6d65d0fed56c9501ddadfae979099ba467ecfd21	
 zig/src/families/flashnext/cuda_lanes_admission_test.zig	eef300305c40846de8d362f32d1f5274fd3896fa3959a658cf72b86a394949cc	; raw
-zig/src/families/flashnext/cuda_lanes_load.zig	c86fc29c303c4e5224cfa067e80845d30548b09b67480ef65a1d2e7a479ad8f3	
+zig/src/families/flashnext/cuda_lanes_load.zig	c86fc29c303c4e5224cfa067e80845d30548b09b67480ef65a1d2e7a479ad8f3	; opt-in TF_FLASHNEXT_DECODE_GRAPH no longer refused with the dense split; default serving unchanged
 zig/src/families/flashnext/cuda_lanes_restore_test.zig	4d2a75c0ada18d769e71c1d64306109dfc8ef07d442219c32b0f2f5d4174f145	
 zig/src/families/flashnext/cuda_launch.zig	8127e7051dbd5bfab1200001f42669abe2a51f16a3cb3402d212ff031ac6df51	
 zig/src/families/flashnext/cuda_media.zig	394601e8a807f5516f501efcaefa6fb3308f392ee322db7296b11c90814f8eea	raw
@@ -155,7 +155,7 @@ zig/src/families/flashnext/cuda_ple_nvfp4_test.zig	742bef48f8ddbf7257c18ad78911d
 zig/src/families/flashnext/cuda_projection.zig	42e553d337ee5b2acd2146018a4db96bc471a5cc7bc2a87f567ace934b1b40d5	raw
 zig/src/families/flashnext/cuda_projection_load.zig	8c415a070d7dada62f98646bc72c7b7cc29b3ac018a6638684d23a16d959681e	raw
 zig/src/families/flashnext/cuda_projection_load_test.zig	bcbd6ed2753c863916a2163d1cf72544429c776365702e860f52cd22449354a1	raw
-zig/src/families/flashnext/cuda_prompt.zig	5201c96c87cc3c8955f547bb8cc4e2dc83b0a4d7f861a2c73b1e2e3ef5ce020b	raw	TF_FLASHNEXT_FUSED_SPLIT read at engine init; sets only its own native_lane; #3368 (the widths config.json selects size the scratch, a layer's shared rows checked against them; default-shape replies unchanged); TF_FLASHNEXT_FUSED_SPLIT read at engine init; sets only its own native_lane; D1040 (opt-in TF_FLASHNEXT_GRAPH_TAIL); #5222: layer-index test moved unchanged; opt-in TF_FLASHNEXT_DECODE_GRAPH leaves rounds with pockets eager; default serving unchanged (#2980)
+zig/src/families/flashnext/cuda_prompt.zig	5201c96c87cc3c8955f547bb8cc4e2dc83b0a4d7f861a2c73b1e2e3ef5ce020b	raw	TF_FLASHNEXT_FUSED_SPLIT read at engine init; sets only its own native_lane; #3368 (the widths config.json selects size the scratch, a layer's shared rows checked against them; default-shape replies unchanged); TF_FLASHNEXT_FUSED_SPLIT read at engine init; sets only its own native_lane; D1040 (opt-in TF_FLASHNEXT_GRAPH_TAIL); #5222: layer-index test moved unchanged; opt-in TF_FLASHNEXT_DECODE_GRAPH takes the dense split and leaves rounds with pockets eager; default serving unchanged (#2980)
 zig/src/families/flashnext/cuda_prompt_load.zig	a5629649a64150b795aee8239ad98462836efaa106e5952fcebc0066b8306a7e	raw
 zig/src/families/flashnext/cuda_prompt_main.zig	ea77677bfbe2942f6ebdb85ad04e8005789a12f99716266c5f2ba65a07f41c48	raw	main dfd9ac5ef4 (#2585: the TF_FLASHNEXT_* startup check), c274b45cc1 (the check through the flashnext module); #5188 (environment settings through the registry; accepted values and replies unchanged)
 zig/src/families/flashnext/cuda_prompt_step.zig	df47388a65fd1b79d91418cde75857cc00bde38dd543e82689eabd71a72368fa	raw	#3368 (the MLX row write-back's 10 and 11 named by the default slot count; its arguments unchanged)
