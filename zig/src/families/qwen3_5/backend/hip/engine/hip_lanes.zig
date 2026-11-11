@@ -9,6 +9,7 @@ const state = @import("../forward/state.zig");
 const mtp = @import("mtp.zig");
 const costs = @import("hip_costs.zig");
 const prefix = @import("prefix.zig");
+const prompt_rows = @import("prompt_rows.zig");
 const hip_prefix = @import("hip_prefix.zig");
 const memory = @import("memory.zig");
 const pages = @import("../forward/pages.zig");
@@ -334,9 +335,19 @@ pub const Hip = struct {
         return lane;
     }
 
-    /// Where the chunk from `at` ends: decoding streams wait less; a readout keeps the chunk (rocBLAS bits by rows).
+    /// Where the chunk from `at` ends: the prompt rows alone, fewer beside decoders; rocBLAS bits keep the chunk.
     pub fn reach(h: *Hip, lane: *Lane, at: usize, limit: usize) !usize {
-        const rows = if (h.e.o.cut_rows > 0) h.e.o.cut_rows else if (lane.readout == null and h.decoding()) h.e.o.policy.fill_rows else prefix.chunk;
+        const o = &h.e.o;
+        const rows = if (o.cut_rows > 0)
+            o.cut_rows
+        else if (lane.readout != null)
+            prefix.chunk
+        else if (h.decoding())
+            o.policy.fill_rows
+        else if (h.e.plain())
+            prefix.chunk
+        else
+            prompt_rows.idle(o.prompt_rows, o.policy);
         const end = prefix.chunkEnd(at, limit, rows);
         if (h.cuts) |c| try c.append(h.gpa, @intCast(end));
         return end;
