@@ -1,4 +1,4 @@
-//! TF_DSV41_DRAFT_PLAIN_STREAMS: the env knob, and a round with enough active windows decodes plain.
+//! TF_DSV41_DRAFT_PLAIN_STREAMS: the env knob, and a round with enough decoding streams decodes plain.
 const std = @import("std");
 const lanes = @import("lanes");
 const twin = @import("twin.zig");
@@ -8,6 +8,7 @@ const depth = @import("depth.zig");
 const calib_env = @import("calib_env.zig");
 
 const gpa = std.testing.allocator;
+const t_ = std.testing;
 
 const Env = struct {
     var pairs: []const [2][]const u8 = &.{};
@@ -17,19 +18,39 @@ const Env = struct {
     }
 };
 
-test "TF_DSV41_DRAFT_PLAIN_STREAMS: parsed, 0 when unset, 0 to 16 taken, anything else refused by name" {
-    Env.pairs = &.{};
-    try std.testing.expectEqual(@as(usize, 0), (try calib_env.depthSettings(&Env.get)).plain_streams);
-    Env.pairs = &.{.{ "TF_DSV41_DRAFT_PLAIN_STREAMS", "3" }};
-    try std.testing.expectEqual(@as(usize, 3), (try calib_env.depthSettings(&Env.get)).plain_streams);
-    for ([_][]const u8{ "16", "17", "4294967296", "18446744073709551616", "-1", "oops", "3x" }) |raw| {
-        Env.pairs = &.{.{ "TF_DSV41_DRAFT_PLAIN_STREAMS", raw }};
-        if (std.mem.eql(u8, raw, "16")) try std.testing.expectEqual(@as(usize, 16), (try calib_env.depthSettings(&Env.get)).plain_streams) else try std.testing.expectError(error.DraftPlainStreams, calib_env.depthSettings(&Env.get));
-    }
-    Env.pairs = &.{};
+fn plainStreams(raw: []const u8) !usize {
+    Env.pairs = &.{.{ "TF_DSV41_DRAFT_PLAIN_STREAMS", raw }};
+    defer Env.pairs = &.{};
+    return (try calib_env.depthSettings(&Env.get)).plain_streams;
 }
 
-fn runPlain(cases: []const []const u32, setup: Setup, max_news: []const u32) !Run {
+test "TF_DSV41_DRAFT_PLAIN_STREAMS: 0 when unset, 0 to 16 taken, anything else refused by name" {
+    Env.pairs = &.{};
+    try t_.expectEqual(@as(usize, 0), (try calib_env.depthSettings(&Env.get)).plain_streams);
+    for ([_][]const u8{ "0", "3", " 16 " }, [_]usize{ 0, 3, 16 }) |raw, want| try t_.expectEqual(want, try plainStreams(raw));
+    for ([_][]const u8{ "17", "4294967296", "18446744073709551616", "-1", "oops", "3x" }) |raw|
+        try t_.expectError(error.DraftPlainStreams, plainStreams(raw));
+}
+
+/// A run's settings: the switch, staggered arrivals, sampling.
+pub const Opts = struct { set: depth.Settings = .{}, stagger: bool = false, sampling: ?lanes.Sampling = null };
+
+pub const Run = struct {
+    drafted: u64,
+    accepted: u64,
+    ok: bool,
+    passes: u64,
+    ingests: u64,
+    out: [][]u32,
+
+    pub fn deinit(r: Run) void {
+        for (r.out) |o| gpa.free(o);
+        gpa.free(r.out);
+    }
+};
+
+/// Streams of these prompts and lengths through the lanes over the twin; staggered: one added each step.
+pub fn run(cases: []const []const u32, max_news: []const u32, o: Opts) !Run {
     const dims: twin.Dims = .{ .bigram = 8.0, .head = 0.08 }; // a confident drafter (lanes_test's): drafts are chosen
     const t = try twin.Twin.init(gpa, dims, cases.len + 1);
     defer t.deinit();
@@ -37,7 +58,7 @@ fn runPlain(cases: []const []const u32, setup: Setup, max_news: []const u32) !Ru
     defer d.deinit();
     var c = try costs_mod.defaults(gpa, 64);
     defer c.deinit(gpa);
-    const x = try ln.Lanes.init(gpa, t.target(), d.pass(), c, .{ .shape = d.shape, .slots = 4, .depth = setup, .spec = .{ .on = true } });
+    const x = try ln.Lanes.init(gpa, t.target(), d.pass(), c, .{ .shape = d.shape, .slots = 4, .depth = o.set, .spec = .{ .on = true } });
     defer x.deinit();
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
@@ -49,176 +70,89 @@ fn runPlain(cases: []const []const u32, setup: Setup, max_news: []const u32) !Ru
     x.attach(&e);
     const streams = try gpa.alloc(lanes.Stream, cases.len);
     defer gpa.free(streams);
-    for (cases, streams, max_news) |p, *s, *n| s.* = try lanes.Stream.init(gpa, .{ .id = "s", .prompt = p, .max_new = n.* });
+    for (cases, streams, max_news) |p, *s, n| s.* = try lanes.Stream.init(gpa, .{ .id = "s", .prompt = p, .max_new = n, .sampling = o.sampling });
     defer for (streams) |*s| s.deinit(gpa);
-    for (streams) |*s| try e.addStream(s);
-    while (e.activeCount() > 0) try e.step();
+    var added: usize = 0;
+    if (!o.stagger) {
+        for (streams) |*s| try e.addStream(s);
+        added = streams.len;
+    }
+    var steps: usize = 0;
+    while (e.activeCount() > 0 or added < streams.len) : (steps += 1) {
+        if (added < streams.len) {
+            try e.addStream(&streams[added]);
+            added += 1;
+        }
+        try e.step();
+        if (steps > 1000) return error.TooManySteps;
+    }
     var ok = true;
     for (streams) |*s| ok = ok and s.emitted().len > 0;
-    return .{ .drafted = e.drafted, .ok = ok, .passes = d.passes, .out = blk: {
-        const out = try gpa.alloc([]u32, cases.len);
-        for (out, streams) |*o, *s| o.* = try gpa.dupe(u32, s.emitted());
-        break :blk out;
-    } };
+    const out = try gpa.alloc([]u32, cases.len);
+    for (out, streams) |*q, *s| q.* = try gpa.dupe(u32, s.emitted());
+    return .{ .drafted = e.drafted, .accepted = e.accepted, .ok = ok, .passes = d.passes, .ingests = d.ingests, .out = out };
 }
 
-fn freeRun(r: *Run) void {
-    for (r.out) |o| gpa.free(o);
-    gpa.free(r.out);
-}
-
-const Setup = depth.Settings;
-
-const Run = struct { drafted: u64, ok: bool, passes: u64, out: [][]u32 };
-
-const a1 = [_]u32{ 3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5, 8, 9, 7, 9, 3, 2, 3, 8, 4 };
-
-test "a round with plain_streams or more active windows decodes plain; below it drafts; 0 keeps drafts" {
-    // identical prompts and greedy sampling keep every round a full 4-window round until the streams end together
-    const four = [_][]const u32{ &a1, &a1, &a1, &a1 };
-    const fours = [_]u32{ 40, 40, 40, 40 };
-    // 4 active, threshold 3: every drafted window is forced to count 0
-    const plain = try runPlain(&four, .{ .plain_streams = 3 }, &fours);
-    defer freeRun(@constCast(&plain));
-    try std.testing.expect(plain.ok);
-    try std.testing.expectEqual(@as(u64, 0), plain.drafted);
-    // 3 active, threshold 3: at it, plain too
-    const at = try runPlain(four[0..3], .{ .plain_streams = 3 }, fours[0..3]);
-    defer freeRun(@constCast(&at));
-    try std.testing.expect(at.ok);
-    try std.testing.expectEqual(@as(u64, 0), at.drafted);
-    // 2 active, threshold 3: below it, drafts are kept
-    const below = try runPlain(four[0..2], .{ .plain_streams = 3 }, fours[0..2]);
-    defer freeRun(@constCast(&below));
-    try std.testing.expect(below.ok);
-    try std.testing.expect(below.drafted > 0);
-    // 4 active, threshold 0 (off): drafts are kept
-    const off = try runPlain(&four, .{}, &fours);
-    defer freeRun(@constCast(&off));
-    try std.testing.expect(off.ok);
-    try std.testing.expect(off.drafted > 0);
-}
-
-test "a stream's first draft ask waits for its first round; the replies stay the serial ones" {
-    const four = [_][]const u32{ &a1, &a1, &a1, &a1 };
-    const dims: twin.Dims = .{ .bigram = 8.0, .head = 0.08 };
-    const fours = [_]u32{ 40, 40, 40, 40 };
-    // off, 4 streams: every round drafts, every round runs the pass
-    const off = try runPlain(&four, .{}, &fours);
-    defer freeRun(@constCast(&off));
-    try std.testing.expect(off.passes > 0);
-    // at the threshold: shared rounds run no pass and the opening asks are skipped, so no pass runs at all
-    const on = try runPlain(&four, .{ .plain_streams = 3 }, &fours);
-    defer freeRun(@constCast(&on));
-    try std.testing.expectEqual(@as(u64, 0), on.drafted);
-    try std.testing.expectEqual(@as(u64, 0), on.passes);
-    // tokens identical drafted or plain
-    for (off.out, on.out) |a, b| try std.testing.expectEqualSlices(u32, a, b);
-    // serial reference
-    {
-        const t = try twin.Twin.init(gpa, dims, 1);
-        defer t.deinit();
-        for (on.out, four) |got, p| {
-            const want = try t.serial(0, p, 40, null, null);
-            defer gpa.free(want);
-            try std.testing.expectEqualSlices(u32, want, got);
-        }
-    }
-}
-
-test "a stream drafts no round until its burst has formed or its second ask while never wide" {
-    // staggered arrival, plain_streams 3: the burst forms at the third stream, from which every stream drafts
-    const dims: twin.Dims = .{ .bigram = 8.0, .head = 0.08 };
-    {
-        const t = try twin.Twin.init(gpa, dims, 5);
-        defer t.deinit();
-        const d = try twin.Drafter.init(gpa, t, 5);
-        defer d.deinit();
-        var c = try costs_mod.defaults(gpa, 64);
-        defer c.deinit(gpa);
-        const x = try ln.Lanes.init(gpa, t.target(), d.pass(), c, .{ .shape = d.shape, .slots = 4, .depth = .{ .plain_streams = 3 }, .spec = .{ .on = true } });
-        defer x.deinit();
-        var arena = std.heap.ArenaAllocator.init(gpa);
-        defer arena.deinit();
-        var cfg = try lanes.Config.init(gpa, try x.model(arena.allocator(), 64), 16, 15);
-        defer cfg.deinit(gpa);
-        var clock: lanes.fake.FixedClock = .{};
-        var e = lanes.Engine.init(gpa, &cfg, x.backend(), clock.clock());
-        defer e.deinit();
-        x.attach(&e);
-        const streams = try gpa.alloc(lanes.Stream, 4);
-        defer gpa.free(streams);
-        var i: usize = 0;
-        var steps: u64 = 0;
-        while (e.activeCount() > 0 or i < 4) {
-            try e.step();
-            steps += 1;
-            if (i < 4) {
-                const s = &streams[i];
-                s.* = try lanes.Stream.init(gpa, .{ .id = "s", .prompt = &a1, .max_new = 40 });
-                try e.addStream(s);
-                i += 1;
-            }
-            if (steps > 400) return error.TooManySteps;
-        }
-        defer for (streams) |*s| s.deinit(gpa);
-        var ok = true;
-        for (streams) |*s| ok = ok and s.emitted().len > 0;
-        try std.testing.expect(ok);
-        try std.testing.expect(d.passes > 0); // the burst formed at three streams: the later rounds draft
-        try std.testing.expect(e.drafted > 0);
-        // tokens equal to the serial reference
-        for (streams) |*s| {
-            const want = try t.serial(0, &a1, 40, null, null);
-            defer gpa.free(want);
-            try std.testing.expectEqualSlices(u32, want, s.emitted());
-        }
-    }
-    // the truly-lone control: one stream admitted alone drafts from its second ask
-    const lone = try runPlain(&.{&a1}, .{ .plain_streams = 3 }, &.{40});
-    defer freeRun(@constCast(&lone));
-    try std.testing.expect(lone.ok);
-    try std.testing.expect(lone.drafted > 0);
-    try std.testing.expect(lone.passes > 0);
-    {
-        const t = try twin.Twin.init(gpa, dims, 1);
-        defer t.deinit();
-        const want = try t.serial(0, &a1, 40, null, null);
+/// Each reply is its prompt's serial decode at its own length.
+pub fn expectSerial(r: Run, cases: []const []const u32, max_news: []const u32, sampling: ?lanes.Sampling) !void {
+    const t = try twin.Twin.init(gpa, .{ .bigram = 8.0, .head = 0.08 }, 1);
+    defer t.deinit();
+    try t_.expect(r.ok);
+    for (r.out, cases, max_news) |got, p, n| {
+        const want = try t.serial(0, p, n, sampling, null);
         defer gpa.free(want);
-        try std.testing.expectEqualSlices(u32, want, lone.out[0]);
+        try t_.expectEqualSlices(u32, want, got);
     }
 }
 
-test "below the threshold a stream drafts on its first ask; drafting resumes once streams finish" {
-    const four = [_][]const u32{ &a1, &a1, &a1, &a1 };
-    const dims: twin.Dims = .{ .bigram = 8.0, .head = 0.08 };
-    const fours = [_]u32{ 40, 40, 40, 40 };
-    // the threshold not reached (1-2 active): the first ask is held, the second drafts
-    const one = try runPlain(four[0..1], .{ .plain_streams = 3 }, fours[0..1]);
-    defer freeRun(@constCast(&one));
-    try std.testing.expect(one.ok);
-    try std.testing.expect(one.drafted > 0);
-    try std.testing.expect(one.passes > 0);
-    const two = try runPlain(four[0..2], .{ .plain_streams = 3 }, fours[0..2]);
-    defer freeRun(@constCast(&two));
-    try std.testing.expect(two.ok);
-    try std.testing.expect(two.drafted > 0);
-    try std.testing.expect(two.passes > 0);
-    // 4 streams, two finish early: admitted four-deep, the burst has formed from round one, so every ask drafts
-    const twos = [_]u32{ 6, 6, 40, 40 };
-    const mixed = try runPlain(&four, .{ .plain_streams = 3 }, &twos);
-    defer freeRun(@constCast(&mixed));
-    try std.testing.expect(mixed.ok);
-    try std.testing.expect(mixed.drafted > 0); // after two streams finished, 2 active: drafts asked again
-    try std.testing.expect(mixed.passes > 0); // every pass is from the resumed rounds
-    // serial reference, each stream's own length
-    {
-        const t = try twin.Twin.init(gpa, dims, 1);
-        defer t.deinit();
-        for (mixed.out, four, &twos) |got, p, *n| {
-            const want = try t.serial(0, p, n.*, null, null);
-            defer gpa.free(want);
-            try std.testing.expectEqualSlices(u32, want, got);
-        }
-    }
+pub const a1 = [_]u32{ 3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5, 8, 9, 7, 9, 3, 2, 3, 8, 4 };
+const four = [_][]const u32{ &a1, &a1, &a1, &a1 };
+const fours = [_]u32{ 40, 40, 40, 40 };
+
+test "a round with plain_streams or more decoding streams decodes plain; below it drafts; 0 keeps drafts" {
+    // identical prompts and greedy sampling keep every round a full round until the streams end together
+    const plain = try run(&four, &fours, .{ .set = .{ .plain_streams = 3 } });
+    defer plain.deinit();
+    try t_.expectEqual(@as(u64, 0), plain.drafted);
+    const at = try run(four[0..3], fours[0..3], .{ .set = .{ .plain_streams = 3 } });
+    defer at.deinit();
+    try t_.expectEqual(@as(u64, 0), at.drafted);
+    const below = try run(four[0..2], fours[0..2], .{ .set = .{ .plain_streams = 3 } });
+    defer below.deinit();
+    try t_.expect(below.drafted > 0);
+    const off = try run(&four, &fours, .{});
+    defer off.deinit();
+    try t_.expect(off.drafted > 0);
+    for ([_]Run{ plain, at, below, off }, [_]usize{ 4, 3, 2, 4 }) |r, n| try expectSerial(r, four[0..n], fours[0..n], null);
+}
+
+test "below the threshold the switch changes nothing: 1 and 2 streams draft from their first ask as with it off" {
+    for ([_]usize{ 1, 2 }) |n| for ([_]bool{ false, true }) |stagger| {
+        const on = try run(four[0..n], fours[0..n], .{ .set = .{ .plain_streams = 3 }, .stagger = stagger });
+        defer on.deinit();
+        const off = try run(four[0..n], fours[0..n], .{ .stagger = stagger });
+        defer off.deinit();
+        try t_.expect(on.drafted > 0);
+        try t_.expectEqual(off.passes, on.passes);
+        try t_.expectEqual(off.drafted, on.drafted);
+        try t_.expectEqual(off.accepted, on.accepted);
+        try t_.expectEqual(off.ingests, on.ingests);
+        for (off.out, on.out) |a, b| try t_.expectEqualSlices(u32, a, b);
+    };
+}
+
+test "at the threshold only the asks made before plain_streams streams decode run a pass; replies unchanged" {
+    const on = try run(&four, &fours, .{ .set = .{ .plain_streams = 3 } });
+    defer on.deinit();
+    try t_.expectEqual(@as(u64, 0), on.drafted);
+    try t_.expect(on.passes <= 2); // the first two streams' opening asks, made while fewer than three decoded
+    try expectSerial(on, &four, &fours, null);
+}
+
+test "staggered arrivals: streams draft until plain_streams decode, plain after, drafting again as they end" {
+    const lens = [_]u32{ 40, 46, 52, 58 };
+    const on = try run(&four, &lens, .{ .set = .{ .plain_streams = 3 }, .stagger = true });
+    defer on.deinit();
+    try t_.expect(on.passes > 0 and on.drafted > 0);
+    try expectSerial(on, &four, &lens, null);
 }
