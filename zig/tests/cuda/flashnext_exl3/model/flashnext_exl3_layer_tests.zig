@@ -234,6 +234,10 @@ pub fn layerCheck(gpu: Gpu, r: *Rig, raw: *const RawPack, lw: *const pl.Layer, l
     defer arena.deinit();
     const a = arena.allocator();
     const prefill = 8;
+    if (lw.exl3) |x| {
+        if (x.needsPool())
+            _ = try X.pass.attach(gpu.gpa, gpu.io, gpu.d, r.stream, lw[0..1], prefill, .{ .lines = experts_n, .max_rows = prefill }, null);
+    }
     var t0 = check.now(gpu.io);
     const o = try Oracle.create(a, raw, l, r.store.norm_offset, r.cap);
     std.debug.print("  float64 layer {d} decoded in {d:.0} ms (offset {d})\n", .{ l, @as(f64, @floatFromInt(check.now(gpu.io) - t0)) / 1e6, r.store.norm_offset });
@@ -370,7 +374,7 @@ pub fn layerMode(gpu: Gpu, dir: []const u8, which: []const usize) !void {
         const t0 = check.now(gpu.io);
         var lw = try pl.loadLayerRank(gpu.gpa, @constCast(gpu.d), &rig.stream, &rig.store, rig.pack_fn, l, 1, 0, null);
         defer lw.free(gpu.gpa);
-        std.debug.print("== layer {d} ({s}): the family's loader (cuda_prompt_load.loadLayerRank) in {d:.0} ms, every expert resident\n", .{ l, if (wt.linearLayer(l)) "GDN" else "attention", @as(f64, @floatFromInt(check.now(gpu.io) - t0)) / 1e6 });
+        std.debug.print("== layer {d} ({s}): the family's loader (cuda_prompt_load.loadLayerRank) in {d:.0} ms\n", .{ l, if (wt.linearLayer(l)) "GDN" else "attention", @as(f64, @floatFromInt(check.now(gpu.io) - t0)) / 1e6 });
         try check.expect(lw.exl3 != null, "layer {d}: experts did not load as EXL3", .{l});
         var arena: std.heap.ArenaAllocator = .init(gpu.gpa);
         defer arena.deinit();
