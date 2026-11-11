@@ -10,6 +10,7 @@ const images = @import("cuda_images.zig");
 const memory = @import("exl3/pack/exl3_startup_memory.zig");
 const exl3_pass = @import("exl3/model/cuda_exl3_pass.zig");
 pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, captured: ?[]const u8, o: F.Options) !F.Loaded {
+    try @import("env_validate.zig").startup();
     if (o.vision) |v| try @import("qwen_vision").media.checkLimits(v);
     var load_cache = @import("core").checkpoint.cache.Load.begin(io, o.tp > 1);
     defer load_cache.deinit();
@@ -45,7 +46,7 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     errdefer gpa.destroy(own);
     own.* = .{ .gpa = gpa, .context = o.context, .engine = undefined, .glue = undefined, .stream = undefined, .logits = undefined };
     // fixed-size lane buffers reused across streams (cuda_lane_parts.zig; TF_FLASHNEXT_LANE_PARTS=0: allocate each)
-    own.parts.on = if (std.c.getenv("TF_FLASHNEXT_LANE_PARTS")) |v| !std.mem.eql(u8, std.mem.span(v), "0") else true;
+    own.parts.on = try @import("sys").environment.read(bool, "TF_FLASHNEXT_LANE_PARTS", true);
     own.stream = try cuda.Stream.init(driver, true);
     errdefer own.stream.deinit();
     own.glue = try Glue.load(driver);
@@ -90,14 +91,16 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     try @import("exl3/kv/cuda_exl3_kv.zig").setup(own.engine, mode == .exl3);
     // the pass's scratch for a full chunk, once for the engine (every prompt, window, round and head pass)
     _ = try own.engine.reserve(@max(@min(o.context, own.engine.chunk), if (o.slide) @as(usize, @import("cuda_train.zig").pack_rows) else 0));
-    // the MTP head unless --no-drafts (TF_FLASHNEXT_DRAFTS and _CONFIDENCE: the chain's rule, 6 and 0.60)
+    // the MTP head unless --no-drafts (TF_FLASHNEXT_DRAFTS and _CONFIDENCE: the chain's rule, 6 and -0.4)
     if (o.drafts and (o.tp == 1 or o.rank == 0)) {
         const head_before = cuda.usage(false).device;
         own.head = try mtp.Head.init(gpa, io, driver, &own.stream, dir);
         persistent_bytes = try std.math.add(u64, persistent_bytes, cuda.usage(false).device -| head_before);
-        own.depth = @max(1, @min(mtp.max_chain, F.envUsize("TF_FLASHNEXT_DRAFTS", mtp.default_depth)));
-        own.depth_greedy = @max(1, @min(mtp.max_chain, F.envUsize("TF_FLASHNEXT_DRAFTS_GREEDY", mtp.default_depth_greedy)));
-        if (std.c.getenv("TF_FLASHNEXT_CONFIDENCE")) |v| own.confidence = std.fmt.parseFloat(f64, std.mem.span(v)) catch mtp.default_confidence;
+        const drafts = try @import("sys").environment.read(usize, "TF_FLASHNEXT_DRAFTS", mtp.default_depth);
+        own.depth = @max(1, @min(mtp.max_chain, drafts));
+        const greedy = try @import("sys").environment.read(usize, "TF_FLASHNEXT_DRAFTS_GREEDY", mtp.default_depth_greedy);
+        own.depth_greedy = @max(1, @min(mtp.max_chain, greedy));
+        own.confidence = try @import("sys").environment.read(f64, "TF_FLASHNEXT_CONFIDENCE", mtp.default_confidence);
     }
     errdefer if (own.head) |h| h.deinit();
     @import("cuda_prompt_wt.zig").dropPageCache(io, dir, e.ngram.files.items);

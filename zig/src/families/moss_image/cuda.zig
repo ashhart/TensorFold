@@ -9,6 +9,7 @@ pub const seconds = @import("cuda_model.zig").seconds;
 test {
     _ = @import("cuda_kernels.zig");
     _ = @import("cuda_model.zig");
+    _ = @import("generate.zig");
     _ = config;
     _ = host;
 }
