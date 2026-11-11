@@ -7,7 +7,7 @@ const verify = @import("cuda_lanes_verify.zig");
 const be = lanes.backend;
 const t = std.testing;
 
-/// Each call a pass made: 0 a lone verify, else a shared pass of that many windows (100 + n on the ranks).
+/// Each call a pass made: 0 a lone verify (50 into the lanes' buffer), n a shared pass of n windows (100 + n on ranks).
 const Log = struct {
     calls: [16]usize = undefined,
     n: usize = 0,
@@ -30,6 +30,10 @@ const Owner = struct {
         log: *Log,
         pub fn verify(o: Ops, _: *prompt.Seq, _: *mtp.Draft, _: []const u32) !void {
             o.log.add(0);
+        }
+        pub fn verifyIn(o: Ops, _: *prompt.Seq, _: *mtp.Draft, _: []const u32, out: u64) !void {
+            try t.expectEqual(@as(u64, 0x1000), out);
+            o.log.add(50);
         }
         pub fn verifyMany(o: Ops, seqs: []const *prompt.Seq, _: []const *mtp.Draft, _: []const []const u32, _: u64) !void {
             o.log.add(seqs.len);
@@ -55,6 +59,10 @@ const Owner = struct {
 };
 
 fn run(o: *Owner, rows: []const usize, cap: usize) !void {
+    return runPaged(o, rows, cap, false);
+}
+
+fn runPaged(o: *Owner, rows: []const usize, cap: usize, paged: bool) !void {
     var wins: [4]be.Window = undefined;
     var out: [4]be.Verified = undefined;
     var sampled: [4][mtp.max_rows]u32 = undefined;
@@ -65,6 +73,7 @@ fn run(o: *Owner, rows: []const usize, cap: usize) !void {
         wins[i] = .{ .stream = &o.streams[i], .pending = 0, .held = @intCast(r - 1), .tokens = &.{}, .parents = null, .positions = &.{} };
         out[i] = .{ .sampled = &sampled[i], .drafts = &.{} };
         drafted[i] = i;
+        o.lanes_[i].draft.?.logit_paged = paged;
         row_ids[i] = @splat(1);
     }
     o.log = .{};
@@ -92,4 +101,19 @@ test "shared verify dispatch: at TP=2 a group goes to the ranks, a lone window a
     o.ranks = null;
     try run(&o, &.{ 2, 3, 2 }, 64);
     try t.expectEqualSlices(usize, &.{3}, o.log.calls[0..o.log.n]);
+}
+
+test "a lone window on a paged draft verifies into the lanes' buffer; a shared pass and the ranks are as before" {
+    var o: Owner = .{};
+    try runPaged(&o, &.{4}, 64, true);
+    try t.expectEqualSlices(usize, &.{50}, o.log.calls[0..o.log.n]);
+    try runPaged(&o, &.{ 3, 3 }, 4, true);
+    try t.expectEqualSlices(usize, &.{ 50, 50 }, o.log.calls[0..o.log.n]);
+    try runPaged(&o, &.{ 2, 3, 2 }, 64, true);
+    try t.expectEqualSlices(usize, &.{3}, o.log.calls[0..o.log.n]);
+    var log: Log = .{};
+    var ranks: Owner.Ranks = .{ .log = &log };
+    o.ranks = &ranks; // with ranks a lone window keeps the plain verify, which refuses a paged draft by name
+    try runPaged(&o, &.{4}, 64, true);
+    try t.expectEqualSlices(usize, &.{0}, o.log.calls[0..o.log.n]);
 }
