@@ -5,12 +5,25 @@ const kv = @import("kv_pool.zig");
 /// Where a pass resumes and the marks it keeps states at (`marks` the store's allocation, freed by `free`).
 pub const Plan = struct { from: u32 = 0, marks: []const u32 = &.{} };
 
+/// An image's exact identity, as the store compares it beside the key (cache_images.Identity, core-side).
+pub const Image = struct { at: u32, tokens: u32, gh: u32, gw: u32, hash: u64 };
+
 /// What a pass asks the store about (prompt_radix.Query as a family on the core pool gives it).
 pub const Query = struct {
     /// The words the store compares: the request's cache key, one word a model row; for text, the prompt.
     key: []const u32,
     /// The prompt's length; a key of another length reuses nothing.
     prompt_len: u32,
+    /// The request's images in prompt order: rows they cover match only the same image.
+    images: []const Image = &.{},
+    /// The request's image frame (0: text's).
+    frame: u32 = 0,
+    /// What the rows depend on beyond key, images and frame (0: nothing).
+    namespace: u64 = 0,
+    /// The request's own chunk starts; empty: the store's grid.
+    starts: []const u32 = &.{},
+    /// Rows this pass prefills; null: the prompt's length.
+    prefilled: ?u32 = null,
 
     /// A query of `key` alone, as long as its prompt.
     pub fn of(key: []const u32) Query {
