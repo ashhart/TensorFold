@@ -14,6 +14,7 @@ pub fn floatType(dtype: DType) !Float {
 }
 
 pub const Head = extern struct { width: u32, rows: u32, stride: u32, activation: Float, gain: Float, eps: f32, shift: u32 = 0, heads: u32 = 1, row_stride: u32 = 0 };
+pub const QkNormRope = extern struct { width: u32, heads: u32, kv_heads: u32, rows: u32, rotary: u32, key_stride: u32, eps: f32, theta: f32, h_end: u32, w_end: u32, plane: u32 };
 pub const Embed = extern struct { width: u32, rows: u32, vocab: u32, bits: u32, group: u32, metadata: Float };
 pub const EmbedBf16 = extern struct { width: u32, rows: u32, vocab: u32 };
 /// M-RoPE's axis ends (`plane` stride); nonzero `yarn_scale` turns rotated pairs via `yarn_freq`.
@@ -43,6 +44,7 @@ pub fn checkEmbed(a: Embed) !void {
 }
 
 test "operator parameters match their Metal structs word for word" {
+    try std.testing.expectEqual(@as(usize, 44), @sizeOf(QkNormRope));
     try std.testing.expectEqual(@as(usize, 36), @sizeOf(Head));
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(Embed));
     try std.testing.expectEqual(@as(usize, 12), @sizeOf(EmbedBf16));
