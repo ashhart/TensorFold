@@ -2,6 +2,7 @@
 const std = @import("std");
 const json = @import("json");
 const cli = @import("cli.zig");
+const cli_config = @import("cli_config.zig");
 const log = @import("log.zig");
 const hub = @import("hub.zig");
 const engines = @import("engines.zig");
@@ -17,7 +18,7 @@ const checkpoint_cli = @import("checkpoint_cli");
 const pdf_worker = @import("pdf_worker.zig");
 const web_cli = @import("web_cli.zig");
 
-const usage_line = "usage: tensorfold serve [-h] [--host HOST] [--port PORT] [--unix-socket PATH] [--name NAME] [--chat-template FILE]" ++
+const usage_line = "usage: tensorfold serve [-h] [--config FILE.toml] [--host HOST] [--port PORT] [--unix-socket PATH] [--name NAME] [--chat-template FILE]" ++
     " [--alias ALIAS] [--allowed-host NAME] [--allowed-origin ORIGIN] [--api-key API_KEY] [--api-key-file API_KEY_FILE] [--metrics-open] [--dashboard]" ++
     " [--max-inflight N] [--max-inflight-per-key N] [--requests-per-second N] [--request-burst N]" ++
     " [--max-connections N] [--max-connections-per-address N] [--trusted-proxy ADDRESS]" ++
@@ -102,13 +103,22 @@ pub fn main(init: std.process.Init) !u8 {
     }
     const started = std.Io.Clock.awake.now(io).toNanoseconds();
     var u: cli.Usage = .{};
-    var args = cli.parse(a, argv[2..], &u) catch |e| switch (e) {
+    const expanded = cli_config.expand(a, io, argv[2..], &u) catch |e| switch (e) {
         error.Usage => {
             std.debug.print("{s}tensorfold serve: error: {s}\n", .{ usage_line, u.message });
             return 2;
         },
         else => |x| return x,
     };
+    var args = cli.parse(a, expanded.argv, &u) catch |e| switch (e) {
+        error.Usage => {
+            std.debug.print("{s}tensorfold serve: error: {s}\n", .{ usage_line, u.message });
+            if (try cli_config.note(a, expanded)) |n| std.debug.print("tensorfold serve: {s}\n", .{n});
+            return 2;
+        },
+        else => |x| return x,
+    };
+    if (expanded.path) |path| log.line("config: {s} ({d} options)", .{ path, expanded.options });
     if (try engines.environment(a, args)) |why| return fail(why);
     const receipt = @import("core").startup_receipt;
     receipt.enable(io, entry, try @import("sys").environment.read(bool, "TF_STARTUP_RECEIPT", false));
