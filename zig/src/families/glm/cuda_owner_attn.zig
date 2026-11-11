@@ -69,8 +69,8 @@ pub fn run(comptime D: type, d: D, segs: []const Seg, rank: usize, world: usize)
     try d.group(.end);
 }
 
-/// Exchange counts since start (rank 0's appear in glm-paged-check's receipt).
-pub const Stats = struct { layers: u64 = 0, rows: u64 = 0, bytes: u64 = 0 };
+/// Exchange counts since start (rank 0's appear in glm-paged-check's receipt); fetches: cuda_owner_fetch's layers.
+pub const Stats = struct { layers: u64 = 0, rows: u64 = 0, bytes: u64 = 0, fetches: u64 = 0, fetched: u64 = 0, fetch_bytes: u64 = 0 };
 
 /// The exchange room: each other rank's queries and the outputs computed for it, `rows` rows of its heads a slot.
 pub const Room = struct {
@@ -195,6 +195,8 @@ pub fn body(f: *const fw.Forward, r: fw.Rank, k: dsa_block.Kernels, a: dsa_block
     const b = r.b;
     if (one.owner == null) return dsa_block.body(k, f.stream, a, one.c, b.dsa, x, r.w.config.hidden, rows, one.pos, one.host_pos, nch, b.part_rows);
     const room = try roomOf(f);
+    const fetch = @import("cuda_owner_fetch.zig"); // a prompt chunk: the history to every rank, each its heads
+    if (fetch.fetches(b.prefill, one.owner, one.host_pos, rows, fetch.roomRows(room.buf.len, a.lw))) return fetch.body(f, r, room, k, a, x, one, rows, nch);
     try dsa_block.prepareProfile(k.set, f.stream, a, b.dsa, x, r.w.config.hidden, rows, dsa_block.sparseRows(a, one.host_pos, rows), k.prof);
     const d: Gpu = .{ .f = f, .room = room, .k = k, .a = a, .b = b, .caches = &.{one.c}, .pos = &.{one.pos}, .host = &.{one.host_pos}, .nch = nch };
     const segs = [_]Seg{.{ .row0 = 0, .rows = rows, .owner = one.owner }};
