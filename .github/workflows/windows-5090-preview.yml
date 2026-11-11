@@ -33,6 +33,7 @@ jobs:
           TF_PREVIEW_CONTEXT_DIGESTS: ${{ secrets.WINDOWS_PREVIEW_PRIVATE_CONTEXT }}
         run: |
           $ErrorActionPreference = 'Stop'
+          $tfPreviewContext = $env:TF_PREVIEW_CONTEXT_DIGESTS
           $vswhere = Join-Path ([Environment]::GetFolderPath('ProgramFilesX86')) 'Microsoft Visual Studio\Installer\vswhere.exe'
           $installation = & $vswhere -latest -version '[17.0,18.0)' -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
           if ($LASTEXITCODE -ne 0 -or @($installation).Count -ne 1) { throw 'MSVC installation lookup failed' }
@@ -44,6 +45,7 @@ jobs:
             $split = $line.IndexOf('=')
             if ($split -gt 0) { [Environment]::SetEnvironmentVariable($line.Substring(0, $split), $line.Substring($split + 1), 'Process') }
           }
+          $env:TF_PREVIEW_CONTEXT_DIGESTS = $tfPreviewContext
           python tools/cuda/cublaslt_bridge/build_preview.py --execute --work C:\tf-preview
           if ($LASTEXITCODE -ne 0) { throw 'Windows preview build or artifact review failed; nothing was uploaded' }
       - name: Recheck the precise publication bytes immediately before upload
