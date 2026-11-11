@@ -158,6 +158,8 @@ fn actualFrame(block: usize) !void {
     e.affine.mlp128 = false;
     e.affine.prefill_fn = function(&driver, 11);
     e.affine.group_fn = function(&driver, 10);
+    e.affine.gemv_fn = function(&driver, 7);
+    e.affine.split = null;
     e.affine.pdl = false;
     e.affine.wide_verify = false;
     e.fns.norm = function(&driver, 13);

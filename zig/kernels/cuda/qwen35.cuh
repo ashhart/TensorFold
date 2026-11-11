@@ -12,7 +12,7 @@ constexpr int TAPS = 4;   // causal convolution taps
 constexpr int HD = 256;   // attention head width
 constexpr int MAXQ = 32;  // attention query heads at most
 constexpr int MAXW = 64;  // a window's rows at most (the log's rows a stream)
-constexpr int MAXCH = 64; // attention chunks a row at most (cuda_engine.zig's max_chunks)
+constexpr int MAXCH = 64; // attention chunks a row at most (cuda_scratch.zig's max_chunks)
 constexpr int MROPE = 3;  // an image row's t, h and w positions (cuda_round.zig's mrope_axes)
 
 // The model's widths: hidden, linear key heads, linear value heads, attention query and key/value heads, linear layers.

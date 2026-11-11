@@ -273,11 +273,10 @@ test "format coexistence: disjoint mixer and dense MLP scratch regions share one
     defer t.allocator.free(c);
     var e: Engine = undefined;
     e.g = try geo.parse(t.allocator, c);
-    e.arena = .{ .d = undefined, .ptr = 0x100000, .len = 1 << 30 };
-    e.arena_at = 0;
-    const measured = try e.scratch(.measure);
-    e.arena_at = 0;
-    try t.expectEqual(measured, try e.scratch(.allocate));
+    e.scratch_buf = .{ .d = undefined, .ptr = 0x200000, .len = 1 << 30 };
+    e.scratch_capacity = 0;
+    const measured = try e.scratch(@import("src/families/qwen3_5/cuda_engine.zig").max_rows, .measure);
+    try t.expectEqual(measured, try e.scratch(@import("src/families/qwen3_5/cuda_engine.zig").max_rows, .allocate));
     try t.expectEqual(e.y, e.gate);
     try t.expectEqual(e.z, e.qraw);
 }
