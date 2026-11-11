@@ -162,10 +162,10 @@ KERNEL(16) void attn_merge(global const float *PM, global const float *PL, globa
     const float wj = ok ? exp(PM[base + s0 + lane] - m) : 0.0f, lj = ok ? PL[base + s0 + lane] : 0.0f;
     float v[16];
     #pragma unroll
-    for (int k = 0; k < 16; k++) v[k] = PO[(base + min(s0 + k, used - 1)) * 256 + g * 16 + lane];
+    for (int k = 0; k < 16; k++) v[k] = s0 + k < used ? PO[(base + s0 + k) * 256 + g * 16 + lane] : 0.0f;
     #pragma unroll
     for (int k = 0; k < 16; k++) {
-      const float w = sub_group_broadcast(wj, k); // 0 past the last slice: adds an exact zero
+      const float w = sub_group_broadcast(wj, k); // 0 past the last slice, with a 0 value: adds an exact zero
       l += sub_group_broadcast(lj, k) * w;
       o += v[k] * w;
     }
