@@ -174,6 +174,7 @@ pub const Kernels = struct {
                 .output = if (cut[1] > 0) .f32 else .bf16,
                 .precompute_sums = reg or (p.bits == 8 and p.group == 64),
                 .reg = reg,
+                .row_blocks = long and !reg,
                 .rows = if (long) lane.max_reg_rows else if (reg) lane.reg_rows else 16,
             });
             k.joined(entry.value_ptr);
