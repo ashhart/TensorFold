@@ -72,12 +72,25 @@ const Hook = struct {
     id: Id = 0, // 0: none
     sent: bool = false,
     refuse_at: u32 = 0, // the restore of a state kept this far fails at the first chunk, as qwen27_slots.opening can
+    resumed: u32 = 0, // the first request's pass stands this far already, as slot 0 resumes in place: no mark below
+    late: ?Late = null, // a request submitted as the first request's fill starts its chunk `at`
+    const Late = struct { id: Id, request: *const Request, box: *Box };
     fn call(ctx: *anyopaque, s: *lanes.Stream, chunk: usize) void {
         const c: *Hook = @ptrCast(@alignCast(ctx));
         if (c.refuse_at > 0 and chunk == 0 and s.reuse.saved != null and s.reuse.at == c.refuse_at) {
             s.reuse_failed = true; // the pass prefills from 0 with reuse.remote still set, as on the Mac
             s.reuse.saved = null;
         }
+        if (c.resumed > 0 and chunk == 0 and s.prompt()[system_len] == 300) {
+            s.cached = c.resumed; // as qwen27_slots.opening sets it; the fake still fills its rows from 0
+            var i: usize = 0;
+            while (i < s.reuse.marks.len and s.reuse.marks[i] <= c.resumed) i += 1;
+            s.reuse.marks = s.reuse.marks[i..]; // a pass from `resumed` never stands at a mark at or before it
+        }
+        if (c.late) |l| if (chunk == c.at and s.prompt()[system_len] == 300) {
+            c.late = null;
+            c.engine.?.submit(l.id, l.request, .{ .ctx = l.box, .event = Box.event }) catch unreachable;
+        };
         if (c.slow_ms > 0) std.Io.sleep(std.testing.io, .fromMilliseconds(c.slow_ms), .awake) catch {};
         if (c.sent or c.id == 0 or chunk != c.at or s.prompt()[system_len] != 300) return;
         c.sent = true;
@@ -110,6 +123,7 @@ const Setup = struct {
     twin: ?usize = null, // this request repeats request 0's prompt
     twin_chunks: []const u32 = &.{}, // the twin's own chunk starts
     remote_at: u32 = 0, // TF_PREFILL_KEEP: the system prompt kept this far as a remote state, as a pulled turn leaves it
+    late: ?usize = null, // this request is submitted from the hook, at the first request's chunk `hook.at`
 };
 
 const Run = struct {
@@ -184,6 +198,10 @@ fn fanout(su: Setup, out: *Run) !void {
         if (su.twin) |k| if (k == i) {
             reqs[i].prompt = reqs[0].prompt;
             reqs[i].chunks = su.twin_chunks;
+        };
+        if (su.late) |k| if (k == i) {
+            hook.late = .{ .id = @intCast(i + 1), .request = &reqs[i], .box = &out.boxes[i] };
+            continue;
         };
         try e.submit(@intCast(i + 1), &reqs[i], .{ .ctx = &out.boxes[i], .event = Box.event });
     }
@@ -332,6 +350,24 @@ test "prefix wait: with an active share and the cap on, a waiter is released wit
     }
     try std.testing.expectEqual(@as(u64, 1), on.waits); // the leader's cut released the waiter
     try std.testing.expectEqual(@as(u64, 0), on.timeouts); // within the 25 ms bound, not at it
+}
+
+test "prefix wait: a request arriving while a fill runs waits for its cut and resumes it" {
+    var r: Run = .{};
+    defer r.deinit();
+    try fanout(.{ .requests = 2, .late = 1, .hook = .{ .at = 2 } }, &r);
+    for (0..2) |i| try std.testing.expectEqual(Reason.length, r.reasons[i]);
+    try std.testing.expectEqualSlices(?u32, &.{ 0, cut }, r.cached[0..2]);
+    try std.testing.expectEqual(@as(u64, 1), r.waits);
+}
+
+test "prefix wait: a fill that resumed past the cut in place (slot 0, a hand-off's next turn) is not waited for" {
+    var r: Run = .{};
+    defer r.deinit();
+    try fanout(.{ .requests = 2, .late = 1, .hook = .{ .at = 2, .resumed = system_len } }, &r); // it never stands at the cut
+    for (0..2) |i| try std.testing.expectEqual(Reason.length, r.reasons[i]);
+    try std.testing.expectEqual(@as(u64, 0), r.waits); // else it waits out the leader's pass for a cut never kept
+    try std.testing.expectEqual(@as(?u32, 0), r.cached[1]);
 }
 
 test "prefix wait: a kept remote leader whose copy is refused prefills from 0, so its cut is exact and so are its waiters" {
