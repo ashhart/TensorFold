@@ -181,8 +181,8 @@ pub const max_marks = 2;
 
 /// TF_FLASHNEXT_VERIFY_HOST_LOGITS=1: drafted windows also copy their last row's scores to the host, as before.
 pub fn verifyHostLogits() bool {
-    const v = std.c.getenv("TF_FLASHNEXT_VERIFY_HOST_LOGITS") orelse return false;
-    return std.mem.eql(u8, std.mem.span(v), "1");
+    // the startup check refused every malformed value already, so a plain default stands here
+    return @import("sys").environment.read(bool, "TF_FLASHNEXT_VERIFY_HOST_LOGITS", false) catch false;
 }
 
 /// The kernels the pass launches besides the captured Triton ones, loaded once.

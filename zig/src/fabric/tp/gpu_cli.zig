@@ -1,21 +1,22 @@
 //! Validate the runner's command before opening a driver, bootstrap or fate channel.
 const std = @import("std");
 
-pub const usage = "usage: tf-tp-test suite | device | failfast RANK fatal|kill|transport [N [HOLD_S]] | roce-host | hca | kernel\n";
+pub const usage = "usage: tf-tp-test suite | device | failfast RANK fatal|kill|transport [N [HOLD_S]] | roce-host | tcp-host | hca | kernel\n";
 pub const Mode = enum { fatal, kill, transport };
 pub const Failure = struct { victim: u32, mode: Mode, n: u32 = 50, hold: ?u32 = null };
-pub const Command = union(enum) { suite, device, failfast: Failure, @"roce-host", hca, kernel };
+pub const Command = union(enum) { suite, device, failfast: Failure, @"roce-host", @"tcp-host", hca, kernel };
 
 pub fn parse(args: []const []const u8) error{InvalidArguments}!Command {
     if (args.len == 0) return error.InvalidArguments;
     const tag = std.meta.stringToEnum(std.meta.Tag(Command), args[0]) orelse return error.InvalidArguments;
     switch (tag) {
-        .suite, .device, .@"roce-host", .hca, .kernel => {
+        .suite, .device, .@"roce-host", .@"tcp-host", .hca, .kernel => {
             if (args.len != 1) return error.InvalidArguments;
             return switch (tag) {
                 .suite => .suite,
                 .device => .device,
                 .@"roce-host" => .@"roce-host",
+                .@"tcp-host" => .@"tcp-host",
                 .hca => .hca,
                 .kernel => .kernel,
                 else => unreachable,
@@ -45,7 +46,7 @@ pub const invalid = [_][]const []const u8{
     &.{ "device", "extra" },                         &.{ "hca", "extra" },                                   &.{ "roce-host", "extra" },          &.{"failfast"},
     &.{ "failfast", "0" },                           &.{ "failfast", "0", "typo" },                          &.{ "failfast", "bad", "fatal" },    &.{ "failfast", "-1", "kill" },
     &.{ "failfast", "4294967296", "fatal" },         &.{ "failfast", "0", "fatal", "50" },                   &.{ "failfast", "0", "kill", "50" }, &.{ "failfast", "0", "transport", "bad" },
-    &.{ "failfast", "0", "transport", "50", "bad" }, &.{ "failfast", "0", "transport", "50", "0", "extra" },
+    &.{ "failfast", "0", "transport", "50", "bad" }, &.{ "failfast", "0", "transport", "50", "0", "extra" }, &.{ "tcp-host", "extra" },
 };
 
 test "invalid commands are refused before resources open" {
@@ -53,7 +54,7 @@ test "invalid commands are refused before resources open" {
 }
 
 test "documented commands and failfast defaults" {
-    inline for (.{ "suite", "device", "roce-host", "hca", "kernel" }) |name| {
+    inline for (.{ "suite", "device", "roce-host", "tcp-host", "hca", "kernel" }) |name| {
         try std.testing.expectEqualStrings(name, @tagName(try parse(&.{name})));
     }
     inline for (.{ Mode.fatal, Mode.kill, Mode.transport }) |mode| {
