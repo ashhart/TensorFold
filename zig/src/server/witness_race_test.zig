@@ -90,14 +90,13 @@ const Race = struct {
                     else => _ = r.mixed.fetchAdd(1, .acq_rel),
                 },
             }
-            std.Thread.yield() catch {}; // the idle manager takes the same lock to park; a busy runner must let it in
         }
     }
 };
 
 fn waitState(m: *idle.Manager, want: idle.State) !void {
     var waited: usize = 0;
-    while (waited < 30000) : (waited += 1) {
+    while (waited < 5000) : (waited += 1) {
         m.mutex.lockUncancelable(t.io);
         const now = m.state;
         m.mutex.unlock(t.io);
@@ -133,7 +132,8 @@ test "execution witness: a reader through park and reload cycles never sees a mi
     const cycles = 6;
     for (0..cycles) |_| {
         m.mutex.lockUncancelable(t.io);
-        m.last_activity_ns = 0; // the window has passed: the timer parks the engine
+        const at: i64 = @intCast(std.Io.Clock.awake.now(t.io).toNanoseconds());
+        m.last_activity_ns = at -% (m.idle_s * std.time.ns_per_s) -% 1; // a whole window ago, whatever the uptime
         m.mutex.unlock(t.io);
         m.cond.broadcast(t.io);
         try waitState(m, .unloaded);
