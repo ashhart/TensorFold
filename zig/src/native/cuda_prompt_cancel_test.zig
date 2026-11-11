@@ -13,7 +13,7 @@ pub fn check(comptime Host: type, comptime serve: anytype) !void {
     const h = try gpa.create(Host);
     defer gpa.destroy(h);
     h.* = .{ .gpa = gpa, .gpu = null, .family = &target, .release = Nothing.release, .inner = target.backend(), .vtable = undefined, .cfg = undefined, .clock = undefined, .core = undefined, .host = undefined };
-    try serve(h, std.testing.io, .{ .exact_width = 8, .mtp = true, .speculate = true, .drafts = 7, .hidden_rows = true }, 8, .{ .lanes = 2 }, null);
+    try serve(h, std.testing.io, .{ .exact_width = 8, .mtp = true, .speculate = true, .drafts = 7, .hidden_rows = true }, 8, .{ .lanes = 2 }, null, 0);
     defer {
         h.host.stop();
         h.core.deinit();
