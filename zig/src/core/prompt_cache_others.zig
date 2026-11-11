@@ -17,6 +17,15 @@ pub fn fromEnv() bool {
 
 /// Whether `bytes` more in `new` more states fit in what other conversations' states leave (spare storage counts free).
 pub fn fits(s: *const pc.Store, skip: ?*pc.Entry, prompt: []const u32, bytes: u64, new: usize) bool {
+    if (s.family.vtable.shared_freed == null) {
+        var freed: u64 = 0;
+        var n: usize = 0;
+        for (s.entries.items) |e| if (policy.own(e, skip, prompt)) {
+            freed += e.bytes;
+            n += 1;
+        };
+        return (s.held -| freed) + bytes <= s.budget and s.entries.items.len - n + new <= s.most;
+    }
     const free = @import("prompt_cache_share.zig").freeSet(s, skip, prompt, true);
     return (s.held -| free.bytes) + bytes <= s.budget and s.entries.items.len - free.slots + new <= s.most;
 }

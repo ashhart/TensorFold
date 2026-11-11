@@ -191,3 +191,5 @@ test {
 test {
     _ = @import("residency_qwen27_share_tests.zig");
 }
+
+pub const cache_lineage = @import("src/core/cache_lineage.zig");
