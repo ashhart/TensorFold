@@ -42,7 +42,7 @@ pub const Cache = struct {
     /// The stream the graph captures on and the communicator whose collectives it holds (released before its abort).
     stream: ?cuda.Stream = null,
     collective: ?*Collective = null,
-    /// Rounds captured and replayed since the engine started; a clear keeps them.
+    /// Rounds captured and replayed since start (logged each 64th capture and 1024th replay); a clear keeps them.
     captures: u64 = 0,
     replays: u64 = 0,
 
@@ -97,7 +97,10 @@ pub const Cache = struct {
             c.key = key;
             c.captures += 1;
             if (c.captures % 64 == 1) std.log.info("flashnext: decode round graphs: {d} captured, {d} replayed", .{ c.captures, c.replays });
-        } else c.replays += 1;
+        } else {
+            c.replays += 1;
+            if (c.replays % 1024 == 0) std.log.info("flashnext: decode round graphs: {d} captured, {d} replayed", .{ c.captures, c.replays });
+        }
         try c.exec.?.launchOn(pass.stream);
     }
 };
