@@ -52,10 +52,10 @@ test "flat TOML: scalars, comments and line ends decode in file order" {
     try t.expectEqualStrings("", entries[7].value.scalar.string);
     try t.expectEqual(@as(usize, 0), (try read(a, "")).len);
     try t.expectEqual(@as(usize, 0), (try read(a, "  # only a comment")).len);
-    const crlf = try read(a, "a = 1\r\nb = [\r\n  2,\r\n]\r\n# end\r\n");
+    const crlf = try read(a, "a = 1\r\nb = [\r\n  \"2\",\r\n]\r\n# end\r\n");
     try t.expectEqual(@as(usize, 2), crlf.len);
     try t.expectEqual(@as(u32, 2), crlf[1].line);
-    try t.expectEqualStrings("2", crlf[1].value.array[0].integer);
+    try t.expectEqualStrings("2", crlf[1].value.array[0]);
 }
 
 test "flat TOML: every escape of a basic string decodes" {
@@ -92,13 +92,13 @@ test "flat TOML: numbers keep their text without underscores or an integer's plu
     }
 }
 
-test "flat TOML: arrays take scalars on one line or several, with comments and a trailing comma" {
+test "flat TOML: arrays take strings on one line or several, with comments and a trailing comma" {
     var arena: std.heap.ArenaAllocator = .init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     const entries = try read(a,
         \\empty = []
-        \\one = ["a", 'b', 3, 4.5, true]
+        \\one = ["a", 'b', "c, d]"]
         \\many = [ # the aliases
         \\  "x",
         \\
@@ -108,14 +108,12 @@ test "flat TOML: arrays take scalars on one line or several, with comments and a
     );
     try t.expectEqual(@as(usize, 0), entries[0].value.array.len);
     const one = entries[1].value.array;
-    try t.expectEqual(@as(usize, 5), one.len);
-    try t.expectEqualStrings("a", one[0].string);
-    try t.expectEqualStrings("b", one[1].string);
-    try t.expectEqualStrings("3", one[2].integer);
-    try t.expectEqualStrings("4.5", one[3].float);
-    try t.expect(one[4].boolean);
+    try t.expectEqual(@as(usize, 3), one.len);
+    try t.expectEqualStrings("a", one[0]);
+    try t.expectEqualStrings("b", one[1]);
+    try t.expectEqualStrings("c, d]", one[2]);
     try t.expectEqual(@as(usize, 2), entries[2].value.array.len);
-    try t.expectEqualStrings("y", entries[2].value.array[1].string);
+    try t.expectEqualStrings("y", entries[2].value.array[1]);
     try t.expectEqual(@as(u32, 3), entries[2].line);
     try t.expectEqual(@as(u32, 8), entries[3].line);
 }
@@ -146,10 +144,11 @@ test "flat TOML: malformed text is refused by line" {
         try refused(a, try std.fmt.allocPrint(a, "a = 1\n{s} = 2\n", .{spelling}), 2, "key defined twice");
     try refused(a, "a = \"open\nb = 1\n", 1, "unterminated string");
     try refused(a, "a = 'open", 1, "unterminated string");
-    try refused(a, "a = [1, 2\nb = 3\n", 2, "expected ',' or ']'");
-    try refused(a, "a = [1,\n  2,\n", 3, "unterminated array");
-    try refused(a, "a = [1 2]\n", 1, "expected ',' or ']'");
-    try refused(a, "a = [,]\n", 1, "expected a value");
+    try refused(a, "a = [\"1\", \"2\"\nb = 3\n", 2, "expected ',' or ']'");
+    try refused(a, "a = [\"1\",\n  \"2\",\n", 3, "unterminated array");
+    try refused(a, "a = [\"1\" \"2\"]\n", 1, "expected ',' or ']'");
+    for ([_][]const u8{ "[,]", "[1]", "[\"a\", 2.5]", "[true]", "[\"a\",\n\n  bare]" }) |list| // an array holds strings only
+        try refused(a, try std.fmt.allocPrint(a, "a = {s}\n", .{list}), if (std.mem.indexOfScalar(u8, list, '\n') != null) 3 else 1, "an array holds strings only");
     try refused(a, "a = 1 2\n", 1, "unexpected text after the value");
     try refused(a, "a = \"x\" y\n", 1, "unexpected text after the value");
     try refused(a, "\n\na 1\n", 3, "expected '='");

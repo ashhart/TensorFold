@@ -6,7 +6,7 @@ reviewed and reused. The command line still works as before, and it wins over th
 ```toml
 # glm.toml
 model = "zai-org/GLM-5.3-Flash"
-host = "0.0.0.0"
+host = "127.0.0.1"
 port = 8080
 context = 131072
 parallel = "auto"
@@ -14,6 +14,7 @@ temperature = 0.6
 thinking = false
 dashboard = true
 alias = ["glm", "glm-flash"]
+chat-template = "templates/glm.jinja"   # beside glm.toml
 api-key-file = "/etc/tensorfold/keys"
 ```
 
@@ -35,13 +36,14 @@ model, as the positional argument does. Every key is at the top level of the fil
 
 | Flag kind | Value in the file | Example |
 | --- | --- | --- |
-| Takes a value | A string or a number | `port = 8080`, `host = "0.0.0.0"`, `parallel = "auto"` |
-| Repeatable | One value, or an array with one item a repeat | `alias = ["glm", "glm-flash"]` |
+| Takes a value | A string or a number | `port = 8080`, `host = "127.0.0.1"`, `parallel = "auto"` |
+| Repeatable | One value, or an array of strings with one item a repeat | `alias = ["glm", "glm-flash"]` |
 | Switch | `true` or `false` | `dashboard = true` |
 
 A number is passed as written, without its `_` separators and, for an integer, without a leading `+`;
-the flag checks it as it checks a typed value. `false` for a switch that has a `--no-` twin selects the twin: `thinking = false` is
-`--no-thinking`. `false` for any other switch leaves it off, which is its default.
+the flag checks it as it checks a typed value. A pair of switches has one key, the positive one: write `thinking = false` for `--no-thinking`; the key
+`no-thinking` is refused and the message names the form to use. A switch with no positive twin keeps its
+name (`no-drafts = true`), and `false` for a switch with no `--no-` twin leaves it off, its default.
 
 ## Precedence
 
@@ -56,8 +58,19 @@ consequences follow:
 - Flags that refuse each other do so across the file and the command line. A file with `unix-socket`
   cannot be combined with `--port`.
 
-A relative path in a value, such as `chat-template = "template.jinja"`, is relative to the directory
-`serve` runs in, not to the file.
+## Paths
+
+A relative path in the file starts at the file's folder, not at the directory `serve` runs in, so a
+file and what it names move together. This holds for the flags that name a file or folder:
+`chat-template`, `api-key-file`, `unix-socket`, `voices`, `speed-up`, `prompt-cache-disk`, `learn-dir`,
+`recall-dir`, `slide-graph`, `record`, `compact-memory` and `fsr-route-trace`. An absolute path and one
+that starts with `~` pass as written.
+
+`model` and `drafter` take a folder or a Hugging Face repo id, and `org/name` could be either. Start a
+folder with `./` or `../` to place it beside the file: `model = "./weights/glm"`. Any other text passes as
+written and resolves as it does on the command line.
+
+A path on the command line is still relative to the directory `serve` runs in.
 
 ## What the file can hold
 
@@ -67,15 +80,19 @@ The reader takes a strict subset of TOML 1.0, so every file it accepts means the
 - bare keys (`A-Z a-z 0-9 _ -`) and quoted keys;
 - basic strings `"..."` with TOML's escapes, and literal strings `'...'`;
 - decimal integers and floats, `true` and `false`;
-- arrays of those, on one line or several, with a trailing comma.
+- arrays of strings, on one line or several, with a trailing comma.
 
-It refuses the rest by line: tables (`[section]`), dotted keys, inline tables, nested arrays, multi-line
-strings, dates and times, hexadecimal, octal and binary integers, a key defined twice, a byte order mark,
+It refuses the rest by line: tables (`[section]`), dotted keys, inline tables, nested arrays, an array
+item that is not a string, multi-line strings, dates and times, hexadecimal, octal and binary integers, a key defined twice, a byte order mark,
 and a file over 1 MiB. Tables are refused, not ignored, so that a later release can give them a meaning.
 
 ## Errors
 
 A problem with the file is a usage error that names the file and the line. Nothing is loaded.
+
+On macOS and Linux, a file that its group or other users can write is refused, as is anything that is
+not a regular file: the file chooses what is served and can hold an `api-key`. `chmod go-w FILE` clears
+it.
 
 ```text
 tensorfold serve: error: argument --config: glm.toml line 7: unknown key 'prot'
