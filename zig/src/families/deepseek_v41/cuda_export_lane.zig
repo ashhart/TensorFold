@@ -103,7 +103,7 @@ pub const Export = struct {
     }
 
     fn exported(ptr: *anyopaque, h: Handoff, tokens: []const u32, saved: pc.Saved) void {
-        self(ptr).produce.exported(h.id, tokens, @ptrCast(@alignCast(saved)));
+        self(ptr).produce.exportedBg(h.id, tokens, @ptrCast(@alignCast(saved)));
     }
 
     fn failed(ptr: *anyopaque, h: Handoff, why: []const u8) void {

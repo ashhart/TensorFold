@@ -85,7 +85,9 @@ reply is one token, and the state at the cut goes to the producer (`cuda_export_
   is there is complete.
 * The export reads rank 0's active slot: its snapshot (`Sessions.snapshot`) and its pool pages, through the same
   `PageStore` the NVMe park uses. A replicated pool holds the same pages and rings on every rank, so no other rank takes
-  part. The snapshot's raw bytes are converted at once to the library's bf16 parts and freed.
+  part. The snapshot's raw bytes are read at the cut, on the engine thread, and converted to the library's bf16 parts on a thread of
+  their own (at most two at a time, a third converts inline), so the decode lanes keep running; a decoder that asks before the
+  parts are done waits for them (`.wait` on a link, a held request over HTTP). The raw bytes are freed when the parts stand.
 * The model name is `LaneHost.Remote.checkpointId` of the checkpoint folder (config and weight index hashed): the
   decoder must serve identical files, or give the manifest's name.
 
