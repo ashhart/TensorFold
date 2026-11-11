@@ -10,6 +10,9 @@ pub fn tests(b: *std.Build, test_step: *std.Build.Step) void {
     const quant_run = b.addRunArtifact(quant_test);
     test_step.dependOn(&quant_run.step);
     b.step("test-qwen27-quant-host", "Prepared head cache identity and prompt row capacity without a GPU").dependOn(&quant_run.step);
+    const mixed = b.createModule(.{ .root_source_file = b.path("zig/qwen27_mixed_host.zig"), .target = b.graph.host, .imports = &.{.{ .name = "contract", .module = @import("kernel_contract.zig").module(b, b.graph.host, .debug) }} });
+    mixed.addImport("core", mixed);
+    b.step("test-qwen27-mixed-host", "The production attention projection stage has no slice dispatch").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mixed, .filters = &.{"qwen27 mixed:"} })).step);
     const loop_cfg = b.createModule(.{ .root_source_file = b.path("zig/sensenova_loop_config_host.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true });
     loop_cfg.addImport("core", loop_cfg);
     const loop_cfg_run = b.addRunArtifact(b.addTest(.{ .root_module = loop_cfg, .filters = &.{"SenseNova loop config table:"} }));
