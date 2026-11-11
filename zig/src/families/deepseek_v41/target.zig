@@ -75,6 +75,14 @@ pub const GpuTarget = struct {
         if (slot < t.cut.len) t.cut[slot] = cut;
     }
 
+    /// The slot's armed export point, once: it stands after the prompt's tokens but the last (a hand-off's cut).
+    fn runCut(t: *GpuTarget, slot: u32) void {
+        if (slot >= t.cut.len) return;
+        const c = t.cut[slot] orelse return;
+        t.cut[slot] = null;
+        c.run(c.ptr);
+    }
+
     fn self_(p: *anyopaque) *GpuTarget {
         return @ptrCast(@alignCast(p));
     }
@@ -112,10 +120,7 @@ pub const GpuTarget = struct {
             try t.f.finishPrompt();
             try t.handTaps(slot);
             // the slot stands after the prompt's tokens but the last: the hand-off's export point
-            if (slot < t.cut.len) if (t.cut[slot]) |c| {
-                t.cut[slot] = null;
-                c.run(c.ptr);
-            };
+            t.runCut(slot);
             var one: [1]u32 = undefined;
             var out = [_][]u32{&one};
             try window(p, &.{.{ .slot = slot, .start = ids.len - sp.window, .tokens = ids[ids.len - sp.window ..], .parents = null, .draws = &.{draw}, .sampling = sampling }}, &out);
@@ -161,6 +166,7 @@ pub const GpuTarget = struct {
         if (!available(p, slot)) return error.SlotUnavailable;
         if (!(t.own_prefill and t.prompt_tail == .verify)) return error.NoPieces;
         _ = t.takeReplayed(slot); // a batched replay of a request that never finished is not this one's
+        if (slot < t.cut.len) t.cut[slot] = null; // an export point of a prompt that never finished is not this one's
         const planned = t.admission;
         t.admission = null;
         try t.onSlot(slot);
@@ -216,6 +222,7 @@ pub const GpuTarget = struct {
             try t.f.finishPrompt();
             try t.handTaps(slot);
         }
+        t.runCut(slot); // the hand-off's export point: the replay is in, the last token's window is not
         var one: [1]u32 = undefined;
         var out = [_][]u32{&one};
         try window(p, &.{.{ .slot = slot, .start = ids.len - 1, .tokens = ids[ids.len - 1 ..], .parents = null, .draws = &.{draw}, .sampling = sampling }}, &out);
@@ -278,6 +285,7 @@ pub const GpuTarget = struct {
             try t.f.finishPrompt();
             try t.handTaps(slot);
         }
+        t.runCut(slot); // the hand-off's export point, as in `finish`
         return null;
     }
 
@@ -451,6 +459,7 @@ pub const GpuTarget = struct {
     fn releaseChecked(p: *anyopaque, slot: u32) !void {
         const t = self_(p);
         if (slot >= t.releasing.len) return error.Slots;
+        t.cut[slot] = null; // a prompt that leaves exports nothing at a cut it never reached
         t.releasing[slot] = true;
         if (!t.defer_release) try t.completeRelease(slot);
     }

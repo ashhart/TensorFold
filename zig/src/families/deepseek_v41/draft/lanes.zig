@@ -71,6 +71,8 @@ pub const Lanes = struct {
     /// each slot's stream state (null: free)
     by_slot: []?*St,
     retired: [16]bool = @splat(false),
+    /// each slot's hand-off export point while its prompt runs in pieces (armed at `begin`, run by the target)
+    cuts: [16]Cut = undefined,
     release_requested: [16]bool = @splat(false),
 
     pub const init = @import("lane_owner.zig").init;
@@ -167,7 +169,7 @@ pub const Lanes = struct {
     }
 
     /// A hand-off's export point: the stream's mark hook, called one token before the prompt's end.
-    const Cut = struct {
+    pub const Cut = struct {
         s: *Stream,
         at: u32,
 
@@ -177,6 +179,15 @@ pub const Lanes = struct {
             k.at(k.ptr, c.s, c.at);
         }
     };
+
+    /// A hand-off stream's export point armed on its slot (the stream's marks hold the cut); false: not a hand-off.
+    fn armCut(x: *Lanes, slot: u32, s: *Stream) bool {
+        const ids = s.prompt();
+        if (ids.len < 2 or s.reuse.hook == null or std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(ids.len - 1)) == null) return false;
+        x.cuts[slot] = .{ .s = s, .at = @intCast(ids.len - 1) };
+        x.target.arm(slot, .{ .ptr = &x.cuts[slot], .run = Cut.run });
+        return true;
+    }
 
     fn prefill(ptr: *anyopaque, s: *Stream) anyerror!void {
         const x = self(ptr);
@@ -199,9 +210,7 @@ pub const Lanes = struct {
         x.policy.depth.reset(slot);
         const ids = s.prompt();
         x.target.admit(slot, s.max_new);
-        var cut: Cut = .{ .s = s, .at = @intCast(ids.len -| 1) };
-        const exporting = ids.len >= 2 and s.reuse.hook != null and std.mem.indexOfScalar(u32, s.reuse.marks, cut.at) != null;
-        if (exporting) x.target.arm(slot, .{ .ptr = &cut, .run = Cut.run });
+        const exporting = x.armCut(slot, s);
         defer if (exporting) x.target.arm(slot, null);
         st.first = try x.target.prefill(slot, ids, s.sampling, ids.len);
         st.len = ids.len;
@@ -237,6 +246,7 @@ pub const Lanes = struct {
         x.policy.depth.reset(slot);
         x.target.admit(slot, s.max_new);
         const b = try x.target.begin(slot, s.prompt());
+        _ = x.armCut(slot, s); // the target runs it in `finish` / `tail`, once the replay is in and the last token is not
         try x.streams.put(x.gpa, s, st);
         x.by_slot[slot] = st;
         return .{ .cached = b.at, .damaged = b.damaged };

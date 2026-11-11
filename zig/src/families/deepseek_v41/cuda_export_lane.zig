@@ -27,10 +27,10 @@ pub const Export = struct {
     produce: *serve.Produce,
 
     /// The exporter for `m`, or null with `problem` set; `link` is a `--mcdma-produce` name or `http`.
-    pub fn open(gpa: std.mem.Allocator, io: std.Io, m: *model.Model, pieces: bool, link: ?[]const u8, checkpoint: []const u8, problem: *[]const u8) !?*Export {
+    pub fn open(gpa: std.mem.Allocator, io: std.Io, m: *model.Model, link: ?[]const u8, checkpoint: []const u8, problem: *[]const u8) !?*Export {
         const dump: []const u8 = (try dumpDir(problem)) orelse "";
         if (link == null and dump.len == 0) return null;
-        if (gpu.refusal(m, pieces)) |why| {
+        if (gpu.refusal(m)) |why| {
             problem.* = why;
             return null;
         }

@@ -10,10 +10,9 @@ const ced = @import("ced.zig");
 pub const Error = error{ BadWindow, SplitKvIsNotExported, UnsupportedKvFormat };
 
 /// Why this engine cannot export hand-offs as configured, or null; checked once at open.
-pub fn refusal(m: *const model.Model, pieces: bool) ?[]const u8 {
+pub fn refusal(m: *const model.Model) ?[]const u8 {
     const ss = m.sessions orelse return "--mcdma-produce needs the session store over the paged pool: set TF_DSV41_POOL_TOKENS (and TF_DSV41_SESSIONS=1; with TF_DSV41_SLOTS above 1 also TF_DSV41_SESSION_SLOTS=1)";
     if (!m.gt.own_prefill or m.gt.prompt_tail != .verify) return "--mcdma-produce needs the served prompt shape: TF_DSV41_OWN_PREFILL=1 and TF_DSV41_PROMPT_TAIL=verify (the defaults), so the prompt's last token stays pending at the cut";
-    if (pieces) return "--mcdma-produce needs whole prompts at admission: unset TF_DSV41_PREFILL_PIECES (a prompt in pieces never stands at the cut)";
     const kx = ss.kx;
     if (kx.layout.opts.split and kx.world > 1) return "--mcdma-produce exports a replicated KV pool: unset TF_DSV41_KV_SPLIT (a split pool holds half the pages on the other rank)";
     if (kx.layout.opts.kv != .fp8) return "--mcdma-produce exports CUDA's fp8 comp rows (584 bytes); this pool holds another format";

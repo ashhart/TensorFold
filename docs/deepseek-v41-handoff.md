@@ -90,10 +90,11 @@ reply is one token, and the state at the cut goes to the producer (`cuda_export_
   decoder must serve identical files, or give the manifest's name.
 
 The engine refuses, at start-up and by name, a configuration it cannot export: no session store (`TF_DSV41_POOL_TOKENS`),
-`TF_DSV41_PREFILL_PIECES=1` (a prompt in pieces
-never stands at the cut), `TF_DSV41_KV_SPLIT=1` (half the pages are on the other rank), a non-default prompt shape, and fp4
-comp rows. Replay prefill is exported, with `TF_DSV41_PF_4K` and the other knobs that need it. The pair's serving profile also
-uses pieces and a split pool, so an export pair runs another profile.
+`TF_DSV41_KV_SPLIT=1` (half the pages are on the other rank), a non-default prompt shape, and fp4 comp rows. Replay prefill is
+exported, with `TF_DSV41_PF_4K` and the other knobs that need it. So is a prompt run in pieces between decode rounds
+(`TF_DSV41_PREFILL_PIECES=1`): the cut stands in the prompt's last step, after its last piece and the decoder replay and before
+the last token's window, and the other streams keep decoding while the pieces run. The pair's serving profile (pieces, replay,
+drafts) therefore exports in the same process, with a replicated pool.
 
 ## Assumptions that the library cannot prove
 

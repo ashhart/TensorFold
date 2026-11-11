@@ -206,7 +206,7 @@ pub const Served = struct {
         const dump = (try xl.dumpDir(problem)) != null;
         if (link == null and !dump) return null;
         const checkpoint = try api.LaneHost.Remote.checkpointId(s.arena.allocator(), s.io, dir);
-        return (try xl.Export.open(s.gpa, s.io, s.m, s.sched != null, link, checkpoint, problem)) orelse error.ExportRefused;
+        return (try xl.Export.open(s.gpa, s.io, s.m, link, checkpoint, problem)) orelse error.ExportRefused;
     }
 
     fn syncStream(ctx: *anyopaque) anyerror!void {
