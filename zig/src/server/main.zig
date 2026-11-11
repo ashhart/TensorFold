@@ -103,7 +103,7 @@ pub fn main(init: std.process.Init) !u8 {
     }
     const started = std.Io.Clock.awake.now(io).toNanoseconds();
     var u: cli.Usage = .{};
-    const expanded = cli_config.expand(a, io, argv[2..], &u) catch |e| switch (e) {
+    const expanded = cli_config.expand(a, argv[2..], &u) catch |e| switch (e) {
         error.Usage => {
             std.debug.print("{s}tensorfold serve: error: {s}\n", .{ usage_line, u.message });
             return 2;

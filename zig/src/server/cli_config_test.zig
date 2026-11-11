@@ -126,8 +126,8 @@ test "serve --config: the file's model yields to the command line's, and its fla
     try t.expectEqual(@as(usize, 5), alone.len);
     for ([_][]const u8{ "file/model", "--port=1", "--alias=a", "--port", "2" }, alone) |w, g| try t.expectEqualStrings(w, g);
     const named = try f.merged(text, &.{ "cli/model", "--alias", "z" });
-    for ([_][]const u8{ "--port=1", "--alias=a", "cli/model", "--alias", "z" }, named) |w, g| try t.expectEqualStrings(w, g);
-    try t.expectEqual(@as(usize, 5), named.len);
+    for ([_][]const u8{ "--port=1", "cli/model", "--alias", "z" }, named) |w, g| try t.expectEqualStrings(w, g);
+    try t.expectEqual(@as(usize, 4), named.len); // --alias on the command line replaces the file's list
     // --config between other arguments leaves them in order
     const a = f.arena.allocator();
     const argv: []const []const u8 = &.{ "m", "--dashboard", "--config=f.toml", "--port", "3" };
@@ -146,7 +146,6 @@ test "serve --config: a relative path in the file starts at the file's folder" {
         \\chat-template = "t.jinja"
         \\api-key-file = "../keys"
         \\learn-dir = "/abs/learn"
-        \\recall-dir = "~/recall"
         \\drafter = "./drafter"
         \\name = "plain/name"
         \\kv-cache = "bf16"
@@ -154,7 +153,7 @@ test "serve --config: a relative path in the file starts at the file's folder" {
     const sep = std.fs.path.sep_str;
     const argv: []const []const u8 = &.{ "--config", "conf" ++ sep ++ "f.toml" };
     const out = try config.merge(a, argv, (try config.locate(a, argv, &f.u)).?, text, &f.u);
-    const want = [_][]const u8{ "conf" ++ sep ++ "weights/m", "--chat-template=conf" ++ sep ++ "t.jinja", "--api-key-file=conf" ++ sep ++ "../keys", "--learn-dir=/abs/learn", "--recall-dir=~/recall", "--drafter=conf" ++ sep ++ "drafter", "--name=plain/name", "--kv-cache=bf16" };
+    const want = [_][]const u8{ "conf" ++ sep ++ "weights/m", "--chat-template=conf" ++ sep ++ "t.jinja", "--api-key-file=conf" ++ sep ++ "../keys", "--learn-dir=/abs/learn", "--drafter=conf" ++ sep ++ "drafter", "--name=plain/name", "--kv-cache=bf16" };
     try t.expectEqual(want.len, out.argv.len);
     for (want, out.argv) |w, g| try t.expectEqualStrings(w, g);
     // a repo id, or a folder named without ./, is left as written: the hub resolves it as it does a typed model
@@ -200,8 +199,15 @@ test "serve --config: a file parses as its flags typed by hand, and the command 
     try t.expectEqual(@as(?f64, 0), over.temperature);
     try t.expect(!over.compact_auto);
     try t.expectEqual(@as(?f64, 0.5), over.compact_fraction);
-    try t.expectEqual(@as(usize, 3), over.alias.len); // an append flag accumulates: the file's, then the command line's
-    for ([_][]const u8{ "a", "b", "z" }, over.alias) |w, g| try t.expectEqualStrings(w, g);
+    try t.expectEqual(@as(usize, 1), over.alias.len); // a repeatable flag on the command line replaces the file's list
+    try t.expectEqualStrings("z", over.alias[0]);
+    // so a key, a host or an origin the file names does not stay in force beside the command line's
+    const keys = try cli.parse(a, try f.merged("api-key = [\"old\", \"older\"]\nallowed-host = \"a.example\"\nalias = \"kept\"\n", &.{ "m", "--api-key=new", "--allowed-host", "b.example" }), &f.u);
+    try t.expectEqual(@as(usize, 1), keys.api_key.len);
+    try t.expectEqualStrings("new", keys.api_key[0]);
+    try t.expectEqual(@as(usize, 1), keys.allowed_host.len);
+    try t.expectEqualStrings("b.example", keys.allowed_host[0]);
+    try t.expectEqualStrings("kept", keys.alias[0]); // a list the command line does not name stays the file's
     try t.expectEqualStrings("0.0.0.0", over.host); // what the command line does not name stays the file's
     try t.expect(over.dashboard);
 
@@ -210,11 +216,34 @@ test "serve --config: a file parses as its flags typed by hand, and the command 
         try t.expectError(error.Usage, cli.parse(a, try f.merged("unix-socket = \"/tmp/s.sock\"\n", &.{ "m", "--port", "1" }), &f.u));
         try t.expectEqualStrings("argument --unix-socket: not allowed with --port", f.u.message);
     }
-    // a value the flag refuses is refused by parse, in its own words
-    try t.expectError(error.Usage, cli.parse(a, try f.merged("port = 99999\n", &.{"m"}), &f.u));
-    try t.expectEqualStrings("argument --port: invalid port: '99999'", f.u.message);
-    try t.expectError(error.Usage, cli.parse(a, try f.merged("backend = \"vulkan\"\n", &.{"m"}), &f.u));
-    try t.expectEqualStrings("argument --backend: invalid choice: 'vulkan'", f.u.message);
+    // a value the flag refuses is refused in the flag's own words, with the file's line
+    try f.refused("model = \"m\"\n\nport = 99999\n", 3, "argument --port: invalid port: '99999'");
+    try f.refused("backend = \"vulkan\"\n", 1, "argument --backend: invalid choice: 'vulkan'");
+    try f.refused("port = 1\ntemperature = \"warm\"\n", 2, "argument --temperature: invalid float value: 'warm'");
+    try f.refused("alias = [\"a\"]\nallowed-host = [\"ok.example\",\n  \"bad host:1\"]\n", 2, "argument --allowed-host: expected a hostname or bracketed IP without a port: 'bad host:1'");
+    try f.refused("compact-at = 1.5\n", 1, "argument --compact-at: expected auto or a fraction in (0, 1]: '1.5'");
+    // checks that parse runs once every flag is read name the line too
+    try f.refused("port = 1\nidle-unload = -1\n", 2, "argument --idle-unload: expected a seconds count from 0 (off) under 9223372036: '-1'");
+    try f.refused("name-priority = [\"a=background\", \"broken\"]\n", 1, "argument --name-priority: takes ID=background, not 'broken'");
+    {
+        var hosts: std.ArrayList(u8) = .empty;
+        try hosts.appendSlice(a, "allowed-host = [\n");
+        for (0..65) |n| try hosts.print(a, "  \"h{d}.example\",\n", .{n});
+        try hosts.appendSlice(a, "]\n");
+        try f.refused(hosts.items, 1, "at most 64 --allowed-host and 64 --allowed-origin entries are allowed");
+        const argv: []const []const u8 = &.{ "--config", "f.toml", "--name-priority", "x=background" };
+        try t.expectError(error.Usage, config.merge(a, argv, (try config.locate(a, argv, &f.u)).?, "name-priority = [\"broken\"]\n", &f.u));
+        try t.expectEqualStrings("argument --config: f.toml line 1: argument --name-priority: takes ID=background, not 'broken'", f.u.message);
+    }
+    // a replaced list is still checked, so a bad entry does not hide behind the command line
+    {
+        const argv: []const []const u8 = &.{ "--config", "f.toml", "--allowed-host", "b.example" };
+        try t.expectError(error.Usage, config.merge(a, argv, (try config.locate(a, argv, &f.u)).?, "allowed-host = \"bad host:1\"\n", &f.u));
+        try t.expectEqualStrings("argument --config: f.toml line 1: argument --allowed-host: expected a hostname or bracketed IP without a port: 'bad host:1'", f.u.message);
+    }
+    // no shell expands ~ in the file: a path flag refuses it, where the hub expands a model's or drafter's ~/
+    try f.refused("port = 1\nrecall-dir = \"~/recall\"\n", 2, "--recall-dir: no shell expands ~ in a config file; write the whole path");
+    try f.tokens("model = \"~/models/m\"\ndrafter = \"~/d\"\n", &.{ "~/models/m", "--drafter=~/d" });
     try t.expectError(error.Usage, cli.parse(a, try f.merged("port = 1\n", &.{}), &f.u));
     try t.expectEqualStrings("the following arguments are required: model", f.u.message);
 }
@@ -224,7 +253,7 @@ test "serve --config: expand reads the file, passes other commands through and n
     defer f.deinit();
     const a = f.arena.allocator();
     const plain: []const []const u8 = &.{ "m", "--port", "1" };
-    const same = try config.expand(a, t.io, plain, &f.u);
+    const same = try config.expand(a, plain, &f.u);
     try t.expect(same.argv.ptr == plain.ptr and same.argv.len == plain.len and same.path == null);
     try t.expect(try config.note(a, same) == null);
 
@@ -233,7 +262,7 @@ test "serve --config: expand reads the file, passes other commands through and n
     const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
     try tmp.dir.writeFile(t.io, .{ .sub_path = "serve.toml", .data = "model = \"org/Model\"\nport = 9000\n" });
     const path = try std.fs.path.join(a, &.{ dir, "serve.toml" });
-    const read = try config.expand(a, t.io, &.{ "--config", path, "--dashboard" }, &f.u);
+    const read = try config.expand(a, &.{ "--config", path, "--dashboard" }, &f.u);
     try t.expectEqual(@as(usize, 3), read.argv.len);
     for ([_][]const u8{ "org/Model", "--port=9000", "--dashboard" }, read.argv) |w, g| try t.expectEqualStrings(w, g);
     try t.expectEqualStrings(try std.fmt.allocPrint(a, "--config {s} supplied 2 options, read before the command line's", .{path}), (try config.note(a, read)).?);
@@ -244,23 +273,40 @@ test "serve --config: expand reads the file, passes other commands through and n
         const c = @import("sys").c;
         const pathz = try a.dupeSentinel(u8, path, 0);
         for ([_]u32{ 0o664, 0o646, 0o666 }) |mode| {
-            try t.expectEqual(@as(c_int, 0), c.fchmodat(std.posix.AT.FDCWD, pathz, mode, 0));
-            try t.expectError(error.Usage, config.expand(a, t.io, &.{ "--config", path }, &f.u));
-            try t.expectEqualStrings(try std.fmt.allocPrint(a, "argument --config: {s} can be written by other users (mode 0{o}): it can hold keys and it chooses what is served; use chmod go-w", .{ path, mode }), f.u.message);
+            try t.expectEqual(@as(c_int, 0), c.fchmodat(std.posix.AT.FDCWD, pathz, @intCast(mode), 0));
+            try t.expectError(error.Usage, config.expand(a, &.{ "--config", path }, &f.u));
+            try t.expectEqualStrings(try std.fmt.allocPrint(a, "argument --config: {s} can be written by other users (mode 0{o}): it chooses what is served; use chmod go-w", .{ path, mode }), f.u.message);
         }
         for ([_]u32{ 0o600, 0o644, 0o640 }) |mode| {
-            try t.expectEqual(@as(c_int, 0), c.fchmodat(std.posix.AT.FDCWD, pathz, mode, 0));
-            try t.expectEqual(@as(usize, 2), (try config.expand(a, t.io, &.{ "--config", path }, &f.u)).options);
+            try t.expectEqual(@as(c_int, 0), c.fchmodat(std.posix.AT.FDCWD, pathz, @intCast(mode), 0));
+            try t.expectEqual(@as(usize, 2), (try config.expand(a, &.{ "--config", path }, &f.u)).options);
         }
+        // a file that sets api-key is refused while other users can read it; any other file may be world-readable
+        try tmp.dir.writeFile(t.io, .{ .sub_path = "key.toml", .data = "model = \"m\"\n\napi-key = \"k\"\n" });
+        const key = try std.fs.path.join(a, &.{ dir, "key.toml" });
+        const keyz = try a.dupeSentinel(u8, key, 0);
+        for ([_]u32{ 0o644, 0o640, 0o604 }) |mode| {
+            try t.expectEqual(@as(c_int, 0), c.fchmodat(std.posix.AT.FDCWD, keyz, @intCast(mode), 0));
+            try t.expectError(error.Usage, config.expand(a, &.{ "--config", key }, &f.u));
+            try t.expectEqualStrings(try std.fmt.allocPrint(a, "argument --config: {s} line 3: api-key is set in a file other users can read (mode 0{o}); use chmod 600, or api-key-file", .{ key, mode }), f.u.message);
+        }
+        try t.expectEqual(@as(c_int, 0), c.fchmodat(std.posix.AT.FDCWD, keyz, 0o600, 0));
+        try t.expectEqual(@as(u32, 3), (try config.expand(a, &.{ "--config", key }, &f.u)).secret);
+        // a link is not followed: the file that is checked is the file that is read
+        try tmp.dir.symLink(t.io, "serve.toml", "link.toml", .{});
+        const link = try std.fs.path.join(a, &.{ dir, "link.toml" });
+        try t.expectError(error.Usage, config.expand(a, &.{ "--config", link }, &f.u));
+        try t.expectEqualStrings(try std.fmt.allocPrint(a, "argument --config: cannot open {s} (SymLinkLoop); name an existing file, not a link", .{link}), f.u.message);
         try tmp.dir.createDir(t.io, "folder.toml", .default_dir);
         const folder = try std.fs.path.join(a, &.{ dir, "folder.toml" });
-        try t.expectError(error.Usage, config.expand(a, t.io, &.{ "--config", folder }, &f.u));
+        try t.expectError(error.Usage, config.expand(a, &.{ "--config", folder }, &f.u));
         try t.expectEqualStrings(try std.fmt.allocPrint(a, "argument --config: {s} is not a regular file", .{folder}), f.u.message);
     }
 
     const missing = try std.fs.path.join(a, &.{ dir, "none.toml" });
-    try t.expectError(error.Usage, config.expand(a, t.io, &.{ "m", "--config", missing }, &f.u));
-    try t.expectEqualStrings(try std.fmt.allocPrint(a, "argument --config: cannot read {s}: FileNotFound", .{missing}), f.u.message);
+    try t.expectError(error.Usage, config.expand(a, &.{ "m", "--config", missing }, &f.u));
+    const absent = if (@import("builtin").os.tag == .windows) "OpenFailed" else "FileNotFound";
+    try t.expectEqualStrings(try std.fmt.allocPrint(a, "argument --config: cannot open {s} ({s}); name an existing file, not a link", .{ missing, absent }), f.u.message);
 
     // exactly the limit is read; one byte more, and far more, get the size message
     const filler = try a.alloc(u8, 3 * config.limit);
@@ -269,9 +315,9 @@ test "serve --config: expand reads the file, passes other commands through and n
         try tmp.dir.writeFile(t.io, .{ .sub_path = "big.toml", .data = filler[0..size] });
         const big = try std.fs.path.join(a, &.{ dir, "big.toml" });
         if (size == config.limit) {
-            try t.expectEqual(@as(usize, 0), (try config.expand(a, t.io, &.{ "m", "--config", big }, &f.u)).options);
+            try t.expectEqual(@as(usize, 0), (try config.expand(a, &.{ "m", "--config", big }, &f.u)).options);
         } else {
-            try t.expectError(error.Usage, config.expand(a, t.io, &.{ "m", "--config", big }, &f.u));
+            try t.expectError(error.Usage, config.expand(a, &.{ "m", "--config", big }, &f.u));
             try t.expectEqualStrings(try std.fmt.allocPrint(a, "argument --config: {s} is over 1 MiB", .{big}), f.u.message);
         }
     }
