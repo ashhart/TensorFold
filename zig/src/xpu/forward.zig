@@ -495,6 +495,7 @@ pub fn forward(d: *Dev, m: *Model, a: *Acts, ids: []const i32, p0: u32, mode: Mo
     var toks: [16]i32 = undefined;
     try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, &toks, a.tok, rows * 4, null, 0, null));
     try d.sync();
+    if (mode.cand) |c| c.rows.* = rows; // the candidates are the host's once the copy has landed
     if (mode.rows_out) |o| @memcpy(o[0..rows], toks[0..rows]);
     return toks[rows - 1];
 }
