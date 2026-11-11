@@ -53,6 +53,7 @@ pub const Seen = struct {
     store: ?*const pc.Store = null, // the run's cache, its borrowers counted at the first chunk
     borrowed: u32 = 0, // its states still borrowed at the first chunk: a lookup let go before the pass is not
     refuse: bool = false, // the first chunk refuses a pulled copy, as qwen27_slots.opening can: the pass starts at 0
+    inherit: bool = false, // the first chunk stands the stream on slot 0's remote record, as qwen27_resume.inherit does
     done: std.atomic.Value(bool) = .init(false),
 
     fn chunk(ctx: *anyopaque, s: *lanes.Stream, n: usize) void {
@@ -61,7 +62,8 @@ pub const Seen = struct {
         const kept: []const *pc.Entry = if (x.store) |st| st.entries.items else &.{};
         var borrowed: u32 = 0;
         for (kept) |e| borrowed += e.borrowers;
-        x.* = .{ .restoring = s.reuse.saved != null, .at = s.reuse.at, .remote = s.reuse.remote, .marks = s.reuse.marks.len, .hooked = s.reuse.hook != null, .store = x.store, .borrowed = borrowed, .refuse = x.refuse };
+        x.* = .{ .restoring = s.reuse.saved != null, .at = s.reuse.at, .remote = s.reuse.remote, .marks = s.reuse.marks.len, .hooked = s.reuse.hook != null, .store = x.store, .borrowed = borrowed, .refuse = x.refuse, .inherit = x.inherit };
+        if (x.inherit) s.reuse.remote = true;
         if (!x.refuse or !s.reuse.pulled) return;
         s.reuse_failed = true; // the pass prefills from token 0 with reuse.remote still set, as on the Mac
         s.reuse.saved = null;
@@ -134,12 +136,12 @@ pub fn runWith(peer: *Peer, request: *const api.Request, exp: ?*Exp, cache: ?*pc
 }
 
 /// A run's host beyond the remote source: TF_PREFILL_KEEP, the server's warm passes, slot 0's own resume point.
-pub const Host = struct { keep: bool = false, warm: bool = false, peek: ?remote.ResumePeek = null, refuse: bool = false };
+pub const Host = struct { keep: bool = false, warm: bool = false, peek: ?remote.ResumePeek = null, refuse: bool = false, inherit: bool = false };
 
 pub fn runKeep(peer: *Peer, request: *const api.Request, exp: ?*Exp, cache: ?*pc.Store, o: Host) !Seen {
     var cfg = try lanes.Config.init(t.allocator, .{}, 1, 0);
     defer cfg.deinit(t.allocator);
-    var seen: Seen = .{ .store = cache, .refuse = o.refuse };
+    var seen: Seen = .{ .store = cache, .refuse = o.refuse, .inherit = o.inherit };
     var fake: lanes.fake.Fake = .{ .gpa = t.allocator, .prefill_hook = Seen.chunk, .prefill_hook_ctx = &seen };
     defer fake.deinit();
     var clock: lanes.fake.FixedClock = .{};

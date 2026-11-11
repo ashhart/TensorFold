@@ -151,7 +151,7 @@ pub fn use(h: *LaneHost, job: *Job, reuse: *lanes.stream.Reuse) void {
     reuse.* = .{ .saved = f.saved, .at = f.at, .remote = true, .pulled = true, .marks = marks, .hook = if (h.keep_remote) .{ .ptr = job, .at = Job.kept } else null };
 }
 
-/// A kept remote state slot 0's exact state reaches is let go; if a stream takes slot 0 first, the pass starts at 0.
+/// A kept remote state slot 0's state reaches is let go; if a stream takes slot 0 first, the pass starts at 0.
 fn ownFirst(h: *LaneHost, job: *Job, reuse: *lanes.stream.Reuse) void {
     const p = h.resume_peek orelse return;
     if (p.at(p.ctx, job.request.prompt, h.spans(job.request)) < reuse.at) return;
@@ -159,7 +159,7 @@ fn ownFirst(h: *LaneHost, job: *Job, reuse: *lanes.stream.Reuse) void {
     job.entry = null;
     reuse.saved = null;
     reuse.at = 0;
-    reuse.remote = false; // its marks and hook stay: what the pass keeps past slot 0's point is exact
+    reuse.remote = false; // marks and hook stay; a pass resuming slot 0 takes its rows' origin (qwen27_resume.inherit)
 }
 
 /// The marks after `at`, ascending as the store plans them.
