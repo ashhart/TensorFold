@@ -10,8 +10,9 @@ from drama_reference_cache_check import TEXTS, serve
 GAMMAS = ("1", "1.5", "3")
 CFG = ["--cfg-gamma", "1.5", "--cfg-allow-request-gamma", "--cfg-force-guided"]
 MODES = {"plain": [], "separate": CFG, "paired": [*CFG, "--cfg-batched"]}
-# One row a chunk, and chunks that take a whole prompt (or a cached reference's suffix) in one round.
-ROWS = (1, 1024)
+# One row a chunk, and chunks long enough that a cached reference's suffix (a short text) is one round; a reference
+# keeps whole chunks only, so a voice needs more reference rows than a chunk for its later requests to hit the cache.
+ROWS = (1, 64)
 
 
 def plan(voice):
@@ -29,21 +30,35 @@ def require_reference(voices, voice):
 
 
 def verdict(runs):
-    """Every reply has PCM; paired equals separate; forced gamma 1 equals the server without CFG; per prefill size."""
+    """Every reply has PCM; paired equals separate; forced gamma 1 equals the server without CFG and gamma above 1
+    differs from it; every guided server resumed a cached reference; per prefill size."""
     problems = []
     for rows, modes in runs.items():
         separate, paired, plain = modes["separate"], modes["paired"], modes["plain"]
-        for mode, replies in modes.items():
-            problems += [f"rows={rows} {name}: {mode} returned no PCM" for name, reply in replies.items()
+        for mode, run in modes.items():
+            problems += [f"rows={rows} {name}: {mode} returned no PCM" for name, reply in run["replies"].items()
                          if reply["bytes"] == 0]
-        for name, reply in separate.items():
-            if paired[name]["sha256"] != reply["sha256"]:
+        for name, reply in separate["replies"].items():
+            if paired["replies"][name]["sha256"] != reply["sha256"]:
                 problems.append(f"rows={rows} {name}: paired PCM differs from separate")
-        for name, reply in plain.items():
+        for name, reply in plain["replies"].items():
             for mode in ("separate", "paired"):
-                if modes[mode][name]["sha256"] != reply["sha256"]:
+                guided = modes[mode]["replies"]
+                if guided[name]["sha256"] != reply["sha256"]:
                     problems.append(f"rows={rows} {name}: {mode} gamma 1 differs from the server without CFG")
+                for gamma in GAMMAS[1:]:
+                    mixed = name.removesuffix("-g1") + f"-g{gamma}"
+                    if guided[mixed]["sha256"] == guided[name]["sha256"]:
+                        problems.append(f"rows={rows} {mixed}: {mode} PCM equals gamma 1, so guidance changed nothing")
+        for mode in ("separate", "paired"):
+            if modes[mode]["cache_hits"] == 0:
+                problems.append(f"rows={rows}: {mode} never resumed a cached reference")
     return problems
+
+
+def run_mode(args, env, flags, log, steps):
+    replies = serve(args, env, flags, log, steps)
+    return {"replies": replies, "cache_hits": log.read_text(errors="replace").count("reference cache hit")}
 
 
 def main():
@@ -51,7 +66,7 @@ def main():
     parser.add_argument("--bin", type=Path, required=True, help="tensorfold-native built with this change (CUDA)")
     parser.add_argument("--checkpoint", type=Path, required=True, help="fishaudio/drama-3 checkpoint directory")
     parser.add_argument("--voices", type=Path, required=True, help="voice catalog directory for --voices")
-    parser.add_argument("--voice", required=True, help="a catalog voice in --voices with a reference")
+    parser.add_argument("--voice", required=True, help="a catalog voice in --voices whose reference has over 64 rows")
     parser.add_argument("--out", type=Path, required=True, help="new directory for server logs and results.json")
     parser.add_argument("--ready-timeout", type=float, default=900)
     parser.add_argument("--timeout", type=float, default=300)
@@ -62,10 +77,10 @@ def main():
     plain = [s for s in steps if not isinstance(s, list) and s[0].endswith("-g1")]
     runs = {}
     for rows in ROWS:
-        # the cache's second request of a voice resumes after its reference: a one-chunk suffix at large rows
+        # each voice's later requests resume after its cached reference: a one-chunk suffix at large rows
         env = {**os.environ, "TF_DRAMA_PREFILL_ROWS": str(rows), "TF_DRAMA_REFERENCE_CACHE": "2"}
-        runs[rows] = {mode: serve(args, env, flags, args.out / f"server-rows{rows}-{mode}.log",
-                                  plain if mode == "plain" else steps) for mode, flags in MODES.items()}
+        runs[rows] = {mode: run_mode(args, env, flags, args.out / f"server-rows{rows}-{mode}.log",
+                                     plain if mode == "plain" else steps) for mode, flags in MODES.items()}
     problems = verdict(runs)
     result = {"pass": not problems, "problems": problems, "runs": runs}
     (args.out / "results.json").write_text(json.dumps(result, indent=2) + "\n")
