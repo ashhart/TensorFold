@@ -17,7 +17,7 @@ pub const Span = struct {
         encoder.setBuffer(s.buffer, s.offset, index);
     }
 
-    fn overlaps(a: Span, b: Span) bool {
+    pub fn overlaps(a: Span, b: Span) bool {
         return a.buffer.id == b.buffer.id and a.offset < b.offset + b.bytes and b.offset < a.offset + a.bytes;
     }
 };
@@ -108,6 +108,7 @@ pub const Round = struct {
     tree_mode: TreeMode = .auto,
     compact: bool,
     slot_kernel: usize, // which tree_slots kernel holds the plan's peak of live states
+    out_sums: ?@import("quant_gpu.zig").Sums = null,
     column_kernel: ?usize = null, // which column scan holds them, if the plan's trees fit one
 
     pub fn init(shape: abi.Shape, kinds: abi.WeightKinds, p: abi.Params, plan: Plan, b: Buffers, pipelines: Pipelines) !Round {
@@ -185,12 +186,7 @@ pub const Round = struct {
             r.stateGrid(e);
         }
         e.barrier();
-        e.setPipeline(r.pipelines.post);
-        bind(e, .{ r.b.recurrent, r.b.z, r.b.norm }, 0);
-        e.setValue(r.p, 3);
-        r.b.output.bind(e, 4);
-        e.dispatchGroups(.{ .width = 1, .height = r.p.nv, .depth = r.p.rows }, .{ .width = 32, .height = 1, .depth = 1 });
-        e.barrier();
+        r.gate(e);
     }
 
     pub fn forwardChain(r: Round, e: metal.ComputeEncoder, chain: metal.Pipeline) void {
@@ -208,10 +204,15 @@ pub const Round = struct {
         e.barrier();
     }
     pub fn gate(r: Round, e: metal.ComputeEncoder) void {
-        e.setPipeline(r.pipelines.post);
+        const xs = if (r.p.dv == 128) r.out_sums else null;
+        e.setPipeline(if (xs != null) r.pipelines.post_sums.? else r.pipelines.post);
         bind(e, .{ r.b.recurrent, r.b.z, r.b.norm }, 0);
         e.setValue(r.p, 3);
         r.b.output.bind(e, 4);
+        if (xs) |x| {
+            e.setBuffer(x.ref.buffer, x.ref.offset, 5);
+            e.setValue(x.stride, 6);
+        }
         e.dispatchGroups(.{ .width = 1, .height = r.p.nv, .depth = r.p.rows }, .{ .width = 32 });
         e.barrier();
     }

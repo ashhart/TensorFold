@@ -148,8 +148,9 @@ pub const Stages = struct {
             e.barrier();
             out_in = f.get(.mixed);
         }
+        const out_sums = if (outSums(m, s.reduce)) sums(f, .sums, s.rows) else null;
         const product = if (split_attention) s.reduce.?.next() else null;
-        if (product) |sm| try m.kernels.quant(lane.enc, out, out_in, null, f.get(.dims), sm.ref, s.rows) else try m.kernels.quant(lane.enc, out, out_in, null, f.get(.dims), f.get(.output), s.rows);
+        if (product) |sm| try m.kernels.quant(lane.enc, out, out_in, out_sums, f.get(.dims), sm.ref, s.rows) else try m.kernels.quant(lane.enc, out, out_in, out_sums, f.get(.dims), f.get(.output), s.rows);
         lane.enc.barrier();
         if (product) |sm| {
             s.reduce.?.rowsOut(&e, sm, f.get(.output), s.rows, out.n, h);
@@ -299,4 +300,9 @@ fn run(m: *Model, e: *mtl.ComputeEncoder, stages: *Stages) !void {
 /// A norm's or the MLP gate's group sums for the frame's padded rows.
 pub fn sums(f: *Frame, field: @import("gpu_frame.zig").Field, rows: u32) @import("quant_gpu.zig").Sums {
     return .{ .ref = f.get(field), .stride = @import("quant_gpu.zig").padded(rows) };
+}
+
+/// Only the unsplit decode producers emit out-projection sums; prompt merges and ranks retain their own sums.
+pub fn outSums(m: anytype, reduce: anytype) bool {
+    return m.device.tensorUnits() and reduce == null and !m.kernels.prompt;
 }

@@ -16,7 +16,7 @@ pub fn markList(rows: u32, marks: []const u32) ![MARKS]u32 {
     return list;
 }
 
-pub const Pipelines = struct { pre: metal.Pipeline, tree: metal.Pipeline, tree_slots: [slot_kernels.len]metal.Pipeline, replay: metal.Pipeline, post: metal.Pipeline, conv_commit: metal.Pipeline, columns: ?[column_kernels.len]metal.Pipeline = null, pre_vectors: ?metal.Pipeline = null };
+pub const Pipelines = struct { pre: metal.Pipeline, tree: metal.Pipeline, tree_slots: [slot_kernels.len]metal.Pipeline, replay: metal.Pipeline, post: metal.Pipeline, conv_commit: metal.Pipeline, columns: ?[column_kernels.len]metal.Pipeline = null, pre_vectors: ?metal.Pipeline = null, post_sums: ?metal.Pipeline = null };
 
 /// Fitting rounds take the column scan, vector conv and row-side activation; off, the general kernels (checks).
 pub var flat_glue = true;
@@ -90,6 +90,8 @@ pub const Kernels = struct {
         }
         const pre_vectors = try metal.Pipeline.init(device, library, "tf_delta_gdn_pre_vectors", false);
         errdefer pre_vectors.deinit();
+        const post_sums = try metal.Pipeline.init(device, library, "tf_delta_gdn_post_sums", false);
+        errdefer post_sums.deinit();
         for (columns) |p| if (p.simdWidth() != 32 or p.maxThreads() < 32) return error.UnsupportedGdnPipeline;
         if (pre_vectors.simdWidth() != 32 or pre_vectors.maxThreads() < 32) return error.UnsupportedGdnPipeline;
         return .{
@@ -103,6 +105,7 @@ pub const Kernels = struct {
                 .conv_commit = pipelines[4],
                 .columns = columns,
                 .pre_vectors = pre_vectors,
+                .post_sums = post_sums,
             },
             .publish = pipelines[5],
             .clear = pipelines[6],
@@ -132,6 +135,7 @@ pub const Kernels = struct {
             k.pre_step,
         }) |p| p.deinit();
         for (k.pipelines.tree_slots) |p| p.deinit();
+        if (k.pipelines.post_sums) |p| p.deinit();
         if (k.pipelines.columns) |columns| for (columns) |p| p.deinit();
         if (k.pipelines.pre_vectors) |p| p.deinit();
         k.library.deinit();

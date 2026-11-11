@@ -195,42 +195,12 @@ fn validLimits(limits: Limits) !void {
     try limits.geometry.check();
     if (limits.rows == 0 or limits.rows > @import("gpu_frame.zig").max_rows or limits.streams == 0 or limits.streams > planning.max_streams or limits.keys == 0 or limits.keys > std.math.maxInt(i32) / limits.geometry.dim) return error.AttentionLimits;
 }
-fn span(r: Ref, bytes: usize) !void {
-    try spanAligned(r, bytes, 2);
-}
-fn spanAligned(r: Ref, bytes: usize, alignment: usize) !void {
-    if (r.offset > r.buffer.length() or bytes > r.buffer.length() - r.offset or r.offset % alignment != 0) return error.AttentionBuffer;
-}
-fn disjoint(a: Ref, an: usize, b: Ref, bn: usize) !void {
-    if (a.buffer.id == b.buffer.id and a.offset < b.offset + bn and b.offset < a.offset + an) return error.AttentionAlias;
-}
-fn fingerprint(plan: Plan) [32]u8 {
-    var hash = std.crypto.hash.sha2.Sha256.init(.{});
-    // Preserve the canonical 27B's descriptor hash; any new numeric shape gets its own identity.
-    if (!plan.geometry.sameShape(.{})) {
-        const shape = [_]u32{ plan.geometry.heads, plan.geometry.kv_heads, plan.geometry.dim, plan.geometry.rotary };
-        hash.update(std.mem.sliceAsBytes(&shape));
-    }
-    hash.update(std.mem.asBytes(&plan.meta));
-    inline for (.{ plan.tile_stream, plan.q_rows, plan.nodes, plan.paths, plan.positions }) |values| hash.update(std.mem.sliceAsBytes(values));
-    var digest: [32]u8 = undefined;
-    hash.final(&digest);
-    return digest;
-}
-fn cacheBytes(cache: Cache, key: bool, geometry: planning.Geometry) usize {
-    const requested = if (key) cache.key_stride else cache.value_stride;
-    const stride: usize = if (requested == 0) @as(usize, cache.capacity) * geometry.dim else requested;
-    return ((@as(usize, geometry.kv_heads) - 1) * stride + @as(usize, cache.capacity) * geometry.dim) * 2;
-}
-/// An operand outside `cache`'s rows; a paged cache's arena holds only pages, so an operand in it at all is an alias.
-fn apart(cache: Cache, geometry: planning.Geometry, operand: Ref, bytes: usize) !void {
-    if (cache.pages != null) {
-        if (operand.buffer.id == cache.keys.buffer.id or operand.buffer.id == cache.values.buffer.id) return error.AttentionAlias;
-        return;
-    }
-    try disjoint(cache.keys, cacheBytes(cache, true, geometry), operand, bytes);
-    try disjoint(cache.values, cacheBytes(cache, false, geometry), operand, bytes);
-}
+const span = @import("attention_views.zig").span;
+const spanAligned = @import("attention_views.zig").spanAligned;
+const disjoint = @import("attention_views.zig").disjoint;
+const fingerprint = @import("attention_views.zig").fingerprint;
+const cacheBytes = @import("attention_views.zig").cacheBytes;
+const apart = @import("attention_views.zig").apart;
 /// The caches' buffers, and a paged stream's table, resident for the pass's indirect reads.
 fn useCaches(e: mtl.ComputeEncoder, caches: []const Cache) void {
     for (caches) |cache| {
@@ -255,7 +225,7 @@ pub const Preprocess = struct { qg: Ref, key: Ref, q_gain: Ref, k_gain: Ref, nor
 pub const Attention = struct {
     profiler: ?*profile.Trace = null,
     prefix: [32]mtl.Pipeline, // q27_attn_prefix_1 to _16, then q27_attn_prefix_masked_1 to _16
-    io: [11]mtl.Pipeline,
+    io: [12]mtl.Pipeline,
     prompt: ?[6]mtl.Pipeline, // promptPipelines: tensor ops on the M5, simdgroup matrices before it
     units: bool,
     pub fn init(device: mtl.Device, library: mtl.Library) !Attention {
@@ -268,10 +238,10 @@ pub const Attention = struct {
             pipe.* = try mtl.Pipeline.init(device, library, try std.fmt.bufPrint(&name, "q27_attn_prefix_{s}{d}", .{ kind, i % 16 + 1 }), false);
             pn += 1;
         }
-        var io: [11]mtl.Pipeline = undefined;
+        var io: [12]mtl.Pipeline = undefined;
         var n: usize = 0;
         errdefer for (io[0..n]) |pipe| pipe.deinit();
-        for ([_][]const u8{ "q27_attn_pack_a", "q27_attn_pack_b", "q27_attn_append", "q27_attn_tail", "q27_attn_merge", "q27_attn_gather", "q27_attn_scatter", "q27_head_norm", "q27_rope", "q27_gate", "q27_attn_merge_single" }, &io) |name, *pipe| {
+        for ([_][]const u8{ "q27_attn_pack_a", "q27_attn_pack_b", "q27_attn_append", "q27_attn_tail", "q27_attn_merge", "q27_attn_gather", "q27_attn_scatter", "q27_head_norm", "q27_rope", "q27_gate", "q27_attn_merge_single", "q27_attn_merge_single_sums" }, &io) |name, *pipe| {
             pipe.* = try mtl.Pipeline.init(device, library, name, false);
             n += 1;
         }
@@ -398,6 +368,9 @@ pub const Attention = struct {
 
     /// `prompt` picks the prompt kernel; `split` reads the head count, constant when one Mac runs it.
     pub fn encode(a: *const Attention, input_encoder: mtl.ComputeEncoder, scratch: *const Scratch, binding: *const Binding, plan: Plan, q: Ref, k: Ref, v: Ref, out: Ref, caches: []const Cache, raw_gate: ?Ref, prompt: bool, split: bool) !void {
+        return a.encodeSums(input_encoder, scratch, binding, plan, q, k, v, out, caches, raw_gate, prompt, split, null);
+    }
+    pub fn encodeSums(a: *const Attention, input_encoder: mtl.ComputeEncoder, scratch: *const Scratch, binding: *const Binding, plan: Plan, q: Ref, k: Ref, v: Ref, out: Ref, caches: []const Cache, raw_gate: ?Ref, prompt: bool, split: bool, out_sums: ?@import("quant_gpu.zig").Sums) !void {
         try plan.geometry.check();
         const g = plan.geometry;
         const q_bytes = @as(usize, plan.rows) * g.heads * g.dim * 2;
@@ -415,6 +388,19 @@ pub const Attention = struct {
         if (raw_gate) |gate| {
             try span(gate, 2 * q_bytes);
             try disjoint(out, q_bytes, gate, 2 * q_bytes);
+        }
+        if (out_sums) |xs| {
+            if (!a.units or prompt or split or xs.stride < plan.rows) return error.AttentionSums;
+            const bytes = ((@as(usize, g.heads) * g.dim / 64 - 1) * xs.stride + plan.rows) * 4;
+            try spanAligned(xs.ref, bytes, 4);
+            try disjoint(xs.ref, bytes, out, q_bytes);
+            try disjoint(xs.ref, bytes, q, q_bytes);
+            try disjoint(xs.ref, bytes, k, kv_bytes);
+            try disjoint(xs.ref, bytes, v, kv_bytes);
+            if (raw_gate) |gate| try disjoint(xs.ref, bytes, gate, 2 * q_bytes);
+            for (caches) |cache| try apart(cache, g, xs.ref, bytes);
+            for (scratch.buffers) |buffer| if (buffer.id == xs.ref.buffer.id) return error.AttentionAlias;
+            for (binding.buffers) |buffer| if (buffer.id == xs.ref.buffer.id) return error.AttentionAlias;
         }
         const operands = [_]struct { ref: Ref, bytes: usize }{ .{ .ref = q, .bytes = q_bytes }, .{ .ref = k, .bytes = kv_bytes }, .{ .ref = v, .bytes = kv_bytes }, .{ .ref = out, .bytes = q_bytes } };
         for (caches) |cache| for (operands) |operand| try apart(cache, plan.geometry, operand.ref, operand.bytes);
@@ -441,7 +427,7 @@ pub const Attention = struct {
                 e.dispatchThreads(mtl.Size.of(g.dim, g.heads, plan.rows), mtl.Size.of(32, 1, 1));
                 e.barrier();
             }
-        } else try a.treeRows(e, scratch, binding, plan, q, out, raw_gate, args, split);
+        } else try a.treeRows(e, scratch, binding, plan, q, out, raw_gate, args, split, out_sums);
         try timing.end();
     }
     /// `grid` at pick + 16 when every value some row must not see is finite, else at pick + 28; the other grid is 0.
@@ -491,7 +477,7 @@ pub const Attention = struct {
         e.barrier();
     }
     /// Trees and decoded rows: cached keys by chunk (prefix), the round's own by path (tail), merged and gated.
-    fn treeRows(a: *const Attention, e: mtl.ComputeEncoder, scratch: *const Scratch, binding: *const Binding, plan: Plan, q: Ref, out: Ref, raw_gate: ?Ref, args: PackArgs, split: bool) !void {
+    fn treeRows(a: *const Attention, e: mtl.ComputeEncoder, scratch: *const Scratch, binding: *const Binding, plan: Plan, q: Ref, out: Ref, raw_gate: ?Ref, args: PackArgs, split: bool, out_sums: ?@import("quant_gpu.zig").Sums) !void {
         const g = plan.geometry;
         if (!plan.fused) {
             e.setPipeline(a.io[1]);
@@ -528,10 +514,14 @@ pub const Attention = struct {
             e.dispatchGroups(mtl.Size.of(g.kv_heads, plan.tail_chunks, plan.rows), mtl.Size.of(128, 1, 1));
             e.barrier();
         }
-        e.setPipeline(a.io[if (split) 4 else 10]);
+        e.setPipeline(a.io[if (split) 4 else if (out_sums != null) 11 else 10]);
         bind(e, .{ scratch.get(.poa), scratch.get(.pma), scratch.get(.pla), scratch.get(.pob), scratch.get(.pmb), scratch.get(.plb), binding.get(.meta), scratch.get(.nodes), out, raw_gate orelse out });
         e.setValue(@as(u32, @intFromBool(raw_gate != null)), 10);
         if (split) e.setValue(g.heads, 11);
+        if (out_sums) |xs| {
+            e.setBuffer(xs.ref.buffer, xs.ref.offset, 11);
+            e.setValue(xs.stride, 12);
+        }
         e.dispatchGroups(mtl.Size.of(g.kv_heads, plan.rows * g.group(), 1), mtl.Size.of(32, 1, 1));
         e.barrier();
     }

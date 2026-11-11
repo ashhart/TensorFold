@@ -57,7 +57,7 @@ pub const Scalars = struct {
 
 pub const DevicePlan = struct { host: Plan, metadata: Metadata };
 /// z, a and b in their own rows, or (zba_stride > 0) views into one fused zba row.
-pub const Refs = struct { z: Ref, a: Ref, b: Ref, output: Ref, scalars: Scalars, zba_stride: u32 = 0 };
+pub const Refs = struct { z: Ref, a: Ref, b: Ref, output: Ref, scalars: Scalars, zba_stride: u32 = 0, out_sums: ?@import("quant_gpu.zig").Sums = null };
 
 pub const Pool = struct {
     budget: Budget,
@@ -332,6 +332,15 @@ pub const Pool = struct {
             .flows = if (m.flows) |r| try refSpan(r, plan.flows.len * 4) else null,
         };
         var result = try gdn.Round.init(pool.budget.shape, refs.scalars.kinds, p, plan, b, pool.kernels.pipelines);
+        if (refs.out_sums) |x| {
+            if (p.dv != 128 or pool.kernels.pipelines.post_sums == null or x.stride < p.rows or x.ref.offset % 4 != 0) return error.BadGdnSums;
+            const out = try refSpan(x.ref, ((@as(usize, p.nv) * 2 - 1) * x.stride + p.rows) * 4);
+            inline for (@typeInfo(gdn.Buffers).@"struct".field_names) |name| {
+                const operand = if (comptime std.mem.eql(u8, name, "before") or std.mem.eql(u8, name, "flows")) @field(b, name) else @as(?gdn.Span, @field(b, name));
+                if (operand) |span| if (out.overlaps(span)) return error.AliasedGdnState;
+            }
+        }
+        result.out_sums = refs.out_sums;
         result.tree_mode = pool.tree_mode;
         result.p.advance = @intFromBool(pool.advances(plan));
         return result;

@@ -15,6 +15,7 @@ pub const Hook = struct {
     plan: *const Plan,
     linear_index: []const u32,
     accepted_chain: bool = false,
+    out_sums: ?@import("quant_gpu.zig").Sums = null,
 
     pub fn forward(ptr: *anyopaque, e: metal.ComputeEncoder, block: usize, weight: Weights.Gdn, frame: *Frame, rows: u32) !void {
         const hook: *Hook = @ptrCast(@alignCast(ptr));
@@ -24,7 +25,9 @@ pub const Hook = struct {
         try hook.quant.quant(e, weight.qkv, frame.get(.input), sums, frame.get(.dims), try hook.pool.projected(layer), rows);
         try hook.quant.quant(e, weight.zba, frame.get(.input), sums, frame.get(.dims), frame.get(.mixed), rows);
         e.barrier();
-        if (hook.accepted_chain) try hook.pool.forwardChain(layer, devicePlan(hook.plan.*, frame), try refs(weight, frame), e, hook.quant.prompt) else try hook.pool.forward(layer, devicePlan(hook.plan.*, frame), try refs(weight, frame), e);
+        var operands = try refs(weight, frame);
+        operands.out_sums = hook.out_sums;
+        if (hook.accepted_chain) try hook.pool.forwardChain(layer, devicePlan(hook.plan.*, frame), operands, e, hook.quant.prompt) else try hook.pool.forward(layer, devicePlan(hook.plan.*, frame), operands, e);
     }
 
     pub fn commit(hook: *Hook, e: metal.ComputeEncoder, block: usize, frame: *Frame) !void {
