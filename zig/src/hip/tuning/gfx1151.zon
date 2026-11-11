@@ -13,6 +13,8 @@
 // gfx1100's rows, plus the 64-row routed matrix-core tile below 12 pairs an item (measured on gfx1151),
 // and the skewed-row matrix tile (three blocks a WGP) ahead of the padded one where it takes a product.
 // The 64-row routed tile's items of 8 rows or fewer take its K-parallel passes (measured on gfx1151).
+// A plain prompt of 1 or 2 rows takes the 2-row K-parallel tile (measured on gfx1151),
+// but 1 row of 2-bit or 3-bit codes keeps the 1-row tile, which is ahead there.
 .{
     .gfx = "gfx1151",
     .entries = .{
@@ -34,8 +36,8 @@
         .{ .id = "mlx.routed_act.decode.stream", .cost = 1, .rows = 16, .rows_matrix = 15 },
 
         // a prompt: the K-parallel tiles for a few rows or a short plan, the 128-row tile past them
-        .{ .id = "mlx.project.prefill.kp0", .cost = 1, .rows = 2, .routed = false },
-        .{ .id = "mlx.project.prefill.kp3", .cost = 2, .items = 300, .plain = false },
+        .{ .id = "mlx.project.prefill.kp0", .cost = 1, .rows = 1, .max_bits = 3, .routed = false },
+        .{ .id = "mlx.project.prefill.kp3", .cost = 2, .rows = 2, .items = 300 },
         .{ .id = "mlx.project.prefill.kp1", .cost = 3, .rows = 4, .items = 300 },
         .{ .id = "mlx.project.prefill.kp2", .cost = 4, .rows = 32, .routed = false },
         .{ .id = "mlx.project.prefill.skew", .cost = 9.5 },
