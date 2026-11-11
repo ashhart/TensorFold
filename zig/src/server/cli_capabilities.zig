@@ -7,6 +7,8 @@ const cli = @import("cli.zig");
 pub const Engines = struct {
     version: []const u8,
     chip: ?[]const u8 = null,
+    kernels: ?bool = null,
+    kernel_sms: ?[]const u32 = null,
     optional_libraries: []const @import("sys").optional_libraries.Status = &.{},
     backends: []const []const u8 = &.{},
     /// model_type to the weight formats it reads, as gate entries name them; `decisions` lists the decision-only ones.
@@ -59,6 +61,12 @@ pub fn capabilities(w: *std.Io.Writer, e: Engines) !void {
         .available = [_][]const u8{"stable"},
         .registered_switches = api.profile.entries,
     }, .{}, w);
+    if (e.kernel_sms) |sms| {
+        try w.writeAll(", \"kernels\": ");
+        try std.json.Stringify.value(e.kernels, .{}, w);
+        try w.writeAll(", \"kernel_sms\": ");
+        try std.json.Stringify.value(sms, .{}, w);
+    }
     if (e.p2p) |p| try w.print(", \"p2p\": {s}", .{p});
     try w.writeAll("}\n");
 }
