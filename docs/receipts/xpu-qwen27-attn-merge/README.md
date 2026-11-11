@@ -108,22 +108,41 @@ three passed on both: 3 of 3 on the base, 3 of 3 on the branch, 0 failed, 0 skip
 The kernel contract (`zig build -Dxpu-contract=true tf-xpu-contract-run`, `contract-run.out`):
 
 ```text
-SUMMARY bmg-g31 0xe223 10 kernels: 10 pass gates 1-4, 0 fail, 0 known findings; 7 controls: 7 red as planted, 0 missed; 0 limit problems; gates 7112 ms, limits 0 ms
+SUMMARY bmg-g31 0xe223 10 kernels: 10 pass gates 1-4, 0 fail, 0 known findings; 7 controls: 7 red as planted, 0 missed; 0 limit problems; gates 7802 ms, limits 0 ms
 ```
 
 `attn_merge` is registered as a replacement for the frozen kernel of `8a7838a65`
 (`zig/kernels/xpu/contract_merge_upstream.cl`): gate 3 requires its bytes on 21 shapes, 1 to 16 tree rows and 33 to
-131,073 visible keys. Both new planted controls (the new kernel on the old grid, and a copy that weighs the lanes
-past the last slice) go red at gate 3. Gate 5 (`limits.out`): 16 work-items, sub-group 16, 0 SLM, 0 spill and 0
-private bytes. The first line of `contract-run.out`, `Size of SLM (163840) larger than available (131072)`, is the
-`160 KiB of SLM` limits control being refused as planted.
+131,073 visible keys. Both new planted controls (the new kernel on the old grid, and a copy that weighs the lanes past
+the last slice) go red at gate 3. Gate 1 (non-finite inputs) plants NaN, +inf and -inf in the first slice of rows 0 to
+3, and +inf and -inf in the last slice of row 4 (two heads; 2 slices there, 33 visible keys): a merge that reads
+values past a row's last slice and weighs them by zero turns that infinity into NaN, and the gate compares the classes
+of the 30,720 outputs with the float64 reference's (516 non-finite, 30,204 finite). Before the kernel read zero there
+it failed: `contract-old-kernel-red.out` is the contract run of the previous kernel with these two plants (`FAIL
+nonfinite xpu attn_merge`: 2 of 30,720 outputs are NaN where float64 gives an infinity; summary `9 pass gates 1-4, 1
+fail`). Gate 5 (`limits.out`): 16 work-items, sub-group 16, 0 SLM, 0 spill and 0 private bytes. The first line of
+`contract-run.out`, `Size of SLM (163840) larger than available (131072)`, is the `160 KiB of SLM` limits control
+being refused as planted.
+
+## Final tree check
+
+After the timed passes the load of `attn_merge` changed: the values past a row's last slice are now a literal zero
+instead of a reload of the last slice (`min(s0 + k, used - 1)`), so an infinity in that slice is not turned into NaN by
+the zero weight. The bytes are the same for finite values and now for infinities as well. The timed passes above ran the
+previous load and were not repeated. On the final tree, on the host's card 1 (`ZE_AFFINITY_MASK=1`), one server
+(`--parallel 1 --context 132096`, bf16 KV, DFlash2 drafter), `bench_merge.py` with `CELLS="0:code;8192:code"`, one
+warm-up and one measured request, drafted and plain (`final-tree/served.jsonl`): 8 requests, 34 and 7,588 prompt tokens.
+All 8 have the `prompt_sha256` and the `token_sha256` of the same prompt and mode in `runs/` (`5d721308b699d401` and
+`9764d2d6fb7cbdbf`, the first 16 hex digits). The three device tests pass 3 of 3 on card 1
+(`final-tree/tests-*.out`). The prompts of that run were built from `corp_code` rebuilt with
+`scripts/build_corp_code.sh` (see Reproduce).
 
 ## Why the bytes are equal
 
 For one output lane the old kernel adds the slices' weighted values in slice order, starting from zero. The new one
 reads 16 slices' values at once into registers and adds them in the same order, with one subgroup lane per output
 dimension and 16 subgroups per head. The maximum is an order-independent `fmax`, the weights are the same `exp`, and
-the lanes past the last slice add an exact zero.
+the lanes past the last slice load zero and carry weight zero, so they add an exact zero.
 
 ## Limits
 
@@ -134,7 +153,8 @@ the lanes past the last slice add an exact zero.
   and after; gate 3 sweeps that count from 2 to 4,097 slices. The single-stream runs use one stream; the four-stream
   runs (Several streams) read `POS` with four different values.
 - One card, one host, one driver stack. The second B70 and other Intel GPUs were not run.
-- The contract was re-run on the final tree (`contract-run.out`), with the same summary as the first run.
+- The contract was re-run on the final tree (`contract-run.out`), with the same pass, fail and control counts as the
+  first run.
 - The lean checker reports the same inherited problems on both trees (`pr_check` output in the pull request).
 
 ## Reproduce
@@ -144,7 +164,7 @@ Set `WORK` to a directory holding `bin-main/tensorfold-native`, `bin-branch/tens
 
 ```sh
 mkdir scripts/inputs
-xz -dc inputs/corp_code.txt.xz > scripts/inputs/corp_code.txt
+scripts/build_corp_code.sh scripts/inputs/corp_code.txt
 xz -dc inputs/corp_text.txt.xz > scripts/inputs/corp_text.txt
 WORK=... MODELS=... scripts/driver.sh
 python3 -I scripts/compare.py runs compare.md
@@ -154,5 +174,13 @@ python3 -I scripts/abba.py runs
 `WORK=... MODELS=... scripts/par4.sh` runs the four-stream passes into `par4/`, and
 `python3 -I scripts/par4_compare.py par4 runs` prints `par4.out`. `scripts/run-tests.sh` runs the three device
 tests. The prompts are the two corpora cut to a token depth by the bench script's own calibration (a 20,000-character
-probe); `prompt_sha256` in every line identifies the exact prompt. `corp_code` is Python standard-library source and
-`corp_text` is Markdown documentation text.
+probe); `prompt_sha256` in every line identifies the exact prompt. `corp_text` is Markdown documentation text.
+`corp_code` is rebuilt, not stored: it is the top-level `*.py` files of the `python3.14` standard library at
+`/usr/lib/python3.14` (Ubuntu 26.04 packages `python3.14`, `libpython3.14-minimal` and `libpython3.14-stdlib`, version
+`3.14.4-1ubuntu0.2`; 157 files), concatenated without a separator, sorted by file name with case and punctuation
+ignored (lower-cased, anything but `a-z0-9` removed, then the name; so `abc.py`, `_aix_support.py`, `annotationlib.py`,
+... , `code.py` after `codeop.py`), and cut to the first 1,500,000 bytes. `scripts/build_corp_code.sh OUT` does this and
+prints the SHA-256, which must be
+`31b2f903b4a2ea01728927e53436d924994c93cf3114c7b7f35e58d906961e30`. The file this receipt used before was byte-identical
+to that output (same SHA-256), and the final tree check above built identical prompts from the rebuilt file. Other
+Python versions or packages give other bytes, hence other prompts.
