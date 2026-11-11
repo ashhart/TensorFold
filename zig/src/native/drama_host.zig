@@ -317,7 +317,7 @@ const Host = struct {
     };
     fn waitSession(ctx: *anyopaque) !void {
         const s: *Session = @ptrCast(@alignCast(ctx));
-        if (is_cuda) return s.t.complete();
+        if (is_cuda) return d3.guidance.complete(s.t, s.guide);
         // Metal's command failure is reported after its wait completed, including the queued successor.
         s.e.flush() catch |err| if (err != error.CommandBufferFailed) return err;
     }
