@@ -5,6 +5,9 @@ const sys = @import("sys.zig");
 pub const Error = error{InvalidEnvironment};
 pub const Scope = enum { common, cuda, metal, xpu, slide, hooks, dsv41, gemma4, drama3, glm, flashnext, nemotron, minimax_m3, chat };
 pub const Kind = enum { u32, u64, size, percent, positive, device, segments, mib, bit_width, word, prompt, flag, toggle, real, positive_real, signed_real, range, path };
+/// The release from which the server refuses the rank aliases: the one after the release that first ships the flags.
+pub const alias_retire = "1.4.0";
+
 pub const Rule = struct {
     name: [:0]const u8,
     scope: Scope,
@@ -110,12 +113,12 @@ pub const rules = [_]Rule{
     .{ .name = "TF_SLIDE_TAKE_OUT_CHECK", .scope = .slide, .kind = .flag, .forms = "0 or 1 (1 takes every kept lesson out again to check the facts before it come back)" },
     .{ .name = "TF_SLIDE_TAP_CHECK", .scope = .slide, .kind = .flag, .forms = "0 or 1 (1 checks tapped rows against a fresh run's)" },
     .{ .name = "TF_SLIDE_FORGET_FAIL", .scope = .hooks, .kind = .u32, .trim = " ", .forms = "a whole fact index from 0 to 4294967295 (0 disables the planted failure)" },
-    .{ .name = "TF_GLM_RANK", .scope = .glm, .kind = .u32, .forms = "a whole rank from 0", .flag = "--rank", .retire = "1.4.0" },
-    .{ .name = "TF_GLM_WORLD", .scope = .glm, .kind = .u32, .forms = "a whole world size from 1", .flag = "--tp", .retire = "1.4.0" },
-    .{ .name = "TF_MINIMAX_RANK", .scope = .minimax_m3, .kind = .u32, .forms = "a whole rank from 0", .flag = "--rank", .retire = "1.4.0" },
-    .{ .name = "TF_MINIMAX_WORLD", .scope = .minimax_m3, .kind = .u32, .forms = "a whole world size from 1", .flag = "--tp", .retire = "1.4.0" },
-    .{ .name = "TF_NEMOTRON_RANK", .scope = .nemotron, .kind = .u32, .forms = "a whole rank from 0", .flag = "--rank", .retire = "1.4.0" },
-    .{ .name = "TF_NEMOTRON_WORLD", .scope = .nemotron, .kind = .u32, .forms = "a whole world size from 1", .flag = "--tp", .retire = "1.4.0" },
+    .{ .name = "TF_GLM_RANK", .scope = .glm, .kind = .u32, .forms = "a whole rank from 0", .flag = "--rank", .retire = alias_retire },
+    .{ .name = "TF_GLM_WORLD", .scope = .glm, .kind = .u32, .forms = "a whole world size from 1", .flag = "--tp", .retire = alias_retire },
+    .{ .name = "TF_MINIMAX_RANK", .scope = .minimax_m3, .kind = .u32, .forms = "a whole rank from 0", .flag = "--rank", .retire = alias_retire },
+    .{ .name = "TF_MINIMAX_WORLD", .scope = .minimax_m3, .kind = .u32, .forms = "a whole world size from 1", .flag = "--tp", .retire = alias_retire },
+    .{ .name = "TF_NEMOTRON_RANK", .scope = .nemotron, .kind = .u32, .forms = "a whole rank from 0", .flag = "--rank", .retire = alias_retire },
+    .{ .name = "TF_NEMOTRON_WORLD", .scope = .nemotron, .kind = .u32, .forms = "a whole world size from 1", .flag = "--tp", .retire = alias_retire },
     .{ .name = "TF_GLM_HOST_CACHE", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_GLM_VISION_HOST", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_GLM_PROF", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
