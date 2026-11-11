@@ -1,3 +1,4 @@
+const std = @import("std");
 //! The products on a projection of any format, dispatched on its tag; `affine*` are the MLX affine path behind them.
 
 const t = @import("types.zig");
