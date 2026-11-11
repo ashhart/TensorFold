@@ -58,7 +58,7 @@ pub fn pick(h: *const mtp.Head, st: cuda.Stream, gpa: std.mem.Allocator, d: *mtp
 }
 
 // Failure-only downloads leave the normal row selection and graph captures unchanged.
-fn badRow(st: cuda.Stream, d: *mtp.Draft, best: [4]f32, batched: bool, scores: u64, n: usize) void {
+pub fn badRow(st: cuda.Stream, d: *mtp.Draft, best: [4]f32, batched: bool, scores: u64, n: usize) void {
     var input: [wt.wide]u16 = undefined;
     const input_ok: ?bool = if (download(st, std.mem.sliceAsBytes(&input), d.out.ptr)) |_| finite(&input) else |_| null;
     const row = d.host[0..n];
@@ -171,4 +171,15 @@ pub fn badCandidates(h: *const mtp.Head, st: cuda.Stream, d: *mtp.Draft, row: us
     try h.best(st, d.logits.ptr, vocab, vocab, d.rows, d.best.ptr);
     try download(st, std.mem.sliceAsBytes(d.best_host[0 .. 4 * d.rows]), d.best.ptr);
     badVerify(d, row, d.best_host[row * 4 ..][0..4].*, null, false);
+}
+
+/// Device-free draft draw over the same reduced best and full top-k set as the per-stream path.
+pub fn pickFrom(h: *const mtp.Head, a: std.mem.Allocator, best: [4]f32, vals: []const u16, cols: []const i32, position: u64, sm: ?Sampling) !Pick {
+    const tok = try h.view().pickBest(best);
+    if (!mtp.isSampled(sm)) return .{ .token = tok, .prob = @exp(@as(f64, best[0]) - @as(f64, best[1])) };
+    if (!usable(sm.?)) return error.ProposalScoreShape;
+    const sampled = try drawTopk(a, vals, cols, h.ids, position, sm.?);
+    for (vals, cols) |v, col| if (h.ids[@intCast(col)] == sampled)
+        return .{ .token = sampled, .prob = @exp(@as(f64, mtp.promote(v)) - @as(f64, best[1])) };
+    return .{ .token = sampled, .prob = 0 };
 }
