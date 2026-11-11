@@ -50,15 +50,16 @@ too) and computes it for rank 0's jobs. The ranks meet over NCCL, which the engi
 
 ```bash
 # on rank 1
-TF_NEMOTRON_RANK=1 TF_NEMOTRON_WORLD=2 NCCL_COMM_ID=192.0.2.1:29741 \
-  tensorfold serve /models/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4
+tensorfold serve /models/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4 --tp 2 --rank 1 --master 192.0.2.1 --master-port 29741
 # on rank 0 (192.0.2.1)
-TF_NEMOTRON_RANK=0 TF_NEMOTRON_WORLD=2 NCCL_COMM_ID=192.0.2.1:29741 \
-  tensorfold serve /models/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4 --name super --vision --host 0.0.0.0
+tensorfold serve /models/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4 --tp 2 --rank 0 --master 192.0.2.1 --master-port 29741 \
+  --name super --vision --host 0.0.0.0
 ```
 
+`TF_NEMOTRON_RANK` and `TF_NEMOTRON_WORLD` still place a rank as aliases of `--rank` and `--tp` until 1.4.0, which refuses them
+with the flag to use; a flag and an alias that differ refuse.
 Set `NCCL_SOCKET_IFNAME` and `NCCL_IB_HCA` for the link between the hosts as NCCL documents them. Rank 1 keeps a TCP
-line to rank 0 on the port after `NCCL_COMM_ID`'s (29742 here), opened before NCCL. Before any weight loads, both ranks
+line to rank 0 on the port after the root's (29742 here), opened before NCCL. Before any weight loads, both ranks
 check that they run the same build, model, cut and precision and the same checkpoint layout: config.json, the index,
 and each shard's name, size and header. While the weights load, each rank reads and hashes every byte of every shard
 it holds (sha256), and checks each file against its Hugging Face blob name, which is its sha256, when the folder is a
