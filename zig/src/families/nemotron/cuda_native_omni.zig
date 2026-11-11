@@ -39,7 +39,7 @@ pub const slideRefusal = @import("cuda_omni_slide.zig").refusal;
 const nvfp4_bytes: f64 = 0.5625;
 
 /// Bytes this rank's weights take: rank 0 all but the other ranks' expert shares, rank r > 0 its expert shares alone.
-pub fn weightShare(a: std.mem.Allocator, io: std.Io, dir: []const u8, total: u64, drafts: bool) u64 {
+pub fn weightShare(a: std.mem.Allocator, io: std.Io, dir: []const u8, total: u64, drafts: bool, _: u32, _: u32) u64 { // its own variables until it reads the launch
     _ = drafts; // the MTP head's experts are counted either way
     var c = Config.read(a, io, dir) catch return total;
     latent.place(&c) catch return total;
