@@ -46,7 +46,8 @@ pub fn keepAs(e: anytype, id: u64) !void {
         return error.NotAtMark;
     const pool = if (e.snap_pages) |*p| p else return error.NoSnapshotCache;
     const plan = try layout.Plan.init(&e.cur.st, &e.c, e.cur.st.pos, if (e.mtp) e.cur.st.mtp_len else null, heldPages(e, e.cur.st.pos));
-    var lease = try pool.take(plan.len);
+    // TF_GLM_KV_SPLIT: every rank leases the home's size (its latent rows counted), so no rank's pool runs out alone
+    var lease = try pool.take(if (e.cur.st.owner != null) @max(plan.len, bytes(e, e.cur.st.pos)) else plan.len);
     errdefer {
         cuda.completion.drain(e.d, e.stream, "a failed GLM snapshot copy did not drain");
         pool.give(&lease);
@@ -55,7 +56,7 @@ pub fn keepAs(e: anytype, id: u64) !void {
     errdefer e.gpa.free(cur);
     try pool.move(e.stream, &lease, &plan, true);
     try e.stream.synchronize();
-    e.snaps.putAssumeCapacityNoClobber(id, .{ .lease = lease, .len = plan.len, .pos = e.cur.st.pos, .mtp_len = e.cur.st.mtp_len, .cur = cur, .bases = .{ e.cur.st.base, e.cur.st.mtp_base }, .shared = plan.shared });
+    e.snaps.putAssumeCapacityNoClobber(id, .{ .lease = lease, .len = plan.len, .pos = e.cur.st.pos, .mtp_len = e.cur.st.mtp_len, .cur = cur, .bases = .{ e.cur.st.base, e.cur.st.mtp_base }, .shared = plan.shared, .home = e.cur.st.owner });
 }
 
 /// A disk read's state: `at`'s pages leased under rank 0's id on each rank, refused by `restore` until `seal`.
@@ -94,6 +95,7 @@ pub fn seal(e: anytype, id: u64, mtp_len: usize, bases: [2]usize, cur: u64) !voi
 pub fn restore(e: anytype, id: u64) !void {
     const s = e.snaps.getPtr(id) orelse return error.NoKeptState;
     if (s.len == 0) return error.UnsealedState;
+    if (s.home != e.cur.st.owner) return error.KvSplitAway; // its latent rows are on its home's copy alone
     const pool = if (e.snap_pages) |*p| p else return error.NoSnapshotCache;
     // the kept state's own parity picks the half a live-half keep carries; the slot's dead half stays as it is
     const plan = try layout.Plan.initFor(&e.cur.st, &e.c, s.pos, if (e.mtp) s.mtp_len else null, s.shared, s.cur);
