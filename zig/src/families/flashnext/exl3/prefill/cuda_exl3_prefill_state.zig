@@ -45,8 +45,6 @@ pub const Options = struct {
     reseed: bool = false,
     reduced_branch: bool = false,
     two_chunk: bool = false,
-    /// The prompt cache keeps states on the serving step's starts only; false: at any row (a test of resume = fresh).
-    snap_grid: bool = true,
 };
 
 pub fn optionsFromEnv() environment.Error!Options {
@@ -60,7 +58,6 @@ pub fn optionsFromEnv() environment.Error!Options {
     o.two_chunk = try environment.read(bool, "TF_FLASHNEXT_EXL3_PREFILL_TWO_CHUNK", o.two_chunk);
     o.ring = try environment.read(bool, "TF_FLASHNEXT_EXL3_PREFILL_RING", o.ring);
     o.ring_ahead = try environment.read(usize, "TF_FLASHNEXT_EXL3_PREFILL_RING_AHEAD", o.ring_ahead);
-    o.snap_grid = try environment.read(bool, "TF_FLASHNEXT_EXL3_PREFILL_SNAP_GRID", o.snap_grid);
     return o;
 }
 
