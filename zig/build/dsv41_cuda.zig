@@ -31,8 +31,13 @@ pub fn assemble(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     const m = shared.moduleAt(b, target, optimize, file);
     m.addImport("cuda", cuda);
     m.addImport("dsv41_kernels", dk);
-    const tp = @import("tp.zig").module(b, target, optimize, cuda);
+    const verbs = @import("tp.zig").verbsModule(b, target, optimize);
+    const tp = @import("tp.zig").moduleWith(b, target, optimize, cuda, verbs);
     m.addImport("tp", tp);
+    // the hand-off export (cuda_export_serve.zig): MKVH over the fabric, which shares the tp module's verbs
+    const fabric = b.createModule(.{ .root_source_file = b.path("zig/src/fabric/fabric.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    fabric.addImport("verbs", verbs);
+    m.addImport("fabric", fabric);
     m.addImport("kv", @import("dsv41_state.zig").kvModuleAt(b, target, optimize, cuda, tp));
     @import("dsv41_draft.zig").addImportsAt(b, m, target, optimize);
     return m;

@@ -20,9 +20,13 @@ const Allocator = std.mem.Allocator;
 const sched_host = @import("sched_host.zig");
 const serve_line = @import("serve_line.zig");
 const round_graph = @import("round_graph.zig");
+const xl = @import("cuda_export_lane.zig");
 
 pub const backends: []const []const u8 = &.{"cuda"};
 pub const families: []const api.Family = &.{.{ .model_type = "deepseek_v41", .formats = &.{"exl3"}, .raw_text = false }};
+
+/// The flags past the common ones this engine serves: hand-offs exported over MKVH (cuda_export_lane.zig).
+pub const serves: []const []const u8 = &.{"--mcdma-produce"};
 
 pub fn chip(_: Allocator) ?[]const u8 {
     return null;
@@ -46,7 +50,8 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         problem.* = model.asset_names.unset;
         return null;
     });
-    const s = Served.open(gpa, io, o.dir, assets, o.drafts, o.context, o.prompt_cache_gib) catch |e| {
+    const s = Served.openExporting(gpa, io, o.dir, assets, o.drafts, o.context, o.prompt_cache_gib, o.remote_prefill.produce, problem) catch |e| {
+        if (e == error.ExportRefused) return null; // `problem` says what to change
         problem.* = try std.fmt.allocPrint(a, "the DeepSeek-V4.1 CUDA engine cannot load {s} ({s})", .{ o.dir, @errorName(e) });
         return null;
     };
@@ -74,9 +79,17 @@ pub const Served = struct {
     sched: ?*sched_host.SchedHost = null,
     /// TF_DSV41_LOOKUP_PLAN=1 (draft/lookup.zig): priced lookup drafts for each request's copies
     lookup: ?*lookup.Planner = null,
+    /// `--mcdma-produce LINK` / TF_DSV41_HANDOFF_DUMP (cuda_export_lane.zig): handoff requests' states exported
+    exporting: ?*xl.Export = null,
 
     /// Rank 0's engine over a loaded model (`drafts`: DSpark's pass, else serial windows through the same lanes).
     pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, assets: []const u8, drafts: bool, context: ?i64, prompt_cache_gib: ?f64) !*Served {
+        var refused: []const u8 = "";
+        return openExporting(gpa, io, dir, assets, drafts, context, prompt_cache_gib, null, &refused);
+    }
+
+    /// `open` that also exports hand-offs (over `produce`'s link or TF_DSV41_HANDOFF_DUMP); else `ExportRefused`.
+    pub fn openExporting(gpa: Allocator, io: std.Io, dir: []const u8, assets: []const u8, drafts: bool, context: ?i64, prompt_cache_gib: ?f64, produce: ?[]const u8, problem: *[]const u8) !*Served {
         const m = try model.Model.open(gpa, io, dir, assets, .{ .drafts = drafts, .own_prefill = (try model.ownPrefillEnv()), .layers = try model.layersEnv(gpa), .prompt_cache_gib = prompt_cache_gib });
         errdefer m.close();
         if (m.rank() != 0) return error.NotRankZero; // the other ranks run `tf-dsv41 follow`
@@ -176,9 +189,24 @@ pub const Served = struct {
             s.host.proposers = .{ .ctx = pl, .make = makeLookup, .free = freeLookup };
             std.log.info("dsv41 lookup: Python's priced plan (min match {d}, up to {d} rows{s})", .{ ls.min_match, ls.max_rows, if (ls.lookup) "" else ", lookup off" });
         }
+        // the export before the host starts: a handoff request finds its exporter at admission
+        s.exporting = null;
+        if (try s.exportOpen(dir, produce, problem)) |x| {
+            s.exporting = x;
+            s.host.exporter = x.exporter();
+        }
+        errdefer if (s.exporting) |x| x.stop();
         try s.host.start();
         s.rec = Recorder.init(gpa, io, s.host.engine());
         return s;
+    }
+
+    /// The hand-off exporter when `--mcdma-produce` or TF_DSV41_HANDOFF_DUMP asks; `ExportRefused` sets `problem`.
+    fn exportOpen(s: *Served, dir: []const u8, link: ?[]const u8, problem: *[]const u8) !?*xl.Export {
+        const dump = (try xl.dumpDir(problem)) != null;
+        if (link == null and !dump) return null;
+        const checkpoint = try api.LaneHost.Remote.checkpointId(s.arena.allocator(), s.io, dir);
+        return (try xl.Export.open(s.gpa, s.io, s.m, s.sched != null, link, checkpoint, problem)) orelse error.ExportRefused;
     }
 
     fn syncStream(ctx: *anyopaque) anyerror!void {
@@ -242,6 +270,7 @@ pub const Served = struct {
         const s: *Served = @ptrCast(@alignCast(ctx));
         const gpa = s.gpa;
         s.host.stop();
+        if (s.exporting) |x| x.stop();
         if (s.lookup) |pl| gpa.destroy(pl);
         if (s.sched) |sh| {
             s.m.gt.settleReleases();
