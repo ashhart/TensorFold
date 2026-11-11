@@ -102,6 +102,7 @@ test "lone price: tile probes are bounded, respect available rows, and stop afte
     try std.testing.expectEqual(@as(?u32, 16), own.probe(&e, p));
     try e.rule.observeCost(16, 100, false, win.who(&s));
     own.observe(&s, 17, 17, 100);
+    s.rounds += 8;
     try std.testing.expectEqual(@as(?u32, null), own.probe(&e, p));
 }
 
@@ -411,4 +412,35 @@ test "lone price: deadlines a run of streams backed off start the next stream at
     try std.testing.expectEqual(own.carry_most, next.cost_probe_spacing);
     try std.testing.expectEqual(2 + own.carry_most, next.cost_probes[16].after);
     try std.testing.expectEqual(own.carry_most, next.cost_probes[16].spacing);
+}
+
+test "lone price: without plain_guard no probe asks for a round with no draft, and a lone round is priced by its own times" {
+    var cfg = try setup();
+    defer cfg.deinit(a);
+    cfg.plain_guard = false;
+    cfg.lone_cost_tile = 4;
+    var target: fake.Fake = .{ .gpa = a };
+    defer target.deinit();
+    var clock: fake.FixedClock = .{};
+    var e = Engine.init(a, &cfg, target.backend(), clock.clock());
+    defer e.deinit();
+    e.alone = true;
+    var s = try Stream.init(a, .{ .id = "no-plain", .prompt = &.{3}, .max_new = 128 });
+    defer s.deinit(a);
+    const tokens: [15]u32 = @splat(7);
+    const p: win.Plan = .{ .stream = &s, .position = 1, .kind = .head, .tokens = &tokens };
+    try std.testing.expect(own.enabled(&e, p));
+    var w = win.who(&s);
+    w.lone = true;
+    s.rounds += 8;
+    for ([_]u32{ 1, 5, 9, 13, 15 }) |drafts| {
+        s.rounds += 8;
+        try std.testing.expectEqual(@as(?u32, drafts), own.probe(&e, p));
+        try e.rule.observeCost(drafts, 100, false, w);
+        own.observe(&s, drafts + 1, drafts + 1, 100);
+    }
+    try std.testing.expectEqual(@as(?f64, 100), s.depth.?.ms.?.get(15));
+    try std.testing.expect(e.rule.greedy_ms.empty()); // the shared rounds' table is left alone
+    s.rounds += 8;
+    try std.testing.expectEqual(@as(?u32, null), own.probe(&e, p));
 }
