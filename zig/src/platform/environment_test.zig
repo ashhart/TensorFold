@@ -36,6 +36,8 @@ test "environment: every strict reader refuses bad text before opening a model, 
 
 const Case = struct { name: []const u8, raw: []const u8, n: u64 };
 const valid = [_]Case{
+    .{ .name = "TF_FLASHNEXT_BATCH_DRAWS", .raw = "0", .n = 0 },
+    .{ .name = "TF_FLASHNEXT_BATCH_DRAWS", .raw = "1", .n = 1 },
     .{ .name = "TENSORFOLD_VIDEO_TOKENS", .raw = "0", .n = 0 },
     .{ .name = "TENSORFOLD_VIDEO_TOKENS", .raw = "18446744073709551615", .n = std.math.maxInt(u64) },
     .{ .name = "TENSORFOLD_MAX_PDF_PAGES", .raw = "4294967295", .n = std.math.maxInt(u32) },
@@ -117,7 +119,9 @@ test "environment: valid forms remain raw numbers before existing consumer clamp
         try t.expect(why == null);
     }
     for (e.rules) |r| {
-        for ([_][]const u8{ "", " ", "\t \n" }) |raw| try t.expectEqual(@as(?u64, null), try e.parse(r.name, raw));
+        for ([_][]const u8{ "", " ", "\t \n" }) |raw| {
+            if (r.blank_default) try t.expectEqual(@as(?u64, null), try e.parse(r.name, raw)) else try t.expectError(error.InvalidEnvironment, e.parse(r.name, raw));
+        }
         // own scope tests: deepseek_v41/env_validate_test.zig, glm/cuda_env_test.zig, environment_flashnext_test.zig
         if (r.scope == .dsv41 or r.scope == .glm or r.scope == .flashnext) continue;
         var covered = false;

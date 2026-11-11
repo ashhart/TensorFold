@@ -12,6 +12,7 @@ pub const Rule = struct {
     forms: []const u8,
     trim: []const u8 = "",
     first_digit: bool = false,
+    blank_default: bool = true,
     /// A whole number's own bounds inside its kind's; a real kind applies `max` too when it is set.
     min: u64 = 0,
     max: u64 = std.math.maxInt(u64),
@@ -30,6 +31,7 @@ pub fn isReal(kind: Kind) bool {
 }
 
 pub const rules = [_]Rule{
+    .{ .name = "TF_FLASHNEXT_BATCH_DRAWS", .scope = .cuda, .kind = .flag, .blank_default = false, .forms = "0 or 1 (0 restores per-stream Flash Next row draws; default 1)" },
     .{ .name = "TF_STARTUP_RECEIPT", .scope = .common, .kind = .flag, .forms = "0 or 1 (opt-in startup and first completion receipts)" },
     .{ .name = "TENSORFOLD_VIDEO_TOKENS", .scope = .common, .kind = .u64, .forms = "a nonnegative whole video-token budget (default 16384; unsigned 64-bit count)" },
     .{ .name = "TENSORFOLD_MAX_PDF_PAGES", .scope = .common, .kind = .positive, .forms = "a whole number from 1 to 4294967295 (capped by --vision-max-images)" },
@@ -209,10 +211,10 @@ pub fn registered(comptime name: []const u8) void {
     @compileError(name ++ " has no row in platform/environment.zig");
 }
 
-/// Null means unset, empty or whitespace-only (main's readers used their defaults then), never malformed.
+/// Null means unset, or blank when the row preserves a legacy blank default, never malformed.
 pub fn parse(name: []const u8, raw: ?[]const u8) Error!?u64 {
     const r = rule(name);
-    if (std.mem.trim(u8, raw orelse return null, " \t\r\n").len == 0) return null;
+    if (std.mem.trim(u8, raw orelse return null, " \t\r\n").len == 0) return if (r.blank_default) null else error.InvalidEnvironment;
     const text = std.mem.trim(u8, raw.?, r.trim);
     if (r.first_digit and (text[0] < '0' or text[0] > '9')) return error.InvalidEnvironment;
     if (r.kind == .word) {
