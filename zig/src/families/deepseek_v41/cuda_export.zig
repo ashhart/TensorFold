@@ -23,6 +23,12 @@ pub const State = struct {
     index_format: ex.IndexFormat = .fp8,
     pieces: []const Piece,
     pages: []const Pages,
+    /// CED replay: layers from here hold `replay_rows` replayed rows; the window's older ones are another prompt's
+    decoder_from: u32 = none,
+    replay_rows: u32 = 0,
+
+    /// `decoder_from` of a state with no replayed layers
+    pub const none: u32 = std.math.maxInt(u32);
 };
 
 /// A state read back from the engine, held until `Source.release`.
@@ -79,6 +85,15 @@ fn clearRows(r: ex.Ring, rows: u32, from: u64, to: u64) void {
     }
 }
 
+/// A replayed layer's ring holds the last `replay_rows` positions only: the window's older row is zeroed, not stale.
+fn clearUnreplayed(st: State, swa: []const ?ex.Ring, rows: u32) Error!void {
+    if (st.replay_rows == 0 or rows == 0) return;
+    const window: u64 = @min(st.pos, g.release.window);
+    const from = st.pos - window;
+    const to = st.pos - @min(st.pos, st.replay_rows);
+    for (swa[@min(st.decoder_from, swa.len)..]) |maybe| clearRows(maybe orelse return error.MissingRing, rows, from, @max(from, to));
+}
+
 /// The library's view of `st`: slices over the snapshot's bytes, no copy; `ds_rows` rides (0: no drafter rings).
 pub fn cudaOf(arena: std.mem.Allocator, st: State, ds_rows: *u32) Error!ex.Cuda {
     const geo = g.release;
@@ -87,6 +102,7 @@ pub fn cudaOf(arena: std.mem.Allocator, st: State, ds_rows: *u32) Error!ex.Cuda 
     const swa = try arena.alloc(?ex.Ring, geo.layers);
     for (swa, 0..) |*r, l| r.* = try ringOf(st.pieces, @intCast(l), "swa", &ring_rows);
     if (ring_rows != 0) out.rings.rows = ring_rows;
+    try clearUnreplayed(st, swa, ring_rows);
     out.swa = swa;
     const carries = try arena.alloc([]const u8, geo.sources.len);
     for (geo.sources, carries) |s, *c| c.* = if (s.ratio == 2) (piece(st.pieces, s.layer, "carry") orelse return error.MissingCarry) else &.{};

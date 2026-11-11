@@ -146,7 +146,7 @@ test "a snapshot without the drafter's rings exports without them" {
     try p2.check(arena, .{ .upto = 200 }, built.exp.toManifest("dsv41-test", 0, 1));
 }
 
-test "a replay-mode snapshot (rings below the decoder only) is refused, never zero-filled" {
+test "a snapshot without the decoder layers' rings is refused, never zero-filled" {
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -154,7 +154,7 @@ test "a replay-mode snapshot (rings below the decoder only) is refused, never ze
     const snap = try snapshotOf(arena, w);
     var kept: std.ArrayList(cx.Piece) = .empty;
     for (snap.pieces) |p| {
-        // the decoder starts at layer 20: its rings and the drafter's are not in a replay snapshot
+        // the decoder starts at layer 20: its rings and the drafter's are not in this snapshot
         const l = std.fmt.parseInt(u32, p.role[3..std.mem.indexOfScalarPos(u8, p.role, 3, '.').?], 10) catch unreachable;
         if (l < 20) try kept.append(arena, p);
     }
@@ -201,4 +201,59 @@ test "a missing carry, a missing source, a short pool and a mismatched prompt ar
     bad = st;
     bad.pieces = odd;
     try std.testing.expectError(error.BadSnapshot, cx.build(gpa, @splat(1), tokens, bad));
+}
+
+/// A replay export of `upto` tokens: the decoder layers' rings hold another prompt's row where the replay never wrote.
+fn replayCase(upto: u64) !void {
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const w = try s.make(arena, .{ .upto = upto, .seed = upto * 3 + 5 });
+    const full = try snapshotOf(arena, w);
+    const tokens = try tokensOf(arena, upto);
+    const keep: u64 = 127;
+    const d: u32 = 20;
+    // the replay's live slot: every row the replay wrote is the full forward's, the one before them is stale
+    const live = try arena.dupe(cx.Piece, full.pieces);
+    const stale = (upto -| 128) % 256;
+    for (live) |*p| {
+        const l = std.fmt.parseInt(u32, p.role[3..std.mem.indexOfScalarPos(u8, p.role, 3, '.').?], 10) catch unreachable;
+        if (l < d or !std.mem.startsWith(u8, p.role[std.mem.indexOfScalarPos(u8, p.role, 3, '.').? + 1 ..], "swa")) continue;
+        const row: usize = if (std.mem.endsWith(u8, p.role, ".v")) g.cuda_values_bytes else g.cuda_scale_bytes;
+        p.bytes = try arena.dupe(u8, p.bytes);
+        if (upto >= 128) @memset(p.bytes[stale * row ..][0..row], 0xa7);
+    }
+    const base: cx.State = .{ .pos = upto, .ds_rows = 0, .pieces = full.pieces, .pages = full.pages };
+    var rep = base;
+    rep.pieces = live;
+    rep.decoder_from = d;
+    rep.replay_rows = keep;
+    const a = try cx.build(gpa, @splat(1), tokens, base);
+    defer a.deinit(gpa);
+    const b = try cx.build(gpa, @splat(1), tokens, rep);
+    defer b.deinit(gpa);
+    try std.testing.expectEqual(a.bytes, b.bytes);
+    var zeroed: usize = 0;
+    for (a.exp.layers, b.exp.layers, a.exp.sources, b.exp.sources) |la, lb, sa, sb| {
+        try std.testing.expectEqual(la.index, lb.index);
+        for (la.parts, sa.parts, sb.parts) |part, x, y| {
+            const swa = std.mem.eql(u8, part.name, "swa");
+            if (!(swa and la.index >= d and upto >= 128)) {
+                try std.testing.expectEqualSlices(u8, x, y);
+                continue;
+            }
+            // the window's oldest position: zero, the replay's rows are the full forward's
+            for (y[0..1024]) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+            try std.testing.expectEqualSlices(u8, x[1024..], y[1024..]);
+            zeroed += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, if (upto >= 128) geo.layers - d else 0), zeroed);
+    // the library's importer takes the replay export
+    const shape: plan.Shape = .{ .upto = upto };
+    try p2.check(arena, shape, b.exp.toManifest("dsv41-test", 0, 1));
+}
+
+test "a replay-mode export equals the full export but for the window's oldest row of the decoder layers, which is zero" {
+    inline for (.{ 2, 100, 127, 128, 129, 300, 520 }) |upto| try replayCase(upto);
 }

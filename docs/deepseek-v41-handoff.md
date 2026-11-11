@@ -51,8 +51,10 @@ exactly what the Metal engine itself applies to a bf16 row: the fp4 pool (served
   shard into one import. `prefill_source.Remote` pulls one producer (`tp_rank 0`, `tp_size 1`), so a split pair needs
   either a multi-link pull on the Mac or a gather on the producer into one `tp_size 1` export (the exporter takes a
   split view: `Paged.ranks`).
-* The CUDA snapshot must be a **full** one (rings of every layer). A replay-mode (CED) snapshot holds the rings below the
-  decoder only; exporting it is an error (`MissingRing`), never zeros.
+* The CUDA snapshot must hold the rings of every layer; a state without one is an error (`MissingRing`), never zeros.
+  Replay prefill (`TF_DSV41_PREFILL=replay`) is exported: the cut stands after the decoder replay, so the live slot holds the
+  decoder layers' rings (the last 127 positions the replay wrote). The window's oldest position of those layers was never
+  written by the replay (the next token does not read it) and is zero in the export.
 
 ## What a reader does
 
@@ -88,9 +90,10 @@ reply is one token, and the state at the cut goes to the producer (`cuda_export_
   decoder must serve identical files, or give the manifest's name.
 
 The engine refuses, at start-up and by name, a configuration it cannot export: no session store (`TF_DSV41_POOL_TOKENS`),
-`TF_DSV41_PREFILL=replay` (replay snapshots lack the decoder layers' rings), `TF_DSV41_PREFILL_PIECES=1` (a prompt in pieces
+`TF_DSV41_PREFILL_PIECES=1` (a prompt in pieces
 never stands at the cut), `TF_DSV41_KV_SPLIT=1` (half the pages are on the other rank), a non-default prompt shape, and fp4
-comp rows. The production profile on the pair uses replay, pieces and a split pool, so an export pair runs another profile.
+comp rows. Replay prefill is exported, with `TF_DSV41_PF_4K` and the other knobs that need it. The pair's serving profile also
+uses pieces and a split pool, so an export pair runs another profile.
 
 ## Assumptions that the library cannot prove
 

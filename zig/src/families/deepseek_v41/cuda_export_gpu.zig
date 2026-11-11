@@ -5,13 +5,13 @@ const sg = @import("sessions_gpu.zig");
 const pf = @import("forward_prefill.zig");
 const cx = @import("cuda_export.zig");
 const ex = @import("handoff/export.zig");
+const ced = @import("ced.zig");
 
-pub const Error = error{ BadWindow, SplitKvIsNotExported, UnsupportedKvFormat, ReplayPrefillIsNotExported };
+pub const Error = error{ BadWindow, SplitKvIsNotExported, UnsupportedKvFormat };
 
 /// Why this engine cannot export hand-offs as configured, or null; checked once at open.
 pub fn refusal(m: *const model.Model, pieces: bool) ?[]const u8 {
     const ss = m.sessions orelse return "--mcdma-produce needs the session store over the paged pool: set TF_DSV41_POOL_TOKENS (and TF_DSV41_SESSIONS=1; with TF_DSV41_SLOTS above 1 also TF_DSV41_SESSION_SLOTS=1)";
-    if (pf.state(&m.f).mode == .replay) return "--mcdma-produce needs full prefill (leave TF_DSV41_PREFILL unset): a replay-mode snapshot holds the SWA rings of the layers below the decoder only";
     if (!m.gt.own_prefill or m.gt.prompt_tail != .verify) return "--mcdma-produce needs the served prompt shape: TF_DSV41_OWN_PREFILL=1 and TF_DSV41_PROMPT_TAIL=verify (the defaults), so the prompt's last token stays pending at the cut";
     if (pieces) return "--mcdma-produce needs whole prompts at admission: unset TF_DSV41_PREFILL_PIECES (a prompt in pieces never stands at the cut)";
     const kx = ss.kx;
@@ -43,7 +43,9 @@ pub fn capture(gpa: std.mem.Allocator, ss: *sg.Sessions, at: u64) !*Capture {
     const f = ss.f;
     const kx = ss.kx;
     if (f.slot.pos != at or f.slot.pending != null or ss.hist[ss.cur()].items.len != at) return error.BadWindow;
-    if (pf.state(f).mode == .replay) return error.ReplayPrefillIsNotExported;
+    // replay: the cut stands after the decoder replay (target.zig), so the live slot holds the decoder layers' rings
+    const replay = pf.state(f).mode == .replay;
+    if (replay and f.slot.ced.hi != at) return error.BadWindow;
     if (kx.layout.opts.split and kx.world > 1) return error.SplitKvIsNotExported;
     if (kx.layout.opts.kv != .fp8) return error.UnsupportedKvFormat;
     const snap = try ss.snapshot();
@@ -92,6 +94,8 @@ pub fn capture(gpa: std.mem.Allocator, ss: *sg.Sessions, at: u64) !*Capture {
         .index_format = if (kx.layout.opts.index == .fp8) ex.IndexFormat.fp8 else ex.IndexFormat.bf16,
         .pieces = c.pieces,
         .pages = c.pages,
+        .decoder_from = if (replay) try ced.decoderStart(f.cfg) else cx.State.none,
+        .replay_rows = if (replay) ced.keep else 0,
     };
     return c;
 }
