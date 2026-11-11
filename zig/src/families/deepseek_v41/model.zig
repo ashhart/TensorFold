@@ -27,6 +27,7 @@ const support = @import("model_support.zig");
 const model_drafter = @import("model_drafter.zig");
 const model_hash = @import("model_hash.zig");
 const model_lifecycle = @import("model_lifecycle.zig");
+const model_import = @import("model_import.zig");
 const model_propose = @import("model_propose.zig");
 const model_draft_attention = @import("model_draft_attention.zig");
 const forward_impl = @import("forward_impl.zig");
@@ -233,6 +234,13 @@ pub const Model = struct {
     }
     pub fn snapshotRestore(m: *Model, slot: u32, snap: *const Snapshot) !void {
         return model_lifecycle.snapshotRestore(m, slot, snap);
+    }
+    /// A zeroed Snapshot an importer fills (model_import.zig), sealed restorable after `upto` tokens.
+    pub fn snapshotBlank(m: *Model) !*Snapshot {
+        return model_import.blank(m);
+    }
+    pub fn snapshotSeal(m: *const Model, snap: *Snapshot, tokens: []const u32, upto: u32) !void {
+        return model_import.seal(m, snap, tokens, upto);
     }
     pub fn beginSlot(m: *Model, slot: u32) !void {
         return model_lifecycle.beginSlot(m, slot);

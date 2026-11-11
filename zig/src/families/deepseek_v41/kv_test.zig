@@ -355,3 +355,76 @@ test "the fused window KV glue is bit-identical to rms+rope+pack" {
         try std.testing.expectEqualSlices(u8, c1.contents()[0 .. rows * packed_stride], c2.contents()[0 .. rows * packed_stride]);
     }
 }
+
+test "a prefix restored from a heap image continues like the state it was copied from" {
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    const device = try mtl.Device.init();
+    defer device.deinit();
+    const queue = try device.queue();
+    defer queue.deinit();
+    var pipes = try kv.Pipelines.load(device);
+    defer pipes.deinit();
+    const plan = cache.Plan{ .capacity = 1024, .layers = 40 };
+    var from = try cache.State.init(device, plan);
+    defer from.deinit();
+    var into = try cache.State.init(device, plan);
+    defer into.deinit();
+    const at: u32 = 201; // an odd prefix: one raw row rides in the ratio-2 carry
+    const rows: u32 = at / 2;
+    const x = try device.buffer(@as(usize, rows) * 512 * 2, mtl.ResourceOptions.shared);
+    defer x.deinit();
+    const xi = try device.buffer(@as(usize, rows) * 128 * 2, mtl.ResourceOptions.shared);
+    defer xi.deinit();
+    const chunk = try device.buffer(@as(usize, at) * 528, mtl.ResourceOptions.shared);
+    defer chunk.deinit();
+    const f32s = try device.buffer(2 * 512 * 4 * 8, mtl.ResourceOptions.shared);
+    defer f32s.deinit();
+    const weight = try device.buffer(512 * 2, mtl.ResourceOptions.shared);
+    defer weight.deinit();
+    const latent = try device.buffer(2 * 2 * 512 * 2, mtl.ResourceOptions.shared);
+    defer latent.deinit();
+    var prng = std.Random.DefaultPrng.init(41);
+    const rnd = prng.random();
+    for (std.mem.bytesAsSlice(u16, x.contents()[0 .. @as(usize, rows) * 1024])) |*v| v.* = bf(rnd.floatNorm(f32));
+    for (std.mem.bytesAsSlice(u16, xi.contents()[0 .. @as(usize, rows) * 256])) |*v| v.* = bf(rnd.floatNorm(f32));
+    for (chunk.contents()[0 .. @as(usize, at) * 528]) |*b| b.* = rnd.int(u8);
+    for (std.mem.bytesAsSlice(f32, f32s.contents()[0 .. 2 * 512 * 4 * 8])) |*v| v.* = rnd.floatNorm(f32);
+    for (std.mem.bytesAsSlice(u16, weight.contents()[0..1024])) |*v| v.* = bf(1.0);
+
+    // The prefix: FP4 main rows and FP8-scaled index rows into owner 0, layer 2's window ring, one carried raw row.
+    {
+        const src = try from.source(2, 2);
+        const cb = queue.commandBuffer();
+        const enc = cb.compute(.serial);
+        try pipes.encodePack(enc, view(x), src.main, .{ .rows = rows, .width = 512, .stride = 512, .packed_stride = cache.main_stride, .block = 16, .kind = .main_fp4 });
+        try pipes.encodePack(enc, view(xi), src.index, .{ .rows = rows, .width = 128, .stride = 128, .packed_stride = cache.index_stride, .block = 32, .kind = .index_fp4 });
+        try pipes.publishWindow(enc, view(chunk), try from.ring(2), at, 0);
+        try pipes.restorePool(enc, view(f32s), .{ .buffer = f32s, .offset = 512 * 4 }, src.partial, .{ .rows = 1, .ratio = 2, .position = at - 1, .stride = 512, .input_f32 = 1 });
+        try submit(cb, enc);
+        try from.append(at);
+    }
+
+    // The heap image (what a Snapshot holds) goes into a blank state, as snapshotRestore does it.
+    const storage = try std.testing.allocator.dupe(u8, from.storage.contents()[0..plan.packedBytes()]);
+    defer std.testing.allocator.free(storage);
+    const live = try std.testing.allocator.dupe(u8, from.live.contents()[0..plan.mutableBytes()]);
+    defer std.testing.allocator.free(live);
+    @memcpy(into.storage.contents()[0..storage.len], storage);
+    @memcpy(into.live.contents()[0..live.len], live);
+    into.position = at;
+
+    // Both continue by three tokens: the pool must close the same two groups from the carried row.
+    var out: [2][2 * 512]u16 = undefined;
+    for ([_]*cache.State{ &from, &into }, 0..) |state, i| {
+        const src = try state.source(2, 2);
+        const cb = queue.commandBuffer();
+        const enc = cb.compute(.serial);
+        try pipes.encodePool(enc, .{ .buffer = f32s, .offset = 0 }, .{ .buffer = f32s, .offset = 512 * 4 * 3 }, src.partial, view(weight), view(latent), src.capture, .{ .rows = 3, .ratio = 2, .position = at, .stride = 512, .input_f32 = 1, .capture_rows = cache.capture_rows });
+        try submit(cb, enc);
+        @memcpy(&out[i], std.mem.bytesAsSlice(u16, latent.contents()[0 .. 2 * 512 * 2]));
+    }
+    try std.testing.expectEqualSlices(u16, &out[0], &out[1]);
+    try std.testing.expectEqualSlices(u8, from.live.contents()[0..plan.mutableBytes()], into.live.contents()[0..plan.mutableBytes()]);
+    try std.testing.expectEqualSlices(u8, from.storage.contents()[0..plan.packedBytes()], into.storage.contents()[0..plan.packedBytes()]);
+}
