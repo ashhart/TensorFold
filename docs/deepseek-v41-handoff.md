@@ -48,9 +48,12 @@ exactly what the Metal engine itself applies to a bf16 row: the fp4 pool (served
 * **Replicated KV (default)**: one producer, `tp_size 1`, the rank-0 view. Works with `prefill_source.Remote` as is.
 * **KV_SPLIT**: logical page `pg` lives on rank `pg % world`. Each rank exports a shard (`tp_rank`, `tp_size = world`):
   shard 0 carries `swa`, `carry`, `ring` and its pages, others only their `comp`/`ixk` pages. The decoder pulls every
-  shard into one import. `prefill_source.Remote` pulls one producer (`tp_rank 0`, `tp_size 1`), so a split pair needs
-  either a multi-link pull on the Mac or a gather on the producer into one `tp_size 1` export (the exporter takes a
-  split view: `Paged.ranks`).
+  shard into one import. Rank 0's `--mcdma-produce LINK` exports shard 0; rank 0 sends each follower an `op_export` at
+  the cut and a follower started with `TF_DSV41_PRODUCE_LINK=NAME` (an `mcdma-rpcd` listen link of its own host) reads
+  its pages and exports them under the same hand-off id. The Mac names every link, shard 0 first:
+  `--mcdma-link A,B`. It opens the links, triggers the producer once and pulls the shards in parallel, one thread and one
+  link each, into one landing, so a pair with a cable per Spark pulls at the sum of the two links.
+  A pool that is not split exports whole from rank 0 as before; `--mcdma-produce http` exports a replicated pool only.
 * The CUDA snapshot must hold the rings of every layer; a state without one is an error (`MissingRing`), never zeros.
   Replay prefill (`TF_DSV41_PREFILL=replay`) is exported: the cut stands after the decoder replay, so the live slot holds the
   decoder layers' rings (the last 127 positions the replay wrote). The window's oldest position of those layers was never
@@ -97,6 +100,7 @@ exported, with `TF_DSV41_PF_4K` and the other knobs that need it. So is a prompt
 (`TF_DSV41_PREFILL_PIECES=1`): the cut stands in the prompt's last step, after its last piece and the decoder replay and before
 the last token's window, and the other streams keep decoding while the pieces run. The pair's serving profile (pieces, replay,
 drafts) therefore exports in the same process, with a replicated pool.
+A split pool (`TF_DSV41_KV_SPLIT=1`) is exported by shard, each rank on its own link (Shards above).
 
 ## Assumptions that the library cannot prove
 
