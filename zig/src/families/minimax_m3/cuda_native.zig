@@ -1,4 +1,4 @@
-//! MiniMax-M3.1-Flash native CUDA at TP (TF_MINIMAX_RANK, TF_MINIMAX_WORLD, NCCL_COMM_ID): rank 0 serves.
+//! MiniMax-M3.1-Flash native CUDA at TP (--tp, --rank, NCCL's root): rank 0 serves.
 
 const std = @import("std");
 const cuda = @import("cuda");
@@ -324,11 +324,11 @@ fn release(own: *Owned) void {
 /// The server's words for this family's refusals.
 pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
     return switch (err) {
-        error.NoRank => "MiniMax-M3.1-Flash runs at TP over two hosts: set TF_MINIMAX_RANK (0 or 1) and TF_MINIMAX_WORLD=2 on both",
+        error.NoRank => "MiniMax-M3.1-Flash runs at TP over two hosts: launch both with --tp 2 and --rank 0 or 1",
         error.NoCommId => "MiniMax-M3.1-Flash's ranks meet over NCCL: give --master (rank 0's address) or set NCCL_COMM_ID to rank 0's address:port on both hosts",
         error.RendezvousDisagree => "NCCL_COMM_ID differs from --master:--master-port: give one of them, or equal values",
         error.MiniMaxM3RequiresSm121 => "MiniMax-M3.1-Flash on CUDA is served on GB10 (sm_121) only so far, and this GPU is another",
-        error.MiniMaxM3RequiresTwoRanks => "MiniMax-M3.1-Flash on CUDA is served at two TP ranks only so far: TF_MINIMAX_WORLD=2 on both hosts",
+        error.MiniMaxM3RequiresTwoRanks => "MiniMax-M3.1-Flash on CUDA is served at two TP ranks only so far: launch both hosts with --tp 2",
         error.NotExl3 => "MiniMax-M3.1-Flash on CUDA serves a published EXL3 pack (quantization_config quant_method \"exl3\"), e.g. Mia-AiLab/MiniMax-M3.1-Flash-EXL3-EAQ-v1-3.06-bpw",
         error.UnsupportedExl3 => "this EXL3 pack is not one the CUDA kernels read: exllamav3 1.x on the mul1 codebook, every projection at a width the dense kernels build",
         error.UnexpectedMiniMaxTensor => "a tensor is not stored as MiniMax-M3.1-Flash's EXL3 packs store it (the log names it)",
