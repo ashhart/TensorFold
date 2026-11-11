@@ -29,3 +29,25 @@ test "tail cache: a raw prompt keeps its last chunk start, and its repeat and a 
     store.rules.tail = false;
     try std.testing.expectEqual(@as(usize, 0), (try store.marks(arena.allocator(), raw, 0, 0, &.{}, &.{}, &.{})).len);
 }
+
+test "tail cache: a lookup planned from a landed prefix drops a tail mark under 64 rows past it and keeps one farther" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var f: fake.Fake = .{ .gpa = a };
+    var store = pc.Store.init(a, f.snapshots(), .{ .planned = true, .grid = 128, .tail = true, .tail_align = 128, .min_prompt = 0, .min_gap = 64 }, 1 << 20);
+    defer store.deinit();
+    var prompt: [340]u32 = undefined;
+    for (&prompt, 0..) |*token, i| token.* = @intCast(i + 1);
+    const fresh = try store.lookup(arena.allocator(), &prompt, 0, &.{}, &.{}, &.{});
+    try std.testing.expectEqualSlices(u32, &.{256}, fresh.marks);
+    try std.testing.expectEqual(@as(u32, 256), fresh.snap_at);
+    store.resume_floor = 230; // the pass starts 26 rows below the mark: a cut there would be a chunk of its own
+    const near = try store.lookup(arena.allocator(), &prompt, 0, &.{}, &.{}, &.{});
+    try std.testing.expectEqual(@as(usize, 0), near.marks.len);
+    try std.testing.expectEqual(@as(u32, 0), near.snap_at);
+    store.resume_floor = 100;
+    const far = try store.lookup(arena.allocator(), &prompt, 0, &.{}, &.{}, &.{});
+    try std.testing.expectEqualSlices(u32, &.{256}, far.marks);
+    try std.testing.expectEqual(@as(u32, 256), far.snap_at);
+}

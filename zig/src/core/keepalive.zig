@@ -10,7 +10,7 @@ pub const Target = struct {
 };
 
 /// The served interval: macOS unwires an idle model after 1-2 s, so a tick each 400 ms stays well inside it.
-const served_interval_ns: i64 = 400 * std.time.ns_per_ms;
+pub const served_interval_ns: i64 = 400 * std.time.ns_per_ms;
 
 /// The ticker: commits every 400 ms while no request runs and `--keep-warm` seconds have not passed.
 pub const Keepalive = struct {
