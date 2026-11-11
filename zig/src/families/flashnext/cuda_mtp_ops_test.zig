@@ -8,6 +8,10 @@ const ops_ = @import("cuda_mtp_ops.zig");
 const Ops = ops_.Ops;
 const Draft = mtp.Draft;
 const max_rows = mtp.max_rows;
+
+test {
+    _ = @import("cuda_mtp_group_tier_test.zig");
+}
 const Head = mtp.Head;
 const vocab = @import("cuda_prompt_wt.zig").vocab;
 
