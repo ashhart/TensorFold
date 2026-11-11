@@ -267,7 +267,7 @@ pub const Head = struct {
                 std.log.err("PROBE mtp argmaxRows: {s}", .{@errorName(err)});
                 return err;
             };
-            if (cut and n + 1 < most) try (o.tokenProb(logits, rows, head.n, 0, dev + at.probs + 4 * h.cap * n) catch |err| {
+            if (cut and n + 1 < most) o.tokenProb(logits, rows, head.n, 0, dev + at.probs + 4 * h.cap * n) catch |err| {
                 std.log.err("PROBE mtp tokenProb: {s}", .{@errorName(err)});
                 return err;
             });
