@@ -88,6 +88,20 @@ test "ranks that differ only in the call, the op or the type are refused over TC
     for (0..3) |f| try tcp.run(gpa, 2, opts, @as(u8, @intCast(f)), FieldDesync.go);
 }
 
+/// The ranks make the same call but name different parts of a staged call (`stage.zig`): both refuse it.
+const PartDesync = struct {
+    fn go(c: Collective, rank: u32, _: void) !void {
+        @as(*tcp.Rank, @ptrCast(@alignCast(c.ptr))).part = rank;
+        var a: [8]u8 = @splat(0);
+        var b: [16]u8 = undefined;
+        if (c.allGather(addr(&a), addr(&b), 8, .u8, null)) |_| return error.ShouldHaveFailed else |e| if (e != error.Invalid and e != error.Aborted) return e;
+    }
+};
+
+test "ranks that differ only in the part number are refused over TCP" {
+    try tcp.run(gpa, 2, opts, {}, PartDesync.go);
+}
+
 test "abort over TCP frees a peer waiting in a collective" {
     try tcp.run(gpa, 2, opts, {}, host_test.Aborts.go);
 }
