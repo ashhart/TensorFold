@@ -61,7 +61,17 @@ pub fn steps(b: *std.Build, metal: *std.Build.Module, sources: *std.Build.Module
     const vis_step = b.step("test-dsv41-metal-vision", "DeepSeek-V4.1 Metal vision: the tower against float64, image rows in prompts");
     vis_step.dependOn(&vis_run.step);
     const prepare_run = b.addRunArtifact(b.addTest(.{ .root_module = p.pkg, .filters = &.{"prepare"} }));
-    b.step("test-dsv41-metal-prepare", "DeepSeek-V4.1 Metal: image bytes to patches").dependOn(&prepare_run.step);
+    const prepare_test_mod = b.createModule(.{
+        .root_source_file = b.path("zig/tests/dsv41_metal/vision_prepare_test.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+        .link_libc = true,
+        .imports = &.{.{ .name = "dsv41_metal", .module = p.pkg }},
+    });
+    const prepare_test_run = b.addRunArtifact(b.addTest(.{ .root_module = prepare_test_mod }));
+    const prepare_step = b.step("test-dsv41-metal-prepare", "DeepSeek-V4.1 Metal: image bytes to patches");
+    prepare_step.dependOn(&prepare_run.step);
+    prepare_step.dependOn(&prepare_test_run.step);
     // the served engine over the tiny model: LaneHost replies, drafts, the prompt cache, seeds, cancels
     const serve = b.createModule(.{
         .root_source_file = b.path("zig/tests/dsv41_metal/serve_test.zig"),

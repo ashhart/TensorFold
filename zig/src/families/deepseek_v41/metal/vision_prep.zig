@@ -103,10 +103,10 @@ pub fn contain(w: u32, h: u32, bw: u32, bh: u32) [2]u32 {
     const dest: f64 = @as(f64, @floatFromInt(bw)) / @as(f64, @floatFromInt(bh));
     if (im == dest) return .{ bw, bh };
     if (im > dest) {
-        const nh = roundEven(@as(f64, @floatFromInt(h)) / @as(f64, @floatFromInt(w)) * @as(f64, @floatFromInt(bw)));
+        const nh = @max(1, roundEven(@as(f64, @floatFromInt(h)) / @as(f64, @floatFromInt(w)) * @as(f64, @floatFromInt(bw))));
         return .{ bw, if (nh != bh) nh else bh };
     }
-    const nw = roundEven(@as(f64, @floatFromInt(w)) / @as(f64, @floatFromInt(h)) * @as(f64, @floatFromInt(bh)));
+    const nw = @max(1, roundEven(@as(f64, @floatFromInt(w)) / @as(f64, @floatFromInt(h)) * @as(f64, @floatFromInt(bh))));
     return .{ if (nw != bw) nw else bw, bh };
 }
 

@@ -98,7 +98,15 @@ pub const Metal = struct {
         const v = m.parts.env.vision orelse return null;
         const lim = m.parts.images orelse return null;
         m.prep = .{ .io = lim.io, .cfg = v.w.cfg };
-        return .{ .ctx = &m.prep, .prepare = prepare, .image_token = v.w.cfg.image_token_id, .image_tokens = lim.tokens, .max_images = lim.count };
+        return .{ .ctx = &m.prep, .prepare = prepare, .image_token = v.w.cfg.image_token_id, .image_tokens = lim.tokens, .max_images = lim.count, .explain = explain };
+    }
+
+    /// The server's words for this family's prepare errors it cannot word.
+    fn explain(err: anyerror) ?[]const u8 {
+        return switch (err) {
+            error.TooFewTokens => "the visual-token budget is too small",
+            else => null,
+        };
     }
 
     fn prepare(ctx: *anyopaque, a: Allocator, bytes: []const u8, max_tokens: u32) anyerror!api.PreparedImage {
