@@ -33,7 +33,10 @@ fn affineOf(proj: Projection, h: mlx.Matrix) Affine {
 pub fn project(o: Ops, x: Tensor, proj: Projection, m: usize, f32_out: bool) Error!Tensor {
     if (proj.nvfp4) |h| return nvfp4Project(o, x, proj, h, m, f32_out);
     if (proj.fp8) |h| return fp8Project(o, x, proj, h, m, f32_out);
-    switch (proj.handle orelse return error.BadShape) {
+    switch (proj.handle orelse {
+        std.log.err("PROBE project: no handle (nvfp4={} fp8={} n={d} k={d} m={d})", .{ proj.nvfp4 != null, proj.fp8 != null, proj.n, proj.k, m });
+        return error.BadShape;
+    }) {
         .mlx => |h| return affine(o, x, affineOf(proj, h), m, f32_out),
         .dense => |h| switch (h.dtype) {
             .f32 => {
