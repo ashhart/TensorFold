@@ -27,7 +27,7 @@ const Recording = struct {
 
 test "GLM load prices: DFlash2 races expert forms without timing unused windows or head steps" {
     var r: Recording = .{};
-    const kept = try costs.measurements.measure(&r, true);
+    const kept = try costs.measurements.measure(&r, true, null);
     try t.expectEqual([3]bool{ false, true, true }, r.forms);
     try t.expectEqual(@as(usize, 0), r.drafts);
     for (r.windows, 0..) |count, i| {
@@ -41,7 +41,7 @@ test "GLM load prices: DFlash2 races expert forms without timing unused windows 
 
 test "GLM load prices: MTP retains every timed width and the two-level head slope" {
     var r: Recording = .{};
-    const kept = try costs.measurements.measure(&r, false);
+    const kept = try costs.measurements.measure(&r, false, null);
     try t.expectEqual([3]bool{ false, true, true }, r.forms);
     try t.expectEqual(@as(usize, 32), r.drafts);
     for (r.windows, 0..) |count, i| {
@@ -53,6 +53,22 @@ test "GLM load prices: MTP retains every timed width and the two-level head slop
     try t.expect(!costs.measurements.reusable(kept, true));
     try t.expect(costs.tableFor(kept, false) != null);
     try t.expect(costs.tableFor(kept, true) == null);
+}
+
+test "GLM load prices: a named expert form is set once, before the warm-up, and no forms race" {
+    for ([_]bool{ false, true }) |pin| for ([_]bool{ false, true }) |block| {
+        var r: Recording = .{};
+        const kept = try costs.measurements.measure(&r, block, pin);
+        try t.expectEqual(@as(usize, 1), r.changes);
+        try t.expectEqual(pin, r.forms[0]);
+        try t.expectEqual(@as(u64, @intFromBool(pin)), kept.fact);
+        try t.expectEqual(@as(usize, if (block) 0 else 16), r.drafts);
+        for (r.windows, 0..) |count, i| {
+            const warm: usize = if (i == costs.widths.len - 1) 8 else 0;
+            try t.expectEqual(warm + @as(usize, if (block) 0 else 8), count);
+        }
+        try t.expect(costs.measurements.reusable(kept, block));
+    };
 }
 
 const Device = struct {
@@ -99,14 +115,14 @@ test "GLM load prices: an oversized NCCL setting disables the cache without reje
     defer a.free(long);
     @memset(long, 'x');
     try t.expectEqual(@as(c_int, 0), env.setenv(variable, long, 1));
-    try t.expect((try costs.keyParts(&e, &ctx, &name, &shape)) == null);
+    try t.expect((try costs.keyParts(&e, &ctx, &name, &shape, null)) == null);
     try t.expectEqual(@as(c_int, 0), env.setenv(variable, "SYS", 1));
-    const parts = (try costs.keyParts(&e, &ctx, &name, &shape)) orelse return error.ExpectedShortIdentity;
+    const parts = (try costs.keyParts(&e, &ctx, &name, &shape, null)) orelse return error.ExpectedShortIdentity;
     try t.expectEqualStrings("glm-cuda", parts[0]);
     var dr: @TypeOf(e.drafter.?.*) = undefined;
     dr.bits = 4;
     dr.checkpoint_digest = @splat(2);
     e.drafter = &dr;
-    const form = (try costs.keyParts(&e, &ctx, &name, &shape)) orelse return error.ExpectedFormIdentity;
+    const form = (try costs.keyParts(&e, &ctx, &name, &shape, null)) orelse return error.ExpectedFormIdentity;
     try t.expectEqualStrings("glm-cuda-form", form[0]);
 }
