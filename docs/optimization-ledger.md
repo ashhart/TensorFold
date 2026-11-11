@@ -223,6 +223,7 @@ on the lane host, so few rows apply.
 
 SAM3 (M) caches convolution matrices and rotary tables; its FP32 transposed convolution computes four spatial
 outputs per thread. Its FP32 tensor products reconstruct operand bits omitted by the hardware operation.
+GEMMs with weights expanded from FP16/BF16 omit zero correction products at compile time.
 
 ## Rough gain
 

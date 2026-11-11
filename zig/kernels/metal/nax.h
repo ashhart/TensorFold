@@ -64,7 +64,7 @@ inline void frag_put_in(thread const frag<float>& f, device O* p, int ld, int r,
 #else
 #define TF_MMA_NAME mma_16x32
 #endif
-template <bool TA, bool TB, typename C, typename A, typename B>
+template <bool TA, bool TB, typename C, typename A, typename B, bool EXACT_B = false>
 inline void TF_MMA_NAME(thread frag<C>& lo, thread frag<C>& hi, thread const frag<A>& a, thread const frag<B>& b0,
                       thread const frag<B>& b1) {
   using namespace mpp::tensor_ops;
@@ -185,10 +185,10 @@ inline void scalar_mma_16x32(thread frag<float>& lo, thread frag<float>& hi, thr
   }
 }
 
-template <bool TA, bool TB, typename C, typename A, typename B>
+template <bool TA, bool TB, typename C, typename A, typename B, bool EXACT_B = false>
 inline void mma_16x32(thread frag<C>& lo, thread frag<C>& hi, thread const frag<A>& a,
                       thread const frag<B>& b0, thread const frag<B>& b1) {
-  constexpr bool af = metal::is_same<A, float>::value, bf = metal::is_same<B, float>::value;
+  constexpr bool af = metal::is_same<A, float>::value, bf = metal::is_same<B, float>::value && !EXACT_B;
   if constexpr (!metal::is_same<C, float>::value || (!af && !bf)) {
     mma_16x32_cut<TA, TB>(lo, hi, a, b0, b1);
   } else {
@@ -307,7 +307,7 @@ inline void frag_put_in(thread const frag<float>& f, device O* p, int ld, int r,
 }
 
 // The op as on M5; right operand and accumulator hold a lane's first-half columns at (e >> 2) * 8 + (e & 3).
-template <bool TA, bool TB, typename C, typename A, typename B>
+template <bool TA, bool TB, typename C, typename A, typename B, bool EXACT_B = false>
 inline void mma_16x32(thread frag<C>& lo, thread frag<C>& hi, thread const frag<A>& a, thread const frag<B>& b0,
                       thread const frag<B>& b1) {
   using namespace mpp::tensor_ops;

@@ -17,6 +17,7 @@ pub fn check(init: std.process.Init, args: []const [:0]const u8) !void {
     g.guards = true;
     g.buffer_cache_limit = 32 << 20;
     if (args.len == 2) return benchmark(&g);
+    try checkExactWeightProducts(&g);
     for ([_]usize{ 32, 256, 4736 }) |depth| {
         const x = try g.alloc(64 * depth, .f16);
         defer x.deinit();
@@ -118,6 +119,26 @@ pub fn check(init: std.process.Init, args: []const [:0]const u8) !void {
     try checkSparseMask(&g);
     try checkVisionResidual(&g);
     try checkMemoryMasks(&g);
+}
+
+fn checkExactWeightProducts(g: *gpu.Gpu) !void {
+    for ([_][3]usize{ .{ 65, 129, 257 }, .{ 65, 128, 256 }, .{ 64, 129, 257 }, .{ 64, 128, 4736 } }) |shape| {
+        const rows, const cols, const depth = shape;
+        const x = try g.alloc(rows * depth, .f32);
+        defer x.deinit();
+        const w = try g.alloc(cols * depth, .f32);
+        defer w.deinit();
+        for (x.slice(f32, x.count), 0..) |*value, i| value.* = @sin(@as(f32, @floatFromInt(i % 997)) * 0.037);
+        for (w.slice(f32, w.count), 0..) |*value, i| value.* = @as(f16, @floatCast(@cos(@as(f32, @floatFromInt(i % 991)) * 0.017)));
+        const baseline = try g.matmul(x, w, rows, cols, depth);
+        defer baseline.deinit();
+        var exact = w;
+        exact.tensor_operand_exact = true;
+        const actual = try g.matmul(x, exact, rows, cols, depth);
+        defer actual.deinit();
+        if (!std.mem.eql(u8, baseline.slice(u8, baseline.count * 4), actual.slice(u8, actual.count * 4))) return error.SamExactWeightParity;
+        std.debug.print("SAM exact-weight FP32 projection {d}x{d}x{d}: byte-identical to full reconstruction\n", .{ rows, cols, depth });
+    }
 }
 
 fn checkMemoryMasks(g: *gpu.Gpu) !void {

@@ -20,6 +20,8 @@ pub const Tensor = struct {
     buffer: mtl.Buffer,
     count: usize,
     dtype: DType,
+    // FP32 values expanded from FP16/BF16 have no operand bits for the tensor unit to discard.
+    tensor_operand_exact: bool = false,
     guarded: bool = false,
     owned: bool = true,
     offset: usize = 0,
@@ -203,7 +205,7 @@ pub const Gpu = struct {
         defer if (!same) {
             if (mapped) |value| value.deinit();
         };
-        const result = if (same and mapped != null) mapped.? else try self.alloc(src.numel(), dtype);
+        var result = if (same and mapped != null) mapped.? else try self.alloc(src.numel(), dtype);
         errdefer result.deinit();
         if (mapped) |source| {
             if (!same) try self.dispatch("im_cast", &.{ source, result }, [3]u32{ @intCast(src.numel()), switch (src.dtype) {
@@ -224,6 +226,7 @@ pub const Gpu = struct {
                 }
             }
         }
+        result.tensor_operand_exact = dtype == .f32 and (src.dtype == .f16 or src.dtype == .bf16);
         if (self.cache_weights) {
             try self.weight_cache.put(self.allocator, key, result);
             var borrowed = result;
@@ -339,7 +342,7 @@ pub const Gpu = struct {
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         var name: [64]u8 = undefined;
-        const key = try std.fmt.bufPrint(&name, "qwv_gemm_{s}_nt_{d}{d}", .{ @tagName(x.dtype), @intFromBool(m % 64 == 0), @intFromBool(n % 128 == 0) });
+        const key = try std.fmt.bufPrint(&name, "qwv_gemm_{s}{s}_nt_{d}{d}", .{ @tagName(x.dtype), if (w.dtype == .f32 and w.tensor_operand_exact) "_exact" else "", @intFromBool(m % 64 == 0), @intFromBool(n % 128 == 0) });
         const p = try self.pipeline(key);
         const pass = self.command();
         const cb = pass.cb;
