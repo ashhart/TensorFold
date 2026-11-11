@@ -20,8 +20,8 @@ const Env = struct {
 test "TF_DSV41_DRAFT_PLAIN_STREAMS: parsed, 0 when unset, bad values error" {
     Env.pairs = &.{};
     try std.testing.expectEqual(@as(usize, 0), (try calib_env.depthSettings(&Env.get)).plain_streams);
-    Env.pairs = &.{.{ "TF_DSV41_DRAFT_PLAIN_STREAMS", "4" }};
-    try std.testing.expectEqual(@as(usize, 4), (try calib_env.depthSettings(&Env.get)).plain_streams);
+    Env.pairs = &.{.{ "TF_DSV41_DRAFT_PLAIN_STREAMS", "3" }};
+    try std.testing.expectEqual(@as(usize, 3), (try calib_env.depthSettings(&Env.get)).plain_streams);
     Env.pairs = &.{.{ "TF_DSV41_DRAFT_PLAIN_STREAMS", "oops" }};
     try std.testing.expectError(error.InvalidCharacter, calib_env.depthSettings(&Env.get));
     Env.pairs = &.{};
@@ -65,12 +65,16 @@ const a1 = [_]u32{ 3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5, 8, 9, 7, 9, 3, 2, 3, 8, 4 };
 test "a round with plain_streams or more active windows decodes plain; below it drafts; 0 keeps drafts" {
     // identical prompts and greedy sampling keep every round a full 4-window round until the streams end together
     const four = [_][]const u32{ &a1, &a1, &a1, &a1 };
-    // 4 active, threshold 4: every drafted window is forced to count 0
-    const plain = try runPlain(&four, .{ .plain_streams = 4 });
+    // 4 active, threshold 3: every drafted window is forced to count 0
+    const plain = try runPlain(&four, .{ .plain_streams = 3 });
     try std.testing.expect(plain.ok);
     try std.testing.expectEqual(@as(u64, 0), plain.drafted);
-    // 3 active, threshold 4: below it, drafts are kept
-    const below = try runPlain(four[0..3], .{ .plain_streams = 4 });
+    // 3 active, threshold 3: at it, plain too
+    const at = try runPlain(four[0..3], .{ .plain_streams = 3 });
+    try std.testing.expect(at.ok);
+    try std.testing.expectEqual(@as(u64, 0), at.drafted);
+    // 2 active, threshold 3: below it, drafts are kept
+    const below = try runPlain(four[0..2], .{ .plain_streams = 3 });
     try std.testing.expect(below.ok);
     try std.testing.expect(below.drafted > 0);
     // 4 active, threshold 0 (off): drafts are kept
