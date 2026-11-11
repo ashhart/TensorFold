@@ -204,16 +204,15 @@ const Builder = struct {
         const limits = b.dev.properties.limits;
         return vk.tile.fits(n, k) and vk.tile.padded(n) * k / 2 <= limits.maxStorageBufferRange and limits.minStorageBufferOffsetAlignment % 16 == 0;
     }
-fn tileFor(bf16_act: bool, fits: bool) bool {
-    return bf16_act and fits;
-}
+    fn tileFor(bf16_act: bool, fits: bool) bool {
+        return bf16_act and fits;
+    }
 
-test "float32 layers keep row weights even when the shape tiles" {
-    try std.testing.expect(!tileFor(false, true));
-    try std.testing.expect(tileFor(true, true));
-    try std.testing.expect(!tileFor(true, false));
-}
-
+    test "float32 layers keep row weights even when the shape tiles" {
+        try std.testing.expect(!tileFor(false, true));
+        try std.testing.expect(tileFor(true, true));
+        try std.testing.expect(!tileFor(true, false));
+    }
 
     // One tensor of a tiled projection: checked like `raw`, then repacked on the host into zero-padded 32-column tiles.
     fn repacked(b: *Builder, name: []const u8, dt: loader.table.DType, shape: []const usize, n: usize, k: usize, words: bool) !View {
