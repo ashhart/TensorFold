@@ -121,7 +121,7 @@ fn fullKernels(d: *cuda.Driver) modelopt.Kernels {
     d.api.cuLaunchKernelEx = Recorded.launchEx;
     d.api.cuMemcpyHtoD_v2 = Recorded.copy;
     d.api.cuStreamSynchronize = Recorded.sync;
-    var out: modelopt.Kernels = .{ .lane = undefined, .prompt = undefined, .pack = undefined, .embed = undefined };
+    var out: modelopt.Kernels = .{ .lane = undefined, .prompt = undefined, .pack = undefined, .embed = undefined, .glue = undefined };
     out.lane.clusters = false;
     for (&out.lane.fns) |*set| for (set) |*f| {
         f.* = function(d, 2);
@@ -133,6 +133,7 @@ fn fullKernels(d: *cuda.Driver) modelopt.Kernels {
     out.prompt.lean = function(d, 3);
     out.prompt.lean_f32 = function(d, 3);
     out.prompt.sms = 48;
+    out.prompt.bf16_serving = false;
     out.pack.fp8_lane = function(d, 1);
     return out;
 }

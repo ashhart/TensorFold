@@ -1,7 +1,8 @@
 //! Whole-head chain and baseline launch resource records.
 const registry = @import("registry.zig");
 pub const records = [_]registry.CudaRecord{
-    .{ .launch = .{ .name = "gdn_prefill tf_gdn_chain_norm", .symbol = "tf_gdn_chain_norm", .image = "gdn_prefill", .threads = 256 }, .usage = .{ .{ .regs = 176, .static = 24704, .bound = 256 }, .{ .regs = 184, .static = 24704, .bound = 256 }, .{ .regs = 184, .static = 24704, .bound = 256 }, .{ .regs = 183, .static = 24704, .bound = 256 }, .{ .regs = 183, .static = 24704, .bound = 256 } }, .later_pending = true },
+    .{ .launch = .{ .name = "qwen_gdn_bf16 tf_gdn_chain_norm", .symbol = "tf_gdn_chain_norm", .image = "qwen_gdn_bf16", .threads = 256 }, .usage = registry.none, .later_pending = true },
     .{ .launch = .{ .name = "gdn_prefill chain_kernel", .symbol = "_ZN14tf_gdn_prefill12chain_kernelI13__nv_bfloat16S1_Li64ELi32EEEvPKT_S4_PKS1_PKfPKT0_S8_PfPS1_iii", .image = "gdn_prefill", .threads = 128 }, .usage = .{ .{ .regs = 229, .static = 37120, .bound = 128 }, .{ .regs = 231, .static = 37120, .bound = 128 }, .{ .regs = 231, .static = 37120, .bound = 128 }, .{ .regs = 193, .static = 37120, .bound = 128 }, .{ .regs = 193, .static = 37120, .bound = 128 } }, .later_pending = true },
+    .{ .launch = .{ .name = "qwen_gdn_bf16 chain_kernel", .symbol = "_ZN14tf_gdn_prefill12chain_kernelI13__nv_bfloat16S1_Li64ELi32EEEvPKT_S4_PKS1_PKfPKT0_S8_PfPS1_iii", .image = "qwen_gdn_bf16", .threads = 128 }, .usage = registry.none, .later_pending = true },
     .{ .launch = .{ .name = "qwen35 tf_q35_gdn_post", .symbol = "tf_q35_gdn_post", .image = "qwen35", .threads = 32 }, .usage = .{ .{ .regs = 28, .static = 256, .bound = 32 }, .{ .regs = 29, .static = 256, .bound = 32 }, .{ .regs = 29, .static = 256, .bound = 32 }, .{ .regs = 31, .static = 256, .bound = 32 }, .{ .regs = 31, .static = 256, .bound = 32 } }, .later_pending = true },
 };

@@ -151,7 +151,7 @@ pub const Suite = struct {
     qwen: cuda.Module,
     cases: [6]Case,
     pub fn init(gpu: @import("check.zig").Gpu, s: cuda.Stream, _: cuda.Module) !Suite {
-        var gd = try cuda.Module.load(gpu.d, cuda.kernels.gdn_prefill);
+        var gd = try cuda.Module.load(gpu.d, cuda.kernels.qwen_gdn_bf16);
         errdefer gd.unload();
         var qw = try cuda.Module.load(gpu.d, cuda.kernels.qwen35);
         errdefer qw.unload();

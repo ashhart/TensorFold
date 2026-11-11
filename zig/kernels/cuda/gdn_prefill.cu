@@ -148,6 +148,3 @@ __global__ void __launch_bounds__(2 * ROWS) chain_kernel(
 template __global__ void tf_gdn_prefill::chain_kernel<__nv_bfloat16, __nv_bfloat16, 64, 32>(const __nv_bfloat16* __restrict__,
     const __nv_bfloat16* __restrict__, const __nv_bfloat16* __restrict__, const float* __restrict__,
     const __nv_bfloat16* __restrict__, const float*, float*, __nv_bfloat16* __restrict__, int, int, int);
-
-#define TF_GDN_CHAIN_CONTROLS
-#include "gdn_prefill_norm.cuh"

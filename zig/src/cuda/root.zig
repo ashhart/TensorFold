@@ -224,3 +224,5 @@ test {
 test {
     _ = @import("moe_router_host_test.zig");
 }
+
+pub const moe_bf16 = @import("moe_bf16.zig");

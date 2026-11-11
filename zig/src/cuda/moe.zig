@@ -14,28 +14,18 @@ pub const max_top_k = 31;
 
 pub const Fns = struct {
     router_fn: Function,
-    router_expert: ?Function = null,
     topk_fn: Function,
     combine_fn: Function,
     router_tiles_fn: Function,
 
     /// From the loaded moe module (kernels.moe).
     pub fn resolve(mod: Module) !Fns {
-        const value = std.c.getenv("TF_CUDA_MOE_EXPERT_FIRST");
-        return resolveMode(mod, expertFirst(if (value) |v| std.mem.span(v) else null));
-    }
-
-    pub fn expertFirst(value: ?[]const u8) bool {
-        return value == null or !std.mem.eql(u8, value.?, "0");
-    }
-
-    pub fn resolveMode(mod: Module, on: bool) !Fns {
-        return .{ .router_fn = try mod.function("tf_moe_router"), .router_expert = if (on) try mod.function("tf_moe_router_expert_first") else null, .topk_fn = try mod.function("tf_moe_topk"), .combine_fn = try mod.function("tf_moe_combine"), .router_tiles_fn = try mod.function("tf_moe_router_tiles") };
+        return .{ .router_fn = try mod.function("tf_moe_router"), .topk_fn = try mod.function("tf_moe_topk"), .combine_fn = try mod.function("tf_moe_combine"), .router_tiles_fn = try mod.function("tf_moe_router_tiles") };
     }
 
     /// logits[r][e] = fp32 x[r] . w[e], the gate last; `params` word 2 caps rows; wide calls on the same-bits tiles.
     pub fn route(f: Fns, s: Stream, x: u64, x_stride: usize, rows: usize, w: u64, logits: u64, dims: usize, count: usize, params: u64) !void {
-        if (f.router_expert == null and tiled(x, x_stride, w, rows, dims)) return f.routeTiles(s, x, rows, w, logits, dims, count, params);
+        if (tiled(x, x_stride, w, rows, dims)) return f.routeTiles(s, x, rows, w, logits, dims, count, params);
         var a: launch_.Args = .{};
         a.add(x);
         a.add(int(x_stride));
@@ -43,10 +33,8 @@ pub const Fns = struct {
         a.add(logits);
         for ([_]usize{ rows, dims, count }) |v| a.add(int(v));
         a.add(params);
-        const rt: u32 = @intCast((rows + 15) / 16);
-        const et: u32 = @intCast((count + 15) / 16);
-        const cfg: launch_.Config = .{ .grid = if (f.router_expert != null) .{ .x = et, .y = rt } else .{ .x = rt, .y = et }, .block = .{ .x = 256 } };
-        try launch_.launch(f.router_expert orelse f.router_fn, cfg, s, &a);
+        const cfg: launch_.Config = .{ .grid = .{ .x = @intCast((rows + 15) / 16), .y = @intCast((count + 15) / 16), .z = 1 }, .block = .{ .x = 256 } };
+        try launch_.launch(f.router_fn, cfg, s, &a);
     }
 
     /// Each row's top-k picks and bf16-rounded weights ([rows][top_k + 1]); slot top_k is the shared expert.
