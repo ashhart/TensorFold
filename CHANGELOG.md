@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Build: `zig build -Dgpu=<gpu>` compiles again; the `-Dgpu` products did not set `is_release`, which the server has read since 1.2.5, so every such build failed (#2879). Thanks to @tacosta for the fix and @Defilan for finding it.
+
 - Lanes: where a family learns its shared rows' cost on the machine (`learn_row_costs`, GLM on Macs without tensor units), a fit that shows rows cost less than the table says now lowers their price instead of counting as nothing, so a table timed on a slower build no longer keeps drafts out that would pay. The fall clears the same noise test as a rise, and a round never prices below its streams' plain width. While a stream count has no fit, its rounds now reach the width they measure (the likeliest drafts first), not only stop there, so a table that prices every draft out still gets its wider widths measured. Only how many drafts a round verifies changes; replies are unchanged, and families that do not learn row costs are unchanged (#2777, fixes #2776).
 
 - Tests: the serving pins name the changes #2721, #2753 and #2802 made to six pinned sources, so `test-gradient-serving` passes on main again (#2872).
