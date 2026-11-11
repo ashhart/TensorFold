@@ -111,6 +111,11 @@ pub const Topk = struct {
             const row = self.x[r * shape.n ..][0..shape.n];
             for (row, 0..) |*v, i| {
                 const level = @as(f64, @floatFromInt(rng.uintLessThan(u32, 256))) / 8 - 16;
+                const tiny = @as(f64, @floatFromInt(1 + rng.uintLessThan(u32, 1023))) * 0x1p-24; // an fp16 subnormal
+                if (r % 8 == 5) { // fp16 subnormals of both signs on top of a -1 floor
+                    v.* = if (rng.uintLessThan(u32, 4) == 0) (if (i % 2 == 1) -tiny else tiny) else -1.0;
+                    continue;
+                }
                 v.* = switch (r % 4) {
                     2 => 1.5, // one value everywhere: only the tie order picks the candidates
                     3 => if (level == -16) (if (i % 2 == 1) -0.0 else 0.0) else -@abs(level), // zeros of both signs on top

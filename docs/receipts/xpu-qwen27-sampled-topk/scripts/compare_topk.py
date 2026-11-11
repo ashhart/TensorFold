@@ -40,8 +40,7 @@ for r in rows:
 diff = [k for k, v in alone.items() if len(v) != 1]
 print("MISMATCH across 1, 4 and 8 streams (same prompt and seed, distinct token_sha256 != 1):", len(diff), "of", len(alone), "(prompt, seed) pairs")
 
-# (b) speed: per pass, cell (parallel, depth, kind): per-stream decode tok/s (mean of the wave's streams, median of the 3 measured
-# waves) and the wave's aggregate (completion tokens over the wave's wall time, prefill included)
+# (b) speed per pass and cell: per-stream decode tok/s (median of 3 waves) and the wave's tok/s (prefill included)
 cell = defaultdict(lambda: defaultdict(list))
 for r in rows:
     if r["greedy"] or r["warmup"] or not r["ok"]:
