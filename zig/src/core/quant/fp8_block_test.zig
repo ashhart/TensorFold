@@ -106,8 +106,8 @@ test "fp8 block: read refuses by name a wrong dtype, a wrong shape and short byt
         .{ .w = w, .s = s, .n = 128, .k = 260, .dtype = .f32, .text = "m.q.weight: f8_e4m3 { 130, 260 }, expected f8_e4m3 { 128, 260 }" },
         .{ .w = w, .s = s, .n = 130, .k = 260, .dtype = .bf16, .text = "m.q.weight_scale_inv: f32 { 2, 3 }, expected bf16 { 2, 3 }" },
         .{ .w = w, .s = tensor(.f32, &.{ 3, 2 }, std.mem.sliceAsBytes(&inv)), .n = 130, .k = 260, .dtype = .f32, .text = "m.q.weight_scale_inv: f32 { 3, 2 }, expected f32 { 2, 3 }" },
-        .{ .w = w, .s = tensor(.f32, &.{ 2, 3 }, std.mem.sliceAsBytes(&inv)[0..20]), .n = 130, .k = 260, .dtype = .f32, .text = "m.q.weight_scale_inv: f32 { 2, 3 }, expected f32 { 2, 3 }" },
-        .{ .w = tensor(.f8_e4m3, &.{ 130, 260 }, codes[1..]), .s = s, .n = 130, .k = 260, .dtype = .f32, .text = "m.q.weight: f8_e4m3 { 130, 260 }, expected f8_e4m3 { 130, 260 }" },
+        .{ .w = w, .s = tensor(.f32, &.{ 2, 3 }, std.mem.sliceAsBytes(&inv)[0..20]), .n = 130, .k = 260, .dtype = .f32, .text = "m.q.weight_scale_inv: 20 bytes, f32 { 2, 3 } needs 24" },
+        .{ .w = tensor(.f8_e4m3, &.{ 130, 260 }, codes[1..]), .s = s, .n = 130, .k = 260, .dtype = .f32, .text = "m.q.weight: 33799 bytes, f8_e4m3 { 130, 260 } needs 33800" },
     };
     for (cases) |c| {
         var store: Store = .{ .names = &.{ "m.q.weight", "m.q.weight_scale_inv" }, .tensors = &.{ c.w, c.s } };
