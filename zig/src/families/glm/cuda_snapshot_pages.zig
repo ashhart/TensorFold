@@ -85,7 +85,7 @@ pub const Pool = struct {
         const arena = p.arena orelse return error.NoSnapshotRoom;
         const kept: walk.Kept = .{ .ids = lease.ids.items, .base = arena.ptr() };
         const c: Copy = .{ .d = arena.driver(), .s = stream, .into = into };
-        try walk.Device.each(plan.parts[0..plan.count], plan.ids, kept, c, Copy.run);
+        try walk.Device.eachAlt(plan.parts[0..plan.count], plan.ids, .{ .ids = plan.lat_ids, .kept = plan.lat_ids.len > 0 }, kept, c, Copy.run);
     }
 };
 

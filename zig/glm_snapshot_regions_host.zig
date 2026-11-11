@@ -61,6 +61,7 @@ fn pagedSeq(d: *const cuda.Driver, f: *const Fixture, kv: u64, split: bool) !glm
         .{ .kv = kv, .pages = pages, .page_bytes = g.page() };
     var st = try glm.forward.State.initPaged(t.allocator, d, &w, 16448, on);
     st.pages = &ids;
+    if (split) st.lpages = &ids; // every row on every rank: the latent region holds every page at its id
     st.capacity = ids.len * 512;
     return st;
 }
@@ -81,6 +82,7 @@ const Cover = struct {
 
     fn count(c: *Cover, plan: *const Plan) !void {
         for (plan.parts[0..plan.count]) |part| {
+            if (!plan.holds(part)) continue;
             var done: usize = 0;
             while (done < part.len) {
                 const x = plan.piece(part, done);
@@ -110,6 +112,7 @@ fn fill(_: void, addr: u64, len: usize, j: usize, row: usize, pooled: bool) !voi
 /// The plan's bytes in its order, as a kept state copies them.
 fn gather(plan: *const Plan, out: *std.ArrayList(u8)) !void {
     for (plan.parts[0..plan.count]) |part| {
+        if (!plan.holds(part)) continue;
         var done: usize = 0;
         while (done < part.len) {
             const x = plan.piece(part, done);
@@ -179,5 +182,76 @@ test "GLM snapshots: with TF_GLM_KV_SPLIT and every row on every rank, a plan's 
         try t.expectEqual(lens[0], lens[1]);
         try t.expectEqual(lens[0], bytes[0].items.len);
         try t.expectEqualSlices(u8, bytes[0].items, bytes[1].items);
+    }
+}
+
+/// Owner-only rows: pages of class 1 of 2 (odd ids), latent rows at place id / 2 of `cap` and a trash page.
+const odd = [_]u32{ 11, 3, 19, 1, 15, 5, 7, 17, 9, 13 };
+const cap = 10;
+
+fn ownerSeq(d: *const cuda.Driver, f: *const Fixture, kv: u64, lat: []const u32) !glm.forward.State {
+    var w: glm.weights.Weights = undefined;
+    w.config = f.e.c;
+    w.share = f.e.share;
+    var layers: [2]glm.weights.Layer = undefined;
+    layers[0].mixer = .{ .mla = undefined };
+    layers[1].mixer = .{ .kda = undefined };
+    w.layers = &layers;
+    const g = Geometry.of(f.e.c);
+    const on: Paged = .{ .kv = kv + 2 * cap * 2 * g.pkCache(), .pages = glm.pages.tableLen(16448), .page_bytes = 2 * g.latCache(), .pk = kv, .pk_page = 2 * g.pkCache(), .split = true };
+    var st = try glm.forward.State.initPaged(t.allocator, d, &w, 16448, on);
+    st.pages = &odd;
+    st.lpages = lat;
+    st.capacity = odd.len * 512;
+    return st;
+}
+
+test "GLM snapshots: with TF_GLM_KV_SPLIT the owner's plan reads latent rows at their region places, another's none" {
+    var d = rec.init();
+    var f: Fixture = undefined;
+    try f.init(&d, 0, 2, true);
+    defer f.deinit();
+    const g = Geometry.of(f.e.c);
+    const pooled = 2 * cap * 2 * g.pkCache(); // the pooled region: 20 pages' keys
+    var kv = try cuda.DeviceBuffer.alloc(&d, pooled + (cap + 1) * 2 * g.latCache());
+    defer kv.free();
+    var places: [odd.len]u32 = undefined;
+    for (&places, odd) |*x, id| x.* = id / 2;
+    var own = try ownerSeq(&d, &f, kv.ptr, &places);
+    defer own.deinit();
+    var other = try ownerSeq(&d, &f, kv.ptr, &.{});
+    defer other.deinit();
+    const hits = try t.allocator.alloc(u8, kv.len);
+    defer t.allocator.free(hits);
+    for ([_]?usize{ null, at }) |head| {
+        @memset(hits, 0);
+        var c: Cover = .{ .kv = kv.ptr, .hits = hits };
+        const mine = try Plan.init(&own, &f.e.c, at, head, 0);
+        try c.count(&mine);
+        for (0..2) |j| {
+            const n = if (j == 0) at else head orelse break;
+            for (0..n) |r| { // latent row r of cache j: page odd[r / 512] at place odd / 2, never the trash page
+                const a = pooled + @as(usize, odd[r / 512] / 2) * 2 * g.latCache() + j * g.latCache() + (r % 512) * g.lat_w;
+                for (hits[a..][0..g.lat_w]) |*h| {
+                    try t.expectEqual(@as(u8, 1), h.*);
+                    h.* = 0;
+                }
+            }
+            for (0..n / 4 + 2) |q| try c.expect(kv.ptr + @as(u64, odd[q / 128]) * 2 * g.pkCache() + j * g.pkCache() + (q % 128) * g.pk_w, g.pk_w, j, q, true);
+        }
+        try t.expect(std.mem.indexOfNone(u8, hits, &.{0}) == null); // nothing else, the trash page included
+        // another rank's copy: the same parts in the same order, the latent rows' neither read nor counted
+        const theirs = try Plan.init(&other, &f.e.c, at, head, 0);
+        var latent: usize = 0;
+        for (mine.parts[0..mine.count]) |part| latent += if (part.alt) part.len else 0;
+        try t.expect(latent > 0);
+        try t.expectEqual(mine.len - latent, theirs.len);
+        try t.expectEqual(mine.count, theirs.count);
+        for (mine.parts[0..mine.count], theirs.parts[0..theirs.count]) |x, y| {
+            try t.expect(x.alt == y.alt and x.len == y.len and mine.holds(x));
+            try t.expectEqual(!y.alt, theirs.holds(y));
+        }
+        // sizing counts the latent rows on every rank, so every rank's lease is the owner's
+        try t.expectEqual(try Plan.size(&own, &f.e.c, 16448, at, head, 0), try Plan.size(&other, &f.e.c, 16448, at, head, 0));
     }
 }

@@ -189,12 +189,16 @@ test "GLM KV split: a stream's ids reach both tables, the latent one its owner's
     try std.testing.expectEqualSlices(u32, ids, F.table(f.st(1).table, ids.len));
     for (ids, F.table(f.st(1).ltable, ids.len)) |id, local| try expectEqual(id / 2, local);
     try expectEqual(@as(?u32, 0), f.st(1).owner);
+    try std.testing.expectEqualSlices(u32, F.table(f.st(1).ltable, ids.len), f.st(1).lpages); // a kept state's places
     const other = try p.openOn(2, 1500, 100, 1); // class 1: rank 1 holds its latent rows
     try std.testing.expectEqualSlices(u32, other, F.table(f.st(2).table, other.len));
     for (F.table(f.st(2).ltable, other.len)) |local| try expectEqual(@as(u32, 8), local); // the trash page, past 8
     try expectEqual(@as(?u32, 1), f.st(2).owner);
+    try expectEqual(@as(usize, 0), f.st(2).lpages.len); // none of its latent rows here, so no kept state reads them
     p.close(2);
+    p.close(1);
     try expectEqual(@as(?u32, null), f.st(2).owner);
+    try expectEqual(@as(usize, 0), f.st(1).lpages.len);
 }
 
 /// Fills a stack frame where an upload's source would have been, so a source that did not outlive its call shows.
