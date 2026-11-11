@@ -49,10 +49,8 @@ struct TfCPoolArgs {
 };
 
 // Compressor ratio 2 (model.py:429-487): a column a thread, rows in order; odd positions pool the two slots.
-[[kernel, max_total_threads_per_threadgroup(32)]] void tf_dsv41_c_pool2(
-    const device float* KV [[buffer(0)]], const device float* SC [[buffer(1)]], device float* ST [[buffer(2)]],
-    const device int* P [[buffer(3)]], device bfloat* Y [[buffer(4)]], constant TfCPoolArgs& a [[buffer(5)]],
-    uint d [[thread_position_in_grid]]) {
+inline void tf_c_pool2_col(const device float* KV, const device float* SC, device float* ST, const device int* P,
+                           device bfloat* Y, TfCPoolArgs a, uint d) {
   if (d >= a.dim) return;
   // the carry ST (kv[2][dim], score[2][dim]) keeps each slot's last value: any launch split gives the same bits
   float kv[2] = {ST[d], ST[a.dim + d]}, sc[2] = {ST[2 * a.dim + d], ST[3 * a.dim + d]};
@@ -75,14 +73,20 @@ struct TfCPoolArgs {
   ST[d] = kv[0], ST[a.dim + d] = kv[1], ST[2 * a.dim + d] = sc[0], ST[3 * a.dim + d] = sc[1];
 }
 
+[[kernel, max_total_threads_per_threadgroup(32)]] void tf_dsv41_c_pool2(
+    const device float* KV [[buffer(0)]], const device float* SC [[buffer(1)]], device float* ST [[buffer(2)]],
+    const device int* P [[buffer(3)]], device bfloat* Y [[buffer(4)]], constant TfCPoolArgs& a [[buffer(5)]],
+    uint d [[thread_position_in_grid]]) {
+  tf_c_pool2_col(KV, SC, ST, P, Y, a, d);
+}
+
 struct TfCRtArgs {
   uint blocks, in_stride, out_row;
 };
 
 // The compressed KV's fp4_act_quant round trip (kernel.py:184), 16-value blocks, E4M3 scales, to row D[r] (< 0 skips).
-[[kernel, max_total_threads_per_threadgroup(32)]] void tf_dsv41_c_fp4rt(
-    const device bfloat* X [[buffer(0)]], device bfloat* Y [[buffer(1)]], const device int* D [[buffer(2)]],
-    constant TfCRtArgs& a [[buffer(3)]], uint2 g [[thread_position_in_grid]]) {
+inline void tf_c_fp4rt_block(const device bfloat* X, device bfloat* Y, const device int* D, constant TfCRtArgs& a,
+                             uint2 g) {
   if (g.x >= a.blocks) return;
   const int at = D[g.y];
   if (at < 0) return;
@@ -105,14 +109,19 @@ struct TfCRtArgs {
   if (TF_CTL == 4 && g.x == 0) Y[ulong(at) * a.out_row + a.out_row + 15u] = bfloat(1.0f);
 }
 
+[[kernel, max_total_threads_per_threadgroup(32)]] void tf_dsv41_c_fp4rt(
+    const device bfloat* X [[buffer(0)]], device bfloat* Y [[buffer(1)]], const device int* D [[buffer(2)]],
+    constant TfCRtArgs& a [[buffer(3)]], uint2 g [[thread_position_in_grid]]) {
+  tf_c_fp4rt_block(X, Y, D, a, g);
+}
+
 struct TfCPackArgs {
   uint blocks, in_stride, code_row, scale_row, scale_off, use_dest;
 };
 
 // Index keys and queries, fp4_act_quant: 32-value blocks, E8M0 scales, E2M1 nibbles, to row D[r] (< 0 skips).
-[[kernel, max_total_threads_per_threadgroup(32)]] void tf_dsv41_c_fp4pack(
-    const device bfloat* X [[buffer(0)]], device uchar* C [[buffer(1)]], device uchar* S [[buffer(2)]],
-    const device int* D [[buffer(3)]], constant TfCPackArgs& a [[buffer(4)]], uint2 g [[thread_position_in_grid]]) {
+inline void tf_c_fp4pack_block(const device bfloat* X, device uchar* C, device uchar* S, const device int* D,
+                               constant TfCPackArgs& a, uint2 g) {
   if (g.x >= a.blocks) return;
   const int at = a.use_dest != 0u ? D[g.y] : int(g.y);
   if (at < 0) return;
@@ -135,4 +144,64 @@ struct TfCPackArgs {
   }
   S[ulong(at) * a.scale_row + a.scale_off + g.x] = bad ? uchar(255) : uchar(e + 127);
   if (TF_CTL == 4 && g.x == 0) S[ulong(at) * a.scale_row + a.scale_row] = uchar(1);
+}
+
+[[kernel, max_total_threads_per_threadgroup(32)]] void tf_dsv41_c_fp4pack(
+    const device bfloat* X [[buffer(0)]], device uchar* C [[buffer(1)]], device uchar* S [[buffer(2)]],
+    const device int* D [[buffer(3)]], constant TfCPackArgs& a [[buffer(4)]], uint2 g [[thread_position_in_grid]]) {
+  tf_c_fp4pack_block(X, C, S, D, a, g);
+}
+
+// A slot's state at one layer of a launch over several slots (segs.zig's Seg), then its rows from `base`.
+struct TfDsv41Seg {
+  device uchar* window;
+  device uchar* pool;
+  device uchar* keys;
+  device float* carry;
+  device float* inputs;
+  device uchar* comp;
+  device uchar* ikeys;
+  uint base, rows, nkeys, start;
+};
+
+// Control 6 of the slot kernels: every row takes the first slot's state.
+inline uint tf_c_slot(const device int* RS, uint r) { return TF_CTL == 6 ? 0u : uint(RS[r]); }
+
+struct TfCPoolSegArgs {
+  uint keep, dim; // rows a slot's kept inputs hold (its score half starts keep rows on), columns
+};
+
+// tf_dsv41_c_pool2 over several slots, slot g.y over its rows and carry; its kv and score rows kept in its inputs.
+[[kernel, max_total_threads_per_threadgroup(32)]] void tf_dsv41_c_pool2_segs(
+    const device float* KV [[buffer(0)]], const device float* SC [[buffer(1)]], const device int* P [[buffer(3)]],
+    device bfloat* Y [[buffer(4)]], constant TfCPoolSegArgs& a [[buffer(5)]], const device TfDsv41Seg* SG [[buffer(6)]],
+    uint2 g [[thread_position_in_grid]]) {
+  if (g.x >= a.dim) return;
+  const TfDsv41Seg s = SG[g.y];
+  const ulong b = s.base;
+  const TfCPoolArgs one = {s.rows, a.dim};
+  tf_c_pool2_col(KV + b * a.dim, SC + b * a.dim, SG[TF_CTL == 6 ? 0u : g.y].carry, P + b, Y + b * a.dim, one, g.x);
+  if (s.inputs == nullptr) return;
+  device uint* in = (device uint*)s.inputs;
+  const device uint* kv = (const device uint*)KV + b * a.dim;
+  const device uint* sc = (const device uint*)SC + b * a.dim;
+  for (uint r = 0; r < s.rows; ++r) {
+    in[ulong(r) * a.dim + g.x] = kv[ulong(r) * a.dim + g.x];
+    in[ulong(a.keep + r) * a.dim + g.x] = sc[ulong(r) * a.dim + g.x];
+  }
+}
+
+// tf_dsv41_c_fp4rt over several slots: row r into its slot's compressed rows (RS: row -> slot).
+[[kernel, max_total_threads_per_threadgroup(32)]] void tf_dsv41_c_fp4rt_segs(
+    const device bfloat* X [[buffer(0)]], const device int* D [[buffer(2)]], constant TfCRtArgs& a [[buffer(3)]],
+    const device TfDsv41Seg* SG [[buffer(4)]], const device int* RS [[buffer(5)]], uint2 g [[thread_position_in_grid]]) {
+  tf_c_fp4rt_block(X, (device bfloat*)SG[tf_c_slot(RS, g.y)].pool, D, a, g);
+}
+
+// tf_dsv41_c_fp4pack over several slots: row r into its slot's index keys, codes and scales (RS: row -> slot).
+[[kernel, max_total_threads_per_threadgroup(32)]] void tf_dsv41_c_fp4pack_segs(
+    const device bfloat* X [[buffer(0)]], const device int* D [[buffer(3)]], constant TfCPackArgs& a [[buffer(4)]],
+    const device TfDsv41Seg* SG [[buffer(5)]], const device int* RS [[buffer(6)]], uint2 g [[thread_position_in_grid]]) {
+  device uchar* k = SG[tf_c_slot(RS, g.y)].keys;
+  tf_c_fp4pack_block(X, k, k, D, a, g);
 }
