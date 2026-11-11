@@ -334,9 +334,10 @@ pub const Runtime = struct {
         const limit = self.g.buffer_cache_limit;
         self.g.buffer_cache_limit = 0;
         defer self.g.buffer_cache_limit = limit;
-        const t = try self.g.allocDevice(raw.count, .f32);
+        var t = try self.g.allocDevice(raw.count, .f32);
         errdefer t.deinit();
         try self.g.dispatch(if (transposed) "im_sam_deconv_weight" else "im_sam_conv_weight", &.{ raw, t }, [3]u32{ @intCast(n), @intCast(c), @intCast(k * k) }, Size.of(t.count, 1, 1), Size.of(256, 1, 1));
+        t.tensor_operand_exact = raw.tensor_operand_exact;
         const name_ = try self.g.allocator.dupe(u8, key);
         errdefer self.g.allocator.free(name_);
         try self.convolutions.put(self.g.allocator, name_, t);
@@ -402,7 +403,7 @@ pub fn feature(t: Tensor, h: usize, w: usize, c: usize) Feature {
     return .{ .tensor = t, .height = h, .width = w, .channels = c };
 }
 pub fn view(t: Tensor, start: usize, count: usize) Tensor {
-    return .{ .buffer = t.buffer, .offset = t.offset + start * t.dtype.size(), .dtype = t.dtype, .count = count, .owned = false, .host_data = t.host_data };
+    return .{ .buffer = t.buffer, .offset = t.offset + start * t.dtype.size(), .dtype = t.dtype, .count = count, .owned = false, .host_data = t.host_data, .tensor_operand_exact = t.tensor_operand_exact };
 }
 
 pub fn flash(g: *gpu.Gpu, q: Tensor, k: Tensor, v: Tensor, rows: usize, keys: usize, heads: usize, batch: usize) !Tensor {

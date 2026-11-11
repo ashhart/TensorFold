@@ -46,7 +46,7 @@ pub fn requireMapped(d: limits.MetalLaunch) !void {
 /// Only launches the loader can build on this device enter the limits compiler; declarations are checked first.
 pub fn supported(device: mtl.Device, d: limits.MetalLaunch) bool {
     if (std.mem.startsWith(u8, d.name, "qwen27 prompt ")) return device.tensorUnits() == (std.mem.indexOf(u8, d.name, " m5 ") != null);
-    if (std.mem.startsWith(u8, d.name, "sam3 fp32 mma "))
+    if (std.mem.startsWith(u8, d.name, "sam3 fp32 mma ") or std.mem.startsWith(u8, d.name, "sam3 fp32 gemm "))
         return @import("metal_support.zig").tensor(device.tensorUnits(), d.name);
     if (std.mem.startsWith(u8, d.name, "lfm2 masked prompt "))
         return @import("metal_support.zig").tensor(tf.lfm2_moe.source.optionalAvailable(device), d.name);
@@ -75,6 +75,10 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         } else return error.UnknownLaunch;
         const text_here = try tf.qwen27.simd_attention.grouped(a, units, true, form.group, form.kv_heads, paged);
         return .{ .decl = d, .function = fun, .here = text_here, .pre_m5 = if (units) "" else text_here };
+    }
+    if (std.mem.startsWith(u8, d.name, "sam3 fp32 gemm ")) {
+        if (!assemble) return undefined;
+        return .{ .decl = d, .function = fun, .here = try @import("metal_sam3_gemm.zig").text(a, device), .pre_m5 = "" };
     }
     if (std.mem.startsWith(u8, d.name, "sam3 deconvolution ")) {
         if (!assemble) return undefined;
