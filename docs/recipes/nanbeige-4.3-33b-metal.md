@@ -320,8 +320,9 @@ not count as token-local, so the server cannot give a token's bytes on its own.
 The INT4 release was run to the 131,072-token window, not the full 524,288. After a long prompt the drafter reads
 it before drafting, which holds the reply's second token (30-47 s at 110k-129k tokens with the INT4 release). Only
 the M5's tensor units were checked; M1-M4 Macs are refused at load, and smaller RAM is untested. Other `llama`
-checkpoints, tied heads, other head sizes, Llama 3's scaled RoPE and biased projections are refused at load rather
-than served untested.
+checkpoints, tied heads, other head sizes and Llama 3's scaled RoPE are refused at load rather than served untested;
+Qwen2's biased projections and static YaRN are served for the checkpoint checked with them
+([Bimo-7B-CyberAgent](bimo-7b-cyberagent-metal.md)).
 
 ## Licence
 
