@@ -342,3 +342,26 @@ test "two namespaces never share a page, whatever their words" {
     try testing.expectEqualSlices(u32, &mine2, &path);
     try testing.expect(s.find(.of(&prompt)) == null); // the default namespace holds neither
 }
+
+test "a shared cut planned in one namespace never flags another namespace's state at the same words" {
+    var f: Fake = .{};
+    var s = try radix.Store.init(testing.allocator, f.family(), f.pages(), text);
+    defer s.deinit();
+    s.limit(.{ .pages = 32, .snaps = 8 });
+    const prompt = seq(13);
+    var ns1: radix.Query = .of(&prompt);
+    ns1.namespace = 1;
+    var ns2: radix.Query = .of(&prompt);
+    ns2.namespace = 2;
+    var adopt: std.ArrayList(u32) = .empty;
+    defer adopt.deinit(testing.allocator);
+    const plan = try s.begin(testing.allocator, ns1, 12, &.{8}, null, &adopt); // namespace 1 plans a shared cut at 8
+    defer plan.deinit(testing.allocator);
+    try testing.expect(std.mem.indexOfScalar(u32, plan.marks, 8) != null);
+    const mine = [_]u32{ 0, 1 };
+    f.take(&mine);
+    defer f.end(&mine);
+    var path: [2]u32 = undefined;
+    try testing.expect(s.keep(ns2, 8, null, &mine, &path).held);
+    try testing.expect(!s.find(ns2).?.entry.?.shared); // namespace 2's state is its own conversation's
+}
