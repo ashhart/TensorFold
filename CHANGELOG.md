@@ -10,6 +10,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - GLM-5.3-Flash on CUDA: with `TF_GLM_KV_SPLIT=1` a prompt chunk now fetches its history instead: the owner broadcasts the layer's earlier latent rows and every rank attends its own heads, so the owner no longer works every rank's heads and nothing is sent back. It uses the exchange room part 2 already makes (131,072 rows at TP=2 with the default 2,048-row prompt chunks), and a chunk fetches only while broadcasting its history moves no more bytes than its exchange would: at TP=2, a history of at most 64 rows for each of the chunk's rows, which for full chunks is the room. A short chunk on a long history, a longer prompt's chunks past the room, decode and verify windows keep the owner's exchange. Unset, nothing changes (#2937, part 3 of #1431). Thanks to @wojo.
 
+- GLM-5.3-Flash on CUDA: `TF_GLM_KV_SPLIT=1` now serves with a prompt cache and `--learn-conversations`. A kept state's latent rows stay on the owner rank it was kept on (its home); a resume opens on that rank's class when it has the pages, and otherwise the home sends the rows to the new owner before the pass. Each rank's disk image holds its own rows and records the split and the home, and a server of the other layout refuses it by name. A fresh prompt pass borrows a twin of its pages on every other rank when they are free, so each rank attends its own heads for the prompt, and gives it back before its first decode round. Unset, nothing changes (#2938, part 4 of #1431). Thanks to @wojo.
+
 ## 1.2.9
 
 - Tests: the sessions writes test on real files does the same coverage with 40 requests at half the token sizes, so it no longer times out on busy CI runners (#3347).
