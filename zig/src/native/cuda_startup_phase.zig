@@ -16,7 +16,7 @@ fn note(h: anytype, phase: cuda.startup_watch.Phase) void {
     if (h.startup_phase) |callback| callback(h.family, phase);
 }
 
-pub fn serve(h: anytype, io: std.Io, facts: lanes.Model, rows: u32, info: api.Info, explain: ?api.Explain, callbacks: anytype) !void {
+pub fn serve(h: anytype, io: std.Io, facts: lanes.Model, rows: u32, info: api.Info, explain: ?api.Explain, warm_quiet: u64, callbacks: anytype) !void {
     note(h, .calibration);
     errdefer note(h, .failed);
     h.cfg = try lanes.Config.init(h.gpa, facts, rows, rows - 1);
@@ -34,7 +34,7 @@ pub fn serve(h: anytype, io: std.Io, facts: lanes.Model, rows: u32, info: api.In
     h.host.explain = explain;
     h.host.health = @import("cuda_readiness.zig").source(h);
     h.host.cache = h.store;
-    h.host.warm_quiet = if (info.warm_turns) nemotron.native.warm_quiet else 0;
+    h.host.warm_quiet = if (info.warm_turns) warm_quiet else 0;
     if (h.lone != null) h.host.lone = .{ .ctx = h, .run = callbacks.loneRun, .sampled = true, .logprobs = h.inner.vtable.first_row != null, .structures = h.inner.vtable.first_masked != null, .min_budget = nemotron.native.lone_min_budget, .resumes = true };
     if (h.learn != null) h.host.learner = callbacks.learner(h);
     kv_pages.install(&h.kv, &h.host); // the pool's first census, before the engine thread owns the pool
