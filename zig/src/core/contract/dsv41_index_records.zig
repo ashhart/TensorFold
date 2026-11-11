@@ -5,6 +5,7 @@ const M = @import("limits.zig").MetalLaunch;
 pub const records = [_]M{
     .{ .name = "dsv41 ix scores tf_dsv41_ix_scores", .threads = 128, .tg_memory = 0, .reserved = 128 },
     .{ .name = "dsv41 ix scores tf_dsv41_ix_scores_dec", .threads = 256, .tg_memory = 16640, .reserved = 256 },
+    .{ .name = "dsv41 ix scores segs tf_dsv41_ix_scores_dec_segs", .threads = 256, .tg_memory = 16640, .reserved = 256 },
 };
 
 test "the DeepSeek V4.1 indexer launches fit every Apple family" {
