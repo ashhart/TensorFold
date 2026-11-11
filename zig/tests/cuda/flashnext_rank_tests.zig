@@ -36,11 +36,15 @@ pub fn run(gpu: check.Gpu, rank: usize, port: u16, mode: []const u8) !void {
         try check.sameBytes("fragmented control frame payload", &payload, "payload");
         try link.sendHeader(.{ .kind = .ack, .sequence = 1 }, until);
     }
-    var collective = try flash.collective.Collective.init(link, rank, if (std.mem.eql(u8, mode, "timeout")) 200 else 30_000);
+    var collective = try flash.collective.Collective.init(link, rank, 30_000);
     defer collective.deinit();
+    // the peer's silence bounds the collective, not NCCL's initialization, which can take longer than this
+    if (std.mem.eql(u8, mode, "timeout")) collective.timeout_ms = 200;
     var stream = try cuda.Stream.init(gpu.d, true);
     defer stream.deinit();
     if (std.mem.eql(u8, mode, "eof") or std.mem.eql(u8, mode, "timeout")) {
+        // both communicators are up before the peer fails, so the failure meets the collective, not the init
+        try meet(link, rank, 98);
         if (rank == 1) {
             // A deliberate peer omission: the owner either disconnects or stays alive without entering the collective.
             if (std.mem.eql(u8, mode, "eof")) {
@@ -103,16 +107,21 @@ pub fn run(gpu: check.Gpu, rank: usize, port: u16, mode: []const u8) !void {
             try check.expect(all[owner * count + i] == expected, "rank {d}: gathered BF16 bits at {d}/{d}", .{ rank, owner, i });
         };
     }
-    const done: wire.Header = .{ .kind = .ready, .sequence = 99 };
-    if (rank == 0) {
-        try link.sendHeader(done, wire.deadline(30_000));
-        try std.testing.expectEqualDeep(done, try link.receiveHeader(wire.deadline(30_000)));
-    } else {
-        try std.testing.expectEqualDeep(done, try link.receiveHeader(wire.deadline(30_000)));
-        try link.sendHeader(done, wire.deadline(30_000));
-    }
+    try meet(link, rank, 99);
     check.pass("rank {d}: BF16 all-gather preserves every bit and rank column order for empty, scalar, tail and vocabulary-half rows", .{rank});
     check.pass("rank {d}: two-process chained NCCL FP32 sums exact for empty, scalar, tail and 1,000,003 values; fragmented framed control preserved", .{rank});
+}
+
+/// Both ranks' acknowledgment at `sequence`, so neither goes on (or closes) while the other is still short of it.
+fn meet(link: wire.Link, rank: usize, sequence: u64) !void {
+    const h: wire.Header = .{ .kind = .ready, .sequence = sequence };
+    if (rank == 0) {
+        try link.sendHeader(h, wire.deadline(30_000));
+        try std.testing.expectEqualDeep(h, try link.receiveHeader(wire.deadline(30_000)));
+    } else {
+        try std.testing.expectEqualDeep(h, try link.receiveHeader(wire.deadline(30_000)));
+        try link.sendHeader(h, wire.deadline(30_000));
+    }
 }
 
 fn completeSum(c: *flash.collective.Collective, stream: cuda.Stream, values: u64, count: usize) !void {
