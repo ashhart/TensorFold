@@ -26,6 +26,9 @@ pub const State = struct {
     /// CED replay: layers from here hold `replay_rows` replayed rows; the window's older ones are another prompt's
     decoder_from: u32 = none,
     replay_rows: u32 = 0,
+    /// KV_SPLIT: this producer is shard `shard` of `shards`; `pages` hold only the logical pages it owns (page % shards)
+    shard: u32 = 0,
+    shards: u32 = 1,
 
     /// `decoder_from` of a state with no replayed layers
     pub const none: u32 = std.math.maxInt(u32);
@@ -94,10 +97,36 @@ fn clearUnreplayed(st: State, swa: []const ?ex.Ring, rows: u32) Error!void {
     for (swa[@min(st.decoder_from, swa.len)..]) |maybe| clearRows(maybe orelse return error.MissingRing, rows, from, @max(from, to));
 }
 
+/// The sources' pool pages by rank: a split shard knows its own rank's bytes only (the other ranks' stay empty).
+fn sourcesOf(arena: std.mem.Allocator, st: State) Error![]ex.SourceState {
+    const geo = g.release;
+    const split = st.shards > 1;
+    if (st.shards == 0 or st.shard >= st.shards or st.shards > plan.max_world) return error.BadShape;
+    const sources = try arena.alloc(ex.SourceState, geo.sources.len);
+    for (geo.sources, sources) |s, *x| {
+        const pg = for (st.pages) |p| {
+            if (p.layer == s.layer) break p;
+        } else return error.MissingSource;
+        const comp = try arena.alloc([]const u8, st.shards);
+        const index = try arena.alloc([]const u8, st.shards);
+        @memset(comp, &.{});
+        @memset(index, &.{});
+        comp[st.shard] = pg.comp;
+        index[st.shard] = pg.index;
+        x.* = .{ .layer = s.layer, .comp = .{ .split = split, .ranks = comp }, .index = .{ .split = split, .ranks = index } };
+    }
+    return sources;
+}
+
 /// The library's view of `st`: slices over the snapshot's bytes, no copy; `ds_rows` rides (0: no drafter rings).
 pub fn cudaOf(arena: std.mem.Allocator, st: State, ds_rows: *u32) Error!ex.Cuda {
     const geo = g.release;
     var out: ex.Cuda = .{ .index_format = st.index_format, .sources = &.{}, .swa = &.{}, .carries = &.{} };
+    ds_rows.* = 0;
+    if (st.shard != 0) { // the other shards carry pool pages only: no ring, carry or drafter row
+        out.sources = try sourcesOf(arena, st);
+        return out;
+    }
     var ring_rows: u32 = 0;
     const swa = try arena.alloc(?ex.Ring, geo.layers);
     for (swa, 0..) |*r, l| r.* = try ringOf(st.pieces, @intCast(l), "swa", &ring_rows);
@@ -107,18 +136,7 @@ pub fn cudaOf(arena: std.mem.Allocator, st: State, ds_rows: *u32) Error!ex.Cuda 
     const carries = try arena.alloc([]const u8, geo.sources.len);
     for (geo.sources, carries) |s, *c| c.* = if (s.ratio == 2) (piece(st.pieces, s.layer, "carry") orelse return error.MissingCarry) else &.{};
     out.carries = carries;
-    const sources = try arena.alloc(ex.SourceState, geo.sources.len);
-    for (geo.sources, sources) |s, *x| {
-        const pg = for (st.pages) |p| {
-            if (p.layer == s.layer) break p;
-        } else return error.MissingSource;
-        const comp = try arena.alloc([]const u8, 1);
-        const index = try arena.alloc([]const u8, 1);
-        comp[0] = pg.comp;
-        index[0] = pg.index;
-        x.* = .{ .layer = s.layer, .comp = .{ .split = false, .ranks = comp }, .index = .{ .split = false, .ranks = index } };
-    }
-    out.sources = sources;
+    out.sources = try sourcesOf(arena, st);
     // the drafter's three rings ride whole or not at all; a short run of valid rows is zero-filled below it
     var drows: u32 = 0;
     const drafter = try arena.alloc(ex.Ring, geo.mtp_layers);
@@ -150,7 +168,7 @@ pub fn build(gpa: std.mem.Allocator, id: [16]u8, tokens: []const u32, st: State)
     const a = b.arena.allocator();
     var ds: u32 = 0;
     const cuda = try cudaOf(a, st, &ds);
-    const shape: plan.Shape = .{ .upto = st.pos, .ds_rows = ds };
+    const shape: plan.Shape = .{ .upto = st.pos, .ds_rows = ds, .shard = st.shard, .shards = st.shards, .split = st.shards > 1 };
     const parts = try ex.build(a, shape, cuda);
     var bytes: u64 = 0;
     for (parts) |p| bytes += p.bytes.len;

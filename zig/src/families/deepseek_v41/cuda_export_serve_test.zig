@@ -23,13 +23,24 @@ const Fake = struct {
     taken: u32 = 0,
     released: u32 = 0,
     fail: bool = false,
+    shard: u32 = 0,
+    shards: u32 = 1,
 
     fn init(upto: u64) !*Fake {
+        return initShard(upto, 0, 1);
+    }
+
+    /// Shard `shard` of `shards` KV_SPLIT producers of one synthetic world: its own pool pages, and the snapshot (shard 0).
+    fn initShard(upto: u64, shard: u32, shards: u32) !*Fake {
         const f = try gpa.create(Fake);
-        f.* = .{ .arena = .init(gpa), .snap = undefined, .pos = upto };
+        f.* = .{ .arena = .init(gpa), .snap = undefined, .pos = upto, .shard = shard, .shards = shards };
         errdefer f.arena.deinit();
-        const w = try s.make(f.arena.allocator(), .{ .upto = upto, .ds_rows = @intCast(@min(upto, 128)), .seed = upto });
+        const w = try s.make(f.arena.allocator(), .{ .upto = upto, .ds_rows = @intCast(@min(upto, 128)), .seed = upto, .world = shards, .split = shards > 1 });
         f.snap = try cxt.snapshotOf(f.arena.allocator(), w);
+        if (shards > 1) for (f.snap.pages, w.cuda.sources) |*pg, src| {
+            pg.comp = src.comp.ranks[shard];
+            pg.index = src.index.ranks[shard];
+        };
         return f;
     }
 
@@ -49,7 +60,7 @@ const Fake = struct {
         // the engine hands out a copy: the export zeroes stale drafter rows in place
         const pieces = try f.arena.allocator().alloc(cx.Piece, f.snap.pieces.len);
         for (f.snap.pieces, pieces) |p, *o| o.* = .{ .role = p.role, .bytes = try f.arena.allocator().dupe(u8, p.bytes) };
-        return .{ .ctx = f, .state = .{ .pos = at, .ds_rows = @min(at, 128), .pieces = pieces, .pages = f.snap.pages } };
+        return .{ .ctx = f, .state = .{ .pos = at, .ds_rows = @min(at, 128), .pieces = if (f.shard == 0) pieces else &.{}, .pages = f.snap.pages, .shard = f.shard, .shards = f.shards } };
     }
 
     fn release(ctx: *anyopaque) void {
@@ -289,4 +300,40 @@ test "an export converted off the engine thread is awaited by its reader, and st
     try std.testing.expectError(error.NotHeld, p.read(@splat(0x4f), &why)); // an id nobody exports is not waited for
     p.stop(); // frees every held export and waits for converters: the leak check proves both
     try std.testing.expectEqual(@as(u32, 4), fake.released);
+}
+
+test "a KV_SPLIT pair's producers each dump their shard under one id, and the importer takes both" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", a);
+    const upto: u64 = 700;
+    const tokens = try tokensOf(a, upto);
+    const id: [16]u8 = @splat(0x44);
+    const shape: plan.Shape = .{ .upto = upto, .ds_rows = 128, .shards = 2, .split = true };
+    const via = try target(a);
+    var imp = try im.Import.init(a, shape, .{ .@"packed" = via }, .{});
+    for (0..2) |k| {
+        const fake = try Fake.initShard(upto, @intCast(k), 2);
+        defer fake.deinit();
+        const dump = try std.fmt.allocPrint(a, "{s}/shard{d}", .{ dir, k });
+        var problem: []const u8 = "";
+        const p = try serve.Produce.open(gpa, io, fake.source(), .{ .dump = dump, .model = model, .shard = @intCast(k), .shards = 2 }, &problem);
+        defer p.stop();
+        p.exported(id, tokens, try p.save(upto));
+        var name_buf: [32 + file.extension.len]u8 = undefined;
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{ dump, file.fileName(&name_buf, id) }), a, .limited(64 << 20));
+        var sink: p2.ShardSink = .{ .imp = &imp, .shard = @intCast(k) };
+        var reason: fabric.decoder.Reason = .{};
+        // a shard's stream is for its own rank and the pair's size only
+        try std.testing.expectError(error.Mismatch, file.pull(a, bytes, .{ .model = model, .tokens = tokens, .protocol = 2 }, sink.sink(), &reason));
+        const got = try file.pull(a, bytes, .{ .model = model, .tokens = tokens, .protocol = 2, .tp_rank = k, .tp_size = 2 }, sink.sink(), &reason);
+        var sh = shape;
+        sh.shard = @intCast(k);
+        try p2.check(a, sh, got.manifest);
+    }
+    const done = try imp.complete();
+    try std.testing.expectEqual(upto, done.upto);
 }
