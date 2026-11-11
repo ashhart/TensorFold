@@ -21,6 +21,9 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     const prefill = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{ "Qwen stepped prefill:", "Qwen whole prefill:", "Qwen prefill opening:" } }));
     b.step("test-qwen35-prefill-host", "Stepped, whole and opening prompt lifecycle without devices").dependOn(&prefill.step);
     step.dependOn(&prefill.step);
+    const warm_turns = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"Qwen warm turns:"} }));
+    b.step("test-qwen35-warm-turns-host", "Qwen3.5's warm turn wait and usable ends declared for both CUDA entry points without devices").dependOn(&warm_turns.step);
+    step.dependOn(&warm_turns.step);
     const draft_config = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"Qwen DFlash2 config:"} }));
     b.step("test-qwen35-draft-config-host", "DFlash2 attention declarations agree with the CUDA kernels before loading").dependOn(&draft_config.step);
     step.dependOn(&draft_config.step);
@@ -206,6 +209,9 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
 pub fn registerCopyFamilies(b: *std.Build, native: *std.Build.Module, step: *std.Build.Step) void {
     b.step("test-glm-formats-host", "CUDA GLM EXL3 offer reaches the published family registry without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"GLM capabilities:"} })).step);
     b.step("test-request-starts-host", "Opt-in CUDA message starts without GPU execution").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"request starts:"} })).step);
+    const warm_rules = b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"CUDA warm rules:"} }));
+    b.step("test-cuda-warm-rules-host", "A family's warm rules and its own quiet wait without devices").dependOn(&warm_rules.step);
+    step.dependOn(&warm_rules.step);
     b.step("test-glm-window-prices-host", "GLM timed lone and unchanged shared price values without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"GLM window prices:"} })).step);
     const family_copies = b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"CUDA lane copies:"} }));
     b.step("test-family-copies-host", "Actual CUDA family copy policies through the lane core").dependOn(&family_copies.step);

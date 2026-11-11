@@ -53,6 +53,10 @@ pub const snap_drop = reuse.drop;
 pub const snap_host = true;
 pub const snap_lookahead: u32 = 0;
 pub const snap_grid: u32 = E.max_rows;
+/// Nanoseconds a reply's background warm pass waits for the next request before its first chunk.
+pub const warm_quiet: u64 = 150 * std.time.ns_per_ms;
+/// Keep a warm pass's end only where a resume can use it.
+pub const warm_usable = true;
 /// --learn-conversations: the kept states' disk image, the probe their identity hashes, the facts they depend on.
 pub const kept_disk = @import("cuda_disk.zig");
 
@@ -579,14 +583,6 @@ pub const Lanes = struct {
     }
 };
 
-test "Qwen share faults: --parallel N admits N streams at once with every stream on pages" {
-    try @import("cuda_admit_test.zig").admits(Lanes);
-}
-
-test "Qwen pages default: --parallel a cap with TF_QWEN_KV_PAGES set, a request waits for pages; unset, a window each" {
-    try @import("cuda_admit_test.zig").caps(Lanes);
-}
-
 test "Qwen stepped prefill: cancel between host iterations retains only the last completed cut" {
     try @import("cuda_prefill_test.zig").cancelled(Lanes, Lanes.backend);
 }
@@ -596,5 +592,6 @@ test "Qwen stepped prefill: a cap (the flag's or fcfs's) cuts on the 128 grid in
 }
 
 test {
+    _ = @import("cuda_admit_test.zig");
     _ = @import("cuda_mtp_budget.zig");
 }

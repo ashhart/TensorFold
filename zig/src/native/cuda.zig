@@ -104,8 +104,8 @@ pub const Host = struct {
         }
     }
     /// The round loop and the lane host over the family's backend, its thread started.
-    pub fn serve(h: *Host, io: std.Io, facts: lanes.Model, rows: u32, info: api.Info, explain: ?api.Explain) !void {
-        return @import("cuda_startup_phase.zig").serve(h, io, facts, rows, info, explain, .{
+    pub fn serve(h: *Host, io: std.Io, facts: lanes.Model, rows: u32, info: api.Info, explain: ?api.Explain, warm_quiet: u64) !void {
+        return @import("cuda_startup_phase.zig").serve(h, io, facts, rows, info, explain, warm_quiet, .{
             .bound = &bound,
             .backend = backend,
             .initThread = initThread,
@@ -467,7 +467,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         .slide_conversations = conversations,
         .readouts = readouts,
         .text_generation = readouts == null, // a readout engine answers its readouts only (Clef's /v1/systemone)
-    }), .{ .ctx = loaded.ctx, .text = F.explain });
+    }), .{ .ctx = loaded.ctx, .text = F.explain }, snaps.warmQuiet(F));
     opened = true;
     kv_pages.warnCapacity(cache_capacity, o.keep == 0 or o.prompt_cache_gib == 0 or share, if (paged) |p| p.taken else 0, std.log); // TF_KV_SHARE: no copied rows
     if (@hasField(@TypeOf(loaded), "follow")) if (loaded.follow) |f| {

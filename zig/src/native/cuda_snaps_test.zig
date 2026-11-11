@@ -2,6 +2,7 @@
 const std = @import("std");
 const api = @import("engine_api");
 const cacheRules = @import("cuda_snaps.zig").cacheRules;
+const warmQuiet = @import("cuda_snaps.zig").warmQuiet;
 
 /// Copies that hold nothing: a store keys its states by tokens and position, all that its plans read.
 const Held = struct {
@@ -84,4 +85,23 @@ test "snap fork: a family that opts in keeps where the questions part, and the n
     const planned = try questions(GridFork, a, 4, 16, 2, false);
     try std.testing.expectEqualSlices(u32, &.{ 16, 20 }, planned.marks[1]);
     try std.testing.expectEqual(@as(u32, 16), planned.from[2]);
+}
+
+test "CUDA warm rules: a warm end stays usable only where a family declares it, and its own wait comes through" {
+    const Both = struct {
+        pub const warm_quiet: u64 = 7;
+        pub const warm_usable = true;
+    };
+    const Ends = struct {
+        pub const warm_quiet: u64 = 7;
+    };
+    try std.testing.expectEqual(@as(u64, 7), warmQuiet(Both));
+    try std.testing.expectEqual(@as(u64, 7), warmQuiet(Ends));
+    try std.testing.expectEqual(@as(u64, 0), warmQuiet(struct {}));
+    // A family's wait and the rule that follows it come from one declaration: a nonzero wait is a waiting family.
+    inline for (@import("cuda.zig").registry) |F| {
+        try std.testing.expectEqual(warmQuiet(F) > 0, cacheRules(F).warm == .waits);
+    }
+    try std.testing.expect(cacheRules(Both).warm_usable);
+    try std.testing.expect(!cacheRules(Ends).warm_usable);
 }
