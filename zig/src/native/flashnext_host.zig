@@ -5,6 +5,7 @@ const platform = @import("sys");
 const mtl = @import("metal");
 const api = @import("engine_api");
 const snap = api.prompt_cache.status;
+const FsrRun = @FieldType(@typeInfo(@FieldType(fx.Engine, "r")).pointer.child, "fsr");
 const tf = @import("tensorfold");
 const fx = tf.flashnext_engine;
 const pc = api.prompt_cache;
@@ -59,6 +60,7 @@ pub const Host = struct {
     cache: ?pc.Store = null, // kept prompt states (engine thread only); null: no reuse (rank 1, a zero budget)
     cache_status: ?api.Status.PromptCache = null, // published under the lock; status never reads the store
     disk_status: ?api.Status.DiskCache = null, // published beside it, after the store stops mutating
+    fsr: FsrRun = null, // the engine's FSR counters, set at open: status never reads the engine itself
     prompt: []const u32 = &.{}, // the request in the engine (speed-up mode names kept states by its tokens)
     saved: std.ArrayList(u32) = .empty, // this request's marks the cache kept (speed-up: rank 1 drops the others)
     learned: ?api.prompt_imprint.Imprint = null, // --learn: shared states on disk, read back by later servers
@@ -181,7 +183,7 @@ pub const Host = struct {
             .generation_tokens = generation_tokens,
             .prompt_cache = h.cache_status,
             .disk = h.disk_status,
-            .fsr = if (h.eng.r.fsr) |rt| if (rt.snapshot()) |c| .from(c) else null else null,
+            .fsr = if (h.fsr) |rt| if (rt.snapshot()) |c| .from(c) else null else null,
             .fill_unknown = h.prefilling, // this backend reports no fill counters: the page says so, not idle
         };
     }
@@ -251,7 +253,7 @@ pub const Host = struct {
             h.cancels.clearRetainingCapacity(); // a cancel for an id no longer queued or running
             h.unlock();
             h.serve(job);
-            if (h.eng.r.fsr) |rt| rt.publish(); // the reply's last counts, not those of its last 1 Hz copy
+            if (h.fsr) |rt| rt.publish(); // the reply's last counts, not those of its last 1 Hz copy
             h.lock();
             h.cache_status = if (h.cache) |*s| snap.PromptCache(s) else null;
             h.disk_status = if (h.cache) |*s| snap.Disk(s) else null;
@@ -469,6 +471,7 @@ pub fn openWarmed(gpa: Allocator, io: std.Io, dir: []const u8, eng: *fx.Engine, 
     const context_limit: i64 = @as(i64, @intCast(eng.r.window.capacity)) - fx.MARGIN;
     h.* = .{ .gpa = gpa, .io = io, .eng = eng, .follower = follower, .load_limit = limit orelse 0, .vis = vis, .info_ = .{ .benchmark_ranks = if (eng.r.tp != null) 2 else 1, .benchmark_group = if (eng.r.tp) |t| t.benchmark_group else null, .name = "flashnext-zig", .draft_sources = draft_sources, .prompt_cache_plan = cache_plan, .lanes = 1, .greedy_only = eng.r.tp != null, .context_window = @intCast(if (window > 0) @min(window, context_limit) else context_limit) } };
     h.shared_gdn_pipe = eng.r.gdn_pipe;
+    h.fsr = eng.r.fsr;
     h.warm = .{ .queue = eng.r.queue };
     h.info_.structures = eng.r.tp == null;
     if (vis) |v| h.info_.vision = images.offer(v, h, prepareImage, prepareVideo);
