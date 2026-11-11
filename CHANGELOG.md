@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- HIP on gfx1151: a routed prompt product takes the 64-row tile only while its experts average at most 64 rows each. #1658's 1,024-row chunk cap never fired, so Qwen3.8-Flash-Next's default 4,096-row chunks (80 rows an expert) had been running on it; they now take the skewed 128-row tile. Flash Next 8K-token prompts reach their first token about 5% sooner. Served Qwen3.5/3.6 MoE prompts (1,024-row chunks, at most 32 rows an expert) are unchanged; Nemotron's 2,048-row prompt chunks (96 rows an expert on Nemotron 3.5 Lightning 30B-A3B) now take the skewed 128-row tile, and its 8K-token prompts reach their first token about 6% sooner. Replies are unchanged (#2576). Thanks to @gilby.
+
 - `TF_GLM_REQUEST_STARTS=1` (opt-in, off by default) lets GLM on CUDA cut prompt passes at a request's message starts, so a chat's next turn resumes at its previous turn's history instead of the last 2,048-row point. GLM refuses it at startup with `TF_KV_SHARE` above 0 or with `--learn-conversations`. On two GB10s at TP=2 (EXL3 TR3, DFlash2), a chat of about 58.7K tokens resumed its later turns at 58,735 instead of 57,344, with replies identical to `--prompt-cache-gib 0` and to the switch off (#2404, part of #2396). Thanks to @laidick.
 
 - Docs: the optimization ledger marks the rows that have open PRs and adds DSpine as row 28 (#2681). Thanks to @jschmied.
