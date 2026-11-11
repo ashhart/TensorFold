@@ -492,6 +492,7 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.NoRank => "GLM-5.3-Flash runs at TP over hosts: launch every host with --tp and a --rank below it (--tp 1: one GPU, with TF_GLM_LAYERS for a thin model)",
         error.NoCommId => "GLM-5.3-Flash's ranks meet over NCCL: above one rank, give --master (rank 0's address) or set NCCL_COMM_ID to rank 0's address:port on every host",
         error.RendezvousDisagree => "NCCL_COMM_ID differs from --master:--master-port: give one of them, or equal values",
+        error.MasterTooLong => "--master: too long for NCCL's root address (host:port in 320 bytes); give rank 0's address",
         error.RankMismatch => "the ranks' settings differ (each rank's log names the one): start them alike",
         error.Fp8OnPages => "--kv-cache fp8 keeps a window per stream: unset TF_KV_PAGES, or set it to auto or off",
         error.BadKvShare => "TF_KV_SHARE: give how many states the prompt store over the KV pages keeps, or 0 or unset for off",

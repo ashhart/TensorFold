@@ -205,6 +205,7 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.DraftsPastWindow => std.fmt.comptimePrint("--mtp-drafts: this checkpoint verifies windows of {d} rows, so a round drafts {d} at most; serve it with --mtp-drafts {d} or fewer", .{ narrow, narrow - 1, narrow - 1 }),
         error.CheckpointMathNeedsBlackwell => "--precision checkpoint: NVIDIA's FP4 math runs on Blackwell (compute capability 12.x); serve with --precision full",
         error.RendezvousDisagree => "NCCL_COMM_ID differs from --master:--master-port: give one of them, or equal values",
+        error.MasterTooLong => "--master: too long for NCCL's root address (host:port in 320 bytes); give rank 0's address",
         else => null,
     };
 }

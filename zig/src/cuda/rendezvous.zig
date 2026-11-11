@@ -7,7 +7,7 @@ pub fn fromMaster(o: anytype, lookup: anytype, out: anytype) !void {
     if (o.tp <= 1) return;
     const master = o.master orelse return; // without --master, NCCL_COMM_ID stays required as today (NoCommId)
     var buf: [320]u8 = undefined;
-    const want = std.fmt.bufPrintSentinel(&buf, "{s}:{d}", .{ master, o.master_port }, 0) catch return error.RendezvousDisagree;
+    const want = std.fmt.bufPrintSentinel(&buf, "{s}:{d}", .{ master, o.master_port }, 0) catch return error.MasterTooLong;
     if (lookup.get("NCCL_COMM_ID")) |have| {
         if (!std.mem.eql(u8, have, want)) return error.RendezvousDisagree;
         return;
@@ -47,6 +47,10 @@ test "the rendezvous sets NCCL_COMM_ID from --master once, keeps an equal one, r
     try std.testing.expect(f.set == null);
     f = .{ .have = "10.0.0.8:29583" };
     try std.testing.expectError(error.RendezvousDisagree, fromMaster(O{ .tp = 2, .master = "10.0.0.7", .master_port = 29583 }, &f, &f));
+    f = .{};
+    var long: [400]u8 = undefined;
+    @memset(&long, 'h');
+    try std.testing.expectError(error.MasterTooLong, fromMaster(O{ .tp = 2, .master = &long, .master_port = 29583 }, &f, &f));
     f = .{};
     try fromMaster(O{ .tp = 1, .master = "10.0.0.7", .master_port = 29583 }, &f, &f);
     try fromMaster(O{ .tp = 2, .master = null, .master_port = 29583 }, &f, &f);

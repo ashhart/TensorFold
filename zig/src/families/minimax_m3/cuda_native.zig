@@ -327,6 +327,7 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.NoRank => "MiniMax-M3.1-Flash runs at TP over two hosts: launch both with --tp 2 and --rank 0 or 1",
         error.NoCommId => "MiniMax-M3.1-Flash's ranks meet over NCCL: give --master (rank 0's address) or set NCCL_COMM_ID to rank 0's address:port on both hosts",
         error.RendezvousDisagree => "NCCL_COMM_ID differs from --master:--master-port: give one of them, or equal values",
+        error.MasterTooLong => "--master: too long for NCCL's root address (host:port in 320 bytes); give rank 0's address",
         error.MiniMaxM3RequiresSm121 => "MiniMax-M3.1-Flash on CUDA is served on GB10 (sm_121) only so far, and this GPU is another",
         error.MiniMaxM3RequiresTwoRanks => "MiniMax-M3.1-Flash on CUDA is served at two TP ranks only so far: launch both hosts with --tp 2",
         error.NotExl3 => "MiniMax-M3.1-Flash on CUDA serves a published EXL3 pack (quantization_config quant_method \"exl3\"), e.g. Mia-AiLab/MiniMax-M3.1-Flash-EXL3-EAQ-v1-3.06-bpw",
