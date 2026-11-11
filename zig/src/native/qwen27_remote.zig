@@ -100,6 +100,7 @@ pub const Pull = struct {
 pub fn refusal(f: Flags, qwen27: bool, drafter: bool) ?[]const u8 {
     if (!f.on()) return null;
     if (f.url == null or f.link == null) return "--prefill-from and --mcdma-link go together: the GB10 server's URL and the mcdma-rpcd link it answers on";
+    if (f.overHttp()) return "--mcdma-link http (hand-offs over HTTP) serves DeepSeek V4.1 only: give Qwen3.8-27B an mcdma-rpcd link";
     if (!qwen27) return "--prefill-from serves Qwen3.8-27B only (#1594 step 2b): serve this model without it";
     if (drafter) return "--prefill-from runs without --drafter for now: a remote prefix carries no drafter taps";
     return null;

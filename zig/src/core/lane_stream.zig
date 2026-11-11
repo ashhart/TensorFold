@@ -3,6 +3,9 @@ const std = @import("std");
 const lanes = @import("lanes");
 const host = @import("lane_host.zig");
 const recalls = @import("lane_host_recall.zig");
+const remote = @import("lane_remote.zig");
+const queue = @import("lane_cache_queue.zig");
+const pc = @import("prompt_cache.zig");
 const LaneHost = host.LaneHost;
 const Job = LaneHost.Job;
 
@@ -10,6 +13,13 @@ const Job = LaneHost.Job;
 pub fn freeProposer(h: *LaneHost, job: *Job) void {
     if (job.custom) |c| h.proposers.?.free(h.proposers.?.ctx, c) else job.proposer.deinit();
     job.custom = null;
+}
+
+/// The store's lookup for `job`; a remote prefix landed up to `landed` (0: none) starts the pass there.
+fn lookup(h: *LaneHost, store: *pc.Store, job: *Job, landed: u32) !pc.Lookup {
+    store.resume_floor = landed;
+    defer store.resume_floor = 0;
+    return queue.lookup(h, job);
 }
 
 /// An admitted job's stream (its kept prefix looked up, its drafter): false when it failed (the job is finished).
@@ -25,13 +35,14 @@ pub fn open(h: *LaneHost, job: *Job) bool {
             job.key[0] = 0x8000_0000 | @as(u32, @truncate(std.hash.Wyhash.hash(f, std.mem.asBytes(&job.key[0])) & 0x7fff_ffff));
         }
     };
-    if (h.cache) |store| if (!r.promptOnly() and r.prompt_logprobs == null and !r.untaught and (h.keep_remote or !@import("lane_remote.zig").wins(h, job))) if (@import("lane_cache_queue.zig").lookup(h, job)) |l| {
+    const landed = remote.resumeAt(h, job);
+    if (h.cache) |store| if (!r.promptOnly() and r.prompt_logprobs == null and !r.untaught and (h.keep_remote or landed == 0)) if (lookup(h, store, job, landed)) |l| {
         job.entry = l.entry;
         job.kept0 = store.counts.kept;
         job.marks = l.marks;
         reuse = .{ .saved = if (l.entry) |e| e.saved else null, .at = if (l.entry) |e| e.at else 0, .marks = l.marks, .snap_at = l.snap_at, .hook = .{ .ptr = job, .at = Job.kept }, .remote = if (l.entry) |e| e.remote else false };
     } else |_| {};
-    @import("lane_remote.zig").use(h, job, &reuse);
+    remote.use(h, job, &reuse);
     const handoff = @import("lane_export.zig").exporting(h, job, &reuse);
     if (h.proposers) |ps| {
         job.custom = ps.make(ps.ctx, h.gpa, r.prompt, r.eos) catch return !h.drop(job, "the drafter could not start");

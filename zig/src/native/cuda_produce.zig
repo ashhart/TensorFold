@@ -173,6 +173,10 @@ pub const Produce = struct {
 
 /// The producer for Qwen3.8-27B on CUDA, its geometry and cache format checked first; null with `problem` otherwise.
 pub fn open(comptime F: type, gpa: std.mem.Allocator, loaded: anytype, link: []const u8, model: []const u8, problem: *[]const u8) !?*Produce {
+    if (std.mem.eql(u8, link, api.LaneHost.Remote.http_link)) {
+        problem.* = "--mcdma-produce http serves DeepSeek V4.1 exports only; Qwen3.8-27B exports on an mcdma-rpcd link";
+        return null;
+    }
     if (comptime F != qwen35.native or builtin.os.tag != .linux) {
         problem.* = if (F != qwen35.native) "--mcdma-produce exports Qwen3.8-27B (qwen3_5) states only (#1594 step 2b)" else "--mcdma-produce runs on Linux, beside mcdma-rpcd's listen daemon";
         return null;

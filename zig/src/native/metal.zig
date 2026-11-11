@@ -130,8 +130,8 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     const report = @import("sys").optional_libraries.atBoundary();
     defer report.deinit();
     if (fsr_options.refuse(o, problem)) return null;
-    if (o.remote_prefill.on() and !std.mem.eql(u8, o.model_type, "qwen3_5")) {
-        problem.* = "--prefill-from serves Qwen3.8-27B only (#1594 step 2b): serve this model without it";
+    if (o.remote_prefill.on() and !std.mem.eql(u8, o.model_type, "qwen3_5") and !std.mem.eql(u8, o.model_type, "deepseek_v41")) {
+        problem.* = "--prefill-from serves Qwen3.8-27B and DeepSeek V4.1 only (#1594 step 2b): serve this model without it";
         return null;
     }
     if (o.prompt_int8 or o.rope_yarn != null) {
@@ -300,7 +300,8 @@ fn refusal(a: Allocator, o: api.Open, dense: bool) !?[]const u8 {
     if (o.speed_up != null) if (one_mac) |name| return try std.fmt.allocPrint(a, "--speed-up joins two Macs for Flash Next, GLM-5.3-Flash and GLM-5.3 only: serve {s} without it", .{name});
     if (o.recall and std.mem.eql(u8, t, "qwen4_exp")) return recall_refusal;
     if (spill.refusal(o)) |why| return why;
-    if (@import("qwen27_remote.zig").refusal(o.remote_prefill, dense and std.mem.eql(u8, t, "qwen3_5"), o.drafts and o.drafter != null)) |why| return why;
+    const remote_why = if (std.mem.eql(u8, t, "deepseek_v41")) @import("deepseek_v41_remote.zig").refusal(o.remote_prefill, o.drafts and o.drafter != null) else @import("qwen27_remote.zig").refusal(o.remote_prefill, dense and std.mem.eql(u8, t, "qwen3_5"), o.drafts and o.drafter != null);
+    if (remote_why) |why| return why;
     if (o.learn == null) return null;
     // the 27B writes conversation states
     if (o.learn_conversations and std.mem.eql(u8, t, "qwen3_5") and dense) return null;

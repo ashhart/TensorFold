@@ -26,6 +26,9 @@ pub const ResumePeek = struct { ctx: *anyopaque, at: *const fn (ctx: *anyopaque,
 /// The family's state after `at` prompt tokens, computed by another machine: never kept, never the engine's own.
 pub const Filled = struct { saved: pc.Saved, at: u32 };
 
+/// Link name for the server's own HTTP port, used by `--mcdma-produce http` and `--prefill-from URL --mcdma-link http`.
+pub const http_link = "http";
+
 /// serve --prefill-from URL (the GB10 server) and --mcdma-link NAME (mcdma-rpcd's connect link): both, or neither.
 pub const Flags = struct {
     url: ?[]const u8 = null,
@@ -34,6 +37,12 @@ pub const Flags = struct {
 
     pub fn on(f: Flags) bool {
         return f.url != null or f.link != null;
+    }
+
+    /// `--mcdma-link http`: the hand-off comes over HTTP from `--prefill-from`'s server, not over a fabric link.
+    pub fn overHttp(f: Flags) bool {
+        const l = f.link orelse return false;
+        return std.mem.eql(u8, l, http_link);
     }
 };
 
@@ -60,6 +69,7 @@ fn eligible(r: *const Request) bool {
 /// Fills start for queued requests whose remote prefix beats the cache's, at most TF_PREFILL_AHEAD (engine thread).
 pub fn queue(h: *LaneHost) void {
     const source = h.remote orelse return;
+    keepWarm(h);
     var holding: usize = 0;
     for (h.queued.items) |job| holding += @intFromBool(if (job.ticket) |t| t.state.load(.acquire) == Ticket.running or t.filled != null else false);
     for (h.queued.items) |job| {
@@ -133,6 +143,26 @@ pub fn wins(h: *LaneHost, job: *const Job) bool {
     return f.at > kept;
 }
 
+/// The engine thread's last keepalive tick while a queued request awaited its remote fill (the awake clock, ns).
+threadlocal var warm_tick: i96 = 0;
+
+/// A keepalive tick while a queued request awaits its fill: macOS unwires an idle model after 1-2 s (engine thread).
+fn keepWarm(h: *LaneHost) void {
+    const target = h.keepalive_target orelse return;
+    const now = std.Io.Clock.awake.now(h.io).toNanoseconds();
+    if (now - warm_tick < api.keepalive.served_interval_ns) return;
+    for (h.queued.items) |job| if (held(job)) {
+        warm_tick = now;
+        return target.tick(target.ctx);
+    };
+}
+
+/// Where a landed remote prefix that beats the cache's own starts the pass (0: none), for the lookup's marks.
+pub fn resumeAt(h: *LaneHost, job: *const Job) u32 {
+    if (!wins(h, job)) return 0;
+    return job.ticket.?.filled.?.at;
+}
+
 /// The stream restores a landed remote prefix unless the cache holds at least as much; an entry it beats is released.
 pub fn use(h: *LaneHost, job: *Job, reuse: *lanes.stream.Reuse) void {
     defer if (reuse.remote and !reuse.pulled) ownFirst(h, job, reuse); // a kept remote state stands, pull or none
@@ -148,7 +178,7 @@ pub fn use(h: *LaneHost, job: *Job, reuse: *lanes.stream.Reuse) void {
     job.entry = null;
     // TF_PREFILL_KEEP: the cache's marks past the prefix keep remote states; else no marks and no hook, nothing kept
     const marks = if (h.keep_remote) past(reuse.marks, f.at) else &.{};
-    reuse.* = .{ .saved = f.saved, .at = f.at, .remote = true, .pulled = true, .marks = marks, .hook = if (h.keep_remote) .{ .ptr = job, .at = Job.kept } else null };
+    reuse.* = .{ .saved = f.saved, .at = f.at, .remote = true, .pulled = true, .marks = marks, .snap_at = if (h.keep_remote) reuse.snap_at else 0, .hook = if (h.keep_remote) .{ .ptr = job, .at = Job.kept } else null };
 }
 
 /// A kept remote state slot 0's exact state reaches is let go; if a stream takes slot 0 first, the pass starts at 0.
