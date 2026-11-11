@@ -52,6 +52,7 @@ test "exl3: load refusals are diagnosed without borrowing request diagnostics" {
     };
     // A non-null result claims the refusal for this family's startup diagnostic.
     for (load_refusals) |err| try testing.expect(open(err) != null);
+    try testing.expectEqualStrings(explain(error.UnsupportedLearningFormat).?, open(error.UnsupportedLearningFormat).?);
     const request_refusals = [_]anyerror{ error.PromptTooLong, error.OutOfDeviceMemory };
     for (request_refusals) |err| {
         try testing.expect(explain(err) != null);
