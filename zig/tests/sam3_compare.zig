@@ -1,6 +1,7 @@
 const std = @import("std");
 const sam = @import("sam3");
 const st = @import("safetensors");
+const Masks = @import("sam3_mask_file.zig").Masks;
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
@@ -27,19 +28,22 @@ pub fn main(init: std.process.Init) !void {
     defer left.close(init.io);
     var right = try st.File.open(init.gpa, init.io, args[2]);
     defer right.close(init.io);
-    const x = left.get("masks") orelse return error.MissingMasks;
-    const y = right.get("masks") orelse return error.MissingMasks;
-    if (x.dtype != .u8 or y.dtype != .u8 or x.rank != 3 or !y.is(.u8, x.shape[0..x.rank])) return error.MaskShapeMismatch;
+    const x = try Masks.fromFile(&left);
+    const y = try Masks.fromFile(&right);
+    try x.match(y);
     const first: usize = @intFromBool(skip_first);
-    if (x.dim(0) <= first) return error.EmptyMaskComparison;
-    const pixels = try std.math.mul(usize, x.dim(1), x.dim(2));
+    if (x.frames <= first) return error.EmptyMaskComparison;
     var quality = sam.comparison.Quality{};
-    for (first..x.dim(0)) |frame| try quality.add(frame, x.bytes[frame * pixels ..][0..pixels], y.bytes[frame * pixels ..][0..pixels]);
-    const failure: ?anyerror = if (gate.check(quality, x.dim(0) - first)) |_| null else |err| err;
+    for (first..x.frames) |frame| for (0..x.objects) |object| {
+        try quality.add(std.math.cast(usize, x.frameIndex(frame)) orelse return error.FrameOutOfRange, x.mask(frame, object), y.mask(frame, object));
+    };
+    const failure: ?anyerror = if (gate.check(quality, (x.frames - first) * x.objects)) |_| null else |err| err;
     const json = try std.json.Stringify.valueAlloc(init.arena.allocator(), .{
         .scope = if (skip_first) "propagation_only" else "all_frames",
         .skipped_frames = first,
-        .frames = quality.frames,
+        .frames = x.frames - first,
+        .objects = x.objects,
+        .mask_pairs = quality.frames,
         .pixels = quality.pixels,
         .exact_pixels = quality.exact_pixels,
         .mean_iou = quality.meanIou(),
@@ -50,4 +54,8 @@ pub fn main(init: std.process.Init) !void {
     }, .{ .whitespace = .indent_2 });
     std.debug.print("{s}\n", .{json});
     if (failure) |err| return err;
+}
+
+test {
+    _ = @import("sam3_mask_file.zig");
 }

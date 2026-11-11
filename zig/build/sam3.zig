@@ -62,7 +62,9 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         .link_libc = true,
         .imports = &.{ .{ .name = "sam3", .module = module }, .{ .name = "safetensors", .module = safetensors }, .{ .name = "metal", .module = metal } },
     }) });
+    video.root_module.addImport("process_memory", b.createModule(.{ .root_source_file = b.path("zig/src/server/process_memory.zig"), .target = target, .link_libc = true }));
     tools.dependOn(&b.addInstallArtifact(video, .{}).step);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = video.root_module })).step);
     const compare = b.addExecutable(.{ .name = "tf-sam3-compare", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/sam3_compare.zig"),
         .target = target,
@@ -71,6 +73,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         .imports = &.{ .{ .name = "sam3", .module = module }, .{ .name = "safetensors", .module = safetensors } },
     }) });
     tools.dependOn(&b.addInstallArtifact(compare, .{}).step);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = compare.root_module })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = module.import_table.get("tokenizer").? })).step);
     const run = b.addRunArtifact(kernels);
     if (b.option(bool, "benchmark", "Time the SAM attention shapes") orelse false) run.addArg("--benchmark");

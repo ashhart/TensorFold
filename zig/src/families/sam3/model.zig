@@ -16,12 +16,7 @@ pub const LoadOptions = struct {
     scratch_cache_bytes: usize = 2 << 30,
 };
 
-pub const Mask = struct {
-    size: prompts.Size,
-    pixels: []u8,
-    score: f32,
-    box: [4]f32,
-};
+pub const Mask = @import("mask.zig").Mask;
 
 pub const Prediction = struct {
     allocator: std.mem.Allocator,
@@ -148,6 +143,10 @@ pub fn encodeImage(r: *ops.Runtime, image: prompts.Image, pyramid: []const u8) !
 }
 
 pub fn encodeTrunk(r: *ops.Runtime, image: prompts.Image) !ops.Feature {
+    return vision.trunk(r, try prepareImage(r, image));
+}
+
+pub fn prepareImage(r: *ops.Runtime, image: prompts.Image) !ops.Feature {
     try image.validate();
     const stride = try image.stride();
     const pixels = try image.size.pixels();
@@ -158,29 +157,12 @@ pub fn encodeTrunk(r: *ops.Runtime, image: prompts.Image) !ops.Feature {
                 @as(f32, @floatFromInt(image.rgb[y * stride + x])) / 127.5 - 1;
         }
     }
-    const input = try r.resize(ops.feature(tensor, image.size.height, image.size.width, 3), 1008, 1008, true);
-    return vision.trunk(r, input);
+    return r.resize(ops.feature(tensor, image.size.height, image.size.width, 3), 1008, 1008, true);
 }
 
 pub fn readMask(r: *ops.Runtime, allocator: std.mem.Allocator, mask: ops.Feature, size: prompts.Size, score: f32) !Mask {
     const start = r.mark();
+    defer r.trim(start, &.{});
     const full = try r.resize(mask, size.height, size.width, true);
-    const pixels = try allocator.alloc(u8, try size.pixels());
-    errdefer allocator.free(pixels);
-    var x0 = size.width;
-    var y0 = size.height;
-    var x1: usize = 0;
-    var y1: usize = 0;
-    for (pixels, 0..) |*pixel, i| {
-        pixel.* = if (full.tensor.get(i) > 0) 255 else 0;
-        if (pixel.* == 0) continue;
-        x0 = @min(x0, i % size.width);
-        y0 = @min(y0, i / size.width);
-        x1 = @max(x1, i % size.width + 1);
-        y1 = @max(y1, i / size.width + 1);
-    }
-    r.trim(start, &.{});
-    return .{ .size = size, .pixels = pixels, .score = score, .box = if (x1 == 0) .{ 0, 0, 0, 0 } else .{
-        @floatFromInt(x0), @floatFromInt(y0), @floatFromInt(x1), @floatFromInt(y1),
-    } };
+    return @import("mask.zig").fromLogits(allocator, full.tensor.slice(f32, full.tensor.count), size, score);
 }
