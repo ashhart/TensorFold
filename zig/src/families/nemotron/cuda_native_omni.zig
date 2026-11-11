@@ -39,10 +39,10 @@ pub const slideRefusal = @import("cuda_omni_slide.zig").refusal;
 const nvfp4_bytes: f64 = 0.5625;
 
 /// Bytes this rank's weights take: rank 0 all but the other ranks' expert shares, rank r > 0 its expert shares alone.
-pub fn weightShare(a: std.mem.Allocator, io: std.Io, dir: []const u8, total: u64, drafts: bool, _: u32, _: u32) u64 { // its own variables until it reads the launch
+pub fn weightShare(a: std.mem.Allocator, io: std.Io, dir: []const u8, total: u64, drafts: bool, rank: u32, world: u32) u64 {
     _ = drafts; // the MTP head's experts are counted either way
     var c = Config.read(a, io, dir) catch return total;
-    latent.place(&c) catch return total;
+    latent.placeAt(&c, .{ .rank = rank, .world = world }) catch return total;
     if (c.world < 2 or c.latent == 0) return total;
     const moe: f64 = @floatFromInt(c.count(.moe) + 1); // the MTP head's MoE too
     const per: f64 = @floatFromInt(c.experts * 2 * c.expert_width * c.latent + 2 * c.shared_width * c.hidden);

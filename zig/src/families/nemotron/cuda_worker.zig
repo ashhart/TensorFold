@@ -111,10 +111,10 @@ fn loadLayers(gpa: std.mem.Allocator, io: std.Io, ops: kern.Ops, dir: []const u8
 }
 
 /// Rank r > 0: its expert shares of every MoE layer, computed for rank 0's jobs until rank 0 ends.
-pub fn serve(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, precision: ?@import("config.zig").Precision) !void {
+pub fn serve(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, precision: ?@import("config.zig").Precision, placed: ?latent.At) !void {
     const t0 = std.Io.Clock.awake.now(io);
     var c = try Config.read(gpa, io, dir);
-    try latent.place(&c);
+    if (placed) |x| try latent.placeAt(&c, x) else try latent.place(&c); // the server's launch, or a tool's variables
     var load_cache = core.checkpoint.cache.Load.begin(io, c.world > 1);
     defer load_cache.deinit();
     if (c.rank == 0 or c.latent == 0) return error.NotAnExpertRank;

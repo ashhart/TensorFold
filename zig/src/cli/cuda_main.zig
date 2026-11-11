@@ -229,7 +229,7 @@ pub fn main(init: std.process.Init) !u8 {
     const segments = opts.segments orelse @as(usize, @intCast((try settings.parse("TF_CUDA_SEGMENTS", init.environ_map.get("TF_CUDA_SEGMENTS"))) orelse 1));
     // a rank past 0 of a tensor-parallel latent MoE holds expert shares and serves rank 0's jobs, whatever the command
     if (init.environ_map.get("TF_NEMOTRON_RANK")) |r| if (!std.mem.eql(u8, r, "0")) {
-        nemotron.worker.serve(gpa, init.io, &ctx, opts.model, opts.math) catch |err| {
+        nemotron.worker.serve(gpa, init.io, &ctx, opts.model, opts.math, null) catch |err| {
             cuda.tp_watch.fail(@errorName(err)); // rank 0 stops with this rank's error
             std.log.err("expert rank stopped: {s}", .{@errorName(err)});
             std.c._exit(1); // a stream may still wait on rank 0: a normal exit would join it

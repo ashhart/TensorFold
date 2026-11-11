@@ -35,7 +35,21 @@ pub const prompt_rows: u32 = state.pass_rows;
 pub const window_rows: u32 = state.max_rows; // a request's last verify window: its pages hold that many rows past it
 pub const max_drafts: u32 = @import("cuda_mtp.zig").max_chain; // Super's; open refuses more than a checkpoint's window holds
 
-pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, vision: ?vision.Limits = null, precision: ?@import("config.zig").Precision = null, mtp_drafts: ?u32 = null, mtp_confidence: ?f64 = null };
+pub const Options = struct {
+    context: usize,
+    drafts: bool,
+    segments: usize = 1,
+    slide: bool = false,
+    vision: ?vision.Limits = null,
+    precision: ?@import("config.zig").Precision = null,
+    mtp_drafts: ?u32 = null,
+    mtp_confidence: ?f64 = null,
+    rank: u32 = 0, // the launch's, resolved from --tp/--rank and TF_NEMOTRON_* (native/cuda_launch.zig)
+    tp: u32 = 1,
+    master: ?[]const u8 = null,
+    master_port: u16 = 29551,
+    launch_from: []const u8 = "",
+};
 pub const vision = @import("cuda_vision.zig");
 
 /// Thinking budgets the lone driver takes (cuda_lone.zig): above it, the stream goes to the lane core before its cut.
@@ -110,17 +124,19 @@ const Owned = struct { gpa: std.mem.Allocator, e: *engine.Engine, head: ?*Head, 
 
 /// Own-sequence graphs support both draw modes; drafting also captures the head.
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
-    if (std.c.getenv("TF_NEMOTRON_RANK")) |r| if (!std.mem.eql(u8, std.mem.span(r), "0")) { // expert ranks never serve
-        @import("cuda_worker.zig").serve(gpa, io, ctx, dir, o.precision) catch |err| {
+    try cuda.rendezvous.fromMaster(o, cuda.rendezvous.Process{}, cuda.rendezvous.Process{}); // before the liveness line
+    if (o.tp > 1) std.log.info("[tensorfold] nemotron: rank {d} of {d} ({s})", .{ o.rank, o.tp, o.launch_from });
+    if (o.rank != 0) { // expert ranks never serve
+        @import("cuda_worker.zig").serve(gpa, io, ctx, dir, o.precision, .{ .rank = o.rank, .world = o.tp }) catch |err| {
             cuda.tp_watch.fail(@errorName(err)); // rank 0 stops with this rank's error
             std.log.err("expert rank stopped: {s}", .{@errorName(err)});
             std.c._exit(1); // a stream may still wait on rank 0: a normal exit would join it
         };
         std.process.exit(0);
-    };
+    }
     const carve = try openCarveout(gpa, ctx);
     errdefer if (carve) |c| closeCarveout(gpa, c);
-    const e = try engine.Engine.init(gpa, io, ctx, dir, kernels, .{ .context = o.context, .mtp = o.drafts, .graphs = true, .sampling = null, .segments = o.segments, .carveout = carve, .slide = o.slide, .vision = o.vision, .precision = o.precision });
+    const e = try engine.Engine.init(gpa, io, ctx, dir, kernels, .{ .context = o.context, .mtp = o.drafts, .graphs = true, .sampling = null, .segments = o.segments, .carveout = carve, .slide = o.slide, .vision = o.vision, .precision = o.precision, .place = .{ .rank = o.rank, .world = o.tp } });
     errdefer e.deinit();
     if (o.mtp_drafts) |n| if (n >= state.windowRows(e.c)) return error.DraftsPastWindow;
     // Bolt has no MTP weights; copy drafts use the lane core and the target's ordinary verify windows.
@@ -188,6 +204,7 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.PrecisionNotBuilt => "--precision checkpoint: NVIDIA's FP4 and FP8 math is built for Nemotron 3.5 Super VL's NVFP4 checkpoint so far; serve this one with --precision full",
         error.DraftsPastWindow => std.fmt.comptimePrint("--mtp-drafts: this checkpoint verifies windows of {d} rows, so a round drafts {d} at most; serve it with --mtp-drafts {d} or fewer", .{ narrow, narrow - 1, narrow - 1 }),
         error.CheckpointMathNeedsBlackwell => "--precision checkpoint: NVIDIA's FP4 math runs on Blackwell (compute capability 12.x); serve with --precision full",
+        error.RendezvousDisagree => "NCCL_COMM_ID differs from --master:--master-port: give one of them, or equal values",
         else => null,
     };
 }
