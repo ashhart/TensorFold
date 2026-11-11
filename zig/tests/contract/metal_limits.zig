@@ -46,6 +46,7 @@ pub fn requireMapped(d: limits.MetalLaunch) !void {
 /// Only launches the loader can build on this device enter the limits compiler; declarations are checked first.
 pub fn supported(device: mtl.Device, d: limits.MetalLaunch) bool {
     if (std.mem.eql(u8, d.name, "metal inkling2 vision ik2_gemm_bf16_nt_rows")) return !device.tensorUnits();
+    if (std.mem.startsWith(u8, d.name, "q27 cache ")) return device.tensorUnits();
     if (std.mem.startsWith(u8, d.name, "qwen27 prompt ")) return device.tensorUnits() == (std.mem.indexOf(u8, d.name, " m5 ") != null);
     if (std.mem.startsWith(u8, d.name, "q27 stack qk ")) return @import("metal_support.zig").tensor(device.tensorUnits(), d.name);
     if (std.mem.startsWith(u8, d.name, "lfm2 masked prompt "))
@@ -61,7 +62,7 @@ pub fn supported(device: mtl.Device, d: limits.MetalLaunch) bool {
 
 fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comptime assemble: bool) !Launch {
     const fun = d.name[std.mem.lastIndexOfScalar(u8, d.name, ' ').? + 1 ..];
-    if (std.mem.startsWith(u8, d.name, "q27 stack ") or std.mem.startsWith(u8, d.name, "q27 qk ") or std.mem.startsWith(u8, d.name, "q27 mixed ")) {
+    if (std.mem.startsWith(u8, d.name, "q27 cache ") or std.mem.startsWith(u8, d.name, "q27 stack ") or std.mem.startsWith(u8, d.name, "q27 qk ") or std.mem.startsWith(u8, d.name, "q27 mixed ")) {
         if (!assemble) return undefined;
         const resolved = try @import("metal_q27_limits.zig").resolve(a, device, d.name, d.offline);
         return .{ .decl = d, .function = fun, .here = resolved.here, .pre_m5 = resolved.pre_m5 };
