@@ -117,7 +117,7 @@ zig/src/cuda/vit.zig	72c4301251f50d0f25907f0d8ad03a943281b234c506a455e413627a3ff
 zig/src/families/flashnext/cuda_attn.zig	99dfe79f919a8599490f1cdba0bec20d6e73ccbeafe26d5848419a465fdfa0d0	raw
 zig/src/families/flashnext/cuda_batch.zig	7fa858c564356e9cc80ee50a86602a5d1c1c3d1ef9ef6d0d69b2ac7a8a4b4e5e	raw	main 42ff6c510f (disk states keyed by the resolved prompt passes; serving unchanged)
 zig/src/families/flashnext/cuda_batch_state.zig	5da910105c3b0fa3a776c582198677bd54d977c821f7314a6494d7e9f7a1cbea	raw	main 4f6017ced (prompt cache marks kept inside the pass), dfd9ac5ef4 (#2585: TF_FLASHNEXT_* read through platform/environment.zig, malformed text refused at startup; valid values keep their meaning)
-zig/src/families/flashnext/cuda_collective.zig	898e15d936062b5a26d0aacc0df8b40b5ae4983111d6aec35db1128aaf5f3f76	raw
+zig/src/families/flashnext/cuda_collective.zig	bf475ffb46b3440fcad280f46e34de25cd22b79ed96a0b587d0869e7451d3519	raw	adds sumBlock, the in-place FP32 reduce-scatter with sum's peer check, deadline and abort; no served change on its own
 zig/src/families/flashnext/cuda_compare_main.zig	ade014dfec88f0b386076cdc093ea20710d7bf36c33ff566ca2caf472064695b	raw	main dfd9ac5ef4 (#2585: the TF_FLASHNEXT_* startup check), c274b45cc1 (the check through the flashnext module)
 zig/src/families/flashnext/cuda_config.zig	19366ee591270c719fa6f710af0efd4d5a55cfc3e30c923f5ed08771b5c14001	raw
 zig/src/families/flashnext/cuda_draft_affine.zig	2ec22bec1a38a6d2cc7e16a65d41deeb452d1a679661351a473652b5f39f2da8	raw
