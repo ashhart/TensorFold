@@ -5,10 +5,9 @@ const Engine = @import("engine.zig").Engine;
 const k = @import("kernels.zig");
 const fwd = @import("forward.zig");
 const H = cfg.hidden;
-
-pub fn validGamma(gamma: f32) bool {
-    return std.math.isFinite(gamma) and gamma >= 1 and gamma <= 5;
-}
+const shared = @import("../guidance.zig");
+pub const State = shared.State;
+pub const Guide = shared.Guide(Engine);
 
 pub fn mix(e: *Engine, unconditional: u64, gamma: f32) void {
     mixLogits(e.g, e.cand_logits, unconditional, e.w.n_cand, gamma);
@@ -19,95 +18,22 @@ fn mixLogits(g: *@import("gpu.zig").Gpu, conditional: u64, unconditional: u64, c
     g.go(.d3_cfg_mix, .{ (count + 255) / 256, 1, 1 }, 256, &.{ conditional, unconditional }, Args{ .count = @intCast(count), .gamma = gamma });
 }
 
-/// Host lifecycle is separate from GPU storage; no old reference may activate a later plain request.
-pub const State = struct {
-    active: bool = false,
-    gamma: f32 = 1,
-
-    pub fn begin(s: *State, rows: usize, gamma: f32) !void {
-        s.clear();
-        if (!validGamma(gamma)) return error.BadDramaGuidance;
-        if (rows == 0) return;
-        s.* = .{ .active = true, .gamma = gamma };
-    }
-
-    pub fn clear(s: *State) void {
-        s.* = .{};
-    }
-};
-
-pub const Guide = struct {
-    e: *Engine,
-    batched: bool,
-    state: State = .{},
-
-    pub fn create(base: *Engine, batched: bool) !Guide {
-        return .{ .e = try base.forkBackbone(), .batched = batched };
-    }
-
-    pub fn destroy(g: *Guide) void {
-        g.e.destroy();
-    }
-
-    pub fn begin(g: *Guide, rows: []const [cfg.frame_width]i32, gamma: f32) !void {
-        try g.state.begin(rows.len, gamma);
-        errdefer g.state.clear();
-        // A guide is never restored from the conditional reference cache.
-        if (g.state.active) try g.e.startPrompt(rows);
-    }
-
-    /// One prompt row per scheduler round keeps cancellation and other lanes responsive.
-    pub fn promptStep(g: *Guide, rows: []const [cfg.frame_width]i32) !bool {
-        if (!g.state.active or g.e.rows_done == rows.len) return false;
-        try g.e.backboneChunk(g.e.rows_done, 1, null);
-        g.e.rows_done += 1;
-        if (g.e.rows_done == rows.len) {
-            g.e.g.copy(g.e.hfin, g.e.hlast, H * 2);
-            try g.e.finishPrompt(rows);
-        }
-        return true;
-    }
-
-    pub fn clear(g: *Guide) void {
-        g.state.clear();
-    }
-    /// Paired means one command-buffer submission, not a two-row GEMM or simultaneous GPU execution.
-    pub fn frame(g: *Guide, conditional: *Engine, sampling: @import("../common.zig").Sampling) !void {
-        if (!g.state.active) return conditional.frameStep(sampling, true, null);
-        const u = g.e;
-        k.linear(u.g, u.w.cand_head, u.hlast, H, H, u.w.n_cand, u.cand_logits, u.w.n_cand, 1, true);
-        if (!g.batched) try u.g.commit();
-        try fwd.enqueueFrameGuided(conditional, sampling, null, null, .{ .unconditioned = u.cand_logits, .gamma = g.state.gamma });
-        if (!g.batched) try u.g.commit();
-        // Feed the actual sampled conditional frame to the unconditional backbone, never its codec tower.
-        k.nextInput(u.g, conditional.frame, u.bb_input, u.pos, u.pos_bb);
-        k.embedBackbone(u.g, u.bb_input, u.w.embed, u.w.cb_emb, u.x, 1, H, u.c.ids.sem_begin, u.c.ids.sem_end, cfg.codebook_size);
-        for (0..cfg.layers) |li| fwd.backboneLayer(u, fwd.laneBB(u, u.pos_bb), li, 1);
-        k.rmsnorm(u.g, u.x, H, u.w.final_norm, u.hlast, H, 1, H, cfg.eps, true);
-        k.copyI32(u.g, u.pos_bb, u.pos, 1);
-        try u.g.commit();
-    }
-};
-
-test "CFG rejects nonfinite and out-of-range gamma before state activation" {
-    for ([_]f32{ 0, 0.99, 5.01, std.math.nan(f32), std.math.inf(f32) }) |g|
-        try std.testing.expect(!validGamma(g));
-}
-
-test "CFG transitions clear old voice on plain request cancellation and invalid begin" {
-    var state: State = .{};
-    try state.begin(12, 1.5);
-    try std.testing.expect(state.active);
-    try state.begin(0, 1.5);
-    try std.testing.expect(!state.active and state.gamma == 1);
-    try state.begin(8, 2);
-    state.clear();
-    try std.testing.expect(!state.active);
-    try state.begin(9, 3);
-    try std.testing.expectError(error.BadDramaGuidance, state.begin(9, std.math.nan(f32)));
-    try std.testing.expect(!state.active and state.gamma == 1);
-    try state.begin(7, 1);
-    try std.testing.expect(state.active and state.gamma == 1);
+/// Paired means one command-buffer submission, not a two-row GEMM or simultaneous GPU execution.
+pub fn frame(g: *Guide, conditional: *Engine, sampling: @import("../common.zig").Sampling) !void {
+    if (!g.state.active) return conditional.frameStep(sampling, true, null);
+    const u = g.e;
+    k.linear(u.g, u.w.cand_head, u.hlast, H, H, u.w.n_cand, u.cand_logits, u.w.n_cand, 1, true);
+    if (!g.batched) try u.g.commit();
+    const guidance: ?fwd.Guidance = if (g.state.mixing()) |gamma| .{ .unconditioned = u.cand_logits, .gamma = gamma } else null;
+    try fwd.enqueueFrameGuided(conditional, sampling, null, null, guidance);
+    if (!g.batched) try u.g.commit();
+    // Feed the actual sampled conditional frame to the unconditional backbone, never its codec tower.
+    k.nextInput(u.g, conditional.frame, u.bb_input, u.pos, u.pos_bb);
+    k.embedBackbone(u.g, u.bb_input, u.w.embed, u.w.cb_emb, u.x, 1, H, u.c.ids.sem_begin, u.c.ids.sem_end, cfg.codebook_size);
+    for (0..cfg.layers) |li| fwd.backboneLayer(u, fwd.laneBB(u, u.pos_bb), li, 1);
+    k.rmsnorm(u.g, u.x, H, u.w.final_norm, u.hlast, H, 1, H, cfg.eps, true);
+    k.copyI32(u.g, u.pos_bb, u.pos, 1);
+    try u.g.commit();
 }
 
 /// Synthetic device qualification called only by the explicit Metal quant-check executable.

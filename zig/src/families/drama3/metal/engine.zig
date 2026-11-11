@@ -272,9 +272,9 @@ pub const Engine = struct {
         try e.put(e.pframes, std.mem.sliceAsBytes(rows));
     }
 
-    /// Backbone-only prompt chunk for the unconditional CFG sequence; no codec tower work.
-    pub fn backboneChunk(e: *Engine, c0: usize, t: usize, probe: ?Probe) !void {
-        if (t == 0 or t > e.o.max_rows) return error.BadPromptChunk;
+    /// The backbone over prompt rows c0..c0+t of n, keeping the last row's final norm; no codec tower work.
+    pub fn backboneChunk(e: *Engine, n: usize, c0: usize, t: usize, probe: ?Probe) !void {
+        if (t == 0 or t > e.o.max_rows or c0 >= n or t > n - c0) return error.BadPromptChunk;
         const g = e.g;
         var nb: [64]u8 = undefined;
         try e.setPos(c0);
@@ -286,16 +286,14 @@ pub const Engine = struct {
         }
         k.rmsnorm(g, e.x, H, e.w.final_norm, e.hfin, H, t, H, cfg.eps, true);
         if (probe) |p| try p.f(p.ctx, "backbone_final_norm", e.hfin, t, H, false);
+        if (c0 + t == n) g.copy(e.hfin + (t - 1) * H * 2, e.hlast, H * 2);
     }
 
     pub fn promptChunk(e: *Engine, n: usize, c0: usize, t: usize, probe: ?Probe) !void {
-        if (t == 0 or t > e.o.max_rows or c0 >= n or t > n - c0) return error.BadPromptChunk;
-        try e.backboneChunk(c0, t, probe);
-        const g = e.g;
+        try e.backboneChunk(n, c0, t, probe);
         // the tower over this chunk's rows that have a next prompt row
         const tt = @min(c0 + t, n - 1) - c0;
         if (tt > 0) try e.tower(tt, c0, e.hfin, probe);
-        if (c0 + t == n) g.copy(e.hfin + (t - 1) * H * 2, e.hlast, H * 2);
     }
 
     pub fn finishPrompt(e: *Engine, rows: []const [W]i32) !void {
