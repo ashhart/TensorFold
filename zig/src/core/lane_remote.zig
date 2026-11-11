@@ -6,6 +6,10 @@ const lanes = @import("lanes");
 const LaneHost = @import("lane_host.zig").LaneHost;
 const Job = @import("lane_job.zig").Job;
 const Request = api.Request;
+const route = @import("lane_remote_route.zig");
+
+/// The gate every remote source keeps: one pull at a time, and a prompt that finds the pair busy goes elsewhere.
+pub const Route = route.Route;
 
 /// A family's remote prefill (fabric/prefill_source.zig behind it): opt-in, and outside the exactness contract.
 pub const Source = struct {

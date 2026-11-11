@@ -11,6 +11,7 @@ const trigger = @import("remote_trigger.zig");
 const Filled = api.LaneHost.Remote.Filled;
 const http = @import("deepseek_v41_http.zig");
 const Flags = api.LaneHost.Remote.Flags;
+const Route = api.LaneHost.Remote.Route;
 
 /// The Qwen pull's prefix policy with TF_PREFILL_TAIL: the Mac prefills only the last token by default, no 512 tail.
 pub fn policy() !ps.Policy {
@@ -34,7 +35,7 @@ pub const Pull = struct {
     io: std.Io,
     model: *ds.Model,
     remote: ps.Remote,
-    mutex: std.Io.Mutex = .init,
+    route: Route = .{},
     pulls: u64 = 0,
     ns: u64 = 0,
     running: std.atomic.Value(u32) = .init(0),
@@ -48,8 +49,10 @@ pub const Pull = struct {
 
     /// A prefix of `prompt` beyond `cached` on a whole chunk, filled remotely and landed whole in a blank Snapshot.
     pub fn pull(p: *Pull, prompt: []const u32, cached: u64) !?Filled {
-        p.mutex.lockUncancelable(p.io);
-        defer p.mutex.unlock(p.io);
+        if (p.closing.load(.acquire) or p.off.load(.acquire)) return null;
+        const upto = p.remote.policy.upto(prompt.len, cached) orelse return null;
+        _ = p.route.admit(p.io, Route.estimate(upto, prompt.len - cached), &p.closing) orelse return null;
+        defer p.route.leave();
         if (p.closing.load(.acquire) or p.off.load(.acquire)) return null;
         p.remote.client.renew() catch |err| {
             if (p.linked) std.log.warn("remote prefill: the link is not usable ({s}); prompts are prefilled here", .{@errorName(err)});
@@ -91,7 +94,8 @@ pub const Pull = struct {
         const p: *Pull = @ptrCast(@alignCast(ptr));
         if (p.closing.load(.acquire) or p.off.load(.acquire)) return false;
         const n = p.remote.policy.upto(len, cached) orelse return false;
-        return n - cached >= p.remote.policy.min_prefix;
+        if (n - cached < p.remote.policy.min_prefix) return false;
+        return !p.route.busy(Route.nowNs(p.io), Route.estimate(n, len - cached)); // a busy pair leaves the prompt to this Mac
     }
 
     fn fill(ptr: *anyopaque, prompt: []const u32, cached: u64) anyerror!?Filled {
@@ -201,6 +205,7 @@ pub const Link = struct {
         const l = try gpa.create(Link);
         errdefer gpa.destroy(l);
         const rules = try policy();
+        const gate = try Route.fromEnv();
         l.box = try fabric.mailbox.Mailbox.openConnect(f.link.?);
         errdefer l.box.close();
         l.client = try fabric.mailbox.Client.init(&l.box, fabric.words.native, 30 * std.time.ns_per_s);
@@ -208,7 +213,7 @@ pub const Link = struct {
         const key = try q27.apiKey(gpa, io);
         errdefer if (key) |k| gpa.free(k);
         l.http = .{ .gpa = gpa, .io = io, .url = try std.fmt.allocPrint(gpa, "{s}/v1/completions", .{base}), .model = "", .closing = &l.pull.closing, .key = key };
-        l.pull = .{ .gpa = gpa, .io = io, .model = m, .remote = .{ .gpa = gpa, .policy = rules, .client = &l.client, .trigger = l.http.trigger(), .model = id, .protocol = fabric.wire.recurrent_version } };
+        l.pull = .{ .gpa = gpa, .io = io, .model = m, .route = gate, .remote = .{ .gpa = gpa, .policy = rules, .client = &l.client, .trigger = l.http.trigger(), .model = id, .protocol = fabric.wire.recurrent_version } };
         return l;
     }
 
@@ -279,6 +284,8 @@ test "remote prefill for DeepSeek V4.1 refuses half its flags and a separate dra
 test "the pull wants a prefix only 4096 tokens or more past what the Mac resumes, and stops for good on a mismatch" {
     if (std.c.getenv("TF_PREFILL_MIN") != null or std.c.getenv("TF_PREFILL_CHUNK") != null or std.c.getenv("TF_PREFILL_TAIL") != null) return error.SkipZigTest;
     var p: Pull = undefined;
+    p.io = std.testing.io;
+    p.route = .{};
     p.closing = .init(false);
     p.off = .init(false);
     p.remote.policy = try policy();

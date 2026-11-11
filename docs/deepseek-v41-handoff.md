@@ -116,6 +116,11 @@ built on it are kept (marked remote). The drafter's rings are not in a Snapshot 
 `ring` parts are read and dropped; the drafter has no conditioning rows until local forwards fill the taps, which can lower
 draft acceptance and nothing else.
 
+The pair takes one pull at a time (`core/lane_remote_route.zig`, kept by both Mac pulls). A prompt that arrives while one is
+under way is not queued behind it: `wants` says no when the pair is busy and waiting for it would take longer than prefilling
+the prompt here (the same estimate decides for a pull already queued, so a wait ends when it stops paying), and the lane host
+prefills it with its own rows. Nothing changes on the wire. `TF_PREFILL_ROUTE=always` waits for the pair as the pull used to.
+
 ### How much of the prompt is handed over
 
 The prefix is the prompt less its **tail**, `TF_PREFILL_TAIL` tokens (default 1): the Mac asks the producer for the whole prompt
