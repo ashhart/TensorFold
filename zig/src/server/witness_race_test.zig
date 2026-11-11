@@ -90,13 +90,14 @@ const Race = struct {
                     else => _ = r.mixed.fetchAdd(1, .acq_rel),
                 },
             }
+            std.Thread.yield() catch {}; // the idle manager takes the same lock to park; a busy runner must let it in
         }
     }
 };
 
 fn waitState(m: *idle.Manager, want: idle.State) !void {
     var waited: usize = 0;
-    while (waited < 5000) : (waited += 1) {
+    while (waited < 30000) : (waited += 1) {
         m.mutex.lockUncancelable(t.io);
         const now = m.state;
         m.mutex.unlock(t.io);
