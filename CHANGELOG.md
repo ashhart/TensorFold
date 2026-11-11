@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- XPU: a Qwen3.8-27B stream served alone with its DFlash2 drafter picks its tree's width from the lane rule's lone pricing, the stream's own measured rounds by width in a context band each, where it verified a fixed 15 nodes a round; `XPU_TREE` stays the cap. On an Arc Pro B70 decode at 28,946, 58,543 and 121,022 prompt tokens reads 1.58, 1.77 and 2.04 times the old default and 1.03, 1.02 and 1.06 times the best fixed tree, and 0.96 times the default at 34 tokens; every reply keeps its tokens, at every width, greedy and seeded. A lone round with `lone_cost_tile` set is now priced from the stream's own times even without `plain_guard`, and a probe without `plain_guard` never asks for a round with no draft; families with `plain_guard` are unchanged.
+
 ## 1.2.7
 
 - GLM-5.3-Flash on CUDA: with `TF_GLM_LAYERS=N`, serve's start-up memory check counts the weights by tensor from the shard headers, only those the load reads (the first N layers, the MTP layer when drafts are on, the embedding, norm and head), where it counted every checkpoint file. A 20-layer thin load of the 163.6 GiB checkpoint now counts 66.6 GiB without drafts. Unset, the count is the files' as before (#2788, fixes #2745). Thanks to @wojo.
