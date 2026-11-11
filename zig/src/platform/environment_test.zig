@@ -304,13 +304,12 @@ test "rank aliases name their flag and refuse from their retirement release" {
         const name = row.name;
         try t.expectEqual(row.scope, e.rule(name).scope);
         try t.expectEqualStrings(row.flag, e.rule(name).flag.?);
-        try t.expectEqualStrings("1.4.0", e.rule(name).retire.?);
-        try t.expect(e.retired(name, "1.2.6") == null);
-        try t.expect(e.retired(name, "1.3.9") == null);
-        try t.expect(e.retired(name, "1.4.0-rc.1") == null);
-        try t.expect(e.retired(name, "1.4") == null);
-        try t.expect(e.retired(name, "1.4.0") != null);
-        try t.expect(e.retired(name, "2.0.0") != null);
+        try t.expectEqualStrings(e.alias_retire, e.rule(name).retire.?);
+        var buf: [64]u8 = undefined;
+        try t.expect(e.retired(name, "0.0.1") == null);
+        try t.expect(e.retired(name, try std.fmt.bufPrint(&buf, "{s}-rc.1", .{e.alias_retire})) == null); // a pre-release is before it
+        try t.expect(e.retired(name, e.alias_retire) != null);
+        try t.expect(e.retired(name, "999.0.0") != null);
         try t.expectEqual(@as(?u64, 2), try e.parse(name, "+2"));
         try t.expectError(error.InvalidEnvironment, e.parse(name, " 2"));
         try t.expectError(error.InvalidEnvironment, e.parse(name, "4294967296"));

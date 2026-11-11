@@ -37,7 +37,7 @@ pub fn lfm2(o: api.Open) ?[]const u8 {
     return if (o.vision != null) lfm2_vision else unranked(o);
 }
 
-pub const no_ranks = "this CUDA family has no tensor-parallel ranks: serve without --tp";
+pub const no_ranks = "this CUDA family has no tensor-parallel ranks: serve without --tp and --rank";
 
 /// --tp or --rank for a family that opens outside `family()` (Fish, Qwen4, LFM2): refused, never ignored.
 pub fn unranked(o: api.Open) ?[]const u8 {
@@ -46,6 +46,13 @@ pub fn unranked(o: api.Open) ?[]const u8 {
 
 const lfm2_vision = "--vision: LFM2 reads the checkpoint's images through its own tower without the flag; " ++
     "serve it without --vision";
+
+/// A given --rank below the world, as main's CLI refused it, and a world in the family's `worlds` when it lists them.
+pub fn place(comptime F: type, a: std.mem.Allocator, o: api.Open) !?[]const u8 {
+    if (o.given.rank and o.rank >= o.tp) return try std.fmt.allocPrint(a, "argument --rank: {d} is not below --tp {d}", .{ o.rank, o.tp });
+    if (comptime @hasDecl(F, "worlds")) if (std.mem.indexOfScalar(u32, &F.worlds.ids, o.tp) == null) return F.worlds.refusal;
+    return null;
+}
 
 /// A family takes --drafter only if it says so, and --learn-conversations only as Nemotron; null: `o` may open `F`.
 pub fn family(comptime F: type, o: api.Open) ?[]const u8 {
@@ -323,4 +330,15 @@ pub fn startup(a: std.mem.Allocator, o: api.Open, problem: *[]const u8) !bool {
         return true;
     }
     return false;
+}
+
+test "a rank outside its world and a world the family does not serve refuse by name before admission" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const fnx = @import("flashnext").native;
+    try std.testing.expectEqualStrings(fnx.worlds.refusal, (try place(fnx, a, .{ .dir = "d", .model_type = "m", .tp = 3, .given = .{ .tp = true } })).?);
+    try std.testing.expectEqualStrings("argument --rank: 1 is not below --tp 1", (try place(fnx, a, .{ .dir = "d", .model_type = "m", .rank = 1, .given = .{ .rank = true } })).?);
+    try std.testing.expect(try place(fnx, a, .{ .dir = "d", .model_type = "m", .tp = 2, .rank = 1, .given = .{ .tp = true, .rank = true } }) == null);
+    try std.testing.expect(try place(fnx, a, .{ .dir = "d", .model_type = "m" }) == null);
 }
