@@ -13,7 +13,7 @@ nvcc=/usr/local/cuda/bin/nvcc
 out=/work/out/drama3
 tree=$PWD
 for path in "$fp8/codec.pth" "$pruned/config.json" "$pruned5900/config.json" "$nvcc" "$(command -v zig)"; do
-    [ -e "$path" ] || { echo "missing $path; $pilot holds:" >&2; find "$pilot" -maxdepth 2 >&2; exit 1; }
+    [ -e "$path" ] || { echo "missing $path; /assets holds:" >&2; find /assets -maxdepth 3 >&2; exit 1; }
 done
 nvidia-smi --query-gpu=name,driver_version --format=csv,noheader
 mkdir -p "$out/voices"
