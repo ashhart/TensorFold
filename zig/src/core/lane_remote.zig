@@ -30,7 +30,6 @@ pub const Filled = struct { saved: pc.Saved, at: u32 };
 pub const http_link = "http";
 
 /// serve --prefill-from URL (the GB10 server) and --mcdma-link NAME (mcdma-rpcd's connect link): both, or neither.
-/// NAME may list several links (`a,b`): a KV_SPLIT export's producers, shard 0's link first.
 pub const Flags = struct {
     url: ?[]const u8 = null,
     link: ?[]const u8 = null,

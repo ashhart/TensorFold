@@ -309,10 +309,10 @@ fn splitCase(upto: u64, shards: u32) !void {
     _ = try got.complete();
     try std.testing.expectEqualSlices(u8, want_via.live, got_via.live);
     try std.testing.expectEqualSlices(u8, want_via.storage, got_via.storage);
-    try std.testing.expect(bytes >= whole.bytes); // the shards add no part the whole lacks but their own part headers' rounding
+    try std.testing.expect(bytes >= whole.bytes);
 }
 
-// a prompt of one page has no part for the other shards (an export with no layer is protocol 1): remote prefixes are longer
+// a prompt of one page has no part for the other shards (an export with no layer is protocol 1).
 test "a KV_SPLIT export by shard lands the state the replicated export lands: 2 and 3 shards, odd and long prompts" {
     inline for (.{ 517, 1301, 2000 }) |upto| inline for (.{ 2, 3 }) |shards| try splitCase(upto, shards);
 }

@@ -1,4 +1,4 @@
-//! TF_DSV41_HANDOFF_CHECK=synth:TOKENS:FILE.mkvh2[+synth:...]: hand-off streams of synthetic finite rows, to time decode at any context.
+//! TF_DSV41_HANDOFF_CHECK=synth:TOKENS:FILE.mkvh2[+synth:...].
 const std = @import("std");
 const tf = @import("tensorfold");
 const ho = tf.deepseek_v41_handoff;

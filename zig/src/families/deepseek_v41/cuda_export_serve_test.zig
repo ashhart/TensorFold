@@ -30,7 +30,7 @@ const Fake = struct {
         return initShard(upto, 0, 1);
     }
 
-    /// Shard `shard` of `shards` KV_SPLIT producers of one synthetic world: its own pool pages, and the snapshot (shard 0).
+    /// Shard `shard` of `shards` KV_SPLIT producers of one synthetic world.
     fn initShard(upto: u64, shard: u32, shards: u32) !*Fake {
         const f = try gpa.create(Fake);
         f.* = .{ .arena = .init(gpa), .snap = undefined, .pos = upto, .shard = shard, .shards = shards };

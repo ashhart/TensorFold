@@ -22,7 +22,6 @@ pub fn refusal(m: *const model.Model) ?[]const u8 {
 }
 
 /// One captured state: the snapshot, its pieces over the snapshot's bytes, and the pages read for each KV source.
-/// A rank of a split pool other than the first holds no snapshot: it exports its pool pages only.
 pub const Capture = struct {
     gpa: std.mem.Allocator,
     snap: ?*sg.Sessions.Snap,
@@ -41,8 +40,6 @@ pub const Capture = struct {
 };
 
 /// This rank's pool pages of every KV source for the first `at` tokens, each family's pages back to back in logical
-/// order. A split pool's comp pages are the ones the rank stores (page % world == rank; the index keys are replicated,
-/// so only the same logical pages are read): the rank's shard of a KV_SPLIT export. Buffers go to `bufs`.
 fn readPages(gpa: std.mem.Allocator, kx: *kvs.Kv, at: u64, bufs: *std.ArrayList([]u8)) ![]cx.Pages {
     const page = kx.pool.page;
     const npages: u32 = @intCast((at + page - 1) / page);

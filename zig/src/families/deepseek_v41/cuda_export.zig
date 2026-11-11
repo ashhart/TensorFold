@@ -26,7 +26,7 @@ pub const State = struct {
     /// CED replay: layers from here hold `replay_rows` replayed rows; the window's older ones are another prompt's
     decoder_from: u32 = none,
     replay_rows: u32 = 0,
-    /// KV_SPLIT: this producer is shard `shard` of `shards`; `pages` hold only the logical pages it owns (page % shards)
+    /// KV_SPLIT: this producer is shard `shard` of `shards`.
     shard: u32 = 0,
     shards: u32 = 1,
 
