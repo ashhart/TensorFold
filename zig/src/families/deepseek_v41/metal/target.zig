@@ -12,6 +12,11 @@ const pipelines = @import("pipelines.zig");
 const snapshots = @import("snapshots.zig");
 const tree_ = @import("tree.zig");
 const steps = @import("prompt_steps.zig");
+const vision = @import("vision.zig");
+const vw = @import("vision_weights.zig");
+const vt = @import("vision_tower.zig");
+const vrows = @import("vision_rows.zig");
+const prep = @import("vision_prep.zig");
 
 const iface = host.iface;
 const lanes = host.lanes;
@@ -31,7 +36,11 @@ pub const Env = struct {
     s: *const scratch.Scratch,
     model: forward.Model,
     lookup: ?forward.Lookup,
+    /// the vision tower's kernels and weights (null: text only; a prompt with images is refused)
+    vision: ?VisionRefs = null,
 };
+
+pub const VisionRefs = struct { kit: *const vision.Kit, w: *const vw.Weights };
 
 pub const Options = struct {
     slots: u32,
@@ -67,6 +76,8 @@ pub const Slot = struct {
     live: bool = false,
     /// every launch since the request began completed (a release keeps only a whole state)
     whole: bool = false,
+    /// the images `setImages` named for the next prompt (their pixels borrowed until it is prefilled)
+    images: []vrows.Image = &.{},
     /// the rows the last prompt took from kept state
     resumed: u32 = 0,
     /// a prompt begun in pieces (prompt_steps.zig) and not yet finished: its rows from `tail.end` are still to run
@@ -95,6 +106,8 @@ pub const Target = struct {
     joined: bool = false,
     /// draft trees: the branches' shadow slots and the open tree window (tree.zig)
     tree: tree_.Tree = .{},
+    /// the ViT and aligner, when the environment has a tower
+    tower: ?vt.Tower = null,
 
     pub fn init(a: Allocator, env: Env, opt: Options) !*Target {
         const c = env.c;
@@ -126,6 +139,7 @@ pub const Target = struct {
             made += 1;
         }
         t.slots = slots;
+        if (env.vision) |v| t.tower = vt.Tower.init(a, env.device, env.queue, v.kit, v.w);
         t.joinResident() catch {};
         return t;
     }
@@ -162,6 +176,7 @@ pub const Target = struct {
         a.free(s.ring);
         s.hist.deinit(a);
         s.hit.deinit(a);
+        a.free(s.images);
     }
 
     pub fn deinit(t: *Target) void {
@@ -172,6 +187,7 @@ pub const Target = struct {
             t.ownBuffers(&bufs) catch {};
             for (bufs.items) |b| t.opt.resident.?.remove(b);
         }
+        if (t.tower) |*w| w.deinit();
         for (t.slots) |*s| freeSlot(t.a, s);
         t.a.free(t.slots);
         t.cache.deinit();
@@ -191,7 +207,7 @@ pub const Target = struct {
     }
 
     pub fn target(t: *Target) iface.Target {
-        return .{ .ptr = t, .vtable = &.{ .prefill = prefill, .window = window, .keep = keep, .taps = taps, .release = release, .resumed = resumedFn, .history = history, .begin = steps.begin, .piece = steps.piece, .finish = steps.finish } };
+        return .{ .ptr = t, .vtable = &.{ .prefill = prefill, .window = window, .keep = keep, .taps = taps, .release = release, .resumed = resumedFn, .history = history, .begin = steps.begin, .piece = steps.piece, .finish = steps.finish, .images = imagesFn } };
     }
 
     pub fn self(ptr: *anyopaque) *Target {
@@ -212,12 +228,37 @@ pub const Target = struct {
 
     // prompts ------------------------------------------------------------------------------------------------------
 
+    /// The images of the slot's next prompt, their pixels borrowed until `prefill` returns.
+    pub fn setImages(t: *Target, slot: u32, images: []const vrows.Image) !void {
+        if (slot >= t.slots.len) return error.NoSlot;
+        const s = &t.slots[slot];
+        if (images.len > 0 and t.tower == null) return error.NoVision;
+        const copy = try t.a.dupe(vrows.Image, images);
+        t.a.free(s.images);
+        s.images = copy;
+    }
+
+    fn imagesFn(ptr: *anyopaque, slot: u32, images: []const vrows.Image) anyerror!void {
+        return self(ptr).setImages(slot, images);
+    }
+
     fn resumedFn(ptr: *anyopaque, slot: u32) u64 {
         const t = self(ptr);
         return if (slot < t.slots.len) t.slots[slot].resumed else 0;
     }
 
-    fn prefill(ptr: *anyopaque, slot: u32, ids: []const u32, smp: ?lanes.Sampling, draw: u64) anyerror!u32 {
+    /// `ids` with each image position replaced by its virtual id (the prompt cache's and the Engram hash's view of it).
+    fn withVids(t: *Target, ids: []const u32, images: []const vrows.Image) ![]u32 {
+        const out = try t.a.dupe(u32, ids);
+        errdefer t.a.free(out);
+        for (images) |im| {
+            if (@as(u64, im.at) + im.tokens > ids.len) return error.BadImageSpan;
+            for (0..im.tokens) |p| out[im.at + p] = prep.vid(im.hash, @intCast(p));
+        }
+        return out;
+    }
+
+    fn prefill(ptr: *anyopaque, slot: u32, ids_in: []const u32, smp: ?lanes.Sampling, draw: u64) anyerror!u32 {
         const t = self(ptr);
         const st = try t.startPrompt(slot, ids);
         const s = st.s;
@@ -236,7 +277,17 @@ pub const Target = struct {
         if (s.live or s.filling) return error.SlotLive;
         if (ids.len == 0) return error.EmptyPrompt;
         if (ids.len >= t.opt.limit) return error.PastLimit;
-        for (ids) |id| if (id >= c.vocab) return error.BadToken;
+        const images = s.images;
+        s.images = &.{};
+        defer t.a.free(images);
+        var vids: ?[]u32 = null;
+        defer if (vids) |v| t.a.free(v);
+        if (images.len > 0) {
+            if (t.tower == null) return error.NoVision;
+            vids = try t.withVids(ids, images);
+        }
+        const ids: []const u32 = vids orelse ids;
+        for (ids) |id| if (id >= c.vocab and !prep.isVid(id)) return error.BadToken;
         t.tree.forget(slot);
         s.whole = false;
         s.open = false;
@@ -244,8 +295,11 @@ pub const Target = struct {
         s.hit_on = false;
         t.pr.forget(&s.tail);
         t.stats.prompts += 1;
-        // a kept state that starts this prompt, else a cleared slot
-        const hit = if (t.cache.on()) t.cache.best(ids) else null;
+        // a kept state that starts this prompt (not one that ends inside an image's span), else a cleared slot
+        var hit = if (t.cache.on()) t.cache.best(ids) else null;
+        if (hit) |e| for (images) |im| if (e.ids.len > im.at and e.ids.len < im.at + im.tokens) {
+            hit = null;
+        };
         const at: u32 = if (hit) |e| @intCast(e.ids.len) else 0;
         if (hit) |e| {
             t.cache.restore(c, e, &s.kv, s.high, s.ring);
