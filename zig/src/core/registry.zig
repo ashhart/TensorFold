@@ -110,9 +110,12 @@ pub fn Registry(comptime Launch: type) type {
             return r;
         }
 
-        /// The tuned row of one of the registry's entries, or null for an entry this GPU's table does not name.
+        /// The tuned row of entry `e`, or null for one this GPU's table does not name or the registry does not hold.
         pub fn rowOf(r: *const Self, e: *const E) ?tuning.Row {
-            const i = (@intFromPtr(e) - @intFromPtr(r.entries.ptr)) / @sizeOf(E);
+            const at = @intFromPtr(e);
+            const first = @intFromPtr(r.entries.ptr);
+            if (at < first) return null;
+            const i = (at - first) / @sizeOf(E);
             return if (i < r.entries.len) r.tuned[i] else null;
         }
 
@@ -277,6 +280,23 @@ test "the cheapest entry that has room for the rows runs" {
     // an entry the table does not list never runs
     const partial = Toy.init(&.{ .gfx = "toy", .rows = rows[2..] }, &entries);
     try std.testing.expect(std.mem.endsWith(u8, partial.select(toy_env, .mlx, .project, .decode, shape).?.id, "any"));
+}
+
+test "an entry's tuned row is the table's, and null for an entry the table or the registry does not hold" {
+    const entries = [_]ToyEntry{
+        toy("a.decode.before", .decode, .lanes, false),
+        toy("a.decode.few", .decode, .stream, true),
+        toy("a.decode.any", .decode, .lanes, false),
+        toy("a.decode.after", .decode, .lanes, false),
+    };
+    const rows = [_]tuning.Row{.{ .id = "a.decode.few", .cost = 1, .few_rows = 8 }};
+    // the registry holds the two entries in the middle, and the table names the first of them
+    const r = Toy.init(&.{ .gfx = "toy", .rows = &rows }, entries[1..3]);
+    try std.testing.expectEqual(@as(u32, 8), r.rowOf(&entries[1]).?.few_rows);
+    try std.testing.expect(r.rowOf(&entries[2]) == null);
+    // an entry before or after the registry's own has no row
+    try std.testing.expect(r.rowOf(&entries[0]) == null);
+    try std.testing.expect(r.rowOf(&entries[3]) == null);
 }
 
 test "a plan is chosen by its items, a plain product by its rows" {
