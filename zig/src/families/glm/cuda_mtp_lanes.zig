@@ -43,6 +43,7 @@ pub fn draftLanes(self: anytype, requests: []const lanes.backend.DraftRequest) !
     var absorbed: usize = 0;
     for (requests, 0..) |r, k| {
         const l = self.lanes.getPtr(r.stream) orelse return error.UnknownStream;
+        if (l.draft_failed) return error.SharedDraftFailed;
         for (parts[0..k]) |q| if (q.slot == l.slot) return error.SlotTwice;
         if (r.lanes != null) return error.TreesNotBuilt;
         var kept: usize = 0;
@@ -79,7 +80,11 @@ pub fn draftLanes(self: anytype, requests: []const lanes.backend.DraftRequest) !
         };
         held[k] = l;
     }
-    try self.x.draftShared(parts[0..requests.len]);
+    // Dispatch errors are fatal to every member until release; an already kept prefix must never be retried.
+    self.x.draftShared(parts[0..requests.len]) catch |err| {
+        for (held[0..requests.len]) |l| l.draft_failed = true;
+        return err;
+    };
     for (parts[0..requests.len], held[0..requests.len]) |p, l| {
         l.pending_rows = null;
         l.held_n = p.depth;

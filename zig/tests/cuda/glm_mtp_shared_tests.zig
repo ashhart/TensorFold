@@ -89,6 +89,16 @@ pub fn run(gpu: check.Gpu, checkpoint: []const u8, rank: c_int, world: c_int, id
         }
         for (1..8) |width| for (0..5) |depth_case| {
             const vw = if (width < 7 and depth_case % 2 == 1 and s_count * (width + 1) <= glm.engine.shared_rows) width + 1 else width;
+            if (s_count * width > glm.engine.shared_rows) {
+                const follow_ids: [7]u32 = @splat(1);
+                for (parts[0..s_count], 0..) |*p, i| p.* = .{ .slot = @intCast(i), .follow = follow_ids[0..width], .depth = 0, .out = &.{} };
+                e.draftShared(parts[0..s_count]) catch |err| {
+                    if (err != error.WindowTooWide) return err;
+                    oversized += 1;
+                    continue;
+                };
+                return error.OversizedCohortAccepted;
+            }
             var v_parts: [max_s]glm.engine.Part = undefined;
             var ids: [max_s][8]u32 = undefined;
             var v_out: [max_s][8]u32 = undefined;
@@ -97,19 +107,10 @@ pub fn run(gpu: check.Gpu, checkpoint: []const u8, rank: c_int, world: c_int, id
                 for (0..vw) |r| ids[i][r] = 1 + @as(u32, @intCast((width * 41 + depth_case * 19 + i * 11 + r * 23) % (vocab - 1)));
                 v_parts[i] = .{ .slot = @intCast(i), .ids = ids[i][0..vw], .out = v_out[i][0..vw] };
             }
-            if (s_count * vw <= glm.engine.shared_rows) {
-                try e.verifyShared(v_parts[0..s_count]);
-                for (0..s_count) |i| {
-                    try e.bind(@intCast(i));
-                    try oracle.saveRows(e, owned[i], vw);
-                }
-            } else {
-                oversized += 1;
-                for (0..s_count) |i| {
-                    try e.bind(@intCast(i));
-                    try e.verify(ids[i][0..vw], v_out[i][0..vw], 0);
-                    try oracle.saveRows(e, owned[i], vw);
-                }
+            try e.verifyShared(v_parts[0..s_count]);
+            for (0..s_count) |i| {
+                try e.bind(@intCast(i));
+                try oracle.saveRows(e, owned[i], vw);
             }
             for (0..s_count) |i| {
                 try e.bind(@intCast(s_count + i));

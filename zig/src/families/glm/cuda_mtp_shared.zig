@@ -35,7 +35,7 @@ pub fn mtpMode(f: *const fw.Forward, ids: []const i32, hidden: []const u64, prop
         }
     }
     if (at0 != n) return error.BadWindow;
-    if (!f.ranks[0].b.prefill and k_prop > 16) return error.WindowTooWide;
+    if (!f.ranks[0].b.prefill and k_prop > engine.max_shared) return error.WindowTooWide;
     const c = &f.ranks[0].w.config;
     const D: usize = c.hidden;
     for (f.ranks, hidden) |r, h| {
@@ -107,11 +107,13 @@ pub fn mtpMode(f: *const fw.Forward, ids: []const i32, hidden: []const u64, prop
     }
 }
 
-/// Segmented MTP absorb and chained level draws across `parts` on this TP rank.
-pub fn draftShared(e: *Engine, parts: []const DraftPart) !void {
+/// Refuse malformed cohorts before any bind, keep, cache update or device enqueue.
+pub fn validate(e: *const Engine, parts: []const DraftPart) !void {
     if (!e.mtp) return error.NoDraftHead;
     if (parts.len == 0 or parts.len > engine.max_shared) return error.WindowTooWide;
+    var rows: usize = 0;
     for (parts, 0..) |p, i| {
+        if (p.kept > fw.window_rows) return error.BadCommit;
         if (p.depth > engine.max_drafts) return error.TooDeep;
         if (p.follow.len == 0 or p.follow.len > fw.window_rows) return error.WindowTooWide;
         if (p.from_prompt and p.follow.len != 1) return error.WindowTooWide;
@@ -119,7 +121,29 @@ pub fn draftShared(e: *Engine, parts: []const DraftPart) !void {
         if (p.chances) |ch| if (ch.len < p.depth) return error.WindowTooWide;
         if (p.slot >= e.seqs.items.len or e.seqs.items[p.slot] == null) return error.UnknownSlot;
         for (parts[0..i]) |q| if (q.slot == p.slot) return error.SlotTwice;
+        rows += p.follow.len;
+        if (rows > fw.window_rows) return error.WindowTooWide;
+        const seq = e.seqs.items[p.slot].?;
+        const st = &seq.st;
+        if (p.kept > 0) {
+            if (p.kept > st.pending or (st.prompt and p.kept != st.pending)) return error.BadCommit;
+            if (!st.prompt and st.kda_layers > 0) {
+                if (st.cur.len == 0) return error.BadWindow;
+                for (st.cur) |cur| if (cur != st.cur[0]) return error.KdaLayersOutOfStep;
+            }
+        }
+        if (seq.in_head > st.mtp_len) return error.BadWindow;
+        const at = st.mtp_len - seq.in_head;
+        const grow = p.follow.len + (p.depth -| 1);
+        if (at > st.capacity or grow > st.capacity - at) return error.PastCapacity;
     }
+    if (e.w.mtp == null) return error.NoMtpHead;
+    if (e.bm.prefill or rows > e.bm.rows) return error.BadWindow;
+}
+
+/// Segmented MTP absorb and chained level draws across `parts` on this TP rank.
+pub fn draftShared(e: *Engine, parts: []const DraftPart) !void {
+    try validate(e, parts);
     if (parts.len == 1) {
         const p = parts[0];
         try e.bind(p.slot);
@@ -147,60 +171,29 @@ pub fn draftShared(e: *Engine, parts: []const DraftPart) !void {
     var d0: usize = 0;
     while (d0 < parts.len and parts[order[d0]].depth > 0) : (d0 += 1) {}
     const D = e.c.hidden;
-    const vocab_bytes = e.share.vocab.len() * 2;
     var one: [1]fw.Rank = undefined;
     var f = e.view(&e.bm, &one);
     var segs: [engine.max_shared]fw.Seg = undefined;
     var ids_buf: [fw.window_rows]u32 = undefined;
-    var start: usize = 0;
-    var prop_saved: usize = 0;
-    var multi_group = false;
-    while (start < parts.len) {
-        var end = start;
-        var rows: usize = 0;
-        var gk: usize = 0;
-        while (end < parts.len) {
-            const idx = order[end];
-            const n = parts[idx].follow.len;
-            if (rows > 0 and rows + n > fw.window_rows) break;
-            try e.copy(e.bm.hin + rows * D * 2, hiddens[idx], n * D * 2);
-            @memcpy(ids_buf[rows..][0..n], parts[idx].follow);
-            const prop = parts[idx].depth > 0;
-            segs[end - start] = .{ .st = &seqs[idx].st, .row0 = rows, .rows = n, .propose = prop, .image_slot = parts[idx].slot };
-            rows += n;
-            gk += @intFromBool(prop);
-            end += 1;
-        }
-        if (start == 0 and end < parts.len) multi_group = true;
-        one[0] = .{ .w = &e.w, .st = segs[0].st, .b = &e.bm, .segs = segs[0 .. end - start] };
-        try f.mtpMode(@ptrCast(ids_buf[0..rows]), &.{e.bm.hin}, gk > 0);
-        for (segs[0 .. end - start]) |g| try g.st.setMtpLen(e.stream, g.st.mtp_len + g.rows);
-        if (multi_group and gk > 0) {
-            const bs = &(e.bs orelse return error.NoSharedWindows);
-            try e.copy(bs.mx + prop_saved * D * 2, e.bm.fnormed, gk * D * 2);
-            try e.copy(bs.logits + prop_saved * vocab_bytes, e.bm.logits, gk * vocab_bytes);
-            prop_saved += gk;
-        }
-        start = end;
+    var rows: usize = 0;
+    for (order[0..parts.len], 0..) |idx, i| {
+        const p = parts[idx];
+        try e.copy(e.bm.hin + rows * D * 2, hiddens[idx], p.follow.len * D * 2);
+        @memcpy(ids_buf[rows..][0..p.follow.len], p.follow);
+        segs[i] = .{ .st = &seqs[idx].st, .row0 = rows, .rows = p.follow.len, .propose = p.depth > 0, .image_slot = p.slot };
+        rows += p.follow.len;
     }
+    one[0] = .{ .w = &e.w, .st = segs[0].st, .b = &e.bm, .segs = segs[0..parts.len] };
+    try f.mtpMode(@ptrCast(ids_buf[0..rows]), &.{e.bm.hin}, max_depth > 0);
+    for (segs[0..parts.len]) |g| try g.st.setMtpLen(e.stream, g.st.mtp_len + g.rows);
     if (max_depth == 0) {
         if (e.images) |v| try v.activate(e.slot);
         return;
     }
-    var level0_logits = e.bm.logits;
-    if (multi_group) {
-        const bs = &e.bs.?;
-        level0_logits = bs.logits;
-        if (max_depth > 1) {
-            var d1: usize = 0;
-            while (d1 < d0 and parts[order[d1]].depth > 1) : (d1 += 1) {}
-            if (d1 > 0) try e.copy(e.bm.fnormed, bs.mx, d1 * D * 2);
-        }
-    }
     var live = d0;
     for (0..max_depth) |j| {
         while (live > 0 and parts[order[live - 1]].depth <= j) : (live -= 1) {}
-        try drawLevel(e, if (j == 0) level0_logits else e.bm.logits, order[0..live], parts, &seqs, j);
+        try drawLevel(e, e.bm.logits, order[0..live], parts, &seqs, j);
         var next_live = live;
         while (next_live > 0 and parts[order[next_live - 1]].depth <= j + 1) : (next_live -= 1) {}
         if (next_live > 0) {

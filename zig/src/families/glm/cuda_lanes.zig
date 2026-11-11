@@ -21,6 +21,7 @@ const lane_costs = @import("cuda_lane_costs.zig");
 const Lane = struct {
     slot: u32,
     pending_rows: ?usize = null,
+    draft_failed: bool = false, // a partially executed shared draft cannot be retried before release
     held: [@max(max_held, engine.max_drafts)]u32 = undefined,
     chances: [@max(max_held, engine.max_drafts)]f64 = undefined, // each held draft's chance: DFlash2's selector's, or the MTP head's (--mtp-confidence)
     held_n: usize = 0,
@@ -174,6 +175,7 @@ pub const Lanes = struct {
     /// The stream's sequence bound, its last verify committed (`kept` rows, else all of them).
     pub fn bind(self: *Lanes, s: *const lanes.Stream, kept: ?usize) !*Lane {
         const l = self.lanes.getPtr(s) orelse return error.UnknownStream;
+        if (l.draft_failed) return error.SharedDraftFailed;
         try self.x.bind(l.slot);
         if (l.pending_rows) |rows| try self.x.keep(kept orelse rows);
         l.pending_rows = null;
