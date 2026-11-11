@@ -60,7 +60,6 @@ pub const rules = [_]Rule{
     .{ .name = "TF_FLASHNEXT_EXL3_PREFILL_TWO_CHUNK", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0)" },
     .{ .name = "TF_FLASHNEXT_EXL3_PREFILL_RING", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 1)" },
     .{ .name = "TF_FLASHNEXT_EXL3_PREFILL_RING_AHEAD", .scope = .cuda, .kind = .size, .forms = "a whole nonnegative ring lookahead count (default 1)" },
-    .{ .name = "TF_FLASHNEXT_EXL3_PREFILL_SNAP_GRID", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 1; grid removal still requires off-grid resume parity)" },
     .{ .name = "TF_FLASHNEXT_EXL3_PREFILL_OVERLAP", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 1)" },
     .{ .name = "TF_DRAFT_NODES", .scope = .cuda, .kind = .size, .forms = "a whole nonnegative native-size node count (capped by the drafter's window)" },
     .{ .name = "TF_QMMF_HALF_BELOW", .scope = .cuda, .kind = .size, .forms = "a whole nonnegative native-size block count (0 disables half tiles)" },
