@@ -222,12 +222,15 @@ fn prepare(
     // the most streams up to the ones asked whose bytes fit, then the least of that over the ranks
     var streams = o.streams;
     while (streams > 0) : (streams -= 1) {
-        if ((served(e, streams, capacity, readouts) catch |err| return steps.refuseAll(
-            a,
-            problem,
-            "the native HIP engine cannot count its scratch ({s})",
-            .{@errorName(err)},
-        )) <= room) break;
+        if ((served(e, streams, capacity, readouts) catch |err| {
+            if (@errorReturnTrace()) |t| std.debug.dumpStackTrace(t.*);
+            return steps.refuseAll(
+                a,
+                problem,
+                "the native HIP engine cannot count its scratch ({s})",
+                .{@errorName(err)},
+            );
+        }) <= room) break;
     }
     streams = (try steps.together(a, .{ streams, 0 }, .least, problem))[0];
     // every rank holds the same least, so every rank refuses here alike
