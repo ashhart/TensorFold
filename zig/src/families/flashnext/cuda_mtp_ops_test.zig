@@ -9,6 +9,10 @@ const Ops = ops_.Ops;
 const Draft = mtp.Draft;
 const max_rows = mtp.max_rows;
 
+test {
+    _ = @import("cuda_mtp_group_tier_test.zig");
+}
+
 test "exl3: common verification scopes TP1 and TP2 validation and delegation without joins" {
     const Tri = @import("cuda_launch.zig").Tri;
     const Fake = @import("exl3/model/cuda_exl3_fake_driver_test.zig").Fake;
