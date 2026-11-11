@@ -100,6 +100,11 @@ pub const Room = struct {
         r.buf.free();
     }
 
+    /// Every owned segment within the room: checked on every rank before the first group, so none waits in one.
+    pub fn holds(r: *const Room, segs: []const Seg) !void {
+        for (segs) |g| if (g.owner != null and g.row0 + g.rows > r.rows) return error.KvSplitRoom;
+    }
+
     /// Rank p's slot (every rank but this one has one, in rank order).
     fn slot(r: *const Room, p: usize) usize {
         return if (p < r.rank) p else p - 1;
@@ -193,6 +198,7 @@ pub fn body(f: *const fw.Forward, r: fw.Rank, k: dsa_block.Kernels, a: dsa_block
     try dsa_block.prepareProfile(k.set, f.stream, a, b.dsa, x, r.w.config.hidden, rows, dsa_block.sparseRows(a, one.host_pos, rows), k.prof);
     const d: Gpu = .{ .f = f, .room = room, .k = k, .a = a, .b = b, .caches = &.{one.c}, .pos = &.{one.pos}, .host = &.{one.host_pos}, .nch = nch };
     const segs = [_]Seg{.{ .row0 = 0, .rows = rows, .owner = one.owner }};
+    try room.holds(&segs);
     try run(Gpu, d, &segs, room.rank, room.world);
     note(room, &segs);
     try latent.expandV(k.set, f.stream, b.dsa.ol, a.wv, b.dsa.vn, rows, a.heads, a.dv, a.lw);
@@ -209,6 +215,7 @@ pub fn lastRow(f: *const fw.Forward, r: fw.Rank, k: dsa_block.Kernels, a: dsa_bl
     try dsa_block.writeKeys(k, f.stream, a, one.c, b.dsa, rows, one.pos); // all rows, at pos, before any of them attends
     const d: Gpu = .{ .f = f, .room = room, .k = k, .a = a, .b = b, .caches = &.{one.c}, .pos = &.{one.pos}, .host = &.{one.host_pos}, .nch = nch, .last = rows };
     const segs = [_]Seg{.{ .row0 = rows - 1, .rows = 1, .owner = one.owner }};
+    try room.holds(&segs);
     try run(Gpu, d, &segs, room.rank, room.world);
     note(room, &segs);
     const off = (rows - 1) * a.heads * a.lw * 2;
@@ -252,6 +259,7 @@ pub fn shared(f: *const fw.Forward, r: fw.Rank, a: dsa_block.Layer, di: usize, r
     try dsa_block.prepare(f.set(), f.stream, a, b.dsa, b.normed, r.w.config.hidden, rows, sparse_any);
     const n = r.segs.len;
     const d: Gpu = .{ .f = f, .room = room, .k = .{ .set = f.set(), .ops = f.m.ops() }, .a = a, .b = b, .caches = caches[0..n], .pos = pos[0..n], .host = host[0..n], .nch = null };
+    try room.holds(segs[0..n]);
     try run(Gpu, d, segs[0..n], room.rank, room.world);
     note(room, segs[0..n]);
     try latent.expandV(f.set(), f.stream, b.dsa.ol, a.wv, b.dsa.vn, rows, a.heads, a.dv, a.lw);
