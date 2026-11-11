@@ -79,7 +79,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
         break :blk run.captureStdOut(.{});
     }, .{ .name = "h3", .flags = &.{"-O3"} }, sms) else null;
     @import("h3_host.zig").library(b, target, optimize, h3_image);
-    const cuda = runtime(b, target, optimize, if (nvcc != null or prebuilt != null) &images else &.{});
+    const cuda = @import("cuda_runtime.zig").runtimeWithTargets(b, target, optimize, if (nvcc != null or prebuilt != null) &images else &.{}, null, if (nvcc != null and prebuilt == null) sms else "");
     const mods = family(b, target, optimize, cuda, draft_ids);
     const cli = b.createModule(.{ .root_source_file = b.path("zig/src/cli/cuda_main.zig"), .target = target, .optimize = optimize, .link_libc = true, .strip = strip });
     const native = engines(b, target, optimize, cuda, mods.core, mods.lanes, mods.nemotron, mods.heat, mods.qwen35, mods.qwen_vision);
@@ -302,6 +302,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
         copies.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{"Nemotron copies:"} })).step);
     }
     @import("cuda_fault_host.zig").steps(b, cuda, flashnextModule(b, host, .debug, cuda, mods.core, mods.lanes, mods.qwen_vision, mods.api), native);
+    @import("cuda_sm_host.zig").steps(b, native_modules.api, step);
     @import("release_cuda_refusal.zig").tests(b, step, native_modules.api, mods.nemotron);
     @import("qwen_cost_open.zig").tests(b, mods, native_modules, step);
     const windows_port = @import("windows_host.zig").steps(b, cuda, native_modules.api);
@@ -414,7 +415,7 @@ pub fn distServer(b: *std.Build, target: std.Build.ResolvedTarget, draft_ids: *s
     if (prebuilt) |dir| for (kernels, &images) |k, *image| {
         image.* = b.graph.cwdRelativePath(b.pathJoin(&.{ dir, b.fmt("{s}.fatbin", .{k.name}) }));
     };
-    const cuda = runtime(b, target, .fast, if (prebuilt != null) &images else &.{});
+    const cuda = @import("cuda_runtime.zig").runtimeWithTargets(b, target, .fast, if (prebuilt != null) &images else &.{}, null, release_sms);
     const mods = family(b, target, .fast, cuda, draft_ids);
     return nativeServer(b, target, .fast, cuda, mods.core, mods.lanes, mods.nemotron, mods.heat, mods.qwen35, mods.qwen_vision, mods.tokenizer, mods.living, build_options, false, null);
 }
