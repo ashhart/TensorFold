@@ -85,8 +85,9 @@ pub fn run(gpu: check.Gpu, rank: usize, port: u16, mode_arg: []const u8, master:
     }
     var probe = try cuda.DeviceBuffer.fromHost(gpu.d, std.mem.asBytes(&@as(f32, 1)));
     defer probe.free();
+    const one_host = try link.oneHost();
     const returned = collective.lib.api.ncclAllReduce(probe.ptr, probe.ptr, 1, .f32, .sum, collective.comm, stream.handle);
-    try check.expect(returned == 0, "rank {d}: a collective returns enqueued, not in progress on NCCL's thread ({d})", .{ rank, returned });
+    try check.expect(returned == 0 or (!one_host and returned == cuda.nccl.in_progress), "rank {d}: a collective returns enqueued on one host, or in progress across hosts ({d})", .{ rank, returned });
     try collective.finish(stream);
     for ([_]usize{ 0, 1, 17, 4099, 1_000_003 }, 0..) |count, seq| {
         const host = try gpu.gpa.alloc(f32, @max(1, count));
@@ -128,7 +129,7 @@ pub fn run(gpu: check.Gpu, rank: usize, port: u16, mode_arg: []const u8, master:
         };
     }
     try meet(link, rank, 99);
-    check.pass("rank {d}: a collective returns enqueued; {d} MiB of device memory after the collectives", .{ rank, (before.free -| (try gpu.ctx.memInfo()).free) >> 20 });
+    check.pass("rank {d}: {s}; {d} MiB of device memory after the collectives", .{ rank, if (one_host) "one host: a collective returns enqueued" else "two hosts: collectives on the nonblocking communicator", (before.free -| (try gpu.ctx.memInfo()).free) >> 20 });
     check.pass("rank {d}: BF16 all-gather preserves every bit and rank column order for empty, scalar, tail and vocabulary-half rows", .{rank});
     check.pass("rank {d}: two-process chained NCCL FP32 sums exact for empty, scalar, tail and 1,000,003 values; fragmented framed control preserved", .{rank});
 }

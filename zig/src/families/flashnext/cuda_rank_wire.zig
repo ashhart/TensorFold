@@ -191,7 +191,29 @@ pub const Link = struct {
             else => return error.RankDisconnected,
         };
     }
+
+    /// Whether both ranks run on one host; both ends of the link read the same answer.
+    pub fn oneHost(l: Link) !bool {
+        var local: std.Io.Threaded.PosixAddress = undefined;
+        var peer: std.Io.Threaded.PosixAddress = undefined;
+        var local_len: p.socklen_t = @sizeOf(std.Io.Threaded.PosixAddress);
+        var peer_len: p.socklen_t = @sizeOf(std.Io.Threaded.PosixAddress);
+        if (std.c.getsockname(l.fd, &local.any, &local_len) != 0 or std.c.getpeername(l.fd, &peer.any, &peer_len) != 0) return error.RankLink;
+        return sameHost(&local, &peer);
+    }
 };
+
+/// A Unix socket, a loopback peer, or the same address at both ends of the link.
+pub fn sameHost(local: *const std.Io.Threaded.PosixAddress, peer: *const std.Io.Threaded.PosixAddress) bool {
+    if (peer.any.family == p.AF.UNIX) return true;
+    if (local.any.family != peer.any.family) return false;
+    const loop6 = [16]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 };
+    return switch (peer.any.family) {
+        p.AF.INET => peer.in.addr == local.in.addr or std.mem.toBytes(peer.in.addr)[0] == 127,
+        p.AF.INET6 => std.mem.eql(u8, &peer.in6.addr, &local.in6.addr) or std.mem.eql(u8, &peer.in6.addr, &loop6),
+        else => false,
+    };
+}
 
 fn socket(family: u32) !p.socket_t {
     const fd = std.c.socket(family, p.SOCK.STREAM | p.SOCK.NONBLOCK | p.SOCK.CLOEXEC, 0);
@@ -219,4 +241,30 @@ test "rank frames are versioned, bounded and exact" {
     @memset(raw[32..36], 0xff);
     try std.testing.expectError(error.BadRankFrame, Header.decode(&raw));
     try std.testing.expectError(error.BadRankFrame, (Header{ .kind = .forward, .bytes = max_payload + 1 }).encode());
+}
+
+test "one host is a Unix socket, a loopback peer or one address at both ends; two addresses are two hosts" {
+    const P = std.Io.Threaded.PosixAddress;
+    const at = struct {
+        fn v4(text: []const u8) P {
+            var out: P = undefined;
+            _ = std.Io.Threaded.addressToPosix(&(net.IpAddress.parse(text, 1) catch unreachable), &out);
+            return out;
+        }
+    }.v4;
+    const a = at("192.0.2.1");
+    const b = at("192.0.2.2");
+    const loop = at("127.0.0.1");
+    const six = at("::1");
+    const other6 = at("fd00::2");
+    try std.testing.expect(!sameHost(&a, &b) and !sameHost(&b, &a));
+    try std.testing.expect(sameHost(&a, &a) and sameHost(&loop, &loop) and sameHost(&a, &loop));
+    try std.testing.expect(sameHost(&six, &six) and !sameHost(&other6, &at("fd00::3")) and !sameHost(&a, &other6));
+    if (builtin.os.tag == .windows) return;
+    var pair: [2]c_int = undefined;
+    try std.testing.expect(std.c.socketpair(p.AF.UNIX, p.SOCK.STREAM, 0, &pair) == 0);
+    defer for (pair) |fd| {
+        _ = std.c.close(fd);
+    };
+    try std.testing.expect(try (Link{ .fd = pair[0] }).oneHost());
 }

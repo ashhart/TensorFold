@@ -1,4 +1,4 @@
-//! One two-rank NCCL owner: a nonblocking communicator bounds start-up; its blocking split carries the collectives.
+//! One two-rank NCCL owner: nonblocking start-up under a deadline; on one host a blocking split runs the collectives.
 const std = @import("std");
 const builtin = @import("builtin");
 const cuda = @import("cuda");
@@ -17,7 +17,7 @@ const Advanced = struct {
 pub const Collective = struct {
     lib: nccl.Library,
     api: Advanced,
-    comm: nccl.Comm = null, // the blocking split every collective uses once init returns
+    comm: nccl.Comm = null, // the collectives' communicator: the blocking split on one host, else the parent
     parent: nccl.Comm = null, // the nonblocking start-up communicator, whose connections `comm` shares
     link: wire.Link,
     timeout_ms: u64,
@@ -27,8 +27,9 @@ pub const Collective = struct {
     /// `link` has completed the source/settings handshake; it stays owned by the caller.
     pub fn init(link: wire.Link, rank: usize, timeout_ms: u64) !Collective {
         if (rank > 1 or timeout_ms == 0) return error.BadRank;
-        // every connection is made inside the bounded init and split, none by a collective; an operator's value stands
-        _ = env.setenv("NCCL_RUNTIME_CONNECT", "0", 0);
+        const one_host = try link.oneHost();
+        // one host: connections are made in the bounded init and split, none by a collective; an operator's value wins
+        if (one_host) _ = env.setenv("NCCL_RUNTIME_CONNECT", "0", 0);
         var c: Collective = .{ .lib = try nccl.Library.open(), .api = undefined, .link = link, .timeout_ms = timeout_ms, .rank = rank };
         errdefer c.lib.close();
         try c.lib.requireSupportedVersion();
@@ -43,16 +44,17 @@ pub const Collective = struct {
             try link.send(std.mem.asBytes(&id), until);
         } else try link.receive(std.mem.asBytes(&id), until);
         errdefer c.abort();
-        try c.connect(id, until);
+        try c.connect(id, until, one_host);
         cuda.p2p_report.afterInit(&diag, .{ .lib = &c.lib, .comm = c.comm }); // no driver here: no probe
         return c;
     }
 
-    /// The parent shares its connections, so its split, which the collectives use, connects nothing of its own.
-    fn connect(c: *Collective, id: nccl.UniqueId, until: u64) !void {
-        var config: nccl.Config = .{ .split_share = 1 };
+    /// One host: the parent shares its connections with a blocking split for the collectives; across hosts it runs them
+    fn connect(c: *Collective, id: nccl.UniqueId, until: u64, one_host: bool) !void {
+        var config: nccl.Config = if (one_host) .{ .split_share = 1 } else .{};
         try c.submitted(c.api.ncclCommInitRankConfig(&c.comm, 2, id, @intCast(c.rank), &config));
         try c.wait(null, until);
+        if (!one_host) return;
         var child: nccl.Comm = null;
         errdefer {
             c.abort(); // the parent first: it stops the split and joins it, after which NCCL has stored the child
@@ -262,7 +264,7 @@ test "a nonblocking parent that shares its connections hands the collectives to 
         var c = try rig(&pair, 1000);
         defer closePair(pair);
         Fake.reset(&.{ nccl.in_progress, 0, nccl.in_progress, nccl.in_progress, 0 }, returned);
-        try c.connect(undefined, wire.deadline(1000));
+        try c.connect(undefined, wire.deadline(1000), true);
         try std.testing.expect(Fake.parent_config.blocking == 0 and Fake.parent_config.split_share == 1);
         try std.testing.expect(Fake.child_config.blocking == 1 and Fake.color == 0 and Fake.key == 1);
         try std.testing.expect(c.comm == Fake.child and c.parent == Fake.parent and !c.failed);
@@ -274,13 +276,27 @@ test "a nonblocking parent that shares its connections hands the collectives to 
     }
 }
 
+test "across hosts the collectives stay on the nonblocking parent with NCCL's default config, and nothing is split" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var pair: [2]c_int = undefined;
+    var c = try rig(&pair, 1000);
+    defer closePair(pair);
+    Fake.reset(&.{ nccl.in_progress, 0 }, 0);
+    try c.connect(undefined, wire.deadline(1000), false);
+    const default: nccl.Config = .{};
+    try std.testing.expect(Fake.parent_config.blocking == 0 and Fake.parent_config.split_share == default.split_share);
+    try std.testing.expect(c.comm == Fake.parent and c.parent == null and Fake.color == -1 and !c.failed);
+    c.abort();
+    try Fake.expectAborts(&.{Fake.parent});
+}
+
 test "a split that fails through its parent's asynchronous error aborts the parent, then the child NCCL returned" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     var pair: [2]c_int = undefined;
     var c = try rig(&pair, 1000);
     defer closePair(pair);
     Fake.reset(&.{ 0, nccl.in_progress, 6 }, 0); // ncclRemoteError
-    try std.testing.expectError(error.NcclFailed, c.connect(undefined, wire.deadline(1000)));
+    try std.testing.expectError(error.NcclFailed, c.connect(undefined, wire.deadline(1000), true));
     try Fake.expectAborts(&.{ Fake.parent, Fake.child });
     try std.testing.expect(c.failed and c.comm == null and c.parent == null);
 }
@@ -292,7 +308,7 @@ test "a split still running at its deadline is stopped through the parent within
     defer closePair(pair);
     Fake.reset(&.{ 0, nccl.in_progress }, 0);
     const start = wire.now();
-    try std.testing.expectError(error.RankTimeout, c.connect(undefined, wire.deadline(1000)));
+    try std.testing.expectError(error.RankTimeout, c.connect(undefined, wire.deadline(1000), true));
     try std.testing.expect(wire.now() - start < std.time.ns_per_s);
     try Fake.expectAborts(&.{ Fake.parent, Fake.child });
     try std.testing.expect(c.failed and c.comm == null and c.parent == null);
@@ -305,7 +321,7 @@ test "a peer that closes its link during the split surfaces as disconnected, bot
     defer closePair(pair);
     Fake.reset(&.{ 0, nccl.in_progress }, 0);
     Fake.leaves = pair[1];
-    try std.testing.expectError(error.RankDisconnected, c.connect(undefined, wire.deadline(1000)));
+    try std.testing.expectError(error.RankDisconnected, c.connect(undefined, wire.deadline(1000), true));
     try Fake.expectAborts(&.{ Fake.parent, Fake.child });
     try std.testing.expect(c.failed and c.comm == null and c.parent == null);
 }
@@ -316,7 +332,7 @@ test "a split NCCL refuses outright aborts the parent and leaves no child" {
     var c = try rig(&pair, 1000);
     defer closePair(pair);
     Fake.reset(&.{0}, 4); // ncclInvalidArgument
-    try std.testing.expectError(error.NcclFailed, c.connect(undefined, wire.deadline(1000)));
+    try std.testing.expectError(error.NcclFailed, c.connect(undefined, wire.deadline(1000), true));
     try Fake.expectAborts(&.{Fake.parent});
     try std.testing.expect(c.failed and c.comm == null and c.parent == null);
 }
