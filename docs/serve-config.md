@@ -39,8 +39,8 @@ model, as the positional argument does. Every key is at the top level of the fil
 | Repeatable | One value, or an array with one item a repeat | `alias = ["glm", "glm-flash"]` |
 | Switch | `true` or `false` | `dashboard = true` |
 
-A number is passed as written, without its `_` separators; the flag checks it as it checks a typed
-value. `false` for a switch that has a `--no-` twin selects the twin: `thinking = false` is
+A number is passed as written, without its `_` separators and, for an integer, without a leading `+`;
+the flag checks it as it checks a typed value. `false` for a switch that has a `--no-` twin selects the twin: `thinking = false` is
 `--no-thinking`. `false` for any other switch leaves it off, which is its default.
 
 ## Precedence
@@ -96,5 +96,6 @@ The startup log names the file and how many options it gave, never a value.
 - One `--config` a command, and a file cannot name another file. The path must end in `.toml`.
 - The file holds serve flags only. Environment variables (`TF_*`, `TENSORFOLD_*`) are still set in the
   environment; [profiles](profiles.md) describes the registered switches.
-- `tensorfold benchmark` and `tensorfold service install` do not read the file.
+- `tensorfold benchmark` and `tensorfold service install` do not read the file. TensorFold Web refuses
+  `--config` as an extra flag, because a file could set the flags that Settings manages.
 - Prefer `api-key-file` to `api-key` in a file that is checked in, so that no key is stored with it.
