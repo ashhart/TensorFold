@@ -8,6 +8,17 @@ const Device = @import("device.zig").Device;
 
 const Id = objc.Id;
 
+/// Apple's unfair lock. Builds for other systems still analyze this file (`Buffer.deinit` calls `released`), so there
+/// it is an empty stand-in that never runs.
+const darwin = @import("builtin").os.tag.isDarwin();
+const Lock = if (darwin) std.c.os_unfair_lock else struct {};
+fn hold(lock: *Lock) void {
+    if (darwin) std.c.os_unfair_lock_lock(lock);
+}
+fn drop(lock: *Lock) void {
+    if (darwin) std.c.os_unfair_lock_unlock(lock);
+}
+
 /// Command buffers a context reuses; a 64-layer pass committing every 4 layers takes 16.
 pub const max_buffers = 32;
 /// The ring setBytes copies into, since Metal 4 has no setBytes: a pass waits for the last, so the ring may wrap.
@@ -65,7 +76,7 @@ pub const Context = struct {
     dirty: bool = false,
     /// A dispatch since the encoder's last barrier: without one a barrier orders nothing new.
     pending: bool = false,
-    lock: std.c.os_unfair_lock = .{},
+    lock: Lock = .{},
     freed: std.ArrayList(Id) = .empty,
     frees: std.atomic.Value(usize) = .init(0),
 
@@ -222,9 +233,9 @@ pub const Context = struct {
         const key = @intFromPtr(buffer.id);
         if (c.known.get(key)) |address| return address;
         const address = buffer.gpuAddress();
-        std.c.os_unfair_lock_lock(&c.lock);
+        hold(&c.lock);
         c.known.put(c.gpa, key, address) catch {}; // without room it joins again on its next use, which changes nothing
-        std.c.os_unfair_lock_unlock(&c.lock);
+        drop(&c.lock);
         objc.msg(void, c.set, "addAllocation:", .{buffer.id});
         c.dirty = true;
         return address;
@@ -232,8 +243,8 @@ pub const Context = struct {
 
     /// Any thread, as a buffer is released: the set's reference keeps it alive until an idle command buffer drops it.
     fn forget(c: *Context, id: Id) void {
-        std.c.os_unfair_lock_lock(&c.lock);
-        defer std.c.os_unfair_lock_unlock(&c.lock);
+        hold(&c.lock);
+        defer drop(&c.lock);
         if (!c.known.contains(@intFromPtr(id))) return;
         c.freed.append(c.gpa, id) catch return; // without room the set keeps it until the context goes
         _ = c.frees.fetchAdd(1, .release);
@@ -241,8 +252,8 @@ pub const Context = struct {
 
     fn drainFrees(c: *Context) void {
         if (c.frees.load(.acquire) == 0) return;
-        std.c.os_unfair_lock_lock(&c.lock);
-        defer std.c.os_unfair_lock_unlock(&c.lock);
+        hold(&c.lock);
+        defer drop(&c.lock);
         for (c.freed.items) |id| {
             objc.msg(void, c.set, "removeAllocation:", .{id});
             _ = c.known.remove(@intFromPtr(id));
@@ -304,13 +315,13 @@ pub fn updateFence(e: Id, fence: Id) void {
     objc.msg(void, e, "updateFence:afterEncoderStages:", .{ fence, stage_dispatch });
 }
 
-var registry_lock: std.c.os_unfair_lock = .{};
+var registry_lock: Lock = .{};
 var registry: [8]?*Context = @splat(null);
 var live = std.atomic.Value(usize).init(0);
 
 fn register(c: *Context) !void {
-    std.c.os_unfair_lock_lock(&registry_lock);
-    defer std.c.os_unfair_lock_unlock(&registry_lock);
+    hold(&registry_lock);
+    defer drop(&registry_lock);
     for (&registry) |*entry| if (entry.* == null) {
         entry.* = c;
         _ = live.fetchAdd(1, .release);
@@ -320,8 +331,8 @@ fn register(c: *Context) !void {
 }
 
 fn unregister(c: *Context) void {
-    std.c.os_unfair_lock_lock(&registry_lock);
-    defer std.c.os_unfair_lock_unlock(&registry_lock);
+    hold(&registry_lock);
+    defer drop(&registry_lock);
     for (&registry) |*entry| if (entry.* == c) {
         entry.* = null;
         _ = live.fetchSub(1, .release);
@@ -331,8 +342,8 @@ fn unregister(c: *Context) void {
 /// Buffer.deinit's hook: a buffer about to be released leaves each context's set once that context is idle.
 pub fn released(id: Id) void {
     if (live.load(.acquire) == 0) return;
-    std.c.os_unfair_lock_lock(&registry_lock);
-    defer std.c.os_unfair_lock_unlock(&registry_lock);
+    hold(&registry_lock);
+    defer drop(&registry_lock);
     for (registry) |entry| if (entry) |c| c.forget(id);
 }
 
