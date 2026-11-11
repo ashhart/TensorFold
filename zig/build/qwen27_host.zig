@@ -15,6 +15,9 @@ pub fn tests(b: *std.Build, test_step: *std.Build.Step) void {
     const loop_cfg_run = b.addRunArtifact(b.addTest(.{ .root_module = loop_cfg, .filters = &.{"SenseNova loop config table:"} }));
     test_step.dependOn(&loop_cfg_run.step);
     b.step("test-sensenova-loop-config-host", "SenseNova loop config table through config reader and Metal admission without a GPU").dependOn(&loop_cfg_run.step);
+    const mixed = b.createModule(.{ .root_source_file = b.path("zig/qwen27_mixed_host.zig"), .target = b.graph.host, .imports = &.{.{ .name = "contract", .module = @import("kernel_contract.zig").module(b, b.graph.host, .debug) }} });
+    mixed.addImport("core", mixed);
+    b.step("test-qwen27-mixed-host", "The production attention projection stage has no slice dispatch").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mixed, .filters = &.{"qwen27 mixed:"} })).step);
     const metrics = b.createModule(.{ .root_source_file = b.path("zig/src/metal/pass_metrics.zig"), .target = b.graph.host });
     b.step("test-qwen27-pass-metrics-host", "Pass timing and forwarding allocator without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = metrics })).step);
     const mtp_flags = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_mtp_flags.zig"), .target = b.graph.host }) }));
