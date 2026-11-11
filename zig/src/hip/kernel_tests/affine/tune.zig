@@ -145,6 +145,7 @@ fn printRow(r: tuning.Row) void {
     if (r.min_rows != 0) std.debug.print(", .min_rows = {d}", .{r.min_rows});
     if (r.items != 0) std.debug.print(", .items = {d}", .{r.items});
     if (r.pairs_per_item != 0) std.debug.print(", .pairs_per_item = {d}", .{r.pairs_per_item});
+    if (r.max_bits != 0) std.debug.print(", .max_bits = {d}", .{r.max_bits});
     if (!r.plain) std.debug.print(", .plain = false", .{});
     if (!r.routed) std.debug.print(", .routed = false", .{});
     std.debug.print(" }},\n", .{});
