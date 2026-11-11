@@ -66,6 +66,7 @@ pub const Runner = struct {
     /// The last tapped pass's rows by slot: their cache start, first frame row and count (0: none held).
     tapped: [attn.planning.max_streams]Tapped = @splat(.{}),
     tail: ?forward.Tail = null,
+    picks_tail: bool = false,
     accepted_chain: bool = false,
     /// The running pass's prompt tail start (prompt_tail.zig): its last layer's q, o and MLP run from this row on.
     tail_from: ?u32 = null,
@@ -281,7 +282,7 @@ pub const Runner = struct {
         defer metric.end();
         if (r.failed or r.active != null or round.ids.len > r.model.frame.capacity) return error.RoundNotReady;
         mtl.pass_metrics.rows(round.ids.len);
-        if (r.tail != null and (accepted or head != .all)) return error.BadVerifyTail;
+        if (r.tail != null and !r.picks_tail and (accepted or head != .all)) return error.BadVerifyTail;
         // A rank's head writes only this rank's vocabulary columns; the tail's matcher reads the whole vocabulary.
         if (r.tail != null and r.reduce != null) return error.TailOnRank;
         for (round.slots, round.windows) |slot, window| if (slot >= r.ready or r.offsets[slot] != window.start) return error.CachePositionDiffers;

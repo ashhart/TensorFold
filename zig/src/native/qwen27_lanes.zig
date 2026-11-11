@@ -254,7 +254,7 @@ pub const Metal = struct {
     }
 
     /// Rows [first, first + rows) drawn at their positions: GPU argmax, else on the host (sampled, masked or `pens`).
-    fn draw(b: *Metal, s: *const lanes.Stream, first: usize, rows: usize, positions: []const u64, out: []u32, masks: []const u32, pens: bool) !void {
+    pub fn draw(b: *Metal, s: *const lanes.Stream, first: usize, rows: usize, positions: []const u64, out: []u32, masks: []const u32, pens: bool) !void {
         const logits = b.runner.model.frame.get(.logits);
         const vocab: u32 = @intCast(b.runner.model.config.vocab);
         const width = (@as(usize, vocab) + 31) / 32;
@@ -276,33 +276,41 @@ pub const Metal = struct {
     }
 
     /// Rows [first, first + rows)'s greedy picks into `picks` at the same rows: one command buffer and one wait.
-    fn argmaxRows(b: *Metal, first: usize, rows: usize) !void {
+    pub fn argmaxRows(b: *Metal, first: usize, rows: usize) !void {
         const metric = mtl.pass_metrics.phase(.sampling);
         defer metric.end();
-        const logits = b.runner.model.frame.get(.logits);
-        const vocab: u32 = @intCast(b.runner.model.config.vocab);
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         const cb = b.runner.model.queue.commandBuffer();
         const e = cb.compute(.serial);
-        var at = first;
-        while (at < first + rows) : (at += contract.max_rows) {
-            const n = @min(first + rows - at, contract.max_rows);
-            try b.ops.argmaxChunks(e, .{ .buf = logits.buffer, .off = logits.offset + at * vocab * 2 }, .{ .buf = b.picks, .off = at * @sizeOf(contract.Pick) }, .{ .rows = @intCast(n), .vocab = vocab, .stride = vocab });
-        }
+        try b.encodePicks(e, first, rows);
         e.end();
         cb.commit();
         cb.wait();
         if (q.decode_round.gpuFailed(cb, "a draw")) return error.DrawGpuFailure;
     }
 
-    /// The tokens argmaxRows picked for rows [first, first + rows).
-    fn picked(b: *const Metal, first: usize, rows: usize, out: []u32) !void {
-        const picks: [*]const contract.Pick = @ptrCast(@alignCast(b.picks.contents()));
-        for (out[0..rows], picks[first..][0..rows]) |*t, p| {
-            if (p.token == contract.invalid_token or p.nonfinite != 0) return error.NonfiniteLogits;
-            t.* = p.token;
+    /// The existing row argmax, encoded after its logits producer's barrier on the caller's encoder.
+    pub fn encodePicks(b: *Metal, e: mtl.ComputeEncoder, first: usize, rows: usize) !void {
+        const logits = b.runner.model.frame.get(.logits);
+        const vocab: u32 = @intCast(b.runner.model.config.vocab);
+        var at = first;
+        while (at < first + rows) : (at += contract.max_rows) {
+            const n = @min(first + rows - at, contract.max_rows);
+            try b.ops.argmaxChunks(e, .{ .buf = logits.buffer, .off = logits.offset + at * vocab * 2 }, .{ .buf = b.picks, .off = at * @sizeOf(contract.Pick) }, .{ .rows = @intCast(n), .vocab = vocab, .stride = vocab });
+            if (at + n < first + rows) e.barrier();
         }
+    }
+
+    pub fn encodePicksTail(ptr: *anyopaque, e: mtl.ComputeEncoder) !void {
+        const b = self(ptr);
+        try b.encodePicks(e, 0, b.rows);
+    }
+
+    /// The tokens argmaxRows picked for rows [first, first + rows).
+    pub fn picked(b: *const Metal, first: usize, rows: usize, out: []u32) !void {
+        const picks: [*]const contract.Pick = @ptrCast(@alignCast(b.picks.contents()));
+        try @import("qwen27_pick_submit.zig").picked(picks[first..][0..rows], out[0..rows]);
     }
 
     /// Keep the last verify's rows on `paths`: slot 0 alone keeps on the GPU with its taps, else the runner and rings.
@@ -480,24 +488,8 @@ pub const Metal = struct {
         b.pens.clear(); // each penalized window's rows: the reply, its pending token, then the row's own path
         for (windows, b.round.?.firsts) |w, first| try b.pens.stageWindow(b.gpa, w, b.ids[first + 1 ..][0 .. w.rows() - 1], first);
         const fused = windows.len == 1 and b.windows[0] == 0 and b.draft != null and total > 1 and windows[0].stream.sampling == null and windows[0].masks.len == 0 and b.pens.len() == 0;
-        std.debug.assert(r.tail == null);
-        if (fused) r.tail = .{ .ptr = b, .encode = @import("qwen27_keep.zig").encodeTail };
-        defer r.tail = null;
-        const before = r.gpu_seconds;
-        if (plain) try r.advance(&b.round.?, .all) else try r.verifyHead(&b.round.?, .all);
-        for (windows) |w| slots.charge(b, w.stream, before); // a shared round counts whole in each reply
-        b.advanced = plain;
-        b.rows = total;
-        // every greedy window's rows from one argmax over the round; a sampled window draws on the host
-        var greedy = false;
-        for (windows) |w| greedy = greedy or (w.stream.sampling == null and w.masks.len == 0 and !w.stream.penalties.active());
-        if (fused) try @import("qwen27_keep.zig").finishPrefetch(b) else if (greedy) try b.argmaxRows(0, total);
-        for (windows, out, b.round.?.firsts) |w, o, first| {
-            const rows = w.rows();
-            const pens = w.stream.penalties.active();
-            if (w.stream.sampling != null or w.masks.len > 0 or pens) try b.draw(w.stream, first, rows, w.positions, o.sampled, w.masks, pens) else try b.picked(first, rows, o.sampled);
-            @memcpy(o.drafts, b.ids[first + 1 ..][0 .. rows - 1]);
-        }
+        var submission = @import("qwen27_verify_picks.zig").Submission{ .b = b, .windows = windows, .out = out };
+        try @import("qwen27_pick_submit.zig").run(&submission, plain, fused, windows);
         if (windows.len == 1) @memcpy(b.sampled[0..b.rows], out[0].sampled);
     }
 
