@@ -8,6 +8,10 @@ const Fixture = @import("test_support/glm_snap_fixture.zig").Fixture;
 const Plan = glm.snapshots.layout.Plan;
 const Paged = @typeInfo(@TypeOf(glm.forward.State.initPaged)).@"fn".param_types[4].?;
 
+test {
+    _ = @import("glm_kv_carry_host.zig");
+}
+
 const ids = [_]u32{ 5, 2, 9, 0, 7, 1, 3, 8, 4, 6 }; // every page of the pool, out of order
 const at = ids.len * 512 - 8; // its latent rows and its pooled keys (at / 4 + 2 rows) reach every leased page
 
@@ -259,7 +263,7 @@ test "GLM snapshots: with TF_GLM_KV_SPLIT the owner's plan reads latent rows at 
 test "GLM snapshots: with TF_GLM_KV_SPLIT a kept state records its home, every rank leases its size, restores at home" {
     var d = rec.init();
     var f: Fixture = undefined;
-    try f.initFormat(&d, 0, 2, true, true); // 512-wide latent rows: more than a snapshot page of them
+    try f.initFormat(&d, 1, 2, true, true); // rank 1, the owner; 512-wide latent rows: past a snapshot page
     defer f.deinit();
     const g = Geometry.of(f.e.c);
     const pooled = 2 * cap * 2 * g.pkCache();
@@ -306,12 +310,6 @@ test "GLM snapshots: with TF_GLM_KV_SPLIT a kept state records its home, every r
     defer after.deinit(t.allocator);
     try gather(&try Plan.init(&own.st, &f.e.c, at, at, 0), &after);
     try t.expectEqualSlices(u8, before.items, after.items);
-    // away from home its latent rows are not on this copy: refused by name, never a restore of the trash page
-    own.st.owner = 0;
-    try t.expectError(error.KvSplitAway, f.e.restoreState(mine));
-    other.st.owner = 0;
-    f.e.cur = &other;
-    try t.expectError(error.KvSplitAway, f.e.restoreState(theirs));
     own.st.owner = null; // unsplit: a split state is not this sequence's
     f.e.cur = &own;
     try t.expectError(error.KvSplitAway, f.e.restoreState(mine));

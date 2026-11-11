@@ -266,6 +266,8 @@ const Fake = struct {
     snaps: std.AutoHashMapUnmanaged(u64, @import("cuda_engine_types.zig").Snap) = .empty,
     snap_pages: ?pages.Pool = null,
     share_pages: bool = false,
+    share: struct { rank: usize = 0, world: usize = 1 } = .{},
+    room: ?@import("cuda_owner_attn.zig").Room = null,
 };
 
 test "GLM disk image: a disk read's blank state is refused until sealed, and its seal checks the words" {
