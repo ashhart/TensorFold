@@ -121,7 +121,7 @@ const Pass = struct {
     uploads: bool = false,
     /// The dense split's layer: a BF16 head gather and an FP32 column gather beside the sum.
     split: bool = false,
-    m: struct { collective: ?*Collective },
+    m: struct { collective: ?*Collective, pocket: ?*anyopaque = null },
 
     pub fn chunk(p: *Pass, _: []const u32, _: usize, _: ?[]u8) !void {
         if (p.uploads) try cuda.copy_source.enqueue(p.stream.d, 0x5000, &.{ 1, 2, 3, 4 }, p.stream);
@@ -133,10 +133,90 @@ const Pass = struct {
     }
 };
 
+const Buf = struct { ptr: u64 };
+const linear_n = @import("cuda_prompt_wt.zig").linear_n;
+const attn_n = @import("cuda_prompt_wt.zig").attn_n;
+
+/// A sequence's owner, length and the buffer addresses a round's lane takes from it.
+const Seq = struct {
+    rank_id: u64,
+    fed: usize = 10,
+    cap: usize = 1024,
+    conv: [linear_n]Buf = undefined,
+    state: [linear_n]Buf = undefined,
+    kc: [attn_n]Buf = undefined,
+    vc: [attn_n]Buf = undefined,
+    ikc: [attn_n]Buf = undefined,
+    pooled: [attn_n]Buf = undefined,
+    tail: Buf = undefined,
+    pg: @import("cuda_glue.zig").Pg = .{},
+
+    /// `owner`'s sequence whose buffers start at `base`, each the next 64 KiB.
+    fn at(owner: u64, base: u64) Seq {
+        var q: Seq = .{ .rank_id = owner };
+        var a = base;
+        inline for (.{ "conv", "state", "kc", "vc", "ikc", "pooled" }) |f| {
+            for (&@field(q, f)) |*b| {
+                b.ptr = a;
+                a += 0x10000;
+            }
+        }
+        q.tail.ptr = a;
+        return q;
+    }
+
+    /// A drafted window settled whole (Draft.settle): its states and the window's spares change places.
+    fn settle(q: *Seq, spare: *[linear_n]Buf) void {
+        for (&q.state, spare) |*a, *b| std.mem.swap(Buf, a, b);
+    }
+};
+
+fn spares(base: u64) [linear_n]Buf {
+    var s: [linear_n]Buf = undefined;
+    for (&s, 0..) |*b, i| b.ptr = base + i * 0x10000;
+    return s;
+}
+
+fn keyOf(seqs: []const *const Seq) !rg.Key {
+    return rg.Key.init(seqs, 1, 2, 3);
+}
+
 fn key(owner: u64) !rg.Key {
-    const Seq = struct { rank_id: u64, fed: usize };
-    const q: Seq = .{ .rank_id = owner, .fed = 10 };
-    return rg.Key.init(@as([]const *const Seq, &.{&q}), 1, 2, 3);
+    const q: Seq = .at(owner, owner << 32);
+    return keyOf(&.{&q});
+}
+
+test "decode graph keys: owner order, attention and score tile seams, each lane's buffers and length" {
+    var first: Seq = .at(1, 0x1000_0000);
+    var second: Seq = .at(2, 0x2000_0000);
+    const base = try keyOf(&.{ &first, &second });
+    try t.expectEqual(base, try keyOf(&.{ &first, &second }));
+    try t.expect(!std.meta.eql(base, try keyOf(&.{ &second, &first })));
+    const alone = try keyOf(&.{&first});
+    var spare = spares(0x3000_0000);
+    second.settle(&spare);
+    try t.expect(!std.meta.eql(base, try keyOf(&.{ &first, &second })));
+    // another stream's settled window leaves a round without it on its graph
+    try t.expectEqual(alone, try keyOf(&.{&first}));
+    second.settle(&spare);
+    try t.expectEqual(base, try keyOf(&.{ &first, &second }));
+    second.tail.ptr += 0x100;
+    try t.expect(!std.meta.eql(base, try keyOf(&.{ &first, &second })));
+    second.tail.ptr -= 0x100;
+    second.cap = 2048;
+    try t.expect(!std.meta.eql(base, try keyOf(&.{ &first, &second })));
+    first.fed = 511;
+    const before = try keyOf(&.{&first});
+    first.fed = 512;
+    try t.expect(!std.meta.eql(before, try keyOf(&.{&first})));
+    first.fed = 2048;
+    const dense = try keyOf(&.{&first});
+    first.fed = 2051;
+    try t.expect(!std.meta.eql(dense, try keyOf(&.{&first})));
+    first.fed = 2303;
+    const score = try keyOf(&.{&first});
+    first.fed = 2304;
+    try t.expect(!std.meta.eql(score, try keyOf(&.{&first})));
 }
 
 /// The same stream can be captured again: no capture is open and the copy guard was released.
@@ -199,13 +279,64 @@ test "a dense-split round's gathers join its capture, and a clear between rounds
     for (0..3) |_| try c.launch(try key(1), &p, &.{7});
     try t.expectEqual([3]usize{ 1, 2, 1 }, [3]usize{ Fake.begins, Fake.captured_gathers, Fake.captured_sums });
     try t.expectEqual([2]u64{ 1, 2 }, [2]u64{ c.captures, c.replays });
-    // a drafted window's verify clears the graph ahead of the plain rounds in the same step
+    // a sequence made or dropped clears the graph: the round after it is captured again with its gathers
     for (0..3) |_| {
         c.clear();
         try c.launch(try key(1), &p, &.{7});
     }
     try t.expectEqual([3]usize{ 4, 8, 4 }, [3]usize{ Fake.begins, Fake.captured_gathers, Fake.captured_sums });
     try t.expectEqual([2]u64{ 4, 2 }, [2]u64{ c.captures, c.replays });
+}
+
+test "mixed drafted and plain streams: verifies between plain rounds keep their graph; a settled lane is captured anew" {
+    var d = Fake.driver();
+    const previous = enter();
+    defer cuda.copy_source.setCurrent(previous);
+    const stream: cuda.Stream = .{ .d = &d, .handle = @ptrFromInt(1) };
+    var pair: [2]c_int = undefined;
+    var col = try collective(&pair);
+    defer for (pair) |fd| {
+        _ = std.c.close(fd);
+    };
+    var c: rg.Cache = .{};
+    defer c.clear();
+    var p: Pass = .{ .stream = stream, .split = true, .m = .{ .collective = &col } };
+    const plain: Seq = .at(1, 0x1000_0000);
+    var drafted: Seq = .at(2, 0x2000_0000);
+    var spare = spares(0x3000_0000);
+    // each step: the plain stream's round, then the drafted stream's window verified and kept whole
+    for (0..4) |_| {
+        try c.launch(try keyOf(&.{&plain}), &p, &.{7});
+        drafted.settle(&spare);
+    }
+    try t.expectEqual([2]u64{ 1, 3 }, [2]u64{ c.captures, c.replays });
+    // a round that holds the drafted lane: its states moved after each settle, so the graph is recorded again
+    for (0..3) |_| {
+        try c.launch(try keyOf(&.{ &plain, &drafted }), &p, &.{ 7, 8 });
+        try c.launch(try keyOf(&.{ &plain, &drafted }), &p, &.{ 7, 8 });
+        drafted.settle(&spare);
+    }
+    try t.expectEqual([2]u64{ 4, 6 }, [2]u64{ c.captures, c.replays });
+    try t.expectEqual([2]usize{ 4, 4 }, [2]usize{ Fake.begins, Fake.captured_sums });
+    try t.expectEqual(@as(usize, 1), Fake.execs);
+}
+
+test "a decode round whose pass adds a pocket is refused before any capture" {
+    var d = Fake.driver();
+    const previous = enter();
+    defer cuda.copy_source.setCurrent(previous);
+    const stream: cuda.Stream = .{ .d = &d, .handle = @ptrFromInt(1) };
+    var pair: [2]c_int = undefined;
+    var col = try collective(&pair);
+    defer for (pair) |fd| {
+        _ = std.c.close(fd);
+    };
+    var c: rg.Cache = .{};
+    defer c.clear();
+    var p: Pass = .{ .stream = stream, .m = .{ .collective = &col, .pocket = @ptrFromInt(0x10) } };
+    try t.expectError(error.UnexpectedTensor, c.launch(try key(1), &p, &.{7}));
+    try t.expectEqual([2]usize{ 0, 0 }, [2]usize{ Fake.begins, Fake.launches });
+    try t.expect(c.exec == null);
 }
 
 test "a decode round whose pass uploads inside its capture is refused; its stream and copy guard are released" {
