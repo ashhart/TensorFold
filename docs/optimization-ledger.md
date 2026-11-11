@@ -47,7 +47,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | Optimization | q3.5 | fnext | glm | gem4 | nemo |
 | --- | --- | --- | --- | --- | --- |
 | 1. Prompt tail | done [#2229] | yes | yes | open [#2432] | open [#2432] |
-| 2. Paged KV | done C[#1750] M[#1294] | done [#1169] | done [#1163] | done [#1619] | done C[#935] M[#1537] |
+| 2. Paged KV | done C[#1750] M[#1294]; M causal prompt bounds prepared (#2912) | done [#1169] | done [#1163] | done [#1619] | done C[#935] M[#1537] |
 | 3. Prompt store | done [#1357] | yes (host store) | done [#1732] | done [#1883] | yes C open M[#1850] |
 | 4. iGPU states | done [#2113] | done¹ | yes | done¹ | done¹ |
 | 5. State walk | open C[#2392] | open C[#2392] | open [#2215] | open C[#2392] | open C[#2392] |

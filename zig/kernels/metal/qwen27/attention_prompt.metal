@@ -157,7 +157,19 @@ kernel void q27_attn_prompt(device const bfloat* QA [[buffer(0)]], device const 
   const int r0 = tile * 16 + fm, r1 = r0 + 8;
   const int n0 = live && r0 < args.rows * PG ? args.start + r0 / PG + 1 : 0;
   const int n1 = live && r1 < args.rows * PG ? args.start + r1 / PG + 1 : 0;
-  const int kbeg = c * PCK, kend = min(kbeg + PCK, args.start + args.rows);
+  const int last = min(args.rows * PG, (int(tg.z) + 1) * (SG / 2) * 16) - 1;
+  const int seen_tg = args.start + last / PG + 1;
+  const int kbeg = c * PCK;
+  int kend = min(kbeg + PCK, args.start + args.rows);
+  if (kbeg >= seen_tg) {
+    if (live && h == 0 && (lane & 9) == 0) {
+      const int64_t base = ((int64_t)hk * args.chunks + c) * args.rp + tile * 16;
+      PM[base + fm] = -INFINITY; PL[base + fm] = 0.0f;
+      PM[base + fm + 8] = -INFINITY; PL[base + fm + 8] = 0.0f;
+    }
+    return;
+  }
+  kend = min(kend, kbeg + (seen_tg - kbeg + PTK - 1) / PTK * PTK);
   const device bfloat* q = QA + ((int64_t)hk * args.rp + (live ? tile * 16 : 0)) * PD + h * PH;
   const device bfloat* k = caches[0].keys + (int64_t)hk * args.key_stride + h * PH;
   const device bfloat* v = caches[0].values + (int64_t)hk * args.value_stride + h * PH;
