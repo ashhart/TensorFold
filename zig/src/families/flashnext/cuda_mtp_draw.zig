@@ -71,27 +71,11 @@ fn finite(row: []const u16) bool {
     return true;
 }
 
-/// A draw's candidates on the host: k values and their columns a row.
-const Cands = struct { vals: []u16, cols: []i32 };
-
 /// The candidates of `rows` rows of `v` scores `ld` apart, k a row, into d.best past its best values, then to d.host.
-fn candidates(h: *const mtp.Head, st: cuda.Stream, d: *mtp.Draft, scores: u64, v: usize, ld: usize, rows: usize, k: usize) !Cands {
+fn candidates(h: *const mtp.Head, st: cuda.Stream, d: *mtp.Draft, scores: u64, v: usize, ld: usize, rows: usize, k: usize) !struct { vals: []u16, cols: []i32 } {
     const tv = d.best.ptr + max_rows * 16;
     const tc = tv + max_rows * topk_max * 2;
     try h.topk(st, scores, v, ld, rows, k, tv, tc);
-    const vals = d.host[0 .. rows * k];
-    const cols: []i32 = @alignCast(std.mem.bytesAsSlice(i32, std.mem.sliceAsBytes(d.host[max_rows * topk_max ..][0 .. 2 * rows * k])));
-    try st.synchronize();
-    try copyReady(st, std.mem.sliceAsBytes(vals), tv);
-    try copyReady(st, std.mem.sliceAsBytes(cols), tc);
-    return .{ .vals = vals, .cols = cols };
-}
-
-/// candidates over a paged draft's score rows, a launch a row into that row of the outputs (one block a row).
-fn rowCandidates(h: *const mtp.Head, st: cuda.Stream, d: *mtp.Draft, rows: usize, k: usize) !Cands {
-    const tv = d.best.ptr + max_rows * 16;
-    const tc = tv + max_rows * topk_max * 2;
-    for (d.logit_rows[0..rows], 0..) |row, r| try h.topk(st, row, vocab, vocab, 1, k, tv + r * k * 2, tc + r * k * 4);
     const vals = d.host[0 .. rows * k];
     const cols: []i32 = @alignCast(std.mem.bytesAsSlice(i32, std.mem.sliceAsBytes(d.host[max_rows * topk_max ..][0 .. 2 * rows * k])));
     try st.synchronize();
@@ -129,8 +113,8 @@ fn checkBest(st: cuda.Stream, d: *mtp.Draft, rows: ?[]const u16) !void {
 pub fn draws(h: *const mtp.Head, st: cuda.Stream, gpa: std.mem.Allocator, d: *mtp.Draft, sm: ?Sampling, masks: []const u32, out: []u32) !void {
     const n = d.rows;
     var pending: [max_rows]u32 = undefined;
-    if (masks.len == 0 and !d.logit_paged) try h.best(st, d.logits.ptr, vocab, vocab, n, d.best.ptr);
-    if (masks.len == 0 and d.logit_paged) for (d.logit_rows[0..n], 0..) |row, r| try h.best(st, row, vocab, vocab, 1, d.best.ptr + r * 16);
+    const scores = if (d.logit_paged) d.window_scores else d.logits.ptr; // on pieces: the rows its verify wrote
+    if (masks.len == 0) try h.best(st, scores, vocab, vocab, n, d.best.ptr);
     if (!mtp.isSampled(sm) and masks.len == 0) {
         try st.synchronize();
         try checkBest(st, d, null);
@@ -140,7 +124,7 @@ pub fn draws(h: *const mtp.Head, st: cuda.Stream, gpa: std.mem.Allocator, d: *mt
     }
     if (masks.len == 0) if (sm) |s| if (usable(s)) {
         const k: usize = s.top_k;
-        const c = if (d.logit_paged) try rowCandidates(h, st, d, n, k) else try candidates(h, st, d, d.logits.ptr, vocab, vocab, n, k);
+        const c = try candidates(h, st, d, scores, vocab, vocab, n, k);
         try checkBest(st, d, null);
         for (pending[0..n], 0..) |*t, r| t.* = drawTopk(gpa, c.vals[r * k ..][0..k], c.cols[r * k ..][0..k], null, d.fed0 + 1 + r, s) catch |err| {
             if (err == error.ProposalNonfinite) badVerify(d, r, d.best_host[r * 4 ..][0..4].*, null, false);
@@ -150,8 +134,7 @@ pub fn draws(h: *const mtp.Head, st: cuda.Stream, gpa: std.mem.Allocator, d: *mt
         return;
     };
     const rows = d.host[0 .. n * vocab];
-    if (!d.logit_paged) try download(st, std.mem.sliceAsBytes(rows), d.logits.ptr);
-    if (d.logit_paged) for (d.logit_rows[0..n], 0..) |row, r| try download(st, std.mem.sliceAsBytes(rows[r * vocab ..][0..vocab]), row);
+    try download(st, std.mem.sliceAsBytes(rows), scores);
     if (masks.len == 0) {
         try checkBest(st, d, rows);
     } else {

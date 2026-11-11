@@ -78,10 +78,10 @@ pub const Draft = struct {
     /// Where the saved n-gram tail and the window's n-gram rows are (in `saved`, or pieces of their own).
     saved_tail: u64 = 0,
     saved_nrow: u64 = 0,
-    /// On pieces (TF_FLASHNEXT_STATE_PAGES): each block of `streams` (streamRows), and each row of `logits`.
+    /// On pieces: each block of `streams`; no `logits`, a window's scores stay where its verify wrote them.
     stream_blocks: []u64 = &.{},
-    logit_rows: [max_rows]u64 = undefined,
     logit_paged: bool = false,
+    window_scores: u64 = 0,
     /// A window's DeltaNet end states: swapped in when every row is kept, else the kept rows replay on the sequence's.
     spare: [linear_n]cuda.DeviceBuffer = undefined,
     /// Where `saved` holds each piece and how large the spares are, at the model's heads (its sequence's).
@@ -269,7 +269,7 @@ pub const Draft = struct {
         d.aim();
     }
 
-    /// A pool lane's draft pieces in initPieces' order; streams in blocks of max_rows rows, logits a row a piece.
+    /// A pool lane's draft pieces in initPieces' order; streams in blocks of max_rows rows, no logits.
     pub fn pieceSizes(gpa: std.mem.Allocator, out: *std.ArrayList(u64), draft_n: usize, rows: usize) !void {
         const l = Layout.of(pool_heads);
         try out.appendNTimes(gpa, l.state, linear_n); // spares
@@ -282,7 +282,6 @@ pub const Draft = struct {
             try out.appendNTimes(gpa, layer_log_bytes, linear_n);
         }
         try streamRows(rows).sizes(gpa, out);
-        try out.appendNTimes(gpa, vocab * 2, max_rows); // a window's scores, a row a piece
     }
 
     /// `streams` read through pages by row: blocks of max_rows rows, so a window's rows are block 0's.
@@ -296,7 +295,7 @@ pub const Draft = struct {
         return streamRows(d.rows_cap).at(d.stream_blocks, @intCast(i));
     }
 
-    /// Where a lone window's scores go: one buffer; on pieces rows are apart, so only verifyMany writes them.
+    /// Where a lone window's scores go: its own buffer; on pieces it has none, so only verifyIn/verifyMany score it.
     pub fn windowScores(d: *const Draft) error{FlashNextPagedDraftVerify}!u64 {
         return if (d.logit_paged) error.FlashNextPagedDraftVerify else d.logits.ptr;
     }
@@ -307,7 +306,7 @@ pub const Draft = struct {
         const n = linear_n;
         const own = 3 * n + 5 + if (late()) 1 + n else 0;
         const blocks = streamRows(rows).blocks();
-        if (at.len != own + blocks + max_rows) return error.FlashNextRunTooShort;
+        if (at.len != own + blocks) return error.FlashNextRunTooShort;
         const B = struct {
             fn of(dr: *const cuda.Driver, ptr: u64, len: usize) cuda.DeviceBuffer {
                 return .{ .d = dr, .ptr = ptr, .len = len, .borrowed = true };
@@ -316,9 +315,8 @@ pub const Draft = struct {
         const head = wt.attn_n;
         const rows_cap = @max(rows, max_rows);
         const stream_at = at[own..][0..blocks];
-        const logit_at = at[own + blocks ..][0..max_rows];
-        // streams: block 0 (a window's rows, max_rows of them); logits: row 0, each row its own piece
-        var d: Draft = .{ .gen = @import("cuda_window_graph.zig").nextGen(), .gpa = gpa, .cap = cap, .rows_cap = rows_cap, .kc = B.of(driver, paged.at(head, .key), 0), .vc = B.of(driver, paged.at(head, .value), 0), .ikc = B.of(driver, paged.at(head, .index), 0), .pooled = B.of(driver, paged.at(head, .pooled), 0), .pg = paged.pg(), .streams = B.of(driver, stream_at[0], max_rows * wide * 2), .out = undefined, .logits = B.of(driver, logit_at[0], vocab * 2), .dlogits = undefined, .best = undefined, .saved = B.of(driver, 0, 0), .host = undefined, .layout = l };
+        // streams: block 0 (a window's rows, max_rows of them); logits: none
+        var d: Draft = .{ .gen = @import("cuda_window_graph.zig").nextGen(), .gpa = gpa, .cap = cap, .rows_cap = rows_cap, .kc = B.of(driver, paged.at(head, .key), 0), .vc = B.of(driver, paged.at(head, .value), 0), .ikc = B.of(driver, paged.at(head, .index), 0), .pooled = B.of(driver, paged.at(head, .pooled), 0), .pg = paged.pg(), .streams = B.of(driver, stream_at[0], max_rows * wide * 2), .out = undefined, .logits = B.of(driver, 0, 0), .dlogits = undefined, .best = undefined, .saved = B.of(driver, 0, 0), .host = undefined, .layout = l };
         for (&d.spare, at[0..n]) |*b, ptr| b.* = B.of(driver, ptr, l.state);
         d.saved_tail = at[3 * n];
         d.saved_nrow = at[3 * n + 1];
@@ -339,7 +337,6 @@ pub const Draft = struct {
         }
         d.stream_blocks = try gpa.dupe(u64, stream_at);
         errdefer gpa.free(d.stream_blocks);
-        @memcpy(&d.logit_rows, logit_at);
         d.logit_paged = true;
         d.host = try gpa.alloc(u16, @max(max_rows * vocab, draft_n));
         d.aim();

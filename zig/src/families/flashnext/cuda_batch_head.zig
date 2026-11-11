@@ -35,8 +35,7 @@ pub fn head(self: anytype, logits_host: ?[]u8) !void {
             try self.projectHead(out, n);
             row0 = 0;
             for (self.lanes) |l| {
-                if (l.logit_rows.len == 0) try self.copy(l.logits, out + row0 * vocab * 2, l.rows * vocab * 2);
-                for (l.logit_rows[0..@min(l.rows, l.logit_rows.len)], 0..) |dst, r| try self.copy(dst, out + (row0 + r) * vocab * 2, vocab * 2);
+                try self.copy(l.logits, out + row0 * vocab * 2, l.rows * vocab * 2);
                 row0 += l.rows;
             }
             if (logits_host) |lh| {

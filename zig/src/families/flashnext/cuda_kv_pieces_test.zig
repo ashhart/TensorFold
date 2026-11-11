@@ -38,13 +38,13 @@ fn withLate(on: bool) bool {
     return was;
 }
 
-test "Flash Next pieces at 256-row pages: streams and logits by row, the run's pages exactly, nothing outside" {
+test "Flash Next pieces at 256-row pages: streams by row, no logits of its own, the run's pages exactly, nothing outside" {
     const was = withLate(false);
     defer Draft.late_on = was;
     const run = lanes.layout(40960, 256, head, 0);
     const l = try lanes.layoutPieces(40960, 256, head, 0);
     try t.expectEqual(@as(usize, 41), run.statePages());
-    try t.expectEqual(kv.groups.Pieces{ .n = 266, .pages = 41, .bytes = 270_008_832 + 31_457_280 + 15_892_480 }, l.pieces.?);
+    try t.expectEqual(kv.groups.Pieces{ .n = 234, .pages = 41, .bytes = 270_008_832 + 31_457_280 }, l.pieces.?);
     try t.expectEqual(run.statePages(), l.statePages());
     try t.expectEqual(@as(u64, 0), l.run_bytes);
     try t.expectEqual(@as(u64, 0), l.outside);
@@ -52,7 +52,7 @@ test "Flash Next pieces at 256-row pages: streams and logits by row, the run's p
     try t.expectEqual(run.pageBytes(), l.pageBytes());
     Draft.late_on = true;
     const late = try lanes.layoutPieces(40960, 256, head, 0);
-    try t.expectEqual(@as(u32, 303), late.pieces.?.n);
+    try t.expectEqual(@as(u32, 271), late.pieces.?.n);
     try t.expectEqual(@as(u32, 48), late.pieces.?.pages);
     try t.expectEqual(lanes.layout(40960, 256, head, 0).statePages(), late.statePages());
     try t.expectEqual(@as(u64, 0), late.outside);
@@ -95,7 +95,6 @@ fn ranges(a: std.mem.Allocator, seq: anytype, d: ?*const Draft) !std.ArrayList([
     for ([_]cuda.DeviceBuffer{ x.out, x.dlogits, x.best }) |b| try r.append(a, .{ b.ptr, b.ptr + b.len });
     const rows = Draft.streamRows(x.rows_cap);
     for (x.stream_blocks, 0..) |b, k| try r.append(a, .{ b, b + @min(rows.block, rows.rows - k * rows.block) * rows.row });
-    if (x.logit_paged) for (x.logit_rows) |b| try r.append(a, .{ b, b + wt.vocab * 2 });
     return r;
 }
 
@@ -170,7 +169,7 @@ test "two lanes with the head: every piece inside its own lane's state pages, no
         try all.appendSlice(t.allocator, r.items);
         try t.expectEqual(@as(usize, 48), dr.stream_blocks.len);
         try t.expectEqual(dr.stream_blocks[0], dr.streams.ptr);
-        try t.expectEqual(dr.logit_rows[0], dr.logits.ptr);
+        try t.expect(dr.logit_paged and dr.logits.len == 0); // no scores of its own: its verify's rows
         try t.expectError(error.FlashNextPagedDraftVerify, dr.windowScores()); // a lone verify refused, by name
         for (0..dr.rows_cap) |i| { // a row's address: in its block, rows of a block side by side
             const b = dr.stream_blocks[i / mtp.max_rows];

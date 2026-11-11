@@ -21,7 +21,7 @@ pub fn forwardGraph(e: *Engine, comptime Tri: type, p: *batch.Pass(Tri), seq: *S
 }
 
 /// A stream's window in a shared pass: its rows, and where its rollback rows, hidden rows and scores go (0: none).
-pub const Window = struct { seq: *Seq, ids: []const u32, keep: ?*const batch.Keep = null, streams: u64 = 0, logits: u64 = 0, logit_rows: []const u64 = &.{} };
+pub const Window = struct { seq: *Seq, ids: []const u32, keep: ?*const batch.Keep = null, streams: u64 = 0, logits: u64 = 0 };
 
 /// Several streams' windows in one batched pass, each row's bits its lone pass's; `out` holds every row's scores.
 pub fn windows(e: *Engine, comptime Tri: type, tri: Tri, wins: []const Window, out: u64) !void {
@@ -47,7 +47,7 @@ pub fn windows(e: *Engine, comptime Tri: type, tri: Tri, wins: []const Window, o
     const scores = try e.reserveScores(cap, s.cap);
     var at: usize = 0;
     for (wins, lanes) |w, *l| {
-        l.* = .{ .seq = w.seq.view(scores), .pos = w.seq.fed, .rows = w.ids.len, .keep = w.keep, .streams = w.streams, .logits = w.logits, .logit_rows = w.logit_rows };
+        l.* = .{ .seq = w.seq.view(scores), .pos = w.seq.fed, .rows = w.ids.len, .keep = w.keep, .streams = w.streams, .logits = w.logits };
         @memcpy(ids[at..][0..w.ids.len], w.ids);
         @memset(untaught[at..][0..w.ids.len], w.seq.untaught);
         at += w.ids.len;
