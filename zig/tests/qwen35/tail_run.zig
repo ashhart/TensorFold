@@ -7,14 +7,14 @@ const qwen35 = @import("qwen3_5");
 const Engine = qwen35.engine.Engine;
 const fwd = qwen35.forward;
 
-/// One tile and less (the whole chunk runs), a 64-row tile's edges, a chunk's edges, and past a 2,048-row step.
-pub const lengths = [_]usize{ 1, 63, 64, 65, 1023, 1024, 1025, 2049, 4096 };
+/// Whole chunks (to 128 rows), 64-row tile and chunk edges, tails across a step (first pieces of 127, 76, 28, 1 rows).
+pub const lengths = [_]usize{ 1, 63, 64, 65, 1023, 1024, 1025, 2049, 2100, 2148, 2175, 4096 };
 
 /// Rows run after the chunk on its caches, whose attention reads every key the chunk wrote.
 pub const after = 16;
 
 /// Positions the longest case takes.
-pub const need = lengths[lengths.len - 1] + after;
+pub const need = std.mem.max(usize, &lengths) + after;
 
 /// What first differs from the whole chunk, and at which byte.
 pub const Diff = struct { what: []const u8, byte: usize };
