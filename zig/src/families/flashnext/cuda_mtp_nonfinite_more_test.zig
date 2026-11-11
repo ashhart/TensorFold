@@ -11,14 +11,14 @@ const D = f.Device;
 const t = std.testing;
 const a = t.allocator;
 
-fn joinedBeforeWait() !void {
+fn joinedBeforeWait(want_best: bool) !void {
     var best = false;
     var topk = false;
     for (D.events[0..D.events_n]) |e| switch (e) {
         .best => best = true,
         .topk => topk = true,
         .wait => {
-            try t.expect(best and topk);
+            try t.expect(best == want_best and topk);
             return;
         },
         else => {},
@@ -108,13 +108,14 @@ test "Flash Next nonfinite: a later bad verify reduction publishes no earlier to
     reductions[1] = f.reduction(1, std.math.nan(f32), 17);
     for ([_]?mtp.Sampling{ null, .{ .seed = 7, .temperature = 1, .top_k = 2 }, .{ .seed = 7, .temperature = 1, .top_k = 0 } }) |sm| {
         D.reset();
+        D.cols = &.{ 17, 5, -1, 5 };
         var out = [_]u32{ 42, 43 };
         try t.expectError(error.ProposalNonfinite, draw.draws(&h, st, a, &x, sm, &.{}, &out));
         try t.expectEqualSlices(u32, &.{ 42, 43 }, &out);
         try t.expectEqual(@as(usize, 32), D.best_bytes);
-        try t.expectEqual(@as(usize, 1), D.waits);
+        try t.expectEqual(@as(usize, if (sm != null and sm.?.top_k == 2) 2 else 1), D.waits);
         if (sm != null and sm.?.top_k == 2) {
-            try joinedBeforeWait();
+            try joinedBeforeWait(false);
         }
     }
 }
@@ -135,7 +136,7 @@ test "Flash Next nonfinite: a later bad candidate leaves the entire verify outpu
     const st: cuda.Stream = .{ .d = &driver, .handle = null };
     try t.expectError(error.ProposalNonfinite, draw.draws(&h, st, a, &x, .{ .seed = 7, .temperature = 1, .top_k = 2 }, &.{}, &out));
     try t.expectEqualSlices(u32, &.{ 42, 43 }, &out);
-    try t.expectEqual(@as(usize, 1), D.waits);
+    try t.expectEqual(@as(usize, 2), D.waits);
 }
 
 test "Flash Next nonfinite: finite head sampled candidates and full rows match the original draw and probability" {
@@ -187,7 +188,12 @@ test "Flash Next nonfinite: finite verify top-k and full-row draws match keyed o
         try draw.draws(&h, st, a, &x, sm, &.{}, &out);
         try t.expectEqual(expected, out[0]);
         try t.expectEqual(@as(usize, 1), D.waits);
-        if (k == 2) try joinedBeforeWait();
+        if (k == 2) {
+            try joinedBeforeWait(false);
+            try t.expectEqual(@as(usize, 1), D.launches);
+            try t.expectEqual(@as(usize, 0), D.best_calls);
+            try t.expectEqual(@as(u32, 1), D.grids[0]);
+        }
     };
 }
 
@@ -236,4 +242,33 @@ test "Flash Next nonfinite: candidate shape refuses empty mismatched and oversiz
     const vals: [draw.topk_max + 1]u16 = @splat(0x3f80);
     const cols: [draw.topk_max + 1]i32 = @splat(0);
     try t.expectError(error.ProposalScoreShape, draw.drawTopk(a, &vals, &cols, null, 1, sm));
+}
+
+test "Flash Next nonfinite: folded NaN and infinity sentinels fetch best only after failure" {
+    var driver = D.driver();
+    defer cuda.download_stage.closeDriver(&driver);
+    var h = try f.head(&driver);
+    defer h.artifact.deinit();
+    const host = try a.alloc(u16, wt.vocab);
+    defer a.free(host);
+    const row = try a.alloc(u16, wt.vocab);
+    defer a.free(row);
+    @memset(row, 0);
+    var x = f.draft(&driver, host);
+    const st: cuda.Stream = .{ .d = &driver, .handle = null };
+    for ([_]u16{ 0xffc1, 0x7fc1, 0x7f80 }) |bits| {
+        row[7] = bits;
+        D.verify_rows = row;
+        D.vals = &.{ 0x3f80, 0 };
+        D.cols = &.{ -1, 5 };
+        D.best = f.reduction(1, std.math.nan(f32), 17);
+        D.reset();
+        var out = [_]u32{42};
+        try t.expectError(error.ProposalNonfinite, draw.draws(&h, st, a, &x, .{ .seed = 71, .temperature = 1, .top_k = 2 }, &.{}, &out));
+        try t.expectEqual(@as(u32, 42), out[0]);
+        try t.expectEqualSlices(usize, &.{ 2, 1 }, D.functions[0..D.launches]);
+        try t.expectEqualSlices(u32, &.{ 1, 1 }, D.grids[0..D.launches]);
+        try joinedBeforeWait(false);
+        try t.expectEqual(@as(usize, 2), D.waits);
+    }
 }

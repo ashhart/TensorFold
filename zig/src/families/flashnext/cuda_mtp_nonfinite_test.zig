@@ -66,6 +66,7 @@ test "Flash Next nonfinite: main-model greedy sampled and masked rows fail befor
     const sampled: mtp.Sampling = .{ .seed = 7, .temperature = 1, .top_k = 2 };
     for ([_]?mtp.Sampling{ null, sampled }) |sm| {
         Device.best = reduction(-std.math.inf(f32), std.math.nan(f32), std.math.maxInt(i32));
+        Device.cols = &.{ -1, 1 };
         var out = [_]u32{42};
         try t.expectError(error.ProposalNonfinite, draw.draws(&h, st, gpa, &x, sm, &.{}, &out));
         try t.expectEqual(@as(u32, 42), out[0]);
