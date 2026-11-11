@@ -210,9 +210,10 @@ pub const Leader = struct {
         var h: Header = .{ .kind = @backingInt(Kind.begin), .a = kept };
         if (pages.len > 0) if (x.e.pages) |p| { // TF_GLM_KV_SPLIT: the owner class every id is of (0 otherwise)
             h.depth = p.leases[x.e.slot].owner;
+            if (@import("cuda_pages_twin.zig").twinned(p, x.e.slot)) h.flags |= 2; // the ids then each class's twin
         };
         if (c) |v| {
-            h.flags = 1;
+            h.flags |= 1;
             h.seed = v.seed;
             h.temperature = v.temperature;
             h.top_p = v.top_p;
@@ -386,7 +387,7 @@ pub fn follow(e: *Engine, link: *Link) !void {
         e.structured = structuredStep(h); // rank 0 alone masks them
         switch (kind) {
             .begin => {
-                if (step.ids.len > 0) try (e.pages orelse return error.BadStep).mapOwned(h.slot, step.ids, std.math.cast(usize, h.a) orelse return error.BadStep, h.depth);
+                if (step.ids.len > 0) try (e.pages orelse return error.BadStep).mapBegin(h.slot, step.ids, std.math.cast(usize, h.a) orelse return error.BadStep, h.depth, h.flags & 2 != 0);
                 try e.beginFollowing(if (h.flags & 1 != 0) .{ .seed = h.seed, .temperature = h.temperature, .top_p = h.top_p, .min_p = h.min_p, .top_k = h.top_k } else null);
             },
             .pool => {

@@ -217,7 +217,7 @@ pub const Forward = struct {
                 if (b.prefill) st.cur[li] = 1 - cur; // a prompt chunk keeps every row: the layer commits now
             },
             .mla => |a| {
-                try owner_attn.body(f, r, .{ .set = f.set(), .ops = f.m.ops(), .prof = f.prof, .split = f.indexSplit(r) }, a, b.normed, .{ .c = st.caches[di], .pos = st.pos_dev, .host_pos = st.pos, .owner = st.owner }, rows, nch);
+                try owner_attn.body(f, r, .{ .set = f.set(), .ops = f.m.ops(), .prof = f.prof, .split = f.indexSplit(r) }, a, b.normed, .{ .c = st.caches[di], .pos = st.pos_dev, .host_pos = st.pos, .owner = st.attends() }, rows, nch);
                 if (out) |o| try dsa_block.fill(f.set(), f.stream, a, b.dsa, 0, rows, o);
             },
         }

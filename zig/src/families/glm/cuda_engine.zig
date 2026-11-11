@@ -456,6 +456,7 @@ pub const Engine = struct {
     /// A verify window: `ids` (pending token, then drafts) at the committed position; `out[r]` drawn at pos + 1 + r.
     pub fn verify(e: *Engine, ids: []const u32, out: []u32, bits: u64) !void {
         if (ids.len == 0 or ids.len > fw.window_rows) return error.WindowTooWide;
+        if (e.pages) |p| try p.giveTwin(e.slot); // TF_GLM_KV_SPLIT: no decode round reads a prompt's twin
         var one: [1]fw.Rank = undefined;
         var f = e.view(&e.bd, &one);
         const at = e.cur.st.pos;
@@ -481,6 +482,7 @@ pub const Engine = struct {
             if (p.ids.len == 0 or p.ids.len > fw.window_rows or rows + p.ids.len > shared_rows) return error.WindowTooWide;
             for (parts[0..i]) |q| if (q.slot == p.slot) return error.SlotTwice;
             try e.bind(p.slot);
+            if (e.pages) |q| try q.giveTwin(p.slot);
             segs[i] = .{ .st = &e.cur.st, .row0 = rows, .rows = p.ids.len };
             @memcpy(ids[rows..][0..p.ids.len], p.ids);
             rows += p.ids.len;

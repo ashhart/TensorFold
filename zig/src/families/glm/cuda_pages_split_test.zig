@@ -362,3 +362,72 @@ test "GLM KV split: a request longer than a class fits admission and is refused 
     try std.testing.expectError(error.ClassTooSmall, p.open(1, 5000, 100));
     try expect(!p.used[1] and p.pool.idle());
 }
+
+test "GLM KV split twins: a fresh pass borrows the other class's pages, every rank attends its own; first decode gives them back" {
+    var f: Fake = undefined;
+    try f.init(true);
+    const p = try f.pool(4, 16, true); // 8 pages a class; rank 0 of two
+    defer f.deinit(p);
+    const w = try p.openTwinned(1, 1500, 100, 1); // class 1's stream: rank 1 owns it, rank 0 borrows a twin
+    const n = w.len / 2;
+    try expectEqual(@as(usize, 4), n);
+    for (w[0..n]) |id| try expectEqual(@as(u32, 1), id % 2);
+    for (w[n..]) |id| try expectEqual(@as(u32, 0), id % 2); // the twin: rank 0's class
+    try std.testing.expectEqualSlices(u32, w[0..n], F.table(f.st(1).table, n)); // the pooled keys' table: its ids
+    for (w[n..], F.table(f.st(1).ltable, n)) |id, local| try expectEqual(id / 2, local); // the latent rows: the twin's
+    try expect(f.st(1).twin and f.st(1).attends() == null and f.st(1).owner.? == 1);
+    const fetch = @import("cuda_owner_fetch.zig"); // twinned: no history fetch, each rank attends its own rows
+    const away: fetch.Away = .{ .heads = 32, .to = 1 };
+    try expect(!fetch.fetches(true, f.st(1).attends(), 4096, 512, 1 << 20, away) and fetch.fetches(true, f.st(1).owner, 4096, 512, 1 << 20, away));
+    try expectEqual(@as(usize, 0), f.st(1).lpages.len); // a kept state still takes its latent rows from the owner
+    try expectEqual(@as(usize, 4), p.pool.classFree(0));
+    try std.testing.expectEqualSlices(u32, w, @import("cuda_pages_twin.zig").wire(p, 1, w[0..n]));
+    try p.giveTwin(1); // the first decode round, on every rank
+    for (F.table(f.st(1).ltable, n)) |local| try expectEqual(@as(u32, 8), local); // the trash page again
+    try expect(!f.st(1).twin and f.st(1).attends().? == 1);
+    try expect(fetch.fetches(true, f.st(1).attends(), 4096, 512, 1 << 20, away)); // given back: the fetch, as part 3
+    try expectEqual(@as(usize, 8), p.pool.classFree(0));
+    try p.giveTwin(1); // later rounds: nothing to give
+    p.close(1);
+    try expect(p.pool.idle());
+}
+
+test "GLM KV split twins: none when a class lacks the pages or a pass resumes a kept state; a cancel gives them back" {
+    var f: Fake = undefined;
+    try f.init(true);
+    const p = try f.pool(4, 16, true);
+    defer f.deinit(p);
+    _ = try p.openOn(1, 3000, 100, 0); // 7 of class 0's 8
+    const lone = try p.openTwinned(2, 1500, 100, 1); // a twin needs 4 of class 0: none
+    try expect(lone.len == 4 and !f.st(2).twin);
+    p.close(2);
+    p.close(1);
+    const resumed = try p.openNear(2, 1500, 100, &.{}, 1); // a resume restores at home or carries: no twin
+    try expect(resumed.len == 4 and !f.st(2).twin);
+    p.close(2);
+    const fresh = try p.openNear(2, 1500, 100, &.{}, null); // a fresh pass on the roomiest: twinned
+    try expect(fresh.len == 8 and f.st(2).twin);
+    p.close(2); // ended in its prompt pass: its pages and its twin back
+    try expect(p.pool.idle() and !f.st(2).twin);
+    for (0..2) |c| try expectEqual(@as(usize, 8), p.pool.classFree(@intCast(c)));
+}
+
+test "GLM KV split twins: a follower maps a twinned begin, its own class's twin, refusing another class or a short wire" {
+    var f: Fake = undefined;
+    try f.init(true);
+    const p = try f.pool(4, 16, false); // rank 0 as a follower of another leader
+    defer f.deinit(p);
+    try std.testing.expectError(error.ResidueMismatch, p.mapBegin(1, &.{ 1, 3, 5, 7 }, 0, 1, true)); // a twin of class 1
+    try std.testing.expectError(error.BadStep, p.mapBegin(1, &.{ 1, 3, 4 }, 0, 1, true));
+    try p.mapBegin(1, &.{ 1, 3, 6, 2 }, 0, 1, true);
+    try std.testing.expectEqualSlices(u32, &.{ 1, 3 }, F.table(f.st(1).table, 2));
+    try std.testing.expectEqualSlices(u32, &.{ 3, 1 }, F.table(f.st(1).ltable, 2)); // ids 6 and 2 at places 3 and 1
+    try expect(f.st(1).twin and f.st(1).attends() == null);
+    try p.giveTwin(1);
+    try std.testing.expectEqualSlices(u32, &.{ 8, 8 }, F.table(f.st(1).ltable, 2));
+    p.close(1);
+    try p.mapBegin(1, &.{ 0, 2 }, 0, 0, true); // its own class's stream: no twin here, but every rank attends its own
+    try std.testing.expectEqualSlices(u32, &.{0}, F.table(f.st(1).table, 1));
+    try expect(f.st(1).twin and f.st(1).attends() == null);
+    p.close(1);
+}
