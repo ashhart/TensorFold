@@ -134,12 +134,17 @@ pub const DeviceBuffer = struct {
 
     /// `len` bytes, 256-byte aligned (512 from an installed arena); zero bytes allocate nothing and hold address 0.
     pub fn alloc(d: *const Driver, len: usize) Error!DeviceBuffer {
+        return allocVia(d, len, alloc_hook);
+    }
+
+    /// As alloc, through `hook` instead of the installed one (an owner's own sub-allocator; null: cuMemAlloc).
+    pub fn allocVia(d: *const Driver, len: usize, hook: ?Hook) Error!DeviceBuffer {
         try reserveAllocation(len);
         errdefer finishAllocation(null, len);
         var p: abi.DevicePtr = 0;
         var owner: ?Hook = null;
         if (len > 0) {
-            if (alloc_hook) |h| if (h.alloc(h.ctx, len)) |ptr| {
+            if (hook) |h| if (h.alloc(h.ctx, len)) |ptr| {
                 p = ptr;
                 owner = h;
             };
