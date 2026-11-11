@@ -73,6 +73,7 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/dsv41_shared.zig").steps(b);
     @import("zig/build/dsv41_cuda.zig").steps(b);
     @import("zig/build/dsv41_state.zig").steps(b);
+    @import("zig/build/dsv41_handoff.zig").steps(b);
     @import("zig/build/dsv41_draft.zig").steps(b);
     @import("zig/build/dsv41_assets.zig").steps(b);
     const target = b.standardTargetOptions(.{});
