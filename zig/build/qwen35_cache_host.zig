@@ -15,7 +15,7 @@ pub fn tests(b: *std.Build) void {
         .imports = &.{ .{ .name = "metal", .module = fake }, .{ .name = "lanes", .module = lanes }, .{ .name = "kernel_sources", .module = sources } },
     });
     b.step("test-qwen35-cache-host", "Qwen2B retained bytes, paged images and resumed host-reference tokens").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = root, .filters = &.{"Qwen retained:"} })).step);
-    const pure = &.{ "admit the affine 2B", "admit untied heads", "text_config parses", "a top-level config", "the geometry refuses", "the Python loader's refusals", "candidate selection preserves", "a masked draw", "the blocked selection", "a non-finite word inside", "a stream's cache bytes" };
+    const pure = &.{ "admit the affine 2B", "admit untied heads", "text_config parses", "a top-level config", "the geometry refuses", "the Python loader's refusals", "candidate selection preserves", "a masked draw", "bounded keyed draws", "the blocked selection", "a non-finite word inside", "a stream's cache bytes" };
     b.step("test-qwen35-metal-host", "Qwen2B geometry, keyed draws and state sizing on the CPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = root, .filters = pure })).step);
 }
 
