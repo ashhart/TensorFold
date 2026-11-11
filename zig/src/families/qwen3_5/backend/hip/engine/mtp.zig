@@ -263,8 +263,14 @@ pub const Head = struct {
             const drafts = dev + at.drafts + 4 * h.cap * n;
             const ids = if (n == 0) dev else drafts - 4 * h.cap;
             const logits = try h.step(o, m, head, cur, ids, rows, dev + at.slots + 4 * n, dev + at.pos + 4 * h.cap * n, n);
-            try o.argmaxRows(logits, rows, head.n, drafts);
-            if (cut and n + 1 < most) try o.tokenProb(logits, rows, head.n, 0, dev + at.probs + 4 * h.cap * n);
+            o.argmaxRows(logits, rows, head.n, drafts) catch |err| {
+                std.log.err("PROBE mtp argmaxRows: {s}", .{@errorName(err)});
+                return err;
+            };
+            if (cut and n + 1 < most) try (o.tokenProb(logits, rows, head.n, 0, dev + at.probs + 4 * h.cap * n) catch |err| {
+                std.log.err("PROBE mtp tokenProb: {s}", .{@errorName(err)});
+                return err;
+            });
             cur = .{ .ptr = h.last, .kind = m.act };
         }
     }
@@ -276,15 +282,27 @@ pub const Head = struct {
         const eps: f32 = @floatCast(s.eps);
         const hd = s.head_dim;
         const emb = try fwd.take(o, m.act, rows * s.hidden);
-        try o.embedRows(m.embed, ids, rows, emb);
+        o.embedRows(m.embed, ids, rows, emb) catch |err| {
+            std.log.err("PROBE mtp embedRows: {s}", .{@errorName(err)});
+            return err;
+        };
         const emb_e = try fwd.take(o, m.act, rows * s.hidden);
-        try o.rms(emb, w.fc_e_norm.ptr, emb_e, rows, s.hidden, eps);
+        o.rms(emb, w.fc_e_norm.ptr, emb_e, rows, s.hidden, eps) catch |err| {
+            std.log.err("PROBE mtp rms fc_e: {s}", .{@errorName(err)});
+            return err;
+        };
         const emb_h = try fwd.take(o, m.act, rows * s.hidden);
-        try o.rms(hidden, w.fc_h_norm.ptr, emb_h, rows, s.hidden, eps);
+        o.rms(hidden, w.fc_h_norm.ptr, emb_h, rows, s.hidden, eps) catch |err| {
+            std.log.err("PROBE mtp rms fc_h: {s}", .{@errorName(err)});
+            return err;
+        };
         const e_proj = try project(o, w.fc_e, emb_e, rows);
         const h_proj = try project(o, w.fc_h, emb_h, rows);
         const x = try fwd.take(o, m.act, rows * s.hidden);
-        try o.add(e_proj, h_proj, x, rows * s.hidden);
+        o.add(e_proj, h_proj, x, rows * s.hidden) catch |err| {
+            std.log.err("PROBE mtp add fc: {s}", .{@errorName(err)});
+            return err;
+        };
         var normed = x;
         if (w.input_norm) |n| {
             normed = try fwd.take(o, m.act, rows * s.hidden);
@@ -295,7 +313,10 @@ pub const Head = struct {
         const keys = try project(o, w.k, normed, rows);
         const values = try project(o, w.v, normed, rows);
         const qc = try fwd.take(o, m.act, rows * h.heads * hd);
-        try o.copyCols(qg, if (w.gated) 2 * hd else hd, 0, qc.ptr, rows * h.heads, hd);
+        o.copyCols(qg, if (w.gated) 2 * hd else hd, 0, qc.ptr, rows * h.heads, hd) catch |err| {
+            std.log.err("PROBE mtp copyCols q: {s}", .{@errorName(err)});
+            return err;
+        };
         const qn = try fwd.take(o, m.act, rows * h.heads * hd);
         try o.rms(qc, w.q_norm.ptr, qn, rows * h.heads, hd, eps);
         const kn = try fwd.take(o, m.act, rows * h.kv_heads * hd);
@@ -303,13 +324,25 @@ pub const Head = struct {
         const q32 = try ropeRows(o, m, qn, rows, h.heads, pos);
         const k32 = try ropeRows(o, m, kn, rows, h.kv_heads, pos);
         const kr = try fwd.take(o, m.act, rows * h.kv_heads * hd);
-        try o.cast(.{ .ptr = k32, .kind = .f32 }, kr, rows * h.kv_heads * hd);
+        o.cast(.{ .ptr = k32, .kind = .f32 }, kr, rows * h.kv_heads * hd) catch |err| {
+            std.log.err("PROBE mtp cast k: {s}", .{@errorName(err)});
+            return err;
+        };
         const att = try o.arena.of(f32, rows * h.heads * hd);
         for (0..rows) |r| {
             const c: Ops.Cache = .{ .k = h.k.base() + r * h.cache_bytes, .v = h.v.base() + r * h.cache_bytes, .kind = m.act, .kv_heads = h.kv_heads, .total = max_depth + 1, .d = hd };
-            try o.kvWrite(fwd.at(kr, r * h.kv_heads * hd), c.k, 1, h.kv_heads, hd, c.total, slot);
-            try o.kvWrite(fwd.at(values, r * h.kv_heads * hd), c.v, 1, h.kv_heads, hd, c.total, slot);
-            try o.causalAt(q32 + r * h.heads * hd * 4, c, att + r * h.heads * hd * 4, 1, h.heads, fwd.scaleOf(hd), slot_at);
+            o.kvWrite(fwd.at(kr, r * h.kv_heads * hd), c.k, 1, h.kv_heads, hd, c.total, slot) catch |err| {
+                std.log.err("PROBE mtp kvWrite k: {s}", .{@errorName(err)});
+                return err;
+            };
+            o.kvWrite(fwd.at(values, r * h.kv_heads * hd), c.v, 1, h.kv_heads, hd, c.total, slot) catch |err| {
+                std.log.err("PROBE mtp kvWrite v: {s}", .{@errorName(err)});
+                return err;
+            };
+            o.causalAt(q32 + r * h.heads * hd * 4, c, att + r * h.heads * hd * 4, 1, h.heads, fwd.scaleOf(hd), slot_at) catch |err| {
+                std.log.err("PROBE mtp causalAt: {s}", .{@errorName(err)});
+                return err;
+            };
         }
         const gated = try fwd.take(o, m.act, rows * h.heads * hd);
         if (w.gated) {
