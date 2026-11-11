@@ -97,7 +97,7 @@ test "a round with plain_streams or more active windows decodes plain; below it 
     try std.testing.expect(off.drafted > 0);
 }
 
-test "plain rounds skip the draft pass; the replies stay the serial ones; drafting resumes below the threshold" {
+test "a stream's first draft ask waits for its first round; the replies stay the serial ones" {
     const four = [_][]const u32{ &a1, &a1, &a1, &a1 };
     const dims: twin.Dims = .{ .bigram = 8.0, .head = 0.08 };
     const fours = [_]u32{ 40, 40, 40, 40 };
@@ -105,11 +105,11 @@ test "plain rounds skip the draft pass; the replies stay the serial ones; drafti
     const off = try runPlain(&four, .{}, &fours);
     defer freeRun(@constCast(&off));
     try std.testing.expect(off.passes > 0);
-    // at the threshold: shared rounds run no pass (the engine asks depth 0); the four opening asks stay
+    // at the threshold: shared rounds run no pass and the opening asks are skipped, so no pass runs at all
     const on = try runPlain(&four, .{ .plain_streams = 3 }, &fours);
     defer freeRun(@constCast(&on));
     try std.testing.expectEqual(@as(u64, 0), on.drafted);
-    try std.testing.expectEqual(@as(u64, 4), on.passes);
+    try std.testing.expectEqual(@as(u64, 0), on.passes);
     // tokens identical drafted or plain
     for (off.out, on.out) |a, b| try std.testing.expectEqualSlices(u32, a, b);
     // serial reference
@@ -122,21 +122,35 @@ test "plain rounds skip the draft pass; the replies stay the serial ones; drafti
             try std.testing.expectEqualSlices(u32, want, got);
         }
     }
-    // three streams, the first stops early: its last rounds run with 2 active, drafts resume (a pass again)
-    const threes = [_]u32{ 6, 40, 40 };
-    const tail = [_][]const u32{ &a1, &a1, &a1 };
-    const mixed = try runPlain(&tail, .{ .plain_streams = 3 }, &threes);
+}
+
+test "below the threshold a stream drafts on its first ask; drafting resumes once streams finish" {
+    const four = [_][]const u32{ &a1, &a1, &a1, &a1 };
+    const dims: twin.Dims = .{ .bigram = 8.0, .head = 0.08 };
+    const fours = [_]u32{ 40, 40, 40, 40 };
+    // the threshold not reached (1-2 active): the first ask drafts as usual
+    const one = try runPlain(four[0..1], .{ .plain_streams = 3 }, fours[0..1]);
+    defer freeRun(@constCast(&one));
+    try std.testing.expect(one.ok);
+    try std.testing.expect(one.drafted > 0);
+    try std.testing.expect(one.passes > 0);
+    const two = try runPlain(four[0..2], .{ .plain_streams = 3 }, fours[0..2]);
+    defer freeRun(@constCast(&two));
+    try std.testing.expect(two.ok);
+    try std.testing.expect(two.drafted > 0);
+    try std.testing.expect(two.passes > 0);
+    // 4 streams, two finish early: the first asks are skipped, drafting resumes at 2 active
+    const twos = [_]u32{ 6, 6, 40, 40 };
+    const mixed = try runPlain(&four, .{ .plain_streams = 3 }, &twos);
     defer freeRun(@constCast(&mixed));
     try std.testing.expect(mixed.ok);
-    try std.testing.expect(mixed.drafted > 0); // after a stream finished, 2 active: drafts asked again
-    try std.testing.expect(mixed.passes > 4); // the three opening asks plus the resumed rounds
-    // stream 0 stops at 6: its 6 tokens must equal the off run's opening prefix; the others match in full
-    try std.testing.expectEqualSlices(u32, off.out[0][0..6], mixed.out[0]);
-    for (off.out[1..3], mixed.out[1..]) |a, b| try std.testing.expectEqualSlices(u32, a, b);
+    try std.testing.expect(mixed.drafted > 0); // after two streams finished, 2 active: drafts asked again
+    try std.testing.expect(mixed.passes > 0); // every pass is from the resumed rounds
+    // serial reference, each stream's own length
     {
         const t = try twin.Twin.init(gpa, dims, 1);
         defer t.deinit();
-        for (mixed.out, tail, &threes) |got, p, *n| {
+        for (mixed.out, four, &twos) |got, p, *n| {
             const want = try t.serial(0, p, n.*, null, null);
             defer gpa.free(want);
             try std.testing.expectEqualSlices(u32, want, got);
