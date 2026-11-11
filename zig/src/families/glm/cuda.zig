@@ -60,6 +60,7 @@ test {
     _ = @import("cuda_pages_test.zig");
     _ = @import("cuda_snapshot_layout_test.zig");
     _ = @import("cuda_pages_split_test.zig");
+    _ = @import("cuda_owner_route_test.zig");
     _ = @import("cuda_follow_split_test.zig");
     _ = @import("cuda_regions_test.zig");
     _ = @import("cuda_ranks_test.zig");
