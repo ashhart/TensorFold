@@ -17,13 +17,15 @@ const Env = struct {
     }
 };
 
-test "TF_DSV41_DRAFT_PLAIN_STREAMS: parsed, 0 when unset, bad values error" {
+test "TF_DSV41_DRAFT_PLAIN_STREAMS: parsed, 0 when unset, 0 to 16 taken, anything else refused by name" {
     Env.pairs = &.{};
     try std.testing.expectEqual(@as(usize, 0), (try calib_env.depthSettings(&Env.get)).plain_streams);
     Env.pairs = &.{.{ "TF_DSV41_DRAFT_PLAIN_STREAMS", "3" }};
     try std.testing.expectEqual(@as(usize, 3), (try calib_env.depthSettings(&Env.get)).plain_streams);
-    Env.pairs = &.{.{ "TF_DSV41_DRAFT_PLAIN_STREAMS", "oops" }};
-    try std.testing.expectError(error.InvalidCharacter, calib_env.depthSettings(&Env.get));
+    for ([_][]const u8{ "16", "17", "4294967296", "18446744073709551616", "-1", "oops", "3x" }) |raw| {
+        Env.pairs = &.{.{ "TF_DSV41_DRAFT_PLAIN_STREAMS", raw }};
+        if (std.mem.eql(u8, raw, "16")) try std.testing.expectEqual(@as(usize, 16), (try calib_env.depthSettings(&Env.get)).plain_streams) else try std.testing.expectError(error.DraftPlainStreams, calib_env.depthSettings(&Env.get));
+    }
     Env.pairs = &.{};
 }
 
