@@ -17,7 +17,7 @@ fn noSums(_: c.Shape) usize {
 
 /// rows = score rows, n = the columns ranked (V), k = the candidates kept (K).
 pub fn spec() c.Spec {
-    return .{ .name = "cuda flashnext fn_row_topk (a row's top_k candidates for sampled draws)", .accum = .none, .depth = noSums, .out = .raw, .nan = .{ .stated = "NaN of either sign or +Inf sets column 0 to -1; other bf16 bits as drawRow orders them (-0 as +0); ties to the lowest columns; the values above the K-th, then the ties, each in column order" }, .tiles = .{ .{}, .{ .size = 1024, .step = 1, .min = 1 }, .{ .size = k_max, .step = 1, .min = 1 } }, .served = &.{ .{ .rows = 1, .n = vocab, .k = 20 }, .{ .rows = 9, .n = vocab, .k = k_max }, .{ .rows = 17, .n = vocab, .k = 1 }, .{ .rows = 8, .n = 79591, .k = 20 } } };
+    return .{ .name = "cuda flashnext fn_row_topk (a row's top_k candidates for sampled draws)", .accum = .none, .depth = noSums, .out = .raw, .nan = .{ .stated = "NaN of either sign or +Inf sets column 0 to -1; other bf16 bits as drawRow orders them (-0 as +0); ties to the lowest columns; the values above the K-th, then the ties, each in column order" }, .tiles = .{ .{}, .{ .size = 1024, .step = 1, .min = 1 }, .{ .size = k_max, .step = 1, .min = 1 } }, .served = &.{ .{ .rows = 1, .n = vocab, .k = 20 }, .{ .rows = 9, .n = vocab, .k = k_max }, .{ .rows = 17, .n = vocab, .k = 1 }, .{ .rows = 8, .n = 79591, .k = 20 }, .{ .rows = 64, .n = vocab, .k = 20 } } };
 }
 
 /// drawRow's order as an unsigned key: larger value, larger key; -0 as +0.

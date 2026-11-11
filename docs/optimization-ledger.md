@@ -28,6 +28,9 @@ Shared helpers that hold the cross-family parts:
 - `zig/src/core/prompt_tail.zig`: the last layer's kept tile ([#2229]) and the chunks nothing reads ([#2432]).
 - `zig/src/core/state_walk.zig`: one walk for kept prompt states. Not on main yet: it is on [#2215].
 
+Flash Next CUDA sampled reductions: one check in top-k and batched verify/draft completions prepared (#2920);
+CUDA candidate bytes, parity and served/speed qualification are pending.
+
 ## The table
 
 Each cell is one of these:
