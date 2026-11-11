@@ -7,7 +7,7 @@ const Mock = struct {
     var args: [8]u64 = undefined;
     var bindings: usize = 0;
     fn bind(out: *cuda.abi.Function, _: cuda.abi.Module, name: [*:0]const u8) callconv(.c) cuda.abi.Result {
-        const names = [_][]const u8{ "tf_moe_router", "tf_moe_router_expert_first", "tf_moe_topk", "tf_moe_combine" };
+        const names = [_][]const u8{ "tf_moe_router", "tf_moe_router_expert_first", "tf_moe_topk", "tf_moe_combine", "tf_moe_router_tiles" };
         for (names, 1..) |n, i| if (std.mem.eql(u8, n, std.mem.span(name))) {
             out.* = @ptrFromInt(i);
             bindings += 1;
@@ -24,9 +24,9 @@ const Mock = struct {
     }
 };
 test "MoE router port: off avoids the new symbol and restores the row-first grid" {
-    try std.testing.expect(cuda.moe.Fns.expertFirst(null));
-    try std.testing.expect(cuda.moe.Fns.expertFirst("1"));
-    try std.testing.expect(!cuda.moe.Fns.expertFirst("0"));
+    try std.testing.expect(try cuda.moe_bf16.Fns.expertFirst(null));
+    try std.testing.expect(try cuda.moe_bf16.Fns.expertFirst("1"));
+    try std.testing.expect(!try cuda.moe_bf16.Fns.expertFirst("0"));
     var d: cuda.Driver = undefined;
     d.api.cuModuleGetFunction = Mock.bind;
     d.api.cuLaunchKernel = Mock.launch;
@@ -34,8 +34,8 @@ test "MoE router port: off avoids the new symbol and restores the row-first grid
     const s: cuda.Stream = .{ .d = &d, .handle = null };
     for ([_]bool{ false, true }) |on| {
         Mock.bindings = 0;
-        const f = try cuda.moe.Fns.resolveMode(mod, on);
-        try std.testing.expectEqual(@as(usize, if (on) 4 else 3), Mock.bindings);
+        const f = try cuda.moe_bf16.Fns.resolveMode(mod, on);
+        try std.testing.expectEqual(@as(usize, if (on) 5 else 4), Mock.bindings);
         for ([_]usize{ 1, 15, 16, 17, 31, 32, 33, 128, 512, 1024, 2048 }) |rows| for ([_]usize{ 1, 15, 16, 17, 255, 256, 257 }) |experts| for ([_]usize{ 128, 2048, 2055 }) |dims| for ([_]u64{ 0, 0xbeef }) |params| {
             try f.route(s, 0x1000, dims + 16, rows, 0x2000, 0x3000, dims, experts, params);
             try std.testing.expectEqual(@as(usize, if (on) 2 else 1), Mock.id);

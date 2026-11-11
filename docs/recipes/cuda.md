@@ -109,9 +109,10 @@ format ([prompt precision](#prompt-precision)):
 ## Native prompt controls
 
 Qwen dense/MoE, Nemotron ModelOpt and Dory BF16 projections use the shared BF16 prompt tile from 1,024 rows.
-`TF_CUDA_PROMPT_BF16=0` restores their lane projections; unset or any other value selects the tile.
+`TF_CUDA_PROMPT_BF16=0` restores their lane projections; unset or 1 selects the tile; malformed values are refused by name.
 The threshold is fixed. The prompt module always binds its required BF16 symbols, including with the switch off.
 Flash Next keeps its own prompt selection and controls.
+Qwen ModelOpt alone loads the fused GDN norm and expert-first router; MLX keeps the standard images and launches.
 
 For Nemotron, the native `tensorfold run` command on a CUDA build accepts `--device N` to choose a CUDA ordinal. If
 the flag is absent, it uses `TF_CUDA_DEVICE`, then device 0. `--segments N` enables

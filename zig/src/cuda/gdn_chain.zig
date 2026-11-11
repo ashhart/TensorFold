@@ -27,16 +27,14 @@ pub const Chain = struct {
     fused: ?module.Function = null,
 
     pub fn resolve(mod: module.Module) !Chain {
-        return resolveMode(mod, enabled());
+        return resolveMode(mod, try enabled());
     }
 
-    pub fn enabled() bool {
-        const value = std.c.getenv("TF_CUDA_GDN_CHAIN_NORM");
-        return enabledValue(if (value) |v| std.mem.span(v) else null);
+    pub fn enabled() !bool {
+        return @import("sys").environment.read(bool, "TF_CUDA_GDN_CHAIN_NORM", true);
     }
-
-    pub fn enabledValue(value: ?[]const u8) bool {
-        return value == null or !std.mem.eql(u8, value.?, "0");
+    pub fn enabledValue(value: ?[]const u8) !bool {
+        return (try @import("sys").environment.parse("TF_CUDA_GDN_CHAIN_NORM", value) orelse 1) != 0;
     }
 
     pub fn resolveMode(mod: module.Module, on: bool) !Chain {
