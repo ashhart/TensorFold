@@ -39,7 +39,7 @@ pub const Options = struct {
 };
 
 /// What the target did, for the tests and the logs.
-pub const Stats = struct { prompts: u64 = 0, hits: u64 = 0, cached_rows: u64 = 0, windows: u64 = 0, rows: u64 = 0, rewinds: u64 = 0, launches: u64 = 0 };
+pub const Stats = struct { prompts: u64 = 0, hits: u64 = 0, cached_rows: u64 = 0, windows: u64 = 0, rows: u64 = 0, rewinds: u64 = 0, launches: u64 = 0, history_rows: u64 = 0 };
 
 /// A slot: its device state, prompt tail, ids (rows run, the last window's included until its keep) and taps.
 const Slot = struct {
@@ -138,7 +138,7 @@ pub const Target = struct {
     }
 
     pub fn target(t: *Target) iface.Target {
-        return .{ .ptr = t, .vtable = &.{ .prefill = prefill, .window = window, .keep = keep, .taps = taps, .release = release, .resumed = resumedFn } };
+        return .{ .ptr = t, .vtable = &.{ .prefill = prefill, .window = window, .keep = keep, .taps = taps, .release = release, .resumed = resumedFn, .history = history } };
     }
 
     fn self(ptr: *anyopaque) *Target {
@@ -384,6 +384,21 @@ pub const Target = struct {
         const tb = s.kv.taps orelse return;
         const w = tapWidth(t.env.c);
         for (0..m) |r| t.ringPut(s, s.base + r, tb.slice(u16, @as(usize, s.rows) * w)[r * w ..][0..w]);
+    }
+
+    /// Committed rows' taps [start, start + rows) from the ring, in order, in the prompt-taps buffer.
+    fn history(ptr: *anyopaque, slot: u32, start: u64, rows: u32) ?iface.Taps {
+        const t = self(ptr);
+        if (slot >= t.slots.len) return null;
+        const s = &t.slots[slot];
+        const c = t.env.c;
+        const w = tapWidth(c);
+        const end: u64 = if (s.open) s.base else s.hist.items.len;
+        if (w == 0 or s.after_prompt or rows == 0 or start + rows > end or start + ringRows(c) < end) return null;
+        const out = s.ptaps.slice(u16, @as(usize, rows) * w);
+        for (0..rows) |i| @memcpy(out[i * w ..][0..w], s.ring[((start + i) % ringRows(c)) * w ..][0..w]);
+        t.stats.history_rows += rows;
+        return .{ .address = @intFromPtr(s.ptaps.contents()), .rows = rows, .stride = @intCast(w) };
     }
 
     fn taps(ptr: *anyopaque, slot: u32) iface.Taps {
