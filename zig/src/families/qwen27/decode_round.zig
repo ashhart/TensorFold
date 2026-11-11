@@ -151,6 +151,7 @@ pub const Runner = struct {
         };
         defer library.deinit();
         var attention = try attn.Attention.init(m.device, library);
+        geometry.solo_prompt = !units and attention.prompt != null;
         errdefer attention.deinit();
         attention.join = try @import("attention_join.zig").build(a, m.device, units, geometry.group(), geometry.kv_heads, paged);
         pipelines.end();
@@ -527,11 +528,17 @@ pub const Runner = struct {
         return r.geometry.promptRows(@min(requested, r.model.frame.capacity));
     }
 
+    pub fn decodeRows(r: *const Runner) u32 {
+        return if (r.geometry.shared_prefix) r.model.frame.capacity else attn.planning.max_rows;
+    }
+
     pub fn attentionPlan(r: *Runner, round: *const Round) !attn.Plan {
         var windows: [attn.planning.max_streams]attn.planning.Window = undefined;
         if (round.windows.len > windows.len) return error.AttentionStreams;
         for (round.windows, round.slots, 0..) |window, slot, i| windows[i] = .{ .parents = window.parents, .start = window.start, .capacity = if (r.kv_step != null) r.heldRows(slot) else r.capacity };
-        var plan = try attn.Plan.init(r.allocator, windows[0..round.windows.len], r.geometry);
+        var geometry = r.geometry;
+        geometry.solo_prompt = geometry.solo_prompt and r.model.kernels.prompt;
+        var plan = try attn.Plan.init(r.allocator, windows[0..round.windows.len], geometry);
         if (r.attention.join != null) plan.pair(&.{}); // a stream's rows in pairs over the keys below its window
         return plan;
     }
