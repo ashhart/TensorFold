@@ -53,10 +53,7 @@ pub fn loaderTests(b: *std.Build, test_step: *std.Build.Step) void {
     }) }));
     loader.has_side_effects = true; // TF_QWEN_DIR is not a cached input
     test_step.dependOn(&loader.step);
-    // its cuts as mesh declarations: a test-only module, so no binary roots canon or mesh twice
-    const mesh = @import("mesh.zig").module(b, b.graph.host, .debug, @import("cuda_engines.zig").canonModule(b, b.graph.host, .debug));
-    const decl = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen3_5/slicing_decl_test.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "core", .module = coreModule(b, b.graph.host) }, .{ .name = "mesh", .module = mesh } } }) }));
-    loader.step.dependOn(&decl.step);
+    loader.step.dependOn(@import("mesh.zig").qwenDeclTest(b, coreModule(b, b.graph.host))); // its cuts as declarations
     b.step("test-qwen35", "Qwen3.5 / 3.6 checkpoint loader tests; TF_QWEN_DIR indexes a real checkpoint").dependOn(&loader.step);
 }
 /// hip-host-test (part of `test`), hip-gpu-build and hip-gpu-test, hip-affine-build and hip-affine-test.
