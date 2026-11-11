@@ -60,13 +60,13 @@ pub fn run(ks: *const Kernels, stream: cuda.Stream, which: Which, l: cuda.expert
     };
     const in: cuda.experts.Rows = .{ .x = x, .stride = x_stride, .slots = plan.slots };
     const pairs = rows * plan.slots;
-    if (plan.prompt) return g.prompt(stream, epi, in, l, plan.route, out, maxItems(pairs, plan.experts, staged_tile), skip);
+    if (plan.prompt) return g.prompt(stream, epi, in, l, plan.route, out, maxItems(pairs, plan.experts, staged_tile), pairs, staged_tile, skip);
     if (plan.fact) {
         // gate-up reads two matrices a K tile and gains from the factored tiles; down is short and keeps the waves
         if (epi == .up and !l.relu2) return cuda.experts.Nvfp4Experts.runFact(&ks.nvfp4, stream, epi, in, l, plan.route, out, maxItems(pairs, plan.experts, staged_tile), skip);
         return cuda.experts_waves.run(&ks.nvfp4, stream, epi, in, l, plan.route, out, maxItems(pairs, plan.experts, tile), skip);
     }
-    return g.decode(stream, epi, in, l, plan.route, out, maxItems(pairs, plan.experts, tile), skip);
+    return g.decode(stream, epi, in, l, plan.route, out, maxItems(pairs, plan.experts, tile), pairs, tile, skip);
 }
 
 test "block 32's kernels are wanted for a csf0_v1 module alone, not for block 16's recipes or a single-format NVFP4" {
