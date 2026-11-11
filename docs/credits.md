@@ -122,8 +122,12 @@ contributions are in it.
   stages 2- and 3-bit codes the same way.
 - The native Vulkan dense Qwen3.5-2B engine (`zig/src/families/qwen3_5/backend/vulkan/`) follows the same frozen
   dense-lane design ([lane_qmm.py](https://github.com/ashhart/TensorFold/blob/v0.6.6/src/tensorfold/kernels/qwen/dense/v1/lane_qmm.py),
-  [#34](https://github.com/ashhart/TensorFold/pull/34)) for its per-lane qmm decomposition; its compute shaders are
-  new work, written for this engine.
+  [#34](https://github.com/ashhart/TensorFold/pull/34)) for its per-lane qmm decomposition. Fifteen of its compute
+  shaders and `omarchy_trig.h` come from Joshua Warren's MIT-licensed omarchy-mlx unchanged (`argreduce_chunk`,
+  `argreduce_combine`, `binary_vec`, `cast`, `conv_dw1d`, `copy_general`, `dequant`, `fast_norm`, `fast_norm_gated`,
+  `fast_rope`, `gather_take`, `gated_delta_decode`, `gated_delta_prefill_oracle`, `gdn_conv_decode`, `sdpa_decode_native`
+  and `swiglu`); `qmm.comp` is derived from it. The rest (`attention_gate`, `finite_logits`, `gdn_split`, `qmm_q4_vec4`
+  and the contract controls) are new work, written for this engine.
 - @di37 made the engine read the GPU generation once from `applegpu_gN`, and a virtual machine's GPU as none, in
   [#209](https://github.com/ashhart/TensorFold/pull/209)
   ([device.py](https://github.com/ashhart/TensorFold/blob/v0.6.6/src/tensorfold/kernels/device.py)), as
