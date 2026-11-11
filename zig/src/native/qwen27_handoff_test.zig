@@ -97,8 +97,12 @@ const Mac = struct {
     fn prefill(ptr: *anyopaque, s: *lanes.Stream) anyerror!void {
         const m = current.?;
         m.resumed = 0;
+        var cached: ?u32 = null; // what opening left in s.cached, which the fake's own fill overwrites
         if (slots.resumeAt(&m.back, s.prompt(), s.decode_spans) > 0) {
-            m.resumed = @intCast((try slots.opening(&m.back, s, 0)).from);
+            const f = try slots.opening(&m.back, s, 0);
+            m.resumed = @intCast(f.from);
+            cached = s.cached;
+            if (f.rewind > 0) m.back.standing.rewind_at = f.rewind; // chunk's saveRewind there, which needs a GPU
         } else {
             const at: usize = if (s.reuse.saved != null) s.reuse.at else 0;
             const point = slots.rewindPoint(&m.back, s, 0, at, .{});
@@ -106,7 +110,7 @@ const Mac = struct {
             m.back.standing.rewind_at = point; // saveRewind's blit at the point, which needs a GPU, landed
         }
         try m.fake_prefill.?(ptr, s);
-        if (m.resumed > 0) s.cached = m.resumed; // the fake fills from 0; the Metal stood there already
+        if (cached) |n| s.cached = n; // opening's own value: the fake fills from 0, the Metal stood there already
     }
 
     /// The stream leaves slot 0 one short of its reply's end, as unbind does.
@@ -180,7 +184,8 @@ test "qwen27 hand-off: the follow-up resumes slot 0 where the pulled turn left i
     try t.expectEqual(@as(u32, 1), peer.fills); // nothing pulled again
     try t.expectEqual(@as(u32, p1.len + 2), m.resumed); // in place where turn 1 left slot 0, not at 0
     try t.expectEqual(Heard{ .reason = .length, .remote_prefix = p1.len + 2, .pulled_prefix = 0 }, next.plain()); // kept remote
-    try t.expect(st.remote and st.rewind_at == 8 and st.tokens.len == follow.len + 2); // and it stands remote again
+    // and it stands remote again, its point still turn 1's: a pass resumed in a reply sent back as generated makes none
+    try t.expect(st.remote and st.rewind_at == 8 and st.tokens.len == follow.len + 2);
     try t.expectEqual(.{ true, true, @as(u32, 8), @as(usize, p1.len + 2) }, stood); // a remote record one short of the end
     try t.expectEqual(@as(u32, 8), back_at); // a turn without the reply's reasoning goes back to the history end
 }
