@@ -72,6 +72,7 @@ pub const rules = [_]Rule{
     .{ .name = "TF_DSV41_ENGRAM_CACHE", .scope = .metal, .kind = .u32, .forms = "a whole Engram record count a layer from 0 to 4294967295 (default 65536)" },
     .{ .name = "TF_PREFILL_MIN", .scope = .metal, .kind = .u64, .forms = "a whole prompt-token count (default 4096)" },
     .{ .name = "TF_PREFILL_CHUNK", .scope = .metal, .kind = .u64, .min = 16, .forms = "a positive multiple of 16 prompt tokens (default 512)" },
+    .{ .name = "TF_PREFILL_TAIL", .scope = .metal, .kind = .u64, .forms = "DeepSeek V4.1 with --prefill-from: prompt tokens the Mac prefills itself after the pull (default 1; 0 cuts the prefix on the TF_PREFILL_CHUNK boundary)" },
     .{ .name = "TF_PREFILL_KEEP", .scope = .metal, .kind = .flag, .forms = "0 or 1 (default 1)" },
     .{ .name = "TF_PREFILL_AHEAD", .scope = .metal, .kind = .u64, .min = 1, .forms = "a whole number of fills ahead from 1 (default 4)" },
     .{ .name = "TF_PREFILL_API_KEY_FILE", .scope = .metal, .kind = .path, .forms = "a path to a file only its owner can read, holding the GB10 server's API key" },
