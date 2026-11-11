@@ -12,7 +12,7 @@ var pulled_state: u8 = 0; // a pulled copy's stand-in: these rules never read it
 fn open(st: *rules.Standing, s: *Stream, kept_at: u32) rules.Resume {
     const plan = if (rules.plain(s)) st.plan(s.prompt(), s.decode_spans, kept_at) else .none;
     st.take(t.allocator, plan);
-    if (plan != .none) rules.inherit(&s.reuse, st.remote);
+    rules.inherit(&s.reuse, plan, st.remote); // the rule decides which plans take the rows' origin, as there
     return plan;
 }
 
