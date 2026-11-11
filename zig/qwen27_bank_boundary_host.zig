@@ -30,6 +30,7 @@ test "qwen27 bank boundary: a verify tail cannot run on prompt heads or accepted
     runner.active = null;
     runner.model = &model;
     var called = false;
+    runner.picks_tail = false;
     runner.tail = .{ .ptr = &called, .encode = unusedTail };
     var round: q.round_plan.Round = undefined;
     round.ids = @constCast(&[_]u32{0});
@@ -58,6 +59,7 @@ test "qwen27 bank boundary: a rank's verify never runs a tail" {
     runner.active = null;
     runner.model = &model;
     var called = false;
+    runner.picks_tail = false;
     runner.tail = .{ .ptr = &called, .encode = unusedTail };
     runner.reduce = .{ .ptr = undefined, .part = unusedSeamPart, .stage = unusedSeamStage, .gather = unusedSeamGather, .failed = unusedSeamFailed };
     var round: q.round_plan.Round = undefined;
@@ -74,4 +76,24 @@ test "qwen27 bank boundary: snapshot drain preserves the picked bonus while rese
     try std.testing.expectEqual(@as(?u32, 17), g.pending);
     try g.settle();
     try std.testing.expectEqual(@as(?u32, null), g.pending);
+}
+
+test "qwen27 bank boundary: pick tails reach accepted-chain validation but never a rank seam" {
+    var model: q.model.Model = undefined;
+    model.frame.capacity = 16;
+    var runner: q.decode_round.Runner = undefined;
+    runner.failed = false;
+    runner.active = null;
+    runner.model = &model;
+    runner.picks_tail = true;
+    runner.reduce = null;
+    var called = false;
+    runner.tail = .{ .ptr = &called, .encode = unusedTail };
+    runner.ready = 0;
+    var round = try q.round_plan.Round.init(std.testing.allocator, &.{.{ .slot = 0, .start = 0, .capacity = 16, .ids = &.{0} }}, 4, 1, 16);
+    defer round.deinit();
+    try std.testing.expectError(error.CachePositionDiffers, runner.advance(&round, .all));
+    runner.reduce = .{ .ptr = undefined, .part = unusedSeamPart, .stage = unusedSeamStage, .gather = unusedSeamGather, .failed = unusedSeamFailed };
+    try std.testing.expectError(error.TailOnRank, runner.advance(&round, .all));
+    try std.testing.expect(!called);
 }
