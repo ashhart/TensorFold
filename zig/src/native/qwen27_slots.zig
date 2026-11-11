@@ -239,24 +239,24 @@ fn takeStanding(b: *Metal, s: *lanes.Stream, kept_at: u32) !u32 {
     b.standing.take(b.gpa, plan);
     errdefer b.standing = b.standing.settings(); // tokens and spans freed by take: the point and reply go too
     // rows [0, rewind_at) and the buffer hold only while slot 0 just extends past it: a restore, reset or move drops it
-    switch (plan) {
+    const at: u32 = switch (plan) {
         .none => return 0,
-        .here => |n| {
+        .here => |n| here: {
             if (b.draft) |d| {
                 try d.model.reset(); // a new session over the kept taps, as after a restore
                 d.model.committed_end = n;
             }
-            resume_rules.inherit(&s.reuse, b.standing.remote); // its rows' origin, not a pull it skipped
-            return n;
+            break :here n;
         },
-        .back => |h| {
+        .back => |h| back: {
             const buf = b.rewind orelse return dropRewind(b);
             if (b.draft) |d| try d.model.reset();
             q.snapshot.rewindSlot(b.gpa, b.runner, 0, b.ringOf(0), h, buf) catch return dropRewind(b); // starts at 0
-            resume_rules.inherit(&s.reuse, b.standing.remote);
-            return h;
+            break :back h;
         },
-    }
+    };
+    resume_rules.inherit(&s.reuse, b.standing.remote); // here or back: its rows' origin, not a pull it skipped
+    return at;
 }
 
 /// A pass that could not rewind slot 0 starts it afresh, keeping no rewind point (0: resumed nowhere).
@@ -278,13 +278,13 @@ pub fn resumeAt(ptr: *anyopaque, prompt: []const u32, spans: []const [2]u32) u32
 }
 
 /// A stream leaves slot 0: what it stands at stays for the next prompt that extends it, if a fresh pass stands there.
-fn leave(b: *Metal, s: *const lanes.Stream) void {
+pub fn leave(b: *Metal, s: *const lanes.Stream) void {
     const at = b.runner.offsets[0];
     b.standing.left(b.gpa, s, at, slotResume(b) and standsAt(b, at)); // a hand-off's rows too, with TF_PREFILL_KEEP
 }
 
 /// Where slot 0's pass from `at` keeps its rewind point: its history's end (0: none, or it resumed in a `replay`).
-fn rewindPoint(b: *const Metal, s: *const lanes.Stream, slot: u32, at: usize, replay: resume_rules.Replay) u32 {
+pub fn rewindPoint(b: *const Metal, s: *const lanes.Stream, slot: u32, at: usize, replay: resume_rules.Replay) u32 {
     if (slot != 0 or b.rewind == null or !slotResume(b) or replay.holds(at)) return 0;
     return b.standing.point(s, at);
 }

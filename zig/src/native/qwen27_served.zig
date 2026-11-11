@@ -587,3 +587,7 @@ test "Qwen27 interior state uses a guaranteed cold request cut" {
 test "qwen27 reply cache: warm work preserves both client histories within rounded budgets" {
     try @import("qwen27_reply_cache_test.zig").exercise(keepEnd, slot_state.opening);
 }
+
+test {
+    _ = @import("qwen27_handoff_test.zig"); // "qwen27 hand-off:", run by test-qwen27-reply-cache-host
+}
