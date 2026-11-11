@@ -13,8 +13,15 @@ fn observed(s: anytype) Table {
 }
 
 pub fn enabled(e: anytype, p: anytype) bool {
-    return e.alone and e.cfg.lone_cost_tile > 0 and e.cfg.timed and e.cfg.plain_guard and
+    return e.alone and e.cfg.lone_cost_tile > 0 and e.cfg.timed and
         e.cfg.draft_confidence == null and p.kind == .head and p.lanes == null;
+}
+
+/// The rule's view of a stream, marked as a lone round priced from its own times or not.
+pub fn marked(who: anytype, lone: bool) @TypeOf(who) {
+    var w = who;
+    w.lone = lone;
+    return w;
 }
 
 /// Measured full-round time at this width; otherwise the nearest sample plus the startup forward-time difference.
@@ -58,7 +65,7 @@ pub fn probe(e: anytype, p: anytype) ?u32 {
     const most: u32 = @intCast(@min(p.count() + 1, e.cfg.batch_rows));
     var retry: ?u32 = null;
     var earliest: u64 = std.math.maxInt(u64);
-    var rows: u32 = 1;
+    var rows: u32 = @min(@as(u32, if (e.cfg.plain_guard) 1 else 2), most); // without plain_guard no round is drafted with nothing
     while (true) {
         if (rows < s.cost_probes.len) {
             const cd = s.cost_probes[rows];

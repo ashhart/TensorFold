@@ -231,7 +231,7 @@ pub const Engine = struct {
                 const ms = e.clock.elapsedMs(.cost);
                 const first = s.rounds == 1; // a stream's first round carries the prefill-to-decode switch
                 try trail.event(e, &.{ f("ev", str("cost")), f("stream", str(s.id)), f("drafts", int(rows - 1)), f("init", .{ .bool = first }), f("ms", ev.bits(ms)) });
-                try e.rule.observeCost(@intCast(rows - 1), ms, first, win.who(s));
+                try e.rule.observeCost(@intCast(rows - 1), ms, first, lone_costs.marked(win.who(s), lone_costs.enabled(e, plan)));
                 lone_costs.observe(s, plan.cost_probe_rows, rows, ms);
             }
         }

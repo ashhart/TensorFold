@@ -6,6 +6,9 @@ const Stream = lanes.Stream;
 const Held = lanes.stream.Held;
 const Allocator = std.mem.Allocator;
 
+const lone_costs = lanes.lone_costs;
+const Landing = lanes.draft_tree.Landing;
+
 pub const TREE_MIN = 5; // drafts from which a stream's window is a DFlash2 tree (below: its chain)
 
 /// The round loop's facts through Drafted as the lane target gave them alone (its own rule shares a round's rows).
@@ -13,6 +16,51 @@ pub fn facts(wrap: *const lanes.drafted.Drafted, target: lanes.Model) lanes.Mode
     var m = wrap.facts(target);
     m.allocate_shared_drafts = target.allocate_shared_drafts;
     return m;
+}
+
+/// Calibration probes every 4 rows, from row 2: 1, 5, 9, 13 and 15 drafts.
+pub const lone_tile = 4;
+
+/// The drafts a lone tree grows under the `XPU_TREE` cap, 15 at most; null: under 2 there is no width to choose.
+pub fn priced(cap: u32) ?u32 {
+    const n = @min(cap, 15);
+    return if (n >= 2) n else null;
+}
+
+/// A grown tree's node chances: each its landing chance under its parent times its parent's, as the CUDA drafter's.
+pub fn chances(landing: *const Landing, sampled: bool, parents: []const i32, own: []const f64, out: []f64) void {
+    for (out, parents[0..out.len], own[0..out.len]) |*o, parent, x| o.* = landing.chance(sampled, x) * (if (parent >= 0) out[@intCast(parent)] else 1);
+}
+
+/// A lone round's drafts to verify, and the rows of a calibration trial when the rule asks for one.
+pub const Width = struct { nodes: u32, trial: ?u32 = null };
+
+/// A lone round's drafts: the most expected tokens a ms over its band's priced rounds, or a width to measure.
+pub fn width(e: *lanes.Engine, s: *Stream, chance: []const f64) !Width {
+    const tokens: [16]u32 = @splat(0);
+    const p: lanes.windows.Plan = .{ .stream = s, .position = s.cache_len, .kind = .head, .tokens = tokens[0..chance.len] };
+    if (!s.prices_seeded) {
+        s.prices_seeded = true;
+        _ = try e.rule.rates(lanes.windows.who(s));
+        try lone_costs.seed(e.gpa, lone_costs.slot(&e.lone_kept, s).*, s);
+    }
+    _ = e.arena.reset(.retain_capacity);
+    const a = e.arena.allocator();
+    const prices = try lone_costs.prices(e, p);
+    // least_rows 2: a lone tree drafts at least one node
+    const counts = try lanes.allocate.allocateDrafts(a, &.{1}, &.{chance}, &prices, 0, @max(1, e.cfg.batch_rows), .{ .least_rows = 2 });
+    var out: Width = .{ .nodes = counts[0] };
+    if (lone_costs.probe(e, p)) |drafts| {
+        out = .{ .nodes = drafts, .trial = drafts + 1 };
+        s.cost_probe_trial = lone_costs.trial(s, chance, drafts + 1);
+    }
+    return out;
+}
+
+/// A complete lone round of `drafts` took `ms`: the rule blends it into the stream's table, and the trial's result.
+pub fn measured(e: *lanes.Engine, s: *Stream, trial: ?u32, drafts: u32, ms: f64) !void {
+    try e.rule.observeCost(drafts, ms, false, lone_costs.marked(lanes.windows.who(s), true));
+    lone_costs.observe(s, trial, drafts + 1, ms);
 }
 
 /// `M`: the drafter's module (Drafter, Block, Absorb, TOPK, WIN); `H`: the lane target it reads slots and taps from.
