@@ -25,23 +25,40 @@ pub const Method = struct {
     shape: Shape = .raw,
     cycle: u32 = 4,
     deep: u32 = 5,
+    /// timed repetitions stop once the run has taken this long, each entry keeping its first timed run (0: no limit)
+    budget_ms: u32 = 0,
 };
+
+/// A run that was not timed because the budget was spent (a sample's ns).
+pub const skipped: i64 = std.math.minInt(i64);
+
+/// The method for a backend whose launch carries at most 16 rows: few repetitions and a time budget.
+pub const launch_bound: Method = .{ .reps = 3, .warm = 1, .stat = .min, .recheck = 0, .cycle = 4, .deep = 2, .budget_ms = 400 };
+
+/// The shared windows a launch-bound backend times: the second launch's first row, then two sizes of it.
+pub const launch_wide = [_]u32{ 17, 24, 32 };
 
 /// The defaults by shape (raw: G15; fit: G14, VERSION 3), then the explicit knobs, each range-checked.
 pub fn method(get: *const fn ([*:0]const u8) ?[]const u8) !Method {
-    const shape_s = trimmed(get("TF_DSV41_CALIB_SHAPE")) orelse "raw";
-    const shape: Shape = if (std.ascii.eqlIgnoreCase(shape_s, "raw")) .raw else if (std.ascii.eqlIgnoreCase(shape_s, "fit")) .fit else return error.CalibShape;
-    const d: Method = if (shape == .raw) .{} else .{ .shape = .fit, .warm = 2, .recheck = 2, .cycle = 0, .deep = 3 };
-    const stat_s = trimmed(get("TF_DSV41_CALIB_STAT")) orelse "median";
+    return methodFrom(get, .{});
+}
+
+/// `method` where a backend's own defaults (`base`) stand in for the reference's when the shape is not named.
+pub fn methodFrom(get: *const fn ([*:0]const u8) ?[]const u8, base: Method) !Method {
+    const named = trimmed(get("TF_DSV41_CALIB_SHAPE"));
+    const shape: Shape = if (named) |n| (if (std.ascii.eqlIgnoreCase(n, "raw")) .raw else if (std.ascii.eqlIgnoreCase(n, "fit")) .fit else return error.CalibShape) else base.shape;
+    const d: Method = if (named == null) base else if (shape == .raw) .{} else .{ .shape = .fit, .warm = 2, .recheck = 2, .cycle = 0, .deep = 3 };
+    const stat_s = trimmed(get("TF_DSV41_CALIB_STAT")) orelse @tagName(d.stat);
     const stat: Stat = if (std.ascii.eqlIgnoreCase(stat_s, "median")) .median else if (std.ascii.eqlIgnoreCase(stat_s, "min")) .min else return error.CalibStat;
     return .{
-        .reps = try num(get("TF_DSV41_CALIB_REPS"), 5, 1, 50),
+        .reps = try num(get("TF_DSV41_CALIB_REPS"), d.reps, 1, 50),
         .warm = try num(get("TF_DSV41_CALIB_WARM"), d.warm, 0, 20),
         .stat = stat,
         .recheck = try num(get("TF_DSV41_CALIB_RECHECK"), d.recheck, 0, early),
         .shape = shape,
         .cycle = try num(get("TF_DSV41_CALIB_CYCLE"), d.cycle, 0, early),
         .deep = try num(get("TF_DSV41_CALIB_DEEP_REPS"), d.deep, 1, 50),
+        .budget_ms = try num(get("TF_DSV41_CALIB_BUDGET_MS"), d.budget_ms, 0, 600_000),
     };
 }
 
@@ -131,15 +148,20 @@ pub fn split(total: u32, out: []u32) void {
     for (out, 0..) |*o, i| o.* = total / n + @intFromBool(i < total % n);
 }
 
-/// The wide buckets `slots` slots can time (at most SLOT_ROWS rows a slot), past `rows`.
-pub fn wideBuckets(slots: u32, rows_cap: u64, rows: u32, out: *[wide.len]u32) []u32 {
+/// The wide buckets `slots` slots can time (at most SLOT_ROWS rows a slot), past `rows`, from `list` (ascending).
+pub fn pickWide(slots: u32, rows_cap: u64, rows: u32, list: []const u32, out: *[wide.len]u32) []u32 {
     var n: usize = 0;
     const top = @min(rows_cap, @as(u64, slot_rows) * @max(1, slots));
-    for (wide) |b| if (rows < b and b <= top) {
+    for (list) |b| if (rows < b and b <= top and n < out.len) {
         out[n] = b;
         n += 1;
     };
     return out[0..n];
+}
+
+/// The reference's wide buckets.
+pub fn wideBuckets(slots: u32, rows_cap: u64, rows: u32, out: *[wide.len]u32) []u32 {
+    return pickWide(slots, rows_cap, rows, &wide, out);
 }
 
 fn ceilDiv(a: u32, b: u32) u32 {
@@ -175,10 +197,15 @@ pub const Plan = struct {
 
     /// `slots`: engine slots; `rows_cap`: TF_DSV41_GRAPH_ROWS_MAX (64); `rows`: widest window (16); `draft`: DSpark.
     pub fn init(gpa: Allocator, slots: u32, rows_cap: u64, rows: u32, m: Method, draft: bool) !Plan {
+        return initWide(gpa, slots, rows_cap, rows, m, draft, &wide);
+    }
+
+    /// `init` timing the shared windows of `list` (ascending, at most `wide.len`) in place of the reference's.
+    pub fn initWide(gpa: Allocator, slots: u32, rows_cap: u64, rows: u32, m: Method, draft: bool, list: []const u32) !Plan {
         if (rows == 0 or rows > max_rows) return error.BadRows;
         var p: Plan = .{ .rows = rows, .n = 1, .per_slot = false, .draft = draft, .m = m };
         errdefer p.runs.deinit(gpa);
-        const w = wideBuckets(slots, rows_cap, rows, &p.wide_buf);
+        const w = pickWide(slots, rows_cap, rows, list, &p.wide_buf);
         p.nwide = @intCast(w.len);
         const want: u32 = if (w.len > 0) @max(2, ceilDiv(w[w.len - 1], slot_rows)) else 2;
         p.n = @min(@max(1, slots), want);
@@ -259,9 +286,17 @@ pub const Plan = struct {
         if (p.draft) out[0] = (try p.stat(samples, .draft, &buf)) orelse return error.NoRuns;
     }
 
+    /// Run `at` only warms or repeats an entry an earlier run timed, so dropping it leaves the entry a sample.
+    pub fn repeat(p: *const Plan, at: usize) bool {
+        const run = p.runs.items[at];
+        if (run.warm) return true;
+        for (p.runs.items[0..at]) |r| if (!r.warm and std.meta.eql(r.what, run.what)) return true;
+        return false;
+    }
+
     fn stat(p: *const Plan, samples: []const f64, what: What, buf: *[max_samples]f64) !?f64 {
         var n: usize = 0;
-        for (p.runs.items, samples) |r, x| if (!r.warm and std.meta.eql(r.what, what)) {
+        for (p.runs.items, samples) |r, x| if (!r.warm and x >= 0 and std.meta.eql(r.what, what)) {
             if (n == buf.len) return error.TooManyRuns;
             buf[n] = x;
             n += 1;
