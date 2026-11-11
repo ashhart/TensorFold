@@ -126,13 +126,17 @@ pub const Fixture = struct {
         if (mode != .nonfinite) return;
         const nan = std.math.nan(f32);
         const inf = std.math.inf(f32);
-        const at = [_]struct { usize, usize }{ .{ 0, 0 }, .{ 1, 1 }, .{ 2, 2 }, .{ 3, 3 } };
+        const at = [_]struct { usize, usize }{ .{ 0, 0 }, .{ 1, 1 }, .{ 2, 2 }, .{ 3, 3 }, .{ 4, 4 }, .{ 4, 5 } };
         for (at, 0..) |p, i| if (p[0] < f.shape.rows) {
             const x = f.part(p[0], p[1], 0);
+            // row 4: an infinity in the last slice, in two heads; a merge reading past it would weigh it by zero
+            const last = f.part(p[0], p[1], f.used(p[0]) - 1);
             switch (i) {
                 0 => f.pm[x] = nan,
                 1 => f.po[x * head_dim + 3] = inf,
                 2 => f.po[x * head_dim + 5] = -inf,
+                4 => f.po[last * head_dim + 7] = inf,
+                5 => f.po[last * head_dim + 9] = -inf,
                 else => f.pl[x] = nan,
             }
         };
@@ -250,6 +254,8 @@ test "XPU merge: nonfinite partials leave finite, NaN and infinite classes" {
     try std.testing.expectEqual(c.Class.pos_inf, c.classOf(want[(1 * q_heads + 1) * head_dim + 3]));
     try std.testing.expectEqual(c.Class.neg_inf, c.classOf(want[(2 * q_heads + 2) * head_dim + 5]));
     try std.testing.expectEqual(c.Class.nan, c.classOf(want[(3 * q_heads + 3) * head_dim]));
+    try std.testing.expectEqual(c.Class.pos_inf, c.classOf(want[(4 * q_heads + 4) * head_dim + 7]));
+    try std.testing.expectEqual(c.Class.neg_inf, c.classOf(want[(4 * q_heads + 5) * head_dim + 9]));
     try std.testing.expectEqual(c.Class.finite, c.classOf(want[(1 * q_heads + 1) * head_dim]));
 }
 
