@@ -18,6 +18,7 @@ const vt = @import("vision_tower.zig");
 const vrows = @import("vision_rows.zig");
 const prep = @import("vision_prep.zig");
 const pick = @import("pick.zig");
+const round_prof = @import("round_prof.zig");
 
 const iface = host.iface;
 const lanes = host.lanes;
@@ -68,6 +69,8 @@ pub const Target = struct {
     slots: []Slot,
     cache: snapshots.Store,
     stats: Stats = .{},
+    /// TF_DSV41_ROUND_PROF: where the windows book their times (null: no clock reads)
+    prof: ?*round_prof.RoundProf = null,
     /// a command buffer failed: the device state is no longer trusted (the health hook)
     failed: bool = false,
     /// the target's own buffers joined the weights' residency owner (they leave it before they are freed)
@@ -431,6 +434,7 @@ pub const Target = struct {
             for (g.tokens) |id| if (id >= c.vocab) return error.BadToken;
             total += @intCast(n);
         }
+        var rec: ?round_prof.Round = if (t.prof) |p| p.begin(@intCast(group.len), total) else null;
         for (group) |g| {
             const s = &t.slots[g.slot];
             t.tree.close(g.slot);
@@ -439,7 +443,7 @@ pub const Target = struct {
             try s.hist.appendSlice(t.a, g.tokens);
             s.high = @max(s.high, s.hist.items.len);
         }
-        t.launch(group) catch |e| return t.fail(e);
+        t.launch(group, if (rec) |*r| r else null) catch |e| return t.fail(e);
         const lg = t.b.logitsOf(c, total);
         var r0: usize = 0;
         for (group, choices) |g, out| {
@@ -458,17 +462,21 @@ pub const Target = struct {
             r0 += n;
         }
         t.stats.launches += 1;
+        if (rec) |*r| {
+            r.lap(.choose);
+            r.end();
+        }
     }
 
     /// One launch of the decode forward over the segments' rows, each slot's ids at its positions from `start`.
-    fn launch(t: *Target, group: []const iface.Segment) !void {
+    fn launch(t: *Target, group: []const iface.Segment, rec: ?*round_prof.Round) !void {
         const look = t.env.c.engram_max_ngram - 1;
         var runs: [R]Run = undefined;
         for (group, runs[0..group.len]) |g, *r| {
             const s = &t.slots[g.slot];
             r.* = .{ .kv = &s.kv, .ids = g.tokens, .start = @intCast(g.start), .lookback = s.hist.items[@as(usize, @intCast(g.start)) -| look..@intCast(g.start)] };
         }
-        return t.launchRuns(runs[0..group.len]);
+        return t.launchRunsTimed(runs[0..group.len], rec);
     }
 
     /// One chain of a launch: the state it runs on, its ids from position `start`, the Engram ids before them.
@@ -476,6 +484,10 @@ pub const Target = struct {
 
     /// One launch of the decode forward over the runs' rows, in order (at most R rows).
     pub fn launchRuns(t: *Target, runs: []const Run) !void {
+        return t.launchRunsTimed(runs, null);
+    }
+
+    fn launchRunsTimed(t: *Target, runs: []const Run, rec: ?*round_prof.Round) !void {
         const e = t.env;
         const c = e.c;
         var pieces: [R]forward.Piece = undefined;
@@ -491,10 +503,11 @@ pub const Target = struct {
         }
         try forward.prepareSegs(&t.b, c, pieces[0..runs.len], e.lookup);
         try e.s.writeSpans(c, spans[0..runs.len]);
+        if (rec) |r| r.lap(.prepare);
         const x: ctx_.Ctx = .{ .c = c, .p = e.p, .s = e.s, .slot = segs[0].slot, .tables = e.tables, .p0 = segs[0].p0, .rows = r0, .segs = segs[0..runs.len] };
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
-        try forward.run(&x, e.queue, e.model, &t.b);
+        try forward.runTimed(&x, e.queue, e.model, &t.b, rec);
     }
 
     /// Keep the window's first rows (a chain from row 0): later rows' ids go, the compressor's carry rewinds.
