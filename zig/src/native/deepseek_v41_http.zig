@@ -15,6 +15,7 @@ const Route = api.LaneHost.Remote.Route;
 const Ask = api.LaneHost.Remote.Ask;
 const Verdict = api.LaneHost.Remote.Verdict;
 const Measured = api.LaneHost.Remote.Measured;
+const Outcome = api.LaneHost.Remote.Outcome;
 
 /// The lane host's remote source over HTTP: one pull at a time, each into a blank Snapshot of this model's shape.
 pub const Pull = struct {
@@ -35,18 +36,32 @@ pub const Pull = struct {
     running: std.atomic.Value(u32) = .init(0),
     closing: std.atomic.Value(bool) = .init(false),
     off: std.atomic.Value(bool) = .init(false),
+    /// the gate wait of the pull under way, for its phases
+    waited_ns: u64 = 0,
 
     pub fn source(p: *Pull) api.LaneHost.Remote.Source {
         return .{ .ptr = p, .wants = wants, .fill = fill, .drop = drop, .running = &p.running, .measured = measured };
     }
 
     /// A prefix of `prompt` beyond `cached` on a whole chunk, asked for, fetched and landed whole in a blank Snapshot.
-    pub fn pull(p: *Pull, prompt: []const u32, cached: u64) !?Filled {
+    pub fn pull(p: *Pull, prompt: []const u32, cached: u64, gone: *const std.atomic.Value(bool)) !?Filled {
         if (p.closing.load(.acquire) or p.off.load(.acquire)) return null;
         const upto = p.policy.upto(prompt.len, cached) orelse return null;
-        _ = p.route.admit(p.io, p.route.estimate(upto, prompt.len - cached), &p.closing) orelse return null;
+        p.waited_ns = p.route.admit(p.io, p.route.estimate(upto, prompt.len - cached), &p.closing, gone) orelse return null;
         defer p.route.leave();
-        if (p.closing.load(.acquire) or p.off.load(.acquire)) return null;
+        if (p.closing.load(.acquire) or p.off.load(.acquire) or gone.load(.acquire)) return null;
+        return api.LaneHost.Remote.guarded(p, prompt, cached, upto, gone);
+    }
+
+    /// The trial pull's liveness check: the GB10's server answers.
+    pub fn alive(p: *Pull) bool {
+        if (p.trigger.alive()) return true;
+        std.log.warn("remote prefill: the GB10's server does not answer /health", .{});
+        return false;
+    }
+
+    /// The pull itself, the gate held: trigger, fetch, landing; each bound by the pull's deadline.
+    pub fn run(p: *Pull, prompt: []const u32, _: u64, upto: u64, gone: *const std.atomic.Value(bool), outcome: *Outcome) !?Filled {
         p.reason.len = 0;
         const at: u32 = std.math.cast(u32, upto) orelse return error.PrefixTooLong;
         if (upto >= prompt.len) return error.PrefixTooLong; // a token past the prefix goes too
@@ -55,7 +70,12 @@ pub const Pull = struct {
         p.io.randomSecure(id[0..8]) catch return error.NoEntropy;
         std.mem.writeInt(u64, id[8..16], p.next_id, .little);
         p.next_id += 1;
+        const limit_s = p.route.deadlineS(upto);
+        p.trigger.limit_s = limit_s;
+        p.trigger.gone = gone;
+        defer p.trigger.gone = null; // the ticket's flag goes with its fill
         try p.trigger.trigger().start_fn(p.trigger.trigger().ptr, id, prompt[0 .. upto + 1]);
+        const triggered = fabric.words.nowNs();
 
         const snap = try p.model.snapshotBlank();
         errdefer p.model.snapshotDrop(snap);
@@ -64,8 +84,8 @@ pub const Pull = struct {
         defer landing.deinit();
         var arena: std.heap.ArenaAllocator = .init(p.gpa);
         defer arena.deinit();
-        p.from.budget_ns = trigger.seconds(prompt.len) * std.time.ns_per_s;
-        const expect: fabric.decoder.Expect = .{ .model = p.checkpoint, .tokens = prompt[0..upto], .protocol = fabric.wire.recurrent_version };
+        p.from.budget_ns = limit_s * std.time.ns_per_s;
+        const expect: fabric.decoder.Expect = .{ .model = p.checkpoint, .tokens = prompt[0..upto], .protocol = fabric.wire.recurrent_version, .abort = gone };
         const got = p.from.pull(arena.allocator(), id, expect, landing.decoderSink(), &p.reason) catch |err| {
             if (err == error.Refused and p.reason.len > 0) std.log.warn("remote prefill: the GB10 refused ({s})", .{p.reason.text()});
             if (err != error.NotHeld and err != error.Unauthorized) p.from.release(id); // what is held there is of no use now
@@ -82,7 +102,8 @@ pub const Pull = struct {
         p.bytes += got.bytes;
         p.ns += took;
         p.route.observe(.{ .pass = .remote, .rows = at, .ns = took });
-        return .{ .saved = snap, .at = at };
+        outcome.* = .ok;
+        return .{ .saved = snap, .at = at, .phases = .{ .queue_ns = p.waited_ns, .trigger_ns = triggered - t0, .pull_ns = took -| (triggered - t0), .land_ns = landing.land_ns, .bytes = got.bytes } };
     }
 
     /// A mismatch no retry mends (the checkpoint, the prompt's tokens, the protocol) turns remote prefill off for good.
@@ -105,9 +126,9 @@ pub const Pull = struct {
         p.route.observe(m);
     }
 
-    fn fill(ptr: *anyopaque, prompt: []const u32, cached: u64) anyerror!?Filled {
+    fn fill(ptr: *anyopaque, prompt: []const u32, cached: u64, gone: *const std.atomic.Value(bool)) anyerror!?Filled {
         const p: *Pull = @ptrCast(@alignCast(ptr));
-        return p.pull(prompt, cached);
+        return p.pull(prompt, cached, gone);
     }
 
     fn drop(ptr: *anyopaque, saved: *anyopaque) void {

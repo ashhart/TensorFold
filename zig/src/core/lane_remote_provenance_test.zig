@@ -49,6 +49,23 @@ test "handoff: a repeat whose lookup finds its exact cut resumes below it on a r
     try unborrowed(&store);
 }
 
+test "handoff: the state a repeat resumes below its cut brings its own provenance, not the cut's" {
+    var store = cache();
+    defer store.deinit();
+    try t.expect(store.keep(&six, 3, null, &.{}, &.{})); // the engine's own, before the cut
+    store.keep_remote = true;
+    try t.expect(store.keep(&six, 5, null, &.{}, &.{})); // a remote copy at the cut, which the lookup finds first
+    store.keep_remote = false;
+    var peer: Peer = .{ .at = 0 };
+    var e: Exp = .{};
+    const seen = try runWith(&peer, &.{ .prompt = &six, .max_tokens = 1, .handoff = id }, &e, &store);
+    try t.expect(seen.restoring and !seen.remote); // resumed at 3, the engine's own state
+    try t.expectEqual(@as(u32, 3), seen.at);
+    try t.expectEqual(@as(?usize, 5), e.tokens);
+    try t.expect(!store.find(&six, &.{}, &.{}).?.remote); // the pass kept its cut as its own, hiding the remote copy
+    try unborrowed(&store);
+}
+
 test "remote prefix kept: a refused pull leaves the shorter kept state it beat, let go before the pass and never refused" {
     var store = cache();
     defer store.deinit();
@@ -112,4 +129,24 @@ test "remote prefix kept (TF_PREFILL_KEEP): a reply on a kept remote state repor
     try t.expectEqual(@as(?u32, 0), next.pulled_prefix);
     try t.expectEqual(@as(u32, 5), next.remote_prefix.? - next.pulled_prefix.?); // kept_remote_cache_tokens: all five
     try unborrowed(&store);
+}
+
+test "remote prefix: the reply's stats carry the route's verdict, and for a pulled prefix the pull's phases and the tail pass" {
+    const ms = std.time.ns_per_ms;
+    var peer: Peer = .{ .at = 4, .phases = .{ .queue_ns = 500 * ms, .trigger_ns = 2000 * ms, .pull_ns = 1000 * ms, .land_ns = 250 * ms, .bytes = 5 << 20 } };
+    defer peer.kept.deinit(t.allocator);
+    const seen = try fixture.runAs(&peer, &.{ .prompt = &six, .max_tokens = 2 }, null);
+    try t.expectEqual(@as(?u32, 4), seen.pulled_prefix);
+    try t.expectEqualStrings("remote", seen.report.route);
+    try t.expectEqual(@as(f64, 0.5), seen.report.queue_s);
+    try t.expectEqual(@as(f64, 2), seen.report.trigger_s);
+    try t.expectEqual(@as(f64, 1), seen.report.pull_s);
+    try t.expectEqual(@as(f64, 0.25), seen.report.land_s);
+    try t.expectEqual(@as(u64, 5 << 20), seen.report.bytes);
+    try t.expect(seen.report.tail_s >= 0);
+    var small: Peer = .{ .at = 0 }; // the source declines the prompt: nothing was pulled, the verdict still says why
+    const own = try fixture.runAs(&small, &.{ .prompt = &six, .max_tokens = 2 }, null);
+    try t.expectEqualStrings("small", own.report.route);
+    try t.expectEqual(@as(f64, 0), own.report.trigger_s);
+    try t.expectEqual(@as(u64, 0), own.report.bytes);
 }

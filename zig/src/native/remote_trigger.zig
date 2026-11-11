@@ -10,24 +10,40 @@ pub const Http = struct {
     model: []const u8,
     closing: ?*const std.atomic.Value(bool) = null, // the server stops: an exchange under way is cut off
     key: ?[]const u8 = null, // TF_PREFILL_API_KEY_FILE's key, sent as a Bearer token to a GB10 started with --api-key
+    gone: ?*const std.atomic.Value(bool) = null, // the pull's request ended: the exchange under way is cut off (`Aborted`)
+    limit_s: u64 = 0, // the exchange's bound, set by the pull before each trigger; 0: `seconds` of the tokens sent
 
     pub fn trigger(h: *Http) fabric.prefill_source.Trigger {
         return .{ .ptr = h, .start_fn = start };
     }
 
-    /// The exchange, bounded by `deadline` (the GB10 prefills the tokens first), or until closing.
+    /// The exchange, bounded by `limit_s` (the pull's own deadline) or `seconds`: the GB10 prefills the tokens first.
     fn start(ptr: *anyopaque, handoff: [16]u8, tokens: []const u32) anyerror!void {
         const h: *Http = @ptrCast(@alignCast(ptr));
         const body = try request(h.gpa, h.model, handoff, tokens);
         defer h.gpa.free(body);
         var x: Exchange = .{ .h = h, .body = body };
-        const deadline = fabric.words.nowNs() + seconds(tokens.len) * std.time.ns_per_s;
-        var future = h.io.concurrent(Exchange.run, .{&x}) catch return error.TriggerUnavailable;
+        try h.bounded(&x, if (h.limit_s != 0) h.limit_s else seconds(tokens.len));
+        return x.result;
+    }
+
+    /// Whether the GB10's server answers GET /health (an open route, no key) within 2 s: a liveness check only.
+    pub fn alive(h: *Http) bool {
+        var x: Health = .{ .h = h };
+        h.bounded(&x, 2) catch return false;
+        return if (x.result) |_| true else |_| false;
+    }
+
+    /// `x.run` on its own task, so this can give up on it: after `limit_s` seconds, or when the server stops.
+    fn bounded(h: *Http, x: anytype, limit_s: u64) !void {
+        const deadline = fabric.words.nowNs() + limit_s * std.time.ns_per_s;
+        var future = h.io.concurrent(@TypeOf(x.*).run, .{x}) catch return error.TriggerUnavailable;
         while (!x.done.load(.acquire)) {
             const closing = if (h.closing) |c| c.load(.acquire) else false;
-            if (closing or fabric.words.nowNs() >= deadline) {
+            const gone = if (h.gone) |g| g.load(.acquire) else false;
+            if (closing or gone or fabric.words.nowNs() >= deadline) {
                 future.cancel(h.io);
-                return if (closing) error.TriggerClosed else error.TriggerTimedOut;
+                return if (closing) error.TriggerClosed else if (gone) error.Aborted else error.TriggerTimedOut;
             }
             h.io.sleep(.fromMilliseconds(1), .awake) catch {
                 future.cancel(h.io);
@@ -35,7 +51,6 @@ pub const Http = struct {
             };
         }
         future.await(h.io);
-        return x.result;
     }
 };
 
@@ -43,6 +58,35 @@ pub const Http = struct {
 pub fn seconds(tokens: usize) u64 {
     return @import("sys").environment.read(u64, "TF_PREFILL_TIMEOUT_S", 60 + tokens / 400) catch 60 + tokens / 400;
 }
+
+/// GET /health on its own task, as `Exchange` is.
+const Health = struct {
+    h: *Http,
+    done: std.atomic.Value(bool) = .init(false),
+    result: anyerror!void = {},
+
+    fn run(x: *Health) void {
+        defer x.done.store(true, .release);
+        x.result = x.get();
+    }
+
+    fn get(x: *Health) !void {
+        const h = x.h;
+        const stem = "/v1/completions";
+        const base = if (std.mem.endsWith(u8, h.url, stem)) h.url[0 .. h.url.len - stem.len] else h.url;
+        const url = try std.fmt.allocPrint(h.gpa, "{s}/health", .{base});
+        defer h.gpa.free(url);
+        var client: std.http.Client = .{ .allocator = h.gpa, .io = h.io };
+        defer client.deinit();
+        const uri = try std.Uri.parse(url);
+        if (!std.ascii.eqlIgnoreCase(uri.scheme, "http")) return error.TriggerNotHttp;
+        var req = try client.request(.GET, uri, .{ .keep_alive = false, .redirect_behavior = .unhandled, .headers = .{ .accept_encoding = .{ .override = "identity" } } });
+        defer req.deinit();
+        try req.sendBodiless();
+        const resp = try req.receiveHead(&.{});
+        if (resp.head.status.class() != .success) return error.TriggerRefused;
+    }
+};
 
 /// One HTTP exchange on its own task, so `start` can give up on it.
 const Exchange = struct {
@@ -140,7 +184,14 @@ const Peer = struct {
     }
 };
 
-fn exchangeWith(status: []const u8, key: ?[]const u8) !struct { result: anyerror!void, peer: *Peer } {
+const Exchanged = struct { result: anyerror!void, peer: *Peer };
+
+fn exchangeWith(status: []const u8, key: ?[]const u8) !Exchanged {
+    return exchangeBounded(status, key, 0);
+}
+
+/// `exchangeWith`, the exchange bounded by `limit_s` seconds (0: the default bound), then GET /health at the same peer.
+fn exchangeBounded(status: []const u8, key: ?[]const u8, limit_s: u64) !Exchanged {
     const io = std.testing.io;
     const peer = try std.testing.allocator.create(Peer);
     errdefer std.testing.allocator.destroy(peer);
@@ -149,10 +200,26 @@ fn exchangeWith(status: []const u8, key: ?[]const u8) !struct { result: anyerror
     defer peer.server.deinit(io);
     const thread = try std.Thread.spawn(.{}, Peer.serve, .{ peer, io });
     var url: [64]u8 = undefined;
-    var h: Http = .{ .gpa = std.testing.allocator, .io = io, .url = try std.fmt.bufPrint(&url, "http://127.0.0.1:{d}/v1/completions", .{peer.server.socket.address.getPort()}), .model = "", .key = key };
+    var h: Http = .{ .gpa = std.testing.allocator, .io = io, .url = try std.fmt.bufPrint(&url, "http://127.0.0.1:{d}/v1/completions", .{peer.server.socket.address.getPort()}), .model = "", .key = key, .limit_s = limit_s };
     const result = Http.start(&h, @splat(7), &.{ 1, 2, 3 });
     thread.join();
     return .{ .result = result, .peer = peer };
+}
+
+/// `alive` against one peer answering `status` ("": never).
+fn healthWith(status: []const u8) !struct { up: bool, peer: *Peer } {
+    const io = std.testing.io;
+    const peer = try std.testing.allocator.create(Peer);
+    errdefer std.testing.allocator.destroy(peer);
+    const loopback: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    peer.* = .{ .server = try loopback.listen(io, .{}), .status = status };
+    defer peer.server.deinit(io);
+    const thread = try std.Thread.spawn(.{}, Peer.serve, .{ peer, io });
+    var url: [64]u8 = undefined;
+    var h: Http = .{ .gpa = std.testing.allocator, .io = io, .url = try std.fmt.bufPrint(&url, "http://127.0.0.1:{d}/v1/completions", .{peer.server.socket.address.getPort()}), .model = "" };
+    const up = h.alive();
+    thread.join();
+    return .{ .up = up, .peer = peer };
 }
 
 test "the trigger sends TF_PREFILL_API_KEY_FILE's key as a Bearer token, and a 401 is its own refusal" {
@@ -182,4 +249,20 @@ test "the trigger gives up at TF_PREFILL_TIMEOUT_S on a GB10 that never answers"
     defer std.testing.allocator.destroy(silent.peer);
     try std.testing.expectError(error.TriggerTimedOut, silent.result);
     try std.testing.expect(fabric.words.nowNs() - began < 10 * std.time.ns_per_s);
+}
+
+test "the trigger gives up at the pull's own bound, and alive asks GET /health" {
+    const slow = try exchangeBounded("", null, 1);
+    defer std.testing.allocator.destroy(slow.peer);
+    try std.testing.expectError(error.TriggerTimedOut, slow.result);
+    const up = try healthWith("200 OK");
+    defer std.testing.allocator.destroy(up.peer);
+    try std.testing.expect(up.up and up.peer.sent("GET /health HTTP/1.1"));
+    const sick = try healthWith("503 Service Unavailable");
+    defer std.testing.allocator.destroy(sick.peer);
+    try std.testing.expect(!sick.up);
+    const began = fabric.words.nowNs();
+    const silent = try healthWith("");
+    defer std.testing.allocator.destroy(silent.peer);
+    try std.testing.expect(!silent.up and fabric.words.nowNs() - began < 10 * std.time.ns_per_s);
 }
