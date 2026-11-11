@@ -77,6 +77,17 @@ pub const Trigger = struct {
     start_fn: *const fn (ptr: *anyopaque, handoff: [16]u8, tokens: []const u32) anyerror!void,
 };
 
+/// Makes every link usable again once the producer's prefill is over: a daemon may have re-linked while it ran.
+pub const Renew = struct {
+    ptr: *anyopaque,
+    /// error.LinkDown: a link is not up yet (the pull waits for it); any other error ends the fill
+    renew_fn: *const fn (ptr: *anyopaque) anyerror!void,
+};
+
+/// How long a pull waits for a link that dropped during the producer's prefill to come back (a re-link takes seconds).
+pub const link_wait_ns = 30 * std.time.ns_per_s;
+const link_poll_ns = 100 * std.time.ns_per_ms;
+
 /// The fabric's source: one handoff at a time per link, pulled with the decoder into the stream's caches.
 pub const Remote = struct {
     gpa: std.mem.Allocator,
@@ -95,9 +106,28 @@ pub const Remote = struct {
     /// the last fill's trigger exchange (the producer's prefill) in ns, and the payload bytes it pulled
     trigger_ns: u64 = 0,
     bytes: u64 = 0,
+    /// called between the trigger and the pull, when set
+    renew: ?Renew = null,
+    /// the longest wait for a link to come back after the trigger
+    link_wait_ns: u64 = link_wait_ns,
 
     pub fn source(r: *Remote) PrefillSource {
         return .{ .ptr = r, .vtable = &.{ .offer = offerFn, .fill = fillFn } };
+    }
+
+    /// `renew` until every link answers; only a link that is not up yet is waited for, for `link_wait_ns`.
+    fn renewLinks(r: *Remote) !void {
+        const rn = r.renew orelse return;
+        const deadline = words.nowNs() +| r.link_wait_ns;
+        while (true) {
+            rn.renew_fn(rn.ptr) catch |err| {
+                if (err != error.LinkDown or words.nowNs() >= deadline) return err;
+                if (r.abort) |gone| if (gone.load(.acquire)) return err;
+                words.pause(link_poll_ns);
+                continue;
+            };
+            return;
+        }
     }
 
     fn offerFn(ptr: *anyopaque, prompt: []const u32, cached: u64) ?Offer {
@@ -121,6 +151,7 @@ pub const Remote = struct {
         const began = words.nowNs();
         try r.trigger.start_fn(r.trigger.ptr, id, prompt[0..@intCast(o.upto + 1)]);
         r.trigger_ns = words.nowNs() - began;
+        try r.renewLinks();
         if (r.peers.len > 0) {
             try r.pullShards(id, tokens, sink);
         } else {
