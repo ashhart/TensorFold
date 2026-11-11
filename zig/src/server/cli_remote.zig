@@ -19,7 +19,7 @@ pub fn apply(out: anytype, name: []const u8, value: []const u8) !bool {
         if (!std.ascii.eqlIgnoreCase(uri.scheme, "http") or uri.host == null) return error.ExpectedHttpUrl;
         out.url = value;
     } else if (std.mem.eql(u8, name, "--mcdma-link")) {
-        if (!validLink(value)) return error.ExpectedLinkName;
+        if (!validLinks(value)) return error.ExpectedLinkName;
         out.link = value;
     } else if (std.mem.eql(u8, name, "--mcdma-produce")) {
         if (!validLink(value)) return error.ExpectedLinkName;
@@ -35,6 +35,17 @@ fn validLink(name: []const u8) bool {
     return true;
 }
 
+/// `--mcdma-link`: one link name, or a comma list of up to eight (a KV_SPLIT pair's producers, shard 0 first); `http` alone.
+fn validLinks(value: []const u8) bool {
+    var n: usize = 0;
+    var it = std.mem.splitScalar(u8, value, ',');
+    while (it.next()) |name| : (n += 1) {
+        if (!validLink(name) or n == 8) return false;
+        if (std.mem.eql(u8, name, "http") and (n > 0 or std.mem.indexOfScalar(u8, value, ',') != null)) return false;
+    }
+    return true;
+}
+
 test "the remote prefill flags take an http URL and an mcdma-rpcd link name, and refuse others by name" {
     var f: struct { url: ?[]const u8 = null, link: ?[]const u8 = null, produce: ?[]const u8 = null } = .{};
     try std.testing.expect(try apply(&f, "--prefill-from", "http://192.0.2.20:8000"));
@@ -44,5 +55,10 @@ test "the remote prefill flags take an http URL and an mcdma-rpcd link name, and
     try std.testing.expectError(error.ExpectedHttpUrl, apply(&f, "--prefill-from", "https://gb10:8000"));
     try std.testing.expectError(error.ExpectedHttpUrl, apply(&f, "--prefill-from", "gb10:8000"));
     try std.testing.expectError(error.ExpectedLinkName, apply(&f, "--mcdma-link", "a/b"));
+    try std.testing.expect(try apply(&f, "--mcdma-link", "tf2a,tf2b"));
+    try std.testing.expectEqualStrings("tf2a,tf2b", f.link.?);
+    try std.testing.expectError(error.ExpectedLinkName, apply(&f, "--mcdma-link", "tf2a,"));
+    try std.testing.expectError(error.ExpectedLinkName, apply(&f, "--mcdma-link", "http,tf2b"));
+    try std.testing.expectError(error.ExpectedLinkName, apply(&f, "--mcdma-link", "a,b,c,d,e,f,g,h,i"));
     try std.testing.expect(!try apply(&f, "--context", "4096"));
 }
