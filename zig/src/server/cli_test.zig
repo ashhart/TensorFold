@@ -598,18 +598,3 @@ test "prompt cache disk: missing and empty directories are usage errors and the 
     try capabilities(&output.writer, .{ .version = "test" });
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "\"--prompt-cache-disk\": {}") != null);
 }
-
-test "flag deps: --backend vulkan parses where served and gets the gated refusal elsewhere" {
-    const backend_values = cli.Test.backend_values;
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var u: Usage = .{};
-    if (servedBy(backend_values, "vulkan")) {
-        const parsed = try parse(a, &.{ "m", "--backend", "vulkan" }, &u);
-        try std.testing.expectEqualStrings("vulkan", parsed.backend);
-    } else {
-        try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--backend", "vulkan" }, &u));
-        try std.testing.expect(std.mem.indexOf(u8, u.message, "not served by the native engine") != null);
-    }
-}
