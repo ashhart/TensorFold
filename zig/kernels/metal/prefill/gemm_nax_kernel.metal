@@ -6,3 +6,11 @@
       uint lane [[thread_index_in_simdgroup]], uint3 tg [[threadgroup_position_in_grid]]) {                        \
     tfp::gemm_nax<T, TA, TB, AM, AN, false, 64, 128, 256, 2, 4>(A, B, D, P, tg, sg, lane);                         \
   }
+// The same kernel storing D as TD (float: the fp32 sums, for the caller's own epilogue).
+#define TF_GEMM_NAX_KERNEL_TO(NAME, T, TD, TA, TB, AM, AN)                                                         \
+  [[max_total_threads_per_threadgroup(256)]] [[kernel]] void NAME(                                                \
+      const device T* A [[buffer(0)]], const device T* B [[buffer(1)]], const device int32_t* P [[buffer(2)]],     \
+      device TD* D [[buffer(3)]], uint sg [[simdgroup_index_in_threadgroup]],                                     \
+      uint lane [[thread_index_in_simdgroup]], uint3 tg [[threadgroup_position_in_grid]]) {                        \
+    tfp::gemm_nax<T, TA, TB, AM, AN, false, 64, 128, 256, 2, 4, TD>(A, B, D, P, tg, sg, lane);                     \
+  }
