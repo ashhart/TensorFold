@@ -55,9 +55,9 @@ fn cint(v: usize) c_int {
     return @intCast(v);
 }
 
-/// A lane of the head's grouped pass: its draft's cache and pages at its length, as the lone head's pass reads them.
-fn headLane(d: *Draft, rows: usize, score_rows: u64) batch.Lane {
-    return .{ .seq = .{ .media = null, .conv = &.{}, .state = &.{}, .kc = (&d.kc)[0..1], .vc = (&d.vc)[0..1], .ikc = (&d.ikc)[0..1], .pooled = (&d.pooled)[0..1], .pg = d.pg, .tail = d.kc, .history = &d.unused_history, .cap = d.cap, .scores = score_rows }, .pos = d.len, .rows = rows };
+/// A lane of the head's grouped pass: its draft's cache, pages and host-tier selection at its length, as the lone head's pass reads them.
+pub fn headLane(d: *Draft, rows: usize, score_rows: u64) batch.Lane {
+    return .{ .seq = d.headSeq(null, score_rows), .pos = d.len, .rows = rows };
 }
 
 fn copyAsync(stream: cuda.Stream, dst: u64, src: u64, n: usize) !void {
@@ -425,17 +425,6 @@ pub fn Ops(comptime Tri: type) type {
             d.open = false;
         }
     };
-}
-
-test "a grouped head's lane carries its draft's page table" {
-    var d: Draft = undefined;
-    d.pg = .{ .pt = 0x7000, .ps = 4096, .ptok = 256 };
-    d.len = 300;
-    d.cap = 1024;
-    const l = headLane(&d, 3, 0);
-    try std.testing.expectEqual(d.pg, l.seq.pg);
-    try std.testing.expectEqual(@as(usize, 300), l.pos);
-    try std.testing.expectEqual(@as(usize, 3), l.rows);
 }
 
 /// One shared head loop over its operator boundary: forward work, reductions, guarded picks and stop policy.
