@@ -40,9 +40,18 @@ pub fn steps(b: *std.Build, metal: *std.Build.Module, sources: *std.Build.Module
         .link_libc = true,
         .imports = &.{ .{ .name = "dsv41_metal", .module = p.pkg }, .{ .name = "metal", .module = metal }, .{ .name = "dsv41", .module = p.host } },
     });
+    // the package's own checks run with the default test step; its device suites run from their named steps
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = p.pkg })).step);
     const step = b.step("test-dsv41-metal", "DeepSeek-V4.1 Metal layer and forward: float64 stages, rows at once == one at a time");
-    const pkg_run = &b.addRunArtifact(b.addTest(.{ .root_module = p.pkg })).step;
-    step.dependOn(pkg_run);
+    // serve_lanes over the CPU twin, checked here so no CUDA step has to depend on the neutral served engine
+    const lanes_test = b.createModule(.{
+        .root_source_file = b.path("zig/src/families/deepseek_v41/serve_lanes_test.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "core", .module = p.host.import_table.get("core").? }, .{ .name = "engine_api", .module = p.host.import_table.get("engine_api").? }, .{ .name = "lanes", .module = p.host.import_table.get("lanes").? }, .{ .name = "tokenizer", .module = p.host.import_table.get("tokenizer").? } },
+    });
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = lanes_test })).step);
     const run = b.addRunArtifact(b.addTest(.{ .root_module = tests }));
     run.has_side_effects = true; // a device run: never cached
     step.dependOn(&run.step);
@@ -58,8 +67,12 @@ pub fn steps(b: *std.Build, metal: *std.Build.Module, sources: *std.Build.Module
     const serve_run = b.addRunArtifact(b.addTest(.{ .root_module = serve }));
     serve_run.has_side_effects = true;
     step.dependOn(&serve_run.step);
-    b.step("test-dsv41-metal-serve", "DeepSeek-V4.1 Metal served through LaneHost: concurrent, drafted, cached, seeded, cancelled").dependOn(&serve_run.step);
-    test_step.dependOn(pkg_run); // the package's host checks only; the device run stays in its own step
+    const serve_step = b.step("test-dsv41-metal-serve", "DeepSeek-V4.1 Metal served through LaneHost: concurrent, drafted, cached, seeded, cancelled");
+    serve_step.dependOn(&serve_run.step);
+    // the release-checkpoint steps (TF_DSV41_REAL) stay opt-in, so the umbrella holds the default device suites
+    const all = b.step("test-dsv41-metal-all", "DeepSeek-V4.1 Metal: every device test step on this GPU (layer, served)");
+    all.dependOn(step);
+    all.dependOn(serve_step);
     const fast = package(b, metal, sources, .ReleaseSafe);
     const real = b.createModule(.{
         .root_source_file = b.path("zig/tests/dsv41_metal/real_test.zig"),
