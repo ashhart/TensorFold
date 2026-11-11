@@ -8,6 +8,7 @@ const state = @import("cuda_state.zig");
 const types = @import("cuda_engine_types.zig");
 const Engine = @import("cuda_engine.zig").Engine;
 const kv_host = @import("cuda_kv_host.zig");
+const owned = @import("cuda_pages_owner.zig");
 
 /// Table entries a sequence of `capacity` rows takes.
 pub fn tableLen(capacity: usize) usize {
@@ -20,7 +21,9 @@ pub fn layout(gpa: std.mem.Allocator, e: *const Engine, extra: u64) !kv.Layout {
     // TF_GLM_KV_HOST: a page costs the device only its pooled keys (the pages themselves are in host memory)
     const page = if (kv_host.onHost()) state.pkPageBytes(&e.w) else state.pageBytes(&e.w);
     const classes: u32 = if (e.settings.kv_split) @intCast(e.share.world) else 1; // TF_GLM_KV_SPLIT: an owner class a rank
-    return .{ .fixed_bytes = fixed + extra, .token_bytes = page / state.page_rows, .page_tokens = state.page_rows, .snap_bytes = 0, .classes = classes };
+    // TF_GLM_KV_SPLIT: a rank holds every pooled key and its own class's latent rows, 6,912 bytes a token at TP=2
+    const token = if (classes > 1) owned.tokenBytes(state.pkPageBytes(&e.w), state.latentPageBytes(&e.w), classes, state.page_rows) else page / state.page_rows;
+    return .{ .fixed_bytes = fixed + extra, .token_bytes = token, .page_tokens = state.page_rows, .snap_bytes = 0, .classes = classes };
 }
 
 /// TF_KV_SHARE: a kept state's slot (`e.share_pages`: its prefix's pages left to the store), at the window's last mark.
@@ -65,15 +68,20 @@ pub const Pages = struct {
     host_ptr: u64 = 0,
     pk_arena: ?cuda.DeviceBuffer = null, // TF_GLM_KV_HOST: the pooled keys' device pages
     leases: []kv.Lease, // slot i's: rank 0's lease, or the ids another rank mapped
+    lat_ids: []u32 = &.{}, // TF_GLM_KV_SPLIT: slot i's latent table entries from tableLen x i, the upload's source
     used: []bool,
     leader: bool,
     poison: bool, // TF_KV_POISON=1: a stream's pages start as NaN, so a row read before its write shows in the reply
     prompts: ?kp.Prompts = null, // TF_KV_SHARE: the shared prompt store over this pool (rank 0's), from the server
 
     /// `streams` sequences from slot 0 on `pages` pages: the engine's own (`ownSequence`) placed, the others made now.
-    pub fn init(gpa: std.mem.Allocator, e: *Engine, l: kv.Layout, streams: usize, pages: usize, leader: bool) !*Pages {
+    pub fn init(gpa: std.mem.Allocator, e: *Engine, l: kv.Layout, streams: usize, planned: usize, leader: bool) !*Pages {
         const own = if (e.seqs.items.len > 0) e.seqs.items[0] else null;
         if (own == null or own.?.st.table == 0) return error.OwnNotPaged; // slot 0 holds a window, or none was made
+        const pooled = state.pkPageBytes(&e.w);
+        const lat = state.latentPageBytes(&e.w);
+        // TF_GLM_KV_SPLIT: a page of each class gives way to the trash page, on every rank alike
+        const pages = if (l.classes > 1) owned.funded(planned, l.pageBytes(), pooled, lat, l.classes) else planned;
         if (l.classes > 1 and pages / l.classes < tableLen(e.capacity)) { // a stream's pages all come from one class
             if (!@import("builtin").is_test) std.log.err("the pool's {d} pages a class hold less than one stream's {d}", .{ pages / l.classes, tableLen(e.capacity) });
             return error.ClassTooSmall;
@@ -84,7 +92,8 @@ pub const Pages = struct {
         p.* = .{ .gpa = gpa, .e = e, .layout = l, .page = page, .pool = try kv.Pool.initClasses(gpa, pages, page, l.classes), .arena = null, .leases = &.{}, .used = &.{}, .leader = leader, .poison = poisoned() };
         errdefer p.pool.deinit();
         const host = kv_host.onHost() and pages > 0;
-        if (pages > 0 and !host) p.arena = try cuda.DeviceBuffer.alloc(e.d, pages * page);
+        const bytes = if (l.classes > 1) owned.arenaBytes(pages, pooled, lat, l.classes) else pages * page;
+        if (pages > 0 and !host) p.arena = try cuda.DeviceBuffer.alloc(e.d, bytes);
         errdefer if (p.arena) |*a| a.free();
         if (host) {
             if (kv_host.shared()) {
@@ -103,6 +112,8 @@ pub const Pages = struct {
         errdefer if (p.pk_arena) |*a| a.free();
         p.leases = try gpa.alloc(kv.Lease, streams);
         errdefer gpa.free(p.leases);
+        if (l.classes > 1) p.lat_ids = try gpa.alloc(u32, streams * tableLen(e.capacity));
+        errdefer gpa.free(p.lat_ids);
         @memset(p.leases, .{});
         p.used = try gpa.alloc(bool, streams);
         errdefer gpa.free(p.used);
@@ -131,7 +142,7 @@ pub const Pages = struct {
         }
         try e.stream.synchronize();
         own.?.st.place(&e.w, at); // last: a failure before it leaves the engine's own as it was
-        if (l.classes > 1 and !@import("builtin").is_test) std.log.info("kv split: {d} owner classes of {d} pages; a stream takes at most one class ({d} pages at the window); every rank still holds every latent row, so this saves no memory yet", .{ l.classes, pages / l.classes, tableLen(e.capacity) });
+        if (l.classes > 1 and !@import("builtin").is_test) std.log.info("kv split: {d} owner classes of {d} pages ({d} planned, a page a class for the trash page); a stream takes at most one class ({d} pages at the window); this rank holds its class's latent rows alone, {d} bytes a token", .{ l.classes, pages / l.classes, planned, tableLen(e.capacity), l.token_bytes });
         return p;
     }
 
@@ -168,7 +179,12 @@ pub const Pages = struct {
     fn parts(p: *const Pages) [2]struct { at: u64, bytes: u64 } {
         if (!p.e.settings.kv_split) return .{ .{ .at = p.base(), .bytes = p.page }, .{ .at = 0, .bytes = 0 } };
         const pooled = state.pkPageBytes(&p.e.w);
-        return .{ .{ .at = p.base(), .bytes = pooled }, .{ .at = p.base() + p.pool.total() * pooled, .bytes = p.page - pooled } };
+        return .{ .{ .at = p.base(), .bytes = pooled }, .{ .at = p.base() + p.pool.total() * pooled, .bytes = state.latentPageBytes(&p.e.w) } };
+    }
+
+    /// TF_GLM_KV_SPLIT: this rank's latent region, its class's pages and the trash page.
+    pub fn region(p: *const Pages) owned.Region {
+        return .{ .rank = @intCast(p.e.share.rank), .classes = p.pool.classes, .cap = p.pool.classCap() };
     }
 
     /// The pool and the pages' arena; the paged sequences are the engine's (it frees every slot).
@@ -178,6 +194,7 @@ pub const Pages = struct {
             if (p.leader and u) p.pool.finish(l) else l.ids.deinit(p.gpa);
         }
         p.gpa.free(p.leases);
+        p.gpa.free(p.lat_ids);
         p.gpa.free(p.used);
         if (p.arena) |*a| a.free();
         if (p.host) |*h| h.free();
@@ -267,7 +284,11 @@ pub const Pages = struct {
     /// The slot's sequence reaches its pages' rows (past the `kept` first, NaN first under TF_KV_POISON).
     fn mapped(p: *Pages, slot: u32, ids: []const u32, kept: usize) !void {
         const st = &p.e.seqs.items[slot].?.st;
-        if (p.poison) for (ids[kept..]) |id| for (p.parts()) |r| if (r.bytes > 0) try p.e.d.check(p.e.d.api.cuMemsetD32Async(r.at + id * r.bytes, 0xFFFF_FFFF, r.bytes / 4, p.e.stream.handle), "cuMemsetD32Async");
+        if (p.poison) for (ids[kept..]) |id| for (p.parts(), 0..) |r, k| {
+            // TF_GLM_KV_SPLIT: the latent rows only where this rank holds them, at their place in its region
+            const at: ?u64 = if (k == 0 or !p.e.settings.kv_split) id else if (p.region().holds(id)) p.region().entry(id) else null;
+            if (r.bytes > 0) if (at) |i| try p.e.d.check(p.e.d.api.cuMemsetD32Async(r.at + i * r.bytes, 0xFFFF_FFFF, r.bytes / 4, p.e.stream.handle), "cuMemsetD32Async");
+        };
         st.owner = if (p.e.settings.kv_split) @intCast(p.leases[slot].owner) else null; // the rank its latent rows live on
         st.pages = ids;
         st.capacity = @min(ids.len * state.page_rows, p.e.capacity);
@@ -320,8 +341,14 @@ pub const Pages = struct {
             const st = &e.seqs.items[u.slot].?.st;
             const bytes = std.mem.sliceAsBytes(ids[from..]);
             try e.d.check(e.d.api.cuMemcpyHtoD_v2(st.table + from * 4, bytes.ptr, bytes.len), "cuMemcpyHtoD");
-            // TF_GLM_KV_SPLIT: the latent table holds the same ids while every rank holds every row
-            if (st.ltable != 0) try e.d.check(e.d.api.cuMemcpyHtoD_v2(st.ltable + from * 4, bytes.ptr, bytes.len), "cuMemcpyHtoD");
+            if (st.ltable == 0) return;
+            // TF_GLM_KV_SPLIT: each id's place in this rank's latent region, or the trash page where another holds it
+            const t = tableLen(e.capacity);
+            if (ids.len > t or u.p.lat_ids.len < (u.slot + 1) * t) return error.BadStep;
+            const local = u.p.lat_ids[u.slot * t ..][0..ids.len]; // the source outlives the call, as `ids` does (GB10)
+            for (local[from..], ids[from..]) |*x, id| x.* = u.p.region().entry(id);
+            const lb = std.mem.sliceAsBytes(local[from..]);
+            try e.d.check(e.d.api.cuMemcpyHtoD_v2(st.ltable + from * 4, lb.ptr, lb.len), "cuMemcpyHtoD");
         }
     };
 };
