@@ -138,7 +138,7 @@ fn oneCase(gpu: Gpu, fx: Fixture, router: grouped.Router, g: ex_.Grouped, s: cud
     var act = try cuda.DeviceBuffer.alloc(gpu.d, pairs * l.width * 2);
     defer act.free();
     try act.fill8(0xff, s.handle); // a call that writes nothing fails rather than pass on old bytes
-    try g.decode(s, .up, .{ .x = dx.ptr, .stride = l.dims, .slots = slots }, l, plan, act.ptr, bound, -1);
+    try g.decode(s, .up, .{ .x = dx.ptr, .stride = l.dims, .slots = slots }, l, plan, act.ptr, bound, pairs, 16, -1);
     try s.synchronize();
     const got_act = try check.download(gpu, act);
     defer a.free(got_act);
@@ -150,7 +150,7 @@ fn oneCase(gpu: Gpu, fx: Fixture, router: grouped.Router, g: ex_.Grouped, s: cud
     var y = try cuda.DeviceBuffer.alloc(gpu.d, pairs * l.dims * width);
     defer y.free();
     try y.fill8(0xff, s.handle);
-    try g.decode(s, if (wide) .down_bf16 else .down_f32, .{ .x = act.ptr, .stride = l.width }, l, plan, y.ptr, bound, -1);
+    try g.decode(s, if (wide) .down_bf16 else .down_f32, .{ .x = act.ptr, .stride = l.width }, l, plan, y.ptr, bound, pairs, 16, -1);
     try s.synchronize();
     const got_y = try check.download(gpu, y);
     defer a.free(got_y);
