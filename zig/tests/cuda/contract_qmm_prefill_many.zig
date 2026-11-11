@@ -19,6 +19,8 @@ const served = [_]c.Shape{
     .{ .rows = 129, .n = 10240, .k = 5120 },
     .{ .rows = 257, .n = 17408, .k = 5120 },
     .{ .rows = 33, .n = 65, .k = 512 },
+    .{ .rows = 2048, .n = 48, .k = 5120 },
+    .{ .rows = 4096, .n = 48, .k = 5120 },
 };
 
 const rule = "every output byte equals separate qmm_prefill launches on the same BF16 input and affine-4 weights";
@@ -147,6 +149,7 @@ pub fn bench(gpu: gpu_check.Gpu) !void {
 fn widths(shape: c.Shape) []const usize {
     if (shape.k == 512 and shape.n == 65) return &.{ 65, 129 };
     return switch (shape.n) {
+        48 => &.{ 48, 48 },
         12288 => &.{ 12288, 1024, 1024 },
         10240 => &.{ 10240, 6144, 48, 48 },
         17408 => &.{ 17408, 17408 },
