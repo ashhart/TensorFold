@@ -148,7 +148,7 @@ pub const Rule = struct {
     pub fn depth(r: *Rule, who: Who) !i64 {
         const most = @min(@as(i64, r.most_drafts), @max(1, who.draft_room - 1));
         if (most <= 0) return 0;
-        if (r.confidence_floor != null and !who.sampled) return most;
+        if (r.confidence_floor != null and !who.sampled and !r.k.floor_rates) return most;
         const p = try r.rates(who);
         if (r.family_costs.empty()) {
             const want: i64 = if (p[0] < 0.8) 1 else if (p[0] < 0.9) 2 else 3;
@@ -217,7 +217,7 @@ pub const Rule = struct {
     pub fn headDepth(r: *Rule, who: *const Who, budget: ?i64, probe: Probe) !i64 {
         const d: i64 = if (who.finished) 0 else if (budget) |b| b else if (r.granted_depth)
             try r.grantDepth(who.*)
-        else if (r.node_probabilities and !(who.sampled and r.confidence_floor != null))
+        else if (r.node_probabilities and !((who.sampled or r.k.floor_rates) and r.confidence_floor != null))
             @min(@as(i64, r.most_drafts), @max(1, who.draft_room - 1))
         else
             try r.depth(who.*);
