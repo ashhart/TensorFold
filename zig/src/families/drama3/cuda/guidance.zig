@@ -33,8 +33,7 @@ fn handoff(g: *Guide, from: cuda.Stream, to: cuda.Stream) !void {
     try to.wait(g.e.ev_fork);
 }
 
-/// A lane's drain: the codec and conditional streams (`tts.complete`), then the guide's own stream, which the last
-/// frame leaves running its unconditional backbone row. Both are waited; the first failure returns.
+/// A lane's drain: waits the codec and conditional streams, then the guide's stream; the first failure returns.
 pub fn complete(tts: anytype, guide: anytype) !void {
     const conditional = tts.complete();
     const unconditional = if (guide) |g| g.e.stream.synchronize() else {};
