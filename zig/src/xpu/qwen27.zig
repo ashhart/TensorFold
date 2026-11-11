@@ -425,7 +425,7 @@ pub const Runner = struct {
     pub fn step(r: *Runner, token: u32) !void {
         if (r.pos + 1 > r.context) return error.ContextFull;
         const id: i32 = @bitCast(token); // an id past i32 turns negative, which forward refuses
-        r.last = @intCast((try forward(&r.d, &r.model, &r.acts, &.{id}, r.pos, .{ .taps = r.taps_on, .cand = r.candMode(1) })).?);
+        r.last = @intCast((try forward(&r.d, &r.model, &r.acts, &.{id}, r.pos, .{ .taps = r.taps_on, .cand = r.candMode() })).?);
         r.pos += 1;
         if (r.taps_on) if (r.on_taps) |cb| try cb.f(cb.ctx, r.acts.taps, 1);
     }
@@ -434,7 +434,7 @@ pub const Runner = struct {
     pub fn verify(r: *Runner, ids: []const u32) ![]const u32 {
         if (ids.len == 0 or ids.len > 16) return error.BadBlock;
         if (r.pos + ids.len > r.context) return error.ContextFull;
-        _ = try forward(&r.d, &r.model, &r.acts, @ptrCast(ids), r.pos, .{ .want = .rows, .stash = true, .taps = r.taps_on, .rows_out = &r.tok_host, .cand = r.candMode(@intCast(ids.len)) });
+        _ = try forward(&r.d, &r.model, &r.acts, @ptrCast(ids), r.pos, .{ .want = .rows, .stash = true, .taps = r.taps_on, .rows_out = &r.tok_host, .cand = r.candMode() });
         for (r.block[0..ids.len], r.tok_host[0..ids.len]) |*o, t| o.* = @intCast(t);
         r.block_rows = @intCast(ids.len);
         return r.block[0..ids.len];
@@ -487,7 +487,7 @@ pub const Runner = struct {
         }
         if (r.pos + depth_max + 1 > r.context or r.pos + ids.len > r.context) return error.ContextFull;
         try ze.check(r.d.g.api.zeCommandListAppendMemoryCopy(r.d.list, r.acts.tree, &r.tree_host, ids.len * 17 * 4, null, 0, null));
-        _ = try forward(&r.d, &r.model, &r.acts, @ptrCast(ids), r.pos, .{ .want = .rows, .stash = true, .taps = r.taps_on, .tree = true, .rows_out = &r.tok_host, .cand = r.candMode(@intCast(ids.len)) });
+        _ = try forward(&r.d, &r.model, &r.acts, @ptrCast(ids), r.pos, .{ .want = .rows, .stash = true, .taps = r.taps_on, .tree = true, .rows_out = &r.tok_host, .cand = r.candMode() });
         for (r.block[0..ids.len], r.tok_host[0..ids.len]) |*o, t| o.* = @intCast(t);
         r.block_rows = @intCast(ids.len);
         r.tree_on = true;
