@@ -137,6 +137,15 @@ pub fn parse(root: std.json.Value) !Shape {
     return s;
 }
 
+/// A served window (TF_DSPINE_WINDOW): a block up to the checkpoint's sliding_window, never wider; 0 keeps it.
+pub fn narrowed(s: Shape, window: usize) error{DSpineWindowOutOfRange}!Shape {
+    if (window == 0) return s;
+    if (window < s.block or window > s.window) return error.DSpineWindowOutOfRange;
+    var out = s;
+    out.window = window;
+    return out;
+}
+
 /// Row r's sender for `pred`: 0 on row 0 (all hold the pending token), else its index in the row before's candidates.
 pub fn sender(r: usize, previous: []align(1) const u32, pred: u32) ?usize {
     if (r == 0) return 0;

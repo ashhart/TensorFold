@@ -1,24 +1,17 @@
 // Step-5's perception encoder at torch's per-op bf16 rounding (vision_encoder.py); after gemm_nax.metal.
 
-#define S5V_GEMM(NAME, T, TA, TB, AM, AN)                                                                          \
-  [[max_total_threads_per_threadgroup(256)]] [[kernel]] void NAME(                                                \
-      const device T* A [[buffer(0)]], const device T* B [[buffer(1)]], const device int32_t* P [[buffer(2)]],     \
-      device T* D [[buffer(3)]], uint sg [[simdgroup_index_in_threadgroup]],                                      \
-      uint lane [[thread_index_in_simdgroup]], uint3 tg [[threadgroup_position_in_grid]]) {                        \
-    tfp::gemm_nax<T, TA, TB, AM, AN, false, 64, 128, 256, 2, 4>(A, B, D, P, tg, sg, lane);                         \
-  }
-S5V_GEMM(s5v_gemm_bf16_nt_00, bfloat16_t, false, true, false, false)
-S5V_GEMM(s5v_gemm_bf16_nt_01, bfloat16_t, false, true, false, true)
-S5V_GEMM(s5v_gemm_bf16_nt_10, bfloat16_t, false, true, true, false)
-S5V_GEMM(s5v_gemm_bf16_nt_11, bfloat16_t, false, true, true, true)
-S5V_GEMM(s5v_gemm_f32_nt_00, float, false, true, false, false)
-S5V_GEMM(s5v_gemm_f32_nt_01, float, false, true, false, true)
-S5V_GEMM(s5v_gemm_f32_nt_10, float, false, true, true, false)
-S5V_GEMM(s5v_gemm_f32_nt_11, float, false, true, true, true)
-S5V_GEMM(s5v_gemm_f32_nn_00, float, false, false, false, false)
-S5V_GEMM(s5v_gemm_f32_nn_01, float, false, false, false, true)
-S5V_GEMM(s5v_gemm_f32_nn_10, float, false, false, true, false)
-S5V_GEMM(s5v_gemm_f32_nn_11, float, false, false, true, true)
+TF_GEMM_NAX_KERNEL(s5v_gemm_bf16_nt_00, bfloat16_t, false, true, false, false)
+TF_GEMM_NAX_KERNEL(s5v_gemm_bf16_nt_01, bfloat16_t, false, true, false, true)
+TF_GEMM_NAX_KERNEL(s5v_gemm_bf16_nt_10, bfloat16_t, false, true, true, false)
+TF_GEMM_NAX_KERNEL(s5v_gemm_bf16_nt_11, bfloat16_t, false, true, true, true)
+TF_GEMM_NAX_KERNEL(s5v_gemm_f32_nt_00, float, false, true, false, false)
+TF_GEMM_NAX_KERNEL(s5v_gemm_f32_nt_01, float, false, true, false, true)
+TF_GEMM_NAX_KERNEL(s5v_gemm_f32_nt_10, float, false, true, true, false)
+TF_GEMM_NAX_KERNEL(s5v_gemm_f32_nt_11, float, false, true, true, true)
+TF_GEMM_NAX_KERNEL(s5v_gemm_f32_nn_00, float, false, false, false, false)
+TF_GEMM_NAX_KERNEL(s5v_gemm_f32_nn_01, float, false, false, false, true)
+TF_GEMM_NAX_KERNEL(s5v_gemm_f32_nn_10, float, false, false, true, false)
+TF_GEMM_NAX_KERNEL(s5v_gemm_f32_nn_11, float, false, false, true, true)
 
 inline float s5v_bf(float x) { return float(bfloat(x)); }
 
