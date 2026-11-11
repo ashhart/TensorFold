@@ -274,9 +274,14 @@ pub const Engine = struct {
         // rocBLAS serves an unquantized checkpoint's projections and a ModelOpt checkpoint's vision tower
         if (e.plain() or e.modelopt) {
             e.workspace = try hip.DeviceBuffer.alloc(&e.driver, hip.blas.workspace_bytes);
-            e.blas = hip.blas.Blas.open(e.stream) catch |err| {
-                e.workspace.free();
-                return err;
+            e.blas = hip.blas.Blas.open(e.stream) catch |err| blk: {
+                // a ModelOpt text checkpoint needs no rocBLAS: only its vision tower would, and it is refused without
+                if (e.plain()) {
+                    e.workspace.free();
+                    return err;
+                }
+                std.log.warn("rocBLAS is unavailable ({s}): a ModelOpt checkpoint's vision tower is not served", .{@errorName(err)});
+                break :blk null;
             };
         }
         errdefer e.closeBlas();
