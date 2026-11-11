@@ -374,6 +374,9 @@ CUDA also checks GLM-5.3-Flash's KV page kernels on a page table out of order: t
 `tf_glm_dsa_tokens`), and the MLA chunks through their merge (`tf_glm_chunks_16` and `tf_glm_chunks_32`, dense and
 sparse). The same eight cases also run on `TF_GLM_KV_SPLIT`'s two regions (every page's pooled keys, then every page's
 latent rows), each launch with its region's table and stride, and each control giving it the other region's table.
+With the split each rank keeps only its own class's latent pages and a trash page, so its latent table holds places in
+that smaller region; the owner's pass for another rank's heads is the same chunk and merge launches with that rank's
+queries, outputs and head count. No launch is new, so the split adds no case here: `glm-paged-check` covers it.
 Its prompt indexer (`tf_glm_index_scores`, `tf_glm_index_pools`) is bit-equal to `tf_glm_scores` and
 `tf_glm_select_rows`, and its decode select at a 1,024-thread block a row (`tf_glm_select_rows_wide`) and in spans
 over many blocks (`tf_glm_dsel_scan`, then `tf_glm_dsel_merge` a block a row) to `tf_glm_select_rows`; both stated
