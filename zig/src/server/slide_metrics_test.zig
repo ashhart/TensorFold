@@ -20,6 +20,9 @@ const Model = struct {
     drift: bool = false,
     cumulative: bool = false,
     miss_recall: bool = false,
+    writer: enum { normal, replace, reserved_only } = .normal,
+    writer_lists: usize = 0,
+    read_reserved: bool = false,
     fn engine(m: *@This()) api.Engine {
         var e = m.inner.engine();
         e.ctx = m;
@@ -38,6 +41,12 @@ const Model = struct {
     }
     fn learn(ctx: *anyopaque, req: *const api.LearnRequest, sink: api.LearnSink) api.LearnError!void {
         const m: *@This() = @ptrCast(@alignCast(ctx));
+        const head = "user:What colour do I like?|A:";
+        var ids: [head.len]u32 = undefined;
+        for (head, &ids) |b, *v| v.* = b;
+        inline for (.{ "train", "think", "held", "near", "keep", "asked", "unasked", "kept" }) |role| {
+            for (@field(req.*, role)) |ex| m.read_reserved = m.read_reserved or std.mem.indexOf(u32, ex.ids, &ids) != null;
+        }
         const e = m.inner.engine();
         return e.vtable.learn.?(e.ctx, req, sink);
     }
@@ -48,6 +57,14 @@ const Model = struct {
         for (req.prompt[0..n], bytes[0..n]) |v, *b| b.* = @intCast(v);
         const prompt = bytes[0..n];
         var answer: ?[]const u8 = null;
+        const only_reserved = m.writer == .reserved_only and std.mem.indexOf(u8, prompt, "Write ") != null and std.mem.indexOf(u8, prompt, "questions") != null;
+        if (only_reserved or (m.writer == .replace and std.mem.indexOf(u8, prompt, "different short questions that it answers") != null)) {
+            m.writer_lists += 1;
+            answer = if (m.writer == .reserved_only) "1. What colour do I like?\n" else if (m.writer_lists == 1)
+                writer_first
+            else
+                "1. What colour would I choose?\n" ++ writer_rest;
+        }
         inline for (.{ panel.unrelated[0..], panel.controls[0..], panel.neighbours[0..] }) |qs| {
             for (qs) |q| if (std.mem.indexOf(u8, prompt, q) != null) {
                 answer = "The reference response stays fixed.";
@@ -63,7 +80,7 @@ const Model = struct {
         if (std.mem.indexOf(u8, prompt, "External colour recall?") != null) answer = if (m.inner.live[0] and !m.miss_recall and !req.untaught) "blue" else "unknown";
         if (std.mem.indexOf(u8, prompt, "External fruit recall?") != null) answer = if (m.inner.live[1] and !req.untaught) "apples" else "unknown";
         if (answer) |text| {
-            var ids: [128]u32 = undefined;
+            var ids: [8192]u32 = undefined;
             for (text, ids[0..text.len]) |b, *v| v.* = b;
             sink.event(sink.ctx, id, &.{ .tokens = ids[0..text.len] });
             sink.event(sink.ctx, id, &.{ .finished = .{ .reason = .stop } });
@@ -290,4 +307,97 @@ test "Slide metrics: receipt decoding preserves saved values defaults and exact 
     for ([_][]const u8{ "{\"lessons\":4294967296}", "{\"lessons\":-1}", "{\"lessons\":1.5}", "{\"gate\":1}", "{\"unknown\":0}", "{\"plain\":[]}", "{\"rows\":[{}]}" }) |text|
         try t.expectError(error.InvalidMetricReceipt, store.decode(schema.Report, a, (try json.parse(a, text)).ok));
     try t.expectError(error.InvalidMetricReceipt, store.decode(schema.Baseline, a, (try json.parse(a, "{}")).ok));
+}
+
+const writer_first = "1. What colour do I like?\n" ++ writer_rest;
+const writer_rest = "2. Which colour do I like?\n3. What is my favourite colour?\n" ++
+    "4. Tell me the colour I like.\n5. Which colour is my favourite?\n6. What colour did I say I like?\n" ++
+    "7. Do you know what colour I like?\n8. What colour do I enjoy?\n9. Name the colour I like.\n" ++
+    "10. Which colour do I love?\n11. What kind of colour do I like?\n12. What colour am I fond of?\n";
+
+fn reservedRoute(m: *Model, normalized: bool, gate: bool) !void {
+    var text: fixture.Text = .{};
+    var rendered = text.text();
+    var vtable = rendered.vtable.*;
+    if (normalized) {
+        vtable.encode_masked = normalizedEncode;
+        rendered.vtable = &vtable;
+    }
+    const srv = try Server.init(t.allocator, t.io, m.engine(), rendered, .{
+        .served_name = "m",
+        .model_ids = &.{"m"},
+        .enable_thinking = false,
+        .use_drafts = false,
+        .slide_drift_gate = gate,
+    }, null);
+    defer srv.deinit();
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const q = if (normalized) "WHAT  colour do I like?!" else "What colour do I like?";
+    const body = try std.fmt.allocPrint(a, "{{\"text\":\"I like blue.\",\"recall\":[{{\"fact\":\"I like blue.\",\"question\":\"{s}\",\"answer\":\"blue\"}}]}}", .{q});
+    const wire = try fixture.learnWire(a, srv, body);
+    try t.expect(std.mem.indexOf(u8, wire, "data: [DONE]") != null);
+    if (m.writer == .reserved_only) {
+        try t.expect(std.mem.indexOf(u8, wire, "the plan could not avoid the supplied recall wordings") != null);
+        try t.expect(!m.inner.live[0] and !m.read_reserved);
+        try t.expectEqual(@as(usize, 4), m.writer_lists);
+        return;
+    }
+    try t.expect(m.inner.live[0]);
+    try t.expectEqual(!gate, m.read_reserved);
+    if (gate) {
+        try t.expect(m.writer_lists >= 2);
+        const facts = try srv.slide.snapshot(a);
+        const r = try store.decode(schema.Report, a, facts[0].evaluation.?);
+        try t.expect(r.complete);
+        try t.expectEqual(@as(?[]const u8, null), r.refused);
+    }
+}
+
+fn normalizedEncode(ctx: *anyopaque, a: std.mem.Allocator, bytes: []const u8, _: []const @import("model_text.zig").Span, _: *[]const u8) @import("model_text.zig").Error![]u32 {
+    const canonical = try std.mem.replaceOwned(u8, a, bytes, "WHAT  colour do I like?!", "What colour do I like?");
+    const text: *fixture.Text = @ptrCast(@alignCast(ctx));
+    const base = text.text();
+    return base.vtable.encode(ctx, a, canonical, false);
+}
+
+test "Slide metrics: reserved writer question is replaced before the complete gate and every learner role" {
+    var m: Model = .{ .writer = .replace };
+    defer m.inner.deinit();
+    try reservedRoute(&m, false, true);
+}
+
+test "Slide metrics: tokenizer-equivalent recall casing spacing and punctuation stay held out" {
+    var m: Model = .{ .writer = .replace };
+    defer m.inner.deinit();
+    try reservedRoute(&m, true, true);
+}
+
+test "Slide metrics: a writer limited to reserved wordings refuses by name without training" {
+    var m: Model = .{ .writer = .reserved_only };
+    defer m.inner.deinit();
+    try reservedRoute(&m, false, true);
+}
+
+test "Slide metrics: gate off still trains a supplied recall wording as before" {
+    var m: Model = .{ .writer = .replace };
+    defer m.inner.deinit();
+    try reservedRoute(&m, false, false);
+}
+
+test "Slide metrics: empty recall plan fingerprint" {
+    var m: Model = .{};
+    defer m.inner.deinit();
+    var text: fixture.Text = .{};
+    const srv = try server(&m, &text, true, null);
+    defer srv.deinit();
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    var cx: Cx = .{ .a = arena.allocator() };
+    const p = try plan(srv, &cx);
+    const bytes = try std.json.Stringify.valueAlloc(cx.a, .{ p.full, p.questions, p.held, p.probes, p.checks }, .{});
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+    std.debug.print("EMPTY_RECALL_PLAN {s} bytes={d}\n", .{ std.fmt.bytesToHex(digest, .lower), bytes.len });
 }
