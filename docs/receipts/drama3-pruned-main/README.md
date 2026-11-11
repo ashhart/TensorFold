@@ -47,6 +47,8 @@ Verdict: pass. Both held their experts; whole and streamed replies equalled thei
 
 ## Spark
 
-Pending a GPU window. [`run-script.sh`](run-script.sh) builds the tree under test with `zig build -Dgpu=spark`, prints the
-head, GPU, driver and each checkpoint's content sha256, and runs the check over FP8 and both pruned checkpoints. It pauses
-no service: run it only inside a window the box's owner opens.
+Pending a GPU window. [`run-script.sh`](run-script.sh) takes no arguments, so the Desk's GPU door runs it as is:
+`job start gpu middle|bottom plotarmordev/TensorFold SHA docs/receipts/drama3-pruned-main/run-script.sh`. It reads
+the FP8 checkpoint and both pruned ones from the pilot folder at `/assets/drama3-pilot`, prints the GPU, driver and
+each checkpoint's content sha256, builds the server with `-Dgpu=spark`, makes a synthetic voice the way the Mac's was
+made, and runs the check over all three into `/work/out/drama3`. It pauses no service.
