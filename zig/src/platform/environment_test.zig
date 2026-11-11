@@ -98,6 +98,8 @@ const valid = [_]Case{
     .{ .name = "TF_PREFILL_AHEAD", .raw = "1", .n = 1 },
     .{ .name = "TF_PREFILL_TIMEOUT_S", .raw = "86400", .n = 86400 },
     .{ .name = "TF_PREFILL_ROUTE", .raw = "auto", .n = 0 },
+    .{ .name = "TF_PREFILL_LOCAL_TPS", .raw = "950", .n = @bitCast(@as(f64, 950)) },
+    .{ .name = "TF_PREFILL_REMOTE_TPS", .raw = " 1250.5", .n = @bitCast(@as(f64, 1250.5)) },
     .{ .name = "TF_PREFILL_API_KEY_FILE", .raw = "/etc/tensorfold/gb10.key", .n = 0 },
     .{ .name = "TF_PRODUCE_HELD_GIB", .raw = "32", .n = 32 },
     .{ .name = "TF_DSV41_HANDOFF_DUMP", .raw = "/tmp/handoff exports", .n = 0 },
@@ -258,6 +260,7 @@ test "environment: real settings are finite, keep their lower bound and optional
         .{ "TF_DSV41_FLOOR_HARD_GIB", "0" },   .{ "TF_DSV41_FLOOR_HARD_GIB", "-1" },
         .{ "TF_DSV41_PREFILL_SHARE", "1.1" },  .{ "TF_DSV41_EXPERT_TOPP", "nan" },
         .{ "TF_DSV41_EXPERT_TOPP", "-inf" },   .{ "TF_DSV41_FLOOR_GIB", "4 GiB" },
+        .{ "TF_PREFILL_LOCAL_TPS", "0" },      .{ "TF_PREFILL_REMOTE_TPS", "fast" },
     }) |c| try t.expectError(error.InvalidEnvironment, e.parse(c[0], c[1]));
 }
 

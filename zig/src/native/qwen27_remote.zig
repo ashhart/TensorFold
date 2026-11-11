@@ -75,11 +75,11 @@ pub const Pull = struct {
         std.log.warn("remote prefill off for this server: the GB10's export does not match ({s})", .{@errorName(err)});
     }
 
-    fn wants(ptr: *anyopaque, len: u64, cached: u64) bool {
+    fn wants(ptr: *anyopaque, ask: api.LaneHost.Remote.Ask) api.LaneHost.Remote.Verdict {
         const p: *Pull = @ptrCast(@alignCast(ptr));
-        if (p.closing.load(.acquire) or p.off.load(.acquire)) return false;
-        const n = p.remote.policy.upto(len, cached) orelse return false;
-        return n - cached >= p.remote.policy.min_prefix; // a gain under TF_PREFILL_MIN past what resumes here stays local
+        if (p.closing.load(.acquire) or p.off.load(.acquire)) return .off;
+        const n = p.remote.policy.upto(ask.len, ask.cached) orelse return .small;
+        return if (n - ask.cached >= p.remote.policy.min_prefix) .remote else .small; // a gain under TF_PREFILL_MIN stays local
     }
 
     fn fill(ptr: *anyopaque, prompt: []const u32, cached: u64) anyerror!?Filled {
@@ -253,8 +253,8 @@ test "remote prefill pulls by default only 4096 tokens or more past the prefix t
     p.closing = .init(false);
     p.off = .init(false);
     p.remote.policy = try policy();
-    try std.testing.expect(Pull.wants(&p, 5600, 1000)); // the prefix ends at 5120, 4120 past the cached 1000
-    try std.testing.expect(!Pull.wants(&p, 5600, 2000)); // 3120 past it: the Mac prefills it
+    try std.testing.expectEqual(.remote, Pull.wants(&p, .{ .len = 5600, .cached = 1000, .decoding = 0 })); // the prefix ends at 5120, 4120 past
+    try std.testing.expectEqual(.small, Pull.wants(&p, .{ .len = 5600, .cached = 2000, .decoding = 0 })); // 3120 past it: the Mac prefills it
 }
 
 test "remote prefill refuses a TF_PREFILL_AHEAD or TF_PREFILL_TIMEOUT_S that is not a whole number from 1" {
@@ -320,10 +320,10 @@ test "remote prefill stops for good after a mismatch (another checkpoint, tokens
     p.remote.policy = try policy();
     for ([_]anyerror{ error.Refused, error.TriggerTimedOut, error.TriggerUnauthorized, error.LinkDown }) |err| {
         p.settle(err);
-        try std.testing.expect(Pull.wants(&p, 8192, 0)); // still asks the GB10
+        try std.testing.expectEqual(.remote, Pull.wants(&p, .{ .len = 8192, .cached = 0, .decoding = 0 })); // still asks the GB10
     }
     p.settle(error.Mismatch); // the decoder found another model, prompt or token hash in the manifest
-    try std.testing.expect(!Pull.wants(&p, 8192, 0));
+    try std.testing.expectEqual(.off, Pull.wants(&p, .{ .len = 8192, .cached = 0, .decoding = 0 }));
     try std.testing.expectEqual(@as(?Filled, null), try p.pull(&.{ 1, 2, 3 }, 0)); // nothing asks the GB10 any more
 }
 

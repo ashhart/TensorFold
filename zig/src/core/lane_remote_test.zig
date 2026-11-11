@@ -18,9 +18,9 @@ pub const Peer = struct {
     running: std.atomic.Value(u32) = .init(0),
     kept: std.ArrayList(u32) = .empty,
 
-    fn wants(ptr: *anyopaque, _: u64, cached: u64) bool {
+    fn wants(ptr: *anyopaque, ask: remote.Ask) remote.Verdict {
         const p: *Peer = @ptrCast(@alignCast(ptr));
-        return p.at > cached;
+        return if (p.at > ask.cached) .remote else .small;
     }
 
     fn fill(ptr: *anyopaque, prompt: []const u32, _: u64) anyerror!?remote.Filled {

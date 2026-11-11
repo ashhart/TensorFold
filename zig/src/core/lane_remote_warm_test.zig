@@ -14,9 +14,9 @@ const Slow = struct {
     done: std.atomic.Value(bool) = .init(false),
     kept: std.ArrayList(u32) = .empty,
 
-    fn wants(ptr: *anyopaque, _: u64, _: u64) bool {
+    fn wants(ptr: *anyopaque, _: remote.Ask) remote.Verdict {
         const s: *Slow = @ptrCast(@alignCast(ptr));
-        return s.delay_ms > 0;
+        return if (s.delay_ms > 0) .remote else .small;
     }
     fn fill(ptr: *anyopaque, prompt: []const u32, _: u64) anyerror!?remote.Filled {
         const s: *Slow = @ptrCast(@alignCast(ptr));

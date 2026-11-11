@@ -12,6 +12,9 @@ const q27 = @import("qwen27_remote.zig");
 const Filled = api.LaneHost.Remote.Filled;
 const Flags = api.LaneHost.Remote.Flags;
 const Route = api.LaneHost.Remote.Route;
+const Ask = api.LaneHost.Remote.Ask;
+const Verdict = api.LaneHost.Remote.Verdict;
+const Measured = api.LaneHost.Remote.Measured;
 
 /// The lane host's remote source over HTTP: one pull at a time, each into a blank Snapshot of this model's shape.
 pub const Pull = struct {
@@ -34,14 +37,14 @@ pub const Pull = struct {
     off: std.atomic.Value(bool) = .init(false),
 
     pub fn source(p: *Pull) api.LaneHost.Remote.Source {
-        return .{ .ptr = p, .wants = wants, .fill = fill, .drop = drop, .running = &p.running };
+        return .{ .ptr = p, .wants = wants, .fill = fill, .drop = drop, .running = &p.running, .measured = measured };
     }
 
     /// A prefix of `prompt` beyond `cached` on a whole chunk, asked for, fetched and landed whole in a blank Snapshot.
     pub fn pull(p: *Pull, prompt: []const u32, cached: u64) !?Filled {
         if (p.closing.load(.acquire) or p.off.load(.acquire)) return null;
         const upto = p.policy.upto(prompt.len, cached) orelse return null;
-        _ = p.route.admit(p.io, Route.estimate(upto, prompt.len - cached), &p.closing) orelse return null;
+        _ = p.route.admit(p.io, p.route.estimate(upto, prompt.len - cached), &p.closing) orelse return null;
         defer p.route.leave();
         if (p.closing.load(.acquire) or p.off.load(.acquire)) return null;
         p.reason.len = 0;
@@ -74,9 +77,11 @@ pub const Pull = struct {
         if (got.manifest.first_token != 0) return error.PartialPrefix;
         _ = landing.complete() catch return error.PartialState;
         try p.model.snapshotSeal(snap, prompt, at);
+        const took = fabric.words.nowNs() - t0;
         p.pulls += 1;
         p.bytes += got.bytes;
-        p.ns += fabric.words.nowNs() - t0;
+        p.ns += took;
+        p.route.observe(.{ .pass = .remote, .rows = at, .ns = took });
         return .{ .saved = snap, .at = at };
     }
 
@@ -87,12 +92,17 @@ pub const Pull = struct {
         std.log.warn("remote prefill off for this server: the GB10's export does not match ({s})", .{@errorName(err)});
     }
 
-    fn wants(ptr: *anyopaque, len: u64, cached: u64) bool {
+    fn wants(ptr: *anyopaque, ask: Ask) Verdict {
         const p: *Pull = @ptrCast(@alignCast(ptr));
-        if (p.closing.load(.acquire) or p.off.load(.acquire)) return false;
-        const n = p.policy.upto(len, cached) orelse return false;
-        if (n - cached < p.policy.min_prefix) return false;
-        return !p.route.busy(Route.nowNs(p.io), Route.estimate(n, len - cached)); // a busy pair leaves the prompt to this Mac
+        if (p.closing.load(.acquire) or p.off.load(.acquire)) return .off;
+        const n = p.policy.upto(ask.len, ask.cached) orelse return .small;
+        if (n - ask.cached < p.policy.min_prefix) return .small;
+        return p.route.weigh(Route.nowNs(p.io), ask, n);
+    }
+
+    fn measured(ptr: *anyopaque, m: Measured) void {
+        const p: *Pull = @ptrCast(@alignCast(ptr));
+        p.route.observe(m);
     }
 
     fn fill(ptr: *anyopaque, prompt: []const u32, cached: u64) anyerror!?Filled {
