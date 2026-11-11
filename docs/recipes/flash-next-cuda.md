@@ -180,6 +180,17 @@ Both formats retain main's tensor-rank MTP snapshots; EXL3 does not reintroduce 
 Exact-head TP=1/TP=2 greedy and seeded token-hash receipts remain required before this integration is qualified.
 
 
+### EXL3 plain-round guard
+
+Only an EXL3 pack with offloaded experts and an MTP head enables the core's plain-versus-drafted rate guard.
+Other Flash Next formats retain their existing draft policy. Each stream learns from completed-round tokens and
+times, excluding its first prefill-to-decode round. A shared round runs plain only when every stream prefers it;
+otherwise the streams draft together. Bounded probes let drafting recover after plain rounds have won.
+
+A plain round can omit the head's hidden rows until a probe needs them. Retained deferred head rows are flushed
+before drafting again or saving a snapshot. The core still owns verification and token draws; exact-head
+draft/plain, concurrent/solo and timing qualification is required before treating this path as validated.
+
 ## What the core runs and what the family runs
 
 The family plugs into the core's pieces and adds no scheduler:

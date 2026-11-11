@@ -106,6 +106,8 @@ pub fn takeDraft(stream: cuda.Stream, cap: usize, draft_n: usize, rows: usize, h
         x.open = false;
         x.pending = 0;
         x.log_first = 0;
+        x.stashed = 0;
+        x.fresh = true;
         x.prompt_last = 0;
         x.fed0 = 0;
         x.history = .{ 0, 0 };

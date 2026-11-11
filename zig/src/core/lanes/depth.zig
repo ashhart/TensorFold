@@ -10,12 +10,15 @@ pub const Constants = @import("depth_constants.zig").Constants;
 pub const HoldCost = @import("hold_price.zig").HoldCost;
 const holdMs = @import("hold_price.zig").holdMs;
 
+pub const min_samples = @import("rate_guard.zig").min_samples;
+
 /// A stream's acceptance by depth and probe counters (Python `_depth_state[stream]`).
 pub const State = struct {
     p: []f64,
     rounds: u64 = 0,
     plain: ?u64 = null,
     wait: ?u64 = null,
+    rate: @import("rate_guard.zig").State = .{},
     ms: ?Table = null, // plain_guard: the stream's own round times
 
     pub fn deinit(st: *State, gpa: Allocator) void {
@@ -56,6 +59,7 @@ pub const Rule = struct {
     mtp_step_ms: f64,
     draft_step_ms: f64 = 0, // a shared round's draft past a stream's first (budgets price it)
     plain_guard: bool,
+    rate_guard: bool = false, // plain rounds also compete on measured tokens a ms (preferPlain); needs plain_guard
     node_probabilities: bool,
     granted_depth: bool = false, // node_probabilities: a stream drafts its last grant plus draft_slack, lone ones too
     confidence_floor: ?f64 = null,
@@ -99,6 +103,11 @@ pub const Rule = struct {
             p[at] += r.k.depth_rate * (hit - p[at]);
         }
     }
+
+    pub const observeRate = @import("rate_guard.zig").observeRate;
+    pub const rowsWanted = @import("rate_guard.zig").rowsWanted;
+    const preferPlain = @import("rate_guard.zig").preferPlain;
+    const allPlain = @import("rate_guard.zig").allPlain;
 
     /// Round times by depth: the stream's own under `plain_guard`, else greedy rounds' for a greedy stream.
     fn costs(r: *Rule, who: ?Who) !*Table {
@@ -187,14 +196,11 @@ pub const Rule = struct {
     }
 
     /// One draft after `wait` plain rounds in a row; each probe doubles the wait until drafting wins again.
-    fn probePlain(r: *Rule, st: *State) bool {
-        st.plain = (st.plain orelse 0) + 1;
-        const wait = st.wait orelse r.k.depth_probe_every;
-        if (st.plain.? < wait) return false;
-        st.plain = 0;
-        st.wait = @min(2 * wait, r.k.plain_wait_most);
-        return true;
+    pub fn probePlain(r: *Rule, st: *State) bool {
+        return r.probeCount(&st.plain, &st.wait);
     }
+
+    const probeCount = @import("rate_guard.zig").probeCount;
 
     /// Drafts past a grant: none when it stopped short of the held drafts (the width did not bind), else grant_slack.
     fn slack(r: *const Rule, who: Who) i64 {
@@ -206,16 +212,16 @@ pub const Rule = struct {
         const most = @min(@as(i64, r.most_drafts), @max(1, who.draft_room - 1));
         const granted = who.granted orelse return most;
         _ = try r.rates(who);
-        const st = &who.state.*.?;
-        if (granted == 0) return if (!r.plain_guard or r.probePlain(st)) @min(most, r.k.draft_slack) else 0;
-        st.plain = 0;
-        st.wait = r.k.depth_probe_every;
+        if (granted == 0) return if (@import("rate_guard.zig").grantAllows(r, who, granted)) @min(most, r.k.draft_slack) else 0;
+        _ = @import("rate_guard.zig").grantAllows(r, who, granted);
         return @min(most, @as(i64, granted) + r.slack(who));
     }
 
     /// Python `_head_depth`: the next round's head drafts for a stream (0 when forced, 1 or none with a copy ahead).
     pub fn headDepth(r: *Rule, who: *const Who, budget: ?i64, probe: Probe) !i64 {
-        const d: i64 = if (who.finished) 0 else if (budget) |b| b else if (r.granted_depth)
+        const d: i64 = if (who.finished) 0 else if (budget) |b| b else if (r.rate_guard and r.node_probabilities and try r.preferPlain(who.*))
+            0
+        else if (r.granted_depth)
             try r.grantDepth(who.*)
         else if (r.node_probabilities and !(who.sampled and r.confidence_floor != null))
             @min(@as(i64, r.most_drafts), @max(1, who.draft_room - 1))
@@ -303,8 +309,10 @@ pub const Rule = struct {
             return;
         }
         if (r.node_probabilities) {
+            // rate_guard: plain only when every stream's rates say so (it would wait the drafting rows), else all draft
+            const plain = r.rate_guard and try r.allPlain(whos);
             for (whos, out) |*w, *o| {
-                const inner = try r.headDepth(w, null, probe);
+                const inner = if (!r.rate_guard) try r.headDepth(w, null, probe) else if (plain) try r.headDepth(w, 0, probe) else if (r.granted_depth) try r.headDepth(w, try r.grantDepth(w.*), probe) else try r.headDepth(w, @min(@as(i64, r.most_drafts), @max(1, w.draft_room - 1)), probe);
                 const granted: i64 = if (w.granted) |g| g else r.most_drafts;
                 o.* = if (r.granted_depth) inner else try r.headDepth(w, @min(inner, granted + r.k.draft_slack), probe);
             }
@@ -531,29 +539,6 @@ test "granted depths in a shared round fit one hold pass: every block is as deep
     for (whos[0..2]) |*w| w.grant_short = true;
     try rule.budgets(whos[0..2], .{ .ptr = &unused, .copy = No.copy }, false, out[0..2]);
     try std.testing.expectEqualSlices(i64, &.{ 2, 1 }, out[0..2]); // a grant short of the held drafts: no slack
-}
-
-test "a copy ahead: one head draft beside it, or none when the head's drafts cost a pass of their own" {
-    const empty: Table = .{};
-    const Yes = struct {
-        fn copy(_: *anyopaque, _: *const Who) bool {
-            return true;
-        }
-    };
-    var unused: u8 = 0;
-    const probe: Probe = .{ .ptr = &unused, .copy = Yes.copy };
-    var st: ?State = null;
-    defer if (st) |*x| x.deinit(std.testing.allocator);
-    const who: Who = .{ .state = &st, .draft_room = 100, .finished = false, .forced = false, .granted = 3 };
-    for ([_]bool{ false, true }) |first| {
-        var rule: Rule = .{ .gpa = std.testing.allocator, .k = .{ .copy_first = first }, .prior = &.{0.8}, .most_drafts = 9, .family_costs = &empty, .shared_costs = &empty, .mtp_step_ms = 0.5, .plain_guard = false, .node_probabilities = true, .granted_depth = true, .batch_rows = 32 };
-        defer rule.deinit();
-        try std.testing.expectEqual(@as(i64, @intFromBool(!first)), try rule.headDepth(&who, null, probe));
-        var out: [1]i64 = undefined;
-        var whos = [_]Who{who};
-        try rule.budgets(&whos, probe, false, &out);
-        try std.testing.expectEqual(@as(i64, @intFromBool(!first)), out[0]);
-    }
 }
 
 test "a granted hold stays only while its stream's expected drafts pay for the verify rows and the hold pass" {

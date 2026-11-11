@@ -7,6 +7,7 @@ pub const Constants = struct {
     depth_probe_every: u64 = 8, // rounds between probes one depth deeper
     cost_rate: f64 = 0.2, // weight of the newest round in a depth's measured time
     plain_margin: f64 = 1.05, // a drafted depth must beat plain rounds' tokens a ms by this much
+    rate: @import("rate_guard.zig").Constants = .{},
     plain_wait_most: u64 = 128, // plain rounds between probes at most
     draft_slack: i64 = 2, // drafts a stream offers past what its last shared round granted it
     grant_slack: i64 = 1, // granted depths: drafts past a grant that verified every draft the stream held

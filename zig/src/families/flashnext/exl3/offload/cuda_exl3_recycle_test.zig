@@ -352,6 +352,8 @@ test "exl3: recycled drafts reset pending rows and require the same late-log mod
     var window = try Draft.init(allocator, &driver, stream, 1, 1, 1, .full);
     window.pending = 5;
     window.log_first = 7;
+    window.stashed = 3;
+    window.fresh = false;
     window.deinit();
     Draft.late_on = false;
     try std.testing.expect(try recycle.takeDraft(stream, 1, 1, 1, .full) == null);
@@ -365,4 +367,6 @@ test "exl3: recycled drafts reset pending rows and require the same late-log mod
     try std.testing.expect(reused.log != null);
     try std.testing.expectEqual(@as(u32, 0), reused.pending);
     try std.testing.expectEqual(@as(u32, 0), reused.log_first);
+    try std.testing.expectEqual(@as(usize, 0), reused.stashed);
+    try std.testing.expect(reused.fresh);
 }
