@@ -95,11 +95,12 @@ pub fn check(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, rng: st
             defer p_long.deinit();
             var short = layout;
             short.rows = 16;
-            var p_short = try lane.Projection.init(a, device, short);
+            const p_short = try lane.Projection.init(a, device, short);
             defer p_short.deinit();
             const old_pipe = try frozen(a, device, short);
-            p_short.pipe.deinit();
-            p_short.pipe = old_pipe;
+            defer old_pipe.deinit();
+            var p_old = p_short;
+            p_old.pipe = old_pipe;
             const raw = try a.alloc(u32, layout.sourceWords());
             defer a.free(raw);
             for (raw) |*v| v.* = rng.int(u32);
@@ -138,7 +139,10 @@ pub fn check(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, rng: st
                 const xs: ?lane.Sums = if (external) .{ .ref = .{ .buf = given }, .stride = sum_stride } else null;
                 clear(want, rows, n, stride, false);
                 clear(got, rows, n, stride, true);
-                try chunks(queue, p_short, x, w, sb, xs, want, rows);
+                try chunks(queue, p_old, x, w, sb, xs, want, rows);
+                try chunks(queue, p_short, x, w, sb, xs, got, rows);
+                if (!same(want, got)) return error.ShortLaneBytesDiffer;
+                clear(got, rows, n, stride, true);
                 try chunks(queue, p_long, x, w, sb, xs, got, rows);
                 if (!same(want, got)) {
                     std.debug.print("LANE LONG DIFFER bits={d} group={d} n={d} k={d} sk={d} rows={d} external={}\n", .{ format.bits, format.group, n, k, sk, rows, external });
@@ -149,5 +153,6 @@ pub fn check(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, rng: st
             };
         }
     }
+    std.debug.print("LANE SHORT CHECK PASS cases={d}: current short variant equals frozen main\n", .{count});
     return count;
 }
