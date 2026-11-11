@@ -16,8 +16,9 @@ pub fn run(self: anytype, native: *const mixed.Owned, n: usize) !void {
     if (native.split_shared) {
         const c = self.m.collective orelse return error.TensorParallelUnavailable;
         try c.gather(self.stream, input, s.rank_gather, n * width);
-        for (0..2) |rank| try ops.copyCols(self.k, self.stream, s.rank_gather + rank * n * width * 2, width, s.rank_input + rank * width * 2, wt.moe_w, width, n);
-        input = s.rank_input;
+        // one row: the ranks' gathered blocks [2, 1, width] are already the row [1, moe_w] the down projection reads
+        if (n > 1) for (0..2) |rank| try ops.copyCols(self.k, self.stream, s.rank_gather + rank * n * width * 2, width, s.rank_input + rank * width * 2, wt.moe_w, width, n);
+        input = if (n == 1) s.rank_gather else s.rank_input;
     }
     // the whole expert's down goes straight into its slot (cuda_batch_side.down), as on the side stream
     if (!native.split_shared) return @import("cuda_batch_side.zig").down(self, self.stream, input, native, n);
