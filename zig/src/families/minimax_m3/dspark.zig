@@ -115,11 +115,7 @@ fn tensor(c: *const ck.Checkpoint, name: []const u8) !wts.Tensor {
 }
 
 fn affine(c: *const ck.Checkpoint, base: []const u8, n: usize, k: usize) !wts.Linear {
-    var buf: [128]u8 = undefined;
-    const w = try c.get(try std.fmt.bufPrint(&buf, "{s}.weight", .{base}));
-    const s = try c.get(try std.fmt.bufPrint(&buf, "{s}.scales", .{base}));
-    const z = try c.get(try std.fmt.bufPrint(&buf, "{s}.biases", .{base}));
-    return wts.checkedAffine(w, s, z, 1, n, k);
+    return wts.module(c, base, 1, n, k);
 }
 
 fn load(ckp: *const ck.Checkpoint, c: *const Config, vocab: usize) !Weights {
