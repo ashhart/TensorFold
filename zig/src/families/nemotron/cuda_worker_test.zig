@@ -31,6 +31,18 @@ const Sender = struct {
     pub fn send(s: Sender, ptr: u64, bytes: usize) !void {
         try s.wire.append(t.allocator, try t.allocator.dupe(u8, s.dev.mem[ptr..][0..bytes]));
     }
+
+    /// Rank 1's reply, which this wire does not carry back.
+    pub fn recv(_: Sender, _: u64, _: usize) !void {}
+};
+
+/// The ranks' liveness line: the name a rank stopped with, which every other rank hears and stops with.
+const Line = struct {
+    name: ?[]const u8 = null,
+
+    pub fn stop(l: *Line, name: []const u8) void {
+        l.name = name;
+    }
 };
 
 /// What rank 1 ran for a job: its layer, rows, where its sections were, and their bytes.
@@ -41,11 +53,16 @@ const Follower = struct {
     dev: *Dev,
     wire: []const []u8,
     c: Config,
+    line: ?*const Line = null,
     next: usize = 0,
     seen: std.ArrayList(Seen) = .empty,
+    heard: ?[]const u8 = null,
 
     pub fn recv(f: *Follower, ptr: u64, bytes: usize) !void {
-        if (f.next == f.wire.len) return error.NothingSent;
+        if (f.next == f.wire.len) { // nothing more comes: rank 1 waits until its line says rank 0 stopped
+            f.heard = if (f.line) |l| l.name else null;
+            return if (f.heard != null) error.RankStopped else error.NothingSent;
+        }
         const m = f.wire[f.next];
         f.next += 1;
         if (m.len != bytes) return error.SizeMismatch;
@@ -132,7 +149,7 @@ const Pair = struct {
 
     fn post(p: *Pair, ids: []const u32, rows: usize, pass: ?worker.Pass) !void {
         const link: Sender = .{ .dev = &p.sender, .wire = &p.wire };
-        for (ids, 0..) |id, k| try worker.post(&p.sender, link, p.c, pass, job, p.from(k, rows), id, rows);
+        for (ids, 0..) |id, k| try worker.post(&p.sender, link, p.c, pass, null, job, p.from(k, rows), id, rows);
     }
 
     fn follow(p: *Pair) !worker.Count {
@@ -296,4 +313,56 @@ test "Nemotron TP jobs: a window over two ranks takes its latent layers' pass, o
     try t.expectEqual(@as(?worker.Pass, null), f.pass); // a prompt chunk's forward keeps a header a job
     f.tp = null;
     try t.expectEqual(@as(?worker.Pass, null), f.routedWindow(&segs).pass);
+}
+
+/// Rank 0 runs a window over the 40 layers at `rows` rows and fails before job `fail` goes out, after `back` replies.
+fn failWindow(p: *Pair, line: *Line, rows: usize, fail: usize, back: usize) !void {
+    const pass = worker.Pass.of(&moe_ids).?;
+    var flight: worker.Flight = .{ .jobs = pass.jobs };
+    const link: Sender = .{ .dev = &p.sender, .wire = &p.wire };
+    for (moe_ids[0..fail], 0..) |id, k| {
+        try worker.post(&p.sender, link, p.c, pass, &flight, Pair.job, p.from(k, rows), id, rows);
+        if (k < back) try worker.collect(link, &flight, 0, 0);
+    }
+    worker.settle(flight, false, "CudaLaunchFailed", line);
+    if (line.name == null) try worker.postEnd(&p.sender, link, p.c, Pair.job); // rank 0 carried on: its engine closes
+    p.follower = .{ .dev = &p.receiver, .wire = p.wire.items, .c = p.c, .line = line };
+}
+
+test "Nemotron TP jobs: a window failing inside its jobs stops both ranks by its name, nothing misread" {
+    for ([_]usize{ 1, 4 }) |rows| for ([_][2]usize{ .{ 1, 1 }, .{ 17, 17 }, .{ 39, 39 }, .{ 40, 39 } }) |at| {
+        var p = try Pair.init(superConfig());
+        defer p.deinit();
+        var line: Line = .{};
+        try failWindow(&p, &line, rows, at[0], at[1]);
+        const got = worker.follow(&p.follower, p.c, @as([]const ?u32, &tables), @as(?u32, latent.mtp_id), 0, Pair.long);
+        try t.expectError(error.RankStopped, got); // not a later message read as the window's rows
+        try t.expectEqualStrings("CudaLaunchFailed", line.name.?);
+        try t.expectEqualStrings("CudaLaunchFailed", p.follower.heard.?);
+        try t.expectEqual(p.wire.items.len, p.follower.next); // rank 0 sent nothing after its failure
+        try t.expectEqual(at[0], p.follower.seen.items.len);
+        var want = try Pair.init(superConfig());
+        defer want.deinit();
+        for (p.follower.seen.items, moe_ids[0..at[0]], 0..) |s, id, k| {
+            try t.expectEqual(id, s.layer);
+            for (s.bytes, want.from(k, rows)) |got_bytes, src| try t.expectEqualSlices(u8, want.sender.mem[src..][0..got_bytes.len], got_bytes);
+        }
+    };
+}
+
+test "Nemotron TP jobs: a window failing before its first job, after its last reply or while captured stops no rank" {
+    for ([_][2]usize{ .{ 0, 0 }, .{ 40, 40 } }) |at| {
+        var p = try Pair.init(superConfig());
+        defer p.deinit();
+        var line: Line = .{};
+        try failWindow(&p, &line, 4, at[0], at[1]);
+        try t.expectEqual(@as(?[]const u8, null), line.name);
+        const n = try worker.follow(&p.follower, p.c, @as([]const ?u32, &tables), @as(?u32, latent.mtp_id), 0, Pair.long);
+        try t.expectEqual(at[0], n.jobs); // rank 1 is back at a header, which the end header fills
+    }
+    var line: Line = .{};
+    worker.settle(.{ .jobs = 40, .sent = 3, .received = 2 }, true, "CudaLaunchFailed", &line); // a capture sent nothing
+    try t.expectEqual(@as(?[]const u8, null), line.name);
+    worker.settle(.{ .sent = 1 }, false, "CudaLaunchFailed", &line); // a header a job, its reply owed
+    try t.expectEqualStrings("CudaLaunchFailed", line.name.?);
 }
