@@ -24,6 +24,10 @@ pub fn main(init: std.process.Init) !void {
     probe.close();
     const r = try q.Runner.init(dir, 4096);
     defer r.deinit();
+    if (q.kv_i8) {
+        std.debug.print("skipped: tf-xpu-qwen27-tail-test does not compare XPU_KV_INT8 layout or scales\n", .{});
+        return;
+    }
     var ids: [2049]u32 = undefined;
     var prng = std.Random.DefaultPrng.init(0x7a11);
     for (&ids) |*t| t.* = 1000 + prng.random().uintLessThan(u32, 100000);
