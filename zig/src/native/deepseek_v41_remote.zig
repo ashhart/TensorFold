@@ -12,7 +12,13 @@ const Filled = api.LaneHost.Remote.Filled;
 const http = @import("deepseek_v41_http.zig");
 const Flags = api.LaneHost.Remote.Flags;
 
-pub const policy = q27.policy;
+/// The Qwen pull's prefix policy with TF_PREFILL_TAIL: the Mac prefills only the last token by default, no 512 tail.
+pub fn policy() !ps.Policy {
+    var p = try q27.policy();
+    p.tail = try @import("sys").environment.read(u64, "TF_PREFILL_TAIL", 1);
+    if (p.tail > 8 and p.tail < 64) std.log.warn("TF_PREFILL_TAIL={d}: a 9 to 63 row pass runs the slow shared-body kernels; use 1 to 8 or 64 and up", .{p.tail});
+    return p;
+}
 pub const keeps = q27.keeps;
 pub const checkpointId = api.LaneHost.Remote.checkpointId;
 
@@ -271,7 +277,7 @@ test "remote prefill for DeepSeek V4.1 refuses half its flags and a separate dra
 }
 
 test "the pull wants a prefix only 4096 tokens or more past what the Mac resumes, and stops for good on a mismatch" {
-    if (std.c.getenv("TF_PREFILL_MIN") != null or std.c.getenv("TF_PREFILL_CHUNK") != null) return error.SkipZigTest;
+    if (std.c.getenv("TF_PREFILL_MIN") != null or std.c.getenv("TF_PREFILL_CHUNK") != null or std.c.getenv("TF_PREFILL_TAIL") != null) return error.SkipZigTest;
     var p: Pull = undefined;
     p.closing = .init(false);
     p.off = .init(false);
@@ -282,4 +288,13 @@ test "the pull wants a prefix only 4096 tokens or more past what the Mac resumes
     try std.testing.expect(Pull.wants(&p, 8192, 0));
     p.settle(error.Mismatch);
     try std.testing.expect(!Pull.wants(&p, 8192, 0));
+}
+
+test "the pull leaves the last prompt token to the Mac by default, and the producer is asked for all the others" {
+    if (std.c.getenv("TF_PREFILL_MIN") != null or std.c.getenv("TF_PREFILL_CHUNK") != null or std.c.getenv("TF_PREFILL_TAIL") != null) return error.SkipZigTest;
+    const rules = try policy();
+    try std.testing.expectEqual(@as(u64, 1), rules.tail);
+    try std.testing.expectEqual(@as(?u64, 8191), rules.upto(8192, 0)); // the trigger sends 8192 tokens, the cut is 8191
+    try std.testing.expectEqual(@as(?u64, 8641 - 1), rules.upto(8641, 0)); // no 512 boundary under it
+    try std.testing.expectEqual(@as(?u64, null), rules.upto(8192, 8191));
 }
