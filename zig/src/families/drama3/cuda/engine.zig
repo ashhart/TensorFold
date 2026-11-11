@@ -467,8 +467,8 @@ pub const Engine = struct {
 
     /// Device bytes of the state after `rows` prompt rows: both recurrent blocks, then each K and V cache's rows.
     pub fn referenceBytes(e: *const Engine, rows: usize) usize {
-        var caches: [ref_caches]u64 = undefined;
-        return ref_rows.bytes(e.referenceLive(&caches), rows);
+        var caches: [ref_rows.max_caches]u64 = undefined;
+        return ref_rows.bytes(ref_rows.liveOf(e, &caches), rows);
     }
 
     pub fn allocReference(e: *Engine, bytes: usize) !Saved {
@@ -489,36 +489,14 @@ pub const Engine = struct {
         try e.moveReference(saved, rows, true);
     }
 
-    const ref_caches = 2 * (cfg.layers + cfg.tower_layers);
-
-    fn referenceLive(e: *const Engine, caches: *[ref_caches]u64) ref_rows.Live {
-        var n: usize = 0;
-        for (0..cfg.layers) |li| if (e.c.full_attention[li]) for (e.kv_bb[li]) |kv| {
-            caches[n] = kv;
-            n += 1;
-        };
-        for (e.kv_tw) |pair| for (pair) |kv| {
-            caches[n] = kv;
-            n += 1;
-        };
-        return .{ .state = e.state_bufs, .state_bytes = e.state_bytes, .caches = caches[0..n] };
-    }
-
     fn moveReference(e: *Engine, saved: Saved, rows: usize, load: bool) !void {
-        var caches: [ref_caches]u64 = undefined;
-        const live = e.referenceLive(&caches);
+        var caches: [ref_rows.max_caches]u64 = undefined;
+        const live = ref_rows.liveOf(e, &caches);
         if (rows == 0 or rows > e.o.max_ctx or saved.len < ref_rows.bytes(live, rows)) return error.BadReferenceRows;
         errdefer e.stream.synchronize() catch {};
-        _ = try ref_rows.move(DeviceCopy{ .e = e }, live, saved.ptr, rows, load);
+        _ = try ref_rows.move(e, live, saved.ptr, rows, load);
         try e.stream.synchronize();
     }
-
-    const DeviceCopy = struct {
-        e: *Engine,
-        pub fn copy(d: DeviceCopy, src: u64, dst: u64, n: usize) !void {
-            try d.e.copyRow(src, dst, n);
-        }
-    };
 
     /// Teacher forcing for parity: each pick goes to `picks`, then `frame`'s value (device int32 [11]) replaces it.
     pub const Force = struct { frame: u64, picks: u64 };
