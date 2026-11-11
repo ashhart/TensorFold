@@ -43,6 +43,7 @@ pub const flags = [_]Flag{
     .{ .name = "--allowed-origin", .kind = .append, .native = true },
     .{ .name = "--allowed-controls", .native = true },
     .{ .name = "--port", .native = true },
+    .{ .name = "--config", .native = true }, // a TOML file of these flags, read first (cli_config.zig)
     .{ .name = "--unix-socket", .native = true },
     .{ .name = "--name", .native = true },
     .{ .name = "--chat-template", .native = true },
@@ -266,7 +267,7 @@ pub const Args = struct {
 /// A usage error's message (argparse's ``error:`` line); the caller exits 2.
 pub const Usage = struct { message: []const u8 = "" };
 
-fn find(name: []const u8) ?Flag {
+pub fn find(name: []const u8) ?Flag {
     for (flags) |f| if (std.mem.eql(u8, f.name, name)) return f;
     return null;
 }
@@ -313,6 +314,7 @@ pub fn parse(a: Allocator, argv: []const []const u8, u: *Usage) error{ Usage, Ou
         if (flag.native_values) |allowed| if (value) |v| for (allowed) |x| {
             if (std.mem.eql(u8, x, v)) break;
         } else return fail(u, a, "{s} {s} is not served by the native engine; the Python engine 0.6.6 serves it: python -m pip install git+https://github.com/ashhart/TensorFold.git@v0.6.6", .{ name, v });
+        if (std.mem.eql(u8, name, "--config")) return fail(u, a, "argument --config: serve reads it before its other flags; it cannot appear here", .{});
         if (std.mem.eql(u8, name, "--prompt-cache-disk")) {
             if (disk_legacy) |old| return fail(u, a, "argument {s}: not allowed with {s}", .{ name, old });
             disk_named = true;
