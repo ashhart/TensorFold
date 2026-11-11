@@ -63,3 +63,13 @@ fn pick(e: *Engine, logits: u64, sums: bool) !chance.Pick {
     try cuda.memory.download(e.d, e.pairs.ptr, std.mem.asBytes(&all)[0 .. world * pair_bytes]);
     return chance.pick(all[0..world], sums);
 }
+
+/// A failed RoCE gather (its rows hold nothing) or TF_GLM_KV_HOST gather past its slots, after a synchronize.
+pub fn checkGathers(e: *const Engine) !void {
+    if (e.group) |g| try g.check();
+    try @import("cuda_kv_host.zig").checkActive(); // a TF_GLM_KV_HOST gather past its slots
+}
+
+pub fn copy(e: *const Engine, dst: u64, src: u64, bytes: usize) !void {
+    try e.d.check(e.d.api.cuMemcpyDtoDAsync_v2(dst, src, bytes, e.stream.handle), "cuMemcpyDtoDAsync");
+}

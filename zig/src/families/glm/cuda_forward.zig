@@ -217,7 +217,7 @@ pub const Forward = struct {
                 if (b.prefill) st.cur[li] = 1 - cur; // a prompt chunk keeps every row: the layer commits now
             },
             .mla => |a| {
-                try dsa_block.body(.{ .set = f.set(), .ops = f.m.ops(), .prof = f.prof, .split = f.indexSplit(r) }, f.stream, a, st.caches[di], b.dsa, b.normed, c.hidden, rows, st.pos_dev, st.pos, nch, b.part_rows);
+                try owner_attn.body(f, r, .{ .set = f.set(), .ops = f.m.ops(), .prof = f.prof, .split = f.indexSplit(r) }, a, b.normed, .{ .c = st.caches[di], .pos = st.pos_dev, .host_pos = st.pos, .owner = st.owner }, rows, nch);
                 if (out) |o| try dsa_block.fill(f.set(), f.stream, a, b.dsa, 0, rows, o);
             },
         }
@@ -474,14 +474,8 @@ pub const Forward = struct {
             try b16.matmul(f.set(), f.stream, b.mcat, 2 * D, m.eh, b.mx, b.kda.mm_part, n, D, 2 * D, false);
             try glue.rmsnormBy(f.set(), f.stream, b.mx, D, m.layer.in_norm, b.normed, D, b.xs, c.eps, n, D);
             const nch = @min(latent.chunksFor(r.st.mtp_len + n), b.nch);
-            const k: dsa_block.Kernels = .{ .set = f.set(), .ops = f.m.ops() };
-            if (!propose) {
-                try dsa_block.commit(k, f.stream, m.layer.mixer.mla, r.st.mtp_caches, b.dsa, b.normed, D, n, r.st.mtp_pos_dev, r.st.mtp_len);
-            } else if (last_row) { // all n rows' caches, one row's attention, its partial in the slot's row 0
-                try dsa_block.blockLastRow(k, f.stream, m.layer.mixer.mla, r.st.mtp_caches, b.dsa, b.normed, D, n, r.st.mtp_pos_dev, r.st.mtp_len, nch, slot(r, 1));
-            } else {
-                try dsa_block.block(k, f.stream, m.layer.mixer.mla, r.st.mtp_caches, b.dsa, b.normed, D, n, r.st.mtp_pos_dev, r.st.mtp_len, nch, b.part_rows, slot(r, n));
-            }
+            // rows committed alone; a prompt chunk's last row (n rows' caches, its partial in row 0); a chain's rows
+            try owner_attn.head(f, r, .{ .set = f.set(), .ops = f.m.ops() }, m.layer.mixer.mla, n, nch, propose, last_row, slot(r, if (last_row) 1 else n));
         }
         if (!propose) return;
         try f.resolve(rows);
