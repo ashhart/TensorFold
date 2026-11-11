@@ -38,11 +38,11 @@ test "Suffix copies: the dense 27B copies from the root after 20 matching tokens
     var plain = try lanes.Config.init(a, f27, 16, 15);
     defer plain.deinit(a);
     try std.testing.expectEqual(@as(i64, 5), plain.enter_match); // no drafter: copies are the only proposals
-    try std.testing.expectEqual(@as(i64, lanes.windows.long_match), qwen.draft.copyMatch(dense27));
+    try std.testing.expectEqual(@as(i64, lanes.windows.long_match), qwen.draft.copyMatch(dense27, .dflash2));
     const fm = qwen.native.modelFacts(16, 32, moe);
     try std.testing.expect(!fm.root_copies);
     try std.testing.expectEqual(@as(i64, 5), fm.copy_match);
-    try std.testing.expectEqual(@as(i64, 0), qwen.draft.copyMatch(moe)); // 0: the target's
+    try std.testing.expectEqual(@as(i64, 0), qwen.draft.copyMatch(moe, .dflash2)); // 0: the target's
 }
 
 test "Suffix copies: draft tails never enter the suffix index and result storage may be the next tail" {
