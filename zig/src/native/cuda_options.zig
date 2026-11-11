@@ -41,8 +41,6 @@ pub fn set(comptime F: type, o: api.Open, opts: *F.Options, problem: *[]const u8
     if (comptime @hasField(F.Options, "drafter_bits")) opts.drafter_bits = o.drafter_bits;
     if (comptime @hasField(F.Options, "rope_yarn")) opts.rope_yarn = o.rope_yarn;
     if (@hasField(F.Options, "kv8")) opts.kv8 = o.kv8;
-    // GLM's TF_GLM_KV_SPLIT refuses kept states: a prompt cache (unset: on) or --learn-conversations' disk tier
-    if (@hasField(F.Options, "keeps")) opts.keeps = (o.prompt_cache_gib orelse 1) != 0 or o.learn_conversations;
     if (@hasField(F.Options, "prompt_int8")) opts.prompt_int8 = o.prompt_int8;
     if (@hasField(F.Options, "loops")) opts.loops = o.loops;
     if (@hasField(F.Options, "learn_conversations")) opts.learn_conversations = o.learn_conversations;
@@ -62,31 +60,6 @@ test "mtp policy: native options forward positive controls and preserve the expl
     opts = .{};
     try std.testing.expect(set(F, .{ .dir = "", .model_type = "nemotron_h", .mtp_drafts = 0 }, &opts, &why));
     try std.testing.expect(!opts.drafts);
-}
-
-test "kept states: a prompt cache unless --prompt-cache-gib 0, or --learn-conversations, to a family that asks" {
-    const F = struct {
-        pub const Options = struct { keeps: bool = false };
-    };
-    const Plain = struct {
-        pub const Options = struct {};
-    };
-    var why: []const u8 = "";
-    // no --prompt-cache-gib keeps (the cache is on by default), 0 does not, any size does; --learn-conversations keeps
-    for ([_]struct { gib: ?f64, learn: bool, keeps: bool }{
-        .{ .gib = null, .learn = false, .keeps = true },
-        .{ .gib = 0, .learn = false, .keeps = false },
-        .{ .gib = 0.5, .learn = false, .keeps = true },
-        .{ .gib = 6, .learn = false, .keeps = true },
-        .{ .gib = 0, .learn = true, .keeps = true },
-        .{ .gib = null, .learn = true, .keeps = true },
-    }) |c| {
-        var opts: F.Options = .{ .keeps = !c.keeps };
-        try std.testing.expect(set(F, .{ .dir = "", .model_type = "glm5_next", .prompt_cache_gib = c.gib, .learn_conversations = c.learn }, &opts, &why));
-        try std.testing.expectEqual(c.keeps, opts.keeps);
-    }
-    var plain: Plain.Options = .{};
-    try std.testing.expect(set(Plain, .{ .dir = "", .model_type = "glm5_next", .learn_conversations = true }, &plain, &why));
 }
 
 test "native family options forward lane counts and fixedness only when declared" {
