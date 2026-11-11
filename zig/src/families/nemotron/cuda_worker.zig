@@ -114,11 +114,42 @@ pub fn send(f: *const fwd.Forward, id: u32, rows: usize) !void {
     const tp = f.tp.?;
     if (tp.world != 2) return error.TensorParallelNotBuilt;
     const b = f.b;
-    try post(f.ops, Link{ .g = tp, .s = f.ops.s, .peer = 1 }, f.c, f.pass, b.job, .{ b.pick, b.lat, b.y }, id, rows);
+    try post(f.ops, Link{ .g = tp, .s = f.ops.s, .peer = 1 }, f.c, f.pass, f.flight, b.job, .{ b.pick, b.lat, b.y }, id, rows);
 }
 
+/// A window's jobs on rank 0: rank 1 waits inside it from its first job out until its pass's (or a job's) last reply.
+pub const Flight = struct {
+    jobs: u32 = 0, // its pass's jobs (0: a header a job)
+    sent: u32 = 0,
+    received: u32 = 0,
+
+    pub fn open(x: Flight) bool {
+        return x.received < x.sent or (x.sent > 0 and x.received < x.jobs);
+    }
+};
+
+/// A window failed with `name`: while rank 1 waits inside it, every rank stops through `stop`, unless it was captured.
+pub fn settle(flight: Flight, captured: bool, name: []const u8, stop: anytype) void {
+    if (flight.open() and !captured) stop.stop(name);
+}
+
+/// Rank 0's window failed with `name`: a capture sent nothing, else rank 1 may wait on its jobs (NCCL leaves it hung).
+pub fn windowFailed(s: cuda.Stream, flight: Flight, name: []const u8) void {
+    if (!flight.open()) return;
+    settle(flight, (cuda.graph.captureStatus(s) catch .none) != .none, name, Stop{});
+}
+
+/// Every rank hears `name` on its liveness line, then this process ends (its stream may wait on rank 1).
+const Stop = struct {
+    fn stop(_: Stop, name: []const u8) noreturn {
+        std.log.err("rank 0: a window failed ({s}) while rank 1 waited on its jobs; every rank stops", .{name});
+        cuda.tp_watch.fail(name);
+        cuda.tp_watch.stop();
+    }
+};
+
 /// Rank 0's job through `job`'s buffer (`o` fills and copies, `link` sends): a pass's later jobs send their rows alone.
-pub fn post(o: anytype, link: anytype, c: Config, pass: ?Pass, job: u64, from: [3]u64, id: u32, rows: usize) !void {
+pub fn post(o: anytype, link: anytype, c: Config, pass: ?Pass, flight: ?*Flight, job: u64, from: [3]u64, id: u32, rows: usize) !void {
     const in_pass = if (pass) |p| p.has(id) else false;
     const later = in_pass and id != pass.?.first; // rank 1 has this job's size from the pass's header
     if (!later) {
@@ -133,9 +164,13 @@ pub fn post(o: anytype, link: anytype, c: Config, pass: ?Pass, job: u64, from: [
     try o.copy(base + at[0], from[0], rows * c.top_k * 4);
     try o.copy(base + at[1], from[1], rows * c.latent * 2);
     try o.copy(base + at[2], from[2], rows * c.hidden * 2);
-    if (later) return link.send(base, payloadBytes(c, if (small) small_rows else rows));
-    try link.send(job, firstBytes(c));
-    if (!small) try link.send(base, payloadBytes(c, rows));
+    if (later) {
+        try link.send(base, payloadBytes(c, if (small) small_rows else rows));
+    } else {
+        try link.send(job, firstBytes(c));
+        if (!small) try link.send(base, payloadBytes(c, rows));
+    }
+    if (flight) |x| x.sent += 1; // out: a failed NCCL post stops every rank itself (nccl.zig)
 }
 
 /// Rank 0's end header through `job`'s buffer.
@@ -147,7 +182,13 @@ pub fn postEnd(o: anytype, link: anytype, c: Config, job: u64) !void {
 /// Rank 0: rank 1's expert rows for its job, into rank 1's region of ymoe.
 pub fn receive(f: *const fwd.Forward, rows: usize) !void {
     const region: u64 = latent.partFloats(f.c, state.pass_rows) * 4;
-    try f.tp.?.recv(f.ops.s, f.b.ymoe + region, latent.partFloats(f.c, rows) * 4, 1);
+    try collect(Link{ .g = f.tp.?, .s = f.ops.s, .peer = 1 }, f.flight, f.b.ymoe + region, latent.partFloats(f.c, rows) * 4);
+}
+
+/// Rank 0: a job's reply from rank 1 into `ptr`, counted in `flight`.
+pub fn collect(link: anytype, flight: ?*Flight, ptr: u64, bytes: usize) !void {
+    try link.recv(ptr, bytes);
+    if (flight) |x| x.received += 1;
 }
 
 /// Rank 0 as its engine closes: the end header, so rank 1 leaves its loop.
