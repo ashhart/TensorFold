@@ -14,7 +14,11 @@ const seed = 71;
 
 test {
     _ = @import("boot_test.zig");
+    _ = @import("steps_test.zig");
 }
+
+/// Replies that have shown their first tokens so far (Box.first).
+var firsts: std.atomic.Value(u64) = .init(0);
 
 /// A reply's tokens and finish, written on LaneHost's thread and read on the test's.
 const Box = struct {
@@ -24,13 +28,18 @@ const Box = struct {
     reason: ?api.Reason = null,
     drafted: u64 = 0,
     cached: u32 = 0,
+    /// when the reply's first tokens came, in the order of every box's (0: none yet)
+    first: u64 = 0,
 
     fn event(ctx: *anyopaque, _: api.Id, e: *const api.Event) void {
         const b: *Box = @ptrCast(@alignCast(ctx));
         b.mutex.lockUncancelable(io);
         defer b.mutex.unlock(io);
         switch (e.*) {
-            .tokens => |ts| b.out.appendSlice(gpa, ts) catch {},
+            .tokens => |ts| {
+                if (b.first == 0) b.first = firsts.fetchAdd(1, .monotonic) + 1;
+                b.out.appendSlice(gpa, ts) catch {};
+            },
             .finished => |fin| {
                 b.done = true;
                 b.reason = fin.reason;
@@ -286,4 +295,122 @@ test "dsv41 metal serve: (f) plain rounds at four streams, drafts again at two f
     say(bad == 0 and caught > 0 and drafted > 0, "(f) 4 together vs serial: {d} differ; {d} rows caught up from history, {d} drafted rows, {d} ingests", .{ bad, caught, drafted, m.ad.ingests });
     try testing.expectEqual(@as(usize, 0), bad);
     try testing.expect(caught > 0 and drafted > 0);
+}
+
+/// Waits until `field` of the target's stats reaches `n` (read from LaneHost's thread's writes).
+fn awaitStat(field: *const u64, n: u64) !void {
+    for (0..60_000) |_| {
+        if (@atomicLoad(u64, field, .monotonic) >= n) return;
+        std.Io.sleep(io, .fromMilliseconds(1), .awake) catch {};
+    }
+    return error.Timeout;
+}
+
+test "dsv41 metal serve: (g) prompts in steps: concurrent == solo == serial, drafted == draft:false, pieces between rounds" {
+    const p0 = try ids(150, 1);
+    defer gpa.free(p0);
+    const p1 = try ids(620, 2);
+    defer gpa.free(p1);
+    const asks = [_]Ask{ .{ .prompt = p0 }, .{ .prompt = p1 } };
+    var want: [2][]u32 = undefined;
+    try reference(&asks, &want);
+    defer freeAll(&want);
+    const m = try fs.open(gpa, io, seed, .{ .steps = true });
+    const s = try Served.open(gpa, io, m.model(), ".", null);
+    defer Served.close(s);
+    const e = s.engine();
+    var drafted: u64 = 0;
+    var solo: [2][]u32 = undefined;
+    try serve(e, &asks, false, &solo, &drafted);
+    defer freeAll(&solo);
+    var both: [2][]u32 = undefined;
+    try serve(e, &asks, true, &both, &drafted);
+    defer freeAll(&both);
+    const plain_asks = [_]Ask{ .{ .prompt = p0, .drafts = false }, .{ .prompt = p1, .drafts = false } };
+    var plain_drafted: u64 = 0;
+    var plain: [2][]u32 = undefined;
+    try serve(e, &plain_asks, true, &plain, &plain_drafted);
+    defer freeAll(&plain);
+    const bad = same(&want, &solo) + same(&want, &both) + same(&want, &plain);
+    say(bad == 0 and m.t.stats.pieces > 0 and drafted > 0, "(g) in steps: {d} of 6 replies differ from serial; {d} pieces, {d} drafted rows", .{ bad, m.t.stats.pieces, drafted });
+    try testing.expectEqual(@as(usize, 0), bad);
+    try testing.expect(m.t.stats.pieces > 0 and drafted > 0 and plain_drafted == 0);
+}
+
+test "dsv41 metal serve: (h) a short request during a long prompt: first in steps, after it as whole prompts" {
+    const long = try ids(1100, 30);
+    defer gpa.free(long);
+    const short = try ids(100, 31);
+    defer gpa.free(short);
+    const asks = [_]Ask{ .{ .prompt = long, .max = 4 }, .{ .prompt = short, .max = 4 } };
+    var want: [2][]u32 = undefined;
+    try reference(&asks, &want);
+    defer freeAll(&want);
+    var bad: usize = 0;
+    for ([_]bool{ false, true }) |steps| {
+        const m = try fs.open(gpa, io, seed, .{ .slots = 2, .chunk = 16, .steps = steps });
+        const s = try Served.open(gpa, io, m.model(), ".", null);
+        defer Served.close(s);
+        const e = s.engine();
+        var boxes: [2]Box = @splat(.{});
+        defer for (&boxes) |*b| b.deinit();
+        const reqs = [2]api.Request{ .{ .prompt = long, .max_tokens = 4 }, .{ .prompt = short, .max_tokens = 4 } };
+        try e.submit(600, &reqs[0], .{ .ctx = &boxes[0], .event = Box.event });
+        // the short request arrives while the long prompt runs: two of its pieces in, or (whole) once it began
+        if (steps) try awaitStat(&m.t.stats.pieces, 2) else try awaitStat(&m.t.stats.prompts, 1);
+        try e.submit(601, &reqs[1], .{ .ctx = &boxes[1], .event = Box.event });
+        for (&boxes) |*b| try b.wait();
+        const short_first = boxes[1].first < boxes[0].first;
+        const equal = std.mem.eql(u32, want[0], boxes[0].out.items) and std.mem.eql(u32, want[1], boxes[1].out.items);
+        const ok = equal and short_first == steps;
+        say(ok, "(h) {s}: the short reply's first token came {s} the long one's ({d} pieces); replies {s} serial", .{ if (steps) "in steps" else "whole prompts", if (short_first) "before" else "after", m.t.stats.pieces, if (equal) "equal" else "differ from" });
+        bad += @intFromBool(!ok);
+    }
+    try testing.expectEqual(@as(usize, 0), bad);
+}
+
+test "dsv41 metal serve: (i) in steps, a request cancelled mid-prompt keeps nothing and the next requests == serial" {
+    const long = try ids(1100, 32);
+    defer gpa.free(long);
+    const p0 = try ids(120, 33);
+    defer gpa.free(p0);
+    const asks = [_]Ask{ .{ .prompt = p0, .max = 40 }, .{ .prompt = long } };
+    var want: [2][]u32 = undefined;
+    try reference(&asks, &want);
+    defer freeAll(&want);
+    const m = try fs.open(gpa, io, seed, .{ .slots = 2, .chunk = 16, .cache_bytes = 1 << 30, .steps = true });
+    const s = try Served.open(gpa, io, m.model(), ".", null);
+    defer Served.close(s);
+    const e = s.engine();
+    var bg: Box = .{};
+    defer bg.deinit();
+    const r0: api.Request = .{ .prompt = p0, .max_tokens = 40 };
+    try e.submit(700, &r0, .{ .ctx = &bg, .event = Box.event });
+    // the long prompt once the decoding reply is out, cancelled three of its pieces in
+    for (0..60_000) |_| {
+        bg.mutex.lockUncancelable(io);
+        const out = bg.first != 0;
+        bg.mutex.unlock(io);
+        if (out) break;
+        std.Io.sleep(io, .fromMilliseconds(1), .awake) catch {};
+    } else return error.Timeout;
+    var gone: Box = .{};
+    defer gone.deinit();
+    const rl: api.Request = .{ .prompt = long, .max_tokens = 64 };
+    const p_before = @atomicLoad(u64, &m.t.stats.pieces, .monotonic);
+    try e.submit(701, &rl, .{ .ctx = &gone, .event = Box.event });
+    try awaitStat(&m.t.stats.pieces, p_before + 3);
+    e.cancel(701);
+    try gone.wait();
+    try bg.wait();
+    var prefix_kept = false;
+    for (m.t.cache.entries.items) |x| prefix_kept = prefix_kept or std.mem.startsWith(u32, long, x.ids);
+    var drafted: u64 = 0;
+    var again: [1][]u32 = undefined;
+    try serve(e, asks[1..], false, &again, &drafted);
+    defer freeAll(&again);
+    const ok = gone.reason.? == .cancelled and m.t.stats.abandoned == 1 and std.mem.eql(u32, want[0], bg.out.items) and std.mem.eql(u32, want[1], again[0]);
+    if (!ok) std.debug.print("     reason {t}, abandoned {d}, decoding reply {}, again {}\n", .{ gone.reason.?, m.t.stats.abandoned, std.mem.eql(u32, want[0], bg.out.items), std.mem.eql(u32, want[1], again[0]) });
+    say(ok and !prefix_kept and cached_rows[0] == 0, "(i) cancelled after {d}+ pieces: {d} abandoned, a prefix of it kept: {}, the decoding reply and the prompt again (cached {d}) {s} serial", .{ 3, m.t.stats.abandoned, prefix_kept, cached_rows[0], if (ok) "equal" else "differ from" });
+    try testing.expect(ok and !prefix_kept and cached_rows[0] == 0);
 }

@@ -76,11 +76,15 @@ pub fn check(c: *const Config) !u32 {
 /// Where a prompt's encoder time went: host fills, host encoding, host waits, GPU time (TF_DSV41_PROMPT_PROF).
 pub const Prof = struct { prep_ns: u64 = 0, enc_ns: u64 = 0, stall_ns: u64 = 0, gpu_s: f64 = 0, chunks: u32 = 0 };
 
-fn now() u64 {
+/// The monotonic clock in ns (the prompt's profile and wall time).
+pub fn now() u64 {
     var t: std.c.timespec = undefined;
     _ = std.c.clock_gettime(.MONOTONIC, &t);
     return @as(u64, @intCast(t.sec)) * std.time.ns_per_s + @as(u64, @intCast(t.nsec));
 }
+
+/// A chunk's inputs prepared ahead into input set `set`: the tail (slot) they are for and the chunk's rows.
+const Stage = struct { tail: *const Tail, a: u32, b: u32, set: usize };
 
 pub const Prompt = struct {
     o: Opts,
@@ -94,6 +98,8 @@ pub const Prompt = struct {
     head: u32 = 0,
     taps: u32 = 0,
     prof: Prof = .{},
+    /// the next chunk's inputs an `encode` that stopped short of the prompt's end prepared for the next call
+    stage: ?Stage = null,
 
     pub fn init(device: mtl.Device, c: *const Config, o: Opts, limit: u32) !Prompt {
         const d = try check(c);
@@ -112,16 +118,29 @@ pub const Prompt = struct {
     /// The whole prompt: positions [tail.end, hist.len) through the encoder, then the decoder's cone and the head.
     pub fn run(p: *Prompt, env: Env, slot: *const kv.Slot, tail: *Tail, hist: []const u32) !void {
         p.prof = .{};
+        p.stage = null;
         const t0 = now();
         try p.encode(env, slot, tail, hist, @intCast(hist.len));
         try p.finish(env, slot, tail);
+        p.report(hist.len, now() - t0);
+    }
+
+    /// The prompt's encoder profile and wall time on the log when TF_DSV41_PROMPT_PROF is set.
+    pub fn report(p: *const Prompt, rows: usize, wall_ns: u64) void {
         if (std.c.getenv("TF_DSV41_PROMPT_PROF") == null) return;
         const ms = struct {
             fn of(ns: u64) f64 {
                 return @as(f64, @floatFromInt(ns)) / 1e6;
             }
         }.of;
-        std.log.scoped(.dsv41).info("prompt {d} rows: {d:.0} ms, encoder {d} chunks: gpu {d:.0} ms, host fill {d:.0} ms, host encode {d:.0} ms, host wait {d:.0} ms", .{ hist.len, ms(now() - t0), p.prof.chunks, p.prof.gpu_s * 1e3, ms(p.prof.prep_ns), ms(p.prof.enc_ns), ms(p.prof.stall_ns) });
+        std.log.scoped(.dsv41).info("prompt {d} rows: {d:.0} ms, encoder {d} chunks: gpu {d:.0} ms, host fill {d:.0} ms, host encode {d:.0} ms, host wait {d:.0} ms", .{ rows, ms(wall_ns), p.prof.chunks, p.prof.gpu_s * 1e3, ms(p.prof.prep_ns), ms(p.prof.enc_ns), ms(p.prof.stall_ns) });
+    }
+
+    /// The prepared next chunk is dropped if it was `tail`'s (that slot's prompt ended or restarts).
+    pub fn forget(p: *Prompt, tail: *const Tail) void {
+        if (p.stage) |st| if (st.tail == tail) {
+            p.stage = null;
+        };
     }
 
     /// Encoder chunks over [tail.end, upto): layers 0..d-1, d's publish, the tail; next chunk's inputs fill meanwhile.
@@ -129,6 +148,11 @@ pub const Prompt = struct {
         if (upto > hist.len or upto < tail.end) return error.BadRows;
         var cur: usize = 0;
         var staged = false;
+        if (p.stage) |st| if (st.tail == tail and st.a == tail.end and tail.end < upto and st.b == try p.chunkEnd(tail.end, upto)) {
+            cur = st.set;
+            staged = true;
+        };
+        p.stage = null;
         while (tail.end < upto) {
             const a = tail.end;
             const b = try p.chunkEnd(a, upto);
@@ -140,8 +164,12 @@ pub const Prompt = struct {
             const cb = try p.encoderChunk(env, slot, tail, a, b, cur);
             p.prof.enc_ns += now() - te;
             var ahead: anyerror!void = {};
-            if (b < upto) {
-                if (p.chunkEnd(b, upto)) |nb| {
+            // the next chunk of this call, else (stopping short of the prompt's end) the next call's first chunk
+            const lim: u32 = if (b < upto) upto else @intCast(hist.len);
+            var nb: u32 = b;
+            if (b < lim) {
+                if (p.chunkEnd(b, lim)) |e| {
+                    nb = e;
                     ahead = p.prepTimed(env, hist, b, nb, 1 - cur);
                     staged = true;
                 } else |err| ahead = err;
@@ -154,6 +182,7 @@ pub const Prompt = struct {
             p.prof.chunks += 1;
             tail.end = b;
             try ahead;
+            if (b == upto and nb > b) p.stage = .{ .tail = tail, .a = b, .b = nb, .set = 1 - cur };
             cur = 1 - cur;
         }
     }

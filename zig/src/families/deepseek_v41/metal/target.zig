@@ -10,6 +10,7 @@ const forward = @import("forward.zig");
 const prompt = @import("prompt.zig");
 const pipelines = @import("pipelines.zig");
 const snapshots = @import("snapshots.zig");
+const steps = @import("prompt_steps.zig");
 
 const iface = host.iface;
 const lanes = host.lanes;
@@ -39,10 +40,10 @@ pub const Options = struct {
 };
 
 /// What the target did, for the tests and the logs.
-pub const Stats = struct { prompts: u64 = 0, hits: u64 = 0, cached_rows: u64 = 0, windows: u64 = 0, rows: u64 = 0, rewinds: u64 = 0, launches: u64 = 0, history_rows: u64 = 0 };
+pub const Stats = struct { prompts: u64 = 0, hits: u64 = 0, cached_rows: u64 = 0, windows: u64 = 0, rows: u64 = 0, rewinds: u64 = 0, launches: u64 = 0, history_rows: u64 = 0, pieces: u64 = 0, abandoned: u64 = 0 };
 
 /// A slot: its device state, prompt tail, ids (rows run, the last window's included until its keep) and taps.
-const Slot = struct {
+pub const Slot = struct {
     kv: kv.Slot,
     tail: prompt.Tail,
     hist: std.ArrayList(u32) = .empty,
@@ -63,6 +64,13 @@ const Slot = struct {
     whole: bool = false,
     /// the rows the last prompt took from kept state
     resumed: u32 = 0,
+    /// a prompt begun in pieces (prompt_steps.zig) and not yet finished: its rows from `tail.end` are still to run
+    filling: bool = false,
+    /// a begun prompt's choice logits when a kept state held the whole prompt (its entry may go before `finish`)
+    hit: std.ArrayList(f32) = .empty,
+    hit_on: bool = false,
+    /// when the begun prompt began (its wall time on the profile line)
+    began: u64 = 0,
 };
 
 pub const Target = struct {
@@ -116,6 +124,7 @@ pub const Target = struct {
         s.ptaps.deinit();
         a.free(s.ring);
         s.hist.deinit(a);
+        s.hit.deinit(a);
     }
 
     pub fn deinit(t: *Target) void {
@@ -138,10 +147,10 @@ pub const Target = struct {
     }
 
     pub fn target(t: *Target) iface.Target {
-        return .{ .ptr = t, .vtable = &.{ .prefill = prefill, .window = window, .keep = keep, .taps = taps, .release = release, .resumed = resumedFn, .history = history } };
+        return .{ .ptr = t, .vtable = &.{ .prefill = prefill, .window = window, .keep = keep, .taps = taps, .release = release, .resumed = resumedFn, .history = history, .begin = steps.begin, .piece = steps.piece, .finish = steps.finish } };
     }
 
-    fn self(ptr: *anyopaque) *Target {
+    pub fn self(ptr: *anyopaque) *Target {
         return @ptrCast(@alignCast(ptr));
     }
 
@@ -166,16 +175,28 @@ pub const Target = struct {
 
     fn prefill(ptr: *anyopaque, slot: u32, ids: []const u32, smp: ?lanes.Sampling, draw: u64) anyerror!u32 {
         const t = self(ptr);
+        const st = try t.startPrompt(slot, ids);
+        const s = st.s;
+        const n: u32 = @intCast(ids.len);
+        if (st.hit) |e| if (e.ids.len == n) return t.endPrompt(s, e.logits.?, smp, draw);
+        t.pr.run(t.promptEnv(), &s.kv, &s.tail, s.hist.items) catch |e| return t.fail(e);
+        return t.endPrompt(s, null, smp, draw);
+    }
+
+    /// A prompt's start on a free slot: a kept state that starts it (restored), else the slot cleared; ids recorded.
+    pub fn startPrompt(t: *Target, slot: u32, ids: []const u32) !struct { s: *Slot, hit: ?*snapshots.Entry } {
         if (slot >= t.slots.len) return error.NoSlot;
         const s = &t.slots[slot];
         const c = t.env.c;
-        if (s.live) return error.SlotLive;
+        if (s.live or s.filling) return error.SlotLive;
         if (ids.len == 0) return error.EmptyPrompt;
         if (ids.len >= t.opt.limit) return error.PastLimit;
         for (ids) |id| if (id >= c.vocab) return error.BadToken;
         s.whole = false;
         s.open = false;
         s.rows = 0;
+        s.hit_on = false;
+        t.pr.forget(&s.tail);
         t.stats.prompts += 1;
         // a kept state that starts this prompt, else a cleared slot
         const hit = if (t.cache.on()) t.cache.best(ids) else null;
@@ -191,11 +212,16 @@ pub const Target = struct {
         s.hist.clearRetainingCapacity();
         try s.hist.appendSlice(t.a, ids);
         s.high = @max(at, ids.len);
-        const n: u32 = @intCast(ids.len);
+        return .{ .s = s, .hit = hit };
+    }
+
+    /// The prompt's rows are in (`hit`: a kept state's logits, else the prompt head's): taps, choice, the slot live.
+    pub fn endPrompt(t: *Target, s: *Slot, hit: ?[]const f32, smp: ?lanes.Sampling, draw: u64) !u32 {
+        const c = t.env.c;
+        const n: u32 = @intCast(s.hist.items.len);
         const V: usize = c.vocab;
         var logits: []const f32 = undefined;
-        if (at == n) logits = hit.?.logits.? else {
-            t.pr.run(t.promptEnv(), &s.kv, &s.tail, ids) catch |e| return t.fail(e);
+        if (hit) |l| logits = l else {
             const all = t.pr.logits(c);
             logits = all[(t.pr.head - 1) * V ..][0..V];
             const tr = t.pr.tapRows(c);
@@ -206,11 +232,11 @@ pub const Target = struct {
         s.base = n;
         s.live = true;
         s.whole = true;
-        if (t.cache.on() and at < n) t.cache.save(c, &s.kv, ids, s.ring, logits) catch {};
+        if (t.cache.on() and s.resumed < n) t.cache.save(c, &s.kv, s.hist.items, s.ring, logits) catch {};
         return choice;
     }
 
-    fn promptEnv(t: *const Target) prompt.Env {
+    pub fn promptEnv(t: *const Target) prompt.Env {
         const e = t.env;
         return .{ .c = e.c, .p = e.p, .tables = e.tables, .model = e.model, .lookup = e.lookup, .queue = e.queue };
     }
@@ -258,7 +284,7 @@ pub const Target = struct {
         return @intCast(best);
     }
 
-    fn fail(t: *Target, e: anyerror) anyerror {
+    pub fn fail(t: *Target, e: anyerror) anyerror {
         if (e == error.CommandBufferFailed) t.failed = true;
         return e;
     }
@@ -415,6 +441,7 @@ pub const Target = struct {
         const t = self(ptr);
         if (slot >= t.slots.len) return;
         const s = &t.slots[slot];
+        if (s.filling) steps.abandon(t, s);
         if (!s.live) return;
         s.live = false;
         if (s.open) t.commitTaps(s, s.rows);
