@@ -193,3 +193,5 @@ test {
 }
 
 pub const cache_lineage = @import("src/core/cache_lineage.zig");
+
+pub const kept_pages = @import("src/core/kept_pages.zig");
