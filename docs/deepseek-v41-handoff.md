@@ -3,6 +3,7 @@
 A GB10 pair prefills a prompt; a Mac decodes it. The hand-off is the state a prefill leaves behind, carried by MKVH
 protocol 2 (recurrent layers of named parts) and converted to the Metal engine's own cache layout
 on arrival. The library is `zig/src/families/deepseek_v41/handoff/`; it is host-only and independent of the transport.
+The operator recipe (hardware, link set-up, launch, troubleshooting, measurements) is [deepseek-v41-disaggregated.md](deepseek-v41-disaggregated.md).
 
 A hand-off prefix is **outside the exactness contract**: it is opt-in (`--prefill-from`), labelled remote, never kept as a
 native state, and the Metal engine re-quantises some of it (below). Decode after an import is not bit-identical to a
