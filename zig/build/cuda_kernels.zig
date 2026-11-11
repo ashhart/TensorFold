@@ -126,6 +126,7 @@ pub const kernels = [_]Kernel{
     .{ .name = "dots_mocr", .flags = glue }, // ours: dots.mocr's q|k|v bias and Torch-order RoPE (dots_rope.cuh)
     .{ .name = "vit", .flags = glue }, // ours: vision towers' LayerNorm, Linear epilogues, activations, unshuffle
     .{ .name = "moss_image", .flags = glue }, // ours: MOSS-Image's modulated norm, q/k rotary, situ, gated add
+    .{ .name = "nemo_audio", .flags = glue }, // ours: Nemotron Transcribe's audio encoder glue and head-64 attention
     .{ .name = "tree_round", .flags = &.{"-O3"} }, // ours: verified tree rounds for every family (cuda/tree_round.zig)
     .{ .name = "act_rows", .flags = &.{"-O3"} }, // ours: SwiGLU, output gates, group sums (cuda/act_rows.zig)
     .{ .name = "gemma4_ple", .flags = &.{"-O3"} }, // ours: Gemma 4 E-series per-layer inputs (gemma4/cuda_ple.zig)

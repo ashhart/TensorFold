@@ -433,6 +433,12 @@ CUDA also checks MOSS-Image's glue (`moss_image.cu`: the norm, plain and modulat
 rows; situ; the gated add), each output within float64's range at its torch bf16 points (five controls, each dropping
 one point), and `vision_kernel` at head dim 128 against `contract_attn.zig`'s float64 reference (`moss-contract`).
 
+CUDA also checks Nemotron 3.5 Transcribe's audio encoder glue (`nemo_audio.cu`: log-mel frames, their per-feature
+normalisation, q/k norm and rotary in both stacks' forms, the speaker head's taps, ReLU and predictions, and the fusion
+of the two branches), each output within float64's range at its bf16 points, and its head-64 attention against
+`contract_attn.zig`'s float64 reference (`audio-contract`; eight controls built from `nemo_audio.cuh` with one thing
+dropped each).
+
 CPU: Qwen3.5-2B's affine projection (4 bits, groups of 64, `cpu_kernels.zig`) at the widths the 2B calls it, one row
 to a 128-row prompt chunk, registered once for each chain count of its projection classes (16; 32 for the delta rule's
 a and b; 8 for the head), and its RMS norm over 2048-wide rows; each registration's runs take 1 to 8 threads in turn,

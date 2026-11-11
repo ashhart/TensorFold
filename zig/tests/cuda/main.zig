@@ -192,6 +192,7 @@ const usage =
     \\  radio-processor REF PICS MODEL  decoded RGB, processor pixels, float resizes and grids against the reference
     \\  radio-kernels             RADIO's float-patch cast and position rows against host references (synthetic rows)
     \\  radio-attention           the head-dim-80 tower attention's time at five sizes, outputs finite (synthetic rows)
+    \\  audio-check MODEL WAV OUT [layers] | audio-contract  Transcribe's audio encoder: a clip's stages to OUT | gates 1-4
     \\  gdn-back                  DeltaNet input gradients against FP64
     \\  q4-back                  Affine input gradients against FP64
     \\  moe-back                  Expert and router input gradients against FP64
@@ -503,6 +504,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "radio-processor")) return radio_tests.processor(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2));
     if (std.mem.eql(u8, cmd, "radio-kernels")) return radio_tests.kernels(gpu);
     if (std.mem.eql(u8, cmd, "radio-attention")) return radio_tests.attention(gpu);
+    if (std.mem.eql(u8, cmd, "audio-contract")) return @import("contract_nemo_audio.zig").run(gpu) else if (std.mem.eql(u8, cmd, "audio-check")) return @import("audio_check.zig").run(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), rest.len > 3 and std.mem.eql(u8, rest[3], "layers"));
     if (std.mem.eql(u8, cmd, "window-profile")) return window_profile.run(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2));
     if (std.mem.eql(u8, cmd, "tree-accept")) return tree_accept.run(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), try arg(rest, 3));
     if (std.mem.eql(u8, cmd, "chunk-costs")) return chunk_costs.run(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2));
