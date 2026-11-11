@@ -449,6 +449,7 @@ pub const Engine = struct {
     pub const keepAs = snapshots.keepAs;
     pub const restoreState = snapshots.restore;
     pub const holds = snapshots.holds;
+    pub const homeOf = snapshots.home;
     pub const dropState = snapshots.drop;
     const freeSnap = snapshots.free;
 

@@ -112,6 +112,11 @@ fn heldPages(e: anytype, at: usize) usize {
     return if (e.share_pages) at / @import("cuda_state.zig").page_rows else 0;
 }
 
+/// TF_GLM_KV_SPLIT: the owner class kept state `id` was kept on (null: unsplit, or not held).
+pub fn home(e: anytype, id: u64) ?u32 {
+    return (e.snaps.get(id) orelse return null).home;
+}
+
 pub fn holds(e: anytype, id: u64) bool {
     return e.snaps.contains(id);
 }
