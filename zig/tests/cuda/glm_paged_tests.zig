@@ -68,6 +68,7 @@ pub fn pagedCheck(gpu: Gpu, checkpoint: []const u8, rank: c_int, world: c_int, i
         const held = try pages.openOn(paged_slot, len, 64, @intCast(k % classes));
         for (held[1..], held[0 .. held.len - 1]) |b, prev| unordered += @intFromBool(b != prev + classes);
         if (classes > 1) std.debug.print("  a {d}-token prompt on owner {d}\n", .{ len, k % classes });
+        if (classes > 1) failed = !try ownerTable(gpu, e, held) or failed;
         var first: [2]u32 = undefined;
         var drafts: [2][glm.engine.max_drafts]u32 = undefined;
         for ([_]u32{ paged_slot, twin_slot }, 0..) |slot, j| {
@@ -117,6 +118,26 @@ pub fn pagedCheck(gpu: Gpu, checkpoint: []const u8, rank: c_int, world: c_int, i
         std.debug.print("FAIL paged: every stream's pages came in order; the check did not reach a shuffled table\n", .{});
         failed = true;
     }
+    const owned = if (e.room) |r| r.stats else glm.owner_attn.Stats{};
+    if (classes > 1 and (owned.layers == 0 or owned.rows == 0)) {
+        std.debug.print("FAIL paged: no layer attended owner-computed; the check did not reach a stream's owner-only rows\n", .{});
+        failed = true;
+    }
     if (failed) return error.TestFailed;
-    check.pass("pages at TP={d}{s}: on the engine's own sequence, {d} prompts at the pages' edges (511 to 5,000 tokens) and {d} window rows equal their twins' logits, tokens and drafts byte for byte, pages out of order ({d} jumps) and NaN before use; the pool idle after", .{ world, if (classes > 1) " on owner classes (TF_GLM_KV_SPLIT)" else "", lengths.len, compared, unordered });
+    check.pass("pages at TP={d}{s}: on the engine's own sequence, {d} prompts at the pages' edges (511 to 5,000 tokens) and {d} window rows equal their twins' logits, tokens and drafts byte for byte, pages out of order ({d} jumps) and NaN before use; the pool idle after", .{ world, if (classes > 1) " on owner classes (TF_GLM_KV_SPLIT), each stream's latent rows on its owner alone" else "", lengths.len, compared, unordered });
+    if (classes > 1) std.debug.print("  owner-computed: {d} layers, {d} rows, {d} bytes sent by rank 0\n", .{ owned.layers, owned.rows, owned.bytes });
+}
+
+/// TF_GLM_KV_SPLIT: rank 0's latent table for the paged stream holds its region's places, or the trash page alone.
+fn ownerTable(gpu: Gpu, e: anytype, held: []const u32) !bool {
+    const st = &e.seqs.items[paged_slot].?.st;
+    const got = try gpu.gpa.alloc(u32, held.len);
+    defer gpu.gpa.free(got);
+    try cuda.memory.download(gpu.d, st.ltable, std.mem.sliceAsBytes(got));
+    const region = e.pages.?.region();
+    for (held, got) |id, local| if (local != region.entry(id) or (st.owner.? != 0) != (local == region.cap)) {
+        std.debug.print("FAIL paged: rank 0's latent table maps page {d} of owner {d} to {d}\n", .{ id, st.owner.?, local });
+        return false;
+    };
+    return true;
 }
