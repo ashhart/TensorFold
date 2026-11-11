@@ -46,6 +46,8 @@ pub const Target = struct {
         replays: ?*const fn (ptr: *anyopaque, list: []const Final) anyerror!void = null,
         /// Engram reads ahead of the next window (TF_DSV41_ENGRAM_WARM); reads only, window bits are unaffected.
         warm: ?*const fn (ptr: *anyopaque, asks: []const Warm) void = null,
+        /// Before `prefill`: the slot's prompt images (their rows replace placeholder ids); borrowed until it returns.
+        images: ?*const fn (ptr: *anyopaque, slot: u32, images: []const lanes.stream.Image) anyerror!void = null,
         /// After `prefill`: the prompt rows the slot took from kept state (its first row computed is this one).
         resumed: ?*const fn (ptr: *anyopaque, slot: u32) u64 = null,
         /// Committed rows' taps for positions [start, start + rows), in order; null: not kept. null fn: none kept.
@@ -59,6 +61,11 @@ pub const Target = struct {
 
     pub fn history(t: Target, slot: u32, start: u64, rows: u32) ?Taps {
         return if (t.vtable.history) |f| f(t.ptr, slot, start, rows) else null;
+    }
+
+    /// The slot's prompt images for its next `prefill`; error.NoImages when the target has no image path.
+    pub fn setImages(t: Target, slot: u32, images: []const lanes.stream.Image) !void {
+        return (t.vtable.images orelse return error.NoImages)(t.ptr, slot, images);
     }
 
     /// The prompt rows the slot's last `prefill` took from kept state (0: none, or a target that keeps none).
