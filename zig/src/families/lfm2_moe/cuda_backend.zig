@@ -176,9 +176,10 @@ pub const Lfm = struct {
         snap.drop(x.gpa, &x.snaps.?, k);
     }
 
-    /// Before the prompt stream writes a slot's caches: the keeps' copies queued so far land first (a draw needn't).
-    fn settle(x: *Lfm) !void {
+    /// The stream every write to a slot's caches takes, after the keeps so far (a draw needn't); tested below.
+    fn fenced(x: *Lfm) !cuda.Stream {
         if (x.snaps) |*p| try p.fence(x.s);
+        return x.s;
     }
 
     fn snapPages(x: *Lfm) !*snap.Pages {
@@ -245,8 +246,7 @@ pub const Lfm = struct {
             l.sampled = true;
         };
         s.cached = 0;
-        try x.settle();
-        try x.m.clearSlot(x.s, l.slot);
+        try x.m.clearSlot(try x.fenced(), l.slot);
         l.fill = x.resumeAt(s, l, p.len);
         s.fill_at.store(@intCast(l.fill.?), .monotonic);
         return l;
@@ -281,8 +281,7 @@ pub const Lfm = struct {
         const done = c.end == p.len;
         var rows: [mdl.max_taps]usize = undefined;
         for (c.taps(), 0..) |t, j| rows[j] = t - at - 1;
-        try x.settle();
-        try fwd.forward(x.m, x.k, x.s, &.{.{ .slot = l.slot, .p0 = at, .tokens = p[at..c.end], .taps = rows[0..c.n] }}, true, c.end - at - 1, @intFromBool(done));
+        try fwd.forward(x.m, x.k, try x.fenced(), &.{.{ .slot = l.slot, .p0 = at, .tokens = p[at..c.end], .taps = rows[0..c.n] }}, true, c.end - at - 1, @intFromBool(done));
         if (done) try x.d.check(x.d.api.cuMemcpyDtoDAsync_v2(l.last, x.m.s.logits, cfg.vocab * 2, x.s.handle), "cuMemcpyDtoDAsync");
         s.fill_at.store(@intCast(c.end), .monotonic);
         l.fill = if (done) null else c.end;
@@ -369,8 +368,7 @@ pub const Lfm = struct {
         const l = x.lanes.getPtr(s) orelse return error.UnknownStream;
         const t = try x.value(feed);
         if (position != l.len + 1) return error.PositionMismatch;
-        try x.settle();
-        try fwd.forward(x.m, x.k, x.s, &.{.{ .slot = l.slot, .p0 = l.len, .tokens = &.{t} }}, false, 0, 1);
+        try fwd.forward(x.m, x.k, try x.fenced(), &.{.{ .slot = l.slot, .p0 = l.len, .tokens = &.{t} }}, false, 0, 1);
         l.len += 1;
         const h = x.next;
         try x.drawRows(l, x.m.s.logits, 0, 1, position, x.handle(), 0);
@@ -406,8 +404,7 @@ pub const Lfm = struct {
             total += l.rows.items.len;
         }
         if (total > round_rows) return error.RoundTooWide;
-        try x.settle();
-        try fwd.forward(x.m, x.k, x.s, chains, false, 0, total);
+        try fwd.forward(x.m, x.k, try x.fenced(), chains, false, 0, total);
         var at: usize = 0;
         for (windows, 0..) |w, i| {
             const l = x.lanes.getPtr(w.stream).?;
@@ -440,8 +437,7 @@ pub const Lfm = struct {
             slots[i] = @intCast(l.slot);
             rows[i] = @intCast(l.row0 + path.len - 1); // the conv states after the last kept row
         }
-        try x.settle();
-        try fwd.commit(x.m, x.k, x.s, slots[0..windows.len], rows[0..windows.len]);
+        try fwd.commit(x.m, x.k, try x.fenced(), slots[0..windows.len], rows[0..windows.len]);
     }
 
     /// No draft head: absorbing is a no-op, a request for drafts is refused by name (copy drafts come from the host).
@@ -498,4 +494,87 @@ test "a chunk taps the marks inside it, up to four, and ends at the next one, th
         try std.testing.expectEqual(k.end, c.end);
         try std.testing.expectEqualSlices(usize, k.taps, c.taps());
     }
+}
+
+/// The writes a keep reads, by their call, and which argument is the stream each is queued on.
+const Write = struct { call: []const u8, arg: usize };
+const writes = [_]Write{ .{ .call = "fwd.forward(", .arg = 2 }, .{ .call = "fwd.commit(", .arg = 2 }, .{ .call = ".clearSlot(", .arg = 0 } };
+
+/// The writes in `code` whose stream isn't `try x.fenced()`; `found` counts every write.
+fn unfenced(code: []const u8, found: *usize) usize {
+    var bad: usize = 0;
+    for (writes) |w| {
+        var from: usize = 0;
+        while (std.mem.indexOfPos(u8, code, from, w.call)) |at| {
+            from = at + w.call.len;
+            found.* += 1;
+            var depth: usize = 0;
+            var arg: usize = 0;
+            var start = from;
+            const stream = for (code[from..], from..) |ch, i| switch (ch) {
+                '(', '[', '{' => depth += 1,
+                ')', ']', '}' => if (depth == 0) break code[start..i] else {
+                    depth -= 1;
+                },
+                ',' => if (depth == 0) {
+                    if (arg == w.arg) break code[start..i];
+                    arg += 1;
+                    start = i + 1;
+                },
+                else => {},
+            } else "";
+            if (arg != w.arg or !std.mem.eql(u8, std.mem.trim(u8, stream, " \n"), "try x.fenced()")) bad += 1;
+        }
+    }
+    return bad;
+}
+
+test "a clear, a chunk, a one-row step, a verify round and a commit wait for the keeps; one on x.s is red" {
+    const all = @embedFile("cuda_backend.zig");
+    const code = all[0..std.mem.indexOf(u8, all, "\ntest \"").?];
+    var found: usize = 0;
+    try std.testing.expectEqual(@as(usize, 0), unfenced(code, &found));
+    try std.testing.expectEqual(@as(usize, 5), found); // a new write names itself here
+    // planted: each write in turn queued on the prompt stream without the wait
+    const fence = "try x.fenced()";
+    var planted: usize = 0;
+    var from: usize = 0;
+    while (std.mem.indexOfPos(u8, code, from, fence)) |at| : (from = at + fence.len) {
+        const bent = try std.mem.concat(std.testing.allocator, u8, &.{ code[0..at], "x.s", code[at + fence.len ..] });
+        defer std.testing.allocator.free(bent);
+        found = 0;
+        try std.testing.expectEqual(@as(usize, 1), unfenced(bent, &found));
+        planted += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 5), planted);
+}
+
+const Waits = struct {
+    var n: usize = 0;
+    var on: usize = 0;
+    var of: usize = 0;
+    fn wait(st: cuda.abi.Stream, ev: cuda.abi.Event, _: c_uint) callconv(.c) cuda.abi.Result {
+        n += 1;
+        on = @intFromPtr(st);
+        of = @intFromPtr(ev);
+        return 0;
+    }
+};
+
+test "fenced: the prompt stream waits for the keeps' done once a keep is queued, and not again until the next" {
+    var d: cuda.Driver = undefined;
+    d.api.cuStreamWaitEvent = Waits.wait;
+    var x: Lfm = undefined;
+    x.s = .{ .d = &d, .handle = @ptrFromInt(1) };
+    x.snaps = null;
+    Waits.n = 0;
+    try std.testing.expectEqual(x.s.handle, (try x.fenced()).handle); // no prompt cache: nothing to wait for
+    const side: snap.Side = .{ .stream = .{ .d = &d, .handle = @ptrFromInt(2) }, .ready = .{ .d = &d, .handle = @ptrFromInt(3) }, .done = .{ .d = &d, .handle = @ptrFromInt(4) }, .pending = true };
+    x.snaps = .{ .pages = try kv.Pool.init(std.testing.allocator, 1, snap.page), .arena = null, .side = side };
+    defer x.snaps.?.pages.deinit();
+    try std.testing.expectEqual(@as(usize, 0), Waits.n);
+    try std.testing.expectEqual(x.s.handle, (try x.fenced()).handle);
+    try std.testing.expect(Waits.n == 1 and Waits.on == 1 and Waits.of == 4);
+    _ = try x.fenced(); // nothing queued since: no second wait
+    try std.testing.expectEqual(@as(usize, 1), Waits.n);
 }
