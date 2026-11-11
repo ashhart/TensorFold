@@ -75,3 +75,46 @@ test "qwen27 bank boundary: snapshot drain preserves the picked bonus while rese
     try g.settle();
     try std.testing.expectEqual(@as(?u32, null), g.pending);
 }
+
+test "qwen27 bank boundary: decode rows retain the pre-M5 limit while solo prompt rows follow the frame" {
+    var model: q.model.Model = undefined;
+    var runner: q.decode_round.Runner = undefined;
+    runner.model = &model;
+    for ([_]u32{ 128, 512, 2048 }) |capacity| {
+        model.frame.capacity = capacity;
+        runner.geometry = .{ .shared_prefix = false, .solo_prompt = true };
+        try std.testing.expectEqual(@as(u32, 128), runner.decodeRows());
+        try std.testing.expectEqual(capacity, runner.promptRows(2048));
+        runner.geometry.solo_prompt = false;
+        try std.testing.expectEqual(@as(u32, 128), runner.promptRows(2048));
+        runner.geometry.shared_prefix = true;
+        try std.testing.expectEqual(capacity, runner.decodeRows());
+    }
+}
+
+test "qwen27 bank boundary: prompt partial scratch fits packed rows and rejects one tile past its bytes" {
+    const planning = q.attention.planning;
+    var parents: [2048]i32 = undefined;
+    for (&parents, 0..) |*p, i| p.* = @as(i32, @intCast(i)) - 1;
+    for ([_]u32{ 128, 512, 1024, 2048 }) |rows| {
+        const limits = q.attention.Limits{ .rows = rows, .streams = 1, .keys = 65536, .shared_prefix = false, .geometry = .{ .shared_prefix = false, .solo_prompt = true } };
+        const layout = q.attention.Layout.init(limits);
+        const rp = @as(usize, layout.tiles) * 16;
+        const want = @max(@as(usize, @min(rows, planning.max_rows)) * 16, rp);
+        try std.testing.expectEqual(want, layout.chunk_rows);
+        try std.testing.expectEqual(@as(usize, 4) * layout.tail_chunks * want * 256 * 4, layout.sizes[10]);
+        try std.testing.expectEqual(@as(usize, 4) * @min(rows, planning.max_rows) * 16 * 256 * 2, layout.sizes[6]);
+        var scratch: q.attention.Scratch = undefined;
+        scratch.limits = limits;
+        scratch.tiles = layout.tiles;
+        scratch.chunks = layout.chunks;
+        scratch.tail_chunks = layout.tail_chunks;
+        scratch.chunk_rows = layout.chunk_rows;
+        var plan = try planning.Plan.init(std.testing.allocator, &.{.{ .parents = parents[0..rows], .start = 16384, .capacity = 65536 }}, limits.geometry);
+        defer plan.deinit();
+        const chunks: u32 = @intCast(@divFloor(16384 + rows + planning.chunk - 1, planning.chunk));
+        try scratch.checkPrompt(chunks, plan.tiles, false);
+        scratch.tiles = @intCast(layout.chunk_rows / 16 + 1);
+        try std.testing.expectError(error.AttentionLimits, scratch.checkPrompt(layout.tail_chunks, scratch.tiles, false));
+    }
+}

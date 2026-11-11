@@ -28,8 +28,21 @@ test "qwen27 rows: valid overrides stay exact and invalid ones use the chip defa
     }
 }
 
+const Device = struct {
+    units: bool = true,
+    pub fn tensorUnits(d: Device) bool {
+        return d.units;
+    }
+};
 const Backend = struct {
-    runner: struct { slots: usize = 3 } = .{},
+    runner: struct {
+        slots: usize = 3,
+        model: struct { device: Device = .{} } = .{},
+        decode_rows: u32 = 2048,
+        pub fn decodeRows(r: *const @This()) u32 {
+            return r.decode_rows;
+        }
+    } = .{},
     chunk: usize = 2048,
     owners: [3]?*Stream = @splat(null),
     fills: std.AutoHashMapUnmanaged(*Stream, bool) = .empty,
@@ -159,4 +172,27 @@ test "qwen27 rows: empty or whitespace-only settings are unset and reach the loa
     for ([_][]const u8{ "", " ", "\t\n" }) |value| try loader.open(value, &why);
     try std.testing.expectEqual(@as(usize, 3), loader.calls);
     try std.testing.expectEqualStrings("unchanged", why);
+}
+
+test "qwen27 rows: pre-M5 decoded spans and a live decoder keep the 128-row bound" {
+    var prompt = try Stream.init(a, .{ .id = "prompt", .prompt = &.{ 1, 2 }, .max_new = 4, .drafts = false });
+    defer prompt.deinit(a);
+    var decoder = try Stream.init(a, .{ .id = "decoder", .prompt = &.{ 1, 2 }, .max_new = 4, .drafts = false });
+    defer decoder.deinit(a);
+    var b: Backend = .{ .owners = .{ &prompt, null, null } };
+    defer b.fills.deinit(a);
+    try b.fills.put(a, &prompt, true);
+    for ([_]bool{ false, true }) |units| {
+        b.runner.model.device.units = units;
+        b.runner.decode_rows = if (units) 2048 else 128;
+        b.owners[1] = null;
+        try std.testing.expectEqual(@as(usize, 2048), policy.chunk(&b, &prompt, false));
+        try std.testing.expectEqual(@as(usize, b.runner.decode_rows), policy.chunk(&b, &prompt, true));
+        b.owners[1] = &decoder;
+        try std.testing.expectEqual(@as(usize, if (units) 512 else 128), policy.choose(&b, &prompt));
+        try std.testing.expectEqual(@as(usize, if (units) 512 else 128), policy.chunk(&b, &prompt, true));
+        decoder.paused = true;
+        try std.testing.expectEqual(@as(usize, 2048), policy.choose(&b, &prompt));
+        decoder.paused = false;
+    }
 }

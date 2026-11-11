@@ -56,7 +56,8 @@ test "qwen27 memory: startup counts shared scratch once and each slot's state, K
     f.context = 32768;
     try std.testing.expect(try f.cost(2048, 2) < wide);
     f.shared = false;
-    try std.testing.expect(try f.cost(512, 2) > old);
+    const kv_and_slots = @as(usize, f.slots) * (@as(usize, f.context) * 16 * 2 * 1024 * 2 + (256 << 20));
+    try std.testing.expect(try f.cost(512, 2) > kv_and_slots);
 }
 
 test "qwen27 memory: the development working-set cap cannot raise real capacity" {
