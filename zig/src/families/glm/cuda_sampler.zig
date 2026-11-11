@@ -38,6 +38,7 @@ pub const Sampler = struct {
     meta: cuda.DeviceBuffer,
     tok: cuda.DeviceBuffer,
     prob: cuda.DeviceBuffer,
+    waiter: cuda.host_wait.Waiter = .{}, // TF_CUDA_HOST_WFE: the draw's parked wait
 
     pub fn init(d: *const cuda.Driver, vocab: usize, rows: usize) !Sampler {
         var m = try cuda.Module.load(d, cuda.kernels.sample);
@@ -59,6 +60,7 @@ pub const Sampler = struct {
 
     pub fn deinit(s: *Sampler) void {
         s.prob.free();
+        s.waiter.deinit();
         s.tok.free();
         s.meta.free();
         s.rule.free();
@@ -88,7 +90,7 @@ pub const Sampler = struct {
         args.add(s.tok.ptr);
         args.add(s.prob.ptr);
         try cuda.launch.launch(s.tf_draw, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 1024 } }, stream, &args);
-        try stream.synchronize();
+        try s.waiter.synchronize(stream);
         try s.tok.download(0, std.mem.sliceAsBytes(out[0..rows]));
     }
 

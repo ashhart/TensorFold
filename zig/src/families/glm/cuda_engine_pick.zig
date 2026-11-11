@@ -29,7 +29,7 @@ pub fn greedyRows(e: *Engine, logits: u64, rows: usize, out: []u32) !void {
         try cuda.launch.launch(e.m.glue.top1, .{ .grid = .{ .x = 1 }, .block = .{ .x = 1024 } }, e.stream, &a);
     }
     if (e.group) |g| try g.allGather(e.stream, mine, e.pairs.ptr, bytes) else try e.lib.check(e.lib.api.ncclAllGather(mine, e.pairs.ptr, bytes, .u8, e.comm, e.stream.handle), "ncclAllGather");
-    try e.stream.synchronize();
+    try e.waiter.synchronize(e.stream);
     try e.checkGathers();
     var all: [ranks.max_world * pick_rows][4]u32 = undefined;
     try cuda.memory.download(e.d, e.pairs.ptr, std.mem.asBytes(&all)[0 .. world * bytes]);
@@ -57,7 +57,7 @@ fn pick(e: *Engine, logits: u64, sums: bool) !chance.Pick {
     const stamp = @import("cuda_prof.zig").span(e.profiling_prompt, e.stream, .token_gather);
     if (e.group) |g| try g.allGather(e.stream, mine, e.pairs.ptr, pair_bytes) else try e.lib.check(e.lib.api.ncclAllGather(mine, e.pairs.ptr, pair_bytes, .u8, e.comm, e.stream.handle), "ncclAllGather");
     stamp.end();
-    try e.stream.synchronize();
+    try e.waiter.synchronize(e.stream);
     try e.checkGathers();
     var all: [ranks.max_world][4]u32 = undefined; // Engine.init refuses a larger world
     try cuda.memory.download(e.d, e.pairs.ptr, std.mem.asBytes(&all)[0 .. world * pair_bytes]);

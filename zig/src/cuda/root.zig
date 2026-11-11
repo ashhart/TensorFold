@@ -31,6 +31,7 @@ pub const graph = @import("graph.zig");
 pub const cublaslt = @import("cublaslt.zig");
 pub const nccl = @import("nccl.zig");
 pub const roce = @import("roce.zig");
+pub const host_wait = @import("host_wait.zig");
 pub const triton = @import("triton.zig");
 pub const aot = @import("aot.zig");
 pub const kernels = @import("kernels.zig");
@@ -98,6 +99,7 @@ test {
     _ = train_q4;
     _ = train_attn;
     _ = @import("memory.zig");
+    _ = @import("host_wait.zig");
     _ = @import("download_stage_test.zig");
     _ = memory_receipt;
     _ = @import("grouped.zig");
