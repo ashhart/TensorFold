@@ -95,4 +95,5 @@ test "Flash Next nonfinite: top-k rejects NaNs infinities and invalid columns be
 
 test {
     _ = @import("cuda_mtp_nonfinite_more_test.zig");
+    _ = @import("cuda_draw_batch_test.zig");
 }
