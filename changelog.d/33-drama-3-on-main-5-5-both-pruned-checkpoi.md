@@ -1,0 +1,3 @@
+# Drama 3 pruned NVFP4 checkpoints on main
+- `docs/drama-3-nvfp4.md` covers serving both published pruned checkpoints (7,369 and 5,900 routed experts kept) from main on a DGX Spark and a Mac, with the current test commands and measured limits.
+- `tools/zig/drama3_checkpoints_check.py` serves each given checkpoint and fails unless its startup line holds the expected experts and fixed-seed whole and streamed replies equal their repeats and their concurrent lanes; it records load time, peak memory, first audio, total time and RTF. On an M5 Ultra both pruned checkpoints pass, load in under 9 s and speak at an RTF of 0.73 and 0.74; the Spark receipt waits on a GPU window.
