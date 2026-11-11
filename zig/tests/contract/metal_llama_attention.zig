@@ -77,7 +77,7 @@ pub const DecodeVec = struct {
     const vt = g.hooks(DecodeVec);
 
     pub fn kernel(p: *DecodeVec) g.Kernel {
-        return controls.mark(.{ .spec = .{ .name = "llama glue ll_decode_vec", .accum = .f32, .depth = decodeDepth, .ops = 24, .out = .f32, .tiles = .{ .{ .size = 16, .step = 1, .min = 1 }, .{}, .{ .size = 32, .step = 1, .min = 1 } }, .served = &.{ .{ .rows = 16, .n = family.nanbeige43.heads, .k = 4096 }, .{ .rows = 4, .n = family.nanbeige41.heads, .k = 1024 } }, .sums = softmax_sums }, .ctx = p, .vt = &vt }, p.mutation);
+        return controls.mark(.{ .spec = .{ .name = "llama glue ll_decode_vec", .accum = .f32, .depth = decodeDepth, .ops = 24, .out = .f32, .tiles = .{ .{ .size = 16, .step = 1, .min = 1 }, .{}, .{ .size = 32, .step = 1, .min = 1 } }, .served = &.{ .{ .rows = 16, .n = family.nanbeige43.heads, .k = 4096 }, .{ .rows = 4, .n = family.nanbeige41.heads, .k = 1024 }, .{ .rows = 8, .n = family.bimo7b.heads, .k = 2048 } }, .sums = softmax_sums }, .ctx = p, .vt = &vt }, p.mutation);
     }
 
     /// rows query rows at the end of k positions, n query heads; the blocks as the served cache of k would hold.
@@ -239,7 +239,7 @@ pub const MergeVec = struct {
     shape: c.Shape = .{ .rows = 0, .n = 0, .k = 0 },
     /// The label and shapes it registers at: llama's, or another family's that runs it.
     name: []const u8 = "llama glue ll_merge_vec",
-    served: []const c.Shape = &.{ .{ .rows = 16, .n = family.nanbeige43.heads, .k = 128 }, .{ .rows = 4, .n = family.nanbeige41.heads, .k = 64 } },
+    served: []const c.Shape = &.{ .{ .rows = 16, .n = family.nanbeige43.heads, .k = 128 }, .{ .rows = 4, .n = family.nanbeige41.heads, .k = 64 }, .{ .rows = 8, .n = family.bimo7b.heads, .k = 64 } },
     pm: []f32 = &.{},
     pl: []f32 = &.{},
     po: []f32 = &.{},
