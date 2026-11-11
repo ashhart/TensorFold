@@ -5,7 +5,9 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 ## Unreleased
 
 - Flash Next: twenty-nine `TF_FLASHNEXT_*` settings refuse a malformed value by name at startup, before any device work on CUDA, and a Metal load refuses them too; blank `TF_FLASHNEXT_KV_PAGE_TEST` and `TF_FLASHNEXT_KEEP_LATE` read as unset, and a non-finite confidence is refused (#2585, part of #2370). Thanks to @devopsfortunato.
-
+- Flash Next on CUDA: twenty-nine `TF_FLASHNEXT_*` settings refuse a malformed value by name at startup, before any
+  device or checkpoint work, through the shared environment table: unset and blank keep the default, a valid value keeps
+  its meaning, and the switches are exactly `0` or `1` (#2585, for #2370). Thanks to @devopsfortunato.
 - MOSS-Image on Metal: `tf-moss-image-generate` makes a picture from options alone (`--prompt`, `--negative`, `--width`, `--height`, `--steps`, `--seed`, `--guidance`) at the card's defaults, and refuses skip-layer guidance by name; `tf-moss-image` still runs a reference case (#2719, for #1531). Thanks to @devopsfortunato.
 - `tf-moss-image-generate` makes a MOSS-Image picture from options alone (`--prompt`, `--negative`, `--width`, `--height`, `--steps`, `--seed`, `--guidance`) at the card's defaults, and refuses skip-layer guidance by name; `tf-moss-image` still runs a reference case (#1531).
 - Tensor parallel: `fabric/tp` gains a TCP transport for hosts without RDMA (`Kind.tcp`), the same collective contract over one stream socket a pair of ranks, failing by name on a desynchronised call, a late frame or a lost peer; `tf-tp-test tcp-host` checks two hosts bit for bit over it. No serving backend can select it in this release, so every engine is unchanged (#2718, part of #2065). Thanks to @Shoestring-dev.
@@ -105,10 +107,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - GLM-5.3-Flash on CUDA: the router's eight K slices run on the shared mma tiles (`common/router_mma.cuh`), so Flash Next and GLM share one router template; every partial keeps its bytes, and replies, prompt and decode speed at TP=2 on two GB10s are unchanged. The unaligned copy (`tf_glm_router_part`) is gone, and `glue.router` refuses unaligned rows, which no caller passes (#2557, fixes #2535). Thanks to @laudney.
 
 - CUDA: Flash Next's router logits template (`route_logits`) moves into the shared header `common/router_mma.cuh`, with a K-sliced form for GLM's router; its kernels compile to the same machine code on sm_80, sm_86, sm_89, sm_120 and sm_121 (#2556, part of #2535). Thanks to @laudney.
-
-- Flash Next on CUDA: twenty-nine `TF_FLASHNEXT_*` settings refuse a malformed value by name at startup, before any
-  device or checkpoint work, through the shared environment table: unset and blank keep the default, a valid value keeps
-  its meaning, and the switches are exactly `0` or `1` (#2585, for #2370). Thanks to @devopsfortunato.
 
 - Tests: the thinking benchmark check accepts an unmeasured delivery, so it no longer flakes on busy Linux runners, and the image routes' fixture starts its reader before writing, so its two large-body tests no longer hang where socket buffers are small, as on macOS (#2743, closes #2735).
 
