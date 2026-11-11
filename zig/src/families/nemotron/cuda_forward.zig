@@ -63,6 +63,7 @@ pub const Forward = struct {
     unread: bool = false, // nothing reads this prompt chunk's rows: it stops at its last state write
     captures: []const kept.Mark = &.{}, // marks inside the prompt chunk: their Mamba states are copied out as it runs
     tp: ?*const cuda.tp_group.Group = null, // a latent MoE's ranks: their expert rows meet every MoE layer
+    pass: ?@import("cuda_worker.zig").Pass = null, // a window's jobs to the other rank under one header (null: one a job)
     vision: ?*const @import("cuda_vision.zig").Vision = null, // a prompt pass's image rows, spliced after its embeds
     page_elems: u64 = 0, // elements between a paged sequence's pages (its layers' K and V of state.chunk_keys rows)
 
@@ -142,7 +143,10 @@ pub const Forward = struct {
     pub fn routedWindow(f: *const Forward, segs: []const Seg) Forward {
         var routed = f.*;
         routed.segs = segs;
-        if (f.c.latent > 0 and f.tp != null) routed.side = null;
+        if (f.c.latent > 0 and f.tp != null) {
+            routed.side = null;
+            routed.pass = @import("cuda_worker.zig").Pass.blocks(f.w.blocks);
+        }
         routed.untaught = for (segs) |s| {
             if (s.untaught) break true;
         } else false;
