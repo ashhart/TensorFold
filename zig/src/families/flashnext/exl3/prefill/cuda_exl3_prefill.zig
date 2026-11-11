@@ -90,11 +90,6 @@ pub fn stepRows(e: *const prompt.Engine, base: usize, draft_rows: ?usize) !usize
     return n;
 }
 
-/// The grid the prompt cache keeps states on: the serving step's rows, or 0 (any row) with the option off.
-pub fn snapGrid(e: *const prompt.Engine, base: usize) !u32 {
-    return if ((try opts()).snap_grid) @intCast(try stepRows(e, base, null)) else 0;
-}
-
 pub fn stepCapacity(rows: usize, paired: bool) usize {
     return if (paired and rows <= window_.max_rows) rows * 2 else rows;
 }
