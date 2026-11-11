@@ -38,6 +38,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Remote prefill, DeepSeek V4.1 on Metal: the pull-rate estimate no longer counts tokens the producer's prompt cache held. The trigger's reply's `usage.prompt_tokens_details.cached_tokens` is subtracted from the pulled prefix before it is divided by the pull's time, and a pull that left fewer than 1024 computed tokens says nothing, so a warm-up prompt cached on the producer no longer sends the next prompts to the pair on an inflated rate.
 
 - Docs: `docs/deepseek-v41-disaggregated.md` is the operator guide for DeepSeek-V4.1 prefilled on a GB10 pair and decoded on an Apple Silicon Mac over MCDMA or plain HTTP: the hardware, the link's set-up and its traps, the launch flags and environment, the export and decoder profiles, the measured time to first token against the Mac alone, the fallback when the pair or link is down, and what is not measured.
+- Remote prefill: the pull makes its links' clients afresh once the producer's trigger returns, and waits up to 30 s for a link that is down at that moment. A prompt that takes the GB10 minutes to prefill (a 261k-token one took 286 s) outlived the clients made before the trigger when a daemon re-linked meanwhile: the finished export was not pulled (`LinkDown` after the whole prefill, the Mac prefilled the prompt again) and the producer's work was lost.
 
 ## 1.2.7
 

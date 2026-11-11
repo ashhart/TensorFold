@@ -68,6 +68,20 @@ const Peer = struct {
     }
 };
 
+/// What the links do while the producers prefill (the trigger call) and whether the pull renews them afterwards.
+const Flap = enum {
+    /// the links stay up
+    none,
+    /// both links re-link at once, new generations; the pull does not renew them
+    stale,
+    /// both links re-link at once; the pull renews them
+    renewed,
+    /// both links drop and come back 300 ms after the trigger returned; the pull renews them
+    late,
+    /// both links drop and stay down; the pull renews them, and gives up after its wait
+    never,
+};
+
 /// The trigger of the test: the pull's id arrives here, and both producers record their shard under it.
 const Both = struct {
     arena: std.mem.Allocator,
@@ -75,7 +89,9 @@ const Both = struct {
     upto: u64,
     peers: *[2]Peer,
     fail: ?u32,
+    flap: Flap = .none,
     asked: u32 = 0,
+    returning: ?std.Thread = null,
 
     fn start(ptr: *anyopaque, id: [16]u8, tokens: []const u32) anyerror!void {
         const b: *Both = @ptrCast(@alignCast(ptr));
@@ -84,10 +100,32 @@ const Both = struct {
             const shape: plan.Shape = .{ .upto = b.upto, .shard = @intCast(k), .shards = 2, .split = true };
             try p.publish(b.arena, b.w, shape, id, tokens[0..b.upto], b.fail == @as(u32, @intCast(k)));
         }
+        switch (b.flap) {
+            .none => {},
+            .stale, .renewed => for (b.peers) |*p| {
+                p.link.down();
+                p.link.up();
+            },
+            .late, .never => {
+                for (b.peers) |*p| p.link.down();
+                if (b.flap == .late) b.returning = try std.Thread.spawn(.{}, comeBack, .{b.peers});
+            },
+        }
+    }
+
+    fn comeBack(peers: *[2]Peer) void {
+        fabric.words.pause(300 * std.time.ns_per_ms);
+        for (peers) |*p| p.link.up();
+    }
+
+    /// `Remote.renew`: every client made afresh for its link's new generation.
+    fn renew(ptr: *anyopaque) anyerror!void {
+        const b: *Both = @ptrCast(@alignCast(ptr));
+        for (b.peers) |*p| try p.client.renew();
     }
 };
 
-fn pullBoth(upto: u64, fail: ?u32) !void {
+fn pullBoth(upto: u64, fail: ?u32, flap: Flap) !void {
     const a = std.testing.allocator;
     var arena_state: std.heap.ArenaAllocator = .init(a);
     defer arena_state.deinit();
@@ -102,9 +140,12 @@ fn pullBoth(upto: u64, fail: ?u32) !void {
         try p.start(@intCast(k), 2);
         started += 1;
     }
-    var both: Both = .{ .arena = arena, .w = w, .upto = upto, .peers = &peers, .fail = fail };
+    var both: Both = .{ .arena = arena, .w = w, .upto = upto, .peers = &peers, .fail = fail, .flap = flap };
+    defer if (both.returning) |t| t.join();
     const links = [1]*fabric.mailbox.Client{&peers[1].client};
     var remote: ps.Remote = .{ .gpa = a, .policy = .{ .enabled = true, .min_prefix = 0, .tail = 1 }, .client = &peers[0].client, .peers = &links, .trigger = .{ .ptr = &both, .start_fn = Both.start }, .model = model, .protocol = 2 };
+    if (flap != .none and flap != .stale) remote.renew = .{ .ptr = &both, .renew_fn = Both.renew };
+    if (flap == .never) remote.link_wait_ns = 200 * std.time.ns_per_ms;
     const offer = remote.source().offer(prompt, 0).?;
     try std.testing.expectEqual(upto, offer.upto);
 
@@ -115,6 +156,10 @@ fn pullBoth(upto: u64, fail: ?u32) !void {
     if (fail) |_| {
         try std.testing.expectError(error.Refused, remote.source().fill(prompt, offer, land.state()));
         try std.testing.expectEqualStrings("the shard's export failed", remote.reason.text());
+        return;
+    }
+    if (flap == .stale or flap == .never) {
+        try std.testing.expectError(error.LinkDown, remote.source().fill(prompt, offer, land.state()));
         return;
     }
     try remote.source().fill(prompt, offer, land.state());
@@ -134,12 +179,19 @@ fn pullBoth(upto: u64, fail: ?u32) !void {
 }
 
 test "a Remote pulls a KV_SPLIT export from two links at once, landing the direct import's bytes" {
-    try pullBoth(300, null);
-    try pullBoth(1301, null);
+    try pullBoth(300, null, .none);
+    try pullBoth(1301, null, .none);
+}
+
+test "links that re-linked while the producers prefilled are renewed before the pull, and one that is coming back is waited for" {
+    try pullBoth(300, null, .stale); // the old clients' generation is gone: the pull fails, as the long prompts' did
+    try pullBoth(300, null, .renewed);
+    try pullBoth(1301, null, .late);
+    try pullBoth(300, null, .never);
 }
 
 test "a shard that failed to export fails the whole pull with its producer's reason" {
-    try pullBoth(300, 1);
+    try pullBoth(300, 1, .none);
 }
 
 test "a sink that takes one producer only is refused when the export is split, before any link is used" {

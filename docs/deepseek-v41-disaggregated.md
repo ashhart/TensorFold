@@ -232,6 +232,12 @@ prompts, and the rates the average settles at.
   replaced it, maps the new one (backoff 1 s to 30 s while that is refused) and makes a new client: no server restart
   (`remote prefill: the connect daemon's mailbox was replaced; the link was re-opened`). The producer's listen daemon
   restarting is healed on the GB10 side (the producer attaches again, at most once a second).
+* **A link re-links while the producer prefills.** The links are checked before the trigger, and a long prompt's prefill takes
+  minutes (the daemons' liveness window is 6 s: a lost control datagram or two drops the link, and it comes back with a new
+  generation, which a client made earlier no longer matches). Once the trigger returns, the pull makes every link's client
+  afresh and waits up to 30 s for a link that is down at that moment, so the producer's finished export is pulled instead of
+  failing with `LinkDown` and the prompt being prefilled again on the Mac (`remote prefill: a link was re-made while the GB10
+  prefilled; the pull uses the new one`). A link still down after 30 s fails the pull as before.
 
 ### A request that goes away
 
