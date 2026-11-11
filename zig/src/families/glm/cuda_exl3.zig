@@ -168,45 +168,24 @@ pub fn run(k: *const Kernels, ek: *const experts.Kernels, stream: cuda.Stream, w
         }
         return;
     }
-    return compact(k, ek, stream, w, sc, plan_buf, x, x_stride, picks, slots, rows, count, dims, width, limit, false, ey);
+    return compact(k, stream, w, sc, x, x_stride, picks, slots, rows, count, dims, width, limit, ey);
 }
 
-/// The retained compact route used by decode; the test-only reference below also exercises the old prompt loop.
-fn compact(k: *const Kernels, ek: *const experts.Kernels, stream: cuda.Stream, w: Experts, sc: Scratch, plan_buf: cuda.grouped.Plan, x: u64, x_stride: usize, picks: u64, slots: usize, rows: usize, count: usize, dims: usize, width: usize, limit: f32, prompt: bool, ey: u64) !void {
+/// Compact routed picks and output for decode or prompt layers without the whole-pass kernel.
+fn compact(k: *const Kernels, stream: cuda.Stream, w: Experts, sc: Scratch, x: u64, x_stride: usize, picks: u64, slots: usize, rows: usize, count: usize, dims: usize, width: usize, limit: f32, ey: u64) !void {
     const l = layer(w, count, dims, width, limit);
     const cap: usize = @min(rows, chunk_rows);
     const arena = sc.picks + picksBytes(rows);
-    const fused = prompt and common.prompt.eligible(l);
     var at: usize = 0;
     while (at < rows) : (at += chunk_rows) {
         const n: usize = @min(chunk_rows, rows - at);
         try copyRows(stream, sc.picks, top_k * 4, picks + at * slots * 4, slots * 4, top_k * 4, n, "EXL3 compact route rows");
-        const output = if (fused) blk: {
-            const scratch = try common.prompt.scratch(arena, l, cap, top_k);
-            const y = arena + (try common.prompt.bytes(l, cap, top_k));
-            try k.prompt.run(k, ek.router, stream, l, x + at * x_stride * 2, x_stride, sc.picks, n, scratch, plan_buf, y, null);
-            break :blk y;
-        } else blk: {
-            const scratch = try common.scratch(arena, l, cap, top_k);
-            try k.runSlots(stream, l, x + at * x_stride * 2, x_stride, .bf16, sc.picks, n, scratch);
-            break :blk scratch.y;
-        };
+        const scratch = try common.scratch(arena, l, cap, top_k);
+        try k.runSlots(stream, l, x + at * x_stride * 2, x_stride, .bf16, sc.picks, n, scratch);
+        const output = scratch.y;
         try copyRows(stream, ey + at * slots * dims * 4, slots * dims * 4, output, top_k * dims * 4, top_k * dims * 4, n, "EXL3 routed output slots");
     }
 }
-
-/// Device tests alone retain the former 1,024-row prompt calls and copies; normal serving never selects this hook.
-pub const testing = struct {
-    pub fn scratchBytes(rows: usize, dims: usize, width: usize, shx: bool) usize {
-        var l = shape(dims, width);
-        l.shared_input = shx;
-        const n: usize = @min(rows, chunk_rows);
-        return picksBytes(rows) + (common.prompt.bytes(l, n, top_k) catch unreachable) + n * top_k * dims * 4;
-    }
-    pub fn run(k: *const Kernels, ek: *const experts.Kernels, stream: cuda.Stream, w: Experts, sc: Scratch, plan_buf: cuda.grouped.Plan, x: u64, x_stride: usize, picks: u64, slots: usize, rows: usize, count: usize, dims: usize, width: usize, limit: f32, ey: u64) !void {
-        return compact(k, ek, stream, w, sc, plan_buf, x, x_stride, picks, slots, rows, count, dims, width, limit, true, ey);
-    }
-};
 
 test "EXL3 admission: Mia-AiLab's block passes; other widths and codebooks are refused by name" {
     const gpa = std.testing.allocator;
