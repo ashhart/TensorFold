@@ -13,16 +13,19 @@ pub fn available(device: mtl.Device) bool {
 
 /// A served geometry the attention compiles for (the head size is the family's 128).
 pub const Geometry = struct { name: []const u8, heads: u32, kv_heads: u32, hidden: usize, intermediate: usize, vocab: usize };
-/// Nanbeige4.3-33B, the family's first model, and Nanbeige4.1-3B, its drafter.
+/// Nanbeige4.3-33B, the family's first model, Nanbeige4.1-3B, its drafter, and Bimo-7B-CyberAgent, a Qwen2.
 pub const nanbeige43: Geometry = .{ .name = "33B", .heads = 56, .kv_heads = 8, .hidden = 7168, .intermediate = 22016, .vocab = 166912 };
 pub const nanbeige41: Geometry = .{ .name = "3B", .heads = 20, .kv_heads = 4, .hidden = 2560, .intermediate = 10496, .vocab = 166144 };
-pub const geometries = [_]Geometry{ nanbeige43, nanbeige41 };
+pub const bimo7b: Geometry = .{ .name = "7B", .heads = 28, .kv_heads = 4, .hidden = 3584, .intermediate = 18944, .vocab = 152064 };
+pub const geometries = [_]Geometry{ nanbeige43, nanbeige41, bimo7b };
 
 pub const glue_names = model.glue_names;
 pub const gemm_names = [_][]const u8{ "ll_gemm_00", "ll_gemm_01", "ll_gemm_10", "ll_gemm_11" };
+/// The forms storing fp32 sums for a biased projection (gemm.metal's TF_GEMM_NAX_KERNEL_TO forms).
+pub const gemm_f32_names = [_][]const u8{ "ll_gemm_f32_00", "ll_gemm_f32_01", "ll_gemm_f32_10", "ll_gemm_f32_11" };
 pub const attention_name = "ll_prompt_attention";
-/// Every pipeline the family runs: the glue, the four GEMM forms and the prompt attention.
-pub const pipelines = glue_names.len + gemm_names.len + 1;
+/// Every pipeline the family runs: the glue, the four GEMM forms, their fp32 forms and the prompt attention.
+pub const pipelines = glue_names.len + gemm_names.len + gemm_f32_names.len + 1;
 
 /// The glue's text as model.zig builds it.
 pub fn glueSource(a: std.mem.Allocator) ![]u8 {
@@ -55,7 +58,7 @@ pub fn gemmSource(device: mtl.Device, a: std.mem.Allocator) ![]u8 {
 
 /// Every pipeline the family runs appears among the registrations' functions.
 pub fn requireComplete(functions: []const []const u8) !void {
-    inline for (.{ glue_names, gemm_names, [_][]const u8{attention_name} }) |list| for (list) |name| {
+    inline for (.{ glue_names, gemm_names, gemm_f32_names, [_][]const u8{attention_name} }) |list| for (list) |name| {
         var seen = false;
         for (functions) |f| if (std.mem.eql(u8, f, name)) {
             seen = true;
@@ -67,7 +70,7 @@ pub fn requireComplete(functions: []const []const u8) !void {
 test "llama contracts: the roll call wants every pipeline" {
     var all: [pipelines][]const u8 = undefined;
     var i: usize = 0;
-    inline for (.{ glue_names, gemm_names, [_][]const u8{attention_name} }) |list| for (list) |name| {
+    inline for (.{ glue_names, gemm_names, gemm_f32_names, [_][]const u8{attention_name} }) |list| for (list) |name| {
         all[i] = name;
         i += 1;
     };

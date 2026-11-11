@@ -9,8 +9,8 @@ const frags = @import("../../core/frags.zig");
 const weights = @import("weights.zig");
 const contracts = @import("contracts.zig");
 
-pub const glue_names = [_][:0]const u8{ "ll_embed", "ll_norm", "ll_add", "ll_add_norm", "ll_prep", "ll_silu_gu", "ll_decode_vec", "ll_merge_vec", "ll_argmax", "ll_matvec_1", "ll_matvec_2", "ll_matvec_4", "ll_matvec_8", "ll_matvec_16", "ll_matvec_32", "ll_q4_matvec_1", "ll_q4_matvec_2", "ll_q4_matvec_4", "ll_q4_matvec_8", "ll_q4_matvec_16", "ll_q4_matvec_32", "ll_q4_dequant" };
-pub const Glue = enum { embed, norm, add, add_norm, prep, silu_gu, decode_vec, merge_vec, argmax, matvec_1, matvec_2, matvec_4, matvec_8, matvec_16, matvec_32, q4_matvec_1, q4_matvec_2, q4_matvec_4, q4_matvec_8, q4_matvec_16, q4_matvec_32, q4_dequant };
+pub const glue_names = [_][:0]const u8{ "ll_embed", "ll_norm", "ll_add", "ll_add_norm", "ll_prep", "ll_silu_gu", "ll_decode_vec", "ll_merge_vec", "ll_argmax", "ll_matvec_1", "ll_matvec_2", "ll_matvec_4", "ll_matvec_8", "ll_matvec_16", "ll_matvec_32", "ll_matvec_bias_1", "ll_matvec_bias_2", "ll_matvec_bias_4", "ll_matvec_bias_8", "ll_matvec_bias_16", "ll_matvec_bias_32", "ll_q4_matvec_1", "ll_q4_matvec_2", "ll_q4_matvec_4", "ll_q4_matvec_8", "ll_q4_matvec_16", "ll_q4_matvec_32", "ll_q4_dequant", "ll_bias_round" };
+pub const Glue = enum { embed, norm, add, add_norm, prep, silu_gu, decode_vec, merge_vec, argmax, matvec_1, matvec_2, matvec_4, matvec_8, matvec_16, matvec_32, matvec_bias_1, matvec_bias_2, matvec_bias_4, matvec_bias_8, matvec_bias_16, matvec_bias_32, q4_matvec_1, q4_matvec_2, q4_matvec_4, q4_matvec_8, q4_matvec_16, q4_matvec_32, q4_dequant, bias_round };
 
 pub const Model = struct {
     gpa: std.mem.Allocator,
@@ -26,6 +26,8 @@ pub const Model = struct {
     sample_full: mtl.Pipeline,
     /// Prompt chunks' bf16 GEMM on the tensor units, by whole M and N tiles.
     gemm: [2][2]mtl.Pipeline,
+    /// The same GEMM storing its fp32 sums: a biased projection's, before ll_bias_round adds the bias and rounds.
+    gemm_f32: [2][2]mtl.Pipeline,
     /// RoPE's inverse frequencies: fp32 [head_dim / 2].
     inv: mtl.Buffer,
     /// The queue is another model's (a drafter's commands behind the served model's, in its residency set).
@@ -90,15 +92,16 @@ pub const Model = struct {
             const lib = try mtl.Library.fromSource(m.device, body, mtl.CompileOptions.mlx());
             defer lib.deinit();
             var made: usize = 0;
-            errdefer for (0..made) |i| m.gemm[i / 2][i % 2].deinit();
-            for (0..4) |i| {
-                var nm: [16]u8 = undefined;
-                const full = try std.fmt.bufPrintSentinel(&nm, "ll_gemm_{d}{d}", .{ i / 2, i % 2 }, 0);
-                m.gemm[i / 2][i % 2] = try mtl.Pipeline.init(m.device, lib, full, false);
+            errdefer for (0..made) |i| (if (i < 4) m.gemm[i / 2][i % 2] else m.gemm_f32[(i - 4) / 2][i % 2]).deinit();
+            for (0..8) |i| {
+                var nm: [20]u8 = undefined;
+                const full = try std.fmt.bufPrintSentinel(&nm, "ll_gemm_{s}{d}{d}", .{ if (i < 4) "" else "f32_", i / 2 % 2, i % 2 }, 0);
+                (if (i < 4) &m.gemm[i / 2][i % 2] else &m.gemm_f32[(i - 4) / 2][i % 2]).* = try mtl.Pipeline.init(m.device, lib, full, false);
                 made += 1;
             }
         }
         errdefer for (m.gemm) |row| for (row) |p| p.deinit();
+        errdefer for (m.gemm_f32) |row| for (row) |p| p.deinit();
         m.inv = try m.device.buffer(cfg.head_dim / 2 * 4, mtl.ResourceOptions.shared);
         m.config.inverseFrequencies(m.inv.slice(f32, cfg.head_dim / 2));
         return m;
@@ -110,6 +113,7 @@ pub const Model = struct {
 
     pub fn deinit(m: *Model) void {
         m.inv.deinit();
+        for (m.gemm_f32) |row| for (row) |p| p.deinit();
         for (m.gemm) |row| for (row) |p| p.deinit();
         m.sample_full.deinit();
         m.prompt_attn.deinit();
