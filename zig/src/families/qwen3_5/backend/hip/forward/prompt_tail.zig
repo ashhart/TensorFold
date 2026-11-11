@@ -19,6 +19,8 @@ pub const Facts = struct {
     images: bool = false,
     /// rocBLAS runs the products, whose bits vary with the row count: a tail would not keep the read row's.
     plain: bool = false,
+    /// A product past the last layer's keys is `.dense` (a widened chat checkpoint, an unquantized tensor): unchecked.
+    dense: bool = false,
     /// Full attention: the layer's only state is its keys and values.
     last_full: bool = true,
 
@@ -27,7 +29,7 @@ pub const Facts = struct {
         if (!f.last_full) return 0;
         const r: Reads = .{ .logits = reads.logits, .readers = reads.readers or f.last_tapped or f.traced or f.images };
         if (tail.unread(r)) return len;
-        return tail.start(.{ .total = len, .nseg = 1, .readers = r.readers, .fits = !f.plain }) orelse 0;
+        return tail.start(.{ .total = len, .nseg = 1, .readers = r.readers, .fits = !f.plain and !f.dense }) orelse 0;
     }
 };
 
@@ -39,8 +41,26 @@ pub fn of(m: *const view.Model, o: hip.ops.Ops, traced: bool) Facts {
         .traced = traced,
         .images = if (m.frame) |fr| fr.runs.len != 0 else false,
         .plain = o.blas != null,
+        .dense = switch (m.layers[last]) {
+            .full => |f| densePastKeys(f),
+            .linear => false,
+        },
         .last_full = m.layers[last] == .full,
     };
+}
+
+/// Whether q, o or the MLP of `f` takes the dense kernels; k and v run every row either way.
+fn densePastKeys(f: view.Full) bool {
+    const mlp = switch (f.mlp) {
+        .dense => |d| isDense(d.gate) or isDense(d.up) or isDense(d.down),
+        .moe => |r| isDense(r.experts.fused) or isDense(r.experts.down) or
+            if (r.experts.shared) |sh| isDense(sh.gate_up) or isDense(sh.down) else false,
+    };
+    return isDense(f.q) or isDense(f.o) or mlp;
+}
+
+fn isDense(p: view.Projection) bool {
+    return p.handle == .dense;
 }
 
 test "qwen3_5 hip prompt tail: an open chunk keeps its last tile, or only its keys when nothing reads it" {
@@ -66,15 +86,22 @@ test "qwen3_5 hip prompt tail: each planted reader of the other rows refuses the
     f.last_full = false;
     if (f.first(.{ .logits = false, .readers = false }, 4096) == 0 and f.first(.{ .logits = true, .readers = false }, 4096) == 0) refused += 1;
     try std.testing.expectEqual(@as(usize, 4), refused);
-    // rocBLAS: k and v run every row as before, so only the tail is refused
-    f = open;
-    f.plain = true;
-    try std.testing.expectEqual(@as(usize, 0), f.first(.{ .logits = true, .readers = false }, 4096));
-    try std.testing.expectEqual(@as(usize, 4096), f.first(.{ .logits = false, .readers = false }, 4096));
+    // rocBLAS and the dense kernels: k and v run every row as before, so only the tail is refused
+    inline for (.{ "plain", "dense" }) |name| {
+        f = open;
+        @field(f, name) = true;
+        try std.testing.expectEqual(@as(usize, 0), f.first(.{ .logits = true, .readers = false }, 4096));
+        try std.testing.expectEqual(@as(usize, 4096), f.first(.{ .logits = false, .readers = false }, 4096));
+    }
 }
 
-test "qwen3_5 hip prompt tail: the model's taps, images, rocBLAS and last layer are each read as a fact" {
-    var layers = [_]view.Layer{ .{ .linear = undefined }, .{ .full = undefined } };
+test "qwen3_5 hip prompt tail: the model's taps, images, rocBLAS, dense products and last layer are read as facts" {
+    const mlx: view.Projection = .{ .n = 64, .k = 64, .handle = .{ .mlx = undefined } };
+    const dense: view.Projection = .{ .n = 64, .k = 64, .handle = .{ .dense = .{ .weight = 0 } } };
+    var full: view.Full = undefined;
+    inline for (.{ "q", "k", "v", "o" }) |name| @field(full, name) = mlx;
+    full.mlp = .{ .dense = .{ .gate = mlx, .up = mlx, .down = mlx } };
+    var layers = [_]view.Layer{ .{ .linear = undefined }, .{ .full = full } };
     var m: view.Model = undefined;
     m.layers = &layers;
     m.taps = .{};
@@ -95,6 +122,23 @@ test "qwen3_5 hip prompt tail: the model's taps, images, rocBLAS and last layer 
     var plain = o;
     plain.blas = @ptrFromInt(0x100);
     try std.testing.expect(of(&m, plain, false).plain);
+    // dense k and v run every row as on main; a dense q, o or MLP product is a fact
+    layers[1].full.k = dense;
+    layers[1].full.v = dense;
+    try std.testing.expect(!of(&m, o, false).dense);
+    layers[1].full.o = dense;
+    try std.testing.expect(of(&m, o, false).dense);
+    layers[1].full.o = mlx;
+    layers[1].full.mlp.dense.down = dense;
+    try std.testing.expect(of(&m, o, false).dense);
+    var routed: view.Routed = undefined;
+    routed.experts.fused = mlx;
+    routed.experts.down = mlx;
+    routed.experts.shared = null;
+    layers[1].full.mlp = .{ .moe = routed };
+    try std.testing.expect(!of(&m, o, false).dense);
+    layers[1].full.mlp.moe.experts.shared = .{ .gate_up = dense, .down = mlx };
+    try std.testing.expect(of(&m, o, false).dense);
     layers[1] = .{ .linear = undefined };
     try std.testing.expect(!of(&m, o, false).last_full);
 }
