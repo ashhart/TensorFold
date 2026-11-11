@@ -15,6 +15,7 @@ const Model = loader.Model;
 const Proj = loader.Proj;
 const SPLIT = q.SPLIT;
 const limits = @import("limits.zig");
+const tail = @import("prompt_tail.zig");
 const ST_B = q.ST_B;
 const ST_G = q.ST_G;
 const ST_K = q.ST_K;
@@ -250,7 +251,22 @@ pub fn dumpBuf(d: *Dev, name: []const u8, p: *anyopaque, n: usize, kind: enum { 
 }
 
 /// What a forward leaves: nothing, the last row's logits and greedy token, or every row's (verification, ≤ 16 rows).
-pub const Want = enum { none, last, rows };
+pub const Want = tail.Want;
+
+comptime {
+    if (LAYERS != tail.layers) @compileError("xpu/prompt_tail.zig's layer count does not match qwen27.zig");
+    for (TAP_LAYERS) |tl| if (tl == LAYERS - 1) @compileError("the XPU prompt tail assumes the last layer is not tapped");
+}
+
+/// The fixed-pitch buffers shift; h, p and ahi/alo stay at row 0 scratch, pitched by their producer.
+fn atRows(a: *const Acts, base: usize) Acts {
+    var t = a.*;
+    t.x = off(a.x, base * D * 4);
+    t.r = off(a.r, base * D * 2);
+    t.q = off(a.q, base * 24 * 256 * 2);
+    t.y = off(a.y, base * 6144 * 2);
+    return t;
+}
 pub fn kvBytes() usize {
     return @as(usize, q.MAX_CTX) * 4 * @as(usize, if (q.kv_i8) 256 + 4 else 256 * 2);
 }
@@ -319,7 +335,29 @@ pub fn forward(d: *Dev, m: *Model, a: *Acts, ids: []const i32, p0: u32, mode: Mo
     errdefer d.settle(); // the queued copy reads the caller's ids: an error returns only once the queue is idle
     try embedRows(d, m, a.ids, a.x, T);
     if (p0 == 0) try dump(d, a, T, "embed", false);
+    // anything that reads layer 63's other rows keeps the whole layer; the tail is a prompt optimisation only
+    const tail_hooks = q.dump_h != null or q.dump_dir != null or gemm_probe != null or gdn_probe != null or gemm_hook != null or q.a8_group != 0 or !q.prompt_tail_on;
+    var tail_used = false;
+    var tail_at: ?usize = null;
+    var tail_acts: Acts = undefined;
     for (&m.layers, 0..) |*l, i| {
+        const tapped = mode.taps and std.mem.indexOfScalar(usize, &TAP_LAYERS, i) != null;
+        const plan = if (mode.prompt and l.attn) tail.tailPlan(T, mode.want, i, tail_hooks or tapped) else tail.Plan.all;
+        const kv_only = plan == .kv_only;
+        var wa: *Acts = a;
+        var wr: u32 = T;
+        var ap0: u32 = p0;
+        switch (plan) {
+            .tail => |t0| {
+                tail_used = true;
+                tail_at = t0;
+                tail_acts = atRows(a, t0);
+                wa = &tail_acts;
+                wr = @intCast(T - t0);
+                ap0 = p0 + @as(u32, @intCast(t0));
+            },
+            else => {},
+        }
         try d.launch(if (wide) d.k.add_rmsnorm else d.k.add_rmsnorm_dec, .{ .x = T }, .{ a.x, a.r, l.in_norm, a.h, a.ahi, a.alo, @as(i32, D), EPS, @as(i32, if (i == 0) 0 else 1), gs, q8a, q8s, q8ms, q.rot_on });
         const probe = p0 == 0 and i == 0;
         if (probe) try dumpBuf(d, "h0", a.h, T * D, .f16);
@@ -336,16 +374,18 @@ pub fn forward(d: *Dev, m: *Model, a: *Acts, ids: []const i32, p0: u32, mode: Mo
             const mt: ?*anyopaque = if (mode.multi) |mm| off(mm.mt, i * 16 * 8 * 8) else null;
             const ns = (ctx + SPLIT - 1) / SPLIT;
             try d.launch(d.k.attn_prep, .{ .x = T }, .{ a.p, l.qn.?, l.kn.?, m.invf, a.q, l.kc.?, l.vc.?, @as(i32, @intCast(p0)), EPS, tree, mt, mpos, q.kv8, kvCap() });
+            if (kv_only) break;
             if (wide and q.kv_i8) {
-                try d.launch(d.k.attn_prompt8, .{ .x = (T + 7) / 8, .y = 4 }, .{ a.q, l.kc.?, l.vc.?, a.y, @as(i32, @intCast(p0)), t32, @as(f32, 1.0 / 16.0), kvCap() });
+                try d.launch(d.k.attn_prompt8, .{ .x = (wr + 7) / 8, .y = 4 }, .{ wa.q, l.kc.?, l.vc.?, wa.y, @as(i32, @intCast(ap0)), @as(i32, @intCast(wr)), @as(f32, 1.0 / 16.0), kvCap() });
             } else if (wide) {
-                try d.launch(d.k.attn_prompt, .{ .x = (T + 7) / 8, .y = 4 }, .{ a.q, l.kc.?, l.vc.?, a.y, @as(i32, @intCast(p0)), t32, @as(f32, 1.0 / 16.0) });
+                try d.launch(d.k.attn_prompt, .{ .x = (wr + 7) / 8, .y = 4 }, .{ wa.q, l.kc.?, l.vc.?, wa.y, @as(i32, @intCast(ap0)), @as(i32, @intCast(wr)), @as(f32, 1.0 / 16.0) });
             } else {
-                try d.launch(d.k.attn_decode, .{ .x = ns, .y = 4, .z = T }, .{ a.q, l.kc.?, l.vc.?, a.pm, a.pl, a.po, @as(i32, @intCast(p0)), @as(i32, @intCast(ns)), @as(f32, 1.0 / 16.0), if (mode.multi != null) tree else table, mt, mpos, kvCap() });
-                try d.launch(d.k.attn_merge, .{ .x = 24, .y = T }, .{ a.pm, a.pl, a.po, a.y, @as(i32, @intCast(p0)), @as(i32, @intCast(ns)), table, mpos });
+                try d.launch(d.k.attn_decode, .{ .x = ns, .y = 4, .z = wr }, .{ wa.q, l.kc.?, l.vc.?, a.pm, a.pl, a.po, @as(i32, @intCast(ap0)), @as(i32, @intCast(ns)), @as(f32, 1.0 / 16.0), if (mode.multi != null) tree else table, mt, mpos, kvCap() });
+                try d.launch(d.k.attn_merge, .{ .x = 24, .y = wr }, .{ a.pm, a.pl, a.po, wa.y, @as(i32, @intCast(ap0)), @as(i32, @intCast(ns)), table, mpos });
             }
-            if (q.kv8 & 1 != 0) try d.launch(d.k.rot_heads, .{ .x = T, .y = 24 }, .{a.y});
-            try d.launch(d.k.attn_gate, .{ .x = T }, .{ a.y, a.p, a.h, a.ahi, a.alo, gs, q.rot_on, q8oa, q8os, q8ms });
+            if (q.kv8 & 1 != 0) try d.launch(d.k.rot_heads, .{ .x = wr, .y = 24 }, .{wa.y});
+            const p_attn: *anyopaque = if (tail_at) |t0| off(a.p, t0 * q.ATT_IN * 2) else a.p;
+            try d.launch(d.k.attn_gate, .{ .x = wr }, .{ wa.y, p_attn, wa.h, wa.ahi, wa.alo, gs, q.rot_on, q8oa, q8os, q8ms });
         } else {
             const cin = l.conv[l.conv_cur].?;
             const cout = l.conv[1 - l.conv_cur].?;
@@ -400,17 +440,17 @@ pub fn forward(d: *Dev, m: *Model, a: *Acts, ids: []const i32, p0: u32, mode: Mo
             try d.launch(d.k.gated_norm, .{ .x = T }, .{ a.y, a.p, l.gnorm.?, a.h, a.ahi, a.alo, EPS, gs, q.rot_on, q8oa, q8os, q8ms });
             if (probe) try dumpBuf(d, "o0", a.h, T * 6144, .f16);
         }
-        try a8(d, a, a.h, 6144, T, 2);
-        try pgemm(d, a, a.h, l.mixer_out, a.r, T, q8out, 0, q.int4_sites & 2 != 0, wide);
-        if (gemm_probe) |f| try f(d, a, l.mixer_out, a.h, T, i, 1);
-        if (probe) try dumpBuf(d, "r0", a.r, T * D, .f16);
-        try d.launch(if (wide) d.k.add_rmsnorm else d.k.add_rmsnorm_dec, .{ .x = T }, .{ a.x, a.r, l.post_norm, a.h, a.ahi, a.alo, @as(i32, D), EPS, @as(i32, 1), gs, q8a, q8s, q8ms, q.rot_on });
-        try a8(d, a, a.h, D, T, 4);
-        if (gemm_probe) |f| try f(d, a, l.gu, a.h, T, i, 2);
-        const act = try mlpIn(d, a, l.gu, T, gs, q8on, wide);
-        try a8(d, a, act, 17408, T, 8);
-        try pgemm(d, a, act, l.down, a.r, T, false, if (act == a.p) q.rot_on else 0, q.int4_sites & 8 != 0, wide);
-        if (gemm_probe) |f| try f(d, a, l.down, act, T, i, 3);
+        try a8(d, wa, wa.h, 6144, wr, 2);
+        try pgemm(d, wa, wa.h, l.mixer_out, wa.r, wr, q8out, 0, q.int4_sites & 2 != 0, wide);
+        if (gemm_probe) |f| try f(d, wa, l.mixer_out, wa.h, wr, i, 1);
+        if (probe) try dumpBuf(d, "r0", wa.r, wr * D, .f16);
+        try d.launch(if (wide) d.k.add_rmsnorm else d.k.add_rmsnorm_dec, .{ .x = wr }, .{ wa.x, wa.r, l.post_norm, wa.h, wa.ahi, wa.alo, @as(i32, D), EPS, @as(i32, 1), gs, q8a, q8s, q8ms, q.rot_on });
+        try a8(d, wa, wa.h, D, wr, 4);
+        if (gemm_probe) |f| try f(d, wa, l.gu, wa.h, wr, i, 2);
+        const act = try mlpIn(d, wa, l.gu, wr, gs, q8on, wide);
+        try a8(d, wa, act, 17408, wr, 8);
+        try pgemm(d, wa, act, l.down, wa.r, wr, false, if (act == wa.p) q.rot_on else 0, q.int4_sites & 8 != 0, wide);
+        if (gemm_probe) |f| try f(d, wa, l.down, act, wr, i, 3);
         if (p0 == 0 and i < 4) try dump(d, a, T, try std.fmt.allocPrint(alloc, "{d}", .{i}), true);
         if (mode.taps) for (TAP_LAYERS, 0..) |tl, slot| if (tl == i)
             try d.launch(d.k.tap, .{ .x = D / 256, .y = T }, .{ a.x, a.r, a.taps, @as(i32, D), @as(i32, @intCast(slot)) });
@@ -420,7 +460,9 @@ pub fn forward(d: *Dev, m: *Model, a: *Acts, ids: []const i32, p0: u32, mode: Mo
         return null;
     }
     const hgs: i32 = @intCast(m.head.gs);
-    try d.launch(if (wide) d.k.add_rmsnorm else d.k.add_rmsnorm_dec, .{ .x = T }, .{ a.x, a.r, m.norm, a.h, a.ahi, a.alo, @as(i32, D), EPS, @as(i32, 1), hgs, no_q8, no_q8, @as(i32, 0), @as(i32, 0) });
+    const fa: *Acts = if (tail_used) &tail_acts else a;
+    const fr: u32 = if (tail_at) |t0| @intCast(T - t0) else T;
+    try d.launch(if (wide) d.k.add_rmsnorm else d.k.add_rmsnorm_dec, .{ .x = fr }, .{ fa.x, fa.r, m.norm, fa.h, fa.ahi, fa.alo, @as(i32, D), EPS, @as(i32, 1), hgs, no_q8, no_q8, @as(i32, 0), @as(i32, 0) });
     if (q.dump_h) |fd| { // XPU_DUMP_H: every row's final normed hidden state, appended
         const host = try alloc.alloc(u16, T * D);
         defer alloc.free(host);
@@ -429,10 +471,10 @@ pub fn forward(d: *Dev, m: *Model, a: *Acts, ids: []const i32, p0: u32, mode: Mo
         _ = write(fd, @ptrCast(host.ptr), T * D * 2);
         if (!want) return null;
     }
-    if (gemm_probe) |f| try f(d, a, m.head, a.h, T, LAYERS, 4);
-    const first = if (mode.want == .rows) 0 else T - 1;
-    const rows = T - first;
-    try gemm(d, a.pscr, off(a.h, first * D * 2), off(a.ahi, first * (D / m.head.gs) * 2), off(a.alo, first * (D / m.head.gs) * 2), m.head, a.logits, rows);
+    if (gemm_probe) |f| try f(d, fa, m.head, fa.h, fr, LAYERS, 4);
+    const first = if (mode.want == .rows) 0 else fr - 1;
+    const rows = fr - first;
+    try gemm(d, a.pscr, off(fa.h, first * D * 2), off(fa.ahi, first * (D / m.head.gs) * 2), off(fa.alo, first * (D / m.head.gs) * 2), m.head, a.logits, rows);
     try d.launch(d.k.argmax_part, .{ .x = 256, .y = rows }, .{ a.logits, @as(i32, VOCAB), a.pv, a.pi });
     try d.launch(d.k.argmax, .{ .x = rows }, .{ a.pv, a.pi, a.tok });
     var toks: [16]i32 = undefined;
