@@ -140,6 +140,7 @@ def md5(path):
 
 
 def run(binary, data, out, times):
+    out = out.resolve()
     out.mkdir(parents=True, exist_ok=True)
     binary = binary.resolve()
     data = data.resolve()
