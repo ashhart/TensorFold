@@ -125,8 +125,8 @@ pub const Tree = struct {
         return p;
     }
 
-    /// The deepest node with a state at a multiple of `step` that `prompt` repeats up to `limit_at` (a page edge).
-    pub fn deepest(t: *const Tree, prompt: []const u32, limit_at: usize, step: usize) ?*Node {
+    /// The deepest node with a state at a resume point (`ok.ok(end)`) that `prompt` repeats up to `limit_at`.
+    pub fn deepest(t: *const Tree, prompt: []const u32, limit_at: usize, ok: anytype) ?*Node {
         var node = t.root;
         var at: usize = 0;
         var best: ?*Node = null;
@@ -136,13 +136,13 @@ pub const Tree = struct {
             if (p < t.npages(c)) break;
             at += p * t.page;
             node = c;
-            if (c.entry != null and c.end % step == 0) best = c;
+            if (c.entry != null and ok.ok(c.end)) best = c;
         }
         return best;
     }
 
     /// The deepest page edge `prompt` repeats up to `limit_at`, inside a node too: where a page-only store resumes.
-    pub fn deepestPage(t: *const Tree, prompt: []const u32, limit_at: usize) ?Hit {
+    pub fn deepestPage(t: *const Tree, prompt: []const u32, limit_at: usize, ok: anytype) ?Hit {
         var node = t.root;
         var at: usize = 0;
         var best: ?Hit = null;
@@ -150,7 +150,9 @@ pub const Tree = struct {
             const c = t.child(node, prompt[at..]) orelse break;
             const p = t.common(c, prompt[at..], (limit_at - at) / t.page);
             if (p == 0) break;
-            best = .{ .node = c, .pages = p };
+            var k = p; // the deepest of its matched page edges that is a resume point
+            while (k > 0 and !ok.ok(@intCast(at + k * t.page))) k -= 1;
+            if (k > 0) best = .{ .node = c, .pages = k };
             if (p < t.npages(c)) break;
             at += p * t.page;
             node = c;
