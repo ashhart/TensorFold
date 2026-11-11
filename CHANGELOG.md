@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Server: with `--execution-witness`, `"execution_witness": true` on a chat completion or completion adds an `execution_witness` object to the reply (on a stream, its finish chunk): the witness read before the engine takes the request and again at the end, the prompt ids', resolved request's and reply tokens' SHA-256 (the request with the seed actually used, shown beside it), the finish reason and a `binding` over them, or `unknown` with a reason, including `epoch_changed` when the engine changed in between. Without the flag the field answers 400; without the field replies are unchanged (refs #2741).
+
 - Server: `serve --execution-witness` (off by default) adds `GET /v1/execution/witness` under the `read` key scope, a snapshot naming the running binary, the checkpoint's text files, the serve defaults and `TF_*` settings, the engine's epoch and a per-process instance, or `unknown` with its reason. It needs an API key or `--unix-socket`, hashes only after the server is ready, and no engine attests a supported path yet, so every engine reads `unsupported_path`; without the flag the route answers 404 and replies are unchanged (#2901, refs #2741). Thanks to @kotevcode.
 
 - Video input: libtfvideo decodes MPEG-4 Part 2 and H.264 streams that declare no B-frames on up to four frame threads, 2.1x to 3.4x faster on Mac and Linux, with every frame equal to before, damaged clips included; H.264 with B-frames keeps the single-threaded path, because frame threads conceal damage there differently, and a stream that contradicts its own headers falls back to it (#2863). Thanks to @swbiggart.

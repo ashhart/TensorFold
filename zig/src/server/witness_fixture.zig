@@ -19,6 +19,8 @@ pub const Engine = struct {
     hooked: bool = true,
     facts: Facts = .{ .known = .{ .path = "test/fake", .digest = @splat(7) } },
     calls: std.atomic.Value(u32) = .init(0),
+    /// A witness whose epoch moves inside submit, as a reload between admission and the end would move it.
+    bump: ?*witness.State = null,
 
     pub fn engine(e: *Engine) api.Engine {
         return .{ .ctx = e, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
@@ -35,6 +37,7 @@ pub const Engine = struct {
     }
     fn submit(ptr: *anyopaque, id: api.Id, _: *const api.Request, sink: api.Sink) api.SubmitError!void {
         _ = cast(ptr).calls.fetchAdd(1, .monotonic);
+        if (cast(ptr).bump) |s| s.bump();
         sink.event(sink.ctx, id, &.{ .prefilled = 0 });
         sink.event(sink.ctx, id, &.{ .tokens = &.{'x'} });
         sink.event(sink.ctx, id, &.{ .finished = .{ .reason = .stop } });
