@@ -35,7 +35,7 @@ pub const Buffers = struct {
         errdefer columns.free();
         var full = try cuda.DeviceBuffer.alloc(e.d, batch_rows * e.c.vocab * 2);
         errdefer full.free();
-        return .{ .columns = columns, .full = full, .stage = try cuda.DeviceBuffer.alloc(e.d, batch_rows * e.c.vocab * 2) };
+        return .{ .columns = columns, .full = full, .stage = try cuda.DeviceBuffer.alloc(e.d, @import("cuda_sampler.zig").stagingBytes(e.c.vocab, batch_rows)) };
     }
 
     pub fn free(b: *Buffers) void {
@@ -92,7 +92,12 @@ pub fn run(e: *Engine, want: Want, next: []const u32) !void {
     }
 }
 
-/// The passes' own buffers from the first that asks; if a rank has no room, every rank takes the window's (8 rows).
+/// Prepare before admission so the CUDA byte counter includes the prompt gather's resident buffers.
+pub fn prepare(e: *Engine) !void {
+    _ = try buffers(e);
+}
+
+/// If a rank has no room for the passes' own buffers, every rank takes the window's rows.
 fn buffers(e: *Engine) !?*Buffers {
     if (!e.prompt_tried) {
         e.prompt_tried = true;
