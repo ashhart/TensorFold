@@ -235,7 +235,7 @@ pub fn lastRow(f: *const fw.Forward, r: fw.Rank, k: dsa_block.Kernels, a: dsa_bl
 /// mtp.mtp_forward's DSA block on the head's caches: `n` rows committed alone, a prompt chunk's last row, or a chain.
 pub fn head(f: *const fw.Forward, r: fw.Rank, k: dsa_block.Kernels, a: dsa_block.Layer, n: usize, nch: usize, propose: bool, last_row: bool, out: u64) !void {
     const b = r.b;
-    const one: One = .{ .c = r.st.mtp_caches, .pos = r.st.mtp_pos_dev, .host_pos = r.st.mtp_len, .owner = r.st.owner };
+    const one: One = .{ .c = r.st.mtp_caches, .pos = r.st.mtp_pos_dev, .host_pos = r.st.mtp_len, .owner = r.st.attends() };
     if (!propose) return dsa_block.commit(k, f.stream, a, one.c, b.dsa, b.normed, r.w.config.hidden, n, one.pos, one.host_pos);
     if (last_row) return lastRow(f, r, k, a, b.normed, one, n, nch, out);
     try body(f, r, k, a, b.normed, one, n, nch);
@@ -244,7 +244,7 @@ pub fn head(f: *const fw.Forward, r: fw.Rank, k: dsa_block.Kernels, a: dsa_block
 
 /// Whether any of a shared window's streams holds its latent rows on one rank.
 pub fn owned(r: fw.Rank) bool {
-    for (r.segs) |g| if (g.st.owner != null) return true;
+    for (r.segs) |g| if (g.st.attends() != null) return true;
     return false;
 }
 
@@ -262,7 +262,7 @@ pub fn shared(f: *const fw.Forward, r: fw.Rank, a: dsa_block.Layer, di: usize, r
         caches[i] = g.st.caches[di];
         pos[i] = g.st.pos_dev;
         host[i] = g.st.pos;
-        segs[i] = .{ .row0 = g.row0, .rows = g.rows, .owner = g.st.owner, .i = i };
+        segs[i] = .{ .row0 = g.row0, .rows = g.rows, .owner = g.st.attends(), .i = i };
         sparse_any = sparse_any or dsa_block.sparseRows(a, g.st.pos, g.rows);
     }
     try dsa_block.prepare(f.set(), f.stream, a, b.dsa, b.normed, r.w.config.hidden, rows, sparse_any);

@@ -420,6 +420,12 @@ pub const State = struct {
     owner: ?u32 = null, // TF_GLM_KV_SPLIT: the rank holding its latent rows, which attends for every rank (null: each)
     pages: []const u32 = &.{}, // on pages: the page ids its table holds, in row order (none while no stream holds it)
     lpages: []const u32 = &.{}, // TF_GLM_KV_SPLIT: its latent rows' places in this rank's region (none: not held here)
+    twin: bool = false, // TF_GLM_KV_SPLIT: its prompt pass's twin: every rank holds its rows and attends its own heads
+
+    /// The rank attending for every rank's heads (TF_GLM_KV_SPLIT's owner), or null: each its own (unsplit, a twin).
+    pub fn attends(st: *const State) ?u32 {
+        return if (st.twin) null else st.owner;
+    }
 
     pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, w: *const weights.Weights, capacity: usize) !State {
         return initFormat(gpa, d, w, capacity, false);

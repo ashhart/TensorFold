@@ -9,6 +9,7 @@ const types = @import("cuda_engine_types.zig");
 const Engine = @import("cuda_engine.zig").Engine;
 const kv_host = @import("cuda_kv_host.zig");
 const owned = @import("cuda_pages_owner.zig");
+const twins = @import("cuda_pages_twin.zig");
 
 /// Table entries a sequence of `capacity` rows takes.
 pub fn tableLen(capacity: usize) usize {
@@ -74,6 +75,7 @@ pub const Pages = struct {
     leader: bool,
     poison: bool, // TF_KV_POISON=1: a stream's pages start as NaN, so a row read before its write shows in the reply
     prompts: ?kp.Prompts = null, // TF_KV_SHARE: the shared prompt store over this pool (rank 0's), from the server
+    twin: twins.Twins = .{}, // TF_GLM_KV_SPLIT, rank 0: the prompt passes' twins (cuda_pages_twin.zig)
 
     /// `streams` sequences from slot 0 on `pages` pages: the engine's own (`ownSequence`) placed, the others made now.
     pub fn init(gpa: std.mem.Allocator, e: *Engine, l: kv.Layout, streams: usize, planned: usize, leader: bool) !*Pages {
@@ -115,6 +117,8 @@ pub const Pages = struct {
         errdefer gpa.free(p.leases);
         if (l.classes > 1) p.lat_ids = try gpa.alloc(u32, streams * tableLen(e.capacity));
         errdefer gpa.free(p.lat_ids);
+        if (l.classes > 1 and leader) p.twin = try .init(gpa, streams, l.classes, tableLen(e.capacity));
+        errdefer if (p.twin.on.len > 0) p.twin.deinit(gpa);
         @memset(p.leases, .{});
         p.used = try gpa.alloc(bool, streams);
         errdefer gpa.free(p.used);
@@ -197,9 +201,11 @@ pub const Pages = struct {
     /// The pool and the pages' arena; the paged sequences are the engine's (it frees every slot).
     pub fn deinit(p: *Pages) void {
         cuda.completion.drain(p.e.d, p.e.stream, "GLM page ownership did not drain");
-        for (p.leases, p.used) |*l, u| {
+        for (p.leases, p.used, 0..) |*l, u, i| {
+            if (p.leader and u) twins.drop(p, @intCast(i));
             if (p.leader and u) p.pool.finish(l) else l.ids.deinit(p.gpa);
         }
+        if (p.twin.on.len > 0) p.twin.deinit(p.gpa);
         p.gpa.free(p.leases);
         p.gpa.free(p.lat_ids);
         p.gpa.free(p.used);
@@ -236,22 +242,27 @@ pub const Pages = struct {
 
     /// `open` with the prompt cache's `adopted` pages (held for this call) first: their rows stay as the cache kept.
     pub fn openWith(p: *Pages, slot: u32, prompt: usize, max_tokens: usize, adopted: []const u32) ![]const u32 {
-        return p.openOwned(slot, prompt, max_tokens, adopted, p.pool.roomiest());
+        return p.openOwned(slot, prompt, max_tokens, adopted, p.pool.roomiest(), false);
     }
 
     /// `openWith` for a stream resuming a state kept on owner class `home`: that class when it has the pages now.
     pub fn openNear(p: *Pages, slot: u32, prompt: usize, max_tokens: usize, adopted: []const u32, home: ?u32) ![]const u32 {
         const n = need(p.layout, prompt, max_tokens);
         const near = if (home) |h| h < p.pool.classes and p.pool.availableIn(h) >= n else false;
-        return p.openOwned(slot, prompt, max_tokens, adopted, if (near) home.? else p.pool.roomiest());
+        return p.openOwned(slot, prompt, max_tokens, adopted, if (near) home.? else p.pool.roomiest(), home == null); // fresh: a twin
     }
 
     /// `open` on owner class `owner` (the harness pins it; serving takes the roomiest).
     pub fn openOn(p: *Pages, slot: u32, prompt: usize, max_tokens: usize, owner: u32) ![]const u32 {
-        return p.openOwned(slot, prompt, max_tokens, &.{}, owner);
+        return p.openOwned(slot, prompt, max_tokens, &.{}, owner, false);
     }
 
-    fn openOwned(p: *Pages, slot: u32, prompt: usize, max_tokens: usize, adopted: []const u32, owner: u32) ![]const u32 {
+    /// `openOn` with a prompt twin when the other classes have the pages: the begin step's ids (twins after its own).
+    pub fn openTwinned(p: *Pages, slot: u32, prompt: usize, max_tokens: usize, owner: u32) ![]const u32 {
+        return p.openOwned(slot, prompt, max_tokens, &.{}, owner, true);
+    }
+
+    fn openOwned(p: *Pages, slot: u32, prompt: usize, max_tokens: usize, adopted: []const u32, owner: u32, twin: bool) ![]const u32 {
         var held = adopted.len > 0;
         errdefer if (held) for (adopted) |id| p.pool.release(id);
         if (!p.paged(slot) or p.used[slot]) return error.SlotTaken;
@@ -271,7 +282,24 @@ pub const Pages = struct {
         if (adopted.len > 0) try Upload.write(&up, l.ids.items, 0);
         try p.pool.cover(l, n, .{ .ctx = &up, .write = Upload.write });
         try p.mapped(slot, l.ids.items, adopted.len);
-        return l.ids.items;
+        if (!twin or !try twins.borrow(p, slot, l.ids.items.len)) return l.ids.items;
+        errdefer twins.drop(p, slot);
+        const w = twins.wire(p, slot, l.ids.items);
+        try twins.map(p, slot, try twins.mine(p, w, owner));
+        return w;
+    }
+
+    /// Another rank: rank 0's begin step for `slot`; `twinned`, its ids then each other class's twin of them.
+    pub fn mapBegin(p: *Pages, slot: u32, ids: []const u32, kept: usize, owner: u32, twinned: bool) !void {
+        if (!twinned) return p.mapOwned(slot, ids, kept, owner);
+        const mine = try twins.mine(p, ids, owner);
+        try p.mapOwned(slot, ids[0 .. ids.len / p.pool.classes], kept, owner);
+        try twins.map(p, slot, mine);
+    }
+
+    /// Before `slot`'s first decode round, on every rank: its twin back (none: nothing).
+    pub fn giveTwin(p: *Pages, slot: u32) !void {
+        return twins.giveBack(p, slot);
     }
 
     /// Another rank: paged slot `slot` maps rank 0's page ids (its begin step's), the prompt cache's `kept` first.
@@ -319,12 +347,14 @@ pub const Pages = struct {
         st.capacity = 0;
         st.owner = null;
         st.lpages = &.{};
+        st.twin = false;
         p.used[slot] = false;
         if (kv_host.active) |*g| g.invalidate(p.e.stream) catch {};
         if (!p.leader) {
             p.leases[slot].owner = 0;
             return p.leases[slot].ids.clearRetainingCapacity();
         }
+        twins.drop(p, slot); // a stream that ends in its prompt pass gives its twin back with its pages
         p.pool.finish(&p.leases[slot]);
         for (p.used) |u| if (u) return;
         p.report();
