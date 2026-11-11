@@ -7,6 +7,8 @@ const routes = @import("routes.zig");
 const manifest = @import("benchmark_manifest.zig");
 const Server = @import("server.zig").Server;
 const Conn = @import("http_conn.zig").Conn;
+const Metrics = @import("metrics.zig").Metrics;
+const stats_snapshot = @import("stats_snapshot.zig");
 const Value = json.Value;
 const Allocator = std.mem.Allocator;
 
@@ -231,41 +233,37 @@ pub fn stats(srv: *Server, conn: *Conn, a: Allocator) void {
     const drafted = srv.metrics.drafted;
     const accepted = srv.metrics.accepted;
     const rounds = srv.metrics.rounds;
+    const cached = srv.metrics.cached;
+    const median_latency_ms = medianMs(srv.metrics.latency);
+    const median_ttft_ms = medianMs(srv.metrics.ttft);
     srv.metrics.mutex.unlock(srv.io);
-    const body = statsSnapshot(a, status, memory, prompt, generation, drafted, accepted, rounds) catch return;
+    var preemptions: u64 = 0;
+    var requeued: u64 = 0;
+    var work: ?api.load_ledger.Work = null;
+    const snap = srv.load.read();
+    if (snap.requests != null) {
+        preemptions = snap.requests.?.requeued + snap.requests.?.yields;
+        requeued = snap.requests.?.requeued;
+        work = snap.work;
+    }
+    const body = stats_snapshot.statsSnapshot(a, status, memory, prompt, generation, drafted, accepted, rounds, cached, preemptions, requeued, work, srv.config.served_name, srv.config.identity.version, srv.config.identity.backend, srv.config.identity.device, median_latency_ms, median_ttft_ms) catch return;
     conn.quiet_log = true;
     routes.sendValue(conn, a, 200, body);
 }
 
-pub fn statsSnapshot(a: Allocator, status: api.Status, memory: ?api.Memory, prompt: u64, generation: u64, drafted: u64, accepted: u64, rounds: u64) Allocator.Error!Value {
-    const o = try json.newObject(a);
-    try o.put(a, "running", try json.intValue(a, status.running));
-    try o.put(a, "waiting", try json.intValue(a, status.waiting));
-    try o.put(a, "decode_tokens_per_second", .{ .float = status.decode_tokens_per_second });
-    try o.put(a, "prefill_tokens_per_second", .{ .float = status.prefill_tokens_per_second });
-    try o.put(a, "generation_tokens_running", try json.intValue(a, status.generation_tokens));
-    if (status.fill_prompt_tokens != null) {
-        try o.put(a, "fill_prompt_tokens", try json.intValue(a, status.fill_prompt_tokens.?));
-        try o.put(a, "fill_tokens_left", try json.intValue(a, status.fill_tokens_left orelse 0));
-        try o.put(a, "fill_run", try json.intValue(a, status.fill_run));
-    } else if (status.fill_unknown) {
-        try o.put(a, "fill_unknown", .{ .bool = true }); // prefilling, but this backend reports no progress
-        try o.put(a, "fill_run", try json.intValue(a, status.fill_run));
+// A histogram's median in ms: the bucket edge half the observations fall under (+Inf is not reported).
+fn medianMs(h: @import("metrics.zig").Histogram) ?f64 {
+    if (h.n == 0) return null;
+    const half = (h.n + 1) / 2;
+    var seen: u64 = 0;
+    for (h.counts, 0..) |count, i| {
+        seen += count;
+        if (seen >= half) {
+            if (i < @import("metrics.zig").buckets.len) return @import("metrics.zig").buckets[i] * 1000;
+            return null;
+        }
     }
-    try o.put(a, "prompt_tokens_total", try json.intValue(a, prompt));
-    try o.put(a, "generation_tokens_total", try json.intValue(a, generation));
-    try o.put(a, "mtp_drafted_total", try json.intValue(a, drafted));
-    try o.put(a, "mtp_accepted_total", try json.intValue(a, accepted));
-    try o.put(a, "decode_rounds_total", try json.intValue(a, rounds));
-    const mem = try json.newObject(a);
-    if (memory) |m| {
-        try mem.put(a, "active", try json.intValue(a, m.active));
-        try mem.put(a, "cache", try json.intValue(a, m.cache));
-        try mem.put(a, "peak", try json.intValue(a, m.peak));
-        if (m.limit) |limit| try mem.put(a, "limit", try json.intValue(a, limit));
-    }
-    try o.put(a, "memory", .{ .object = mem });
-    return .{ .object = o };
+    return null;
 }
 
 const dashboard_page = @embedFile("dashboard.html");
@@ -329,59 +327,6 @@ test "model discovery names a default effort only when the server was started wi
     const started = try reasoningValue(a, false, true, "low", &levels);
     try std.testing.expectEqualStrings("low", started.get("default_effort").?.string);
     try std.testing.expect(!started.get("default_enabled").?.bool);
-}
-
-test "stats snapshot exposes counters and omits unknown memory" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const value = try statsSnapshot(arena.allocator(), .{ .running = 1, .generation_tokens = 2 }, null, 3, 4, 5, 6, 7);
-    const object = value.object;
-    for ([_][]const u8{ "running", "waiting", "generation_tokens_running", "prompt_tokens_total", "generation_tokens_total", "mtp_drafted_total", "mtp_accepted_total", "decode_rounds_total", "memory" }) |key|
-        try std.testing.expect(object.contains(key));
-    try std.testing.expectEqual(@as(usize, 0), object.get("memory").?.object.count());
-    try std.testing.expect(object.get("fill_prompt_tokens") == null); // no fill in progress: the keys stay out
-}
-
-test "stats snapshot carries the filling prompt's tokens while a prefill runs" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const status: api.Status = .{ .fill_prompt_tokens = 900, .fill_tokens_left = 300 };
-    const value = try statsSnapshot(arena.allocator(), status, null, 0, 0, 0, 0, 0);
-    const object = value.object;
-    try std.testing.expectEqual(@as(i64, 900), object.get("fill_prompt_tokens").?.int64().?);
-    try std.testing.expectEqual(@as(i64, 300), object.get("fill_tokens_left").?.int64().?);
-}
-test "stats snapshot marks an unknown-progress fill without counters" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const status: api.Status = .{ .fill_unknown = true, .fill_run = 7 };
-    const value = try statsSnapshot(arena.allocator(), status, null, 0, 0, 0, 0, 0);
-    const object = value.object;
-    try std.testing.expect(object.get("fill_unknown").?.bool);
-    try std.testing.expectEqual(@as(i64, 7), object.get("fill_run").?.int64().?);
-    try std.testing.expect(object.get("fill_prompt_tokens") == null); // no counters: the keys stay out
-}
-
-test "stats snapshot's memory carries a configured limit and omits none" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const with = try statsSnapshot(
-        arena.allocator(),
-        .{},
-        .{ .active = 5, .cache = 1, .peak = 9, .pinned = 2, .limit = 100 },
-        0,
-        0,
-        0,
-        0,
-        0,
-    );
-    const memory = with.object.get("memory").?.object;
-    try std.testing.expectEqual(@as(i64, 5), memory.get("active").?.int64().?);
-    try std.testing.expectEqual(@as(i64, 9), memory.get("peak").?.int64().?);
-    try std.testing.expectEqual(@as(i64, 100), memory.get("limit").?.int64().?);
-    const without = try statsSnapshot(arena.allocator(), .{}, .{ .active = 5, .peak = 9 }, 0, 0, 0, 0, 0);
-    // no limit configured: the key stays out
-    try std.testing.expect(without.object.get("memory").?.object.get("limit") == null);
 }
 
 test "model discovery respects the loaded engine's reasoning refusal despite template markers" {

@@ -37,7 +37,7 @@ pub fn resumedWithReason(s: *pc.Store, e: *pc.Entry, prompt: []const u32, failur
         return;
     }
     s.clock += 1;
-    e.used = s.clock;
+    e.used = e.seen.hit(s.clock);
     const branch = @import("prompt_cache_policy.zig").continuedLater(s, e) and !std.mem.eql(u32, prompt, e.last);
     e.branched = e.branched or branch; // an identical re-send adds no branch
     s.counts.hits += 1;
