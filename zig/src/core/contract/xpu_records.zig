@@ -10,7 +10,7 @@ pub const Record = struct { launch: X, usage: [limits.xe.len]U, compiled: bool =
 
 const glue = limits.Format.native;
 
-/// The six Qwen3.8-27B glue kernels that register first: row arithmetic, a stated rule and a row copy.
+/// The eight Qwen3.8-27B glue kernels that register first: row arithmetic, stated rules and a row copy.
 pub const records = [_]Record{
     .{
         .launch = .{ .name = "add_rmsnorm", .symbol = "add_rmsnorm", .image = "glue", .format = glue, .threads = .{ 128, 1, 1 }, .slm = 10272, .sub_group = 16, .grf = 256 },
@@ -31,6 +31,14 @@ pub const records = [_]Record{
     .{
         .launch = .{ .name = "argmax", .symbol = "argmax", .image = "glue", .format = glue, .threads = .{ 256, 1, 1 }, .slm = 2048, .sub_group = 16, .grf = 256 },
         .usage = .{.{ .threads = .{ 256, 1, 1 }, .slm = 2048, .sub_group = 16, .grf = 256 }},
+    },
+    .{
+        .launch = .{ .name = "topk_part", .symbol = "topk_part", .image = "glue", .format = glue, .threads = .{ 256, 1, 1 }, .slm = 192, .sub_group = 16, .grf = 256 },
+        .usage = .{.{ .threads = .{ 256, 1, 1 }, .slm = 192, .sub_group = 16, .grf = 256 }},
+    },
+    .{
+        .launch = .{ .name = "topk_merge", .symbol = "topk_merge", .image = "glue", .format = glue, .threads = .{ 256, 1, 1 }, .slm = 192, .sub_group = 16, .grf = 256 },
+        .usage = .{.{ .threads = .{ 256, 1, 1 }, .slm = 192, .sub_group = 16, .grf = 256 }},
     },
     .{
         .launch = .{ .name = "embed", .symbol = "embed", .image = "glue", .format = glue, .threads = .{ 256, 1, 1 }, .sub_group = 16, .grf = 256 },
