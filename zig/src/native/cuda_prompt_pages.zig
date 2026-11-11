@@ -173,6 +173,41 @@ test "TF_KV_SHARE's adapter: a kept prompt's pages resume a later one, adopted; 
     try testing.expect(f.prompts == null and f.pool.idle() and f.pool.available() == 8);
 }
 
+test "TF_KV_SHARE's adapter: a picture under the same key words reaches the store, so text pages share and image pages don't" {
+    var f: Fake = .{ .pool = try kv.Pool.init(testing.allocator, 8, 1) };
+    defer f.pool.deinit();
+    const x = (try Adapter.open(Fake, testing.allocator, &f, 4, 4)).?;
+    defer x.close();
+    const p = f.prompts.?;
+    const prompt = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 }; // rows 4..8 an image's, its key words alike for any picture
+    const a = [_]hooks.Image{.{ .at = 4, .tokens = 4, .gh = 2, .gw = 2, .hash = 0xa }};
+    const b = [_]hooks.Image{.{ .at = 4, .tokens = 4, .gh = 2, .gw = 2, .hash = 0xb }};
+    var qa: hooks.Query = .of(&prompt);
+    qa.images = &a;
+    var qb: hooks.Query = .of(&prompt);
+    qb.images = &b;
+    var la: kv.Lease = .{};
+    defer f.pool.finish(&la);
+    try f.pool.promise(&la, 2);
+    try f.pool.cover(&la, 2, null);
+    var lb: kv.Lease = .{};
+    defer f.pool.finish(&lb);
+    try f.pool.promise(&lb, 2);
+    try f.pool.cover(&lb, 2, null);
+    var path: [2]u32 = undefined;
+    var owner: u8 = 0;
+    try testing.expectEqual(@as(usize, 2), p.keep(qa, 8, &owner, la.ids.items, &path));
+    try testing.expectEqual(@as(usize, 2), p.keep(qb, 8, &owner, lb.ids.items, &path));
+    try testing.expectEqual(la.ids.items[0], path[0]); // the text page: a's
+    try testing.expectEqual(lb.ids.items[1], path[1]); // the image's page: b's own
+    var adopt: std.ArrayList(u32) = .empty;
+    defer adopt.deinit(testing.allocator);
+    const plan = try p.begin(qa, 10, &.{}, &owner, &adopt); // a again resumes a's pages
+    defer p.free(plan.marks);
+    try testing.expectEqualSlices(u32, la.ids.items, adopt.items);
+    for (adopt.items) |id| f.pool.release(id);
+}
+
 test "TF_KV_SHARE: a state past the unpaged cache's whole budget names it where the family on pages could keep it" {
     const l: kv.Layout = .{ .fixed_bytes = 0, .token_bytes = 1, .page_tokens = 4, .snap_bytes = 0 };
     const paged: struct { layout: ?kv.Layout } = .{ .layout = l };
