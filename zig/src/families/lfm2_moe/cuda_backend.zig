@@ -176,6 +176,11 @@ pub const Lfm = struct {
         snap.drop(x.gpa, &x.snaps.?, k);
     }
 
+    /// Before the prompt stream writes a slot's caches: the keeps' copies queued so far land first (a draw needn't).
+    fn settle(x: *Lfm) !void {
+        if (x.snaps) |*p| try p.fence(x.s);
+    }
+
     fn snapPages(x: *Lfm) !*snap.Pages {
         return if (x.snaps) |*p| p else error.NoSnapshotCache;
     }
@@ -240,6 +245,7 @@ pub const Lfm = struct {
             l.sampled = true;
         };
         s.cached = 0;
+        try x.settle();
         try x.m.clearSlot(x.s, l.slot);
         l.fill = x.resumeAt(s, l, p.len);
         s.fill_at.store(@intCast(l.fill.?), .monotonic);
@@ -275,6 +281,7 @@ pub const Lfm = struct {
         const done = c.end == p.len;
         var rows: [mdl.max_taps]usize = undefined;
         for (c.taps(), 0..) |t, j| rows[j] = t - at - 1;
+        try x.settle();
         try fwd.forward(x.m, x.k, x.s, &.{.{ .slot = l.slot, .p0 = at, .tokens = p[at..c.end], .taps = rows[0..c.n] }}, true, c.end - at - 1, @intFromBool(done));
         if (done) try x.d.check(x.d.api.cuMemcpyDtoDAsync_v2(l.last, x.m.s.logits, cfg.vocab * 2, x.s.handle), "cuMemcpyDtoDAsync");
         s.fill_at.store(@intCast(c.end), .monotonic);
@@ -362,6 +369,7 @@ pub const Lfm = struct {
         const l = x.lanes.getPtr(s) orelse return error.UnknownStream;
         const t = try x.value(feed);
         if (position != l.len + 1) return error.PositionMismatch;
+        try x.settle();
         try fwd.forward(x.m, x.k, x.s, &.{.{ .slot = l.slot, .p0 = l.len, .tokens = &.{t} }}, false, 0, 1);
         l.len += 1;
         const h = x.next;
@@ -398,6 +406,7 @@ pub const Lfm = struct {
             total += l.rows.items.len;
         }
         if (total > round_rows) return error.RoundTooWide;
+        try x.settle();
         try fwd.forward(x.m, x.k, x.s, chains, false, 0, total);
         var at: usize = 0;
         for (windows, 0..) |w, i| {
@@ -431,6 +440,7 @@ pub const Lfm = struct {
             slots[i] = @intCast(l.slot);
             rows[i] = @intCast(l.row0 + path.len - 1); // the conv states after the last kept row
         }
+        try x.settle();
         try fwd.commit(x.m, x.k, x.s, slots[0..windows.len], rows[0..windows.len]);
     }
 
