@@ -7,6 +7,7 @@ const draw = @import("cuda_mtp_draw.zig");
 const wt = @import("cuda_prompt_wt.zig");
 
 pub const Device = struct {
+    pub var batch_host: [@import("cuda_draw_batch.zig").bytes]u8 align(8) = undefined;
     pub var best: [4]f32 = undefined;
     pub var reductions: []const [4]f32 = &.{};
     pub var vals: []const u16 = &.{ 0x3f80, 0 };
@@ -21,7 +22,11 @@ pub const Device = struct {
     pub var best_calls: usize = 0;
     pub var best_bytes: usize = 0;
     pub var pending: bool = false;
-    pub const Event = enum { best, topk, wait, read_best, read_vals, read_cols, read_row };
+    pub var top_k: usize = 0;
+    pub var single_vals: ?[]const u16 = null;
+    pub var single_cols: ?[]const i32 = null;
+    pub var reads: usize = 0;
+    pub const Event = enum { best, topk, wait, read_best, read_vals, read_cols, read_row, read_batch };
     pub var events: [512]Event = undefined;
     pub var events_n: usize = 0;
 
@@ -37,6 +42,7 @@ pub const Device = struct {
         best_calls = 0;
         best_bytes = 0;
         pending = false;
+        reads = 0;
         events_n = 0;
     }
     fn launch(f: cuda.abi.Function, gx: u32, _: u32, _: u32, _: u32, _: u32, _: u32, _: u32, _: cuda.abi.Stream, args: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) c_int {
@@ -48,7 +54,10 @@ pub const Device = struct {
             event(.best);
             sources[best_calls] = std.mem.bytesToValue(u64, @as([*]const u8, @ptrCast(args.?[0].?))[0..8]);
             best_calls += 1;
-        } else event(.topk);
+        } else {
+            event(.topk);
+            top_k = @intCast(std.mem.bytesToValue(c_int, @as([*]const u8, @ptrCast(args.?[3].?))[0..4]));
+        }
         return 0;
     }
     fn wait(_: cuda.abi.Stream) callconv(.c) c_int {
@@ -58,23 +67,34 @@ pub const Device = struct {
         return 0;
     }
     fn read(dst: ?*anyopaque, src: u64, n: usize) callconv(.c) c_int {
+        reads += 1;
         std.debug.assert(!pending);
         const bytes = @as([*]u8, @ptrCast(dst.?))[0..n];
         const tv = 0x1000 + mtp.max_rows * 16;
         const tc = tv + mtp.max_rows * draw.topk_max * 2;
-        if (src == 0x1000) {
+        if (src == 0x9000) {
+            event(.read_batch);
+            const b = @import("cuda_draw_batch.zig");
+            std.debug.assert(n == b.bytes);
+            @memset(bytes, 0);
+            for (0..b.rows_max) |i| @memcpy(bytes[i * 16 ..][0..16], std.mem.asBytes(if (reductions.len > i) &reductions[i] else &best));
+            @memcpy(bytes[b.vals_at..][0 .. vals.len * 2], std.mem.sliceAsBytes(vals));
+            @memcpy(bytes[b.cols_at..][0 .. cols.len * 4], std.mem.sliceAsBytes(cols));
+        } else if (src == 0x1000) {
             event(.read_best);
             best_bytes = n;
             std.debug.assert(n % 16 == 0);
             for (0..n / 16) |i| @memcpy(bytes[i * 16 ..][0..16], std.mem.asBytes(if (reductions.len > i) &reductions[i] else &best));
         } else if (src == tv) {
             event(.read_vals);
-            std.debug.assert(n <= vals.len * 2);
-            @memcpy(bytes, std.mem.sliceAsBytes(vals)[0..n]);
+            const v = if (single_vals) |v| (if (n <= v.len * 2) v else vals) else vals;
+            std.debug.assert(n <= v.len * 2);
+            @memcpy(bytes, std.mem.sliceAsBytes(v)[0..n]);
         } else if (src == tc) {
             event(.read_cols);
-            std.debug.assert(n <= cols.len * 4);
-            @memcpy(bytes, std.mem.sliceAsBytes(cols)[0..n]);
+            const v = if (single_cols) |v| (if (n <= v.len * 4) v else cols) else cols;
+            std.debug.assert(n <= v.len * 4);
+            @memcpy(bytes, std.mem.sliceAsBytes(v)[0..n]);
         } else if (src == 0x3000 and n <= head_row.len * 2) {
             event(.read_row);
             @memcpy(bytes, std.mem.sliceAsBytes(head_row)[0..n]);
@@ -100,6 +120,8 @@ pub const Device = struct {
         d.api.cuMemcpyDtoH_v2 = read;
         d.api.cuCtxGetDevice = context;
         d.api.cuDeviceGetAttribute = attribute;
+        single_vals = null;
+        single_cols = null;
         reductions = &.{};
         vals = &.{ 0x3f80, 0 };
         cols = &.{ 0, 1 };
@@ -137,6 +159,7 @@ pub fn head(d: *cuda.Driver) !mtp.Head {
     h.artifact = try core.proposal_vocab.legacy.artifact(gpa, &.{ 0, 3, 7 }, .{ .vocab = wt.vocab, .hidden = wt.dims, .format = "bf16", .group = 0, .scale_recipe = "fixture" });
     h.ids = h.artifact.ids();
     h.service = try @import("lanes").proposal_head.Service.legacy(gpa, &h.artifact);
+    h.draw_batch = .{ .device = .{ .d = d, .ptr = 0x9000, .len = @import("cuda_draw_batch.zig").bytes }, .host = &Device.batch_host, .on = true };
     h.best_fn = .{ .d = d, .handle = @ptrFromInt(1) };
     h.topk_fn = .{ .d = d, .handle = @ptrFromInt(2) };
     return h;

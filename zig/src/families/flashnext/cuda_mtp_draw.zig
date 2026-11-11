@@ -94,7 +94,7 @@ pub fn pickHead(h: *const mtp.Head, st: cuda.Stream, gpa: std.mem.Allocator, d: 
 }
 
 /// A verify failure names its own row; the head's stream activations are not a verify input capture.
-fn badVerify(d: *const mtp.Draft, row: usize, best: ?[4]f32, row_ok: ?bool, masked: bool) void {
+pub fn badVerify(d: *const mtp.Draft, row: usize, best: ?[4]f32, row_ok: ?bool, masked: bool) void {
     const top: ?f32 = if (best) |b| b[0] else null;
     const lse: ?f32 = if (best) |b| b[1] else null;
     std.debug.print("Flash Next ProposalNonfinite stream={s} kind=verify row={d} rows={d} len={d} cap={d} top={?} lse={?} cache={s} input=not_captured scores={s} row_finite={?}\n", .{ d.label, row, d.rows, d.len, d.cap, top, lse, if (d.pooled_lane) "pool" else "own", if (masked) "masked" else "raw", row_ok });
@@ -126,9 +126,7 @@ pub fn draws(h: *const mtp.Head, st: cuda.Stream, gpa: std.mem.Allocator, d: *mt
         const c = try candidates(h, st, d, d.logits.ptr, vocab, vocab, n, k);
         for (pending[0..n], 0..) |*t, r| t.* = drawTopk(gpa, c.vals[r * k ..][0..k], c.cols[r * k ..][0..k], null, d.fed0 + 1 + r, s) catch |err| {
             if (err == error.ProposalNonfinite) {
-                try h.best(st, d.logits.ptr, vocab, vocab, n, d.best.ptr);
-                try download(st, std.mem.sliceAsBytes(d.best_host[0 .. 4 * n]), d.best.ptr);
-                badVerify(d, r, d.best_host[r * 4 ..][0..4].*, null, false);
+                try badCandidates(h, st, d, r);
             }
             return err;
         };
@@ -166,4 +164,11 @@ fn copyReady(st: cuda.Stream, dst: []u8, src: u64) !void {
 fn download(st: cuda.Stream, dst: []u8, src: u64) !void {
     try st.synchronize();
     try copyReady(st, dst, src);
+}
+
+/// Diagnostic reductions are only queued after a top-k sentinel refuses a verify row.
+pub fn badCandidates(h: *const mtp.Head, st: cuda.Stream, d: *mtp.Draft, row: usize) !void {
+    try h.best(st, d.logits.ptr, vocab, vocab, d.rows, d.best.ptr);
+    try download(st, std.mem.sliceAsBytes(d.best_host[0 .. 4 * d.rows]), d.best.ptr);
+    badVerify(d, row, d.best_host[row * 4 ..][0..4].*, null, false);
 }

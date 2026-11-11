@@ -178,6 +178,11 @@ pub fn Ops(comptime Tri: type) type {
             return draw.pick(h, o.stream(), o.e.gpa, d, d.best_host[0..4].*, position, sm, false);
         }
 
+        /// One shared verify group completes its reductions before drawing in stream order.
+        pub fn drawsMany(o: Self, scores: u64, ds: []const *Draft, sms: []const ?Sampling, masks: []const []const u32, outs: []const []u32) !void {
+            return @import("cuda_draw_batch.zig").drawsMany(o.h, o.stream(), o.e.gpa, scores, ds, sms, masks, outs);
+        }
+
         /// Python decode.draft: absorb the kept rows, then chain up to `count` drafts under mtp.Stop, the first kept.
         pub fn draft(o: Self, d: *Draft, next: []const u32, rows: u64, position: u64, count: usize, sm: ?Sampling, confidence: f64, out: *Chain) !void {
             out.n = 0;
