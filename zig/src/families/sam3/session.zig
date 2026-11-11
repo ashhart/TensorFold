@@ -6,9 +6,10 @@ const tracker = @import("tracker.zig");
 const memory = @import("memory.zig");
 const prompts = @import("prompts.zig");
 const slots = @import("slots.zig");
+const profile = @import("profile.zig");
 
 pub const Direction = enum { forward, reverse };
-pub const Options = struct { max_objects: usize = 16, frame_count: usize, direction: Direction = .forward };
+pub const Options = struct { max_objects: usize = 16, frame_count: usize, direction: Direction = .forward, profile: bool = false };
 pub const Seed = struct { id: slots.ObjectId, prompt: prompts.Prompt };
 pub const TrackedMask = struct { id: slots.ObjectId, mask: model.Mask };
 pub const Prediction = struct {
@@ -39,6 +40,7 @@ pub const Session = struct {
     features: ?[3]ops.Feature = null,
     interactive: ?[3]ops.Feature = null,
     trunk: ?ops.Feature = null,
+    last_profile: profile.Frame = .{},
 
     pub fn init(allocator: std.mem.Allocator, loaded: *model.Model, options: Options) !Session {
         if (options.frame_count == 0) return error.EmptyVideo;
@@ -96,9 +98,16 @@ pub const Session = struct {
         ?[3]ops.Feature,
         ?ops.Feature,
     } {
-        const trunk = try model.encodeTrunk(&self.r, image);
+        const prepare_start = profile.Stamp.take(self.r.g, self.options.profile);
+        const input = try model.prepareImage(&self.r, image);
+        prepare_start.record(self.r.g, self.options.profile, &self.last_profile.preprocess);
+        const trunk_start = profile.Stamp.take(self.r.g, self.options.profile);
+        const trunk = try vision.trunk(&self.r, input);
+        trunk_start.record(self.r.g, self.options.profile, &self.last_profile.trunk);
+        const pyramid_start = profile.Stamp.take(self.r.g, self.options.profile);
         const propagation = try vision.pyramid(&self.r, trunk, self.model.config.pyramidPrefix(false));
         const interactive: ?[3]ops.Feature = if (self.model.config.version == .sam3) propagation else if (needs_interactive) try vision.pyramid(&self.r, trunk, self.model.config.pyramidPrefix(true)) else null;
+        pyramid_start.record(self.r.g, self.options.profile, &self.last_profile.pyramid);
         return .{ propagation, interactive, if (interactive == null) trunk else null };
     }
 
@@ -160,15 +169,18 @@ pub const Session = struct {
         defer self.r.a = self.allocator;
         self.clear();
         errdefer self.clear();
+        self.last_profile = .{};
         self.size = image.size;
         const features, const interactive, const trunk = try self.encode(image, true);
         const per_object = try self.r.a.alloc(?tracker.Result, self.objects.ids.len);
         @memset(per_object, null);
+        const seed_start = profile.Stamp.take(self.r.g, self.options.profile);
         for (seeds) |item| {
             const slot = try self.objects.add(item.id);
             per_object[slot.bucket * self.model.config.bucket_size + slot.slot] =
                 try tracker.seed(&self.r, interactive.?, item.prompt, image.size);
         }
+        seed_start.record(self.r.g, self.options.profile, &self.last_profile.tracker);
         const results = try self.r.a.alloc(?tracker.Result, self.buckets.len);
         const memories = try self.r.a.alloc(?memory.Memory, self.buckets.len);
         @memset(results, null);
@@ -178,13 +190,20 @@ pub const Session = struct {
             if (bits == 0) continue;
             try bucket.history.ensureUnusedCapacity(self.allocator, 1);
             const first = b * self.model.config.bucket_size;
+            const combine_start = profile.Stamp.take(self.r.g, self.options.profile);
             results[b] = try combine(&self.r, per_object[first..@min(first + self.model.config.bucket_size, per_object.len)]);
+            combine_start.record(self.r.g, self.options.profile, &self.last_profile.tracker);
             const from_points = self.model.config.version == .sam31 or
                 seeds[b].prompt.points.len != 0 or seeds[b].prompt.boxes.len != 0;
+            const memory_start = profile.Stamp.take(self.r.g, self.options.profile);
             memories[b] = try memory.encode(&self.r, features[2].tensor, results[b].?, bits, bits, from_points, index);
+            memory_start.record(self.r.g, self.options.profile, &self.last_profile.memory);
         }
+        const readback_start = profile.Stamp.take(self.r.g, self.options.profile);
         var output = try self.snapshot(allocator, index, results);
         errdefer output.deinit();
+        readback_start.record(self.r.g, self.options.profile, &self.last_profile.readback);
+        const state_start = profile.Stamp.take(self.r.g, self.options.profile);
         self.r.trim(0, try self.retained(features, interactive, trunk, results, memories));
         for (self.buckets, 0..) |*bucket, b| {
             bucket.last = results[b];
@@ -194,6 +213,7 @@ pub const Session = struct {
         self.features = features;
         self.interactive = interactive;
         self.trunk = trunk;
+        state_start.record(self.r.g, self.options.profile, &self.last_profile.state);
         return output;
     }
 
@@ -209,6 +229,7 @@ pub const Session = struct {
         defer self.r.a = self.allocator;
         const start = self.r.mark();
         errdefer self.r.trim(start, &.{});
+        self.last_profile = .{};
         const features, const interactive, const trunk = try self.encode(image, false);
         const results = try self.r.a.alloc(?tracker.Result, self.buckets.len);
         const memories = try self.r.a.alloc(?memory.Memory, self.buckets.len);
@@ -218,11 +239,18 @@ pub const Session = struct {
             const bits = self.active(b);
             if (bits == 0) continue;
             try bucket.history.ensureUnusedCapacity(self.allocator, 1);
+            const tracker_start = profile.Stamp.take(self.r.g, self.options.profile);
             results[b] = try tracker.propagate(&self.r, features, bucket.history.items, index, self.options.frame_count, bits);
+            tracker_start.record(self.r.g, self.options.profile, &self.last_profile.tracker);
+            const memory_start = profile.Stamp.take(self.r.g, self.options.profile);
             memories[b] = try memory.encode(&self.r, features[2].tensor, results[b].?, bits, 0, false, index);
+            memory_start.record(self.r.g, self.options.profile, &self.last_profile.memory);
         }
+        const readback_start = profile.Stamp.take(self.r.g, self.options.profile);
         var output = try self.snapshot(allocator, index, results);
         errdefer output.deinit();
+        readback_start.record(self.r.g, self.options.profile, &self.last_profile.readback);
+        const state_start = profile.Stamp.take(self.r.g, self.options.profile);
         self.r.trim(start, try self.retained(features, interactive, trunk, results, memories));
         self.releaseFeatures();
         for (self.buckets, 0..) |*bucket, b| {
@@ -246,6 +274,7 @@ pub const Session = struct {
         self.features = features;
         self.interactive = interactive;
         self.trunk = trunk;
+        state_start.record(self.r.g, self.options.profile, &self.last_profile.state);
         return output;
     }
 

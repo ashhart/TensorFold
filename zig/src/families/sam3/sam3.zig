@@ -4,6 +4,7 @@ pub const slots = @import("slots.zig");
 pub const checkpoint = @import("checkpoint.zig");
 pub const kernel_checks = @import("kernel_checks.zig");
 pub const comparison = @import("comparison.zig");
+pub const profile = @import("profile.zig");
 pub const model = @import("model.zig");
 pub const session = @import("session.zig");
 pub const Session = session.Session;
@@ -22,6 +23,7 @@ test {
     _ = slots;
     _ = checkpoint;
     _ = comparison;
+    _ = @import("mask.zig");
     _ = session;
     _ = @import("tracker.zig");
 }

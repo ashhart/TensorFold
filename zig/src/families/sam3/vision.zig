@@ -1,5 +1,4 @@
-// SAM 3.1 architecture, adapted from facebookresearch/sam3.
-// Copyright (c) Meta Platforms, Inc. and affiliates. See LICENSES/SAM.txt.
+// Adapted from facebookresearch/sam3; Copyright (c) Meta Platforms, Inc. and affiliates. See LICENSES/SAM.txt.
 const std = @import("std");
 const gpu = @import("tensor_metal");
 const ops = @import("ops.zig");

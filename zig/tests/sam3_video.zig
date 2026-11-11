@@ -2,6 +2,8 @@ const std = @import("std");
 const sam = @import("sam3");
 const st = @import("safetensors");
 const clock = @import("metal").clock;
+const Capture = @import("sam3_capture.zig").Capture;
+const receipt = @import("sam3_receipt.zig");
 
 pub fn main(init: std.process.Init) !void {
     const a = init.arena.allocator();
@@ -11,6 +13,7 @@ pub fn main(init: std.process.Init) !void {
             \\tf-sam3-video CHECKPOINT FRAMES OUTPUT_PREFIX --point ID X Y | --box ID X0 Y0 X1 Y1 | --seed-reference MASKS
             \\  --start N --frames N --reverse --fp32 --exercise-lifecycle
             \\  --reference MASKS --min-frame-iou N --min-mean-iou N
+            \\  --raw-masks FILE.safetensors --benchmark FILE.json --warmup N
             \\Reference comparisons exclude the seed frame and require one unchanged object.
             \\Default: exact binary masks. Approximate comparisons require --min-frame-iou.
             \\
@@ -26,6 +29,9 @@ pub fn main(init: std.process.Init) !void {
     var fp32 = false;
     var reference_path: ?[]const u8 = null;
     var seed_path: ?[]const u8 = null;
+    var raw_path: ?[]const u8 = null;
+    var benchmark_path: ?[]const u8 = null;
+    var warmup: usize = 0;
     var gate = sam.comparison.Gate{};
     var i: usize = 4;
     while (i < args.len) {
@@ -64,10 +70,11 @@ pub fn main(init: std.process.Init) !void {
             if (i == args.len) return error.MissingArgument;
             const value = args[i];
             i += 1;
-            if (std.mem.eql(u8, flag, "--start")) start = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, flag, "--frames")) count = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, flag, "--seed-reference")) seed_path = value else if (std.mem.eql(u8, flag, "--reference")) reference_path = value else if (!try gate.set(flag, value)) return error.UnknownArgument;
+            if (std.mem.eql(u8, flag, "--start")) start = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, flag, "--frames")) count = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, flag, "--warmup")) warmup = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, flag, "--seed-reference")) seed_path = value else if (std.mem.eql(u8, flag, "--reference")) reference_path = value else if (std.mem.eql(u8, flag, "--raw-masks")) raw_path = value else if (std.mem.eql(u8, flag, "--benchmark")) benchmark_path = value else if (!try gate.set(flag, value)) return error.UnknownArgument;
         }
     }
     if (count == 0) return error.EmptyVideo;
+    if (warmup >= count or (warmup != 0 and benchmark_path == null)) return error.InvalidWarmup;
     var file = try st.File.open(init.gpa, init.io, args[2]);
     defer file.close(init.io);
     const frames = file.get("frames") orelse return error.MissingFramesTensor;
@@ -95,6 +102,7 @@ pub fn main(init: std.process.Init) !void {
         } } });
     }
     if (seeds.items.len == 0) return error.EmptyPrompt;
+    if (benchmark_path != null and exercise) return error.LifecycleTimingRequiresSeparateRuns;
     const comparison_path = reference_path orelse seed_path;
     try sam.comparison.validateVideo(comparison_path != null, count, seeds.items.len, exercise, gate);
     if (comparison_path) |path| {
@@ -102,6 +110,13 @@ pub fn main(init: std.process.Init) !void {
         const masks = reference.?.get("masks") orelse return error.MissingMasks;
         if (!masks.is(.u8, &.{ frames.dim(0), height, width })) return error.BadReferenceShape;
     }
+    const identity: ?receipt.Identity = if (benchmark_path != null) try receipt.Identity.load(a, init.io, args[1], frames.bytes, seeds.items) else null;
+    const ids = try a.alloc(u64, seeds.items.len);
+    for (seeds.items, ids) |seed, *id| id.* = seed.id;
+    var capture: ?Capture = if (raw_path) |path| try Capture.create(a, init.io, .cwd(), path, ids, .{ .width = width, .height = height }, count, start, reverse) else null;
+    defer if (capture) |*output| output.deinit(init.io);
+    const samples: []receipt.Sample = if (benchmark_path != null) try a.alloc(receipt.Sample, count) else &.{};
+    var masks_hash = std.crypto.hash.sha2.Sha256.init(.{});
     const loaded = try sam.Model.load(init.gpa, init.io, args[1], .{
         .precision = if (fp32) .float32 else .checkpoint,
     });
@@ -110,6 +125,7 @@ pub fn main(init: std.process.Init) !void {
         .max_objects = @max(seeds.items.len, 17),
         .frame_count = frames.dim(0),
         .direction = if (reverse) .reverse else .forward,
+        .profile = benchmark_path != null,
     });
     defer session.deinit();
     var quality = sam.comparison.Quality{};
@@ -123,11 +139,25 @@ pub fn main(init: std.process.Init) !void {
             4 => try session.reset(),
             else => {},
         };
-        var prediction = if (step == 0 or (exercise and step % 5 == 4))
+        const frame_start = if (benchmark_path != null) clock.seconds() else 0;
+        const is_seed = step == 0 or (exercise and step % 5 == 4);
+        var prediction = if (is_seed)
             try session.seed(init.gpa, image, index, seeds.items)
         else
             try session.track(init.gpa, image, index);
         defer prediction.deinit();
+        if (benchmark_path != null) {
+            samples[step] = .{ .frame_index = index, .seed = is_seed, .wall_seconds = clock.seconds() - frame_start, .stages = session.last_profile };
+            var index_bytes: [8]u8 = undefined;
+            std.mem.writeInt(u64, &index_bytes, prediction.frame_index, .little);
+            masks_hash.update(&index_bytes);
+            for (prediction.objects) |object| {
+                std.mem.writeInt(u64, &index_bytes, object.id, .little);
+                masks_hash.update(&index_bytes);
+                masks_hash.update(object.mask.pixels);
+            }
+        }
+        if (capture) |*output| try output.add(init.io, prediction, exercise);
         if (reference != null and step != 0) {
             const expected = reference.?.get("masks").?.bytes[index * pixels ..][0..pixels];
             try quality.addPrediction(index, seeds.items[0].id, prediction, expected);
@@ -145,9 +175,26 @@ pub fn main(init: std.process.Init) !void {
             }
         }
     }
+    if (capture) |*output| try output.finish(init.io);
+    if (benchmark_path) |path| {
+        var digest: [32]u8 = undefined;
+        masks_hash.final(&digest);
+        try receipt.write(a, init.io, path, identity.?, loaded, samples, warmup, .{
+            .input_shape = frames.shape[0..frames.rank],
+            .start = start,
+            .frames = count,
+            .reverse = reverse,
+            .object_ids = ids,
+        }, std.fmt.bytesToHex(digest, .lower));
+    }
     std.debug.print("SAM {s}: {d} frames, {d:.3}s wall, {d:.3}s GPU, peak Metal allocation {d} bytes\n", .{ loaded.config.version.name(), count, clock.seconds() - started, loaded.gpu.gpu_seconds, loaded.gpu.peak_bytes });
     if (reference != null) {
         std.debug.print("reference IoU (propagation only, seed excluded): {d} frames, mean {d:.6}, minimum {d:.6}, worst frame {?d}\n", .{ quality.frames, quality.meanIou(), quality.minimum_iou, quality.worst_frame });
         try gate.check(quality, count - 1);
     }
+}
+
+test {
+    _ = @import("sam3_capture.zig");
+    _ = receipt;
 }
