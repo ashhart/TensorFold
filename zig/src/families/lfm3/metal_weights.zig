@@ -3,6 +3,7 @@ const std = @import("std");
 const ck = @import("../../core/checkpoint_metal.zig");
 const row = @import("../../core/row_projection.zig");
 const c = @import("config.zig");
+const mlx_affine = @import("../../core/quant/mlx_affine.zig");
 
 pub const Tensor = ck.Tensor;
 pub const Linear = row.Weights;
@@ -44,24 +45,11 @@ const Loader = struct {
         var buf: [256]u8 = undefined;
         const name = try std.fmt.bufPrint(&buf, "{s}{s}", .{ prefix, suffix });
         const q = try self.config.width(name);
-        if (k % q.group != 0 or k * q.bits % 32 != 0) return error.UnsupportedQuantization;
-        const w = try self.tensor(name, ".weight", .u32, &.{ n, k * q.bits / 32 });
-        const s = try self.tensor(name, ".scales", .bf16, &.{ n, k / q.group });
-        const b = try self.tensor(name, ".biases", .bf16, &.{ n, k / q.group });
-        const out: Linear = .{
-            .w = w.buffer,
-            .w_off = w.offset,
-            .scales = s.buffer,
-            .s_off = s.offset,
-            .biases = b.buffer,
-            .b_off = b.offset,
-            .n = n,
-            .k = k,
-            .group = q.group,
-            .bits = q.bits,
-        };
-        try out.validate();
-        return out;
+        const d = mlx_affine.dims(.{ .n = n, .k = k }, q.bits, q.group) catch return error.UnsupportedQuantization;
+        const w = try self.tensor(name, ".weight", .u32, d.words[0..d.rank]);
+        const s = try self.tensor(name, ".scales", .bf16, d.tables[0..d.rank]);
+        const b = try self.tensor(name, ".biases", .bf16, d.tables[0..d.rank]);
+        return row.affine(.{ .weight = w, .scales = s, .biases = b, .n = n, .k = k, .bits = q.bits, .group = q.group });
     }
 };
 
