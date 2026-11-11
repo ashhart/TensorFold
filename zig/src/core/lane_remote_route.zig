@@ -152,6 +152,11 @@ pub const Route = struct {
         }
     }
 
+    /// A pull of `prefix` tokens took `ns`; `producer_cached` of them came from the producer's cache, not its compute.
+    pub fn observePull(r: *Route, prefix: u64, producer_cached: u64, ns: u64) void {
+        r.observe(.{ .pass = .remote, .rows = prefix -| producer_cached, .ns = ns });
+    }
+
     /// Whether a prompt that came at `arrived` and looks again at `now` is better off here than behind the pull.
     fn goesLocal(r: *const Route, now: u64, arrived: u64, e: Estimate) bool {
         if (r.mode == .always) return false;

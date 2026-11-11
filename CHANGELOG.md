@@ -32,6 +32,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Remote prefill, DeepSeek-V4.1: a pulled hand-off's drafter rings (the DSpark stages' last 128 keys, sent by a producer in its full-prefill profile) are landed in the slot instead of dropped when its cache plan holds them, so the proposer does not start cold; all three stages land or none.
 
+- Remote prefill, DeepSeek V4.1 on Metal: the pull-rate estimate no longer counts tokens the producer's prompt cache held. The trigger's reply's `usage.prompt_tokens_details.cached_tokens` is subtracted from the pulled prefix before it is divided by the pull's time, and a pull that left fewer than 1024 computed tokens says nothing, so a warm-up prompt cached on the producer no longer sends the next prompts to the pair on an inflated rate.
+
 ## 1.2.7
 
 - GLM-5.3-Flash on CUDA: with `TF_GLM_LAYERS=N`, serve's start-up memory check counts the weights by tensor from the shard headers, only those the load reads (the first N layers, the MTP layer when drafts are on, the embedding, norm and head), where it counted every checkpoint file. A 20-layer thin load of the 163.6 GiB checkpoint now counts 66.6 GiB without drafts. Unset, the count is the files' as before (#2788, fixes #2745). Thanks to @wojo.

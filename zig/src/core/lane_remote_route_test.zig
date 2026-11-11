@@ -109,6 +109,19 @@ test "weigh: always sends every prompt, and auto only one the pair is predicted 
     try t.expectEqual(Verdict.slower, r.weigh(0, .{ .len = 8192, .cached = 4000, .decoding = 0 }, 8191)); // 4.2 s here
 }
 
+test "observePull: a pull that hit the producer's prompt cache does not move the remote rate, a computed one does" {
+    var r: Route = .{};
+    r.observePull(16384, 16384 - 512, 300 * std.time.ns_per_ms); // a warm-up prompt cached there: 512 computed tokens
+    try t.expect(!r.remote_tps.seen and r.remote_tps.v == 1000);
+    r.observePull(16384, 0, 8192 * std.time.ns_per_ms); // 2000 tokens a second computed
+    try t.expectEqual(@as(f64, 2000), r.remote_tps.v);
+    r.observePull(16384, 12288, 4096 * std.time.ns_per_ms); // 4096 computed, 1000 a second: blends 70/30
+    try t.expectApproxEqAbs(@as(f64, 0.7 * 2000 + 0.3 * 1000), r.remote_tps.v, 1e-6);
+    const before = r.remote_tps.v;
+    r.observePull(8192, 9000, 1); // a count past the prefix computes nothing
+    try t.expectEqual(before, r.remote_tps.v);
+}
+
 test "weigh: a busy pair is not waited for beyond what prefilling here costs, even with a stream decoding" {
     var r: Route = .{};
     try t.expectEqual(.entered, r.enter(0, 0, r.estimate(8191, 8192))); // under way, 9.2 s to go

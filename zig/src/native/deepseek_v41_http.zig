@@ -101,7 +101,7 @@ pub const Pull = struct {
         p.pulls += 1;
         p.bytes += got.bytes;
         p.ns += took;
-        p.route.observe(.{ .pass = .remote, .rows = at, .ns = took });
+        p.route.observePull(at, p.trigger.cached, took);
         outcome.* = .ok;
         return .{ .saved = snap, .at = at, .phases = .{ .queue_ns = p.waited_ns, .trigger_ns = triggered - t0, .pull_ns = took -| (triggered - t0), .land_ns = landing.land_ns, .bytes = got.bytes } };
     }
