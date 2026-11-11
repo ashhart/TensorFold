@@ -142,8 +142,11 @@ pub const Fixture = struct {
             planted.name = corrupt_names[i];
             return .{ .spec = planted, .ctx = f, .vt = &vt, .control = .repeat };
         }
-        return .{ .spec = spec, .ctx = f, .vt = &vt };
+        var named = spec;
+        if (f.name) |n| named.name = n;
+        return .{ .spec = named, .ctx = f, .vt = &vt };
     }
+
     fn allocPoison(a: std.mem.Allocator, data_len: usize) ![]u16 {
         const extra: usize = if (data_len % 2 == 0) 16 else 17;
         const p = try a.alloc(u16, data_len + extra);
@@ -274,6 +277,17 @@ pub const Fixture = struct {
         return f.affine.?.simulate(accum, order, out);
     }
 };
+
+test "a fixture name replaces the default kernel name" {
+    var f: Fixture = undefined;
+    f.corrupt = null;
+    f.name = "vulkan qmm_q4_vec4 affine q4 g64 transposed";
+    try std.testing.expectEqualStrings(f.name.?, f.kernel().spec.name);
+    f.name = "vulkan qmm_q4_tile affine q4 g64 transposed tiled 32";
+    try std.testing.expectEqualStrings(f.name.?, f.kernel().spec.name);
+    f.name = null;
+    try std.testing.expectEqualStrings(spec.name, f.kernel().spec.name);
+}
 
 /// One source shader variant, exercised through the same hook contract as HIP's planted controls.
 pub const ControlKind = enum { qmm_fmax, atomic_sum, scribble_sum, drop_tail, fp16_accum };

@@ -92,7 +92,13 @@ pub fn project(o: *Ops, cmds: *Commands, out: View, x: View, w: View, scales: Vi
 }
 
 /// `project` over weights repacked by `tile`: one dispatch, so w must fit one binding and start 16-byte aligned.
+/// The tiled image reads and stores packed bf16. A float32 view is refused by name.
+pub fn tiledActivation(out: View, x: View) Error!void {
+    if (out.kind != .bf16 or x.kind != .bf16) return error.Invalid;
+}
+
 pub fn projectTiled(o: *Ops, cmds: *Commands, out: View, x: View, w: View, scales: View, biases: View, k: u64, timeout_ns: u64) Error!void {
+    try tiledActivation(out, x);
     const g = try projectGeometry(out, x, w, scales, biases, k, .tiles);
     if (!tile.fits(g.n, k)) return error.Invalid;
     const range = o.dev.properties.limits.maxStorageBufferRange;
@@ -245,6 +251,17 @@ test "tiled storage holds n rounded up to whole tiles of columns" {
     const g = try projectGeometry(out, x, w, scales, biases, 128, .tiles);
     try testing.expectEqual(@as(u64, 100), g.n);
     try testing.expectError(error.Invalid, projectGeometry(out, x, w, scales, biases, 128, .rows));
+}
+
+test "the tiled image refuses a float32 activation" {
+    const dev: @import("device.zig").Device = undefined;
+    const buf = @import("memory.zig").Buffer{ .dev = &dev, .handle = null, .memory = null, .len = 1 << 20, .kind = .device, .mapped = null, .coherent = false };
+    const out = try View.init(&buf, .bf16, 0, 3 * 100);
+    const x = try View.init(&buf, .bf16, 1024, 3 * 128);
+    try tiledActivation(out, x);
+    const f32x = try View.init(&buf, .f32, 8192, 3 * 128);
+    const f32out = try View.init(&buf, .f32, 16384, 3 * 100);
+    try testing.expectError(error.Invalid, tiledActivation(f32out, f32x));
 }
 
 test "the vec4 qmm image is chosen only when every vector load is 16-byte aligned" {
