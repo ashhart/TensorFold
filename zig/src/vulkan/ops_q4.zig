@@ -91,8 +91,7 @@ pub fn project(o: *Ops, cmds: *Commands, out: View, x: View, w: View, scales: Vi
     return projectAs(o, null, cmds, out, x, w, scales, biases, k, scratch, timeout_ns);
 }
 
-/// `project` over weights repacked by `tile`: one dispatch, so w must fit one binding and start 16-byte aligned.
-/// The tiled image reads and stores packed bf16. A float32 view is refused by name.
+/// `project` over weights repacked by `tile`: one dispatch. The tiled image reads and stores packed bf16.
 pub fn tiledActivation(out: View, x: View) Error!void {
     if (out.kind != .bf16 or x.kind != .bf16) return error.Invalid;
 }
