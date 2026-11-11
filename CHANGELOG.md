@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Tests: the serving pins name the changes #2721, #2753 and #2802 made to six pinned sources, so `test-gradient-serving` passes on main again (#2872).
+
 - Flash Next on Metal: the host's status reads the FSR cache counters through a pointer the host keeps from open, not through the engine, so `zig build test-native` no longer crashes in two host tests that build a host without one; served behaviour is unchanged (#2876).
 
 - Docs: `docs/optimizing.md` says how to approach speed work in TensorFold: measure first, keep every token exact, and write what lands from our own code, with a worked example (#2740, #2739). Thanks to @jschmied.
