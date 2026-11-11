@@ -4,6 +4,10 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- EXL3 TP head sharding and MTP residency use registered, strict `0`/`1` settings; blank is unset and malformed text refuses before expert allocation. The TP memory runner propagates the same refusals (#1442).
+
+- CUDA EXL3 Flash Next adds expert-parallel TP and MTP drafts, preserving the first slice's canonical expert reduction order and main's prepared prompt-mark snapshots (#1442).
+
 - CUDA resource checks use measured NVCC 13.4 register counts for paged Flash Next preparation, retaining earlier compiler receipts and unchanged launch bounds (#1441).
 
 - EXL3's mapped n-gram table participates in upstream's opt-in read-ahead once per file, and teardown joins the worker before unmapping (#1441).
@@ -826,6 +830,9 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - CUDA on the RTX PRO 4500 (sm_120): attention takes the MT2 FP8 path from 8,192 cached tokens, token-equal to the default path (#1731, thanks @Maxrio9).
 
 - Flash Next on HIP advises random access over the n-gram table's mapped tensors, so a gather's scattered single-row reads fault only their own pages instead of whole readahead windows: the first request after start decodes at 35.8 tok/s instead of 24.4, and a cold 7K-token prompt starts in 28.9 s instead of 48.4 s on a Strix Halo (gfx1151), with every reply token-equal (#1615, fixes #1602, thanks @gilby).
+
+
+
 
 - `TF_KV_SHARE=n` keeps a paged CUDA family's prompts as its core pool's pages (Gemma 4, Kolibri-1), with replies equal to a fresh prefill; it's opt-in, and costs about 3.5% decode after a short cold prompt on Kolibri-1 (#1755, part of #1657). Thanks to @jschmied.
 - Qwen3.5's attention-layer pattern (`layer_types`, `full_attention_interval`) is read by one shared reader on Metal, CUDA, HIP and XPU, so a config gets the same pattern or the same refusal everywhere; a `layer_types` list that contradicts the interval is refused naming both keys, and XPU checks a present `config.json` at load (#2086, fixes #1863).

@@ -31,6 +31,19 @@ pub fn named(root: std.json.ObjectMap) bool {
     return std.mem.eql(u8, m, "exl3");
 }
 
+/// Whether the checkpoint at `dir` declares an EXL3 pack (cuda_config.mode's rule); false if config.json is unreadable.
+pub fn packAt(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) bool {
+    const path = std.fs.path.join(gpa, &.{ dir, "config.json" }) catch return false;
+    defer gpa.free(path);
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 24)) catch return false;
+    defer gpa.free(bytes);
+    const parsed = std.json.parseFromSlice(std.json.Value, gpa, bytes, .{}) catch return false;
+    defer parsed.deinit();
+    if (parsed.value != .object) return false;
+    if (parsed.value.object.get("quantization")) |v| if (v == .object) return false; // an MLX affine pack
+    return named(parsed.value.object);
+}
+
 /// The first field an EXL3 checkpoint differs in from what the family serves, else null.
 pub fn mismatch(root: std.json.ObjectMap, text: std.json.ObjectMap, comptime geometry: fn (std.json.ObjectMap) ?[]const u8) ?[]const u8 {
     const q = block(root) orelse return "quantization_config";

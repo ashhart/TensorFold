@@ -114,8 +114,9 @@ tensorfold-native serve /path/to/checkpoint --temperature 0
 
 ## EXL3 checkpoints
 
-An EXL3 pack (see [EXL3 weights](exl3.md)) serves on one sm_120 rank with its routed experts in pinned host memory and
-a pool of expert lines a layer on the device. `tools/exl3_serve.sh` starts it. These switches tune it:
+An EXL3 pack (see [EXL3 weights](exl3.md)) serves on one sm_120 rank, or on two with expert parallel (`--tp 2`), with
+its routed experts in pinned host memory and a pool of expert lines a layer on the device. `tools/exl3_serve_tp2.sh`
+starts a rank. These switches tune it:
 
 | Name | Default | Effect |
 | --- | --- | --- |
@@ -127,6 +128,7 @@ a pool of expert lines a layer on the device. `tools/exl3_serve.sh` starts it. T
 | `TF_FLASHNEXT_EXL3_PROFILE_SIZING` | `0` | `0` or `1`; `1` sizes the pools from the stored profile and is ignored with `TF_FLASHNEXT_EXPERT_LINES`. |
 | `TF_FLASHNEXT_EXL3_ROUTED` | `host` | `host` or `device`; `device` keeps every routed expert on the device. |
 | `TF_FLASHNEXT_EXL3_ARCH` | unset | `unqualified` serves on a device that is not sm_120, without a claim. |
+| `TF_FLASHNEXT_EXL3_MTP_RESIDENT` | `0` | `0` or `1`; `1` keeps the MTP layer's experts on the device instead of a pool (one rank). |
 | `TF_FLASHNEXT_PLE_READ` | `map` | `map` or `pread`; `pread` reads the n-gram embedding rows by positional read. |
 | `TF_FLASHNEXT_SNAP_HOST` | `1` above 32,768 tokens of context, else `0` | `0` or `1`: whether kept prompt-cache states live in pinned host memory. |
 | `TF_FLASHNEXT_CACHE_TELEMETRY` | `0` | Diagnostics only: `0` or `1`; `1` logs `EXL3-CACHE` expert-cache counters per phase, with a sync at each boundary. |
@@ -140,6 +142,15 @@ unified memory) and at most the memory's size.
 
 EXL3 keeps its configured prompt cuts, including cache marks; `TF_FLASHNEXT_KEEP_INPASS` does not enable in-pass
 snapshots for this format. Classic checkpoints retain main's in-pass marks and per-lane convolution histories.
+
+
+### TP integration scope
+
+Expert-parallel EXL3 placement and the collective spin override are EXL3-only; NVFP4 retains its existing placement
+and reduction. Rank forward frames carry the telemetry phase, and MTP advances `prompt_last` after every prompt chunk.
+Both formats retain main's tensor-rank MTP snapshots; EXL3 does not reintroduce the old classic-format refusal.
+Exact-head TP=1/TP=2 greedy and seeded token-hash receipts remain required before this integration is qualified.
+
 
 ## What the core runs and what the family runs
 
