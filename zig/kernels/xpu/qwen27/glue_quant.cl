@@ -256,8 +256,9 @@ KERNEL(256) void topk_part(global const half *L, int V, int K, global float *PV,
     float bv = mv;
     int bi = mi;
     tk_best(&bv, &bi, rv, ri);
-    if (mi == bi) {
+    if (mi == bi && (bi != 0x7fffffff || lid == 0)) { // a short group pads with (-inf, sentinel), from one item
       v[mj] = -INFINITY;
+      id[mj] = 0x7fffffff;
       PV[((long)row * 256 + seg) * 64 + k] = mv;
       PI[((long)row * 256 + seg) * 64 + k] = mi;
     }
