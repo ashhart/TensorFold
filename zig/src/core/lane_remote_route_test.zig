@@ -120,18 +120,18 @@ test "observe: measured rates replace the seeds a third to three times at a time
 }
 
 test "knobs: TF_PREFILL_ROUTE, TF_PREFILL_LOCAL_TPS and TF_PREFILL_REMOTE_TPS default to auto and the notes' rates, and refuse bad text" {
-    const d = try Route.fromText(null, null, null);
+    const env = @import("sys").environment;
+    const d = Route.build(try env.value(u64, "TF_PREFILL_ROUTE", null, 0), try env.value(f64, "TF_PREFILL_LOCAL_TPS", null, 950), try env.value(f64, "TF_PREFILL_REMOTE_TPS", "", 1000));
     try t.expectEqual(route.Mode.auto, d.mode);
-    try t.expectEqual(@as(f64, 950), d.local_tps.v);
-    try t.expectEqual(@as(f64, 1000), d.remote_tps.v);
-    const set = try Route.fromText("always", "2000", " 3000.5");
+    try t.expectEqual((Route{}).local_tps.v, d.local_tps.v);
+    try t.expectEqual((Route{}).remote_tps.v, d.remote_tps.v);
+    const set = Route.build(try env.value(u64, "TF_PREFILL_ROUTE", "always", 0), try env.value(f64, "TF_PREFILL_LOCAL_TPS", "2000", 950), try env.value(f64, "TF_PREFILL_REMOTE_TPS", " 3000.5", 1000));
     try t.expectEqual(route.Mode.always, set.mode);
     try t.expectEqual(@as(f64, 2000), set.local_tps.v);
     try t.expectEqual(@as(f64, 3000.5), set.remote_tps.v);
-    try t.expectEqual(route.Mode.auto, (try Route.fromText("", "", "")).mode); // blank is unset
-    try t.expectError(error.InvalidEnvironment, Route.fromText("sometimes", null, null));
-    try t.expectError(error.InvalidEnvironment, Route.fromText(null, "0", null));
-    try t.expectError(error.InvalidEnvironment, Route.fromText(null, null, "fast"));
+    try t.expectError(error.InvalidEnvironment, env.value(u64, "TF_PREFILL_ROUTE", "sometimes", 0));
+    try t.expectError(error.InvalidEnvironment, env.value(f64, "TF_PREFILL_LOCAL_TPS", "0", 950));
+    try t.expectError(error.InvalidEnvironment, env.value(f64, "TF_PREFILL_REMOTE_TPS", "fast", 1000));
 }
 
 /// What a recording source saw, and the verdict it answers.

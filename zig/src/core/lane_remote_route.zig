@@ -86,16 +86,14 @@ pub const Route = struct {
 
     /// TF_PREFILL_ROUTE, TF_PREFILL_LOCAL_TPS and TF_PREFILL_REMOTE_TPS, each checked by name.
     pub fn fromEnv() !Route {
-        const sys = @import("sys");
-        return fromText(sys.getenv("TF_PREFILL_ROUTE"), sys.getenv("TF_PREFILL_LOCAL_TPS"), sys.getenv("TF_PREFILL_REMOTE_TPS"));
+        const env = @import("sys").environment;
+        const seeds: Route = .{};
+        return build(try env.read(u64, "TF_PREFILL_ROUTE", 0), try env.read(f64, "TF_PREFILL_LOCAL_TPS", seeds.local_tps.v), try env.read(f64, "TF_PREFILL_REMOTE_TPS", seeds.remote_tps.v));
     }
 
-    pub fn fromText(mode: ?[]const u8, local: ?[]const u8, pair: ?[]const u8) !Route {
-        const env = @import("sys").environment;
-        var r: Route = .{ .mode = if ((try env.value(u64, "TF_PREFILL_ROUTE", mode, 0)) == 0) .auto else .always };
-        r.local_tps.v = try env.value(f64, "TF_PREFILL_LOCAL_TPS", local, r.local_tps.v);
-        r.remote_tps.v = try env.value(f64, "TF_PREFILL_REMOTE_TPS", pair, r.remote_tps.v);
-        return r;
+    /// A route from the knobs' values (`mode`: the word's index in TF_PREFILL_ROUTE's list).
+    pub fn build(mode: u64, local_tps: f64, remote_tps: f64) Route {
+        return .{ .mode = if (mode == 0) .auto else .always, .local_tps = .{ .v = local_tps }, .remote_tps = .{ .v = remote_tps } };
     }
 
     fn acquire(r: *Route) void {
