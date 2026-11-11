@@ -29,7 +29,7 @@ fn has(a: std.mem.Allocator, io: std.Io, dir: []const u8) bool {
 }
 
 const ParamJson = struct { name: []const u8, type: []const u8, div16: bool, nospec: bool };
-const ConstJson = struct { int: ?i64 = null, f32: ?u32 = null };
+const ConstJson = @import("aot_pdl.zig").Const;
 const KernelJson = struct {
     @"fn": []const u8,
     hash: []const u8,
@@ -52,7 +52,10 @@ pub const SpecSet = SetJson;
 
 /// aot.json parsed without loading any cubin (host-side checks of variant selection).
 pub fn parseSpecs(gpa: std.mem.Allocator, text: []const u8) !std.json.Parsed(SpecSet) {
-    return std.json.parseFromSlice(SpecSet, gpa, text, .{ .ignore_unknown_fields = true, .allocate = .alloc_always });
+    const parsed = try std.json.parseFromSlice(SpecSet, gpa, text, .{ .ignore_unknown_fields = true, .allocate = .alloc_always });
+    errdefer parsed.deinit();
+    for (parsed.value.kernels) |k| try @import("aot_pdl.zig").validate(k.name, k.pdl, k.consts);
+    return parsed;
 }
 
 /// Preferred general-pass match for selection and capture checks, excluding runtime-one fallback.

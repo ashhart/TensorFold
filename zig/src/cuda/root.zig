@@ -35,6 +35,7 @@ pub const roce = @import("roce.zig");
 pub const roce_pair_rule = @import("roce_pair_rule.zig");
 pub const triton = @import("triton.zig");
 pub const aot = @import("aot.zig");
+pub const aot_pdl = @import("aot_pdl.zig");
 pub const kernels = @import("kernels.zig");
 pub const qmmf_shared = @import("qmmf_shared.zig");
 pub const qmmf = @import("qmmf.zig");
@@ -142,6 +143,7 @@ test {
     _ = launch;
     _ = abi;
     _ = aot;
+    _ = @import("aot_pdl_test.zig");
     _ = segments;
     _ = @import("qmmf.zig");
     _ = @import("qmmf_shared.zig");
