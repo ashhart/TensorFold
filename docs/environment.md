@@ -51,7 +51,8 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_PREFILL_AHEAD` | With `--prefill-from`: whole count from 1 of queued requests with a fill under way or landed; default 4 |
 | `TF_PREFILL_API_KEY_FILE` | With `--prefill-from`: the path of a file only its owner can read, holding the GB10 server's API key, which the trigger sends as a Bearer token; unset sends none, and a GB10 started with `--api-key` then answers 401 |
 | `TF_PRODUCE_HELD_GIB` | With `--mcdma-produce`: whole GiB 1 through 1024 of hand-off exports a GB10 holds at once; an export past it is refused by name and the Mac prefills that prompt itself; default 32 |
-| `TF_PREFILL_TIMEOUT_S` | With `--prefill-from`: whole seconds 1 through 86400 for the trigger; default 60 plus 1 per 400 tokens sent |
+| `TF_DSV41_HANDOFF_DUMP` | A directory path without control characters, used as given; a DeepSeek-V4.1 producer also writes each hand-off export there as a file, with or without `--mcdma-produce`. Unset or blank writes none |
+| `TF_PREFILL_TIMEOUT_S` | With `--prefill-from`: whole seconds 1 through 86400 for the trigger and, with `--mcdma-link http`, separately for the transfer of the export; default 60 plus 1 per 400 tokens sent |
 | `XPU_A8_BITS` | Exactly `4` or `8`, for the XPU quantization study; unset keeps the study's existing setting |
 | `LFM3_FUSE` | Whole u32 fusion mask; default 7 |
 | `TF_SLIDE_POCKET_KEY` | Exactly `auto`, `reply`, `subject` or `both`; default `auto` |
@@ -117,7 +118,7 @@ These settings retain their existing boolean policies rather than gaining new al
   `TF_DSV41_ENGRAM_PF`, `TF_DSV41_ENGRAM_PIPE`, `TF_DSV41_ENGRAM_POS_THREADS`, `TF_DSV41_ENGRAM_SMALL_THREADS`, `TF_DSV41_ENGRAM_STAGE_HASH`,
   `TF_DSV41_ENGRAM_STREAM_DIR`, `TF_DSV41_ENGRAM_THREADS`, `TF_DSV41_ENGRAM_TRACE`, `TF_DSV41_EXL3_FMA`, `TF_DSV41_EXL3_FMA_DENSE_MULTI`,
   `TF_DSV41_FAST_ARGMAX`, `TF_DSV41_FMA_WARPS`, `TF_DSV41_FUSE_UP_SIX`, `TF_DSV41_GATE_DUMP`, `TF_DSV41_GATE_DUMP_ROWS`,
-  `TF_DSV41_GATE_TREE`, `TF_DSV41_GATE_WIDE`, `TF_DSV41_GROUP_MIN_ROWS`, `TF_DSV41_HC_PROBE`, `TF_DSV41_HC_PROBE_INDEP`,
+  `TF_DSV41_GATE_TREE`, `TF_DSV41_GATE_WIDE`, `TF_DSV41_GROUP_MIN_ROWS`, `TF_DSV41_HANDOFF_BISECT`, `TF_DSV41_HANDOFF_CHECK`, `TF_DSV41_HANDOFF_DUMP`, `TF_DSV41_HANDOFF_FILE`, `TF_DSV41_HANDOFF_STEPS`, `TF_DSV41_HANDOFF_TOKENS`, `TF_DSV41_HANDOFF_UPTO`, `TF_DSV41_HC_PROBE`, `TF_DSV41_HC_PROBE_INDEP`,
   `TF_DSV41_HC_PROBE_THREADS`, `TF_DSV41_HID_FULL`, `TF_DSV41_HID_HASH`, `TF_DSV41_HID_ROWS`, `TF_DSV41_HOST_PROF`,
   `TF_DSV41_I8_DIR`, `TF_DSV41_I8_ONLY`, `TF_DSV41_I8_PREFILL`, `TF_DSV41_I8_ROT`, `TF_DSV41_INDEX_KEYS`,
   `TF_DSV41_INDEX_KEYS_SCORE`, `TF_DSV41_INDEX_PARALLEL_FINISH`, `TF_DSV41_INDEX_PARALLEL_MERGE`, `TF_DSV41_INDEX_ROW_SCORE`, `TF_DSV41_INDEX_SCORE_ONE`,

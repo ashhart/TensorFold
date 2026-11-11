@@ -45,7 +45,7 @@ different scopes, or scopes a key the flags or environment already give, is refu
 
 | Scope | Routes |
 | --- | --- |
-| `inference` | POST `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/tokenize`, `/v1/detokenize`, `/v1/audio/speech`, `/v1/images/generations`, `/v1/embeddings`, `/v1/decisions`, `/v1/systemone`, `/v1/rerank` (also by PUT), and the same paths without `/v1` where the server has them; GET `/v1/models`, `/models`, `/v1/voices`; a WebSocket upgrade on GET `/v1/responses` or `/responses` |
+| `inference` | POST `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/tokenize`, `/v1/detokenize`, `/v1/audio/speech`, `/v1/images/generations`, `/v1/embeddings`, `/v1/decisions`, `/v1/systemone`, `/v1/rerank` (also by PUT), and the same paths without `/v1` where the server has them; GET `/v1/models`, `/models`, `/v1/voices`; GET and DELETE `/v1/handoff/<32 hex digits>`; a WebSocket upgrade on GET `/v1/responses` or `/responses` |
 | `read` | GET `/metrics`, `/v1/metrics`, `/v1/load`, `/memory`, `/v1/memory`, `/stats`, `/dashboard`, `/v1/benchmark/manifest`, `/v1/models`, `/models`, `/v1/voices` |
 
 A scoped key reaches nothing else: not the stored Responses (GET or DELETE `/v1/responses/ID`), Recall, Sliding Weights,
@@ -325,6 +325,12 @@ cache, so its whole prompt is prefilled. Chat, streamed requests and other engin
 Every native server reads MCDMA's `kv_transfer_params.mcdma_handoff` (`id`, 32 hex digits, and `export_from`, 0)
 on `/v1/completions` and `/v1/chat/completions`. A server started with `--mcdma-produce` exports that prompt's state;
 any other server, a malformed object, or a nonzero `export_from` gets HTTP 400 naming the field.
+A DeepSeek-V4.1 CUDA server started with `--mcdma-produce http` also serves the exports it holds: `GET /v1/handoff/<id>` streams
+the hand-off (HTTP 200, `application/octet-stream`, `Content-Length`; [DeepSeek-V4.1 hand-off](deepseek-v41-handoff.md#over-plain-http)),
+`DELETE /v1/handoff/<id>` releases it (HTTP 200, or 404 when none is held). An id is exactly 32 hex digits (else HTTP 400); an
+id with no export, a released or an expired one, and a server that serves no exports answer HTTP 404, and an export that failed
+answers 409 with the reason. The key gate runs first: with keys, a request without a valid key gets 401, and a restricted key needs
+the `inference` scope.
 `ignore_eos: true` keeps user-supplied `stop` strings active, including when a stop string spans streamed chunks.
 Both backends reject a non-boolean `ignore_eos` or a malformed `stop` with HTTP 400 before a stream opens.
 Both backends reject malformed `temperature`, `top_p`, `top_k` and `seed` values with HTTP 400, whether or not
