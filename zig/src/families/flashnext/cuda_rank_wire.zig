@@ -58,17 +58,31 @@ pub fn pause() void {
     _ = platform.c.nanosleep(&ts, null);
 }
 
+/// How long a wait polls with a short timeout before it blocks: a core idle through a whole round wakes late.
+pub const warm_ns = 50 * std.time.ns_per_ms;
+
 fn wait(fd: p.socket_t, events: i16, until: ?u64) !void {
+    const start = now();
     while (true) {
         const current = now();
         if (until) |end| if (current >= end) return error.RankTimeout;
         const ms: i32 = if (until) |end| @intCast(@min(1000, (end - current + std.time.ns_per_ms - 1) / std.time.ns_per_ms)) else 1000;
         var fds = [_]p.pollfd{.{ .fd = fd, .events = events, .revents = 0 }};
-        const count = try p.poll(&fds, ms);
+        const count = if (current - start < warm_ns) try shortPoll(&fds) else try p.poll(&fds, ms);
         if (count == 0) continue;
         if (fds[0].revents & events != 0) return;
         if (fds[0].revents & (p.POLL.ERR | p.POLL.HUP | p.POLL.NVAL) != 0) return error.RankDisconnected;
     }
+}
+
+/// One poll ending within about 50 us: the core stays in a shallow idle state, and data wakes it at once.
+fn shortPoll(fds: []p.pollfd) !usize {
+    if (builtin.os.tag != .linux) return p.poll(fds, 1);
+    const short: p.timespec = .{ .sec = 0, .nsec = 50_000 };
+    return p.ppoll(fds, &short, null) catch |err| switch (err) {
+        error.SignalInterrupt => 0,
+        else => err,
+    };
 }
 
 pub const Link = struct {
@@ -219,4 +233,44 @@ test "rank frames are versioned, bounded and exact" {
     @memset(raw[32..36], 0xff);
     try std.testing.expectError(error.BadRankFrame, Header.decode(&raw));
     try std.testing.expectError(error.BadRankFrame, (Header{ .kind = .forward, .bytes = max_payload + 1 }).encode());
+}
+
+fn sendLater(fd: c_int, ms: u64, close: bool) void {
+    const ts: platform.c.timespec = .{ .sec = @intCast(ms / 1000), .nsec = @intCast((ms % 1000) * std.time.ns_per_ms) };
+    _ = platform.c.nanosleep(&ts, null);
+    const byte: u8 = 7;
+    if (close) _ = std.c.close(fd) else _ = std.c.send(fd, &byte, 1, 0);
+}
+
+fn sleeps() isize {
+    return if (builtin.os.tag == .linux) p.getrusage(p.rusage.THREAD).nvcsw else 0;
+}
+
+test "a link wait polls briefly, then blocks, and still ends at its data, its deadline or its peer's exit" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var pair: [2]c_int = undefined;
+    if (std.c.socketpair(p.AF.UNIX, p.SOCK.STREAM, 0, &pair) != 0) return error.SocketPair;
+    defer _ = std.c.close(pair[0]);
+    const flags = std.c.fcntl(pair[0], p.F.GETFL);
+    _ = std.c.fcntl(pair[0], p.F.SETFL, flags | @as(c_int, @bitCast(@as(u32, @bitCast(p.O{ .NONBLOCK = true })))));
+    const l: Link = .{ .fd = pair[0] };
+    var byte: [1]u8 = .{0};
+    var start = now();
+    try std.testing.expectError(error.RankTimeout, l.receive(&byte, deadline(20)));
+    try std.testing.expect(now() - start >= 20 * std.time.ns_per_ms and now() - start < std.time.ns_per_s);
+    // a byte inside the short polls, then one after them: the short polls stop at warm_ns, then one poll blocks
+    for ([_]u64{ 5, 600 }) |late| {
+        start = now();
+        const t = try std.Thread.spawn(.{}, sendLater, .{ pair[1], late, false });
+        const before = sleeps();
+        try l.receive(&byte, null);
+        const polls = sleeps() - before;
+        t.join();
+        try std.testing.expect(byte[0] == 7 and now() - start >= late * std.time.ns_per_ms);
+        if (builtin.os.tag == .linux and late > 50) try std.testing.expect(polls > 20 and polls < 2000);
+        byte[0] = 0;
+    }
+    const t = try std.Thread.spawn(.{}, sendLater, .{ pair[1], 5, true });
+    defer t.join();
+    try std.testing.expectError(error.RankDisconnected, l.receive(&byte, deadline(1000)));
 }
