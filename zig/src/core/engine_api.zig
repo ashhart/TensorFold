@@ -394,11 +394,8 @@ pub const HealthSource = @import("engine_status.zig").HealthSource;
 pub const Status = @import("engine_status.zig").Status;
 pub const SubmitError = error{ Closed, Busy, InvalidSpans, Stale, InvalidRequest, MemoryPressure }; // Stale: put-back has not reached the device
 
-/// What a request refused under critical memory pressure says (a 503).
-pub const pressure_message = "this Mac is under critical memory pressure: the server takes no new requests until it eases; retry shortly";
-
-/// What a reply refused or ended for `Stale` says, a submit's error and a queued job's failure alike.
-pub const stale_message = "a Living Weights delete could not be put back on the device: send the delete again to retry it, or restart the server";
+pub const pressure_message = @import("engine_messages.zig").pressure_message;
+pub const stale_message = @import("engine_messages.zig").stale_message;
 
 /// The longest engine refusal message the server keeps; a longer one is cut at a UTF-8 boundary.
 pub const refusal_bytes = 256;
@@ -450,6 +447,8 @@ pub const Engine = struct {
         load: ?*const fn (ctx: *anyopaque, producer: ?load_ledger.Producer) void = null,
         /// Asked once per whole request: the returned message is the refusal, up to `refusal_bytes`; null: accepted.
         refusal: ?*const fn (ctx: *anyopaque, request: *const Request, out: []u8) ?[]const u8 = null,
+        /// The hand-off exports this engine holds, served over HTTP (`GET /v1/handoff/<id>`); null: it serves none.
+        handoff: ?*const fn (ctx: *anyopaque) ?@import("lane_export.zig").Serve = null,
     };
 
     pub fn info(e: Engine) Info {

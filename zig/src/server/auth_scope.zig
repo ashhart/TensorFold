@@ -71,6 +71,9 @@ const inferring = [_][]const u8{
 pub fn allows(scopes: Scopes, method: []const u8, raw_path: []const u8) bool {
     if (scopes.admin) return true;
     const route = routePath(raw_path);
+    // a decoder that may trigger an export may read and release one held export by its id
+    const reads_or_releases = std.mem.eql(u8, method, "GET") or std.mem.eql(u8, method, "DELETE");
+    if (scopes.inference and reads_or_releases and @import("handoff_param.zig").routeId(route) != null) return true;
     if (std.mem.eql(u8, method, "GET")) {
         if ((scopes.inference or scopes.read) and oneOf(route, &listing)) return true;
         return scopes.read and oneOf(route, &reading);

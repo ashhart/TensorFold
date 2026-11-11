@@ -46,7 +46,16 @@ pub const Target = struct {
         replays: ?*const fn (ptr: *anyopaque, list: []const Final) anyerror!void = null,
         /// Engram reads ahead of the next window (TF_DSV41_ENGRAM_WARM); reads only, window bits are unaffected.
         warm: ?*const fn (ptr: *anyopaque, asks: []const Warm) void = null,
+        /// The slot's next `prefill` calls `cut` at the prompt's last-but-one token (export point); null disarms.
+        arm: ?*const fn (ptr: *anyopaque, slot: u32, cut: ?Cut) void = null,
     };
+
+    /// A call at a prompt's cut: the slot stands after the prompt's tokens but the last, which is still pending.
+    pub const Cut = struct { ptr: *anyopaque, run: *const fn (ptr: *anyopaque) void };
+
+    pub fn arm(t: Target, slot: u32, cut: ?Cut) void {
+        if (t.vtable.arm) |f| f(t.ptr, slot, cut);
+    }
 
     /// A slot's whole prompt whose rows but the last are in (its `finish` / `tail` follows).
     pub const Final = struct { slot: u32, ids: []const u32 };

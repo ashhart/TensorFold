@@ -27,7 +27,6 @@ const native_serves: []const []const u8 = if (@hasDecl(@import("root"), "serves"
 fn served(comptime name: []const u8) bool {
     return servedBy(native_serves, name);
 }
-
 fn servedBy(list: []const []const u8, name: []const u8) bool {
     for (list) |x| if (std.mem.eql(u8, x, name)) return true;
     return false;
@@ -134,8 +133,7 @@ pub const flags = [_]Flag{
     .{ .name = "--rank", .native = served("--tp") },
     .{ .name = "--master", .native = served("--tp") },
     .{ .name = "--master-port", .native = served("--tp") },
-    // the GPU engine's policy switches as key=value pairs, repeatable
-    .{ .name = "--policy", .kind = .append, .native = served("--policy") },
+    .{ .name = "--policy", .kind = .append, .native = served("--policy") }, // the GPU engine's key=value switches
     .{ .name = "--kv-dtype", .choices = &.{ "bf16", "int8", "int4" } },
     .{ .name = "--prefill-fp8", .kind = .store_true },
     .{ .name = "--no-prefill-fp8", .kind = .store_true },
