@@ -43,4 +43,5 @@ test {
 
 test {
     _ = @import("cuda/owner_test.zig");
+    _ = @import("cuda/weights.zig");
 }
