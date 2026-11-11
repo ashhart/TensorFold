@@ -4,13 +4,16 @@ const api = @import("engine_api");
 const mesh = @import("mesh");
 const settings = @import("sys").environment;
 const glm = @import("glm_cuda").native;
+const minimax = @import("minimax_m3_cuda").native;
 
 const Allocator = std.mem.Allocator;
 const Family = mesh.launch.Family;
 
 /// Which rank aliases `F` reads: only the CUDA families that had their own rank variables.
 pub fn family(comptime F: type) Family {
-    return if (F == glm) .glm else .other;
+    if (F == glm) return .glm;
+    if (F == minimax) return .minimax;
+    return .other;
 }
 
 /// `o` with `tp` and `rank` resolved and `launch_from` named, or null with `problem` set; before admission and `open`.
@@ -96,6 +99,12 @@ test "GLM by its aliases, by flags or by both resolves alike; other families rea
     try testing.expectEqualStrings("TF_GLM_WORLD, an alias of --tp", by_alias.launch_from);
     try testing.expectEqualStrings("--tp", by_flags.launch_from);
     try testing.expectEqualStrings("--tp and TF_GLM_WORLD", by_both.launch_from);
+    const mm: Map = .{ .pairs = &.{ .{ "TF_MINIMAX_WORLD", "2" }, .{ "TF_MINIMAX_RANK", "1" } } };
+    const minimax_alias = (try resolveWith(a, .{ .dir = "d", .model_type = "minimax_m3_vl" }, .minimax, mm, &problem)).?;
+    try testing.expectEqual(@as(u32, 1), minimax_alias.rank);
+    try testing.expectEqualStrings("TF_MINIMAX_WORLD, an alias of --tp", minimax_alias.launch_from);
+    try testing.expectEqual(Family.minimax, family(minimax));
+    try testing.expectEqual(Family.glm, family(glm));
     const other = (try resolveWith(a, .{ .dir = "d", .model_type = "m" }, .other, pair, &problem)).?;
     try testing.expectEqual(@as(u32, 1), other.tp);
     // a request built in code keeps its placement: no flag bits, no aliases, nothing to resolve
