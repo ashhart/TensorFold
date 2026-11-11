@@ -63,6 +63,54 @@ pub const Fit = struct {
         }
         return error.TooManyStreams;
     }
+
+    /// Advisory live-memory warning and smaller settings, priced with the startup's actual rows and drafter.
+    pub fn warning(f: Fit, rows: u32, slots: u32, window: u32, free: ?usize, pressure: ?u32) !?Warning {
+        const reserve = try f.cost(rows, slots);
+        if ((if (free) |bytes| reserve <= bytes else true) and (pressure orelse 1) < 2) return null;
+        var out: Warning = .{ .reserve = reserve, .free = free, .pressure = pressure };
+        if (free) |bytes| {
+            var fit = f;
+            fit.slots = slots;
+            fit.left = @min(f.left, bytes);
+            out.streams = fit.streams(rows, false) catch 0;
+            var lo: u32 = 0;
+            var hi = f.context -| window;
+            while (lo < hi) {
+                const mid = lo + (hi - lo) / 2 + 1;
+                fit.context = mid + window;
+                if (try fit.cost(rows, slots) <= fit.left) lo = mid else hi = mid - 1;
+            }
+            out.context = lo;
+        }
+        return out;
+    }
+};
+
+/// A snapshot of live memory is advice only; the fixed working-set budget still determines admission.
+pub const Warning = struct {
+    reserve: usize,
+    free: ?usize,
+    pressure: ?u32,
+    streams: ?u32 = null,
+    context: ?u32 = null,
+
+    pub fn format(warning: Warning, w: *std.Io.Writer) !void {
+        try w.print("stream and scratch reservation is {d:.1} GiB. macOS reports ", .{gibs(warning.reserve)});
+        if (warning.free) |bytes| try w.print("{d:.1} GiB free", .{gibs(bytes)}) else try w.writeAll("free memory unavailable");
+        if (warning.pressure) |p| {
+            try w.print(" and {s} memory pressure", .{if (p >= 4) "critical" else if (p >= 2) "warning" else "normal"});
+        } else try w.writeAll(" and memory pressure unavailable");
+        try w.writeAll(". ");
+        if (warning.streams) |n| {
+            if (n > 0) try w.print("An estimated --parallel {d} fits at this context. ", .{n});
+        }
+        if (warning.context) |n| {
+            if (n > 0) try w.print("An estimated --context {d} fits at this parallelism. ", .{n});
+            if (n == 0) try w.writeAll("Even the minimum context exceeds current free memory. ");
+        }
+        try w.writeAll("Consider a smaller --context or --parallel, or free memory before starting.");
+    }
 };
 
 /// A development cap can only reduce the device's reported working set.
