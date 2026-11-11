@@ -211,6 +211,13 @@ test "GLM KV split owner attention: roles, and a room's slots and bytes at TP=2 
     try t.expectEqual(@as(u64, (1 << 32) + 3 * slot + 21 * 1024), r.at(.po, 2, 1));
 }
 
+test "GLM KV split owner attention: a segment past the room is refused before any exchange, a whole window never" {
+    const r: attn.Room = .{ .buf = .{ .d = undefined, .ptr = 1 << 32, .len = 0 }, .rank = 1, .world = 3, .rows = 10, .lw = 512, .heads = @splat(0), .lib = undefined, .comm = undefined };
+    try r.holds(&.{ .{ .row0 = 0, .rows = 4, .owner = 0 }, .{ .row0 = 4, .rows = 6, .owner = 2 }, .{ .row0 = 10, .rows = 90, .owner = null } });
+    try std.testing.expectError(error.KvSplitRoom, r.holds(&.{ .{ .row0 = 0, .rows = 4, .owner = 0 }, .{ .row0 = 4, .rows = 7, .owner = 2 } }));
+    try std.testing.expectError(error.KvSplitRoom, r.holds(&.{.{ .row0 = 10, .rows = 1, .owner = 1 }}));
+}
+
 test "GLM KV split owner attention: each guard's mutant is caught" {
     defer attn.mutant = .none;
     inline for (.{ attn.Mutant.peer_skipped, attn.Mutant.output_into_qa }) |m| {
