@@ -102,9 +102,9 @@ const Uploader = struct {
     fn projection(u: Uploader, p: host.Projection) !Projection {
         const up = u.up.uploader();
         return switch (p) {
-            .mlx => |x| .{ .core = try quant.mlx.upload(up, x) },
-            .dense => |x| .{ .core = try quant.dense.upload(up, x) },
-            .bf16 => |x| .{ .core = try quant.bf16.upload(up, x) },
+            .mlx => |x| .{ .core = try quant.upload(up, .{ .mlx = x }) },
+            .dense => |x| .{ .core = try quant.upload(up, .{ .dense = x }) },
+            .bf16 => |x| .{ .core = try quant.upload(up, .{ .bf16 = x }) },
             .nvfp4 => |x| .{ .nvfp4 = try quant.nvfp4.upload(up, x) },
             .fp8 => |x| .{ .fp8 = try fp8(u, x) },
         };

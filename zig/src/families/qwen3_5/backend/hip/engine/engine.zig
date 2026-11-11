@@ -302,7 +302,10 @@ pub const Engine = struct {
 
     /// The checkpoint's projections are BF16 as stored (an unquantized HF checkpoint): rocBLAS runs them.
     pub fn plain(e: *const Engine) bool {
-        return e.weights.embed == .bf16;
+        return switch (e.weights.embed) {
+            .core => |d| std.meta.activeTag(d) == .bf16,
+            .nvfp4, .fp8 => false,
+        };
     }
 
     fn closeBlas(e: *Engine) void {

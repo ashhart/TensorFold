@@ -31,7 +31,7 @@ pub fn projection(p: weights.Projection) Error!view.Projection {
 fn coreView(p: weights.Projection, stacked: bool) Error!view.Projection {
     return switch (p) {
         .core => |d| hip.quant.view(d, stacked),
-        .nvfp4 => error.UnsupportedTables,
+        .nvfp4, .fp8 => error.UnsupportedTables,
     };
 }
 
