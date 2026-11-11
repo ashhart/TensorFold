@@ -448,6 +448,7 @@ pub const Tri = struct {
 test {
     _ = @import("cuda_split_lane_test.zig");
     _ = @import("cuda_cap_test.zig");
+    _ = @import("cuda_mtp_graphs_test.zig");
     _ = embed;
     _ = hc;
     _ = qmm;
