@@ -24,10 +24,11 @@ pub fn pagingOf(v: ?[]const u8) !usize {
 
 /// TF_FLASHNEXT_STATE_PAGES=1 (with TF_FLASHNEXT_KV_PAGES): a lane's states and draft buffers as pieces, no run.
 pub fn statePages() !bool {
-    const v = @import("core").profile.get(.TF_FLASHNEXT_STATE_PAGES) orelse return false;
-    if (std.mem.eql(u8, v, "0")) return false;
-    if (!std.mem.eql(u8, v, "1")) return error.BadFlashNextStatePages;
-    return true;
+    return statePagesOf(@import("core").profile.get(.TF_FLASHNEXT_STATE_PAGES));
+}
+
+pub fn statePagesOf(v: ?[]const u8) !bool {
+    return @import("sys").environment.value(bool, "TF_FLASHNEXT_STATE_PAGES", v, false) catch error.BadFlashNextStatePages;
 }
 
 /// TF_FLASHNEXT_KV_PAGES_ALL=1: every stream on pages, none on its own contiguous caches (checks).
