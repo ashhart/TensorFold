@@ -14,6 +14,7 @@ pub fn steps(b: *std.Build) void {
         .macos => {
             wire(b, "test-host-ci-macos-fast", "Nightly host checks without a GPU or shader compiler", &macos_fast);
             wire(b, "test-host-ci-macos-adapters", "Nightly host checks without a GPU or shader compiler", &macos_adapters);
+            wire(b, "test-host-ci-macos-native", "Nightly Metal engine host checks with the Metal toolchain", &macos_native);
             wire(b, "test-host-ci-macos-deepseek", "Nightly host checks without a GPU or shader compiler", &macos_deepseek);
             wire(b, "test-host-ci-macos-lanes", "Nightly host checks without a GPU or shader compiler", &macos_lanes);
             wire(b, "test-host-ci-macos-deferred", "Nightly host checks without a GPU or shader compiler", &macos_deferred);
@@ -288,6 +289,8 @@ const macos_adapters = [_][]const u8{
     "test-step5-host",
     "test-verbs",
 };
+
+const macos_native = [_][]const u8{"test-native"};
 
 const macos_deepseek = [_][]const u8{
     "test-dsv41-device-host",
