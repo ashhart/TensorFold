@@ -117,6 +117,8 @@ pub const Forward = struct {
     sess: ?Sess = null,
     /// a workstream's plan-link operations (slots.zig 16-19), run by a follower in the leader's order
     ext: ?Ext = null,
+    /// a KV_SPLIT follower's hand-off shard export (cuda_export_split.zig): rank 0's op_export messages, run on this rank
+    export_shard: ?Ext = null,
     /// rank 0's clean stop of every rank (model.zig: the TP session's announceStop), run by `stop`
     on_stop: ?struct { ctx: *anyopaque, run: *const fn (ctx: *anyopaque) void } = null,
     pf_switch: ?PfSwitch = null, // several live slots: a multi-segment prefill run's slot switch; null: one slot

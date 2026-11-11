@@ -41,6 +41,35 @@ pub const op_sess_admit: i64 = 48;
 pub const op_pf_multi: i64 = 52;
 pub const op_ced_multi: i64 = 53;
 
+/// 70: [op, id word 0, id word 1, at] the follower exports its pool shard of the slot's first `at` tokens under the
+/// hand-off id; 71: [op, id word 0, id word 1] no export will come under that id (ops 70-71: KV_SPLIT hand-off shards)
+pub const op_export: i64 = 70;
+pub const op_export_fail: i64 = 71;
+
+/// A hand-off id as the two plan-link words its message carries.
+pub fn idWords(id: [16]u8) [2]i64 {
+    return .{ std.mem.readInt(i64, id[0..8], .little), std.mem.readInt(i64, id[8..16], .little) };
+}
+
+pub fn idOf(words: []const i64) [16]u8 {
+    var id: [16]u8 = undefined;
+    std.mem.writeInt(i64, id[0..8], words[0], .little);
+    std.mem.writeInt(i64, id[8..16], words[1], .little);
+    return id;
+}
+
+/// Rank 0: the followers' shard exports of a hand-off, at the slot's cut (engine thread; the slot stands at `at`).
+pub fn sendExport(f: *Forward, id: [16]u8, at: u64) !void {
+    const w = idWords(id);
+    if (f.leads()) try f.link.?.send(&.{ op_export, w[0], w[1], @intCast(at) });
+}
+
+/// Rank 0: the followers' shards of `id` will not come (the leader's own export failed).
+pub fn sendExportFail(f: *Forward, id: [16]u8) !void {
+    const w = idWords(id);
+    if (f.leads()) try f.link.?.send(&.{ op_export_fail, w[0], w[1] });
+}
+
 /// Several slots' CED decoder replays in one run (TF_DSV41_REPLAY_RUNS), every rank; `out`: tails, taps.
 pub fn replayMulti(f: *Forward, slots: []const u32, out: []ft.Replayed) !void {
     if (f.leads()) {
@@ -346,6 +375,11 @@ fn followOp(f: *Forward, msg: []const i64, ids: *std.ArrayList(u32), prompt: *st
         op_grammar => {
             const x = f.grammar orelse return error.BadPlan;
             try x.follow(x.ptr, msg);
+        },
+        op_export, op_export_fail => {
+            // no exporter on this rank (it is not a producer): the leader's shard export is simply not served here
+            const x = f.export_shard orelse return false;
+            try x.run(x.ptr, msg);
         },
         else => {
             const x = f.ext orelse return error.BadPlan;
