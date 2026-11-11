@@ -1,5 +1,6 @@
 //! Dense Qwen text configuration and checkpoint contracts. GPU forward pieces follow separately.
 pub const dflash = @import("dflash/root.zig");
+pub const dspine = @import("dspine/root.zig");
 pub const gguf = @import("gguf.zig");
 pub const config = @import("config.zig");
 pub const affine = @import("affine.zig");
@@ -45,10 +46,13 @@ pub const disk = @import("disk.zig");
 pub const taps = @import("taps.zig");
 pub const tap_gather = @import("tap_gather.zig");
 pub const tap_ring = @import("tap_ring.zig");
+pub const drafter = @import("drafter.zig");
 /// The 27B's Metal sources by name (the kernel contract compiles them as the engine does).
 pub const runtime_sources = @import("qwen_runtime_sources");
 test {
     _ = dflash;
+    _ = dspine;
+    _ = drafter;
     _ = disk;
     _ = @import("core").gpu_profile;
     _ = session;

@@ -132,6 +132,8 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     _ = program(b, "tf-qwen27-bench", "Build the projection-split, one-row floor and shared-round timing bench on real weights", "zig/tests/qwen27/bench.zig", target, false, served);
     _ = program(b, "tf-qwen27-classes", "Build the per-class projection GPU time against the weight-bytes roofline on real weights", "zig/tests/qwen27/classes.zig", target, false, served);
     _ = program(b, "tf-qwen27-streams", "Build the real-weight check that shared rounds keep each stream's logits alone", "zig/tests/qwen27/streams.zig", target, false, served);
+    _ = program(b, "tf-qwen27-dspine-gate", "Build the DSpine one-round gate: MLX reference taps in, Metal drafts and top-16 compared", "zig/tests/qwen27/dspine_gate.zig", target, false, served);
+    _ = program(b, "tf-qwen27-dspine-run", "Build one-stream greedy speed: plain, DFlash2 trees and DSpine chains", "zig/tests/qwen27/dspine_run.zig", target, false, served);
     _ = program(b, "tf-qwen27-reuse", "Qwen27 prompt reuse through the served host against fresh prompt passes: states and replies", "zig/tests/qwen27/reuse.zig", target, false, served);
     _ = program(b, "tf-qwen27-marks", "Build native marked-prefix state and continuation checks on real weights", "zig/tests/qwen27/marks.zig", target, false, served);
     _ = program(b, "tf-qwen27-runtime", "Compile native Qwen interfaces without running a GPU", "zig/tests/qwen27/runtime.zig", target, false, &.{.{ .name = "qwen27", .module = qwen27 }});

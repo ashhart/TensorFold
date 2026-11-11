@@ -167,6 +167,10 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         if (!assemble) return undefined;
         return .{ .decl = d, .function = fun, .here = sources.lfm2, .pre_m5 = sources.lfm2 };
     }
+    if (std.mem.startsWith(u8, d.name, "metal qwen27 dspine ")) {
+        if (!assemble) return undefined;
+        return .{ .decl = d, .function = fun, .here = sources.qwen27_dspine, .pre_m5 = sources.qwen27_dspine };
+    }
     if (std.mem.startsWith(u8, d.name, "metal ling route ")) {
         if (!assemble) return undefined;
         const body = @import("ling_metal").route;

@@ -10,7 +10,7 @@ const Config = @import("cuda_draft_config.zig").Config;
 const Affine4 = cuda.qlinear.Affine4;
 const DeviceBuffer = cuda.DeviceBuffer;
 const aligned = engine.aligned;
-const prefix = "selected_prefix_bridge.";
+const prefix = core.dspine.bridge_prefix;
 
 pub const Bridge = struct {
     read: [8]Affine4 = undefined, // layer i's read: hidden -> code
@@ -42,8 +42,18 @@ pub fn total(c: Config) usize {
         dw.packedBytes(2 * c.rank, c.code) + aligned(c.rank * 2) + aligned(c.vocab * c.code * 2) + aligned(c.vocab * c.rank * 2);
 }
 
-fn version(ck: *core.Checkpoint, name: []const u8) !void {
-    const t = try ck.expect(name, .i64, &.{});
+/// A tensor as core.dspine's table states it: its dtype and its dims for `c`.
+fn tensor(ck: *core.Checkpoint, c: Config, name: []const u8) !core.checkpoint.Tensor {
+    const want = core.dspine.find(name, c.layers) orelse return error.UnsupportedDraftConfig;
+    var dims: [3]usize = undefined;
+    return ck.expect(name, switch (want.kind) {
+        .bf16 => .bf16,
+        .i64 => .i64,
+    }, core.dspine.dims(c, want, &dims));
+}
+
+fn version(ck: *core.Checkpoint, c: Config, name: []const u8) !void {
+    const t = try tensor(ck, c, name);
     if (std.mem.readInt(i64, t.bytes[0..8], .little) != 1) return error.UnsupportedDraftConfig;
 }
 
@@ -51,16 +61,16 @@ fn version(ck: *core.Checkpoint, name: []const u8) !void {
 pub fn load(gpa: std.mem.Allocator, io: std.Io, e: *engine.Engine, dir: []const u8, c: Config, transpose: cuda.Function) !Bridge {
     var ck = try core.Checkpoint.openModel(gpa, io, dir);
     defer core.checkpoint.cache.close(&ck);
-    for ([_][]const u8{ "draft_block_causal_version", "last_write_refine_version", prefix ++ "independent_write_version", prefix ++ "terminal_disabled_version" }) |n| try version(&ck, n);
+    inline for (core.dspine.globals ++ core.dspine.bridge_tensors, 0..) |t, i| if (t.kind == .i64) try version(&ck, c, if (i < core.dspine.globals.len) t.name else prefix ++ t.name);
     var b: Bridge = .{ .arena = try DeviceBuffer.alloc(e.d, total(c)) };
     errdefer b.arena.free();
     const most = @max(dw.rawBytes(c.code, c.hidden), dw.rawBytes(c.hidden, c.rank), dw.rawBytes(2 * c.rank, c.code));
     var stage = try DeviceBuffer.alloc(e.d, most);
     defer stage.free();
     const L = c.layers;
-    const early = try ck.expect(prefix ++ "early_read_weights", .bf16, &.{ L - 1, c.code, c.hidden });
-    const last = try ck.expect(prefix ++ "read_weight", .bf16, &.{ c.code, c.hidden });
-    const writes = try ck.expect(prefix ++ "feature_write_weights", .bf16, &.{ L, c.hidden, c.rank });
+    const early = try tensor(&ck, c, prefix ++ "early_read_weights");
+    const last = try tensor(&ck, c, prefix ++ "read_weight");
+    const writes = try tensor(&ck, c, prefix ++ "feature_write_weights");
     const one_read = c.code * c.hidden;
     const one_write = c.hidden * c.rank;
     for (0..L) |i| {
@@ -68,39 +78,33 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, e: *engine.Engine, dir: []const 
         b.read[i] = try dw.linearRows(gpa, e, &stage, &b, rows, c.code, c.hidden);
         b.write[i] = try dw.linearRows(gpa, e, &stage, &b, std.mem.bytesAsSlice(u16, writes.bytes)[i * one_write ..][0..one_write], c.hidden, c.rank);
     }
-    const gate = try ck.expect(prefix ++ "gate.weight", .bf16, &.{ c.rank, c.code });
+    const gate = try tensor(&ck, c, prefix ++ "gate.weight");
     b.gate = try dw.linearRows(gpa, e, &stage, &b, std.mem.bytesAsSlice(u16, gate.bytes), c.rank, c.code);
     const pv = try gpa.alloc(u16, 2 * c.rank * c.code);
     defer gpa.free(pv);
     for ([_][]const u8{ prefix ++ "predecessor_gate.weight", prefix ++ "prev.weight" }, 0..) |name, i| {
-        const t = try ck.expect(name, .bf16, &.{ c.rank, c.code });
+        const t = try tensor(&ck, c, name);
         @memcpy(pv[i * c.rank * c.code ..][0 .. c.rank * c.code], std.mem.bytesAsSlice(u16, t.bytes));
     }
     b.pv = try dw.linearRows(gpa, e, &stage, &b, pv, 2 * c.rank, c.code);
-    const bias = try ck.expect(prefix ++ "gate.bias", .bf16, &.{c.rank});
+    const bias = try tensor(&ck, c, prefix ++ "gate.bias");
     b.gate_b = try b.alloc(bias.bytes.len);
     try b.arena.upload(b.gate_b - b.arena.ptr, bias.bytes);
-    const book = try ck.expect(prefix ++ "codebook", .bf16, &.{ c.vocab, c.code });
+    const book = try tensor(&ck, c, prefix ++ "codebook");
     b.codebook = try b.alloc(book.bytes.len);
     try b.arena.upload(b.codebook - b.arena.ptr, book.bytes);
     b.tg = try b.alloc(c.vocab * c.rank * 2);
-    const norm = try ck.expect("norm.weight", .bf16, &.{c.hidden});
+    const norm = try tensor(&ck, c, "norm.weight");
     const wl = std.mem.bytesAsSlice(u16, writes.bytes)[(L - 1) * one_write ..][0..one_write];
     try table(gpa, e, c, std.mem.bytesAsSlice(u16, norm.bytes), wl, b.tg, transpose);
     return b;
-}
-
-fn bf16(h: u16) f32 {
-    return @bitCast(@as(u32, h) << 16);
 }
 
 /// TG[v][k] = head row v . bf16(norm * W[:, k]): the target head over `rank` rows, transposed to vocab rows.
 fn table(gpa: std.mem.Allocator, e: *engine.Engine, c: Config, norm: []align(1) const u16, w: []align(1) const u16, out: u64, transpose: cuda.Function) !void {
     const rows = try gpa.alloc(u16, c.rank * c.hidden);
     defer gpa.free(rows);
-    for (0..c.rank) |k| for (0..c.hidden) |h| {
-        rows[k * c.hidden + h] = core.bf16_round.bits(bf16(norm[h]) * bf16(w[h * c.rank + k]));
-    };
+    for (0..c.rank) |k| core.dspine.tgInput(norm, w, c.rank, k, rows[k * c.hidden ..][0..c.hidden]);
     var x = try DeviceBuffer.alloc(e.d, rows.len * 2 + c.rank * (c.hidden / 64) * 4);
     defer x.free();
     try x.upload(0, std.mem.sliceAsBytes(rows));

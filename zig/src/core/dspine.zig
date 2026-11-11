@@ -1,5 +1,6 @@
 //! DSpine (Tencent's code-bridge block drafter) for any backend: its config contract and the exact-sender table walk.
 const std = @import("std");
+const bf16 = @import("bf16_round");
 
 /// The serial second pass's candidates a row (head_topk), as every backend's table fixes them.
 pub const head_topk = 16;
@@ -135,6 +136,123 @@ pub fn parse(root: std.json.Value) !Shape {
     if (s.code % 64 != 0 or s.rank % 64 != 0 or s.hidden % 64 != 0) return error.UnsupportedDraftConfig;
     if (s.window < s.block or s.window > most_window) return error.UnsupportedDraftConfig;
     return s;
+}
+
+/// A checkpoint tensor's dimension in the config's terms (`early`: the layers before the last).
+pub const Dim = enum { hidden, intermediate, vocab, code, rank, layers, early, q_width, kv_width, head_dim, tap_width };
+pub const Kind = enum { bf16, i64 };
+/// One checkpoint tensor: its name (bridge names under bridge_prefix, layer names under "layers.{i}."), dtype and dims.
+pub const Tensor = struct { name: []const u8, kind: Kind = .bf16, dims: []const Dim };
+pub const bridge_prefix = "selected_prefix_bridge.";
+/// The tensors outside the bridge and the layers; the i64 ones are version scalars the reference requires at 1.
+pub const globals = [_]Tensor{
+    .{ .name = "fc.weight", .dims = &.{ .hidden, .tap_width } },
+    .{ .name = "hidden_norm.weight", .dims = &.{.hidden} },
+    .{ .name = "norm.weight", .dims = &.{.hidden} },
+    .{ .name = "draft_block_causal_version", .kind = .i64, .dims = &.{} },
+    .{ .name = "last_write_refine_version", .kind = .i64, .dims = &.{} },
+};
+/// The code bridge: reads [early, code, hidden] then the last's, writes [layers, hidden, rank], gates [rank, code].
+pub const bridge_tensors = [_]Tensor{
+    .{ .name = "codebook", .dims = &.{ .vocab, .code } },
+    .{ .name = "early_read_weights", .dims = &.{ .early, .code, .hidden } },
+    .{ .name = "read_weight", .dims = &.{ .code, .hidden } },
+    .{ .name = "feature_write_weights", .dims = &.{ .layers, .hidden, .rank } },
+    .{ .name = "gate.weight", .dims = &.{ .rank, .code } },
+    .{ .name = "gate.bias", .dims = &.{.rank} },
+    .{ .name = "predecessor_gate.weight", .dims = &.{ .rank, .code } },
+    .{ .name = "prev.weight", .dims = &.{ .rank, .code } },
+    .{ .name = "out.weight", .dims = &.{ .code, .rank } },
+    .{ .name = "independent_write_version", .kind = .i64, .dims = &.{} },
+    .{ .name = "terminal_disabled_version", .kind = .i64, .dims = &.{} },
+};
+/// Each body layer's tensors.
+pub const layer_tensors = [_]Tensor{
+    .{ .name = "input_layernorm.weight", .dims = &.{.hidden} },
+    .{ .name = "post_attention_layernorm.weight", .dims = &.{.hidden} },
+    .{ .name = "self_attn.q_proj.weight", .dims = &.{ .q_width, .hidden } },
+    .{ .name = "self_attn.k_proj.weight", .dims = &.{ .kv_width, .hidden } },
+    .{ .name = "self_attn.v_proj.weight", .dims = &.{ .kv_width, .hidden } },
+    .{ .name = "self_attn.o_proj.weight", .dims = &.{ .hidden, .q_width } },
+    .{ .name = "self_attn.q_norm.weight", .dims = &.{.head_dim} },
+    .{ .name = "self_attn.k_norm.weight", .dims = &.{.head_dim} },
+    .{ .name = "mlp.gate_proj.weight", .dims = &.{ .intermediate, .hidden } },
+    .{ .name = "mlp.up_proj.weight", .dims = &.{ .intermediate, .hidden } },
+    .{ .name = "mlp.down_proj.weight", .dims = &.{ .hidden, .intermediate } },
+};
+
+/// The checkpoint's tensor count: 71 for five layers.
+pub fn tensorCount(layers: usize) usize {
+    return globals.len + bridge_tensors.len + layer_tensors.len * layers;
+}
+
+/// A dimension's size for `s`: a Shape, or any backend config with the same fields.
+pub fn size(s: anytype, d: Dim) usize {
+    return switch (d) {
+        .hidden => s.hidden,
+        .intermediate => s.intermediate,
+        .vocab => s.vocab,
+        .code => s.code,
+        .rank => s.rank,
+        .layers => s.layers,
+        .early => s.layers - 1,
+        .q_width => s.heads * s.head_dim,
+        .kv_width => s.kv_heads * s.head_dim,
+        .head_dim => s.head_dim,
+        .tap_width => s.hidden * s.n_taps,
+    };
+}
+
+/// A tensor's dims for `s`, in `out`.
+pub fn dims(s: anytype, t: Tensor, out: *[3]usize) []const usize {
+    for (t.dims, out[0..t.dims.len]) |d, *o| o.* = size(s, d);
+    return out[0..t.dims.len];
+}
+
+/// The tensor a full checkpoint name stands for (a layer's under layers.{i} for i below `layers`); null: none.
+pub fn find(name: []const u8, layers: usize) ?Tensor {
+    for (globals) |t| if (std.mem.eql(u8, t.name, name)) return t;
+    if (std.mem.startsWith(u8, name, bridge_prefix)) {
+        for (bridge_tensors) |t| if (std.mem.eql(u8, t.name, name[bridge_prefix.len..])) return t;
+        return null;
+    }
+    if (!std.mem.startsWith(u8, name, "layers.")) return null;
+    const rest = name["layers.".len..];
+    const dot = std.mem.indexOfScalar(u8, rest, '.') orelse return null;
+    const i = std.fmt.parseInt(usize, rest[0..dot], 10) catch return null;
+    if (i >= layers or (dot > 1 and rest[0] == '0')) return null;
+    for (layer_tensors) |t| if (std.mem.eql(u8, t.name, rest[dot + 1 ..])) return t;
+    return null;
+}
+
+/// Every name the checkpoint holds, each once: globals, the bridge's, then each layer's.
+pub fn names(gpa: std.mem.Allocator, layers: usize) ![][]const u8 {
+    const result = try gpa.alloc([]const u8, tensorCount(layers));
+    var made: usize = 0;
+    errdefer freeNames(gpa, result[0..made]);
+    for (globals) |t| {
+        result[made] = try gpa.dupe(u8, t.name);
+        made += 1;
+    }
+    for (bridge_tensors) |t| {
+        result[made] = try std.mem.concat(gpa, u8, &.{ bridge_prefix, t.name });
+        made += 1;
+    }
+    for (0..layers) |i| for (layer_tensors) |t| {
+        result[made] = try std.fmt.allocPrint(gpa, "layers.{d}.{s}", .{ i, t.name });
+        made += 1;
+    };
+    return result;
+}
+
+pub fn freeNames(gpa: std.mem.Allocator, list: []const []const u8) void {
+    for (list) |name| gpa.free(name);
+    gpa.free(list);
+}
+
+/// TG's device input for column k: bf16(norm[h] * W_write[last][h][k]); TG[v][k] = target head row v . it.
+pub fn tgInput(norm: []align(1) const u16, write_last: []align(1) const u16, rank: usize, k: usize, out: []u16) void {
+    for (out, norm, 0..) |*o, w, h| o.* = bf16.bits(bf16.value(w) * bf16.value(write_last[h * rank + k]));
 }
 
 /// Row r's sender for `pred`: 0 on row 0 (all hold the pending token), else its index in the row before's candidates.

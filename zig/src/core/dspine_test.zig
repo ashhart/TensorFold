@@ -84,3 +84,30 @@ test "DSpine table: the walk follows the sender's row; the sender is the chosen 
     try t.expectEqual(@as(?usize, 0), dspine.sender(0, cand[0..2], 99));
     try t.expectEqual(@as(?usize, null), dspine.sender(1, cand[0..2], 99));
 }
+
+test "DSpine checkpoint: 71 tensors for five layers, each name found once with its dims; others are not" {
+    const s = try parsed(fixture);
+    const names = try dspine.names(a, s.layers);
+    defer dspine.freeNames(a, names);
+    try t.expectEqual(@as(usize, 71), names.len);
+    for (names) |name| try t.expect(dspine.find(name, s.layers) != null);
+    var dims: [3]usize = undefined;
+    const early = dspine.find("selected_prefix_bridge.early_read_weights", s.layers).?;
+    try t.expectEqualSlices(usize, &.{ 4, 1024, 5120 }, dspine.dims(s, early, &dims));
+    try t.expectEqualSlices(usize, &.{ 5120, 25600 }, dspine.dims(s, dspine.find("fc.weight", s.layers).?, &dims));
+    try t.expectEqual(dspine.Kind.i64, dspine.find("draft_block_causal_version", s.layers).?.kind);
+    try t.expectEqual(@as(usize, 0), dspine.dims(s, dspine.find("selected_prefix_bridge.terminal_disabled_version", s.layers).?, &dims).len);
+    for ([_][]const u8{ "layers.5.mlp.up_proj.weight", "layers.01.mlp.up_proj.weight", "codebook", "selected_prefix_bridge.fc.weight", "lm_head.weight" }) |name| {
+        try t.expect(dspine.find(name, s.layers) == null);
+    }
+}
+
+test "DSpine TG: the device head input for column k is bf16(norm * W[:, k])" {
+    const bf = @import("bf16_round");
+    // hidden 2, rank 2: W [hidden][rank]
+    const norm = [_]u16{ bf.bits(2), bf.bits(0.5) };
+    const write = [_]u16{ bf.bits(1), bf.bits(3), bf.bits(4), bf.bits(-2) };
+    var input: [2]u16 = undefined;
+    dspine.tgInput(&norm, &write, 2, 1, &input);
+    try t.expectEqualSlices(u16, &.{ bf.bits(6), bf.bits(-1) }, &input);
+}

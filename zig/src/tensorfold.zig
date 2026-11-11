@@ -129,6 +129,8 @@ pub const gpu_profile = @import("core/gpu_profile.zig");
 pub const metal_kv_pages = @import("core/metal_kv_pages.zig");
 
 pub const draft_ops = @import("draft_ops");
+/// DSpine's config contract and exact-sender table walk (the CUDA and Metal drafters share it).
+pub const dspine = @import("core/dspine.zig");
 
 pub const affine4 = @import("core/affine4.zig");
 pub const affine4_lane = @import("core/affine4_lane.zig");
