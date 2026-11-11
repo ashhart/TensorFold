@@ -71,8 +71,7 @@ pub fn Guide(comptime Engine: type) type {
     };
 }
 
-/// One prompt round of a request: the guide begins with it, then runs one row a round before the conditional prompt's
-/// next chunk (`conditional`: `whole()` and `chunk()`); true once both prompts are whole, so the first frame may run.
+/// One prompt round: the guide runs a row before each conditional chunk; true once both prompts are whole.
 pub fn promptRound(guide: anytype, rows: []const [W]i32, gamma: f32, first: bool, conditional: anytype) !bool {
     if (guide) |g| {
         if (first) try g.begin(rows, gamma) else if (try g.promptStep(rows)) return false;
