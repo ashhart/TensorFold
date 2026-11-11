@@ -4,6 +4,7 @@ const cuda = @import("cuda");
 const q = @import("qwen35");
 const fixture = @import("qwen35_verify_host.zig");
 const T = std.testing;
+
 const Trace = struct {
     var count: usize = 0;
     var ids: [600]usize = undefined;
@@ -79,6 +80,11 @@ fn engine(d: *cuda.Driver) q.engine.Engine {
     e.wide.split = null;
     e.wide.pdl = false;
     e.g = .{ .hidden = 256, .intermediate = 512, .layers = 0, .vocab = 1, .k_heads = 1, .v_heads = 1, .q_heads = 1, .kv_heads = 1, .eps = 1e-6, .tied = false, .context = 1, .linear = @splat(false) };
+    e.scratch_buf = null;
+    e.scratch_capacity = 0;
+    e.scratch_rows = 64;
+    e.verify_rows = q.engine.most_verify;
+    e.window_rows = q.engine.most_window;
     return e;
 }
 const weight: cuda.qlinear.Affine4 = .{ .w = 10, .s = 20, .b = 30, .n = 129, .k = 256, .npad = 256 };
@@ -104,14 +110,20 @@ test "prompt int8: enable allocates once, failure retains no owner, and deinit i
     Trace.fail = false;
     try e.int8.enable(&e);
     try e.int8.enable(&e);
-    try T.expectEqual(@as(usize, 3), Trace.allocations);
+    try T.expectEqual(@as(usize, 2), Trace.allocations);
     try T.expect(e.int8.on);
-    try T.expectEqual(cuda.w4a8.Kernels.scratch(q.engine.max_rows, 512), e.int8.buf.?.len);
+    try T.expect(e.int8.buf == null and e.int8.ws == 0 and e.int8.capacity == 0);
+
+    // The configured ceiling is reserved at startup; it is not grown during a request.
+    try e.int8.ensureRows(&e, e.scratch_rows);
+    try T.expectEqual(@as(usize, 3), Trace.allocations);
+    try T.expectEqual(@as(usize, 0), Trace.frees);
+    try T.expectEqual(@as(usize, 64), e.int8.capacity);
     e.int8.deinit();
-    try T.expect(!e.int8.on and e.int8.buf == null and e.int8.ws == 0);
+    try T.expect(!e.int8.on and e.int8.buf == null and e.int8.ws == 0 and e.int8.capacity == 0);
     e.int8.deinit();
     try T.expectEqual(@as(usize, 2), Trace.frees);
-    try T.expect(!e.int8.on and e.int8.buf == null and e.int8.ws == 0);
+    try T.expect(!e.int8.on and e.int8.buf == null and e.int8.ws == 0 and e.int8.capacity == 0);
 }
 
 test "prompt int8: actual dispatch keeps option, role and affine width separate at all row edges" {
@@ -126,6 +138,7 @@ test "prompt int8: actual dispatch keeps option, role and affine width separate 
                 e.int8.ws = 0x900000;
                 const p: q.engine.Proj = if (other) .{ .an = .{ .w = 10, .s = 20, .b = 30, .n = 129, .k = 256, .npad = 256, .bits = 8 } } else .{ .a4 = weight };
                 try e.projSums(p, 0x10000, 0x20000, 0x30000, rows, prompt, 0);
+                try T.expectEqual(@as(usize, 0), Trace.allocations); // projection never grows workspace mid-forward
                 const quantized = on and prompt and !other;
                 const wide_prompt = prompt and rows > 16;
                 try T.expectEqual(if (quantized) (if (rows <= 16) @as(usize, 3) else 2) else if (wide_prompt) 1 else 1 + (rows + 15) / 16, Trace.count);
@@ -174,8 +187,66 @@ test "prompt int8: hand-built projection fixture initializes all newly read sele
     try T.expectEqual(@as(u8, 0), std.mem.asBytes(&e.int8.on)[0]);
     try T.expectEqual(@as(u8, 0), std.mem.asBytes(&e.affine.half_prompt)[0]);
     try T.expect(!e.int8.on and e.int8.buf == null and e.int8.flag == null and e.int8.ws == 0);
+    try T.expect(e.scratch_buf == null and e.scratch_capacity == 0);
+    try T.expectEqual(q.engine.most_verify, e.verify_rows);
     try T.expect(!e.affine.half_prompt);
     try T.expectEqual(@as(usize, 4), @intFromPtr(e.affine.prefill22_fn.handle));
+}
+
+
+fn capacityCache(d: *cuda.Driver) q.engine.Cache {
+    const b: cuda.DeviceBuffer = .{ .d = d, .ptr = 1, .len = 1 };
+    return .{
+        .state = b,
+        .kv = b,
+        .log = b,
+        .cap = 128,
+        .logits = &.{},
+    };
+}
+
+test "prompt int8: forward rejects rows beyond reserved scratch before launching kernels" {
+    var d: cuda.Driver = undefined;
+    var e = engine(&d);
+    e.learning = null;
+    e.g.q_heads = 2;
+    e.g.kv_heads = 1;
+    e.g.context = 128;
+    e.scratch_capacity = 64;
+
+    var cache = capacityCache(&d);
+    const parts = [_]q.engine.Part{.{ .cache = &cache, .rows = 65 }};
+    const ids: [65]u32 = @splat(0);
+
+    Trace.reset();
+    try T.expectError(
+        error.ScratchCapacityExceeded,
+        e.forward(&parts, &ids, .last),
+    );
+    try T.expectEqual(@as(usize, 0), Trace.count);
+}
+
+test "prompt int8: forward rejects rows beyond reserved int8 workspace before launching kernels" {
+    var d: cuda.Driver = undefined;
+    var e = engine(&d);
+    e.learning = null;
+    e.g.q_heads = 2;
+    e.g.kv_heads = 1;
+    e.g.context = 128;
+    e.scratch_capacity = 65;
+    e.int8.on = true;
+    e.int8.capacity = 64;
+
+    var cache = capacityCache(&d);
+    const parts = [_]q.engine.Part{.{ .cache = &cache, .rows = 65 }};
+    const ids: [65]u32 = @splat(0);
+
+    Trace.reset();
+    try T.expectError(
+        error.PromptInt8CapacityExceeded,
+        e.forward(&parts, &ids, .last),
+    );
+    try T.expectEqual(@as(usize, 0), Trace.count);
 }
 
 test "prompt int8: large GDN groups retain four separate quantized projections" {
