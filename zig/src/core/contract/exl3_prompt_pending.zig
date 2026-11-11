@@ -1,4 +1,4 @@
-//! Prompt kernels with a new shared-id guard ABI: historical compiler rows do not certify this source.
+//! Shared-id prompt kernels require measured compiler resource records for their current ABI.
 const std = @import("std");
 const registry = @import("registry.zig");
 const limits = @import("limits.zig");
@@ -12,7 +12,7 @@ pub fn owns(name: []const u8) bool {
     return false;
 }
 
-test "EXL3 prompt: changed source cannot inherit historical compiler usage" {
+test "EXL3 prompt: unmeasured compiler usage stays pending" {
     for (records) |r| for ([_]?limits.Nvcc{ null, .{ .major = 13, .minor = 0 }, .{ .major = 13, .minor = 1 }, .{ .major = 13, .minor = 2 }, .{ .major = 13, .minor = 3 } }) |version| {
         try std.testing.expectEqualDeep(registry.none, registry.usageFor(r, version));
     };

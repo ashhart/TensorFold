@@ -5,6 +5,7 @@ const core = @import("core");
 const glm = @import("glm_cuda");
 const check = @import("check.zig");
 const qr = @import("quant_ref_tests.zig");
+const compact_prompt = @import("glm_exl3_compact.zig");
 const Gpu = check.Gpu;
 
 const fmt = core.exl3_format;
@@ -115,7 +116,7 @@ fn runMode(r: *Rig, k: *const glm.exl3.Kernels, ek: *const glm.experts.Kernels, 
         .rank = try r.zeros((if (wide) P else 1) * 4),
         .hist = try r.zeros((if (wide) (P + 1023) / 1024 * (E + 1) else 1) * 4),
     };
-    const sz: [4]usize = if (legacy) .{ glm.exl3.testing.scratchBytes(rows, D, N, s.shx), 4, 4, 4 } else glm.exl3.scratchBytes(rows, D, N, prompt, s.shx);
+    const sz: [4]usize = if (legacy) .{ compact_prompt.scratchBytes(rows, D, N, s.shx), 4, 4, 4 } else glm.exl3.scratchBytes(rows, D, N, prompt, s.shx);
     const sc: glm.exl3.Scratch = .{ .picks = try r.zeros(sz[0]), .xg = try r.zeros(sz[1]), .xu = try r.zeros(sz[2]), .z = try r.zeros(sz[3]) };
     const ey = if (sentinel) |value| blk: {
         const words = try r.a.alloc(u32, rows * slots * D);
@@ -126,13 +127,13 @@ fn runMode(r: *Rig, k: *const glm.exl3.Kernels, ek: *const glm.experts.Kernels, 
     const xp = try r.dev(std.mem.sliceAsBytes(x));
     const picks_dev = try r.dev(std.mem.sliceAsBytes(pk));
     if (legacy) {
-        try glm.exl3.testing.run(k, ek, r.s, s.experts(), sc, plan, xp, D, picks_dev, slots, rows, E, D, N, limit, ey);
+        try compact_prompt.run(k, ek, r.s, s.experts(), sc, plan, xp, D, picks_dev, slots, rows, E, D, N, limit, ey);
     } else try glm.exl3.run(k, ek, r.s, s.experts(), sc, plan, xp, D, picks_dev, slots, rows, E, D, N, limit, prompt, ey, xd);
     try r.s.synchronize();
     return .{ .ey = ey, .rows = rows };
 }
 
-/// Every routed FP32 word against the old compact prompt loop; the shared writer alone owns the ninth slot.
+/// Every routed FP32 word against the compact 1,024-row prompt caller; the shared writer alone owns the ninth slot.
 fn largeBytes(r: *Rig, k: *const glm.exl3.Kernels, ek: *const glm.experts.Kernels, s: Set) !void {
     const sentinel: u32 = 0x4b123456;
     for ([_]usize{ 2054, 4102 }) |rows| {
