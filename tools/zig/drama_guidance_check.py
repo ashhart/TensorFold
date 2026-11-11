@@ -10,6 +10,8 @@ from drama_reference_cache_check import TEXTS, serve
 GAMMAS = ("1", "1.5", "3")
 CFG = ["--cfg-gamma", "1.5", "--cfg-allow-request-gamma", "--cfg-force-guided"]
 MODES = {"plain": [], "separate": CFG, "paired": [*CFG, "--cfg-batched"]}
+# One row a chunk, and chunks that take a whole prompt (or a cached reference's suffix) in one round.
+ROWS = (1, 1024)
 
 
 def plan(voice):
@@ -19,18 +21,28 @@ def plan(voice):
                      ("lane-b", voice, TEXTS[4], {"X-Cfg-Gamma": "1.5"})]]
 
 
-def verdict(modes):
-    """Paired equals separate on every reply; forced gamma 1 equals the server without CFG."""
+def require_reference(voices, voice):
+    """Guidance runs only for a reference-backed catalog voice; the built-in default has no reference."""
+    path = voices / f"{voice}.json"
+    if voice.lower() == "default" or not path.is_file() or not json.loads(path.read_text()).get("references"):
+        raise SystemExit(f"--voice {voice!r} must name a catalog voice with a reference in {voices}")
+
+
+def verdict(runs):
+    """Every reply has PCM; paired equals separate; forced gamma 1 equals the server without CFG; per prefill size."""
     problems = []
-    separate, paired, plain = modes["separate"], modes["paired"], modes["plain"]
-    for name, reply in separate.items():
-        if paired[name]["sha256"] != reply["sha256"]:
-            problems.append(f"{name}: paired PCM differs from separate")
-    for name, reply in plain.items():
-        if name.endswith("-g1"):
+    for rows, modes in runs.items():
+        separate, paired, plain = modes["separate"], modes["paired"], modes["plain"]
+        for mode, replies in modes.items():
+            problems += [f"rows={rows} {name}: {mode} returned no PCM" for name, reply in replies.items()
+                         if reply["bytes"] == 0]
+        for name, reply in separate.items():
+            if paired[name]["sha256"] != reply["sha256"]:
+                problems.append(f"rows={rows} {name}: paired PCM differs from separate")
+        for name, reply in plain.items():
             for mode in ("separate", "paired"):
                 if modes[mode][name]["sha256"] != reply["sha256"]:
-                    problems.append(f"{name}: {mode} gamma 1 differs from the server without CFG")
+                    problems.append(f"rows={rows} {name}: {mode} gamma 1 differs from the server without CFG")
     return problems
 
 
@@ -39,18 +51,23 @@ def main():
     parser.add_argument("--bin", type=Path, required=True, help="tensorfold-native built with this change (CUDA)")
     parser.add_argument("--checkpoint", type=Path, required=True, help="fishaudio/drama-3 checkpoint directory")
     parser.add_argument("--voices", type=Path, required=True, help="voice catalog directory for --voices")
-    parser.add_argument("--voice", required=True, help="a catalog voice in --voices")
+    parser.add_argument("--voice", required=True, help="a catalog voice in --voices with a reference")
     parser.add_argument("--out", type=Path, required=True, help="new directory for server logs and results.json")
     parser.add_argument("--ready-timeout", type=float, default=900)
     parser.add_argument("--timeout", type=float, default=300)
     args = parser.parse_args()
+    require_reference(args.voices, args.voice)
     args.out.mkdir(parents=True, exist_ok=False)
     steps = plan(args.voice)
     plain = [s for s in steps if not isinstance(s, list) and s[0].endswith("-g1")]
-    modes = {mode: serve(args, dict(os.environ), flags, args.out / f"server-{mode}.log",
-                         plain if mode == "plain" else steps) for mode, flags in MODES.items()}
-    problems = verdict(modes)
-    result = {"pass": not problems, "problems": problems, "modes": modes}
+    runs = {}
+    for rows in ROWS:
+        # the cache's second request of a voice resumes after its reference: a one-chunk suffix at large rows
+        env = {**os.environ, "TF_DRAMA_PREFILL_ROWS": str(rows), "TF_DRAMA_REFERENCE_CACHE": "2"}
+        runs[rows] = {mode: serve(args, env, flags, args.out / f"server-rows{rows}-{mode}.log",
+                                  plain if mode == "plain" else steps) for mode, flags in MODES.items()}
+    problems = verdict(runs)
+    result = {"pass": not problems, "problems": problems, "runs": runs}
     (args.out / "results.json").write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps({"pass": result["pass"], "problems": problems}, indent=2))
     return 0 if not problems else 1

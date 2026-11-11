@@ -53,17 +53,32 @@ pub fn Guide(comptime Engine: type) type {
 
         /// One prompt row per scheduler round keeps cancellation and other lanes responsive.
         pub fn promptStep(g: *Self, rows: []const [W]i32) !bool {
-            if (!g.state.active or g.e.rows_done == rows.len) return false;
+            if (g.whole(rows)) return false;
             try g.e.backboneChunk(rows.len, g.e.rows_done, 1, null);
             g.e.rows_done += 1;
             if (g.e.rows_done == rows.len) try g.e.finishPrompt(rows);
             return true;
         }
 
+        /// Every row of this request's unconditional prompt has run (none for a plain request).
+        pub fn whole(g: *const Self, rows: []const [W]i32) bool {
+            return !g.state.active or g.e.rows_done == rows.len;
+        }
+
         pub fn clear(g: *Self) void {
             g.state.clear();
         }
     };
+}
+
+/// One prompt round of a request: the guide begins with it, then runs one row a round before the conditional prompt's
+/// next chunk (`conditional`: `whole()` and `chunk()`); true once both prompts are whole, so the first frame may run.
+pub fn promptRound(guide: anytype, rows: []const [W]i32, gamma: f32, first: bool, conditional: anytype) !bool {
+    if (guide) |g| {
+        if (first) try g.begin(rows, gamma) else if (try g.promptStep(rows)) return false;
+    }
+    if (!conditional.whole()) try conditional.chunk();
+    return conditional.whole() and if (guide) |g| g.whole(rows) else true;
 }
 
 test "CFG rejects nonfinite and out-of-range gamma before state activation" {
@@ -99,25 +114,27 @@ test "CFG mixes only an active guide above gamma 1, so gamma 1 keeps the conditi
     try std.testing.expectEqual(null, state.mixing());
 }
 
+/// A backbone that checks each guide row arrives in order, one a chunk.
+const FakeBackbone = struct {
+    rows_done: usize = 0,
+    starts: usize = 0,
+    finished: usize = 0,
+    fn startPrompt(f: *@This(), _: []const [W]i32) !void {
+        f.starts += 1;
+        f.rows_done = 0;
+    }
+    fn backboneChunk(f: *@This(), n: usize, c0: usize, t: usize, _: ?*const anyopaque) !void {
+        if (c0 != f.rows_done or t != 1 or c0 >= n) return error.BadPromptChunk;
+    }
+    fn finishPrompt(f: *@This(), rows: []const [W]i32) !void {
+        f.finished += 1;
+        f.rows_done = rows.len;
+    }
+};
+
 test "CFG guide: a cancelled or changed reference clears the guide, which prefills its own rows again" {
-    const Fake = struct {
-        rows_done: usize = 0,
-        starts: usize = 0,
-        finished: usize = 0,
-        fn startPrompt(f: *@This(), _: []const [W]i32) !void {
-            f.starts += 1;
-            f.rows_done = 0;
-        }
-        fn backboneChunk(f: *@This(), n: usize, c0: usize, t: usize, _: ?*const anyopaque) !void {
-            if (c0 != f.rows_done or t != 1 or c0 >= n) return error.BadPromptChunk;
-        }
-        fn finishPrompt(f: *@This(), rows: []const [W]i32) !void {
-            f.finished += 1;
-            f.rows_done = rows.len;
-        }
-    };
-    var e: Fake = .{};
-    var g: Guide(Fake) = .{ .e = &e, .batched = false };
+    var e: FakeBackbone = .{};
+    var g: Guide(FakeBackbone) = .{ .e = &e, .batched = false };
     const voice_a: [3][W]i32 = @splat(@splat(0));
     const voice_b: [2][W]i32 = @splat(@splat(0));
     try g.begin(&voice_a, 2);
@@ -133,4 +150,43 @@ test "CFG guide: a cancelled or changed reference clears the guide, which prefil
     try g.begin(&.{}, 1.5); // a plain request leaves no guidance behind
     try std.testing.expectEqual(null, g.state.mixing());
     try std.testing.expect(!try g.promptStep(&voice_b));
+}
+
+test "CFG prompt rounds: the guide's every row runs before the first frame, even when the conditional takes one chunk" {
+    // The conditional prompt resumes at `from` (a reference-cache hit) and takes `chunk` rows a round.
+    const Conditional = struct {
+        at: usize,
+        total: usize,
+        chunk_rows: usize,
+        chunks: usize = 0,
+        fn whole(c: *const @This()) bool {
+            return c.at == c.total;
+        }
+        fn chunk(c: *@This()) !void {
+            if (c.at >= c.total) return error.BadPromptChunk; // a zero-row chunk
+            c.at += @min(c.chunk_rows, c.total - c.at);
+            c.chunks += 1;
+        }
+    };
+    const voice: [5][W]i32 = @splat(@splat(0));
+    // (total, from, rows a chunk): cold whole prompt in one chunk, cached one-chunk suffix, single-row chunks
+    for ([_][3]usize{ .{ 40, 0, 1024 }, .{ 40, 28, 1024 }, .{ 40, 28, 4 }, .{ 3, 0, 1 } }) |case| {
+        for ([_]usize{ 1, voice.len }) |guide_rows| {
+            var e: FakeBackbone = .{};
+            var g: Guide(FakeBackbone) = .{ .e = &e, .batched = false };
+            var c: Conditional = .{ .total = case[0], .at = case[1], .chunk_rows = case[2] };
+            const rows = voice[0..guide_rows];
+            var round: usize = 0;
+            while (!try promptRound(@as(?*Guide(FakeBackbone), &g), rows, 2, round == 0, &c)) round += 1;
+            try std.testing.expectEqual(1, e.starts);
+            try std.testing.expectEqual(1, e.finished);
+            try std.testing.expect(g.whole(rows) and c.whole());
+            try std.testing.expectEqual((case[0] - case[1] + case[2] - 1) / case[2], c.chunks);
+            try std.testing.expectEqual(2, g.state.mixing().?);
+        }
+        var c: Conditional = .{ .total = case[0], .at = case[1], .chunk_rows = case[2] };
+        var round: usize = 0; // no guide: one conditional chunk a round, as before guidance
+        while (!try promptRound(@as(?*Guide(FakeBackbone), null), &voice, 2, round == 0, &c)) round += 1;
+        try std.testing.expectEqual(c.chunks, round + 1);
+    }
 }

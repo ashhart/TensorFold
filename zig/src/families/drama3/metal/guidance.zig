@@ -8,6 +8,7 @@ const H = cfg.hidden;
 const shared = @import("../guidance.zig");
 pub const State = shared.State;
 pub const Guide = shared.Guide(Engine);
+pub const promptRound = shared.promptRound;
 
 pub fn mix(e: *Engine, unconditional: u64, gamma: f32) void {
     mixLogits(e.g, e.cand_logits, unconditional, e.w.n_cand, gamma);

@@ -1,4 +1,4 @@
-//! The exceptional CUDA window policy is CPU tested without a GPU module or shader producer.
+//! The exceptional CUDA window policy and Drama 3's CFG mix are CPU tested without a GPU module or shader producer.
 const std = @import("std");
 
 pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, all: *std.Build.Step) void {
@@ -13,6 +13,12 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, all: *std.Build.St
     const run = b.addRunArtifact(b.addTest(.{ .root_module = m }));
     b.step("test-window-fallback-host", "Exceptional prompt head policy through the CUDA source helper, without a GPU").dependOn(&run.step);
     all.dependOn(&run.step);
+    const mix = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/drama_cfg_mix_test.zig"), .target = target, .optimize = .debug, .link_libc = true });
+    mix.addIncludePath(b.path("zig/kernels/cuda"));
+    mix.addCSourceFile(.{ .file = b.path("zig/tests/cuda/drama_cfg_mix_shim.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+    const mix_run = b.addRunArtifact(b.addTest(.{ .root_module = mix }));
+    b.step("test-drama-cfg-mix-host", "Drama 3's CFG mix element body against float64, without a GPU").dependOn(&mix_run.step);
+    all.dependOn(&mix_run.step);
 }
 /// New pointwise and tower contracts beside main's row contracts.
 pub fn contracts(b: *std.Build, target: std.Build.ResolvedTarget, cuda: *std.Build.Module, core: *std.Build.Module, all: *std.Build.Step) void {
