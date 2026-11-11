@@ -79,8 +79,8 @@ pub fn projectSilu(o: Ops, x: Tensor, proj: Projection, m: usize, act: Tensor) E
         .dense => |d| d,
         .mlx, .bf16 => return error.BadShape,
     };
-    if (h.dtype != .bf16 or m == 0 or x.kind != .bf16 or act.kind != .bf16) return error.BadShape;
-    if (o.l.dense.siluRefusal(x.ptr, h.weight, act.ptr, int(m), int(proj.n), int(proj.k)) != null) return error.BadShape;
+    if (h.dtype != .bf16 or m == 0 or x.kind != .bf16 or act.kind != .bf16) {
+    if (o.l.dense.siluRefusal(x.ptr, h.weight, act.ptr, int(m), int(proj.n), int(proj.k)) != null) {
     try o.l.dense.gemmSilu(o.l.r, x.ptr, h.weight, act.ptr, int(m), int(proj.n), int(proj.k), o.stream);
 }
 
@@ -411,9 +411,9 @@ pub fn denseRows(o: Ops, x: Tensor, w: u64, out: Tensor, rows: usize, n: usize, 
 
 /// x (rows, k) BF16 times BF16 weights [n, k] on `tile`: `out` fp32, or BF16 rounded once.
 pub fn denseGemm(o: Ops, tile: DenseTile, x: Tensor, w: u64, out: Tensor, rows: usize, n: usize, k: usize) Error!void {
-    if (x.kind != .bf16 or out.kind == .f16) return error.BadShape;
+    if (x.kind != .bf16 or out.kind == .f16) {
     const wide = out.kind == .f32;
-    if (o.l.dense.refusal(tile, x.ptr, w, int(rows), int(n), int(k)) != null) return error.BadShape;
+    if (o.l.dense.refusal(tile, x.ptr, w, int(rows), int(n), int(k)) != null) {
     try o.l.dense.gemm(o.l.r, tile, x.ptr, w, if (wide) out.ptr else 0, if (wide) 0 else out.ptr, int(rows), int(n), int(k), o.stream);
 }
 
