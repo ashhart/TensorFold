@@ -3,8 +3,11 @@ const std = @import("std");
 const sys = @import("sys.zig");
 
 pub const Error = error{InvalidEnvironment};
-pub const Scope = enum { common, cuda, metal, xpu, slide, hooks, dsv41, gemma4, drama3, glm };
+pub const Scope = enum { common, cuda, metal, xpu, slide, hooks, dsv41, gemma4, drama3, glm, minimax, nemotron };
 pub const Kind = enum { u32, u64, size, percent, positive, device, segments, mib, bit_width, word, prompt, flag, toggle, real, positive_real, signed_real, range, path };
+/// The release from which the server refuses the rank aliases: the one after the release that first ships the flags.
+pub const alias_retire = "1.2.9";
+
 pub const Rule = struct {
     name: [:0]const u8,
     scope: Scope,
@@ -23,6 +26,10 @@ pub const Rule = struct {
     alias_of: ?[:0]const u8 = null,
     /// False where the old reader took only 0, false and off as off: "no" is refused, not read as off.
     no_word: bool = true,
+    /// A rank variable kept as an alias of this server flag (fabric/mesh/launch.zig resolves it).
+    flag: ?[]const u8 = null,
+    /// The release from which the server refuses this alias, naming `flag`.
+    retire: ?[]const u8 = null,
 };
 
 pub fn isReal(kind: Kind) bool {
@@ -66,6 +73,12 @@ pub const rules = [_]Rule{
     .{ .name = "TF_SLIDE_FIT_GIB", .scope = .slide, .kind = .size, .forms = "a whole nonnegative native-size GiB count" },
     .{ .name = "TF_SLIDE_POCKET_DUMP", .scope = .slide, .kind = .path, .forms = "a directory path without control characters, where each lesson's read rows are written" },
     .{ .name = "TF_SLIDE_FORGET_FAIL", .scope = .hooks, .kind = .u32, .trim = " ", .forms = "a whole fact index from 0 to 4294967295 (0 disables the planted failure)" },
+    .{ .name = "TF_GLM_RANK", .scope = .glm, .kind = .u32, .forms = "a whole rank from 0", .flag = "--rank", .retire = alias_retire },
+    .{ .name = "TF_GLM_WORLD", .scope = .glm, .kind = .u32, .forms = "a whole world size from 1", .flag = "--tp", .retire = alias_retire },
+    .{ .name = "TF_MINIMAX_RANK", .scope = .minimax, .kind = .u32, .forms = "a whole rank from 0", .flag = "--rank", .retire = alias_retire },
+    .{ .name = "TF_MINIMAX_WORLD", .scope = .minimax, .kind = .u32, .forms = "a whole world size from 1", .flag = "--tp", .retire = alias_retire },
+    .{ .name = "TF_NEMOTRON_RANK", .scope = .nemotron, .kind = .u32, .forms = "a whole rank from 0", .flag = "--rank", .retire = alias_retire },
+    .{ .name = "TF_NEMOTRON_WORLD", .scope = .nemotron, .kind = .u32, .forms = "a whole world size from 1", .flag = "--tp", .retire = alias_retire },
     .{ .name = "TF_GLM_HOST_CACHE", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_GLM_VISION_HOST", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_GLM_PROF", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
@@ -157,6 +170,16 @@ pub const rules = [_]Rule{
     .{ .name = "TF_DSV41_LAYERS", .scope = .dsv41, .kind = .range, .forms = "lo-hi: two whole layer numbers from 0 to 4294967295 with lo <= hi" },
     .{ .name = "TF_DSV41_ROWS_CAP", .scope = .dsv41, .kind = .u32, .only = &.{ 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 24, 32, 48, 64 }, .forms = "1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 24, 32, 48 or 64" },
 };
+
+/// An alias the server refuses at `version` (semantic versions; a pre-release is before its release), else null.
+pub fn retired(name: []const u8, version: []const u8) ?Rule {
+    for (rules) |r| if (std.mem.eql(u8, name, r.name)) {
+        const at = std.SemanticVersion.parse(r.retire orelse return null) catch return null;
+        const now = std.SemanticVersion.parse(version) catch return null;
+        return if (now.order(at) != .lt) r else null;
+    };
+    return null;
+}
 
 pub fn rule(name: []const u8) Rule {
     for (rules) |r| if (std.mem.eql(u8, name, r.name)) return r;
@@ -318,6 +341,8 @@ pub const Flags = struct {
     gemma4: bool = false,
     drama3: bool = false,
     glm: bool = false,
+    minimax: bool = false,
+    nemotron: bool = false,
     device: ?u32 = null,
     segments: ?u32 = null,
     carveout: bool = false,
@@ -334,6 +359,8 @@ pub const Flags = struct {
             .gemma4 => f.gemma4,
             .drama3 => f.drama3,
             .glm => f.glm,
+            .minimax => f.minimax,
+            .nemotron => f.nemotron,
         };
     }
 };

@@ -33,8 +33,15 @@ pub fn headFp8(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !bool {
     return (try store.tensor(name)).dtype == .f8_e4m3;
 }
 
+/// The worlds Flash Next serves on CUDA; `native/cuda_refusal.place` refuses others by name before admission.
+pub const worlds = struct {
+    pub const ids = [_]u32{ 1, 2 };
+    pub const refusal = "Flash Next on CUDA runs on one GPU or at --tp 2 (two ranks): serve with --tp 1 or --tp 2";
+};
+
 /// The tower's weights and one call's scratch, which rank zero holds beside the text weights with --vision.
-pub fn visionBytes(a: std.mem.Allocator, io: std.Io, dir: []const u8) !u64 {
+pub fn visionBytes(a: std.mem.Allocator, io: std.Io, dir: []const u8, rank: u32, _: u32) !u64 {
+    if (rank != 0) return 0;
     const v = @import("qwen_vision");
     const c = ((try v.Settings.read(a, io, dir)) orelse return error.NoVisionTower).tower;
     return v.Tower.weightBytes(c) + v.Tower.scratchBytes(c, v.max_patches);

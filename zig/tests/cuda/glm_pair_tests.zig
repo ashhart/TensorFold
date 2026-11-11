@@ -17,10 +17,11 @@ pub fn pairCheck(gpu: Gpu, checkpoint: []const u8, dc_path: []const u8, rank: c_
     const comm = try @import("glm_lanes_tests.zig").openComm(gpu, &lib, rank, world, id_path);
     defer _ = lib.api.ncclCommDestroy(comm);
     var problem: []const u8 = "";
-    const set = glm.ranks.Settings.read(&glm.ranks.environment, &problem) catch |err| {
+    var set = glm.ranks.Settings.read(&glm.ranks.environment, &problem) catch |err| {
         std.debug.print("REFUSE {s}\n", .{problem});
         return err;
     };
+    glm.ranks.toolPieces(&set, &glm.ranks.environment); // TF_GLM_WORLD's rule, as before
     try check.expect(set.pair, "glm-pair-check needs TF_GLM_PROMPT_PAIR on (unset or 1)", .{});
     try check.expect(world > 1, "glm-pair-check needs other ranks: at TP=1 an engine makes no twin", .{});
     const C = glm.engine.prompt_rows;

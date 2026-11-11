@@ -1,4 +1,4 @@
-//! MiniMax-M3.1-Flash native CUDA at TP (TF_MINIMAX_RANK, TF_MINIMAX_WORLD, NCCL_COMM_ID): rank 0 serves.
+//! MiniMax-M3.1-Flash native CUDA at TP (--tp, --rank, NCCL's root): rank 0 serves.
 
 const std = @import("std");
 const cuda = @import("cuda");
@@ -31,6 +31,11 @@ pub const Options = struct {
     slide: bool = false,
     room: ?Room = null,
     vision: ?vision_mod.Limits = null, // --vision: the last rank's tower, every rank's image rows
+    rank: u32 = 0, // the launch's, resolved from --tp/--rank and TF_MINIMAX_* (native/cuda_launch.zig)
+    tp: u32 = 1,
+    master: ?[]const u8 = null,
+    master_port: u16 = 29551,
+    launch_from: []const u8 = "",
 };
 /// An image takes at most 576 tokens; a request's images 4096 in all unless --vision-image-tokens says otherwise.
 pub const default_image_tokens: u32 = 4096;
@@ -52,15 +57,25 @@ pub const Loaded = struct {
 };
 
 /// The tower's bytes on this rank: the last rank holds it, sized from its tensors (every rank's staging is small).
-pub fn visionBytes(a: std.mem.Allocator, io: std.Io, dir: []const u8) !u64 {
-    const p = place() catch return 0;
+pub fn visionBytes(a: std.mem.Allocator, io: std.Io, dir: []const u8, rank: u32, world: u32) !u64 {
+    const p = checked(.{ .rank = rank, .world = world }) catch return 0;
     return if (p.rank + 1 == p.world) vision_mod.Tower.bytesFor(a, io, dir) else 0;
 }
 
-/// This rank's place: TF_MINIMAX_RANK of TF_MINIMAX_WORLD (both, or neither for one rank).
 pub const Place = struct { rank: usize, world: usize };
 
-pub fn place() !Place {
+/// This rank's place as the launch resolved it (`o.rank` of `o.tp`).
+pub fn place(o: anytype) !Place {
+    return checked(.{ .rank = o.rank, .world = o.tp });
+}
+
+fn checked(p: Place) !Place {
+    if (p.world < 1 or p.rank >= p.world) return error.NoRank;
+    return p;
+}
+
+/// The dump tool's place: TF_MINIMAX_RANK of TF_MINIMAX_WORLD (both, or neither for one rank), its input as before.
+pub fn toolPlace() !Place {
     const r = std.c.getenv("TF_MINIMAX_RANK");
     const w = std.c.getenv("TF_MINIMAX_WORLD");
     if (r == null and w == null) return .{ .rank = 0, .world = 1 };
@@ -105,9 +120,9 @@ fn draftBytes(a: std.mem.Allocator, io: std.Io, dir: []const u8) !u64 {
 }
 
 /// Bytes this rank's weights take: its share of the split axes; the embeddings, the routers and dspark/ counted whole.
-pub fn weightShare(a: std.mem.Allocator, io: std.Io, dir: []const u8, total: u64, drafts: bool) u64 {
+pub fn weightShare(a: std.mem.Allocator, io: std.Io, dir: []const u8, total: u64, drafts: bool, rank: u32, world: u32) u64 {
     _ = drafts; // dspark/ is counted whole (drafts are on by default)
-    const p = place() catch return total;
+    const p = checked(.{ .rank = rank, .world = world }) catch return total;
     const c = cfg.Config.read(a, io, dir) catch return total;
     const f = (shard.Share.of(&c, p.rank, p.world) catch return total).part(&c);
     var moe: u64 = 0;
@@ -138,10 +153,12 @@ const Owned = struct {
 
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
     _ = kernels;
-    const p = try place();
+    try cuda.rendezvous.fromMaster(o, cuda.rendezvous.Process{}, cuda.rendezvous.Process{}); // before the liveness line
+    const p = try place(o);
     try admit(@intCast(try ctx.attribute(.compute_capability_major) * 10 + try ctx.attribute(.compute_capability_minor)), p.world);
     if (p.world > 1 and std.c.getenv("NCCL_COMM_ID") == null) return error.NoCommId;
     if (p.world > 1) try cuda.tp_watch.start(io, p.rank, p.world);
+    if (p.world > 1) std.log.info("[tensorfold] minimax: rank {d} of {d} ({s})", .{ p.rank, p.world, o.launch_from });
     return openRank(gpa, io, ctx, dir, o, p) catch |err| {
         cuda.tp_watch.fail(@errorName(err));
         return err;
@@ -307,10 +324,12 @@ fn release(own: *Owned) void {
 /// The server's words for this family's refusals.
 pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
     return switch (err) {
-        error.NoRank => "MiniMax-M3.1-Flash runs at TP over two hosts: set TF_MINIMAX_RANK (0 or 1) and TF_MINIMAX_WORLD=2 on both",
-        error.NoCommId => "MiniMax-M3.1-Flash's ranks meet over NCCL: set NCCL_COMM_ID to rank 0's address:port on both hosts",
+        error.NoRank => "MiniMax-M3.1-Flash runs at TP over two hosts: launch both with --tp 2 and --rank 0 or 1",
+        error.NoCommId => "MiniMax-M3.1-Flash's ranks meet over NCCL: give --master (rank 0's address) or set NCCL_COMM_ID to rank 0's address:port on both hosts",
+        error.RendezvousDisagree => "NCCL_COMM_ID differs from --master:--master-port: give one of them, or equal values",
+        error.MasterTooLong => "--master: too long for NCCL's root address (host:port in 320 bytes); give rank 0's address",
         error.MiniMaxM3RequiresSm121 => "MiniMax-M3.1-Flash on CUDA is served on GB10 (sm_121) only so far, and this GPU is another",
-        error.MiniMaxM3RequiresTwoRanks => "MiniMax-M3.1-Flash on CUDA is served at two TP ranks only so far: TF_MINIMAX_WORLD=2 on both hosts",
+        error.MiniMaxM3RequiresTwoRanks => "MiniMax-M3.1-Flash on CUDA is served at two TP ranks only so far: launch both hosts with --tp 2",
         error.NotExl3 => "MiniMax-M3.1-Flash on CUDA serves a published EXL3 pack (quantization_config quant_method \"exl3\"), e.g. Mia-AiLab/MiniMax-M3.1-Flash-EXL3-EAQ-v1-3.06-bpw",
         error.UnsupportedExl3 => "this EXL3 pack is not one the CUDA kernels read: exllamav3 1.x on the mul1 codebook, every projection at a width the dense kernels build",
         error.UnexpectedMiniMaxTensor => "a tensor is not stored as MiniMax-M3.1-Flash's EXL3 packs store it (the log names it)",
@@ -337,4 +356,10 @@ test "MiniMax-M3.1-Flash is admitted on GB10 (sm_121) at two TP ranks only" {
 test "the tower's scratch is load's buffers at the largest image" {
     // load's eleven scratch buffers at 2,304 patches (576 tokens, 2 x 2 patches each), summed by hand
     try std.testing.expectEqual(@as(u64, 183_785_472), vision_mod.Tower.scratch_bytes);
+}
+
+test "MiniMax's place is the launch's; the tower counts only on the last rank" {
+    try std.testing.expectEqual(Place{ .rank = 1, .world = 2 }, try place(.{ .rank = @as(u32, 1), .tp = @as(u32, 2) }));
+    try std.testing.expectError(error.NoRank, place(.{ .rank = @as(u32, 2), .tp = @as(u32, 2) }));
+    try std.testing.expectEqual(@as(u64, 0), try visionBytes(std.testing.allocator, std.testing.io, "missing", 0, 2));
 }

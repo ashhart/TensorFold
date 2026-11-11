@@ -174,7 +174,12 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     problem.* = try std.fmt.allocPrint(a, "the native CUDA engine has no backend for {s} checkpoints yet", .{o.model_type});
     return null;
 }
-fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: api.Open, problem: *[]const u8) !?api.Opened {
+    const o = (try @import("cuda_launch.zig").resolve(F, a, asked, problem)) orelse return null;
+    if (try refusals.place(F, a, o)) |why| { // a rank inside its world, a world the family serves: before admission
+        problem.* = why;
+        return null;
+    }
     if (refusals.family(F, o)) |why| {
         problem.* = why;
         return null;

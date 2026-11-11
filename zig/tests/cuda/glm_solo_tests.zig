@@ -27,10 +27,11 @@ pub fn soloCheck(gpu: Gpu, checkpoint: []const u8, dc_path: []const u8, rank: c_
     const comm = try @import("glm_lanes_tests.zig").openComm(gpu, &lib, rank, world, id_path);
     defer _ = lib.api.ncclCommDestroy(comm);
     var problem: []const u8 = "";
-    const set = glm.ranks.Settings.read(&glm.ranks.environment, &problem) catch |err| {
+    var set = glm.ranks.Settings.read(&glm.ranks.environment, &problem) catch |err| {
         std.debug.print("REFUSE {s}\n", .{problem});
         return err;
     };
+    glm.ranks.toolPieces(&set, &glm.ranks.environment); // TF_GLM_WORLD's rule, as before
     try check.expect(set.solo, "glm-solo-check needs TF_GLM_CHUNK_SOLO=4096", .{});
     const C = glm.engine.prompt_rows;
     const capacity = @max(dc.capacity, 6 * C);

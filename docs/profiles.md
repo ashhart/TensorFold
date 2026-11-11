@@ -253,7 +253,7 @@ gathers whose stride exceeds the ceiling. `TF_TP_MAILBOX_MAX_KB` still sizes the
 is the smaller of the two limits. Changing the relay ceiling does not resize those slots or change gathered bytes.
 
 This setting is read directly by the TP parser, outside the profile registry. Invalid values refuse by name, and
-relay ranks must agree on the value. GLM uses its actual `TF_GLM_WORLD` and rank for relay validation, so a four-rank
+relay ranks must agree on the value. GLM uses its actual world (`--tp`, or `TF_GLM_WORLD`) and rank for relay validation, so a four-rank
 GLM run does not also need `TF_TP_WORLD=4`. With `TF_GLM_ROCE_MULTI=1`, a relay outside four ranks is refused before
 weights load.
 The relay remains opt-in through `TF_TP_ROCE_RELAY=1`; mesh, two-rank paths and all-reduce routing keep their defaults.

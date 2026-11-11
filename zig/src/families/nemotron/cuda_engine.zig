@@ -39,6 +39,7 @@ pub const Options = struct {
     slide: bool = false, // Sliding Weights asked for: refused for a checkpoint the learner cannot read
     vision: ?@import("cuda_vision.zig").Limits = null, // --vision: the checkpoint's image tower (an omni checkpoint's)
     precision: ?@import("config.zig").Precision = null, // --precision; null: the checkpoint's math where it is built
+    place: ?latent.At = null, // the server's resolved launch; null: the tools' TF_NEMOTRON_* (latent.place)
 };
 
 const prompt_hooks = @import("cuda_prompt_hooks.zig");
@@ -131,7 +132,7 @@ pub const Engine = struct {
         e.* = .{ .gpa = gpa, .io = io, .ctx = ctx, .stream = undefined, .k = undefined, .w = undefined, .b = undefined, .c = undefined, .max_len = 0, .pinned = undefined, .history = undefined };
         e.trace = platform.c.getenv("TF_SLIDE_TRACE") != null;
         e.c = try Config.read(gpa, io, model_dir);
-        try latent.place(&e.c);
+        if (opts.place) |at| try latent.placeAt(&e.c, at) else try latent.place(&e.c);
         var load_cache = @import("core").checkpoint.cache.Load.begin(io, e.c.world > 1);
         defer load_cache.deinit();
         if (e.c.rank > 0) return error.RankServesExperts; // ranks past 0 run cuda_worker.serve, not an engine

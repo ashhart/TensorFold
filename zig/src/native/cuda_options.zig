@@ -16,6 +16,7 @@ pub fn set(comptime F: type, o: api.Open, opts: *F.Options, problem: *[]const u8
         opts.master = if (o.master.len > 0) o.master else null;
         opts.master_port = o.master_port;
     }
+    if (@hasField(F.Options, "launch_from")) opts.launch_from = o.launch_from;
     if (comptime @hasField(F.Options, "vision")) {
         if (o.vision) |vo| {
             const own: ?u32 = comptime if (@hasDecl(F, "default_image_tokens")) F.default_image_tokens else null;

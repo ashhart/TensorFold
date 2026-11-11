@@ -173,10 +173,10 @@ Each engine defines its own serial reference. A verify row uses the same group o
 rounding as that row alone. Attention partitions depend on absolute key position; router ties use a
 stable ID order. Recurrent commits replay the accepted path with the same update routine.
 
-Native CUDA has tensor-parallel serving as well as one-GPU paths. GLM's recorded TP=2 and TP=3 setups use
-`TF_GLM_RANK`, `TF_GLM_WORLD` and `NCCL_COMM_ID`; see [native GLM placement](glm-5.3-flash-cuda.md#run).
-Other families take `--tp`, `--rank` and `--master` only where their native options support ranks; for example,
-[Super VL](nemotron-3.5-super-vl.md) serves on one or two GB10s. A rank option is not universal family support.
+Native CUDA has tensor-parallel serving as well as one-GPU paths. GLM, MiniMax and Nemotron take
+`--tp`, `--rank`, `--master` and `--master-port` (see [native GLM placement](glm-5.3-flash-cuda.md#run)); their
+`TF_*_RANK` and `TF_*_WORLD` variables are aliases for one release (the start-up warning names the release that refuses them). Other families take the flags only where their native
+options support ranks; for example, [Super VL](nemotron-3.5-super-vl.md) serves on one or two GB10s. A rank option is not universal family support.
 
 The following transport and two-rank reduction notes describe Python 0.6.6. In that engine, @jayleaton's
 [#219](https://github.com/ashhart/TensorFold/pull/219) gave the communicator its transport interface

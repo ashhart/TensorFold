@@ -3,7 +3,7 @@ const std = @import("std");
 const e = @import("environment.zig");
 const t = std.testing;
 const a = t.allocator;
-const all: e.Flags = .{ .cuda = true, .metal = true, .xpu = true, .slide = true, .hooks = true, .dsv41 = true, .gemma4 = true, .drama3 = true, .glm = true };
+const all: e.Flags = .{ .cuda = true, .metal = true, .xpu = true, .slide = true, .hooks = true, .dsv41 = true, .gemma4 = true, .drama3 = true, .glm = true, .minimax = true, .nemotron = true };
 const Env = struct {
     name: []const u8,
     raw: ?[]const u8,
@@ -66,6 +66,10 @@ const valid = [_]Case{
     .{ .name = "TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS", .raw = "0", .n = 0 },
     .{ .name = "TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS", .raw = "1", .n = 1 },
     .{ .name = "TF_ROCE_GID_INDEX", .raw = "2147483647", .n = 2147483647 },
+    .{ .name = "TF_MINIMAX_RANK", .raw = "1", .n = 1 },
+    .{ .name = "TF_MINIMAX_WORLD", .raw = "2", .n = 2 },
+    .{ .name = "TF_NEMOTRON_RANK", .raw = "0", .n = 0 },
+    .{ .name = "TF_NEMOTRON_WORLD", .raw = "4294967295", .n = 4294967295 },
     .{ .name = "TF_DRAMA_PREFILL_ROWS", .raw = " 128 ", .n = 128 },
     .{ .name = "TF_DRAMA_REFERENCE_CACHE", .raw = "0", .n = 0 },
     .{ .name = "TF_FLASHNEXT_GROUPED_ROWS", .raw = "0", .n = 0 },
@@ -279,4 +283,29 @@ test "environment: a legacy alias is checked only while its canonical name is un
     try t.expectEqualStrings("TF_DSV41_TOOL_GRAMMAR=\"bad\": expected 0 or 1 (ignored while TENSORFOLD_TOOL_GRAMMAR is set)", why);
     for ([_][]const u8{ "", "0", "1" }) |canonical| try t.expect((try e.refusal(a, Alias{ .canonical = canonical }, .{ .dsv41 = true })) == null);
     try t.expect((try e.refusal(a, Alias{ .canonical = null }, .{})) == null);
+}
+
+test "rank aliases name their flag and refuse from their retirement release" {
+    const Row = struct { name: [:0]const u8, scope: e.Scope, flag: []const u8 };
+    const rows = [_]Row{
+        .{ .name = "TF_GLM_RANK", .scope = .glm, .flag = "--rank" },           .{ .name = "TF_GLM_WORLD", .scope = .glm, .flag = "--tp" },
+        .{ .name = "TF_MINIMAX_RANK", .scope = .minimax, .flag = "--rank" },   .{ .name = "TF_MINIMAX_WORLD", .scope = .minimax, .flag = "--tp" },
+        .{ .name = "TF_NEMOTRON_RANK", .scope = .nemotron, .flag = "--rank" }, .{ .name = "TF_NEMOTRON_WORLD", .scope = .nemotron, .flag = "--tp" },
+    };
+    for (rows) |row| {
+        const name = row.name;
+        try t.expectEqual(row.scope, e.rule(name).scope);
+        try t.expectEqualStrings(row.flag, e.rule(name).flag.?);
+        try t.expectEqualStrings(e.alias_retire, e.rule(name).retire.?);
+        var buf: [64]u8 = undefined;
+        try t.expect(e.retired(name, "0.0.1") == null);
+        try t.expect(e.retired(name, try std.fmt.bufPrint(&buf, "{s}-rc.1", .{e.alias_retire})) == null); // a pre-release is before it
+        try t.expect(e.retired(name, e.alias_retire) != null);
+        try t.expect(e.retired(name, "999.0.0") != null);
+        try t.expectEqual(@as(?u64, 2), try e.parse(name, "+2"));
+        try t.expectError(error.InvalidEnvironment, e.parse(name, " 2"));
+        try t.expectError(error.InvalidEnvironment, e.parse(name, "4294967296"));
+    }
+    try t.expect(e.retired("TF_GLM_PROF", "9.9.9") == null);
+    try t.expect(e.retired("TF_NOT_A_ROW", "9.9.9") == null);
 }

@@ -40,6 +40,6 @@ pub fn tp2(gpu: check.Gpu, model: []const u8, ids: []const u8) !void {
     var c = try nemotron.Config.read(gpu.gpa, gpu.io, model);
     try nemotron.latent.place(&c);
     if (c.world != 2 or c.latent == 0 or c.bolt) return error.ExpectedLatentTwoRanks;
-    if (c.rank > 0) return nemotron.worker.serve(gpu.gpa, gpu.io, gpu.ctx, model, null);
+    if (c.rank > 0) return nemotron.worker.serve(gpu.gpa, gpu.io, gpu.ctx, model, null, null); // its TF_NEMOTRON_* place, read above
     try @import("prompt_cuts.zig").run(gpu, model, ids);
 }

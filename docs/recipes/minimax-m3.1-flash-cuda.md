@@ -35,22 +35,23 @@ rank, the vocabulary split 782 and 781 blocks.
 ## Run
 
 The family is admitted only as it was run: on GB10 (sm_121) at two ranks. Any other GPU is refused
-(`MiniMaxM3RequiresSm121`), and so is one rank or any other world (`MiniMaxM3RequiresTwoRanks`). `TF_MINIMAX_RANK`
-(0 or 1) of `TF_MINIMAX_WORLD=2` places each rank, and `NCCL_COMM_ID` names rank 0's address and port on the link
-between the hosts. With 192.0.2.1 as rank 0's address on their direct link, the same folder on both:
+(`MiniMaxM3RequiresSm121`), and so is one rank or any other world (`MiniMaxM3RequiresTwoRanks`). `--rank`
+(0 or 1) of `--tp 2` places each rank, and `--master` with `--master-port` names rank 0's address and port on the link
+between the hosts (NCCL's root, `NCCL_COMM_ID`). `TF_MINIMAX_RANK` and `TF_MINIMAX_WORLD` still place a rank as aliases of `--rank` and `--tp` for one release; the start-up warning names the release that refuses them
+with the flag to use; a flag and an alias that differ refuse. With 192.0.2.1 as rank 0's address on their direct link, the same folder on both:
 
 ```bash
 export NCCL_RUNTIME_CONNECT=0 NCCL_CUMEM_ENABLE=0 NCCL_CUMEM_HOST_ENABLE=0   # on GB10 pairs
 # on rank 1
-TF_MINIMAX_RANK=1 TF_MINIMAX_WORLD=2 NCCL_COMM_ID=192.0.2.1:29581 TENSORFOLD_MEMORY_RESERVE_GIB=3 \
-  tensorfold serve ~/models/mm-exl3 --context 32768 --parallel 2 --prompt-cache-gib 3 --vision
+TENSORFOLD_MEMORY_RESERVE_GIB=3 tensorfold serve ~/models/mm-exl3 --tp 2 --rank 1 --master 192.0.2.1 \
+  --master-port 29581 --context 32768 --parallel 2 --prompt-cache-gib 3 --vision
 # on rank 0 (192.0.2.1)
-TF_MINIMAX_RANK=0 TF_MINIMAX_WORLD=2 NCCL_COMM_ID=192.0.2.1:29581 TENSORFOLD_MEMORY_RESERVE_GIB=3 \
-  tensorfold serve ~/models/mm-exl3 --context 32768 --parallel 2 --prompt-cache-gib 3 --vision
+TENSORFOLD_MEMORY_RESERVE_GIB=3 tensorfold serve ~/models/mm-exl3 --tp 2 --rank 0 --master 192.0.2.1 \
+  --master-port 29581 --context 32768 --parallel 2 --prompt-cache-gib 3 --vision
 ```
 
 Set `NCCL_SOCKET_IFNAME` and `NCCL_IB_HCA` for the link as NCCL documents them; each rank keeps a TCP line to rank 0
-on the port after `NCCL_COMM_ID`'s, so a rank that fails stops the others. On two ranks the layers' small gathers go by
+on the port after the root's, so a rank that fails stops the others. On two ranks the layers' small gathers go by
 RoCE writes (as GLM's); `TF_ROCE=0` leaves them to NCCL and `TF_ROCE_MAX_KB` caps a rank's bytes.
 
 - The key/value cache is bf16, exact; a token takes 75 KiB a rank at TP=2 across the 60 layers (keys and values of the
