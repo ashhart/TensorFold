@@ -30,6 +30,7 @@ pub const target = @import("target.zig");
 pub const pass = @import("pass.zig");
 pub const serve = @import("serve.zig");
 pub const boot = @import("boot.zig");
+pub const round_prof = @import("round_prof.zig");
 
 test {
     std.testing.refAllDecls(@This());
@@ -40,4 +41,5 @@ test {
     _ = dspark;
     _ = dspark_plan;
     _ = pass;
+    _ = round_prof;
 }

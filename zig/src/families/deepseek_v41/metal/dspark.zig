@@ -13,6 +13,7 @@ const forward = @import("forward.zig");
 const plan_ = @import("dspark_plan.zig");
 const dw = @import("dspark_weights.zig");
 const st = @import("dspark_stage.zig");
+const round_prof = @import("round_prof.zig");
 
 const Config = host.config.Config;
 const Params = host.dspark.Params;
@@ -61,6 +62,8 @@ pub const Pass = struct {
     device: mtl.Device,
     queue: mtl.Queue,
     opt: Options,
+    /// TF_DSV41_ROUND_PROF: where the passes book their times (null: no clock reads)
+    prof: ?*round_prof.RoundProf = null,
     b: forward.Bufs,
     plan: plan_.Plan,
     /// act_quant of the taps rows [16][targets * hidden]
@@ -129,9 +132,10 @@ pub const Pass = struct {
     }
 
     /// The command buffer of one serial encoder: `f` encodes, then it is committed and waited for.
-    fn run(x: *const Pass, comptime F: type, f: F) !void {
+    fn run(x: *const Pass, comptime F: type, f: F, comptime ev: [2]round_prof.Event) !void {
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
+        const t0 = if (x.prof) |q| q.clock() else 0;
         const cb = x.queue.commandBuffer();
         const e = cb.compute(.serial);
         f.encode(e) catch |err| {
@@ -141,6 +145,11 @@ pub const Pass = struct {
         e.end();
         cb.commit();
         cb.wait();
+        if (x.prof) |q| {
+            q.event(ev[0], q.clock() -| t0);
+            const s = cb.gpuSeconds();
+            q.event(ev[1], if (s > 0) @intFromFloat(s * 1e9) else 0);
+        }
         if (cb.failure()) |msg| {
             std.debug.print("dspark command buffer failed: {s}\n", .{msg});
             return error.CommandBufferFailed;
@@ -184,7 +193,7 @@ pub const Pass = struct {
                 try st.ingest(&cx, e, j.x.w, j.taps, .{ .buf = j.x.quant }, j.x.rings, j.refs.pos, j.refs.dest);
             }
         };
-        try x.run(job, .{ .x = x, .n = n, .taps = .{ .buf = taps.buf, .off = taps.off + row0 * row_bytes }, .refs = refs });
+        try x.run(job, .{ .x = x, .n = n, .taps = .{ .buf = taps.buf, .off = taps.off + row0 * row_bytes }, .refs = refs }, .{ .ingest_wall, .ingest_gpu });
     }
 
     // propose ------------------------------------------------------------------------------------------------------
@@ -293,8 +302,10 @@ pub const Pass = struct {
                     try j.x.encodeAll(e, j.l);
                 }
             };
-            try x.run(job, .{ .x = x, .l = &l });
+            try x.run(job, .{ .x = x, .l = &l }, .{ .propose_wall, .propose_gpu });
+            const t0 = if (x.prof) |q| q.clock() else 0;
             try x.finish(&l, out[at..][0..m]);
+            if (x.prof) |q| q.event(.finish, q.clock() -| t0);
         }
     }
 

@@ -6,6 +6,7 @@ const ctx_ = @import("ctx.zig");
 const weights = @import("weights.zig");
 const pipelines = @import("pipelines.zig");
 const layer = @import("layer.zig");
+const round_prof = @import("round_prof.zig");
 
 const Config = host.config.Config;
 const Ctx = ctx_.Ctx;
@@ -210,11 +211,17 @@ pub fn chunkEnd(lo: usize, n: usize) usize {
 
 /// The decode forward in about `buffers` command buffers, each committed once encoded; waits for the last.
 pub fn run(x: *const Ctx, q: mtl.Queue, m: Model, b: *const Bufs) !void {
+    return runTimed(x, q, m, b, null);
+}
+
+/// `run`, booking the encode and wait phases and each command buffer's spans to `rec` when it is set.
+pub fn runTimed(x: *const Ctx, q: mtl.Queue, m: Model, b: *const Bufs, rec: ?*round_prof.Round) !void {
     if (m.layers.len != x.c.layers) return error.LayerOrder;
     if (x.rows == 0 or x.rows > R or x.rows != x.total()) return error.BadRows;
     var cbs: [max_buffers]mtl.CommandBuffer = undefined;
     var n: usize = 0;
     defer for (cbs[0..n]) |cb| cb.release();
+    var committed: [max_buffers]u64 = undefined;
     var lo: usize = 0;
     while (true) {
         const hi = chunkEnd(lo, m.layers.len);
@@ -227,20 +234,46 @@ pub fn run(x: *const Ctx, q: mtl.Queue, m: Model, b: *const Bufs) !void {
             if (n > 0) cbs[n - 1].wait();
             return err;
         };
+        if (rec) |r| committed[n] = r.now();
         cb.commit();
         cbs[n] = cb.retain();
         n += 1;
         if (hi == m.layers.len) break;
         lo = hi;
     }
+    if (rec) |r| r.lap(.encode);
     cbs[n - 1].wait();
+    if (rec) |r| {
+        r.lap(.wait);
+        bookBuffers(r, cbs[0..n], committed[0..n]);
+        r.skip();
+    }
     for (cbs[0..n]) |cb| if (cb.failure()) |msg| {
         std.debug.print("dsv41 metal window failed: {s}\n", .{msg});
         return error.CommandBufferFailed;
     };
 }
 
-const max_buffers = 16;
+const max_buffers = round_prof.max_cbs;
+
+/// Each buffer's span on the GPU's clock, the idle time between them, and its wall time from commit to now.
+fn bookBuffers(r: *round_prof.Round, cbs: []const mtl.CommandBuffer, committed: []const u64) void {
+    const done = r.now();
+    var prev_end: f64 = 0;
+    for (cbs, committed, 0..) |cb, at, i| {
+        const t0 = cb.gpuStart();
+        const t1 = cb.gpuEnd();
+        r.buffer(done -| at, secondsNs(t1 - t0));
+        r.book(.gpu, secondsNs(t1 - t0));
+        if (i > 0) r.book(.gap, secondsNs(t0 - prev_end));
+        prev_end = t1;
+    }
+    r.book(.commit_done, done -| committed[0]);
+}
+
+fn secondsNs(s: f64) u64 {
+    return if (s > 0) @intFromFloat(s * 1e9) else 0;
+}
 
 /// Layers lo .. hi of the forward, the embedding before layer 0 and the head after the last.
 fn encodeRange(x: *const Ctx, e: mtl.ComputeEncoder, m: Model, b: *const Bufs, lo: usize, hi: usize) !void {

@@ -8,6 +8,7 @@ const prompt = @import("prompt.zig");
 const target_ = @import("target.zig");
 const pass_ = @import("pass.zig");
 const pipelines = @import("pipelines.zig");
+const round_prof = @import("round_prof.zig");
 
 const serve_lanes = host.serve_lanes;
 const iface = host.iface;
@@ -32,6 +33,8 @@ pub const Options = struct {
     drafts: bool = true,
     cache_bytes: u64 = 0,
     prompt: prompt.Opts = .{},
+    /// time each decode round and the drafter's passes (TF_DSV41_ROUND_PROF)
+    round_prof: bool = false,
 };
 
 /// A position's draft candidates the pass keeps (the shape the lanes size their buffers by).
@@ -44,6 +47,7 @@ pub const Metal = struct {
     t: *target_.Target,
     dp: ?*dspark.Pass = null,
     ad: pass_.Pass = undefined,
+    rp: ?*round_prof.RoundProf = null,
 
     pub fn open(a: Allocator, parts: Parts, opt: Options) !*Metal {
         const m = try a.create(Metal);
@@ -51,10 +55,16 @@ pub const Metal = struct {
         m.* = .{ .a = a, .parts = parts, .opt = opt, .t = undefined };
         m.t = try target_.Target.init(a, parts.env, .{ .slots = opt.slots, .limit = opt.limit, .prompt = opt.prompt, .cache_bytes = opt.cache_bytes });
         errdefer m.t.deinit();
+        if (opt.round_prof) {
+            m.rp = try round_prof.RoundProf.init(a);
+            m.t.prof = m.rp;
+        }
+        errdefer if (m.rp) |p| p.deinit();
         const e = parts.env;
         if (opt.drafts) if (parts.dspark) |w| {
             m.dp = try dspark.Pass.init(a, e.device, e.queue, e.c, e.p, e.s, e.tables, parts.top, w, .{ .slots = opt.slots, .candidates = @min(candidates, e.c.vocab) });
             m.ad = .{ .x = m.dp.?, .t = m.t };
+            m.dp.?.prof = m.rp;
         };
         return m;
     }
@@ -113,8 +123,10 @@ pub const Metal = struct {
 
     fn close(ctx: *anyopaque) void {
         const m = self(ctx);
+        if (m.rp) |p| p.log();
         if (m.dp) |p| p.deinit();
         m.t.deinit();
+        if (m.rp) |p| p.deinit();
         if (m.parts.owner) |o| o.close(o.ctx);
         m.a.destroy(m);
     }
