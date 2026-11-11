@@ -55,7 +55,7 @@ grids, and whether a captured set runs with which entries on our glue. `TF_FLASH
 keyed through the profile rows. Its draft, window, round, graph, lane-parts (`TF_FLASHNEXT_LANE_PARTS`), load-thread, I/O and dense-split settings and
 `TF_FLASHNEXT_KV_PAGE_TEST` are not keyed: kept states come only from prompt passes, which those settings either never
 reach, reach with the same launches or the same kernels addressing pages, or refuse for disk at `--tp 2`.
-Nemotron on CUDA keys `--precision checkpoint`'s math, the expert ranks of `TF_NEMOTRON_WORLD`, a ModelOpt
+Nemotron on CUDA keys `--precision checkpoint`'s math, the expert ranks of `--tp` (or `TF_NEMOTRON_WORLD`), a ModelOpt
 checkpoint's NVFP4 decode warps and lane half-tile threshold, the experts' resident grids and, with a captured set, the
 attention variant `--context` picks by its chunk count. Its pages, poison fill, carveout, segments, graph log and trace,
 and the context on our own glue, are not keyed: they place memory, fill pages before use, log, run only passes that
