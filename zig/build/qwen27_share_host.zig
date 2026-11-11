@@ -9,7 +9,9 @@ pub fn steps(b: *std.Build) void {
     mods.sources.addAnonymousImport("nemotron_packed_metallib", .{ .root_source_file = files.add("share-empty.zig", "pub const bytes: []const u8 = &.{};\n") });
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = target, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = mods.lanes }} });
     const host = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_served.zig"), .target = target, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = mods.metal }, .{ .name = "tensorfold", .module = mods.engine }, .{ .name = "engine_api", .module = api } } });
-    b.step("test-qwen27-share-owner-host", "Native snapshot owner and lineage eligibility with inert assets").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host, .filters = &.{"qwen27 share:"} })).step);
+    const run = b.addRunArtifact(b.addTest(.{ .root_module = host, .filters = &.{"qwen27 share:"} }));
+    b.step("test-qwen27-share-owner-host", "Native snapshot owner and lineage eligibility with inert assets").dependOn(&run.step);
+    b.top_level_steps.get("test").?.step.dependOn(&run.step);
     const root = b.createModule(.{ .root_source_file = b.path("zig/qwen27_speed_compile.zig"), .target = target, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = mods.metal }, .{ .name = "tensorfold", .module = mods.engine }, .{ .name = "engine_api", .module = api }, .{ .name = "qwen27_served", .module = host } } });
     const object = b.addObject(.{ .name = "qwen27-share-native", .root_module = root });
     _ = object.getEmittedBin();
