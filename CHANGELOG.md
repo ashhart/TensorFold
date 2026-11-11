@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Tests: host tests that rely on the operating system refusing access skip by name when run as root, so those tests no longer fail in containers that run as root; as an ordinary user nothing changes (#2757, part of #2748).
+
 - Flash Next on CUDA: a draft-head row that comes back non-finite now fails as `ProposalNonfinite` instead of `ProposalPaddingPick`, sampled draft candidates are checked for count, finite values and column range before sampling, and verify rows are checked the same way before any output token is written (grammar-masked columns excepted); each refusal logs one line naming the stream, the draft length and the row's top and log-sum-exp. Finite rows pick exactly as before, and prompt passes and decode (chat and code, 1 to 8 streams) read level on a GB10 (#2753, refs #2734).
 
 - GLM-5.3-Flash on CUDA with a DFlash2 drafter: shared rounds size each stream's drafts by its last grant plus the slack again, trimmed at verify, instead of pricing them first from chances the drafter's chain cut zeroed, so a stream no longer stays at no drafts while its peers decode. On two GB10s at TP=2 with distinct prompts, four-stream decode is 3.7% faster greedy and 3.5% faster at temperature 0.7; one stream, the MTP head and every reply's tokens are unchanged (#2793, fixes #2720). Thanks to @kelchm.
