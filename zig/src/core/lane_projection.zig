@@ -36,8 +36,10 @@ pub const Layout = struct {
     cooperative: bool = false,
     /// 4-bit g64 codes in reg_layout, unpacked into tensor-op registers; every word equals the cooperative kernel's.
     reg: bool = false,
-    /// Rows one encode may take: it sizes scratch, never the kernel source; cooperative encodes still take 16.
+    /// Row capacity for reg layouts and opted-in row blocks; cooperative and scalar layouts take 16.
     rows: usize = reg_rows,
+    /// Non-reg prompt callers opt into independent 16-row blocks on the grid's y.
+    row_blocks: bool = false,
     /// Elements between output rows (default N): a member of a fused stack writes its columns of the fused rows.
     y_stride: ?usize = null,
 
@@ -120,7 +122,7 @@ pub fn source(a: std.mem.Allocator, l: Layout) ![]u8 {
     }
     try text.appendSlice(a, if (l.ranges.len == 0) "  return j;\n}\n" else "  return 0;\n}\n");
     try text.print(a, "#define TF_PRECOMPUTE_SUMS {d}\n", .{@intFromBool(l.precompute_sums)});
-    try text.print(a, "#define TF_ROW_BLOCKS {d}\n", .{@intFromBool(!l.reg and !l.cooperative and l.rows > 16)});
+    try text.print(a, "#define TF_ROW_BLOCKS {d}\n", .{@intFromBool(l.row_blocks and !l.reg and !l.cooperative and l.rows > 16)});
     if (l.reg) try text.appendSlice(a, "#define TF_REG 1\n");
     if (l.y_stride) |s| try text.print(a, "#define TF_YS {d}\n", .{s});
     try text.appendSlice(a, ks.core_lane_projection);
@@ -242,14 +244,14 @@ pub const Projection = struct {
     threads_per_slice: usize = 32,
     reg: bool = false,
     cooperative: bool = false,
-    /// Rows one encode takes at most: the layout's rows on tensor units, 16 on cooperative or older-chip paths.
+    /// Capacity is the reg or opted-in row count on tensor units, otherwise 16.
     max_rows: u32 = reg_rows,
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, l: Layout) !Projection {
         try l.validate();
         const units = device.tensorUnits();
         if (!units and (l.format.bits != 6 or l.format.group != 32 or l.cooperative or l.reg or l.precompute_sums)) return error.TensorUnitsRequired;
-        const capacity: usize = if (l.cooperative or !units) 16 else l.rows;
+        const capacity: usize = if (l.cooperative or !units or (!l.reg and !l.row_blocks)) 16 else l.rows;
         var kernel_layout = l;
         if (!units and !l.cooperative and !l.reg) kernel_layout.rows = capacity;
         const text = try source(a, kernel_layout);

@@ -1,4 +1,4 @@
-//! Whole prompt lanes at each width against main's frozen 16-row kernel, including strided oQ member formats.
+//! Whole prompt lanes at each width against a frozen 16-row kernel, including strided oQ member formats.
 const std = @import("std");
 const mtl = @import("metal");
 const lane = @import("core_lane");
@@ -90,7 +90,7 @@ pub fn check(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, rng: st
             const ng = k / format.group;
             // Group128 SK8 exceeds the unchanged admission bound; compare its supported SK4 variant on both sides.
             const sk = if (format.group == 128 and shape[2] == 8) 4 else shape[2];
-            const layout = lane.Layout{ .n = n, .k = k, .format = format, .sk = sk, .rows = most, .precompute_sums = fi == 0 or fi == 6, .y_stride = stride };
+            const layout = lane.Layout{ .n = n, .k = k, .format = format, .sk = sk, .rows = most, .row_blocks = true, .precompute_sums = fi == 0 or fi == 6, .y_stride = stride };
             const p_long = try lane.Projection.init(a, device, layout);
             defer p_long.deinit();
             var short = layout;
@@ -134,7 +134,7 @@ pub fn check(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, rng: st
             defer want.deinit();
             const got = try device.buffer(most * stride * 2, opts);
             defer got.deinit();
-            for ([_]u32{ 17, 1065, most }) |rows| for ([_]bool{ false, true }) |external| {
+            for ([_]u32{ 16, 17, 1065, most }) |rows| for ([_]bool{ false, true }) |external| {
                 if (external and fi != 0) continue;
                 const xs: ?lane.Sums = if (external) .{ .ref = .{ .buf = given }, .stride = sum_stride } else null;
                 clear(want, rows, n, stride, false);
