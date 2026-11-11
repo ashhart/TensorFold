@@ -444,7 +444,7 @@ fn fp8Project(o: Ops, x: Tensor, proj: Projection, h: quant.fp8.Matrix, m: usize
         return error.BadShape;
     }
     const wide: Tensor = .{ .ptr = try o.arena.take(m * proj.n * 4), .kind = .f32 };
-    if (o.stream == counting) return wide;
+    if (o.stream == counting) return .{ .ptr = try o.arena.take(m * proj.n * (if (f32_out) 4 else x.kind.size())), .kind = if (f32_out) .f32 else x.kind };
     const launched = @import("../launches/fp8.zig");
     const w: launched.Weight = .{
         .x = x.ptr,
@@ -474,8 +474,8 @@ fn nvfp4Project(o: Ops, x: Tensor, proj: Projection, h: quant.nvfp4.Matrix, m: u
         return error.BadShape;
     }
     const wide: Tensor = .{ .ptr = try o.arena.take(m * proj.n * 4), .kind = .f32 };
-    // the counting stream sizes the arena: no product runs on its addresses
-    if (o.stream == counting) return wide;
+    // the counting stream sizes the arena: no product runs on its addresses, and its kind is the one stored
+    if (o.stream == counting) return .{ .ptr = try o.arena.take(m * proj.n * (if (f32_out) 4 else x.kind.size())), .kind = if (f32_out) .f32 else x.kind };
     const launched = @import("../launches/nvfp4.zig");
     const w: launched.Weight = .{
         .x = x.ptr,
