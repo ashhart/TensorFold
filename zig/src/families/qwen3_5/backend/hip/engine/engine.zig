@@ -115,6 +115,8 @@ pub const Engine = struct {
     pub const Rows = lane_round.Rows;
 
     gpa: std.mem.Allocator,
+    /// A ModelOpt checkpoint: its text layers decode in flight, its vision tower runs on rocBLAS.
+    modelopt: bool = false,
     driver: hip.Runtime,
     ctx: hip.Context,
     lib: hip.Launcher,
@@ -210,6 +212,7 @@ pub const Engine = struct {
             var cfg = config.Config.read(gpa, io, dir) catch null;
             defer if (cfg) |*c| c.deinit();
             modelopt = if (cfg) |c| c.modelopt else false;
+            e.modelopt = modelopt;
         }
         if (e.plain() or chat or modelopt) {
             // bf16 products (rocBLAS, or the dense kernels a ModelOpt or chat checkpoint reads): one rank, no graphs
@@ -269,8 +272,7 @@ pub const Engine = struct {
         e.round = try lane_round.State.init(e);
         errdefer e.round.deinit(e);
         // rocBLAS serves an unquantized checkpoint's projections and a ModelOpt checkpoint's vision tower
-        const tower = if (vision.Vision.config(gpa, io, dir)) |_| true else |_| false;
-        if (e.plain() or tower) {
+        if (e.plain() or e.modelopt) {
             e.workspace = try hip.DeviceBuffer.alloc(&e.driver, hip.blas.workspace_bytes);
             e.blas = hip.blas.Blas.open(e.stream) catch |err| {
                 e.workspace.free();
