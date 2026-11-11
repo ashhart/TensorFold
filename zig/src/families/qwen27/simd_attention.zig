@@ -32,12 +32,12 @@ const rewrites = [_][2][]const u8{
 
 /// The attention kernels as this chip builds them (before M5: the tail rewritten, the prompt kernels if `prompt`).
 pub fn library(a: std.mem.Allocator, units: bool, prompt: bool) ![]u8 {
-    return compose(a, units, prompt, @import("qwen_runtime_sources"));
+    return compose(a, units, prompt, @import("qwen_runtime_sources"), false);
 }
 
 /// As `library`, its K/V kernels reading pages of the core pool (TF_QWEN27_METAL_KV_PAGES), under main's names.
 pub fn pagedLibrary(a: std.mem.Allocator, units: bool, prompt: bool) ![]u8 {
-    return compose(a, units, prompt, Paged);
+    return compose(a, units, prompt, Paged, true);
 }
 
 const Paged = struct {
@@ -49,9 +49,10 @@ const Paged = struct {
     pub const attention_prompt_sg = twins.attention_prompt_sg;
 };
 
-fn compose(a: std.mem.Allocator, units: bool, prompt: bool, comptime source: type) ![]u8 {
-    if (units) return a.dupe(u8, source.glue ++ source.attention_mpp ++ source.attention_io ++ source.attention_prompt);
-    const tail = try rewrite(a, source.glue ++ source.attention_mpp ++ source.attention_io);
+fn compose(a: std.mem.Allocator, units: bool, prompt: bool, comptime source: type, comptime pages: bool) ![]u8 {
+    const prepare = comptime @import("kernel_sources").qwen27_qk_cache.source(pages);
+    if (units) return a.dupe(u8, source.glue ++ source.attention_mpp ++ source.attention_io ++ prepare ++ source.attention_prompt);
+    const tail = try rewrite(a, source.glue ++ source.attention_mpp ++ source.attention_io ++ prepare);
     if (!prompt) return tail;
     defer a.free(tail);
     return std.mem.concat(a, u8, &.{ tail, source.attention_prompt, source.attention_prompt_sg });
