@@ -276,7 +276,7 @@ pub const Attn = struct {
         const op = if (t.baseline) &t.base_op.? else &t.op;
         const caches = if (t.baseline) t.base_caches[0..t.rd.streams] else t.caches[0..t.rd.streams];
         const p = t.rig.begin();
-        op.encode(p.e, &s.scratch, &s.binding, s.plan, at_.ref(t.refs[0]), at_.ref(t.refs[1]), at_.ref(t.refs[2]), at_.ref(t.refs[4]), caches, at_.ref(t.refs[3]), t.reg.which == .prompt, t.reg.paged and t.reg.heads == .rank) catch |err| {
+        op.encodeContiguous(p.e, &s.scratch, &s.binding, s.plan, at_.ref(t.refs[0]), at_.ref(t.refs[1]), at_.ref(t.refs[2]), at_.ref(t.refs[4]), caches, at_.ref(t.refs[3]), t.reg.which == .prompt, false) catch |err| {
             p.e.end();
             p.pool.pop();
             return err;

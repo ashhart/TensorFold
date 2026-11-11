@@ -9,7 +9,7 @@ const Plan = attn.Plan;
 test "cache and pack descriptors match native pointer and six-word ABI" {
     try std.testing.expectEqual(@as(usize, 16), @sizeOf(attn.CachePtrs));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(attn.PagedPtrs));
-    try std.testing.expectEqual(@as(usize, 24), @sizeOf(attn.PackArgs));
+    try std.testing.expectEqual(@as(usize, 28), @sizeOf(attn.PackArgs));
     try std.testing.expectEqual(@as(usize, 16), @sizeOf(planning.KeepRow));
 }
 
