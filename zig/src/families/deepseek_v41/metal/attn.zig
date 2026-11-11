@@ -98,7 +98,7 @@ pub fn encode(x: *const Ctx, e: mtl.ComputeEncoder, w: *const weights.Layer) !vo
         }
     }
     if (ix_src or kv_src) e.barrier();
-    if (ix_src) try indexer.select(x, e, w, ratio);
+    if (ix_src) try indexer.select(x, e, w, ratio, tab);
     // sparse attention over the window and the selected compressed rows, each slot's rows over its own state
     if (tab) |t| try each.attend(x, e, w, ratio, t) else for (segs) |*px| {
         const region = &px.slot.regions[l];

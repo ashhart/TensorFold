@@ -4,6 +4,7 @@ const M = @import("limits.zig").MetalLaunch;
 
 pub const records = [_]M{
     .{ .name = "dsv41 cand tf_cand", .threads = 1024, .tg_memory = 8592, .reserved = 1024, .m1 = 1024, .m2 = 1024 },
+    .{ .name = "dsv41 cand segs tf_cand_segs", .threads = 1024, .tg_memory = 8592, .reserved = 1024, .m1 = 1024, .m2 = 1024 },
 };
 
 test "the DeepSeek V4.1 candidate-block launch fits every Apple family" {
