@@ -164,6 +164,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Prompt cache: when two disk restores in a row fail (a damaged or missing state file), the request now resumes from the shorter state it already had in RAM instead of prefilling from token 0, so the reply's `cached_tokens` reports that state's position (#2694). Thanks to @ThinkOffApp.
 
+- GLM-5.3-Flash on CUDA with `--mtp-confidence`: a temperature-0 stream drafts its MTP head's rates' depth instead of fifteen head steps a round, of which the window verified only the few the floor keeps, so one greedy stream decodes 24 to 46% faster at TP=3 on three GB10s, with the same tokens (#2864). Thanks to @Bizuayeu.
+
 ## 1.2.6
 
 - Prompt cache: long conversations survive 8 to 16 agents sending follow-ups at once. Redundant states are evicted before each conversation's newest one, admission never evicts a state a queued request resumes, concurrent keeps reserve their room, and the default budget scales with the room left after streams on Metal and unified-memory CUDA (discrete CUDA hosts keep 8 GiB, Flash Next's batch host 16 GiB). On Qwen3.8-27B with DFlash2 at 16 agents, a follow-up's median first token drops from 546 s to 15.9 s on an M3 Ultra and from 105 s to 25.8 s on a GB10, with every reply unchanged (#2699).
