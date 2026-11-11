@@ -31,6 +31,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         .drafts = o.drafts,
         .cache_bytes = if (o.prompt_cache_gib) |g| @intFromFloat(@max(g, 0) * (1 << 30)) else 4 << 30,
         .small = try env.read(bool, "TF_DSV41_SMALL", false),
+        .steps = try serve_lanes.stepsFromEnv(),
     };
     const m = pkg.boot.Boot.open(gpa, io, o.dir, opts) catch |e| {
         problem.* = try std.fmt.allocPrint(a, "the DeepSeek-V4.1 Metal engine cannot load {s} ({s})", .{ o.dir, @errorName(e) });
