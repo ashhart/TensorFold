@@ -383,9 +383,16 @@ test "TF_GLM_OVERLAP_PIECES: unset, 8 under TF_GLM_CHUNK_SOLO=4096 with TF_GLM_R
         }
     };
     var problem: []const u8 = "";
-    try std.testing.expectEqual(@as(u32, 8), (try Settings.read(Reader.both, &problem)).pieces);
-    try std.testing.expectEqual(@as(u32, 3), (try Settings.read(Reader.bothTwo, &problem)).pieces);
-    try std.testing.expectEqual(@as(u32, 3), (try Settings.read(Reader.bothSet, &problem)).pieces);
+    // the wire opens at three ranks or more: the launch's world, given to wirePieces (TF_GLM_WORLD is an alias of --tp)
+    var at3 = try Settings.read(Reader.both, &problem);
+    ranks.wirePieces(&at3, 3, Reader.both);
+    try std.testing.expectEqual(@as(u32, 8), at3.pieces);
+    var at2 = try Settings.read(Reader.both, &problem);
+    ranks.wirePieces(&at2, 2, Reader.both);
+    try std.testing.expectEqual(@as(u32, 3), at2.pieces);
+    var set = try Settings.read(Reader.bothSet, &problem);
+    ranks.wirePieces(&set, 3, Reader.bothSet);
+    try std.testing.expectEqual(@as(u32, 3), set.pieces);
     try std.testing.expectEqual(@as(u32, 3), (try Settings.read(Reader.solo, &problem)).pieces);
     try std.testing.expectEqual(@as(u32, 3), (try Settings.read(Reader.wire, &problem)).pieces);
     try std.testing.expectEqual(@as(u32, 3), (try Settings.read(Reader.soloNarrow, &problem)).pieces);
