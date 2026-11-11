@@ -417,6 +417,7 @@ pub const State = struct {
     prompt_hidden: u64, // first-draft row owned and charged by this sequence arena
     table: u64 = 0, // on pages: its page table (i32, `pages` entries), else 0
     ltable: u64 = 0, // TF_GLM_KV_SPLIT: its latent rows' table, after `table` (the same ids until rows have owners)
+    owner: ?u32 = null, // TF_GLM_KV_SPLIT: the rank holding its latent rows, which attends for every rank (null: each)
     pages: []const u32 = &.{}, // on pages: the page ids its table holds, in row order (none while no stream holds it)
 
     pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, w: *const weights.Weights, capacity: usize) !State {

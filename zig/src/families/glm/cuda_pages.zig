@@ -268,6 +268,7 @@ pub const Pages = struct {
     fn mapped(p: *Pages, slot: u32, ids: []const u32, kept: usize) !void {
         const st = &p.e.seqs.items[slot].?.st;
         if (p.poison) for (ids[kept..]) |id| for (p.parts()) |r| if (r.bytes > 0) try p.e.d.check(p.e.d.api.cuMemsetD32Async(r.at + id * r.bytes, 0xFFFF_FFFF, r.bytes / 4, p.e.stream.handle), "cuMemsetD32Async");
+        st.owner = if (p.e.settings.kv_split) @intCast(p.leases[slot].owner) else null; // the rank its latent rows live on
         st.pages = ids;
         st.capacity = @min(ids.len * state.page_rows, p.e.capacity);
         p.used[slot] = true;
@@ -280,6 +281,7 @@ pub const Pages = struct {
         const st = &p.e.seqs.items[slot].?.st;
         st.pages = &.{};
         st.capacity = 0;
+        st.owner = null;
         p.used[slot] = false;
         if (kv_host.active) |*g| g.invalidate(p.e.stream) catch {};
         if (!p.leader) {
