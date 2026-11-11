@@ -205,7 +205,7 @@ pub const Store = struct {
         errdefer a.free(marks_);
         for (shared) |w| { // the shared cuts this pass keeps: their states serve other conversations too
             const cut = sched.markAt(s.rules, q, w) orelse continue;
-            if (std.mem.indexOfScalar(u32, marks_, cut) != null) s.noteShared(prompt[0 .. cut + s.rules.lookahead]);
+            if (std.mem.indexOfScalar(u32, marks_, cut) != null) s.noteShared(keyOf(q, cut + s.rules.lookahead));
         }
         s.reserve(q, found, marks_);
         var from: u32 = 0;
@@ -317,12 +317,20 @@ pub const Store = struct {
         s.tree.evict(n);
     }
 
-    fn sharedKey(tokens: []const u32) u64 {
-        return std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(tokens));
+    /// A cut's identity: its words, and its namespace, frame and images, so one identity never flags another's state.
+    fn sharedKey(k: Key) u64 {
+        var h = std.hash.Wyhash.init(0);
+        h.update(std.mem.sliceAsBytes(k.tokens));
+        if (k.ns.namespace != 0 or k.ns.frame != 0 or k.images.len > 0) { // text in the default Ns hashes as before
+            h.update(std.mem.asBytes(&k.ns.namespace));
+            h.update(std.mem.asBytes(&k.ns.frame));
+            for (k.images) |i| if (i.at < k.tokens.len) h.update(std.mem.asBytes(&[_]u64{ i.at, i.tokens, i.gh, i.gw, i.hash }));
+        }
+        return h.final();
     }
 
-    fn noteShared(s: *Store, tokens: []const u32) void {
-        const k = sharedKey(tokens);
+    fn noteShared(s: *Store, key: Key) void {
+        const k = sharedKey(key);
         if (std.mem.indexOfScalar(u64, s.shared_keys.items, k) != null) return;
         if (s.shared_keys.items.len == SHARED_KEYS) _ = s.shared_keys.orderedRemove(0);
         s.shared_keys.append(s.tree.gpa, k) catch {};
@@ -392,7 +400,7 @@ pub const Store = struct {
         if (!s.decl.fits(at, retained)) return .{ .held = false, .shared = 0 };
         t.clock += 1;
         const tokens = prompt[0 .. at + s.rules.lookahead]; // a page past which the lookahead differs is another page
-        const flagged = std.mem.indexOfScalar(u64, s.shared_keys.items, sharedKey(tokens)) != null;
+        const flagged = std.mem.indexOfScalar(u64, s.shared_keys.items, sharedKey(keyOf(q, tokens.len))) != null;
         while (true) {
             var last: ?*Node = null;
             const got = t.heldPrefix(keyOf(q, tokens.len), np, path, &last);
