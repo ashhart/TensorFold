@@ -158,3 +158,26 @@ test "FSR a forecast gives back the expert it displaced, unless that expert move
     try c.giveBack(empty);
     try std.testing.expectEqual(absent, c.map[3]);
 }
+
+test "FSR occupancy, hits and evictions at a glance" {
+    var c = try Cache.init(a, 8, 2);
+    defer c.deinit();
+    try fill(&c, &.{0});
+    c.release();
+    try fill(&c, &.{1});
+    c.release();
+    var o = c.occupancy();
+    try std.testing.expectEqual(@as(usize, 2), o.held);
+    try std.testing.expectEqual(@as(usize, 2), o.capacity);
+    try std.testing.expectEqual(@as(u64, 0), o.evictions);
+    try std.testing.expectEqual(@as(u64, 0), o.hits);
+    // a resident hit, and one eviction when the third expert takes the last used-once slot
+    _ = try c.resident(0);
+    try fill(&c, &.{2});
+    c.release();
+    o = c.occupancy();
+    try std.testing.expectEqual(@as(usize, 2), o.held);
+    try std.testing.expectEqual(@as(u64, 1), o.evictions);
+    try std.testing.expectEqual(@as(u64, 1), o.hits);
+    try std.testing.expect(try c.peek(2) != null);
+}

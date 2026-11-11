@@ -20,7 +20,7 @@ pub fn keepBorn(s: *Store, prompt: []const u32, born: u32, at: u32, owner: ?*any
     s.clock += 1;
     const shared = std.mem.indexOfScalar(u64, s.shared_keys.items, sharedKey(prompt[0..n])) != null;
     for (s.entries.items) |e| if (!e.expired and e.at == at and std.mem.eql(u32, e.tokens, prompt[0..n]) and modes.equal(e.decode_spans, spans, at) and images.matches(s, e)) {
-        e.used = s.clock; // the same state again: no copy
+        e.used = e.seen.touch(s.clock); // the same state again: no copy
         e.shared = e.shared or shared;
         e.rewind = e.rewind or (at == s.active_rewind_at and sharedKey(e.tokens) == s.active_rewind_key);
         if (shared) learned.learn(s, e, starts);
@@ -73,7 +73,7 @@ pub fn keepBorn(s: *Store, prompt: []const u32, born: u32, at: u32, owner: ?*any
         return s.fail(at, err);
     };
     const charged = if (s.family.vtable.charged) |f| f(s.family.ptr, saved) else bytes;
-    e.* = .{ .tokens = last[0..n], .images = image_ids, .image_frame = s.image_frame, .decode_spans = decoded, .at = at, .saved = saved, .bytes = charged, .born = born, .used = s.clock, .last = last, .shared = shared, .rewind = at == s.active_rewind_at and sharedKey(last[0..n]) == s.active_rewind_key, .own = last };
+    e.* = .{ .tokens = last[0..n], .images = image_ids, .image_frame = s.image_frame, .decode_spans = decoded, .at = at, .saved = saved, .bytes = charged, .born = born, .used = s.clock, .seen = .of(s, last[0..n], decoded, starts, at), .last = last, .shared = shared, .rewind = at == s.active_rewind_at and sharedKey(last[0..n]) == s.active_rewind_key, .own = last };
     owns_decoded = false;
     owns_images = false;
     index.add(s, e) catch {

@@ -169,6 +169,7 @@ pub fn openConfigured(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, dump:
     errdefer dropResident(h);
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
     h.host.memory = .{ .ctx = h, .read = memory };
+    if (eng.r.fsr != null) h.host.fsr = .{ .ctx = h, .read = fsr };
     var listed: [tf.flashnext_replay.MAXR * 8]u8 = undefined;
     var w: std.Io.Writer = .fixed(&listed);
     for (caps.items, 0..) |c, i| w.print("{s}{d}", .{ if (i == 0) "" else ",", c }) catch break;
@@ -227,6 +228,12 @@ fn close(ctx: *anyopaque) void {
     if (h.vis) |v| v.deinit();
     h.eng.deinit();
     h.gpa.destroy(h);
+}
+
+fn fsr(ctx: *anyopaque) ?api.Status.FsrCache {
+    const h: *Host = @ptrCast(@alignCast(ctx));
+    const counts = (h.eng.r.fsr orelse return null).snapshot() orelse return null;
+    return .from(counts);
 }
 
 fn memory(ctx: ?*anyopaque, reset_peak: bool) ?api.Memory {

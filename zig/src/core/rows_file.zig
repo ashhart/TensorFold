@@ -40,9 +40,45 @@ pub fn path(buf: []u8, dir: []const u8, stem: []const u8, ext: []const u8, part:
     return std.fmt.bufPrintSentinel(buf, "{s}/{s}{s}{s}", .{ dir, stem, ext, if (part) ".part" else "" }, 0);
 }
 
+/// A fixed-bucket latency histogram in milliseconds: the bucket edge a percentile reports.
+pub const Latency = struct {
+    pub const edges = [_]f64{ 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000 };
+    counts: [edges.len + 1]u64 = @splat(0), // the top bucket is past the last edge
+    n: u64 = 0,
+
+    pub fn observe(l: *Latency, ms: f64) void {
+        l.n += 1;
+        for (edges, 0..) |edge, i| if (ms <= edge) {
+            l.counts[i] += 1;
+            return;
+        };
+        l.counts[edges.len] += 1;
+    }
+
+    /// The edge of the bucket `p` of the observations fall under (0: none yet, past the top edge: the top edge).
+    pub fn percentile(l: *const Latency, p: f64) f64 {
+        if (l.n == 0) return 0;
+        const half = @as(f64, @floatFromInt(l.n)) * p;
+        var seen: f64 = 0;
+        for (edges, 0..) |edge, i| {
+            seen += @floatFromInt(l.counts[i]);
+            if (seen >= half) return edge;
+        }
+        return edges[edges.len - 1];
+    }
+};
+
 /// The filesystem calls for one writer; tests supply per-store faults without a process-wide hook.
 pub const IO = struct {
     ctx: ?*anyopaque = null,
+    read_ms_last: f64 = 0,
+    read_ms_ema: f64 = 0,
+    write_ms_last: f64 = 0,
+    write_ms_ema: f64 = 0, // last and smoothed read/write milliseconds (0: none yet)
+    read_lat: Latency = .{},
+    write_lat: Latency = .{}, // read/write latency histograms (percentiles are bucket edges)
+    last_read_ms: i64 = 0, // wall-clock ms since epoch of the last read (0: none)
+    last_write_ms: i64 = 0, // wall-clock ms since epoch of the last write (0: none)
     write: *const fn (?*anyopaque, c_int, []const u8) anyerror!usize = writeDefault,
     sync: *const fn (?*anyopaque, c_int) anyerror!void = syncDefault,
 
@@ -262,6 +298,17 @@ fn readUnaligned(fd: c_int, dest: []u8, at: u64) bool {
 /// A staging buffer that holds `bytes` read in aligned spans.
 pub fn stage(a: std.mem.Allocator, bytes: u64) !Stage {
     return a.alignedAlloc(u8, .fromByteUnits(alignment), @intCast(std.mem.alignForward(u64, @max(bytes, 1), alignment)));
+}
+
+test "a latency histogram reports the bucket edges at p50 and p95, and nothing before any sample" {
+    var l: Latency = .{};
+    try std.testing.expectEqual(@as(f64, 0), l.percentile(0.5));
+    for ([_]f64{ 3, 4, 6, 7 }) |ms| l.observe(ms); // four of five under the 10 ms edge
+    l.observe(500);
+    try std.testing.expectEqual(@as(f64, 10), l.percentile(0.5));
+    try std.testing.expectEqual(@as(f64, 500), l.percentile(0.95)); // past 95%: the 500 ms edge it fell under
+    l.observe(99999);
+    try std.testing.expectEqual(@as(f64, 5000), l.percentile(0.95)); // past the top edge: the top edge, not a guess
 }
 
 test "a block file reads back byte for byte, and a flipped byte, a cut tail or another name is refused" {
