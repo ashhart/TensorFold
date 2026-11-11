@@ -6,6 +6,7 @@ const Ref = @import("projection.zig").Ref;
 const glue = @import("glue.zig");
 pub const planning = @import("attention_plan.zig");
 pub const Plan = planning.Plan;
+pub const Layout = @import("attention_memory.zig").Layout;
 pub const Cache = struct {
     keys: Ref,
     values: Ref,
@@ -150,10 +151,11 @@ pub const Scratch = struct {
     tiles: u32,
     chunks: u32,
     tail_chunks: u32,
+    chunk_rows: usize,
     uploaded: ?[32]u8 = null,
     pub fn init(device: mtl.Device, limits: Limits) !Scratch {
         try validLimits(limits);
-        const layout = @import("attention_memory.zig").Layout.init(limits);
+        const layout = Layout.init(limits);
         const sizes = layout.sizes;
         comptime std.debug.assert(sizes.len == std.enums.values(Field).len);
         var buffers: [sizes.len]mtl.Buffer = undefined;
@@ -164,7 +166,11 @@ pub const Scratch = struct {
             made += 1;
         }
         @memset(buffers[@backingInt(Field.pick)].slice(u32, 12), 0); // the pick clears the flag after each read
-        return .{ .buffers = buffers, .limits = limits, .tiles = layout.tiles, .chunks = layout.chunks, .tail_chunks = layout.tail_chunks };
+        return .{ .buffers = buffers, .limits = limits, .tiles = layout.tiles, .chunks = layout.chunks, .tail_chunks = layout.tail_chunks, .chunk_rows = layout.chunk_rows };
+    }
+    pub fn checkPrompt(s: *const Scratch, chunks: u32, tiles: u32, shared: bool) !void {
+        if (chunks > s.chunks or tiles > s.tiles) return error.AttentionLimits;
+        if (!shared and @as(usize, chunks) * tiles * 16 > @as(usize, s.tail_chunks) * s.chunk_rows) return error.AttentionLimits;
     }
     pub fn deinit(s: *Scratch) void {
         for (s.buffers) |buffer| buffer.deinit();
@@ -465,10 +471,9 @@ pub const Attention = struct {
         const start: i32 = plan.meta[planning.global_words + 4];
         for (plan.positions, 0..) |position, i| if (position != start + @as(i32, @intCast(i))) return error.PromptRowsNotChain; // the kernel places row i at start + i
         const chunks: u32 = @intCast(@divFloor(start + @as(i32, @intCast(plan.rows)) + planning.chunk - 1, planning.chunk));
-        if (chunks > scratch.chunks or plan.tiles > scratch.tiles) return error.AttentionLimits;
         // before M5 (no shared prefix) the partials take the tail's buffers, which hold every chunk's packed rows
         const parts = if (g.shared_prefix) [3]Field{ .poa, .pma, .pla } else [3]Field{ .pob, .pmb, .plb };
-        if (!g.shared_prefix and @as(usize, chunks) * plan.tiles * 16 > @as(usize, scratch.tail_chunks) * scratch.limits.rows * 16) return error.AttentionLimits;
+        try scratch.checkPrompt(chunks, plan.tiles, g.shared_prefix);
         const args = PromptArgs{ .start = start, .rows = @intCast(plan.rows), .chunks = @intCast(chunks), .rp = @intCast(plan.tiles * 16), .key_stride = @intCast(binding.strides[0][0]), .value_stride = @intCast(binding.strides[0][1]), .scale2 = 0.0625 * std.math.log2e, .kv_heads = @intCast(g.kv_heads) };
         const pairs = prompt_threads / 64; // simdgroup pairs, each halving the head dim of one 16-row tile
         const pick = scratch.get(.pick).buffer;

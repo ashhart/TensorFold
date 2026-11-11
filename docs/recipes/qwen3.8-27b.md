@@ -67,7 +67,9 @@ scratch. The same FP64 keyed sampler applies temperature, top-p and min-p to the
 Larger or unbounded cuts keep the general draw. Sampling time has its own pass-profile phase.
 
 On Metal, M5 prompt passes request 2,048 rows when no other request is decoding; earlier chips keep the 512-row
-default. The larger frame must fit the configured context and all streams beside loaded weights and the 8 GiB
+frame default. M1-M4 solo prompt chains take that frame's rows when the prompt attention kernels build, otherwise
+they keep 128-row passes. Decoded spans, trees and verifies retain their 128-row limit before M5. A live decoder
+caps the next prompt chunk at 128 rows before M5, or 512 with tensor units. The larger frame must fit the configured context and all streams beside loaded weights and the 8 GiB
 margin, otherwise M5 keeps 512 rows. Startup reserves the actual prompt scratch sizes as well as stream caches.
 Wide prompt frames keep separate 512-row activation scratch for small rounds, so decoding binds the small buffers.
 Admission counts both banks.

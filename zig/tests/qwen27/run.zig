@@ -33,6 +33,8 @@ fn write(a: std.mem.Allocator, io: std.Io, dir: []const u8, name: []const u8, te
 fn emit(a: std.mem.Allocator, io: std.Io, dir: []const u8) !void {
     try write(a, io, dir, "glue.metal", sources.glue ++ sources.copy);
     try write(a, io, dir, "attention.metal", sources.glue ++ sources.attention_mpp ++ sources.attention_io);
+    try write(a, io, dir, "attention-tensor.metal", try q.simd_attention.grouped(a, true, true, 6, 4, false));
+    try write(a, io, dir, "attention-simd.metal", try q.simd_attention.grouped(a, false, true, 6, 4, false));
     try write(a, io, dir, "gdn.metal", gdn_source.text);
     for ([_][]const u8{ "norm_input", "norm_xs", "mlp_xs", "xsum" }) |name| {
         const template = if (std.mem.eql(u8, name, "norm_input")) sources.norm_input else if (std.mem.eql(u8, name, "norm_xs")) sources.norm_xs else if (std.mem.eql(u8, name, "mlp_xs")) sources.mlp_xs else sources.xsum;
@@ -243,7 +245,7 @@ pub fn main(init: std.process.Init) !void {
         .prompt_ns = prompt_ns,
         .decode_ns = decode_ns,
         .prompt_tok_s = @as(f64, @floatFromInt(ids.len)) * 1e9 / @as(f64, @floatFromInt(@max(prompt_ns, 1))),
-        .physical_prompt_rows = 128,
+        .physical_prompt_rows = runner.promptRows(@intCast(chunk)),
         .projection_rows = 16,
         .prompt_sha256 = @as([]const u8, &digest_hex),
     }, .{});
