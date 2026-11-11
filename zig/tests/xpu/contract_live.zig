@@ -24,6 +24,8 @@ fn argsOf(symbol: []const u8) u32 {
         .{ "gated_norm", 12 },
         .{ "swiglu", 7 },
         .{ "argmax", 3 },
+        .{ "topk_part", 6 },
+        .{ "topk_merge", 6 },
         .{ "embed", 6 },
     };
     for (table) |e| if (std.mem.eql(u8, e[0], symbol)) return e[1];

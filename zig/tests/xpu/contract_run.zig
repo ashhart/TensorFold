@@ -7,6 +7,7 @@ const live5 = @import("contract_live.zig");
 const norm_k = @import("contract_norm.zig");
 const swiglu_k = @import("contract_swiglu.zig");
 const argmax_k = @import("contract_argmax.zig");
+const topk_k = @import("contract_topk.zig");
 const embed_k = @import("contract_embed.zig");
 const controls_k = @import("contract_controls.zig");
 
@@ -48,6 +49,10 @@ pub fn main(init: std.process.Init) !u8 {
     var argmax = try argmax_k.Argmax.init(a, &dev);
     defer argmax.deinit();
     try kernels.append(a, argmax.kernel());
+    var topk: [std.enums.values(topk_k.Which).len]topk_k.Topk = undefined;
+    for (&topk, std.enums.values(topk_k.Which)) |*x, w| x.* = try topk_k.Topk.init(a, &dev, w);
+    defer for (&topk) |*x| x.deinit();
+    for (&topk) |*x| try kernels.append(a, x.kernel());
     var embed = try embed_k.Embed.init(a, &dev);
     defer embed.deinit();
     try kernels.append(a, embed.kernel());
