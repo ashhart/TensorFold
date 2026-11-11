@@ -26,6 +26,7 @@ const Session = struct {
 const Snap = if (is_cuda) struct {} else d3.Snapshot;
 const Refs = if (is_cuda) @import("drama_reference.zig").Cache(d3.Engine) else struct {};
 const Guide = d3.guidance.Guide;
+const Conditional = @import("drama_conditional.zig").Conditional(Host);
 const Job = struct {
     id: api.Id,
     request: *const api.SpeechRequest,
@@ -210,7 +211,7 @@ const Host = struct {
         const j = &h.jobs[i].?;
         const r = j.request;
         if (work.stage == .prompt) {
-            const conditional: Conditional = .{ .h = h, .lane = lane, .j = j };
+            const conditional: Conditional = .{ .h = h, .lane = i };
             if (try d3.guidance.promptRound(if (lane.guide) |*g| g else null, r.unconditioned, r.cfg_gamma, !j.state.started, conditional)) {
                 try s.e.finishPrompt(r.frames);
                 h.lock();
@@ -270,51 +271,6 @@ const Host = struct {
         h.unlock();
         j.sink.event(j.sink.ctx, j.id, &.{ .finished = .{ .reason = final_reason, .message = final_message } });
     }
-    /// A request's conditional prompt for its guidance round: one chunk, the first resuming after a cached reference.
-    const Conditional = struct {
-        h: *Host,
-        lane: *Session,
-        j: *Job,
-
-        pub fn whole(c: Conditional) bool {
-            return c.j.state.started and c.j.state.prompt == c.j.request.frames.len;
-        }
-
-        pub fn chunk(c: Conditional) !void {
-            const s = c.lane.*;
-            const r = c.j.request;
-            const state = &c.j.state;
-            if (is_cuda) {
-                if (!state.started) try s.t.c.reset(s.t.cs);
-                return c.h.refs.prompt(s.e, r.frames, r.reference_rows, state);
-            }
-            const ref_rows = reference.prefillRows(r.frames.len, r.reference_rows, s.e.o.max_rows);
-            if (!state.started) {
-                // Invalidate before reset, GPU work or any fallible preparation for a miss.
-                if (try c.lane.prefix.begin(c.h.gpa, r.frames, ref_rows)) {
-                    try s.e.restore(&c.lane.cache);
-                    try s.e.beginPromptFrom(r.frames, ref_rows);
-                    state.prompt = ref_rows;
-                    std.log.info("drama3: reference cache hit ({d} rows restored)", .{ref_rows});
-                } else {
-                    try s.e.startPrompt(r.frames);
-                    state.prompt = 0;
-                }
-                try s.t.c.reset();
-                state.started = true;
-            }
-            var count = s.e.o.promptRows(r.frames.len - state.prompt);
-            const want_snapshot = ref_rows > 0 and !c.lane.prefix.valid;
-            if (want_snapshot and state.prompt < ref_rows) count = @min(count, ref_rows - state.prompt);
-            try s.e.promptChunk(r.frames.len, state.prompt, count, null);
-            state.prompt += count;
-            if (want_snapshot and state.prompt == ref_rows) {
-                try s.e.snapshot(&c.lane.cache);
-                c.lane.prefix.saved();
-                std.log.info("drama3: reference cache built ({d} rows)", .{ref_rows});
-            }
-        }
-    };
     fn waitSession(ctx: *anyopaque) !void {
         const s: *Session = @ptrCast(@alignCast(ctx));
         if (is_cuda) return d3.guidance.complete(s.t, s.guide);
