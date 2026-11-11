@@ -51,7 +51,7 @@ pub const Pull = struct {
         p.mutex.lockUncancelable(p.io);
         defer p.mutex.unlock(p.io);
         if (p.closing.load(.acquire) or p.off.load(.acquire)) return null;
-        p.remote.client.renew() catch |err| {
+        p.renewLinks() catch |err| {
             if (p.linked) std.log.warn("remote prefill: the link is not usable ({s}); prompts are prefilled here", .{@errorName(err)});
             p.linked = false;
             return null;
@@ -66,18 +66,26 @@ pub const Pull = struct {
         const snap = try p.model.snapshotBlank();
         errdefer p.model.snapshotDrop(snap);
         var landing: ho.landing.Landing = undefined;
-        try landing.init(p.gpa, at, .{ .@"packed" = packedOf(p.model, snap) });
+        try landing.initShards(p.gpa, at, @intCast(1 + p.remote.peers.len), .{ .@"packed" = packedOf(p.model, snap) });
         defer landing.deinit();
         src.fill(prompt, offer, landing.state()) catch |err| {
             if (err == error.Refused and p.remote.reason.len > 0) std.log.warn("remote prefill: the GB10 refused ({s})", .{p.remote.reason.text()});
             p.settle(err);
             return err;
         };
+        const pulled_ns = fabric.words.nowNs() - t0;
         _ = landing.complete() catch return error.PartialState;
         try p.model.snapshotSeal(snap, prompt, at);
         p.pulls += 1;
         p.ns += fabric.words.nowNs() - t0;
+        if (p.remote.peers.len > 0) std.log.info("remote prefill: {d} tokens pulled over {d} links in {d:.0} ms", .{ at, 1 + p.remote.peers.len, @as(f64, @floatFromInt(pulled_ns)) / 1e6 });
         return .{ .saved = snap, .at = at };
+    }
+
+    /// Every link of the pull usable again (a producer's new generation starts afresh).
+    fn renewLinks(p: *Pull) !void {
+        try p.remote.client.renew();
+        for (p.remote.peers) |c| try c.renew();
     }
 
     /// A mismatch no retry mends (the checkpoint, the prompt's tokens, the protocol) turns remote prefill off for good.
@@ -114,9 +122,22 @@ pub fn parseIds(a: std.mem.Allocator, text: []const u8) ![]u32 {
     return out.toOwnedSlice(a);
 }
 
+/// A file in one allocation, read in 1 GiB steps (one read of 2 GiB or more fails on macOS).
+fn readWhole(a: std.mem.Allocator, io: std.Io, path: []const u8) ![]u8 {
+    var f = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer f.close(io);
+    const n: usize = @intCast(try f.length(io));
+    const buf = try a.alloc(u8, n);
+    errdefer a.free(buf);
+    var r = f.reader(io, &.{});
+    var at: usize = 0;
+    while (at < n) : (at += 1 << 30) try r.interface.readSliceAll(buf[at..@min(n, at + (1 << 30))]);
+    return buf;
+}
+
 /// A hand-off file: the library's blob or a producer stream (`<id>.mkvh2`, `<id>.tokens.json`) for `checkpoint`.
 pub fn loadFile(a: std.mem.Allocator, io: std.Io, path: []const u8, checkpoint: []const u8) !ho.blob.Blob {
-    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(8 << 30));
+    const bytes = try readWhole(a, io, path);
     if (!std.mem.endsWith(u8, path, ho.file.extension)) return ho.blob.Blob.parse(a, bytes);
     const ids = try std.fmt.allocPrint(a, "{s}.tokens.json", .{path[0 .. path.len - ho.file.extension.len]});
     const tokens = try parseIds(a, try std.Io.Dir.cwd().readFileAlloc(io, ids, a, .limited(64 << 20)));
@@ -193,22 +214,47 @@ pub fn refusal(f: Flags, drafter: bool) ?[]const u8 {
 pub const Link = struct {
     box: fabric.mailbox.Mailbox,
     client: fabric.mailbox.Client,
+    /// a KV_SPLIT pair's other producers' links (`--mcdma-link a,b`): shard k's mailbox and client are `more[k - 1]`'s
+    more: []More = &.{},
+    peers: []*fabric.mailbox.Client = &.{},
     http: trigger.Http,
     pull: Pull,
+
+    const More = struct { box: fabric.mailbox.Mailbox, client: fabric.mailbox.Client };
 
     /// `id` names the checkpoint both ends load (the manifest's model must equal it).
     pub fn start(gpa: std.mem.Allocator, io: std.Io, m: *ds.Model, f: Flags, id: []const u8) !*Link {
         const l = try gpa.create(Link);
         errdefer gpa.destroy(l);
         const rules = try policy();
-        l.box = try fabric.mailbox.Mailbox.openConnect(f.link.?);
+        var names = std.mem.splitScalar(u8, f.link.?, ',');
+        l.box = try fabric.mailbox.Mailbox.openConnect(names.first());
         errdefer l.box.close();
         l.client = try fabric.mailbox.Client.init(&l.box, fabric.words.native, 30 * std.time.ns_per_s);
+        l.more = &.{};
+        l.peers = &.{};
+        var opened: usize = 0;
+        errdefer {
+            for (l.more[0..opened]) |*x| x.box.close();
+            gpa.free(l.more);
+            gpa.free(l.peers);
+        }
+        const extra = std.mem.count(u8, f.link.?, ",");
+        if (extra > 0) {
+            l.more = try gpa.alloc(More, extra);
+            l.peers = try gpa.alloc(*fabric.mailbox.Client, extra);
+            while (names.next()) |name| : (opened += 1) {
+                l.more[opened].box = try fabric.mailbox.Mailbox.openConnect(name);
+                errdefer l.more[opened].box.close();
+                l.more[opened].client = try fabric.mailbox.Client.init(&l.more[opened].box, fabric.words.native, 30 * std.time.ns_per_s);
+                l.peers[opened] = &l.more[opened].client;
+            }
+        }
         const base = std.mem.trimEnd(u8, f.url.?, "/");
         const key = try q27.apiKey(gpa, io);
         errdefer if (key) |k| gpa.free(k);
         l.http = .{ .gpa = gpa, .io = io, .url = try std.fmt.allocPrint(gpa, "{s}/v1/completions", .{base}), .model = "", .closing = &l.pull.closing, .key = key };
-        l.pull = .{ .gpa = gpa, .io = io, .model = m, .remote = .{ .gpa = gpa, .policy = rules, .client = &l.client, .trigger = l.http.trigger(), .model = id, .protocol = fabric.wire.recurrent_version } };
+        l.pull = .{ .gpa = gpa, .io = io, .model = m, .remote = .{ .gpa = gpa, .policy = rules, .client = &l.client, .peers = l.peers, .trigger = l.http.trigger(), .model = id, .protocol = fabric.wire.recurrent_version } };
         return l;
     }
 
@@ -223,6 +269,9 @@ pub const Link = struct {
             gpa.free(k);
         }
         l.box.close();
+        for (l.more) |*x| x.box.close();
+        gpa.free(l.more);
+        gpa.free(l.peers);
         gpa.destroy(l);
     }
 };
