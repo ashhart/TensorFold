@@ -152,6 +152,9 @@ pub fn snap_bytes(_: *anyopaque, at: u32) u64 {
     return snap.bytes(at);
 }
 
+/// The startup line says the prompt cache is reserved at load: `snap_ready` allocates all of it before any request.
+pub const snap_reserved = true;
+
 /// The cache's pages, allocated once before any request: the store counts held and spare pages through the hooks below.
 pub fn snap_ready(ptr: *anyopaque, budget: u64) !u64 {
     const x = lfm(ptr);
