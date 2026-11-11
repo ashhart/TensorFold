@@ -26,7 +26,9 @@ pub fn windows(self: anytype, wins: []const be.Window, out: []be.Verified, draft
             rows += w.rows();
         }
         if (n == 1 or cap <= 1) {
-            for (seqs[0..n], ds[0..n], idss[0..n]) |q, d, ids| try self.ops().verify(q, d, ids);
+            for (seqs[0..n], ds[0..n], idss[0..n]) |q, d, ids| {
+                if (d.logit_paged and self.ranks == null) try self.ops().verifyIn(q, d, ids, self.logits.ptr) else try self.ops().verify(q, d, ids);
+            }
         } else if (self.ranks) |r| {
             try r.verifyMany(@TypeOf(self.tri()), self.tri(), seqs[0..n], ds[0..n], idss[0..n], self.logits.ptr);
         } else try self.ops().verifyMany(seqs[0..n], ds[0..n], idss[0..n], self.logits.ptr);
