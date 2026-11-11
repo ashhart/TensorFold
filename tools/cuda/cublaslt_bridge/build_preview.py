@@ -84,6 +84,8 @@ def diagnostic_tail(stage, path, context, work, repo, zig_root, gitleaks):
     scanner.scan(text.encode(), "normalized-diagnostic")
     receipt = scanner.close()
     if receipt["findings"]:
+        print(json.dumps({"stage": stage, "diagnostic_withheld": "context-finding",
+                          "finding_count": len(receipt["findings"])}))
         return
     secret_scan(gitleaks, audit / "readable-spans.txt", audit)
     print(json.dumps({"stage": stage, "reviewed_diagnostic_tail": text}))
@@ -138,6 +140,7 @@ def main():
     def run(name, argv, timeout=5400):
         global STAGE
         STAGE = name
+        print(json.dumps({"status": "BUILD_STAGE", "stage": name}), flush=True)
         path = logs / (name + ".log")
         with path.open("wb") as log:
             result = subprocess.run([str(value) for value in argv], cwd=repo,
@@ -157,8 +160,8 @@ def main():
                 selected_log = work / "bridge/private-audit/compile-link.log"
             try:
                 diagnostic_tail(name, selected_log, context_path, work, repo, zig_root, gitleaks)
-            except Exception:
-                pass
+            except Exception as diagnostic_error:
+                print(json.dumps({"stage": name, "diagnostic_withheld": type(diagnostic_error).__name__}))
             raise ValueError("preview command failed: " + name)
 
     zig_before = tree(zig_root)

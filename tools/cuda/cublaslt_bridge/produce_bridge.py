@@ -135,6 +135,7 @@ def run(argv, *, cwd, env, audit, name, roots, accepted=(0,), timeout=1800):
 
 
 def main():
+    global PRODUCER_STAGE
     parser = argparse.ArgumentParser()
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--work", type=Path)
@@ -182,18 +183,19 @@ def main():
     audit, bundle = work / "private-audit", work / "bundle"
     audit.mkdir()
     bundle.mkdir()
+    PRODUCER_STAGE = "host-inputs"
     env = dict(os.environ)
     for key in list(env):
         if key.upper() in ("CL", "_CL_", "LINK", "_LINK_", "NVCC_PREPEND_FLAGS",
                            "NVCC_APPEND_FLAGS", "NVCC_CCBIN", "CUDA_PATH", "CUDA_HOME") or key.upper().startswith("CUDA_PATH_V"):
             del env[key]
-    needed = ("VCToolsInstallDir", "WindowsSdkDir", "WindowsSDKVersion", "VCToolsVersion")
+    needed = ("VCTOOLSINSTALLDIR", "WINDOWSSDKDIR", "WINDOWSSDKVERSION", "VCTOOLSVERSION")
     if any(not env.get(key) for key in needed):
         raise ValueError("initialize the exact MSVC x64 toolset before execute")
-    msvc = Path(env["VCToolsInstallDir"]).resolve()
-    winsdk = Path(env["WindowsSdkDir"]).resolve()
-    sdkversion = env["WindowsSDKVersion"].strip("\\/")
-    if not re.fullmatch(r"\d+\.\d+\.\d+", env["VCToolsVersion"].strip("\\/")):
+    msvc = Path(env["VCTOOLSINSTALLDIR"]).resolve()
+    winsdk = Path(env["WINDOWSSDKDIR"]).resolve()
+    sdkversion = env["WINDOWSSDKVERSION"].strip("\\/")
+    if not re.fullmatch(r"\d+\.\d+\.\d+", env["VCTOOLSVERSION"].strip("\\/")):
         raise ValueError("unexpected MSVC version")
     if not re.fullmatch(r"\d+\.\d+\.\d+\.\d+", sdkversion):
         raise ValueError("unexpected Windows SDK version")
@@ -223,7 +225,7 @@ def main():
             values.append({"root": label, "path": path.relative_to(host_roots[label]).as_posix()})
         search_paths[variable] = values
     host_manifest = {"schema": "tensorfold.bridge.host-inputs.v1",
-                     "msvc_version": env["VCToolsVersion"].strip("\\/"),
+                     "msvc_version": env["VCTOOLSVERSION"].strip("\\/"),
                      "windows_sdk_version": sdkversion,
                      "search_paths": search_paths, "roots": {}}
     for name, path in host_roots.items():
@@ -241,6 +243,7 @@ def main():
     toolkit = work / "cuda"
     toolkit.mkdir()
     input_rows, packages = [], {}
+    PRODUCER_STAGE = "sdk-inputs"
     metadata = work / "downloads" / "redistrib_13.5.0.json"
     urllib.request.urlretrieve(lock["official_metadata_url"], metadata)
     if digest(metadata) != lock["official_metadata_sha256"]:
