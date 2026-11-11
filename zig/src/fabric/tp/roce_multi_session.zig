@@ -125,9 +125,16 @@ test "multirank probe: one rank's mismatch leaves every rank without the wire; m
         defer sock.close(l.fd);
         var v: Vote = .{ .port = l.port, .lfd = l.fd, .odd = odd };
         var t: [2]std.Thread = undefined;
-        for (&t, 1..) |*x, me| x.* = try std.Thread.spawn(.{}, Vote.rank, .{ &v, @as(u32, @intCast(me)) });
+        var started: usize = 0;
+        // the ranks use this frame's vote: a failed spawn first joins the started ones (their deadlines bound it)
+        defer for (t[0..started]) |x| x.join();
+        for (&t, 1..) |*x, me| {
+            x.* = try std.Thread.spawn(.{}, Vote.rank, .{ &v, @as(u32, @intCast(me)) });
+            started = me;
+        }
         v.rank(0);
         for (t) |x| x.join();
+        started = 0; // joined above, so a failed check below does not join them again
         for (v.errs) |e| try std.testing.expectEqual(@as(?anyerror, null), e);
         for (v.kept) |k| try std.testing.expectEqual(odd == null, k);
     }
