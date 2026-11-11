@@ -377,6 +377,9 @@ latent rows), each launch with its region's table and stride, and each control g
 With the split each rank keeps only its own class's latent pages and a trash page, so its latent table holds places in
 that smaller region; the owner's pass for another rank's heads is the same chunk and merge launches with that rank's
 queries, outputs and head count. No launch is new, so the split adds no case here: `glm-paged-check` covers it.
+A prompt chunk's history fetch packs the owner's earlier rows with `tf_glm_kvh_rows` (the `rows` case above) and
+attends them on the other ranks with the same chunk and merge launches over rows in order (no table), so it adds
+no case either.
 Its prompt indexer (`tf_glm_index_scores`, `tf_glm_index_pools`) is bit-equal to `tf_glm_scores` and
 `tf_glm_select_rows`, and its decode select at a 1,024-thread block a row (`tf_glm_select_rows_wide`) and in spans
 over many blocks (`tf_glm_dsel_scan`, then `tf_glm_dsel_merge` a block a row) to `tf_glm_select_rows`; both stated
