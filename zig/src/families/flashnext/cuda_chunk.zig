@@ -31,7 +31,8 @@ pub fn passRows(lanes: anytype, own: anytype, solo: usize, busy: usize) usize {
 
 /// Rows from which a read-out takes the tiles (TF_FLASHNEXT_READOUT_ROWS, default 64, 0 never), read once at load.
 pub fn readoutTileRows() usize {
-    const r = if (std.c.getenv("TF_FLASHNEXT_READOUT_ROWS")) |v| std.fmt.parseInt(usize, std.mem.span(v), 10) catch 64 else 64;
+    // the startup check refused every malformed value already, so a plain default stands here
+    const r = @import("sys").environment.read(usize, "TF_FLASHNEXT_READOUT_ROWS", 64) catch 64;
     return if (r == 0) std.math.maxInt(usize) else r;
 }
 
