@@ -329,11 +329,30 @@ pub const Forward = struct {
         const ex = m.experts;
         const K = c.top_k;
         const pairs = rows * K;
+        const tile: usize = if (prompt) cuda.experts.promptTile(ex.format) else 16;
+        const g = o.grouped();
+        // shared expert: one pair a row, its own act/out rows; a decode window forks it, joined before the add
+        const sh = lt.shared;
+        const in_window = !prompt and rows <= state.windowRows(c);
+        const sd = if (in_window) f.side else null;
+        const sh_act = if (in_window) b.sact else b.act;
+        const sh_out = if (in_window) b.sout else b.ymoe;
+        const sh_up: cuda.experts.Rows = .{ .x = b.y, .stride = c.hidden, .slots = 1 };
+        const sh_down: cuda.experts.Rows = .{ .x = sh_act, .stride = sh.width };
+        var sh_plan = b.plan;
+        if (in_window) {
+            sh_plan = b.latentPlan(c, rows);
+            if (sd) |side| {
+                try side.fork.record(o.s);
+                try side.s.wait(side.fork);
+                try g.decode(side.s, .up, sh_up, sh, sh_plan, sh_act, kern.maxItems(rows, 1, 16), rows, 16, -1);
+                try g.decode(side.s, .down_f32, sh_down, sh, sh_plan, sh_out, kern.maxItems(rows, 1, 16), rows, 16, -1);
+                try side.join.record(side.s);
+            }
+        }
         try f.glue.route(b.y, m.router, m.bias, b.part, b.pick, b.wts, rows, c.hidden, ex.experts, K, K, c.routed_scaling, c.norm_topk);
         try f.mark(.route);
         if (prompt) try o.prefillDense(b.y, lt.fc1, b.lat, rows) else try o.dense(b.y, b.xs, lt.fc1, b.lat, rows);
-        const tile: usize = if (prompt) cuda.experts.promptTile(ex.format) else 16;
-        const g = o.grouped();
         try o.plan(b.pick, pairs, ex.experts, tile, b.plan);
         try f.mark(.plan);
         var items = kern.maxItems(pairs, ex.experts, tile);
@@ -350,20 +369,24 @@ pub const Forward = struct {
         }
         try o.latentSum(b.ymoe, b.wts, b.comb, rows, K, c.latent);
         if (prompt) try o.prefillDense(b.comb, lt.fc2, b.delta, rows) else try o.dense(b.comb, 0, lt.fc2, b.delta, rows);
-        // the shared expert: every row's pair with expert 0 of a one-expert layer, relu^2 between as the routed ones
-        const sh = lt.shared;
-        try o.plan(b.sids, rows, 1, tile, b.plan);
-        items = kern.maxItems(rows, 1, tile);
-        const sh_up: cuda.experts.Rows = .{ .x = b.y, .stride = c.hidden, .slots = 1 };
-        const sh_down: cuda.experts.Rows = .{ .x = b.act, .stride = sh.width };
-        if (prompt) {
-            try g.prompt(o.s, .up, sh_up, sh, b.plan, b.act, items, rows, tile, -1);
-            try g.prompt(o.s, .down_f32, sh_down, sh, b.plan, b.ymoe, items, rows, tile, -1);
+        if (in_window) {
+            if (sd == null) {
+                try g.decode(o.s, .up, sh_up, sh, sh_plan, sh_act, kern.maxItems(rows, 1, 16), rows, 16, -1);
+                try g.decode(o.s, .down_f32, sh_down, sh, sh_plan, sh_out, kern.maxItems(rows, 1, 16), rows, 16, -1);
+            }
         } else {
-            try g.decode(o.s, .up, sh_up, sh, b.plan, b.act, items, rows, tile, -1);
-            try g.decode(o.s, .down_f32, sh_down, sh, b.plan, b.ymoe, items, rows, tile, -1);
+            try o.plan(b.sids, rows, 1, tile, b.plan);
+            items = kern.maxItems(rows, 1, tile);
+            if (prompt) {
+                try g.prompt(o.s, .up, sh_up, sh, b.plan, sh_act, items, rows, tile, -1);
+                try g.prompt(o.s, .down_f32, sh_down, sh, b.plan, sh_out, items, rows, tile, -1);
+            } else {
+                try g.decode(o.s, .up, sh_up, sh, b.plan, sh_act, items, rows, tile, -1);
+                try g.decode(o.s, .down_f32, sh_down, sh, b.plan, sh_out, items, rows, tile, -1);
+            }
         }
-        try o.addBf16(b.delta, b.delta, b.ymoe, true, rows * c.hidden);
+        if (sd) |side| try o.s.wait(side.join);
+        try o.addBf16(b.delta, b.delta, sh_out, true, rows * c.hidden);
         try f.mark(.shared_wait);
     }
 
