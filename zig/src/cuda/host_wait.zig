@@ -69,10 +69,16 @@ const Cpu = struct {
             : .{ .x10 = true, .memory = true });
     }
 };
-/// The RoCE proxy's idle wait on its doorbell, with a 1 ms WFET counter deadline; the caller rechecks after any wake.
-pub fn park(word: *const u32, old: u32) void {
+/// WFET parks of a RoCE proxy's idle stretch before it naps as it does unset.
+pub const idle_parks: u64 = 8192;
+/// The RoCE proxy's `n`th idle wait on its doorbell: a 1 ms WFET park, then after `idle_parks` the proxy's nap.
+pub fn idle(word: *const u32, old: u32, n: u64) void {
     if (comptime !arm) return;
-    Cpu.wait(word, old, Cpu.now() + Cpu.slice());
+    idleWith(Cpu, @import("roce_nap.zig").pause, word, old, n);
+}
+fn idleWith(comptime H: type, comptime nap: fn () void, word: *const u32, old: u32, n: u64) void {
+    if (n > idle_parks) return nap(); // a long idle stretch sleeps, so the kernel's idle states can take the core
+    H.wait(word, old, H.now() + H.slice()); // the caller rechecks after any wake
 }
 /// Adds one finished marker wait to the totals; a debug line carries them at most every 10 s of the clock `H`.
 fn count(comptime H: type, parks: u64, by_marker: bool, ticks: u64) void {
@@ -328,10 +334,26 @@ test "host wait: another stream's success does not retire an unconfirmed marker 
     w.deinit();
     try std.testing.expectEqual(@as(usize, 0), Fake.frees);
 }
-test "host wait: park smoke test on a host with WFET" {
+test "host wait: a proxy's idle stretch parks up to idle_parks, then naps" {
+    const Nap = struct {
+        var naps: usize = 0;
+        fn pause() void {
+            naps += 1;
+        }
+    };
+    Clock.waits = 0;
+    var word: u32 = 7;
+    idleWith(Clock, Nap.pause, &word, 7, 1);
+    idleWith(Clock, Nap.pause, &word, 7, idle_parks);
+    try std.testing.expect(Clock.waits == 2 and Nap.naps == 0);
+    idleWith(Clock, Nap.pause, &word, 7, idle_parks + 1);
+    try std.testing.expect(Clock.waits == 2 and Nap.naps == 1);
+}
+test "host wait: idle smoke test on a host with WFET" {
     var word: u32 = 8;
-    park(&word, 7);
+    idle(&word, 7, 1);
     if (!(arm and @as(u64, auxval(std.elf.AT.HWCAP2)) & hwcap2_wfxt != 0)) return;
     word = 7;
-    park(&word, 7);
+    idle(&word, 7, 1);
+    idle(&word, 7, idle_parks + 1);
 }

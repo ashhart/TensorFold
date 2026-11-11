@@ -426,17 +426,18 @@ pub const Gather = struct {
     /// The proxy: spins on the doorbell and posts each sequence in order (a missed one from its slot's size).
     fn proxy(g: *Gather) void {
         const c = g.ctrl();
-        const wfe = host_wait.on(); // a park lasts up to 1 ms, so the CQs drain every 8 parks instead of 64 polls
+        const wfe = host_wait.on();
+        const m: u64 = if (wfe) 7 else 63; // a park lasts up to 1 ms: the CQs drain every 8 parks, or every 64 polls
         var idle: u64 = 0;
         while (g.running.load(.monotonic)) {
             const seq = @atomicLoad(u32, &c[layout.c_seq], .acquire);
             if (seq == g.last_seq) {
                 idle += 1;
-                if (idle % @as(u64, if (wfe) 8 else 64) == 0) for (0..g.n_hca) |h| g.drain(h) catch {
+                if (idle & m == 0) for (0..g.n_hca) |h| g.drain(h) catch {
                     g.failed.store(true, .release);
                     return;
                 };
-                if (wfe) host_wait.park(&c[layout.c_seq], seq) else if (idle >= idle_spins) nap.pause();
+                if (wfe) host_wait.idle(&c[layout.c_seq], seq, idle) else if (idle >= idle_spins) nap.pause();
                 continue;
             }
             idle = 0;
