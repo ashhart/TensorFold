@@ -5,6 +5,7 @@ const mesh = @import("mesh");
 const settings = @import("sys").environment;
 const glm = @import("glm_cuda").native;
 const minimax = @import("minimax_m3_cuda").native;
+const nemotron = @import("nemotron");
 
 const Allocator = std.mem.Allocator;
 const Family = mesh.launch.Family;
@@ -13,6 +14,7 @@ const Family = mesh.launch.Family;
 pub fn family(comptime F: type) Family {
     if (F == glm) return .glm;
     if (F == minimax) return .minimax;
+    if (F == nemotron.native or F == nemotron.omni) return .nemotron;
     return .other;
 }
 
@@ -105,6 +107,8 @@ test "GLM by its aliases, by flags or by both resolves alike; other families rea
     try testing.expectEqualStrings("TF_MINIMAX_WORLD, an alias of --tp", minimax_alias.launch_from);
     try testing.expectEqual(Family.minimax, family(minimax));
     try testing.expectEqual(Family.glm, family(glm));
+    try testing.expectEqual(Family.nemotron, family(nemotron.native));
+    try testing.expectEqual(Family.nemotron, family(nemotron.omni));
     const other = (try resolveWith(a, .{ .dir = "d", .model_type = "m" }, .other, pair, &problem)).?;
     try testing.expectEqual(@as(u32, 1), other.tp);
     // a request built in code keeps its placement: no flag bits, no aliases, nothing to resolve
