@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Lane host: when the backend fails a round, only the streams it held at the failure (paused ones included) and the prompts whose last piece the round planned fail with it; a prompt still filling keeps filling, and a stream that had already finished delivers its reply instead of an error (#2727). Thanks to @ciprianveg.
+
 - Dashboard (`--dashboard`) and `/stats`: the prompt cache, its disk tier and Flash Next's SSD-expert cache now show their entries, sizes, hits and resumes; nothing is hashed or published with the dashboard off (#2682, refs #2655). Thanks to @volfco.
 
 - Server: a GLM tool call whose argument value runs into the next key/value pair, or never closes before the call ends, now stays in `content` as text instead of becoming a call with corrupt arguments, whole and streamed (a stream may already have sent the call's first pieces); well-formed GLM calls parse as before (#2831, fixes #2801). Thanks to @devopsfortunato.
