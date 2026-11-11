@@ -9,6 +9,10 @@ pub const Pipelines = struct {
     pool: mtl.Pipeline,
     rt: mtl.Pipeline,
     pack: mtl.Pipeline,
+    /// the three over several slots, each slot's rows into its own state (segs.zig's table)
+    pool_segs: mtl.Pipeline,
+    rt_segs: mtl.Pipeline,
+    pack_segs: mtl.Pipeline,
 
     pub fn load(device: mtl.Device) !Pipelines {
         return loadSource(device, sources.dsv41.compress);
@@ -22,11 +26,14 @@ pub const Pipelines = struct {
         p.pool = try mtl.Pipeline.init(device, lib, "tf_dsv41_c_pool2", false);
         p.rt = try mtl.Pipeline.init(device, lib, "tf_dsv41_c_fp4rt", false);
         p.pack = try mtl.Pipeline.init(device, lib, "tf_dsv41_c_fp4pack", false);
+        p.pool_segs = try mtl.Pipeline.init(device, lib, "tf_dsv41_c_pool2_segs", false);
+        p.rt_segs = try mtl.Pipeline.init(device, lib, "tf_dsv41_c_fp4rt_segs", false);
+        p.pack_segs = try mtl.Pipeline.init(device, lib, "tf_dsv41_c_fp4pack_segs", false);
         return p;
     }
 
     pub fn deinit(p: *Pipelines) void {
-        for ([_]mtl.Pipeline{ p.pool, p.rt, p.pack }) |x| x.deinit();
+        for ([_]mtl.Pipeline{ p.pool, p.rt, p.pack, p.pool_segs, p.rt_segs, p.pack_segs }) |x| x.deinit();
     }
 };
 
@@ -48,11 +55,30 @@ pub fn pool2(p: *const Pipelines, e: mtl.ComputeEncoder, kv: Ref, score: Ref, st
     grid(e, dim, 1);
 }
 
+/// `pool2` of `count` slots in one launch: slot j's rows from segs[j].base over its carry, kept into its inputs.
+pub fn pool2Segs(p: *const Pipelines, e: mtl.ComputeEncoder, kv: Ref, score: Ref, pos: Ref, y: Ref, segs: Ref, count: u32, keep: u32, dim: u32) void {
+    e.setPipeline(p.pool_segs);
+    bind(e, &.{ kv, score, kv, pos, y });
+    e.setValue([2]u32{ keep, dim }, 5);
+    e.setBuffer(segs.buf, segs.off, 6);
+    grid(e, dim, count);
+}
+
 /// FP4 round trip (16-value blocks, E4M3 scales) of `rows` rows of `dim` bf16 into row dest[i] of y; dest < 0 skips.
 pub fn fp4rt(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, y: Ref, dest: Ref, rows: u32, dim: u32) void {
     e.setPipeline(p.rt);
     bind(e, &.{ x, y, dest });
     e.setValue([3]u32{ dim / 16, dim, dim }, 3);
+    grid(e, dim / 16, rows);
+}
+
+/// `fp4rt` over several slots' rows: row r into its slot's compressed rows (`segs` table, `slots` [rows] its index).
+pub fn fp4rtSegs(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, dest: Ref, segs: Ref, slots: Ref, rows: u32, dim: u32) void {
+    e.setPipeline(p.rt_segs);
+    bind(e, &.{ x, x, dest });
+    e.setValue([3]u32{ dim / 16, dim, dim }, 3);
+    e.setBuffer(segs.buf, segs.off, 4);
+    e.setBuffer(slots.buf, slots.off, 5);
     grid(e, dim / 16, rows);
 }
 
@@ -64,5 +90,15 @@ pub fn fp4pack(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, codes: Ref, s
     e.setPipeline(p.pack);
     bind(e, &.{ x, codes, scales, k.dest orelse x });
     e.setValue([6]u32{ k.blocks, k.in_stride, k.code_row, k.scale_row, k.scale_off, @intFromBool(k.dest != null) }, 4);
+    grid(e, k.blocks, rows);
+}
+
+/// `fp4pack` over several slots' rows: row r into its slot's index keys (codes and scales in one row, by k.dest).
+pub fn fp4packSegs(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, segs: Ref, slots: Ref, rows: u32, k: Pack) void {
+    e.setPipeline(p.pack_segs);
+    bind(e, &.{ x, x, x, k.dest orelse x });
+    e.setValue([6]u32{ k.blocks, k.in_stride, k.code_row, k.scale_row, k.scale_off, @intFromBool(k.dest != null) }, 4);
+    e.setBuffer(segs.buf, segs.off, 5);
+    e.setBuffer(slots.buf, slots.off, 6);
     grid(e, k.blocks, rows);
 }

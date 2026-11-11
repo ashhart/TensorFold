@@ -535,6 +535,9 @@ pub const Suite = struct {
             .pool = try mtl.Pipeline.init(s.device, lib, "tf_dsv41_g_pool2", false),
             .rt = try mtl.Pipeline.init(s.device, lib, "tf_dsv41_g_fp4rt", false),
             .pack = try mtl.Pipeline.init(s.device, lib, "tf_dsv41_g_fp4pack", false),
+            .pool_segs = try rig_.pipeline(s.device, sources.dsv41.compress, "tf_dsv41_c_pool2_segs"),
+            .rt_segs = try rig_.pipeline(s.device, sources.dsv41.compress, "tf_dsv41_c_fp4rt_segs"),
+            .pack_segs = try rig_.pipeline(s.device, sources.dsv41.compress, "tf_dsv41_c_fp4pack_segs"),
         };
         defer old.deinit();
         var cases: usize = 0;

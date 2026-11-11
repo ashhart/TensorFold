@@ -201,14 +201,10 @@ struct TfFKvArgs {
 };
 
 // glue_tmp's rmsnorm, rope, actq and scatter of a window key row (dim 512) in a group of 256, into D[reps r + k].
-[[kernel, max_total_threads_per_threadgroup(256)]] void tf_dsv41_f_kv(
-    const device bfloat* X [[buffer(0)]], const device float* Wt [[buffer(1)]], device bfloat* KVN [[buffer(2)]],
-    device bfloat* KVR [[buffer(3)]], device bfloat* KVQ [[buffer(4)]], device bfloat* WIN [[buffer(5)]],
-    const device int* P [[buffer(6)]], const device float* CS [[buffer(7)]], const device int* D [[buffer(8)]],
-    constant TfFKvArgs& a [[buffer(9)]], uint r [[threadgroup_position_in_grid]],
-    uint t [[thread_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
-    uint sg [[simdgroup_index_in_threadgroup]]) {
-  threadgroup float part[8];
+inline void tf_f_kv_row(const device bfloat* X, const device float* Wt, device bfloat* KVN, device bfloat* KVR,
+                        device bfloat* KVQ, device bfloat* WIN, const device int* P, const device float* CS,
+                        const device int* D, constant TfFKvArgs& a, uint r, uint t, uint lane, uint sg,
+                        threadgroup float* part) {
   const int pos = P[r];
   if (pos < 0) return;
   const device bfloat* x = X + ulong(r) * a.dim;
@@ -238,6 +234,38 @@ struct TfFKvArgs {
     }
   }
   if (TF_CTL == 4 && r == 0 && t == 0) WIN[ulong(a.rows) * a.dim] = bfloat(1.0f); // the first bf16 past the ring
+}
+
+#define TF_F_KV_ARGS                                                                                                 \
+  const device bfloat* X [[buffer(0)]], const device float* Wt [[buffer(1)]], device bfloat* KVN [[buffer(2)]],    \
+      device bfloat* KVR [[buffer(3)]], device bfloat* KVQ [[buffer(4)]], const device int* P [[buffer(6)]],       \
+      const device float* CS [[buffer(7)]], const device int* D [[buffer(8)]], constant TfFKvArgs& a [[buffer(9)]], \
+      uint r [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]],                             \
+      uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]
+
+[[kernel, max_total_threads_per_threadgroup(256)]] void tf_dsv41_f_kv(TF_F_KV_ARGS, device bfloat* WIN [[buffer(5)]]) {
+  threadgroup float part[8];
+  tf_f_kv_row(X, Wt, KVN, KVR, KVQ, WIN, P, CS, D, a, r, t, lane, sg, part);
+}
+
+// A slot's state at one layer of a launch over several slots (segs.zig's Seg), then its rows from `base`.
+struct TfDsv41Seg {
+  device uchar* window;
+  device uchar* pool;
+  device uchar* keys;
+  device float* carry;
+  device float* inputs;
+  device uchar* comp;
+  device uchar* ikeys;
+  uint base, rows, nkeys, start;
+};
+
+// tf_dsv41_f_kv over several slots: row r into its slot's window ring (RS: row -> slot; control 6: the first slot's).
+[[kernel, max_total_threads_per_threadgroup(256)]] void tf_dsv41_f_kv_segs(
+    TF_F_KV_ARGS, const device TfDsv41Seg* SG [[buffer(10)]], const device int* RS [[buffer(11)]]) {
+  threadgroup float part[8];
+  device bfloat* win = (device bfloat*)SG[TF_CTL == 6 ? 0 : RS[r]].window;
+  tf_f_kv_row(X, Wt, KVN, KVR, KVQ, win, P, CS, D, a, r, t, lane, sg, part);
 }
 
 inline float tf_f_clip(float x, float lo, float hi) { return x != x ? x : clamp(x, lo, hi); }
