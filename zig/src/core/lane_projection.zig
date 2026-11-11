@@ -120,6 +120,7 @@ pub fn source(a: std.mem.Allocator, l: Layout) ![]u8 {
     }
     try text.appendSlice(a, if (l.ranges.len == 0) "  return j;\n}\n" else "  return 0;\n}\n");
     try text.print(a, "#define TF_PRECOMPUTE_SUMS {d}\n", .{@intFromBool(l.precompute_sums)});
+    try text.print(a, "#define TF_ROW_BLOCKS {d}\n", .{@intFromBool(!l.reg and !l.cooperative and l.rows > 16)});
     if (l.reg) try text.appendSlice(a, "#define TF_REG 1\n");
     if (l.y_stride) |s| try text.print(a, "#define TF_YS {d}\n", .{s});
     try text.appendSlice(a, ks.core_lane_projection);
@@ -249,7 +250,9 @@ pub const Projection = struct {
         const units = device.tensorUnits();
         if (!units and (l.format.bits != 6 or l.format.group != 32 or l.cooperative or l.reg or l.precompute_sums)) return error.TensorUnitsRequired;
         const capacity: usize = if (l.cooperative or !units) 16 else l.rows;
-        const text = try source(a, l);
+        var kernel_layout = l;
+        if (!units and !l.cooperative and !l.reg) kernel_layout.rows = capacity;
+        const text = try source(a, kernel_layout);
         defer a.free(text);
         const adapted = try frags.source(device, a, text);
         defer a.free(adapted);
