@@ -537,8 +537,8 @@ pub const SeqState = struct {
 pub const scoreStride = sizes.scoreStride;
 pub const scoreBytes = sizes.scoreBytes;
 
-/// One stream's rows in a shared pass from `pos` on its own caches; its rollback, hidden rows and scores (by row).
-pub const Lane = struct { seq: SeqState, pos: usize, rows: usize = 1, keep: ?*const Keep = null, streams: u64 = 0, logits: u64 = 0, logit_rows: []const u64 = &.{} };
+/// One stream's rows in a shared pass from `pos` on its own caches, and its window's rollback, hidden rows and scores.
+pub const Lane = struct { seq: SeqState, pos: usize, rows: usize = 1, keep: ?*const Keep = null, streams: u64 = 0, logits: u64 = 0 };
 
 /// The engine's resident weights the pass reads.
 pub const Model = struct {
