@@ -8,7 +8,7 @@ const check = @import("check.zig");
 const hold_bytes = 256 << 20;
 const shared_streams = [_]usize{ 2, 4, 8 };
 
-/// MODEL in both precisions: every latent MoE layer at 1 to max_rows rows, forked against one stream, byte for byte.
+/// MODEL in both precisions where built: each latent MoE layer at 1 to windowRows rows, forked against one stream.
 pub fn run(gpu: check.Gpu, model: []const u8) !void {
     for ([_]nemotron.Precision{ .checkpoint, .full }) |p| try layers(gpu, model, p);
 }
@@ -16,7 +16,10 @@ pub fn run(gpu: check.Gpu, model: []const u8) !void {
 /// Each layer, lone at every width and shared by 2, 4 and 8 streams, side stream held back, against one stream.
 fn layers(gpu: check.Gpu, model: []const u8, precision: nemotron.Precision) !void {
     const gpa = gpu.gpa;
-    const e = try nemotron.Engine.init(gpa, gpu.io, gpu.ctx, model, null, .{ .context = 4096, .graphs = false, .precision = precision });
+    const e = nemotron.Engine.init(gpa, gpu.io, gpu.ctx, model, null, .{ .context = 4096, .graphs = false, .precision = precision }) catch |err| switch (err) {
+        error.PrecisionNotBuilt => return, // Bolt has no checkpoint-math shared expert; its full path runs below
+        else => return err,
+    };
     defer e.deinit();
     const c = e.c;
     var plain = e.forward(null);
@@ -25,8 +28,8 @@ fn layers(gpu: check.Gpu, model: []const u8, precision: nemotron.Precision) !voi
     const side = forked.side orelse return error.NoSideStream;
     var moes: std.ArrayList(nemotron.weights.MoE) = .empty;
     defer moes.deinit(gpa);
-    for (e.w.blocks) |blk| if (blk.kind == .moe) try moes.append(gpa, blk.moe);
-    if (e.w.mtp) |m| try moes.append(gpa, m.moe);
+    for (e.w.blocks) |blk| if (blk.kind == .moe and (blk.moe.latent != null or blk.moe.bolt != null)) try moes.append(gpa, blk.moe);
+    if (e.w.mtp) |m| if (m.moe.latent != null or m.moe.bolt != null) try moes.append(gpa, m.moe);
     var hold = try cuda.DeviceBuffer.alloc(e.ctx.d, hold_bytes);
     defer hold.free();
     const most = nemotron.state.windowRows(c);
@@ -85,15 +88,25 @@ const Trial = struct {
         for (t.x[0 .. rows * c.hidden]) |*v| v.* = @truncate(@as(u32, @bitCast((t.rng.float(f32) - 0.5) * 4.0)) >> 16);
         try e.ops().upload(b.y, std.mem.sliceAsBytes(t.x[0 .. rows * c.hidden]));
         const len = rows * c.hidden * 2;
-        try nemotron.latent.run(t.plain, moe, rows);
+        try pass(t.plain, moe, rows);
         try e.ops().download(t.want[0..len], b.delta);
         // the one-stream pass left the right shared rows behind: a sum that skips the join must read NaN instead
-        const shared_rows = b.ymoe + @as(u64, rows * c.top_k * c.ownShares()) * c.latent * 4;
-        try e.ops().fill32(shared_rows, 0x7fc00000, rows * c.ownShares() * c.hidden);
+        if (moe.bolt != null) {
+            try e.ops().fill32(b.sout, 0x7fc00000, rows * c.hidden);
+        } else {
+            const shared_rows = b.ymoe + @as(u64, rows * c.top_k * c.ownShares()) * c.latent * 4;
+            try e.ops().fill32(shared_rows, 0x7fc00000, rows * c.ownShares() * c.hidden);
+        }
         for (0..8) |_| try t.held.copy(t.hold + hold_bytes / 2, t.hold, hold_bytes / 2);
-        try nemotron.latent.run(forked, moe, rows);
+        try pass(forked, moe, rows);
         try e.ops().download(t.got[0..len], b.delta);
         try e.stream.synchronize();
         try check.sameBytes(what, t.got[0..len], t.want[0..len]);
     }
 };
+
+/// A layer's experts: Bolt's latentExperts, else the generic latent MoE's shared expert on its own plan.
+fn pass(f: *const nemotron.Forward, moe: nemotron.weights.MoE, rows: usize) !void {
+    if (moe.bolt != null) return f.experts(moe, rows, false);
+    return nemotron.latent.run(f, moe, rows);
+}
