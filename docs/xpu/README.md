@@ -90,6 +90,11 @@ Options through environment variables:
 | 2 / 4 / 8 simultaneous streams, chat, greedy (aggregate) | 151 / 239 / 300 | 148 / 215 / 208 | 162 / 230 / 224 | 162 / 249 / 227 |
 | `bench_openai` decode, 1 / 2 / 4 / 8 requests (aggregate) | 173 / 243 / 343 / 350 | 165 / 300 / 337 / 439 | 165 / 336 / 367 / 456 | 179 / 325 / 364 / 463 |
 
+The prefill row predates 1.1.0, which feeds the prompt DeltaNet's fp32 intermediates to the matrix units at close to fp32
+precision (`489baa2673`, `17facba3f8`). On a B70 with GPTQ g128 that costs about 5% of a 32,768-token prompt in the
+raw runner (`xpu-qwen27 --bench=32768`: 1,647 to 1,571 tok/s, tokens unchanged; #2859). The table's sizes have not been
+re-measured since.
+
 Before the per-stream DFlash2 drafts (copies only in the shared rounds), 2 / 4 / 8 code streams ran at
 64 / 120 / 182 tok/s in GPTQ. Validation: `zig build test`, oracle, drafted == serial, multi-stream == serial (chains
 and trees), and `bench_concurrent --alone --serial` on 1, 2, 4 and 8 streams, greedy and sampled, for the four
