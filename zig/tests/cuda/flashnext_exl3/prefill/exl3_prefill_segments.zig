@@ -94,12 +94,11 @@ const Run = struct {
     }
 };
 
-/// The options the next forwards read: the deep path on or off, its chunk, the cache's grid.
-fn setOptions(deep_on: bool, step: usize, grid: bool) !void {
+/// The options the next forwards read: the deep path on or off and its chunk rows.
+fn setOptions(deep_on: bool, step: usize) !void {
     var o = try xpre.optionsFromEnv();
     o.enabled = deep_on;
     o.rows = step;
-    o.snap_grid = grid;
     xpre.state.options = o;
 }
 
@@ -175,7 +174,7 @@ pub fn mixedRun(gpu: Gpu, dir: []const u8, rest: []const [:0]const u8) !void {
     defer a.free(forced.logits);
     var got = try Run.init(a);
     defer a.free(got.logits);
-    try setOptions(false, 0, true);
+    try setOptions(false, 0);
     var whole = try Plan.steps(0, n, n);
     try fresh(g, ids, &whole, &batched);
     try serial(g, ids, &forced);
@@ -186,7 +185,7 @@ pub fn mixedRun(gpu: Gpu, dir: []const u8, rest: []const [:0]const u8) !void {
     const orders = [_]struct { shallow_first: bool, mark: bool }{ .{ .shallow_first = false, .mark = false }, .{ .shallow_first = true, .mark = false }, .{ .shallow_first = false, .mark = true } };
     for (sizes[0..n_sizes]) |size| for (orders) |order| {
         const step: usize = @intCast(size);
-        try setOptions(true, step, true);
+        try setOptions(true, step);
         var plan = try Plan.mixed(n, step, order.shallow_first, order.mark);
         try fresh(g, ids, &plan, &got);
         std.debug.print("MIXED {d} tokens, steps of {d} rows, cuts", .{ n, step });
@@ -203,7 +202,7 @@ pub fn mixedRun(gpu: Gpu, dir: []const u8, rest: []const [:0]const u8) !void {
     check.pass("{d} mixed cuts at {d} step sizes equal the batched pass and forced serial decode in logits bytes and tokens", .{ cases, n_sizes });
 }
 
-/// A state kept at any row (snap grid off), cold-continued or resumed, equals a fresh prompt; a cut < 0 is rows left.
+/// A state kept at any row, cold-continued or resumed, equals a fresh prompt; a cut < 0 is rows left.
 pub fn resumeRun(gpu: Gpu, dir: []const u8, rest: []const [:0]const u8) !void {
     const a = gpu.gpa;
     if (rest.len < 4) return error.MissingArgument;
@@ -233,11 +232,8 @@ pub fn resumeRun(gpu: Gpu, dir: []const u8, rest: []const [:0]const u8) !void {
     var cases: usize = 0;
     for (sizes[0..n_sizes]) |size| {
         const step: usize = @intCast(size);
-        try setOptions(true, step, true);
-        const grid_on = try xpre.snapGrid(g.e, g.e.chunk);
-        try setOptions(true, step, false);
-        try check.expect(try xpre.snapGrid(g.e, g.e.chunk) == 0, "the engine's snap grid is off with the option off", .{});
-        std.debug.print("RESUME steps of {d} rows: snap grid {d} by default, 0 (any row) now\n", .{ step, grid_on });
+        try setOptions(true, step);
+        std.debug.print("RESUME steps of {d} rows: states may resume at any row\n", .{step});
         var whole = try Plan.steps(0, n, step);
         try fresh(g, ids, &whole, &want);
         for (cuts[0..n_cuts]) |c| {
@@ -270,5 +266,5 @@ pub fn resumeRun(gpu: Gpu, dir: []const u8, rest: []const [:0]const u8) !void {
     }
     xpre.state.options = null;
     try check.expect(all_equal, "a state kept at any row, resumed or continued, equals a fresh prompt", .{});
-    check.pass("{d} states kept at any row (snap grid off) resume to a fresh prompt's logits bytes and tokens", .{cases});
+    check.pass("{d} states kept at any row resume to a fresh prompt's logits bytes and tokens", .{cases});
 }
