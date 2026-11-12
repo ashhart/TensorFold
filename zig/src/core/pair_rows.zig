@@ -9,6 +9,7 @@ const Fence = @import("fence.zig").Fence;
 const Owner = @import("../families/flashnext/owned.zig").Owner;
 const pair_layout = @import("pair_rows_layout.zig");
 const pair_loopback = @import("pair_rows_loopback.zig");
+const pair_start = @import("pair_rows_start.zig");
 
 pub const Settings = settings.Settings;
 pub const Ref = @import("exlr8_projection.zig").Ref;
@@ -188,51 +189,8 @@ pub const Pair = struct {
         if (s.rank > 1 or s.links.len != 1) return error.PairTwoRanksOneLink;
         const lib = try gpa.dupeSentinel(u8, s.library, 0);
         defer gpa.free(lib);
-        const ep = try fabric.mcdma.Endpoint.create(gpa, lib, .{ .rank = s.rank, .ranks = 2, .window_bytes = l.window(), .staging_bytes = 4 << 20, .links = s.links, .timeout_ns = 60 * std.time.ns_per_s, .connect_timeout_ns = 300 * std.time.ns_per_s });
-        errdefer ep.deinit();
-        var owned: Owner(mtl) = .{};
-        errdefer owned.deinit();
-        const rd = ep.rdma();
-        const win = rd.window();
-        const lib_m = try mtl.Library.fromSource(device, sources.core_pair_rows, mtl.CompileOptions.mlx());
-        defer lib_m.deinit();
-        const fence = try Fence.init(device);
-        errdefer fence.deinit();
-        const posted = try device.sharedEvent();
-        errdefer posted.deinit();
-        const landed = try device.sharedEvent();
-        errdefer landed.deinit();
-        const p = try gpa.create(Pair);
-        errdefer gpa.destroy(p);
-        const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
-        p.* = .{
-            .rank = s.rank,
-            .peer = 1 - s.rank,
-            .l = l,
-            .ep = ep,
-            .rd = rd,
-            .win = win,
-            .wbuf = try owned.keep(gpa, try device.bufferNoCopy(win.ptr, win.len, opts)),
-            .stage_pipe = try owned.keep(gpa, try mtl.Pipeline.init(device, lib_m, "pair_stage", false)),
-            .gather_pipe = try owned.keep(gpa, try mtl.Pipeline.init(device, lib_m, "pair_gather", false)),
-            .argmax_pipe = try owned.keep(gpa, try mtl.Pipeline.init(device, lib_m, "pair_argmax", false)),
-            .pick_pipe = try owned.keep(gpa, try mtl.Pipeline.init(device, lib_m, "pair_pick", false)),
-            .fence = fence,
-            .posted = posted,
-            .landed = landed,
-            .bytes = try gpa.alloc(u32, JOBS),
-            .gpa = gpa,
-            .arena = arena,
-            .owned = owned,
-            .trace_every = trace_every,
-        };
-        owned = .{}; // the pair owns them now: the error path must not release them twice
-        errdefer gpa.free(p.bytes);
-        // both Macs up before the first exchange: a word each way
-        try rd.signal(p.peer, l.flags() + HELLO, 1);
-        while (@atomicLoad(u64, p.word64(l.flags() + HELLO), .acquire) < 1) std.atomic.spinLoopHint();
-        p.thread = try std.Thread.spawn(.{}, service, .{p});
-        return p;
+        var kit: Kit = .{ .gpa = gpa, .device = device, .library_path = lib, .s = s, .l = l, .arena = arena, .trace_every = trace_every };
+        return pair_start.start(Kit, &kit, gpa, JOBS);
     }
 
     /// Rank 0 tells rank 1 it is done (its `next` returns null); then the sending thread and the link close.
@@ -518,6 +476,71 @@ pub const Pair = struct {
             p.landed.set(x);
             x +%= 1;
         }
+    }
+};
+
+/// Pair.init's makers for `pair_rows_start.start`: the link, the Metal objects, the hello and the service thread.
+const Kit = struct {
+    pub const Made = Pair;
+    pub const Owned = Owner(mtl);
+    gpa: std.mem.Allocator,
+    device: mtl.Device,
+    library_path: [:0]const u8,
+    s: Settings,
+    l: Layout,
+    arena: *std.heap.ArenaAllocator,
+    trace_every: u64,
+
+    pub fn endpoint(k: *Kit) !*fabric.mcdma.Endpoint {
+        return fabric.mcdma.Endpoint.create(k.gpa, k.library_path, .{ .rank = k.s.rank, .ranks = 2, .window_bytes = k.l.window(), .staging_bytes = 4 << 20, .links = k.s.links, .timeout_ns = 60 * std.time.ns_per_s, .connect_timeout_ns = 300 * std.time.ns_per_s });
+    }
+    pub fn library(k: *Kit) !mtl.Library {
+        return mtl.Library.fromSource(k.device, sources.core_pair_rows, mtl.CompileOptions.mlx());
+    }
+    pub fn fence(k: *Kit) !Fence {
+        return Fence.init(k.device);
+    }
+    pub fn event(k: *Kit) !mtl.SharedEvent {
+        return k.device.sharedEvent();
+    }
+    pub fn window(k: *Kit, win: []u8) !mtl.Buffer {
+        return k.device.bufferNoCopy(win.ptr, win.len, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+    }
+    pub fn pipeline(k: *Kit, lib: mtl.Library, name: []const u8) !mtl.Pipeline {
+        return mtl.Pipeline.init(k.device, lib, name, false);
+    }
+
+    /// The pair around what `start` made; `owned` and `thread` stay empty until start's last step.
+    pub fn assemble(k: *Kit, p: *Pair, o: anytype) void {
+        p.* = .{
+            .rank = k.s.rank,
+            .peer = 1 - k.s.rank,
+            .l = k.l,
+            .ep = o.ep,
+            .rd = o.rd,
+            .win = o.win,
+            .wbuf = o.wbuf,
+            .stage_pipe = o.stage_pipe,
+            .gather_pipe = o.gather_pipe,
+            .argmax_pipe = o.argmax_pipe,
+            .pick_pipe = o.pick_pipe,
+            .fence = o.fence,
+            .posted = o.posted,
+            .landed = o.landed,
+            .bytes = o.bytes,
+            .gpa = k.gpa,
+            .arena = k.arena,
+            .trace_every = k.trace_every,
+        };
+    }
+
+    /// Both Macs up before the first exchange: a word each way.
+    pub fn hello(_: *Kit, p: *Pair) !void {
+        try p.rd.signal(p.peer, p.l.flags() + HELLO, 1);
+        while (@atomicLoad(u64, p.word64(p.l.flags() + HELLO), .acquire) < 1) std.atomic.spinLoopHint();
+    }
+    pub fn spawn(_: *Kit, p: *Pair) !std.Thread {
+        return std.Thread.spawn(.{}, Pair.service, .{p});
     }
 };
 
