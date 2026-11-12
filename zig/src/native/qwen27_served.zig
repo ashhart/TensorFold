@@ -352,6 +352,7 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
         why.* = policy.problem(err) orelse why.*;
         return err;
     };
+    try pair_flags.refuseSerial(pair != null, drafter != null or o.drafter != null, serial, why); // before the drafter loads
     const h = try parent.create(Host);
     errdefer parent.destroy(h);
     h.counted = .{ .parent = parent };
@@ -474,9 +475,8 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
         h.wrap = try lanes.drafted.Drafted.init(gpa, h.back.backend(), @import("sensenova_mtp_drafter.zig").drafter(m));
     }
     errdefer if (h.wrap) |*w| w.deinit();
-    // The lane-cost timing rounds run real verifies through the backend: rank 1's replay engine never
-    // prices its own windows, and its costs stay unread (the follower serves every round rank 0 drives).
-    if ((h.draft != null or mtp_on or h.sn_mtp != null) and !(pair != null and pair.?.rank != 0)) try h.back.measure(io);
+    // one Mac prices its windows before the lane config copies their costs, as on main; a pair, once both are ready
+    if ((h.draft != null or mtp_on or h.sn_mtp != null) and lb.measuresFirst(pair)) try h.back.measure(io);
     h.mtp = null;
     h.wrap = null;
     if (mtp_on) {
@@ -557,8 +557,8 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     if (h.follower) h.host.health = .{ .ctx = h, .read = unhealthyFollower };
     try h.host.start();
     errdefer h.host.stop(); // a start-up failure after the host is up stops it before `open` frees what it serves
-    // Both ranks time their lane costs: the rounds are local and symmetric, leaving both drafters in the same state.
-    if (h.draft != null) try h.back.measure(io);
+    // Both ranks of a pair time their lane costs: the rounds are local and symmetric, leaving both drafters alike.
+    if (h.draft != null and !lb.measuresFirst(pair)) try h.back.measure(io);
     tf.startup_receipt.span(.model_ready).end();
     std.log.info("{f}", .{StartupLine{ .streams = slots, .context = capacity, .draft_slots = if (h.draft != null) h.back.draft_slots else if (h.sn_mtp != null) slots else 0, .drafter = if (h.draft) |d| d.model.graph.config.kind() else "DFlash2", .images = o.images != null }});
     return h;
