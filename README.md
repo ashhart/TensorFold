@@ -177,7 +177,7 @@ Conversions are explicitly marked: their upstream weights need the linked conver
 
 | Model / format | Download | Machine and memory scope | Native recipe / limits |
 | --- | --- | --- | --- |
-| dots.mocr, BF16 OCR | Use the local `dots-studio/dots.mocr` checkpoint. | Native HIP; AMD R9700 (`gfx1201`) checked, one GPU. | [Native OCR recipe](docs/recipes/dots-mocr-hip.md); full model-card demo matches HF tokens. No video, MTP head, CUDA, or Metal qualification. |
+| dots.mocr, BF16 OCR | Use the local `dots-studio/dots.mocr` checkpoint. | Native HIP; AMD R9700 (`gfx1201`) checked, one GPU. | [Native OCR recipe](docs/recipes/dots-mocr-hip.md); full model-card demo matches HF tokens. Native CUDA serves text prompts only ([CUDA recipe](docs/recipes/dots-mocr-cuda.md)). No video, MTP head, or Metal qualification. |
 | Qwen3.5-2B, MLX 4-bit | `tensorfold pull mlx-community/Qwen3.5-2B-MLX-4bit@93760be4f1f69842a46bc13dbdc0f19e291392a3` | One Mac (M5 Max checked), or one GB10; no RAM minimum published. | [2B](docs/recipes/qwen3.5-2b-native.md); [CUDA release checks](CHANGELOG.md#110). Text only. |
 | Qwen3.8-27B, MLX 4-bit | `tensorfold pull TensorFold/Qwen3.8-27B-MLX-4bit`<br>`tensorfold pull z-lab/Qwen3.8-27B-DFlash2` | One Mac (M5 Max/M3 Ultra), or one GB10; a 32 GB Mac needs `iogpu.wired_limit_mb` raised (the startup refusal names the value). | [27B](docs/recipes/qwen3.8-27b.md). Add `--drafter z-lab/Qwen3.8-27B-DFlash2`; without it decoding is plain. |
 | Nemotron 3.5 Lightning 30B-A3B, MLX 4-bit | `tensorfold pull TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit` | One Mac (M1-M5), or one GB10; also checked on RTX 3090 / RTX PRO 6000. | [Lightning](docs/recipes/nemotron-3.5.md). Includes MTP. |
