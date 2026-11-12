@@ -177,6 +177,8 @@ Native CUDA has tensor-parallel serving as well as one-GPU paths. GLM's recorded
 `TF_GLM_RANK`, `TF_GLM_WORLD` and `NCCL_COMM_ID`; see [native GLM placement](glm-5.3-flash-cuda.md#run).
 Other families take `--tp`, `--rank` and `--master` only where their native options support ranks; for example,
 [Super VL](nemotron-3.5-super-vl.md) serves on one or two GB10s. A rank option is not universal family support.
+Ranks on more than one host must share a key file: see
+[Ranks on more than one host](../../SECURITY.md#ranks-on-more-than-one-host).
 
 The following transport and two-rank reduction notes describe Python 0.6.6. In that engine, @jayleaton's
 [#219](https://github.com/ashhart/TensorFold/pull/219) gave the communicator its transport interface
