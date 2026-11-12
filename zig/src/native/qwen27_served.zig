@@ -377,6 +377,7 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     h.disk_stage = null;
     // create() leaves unnamed Host fields undefined: a debug-filled optional is non-null, so name h.link first.
     h.link = null;
+    h.follower = false;
     h.hw = null;
     h.picks = null;
     h.workers = .{};
@@ -471,6 +472,7 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
         // The follower must listen before either rank signals ready: rank 0's measure seams follow the handshake.
         try h.workers.startFollower(p, h.back, a, why);
     }
+    errdefer if (pair) |p| h.workers.stop(p); // a failed ready or start joins the threads before `open` frees the pair
     // a mismatch's words name the fact that differs (`Pair.ready`); the other failures are worded here
     if (pair) |p| p.ready(fp.?, a, why) catch |err| {
         if (err == error.PairPeerSilent) {
@@ -480,16 +482,10 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     };
     // a dead link is not a serving state: exit so a supervisor restarts both ranks, not serve seam errors
     if (pair) |p| try h.workers.startWatch(p, a, why);
-    errdefer if (pair) |p| h.workers.stop(p); // before `open` frees the pair these threads read
+    // Rank 1 serves no generations: its engine only replays rank 0's rounds, so admission refuses at the door.
+    if (h.follower) h.host.health = .{ .ctx = h, .read = unhealthyFollower };
     try h.host.start();
     errdefer h.host.stop(); // a start-up failure after the host is up stops it before `open` frees what it serves
-    if (pair) |p| {
-        h.follower = p.rank != 0;
-        // Rank 1 serves no generations: its engine only replays rank 0's rounds, so admission refuses at the door.
-        if (h.follower) h.host.health = .{ .ctx = h, .read = unhealthyFollower };
-        // The follower must listen before rank 0's measure(): its cost-timing rounds send real seams.
-        try h.workers.startFollower(p, h.back, a, why);
-    }
     // Both ranks time their lane costs: the rounds are local and symmetric, leaving both drafters in the same state.
     if (h.draft != null) try h.back.measure(io);
     tf.startup_receipt.span(.model_ready).end();
