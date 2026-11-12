@@ -99,7 +99,7 @@ pub const Suite = struct {
 
     pub fn collect(self: *Suite, only: ?[]const u8) !void {
         if (!self.device.tensorUnits()) return;
-        for ([_]bool{ false, true }) |ta| for ([_]bool{ false, true }) |tb| for (0..7) |kind| {
+        for ([_]bool{ false, true }) |ta| for ([_]bool{ false, true }) |tb| for (0..8) |kind| {
             const layout = if (ta) (if (tb) "tt" else "tn") else (if (tb) "nt" else "nn");
             const control = kind == 1;
             const range: fixture.Range = switch (kind) {
@@ -108,6 +108,7 @@ pub const Suite = struct {
                 4 => .half_left,
                 5 => .half_right,
                 6 => .half_both,
+                7 => .mixed_tiny,
                 else => .normal,
             };
             const suffix = switch (range) {
@@ -117,6 +118,7 @@ pub const Suite = struct {
                 .half_left => " exact half left",
                 .half_right => " exact half right",
                 .half_both => " exact half operands",
+                .mixed_tiny => " mixed tiny operand",
             };
             const name = try std.fmt.allocPrint(self.a, "{s}sam3 fp32 mma {s}{s}", .{ if (control) "control: " else "metal ", layout, suffix });
             errdefer self.a.free(name);

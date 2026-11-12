@@ -9,13 +9,19 @@ const Conv = Runtime.Conv;
 const flash = Runtime.flash;
 
 pub fn check(init: std.process.Init, args: []const [:0]const u8) !void {
-    if (args.len != 1 and !(args.len == 2 and std.mem.eql(u8, args[1], "--benchmark"))) return error.UnexpectedSamKernelArgument;
+    if (args.len == 2 and std.mem.eql(u8, args[1], "--help")) {
+        std.debug.print("tf-sam3-kernels [--benchmark]\ntf-sam3-kernels --replay-attention Q.safetensors K.safetensors V.safetensors [ROW]\n", .{});
+        return;
+    }
+    const replay = args.len >= 2 and std.mem.eql(u8, args[1], "--replay-attention");
+    if (!replay and args.len != 1 and !(args.len == 2 and std.mem.eql(u8, args[1], "--benchmark"))) return error.UnexpectedSamKernelArgument;
     const pool = gpu.mtl.objc.Pool.push();
     defer pool.pop();
     var g = try gpu.Gpu.init(init.gpa, @import("sam3_kernels").source);
     defer g.deinit();
     g.guards = true;
     g.buffer_cache_limit = 32 << 20;
+    if (replay) return @import("attention_replay.zig").run(init, &g, args[2..]);
     if (args.len == 2) return benchmark(&g);
     try checkExactWeightProducts(&g);
     for ([_]usize{ 32, 256, 4736 }) |depth| {
@@ -116,6 +122,7 @@ pub fn check(init: std.process.Init, args: []const [:0]const u8) !void {
     std.debug.print("SAM cached rotary is byte-identical; transposed convolution maximum error {e}\n", .{maximum});
     if (maximum > 1e-4) return error.SamDeconvolutionParity;
     try checkFlash(&g);
+    try @import("attention_replay.zig").checkUniform(&g);
     try checkSparseMask(&g);
     try checkVisionResidual(&g);
     try checkMemoryMasks(&g);

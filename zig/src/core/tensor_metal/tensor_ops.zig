@@ -108,7 +108,7 @@ fn attentionBatchedWindow(g: *Gpu, q: Tensor, k: Tensor, v: Tensor, rows: usize,
     enc.setValue(args, 3);
     enc.setValue([4]f32{ scale, 0, 0, 0 }, 4);
     enc.setBuffer(out.buffer, 0, 5);
-    enc.dispatchThreads(mtl.Size.of(nq * 32, heads * 4, batch), mtl.Size.of(32, 4, 1));
+    enc.dispatchThreads(mtl.Size.of(nq * 32, heads * 4, batch * @as(usize, if (dim == 256) 2 else 1)), mtl.Size.of(32, 4, 1));
     try g.finish(cb, enc);
     return out;
 }

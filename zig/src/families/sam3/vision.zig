@@ -51,11 +51,7 @@ pub fn trunk(r: *Runtime, image: Feature) !Feature {
 }
 
 fn observe(r: *Runtime, name: []const u8, value: Feature) !void {
-    const observer = r.observer orelse return;
-    const batched = r.g.batch != null;
-    if (batched) try r.g.endBatch();
-    try observer.write(observer.context, name, value.tensor, &.{ 1, value.height, value.width, value.channels });
-    if (batched) try r.g.beginBatch();
+    try r.observe(name, value.tensor, &.{ 1, value.height, value.width, value.channels });
 }
 
 pub fn pyramid(r: *Runtime, x: Feature, kind: []const u8) ![3]Feature {

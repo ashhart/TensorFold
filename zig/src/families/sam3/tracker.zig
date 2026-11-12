@@ -84,7 +84,15 @@ fn oldAttention(r: *Runtime, key: []const u8, q: Tensor, k: Tensor, v: Tensor, i
     const qp = try r.linear(try r.name("{s}.q_proj", .{key}), q, 256);
     const kp = try r.linear(try r.name("{s}.k_proj", .{key}), k, input_width);
     const vp = try r.linear(try r.name("{s}.v_proj", .{key}), v, input_width);
-    const attended = try r.attend(try r.rope(qp, 1, 256, 72, false, 5184), try r.rope(kp, 1, 256, 72, false, spatial_keys), vp, 1, 256, null, false);
+    const qr = try r.rope(qp, 1, 256, 72, false, 5184);
+    const kr = try r.rope(kp, 1, 256, 72, false, spatial_keys);
+    if (r.observer != null) {
+        try r.observe(try r.name("{s}.q", .{key}), qr, &.{ qr.count / 256, 256 });
+        try r.observe(try r.name("{s}.k", .{key}), kr, &.{ kr.count / 256, 256 });
+        try r.observe(try r.name("{s}.v", .{key}), vp, &.{ vp.count / 256, 256 });
+    }
+    const attended = try r.attend(qr, kr, vp, 1, 256, null, false);
+    if (r.observer != null) try r.observe(try r.name("{s}.attended", .{key}), attended, &.{ attended.count / 256, 256 });
     return r.linear(try r.name("{s}.out_proj", .{key}), attended, 256);
 }
 
@@ -134,15 +142,21 @@ pub fn propagate(r: *Runtime, features: [3]Feature, history: []const Memory, ind
     const memory_pos = try r.concat(positions.items);
     const image = features[2].tensor;
     var h = try r.add(image, try r.scale(pos, 0.1));
+    try r.observe("tracker.input", h, &.{ 1, 72, 72, 256 });
+    try r.observe("tracker.memory", encoded, &.{ encoded.count / width, width });
+    try r.observe("tracker.memory_pos", memory_pos, &.{ memory_pos.count / width, width });
     for (0..4) |i| {
         const mark = r.mark();
         const layer = try r.name("{s}.transformer.encoder.layers.{d}", .{ root, i });
         const norm = try r.norm(try r.name("{s}.norm1", .{layer}), h, 256, 1e-5);
+        if (r.observer != null) try r.observe(try r.name("tracker.layers.{d}.norm1", .{i}), norm, &.{ 1, 72, 72, 256 });
         var next: Tensor = undefined;
         if (!multiplex) {
             next = try r.add(h, try oldAttention(r, try r.name("{s}.self_attn", .{layer}), norm, norm, norm, 256, 5184));
+            if (r.observer != null) try r.observe(try r.name("tracker.layers.{d}.self", .{i}), next, &.{ 1, 72, 72, 256 });
             const cross_norm = try r.norm(try r.name("{s}.norm2", .{layer}), next, 256, 1e-5);
             next = try r.add(next, try oldAttention(r, try r.name("{s}.cross_attn_image", .{layer}), cross_norm, try r.add(encoded, memory_pos), encoded, width, spatial_count));
+            if (r.observer != null) try r.observe(try r.name("tracker.layers.{d}.cross", .{i}), next, &.{ 1, 72, 72, 256 });
             const up = try r.unary(try r.linear(try r.name("{s}.linear1", .{layer}), try r.norm(try r.name("{s}.norm3", .{layer}), next, 256, 1e-5), 256), 0);
             h = try r.add(next, try r.linear(try r.name("{s}.linear2", .{layer}), up, 2048));
         } else {
@@ -174,9 +188,11 @@ pub fn propagate(r: *Runtime, features: [3]Feature, history: []const Memory, ind
             next = try r.add(next, try r.linear(try r.name("{s}.cross_attn_out_proj", .{layer}), cross, 256));
             h = try r.add(next, try vision.feedForward(r, layer, try r.norm(try r.name("{s}.norm3", .{layer}), next, 256, 1e-5)));
         }
+        if (r.observer != null) try r.observe(try r.name("tracker.layers.{d}.output", .{i}), h, &.{ 1, 72, 72, 256 });
         r.trim(mark, &.{h});
     }
     h = try r.norm(try r.name("{s}.transformer.encoder.norm", .{root}), h, 256, 1e-5);
+    try r.observe("tracker.output", h, &.{ 1, 72, 72, 256 });
     try r.g.endBatch();
     const out = try decoder.decode(r, features, h, .{ .multiplex = multiplex, .active = active });
     r.trim(start, &.{ out.masks.tensor, out.pointer });
