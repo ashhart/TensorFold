@@ -7,6 +7,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - CUDA EXL3 grouped experts launch and size their storage at the caller's tile and pair count, so decode no longer launches three quarters of its grid empty, and Qwen3.6-35B-A3B EXL3 sizes its grouped storage for 36,864 pair rows instead of 163,904 (about 3 GB less); outputs are bit-equal (#2843, for #2823).
 
 - CUDA: dots.mocr's text decoder serves text prompts on a GB10 from the publisher's BF16 weights, on a new shared engine for dense GQA decoders (`zig/src/cuda_dense/`); `--vision`, prompt caching and fp8 caches are refused by name, and served CUDA checkpoints are unchanged (#2673, part of #1927). Thanks to @laudney.
+- CUDA: with `TF_FLASHNEXT_KV_PAGES` the Flash Next page pool no longer takes its whole arena at load (15.75 GiB at 262,144 x 3 on a GB10): its 256 MiB pieces are mapped as streams first use them, a helper thread maps the next ones between requests, and paged decode attention loads the next tile's page ids while the current one computes. Replies are unchanged. On one GB10 the memory left free keeps the whole n-gram table in the page cache (66-83 % before), so the first request after a start reaches its first token 75 ms sooner and finishes about 5 % faster; without `TF_FLASHNEXT_KV_PAGES` nothing changes (#3066). Thanks to @Arminova.
 
 
 
