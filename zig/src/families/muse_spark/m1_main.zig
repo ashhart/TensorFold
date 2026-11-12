@@ -9,8 +9,9 @@ const draft_main = @import("draft_main.zig");
 const prompt_main = @import("prompt_main.zig");
 const Model = muse.forward.Model;
 
-fn env(name: [*:0]const u8, default: usize) usize {
-    const v = std.c.getenv(name) orelse return default;
+/// A developer knob's whole number (`std.c.getenv("MUSE_...")` at the call, so the name stays a literal).
+fn env(raw: ?[*:0]const u8, default: usize) usize {
+    const v = raw orelse return default;
     return std.fmt.parseInt(usize, std.mem.span(v), 10) catch default;
 }
 
@@ -103,20 +104,21 @@ pub fn main(init: std.process.Init) !u8 {
     const gpa = init.gpa;
     const ar = init.arena.allocator();
     const io = init.io;
-    const rows_per = env("MUSE_ROWS", 1);
-    const slots = env("MUSE_SLOTS", 1);
-    const context = env("MUSE_CONTEXT", 4096);
-    const n_greedy = env("MUSE_GREEDY", 32);
-    const capture = env("MUSE_CAPTURE", 0) != 0;
-    const teacher = env("MUSE_TEACHER", 0) != 0;
-    const graphs = env("MUSE_GRAPHS", 0) != 0; // graphed windows (no captures): logits must equal the eager run's bits
+    const rows_per = env(std.c.getenv("MUSE_ROWS"), 1);
+    const slots = env(std.c.getenv("MUSE_SLOTS"), 1);
+    const context = env(std.c.getenv("MUSE_CONTEXT"), 4096);
+    const n_greedy = env(std.c.getenv("MUSE_GREEDY"), 32);
+    const capture = env(std.c.getenv("MUSE_CAPTURE"), 0) != 0;
+    const teacher = env(std.c.getenv("MUSE_TEACHER"), 0) != 0;
+    const graphs = env(std.c.getenv("MUSE_GRAPHS"), 0) != 0; // graphed windows (no captures): logits must equal the eager run's bits
     if (graphs and (capture or teacher)) return error.GraphsTakeNoCaptures;
-    const max_layers: ?usize = if (env("MUSE_LAYERS", 0) > 0) env("MUSE_LAYERS", 0) else null;
+    const max_layers: ?usize = if (env(std.c.getenv("MUSE_LAYERS"), 0) > 0) env(std.c.getenv("MUSE_LAYERS"), 0) else null;
     if (rows_per * slots > muse.forward.DECODE_ROWS) return error.WindowTooWide;
 
-    const kn: Knobs = .{ .rows_per = rows_per, .slots = slots, .context = context, .n_greedy = n_greedy, .capture = capture, .teacher = teacher, .graphs = graphs, .max_layers = max_layers, .mode = mode, .dk = .{ .context = env("MUSE_CONTEXT", 8192), .n_greedy = env("MUSE_GREEDY", 64), .graphs = env("MUSE_GRAPHS", 1) != 0 and env("MUSE_PAIR", 0) == 0, .max_layers = max_layers, .rows_per = env("MUSE_ROWS", 32), .dump_taps = env("MUSE_DUMP_TAPS", 0) != 0 }, .prompt = prompt_check };
-    const pair_mode = env("MUSE_PAIR", 0) != 0; // both ranks of TP=2 in this process on one GPU (an in-process gather)
-    const tpc: ?tp.Config = if (!pair_mode and std.c.getenv("TF_TP_WORLD") != null) try tp.Config.fromEnv() else null;
+    const kn: Knobs = .{ .rows_per = rows_per, .slots = slots, .context = context, .n_greedy = n_greedy, .capture = capture, .teacher = teacher, .graphs = graphs, .max_layers = max_layers, .mode = mode, .dk = .{ .context = env(std.c.getenv("MUSE_CONTEXT"), 8192), .n_greedy = env(std.c.getenv("MUSE_GREEDY"), 64), .graphs = env(std.c.getenv("MUSE_GRAPHS"), 1) != 0 and env(std.c.getenv("MUSE_PAIR"), 0) == 0, .max_layers = max_layers, .rows_per = env(std.c.getenv("MUSE_ROWS"), 32), .dump_taps = env(std.c.getenv("MUSE_DUMP_TAPS"), 0) != 0 }, .prompt = prompt_check };
+    const pair_mode = env(std.c.getenv("MUSE_PAIR"), 0) != 0; // both ranks of TP=2 in this process on one GPU (an in-process gather)
+    const tp_set = @import("sys").environment.Process.get(.{}, "TF_TP_WORLD") != null; // unset: one rank (tp's default is two)
+    const tpc: ?tp.Config = if (!pair_mode and tp_set) try tp.Config.fromEnv() else null;
     const world: usize = if (pair_mode) 2 else if (tpc) |c| c.world else 1;
     const rank: usize = if (tpc) |c| c.rank else 0;
     var driver = try cuda.Driver.open();

@@ -56,7 +56,7 @@ pub fn run(mode: Mode, gpa: std.mem.Allocator, ar: std.mem.Allocator, io: std.Io
     if (mode == .drafted and texts.items.len > slots) return error.TooManyTexts;
     var model = try Model.init(gpa, driver, &w, &k3, comm, kn.context, muse.forward.DECODE_ROWS, slots, s);
     defer model.deinit();
-    const ddir = try muse.engine.drafterDir(ar, args[2], if (std.c.getenv("TF_MUSE_DRAFTER")) |v| std.mem.span(v) else null);
+    const ddir = try muse.engine.drafterDir(ar, args[2], if (std.c.getenv("MUSE_DRAFTER")) |v| std.mem.span(v) else null);
     var tb: [8]usize = undefined;
     const dr = try Drafter.init(gpa, io, &model, ddir, s, kn.graphs, try tapsOverride(&tb));
     defer dr.deinit();
@@ -255,9 +255,9 @@ fn drafted(c: *Ctx, ar: std.mem.Allocator, io: std.Io, out_dir: []const u8, text
     std.debug.print("[drafted] {d} streams, {d} rounds, accepted {d} / drafted {d} ({d:.3}), {d:.2} tokens a stream-round: {s}\n", .{ S, rounds, accepted, drafted_rows, @as(f64, @floatFromInt(accepted)) / @as(f64, @floatFromInt(@max(drafted_rows, 1))), @as(f64, @floatFromInt(new_tokens)) / @as(f64, @floatFromInt(@max(stream_rounds, 1))), if (pass) "PASS" else "FAIL" });
 }
 
-/// TF_MUSE_DRAFT_TAPS=a,b,..: tap these target layers instead of the drafter's (plumbing checks on k-layer packs).
+/// MUSE_DRAFT_TAPS=a,b,..: tap these target layers instead of the drafter's (plumbing checks on k-layer packs).
 fn tapsOverride(buf: []usize) !?[]const usize {
-    const v = std.mem.span(std.c.getenv("TF_MUSE_DRAFT_TAPS") orelse return null);
+    const v = std.mem.span(std.c.getenv("MUSE_DRAFT_TAPS") orelse return null);
     var n: usize = 0;
     var it = std.mem.tokenizeScalar(u8, v, ',');
     while (it.next()) |t| : (n += 1) {
