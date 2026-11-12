@@ -10,15 +10,13 @@ pub const Key = [32]u8;
 pub const Nonce = [32]u8;
 pub const Proof = [Hmac.mac_length]u8;
 
-/// The fewest secret bytes a key file holds.
-pub const least_bytes = 16;
-/// The most bytes a key file holds.
+/// The most bytes a key file holds; the fewest is the caller's (rank links 32, the stage ring 16).
 pub const most_bytes = 4096;
 
 pub const Error = error{ SecretUnreadable, SecretNotAFile, SecretNotPrivate, SecretTooShort, SecretTooLong, NoRandom };
 
-/// The key for the secret in `path`: its SHA-256, trailing whitespace dropped. A regular owner-only file up to 4 KiB.
-pub fn fromFile(path: [:0]const u8) Error!Key {
+/// The key for the secret in `path`: its SHA-256, trailing whitespace dropped. An owner-only file, `least` B to 4 KiB.
+pub fn fromFile(path: [:0]const u8, least: usize) Error!Key {
     const fd = open(path);
     if (fd < 0) return error.SecretUnreadable;
     defer _ = c.close(fd);
@@ -40,13 +38,13 @@ pub fn fromFile(path: [:0]const u8) Error!Key {
         var more: [1]u8 = undefined;
         if (c.read(fd, &more, 1) != 0) return error.SecretTooLong;
     }
-    return fromBytes(buf[0..n]);
+    return fromBytes(buf[0..n], least);
 }
 
-/// Opens the key file to read. A symlink as its last component is refused, and a FIFO is not waited on.
+/// Opens the key file through symlinks (secret mounts are links), without waiting on a FIFO; its mode is checked after.
 fn open(path: [:0]const u8) c.fd_t {
     if (windows) return c.open(path, .{ .ACCMODE = .RDONLY });
-    return c.open(path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true, .NONBLOCK = true });
+    return c.open(path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NONBLOCK = true });
 }
 
 /// `fd`'s type and permission bits: statx on Linux (its libc has no fstat), fstat elsewhere.
@@ -63,10 +61,10 @@ fn mode(fd: c.fd_t) Error!u32 {
     return @intCast(st.mode);
 }
 
-/// The key for secret `bytes` (trailing whitespace dropped).
-pub fn fromBytes(bytes: []const u8) Error!Key {
+/// The key for secret `bytes` (trailing whitespace dropped), refused under `least` bytes.
+pub fn fromBytes(bytes: []const u8, least: usize) Error!Key {
     const s = std.mem.trimEnd(u8, bytes, " \t\r\n");
-    if (s.len < least_bytes) return error.SecretTooShort;
+    if (s.len < least) return error.SecretTooShort;
     var key: Key = undefined;
     Sha256.hash(s, &key, .{});
     return key;
@@ -105,8 +103,9 @@ pub fn same(got: *const Proof, want: *const Proof) bool {
 }
 
 test "rank key: a mac changes with the key, with any part, and with the order of the parts" {
-    const k = try fromBytes("correct horse battery staple\n");
-    const other = try fromBytes("correct horse battery staplf");
+    const least = 32; // a rank key's minimum
+    const k = try fromBytes("correct horse battery staple and more\n", least);
+    const other = try fromBytes("correct horse battery staple and morf", least);
     const a = try nonce();
     const b = try nonce();
     const p = mac(&k, &.{ "label", &a, &b });
@@ -115,7 +114,7 @@ test "rank key: a mac changes with the key, with any part, and with the order of
     try std.testing.expect(!same(&p, &mac(&k, &.{ "labem", &a, &b })));
     try std.testing.expect(!same(&p, &mac(&k, &.{ "label", &b, &a })));
     try std.testing.expect(!std.mem.eql(u8, &a, &b));
-    try std.testing.expectEqual(try fromBytes("0123456789abcdef"), try fromBytes("0123456789abcdef \r\n"));
+    try std.testing.expectEqual(try fromBytes("0123456789abcdef0123456789abcdef", least), try fromBytes("0123456789abcdef0123456789abcdef \r\n", least));
 }
 
 /// Writes `bytes` to a new file at `path` with `perm`, whatever the umask.
@@ -128,10 +127,20 @@ fn plant(path: [:0]const u8, perm: c.mode_t, bytes: []const u8) !void {
     try std.testing.expectEqual(@as(isize, @intCast(bytes.len)), c.write(fd, bytes.ptr, bytes.len));
 }
 
-test "rank key: a key file is a regular file only its owner can read, never a link, and holds 16 bytes to 4 KiB" {
+test "rank key: a key file is a regular file only its owner can read, through a link or not, and holds 32 B to 4 KiB" {
     if (windows) return error.SkipZigTest; // refusal by mode bits
-    try std.testing.expectError(error.SecretTooShort, fromBytes("short secret \n"));
-    try std.testing.expectError(error.SecretUnreadable, fromFile("/nonexistent/rank-secret"));
+    const least = 32; // a rank key's minimum; the caller names it
+    try std.testing.expectError(error.SecretTooShort, fromBytes("short secret \n", least));
+    // 31 bytes are refused, 32 taken; trailing whitespace does not count
+    var at_least: [least]u8 = @splat('k');
+    _ = try fromBytes(&at_least, least);
+    try std.testing.expectError(error.SecretTooShort, fromBytes(at_least[0 .. least - 1], least));
+    at_least[least - 1] = '\n';
+    try std.testing.expectError(error.SecretTooShort, fromBytes(&at_least, least));
+    // the minimum is the caller's: the stage ring's 16 takes 16 bytes and refuses 15
+    _ = try fromBytes(at_least[0..16], 16);
+    try std.testing.expectError(error.SecretTooShort, fromBytes(at_least[0..15], 16));
+    try std.testing.expectError(error.SecretUnreadable, fromFile("/nonexistent/rank-secret", least));
     var path_buf: [64]u8 = undefined;
     var link_buf: [64]u8 = undefined;
     var dir_buf: [64]u8 = undefined;
@@ -139,26 +148,30 @@ test "rank key: a key file is a regular file only its owner can read, never a li
     const link = try std.fmt.bufPrintSentinel(&link_buf, "/tmp/tf-rank-key-{d}.link", .{c.getpid()}, 0);
     const dir = try std.fmt.bufPrintSentinel(&dir_buf, "/tmp/tf-rank-key-{d}.d", .{c.getpid()}, 0);
     defer _ = c.unlink(path);
-    const contents = "0123456789abcdef0123\n";
+    const contents = "0123456789abcdef0123456789abcdef0123\n";
     try plant(path, 0o600, contents);
-    try std.testing.expectEqual(try fromBytes("0123456789abcdef0123"), try fromFile(path));
+    try std.testing.expectEqual(try fromBytes("0123456789abcdef0123456789abcdef0123", least), try fromFile(path, least));
     for ([_]c.mode_t{ 0o644, 0o640, 0o604, 0o620 }) |perm| {
         try plant(path, perm, contents);
-        try std.testing.expectError(error.SecretNotPrivate, fromFile(path));
+        try std.testing.expectError(error.SecretNotPrivate, fromFile(path, least));
     }
     try plant(path, 0o600, contents);
     _ = c.unlink(link);
     try std.testing.expectEqual(@as(c_int, 0), c.symlink(path, link));
     defer _ = c.unlink(link);
-    try std.testing.expectError(error.SecretUnreadable, fromFile(link));
+    // a mounted secret is a link to an owner-only file: it loads, the same key as the file itself
+    try std.testing.expectEqual(try fromFile(path, least), try fromFile(link, least));
+    // the mode is the opened file's: a link to a file others can read is refused
+    try plant(path, 0o644, contents);
+    try std.testing.expectError(error.SecretNotPrivate, fromFile(link, least));
     _ = c.rmdir(dir);
     try std.testing.expectEqual(@as(c_int, 0), c.mkdir(dir, 0o700));
     defer _ = c.rmdir(dir);
-    try std.testing.expectError(error.SecretNotAFile, fromFile(dir));
+    try std.testing.expectError(error.SecretNotAFile, fromFile(dir, least));
     const most: [most_bytes]u8 = @splat('k');
     try plant(path, 0o600, &most);
-    try std.testing.expectEqual(try fromBytes(&most), try fromFile(path));
+    try std.testing.expectEqual(try fromBytes(&most, least), try fromFile(path, least));
     const big: [most_bytes + 1]u8 = @splat('k');
     try plant(path, 0o600, &big);
-    try std.testing.expectError(error.SecretTooLong, fromFile(path));
+    try std.testing.expectError(error.SecretTooLong, fromFile(path, least));
 }
