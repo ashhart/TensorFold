@@ -336,6 +336,7 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
         why.* = policy.problem(err) orelse why.*;
         return err;
     };
+    try pair_flags.refuseSerial(pair != null, drafter != null or o.drafter != null, serial, why); // before the drafter loads
     const h = try parent.create(Host);
     errdefer parent.destroy(h);
     h.counted = .{ .parent = parent };
@@ -419,6 +420,8 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     if (pair != null) h.back.chunk = lb.pairChunk(@intCast(h.back.chunk));
     h.back.grow = .{ .ctx = h, .room = Host.roomFor, .added = Host.added };
     h.back.vision = o.images;
+    // one Mac prices its windows before the lane config copies their costs, as on main; a pair, once both are ready
+    if (h.draft != null and lb.measuresFirst(pair)) try h.back.measure(io);
     h.cfg = try lanes.Config.init(gpa, h.back.facts(), window, h.back.nodes);
     errdefer h.cfg.deinit(gpa);
     h.clock = .{ .io = io };
@@ -486,8 +489,8 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     if (h.follower) h.host.health = .{ .ctx = h, .read = unhealthyFollower };
     try h.host.start();
     errdefer h.host.stop(); // a start-up failure after the host is up stops it before `open` frees what it serves
-    // Both ranks time their lane costs: the rounds are local and symmetric, leaving both drafters in the same state.
-    if (h.draft != null) try h.back.measure(io);
+    // Both ranks of a pair time their lane costs: the rounds are local and symmetric, leaving both drafters alike.
+    if (h.draft != null and !lb.measuresFirst(pair)) try h.back.measure(io);
     tf.startup_receipt.span(.model_ready).end();
     std.log.info("{f}", .{StartupLine{ .streams = slots, .context = capacity, .draft_slots = if (h.draft != null) h.back.draft_slots else 0, .images = o.images != null }});
     return h;

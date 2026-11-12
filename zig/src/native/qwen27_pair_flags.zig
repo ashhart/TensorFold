@@ -17,6 +17,13 @@ pub fn refuse(drafter: bool, cache_gib: bool, learn: bool, vision: bool, why: *[
     }
 }
 
+/// TF_QWEN27_LANES=0's serial draft loop sends rank 1 no rounds: a drafted pair refuses it rather than wait on rank 1.
+pub fn refuseSerial(pair: bool, drafting: bool, serial: bool, why: *[]const u8) !void {
+    if (!(pair and drafting and serial)) return;
+    why.* = "TF_QWEN27_LANES=0 does not run on a pair with --drafter: its serial draft loop sends rank 1 no rounds, so rank 0 would wait at its first seam; unset it";
+    return error.PairSerialDraft;
+}
+
 /// The flags `qwen27_served.Options` carries, mapped onto `refuse`'s booleans: `open` and `attach` both pass theirs.
 pub fn refuseOptions(pair: bool, o: anytype, bound_drafter: bool, why: *[]const u8) !void {
     if (!pair) return;
