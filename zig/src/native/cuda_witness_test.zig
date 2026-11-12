@@ -275,6 +275,9 @@ test "execution witness: files that cannot be stamped read hash_failed and the l
     try c.tmp.dir.writeFile(t.io, .{ .sub_path = "aot/aot.json", .data = "not a manifest" });
     const kernels = try std.fs.path.join(a, &.{ c.dir, "aot" });
     try t.expect(std.meta.isError(witness.Witness.open(t.allocator, t.io, c.dir, kernels)));
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err; // the expected hash_failed warning stays out of the test output
+    defer std.testing.log_level = log_level;
     const w = try witness.Witness.openOrFailed(t.allocator, t.io, c.dir, kernels);
     defer w.close();
     w.set("qwen3_5-2b/cuda/tp1/mlx-q4g64/text", .{ .name = "fake", .capability = 80, .driver = 12040 }, &.{}, .{ 108, 4096, 8, 1 });
