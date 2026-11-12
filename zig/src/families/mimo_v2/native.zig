@@ -447,7 +447,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     if (try ctx.capability() != 121) return error.MimoV2RequiresSm121;
     if (o.lanes == 0 or o.lanes > 16) return error.Slots;
     const su: engine.Setup = .{ .context = o.context, .slots = o.lanes, .drafts = o.drafts };
-    const c = try twoRanks(&envGet);
+    const c = try twoRanks(tpRead());
     if (c.rank != 0) return error.FollowerServes; // rank 1 runs `tf-mimo follow`
     const session = try gpa.create(tp.Session);
     errdefer gpa.destroy(session);
@@ -475,28 +475,33 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     };
 }
 
-/// `get`'s TF_TP_* for two ranks, the only world validated: unset (one GPU) or any other world is refused by name.
-fn twoRanks(get: *const fn ([]const u8) ?[]const u8) (tp.config.Error || error{MimoV2RequiresTwoRanks})!tp.Config {
-    if (get("TF_TP_WORLD") == null) return error.MimoV2RequiresTwoRanks;
-    const c = try tp.Config.parse(get);
+/// TF_TP_* as read, for two ranks, the only world validated: unset (one GPU) or any other world is refused by name.
+fn twoRanks(read: tp.config.Error!?tp.Config) (tp.config.Error || error{MimoV2RequiresTwoRanks})!tp.Config {
+    const c = (try read) orelse return error.MimoV2RequiresTwoRanks;
     return if (c.world == 2) c else error.MimoV2RequiresTwoRanks;
 }
 
-fn envGet(name: []const u8) ?[]const u8 {
-    var buf: [64]u8 = undefined;
-    const z = std.mem.printSentinel(&buf, "{s}", .{name}, 0) catch return null;
-    return std.mem.span(std.c.getenv(z) orelse return null);
+/// The process's TF_TP_* through tp's own reader; null while TF_TP_WORLD is unset or blank (tp's default is two).
+fn tpRead() tp.config.Error!?tp.Config {
+    const world = @import("sys").environment.Process.get(.{}, "TF_TP_WORLD") orelse return null;
+    return if (world.len == 0) null else try tp.Config.fromEnv();
+}
+
+/// `get`'s TF_TP_*, as tpRead reads the process's (the tests' fake environments).
+fn tpFrom(get: *const fn ([]const u8) ?[]const u8) tp.config.Error!?tp.Config {
+    if (get("TF_TP_WORLD") == null) return null;
+    return try tp.Config.parse(get);
 }
 
 /// Admission bytes of a rank: the split matrices' share of `total`, plus the embeddings and dflash/ whole on each.
-pub fn weightShare(a: std.mem.Allocator, io: std.Io, dir: []const u8, total: u64) !u64 {
-    return share(a, io, dir, total, &envGet);
+pub fn weightShare(a: std.mem.Allocator, io: std.Io, dir: []const u8, total: u64, _: bool) !u64 {
+    return share(a, io, dir, total, tpRead());
 }
 
-/// weightShare under `get`'s TF_TP_*: a setting `open` refuses is refused here by the same name, not sized.
-fn share(a: std.mem.Allocator, io: std.Io, dir: []const u8, total: u64, get: *const fn ([]const u8) ?[]const u8) !u64 {
+/// weightShare under TF_TP_* as read: a setting `open` refuses is refused here by the same name, not sized.
+fn share(a: std.mem.Allocator, io: std.Io, dir: []const u8, total: u64, read: tp.config.Error!?tp.Config) !u64 {
     const drafter = drafterBytes(a, io, dir);
-    const world: u64 = (try twoRanks(get)).world;
+    const world: u64 = (try twoRanks(read)).world;
     const path = std.fs.path.join(a, &.{ dir, "config.json" }) catch return total + drafter;
     defer a.free(path);
     const text = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 24)) catch return total + drafter;
@@ -561,10 +566,10 @@ test "a bad TF_TP_* refuses the weight share, and so does any world but two rank
             return null;
         }
     }.get;
-    try std.testing.expectError(error.MimoV2RequiresTwoRanks, share(a, io, "no-such-pack", 1000, &unset));
-    inline for (.{ "1", "3", "4" }) |world| try std.testing.expectError(error.MimoV2RequiresTwoRanks, share(a, io, "no-such-pack", 1000, tpEnv(world, "0")));
+    try std.testing.expectError(error.MimoV2RequiresTwoRanks, share(a, io, "no-such-pack", 1000, tpFrom(&unset)));
+    inline for (.{ "1", "3", "4" }) |world| try std.testing.expectError(error.MimoV2RequiresTwoRanks, share(a, io, "no-such-pack", 1000, tpFrom(tpEnv(world, "0"))));
     inline for (.{ .{ "two", "" }, .{ "0", "" }, .{ "65", "" }, .{ "2", "2" }, .{ "2", "-1" }, .{ "2", "one" } }) |bad| {
-        try std.testing.expectError(error.BadSetting, share(a, io, "no-such-pack", 1000, tpEnv(bad[0], bad[1])));
+        try std.testing.expectError(error.BadSetting, share(a, io, "no-such-pack", 1000, tpFrom(tpEnv(bad[0], bad[1]))));
     }
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -574,5 +579,5 @@ test "a bad TF_TP_* refuses the weight share, and so does any world but two rank
     const c = try config.Config.parse(a, config.fixture, null);
     const embed = @as(u64, c.vocab) * c.hidden * 2;
     const total: u64 = 100 << 30;
-    try std.testing.expectEqual((total - embed) / 2 + embed, try share(a, io, dir, total, tpEnv("2", "1")));
+    try std.testing.expectEqual((total - embed) / 2 + embed, try share(a, io, dir, total, tpFrom(tpEnv("2", "1"))));
 }
