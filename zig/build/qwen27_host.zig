@@ -15,6 +15,12 @@ pub fn tests(b: *std.Build, test_step: *std.Build.Step) void {
     const loop_cfg_run = b.addRunArtifact(b.addTest(.{ .root_module = loop_cfg, .filters = &.{"SenseNova loop config table:"} }));
     test_step.dependOn(&loop_cfg_run.step);
     b.step("test-sensenova-loop-config-host", "SenseNova loop config table through config reader and Metal admission without a GPU").dependOn(&loop_cfg_run.step);
+    // the pair's start-up order on a fake kit: every failed step releases what it made, once (no Metal, no link)
+    const pair_start = b.createModule(.{ .root_source_file = b.path("zig/src/pair_rows_start_test.zig"), .target = b.graph.host, .optimize = .debug });
+    const pair_start_run = b.addRunArtifact(b.addTest(.{ .root_module = pair_start, .filters = &.{"pair start:"} }));
+    pair_start_run.has_side_effects = true;
+    test_step.dependOn(&pair_start_run.step);
+    b.step("test-qwen27-pair-start-host", "The pair's start-up releases each object once when any step fails").dependOn(&pair_start_run.step);
     const metrics = b.createModule(.{ .root_source_file = b.path("zig/src/metal/pass_metrics.zig"), .target = b.graph.host });
     b.step("test-qwen27-pass-metrics-host", "Pass timing and forwarding allocator without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = metrics })).step);
     const mtp_flags = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_mtp_flags.zig"), .target = b.graph.host }) }));

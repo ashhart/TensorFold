@@ -281,7 +281,9 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocato
     defer pool.pop();
     // glm_dsa's order: the seam exists before the weights load and ready() comes once every GPU allocation is in.
     var hw: ?mtl.Device = null;
+    errdefer if (hw) |d| d.deinit(); // first, so released last: after the pair whose buffers and events it made
     var pair: ?*lb.Pair = null;
+    errdefer if (pair) |p| p.deinit();
     if (o.pair) |path| {
         hw = try mtl.Device.init();
         pair = lb.Pair.init(gpa, io, hw.?, path, lb.pairBytes()) catch |err| {
@@ -289,8 +291,6 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocato
             return err;
         };
     }
-    errdefer if (pair) |p| p.deinit();
-    errdefer if (hw) |d| d.deinit();
     const model = if (pair) |p|
         try q.model.Model.loadShardDeferred(gpa, io, dir, reserve.loaded_rows, p.rank, 2, .mlp) // whole attention a rank: one seam a layer, 65 exchanges a token not 257
     else
@@ -414,7 +414,13 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     h.picks = null;
     h.workers = .{};
     h.vision = o.images; // closed with the host; a failed attach leaves it to the caller
-    h.trace = null;
+    h.trace = null; // TF_QWEN27_METAL_KV_PAGES=1: every slot's rows in pages; Fit charged each its window
+    // the pair's picks and link at function scope, before the runner: a failure releases them after it, as close does
+    errdefer if (h.picks) |b| b.deinit();
+    errdefer if (h.link) |l| {
+        l.deinit();
+        gpa.destroy(l);
+    };
     const paged = try q.decode_round.pagesOn();
     const kv_step = if (paged) null else q.kv_grow.step(@import("sys").environment.rawText("TF_Q27_KV_GROW")) catch |err| {
         why.* = "TF_Q27_KV_GROW must be 0 (off) or a row count that is a multiple of 16";
@@ -431,11 +437,10 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
         }
         // The picks live where the head seam writes them, so the lane backend reads them rather than a local argmax.
         const picks = try model.device.buffer(lb.batch_rows * @sizeOf(u32), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
-        errdefer picks.deinit();
         h.picks = picks;
-        h.link = try gpa.create(lb.Link);
-        errdefer gpa.destroy(h.link.?);
-        h.link.?.* = .{ .pair = p, .gpa = gpa };
+        const l = try gpa.create(lb.Link);
+        l.* = .{ .pair = p, .gpa = gpa };
+        h.link = l;
         h.runner.reduce = lb.pairReduce(p);
         h.runner.picks = .{ .buffer = picks, .offset = 0 };
     }
