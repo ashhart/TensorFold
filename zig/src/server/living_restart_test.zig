@@ -13,6 +13,10 @@ const ByteText = @import("slide_forget_test.zig").ByteText;
 const t = std.testing;
 const io = t.io;
 const a = t.allocator;
+/// TF_TEST_RECEIPTS=1 prints each case's counts; the checks run either way, and a passing run stays quiet.
+fn receipts() bool {
+    return if (@import("builtin").os.tag == .windows) false else t.environ.getPosix("TF_TEST_RECEIPTS") != null;
+}
 const facts = [_]struct { text: []const u8, question: []const u8, word: []const u8, answer: []const u8 }{
     .{ .text = "My favourite colour is teal.", .question = "What is my favourite colour?", .word = "colour", .answer = "teal" },
     .{ .text = "My dog's name is Brindle.", .question = "What is my dog's name?", .word = "dog", .answer = "Brindle" },
@@ -170,7 +174,7 @@ fn restartCase(retain_graph: bool) !void {
         try check(srv, al, 2);
         const after = try tmp.dir.readFileAlloc(io, "model.safetensors", al, .limited(1 << 20));
         try t.expectEqualSlices(u8, before, after);
-        std.debug.print("RESTART_CASE graph={any} used={d} submits={d} both_recalled=true refusal_file_equal=true\n", .{ retain_graph, h.used, m.requests.load(.acquire) });
+        if (receipts()) std.debug.print("RESTART_CASE graph={any} used={d} submits={d} both_recalled=true refusal_file_equal=true\n", .{ retain_graph, h.used, m.requests.load(.acquire) });
     }
     var last: fixture.Host = .{ .dir = dir };
     try last.reopen();
@@ -181,7 +185,7 @@ fn restartCase(retain_graph: bool) !void {
     var final_arena = std.heap.ArenaAllocator.init(a);
     defer final_arena.deinit();
     try check(reopened, final_arena.allocator(), 2);
-    std.debug.print("REOPEN_FINAL graph={any} used={d} both_recalled=true\n", .{ retain_graph, last.used });
+    if (receipts()) std.debug.print("REOPEN_FINAL graph={any} used={d} both_recalled=true\n", .{ retain_graph, last.used });
 }
 test "restart case: retained graph, new server and learner teach a second fact" {
     try restartCase(true);
