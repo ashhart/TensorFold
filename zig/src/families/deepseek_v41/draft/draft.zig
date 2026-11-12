@@ -43,6 +43,10 @@ test {
     _ = calib_measure;
     _ = @import("calib_measure_test.zig");
     _ = @import("cost_table_test.zig");
+    _ = @import("priced.zig");
+    _ = @import("priced_rule_test.zig");
+    _ = @import("priced_off_test.zig");
+    _ = @import("priced_test.zig");
     _ = branches_oracle;
     _ = @import("branches_test.zig");
     _ = @import("drive_test.zig");

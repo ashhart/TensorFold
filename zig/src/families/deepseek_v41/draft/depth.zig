@@ -5,6 +5,7 @@ const Costs = @import("costs.zig").Costs;
 const calib = @import("calib.zig");
 const joint = @import("joint.zig");
 const tree = @import("tree.zig");
+const priced = @import("priced.zig");
 
 pub const rate_window = 16; // rounds in a slot's running rate
 pub const slot_rows = 16; // a slot's window at most
@@ -23,6 +24,7 @@ pub const Settings = struct {
     code_accept: bool = false, // TF_DSV41_CODE_ACCEPT: expand high-acceptance short-context chains
     context_bucket: u64 = 2048, // TF_DSV41_GRAPH_BUCKET; short contexts only use its linear buckets
     plain_streams: usize = 0, // TF_DSV41_DRAFT_PLAIN_STREAMS: a round with this many active streams or more decodes plain; 0 = off
+    priced: bool = false, // TF_DSV41_DRAFT_PRICED: each round's asks and depths by price, no pass among the choices
 };
 
 /// [E(0) .. E(len)]: tokens a round verifying k drafts commits on average, into `out` (len + 1).
@@ -91,8 +93,11 @@ pub const Slot = struct {
     rows: usize = 0,
     keep: usize = 0,
     ms: ?f64 = null, // a tree round's modelled ms
+    pred: [slot_rows]f64 = undefined, // priced: the running raw confidences of this stream's passes, by position
+    pred_len: usize = 0,
+    stale: bool = false, // priced: a round went without its pass since `pred` was last observed
 
-    fn use(st: *Slot, conf: []const f64) void {
+    pub fn use(st: *Slot, conf: []const f64) void {
         st.used_len = @min(conf.len, slot_rows);
         @memcpy(st.used[0..st.used_len], conf[0..st.used_len]);
     }
@@ -112,6 +117,7 @@ pub const Depth = struct {
     expanded_rounds: u64 = 0,
     expanded_rows: u64 = 0,
     forward_rows: u64 = 16, // Lanes.model supplies the real forward cap, not the allocator's graph limit
+    last: ?priced.Plan = null, // priced: the last round's choice as priced
 
     const costs_rows = 64;
 
@@ -188,7 +194,7 @@ pub const Depth = struct {
     }
 
     /// The open round's commits -> one (tokens, modelled ms) of the aggregate rate by its windows.
-    fn close(d: *Depth) void {
+    pub fn close(d: *Depth) void {
         if (d.acc.items.len == 0) return;
         var tokens: f64 = 0.0;
         var rows: u64 = 0;
@@ -274,6 +280,10 @@ pub const Depth = struct {
 
     /// Every DSpark slot's k of one round, together; `others`: rows of the round's other windows. Writes `ks`.
     pub fn chooseJoint(d: *Depth, asks: []const Ask, others: u64, other_windows: usize, alone_in: ?bool, ks: []usize) !void {
+        if (d.set.priced and d.set.mode == .cost) {
+            d.last = try priced.chooseRound(d, asks, others, other_windows, ks);
+            return;
+        }
         d.close();
         const alone = (alone_in orelse (asks.len == 1 and other_windows == 0)) and asks.len == 1 and other_windows == 0;
         if (d.set.joint == 0 or d.set.mode == .static or alone or asks.len + other_windows <= 1) {

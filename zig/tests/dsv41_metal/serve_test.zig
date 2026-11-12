@@ -288,3 +288,30 @@ test "dsv41 metal serve: (f) plain rounds at four streams, drafts again at two f
     try testing.expectEqual(@as(usize, 0), bad);
     try testing.expect(caught > 0 and drafted > 0);
 }
+
+test "dsv41 metal serve: (g) priced plain rounds at four streams: no-pass and drafted rounds both run, replies == serial" {
+    var ps: [4][]u32 = undefined;
+    for (&ps, 0..) |*p, i| p.* = try ids(100 + 30 * i, 40 + i);
+    defer for (ps) |p| gpa.free(p);
+    const asks = [_]Ask{ .{ .prompt = ps[0], .max = 60 }, .{ .prompt = ps[1], .max = 60 }, .{ .prompt = ps[2], .max = 60 }, .{ .prompt = ps[3], .max = 60 } };
+    var want: [4][]u32 = undefined;
+    try reference(&asks, &want);
+    defer freeAll(&want);
+    const m = try fs.open(gpa, io, seed, .{});
+    const s = try Served.open(gpa, io, m.model(), ".", null);
+    defer Served.close(s);
+    // an M3-shaped table, not the tiny model's own: a draft must earn its rows and the pass before it is asked for
+    const c = &s.x.policy.depth.costs;
+    for (c.verify, 1..) |*v, r| v.* = 30.6 + 10.0 * @as(f64, @floatFromInt(r - 1)) + (if (r > 16) @as(f64, 20.0) else 0.0);
+    c.draft = 12.0;
+    var drafted: u64 = 0;
+    var got: [4][]u32 = undefined;
+    try serve(s.engine(), &asks, true, &got, &drafted);
+    defer freeAll(&got);
+    const bad = same(&want, &got);
+    const st = s.x.policy.priced;
+    say(bad == 0 and st.passes > 0 and st.plain > 0, "(g) 4 together vs serial: {d} differ; {d} rounds priced, {d} with a pass, {d} without, {d} probes, {d} drafted rows", .{ bad, st.rounds, st.passes, st.plain, st.probes, drafted });
+    try testing.expect(s.x.opts.depth.priced and s.x.opts.depth.plain_streams == 0);
+    try testing.expectEqual(@as(usize, 0), bad);
+    try testing.expect(st.passes > 0 and st.plain > 0 and st.below == 0);
+}

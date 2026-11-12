@@ -23,7 +23,8 @@ pub const Options = struct {
     dup: tree.Dup = .{}, // sibling pricing: TF_DSV41_TREE_DUP_MS a sibling, its pending row counted
     slots: u32 = 4, // streams at once
     spec: spec_mod.Settings = .{}, // the speculative pass (TF_DSV41_SPEC_DRAFT / _SPEC_NUCLEUS)
-    plain_streams_default: usize = 0, // depth.plain_streams when TF_DSV41_DRAFT_PLAIN_STREAMS is unset
+    plain_streams_default: usize = 0, // depth.plain_streams when TF_DSV41_DRAFT_PLAIN_STREAMS is unset (and not priced)
+    priced_default: bool = false, // depth.priced when TF_DSV41_DRAFT_PRICED is unset
 };
 
 /// A stream's slot and what the backend holds for it between rounds.
@@ -437,6 +438,7 @@ pub const Lanes = struct {
         _ = x.scratch.reset(.retain_capacity);
         const a = x.scratch.allocator();
         const wide = x.wideRound();
+        const priced = if (x.opts.depth.priced and !wide) try x.policy.planAsks(requests, a) else null;
         const asks = try a.alloc(iface.Ask, requests.len);
         const whose = try a.alloc(*St, requests.len);
         const depths = try a.alloc(u32, requests.len);
@@ -444,9 +446,9 @@ pub const Lanes = struct {
         const row0_ids = try a.alloc(u32, requests.len);
         var n_row0: usize = 0;
         var n: usize = 0;
-        for (requests) |r| {
+        for (requests, 0..) |r, i| {
             const st = try x.get(r.stream);
-            const asks_now = r.depth > 0 and !wide;
+            const asks_now = r.depth > 0 and !wide and (priced == null or priced.?[i]);
             var at = st.len;
             if (r.rows) |path| {
                 if (r.start != st.base) return error.PositionMismatch;
@@ -466,7 +468,7 @@ pub const Lanes = struct {
             st.n = 0;
             st.n_sib = 0;
             st.start = at;
-            if (!asks_now) continue; // no drafts asked, or the plain switch: a round this wide drafts none
+            if (!asks_now) continue; // no drafts asked, the plain switch, or no draft pays (priced): no pass for it
             if (n == x.opts.slots) return error.TooManySlots;
             asks[n] = .{ .slot = st.slot, .anchor = anchor, .start = at, .params = dspark.Params.of(r.stream.sampling, at) };
             whose[n] = st;

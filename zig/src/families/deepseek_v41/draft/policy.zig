@@ -9,6 +9,8 @@ const tree = @import("tree.zig");
 const Costs = @import("costs.zig").Costs;
 const ln = @import("lanes.zig");
 const acclog = @import("acclog.zig");
+const priced = @import("priced.zig");
+const be = lanes.backend;
 
 pub const Policy = struct {
     gpa: Allocator,
@@ -19,6 +21,7 @@ pub const Policy = struct {
     dup: tree.Dup,
     trees: u64 = 0, // rounds that verified a sibling
     sib_wins: u64 = 0,
+    priced: priced.Stats = .{}, // the priced asks (TF_DSV41_DRAFT_PRICED)
 
     pub fn init(gpa: Allocator, costs: Costs, opts: ln.Options) !Policy {
         return .{ .gpa = gpa, .depth = try depth.Depth.init(gpa, costs, opts.shape.block, opts.depth), .sib_rows = opts.sib_rows, .dup = opts.dup };
@@ -107,6 +110,62 @@ pub const Policy = struct {
             out[i] = .{ .count = @intCast(k) };
             try show(p.gpa, st, k, &.{});
         }
+    }
+
+    /// Which requests ask for a pass this round (priced): fresh and probed streams, and every stream a draft pays for.
+    pub fn planAsks(p: *Policy, requests: []const be.DraftRequest, a: Allocator) ![]bool {
+        const x = p.owner;
+        const d = &p.depth;
+        const out = try a.alloc(bool, requests.len);
+        @memset(out, false);
+        const qss = try a.alloc([]const f64, requests.len);
+        const forced = try a.alloc(bool, requests.len);
+        const slots = try a.alloc(?*depth.Slot, requests.len);
+        const due = p.priced.plain_ms >= d.costs.draft / priced.probe_share;
+        var decoding: usize = 0;
+        for (x.by_slot) |o| if (o) |st| {
+            decoding += @intFromBool(st.len > 0);
+        };
+        var probed = false;
+        for (requests, qss, forced, slots) |r, *qs, *f, *sl| {
+            qs.* = &.{};
+            f.* = false;
+            sl.* = null;
+            if (r.depth == 0) continue;
+            const s = try d.state((x.state(r.stream) orelse return error.UnknownStream).slot);
+            sl.* = s;
+            const top = @min(@min(@min(r.depth, d.set.cap), x.opts.shape.block), depth.slot_rows - 1);
+            if (s.pred_len == 0) {
+                f.* = true; // no pass seen yet: its first priced from what that pass reports
+                p.priced.fresh += 1;
+                continue;
+            }
+            const q = try a.alloc(f64, @min(top, s.pred_len));
+            for (q, s.pred[0..q.len], 0..) |*v, c, j| v.* = d.cal.q(j, c);
+            qs.* = q;
+            f.* = due and s.stale;
+            probed = probed or f.*;
+        }
+        const plan = try priced.plan(a, d.costs, @max(decoding, requests.len), qss, forced, d.set.max_rows, out);
+        var plain_any = false;
+        for (out, slots) |o, sl| if (sl) |s| if (!o) {
+            s.stale = true;
+            plain_any = true;
+        };
+        var free = true;
+        for (forced) |f| free = free and !f;
+        if (free and plan.rate < plan.plain - 1e-12) p.priced.below += 1;
+        if (free and plan.pass) p.priced.low = @min(p.priced.low, plan.rate / plan.plain);
+        p.priced.rounds += 1;
+        p.priced.passes += @intFromBool(plan.pass);
+        p.priced.plain += @intFromBool(!plan.pass);
+        p.priced.probes += @intFromBool(probed);
+        p.priced.asks += plan.asks;
+        p.priced.last = plan;
+        if (plain_any) p.priced.plain_total_ms += plan.ms;
+        if (probed) p.priced.probe_ms += d.costs.draft;
+        if (probed) p.priced.plain_ms = 0 else if (plain_any) p.priced.plain_ms += plan.ms;
+        return out;
     }
 
     /// A lone window with siblings: tree.plan picks the main chain's k and each sibling's rows.

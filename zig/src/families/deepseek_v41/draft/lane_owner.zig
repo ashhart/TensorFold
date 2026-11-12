@@ -14,7 +14,9 @@ pub fn init(gpa: std.mem.Allocator, target: iface.Target, pass: iface.Pass, pric
     errdefer gpa.destroy(x);
     const set = blk: {
         var s = opts.depth;
-        if (!@import("calib_env.zig").plainStreamsSet() and s.plain_streams == 0) s.plain_streams = opts.plain_streams_default;
+        const env = @import("calib_env.zig");
+        if (!env.pricedSet() and opts.priced_default) s.priced = true;
+        if (!env.plainStreamsSet() and s.plain_streams == 0 and !s.priced) s.plain_streams = opts.plain_streams_default;
         break :blk s;
     };
     opts.depth = set;

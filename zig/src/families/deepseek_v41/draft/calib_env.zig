@@ -228,6 +228,7 @@ pub fn depthSettings(get: *const fn ([*:0]const u8) ?[]const u8) !depth.Settings
     s.fair = try float(get("TF_DSV41_DEPTH_FAIR"), joint.fair, 0.0, 4.0);
     s.host_ms = try float(get("TF_DSV41_DEPTH_HOST_MS"), joint.host_ms, 0.0, 100.0);
     if (trimmed(get("TF_DSV41_GRAPH_ROWS_MAX"))) |v| s.max_rows = @max(1, @min(try std.fmt.parseInt(u64, v, 10), costs_mod.max_rows));
+    if (trimmed(get("TF_DSV41_DRAFT_PRICED"))) |v| s.priced = try flag(v, error.DraftPriced);
     if (trimmed(get("TF_DSV41_DRAFT_PLAIN_STREAMS"))) |v| {
         s.plain_streams = std.fmt.parseInt(usize, v, 10) catch return error.DraftPlainStreams;
         if (s.plain_streams > max_plain_streams) return error.DraftPlainStreams;
@@ -255,6 +256,11 @@ pub fn env(name: [*:0]const u8) ?[]const u8 {
 /// TF_DSV41_DRAFT_PLAIN_STREAMS as depthSettings reads it (set and non-blank).
 pub fn plainStreamsSet() bool {
     return trimmed(env("TF_DSV41_DRAFT_PLAIN_STREAMS")) != null;
+}
+
+/// TF_DSV41_DRAFT_PRICED as depthSettings reads it (set and non-blank).
+pub fn pricedSet() bool {
+    return trimmed(env("TF_DSV41_DRAFT_PRICED")) != null;
 }
 
 fn trimmed(v: ?[]const u8) ?[]const u8 {

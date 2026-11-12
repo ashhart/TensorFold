@@ -121,7 +121,7 @@ pub const Served = struct {
         }
         // draft trees (TF_DSV41_TREE / _DUP_MS / _ROWS; off by default): first-position siblings
         const trees = if (dspark_on) try tree.Settings.fromEnv() else tree.Settings{};
-        s.x = try ln.Lanes.init(gpa, tgt, pass, s.costs, .{ .shape = backend.shape, .slots = backend.slots, .siblings = trees.siblings, .sib_rows = trees.sib_rows, .dup = trees.dup, .depth = try calib_env.depthSettings(&calib_env.env), .spec = if (dspark_on) try spec.Settings.fromEnv() else .{}, .plain_streams_default = 3 });
+        s.x = try ln.Lanes.init(gpa, tgt, pass, s.costs, .{ .shape = backend.shape, .slots = backend.slots, .siblings = trees.siblings, .sib_rows = trees.sib_rows, .dup = trees.dup, .depth = try calib_env.depthSettings(&calib_env.env), .spec = if (dspark_on) try spec.Settings.fromEnv() else .{}, .plain_streams_default = 3, .priced_default = true });
         s.arena = std.heap.ArenaAllocator.init(gpa);
         s.cfg = try lanes.Config.init(gpa, try s.x.model(s.arena.allocator(), 64), 16, 15);
         s.x.policy.depth.forward_rows = backend.forward_rows;
@@ -130,6 +130,7 @@ pub const Served = struct {
         // the depth policy as booted (the reference's "DSpark on (depth ...)"): what a check reads from the log
         const dset = s.x.policy.depth.set;
         std.log.info("dsv41 depth: {t}, cap {d}, skip {s}, joint {d}, drafts priced {s}", .{ dset.mode, dset.cap, if (dset.skip) "on" else "off", dset.joint, if (s.cfg.timed) "by the wall clock" else "from the cost tables" });
+        std.log.info("dsv41 plain rounds: {s}, the plain switch at {d} streams (0: off)", .{ if (dset.priced) "priced each round (TF_DSV41_DRAFT_PRICED)" else "not priced", dset.plain_streams });
         s.clock = .{ .io = io };
         s.core = lanes.Engine.init(gpa, &s.cfg, s.x.backend(), s.clock.clock());
         s.x.attach(&s.core);
