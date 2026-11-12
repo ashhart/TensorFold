@@ -97,6 +97,13 @@ const valid = [_]Case{
     .{ .name = "TF_PREFILL_KEEP", .raw = "1", .n = 1 },
     .{ .name = "TF_PREFILL_AHEAD", .raw = "1", .n = 1 },
     .{ .name = "TF_PREFILL_TIMEOUT_S", .raw = "86400", .n = 86400 },
+    .{ .name = "TF_PREFILL_ROUTE", .raw = "auto", .n = 0 },
+    .{ .name = "TF_PREFILL_LOCAL_TPS", .raw = "950", .n = @bitCast(@as(f64, 950)) },
+    .{ .name = "TF_PREFILL_REMOTE_TPS", .raw = " 1250.5", .n = @bitCast(@as(f64, 1250.5)) },
+    .{ .name = "TF_PREFILL_BREAKER", .raw = "0", .n = 0 },
+    .{ .name = "TF_PREFILL_BREAKER", .raw = " 3", .n = 3 },
+    .{ .name = "TF_PREFILL_COOLDOWN_S", .raw = "1", .n = 1 },
+    .{ .name = "TF_PREFILL_COOLDOWN_S", .raw = "86400", .n = 86400 },
     .{ .name = "TF_PREFILL_API_KEY_FILE", .raw = "/etc/tensorfold/gb10.key", .n = 0 },
     .{ .name = "TF_PRODUCE_HELD_GIB", .raw = "32", .n = 32 },
     .{ .name = "TF_DSV41_HANDOFF_DUMP", .raw = "/tmp/handoff exports", .n = 0 },
@@ -148,6 +155,8 @@ test "environment: range, enum, whitespace and native prompt geometry refusals a
         .{ "TF_PREFILL_KEEP", "true" },         .{ "TF_PREFILL_AHEAD", "0" },
         .{ "TF_PREFILL_TAIL", "-1" },           .{ "TF_PREFILL_TAIL", "1.5" },
         .{ "TF_PREFILL_TIMEOUT_S", "0" },       .{ "TF_PREFILL_TIMEOUT_S", "86401" },
+        .{ "TF_PREFILL_BREAKER", "-1" },        .{ "TF_PREFILL_BREAKER", "2.5" },
+        .{ "TF_PREFILL_COOLDOWN_S", "0" },      .{ "TF_PREFILL_COOLDOWN_S", "86401" },
     }) |c| try t.expectError(error.InvalidEnvironment, e.parse(c[0], c[1]));
     try t.expectEqual(@as(?u64, null), try e.parse("TF_CUDA_DEVICE", "   "));
     try t.expectEqual(@as(?u64, 0), try e.parse("TF_Q27_COPY_ROWS", "+0"));
@@ -258,6 +267,7 @@ test "environment: real settings are finite, keep their lower bound and optional
         .{ "TF_DSV41_FLOOR_HARD_GIB", "0" },   .{ "TF_DSV41_FLOOR_HARD_GIB", "-1" },
         .{ "TF_DSV41_PREFILL_SHARE", "1.1" },  .{ "TF_DSV41_EXPERT_TOPP", "nan" },
         .{ "TF_DSV41_EXPERT_TOPP", "-inf" },   .{ "TF_DSV41_FLOOR_GIB", "4 GiB" },
+        .{ "TF_PREFILL_LOCAL_TPS", "0" },      .{ "TF_PREFILL_REMOTE_TPS", "fast" },
     }) |c| try t.expectError(error.InvalidEnvironment, e.parse(c[0], c[1]));
 }
 
@@ -269,6 +279,9 @@ test "environment: ranges, word lists and whole-number bounds refuse ignored tai
     try t.expectEqual(@as(?u64, 1), try e.parse("TF_DSV41_IMAGES", " native "));
     try t.expectEqual(@as(?u64, 0), try e.parse("TF_DSV41_IMAGES", "0"));
     for ([_][]const u8{ "Native", "1", "nativee" }) |raw| try t.expectError(error.InvalidEnvironment, e.parse("TF_DSV41_IMAGES", raw));
+    try t.expectEqual(@as(?u64, 0), try e.parse("TF_PREFILL_ROUTE", " auto"));
+    try t.expectEqual(@as(?u64, 1), try e.parse("TF_PREFILL_ROUTE", "always"));
+    for ([_][]const u8{ "Always", "1", "always-on" }) |raw| try t.expectError(error.InvalidEnvironment, e.parse("TF_PREFILL_ROUTE", raw));
     for ([_][2][]const u8{ .{ "TF_DSV41_ENGRAM_READERS", "32" }, .{ "TF_DSV41_SLOTS", "16" }, .{ "TF_DSV41_ROWS_CAP", "12" }, .{ "TF_DSV41_CONTEXT", "9223372036854775807" } }) |c|
         try t.expect(try e.parse(c[0], c[1]) != null);
     for ([_][2][]const u8{ .{ "TF_DSV41_ENGRAM_READERS", "33" }, .{ "TF_DSV41_SLOTS", "0" }, .{ "TF_DSV41_SLOTS", "17" }, .{ "TF_DSV41_ROWS_CAP", "9" }, .{ "TF_DSV41_CONTEXT", "9223372036854775808" }, .{ "TF_DSV41_PREFILL_ADAPT_MIN", "15" } }) |c|

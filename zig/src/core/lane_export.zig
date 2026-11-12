@@ -119,7 +119,7 @@ fn exportAt(ptr: *anyopaque, s: *lanes.Stream, at: u32) void {
     if (at != job.cut[0]) return Job.kept(ptr, s, at); // one of the store's marks: kept as for any request
     const x = job.host.exporter orelse return;
     const h = job.request.handoff orelse return;
-    if (job.exported) return;
+    if (job.exported or s.isCancelled()) return; // a decoder that went away leaves nothing to hold; `unexported` tells the rest
     job.exported = true;
     const saved = x.snapshots.vtable.save(x.snapshots.ptr, s, at) catch |err| return x.failed(x.ptr, h, @errorName(err));
     x.exported(x.ptr, h, job.request.prompt[0..at], saved);

@@ -3,6 +3,7 @@ const std = @import("std");
 const manifest = @import("manifest.zig");
 const mailbox = @import("mailbox.zig");
 const decoder = @import("decoder.zig");
+const words = @import("words.zig");
 
 /// macOS and glibc both provide it; Zig's std.c declares it on some systems only.
 extern "c" fn getentropy(buf: [*]u8, len: usize) c_int;
@@ -89,6 +90,11 @@ pub const Remote = struct {
     busy: bool = false,
     next_id: u64 = 1,
     reason: decoder.Reason = .{},
+    /// the pull's request is gone (set before each fill, which one gate serialises); the decoder stops between calls
+    abort: ?*const std.atomic.Value(bool) = null,
+    /// the last fill's trigger exchange (the producer's prefill) in ns, and the payload bytes it pulled
+    trigger_ns: u64 = 0,
+    bytes: u64 = 0,
 
     pub fn source(r: *Remote) PrefillSource {
         return .{ .ptr = r, .vtable = &.{ .offer = offerFn, .fill = fillFn } };
@@ -112,15 +118,18 @@ pub const Remote = struct {
         r.next_id += 1;
         if (o.upto >= prompt.len) return error.PrefixTooLong; // a token past the prefix goes too
         const tokens = prompt[0..@intCast(o.upto)];
+        const began = words.nowNs();
         try r.trigger.start_fn(r.trigger.ptr, id, prompt[0..@intCast(o.upto + 1)]);
+        r.trigger_ns = words.nowNs() - began;
         if (r.peers.len > 0) {
             try r.pullShards(id, tokens, sink);
         } else {
             var arena: std.heap.ArenaAllocator = .init(r.gpa);
             defer arena.deinit();
             const pass: decoder.Sink = .{ .ptr = sink.ptr, .put_fn = sink.put_fn };
-            const got = try decoder.pull(arena.allocator(), r.client, id, .{ .model = r.model, .tokens = tokens, .protocol = r.protocol }, pass, &r.reason);
+            const got = try decoder.pull(arena.allocator(), r.client, id, .{ .model = r.model, .tokens = tokens, .protocol = r.protocol, .abort = r.abort }, pass, &r.reason);
             if (got.manifest.first_token != 0) return error.PartialPrefix;
+            r.bytes = got.bytes;
         }
         sink.commit_fn(sink.ptr, o.upto, .remote);
     }
@@ -149,7 +158,7 @@ pub const Remote = struct {
         var made: usize = 0;
         defer for (jobs[0..made]) |*j| j.arena.deinit();
         for (jobs, 0..) |*j, k| {
-            const expect: decoder.Expect = .{ .model = r.model, .tokens = tokens, .protocol = r.protocol, .tp_rank = k, .tp_size = n };
+            const expect: decoder.Expect = .{ .model = r.model, .tokens = tokens, .protocol = r.protocol, .tp_rank = k, .tp_size = n, .abort = r.abort };
             j.* = .{ .client = if (k == 0) r.client else r.peers[k - 1], .id = id, .expect = expect, .sink = shard_fn(sink.ptr, @intCast(k)), .arena = .init(r.gpa) };
             made += 1;
         }
@@ -159,12 +168,14 @@ pub const Remote = struct {
         for (jobs[1..], threads[1..]) |*j, *t| t.* = std.Thread.spawn(.{}, Job.run, .{j}) catch null;
         jobs[0].run();
         for (jobs[1..], threads[1..]) |*j, t| if (t) |th| th.join() else j.run();
+        r.bytes = 0;
         for (jobs) |*j| {
             const got = j.result catch |err| {
                 r.reason = j.reason;
                 return err;
             };
             if (got.manifest.first_token != 0) return error.PartialPrefix;
+            r.bytes += got.bytes;
         }
     }
 };

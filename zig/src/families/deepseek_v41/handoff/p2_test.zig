@@ -25,7 +25,7 @@ fn target(arena: std.mem.Allocator, capacity: u32) !metal.Packed {
 }
 
 /// One shard's export served over its own fake link and pulled into `imp`.
-fn pullShard(a: std.mem.Allocator, arena: std.mem.Allocator, w: s.World, shape: plan.Shape, tokens: []const u32, expect_tokens: []const u32, protocol: u16, imp: *im.Import) !fabric.decoder.Pulled {
+fn pullShard(a: std.mem.Allocator, arena: std.mem.Allocator, w: s.World, shape: plan.Shape, tokens: []const u32, expect_tokens: []const u32, protocol: u16, imp: *im.Import, abort: ?*const std.atomic.Value(bool)) !fabric.decoder.Pulled {
     var link = try fabric.link_fake.Link.init(a, half, half, true, .immediate);
     defer link.deinit();
     link.up();
@@ -55,7 +55,7 @@ fn pullShard(a: std.mem.Allocator, arena: std.mem.Allocator, w: s.World, shape: 
     var client = try fabric.mailbox.Client.init(&mac, fabric.words.native, 30 * std.time.ns_per_s);
     var sink: p2.ShardSink = .{ .imp = imp, .shard = shape.shard };
     var reason: fabric.decoder.Reason = .{};
-    return fabric.decoder.pull(arena, &client, id, .{ .model = model, .tokens = expect_tokens, .tp_rank = shape.shard, .tp_size = shape.shards, .protocol = protocol }, sink.sink(), &reason);
+    return fabric.decoder.pull(arena, &client, id, .{ .model = model, .tokens = expect_tokens, .tp_rank = shape.shard, .tp_size = shape.shards, .protocol = protocol, .abort = abort }, sink.sink(), &reason);
 }
 
 fn endToEnd(upto: u64, world: u32, ds_rows: u32) !void {
@@ -71,7 +71,7 @@ fn endToEnd(upto: u64, world: u32, ds_rows: u32) !void {
     var imp = try im.Import.init(arena, shapeFor(upto, 0, world, ds_rows), .{ .@"packed" = via }, .{});
     for (0..world) |sh| {
         const shape = shapeFor(upto, @intCast(sh), world, ds_rows);
-        const got = try pullShard(a, arena, w, shape, tokens, tokens, 2, &imp);
+        const got = try pullShard(a, arena, w, shape, tokens, tokens, 2, &imp, null);
         try p2.check(arena, shape, got.manifest); // the manifest announced exactly the plan
         const again = try p2.shapeOf(geo, got.manifest);
         try std.testing.expectEqual(shape.upto, again.upto);
@@ -111,10 +111,26 @@ test "a protocol 1 decoder refuses the export, and a pull for the wrong prompt o
     for (tokens, 0..) |*t, i| t.* = @intCast(i);
     const cap = try target(arena, 64);
     var imp = try im.Import.init(arena, shapeFor(20, 0, 1, 0), .{ .@"packed" = cap }, .{});
-    try std.testing.expectError(error.Protocol, pullShard(a, arena, w, shapeFor(20, 0, 1, 0), tokens, tokens, 1, &imp));
+    try std.testing.expectError(error.Protocol, pullShard(a, arena, w, shapeFor(20, 0, 1, 0), tokens, tokens, 1, &imp, null));
     var other = try arena.dupe(u32, tokens);
     other[3] += 1;
-    try std.testing.expectError(error.Mismatch, pullShard(a, arena, w, shapeFor(20, 0, 1, 0), tokens, other, 2, &imp));
+    try std.testing.expectError(error.Mismatch, pullShard(a, arena, w, shapeFor(20, 0, 1, 0), tokens, other, 2, &imp, null));
+}
+
+test "a pull whose request is gone stops with Aborted instead of taking the export" {
+    const a = std.testing.allocator;
+    var arena_state: std.heap.ArenaAllocator = .init(a);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const w = try s.make(arena, .{ .upto = 20 });
+    const tokens = try arena.alloc(u32, 20);
+    for (tokens, 0..) |*t, i| t.* = @intCast(i);
+    const cap = try target(arena, 64);
+    var imp = try im.Import.init(arena, shapeFor(20, 0, 1, 0), .{ .@"packed" = cap }, .{});
+    var gone: std.atomic.Value(bool) = .init(true);
+    try std.testing.expectError(error.Aborted, pullShard(a, arena, w, shapeFor(20, 0, 1, 0), tokens, tokens, 2, &imp, &gone));
+    gone.store(false, .release);
+    _ = try pullShard(a, arena, w, shapeFor(20, 0, 1, 0), tokens, tokens, 2, &imp, &gone); // the same pull, not gone, completes
 }
 
 test "the manifest is one recurrent layer per model layer, and a changed one is refused by check" {
