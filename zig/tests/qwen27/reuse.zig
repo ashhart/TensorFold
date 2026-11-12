@@ -91,7 +91,7 @@ const Run = struct {
     }
 };
 
-/// Drafted requests on the lane core: the host left its lone serial loop off (the default; TF_QWEN27_LANES=0 sets it).
+/// Whether this attached host sends drafted requests through the lane core rather than the lone driver.
 fn lanesMode(h: *host.Host) bool {
     return h.host.lone == null;
 }

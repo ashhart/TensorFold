@@ -414,7 +414,7 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     h.host.memory = .{ .ctx = h, .read = readMemory };
     h.host.explain = .{ .text = words };
     h.host.decoded_rows = true; // a reply's rows prefill with the bits decoding gave them, with the cache on or off
-    // The narrow tensor window retains the serial loop; wide windows use the priced lane path.
+    // A lone greedy request keeps its long-copy tail on the narrow tensor window; arrivals yield to lanes.
     if (h.draft != null and serial) h.host.lone = .{ .ctx = h, .run = Host.lone };
     // a reply that ends soon goes first beside a long prompt; a share someone set stays as they set it
     if (o.decode_share == null and std.c.getenv("TENSORFOLD_PREFILL_SHARE") == null) h.host.srpt = .withDefault(true);
