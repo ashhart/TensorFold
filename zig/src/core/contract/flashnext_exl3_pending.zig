@@ -1,5 +1,5 @@
-//! Flash Next EXL3 launches (pick mask, pool plan, prefill tiles, host-tier K/V). The split is measured at nvcc 13.4; the
-//! canonical reduction (f64 leaves and tree) is pending until its f64 kernels are measured on all five SMs.
+//! Flash Next EXL3 launches (pick mask, pool plan, prefill tiles, host-tier K/V): measured nvcc 13.4 resources, with
+//! the older compiler versions kept explicitly pending.
 const std = @import("std");
 const limits = @import("limits.zig");
 const registry = @import("registry.zig");
@@ -31,11 +31,13 @@ pub const records = [_]registry.CudaRecord{
     .{ .launch = .{ .name = "flashnext_exl3_kvtier kvt_remap", .symbol = "kvt_remap", .image = "flashnext_exl3_kvtier", .threads = 256 }, .usage = registry.none },
 };
 
-/// nvcc 13.4's measured registers, static shared bytes and launch bounds for sm_80, sm_86, sm_89, sm_120, sm_121. The
-/// canonical reduction's root, partial and finish are absent: the f32 receipts of their old bodies do not describe the f64
-/// kernels, and each is added here, all five SMs, only from a fresh 13.4 compile.
+/// nvcc 13.4's measured registers, user static shared bytes and launch bounds for sm_80, sm_86, sm_89, sm_120, sm_121.
+/// The canonical reduction measurements use f64 leaves, tree additions and transported partials.
 pub const cuda_134 = [_]registry.Override{
     .{ .name = "flashnext_exl3 fn_exl3_split_f16", .usage = .{ .{ .regs = 10, .static = 0, .bound = 0 }, .{ .regs = 10, .static = 0, .bound = 0 }, .{ .regs = 10, .static = 0, .bound = 0 }, .{ .regs = 12, .static = 0, .bound = 0 }, .{ .regs = 12, .static = 0, .bound = 0 } } },
+    .{ .name = "flashnext_batch fn_exl3_leaf_tree", .usage = .{ .{ .regs = 24, .static = 0, .bound = 0 }, .{ .regs = 26, .static = 0, .bound = 0 }, .{ .regs = 26, .static = 0, .bound = 0 }, .{ .regs = 26, .static = 0, .bound = 0 }, .{ .regs = 26, .static = 0, .bound = 0 } } },
+    .{ .name = "flashnext_batch fn_exl3_leaf_partial", .usage = .{ .{ .regs = 24, .static = 0, .bound = 0 }, .{ .regs = 26, .static = 0, .bound = 0 }, .{ .regs = 26, .static = 0, .bound = 0 }, .{ .regs = 26, .static = 0, .bound = 0 }, .{ .regs = 26, .static = 0, .bound = 0 } } },
+    .{ .name = "flashnext_batch fn_exl3_leaf_finish", .usage = .{ .{ .regs = 25, .static = 0, .bound = 0 }, .{ .regs = 25, .static = 0, .bound = 0 }, .{ .regs = 25, .static = 0, .bound = 0 }, .{ .regs = 22, .static = 0, .bound = 0 }, .{ .regs = 22, .static = 0, .bound = 0 } } },
     .{ .name = "flashnext_exl3_tp fn_exl3_tp_mask", .usage = .{ .{ .regs = 10, .static = 0, .bound = 0 }, .{ .regs = 10, .static = 0, .bound = 0 }, .{ .regs = 10, .static = 0, .bound = 0 }, .{ .regs = 10, .static = 0, .bound = 0 }, .{ .regs = 10, .static = 0, .bound = 0 } } },
     .{ .name = "flashnext_exl3_dplan fn_exl3_dcheckpoint", .usage = .{ .{ .regs = 32, .static = 0, .bound = 0 }, .{ .regs = 34, .static = 0, .bound = 0 }, .{ .regs = 34, .static = 0, .bound = 0 }, .{ .regs = 34, .static = 0, .bound = 0 }, .{ .regs = 34, .static = 0, .bound = 0 } } },
     .{ .name = "flashnext_exl3_dplan fn_exl3_dplan", .usage = .{ .{ .regs = 32, .static = 4688, .bound = 256 }, .{ .regs = 40, .static = 4688, .bound = 256 }, .{ .regs = 40, .static = 4688, .bound = 256 }, .{ .regs = 48, .static = 4688, .bound = 256 }, .{ .regs = 48, .static = 4688, .bound = 256 } } },
