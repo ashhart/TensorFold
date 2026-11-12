@@ -1,4 +1,4 @@
-// Preserve the omitted contract, precision, and host-interface facts from the original comment.
+// Splits the conv output into q, k and v (SoA by head-row) and computes the gates g and beta from a, b, A_log and dt.
 
 #version 460
 
@@ -52,7 +52,7 @@ uint16_t bf16_store(float value) {
   return uint16_t((bits + 0x7fffu + ((bits >> 16) & 1u)) >> 16);
 }
 
-// Match Ash8c Metal gdn_pre lane 0: bf16-round s and softplus; keep g f32.
+// Match the Metal oracle's gdn_pre lane 0: bf16-round s and softplus; keep g f32.
 vec2 ash_gate(float a_in, float b_in, float a_log, float dt_in) {
   float s = bf16_load(bf16_store(a_in + dt_in));
   float sp = bf16_load(bf16_store(max(s, 0.0f) + log(1.0f + exp(-abs(s)))));

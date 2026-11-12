@@ -1,7 +1,7 @@
-//! MLX's 120-byte ComputeParams push constants, shared by every stage 1 Vulkan shader.
+//! The 120-byte push-constant block shared by every stage 1 Vulkan shader.
 const std = @import("std");
 
-/// qmm.comp's push constants (std430); shaders read the fields each op sets, the rest keep MLX's defaults.
+/// qmm.comp's push constants (std430); shaders read the fields each op sets, the rest keep the defaults below.
 pub const Params = extern struct {
     count: u32 = 0,
     operation: u32 = 0,

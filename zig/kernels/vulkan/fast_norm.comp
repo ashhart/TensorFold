@@ -1,4 +1,6 @@
-// Preserve the omitted contract, precision, and host-interface facts from the original comment.
+// From omarchy-mlx overlay/mlx/backend/omarchy/shaders/fast_norm.comp at 8d9aaa2db04a.
+// Code adapted: 2 lines added or changed, 0 removed.
+// Copyright © 2026 Joshua Warren and mlx-omarchy contributors; MIT License, full text in LICENSES/mlx-omarchy-MIT.txt.
 
 #version 460
 
@@ -129,7 +131,7 @@ void main() {
       float result = (value - mu) * norm * weight + bias;
 #else
 #ifdef ASH_QWEN35
-      // Ash8c Metal: bfloat(Wt*(hv*inv)); weight multiplies the product; one store rounding.
+      // Metal oracle: bfloat(Wt*(hv*inv)); weight multiplies the product; one store rounding.
       float result = weight * (value * norm);
 #else
       float result = value * norm * weight;
