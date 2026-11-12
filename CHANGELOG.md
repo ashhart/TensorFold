@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- LFM3-VL-2B on Metal: images. The native engine serves the official MLX 4-, 6- and 8-bit LFM3-VL-2B checkpoints with their own image tower, up to four images and 256 image tokens a request by default, and an LFM3 prompt fills in steps under `--decode-share` so replies keep decoding beside it. Tensor-unit prompt projection and tiled attention are development build options, off by default and refused by release builds (#1502, part of #1491). Thanks to @BlivionIaG.
+
 - CUDA EXL3 grouped experts launch and size their storage at the caller's tile and pair count, so decode no longer launches three quarters of its grid empty, and Qwen3.6-35B-A3B EXL3 sizes its grouped storage for 36,864 pair rows instead of 163,904 (about 3 GB less); outputs are bit-equal (#2843, for #2823).
 
 - CUDA: dots.mocr's text decoder serves text prompts on a GB10 from the publisher's BF16 weights, on a new shared engine for dense GQA decoders (`zig/src/cuda_dense/`); `--vision`, prompt caching and fp8 caches are refused by name, and served CUDA checkpoints are unchanged (#2673, part of #1927). Thanks to @laudney.
@@ -159,7 +161,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Tests: the sessions-writes mixed load holds its pool to one slot's capacity, so it exercises spills to the tier (#2731). Thanks to @garvrao80.
 
 - Prompt cache: when two disk restores in a row fail (a damaged or missing state file), the request now resumes from the shorter state it already had in RAM instead of prefilling from token 0, so the reply's `cached_tokens` reports that state's position (#2694). Thanks to @ThinkOffApp.
-- LFM3-VL-2B on Metal: serve the official MLX 4-, 6- and 8-bit checkpoints with the native image tower and projector; the native checkpoint adapter shares the host tensor-admission checks. LFM3 also supports stepped prefill under `--decode-share`; development-only tensor-unit prompt projection and tiled attention remain off by default (#1502, part of #1491). Thanks to @BlivionIaG.
 
 ## 1.2.6
 
