@@ -70,17 +70,20 @@ An M5 result does not establish correctness on those GPUs.
 `zig build native-cpu -Doptimize=ReleaseFast` builds `zig-out/native-cpu/bin/tensorfold-native` with the same checkpoint
 served on the host's cores, no GPU and no kernel library (`capabilities --json` says `"backends": ["cpu"]`); the default
 builds are unchanged. It takes the same `serve` flags; `TF_QWEN35_CPU_THREADS=N` sets the worker threads beside the engine
-thread (default: the logical CPUs less one), and `TF_QWEN35_CPU_WINDOWS=1` admits verify windows of up to 16 rows (copy
-drafts) once the engine's local exactness check against one-row steps passes at load. The engine's arithmetic is the
-portable shape: the registered projection and RMS norm (`zig build cpu-contract`), fp32 sums in the attention and the
-delta rule's recurrence, and every other row computed in float64 and rounded once to bf16, so x86_64 and arm64 give the
-same bytes at every thread count. Its fidelity is judged against a float64 reference, not against Metal's bits:
+thread, 1 to 255 (default: the logical CPUs less one), and `TF_QWEN35_CPU_WINDOWS=1` admits verify windows of up to 16
+rows (copy drafts) once the engine's local exactness check against one-row steps passes at load; only this binary checks
+the `TF_QWEN35_CPU_*` settings. The engine's arithmetic is the portable shape: the registered projection and RMS norm
+(`zig build cpu-contract`), fp32 sums in the attention and the delta rule's recurrence, and every other row computed in
+float64 and rounded to bf16 through fp32. The same bytes come back at every thread count. Across hosts, the float64
+functions come from each host's libm, so equal bytes are checked, not built in: `zig build test-cpu` pins a synthetic
+forward's committed bytes by digest, which CI runs on Linux, Windows and macOS, and the fidelity packet's list case gave
+the same bytes on x86_64 as on arm64. Its fidelity is judged against a float64 reference, not against Metal's bits:
 `tools/zig/cpu_fidelity.py` freezes a prompt set and records a serve's greedy replies; `tools/zig/qwen35_cpu_long_ref.py
 --run-input` computes the reference's logits for each case (the whole forward in float64 over the exactly dequantized
 weights, numpy only, the oracle #1544 judged the Vulkan engine against); and `cpu_fidelity.py compare` sets
 `tf-qwen35-cpu-forward`'s teacher-forced logits (`zig build qwen35-cpu-forward`) against them row by row, listing every
-top-token difference with both margins. `zig/tests/qwen35/serve_check.py` runs the drafted, concurrent and resumed checks
-against its serve as against any other.
+top-token difference with both margins. `zig/tests/qwen35/serve_check.py` runs the drafted, concurrent and resumed
+checks against its serve as against any other.
 
 ## Verification
 
