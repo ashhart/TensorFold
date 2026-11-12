@@ -119,7 +119,7 @@ fn envCount(name: [:0]const u8, default: usize) usize {
 }
 
 pub fn main(init: std.process.Init) !u8 {
-    try @import("env_validate.zig").startup();
+    try flash.env_validate.startup();
     const gpa = init.gpa;
     const io = init.io;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
