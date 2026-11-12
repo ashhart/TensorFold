@@ -344,7 +344,8 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
         why.* = policy.problem(err) orelse why.*;
         return err;
     };
-    const serial = policy.serial(units, window, if (platform.c.getenv("TF_QWEN27_LANES")) |v| std.mem.span(v) else null) catch |err| {
+    const lanes_value = if (platform.c.getenv("TF_QWEN27_LANES")) |v| std.mem.span(v) else null;
+    const serial = policy.serial(units, window, lanes_value) catch |err| {
         why.* = policy.problem(err) orelse why.*;
         return err;
     };
@@ -400,6 +401,7 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     errdefer if (h.draft) |d| d.deinit();
     h.back = try lb.Metal.init(gpa, &h.runner, h.draft);
     errdefer h.back.deinit();
+    h.back.serial_copy_match = policy.serialCopyMatch(units, window, lanes_value);
     h.back.chunk = h.runner.promptRows(@min(rows, row_policy.requested(model.device.generation(), model.config.moe(), value)));
     h.back.grow = .{ .ctx = h, .room = Host.roomFor, .added = Host.added };
     h.back.vision = o.images;
