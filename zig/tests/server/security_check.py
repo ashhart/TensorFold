@@ -164,7 +164,7 @@ def held_slots(port):
 
 
 def slot_cases():
-    yield "connections with no request give their slots up under pressure", held_slots
+    yield "connections with no request give their slots up once every slot is taken", held_slots
 
 
 def main():

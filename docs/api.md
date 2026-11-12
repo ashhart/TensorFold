@@ -925,6 +925,13 @@ A retryable refusal on an inference route answers 503 and names its wait in the 
 
 A capacity refusal keeps the frozen Python engine's shape (`type` `invalid_request_error` and its message) and still carries no `Retry-After`; the code is native's addition. The Messages routes keep their Anthropic envelope, which has no code field, and the Sliding Weights learn/delete and imprint routes keep their own 503 bodies.
 
+Connections are limited apart from requests. The server holds at most `--max-connections N` open connections (1-1024,
+default 128). From three quarters of them open, one address may hold `--max-connections-per-address N` (0-1024; by
+default a quarter of the limit; 0 turns it off). An IPv6 address counts by its /64. Loopback clients and each
+`--trusted-proxy ADDRESS` (repeatable, up to 64; an exact IPv4 or IPv6 address, for a proxy, load balancer or Docker's
+bridge gateway) are never counted. A refused connection gets 503 with `Retry-After: 1`. Only with every slot taken does
+a connection waiting for its next request give its slot up, after 5 seconds; a request in progress is never cut.
+
 ## Conversations on disk
 
 Use `--prompt-cache-disk DIR` to keep conversation prompt states on disk:
