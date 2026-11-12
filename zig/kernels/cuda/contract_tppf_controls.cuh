@@ -7,13 +7,14 @@
 
 namespace tf_tppf_ctl {
 
-enum Fault { FLAT = 0, NAN_DROPPED = 1, WRITES_INPUT = 2, BF16_ADDS = 3, WRONG = 4 };
+enum Fault { FLAT = 0, NAN_DROPPED = 1, WRITES_INPUT = 2, BF16_ADDS = 3, WRONG = 4, F32_PARTIALS = 5 };
 
 __device__ __forceinline__ float rb(float x) { return __bfloat162float(__float2bfloat16_rn(x)); }
 
-__device__ __forceinline__ float add(float a, float b, bool bf16) {
-    const float s = __fadd_rn(a, b);
-    return bf16 ? rb(s) : s;
+// One tree add in double; BF16_ADDS rounds the sum to bf16 (through float) the way a half-precision merge would.
+__device__ __forceinline__ double add(double a, double b, bool bf16) {
+    const double s = __dadd_rn(a, b);
+    return bf16 ? static_cast<double>(rb(__double2float_rn(s))) : s;
 }
 
 // fwht128 of exl3_decode.cuh with every add and subtract rounded to bf16 (gate 4).
@@ -73,106 +74,91 @@ __device__ __forceinline__ int blocks(int lo, int hi, int* st, int* sz) {
     return n;
 }
 
-// tf_exl3pf_tp_combine, then the fault: FLAT one chain a block (3), NAN_DROPPED (1), WRITES_INPUT (2), BF16_ADDS (4).
+// Canonical F64 block, with a flat, NaN, bf16-merge or narrowed-partial fault.
 template <int F>
-__device__ __forceinline__ void combine(float* y, const float* wts, const int* pick, float* out, int slots, int D, int n,
+__device__ __forceinline__ double block_value(const float* y, const float* wts, const int* pick, int r, int d, int D, int slots,
+                                              int start, int log) {
+    const int end = start + (1 << log);
+    int leaf[11];
+    double val[11];
+    int n = 0;
+    double chain = 0.0;
+    for (int k = 0; k < slots; ++k) {
+        const int p = pick[r * slots + k];
+        const int l = p >= 512 ? 63 : (p >> 3);
+        if (l < start || l >= end) continue;
+        const double yv = y[(static_cast<long long>(r) * slots + k) * D + d];
+        const double wv = wts[r * slots + k];
+        if (F == NAN_DROPPED) {
+            const double product = __dmul_rn(yv, wv);
+            if (product != product) continue;
+        }
+        chain = __fma_rn(yv, wv, chain);
+        int j = 0;
+        while (j < n && leaf[j] != l) ++j;
+        if (j == n) {
+            leaf[n] = l;
+            val[n] = 0.0;
+            ++n;
+        }
+        val[j] = __fma_rn(yv, wv, val[j]);
+    }
+    if (F == FLAT) return chain;
+    for (int i = 1; i < n; ++i)
+        for (int j = i; j > 0 && leaf[j - 1] > leaf[j]; --j) {
+            const int tl = leaf[j - 1];
+            leaf[j - 1] = leaf[j];
+            leaf[j] = tl;
+            const double tv = val[j - 1];
+            val[j - 1] = val[j];
+            val[j] = tv;
+        }
+    for (int i = 0; i < n; ++i) leaf[i] -= start;
+    for (int lev = 0; lev < log; ++lev) {
+        int m = 0;
+        for (int q = 0; q < n;) {
+            const int parent = leaf[q] >> 1;
+            if (q + 1 < n && parent == (leaf[q + 1] >> 1)) {
+                val[m] = add(val[q], val[q + 1], F == BF16_ADDS);
+                q += 2;
+            } else {
+                val[m] = __dadd_rn(val[q], 0.0);
+                q += 1;
+            }
+            leaf[m] = parent;
+            ++m;
+        }
+        n = m;
+    }
+    const double value = n == 0 ? 0.0 : val[0];
+    return F == F32_PARTIALS ? static_cast<double>(__double2float_rn(value)) : value;
+}
+
+// Combine faults: NaN is gate 1, input write gate 2, flat/bf16/narrowed F64 partials gate 3.
+template <int F>
+__device__ __forceinline__ void combine(float* y, const float* wts, const int* pick, double* out, int slots, int D, int n,
                                         int sub, int world, int rank, int M) {
-    __shared__ float w_sh[16];
-    __shared__ int nl_sh;
-    __shared__ int leaf_sh[16];
-    __shared__ unsigned mask_sh[16];
     const int r = blockIdx.x;
     const int llo = 64 * rank / world, lhi = 64 * (rank + 1) / world;
-    if (static_cast<int>(threadIdx.x) < slots) w_sh[threadIdx.x] = wts[r * slots + threadIdx.x];
-    if (threadIdx.x == 0) {
-        int nl = 0;
-        for (int k = 0; k < slots; ++k) {
-            const int p = pick[r * slots + k];
-            if (p < 0) continue;
-            const int leaf = p >= 512 ? 63 : p / 8;
-            if (leaf < llo || leaf >= lhi) continue;
-            int at = 0;
-            while (at < nl && leaf_sh[at] < leaf) ++at;
-            if (at < nl && leaf_sh[at] == leaf) {
-                mask_sh[at] |= 1u << k;
-                continue;
-            }
-            for (int i = nl; i > at; --i) {
-                leaf_sh[i] = leaf_sh[i - 1];
-                mask_sh[i] = mask_sh[i - 1];
-            }
-            leaf_sh[at] = leaf;
-            mask_sh[at] = 1u << k;
-            ++nl;
-        }
-        nl_sh = nl;
-    }
-    __syncthreads();
-    const int nl = nl_sh;
     int bst[16], bsz[16];
     const int nb = blocks(llo, lhi, bst, bsz);
     const int b = r / sub, rr = r - b * sub;
     const int mb = min(sub, n - b * sub);
-    const float* yr = y + static_cast<size_t>(r) * slots * D;
     for (int d = threadIdx.x; d < D; d += blockDim.x) {
-        float val[16];
-        int st[16];
-        for (int i = 0; i < nl; ++i) {
-            float acc = 0.0f;
-            for (unsigned m = mask_sh[i]; m; m &= m - 1) {
-                const int k = __ffs(m) - 1;
-                const float yv = yr[static_cast<size_t>(k) * D + d];
-                if (F == NAN_DROPPED && __fmul_rn(yv, w_sh[k]) != __fmul_rn(yv, w_sh[k])) continue;
-                acc = fmaf(yv, w_sh[k], acc);
-            }
-            val[i] = acc;
-            st[i] = leaf_sh[i];
-        }
         for (int j = 0; j < nb; ++j) {
-            float v[16];
-            int s[16];
-            int cnt = 0;
-            float chain = 0.0f;
-            for (int i = 0; i < nl; ++i)
-                if (st[i] >= bst[j] && st[i] < bst[j] + bsz[j]) {
-                    v[cnt] = val[i];
-                    s[cnt] = st[i];
-                    ++cnt;
-                }
-            if (F == FLAT) {
-                for (int k = 0; k < slots; ++k) {
-                    const int p = pick[r * slots + k];
-                    const int leaf = p >= 512 ? 63 : p / 8;
-                    if (p >= 0 && leaf >= bst[j] && leaf < bst[j] + bsz[j]) chain = fmaf(yr[static_cast<size_t>(k) * D + d], w_sh[k], chain);
-                }
-            }
-            for (int size = 1; size < bsz[j]; size *= 2) {
-                int m = 0;
-                for (int i = 0; i < cnt;) {
-                    const int start = s[i] & ~(2 * size - 1);
-                    if (s[i] % (2 * size) == 0 && i + 1 < cnt && s[i + 1] == s[i] + size) {
-                        v[m] = add(v[i], v[i + 1], F == BF16_ADDS);
-                        i += 2;
-                    } else {
-                        v[m] = v[i];
-                        ++i;
-                    }
-                    s[m] = start;
-                    ++m;
-                }
-                cnt = m;
-            }
-            const float result = F == FLAT ? chain : (cnt ? v[0] : 0.0f);
-            out[(static_cast<size_t>(b) * sub * world * M + static_cast<size_t>(rank * M + j) * mb + rr) * D + d] = result;
+            int log = 0;
+            while ((2 << log) <= bsz[j]) ++log;
+            out[(static_cast<size_t>(b) * sub * world * M + static_cast<size_t>(rank * M + j) * mb + rr) * D + d] =
+                block_value<F>(y, wts, pick, r, d, D, slots, bst[j], log);
         }
     }
     __syncthreads();
     if (F == WRITES_INPUT && r == 0 && threadIdx.x == 0) y[0] = __fadd_rn(y[0], 1.0f);
 }
 
-// tf_exl3pf_tp_finish, then the fault: FLAT adds every piece in one chain (gate 3), WRITES_INPUT (2), BF16_ADDS (4).
+// Finish faults: input write gate 2, flat/narrowed partials gate 3, bf16 merges gate 4.
 template <int F>
-__device__ __forceinline__ void finish(float* gath, float* sum, int D, int m, int world, int M) {
+__device__ __forceinline__ void finish(double* gath, float* sum, int D, int m, int world, int M) {
     __shared__ int bs_sh[96], bz_sh[96], bq_sh[96];
     __shared__ int nb_sh;
     if (threadIdx.x == 0) {
@@ -193,14 +179,15 @@ __device__ __forceinline__ void finish(float* gath, float* sum, int D, int m, in
     const int rr = blockIdx.x;
     const int nb = nb_sh;
     for (int d = threadIdx.x; d < D; d += blockDim.x) {
-        float v[96];
+        double v[96];
         int s[96], z[96];
-        float chain = 0.0f;
+        double chain = 0.0;
         for (int i = 0; i < nb; ++i) {
-            v[i] = gath[(static_cast<size_t>(bq_sh[i]) * m + rr) * D + d];
+            const double piece = gath[(static_cast<size_t>(bq_sh[i]) * m + rr) * D + d];
+            v[i] = F == F32_PARTIALS ? static_cast<double>(__double2float_rn(piece)) : piece;
             s[i] = bs_sh[i];
             z[i] = bz_sh[i];
-            chain = __fadd_rn(chain, v[i]);
+            chain = __dadd_rn(chain, v[i]);
         }
         int cnt = nb;
         while (cnt > 1) {
@@ -221,10 +208,10 @@ __device__ __forceinline__ void finish(float* gath, float* sum, int D, int m, in
             }
             cnt = k;
         }
-        sum[static_cast<size_t>(rr) * D + d] = F == FLAT ? chain : v[0];
+        sum[static_cast<size_t>(rr) * D + d] = __double2float_rn(F == FLAT ? chain : v[0]);
     }
     __syncthreads();
-    if (F == WRITES_INPUT && rr == 0 && threadIdx.x == 0) gath[0] = __fadd_rn(gath[0], 1.0f);
+    if (F == WRITES_INPUT && rr == 0 && threadIdx.x == 0) gath[0] = __dadd_rn(gath[0], 1.0);
 }
 
 // tf_exl3pf_tp_place, then the fault: NAN_DROPPED copies a NaN as 0 (gate 1), WRITES_INPUT (2), WRONG: weights 1 (3).
@@ -256,7 +243,7 @@ TF_CTL_TPPF_ROTATE(tf_ctl_tppf_rotate_bf16_adds, tf_tppf_ctl::BF16_ADDS)
 #undef TF_CTL_TPPF_ROTATE
 
 #define TF_CTL_TPPF_COMBINE(NAME, F)                                                                                 \
-    extern "C" __global__ void __launch_bounds__(256) NAME(float* y, const float* wts, const int* pick, float* out,  \
+    extern "C" __global__ void __launch_bounds__(256) NAME(float* y, const float* wts, const int* pick, double* out, \
                                                            int slots, int D, int n, int sub, int world, int rank,    \
                                                            int M) {                                                  \
         tf_tppf_ctl::combine<F>(y, wts, pick, out, slots, D, n, sub, world, rank, M);                                \
@@ -265,15 +252,17 @@ TF_CTL_TPPF_COMBINE(tf_ctl_tppf_combine_flat, tf_tppf_ctl::FLAT)
 TF_CTL_TPPF_COMBINE(tf_ctl_tppf_combine_nan_dropped, tf_tppf_ctl::NAN_DROPPED)
 TF_CTL_TPPF_COMBINE(tf_ctl_tppf_combine_writes_input, tf_tppf_ctl::WRITES_INPUT)
 TF_CTL_TPPF_COMBINE(tf_ctl_tppf_combine_bf16_adds, tf_tppf_ctl::BF16_ADDS)
+TF_CTL_TPPF_COMBINE(tf_ctl_tppf_combine_f32_partials, tf_tppf_ctl::F32_PARTIALS)
 #undef TF_CTL_TPPF_COMBINE
 
 #define TF_CTL_TPPF_FINISH(NAME, F)                                                                                  \
-    extern "C" __global__ void __launch_bounds__(256) NAME(float* gath, float* sum, int D, int m, int world, int M) { \
+    extern "C" __global__ void __launch_bounds__(256) NAME(double* gath, float* sum, int D, int m, int world, int M) { \
         tf_tppf_ctl::finish<F>(gath, sum, D, m, world, M);                                                           \
     }
 TF_CTL_TPPF_FINISH(tf_ctl_tppf_finish_flat, tf_tppf_ctl::FLAT)
 TF_CTL_TPPF_FINISH(tf_ctl_tppf_finish_bf16_adds, tf_tppf_ctl::BF16_ADDS)
 TF_CTL_TPPF_FINISH(tf_ctl_tppf_finish_writes_input, tf_tppf_ctl::WRITES_INPUT)
+TF_CTL_TPPF_FINISH(tf_ctl_tppf_finish_f32_partials, tf_tppf_ctl::F32_PARTIALS)
 #undef TF_CTL_TPPF_FINISH
 
 #define TF_CTL_TPPF_PLACE(NAME, F)                                                                                   \

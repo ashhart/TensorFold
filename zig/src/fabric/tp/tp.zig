@@ -13,6 +13,7 @@ pub const host = @import("host.zig");
 pub const device = @import("device.zig");
 pub const tcp = @import("tcp.zig");
 pub const nccl = @import("nccl.zig");
+pub const group = @import("group.zig");
 pub const mailbox = @import("mailbox.zig");
 pub const hybrid = @import("hybrid.zig");
 pub const roce = @import("roce.zig");
@@ -223,6 +224,7 @@ pub const Session = struct {
 };
 
 test {
+    _ = group;
     _ = collective;
     _ = reference;
     _ = config;
