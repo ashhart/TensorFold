@@ -185,14 +185,19 @@ pub const Engine = struct {
         e.chosen = null;
         e.pool = .{};
         // a window runs from the plan where its shapes are the plan kernels': else a snapshot a row stays
+        e.gdn = null;
         if (gdn.supported(e.weights.model.dims, e.cfg.layers)) {
             const slots = try gpa.create(gdn.Slots);
             errdefer gpa.destroy(slots);
             slots.* = try gdn.Slots.init(gpa, &e.driver, e.weights.model.dims, @max(o.want, 1));
-            errdefer slots.deinit();
             e.gdn = slots;
             e.weights.model.gdn = slots;
         }
+        errdefer if (e.gdn) |p| {
+            p.deinit();
+            gpa.destroy(p);
+            e.weights.model.gdn = null;
+        };
         _ = try steps.done(.{ 0, 0 }, .first);
         return e;
     }
