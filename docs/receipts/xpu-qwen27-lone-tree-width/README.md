@@ -76,9 +76,41 @@ The branch against the best fixed tree (unrounded means):
 
 **At 34 prompt tokens the branch is 3.6 % below the best fixed tree**: it does not reach the target of "at or above the
 best fixed tree at each depth" there. Its measured requests verify 11.3 to 12.0 nodes a round (drafted / rounds) where
-the best fixed tree verifies 15, and accept 4.36 drafts a round where 15 nodes accept 4.67: a likely cause, not
-tested here, is that at this depth the round times of neighbouring widths differ by about 1 ms of 40, which is less than
-the jitter of the times the rule measures. At the three deep points it is above every fixed tree.
+the best fixed tree verifies 15, and accept 4.36 drafts a round where 15 nodes accept 4.67; the cause is measured below, in a separate
+instrumented run. At the three deep points it is above every fixed tree.
+
+### Why 34 tokens stays below
+
+A separate run of the branch with a temporary per-round log (price table, chosen width, measured time, drafted and
+accepted; 34 tokens, one warm-up and 3 requests, 190 rounds, `diag/`) shows the cause. That run is not the table's: its
+mean width is 13.4 where the table's is 11.66, and it reads 133 to 139 tok/s.
+
+- A round costs about the same at 14 nodes as at 15. 14 nodes: 40.42 ms, sigma 1.37 ms, n = 156 rounds; the 15-node
+  fixed tree: 40.1 ms a round. One round varies by 3.4 %, and the difference of two single timings by 4.8 %, a price
+  being one timing blended at 0.2.
+- The table keeps prices of widths the rule no longer picks, from the warm-up request's first rounds (15 nodes at 50.6
+  and 48.5 ms there): 44.6 and 44.9 ms at 11 and 12 nodes while 14 is at 39.8, and 43.0 at 15 (one trial).
+- The chances model is not at fault: 5.46 tokens a round predicted at the chosen width, 5.49 observed (184 rounds).
+- The trials are not the cause either: 2 of the 190 rounds.
+- The gap is rounds: 47 to 48 against 45 for 15 fixed nodes, at the same ms a round.
+
+Three rules that take the widest width priced within a band of the best were tried on the same card, greedy, 1 warm-up
+and 3 requests a depth (`exp/`, raw requests and bench logs; `exp/scatter-rule.patch` is the scatter rule, the 5 %
+rule's build was not kept). "Base" is the branch's own rule, same binary, same session. The 5 % is a band on tokens a
+ms; 2 sigma and 4 sigma are bands of that many scatters of the stream's own times (residual of their line over the
+drafts count) on the price. Median of the requests, tok/s, and mean drafts a round in brackets:
+
+| rule | 34 tokens | 28,946 | 121,022 |
+|---|---|---|---|
+| base | 135.82 (13.24) | 46.61 (4.04) | 22.00 (2.62), 2 requests, pass cut |
+| 5 % of rate | 138.05 (14.14) | 41.28 (5.96) | 21.96 (2.98) |
+| 2 sigma | 135.11 (12.81) | 47.06 (3.80) | 22.00 (2.54) |
+| 4 sigma | 137.92 (14.65) | 42.42 (5.69) | 20.28 (3.47) |
+
+The best fixed tree at 34 tokens is 141.23 (the table's, mean of two passes' medians; its passes read 141.3 each). None
+of the rules gets there (0.977 for 5 %, 0.974 for 4 sigma), and the two that widen 34 tokens' trees lose against base at
+28,946 tokens (0.886 and 0.910); 2 sigma changes neither depth. No such rule is in the branch. All hashes equal the
+table's in these runs (34: `5d721308`, 28,946: `1d59abb4`, 121,022: `db07bcbf`, first 8 hex).
 
 Drafts verified a round (`drafted / rounds`) and drafts accepted a round, mean of the measured requests:
 

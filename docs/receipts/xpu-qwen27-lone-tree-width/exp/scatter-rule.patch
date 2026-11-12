@@ -1,0 +1,65 @@
+diff --git a/zig/src/native/xpu_dflash2.zig b/zig/src/native/xpu_dflash2.zig
+index 7a5b8813b..d7790e0b2 100644
+--- a/zig/src/native/xpu_dflash2.zig
++++ b/zig/src/native/xpu_dflash2.zig
+@@ -35,6 +35,51 @@ pub fn chances(landing: *const Landing, sampled: bool, parents: []const i32, own
+ /// A lone round's drafts to verify, and the rows of a calibration trial when the rule asks for one.
+ pub const Width = struct { nodes: u32, trial: ?u32 = null };
+ 
++/// Scatter of a stream's own round times around the line through them, ms: its prices cannot tell apart less.
++pub fn scatter(ms: lanes.table.Table) f64 {
++    var n: f64 = 0;
++    var sx: f64 = 0;
++    var sy: f64 = 0;
++    var sxx: f64 = 0;
++    var sxy: f64 = 0;
++    for (ms.slots, 0..) |slot, d| {
++        const y = slot orelse continue;
++        const x: f64 = @floatFromInt(d);
++        n += 1;
++        sx += x;
++        sy += y;
++        sxx += x * x;
++        sxy += x * y;
++    }
++    if (n < 4) return 0;
++    const den = n * sxx - sx * sx;
++    if (den <= 0) return 0;
++    const slope = (n * sxy - sx * sy) / den;
++    const base = (sy - slope * sx) / n;
++    var sq: f64 = 0;
++    for (ms.slots, 0..) |slot, d| {
++        const y = slot orelse continue;
++        const r = y - base - slope * @as(f64, @floatFromInt(d));
++        sq += r * r;
++    }
++    return @sqrt(sq / (n - 2));
++}
++
++/// Times differing by less than this many scatters are one price: a wider tree is taken when it costs no more.
++pub const scatters = 2.0;
++
++/// The widest drafts count priced within `scatters` of `best` drafts' price (more nodes never keep fewer tokens).
++pub fn widest(chance: []const f64, prices: *const lanes.table.Table, best: u32, noise_ms: f64) u32 {
++    if (best < 1 or best > chance.len) return best;
++    const base = prices.get(@as(i64, best) + 1) orelse return best;
++    var out = best;
++    for (chance, 1..) |_, k| {
++        const ms = prices.get(@intCast(k + 1)) orelse continue;
++        if (k > best and ms <= base + (if (std.c.getenv("XPU_NOISE")) |v| (std.fmt.parseFloat(f64, std.mem.span(v)) catch scatters) else scatters) * noise_ms) out = @intCast(k);
++    }
++    return out;
++}
++
+ /// A lone round's drafts: the most expected tokens a ms over its band's priced rounds, or a width to measure.
+ pub fn width(e: *lanes.Engine, s: *Stream, chance: []const f64) !Width {
+     const tokens: [16]u32 = @splat(0);
+@@ -49,7 +94,7 @@ pub fn width(e: *lanes.Engine, s: *Stream, chance: []const f64) !Width {
+     const prices = try lone_costs.prices(e, p);
+     // least_rows 2: a lone tree drafts at least one node
+     const counts = try lanes.allocate.allocateDrafts(a, &.{1}, &.{chance}, &prices, 0, @max(1, e.cfg.batch_rows), .{ .least_rows = 2 });
+-    var out: Width = .{ .nodes = counts[0] };
++    var out: Width = .{ .nodes = widest(chance, &prices, counts[0], scatter(if (s.depth) |d| d.ms orelse .{} else .{})) };
+     if (lone_costs.probe(e, p)) |drafts| {
+         out = .{ .nodes = drafts, .trial = drafts + 1 };
+         s.cost_probe_trial = lone_costs.trial(s, chance, drafts + 1);
