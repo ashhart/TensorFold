@@ -56,6 +56,13 @@ pub const spec: c.Spec = .{
     // gate 4 keeps the harness default: fp16 and bf16 sums must miss by 100x (no claim that output rounding hides them)
 };
 
+/// The f32-activation image: x and the output are f32, so gate 3's rounding model is the f32 one.
+pub const spec_f32: c.Spec = blk: {
+    var s = spec;
+    s.out = .f32;
+    break :blk s;
+};
+
 /// The shared gate harness expects a rig object; as in HIP, it exposes bytes while the fixture owns device buffers.
 const Rig = struct {
     output: []const u8 = &.{},
@@ -105,12 +112,17 @@ pub const Fixture = struct {
     name: ?[]const u8 = null,
     /// Tiled image: inputs are repacked into 32-column tiles before upload; shapes that cannot be tiled are refused.
     tiled: bool = false,
+    /// f32 activations: x is stored as f32 (the bf16 values widened exactly) and the output is f32.
+    act_f32: bool = false,
 
     pub fn init(a: std.mem.Allocator, dev: *const vk.Device, cmds: *vk.Commands, staging: vk.Buffer, pipeline: *dispatch.Pipeline) Fixture {
         return .{ .a = a, .dev = dev, .cmds = cmds, .staging = staging, .pipeline = pipeline };
     }
     pub fn deinit(f: *Fixture) void {
         f.reset();
+    }
+    fn actUnits(f: *const Fixture) usize {
+        return if (f.act_f32) 2 else 1;
     }
     fn reset(f: *Fixture) void {
         while (f.made > 0) {
@@ -142,7 +154,7 @@ pub const Fixture = struct {
             planted.name = corrupt_names[i];
             return .{ .spec = planted, .ctx = f, .vt = &vt, .control = .repeat };
         }
-        var named = spec;
+        var named = if (f.act_f32) spec_f32 else spec;
         if (f.name) |n| named.name = n;
         return .{ .spec = named, .ctx = f, .vt = &vt };
     }
@@ -202,9 +214,14 @@ pub const Fixture = struct {
             .nonfinite => .nonfinite,
             .stress => .stress,
         }, seed);
-        const x = try allocPoison(f.a, shape.rows * shape.k);
+        const x = try allocPoison(f.a, shape.rows * shape.k * f.actUnits());
         errdefer f.a.free(x);
-        @memcpy(x[0..q.x.len], q.x);
+        if (f.act_f32) {
+            for (q.x, 0..) |v, i| {
+                x[2 * i] = 0;
+                x[2 * i + 1] = v;
+            }
+        } else @memcpy(x[0..q.x.len], q.x);
         const stored: usize = if (f.tiled) vk.tile.padded(shape.n) else shape.n;
         const words_len = shape.n * shape.k / 8;
         const w = try f.a.alloc(u32, stored * shape.k / 8 + 4);
@@ -219,7 +236,7 @@ pub const Fixture = struct {
         const biases = try allocPoison(f.a, nstored);
         errdefer f.a.free(biases);
         @memcpy(biases[0..nparam], q.biases);
-        const out = try allocPoison(f.a, shape.rows * shape.n);
+        const out = try allocPoison(f.a, shape.rows * shape.n * f.actUnits());
         errdefer f.a.free(out);
         const want = try f.a.alloc(f64, shape.rows * shape.n);
         errdefer f.a.free(want);
@@ -258,7 +275,7 @@ pub const Fixture = struct {
             try vk.orExit(vk.download(f.cmds, b.buffer.*, 0, f.staging, f.input_snapshot[at..][0..b.len], timeout_ns));
             at += b.len;
         }
-        const data_count = s.rows * s.n;
+        const data_count = s.rows * s.n * f.actUnits();
         f.rig.guards_ok = true;
         for (f.out[data_count..]) |v| if (v != poison) {
             f.rig.guards_ok = false;
@@ -281,6 +298,7 @@ pub const Fixture = struct {
 test "a fixture name replaces the default kernel name" {
     var f: Fixture = undefined;
     f.corrupt = null;
+    f.act_f32 = false;
     f.name = "vulkan qmm_q4_vec4 affine q4 g64 transposed";
     try std.testing.expectEqualStrings(f.name.?, f.kernel().spec.name);
     f.name = "vulkan qmm_q4_tile affine q4 g64 transposed tiled 32";
