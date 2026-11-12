@@ -209,6 +209,9 @@ pub fn main(init: std.process.Init) !u8 {
     if (wanted(o, mixed.kernel().spec.name)) {
         if (@import("metal_support.zig").tensor(tensor, mixed.kernel().spec.name)) try kernels.append(a, mixed.kernel());
     }
+    var picks: @import("metal_tree_round_picks.zig").Suite = .{};
+    defer picks.deinit(a);
+    try picks.collect(a, device, queue, o.only, &kernels);
     var lfm2: @import("metal_lfm2_suite.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer lfm2.deinit();
     try lfm2.collect(o.only);
