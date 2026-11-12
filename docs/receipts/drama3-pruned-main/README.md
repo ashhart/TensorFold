@@ -50,13 +50,33 @@ Verdict: pass. Both held their experts; whole and streamed replies equalled thei
 
 ## Spark
 
-Pending a GPU window. The job image has no C++ compiler for nvcc, so the kernel images are built first, once per commit,
-by [`prebuild-fatbins.sh`](prebuild-fatbins.sh) on the Spark through `bottom shell`, from a clean checkout of `SHA`:
-`PILOT=~/Documents/drama3-pilot-20261014 IMAGE=<job image> docs/receipts/drama3-pruned-main/prebuild-fatbins.sh`. It
-builds `zig build fatbins -Dsm=121` in the job image with g++ added and writes them, with `SHA256SUMS`, to
-`tensorfold-fatbins-SHA` in the pilot folder. [`run-script.sh`](run-script.sh) takes no arguments, so the Desk's GPU
-door runs it as is: `job start gpu middle|bottom plotarmordev/TensorFold SHA docs/receipts/drama3-pruned-main/run-script.sh`.
-It reads the FP8 checkpoint, both pruned ones and its commit's kernel images from the pilot folder at
-`/assets/drama3-pilot`, checks the images against `SHA256SUMS`, prints the GPU, driver and each input's sha256, builds
-the server with `-Dgpu=spark -Dfatbins` (no nvcc), makes a synthetic voice the way the Mac's was made, and runs the
-check over all three into `/work/out/drama3`. It pauses no service.
+DGX Spark (GB10, sm_121, 128 GB unified memory), driver 580.173.02, CUDA 13.0; this branch at `132bd1238`, GPU job
+`bottom-49eafd253777` on 12 Nov 2026. The job image has no C++ compiler for nvcc, so
+[`prebuild-fatbins.sh`](prebuild-fatbins.sh) first built the commit's kernel images on the Spark through `bottom shell`,
+from a clean checkout of `SHA`: `PILOT=~/Documents/drama3-pilot-20261014 IMAGE=<job image>
+docs/receipts/drama3-pruned-main/prebuild-fatbins.sh` (`zig build fatbins -Dsm=121` in the job image with g++ added,
+into `tensorfold-fatbins-SHA` in the pilot folder with `SHA256SUMS`; sha256 of those sums `fc8e7105…`).
+[`run-script.sh`](run-script.sh) takes no arguments, so the GPU door runs it as is:
+`job start gpu bottom plotarmordev/TensorFold SHA docs/receipts/drama3-pruned-main/run-script.sh`. It checks the
+kernel images, builds the server with `-Dgpu=spark -Dfatbins` (no nvcc), makes a synthetic voice the way the Mac's was
+made, and runs the check over the FP8 checkpoint and both pruned ones from the pilot folder. It pauses no service.
+Raw: [`spark/results.json`](spark/results.json) and the three `spark/server-*.log`.
+
+Inputs (sha256 over each checkpoint's safetensors and `codec.pth`): FP8 `03a65274…`, pruned `abd1d1c0…`,
+pruned-5900 `ac30e4e1…`.
+
+| Checkpoint | Experts held | Load (s) | Peak device (GiB) | First audio (s) | Total (s) | Audio (s) | RTF |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| fp8 | 10240 | 27.6 | 39.57 | 6.07 | 11.83 | 5.02 | 2.359 |
+| pruned | 7369 | 24.5 | 21.71 | 5.69 | 11.32 | 5.25 | 2.157 |
+| pruned-5900 | 5900 | 26.0 | 19.29 | 5.65 | 10.89 | 4.88 | 2.233 |
+
+Verdict: pass. Each held its experts (pruned ones: NVFP4 in 40 of 40 layers, compact routers in 36 of 40); whole and
+streamed replies equalled their repeats and their concurrent lanes. First audio is timed at the first bytes (`read1()`).
+
+- **Against FP8.** The pruned checkpoints take 45% and 51% less device memory, load 3.1 and 1.6 s faster, and
+  reach first audio about 0.4 s sooner, at a similar RTF.
+- **Slower than real time.** With guidance and a reference voice, every checkpoint runs at RTF 2.2-2.4 on the Spark.
+  Unguided, the FP8 voice generation in the same job ran at RTF 1.43.
+- **Second lane.** At once, the two lanes take turns: the concurrent streamed reply reached first audio at 11.1-11.9 s
+  and ended at 20.3-22.0 s (RTF 4.0-4.4), the whole reply at 21.5-23.0 s.
