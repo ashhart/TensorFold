@@ -35,6 +35,8 @@ pub const Options = struct {
     prompt: prompt.Opts = .{},
     /// the draft cost table is timed at load unless TF_DSV41_CALIB names another source (false: the defaults)
     measure_costs: bool = false,
+    /// the device and weights a stored cost table is specific to (0: none named)
+    identity: u64 = 0,
 };
 
 /// A position's draft candidates the pass keeps (the shape the lanes size their buffers by).
@@ -80,6 +82,7 @@ pub const Metal = struct {
             .memory = .{ .ctx = m, .read = memory },
             .health = .{ .ctx = m, .read = healthy },
             .close = close,
+            .calib_id = m.opt.identity,
             .calib = m.knobs(),
         };
     }

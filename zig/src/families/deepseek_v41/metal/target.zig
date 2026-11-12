@@ -424,7 +424,7 @@ pub const Target = struct {
 
     // calibration --------------------------------------------------------------------------------------------------
 
-    /// The slot's last window dropped: its ids and rows are as they were before it, the prompt's taps current again.
+    /// Calibration only, `wipe` follows: the last window's ids and rows dropped; the compressor carry is not rewound.
     pub fn dropWindow(t: *Target, slot: u32) !void {
         if (slot >= t.slots.len) return error.NoSlot;
         const s = &t.slots[slot];

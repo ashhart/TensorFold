@@ -56,6 +56,8 @@ pub const Model = struct {
     close: *const fn (ptr: *anyopaque) void,
     /// image input (the lanes' Info.vision); null: text only
     vision: ?api.Vision = null,
+    /// the device and weights a stored cost table is specific to (0: none named)
+    calib_id: u64 = 0,
     /// the calibration knobs (null: TF_DSV41_CALIB / _DIR / _FILE and HOME, as read at open)
     calib: ?calib_env.Knobs = null,
 };
@@ -93,7 +95,7 @@ pub const Served = struct {
         const window: u64 = @intCast(@min(context orelse limit, limit));
         // draft pricing: the cached calibration and depth knobs (TF_DSV41_CALIB=measure: timed now, stored)
         const knobs = backend.calib orelse calib_env.Knobs.fromEnv();
-        const want: calib_env.Shape = .{ .slots = backend.slots, .world = backend.world, .dspark = dspark_on, .context = window };
+        const want: calib_env.Shape = .{ .slots = backend.slots, .world = backend.world, .dspark = dspark_on, .context = window, .id = backend.calib_id };
         var cal = try calib_env.load(gpa, io, knobs, want, 64);
         defer if (cal.path) |p| gpa.free(p);
         if (cal.source == .measure) {

@@ -82,7 +82,22 @@ pub const Boot = struct {
         const r = b.w.report();
         std.log.info("dsv41 metal: {d} layers, {d} shards ({d} MiB mapped, {d} MiB copied), {d} slots of {d} positions, DSpark {s}", .{ c.layers, r.shards, r.shard_bytes >> 20, r.arena_bytes >> 20, o.slots, limit, if (b.ds != null) "on" else "off" });
         const env: target_.Env = .{ .device = b.device, .queue = b.queue, .c = c, .p = &b.p, .tables = &b.tables, .s = &b.s, .model = b.w.view(), .lookup = lookup };
-        return serve.Metal.open(a, .{ .env = env, .top = &b.w.top, .dspark = if (b.ds) |*w| w else null, .owner = .{ .ctx = b, .close = close } }, .{ .slots = o.slots, .limit = limit, .drafts = o.drafts, .cache_bytes = o.cache_bytes, .measure_costs = o.measure_costs });
+        return serve.Metal.open(a, .{ .env = env, .top = &b.w.top, .dspark = if (b.ds) |*w| w else null, .owner = .{ .ctx = b, .close = close } }, .{ .slots = o.slots, .limit = limit, .drafts = o.drafts, .cache_bytes = o.cache_bytes, .measure_costs = o.measure_costs, .identity = try identity(a, io, dir, b.device, b.ds != null) });
+    }
+
+    /// What a stored cost table is specific to: the chip, the config, the weight index and whether DSpark is loaded.
+    fn identity(a: Allocator, io: std.Io, dir: []const u8, device: mtl.Device, drafts: bool) !u64 {
+        var h = std.hash.Wyhash.init(0);
+        h.update(std.mem.span(device.name()));
+        h.update(&.{@intFromBool(drafts)});
+        for ([_][]const u8{ "config.json", "model.safetensors.index.json" }) |name| {
+            const path = try std.fs.path.join(a, &.{ dir, name });
+            defer a.free(path);
+            const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 26)) catch continue;
+            defer a.free(bytes);
+            h.update(bytes);
+        }
+        return h.final() | 1;
     }
 
     fn readConfig(a: Allocator, io: std.Io, dir: []const u8, small: bool) !Config {
