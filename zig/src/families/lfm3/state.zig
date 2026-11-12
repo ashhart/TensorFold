@@ -129,6 +129,8 @@ pub const Scratch = struct {
     binned_sums: ?mtl.Buffer = null,
     binned_meta: ?mtl.Buffer = null,
     logits: mtl.Buffer,
+    /// Each head row's greedy pick and nonfinite flag (u32 pairs), from a forward whose head takes every row.
+    best: mtl.Buffer,
     snapshots: [c.layers]?mtl.Buffer = @splat(null),
 
     pub fn init(gpa: std.mem.Allocator, device: mtl.Device, layer_types: *const [c.layers]c.LayerType, rows: usize) !Scratch {
@@ -163,6 +165,7 @@ pub const Scratch = struct {
         out.head_gate = try mem.alloc(rows * c.query_heads * 2);
         const logit_rows: usize = @min(rows, batch_rows);
         out.logits = try mem.alloc(logit_rows * c.vocab * 2);
+        out.best = try mem.alloc(logit_rows * 2 * 4);
         for (&out.snapshots, layer_types) |*s, kind| if (kind == .conv) { // a recorded window's rows, or a prompt call's last row
             s.* = try mem.alloc(logit_rows * conv_bytes);
         };

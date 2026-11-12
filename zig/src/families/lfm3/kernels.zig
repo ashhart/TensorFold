@@ -22,7 +22,7 @@ comptime {
 pub const names = [_][:0]const u8{
     "lfm3_embed_b4",      "lfm3_embed_b6",            "lfm3_embed_b8", "lfm3_norm", "lfm3_post_add", "lfm3_add",    "lfm3_post_norm",
     "lfm3_attn_segments", "lfm3_attn_segments_merge", "lfm3_conv",     "lfm3_qk",   "lfm3_gate",     "lfm3_swiglu", "lfm3_attn_partial",
-    "lfm3_attn_merge",    "lfm3_conv_segments",
+    "lfm3_attn_merge",    "lfm3_conv_segments",       "lfm3_argmax",
 };
 
 pub const Kernels = struct {
