@@ -29,6 +29,7 @@ pub const pairChunk = pair_mod.chunk;
 pub const seamBytes = pair_mod.seamBytes;
 pub const resumesInPlace = pair_mod.resumesInPlace;
 pub const slotResume = pair_mod.slotResume;
+pub const measuresFirst = pair_mod.measuresFirst;
 
 /// A window's rows at most: the pending row and a DFlash2 tree.
 pub const max_rows = @import("qwen27_window.zig").capacity;
