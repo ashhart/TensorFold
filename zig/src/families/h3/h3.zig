@@ -5,6 +5,7 @@ const st = @import("core").safetensors;
 const tensors = @import("tensors.zig");
 const kernels = @import("h3_kernels");
 const block = @import("block.zig");
+pub const gpu_turn = @import("gpu_turn");
 pub const modulation = @import("modulation.zig");
 pub const schedule = @import("schedule.zig");
 pub const geometry = @import("geometry.zig");
@@ -29,10 +30,11 @@ pub const gate_m = 5;
 /// A block's projections, (N, K) bf16 read in place; in the released layout q holds every head's fused [q, k, v] rows.
 pub const Block = struct { q: Ref, k: Ref, v: Ref, compress: Ref, out: Ref, fc1: Ref, fc2: Ref, norm1: Ref, norm2: Ref, norm_q: Ref, norm_k: Ref, tables: Ref };
 
-/// `defines` goes ahead of the kernels' source (a probe or a knock-out under test).
-pub const Options = struct { defines: []const u8 = "" };
+/// Shader overrides and optional per-block yielding to live speech.
+pub const Options = struct { defines: []const u8 = "", give_way: ?gpu_turn.Turn = null };
 
-pub const Timing = struct { wall: f64, gpu: f64 };
+/// A timing is valid only with a working speech signal and no speech or waiting anywhere in the forward.
+pub const Timing = struct { wall: f64, gpu: f64, paused: f64, timing_valid: bool };
 
 /// Where a profiled forward's GPU time went.
 pub const stages = [_][]const u8{ "rows in", "norms", "q k v gate", "heads", "routing", "attention", "gate mix", "quantize", "attention out", "mlp in", "mlp out", "final" };
@@ -122,6 +124,8 @@ pub const Model = struct {
     qkv: mtl.Buffer,
     profile: bool = false,
     spent: [stages.len]f64 = @splat(0),
+    give_way: ?gpu_turn.Turn,
+    paused: f64,
 
     pub fn pipeline(self: *const Model, comptime name: []const u8) mtl.Pipeline {
         inline for (kernels.names, 0..) |n, i| if (comptime std.mem.eql(u8, n, name)) return self.pipelines[i];
@@ -157,6 +161,7 @@ pub const Model = struct {
         self.device = device;
         self.queue = try device.queue();
         self.case = case;
+        self.give_way = options.give_way;
         self.checkpoint = checkpoint;
         const ck = &self.checkpoint;
         self.base = ck.entry("blocks.0.attn.qkv_proj.weight") != null;
@@ -315,6 +320,7 @@ pub const Model = struct {
         inline for (stages, 0..) |s, i| if (comptime std.mem.eql(u8, s, stage)) {
             self.spent[i] += pass.cb.gpuSeconds();
         };
+        if (self.give_way) |t| self.paused += gpu_turn.yield(t.io, t.at);
         pass.cb = self.queue.commandBuffer();
         pass.enc = pass.cb.compute(.concurrent);
     }
@@ -368,7 +374,10 @@ pub const Model = struct {
         try geometry.forward(self.rows, self.video * self.video_in, self.audio * self.audio_in, self.adaln.len, self.times.len, step, video.len, audio.len, video_velocity.len, audio_velocity.len);
         // this step's output head (its byte offsets), before anything is encoded
         const at = try geometry.headOffsets(self.step_heads, step, self.adaln.len / self.rows, self.video_in, self.hidden);
+        const mark = if (self.give_way) |t| gpu_turn.mark(t.io, t.at) else null;
         const started = mtl.clock.seconds();
+        self.paused = 0;
+        if (self.give_way) |t| self.paused += gpu_turn.yield(t.io, t.at);
         const rows = self.rows;
         const hidden = self.hidden;
         // each row's line in the blocks' tables and in the final layer's, for this step
@@ -390,7 +399,26 @@ pub const Model = struct {
         if (self.audio > 0) self.rowsIn(enc.*, self.audio_latents, self.w_audio_in, self.b_audio_in, self.audio, self.audio_in, media);
         self.rowsIn(enc.*, self.video_latents, self.w_video_in, self.b_video_in, self.video, self.video_in, media + self.audio);
         self.lap(&pass, "rows in");
-        for (0..self.blocks.len) |index| block.run(self, &pass, index);
+        // Keep blocks queued to hide host wake-up latency without submitting the entire forward ahead of speech.
+        var queued: [3]mtl.CommandBuffer = undefined;
+        var n: usize = 0;
+        for (0..self.blocks.len) |index| {
+            block.run(self, &pass, index);
+            const t = self.give_way orelse continue;
+            pass.enc.end();
+            pass.cb.commit();
+            if (n == queued.len) {
+                gpu += try finish(queued[0]);
+                std.mem.copyForwards(mtl.CommandBuffer, queued[0 .. n - 1], queued[1..n]);
+                n -= 1;
+            }
+            queued[n] = pass.cb;
+            n += 1;
+            self.paused += gpu_turn.yield(t.io, t.at);
+            pass.cb = self.queue.commandBuffer();
+            pass.enc = pass.cb.compute(.concurrent);
+        }
+        for (queued[0..n]) |cb| gpu += try finish(cb);
         const last = self.blocks[self.blocks.len - 1].tables;
         enc.setPipeline(self.pipeline("h3_gate_add"));
         enc.setBuffer(self.x, 0, 0);
@@ -416,15 +444,24 @@ pub const Model = struct {
         self.rowsOut(enc.*, w_out, b_out, self.video_velocity, self.video, self.video_in, media + self.audio);
         pass.enc.end();
         pass.cb.commit();
-        pass.cb.wait();
-        gpu += pass.cb.gpuSeconds();
-        if (self.profile) self.spent[stages.len - 1] += pass.cb.gpuSeconds();
-        if (pass.cb.failure()) |text| {
+        const final = try finish(pass.cb);
+        gpu += final;
+        if (self.profile) self.spent[stages.len - 1] += final;
+        if (self.give_way) |t| self.paused += gpu_turn.yield(t.io, t.at);
+        @memcpy(video_velocity, self.video_velocity.slice(f32, video_velocity.len));
+        @memcpy(audio_velocity, self.audio_velocity.slice(f32, audio_velocity.len));
+        const wall = mtl.clock.seconds() - started;
+        const timing_valid = if (self.give_way) |t| self.paused == 0 and gpu_turn.clean(t.io, t.at, mark) else false;
+        return .{ .wall = wall, .gpu = gpu, .paused = self.paused, .timing_valid = timing_valid };
+    }
+
+    /// Waits for a committed command buffer; its GPU seconds.
+    fn finish(cb: mtl.CommandBuffer) !f64 {
+        cb.wait();
+        if (cb.failure()) |text| {
             std.debug.print("command buffer failed: {s}\n", .{text});
             return error.GpuFailed;
         }
-        @memcpy(video_velocity, self.video_velocity.slice(f32, video_velocity.len));
-        @memcpy(audio_velocity, self.audio_velocity.slice(f32, audio_velocity.len));
-        return .{ .wall = mtl.clock.seconds() - started, .gpu = gpu };
+        return cb.gpuSeconds();
     }
 };

@@ -183,6 +183,73 @@ It writes `out/case.latent.f32`, the normalised latent [24, rows, columns] in fl
 decoder. `once` runs the first teacher-forced step alone; `free` runs only the free run. It needs the M5's tensor
 units, as the clip tool does.
 
+It and `tf-h3-image-server` make way for live speech on the same GPU. The speech server holds a shared flock on
+`/tmp/tensorfold-speech.lock` while it synthesizes (`zig/src/server/gpu_turn.zig`). The tools submit each block as its
+own command buffer, with three queued, and wait before the forward, between blocks, after profile stages and after the
+step's output while that lock is held. During an earlier 4096 x 4096 render, five streamed Drama 3 voice notes reached
+first audio in 1.3 to 1.6 s, against 9.5 to 10.8 s without yielding. The run resumes on the same rows with a
+byte-identical latent.
+Each step and profile prints `timing_valid`: benchmarks must exclude every `false` sample, including zero-wait
+samples. A separate 16-byte generation in `/tmp/tensorfold-speech.lock.stamp` detects speech that starts and ends
+between lock polls. Missing, malformed or inaccessible signals invalidate timings; uncoordinated forwards do too.
+Both processes must use this protocol; an old speech binary cannot certify clean timings. Speech remains best-effort
+on filesystem errors: if both publishing and invalidating a generation fail, a short request can remain unobserved.
+Speech waits for its shared hold only behind a render's exclusive probe, which lasts microseconds and never spans GPU
+work, so it never synthesizes unprotected. The prompt encoder (`tf-h3-image-prompt`, the server's first stage) waits
+before each pass with three queued, and the decoder (`tf-h3-image-decoder`, its last) before each batch of tiles; both
+print the seconds they waited.
+
+### Speech contention receipt, 12 November 2026
+
+Apple M5 Ultra, 256 GiB RAM, macOS 27.0 (26A425), Zig 0.17.0, ReleaseFast with `-Dcpu=apple_m1`.
+The branch's isolated Drama 3 NVFP4 server served a voice catalog in `synth.json`, CFG 1.5 with paired submission,
+one lane and context 8192. The live release server was not changed. More than 170 GiB was free before loading.
+The client timed from sending each HTTP request until reading the first two PCM bytes, not response headers.
+
+The reference cache was warmed before starting `tf-h3-image MODEL_DIR CASE OUT free`. The case was card 35's
+4096-square, seed-42, 24-text-row case (SHA-256 `af4f85f19ebeb4e4af5beada167d8e8fd00bf1b880541b88a60c0a2b5b6dd66b`).
+Five sequential requests, seeds 42–46, used `stream=true` and `response_format="pcm"`:
+
+| Public input | First PCM (s) | PCM bytes | Status |
+|---|---:|---:|---:|
+| The little boat crossed the harbor before the sun came up. | 1.168 | 212992 | 200 |
+| A blue bicycle waited beside the garden gate. | 1.174 | 180224 | 200 |
+| Please put the fresh apples in the bowl on the table. | 1.208 | 196608 | 200 |
+| We can take the quiet path through the woods today. | 1.265 | 180224 | 200 |
+| The train will arrive at the station in a few minutes. | 1.357 | 192512 | 200 |
+
+The render was running at the start and end of every request. Step 1 waited 12.68 s and reported
+`timing_valid=false`; steps 2–6 waited zero and reported `true`. The render exited 0 and its final rows matched
+the uncoordinated baseline byte-for-byte (SHA-256 `b3726693636bbe7ce77eac8da41868bd959262646bfc5ac889e2c939ee1cd5fd`).
+The server drained and stopped afterward. This is a transformer-step benchmark exclusion check, not a clip-profile
+receipt: a valid audio/video clip case is still required to exercise `tf-h3-dit` directly.
+
+Cold reference conditioning remains outside the demonstrated latency bound: first PCM without a render took
+14.819 s while building 1284 cached reference rows, versus 0.528 s on the next idle request. A cold request during
+a render took 15.332 s. The five sub-three-second results therefore establish warm live-voice contention relief,
+not a cold-start guarantee. Generation checks now bracket the complete wall interval, including output copies.
+
+### Five voice notes during a resident render, 13 November 2026
+
+Same machine, speech server and client, built from `b82e132` and served on port 18899; `tf-h3-image-server` drew
+card 34's prompt at 4096x4096, seed 42. The server's first request after start, with its reference rows still unbuilt
+in memory, reached first PCM in 2.879 s idle; the next took 0.414 s. Five notes then went out 15 s apart during the
+render, all HTTP 200 with the render running at the start and end of each:
+
+| Note | First PCM (s) | PCM bytes |
+|---:|---:|---:|
+| 1 | 1.375 | 245760 |
+| 2 | 1.142 | 192512 |
+| 3 | 0.687 | 225280 |
+| 4 | 1.165 | 188416 |
+| 5 | 1.355 | 225280 |
+
+Steps 1-3, 5 and 6 waited 2.27-3.21 s each and reported `timing_valid=false`; step 4 waited zero and reported
+`true`, with 10.04 s on the GPU like the others. The render resumed after each wait and exited 0; its latent matched
+card 34's `t2i-4096.latent.f32` and its rows the 12 November baseline (`b3726693...`) byte-for-byte. The prompt
+encoder and decoder are too short at this spacing to catch a note; `test-h3-image-server` has speech arrive during
+each stage. The isolated server was stopped afterward; the live release server was not changed.
+
 ## Gates, fixed before any run
 
 These are the bounds `tf-h3-image` checks (`picture.gates`). It exits 1 when one fails, and 2 when the case holds no
