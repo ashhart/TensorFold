@@ -257,6 +257,7 @@ pub fn one(a: Allocator, out: *Args, repeated: *Repeated, flag: Flag, value: ?[]
         if (std.mem.eql(u8, c, v)) break;
     } else return fail(u, a, "argument {s}: invalid choice: '{s}'", .{ flag.name, v });
     if (!flag.native) return fail(u, a, "{s} is not served by the native engine yet; the Python engine 0.6.6 serves it: python -m pip install git+https://github.com/ashhart/TensorFold.git@v0.6.6", .{flag.name});
+    if (value) |v| if (std.mem.eql(u8, flag.name, "--backend") and std.mem.eql(u8, v, "cpu") and !served("--backend=cpu")) return fail(u, a, "--backend cpu is served by the CPU engine's own build: zig build native-cpu puts its tensorfold-native in zig-out/native-cpu/bin", .{});
     if (flag.native_values) |allowed| if (value) |v| for (allowed) |x| {
         if (std.mem.eql(u8, x, v)) break;
     } else return fail(u, a, "{s} {s} is not served by the native engine; the Python engine 0.6.6 serves it: python -m pip install git+https://github.com/ashhart/TensorFold.git@v0.6.6", .{ flag.name, v });
