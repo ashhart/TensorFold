@@ -1,10 +1,11 @@
 LIMITS deviceName="Apple M1 (G13G B1)"
-LIMITS driverName="Honeykrisp" driverInfo="Mesa 26.3.0-devel (git-9323171c12)" subgroupSize=32
+LIMITS driverName="Honeykrisp" driverInfo="Mesa 26.3.0-devel (git-439dc032d7)" subgroupSize=32
 LIMITS maxComputeWorkGroupInvocations=1024 maxComputeWorkGroupSize=1024,1024,64 maxComputeSharedMemorySize=32768
 LIMITS maxStorageBufferRange=2147483647 minStorageBufferOffsetAlignment=16
 PASS limits qmm_bf16: local=256x1x1 invocations=256 shared=0
 PASS limits qmm_q4_vec4: local=256x1x1 invocations=256 shared=0
 PASS limits qmm_q4_tile: local=256x1x1 invocations=256 shared=0
+PASS limits qmm_q4_tile_f32: local=256x1x1 invocations=256 shared=0
 PASS limits control:qmm_fmax_nonfinite: local=256x1x1 invocations=256 shared=0
 PASS limits control:atomic_sum: local=256x1x1 invocations=256 shared=0
 PASS limits control:scribble_input: local=256x1x1 invocations=256 shared=0
@@ -37,4 +38,8 @@ FAIL repeat control: qmm writes its weights: a run changed its inputs
 CONTROL control: qmm writes its weights: red at repeat, as planted
 FAIL repeat control: qmm writes its biases: a run changed its inputs
 CONTROL control: qmm writes its biases: red at repeat, as planted
-SUMMARY Apple M1 (G13G B1) 3 kernels: 3 pass gates 1-4, 0 fail, 0 known findings; 8 controls: 8 caught, 0 missed; 0 limit failures; gates 32248 ms
+PASS nonfinite vulkan qmm_q4_tile_f32 affine q4 g64 transposed tiled 32 f32 activations: 64 non-finite and 16 finite outputs match the float64 classes
+PASS repeat vulkan qmm_q4_tile_f32 affine q4 g64 transposed tiled 32 f32 activations: five runs byte-identical (96 bytes), inputs and guards untouched, no overlap
+PASS shapes vulkan qmm_q4_tile_f32 affine q4 g64 transposed tiled 32 f32 activations: 15 shapes within the float64 bound (worst 0.034 of the bound), 0 edges refused by the kernel
+PASS sums vulkan qmm_q4_tile_f32 affine q4 g64 transposed tiled 32 f32 activations: exact sums at k 6144, where fp16 sums would miss by 882128357x and bf16 by 16777216x
+SUMMARY Apple M1 (G13G B1) 4 kernels: 4 pass gates 1-4, 0 fail, 0 known findings; 8 controls: 8 caught, 0 missed; 0 limit failures; gates 41802 ms
