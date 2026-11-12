@@ -253,7 +253,7 @@ fn stranger(port: u16, bytes: []const u8) !usize {
 
 test "security: a stranger that says a rank's hello first hears nothing and takes no place" {
     loopback.ignorePipe();
-    const key = try auth.Secret.fromBytes("the group's rank secret");
+    const key = try auth.Secret.fromBytes("the group's rank secret for the tests");
     var ranks = [_]Rank{
         .{ .hello = hello(0, 2), .port = try loopback.freePort(), .secret = key },
         .{ .hello = hello(1, 2), .port = 0, .secret = key },
@@ -273,10 +273,10 @@ test "security: a stranger that says a rank's hello first hears nothing and take
 
 test "security: a rank with another key or with none is refused by name, and rank 0 still takes its own" {
     loopback.ignorePipe();
-    const key = try auth.Secret.fromBytes("the group's rank secret");
+    const key = try auth.Secret.fromBytes("the group's rank secret for the tests");
     var lead: Rank = .{ .hello = hello(0, 2), .port = try loopback.freePort(), .secret = key };
     const thread = try std.Thread.spawn(.{}, Rank.run, .{&lead});
-    var other: Rank = .{ .hello = hello(1, 2), .port = lead.port, .secret = try auth.Secret.fromBytes("another group's secret") };
+    var other: Rank = .{ .hello = hello(1, 2), .port = lead.port, .secret = try auth.Secret.fromBytes("another group's secret for the tests") };
     other.run();
     try std.testing.expectEqual(@as(?link.Error, error.RankAuthWrongKey), other.err);
     var bare: Rank = .{ .hello = hello(1, 2), .port = lead.port };

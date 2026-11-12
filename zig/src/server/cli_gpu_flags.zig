@@ -86,7 +86,7 @@ test "security: --rank-secret takes only a key file its owner alone can read, an
         const fd = c.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true }, mode);
         try std.testing.expect(fd >= 0);
         _ = c.fchmod(fd, mode);
-        _ = c.write(fd, "0123456789abcdef0123\n", 21);
+        _ = c.write(fd, "0123456789abcdef0123456789abcdef0123\n", 37);
         _ = c.close(fd);
         if (mode == 0o600) {
             try std.testing.expect(try gpuFlag(a, &args, "--rank-secret", path, &u));
