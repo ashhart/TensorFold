@@ -312,6 +312,7 @@ pub fn hrefs(a: Allocator, page: []const u8, max: usize, budget: ?*Budget) Alloc
         while (after < tag.len and std.ascii.isWhitespace(tag[after])) after += 1; // href = is the same attribute
         if (after >= tag.len or tag[after] != '=') continue;
         var v = tag[after + 1 ..];
+        while (v.len > 0 and std.ascii.isWhitespace(v[0])) v = v[1..]; // a newline may sit before the quotes
         const q: u8 = if (v.len > 0 and (v[0] == '"' or v[0] == '\'')) v[0] else ' ';
         if (q != ' ') v = v[1..];
         const stop = std.mem.indexOfAny(u8, v, if (q == ' ') " >" else &.{q}) orelse v.len;
@@ -465,6 +466,15 @@ test "a page link keeps its target when a space precedes href's equals" {
     const got = try hrefs(a, "<a href =\"https://b.org/x\">n</a>", 10, null);
     try std.testing.expectEqual(@as(usize, 1), got.len);
     try std.testing.expectEqualStrings("https://b.org/x", got[0]);
+}
+
+test "a page link keeps its target when a newline follows href's equals" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const got = try hrefs(a, "<a href=\n\"https://b.org/y\">n</a>", 10, null);
+    try std.testing.expectEqual(@as(usize, 1), got.len);
+    try std.testing.expectEqualStrings("https://b.org/y", got[0]);
 }
 
 test "a link broken onto the next line by a carriage return is kept" {
