@@ -56,8 +56,12 @@ fresh 32-byte nonce and an HMAC-SHA256 over the nonces, the link, the rank and t
 is closed. It is sent no checkpoint identity, no NCCL or RCCL id and no prompt, and it cannot stop the group.
 
 - Set `TF_RANK_SECRET_FILE` on every rank, or pass `--rank-secret FILE` to `serve`, naming a file with the same
-  contents on every host. It must be a regular file only its owner can read, holding 16 bytes to 4 KiB:
-  `head -c 32 /dev/urandom | base64 > rank.key && chmod 600 rank.key`.
+  contents on every host. It must be a regular file only its owner can read, holding 32 bytes to 4 KiB:
+  `head -c 32 /dev/urandom | base64 > rank.key && chmod 600 rank.key`. A symbolic link to such a file is fine, as
+  Kubernetes and secret managers mount them; the mode checked is the file's, so give a Kubernetes secret
+  `defaultMode: 0400`.
+- Rank 0 logs each connection it refuses with the peer's address and the reason: no key, a different key, or no hello
+  within 2 seconds. A connection that sends nothing is dropped after those 2 seconds.
 - Ranks with no key meet only on one host. A rank that reaches another host without a key refuses to start, and its
   error names the setting.
 - To change the key, replace the file on every host and restart the group.

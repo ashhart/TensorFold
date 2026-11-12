@@ -96,7 +96,7 @@ const Acceptor = struct {
 
 test "rank auth: ranks with one key prove both ways, keep one session key, and rank 0 learns who came" {
     if (skip) return error.SkipZigTest;
-    const k = try Secret.fromBytes("a shared rank secret\n");
+    const k = try Secret.fromBytes("a shared rank secret for the tests\n");
     const m = try meet(k, k, &.{ .tp_control, .tp_plan }, .tp_plan, 3, 4);
     const proven = try m.accepted;
     try std.testing.expectEqual(@as(?anyerror, null), m.connector.err);
@@ -117,8 +117,8 @@ test "rank auth: ranks with no key meet on one host" {
 
 test "rank auth: a rank with another key is refused, and so is a key at one end only" {
     if (skip) return error.SkipZigTest;
-    const k = try Secret.fromBytes("a shared rank secret");
-    const other = try Secret.fromBytes("b shared rank secret");
+    const k = try Secret.fromBytes("a shared rank secret for the tests");
+    const other = try Secret.fromBytes("b shared rank secret for the tests");
     const wrong = try meet(k, other, &.{.rocm}, .rocm, 1, 2);
     try std.testing.expectEqual(@as(?anyerror, error.RankAuthWrongKey), wrong.connector.err);
     try std.testing.expectError(error.RankAuthClosed, wrong.accepted); // the rank left at rank 0's proof
@@ -132,7 +132,7 @@ test "rank auth: a rank with another key is refused, and so is a key at one end 
 
 test "rank auth: a link, rank or world rank 0 does not take is refused before it answers" {
     if (skip) return error.SkipZigTest;
-    const k = try Secret.fromBytes("a shared rank secret");
+    const k = try Secret.fromBytes("a shared rank secret for the tests");
     for ([_]struct { auth.Purpose, u32, u32 }{ .{ .rocm, 1, 2 }, .{ .flashnext, 0, 2 }, .{ .flashnext, 2, 2 }, .{ .flashnext, 1, 1 }, .{ .flashnext, 1, auth.max_world + 1 } }) |claim| {
         const m = try meet(k, k, &.{.flashnext}, claim[0], claim[1], claim[2]);
         try std.testing.expectError(error.RankAuthBadClaim, m.accepted);
@@ -142,7 +142,7 @@ test "rank auth: a link, rank or world rank 0 does not take is refused before it
 
 test "rank auth: a stranger without the key gets a challenge and nothing more" {
     if (skip) return error.SkipZigTest;
-    const k = try Secret.fromBytes("a shared rank secret");
+    const k = try Secret.fromBytes("a shared rank secret for the tests");
     const fds = try pair();
     defer close(fds);
     var acceptor: Acceptor = .{};
@@ -161,7 +161,7 @@ test "rank auth: a stranger without the key gets a challenge and nothing more" {
 
 test "rank auth: a recorded proof replayed, rank 0's proof sent back, and a proof for another rank are refused" {
     if (skip) return error.SkipZigTest;
-    const k = try Secret.fromBytes("a shared rank secret");
+    const k = try Secret.fromBytes("a shared rank secret for the tests");
     const nonce = try key.nonce();
     const hello = auth.hello(@backingInt(auth.Purpose.flashnext), 1, 2, true, &nonce);
     var recorded: key.Proof = undefined;
@@ -194,7 +194,7 @@ test "rank auth: a recorded proof replayed, rank 0's proof sent back, and a proo
 
 test "rank auth: other bytes, a short hello and a silent peer end inside the budget, with nothing sent" {
     if (skip) return error.SkipZigTest;
-    const k = try Secret.fromBytes("a shared rank secret");
+    const k = try Secret.fromBytes("a shared rank secret for the tests");
     const Case = enum { other_protocol, short, silent };
     for ([_]Case{ .other_protocol, .short, .silent }) |case| {
         const fds = try pair();
@@ -228,7 +228,7 @@ test "rank auth: other bytes, a short hello and a silent peer end inside the bud
 
 test "rank auth: a connector tells an older build and a stranger from a rank, and sends them no proof" {
     if (skip) return error.SkipZigTest;
-    const k = try Secret.fromBytes("a shared rank secret");
+    const k = try Secret.fromBytes("a shared rank secret for the tests");
     const Peer = struct {
         /// Not a rank: reads the hello, answers with `bytes`, and reports what the connector sent after.
         fn run(fd: c.fd_t, bytes: []const u8, after: *usize) void {
@@ -257,8 +257,8 @@ test "rank auth: a connector tells an older build and a stranger from a rank, an
 }
 
 test "rank auth: a proof binds the key, the end, the link, the rank, the world and both nonces" {
-    const k = (try Secret.fromBytes("a shared rank secret")).key;
-    const other = (try Secret.fromBytes("b shared rank secret")).key;
+    const k = (try Secret.fromBytes("a shared rank secret for the tests")).key;
+    const other = (try Secret.fromBytes("b shared rank secret for the tests")).key;
     const a = try key.nonce();
     const b = try key.nonce();
     const p = auth.proof(&k, .connector, .flashnext, 1, 2, &a, &b);
@@ -292,4 +292,68 @@ test "rank auth: the key comes from the file the setting names, and no setting m
     try std.testing.expectError(error.SecretUnreadable, Secret.fromEnv());
     try std.testing.expect(auth.explain(error.SecretUnreadable) != null);
     try std.testing.expect(auth.explain(error.OutOfMemory) == null);
+}
+
+test "rank auth: a silent connection is dropped after the hello's budget, and an honest rank still joins after it" {
+    if (skip) return error.SkipZigTest;
+    const k = try Secret.fromBytes("a shared rank secret for the tests");
+    // rank 0 with its whole budget left: a connection that sends nothing holds it for first_ms, not budget_ms
+    const silent = try pair();
+    defer close(silent);
+    const t0 = nowMs();
+    try std.testing.expectError(error.RankAuthTimeout, auth.accept(silent[1], &k, &.{.flashnext}, auth.budget_ms));
+    const took = nowMs() - t0;
+    try std.testing.expect(took + 50 >= auth.first_ms and took < auth.first_ms + 1000);
+    // the serial acceptor's next connection, an honest rank, meets as before
+    const m = try meet(k, k, &.{.flashnext}, .flashnext, 1, 2);
+    try std.testing.expectEqual(@as(u32, 1), (try m.accepted).rank);
+    try std.testing.expectEqual(@as(?anyerror, null), m.connector.err);
+}
+
+/// Writes `bytes` to a new owner-only file at `path`, whatever the umask.
+fn plant(path: [:0]const u8, bytes: []const u8) !void {
+    _ = c.unlink(path);
+    const fd = c.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true }, @as(c.mode_t, 0o600));
+    try std.testing.expect(fd >= 0);
+    defer _ = c.close(fd);
+    _ = c.fchmod(fd, 0o600);
+    try std.testing.expectEqual(@as(isize, @intCast(bytes.len)), c.write(fd, bytes.ptr, bytes.len));
+}
+
+test "rank auth: a missing, different or short key names serve --rank-secret and a command that makes a key" {
+    if (skip) return error.SkipZigTest;
+    for ([_]anyerror{ error.RankAuthKeyRequired, error.RankAuthWrongKey, error.RankAuthPeerHasKey, error.RankAuthPeerHasNoKey }) |e| {
+        const text = auth.explain(e).?;
+        try std.testing.expect(std.mem.indexOf(u8, text, "serve --rank-secret FILE") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, auth.make_key) != null);
+    }
+    var path_buf: [64]u8 = undefined;
+    var link_buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrintSentinel(&path_buf, "/tmp/tf-rank-auth-key-{d}", .{c.getpid()}, 0);
+    const link = try std.fmt.bufPrintSentinel(&link_buf, "/tmp/tf-rank-auth-key-{d}.link", .{c.getpid()}, 0);
+    defer _ = c.unlink(path);
+    // 31 bytes of key: refused, and the message says how long and how to make one
+    const short: [31]u8 = @splat('k');
+    try plant(path, &short);
+    try std.testing.expectError(error.SecretTooShort, Secret.fromFile(path));
+    const why = auth.explain(error.SecretTooShort).?;
+    try std.testing.expect(std.mem.indexOf(u8, why, "fewer than 32 bytes") != null and std.mem.indexOf(u8, why, auth.make_key) != null);
+    // 32 bytes, read through a symbolic link as a Kubernetes or secret-manager mount gives it: the same key
+    const long: [32]u8 = @splat('k');
+    try plant(path, &long);
+    _ = c.unlink(link);
+    try std.testing.expectEqual(@as(c_int, 0), c.symlink(path, link));
+    defer _ = c.unlink(link);
+    const through = try Secret.fromFile(link);
+    try std.testing.expect(through.keyed);
+    try std.testing.expectEqualSlices(u8, &(try Secret.fromFile(path)).key, &through.key);
+}
+
+test "rank auth: rank 0 names a refused peer by its address" {
+    if (skip) return error.SkipZigTest;
+    const fds = try pair();
+    defer close(fds);
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("127.0.0.1", auth.peerText(fds[1], &buf));
+    try std.testing.expectEqualStrings("an unknown address", auth.peerText(-1, &buf));
 }
