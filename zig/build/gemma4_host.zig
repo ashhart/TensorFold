@@ -32,6 +32,12 @@ pub fn tests(b: *std.Build, sources: *std.Build.Module) *std.Build.Step {
     const head_run = b.addRunArtifact(b.addTest(.{ .root_module = head_root }));
     head_run.has_side_effects = true;
     b.step("test-gemma4-prompt-head-host", "Last prompt-row and decode projection bindings against synthetic layer logits").dependOn(&head_run.step);
+    // Metal's prompt pass a chunk a call (#3021): its cuts, a decode between chunks, a drafter's taps, on a fake
+    const step_lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = b.graph.host, .link_libc = true });
+    const steps_root = b.createModule(.{ .root_source_file = b.path("zig/src/families/gemma4/prefill_steps.zig"), .target = b.graph.host, .imports = &.{.{ .name = "lanes", .module = step_lanes }} });
+    const steps_run = b.addRunArtifact(b.addTest(.{ .root_module = steps_root, .filters = &.{"Gemma Metal steps:"} }));
+    steps_run.has_side_effects = true;
+    b.step("test-gemma4-metal-steps-host", "Gemma 4 Metal's stepped prompt pass on a recording fake, no GPU").dependOn(&steps_run.step);
     return family_step;
 }
 

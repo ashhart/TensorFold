@@ -8,6 +8,7 @@ const fwd = @import("forward.zig");
 const prompt = @import("prompt.zig");
 const snapshot = @import("snapshot.zig");
 const Model = @import("model.zig").Model;
+const steps = @import("prefill_steps.zig");
 const draw = @import("../qwen3_5/backend.zig").draw;
 const be = lanes.backend;
 
@@ -21,6 +22,10 @@ pub const Metal = struct {
     /// Prompt chunks' activations: 512 rows on core affine_mm and the tensor-unit attention.
     prompt_scratch: prompt.Scratch,
     caches: std.AutoHashMapUnmanaged(*lanes.Stream, *st.Cache) = .empty,
+    /// Prompt passes a chunk a call (prefill_step) between rounds, by stream.
+    fills: std.AutoHashMapUnmanaged(*lanes.Stream, Fill) = .empty,
+    /// Prompt chunks run on `prompt_scratch`: a stepped chunk's tapped rows there are current while this matches.
+    prompt_gen: u64 = 0,
     follow: ?mtl.ResidencySet.Follow = null,
     /// Forwards run on `scratch`: a stream's tapped rows there are current while its tap's gen matches.
     gen: u64 = 0,
@@ -52,6 +57,12 @@ pub const Metal = struct {
             self.gpa.destroy(cache.*);
         }
         self.caches.deinit(self.gpa);
+        var fills = self.fills.valueIterator();
+        while (fills.next()) |f| {
+            f.spans.deinit(self.gpa);
+            if (f.rows) |b| b.deinit();
+        }
+        self.fills.deinit(self.gpa);
         self.scratch.deinit();
         self.prompt_scratch.deinit();
         self.gpa.destroy(self);
@@ -124,7 +135,7 @@ pub const Metal = struct {
     }
 
     pub fn backend(self: *Metal) be.Backend {
-        return .{ .ptr = self, .vtable = &.{ .prefill = prefillFn, .prepare_features = prepareFn, .features = featuresFn, .prefill_features = prefillFeaturesFn, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .release = releaseFn } };
+        return .{ .ptr = self, .vtable = &.{ .prefill = prefillFn, .prefill_step = prefillStepFn, .cancel_prefill = cancelPrefillFn, .reports_fill = true, .prepare_features = prepareFn, .features = featuresFn, .prefill_features = prefillFeaturesFn, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .release = releaseFn } };
     }
 
     fn cast(ptr: *anyopaque) *Metal {
@@ -175,7 +186,13 @@ pub const Metal = struct {
     /// Rows [start, start + count) of the stream's latest tapped rows, on the device.
     fn featuresFn(ptr: *anyopaque, stream: *lanes.Stream, taps: []const u32, start: u64, count: u32) !be.Features {
         const self = cast(ptr);
-        const t = (try self.cacheOf(stream)).tap;
+        const cache = try self.cacheOf(stream);
+        const t = cache.tap;
+        // a stepped prompt's latest chunk (prefillStepFn), while no other prompt chunk has rewritten the prompt scratch
+        const c = cache.chunk_tap;
+        const in_tap = t.buf != null and steps.holds(.{ .start = t.start, .rows = t.rows, .gen = t.gen }, self.gen, start, count);
+        if (!in_tap and taps.len == self.model.taps and c.buf != null and steps.holds(.{ .start = c.start, .rows = c.rows, .gen = c.gen }, self.prompt_gen, start, count))
+            return .{ .buffer = @intFromPtr(c.buf.?.id), .offset = c.off + (start - c.start) * self.tapBytes(), .rows = count, .row_bytes = @intCast(self.tapBytes()), .space = .device, .dtype = .bf16 };
         if (taps.len != self.model.taps or t.buf == null) return error.UnpreparedGemmaTaps;
         if (t.gen) |g| if (g != self.gen) return error.StaleGemmaTaps;
         if (count == 0 or start < t.start or start + count > t.start + t.rows) return error.GemmaTapsNotHeld;
@@ -183,7 +200,54 @@ pub const Metal = struct {
         return .{ .buffer = @intFromPtr(t.buf.?.id), .offset = t.off + (start - t.start) * width, .rows = count, .row_bytes = @intCast(width), .space = .device, .dtype = .bf16 };
     }
 
+    /// A stream's prompt pass in progress (prefill_step): its next row, its images' rows and their spans.
+    const Fill = struct { pass: steps.Fill, spans: std.ArrayList(prompt.Span) = .empty, rows: ?mtl.Buffer = null };
+
+    /// One chunk's work for `steps.step`: the pass, the drafter's rows (a sink, or `later` via featuresFn), marks.
+    const Run = struct {
+        m: *Metal,
+        cache: *st.Cache,
+        spans: []const prompt.Span,
+        sink: ?be.FeatureSink,
+        later: bool,
+
+        pub fn run(r: Run, stream: *lanes.Stream, at: usize, end: usize) !void {
+            const self = r.m;
+            const ids = stream.prompt();
+            try prompt.run(self.model, &self.prompt_scratch, r.cache, ids[at..end], r.spans);
+            self.prompt_gen += 1;
+            if (r.sink != null or r.later) {
+                const width = self.tapBytes();
+                const rows = self.prompt_scratch.taps.?;
+                if (r.sink) |k| try k.take(k.ptr, stream, .{ .buffer = @intFromPtr(rows.id), .rows = @intCast(end - at), .row_bytes = @intCast(width), .space = .device, .dtype = .bf16 }, at);
+                // a stepped pass's rows stay in the prompt scratch until the next chunk runs: featuresFn serves them
+                if (r.later) r.cache.chunk_tap = .{ .buf = rows, .start = at, .rows = end - at, .gen = self.prompt_gen };
+                if (end == ids.len) { // the prompt's last row, kept for the first draft (another prompt may reuse the scratch)
+                    const last = try self.model.device.buffer(width, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+                    r.cache.setLastTap(last);
+                    @memcpy(last.slice(u8, width), rows.slice(u8, st.chunk_rows * width)[(end - 1 - at) * width ..][0..width]);
+                    r.cache.tap = .{ .buf = last, .start = ids.len - 1, .rows = 1 };
+                }
+            }
+            lanes.prefill_widths.completed(self.gpa, stream, end - at);
+            if (end == ids.len) @memcpy(r.cache.logits.slice(u16, cfg.vocab), self.prompt_scratch.logits.slice(u16, cfg.vocab));
+        }
+
+        pub fn keep(_: Run, stream: *lanes.Stream, at: u32) void {
+            if (stream.reuse.hook) |k| k.at(k.ptr, stream, at);
+        }
+    };
+
     fn prefillWith(self: *Metal, stream: *lanes.Stream, sink: ?be.FeatureSink) !void {
+        const f = try self.opening(stream);
+        errdefer self.drop(stream);
+        const r: Run = .{ .m = self, .cache = try self.cacheOf(stream), .spans = f.spans.items, .sink = sink, .later = false };
+        while (!try steps.step(r, stream, &f.pass, st.chunk_rows, f.spans.items, false)) {}
+        self.closing(stream);
+    }
+
+    /// The stream's cache made (a kept state restored into it) and its images encoded: its pass from `cache.len`.
+    fn opening(self: *Metal, stream: *lanes.Stream) !*Fill {
         const ids = stream.prompt();
         if (ids.len == 0 or ids.len + stream.max_new > self.options.capacity or self.caches.contains(stream)) return error.InvalidGemmaPrompt;
         const capacity = @min(self.options.capacity, (ids.len + stream.max_new + st.max_rows + 63) / 64 * 64);
@@ -203,39 +267,48 @@ pub const Metal = struct {
                 if (snapshot.restore(self.gpa, self.model.queue, snap, cache)) stream.cached = snap.at else |_| stream.reuse_failed = true;
             } else stream.reuse_failed = true;
         }
-        var spans: std.ArrayList(prompt.Span) = .empty;
-        defer spans.deinit(self.gpa);
-        const rows_buf = try self.encodeImages(stream, cache.len, &spans);
-        defer if (rows_buf) |b| b.deinit();
-        var at: usize = cache.len;
-        while (at < ids.len) {
-            if (stream.isCancelled()) return error.Cancelled;
-            var end = @min(ids.len, at + st.chunk_rows);
-            // planned chunk starts and kept marks cut a chunk (resumed and fresh passes cut alike past them)
-            for ([_][]const u32{ stream.chunks, stream.reuse.marks }) |cuts| for (cuts) |x| if (x > at and x < end) {
-                end = x;
-            };
-            // an image's rows see each other on sliding layers: no cut inside one (before it, or past it when it leads)
-            for (spans.items) |span| if (span.at < end and span.at + span.n > end) {
-                end = if (span.at > at) span.at else span.at + span.n;
-            };
-            try prompt.run(self.model, &self.prompt_scratch, cache, ids[at..end], spans.items);
-            if (sink) |k| {
-                const width = self.tapBytes();
-                const rows = self.prompt_scratch.taps.?;
-                try k.take(k.ptr, stream, .{ .buffer = @intFromPtr(rows.id), .rows = @intCast(end - at), .row_bytes = @intCast(width), .space = .device, .dtype = .bf16 }, at);
-                if (end == ids.len) { // the prompt's last row, kept for the first draft (another prompt may reuse the scratch)
-                    const last = try self.model.device.buffer(width, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
-                    cache.setLastTap(last);
-                    @memcpy(last.slice(u8, width), rows.slice(u8, st.chunk_rows * width)[(end - 1 - at) * width ..][0..width]);
-                    cache.tap = .{ .buf = last, .start = ids.len - 1, .rows = 1 };
-                }
-            }
-            lanes.prefill_widths.completed(self.gpa, stream, end - at);
-            at = end;
-            if (std.mem.indexOfScalar(u32, stream.reuse.marks, @intCast(cache.len)) != null) if (stream.reuse.hook) |k| k.at(k.ptr, stream, @intCast(cache.len));
+        var f: Fill = .{ .pass = .{ .at = cache.len } };
+        errdefer f.spans.deinit(self.gpa);
+        f.rows = try self.encodeImages(stream, cache.len, &f.spans);
+        errdefer if (f.rows) |b| b.deinit();
+        try self.fills.put(self.gpa, stream, f);
+        stream.fill_at.store(@intCast(cache.len), .monotonic); // what the restore kept: 0 when none
+        return self.fills.getPtr(stream).?;
+    }
+
+    /// The pass is over, or the stream left mid-pass: its images' rows and spans freed.
+    fn closing(self: *Metal, stream: *lanes.Stream) void {
+        var entry = self.fills.fetchRemove(stream) orelse return;
+        entry.value.spans.deinit(self.gpa);
+        if (entry.value.rows) |b| b.deinit();
+    }
+
+    /// A pass that failed: its fill and its cache go, as the whole pass's error left them.
+    fn drop(self: *Metal, stream: *lanes.Stream) void {
+        self.closing(stream);
+        if (self.caches.fetchRemove(stream)) |entry| {
+            entry.value.deinit();
+            self.gpa.destroy(entry.value);
         }
-        @memcpy(cache.logits.slice(u16, cfg.vocab), self.prompt_scratch.logits.slice(u16, cfg.vocab));
+    }
+
+    /// One chunk a call at the whole pass's cuts (`max_rows` is never set: this family declares no chunk_invariant).
+    fn prefillStepFn(ptr: *anyopaque, stream: *lanes.Stream, _: u32) !bool {
+        const self = cast(ptr);
+        const f = self.fills.getPtr(stream) orelse try self.opening(stream);
+        errdefer self.drop(stream);
+        // a drafting stream's wrapper absorbs each chunk after the call (featuresFn): its marks keep at the next call
+        const later = stream.drafts and self.prompt_scratch.taps != null;
+        const r: Run = .{ .m = self, .cache = try self.cacheOf(stream), .spans = f.spans.items, .sink = null, .later = later };
+        const done = try steps.step(r, stream, &f.pass, st.chunk_rows, f.spans.items, later);
+        if (done) self.closing(stream);
+        return done;
+    }
+
+    /// The host cancels between chunks: the last landed chunk's state is kept (no prompt work runs).
+    fn cancelPrefillFn(ptr: *anyopaque, stream: *lanes.Stream) !void {
+        const self = cast(ptr);
+        if (self.fills.get(stream)) |f| stream.keepInterruptedPrefill(@intCast(f.pass.at));
     }
 
     /// The stream's images from `from` on through the tower into one buffer of rows (null: none), a span each.
@@ -396,6 +469,7 @@ pub const Metal = struct {
 
     fn releaseFn(ptr: *anyopaque, stream: *lanes.Stream) void {
         const self = cast(ptr);
+        self.closing(stream); // a stream that left mid-pass
         if (self.caches.fetchRemove(stream)) |entry| {
             entry.value.deinit();
             self.gpa.destroy(entry.value);
@@ -410,6 +484,14 @@ const shared_widths = [_]usize{ 32, 48, 64, 96, 128 };
 const mask_words = (cfg.vocab + 31) / 32;
 
 const Pick = @import("tree_round_gpu").contract.Pick;
+
+test "Gemma Metal steps: the backend steps its prompt passes, reports their fill and keeps a cancelled one's chunks" {
+    var b: Metal = undefined;
+    const v = b.backend().vtable;
+    // the lane host fills it a chunk a round (open.zig fills); the drafted wrapper steps too (features, reports_fill)
+    try std.testing.expect(v.prefill_step != null and v.reports_fill and v.cancel_prefill != null and v.features != null);
+    try std.testing.expect(!b.backend().chunk_invariant); // the host never caps its chunks (lane_host_fill.zig capRows)
+}
 
 test "zero grant: Gemma Metal assistant and DFlash retain tapped context through a long skip" {
     var b: Metal = undefined;
