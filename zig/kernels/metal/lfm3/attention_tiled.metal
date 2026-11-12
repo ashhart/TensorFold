@@ -222,7 +222,7 @@ inline void frag_put_rows(thread const frag<float>& f, device O* r0, device O* r
 
 namespace tfp {
 
-// MLX's Limits<float>::finite_min, the score of a masked key.
+// The most negative finite float: the score of a masked key.
 constant constexpr float kMasked = -3.402823466e+38f;
 constant constexpr int kAnyCols = 1 << 30;
 

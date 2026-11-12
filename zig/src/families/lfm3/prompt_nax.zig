@@ -1,4 +1,4 @@
-//! Dense prompt projections on the tensor units through Flash Next's width-general tiles (MLX's bf16 dequantization).
+//! Dense prompt projections on the tensor units through Flash Next's width-general tiles: codes as bf16, sums in fp32.
 const std = @import("std");
 const mtl = @import("metal");
 const ks = @import("kernel_sources");
