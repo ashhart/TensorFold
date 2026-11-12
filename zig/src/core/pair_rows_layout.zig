@@ -53,7 +53,7 @@ pub const HELLO = 64;
 pub const CMD_FLAG = 128; // u64, at rank 1: the last command rank 0 has written
 pub const CMD_ACK = 192; // u64, at rank 0: the last command rank 1 has copied out
 pub const READY = 256; // u64: the peer has loaded its model
-pub const FINGERPRINT = 320; // 4 u64 words: engine version, chip class, checkpoint, weight format (`Fingerprint`)
+pub const FINGERPRINT = 320; // a u64 per `Fingerprint` fact: version, chip, checkpoint, format, command protocol
 pub const BEAT = 384; // u64: the peer's watchdog ran; a rank idle in no round still sees a dead peer through this
 
 // The sync page's words shared with pair_rows.metal: POSTED last released exchange, FAILED give-ups, OBSERVED refusals.

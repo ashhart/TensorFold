@@ -11,6 +11,20 @@ pub const Pair = tf.pair_rows.Pair;
 /// The command set rank 1 replays (glm_dsa's `follow.zig` shape); `.tree`/`.commit` carry a draft round.
 pub const Kind = enum(u32) { begin = 1, chunk, step, end, tree, commit };
 
+/// Raise when a command's words change shape (`Link`'s senders, `qwen27_link.decode`); `Kind` hashes in by itself.
+const command_revision = 1;
+
+/// The command set's word for `Pair.ready`: builds that send or replay different commands refuse each other by name.
+pub const protocol: u64 = blk: {
+    const kinds = @typeInfo(Kind).@"enum";
+    var h = std.hash.Wyhash.init(command_revision);
+    for (kinds.field_names, kinds.field_values) |name, value| {
+        h.update(name);
+        h.update(&std.mem.toBytes(@as(u32, value)));
+    }
+    break :blk h.final();
+};
+
 /// Rank 0 puts each round on the wire before running it; rank 1 replays them in order here. Owned by the host.
 pub const Link = struct {
     pair: *Pair,
@@ -169,6 +183,7 @@ pub fn pairFingerprint(a: std.mem.Allocator, io: std.Io, model: *q.model.Model, 
         .chip = chip,
         .checkpoint = checkpoint,
         .format = model.widths_tag,
+        .protocol = protocol,
     };
 }
 

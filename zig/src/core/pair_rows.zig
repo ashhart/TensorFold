@@ -23,6 +23,8 @@ pub const Fingerprint = struct {
     checkpoint: u64 = 0,
     /// The weight format tag the affine readers resolved (the widths tag), so a 4-bit stack refuses a 6-bit stack.
     format: u64 = 0,
+    /// The commands rank 1 replays and their words: two builds with one version string may still differ here.
+    protocol: u64 = 0,
 };
 
 /// The wire's encoding: ready cannot signal a 0, so a fact travels as @max(w,1); the comparison normalizes both sides.
@@ -32,7 +34,7 @@ fn wireWord(w: u64) u64 {
 
 /// A fingerprint fact's mismatch: names the fact and both sides' values, so the restart message says what differed.
 pub fn fingerprintProblem(a: std.mem.Allocator, mine: Fingerprint, peer: Fingerprint) !?[]const u8 {
-    const facts = .{ .{ "engine version", "version" }, .{ "GPU family", "chip" }, .{ "checkpoint", "checkpoint" }, .{ "weight format", "format" } };
+    const facts = .{ .{ "engine version", "version" }, .{ "GPU family", "chip" }, .{ "checkpoint", "checkpoint" }, .{ "weight format", "format" }, .{ "command protocol", "protocol" } };
     inline for (facts) |f| {
         const name = f[0];
         const field = f[1];
