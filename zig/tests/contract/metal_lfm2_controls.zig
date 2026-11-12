@@ -50,8 +50,13 @@ pub const Mutation = enum {
 
 /// lfm2.metal's text as built for the kernel under test; a control's one edit must change it, or it proves nothing.
 pub fn source(a: std.mem.Allocator, m: Mutation) ![]const u8 {
-    if (m == .none) return sources.lfm2;
+    return edited(a, m, sources.lfm2);
+}
+
+/// `text` with the control's one edit: LFM3's ops.metal carries lfm2_argmax's body as lfm3_argmax, and its controls.
+pub fn edited(a: std.mem.Allocator, m: Mutation, text: []const u8) ![]const u8 {
+    if (m == .none) return text;
     const e = m.edit();
-    if (std.mem.indexOf(u8, sources.lfm2, e.from) == null) return error.ControlEditMissing;
-    return std.mem.replaceOwned(u8, a, sources.lfm2, e.from, e.to);
+    if (std.mem.indexOf(u8, text, e.from) == null) return error.ControlEditMissing;
+    return std.mem.replaceOwned(u8, a, text, e.from, e.to);
 }

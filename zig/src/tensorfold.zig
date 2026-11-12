@@ -108,6 +108,7 @@ test {
     _ = @import("families/lfm3/model.zig");
     _ = @import("families/lfm3/state.zig");
     _ = @import("families/lfm3/qk_segments_test.zig"); // a shared round's qk in one dispatch (Metal)
+    _ = @import("families/lfm3/argmax_test.zig"); // the greedy pick on the GPU against greedy.select (Metal)
     _ = @import("families/lfm3/snapshot.zig");
     _ = @import("families/lfm3/image.zig");
     _ = @import("families/nemotron/prefill_kernels.zig"); // Compile the prompt-chunk sources in tests.
