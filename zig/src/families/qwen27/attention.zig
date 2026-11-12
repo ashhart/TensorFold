@@ -251,28 +251,11 @@ fn bind(e: mtl.ComputeEncoder, refs: anytype) void {
 /// The prompt kernel's threads a group: eight simdgroups, both kernels (attention_prompt*.metal's SG = 8).
 const prompt_threads = 256;
 /// h_end and w_end above 0: an M-RoPE round, the h and w position planes `plane` rows past each other in `positions`.
-pub const Preprocess = struct {
-    qg: Ref,
-    key: Ref,
-    q_gain: Ref,
-    k_gain: Ref,
-    norm_q: Ref,
-    norm_k: Ref,
-    query: Ref,
-    rotated_key: Ref,
-    positions: Ref,
-    rows: u32,
-    eps: f32,
-    theta: f64,
-    gain: glue.Float = .bf16,
-    h_end: u32 = 0,
-    w_end: u32 = 0,
-    plane: u32 = 0,
-    geometry: planning.Geometry = .{},
-    pub fn head(p: Preprocess, heads: u32, stride: u32) glue.Head {
-        return .{ .width = p.geometry.dim, .rows = p.rows * heads, .stride = stride, .activation = .bf16, .gain = p.gain, .eps = p.eps };
-    }
-};
+pub const Preprocess = struct { qg: Ref, key: Ref, q_gain: Ref, k_gain: Ref, norm_q: Ref, norm_k: Ref, query: Ref, rotated_key: Ref, positions: Ref, rows: u32, eps: f32, theta: f64, gain: glue.Float = .bf16, h_end: u32 = 0, w_end: u32 = 0, plane: u32 = 0, geometry: planning.Geometry = .{} };
+/// The q/k norm binding: `heads` heads a row at `stride`, BF16 activations, the source's gain (F32 from a GGUF).
+pub fn prepHead(p: Preprocess, heads: u32, stride: u32) glue.Head {
+    return .{ .width = p.geometry.dim, .rows = p.rows * heads, .stride = stride, .activation = .bf16, .gain = p.gain, .eps = p.eps };
+}
 pub const Attention = struct {
     profiler: ?*profile.Trace = null,
     prefix: [32]mtl.Pipeline, // q27_attn_prefix_1 to _16, then q27_attn_prefix_masked_1 to _16
@@ -351,12 +334,12 @@ pub const Attention = struct {
         }
         e.setPipeline(a.io[7]);
         bind(e, .{ p.qg, p.q_gain });
-        e.setValue(p.head(g.heads, 2 * g.dim), 2);
+        e.setValue(prepHead(p, g.heads, 2 * g.dim), 2);
         e.setBuffer(p.norm_q.buffer, p.norm_q.offset, 3);
         e.dispatchGroups(mtl.Size.of(p.rows * g.heads, 1, 1), mtl.Size.of(64, 1, 1));
         e.setPipeline(a.io[7]);
         bind(e, .{ p.key, p.k_gain });
-        e.setValue(p.head(g.kv_heads, g.dim), 2);
+        e.setValue(prepHead(p, g.kv_heads, g.dim), 2);
         e.setBuffer(p.norm_k.buffer, p.norm_k.offset, 3);
         e.dispatchGroups(mtl.Size.of(p.rows * g.kv_heads, 1, 1), mtl.Size.of(64, 1, 1));
         e.barrier();
@@ -611,16 +594,6 @@ test "descriptor identity includes numeric geometry and limits still refuse new 
     try std.testing.expectError(error.TargetAttentionShape, validLimits(.{ .geometry = plan.geometry }));
 }
 
-test "GGUF attention: native gain defaults to BF16 and exact F32 gains reach both head bindings" {
-    var p: Preprocess = .{ .qg = undefined, .key = undefined, .q_gain = undefined, .k_gain = undefined, .norm_q = undefined, .norm_k = undefined, .query = undefined, .rotated_key = undefined, .positions = undefined, .rows = 3, .eps = 1e-6, .theta = 1e7 };
-    try std.testing.expectEqual(glue.Float.bf16, p.head(24, 512).gain);
-    p.gain = .f32;
-    const q = p.head(24, 512);
-    const k = p.head(4, 256);
-    try std.testing.expectEqual(glue.Float.f32, q.gain);
-    try std.testing.expectEqual(glue.Float.f32, k.gain);
-    try std.testing.expectEqual(@as(u32, 72), q.rows);
-    try std.testing.expectEqual(@as(u32, 12), k.rows);
-    try std.testing.expectEqual(@as(u32, 256), q.width);
-    try std.testing.expectEqual(@as(u32, 512), q.stride);
+test {
+    _ = @import("attention_gguf_test.zig");
 }
