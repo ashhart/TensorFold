@@ -39,12 +39,17 @@ pub const Model = struct {
         var ck = try Checkpoint.openModel(gpa, io, dir);
         defer ck.close();
         ck.scope = names.scopeOf(&ck);
+        return fromCheckpoint(gpa, d, &ck, spec);
+    }
+
+    /// `spec`'s tensors from an open checkpoint under its scope (a model whose Qwen3 sits beside other parts).
+    pub fn fromCheckpoint(gpa: Allocator, d: *const cuda.Driver, ck: *Checkpoint, spec: config.Spec) !Model {
         var m: Model = .{ .gpa = gpa, .spec = spec, .embed = 0, .final_norm = 0, .layers = &.{}, .st = .{ .gpa = gpa, .d = d } };
         errdefer m.deinit();
-        m.embed = try projection(&ck, &m.st, "embed_tokens.weight", spec.vocab, spec.hidden);
-        m.final_norm = try norm(&ck, &m.st, "norm.weight", spec.hidden);
+        m.embed = try projection(ck, &m.st, "embed_tokens.weight", spec.vocab, spec.hidden);
+        m.final_norm = try norm(ck, &m.st, "norm.weight", spec.hidden);
         m.layers = try gpa.alloc(Layer, spec.layers);
-        for (m.layers, 0..) |*l, i| l.* = try layer(&ck, &m.st, spec, i);
+        for (m.layers, 0..) |*l, i| l.* = try layer(ck, &m.st, spec, i);
         return m;
     }
 

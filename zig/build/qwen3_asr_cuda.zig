@@ -2,7 +2,9 @@
 const std = @import("std");
 
 pub fn tool(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module, tokenizer: *std.Build.Module, strip: ?bool) void {
-    const family = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen3_asr/qwen3_asr_cuda.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = core } } });
+    // the Qwen3 layers: qwen3's CUDA pass, the one the embedding engine runs
+    const pass = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen3/pass_cuda.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = core } } });
+    const family = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen3_asr/qwen3_asr_cuda.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = core }, .{ .name = "qwen3_pass", .module = pass } } });
     const main = b.createModule(.{ .root_source_file = b.path("zig/tests/qwen3_asr_cuda.zig"), .target = target, .optimize = optimize, .link_libc = true, .strip = strip, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "qwen3_asr", .module = family }, .{ .name = "tokenizer", .module = tokenizer } } });
     const exe = b.addExecutable(.{ .name = "tf-qwen3-asr", .root_module = main });
     b.installArtifact(exe);

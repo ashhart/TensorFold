@@ -72,8 +72,7 @@ pub const Engine = struct {
         errdefer e.scratch.free();
         const cap = std.mem.alignForward(usize, window, lm.chunk_keys);
         e.a = sc.at(e.scratch.ptr);
-        try e.positions(cap);
-        try e.rope(cap);
+        try lm.tables(e.gpa, &e.d, e.a, e.m.spec, cap);
         e.ids_host = try cuda.HostBuffer.alloc(&e.d, 4 * window);
         errdefer e.ids_host.free();
         e.rows_host = try cuda.HostBuffer.alloc(&e.d, 2 * max_inputs * e.m.spec.hidden);
@@ -128,40 +127,6 @@ pub const Engine = struct {
         e.ctx.deinit();
         e.d.close();
         e.gpa.destroy(e);
-    }
-
-    /// Positions 0 to cap - 1: each row's rotation angle, and the first position a row block's chunks read.
-    fn positions(e: *Engine, cap: usize) !void {
-        const pos = try e.gpa.alloc(i32, cap);
-        defer e.gpa.free(pos);
-        for (pos, 0..) |*x, i| x.* = @intCast(i);
-        try store.view(&e.d, e.a.pos, cap * 4).upload(0, std.mem.sliceAsBytes(pos));
-    }
-
-    /// The RoPE table [cap, head_dim] of fp32 cosines and sines, each half of a head rotating by the same angle.
-    fn rope(e: *Engine, cap: usize) !void {
-        const hd = e.m.spec.head_dim;
-        const theta: f64 = e.m.spec.theta;
-        const cs = try e.gpa.alloc(f32, cap * hd);
-        defer e.gpa.free(cs);
-        const sn = try e.gpa.alloc(f32, cap * hd);
-        defer e.gpa.free(sn);
-        var i: usize = 0;
-        while (i < hd / 2) : (i += 1) {
-            const inv = 1.0 / std.math.pow(f64, theta, @as(f64, @floatFromInt(2 * i)) / @as(f64, @floatFromInt(hd)));
-            var p: usize = 0;
-            while (p < cap) : (p += 1) {
-                const angle = @as(f64, @floatFromInt(p)) * inv;
-                const c: f32 = @floatCast(@cos(angle));
-                const s: f32 = @floatCast(@sin(angle));
-                for ([_]usize{ i, i + hd / 2 }) |col| {
-                    cs[p * hd + col] = c;
-                    sn[p * hd + col] = s;
-                }
-            }
-        }
-        try store.view(&e.d, e.a.cos, cs.len * 4).upload(0, std.mem.sliceAsBytes(cs));
-        try store.view(&e.d, e.a.sin, sn.len * 4).upload(0, std.mem.sliceAsBytes(sn));
     }
 };
 

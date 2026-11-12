@@ -5,11 +5,11 @@ const qa = @import("qwen3_asr");
 const host = qa.host;
 const forced = host.forced;
 
-const usage = "usage: tf-qwen3-asr-forced MODEL_DIR CLIP.wav --case DIR [--plant splice|norms] [--rows K [--row-gemms]]\n" ++
+const usage = "usage: tf-qwen3-asr-forced MODEL_DIR CLIP.wav --case DIR [--plant splice|norms] [--rows K]\n" ++
     "  every step on the case's greedy history: a differing top token passes only as a swap with both margins <= 0.25\n" ++
     "  (each listed); anything else fails, exit 1. With logits_fp32 and logits_bf16 in the case, the distances to fp32.\n" ++
     "  --rows K: the prompt pass over the first K reply ids against the decode steps, and the prompt in two passes\n" ++
-    "  against one (caches and logits): exit 1 unless bit-equal; --row-gemms runs every projection a row at a time.\n" ++
+    "  against one (caches and logits): exit 1 unless bit-equal.\n" ++
     "  --plant: the audio rows one position late (splice) or q_norm and k_norm swapped in every layer (norms).\n";
 
 /// A planted fault the tool must catch: the audio rows one position late, or q_norm and k_norm swapped.
@@ -70,10 +70,9 @@ pub fn main(init: std.process.Init) !u8 {
     var case_dir: ?[]const u8 = null;
     var plant: ?Plant = null;
     var check_rows: usize = 0;
-    var row_gemms = false;
     var i: usize = 3;
     while (i < args.len) : (i += 2) {
-        if (i + 1 >= args.len and !std.mem.eql(u8, args[i], "--row-gemms")) break;
+        if (i + 1 >= args.len) break;
         if (std.mem.eql(u8, args[i], "--case")) case_dir = args[i + 1] else if (std.mem.eql(u8, args[i], "--rows")) {
             check_rows = try std.fmt.parseInt(usize, args[i + 1], 10);
         } else if (std.mem.eql(u8, args[i], "--plant")) {
@@ -81,9 +80,6 @@ pub fn main(init: std.process.Init) !u8 {
                 std.debug.print(usage, .{});
                 return 2;
             };
-        } else if (std.mem.eql(u8, args[i], "--row-gemms")) {
-            row_gemms = true;
-            i -= 1;
         } else {
             std.debug.print(usage, .{});
             return 2;
@@ -124,24 +120,23 @@ pub fn main(init: std.process.Init) !u8 {
     defer ctx.deinit();
     var s = try cuda.Stream.init(&driver, false);
     defer s.deinit();
-    const opts: qa.Options = .{ .audio_rows = plan.rows, .pass_rows = ids.len + check_rows, .positions = ids.len + want.len + 1 };
+    const opts: qa.Options = .{ .audio_rows = plan.rows, .pass_rows = ids.len + check_rows, .positions = ids.len + want.len + 1, .head_rows = check_rows + 1 };
     const m = try qa.Model.load(gpa, io, &driver, s, args[1], cfg, opts);
     defer m.deinit();
     var rows_buf = try cuda.DeviceBuffer.alloc(&driver, plan.rows * cfg.audio.out * 2);
     defer rows_buf.free();
     const n_rows = try m.encode(feats, rows_buf.ptr, null);
     const splice: qa.Splice = .{ .ptr = rows_buf.ptr, .at = at + @intFromBool(plant == .splice), .n = n_rows };
-    m.lr.plant_norms = plant == .norms;
-    m.lr.row_gemms = row_gemms;
+    if (plant == .norms) m.swapQkNorms();
     const vocab = cfg.text.vocab;
 
     // the prompt pass, then one decode step a reference id: every step's logits row kept
     var steps: std.ArrayList(u16) = .empty;
     defer steps.deinit(gpa);
-    m.lr.keep = .{ .gpa = gpa, .rows = &steps };
+    m.keep = .{ .gpa = gpa, .rows = &steps };
     _ = try m.forward(ids, 0, splice);
     for (want[0 .. want.len - 1], 0..) |id, k| _ = try m.forward(&.{id}, ids.len + k, null);
-    m.lr.keep = null;
+    m.keep = null;
 
     const clip = std.fs.path.basename(case_dir.?);
     var same: usize = 0;
@@ -189,24 +184,24 @@ pub fn main(init: std.process.Init) !u8 {
         defer gpa.free(long);
         var pass: std.ArrayList(u16) = .empty;
         defer pass.deinit(gpa);
-        m.lr.keep = .{ .gpa = gpa, .rows = &pass };
+        m.keep = .{ .gpa = gpa, .rows = &pass };
         _ = try m.forwardHeads(long, 0, splice, check_rows + 1);
-        m.lr.keep = null;
+        m.keep = null;
         const dec = compareRows(pass.items, steps.items[0 .. (check_rows + 1) * vocab], vocab);
         std.debug.print("ROWS {s}: the prompt pass's last {d} rows against the decode steps: {d} bit-equal, worst |diff| {d:.6}\n", .{ clip, dec.rows, dec.equal, dec.worst });
         ok = ok and dec.equal == dec.rows;
         // the prompt in one pass, then in two cut inside the audio rows: caches and the last row's logits
         var one: std.ArrayList(u16) = .empty;
         defer one.deinit(gpa);
-        m.lr.keep = .{ .gpa = gpa, .rows = &one };
+        m.keep = .{ .gpa = gpa, .rows = &one };
         _ = try m.forward(ids, 0, splice);
-        const c1 = try m.lr.cacheRows(gpa, ids.len);
+        const c1 = try m.cacheRows(gpa, ids.len);
         defer gpa.free(c1);
         const cut = at + n_rows / 2;
         _ = try m.forward(ids[0..cut], 0, splice);
         _ = try m.forward(ids[cut..], cut, splice);
-        m.lr.keep = null;
-        const c2 = try m.lr.cacheRows(gpa, ids.len);
+        m.keep = null;
+        const c2 = try m.cacheRows(gpa, ids.len);
         defer gpa.free(c2);
         var differ: usize = 0;
         for (c1, c2) |x, y| differ += @intFromBool(x != y);

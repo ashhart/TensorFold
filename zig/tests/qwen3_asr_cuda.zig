@@ -175,7 +175,7 @@ pub fn main(init: std.process.Init) !u8 {
     defer out.deinit(gpa);
     var margins: std.ArrayList(f32) = .empty;
     defer margins.deinit(gpa);
-    try margins.append(gpa, m.lr.last_margin);
+    try margins.append(gpa, m.last_margin);
     if (cmp) |*c| if (!ids_only) { // the prompt pass's stages, then the pass again: its caches written as before
         _ = try m.forwardDump(ids, 0, splice, .{ .ctx = c, .put = Compare.put });
     };
@@ -184,7 +184,7 @@ pub fn main(init: std.process.Init) !u8 {
         try out.append(gpa, next);
         if (std.mem.indexOfScalar(u32, &eos, next) != null) break;
         next = try m.forward(&.{next}, ids.len + out.items.len - 1, null);
-        try margins.append(gpa, m.lr.last_margin);
+        try margins.append(gpa, m.last_margin);
     }
     const dec_s = seconds() - t_dec;
     const body = if (out.items.len > 0 and std.mem.indexOfScalar(u32, &eos, out.items[out.items.len - 1]) != null) out.items[0 .. out.items.len - 1] else out.items;
