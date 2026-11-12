@@ -143,4 +143,5 @@ pub const dsv41_pending = @import("registry_union.zig").extra(
 test {
     _ = @import("mla_cuda_records.zig");
     _ = @import("inkling2_cuda_records.zig");
+    _ = @import("living_native_records.zig");
 }
