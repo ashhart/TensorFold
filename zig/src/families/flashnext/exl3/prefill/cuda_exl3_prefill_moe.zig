@@ -10,6 +10,7 @@ const pk = @import("cuda_exl3_prefill_k.zig");
 const tp_ = @import("../tp/cuda_exl3_tp.zig");
 const state = @import("cuda_exl3_prefill_state.zig");
 const leaves = @import("cuda_exl3_prefill_leaves.zig");
+const canon = @import("../tp/exl3_canon.zig");
 
 const dims = wt.dims;
 const slots = wt.slots;
@@ -94,7 +95,7 @@ pub fn maskOwned(picks: []i32, r: ?tp_.Rank) void {
     };
 }
 
-/// The canonical reduction at any degree: block partials, an fp32 all-gather, the tree finished on every rank, placed.
+/// Keep TP partials F64 until the root; TP1 reuses decode's root kernel without a gather buffer or finish pass.
 pub fn rankSum(dp: *Deep, p: anytype, x: *const load.Experts, n: usize, sub: usize) !void {
     const st = p.stream;
     const sum = dp.dptr(dp.lay.sum);
@@ -102,20 +103,28 @@ pub fn rankSum(dp: *Deep, p: anytype, x: *const load.Experts, n: usize, sub: usi
     const wts = dp.dptr(dp.lay.wts);
     const world: usize = if (x.tp) |r| r.world else 1;
     const rank: usize = if (x.tp) |r| r.rank else 0;
+    if (world == 1) {
+        const root = .{
+            .k = p.k,
+            .s = .{ .y = y, .wts = wts, .picks = dp.dptr(dp.lay.picks) },
+            .rows = n,
+            .stream = st,
+        };
+        try @import("../../cuda_batch_moe.zig").leafTree(root, sum, 0, canon.leaf_log);
+        if (!dp.reduced_branch) try pk.tpPlace(&dp.kern, st, sum, y, wts, n, slots, dims);
+        return;
+    }
     const m = leaves.partials(world);
     const gath = sum + dp.rows * dims * 4;
+    const partial = @sizeOf(f64); // bytes an element of a gathered partial
     const profiling = try profile();
     const t0 = if (profiling) now(p.io) else 0;
     const use_overlap = world > 1 and try overlap() and dp.red != null;
     const per = if (use_overlap) sub else n;
-    try pk.tpCombine(&dp.kern, st, y, wts, dp.dptr(dp.lay.picks), if (world == 1) sum else gath, n, slots, dims, per, world, rank, m);
-    if (world == 1) {
-        if (!dp.reduced_branch) try pk.tpPlace(&dp.kern, st, sum, y, wts, n, slots, dims);
-        return;
-    }
+    try pk.tpCombine(&dp.kern, st, y, wts, dp.dptr(dp.lay.picks), gath, n, slots, dims, per, world, rank, m);
     const c = p.m.collective orelse return error.TensorParallelUnavailable;
     if (!use_overlap) {
-        try c.gatherF32(st, gath + rank * m * n * dims * 4, gath, m * n * dims);
+        try c.gatherF64(st, gath + rank * m * n * dims * partial, gath, m * n * dims);
         try pk.tpFinish(&dp.kern, st, gath, sum, n, dims, world, m);
         if (!dp.reduced_branch) try pk.tpPlace(&dp.kern, st, sum, y, wts, n, slots, dims);
     } else {
@@ -126,8 +135,8 @@ pub fn rankSum(dp: *Deep, p: anytype, x: *const load.Experts, n: usize, sub: usi
         for (0..n_sub) |b| {
             const r0 = b * sub;
             const rows = @min(sub, n - r0);
-            const region = gath + r0 * world * m * dims * 4;
-            try c.gatherF32(rs, region + rank * m * rows * dims * 4, region, m * rows * dims);
+            const region = gath + r0 * world * m * dims * partial;
+            try c.gatherF64(rs, region + rank * m * rows * dims * partial, region, m * rows * dims);
             try pk.tpFinish(&dp.kern, rs, region, sum + r0 * dims * 4, rows, dims, world, m);
             if (!dp.reduced_branch) try pk.tpPlace(&dp.kern, rs, sum + r0 * dims * 4, y + r0 * slots * dims * 4, wts + r0 * slots * 4, rows, slots, dims);
             try dp.red_ev[b].record(rs);

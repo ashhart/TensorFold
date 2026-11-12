@@ -1,12 +1,13 @@
 //! The kernel contract: what a GPU kernel's test registers, the shapes it is checked at and the bound it must meet.
 const std = @import("std");
 
-/// The accumulator a kernel declares for its sums; none: it only compares or moves values.
-pub const Accum = enum { f32, f16, bf16, none };
+/// Declared sum precision; gate 4 applies to fp32, while f64 fixtures enforce their own exact check.
+pub const Accum = enum { f64, f32, f16, bf16, none };
 
 /// An accumulator's unit roundoff: half its ulp at 1.
 pub fn unit(a: Accum) f64 {
     return switch (a) {
+        .f64 => 0x1p-53,
         .f32 => 0x1p-24,
         .f16 => 0x1p-11,
         .bf16 => 0x1p-8,
