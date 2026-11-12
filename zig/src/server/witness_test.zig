@@ -156,6 +156,7 @@ test "execution witness: preparation follows the serving defaults, environment t
     try env.put("PATH", "/usr/bin");
     try env.put("TENSORFOLD_API_KEY", "secret-two");
     try env.put("BRAVE_SEARCH_API_KEY", "other");
+    try env.put("TENSORFOLD_BENCHMARK_TOKEN", "upload");
     try t.expectEqualSlices(u8, &settings, &try parts.environment(a, &env));
     try env.put("TF_QWEN_KV_PAGES", "0");
     try t.expect(!std.mem.eql(u8, &settings, &try parts.environment(a, &env)));
