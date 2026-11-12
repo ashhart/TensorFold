@@ -27,7 +27,6 @@ pub const round_timing = @import("cuda_round_timing.zig");
 pub const vision = @import("cuda_vision.zig");
 pub const slide = @import("cuda_slide.zig");
 pub const linked = slide.linked;
-
 pub const model_type = "qwen3_5";
 pub const formats: []const []const u8 = &.{ "mlx-q4g64", "exl3" };
 pub const default_context: i64 = 32768;
@@ -151,6 +150,7 @@ pub fn ledgerPool(p: *anyopaque) ?*@import("core").kv_pool.Pool {
 
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
     const clef = try decide.check(gpa, io, dir, .{ .drafter = o.drafter != null, .slide = o.slide, .vision = o.vision != null, .kv8 = o.kv8, .prompt_int8 = o.prompt_int8 });
+    try @import("cuda_sm110_open.zig").check(ctx, kernels, o.context, o.slide, o.kv8, o.prompt_int8, o.rope_yarn != null);
     var loaded = try openLanes(gpa, io, ctx, dir, kernels, o);
     if (!clef) return loaded;
     errdefer loaded.deinit(loaded.ctx);
@@ -166,9 +166,9 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     loaded.readouts = j.readout().info;
     return loaded;
 }
+
 /// `open` without the decision-only refusals: the runners open a BF16 backbone with a test readout through it.
 pub fn openLanes(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
-    try @import("cuda_sm110_modes.zig").checkDevice(ctx, o.kv8, o.prompt_int8, o.rope_yarn != null);
     if (kernels != null) return error.QwenHasNoCapturedKernels;
     if (o.slide and o.kv8) return error.UnsupportedLearningFormat;
     const page_tokens = try pages_mod.paging();

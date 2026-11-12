@@ -35,7 +35,9 @@ pub fn current(kv8: bool, prompt_int8: bool, rope_yarn: bool) Modes {
 }
 
 pub fn checkDevice(ctx: *const cuda.Context, kv8: bool, prompt_int8: bool, rope_yarn: bool) !void {
-    try check(try ctx.capability(), current(kv8, prompt_int8, rope_yarn));
+    const now = current(kv8, prompt_int8, rope_yarn);
+    if (!needsDevice(now)) return;
+    try check(try ctx.capability(), now);
 }
 
 pub fn check(sm: u32, modes: Modes) !void {
@@ -62,6 +64,12 @@ fn one(raw: ?[]const u8) bool {
     return std.mem.eql(u8, raw orelse return false, "1");
 }
 
+fn needsDevice(modes: Modes) bool {
+    return modes.kv8 or modes.prompt_int8 or modes.rope_yarn or count(modes.kv_pages) or
+        one(modes.kv_pages_all) or count(modes.kv_share) or one(modes.request_starts) or
+        modes.kv_page_test != null or one(modes.keep_late) or modes.no_trees != null or modes.draft_nodes != null;
+}
+
 pub fn explain(err: anyerror) ?[]const u8 {
     return switch (err) {
         error.QwenSm110Fp8KvUnqualified => "--kv-cache fp8 is not qualified for Qwen on sm_110; use bf16",
@@ -83,6 +91,8 @@ test "SM110 accepts defaults, including explicit off values; other SMs retain ev
     try check(110, .{});
     try check(110, .{ .kv_pages = "0", .kv_share = "0", .kv_pages_all = "0", .request_starts = "0", .keep_late = "0" });
     try check(121, .{ .kv8 = true, .prompt_int8 = true, .kv_pages = "256", .keep_late = "1" });
+    try std.testing.expect(!needsDevice(.{ .kv_pages = "0", .kv_share = "0", .kv_pages_all = "0", .request_starts = "0", .keep_late = "0" }));
+    try std.testing.expect(needsDevice(.{ .kv8 = true }));
 }
 
 test "SM110 refuses every unqualified Qwen serving mode with an explanation" {
