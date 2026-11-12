@@ -89,6 +89,7 @@ const linux_fast = [_][]const u8{
     "test-native-options-host",
     "test-template-limits-host",
     "test-originals-host",
+    "test-tokenizer-host",
 };
 
 const linux_hip = [_][]const u8{
@@ -318,6 +319,7 @@ const macos_fast = [_][]const u8{
     "test-qwen27-reply-cache-host",
     "test-qwen27-startup-host",
     "test-template-limits-host",
+    "test-tokenizer-host",
 };
 
 const macos_lanes = [_][]const u8{
