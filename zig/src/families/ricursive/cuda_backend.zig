@@ -109,7 +109,7 @@ pub const Ripple = struct {
     }
 
     pub fn backend(x: *Ripple) be.Backend {
-        return .{ .ptr = x, .vtable = &vtable, .chunk_invariant = true }; // M1: chunk cuts give the same bits
+        return .{ .ptr = x, .vtable = &vtable, .chunk_invariant = true }; // chunk cuts give the same bits
     }
 
     const vtable: be.Backend.VTable = .{ .prefill = prefill, .prefill_step = prefillStep, .cancel_prefill = cancelPrefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release, .first_row = firstRow, .prompt_rows = true, .reports_fill = true };

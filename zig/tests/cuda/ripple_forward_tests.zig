@@ -193,7 +193,7 @@ fn same(comptime what: []const u8, args: anytype, got: []const u8, want: []const
     return false;
 }
 
-/// A prompt into `slot` from 0 in chunks of up to 2,048 rows (M1's path), its last row through the head.
+/// A prompt into `slot` from 0 in chunks of up to 2,048 rows, its last row through the head.
 fn prefill(m: *const fwd.Model, slot: usize, ids: []const u32) !fwd.Seq {
     var seq: fwd.Seq = .{ .slot = slot };
     while (seq.len < ids.len) {
