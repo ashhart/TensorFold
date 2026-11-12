@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- HIP ranks: a follower checks each step's counts against its message before using them, so a malformed step is refused instead of read past; a zero-row prompt chunk is still taken (#3042).
+
 - Cluster pull: a file pulled whole is checked against the manifest's hash; a mismatch deletes the file and fails the load (#3043).
 
 - Pull: a repository file under the engine's reserved names (`.tensorfold*` paths and `*.tensorfold-rollback`) is refused, so a model repository can't overwrite the engine's own state (#3032).
