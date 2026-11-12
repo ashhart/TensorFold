@@ -99,6 +99,14 @@ pub fn tiledActivation(out: View, x: View) Error!void {
 /// Rows of x one thread of qmm_q4_tile_rows computes (it also takes two columns); a chunk this long takes that image.
 pub const tile_rows: u64 = 4;
 
+/// The tiled images: f32 activations take `tile_f32`, bf16 chunks of `tile_rows` or more `tile_rows`, else `tile`.
+pub const TileImage = enum { tile_f32, tile_rows, tile };
+
+pub fn tileImage(act_f32: bool, m: u64) TileImage {
+    if (act_f32) return .tile_f32;
+    return if (m >= tile_rows) .tile_rows else .tile;
+}
+
 /// `project` over weights repacked by `tile`: one dispatch, so w must fit one binding and start 16-byte aligned.
 pub fn projectTiled(o: *Ops, cmds: *Commands, out: View, x: View, w: View, scales: View, biases: View, k: u64, timeout_ns: u64) Error!void {
     try tiledActivation(out, x);
@@ -107,12 +115,15 @@ pub fn projectTiled(o: *Ops, cmds: *Commands, out: View, x: View, w: View, scale
     const range = o.dev.properties.limits.maxStorageBufferRange;
     if (x.byteLen() > range or out.byteLen() > range or w.byteLen() > range) return error.TooLarge;
     if (qmmVariant(x, w) != .vec4) return error.Misaligned;
-    const act_f32 = out.kind == .f32;
-    const many = !act_f32 and g.m >= tile_rows;
-    const pipe = if (act_f32) &o.qmm_q4_tile_f32 else if (many) &o.qmm_q4_tile_rows else &o.qmm_q4_tile;
+    const image = tileImage(out.kind == .f32, g.m);
+    const pipe = switch (image) {
+        .tile_f32 => &o.qmm_q4_tile_f32,
+        .tile_rows => &o.qmm_q4_tile_rows,
+        .tile => &o.qmm_q4_tile,
+    };
     try pipe.bind(&.{ x.bind(), w.bind(), scales.bind(), biases.bind(), out.bind() });
     const p = try q4Push(g.m, g.n, k);
-    const threads = if (many) try ops_mod.cast32((g.m + tile_rows - 1) / tile_rows * ((g.n + 31) / 32 * 16)) else p.count;
+    const threads = if (image == .tile_rows) try ops_mod.cast32((g.m + tile_rows - 1) / tile_rows * ((g.n + 31) / 32 * 16)) else p.count;
     try pipe.run(cmds, std.mem.asBytes(&p), ops_mod.dispatchGroups(threads, pipe.local[0]), timeout_ns);
 }
 
@@ -270,6 +281,15 @@ test "the tiled image takes matching bf16 or f32 activations and refuses a mix" 
     try tiledActivation(f32out, f32x);
     try testing.expectError(error.Invalid, tiledActivation(f32out, x));
     try testing.expectError(error.Invalid, tiledActivation(out, f32x));
+}
+
+test "the tile image follows the activation kind and the chunk rows" {
+    try testing.expectEqual(TileImage.tile_f32, tileImage(true, 1));
+    try testing.expectEqual(TileImage.tile_f32, tileImage(true, 33));
+    try testing.expectEqual(TileImage.tile, tileImage(false, 1));
+    try testing.expectEqual(TileImage.tile, tileImage(false, 3));
+    try testing.expectEqual(TileImage.tile_rows, tileImage(false, 4));
+    try testing.expectEqual(TileImage.tile_rows, tileImage(false, 33));
 }
 
 test "the vec4 qmm image is chosen only when every vector load is 16-byte aligned" {
