@@ -255,7 +255,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
             return null;
         },
     };
-    const witness = if (cuda_witness.wanted(F, o)) try cuda_witness.Witness.open(gpa, io, o.dir) else null; // before the load
+    const witness = if (cuda_witness.wanted(F, o)) try cuda_witness.Witness.openOrFailed(gpa, io, o.dir, kernels) else null; // before the load
     defer cuda_witness.release(witness);
     const before = try pool(a, io, &g.ctx, problem) orelse return null;
     // a family split over hosts holds only its rank's share (GLM-5.3-Flash's TP)
@@ -445,7 +445,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     h.kv = kv_pages.watchOf(F, loaded, paged);
     h.kv_count = if (admit != null) kv_pages.ledgerPool(F, loaded) else null;
     const bench = if (@hasDecl(F, "benchmark")) F.benchmark(loaded.ctx) else api.Benchmark{ .ranks = 1 };
-    h.witness = cuda_witness.bound(F, witness, loaded, &g.ctx, kernels, .{ @intCast(window), @intCast(streams), @intCast(segments) });
+    h.witness = cuda_witness.bound(F, witness, loaded, &g.ctx, .{ @intCast(window), @intCast(streams), @intCast(segments) });
     const readouts: ?lanes.readout.Info = if (@hasField(@TypeOf(loaded), "readouts")) loaded.readouts else null;
     try h.serve(io, served.facts, loaded.rows, familyInfo(F, .{
         .benchmark_ranks = bench.ranks,

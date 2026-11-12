@@ -53,13 +53,15 @@ test "execution witness: each flag outside the first path names itself, and the 
         .{ .flag = "--drafter", .argv = &.{ "--drafter", "/tmp/drafter" } },
         .{ .flag = "--record", .argv = &.{ "--record", "/tmp/rows" } },
         .{ .flag = "--vision", .argv = &.{"--vision"} },
+        .{ .flag = "--kv-cache", .argv = &.{ "--kv-cache", "fp8" } },
+        .{ .flag = "--prompt-precision", .argv = &.{ "--prompt-precision", "int8" } },
     };
     for (cases) |c| {
         const argv = try std.mem.concat(a, []const u8, &.{ &.{ "m", "--execution-witness" }, c.argv });
         try t.expectEqualStrings(c.flag, witness.excluded(try parse(a, argv)).?);
     }
     // the build-gated flags: set as their parsers set them
-    for ([_]struct { []const u8, cli.Args }{ .{ "--spill-gib", .{ .spill_gib = 1 } }, .{ "--mtp-drafts", .{ .mtp_drafts = 2 } }, .{ "--tp", .{ .tp = 2 } }, .{ "--speed-up", .{ .speed_up = "a" } } }) |c|
+    for ([_]struct { []const u8, cli.Args }{ .{ "--spill-gib", .{ .spill_gib = 1 } }, .{ "--mtp-drafts", .{ .mtp_drafts = 2 } }, .{ "--tp", .{ .tp = 2 } }, .{ "--speed-up", .{ .speed_up = "a" } }, .{ "--rope-yarn", .{ .rope_yarn = 4 } } }) |c|
         try t.expectEqualStrings(c[0], witness.excluded(c[1]).?);
     try t.expectEqual(@as(?[]const u8, null), witness.excluded(.{ .mtp_drafts = 0, .spill_gib = 0 }));
 }

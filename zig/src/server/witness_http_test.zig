@@ -147,3 +147,22 @@ test "execution witness HTTP: an engine without a hook is unsupported_path; an e
         try t.expect(v.get("witness") == null and v.get("content") == null);
     }
 }
+
+test "execution witness HTTP: the engine's hashing begins at ready and at each reload, never on an excluded server" {
+    var c = try fixture.Checkpoint.init();
+    defer c.deinit();
+    for ([_]struct { args: @import("cli.zig").Args, begins: [2]u32 }{
+        .{ .args = .{ .execution_witness = true, .unix_socket = "test" }, .begins = .{ 1, 2 } },
+        .{ .args = .{ .execution_witness = true, .unix_socket = "test", .cortheon = true }, .begins = .{ 0, 0 } },
+    }) |case| {
+        var engine: fixture.Engine = .{};
+        var h: fixture.Harness = .{};
+        try h.start(&engine, null, &c, case.args);
+        defer h.deinit();
+        try t.expectEqual(@as(u32, 0), engine.begins.load(.acquire)); // nothing before ready
+        h.state.?.start(h.srv);
+        try t.expectEqual(case.begins[0], engine.begins.load(.acquire));
+        h.state.?.bump(h.srv.info); // a reload publishes a new engine
+        try t.expectEqual(case.begins[1], engine.begins.load(.acquire));
+    }
+}
