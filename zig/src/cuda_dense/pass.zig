@@ -112,6 +112,7 @@ pub fn rowsOf(m: *const Model, chains: []const Chain, prompt: bool, head0: usize
     var rows: usize = 0;
     for (chains) |ch| {
         if (ch.tokens.len == 0 or ch.slot >= m.slots or ch.p0 + ch.tokens.len > m.caps[ch.slot]) return error.BadChain;
+        for (ch.tokens) |t| if (t >= m.g.vocab) return error.TokenOutsideVocabulary; // embed reads row id unchecked
         if (ch.images.len > 0 and !prompt) return error.BadWindow;
         for (ch.images) |im| if (im.rows == 0 or im.row >= ch.tokens.len or im.rows > ch.tokens.len - im.row) return error.BadChain;
         rows += ch.tokens.len;
