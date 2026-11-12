@@ -1,4 +1,4 @@
-//! A Qwen3 dense checkpoint on the device: BF16 tensors as stored, norms widened to fp32, the output head on the host.
+//! A Qwen3 dense checkpoint: BF16 tensors on the device as stored, norms widened to fp32, the head's stored name.
 const std = @import("std");
 const core = @import("core");
 const cuda = @import("cuda");
