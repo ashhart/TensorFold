@@ -292,6 +292,7 @@ const macos_adapters = [_][]const u8{
     "test-shared-head-cost-metal-host",
     "test-slide-metal-host",
     "test-step5-host",
+    "test-token-ids-metal-host",
     "test-verbs",
 };
 
