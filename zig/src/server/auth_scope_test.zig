@@ -124,6 +124,16 @@ test "auth scopes: restricted Responses requests must be stateless and full keys
         try t.expectEqual(@as(?scope.Denial, null), try denial(scope.full, body));
 }
 
+test "auth scopes: a reply's execution witness needs read beside inference; admin and full keys keep it" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const asked = (try json.parse(arena.allocator(), "{\"prompt\":\"x\",\"execution_witness\":true}")).ok;
+    try t.expectEqual(@as(?scope.Denial, .execution_witness), scope.witnessDenial(.{ .inference = true }, asked));
+    for ([_]scope.Scopes{ .{ .inference = true, .read = true }, scope.full }) |s| try t.expectEqual(@as(?scope.Denial, null), scope.witnessDenial(s, asked));
+    for ([_][]const u8{ "{\"prompt\":\"x\"}", "{\"execution_witness\":false}", "{\"execution_witness\":1}", "[1]" }) |body|
+        try t.expectEqual(@as(?scope.Denial, null), scope.witnessDenial(.{ .inference = true }, (try json.parse(arena.allocator(), body)).ok));
+}
+
 test "auth scopes: flags, environment and plain file lines keep every route; the first configured key wins" {
     var file = try KeyFile.init("ops: file-secret\nplain-secret\nworker[inference]: app-secret\n");
     defer file.deinit();

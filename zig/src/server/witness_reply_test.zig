@@ -12,6 +12,7 @@ const steady = @import("witness_http_test.zig").steady;
 
 const open_body = "{\"model\":\"m\",\"prompt\":[104,105],\"max_tokens\":1,\"temperature\":0,\"execution_witness\":true";
 const ids_prompt = open_body ++ "}";
+const chat_body = "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":1,\"execution_witness\":true}";
 
 /// A server with the flag on, hashed and ready (an API key is not needed with --unix-socket's flag set).
 fn ready(h: *fixture.Harness, engine: *fixture.Engine, c: *fixture.Checkpoint, args: @import("cli.zig").Args) !void {
@@ -289,4 +290,68 @@ test "execution witness reply: concurrent replies each bind their own prompt to 
     for (threads) |th| th.join();
     try t.expectEqual(@as(u32, 0), shared.failed.load(.acquire));
     try t.expectEqual(@as(u32, 8), engine.calls.load(.acquire));
+}
+
+test "execution witness reply: a key without read is refused before the engine; read beside inference, admin or full binds" {
+    var file = try @import("auth_scope_test.zig").KeyFile.init("app[inference]: infer-secret\nboth[inference,read]: both-secret\nops[admin]: admin-secret\nfull-secret\n");
+    defer file.deinit();
+    var problem: []const u8 = "";
+    var keys = try @import("auth.zig").Store.init(t.allocator, &.{}, "", file.path, false, &problem);
+    defer keys.deinit();
+    var c = try fixture.Checkpoint.init();
+    defer c.deinit();
+    var engine: fixture.Engine = .{};
+    var h: fixture.Harness = .{ .model = fixture.ChatText.model() };
+    try h.start(&engine, &keys, &c, .{ .execution_witness = true });
+    defer h.deinit();
+    h.state.?.start();
+    _ = fixture.settled(h.state.?, h.srv);
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const routes = [_][2][]const u8{ .{ "/v1/completions", ids_prompt }, .{ "/v1/chat/completions", chat_body } };
+    for (routes) |route| {
+        const denied = try h.ask(a, "POST", route[0], "infer-secret", "localhost", route[1]);
+        try expectStatus(denied, 403);
+        try t.expectEqualStrings("insufficient_scope", (try fixture.payload(a, denied)).get("error").?.strField("code").?);
+        try t.expectEqualStrings("execution_witness", (try fixture.payload(a, denied)).get("error").?.strField("param").?);
+    }
+    try t.expectEqual(@as(u32, 0), engine.calls.load(.acquire));
+    const off = "{\"model\":\"m\",\"prompt\":[104,105],\"max_tokens\":1,\"temperature\":0,\"execution_witness\":false}";
+    const plain = try h.ask(a, "POST", "/v1/completions", "infer-secret", "localhost", off);
+    try expectStatus(plain, 200);
+    try t.expect(std.mem.indexOf(u8, plain, "execution_witness") == null);
+    for ([_][]const u8{ "both-secret", "admin-secret", "full-secret" }) |key| for (routes) |route| {
+        const reply = try h.ask(a, "POST", route[0], key, "localhost", route[1]);
+        try expectStatus(reply, 200);
+        const b = (try fixture.payload(a, reply)).get("execution_witness").?;
+        try t.expectEqualStrings("known", b.strField("state").?);
+        try expectConsistent(b);
+    };
+    try t.expectEqual(@as(u32, 7), engine.calls.load(.acquire));
+}
+
+test "execution witness reply: Responses and Messages refuse a true field by name, before the engine" {
+    var c = try fixture.Checkpoint.init();
+    defer c.deinit();
+    var engine: fixture.Engine = .{};
+    var h: fixture.Harness = .{ .model = fixture.ChatText.model() };
+    try ready(&h, &engine, &c, .{});
+    defer h.deinit();
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const responses = "{\"model\":\"m\",\"input\":\"hi\",\"max_output_tokens\":16,\"execution_witness\":true}";
+    const routes = [_][2][]const u8{ .{ "/v1/responses", responses }, .{ "/v1/messages", chat_body }, .{ "/v1/messages/count_tokens", chat_body } };
+    for (routes) |route| {
+        const refused = try h.ask(a, "POST", route[0], "", "localhost", route[1]);
+        try expectStatus(refused, 400);
+        try t.expect(std.mem.indexOf(u8, refused, "execution_witness is supported on /v1/chat/completions and /v1/completions only") != null);
+    }
+    try t.expectEqual(@as(u32, 0), engine.calls.load(.acquire));
+    for (routes) |route| {
+        const without = try std.mem.replaceOwned(u8, a, route[1], ",\"execution_witness\":true", "");
+        try expectStatus(try h.ask(a, "POST", route[0], "", "localhost", without), 200);
+    }
+    try t.expectEqual(@as(u32, 2), engine.calls.load(.acquire));
 }

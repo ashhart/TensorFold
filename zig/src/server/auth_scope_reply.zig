@@ -22,5 +22,6 @@ pub fn text(anthropic_shape: bool, reason: scope.Denial) []const u8 {
         .route => "{\"error\": {\"message\": \"This API key does not permit this operation\", \"type\": \"permission_error\", \"param\": null, \"code\": \"insufficient_scope\"}}",
         .response_history => "{\"error\": {\"message\": \"This API key cannot read stored responses: send the whole conversation without previous_response_id\", \"type\": \"permission_error\", \"param\": \"previous_response_id\", \"code\": \"insufficient_scope\"}}",
         .response_storage => "{\"error\": {\"message\": \"This API key cannot store responses: send \\\"store\\\": false\", \"type\": \"permission_error\", \"param\": \"store\", \"code\": \"insufficient_scope\"}}",
+        .execution_witness => "{\"error\": {\"message\": \"This API key cannot read the execution witness: send the request without execution_witness\", \"type\": \"permission_error\", \"param\": \"execution_witness\", \"code\": \"insufficient_scope\"}}",
     };
 }
