@@ -11,6 +11,8 @@ const lfm3_dual = @import("metal_lfm3_dual.zig");
 const lfm3_segments = @import("metal_lfm3_segments.zig");
 const lfm3_alpha = @import("metal_lfm3_alpha.zig");
 const lfm3_conv_segments = @import("metal_lfm3_conv_segments.zig");
+const argmax = @import("metal_lfm2_argmax.zig");
+const lfm2_controls = @import("metal_lfm2_controls.zig");
 const binned_projection = @import("metal_binned_projection.zig");
 const lfm3_projection = @import("metal_lfm3_projection.zig");
 const g = contract.gates;
@@ -42,6 +44,8 @@ pub const Suite = struct {
     lfm3_shared_count: usize = 0,
     lfm3_conv_probes: [2]lfm3_conv_segments.Probe = undefined,
     lfm3_conv_count: usize = 0,
+    lfm3_argmax_probes: [3]argmax.Probe = undefined,
+    lfm3_argmax_count: usize = 0,
     lfm3_sum_probes: [8]lfm3_sums.Probe = undefined,
     lfm3_sum_count: usize = 0,
     lfm3_attention_probes: [std.enums.values(lfm3_attention_sums.Kind).len * 2]lfm3_attention_sums.Probe = undefined,
@@ -125,6 +129,12 @@ pub const Suite = struct {
             s.lfm3_conv_count += 1;
         }
         for (s.lfm3_conv_probes[0..s.lfm3_conv_count]) |*probe| try kernels.append(a, probe.kernel());
+        for ([_]lfm2_controls.Mutation{ .none, .argmax_last_tie, .argmax_no_flag }) |m| {
+            if (!wanted(only, argmax.familyName(.lfm3, m))) continue;
+            s.lfm3_argmax_probes[s.lfm3_argmax_count] = try argmax.Probe.initFor(a, device, queue, .lfm3, m);
+            s.lfm3_argmax_count += 1;
+        }
+        for (s.lfm3_argmax_probes[0..s.lfm3_argmax_count]) |*probe| try kernels.append(a, probe.kernel());
         for ([_]lfm3_sums.Kind{ .norm, .qk }) |kind| for ([_]bool{ false, true }) |bad| {
             if (!wanted(only, lfm3_sums.name(kind, bad))) continue;
             s.lfm3_sum_probes[s.lfm3_sum_count] = try lfm3_sums.Probe.init(a, device, queue, kind, bad);
@@ -183,6 +193,7 @@ pub const Suite = struct {
         if (s.lfm3_alpha_probe) |*probe| probe.deinit();
         for (s.lfm3_shared_probes[0..s.lfm3_shared_count]) |*probe| probe.deinit();
         for (s.lfm3_conv_probes[0..s.lfm3_conv_count]) |*probe| probe.deinit();
+        for (s.lfm3_argmax_probes[0..s.lfm3_argmax_count]) |*probe| probe.deinit();
         for (s.lfm3_sum_probes[0..s.lfm3_sum_count]) |*probe| probe.deinit();
         for (s.lfm3_attention_probes[0..s.lfm3_attention_count]) |*probe| probe.deinit();
         for (s.binned_probes[0..s.binned_count]) |*probe| probe.deinit();
