@@ -111,8 +111,12 @@ mapped coherent host memory; a GPU without them is refused by name.
   ranks of one process hung, or read stale bytes, once a call reached 16 KiB (ROCm 10.0, gfx1151).
 - A call larger than `Options.part_bytes` (default 4 MiB, the same on every rank or the open fails) moves in parts.
   Each frame names its part, so one call in two parts never pairs with two whole calls.
+- The stream writes `ready` only after the work queued before it on that stream has finished, so when the proxy sees
+  it the input is complete in device memory, and the proxy's own stream reads it from there.
 - A failure, the peer's, a timeout or a device call's, sets every `done` word, so no stream waits on it; it shows at
   the next call or at `check`, and the outputs of the calls in flight are not defined.
+- The proxy waits for each of its copies at most `Hip.limit_ns` (30 s), then fails the call: past the runtime's
+  hardware queues (`GPU_MAX_HW_QUEUES`, 4 by default) its stream can share one with a stream parked on a word.
 - A capturing stream is refused (`Unsupported`): a replay would write and wait on the words' old values.
 - `allGatherV` moves whole strides, as `Collective` does for a transport without its own.
 - `deinit` frees the slab once every stream has passed its last call; the caller synchronises its streams first.
