@@ -339,6 +339,30 @@ test "serve steps: a failed piece and a cancel mid-prompt free the slot; the nex
     try t.expectEqual(@as(u64, 2), r.x.abandoned);
 }
 
+test "serve steps: --decode-share 0.5 alone turns steps on at that share; out of range and a malformed switch refused" {
+    const t = std.testing;
+    const env = @import("sys").env;
+    const names = [_][:0]const u8{ "TF_DSV41_PREFILL_PIECES", "TENSORFOLD_PREFILL_ORDER", "TENSORFOLD_PREFILL_POLICY", "TENSORFOLD_PREFILL_SHARE", "TENSORFOLD_PREFILL_BUDGET" };
+    for (names) |n| _ = env.unsetenv(n);
+    defer for (names) |n| {
+        _ = env.unsetenv(n);
+    };
+    try t.expect(try serve_lanes.stepsFor(0.5));
+    try t.expect(!try serve_lanes.stepsFor(0));
+    try t.expect(!try serve_lanes.stepsFor(null));
+    for ([_]f64{ 1, 1.5, -0.1, std.math.nan(f64) }) |x| try t.expectError(error.BadDecodeShare, serve_lanes.stepsFor(x));
+    var r: Rig = undefined;
+    try r.openShared(2, try serve_lanes.stepsFor(0.5), 0.5);
+    defer r.close();
+    try t.expectApproxEqAbs(@as(f64, 0.5), r.s.host.share.p, 1e-9);
+    try t.expect(r.s.host.decode_cap and r.s.backend.steps);
+    // the switch: blank keeps its default, malformed text stops the start (entry.zig names it)
+    _ = env.setenv(names[0], " ", 1);
+    try t.expect(!try serve_lanes.stepsFor(null));
+    _ = env.setenv(names[0], "yes", 1);
+    try t.expectError(error.InvalidEnvironment, serve_lanes.stepsFor(null));
+}
+
 test "serve steps: TF_DSV41_PREFILL_PIECES, an srpt order or a prompt share turns steps on; nothing set keeps whole" {
     const t = std.testing;
     const env = @import("sys").env;
