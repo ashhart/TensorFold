@@ -145,9 +145,9 @@ jobs:
       # Keep per-test timeouts while allowing the DeepSeek AOT enumeration to finish on hosted runners.
       - name: zig build test-host
         run: zig build -Dfixed-cpu test-host --test-timeout 20m
-      # DeepSeek-V4.1's keyed sampling, DSpark, row and device plans run without a GPU.
-      - name: zig build test-dsv41-draft test-dsv41-device-host
-        run: zig build -Dfixed-cpu test-dsv41-draft test-dsv41-device-host --test-timeout 10m
+      # DeepSeek-V4.1's keyed sampling, DSpark and shared lane core host tests. Its row and device plans run nightly.
+      - name: zig build test-dsv41-draft
+        run: zig build -Dfixed-cpu test-dsv41-draft --test-timeout 10m
       # The kernel contract's limits gate: every registered launch against M1-M5 and sm_80/86/89/120/121, controls red.
       - name: zig build test-kernel-contract
         run: zig build -Dfixed-cpu test-kernel-contract
