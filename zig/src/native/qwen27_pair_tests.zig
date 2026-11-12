@@ -109,8 +109,9 @@ test "qwen27 pair: the fingerprint names the fact two Macs differ on" {
         .{ .version = 7, .chip = 5, .checkpoint = 0xA11CE, .format = 64 }, // an M5 beside an M4
         .{ .version = 7, .chip = 4, .checkpoint = 0xB0B, .format = 64 }, // another checkpoint (quantization, shapes)
         .{ .version = 7, .chip = 4, .checkpoint = 0xA11CE, .format = 128 }, // another weight format
+        .{ .version = 7, .chip = 4, .checkpoint = 0xA11CE, .format = 64, .protocol = 9 }, // another command set
     };
-    const names = [_][]const u8{ "engine version", "GPU family", "checkpoint", "weight format" };
+    const names = [_][]const u8{ "engine version", "GPU family", "checkpoint", "weight format", "command protocol" };
     for (cases, names) |peer, name| {
         const why = (try tf.pair_rows.fingerprintProblem(std.testing.allocator, same, peer)).?;
         defer std.testing.allocator.free(why);
@@ -164,14 +165,16 @@ fn readyBoth(zero: Fingerprint, one: Fingerprint) ![2]Ready {
     return ranks;
 }
 
-test "qwen27 pair: ready refuses another checkpoint or GPU family by name, read through the link's words" {
-    const m4: Fingerprint = .{ .version = 7, .chip = pair_mod.chipGeneration("Apple M4 Max"), .checkpoint = 0xA11CE, .format = 64 };
+test "qwen27 pair: ready refuses another checkpoint, GPU family or command set by name, through the link's words" {
+    const m4: Fingerprint = .{ .version = 7, .chip = pair_mod.chipGeneration("Apple M4 Max"), .checkpoint = 0xA11CE, .format = 64, .protocol = pair_mod.protocol };
     for (try readyBoth(m4, m4)) |r| try std.testing.expectEqual(@as(?anyerror, null), r.err); // alike: both come up
     var m5 = m4;
     m5.chip = pair_mod.chipGeneration("Apple M5 Ultra");
     var other = m4;
     other.checkpoint = 0xB0B;
-    for ([_]Fingerprint{ m5, other }, [_][]const u8{ "GPU family", "checkpoint" }) |peer, name| {
+    var commands = m4;
+    commands.protocol +%= 1; // a build whose commands differ, though its version string is the same
+    for ([_]Fingerprint{ m5, other, commands }, [_][]const u8{ "GPU family", "checkpoint", "command protocol" }) |peer, name| {
         // each rank compares its own facts with the words the other signalled, so both refuse, naming the fact
         const ranks = try readyBoth(m4, peer);
         for (ranks) |r| {
