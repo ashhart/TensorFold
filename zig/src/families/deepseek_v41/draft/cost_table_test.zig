@@ -261,3 +261,20 @@ test "a lone stream's choice under the measured table is never worse, under the 
         try t_.expect(km <= kd); // dearer rows past the first never draft deeper
     }
 }
+
+test "a stored table whose pass is implausible against its rows is never read back" {
+    const io = t_.io;
+    var tmp = t_.tmpDir(.{});
+    defer tmp.cleanup();
+    var buf: [256]u8 = undefined;
+    const root = try std.fmt.bufPrint(&buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const want: calib_env.Shape = .{ .slots = 4, .world = 1, .dspark = true, .context = 1280, .id = 0xa1 };
+    var v = [_]f64{ 28.4, 37.5 };
+    const bad: costs_mod.Costs = .{ .verify = &v, .draft = 105.0, .slot = 8.0 };
+    const path = try calib_env.store(gpa, io, root, want, bad, .{ .method = .{}, .seconds = 1.0 }, 1_791_504_000);
+    defer gpa.free(path);
+    var got = try calib_env.load(gpa, io, .{ .mode = "zig", .dir = root }, want, 64);
+    defer got.deinit(gpa);
+    try t_.expectEqual(calib_env.Source.measure, got.source); // measured again, not the stored 105 ms
+    try t_.expectError(error.ImplausibleCosts, calib_env.load(gpa, io, .{ .mode = "cached", .file = path }, want, 64));
+}
