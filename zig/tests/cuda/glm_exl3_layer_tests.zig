@@ -189,7 +189,7 @@ pub fn run(gpu: Gpu, dir: []const u8, layer_s: []const u8, rank_s: []const u8, w
     defer pm.unload();
     var k = try glm.exl3.Kernels.load(gpu.d);
     defer k.unload();
-    var ek = try glm.experts.Kernels.load(gpu.d, pm, @intCast(try gpu.ctx.attribute(.multiprocessor_count)));
+    var ek = try glm.experts.Kernels.load(gpu.d, pm, @intCast(try gpu.ctx.attribute(.multiprocessor_count)), false);
     defer ek.unload();
 
     // the pool: the first and last experts and 14 more, distinct
