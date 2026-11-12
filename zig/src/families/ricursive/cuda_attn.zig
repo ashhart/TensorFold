@@ -350,7 +350,7 @@ test "global decode rows: each row its own stream and call table row, committed 
     plan(&one, 4, 510, 3, 0, 4608);
     var rows: [planBytes(4)]u8 = @splat(0xee);
     for (0..3) |r| planRow(&rows, 4, r, 510 + r + 1, 0, 4608);
-    try t.expectEqualSlices(u8, &one, &rows); // a stream's consecutive rows: M1's plan
+    try t.expectEqualSlices(u8, &one, &rows); // a stream's consecutive rows, planned one by one
     try t.expectEqual(@as(usize, 8), groupsOf(&pos)); // 4,096 keys: 8 groups of 512
     try t.expectEqual(@as(usize, 9), groupsOf(&.{4096}));
 }

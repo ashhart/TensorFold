@@ -21,7 +21,7 @@ pub const ring_rows = 3072;
 pub const page_tokens = 512;
 /// Rows the head writes at once for a chunk's every-row logits.
 pub const head_rows = 128;
-/// A one-row round's rows: the round maximum of the CLI and the one-stream backend (M1's one-row chain decode).
+/// A one-row round's rows: the round maximum of the CLI and the one-stream backend (one-row chain decode).
 pub const decode_rows = 1;
 /// Device offsets start on 256 bytes (the row kernels read 16-byte chunks).
 const buffer_align = 256;
@@ -134,7 +134,7 @@ pub const Arena = struct {
     per_slot: usize, // pages a slot's global layer holds
     kvw: usize,
 
-    /// `slots` slots' caches for `context` positions and the int32 table (one slot: M1's State.bytes).
+    /// `slots` slots' caches for `context` positions and the int32 table.
     pub fn bytes(c: Config, context: usize, slots: usize) usize {
         return slots * slotBytes(c, context) + std.mem.alignForward(usize, slots * pagesOf(context) * 4, buffer_align);
     }
@@ -415,7 +415,7 @@ pub const Model = struct {
         }
     }
 
-    /// A prompt chunk of one slot: `ids` at p0, p0 + 1, ... (at most prompt_rows), M1's prompt path and bits.
+    /// A prompt chunk of one slot: `ids` at p0, p0 + 1, ... (at most prompt_rows).
     pub fn prompt(m: *const Model, slot: usize, p0: usize, ids: []const u32) !void {
         const n = ids.len;
         if (n == 0 or n > prompt_rows) return error.ForwardRows;
@@ -540,7 +540,7 @@ test "ricursive cuda caches: 64 rings of 3,072 rows, 16 layers' pages for the co
     const c = try release();
     try testing.expectEqual(@as(usize, 16), c.globals());
     const ring = 64 * 2 * 3072 * 1024 * 2;
-    try testing.expectEqual(ring + 16 * 2 * 64 * 512 * 1024 * 2 + 256, Arena.bytes(c, 32768, 1)); // M1's State.bytes
+    try testing.expectEqual(ring + 16 * 2 * 64 * 512 * 1024 * 2 + 256, Arena.bytes(c, 32768, 1)); // one slot at the default context
     try testing.expectEqual(ring + 16 * 2 * 9 * 512 * 1024 * 2 + 256, Arena.bytes(c, 4096 + 1, 1)); // a part page is a page
     try testing.expectEqual(4 * slotBytes(c, 32768) + 4 * 64 * 4, Arena.bytes(c, 32768, 4)); // the table: 4 rows of 64 ids
     try testing.expect(c.window - 1 + prompt_rows <= ring_rows);
