@@ -197,6 +197,7 @@ pub fn stage(m: *const model.Model, host: *Host, segs: []const Seg, window: bool
     for (segs) |g| {
         const n = g.tokens.len;
         for (g.tokens, 0..) |tok, r| {
+            if (tok >= d.vocab) return error.InvalidToken; // embed reads the table at id unchecked
             for (0..d.streams) |k| ids[(row + r) * d.streams + k] = @intCast(tok);
             pos[row + r] = @intCast(g.pos + r);
             ends[row + r] = @intCast(g.pos + r + 1);

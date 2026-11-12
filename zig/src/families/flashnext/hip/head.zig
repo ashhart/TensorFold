@@ -46,6 +46,7 @@ pub fn run(
     const at_pos = try host.gpa.alloc(i32, rows);
     defer host.gpa.free(at_pos);
     for (ids, at_pos, tokens, 0..) |*i, *p, t, r| {
+        if (t >= d.vocab) return error.InvalidToken; // embed reads the table at id unchecked
         i.* = @intCast(t);
         p.* = @intCast(pos + r);
     }
