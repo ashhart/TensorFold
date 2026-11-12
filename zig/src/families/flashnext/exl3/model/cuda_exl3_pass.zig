@@ -135,6 +135,12 @@ pub fn pooled(st: cuda.Stream, ops: *load.Ops, pool: *pool_.Pool, ex: *const cud
     }
 }
 
+/// Pooled EXL3 layers read picks back for host planning, which cannot run inside whole-pass stream capture.
+pub fn waitsHost(layers: []const @import("../../cuda_prompt_load.zig").Layer) bool {
+    for (layers) |*l| if (l.exl3) |x| if (x.pool != null) return true;
+    return false;
+}
+
 /// Every offloaded experts layer of a loaded engine (the 48 decoder layers).
 pub fn offloadedLayers(layers: []const @import("../../cuda_prompt_load.zig").Layer, out: []*load.Experts) usize {
     var n: usize = 0;
