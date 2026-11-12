@@ -209,3 +209,81 @@ test "qwen27 pair: a pair's /health names the two-Mac mode, and one Mac's Info i
     rest.policy = info.policy;
     try std.testing.expect(std.meta.eql(info, rest)); // the policy is the only field a pair changes
 }
+
+/// Rank 0's half of `Pair.send` over the fake link: its own frame, written to rank 1's command words and flagged.
+fn post(zero: *lb.Pair, kind: u32, words: []const u32) !void {
+    zero.cmd += 1;
+    const n = zero.frame(kind, words);
+    try zero.rd.write(1, zero.l.cmdIn(), zero.win[zero.l.cmdOut()..][0..n]);
+    try zero.rd.signal(1, zero.l.flags() + tf.pair_rows.CMD_FLAG, zero.cmd);
+}
+
+/// What rank 1's `follow` checks before it replays a frame: `Pair.next` reads it off the link, `decode` checks it.
+fn replayed(one: *lb.Pair, words: *std.ArrayList(u32), slots: u32) !pair_mod.Command {
+    const kind = (try one.next(std.testing.allocator, words)) orelse return error.LinkEnded;
+    return pair_mod.decode(kind, words.items, slots);
+}
+
+test "qwen27 pair: rank 1 reads a .tree and a .commit off the link, and refuses a malformed frame or a slot it lacks" {
+    const gpa = std.testing.allocator;
+    const layout: @FieldType(lb.Pair, "l") = .{ .slot = 16384 };
+    const c = try fabric.fake.Cluster.init(gpa, 2, layout.window(), .immediate, null);
+    defer c.deinit();
+    var zero = fakeRank(c, 0, layout);
+    var one = fakeRank(c, 1, layout);
+    var sent: std.ArrayList(u32) = .empty;
+    defer sent.deinit(gpa);
+    var got: std.ArrayList(u32) = .empty;
+    defer got.deinit(gpa);
+    // a drafted round as `Link.tree` and `Link.commit` encode it: three rows, the root's two children, then a path
+    const ids = [_]u32{ 248044, 11, 12 };
+    const parents = [_]i32{ -1, 0, 0 };
+    try pair_mod.encode(&sent, gpa, .{ .tree = .{ .slot = 0, .ids = &ids, .parents = @ptrCast(&parents) } });
+    try post(&zero, @backingInt(pair_mod.Kind.tree), sent.items);
+    const tree = (try replayed(&one, &got, 1)).tree;
+    try std.testing.expectEqualSlices(u32, &ids, tree.ids);
+    for (parents, tree.parents) |want, word| try std.testing.expectEqual(want, @as(i32, @bitCast(word)));
+    try pair_mod.encode(&sent, gpa, .{ .commit = .{ .slot = 0, .path = &.{ 0, 2 } } });
+    try post(&zero, @backingInt(pair_mod.Kind.commit), sent.items);
+    try std.testing.expectEqualSlices(u32, &.{ 0, 2 }, (try replayed(&one, &got, 1)).commit.path);
+    // the same tree for slot 1, on a rank 1 whose runner holds one slot: refused before the slot indexes anything
+    try pair_mod.encode(&sent, gpa, .{ .tree = .{ .slot = 1, .ids = &ids, .parents = @ptrCast(&parents) } });
+    try post(&zero, @backingInt(pair_mod.Kind.tree), sent.items);
+    try std.testing.expectError(error.SlotOutOfRange, replayed(&one, &got, 1));
+    // malformed frames: a row count past the words, a .tree cut to its slot, a commit short of its path, a flag of 2
+    const bad = [_]struct { pair_mod.Kind, []const u32 }{
+        .{ .tree, &.{ 0, 3, 248044, 11, 12, 0xFFFFFFFF, 0 } },
+        .{ .tree, &.{0} },
+        .{ .commit, &.{ 0, 2, 0 } },
+        .{ .step, &.{0} },
+        .{ .chunk, &.{ 0, 1, 2, 0, 11 } },
+    };
+    const why = [_]anyerror{ error.CommandLength, error.CommandLength, error.CommandLength, error.CommandLength, error.CommandFlag };
+    for (bad, why) |frame, err| {
+        try post(&zero, @backingInt(frame[0]), frame[1]);
+        try std.testing.expectError(err, replayed(&one, &got, 1));
+    }
+    try post(&zero, 99, &.{0}); // a command this build does not know
+    try std.testing.expectError(error.UnknownCommand, replayed(&one, &got, 1));
+}
+
+test "qwen27 pair: every command decodes to what was encoded, slot first" {
+    const gpa = std.testing.allocator;
+    var words: std.ArrayList(u32) = .empty;
+    defer words.deinit(gpa);
+    const commands = [_]pair_mod.Command{
+        .{ .begin = 0 },
+        .{ .chunk = .{ .slot = 0, .ids = &.{ 1, 2, 3 }, .last = true, .decoded = false } },
+        .{ .step = .{ .slot = 0, .token = 7 } },
+        .{ .tree = .{ .slot = 0, .ids = &.{ 5, 6 }, .parents = &.{ 0xFFFFFFFF, 0 } } },
+        .{ .commit = .{ .slot = 0, .path = &.{0} } },
+        .{ .end = 0 },
+    };
+    for (commands) |command| {
+        try pair_mod.encode(&words, gpa, command);
+        const back = try pair_mod.decode(@backingInt(std.meta.activeTag(command)), words.items, 1);
+        try std.testing.expectEqual(std.meta.activeTag(command), std.meta.activeTag(back));
+        try std.testing.expectEqual(command.slot(), back.slot());
+        try std.testing.expectEqual(words.items[0], back.slot());
+    }
+}

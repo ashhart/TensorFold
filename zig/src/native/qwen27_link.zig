@@ -5,6 +5,7 @@ const mtl = @import("metal");
 const tf = @import("tensorfold");
 const q = tf.qwen27;
 const lb = @import("qwen27_lanes.zig");
+const pair_mod = @import("qwen27_pair.zig");
 
 /// Rank 1's follower: replay rank 0's rounds in order; a rank that cannot replay stops to be restarted.
 pub fn follow(b: *lb.Metal) void {
@@ -16,52 +17,46 @@ pub fn follow(b: *lb.Metal) void {
             return;
         };
         const k = seen orelse return;
-        const kind = std.enums.fromInt(lb.Kind, k) orelse failFollow("an unknown command", k);
-        const w = l.words.items;
-        std.log.info("q27 follower: got {s} words={d}", .{ @tagName(kind), w.len });
-        switch (kind) {
-            .begin => {
-                if (w.len != 1) failFollow("begin", w.len);
-                b.dropRound();
-                b.runner.reset(w[0]) catch |err| return failFollow("begin", @errorName(err));
-            },
-            .chunk => {
-                if (w.len < 4 or w.len != 4 + w[1]) failFollow("chunk", w.len);
-                const session = q.session.Session{ .runner = b.runner, .slot = w[0] };
-                const chunk = w[4..];
-                if (w[3] != 0) {
-                    session.decodeChunk(chunk, w[2] != 0) catch |err| return failFollow("decode chunk", @errorName(err));
-                } else {
-                    session.promptChunk(chunk, w[2] != 0) catch |err| return failFollow("prompt chunk", @errorName(err));
-                }
-            },
-            .step => {
-                if (w.len != 2) failFollow("step", w.len);
-                (q.session.Session{ .runner = b.runner, .slot = w[0] }).step(w[1]) catch |err| return failFollow("step", @errorName(err));
-            },
-            .tree => {
-                std.log.info("q27 follower: tree slot={d} rows={d}", .{ w[0], w[1] });
-                if (w.len < 2 or w.len != 2 + 2 * w[1]) failFollow("tree", w.len);
-                const slot = w[0];
-                const ids = w[2 .. 2 + w[1]];
-                const parent_words = w[2 + w[1] ..];
-                const parents = b.gpa.alloc(i32, parent_words.len) catch |err| return failFollow("tree parents", @errorName(err));
-                defer b.gpa.free(parents);
-                for (parent_words, 0..) |pw, i| parents[i] = @bitCast(pw);
-                const round = q.round_plan.Round.init(b.gpa, &.{.{ .slot = slot, .start = b.runner.offsets[slot], .capacity = b.runner.capacity, .ids = ids, .parents = parents }}, @intCast(b.runner.model.config.conv_kernel), b.runner.slots, @intCast(b.runner.model.shard.global.vocab)) catch |err| return failFollow("tree round", @errorName(err));
-                if (b.round) |*old| old.deinit();
-                b.round = round;
-                b.runner.verifyHead(&b.round.?, .all) catch |err| return failFollow("tree verify", @errorName(err));
-            },
-            .commit => {
-                if (w.len < 2 or w.len != 2 + w[1]) failFollow("commit", w.len);
-                const round = &(b.round orelse return failFollow("commit without a tree", w[0]));
-                b.runner.keep(round, &.{w[2..][0..w[1]]}) catch |err| return failFollow("tree keep", @errorName(err));
-                round.deinit();
-                b.round = null;
-            },
-            .end => {},
-        }
+        // a frame is checked whole before any word is read as a field or a slot indexes the runner
+        const command = pair_mod.decode(k, l.words.items, b.runner.slots) catch |err| failFollow("a command", .{ k, @errorName(err) });
+        std.log.info("q27 follower: got {s} words={d}", .{ @tagName(command), l.words.items.len });
+        replay(b, command);
+    }
+}
+
+/// One checked command on rank 1's runner, as rank 0 ran it.
+fn replay(b: *lb.Metal, command: pair_mod.Command) void {
+    switch (command) {
+        .begin => |slot| {
+            b.dropRound();
+            b.runner.reset(slot) catch |err| return failFollow("begin", @errorName(err));
+        },
+        .chunk => |c| {
+            const session = q.session.Session{ .runner = b.runner, .slot = c.slot };
+            if (c.decoded) {
+                session.decodeChunk(c.ids, c.last) catch |err| return failFollow("decode chunk", @errorName(err));
+            } else {
+                session.promptChunk(c.ids, c.last) catch |err| return failFollow("prompt chunk", @errorName(err));
+            }
+        },
+        .step => |s| (q.session.Session{ .runner = b.runner, .slot = s.slot }).step(s.token) catch |err| return failFollow("step", @errorName(err)),
+        .tree => |t| {
+            const parents = b.gpa.alloc(i32, t.parents.len) catch |err| return failFollow("tree parents", @errorName(err));
+            defer b.gpa.free(parents);
+            for (t.parents, parents) |word, *p| p.* = @bitCast(word);
+            const round = q.round_plan.Round.init(b.gpa, &.{.{ .slot = t.slot, .start = b.runner.offsets[t.slot], .capacity = b.runner.capacity, .ids = t.ids, .parents = parents }}, @intCast(b.runner.model.config.conv_kernel), b.runner.slots, @intCast(b.runner.model.shard.global.vocab)) catch |err| return failFollow("tree round", @errorName(err));
+            if (b.round) |*old| old.deinit();
+            b.round = round;
+            b.runner.verifyHead(&b.round.?, .all) catch |err| return failFollow("tree verify", @errorName(err));
+        },
+        .commit => |c| {
+            const round = &(b.round orelse return failFollow("commit without a tree", c.slot));
+            if (round.slots[0] != c.slot) return failFollow("commit for another slot's tree", .{ c.slot, round.slots[0] });
+            b.runner.keep(round, &.{c.path}) catch |err| return failFollow("tree keep", @errorName(err));
+            round.deinit();
+            b.round = null;
+        },
+        .end => {},
     }
 }
 

@@ -73,7 +73,8 @@ const slotOf = pair_layout.slotOf;
 const Layout = pair_layout.Layout;
 const FLAG = pair_layout.FLAG;
 const HELLO = pair_layout.HELLO;
-const CMD_FLAG = pair_layout.CMD_FLAG;
+/// The flag word rank 1 waits on for the next command (the host tests post commands through it).
+pub const CMD_FLAG = pair_layout.CMD_FLAG;
 const CMD_ACK = pair_layout.CMD_ACK;
 const READY = pair_layout.READY;
 const FINGERPRINT = pair_layout.FINGERPRINT;
@@ -392,11 +393,17 @@ pub const Pair = struct {
         raise();
         try p.reach(p.l.flags() + CMD_ACK, p.cmd, cmd_ack_timeout_ms);
         p.cmd += 1;
+        const n = p.frame(kind, words);
+        try p.ep.writeSignalFrom(p.peer, p.l.cmdOut(), p.l.cmdIn(), n, p.l.flags() + CMD_FLAG, p.cmd);
+    }
+
+    /// Rank 0's frame at its cmdOut, as `next` reads it at cmdIn: kind, word count, the words; its byte count.
+    pub fn frame(p: *Pair, kind: u32, words: []const u32) usize {
         const head: [2]u32 = .{ kind, @intCast(words.len) };
         const out = p.l.cmdOut();
         @memcpy(p.win[out..][0..8], std.mem.asBytes(&head));
         @memcpy(p.win[out + 8 ..][0 .. 4 * words.len], std.mem.sliceAsBytes(words));
-        try p.ep.writeSignalFrom(p.peer, out, p.l.cmdIn(), 8 + 4 * words.len, p.l.flags() + CMD_FLAG, p.cmd);
+        return 8 + 4 * words.len;
     }
 
     /// Rank 1: rank 0's next command's words into `out` and its kind; null once rank 0 is done or this Mac stops.
