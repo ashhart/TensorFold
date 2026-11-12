@@ -8,27 +8,32 @@ const ring = @import("ring.zig");
 const net = @import("net.zig");
 const t = std.testing;
 
-const layers = 6;
-const hidden = 4;
+test {
+    _ = @import("lead_test.zig");
+}
+
+pub const layers = 6;
+pub const hidden = 4;
 const planes = 2;
-const most_rows = 16;
+pub const most_rows = 16;
 const most_window = 8;
-const parallel = 2;
-const context = 256;
-const most = 3;
-const pipe_streams = 4;
+pub const parallel = 2;
+pub const context = 256;
+pub const most = 3;
+pub const pipe_streams = 4;
 const pipe_steps = 6;
 
-/// A planted fault on one stage: a layer short of its range, a rollback of the position only, or no rollback.
-const Plant = enum { none, short_range, no_restore, no_rollback };
+/// A planted fault on one stage: short range, position-only rollback, no rollback, or death at its third forward.
+pub const Plant = enum { none, short_range, no_restore, no_rollback, dies };
 
 /// An engine whose layer `l` mixes `l` and a per-stream running state into every row, so order and state both show.
-const Fake = struct {
+pub const Fake = struct {
     pub const Engine = struct {
         gpa: std.mem.Allocator,
         first: u32,
         end: u32,
         plant: Plant = .none,
+        forwards: u32 = 0,
         /// Rank 0's head: every window row, and a prompt part's last row, `hidden` values each.
         out: std.ArrayList(u32) = .empty,
         h: [most_rows * hidden]u32 = undefined,
@@ -127,6 +132,8 @@ const Fake = struct {
 
     /// This stage's layers over the round's rows; rank 0 embeds and runs the head, the hop carries the rows between.
     pub fn forward(e: *Engine, parts: []const Part, ids: []const u32, mode: plan.Mode, hop: ?driver.Hop) !void {
+        e.forwards += 1;
+        if (e.plant == .dies and e.forwards == 3) return error.PlantedDeath;
         const bytes = try runLayers(e, parts, ids, mode, hop);
         if (hop) |x| {
             pack(e, bytes);
@@ -219,13 +226,13 @@ const Fake = struct {
     }
 };
 
-const D = driver.Driver(Fake);
+pub const D = driver.Driver(Fake);
 
 /// One round of the scenario: entries, then the round's mode; ids come from a fixed sequence.
 const Round = struct { entries: []const driver.Entry, mode: plan.Mode };
 
 /// Two prompt chunks, steps, a second stream beside, a keep-alive, windows kept 3, 0, 5 and 2 of 5, then closes.
-const scenario = [_]Round{
+pub const scenario = [_]Round{
     .{ .entries = &.{.{ .id = 1, .op = .open, .rows = 10 }}, .mode = .prompt },
     .{ .entries = &.{.{ .id = 1, .op = .@"continue", .rows = 6 }}, .mode = .prompt },
     .{ .entries = &.{.{ .id = 1, .op = .@"continue", .rows = 1 }}, .mode = .window },
@@ -241,7 +248,7 @@ const scenario = [_]Round{
     .{ .entries = &.{ .{ .id = 1, .op = .close }, .{ .id = 2, .op = .close } }, .mode = .window },
 };
 
-fn run(lead: *D.Lead) !void {
+pub fn run(lead: *D.Lead) !void {
     var ids: [most_rows]u32 = undefined;
     for (&ids, 0..) |*x, i| x.* = @intCast(1000 + 37 * i);
     for (scenario) |r| {
@@ -252,7 +259,7 @@ fn run(lead: *D.Lead) !void {
 }
 
 /// One engine, no ring: the reference bytes.
-fn whole(gpa: std.mem.Allocator) ![]u32 {
+pub fn whole(gpa: std.mem.Allocator) ![]u32 {
     var e: Fake.Engine = .{ .gpa = gpa, .first = 0, .end = layers };
     defer e.out.deinit(gpa);
     var lead = try D.Lead.init(gpa, &e, null, parallel, context, 1);
@@ -262,7 +269,7 @@ fn whole(gpa: std.mem.Allocator) ![]u32 {
 }
 
 /// A ring's layout, a fault planted per rank, and one rank that describes another range than the layout's.
-const Case = struct {
+pub const Case = struct {
     layout: []const boot.Range,
     plants: [most]Plant = @splat(.none),
     misdescribe: ?struct { rank: u32, range: boot.Range } = null,
@@ -270,11 +277,14 @@ const Case = struct {
     k: usize = 0,
     /// The last stage echoes a round's plan short or empty; rank 0 pipes one round without rows.
     echo: ?Echo = null,
+    /// Rank 0's rounds when set (lead_test.zig), over `width` streams (0: as above).
+    body: ?*const fn (std.mem.Allocator, *D.Lead, *Fake.Engine) anyerror![]u32 = null,
+    width: u32 = 0,
 };
 
 const Echo = enum { short, empty };
 
-const Result = struct { err: ?anyerror = null, out: []u32 = &.{} };
+pub const Result = struct { err: ?anyerror = null, out: []u32 = &.{} };
 
 fn rankMain(gpa: std.mem.Allocator, o: ring.Options, l: net.Fd, c: Case, res: *Result) void {
     rankRun(gpa, o, l, c, res) catch |e| {
@@ -285,7 +295,7 @@ fn rankMain(gpa: std.mem.Allocator, o: ring.Options, l: net.Fd, c: Case, res: *R
 fn rankRun(gpa: std.mem.Allocator, o: ring.Options, l: net.Fd, c: Case, res: *Result) !void {
     var r = try ring.Ring.join(o, l);
     defer r.close();
-    defer r.stop(); // as the tools do: a clean end passes a stop round the ring
+    defer if (c.plants[o.rank] != .dies) r.stop(); // as the tools do: a clean end passes a stop round the ring
     const mine = c.layout[o.rank];
     var e: Fake.Engine = .{ .gpa = gpa, .first = mine.first, .end = mine.end, .plant = c.plants[o.rank] };
     defer e.out.deinit(gpa);
@@ -293,10 +303,10 @@ fn rankRun(gpa: std.mem.Allocator, o: ring.Options, l: net.Fd, c: Case, res: *Re
     if (c.misdescribe) |m| if (m.rank == o.rank) {
         said = m.range;
     };
-    const own = try D.describe(&e, o.rank, o.world, said, if (c.k > 0) pipe_streams else parallel, context);
+    const width: u32 = if (c.width > 0) c.width else if (c.k > 0) pipe_streams else parallel;
+    const own = try D.describe(&e, o.rank, o.world, said, width, context);
     const b = Fake.boundary(&e);
     const model: boot.Model = .{ .version = Fake.version, .kv_dtype = .bf16, .layers = layers, .boundary = b, .shapes = own.shapes, .taps = &.{} };
-    const width: u32 = if (c.k > 0) pipe_streams else parallel;
     const next = try driver.bootRing(gpa, &r, &own, &model, c.layout, Fake.backend);
     if (c.echo != null and o.rank + 1 == o.world) return badEcho(&r, next, c.echo.?);
     if (o.rank != 0) return D.serve(gpa, &e, &r, width, context, next);
@@ -306,6 +316,10 @@ fn rankRun(gpa: std.mem.Allocator, o: ring.Options, l: net.Fd, c: Case, res: *Re
         try lead.pipe(t.io, 2);
         try lead.issue(&.{}, &.{}, .window);
         return lead.complete();
+    }
+    if (c.body) |f| {
+        res.out = try f(gpa, &lead, &e);
+        return;
     }
     if (c.k > 0) {
         res.out = try piped(gpa, &lead, &e, c.k);
@@ -327,7 +341,7 @@ fn badEcho(r: *ring.Ring, first_round: u64, echo: Echo) !void {
 }
 
 /// Every rank of `c` on its own loopback thread; each result holds rank 0's bytes or the rank's error.
-fn ringRun(gpa: std.mem.Allocator, c: Case, res: *[most]Result) !void {
+pub fn ringRun(gpa: std.mem.Allocator, c: Case, res: *[most]Result) !void {
     const world: u32 = @intCast(c.layout.len);
     var peers: [most]ring.Peer = undefined;
     var listeners: [most]net.Fd = undefined;
@@ -355,8 +369,8 @@ fn expectRing(c: Case, same: bool) !void {
     try t.expectEqual(same, std.mem.eql(u32, ref, res[0].out));
 }
 
-const two = [_]boot.Range{ .{ .first = 0, .end = 3 }, .{ .first = 3, .end = 6 } };
-const three = [_]boot.Range{ .{ .first = 0, .end = 2 }, .{ .first = 2, .end = 5 }, .{ .first = 5, .end = 6 } };
+pub const two = [_]boot.Range{ .{ .first = 0, .end = 3 }, .{ .first = 3, .end = 6 } };
+pub const three = [_]boot.Range{ .{ .first = 0, .end = 2 }, .{ .first = 2, .end = 5 }, .{ .first = 5, .end = 6 } };
 
 test "stage driver: one engine's head bytes are a function of every layer and every rollback" {
     const gpa = t.allocator;
