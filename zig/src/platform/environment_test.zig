@@ -323,6 +323,16 @@ test "environment: video token budgets retain the full unsigned count and refuse
         try t.expectError(error.InvalidEnvironment, e.value(u64, name, raw, 7));
 }
 
+test "environment: video refusal describes the token budget without advertising a storage maximum" {
+    const why = try e.describe(a, "TENSORFOLD_VIDEO_TOKENS", "bad-value");
+    defer a.free(why);
+    try t.expectEqualStrings(
+        "TENSORFOLD_VIDEO_TOKENS=\"bad-value\": expected a nonnegative whole video-token budget (default 16384; unsigned 64-bit count)",
+        why,
+    );
+    try t.expect(std.mem.indexOf(u8, why, "18446744073709551615") == null);
+}
+
 const Inactive = struct {
     pub fn get(_: Inactive, name: []const u8) ?[]const u8 {
         if (std.mem.eql(u8, name, "TF_CUDA_CARVEOUT")) return "0";
