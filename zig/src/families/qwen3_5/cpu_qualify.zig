@@ -108,3 +108,35 @@ test "synthetic weights: the committed states and logits are the same bytes at 1
         } else one = cache;
     }
 }
+
+/// The committed logits, recurrent states and filled key and value rows of a cache, hashed as little-endian bytes.
+fn digest(cache: *const st.Cache) [32]u8 {
+    var h = std.crypto.hash.sha2.Sha256.init(.{});
+    h.update(std.mem.sliceAsBytes(cache.logits));
+    for (cache.blocks) |b| switch (b) {
+        .delta => |d| {
+            h.update(std.mem.sliceAsBytes(d.recurrence));
+            h.update(std.mem.sliceAsBytes(d.conv));
+        },
+        .attention => |kv| for ([_][]const u16{ kv.keys, kv.values }) |rows| for (0..c.kv_heads) |head| {
+            h.update(std.mem.sliceAsBytes(rows[head * cache.capacity * c.head_dim ..][0 .. cache.len * c.head_dim]));
+        },
+    };
+    return h.finalResult();
+}
+
+test "synthetic weights: a prompt and a decode step commit pinned bytes, so each host CI builds on checks the same" {
+    if (@import("builtin").cpu.arch.endian() != .little) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const ids = [_]u32{ 825, 264, 15352, 4829, 9944, 13, 271, 279, 854, 22373, 825, 264, 15352, 4829, 9944, 13, 42 };
+    const m = try Model.synthetic(gpa, std.testing.io, 11, 2);
+    defer m.deinit();
+    var scratch = try st.Scratch.init(gpa, 32, 64, m.pool.workers());
+    defer scratch.deinit();
+    var cache = try st.Cache.init(gpa, 64);
+    defer cache.deinit();
+    try fwd.run(m, &scratch, &.{.{ .cache = &cache, .rows = ids.len - 1 }}, ids[0 .. ids.len - 1], false, .last);
+    try fwd.run(m, &scratch, &.{.{ .cache = &cache, .rows = 1 }}, ids[ids.len - 1 ..], false, .all);
+    const hex = std.fmt.bytesToHex(digest(&cache), .lower);
+    try std.testing.expectEqualStrings("b8606743a220490418e883f091ae6e9732d557e5ef9fa17725442ecf8604a0e3", &hex);
+}
