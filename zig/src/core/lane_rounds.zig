@@ -23,6 +23,10 @@ pub const Rounds = struct {
         pub fn step(h: *LaneHost) bool {
             return round(h, h.rounds.?);
         }
+        /// Ends every request a stepped host still holds (a family's test has no engine thread to stop).
+        pub fn close(h: *LaneHost) void {
+            ends.closeAll(h);
+        }
     } else struct {};
 
     /// Why a request stays queued (wait_reason.zig): the planner names it with its `wait` or `skip`.
@@ -98,6 +102,7 @@ fn round(h: *LaneHost, rd: Rounds) bool {
                 .refuse => {
                     if (refused.append(h.gpa, .{ .job = job, .why = why })) |_| {} else |_| break;
                     _ = h.queued.orderedRemove(i);
+                    h.load.failures[@backingInt(load.Failure.planner_refused)] += 1; // its reply: a failure, no code
                 },
             }
         }
@@ -123,7 +128,7 @@ fn round(h: *LaneHost, rd: Rounds) bool {
             _ = ends.dropFailed(h, job, e);
             continue;
         };
-        if (b.damaged) load.fellBack(h); // its saved prefix was dropped: it prefills from 0 and is still served
+        if (b.damaged) load.fellBack(h, job); // its saved prefix was dropped: it prefills from 0 and is still served
         rd.vtable.began(rd.ctx, @intFromPtr(job), b.damaged);
     }
     // this round's pieces, a decode round of the streams decoding, then the prompts whose rows are in
