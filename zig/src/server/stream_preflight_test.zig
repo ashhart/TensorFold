@@ -218,7 +218,7 @@ const Seen = struct {
     }
 };
 
-const Route = enum { chat, messages, responses };
+const Route = enum { chat, messages, responses, completions };
 
 /// A Responses request with no stored conversation to read.
 pub const NoHistory = struct {
@@ -257,15 +257,46 @@ fn sendWithBudget(engine: api.Engine, route: Route, body: []const u8, start: See
     const raw = (try json.parse(a, body)).ok;
     var cx: errors.Cx = .{ .a = a };
     const chat = switch (route) {
-        .chat => raw,
+        .chat, .completions => raw,
         .messages => try anthropic_translate.translate(&cx, raw, false),
         .responses => (try responses_translate.translate(&cx, raw, NoHistory{})).chat,
     };
     var conn: Conn = .{ .fd = -1, .peer = "", .buf = &.{}, .gpa = a };
     var seen = start;
-    openai.run(srv, a, seen.out(), .{ .conn = &conn }, true, chat);
+    openai.run(srv, a, seen.out(), .{ .conn = &conn }, route != .completions, chat);
     seen.preparing = srv.preparing.load(.acquire);
     return seen;
+}
+
+const RepetitionEngine = struct {
+    factor: f32 = 0,
+    greedy: bool = false,
+    fn engine(e: *@This()) api.Engine {
+        return .{ .ctx = e, .vtable = &.{ .info = info, .submit = submit, .cancel = HiEngine.cancel, .status = HiEngine.status, .memory = HiEngine.memory } };
+    }
+    fn info(_: *anyopaque) api.Info {
+        return .{ .context_window = 4096, .repetition_penalty = true };
+    }
+    fn submit(ctx: *anyopaque, id: api.Id, req: *const api.Request, sink: api.Sink) api.SubmitError!void {
+        const e: *@This() = @ptrCast(@alignCast(ctx));
+        e.factor = req.penalties.repetition;
+        e.greedy = req.sampling == null;
+        try HiEngine.submit(ctx, id, req, sink);
+    }
+};
+
+test "repetition factor reaches chat, completions and Responses engines in greedy mode" {
+    for ([_]struct { Route, []const u8 }{
+        .{ .chat, "{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"x\"}],\"max_tokens\":2,\"temperature\":0,\"repetition_penalty\":1.1}" },
+        .{ .completions, "{\"model\":\"test-model\",\"prompt\":\"x\",\"max_tokens\":2,\"temperature\":0,\"repetition_penalty\":1.1}" },
+        .{ .responses, "{\"model\":\"test-model\",\"input\":\"x\",\"max_output_tokens\":2,\"temperature\":0,\"repetition_penalty\":1.1}" },
+    }) |case| {
+        var backend: RepetitionEngine = .{};
+        const seen = try sendWith(backend.engine(), case[0], case[1], .{});
+        try std.testing.expectEqual(@as(?u16, 200), seen.status);
+        try std.testing.expectEqual(@as(f32, 1.1), backend.factor);
+        try std.testing.expect(backend.greedy);
+    }
 }
 
 fn expectContextInStream(seen: Seen, role: bool) !void {
@@ -378,8 +409,8 @@ test "a streamed Responses tool reply sends no whitespace that the whole reply d
 }
 
 /// HiEngine's replies from an engine that decodes greedily only.
-const GreedyEngine = struct {
-    fn engine(e: *@This()) api.Engine {
+pub const GreedyEngine = struct {
+    pub fn engine(e: *@This()) api.Engine {
         return .{ .ctx = e, .vtable = &.{ .info = info, .submit = HiEngine.submit, .cancel = HiEngine.cancel, .status = HiEngine.status, .memory = HiEngine.memory } };
     }
 
@@ -535,4 +566,8 @@ test "closed, busy or memory-pressure admission is service unavailable across ch
         };
     }
     try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+test {
+    _ = @import("repetition_test.zig");
 }

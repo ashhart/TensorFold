@@ -460,6 +460,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         .logprobs = served.backend.vtable.first_row != null,
         .prompt_logprobs = served.backend.vtable.prompt_rows,
         .penalties = served.backend.penalties,
+        .repetition_penalty = F == @import("glm_cuda").native,
         .structures = served.backend.vtable.first_masked != null,
         .vision = if (@hasField(@TypeOf(loaded), "vision")) vision_offer.offer(loaded.vision, o.vision) else null,
         .admit = admit,

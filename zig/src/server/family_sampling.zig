@@ -46,6 +46,15 @@ pub fn resolve(a: std.mem.Allocator, model_type: []const u8, generation_config: 
     return if (out.count() > 0) json.Value{ .object = out } else null;
 }
 
+test "generation defaults retain repetition factor for greedy decoding" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const defaults = (try resolve(arena.allocator(), "glm_moe_dsa", "{\"do_sample\":false,\"repetition_penalty\":1.1}", .{})).?;
+    try std.testing.expect(defaults.get("repetition_penalty") != null);
+    try std.testing.expectEqual(@as(?f64, 1.1), defaults.get("repetition_penalty").?.float64());
+    try std.testing.expectEqual(@as(?f64, 0), defaults.get("temperature").?.float64());
+}
+
 /// True when generation_config.json says ``do_sample: false``: the checkpoint decodes greedily.
 pub fn greedyConfig(a: std.mem.Allocator, generation_config: ?[]const u8) !bool {
     const bytes = generation_config orelse return false;
@@ -145,7 +154,7 @@ fn base(a: std.mem.Allocator, out: *json.Object, model_type: []const u8, generat
     try put(a, out, model_type);
     if (generation_config) |bytes| if ((try json.parse(a, bytes)) == .ok) {
         const cfg = (try json.parse(a, bytes)).ok;
-        for ([_][]const u8{ "temperature", "top_k", "top_p", "min_p" }) |k| if (cfg.field(k)) |v| try out.put(a, k, v);
+        for ([_][]const u8{ "temperature", "top_k", "top_p", "min_p", "repetition_penalty" }) |k| if (cfg.field(k)) |v| try out.put(a, k, v);
         if (cfg.get("do_sample")) |d| if (d == .bool) {
             if (!d.bool) try out.put(a, "temperature", .{ .float = 0 }) else if (out.get("temperature") == null) try out.put(a, "temperature", .{ .float = 1 });
         };

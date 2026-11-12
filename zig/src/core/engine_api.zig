@@ -9,8 +9,7 @@ pub const DraftSources = @import("draft_sources.zig").Sources;
 pub const Id = u64;
 /// One request's sampling (Python's exact_sampling.Sampling); a request without one decodes greedily.
 pub const Sampling = lanes.Sampling;
-/// presence_penalty and frequency_penalty, applied where ``Info.penalties``.
-pub const Penalties = lanes.Penalties;
+pub const Penalties = lanes.Penalties; // Additive and repetition penalties need their engine's corresponding capability.
 pub const EmbeddingInfo = lanes.embedding.Info;
 pub const EmbeddingBatch = lanes.embedding.Batch;
 pub const embedding_vector = @import("embedding_vector.zig");
@@ -191,6 +190,7 @@ pub const Info = struct {
     logprobs: bool = false,
     /// Requests' presence_penalty and frequency_penalty change the draws (false: nonzero is refused).
     penalties: bool = false,
+    repetition_penalty: bool = false, // Requests' Hugging Face repetition factor changes target draws.
     /// Requests may ask for ``prompt_logprobs`` (a prompt pass from 0 that reads every row).
     prompt_logprobs: bool = false,
     /// Prompt rows a prefill chunk at most, for the server's chunk starts (0: the engine cuts prompts itself).

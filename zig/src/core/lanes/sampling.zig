@@ -28,6 +28,11 @@ pub const Sampling = struct {
 pub const Penalties = struct {
     presence: f32 = 0,
     frequency: f32 = 0,
+    repetition: f32 = 1.0,
+
+    pub fn repetitionActive(p: Penalties) bool {
+        return p.repetition != 1.0;
+    }
 
     pub fn active(p: Penalties) bool {
         return p.presence != 0 or p.frequency != 0;

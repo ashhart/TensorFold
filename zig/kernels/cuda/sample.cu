@@ -107,7 +107,15 @@ struct Row {
     unsigned V;
     float inv_t;
     unsigned t, lane, sg;
-    __device__ __forceinline__ float v(unsigned i) const { return __bfloat162float(L[i]) * inv_t; }
+    const unsigned* seen = nullptr;
+    float factor = 1.0f;
+    __device__ __forceinline__ float v(unsigned i) const {
+        float x = __bfloat162float(L[i]);
+        if (seen && ((seen[i / 32] >> (i % 32)) & 1u)) {
+            x = x < 0.0f ? __fmul_rn(x, factor) : __fdiv_rn(x, factor);
+        }
+        return x * inv_t;
+    }
 };
 
 // A block sum in tf_gpu_sample's order: warp butterflies, then warps in order; every thread gets it.
@@ -432,9 +440,9 @@ __device__ void pick(const Rule& rl, float m, float z, unsigned n_cand, unsigned
 // tf_gpu_sample: the top_k candidates, the top_p and min_p cuts, then the race; PROB (if any) gets the pick's share.
 template <bool MAP>
 __device__ void gpu_sample(const __nv_bfloat16* L, unsigned V, const Rule& rl, unsigned position, const long long* IDS,
-                           unsigned* TOK, float* PROB, Shared& s) {
+                           unsigned* TOK, float* PROB, Shared& s, const unsigned* seen = nullptr, float factor = 1.0f) {
     const unsigned t = threadIdx.x, lane = t & 31u, sg = t >> 5;
-    const Row r{L, V, rl.inv_t, t, lane, sg};
+    const Row r{L, V, rl.inv_t, t, lane, sg, seen, factor};
     const float m = row_max(r, s);
     float z = 0.0f;
     const unsigned n_cand = first_block(r, m, rl.top_p, rl.near, rl.top_k, z, s);
@@ -493,9 +501,9 @@ __device__ void race(const Row& r, float lo, Mark top, Mark cut, unsigned long l
 // Full-row filters precede the keyed race; PROB reports the selected probability.
 template <bool MAP>
 __device__ void sample_full(const __nv_bfloat16* L, unsigned V, const Rule& rl, unsigned position, const long long* IDS,
-                            unsigned* TOK, float* PROB, Shared& s) {
+                            unsigned* TOK, float* PROB, Shared& s, const unsigned* seen = nullptr, float factor = 1.0f) {
     const unsigned t = threadIdx.x, lane = t & 31u, sg = t >> 5;
-    const Row r{L, V, rl.inv_t, t, lane, sg};
+    const Row r{L, V, rl.inv_t, t, lane, sg, seen, factor};
     const unsigned kc = rl.top_k;
     const float m = row_max(r, s);
     const float lo = fmaxf(m + rl.min_log, m - NEVER);
@@ -540,6 +548,7 @@ extern "C" __global__ void __launch_bounds__(1024) tf_draw(const __nv_bfloat16* 
 }
 
 #include "sample_rows.cuh"
+#include "sample_repetition.cuh"
 
 // The same over a column subset whose token ids are IDS (int64, a draft head's vocabulary): noise and token by id.
 extern "C" __global__ void __launch_bounds__(1024) tf_draw_ids(const __nv_bfloat16* L, unsigned V, const tf_sample::Rule* rule,

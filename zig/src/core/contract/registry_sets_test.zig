@@ -10,6 +10,13 @@ const setFor = registry.setFor;
 const usageFor = registry.usageFor;
 const CudaRecord = registry.CudaRecord;
 
+test "unmeasured CUDA records cannot pass a compiled resource check" {
+    for (registry.cuda_pending) |r| {
+        if (!std.meta.eql(registry.none, r.usage)) continue;
+        try std.testing.expectEqual(limits.sms.len, try checkCuda(std.testing.allocator, &.{r}, true));
+    }
+}
+
 fn named(name: []const u8) ?CudaRecord {
     for (registry.all_cuda) |r| if (std.mem.eql(u8, r.launch.name, name)) return r;
     return null;

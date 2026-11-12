@@ -35,3 +35,37 @@ hashes each one's bf16 bytes and names the first token, layer and step that diff
 each step MLX's previous output and compares the values. The prints are deterministic on a given MLX and chip; other versions or chips
 may differ in the last bit of a sum (the single-row matmul and rms_norm kernels are chosen by shape and by GPU generation).
 An Apple M5 Ultra with the same versions gives the same prints as the M4 Max.
+
+## Synthetic repetition-penalty logits
+
+`zig/tests/cuda/repetition_hf_fixture.h` contains ten model-free cases written for the repetition processor tests.
+Every input is an explicit IEEE float32 pattern and every history is a small list of synthetic token IDs.
+Finite logits are exactly representable in BF16. The reference keeps the processed logits in float32.
+The cases cover signs, signed zero, duplicate IDs, identity and below-one factors, empty history, infinities,
+NaNs, greedy changes and a value whose winner would change if processed logits were rounded back to BF16.
+They contain no checkpoint weights, tokenizer output or conversation data.
+
+`tools/zig/repetition_hf_fixture.py` calls the actual
+`transformers.generation.logits_process.RepetitionPenaltyLogitsProcessor` from Transformers **5.20.1** on CPU.
+The installed package is an optional developer reference; native inference and native tests do not import it.
+Use an isolated environment with a CPU-capable PyTorch installation and `transformers==5.20.1`:
+
+```sh
+CUDA_VISIBLE_DEVICES= HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
+  python3 tools/zig/repetition_hf_fixture.py --check zig/tests/cuda/repetition_hf_fixture.h
+CUDA_VISIBLE_DEVICES= HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
+  python3 tools/zig/repetition_hf_fixture.py --out zig/tests/cuda/repetition_hf_fixture.h
+```
+
+The first command reads and checks the header. The second explicitly regenerates it.
+Both print the package versions, processor source hash, header hash, device and dtype as JSON.
+The script refuses a different Transformers version.
+The original processor is available in the
+[Transformers 5.20.1 source](https://github.com/huggingface/transformers/blob/v5.20.1/src/transformers/generation/logits_process.py).
+
+CPU regeneration with Transformers 5.20.1 and PyTorch 2.14.1 reproduced all ten cases byte for byte:
+header SHA256 `9388ddb013232071f6290e43a2d91fa1772f539cf7c0d5830e63115f7c5a9dd3`,
+processor-class source SHA256 `bada3b1186344c29c3fc79161e865a6d649d1bbcf386d60fb74fb8d471133c1d`.
+NaN payload bits can vary through BF16 conversion; the native test checks their NaN class.
+The HF processor supplies transformed logits. Greedy selection is checked separately by the native test;
+the `0xffffffff` greedy sentinel skips selection for the NaN fixture.

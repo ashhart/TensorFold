@@ -142,6 +142,20 @@ pub fn cuda(b: *std.Build, runner: *std.Build.Step.Compile, controls: ?std.Build
     runner.root_module.addAnonymousImport("fatbin_contract_controls", .{ .root_source_file = controls orelse empty });
     // MiniMax H3's image (the tf-h3 library's) for its kernels' registrations
     runner.root_module.addAnonymousImport("fatbin_h3", .{ .root_source_file = h3 orelse b.addWriteFiles().add("h3.fatbin", "") });
+    const repetition_root = b.createModule(.{
+        .root_source_file = b.path("zig/tests/cuda/sample_repetition_main.zig"),
+        .target = runner.root_module.resolved_target.?,
+        .optimize = runner.root_module.optimize.?,
+        .link_libc = true,
+    });
+    inline for (.{ "cuda", "core", "lanes" }) |name|
+        repetition_root.addImport(name, runner.root_module.import_table.get(name).?);
+    repetition_root.addOptions("contract_options", opts);
+    repetition_root.addAnonymousImport("fatbin_contract_controls", .{ .root_source_file = controls orelse empty });
+    const repetition = b.addExecutable(.{ .name = "tf-sample-repetition-contract", .root_module = repetition_root });
+    b.step("tf-sample-repetition-contract", "Build only the bounded repetition sampling contract runner").dependOn(&b.addInstallArtifact(repetition, .{}).step);
+    const repetition_run = b.addRunArtifact(repetition);
+    b.step("sample-repetition-contract", "Repetition sampling gates, planted controls and five-SM launch records").dependOn(&repetition_run.step);
     const install = b.step("kernel-contract-fatbins", "Install all CUDA contract images (fatbin/)");
     if (controls) |file| install.dependOn(&b.addInstallFile(file, "fatbin/contract_controls.fatbin").step);
     if (h3) |file| install.dependOn(&b.addInstallFile(file, "fatbin/h3.fatbin").step);

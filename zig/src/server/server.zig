@@ -333,9 +333,9 @@ pub const Server = struct {
         try merge(options, cx, try fields.parseNumbers(cx, f));
         const presence = number(options.get("presence_penalty")) orelse 0;
         const frequency = number(options.get("frequency_penalty")) orelse 0;
-        if (!srv.info.capability(.penalties) and (presence != 0 or frequency != 0))
-            return cx.fail(.request, "presence_penalty and frequency_penalty are not supported by backend '{s}': send 0 or leave them out", .{srv.backendName()});
-        return .{ .presence = @floatCast(presence), .frequency = @floatCast(frequency) };
+        const repetition = try fields.repetitionFactor(cx, number(options.get("repetition_penalty")) orelse 1, srv.info.capability(.repetition_penalty), srv.backendName());
+        if (!srv.info.capability(.penalties) and (presence != 0 or frequency != 0)) return cx.fail(.request, "presence_penalty and frequency_penalty are not supported by backend '{s}': send 0 or leave them out", .{srv.backendName()});
+        return .{ .presence = @floatCast(presence), .frequency = @floatCast(frequency), .repetition = repetition };
     }
 
     /// A specific engine name, or the server's backend identity when the shared host uses its default name.

@@ -14,8 +14,10 @@ const pages_mod = @import("cuda_pages.zig");
 const sparse = @import("cuda_sparse.zig");
 const prompt_pair = @import("cuda_prompt_pair.zig");
 const Engine = engine.Engine;
+const repetition = @import("cuda_repetition.zig");
+const processor_wire = @import("cuda_processor_wire.zig");
 
-pub const Kind = enum(u32) { begin = 1, prefill, verify, keep, draft, end, drop, release, chunk, shared, image, block, many, redraw, idle, snapshots, pool, form, cuts };
+pub const Kind = enum(u32) { begin = 1, prefill, verify, keep, draft, end, drop, release, chunk, shared, image, block, many, redraw, idle, snapshots, pool, form, cuts, processor };
 
 /// One step as it crosses: 64 bytes, then `n` u32 ids.
 pub const Header = extern struct {
@@ -137,6 +139,28 @@ pub const Chunk = struct { first: ?u32, rows: usize };
 pub const Leader = struct {
     e: *Engine,
     link: *Link,
+
+    /// Versioned descriptors and readiness precede masks; an empty table clears an earlier active operation.
+    pub fn processors(x: Leader, stage: *const repetition.Stage) !void {
+        const descriptors = stage.descriptors();
+        if (descriptors.len == 0 and x.e.processor_rows.table.len == 0) return;
+        var table: repetition.Table = .{};
+        try table.set(descriptors, x.e.c.vocab, stage.words, x.e.seqs.items.len, x.e.capacity);
+        if (descriptors.len != 0 and stage.masks.items.len != descriptors.len * stage.words) return error.BadProcessorTable;
+        var words: [repetition.max_rows * 4]u32 = undefined;
+        for (descriptors, 0..) |r, i| {
+            words[4 * i] = r.slot;
+            words[4 * i + 1] = r.position;
+            words[4 * i + 2] = @bitCast(r.factor);
+            words[4 * i + 3] = 0;
+        }
+        if (descriptors.len * 4 > x.link.ids.len) return error.TooManyIds;
+        try x.e.prepareProcessors(table, stage.words);
+        if (descriptors.len != 0) try x.e.processor_rows.masks.?.uploadAsync(0, std.mem.sliceAsBytes(stage.masks.items), x.e.stream.handle);
+        try x.send(.{ .kind = @backingInt(Kind.processor), .flags = 1, .depth = @intCast(descriptors.len), .a = x.e.c.vocab, .seed = stage.words }, words[0 .. descriptors.len * 4]);
+        if (!try processor_wire.vote(x.e, false)) return error.ProcessorRefused;
+        if (descriptors.len != 0) try x.link.rows(x.e.processor_rows.masks.?.ptr, descriptors.len * stage.words * 4);
+    }
 
     /// The step on the bound stream's sequence (its slot) to every rank.
     fn send(x: Leader, h: Header, ids: []const u32) !void {
@@ -355,10 +379,15 @@ pub fn follow(e: *Engine, link: *Link) !void {
         const step = try link.receive();
         const h = step.h;
         const kind: Kind = @fromBackingInt(@intCast(h.kind));
+        if (kind == .processor) {
+            _ = try processor_wire.apply(e, link, h, step.ids);
+            continue;
+        }
         if (kind != .end and kind != .drop and kind != .shared and kind != .block and kind != .many and kind != .idle and kind != .snapshots and kind != .pool and kind != .form) try e.bind(h.slot);
         e.prompt_logprobs = if (promptRows(h)) .{} else null;
         e.structured = structuredStep(h); // rank 0 alone masks them
         switch (kind) {
+            .processor => unreachable,
             .begin => {
                 if (step.ids.len > 0) try (e.pages orelse return error.BadStep).map(h.slot, step.ids, std.math.cast(usize, h.a) orelse return error.BadStep);
                 try e.beginFollowing(if (h.flags & 1 != 0) .{ .seed = h.seed, .temperature = h.temperature, .top_p = h.top_p, .min_p = h.min_p, .top_k = h.top_k } else null);

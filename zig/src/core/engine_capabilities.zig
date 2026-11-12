@@ -12,6 +12,7 @@ pub const Capability = enum {
     structures,
     logprobs,
     penalties,
+    repetition_penalty,
     prompt_logprobs,
     prompt_cache,
     warm_turns,

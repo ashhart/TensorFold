@@ -65,7 +65,6 @@ const q35_contiguous = @import("contract_q35_contiguous.zig");
 const contract = core.contract;
 const g = contract.gates;
 const kk = cuda.kernels;
-
 const images = struct {
     pub const controls align(16) = @embedFile("fatbin_contract_controls").*;
     pub const h3 align(16) = @embedFile("fatbin_h3").*;
@@ -591,6 +590,7 @@ fn registered(gpu: check.Gpu, only: []const []const u8, t0: *i96) !g.Tally {
     t0.* = check.now(gpu.io);
     @import("contract_after.zig").keep(&kernels, only);
     try g.runAll(a, kernels.items, 0x6b63, &t);
+    if (only.len == 0) try families.repetition.group.finiteRules();
     return t;
 }
 

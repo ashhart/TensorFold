@@ -10,6 +10,7 @@ const Leader = struct {
     e: *Engine,
     fail: bool = false,
     rows: usize = glm.engine.prompt_rows,
+    pub fn processors(_: @This(), _: *const u8) !void {}
     pub fn bind(_: @This(), _: u32) !void {}
     pub fn chunk(x: @This(), ids: []const u32, at: usize, _: bool, _: anytype, _: anytype, _: anytype) !glm.follow.Chunk {
         if (x.fail) return error.PlantedForward;
@@ -33,6 +34,16 @@ const Backend = struct {
     x: Leader,
     from: usize = 0,
     lanes: std.AutoHashMapUnmanaged(*const lanes.Stream, Lane) = .empty,
+    processor_stage: u8 = 0,
+    pub fn resetProcessors(b: *@This()) !*const u8 {
+        return &b.processor_stage;
+    }
+    pub fn addProcessor(_: *@This(), s: *const lanes.Stream, _: u64, _: []const u32, _: []const u32) !void {
+        try t.expectEqual(@as(f32, 1), s.penalties.repetition);
+    }
+    pub fn promptProcessor(_: *@This(), s: *const lanes.Stream) !void {
+        try t.expectEqual(@as(f32, 1), s.penalties.repetition);
+    }
     pub fn opening(b: *@This(), _: *lanes.Stream) !?glm.engine.Resume {
         return if (b.from > 0) .{ .id = 1, .at = b.from } else null;
     }

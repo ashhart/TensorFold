@@ -4,6 +4,8 @@ const std = @import("std");
 pub fn steps(b: *std.Build, cuda: *std.Build.Module, glm: *std.Build.Module, mods: anytype, step: *std.Build.Step) void {
     // GLM CUDA's startup watcher (named phases, a warning while NCCL init or a load blocks), from cuda.zig's room
     b.step("test-startup-watch-host", "Blocked startup phase warnings without a driver or communicator").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cuda, .filters = &.{"startup watcher:"} })).step);
+    const repetition = b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM repetition:"} }));
+    b.step("test-glm-repetition-host", "Full-prefix repetition history, target rows and TP refusal without devices").dependOn(&repetition.step);
     const host = b.graph.host;
     inline for (.{ .{ "test-glm-link-transport-host", "zig/glm_link_transport_host.zig" }, .{ "test-glm-kv-uncached-host", "zig/glm_kv_uncached_host.zig" }, .{ "test-glm-lane-costs-host", "zig/glm_lane_costs_host.zig" } }) |entry| {
         const checks = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{

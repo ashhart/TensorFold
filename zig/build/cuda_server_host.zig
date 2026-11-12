@@ -15,6 +15,7 @@ pub fn steps(b: *std.Build, host: std.Build.ResolvedTarget, cuda: *std.Build.Mod
         .imports = &.{ .{ .name = "engine_api", .module = native_modules.api }, .{ .name = "tokenizer", .module = mods.tokenizer }, .{ .name = "template", .module = template }, .{ .name = "living", .module = mods.living }, .{ .name = "core", .module = mods.core } },
     });
     const server_json = @import("server.zig").addTo(b, server_tests, host, .debug);
+    b.step("test-repetition-api-host", "Repetition factor parsing, greedy defaults and HTTP capability admission").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"repetition"} })).step);
     const startup_receipt = b.step("test-startup-receipt-host", "Monotonic startup receipts and fail-closed readiness without devices");
     const startup_spans = b.createModule(.{ .root_source_file = b.path("zig/src/core/startup_receipt.zig"), .target = host, .link_libc = true });
     startup_receipt.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = startup_spans, .filters = &.{"startup receipt:"} })).step);
