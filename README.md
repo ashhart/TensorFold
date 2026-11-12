@@ -308,7 +308,7 @@ The binary's `capabilities --json` response lists its supported flags and platfo
 | `--context N` | Bound prompt plus reply tokens; the model's window and memory checks still apply. Qwen3.8-27B defaults to 32,768 and takes up to 262,144. |
 | `--rope-yarn F` | YaRN context extension with this factor over the checkpoint's trained window, for Qwen3.5 and 3.6 on a CUDA build; other builds refuse the flag. |
 | `--loops N` | Passes over a looped model's recurrent block, from 1; without it the checkpoint's own count runs. Other builds refuse the flag. |
-| `--speed-up FILE` | Rank and link settings for two-Mac Flash Next or GLM serving. |
+| `--speed-up FILE` | Rank and link settings for two-Mac Flash Next, GLM or Qwen3.8-27B serving; the 27B pair is [opt-in, greedy and slower than one Mac](docs/recipes/qwen3.8-27b.md#two-macs-over-thunderbolt). |
 | `--max-tokens N` | Default reply limit, 4096; requests can override it. |
 | `--temperature T` | Sampling temperature; zero requests greedy decoding. |
 | `--prompt-seed` | Use native prompt-derived keys instead of the fresh OS fallback; request and configured default seeds still win. |
