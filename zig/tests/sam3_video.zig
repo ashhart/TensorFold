@@ -153,6 +153,16 @@ pub fn main(init: std.process.Init) !void {
         .precision = if (fp32) .float32 else .checkpoint,
     });
     defer loaded.deinit();
+    const started = clock.seconds();
+    if (exercise) {
+        if (count < 2) return error.LifecycleNeedsTwoFrames;
+        const next = if (reverse) start - 1 else start + 1;
+        const size = sam.prompts.Size{ .width = width, .height = height };
+        try @import("sam3_sessions.zig").check(init.gpa, init.io, loaded, .{
+            .{ .size = size, .rgb = frames.bytes[start * bytes ..][0..bytes] },
+            .{ .size = size, .rgb = frames.bytes[next * bytes ..][0..bytes] },
+        }, .{ start, next }, frames.dim(0), seeds.items);
+    }
     var session = try sam.Session.init(init.gpa, loaded, .{
         .max_objects = @max(seeds.items.len, 17),
         .frame_count = frames.dim(0),
@@ -161,7 +171,6 @@ pub fn main(init: std.process.Init) !void {
     });
     defer session.deinit();
     var quality = sam.comparison.Quality{};
-    const started = clock.seconds();
     for (0..count) |step| {
         const index = if (reverse) start - step else start + step;
         const image = sam.Image{ .size = .{ .width = width, .height = height }, .rgb = frames.bytes[index * bytes ..][0..bytes] };

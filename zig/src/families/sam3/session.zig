@@ -26,6 +26,7 @@ pub const Prediction = struct {
 const Bucket = struct {
     history: std.ArrayList(memory.Memory) = .empty,
     last: ?tracker.Result = null,
+    conditioning: u16 = 0,
 };
 
 pub const Session = struct {
@@ -67,6 +68,7 @@ pub const Session = struct {
         for (self.buckets) |*bucket| {
             bucket.history.clearRetainingCapacity();
             bucket.last = null;
+            bucket.conditioning = 0;
         }
         @memset(self.objects.ids, null);
         for (self.objects.epochs) |*epoch| epoch.* +%= 1;
@@ -207,6 +209,7 @@ pub const Session = struct {
         self.r.trim(0, try self.retained(features, interactive, trunk, results, memories));
         for (self.buckets, 0..) |*bucket, b| {
             bucket.last = results[b];
+            bucket.conditioning = self.active(b);
             if (memories[b]) |past| bucket.history.appendAssumeCapacity(past);
         }
         self.frame_index = index;
@@ -218,11 +221,11 @@ pub const Session = struct {
     }
 
     pub fn track(self: *Session, allocator: std.mem.Allocator, image: prompts.Image, index: usize) !Prediction {
+        try self.model.mutex.lock(self.model.io);
+        defer self.model.mutex.unlock(self.model.io);
         try validateNext(self.frame_index, index, self.options);
         if (!std.meta.eql(image.size, self.size.?)) return error.VideoSizeChanged;
         try image.validate();
-        try self.model.mutex.lock(self.model.io);
-        defer self.model.mutex.unlock(self.model.io);
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         self.r.a = arena.allocator();
@@ -256,6 +259,7 @@ pub const Session = struct {
         for (self.buckets, 0..) |*bucket, b| {
             self.releaseLast(bucket);
             bucket.last = results[b];
+            bucket.conditioning = 0;
             if (memories[b]) |past| bucket.history.appendAssumeCapacity(past);
             var i: usize = 0;
             while (i < bucket.history.items.len) {
@@ -294,11 +298,15 @@ pub const Session = struct {
     }
 
     pub fn removeObject(self: *Session, id: slots.ObjectId) !void {
+        try self.model.mutex.lock(self.model.io);
+        defer self.model.mutex.unlock(self.model.io);
         const slot = self.objects.get(id) orelse return error.UnknownObject;
         try self.recondition(id, slot, null);
     }
 
     pub fn prompt(self: *Session, id: slots.ObjectId, value: prompts.Prompt) !void {
+        try self.model.mutex.lock(self.model.io);
+        defer self.model.mutex.unlock(self.model.io);
         const size = self.size orelse return error.SessionNotSeeded;
         try value.validate(size);
         const slot = self.objects.get(id) orelse free: {
@@ -315,8 +323,6 @@ pub const Session = struct {
     fn recondition(self: *Session, id: slots.ObjectId, slot: slots.Slot, value: ?prompts.Prompt) !void {
         const index = self.frame_index orelse return error.SessionNotSeeded;
         if (self.objects.epochs[slot.bucket] == std.math.maxInt(u64)) return error.EpochOverflow;
-        try self.model.mutex.lock(self.model.io);
-        defer self.model.mutex.unlock(self.model.io);
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         self.r.a = arena.allocator();
@@ -348,10 +354,11 @@ pub const Session = struct {
         } else bits &= ~(@as(u16, 1) << @intCast(slot.slot));
         var result: ?tracker.Result = null;
         var past: ?memory.Memory = null;
+        const slot_bit = @as(u16, 1) << @intCast(slot.slot);
+        const conditioning = (bucket.conditioning & bits & ~slot_bit) | if (value != null) slot_bit else @as(u16, 0);
         if (bits != 0) {
             result = try combine(&self.r, items[0..size]);
             const from_points = if (value) |p| p.points.len != 0 or p.boxes.len != 0 else false;
-            const conditioning = if (value != null) @as(u16, 1) << @intCast(slot.slot) else bits;
             past = try memory.encode(&self.r, self.features.?[2].tensor, result.?, bits, conditioning, from_points, index);
         }
         var keep: std.ArrayList(ops.Tensor) = .empty;
@@ -375,6 +382,7 @@ pub const Session = struct {
         bucket.history.clearRetainingCapacity();
         self.releaseLast(bucket);
         bucket.last = result;
+        bucket.conditioning = conditioning;
         if (past) |m| bucket.history.appendAssumeCapacity(m);
     }
 };
