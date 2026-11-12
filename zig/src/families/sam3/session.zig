@@ -8,7 +8,8 @@ const prompts = @import("prompts.zig");
 const slots = @import("slots.zig");
 const profile = @import("profile.zig");
 
-pub const Direction = enum { forward, reverse };
+const selection = @import("memory_selection.zig");
+pub const Direction = selection.Direction;
 pub const Options = struct { max_objects: usize = 16, frame_count: usize, direction: Direction = .forward, profile: bool = false };
 pub const Seed = struct { id: slots.ObjectId, prompt: prompts.Prompt };
 pub const TrackedMask = struct { id: slots.ObjectId, mask: model.Mask };
@@ -243,7 +244,7 @@ pub const Session = struct {
             if (bits == 0) continue;
             try bucket.history.ensureUnusedCapacity(self.allocator, 1);
             const tracker_start = profile.Stamp.take(self.r.g, self.options.profile);
-            results[b] = try tracker.propagate(&self.r, features, bucket.history.items, index, self.options.frame_count, bits);
+            results[b] = try tracker.propagate(&self.r, features, bucket.history.items, index, self.options.frame_count, self.options.direction, bits);
             tracker_start.record(self.r.g, self.options.profile, &self.last_profile.tracker);
             const memory_start = profile.Stamp.take(self.r.g, self.options.profile);
             memories[b] = try memory.encode(&self.r, features[2].tensor, results[b].?, bits, 0, false, index);
@@ -264,12 +265,12 @@ pub const Session = struct {
             var i: usize = 0;
             while (i < bucket.history.items.len) {
                 const past = &bucket.history.items[i];
-                const delta = tracker.distance(index, past.index);
-                if (!past.conditioning and delta >= 16) {
+                const retain = selection.retention(bucket.history.items, i, index, self.options.frame_count, self.model.config.version == .sam31);
+                if (!retain.keep) {
                     past.release(&self.r);
                     _ = bucket.history.orderedRemove(i);
                 } else {
-                    if (!past.conditioning and delta >= 6) past.expireSpatial(&self.r);
+                    if (!retain.spatial) past.expireSpatial(&self.r);
                     i += 1;
                 }
             }

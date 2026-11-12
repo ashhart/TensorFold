@@ -7,7 +7,12 @@ const rig_ = @import("rig.zig");
 const c = contract.spec;
 const g = contract.gates;
 
-pub fn text(a: std.mem.Allocator, device: mtl.Device, exact: bool) ![]u8 {
+pub fn text(a: std.mem.Allocator, device: mtl.Device, exact: bool, compact: bool) ![]u8 {
+    if (compact) {
+        const raw = try std.mem.concat(a, u8, &.{ if (exact) "#define TF_NAX_EXACT_B\n" else "", sources.tensor_compact_gemm });
+        defer a.free(raw);
+        return tf.frags.source(device, a, raw);
+    }
     return tf.frags.source(device, a, if (exact) sources.tensor_exact_gemm else "#define TF_NAX_STRICT_FP32\n" ++ sources.core_qwen_vision);
 }
 
@@ -46,6 +51,7 @@ const Probe = struct {
     baseline: mtl.Pipeline,
     name: []const u8,
     exact: bool,
+    compact: bool,
     control: bool,
     am: bool,
     an: bool,
@@ -66,7 +72,7 @@ const Probe = struct {
                 .accum = .f32,
                 .depth = if (self.exact) exactDepth else fullDepth,
                 .out = .f32,
-                .replaces = if (self.exact) "full reconstructed FP32 GEMM" else null,
+                .replaces = if (self.exact or self.compact) "full reconstructed FP32 GEMM" else null,
                 .served = if (self.an) &aligned else &ragged,
                 .tiles = .{ .{}, .{ .size = 128, .step = if (self.an) 128 else 1, .min = if (self.an) 128 else 1 }, .{ .size = 256 } },
             },
@@ -126,7 +132,8 @@ const Probe = struct {
             }
         }
         const tn = (shape.n + 127) / 128;
-        const tm = (self.m + 63) / 64;
+        const tile: usize = if (self.compact) 32 else 64;
+        const tm = (self.m + tile - 1) / tile;
         const fields = [_]usize{ self.m, shape.n, shape.k, shape.k, shape.k, shape.n, tn, tm, 2, shape.k / 256, self.m * shape.k, shape.n * shape.k, self.m * shape.n };
         self.params = @splat(0);
         for (fields, 0..) |value, i| self.params[i] = @intCast(value);
@@ -141,11 +148,14 @@ const Probe = struct {
         const pass = self.rig.begin();
         pass.e.setPipeline(if (baseline) self.baseline else self.pipe);
         for (self.ins, 0..) |input, i| pass.e.setBuffer(input.buf, input.off, i);
-        pass.e.setValue(self.params, 2);
+        var params = self.params;
         const dst = if (baseline) self.base else self.out;
         pass.e.setBuffer(dst.buf, dst.off, 3);
         const tn = (self.shape.n + 127) / 128;
-        const tm = (self.m + 63) / 64;
+        const tile: usize = if (self.compact and !baseline) 32 else 64;
+        const tm = (self.m + tile - 1) / tile;
+        params[7] = @intCast(tm);
+        pass.e.setValue(params, 2);
         pass.e.dispatchThreads(mtl.Size.of(tn * 4 * 32, (tm + 3) / 4 * 4, self.shape.rows * 2), mtl.Size.of(32, 4, 2));
         try self.rig.finish(pass);
     }
@@ -211,37 +221,40 @@ pub const Suite = struct {
 
     pub fn collect(self: *Suite, device: mtl.Device, queue: mtl.Queue, kernels: *std.ArrayList(g.Kernel), only: ?[]const u8) !void {
         if (!device.tensorUnits()) return;
-        const source = try text(self.a, device, false);
-        defer self.a.free(source);
-        const exact_source = try text(self.a, device, true);
-        defer self.a.free(exact_source);
-        var library: ?mtl.Library = null;
-        defer if (library) |lib| lib.deinit();
-        var exact_library: ?mtl.Library = null;
-        defer if (exact_library) |lib| lib.deinit();
-        for ([_]bool{ false, true }) |am| for ([_]bool{ false, true }) |an| for (0..3) |kind| {
+        const texts = [_][]u8{
+            try text(self.a, device, false, false),
+            try text(self.a, device, true, false),
+            try text(self.a, device, false, true),
+            try text(self.a, device, true, true),
+        };
+        defer for (texts) |source| self.a.free(source);
+        var libraries: [4]?mtl.Library = @splat(null);
+        defer for (libraries) |maybe| if (maybe) |library| library.deinit();
+        for ([_]bool{ false, true }) |compact| for ([_]bool{ false, true }) |am| for ([_]bool{ false, true }) |an| for (0..3) |kind| {
             const exact = kind != 0;
             const control = kind == 2;
-            const label = try std.fmt.allocPrint(self.a, "{s}sam3 fp32 gemm {s} nt {d}{d}", .{ if (control) "control: " else "metal ", if (control) "invalid exact flag" else if (exact) "exact" else "full", @intFromBool(am), @intFromBool(an) });
+            const label = try std.fmt.allocPrint(self.a, "{s}sam3 fp32 gemm {s}{s} nt {d}{d}", .{ if (control) "control: " else "metal ", if (compact) "compact " else "", if (control) "invalid exact flag" else if (exact) "exact" else "full", @intFromBool(am), @intFromBool(an) });
             errdefer self.a.free(label);
             if (only) |needle| if (std.mem.indexOf(u8, label, needle) == null) {
                 self.a.free(label);
                 continue;
             };
-            if (library == null) library = try mtl.Library.fromSource(device, source, mtl.CompileOptions.mlx());
-            if (exact and exact_library == null) exact_library = try mtl.Library.fromSource(device, exact_source, mtl.CompileOptions.mlx());
+            const slot = @as(usize, @intFromBool(compact)) * 2 + @intFromBool(exact);
+            if (libraries[0] == null) libraries[0] = try mtl.Library.fromSource(device, texts[0], mtl.CompileOptions.mlx());
+            if (libraries[slot] == null) libraries[slot] = try mtl.Library.fromSource(device, texts[slot], mtl.CompileOptions.mlx());
             var symbol: [64]u8 = undefined;
-            const name_ = try std.fmt.bufPrint(&symbol, "qwv_gemm_f32{s}_nt_{d}{d}", .{ if (exact) "_exact" else "", @intFromBool(am), @intFromBool(an) });
-            const pipe = try mtl.Pipeline.init(device, if (exact) exact_library.? else library.?, name_, false);
+            const name_ = try std.fmt.bufPrint(&symbol, "qwv_gemm_f32{s}{s}_nt_{d}{d}", .{ if (exact) "_exact" else "", if (compact) "_compact" else "", @intFromBool(am), @intFromBool(an) });
+            const pipe = try mtl.Pipeline.init(device, libraries[slot].?, name_, false);
             errdefer pipe.deinit();
-            const base_name = try std.fmt.bufPrint(&symbol, "qwv_gemm_f32_nt_{d}{d}", .{ @intFromBool(am), @intFromBool(an) });
-            const baseline = try mtl.Pipeline.init(device, library.?, base_name, false);
+            const base_name = try std.fmt.bufPrint(&symbol, "qwv_gemm_f32_nt_{d}{d}", .{ @intFromBool(am and !compact), @intFromBool(an) });
+            const baseline = try mtl.Pipeline.init(device, libraries[0].?, base_name, false);
             errdefer baseline.deinit();
             const probe = try self.a.create(Probe);
             errdefer self.a.destroy(probe);
             try self.probes.ensureUnusedCapacity(self.a, 1);
             try kernels.ensureUnusedCapacity(self.a, 1);
-            probe.* = .{ .a = self.a, .rig = .{ .a = self.a, .device = device, .queue = queue }, .pipe = pipe, .baseline = baseline, .name = label, .exact = exact, .control = control, .am = am, .an = an, .m = if (am) 64 else 65 };
+            const tile: usize = if (compact) 32 else 64;
+            probe.* = .{ .a = self.a, .rig = .{ .a = self.a, .device = device, .queue = queue }, .pipe = pipe, .baseline = baseline, .name = label, .exact = exact, .compact = compact, .control = control, .am = am, .an = an, .m = tile + @intFromBool(!am) };
             self.probes.appendAssumeCapacity(probe);
             kernels.appendAssumeCapacity(probe.kernel());
         };

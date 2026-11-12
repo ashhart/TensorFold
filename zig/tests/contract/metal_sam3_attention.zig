@@ -15,18 +15,28 @@ const single_shapes = [_]c.Shape{
     .{ .rows = 5184, .n = dim, .k = 5184 },
     .{ .rows = 5184, .n = dim, .k = 36544 },
     .{ .rows = 5185, .n = dim, .k = 33 },
+    .{ .rows = 2047, .n = dim, .k = 97 },
+    .{ .rows = 2048, .n = dim, .k = 97 },
+    .{ .rows = 2049, .n = dim, .k = 97 },
+    .{ .rows = 4096, .n = dim, .k = 33 },
+    .{ .rows = 4097, .n = dim, .k = 33 },
 };
 const batch_shapes = [_]c.Shape{
     .{ .rows = 65, .n = 2 * dim, .k = 97 },
     .{ .rows = 5185, .n = 2 * dim, .k = 33 },
+    .{ .rows = 2049, .n = 2 * dim, .k = 97 },
+    .{ .rows = 4096, .n = 2 * dim, .k = 33 },
 };
 
 fn depth(s: c.Shape) usize {
     return dim + s.k;
 }
 
-fn label(batched: bool, control: bool) []const u8 {
-    return if (control) "control: sam3 attention D256 value partition" else if (batched) "metal sam3 attention D256 batches and heads" else "metal sam3 attention D256 full";
+fn label(batched: bool, control: bool, two_pass: bool, replacement: bool) []const u8 {
+    if (control) return if (two_pass) "control: sam3 attention D256 two-pass value partition" else "control: sam3 attention D256 value partition";
+    if (replacement) return if (batched) "metal sam3 attention D256 two-pass batched replacement" else "metal sam3 attention D256 two-pass replacement";
+    if (two_pass) return if (batched) "metal sam3 attention D256 two-pass batches and heads" else "metal sam3 attention D256 two-pass full";
+    return if (batched) "metal sam3 attention D256 batches and heads" else "metal sam3 attention D256 full";
 }
 
 fn stressValue(j: usize, n: usize) f32 {
@@ -46,12 +56,24 @@ pub fn text(a: std.mem.Allocator, control: bool) ![]u8 {
     return std.mem.replaceOwned(u8, a, raw, from, "P[19];");
 }
 
+pub fn twoPassText(a: std.mem.Allocator, control: bool) ![]u8 {
+    const raw = try text(a, false);
+    if (!control) return raw;
+    defer a.free(raw);
+    const from = "P[19] + part * 128;";
+    if (std.mem.count(u8, raw, from) != 1) return error.ControlTextNotFound;
+    return std.mem.replaceOwned(u8, a, raw, from, "P[19];");
+}
+
 const Probe = struct {
     a: std.mem.Allocator,
     rig: rig_.Rig,
     pipe: mtl.Pipeline,
     batched: bool,
     control: bool,
+    two_pass: bool,
+    replacement: bool,
+    passes: [2]?mtl.Pipeline = .{ null, null },
     shape: c.Shape = undefined,
     stress: bool = false,
     q: []f32 = &.{},
@@ -60,14 +82,17 @@ const Probe = struct {
     half: []f64 = &.{},
     ins: [3]rig_.Ref = undefined,
     out: rig_.Ref = undefined,
+    base: rig_.Ref = undefined,
+    work: [2]rig_.Ref = undefined,
 
     fn spec(p: *const Probe) c.Spec {
         return .{
-            .name = label(p.batched, p.control),
+            .name = label(p.batched, p.control, p.two_pass, p.replacement),
             .accum = .f32,
             .depth = depth,
             .ops = 8,
             .out = .f32,
+            .replaces = if (p.replacement) "split-value SAM D256 attention" else null,
             .served = if (p.batched) &batch_shapes else &single_shapes,
             .tiles = .{ .{ .size = 64 }, .{}, .{ .size = 32 } },
         };
@@ -128,10 +153,17 @@ const Probe = struct {
         }
         for ([_][]const f32{ p.q, p.k, p.v }, &p.ins) |values, *input| input.* = try p.rig.input(std.mem.sliceAsBytes(values));
         p.out = try p.rig.output(p.count() * 4);
+        if (p.replacement) p.base = try p.rig.scratch(p.count() * 4);
+        if (p.two_pass) {
+            const blocks = (s.k + 31) / 32;
+            const planes = p.batches() * p.heads() * s.rows;
+            p.work[0] = try p.rig.scratch(planes * blocks * 32 * 4);
+            p.work[1] = try p.rig.scratch(planes * (blocks + 1) * 4);
+        }
         return true;
     }
 
-    fn launch(p: *Probe) !void {
+    fn launch(p: *Probe, baseline: bool) !void {
         const s = p.shape;
         const nheads = p.heads();
         const nq = (s.rows + 63) / 64;
@@ -142,11 +174,21 @@ const Probe = struct {
         var params: [24]i32 = undefined;
         for (vals, &params) |x, *v| v.* = @intCast(x);
         const pass = p.rig.begin();
+        if (p.two_pass and !baseline) {
+            const Binding = struct { buffer: mtl.Buffer, offset: usize };
+            var refs: [6]Binding = undefined;
+            for ([_]rig_.Ref{ p.ins[0], p.ins[1], p.ins[2], p.work[0], p.work[1], p.out }, &refs) |r, *binding|
+                binding.* = .{ .buffer = r.buf, .offset = r.off };
+            sources.tensor_attention_passes.encode(mtl, pass.e, p.passes[0].?, p.passes[1].?, refs, params, 0.0625);
+            try p.rig.finish(pass);
+            return;
+        }
         pass.e.setPipeline(p.pipe);
         for (p.ins, 0..) |r, i| pass.e.setBuffer(r.buf, r.off, i);
         pass.e.setValue(params, 3);
         pass.e.setValue([4]f32{ 0.0625, 0, 0, 0 }, 4);
-        pass.e.setBuffer(p.out.buf, p.out.off, 5);
+        const output = if (baseline) p.base else p.out;
+        pass.e.setBuffer(output.buf, output.off, 5);
         pass.e.dispatchThreads(mtl.Size.of(nq * 32, nheads * 4, p.batches() * 2), mtl.Size.of(32, 4, 1));
         try p.rig.finish(pass);
     }
@@ -154,17 +196,22 @@ const Probe = struct {
     pub fn run(p: *Probe) !void {
         const before = try p.a.dupe(u8, try p.rig.inputBytes());
         defer p.a.free(before);
-        try p.launch();
+        try p.launch(false);
         if (p.shape.rows > 64) {
             const first = try p.a.dupe(u8, p.rig.bytes(p.out, p.count() * 4));
             defer p.a.free(first);
             for (1..5) |_| {
-                try p.launch();
+                try p.launch(false);
                 if (!std.mem.eql(u8, first, p.rig.bytes(p.out, first.len))) return error.AttentionNotRepeatable;
             }
         }
         if (!std.mem.eql(u8, before, try p.rig.inputBytes())) return error.AttentionInputsChanged;
         if (!try p.rig.intact()) return error.AttentionGuardsChanged;
+    }
+
+    pub fn replaced(p: *Probe) ![]const u8 {
+        try p.launch(true);
+        return p.rig.bytes(p.base, p.count() * 4);
     }
 
     pub fn count(p: *const Probe) usize {
@@ -229,27 +276,35 @@ const Probe = struct {
         p.reset();
         p.rig.deinit();
         p.pipe.deinit();
+        for (p.passes) |maybe| if (maybe) |pipe| pipe.deinit();
     }
 };
 
 pub const Suite = struct {
     a: std.mem.Allocator,
-    probes: [3]?*Probe = @splat(null),
+    probes: [8]?*Probe = @splat(null),
 
     pub fn collect(s: *Suite, device: mtl.Device, queue: mtl.Queue, kernels: *std.ArrayList(g.Kernel), only: ?[]const u8) !void {
         if (!device.tensorUnits()) return;
-        for (0..3) |i| {
-            const batched = i == 1;
-            const control = i == 2;
-            if (only) |needle| if (std.mem.indexOf(u8, label(batched, control), needle) == null) continue;
-            const body = try text(s.a, control);
+        for (0..8) |i| {
+            const batched = i == 1 or i == 4 or i == 6;
+            const control = i == 2 or i == 7;
+            const two_pass = i >= 3;
+            const replacement = i == 5 or i == 6;
+            if (only) |needle| if (std.mem.indexOf(u8, label(batched, control, two_pass, replacement), needle) == null) continue;
+            const body = if (two_pass) try twoPassText(s.a, control) else try text(s.a, control);
             defer s.a.free(body);
-            const pipe = try rig_.pipeline(device, body, "im_attention_f32_full256");
+            const lib = try mtl.Library.fromSource(device, body, mtl.CompileOptions.mlx());
+            defer lib.deinit();
+            const pipe = try mtl.Pipeline.init(device, lib, "im_attention_f32_full256", false);
             errdefer pipe.deinit();
             const p = try s.a.create(Probe);
             errdefer s.a.destroy(p);
             try kernels.ensureUnusedCapacity(s.a, 1);
-            p.* = .{ .a = s.a, .rig = .{ .a = s.a, .device = device, .queue = queue }, .pipe = pipe, .batched = batched, .control = control };
+            const scores = if (two_pass) try mtl.Pipeline.init(device, lib, "im_attention_scores256", false) else null;
+            errdefer if (scores) |score| score.deinit();
+            const values = if (two_pass) try mtl.Pipeline.init(device, lib, "im_attention_values256", false) else null;
+            p.* = .{ .a = s.a, .rig = .{ .a = s.a, .device = device, .queue = queue }, .pipe = pipe, .batched = batched, .control = control, .two_pass = two_pass, .replacement = replacement, .passes = .{ scores, values } };
             s.probes[i] = p;
             kernels.appendAssumeCapacity(.{ .spec = p.spec(), .ctx = p, .vt = &vt, .control = if (control) .shapes else null });
         }

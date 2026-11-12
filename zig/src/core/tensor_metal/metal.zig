@@ -80,6 +80,7 @@ pub const Gpu = struct {
     queue: mtl.Queue,
     library: mtl.Library,
     exact_library: ?mtl.Library = null,
+    compact_libraries: [2]?mtl.Library = .{ null, null },
     pipelines: std.StringHashMapUnmanaged(mtl.Pipeline) = .empty,
     gpu_seconds: f64 = 0,
     wait_seconds: f64 = 0,
@@ -94,6 +95,10 @@ pub const Gpu = struct {
     guards: bool = false,
     cache_weights: bool = false,
     map_weights: bool = false,
+    attention_two_pass: bool = true,
+    compact_gemm: bool = false,
+    attention_probabilities: ?Tensor = null,
+    attention_stats: ?Tensor = null,
     weight_cache: std.AutoHashMapUnmanaged(WeightKey, Tensor) = .empty,
     batch: ?struct { pass: Pass, pool: mtl.objc.Pool } = null,
 
@@ -112,6 +117,8 @@ pub const Gpu = struct {
 
     pub fn deinit(self: *Gpu) void {
         if (self.batch != null) self.endBatch() catch {};
+        if (self.attention_probabilities) |t| t.deinit();
+        if (self.attention_stats) |t| t.deinit();
         self.clearWeights();
         for (self.spares.items) |slot| slot.buffer.deinit();
         self.spares.deinit(self.allocator);
@@ -123,25 +130,34 @@ pub const Gpu = struct {
         self.pipelines.deinit(self.allocator);
         self.library.deinit();
         if (self.exact_library) |library| library.deinit();
+        for (self.compact_libraries) |maybe| if (maybe) |library| library.deinit();
         self.queue.deinit();
         self.device.deinit();
     }
 
     pub fn alloc(self: *Gpu, count: usize, dtype: DType) !Tensor {
-        return self.allocBuffer(count, dtype, false);
+        return self.allocBuffer(count, dtype, false, true);
     }
 
     // Only encoder writes may initialize this buffer until the current serial batch completes.
     pub fn allocDevice(self: *Gpu, count: usize, dtype: DType) !Tensor {
-        return self.allocBuffer(count, dtype, true);
+        return self.allocBuffer(count, dtype, true, true);
     }
 
-    fn allocBuffer(self: *Gpu, count: usize, dtype: DType, device_only: bool) !Tensor {
+    pub fn allocDedicated(self: *Gpu, count: usize, dtype: DType) !Tensor {
+        return self.allocBuffer(count, dtype, true, false);
+    }
+
+    pub fn reserveAttention(self: *Gpu, rows: usize, keys: usize, heads: usize, batch: usize) !void {
+        if (self.attention_two_pass) try @import("attention_two_pass.zig").prepare(self, rows, keys, heads, batch);
+    }
+
+    fn allocBuffer(self: *Gpu, count: usize, dtype: DType, device_only: bool, pooled: bool) !Tensor {
         if (count == 0) return error.EmptyTensor;
         const bytes = try std.math.mul(usize, count, dtype.size());
         const capacity = bytes + @as(usize, if (self.guards) 256 else 0);
         const started = mtl.clock.seconds();
-        if (self.buffer_cache_limit > 0) {
+        if (pooled and self.buffer_cache_limit > 0) {
             var best: ?usize = null;
             for (self.spares.items, 0..) |slot, i| {
                 const ready = self.submissions + @as(usize, @intFromBool(device_only and self.batch != null and !self.guards));
@@ -164,7 +180,7 @@ pub const Gpu = struct {
         if (self.guards) @memset(buffer.contents()[bytes..][0..256], 0xa5);
         self.peak_bytes = @max(self.peak_bytes, self.device.allocated());
         var out = Tensor{ .buffer = buffer, .count = count, .dtype = dtype, .guarded = self.guards, .host_data = buffer.contents() };
-        if (capacity <= self.buffer_cache_limit -| self.buffer_cache_bytes) {
+        if (pooled and capacity <= self.buffer_cache_limit -| self.buffer_cache_bytes) {
             try self.spares.append(self.allocator, .{ .buffer = buffer, .bytes = capacity });
             self.buffer_cache_bytes += capacity;
             out.recycle = .{ .owner = self, .index = self.spares.items.len - 1 };
@@ -260,7 +276,18 @@ pub const Gpu = struct {
         if (self.pipelines.get(name)) |p| return p;
         const key = try self.allocator.dupe(u8, name);
         errdefer self.allocator.free(key);
-        const library = if (std.mem.startsWith(u8, name, "qwv_gemm_f32_exact_")) blk: {
+        const library = if (std.mem.indexOf(u8, name, "_compact_") != null) blk: {
+            const exact = std.mem.startsWith(u8, name, "qwv_gemm_f32_exact_");
+            const slot = &self.compact_libraries[@intFromBool(exact)];
+            if (slot.* == null) {
+                const raw = try std.mem.concat(self.allocator, u8, &.{ if (exact) "#define TF_NAX_EXACT_B\n" else "", sources.tensor_compact_gemm });
+                defer self.allocator.free(raw);
+                const source = try std.mem.replaceOwned(u8, self.allocator, raw, "#include \"../nax.h\"", sources.nax);
+                defer self.allocator.free(source);
+                slot.* = try mtl.Library.fromSource(self.device, source, mtl.CompileOptions.mlx());
+            }
+            break :blk slot.*.?;
+        } else if (std.mem.startsWith(u8, name, "qwv_gemm_f32_exact_")) blk: {
             if (self.exact_library == null) {
                 const source = try std.mem.replaceOwned(u8, self.allocator, sources.tensor_exact_gemm, "#include \"../nax.h\"", sources.nax);
                 defer self.allocator.free(source);
@@ -346,7 +373,9 @@ pub const Gpu = struct {
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         var name: [64]u8 = undefined;
-        const key = try std.fmt.bufPrint(&name, "qwv_gemm_{s}{s}_nt_{d}{d}", .{ @tagName(x.dtype), if (w.dtype == .f32 and w.tensor_operand_exact) "_exact" else "", @intFromBool(m % 64 == 0), @intFromBool(n % 128 == 0) });
+        const compact = self.compact_gemm and x.dtype == .f32;
+        const tile_rows: usize = if (compact) 32 else 64;
+        const key = try std.fmt.bufPrint(&name, "qwv_gemm_{s}{s}{s}_nt_{d}{d}", .{ @tagName(x.dtype), if (w.dtype == .f32 and w.tensor_operand_exact) "_exact" else "", if (compact) "_compact" else "", @intFromBool(m % tile_rows == 0), @intFromBool(n % 128 == 0) });
         const p = try self.pipeline(key);
         const pass = self.command();
         const cb = pass.cb;
@@ -356,12 +385,13 @@ pub const Gpu = struct {
         enc.setBuffer(w.buffer, w.offset, 1);
         var args: [16]i32 = @splat(0);
         const tn = (n + 127) / 128;
-        const tm = (m + 63) / 64;
+        const tm = (m + tile_rows - 1) / tile_rows;
         for ([_]usize{ m, n, k, k, k, n, tn, tm, 2, k / 256 }, 0..) |v, i| args[i] = std.math.cast(i32, v) orelse return error.MatrixTooLarge;
         for ([_]usize{ xs, ws, ys }, 10..) |v, i| args[i] = std.math.cast(i32, v) orelse return error.MatrixTooLarge;
         enc.setValue(args, 2);
         enc.setBuffer(out.buffer, out.offset, 3);
-        enc.dispatchThreads(mtl.Size.of(tn * 4 * 32, (tm + 3) / 4 * 4, batch * 2), mtl.Size.of(32, 4, 2));
+        const group_depth: usize = 2;
+        enc.dispatchThreads(mtl.Size.of(tn * 4 * 32, (tm + 3) / 4 * 4, batch * group_depth), mtl.Size.of(32, 4, group_depth));
         try self.finish(cb, enc);
     }
 

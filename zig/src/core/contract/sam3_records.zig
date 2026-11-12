@@ -10,10 +10,12 @@ pub const metal = blk: {
     out[9] = .{ .name = "sam3 fp32 mma helper control tf_sam3_fma_flush", .threads = 32, .tg_memory = 0, .reserved = 32, .offline = false };
     break :blk out;
 } ++ blk: {
-    var out: [8]M = undefined;
+    var out: [16]M = undefined;
     for ([_][]const u8{ "00", "01", "10", "11" }, 0..) |tag, i| {
         out[i] = .{ .name = "sam3 fp32 gemm qwv_gemm_f32_nt_" ++ tag, .threads = 256, .tg_memory = 0, .reserved = 256, .offline = false };
         out[i + 4] = .{ .name = "sam3 fp32 gemm qwv_gemm_f32_exact_nt_" ++ tag, .threads = 256, .tg_memory = 0, .reserved = 256, .offline = false };
+        out[i + 8] = .{ .name = "sam3 fp32 gemm qwv_gemm_f32_compact_nt_" ++ tag, .threads = 256, .tg_memory = 0, .reserved = 256, .offline = false };
+        out[i + 12] = .{ .name = "sam3 fp32 gemm qwv_gemm_f32_exact_compact_nt_" ++ tag, .threads = 256, .tg_memory = 0, .reserved = 256, .offline = false };
     }
     break :blk out;
 } ++ [_]M{
@@ -21,4 +23,7 @@ pub const metal = blk: {
     .{ .name = "sam3 deconvolution baseline im_sam_deconv_baseline", .threads = 256, .tg_memory = 0, .reserved = 256 },
     .{ .name = "sam3 attention im_attention_f32_full256", .threads = 128, .tg_memory = 0, .reserved = 128, .offline = false },
     .{ .name = "sam3 attention control im_attention_f32_full256", .threads = 128, .tg_memory = 0, .reserved = 128, .offline = false },
+    .{ .name = "sam3 attention two-pass im_attention_scores256", .threads = 128, .tg_memory = 0, .reserved = 128, .offline = false },
+    .{ .name = "sam3 attention two-pass im_attention_values256", .threads = 128, .tg_memory = 0, .reserved = 128, .offline = false },
+    .{ .name = "sam3 attention two-pass control im_attention_values256", .threads = 128, .tg_memory = 0, .reserved = 128, .offline = false },
 };

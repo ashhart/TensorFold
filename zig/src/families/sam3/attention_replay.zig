@@ -64,6 +64,20 @@ fn firstNonFinite(tensor: gpu.Tensor) ?usize {
     return null;
 }
 
+const Repeated = struct { tensor: gpu.Tensor, seconds: f64 };
+
+fn five(g: *gpu.Gpu, q: gpu.Tensor, k: gpu.Tensor, v: gpu.Tensor, rows: usize, keys: usize) !Repeated {
+    const before = g.gpu_seconds;
+    const full = try gpu.ops.attentionCross(g, q, k, v, rows, keys, 1, 0.0625);
+    errdefer full.deinit();
+    for (1..5) |_| {
+        const repeated = try gpu.ops.attentionCross(g, q, k, v, rows, keys, 1, 0.0625);
+        defer repeated.deinit();
+        if (!std.mem.eql(u8, full.slice(u8, full.count * 4), repeated.slice(u8, repeated.count * 4))) return error.AttentionReplayNotRepeatable;
+    }
+    return .{ .tensor = full, .seconds = (g.gpu_seconds - before) / 5 };
+}
+
 pub fn run(init: std.process.Init, g: *gpu.Gpu, args: []const [:0]const u8) !void {
     if (args.len != 3 and args.len != 4) return error.ExpectedQueryKeyValueAndOptionalRow;
     const q = try load(init, g, args[0]);
@@ -75,16 +89,15 @@ pub fn run(init: std.process.Init, g: *gpu.Gpu, args: []const [:0]const u8) !voi
     if (k.count != v.count) return error.AttentionReplayShape;
     const rows = q.count / 256;
     const keys = k.count / 256;
-    const gpu_before = g.gpu_seconds;
-    const full = try gpu.ops.attentionCross(g, q, k, v, rows, keys, 1, 0.0625);
+    const baseline: ?Repeated = if (g.attention_two_pass) blk: {
+        g.attention_two_pass = false;
+        defer g.attention_two_pass = true;
+        break :blk try five(g, q, k, v, rows, keys);
+    } else null;
+    defer if (baseline) |base| base.tensor.deinit();
+    const measured = try five(g, q, k, v, rows, keys);
+    const full = measured.tensor;
     defer full.deinit();
-    for (1..5) |_| {
-        const repeated = try gpu.ops.attentionCross(g, q, k, v, rows, keys, 1, 0.0625);
-        defer repeated.deinit();
-        if (!std.mem.eql(u8, full.slice(u8, full.count * 4), repeated.slice(u8, repeated.count * 4)))
-            return error.AttentionReplayNotRepeatable;
-    }
-    const grid_seconds = (g.gpu_seconds - gpu_before) / 5;
     const bad = firstNonFinite(full);
     const row = if (args.len == 4) try std.fmt.parseInt(usize, args[3], 10) else if (bad) |i| i / 256 else 0;
     if (row >= rows) return error.AttentionReplayRow;
@@ -134,5 +147,31 @@ pub fn run(init: std.process.Init, g: *gpu.Gpu, args: []const [:0]const u8) !voi
     }
     if (bad != null or firstNonFinite(single) != null) return error.NonFiniteAttentionReplay;
     if (!equal) return error.AttentionReplayRowsDiffer;
-    std.debug.print("Five full-grid runs are byte-identical; mean GPU time {d:.3} ms\n", .{grid_seconds * 1000});
+    if (g.attention_two_pass) {
+        try g.beginBatch();
+        errdefer if (g.batch != null) g.endBatch() catch {};
+        const first = try gpu.ops.attentionCross(g, q, k, v, rows, keys, 1, 0.0625);
+        defer first.deinit();
+        const middle = try gpu.ops.attentionCross(g, selected, k, v, 1, keys, 1, 0.0625);
+        defer middle.deinit();
+        const last = try gpu.ops.attentionCross(g, q, k, v, rows, keys, 1, 0.0625);
+        defer last.deinit();
+        try g.endBatch();
+        const expected = full.slice(u8, full.count * 4);
+        if (!std.mem.eql(u8, expected, first.slice(u8, expected.len)) or
+            !std.mem.eql(u8, expected, last.slice(u8, expected.len)) or
+            !std.mem.eql(u8, single.slice(u8, 256 * 4), middle.slice(u8, 256 * 4))) return error.AttentionWorkspaceChanged;
+        std.debug.print("Shared attention workspace preserves batched full/single/full outputs\n", .{});
+    }
+    std.debug.print("Five full-grid runs are byte-identical; mean GPU time {d:.3} ms\n", .{measured.seconds * 1000});
+    if (baseline) |base| {
+        var changed: usize = 0;
+        var first: usize = 0;
+        for (full.slice(u32, full.count), base.tensor.slice(u32, full.count), 0..) |x, y, i| if (x != y) {
+            if (changed == 0) first = i;
+            changed += 1;
+        };
+        std.debug.print("Two-pass attention vs baseline: {d} changed outputs, first {d}; {d:.3} vs {d:.3} ms GPU\n", .{ changed, first, measured.seconds * 1000, base.seconds * 1000 });
+        if (changed != 0) return error.AttentionReplacementChanged;
+    }
 }

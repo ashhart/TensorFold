@@ -4,6 +4,7 @@ const ops = @import("ops.zig");
 const vision = @import("vision.zig");
 const decoder = @import("decoder.zig");
 const memory = @import("memory.zig");
+const selection = @import("memory_selection.zig");
 const prompt_encoder = @import("prompt_encoder.zig");
 const prompts = @import("prompts.zig");
 const Runtime = ops.Runtime;
@@ -42,26 +43,6 @@ pub fn seed(r: *Runtime, features: [3]Feature, prompt: prompts.Prompt, size: pro
     return result;
 }
 
-pub fn distance(a: usize, b: usize) usize {
-    return @max(a, b) - @min(a, b);
-}
-
-fn spatial(past: Memory, index: usize) bool {
-    return past.spatial_live and (past.conditioning or distance(index, past.index) < 7);
-}
-
-fn temporalIndex(multiplex: bool, conditioning: bool, delta: usize) usize {
-    return if ((!multiplex and conditioning) or delta == 0 or delta >= 7) 6 else 6 - delta;
-}
-
-test "SAM3.1 temporally encodes conditioning frames while SAM3 uses its conditioning indicator" {
-    try std.testing.expectEqual(@as(usize, 6), temporalIndex(false, true, 1));
-    try std.testing.expectEqual(@as(usize, 5), temporalIndex(true, true, 1));
-    try std.testing.expectEqual(@as(usize, 0), temporalIndex(true, true, 6));
-    try std.testing.expectEqual(@as(usize, 6), temporalIndex(true, true, 7));
-    try std.testing.expectEqual(@as(usize, 4), temporalIndex(false, false, 2));
-}
-
 fn pointerPosition(r: *Runtime, max_pointers: usize, delta: usize) !Tensor {
     const key = try r.name("pointer.positions.{d}.{d}", .{ max_pointers, delta });
     if (delta < 16) if (r.constant(key)) |cached| return cached;
@@ -96,11 +77,12 @@ fn oldAttention(r: *Runtime, key: []const u8, q: Tensor, k: Tensor, v: Tensor, i
     return r.linear(try r.name("{s}.out_proj", .{key}), attended, 256);
 }
 
-pub fn propagate(r: *Runtime, features: [3]Feature, history: []const Memory, index: usize, frames: usize, active: u16) !Result {
+pub fn propagate(r: *Runtime, features: [3]Feature, history: []const Memory, index: usize, frames: usize, direction: selection.Direction, active: u16) !Result {
     if (history.len == 0) return error.MissingConditioningFrame;
     const start = r.mark();
     const root = r.config.trackerPrefix();
     const multiplex = r.config.version == .sam31;
+    const plan = try selection.select(history, index, frames, direction, multiplex);
     const width = r.config.memory_width;
     const pos = try vision.sine(r, 72, 72);
     const memory_pe = try vision.sineWidth(r, 72, 72, width);
@@ -109,27 +91,27 @@ pub fn propagate(r: *Runtime, features: [3]Feature, history: []const Memory, ind
     var pointers: std.ArrayList(Tensor) = .empty;
     var pointer_positions: std.ArrayList(Tensor) = .empty;
     const max_pointers = @min(frames, 16);
-    for (history) |past| {
-        const delta = distance(index, past.index);
-        if (!past.conditioning and delta >= max_pointers) continue;
+    for (plan.pointers.constSlice()) |item| {
+        const past = history[item.history];
         try pointers.append(a, past.pointer);
-        try pointer_positions.append(a, try pointerPosition(r, max_pointers, delta));
+        try pointer_positions.append(a, try pointerPosition(r, max_pointers, item.relative));
     }
     const pointer_count = pointers.items.len * r.config.bucket_size * 256 / width;
     const zero = try r.alloc(pointer_count * 256);
     @memset(zero.slice(f32, zero.count), 0);
+    if (!multiplex) {
+        try r.g.reserveAttention(5184, @max(5184, plan.spatial.len * 5184 + pointer_count), 1, 1);
+    }
     try r.g.beginBatch();
     errdefer if (r.g.batch != null) r.g.endBatch() catch {};
     var memories: std.ArrayList(Tensor) = .empty;
     var images: std.ArrayList(Tensor) = .empty;
     var positions: std.ArrayList(Tensor) = .empty;
-    for (history) |past| {
-        if (!spatial(past, index)) continue;
-        const delta = distance(index, past.index);
-        const t = temporalIndex(multiplex, past.conditioning, delta);
+    for (plan.spatial.constSlice()) |item| {
+        const past = history[item.history];
         try memories.append(a, past.encoded);
         try images.append(a, past.image);
-        try positions.append(a, try r.add(memory_pe, view(temporal, t * width, width)));
+        try positions.append(a, try r.add(memory_pe, view(temporal, item.temporal * width, width)));
     }
     if (memories.items.len == 0) return error.MissingSpatialMemory;
     const spatial_count = memories.items.len * 5184;
@@ -171,8 +153,8 @@ pub fn propagate(r: *Runtime, features: [3]Feature, history: []const Memory, ind
             if (cached) {
                 var keys: std.ArrayList(Tensor) = .empty;
                 var values: std.ArrayList(Tensor) = .empty;
-                for (history) |past| {
-                    if (!spatial(past, index)) continue;
+                for (plan.spatial.constSlice()) |item| {
+                    const past = history[item.history];
                     try keys.append(a, past.projected.?[i].key);
                     try values.append(a, past.projected.?[i].value);
                 }
