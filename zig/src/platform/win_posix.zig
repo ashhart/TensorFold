@@ -81,6 +81,7 @@ const ws = struct {
     extern "ws2_32" fn connect(s: isize, addr: *const anyopaque, len: c_int) callconv(.winapi) c_int;
     extern "ws2_32" fn accept(s: isize, addr: ?*anyopaque, len: ?*c_int) callconv(.winapi) isize;
     extern "ws2_32" fn getsockname(s: isize, addr: *anyopaque, len: *c_int) callconv(.winapi) c_int;
+    extern "ws2_32" fn getpeername(s: isize, addr: *anyopaque, len: *c_int) callconv(.winapi) c_int;
     extern "ws2_32" fn setsockopt(s: isize, level: c_int, opt: c_int, val: [*]const u8, len: c_int) callconv(.winapi) c_int;
     extern "ws2_32" fn shutdown(s: isize, how: c_int) callconv(.winapi) c_int;
     extern "ws2_32" fn closesocket(s: isize) callconv(.winapi) c_int;
@@ -155,6 +156,9 @@ pub const system = struct {
     }
     pub fn getsockname(fd: socket_t, addr: *anyopaque, len: *socklen_t) c_int {
         return if (ws.getsockname(fd, addr, len) != 0) failed() else 0;
+    }
+    pub fn getpeername(fd: socket_t, addr: *anyopaque, len: *socklen_t) c_int {
+        return if (ws.getpeername(fd, addr, len) != 0) failed() else 0;
     }
     pub fn shutdown(fd: socket_t, how: i32) c_int {
         return if (ws.shutdown(fd, how) != 0) failed() else 0;
