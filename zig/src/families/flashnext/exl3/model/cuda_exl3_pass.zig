@@ -229,9 +229,9 @@ pub fn freeBytes(d: *const cuda.Driver) !u64 {
     return free;
 }
 
-/// UNIFORM_LINES: 0 and 1 both keep every rank on the asked-for lines; the setting has always meant its presence.
+/// UNIFORM_LINES=1 keeps every rank on the requested lines; 0 or unset keeps automatic sizing.
 pub fn uniformLines() !bool {
-    return (try @import("sys").environment.read(?bool, "TF_FLASHNEXT_EXL3_UNIFORM_LINES", null)) != null;
+    return @import("sys").environment.read(bool, "TF_FLASHNEXT_EXL3_UNIFORM_LINES", false);
 }
 
 /// The sizing hook (cuda_lanes_load.zig, once everything else of the family is allocated).

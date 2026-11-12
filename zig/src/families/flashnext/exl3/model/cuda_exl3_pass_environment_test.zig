@@ -24,17 +24,17 @@ const SavedEnv = struct {
     }
 };
 
-test "exl3: UNIFORM_LINES selects on 0 or 1, is unset when blank, and refuses other text" {
+test "exl3: UNIFORM_LINES obeys zero and one and refuses other text" {
     const saved = try SavedEnv.take("TF_FLASHNEXT_EXL3_UNIFORM_LINES");
     defer saved.restore();
     for ([_]?[:0]const u8{ null, "", " ", "\t" }) |unset| {
         try saved.set(unset);
         try std.testing.expect(!try pass.uniformLines());
     }
-    for ([_][:0]const u8{ "0", "1" }) |text| {
-        try saved.set(text);
-        try std.testing.expect(try pass.uniformLines());
-    }
+    try saved.set("0");
+    try std.testing.expect(!try pass.uniformLines());
+    try saved.set("1");
+    try std.testing.expect(try pass.uniformLines());
     for ([_][:0]const u8{ "2", "yes", "true", "on", " 1", "1 " }) |text| {
         try saved.set(text);
         try std.testing.expectError(error.InvalidEnvironment, pass.uniformLines());
