@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- HIP: the qwen3_5 engine has a DFlash2 draft engine for chains: it walks the core `draft_tree`, shares one `prior` table with CUDA, and refuses an absorb whose start differs from its features; in the drafter test with Qwen3.8-27B on gfx1151, 0.86 of first drafts are right and a round makes about 5 tokens (greedy), and without a drafter the 27B's and 35B-A3B's logits on HIP are byte-identical to main's; the server doesn't use it yet (#2726, part 4 of #1563). Thanks to @AbrahamCete.
+
 - Tests: the cancelled-benchmark test checks that a cancelled run saves one cancelled sample and never publishes, instead of counting requests that race the stop, so it no longer fails on a busy runner (#2865, fixes #2853).
 
 - HIP Flash Next: a decode round's n-gram table gather spreads over the parked host workers and asks for its pages first (`MADV_POPULATE_READ`), so first-time page faults overlap; on one Radeon 8060S (gfx1151) with Qwen3.8-Flash-Next oQ4e at 4 streams, cold decode is about 45% faster sampled and 18% greedy and the cold 8K first token about 10% sooner, with warm decode level and tokens unchanged (#2695). Thanks to @gilby.
