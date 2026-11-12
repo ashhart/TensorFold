@@ -54,11 +54,12 @@ test "explicit frame budgets are bounded and leave prompt room" {
     try std.testing.expectEqualDeep(default, explicit);
 }
 
-pub fn metalShapeProblem(window: i64, tp: usize, rank: usize, lanes: usize) ?[]const u8 {
+pub fn metalShapeProblem(window: i64, tp: usize, rank: usize, lanes: usize, speed_up: bool) ?[]const u8 {
     if (window < 1025 or window > 8192)
         return "Drama 3 Metal supports --context 1025 through 8192 positional rows, including prompt, generated frames and one reserved row";
     if (tp != 1 or rank != 0)
         return "Drama 3 Metal serves one device per engine; tensor parallelism is unsupported (--tp 1, --rank 0)";
+    if (speed_up) return "Drama 3 Metal does not support --speed-up; use one Mac per engine";
     if (lanes == 0 or lanes > 8)
         return "Drama 3 Metal supports 1 through 8 speech frame lanes";
     return null;
@@ -67,13 +68,15 @@ pub fn metalShapeProblem(window: i64, tp: usize, rank: usize, lanes: usize) ?[]c
 test "Drama Metal shape refusals preserve the qualified window and single device" {
     const t = std.testing;
     for ([_]i64{ 1025, 4096, 8192 }) |window| {
-        try t.expectEqual(null, metalShapeProblem(window, 1, 0, 1));
-        try t.expectEqual(null, metalShapeProblem(window, 1, 0, 8));
+        try t.expectEqual(null, metalShapeProblem(window, 1, 0, 1, false));
+        try t.expectEqual(null, metalShapeProblem(window, 1, 0, 8, false));
     }
     for ([_]i64{ -1, 0, 1024, 8193, 262144 }) |window|
-        try t.expect(std.mem.indexOf(u8, metalShapeProblem(window, 1, 0, 1).?, "positional rows") != null);
-    try t.expect(std.mem.indexOf(u8, metalShapeProblem(8192, 2, 0, 1).?, "tensor parallelism is unsupported") != null);
-    try t.expect(std.mem.indexOf(u8, metalShapeProblem(8192, 1, 1, 1).?, "tensor parallelism is unsupported") != null);
+        try t.expect(std.mem.indexOf(u8, metalShapeProblem(window, 1, 0, 1, false).?, "positional rows") != null);
+    try t.expect(std.mem.indexOf(u8, metalShapeProblem(8192, 2, 0, 1, false).?, "tensor parallelism is unsupported") != null);
+    try t.expect(std.mem.indexOf(u8, metalShapeProblem(8192, 1, 1, 1, false).?, "tensor parallelism is unsupported") != null);
     for ([_]usize{ 0, 9 }) |lanes|
-        try t.expect(std.mem.indexOf(u8, metalShapeProblem(8192, 1, 0, lanes).?, "speech frame lanes") != null);
+        try t.expect(std.mem.indexOf(u8, metalShapeProblem(8192, 1, 0, lanes, false).?, "speech frame lanes") != null);
+    for ([_]usize{ 1, 2, 8 }) |lanes|
+        try t.expectEqualStrings("Drama 3 Metal does not support --speed-up; use one Mac per engine", metalShapeProblem(8192, 1, 0, lanes, true).?);
 }
