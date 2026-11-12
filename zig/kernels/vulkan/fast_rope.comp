@@ -1,4 +1,6 @@
-// Preserve the omitted contract, precision, and host-interface facts from the original comment.
+// From omarchy-mlx overlay/mlx/backend/omarchy/shaders/fast_rope.comp at de34407c136e.
+// Code adapted: 7 lines added or changed, 0 removed.
+// Copyright © 2026 Joshua Warren and mlx-omarchy contributors; MIT License, full text in LICENSES/mlx-omarchy-MIT.txt.
 #version 460
 
 #extension GL_GOOGLE_include_directive : require
@@ -26,7 +28,6 @@ float rope_round(float value) {
 }
 #elif defined(USE_BF16)
 #extension GL_EXT_shader_16bit_storage : require
-// Preserve the omitted contract, precision, and host-interface facts from the original comment.
 layout(set = 0, binding = 0, std430) readonly buffer Input {
   uint values[];
 } input_data;
@@ -140,7 +141,6 @@ layout(push_constant) uniform Params {
 
 void main() {
 #ifdef USE_BF16
-  // Preserve the omitted contract, precision, and host-interface facts from the original comment.
   uint index = gl_GlobalInvocationID.x;
   uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
   uint half_dims = params.dims;

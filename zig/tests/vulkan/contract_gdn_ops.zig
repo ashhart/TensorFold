@@ -353,7 +353,7 @@ pub const Gdn = struct {
                         for (0..dk) |i| out[dst + i] = if (head < 2 * heads) scale_f * (vals[i] * inv) else vals[i];
                     }
                     for (0..heads) |hv| {
-                        const ref = fx.gateRefAsh(f.a_bits[t * heads + hv], f.b_bits[t * heads + hv], f32Of(f.a_log_bits, hv), f.dt_bits[hv]);
+                        const ref = fx.gateRefOracle(f.a_bits[t * heads + hv], f.b_bits[t * heads + hv], f32Of(f.a_log_bits, hv), f.dt_bits[hv]);
                         out[3 * T * linear_dim + t * heads + hv] = ref.beta;
                     }
                 }

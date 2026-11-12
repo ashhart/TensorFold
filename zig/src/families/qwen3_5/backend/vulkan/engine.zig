@@ -210,7 +210,7 @@ pub const Engine = struct {
         e.poisoned = false;
     }
 
-    // Ash draw picks the largest finite logit; ties (+0/-0) go lowest index. Any NaN/Inf refuses and poisons.
+    // The oracle draw picks the largest finite logit; ties (+0/-0) go lowest index. Any NaN/Inf refuses and poisons.
     pub fn draw(e: *Engine) Error!u32 {
         try logitsReady(e.poisoned, e.state.visible());
         return vk.orExit(e.greedy.select(e.cmds, e.staging, e.logits, e.timeout_ns)) catch |err| {

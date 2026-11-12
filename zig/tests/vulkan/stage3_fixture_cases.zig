@@ -38,7 +38,7 @@ fn poisonedShell(a: std.mem.Allocator, len: usize) ![]u16 {
     return buf;
 }
 
-/// The ASH rope in f64 for one 256-wide row at absolute position `pos`.
+/// The oracle rope in f64 for one 256-wide row at absolute position `pos`.
 pub fn ropeRef(row: []const u16, pos: f64, out: []f64) void {
     for (0..rotary) |i| {
         const inv = std.math.pow(f64, theta, -@as(f64, @floatFromInt(i)) / 32.0);
