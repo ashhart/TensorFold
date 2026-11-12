@@ -1,4 +1,4 @@
-//! The stream tile with Nemotron's relu^2 as its epilogue under the contract on HIP: the plain tile then tf_nemo_relu2.
+//! The stream tile with Nemotron's relu^2 as its epilogue under the contract on HIP, at each width oQ checkpoints hold.
 const std = @import("std");
 const hip = @import("hip");
 const core = @import("core");
@@ -6,6 +6,8 @@ const rig_ = @import("contract_rig.zig");
 const kit = @import("contract_kit.zig");
 
 const contract = core.contract;
+const Allocator = std.mem.Allocator;
+const Launcher = hip.Launcher;
 const c = contract.spec;
 const g = contract.gates;
 
@@ -13,23 +15,32 @@ const Kernels = @FieldType(hip.Launcher, "affine");
 /// launches/affine.zig's Arg, as relu2Go takes it.
 pub const Arg = @typeInfo(@TypeOf(Kernels.relu2Go)).@"fn".param_types[2].?;
 
-const bits = 4; // Nano's MLX checkpoints
 const group = 64;
+/// The widths Nemotron's MLX and oQ checkpoints store the relu^2 products at.
+pub const widths = [_]u8{ 4, 5, 6, 8 };
 
 /// A group's codes by dot2 pairs, its scale and bias, then the groups' sum: one fp32 chain over k.
 fn depth(s: c.Shape) usize {
     return s.k / 2 + s.k / group + 8;
 }
 
-const names = [2][]const u8{
-    "hip affine_dot2_stream_relu2 (4-bit, fp16)",
-    "hip affine_dot2_stream_relu2 (4-bit, bf16)",
-};
+fn name(comptime bits: u8, k: kit.Kind, plant: bool) []const u8 {
+    const fmt = "hip affine_dot2_stream_relu2 ({d}-bit, {s})";
+    const half = std.fmt.comptimePrint(fmt, .{ bits, "fp16" });
+    const kinds = [2][]const u8{ half, std.fmt.comptimePrint(fmt, .{ bits, "bf16" }) };
+    const control = std.fmt.comptimePrint("control: the {d}-bit relu2 stream tile reads its codes as 4-bit", .{bits});
+    return if (plant) control else kinds[@intFromBool(k == .bf16)];
+}
+
+fn nameOf(bits: u8, k: kit.Kind, plant: bool) []const u8 {
+    inline for (widths) |b| if (b == bits) return name(b, k, plant);
+    unreachable;
+}
 const bf16_why = "the bound's two roundings to bf16 cap the miss of a sum relu turns to 0 at 85x";
 
-pub fn spec(k: kit.Kind) c.Spec {
+pub fn spec(k: kit.Kind, bits: u8, plant: bool) c.Spec {
     return .{
-        .name = names[@intFromBool(k == .bf16)],
+        .name = nameOf(bits, k, plant),
         .accum = .f32,
         .depth = depth,
         .ops = 1,
@@ -48,19 +59,23 @@ pub fn spec(k: kit.Kind) c.Spec {
     };
 }
 
-/// x [rows][k] of the kind times the MLX 4-bit matrix [n][k]: relu(round(y))^2 [rows][n] of the kind.
+/// x [rows][k] of the kind times the MLX matrix [n][k] at `bits`: relu(round(y))^2 [rows][n] of the kind.
 pub const Relu2 = struct {
     rig: rig_.Rig,
-    l: *const hip.Launcher,
+    l: *const Launcher,
     k: kit.Kind,
+    bits: u8,
+    /// The planted control: the tile told 4-bit over codes packed at `bits`, which gate 3 must turn red.
+    plant: bool,
     arena: std.heap.ArenaAllocator,
     f: ?contract.affine.Affine = null,
     arg: Arg = undefined,
     sum: u64 = 0,
     base: u64 = 0,
 
-    pub fn init(a: std.mem.Allocator, rt: *const hip.Runtime, s: hip.Stream, l: *const hip.Launcher) Relu2 {
-        return .{ .rig = .{ .a = a, .r = rt, .s = s }, .l = l, .k = kit.act(), .arena = .init(a) };
+    pub fn init(a: Allocator, rt: *const hip.Runtime, s: hip.Stream, l: *const Launcher, bits: u8, plant: bool) Relu2 {
+        const rig: rig_.Rig = .{ .a = a, .r = rt, .s = s };
+        return .{ .rig = rig, .l = l, .k = kit.act(), .bits = bits, .plant = plant, .arena = .init(a) };
     }
 
     pub fn deinit(self: *Relu2) void {
@@ -69,7 +84,8 @@ pub const Relu2 = struct {
     }
 
     pub fn kernel(self: *Relu2) g.Kernel {
-        return .{ .spec = spec(self.k), .ctx = self, .vt = &vt };
+        const control: ?g.Gate = if (self.plant) .shapes else null;
+        return .{ .spec = spec(self.k, self.bits, self.plant), .ctx = self, .vt = &vt, .control = control };
     }
 
     const vt = g.hooks(Relu2);
@@ -79,6 +95,7 @@ pub const Relu2 = struct {
         self.rig.reset();
         _ = self.arena.reset(.retain_capacity);
         const a = self.arena.allocator();
+        const bits = self.bits;
         var f = try contract.affine.Affine.init(a, shape, bits, group);
         try f.fill(fill, seed);
         // gate 4's rows sum to a negative product, which relu would hide: x negated makes it positive
@@ -109,7 +126,7 @@ pub const Relu2 = struct {
             .m = @intCast(shape.rows),
             .n = @intCast(shape.n),
             .k = @intCast(shape.k),
-            .bits = bits,
+            .bits = if (self.plant) 4 else bits,
             .group = group,
             .fp16 = @intFromBool(self.k == .f16),
             .out16 = out,
@@ -122,9 +139,10 @@ pub const Relu2 = struct {
         try self.rig.s.synchronize();
     }
 
-    /// The plain stream tile's fp32 sums, then tf_nemo_relu2 into the kind.
+    /// The plain stream tile's fp32 sums at the codes' own width, then tf_nemo_relu2 into the kind.
     pub fn replaced(self: *Relu2) ![]const u8 {
         var plain = self.arg;
+        plain.bits = self.bits;
         plain.out = self.sum;
         plain.out16 = 0;
         try self.l.affine.streamGo(self.l.r, plain, .{}, plain.n, 1, self.rig.s.handle);
