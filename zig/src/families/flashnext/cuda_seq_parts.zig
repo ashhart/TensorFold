@@ -61,9 +61,11 @@ pub fn newSeqIn(e: *Engine, cap: usize, block: cuda.DeviceBuffer) !Seq {
     seq.conv = try viewsAt(e.gpa, e.driver, &at, linear_n, sizes.convBytes(e.heads));
     seq.state = try viewsAt(e.gpa, e.driver, &at, linear_n, sizes.stateBytes(e.heads));
     seq.tail = viewAt(e.driver, &at, ple_tail_n * wide * 2);
-    seq.kc = try prompt.zeros(e.gpa, e.driver, e.stream.*, attn_n, sizes.kvBytes(cap, e.heads), &.{});
-    seq.vc = try prompt.zeros(e.gpa, e.driver, e.stream.*, attn_n, sizes.kvBytes(cap, e.heads), &.{});
-    seq.ikc = try prompt.zeros(e.gpa, e.driver, e.stream.*, attn_n, sizes.indexBytes(cap), &.{});
-    seq.pooled = try prompt.zeros(e.gpa, e.driver, e.stream.*, attn_n, sizes.pooledBytes(cap), &.{});
+    // TF_CUDA_CARVEOUT: the planes the load plan counts into the room are claimed here, as newSeqOn does.
+    if (e.carve) |c| try c.take(&seq.carved, cap);
+    seq.kc = try prompt.zeros(e.gpa, e.driver, e.stream.*, attn_n, sizes.kvBytes(cap, e.heads), seq.carved.of(.key));
+    seq.vc = try prompt.zeros(e.gpa, e.driver, e.stream.*, attn_n, sizes.kvBytes(cap, e.heads), seq.carved.of(.value));
+    seq.ikc = try prompt.zeros(e.gpa, e.driver, e.stream.*, attn_n, sizes.indexBytes(cap), seq.carved.of(.index));
+    seq.pooled = try prompt.zeros(e.gpa, e.driver, e.stream.*, attn_n, sizes.pooledBytes(cap), seq.carved.of(.pooled));
     return seq;
 }
