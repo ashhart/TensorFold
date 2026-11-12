@@ -157,11 +157,18 @@ test "execution witness: preparation follows the serving defaults, environment t
     try env.put("TENSORFOLD_API_KEY", "secret-two");
     try env.put("BRAVE_SEARCH_API_KEY", "other");
     try env.put("TENSORFOLD_BENCHMARK_TOKEN", "upload");
+    try env.put("TF_RUNTIME_SIGNING_KEY", "feed");
+    try env.put("TF_STAGE_SECRET_FILE", "/run/stage");
+    try env.put("TENSORFOLD_TOOL_ID_KEY_FILE", "/run/tool");
     try t.expectEqualSlices(u8, &settings, &try parts.environment(a, &env));
     try env.put("TF_QWEN_KV_PAGES", "0");
     try t.expect(!std.mem.eql(u8, &settings, &try parts.environment(a, &env)));
     try env.put("TF_QWEN_KV_PAGES", "1");
     try env.put("TENSORFOLD_PREFILL_TOKENS", "512");
+    try t.expect(!std.mem.eql(u8, &settings, &try parts.environment(a, &env)));
+    _ = env.orderedRemove("TENSORFOLD_PREFILL_TOKENS");
+    try t.expectEqualSlices(u8, &settings, &try parts.environment(a, &env));
+    try env.put("TF_SLIDE_POCKET_KEY", "reply");
     try t.expect(!std.mem.eql(u8, &settings, &try parts.environment(a, &env)));
 }
 
