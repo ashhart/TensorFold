@@ -266,9 +266,10 @@ test "CUDA kept: a saved state resumes under its own key, and a stale key misses
     const gpu: cuda.Context = .{ .d = &d, .device = 0, .handle = null };
     const key = struct {
         fn of(arena_: std.mem.Allocator, g: *const cuda.Context, folder: []const u8, form: u64) !u64 {
-            const facts = [_]u64{ form, try kept.promptHash(arena_, t.io, folder, null) };
+            const facts = [_]u64{form};
             const profile: @import("disk_identity.zig").Profile = .{ .family = "dory", .backend = "cuda" };
-            return disk.identityOf(arena_, t.io, g, folder, null, &facts, 42, profile);
+            const id = try disk.identityOf(arena_, t.io, g, folder, null, &facts, 42, profile);
+            return K.prompted(arena_, t.io, .{ .dir = folder, .model_type = "dory" }, id); // as attachKept extends it
         }
     }.of;
     const id = try key(a, &gpu, dir, 1);
@@ -289,6 +290,48 @@ test "CUDA kept: a saved state resumes under its own key, and a stale key misses
     try t.expectEqual(@as(u32, 0), target.restored);
     // its own key still resumes, at the state the second turn kept
     try t.expectEqual(@as(u32, 1404), try turn(a, root, id, &target, second, 1404));
+}
+
+/// `View` at a served window, which the store's permit takes whole.
+const Windowed = struct {
+    pub const Target = View.Target;
+    pub const State = View.State;
+    pub const probe_seed = View.probe_seed;
+    pub const buffers = View.buffers;
+    pub const facts = View.facts;
+    pub const parts = View.parts;
+    pub const blank = View.blank;
+    pub var window: usize = 0;
+    pub fn context(_: *const Target) usize {
+        return window;
+    }
+};
+
+test "CUDA kept: core's permit takes a state at the served window whole, within the RAM store's budget" {
+    var d = Host.driver();
+    var target: View.Target = .{ .d = &d, .s = .{ .d = &d, .handle = @ptrFromInt(331) } };
+    const W = kept.Kept(Windowed);
+    try t.expectEqual(@as(u32, 0), K.longest(&target)); // no window declared: the store's default permit
+    Windowed.window = 1 << 28; // 2 GiB of rows at 8 bytes each, past the 1 GiB default
+    try t.expectEqual(@as(u32, 1 << 28), W.longest(&target));
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(t.io, ".", t.allocator);
+    defer t.allocator.free(root);
+    const vt: api.prompt_cache.Snapshots.VTable = .{ .bytes = Copies.bytes, .save = Copies.save, .restore = Copies.restore, .drop = Copies.drop, .rows = &W.image };
+    const copies: api.prompt_cache.Snapshots = .{ .ptr = &target, .vtable = &vt };
+    for ([_]u64{ 8 << 30, 3 << 29 }) |budget| {
+        var s = api.prompt_cache.Store.init(t.allocator, copies, rules, budget);
+        const options: rows.Options = .{ .root = root, .identity = 1, .cap = 1 << 34, .floor = 0, .daily = 1 << 34, .longest = W.longest(&target) };
+        const r = rows.attach(t.allocator, &s, options) catch |e| {
+            s.deinit();
+            return e;
+        };
+        defer r.deinit();
+        defer s.deinit(); // the store before its disk, as the rows fixtures close them
+        const whole = (@as(u64, 1 << 28) * 8) + 32 + 16;
+        if (budget > whole) try t.expect(r.staging_bytes > whole) else try t.expectEqual(budget, r.staging_bytes);
+    }
 }
 
 test "CUDA kept: Gemma 4, Dory and Spark2.5 take the store, a family without a view still refuses" {
