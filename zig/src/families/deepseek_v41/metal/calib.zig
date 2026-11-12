@@ -22,6 +22,16 @@ pub const Subject = struct {
     limit: u32,
     vocab: u32,
     shape: host.dspark.Shape,
+    /// what the measurement did, filled when it ends (null: not wanted)
+    report: ?*Report = null,
+};
+
+/// The work a measurement did on the served model: prompts and rows run, windows launched, state cleared after.
+pub const Report = struct {
+    prompts: u64 = 0,
+    prompt_rows: u64 = 0,
+    windows: u64 = 0,
+    wiped: target_.Target.Wiped = .{},
 };
 
 const Rig = struct {
@@ -87,8 +97,10 @@ const Held = struct {
     }
 
     fn leave(h: Held) void {
+        const now = h.s.t.stats;
+        const wiped = h.s.t.wipe();
+        if (h.s.report) |r| r.* = .{ .prompts = now.prompts - h.stats.prompts, .prompt_rows = now.prompt_rows - h.stats.prompt_rows, .windows = now.windows - h.stats.windows, .wiped = wiped };
         h.s.t.stats = h.stats;
-        h.s.t.wipe();
         if (h.s.ad) |p| for (0..h.s.slots) |i| p.pass().reset(@intCast(i));
     }
 };

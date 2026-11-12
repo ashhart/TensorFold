@@ -113,8 +113,12 @@ pub const Metal = struct {
     }
 
     fn calibrate(ctx: *anyopaque, a: Allocator, io: std.Io, dir: []const u8, k: host.calib_env.Knobs, want: host.calib_env.Shape) anyerror!host.calib_lanes.Boot {
-        const m = self(ctx);
-        return calib.run(a, io, dir, k, want, .{ .t = m.t, .ad = if (m.dp != null) &m.ad else null, .slots = m.opt.slots, .limit = m.opt.limit, .vocab = m.parts.env.c.vocab, .shape = m.dsparkShape() });
+        return self(ctx).calibrateReport(a, io, dir, k, want, null);
+    }
+
+    /// `calibrate`, with what the measurement did written to `report` (the tests bound it).
+    pub fn calibrateReport(m: *Metal, a: Allocator, io: std.Io, dir: []const u8, k: host.calib_env.Knobs, want: host.calib_env.Shape, report: ?*calib.Report) !host.calib_lanes.Boot {
+        return calib.run(a, io, dir, k, want, .{ .t = m.t, .ad = if (m.dp != null) &m.ad else null, .slots = m.opt.slots, .limit = m.opt.limit, .vocab = m.parts.env.c.vocab, .shape = m.dsparkShape(), .report = report });
     }
 
     /// The device's allocated bytes now (the weights, slots, prompt buffers and kept-state host copies aside).

@@ -56,15 +56,15 @@ pub fn bestK(qs: []const f64, verify: []const f64, rate: f64, least: usize) Best
     return best;
 }
 
-const Round = struct { tokens: f64, ms: f64 };
+pub const Round = struct { tokens: f64, ms: f64 };
 
 /// The last `rate_window` rounds: (tokens, modelled ms), oldest first.
-const Ring = struct {
+pub const Ring = struct {
     items: [rate_window]Round = undefined,
     len: usize = 0,
     head: usize = 0,
 
-    fn push(r: *Ring, x: Round) void {
+    pub fn push(r: *Ring, x: Round) void {
         r.items[(r.head + r.len) % rate_window] = x;
         if (r.len < rate_window) r.len += 1 else r.head = (r.head + 1) % rate_window;
     }

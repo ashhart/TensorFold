@@ -56,6 +56,42 @@ test "dsv41 metal calib: a measured table, every slot as new after it, the stats
     md.close(md.ptr);
 }
 
+/// Every byte a slot's buffers hold.
+fn slotBytes(s: anytype) u64 {
+    var n: u64 = s.ptaps.length() + s.ring.len * 2;
+    for (s.kv.regions) |r| {
+        n += r.window.length();
+        inline for (.{ "pool", "keys", "carry", "inputs" }) |f| if (@field(r, f)) |b| {
+            n += b.length();
+        };
+    }
+    if (s.kv.taps) |b| n += b.length();
+    return n;
+}
+
+test "dsv41 metal calib: the work a measurement does is bounded: a few prompt rows, the planned windows, only the slots it used" {
+    const m = try fs.open(gpa, io, seed, .{ .cache_bytes = 1 << 30 });
+    const md = m.model();
+    defer md.close(md.ptr);
+    var full: u64 = 0;
+    for (m.t.slots) |s| full += slotBytes(s);
+    var rep: pkg.calib.Report = .{};
+    var got = try m.calibrateReport(gpa, io, ".", .{ .mode = "measure" }, want, &rep);
+    got.costs.deinit(gpa);
+    var plan = try host.calib_measure.Plan.initWide(gpa, 4, 64, 16, host.calib_measure.launch_bound, true, &host.calib_measure.launch_wide);
+    defer plan.deinit(gpa);
+    // a launch counts a window for each slot in it
+    var planned: u64 = 0;
+    for (plan.runs.items) |r| planned += if (r.what == .draft) 0 else r.nsegs;
+    say(true, "{d} prompts of {d} rows, {d} slot windows of {d} planned, {d} slots wiped, {d} of {d} bytes cleared", .{ rep.prompts, rep.prompt_rows, rep.windows, planned, rep.wiped.slots, rep.wiped.bytes, full });
+    try testing.expectEqual(@as(u64, plan.n), rep.prompts);
+    try testing.expect(rep.prompt_rows <= 8);
+    try testing.expect(rep.windows <= planned);
+    try testing.expectEqual(plan.n, rep.wiped.slots);
+    try testing.expect(rep.wiped.bytes <= @as(u64, plan.n) * (full / m.t.slots.len));
+    try testing.expect(rep.wiped.bytes < full);
+}
+
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 

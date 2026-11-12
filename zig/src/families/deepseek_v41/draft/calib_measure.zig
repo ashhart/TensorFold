@@ -31,8 +31,8 @@ pub const Method = struct {
     sparse: bool = false,
 };
 
-/// The rows a sparse plan times (ascending, the last is the widest window).
-pub const sparse_rows = [_]u32{ 1, 2, 4, 8, 16 };
+/// The rows a sparse plan times: every window a lone stream's drafts (at most five) can make, then a spread to 16.
+pub const sparse_rows = [_]u32{ 1, 2, 3, 4, 5, 6, 8, 12, 16 };
 
 /// A run that was not timed because the budget was spent (a sample's ns).
 pub const skipped: i64 = std.math.minInt(i64);

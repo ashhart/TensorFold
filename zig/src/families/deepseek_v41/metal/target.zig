@@ -39,7 +39,7 @@ pub const Options = struct {
 };
 
 /// What the target did, for the tests and the logs.
-pub const Stats = struct { prompts: u64 = 0, hits: u64 = 0, cached_rows: u64 = 0, windows: u64 = 0, rows: u64 = 0, rewinds: u64 = 0, launches: u64 = 0, history_rows: u64 = 0 };
+pub const Stats = struct { prompts: u64 = 0, prompt_rows: u64 = 0, hits: u64 = 0, cached_rows: u64 = 0, windows: u64 = 0, rows: u64 = 0, rewinds: u64 = 0, launches: u64 = 0, history_rows: u64 = 0 };
 
 /// A slot: its device state, prompt tail, ids (rows run, the last window's included until its keep) and taps.
 const Slot = struct {
@@ -194,6 +194,7 @@ pub const Target = struct {
         const n: u32 = @intCast(ids.len);
         const V: usize = c.vocab;
         var logits: []const f32 = undefined;
+        t.stats.prompt_rows += n - at;
         if (at == n) logits = hit.?.logits.? else {
             t.pr.run(t.promptEnv(), &s.kv, &s.tail, ids) catch |e| return t.fail(e);
             const all = t.pr.logits(c);
@@ -449,14 +450,28 @@ pub const Target = struct {
         return was;
     }
 
-    /// Every slot as a new one: its state, ids, taps and bookkeeping cleared, nothing live.
-    pub fn wipe(t: *Target) void {
+    /// What `wipe` did: slots cleared and bytes zeroed.
+    pub const Wiped = struct { slots: u32 = 0, bytes: u64 = 0 };
+
+    /// Every slot a request used as a new one: its state up to the most positions it wrote, ids, taps and bookkeeping.
+    pub fn wipe(t: *Target) Wiped {
+        var w: Wiped = .{};
         for (t.slots) |*s| {
+            if (s.high == 0 and !s.live and s.hist.items.len == 0) continue;
+            w.slots += 1;
+            w.bytes += snapshots.clearedBytes(t.env.c, &s.kv, s.high);
             snapshots.clear(t.env.c, &s.kv, s.high);
-            for (s.kv.regions) |r| if (r.inputs) |b| @memset(b.contents()[0..b.length()], 0);
-            if (s.kv.taps) |b| @memset(b.contents()[0..b.length()], 0);
+            for (s.kv.regions) |r| if (r.inputs) |b| {
+                @memset(b.contents()[0..b.length()], 0);
+                w.bytes += b.length();
+            };
+            if (s.kv.taps) |b| {
+                @memset(b.contents()[0..b.length()], 0);
+                w.bytes += b.length();
+            }
             @memset(s.ptaps.contents()[0..s.ptaps.length()], 0);
             @memset(s.ring, 0);
+            w.bytes += s.ptaps.length() + s.ring.len * 2;
             s.hist.clearRetainingCapacity();
             s.tail.end = 0;
             s.tail.done = 0;
@@ -470,6 +485,7 @@ pub const Target = struct {
             s.whole = false;
             s.after_prompt = false;
         }
+        return w;
     }
 
     /// The serial reference without lanes: the prompt, then one row a step, each drawn at its own position.
