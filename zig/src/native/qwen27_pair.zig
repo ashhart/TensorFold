@@ -11,7 +11,7 @@ pub const Pair = tf.pair_rows.Pair;
 /// The command set rank 1 replays (glm_dsa's `follow.zig` shape); `.tree`/`.commit` carry a draft round.
 pub const Kind = enum(u32) { begin = 1, chunk, step, end, tree, commit };
 
-/// Raise when a command's words change shape (`Link`'s senders, `qwen27_link.decode`); `Kind` hashes in by itself.
+/// Raise when a command's words change shape (`encode` and `decode` below); `Kind` hashes in by itself.
 const command_revision = 1;
 
 /// The command set's word for `Pair.ready`: builds that send or replay different commands refuse each other by name.
@@ -25,6 +25,69 @@ pub const protocol: u64 = blk: {
     break :blk h.final();
 };
 
+/// One command's fields: what rank 0's `Link` sends and rank 1's `follow` replays, each naming its slot first.
+pub const Command = union(Kind) {
+    begin: u32,
+    chunk: struct { slot: u32, ids: []const u32, last: bool, decoded: bool },
+    step: struct { slot: u32, token: u32 },
+    end: u32,
+    tree: struct { slot: u32, ids: []const u32, parents: []const u32 },
+    commit: struct { slot: u32, path: []const u32 },
+
+    pub fn slot(c: Command) u32 {
+        return switch (c) {
+            .begin, .end => |at| at,
+            inline else => |f| f.slot,
+        };
+    }
+};
+
+/// A command's words into `out`, slot first: [slot], [slot n last decoded ids], [slot token] or [slot n rows...].
+pub fn encode(out: *std.ArrayList(u32), gpa: std.mem.Allocator, c: Command) !void {
+    out.clearRetainingCapacity();
+    switch (c) {
+        .begin, .end => |at| try out.append(gpa, at),
+        .chunk => |f| {
+            try out.appendSlice(gpa, &.{ f.slot, @intCast(f.ids.len), @intFromBool(f.last), @intFromBool(f.decoded) });
+            try out.appendSlice(gpa, f.ids);
+        },
+        .step => |f| try out.appendSlice(gpa, &.{ f.slot, f.token }),
+        .tree => |f| {
+            std.debug.assert(f.ids.len == f.parents.len);
+            try out.appendSlice(gpa, &.{ f.slot, @intCast(f.ids.len) });
+            try out.appendSlice(gpa, f.ids);
+            try out.appendSlice(gpa, f.parents);
+        },
+        .commit => |f| {
+            try out.appendSlice(gpa, &.{ f.slot, @intCast(f.path.len) });
+            try out.appendSlice(gpa, f.path);
+        },
+    }
+}
+
+/// `encode`'s words back, checked before any is read as a field: the length, the flags, then the slot against `slots`.
+pub fn decode(kind: u32, w: []const u32, slots: u32) error{ UnknownCommand, CommandLength, CommandFlag, SlotOutOfRange }!Command {
+    const c: Command = switch (std.enums.fromInt(Kind, kind) orelse return error.UnknownCommand) {
+        .begin => if (w.len == 1) .{ .begin = w[0] } else return error.CommandLength,
+        .end => if (w.len == 1) .{ .end = w[0] } else return error.CommandLength,
+        .chunk => blk: {
+            if (w.len < 4 or w.len - 4 != w[1]) return error.CommandLength;
+            if (w[2] > 1 or w[3] > 1) return error.CommandFlag;
+            break :blk .{ .chunk = .{ .slot = w[0], .ids = w[4..], .last = w[2] != 0, .decoded = w[3] != 0 } };
+        },
+        .step => if (w.len == 2) .{ .step = .{ .slot = w[0], .token = w[1] } } else return error.CommandLength,
+        .tree => blk: {
+            if (w.len < 2 or w.len - 2 != 2 * @as(usize, w[1])) return error.CommandLength;
+            break :blk .{ .tree = .{ .slot = w[0], .ids = w[2..][0..w[1]], .parents = w[2 + w[1] ..] } };
+        },
+        .commit => blk: {
+            if (w.len < 2 or w.len - 2 != w[1]) return error.CommandLength;
+            break :blk .{ .commit = .{ .slot = w[0], .path = w[2..] } };
+        },
+    };
+    return if (c.slot() < slots) c else error.SlotOutOfRange;
+}
+
 /// Rank 0 puts each round on the wire before running it; rank 1 replays them in order here. Owned by the host.
 pub const Link = struct {
     pair: *Pair,
@@ -35,53 +98,37 @@ pub const Link = struct {
         l.words.deinit(l.gpa);
     }
 
-    fn put(l: *Link, kind: Kind) !void {
-        try l.pair.send(@backingInt(kind), l.words.items);
+    fn put(l: *Link, c: Command) !void {
+        try encode(&l.words, l.gpa, c);
+        try l.pair.send(@backingInt(std.meta.activeTag(c)), l.words.items);
         l.words.clearRetainingCapacity();
     }
 
     /// A prompt's chunk boundaries are rank 0's memory policy's, so the send carries them: rank 1 cannot infer them.
     pub fn begin(l: *Link, slot: u32) !void {
-        l.words.clearRetainingCapacity();
-        try l.words.append(l.gpa, slot);
-        try l.put(.begin);
+        try l.put(.{ .begin = slot });
     }
 
     pub fn chunk(l: *Link, slot: u32, ids: []const u32, last: bool, decoded: bool) !void {
-        l.words.clearRetainingCapacity();
-        try l.words.appendSlice(l.gpa, &.{ slot, @intCast(ids.len), @intFromBool(last), @intFromBool(decoded) });
-        try l.words.appendSlice(l.gpa, ids);
-        try l.put(.chunk);
+        try l.put(.{ .chunk = .{ .slot = slot, .ids = ids, .last = last, .decoded = decoded } });
     }
 
     pub fn step(l: *Link, slot: u32, token: u32) !void {
-        l.words.clearRetainingCapacity();
-        try l.words.appendSlice(l.gpa, &.{ slot, token });
-        try l.put(.step);
+        try l.put(.{ .step = .{ .slot = slot, .token = token } });
     }
 
     /// A draft round's verify: the rows (ids) with their parents; rank 1 replays the same verify round.
     pub fn tree(l: *Link, slot: u32, ids: []const u32, parents: []const i32) !void {
-        std.debug.assert(ids.len == parents.len);
-        l.words.clearRetainingCapacity();
-        try l.words.appendSlice(l.gpa, &.{ slot, @intCast(ids.len) });
-        try l.words.appendSlice(l.gpa, ids);
-        for (parents) |p| try l.words.append(l.gpa, @bitCast(p));
-        try l.put(.tree);
+        try l.put(.{ .tree = .{ .slot = slot, .ids = ids, .parents = @ptrCast(parents) } });
     }
 
     /// The accepted path rank 0 read from its picks: rank 1 keeps the same rows so both caches agree.
     pub fn commit(l: *Link, slot: u32, path: []const u32) !void {
-        l.words.clearRetainingCapacity();
-        try l.words.appendSlice(l.gpa, &.{ slot, @intCast(path.len) });
-        try l.words.appendSlice(l.gpa, path);
-        try l.put(.commit);
+        try l.put(.{ .commit = .{ .slot = slot, .path = path } });
     }
 
     pub fn end(l: *Link, slot: u32) void {
-        l.words.clearRetainingCapacity();
-        l.words.append(l.gpa, slot) catch return;
-        l.put(.end) catch {};
+        l.put(.{ .end = slot }) catch {};
     }
 };
 
