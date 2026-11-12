@@ -36,8 +36,8 @@ pub const default_depth_greedy: usize = 8;
 
 /// A drafted stream's first token is sent before its first drafts are asked (core/lanes/open_first.zig).
 pub fn firstEarly() bool {
-    const v = std.c.getenv("TF_FLASHNEXT_FIRST_EARLY") orelse return true;
-    return !std.mem.eql(u8, std.mem.span(v), "0");
+    // the startup check refused every malformed value already, so a plain default stands here
+    return @import("sys").environment.read(bool, "TF_FLASHNEXT_FIRST_EARLY", true) catch true;
 }
 
 /// The chain a stream drafts at most: `greedy` for greedy streams (no sampling or temperature 0), else `depth`.

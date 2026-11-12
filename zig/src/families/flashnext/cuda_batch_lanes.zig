@@ -40,8 +40,8 @@ pub fn rollbackOnly(k: *const Keep) bool {
 
 /// TF_FLASHNEXT_ATTN_LANES=1: a shared round's attention in one launch a kernel for every lane (else a lane at a time).
 fn attnLanesOn() bool {
-    const v = std.c.getenv("TF_FLASHNEXT_ATTN_LANES") orelse return false;
-    return std.mem.eql(u8, std.mem.span(v), "1");
+    // the startup check refused every malformed value already, so a plain default stands here
+    return @import("sys").environment.read(bool, "TF_FLASHNEXT_ATTN_LANES", false) catch false;
 }
 
 fn cdiv(a: usize, b: usize) usize {

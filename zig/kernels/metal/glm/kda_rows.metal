@@ -298,5 +298,3 @@ template <int H, int D, int TAPS, int TY, int FB, int GB>
   }
 
 }
-
-template [[host_name("custom_kernel_tf_glm5_kda_rows_918a341e71__64_128_4_32_4_4_bfloat16_t_bfloat16_t_float_uint32_t_bfloat16_t_bfloat16_t_uint32_t_bfloat16_t_bfloat16_t_float_float_float_float_floatc_floatc_bfloat16_t_float_bfloat16_t")]] [[kernel]] decltype(custom_kernel_tf_glm5_kda_rows_918a341e71__64_128_4_32_4_4_bfloat16_t_bfloat16_t_float_uint32_t_bfloat16_t_bfloat16_t_uint32_t_bfloat16_t_bfloat16_t_float_float_float_float_floatc_floatc_bfloat16_t_float_bfloat16_t<64, 128, 4, 32, 4, 4>) custom_kernel_tf_glm5_kda_rows_918a341e71__64_128_4_32_4_4_bfloat16_t_bfloat16_t_float_uint32_t_bfloat16_t_bfloat16_t_uint32_t_bfloat16_t_bfloat16_t_float_float_float_float_floatc_floatc_bfloat16_t_float_bfloat16_t<64, 128, 4, 32, 4, 4>;

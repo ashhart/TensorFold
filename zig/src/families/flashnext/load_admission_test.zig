@@ -141,6 +141,11 @@ test "normal and dump load paths admit before any engine device or pack work and
     try std.testing.expect(admission.problemFor(error.OutOfMemory) == null);
 }
 
+test "the Flash Next open path validates the environment before any engine device or pack work" {
+    const body = entryBody(@embedFile("cuda_lanes_load.zig"), "pub fn open(") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(std.mem.startsWith(u8, body, "try @import(\"env_validate.zig\").startup();"));
+}
+
 test "a module the device kernels cannot read is refused under its checkpoint tensor name, whatever its key's prefix" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -188,6 +193,9 @@ fn entryBody(source: []const u8, name: []const u8) ?[]const u8 {
 
 fn admissionFirst(source: []const u8) bool {
     var body = entryBody(source, "pub fn loadConfigured(") orelse return false;
+    const startup = "try @import(\"env_validate.zig\").startup();";
+    if (!std.mem.startsWith(u8, body, startup)) return false;
+    body = std.mem.trimStart(u8, body[startup.len..], " \t\r\n");
     const validation = "try window.validate(speed_up != null or platform.c.getenv(\"TF_FLASHNEXT_TP\") != null);";
     if (!std.mem.startsWith(u8, body, validation)) return false;
     body = std.mem.trimStart(u8, body[validation.len..], " \t\r\n");

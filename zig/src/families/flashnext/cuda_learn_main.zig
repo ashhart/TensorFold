@@ -139,6 +139,7 @@ fn slope(t: *Trainer, sq: *const train.Seq, k: usize, l: usize, dir: []const f32
 }
 
 pub fn main(init: std.process.Init) !u8 {
+    try flash.env_validate.startup();
     const gpa = init.gpa;
     const io = init.io;
     const args = try init.minimal.args.toSlice(init.arena.allocator());

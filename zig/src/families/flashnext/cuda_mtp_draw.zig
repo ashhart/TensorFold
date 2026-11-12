@@ -17,8 +17,8 @@ pub const topk_max: usize = 64;
 
 /// On by default (the same draws); TF_FLASHNEXT_GPU_TOPK=0 downloads whole rows.
 pub fn on() bool {
-    const v = std.c.getenv("TF_FLASHNEXT_GPU_TOPK") orelse return true;
-    return !std.mem.eql(u8, std.mem.span(v), "0");
+    // the startup check refused every malformed value already, so a plain default stands here
+    return @import("sys").environment.read(bool, "TF_FLASHNEXT_GPU_TOPK", true) catch true;
 }
 
 /// Whether a draw under `s` can read fn_row_topk's candidates instead of its whole row.

@@ -3,7 +3,7 @@ const std = @import("std");
 const e = @import("environment.zig");
 const t = std.testing;
 const a = t.allocator;
-const all: e.Flags = .{ .cuda = true, .metal = true, .xpu = true, .slide = true, .hooks = true, .dsv41 = true, .gemma4 = true, .drama3 = true, .glm = true };
+const all: e.Flags = .{ .cuda = true, .metal = true, .xpu = true, .slide = true, .hooks = true, .dsv41 = true, .gemma4 = true, .drama3 = true, .glm = true, .flashnext = true };
 const Env = struct {
     name: []const u8,
     raw: ?[]const u8,
@@ -64,6 +64,8 @@ const valid = [_]Case{
     .{ .name = "TF_CUDA_CARVEOUT_MIB", .raw = "1792", .n = 1792 },
     .{ .name = "TF_MTP_DRAFTS", .raw = "0", .n = 0 },
     .{ .name = "TF_MTP_DRAFTS", .raw = "4294967295", .n = std.math.maxInt(u32) },
+    .{ .name = "TF_DSPINE_WINDOW", .raw = "16", .n = 16 },
+    .{ .name = "TF_DSPINE_WINDOW", .raw = "4096", .n = 4096 },
     .{ .name = "TF_DRAFT_NODES", .raw = "0", .n = 0 },
     .{ .name = "TF_DRAFT_NODES", .raw = "64", .n = 64 },
     .{ .name = "TF_QMMF_HALF_BELOW", .raw = "0", .n = 0 },
@@ -102,6 +104,7 @@ const valid = [_]Case{
     .{ .name = "TF_SLIDE_POCKET_KEY", .raw = "both", .n = 3 },
     .{ .name = "TF_SLIDE_FIT_GIB", .raw = "4", .n = 4 },
     .{ .name = "TF_SLIDE_POCKET_DUMP", .raw = "/tmp/pocket rows", .n = 0 },
+    .{ .name = "TENSORFOLD_CUDA_KERNELS", .raw = "/tmp/captured set", .n = 0 },
     .{ .name = "TF_SLIDE_FORGET_FAIL", .raw = " 0 ", .n = 0 },
 };
 
@@ -114,8 +117,8 @@ test "environment: valid forms remain raw numbers before existing consumer clamp
     }
     for (e.rules) |r| {
         for ([_][]const u8{ "", " ", "\t \n" }) |raw| try t.expectEqual(@as(?u64, null), try e.parse(r.name, raw));
-        // the DeepSeek and GLM rows are each covered by deepseek_v41/env_validate_test.zig and glm/cuda_env_test.zig
-        if (r.scope == .dsv41 or r.scope == .glm) continue;
+        // own scope tests: deepseek_v41/env_validate_test.zig, glm/cuda_env_test.zig, environment_flashnext_test.zig
+        if (r.scope == .dsv41 or r.scope == .glm or r.scope == .flashnext) continue;
         var covered = false;
         for (valid) |c| if (std.mem.eql(u8, r.name, c.name)) {
             covered = true;
@@ -136,6 +139,8 @@ test "environment: range, enum, whitespace and native prompt geometry refusals a
         .{ "TF_PROMPT_ROWS", " 512" },          .{ "XPU_A8_BITS", "04" },
         .{ "XPU_A8_BITS", "16" },               .{ "TF_SLIDE_POCKET_KEY", "AUTO" },
         .{ "TF_DRAMA_PREFILL_ROWS", "4096x" },  .{ "TF_DRAMA_REFERENCE_CACHE", "4294967296" },
+        .{ "TF_DSPINE_WINDOW", "0" },           .{ "TF_DSPINE_WINDOW", "15" },
+        .{ "TF_DSPINE_WINDOW", "8193" },
     }) |c| try t.expectError(error.InvalidEnvironment, e.parse(c[0], c[1]));
     try t.expectEqual(@as(?u64, null), try e.parse("TF_CUDA_DEVICE", "   "));
     try t.expectEqual(@as(?u64, 0), try e.parse("TF_Q27_COPY_ROWS", "+0"));
