@@ -1,4 +1,4 @@
-//! Host cases of Flash Next EXL3's TP prefill reduction launches: inputs, float64 and bit oracles, stress, faults.
+//! TP-prefill F64 partials and F32 roots: independent values, bit checks, stress and planted faults.
 const std = @import("std");
 const core = @import("core");
 const flash = @import("flashnext");
@@ -11,54 +11,62 @@ pub const slots = canon.slots;
 pub const dims = 2560;
 
 /// A planted fault of a control kernel (contract_tppf_controls.cuh); none is the shipped kernel.
-pub const Fault = enum { none, flat, nan_dropped, writes_input, bf16_adds, wrong };
+pub const Fault = enum { none, flat, nan_dropped, writes_input, bf16_adds, wrong, f32_partials };
 
-pub fn controlGate(f: Fault) ?g.Gate {
+/// F64 partials have no gate 4; their bf16-merge fault must fail the exact check at gate 3.
+pub fn controlGate(comptime Case: type, f: Fault) ?g.Gate {
     return switch (f) {
         .none => null,
-        .flat, .wrong => .shapes,
+        .flat, .wrong, .f32_partials => .shapes,
         .nan_dropped => .nonfinite,
         .writes_input => .repeat,
-        .bf16_adds => .sums,
+        .bf16_adds => if (@hasDecl(Case, "f64_words")) .shapes else .sums,
     };
 }
 
-/// An output no launch wrote: the rig poisons outputs with 0xff bytes.
-const unwritten: u32 = 0xffffffff;
-
 /// Bit-equal to the host's result, or both NaN (a payload is not part of the contract).
-pub fn sameBits(got: f32, want: f32) bool {
-    return @as(u32, @bitCast(got)) == @as(u32, @bitCast(want)) or (std.math.isNan(got) and std.math.isNan(want));
+pub fn sameBits(got: f64, want: f64) bool {
+    return @as(u64, @bitCast(got)) == @as(u64, @bitCast(want)) or (std.math.isNan(got) and std.math.isNan(want));
 }
 
 pub fn bf16(x: f32) f32 {
     return c.fromBf16(c.toBf16(x));
 }
 
-fn bitsOf(out: []const u8, i: usize) f32 {
-    return @bitCast(std.mem.readInt(u32, out[i * 4 ..][0..4], .little));
+/// Output i: an f64 word (`wide`) or an f32 word, as f64 (an f32 widens exactly).
+fn valueOf(wide: bool, out: []const u8, i: usize) f64 {
+    if (wide) return @bitCast(std.mem.readInt(u64, out[i * 8 ..][0..8], .little));
+    return @as(f32, @bitCast(std.mem.readInt(u32, out[i * 4 ..][0..4], .little)));
+}
+
+/// The host's f64 value as the kernel stores it: itself (`wide`) or rounded once to f32.
+fn storedAs(wide: bool, host: f64) f64 {
+    return if (wide) host else canon.toF32(host);
 }
 
 pub fn put(out: []u8, i: usize, v: f32) void {
     std.mem.writeInt(u32, out[i * 4 ..][0..4], @bitCast(v), .little);
 }
 
-/// Fp32 values that make fp16 sums overflow and bf16 ones round away their low bits: 2^19 to 2^20, either sign.
-fn big(rng: std.Random) f32 {
-    const v: f32 = @floatFromInt((@as(u32, 1) << 19) + rng.uintLessThan(u32, 1 << 19));
+fn putWide(out: []u8, i: usize, v: f64) void {
+    std.mem.writeInt(u64, out[i * 8 ..][0..8], @bitCast(v), .little);
+}
+
+/// Values that make fp16 sums overflow and bf16 ones round away their low bits: 2^19 to 2^20, either sign.
+fn big(rng: std.Random) f64 {
+    const v: f64 = @floatFromInt((@as(u32, 1) << 19) + rng.uintLessThan(u32, 1 << 19));
     return if (rng.boolean()) v else -v;
 }
 
 const stated = "the bytes of the host canonical tree (NaN payloads aside) and float64's class on every output";
 
-/// Each output against the host's bits, float64's class and bound (gate 1: some finite and some not).
-fn verifyF32(msg: []u8, s: c.Spec, shape: c.Shape, gate: g.Gate, out: []const u8, want: []const f64, mag: []const f64, ctx: anytype, comptime expected: anytype) !?[]const u8 {
+/// Check exact stored values, float64 classes and numerical bounds.
+fn verifyWords(wide: bool, msg: []u8, s: c.Spec, shape: c.Shape, gate: g.Gate, out: []const u8, want: []const f64, mag: []const f64, ctx: anytype, comptime expected: anytype) !?[]const u8 {
     var finite: usize = 0;
     for (want, mag, 0..) |w, m, i| {
-        const got = bitsOf(out, i);
-        const host = expected(ctx, i);
-        if (!sameBits(got, host)) return try std.fmt.bufPrint(msg, "output {d}: {x:0>8} where the host canonical reduction gives {x:0>8}", .{ i, @as(u32, @bitCast(got)), @as(u32, @bitCast(host)) });
-        const have: f64 = got;
+        const have = valueOf(wide, out, i);
+        const host = storedAs(wide, expected(ctx, i));
+        if (!sameBits(have, host)) return try std.fmt.bufPrint(msg, "output {d}: {x:0>16} where the host canonical reduction gives {x:0>16} (f64 bits)", .{ i, @as(u64, @bitCast(have)), @as(u64, @bitCast(host)) });
         if (c.classOf(have) != c.classOf(w)) return try std.fmt.bufPrint(msg, "output {d} is {t} where float64 gives {t}", .{ i, c.classOf(have), c.classOf(w) });
         if (std.math.isFinite(w)) {
             finite += 1;
@@ -91,26 +99,28 @@ fn plantRows(rows: usize, n: usize, y: []f32, w: []f32, pieces: usize) void {
     };
 }
 
-/// A row's value of one block as the kernel's leaf chains and tree give it (absent leaves are +0, never -0).
-pub fn blockSum(y: *const [slots]f32, w: *const [slots]f32, p: *const [slots]i32, start: usize, log: u8, fault: Fault) f32 {
-    var leaf: [canon.leaves]f32 = @splat(0);
+/// Canonical F64 leaf chains and tree, optionally faulted before the store.
+pub fn blockSum(y: *const [slots]f32, w: *const [slots]f32, p: *const [slots]i32, start: usize, log: u8, fault: Fault) f64 {
+    var leaf: [canon.leaves]f64 = @splat(0);
     const size = @as(usize, 1) << @intCast(log);
-    var chain: f32 = 0;
+    var chain: f64 = 0;
     for (0..slots) |k| {
         if (p[k] < 0) continue;
         const l = canon.leafOf(@intCast(p[k]));
         if (l < start or l >= start + size) continue;
-        if (fault == .nan_dropped and std.math.isNan(y[k] * w[k])) continue;
-        chain = @mulAdd(f32, y[k], w[k], chain);
-        leaf[l - start] = @mulAdd(f32, y[k], w[k], leaf[l - start]);
+        const yv: f64 = y[k];
+        const wv: f64 = w[k];
+        if (fault == .nan_dropped and std.math.isNan(yv * wv)) continue;
+        chain = @mulAdd(f64, yv, wv, chain);
+        leaf[l - start] = @mulAdd(f64, yv, wv, leaf[l - start]);
     }
     if (fault == .flat) return chain;
     var n = size;
     while (n > 1) : (n /= 2) for (0..n / 2) |i| {
         const s = leaf[2 * i] + leaf[2 * i + 1];
-        leaf[i] = if (fault == .bf16_adds) bf16(s) else s;
+        leaf[i] = if (fault == .bf16_adds) bf16(@floatCast(s)) else s;
     };
-    return leaf[0];
+    return if (fault == .f32_partials) @as(f32, @floatCast(leaf[0])) else leaf[0];
 }
 
 /// The blocks rank `rank` of `world` computes, in leaf order.
@@ -119,9 +129,9 @@ pub fn rankBlocks(buf: *[canon.max_blocks]canon.Block, world: usize, rank: usize
     return canon.blocks(buf, r.lo, r.hi);
 }
 
-/// A leaf's fma chain (at most 11 slots) and the 6 levels of the tree above it.
-fn combineDepth(_: c.Shape) usize {
-    return slots + canon.leaf_log;
+/// Bound the F64 partial's leaf chains and six tree levels against an independent sum.
+fn partialDepth(_: c.Shape) usize {
+    return 2 * (slots + canon.leaf_log);
 }
 
 /// Each piece meets at most 6 adds on its way up the tree.
@@ -167,6 +177,8 @@ pub const Combine = struct {
 
     pub const n_in = 3;
     pub const n_out = 1;
+    /// The outputs are f64 words, not an element type the harness reads (controlGate).
+    pub const f64_words = true;
 
     pub fn deinit(self: *Combine) void {
         if (self.arena) |*a| a.deinit();
@@ -179,9 +191,10 @@ pub const Combine = struct {
             .nan_dropped => "control: tf_exl3pf_tp_combine with NaN products dropped",
             .writes_input => "control: tf_exl3pf_tp_combine writing its input",
             .bf16_adds => "control: tf_exl3pf_tp_combine with bf16 tree adds",
+            .f32_partials => "control: tf_exl3pf_tp_combine storing its partials through f32",
             else => unreachable,
         };
-        return .{ .name = name, .accum = .f32, .depth = combineDepth, .out = .f32, .nan = .{ .stated = stated }, .tiles = edges, .served = if (self.blocks) &combine_blocks else &combine_region };
+        return .{ .name = name, .accum = .f64, .depth = partialDepth, .out = .raw, .nan = .{ .stated = stated }, .tiles = edges, .served = if (self.blocks) &combine_blocks else &combine_region };
     }
 
     pub fn accepts(shape: c.Shape) bool {
@@ -210,7 +223,7 @@ pub const Combine = struct {
     }
 
     pub fn outputLens(self: *const Combine) [n_out]usize {
-        return .{self.count() * 4};
+        return .{self.count() * 8};
     }
 
     pub fn count(self: *const Combine) usize {
@@ -227,14 +240,22 @@ pub const Combine = struct {
                 self.p[r * slots + k] = id;
             }
         }
-        for (self.y) |*v| v.* = if (rng.uintLessThan(u8, 23) == 0) -0.0 else rng.floatNorm(f32) * 0.05;
+        // 2^-10 to 2^10 a slot: 48-bit products whose f64 sums round, so a flat chain or an f32 stage shows in the bits
+        for (self.y) |*v| v.* = if (rng.uintLessThan(u8, 23) == 0) -0.0 else rng.floatNorm(f32) * 0.05 * std.math.exp2(@as(f32, @floatFromInt(rng.intRangeAtMost(i32, -10, 10))));
         for (self.w) |*v| v.* = if (rng.uintLessThan(u8, 29) == 0) -0.0 else rng.floatNorm(f32) * 0.2;
         if (fill == .nonfinite) {
             plantRows(self.shape.rows, self.shape.n, self.y, self.w, slots);
-        } else for (0..slots) |k| {
-            self.y[k * self.shape.n] = @bitCast(@as(u32, 0x80000001));
-            self.w[k] = 0x1p-4;
-            self.p[k] = if (k == slots - 1) 512 else @intCast(256 + k);
+        } else {
+            // Plant subnormal, signed-zero, F32-cancellation and F64-order faults in separate columns.
+            const n = self.shape.n;
+            const cancel = [2][4]f32{ .{ 2e9, 16, -2e9, 16 }, .{ 0x1p64, 16, -0x1p64, 16 } };
+            for (0..slots) |k| {
+                self.y[k * n] = @bitCast(@as(u32, 0x80000001));
+                self.y[k * n + 1] = -0.0;
+                for (cancel, 2..) |col, at| self.y[k * n + at] = if (k < 4) col[k] else 0;
+                self.w[k] = 0x1p-4;
+                self.p[k] = if (k == slots - 1) 512 else @intCast(8 * k);
+            }
         }
     }
 
@@ -288,9 +309,10 @@ pub const Combine = struct {
         }
     }
 
-    fn expectedAs(self: *const Combine, i: usize, fault: Fault) f32 {
+    /// The host's f64 value of output `i` (a planted fault's too); NaN where no rank writes it.
+    fn expectedAs(self: *const Combine, i: usize, fault: Fault) f64 {
         const at = self.locate(i);
-        const blk = at.block orelse return @bitCast(unwritten);
+        const blk = at.block orelse return std.math.nan(f64);
         var y: [slots]f32 = undefined;
         var w: [slots]f32 = undefined;
         var p: [slots]i32 = undefined;
@@ -298,7 +320,7 @@ pub const Combine = struct {
         return blockSum(&y, &w, &p, blk.start, blk.log, fault);
     }
 
-    fn expected(self: *const Combine, i: usize) f32 {
+    fn expected(self: *const Combine, i: usize) f64 {
         return self.expectedAs(i, .none);
     }
 
@@ -348,12 +370,12 @@ pub const Combine = struct {
         const want = try a.alloc(f64, self.count());
         const mag = try a.alloc(f64, self.count());
         try self.reference(want, mag);
-        return verifyF32(&self.msg, self.spec(), self.shape, gate, out, want, mag, self, Combine.expected);
+        return verifyWords(true, &self.msg, self.spec(), self.shape, gate, out, want, mag, self, Combine.expected);
     }
 
     /// The host's emulation of a launch (a planted fault's too), for the gates' own host tests.
     pub fn emulate(self: *Combine, fault: Fault, out: []u8) void {
-        for (0..self.count()) |i| put(out, i, self.expectedAs(i, fault));
+        for (0..self.count()) |i| putWide(out, i, self.expectedAs(i, fault));
         if (fault == .writes_input) self.y[0] += 1;
     }
 };
@@ -370,7 +392,7 @@ const finish_served = [_]c.Shape{
 };
 pub const max_finish_rows = 4096;
 
-/// The tree finished from the gathered partials of one region: world x M partial blocks a row, merged in leaf order.
+/// Merge gathered F64 blocks in leaf order and round each finished root once to F32.
 pub const Finish = struct {
     gpa: std.mem.Allocator,
     fault: Fault = .none,
@@ -379,7 +401,7 @@ pub const Finish = struct {
     m: usize = 1,
     ps: [canon.max_pieces]canon.Piece = undefined,
     np: usize = 0,
-    vals: []f32 = &.{},
+    vals: []f64 = &.{},
     msg: [200]u8 = undefined,
 
     pub const n_in = 1;
@@ -395,6 +417,7 @@ pub const Finish = struct {
             .flat => "control: tf_exl3pf_tp_finish as one chain, no tree",
             .bf16_adds => "control: tf_exl3pf_tp_finish with bf16 merges",
             .writes_input => "control: tf_exl3pf_tp_finish writing its input",
+            .f32_partials => "control: tf_exl3pf_tp_finish merging partials rounded to f32",
             else => unreachable,
         };
         return .{ .name = name, .accum = .f32, .depth = finishDepth, .out = .f32, .nan = .{ .stated = stated }, .tiles = edges, .served = &finish_served };
@@ -417,7 +440,7 @@ pub const Finish = struct {
         self.shape = shape;
         self.m = canon.maxPartials(shape.k);
         self.np = canon.pieces(&self.ps, shape.k);
-        self.vals = try a.alloc(f32, shape.k * self.m * shape.rows * shape.n);
+        self.vals = try a.alloc(f64, shape.k * self.m * shape.rows * shape.n);
         var prng = std.Random.DefaultPrng.init(seed ^ 0x66696e73);
         const rng = prng.random();
         if (fill == .stress) self.stress(rng) else self.random(rng, fill);
@@ -441,11 +464,11 @@ pub const Finish = struct {
         return self.slotOf(self.ps[piece]) * self.count() + i;
     }
 
-    /// Partials of different magnitudes (an fp32 sum of them depends on the order of the merges), a few negative zeros.
+    /// Full F64 mantissas, mixed magnitudes and signed zeros expose narrowed merges.
     fn random(self: *Finish, rng: std.Random, fill: g.Fill) void {
         for (self.vals) |*v| {
-            const scale: f32 = @floatFromInt(@as(u32, 1) << rng.uintLessThan(u5, 10));
-            v.* = if (rng.uintLessThan(u8, 23) == 0) -0.0 else rng.floatNorm(f32) * scale;
+            const scale: f64 = @floatFromInt(@as(u32, 1) << rng.uintLessThan(u5, 10));
+            v.* = if (rng.uintLessThan(u8, 23) == 0) -0.0 else rng.floatNorm(f64) * scale;
         }
         if (fill != .nonfinite) return;
         const n = self.shape.n;
@@ -454,28 +477,28 @@ pub const Finish = struct {
             const piece = (col / 7) % self.np;
             const i = r * n + col;
             switch (r % 5) {
-                0 => self.vals[self.at(piece, i)] = std.math.nan(f32),
-                1 => self.vals[self.at(piece, i)] = std.math.inf(f32),
-                2 => self.vals[self.at(piece, i)] = -std.math.inf(f32),
+                0 => self.vals[self.at(piece, i)] = std.math.nan(f64),
+                1 => self.vals[self.at(piece, i)] = std.math.inf(f64),
+                2 => self.vals[self.at(piece, i)] = -std.math.inf(f64),
                 3 => {
-                    self.vals[self.at(piece, i)] = std.math.inf(f32);
-                    self.vals[self.at((piece + 1) % self.np, i)] = -std.math.inf(f32);
+                    self.vals[self.at(piece, i)] = std.math.inf(f64);
+                    self.vals[self.at((piece + 1) % self.np, i)] = -std.math.inf(f64);
                 },
-                else => self.vals[self.at(self.np - 1, i)] = std.math.nan(f32),
+                else => self.vals[self.at(self.np - 1, i)] = std.math.nan(f64),
             }
         };
     }
 
-    /// Integer partials of 2^19 to 2^20 in shuffled negated pairs (odd one out 3): exact in fp32, ruinous in fp16/bf16.
+    /// Shuffled signed integer pairs are exact in F32/F64, but not F16/BF16.
     fn stress(self: *Finish, rng: std.Random) void {
         for (0..self.count()) |i| {
-            var v: [canon.max_pieces]f32 = undefined;
+            var v: [canon.max_pieces]f64 = undefined;
             for (0..self.np / 2) |j| {
                 v[2 * j] = big(rng);
                 v[2 * j + 1] = -v[2 * j];
             }
             if (self.np % 2 == 1) v[self.np - 1] = 3;
-            rng.shuffle(f32, v[0..self.np]);
+            rng.shuffle(f64, v[0..self.np]);
             for (v[0..self.np], 0..) |x, piece| self.vals[self.at(piece, i)] = x;
         }
     }
@@ -489,22 +512,26 @@ pub const Finish = struct {
         }
     }
 
-    fn pieceValues(self: *const Finish, i: usize, buf: *[canon.max_pieces]f32) []const f32 {
+    fn pieceValues(self: *const Finish, i: usize, buf: *[canon.max_pieces]f64) []f64 {
         for (0..self.np) |piece| buf[piece] = self.vals[self.at(piece, i)];
         return buf[0..self.np];
     }
 
-    fn expectedAs(self: *const Finish, i: usize, fault: Fault) f32 {
-        var buf: [canon.max_pieces]f32 = undefined;
+    /// The host's f64 merge of output `i` before the one rounding to f32 (a planted fault's too).
+    fn expectedAs(self: *const Finish, i: usize, fault: Fault) f64 {
+        var buf: [canon.max_pieces]f64 = undefined;
         const v = self.pieceValues(i, &buf);
         if (fault == .flat) {
-            var chain: f32 = 0;
+            var chain: f64 = 0;
             for (v) |x| chain += x;
             return chain;
         }
+        if (fault == .f32_partials) {
+            for (v) |*x| x.* = @as(f32, @floatCast(x.*));
+        }
         if (fault != .bf16_adds) return canon.finish(self.ps[0..self.np], v);
         var top: usize = 0;
-        var s: [canon.max_pieces]f32 = undefined;
+        var s: [canon.max_pieces]f64 = undefined;
         var lg: [canon.max_pieces]u8 = undefined;
         var st: [canon.max_pieces]u8 = undefined;
         for (self.ps[0..self.np], v) |p, x| {
@@ -513,7 +540,7 @@ pub const Finish = struct {
             st[top] = p.start;
             top += 1;
             while (top >= 2 and lg[top - 1] == lg[top - 2] and st[top - 2] % (@as(usize, 2) << @intCast(lg[top - 1])) == 0) {
-                s[top - 2] = bf16(s[top - 2] + s[top - 1]);
+                s[top - 2] = bf16(@floatCast(s[top - 2] + s[top - 1]));
                 lg[top - 2] += 1;
                 top -= 1;
             }
@@ -521,30 +548,25 @@ pub const Finish = struct {
         return s[0];
     }
 
-    fn expected(self: *const Finish, i: usize) f32 {
+    fn expected(self: *const Finish, i: usize) f64 {
         return self.expectedAs(i, .none);
     }
 
     pub fn reference(self: *const Finish, want: []f64, mag: []f64) !void {
-        var buf: [canon.max_pieces]f32 = undefined;
+        var buf: [canon.max_pieces]f64 = undefined;
         for (want, mag, 0..) |*w, *m, i| {
             w.* = 0;
             m.* = 0;
             for (self.pieceValues(i, &buf)) |v| {
                 w.* += v;
-                m.* += @abs(@as(f64, v));
+                m.* += @abs(v);
             }
         }
     }
 
     pub fn simulate(self: *const Finish, acc: c.Accum, order: g.Order, out: []f64) !void {
-        var buf: [canon.max_pieces]f32 = undefined;
-        var t: [canon.max_pieces]f64 = undefined;
-        for (out, 0..) |*o, i| {
-            const v = self.pieceValues(i, &buf);
-            for (v, t[0..v.len]) |x, *y| y.* = x;
-            o.* = core.contract.rows.sumIn(acc, order, t[0..v.len]);
-        }
+        var buf: [canon.max_pieces]f64 = undefined;
+        for (out, 0..) |*o, i| o.* = core.contract.rows.sumIn(acc, order, self.pieceValues(i, &buf));
     }
 
     pub fn verify(self: *Finish, out: []const u8, gate: g.Gate) !?[]const u8 {
@@ -552,11 +574,11 @@ pub const Finish = struct {
         const want = try a.alloc(f64, self.count());
         const mag = try a.alloc(f64, self.count());
         try self.reference(want, mag);
-        return verifyF32(&self.msg, self.spec(), self.shape, gate, out, want, mag, self, Finish.expected);
+        return verifyWords(false, &self.msg, self.spec(), self.shape, gate, out, want, mag, self, Finish.expected);
     }
 
     pub fn emulate(self: *Finish, fault: Fault, out: []u8) void {
-        for (0..self.count()) |i| put(out, i, self.expectedAs(i, fault));
+        for (0..self.count()) |i| put(out, i, canon.toF32(self.expectedAs(i, fault)));
         if (fault == .writes_input) self.vals[0] += 1;
     }
 };

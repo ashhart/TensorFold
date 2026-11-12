@@ -191,7 +191,7 @@ cold 64K prompts in 36.5 s and decode at 73.1 / 60.8 tok/s (code / chat, tempera
 `TF_GLM_WORLD=3` places a third rank the same way. From 1.1.2 the uneven KDA input projections of TP=3 (22, 21 and
 21 heads) run instead of being refused; TP=3 device qualification is pending
 ([#1067](https://github.com/ashhart/TensorFold/issues/1067)). How a prompt's rows reach the other ranks
-(`TF_GLM_PREFILL_REDUCE`) and the two-rank RoCE gathers (`TF_ROCE`) are in
+(`TF_GLM_PREFILL_REDUCE`) and the RoCE gathers (`TF_ROCE`: on at two ranks, `TF_ROCE=1` at three or more) are in
 [placement](../multi-rank-receipts.md#the-settings-the-ranks-agreed-on).
 
 ## Prompt chunk size

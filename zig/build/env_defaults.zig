@@ -21,6 +21,7 @@ pub fn steps(b: *std.Build, draft_ids: *std.Build.Module, all: *std.Build.Step) 
         },
     });
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native_test })).step);
+    const canon = @import("cuda_engines.zig").canonModule(b, host, .debug);
     const glm_test = b.createModule(.{
         .root_source_file = b.path("zig/src/families/glm/env_defaults_test.zig"),
         .target = host,
@@ -30,7 +31,8 @@ pub fn steps(b: *std.Build, draft_ids: *std.Build.Module, all: *std.Build.Step) 
             .{ .name = "cuda", .module = cuda },
             .{ .name = "heat", .module = mods.heat },
             .{ .name = "core", .module = mods.core },
-            .{ .name = "canon", .module = @import("cuda_engines.zig").canonModule(b, host, .debug) },
+            .{ .name = "canon", .module = canon },
+            .{ .name = "mesh", .module = @import("mesh.zig").module(b, host, .debug, canon) }, // over that one canon
         },
     });
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm_test })).step);

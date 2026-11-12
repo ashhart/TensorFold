@@ -118,6 +118,9 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     const prompt_moe = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"prompt MoE precision:"} }));
     b.step("test-qwen35-prompt-moe-host", "Prompt expert arithmetic stays separate from verify capacity without devices").dependOn(&prompt_moe.step);
     step.dependOn(&prompt_moe.step);
+    const stages = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"Qwen stage:"} }));
+    b.step("test-qwen35-stage-host", "Pipeline stage geometry: the stages' weights and state sum to one engine's").dependOn(&stages.step);
+    step.dependOn(&stages.step);
     const int8_contract = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/contract_w4a8_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = mods.core } } });
     int8_contract.addCSourceFile(.{ .file = b.path("zig/tests/cuda/w4a8_normalize_host.c"), .flags = &.{ "-std=c11", "-ffp-contract=off" } });
     int8_contract.addCSourceFile(.{ .file = b.path("zig/tests/cuda/w4a8_store_host.cpp"), .flags = &.{ "-std=c++17", "-fno-exceptions", "-fno-rtti" } });

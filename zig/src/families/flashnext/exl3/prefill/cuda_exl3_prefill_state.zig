@@ -90,15 +90,20 @@ pub fn deviceBytes(rows: usize) usize {
     return Layout.of(rows, 1).total;
 }
 
-/// The same at `world` ranks (expert parallel adds the ranks' sum, rows x 2560 fp32).
+/// The same at `world` ranks (the reduction's fp64 partials add rows x 2560 doubles a partial a rank).
 pub fn deviceBytesAt(rows: usize, world: usize) usize {
     return Layout.of(rows, world).total;
 }
 
-/// The reduction's branch [rows, D] fp32, then (expert parallel) the gathered block partials of every rank.
+/// Reserve the F32 branch followed by TP F64 partials; a lone rank needs only the branch.
 pub fn sumBytes(rows: usize, world: usize) usize {
-    const one = rows * dims * 4;
-    return if (world > 1) one * (1 + world * leaves.partials(world)) else one;
+    return rows * dims * 4 + gatherBytes(rows, world);
+}
+
+/// The fp64 partials of every rank after the branch in `sumBytes`.
+pub fn gatherBytes(rows: usize, world: usize) usize {
+    if (world == 1) return 0;
+    return world * leaves.partials(world) * rows * dims * @sizeOf(f64);
 }
 
 pub const Layout = struct {
