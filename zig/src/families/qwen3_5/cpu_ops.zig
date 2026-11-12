@@ -1,4 +1,4 @@
-//! The Qwen3.5-2B rows between the registered kernels: each output computed in float64 and rounded once to bf16.
+//! The Qwen3.5-2B rows between the registered kernels: each output computed in float64, rounded to bf16 via fp32.
 const std = @import("std");
 const c = @import("config.zig");
 const k = @import("cpu_kernels.zig");
@@ -18,7 +18,7 @@ pub fn silu(x: f64) f64 {
     return x / (1.0 + @exp(-x));
 }
 
-/// A float64 value rounded once to bf16 bits (through fp32, which is exact for the bf16 grid).
+/// A float64 value rounded to fp32, then to bf16 bits: at a bf16 tie this can sit one ulp from a direct rounding.
 pub fn bf16of64(x: f64) u16 {
     return bf16of(@floatCast(x));
 }
@@ -32,7 +32,7 @@ pub fn embed(e: k.Linear, id: u32, out: []u16) void {
     }
 }
 
-/// The residual stream's add: h = bf16(h + r), the sum exact before its one rounding.
+/// The residual stream's add: h = bf16(h + r), the sum exact in float64 before its rounding through fp32.
 pub fn residual(h: []u16, r: []const u16) void {
     for (h, r) |*hb, rb| hb.* = bf16of64(@as(f64, f32of(hb.*)) + @as(f64, f32of(rb)));
 }
@@ -96,7 +96,7 @@ test "a bf16 embedding row dequantizes each nibble with its group's scale and bi
     try std.testing.expectEqual(bf16of(0.5 * 1 + 31), out[2047 - 6]);
 }
 
-test "the pointwise rows round once: residual, activation and gate agree with float64 to half a bf16 ulp" {
+test "the pointwise rows round through fp32: residual, activation and gate agree with float64 to half a bf16 ulp" {
     var prng = std.Random.DefaultPrng.init(3);
     const rnd = prng.random();
     for (0..10_000) |_| {

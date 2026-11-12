@@ -440,7 +440,7 @@ non-finite input as zero, writing its output over its input, scaling by the next
 squares in bf16. The CPU engine's other operations (`cpu_ops.zig`, `cpu_mixers.zig`) are registered beside them, each
 at a decode step's, a verify window's, the verify batch's and a prompt chunk's rows (the per-segment delta rule at a
 step's, a window's and a chunk's): the embedding, residual add, MLP activation, attention
-gate and rotary (one float64 expression an output, rounded once, no sums); the q/k head norm over 256 and the delta
+gate and rotary (one float64 expression an output, rounded to bf16 through fp32, no sums); the q/k head norm over 256 and the delta
 rule's gated output norm over 128 (the `rows` family's RMS reference); the attention (one query row's softmax over up to
 4096 keys, its bound carrying the fp32 dots' error through the softmax); the delta rule's inputs (the four-tap conv,
 SiLU, L2 norms and beta), its decay (fp32) and its recurrence (one head's fp32 state over a window, its bound carried

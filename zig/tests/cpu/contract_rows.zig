@@ -75,7 +75,7 @@ pub fn spec(w: Which) c.Spec {
         .rotate => if (is_control) &ctl_head else &served_head,
         else => unreachable,
     };
-    return .{ .name = name, .accum = .none, .depth = flat, .out = .bf16, .served = shapes, .sums = .{ .f16 = 0, .bf16 = 0, .why = "each output is one float64 expression rounded once to bf16; there is no sum" } };
+    return .{ .name = name, .accum = .none, .depth = flat, .out = .bf16, .served = shapes, .sums = .{ .f16 = 0, .bf16 = 0, .why = "each output is one float64 expression rounded to bf16 through fp32; there is no sum" } };
 }
 
 /// The gate each control must fail.
