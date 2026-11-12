@@ -3,6 +3,7 @@ test {
     _ = @import("sampling_test.zig");
     _ = @import("dsv41_serve");
     _ = @import("serve_knobs_test.zig");
+    _ = @import("calib_pass_test.zig");
 }
 
 test {
