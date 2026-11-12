@@ -68,9 +68,10 @@ is closed. It is sent no checkpoint identity, no NCCL or RCCL id and no prompt, 
 
 The proof shows which process connected. On the ROCm ranks' command link, every byte after it then crosses in
 ChaCha20-Poly1305 records under a key the proof leaves at both ends, so a host on the path can neither read the
-commands nor change them. Nothing else is sealed: the CUDA control links, and the NCCL, RCCL and RDMA traffic on every
-backend, are clear text, so run the ranks on a network you trust or on an encrypted one. The cluster links
-(`serve --cluster`, `tensorfold node`) are a separate transport and do not use this key.
+commands nor change them. A group with no key, which meets on one host only, is not sealed. Nothing else is sealed: the
+CUDA control links, and the NCCL, RCCL and RDMA traffic on every backend, are clear text, so run the ranks on a network
+you trust or on an encrypted one. The cluster links (`serve --cluster`, `tensorfold node`) are a separate transport and
+do not use this key.
 
 ## Release files
 
