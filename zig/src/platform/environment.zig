@@ -77,6 +77,8 @@ pub const rules = [_]Rule{
     .{ .name = "TF_DSV41_CALIB_RECHECK", .scope = .metal, .kind = .u32, .trim = " \t\r\n", .max = 8, .forms = "a whole row count from 0 to 8" },
     .{ .name = "TF_DSV41_CALIB_CYCLE", .scope = .metal, .kind = .u32, .trim = " \t\r\n", .max = 8, .forms = "a whole row count from 0 to 8" },
     .{ .name = "TF_DSV41_CALIB_DEEP_REPS", .scope = .metal, .kind = .u32, .trim = " \t\r\n", .min = 1, .max = 50, .forms = "a whole number of timed runs from 1 to 50" },
+    .{ .name = "TF_DSV41_DRAFT_PRICED", .scope = .metal, .kind = .word, .trim = " \t\r\n", .ignore_case = true, .words = &.{ "0", "1", "off", "on", "false", "true" }, .forms = "0, 1, off, on, false or true, in any case (unset or blank: on for the Metal lanes)" },
+    .{ .name = "TF_DSV41_DRAFT_PLAIN_STREAMS", .scope = .metal, .kind = .u32, .trim = " \t\r\n", .max = 16, .forms = "a whole stream count from 0 to 16 (0: off; unset: off while draft asks are priced, else 3 on Metal)" },
     .{ .name = "TF_DSV41_CALIB_BUDGET_MS", .scope = .metal, .kind = .u32, .trim = " \t\r\n", .max = 600000, .forms = "whole milliseconds from 0 to 600000 (0: no limit)" },
     .{ .name = "XPU_A8_BITS", .scope = .xpu, .kind = .bit_width, .forms = "4 or 8" },
     .{ .name = "LFM3_FUSE", .scope = .xpu, .kind = .u32, .forms = "a whole fusion mask from 0 to 4294967295" },

@@ -96,7 +96,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 16. DFlash(2) | yes | yes | yes | done¹ | yes |
 | 17. DSpark | yes | yes | yes | done¹ | done [#1751] |
 | 18. Copy drafts | done [#2022] | done [#2022] | done [#2022] | done [#2022] | done¹ |
-| 19. Shared drafts | no (copies) | no (copies) | no (copies) | open [#1426] | done¹ (opt-in) |
+| 19. Shared drafts | no (copies) | no (copies) | no (copies) | open [#1426] | done¹ (opt-in), open M[#2986] |
 | 20. Solo chunks | yes | yes | yes | yes | yes |
 | 21. Read-ahead | done [#2033] | done [#2033] | yes | done [#2033] | done [#2033] |
 | 22. Direct load | yes | open [#2449] | open [#2449] | yes | open [#1924] |
@@ -389,7 +389,8 @@ below; these are estimates for planning a port, not results.
     | nemotron | level from 2K to 64K (−1.4..+1.0 %) on prompts without repeats | [#1974] |
 
 19. **Shared draft rounds.** Several streams' drafts run in one batched pass, and a shared round prices drafts first
-    and skips proposals it won't verify ([#1779]).
+    and skips proposals it won't verify ([#1779]). DeepSeek-V4.1 on Metal prices each round's draft asks from the
+    cost table, a round where no draft pays running no pass at all, in place of a stream-count switch (open [#2986]).
 
     | Family | Gain (measured) | Where |
     | --- | --- | --- |
@@ -614,4 +615,5 @@ below; these are estimates for planning a port, not results.
 [#2633]: https://github.com/ashhart/TensorFold/pull/2633
 [#2634]: https://github.com/ashhart/TensorFold/pull/2634
 [#2784]: https://github.com/ashhart/TensorFold/pull/2784
+[#2986]: https://github.com/ashhart/TensorFold/pull/2986
 [#2764]: https://github.com/ashhart/TensorFold/issues/2764

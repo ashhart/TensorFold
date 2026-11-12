@@ -117,6 +117,10 @@ const valid = [_]Case{
     .{ .name = "TF_DSV41_CALIB_DEEP_REPS", .raw = "1", .n = 1 },
     .{ .name = "TF_DSV41_CALIB_BUDGET_MS", .raw = " 600000 ", .n = 600000 },
     .{ .name = "TF_DSV41_CALIB_BUDGET_MS", .raw = "0", .n = 0 },
+    .{ .name = "TF_DSV41_DRAFT_PRICED", .raw = " On\n", .n = 3 },
+    .{ .name = "TF_DSV41_DRAFT_PRICED", .raw = "0", .n = 0 },
+    .{ .name = "TF_DSV41_DRAFT_PLAIN_STREAMS", .raw = " 16 ", .n = 16 },
+    .{ .name = "TF_DSV41_DRAFT_PLAIN_STREAMS", .raw = "0", .n = 0 },
 };
 
 test "environment: valid forms remain raw numbers before existing consumer clamps and defaults" {
@@ -317,5 +321,23 @@ test "environment: a malformed calibration setting stops a Metal start naming th
         try t.expect(std.mem.indexOf(u8, why, e.rule(c.name).forms) != null);
         // a CUDA start does not check these rows: the engine's own reader refuses them when it measures
         try t.expect((try e.refusal(a, Env{ .name = c.name, .raw = c.raw }, .{ .cuda = true })) == null);
+    }
+}
+
+test "environment: a malformed draft pricing setting stops a Metal start naming the setting, its text and the forms" {
+    const metal: e.Flags = .{ .metal = true };
+    const bad = [_]struct { name: []const u8, raw: []const u8 }{
+        .{ .name = "TF_DSV41_DRAFT_PRICED", .raw = "yes" },
+        .{ .name = "TF_DSV41_DRAFT_PRICED", .raw = "2" },
+        .{ .name = "TF_DSV41_DRAFT_PLAIN_STREAMS", .raw = "17" },
+        .{ .name = "TF_DSV41_DRAFT_PLAIN_STREAMS", .raw = "3x" },
+        .{ .name = "TF_DSV41_DRAFT_PLAIN_STREAMS", .raw = "-1" },
+    };
+    for (bad) |c| {
+        const why = (try e.refusal(a, Env{ .name = c.name, .raw = c.raw }, metal)).?;
+        defer a.free(why);
+        try t.expect(std.mem.indexOf(u8, why, c.name) != null);
+        try t.expect(std.mem.indexOf(u8, why, c.raw) != null);
+        try t.expect(std.mem.indexOf(u8, why, e.rule(c.name).forms) != null);
     }
 }
