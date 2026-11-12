@@ -1,0 +1,158 @@
+[
+ {
+  "pair": [
+   0,
+   4
+  ],
+  "sampled": false,
+  "draft": true,
+  "ok": true,
+  "rows": [
+   160,
+   160
+  ]
+ },
+ {
+  "pair": [
+   0,
+   4
+  ],
+  "sampled": false,
+  "draft": false,
+  "ok": true,
+  "rows": [
+   160,
+   160
+  ]
+ },
+ {
+  "pair": [
+   0,
+   4
+  ],
+  "sampled": true,
+  "draft": true,
+  "ok": true,
+  "rows": [
+   160,
+   160
+  ]
+ },
+ {
+  "pair": [
+   0,
+   4
+  ],
+  "sampled": true,
+  "draft": false,
+  "ok": true,
+  "rows": [
+   160,
+   160
+  ]
+ },
+ {
+  "pair": [
+   1,
+   2
+  ],
+  "sampled": false,
+  "draft": true,
+  "ok": true,
+  "rows": [
+   160,
+   160
+  ]
+ },
+ {
+  "pair": [
+   1,
+   2
+  ],
+  "sampled": false,
+  "draft": false,
+  "ok": true,
+  "rows": [
+   160,
+   160
+  ]
+ },
+ {
+  "pair": [
+   1,
+   2
+  ],
+  "sampled": true,
+  "draft": true,
+  "ok": true,
+  "rows": [
+   160,
+   160
+  ]
+ },
+ {
+  "pair": [
+   1,
+   2
+  ],
+  "sampled": true,
+  "draft": false,
+  "ok": true,
+  "rows": [
+   160,
+   160
+  ]
+ },
+ {
+  "pair": [
+   3,
+   5
+  ],
+  "sampled": false,
+  "draft": true,
+  "ok": true,
+  "rows": [
+   30,
+   67
+  ]
+ },
+ {
+  "pair": [
+   3,
+   5
+  ],
+  "sampled": false,
+  "draft": false,
+  "ok": true,
+  "rows": [
+   30,
+   67
+  ]
+ },
+ {
+  "pair": [
+   3,
+   5
+  ],
+  "sampled": true,
+  "draft": true,
+  "ok": true,
+  "rows": [
+   27,
+   69
+  ]
+ },
+ {
+  "pair": [
+   3,
+   5
+  ],
+  "sampled": true,
+  "draft": false,
+  "ok": true,
+  "rows": [
+   27,
+   69
+  ]
+ }
+]

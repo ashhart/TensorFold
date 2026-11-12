@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3.8-27B on Intel GPUs: `logprobs` and `top_logprobs` are served, for a lone drafted stream, plain streams and shared rounds, greedy and sampled, with the tokens bit-equal to a request without them and a drafted stream's rows equal to a plain one's; `prompt_logprobs` is still refused. Decode costs 6.3% for a lone drafted stream and 13.6% for two streams at once (a total rate, prefill included); these are an order of magnitude from one Arc Pro B70 in a Gen4 x4 slot, and only the with and without pairs compare (#3050).
+
 - Tests: `tf-cuda-test flashnext-rank RANK PORT timeout` passes again on two GPUs. NCCL start-up keeps its 30 s bound and only the stalled collective gets 200 ms, and both ranks meet once their communicators are up, so `timeout` and `eof` fail the collective under test, not the start-up (#2976, fixes #2975). Thanks to @swbiggart.
 
 - Tokenizer: a split pattern is held to a work allowance per piece (2,048 instructions a byte, counted, not timed) and refused at load when too deep or too large, so a crafted tokenizer or prompt can't hang the pre-tokenizer; every split of the patterns we serve is unchanged (#3071).
