@@ -113,7 +113,7 @@ pub fn gdnChain(state: []f32, q: []const u16, kk: []const u16, v: []const u16, g
     }
 }
 
-/// The delta layer's output for one row: each head's RMS norm of y, times silu(z), one rounding.
+/// The delta layer's output for one row: each head's RMS norm of y, times silu(z), rounded to bf16 through fp32.
 pub fn gdnPost(y: []const u16, z: []const u16, norm_w: []const u16, out: []u16) void {
     for (0..c.linear_heads) |hv| {
         var ss: f64 = 0;
@@ -126,7 +126,7 @@ pub fn gdnPost(y: []const u16, z: []const u16, norm_w: []const u16, out: []u16) 
     }
 }
 
-/// The q and k norms over one head of 256: RMS with weight, one rounding.
+/// The q and k norms over one head of 256: RMS with weight, rounded to bf16 through fp32.
 pub fn headNorm(x: []const u16, weight: []const u16, out: []u16) void {
     var ss: f64 = 0;
     for (x[0..c.head_dim]) |xb| ss += @as(f64, f32of(xb)) * f32of(xb);
