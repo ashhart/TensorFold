@@ -35,7 +35,7 @@ test "a table timed at the defaults' own values is the defaults' table, and the 
     var lin = try costs_mod.defaults(gpa, 64);
     defer lin.deinit(gpa);
     // [pass, rows 1..16, the 4 + 4 window, the wide windows]
-    var rank: [1 + 16 + 1 + 3]f64 = undefined;
+    var rank: [1 + 16 + 1 + 2]f64 = undefined;
     rank[0] = lin.draft;
     for (rank[1..17], 1..) |*x, r| x.* = lin.windowMs(@intCast(r));
     rank[17] = lin.windowMs(8);
@@ -115,31 +115,64 @@ test "the launch-bound method is the backend's default and every knob still over
     try t_.expectError(error.InvalidCharacter, cm.methodFrom(&Env.get, cm.launch_bound));
 }
 
-test "the shared windows timed past 16 rows need a second slot; a spent budget drops repeats but never an entry's first run" {
+/// What a window of `rows` rows over `slots` slots costs on a launch-bound model: two launches past 16 rows.
+fn synthetic(rows: u32, slots: u32) f64 {
+    const launches: f64 = @floatFromInt((rows + 15) / 16);
+    return 28.0 * launches + 6.6 * @as(f64, @floatFromInt(rows)) + 7.0 * @as(f64, @floatFromInt(slots - 1));
+}
+
+test "a sparse plan under a spent budget still gives a monotone 32-row table from a few timed windows" {
     var one = try cm.Plan.initWide(gpa, 1, 64, 16, cm.launch_bound, true, &cm.launch_wide);
     defer one.deinit(gpa);
     try t_.expectEqual(@as(usize, 0), one.wideBucketsOf().len);
-    var p = try cm.Plan.initWide(gpa, 2, 64, 16, cm.launch_bound, true, &cm.launch_wide);
+    var p = try cm.Plan.initWide(gpa, 4, 64, 16, cm.launch_bound, true, &cm.launch_wide);
     defer p.deinit(gpa);
     try t_.expectEqualSlices(u32, &cm.launch_wide, p.wideBucketsOf());
-    const dropped = try gpa.alloc(i64, p.runs.items.len);
-    defer gpa.free(dropped);
-    var first: usize = 0;
-    for (p.runs.items, 0..) |r, i| {
-        dropped[i] = if (p.repeat(i)) cm.skipped else 1_000_000;
-        if (!r.warm) {
-            var seen = false;
-            for (p.runs.items[0..i]) |o| seen = seen or (!o.warm and std.meta.eql(o.what, r.what));
-            first += @intFromBool(!seen);
-            try t_.expectEqual(seen, p.repeat(i));
-        } else try t_.expect(p.repeat(i));
-    }
-    try t_.expectEqual(p.entries(), first); // every entry has its first timed run kept
+    // every pass after the first is dropped: the budget was spent by the first
     const ms = try gpa.alloc(f64, p.runs.items.len);
     defer gpa.free(ms);
-    for (ms, dropped) |*y, ns| y.* = if (ns == cm.skipped) -1.0 else @as(f64, @floatFromInt(ns)) / 1e6;
+    var timed: usize = 0;
+    var spent: f64 = 0.0;
+    var pass_runs: usize = 0;
+    for (p.runs.items, ms, 0..) |r, *y, i| {
+        if (i > 0 and !r.warm and p.repeat(i)) {
+            y.* = -1.0;
+            continue;
+        }
+        var rows: u32 = 0;
+        for (r.segments()) |sg| rows += sg.rows;
+        y.* = if (r.what == .draft) 12.0 else synthetic(rows, r.nsegs);
+        spent += y.*;
+        timed += 1;
+        pass_runs += @intFromBool(!r.warm);
+    }
+    // 1 untimed window, 1 untimed pass, then 5 rows, the 4 + 4 window, 2 wide windows and the pass once each
+    try t_.expectEqual(@as(usize, 2 + 5 + 1 + 2 + 1), timed);
+    try t_.expectEqual(@as(usize, 9), pass_runs);
+    try t_.expect(spent < 2000.0);
     const out = try gpa.alloc(f64, p.entries());
     defer gpa.free(out);
-    try p.values(ms, out); // every entry still has a sample: 1 ms each
-    for (out[1..]) |x| try t_.expectEqual(@as(f64, 1.0), x);
+    try p.values(ms, out);
+    var built = try p.build(gpa, &.{out});
+    defer built.deinit(gpa);
+    try t_.expectEqual(@as(usize, 32), built.verify.len);
+    for (built.verify[1..], built.verify[0..31]) |b, a| try t_.expect(b >= a);
+    // the timed rows are exact and the ones between them are on the line
+    for ([_]u32{ 1, 2, 4, 8, 16 }) |r| try t_.expectApproxEqAbs(synthetic(r, 1), built.verify[r - 1], 0.002);
+    try t_.expectApproxEqAbs((synthetic(4, 1) + synthetic(8, 1)) / 2.0, built.verify[5], 0.01);
+    try t_.expect(built.verify[16] - built.verify[15] > 20.0); // the second launch's step is in the table
+    try t_.expectEqual(@as(f64, 12.0), built.draft);
+}
+
+test "a plan with budget left repeats its passes, and a repeat never replaces an entry's first timed run" {
+    var p = try cm.Plan.initWide(gpa, 2, 64, 16, cm.launch_bound, true, &cm.launch_wide);
+    defer p.deinit(gpa);
+    var first: usize = 0;
+    for (p.runs.items, 0..) |r, i| {
+        var seen = false;
+        for (p.runs.items[0..i]) |o| seen = seen or (!o.warm and std.meta.eql(o.what, r.what));
+        try t_.expectEqual(seen, p.repeat(i));
+        first += @intFromBool(!r.warm and !seen);
+    }
+    try t_.expectEqual(@as(usize, 9), first); // 5 rows, the 4 + 4 window, 2 wide windows, the pass
 }

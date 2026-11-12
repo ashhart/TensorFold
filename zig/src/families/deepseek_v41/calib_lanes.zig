@@ -20,6 +20,10 @@ pub const Measured = struct {
     /// slots the windows used, timed runs
     n: u32 = 0,
     runs: usize = 0,
+    /// runs timed (the plan's, less those a spent budget dropped, and untimed warm-ups)
+    timed: usize = 0,
+    /// the drafter's ingest of a few committed rows within the pass, fastest timed run, ms (0: not timed apart)
+    ingest_ms: f64 = 0.0,
 };
 
 /// `boot`'s result: the measured table and the stored entry's path (null when nothing was stored).
@@ -121,6 +125,8 @@ pub fn measure(gpa: Allocator, d: Device, ids: []const u32, how: cm.Method, rows
     var conf: [cm.max_rows]f32 = undefined;
     var chosen: [4][cm.max_rows]u32 = undefined;
     const began = ph.nowNs();
+    var timed: usize = 0;
+    var ingest_best: f64 = std.math.inf(f64);
     for (plan.runs.items, samples, 0..) |run, *x, at| {
         if (how.budget_ms > 0 and ph.nowNs() - began > @as(u64, how.budget_ms) * std.time.ns_per_ms and plan.repeat(at)) {
             x.* = cm.skipped;
@@ -131,9 +137,14 @@ pub fn measure(gpa: Allocator, d: Device, ids: []const u32, how: cm.Method, rows
             const asks = [_]iface.Ask{.{ .slot = 0, .anchor = ids[lens[0] - 1], .start = p0, .params = dspark.Params.of(null, p0) }};
             var props = [_]iface.Proposal{.{ .drafts = drafts[0..shape.block], .conf = conf[0..shape.block] }};
             const t0 = try d.mark(d.ctx);
-            if (d.ingest) |f| try f(d.ctx, 0);
+            if (d.ingest) |f| {
+                try f(d.ctx, 0);
+                const t1 = try d.mark(d.ctx);
+                if (!run.warm) ingest_best = @min(ingest_best, @as(f64, @floatFromInt(t1 - t0)) / 1e6);
+            }
             try pass.?.propose(&asks, &props);
             x.* = @intCast((try d.mark(d.ctx)) - t0);
+            timed += 1;
             continue;
         }
         var segs: [4]iface.Segment = undefined;
@@ -147,6 +158,7 @@ pub fn measure(gpa: Allocator, d: Device, ids: []const u32, how: cm.Method, rows
         const t0 = try d.mark(d.ctx);
         try tgt.window(segs[0..run.nsegs], outs[0..run.nsegs]);
         x.* = @intCast((try d.mark(d.ctx)) - t0);
+        timed += 1;
         for (run.segments()) |s| try d.drop_window(d.ctx, s.slot);
     }
     for (0..plan.n) |i| {
@@ -177,7 +189,7 @@ pub fn measure(gpa: Allocator, d: Device, ids: []const u32, how: cm.Method, rows
         try plan.values(ms, v);
         r.* = v;
     }
-    var out: Measured = .{ .costs = try plan.build(gpa, ranks), .rows = rows, .n = plan.n, .runs = plan.runs.items.len };
+    var out: Measured = .{ .costs = try plan.build(gpa, ranks), .rows = rows, .n = plan.n, .runs = plan.runs.items.len, .timed = timed, .ingest_ms = if (std.math.isFinite(ingest_best)) ingest_best else 0.0 };
     @memcpy(out.kept[0..rows], ranks[0][1 .. rows + 1]);
     return out;
 }
@@ -225,6 +237,6 @@ pub fn boot(gpa: Allocator, io: std.Io, d: Device, dir: []const u8, k: calib_env
         wr.print("{s}{d:.1}", .{ if (first) "" else ", ", got.costs.windowMs(r) }) catch {};
         first = false;
     };
-    log.info("dsv41 calibration (zig): draft {d:.2} ms, slot {d:.2} ms, verify {s} ms, measured in {d:.1} s{s}{s}{s}", .{ got.costs.draft, got.costs.slot, wr.buffered(), secs, if (path != null) " (stored " else " (not stored", path orelse "", ")" });
+    log.info("dsv41 calibration (zig): draft {d:.2} ms (ingest {d:.2}), slot {d:.2} ms, verify {s} ms, measured in {d:.2} s over {d} timed runs{s}{s}{s}", .{ got.costs.draft, got.ingest_ms, got.costs.slot, wr.buffered(), secs, got.timed, if (path != null) " (stored " else " (not stored", path orelse "", ")" });
     return .{ .costs = got.costs, .path = path };
 }

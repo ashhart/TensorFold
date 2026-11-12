@@ -27,16 +27,21 @@ pub const Method = struct {
     deep: u32 = 5,
     /// timed repetitions stop once the run has taken this long, each entry keeping its first timed run (0: no limit)
     budget_ms: u32 = 0,
+    /// only `sparse_rows` are timed, once per pass over a list; the rows between are interpolated
+    sparse: bool = false,
 };
+
+/// The rows a sparse plan times (ascending, the last is the widest window).
+pub const sparse_rows = [_]u32{ 1, 2, 4, 8, 16 };
 
 /// A run that was not timed because the budget was spent (a sample's ns).
 pub const skipped: i64 = std.math.minInt(i64);
 
-/// The method for a backend whose launch carries at most 16 rows: few repetitions and a time budget.
-pub const launch_bound: Method = .{ .reps = 3, .warm = 1, .stat = .min, .recheck = 0, .cycle = 4, .deep = 2, .budget_ms = 400 };
+/// The method for a backend whose launch carries at most 16 rows: a sparse sweep, passes repeated while time remains.
+pub const launch_bound: Method = .{ .reps = 3, .warm = 1, .stat = .min, .recheck = 0, .budget_ms = 1000, .sparse = true };
 
-/// The shared windows a launch-bound backend times: the second launch's first row, then two sizes of it.
-pub const launch_wide = [_]u32{ 17, 24, 32 };
+/// The shared windows a launch-bound backend times: the second launch's first row and the widest two-launch window.
+pub const launch_wide = [_]u32{ 17, 32 };
 
 /// The defaults by shape (raw: G15; fit: G14, VERSION 3), then the explicit knobs, each range-checked.
 pub fn method(get: *const fn ([*:0]const u8) ?[]const u8) !Method {
@@ -59,6 +64,7 @@ pub fn methodFrom(get: *const fn ([*:0]const u8) ?[]const u8, base: Method) !Met
         .cycle = try num(get("TF_DSV41_CALIB_CYCLE"), d.cycle, 0, early),
         .deep = try num(get("TF_DSV41_CALIB_DEEP_REPS"), d.deep, 1, 50),
         .budget_ms = try num(get("TF_DSV41_CALIB_BUDGET_MS"), d.budget_ms, 0, 600_000),
+        .sparse = d.sparse,
     };
 }
 
@@ -182,6 +188,17 @@ pub const Run = struct {
     }
 };
 
+/// Rows marked -1 take the line between their timed neighbours (the last row is always timed).
+fn interpolate(v: []f64) !void {
+    if (v.len == 0 or v[v.len - 1] < 0 or v[0] < 0) return error.NoRuns;
+    var lo: usize = 0;
+    for (1..v.len) |i| {
+        if (v[i] < 0) continue;
+        for (lo + 1..i) |k| v[k] = v[lo] + (v[i] - v[lo]) * @as(f64, @floatFromInt(k - lo)) / @as(f64, @floatFromInt(i - lo));
+        lo = i;
+    }
+}
+
 /// The measurement's timed runs, in the reference order.
 pub const Plan = struct {
     rows: u32,
@@ -210,6 +227,10 @@ pub const Plan = struct {
         const want: u32 = if (w.len > 0) @max(2, ceilDiv(w[w.len - 1], slot_rows)) else 2;
         p.n = @min(@max(1, slots), want);
         p.per_slot = p.n >= 2 and rows >= 8;
+        if (m.sparse) {
+            try p.sparsePasses(gpa, w);
+            return p;
+        }
         try p.block(gpa, @min(rows, early), false);
         var r: u32 = early + 1;
         while (r <= rows) : (r += 1) try p.add(gpa, &.{.{ .slot = 0, .rows = r }}, .{ .sweep = r }, 1, m.deep);
@@ -219,17 +240,34 @@ pub const Plan = struct {
             j += 1;
         }
         for (w) |b| {
-            const k = ceilDiv(b, slot_rows);
-            var parts: [4]u32 = undefined;
-            split(b, parts[0..k]);
-            var segs: [4]Seg = undefined;
-            for (segs[0..k], parts[0..k], 0..) |*s, x, i| s.* = .{ .slot = @intCast(i), .rows = x };
-            try p.add(gpa, segs[0..k], .{ .shared = j }, 1, light_reps);
+            const wr = wideRun(b, j, false);
+            try p.add(gpa, wr.segments(), .{ .shared = j }, 1, light_reps);
             j += 1;
         }
         try p.block(gpa, @min(m.recheck, rows), true);
         if (draft) try p.add(gpa, &.{}, .draft, 1, light_reps);
         return p;
+    }
+
+    /// An untimed window and pass, then `reps` passes timing each sparse row, the 4 + 4 window, wide windows and pass.
+    fn sparsePasses(p: *Plan, gpa: Allocator, w: []const u32) !void {
+        try p.runs.append(gpa, one(1, true, false));
+        if (p.draft) try p.runs.append(gpa, .{ .warm = true, .what = .draft, .nsegs = 0 });
+        for (0..p.m.reps) |_| {
+            for (sparse_rows) |r| if (r <= p.rows) try p.runs.append(gpa, one(r, false, false));
+            var j: u32 = 0;
+            if (p.per_slot) {
+                var x: Run = .{ .warm = false, .what = .{ .shared = j }, .nsegs = 2 };
+                x.segs[0..2].* = .{ .{ .slot = 0, .rows = 4 }, .{ .slot = 1, .rows = 4 } };
+                try p.runs.append(gpa, x);
+                j += 1;
+            }
+            for (w) |b| {
+                try p.runs.append(gpa, wideRun(b, j, false));
+                j += 1;
+            }
+            if (p.draft) try p.runs.append(gpa, .{ .warm = false, .what = .draft, .nsegs = 0 });
+        }
     }
 
     pub fn deinit(p: *Plan, gpa: Allocator) void {
@@ -256,6 +294,16 @@ pub const Plan = struct {
         while (r <= hi) : (r += 1) for (0..p.m.warm + p.m.reps) |k| try p.runs.append(gpa, one(r, k < p.m.warm, recheck));
     }
 
+    /// A shared window of `b` rows over as many slots as it needs.
+    fn wideRun(b: u32, j: u32, warm: bool) Run {
+        const k = ceilDiv(b, slot_rows);
+        var parts: [4]u32 = undefined;
+        split(b, parts[0..k]);
+        var x: Run = .{ .warm = warm, .what = .{ .shared = j }, .nsegs = @intCast(k) };
+        for (x.segs[0..k], parts[0..k], 0..) |*s, rows, i| s.* = .{ .slot = @intCast(i), .rows = rows };
+        return x;
+    }
+
     fn one(r: u32, warm: bool, recheck: bool) Run {
         var x: Run = .{ .warm = warm, .what = if (recheck) .{ .recheck = r } else .{ .sweep = r } };
         x.segs[0] = .{ .slot = 0, .rows = r };
@@ -277,7 +325,8 @@ pub const Plan = struct {
         var buf: [max_samples]f64 = undefined;
         // each entry's timed samples in run order: rows (sweep), rows (recheck), shared, draft
         out[0] = 0.0;
-        for (0..p.rows) |i| out[1 + i] = (try p.stat(samples, .{ .sweep = @intCast(i + 1) }, &buf)) orelse return error.NoRuns;
+        for (0..p.rows) |i| out[1 + i] = (try p.stat(samples, .{ .sweep = @intCast(i + 1) }, &buf)) orelse if (p.m.sparse) -1.0 else return error.NoRuns;
+        if (p.m.sparse) try interpolate(out[1 .. 1 + p.rows]);
         for (0..p.rows) |i| if (try p.stat(samples, .{ .recheck = @intCast(i + 1) }, &buf)) |x| {
             out[1 + i] = @min(out[1 + i], x);
         };
@@ -286,10 +335,9 @@ pub const Plan = struct {
         if (p.draft) out[0] = (try p.stat(samples, .draft, &buf)) orelse return error.NoRuns;
     }
 
-    /// Run `at` only warms or repeats an entry an earlier run timed, so dropping it leaves the entry a sample.
+    /// Run `at` repeats an entry an earlier run timed, so dropping it leaves the entry a sample.
     pub fn repeat(p: *const Plan, at: usize) bool {
         const run = p.runs.items[at];
-        if (run.warm) return true;
         for (p.runs.items[0..at]) |r| if (!r.warm and std.meta.eql(r.what, run.what)) return true;
         return false;
     }
