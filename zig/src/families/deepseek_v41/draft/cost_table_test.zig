@@ -3,6 +3,7 @@ const std = @import("std");
 const cm = @import("calib_measure.zig");
 const costs_mod = @import("costs.zig");
 const depth = @import("depth.zig");
+const calib_env = @import("calib_env.zig");
 const plain = @import("plain_streams_test.zig");
 
 const gpa = std.testing.allocator;
@@ -175,4 +176,37 @@ test "a plan with budget left repeats its passes, and a repeat never replaces an
         first += @intFromBool(!r.warm and !seen);
     }
     try t_.expectEqual(@as(usize, 9), first); // 5 rows, the 4 + 4 window, 2 wide windows, the pass
+}
+
+test "a stored table is read back only for the device and weights that stored it" {
+    const io = t_.io;
+    var tmp = t_.tmpDir(.{});
+    defer tmp.cleanup();
+    var buf: [256]u8 = undefined;
+    const root = try std.fmt.bufPrint(&buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const base: calib_env.Shape = .{ .slots = 4, .world = 1, .dspark = true, .context = 1280 };
+    var one = [_]f64{ 30.0, 40.0 };
+    var other = [_]f64{ 50.0, 60.0 };
+    const mine: costs_mod.Costs = .{ .verify = &one, .draft = 10.0, .slot = 1.0 };
+    const theirs: costs_mod.Costs = .{ .verify = &other, .draft = 20.0, .slot = 2.0 };
+    var a = base;
+    a.id = 0xa1;
+    var b = base;
+    b.id = 0xb2;
+    const pa = try calib_env.store(gpa, io, root, a, mine, .{ .method = .{}, .seconds = 1.0 }, 1_791_504_000);
+    defer gpa.free(pa);
+    const p0 = try calib_env.store(gpa, io, root, base, theirs, .{ .method = .{}, .seconds = 1.0 }, 1_791_504_001);
+    defer gpa.free(p0);
+    try t_.expect(!std.mem.eql(u8, std.fs.path.basename(pa), std.fs.path.basename(p0)));
+    var got = try calib_env.load(gpa, io, .{ .mode = "zig", .dir = root }, a, 64);
+    defer got.deinit(gpa);
+    try t_.expectEqual(calib_env.Source.cached, got.source);
+    try t_.expectEqual(@as(f64, 10.0), got.costs.draft);
+    var none = try calib_env.load(gpa, io, .{ .mode = "zig", .dir = root }, b, 64);
+    defer none.deinit(gpa);
+    try t_.expectEqual(calib_env.Source.measure, none.source);
+    var unnamed = try calib_env.load(gpa, io, .{ .mode = "zig", .dir = root }, base, 64);
+    defer unnamed.deinit(gpa);
+    try t_.expectEqual(calib_env.Source.cached, unnamed.source);
+    try t_.expectEqual(@as(f64, 20.0), unnamed.costs.draft);
 }

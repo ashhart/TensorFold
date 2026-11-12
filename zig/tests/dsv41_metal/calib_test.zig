@@ -56,6 +56,26 @@ test "dsv41 metal calib: a measured table, every slot as new after it, the stats
     md.close(md.ptr);
 }
 
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+
+test "dsv41 metal calib: a malformed timing setting stops the start instead of falling back to the defaults" {
+    const m = try fs.open(gpa, io, seed, .{});
+    const md = m.model();
+    defer md.close(md.ptr);
+    const before = digest(m);
+    for ([_][2][:0]const u8{ .{ "TF_DSV41_CALIB_BUDGET_MS", "abc" }, .{ "TF_DSV41_CALIB_REPS", "0" }, .{ "TF_DSV41_CALIB_STAT", "mean" } }) |kv| {
+        _ = setenv(kv[0], kv[1], 1);
+        defer _ = unsetenv(kv[0]);
+        const got = md.calibrate(md.ptr, gpa, io, ".", .{ .mode = "measure" }, want);
+        say(std.meta.isError(got), "{s}={s} refused by name before any window ran", .{ kv[0], kv[1] });
+        try testing.expectError(error.InvalidEnvironment, got);
+    }
+    try testing.expectEqual(before, digest(m));
+    var ok = try md.calibrate(md.ptr, gpa, io, ".", .{ .mode = "measure" }, want);
+    ok.costs.deinit(gpa);
+}
+
 test "dsv41 metal calib: a reply after the measurement equals the serial decode, drafted and not" {
     const prompt = try ff.ids(gpa, &fs.config(), 200, 9);
     defer gpa.free(prompt);

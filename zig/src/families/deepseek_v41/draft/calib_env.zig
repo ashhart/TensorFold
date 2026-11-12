@@ -9,8 +9,8 @@ const Costs = costs_mod.Costs;
 
 pub const Mode = enum { cached, default, real, measure, zig };
 
-/// The engine the table must have been measured on (slots, world, DSpark; context preferred).
-pub const Shape = struct { slots: u32, world: u32, dspark: bool, context: ?u64 = null };
+/// The engine the table was measured on: slots, world, DSpark, the device and weights `id`; context preferred.
+pub const Shape = struct { slots: u32, world: u32, dspark: bool, context: ?u64 = null, id: u64 = 0 };
 
 /// `measure`: the engine must measure (defaults until it has); `measured`: this boot's own measurement.
 pub const Source = enum { default, cached, measure, measured };
@@ -98,7 +98,7 @@ pub fn shared(gpa: Allocator, c: Costs) !Costs {
 const Meta = struct {
     engine: []const u8 = "",
     meta: struct {
-        shape: struct { slots: u32 = 0, world: u32 = 0, dspark: bool = false, context: ?u64 = null } = .{},
+        shape: struct { slots: u32 = 0, world: u32 = 0, dspark: bool = false, context: ?u64 = null, id: u64 = 0 } = .{},
         time: []const u8 = "",
     } = .{},
 };
@@ -130,7 +130,7 @@ pub fn pickOf(gpa: Allocator, io: std.Io, dir: []const u8, want: Shape, engine: 
         defer parsed.deinit();
         const m = parsed.value.meta;
         if (std.mem.eql(u8, parsed.value.engine, "zig") != (engine == .zig)) continue;
-        if (m.shape.world != want.world or m.shape.slots < want.slots or m.shape.dspark != want.dspark) continue;
+        if (m.shape.world != want.world or m.shape.slots < want.slots or m.shape.dspark != want.dspark or m.shape.id != want.id) continue;
         // a usable table (calib.load's rule) before it can win
         var c = Costs.parseJson(gpa, bytes) catch continue;
         c.deinit(gpa);
@@ -151,8 +151,11 @@ pub fn pickOf(gpa: Allocator, io: std.Io, dir: []const u8, want: Shape, engine: 
 
 /// A Zig measurement's file: calib-zig-<shape SHA-256, 16 hex>.json (one per shape; a new one replaces it).
 pub fn zigName(buf: []u8, want: Shape) ![]const u8 {
-    var key: [96]u8 = undefined;
-    const k = try std.fmt.bufPrint(&key, "slots={d} world={d} dspark={d} context={d}", .{ want.slots, want.world, @intFromBool(want.dspark), want.context orelse 0 });
+    var key: [128]u8 = undefined;
+    const base = try std.fmt.bufPrint(&key, "slots={d} world={d} dspark={d} context={d}", .{ want.slots, want.world, @intFromBool(want.dspark), want.context orelse 0 });
+    var named: [160]u8 = undefined;
+    // a table specific to a device and weights has its own file; one that names none keeps its old name
+    const k = if (want.id == 0) base else try std.fmt.bufPrint(&named, "{s} id={x}", .{ base, want.id });
     var h: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(k, &h, .{});
     return std.fmt.bufPrint(buf, "calib-zig-{x}.json", .{h[0..8]});
@@ -189,7 +192,7 @@ pub fn store(gpa: Allocator, io: std.Io, dir: []const u8, want: Shape, c: Costs,
         .slot = c.slot,
         .engine = "zig",
         .meta = .{
-            .shape = .{ .slots = want.slots, .world = want.world, .dspark = want.dspark, .context = want.context },
+            .shape = .{ .slots = want.slots, .world = want.world, .dspark = want.dspark, .context = want.context, .id = want.id },
             .time = time,
             .method = .{ .reps = m.reps, .warm = m.warm, .stat = @tagName(m.stat), .recheck = m.recheck, .shape = @tagName(m.shape), .cycle = m.cycle, .deep = m.deep },
             .seconds = rec.seconds,

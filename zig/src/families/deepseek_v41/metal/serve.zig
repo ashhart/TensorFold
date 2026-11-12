@@ -54,6 +54,8 @@ pub const Options = struct {
     narrow: u32 = 0,
     /// the draft cost table is timed at load unless TF_DSV41_CALIB names another source (false: the defaults)
     measure_costs: bool = false,
+    /// the device and weights a stored cost table is specific to (0: none named)
+    identity: u64 = 0,
 };
 
 /// A position's draft candidates the pass keeps (the shape the lanes size their buffers by).
@@ -128,6 +130,7 @@ pub const Metal = struct {
             .keepalive = m.keepalive(),
             .close = close,
             // a cost table measured on this machine (TF_DSV41_CALIB_FILE), else the defaults: Metal has nothing to time
+            .calib_id = m.opt.identity,
             .calib = m.knobs(),
             .steps = m.opt.steps,
             .decode_share = m.opt.decode_share,
