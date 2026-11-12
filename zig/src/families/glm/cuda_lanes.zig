@@ -14,13 +14,14 @@ const ring = 1024;
 /// The widest verify window: the pending token and a copy (the lane core proposes them), as the decode buffers hold.
 pub const max_rows = fw.window_rows;
 const max_held = dflash.BLOCK - 1; // a DFlash2 block's drafts (the MTP head's chains stop at max_drafts)
-const shared_head_drafts = 3; // an MTP chain's most drafts in a shared round, whose chains step stream by stream
+const shared_head_drafts = 3; // an MTP chain's most drafts in a shared round
 const copy_policy = @import("cuda_copy_policy.zig");
 const lane_costs = @import("cuda_lane_costs.zig");
 /// A stream's place in the backend: its sequence's slot, the rows its last verify left uncommitted, its held drafts.
 const Lane = struct {
     slot: u32,
     pending_rows: ?usize = null,
+    draft_failed: bool = false, // a partially executed shared draft cannot be retried before release
     held: [@max(max_held, engine.max_drafts)]u32 = undefined,
     chances: [@max(max_held, engine.max_drafts)]f64 = undefined, // each held draft's chance: DFlash2's selector's, or the MTP head's (--mtp-confidence)
     held_n: usize = 0,
@@ -108,7 +109,7 @@ pub const Lanes = struct {
             .speculate = drafting,
             .speculate_early = false,
             .drafts = if (block) max_held else engine.max_drafts,
-            .draft_streams = block, // one block pass drafts every stream of the round
+            .draft_streams = block or sharing, // a shared round's heads or block pass draft in one batch
             .mtp_step_ms = if (costs) |c| c.step_ms else if (block) 1.6 / @as(f64, max_held) else 0, // a block's seven drafts share one pass
             .shared_step_ms = if (costs == null) null else 0,
             .draft_probabilities = block or self.mtp_confidence != null, // chances size each window (DFlash2's by the costs)
@@ -140,7 +141,7 @@ pub const Lanes = struct {
         return h;
     }
 
-    fn value(self: *const Lanes, feed: be.Feed) u32 {
+    pub fn value(self: *const Lanes, feed: be.Feed) u32 {
         return switch (feed) {
             .handle => |h| self.drawn[h % ring],
             .value => |v| v,
@@ -172,8 +173,9 @@ pub const Lanes = struct {
     }
 
     /// The stream's sequence bound, its last verify committed (`kept` rows, else all of them).
-    fn bind(self: *Lanes, s: *const lanes.Stream, kept: ?usize) !*Lane {
+    pub fn bind(self: *Lanes, s: *const lanes.Stream, kept: ?usize) !*Lane {
         const l = self.lanes.getPtr(s) orelse return error.UnknownStream;
+        if (l.draft_failed) return error.SharedDraftFailed;
         try self.x.bind(l.slot);
         if (l.pending_rows) |rows| try self.x.keep(kept orelse rows);
         l.pending_rows = null;
@@ -515,25 +517,12 @@ pub const Lanes = struct {
         }
     }
 
+    pub const draftRound = @import("cuda_mtp_lanes.zig").draftLanes;
+
     fn draftFn(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void {
         const self = of(ptr);
         if (self.x.e.drafter != null) return self.draftBlock(requests);
-        if (!self.x.e.mtp) return error.NoDraftHead;
-        for (requests) |r| {
-            const l = try self.bind(r.stream, if (r.rows) |rows| rows.len else null);
-            if (r.position != self.x.e.pos() + 1) return error.PositionMismatch;
-            if (r.lanes != null) return error.TreesNotBuilt;
-            const depth = @min(r.depth, engine.max_drafts);
-            const chances: ?[]f64 = if (self.mtp_confidence != null) l.chances[0..depth] else null;
-            if (r.rows) |rows| {
-                for (rows, 0..) |row, i| if (row != i) return error.TreesNotBuilt;
-                try self.x.draft(false, r.follow[0..rows.len], depth, &l.held, chances);
-            } else {
-                const first = self.value(r.first orelse return error.NoFirstToken);
-                try self.x.draft(true, &.{first}, depth, &l.held, chances);
-            }
-            l.held_n = depth;
-        }
+        return draftRound(self, requests);
     }
 
     /// DFlash2: every request's kept rows committed, then one block round for them all (cuda_follow's block step).

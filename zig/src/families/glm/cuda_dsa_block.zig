@@ -257,3 +257,12 @@ pub fn commit(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, 
     try prepareProfile(k.set, stream, l, s, x, stride, rows, sparseRows(l, host_pos, rows), k.prof);
     try writeKeys(k, stream, l, c, s, rows, pos);
 }
+
+/// One segment's cache writes from row `r0` after `prepare` ran across a shared batch.
+pub fn writeKeysAt(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, r0: usize, rows: usize, pos: u64) !void {
+    var v = s;
+    v.lat += r0 * l.lw * 2;
+    v.ikr += r0 * (l.index.d + l.index.heads) * 2;
+    v.igr += r0 * l.index.d * 4;
+    try writeKeys(k, stream, l, c, v, rows, pos);
+}

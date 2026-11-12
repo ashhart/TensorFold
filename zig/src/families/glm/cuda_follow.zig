@@ -3,6 +3,7 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const engine = @import("cuda_engine.zig");
+const fw = @import("cuda_forward.zig");
 const prompt_solo = @import("cuda_prompt_solo.zig");
 const prompt_cuts = @import("cuda_prompt_cuts.zig");
 const images_mod = @import("cuda_images.zig");
@@ -15,7 +16,8 @@ const sparse = @import("cuda_sparse.zig");
 const prompt_pair = @import("cuda_prompt_pair.zig");
 const Engine = engine.Engine;
 
-pub const Kind = enum(u32) { begin = 1, prefill, verify, keep, draft, end, drop, release, chunk, shared, image, block, many, redraw, idle, snapshots, pool, form, cuts };
+pub const Kind = enum(u32) { begin = 1, prefill, verify, keep, draft, end, drop, release, chunk, shared, image, block, many, redraw, idle, snapshots, pool, form, cuts, draft_shared };
+pub const draft_shared_words = @import("cuda_mtp_wire.zig").words;
 
 /// One step as it crosses: 64 bytes, then `n` u32 ids.
 pub const Header = extern struct {
@@ -305,6 +307,16 @@ pub const Leader = struct {
         try x.e.draft(from_prompt, follow_ids, depth, out, chances);
     }
 
+    /// Several streams' MTP absorbs and chained drafts in one batch on every rank (Engine.draftShared).
+    pub fn draftShared(x: Leader, parts: []const engine.DraftPart) !void {
+        try @import("cuda_mtp_shared.zig").validate(x.e, parts);
+        var buf: [draft_shared_words]u32 = undefined;
+        const enc = try encodeDraftShared(parts, &buf);
+        try x.flush();
+        try x.send(enc.h, enc.ids);
+        try x.e.draftShared(parts);
+    }
+
     /// DFlash2's round on every rank (Engine.draftBlock): each stream's slot, kept rows and anchor.
     pub fn block(x: Leader, reqs: []dflash.Req) !void {
         if (reqs.len == 0 or reqs.len > dflash.MAX_S) return error.TooManyStreams;
@@ -355,7 +367,7 @@ pub fn follow(e: *Engine, link: *Link) !void {
         const step = try link.receive();
         const h = step.h;
         const kind: Kind = @fromBackingInt(@intCast(h.kind));
-        if (kind != .end and kind != .drop and kind != .shared and kind != .block and kind != .many and kind != .idle and kind != .snapshots and kind != .pool and kind != .form) try e.bind(h.slot);
+        if (kind != .end and kind != .drop and kind != .shared and kind != .block and kind != .many and kind != .idle and kind != .snapshots and kind != .pool and kind != .form and kind != .draft_shared) try e.bind(h.slot);
         e.prompt_logprobs = if (promptRows(h)) .{} else null;
         e.structured = structuredStep(h); // rank 0 alone masks them
         switch (kind) {
@@ -418,6 +430,13 @@ pub fn follow(e: *Engine, link: *Link) !void {
                 defer e.gpa.free(ids);
                 try e.draft(h.flags & 1 != 0, ids, h.depth, &drafts, if (h.flags & 2 != 0) &chances else null);
             },
+            .draft_shared => {
+                var parts: [engine.max_shared]engine.DraftPart = undefined;
+                var outs: [engine.max_shared][engine.max_drafts]u32 = undefined;
+                var part_chances: [engine.max_shared][engine.max_drafts]f64 = undefined;
+                var follow_buf: [engine.max_shared * fw.window_rows]u32 = undefined;
+                try e.draftShared(try decodeDraftShared(h, step.ids, &parts, &outs, &part_chances, &follow_buf));
+            },
             .block => {
                 const k = h.depth;
                 if (k == 0 or k > dflash.MAX_S or step.ids.len != 3 * k) return error.BadStep;
@@ -459,6 +478,10 @@ pub fn spanWords(a: std.mem.Allocator, spans: []const images_mod.Span, max_words
     for (spans, 0..) |sp, i| words[3 * i ..][0..3].* = .{ sp.at, sp.n, sp.row };
     return words;
 }
+
+pub const encodeDraftShared = @import("cuda_mtp_wire.zig").encodeDraftShared;
+pub const decodeDraftShared = @import("cuda_mtp_wire.zig").decodeDraftShared;
+
 test "128 video pairs cross the span serializer and a follower's receiver; one word short is refused" {
     const a = std.testing.allocator;
     var spans: [128]images_mod.Span = undefined;

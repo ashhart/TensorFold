@@ -45,6 +45,7 @@ const snapshots = @import("cuda_snapshots.zig");
 const prompt_solo = @import("cuda_prompt_solo.zig");
 pub const prompt_cuts = @import("cuda_prompt_cuts.zig"); // cuda_lanes' resume check too
 pub const Part = types.Part;
+pub const DraftPart = @import("cuda_mtp_shared.zig").DraftPart;
 pub const Kept = types.Kept;
 const Seq = types.Seq;
 const Snap = types.Snap;
@@ -541,6 +542,9 @@ pub const Engine = struct {
             }
         }
     }
+
+    /// Batched shared-round MTP: one segmented absorb, then one head pass and one draw per chained level.
+    pub const draftShared = @import("cuda_mtp_shared.zig").draftShared;
 
     /// `rows` logits rows of this rank's vocabulary -> the tokens at positions first, first + 1, ...
     pub fn draw(e: *Engine, logits: u64, rows: usize, first: u64, bits: u64, out: []u32) !void {
