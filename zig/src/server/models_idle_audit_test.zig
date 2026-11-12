@@ -43,6 +43,7 @@ test "capability audit: model discovery waits for an idle reload and reads the p
     srv.thinking_switch = false;
     srv.effort_levels = &.{};
     srv.think_close = &.{};
+    srv.video_decoder = false; // discovery reads it for input_types (#3004)
     // Discovery reads the template for effort use; this one names none.
     var text_vtable: @TypeOf(srv.text.vtable.*) = undefined;
     text_vtable.template_source = struct {
