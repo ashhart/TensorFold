@@ -434,8 +434,9 @@ A SIGTERM stop writes what waits within 20 seconds. It is equivalent to `--learn
 the old flags remain supported, and `--learn-conversations` alone keeps its existing default directory.
 Use either spelling: combining `--prompt-cache-disk` with `--learn-dir` or `--learn-conversations` is refused.
 The startup line names the disk directory and the device budget when the engine reports one.
-GLM on Metal captures every resident keep, including each planned mark, before its borrowed MLA rows can be reused.
-This applies with or without spill, moving the gather and its GPU wait into the request path.
+GLM on Metal stages every resident keep, including each planned mark, before its borrowed MLA rows can be reused.
+It does so whatever `--spill-gib` is set to: with `--spill-gib`, those keeps are staged when kept, not at eviction.
+That moves the gather and its GPU wait into the request path.
 A busy staging permit waits and retries; an image larger than the permit finishes through the chunk writer there.
 Other admission or copy failures are named in the log; that keep remains in RAM only, without an automatic retry.
 The synchronous writer finishes at keep; otherwise an owned staged image publishes in the background.

@@ -989,6 +989,8 @@ up to N GiB under `~/.cache/tensorfold/spilled` for every model together, and re
 matches resumes from it, token for token as a fresh prompt pass, after a restart too. An eviction stages a copy before
 releasing RAM, then the engine continues while the I/O thread writes it. A full staging permit skips that save;
 the request prefills if it returns before a saved state is available. This changes cache hits, never reply tokens.
+GLM-5.3-Flash also stages each resident state when it is kept, with or without `--spill-gib`, because its slots and
+shared pool can reuse those rows before an eviction.
 An idle unload and a planned stop also save the states still in RAM, newest first, within the same disk cap and
 20-second stop budget. The next engine open scans those files and restores them through the same path as evictions.
 Older queued saves cannot evict states saved earlier in that close. States that exceed a staging permit, disk cap,
