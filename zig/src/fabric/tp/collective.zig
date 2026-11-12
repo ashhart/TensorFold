@@ -30,7 +30,7 @@ pub const DType = enum(u8) {
 pub const Op = enum(u8) { sum, max, min };
 
 /// Which implementation is behind a `Collective` (logs, bench labels).
-pub const Kind = enum { nccl, mailbox, hybrid, roce, host, device, tcp };
+pub const Kind = enum { nccl, mailbox, hybrid, roce, host, device, tcp, group };
 
 pub const Collective = struct {
     ptr: *anyopaque,

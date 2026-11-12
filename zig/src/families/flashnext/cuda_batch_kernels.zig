@@ -87,6 +87,7 @@ pub const Kernels = struct {
     sum: cuda.Function,
     moe_sum: cuda.Function,
     leaf_tree: cuda.Function,
+    leaf_partial: cuda.Function,
     leaf_finish: cuda.Function,
     copy_cols: cuda.Function,
     ep_picks: cuda.Function,
@@ -132,6 +133,7 @@ pub const Kernels = struct {
         k.sum = try k.batch.function("fn_sum_slices");
         k.moe_sum = try k.batch.function("fn_moe_sum");
         k.leaf_tree = try k.batch.function("fn_exl3_leaf_tree");
+        k.leaf_partial = try k.batch.function("fn_exl3_leaf_partial");
         k.leaf_finish = try k.batch.function("fn_exl3_leaf_finish");
         k.copy_cols = try k.batch.function("fn_copy_cols");
         k.ep_picks = try k.batch.function("fn_ep_picks");

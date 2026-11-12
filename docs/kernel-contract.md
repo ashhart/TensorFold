@@ -320,10 +320,13 @@ unsplit K, `linear_wc`'s tiles); a host test sweeps K and N to 16384 through `ex
 form no registration runs. A fixed plan keeps the linear. Gate 4 proves an fp16 sum would overflow on a constant-weight
 stress input (all-ones states: one weight at every width). Six controls: another K split (3, 4 and 5 bits; `linear_wc`),
 swapped scales, a swapped suh.
-Flash Next EXL3's canonical expert reduction starts in the one-rank slice: `fn_exl3_leaf_tree` and
-`fn_exl3_leaf_finish` register in `contract_flashnext_exl3_canon.zig`, against the host fp32 tree bit for bit and
-float64's exceptional classes. The controls flatten the tree, drop NaNs, write an input or use bf16 adds; each
-must fail its intended gate. Independent host references compare the canonical order with exact products and fp64.
+Flash Next EXL3's canonical expert reduction starts in the one-rank slice: `fn_exl3_leaf_tree`,
+`fn_exl3_leaf_partial` and `fn_exl3_leaf_finish` register in `contract_flashnext_exl3_canon.zig`. Leaves,
+tree additions and transported partials are float64; only the root converts once to float32, round-to-nearest-even.
+Outputs match the host tree bit for bit (NaN payloads aside), including float64's exceptional classes.
+Controls flatten the tree, drop NaNs, write an input, use bf16 adds or narrow partials to float32; each must fail
+its intended gate. Independent integer-product references check error and TP independence without a sampled-error
+tolerance. Checkpoint BF16 state boundaries are unchanged.
 HIP: the RMS norm rows, a wave a row (fp32, fp16 and bf16 out) and a block a row (fp16 and bf16 out).
 HIP also checks the decode tail (`tf_tail`): the residual add, of a row of the activation kind or of nine slots' fp32
 rows times their weights summed in slot order, and the RMS norm after it, against float64 at Qwen3.6-35B-A3B's and
@@ -409,18 +412,16 @@ CUDA also checks the affine-3 experts' split decode pair, bit-equal to the pair 
 one dropping a last round of K groups short of the warps, one chaining the groups in reverse).
 CUDA also checks Flash Next's NVFP4 experts on prompt tiles with the decode form's sums (SwiGLU gate-up and fp32
 down, each bit-equal to the decode instance it replaces; the scaled-code prompt tile is the planted control).
-CUDA also checks Flash Next EXL3's canonical expert reduction (`flashnext_batch.cu`): `fn_exl3_leaf_tree` over leaves
-0-31, 32-63 and all 64 (rows 1, 2, 5 and 16 at width 2560) and `fn_exl3_leaf_finish` over the pieces of 2, 3, 5 and 8
-ranks, each output byte-equal to the host reference `exl3_canon.zig` (NaN payloads aside), its class equal to float64's
-and its value within float64's bound. Six controls, each one planted fault: the tree as one flat fma chain, NaN products
-dropped, a write into the input, bf16 tree adds, and the finish as one flat chain and with bf16 merges.
-Its order is TP-independent: 64 leaves of 8 expert ids (the shared expert in the last), an fp32 fma chain a leaf in
-slot order from +0, then a fixed balanced fp32 tree, so every TP degree 1 to 8 gives the same bits. Against exact integer
-sums of the products (`exl3_canon_fp64_test.zig`) the host tests check each output at |err| <= n u / (1 - n u) times the
-sum of |y w| with n = 11 and u = 2^-24, not the contract's depth 17: a term meets at most c roundings in its leaf's chain
-of c and one per tree level whose sibling holds terms, at most 11 - c, so n <= 11, as for the old one chain over the 11
-slots (the bound is the chain's, not a lower one). On router-like and wide-range rows the tree's worst output is no
-worse than the old chain's or a rank-split sum's and its mean within a quarter of the best of them.
+CUDA also checks Flash Next EXL3's canonical expert reduction (`flashnext_batch.cu`): the float32 root,
+float64 `fn_exl3_leaf_partial` over leaves 0-31, 32-63, all 64 and an interior subtree, and
+`fn_exl3_leaf_finish` over the pieces of 2, 3, 5 and 8 ranks (rows 1, 2, 5 and 16 at width 2560).
+Each output is byte-equal to `exl3_canon.zig` (NaN payloads aside), has float64's exceptional class and
+satisfies its numerical bound. Eight controls flatten a tree, drop NaNs, write an input, use bf16 adds,
+or round a partial through float32.
+Leaves and fixed-tree merges stay float64, including across the typed NCCL all-gather; the root alone
+rounds to float32. Every TP degree 1 to 8 gives the same bits. Exact integer-product host references
+bound root error by `2^-24 |sum| + 18 * 2^-53 sum(|y w|) + 2^-150` and require every sampled row to lose
+no accuracy to the slot chain or rank-split sums, without an error-comparison tolerance.
 CUDA also checks Nemotron's pocket (`nemotron_ops.cu`, the learned neurons the living-weights learner adds beside the
 shared expert): relu^2 up into act rows and down added into the shared expert's slot, a block row a row and tiled, the
 down to fp32 and bf16, against float64, the neurons past the count NaN so a read of one shows (two controls: the up's

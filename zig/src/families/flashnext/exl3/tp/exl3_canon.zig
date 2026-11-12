@@ -1,4 +1,5 @@
-//! The canonical expert reduction at any TP degree: 64 leaves of 8 ids, an fma chain each, a fixed binary tree.
+//! The canonical expert reduction at any TP degree: 64 leaves of 8 ids, an fma chain each, a fixed binary tree, all in f64.
+//! Only the root rounds, once, to f32 (`toF32`): partials and their merges never narrow.
 const std = @import("std");
 
 pub const leaves: usize = 64;
@@ -68,10 +69,16 @@ pub fn pieces(out: *[max_pieces]Piece, world: usize) usize {
     return n;
 }
 
-/// One column of a row: the value of the subtree [start, start + 2^log) (the reference of fn_exl3_leaf_tree).
-pub fn subtree(y: *const [slots]f32, w: *const [slots]f32, picks: *const [slots]u16, start: usize, log: u8) f32 {
+/// The root's one rounding: an f64 value to the f32 the model sees, to nearest even.
+pub fn toF32(v: f64) f32 {
+    return @floatCast(v);
+}
+
+/// One column of a row: the f64 value of the subtree [start, start + 2^log) (the reference of fn_exl3_leaf_partial; its
+/// `toF32` is that of fn_exl3_leaf_tree). The f32 products are exact in f64, so each leaf is an f64 fma chain.
+pub fn subtree(y: *const [slots]f32, w: *const [slots]f32, picks: *const [slots]u16, start: usize, log: u8) f64 {
     var leaf: [slots]u8 = undefined;
-    var val: [slots]f32 = undefined;
+    var val: [slots]f64 = undefined;
     var n: usize = 0;
     const end = start + (@as(usize, 1) << @intCast(log));
     for (0..slots) |k| {
@@ -84,7 +91,7 @@ pub fn subtree(y: *const [slots]f32, w: *const [slots]f32, picks: *const [slots]
             val[n] = 0.0;
             n += 1;
         }
-        val[j] = @mulAdd(f32, y[k], w[k], val[j]);
+        val[j] = @mulAdd(f64, y[k], w[k], val[j]);
     }
     // Merge siblings in leaf order, including an empty sibling's +0 for signed-zero exactness.
     var i: usize = 1;
@@ -92,7 +99,7 @@ pub fn subtree(y: *const [slots]f32, w: *const [slots]f32, picks: *const [slots]
         var j = i;
         while (j > 0 and leaf[j - 1] > leaf[j]) : (j -= 1) {
             std.mem.swap(u8, &leaf[j - 1], &leaf[j]);
-            std.mem.swap(f32, &val[j - 1], &val[j]);
+            std.mem.swap(f64, &val[j - 1], &val[j]);
         }
     }
     var pos: [slots]u8 = undefined;
@@ -118,10 +125,10 @@ pub fn subtree(y: *const [slots]f32, w: *const [slots]f32, picks: *const [slots]
 }
 
 /// The finish: pieces in leaf order merged left to right, two equal adjacent blocks with an aligned left start adding.
-pub fn finish(ps: []const Piece, values: []const f32) f32 {
+pub fn finish(ps: []const Piece, values: []const f64) f64 {
     var s_start: [max_pieces]u8 = undefined;
     var s_log: [max_pieces]u8 = undefined;
-    var s_val: [max_pieces]f32 = undefined;
+    var s_val: [max_pieces]f64 = undefined;
     var top: usize = 0;
     for (ps, values) |p, v| {
         s_start[top] = p.start;
@@ -144,7 +151,8 @@ pub const Row = struct { y: [slots]f32, w: [slots]f32, p: [slots]u16 };
 fn randomRow(rng: std.Random) Row {
     var r: Row = undefined;
     for (0..slots) |k| {
-        r.y[k] = rng.floatNorm(f32) * 0.05;
+        // magnitudes over 2^-10 to 2^10 a slot: the 48-bit products' f64 sums round, so orders and groupings show
+        r.y[k] = rng.floatNorm(f32) * 0.05 * std.math.exp2(@as(f32, @floatFromInt(rng.intRangeAtMost(i32, -10, 10))));
         r.w[k] = rng.floatNorm(f32) * 0.2;
         if (rng.uintLessThan(u8, 23) == 0) r.y[k] = -0.0;
         if (rng.uintLessThan(u8, 29) == 0) r.w[k] = -0.0;
@@ -155,11 +163,11 @@ fn randomRow(rng: std.Random) Row {
 }
 
 /// The definition with no shortcut: all 64 leaf sums (empty = +0), then the full tree level by level.
-fn naive(r: Row) f32 {
-    var level: [leaves]f32 = @splat(0.0);
+fn naive(r: Row) f64 {
+    var level: [leaves]f64 = @splat(0.0);
     for (0..slots) |k| {
         const l = leafOf(r.p[k]);
-        level[l] = @mulAdd(f32, r.y[k], r.w[k], level[l]);
+        level[l] = @mulAdd(f64, r.y[k], r.w[k], level[l]);
     }
     var n: usize = leaves;
     while (n > 1) : (n /= 2) for (0..n / 2) |i| {
@@ -169,15 +177,15 @@ fn naive(r: Row) f32 {
 }
 
 /// One virtual rank a piece: every piece of `world` computed by its own subtree, then merged.
-pub fn emulate(world: usize, r: Row) f32 {
+pub fn emulate(world: usize, r: Row) f64 {
     var ps: [max_pieces]Piece = undefined;
     const n = pieces(&ps, world);
-    var vals: [max_pieces]f32 = undefined;
+    var vals: [max_pieces]f64 = undefined;
     for (ps[0..n], vals[0..n]) |p, *v| v.* = subtree(&r.y, &r.w, &r.p, p.start, p.log);
     return finish(ps[0..n], vals[0..n]);
 }
 
-fn bits(f: f32) u32 {
+fn bits(f: f64) u64 {
     return @bitCast(f);
 }
 
@@ -231,8 +239,8 @@ test "exl3: canon mutations of the order, a slot, a leaf or a level change bits"
         drop.w[rng.uintLessThan(usize, slots)] = 0.0;
         dropped += @intFromBool(bits(subtree(&drop.y, &drop.w, &drop.p, 0, leaf_log)) != want);
         // one flat chain over the 11 slots is not the tree
-        var chain: f32 = 0.0;
-        for (0..slots) |k| chain = @mulAdd(f32, row.y[k], row.w[k], chain);
+        var chain: f64 = 0.0;
+        for (0..slots) |k| chain = @mulAdd(f64, row.y[k], row.w[k], chain);
         flat += @intFromBool(bits(chain) != want);
         // a slot filed under the neighbouring leaf
         var moved = row;
@@ -244,13 +252,17 @@ test "exl3: canon mutations of the order, a slot, a leaf or a level change bits"
 
 test "exl3: canon empty siblings preserve signed-zero equality across degrees" {
     const negative_min: f32 = @bitCast(@as(u32, 0x80000001));
-    var row: Row = .{ .y = @splat(negative_min), .w = @splat(0.1), .p = undefined };
-    for (0..slots - 1) |k| row.p[k] = @intCast(256 + k);
-    row.p[slots - 1] = 512;
-    try std.testing.expectEqual(bits(emulate(1, row)), bits(emulate(2, row)));
-    const want = bits(naive(row));
-    try std.testing.expectEqual(@as(u32, 0), want);
-    for (1..9) |world| try std.testing.expectEqual(want, bits(emulate(world, row)));
+    // -0 products start from the chain's +0 and every empty sibling adds +0: the root is +0 at every degree; a negative
+    // subnormal times 0.1 is a nonzero f64 product that no degree may lose or round differently
+    for ([_]f32{ -0.0, negative_min }) |v| {
+        var row: Row = .{ .y = @splat(v), .w = @splat(0.1), .p = undefined };
+        for (0..slots - 1) |k| row.p[k] = @intCast(256 + k);
+        row.p[slots - 1] = 512;
+        try std.testing.expectEqual(bits(emulate(1, row)), bits(emulate(2, row)));
+        const want = bits(naive(row));
+        try std.testing.expectEqual(v == 0, want == 0);
+        for (1..9) |world| try std.testing.expectEqual(want, bits(emulate(world, row)));
+    }
 }
 
 test {
