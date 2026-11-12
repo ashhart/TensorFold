@@ -4,17 +4,16 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- HIP Flash Next: a decode round's n-gram table gather spreads over the parked host workers and asks for its pages first (`MADV_POPULATE_READ`), so first-time page faults overlap; on one Radeon 8060S (gfx1151) with Qwen3.8-Flash-Next oQ4e at 4 streams, cold decode is about 45% faster sampled and 18% greedy and the cold 8K first token about 10% sooner, with warm decode level and tokens unchanged (#2695). Thanks to @gilby.
+
 - Cortheon (`--cortheon`): DuckDuckGo results are kept, and its ads still skipped, when only the spelling differs (either quote style, a `class` attribute in any letter case, an unquoted `href`, spaces around its `=`, or a line break before it); a duplicate whose scheme or host differs only in letter case is dropped while paths and queries keep their case, and the PyPI, npm and crates.io allow-list takes the host in any case with the path exact (#2750). Thanks to @ppardus.
 
 - GLM-5.3-Flash on CUDA: with `--vision` and no video library, rank 0 says at startup how much each stream sets aside for `--vision-video-tokens` rows that no request can fill (128 MiB a stream at the default 16,384), and that `--vision-video-tokens 64` on every rank cuts it to 512 KiB (#2813). Thanks to @Bizuayeu.
-
-
 
 - CUDA: `Qwen/Qwen3-Embedding-0.6B`, `-4B` and `-8B` load on the native engine from the published BF16 weights and serve `/v1/embeddings` (last-token pooling, unit-normed, `dimensions` crops). On one GB10 the worst cosine distance to float32 is 1.55e-4, 1.34e-4 and 1.08e-4 (transformers' own BF16: 1.88e-4, 1.79e-4 and 1.77e-4), a request's vectors equal each input sent alone, and a reranker folder or a flag the family does not serve is refused by name (#2285). Thanks to @Arminova.
 - Qwen3.8-27B on Metal: the startup line says how many streams draft ("for both streams", "for all 4 streams", "for 8 of 16 streams"), the smaller of the stream count and `TF_Q27_DRAFT_SLOTS`, instead of "for one of them"; log text only (#2806).
 
 - Server: `--profile fast` refuses as not planned, since a speed mode that changes output tokens is not shipped; `--profile fast-exact` now names the token gates it still needs, and an unknown spelling is told that `stable` is the only served profile (#2794). Thanks to @devopsfortunato.
-- Prompt cache: long conversations survive 8 to 16 agents sending follow-ups at once. Redundant states are evicted before each conversation's newest one, admission never evicts a state a queued request resumes, concurrent keeps reserve their room, and the default budget scales with the room left after streams on Metal and unified-memory CUDA (discrete CUDA hosts keep 8 GiB, Flash Next's batch host 16 GiB). On Qwen3.8-27B with DFlash2 at 16 agents, a follow-up's median first token drops from 546 s to 16.5 s on an M3 Ultra and from 90-114 s to 28 s on a GB10, with every reply unchanged (#2699).
 - Qwen3.8-27B on Metal: three glue kernels nothing launched (`q27_norm`, `q27_mlp`, `q27_gdn_post`) and their host mirrors are removed; saved prompt states on Metal are recomputed once after upgrading, since their identity covers the kernel sources (#2816, part of #2251). Thanks to @jschmied.
 
 - Pipeline stages: the shared stage driver pipelines rounds, so rank 0 sends round r + 1 while the later stages still run round r, and a stage that echoes a round short or empty is refused by name; tokens are checked equal to one engine on the same binary (#2579, part of #2005). Thanks to @jschmied.
@@ -126,8 +125,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Qwen3.8-Flash-Next on HIP: a decode round's n-gram table rows are gathered over parked workers, and the pages they need are asked for first, so the page faults of first-time text overlap instead of running one after another on one thread; on a Strix Halo iGPU four cold distinct streams decode about 38% faster, and a cold 8K prompt's first token comes about 10% sooner with its reply decoding about 25% faster. Replies are unchanged.
 
 - Prompt cache: long conversations survive 8 to 16 agents sending follow-ups at once. Redundant states are evicted before each conversation's newest one, admission never evicts a state a queued request resumes, concurrent keeps reserve their room, and the default budget scales with the room left after streams on Metal and unified-memory CUDA (discrete CUDA hosts keep 8 GiB, Flash Next's batch host 16 GiB). On Qwen3.8-27B with DFlash2 at 16 agents, a follow-up's median first token drops from 546 s to 16.5 s on an M3 Ultra and from 90-114 s to 28 s on a GB10, with every reply unchanged (#2699).
-
-- Qwen3.8-Flash-Next on HIP: a decode round's n-gram table rows are gathered over parked workers, and the pages they need are asked for first, so the page faults of first-time text overlap instead of running one after another on one thread; on a Strix Halo iGPU four cold distinct streams decode about 38% faster, and a cold 8K prompt's first token comes about 10% sooner with its reply decoding about 25% faster. Replies are unchanged (#2695). Thanks to @gilby.
 
 - Tests: the thinking benchmark check accepts an unmeasured delivery, so it no longer flakes on busy Linux runners, and the image routes' fixture starts its reader before writing, so its two large-body tests no longer hang where socket buffers are small, as on macOS (#2743, closes #2735).
 
