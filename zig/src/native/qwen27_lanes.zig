@@ -113,7 +113,7 @@ pub const Metal = struct {
         errdefer kept.deinit();
         const b = try gpa.create(Metal);
         errdefer gpa.destroy(b);
-        b.* = .{ .gpa = gpa, .runner = runner, .draft = draft, .tensor_units = tensor_units, .window = window, .copies = copies, .nodes = @import("qwen27_window.zig").nodes(window, copies), .ops = ops, .picks = picks, .kept = kept, .draft_slots = try draftSlots(), .slot_resume = slots.slotResumeEnv() };
+        b.* = .{ .gpa = gpa, .runner = runner, .draft = draft, .tensor_units = tensor_units, .window = window, .copies = copies, .nodes = @import("qwen27_window.zig").nodes(window, copies), .ops = ops, .picks = picks, .kept = kept, .draft_slots = try draftSlots(), .slot_resume = try slots.slotResumeEnv() };
         b.pass_profile = platform.c.getenv("TF_Q27_PASS_PROFILE") != null;
         errdefer b.freeContexts();
         if (draft) |d| {
