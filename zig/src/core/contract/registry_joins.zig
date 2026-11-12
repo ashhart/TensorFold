@@ -82,6 +82,7 @@ pub const all_metal = @import("penalties_records.zig").records ++
     @import("prompt_index_records.zig").metal ++
     @import("hc_activation_records.zig").metal ++
     @import("qwen4_records.zig").metal ++
+    @import("tree_round_metal_records.zig").metal ++
     @import("lfm2_records.zig").records ++
     @import("nemotron_experts_records.zig").records ++
     @import("nemotron_pages_records.zig").records ++
