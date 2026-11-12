@@ -1,4 +1,4 @@
-//! Flash Next EXL3's canonical expert reduction (leaf tree and finish) against the host exl3_canon.zig, bit for bit.
+//! Canonical F64 leaves and merges, with one F32 root rounding, checked bit-exact against exl3_canon.zig.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -11,24 +11,28 @@ const canon = flash.exl3_canon;
 
 const slots = canon.slots;
 
-/// The subtree a launch computes: the leaves a rank of two owns, or all 64 (one rank, the whole tree).
-pub const Split = enum { low, high, full };
+/// The subtree a launch computes: the leaves a rank of two owns, all 64 (one rank, the whole tree), or a middle block.
+pub const Split = enum { low, high, full, inner };
+
+/// Roots round once to f32; partials retain the f64 value for a finish.
+pub const Mode = enum { root, partial };
 
 /// A planted fault of a control kernel (contract_leaf_controls.cuh); none is the shipped kernel.
-pub const Fault = enum { none, flat, nan_dropped, writes_input, bf16_adds };
+pub const Fault = enum { none, flat, nan_dropped, writes_input, bf16_adds, f32_partials };
 
 fn subtreeOf(s: Split) struct { start: usize, log: u8 } {
     return switch (s) {
         .low => .{ .start = 0, .log = 5 },
         .high => .{ .start = 32, .log = 5 },
         .full => .{ .start = 0, .log = canon.leaf_log },
+        .inner => .{ .start = 40, .log = 3 },
     };
 }
 
 fn controlGate(f: Fault) ?g.Gate {
     return switch (f) {
         .none => null,
-        .flat => .shapes,
+        .flat, .f32_partials => .shapes,
         .nan_dropped => .nonfinite,
         .writes_input => .repeat,
         .bf16_adds => .sums,
@@ -40,22 +44,32 @@ fn treeDepth(_: c.Shape) usize {
     return slots + canon.leaf_log;
 }
 
+/// The f64 partial against the reference's own f64 sum: both are within that depth's gamma of the exact value.
+fn partialDepth(s: c.Shape) usize {
+    return 2 * treeDepth(s);
+}
+
 /// Each piece meets at most 6 adds on its way up the tree.
 fn finishDepth(_: c.Shape) usize {
     return canon.leaf_log;
 }
 
-fn treeName(s: Split, f: Fault) []const u8 {
+fn treeName(m: Mode, s: Split, f: Fault) []const u8 {
     return switch (f) {
-        .none => switch (s) {
-            .low => "cuda Flash Next EXL3 fn_exl3_leaf_tree (leaves 0-31)",
-            .high => "cuda Flash Next EXL3 fn_exl3_leaf_tree (leaves 32-63)",
-            .full => "cuda Flash Next EXL3 fn_exl3_leaf_tree (all 64 leaves)",
+        .none => switch (m) {
+            .root => "cuda Flash Next EXL3 fn_exl3_leaf_tree (all 64 leaves, f32 root)",
+            .partial => switch (s) {
+                .low => "cuda Flash Next EXL3 fn_exl3_leaf_partial (leaves 0-31)",
+                .high => "cuda Flash Next EXL3 fn_exl3_leaf_partial (leaves 32-63)",
+                .full => "cuda Flash Next EXL3 fn_exl3_leaf_partial (all 64 leaves)",
+                .inner => "cuda Flash Next EXL3 fn_exl3_leaf_partial (leaves 40-47)",
+            },
         },
         .flat => "cuda Flash Next EXL3 fn_exl3_leaf_tree control: one chain, no tree",
         .nan_dropped => "cuda Flash Next EXL3 fn_exl3_leaf_tree control: NaN products dropped",
         .writes_input => "cuda Flash Next EXL3 fn_exl3_leaf_tree control: writes its input",
         .bf16_adds => "cuda Flash Next EXL3 fn_exl3_leaf_tree control: bf16 tree adds",
+        .f32_partials => "cuda Flash Next EXL3 fn_exl3_leaf_partial control: partial rounded to f32",
     };
 }
 
@@ -63,6 +77,7 @@ fn finishName(f: Fault) []const u8 {
     return switch (f) {
         .none => "cuda Flash Next EXL3 fn_exl3_leaf_finish",
         .flat => "cuda Flash Next EXL3 fn_exl3_leaf_finish control: one chain, no tree",
+        .f32_partials => "cuda Flash Next EXL3 fn_exl3_leaf_finish control: partials rounded to f32",
         else => "cuda Flash Next EXL3 fn_exl3_leaf_finish control: bf16 merges",
     };
 }
@@ -77,12 +92,13 @@ const tree_served = [_]c.Shape{
     .{ .rows = 16, .n = 2560, .k = 0 },
 };
 
-fn treeSpec(s: Split, f: Fault) c.Spec {
+/// Roots promise at least fp32 sums; raw f64 partials have an exact check and no gate 4.
+fn treeSpec(m: Mode, s: Split, f: Fault) c.Spec {
     return .{
-        .name = treeName(s, f),
-        .accum = .f32,
-        .depth = treeDepth,
-        .out = .f32,
+        .name = treeName(m, s, f),
+        .accum = if (m == .root) .f32 else .f64,
+        .depth = if (m == .root) treeDepth else partialDepth,
+        .out = if (m == .root) .f32 else .raw,
         .nan = .{ .stated = stated_rule },
         // a block takes 256 columns: one block, two, and the whole width
         .tiles = .{ .{}, .{ .size = 256, .step = 256, .min = 256 }, .{} },
@@ -114,24 +130,32 @@ fn refused(shape: c.Shape) bool {
     return shape.rows == 0 or shape.rows > 64 or shape.n == 0 or shape.n % 256 != 0 or shape.n > 2560;
 }
 
-/// Bit-equal to the host's result, or both NaN (a payload is not part of the contract).
-fn sameBits(got: f32, want: f32) bool {
-    return @as(u32, @bitCast(got)) == @as(u32, @bitCast(want)) or (std.math.isNan(got) and std.math.isNan(want));
+/// Bit-equal, or both NaN (a payload is not part of the contract).
+fn sameBits(got: f64, want: f64) bool {
+    return @as(u64, @bitCast(got)) == @as(u64, @bitCast(want)) or (std.math.isNan(got) and std.math.isNan(want));
 }
 
-fn bitsOf(out: []const u8, i: usize) f32 {
-    return @bitCast(std.mem.readInt(u32, out[i * 4 ..][0..4], .little));
+/// Output i: an f64 word (partial) or an f32 word (root), as f64 (an f32 widens exactly).
+fn valueOf(wide: bool, out: []const u8, i: usize) f64 {
+    if (wide) return @bitCast(std.mem.readInt(u64, out[i * 8 ..][0..8], .little));
+    return @as(f32, @bitCast(std.mem.readInt(u32, out[i * 4 ..][0..4], .little)));
+}
+
+/// The host's f64 value as the kernel stores it: itself (partial) or rounded once to f32 (root).
+fn storedAs(wide: bool, host: f64) f64 {
+    return if (wide) host else canon.toF32(host);
 }
 
 /// Fp32 values that make fp16 sums overflow and bf16 ones round away their low bits: 2^19 to 2^20, either sign.
-fn big(rng: std.Random) f32 {
-    const v: f32 = @floatFromInt((@as(u32, 1) << 19) + rng.uintLessThan(u32, 1 << 19));
+fn big(rng: std.Random) f64 {
+    const v: f64 = @floatFromInt((@as(u32, 1) << 19) + rng.uintLessThan(u32, 1 << 19));
     return if (rng.boolean()) v else -v;
 }
 
 pub const Tree = struct {
     rig: rig_.Rig,
     f: cuda.Function,
+    mode: Mode,
     split: Split,
     fault: Fault,
     arena: ?std.heap.ArenaAllocator = null,
@@ -151,7 +175,7 @@ pub const Tree = struct {
     const vt = g.hooks(Tree);
 
     pub fn kernel(self: *Tree) g.Kernel {
-        return .{ .spec = treeSpec(self.split, self.fault), .ctx = self, .vt = &vt, .control = controlGate(self.fault) };
+        return .{ .spec = treeSpec(self.mode, self.split, self.fault), .ctx = self, .vt = &vt, .control = controlGate(self.fault) };
     }
 
     fn inRange(self: *const Tree, id: i32) bool {
@@ -176,7 +200,7 @@ pub const Tree = struct {
         const dy = try self.rig.input(std.mem.sliceAsBytes(self.y));
         const dw = try self.rig.input(std.mem.sliceAsBytes(self.w));
         const dp = try self.rig.input(std.mem.sliceAsBytes(self.p));
-        self.out = try self.rig.output(self.count() * 4);
+        self.out = try self.rig.output(self.count() * @as(usize, if (self.mode == .partial) 8 else 4));
         self.args = .{ dy, dw, dp };
         return true;
     }
@@ -191,13 +215,18 @@ pub const Tree = struct {
                 self.p[r * slots + k] = id;
             }
         }
-        for (self.y) |*v| v.* = if (rng.uintLessThan(u8, 23) == 0) -0.0 else rng.floatNorm(f32) * 0.05;
+        // 2^-10 to 2^10 a slot: 48-bit products whose f64 sums round, so a flat chain or an f32 stage shows in the bits
+        for (self.y) |*v| v.* = if (rng.uintLessThan(u8, 23) == 0) -0.0 else rng.floatNorm(f32) * 0.05 * std.math.exp2(@as(f32, @floatFromInt(rng.intRangeAtMost(i32, -10, 10))));
         for (self.w) |*v| v.* = if (rng.uintLessThan(u8, 29) == 0) -0.0 else rng.floatNorm(f32) * 0.2;
         if (fill != .nonfinite) {
+            // Columns plant subnormal, signed zero, f32 cancellation and f64 order faults; one slot per leaf.
+            const cancel = [2][4]f32{ .{ 2e9, 16, -2e9, 16 }, .{ 0x1p64, 16, -0x1p64, 16 } };
             if (self.split == .full) for (0..slots) |k| {
                 self.y[k * n] = @bitCast(@as(u32, 0x80000001));
+                self.y[k * n + 1] = -0.0;
+                for (cancel, 2..) |col, at| self.y[k * n + at] = if (k < 4) col[k] else 0;
                 self.w[k] = 0x1p-4;
-                self.p[k] = if (k == slots - 1) 512 else @intCast(256 + k);
+                self.p[k] = if (k == slots - 1) 512 else @intCast(8 * k);
             };
             return;
         }
@@ -263,8 +292,8 @@ pub const Tree = struct {
         return self.shape.rows * self.shape.n;
     }
 
-    /// The host canonical subtree of one output (exl3_canon.subtree, the fp32 reference of this kernel).
-    fn expected(self: *const Tree, i: usize) f32 {
+    /// Host F64 subtree before the root's single F32 conversion.
+    fn expected(self: *const Tree, i: usize) f64 {
         const r = i / self.shape.n;
         const col = i % self.shape.n;
         var y: [slots]f32 = undefined;
@@ -316,12 +345,12 @@ pub const Tree = struct {
         const mag = try a.alloc(f64, self.count());
         try self.reference(want, mag);
         const bytes = [_][]const u8{ std.mem.sliceAsBytes(self.y), std.mem.sliceAsBytes(self.w), std.mem.sliceAsBytes(self.p) };
-        return verify(&self.rig, &self.msg, treeSpec(self.split, self.fault), self.shape, gate, &bytes, want, mag, self, Tree.expected);
+        return verify(self.mode == .partial, &self.rig, &self.msg, treeSpec(self.mode, self.split, self.fault), self.shape, gate, &bytes, want, mag, self, Tree.expected);
     }
 };
 
-/// Guards, inputs, then each output against the host tree, float64's class and bound (gate 1: finite and not).
-fn verify(rig: *rig_.Rig, msg: []u8, s: c.Spec, shape: c.Shape, gate: g.Gate, inputs: []const []const u8, want: []const f64, mag: []const f64, ctx: anytype, comptime expected: anytype) !?[]const u8 {
+/// Check guards, inputs, exact stored values, then float64's classes and numerical bound.
+fn verify(wide: bool, rig: *rig_.Rig, msg: []u8, s: c.Spec, shape: c.Shape, gate: g.Gate, inputs: []const []const u8, want: []const f64, mag: []const f64, ctx: anytype, comptime expected: anytype) !?[]const u8 {
     if (!try rig.intact()) return "a payload guard changed";
     const seen = try rig.inputBytes();
     var at: usize = 0;
@@ -332,10 +361,9 @@ fn verify(rig: *rig_.Rig, msg: []u8, s: c.Spec, shape: c.Shape, gate: g.Gate, in
     const out = try rig.outputBytes();
     var finite: usize = 0;
     for (want, mag, 0..) |w, m, i| {
-        const got = bitsOf(out, i);
-        const host = expected(ctx, i);
-        if (!sameBits(got, host)) return try std.fmt.bufPrint(msg, "output {d}: {x:0>8} where the host canonical reduction gives {x:0>8}", .{ i, @as(u32, @bitCast(got)), @as(u32, @bitCast(host)) });
-        const have: f64 = got;
+        const have = valueOf(wide, out, i);
+        const host = storedAs(wide, expected(ctx, i));
+        if (!sameBits(have, host)) return try std.fmt.bufPrint(msg, "output {d}: {x:0>16} where the host canonical reduction gives {x:0>16} (f64 bits)", .{ i, @as(u64, @bitCast(have)), @as(u64, @bitCast(host)) });
         if (c.classOf(have) != c.classOf(w)) return try std.fmt.bufPrint(msg, "output {d} is {t} where float64 gives {t}", .{ i, c.classOf(have), c.classOf(w) });
         if (std.math.isFinite(w)) {
             finite += 1;
@@ -355,7 +383,7 @@ pub const Finish = struct {
     ps: [canon.max_pieces]canon.Piece = undefined,
     np: usize = 0,
     /// Piece i's rows are stored at slot np - 1 - i: the meta's source index is exercised, not the identity.
-    vals: []f32 = &.{},
+    vals: []f64 = &.{},
     meta: []i32 = &.{},
     out: u64 = 0,
     args: [2]u64 = .{ 0, 0 },
@@ -385,7 +413,7 @@ pub const Finish = struct {
         self.shape = shape;
         self.np = canon.pieces(&self.ps, shape.k);
         const per = shape.rows * shape.n;
-        self.vals = try a.alloc(f32, self.np * per);
+        self.vals = try a.alloc(f64, self.np * per);
         self.meta = try a.alloc(i32, 3 * self.np);
         for (self.ps[0..self.np], 0..) |p, i| self.meta[3 * i ..][0..3].* = .{ p.start, p.log, @intCast(self.np - 1 - i) };
         var prng = std.Random.DefaultPrng.init(seed ^ 0x66696e69);
@@ -401,42 +429,48 @@ pub const Finish = struct {
         return true;
     }
 
-    /// Partials of different magnitudes (an fp32 sum of them depends on the order of the merges), a few negative zeros.
+    /// Full F64 mantissas expose narrowed partials; row 0 plants 2^60, 1, -2^60, 1 to expose flat order.
     fn random(self: *Finish, rng: std.Random, fill: g.Fill) void {
         for (self.vals) |*v| {
-            const scale: f32 = @floatFromInt(@as(u32, 1) << rng.uintLessThan(u5, 10));
-            v.* = if (rng.uintLessThan(u8, 23) == 0) -0.0 else rng.floatNorm(f32) * scale;
+            const scale: f64 = @floatFromInt(@as(u32, 1) << rng.uintLessThan(u5, 10));
+            v.* = if (rng.uintLessThan(u8, 23) == 0) -0.0 else rng.floatNorm(f64) * scale;
         }
-        if (fill != .nonfinite) return;
+        if (fill != .nonfinite) {
+            const plant = [4]f64{ 0x1p60, 1, -0x1p60, 1 };
+            if (self.np >= 4) for (0..self.np) |piece| {
+                self.vals[self.at(piece, 0)] = if (piece < 4) plant[piece] else 0;
+            };
+            return;
+        }
         const n = self.shape.n;
         for (0..self.shape.rows) |r| for (0..n) |col| {
             if (col % 7 != 0) continue;
             const piece = (col / 7) % self.np;
             const i = r * n + col;
             switch (r % 5) {
-                0 => self.vals[self.at(piece, i)] = std.math.nan(f32),
-                1 => self.vals[self.at(piece, i)] = std.math.inf(f32),
-                2 => self.vals[self.at(piece, i)] = -std.math.inf(f32),
+                0 => self.vals[self.at(piece, i)] = std.math.nan(f64),
+                1 => self.vals[self.at(piece, i)] = std.math.inf(f64),
+                2 => self.vals[self.at(piece, i)] = -std.math.inf(f64),
                 3 => {
-                    self.vals[self.at(piece, i)] = std.math.inf(f32);
-                    self.vals[self.at((piece + 1) % self.np, i)] = -std.math.inf(f32);
+                    self.vals[self.at(piece, i)] = std.math.inf(f64);
+                    self.vals[self.at((piece + 1) % self.np, i)] = -std.math.inf(f64);
                 },
-                else => self.vals[self.at(self.np - 1, i)] = std.math.nan(f32),
+                else => self.vals[self.at(self.np - 1, i)] = std.math.nan(f64),
             }
         };
     }
 
-    /// Integer partials of 2^19 to 2^20 in shuffled negated pairs (odd one out 3): exact in fp32, ruinous in fp16/bf16.
+    /// Shuffled signed integer pairs: exact in f32/f64, inaccurate in fp16/bf16.
     fn stress(self: *Finish, rng: std.Random) void {
         for (0..self.shape.rows * self.shape.n) |i| {
-            var v: [canon.max_pieces]f32 = undefined;
+            var v: [canon.max_pieces]f64 = undefined;
             for (0..self.np / 2) |j| {
                 v[2 * j] = big(rng);
                 v[2 * j + 1] = -v[2 * j];
             }
             if (self.np % 2 == 1) v[self.np - 1] = 3;
             // a mirrored order would cancel its own roundings (halves and lanes add pairs symmetrically): break it
-            rng.shuffle(f32, v[0..self.np]);
+            rng.shuffle(f64, v[0..self.np]);
             for (v[0..self.np], 0..) |x, piece| self.vals[self.at(piece, i)] = x;
         }
     }
@@ -458,30 +492,31 @@ pub const Finish = struct {
     }
 
     /// The pieces of one output, in the order the finish merges them.
-    fn pieceValues(self: *const Finish, i: usize, buf: *[canon.max_pieces]f32) []const f32 {
+    fn pieceValues(self: *const Finish, i: usize, buf: *[canon.max_pieces]f64) []const f64 {
         for (0..self.np) |piece| buf[piece] = self.vals[self.at(piece, i)];
         return buf[0..self.np];
     }
 
-    fn expected(self: *const Finish, i: usize) f32 {
-        var buf: [canon.max_pieces]f32 = undefined;
+    /// The host's f64 merge (exl3_canon.finish); the kernel's f32 output is its one rounding.
+    fn expected(self: *const Finish, i: usize) f64 {
+        var buf: [canon.max_pieces]f64 = undefined;
         return canon.finish(self.ps[0..self.np], self.pieceValues(i, &buf));
     }
 
     pub fn reference(self: *Finish, want: []f64, mag: []f64) !void {
-        var buf: [canon.max_pieces]f32 = undefined;
+        var buf: [canon.max_pieces]f64 = undefined;
         for (want, mag, 0..) |*w, *m, i| {
             w.* = 0;
             m.* = 0;
             for (self.pieceValues(i, &buf)) |v| {
                 w.* += v;
-                m.* += @abs(@as(f64, v));
+                m.* += @abs(v);
             }
         }
     }
 
     pub fn simulate(self: *Finish, acc: c.Accum, order: g.Order, out: []f64) !void {
-        var buf: [canon.max_pieces]f32 = undefined;
+        var buf: [canon.max_pieces]f64 = undefined;
         var t: [canon.max_pieces]f64 = undefined;
         for (out, 0..) |*o, i| {
             const v = self.pieceValues(i, &buf);
@@ -496,29 +531,32 @@ pub const Finish = struct {
         const mag = try a.alloc(f64, self.count());
         try self.reference(want, mag);
         const bytes = [_][]const u8{ std.mem.sliceAsBytes(self.vals), std.mem.sliceAsBytes(self.meta) };
-        return verify(&self.rig, &self.msg, finishSpec(self.fault), self.shape, gate, &bytes, want, mag, self, Finish.expected);
+        return verify(false, &self.rig, &self.msg, finishSpec(self.fault), self.shape, gate, &bytes, want, mag, self, Finish.expected);
     }
 };
 
-/// Both kernels, each fault of each as a control, over the flashnext_batch image and the controls image.
+/// Canonical roots, partials and finishes, with a control per planted fault.
 pub const Canons = struct {
     mod: cuda.Module,
-    trees: [7]Tree,
-    finishes: [3]Finish,
+    trees: [10]Tree,
+    finishes: [4]Finish,
 
-    const tree_plan = [7]struct { Split, Fault }{
-        .{ .low, .none },         .{ .high, .none },         .{ .full, .none },      .{ .full, .flat },
-        .{ .full, .nan_dropped }, .{ .full, .writes_input }, .{ .full, .bf16_adds },
+    const tree_plan = [10]struct { Mode, Split, Fault }{
+        .{ .root, .full, .none },            .{ .root, .full, .flat },      .{ .root, .full, .nan_dropped },
+        .{ .root, .full, .writes_input },    .{ .root, .full, .bf16_adds }, .{ .partial, .low, .none },
+        .{ .partial, .high, .none },         .{ .partial, .full, .none },   .{ .partial, .inner, .none },
+        .{ .partial, .full, .f32_partials },
     };
-    const finish_plan = [3]Fault{ .none, .flat, .bf16_adds };
+    const finish_plan = [4]Fault{ .none, .flat, .bf16_adds, .f32_partials };
 
-    fn treeSymbol(f: Fault) [:0]const u8 {
+    fn treeSymbol(m: Mode, f: Fault) [:0]const u8 {
         return switch (f) {
-            .none => "fn_exl3_leaf_tree",
+            .none => if (m == .root) "fn_exl3_leaf_tree" else "fn_exl3_leaf_partial",
             .flat => "tf_ctl_leaf_tree_flat",
             .nan_dropped => "tf_ctl_leaf_tree_nan_dropped",
             .writes_input => "tf_ctl_leaf_tree_writes_input",
             .bf16_adds => "tf_ctl_leaf_tree_bf16_adds",
+            .f32_partials => "tf_ctl_leaf_partial_f32",
         };
     }
 
@@ -526,6 +564,7 @@ pub const Canons = struct {
         return switch (f) {
             .none => "fn_exl3_leaf_finish",
             .flat => "tf_ctl_leaf_finish_flat",
+            .f32_partials => "tf_ctl_leaf_finish_f32",
             else => "tf_ctl_leaf_finish_bf16_adds",
         };
     }
@@ -535,8 +574,8 @@ pub const Canons = struct {
         errdefer mod.unload();
         var self: Canons = .{ .mod = mod, .trees = undefined, .finishes = undefined };
         for (tree_plan, &self.trees) |plan, *t| {
-            const f = try (if (plan[1] == .none) mod else controls).function(treeSymbol(plan[1]));
-            t.* = .{ .rig = .{ .gpu = gpu, .s = s }, .f = f, .split = plan[0], .fault = plan[1] };
+            const f = try (if (plan[2] == .none) mod else controls).function(treeSymbol(plan[0], plan[2]));
+            t.* = .{ .rig = .{ .gpu = gpu, .s = s }, .f = f, .mode = plan[0], .split = plan[1], .fault = plan[2] };
         }
         for (finish_plan, &self.finishes) |fault, *x| {
             const f = try (if (fault == .none) mod else controls).function(finishSymbol(fault));

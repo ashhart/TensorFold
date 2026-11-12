@@ -453,7 +453,7 @@ below; these are estimates for planning a port, not results.
 
 27. **`--profile` switches.** One registry names each opt-in switch with its backend, families, class and evidence,
     and the startup line prints what differs from the defaults ([#1660], [#1944]). Only `stable` is served;
-    `fast-exact` and `fast` are refused by name until switches qualify for them.
+    `fast-exact` is refused by name until switches qualify for it, and `fast` is not planned: it changes output tokens.
 28. **Scale index.** An affine checkpoint stores a bf16 scale and bias beside every group's codes, a fifth of the
     bytes at 4 bits in groups of 32, and a tensor holds few distinct pairs. A 16-bit index a group into the tensor's
     table of pairs gives a kernel the same two values from fewer bytes. Flash Next's 4-bit expert kernels read it on

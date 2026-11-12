@@ -133,10 +133,10 @@ starts a rank. These switches tune it:
 | `TF_FLASHNEXT_EXL3_PREFILL_ROWS` | 8,192 general / 4,096 server | Whole nonnegative rows of a deep chunk; an explicit count sets both budgets. |
 | `TF_FLASHNEXT_EXL3_PREFILL_RING` | on | `0` or `1`; `0` stops streaming the coming layers' experts into one ring of the pools' lines. |
 | `TF_FLASHNEXT_EXL3_PREFILL_RING_AHEAD` | 1 | Whole nonnegative layers ahead the ring prefetches. |
-| `TF_FLASHNEXT_EXL3_PREFILL_OVERLAP` | on | `0` or `1`; `0` (two ranks) stops overlapping the all-reduce with a chunk's compute. |
-| `TF_FLASHNEXT_EXL3_PREFILL_REDUCED_BRANCH` | `0` | Experimental: `0` or `1`; `1` (two ranks) reduces the weighted branch in fp32, written back with unit weights. |
+| `TF_FLASHNEXT_EXL3_PREFILL_OVERLAP` | on | `0` or `1`; `0` (two ranks) stops overlapping the all-gather with a chunk's compute. |
+| `TF_FLASHNEXT_EXL3_PREFILL_REDUCED_BRANCH` | `0` | Experimental: `0` or `1`; `1` (two ranks) combines float64 partials into one float32 branch, written back with unit weights. |
 | `TF_FLASHNEXT_EXL3_PREFILL_TWO_CHUNK` | `0` | Experimental: `0` or `1`; `1` (two ranks, ring) runs a second deep chunk beside the first when memory admits it. |
-| `TF_FLASHNEXT_PROFILE` | `0` | Diagnostics only: `0` or `1`; `1` times the ranks' combine, all-reduce and place of a deep chunk, with a wait each. |
+| `TF_FLASHNEXT_PROFILE` | `0` | Diagnostics only: `0` or `1`; `1` times the ranks' combine, all-gather, finish and place of a deep chunk, with a wait each. |
 | `TF_FLASHNEXT_KV_PAGES` | unset | `n`: streams beside the first take their attention caches from one pool of `n`-position pages. |
 | `TF_FLASHNEXT_KV_PAGES_ALL` | unset | Diagnostics only: `1` puts every request on pool pages, including single-stream checks; without it the first stream keeps contiguous caches. |
 | `TF_FLASHNEXT_KV_HOST` | unset | With `TF_FLASHNEXT_KV_PAGES`: MiB of pinned host RAM holding the K/V plane of every page; `0` is no host tier. Nonzero requires EXL3 scratch; other formats refuse before allocation with `FlashNextKvHostNeedsExl3`. |
@@ -149,6 +149,10 @@ starts a rank. These switches tune it:
 | `TF_FLASHNEXT_CACHE_TELEMETRY` | `0` | Diagnostics only: `0` or `1`; `1` logs `EXL3-CACHE` expert-cache counters per phase, with a sync at each boundary. |
 | `TF_FLASHNEXT_EXL3_LAYER_TELEMETRY` | `0` | Diagnostics only: `0` or `1`; `1`, with the switch above, adds per-layer counters. |
 | `TENSORFOLD_BIN`, `TF_SRC` | built binary, the checkout | Diagnostics only: the binary `tools/exl3_*.sh` run and the checkout `tools/exl3_*.py` read their corpus from. |
+
+Deep prefill keeps canonical partials in float64 until one float32 root rounding. One rank uses the
+existing root kernel and branch buffer, with no partial-gather region. Multiple ranks reserve
+eight-byte partials in their existing scratch layout; checkpoint and persistent state formats are unchanged.
 
 A blank or whitespace-only value is unset. Text outside these forms, or those of `TF_FLASHNEXT_CHUNK` and
 `TF_FLASHNEXT_CHUNK_SOLO` above, is refused when the CUDA backend starts, naming the variable and its accepted forms.

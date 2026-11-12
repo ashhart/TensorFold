@@ -36,7 +36,7 @@ on GLM-5.3-Flash, `TF_GLM_PREFILL_REDUCE` defaults to `split`, which sends every
 world whose ranks reach only their neighbours needs `ring` or `gather` instead, as the collective path supports.
 
 Transport choice changes exchange cost; verify token equality at the same world size rather than assuming it. On
-native GLM on CUDA with two ranks, `TF_ROCE` takes the small all-gathers over RDMA writes and `TF_ROCE=0` on either rank keeps NCCL;
+native GLM on CUDA with two ranks, `TF_ROCE` takes the small all-gathers over RDMA writes and `TF_ROCE=0` on either rank keeps NCCL (three ranks or more ask for it with `TF_ROCE=1` on every rank);
 `TF_ROCE_HCA` names the devices and
 `TF_ROCE_MAX_KB` bounds the largest gather sent that way. Nemotron's serving path opens the NCCL group without
 enabling its optional RoCE gather. On the `fabric/tp` harness, `TF_COMM_BACKEND` picks `nccl`, `mailbox` or `roce`, and

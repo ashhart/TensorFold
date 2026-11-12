@@ -4,6 +4,16 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Server: `--profile fast` refuses as not planned, since a speed mode that changes output tokens is not shipped; `--profile fast-exact` now names the token gates it still needs, and an unknown spelling is told that `stable` is the only served profile (#2794). Thanks to @devopsfortunato.
+- Prompt cache: long conversations survive 8 to 16 agents sending follow-ups at once. Redundant states are evicted before each conversation's newest one, admission never evicts a state a queued request resumes, concurrent keeps reserve their room, and the default budget scales with the room left after streams on Metal and unified-memory CUDA (discrete CUDA hosts keep 8 GiB, Flash Next's batch host 16 GiB). On Qwen3.8-27B with DFlash2 at 16 agents, a follow-up's median first token drops from 546 s to 16.5 s on an M3 Ultra and from 90-114 s to 28 s on a GB10, with every reply unchanged (#2699).
+- Qwen3.8-27B on Metal: three glue kernels nothing launched (`q27_norm`, `q27_mlp`, `q27_gdn_post`) and their host mirrors are removed; saved prompt states on Metal are recomputed once after upgrading, since their identity covers the kernel sources (#2816, part of #2251). Thanks to @jschmied.
+
+- Pipeline stages: the shared stage driver pipelines rounds, so rank 0 sends round r + 1 while the later stages still run round r, and a stage that echoes a round short or empty is refused by name; tokens are checked equal to one engine on the same binary (#2579, part of #2005). Thanks to @jschmied.
+
+- GLM-5.3-Flash on CUDA: tensor-parallel shares and layer sums go through one mesh layer (declared shares, one reduction boundary over a `Collective`), with the same gathers, bytes and order and tokens equal to main at TP=2; an aborted `tp_group` call now ends as `Aborted` instead of stopping the process (#2789, part of #2560). Thanks to @laudney.
+
+- Tensor parallel on CUDA: with `TF_ROCE=1` on every rank, three ranks or more take the one-shot RoCE all-gather for decode-sized gathers, byte-equal to NCCL's, falling back to NCCL with one warning when a peer can't be reached, and GLM-5.3-Flash's DFlash2 drafter MLP splits across every rank; without it they keep NCCL, two ranks run as before, and MiniMax-M3 keeps NCCL at three ranks or more. With `TF_ROCE=1`, GLM-5.3-Flash decode is about 6% faster at one and two streams on three GB10s (four streams level) and 12.9%, 10.4% and 6.6% faster at one, two and four streams on four GB10s, with the target's tokens unchanged; drafter acceptance can move slightly, since the split MLP sums in another order (#2205). Thanks to @shanedertrain.
+
 - Flash Next: twenty-nine `TF_FLASHNEXT_*` settings refuse a malformed value by name at startup, before any device work on CUDA, and a Metal load refuses them too; blank `TF_FLASHNEXT_KV_PAGE_TEST` and `TF_FLASHNEXT_KEEP_LATE` read as unset, and a non-finite confidence is refused (#2585, part of #2370). Thanks to @devopsfortunato.
 - Flash Next on CUDA: twenty-nine `TF_FLASHNEXT_*` settings refuse a malformed value by name at startup, before any
   device or checkpoint work, through the shared environment table: unset and blank keep the default, a valid value keeps
@@ -47,11 +57,11 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - EXL3 prefill and profiling use registered settings and propagate malformed-value refusals. Unset row budgets remain 8192 general / 4096 server; kept prompt states now resume at any row without a chunk-grid restriction (#1443). Thanks to @BlivionIaG.
 
-- EXL3 deep prefill uses decode-exact prompt tiles and retains empty-sibling additions in TP prefill reductions, matching the canonical tree's zero signs (#1443). Its TP reduction probes also run under `test-flashnext-contract-host`.
+- EXL3 deep prefill uses decode-exact prompt tiles and canonical float64 partials with one final float32 rounding, including empty-sibling zero signs. One rank reuses the root kernel and branch buffer without allocating a partial-gather region; TP reduction probes run under `test-flashnext-contract-host` (#1443). Thanks to @BlivionIaG.
 
 - EXL3 TP head sharding and MTP residency use registered, strict `0`/`1` settings; blank is unset and malformed text refuses before expert allocation. The TP memory runner propagates the same refusals (#1442).
 
-- CUDA EXL3 Flash Next adds expert-parallel TP and MTP drafts, preserving the first slice's canonical expert reduction order and main's prepared prompt-mark snapshots (#1442).
+- CUDA EXL3 Flash Next adds expert-parallel TP and MTP drafts, preserving the first slice's canonical expert reduction through typed float64 NCCL partials and one final float32 rounding, with scratch reserved once for the configured rows; main's prepared prompt-mark snapshots are unchanged (#1442). Thanks to @BlivionIaG.
 
 - CUDA tests: Flash Next's real-weight EXL3 layer oracle attaches its expert pool before executing the family pass (#1441). Thanks to @BlivionIaG.
 
@@ -59,7 +69,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - EXL3's mapped n-gram table participates in upstream's opt-in read-ahead once per file, and teardown joins the worker before unmapping (#1441).
 
-- Flash Next's first CUDA EXL3 slice uses the canonical fp32 expert tree, so adding tensor parallelism preserves its one-rank reduction order (#1441, #1442). Other formats are unchanged.
+- Flash Next's first CUDA EXL3 slice uses float64 expert leaves, fixed-tree merges and transported partials, rounding once to float32 at the root so cancellation does not lose low-order terms and tensor parallelism preserves the one-rank result (#1441, #1442). Other formats and checkpoint BF16 state boundaries are unchanged. Thanks to @BlivionIaG.
 
 - Flash Next's EXL3 integration keeps the existing ModelOpt rank scratch and split-head snapshot geometry (#1441). Its configured prompt cut stays fixed when main widens a one-stream ModelOpt pass, preserving stream-independent EXL3 arithmetic.
 

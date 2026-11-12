@@ -82,15 +82,15 @@ test "fingerprints: agreeing ranks pass; the first differing field and rank are 
 }
 
 /// A world seen from `rank`: a group that sends to or receives from a rank it cannot reach fails at its end.
-const Fabric = struct {
-    var world: usize = 4;
-    var rank: usize = 0;
-    var switched = false; // every pair reaches the other; else a ring without a switch, each rank its two neighbours
+pub const Fabric = struct {
+    pub var world: usize = 4;
+    pub var rank: usize = 0;
+    pub var switched = false; // every pair reaches the other; else a ring without a switch, each rank its two neighbours
     var failing = false;
     var posted: usize = 0;
     var allocated: usize = 0;
 
-    fn reaches(peer: c_int) bool {
+    pub fn reaches(peer: c_int) bool {
         const p: usize = @intCast(peer);
         return switched or (p + 1) % world == rank or (rank + 1) % world == p;
     }
@@ -190,7 +190,7 @@ test "every media limit is part of the ranks' agreement" {
 test "every scheduling and identity field that differs stops the ranks" {
     const zero = Fingerprint.of(2, 0, .{}, 8192, true, @splat(0), @splat(0), hashBytes("/same"));
     const one = Fingerprint.of(2, 1, .{}, 8192, true, @splat(0), @splat(0), hashBytes("/same"));
-    inline for (.{ "layout", "world", "rank", "pages", "split", "kda_wide", "kda_pad", "kv_live_half", "pieces", "solo", "pair", "layers", "mtp", "vision", "video_tokens", "max_images", "max_videos", "max_frames", "roce_multi", "kv_host", "capacity", "heat_high", "heat_low", "kv_host_gib" }) |name| {
+    inline for (.{ "layout", "world", "rank", "pages", "split", "kda_wide", "kda_pad", "kv_live_half", "pieces", "solo", "pair", "layers", "mtp", "vision", "video_tokens", "max_images", "max_videos", "max_frames", "roce_multi", "roce_wide", "kv_host", "capacity", "heat_high", "heat_low", "kv_host_gib" }) |name| {
         var all = [_]Fingerprint{ zero, one };
         @field(all[1], name) += 1;
         try std.testing.expectEqual(@field(Fingerprint.Field, name), mismatch(&all).?.field);

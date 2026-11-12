@@ -53,6 +53,7 @@ pub fn loaderTests(b: *std.Build, test_step: *std.Build.Step) void {
     }) }));
     loader.has_side_effects = true; // TF_QWEN_DIR is not a cached input
     test_step.dependOn(&loader.step);
+    loader.step.dependOn(@import("mesh.zig").qwenDeclTest(b, coreModule(b, b.graph.host))); // its cuts as declarations
     b.step("test-qwen35", "Qwen3.5 / 3.6 checkpoint loader tests; TF_QWEN_DIR indexes a real checkpoint").dependOn(&loader.step);
 }
 /// hip-host-test (part of `test`), hip-gpu-build and hip-gpu-test, hip-affine-build and hip-affine-test.
