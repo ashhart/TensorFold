@@ -62,6 +62,14 @@ const Fake = struct {
     const Pages = struct {
         pub fn log(_: *Pages, _: usize, _: usize) void {}
     };
+    const Pockets = struct {
+        held: bool = false,
+        pub fn any(p: *const Pockets) bool {
+            return p.held;
+        }
+    };
+    const Int8 = struct { on: bool = false };
+    const Keep = @import("cuda_engine.zig").Keep;
     const Engine = struct {
         rows: std.ArrayList(usize) = .empty,
         x: u64 = 0,
@@ -71,11 +79,20 @@ const Fake = struct {
         piece_calls: usize = 0,
         piece_rows: usize = 0,
         reset_fails: bool = false,
+        keeps: std.ArrayList(Keep) = .empty,
+        layers: [2]void = .{ {}, {} },
+        taps: [8]u32 = undefined,
+        n_taps: usize = 0,
+        learning: ?*const anyopaque = null,
+        mlp: ?*const anyopaque = null,
+        pockets: Pockets = .{},
+        int8: Int8 = .{},
         pub fn forward(e: *Engine, parts: anytype, ids: []const u32, keep: E.Keep) !void {
             var rows: usize = 0;
             inline for (parts) |p| rows += p.rows;
             try t.expectEqual(rows, ids.len);
             try e.rows.append(t.allocator, ids.len);
+            try e.keeps.append(t.allocator, keep);
             if (keep == .rows) {
                 e.piece_calls += 1;
                 e.piece_rows += rows;
@@ -83,6 +100,10 @@ const Fake = struct {
                 e.whole_calls += 1;
                 e.whole_rows += rows;
             }
+        }
+        fn deinit(e: *Engine) void {
+            e.rows.deinit(t.allocator);
+            e.keeps.deinit(t.allocator);
         }
     };
     gpa: std.mem.Allocator = t.allocator,
@@ -123,7 +144,7 @@ const Fake = struct {
 /// One stepped pass at the caps in turn, a forward a step of at most its cap's rows: where each forward ended.
 fn pass(prompt: []const u32, chunks: []const u32, caps: []const u32, ends: *std.ArrayList(usize)) !void {
     var e: Fake.Engine = .{};
-    defer e.rows.deinit(t.allocator);
+    defer e.deinit();
     var f: Fake = .{ .e = &e };
     defer f.deinit();
     var s = try lanes.Stream.init(t.allocator, .{ .id = "cap", .prompt = prompt, .max_new = 1, .chunks = chunks });
@@ -190,7 +211,7 @@ fn marks() !void {
     @memset(prompt, 3);
     for ([_]u32{ 0, 512 }) |cap| {
         var e: Fake.Engine = .{};
-        defer e.rows.deinit(t.allocator);
+        defer e.deinit();
         var f: Fake = .{ .e = &e };
         defer f.deinit();
         var probe: Probe = .{};
@@ -255,7 +276,7 @@ pub fn whole() !void {
         }
     };
     var eng: Fake.Engine = .{};
-    defer eng.rows.deinit(t.allocator);
+    defer eng.deinit();
     var toks: [E.max_rows + 8]u32 = undefined;
     for (&toks, 0..) |*x, i| x.* = @intCast(i % 7);
     var fake: Fake = .{ .e = &eng, .capacity = toks.len + 1 };
@@ -300,7 +321,7 @@ test "Qwen whole prefill: a text stream runs its pass once and a readout only it
 /// A failed restore resets the cache under `try`: a reset error leaves opening instead of filling from row 0.
 pub fn reset() !void {
     var eng: Fake.Engine = .{ .reset_fails = true };
-    defer eng.rows.deinit(t.allocator);
+    defer eng.deinit();
     var fake: Fake = .{ .e = &eng, .restore_ok = false };
     defer fake.deinit();
     var toks: [3 * E.max_rows]u32 = @splat(3);
@@ -313,4 +334,42 @@ pub fn reset() !void {
 
 test "Qwen prefill opening: a failed reset propagates out of the opening" {
     try reset();
+}
+
+/// A 32K fill: every chunk but the last is unread, and a reader on the last layer keeps every chunk's rows.
+fn unread() !void {
+    const m = @import("cuda_engine.zig").max_rows;
+    const prompt = try t.allocator.alloc(u32, 8 * m);
+    defer t.allocator.free(prompt);
+    @memset(prompt, 3);
+    const Reader = enum { none, tap, learning, mlp, pockets, int8 };
+    for (std.enums.values(Reader)) |reader| {
+        var e: Fake.Engine = .{};
+        defer e.deinit();
+        switch (reader) {
+            .none => {},
+            .tap => {
+                e.taps[0] = 1; // the last layer's tap
+                e.n_taps = 1;
+            },
+            .learning => e.learning = @ptrCast(&e),
+            .mlp => e.mlp = @ptrCast(&e),
+            .pockets => e.pockets.held = true,
+            .int8 => e.int8.on = true,
+        }
+        var f: Fake = .{ .e = &e };
+        defer f.deinit();
+        var s = try lanes.Stream.init(t.allocator, .{ .id = "unread", .prompt = prompt, .max_new = 1 });
+        defer s.deinit(t.allocator);
+        while (!try prefill.step(&f, &s, 0)) {}
+        try t.expectEqual(@as(usize, 8), e.keeps.items.len);
+        for (e.keeps.items, 0..) |keep, i| {
+            const want_none = reader == .none and i + 1 < e.keeps.items.len;
+            if (want_none) try t.expect(keep == .none) else try t.expect(keep == .last);
+        }
+    }
+}
+
+test "Qwen stepped prefill: a chunk nothing reads stops its last layer at the keys" {
+    try unread();
 }

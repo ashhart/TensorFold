@@ -68,10 +68,11 @@ pub const Keep = union(enum) {
     logits,
     hidden,
     rows,
+    none, // a prompt chunk nothing reads: its last layer stops at the state writes
 
-    /// Whether the forward is a verify window (recorded, one-row bits); `last` and `rows` are prompt chunks.
+    /// Whether the forward is a verify window (recorded, one-row bits); `last`, `rows` and `none` are prompt chunks.
     pub fn verifies(k: Keep) bool {
-        return k != .last and k != .rows;
+        return k != .last and k != .rows and k != .none;
     }
 };
 
@@ -489,6 +490,7 @@ pub const Engine = struct {
         };
         shape.hidden = keep == .hidden;
         shape.rows = keep == .rows;
+        shape.unread = keep == .none;
         shape.paged = @import("cuda_attention.zig").hasPages(segs);
         shape.mt2 = @import("cuda_shapes.zig").useMt2(e.mt2.enabled, e.kv8, !record, total, parts.len, parts[0].cache.len);
         if (e.learning != null or e.pockets.any()) {
@@ -528,6 +530,7 @@ pub const Engine = struct {
                 @memcpy(e.tokens[0..total], e.host_logits.slice(u32)[0..total]);
             },
             .rows => {}, // the rows stay in `x` for the readout that runs next on the stream
+            .none => {}, // nothing to copy back
             .logits, .last => {
                 const out = e.host_logits.bytes[0 .. heads * g.vocab * 2];
                 try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(out.ptr, e.logits, out.len, e.stream.handle), "cuMemcpyDtoHAsync");

@@ -2,6 +2,7 @@
 const std = @import("std");
 const lanes = @import("lanes");
 const E = @import("cuda_engine.zig");
+const prompt_tail = @import("cuda_prompt_tail.zig");
 const vision_prompt = @import("cuda_vision_prompt.zig");
 const readout = @import("cuda_readout.zig");
 
@@ -163,7 +164,9 @@ pub fn chunk(self: anytype, stream: *lanes.Stream, f: *Fill, max_rows: u32) !boo
     const cache = try self.cacheOf(stream);
     var images: ?E.Images = if (f.media) |m| .{ .features = m.features.ptr, .src = m.src, .pos = m.pos } else null;
     const end = capped(ids.len, stream.chunks, f, max_rows);
-    try self.e.forward(&.{.{ .cache = cache, .rows = end - f.at, .images = if (images) |*im| im else null }}, ids[f.at..end], .last);
+    // a non-final chunk's rows feed only a head nobody reads: its last layer stops at its keys and values
+    const unread = end < ids.len and prompt_tail.unread(self.e, images != null);
+    try self.e.forward(&.{.{ .cache = cache, .rows = end - f.at, .images = if (images) |*im| im else null }}, ids[f.at..end], if (unread) .none else .last);
     lanes.prefill_widths.completed(self.gpa, stream, end - f.at);
     f.at = end;
     stream.fill_at.store(@intCast(end), .monotonic);

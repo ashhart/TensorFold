@@ -1,0 +1,18 @@
+{
+  "prefix": {
+    "prompt_tokens": 7857,
+    "cached_tokens": 0,
+    "token_sha256": "2d92f715116a7e96bd52e51c3b111d84b9223c834c670fe24b9167e530468977",
+    "output_sha256": "7517f965a8a56f040faeb8d4cce68a39b20584a6ed0828d18d3c4948de25e0cb",
+    "ttft_s": 1.2289988420088775,
+    "error": null
+  },
+  "resumed": {
+    "prompt_tokens": 7863,
+    "cached_tokens": 0,
+    "token_sha256": "e1de42acf830e5ec3a2f43890ebe33a29f9a186ddc0ac95ae0ac34595641af76",
+    "output_sha256": "19079cfe1bf997fb44a8a928a10f2574b80865b1a20faa560d12369d98497ef7",
+    "ttft_s": 1.2395485939923674,
+    "error": null
+  }
+}
