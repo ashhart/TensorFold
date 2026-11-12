@@ -40,7 +40,8 @@ pub fn gather(server: posix.socket_t, secret: *const auth.Secret, world: usize, 
         const fd: posix.socket_t = @intCast(rc);
         // a connection that proves no key, or claims a rank already in, is closed: no line, and sent no NCCL id
         const who = auth.accept(fd, secret, &.{.liveness}, left) catch |e| {
-            std.log.warn("tp: a connection to the liveness port proved no key and is ignored: {s}", .{auth.explain(e) orelse @errorName(e)});
+            var at: [64]u8 = undefined;
+            std.log.warn("tp: a connection from {s} to the liveness port proved no key and is ignored: {s}", .{ auth.peerText(fd, &at), auth.explain(e) orelse @errorName(e) });
             _ = posix.system.close(fd);
             continue;
         };
@@ -114,7 +115,7 @@ fn testRead(fd: posix.socket_t, buf: []u8) usize {
 
 test "security: a connection that proves no key is no liveness line and is sent nothing" {
     if (platform.windows) return error.SkipZigTest;
-    const key = try auth.Secret.fromBytes("the group's rank secret");
+    const key = try auth.Secret.fromBytes("the group's rank secret for the tests");
     const l = try testListener();
     defer _ = posix.system.close(l.fd);
     // a stranger first, with the ready record a rank sends: before the proof the first connection was rank 1's line
@@ -142,8 +143,8 @@ test "security: a connection that proves no key is no liveness line and is sent 
 
 test "security: a rank with another key and a second line for one rank are not lines" {
     if (platform.windows) return error.SkipZigTest;
-    const key = try auth.Secret.fromBytes("the group's rank secret");
-    const other = try auth.Secret.fromBytes("another group's secret");
+    const key = try auth.Secret.fromBytes("the group's rank secret for the tests");
+    const other = try auth.Secret.fromBytes("another group's secret for the tests");
     const l = try testListener();
     defer _ = posix.system.close(l.fd);
     var ranks: [4]TestRank = @splat(.{});
