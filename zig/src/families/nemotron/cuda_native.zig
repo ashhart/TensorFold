@@ -205,19 +205,13 @@ fn release(p: *anyopaque) void {
     own.gpa.destroy(own);
 }
 
-/// TF_CUDA_CARVEOUT=1: the display carveout KV planes go to first (cuda/carveout.zig); null when it is off.
+/// TF_CUDA_CARVEOUT=1 from the card or a lending daemon: the display carveout holds the KV planes first; null off.
 fn openCarveout(gpa: std.mem.Allocator, ctx: *const cuda.Context) !?*cuda.Carveout {
-    const bytes = (try cuda.carveout.requested(false, env("TF_CUDA_CARVEOUT"), env("TF_CUDA_CARVEOUT_MIB"))) orelse return null;
-    const raw_card = (@import("sys").environment.Process{}).get("TF_DRM_CARD") orelse cuda.carveout.default_card;
-    const card = try gpa.dupeSentinel(u8, raw_card, 0);
-    defer gpa.free(card);
+    const want = (try cuda.carveout.requested(.read(false, platform.environment.Process{}))) orelse return null;
     const c = try gpa.create(cuda.Carveout);
     errdefer gpa.destroy(c);
-    c.* = cuda.Carveout.open(ctx.d, card, bytes) catch |err| {
-        std.log.err("display carveout of {d} MiB from {s}: {t} (needs nvidia_drm modeset=1, the card's device node and no display in use)", .{ bytes >> 20, card, err });
-        return err;
-    };
-    std.log.info("display carveout: {d} MiB from {s}; KV planes go there first", .{ bytes >> 20, card });
+    c.* = try cuda.Carveout.from(ctx.d, want);
+    std.log.info("display carveout: {d} MiB, {s}; KV planes go there first", .{ c.bytes() >> 20, c.how() });
     return c;
 }
 
