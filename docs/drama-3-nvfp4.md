@@ -55,11 +55,16 @@ reference voice and about 4.5 s replies, timed by the client.
 | --- | --- | ---: | ---: | ---: | ---: |
 | M5 Ultra, 256 GB | 7,369 experts | 8.9 s | 10.2 GiB footprint + 13.0 GB experts read in place | 0.94 s | 0.73 |
 | M5 Ultra, 256 GB | 5,900 experts | 8.5 s | 10.2 GiB footprint + 10.4 GB experts read in place | 0.94 s | 0.74 |
-| DGX Spark | FP8 and both pruned | pending a GPU window | | | |
+| DGX Spark (GB10) | FP8, 10,240 experts | 27.6 s | 39.6 GiB device | 6.07 s | 2.36 |
+| DGX Spark (GB10) | 7,369 experts | 24.5 s | 21.7 GiB device | 5.69 s | 2.16 |
+| DGX Spark (GB10) | 5,900 experts | 26.0 s | 19.3 GiB device | 5.65 s | 2.23 |
 
 - **Mac memory.** Metal maps the packed experts from the checkpoint files, so the process footprint leaves them out.
   The 7,369-expert server keeps 28.5 GiB wired between requests; the load is refused above 70% of RAM
   (`DRAMA_LOAD_LIMIT_GB` sets another limit).
+- **Spark speed.** With guidance the Spark is slower than real time on every checkpoint; the pruned ones save about
+  half the device memory and 0.4 s to first audio against FP8. Two requests at once take turns: the second ends after
+  20-23 s. Its server finds cuBLAS through `LD_LIBRARY_PATH` (the CUDA 13 `lib` directory).
 - **Second lane.** On the Mac, the concurrent streamed replies recorded first audio at 6.07 s (7,369 experts) and
   6.22 s (5,900), with total times of 8.47/8.66 s and an RTF of 1.90 for each. A lane without a cached reference
   waits for its own reference prefill. These historical first-audio timings, including the table's 0.94 s, used
