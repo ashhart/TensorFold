@@ -22,6 +22,7 @@ pub fn begin(ptr: *anyopaque, slot: u32, ids: []const u32) anyerror!iface.Target
     // the profile (TF_DSV41_PROMPT_PROF) counts every prompt's encoder chunks from here to this one's `finish`
     t.pr.prof = .{};
     s.began = prompt.now();
+    s.mark = t.stats.launches;
     s.filling = true;
     return .{ .at = s.resumed };
 }
@@ -34,8 +35,10 @@ pub fn piece(ptr: *anyopaque, slot: u32, ids: []const u32, start: u64, end: u64,
     // a mid-prompt state is never kept: a kept entry holds a whole prompt's state (the decoder cone run)
     if (start == end and save and start == s.tail.end) return;
     if (start != s.tail.end or end <= start or end >= ids.len) return error.NotAChain;
+    if (start > s.resumed) t.stats.most_between = @max(t.stats.most_between, t.stats.launches - s.mark);
     t.pr.encode(t.promptEnv(), &s.kv, &s.tail, s.hist.items, @intCast(end)) catch |e| return t.fail(e);
     t.stats.pieces += 1;
+    s.mark = t.stats.launches;
 }
 
 /// The rows the pieces left, the decoder's cone once over the prompt's end, then `prefill`'s choice and keep.

@@ -39,8 +39,8 @@ pub const Options = struct {
     cache_bytes: u64 = 0,
 };
 
-/// What the target did, for the tests and the logs.
-pub const Stats = struct { prompts: u64 = 0, hits: u64 = 0, cached_rows: u64 = 0, windows: u64 = 0, rows: u64 = 0, rewinds: u64 = 0, launches: u64 = 0, history_rows: u64 = 0, pieces: u64 = 0, abandoned: u64 = 0 };
+/// What the target did, for the tests and the logs; `most_between`: the most launches between two of a prompt's pieces.
+pub const Stats = struct { prompts: u64 = 0, hits: u64 = 0, cached_rows: u64 = 0, windows: u64 = 0, rows: u64 = 0, rewinds: u64 = 0, launches: u64 = 0, history_rows: u64 = 0, pieces: u64 = 0, abandoned: u64 = 0, most_between: u64 = 0 };
 
 /// A slot: its device state, prompt tail, ids (rows run, the last window's included until its keep) and taps.
 pub const Slot = struct {
@@ -71,6 +71,8 @@ pub const Slot = struct {
     hit_on: bool = false,
     /// when the begun prompt began (its wall time on the profile line)
     began: u64 = 0,
+    /// the target's launches when the begun prompt's last piece ran (Stats.most_between: other slots' rounds between)
+    mark: u64 = 0,
 };
 
 pub const Target = struct {

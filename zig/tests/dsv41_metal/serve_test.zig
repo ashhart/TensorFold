@@ -414,3 +414,35 @@ test "dsv41 metal serve: (i) in steps, a request cancelled mid-prompt keeps noth
     say(ok and !prefix_kept and cached_rows[0] == 0, "(i) cancelled after {d}+ pieces: {d} abandoned, a prefix of it kept: {}, the decoding reply and the prompt again (cached {d}) {s} serial", .{ 3, m.t.stats.abandoned, prefix_kept, cached_rows[0], if (ok) "equal" else "differ from" });
     try testing.expect(ok and !prefix_kept and cached_rows[0] == 0);
 }
+
+test "dsv41 metal serve: (j) a decode share gives a decoding reply rounds between a prompt's pieces; replies == serial" {
+    const long = try ids(1100, 34);
+    defer gpa.free(long);
+    const p0 = try ids(120, 35);
+    defer gpa.free(p0);
+    const asks = [_]Ask{ .{ .prompt = p0, .max = 300, .drafts = false }, .{ .prompt = long, .max = 8 } };
+    var want: [2][]u32 = undefined;
+    try reference(&asks, &want);
+    defer freeAll(&want);
+    var bad: usize = 0;
+    // a share of 0 is one round a step (no debt); 0.75 owes replies three times each step's time (and caps its rows)
+    for ([_]f64{ 0, 0.75 }) |share| {
+        const m = try fs.open(gpa, io, seed, .{ .slots = 2, .chunk = 256, .steps = true, .decode_share = share });
+        const s = try Served.open(gpa, io, m.model(), ".", null);
+        defer Served.close(s);
+        const e = s.engine();
+        var boxes: [2]Box = @splat(.{});
+        defer for (&boxes) |*b| b.deinit();
+        const reqs = [2]api.Request{ .{ .prompt = p0, .max_tokens = 300, .drafts = false }, .{ .prompt = long, .max_tokens = 8 } };
+        try e.submit(800, &reqs[0], .{ .ctx = &boxes[0], .event = Box.event });
+        try awaitStat(&m.t.stats.windows, 1);
+        try e.submit(801, &reqs[1], .{ .ctx = &boxes[1], .event = Box.event });
+        for (&boxes) |*b| try b.wait();
+        const between = m.t.stats.most_between;
+        const equal = std.mem.eql(u32, want[0], boxes[0].out.items) and std.mem.eql(u32, want[1], boxes[1].out.items);
+        const ok = equal and m.t.stats.pieces >= 2 and if (share > 0) between >= 3 else between <= 1;
+        say(ok, "(j) decode share {d:.2}: at most {d} rounds between two of the prompt's {d} pieces; replies {s} serial", .{ share, between, m.t.stats.pieces, if (equal) "equal" else "differ from" });
+        bad += @intFromBool(!ok);
+    }
+    try testing.expectEqual(@as(usize, 0), bad);
+}

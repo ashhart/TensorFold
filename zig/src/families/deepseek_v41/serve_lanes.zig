@@ -60,7 +60,18 @@ pub const Model = struct {
     calib: ?calib_env.Knobs = null,
     /// prompts a `prefill_step` of rows at a time between the other streams' rounds (the target's pieces; stepsFromEnv)
     steps: bool = false,
+    /// --decode-share: the replies' share of wall time beside a prompt's steps (null: `steps_decode_share` in steps)
+    decode_share: ?f64 = null,
 };
+
+/// The replies' share of wall time beside a prompt in steps when neither --decode-share nor the env names one.
+pub const steps_decode_share = 0.25;
+
+/// LaneHost's prompt share in steps: the flag's (through Info, with its row cap), the env's, else the default above.
+fn applyShare(h: *api.LaneHost, backend: Model) void {
+    if (!backend.steps or backend.decode_share != null or @import("sys").environment.Process.get(.{}, "TENSORFOLD_PREFILL_SHARE") != null) return;
+    h.share.p = 1 - steps_decode_share;
+}
 
 /// Prompt steps for a target with pieces: TF_DSV41_PREFILL_PIECES=1, or LaneHost's srpt order or a prompt share set.
 pub fn stepsFromEnv() !bool {
@@ -132,7 +143,6 @@ pub const Served = struct {
         // draft trees (TF_DSV41_TREE / _DUP_MS / _ROWS; off by default): first-position siblings
         const trees = if (dspark_on) try tree.Settings.fromEnv() else tree.Settings{};
         s.x = try ln.Lanes.init(gpa, tgt, pass, s.costs, .{ .shape = backend.shape, .slots = backend.slots, .siblings = trees.siblings, .sib_rows = trees.sib_rows, .dup = trees.dup, .depth = try calib_env.depthSettings(&calib_env.env), .spec = if (dspark_on) try spec.Settings.fromEnv() else .{}, .plain_streams_default = 3, .steps = backend.steps, .step_rows = backend.prefill_step });
-        if (backend.steps) std.log.info("dsv41 prompts: {d} rows a step between the other streams' rounds", .{backend.prefill_step});
         s.arena = std.heap.ArenaAllocator.init(gpa);
         s.cfg = try lanes.Config.init(gpa, try s.x.model(s.arena.allocator(), 64), 16, 15);
         s.x.policy.depth.forward_rows = backend.forward_rows;
@@ -144,7 +154,9 @@ pub const Served = struct {
         s.clock = .{ .io = io };
         s.core = lanes.Engine.init(gpa, &s.cfg, s.x.backend(), s.clock.clock());
         s.x.attach(&s.core);
-        s.host = api.LaneHost.init(gpa, io, &s.core, .{ .name = backend.name, .lanes = backend.slots, .context_window = @intCast(window), .prefill_step = backend.prefill_step, .vision = backend.vision });
+        s.host = api.LaneHost.init(gpa, io, &s.core, .{ .name = backend.name, .lanes = backend.slots, .context_window = @intCast(window), .prefill_step = backend.prefill_step, .vision = backend.vision, .decode_share = backend.decode_share });
+        applyShare(&s.host, backend);
+        if (backend.steps) std.log.info("dsv41 prompts: {d} rows a step between the other streams' rounds, prompts {d:.2} of wall time beside replies", .{ backend.prefill_step, s.host.share.p });
         s.host.info_.draft_sources = draftSources(dspark_on, s.cfg.max_copy > 0);
         // the lanes run on LaneHost's thread: a backend whose state is per thread binds it there
         s.host.on_thread = backend.on_thread;
