@@ -196,9 +196,9 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Tests: the sessions-writes mixed load holds its pool to one slot's capacity, so it exercises spills to the tier (#2731). Thanks to @garvrao80.
 
-- Metal: LFM2.5-24B-A2B can use an explicit DSpark drafter. Request and round costs gate neural work; pre-M5 or unrecognized devices retain target-only execution and cheap copies, and `draft:false` disables neural drafting (#1394).
+- Metal: LFM2.5-24B-A2B can use an explicit DSpark drafter. Request and round costs gate neural work; pre-M5 or unrecognized devices retain target-only execution and cheap copies, and `draft:false` disables neural drafting (#1394). Thanks to @BlivionIaG.
 
-- Kernel contract: adds exact sorted-combine/norm/tap comparisons and float64 BF16 SwiGLU bounds with planted controls for LFM2 (#1394).
+- Kernel contract: adds exact sorted-combine/norm/tap comparisons and float64 BF16 SwiGLU bounds with planted controls for LFM2 (#1394). Thanks to @BlivionIaG.
 
 - Prompt cache: when two disk restores in a row fail (a damaged or missing state file), the request now resumes from the shorter state it already had in RAM instead of prefilling from token 0, so the reply's `cached_tokens` reports that state's position (#2694). Thanks to @ThinkOffApp.
 
