@@ -152,6 +152,7 @@ pub const Metal = struct {
             .window_costs = self.costs.window[0..@min(self.costs.windows, max_window)],
             .mtp_step_ms = self.costs.head_ms,
             .hidden_rows = true,
+            .plain_share = true,
             .batch_rows = @intCast(self.o.batch_rows),
             .max_streams = @intCast(self.o.streams),
             .shared_costs = self.costs.shared[0..self.costs.shareds],
