@@ -29,15 +29,31 @@ pub const Stats = struct {
     last: ?Plan = null,
 };
 
-/// A round's modelled ms: its rows' window, each further window's overhead and the pass when one runs.
-pub fn roundMs(c: Costs, windows: usize, rows: u64, pass: bool) f64 {
-    return c.rowsMs(@intCast(rows)) + c.slot * @as(f64, @floatFromInt(windows -| 1)) + (if (pass) c.draft else 0.0);
+/// A round's modelled ms: its rows' window, each further window's overhead and its pass's `pass_ms`.
+pub fn roundMs(c: Costs, windows: usize, rows: u64, pass_ms: f64) f64 {
+    return c.rowsMs(@intCast(rows)) + c.slot * @as(f64, @floatFromInt(windows -| 1)) + pass_ms;
+}
+
+/// A pass over the asks in `in`: the timed pass holds one ask's ingest, each ask adds its `joins` (0: none asks).
+pub fn passMs(c: Costs, joins: []const f64, in: []const bool) f64 {
+    var ms = c.draft - c.ingest;
+    var any = false;
+    for (joins, in) |j, x| if (x) {
+        ms += j;
+        any = true;
+    };
+    return if (any) ms else 0.0;
+}
+
+/// An ask's share of a pass: its ingest, and a second for the rows it skipped while plain (`catch_up`).
+pub fn joinMs(c: Costs, catch_up: bool) f64 {
+    return c.ingest * (if (catch_up) @as(f64, 2.0) else 1.0);
 }
 
 /// The all-plain round's tokens a ms: one token a window, no drafts, no pass.
 pub fn plainRate(c: Costs, windows: usize) f64 {
     const n = @max(windows, 1);
-    return @as(f64, @floatFromInt(n)) / roundMs(c, n, n, false);
+    return @as(f64, @floatFromInt(n)) / roundMs(c, n, n, 0.0);
 }
 
 const Gain = struct { g: f64, stream: u32, pos: u32 };
@@ -48,10 +64,10 @@ fn larger(_: void, a: Gain, b: Gain) bool {
     return a.pos < b.pos;
 }
 
-/// One round's priced choice over `windows` windows of `base` rows committing `tokens` without drafts.
-pub const Round = struct { windows: usize, tokens: f64, base: u64, max_rows: u64, paid: bool };
+/// One round over `windows` windows of `base` rows committing `tokens` without drafts; `asked`: already in the pass.
+pub const Round = struct { windows: usize, tokens: f64, base: u64, max_rows: u64, joins: []const f64, asked: []const bool };
 
-/// Drafts a stream (`ks`) with the most tokens a ms; `qss[i]` its chain's chances; no drafts and no pass unless paid.
+/// Drafts a stream (`ks`) with the most tokens a ms over the largest gains first, each round priced with its pass.
 pub fn scan(gpa: Allocator, c: Costs, r: Round, qss: []const []const f64, ks: []usize) !Plan {
     var gains: std.ArrayList(Gain) = .empty;
     defer gains.deinit(gpa);
@@ -64,32 +80,39 @@ pub fn scan(gpa: Allocator, c: Costs, r: Round, qss: []const []const f64, ks: []
     }
     // a chain's gains never grow along it, so the m largest are each chain's first drafts
     std.mem.sort(Gain, gains.items, {}, larger);
+    const in = try gpa.dupe(bool, r.asked);
+    defer gpa.free(in);
     const room = r.max_rows -| r.base;
     var best_m: usize = 0;
-    var best = r.tokens / roundMs(c, r.windows, r.base, r.paid);
+    var best_ms = roundMs(c, r.windows, r.base, passMs(c, r.joins, in));
+    var best = r.tokens / best_ms;
     var acc: f64 = 0.0;
     for (gains.items[0..@min(room, gains.items.len)], 1..) |x, m| {
         acc += x.g;
-        const rate = (r.tokens + acc) / roundMs(c, r.windows, r.base + m, true);
-        if (rate > best + eps) {
-            best = rate;
+        in[x.stream] = true;
+        const ms = roundMs(c, r.windows, r.base + m, passMs(c, r.joins, in));
+        if ((r.tokens + acc) / ms > best + eps) {
+            best = (r.tokens + acc) / ms;
+            best_ms = ms;
             best_m = m;
         }
     }
     @memset(ks, 0);
     for (gains.items[0..best_m]) |x| ks[x.stream] += 1;
-    const pass = r.paid or best_m > 0;
-    return .{ .rate = best, .plain = plainRate(c, r.windows), .ms = roundMs(c, r.windows, r.base + best_m, pass), .rows = r.base + best_m, .pass = pass };
+    var pass = false;
+    for (r.asked, ks) |a, k| pass = pass or a or k > 0;
+    return .{ .rate = best, .plain = plainRate(c, r.windows), .ms = best_ms, .rows = r.base + best_m, .pass = pass };
 }
 
-/// The next round's asks: forced ones, and every stream the priced round gives a draft; `out[i]`: stream i asks.
-pub fn plan(gpa: Allocator, c: Costs, windows: usize, qss: []const []const f64, forced: []const bool, max_rows: u64, out: []bool) !Plan {
+/// The next round's asks (`out`): forced ones and every stream given a draft; `catch_up[i]`: it skipped rows plain.
+pub fn plan(gpa: Allocator, c: Costs, windows: usize, qss: []const []const f64, forced: []const bool, catch_up: []const bool, max_rows: u64, out: []bool) !Plan {
     const ks = try gpa.alloc(usize, qss.len);
     defer gpa.free(ks);
-    var paid = false;
-    for (forced) |f| paid = paid or f;
+    const joins = try gpa.alloc(f64, qss.len);
+    defer gpa.free(joins);
+    for (joins, catch_up) |*j, u| j.* = joinMs(c, u);
     const n = @max(windows, qss.len);
-    var p = try scan(gpa, c, .{ .windows = n, .tokens = @floatFromInt(n), .base = n, .max_rows = max_rows, .paid = paid }, qss, ks);
+    var p = try scan(gpa, c, .{ .windows = n, .tokens = @floatFromInt(n), .base = n, .max_rows = max_rows, .joins = joins, .asked = forced }, qss, ks);
     for (out, ks, forced) |*o, k, f| {
         o.* = f or k > 0;
         p.asks += @intFromBool(o.*);
@@ -128,7 +151,14 @@ pub fn chooseRound(d: *depth.Depth, asks: []const depth.Depth.Ask, others: u64, 
         observe(st, a.conf);
     }
     const windows = asks.len + other_windows;
-    const r: Round = .{ .windows = windows, .tokens = @floatFromInt(windows), .base = asks.len + others, .max_rows = d.set.max_rows, .paid = asks.len > 0 };
+    // the pass has run for every ask: its price is the same whichever depths follow
+    const joins = try d.gpa.alloc(f64, asks.len);
+    defer d.gpa.free(joins);
+    @memset(joins, joinMs(d.costs, false));
+    const asked = try d.gpa.alloc(bool, asks.len);
+    defer d.gpa.free(asked);
+    @memset(asked, true);
+    const r: Round = .{ .windows = windows, .tokens = @floatFromInt(windows), .base = asks.len + others, .max_rows = d.set.max_rows, .joins = joins, .asked = asked };
     const p = try scan(d.gpa, d.costs, r, qss, ks);
     var rows: u64 = others;
     var drafts: u64 = 0;
@@ -160,15 +190,15 @@ test "a round priced at none, one or every stream: plain wins weak drafts, stron
     const strong = [_]f64{ 0.95, 0.95, 0.95, 0.95, 0.95 };
     const none = [_]bool{ false, false, false, false };
     // four weak streams: no ask, no pass, the plain rate exactly
-    const p0 = try plan(gpa, c, 4, &.{ &weak, &weak, &weak, &weak }, &none, 64, &out);
+    const p0 = try plan(gpa, c, 4, &.{ &weak, &weak, &weak, &weak }, &none, &none, 64, &out);
     try std.testing.expectEqualSlices(bool, &none, &out);
     try std.testing.expect(!p0.pass and p0.rate == p0.plain);
     // one strong stream beside three weak ones: it alone asks, and the round beats plain
-    const p1 = try plan(gpa, c, 4, &.{ &strong, &weak, &weak, &weak }, &none, 64, &out);
+    const p1 = try plan(gpa, c, 4, &.{ &strong, &weak, &weak, &weak }, &none, &none, 64, &out);
     try std.testing.expectEqualSlices(bool, &.{ true, false, false, false }, &out);
     try std.testing.expect(p1.pass and p1.asks == 1 and p1.rate > p1.plain);
     // a forced ask pays the pass: then a weak stream's draft is priced against the paid pass only
-    const p2 = try plan(gpa, c, 1, &.{&weak}, &.{true}, 64, out[0..1]);
+    const p2 = try plan(gpa, c, 1, &.{&weak}, &.{true}, &.{false}, 64, out[0..1]);
     try std.testing.expect(out[0] and p2.pass);
 }
 

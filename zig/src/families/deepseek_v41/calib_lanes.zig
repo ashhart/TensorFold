@@ -192,6 +192,7 @@ pub fn measure(gpa: Allocator, d: Device, ids: []const u32, how: cm.Method, rows
     const spent: f64 = @floatFromInt(ph.nowNs() - began);
     var out: Measured = .{ .costs = try plan.build(gpa, ranks), .rows = rows, .n = plan.n, .runs = plan.runs.items.len, .timed = timed, .ingest_ms = if (std.math.isFinite(ingest_best)) ingest_best else 0.0, .prefill_rows = prefill_rows, .windows = windows, .prefill_s = @as(f64, @floatFromInt(prefill_ns)) / 1e9, .runs_s = spent / 1e9 };
     @memcpy(out.kept[0..rows], ranks[0][1 .. rows + 1]);
+    out.costs.ingest = @min(out.ingest_ms, out.costs.draft); // the priced pass adds one a further ask
     return out;
 }
 

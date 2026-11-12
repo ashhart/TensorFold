@@ -121,13 +121,15 @@ pub const Policy = struct {
         const qss = try a.alloc([]const f64, requests.len);
         const forced = try a.alloc(bool, requests.len);
         const slots = try a.alloc(?*depth.Slot, requests.len);
+        const catch_up = try a.alloc(bool, requests.len);
+        @memset(catch_up, false);
         const due = p.priced.plain_ms >= d.costs.draft / priced.probe_share;
         var decoding: usize = 0;
         for (x.by_slot) |o| if (o) |st| {
             decoding += @intFromBool(st.len > 0);
         };
         var probed = false;
-        for (requests, qss, forced, slots) |r, *qs, *f, *sl| {
+        for (requests, qss, forced, slots, 0..) |r, *qs, *f, *sl, i| {
             qs.* = &.{};
             f.* = false;
             sl.* = null;
@@ -144,9 +146,10 @@ pub const Policy = struct {
             for (q, s.pred[0..q.len], 0..) |*v, c, j| v.* = d.cal.q(j, c);
             qs.* = q;
             f.* = due and s.stale;
+            catch_up[i] = s.stale;
             probed = probed or f.*;
         }
-        const plan = try priced.plan(a, d.costs, @max(decoding, requests.len), qss, forced, d.set.max_rows, out);
+        const plan = try priced.plan(a, d.costs, @max(decoding, requests.len), qss, forced, catch_up, d.set.max_rows, out);
         var plain_any = false;
         for (out, slots) |o, sl| if (sl) |s| if (!o) {
             s.stale = true;

@@ -84,10 +84,10 @@ pub const Run = struct {
     }
 };
 
-/// The M3 Ultra's shape: its measured verify windows and a 12 ms pass.
+/// The M3 Ultra's shape: its measured verify windows and a 12 ms pass holding a 1 ms ingest.
 pub fn m3Costs(buf: *[32]f64) costs_mod.Costs {
     buf.* = priced.m3Table();
-    return .{ .verify = buf, .draft = 12.0 };
+    return .{ .verify = buf, .draft = 12.0, .ingest = 1.0 };
 }
 
 /// Each prompt's serial reply at its length plus a block past it (what a draft can reach), prompt first.

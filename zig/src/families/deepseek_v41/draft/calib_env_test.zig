@@ -105,6 +105,24 @@ test "code acceptance is default off and rejects invalid flags" {
     Env.pairs = &.{};
 }
 
+test "TF_DSV41_DRAFT_PRICED: unset off here, the startup table's forms in any case, anything else refused by name" {
+    Env.pairs = &.{};
+    defer Env.pairs = &.{};
+    try std.testing.expect(!(try calib_env.depthSettings(&Env.get)).priced);
+    for ([_][]const u8{ "1", " ON ", "True" }) |v| {
+        Env.pairs = &.{.{ "TF_DSV41_DRAFT_PRICED", v }};
+        try std.testing.expect((try calib_env.depthSettings(&Env.get)).priced);
+    }
+    for ([_][]const u8{ "0", "Off", "FALSE" }) |v| {
+        Env.pairs = &.{.{ "TF_DSV41_DRAFT_PRICED", v }};
+        try std.testing.expect(!(try calib_env.depthSettings(&Env.get)).priced);
+    }
+    for ([_][]const u8{ "yes", "2", "onn" }) |v| {
+        Env.pairs = &.{.{ "TF_DSV41_DRAFT_PRICED", v }};
+        try std.testing.expectError(error.DraftPriced, calib_env.depthSettings(&Env.get));
+    }
+}
+
 const Env = struct {
     var pairs: []const [2][]const u8 = &.{};
     fn get(name: [*:0]const u8) ?[]const u8 {
@@ -142,7 +160,7 @@ test "TF_DSV41_CALIB=measure / zig: the engine measures; a stored Zig table is r
     // a reference-engine entry for the shape: cached reads it, zig does not
     try tmp.dir.writeFile(io, .{ .sub_path = "calib-py.json", .data = "{\"verify\": [21.0, 26.0], \"draft\": 3.6, \"meta\": {\"shape\": {\"slots\": 4, \"world\": 2, \"dspark\": true}, \"time\": \"2026-10-07T12:00:00\"}}" });
     var verify = [_]f64{ 20.0004999, 24.5, 24.25, 30.0 };
-    const c: costs_mod.Costs = .{ .verify = &verify, .draft = 3.5005, .slot = 0.611 };
+    const c: costs_mod.Costs = .{ .verify = &verify, .draft = 3.5005, .slot = 0.611, .ingest = 0.4204 };
     const kept = [_]f64{ 20.0, 24.4 };
     const path = try calib_env.store(gpa, io, root, want, c, .{ .method = .{}, .seconds = 7.25, .kept = &kept, .tokens = 201 }, 1_791_504_000);
     defer gpa.free(path);
@@ -157,8 +175,10 @@ test "TF_DSV41_CALIB=measure / zig: the engine measures; a stored Zig table is r
     try std.testing.expectEqualSlices(f64, &.{ 20.0, 24.5, 24.25, 30.0 }, z.costs.verify); // shared: microseconds
     try std.testing.expectEqual(@as(f64, 3.5), z.costs.draft); // 3500.5 us: half to even
     try std.testing.expectEqual(@as(f64, 0.611), z.costs.slot);
+    try std.testing.expectEqual(@as(f64, 0.42), z.costs.ingest); // the pass's ingest, a microsecond as the rest
     var py = try calib_env.load(gpa, io, .{ .mode = "cached", .dir = root }, want, 64);
     defer py.deinit(gpa);
+    try std.testing.expectEqual(@as(f64, 0.0), py.costs.ingest); // a table without one prices the pass flat
     try std.testing.expectEqualStrings("calib-py.json", std.fs.path.basename(py.path.?)); // never the Zig entry
     var real = try calib_env.load(gpa, io, .{ .mode = "real", .dir = root }, .{ .slots = 1, .world = 2, .dspark = true }, 64);
     defer real.deinit(gpa);

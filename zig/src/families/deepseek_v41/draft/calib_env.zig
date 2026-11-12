@@ -92,7 +92,10 @@ pub fn readEntry(gpa: Allocator, io: std.Io, path: []const u8) !Costs {
 pub fn shared(gpa: Allocator, c: Costs) !Costs {
     const ints = try c.encode(gpa);
     defer gpa.free(ints);
-    return Costs.decode(gpa, ints);
+    var out = try Costs.decode(gpa, ints);
+    // the ingest is no rank-shared int: rounded to a microsecond as the others are
+    out.ingest = @as(f64, @floatFromInt(costs_mod.roundEven(c.ingest * 1000.0))) / 1000.0;
+    return out;
 }
 
 const Meta = struct {
@@ -190,6 +193,7 @@ pub fn store(gpa: Allocator, io: std.Io, dir: []const u8, want: Shape, c: Costs,
         .verify = c.verify,
         .draft = c.draft,
         .slot = c.slot,
+        .ingest = c.ingest,
         .engine = "zig",
         .meta = .{
             .shape = .{ .slots = want.slots, .world = want.world, .dspark = want.dspark, .context = want.context, .id = want.id },

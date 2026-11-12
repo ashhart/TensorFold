@@ -11,13 +11,14 @@ pub const Costs = struct {
     verify: []f64,
     draft: f64,
     slot: f64 = 0.0,
+    ingest: f64 = 0.0, // one ask's drafter ingest of a few committed rows, inside `draft` (0: not timed apart)
 
     pub fn deinit(c: *Costs, gpa: Allocator) void {
         gpa.free(c.verify);
     }
 
     pub fn clone(c: Costs, gpa: Allocator) !Costs {
-        return .{ .verify = try gpa.dupe(f64, c.verify), .draft = c.draft, .slot = c.slot };
+        return .{ .verify = try gpa.dupe(f64, c.verify), .draft = c.draft, .slot = c.slot, .ingest = c.ingest };
     }
 
     /// A window of `rows` rows, clamped to the table (Python window_ms).
@@ -53,11 +54,11 @@ pub const Costs = struct {
 
     /// Python's cached calibration (`calib-<key>.json`: verify, draft, slot); at least 2 rows.
     pub fn parseJson(gpa: Allocator, bytes: []const u8) !Costs {
-        const File = struct { verify: []f64, draft: f64, slot: f64 = 0.0 };
+        const File = struct { verify: []f64, draft: f64, slot: f64 = 0.0, ingest: f64 = 0.0 };
         const parsed = try std.json.parseFromSlice(File, gpa, bytes, .{ .ignore_unknown_fields = true });
         defer parsed.deinit();
         if (parsed.value.verify.len < 2) return error.BadCosts;
-        return .{ .verify = try gpa.dupe(f64, parsed.value.verify), .draft = parsed.value.draft, .slot = parsed.value.slot };
+        return .{ .verify = try gpa.dupe(f64, parsed.value.verify), .draft = parsed.value.draft, .slot = parsed.value.slot, .ingest = parsed.value.ingest };
     }
 };
 
