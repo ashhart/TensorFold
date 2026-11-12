@@ -483,6 +483,9 @@ with groups of 32. All retain their F32 scales and biases. These formats do not 
 On the M3 Ultra with 256 GiB, Q4_K_M decoded at about 2.8 tok/s on the three short greedy 32-token requests in
 the GGUF receipt. That is the current generic path's observed speed, not a speed improvement or a Q8_0 decode
 measurement. Q8_0 uses the same generic path; its generation speed remains unmeasured.
+On an M5 Ultra, Q4_K_M decoded at 3.8 tok/s at one stream and 3.9 to 4.0 tok/s across four, against 48.7
+and 182 tok/s for the MLX 4-bit checkpoint on the same machine: about 13 times slower at one stream, with no gain
+from more streams. The generic kernel repeats its weight work for each row, which fits that; it is not profiled.
 
 The full Qwen stop set keeps the declared EOS and the end-of-text control, in that order. Both model config and
 server text expose the same set. An ordinary end-of-text spelling refuses rather than becoming a stop. Adding
