@@ -45,7 +45,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - EXL3's mapped n-gram table participates in upstream's opt-in read-ahead once per file, and teardown joins the worker before unmapping (#1441).
 
-- Flash Next's first CUDA EXL3 slice uses the canonical fp32 expert tree, so adding tensor parallelism preserves its one-rank reduction order (#1441, #1442). Other formats are unchanged.
+- Flash Next's first CUDA EXL3 slice uses float64 expert leaves, fixed-tree merges and transported partials, rounding once to float32 at the root so cancellation does not lose low-order terms and tensor parallelism preserves the one-rank result (#1441, #1442). Other formats and checkpoint BF16 state boundaries are unchanged. Thanks to @BlivionIaG.
 
 - Flash Next's EXL3 integration keeps the existing ModelOpt rank scratch and split-head snapshot geometry (#1441). Its configured prompt cut stays fixed when main widens a one-stream ModelOpt pass, preserving stream-independent EXL3 arithmetic.
 

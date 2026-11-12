@@ -320,10 +320,13 @@ unsplit K, `linear_wc`'s tiles); a host test sweeps K and N to 16384 through `ex
 form no registration runs. A fixed plan keeps the linear. Gate 4 proves an fp16 sum would overflow on a constant-weight
 stress input (all-ones states: one weight at every width). Six controls: another K split (3, 4 and 5 bits; `linear_wc`),
 swapped scales, a swapped suh.
-Flash Next EXL3's canonical expert reduction starts in the one-rank slice: `fn_exl3_leaf_tree` and
-`fn_exl3_leaf_finish` register in `contract_flashnext_exl3_canon.zig`, against the host fp32 tree bit for bit and
-float64's exceptional classes. The controls flatten the tree, drop NaNs, write an input or use bf16 adds; each
-must fail its intended gate. Independent host references compare the canonical order with exact products and fp64.
+Flash Next EXL3's canonical expert reduction starts in the one-rank slice: `fn_exl3_leaf_tree`,
+`fn_exl3_leaf_partial` and `fn_exl3_leaf_finish` register in `contract_flashnext_exl3_canon.zig`. Leaves,
+tree additions and transported partials are float64; only the root converts once to float32, round-to-nearest-even.
+Outputs match the host tree bit for bit (NaN payloads aside), including float64's exceptional classes.
+Controls flatten the tree, drop NaNs, write an input, use bf16 adds or narrow partials to float32; each must fail
+its intended gate. Independent integer-product references check error and TP independence without a sampled-error
+tolerance. Checkpoint BF16 state boundaries are unchanged.
 HIP: the RMS norm rows, a wave a row (fp32, fp16 and bf16 out) and a block a row (fp16 and bf16 out).
 HIP also checks the decode tail (`tf_tail`): the residual add, of a row of the activation kind or of nine slots' fp32
 rows times their weights summed in slot order, and the RMS norm after it, against float64 at Qwen3.6-35B-A3B's and
