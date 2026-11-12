@@ -1,5 +1,6 @@
 const std = @import("std");
 const harness = @import("speech_stream_test.zig");
+// Request text counts as the prompt encodes it: 4096 bytes behind the 14-byte "<|speaker:0|> " tag the builder adds.
 
 test "speech admission refuses assembled rows before submitting to the engine" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -18,7 +19,7 @@ test "speech admission refuses assembled rows before submitting to the engine" {
     while (try served.more(20)) {}
     const response = served.got.items;
     try std.testing.expect(std.mem.indexOf(u8, response, "assembled prompt rows") != null);
-    try std.testing.expect(std.mem.indexOf(u8, response, "request text: 4096 tokens") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response, "request text: 4110 tokens") != null);
     try std.testing.expect(std.mem.indexOf(u8, response, "acoustic references: 0 frames") != null);
     try std.testing.expectEqual(@as(usize, 0), script.takes);
 }
@@ -46,7 +47,7 @@ test "speech admission counts multiple references and refuses before engine subm
     while (try served.more(20)) {}
     const response = served.got.items;
     try std.testing.expect(std.mem.indexOf(u8, response, "assembled prompt rows") != null);
-    try std.testing.expect(std.mem.indexOf(u8, response, "request text: 4096 tokens") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response, "request text: 4110 tokens") != null);
     try std.testing.expect(std.mem.indexOf(u8, response, "acoustic references: 3 frames") != null);
     try std.testing.expectEqual(@as(usize, 0), script.takes);
 }
