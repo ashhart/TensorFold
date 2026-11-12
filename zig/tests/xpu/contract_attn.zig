@@ -1,4 +1,4 @@
-//! The decode attention pair as one replacement operator, plus a merge that deliberately loses the last slice.
+//! The decode attention pair as one replacement operator, and its controls: a merge losing a slice, the old grid.
 const std = @import("std");
 const xpu = @import("xpu");
 const core = @import("core");
@@ -10,6 +10,9 @@ const ref = core.xpu_ref.attention;
 
 const Buffers = struct { pm: ?*anyopaque, pl: ?*anyopaque, po: ?*anyopaque, out: ?*anyopaque };
 
+/// The registration, or a planted control: the merge that loses the last slice, or attn_decode on the old grid.
+pub const Plant = enum { none, drop_slice, old_grid };
+
 /// Q rows, a bf16 K/V cache and a tree table to bf16 attention rows; no input is writable.
 pub const Attn = struct {
     rig: rig_.Rig,
@@ -17,7 +20,7 @@ pub const Attn = struct {
     merge: xpu.Kernel,
     old_decode: xpu.Kernel,
     old_merge: xpu.Kernel,
-    drop_tail: bool,
+    plant: Plant,
     arena: std.heap.ArenaAllocator,
     f: ref.Fixture = undefined,
     q: ?*anyopaque = null,
@@ -27,10 +30,10 @@ pub const Attn = struct {
     candidate: Buffers = undefined,
     baseline: Buffers = undefined,
 
-    pub fn init(a: std.mem.Allocator, dev: *rig_.Dev, drop_tail: bool) !Attn {
+    pub fn init(a: std.mem.Allocator, dev: *rig_.Dev, plant: Plant) !Attn {
         var decode = try dev.kernelFor(.decode, "attn_decode", a);
         errdefer decode.deinit();
-        var merge = if (drop_tail)
+        var merge = if (plant == .drop_slice)
             try dev.kernel(.gate, "tf_ctl_attn_drop_slice", .{ 16, 1, 1 })
         else
             try dev.kernelFor(.decode, "attn_merge", a);
@@ -44,7 +47,7 @@ pub const Attn = struct {
             .merge = merge,
             .old_decode = old_decode,
             .old_merge = old_merge,
-            .drop_tail = drop_tail,
+            .plant = plant,
             .arena = .init(a),
         };
     }
@@ -60,8 +63,12 @@ pub const Attn = struct {
 
     pub fn kernel(self: *Attn) g.Kernel {
         var s = ref.spec();
-        if (self.drop_tail) s.name = "control: xpu attention merge losing its last slice";
-        return .{ .spec = s, .ctx = self, .vt = &vt, .control = if (self.drop_tail) .shapes else null };
+        switch (self.plant) {
+            .none => {},
+            .drop_slice => s.name = "control: xpu attention merge losing its last slice",
+            .old_grid => s.name = "control: xpu attn_decode launched on the old (slices, heads, rows) grid",
+        }
+        return .{ .spec = s, .ctx = self, .vt = &vt, .control = if (self.plant == .none) null else .shapes };
     }
 
     const vt = g.hooks(Attn);
@@ -97,7 +104,9 @@ pub const Attn = struct {
         const ns: u32 = @intCast(self.f.slices());
         const p0: i32 = @intCast(self.f.shape.k - 1);
         const nil: ?*anyopaque = null;
-        const grid: [3]u32 = if (old) .{ ns, ref.kv_heads, t } else .{ t, ref.kv_heads, ns };
+        // the old-grid control launches only where that grid stays inside the buffers: no more slices than rows
+        const old_grid = old or (self.plant == .old_grid and ns <= t);
+        const grid: [3]u32 = if (old_grid) .{ ns, ref.kv_heads, t } else .{ t, ref.kv_heads, ns };
         try self.rig.launch(if (old) self.old_decode else self.decode, grid, .{
             self.q,              self.kc,   self.vc, b.pm, b.pl,        b.po, p0, @as(i32, @intCast(ns)),
             @as(f32, ref.scale), self.tree, nil,     nil,  @as(i32, 0),
