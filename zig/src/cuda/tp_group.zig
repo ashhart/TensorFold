@@ -1,4 +1,4 @@
-//! A tensor-parallel group over NCCL (NCCL_COMM_ID; rows in rank order); two ranks add RoCE small gathers (roce.zig).
+//! A tensor-parallel group over NCCL (NCCL_COMM_ID; rows in rank order); small gathers by RoCE where asked (roce.zig).
 const std = @import("std");
 const nccl = @import("nccl.zig");
 const driver = @import("driver.zig");
@@ -26,7 +26,7 @@ pub const Group = struct {
     rank: usize,
     world: usize,
     aborted: std.atomic.Value(bool) = .init(false),
-    fast: ?*roce.Gather = null, // two ranks' small all-gathers by RoCE writes (openRoce), when both ranks brought it up
+    fast: ?*roce.Gather = null, // the ranks' small all-gathers by RoCE writes (openRoce), when every rank brought it up
     multi: ?Multi = null, // three ranks or more: small all-gathers on a borrowed wire, set once every rank's probe agreed
 
     /// Rank `rank` of `world` (NCCL opened at run time; NCCL_COMM_ID names rank 0's address, every rank the same).
@@ -70,10 +70,14 @@ pub const Group = struct {
         if (!g.aborted.swap(true, .acq_rel)) _ = g.lib.api.ncclCommAbort(g.comm);
     }
 
-    /// Two ranks: gathers up to `max_bytes` a rank go by RoCE writes if both ranks bring it up; else NCCL keeps them.
+    /// Gathers up to `max_bytes` a rank go by RoCE writes if every rank asks (roce.wanted) and reaches all; else NCCL.
     pub fn openRoce(g: *Group, gpa: std.mem.Allocator, io: std.Io, d: *const driver.Driver, s: Stream, max_bytes: usize) !void {
-        if (g.world != 2 or g.fast != null) return;
-        g.fast = try roce.Gather.init(gpa, io, d, g, s, roce.wanted(), max_bytes);
+        if (g.world < 2 or g.fast != null) return;
+        if (g.world > roce.max_world) {
+            if (g.rank == 0) std.log.info("RoCE all-gather: {d} ranks; this path carries at most {d}, NCCL carries every gather", .{ g.world, roce.max_world });
+            return;
+        }
+        g.fast = try roce.Gather.init(gpa, io, d, g, s, roce.wanted(g.world), max_bytes);
     }
 
     /// A failed RoCE gather's error (its rows hold nothing valid): call it after a synchronize that reads a gather.
@@ -86,17 +90,23 @@ pub const Group = struct {
     pub fn allGather(g: *const Group, s: Stream, mine: u64, all: u64, bytes: usize) !void {
         if (g.fast) |f| if (f.fits(bytes)) return f.gather(s.handle, mine, all, bytes);
         if (g.multi) |m| if (m.fits(m.ctx, bytes)) return m.gather(m.ctx, s.handle, mine, all, bytes);
-        try g.lib.check(g.lib.api.ncclAllGather(mine, all, bytes, .u8, g.comm, s.handle), "ncclAllGather");
+        try g.call(g.lib.api.ncclAllGather(mine, all, bytes, .u8, g.comm, s.handle), "ncclAllGather");
+    }
+
+    /// A call's result: once the group is aborted, a failure ends as Aborted, not at lib.check's fatal stop.
+    fn call(g: *const Group, res: nccl.Result, what: []const u8) !void {
+        if (res != 0 and g.aborted.load(.acquire)) return error.Aborted;
+        try g.lib.check(res, what);
     }
 
     /// `bytes` at `ptr` to rank `peer`, on `s` (its matching recv takes the same count).
     pub fn send(g: *const Group, s: Stream, ptr: u64, bytes: usize, peer: usize) !void {
-        try g.lib.check(g.lib.api.ncclSend(ptr, bytes, .u8, @intCast(peer), g.comm, s.handle), "ncclSend");
+        try g.call(g.lib.api.ncclSend(ptr, bytes, .u8, @intCast(peer), g.comm, s.handle), "ncclSend");
     }
 
     /// `bytes` from rank `peer` into `ptr`, on `s`.
     pub fn recv(g: *const Group, s: Stream, ptr: u64, bytes: usize, peer: usize) !void {
-        try g.lib.check(g.lib.api.ncclRecv(ptr, bytes, .u8, @intCast(peer), g.comm, s.handle), "ncclRecv");
+        try g.call(g.lib.api.ncclRecv(ptr, bytes, .u8, @intCast(peer), g.comm, s.handle), "ncclRecv");
     }
 
     /// Rank 0 and rank `peer` connect both ways with one small exchange (`ptr`: 128 bytes, 64 out and 64 in).

@@ -43,7 +43,7 @@ pub const text =
     \\  cublaslt                  bf16 GEMM through cuBLASLt against an fp64 reference
     \\  nccl                      one-rank NCCL all-reduce and all-gather
     \\  rank-scatter <rank> <n> [id]  rank-order reduce-scatter (NCCL_COMM_ID or an id file) against an all-gather
-    \\  roce-gather <rank>        two ranks (NCCL_COMM_ID): the RoCE all-gather against NCCL's, graph replays, time a call
+    \\  roce-gather <rank> [world]  the RoCE all-gather against NCCL's (NCCL_COMM_ID; world 2 by default, any on a switch): every size, graph replays, 3000 mixed calls, time a call
     \\  rank-sum                  the reduce-scatter's sum kernel alone, 2 to 5 ranks as each rank (one GPU, no NCCL)
     \\  nccl-pair <rank> <world> <idfile>  one rank of a multi-host communicator: send/recv with every peer, all-reduce, all-gather
     \\  gdn-replay <dir>          replay_kernel bits against the Python oracle's fixture
