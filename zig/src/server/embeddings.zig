@@ -8,6 +8,7 @@ const response = @import("embedding_response.zig");
 const openai = @import("openai.zig");
 const http_body = @import("http_body.zig");
 const wait = @import("wait_reason.zig");
+const refusals = @import("refusals.zig");
 const Conn = @import("http_conn.zig").Conn;
 const Server = @import("server.zig").Server;
 pub const Failure = errors.Refused || error{Cancelled};
@@ -29,10 +30,10 @@ pub fn reply(srv: *Server, cx: *errors.Cx, body: json.Value, gone: anytype) Fail
     const id = srv.next_id.fetchAdd(1, .monotonic);
     if (gone.check()) return error.Cancelled;
     const ended = @import("prompt_only_wait.zig").run(srv.engine, srv.io, id, &ask, gone) catch |err| return switch (err) {
-        error.InvalidRequest, error.InvalidSpans => cx.refuse("the embedding request does not match the model"),
-        error.Busy => cx.wait(wait.engine_busy, "the embedding engine is busy; retry shortly", .{}),
-        error.Closed, error.Stale => cx.wait(wait.engine_unavailable, "the embedding engine is unavailable", .{}),
-        error.MemoryPressure => cx.wait(wait.memory_pressure, "{s}", .{api.pressure_message}),
+        error.InvalidRequest, error.InvalidSpans => refusals.count(srv, .invalid_request, cx.refuse("the embedding request does not match the model")),
+        error.Busy => refusals.count(srv, .engine_busy, cx.wait(wait.engine_busy, "the embedding engine is busy; retry shortly", .{})),
+        error.Closed, error.Stale => refusals.count(srv, .engine_unavailable, cx.wait(wait.engine_unavailable, "the embedding engine is unavailable", .{})),
+        error.MemoryPressure => refusals.count(srv, .memory_pressure, cx.wait(wait.memory_pressure, "{s}", .{api.pressure_message})),
     };
     switch (ended) {
         .cancelled => return error.Cancelled,
