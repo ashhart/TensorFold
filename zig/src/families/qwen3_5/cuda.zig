@@ -18,6 +18,7 @@ pub const reuse = @import("cuda_reuse.zig");
 pub const joint = @import("cuda_joint_readout.zig");
 /// The joint schema head on the device (cuda/joint_schema), for the runners.
 pub const joint_schema = @import("cuda_joint_schema");
+pub const stage = @import("cuda_stage.zig");
 
 test {
     _ = @import("cuda_attention.zig");
@@ -63,6 +64,10 @@ test {
 
 test {
     _ = @import("cuda_wide.zig");
+    _ = @import("cuda_weights.zig");
+    _ = @import("cuda_mt2.zig");
+    _ = @import("cuda_stage_forward.zig");
+    _ = @import("cuda_shapes.zig");
 }
 
 pub const train_ops = @import("cuda_train_ops.zig");

@@ -1,5 +1,4 @@
-//! Flash Next EXL3's canonical expert reduction (root tree, f64 partial and finish) against the host exl3_canon.zig, bit for bit.
-//! Leaves and tree adds are f64; the f32 root is the f64 value rounded once, to nearest even.
+//! Canonical F64 leaves and merges, with one F32 root rounding, checked bit-exact against exl3_canon.zig.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -15,7 +14,7 @@ const slots = canon.slots;
 /// The subtree a launch computes: the leaves a rank of two owns, all 64 (one rank, the whole tree), or a middle block.
 pub const Split = enum { low, high, full, inner };
 
-/// The root kernel rounds to f32 once; the partial kernel stores the f64 value a finish (here or on another rank) merges.
+/// Roots round once to f32; partials retain the f64 value for a finish.
 pub const Mode = enum { root, partial };
 
 /// A planted fault of a control kernel (contract_leaf_controls.cuh); none is the shipped kernel.
@@ -93,8 +92,7 @@ const tree_served = [_]c.Shape{
     .{ .rows = 16, .n = 2560, .k = 0 },
 };
 
-/// The root is an f32 output of f32-declared sums (gate 4 holds it to at least fp32); the partial's f64 words are raw to
-/// the harness, its own check exact, and its sums f64 (gate 4 does not apply).
+/// Roots promise at least fp32 sums; raw f64 partials have an exact check and no gate 4.
 fn treeSpec(m: Mode, s: Split, f: Fault) c.Spec {
     return .{
         .name = treeName(m, s, f),
@@ -221,10 +219,7 @@ pub const Tree = struct {
         for (self.y) |*v| v.* = if (rng.uintLessThan(u8, 23) == 0) -0.0 else rng.floatNorm(f32) * 0.05 * std.math.exp2(@as(f32, @floatFromInt(rng.intRangeAtMost(i32, -10, 10))));
         for (self.w) |*v| v.* = if (rng.uintLessThan(u8, 29) == 0) -0.0 else rng.floatNorm(f32) * 0.2;
         if (fill != .nonfinite) {
-            // Row 0, one leaf a slot (0-9, the shared expert in 63), every product y / 16, four planted columns:
-            //  0: a negative subnormal, a nonzero f64 product that f32 underflows; 1: all -0 products, the root is +0;
-            //  2: 1.25e8, 1, -1.25e8, 1 (f32 loses the 1s, f64 sums 2); 3: 2^60, 1, -2^60, 1 (f64 loses them too, so a flat
-            //  chain gives 1 where the tree gives 0: a fault the random columns, equal after rounding to f32, cannot show)
+            // Columns plant subnormal, signed zero, f32 cancellation and f64 order faults; one slot per leaf.
             const cancel = [2][4]f32{ .{ 2e9, 16, -2e9, 16 }, .{ 0x1p64, 16, -0x1p64, 16 } };
             if (self.split == .full) for (0..slots) |k| {
                 self.y[k * n] = @bitCast(@as(u32, 0x80000001));
@@ -297,8 +292,7 @@ pub const Tree = struct {
         return self.shape.rows * self.shape.n;
     }
 
-    /// The host canonical subtree of one output in f64 (exl3_canon.subtree: the partial's reference, and the root's before its
-    /// one rounding to f32).
+    /// Host F64 subtree before the root's single F32 conversion.
     fn expected(self: *const Tree, i: usize) f64 {
         const r = i / self.shape.n;
         const col = i % self.shape.n;
@@ -355,8 +349,7 @@ pub const Tree = struct {
     }
 };
 
-/// Guards, inputs, then each output against the host's f64 reduction as the kernel stores it (`wide`: the f64 partial as is;
-/// else its one rounding to f32), then float64's class and bound (gate 1: finite and not).
+/// Check guards, inputs, exact stored values, then float64's classes and numerical bound.
 fn verify(wide: bool, rig: *rig_.Rig, msg: []u8, s: c.Spec, shape: c.Shape, gate: g.Gate, inputs: []const []const u8, want: []const f64, mag: []const f64, ctx: anytype, comptime expected: anytype) !?[]const u8 {
     if (!try rig.intact()) return "a payload guard changed";
     const seen = try rig.inputBytes();
@@ -436,8 +429,7 @@ pub const Finish = struct {
         return true;
     }
 
-    /// Partials of different magnitudes and a full 53-bit mantissa (f32 partials or merges show), a few negative zeros; row 0
-    /// column 0 holds 2^60, 1, -2^60, 1 (the first four pieces of a degree 8 pair up to 0 where one flat chain gives 1).
+    /// Full F64 mantissas expose narrowed partials; row 0 plants 2^60, 1, -2^60, 1 to expose flat order.
     fn random(self: *Finish, rng: std.Random, fill: g.Fill) void {
         for (self.vals) |*v| {
             const scale: f64 = @floatFromInt(@as(u32, 1) << rng.uintLessThan(u5, 10));
@@ -468,7 +460,7 @@ pub const Finish = struct {
         };
     }
 
-    /// Integer partials of 2^19 to 2^20 in shuffled negated pairs (odd one out 3): exact in f64 and fp32, ruinous in fp16/bf16.
+    /// Shuffled signed integer pairs: exact in f32/f64, inaccurate in fp16/bf16.
     fn stress(self: *Finish, rng: std.Random) void {
         for (0..self.shape.rows * self.shape.n) |i| {
             var v: [canon.max_pieces]f64 = undefined;
@@ -543,16 +535,16 @@ pub const Finish = struct {
     }
 };
 
-/// The root, partial and finish kernels, each fault of each as a control, over the flashnext_batch image and the controls image.
+/// Canonical roots, partials and finishes, with a control per planted fault.
 pub const Canons = struct {
     mod: cuda.Module,
     trees: [10]Tree,
     finishes: [4]Finish,
 
     const tree_plan = [10]struct { Mode, Split, Fault }{
-        .{ .root, .full, .none },          .{ .root, .full, .flat },        .{ .root, .full, .nan_dropped },
-        .{ .root, .full, .writes_input },  .{ .root, .full, .bf16_adds },   .{ .partial, .low, .none },
-        .{ .partial, .high, .none },       .{ .partial, .full, .none },     .{ .partial, .inner, .none },
+        .{ .root, .full, .none },            .{ .root, .full, .flat },      .{ .root, .full, .nan_dropped },
+        .{ .root, .full, .writes_input },    .{ .root, .full, .bf16_adds }, .{ .partial, .low, .none },
+        .{ .partial, .high, .none },         .{ .partial, .full, .none },   .{ .partial, .inner, .none },
         .{ .partial, .full, .f32_partials },
     };
     const finish_plan = [4]Fault{ .none, .flat, .bf16_adds, .f32_partials };
