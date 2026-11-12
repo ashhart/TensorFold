@@ -5,7 +5,7 @@ const ks = @import("kernel_sources").dsv41;
 const Set = @import("set.zig").Set;
 const xm = @import("../src/families/deepseek_v41/metal/experts_mma.zig");
 pub fn add(s: *Set, device: mtl.Device) !void {
-    inline for (.{ "fp8_mma", "fp8_rows", "csa2_attn", "topk512", "glue", "glue_tmp", "fused", "fold", "compress", "mv", "cand", "index", "engram", "hc" }) |name|
+    inline for (.{ "fp8_mma", "fp8_rows", "fp8_tile", "csa2_attn", "topk512", "glue", "glue_tmp", "fused", "fold", "compress", "mv", "cand", "index", "engram", "hc" }) |name|
         try s.raw("deepseek-v41", name, @field(ks, name));
     try s.raw("deepseek-v41", "experts", try @import("../src/families/deepseek_v41/metal/experts.zig").source(s.a, "", &.{}));
     try s.raw("deepseek-v41", "expert-mma", try xm.source(s.a, "", &.{}, false));
