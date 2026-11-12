@@ -446,3 +446,42 @@ test "dsv41 metal serve: (j) a decode share gives a decoding reply rounds betwee
     }
     try testing.expectEqual(@as(usize, 0), bad);
 }
+
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+
+test "dsv41 metal serve: (k) fcfs steps capped at 128 and 100 rows: replies == serial, each step on the chunk staged for it" {
+    const long = try ids(1100, 36);
+    defer gpa.free(long);
+    const p0 = try ids(120, 37);
+    defer gpa.free(p0);
+    const asks = [_]Ask{ .{ .prompt = p0, .max = 300, .drafts = false }, .{ .prompt = long, .max = 8 } };
+    var want: [2][]u32 = undefined;
+    try reference(&asks, &want);
+    defer freeAll(&want);
+    _ = setenv("TENSORFOLD_PREFILL_POLICY", "fcfs", 1);
+    defer _ = unsetenv("TENSORFOLD_PREFILL_POLICY");
+    defer _ = unsetenv("TENSORFOLD_PREFILL_TOKENS");
+    var bad: usize = 0;
+    // a 256-row chunk: steps of half a chunk and of rows that divide none, while a reply decodes
+    for ([_][:0]const u8{ "128", "100" }) |tokens| {
+        _ = setenv("TENSORFOLD_PREFILL_TOKENS", tokens, 1);
+        const m = try fs.open(gpa, io, seed, .{ .slots = 2, .chunk = 256, .steps = try host.serve_lanes.stepsFromEnv() });
+        const s = try Served.open(gpa, io, m.model(), ".", null);
+        defer Served.close(s);
+        const e = s.engine();
+        var boxes: [2]Box = @splat(.{});
+        defer for (&boxes) |*b| b.deinit();
+        const reqs = [2]api.Request{ .{ .prompt = p0, .max_tokens = 300, .drafts = false }, .{ .prompt = long, .max_tokens = 8 } };
+        try e.submit(900, &reqs[0], .{ .ctx = &boxes[0], .event = Box.event });
+        try awaitStat(&m.t.stats.windows, 1);
+        try e.submit(901, &reqs[1], .{ .ctx = &boxes[1], .event = Box.event });
+        for (&boxes) |*b| try b.wait();
+        const equal = std.mem.eql(u32, want[0], boxes[0].out.items) and std.mem.eql(u32, want[1], boxes[1].out.items);
+        const hits = m.t.pr.stage_hits;
+        const ok = equal and m.t.stats.pieces >= 3 and hits + 1 >= m.t.stats.pieces;
+        say(ok, "(k) fcfs, {s} rows a step: {d} pieces, {d} calls on a staged chunk; replies {s} serial", .{ tokens, m.t.stats.pieces, hits, if (equal) "equal" else "differ from" });
+        bad += @intFromBool(!ok);
+    }
+    try testing.expectEqual(@as(usize, 0), bad);
+}

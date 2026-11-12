@@ -100,6 +100,8 @@ pub const Prompt = struct {
     prof: Prof = .{},
     /// the next chunk's inputs an `encode` that stopped short of the prompt's end prepared for the next call
     stage: ?Stage = null,
+    /// calls whose first chunk's inputs the previous call prepared (`stage`)
+    stage_hits: u64 = 0,
 
     pub fn init(device: mtl.Device, c: *const Config, o: Opts, limit: u32) !Prompt {
         const d = try check(c);
@@ -151,8 +153,10 @@ pub const Prompt = struct {
         if (p.stage) |st| if (st.tail == tail and st.a == tail.end and tail.end < upto and st.b == try p.chunkEnd(tail.end, upto)) {
             cur = st.set;
             staged = true;
+            p.stage_hits += 1;
         };
         p.stage = null;
+        const from = tail.end;
         while (tail.end < upto) {
             const a = tail.end;
             const b = try p.chunkEnd(a, upto);
@@ -164,8 +168,8 @@ pub const Prompt = struct {
             const cb = try p.encoderChunk(env, slot, tail, a, b, cur);
             p.prof.enc_ns += now() - te;
             var ahead: anyerror!void = {};
-            // the next chunk of this call, else (stopping short of the prompt's end) the next call's first chunk
-            const lim: u32 = if (b < upto) upto else @intCast(hist.len);
+            // the next chunk of this call, else the next call's first, that call taking as many rows as this one
+            const lim: u32 = if (b < upto) upto else @intCast(@min(hist.len, b + (upto - from)));
             var nb: u32 = b;
             if (b < lim) {
                 if (p.chunkEnd(b, lim)) |e| {
