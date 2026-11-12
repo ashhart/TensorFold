@@ -4,11 +4,11 @@ const reg = @import("registry.zig");
 const limits = @import("limits.zig");
 const t = std.testing;
 
-// A zero register count is an SM the receipt has not measured yet (the ModelOpt images: GB10 only).
+// nvcc 13.0 on all five SMs; a zero register count would be an SM the receipt has not measured yet.
 const receipts = [_]struct { name: []const u8, regs: [5]u32, shared: u32, bound: u32 }{
-    .{ .name = "qwen_router_bf16 tf_moe_router_expert_first", .regs = .{ 0, 0, 0, 0, 63 }, .shared = 16512, .bound = 256 },
-    .{ .name = "qwen_gdn_bf16 tf_gdn_chain_norm", .regs = .{ 0, 0, 0, 0, 183 }, .shared = 24704, .bound = 256 },
-    .{ .name = "qwen_gdn_bf16 chain_kernel", .regs = .{ 0, 0, 0, 0, 193 }, .shared = 37120, .bound = 128 },
+    .{ .name = "qwen_router_bf16 tf_moe_router_expert_first", .regs = .{ 32, 48, 48, 63, 63 }, .shared = 16512, .bound = 256 },
+    .{ .name = "qwen_gdn_bf16 tf_gdn_chain_norm", .regs = .{ 176, 184, 184, 183, 183 }, .shared = 24704, .bound = 256 },
+    .{ .name = "qwen_gdn_bf16 chain_kernel", .regs = .{ 229, 231, 231, 193, 193 }, .shared = 37120, .bound = 128 },
     .{ .name = "gdn_prefill chain_kernel", .regs = .{ 229, 231, 231, 193, 193 }, .shared = 37120, .bound = 128 },
     .{ .name = "qwen35 tf_q35_gdn_post", .regs = .{ 28, 29, 29, 31, 31 }, .shared = 256, .bound = 32 },
 };
