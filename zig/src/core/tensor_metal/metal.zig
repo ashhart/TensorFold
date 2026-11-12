@@ -79,6 +79,7 @@ pub const Gpu = struct {
     device: mtl.Device,
     queue: mtl.Queue,
     library: mtl.Library,
+    exact_library: ?mtl.Library = null,
     pipelines: std.StringHashMapUnmanaged(mtl.Pipeline) = .empty,
     gpu_seconds: f64 = 0,
     wait_seconds: f64 = 0,
@@ -127,6 +128,7 @@ pub const Gpu = struct {
         }
         self.pipelines.deinit(self.allocator);
         self.library.deinit();
+        if (self.exact_library) |library| library.deinit();
         self.queue.deinit();
         self.device.deinit();
     }
@@ -264,7 +266,15 @@ pub const Gpu = struct {
         if (self.pipelines.get(name)) |p| return p;
         const key = try self.allocator.dupe(u8, name);
         errdefer self.allocator.free(key);
-        const p = try mtl.Pipeline.init(self.device, self.library, name, false);
+        const library = if (std.mem.startsWith(u8, name, "qwv_gemm_f32_exact_")) blk: {
+            if (self.exact_library == null) {
+                const source = try std.mem.replaceOwned(u8, self.allocator, sources.tensor_exact_gemm, "#include \"../nax.h\"", sources.nax);
+                defer self.allocator.free(source);
+                self.exact_library = try mtl.Library.fromSource(self.device, source, mtl.CompileOptions.mlx());
+            }
+            break :blk self.exact_library.?;
+        } else self.library;
+        const p = try mtl.Pipeline.init(self.device, library, name, false);
         errdefer p.deinit();
         try self.pipelines.put(self.allocator, key, p);
         return p;

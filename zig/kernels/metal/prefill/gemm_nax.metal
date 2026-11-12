@@ -8,7 +8,7 @@ typedef half float16_t;
 namespace tfp {
 
 // One 32-deep K step of a simdgroup's 32x32 block; kk is the step's K offset from A and B, kn the K values left there.
-template <typename T, bool TA, bool TB, bool BOUND, bool EXACT_B = false>
+template <typename T, bool TA, bool TB, bool BOUND>
 inline void gemm_step(thread frag<float> (&acc)[2][2], const device T* A, const device T* B, int lda, int ldb, int kk,
                       int kn, int rows, int cols, short2 home) {
   frag<T> a[2][2], b[2][2];   // a[m][k], b[k][n]: 16x16 blocks of A and B in their stored orientation
@@ -46,13 +46,17 @@ inline void gemm_step(thread frag<float> (&acc)[2][2], const device T* A, const 
   for (short m = 0; m < 2; m++) {
     TF_UNROLL
     for (short k = 0; k < 2; k++) {
-      mma_16x32<TA, TB, float, T, T, EXACT_B>(acc[m][0], acc[m][1], a[m][k], b[k][0], b[k][1]);
+#ifdef TF_NAX_EXACT_B
+      mma_16x32<TA, TB, float, T, T, true>(acc[m][0], acc[m][1], a[m][k], b[k][0], b[k][1]);
+#else
+      mma_16x32<TA, TB>(acc[m][0], acc[m][1], a[m][k], b[k][0], b[k][1]);
+#endif
     }
   }
 }
 
 // A simdgroup's 32x32 block over K: whole BK blocks first (barrier each), then 32-deep steps zero-padded past K.
-template <typename T, bool TA, bool TB, bool FULL, int BK, bool EXACT_B = false>
+template <typename T, bool TA, bool TB, bool FULL, int BK>
 inline void gemm_block(thread frag<float> (&acc)[2][2], const device T* A, const device T* B, int lda, int ldb,
                        int K, int kblocks, int rows, int cols, short2 home) {
   TF_UNROLL
@@ -71,7 +75,7 @@ inline void gemm_block(thread frag<float> (&acc)[2][2], const device T* A, const
     }
 #pragma clang loop unroll(disable)
     for (int kk = 0; kk < BK; kk += 32) {
-      gemm_step<T, TA, TB, !FULL, EXACT_B>(acc, A, B, lda, ldb, kk, 32, rows, cols, home);
+      gemm_step<T, TA, TB, !FULL>(acc, A, B, lda, ldb, kk, 32, rows, cols, home);
     }
     A += TA ? BK * lda : BK;
     B += TB ? BK : BK * ldb;
@@ -84,7 +88,7 @@ inline void gemm_block(thread frag<float> (&acc)[2][2], const device T* A, const
     }
 #pragma clang loop unroll(disable)
     for (int kk = 0; kk < rest; kk += 32) {
-      gemm_step<T, TA, TB, true, EXACT_B>(acc, A, B, lda, ldb, kk, max(0, rest - kk), rows, cols, home);
+      gemm_step<T, TA, TB, true>(acc, A, B, lda, ldb, kk, max(0, rest - kk), rows, cols, home);
     }
   }
 }
@@ -105,7 +109,7 @@ inline void gemm_store(thread const frag<float> (&acc)[2][2], device O* D, int l
 }
 
 // D = A * B per batch, steel_gemm_fused_nax without epilogue; P holds the GEMM_PARAMS fields of check_prefill_ops.
-template <typename T, bool TA, bool TB, bool AM, bool AN, bool AK, int BM, int BN, int BK, int WM, int WN, bool EXACT_B = false>
+template <typename T, bool TA, bool TB, bool AM, bool AN, bool AK, int BM, int BN, int BK, int WM, int WN>
 inline void gemm_nax(const device T* A, const device T* B, device T* D, const device int* P, uint3 tg, uint sg,
                      uint lane) {
   static_assert(BM / WM == 32 && BN / WN == 32, "a simdgroup owns a 32x32 block");
@@ -124,10 +128,10 @@ inline void gemm_nax(const device T* A, const device T* B, device T* D, const de
   const short2 home = frag_home(ushort(lane));
   frag<float> acc[2][2];
   if (full) {
-    gemm_block<T, TA, TB, true, BK, EXACT_B>(acc, A, B, lda, ldb, P[2], P[9], rows, cols, home);
+    gemm_block<T, TA, TB, true, BK>(acc, A, B, lda, ldb, P[2], P[9], rows, cols, home);
     gemm_store<T, true>(acc, D, ldd, rows, cols, home);
   } else {
-    gemm_block<T, TA, TB, false, BK, EXACT_B>(acc, A, B, lda, ldb, P[2], P[9], rows, cols, home);
+    gemm_block<T, TA, TB, false, BK>(acc, A, B, lda, ldb, P[2], P[9], rows, cols, home);
     if (rows > 0 && cols > 0) {
       gemm_store<T, false>(acc, D, ldd, rows, cols, home);
     }

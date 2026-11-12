@@ -7,8 +7,8 @@ const rig_ = @import("rig.zig");
 const c = contract.spec;
 const g = contract.gates;
 
-pub fn text(a: std.mem.Allocator, device: mtl.Device) ![]u8 {
-    return tf.frags.source(device, a, "#define TF_NAX_STRICT_FP32\n" ++ sources.core_qwen_vision);
+pub fn text(a: std.mem.Allocator, device: mtl.Device, exact: bool) ![]u8 {
+    return tf.frags.source(device, a, if (exact) sources.tensor_exact_gemm else "#define TF_NAX_STRICT_FP32\n" ++ sources.core_qwen_vision);
 }
 
 fn fullDepth(s: c.Shape) usize {
@@ -211,10 +211,14 @@ pub const Suite = struct {
 
     pub fn collect(self: *Suite, device: mtl.Device, queue: mtl.Queue, kernels: *std.ArrayList(g.Kernel), only: ?[]const u8) !void {
         if (!device.tensorUnits()) return;
-        const source = try text(self.a, device);
+        const source = try text(self.a, device, false);
         defer self.a.free(source);
+        const exact_source = try text(self.a, device, true);
+        defer self.a.free(exact_source);
         var library: ?mtl.Library = null;
         defer if (library) |lib| lib.deinit();
+        var exact_library: ?mtl.Library = null;
+        defer if (exact_library) |lib| lib.deinit();
         for ([_]bool{ false, true }) |am| for ([_]bool{ false, true }) |an| for (0..3) |kind| {
             const exact = kind != 0;
             const control = kind == 2;
@@ -225,9 +229,10 @@ pub const Suite = struct {
                 continue;
             };
             if (library == null) library = try mtl.Library.fromSource(device, source, mtl.CompileOptions.mlx());
+            if (exact and exact_library == null) exact_library = try mtl.Library.fromSource(device, exact_source, mtl.CompileOptions.mlx());
             var symbol: [64]u8 = undefined;
             const name_ = try std.fmt.bufPrint(&symbol, "qwv_gemm_f32{s}_nt_{d}{d}", .{ if (exact) "_exact" else "", @intFromBool(am), @intFromBool(an) });
-            const pipe = try mtl.Pipeline.init(device, library.?, name_, false);
+            const pipe = try mtl.Pipeline.init(device, if (exact) exact_library.? else library.?, name_, false);
             errdefer pipe.deinit();
             const base_name = try std.fmt.bufPrint(&symbol, "qwv_gemm_f32_nt_{d}{d}", .{ @intFromBool(am), @intFromBool(an) });
             const baseline = try mtl.Pipeline.init(device, library.?, base_name, false);
