@@ -67,7 +67,7 @@ fn serial(f: *Fx, requests: []const be.DraftRequest) anyerror!void {
         while (d < depth) : (d += 1) {
             var tok: [1]u32 = undefined;
             var prob: [1]f32 = undefined;
-            try head_mod.draws(o, m, &e.host, e.stream, mixed, 1, f.draft_ids, &tok, &prob);
+            try head_mod.draws(o, m, &e.host, e.stream, mixed, 1, f.draft_ids, &tok, &prob, false);
             lane.held[d] = tok[0];
             chained = d + 1;
             if (d + 1 == depth or prob[0] < stop_under) break;
@@ -175,6 +175,7 @@ fn batched(f: *Fx, requests: []const be.DraftRequest) anyerror!void {
         f.draft_ids,
         toks[0..n],
         probs[0..n],
+        true,
     );
     var next: usize = 0;
     for (active[0..active_n]) |si| {
@@ -221,6 +222,7 @@ fn batched(f: *Fx, requests: []const be.DraftRequest) anyerror!void {
             f.draft_ids,
             toks[0..active_n],
             probs[0..active_n],
+            true,
         );
         for (active[0..active_n], 0..) |si, a| try hip.raw.copy(
             slots[si].lane.streams,
