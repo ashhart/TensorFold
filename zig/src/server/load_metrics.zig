@@ -28,16 +28,16 @@ pub fn render(w: *std.Io.Writer, s: ledger.Snapshot, id: Identity) !void {
     try family(w, "http_requests_active", "gauge", "Model requests from the end of their headers to the end of their reply, by route group.");
     for (std.enums.values(ledger.RouteGroup)) |g|
         try w.print("{s}http_requests_active{{route=\"{s}\"}} {d}\n", .{ prefix, @tagName(g), s.active(g) });
-    try family(w, "request_refusals_total", "counter", "Requests refused with a client code: the three capacity codes and the engine's invalid_request.");
+    try family(w, "request_refusals_total", "counter", "Requests refused with a client code: capacity, the engine's invalid_request, admission.");
     for (std.enums.values(reasons.Refusal)) |x|
         try w.print("{s}request_refusals_total{{reason=\"{s}\"}} {d}\n", .{ prefix, @tagName(x), s.refusals[@backingInt(x)] });
+    try family(w, "request_failures_total", "counter", "Requests that ended failed with no refusal code, by fixed reason.");
+    for (std.enums.values(reasons.Failure)) |x|
+        try w.print("{s}request_failures_total{{reason=\"{s}\"}} {d}\n", .{ prefix, @tagName(x), s.failed(x) });
     if (s.requests) |r| {
         try family(w, "requests_waiting_by_reason", "gauge", "Queued requests by the one wait reason each holds; they sum to requests_waiting.");
         for (std.enums.values(reasons.Wait)) |x|
             try w.print("{s}requests_waiting_by_reason{{reason=\"{s}\"}} {d}\n", .{ prefix, @tagName(x), r.waiting_by_reason[@backingInt(x)] });
-        try family(w, "request_failures_total", "counter", "Requests the engine took and then ended failed, by fixed reason.");
-        for (std.enums.values(reasons.Failure)) |x|
-            try w.print("{s}request_failures_total{{reason=\"{s}\"}} {d}\n", .{ prefix, @tagName(x), r.failures[@backingInt(x)] });
         try gauge(w, "restore_fallbacks_total", "counter", "Requests whose saved prefix could not be restored: they prefilled from zero and were served.", r.restore_fallbacks);
         try gauge(w, "waiting_prompt_tokens", "gauge", "Prompt tokens of the queued requests, before any kept prefix restores part of them.", r.waiting_prompt_tokens);
         if (r.filling_left) |left| try gauge(w, "filling_prompt_tokens_left", "gauge", "Prompt tokens still to prefill in the foreground passes filling now.", left);
