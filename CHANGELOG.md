@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Tests: the cancelled-benchmark test checks that a cancelled run saves one cancelled sample and never publishes, instead of counting requests that race the stop, so it no longer fails on a busy runner (#2865, fixes #2853).
+
 - HIP Flash Next: a decode round's n-gram table gather spreads over the parked host workers and asks for its pages first (`MADV_POPULATE_READ`), so first-time page faults overlap; on one Radeon 8060S (gfx1151) with Qwen3.8-Flash-Next oQ4e at 4 streams, cold decode is about 45% faster sampled and 18% greedy and the cold 8K first token about 10% sooner, with warm decode level and tokens unchanged (#2695). Thanks to @gilby.
 
 - CI: the serving pins (`test-gradient-serving` and `test-qwen-serving-host`) run on every pull request, not only in the nightly, so a change to a pinned serving file carries its re-pin. `experts.zig` is re-pinned for #2843 (#3011).
