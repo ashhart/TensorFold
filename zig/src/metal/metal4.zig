@@ -8,8 +8,7 @@ const Device = @import("device.zig").Device;
 
 const Id = objc.Id;
 
-/// Apple's unfair lock. Builds for other systems still analyze this file (`Buffer.deinit` calls `released`), so there
-/// it is an empty stand-in that never runs.
+/// Apple's unfair lock; off Apple an empty stand-in, since other builds still analyze this file and never run it.
 const darwin = @import("builtin").os.tag.isDarwin();
 const Lock = if (darwin) std.c.os_unfair_lock else struct {};
 fn hold(lock: *Lock) void {
