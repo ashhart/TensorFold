@@ -389,7 +389,7 @@ const Run = struct {
         message.put(r.a, "content", if (calls != null and reply.content.len == 0) .null else .{ .string = reply.content }) catch return;
         if (calls) |c| message.put(r.a, "tool_calls", .{ .array = c }) catch return;
         if (r.turn) |t| t.remember(r.a, r.plan.input, .{ .object = message });
-        // the next turn sends back the reply as its client got it, its reasoning included
+        // the reply as its client got it; the warm pass keeps its reasoning only for a client that sends reasoning back
         const sent = replyMessage(r.a, reply, calls) catch return;
         warm.reply(r.srv, r.plan.input, .{ .object = sent }, reply.thinking, reply.effort, reply.prompt_tokens);
     }

@@ -197,7 +197,8 @@ test "after a tool call the warm pass opens the next turn as that call's result,
     try nextTurn(srv, &backend, first, next);
 }
 
-test "the warm pass renders the reply's reasoning as the next request sends it back" {
+/// A thinking reply after `history`, then the next request of a client that keeps (`keeps`) or drops reasoning.
+fn reasoningTurns(history: []const u8, keeps: bool) !void {
     var text: Roles = .{};
     var backend: Record = .{ .reply = "Plan.</think>Done." };
     defer backend.deinit();
@@ -206,14 +207,28 @@ test "the warm pass renders the reply's reasoning as the next request sends it b
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const user = "{\"model\":\"m\",\"max_tokens\":64,\"messages\":[{\"role\":\"user\",\"content\":\"go\"}";
-    const got = try exchange(srv, "/v1/chat/completions", user ++ "]}");
+    const user = try std.mem.concat(a, u8, &.{ "{\"model\":\"m\",\"max_tokens\":64,\"messages\":[", history, "{\"role\":\"user\",\"content\":\"go\"}" });
+    const got = try exchange(srv, "/v1/chat/completions", try std.mem.concat(a, u8, &.{ user, "]}" }));
     defer t.allocator.free(got.body);
     try t.expectEqual(@as(u16, 200), got.status);
+    // the reply itself always carries its reasoning; only the warm pass's history follows the client
     const message = try replied(a, got.body);
     try t.expectEqualStrings("Plan.", (try json.parse(a, message)).ok.strField("reasoning_content").?);
     const first: Turns = .{ .warm_prompt = try t.allocator.dupe(u32, backend.warm_prompt), .warm_chunks = try t.allocator.dupe(u32, backend.warm_chunks) };
     try t.expect(first.warm_prompt.len > 0);
-    const next = try std.mem.concat(a, u8, &.{ user, ",", message, ",{\"role\":\"user\",\"content\":\"next\"}]}" });
+    const sent = if (keeps) message else "{\"role\":\"assistant\",\"content\":\"Done.\"}";
+    const next = try std.mem.concat(a, u8, &.{ user, ",", sent, ",{\"role\":\"user\",\"content\":\"next\"}]}" });
     try nextTurn(srv, &backend, first, next);
+}
+
+test "a first turn's warm pass leaves the reply's reasoning out, as a client that drops it sends it back" {
+    try reasoningTurns("", false);
+}
+
+test "the warm pass keeps the reply's reasoning for a client whose history sent reasoning back" {
+    try reasoningTurns("{\"role\":\"user\",\"content\":\"hi\"},{\"role\":\"assistant\",\"content\":\"Hello.\",\"reasoning_content\":\"Greet.\"},", true);
+}
+
+test "the warm pass leaves the reasoning out for a client whose history dropped it" {
+    try reasoningTurns("{\"role\":\"user\",\"content\":\"hi\"},{\"role\":\"assistant\",\"content\":\"Hello.\"},", false);
 }

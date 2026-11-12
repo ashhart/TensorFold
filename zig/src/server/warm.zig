@@ -42,7 +42,7 @@ fn start(srv: *Server, input: chat.Input, message: Value, thinking: bool, effort
     const a = p.arena.allocator();
     const clear = input.fields.get("clear_thinking");
     var cx: errors.Cx = .{ .a = a, .clear_thinking = if (clear != null and clear.? == .bool) clear.?.bool else null };
-    const warm_prompt = try shared(srv, &cx, input, message, thinking, effort);
+    const warm_prompt = try shared(srv, &cx, input, try sentBack(a, input.messages.array, message), thinking, effort);
     var prompt = warm_prompt.ids;
     // an image conversation's pass holds its images as its turns did (data URLs only: no URL is fetched twice)
     const pictures = try images.expand(srv.info.vision, null, srv.text, &cx, .{ .array = warm_prompt.messages }, prompt, prompt.len);
@@ -60,6 +60,23 @@ fn start(srv: *Server, input: chat.Input, message: Value, thinking: bool, effort
     const id = srv.next_id.fetchAdd(1, .monotonic);
     try srv.engine.submit(id, &p.request, .{ .ctx = p, .event = Pass.event });
     handed = true;
+}
+
+/// The reply as the next turn sends it back: with its reasoning only when an earlier reply came back with its own.
+fn sentBack(a: std.mem.Allocator, history: []const Value, message: Value) !Value {
+    if (!message.has("reasoning_content") or keepsReasoning(history)) return message;
+    const copy = try json.copyObject(a, message.object);
+    _ = copy.orderedRemove("reasoning_content");
+    return .{ .object = copy };
+}
+
+/// Whether a client sends replies back with their reasoning, from its history; a first turn's client is taken not to.
+fn keepsReasoning(history: []const Value) bool {
+    for (history) |m| {
+        if (!std.mem.eql(u8, m.strField("role") orelse "", "assistant")) continue;
+        if (m.strField("reasoning_content")) |r| if (r.len > 0) return true;
+    }
+    return false;
 }
 
 /// The tokens every next user or tool turn shares: two renderings agree up to that turn's text.
