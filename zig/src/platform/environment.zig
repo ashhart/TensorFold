@@ -192,6 +192,7 @@ pub const rules = [_]Rule{
     .{ .name = "TF_FLASHNEXT_KV_PAGE_TEST", .scope = .flashnext, .kind = .size, .forms = "a page size the kernels take, whole blocks of the indexer's ratio up to the window (unset: off)" },
     .{ .name = "TF_FLASHNEXT_CONFIDENCE", .scope = .flashnext, .kind = .signed_real, .forms = "a finite number (default -0.4)" },
     .{ .name = "TF_FLASHNEXT_PROMPT", .scope = .flashnext, .kind = .word, .words = &.{"rows"}, .forms = "rows for the rows path (unset or blank keeps the plain path)" },
+    .{ .name = "TF_FLASHNEXT_MTP_WEIGHTS", .scope = .flashnext, .kind = .word, .words = &.{ "checkpoint", "mxfp8" }, .forms = "checkpoint (the rows as stored, the default) or mxfp8 (BF16 drafter linears re-coded at load)" },
 };
 
 pub fn rule(name: []const u8) Rule {

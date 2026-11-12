@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Flash Next on CUDA: `TF_FLASHNEXT_MTP_WEIGHTS=mxfp8` re-codes the MTP drafter's BF16 linears to MXFP8 as they load (E4M3 codes and one power-of-two scale a row's 32 inputs), so a draft pass walks half their bytes; `checkpoint`, the default, keeps the rows as the checkpoint stores them (#9999). On an FP4 checkpoint the backbone is quantized and the drafter is not, which leaves about 181 MB of BF16 weights read on every draft pass. A draft is a proposal the verify forward checks, so a reply's tokens are unchanged and only the rounds it takes move.
+
 - GLM-5.3-Flash: the DFlash2 drafter's startup line and docs give its licence as Apache-2.0, as its model card now says (#3084, for #1583).
 
 - CUDA kernels: a bf16 format for grouped experts runs a checkpoint's own bf16 expert weights in mma fragment blocks, with relu² up and fp32 or bf16 down, in decode and prompt forms; no served checkpoint selects it yet (Nemotron 3.5 Transcribe, #1631, will), and every other expert format's dispatch is unchanged (#1630). Thanks to @BobClawblaw.
