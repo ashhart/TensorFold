@@ -226,3 +226,38 @@ test "HTTP limits: defaults and the maximum declared body have finite total budg
     try testing.expectError(error.Timeout, budget.wait(542_000, 120_000));
     try testing.expectEqual(@as(u32, 128), admission.default_limit);
 }
+
+test "security: one remote address holds at most its share of the connection slots" {
+    const Ip = std.Io.net.IpAddress;
+    var peers: admission.Peers = .{};
+    const cap = admission.perPeer(8);
+    try testing.expectEqual(@as(u32, 2), cap);
+    const a: Ip = .{ .ip4 = .{ .bytes = .{ 192, 0, 2, 1 }, .port = 40001 } };
+    const a_again: Ip = .{ .ip4 = .{ .bytes = .{ 192, 0, 2, 1 }, .port = 40002 } };
+    const a_mapped: Ip = .{ .ip6 = .{ .bytes = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 192, 0, 2, 1 }, .port = 40003 } };
+    const b: Ip = .{ .ip4 = .{ .bytes = .{ 192, 0, 2, 2 }, .port = 40001 } };
+    const first = peers.take(testing.io, a, cap).?;
+    const second = peers.take(testing.io, a_again, cap).?;
+    try testing.expect(first != second);
+    try testing.expectEqual(@as(?u16, null), peers.take(testing.io, a_again, cap));
+    try testing.expectEqual(@as(?u16, null), peers.take(testing.io, a_mapped, cap));
+    const other = peers.take(testing.io, b, cap).?;
+    peers.give(testing.io, first);
+    const freed = peers.take(testing.io, a_mapped, cap).?;
+    try testing.expectEqual(@as(?u16, null), peers.take(testing.io, a, cap));
+    for ([_]u16{ second, other, freed }) |slot| peers.give(testing.io, slot);
+}
+
+test "security: local clients share one address and are never limited by it" {
+    const Ip = std.Io.net.IpAddress;
+    var peers: admission.Peers = .{};
+    const local: Ip = .{ .ip4 = .loopback(40001) };
+    for (0..admission.default_limit) |_| try testing.expectEqual(@as(?u16, admission.Peers.untracked), peers.take(testing.io, local, 1));
+    peers.give(testing.io, admission.Peers.untracked);
+}
+
+test "security: connections with no request give their slots up from three quarters full" {
+    try testing.expectEqual(@as(u32, 96), admission.pressure(admission.default_limit));
+    try testing.expectEqual(@as(u32, 32), admission.perPeer(admission.default_limit));
+    try testing.expectEqual(@as(u32, 1), admission.perPeer(2));
+}

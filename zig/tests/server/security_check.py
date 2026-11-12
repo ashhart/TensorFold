@@ -125,6 +125,48 @@ def cases():
         b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n" + nested)
 
 
+HEALTH = b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
+CLOSING = b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+SLOTS = 128
+
+
+def answered(port):
+    """True when a new client is served; a full server answers 503 or resets the connection."""
+    try:
+        return statuses(exchange(port, CLOSING)) == [200]
+    except (AssertionError, OSError):
+        return False
+
+
+def held_slots(port):
+    """Every connection slot taken by clients with no request in progress: half kept alive, half silent."""
+    held = []
+    try:
+        for index in range(SLOTS):
+            connection = socket.create_connection(("127.0.0.1", port), timeout=5)
+            held.append(connection)
+            if index % 2:
+                continue
+            connection.sendall(HEALTH)
+            if not connection.recv(8192).startswith(b"HTTP/1.1 200"):
+                raise AssertionError("keep-alive health request was not answered")
+        if answered(port):
+            raise AssertionError("the fixture server did not fill up")
+        deadline = time.monotonic() + 12
+        while time.monotonic() < deadline:
+            time.sleep(1)
+            if answered(port):
+                return
+        raise AssertionError("no slot came free within 12 seconds")
+    finally:
+        for connection in held:
+            connection.close()
+
+
+def slot_cases():
+    yield "connections with no request give their slots up under pressure", held_slots
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("binary", type=Path)
@@ -140,6 +182,14 @@ def main():
                 actual = statuses(exchange(port, data))
                 if actual != expected:
                     raise AssertionError(f"expected {expected}, got {actual}")
+                print("PASS", label)
+            except (AssertionError, OSError, ValueError) as error:
+                failed += 1
+                print("FAIL", label + ":", str(error))
+        for label, check in slot_cases():
+            total += 1
+            try:
+                check(port)
                 print("PASS", label)
             except (AssertionError, OSError, ValueError) as error:
                 failed += 1
