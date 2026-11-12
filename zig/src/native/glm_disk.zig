@@ -147,3 +147,24 @@ pub fn withPolicy(legacy: u64, eng: anytype) u64 {
         @intFromBool(ehTile(eng)),
     });
 }
+
+test "GLM disk: whole images at default and native context exceed the default staging permit" {
+    var eng: glm.engine.Engine = undefined;
+    eng.c = .{};
+    var sl: glm.slots.Slots = undefined;
+    sl.e = &eng;
+    var b: Backend = undefined;
+    b.sl = &sl;
+    for ([_]u32{ 131072, 1048576 }, [_]u64{ 2664205312, 20280282112 }) |at, expected| {
+        var ps: std.ArrayList(rows.image.Part) = .empty;
+        defer ps.deinit(std.testing.allocator);
+        try image.parts(&b, at, &ps, std.testing.allocator);
+        try std.testing.expectEqual(expected, rows.image.imageBytes(ps.items));
+        try std.testing.expectEqual(expected, glm.snapshot.bytes(&eng.c, at, false));
+        try std.testing.expect(expected > 1 << 30);
+        var ranges: std.ArrayList(rows.image.Range) = .empty;
+        defer ranges.deinit(std.testing.allocator);
+        try rows.image.blockRanges(ps.items, rows.block_tokens, 0, 0, &ranges, std.testing.allocator);
+        try std.testing.expectEqual(@as(u64, 4915200), rows.image.total(ranges.items));
+    }
+}
