@@ -29,7 +29,7 @@ pub const Failures = struct {
 pub fn queued(r: *Rows, e: *pc.Entry, starts: []const u32) void {
     if (r.stopped or e.image_frame != 0 or e.images.len != 0 or !@import("cache_images.zig").diskSafe(e.tokens)) return;
     sync.queued(r, e, starts);
-    if (r.img.transient) |mutable| if (mutable(r.family.ptr, e.saved)) preserve(r, e);
+    if (r.img.transient) |mutable| if (mutable(r.family.ptr, e.saved)) preserve(r, e, true);
 }
 
 /// Eviction removes only a save still queued (staged work owns no entry); one that waited for room counts as skipped.
@@ -64,19 +64,39 @@ fn blocked(r: *const Rows) bool {
 /// A spill copies the entry before RAM releases it, without waiting for filesystem work or a byte permit.
 pub fn evicted(r: *Rows, e: *pc.Entry) void {
     if (r.spill == .off) return;
-    preserve(r, e);
+    preserve(r, e, false);
 }
 
-/// A completed keep may borrow mutable rows: stage them before any later backend operation can reuse them.
-fn preserve(r: *Rows, e: *pc.Entry) void {
+/// Borrowed rows stay live while a keep waits; an eviction still cannot wait for a permit.
+fn preserve(r: *Rows, e: *pc.Entry, borrowed: bool) void {
     if (r.stopped) return;
     if (r.sync_writes) return sync.preserve(r, e);
     reap(r);
-    for (r.queue.items, 0..) |q, i| if (q.entry == e) {
-        // A full permit refuses staging rather than borrowing the entry beyond this boundary.
-        _ = stage(r, r.queue.orderedRemove(i), false);
-        return;
-    };
+    while (true) {
+        const i = for (r.queue.items, 0..) |q, k| {
+            if (q.entry == e) break k;
+        } else return;
+        switch (stage(r, r.queue.orderedRemove(i), borrowed, borrowed)) {
+            .done => return,
+            .waiting => {
+                while (r.worker) |w| {
+                    if (w.ready() or w.pending() == 0) break;
+                    io.nap();
+                }
+                reap(r);
+            },
+            .oversized => {
+                // No full-image arena fits: publish older jobs, then stream bounded pieces before rows expire.
+                while (r.worker) |w| {
+                    reap(r);
+                    if (w.pending() == 0) break;
+                    io.nap();
+                }
+                sync.preserve(r, e);
+                return;
+            },
+        }
+    }
 }
 
 pub fn wanted(r: *const Rows, n: chain.Stem) bool {
@@ -90,7 +110,7 @@ pub fn step(r: *Rows) bool {
     reap(r);
     if (r.stopped or blocked(r) or (r.spill == .evicted and r.flush_clock == null)) return false;
     const q = r.queue.pop() orelse return false;
-    return stage(r, q, true);
+    return stage(r, q, true, false) != .waiting;
 }
 
 pub fn abort(r: *Rows, j: *Job) void {
@@ -226,15 +246,17 @@ fn complete(r: *const Rows, j: *const io.Job) bool {
     return true;
 }
 
-/// Whether `q` left the queue, staged or skipped; false when it waits for room and is queued again (`may_wait`).
-fn stage(r: *Rows, q: Queued, may_wait: bool) bool {
+const Stage = enum { done, waiting, oversized };
+
+/// A borrowed keep can stream an oversized image; other saves retain the ordinary permit refusal.
+fn stage(r: *Rows, q: Queued, may_wait: bool, borrowed: bool) Stage {
     const at = q.entry.at;
     r.next_job +%= 1;
     const name = chain.state(r.keying, q.entry.tokens, q.entry.decode_spans, q.starts, at);
     const j = sync.prepare(r, q) catch |err| {
         skip(r, name, at, err);
-        return true;
-    } orelse return true;
+        return .done;
+    } orelse return .done;
     var queued_again = false;
     defer {
         if (!queued_again) r.gpa.free(j.starts);
@@ -244,17 +266,17 @@ fn stage(r: *Rows, q: Queued, may_wait: bool) bool {
         r.gpa.destroy(j);
     }
     stageJob(r, j, may_wait) catch |err| {
-        if (err == error.StagingBusy) {
+        if (err == error.StagingBusy or (borrowed and err == error.StagingFull)) {
             queued_again = true;
-            r.waiting = q.entry;
-            r.queue.appendAssumeCapacity(.{ .entry = q.entry, .starts = q.starts, .waited = true });
-            return false;
+            if (err == error.StagingBusy) r.waiting = q.entry;
+            r.queue.appendAssumeCapacity(.{ .entry = q.entry, .starts = q.starts, .waited = err == error.StagingBusy });
+            return if (err == error.StagingBusy) .waiting else .oversized;
         }
         skip(r, j.name, at, err);
         if (err == error.GatherFailed or err == error.SnapshotGpuFailure) r.counts.failed += 1;
-        return true;
+        return .done;
     };
-    return true;
+    return .done;
 }
 
 /// A save given up: counted, recorded under the job id it would have had, and noted.

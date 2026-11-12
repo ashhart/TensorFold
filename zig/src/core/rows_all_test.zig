@@ -8,6 +8,7 @@ test {
     _ = @import("rows_test.zig");
     _ = @import("rows_spill_test.zig");
     _ = @import("rows_expiry_test.zig");
+    _ = @import("rows_borrowed_test.zig");
     _ = @import("rows_async_test.zig");
     _ = @import("rows_close_test.zig");
     _ = @import("rows_stage_test.zig");
