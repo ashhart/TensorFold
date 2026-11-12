@@ -287,3 +287,21 @@ test "qwen27 pair: every command decodes to what was encoded, slot first" {
         try std.testing.expectEqual(words.items[0], back.slot());
     }
 }
+
+test "qwen27 pair: TF_QWEN27_LANES=0 with --drafter is refused by name on a pair, and one Mac keeps its serial loop" {
+    // `attach` passes the window policy's own reading of the switch, so "0" here is the setting's own text
+    const serial = try @import("qwen27_window.zig").serial(false, 16, "0");
+    var why: []const u8 = "";
+    try std.testing.expectError(error.PairSerialDraft, pair_flags.refuseSerial(true, true, serial, &why));
+    try std.testing.expect(std.mem.startsWith(u8, why, "TF_QWEN27_LANES=0 does not run on a pair with --drafter"));
+    try pair_flags.refuseSerial(true, false, serial, &why); // no drafter: no serial draft loop is installed
+    try pair_flags.refuseSerial(true, true, try @import("qwen27_window.zig").serial(false, 16, null), &why); // lanes
+    try pair_flags.refuseSerial(false, true, serial, &why); // one Mac runs its serial loop as on main
+}
+
+test "qwen27 pair: one Mac measures before its lane config, as on main; a pair measures after both are ready" {
+    try std.testing.expect(lb.measuresFirst(null));
+    var pair: lb.Pair = undefined;
+    pair.rank = 0;
+    try std.testing.expect(!lb.measuresFirst(&pair));
+}

@@ -203,6 +203,11 @@ pub fn slotResume(init: bool, pair: ?*const Pair) bool {
     return init and resumesInPlace(pair);
 }
 
+/// Whether `measure` runs before the lane config copies its costs: one Mac's order (main's); a pair's seams need both.
+pub fn measuresFirst(pair: ?*const Pair) bool {
+    return pair == null;
+}
+
 /// A shared round's rows at most: the frame's.
 pub const batch_rows = 128;
 
