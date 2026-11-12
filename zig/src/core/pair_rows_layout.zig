@@ -111,14 +111,14 @@ pub fn writeHalf(out: []u8, at: usize, v: f32) void {
 /// The kernels' argument block: four u32, so its layout and pair_rows.metal's struct stay one struct.
 pub const PairRows = extern struct { width: u32, stride: u32, rank: u32, x: u32 };
 
-/// Between encoders only: fence, close, posted, [wait], reopen; `wait_event` false hands the release to the kernel.
-pub fn seam(enc: *mtl.ComputeEncoder, fence: Fence, posted: mtl.SharedEvent, landed: mtl.SharedEvent, x: u32, wait_event: bool) void {
+/// Between encoders only (core/segments.zig:59-66): fence, close, posted, wait, reopen, wait -- a real hand-off.
+pub fn seam(enc: *mtl.ComputeEncoder, fence: Fence, posted: mtl.SharedEvent, landed: mtl.SharedEvent, x: u32) void {
     const cb = enc.commandBuffer();
     const mode = enc.dispatchType();
     fence.update(enc.*);
     enc.end();
     cb.signal(posted, @as(u64, x));
-    if (wait_event) cb.waitFor(landed, @as(u64, x));
+    cb.waitFor(landed, @as(u64, x));
     enc.* = cb.compute(mode);
     fence.wait(enc.*);
 }

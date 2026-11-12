@@ -165,11 +165,14 @@ pub const Pair = struct {
     gpa: std.mem.Allocator,
     /// The parsed settings file: the endpoint's config points into it, so it outlives `ep`.
     arena: *std.heap.ArenaAllocator,
-    /// TF_Q27_KERNEL_WAIT: gather/pick spin on POSTED; the encoder skips its landed wait per seam.
-    kernel_wait: bool = false,
+    /// TF_Q27_PAIR_TRACE_EVERY's exchanges between trace lines, or 0 when TF_Q27_PAIR_TRACE is off.
+    trace_every: u64 = 0,
 
     /// Connect to the peer named in `settings_path` (speed-up mode's file), exchanges up to `bytes`, and start sending.
     pub fn init(gpa: std.mem.Allocator, io: std.Io, device: mtl.Device, settings_path: []const u8, bytes: usize) !*Pair {
+        // the trace settings are read before anything opens: a malformed one is refused by name, never read as off
+        const trace = try platform.environment.read(bool, "TF_Q27_PAIR_TRACE", false);
+        const trace_every = if (trace) try platform.environment.read(u64, "TF_Q27_PAIR_TRACE_EVERY", 2048) else 0;
         const l: Layout = .{ .slot = pages(bytes) };
         const text = try std.Io.Dir.cwd().readFileAlloc(io, settings_path, gpa, .limited(1 << 20));
         defer gpa.free(text);
@@ -218,10 +221,10 @@ pub const Pair = struct {
             .gpa = gpa,
             .arena = arena,
             .owned = owned,
+            .trace_every = trace_every,
         };
         owned = .{}; // the pair owns them now: the error path must not release them twice
         errdefer gpa.free(p.bytes);
-        p.kernel_wait = platform.environment.read(bool, "TF_Q27_KERNEL_WAIT", false) catch false;
         // both Macs up before the first exchange: a word each way
         try rd.signal(p.peer, l.flags() + HELLO, 1);
         while (@atomicLoad(u64, p.word64(l.flags() + HELLO), .acquire) < 1) std.atomic.spinLoopHint();
@@ -341,7 +344,7 @@ pub const Pair = struct {
         if (out_stride < 2 * width) @panic("pair: gather()'s frame row is narrower than both halves");
         if (mine.buf.id != p.wbuf.id or mine.off != p.l.send(x)) @panic("pair: gather()'s part is not the region part() returned");
         p.queue(x, stageBytes(rows, width));
-        seam(e, p.fence, p.posted, p.landed, x, !p.kernel_wait);
+        seam(e, p.fence, p.posted, p.landed, x);
         e.setPipeline(p.gather_pipe);
         e.setBuffer(p.wbuf, p.l.sync(), 0);
         e.setValue(PairRows{ .width = width, .stride = out_stride, .rank = p.rank, .x = x }, 1);
@@ -370,7 +373,7 @@ pub const Pair = struct {
         e.setValue([4]u32{ stride, lo, n, dtype }, 1);
         e.setBuffer(p.wbuf, p.l.send(x), 2);
         e.dispatchGroups(.{ .width = rows }, .{ .width = 1024 });
-        seam(e, p.fence, p.posted, p.landed, x, !p.kernel_wait); // the encoder boundary orders the argmax before the part is relayed
+        seam(e, p.fence, p.posted, p.landed, x); // the encoder boundary orders the argmax before the part is relayed
         e.setPipeline(p.pick_pipe);
         e.setBuffer(p.wbuf, p.l.sync(), 0);
         e.setValue([2]u32{ rows, x }, 1);
@@ -451,8 +454,6 @@ pub const Pair = struct {
             p.rank, p.round.load(.acquire), x, what, p.posted.value(), @atomicLoad(u64, p.word64(p.l.flags() + FLAG), .acquire), p.queued.load(.acquire), p.observed(), post_timeout_ms, peer_ms,
         });
         p.landed.set(seam_failed);
-        // a kernel-side spinner reads POSTED, not the event: the sentinel's low 32 bits release it too
-        @atomicStore(u32, p.word32(p.l.sync() + POSTED * 4), @truncate(seam_failed), .release);
     }
 
     /// One exchange at a time: part written, relay it, peer's lands, release the GPU; every wait has a deadline.
@@ -461,8 +462,7 @@ pub const Pair = struct {
         var x: u32 = 1;
         // Ticks after which this link is no longer cold: set at the first relay, when both ranks have just loaded.
         var cold_until: u64 = 0;
-        const trace = platform.environment.read(bool, "TF_Q27_PAIR_TRACE", false) catch false;
-        const trace_every: u64 = platform.environment.read(u64, "TF_Q27_PAIR_TRACE_EVERY", 2048) catch 2048;
+        const trace = p.trace_every != 0;
         var tr: Trace = .{};
         while (!p.stop.load(.acquire)) {
             p.seam_x.store(x, .release);
@@ -502,7 +502,7 @@ pub const Pair = struct {
             if (trace) {
                 tr.peer_wait += ticksNow() -% t1;
                 tr.n += 1;
-                if (tr.n % trace_every == 0) tr.log(p.rank);
+                if (tr.n % p.trace_every == 0) tr.log(p.rank, p.trace_every);
             }
             // 4. Release the GPU: both parts are in; the event's wait is the acquire that makes them visible.
             @atomicStore(u32, p.word32(p.l.sync() + POSTED * 4), x, .release);
@@ -522,10 +522,8 @@ const Trace = struct {
     /// Step 3: from submit to the peer's flag word reaching x (the peer land RTT).
     peer_wait: u64 = 0,
 
-    const trace_every = 2048;
-
-    fn log(t: *Trace, rank: u32) void {
-        const n: u64 = trace_every;
+    /// The mean over the last `n` exchanges, the TF_Q27_PAIR_TRACE_EVERY that ended them.
+    fn log(t: *Trace, rank: u32, n: u64) void {
         const us = struct {
             fn f(ticks: u64, count: u64) u64 {
                 return if (count == 0) 0 else ticks * 1000 / (count * ticks_per_ms);

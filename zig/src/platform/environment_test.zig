@@ -80,13 +80,11 @@ const valid = [_]Case{
     .{ .name = "TF_Q27_COPY_ROWS", .raw = "48", .n = 48 },
     .{ .name = "TF_Q27_DRAFT_SLOTS", .raw = "0", .n = 0 },
     .{ .name = "TF_Q27_DRAFT_SLOTS", .raw = "4294967295", .n = std.math.maxInt(u32) },
-    .{ .name = "TF_DIAG_SUBMIT", .raw = "1", .n = 1 },
-    .{ .name = "TF_DIAG_SUBMIT", .raw = "off", .n = 0 },
-    .{ .name = "TF_Q27_KERNEL_WAIT", .raw = "on", .n = 1 },
-    .{ .name = "TF_Q27_KERNEL_WAIT", .raw = "0", .n = 0 },
     .{ .name = "TF_Q27_PAIR_TRACE", .raw = "true", .n = 1 },
     .{ .name = "TF_Q27_PAIR_TRACE", .raw = "0", .n = 0 },
     .{ .name = "TF_Q27_PAIR_TRACE_EVERY", .raw = "256", .n = 256 },
+    .{ .name = "TF_Q27_PAIR_TRACE_EVERY", .raw = "1", .n = 1 },
+    .{ .name = "TF_Q27_PAIR_TRACE_EVERY", .raw = "4294967295", .n = std.math.maxInt(u32) },
     .{ .name = "TF_HEAD_GEOMETRY", .raw = "0", .n = 0 },
     .{ .name = "TF_PROMPT_ROWS", .raw = "128", .n = 128 },
     .{ .name = "TF_PROMPT_ROWS", .raw = "2048", .n = 2048 },
@@ -267,6 +265,15 @@ test "environment: ranges, word lists and whole-number bounds refuse ignored tai
         try t.expect(try e.parse(c[0], c[1]) != null);
     for ([_][2][]const u8{ .{ "TF_DSV41_ENGRAM_READERS", "33" }, .{ "TF_DSV41_SLOTS", "0" }, .{ "TF_DSV41_SLOTS", "17" }, .{ "TF_DSV41_ROWS_CAP", "9" }, .{ "TF_DSV41_CONTEXT", "9223372036854775808" }, .{ "TF_DSV41_PREFILL_ADAPT_MIN", "15" } }) |c|
         try t.expectError(error.InvalidEnvironment, e.parse(c[0], c[1]));
+}
+
+test "environment: the pair trace interval refuses 0, which would divide by zero, and names its variable" {
+    for ([_][]const u8{ "0", "4294967296" }) |raw| {
+        try t.expectError(error.InvalidEnvironment, e.parse("TF_Q27_PAIR_TRACE_EVERY", raw));
+        const why = (try e.refusal(a, Env{ .name = "TF_Q27_PAIR_TRACE_EVERY", .raw = raw }, all)).?;
+        defer a.free(why);
+        try t.expect(std.mem.indexOf(u8, why, "TF_Q27_PAIR_TRACE_EVERY") != null);
+    }
 }
 
 const Alias = struct {
