@@ -190,30 +190,34 @@ pub fn cacheBytes(asked: ?f64, room: u64, streams: u64) u64 {
     return if (room == std.math.maxInt(u64)) @min(left, 16 << 30) else automaticCache(left, 16 << 30);
 }
 
-/// Linux integrated devices use procfs; Windows retains the unified reserve but reads the CUDA pool. So does Linux
-/// under WSL2 (`wsl_pool`): there the GPU's memory is the Windows driver's WDDM pool, apart from the RAM
-/// /proc/meminfo counts (an RTX Spark N1X: a 96 GiB carve-out beside about 30 GiB of WSL RAM, which refused a
-/// 72.8 GiB checkpoint the GPU holds).
+/// Integrated devices count procfs on Linux; Windows and WSL2 (`wsl_pool`: procfs is WSL's RAM) read CUDA's pool.
 pub fn hostCounts(unified: bool, windows: bool, wsl_pool: bool) bool {
     return unified and !windows and !wsl_pool;
 }
 
-/// Whether a Linux integrated device reads CUDA's pool: TENSORFOLD_UNIFIED_HOST_COUNTS=1 keeps procfs and =0 reads
-/// the pool; unset, WSL2 (WSL_DISTRO_NAME set) reads the pool.
-pub fn wslPool(override: ?[]const u8, wsl_distro: ?[]const u8) bool {
-    if (override) |v| return std.mem.eql(u8, v, "0");
-    return wsl_distro != null;
+/// TENSORFOLD_UNIFIED_HOST_COUNTS (its registry row takes only 0 or 1): 0 reads the pool; unset, WSL2 reads it.
+pub fn wslPool(override: ?[]const u8, wsl_distro: ?[]const u8) error{InvalidEnvironment}!bool {
+    const procfs = try @import("sys").environment.parse("TENSORFOLD_UNIFIED_HOST_COUNTS", override) orelse return wsl_distro != null;
+    return procfs == 0;
 }
 
-fn envText(name: [*:0]const u8) ?[]const u8 {
-    return if (std.c.getenv(name)) |v| std.mem.span(v) else null;
+/// `wslPool` for the process environment; a malformed override is refused by name in `problem`.
+fn processWslPool(a: std.mem.Allocator, problem: *[]const u8) !?bool {
+    const settings = @import("sys").environment;
+    const raw = settings.Process.get(.{}, "TENSORFOLD_UNIFIED_HOST_COUNTS");
+    return wslPool(raw, @import("sys").getenv("WSL_DISTRO_NAME")) catch {
+        problem.* = try settings.describe(a, "TENSORFOLD_UNIFIED_HOST_COUNTS", raw.?);
+        return null;
+    };
 }
 
 test "integrated counts: procfs on Linux, the CUDA pool under WSL2 or when asked" {
-    try std.testing.expect(!wslPool(null, null)); // native Linux (a GB10): procfs
-    try std.testing.expect(wslPool(null, "Ubuntu")); // WSL2: the WDDM pool
-    try std.testing.expect(!wslPool("1", "Ubuntu")); // forced procfs
-    try std.testing.expect(wslPool("0", null)); // forced CUDA pool
+    try std.testing.expect(!try wslPool(null, null)); // native Linux (a GB10): procfs
+    try std.testing.expect(try wslPool(null, "Ubuntu")); // WSL2: the WDDM pool
+    try std.testing.expect(try wslPool(" ", "Ubuntu")); // blank reads as unset, as for every registered setting
+    try std.testing.expect(!try wslPool("1", "Ubuntu")); // forced procfs
+    try std.testing.expect(try wslPool("0", null)); // forced CUDA pool
+    for ([_][]const u8{ "2", "01", "true", "yes", " 1" }) |typo| try std.testing.expectError(error.InvalidEnvironment, wslPool(typo, "Ubuntu"));
     try std.testing.expect(hostCounts(true, false, false));
     try std.testing.expect(!hostCounts(true, false, true));
     try std.testing.expect(!hostCounts(true, true, false));
@@ -335,7 +339,8 @@ test "memory limit refuses an oversized finite value and the rounded u64 boundar
 pub fn readPool(a: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, problem: *[]const u8) !?Pool {
     const unified = (try ctx.attribute(.integrated)) != 0;
     const card = try ctx.memInfo();
-    const host_counts = hostCounts(unified, @import("sys").windows, wslPool(envText("TENSORFOLD_UNIFIED_HOST_COUNTS"), envText("WSL_DISTRO_NAME")));
+    const wsl_pool = try processWslPool(a, problem) orelse return null;
+    const host_counts = hostCounts(unified, @import("sys").windows, wsl_pool);
     const text = if (host_counts) procText(a, io, "/proc/meminfo") else null;
     defer if (text) |bytes| a.free(bytes);
     const zones = if (host_counts) procText(a, io, "/proc/zoneinfo") else null;

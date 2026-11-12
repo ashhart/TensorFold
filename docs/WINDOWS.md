@@ -168,7 +168,8 @@ loads and runs exactly as before.
   the WDDM budget, allocation deltas and equality cells; source admission alone does not qualify the device.
 - Under WSL2 the Linux build sees the same integrated N1X, but `/proc/meminfo` there is WSL's RAM (about 30 GiB on a
   128 GB machine whose firmware gives the GPU 96 GB), not the GPU's pool. With `WSL_DISTRO_NAME` set the integrated
-  admission reads the CUDA pool, as on Windows; `TENSORFOLD_UNIFIED_HOST_COUNTS=1` restores procfs, `=0` forces the pool.
+  admission reads the CUDA pool, as on Windows; `TENSORFOLD_UNIFIED_HOST_COUNTS=1` restores procfs, `=0` forces the pool,
+  and the CUDA backend refuses any other value at startup, naming the variable.
 - The API key file is checked for type and size; Windows keeps access in ACLs, not mode bits, so the "unreadable by
   other users" check is the folder's ACL rather than `chmod 600`.
 
@@ -201,4 +202,3 @@ WSL admission change above:
 The GPU ran at about 2.1 GHz and 42-49 W (the laptop's power cap; in Windows' power-saving mode it runs near 1.4 GHz).
 The same laptop serving the same model through exllamav3 (vcruz305's EXL3 recipe, Cyber Frost 3.87 bpw) gave 38.6 /
 34.5 / 27.8 tok/s, a first token in 0.74-0.80 s, and 36.2 tok/s aggregate at four streams.
-
