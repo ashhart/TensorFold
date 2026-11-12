@@ -27,10 +27,10 @@ pub fn sumIn(acc: c.Accum, order: Order, t: []const f64) f64 {
 
 fn round(acc: c.Accum, v: f64) f64 {
     return switch (acc) {
+        .f64, .none => v,
         .f32 => @as(f32, @floatCast(v)),
         .f16 => @as(f16, @floatCast(v)),
         .bf16 => c.fromBf16(c.toBf16(@floatCast(v))),
-        .none => v,
     };
 }
 
