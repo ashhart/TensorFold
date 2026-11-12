@@ -13,12 +13,12 @@ const vocab = [_][]const u8{
 };
 const words = (vocab.len + 31) / 32;
 
-const Limit = *const fn (*anyopaque, i64, i64) callconv(.c) void;
+const Limit = *const fn (*anyopaque, i64) callconv(.c) void;
 
 const Lib = struct {
     f: grammar.Library,
     h: *anyopaque,
-    /// tfg_budget_limits: the work and the milliseconds exploring a grammar may take, for grammars looked up after it.
+    /// tfg_budget_limits: the work exploring a grammar may take (counted, no clock), for grammars looked up after it.
     limit: ?Limit,
 
     fn open() !Lib {
@@ -260,36 +260,48 @@ fn narrowsAfter(l: Lib, g: *anyopaque, depth: usize, exact: bool) !bool {
     return w.compare(3, exact);
 }
 
-test "security: exploring a grammar stops at its work limit, and a place past it keeps xgrammar's mask" {
-    // with the work a grammar may take by default, every place in the run is explored and its mask exact
+/// A fresh library and compiler, `work` the exploring limit (null: the library's own), and `run`'s verdict there.
+fn verdict(work: ?i64) !c_int {
+    const l = try Lib.open();
+    defer l.f.close(l.h);
+    if (work) |w| (l.limit orelse return error.MissingSymbol)(l.h, w);
+    const g = try l.compile(4, run);
+    defer l.f.free(g);
+    const first = l.f.budget_ready.?(g);
+    try std.testing.expectEqual(first, l.f.budget_ready.?(g)); // asked again: the kept tables' answer
+    return first;
+}
+
+test "security: the same grammar gets the same verdict every time, from the work it counts and never the clock" {
+    // under the default limit `run` is explored whole, on every compiler that loads it
+    for (0..2) |_| try std.testing.expectEqual(@as(c_int, 1), try verdict(null));
+    // with work for a few dozen states only it is over the limit, and stays so on every compiler that loads it
+    for (0..2) |_| try std.testing.expectEqual(@as(c_int, 2), try verdict(250_000));
+}
+
+test "security: a grammar over the work limit is refused, and its matcher never gets a partial mask" {
+    // with the default limit every place in the run is explored and its mask exact, as main's
     const whole = try Lib.open();
     defer whole.f.close(whole.h);
     const all = try whole.compile(4, run);
     defer whole.f.free(all);
     try std.testing.expectEqual(@as(c_int, 1), whole.f.budget_ready.?(all));
     for ([_]usize{ 2, 150 }) |depth| try std.testing.expect(try narrowsAfter(whole, all, depth, true));
-    // with work for the first few dozen states only, an early place is masked as before and a late one is left alone
+    // over the limit: refused (2), and a matcher armed anyway keeps xgrammar's bits at every place, early or late
     const cut = try Lib.open();
     defer cut.f.close(cut.h);
-    (cut.limit orelse return error.MissingSymbol)(cut.h, 250_000, 60_000);
+    (cut.limit orelse return error.MissingSymbol)(cut.h, 250_000);
     const some = try cut.compile(4, run);
     defer cut.f.free(some);
-    try std.testing.expectEqual(@as(c_int, 1), cut.f.budget_ready.?(some));
-    try std.testing.expect(try narrowsAfter(cut, some, 2, true));
-    try std.testing.expect(!try narrowsAfter(cut, some, 150, false));
-}
-
-test "security: a grammar that takes longer than its time to explore gets no budget mask" {
-    const l = try Lib.open();
-    defer l.f.close(l.h);
-    (l.limit orelse return error.MissingSymbol)(l.h, 1 << 31, 0);
-    const g = try l.compile(4, run);
-    defer l.f.free(g);
-    try std.testing.expectEqual(@as(c_int, 0), l.f.budget_ready.?(g));
-    const w: Walk = .{ .f = l.f, .m = l.f.matcher(g).? };
-    defer l.f.matcher_free(w.m);
-    try std.testing.expectEqual(@as(c_int, 0), l.f.budget.?(w.m, undefined, 0, 0));
-    var bits = try w.mask();
-    try std.testing.expectEqual(@as(c_int, 1), l.f.budget.?(w.m, @ptrCast(&bits), words, 3));
-    try std.testing.expectEqualSlices(u32, &try w.mask(), &bits);
+    try std.testing.expectEqual(@as(c_int, 2), cut.f.budget_ready.?(some));
+    for ([_]usize{ 2, 150 }) |depth| {
+        const w: Walk = .{ .f = cut.f, .m = cut.f.matcher(some).? };
+        defer cut.f.matcher_free(w.m);
+        try std.testing.expectEqual(@as(c_int, 0), cut.f.budget.?(w.m, undefined, 0, 0));
+        for (0..depth) |_| try w.take(1);
+        const plain = try w.mask();
+        var bits = plain;
+        try std.testing.expectEqual(@as(c_int, 1), cut.f.budget.?(w.m, @ptrCast(&bits), words, 3));
+        try std.testing.expectEqualSlices(u32, &plain, &bits);
+    }
 }
