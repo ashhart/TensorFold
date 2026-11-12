@@ -339,8 +339,8 @@ fn pairExperts(gpu: Gpu, s: cuda.Stream, r: std.Random) !void {
     const layer: cuda.experts.Layer = .{ .format = .affine4, .up = dpair.ptr, .down = ddown.ptr, .width = ni, .dims = dims, .experts = count, .swiglu = true };
     const grouped: cuda.experts.Grouped = .{ .affine4 = &ex };
     const items_n = cuda.grouped.maxItems(pairs, count, 16);
-    try grouped.decode(s, .up, .{ .x = dx.ptr, .stride = dims, .slots = slots }, layer, plan, dact.ptr, items_n, -1);
-    try grouped.decode(s, .down_f32, .{ .x = dact.ptr, .stride = ni }, layer, plan, dy.ptr, items_n, -1);
+    try grouped.decode(s, .up, .{ .x = dx.ptr, .stride = dims, .slots = slots }, layer, plan, dact.ptr, items_n, pairs, 16, -1);
+    try grouped.decode(s, .down_f32, .{ .x = dact.ptr, .stride = ni }, layer, plan, dy.ptr, items_n, pairs, 16, -1);
     try s.synchronize();
     const got = try check.download(gpu, dy);
     defer a.free(got);

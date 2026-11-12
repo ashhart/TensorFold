@@ -195,11 +195,11 @@ fn sameBits(gpu: Gpu, k: Kernels, s: cuda.Stream, r: std.Random, sh: Shape) !voi
             const rows_in: cuda.experts.Rows = .{ .x = dx.ptr, .stride = sh.dims, .slots = sh.slots };
             const act_in: cuda.experts.Rows = .{ .x = act.ptr, .stride = sh.ni };
             if (prompt) {
-                try g.prompt(s, .up, rows_in, l, pb.plan(), act.ptr, pb.items_n, -1);
-                try g.prompt(s, .down_bf16, act_in, l, pb.plan(), y.ptr, pb.items_n, -1);
+                try g.prompt(s, .up, rows_in, l, pb.plan(), act.ptr, pb.items_n, pairs, 64, -1);
+                try g.prompt(s, .down_bf16, act_in, l, pb.plan(), y.ptr, pb.items_n, pairs, 64, -1);
             } else {
-                try g.decode(s, .up, rows_in, l, pb.plan(), act.ptr, pb.items_n, -1);
-                try g.decode(s, .down_f32, act_in, l, pb.plan(), y.ptr, pb.items_n, -1);
+                try g.decode(s, .up, rows_in, l, pb.plan(), act.ptr, pb.items_n, pairs, 16, -1);
+                try g.decode(s, .down_f32, act_in, l, pb.plan(), y.ptr, pb.items_n, pairs, 16, -1);
             }
             try s.synchronize();
             outs[li] = .{ try check.download(gpu, act), try check.download(gpu, y) };
@@ -256,7 +256,7 @@ fn projections(gpu: Gpu, k: Kernels, s: cuda.Stream, r: std.Random) !void {
                 var y = try cuda.DeviceBuffer.alloc(gpu.d, pairs * n * 4);
                 defer y.free();
                 const in: cuda.experts.Rows = .{ .x = dx.ptr, .stride = kk };
-                if (prompt) try g.prompt(s, .down_bf16, in, l, pb.plan(), y.ptr, pb.items_n, -1) else try g.decode(s, .down_f32, in, l, pb.plan(), y.ptr, pb.items_n, -1);
+                if (prompt) try g.prompt(s, .down_bf16, in, l, pb.plan(), y.ptr, pb.items_n, pairs, 64, -1) else try g.decode(s, .down_f32, in, l, pb.plan(), y.ptr, pb.items_n, pairs, 16, -1);
                 try s.synchronize();
                 outs[li] = try check.download(gpu, y);
                 for (0..pairs * n) |i| {
@@ -334,8 +334,8 @@ fn timeDecode(gpu: Gpu, k: Kernels, s: cuda.Stream, r: std.Random, reps: usize) 
             for (0..reps) |i| {
                 const p = plans[i % plans.len];
                 if (form < 2) {
-                    try g.decode(s, .up, rows_in, l3, p.plan(), act.ptr, p.items_n, -1);
-                } else try g.decode(s, .down_f32, act_in, l3, p.plan(), y.ptr, p.items_n, -1);
+                    try g.decode(s, .up, rows_in, l3, p.plan(), act.ptr, p.items_n, rows * sh.slots, 16, -1);
+                } else try g.decode(s, .down_f32, act_in, l3, p.plan(), y.ptr, p.items_n, rows * sh.slots, 16, -1);
             }
             var graph = try cuda.graph.endCapture(s);
             defer graph.deinit();
