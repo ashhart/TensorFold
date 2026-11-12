@@ -3,7 +3,7 @@ const std = @import("std");
 const ks = @import("qwen_runtime_sources");
 const Set = @import("set.zig").Set;
 pub fn add(s: *Set) !void {
-    inline for (.{ "glue", "copy", "moe", "prompt_glue", "prompt_state" }) |name|
+    inline for (.{ "glue", "copy", "moe" }) |name|
         try s.raw("qwen27", name, @field(ks, name));
     try s.raw("qwen27", "moe-rows", @import("../src/families/qwen27/moe_gpu.zig").rows_source);
     const quant = @import("../src/families/qwen27/quant_gpu.zig");
