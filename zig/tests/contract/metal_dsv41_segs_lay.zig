@@ -64,6 +64,25 @@ pub const Pipes = struct {
         return p;
     }
 
+    /// The clean kernels with each per-slot kernel swapped for the base's kept body in dsv41_base.
+    pub fn loadBase(a: std.mem.Allocator, device: mtl.Device) !Pipes {
+        var p = try load(a, device, 0);
+        errdefer p.deinit();
+        const fb = @embedFile("dsv41_base/fused.metal");
+        const cb = @embedFile("dsv41_base/compress.metal");
+        const ab = @embedFile("dsv41_base/csa2_attn.metal");
+        try swap(a, device, &p.fused.kv, sources.dsv41.fused, fb, "tf_base_dsv41_f_kv");
+        try swap(a, device, &p.compress.pool, sources.dsv41.compress, cb, "tf_base_dsv41_c_pool2");
+        try swap(a, device, &p.compress.rt, sources.dsv41.compress, cb, "tf_base_dsv41_c_fp4rt");
+        try swap(a, device, &p.compress.pack, sources.dsv41.compress, cb, "tf_base_dsv41_c_fp4pack");
+        for ([_][]const u8{ "f32", "bf16" }, 0..) |o, i| {
+            var nb: [48]u8 = undefined;
+            try swap(a, device, &p.attn.dec[i], sources.dsv41.csa2_attn, ab, try std.fmt.bufPrint(&nb, "tf_base_dsv41_attn_dec_{s}", .{o}));
+            try swap(a, device, &p.attn.pf[i], sources.dsv41.csa2_attn, ab, try std.fmt.bufPrint(&nb, "tf_base_dsv41_attn_dec_pf_{s}", .{o}));
+        }
+        return p;
+    }
+
     fn text(a: std.mem.Allocator, ctl: u8, src: []const u8) ![]u8 {
         if (ctl == 0) return a.dupe(u8, src);
         return std.fmt.allocPrint(a, "#define TF_CTL {d}\n{s}", .{ ctl, src });
@@ -77,8 +96,7 @@ pub const Pipes = struct {
     }
 };
 
-/// The kernels' TfDsv41Seg.
-const Seg = extern struct { window: u64 = 0, pool: u64 = 0, keys: u64 = 0, carry: u64 = 0, inputs: u64 = 0, comp: u64 = 0, ikeys: u64 = 0, base: u32, rows: u32, nkeys: u32 = 0, start: u32 = 0 };
+const Seg = dm.segs.Seg;
 
 fn addr(r: rig_.Ref) u64 {
     return r.buf.gpuAddress() + r.off;
@@ -386,6 +404,15 @@ pub const Lay = struct {
         return .{ .q = F.of(in[0], r0 * H * D * 2), .w = F.of(in[win0 + j], 0), .c = F.of(in[win0 + L.slots + j], 0), .i = F.of(in[1], r0 * 512 * 4), .m = F.of(in[dest], r0 * 32), .sk = F.of(in[sk], 0), .cs = F.of(in[cs], 0), .o = F.of(outs[0].ref, r0 * H * D * 2) };
     }
 };
+
+/// `slot`'s pipeline replaced by `name` from `src` with the kept `frag` after it.
+pub fn swap(a: std.mem.Allocator, device: mtl.Device, slot: *mtl.Pipeline, src: []const u8, frag: []const u8, name: []const u8) !void {
+    const t = try std.mem.concat(a, u8, &.{ src, frag });
+    defer a.free(t);
+    const pipe = try rig_.pipeline(device, t, name);
+    slot.deinit();
+    slot.* = pipe;
+}
 
 /// The index keys' packing: 68-byte rows, codes then the scales from byte 64, at the publish rows `d`.
 pub fn packArgs(d: cp.Ref) cp.Pack {
