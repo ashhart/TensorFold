@@ -1,5 +1,4 @@
-//! Flash Next EXL3 fp16 row split and canonical reduction launches: measured nvcc 13.4 resources, with the
-//! older compiler versions kept explicitly pending.
+//! NVCC 13.4 EXL3 resource receipts; older compilers remain explicitly pending.
 const std = @import("std");
 const limits = @import("limits.zig");
 const registry = @import("registry.zig");
@@ -12,8 +11,7 @@ pub const records = [_]registry.CudaRecord{
     .{ .launch = .{ .name = "flashnext_batch fn_exl3_leaf_finish", .symbol = "fn_exl3_leaf_finish", .image = "flashnext_batch", .threads = 256 }, .usage = registry.none },
 };
 
-/// nvcc 13.4's measured registers, user static shared bytes and launch bounds for sm_80, sm_86, sm_89, sm_120, sm_121.
-/// The canonical reduction measurements use f64 leaves, tree additions and transported partials.
+/// NVCC 13.4 registers, user shared bytes and bounds for SM80/86/89/120/121, with FP64 canonical sums.
 pub const cuda_134 = [_]registry.Override{
     .{ .name = "flashnext_exl3 fn_exl3_split_f16", .usage = .{ .{ .regs = 10, .static = 0, .bound = 0 }, .{ .regs = 10, .static = 0, .bound = 0 }, .{ .regs = 10, .static = 0, .bound = 0 }, .{ .regs = 12, .static = 0, .bound = 0 }, .{ .regs = 12, .static = 0, .bound = 0 } } },
     .{ .name = "flashnext_batch fn_exl3_leaf_tree", .usage = .{ .{ .regs = 24, .static = 0, .bound = 0 }, .{ .regs = 26, .static = 0, .bound = 0 }, .{ .regs = 26, .static = 0, .bound = 0 }, .{ .regs = 26, .static = 0, .bound = 0 }, .{ .regs = 26, .static = 0, .bound = 0 } } },
