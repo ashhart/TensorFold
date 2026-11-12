@@ -1,7 +1,17 @@
 # qmm_q4_tile receipts, Apple M1 (13-inch)
 
-Qwen3.5-2B 4-bit, 64 greedy steps, two runs per process. Old build is #1990's head (the vec4 build, `1e1b7d8c`), new build is #2015's head (`b6d9a35b`). Both include the float32 fix.
-Each case ran three old and three new processes, interleaved in both orders (old,new,new,old,old,new). Run 2 is the prefill plus 63 decode steps plus the per-step logits readback. Linux 7.3.0-2-20261110.1-lab-ARCH, Honeykrisp from the Omarchy Mesa build (library sha256 `d75f4cbc`).
+Qwen3.5-2B 4-bit, 64 greedy steps, two runs per process. Old build is #1990's head (the vec4 build, ELF `46571f11`), new build is #2015's head (ELF `6e6f47f2`). Both include the float32 fix. The ELFs were built before the comment and name commits that sit above them; those commits change no code.
+Each case ran three old and three new processes, interleaved in both orders (old,new,new,old,old,new). Every process ran under `taskset` on the four P cores (CPU 4-7). Run 2 is the prefill plus 63 decode steps plus the per-step logits readback. Linux 7.3.0-2-20261110.1-lab-ARCH, started 2026-11-12 16:16Z, GPU timeouts 0. All 18 processes returned 0 with the pinned ids and the pinned logits digest.
+
+| Case | Old run 2 (median) | New run 2 (median) | Gain: median (pair range) | Logits digest, all six processes |
+|---|---:|---:|---|---|
+| unicode-24 | 11.8 s | 8.4 s | 28.6% (27.9 to 31.2) | `6bfbb1a55a3e` |
+| document-256 | 26.9 s | 12.2 s | 54.4% (53.9 to 61.0) | `8901e17ccef7` |
+| document-1024 | 76.9 s | 25.8 s | 66.8% (66.1 to 66.9) | `a472a62c7e22` |
+
+`pinned-heads-summary.json` holds every process row of this run. It is generated from the raw run output.
+
+An earlier run on the same chip did not pin the cores (old build `1e1b7d8c`, new build `b6d9a35b`, started 2026-11-11 19:15Z). Its gains were lower and its logits digests differ from the ones above; the two runs do not say which of the changes caused that:
 
 | Case | Old run 2 (median) | New run 2 (median) | Gain: median (pair range) | Logits digest, all six processes |
 |---|---:|---:|---|---|
@@ -29,12 +39,12 @@ An earlier measurement, on the build before the last tile was padded (`a2dcaa1d`
 
 Files:
 
-- `fixed-heads-summary.json` holds every process row (with peak resident memory), the pairs, the ELF hashes and the setup of the fixed-heads run. It is generated from the raw run files.
+- `pinned-heads-summary.json` holds every process row, the pairs, the ELF hashes and the setup of the pinned run in the first table. It is generated from the raw run output.
+- `fixed-heads-summary.json` is the same for the unpinned run of 2026-11-11 in the second table.
 - `summary.json` is the first version's summary (earlier builds, earlier environment, both tile builds). It stays as the record of those runs.
-- `identity-probe.txt` holds the probe that runs the tiled image and the default image on every projection case and compares the output bytes. It ran on the earlier builds and was not re-run on the fixed heads.
-- `kernel-contract-m1-13-inch.txt` holds the contract runner's output on the GPU with the earlier builds. It was not re-run on the fixed heads.
+- `runners-2a5a06c2/` holds the output of the ten contract and stage runners at #2015's head (`2a5a06c2`, 2026-11-12, GPU timeouts 0), one file per runner, with `log.txt` listing the exit codes. `tf-vulkan-kernel-contract.txt` includes `qmm_q4_tile_f32`: four kernels pass gates 1 to 4, eight controls caught. `tf-stage1-gpu.txt` holds the projection cases with `tile=identical` (the tiled image against the default image, byte for byte, on the bf16 projections). No byte-level comparison of the f32 tile image against `qmm_f32` exists; the equal logits digests of the two heads are the identity evidence for it.
 - `PREREG.md` was written before the first GPU run. Its addendum, written after the final pairs, says what changed and why.
 - `raw-files-sha256.txt` lists the SHA-256 of every raw run file the summary was generated from (`final/` and `interim/`) for `summary.json`.
 
 Byte identity: each process writes the SHA-256 of its full logits stream. A case passes only if all six digests are equal and the ids match the pinned ids.
-The digests equal the ones the scalar and vec4 builds gave on the same inputs.
+The digests of #1990's head and #2015's head are equal on every input.
