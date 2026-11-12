@@ -246,12 +246,15 @@ fn draftSpans(a: Allocator, ids: []const u32) ![]Span {
     return list.toOwnedSlice(a);
 }
 
-/// The MTP head from mtp-4bit.safetensors, whole, and the vocabulary head's draft rows.
+/// The MTP head from mtp-4bit.safetensors, whole at the width its file states, and the vocabulary head's draft rows.
 fn loadMtp(gpa: Allocator, io: std.Io, l: *Loader, dir: []const u8, c: *const config.Config, head: Host) !model.Mtp {
     var ck: Checkpoint = .{ .gpa = gpa, .io = io };
     defer ck.close();
     try ck.add(dir, tensors.mtp_file);
-    const t: Tables = .{ .ck = &ck, .w = l.t.w };
+    const path = try std.fs.path.join(l.a, &.{ dir, tensors.mtp_file });
+    const hw = try widths.headOf(l.a, try widths.headQuantization(l.a, io, path));
+    if (!widths.served(hw)) return error.UnsupportedQuantization;
+    const t: Tables = .{ .ck = &ck, .w = .{ .bits = hw.bits, .group = hw.group } };
     const main_t = l.t;
     l.t = &t;
     defer l.t = main_t;
