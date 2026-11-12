@@ -4,7 +4,8 @@
 Start the serve the oracle describes on this Mac (same checkpoint, no drafter, temperature 0, seed 1234), then run
 this recorder against it. It reads the serve's /health first: a serve that reports the two-Mac pair policy is refused,
 because rank 0 of a pair would pass the chat-128 check below just as well, and an oracle always has to come from one
-Mac; the version /health reports becomes the case's runtime. Turn 1 is the oracle's chat prompt; its reply becomes
+Mac; the version /health reports becomes the case's runtime, and the device it reports must be the oracle's
+gpu_family (read as pair_accept.py reads each rank's). Turn 1 is the oracle's chat prompt; its reply becomes
 the assistant turn, turn 2 asks the follow-up, and the reply's token_sha is checked against its own decimal token ids
 before it is stored. The first turn must also reproduce chat-128's token_sha, so the new receipt cannot come from a
 serve that is not the record's single-Mac run. With --write the case replaces (or appends) itself in the oracle.
@@ -16,7 +17,7 @@ import sys
 import urllib.error
 import urllib.request
 
-from pair_accept import DEFAULT_MODEL, family_refusal, load_oracle, post, reply_text, request_body, token_sha
+from pair_accept import DEFAULT_MODEL, load_oracle, post, reply_text, request_body, server_device, token_sha
 
 CASE_NAME = "chat-two-turn-128"
 OPENING_CASE = "chat-128"
@@ -54,6 +55,24 @@ def served_runtime(base, timeout):
     return "tensorfold-native " + version.strip()
 
 
+def family_refusal(oracle, base, timeout):
+    """Why this serve may not add a case to the oracle, or None when its own /health names the oracle's family."""
+    recorded = oracle.get("gpu_family")
+    if not isinstance(recorded, str) or not recorded:
+        return "the oracle records no gpu_family, so a case recorded now could not say which GPU family made it"
+    # pair_accept's reader: the serve's own /health device, not the Mac this script runs on
+    family = server_device(base, timeout)
+    if family is None:
+        return "{} did not report its GPU family on /health; start the single-Mac serve first".format(base)
+    if family == recorded:
+        return None
+    return (
+        "the oracle was recorded on {} but the serve at {} reports {}: before the M5 the bits come from simd_qmm and"
+        " on the M5 from the lane kernels, so a case recorded here could not sit beside the others."
+        " Record on a Mac in the oracle's family, or re-record every case on this one"
+    ).format(recorded, base, family)
+
+
 def two_turn_messages(oracle, base, model, timeout):
     opening = next((c for c in oracle["cases"] if c["name"] == OPENING_CASE), None)
     if opening is None:
@@ -86,11 +105,12 @@ def main():
     args = parser.parse_args()
 
     oracle = load_oracle(args.oracle)
-    refusal = family_refusal(oracle)
+    # a pair serve is refused first: its rank 0 reports a GPU family too, and would pass the family check
+    runtime = served_runtime(args.base_url, args.timeout)
+    refusal = family_refusal(oracle, args.base_url, min(args.timeout, 30.0))
     if refusal is not None:
         print("record_oracle: " + refusal, file=sys.stderr)
         return 2
-    runtime = served_runtime(args.base_url, args.timeout)
     print("record_oracle: serve reports {} at {}".format(runtime, args.base_url.rstrip("/")))
     messages = two_turn_messages(oracle, args.base_url, args.model, args.timeout)
     case = {
