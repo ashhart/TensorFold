@@ -14,6 +14,7 @@ const Allocator = std.mem.Allocator;
 const Name = chain.Name;
 const Span = modes.Span;
 
+/// Tokens a block holds: 256 rows of every row part (the 27B's keys and values: 16 MiB).
 pub const block_tokens = 256;
 
 /// What a family gives the store: its kept states' image as parts, and copies out of and into kept states.
@@ -47,6 +48,7 @@ pub const State = struct {
     shared: bool,
 };
 
+/// A block file's bytes, and how many states name it.
 pub const Block = struct { bytes: u64, refs: u32 = 0 };
 
 pub const Counts = struct { written: u64 = 0, read: u64 = 0, reads: u64 = 0, writes: u64 = 0, skipped: u64 = 0, failed: u64 = 0, evicted: u64 = 0, verified: u64 = 0, differed: u64 = 0 };
@@ -531,14 +533,7 @@ fn onGrid(kept: []const u32, at: u32, grid: u32) bool {
     return true;
 }
 
-/// A planned state's starts with its own position last: its blocks' last chunk ends by it.
-pub fn withAt(a: Allocator, starts: []const u32, at: u32, planned: bool) ![]u32 {
-    if (!planned) return a.alloc(u32, 0);
-    var out = try a.alloc(u32, starts.len + 1);
-    @memcpy(out[0..starts.len], starts);
-    out[starts.len] = at;
-    return out;
-}
+pub const withAt = chain.withAt;
 
 fn dayNow() u64 {
     var t: platform.c.timespec = undefined;
