@@ -321,3 +321,49 @@ test "thinking request: checkpoint GLM 5.3 off closes its generation prefix and 
 test "thinking request: checkpoint LFM2 off closes its generation prefix and preserves main ids" {
     try checkpoint(@embedFile("fixtures/thinking/lfm2.jinja"), @embedFile("fixtures/thinking/lfm2-tokenizer_config.json"), "lfm2_moe", "<|startoftext|><|im_start|>user\nH<|im_end|>\n<|im_start|>assistant\n<think>");
 }
+
+/// GLM 5.3's template with thinking off, served: the prompt the engine gets carries `word` from `effort`.
+fn effortOff(server_effort: ?[]const u8, extra: []const u8, effort: ?[]const u8, word: []const u8) !void {
+    const t = std.testing;
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const config = @embedFile("fixtures/thinking/glm53-tokenizer_config.json");
+    var f = try @import("thinking_family_fixture.zig").init(t.allocator, t.io, @embedFile("fixtures/thinking/glm53.jinja"), config, "glm5_next");
+    defer f.deinit();
+    var problem: []const u8 = "";
+    const hf = try HfText.load(t.allocator, t.io, f.path, null, a, &problem);
+    defer hf.deinit();
+    const text = hf.text();
+    const messages = (try json.parse(a, "[{\"role\":\"user\",\"content\":\"H\"}]")).ok;
+    const raw = try text.render(a, messages, .{ .enable_thinking = false, .reasoning_effort = effort }, &problem);
+    try t.expect(std.mem.indexOf(u8, raw.text, word) != null);
+    const ids = try std.mem.concat(a, u32, &.{ try raw.encode(text, a, &problem), &.{301} });
+    var script: Script = .{};
+    const srv = try Server.init(t.allocator, t.io, script.engine(), text, .{
+        .served_name = "m",
+        .model_ids = &.{ "m", "alias" },
+        .use_drafts = false,
+        .reasoning_effort = server_effort,
+    }, null);
+    defer srv.deinit();
+    try checkpointReply(srv, a, &script, extra, ids);
+}
+
+test "thinking request: GLM 5.3 off renders a named effort, and main's Max when none is named" {
+    try effortOff(null, off ++ ",\"reasoning_effort\":\"high\"", "high", "Reasoning Effort: High");
+    try effortOff(null, ",\"thinking\":false,\"reasoning_effort\":\"low\"", "low", "Reasoning Effort: Low");
+    try effortOff(null, off, null, "Reasoning Effort: Max");
+    try effortOff(null, ",\"reasoning_effort\":\"none\"", null, "Reasoning Effort: Max");
+    try effortOff("high", off, "high", "Reasoning Effort: High"); // --reasoning-effort names it for every request
+}
+
+test "thinking request: a named effort has no fallback, so Kimi's off prompt keeps none" {
+    const fields = @import("fields.zig");
+    const levels = [_][]const u8{ "low", "high", "max" };
+    try std.testing.expect(fields.namedEffort(null, null, &levels) == null); // effortFor would give Kimi "max"
+    try std.testing.expect(fields.namedEffort("none", "high", &levels) == null);
+    try std.testing.expectEqualStrings("high", fields.namedEffort("high", null, &levels).?);
+    try std.testing.expectEqualStrings("low", fields.namedEffort(null, "low", &levels).?);
+    try std.testing.expectEqualStrings("high", fields.namedEffort("high", "low", &levels).?);
+}
