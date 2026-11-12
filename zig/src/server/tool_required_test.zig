@@ -363,6 +363,41 @@ test "a request's compiled grammar is kept for the engine, freed once at release
     try std.testing.expectEqual(@as(usize, 4), fake.frees);
 }
 
+test "security: a grammar over the size limit is refused before the compiler sees it, and one at the limit compiles" {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const g = arena.allocator();
+    const fake = lanes.grammar_fake;
+    const old = fake.install();
+    defer _ = lanes.grammar.swapLibrary(old);
+    var compiler = fake.compiler();
+    var text: Text = .{};
+    var stub: Stub = .{};
+    const srv = try Server.init(a, std.testing.io, stub.engine(), text.text(), .{ .served_name = "m", .model_ids = &.{"m"} }, null);
+    defer srv.deinit();
+    srv.info.structures = true;
+    srv.grammars = &compiler;
+    const most = @import("grammar.zig").max_text;
+    const letters = try g.alloc(u8, most + 1);
+    @memset(letters, 'x');
+    for ([_]usize{ most, most + 1 }) |len| {
+        var cx: errors.Cx = .{ .a = g };
+        var request: api.Request = .{ .prompt = &.{1}, .max_tokens = 64 };
+        const fields = try value(g, try std.fmt.allocPrint(g, "{{\"guided_regex\":\"{s}\"}}", .{letters[0..len]}));
+        const result = srv.checkFeatures(&cx, fields, false, false, &.{1}, &.{}, &request);
+        if (len <= most) {
+            try result;
+            srv.release(false, request);
+            continue;
+        }
+        try std.testing.expectError(error.Refused, result);
+        try std.testing.expectEqual(@as(u16, 400), cx.status());
+        try std.testing.expect(std.mem.indexOf(u8, cx.message, "guided_regex: the grammar is 524289 bytes, more than the 512 KiB") != null);
+    }
+    try std.testing.expectEqual(@as(usize, 1), fake.compiles); // the grammar over the limit never reached the compiler
+    try std.testing.expectEqual(@as(usize, 1), fake.frees);
+}
+
 fn never(_: *anyopaque) callconv(.c) c_int {
     return 0;
 }
