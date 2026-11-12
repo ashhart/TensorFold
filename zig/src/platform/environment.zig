@@ -67,7 +67,7 @@ pub const rules = [_]Rule{
     .{ .name = "TF_DSV41_ENGRAM_DIR", .scope = .metal, .kind = .path, .forms = "a directory path without control characters holding DeepSeek-V4.1's packed Engram tables" },
     .{ .name = "TF_DSV41_ENGRAM_VERIFY", .scope = .metal, .kind = .word, .words = &.{ "sample", "full" }, .forms = "sample or full (full also checks every byte of the Engram tables at boot)" },
     .{ .name = "TF_DSV41_ENGRAM_CACHE", .scope = .metal, .kind = .u32, .forms = "a whole Engram record count a layer from 0 to 4294967295 (default 65536)" },
-    .{ .name = "TF_DSV41_CALIB", .scope = .metal, .kind = .word, .trim = " \t\r\n", .ignore_case = true, .words = &.{ "cached", "default", "real", "measure", "zig" }, .forms = "cached, default, real, measure or zig, in any case (unset or blank: measure on Metal)" },
+    .{ .name = "TF_DSV41_CALIB", .scope = .metal, .kind = .word, .trim = " \t\r\n", .ignore_case = true, .words = &.{ "cached", "default", "real", "measure", "zig" }, .forms = "cached, default, real, measure or zig, in any case (unset or blank: default on Metal)" },
     .{ .name = "TF_DSV41_CALIB_DIR", .scope = .metal, .kind = .path, .forms = "a directory path without control characters holding stored cost tables" },
     .{ .name = "TF_DSV41_CALIB_FILE", .scope = .metal, .kind = .path, .forms = "a path without control characters to one stored cost table" },
     .{ .name = "TF_DSV41_CALIB_SHAPE", .scope = .metal, .kind = .word, .trim = " \t\r\n", .ignore_case = true, .words = &.{ "raw", "fit" }, .forms = "raw or fit, in any case (naming it times every row 1 to 16)" },
