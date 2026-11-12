@@ -140,6 +140,12 @@ A blank or whitespace-only value is unset. Text outside these forms, or those of
 `TENSORFOLD_MEMORY_RESERVE_GIB` must be a finite number of GiB, which the server also holds to at least 0.5 (2 on
 unified memory) and at most the memory's size.
 
+A pass that holds an offloaded experts layer reads each block's picks back to the host before it copies the missing
+expert lines, and a CUDA graph capture cannot hold that wait: on such a pack the drafted-window, shared-window, MTP-head
+(where the pack drafts with one) and `TF_FLASHNEXT_DECODE_GRAPH` graphs are not captured and those passes run eagerly,
+`TF_FLASHNEXT_WINDOW_GRAPH` notwithstanding. With `TF_FLASHNEXT_EXL3_ROUTED=device` no layer waits, and those graphs
+apply.
+
 EXL3 keeps its configured prompt cuts, including cache marks; `TF_FLASHNEXT_KEEP_INPASS` does not enable in-pass
 snapshots for this format. Classic checkpoints retain main's in-pass marks and per-lane convolution histories.
 
