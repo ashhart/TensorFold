@@ -3,6 +3,8 @@ const std = @import("std");
 const platform = @import("sys");
 const startup_log = @import("startup_log.zig");
 const posix = @import("sys").posix;
+const tp_line = @import("tp_line.zig");
+const auth = platform.rank_auth;
 
 /// One record on a line: ready, an error and its name, rank 0's wake, or a part of rank 0's NCCL id.
 const Record = extern struct { kind: u32, rank: u32, text: [56]u8 = @splat(0) };
@@ -10,7 +12,7 @@ const ready_kind: u32 = 1;
 const error_kind: u32 = 2;
 const wake_kind: u32 = 3;
 const id_kind: u32 = 4;
-const max_lines = 16;
+const max_lines = tp_line.max_lines;
 const id_len = 128; // ncclUniqueId's bytes
 const id_part = 48; // an id record's bytes, from text[8]; its part's number is text[0]
 const id_parts = (id_len + id_part - 1) / id_part;
@@ -51,61 +53,32 @@ pub fn explain(e: anyerror) ?[]const u8 {
         error.BindFailed => "rank 0 could not listen on NCCL_COMM_ID's port + 1, where the ranks' liveness lines meet: another process may hold it (often an earlier server still exiting) or NCCL_COMM_ID's host may not be this machine's; wait for that process to exit or choose another NCCL_COMM_ID port",
         error.RankNeverCame => "not every rank connected its liveness line within 5 minutes on NCCL_COMM_ID's port + 1: start every rank with the same NCCL_COMM_ID and check that port is reachable",
         error.AcceptFailed => "rank 0 could not accept another rank's liveness line on NCCL_COMM_ID's port + 1",
-        else => null,
+        else => auth.explain(e), // the key proof on a line, or TF_RANK_SECRET_FILE's file
     };
 }
 
-/// A stream socket whose peer's host vanishing (no FIN) shows within about 20 s: 10 s idle, then 3 probes 3 s apart.
-fn socket() !posix.socket_t {
-    const rc = posix.system.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
-    if (posix.errno(rc) != .SUCCESS) return error.SocketFailed;
-    const fd: posix.socket_t = @intCast(rc);
-    const one: c_int = 1;
-    posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.KEEPALIVE, std.mem.asBytes(&one)) catch {};
-    if (@import("builtin").os.tag == .linux) for ([_][2]u32{ .{ posix.TCP.KEEPIDLE, 10 }, .{ posix.TCP.KEEPINTVL, 3 }, .{ posix.TCP.KEEPCNT, 3 } }) |o| {
-        const v: c_int = @intCast(o[1]);
-        posix.setsockopt(fd, posix.IPPROTO.TCP, o[0], std.mem.asBytes(&v)) catch {};
-    };
-    return fd;
-}
-
-/// Rank 0 takes a line from each other rank within 5 minutes, and they connect to it; then every line is watched.
+/// Rank 0 takes a proven line from each other rank within 5 minutes, they connect to it, then every line is watched.
 pub fn start(io: std.Io, rank: usize, world: usize) !void {
     if (world < 2) return;
     if (world > max_lines + 1) return error.TooManyRanks;
     my_rank = rank;
     watch_io = io;
     var addr = try address();
+    const secret = try auth.Secret.fromEnv();
     if (rank == 0) {
-        const server = try socket();
+        const server = try tp_line.socket();
         defer _ = posix.system.close(server);
         const one: c_int = 1;
         posix.setsockopt(server, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&one)) catch return error.SocketFailed;
         if (posix.errno(posix.system.bind(server, @ptrCast(&addr), @sizeOf(posix.sockaddr.in))) != .SUCCESS) return error.BindFailed;
         if (posix.errno(posix.system.listen(server, 16)) != .SUCCESS) return error.BindFailed;
-        for (1..world) |_| {
-            var fds = [_]posix.pollfd{.{ .fd = server, .events = posix.POLL.IN, .revents = 0 }};
-            if ((posix.poll(&fds, 300_000) catch 0) == 0) return error.RankNeverCame;
-            const rc = posix.system.accept(server, null, null);
-            if (posix.errno(rc) != .SUCCESS) return error.AcceptFailed;
-            lines[line_count] = @intCast(rc);
-            line_count += 1;
-        }
+        try tp_line.gather(server, &secret, world, &lines, tp_line.wait_ms);
+        line_count = world - 1;
         startup_log.connected(startup_log.log, rank, world - 1, std.mem.bigToNative(u16, addr.port), 0);
     } else {
-        var tries: usize = 0;
-        while (true) : (tries += 1) {
-            const fd = try socket();
-            if (posix.errno(posix.system.connect(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.in))) == .SUCCESS) {
-                lines[0] = fd;
-                line_count = 1;
-                startup_log.connected(startup_log.log, rank, 1, 0, tries + 1);
-                break;
-            }
-            _ = posix.system.close(fd);
-            if (tries >= 3000) return error.RankNeverCame;
-            std.Io.sleep(io, .fromMilliseconds(100), .awake) catch {};
-        }
+        lines[0], const tries = try tp_line.reach(io, &addr, &secret, rank, world);
+        line_count = 1;
+        startup_log.connected(startup_log.log, rank, 1, 0, tries);
     }
     for (lines[0..line_count], 0..) |fd, i| (try std.Thread.spawn(.{}, watch, .{ fd, i })).detach();
 }
