@@ -61,6 +61,20 @@ test "Flash Next pieces at 256-row pages: 37 pages with the head (45 with pendin
     try t.expectError(error.PieceOverPage, lanes.layoutPieces(40960, 64, null, 0)); // a 3 MiB state past a page
 }
 
+test "the smallest page that holds a lane's largest piece: 104 rows with the head, 112 without; one step less refuses" {
+    try t.expectEqual(@as(u64, 3 << 20), lanes.largestPiece(head)); // a layer's DeltaNet state
+    try t.expectEqual(@as(u64, 3 << 20), lanes.largestPiece(null));
+    try t.expectEqual(@as(usize, 104), lanes.smallestRows(head));
+    try t.expectEqual(@as(usize, 112), lanes.smallestRows(null));
+    for ([_]?lanes.Head{ head, null }) |h| {
+        const n = lanes.smallestRows(h);
+        _ = try lanes.layoutPieces(40960, n, h, 0);
+        try t.expectError(error.PieceOverPage, lanes.layoutPieces(40960, n - wt.index_ratio, h, 0));
+    }
+    const why = @import("cuda_lanes_explain.zig").explain(error.PieceOverPage).?;
+    try t.expect(std.mem.indexOf(u8, why, "128") == null); // no fixed floor: the log names the page
+}
+
 /// The lane's pieces as [ptr, ptr + len) ranges: its state, conv tails, tail; with `d`, the head's too.
 fn ranges(a: std.mem.Allocator, seq: anytype, d: ?*const Draft) !std.ArrayList([2]u64) {
     var r: std.ArrayList([2]u64) = .empty;

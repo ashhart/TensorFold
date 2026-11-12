@@ -70,7 +70,12 @@ pub fn layoutPieces(capacity: usize, tokens: usize, head: ?Head, extra: usize) !
     var l = layout(capacity, tokens, head, extra);
     var buf: [32 << 10]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&buf);
-    var m = try pieceMap(fba.allocator(), head, l.pageBytes());
+    var m = pieceMap(fba.allocator(), head, l.pageBytes()) catch |err| {
+        const why = "TF_FLASHNEXT_KV_PAGES={d}: a page holds {d} bytes, a lane's largest piece {d}: set {d} or more";
+        const args = .{ tokens, l.pageBytes(), largestPiece(head), smallestRows(head) };
+        if (err == error.PieceOverPage and !@import("builtin").is_test) std.log.err(why, args);
+        return err;
+    };
     defer m.deinit(fba.allocator());
     const outside = if (head) |h| mtp.Draft.wideBytes(h.rows) else 0;
     l.run_bytes = 0;
@@ -80,14 +85,36 @@ pub fn layoutPieces(capacity: usize, tokens: usize, head: ?Head, extra: usize) !
     return l;
 }
 
-/// A lane's pieces in order: each DeltaNet layer's state, then its conv tail, the n-gram tail; then the head's.
-fn pieceMap(gpa: std.mem.Allocator, head: ?Head, page_bytes: u64) !kv.pieces.Map {
-    var sizes: std.ArrayList(u64) = .empty;
-    defer sizes.deinit(gpa);
+/// A lane's piece sizes in order: each DeltaNet layer's state, then its conv tail, the n-gram tail; then the head's.
+fn pieceSizes(gpa: std.mem.Allocator, sizes: *std.ArrayList(u64), head: ?Head) !void {
     try sizes.appendNTimes(gpa, state_bytes, wt.linear_n);
     try sizes.appendNTimes(gpa, conv_bytes, wt.linear_n);
     try sizes.append(gpa, tail_bytes);
-    if (head) |h| try mtp.Draft.pieceSizes(gpa, &sizes, h.draft_n);
+    if (head) |h| try mtp.Draft.pieceSizes(gpa, sizes, h.draft_n);
+}
+
+/// A lane's largest piece as the packer places it (256-byte aligned).
+pub fn largestPiece(head: ?Head) u64 {
+    var buf: [32 << 10]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buf);
+    var sizes: std.ArrayList(u64) = .empty;
+    pieceSizes(fba.allocator(), &sizes, head) catch unreachable; // a few hundred sizes, well inside buf
+    return std.mem.alignForward(u64, std.mem.max(u64, sizes.items), 256);
+}
+
+/// The smallest TF_FLASHNEXT_KV_PAGES whose page holds a lane's largest piece (the head's layer widens a page).
+pub fn smallestRows(head: ?Head) usize {
+    const most = largestPiece(head);
+    var n: usize = wt.index_ratio;
+    while (pages.valid(n) and layout(0, n, head, 0).pageBytes() < most) n += wt.index_ratio;
+    return n;
+}
+
+/// A lane's pieces packed on `page_bytes` pages and checked.
+fn pieceMap(gpa: std.mem.Allocator, head: ?Head, page_bytes: u64) !kv.pieces.Map {
+    var sizes: std.ArrayList(u64) = .empty;
+    defer sizes.deinit(gpa);
+    try pieceSizes(gpa, &sizes, head);
     var m = try kv.pieces.pack(gpa, sizes.items, page_bytes, 256);
     errdefer m.deinit(gpa);
     try kv.pieces.check(gpa, m);

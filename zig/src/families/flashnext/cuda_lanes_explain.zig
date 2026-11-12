@@ -22,7 +22,7 @@ pub fn explain(err: anyerror) ?[]const u8 {
         error.FlashNextPagesUnsupported => "TF_FLASHNEXT_KV_PAGES needs one rank, our own glue and no --slide: unset it",
         error.BadFlashNextStatePages => "TF_FLASHNEXT_STATE_PAGES takes 1 (states as pieces on pool pages) or 0",
         error.FlashNextStatePagesNeedKvPages => "TF_FLASHNEXT_STATE_PAGES puts pool lanes' states on pages: set TF_FLASHNEXT_KV_PAGES too",
-        error.PieceOverPage => "TF_FLASHNEXT_STATE_PAGES needs pages of 128 rows or more: a layer's state (3 MiB) must fit one page",
+        error.PieceOverPage => "TF_FLASHNEXT_STATE_PAGES: a page must hold a lane's largest piece (a layer's 3 MiB state); the log above names the smallest page that does",
         error.UnsupportedCheckpoint => "the checkpoint differs from the supported Flash Next CUDA layout; the log names its config field",
         error.BadDenseSplit => "TF_FLASHNEXT_SPLIT_DENSE takes 1 (split the BF16 dense projections at --tp 2, the default) or 0",
         error.DecodeGraphWithDenseSplit => "TF_FLASHNEXT_DECODE_GRAPH is not qualified with the dense split: unset it or set TF_FLASHNEXT_SPLIT_DENSE=0",
