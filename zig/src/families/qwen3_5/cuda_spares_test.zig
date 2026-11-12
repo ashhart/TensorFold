@@ -96,6 +96,8 @@ fn testGeometry() geometry.Geometry {
     g.q_heads = 4;
     g.kv_heads = 2;
     g.layers = 8;
+    g.first = 0; // one engine, not a pipeline stage
+    g.whole = 0;
     @memset(&g.linear, false);
     for (0..g.layers) |i| g.linear[i] = i % 4 != 3;
     return g;
