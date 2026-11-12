@@ -75,7 +75,7 @@ fn wait(fd: p.socket_t, events: i16, until: ?u64) !void {
 
 pub const Link = struct {
     fd: p.socket_t,
-    /// The key proof's seal: every byte crosses in its records. Null only on a test's socket pair, where no proof ran.
+    /// The key proof's seal: every byte crosses in its records. Null with no key, and on a test's unproven socket pair.
     seal: ?*Seal = null,
 
     pub fn close(l: Link) void {
@@ -105,7 +105,7 @@ pub const Link = struct {
                 const peer = std.c.accept4(fd, null, null, p.SOCK.NONBLOCK | p.SOCK.CLOEXEC);
                 switch (p.errno(peer)) {
                     .SUCCESS => {
-                        if (proven(peer, secret, until)) |session| return sealed(peer, &session, false);
+                        if (proven(peer, secret, until)) |session| return sealed(peer, &session, false, secret.keyed);
                         _ = std.c.close(peer);
                     },
                     .INTR, .AGAIN => continue,
@@ -135,7 +135,7 @@ pub const Link = struct {
         return error.RankTimeout;
     }
 
-    /// `bytes` to the peer, in the seal's records.
+    /// `bytes` to the peer, in the seal's records when the link has one.
     pub fn send(l: Link, bytes: []const u8, until: u64) !void {
         const seal = l.seal orelse return l.sendRaw(bytes, until);
         var wire: [auth.seal.max_record]u8 = undefined;
@@ -237,8 +237,9 @@ fn unsealed() error{RankDisconnected} {
     return error.RankDisconnected;
 }
 
-/// A proven connection and its seal, which is kept off the stack: a link is copied by value.
-fn sealed(fd: p.socket_t, session: *const auth.Key, connector: bool) !Link {
+/// A proven connection, and its seal when the proof used a key: kept off the stack, as a link is copied by value.
+fn sealed(fd: p.socket_t, session: *const auth.Key, connector: bool, keyed: bool) !Link {
+    if (!keyed) return .{ .fd = fd };
     errdefer _ = std.c.close(fd);
     const seal = try std.heap.page_allocator.create(Seal);
     seal.* = .init(session, connector);
@@ -263,7 +264,7 @@ fn prove(fd: p.socket_t, secret: *const auth.Secret, until: u64) !Link {
         _ = std.c.close(fd);
         return error.RankUnproven;
     };
-    return sealed(fd, &session, true);
+    return sealed(fd, &session, true, secret.keyed);
 }
 
 fn socket(family: u32) !p.socket_t {
@@ -466,8 +467,7 @@ fn testForward(link: Link, got: *[TestSender.text.len]u8) !void {
 }
 
 /// Rank 1 joins rank 0 through a relay and reads one frame; `tamper` has the relay change a bit of it.
-fn testThroughRelay(tamper: bool, relay: *TestRelay, got: *[TestSender.text.len]u8) !void {
-    const secret = try auth.Secret.fromBytes("the pair's rank secret");
+fn testThroughRelay(secret: auth.Secret, tamper: bool, relay: *TestRelay, got: *[TestSender.text.len]u8) !void {
     var sender: TestSender = .{ .port = try testPort(), .secret = secret };
     const relay_port = try testPort();
     relay.* = .{ .server = try TestRelay.listen(relay_port), .to = sender.port };
@@ -489,11 +489,26 @@ test "security: the pair's frames cross sealed, and a bit changed on the way end
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     var got: [TestSender.text.len]u8 = undefined;
     var relay: TestRelay = undefined;
-    try testThroughRelay(false, &relay, &got);
+    const secret = try auth.Secret.fromBytes("the pair's rank secret for the tests");
+    try testThroughRelay(secret, false, &relay, &got);
     try std.testing.expectEqualStrings(TestSender.text, &got);
     // a host on the path saw the key proof and then records: no frame magic, none of the payload
     const seen = relay.seen[0..relay.len];
     try std.testing.expect(seen.len > 40 + got.len);
     for ([_][]const u8{ "TFR1", "prompt", "4021" }) |clear| try std.testing.expect(std.mem.indexOf(u8, seen, clear) == null);
-    try std.testing.expectError(error.RankDisconnected, testThroughRelay(true, &relay, &got));
+    try std.testing.expectError(error.RankDisconnected, testThroughRelay(secret, true, &relay, &got));
+}
+
+test "security: a pair with no key, on one host, is not sealed: after the proof its frames cross as they are" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var got: [TestSender.text.len]u8 = undefined;
+    var relay: TestRelay = undefined;
+    try testThroughRelay(.none, false, &relay, &got);
+    try std.testing.expectEqualStrings(TestSender.text, &got);
+    // the proof's challenge, then the forward frame's header and payload: no record heads, no tags
+    const header = try (Header{ .kind = .forward, .arg = 7, .bytes = TestSender.text.len }).encode();
+    const seen = relay.seen[0..relay.len];
+    try std.testing.expectEqual(auth.challenge_len + header.len + got.len, seen.len);
+    try std.testing.expectEqualSlices(u8, &header, seen[auth.challenge_len..][0..header.len]);
+    try std.testing.expectEqualStrings(TestSender.text, seen[auth.challenge_len + header.len ..]);
 }
