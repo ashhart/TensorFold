@@ -222,6 +222,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     const mods = family(b, host, .ReleaseSafe, cuda, draft_ids);
     @import("cuda_checkpoint_cache_host.zig").steps(b, step);
     b.step("test-lfm2-load-host", "LFM2 decision model metadata and load ownership without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = lfm2Module(b, host, .debug, cuda, mods.core) })).step);
+    engines_build.qwen3HostTest(b, engines_build.qwen3Module(b, host, .debug, cuda, mods.core, mods.lanes, mods.api), step);
     const omni_slide = b.addRunArtifact(b.addTest(.{ .root_module = mods.nemotron, .filters = &.{"Omni learner:"} }));
     const omni_slide_step = b.step("test-omni-slide-host", "Omni learner registration, widths and scoped tensors without devices");
     omni_slide_step.dependOn(&omni_slide.step);

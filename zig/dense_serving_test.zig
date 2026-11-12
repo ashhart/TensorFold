@@ -42,6 +42,6 @@ test "dense serving: owned launches and projections retain their reviewed argume
             try out.append(std.testing.allocator, c);
         };
     }
-    // 01b45cd1d's sequence: a BF16 checkpoint's norms take the norm_shift kernels, 1 + w in FP32 (#2383)
-    try std.testing.expectEqualStrings("d21cd8152c545d85a55547d15f633f090dffaabab1223afd885a07c01814154a", &hash(out.items));
+    // 4dd870b84d's sequence: the first input norm keys on g.first + i (#2579); BF16 norms take norm_shift (#2383)
+    try std.testing.expectEqualStrings("7be514892c77ce544d809f73d5a7e2dec2fd33bcb40c68ab67ab6e409a1c02f8", &hash(out.items));
 }
