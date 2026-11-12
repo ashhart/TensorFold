@@ -14,6 +14,7 @@ const Allocator = std.mem.Allocator;
 
 pub const Error = error{ TemplateFailed, OutOfMemory };
 pub const Str = v.Str;
+pub const Limits = eval.Limits;
 pub const Span = v.Span;
 
 /// Why rendering failed; `raised` marks the template's own raise_exception message.
@@ -24,30 +25,41 @@ pub const Compiled = struct {
     /// Its child allocator also backs each render's scratch, so concurrent renders need it thread-safe.
     arena: std.heap.ArenaAllocator,
     tree: ast.Template,
+    limits: eval.Limits = .{},
 
     pub fn deinit(t: *Compiled) void {
         t.arena.deinit();
     }
 };
 
-fn checkNames(stmts: []const ast.Stmt, bad: *?[]const u8) void {
+/// What a walk of the tree found: a filter or test the engine lacks, and an expression taller than the parser's depth.
+const Check = struct { bad: ?[]const u8 = null, tall: bool = false, room: u32 = parser.max_depth };
+
+fn checkNames(stmts: []const ast.Stmt, found: *Check) void {
     const W = struct {
-        fn expr(e: *const ast.Expr, out: *?[]const u8) void {
+        fn expr(e: *const ast.Expr, out: *Check) void {
+            // a loop builds `a + a + a ...` without recursing: its height is checked here, before any whole walk
+            if (out.room == 0) {
+                out.tall = true;
+                return;
+            }
+            out.room -= 1;
+            defer out.room += 1;
             switch (e.*) {
                 .filter => |f| if (!access.among(f.name, &filters.implemented)) {
-                    out.* = f.name;
+                    out.bad = f.name;
                 },
                 .is => |t| if (!access.among(t.name, &filters.tests)) {
-                    out.* = t.name;
+                    out.bad = t.name;
                 },
                 else => {},
             }
             ast.eachChild(error{}, e, out, child) catch |err| switch (err) {};
         }
-        fn child(out: *?[]const u8, e: *ast.Expr) error{}!void {
+        fn child(out: *Check, e: *ast.Expr) error{}!void {
             expr(e, out);
         }
-        fn body(b: []const ast.Stmt, out: *?[]const u8) void {
+        fn body(b: []const ast.Stmt, out: *Check) void {
             for (b) |st| switch (st) {
                 .output => |pieces| for (pieces) |pc| if (pc == .expr) expr(pc.expr, out),
                 .for_ => |f| {
@@ -70,15 +82,51 @@ fn checkNames(stmts: []const ast.Stmt, bad: *?[]const u8) void {
                 .break_, .continue_ => {},
             };
         }
-        fn ifs(n: *const ast.If, out: *?[]const u8) void {
+        fn ifs(n: *const ast.If, out: *Check) void {
             expr(n.test_expr, out);
             body(n.body, out);
             for (n.elifs) |e| ifs(e, out);
             body(n.else_body, out);
         }
     };
-    W.body(stmts, bad);
+    W.body(stmts, found);
 }
+
+/// The render arena's source of memory, which gives out `left` bytes and then refuses.
+const Capped = struct {
+    child: Allocator,
+    left: usize,
+    spent: bool = false,
+
+    fn allocator(c: *Capped) Allocator {
+        return .{ .ptr = c, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+
+    fn take(c: *Capped, n: usize) bool {
+        if (n > c.left) c.spent = true else c.left -= n;
+        return !c.spent;
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const c: *Capped = @ptrCast(@alignCast(ctx));
+        return if (c.take(len)) c.child.rawAlloc(len, alignment, ra) else null;
+    }
+
+    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) bool {
+        const c: *Capped = @ptrCast(@alignCast(ctx));
+        return c.take(new_len -| memory.len) and c.child.rawResize(memory, alignment, new_len, ra);
+    }
+
+    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) ?[*]u8 {
+        const c: *Capped = @ptrCast(@alignCast(ctx));
+        return if (c.take(new_len -| memory.len)) c.child.rawRemap(memory, alignment, new_len, ra) else null;
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ra: usize) void {
+        const c: *Capped = @ptrCast(@alignCast(ctx));
+        c.child.rawFree(memory, alignment, ra);
+    }
+};
 
 fn report(gpa: Allocator, diag: ?*Diag, comptime fmt: []const u8, args: anytype) Error {
     if (diag) |d| d.msg = std.fmt.allocPrint(gpa, fmt, args) catch return error.OutOfMemory;
@@ -94,11 +142,12 @@ pub fn compile(gpa: Allocator, source: []const u8, diag: ?*Diag) Error!Compiled 
     const tokens = lexer.tokenize(&lx) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else report(gpa, diag, "template syntax error: {s}", .{lx.msg});
     var p = parser.Parser{ .a = a, .toks = tokens };
     const body = p.parse() catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else report(gpa, diag, "template syntax error: {s}", .{p.msg});
+    var found: Check = .{};
+    checkNames(body, &found);
+    if (found.tall) return report(gpa, diag, "template syntax error: an expression is nested more than {d} levels deep", .{parser.max_depth});
     var z = scope.Analyzer{ .a = a };
     const frame = z.run(body) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else report(gpa, diag, "template syntax error: {s}", .{z.msg});
-    var bad: ?[]const u8 = null;
-    checkNames(body, &bad);
-    if (bad) |name| return report(gpa, diag, "template uses unsupported filter or test '{s}'", .{name});
+    if (found.bad) |name| return report(gpa, diag, "template uses unsupported filter or test '{s}'", .{name});
     return .{ .arena = arena, .tree = .{ .body = body, .frame = frame } };
 }
 
@@ -117,13 +166,15 @@ pub fn renderProvenance(gpa: Allocator, t: *const Compiled, messages: std.json.V
 /// Checkpoint-owned globals are template data; request context overrides them and retains its provenance.
 pub fn renderProvenanceGlobals(gpa: Allocator, t: *const Compiled, messages: std.json.Value, tools: std.json.Value, context: std.json.Value, template_globals: std.json.Value, add_generation_prompt: bool, diag: ?*Diag) Error!Str {
     // not on `gpa`: an arena there, such as a server request's, would keep the freed scratch until it is reset
-    var arena = std.heap.ArenaAllocator.init(t.arena.child_allocator);
+    var capped: Capped = .{ .child = t.arena.child_allocator, .left = t.limits.bytes };
+    var arena = std.heap.ArenaAllocator.init(capped.allocator());
     defer arena.deinit();
     const a = arena.allocator();
     var out: v.Buffer = .{};
     var vars: v.Map = .empty;
-    var c = eval.Ctx{ .rt = .{ .a = a }, .vars = &vars, .out = &out };
+    var c = eval.Ctx{ .rt = .{ .a = a }, .vars = &vars, .out = &out, .limits = t.limits };
     run(&c, &vars, t, messages, tools, context, template_globals, add_generation_prompt) catch |err| {
+        if (err == error.OutOfMemory and capped.spent) return report(gpa, diag, "the chat template needs more than {d} MiB to render this request", .{t.limits.bytes >> 20});
         if (err == error.OutOfMemory) return error.OutOfMemory;
         if (diag) |d| d.raised = c.rt.raised;
         return report(gpa, diag, "{s}", .{c.rt.msg});
@@ -163,6 +214,7 @@ pub fn renderChat(gpa: Allocator, source: []const u8, messages: std.json.Value, 
 
 test {
     _ = @import("tests.zig");
+    _ = @import("limits_test.zig");
     _ = @import("unicode.zig");
     _ = @import("value.zig");
     _ = @import("provenance_test.zig");
