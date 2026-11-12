@@ -5,6 +5,7 @@ const tf = @import("tensorfold");
 const contract = @import("contract");
 const rig_ = @import("rig.zig");
 const lay = @import("metal_dsv41_segs_lay.zig");
+const sources = @import("kernel_sources");
 
 const c = contract.spec;
 const g = contract.gates;
@@ -146,9 +147,14 @@ pub const Probe = struct {
 
     /// The clean per-slot kernels' bytes, a launch a slot, from the same inputs and starting state.
     pub fn replaced(p: *Probe) ![]const u8 {
+        return p.perSlot(&p.clean);
+    }
+
+    /// The per-slot kernels of `pl` a slot at a time into copies of the outputs, their bytes in output order.
+    fn perSlot(p: *Probe, pl: *const lay.Pipes) ![]const u8 {
         const twins = try p.lay.twins(&p.rig);
         const pass = p.rig.begin();
-        try p.launch(pass.e, &p.clean, twins, false);
+        try p.launch(pass.e, pl, twins, false);
         try p.rig.finish(pass);
         return p.lay.gather(&p.rig, twins);
     }
@@ -171,6 +177,8 @@ pub const Probe = struct {
 
 pub const Suite = struct {
     a: std.mem.Allocator,
+    device: mtl.Device,
+    queue: mtl.Queue,
     probes: std.ArrayList(*Probe) = .empty,
 
     const E = struct { w: Which, ctl: u8, name: []const u8 };
@@ -190,7 +198,7 @@ pub const Suite = struct {
 
     pub fn create(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kernels: *std.ArrayList(g.Kernel), only: ?[]const u8) !*Suite {
         const s = try a.create(Suite);
-        s.* = .{ .a = a };
+        s.* = .{ .a = a, .device = device, .queue = queue };
         errdefer s.destroy();
         for (list) |entry| {
             if (only) |text| if (std.mem.indexOf(u8, entry.name, text) == null) continue;
@@ -203,6 +211,60 @@ pub const Suite = struct {
             try kernels.append(a, p.kernel());
         }
         return s;
+    }
+
+    /// At one stream each per-slot kernel equals the base's kept body byte for byte, random and non-finite inputs.
+    pub fn base(s: *Suite, seed: u64) !usize {
+        var old: ?lay.Pipes = null;
+        defer if (old) |*o| o.deinit();
+        var cases: usize = 0;
+        var differ: usize = 0;
+        for (s.probes.items) |p| {
+            if (p.ctl != 0 or p.which == .attn_pf) continue;
+            if (old == null) old = try lay.Pipes.loadBase(s.a, s.device);
+            for (served, 0..) |shape, i| for ([_]g.Fill{ .random, .nonfinite }) |fill| {
+                if (!try p.prepare(shape, fill, seed + i)) continue;
+                const now = try s.a.dupe(u8, try p.perSlot(&p.clean));
+                defer s.a.free(now);
+                cases += 1;
+                if (std.mem.indexOfDiff(u8, now, try p.perSlot(&old.?))) |at_byte| {
+                    differ += 1;
+                    std.debug.print("FAIL base equality {s} {d}x{d}x{d}: first difference at byte {d}\n", .{ p.name, shape.rows, shape.n, shape.k, at_byte });
+                }
+            };
+        }
+        if (cases > 0) std.debug.print("{s} base equality dsv41 slot kernels' per-slot forms: {d} cases of kv, pool, round trip, pack and decode attention byte-equal to the base's kept bodies, {d} differ\n", .{ if (differ == 0) "PASS" else "FAIL", cases, differ });
+        return differ;
+    }
+
+    /// segs.h's TfDsv41Seg has segs.zig's Seg size and field offsets, read back from a kernel.
+    pub fn layout(s: *Suite) !usize {
+        if (s.probes.items.len == 0) return 0;
+        const F = @typeInfo(dm.segs.Seg).@"struct".field_names;
+        const probe = comptime blk: {
+            var t: []const u8 = "kernel void tf_seg_layout(device uint* out [[buffer(0)]]) {\n  out[0] = sizeof(TfDsv41Seg);\n";
+            for (F, 1..) |f, i| t = t ++ std.fmt.comptimePrint("  out[{d}] = __builtin_offsetof(TfDsv41Seg, {s});\n", .{ i, f });
+            break :blk t ++ "}\n";
+        };
+        const pipe = try rig_.pipeline(s.device, sources.dsv41.segs_h ++ probe, "tf_seg_layout");
+        defer pipe.deinit();
+        const buf = try s.device.buffer(4 * (F.len + 1), mtl.ResourceOptions.shared);
+        defer buf.deinit();
+        const pool = mtl.objc.Pool.push();
+        defer pool.pop();
+        const cb = s.queue.commandBuffer();
+        const e = cb.compute(.serial);
+        e.setPipeline(pipe);
+        e.setBuffer(buf, 0, 0);
+        e.dispatchThreads(mtl.Size.of(1, 1, 1), mtl.Size.of(1, 1, 1));
+        e.end();
+        cb.commit();
+        cb.wait();
+        const got = buf.slice(u32, F.len + 1);
+        var bad: usize = @intFromBool(got[0] != @sizeOf(dm.segs.Seg));
+        inline for (F, 1..) |f, i| bad += @intFromBool(got[i] != @offsetOf(dm.segs.Seg, f));
+        std.debug.print("{s} layout dsv41 TfDsv41Seg: size {d} and {d} field offsets against segs.zig's Seg, {d} differ\n", .{ if (bad == 0) "PASS" else "FAIL", got[0], F.len, bad });
+        return bad;
     }
 
     pub fn destroy(s: *Suite) void {
