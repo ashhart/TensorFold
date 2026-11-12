@@ -4,7 +4,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
-- Qwen3.8-Flash-Next on HIP: when several streams draft in one round, the MTP head drafts them together, one forward and one draw a step instead of one per stream, as on CUDA and Metal; on a Strix Halo iGPU distinct-prompt decode is about 3% faster at 2 streams and 7% at 4, and one stream is unchanged. Replies are unchanged.
+- Qwen3.8-Flash-Next on HIP: when several streams draft in one round, the MTP head drafts them together, one forward and one draw a step instead of one per stream, as on CUDA and Metal; on a Strix Halo iGPU distinct-prompt decode is about 3% faster at 2 streams and 7% at 4, and one stream is unchanged. Replies are unchanged (#2696). Thanks to @gilby.
 
 - GLM-5.3-Flash: the DFlash2 drafter's startup line and docs give its licence as Apache-2.0, as its model card now says (#3084, for #1583).
 
