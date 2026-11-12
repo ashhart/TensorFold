@@ -52,12 +52,15 @@ pub fn main(init: std.process.Init) !u8 {
     var embed = try embed_k.Embed.init(a, &dev);
     defer embed.deinit();
     try kernels.append(a, embed.kernel());
-    var attn = try attn_k.Attn.init(a, &dev, false);
+    var attn = try attn_k.Attn.init(a, &dev, .none);
     defer attn.deinit();
     try kernels.append(a, attn.kernel());
-    var attn_control = try attn_k.Attn.init(a, &dev, true);
+    var attn_control = try attn_k.Attn.init(a, &dev, .drop_slice);
     defer attn_control.deinit();
     try kernels.append(a, attn_control.kernel());
+    var attn_grid = try attn_k.Attn.init(a, &dev, .old_grid);
+    defer attn_grid.deinit();
+    try kernels.append(a, attn_grid.kernel());
     var controls: [std.enums.values(controls_k.Which).len]controls_k.Control = undefined;
     for (&controls, std.enums.values(controls_k.Which)) |*x, w| x.* = try controls_k.Control.init(a, &dev, w);
     defer for (&controls) |*x| x.deinit();
